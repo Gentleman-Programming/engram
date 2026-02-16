@@ -101,8 +101,12 @@ This is NOT optional. If you skip this, the next session starts blind.
 
 ### AFTER COMPACTION
 
-If you see a message about compaction or context reset, IMMEDIATELY call \`mem_context\` to recover
-what was being worked on before the compaction happened. Do not continue blind.
+If you see a message about compaction or context reset, or if you see "FIRST ACTION REQUIRED" in your context:
+1. IMMEDIATELY call \`mem_session_summary\` with the compacted summary content — this persists what was done before compaction
+2. Then call \`mem_context\` to recover any additional context from previous sessions
+3. Only THEN continue working
+
+Do not skip step 1. Without it, everything done before compaction is lost from memory.
 `
 
 // ─── HTTP Client ─────────────────────────────────────────────────────────────
@@ -305,27 +309,6 @@ export const Engram: Plugin = async (ctx) => {
     "experimental.session.compacting": async (input, output) => {
       if (input.sessionID) {
         await ensureSession(input.sessionID)
-
-        // Auto-save a compaction checkpoint observation.
-        // This guarantees SOMETHING is persisted even if the agent
-        // never called mem_save during the session.
-        const count = toolCounts.get(input.sessionID) ?? 0
-        await engramFetch("/observations", {
-          method: "POST",
-          body: {
-            session_id: input.sessionID,
-            title: `Session compacted — ${project}`,
-            content: [
-              `**What**: Session on ${project} was compacted after ${count} tool calls.`,
-              `**Why**: Context window limit reached — system triggered compaction.`,
-              `**Where**: project ${project}`,
-              `**Learned**: Any work not explicitly saved via mem_save before this point may be lost from memory. The agent should call mem_session_summary after resuming.`,
-            ].join("\n"),
-            type: "session",
-            tool_name: "compaction",
-            project,
-          },
-        })
       }
 
       // Inject context from previous sessions
@@ -336,13 +319,16 @@ export const Engram: Plugin = async (ctx) => {
         output.context.push(data.context)
       }
 
-      // Tell the compressor to include a memory reminder in the summary.
-      // The new agent reads this and knows it should save what happened.
+      // Tell the compressor to instruct the new agent to persist the
+      // compacted summary to Engram. The new agent reads the compacted
+      // summary and this instruction, then saves it as a session summary.
       output.context.push(
-        `IMPORTANT: The agent has access to Engram persistent memory (mem_save, mem_session_summary tools). ` +
-        `Include in the compacted summary a reminder that the agent should call mem_session_summary ` +
-        `with a structured summary of what was accomplished so far in this session. ` +
-        `This is critical — without it, the work done before compaction will be lost from memory.`
+        `CRITICAL INSTRUCTION FOR COMPACTED SUMMARY:\n` +
+        `The agent has access to Engram persistent memory via MCP tools.\n` +
+        `You MUST include the following instruction at the TOP of the compacted summary:\n\n` +
+        `"FIRST ACTION REQUIRED: Call mem_session_summary with the content of this compacted summary. ` +
+        `Use project: '${project}'. This preserves what was accomplished before compaction. Do this BEFORE any other work."\n\n` +
+        `This is NOT optional. Without this, everything done before compaction is lost from memory.`
       )
     },
   }
