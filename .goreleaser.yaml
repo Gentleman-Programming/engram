@@ -1,0 +1,61 @@
+version: 2
+
+project_name: engram
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - main: ./cmd/engram
+    binary: engram
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+
+homebrew_casks:
+  - repository:
+      owner: Gentleman-Programming
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Casks
+    name: engram
+    homepage: "https://github.com/Gentleman-Programming/engram"
+    description: "Persistent memory for AI coding agents. Agent-agnostic, single binary, zero dependencies."
+    binaries:
+      - engram
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/engram"]
+          end
+    commit_msg_template: "chore: update engram cask to {{ .Tag }}"

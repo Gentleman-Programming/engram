@@ -27,7 +27,9 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
-const version = "0.1.0"
+// version is set via ldflags at build time by goreleaser.
+// Falls back to "dev" for local builds.
+var version = "dev"
 
 func main() {
 	if len(os.Args) < 2 {
