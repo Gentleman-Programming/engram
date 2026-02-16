@@ -294,12 +294,9 @@ Interactive terminal UI for browsing your memory. Built with [Bubbletea](https:/
 ```bash
 engram tui
 ```
-
 <p align="center">
-  <img src="assets/tui-dashboard.png" alt="TUI Dashboard" width="400" />
-  <img src="assets/tui-recent.png" alt="TUI Recent Observations" width="400" />
-</p>
-<p align="center">
+<img src="assets/tui-dashboard.png" alt="TUI Dashboard" width="400" />
+  <img width="400" alt="image" src="https://github.com/user-attachments/assets/0308991a-58bb-4ad8-9aa2-201c059f8b64" />
   <img src="assets/tui-detail.png" alt="TUI Observation Detail" width="400" />
   <img src="assets/tui-search.png" alt="TUI Search Results" width="400" />
 </p>
