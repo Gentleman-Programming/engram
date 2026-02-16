@@ -1,0 +1,22 @@
+# Binary
+engram
+*.exe
+
+# Database
+*.db
+*.db-wal
+*.db-shm
+
+# Export files
+engram-export.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
