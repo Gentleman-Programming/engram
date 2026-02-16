@@ -35,7 +35,7 @@ SQLite + FTS5 (~/.engram/engram.db)
 
 ```bash
 # Install from source
-git clone https://github.com/Alan-TheGentleman/engram.git
+git clone https://github.com/Gentleman-Programming/engram.git
 cd engram
 go install ./cmd/engram
 ```
