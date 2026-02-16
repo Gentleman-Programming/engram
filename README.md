@@ -306,17 +306,20 @@ engram tui
 
 ## Git Sync
 
-Share memories across machines and team members by committing them to your repo.
+Share memories across machines and team members by committing them to your repo. Uses compressed chunks with a manifest index — no merge conflicts, no huge files.
 
 ```bash
-# Export memories to .engram/memories.json (in your project repo)
+# Export new memories as a compressed chunk
 engram sync
 
 # Commit to git
-git add .engram/memories.json && git commit -m "sync engram memories"
+git add .engram/ && git commit -m "sync engram memories"
 
-# On another machine / clone: import from repo
+# On another machine / clone: import new chunks
 engram sync --import
+
+# Check sync status
+engram sync --status
 
 # Export only memories from a specific project
 engram sync --project my-app
@@ -325,12 +328,22 @@ engram sync --project my-app
 **How it works:**
 
 ```
-Your machine                    Git repo                     Another machine
-~/.engram/engram.db  ──sync──▶  .engram/memories.json  ──▶  ~/.engram/engram.db
-      (local DB)                  (committed to git)           (sync --import)
+.engram/
+├── manifest.json          ← small index (git diffs this)
+├── chunks/
+│   ├── a3f8c1d2.jsonl.gz ← chunk by Alan (compressed, ~2KB)
+│   ├── b7d2e4f1.jsonl.gz ← chunk by Juan
+│   └── c9f1a2b3.jsonl.gz ← chunk by Alan (next day)
+└── engram.db              ← gitignored (local working DB)
 ```
 
-**Auto-import**: The OpenCode plugin automatically imports `.engram/memories.json` when it detects one in the project directory. Clone a repo, open OpenCode, and the memories are there.
+- Each `engram sync` creates a **new chunk** — never modifies old ones
+- Chunks are **gzipped JSONL** — small files, git treats as binary (no diff noise)
+- The **manifest** is the only file git diffs — it's small and append-only
+- Each chunk has a **content hash ID** — imported only once, no duplicates
+- **No merge conflicts** on data — each dev creates independent chunks
+
+**Auto-import**: The OpenCode plugin automatically runs `engram sync --import` when it detects `.engram/manifest.json` in the project directory. Clone a repo, open OpenCode, and the team's memories are loaded.
 
 ## CLI
 
@@ -345,7 +358,7 @@ engram context [project]  Recent context from previous sessions
 engram stats              Memory statistics
 engram export [file]      Export all memories to JSON
 engram import <file>      Import memories from JSON
-engram sync               Export memories to .engram/memories.json for git
+engram sync               Export new memories as compressed chunk to .engram/
 engram version            Show version
 ```
 
@@ -412,6 +425,7 @@ engram/
 │   ├── store/store.go              # Core: SQLite + FTS5 + all data ops
 │   ├── server/server.go            # HTTP REST API (port 7437)
 │   ├── mcp/mcp.go                  # MCP stdio server (10 tools)
+│   ├── sync/sync.go                # Git sync: manifest + compressed chunks
 │   └── tui/                        # Bubbletea terminal UI
 │       ├── model.go                # Screen constants, Model, Init()
 │       ├── styles.go               # Lipgloss styles (Catppuccin Mocha)

@@ -199,18 +199,23 @@ export const Engram: Plugin = async (ctx) => {
     }
   }
 
-  // Auto-import: if .engram/memories.json exists in the project repo,
-  // import it into the local DB. This is how git-synced memories get
-  // loaded when cloning a repo or pulling changes.
+  // Auto-import: if .engram/manifest.json exists in the project repo,
+  // run `engram sync --import` to load any new chunks into the local DB.
+  // This is how git-synced memories get loaded when cloning a repo or
+  // pulling changes. Each chunk is imported only once (tracked by ID).
   try {
-    const syncFile = `${ctx.directory}/.engram/memories.json`
-    const file = Bun.file(syncFile)
+    const manifestFile = `${ctx.directory}/.engram/manifest.json`
+    const file = Bun.file(manifestFile)
     if (await file.exists()) {
-      const data = await file.json()
-      await engramFetch("/import", { method: "POST", body: data })
+      Bun.spawn([ENGRAM_BIN, "sync", "--import"], {
+        cwd: ctx.directory,
+        stdout: "ignore",
+        stderr: "ignore",
+        stdin: "ignore",
+      })
     }
   } catch {
-    // File doesn't exist or can't parse — silently skip
+    // Manifest doesn't exist or binary not found — silently skip
   }
 
   return {

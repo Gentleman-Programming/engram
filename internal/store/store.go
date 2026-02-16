@@ -243,6 +243,11 @@ func (s *Store) migrate() error {
 			content='user_prompts',
 			content_rowid='id'
 		);
+
+		CREATE TABLE IF NOT EXISTS sync_chunks (
+			chunk_id    TEXT PRIMARY KEY,
+			imported_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
 	`
 	if _, err := s.db.Exec(schema); err != nil {
 		return err
@@ -995,6 +1000,36 @@ type ImportResult struct {
 	SessionsImported     int `json:"sessions_imported"`
 	ObservationsImported int `json:"observations_imported"`
 	PromptsImported      int `json:"prompts_imported"`
+}
+
+// ─── Sync Chunk Tracking ─────────────────────────────────────────────────────
+
+// GetSyncedChunks returns a set of chunk IDs that have been imported/exported.
+func (s *Store) GetSyncedChunks() (map[string]bool, error) {
+	rows, err := s.db.Query("SELECT chunk_id FROM sync_chunks")
+	if err != nil {
+		return nil, fmt.Errorf("get synced chunks: %w", err)
+	}
+	defer rows.Close()
+
+	chunks := make(map[string]bool)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		chunks[id] = true
+	}
+	return chunks, rows.Err()
+}
+
+// RecordSyncedChunk marks a chunk as imported/exported so it won't be processed again.
+func (s *Store) RecordSyncedChunk(chunkID string) error {
+	_, err := s.db.Exec(
+		"INSERT OR IGNORE INTO sync_chunks (chunk_id) VALUES (?)",
+		chunkID,
+	)
+	return err
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

@@ -45,6 +45,7 @@ engram/
 │   ├── store/store.go              # Core: SQLite + FTS5 + all data operations
 │   ├── server/server.go            # HTTP REST API server (port 7437)
 │   ├── mcp/mcp.go                  # MCP stdio server (10 tools)
+│   ├── sync/sync.go                # Git sync: manifest + chunks (gzipped JSONL)
 │   └── tui/                        # Bubbletea terminal UI
 │       ├── model.go                # Screen constants, Model struct, Init(), custom messages
 │       ├── styles.go               # Lipgloss styles (Catppuccin Mocha palette)
@@ -70,6 +71,7 @@ engram/
 - **observations_fts** — FTS5 virtual table synced via triggers (`title`, `content`, `tool_name`, `type`, `project`)
 - **user_prompts** — `id` (INTEGER PK AUTOINCREMENT), `session_id` (FK), `content`, `project`, `created_at`
 - **prompts_fts** — FTS5 virtual table synced via triggers (`content`, `project`)
+- **sync_chunks** — `chunk_id` (TEXT PK), `imported_at` — tracks which chunks have been imported to prevent duplicates
 
 ### SQLite Configuration
 
@@ -93,7 +95,7 @@ engram context [project]  Show recent context from previous sessions
 engram stats              Show memory system statistics
 engram export [file]      Export all memories to JSON (default: engram-export.json)
 engram import <file>      Import memories from a JSON export file
-engram sync               Export to .engram/memories.json [--import] [--project NAME]
+engram sync               Export new memories as chunk [--import] [--status] [--project NAME]
 engram version            Print version
 engram help               Show help
 ```
@@ -318,22 +320,36 @@ Share memories across machines, backup, or migrate:
 - `engram export` — JSON dump of all sessions, observations, prompts
 - `engram import <file>` — Load from JSON, sessions use INSERT OR IGNORE (skip duplicates), atomic transaction
 
-### 6. Git Sync
+### 6. Git Sync (Chunked)
 
-Share memories through git repositories:
+Share memories through git repositories using compressed chunks with a manifest index.
 
-- `engram sync` — Exports memories to `.engram/memories.json` in the current directory (ready for `git add && git commit`)
-- `engram sync --import` — Imports from `.engram/memories.json` into the local DB
-- `engram sync --project NAME` — Filters export to a specific project (only sessions and observations matching that project)
+- `engram sync` — Exports new memories as a gzipped JSONL chunk to `.engram/chunks/`
+- `engram sync --import` — Imports chunks listed in the manifest that haven't been imported yet
+- `engram sync --status` — Shows how many chunks exist locally vs remotely, and how many are pending import
+- `engram sync --project NAME` — Filters export to a specific project
 
-**Auto-import**: The OpenCode plugin automatically imports `.engram/memories.json` when it detects one in the project directory at startup. This means: clone a repo → open OpenCode → memories are loaded automatically.
-
-**Flow**:
+**Architecture**:
 ```
-Your machine                    Git repo                     Another machine
-~/.engram/engram.db  ──sync──▶  .engram/memories.json  ──▶  ~/.engram/engram.db
-      (local DB)                  (committed to git)           (sync --import)
+.engram/
+├── manifest.json          ← index of all chunks (small, git-mergeable)
+├── chunks/
+│   ├── a3f8c1d2.jsonl.gz ← chunk 1 (gzipped JSONL)
+│   ├── b7d2e4f1.jsonl.gz ← chunk 2
+│   └── ...
+└── engram.db              ← local working DB (gitignored)
 ```
+
+**Why chunks?**
+- Each `engram sync` creates a NEW chunk — old chunks are never modified
+- No merge conflicts: each dev creates independent chunks, git just adds files
+- Chunks are content-hashed (SHA-256 prefix) — each chunk is imported only once
+- The manifest is the only file git diffs — it's small and append-only
+- Compressed: a chunk with 8 sessions + 10 observations = ~2KB
+
+**Auto-import**: The OpenCode plugin detects `.engram/manifest.json` at startup and runs `engram sync --import` to load any new chunks. Clone a repo → open OpenCode → team memories are loaded.
+
+**Tracking**: The local DB stores a `sync_chunks` table with chunk IDs that have been imported. This prevents re-importing the same data if `sync --import` runs multiple times.
 
 ### 7. AI Compression (Agent-Driven)
 

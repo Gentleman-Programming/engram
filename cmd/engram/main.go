@@ -14,13 +14,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/alanbuscaglia/engram/internal/mcp"
 	"github.com/alanbuscaglia/engram/internal/server"
 	"github.com/alanbuscaglia/engram/internal/store"
+	engramsync "github.com/alanbuscaglia/engram/internal/sync"
 	"github.com/alanbuscaglia/engram/internal/tui"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -442,11 +442,14 @@ func cmdImport(cfg store.Config) {
 func cmdSync(cfg store.Config) {
 	// Parse flags
 	doImport := false
+	doStatus := false
 	project := ""
 	for i := 2; i < len(os.Args); i++ {
 		switch os.Args[i] {
 		case "--import":
 			doImport = true
+		case "--status":
+			doStatus = true
 		case "--project":
 			if i+1 < len(os.Args) {
 				project = os.Args[i+1]
@@ -456,115 +459,70 @@ func cmdSync(cfg store.Config) {
 	}
 
 	syncDir := ".engram"
-	syncFile := filepath.Join(syncDir, "memories.json")
 
-	if doImport {
-		// Import: .engram/memories.json → local DB
-		raw, err := os.ReadFile(syncFile)
-		if err != nil {
-			if os.IsNotExist(err) {
-				fmt.Fprintf(os.Stderr, "No %s found in this directory.\n", syncFile)
-				fmt.Fprintln(os.Stderr, "Run 'engram sync' first to export, or check you're in the right repo.")
-				os.Exit(1)
-			}
-			fatal(fmt.Errorf("read %s: %w", syncFile, err))
-		}
-
-		var data store.ExportData
-		if err := json.Unmarshal(raw, &data); err != nil {
-			fatal(fmt.Errorf("parse %s: %w", syncFile, err))
-		}
-
-		s, err := store.New(cfg)
-		if err != nil {
-			fatal(err)
-		}
-		defer s.Close()
-
-		result, err := s.Import(&data)
-		if err != nil {
-			fatal(err)
-		}
-
-		fmt.Printf("Imported from %s → local DB\n", syncFile)
-		fmt.Printf("  Sessions:     %d\n", result.SessionsImported)
-		fmt.Printf("  Observations: %d\n", result.ObservationsImported)
-		fmt.Printf("  Prompts:      %d\n", result.PromptsImported)
-		return
-	}
-
-	// Export: local DB → .engram/memories.json
 	s, err := store.New(cfg)
 	if err != nil {
 		fatal(err)
 	}
 	defer s.Close()
 
-	data, err := s.Export()
+	sy := engramsync.New(s, syncDir)
+
+	if doStatus {
+		local, remote, pending, err := sy.Status()
+		if err != nil {
+			fatal(err)
+		}
+		fmt.Printf("Sync status:\n")
+		fmt.Printf("  Local chunks:    %d\n", local)
+		fmt.Printf("  Remote chunks:   %d\n", remote)
+		fmt.Printf("  Pending import:  %d\n", pending)
+		return
+	}
+
+	if doImport {
+		result, err := sy.Import()
+		if err != nil {
+			fatal(err)
+		}
+
+		if result.ChunksImported == 0 {
+			fmt.Println("Already up to date — no new chunks to import.")
+			if result.ChunksSkipped > 0 {
+				fmt.Printf("  (%d chunks already imported)\n", result.ChunksSkipped)
+			}
+			return
+		}
+
+		fmt.Printf("Imported %d new chunk(s) from .engram/\n", result.ChunksImported)
+		fmt.Printf("  Sessions:     %d\n", result.SessionsImported)
+		fmt.Printf("  Observations: %d\n", result.ObservationsImported)
+		fmt.Printf("  Prompts:      %d\n", result.PromptsImported)
+		if result.ChunksSkipped > 0 {
+			fmt.Printf("  Skipped:      %d (already imported)\n", result.ChunksSkipped)
+		}
+		return
+	}
+
+	// Export: DB → new chunk
+	username := engramsync.GetUsername()
+	result, err := sy.Export(username, project)
 	if err != nil {
 		fatal(err)
 	}
 
-	// Filter by project if specified
-	if project != "" {
-		filtered := filterExportByProject(data, project)
-		data = filtered
+	if result.IsEmpty {
+		fmt.Println("Nothing new to sync — all memories already exported.")
+		return
 	}
 
-	out, err := json.MarshalIndent(data, "", "  ")
-	if err != nil {
-		fatal(err)
-	}
-
-	// Create .engram/ dir if needed
-	if err := os.MkdirAll(syncDir, 0755); err != nil {
-		fatal(fmt.Errorf("create %s: %w", syncDir, err))
-	}
-
-	if err := os.WriteFile(syncFile, out, 0644); err != nil {
-		fatal(err)
-	}
-
-	fmt.Printf("Synced to %s\n", syncFile)
-	fmt.Printf("  Sessions:     %d\n", len(data.Sessions))
-	fmt.Printf("  Observations: %d\n", len(data.Observations))
-	fmt.Printf("  Prompts:      %d\n", len(data.Prompts))
+	fmt.Printf("Created chunk %s\n", result.ChunkID)
+	fmt.Printf("  Sessions:     %d\n", result.SessionsExported)
+	fmt.Printf("  Observations: %d\n", result.ObservationsExported)
+	fmt.Printf("  Prompts:      %d\n", result.PromptsExported)
 	fmt.Println()
 	fmt.Println("Add to git:")
-	fmt.Printf("  git add %s && git commit -m \"sync engram memories\"\n", syncFile)
-}
-
-// filterExportByProject returns a new ExportData with only items matching the project.
-func filterExportByProject(data *store.ExportData, project string) *store.ExportData {
-	result := &store.ExportData{
-		Version:    data.Version,
-		ExportedAt: data.ExportedAt,
-	}
-
-	// Collect session IDs that match the project
-	sessionIDs := make(map[string]bool)
-	for _, s := range data.Sessions {
-		if s.Project == project {
-			result.Sessions = append(result.Sessions, s)
-			sessionIDs[s.ID] = true
-		}
-	}
-
-	// Filter observations by matching session IDs
-	for _, o := range data.Observations {
-		if sessionIDs[o.SessionID] {
-			result.Observations = append(result.Observations, o)
-		}
-	}
-
-	// Filter prompts by matching session IDs
-	for _, p := range data.Prompts {
-		if sessionIDs[p.SessionID] {
-			result.Prompts = append(result.Prompts, p)
-		}
-	}
-
-	return result
+	fmt.Printf("  git add .engram/ && git commit -m \"sync engram memories\"\n")
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -586,8 +544,9 @@ Commands:
   stats              Show memory system statistics
   export [file]      Export all memories to JSON (default: engram-export.json)
   import <file>      Import memories from a JSON export file
-  sync               Export memories to .engram/memories.json (git-friendly)
-                       --import   Import from .engram/memories.json into local DB
+  sync               Export new memories as compressed chunk to .engram/
+                       --import   Import new chunks from .engram/ into local DB
+                       --status   Show sync status (local vs remote chunks)
                        --project  Filter export to a specific project
   version            Print version
   help               Show this help
