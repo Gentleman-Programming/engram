@@ -267,6 +267,7 @@ func (m Model) handleSearchResultsKeys(key string) (tea.Model, tea.Cmd) {
 		m.Screen = ScreenSearch
 		m.Cursor = 0
 		m.Scroll = 0
+		m.SearchInput.Focus()
 		return m, nil
 	}
 	return m, nil
@@ -311,7 +312,7 @@ func (m Model) handleRecentKeys(key string) (tea.Model, tea.Cmd) {
 		m.Screen = ScreenDashboard
 		m.Cursor = 0
 		m.Scroll = 0
-		return m, nil
+		return m, loadStats(m.store)
 	}
 	return m, nil
 }
@@ -335,7 +336,7 @@ func (m Model) handleObservationDetailKeys(key string) (tea.Model, tea.Cmd) {
 		m.Screen = m.PrevScreen
 		m.Cursor = 0
 		m.DetailScroll = 0
-		return m, nil
+		return m, m.refreshScreen(m.PrevScreen)
 	}
 	return m, nil
 }
@@ -354,7 +355,7 @@ func (m Model) handleTimelineKeys(key string) (tea.Model, tea.Cmd) {
 		m.Screen = m.PrevScreen
 		m.Cursor = 0
 		m.Scroll = 0
-		return m, nil
+		return m, m.refreshScreen(m.PrevScreen)
 	}
 	return m, nil
 }
@@ -393,7 +394,7 @@ func (m Model) handleSessionsKeys(key string) (tea.Model, tea.Cmd) {
 		m.Screen = ScreenDashboard
 		m.Cursor = 0
 		m.Scroll = 0
-		return m, nil
+		return m, loadStats(m.store)
 	}
 	return m, nil
 }
@@ -437,7 +438,24 @@ func (m Model) handleSessionDetailKeys(key string) (tea.Model, tea.Cmd) {
 		m.Screen = ScreenSessions
 		m.Cursor = m.SelectedSessionIdx
 		m.SessionDetailScroll = 0
-		return m, nil
+		return m, loadRecentSessions(m.store)
 	}
 	return m, nil
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+// refreshScreen returns the appropriate data-loading Cmd for a given screen.
+// Used when navigating back so lists show fresh data from the DB.
+func (m Model) refreshScreen(screen Screen) tea.Cmd {
+	switch screen {
+	case ScreenDashboard:
+		return loadStats(m.store)
+	case ScreenRecent:
+		return loadRecentObservations(m.store)
+	case ScreenSessions:
+		return loadRecentSessions(m.store)
+	default:
+		return nil
+	}
 }
