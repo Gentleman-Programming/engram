@@ -29,6 +29,8 @@ func (m Model) View() string {
 		content = m.viewSessions()
 	case ScreenSessionDetail:
 		content = m.viewSessionDetail()
+	case ScreenSetup:
+		content = m.viewSetup()
 	default:
 		content = "Unknown screen"
 	}
@@ -472,6 +474,79 @@ func (m Model) viewSessionDetail() string {
 	}
 
 	b.WriteString(helpStyle.Render("\n  j/k navigate • enter detail • t timeline • esc back"))
+
+	return b.String()
+}
+
+// ─── Setup ───────────────────────────────────────────────────────────────────
+
+func (m Model) viewSetup() string {
+	var b strings.Builder
+
+	b.WriteString(headerStyle.Render("  Setup — Install Agent Plugin"))
+	b.WriteString("\n")
+
+	// Show result after install
+	if m.SetupDone {
+		if m.SetupError != "" {
+			b.WriteString(errorStyle.Render("  ✗ Installation failed: " + m.SetupError))
+			b.WriteString("\n\n")
+		} else if m.SetupResult != nil {
+			b.WriteString(fmt.Sprintf("  %s %s\n",
+				lipgloss.NewStyle().Bold(true).Foreground(colorGreen).Render("✓"),
+				lipgloss.NewStyle().Bold(true).Foreground(colorGreen).Render(
+					fmt.Sprintf("Installed %s plugin (%d files)", m.SetupResult.Agent, m.SetupResult.Files))))
+			b.WriteString(fmt.Sprintf("  %s %s\n\n",
+				detailLabelStyle.Render("Location:"),
+				projectStyle.Render(m.SetupResult.Destination)))
+
+			// Post-install instructions
+			switch m.SetupResult.Agent {
+			case "opencode":
+				b.WriteString(sectionHeadingStyle.Render("  Next Steps"))
+				b.WriteString("\n")
+				b.WriteString(detailContentStyle.Render("1. Restart OpenCode"))
+				b.WriteString("\n")
+				b.WriteString(detailContentStyle.Render("2. Plugin is auto-loaded from ~/.config/opencode/plugins/"))
+				b.WriteString("\n")
+				b.WriteString(detailContentStyle.Render("3. Make sure 'engram' is in your MCP config (opencode.json)"))
+				b.WriteString("\n")
+			case "claude-code":
+				b.WriteString(sectionHeadingStyle.Render("  Next Steps"))
+				b.WriteString("\n")
+				b.WriteString(detailContentStyle.Render("1. Start the engram server: engram serve &"))
+				b.WriteString("\n")
+				b.WriteString(detailContentStyle.Render("2. Restart Claude Code"))
+				b.WriteString("\n")
+				b.WriteString(detailContentStyle.Render("3. Plugin is loaded from ~/.claude/plugins/engram/"))
+				b.WriteString("\n")
+				b.WriteString(detailContentStyle.Render("4. MCP server is registered automatically via .mcp.json"))
+				b.WriteString("\n")
+			}
+		}
+
+		b.WriteString(helpStyle.Render("\n  enter/esc back to dashboard"))
+		return b.String()
+	}
+
+	// Agent selection
+	b.WriteString("\n")
+	b.WriteString(titleStyle.Render("  Select an agent to set up"))
+	b.WriteString("\n\n")
+
+	for i, agent := range m.SetupAgents {
+		if i == m.Cursor {
+			b.WriteString(menuSelectedStyle.Render("▸ " + agent.Description))
+		} else {
+			b.WriteString(menuItemStyle.Render("  " + agent.Description))
+		}
+		b.WriteString("\n")
+		b.WriteString(fmt.Sprintf("      %s %s\n\n",
+			detailLabelStyle.Render("Install to:"),
+			timestampStyle.Render(agent.InstallDir)))
+	}
+
+	b.WriteString(helpStyle.Render("\n  j/k navigate • enter install • esc back"))
 
 	return b.String()
 }

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"github.com/alanbuscaglia/engram/internal/setup"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -92,6 +93,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.Cursor = 0
 		m.SessionDetailScroll = 0
 		return m, nil
+
+	case setupInstallMsg:
+		m.SetupDone = true
+		if msg.err != nil {
+			m.SetupError = msg.err.Error()
+			return m, nil
+		}
+		m.SetupResult = msg.result
+		m.SetupError = ""
+		return m, nil
 	}
 
 	return m, nil
@@ -120,6 +131,8 @@ func (m Model) handleKeyPress(key string) (tea.Model, tea.Cmd) {
 		return m.handleSessionsKeys(key)
 	case ScreenSessionDetail:
 		return m.handleSessionDetailKeys(key)
+	case ScreenSetup:
+		return m.handleSetupKeys(key)
 	}
 	return m, nil
 }
@@ -130,6 +143,7 @@ var dashboardMenuItems = []string{
 	"Search memories",
 	"Recent observations",
 	"Browse sessions",
+	"Setup agent plugin",
 	"Quit",
 }
 
@@ -177,7 +191,16 @@ func (m Model) handleDashboardSelection() (tea.Model, tea.Cmd) {
 		m.Cursor = 0
 		m.Scroll = 0
 		return m, loadRecentSessions(m.store)
-	case 3: // Quit
+	case 3: // Setup
+		m.PrevScreen = ScreenDashboard
+		m.Screen = ScreenSetup
+		m.Cursor = 0
+		m.SetupAgents = setup.SupportedAgents()
+		m.SetupResult = nil
+		m.SetupError = ""
+		m.SetupDone = false
+		return m, nil
+	case 4: // Quit
 		return m, tea.Quit
 	}
 	return m, nil
@@ -439,6 +462,45 @@ func (m Model) handleSessionDetailKeys(key string) (tea.Model, tea.Cmd) {
 		m.Cursor = m.SelectedSessionIdx
 		m.SessionDetailScroll = 0
 		return m, loadRecentSessions(m.store)
+	}
+	return m, nil
+}
+
+// ─── Setup ───────────────────────────────────────────────────────────────────
+
+func (m Model) handleSetupKeys(key string) (tea.Model, tea.Cmd) {
+	// After install completed, any key goes back
+	if m.SetupDone {
+		switch key {
+		case "esc", "q", "enter":
+			m.Screen = ScreenDashboard
+			m.Cursor = 0
+			m.SetupDone = false
+			m.SetupResult = nil
+			m.SetupError = ""
+			return m, loadStats(m.store)
+		}
+		return m, nil
+	}
+
+	switch key {
+	case "up", "k":
+		if m.Cursor > 0 {
+			m.Cursor--
+		}
+	case "down", "j":
+		if m.Cursor < len(m.SetupAgents)-1 {
+			m.Cursor++
+		}
+	case "enter":
+		if len(m.SetupAgents) > 0 && m.Cursor < len(m.SetupAgents) {
+			agent := m.SetupAgents[m.Cursor]
+			return m, installAgent(agent.Name)
+		}
+	case "esc", "q":
+		m.Screen = ScreenDashboard
+		m.Cursor = 0
+		return m, loadStats(m.store)
 	}
 	return m, nil
 }

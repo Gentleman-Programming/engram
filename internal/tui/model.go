@@ -10,6 +10,7 @@
 package tui
 
 import (
+	"github.com/alanbuscaglia/engram/internal/setup"
 	"github.com/alanbuscaglia/engram/internal/store"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -29,6 +30,7 @@ const (
 	ScreenTimeline
 	ScreenSessions
 	ScreenSessionDetail
+	ScreenSetup
 )
 
 // ─── Custom Messages ─────────────────────────────────────────────────────────
@@ -69,6 +71,11 @@ type sessionObservationsMsg struct {
 	err          error
 }
 
+type setupInstallMsg struct {
+	result *setup.Result
+	err    error
+}
+
 // ─── Model ───────────────────────────────────────────────────────────────────
 
 type Model struct {
@@ -106,6 +113,12 @@ type Model struct {
 	SelectedSessionIdx  int
 	SessionObservations []store.Observation
 	SessionDetailScroll int
+
+	// Setup
+	SetupAgents []setup.Agent
+	SetupResult *setup.Result
+	SetupError  string
+	SetupDone   bool
 }
 
 // New creates a new TUI model connected to the given store.
@@ -178,5 +191,12 @@ func loadSessionObservations(s *store.Store, sessionID string) tea.Cmd {
 	return func() tea.Msg {
 		obs, err := s.SessionObservations(sessionID, 200)
 		return sessionObservationsMsg{observations: obs, err: err}
+	}
+}
+
+func installAgent(agentName string) tea.Cmd {
+	return func() tea.Msg {
+		result, err := setup.Install(agentName)
+		return setupInstallMsg{result: result, err: err}
 	}
 }

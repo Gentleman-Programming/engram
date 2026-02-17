@@ -20,6 +20,7 @@ import (
 
 	"github.com/alanbuscaglia/engram/internal/mcp"
 	"github.com/alanbuscaglia/engram/internal/server"
+	"github.com/alanbuscaglia/engram/internal/setup"
 	"github.com/alanbuscaglia/engram/internal/store"
 	engramsync "github.com/alanbuscaglia/engram/internal/sync"
 	"github.com/alanbuscaglia/engram/internal/tui"
@@ -68,6 +69,8 @@ func main() {
 		cmdImport(cfg)
 	case "sync":
 		cmdSync(cfg)
+	case "setup":
+		cmdSetup()
 	case "version", "--version", "-v":
 		fmt.Printf("engram %s\n", version)
 	case "help", "--help", "-h":
@@ -537,6 +540,68 @@ func cmdSync(cfg store.Config) {
 	fmt.Printf("  git add .engram/ && git commit -m \"sync engram memories\"\n")
 }
 
+func cmdSetup() {
+	agents := setup.SupportedAgents()
+
+	// If agent name given directly: engram setup opencode
+	if len(os.Args) > 2 && !strings.HasPrefix(os.Args[2], "-") {
+		result, err := setup.Install(os.Args[2])
+		if err != nil {
+			fatal(err)
+		}
+		fmt.Printf("✓ Installed %s plugin (%d files)\n", result.Agent, result.Files)
+		fmt.Printf("  → %s\n", result.Destination)
+		printPostInstall(result.Agent)
+		return
+	}
+
+	// Interactive selection
+	fmt.Println("engram setup — Install agent plugin\n")
+	fmt.Println("Which agent do you want to set up?\n")
+
+	for i, a := range agents {
+		fmt.Printf("  [%d] %s\n", i+1, a.Description)
+		fmt.Printf("      Install to: %s\n\n", a.InstallDir)
+	}
+
+	fmt.Print("Enter choice (1-", len(agents), "): ")
+	var input string
+	fmt.Scanln(&input)
+
+	choice, err := strconv.Atoi(strings.TrimSpace(input))
+	if err != nil || choice < 1 || choice > len(agents) {
+		fmt.Fprintln(os.Stderr, "Invalid choice.")
+		os.Exit(1)
+	}
+
+	selected := agents[choice-1]
+	fmt.Printf("\nInstalling %s plugin...\n", selected.Name)
+
+	result, err := setup.Install(selected.Name)
+	if err != nil {
+		fatal(err)
+	}
+
+	fmt.Printf("✓ Installed %s plugin (%d files)\n", result.Agent, result.Files)
+	fmt.Printf("  → %s\n", result.Destination)
+	printPostInstall(result.Agent)
+}
+
+func printPostInstall(agent string) {
+	switch agent {
+	case "opencode":
+		fmt.Println("\nNext steps:")
+		fmt.Println("  1. Restart OpenCode")
+		fmt.Println("  2. The plugin is auto-loaded from ~/.config/opencode/plugins/")
+		fmt.Println("  3. Make sure 'engram' is in your MCP config (opencode.json)")
+	case "claude-code":
+		fmt.Println("\nNext steps:")
+		fmt.Println("  1. Start the engram server: engram serve &")
+		fmt.Println("  2. Restart Claude Code — the plugin is loaded from ~/.claude/plugins/engram/")
+		fmt.Println("  3. The plugin registers the MCP server automatically via .mcp.json")
+	}
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 func printUsage() {
@@ -556,6 +621,7 @@ Commands:
   stats              Show memory system statistics
   export [file]      Export all memories to JSON (default: engram-export.json)
   import <file>      Import memories from a JSON export file
+  setup [agent]      Install agent plugin (interactive or: engram setup opencode)
   sync               Export new memories as compressed chunk to .engram/
                        --import   Import new chunks from .engram/ into local DB
                        --status   Show sync status (local vs remote chunks)

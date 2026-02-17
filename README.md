@@ -51,7 +51,15 @@ go install ./cmd/engram
 
 Grab the latest release for your platform from [GitHub Releases](https://github.com/Gentleman-Programming/engram/releases).
 
-Then add Engram to your agent's MCP config — see [Agent Setup](#agent-setup) below.
+Then set up your agent's plugin:
+
+```bash
+engram setup
+```
+
+This will ask which agent you use (OpenCode or Claude Code) and install the plugin automatically. Or specify directly: `engram setup opencode` / `engram setup claude-code`.
+
+See [Agent Setup](#agent-setup) for manual configuration or other agents (Cursor, Windsurf, Gemini).
 
 That's it. No Node.js, no Python, no Bun, no Docker, no ChromaDB, no vector database, no worker processes. **One binary, one SQLite file.**
 
@@ -135,7 +143,8 @@ Add to your `opencode.json` (global: `~/.config/opencode/opencode.json` or proje
 **Optional: OpenCode plugin** for enhanced session management (auto-session tracking, compaction memory persistence, system prompt injection):
 
 ```bash
-cp plugin/opencode/engram.ts ~/.config/opencode/plugins/
+engram setup opencode
+# or manually: cp plugin/opencode/engram.ts ~/.config/opencode/plugins/
 ```
 
 The plugin is auto-loaded from `~/.config/opencode/plugins/` — no config changes needed. It also needs the HTTP server running for session tracking:
@@ -380,6 +389,7 @@ engram sync --project other-name
 ## CLI
 
 ```
+engram setup [agent]      Install agent plugin (interactive or: engram setup opencode)
 engram serve [port]       Start HTTP API server (default: 7437)
 engram mcp                Start MCP server (stdio transport)
 engram tui                Launch interactive terminal UI
@@ -399,8 +409,10 @@ engram version            Show version
 For [OpenCode](https://opencode.ai) users, a thin TypeScript plugin adds enhanced session management on top of the MCP tools:
 
 ```bash
-# Copy the plugin — auto-loaded from the plugins directory
-cp plugin/opencode/engram.ts ~/.config/opencode/plugins/
+# Install via engram (recommended — works from Homebrew or binary install)
+engram setup opencode
+
+# Or manually: cp plugin/opencode/engram.ts ~/.config/opencode/plugins/
 ```
 
 The plugin auto-starts the HTTP server if it's not already running — no manual `engram serve` needed.
@@ -440,11 +452,11 @@ The OpenCode plugin uses a defense-in-depth strategy to ensure memories survive 
 For [Claude Code](https://docs.anthropic.com/en/docs/claude-code) users, a plugin adds enhanced session management using Claude's native hook and skill system:
 
 ```bash
-# Install the plugin
-claude plugin add ./plugin/claude-code
+# Install via engram (recommended — works from Homebrew or binary install)
+engram setup claude-code
 
-# Or for local development/testing
-claude --plugin-dir ./plugin/claude-code
+# Or from the repo: claude plugin add ./plugin/claude-code
+# Or for local development/testing: claude --plugin-dir ./plugin/claude-code
 ```
 
 The plugin requires the HTTP server running for session tracking:
@@ -518,6 +530,7 @@ engram/
 │   ├── store/store.go              # Core: SQLite + FTS5 + all data ops
 │   ├── server/server.go            # HTTP REST API (port 7437)
 │   ├── mcp/mcp.go                  # MCP stdio server (10 tools)
+│   ├── setup/setup.go              # Agent plugin installer (go:embed)
 │   ├── sync/sync.go                # Git sync: manifest + compressed chunks
 │   └── tui/                        # Bubbletea terminal UI
 │       ├── model.go                # Screen constants, Model, Init()
