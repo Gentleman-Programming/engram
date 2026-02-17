@@ -148,6 +148,28 @@ See [OpenCode Plugin](#opencode-plugin) for details.
 
 ### Claude Code
 
+**Option A: Plugin (recommended)** — full session management, auto-import, compaction recovery, and Memory Protocol skill:
+
+```bash
+claude plugin add ./plugin/claude-code
+```
+
+For local development/testing:
+
+```bash
+claude --plugin-dir ./plugin/claude-code
+```
+
+The plugin bundles the MCP server, hooks, and a Memory Protocol skill — no additional config needed. The HTTP server must be running for session tracking:
+
+```bash
+engram serve &
+```
+
+See [Claude Code Plugin](#claude-code-plugin) for details on what the plugin provides.
+
+**Option B: Bare MCP** — just the 10 memory tools, no session management:
+
 Add to your `.claude/settings.json` (project) or `~/.claude/settings.json` (global):
 
 ```json
@@ -160,6 +182,8 @@ Add to your `.claude/settings.json` (project) or `~/.claude/settings.json` (glob
   }
 }
 ```
+
+With bare MCP, add a [Surviving Compaction](#surviving-compaction-recommended) prompt to your `CLAUDE.md` so the agent remembers to use Engram after context resets.
 
 ### Gemini CLI
 
@@ -411,6 +435,68 @@ The OpenCode plugin uses a defense-in-depth strategy to ensure memories survive 
 | **Compaction Hook** | Auto-saves checkpoint + injects context + reminds compressor | Fires during compaction |
 | **Agent Config** | "After compaction, call `mem_context`" in agent prompt | Always present |
 
+## Claude Code Plugin
+
+For [Claude Code](https://docs.anthropic.com/en/docs/claude-code) users, a plugin adds enhanced session management using Claude's native hook and skill system:
+
+```bash
+# Install the plugin
+claude plugin add ./plugin/claude-code
+
+# Or for local development/testing
+claude --plugin-dir ./plugin/claude-code
+```
+
+The plugin requires the HTTP server running for session tracking:
+
+```bash
+engram serve &
+```
+
+### What the Plugin Provides (vs bare MCP)
+
+| Feature | Bare MCP | Plugin |
+|---------|----------|--------|
+| 10 memory tools | ✓ | ✓ |
+| Session tracking (auto-start) | ✗ | ✓ |
+| Auto-import git-synced memories | ✗ | ✓ |
+| Compaction recovery | ✗ | ✓ |
+| Memory Protocol skill | ✗ | ✓ |
+| Previous session context injection | ✗ | ✓ |
+
+### Plugin Structure
+
+```
+plugin/claude-code/
+├── .claude-plugin/plugin.json     # Plugin manifest
+├── .mcp.json                      # Registers engram MCP server
+├── hooks/hooks.json               # SessionStart + Stop lifecycle hooks
+├── scripts/
+│   ├── session-start.sh           # Ensures server, creates session, imports chunks, injects context
+│   ├── post-compaction.sh         # Injects previous context + recovery instructions
+│   └── session-stop.sh            # Placeholder for future heartbeat
+└── skills/memory/SKILL.md         # Memory Protocol (when to save, search, close, recover)
+```
+
+### How It Works
+
+**On session start** (`startup`):
+1. Ensures the engram HTTP server is running
+2. Creates a new session via the API
+3. Auto-imports git-synced chunks from `.engram/manifest.json` (if present)
+4. Injects previous session context into Claude's initial context
+
+**On compaction** (`compact`):
+1. Injects the previous session context + compacted summary
+2. Tells the agent: "FIRST ACTION REQUIRED — call `mem_session_summary` with this content before doing anything else"
+3. This ensures no work is lost when context is compressed
+
+**Memory Protocol skill** (always available):
+- Strict rules for **when to save** (mandatory after bugfixes, decisions, discoveries)
+- **When to search** memory (reactive + proactive)
+- **Session close protocol** — mandatory `mem_session_summary` before ending
+- **After compaction** — 3-step recovery: persist summary → load context → continue
+
 ## Privacy
 
 Wrap sensitive content in `<private>` tags — it gets stripped at TWO levels:
@@ -439,7 +525,13 @@ engram/
 │       ├── update.go               # Input handling, per-screen handlers
 │       └── view.go                 # Rendering, per-screen views
 ├── plugin/
-│   └── opencode/engram.ts          # OpenCode adapter plugin
+│   ├── opencode/engram.ts          # OpenCode adapter plugin
+│   └── claude-code/                # Claude Code plugin (hooks + skill)
+│       ├── .claude-plugin/plugin.json
+│       ├── .mcp.json
+│       ├── hooks/hooks.json
+│       ├── scripts/                # session-start, post-compaction, session-stop
+│       └── skills/memory/SKILL.md
 ├── assets/                         # Screenshots and media
 ├── DOCS.md                         # Full technical documentation
 ├── go.mod
