@@ -54,10 +54,16 @@ Grab the latest release for your platform from [GitHub Releases](https://github.
 Then set up your agent's plugin:
 
 ```bash
+# Claude Code — via marketplace
+claude plugin marketplace add Gentleman-Programming/engram
+claude plugin install engram
+
+# OpenCode — via engram setup
+engram setup opencode
+
+# Or interactive (asks which agent)
 engram setup
 ```
-
-This will ask which agent you use (OpenCode or Claude Code) and install the plugin automatically. Or specify directly: `engram setup opencode` / `engram setup claude-code`.
 
 See [Agent Setup](#agent-setup) for manual configuration or other agents (Cursor, Windsurf, Gemini).
 
@@ -157,27 +163,22 @@ See [OpenCode Plugin](#opencode-plugin) for details.
 
 ### Claude Code
 
-**Option A: Plugin (recommended)** — full session management, auto-import, compaction recovery, and Memory Protocol skill:
+**Option A: Plugin via marketplace (recommended)** — full session management, auto-import, compaction recovery, and Memory Protocol skill:
 
 ```bash
-claude plugin add ./plugin/claude-code
+claude plugin marketplace add Gentleman-Programming/engram
+claude plugin install engram
 ```
 
-For local development/testing:
+That's it. The plugin registers the MCP server, hooks, and Memory Protocol skill automatically.
+
+**Option B: Plugin via `engram setup`** — same plugin, installed from the embedded binary:
 
 ```bash
-claude --plugin-dir ./plugin/claude-code
+engram setup claude-code
 ```
 
-The plugin bundles the MCP server, hooks, and a Memory Protocol skill — no additional config needed. The HTTP server must be running for session tracking:
-
-```bash
-engram serve &
-```
-
-See [Claude Code Plugin](#claude-code-plugin) for details on what the plugin provides.
-
-**Option B: Bare MCP** — just the 10 memory tools, no session management:
+**Option C: Bare MCP** — just the 10 memory tools, no session management:
 
 Add to your `.claude/settings.json` (project) or `~/.claude/settings.json` (global):
 
@@ -193,6 +194,8 @@ Add to your `.claude/settings.json` (project) or `~/.claude/settings.json` (glob
 ```
 
 With bare MCP, add a [Surviving Compaction](#surviving-compaction-recommended) prompt to your `CLAUDE.md` so the agent remembers to use Engram after context resets.
+
+See [Claude Code Plugin](#claude-code-plugin) for details on what the plugin provides.
 
 ### Gemini CLI
 
@@ -452,17 +455,15 @@ The OpenCode plugin uses a defense-in-depth strategy to ensure memories survive 
 For [Claude Code](https://docs.anthropic.com/en/docs/claude-code) users, a plugin adds enhanced session management using Claude's native hook and skill system:
 
 ```bash
-# Install via engram (recommended — works from Homebrew or binary install)
+# Install via Claude Code marketplace (recommended)
+claude plugin marketplace add Gentleman-Programming/engram
+claude plugin install engram
+
+# Or via engram binary (works from Homebrew or binary install)
 engram setup claude-code
 
-# Or from the repo: claude plugin add ./plugin/claude-code
-# Or for local development/testing: claude --plugin-dir ./plugin/claude-code
-```
-
-The plugin requires the HTTP server running for session tracking:
-
-```bash
-engram serve &
+# Or for local development/testing from the repo
+claude --plugin-dir ./plugin/claude-code
 ```
 
 ### What the Plugin Provides (vs bare MCP)
