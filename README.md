@@ -132,6 +132,8 @@ Engram works with **any MCP-compatible agent**. Add it to your agent's MCP confi
 
 ### OpenCode
 
+> **Prerequisite**: Install the `engram` binary first (via [Homebrew](#install-via-homebrew-recommended), [binary download](#download-binary), or [source](#install-from-source)). The plugin needs it for the MCP server and session tracking.
+
 Add to your `opencode.json` (global: `~/.config/opencode/opencode.json` or project-level):
 
 ```json
@@ -162,6 +164,8 @@ engram serve &
 See [OpenCode Plugin](#opencode-plugin) for details.
 
 ### Claude Code
+
+> **Prerequisite**: Install the `engram` binary first (via [Homebrew](#install-via-homebrew-recommended), [binary download](#download-binary), or [source](#install-from-source)). The plugin needs it for the MCP server and session tracking scripts.
 
 **Option A: Plugin via marketplace (recommended)** — full session management, auto-import, compaction recovery, and Memory Protocol skill:
 
