@@ -492,10 +492,13 @@ func (m Model) viewSetup() string {
 			b.WriteString(errorStyle.Render("  ✗ Installation failed: " + m.SetupError))
 			b.WriteString("\n\n")
 		} else if m.SetupResult != nil {
+			successMsg := fmt.Sprintf("Installed %s plugin", m.SetupResult.Agent)
+			if m.SetupResult.Files > 0 {
+				successMsg += fmt.Sprintf(" (%d files)", m.SetupResult.Files)
+			}
 			b.WriteString(fmt.Sprintf("  %s %s\n",
 				lipgloss.NewStyle().Bold(true).Foreground(colorGreen).Render("✓"),
-				lipgloss.NewStyle().Bold(true).Foreground(colorGreen).Render(
-					fmt.Sprintf("Installed %s plugin (%d files)", m.SetupResult.Agent, m.SetupResult.Files))))
+				lipgloss.NewStyle().Bold(true).Foreground(colorGreen).Render(successMsg)))
 			b.WriteString(fmt.Sprintf("  %s %s\n\n",
 				detailLabelStyle.Render("Location:"),
 				projectStyle.Render(m.SetupResult.Destination)))
@@ -514,13 +517,9 @@ func (m Model) viewSetup() string {
 			case "claude-code":
 				b.WriteString(sectionHeadingStyle.Render("  Next Steps"))
 				b.WriteString("\n")
-				b.WriteString(detailContentStyle.Render("1. Start the engram server: engram serve &"))
+				b.WriteString(detailContentStyle.Render("1. Restart Claude Code — the plugin is active immediately"))
 				b.WriteString("\n")
-				b.WriteString(detailContentStyle.Render("2. Restart Claude Code"))
-				b.WriteString("\n")
-				b.WriteString(detailContentStyle.Render("3. Plugin is loaded from ~/.claude/plugins/engram/"))
-				b.WriteString("\n")
-				b.WriteString(detailContentStyle.Render("4. MCP server is registered automatically via .mcp.json"))
+				b.WriteString(detailContentStyle.Render("2. Verify with: claude plugin list"))
 				b.WriteString("\n")
 			}
 		}

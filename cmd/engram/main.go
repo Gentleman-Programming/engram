@@ -596,9 +596,8 @@ func printPostInstall(agent string) {
 		fmt.Println("  3. Make sure 'engram' is in your MCP config (opencode.json)")
 	case "claude-code":
 		fmt.Println("\nNext steps:")
-		fmt.Println("  1. Start the engram server: engram serve &")
-		fmt.Println("  2. Restart Claude Code — the plugin is loaded from ~/.claude/plugins/engram/")
-		fmt.Println("  3. The plugin registers the MCP server automatically via .mcp.json")
+		fmt.Println("  1. Restart Claude Code — the plugin is active immediately")
+		fmt.Println("  2. Verify with: claude plugin list")
 	}
 }
 

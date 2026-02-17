@@ -1,29 +1,27 @@
 // Package setup handles agent plugin installation.
 //
-// Plugin files are embedded in the binary via go:embed so installation
-// works from a Homebrew install or standalone binary — no repo clone needed.
+// - OpenCode: copies embedded plugin file to ~/.config/opencode/plugins/
+// - Claude Code: runs `claude plugin marketplace add` + `claude plugin install`
 package setup
 
 import (
 	"embed"
 	"fmt"
-	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 //go:embed plugins/opencode/*
 var openCodeFS embed.FS
 
-//go:embed all:plugins/claude-code/*
-var claudeCodeFS embed.FS
-
 // Agent represents a supported AI coding agent.
 type Agent struct {
 	Name        string
 	Description string
-	InstallDir  string // resolved at runtime
+	InstallDir  string // resolved at runtime (display only for claude-code)
 }
 
 // Result holds the outcome of an installation.
@@ -32,6 +30,8 @@ type Result struct {
 	Destination string
 	Files       int
 }
+
+const claudeCodeMarketplace = "Gentleman-Programming/engram"
 
 // SupportedAgents returns the list of agents that have plugins available.
 func SupportedAgents() []Agent {
@@ -43,40 +43,28 @@ func SupportedAgents() []Agent {
 		},
 		{
 			Name:        "claude-code",
-			Description: "Claude Code — Native plugin with hooks, skills, MCP registration, and compaction recovery",
-			InstallDir:  claudeCodePluginDir(),
+			Description: "Claude Code — Native plugin via marketplace (hooks, skills, MCP, compaction recovery)",
+			InstallDir:  "managed by claude plugin system",
 		},
 	}
 }
 
-// Install copies the embedded plugin files for the given agent to its install directory.
+// Install installs the plugin for the given agent.
 func Install(agentName string) (*Result, error) {
-	agents := SupportedAgents()
-	var agent *Agent
-	for i := range agents {
-		if agents[i].Name == agentName {
-			agent = &agents[i]
-			break
-		}
-	}
-	if agent == nil {
-		return nil, fmt.Errorf("unknown agent: %q (supported: opencode, claude-code)", agentName)
-	}
-
 	switch agentName {
 	case "opencode":
-		return installOpenCode(agent)
+		return installOpenCode()
 	case "claude-code":
-		return installClaudeCode(agent)
+		return installClaudeCode()
 	default:
-		return nil, fmt.Errorf("no installer for agent: %q", agentName)
+		return nil, fmt.Errorf("unknown agent: %q (supported: opencode, claude-code)", agentName)
 	}
 }
 
 // ─── OpenCode ────────────────────────────────────────────────────────────────
 
-func installOpenCode(agent *Agent) (*Result, error) {
-	dir := agent.InstallDir
+func installOpenCode() (*Result, error) {
+	dir := openCodePluginDir()
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("create plugin dir %s: %w", dir, err)
 	}
@@ -92,7 +80,7 @@ func installOpenCode(agent *Agent) (*Result, error) {
 	}
 
 	return &Result{
-		Agent:       agent.Name,
+		Agent:       "opencode",
 		Destination: dir,
 		Files:       1,
 	}, nil
@@ -100,57 +88,39 @@ func installOpenCode(agent *Agent) (*Result, error) {
 
 // ─── Claude Code ─────────────────────────────────────────────────────────────
 
-func installClaudeCode(agent *Agent) (*Result, error) {
-	dir := agent.InstallDir
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return nil, fmt.Errorf("create plugin dir %s: %w", dir, err)
+func installClaudeCode() (*Result, error) {
+	// Check that claude CLI is available
+	claudeBin, err := exec.LookPath("claude")
+	if err != nil {
+		return nil, fmt.Errorf("claude CLI not found in PATH — install Claude Code first: https://docs.anthropic.com/en/docs/claude-code")
 	}
 
-	fileCount := 0
-
-	err := fs.WalkDir(claudeCodeFS, "plugins/claude-code", func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-
-		// Relative path from the embed root
-		rel, err := filepath.Rel("plugins/claude-code", path)
-		if err != nil {
-			return err
-		}
-
-		target := filepath.Join(dir, rel)
-
-		if d.IsDir() {
-			return os.MkdirAll(target, 0755)
-		}
-
-		data, err := claudeCodeFS.ReadFile(path)
-		if err != nil {
-			return fmt.Errorf("read embedded %s: %w", path, err)
-		}
-
-		// Preserve executable bit for shell scripts
-		perm := os.FileMode(0644)
-		if filepath.Ext(path) == ".sh" {
-			perm = 0755
-		}
-
-		if err := os.WriteFile(target, data, perm); err != nil {
-			return fmt.Errorf("write %s: %w", target, err)
-		}
-
-		fileCount++
-		return nil
-	})
+	// Step 1: Add marketplace (idempotent — if already added, claude will say so)
+	addCmd := exec.Command(claudeBin, "plugin", "marketplace", "add", claudeCodeMarketplace)
+	addOut, err := addCmd.CombinedOutput()
+	addOutputStr := strings.TrimSpace(string(addOut))
 	if err != nil {
-		return nil, fmt.Errorf("install claude-code plugin: %w", err)
+		// If marketplace is already added, that's fine
+		if !strings.Contains(addOutputStr, "already") {
+			return nil, fmt.Errorf("marketplace add failed: %s", addOutputStr)
+		}
+	}
+
+	// Step 2: Install the plugin
+	installCmd := exec.Command(claudeBin, "plugin", "install", "engram")
+	installOut, err := installCmd.CombinedOutput()
+	installOutputStr := strings.TrimSpace(string(installOut))
+	if err != nil {
+		// If plugin is already installed, that's fine
+		if !strings.Contains(installOutputStr, "already") {
+			return nil, fmt.Errorf("plugin install failed: %s", installOutputStr)
+		}
 	}
 
 	return &Result{
-		Agent:       agent.Name,
-		Destination: dir,
-		Files:       fileCount,
+		Agent:       "claude-code",
+		Destination: "claude plugin system (managed by Claude Code)",
+		Files:       0, // managed by claude, not by us
 	}, nil
 }
 
@@ -161,7 +131,6 @@ func openCodePluginDir() string {
 
 	switch runtime.GOOS {
 	case "darwin", "linux":
-		// XDG_CONFIG_HOME or default
 		if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
 			return filepath.Join(xdg, "opencode", "plugins")
 		}
@@ -174,11 +143,4 @@ func openCodePluginDir() string {
 	default:
 		return filepath.Join(home, ".config", "opencode", "plugins")
 	}
-}
-
-func claudeCodePluginDir() string {
-	home, _ := os.UserHomeDir()
-
-	// Claude Code plugins live under ~/.claude/plugins/<plugin-name>/
-	return filepath.Join(home, ".claude", "plugins", "engram")
 }
