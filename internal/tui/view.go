@@ -69,8 +69,23 @@ func (m Model) viewDashboard() string {
 		b.WriteString("\n")
 
 		if len(m.Stats.Projects) > 0 {
-			projects := projectStyle.Render(strings.Join(m.Stats.Projects, ", "))
-			b.WriteString(fmt.Sprintf("  Projects: %s\n\n", projects))
+			b.WriteString(titleStyle.Render("  Projects"))
+			b.WriteString("\n")
+
+			limit := 5
+			for i, p := range m.Stats.Projects {
+				if i >= limit {
+					break
+				}
+				b.WriteString(listItemStyle.Render("• " + p))
+				b.WriteString("\n")
+			}
+
+			if len(m.Stats.Projects) > limit {
+				remaining := len(m.Stats.Projects) - limit
+				b.WriteString(fmt.Sprintf("    %s\n", timestampStyle.Render(fmt.Sprintf("...and %d more projects", remaining))))
+			}
+			b.WriteString("\n")
 		}
 	} else {
 		b.WriteString(statCardStyle.Render("Loading stats..."))

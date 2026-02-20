@@ -447,7 +447,7 @@ func (s *Store) RecentSessions(project string, limit int) ([]SessionSummary, err
 		args = append(args, project)
 	}
 
-	query += " GROUP BY s.id ORDER BY s.started_at DESC LIMIT ?"
+	query += " GROUP BY s.id ORDER BY MAX(COALESCE(o.created_at, s.started_at)) DESC LIMIT ?"
 	args = append(args, limit)
 
 	rows, err := s.db.Query(query, args...)
@@ -487,7 +487,7 @@ func (s *Store) AllSessions(project string, limit int) ([]SessionSummary, error)
 		args = append(args, project)
 	}
 
-	query += " GROUP BY s.id ORDER BY s.started_at DESC LIMIT ?"
+	query += " GROUP BY s.id ORDER BY MAX(COALESCE(o.created_at, s.started_at)) DESC LIMIT ?"
 	args = append(args, limit)
 
 	rows, err := s.db.Query(query, args...)
@@ -1055,7 +1055,7 @@ func (s *Store) Stats() (*Stats, error) {
 	s.db.QueryRow("SELECT COUNT(*) FROM observations WHERE deleted_at IS NULL").Scan(&stats.TotalObservations)
 	s.db.QueryRow("SELECT COUNT(*) FROM user_prompts").Scan(&stats.TotalPrompts)
 
-	rows, err := s.db.Query("SELECT DISTINCT project FROM observations WHERE project IS NOT NULL AND deleted_at IS NULL ORDER BY project")
+	rows, err := s.db.Query("SELECT project FROM observations WHERE project IS NOT NULL AND deleted_at IS NULL GROUP BY project ORDER BY MAX(created_at) DESC")
 	if err != nil {
 		return stats, nil
 	}
