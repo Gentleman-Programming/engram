@@ -41,21 +41,14 @@ changelog:
       - "^test:"
       - "^ci:"
 
-homebrew_casks:
+brews:
   - repository:
       owner: Gentleman-Programming
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-    directory: Casks
+    directory: Formula
     name: engram
     homepage: "https://github.com/Gentleman-Programming/engram"
     description: "Persistent memory for AI coding agents. Agent-agnostic, single binary, zero dependencies."
-    binaries:
-      - engram
-    hooks:
-      post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/engram"]
-          end
-    commit_msg_template: "chore: update engram cask to {{ .Tag }}"
+    license: "MIT"
+    commit_msg_template: "chore: update engram formula to {{ .Tag }}"
