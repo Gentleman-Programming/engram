@@ -43,7 +43,7 @@ brew install gentleman-programming/tap/engram
 Upgrade to latest:
 
 ```bash
-brew upgrade engram
+brew update && brew upgrade engram
 ```
 
 > **Migrating from Cask?** If you installed engram before v1.0.1, it was distributed as a Cask. Uninstall first, then reinstall:
