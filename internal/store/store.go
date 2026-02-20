@@ -336,6 +336,10 @@ func (s *Store) migrate() error {
 		return err
 	}
 
+	if _, err := s.db.Exec(`UPDATE user_prompts SET project = '' WHERE project IS NULL`); err != nil {
+		return err
+	}
+
 	// Create triggers to keep FTS in sync (idempotent check)
 	var name string
 	err := s.db.QueryRow(
@@ -704,7 +708,7 @@ func (s *Store) RecentPrompts(project string, limit int) ([]Prompt, error) {
 		limit = 20
 	}
 
-	query := `SELECT id, session_id, content, project, created_at FROM user_prompts`
+	query := `SELECT id, session_id, content, ifnull(project, '') as project, created_at FROM user_prompts`
 	args := []any{}
 
 	if project != "" {
@@ -740,7 +744,7 @@ func (s *Store) SearchPrompts(query string, project string, limit int) ([]Prompt
 	ftsQuery := sanitizeFTS(query)
 
 	sql := `
-		SELECT p.id, p.session_id, p.content, p.project, p.created_at
+		SELECT p.id, p.session_id, p.content, ifnull(p.project, '') as project, p.created_at
 		FROM prompts_fts fts
 		JOIN user_prompts p ON p.id = fts.rowid
 		WHERE prompts_fts MATCH ?
@@ -1183,7 +1187,7 @@ func (s *Store) Export() (*ExportData, error) {
 
 	// Prompts
 	promptRows, err := s.db.Query(
-		"SELECT id, session_id, content, project, created_at FROM user_prompts ORDER BY id",
+		"SELECT id, session_id, content, ifnull(project, '') as project, created_at FROM user_prompts ORDER BY id",
 	)
 	if err != nil {
 		return nil, fmt.Errorf("export prompts: %w", err)

@@ -387,3 +387,56 @@ func TestTopicKeyUpsertIsScopedByProjectAndScope(t *testing.T) {
 		t.Fatalf("expected topic upsert boundaries by project+scope, got ids base=%d personal=%d other=%d", baseID, personalID, otherProjectID)
 	}
 }
+
+func TestPromptProjectNullScan(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	// Manually insert a prompt with NULL project to simulate legacy data or external changes
+	_, err := s.db.Exec(
+		"INSERT INTO user_prompts (session_id, content, project) VALUES (?, ?, NULL)",
+		"s1", "prompt with null project",
+	)
+	if err != nil {
+		t.Fatalf("manual insert: %v", err)
+	}
+
+	// 1. Test RecentPrompts
+	prompts, err := s.RecentPrompts("", 10)
+	if err != nil {
+		t.Fatalf("RecentPrompts failed with null project: %v", err)
+	}
+	if len(prompts) != 1 || prompts[0].Project != "" {
+		t.Errorf("expected empty string for null project, got %q", prompts[0].Project)
+	}
+
+	// 2. Test SearchPrompts
+	searchResult, err := s.SearchPrompts("null", "", 10)
+	if err != nil {
+		t.Fatalf("SearchPrompts failed with null project: %v", err)
+	}
+	if len(searchResult) != 1 || searchResult[0].Project != "" {
+		t.Errorf("expected empty string for null project in search, got %q", searchResult[0].Project)
+	}
+
+	// 3. Test Export
+	data, err := s.Export()
+	if err != nil {
+		t.Fatalf("Export failed with null project: %v", err)
+	}
+	found := false
+	for _, p := range data.Prompts {
+		if p.Content == "prompt with null project" {
+			found = true
+			if p.Project != "" {
+				t.Errorf("expected empty string for null project in export, got %q", p.Project)
+			}
+		}
+	}
+	if !found {
+		t.Error("exported prompts missing the test prompt")
+	}
+}
