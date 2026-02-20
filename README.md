@@ -102,11 +102,14 @@ Session ends → Agent writes session summary (Goal/Discoveries/Accomplished/Fil
 Next session starts → Previous session context is injected automatically
 ```
 
-### 10 MCP Tools
+### 13 MCP Tools
 
 | Tool | Purpose |
 |------|---------|
 | `mem_save` | Save a structured observation (decision, bugfix, pattern, etc.) |
+| `mem_update` | Update an existing observation by ID |
+| `mem_delete` | Delete an observation (soft-delete by default, hard-delete optional) |
+| `mem_suggest_topic_key` | Suggest a stable `topic_key` for evolving topics before saving |
 | `mem_search` | Full-text search across all memories |
 | `mem_session_summary` | Save end-of-session summary |
 | `mem_context` | Get recent context from previous sessions |
@@ -127,6 +130,35 @@ Token-efficient memory retrieval — don't dump everything, drill in:
 3. mem_get_observation id=42       → full untruncated content
 ```
 
+### Memory Hygiene
+
+- `mem_save` now supports `scope` (`project` default, `personal` optional)
+- `mem_save` also supports `topic_key`; with a topic key, saves become upserts (same project+scope+topic updates the existing memory)
+- Exact dedupe prevents repeated inserts in a rolling window (hash + project + scope + type + title)
+- Duplicates update metadata (`duplicate_count`, `last_seen_at`, `updated_at`) instead of creating new rows
+- Topic upserts increment `revision_count` so evolving decisions stay in one memory
+- `mem_delete` uses soft-delete by default (`deleted_at`), with optional hard delete
+- `mem_search`, `mem_context`, recent lists, and timeline ignore soft-deleted observations
+
+### Topic Key Workflow (recommended)
+
+Use this when a topic evolves over time (architecture, long-running feature decisions, etc.):
+
+```text
+1. mem_suggest_topic_key(type="architecture", title="Auth architecture")
+2. mem_save(..., topic_key="architecture-auth-architecture")
+3. Later change on same topic -> mem_save(..., same topic_key)
+   => existing observation is updated (revision_count++)
+```
+
+Different topics should use different keys (e.g. `architecture/auth-model` vs `bug/auth-nil-panic`) so they never overwrite each other.
+
+`mem_suggest_topic_key` now applies a family heuristic for consistency across sessions:
+
+- `architecture/*` for architecture/design/ADR-like changes
+- `bug/*` for fixes, regressions, errors, panics
+- `decision/*`, `pattern/*`, `config/*`, `discovery/*`, `learning/*` when detected
+
 ## Agent Setup
 
 Engram works with **any MCP-compatible agent**. Add it to your agent's MCP config:
@@ -143,7 +175,7 @@ engram setup opencode
 
 This does two things:
 1. Copies the plugin to `~/.config/opencode/plugins/engram.ts` (session tracking, Memory Protocol, compaction recovery)
-2. Adds the `engram` MCP server entry to your `opencode.json` (the 10 memory tools)
+2. Adds the `engram` MCP server entry to your `opencode.json` (the 13 memory tools)
 
 The plugin also needs the HTTP server running for session tracking:
 
@@ -151,7 +183,7 @@ The plugin also needs the HTTP server running for session tracking:
 engram serve &
 ```
 
-**Alternative: Manual MCP-only setup** (no plugin, just the 10 memory tools):
+**Alternative: Manual MCP-only setup** (no plugin, just the 13 memory tools):
 
 Add to your `opencode.json` (global: `~/.config/opencode/opencode.json` or project-level):
 
@@ -188,7 +220,7 @@ That's it. The plugin registers the MCP server, hooks, and Memory Protocol skill
 engram setup claude-code
 ```
 
-**Option C: Bare MCP** — just the 10 memory tools, no session management:
+**Option C: Bare MCP** — just the 13 memory tools, no session management:
 
 Add to your `.claude/settings.json` (project) or `~/.claude/settings.json` (global):
 
@@ -484,7 +516,7 @@ claude --plugin-dir ./plugin/claude-code
 
 | Feature | Bare MCP | Plugin |
 |---------|----------|--------|
-| 10 memory tools | ✓ | ✓ |
+| 13 memory tools | ✓ | ✓ |
 | Session tracking (auto-start) | ✗ | ✓ |
 | Auto-import git-synced memories | ✗ | ✓ |
 | Compaction recovery | ✗ | ✓ |
@@ -544,7 +576,7 @@ engram/
 ├── internal/
 │   ├── store/store.go              # Core: SQLite + FTS5 + all data ops
 │   ├── server/server.go            # HTTP REST API (port 7437)
-│   ├── mcp/mcp.go                  # MCP stdio server (10 tools)
+│   ├── mcp/mcp.go                  # MCP stdio server (13 tools)
 │   ├── setup/setup.go              # Agent plugin installer (go:embed)
 │   ├── sync/sync.go                # Git sync: manifest + compressed chunks
 │   └── tui/                        # Bubbletea terminal UI

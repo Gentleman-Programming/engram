@@ -36,11 +36,20 @@ Call `mem_save` IMMEDIATELY and WITHOUT BEING ASKED after any of these:
 Format for `mem_save`:
 - **title**: Verb + what — short, searchable (e.g. "Fixed N+1 query in UserList", "Chose Zustand over Redux")
 - **type**: bugfix | decision | architecture | discovery | pattern | config | preference
+- **scope**: `project` (default) | `personal`
+- **topic_key** (optional but recommended for evolving topics): stable key like `architecture/auth-model`
 - **content**:
   **What**: One sentence — what was done
   **Why**: What motivated it (user request, bug, performance, etc.)
   **Where**: Files or paths affected
   **Learned**: Gotchas, edge cases, things that surprised you (omit if none)
+
+### Topic update rules (mandatory)
+
+- Different topics MUST NOT overwrite each other (example: architecture decision vs bugfix)
+- If the same topic evolves, call `mem_save` with the same `topic_key` so memory is updated (upsert) instead of creating a new observation
+- If unsure about the key, call `mem_suggest_topic_key` first, then reuse that key consistently
+- If you already know the exact ID to fix, use `mem_update`
 
 ## WHEN TO SEARCH MEMORY
 

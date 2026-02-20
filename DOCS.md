@@ -44,7 +44,7 @@ engram/
 ├── internal/
 │   ├── store/store.go              # Core: SQLite + FTS5 + all data operations
 │   ├── server/server.go            # HTTP REST API server (port 7437)
-│   ├── mcp/mcp.go                  # MCP stdio server (10 tools)
+│   ├── mcp/mcp.go                  # MCP stdio server (13 tools)
 │   ├── sync/sync.go                # Git sync: manifest + chunks (gzipped JSONL)
 │   └── tui/                        # Bubbletea terminal UI
 │       ├── model.go                # Screen constants, Model struct, Init(), custom messages
@@ -67,7 +67,7 @@ engram/
 ### Tables
 
 - **sessions** — `id` (TEXT PK), `project`, `directory`, `started_at`, `ended_at`, `summary`, `status`
-- **observations** — `id` (INTEGER PK AUTOINCREMENT), `session_id` (FK), `type`, `title`, `content`, `tool_name`, `project`, `created_at`
+- **observations** — `id` (INTEGER PK AUTOINCREMENT), `session_id` (FK), `type`, `title`, `content`, `tool_name`, `project`, `scope`, `topic_key`, `normalized_hash`, `revision_count`, `duplicate_count`, `last_seen_at`, `created_at`, `updated_at`, `deleted_at`
 - **observations_fts** — FTS5 virtual table synced via triggers (`title`, `content`, `tool_name`, `type`, `project`)
 - **user_prompts** — `id` (INTEGER PK AUTOINCREMENT), `session_id` (FK), `content`, `project`, `created_at`
 - **prompts_fts** — FTS5 virtual table synced via triggers (`content`, `project`)
@@ -88,8 +88,8 @@ engram/
 engram serve [port]       Start HTTP API server (default: 7437)
 engram mcp                Start MCP server (stdio transport)
 engram tui                Launch interactive terminal UI
-engram search <query>     Search memories [--type TYPE] [--project PROJECT] [--limit N]
-engram save <title> <msg> Save a memory [--type TYPE] [--project PROJECT]
+engram search <query>     Search memories [--type TYPE] [--project PROJECT] [--scope SCOPE] [--limit N]
+engram save <title> <msg> Save a memory [--type TYPE] [--project PROJECT] [--scope SCOPE] [--topic TOPIC_KEY]
 engram timeline <obs_id>  Show chronological context around an observation [--before N] [--after N]
 engram context [project]  Show recent context from previous sessions
 engram stats              Show memory system statistics
@@ -177,13 +177,15 @@ All endpoints return JSON. Server listens on `127.0.0.1:7437`.
 
 ### Observations
 
-- `POST /observations` — Add observation. Body: `{session_id, type, title, content, tool_name?, project?}`
-- `GET /observations/recent` — Recent observations. Query: `?project=X&limit=N`
+- `POST /observations` — Add observation. Body: `{session_id, type, title, content, tool_name?, project?, scope?, topic_key?}`
+- `GET /observations/recent` — Recent observations. Query: `?project=X&scope=project|personal&limit=N`
 - `GET /observations/{id}` — Get single observation by ID
+- `PATCH /observations/{id}` — Update fields. Body: `{title?, content?, type?, project?, scope?, topic_key?}`
+- `DELETE /observations/{id}` — Delete observation (`?hard=true` for hard delete, soft delete by default)
 
 ### Search
 
-- `GET /search` — FTS5 search. Query: `?q=QUERY&type=TYPE&project=PROJECT&limit=N`
+- `GET /search` — FTS5 search. Query: `?q=QUERY&type=TYPE&project=PROJECT&scope=SCOPE&limit=N`
 
 ### Timeline
 
@@ -197,7 +199,7 @@ All endpoints return JSON. Server listens on `127.0.0.1:7437`.
 
 ### Context
 
-- `GET /context` — Formatted context. Query: `?project=X`
+- `GET /context` — Formatted context. Query: `?project=X&scope=project|personal`
 
 ### Export / Import
 
@@ -210,11 +212,11 @@ All endpoints return JSON. Server listens on `127.0.0.1:7437`.
 
 ---
 
-## MCP Tools (10 tools)
+## MCP Tools (13 tools)
 
 ### mem_search
 
-Search persistent memory across all sessions. Supports FTS5 full-text search with type/project/limit filters.
+Search persistent memory across all sessions. Supports FTS5 full-text search with type/project/scope/limit filters.
 
 ### mem_save
 
@@ -222,7 +224,24 @@ Save structured observations. The tool description teaches agents the format:
 
 - **title**: Short, searchable (e.g. "JWT auth middleware")
 - **type**: `decision` | `architecture` | `bugfix` | `pattern` | `config` | `discovery` | `learning`
+- **scope**: `project` (default) | `personal`
+- **topic_key**: optional canonical topic id (e.g. `architecture/auth-model`) used to upsert evolving memories
 - **content**: Structured with `**What**`, `**Why**`, `**Where**`, `**Learned**`
+
+Exact duplicate saves are deduplicated in a rolling time window using a normalized content hash + project + scope + type + title.
+When `topic_key` is provided, `mem_save` upserts the latest observation in the same `project + scope + topic_key`, incrementing `revision_count`.
+
+### mem_update
+
+Update an observation by ID. Supports partial updates for `title`, `content`, `type`, `project`, `scope`, and `topic_key`.
+
+### mem_suggest_topic_key
+
+Suggest a stable `topic_key` from `type + title` (or content fallback). Uses family heuristics like `architecture/*`, `bug/*`, `decision/*`, etc. Use before `mem_save` when you want evolving topics to upsert into a single observation.
+
+### mem_delete
+
+Delete an observation by ID. Uses soft-delete by default (`deleted_at`); optional hard-delete for permanent removal.
 
 ### mem_save_prompt
 
@@ -230,7 +249,7 @@ Save user prompts — records what the user asked so future sessions have contex
 
 ### mem_context
 
-Get recent memory context from previous sessions — shows sessions, prompts, and observations.
+Get recent memory context from previous sessions — shows sessions, prompts, and observations, with optional scope filtering for observations.
 
 ### mem_stats
 
@@ -425,7 +444,7 @@ The `tool.execute.after` hook receives:
 
 ### ENGRAM_TOOLS (excluded from tool count)
 
-`mem_search`, `mem_save`, `mem_save_prompt`, `mem_session_summary`, `mem_context`, `mem_stats`, `mem_timeline`, `mem_get_observation`, `mem_session_start`, `mem_session_end`
+`mem_search`, `mem_save`, `mem_update`, `mem_delete`, `mem_suggest_topic_key`, `mem_save_prompt`, `mem_session_summary`, `mem_context`, `mem_stats`, `mem_timeline`, `mem_get_observation`, `mem_session_start`, `mem_session_end`
 
 ---
 

@@ -171,7 +171,7 @@ func searchMemories(s *store.Store, query string) tea.Cmd {
 
 func loadRecentObservations(s *store.Store) tea.Cmd {
 	return func() tea.Msg {
-		obs, err := s.AllObservations("", 50)
+		obs, err := s.AllObservations("", "", 50)
 		return recentObservationsMsg{observations: obs, err: err}
 	}
 }

@@ -41,6 +41,9 @@ func registerTools(srv *server.MCPServer, s *store.Store) {
 			mcp.WithString("project",
 				mcp.Description("Filter by project name"),
 			),
+			mcp.WithString("scope",
+				mcp.Description("Filter by scope: project (default) or personal"),
+			),
 			mcp.WithNumber("limit",
 				mcp.Description("Max results (default: 10, max: 20)"),
 			),
@@ -94,8 +97,76 @@ Examples:
 			mcp.WithString("project",
 				mcp.Description("Project name"),
 			),
+			mcp.WithString("scope",
+				mcp.Description("Scope for this observation: project (default) or personal"),
+			),
+			mcp.WithString("topic_key",
+				mcp.Description("Optional topic identifier for upserts (e.g. architecture/auth-model). Reuses and updates the latest observation in same project+scope."),
+			),
 		),
 		handleSave(s),
+	)
+
+	// ─── mem_update ──────────────────────────────────────────────────
+	srv.AddTool(
+		mcp.NewTool("mem_update",
+			mcp.WithDescription("Update an existing observation by ID. Only provided fields are changed."),
+			mcp.WithNumber("id",
+				mcp.Required(),
+				mcp.Description("Observation ID to update"),
+			),
+			mcp.WithString("title",
+				mcp.Description("New title"),
+			),
+			mcp.WithString("content",
+				mcp.Description("New content"),
+			),
+			mcp.WithString("type",
+				mcp.Description("New type/category"),
+			),
+			mcp.WithString("project",
+				mcp.Description("New project value"),
+			),
+			mcp.WithString("scope",
+				mcp.Description("New scope: project or personal"),
+			),
+			mcp.WithString("topic_key",
+				mcp.Description("New topic key (normalized internally)"),
+			),
+		),
+		handleUpdate(s),
+	)
+
+	// ─── mem_suggest_topic_key ───────────────────────────────────────
+	srv.AddTool(
+		mcp.NewTool("mem_suggest_topic_key",
+			mcp.WithDescription("Suggest a stable topic_key for memory upserts. Use this before mem_save when you want evolving topics (like architecture decisions) to update a single observation over time."),
+			mcp.WithString("type",
+				mcp.Description("Observation type/category, e.g. architecture, decision, bugfix"),
+			),
+			mcp.WithString("title",
+				mcp.Description("Observation title (preferred input for stable keys)"),
+			),
+			mcp.WithString("content",
+				mcp.Description("Observation content used as fallback if title is empty"),
+			),
+		),
+		handleSuggestTopicKey(),
+	)
+
+	// ─── mem_delete ──────────────────────────────────────────────────
+	srv.AddTool(
+		mcp.NewTool("mem_delete",
+			mcp.WithDescription("Delete an observation by ID. Soft-delete by default; set hard_delete=true for permanent deletion."),
+			mcp.WithNumber("id",
+				mcp.Required(),
+				mcp.Description("Observation ID to delete"),
+			),
+			mcp.WithBoolean("hard_delete",
+				mcp.Description("If true, permanently deletes the observation"),
+			),
+		),
+		handleDelete(s),
 	)
 
 	// ─── mem_save_prompt ────────────────────────────────────────────
@@ -122,6 +193,9 @@ Examples:
 			mcp.WithDescription("Get recent memory context from previous sessions. Shows recent sessions and observations to understand what was done before."),
 			mcp.WithString("project",
 				mcp.Description("Filter by project (omit for all projects)"),
+			),
+			mcp.WithString("scope",
+				mcp.Description("Filter observations by scope: project (default) or personal"),
 			),
 			mcp.WithNumber("limit",
 				mcp.Description("Number of observations to retrieve (default: 20)"),
@@ -258,11 +332,13 @@ func handleSearch(s *store.Store) server.ToolHandlerFunc {
 		query, _ := req.GetArguments()["query"].(string)
 		typ, _ := req.GetArguments()["type"].(string)
 		project, _ := req.GetArguments()["project"].(string)
+		scope, _ := req.GetArguments()["scope"].(string)
 		limit := intArg(req, "limit", 10)
 
 		results, err := s.Search(query, store.SearchOptions{
 			Type:    typ,
 			Project: project,
+			Scope:   scope,
 			Limit:   limit,
 		})
 		if err != nil {
@@ -280,10 +356,10 @@ func handleSearch(s *store.Store) server.ToolHandlerFunc {
 			if r.Project != nil {
 				project = fmt.Sprintf(" | project: %s", *r.Project)
 			}
-			fmt.Fprintf(&b, "[%d] #%d (%s) — %s\n    %s\n    %s%s\n\n",
+			fmt.Fprintf(&b, "[%d] #%d (%s) — %s\n    %s\n    %s%s | scope: %s\n\n",
 				i+1, r.ID, r.Type, r.Title,
 				truncate(r.Content, 300),
-				r.CreatedAt, project)
+				r.CreatedAt, project, r.Scope)
 		}
 
 		return mcp.NewToolResultText(b.String()), nil
@@ -297,6 +373,8 @@ func handleSave(s *store.Store) server.ToolHandlerFunc {
 		typ, _ := req.GetArguments()["type"].(string)
 		sessionID, _ := req.GetArguments()["session_id"].(string)
 		project, _ := req.GetArguments()["project"].(string)
+		scope, _ := req.GetArguments()["scope"].(string)
+		topicKey, _ := req.GetArguments()["topic_key"].(string)
 
 		if typ == "" {
 			typ = "manual"
@@ -304,6 +382,7 @@ func handleSave(s *store.Store) server.ToolHandlerFunc {
 		if sessionID == "" {
 			sessionID = "manual-save"
 		}
+		suggestedTopicKey := store.SuggestTopicKey(typ, title, content)
 
 		// Ensure the session exists
 		s.CreateSession(sessionID, project, "")
@@ -314,12 +393,97 @@ func handleSave(s *store.Store) server.ToolHandlerFunc {
 			Title:     title,
 			Content:   content,
 			Project:   project,
+			Scope:     scope,
+			TopicKey:  topicKey,
 		})
 		if err != nil {
 			return mcp.NewToolResultError("Failed to save: " + err.Error()), nil
 		}
 
+		if topicKey == "" && suggestedTopicKey != "" {
+			return mcp.NewToolResultText(fmt.Sprintf("Memory saved: %q (%s)\nSuggested topic_key: %s", title, typ, suggestedTopicKey)), nil
+		}
+
 		return mcp.NewToolResultText(fmt.Sprintf("Memory saved: %q (%s)", title, typ)), nil
+	}
+}
+
+func handleSuggestTopicKey() server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		typ, _ := req.GetArguments()["type"].(string)
+		title, _ := req.GetArguments()["title"].(string)
+		content, _ := req.GetArguments()["content"].(string)
+
+		if strings.TrimSpace(title) == "" && strings.TrimSpace(content) == "" {
+			return mcp.NewToolResultError("provide title or content to suggest a topic_key"), nil
+		}
+
+		topicKey := store.SuggestTopicKey(typ, title, content)
+		if topicKey == "" {
+			return mcp.NewToolResultError("could not suggest topic_key from input"), nil
+		}
+
+		return mcp.NewToolResultText(fmt.Sprintf("Suggested topic_key: %s", topicKey)), nil
+	}
+}
+
+func handleUpdate(s *store.Store) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		id := int64(intArg(req, "id", 0))
+		if id == 0 {
+			return mcp.NewToolResultError("id is required"), nil
+		}
+
+		update := store.UpdateObservationParams{}
+		if v, ok := req.GetArguments()["title"].(string); ok {
+			update.Title = &v
+		}
+		if v, ok := req.GetArguments()["content"].(string); ok {
+			update.Content = &v
+		}
+		if v, ok := req.GetArguments()["type"].(string); ok {
+			update.Type = &v
+		}
+		if v, ok := req.GetArguments()["project"].(string); ok {
+			update.Project = &v
+		}
+		if v, ok := req.GetArguments()["scope"].(string); ok {
+			update.Scope = &v
+		}
+		if v, ok := req.GetArguments()["topic_key"].(string); ok {
+			update.TopicKey = &v
+		}
+
+		if update.Title == nil && update.Content == nil && update.Type == nil && update.Project == nil && update.Scope == nil && update.TopicKey == nil {
+			return mcp.NewToolResultError("provide at least one field to update"), nil
+		}
+
+		obs, err := s.UpdateObservation(id, update)
+		if err != nil {
+			return mcp.NewToolResultError("Failed to update memory: " + err.Error()), nil
+		}
+
+		return mcp.NewToolResultText(fmt.Sprintf("Memory updated: #%d %q (%s, scope=%s)", obs.ID, obs.Title, obs.Type, obs.Scope)), nil
+	}
+}
+
+func handleDelete(s *store.Store) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		id := int64(intArg(req, "id", 0))
+		if id == 0 {
+			return mcp.NewToolResultError("id is required"), nil
+		}
+
+		hardDelete := boolArg(req, "hard_delete", false)
+		if err := s.DeleteObservation(id, hardDelete); err != nil {
+			return mcp.NewToolResultError("Failed to delete memory: " + err.Error()), nil
+		}
+
+		mode := "soft-deleted"
+		if hardDelete {
+			mode = "permanently deleted"
+		}
+		return mcp.NewToolResultText(fmt.Sprintf("Memory #%d %s", id, mode)), nil
 	}
 }
 
@@ -352,8 +516,9 @@ func handleSavePrompt(s *store.Store) server.ToolHandlerFunc {
 func handleContext(s *store.Store) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		project, _ := req.GetArguments()["project"].(string)
+		scope, _ := req.GetArguments()["scope"].(string)
 
-		context, err := s.FormatContext(project)
+		context, err := s.FormatContext(project, scope)
 		if err != nil {
 			return mcp.NewToolResultError("Failed to get context: " + err.Error()), nil
 		}
@@ -466,15 +631,22 @@ func handleGetObservation(s *store.Store) server.ToolHandlerFunc {
 		if obs.Project != nil {
 			project = fmt.Sprintf("\nProject: %s", *obs.Project)
 		}
+		scope := fmt.Sprintf("\nScope: %s", obs.Scope)
+		topic := ""
+		if obs.TopicKey != nil {
+			topic = fmt.Sprintf("\nTopic: %s", *obs.TopicKey)
+		}
 		toolName := ""
 		if obs.ToolName != nil {
 			toolName = fmt.Sprintf("\nTool: %s", *obs.ToolName)
 		}
+		duplicateMeta := fmt.Sprintf("\nDuplicates: %d", obs.DuplicateCount)
+		revisionMeta := fmt.Sprintf("\nRevisions: %d", obs.RevisionCount)
 
 		result := fmt.Sprintf("#%d [%s] %s\n%s\nSession: %s%s%s\nCreated: %s",
 			obs.ID, obs.Type, obs.Title,
 			obs.Content,
-			obs.SessionID, project, toolName,
+			obs.SessionID, project+scope+topic, toolName+duplicateMeta+revisionMeta,
 			obs.CreatedAt,
 		)
 
@@ -545,6 +717,14 @@ func intArg(req mcp.CallToolRequest, key string, defaultVal int) int {
 		return defaultVal
 	}
 	return int(v)
+}
+
+func boolArg(req mcp.CallToolRequest, key string, defaultVal bool) bool {
+	v, ok := req.GetArguments()[key].(bool)
+	if !ok {
+		return defaultVal
+	}
+	return v
 }
 
 func truncate(s string, max int) string {

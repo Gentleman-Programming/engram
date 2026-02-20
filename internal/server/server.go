@@ -54,6 +54,8 @@ func (s *Server) routes() {
 	// Observations
 	s.mux.HandleFunc("POST /observations", s.handleAddObservation)
 	s.mux.HandleFunc("GET /observations/recent", s.handleRecentObservations)
+	s.mux.HandleFunc("PATCH /observations/{id}", s.handleUpdateObservation)
+	s.mux.HandleFunc("DELETE /observations/{id}", s.handleDeleteObservation)
 
 	// Search
 	s.mux.HandleFunc("GET /search", s.handleSearch)
@@ -162,9 +164,10 @@ func (s *Server) handleAddObservation(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRecentObservations(w http.ResponseWriter, r *http.Request) {
 	project := r.URL.Query().Get("project")
+	scope := r.URL.Query().Get("scope")
 	limit := queryInt(r, "limit", 20)
 
-	obs, err := s.store.RecentObservations(project, limit)
+	obs, err := s.store.RecentObservations(project, scope, limit)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -183,6 +186,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	results, err := s.store.Search(query, store.SearchOptions{
 		Type:    r.URL.Query().Get("type"),
 		Project: r.URL.Query().Get("project"),
+		Scope:   r.URL.Query().Get("scope"),
 		Limit:   queryInt(r, "limit", 10),
 	})
 	if err != nil {
@@ -208,6 +212,55 @@ func (s *Server) handleGetObservation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonResponse(w, http.StatusOK, obs)
+}
+
+func (s *Server) handleUpdateObservation(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid observation id")
+		return
+	}
+
+	var body store.UpdateObservationParams
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+
+	if body.Type == nil && body.Title == nil && body.Content == nil && body.Project == nil && body.Scope == nil && body.TopicKey == nil {
+		jsonError(w, http.StatusBadRequest, "at least one field is required")
+		return
+	}
+
+	obs, err := s.store.UpdateObservation(id, body)
+	if err != nil {
+		jsonError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, obs)
+}
+
+func (s *Server) handleDeleteObservation(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid observation id")
+		return
+	}
+
+	hard := queryBool(r, "hard", false)
+	if err := s.store.DeleteObservation(id, hard); err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"id":          id,
+		"status":      "deleted",
+		"hard_delete": hard,
+	})
 }
 
 func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
@@ -333,8 +386,9 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 	project := r.URL.Query().Get("project")
+	scope := r.URL.Query().Get("scope")
 
-	context, err := s.store.FormatContext(project)
+	context, err := s.store.FormatContext(project, scope)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -375,4 +429,16 @@ func queryInt(r *http.Request, key string, defaultVal int) int {
 		return defaultVal
 	}
 	return n
+}
+
+func queryBool(r *http.Request, key string, defaultVal bool) bool {
+	v := r.URL.Query().Get(key)
+	if v == "" {
+		return defaultVal
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return defaultVal
+	}
+	return b
 }

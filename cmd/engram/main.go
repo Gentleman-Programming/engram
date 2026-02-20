@@ -139,7 +139,7 @@ func cmdTUI(cfg store.Config) {
 
 func cmdSearch(cfg store.Config) {
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "usage: engram search <query> [--type TYPE] [--project PROJECT] [--limit N]")
+		fmt.Fprintln(os.Stderr, "usage: engram search <query> [--type TYPE] [--project PROJECT] [--scope SCOPE] [--limit N]")
 		os.Exit(1)
 	}
 
@@ -164,6 +164,11 @@ func cmdSearch(cfg store.Config) {
 				if n, err := strconv.Atoi(os.Args[i+1]); err == nil {
 					opts.Limit = n
 				}
+				i++
+			}
+		case "--scope":
+			if i+1 < len(os.Args) {
+				opts.Scope = os.Args[i+1]
 				i++
 			}
 		default:
@@ -199,16 +204,16 @@ func cmdSearch(cfg store.Config) {
 		if r.Project != nil {
 			project = fmt.Sprintf(" | project: %s", *r.Project)
 		}
-		fmt.Printf("[%d] #%d (%s) — %s\n    %s\n    %s%s\n\n",
+		fmt.Printf("[%d] #%d (%s) — %s\n    %s\n    %s%s | scope: %s\n\n",
 			i+1, r.ID, r.Type, r.Title,
 			truncate(r.Content, 300),
-			r.CreatedAt, project)
+			r.CreatedAt, project, r.Scope)
 	}
 }
 
 func cmdSave(cfg store.Config) {
 	if len(os.Args) < 4 {
-		fmt.Fprintln(os.Stderr, "usage: engram save <title> <content> [--type TYPE] [--project PROJECT]")
+		fmt.Fprintln(os.Stderr, "usage: engram save <title> <content> [--type TYPE] [--project PROJECT] [--scope SCOPE] [--topic TOPIC_KEY]")
 		os.Exit(1)
 	}
 
@@ -216,6 +221,8 @@ func cmdSave(cfg store.Config) {
 	content := os.Args[3]
 	typ := "manual"
 	project := ""
+	scope := "project"
+	topicKey := ""
 
 	for i := 4; i < len(os.Args); i++ {
 		switch os.Args[i] {
@@ -227,6 +234,16 @@ func cmdSave(cfg store.Config) {
 		case "--project":
 			if i+1 < len(os.Args) {
 				project = os.Args[i+1]
+				i++
+			}
+		case "--scope":
+			if i+1 < len(os.Args) {
+				scope = os.Args[i+1]
+				i++
+			}
+		case "--topic":
+			if i+1 < len(os.Args) {
+				topicKey = os.Args[i+1]
 				i++
 			}
 		}
@@ -245,6 +262,8 @@ func cmdSave(cfg store.Config) {
 		Title:     title,
 		Content:   content,
 		Project:   project,
+		Scope:     scope,
+		TopicKey:  topicKey,
 	})
 	if err != nil {
 		fatal(err)
@@ -341,7 +360,7 @@ func cmdContext(cfg store.Config) {
 	}
 	defer s.Close()
 
-	ctx, err := s.FormatContext(project)
+	ctx, err := s.FormatContext(project, "")
 	if err != nil {
 		fatal(err)
 	}
@@ -568,8 +587,10 @@ func cmdSetup() {
 	}
 
 	// Interactive selection
-	fmt.Println("engram setup — Install agent plugin\n")
-	fmt.Println("Which agent do you want to set up?\n")
+	fmt.Println("engram setup — Install agent plugin")
+	fmt.Println()
+	fmt.Println("Which agent do you want to set up?")
+	fmt.Println()
 
 	for i, a := range agents {
 		fmt.Printf("  [%d] %s\n", i+1, a.Description)
@@ -624,8 +645,8 @@ Commands:
   serve [port]       Start HTTP API server (default: 7437)
   mcp                Start MCP server (stdio transport, for any AI agent)
   tui                Launch interactive terminal UI
-  search <query>     Search memories [--type TYPE] [--project PROJECT] [--limit N]
-  save <title> <msg> Save a memory  [--type TYPE] [--project PROJECT]
+  search <query>     Search memories [--type TYPE] [--project PROJECT] [--scope SCOPE] [--limit N]
+  save <title> <msg> Save a memory  [--type TYPE] [--project PROJECT] [--scope SCOPE]
   timeline <obs_id>  Show chronological context around an observation [--before N] [--after N]
   context [project]  Show recent context from previous sessions
   stats              Show memory system statistics
