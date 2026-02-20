@@ -62,11 +62,17 @@ claude plugin install engram
 # OpenCode — via engram setup
 engram setup opencode
 
+# Gemini CLI — MCP auto-registration
+engram setup gemini-cli
+
+# Codex — MCP auto-registration
+engram setup codex
+
 # Or interactive (asks which agent)
 engram setup
 ```
 
-See [Agent Setup](#agent-setup) for manual configuration or other agents (Cursor, Windsurf, Gemini).
+See [Agent Setup](#agent-setup) for manual configuration or other agents (Cursor, Windsurf, Gemini, Codex).
 
 That's it. No Node.js, no Python, no Bun, no Docker, no ChromaDB, no vector database, no worker processes. **One binary, one SQLite file.**
 
@@ -241,7 +247,19 @@ See [Claude Code Plugin](#claude-code-plugin) for details on what the plugin pro
 
 ### Gemini CLI
 
-Add to your `~/.gemini/settings.json` (global) or `.gemini/settings.json` (project):
+Recommended: one command to set up MCP + compaction recovery instructions:
+
+```bash
+engram setup gemini-cli
+```
+
+`engram setup gemini-cli` now does three things:
+- Registers `mcpServers.engram` in `~/.gemini/settings.json`
+- Writes `~/.gemini/system.md` with the Engram Memory Protocol (includes post-compaction recovery)
+- Ensures `~/.gemini/.env` contains `GEMINI_SYSTEM_MD=1` so Gemini actually loads that system prompt
+
+Manual alternative: add to your `~/.gemini/settings.json` (global) or `.gemini/settings.json` (project):
+
 
 ```json
 {
@@ -258,6 +276,30 @@ Or via the CLI:
 
 ```bash
 gemini mcp add engram engram mcp
+```
+
+### Codex
+
+Recommended: one command to set up MCP + compaction recovery instructions:
+
+```bash
+engram setup codex
+```
+
+`engram setup codex` now does three things:
+- Registers `[mcp_servers.engram]` in `~/.codex/config.toml`
+- Writes `~/.codex/engram-instructions.md` with the Engram Memory Protocol
+- Writes `~/.codex/engram-compact-prompt.md` and points `experimental_compact_prompt_file` to it, so compaction output includes a required memory-save instruction
+
+Manual alternative: add to your `~/.codex/config.toml`:
+
+```toml
+model_instructions_file = "~/.codex/engram-instructions.md"
+experimental_compact_prompt_file = "~/.codex/engram-compact-prompt.md"
+
+[mcp_servers.engram]
+command = "engram"
+args = ["mcp"]
 ```
 
 ### Cursor
@@ -437,7 +479,7 @@ engram sync --project other-name
 ## CLI
 
 ```
-engram setup [agent]      Install agent plugin (interactive or: engram setup opencode)
+engram setup [agent]      Install/setup agent integration (opencode, claude-code, gemini-cli, codex)
 engram serve [port]       Start HTTP API server (default: 7437)
 engram mcp                Start MCP server (stdio transport)
 engram tui                Launch interactive terminal UI

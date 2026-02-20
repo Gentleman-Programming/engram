@@ -630,6 +630,16 @@ func printPostInstall(agent string) {
 		fmt.Println("\nNext steps:")
 		fmt.Println("  1. Restart Claude Code — the plugin is active immediately")
 		fmt.Println("  2. Verify with: claude plugin list")
+	case "gemini-cli":
+		fmt.Println("\nNext steps:")
+		fmt.Println("  1. Restart Gemini CLI so MCP config is reloaded")
+		fmt.Println("  2. Verify ~/.gemini/settings.json includes mcpServers.engram")
+		fmt.Println("  3. Verify ~/.gemini/system.md + ~/.gemini/.env exist for compaction recovery")
+	case "codex":
+		fmt.Println("\nNext steps:")
+		fmt.Println("  1. Restart Codex so MCP config is reloaded")
+		fmt.Println("  2. Verify ~/.codex/config.toml has [mcp_servers.engram]")
+		fmt.Println("  3. Verify model_instructions_file + experimental_compact_prompt_file are set")
 	}
 }
 
@@ -652,7 +662,7 @@ Commands:
   stats              Show memory system statistics
   export [file]      Export all memories to JSON (default: engram-export.json)
   import <file>      Import memories from a JSON export file
-  setup [agent]      Install agent plugin (interactive or: engram setup opencode)
+  setup [agent]      Install/setup agent integration (opencode, claude-code, gemini-cli, codex)
   sync               Export new memories as compressed chunk to .engram/
                        --import   Import new chunks from .engram/ into local DB
                        --status   Show sync status (local vs remote chunks)
