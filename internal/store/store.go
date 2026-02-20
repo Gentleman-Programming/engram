@@ -247,11 +247,7 @@ func (s *Store) migrate() error {
 		CREATE INDEX IF NOT EXISTS idx_obs_session  ON observations(session_id);
 		CREATE INDEX IF NOT EXISTS idx_obs_type     ON observations(type);
 		CREATE INDEX IF NOT EXISTS idx_obs_project  ON observations(project);
-		CREATE INDEX IF NOT EXISTS idx_obs_scope    ON observations(scope);
-		CREATE INDEX IF NOT EXISTS idx_obs_topic    ON observations(topic_key, project, scope, updated_at DESC);
 		CREATE INDEX IF NOT EXISTS idx_obs_created  ON observations(created_at DESC);
-		CREATE INDEX IF NOT EXISTS idx_obs_deleted  ON observations(deleted_at);
-		CREATE INDEX IF NOT EXISTS idx_obs_dedupe   ON observations(normalized_hash, project, scope, type, title, created_at DESC);
 
 		CREATE VIRTUAL TABLE IF NOT EXISTS observations_fts USING fts5(
 			title,
