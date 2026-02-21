@@ -30,8 +30,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/subagent-stop.sh",
-            "timeout": 15,
+            "command": "uv run ${CLAUDE_PLUGIN_ROOT}/scripts/subagent_stop.py",
+            "timeout": 30,
             "async": true
           }
         ]

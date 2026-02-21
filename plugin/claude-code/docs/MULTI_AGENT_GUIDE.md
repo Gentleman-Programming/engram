@@ -1,207 +1,208 @@
-# Engram Multi-Agent Memory Guide
+# Guia de Memoria Multi-Agente con Engram
 
-This guide covers using Engram in Claude Code projects that orchestrate multiple specialized
-AI agents via the Task() pattern.
+Esta guia cubre el uso de Engram en proyectos de Claude Code que orquestan multiples
+agentes especializados mediante el patron Task().
 
-## What is a Multi-Agent Workflow?
+## Que es un Workflow Multi-Agente?
 
-In Claude Code, you can launch specialized subagents to handle specific tasks:
+En Claude Code, podes lanzar subagentes especializados para manejar tareas especificas:
 
 ```python
-# Claude Code orchestration example
-Task(subagent_type="backend", prompt="Implement the user authentication endpoint")
-Task(subagent_type="testing", prompt="Write tests for the auth endpoint")
-Task(subagent_type="security-reviewer", prompt="Audit the auth implementation for OWASP issues")
+# Ejemplo de orquestacion en Claude Code
+Task(subagent_type="backend", prompt="Implementar el endpoint de autenticacion de usuarios")
+Task(subagent_type="testing", prompt="Escribir tests para el endpoint de auth")
+Task(subagent_type="security-reviewer", prompt="Auditar la implementacion de auth contra OWASP")
 ```
 
-Each subagent is an independent AI instance with its own transcript. Without Engram, when
-each subagent finishes, its knowledge is gone. With Engram, every learning is persisted.
+Cada subagente es una instancia de IA independiente con su propio transcript. Sin Engram, cuando
+cada subagente termina, su conocimiento se pierde. Con Engram, cada aprendizaje se persiste.
 
-## Memory Flow in Multi-Agent Workflows
+## Flujo de Memoria en Workflows Multi-Agente
 
 ```
-Orchestrator (parent)
+Orquestador (padre)
     |
     +-- Task(subagent_type="backend")
     |       |
-    |       +-- Works: implements auth endpoint
-    |       +-- Calls mem_save("Chose JWT over sessions", type="decision")
-    |       +-- Outputs: "## Key Learnings:\n1. bcrypt cost=12 is..."
+    |       +-- Trabaja: implementa endpoint de auth
+    |       +-- Llama mem_save("Elegimos JWT sobre sessions", type="decision")
+    |       +-- Salida: "## Aprendizajes Clave:\n1. bcrypt cost=12 es..."
     |               |
-    |               +-- SubagentStop fires --------------------------+
-    |                                                                |
-    +-- Task(subagent_type="testing")                                |
-    |       |                                                        v
-    |       +-- Calls mem_search("auth JWT") <-- finds backend's     |
-    |       |       saved memories                                   |
-    |       +-- Outputs: "## Key Learnings:\n1. Mock JWT..."         |
-    |               |                                                |
-    |               +-- SubagentStop fires ----------------------+   |
-    |                                                            |   |
-    +-- Session ends                                             |   |
-            |                                                    v   v
-            +-- Stop hook checks for mem_session_summary    Engram DB
-                                                           (all learnings
-                                                            preserved by
-                                                            agent_name)
+    |               +-- SubagentStop se dispara -------------------------+
+    |                                                                    |
+    +-- Task(subagent_type="testing")                                    |
+    |       |                                                            v
+    |       +-- Llama mem_search("auth JWT") <-- encuentra las           |
+    |       |       memorias guardadas por backend                       |
+    |       +-- Salida: "## Aprendizajes Clave:\n1. Mock JWT..."         |
+    |               |                                                    |
+    |               +-- SubagentStop se dispara ----------------------+  |
+    |                                                                 |  |
+    +-- Sesion termina                                                |  |
+            |                                                         v  v
+            +-- Hook Stop busca mem_session_summary              Engram DB
+                                                                 (todos los
+                                                                  aprendizajes
+                                                                  preservados por
+                                                                  agent_name)
 ```
 
-## How Passive Capture Works
+## Como Funciona la Captura Pasiva
 
-The `subagent-stop.sh` hook fires after every Task() completion. It:
+El hook `subagent_stop.py` se dispara despues de cada completacion de Task(). Este:
 
-1. Reads the subagent's transcript
-2. Looks for `## Key Learnings:`, `## Aprendizajes Clave:`, or `### Learnings:` sections
-3. Extracts each numbered or bulleted item
-4. Saves each as an observation with `agent_name` in metadata
-5. Logs to `~/.cache/engram/logs/subagent-stop.log`
+1. Lee el transcript del subagente
+2. Busca secciones `## Key Learnings:`, `## Aprendizajes Clave:`, o `### Learnings:`
+3. Extrae cada item numerado o con vineta
+4. Guarda cada uno como una observacion con `agent_name` en los metadatos
+5. Registra logs en `~/.cache/engram/logs/subagent-stop.log`
 
-This runs asynchronously and never blocks the parent agent.
+Esto se ejecuta de forma asincrona y nunca bloquea al agente padre.
 
-## Active vs Passive Capture
+## Captura Activa vs Pasiva
 
-Both mechanisms work together as defense in depth:
+Ambos mecanismos trabajan juntos como defensa en profundidad:
 
-| Mechanism | How | When to Rely On |
-|-----------|-----|-----------------|
-| **Active** (agent calls mem_save) | Agent decides what's worth saving | High-value decisions, specific bugfixes |
-| **Passive** (SubagentStop hook) | Hook extracts from transcript | Safety net, end-of-task learnings |
+| Mecanismo | Como | Cuando Confiar En El |
+|-----------|------|----------------------|
+| **Activo** (agente llama mem_save) | El agente decide que vale la pena guardar | Decisiones de alto valor, bugfixes especificos |
+| **Pasivo** (hook SubagentStop) | El hook extrae del transcript | Red de seguridad, aprendizajes de fin de tarea |
 
-**Best practice:** Agents should do both:
-1. Call `mem_save` for important decisions during the task
-2. End response with `## Key Learnings:` section for the hook to capture
+**Mejor practica:** Los agentes deberian hacer ambas cosas:
+1. Llamar `mem_save` para decisiones importantes durante la tarea
+2. Terminar la respuesta con la seccion `## Aprendizajes Clave:` para que el hook la capture
 
-## Teaching Your Agents to Emit Learnings
+## Ensenar a tus Agentes a Emitir Aprendizajes
 
-Add this to your agent prompts or SKILL.md:
+Agrega esto a los prompts de tus agentes o SKILL.md:
 
 ```markdown
-## Output Requirement
+## Requisito de Output
 
-AT THE END of your response, include:
+AL FINAL de tu respuesta, incluir:
 
-## Key Learnings:
+## Aprendizajes Clave:
 
-1. [Specific technical insight from this task]
-2. [Pattern or best practice applied]
-3. [Reusable knowledge for future tasks]
+1. [Insight tecnico especifico de esta tarea]
+2. [Patron o mejor practica aplicada]
+3. [Conocimiento reutilizable para futuras tareas]
 ```
 
-The SubagentStop hook reads this section and saves each item to Engram automatically.
+El hook SubagentStop lee esta seccion y guarda cada item en Engram automaticamente.
 
-## Topic Key Namespacing for Agent Teams
+## Namespacing de Topic Keys para Equipos de Agentes
 
-When multiple agents work on the same project, use agent-prefixed topic_keys to prevent
-collision:
+Cuando multiples agentes trabajan en el mismo proyecto, usa topic_keys con prefijo de agente
+para prevenir colisiones:
 
 ```
-backend/architecture/auth-model     <-- @backend agent's auth decisions
-frontend/architecture/auth-model    <-- @frontend agent's auth decisions
-security/architecture/auth-model    <-- @security-reviewer's auth findings
+backend/architecture/auth-model     <-- decisiones de auth del agente @backend
+frontend/architecture/auth-model    <-- decisiones de auth del agente @frontend
+security/architecture/auth-model    <-- hallazgos de auth de @security-reviewer
 ```
 
-**Why this matters:** Without namespacing, if `@backend` saves with `topic_key="auth-model"`
-and `@frontend` also saves with `topic_key="auth-model"`, one overwrites the other. With
-prefixes, both coexist.
+**Por que importa:** Sin namespacing, si `@backend` guarda con `topic_key="auth-model"`
+y `@frontend` tambien guarda con `topic_key="auth-model"`, uno sobreescribe al otro. Con
+prefijos, ambos coexisten.
 
-**Pattern:**
+**Patron:**
 ```
-{agent_name}/{category}/{topic}
-```
-
-**Common categories:**
-- `architecture/` — design decisions
-- `patterns/` — discovered patterns
-- `bugfixes/` — root causes
-- `conventions/` — team agreements
-- `config/` — environment and tooling
-
-## Searching Memories Across Agents
-
-To find what any agent learned about a topic:
-```
-mem_search(query="JWT authentication")
+{agent_name}/{categoria}/{topico}
 ```
 
-To find what a specific agent learned:
+**Categorias comunes:**
+- `architecture/` — decisiones de diseno
+- `patterns/` — patrones descubiertos
+- `bugfixes/` — causas raiz
+- `conventions/` — acuerdos del equipo
+- `config/` — entorno y herramientas
+
+## Buscar Memorias Entre Agentes
+
+Para encontrar lo que cualquier agente aprendio sobre un tema:
 ```
-mem_search(query="backend JWT authentication")
-# or use metadata filter when available
+mem_search(query="autenticacion JWT")
+```
+
+Para encontrar lo que un agente especifico aprendio:
+```
+mem_search(query="backend autenticacion JWT")
+# o usar filtro de metadatos cuando este disponible
 mem_search(query="JWT", filter={"agent_name": "backend"})
 ```
 
-## Session Summary in Multi-Agent Workflows
+## Resumen de Sesion en Workflows Multi-Agente
 
-The orchestrator (parent agent) should call `mem_session_summary` at the end, summarizing
-the combined work of all subagents:
+El orquestador (agente padre) deberia llamar `mem_session_summary` al final, resumiendo
+el trabajo combinado de todos los subagentes:
 
 ```
 mem_session_summary(
-  goal="Implement user authentication with JWT",
+  goal="Implementar autenticacion de usuarios con JWT",
   discoveries=[
-    "backend: bcrypt cost=12 is the right balance for our server",
-    "testing: JWT mock requires specific HS256 algorithm in fixtures",
-    "security: refresh token rotation must be atomic to prevent race"
+    "backend: bcrypt cost=12 es el balance correcto para nuestro servidor",
+    "testing: mock de JWT requiere algoritmo HS256 especifico en fixtures",
+    "security: la rotacion de refresh token debe ser atomica para prevenir race conditions"
   ],
   accomplished=[
-    "Implemented /auth/login, /auth/refresh, /auth/logout",
-    "Full test suite with 94% coverage",
-    "Security audit passed -- 0 OWASP issues"
+    "Implementados /auth/login, /auth/refresh, /auth/logout",
+    "Suite completa de tests con 94% de cobertura",
+    "Auditoria de seguridad aprobada -- 0 issues OWASP"
   ],
-  next_steps=["Add rate limiting to /auth/login"],
+  next_steps=["Agregar rate limiting a /auth/login"],
   relevant_files=["api/auth.py", "tests/test_auth.py"]
 )
 ```
 
-## Debugging
+## Depuracion
 
-**Check what was captured by SubagentStop:**
+**Verificar que capturo SubagentStop:**
 ```bash
 cat ~/.cache/engram/logs/subagent-stop.log | tail -50
 ```
 
-**Check what session-stop found:**
+**Verificar que encontro session-stop:**
 ```bash
 cat ~/.cache/engram/logs/session-stop.log | tail -20
 ```
 
-**Search for learnings from a specific agent:**
+**Buscar aprendizajes de un agente especifico:**
 ```bash
 engram search "backend"
-# or in TUI
+# o en la interfaz TUI
 engram tui
 ```
 
-**Verify hook is registered:**
+**Verificar que el hook esta registrado:**
 ```bash
 cat plugin/claude-code/hooks/hooks.json | jq '.hooks.SubagentStop'
 ```
 
-## Anti-Patterns to Avoid
+## Anti-Patrones a Evitar
 
-**Do NOT use generic topic_keys across agents:**
+**NO uses topic_keys genericos entre agentes:**
 ```
-# Wrong -- frontend will overwrite backend's decisions
+# Incorrecto -- frontend sobreescribira las decisiones de backend
 topic_key="auth-model"
 
-# Correct -- scoped to agent
+# Correcto -- con scope por agente
 topic_key="backend/architecture/auth-model"
 ```
 
-**Do NOT skip mem_session_summary in the orchestrator:**
+**NO omitas mem_session_summary en el orquestador:**
 ```
-# Wrong -- subagent learnings are saved but session context is lost
-Task("backend") -> Task("testing") -> "Done!"
+# Incorrecto -- los aprendizajes de subagentes se guardan pero el contexto de sesion se pierde
+Task("backend") -> Task("testing") -> "Listo!"
 
-# Correct
-Task("backend") -> Task("testing") -> mem_session_summary(...) -> "Done!"
+# Correcto
+Task("backend") -> Task("testing") -> mem_session_summary(...) -> "Listo!"
 ```
 
-**Do NOT search only your own memories:**
+**NO busques solo tus propias memorias:**
 ```
-# Wrong -- misses learnings from other agents in the team
+# Incorrecto -- pierde aprendizajes de otros agentes del equipo
 mem_search("auth backend/auth-model")
 
-# Correct -- broad search across all agents
-mem_search("authentication JWT")
+# Correcto -- busqueda amplia entre todos los agentes
+mem_search("autenticacion JWT")
 ```
