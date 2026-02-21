@@ -323,6 +323,31 @@ GUIDELINES:
 		),
 		handleSessionEnd(s),
 	)
+
+	// ─── mem_capture_passive ─────────────────────────────────────────
+	srv.AddTool(
+		mcp.NewTool("mem_capture_passive",
+			mcp.WithDescription(`Extract and save structured learnings from text output. Use this at the end of a task to capture knowledge automatically.
+
+The tool looks for sections like "## Key Learnings:" or "## Aprendizajes Clave:" and extracts numbered or bulleted items. Each item is saved as a separate observation.
+
+Duplicates are automatically detected and skipped — safe to call multiple times with the same content.`),
+			mcp.WithString("content",
+				mcp.Required(),
+				mcp.Description("The text output containing a '## Key Learnings:' section with numbered or bulleted items"),
+			),
+			mcp.WithString("session_id",
+				mcp.Description("Session ID (default: manual-save)"),
+			),
+			mcp.WithString("project",
+				mcp.Description("Project name"),
+			),
+			mcp.WithString("source",
+				mcp.Description("Source identifier (e.g. 'subagent-stop', 'session-end')"),
+			),
+		),
+		handleCapturePassive(s),
+	)
 }
 
 // ─── Tool Handlers ───────────────────────────────────────────────────────────
@@ -706,6 +731,43 @@ func handleSessionEnd(s *store.Store) server.ToolHandlerFunc {
 		}
 
 		return mcp.NewToolResultText(fmt.Sprintf("Session %q completed", id)), nil
+	}
+}
+
+func handleCapturePassive(s *store.Store) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		content, _ := req.GetArguments()["content"].(string)
+		sessionID, _ := req.GetArguments()["session_id"].(string)
+		project, _ := req.GetArguments()["project"].(string)
+		source, _ := req.GetArguments()["source"].(string)
+
+		if content == "" {
+			return mcp.NewToolResultError("content is required — include text with a '## Key Learnings:' section"), nil
+		}
+
+		if sessionID == "" {
+			sessionID = "manual-save"
+			_ = s.CreateSession(sessionID, project, "")
+		}
+
+		if source == "" {
+			source = "mcp-passive"
+		}
+
+		result, err := s.PassiveCapture(store.PassiveCaptureParams{
+			SessionID: sessionID,
+			Content:   content,
+			Project:   project,
+			Source:    source,
+		})
+		if err != nil {
+			return mcp.NewToolResultError("Passive capture failed: " + err.Error()), nil
+		}
+
+		return mcp.NewToolResultText(fmt.Sprintf(
+			"Passive capture complete: extracted=%d saved=%d duplicates=%d",
+			result.Extracted, result.Saved, result.Duplicates,
+		)), nil
 	}
 }
 

@@ -287,10 +287,10 @@ export const Engram: Plugin = async (ctx) => {
     // ─── Tool Execution Hook ─────────────────────────────────────
     // Count tool calls per session (for session end stats).
     // Also ensures the session exists — handles plugin reload / reconnect.
-    // No raw observation recording — the agent handles all memory via
-    // mem_save and mem_session_summary.
+    // Passive capture: when a Task tool completes, POST its output to
+    // the passive capture endpoint so the server extracts learnings.
 
-    "tool.execute.after": async (input, _output) => {
+    "tool.execute.after": async (input, output) => {
       if (ENGRAM_TOOLS.has(input.tool.toLowerCase())) return
 
       // input.sessionID comes from OpenCode — always available
@@ -298,6 +298,22 @@ export const Engram: Plugin = async (ctx) => {
       if (sessionId) {
         await ensureSession(sessionId)
         toolCounts.set(sessionId, (toolCounts.get(sessionId) ?? 0) + 1)
+      }
+
+      // Passive capture: extract learnings from Task tool output
+      if (input.tool === "Task" && output && sessionId) {
+        const text = typeof output === "string" ? output : JSON.stringify(output)
+        if (text.length > 50) {
+          await engramFetch("/observations/passive", {
+            method: "POST",
+            body: {
+              session_id: sessionId,
+              content: stripPrivateTags(text),
+              project,
+              source: "task-complete",
+            },
+          })
+        }
       }
     },
 

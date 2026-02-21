@@ -171,3 +171,121 @@ func TestObservationsTopicUpsertAndDeleteE2E(t *testing.T) {
 		t.Fatalf("expected bug observation in search results")
 	}
 }
+
+func TestPassiveCaptureEndpointE2E(t *testing.T) {
+	_, ts := newE2EServer(t)
+	client := ts.Client()
+
+	// Create session
+	sessionResp := postJSON(t, client, ts.URL+"/sessions", map[string]any{
+		"id":        "s-passive",
+		"project":   "engram",
+		"directory": "/tmp/engram",
+	})
+	if sessionResp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 creating session, got %d", sessionResp.StatusCode)
+	}
+	sessionResp.Body.Close()
+
+	// POST passive capture with learnings
+	captureResp := postJSON(t, client, ts.URL+"/observations/passive", map[string]any{
+		"session_id": "s-passive",
+		"project":    "engram",
+		"source":     "subagent-stop",
+		"content":    "## Key Learnings:\n\n1. bcrypt cost=12 is the right balance for our server performance\n2. JWT refresh tokens need atomic rotation to prevent race conditions\n",
+	})
+	if captureResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 passive capture, got %d", captureResp.StatusCode)
+	}
+	body := decodeJSON[map[string]any](t, captureResp)
+	if int(body["extracted"].(float64)) != 2 {
+		t.Fatalf("expected 2 extracted, got %v", body["extracted"])
+	}
+	if int(body["saved"].(float64)) != 2 {
+		t.Fatalf("expected 2 saved, got %v", body["saved"])
+	}
+
+	// Verify observations are searchable
+	searchResp, err := client.Get(ts.URL + "/search?q=bcrypt&project=engram&limit=10")
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if searchResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 search, got %d", searchResp.StatusCode)
+	}
+	results := decodeJSON[[]map[string]any](t, searchResp)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 search result, got %d", len(results))
+	}
+}
+
+func TestPassiveCaptureEndpointEmptyContentE2E(t *testing.T) {
+	_, ts := newE2EServer(t)
+	client := ts.Client()
+
+	sessionResp := postJSON(t, client, ts.URL+"/sessions", map[string]any{
+		"id":        "s-empty",
+		"project":   "engram",
+		"directory": "/tmp/engram",
+	})
+	if sessionResp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 creating session, got %d", sessionResp.StatusCode)
+	}
+	sessionResp.Body.Close()
+
+	captureResp := postJSON(t, client, ts.URL+"/observations/passive", map[string]any{
+		"session_id": "s-empty",
+		"content":    "just some text without any learning section",
+		"project":    "engram",
+	})
+	if captureResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for empty capture, got %d", captureResp.StatusCode)
+	}
+	body := decodeJSON[map[string]any](t, captureResp)
+	if int(body["extracted"].(float64)) != 0 {
+		t.Fatalf("expected 0 extracted, got %v", body["extracted"])
+	}
+}
+
+func TestPassiveCaptureEndpointRequiresSessionID(t *testing.T) {
+	_, ts := newE2EServer(t)
+	client := ts.Client()
+
+	captureResp := postJSON(t, client, ts.URL+"/observations/passive", map[string]any{
+		"project": "engram",
+		"content": "## Key Learnings:\n\n1. This should fail because session_id is missing",
+	})
+	if captureResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 when session_id is missing, got %d", captureResp.StatusCode)
+	}
+}
+
+func TestPassiveCaptureEndpointInvalidJSON(t *testing.T) {
+	_, ts := newE2EServer(t)
+	client := ts.Client()
+
+	resp, err := client.Post(ts.URL+"/observations/passive", "application/json", strings.NewReader("{"))
+	if err != nil {
+		t.Fatalf("post invalid json: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid json, got %d", resp.StatusCode)
+	}
+}
+
+func TestPassiveCaptureEndpointReturnsServerErrorWhenSessionMissing(t *testing.T) {
+	_, ts := newE2EServer(t)
+	client := ts.Client()
+
+	// No session created; saving observations should fail with FK constraint.
+	captureResp := postJSON(t, client, ts.URL+"/observations/passive", map[string]any{
+		"session_id": "missing-session",
+		"project":    "engram",
+		"content":    "## Key Learnings:\n\n1. This long learning should trigger a DB insert and fail on FK",
+	})
+	if captureResp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("expected 500 when session does not exist, got %d", captureResp.StatusCode)
+	}
+}

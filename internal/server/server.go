@@ -53,6 +53,7 @@ func (s *Server) routes() {
 
 	// Observations
 	s.mux.HandleFunc("POST /observations", s.handleAddObservation)
+	s.mux.HandleFunc("POST /observations/passive", s.handlePassiveCapture)
 	s.mux.HandleFunc("GET /observations/recent", s.handleRecentObservations)
 	s.mux.HandleFunc("PATCH /observations/{id}", s.handleUpdateObservation)
 	s.mux.HandleFunc("DELETE /observations/{id}", s.handleDeleteObservation)
@@ -160,6 +161,26 @@ func (s *Server) handleAddObservation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonResponse(w, http.StatusCreated, map[string]any{"id": id, "status": "saved"})
+}
+
+func (s *Server) handlePassiveCapture(w http.ResponseWriter, r *http.Request) {
+	var body store.PassiveCaptureParams
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if body.SessionID == "" {
+		jsonError(w, http.StatusBadRequest, "session_id is required")
+		return
+	}
+
+	result, err := s.store.PassiveCapture(body)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, result)
 }
 
 func (s *Server) handleRecentObservations(w http.ResponseWriter, r *http.Request) {

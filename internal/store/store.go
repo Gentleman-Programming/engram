@@ -1693,6 +1693,146 @@ func sanitizeFTS(query string) string {
 	return strings.Join(words, " ")
 }
 
+// ─── Passive Capture ─────────────────────────────────────────────────────────
+
+// PassiveCaptureParams holds the input for passive memory capture.
+type PassiveCaptureParams struct {
+	SessionID string `json:"session_id"`
+	Content   string `json:"content"`
+	Project   string `json:"project,omitempty"`
+	Source    string `json:"source,omitempty"` // e.g. "subagent-stop", "session-end"
+}
+
+// PassiveCaptureResult holds the output of passive memory capture.
+type PassiveCaptureResult struct {
+	Extracted  int `json:"extracted"`  // Total learnings found in text
+	Saved      int `json:"saved"`      // New observations created
+	Duplicates int `json:"duplicates"` // Skipped because already existed
+}
+
+// learningHeaderPattern matches section headers for learnings in both English and Spanish.
+var learningHeaderPattern = regexp.MustCompile(
+	`(?im)^#{2,3}\s+(?:Aprendizajes(?:\s+Clave)?|Key\s+Learnings?|Learnings?):?\s*$`,
+)
+
+// minLearningLength is the minimum character length for a learning to be valid.
+const minLearningLength = 20
+
+// ExtractLearnings parses structured learning items from text.
+// It looks for sections like "## Key Learnings:" or "## Aprendizajes Clave:"
+// and extracts numbered (1. text) or bullet (- text) items.
+// Returns learnings from the LAST matching section (most recent output).
+func ExtractLearnings(text string) []string {
+	matches := learningHeaderPattern.FindAllStringIndex(text, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+
+	// Process sections in reverse — use first valid one (most recent)
+	for i := len(matches) - 1; i >= 0; i-- {
+		sectionStart := matches[i][1]
+		sectionText := text[sectionStart:]
+
+		// Cut off at next major section header
+		if nextHeader := regexp.MustCompile(`\n#{1,3} `).FindStringIndex(sectionText); nextHeader != nil {
+			sectionText = sectionText[:nextHeader[0]]
+		}
+
+		var learnings []string
+
+		// Try numbered items: "1. text" or "1) text"
+		numbered := regexp.MustCompile(`(?m)^\s*\d+[.)]\s+(.+)`).FindAllStringSubmatch(sectionText, -1)
+		if len(numbered) > 0 {
+			for _, m := range numbered {
+				cleaned := cleanMarkdown(m[1])
+				if len(cleaned) >= minLearningLength {
+					learnings = append(learnings, cleaned)
+				}
+			}
+		}
+
+		// Fall back to bullet items: "- text" or "* text"
+		if len(learnings) == 0 {
+			bullets := regexp.MustCompile(`(?m)^\s*[-*]\s+(.+)`).FindAllStringSubmatch(sectionText, -1)
+			for _, m := range bullets {
+				cleaned := cleanMarkdown(m[1])
+				if len(cleaned) >= minLearningLength {
+					learnings = append(learnings, cleaned)
+				}
+			}
+		}
+
+		if len(learnings) > 0 {
+			return learnings
+		}
+	}
+
+	return nil
+}
+
+// cleanMarkdown strips basic markdown formatting and collapses whitespace.
+func cleanMarkdown(text string) string {
+	text = regexp.MustCompile(`\*\*([^*]+)\*\*`).ReplaceAllString(text, "$1") // bold
+	text = regexp.MustCompile("`([^`]+)`").ReplaceAllString(text, "$1")       // inline code
+	text = regexp.MustCompile(`\*([^*]+)\*`).ReplaceAllString(text, "$1")     // italic
+	return strings.TrimSpace(strings.Join(strings.Fields(text), " "))
+}
+
+// PassiveCapture extracts learnings from text and saves them as observations.
+// It deduplicates against existing observations using content hash matching.
+func (s *Store) PassiveCapture(p PassiveCaptureParams) (*PassiveCaptureResult, error) {
+	result := &PassiveCaptureResult{}
+
+	learnings := ExtractLearnings(p.Content)
+	result.Extracted = len(learnings)
+
+	if len(learnings) == 0 {
+		return result, nil
+	}
+
+	for _, learning := range learnings {
+		// Check if this learning already exists (by content hash) within this project
+		normHash := hashNormalized(learning)
+		var existingID int64
+		err := s.db.QueryRow(
+			`SELECT id FROM observations
+			 WHERE normalized_hash = ?
+			   AND ifnull(project, '') = ifnull(?, '')
+			   AND deleted_at IS NULL
+			 LIMIT 1`,
+			normHash, nullableString(p.Project),
+		).Scan(&existingID)
+
+		if err == nil {
+			// Already exists — skip
+			result.Duplicates++
+			continue
+		}
+
+		// Truncate for title: first 60 chars
+		title := learning
+		if len(title) > 60 {
+			title = title[:60] + "..."
+		}
+
+		_, err = s.AddObservation(AddObservationParams{
+			SessionID: p.SessionID,
+			Type:      "passive",
+			Title:     title,
+			Content:   learning,
+			Project:   p.Project,
+			Scope:     "project",
+			ToolName:  p.Source,
+		})
+		if err != nil {
+			return result, fmt.Errorf("passive capture save: %w", err)
+		}
+		result.Saved++
+	}
+
+	return result, nil
+}
+
 // ClassifyTool returns the observation type for a given tool name.
 func ClassifyTool(toolName string) string {
 	switch toolName {
