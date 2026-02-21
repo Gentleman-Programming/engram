@@ -539,3 +539,83 @@ func TestPromptProjectNullScan(t *testing.T) {
 		t.Error("exported prompts missing the test prompt")
 	}
 }
+
+func TestStatsProjectsOrderedByMostRecentObservation(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session s1: %v", err)
+	}
+	if err := s.CreateSession("s2", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session s2: %v", err)
+	}
+
+	_, err := s.db.Exec(
+		`INSERT INTO observations (session_id, type, title, content, project, scope, normalized_hash, revision_count, duplicate_count, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?),
+		        (?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?)`,
+		"s1", "note", "older", "older alpha", "alpha", "project", hashNormalized("older alpha"), "2026-02-01 10:00:00", "2026-02-01 10:00:00",
+		"s2", "note", "newer", "newer beta", "beta", "project", hashNormalized("newer beta"), "2026-02-02 10:00:00", "2026-02-02 10:00:00",
+	)
+	if err != nil {
+		t.Fatalf("insert observations: %v", err)
+	}
+
+	stats, err := s.Stats()
+	if err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	if len(stats.Projects) < 2 {
+		t.Fatalf("expected at least 2 projects, got %d", len(stats.Projects))
+	}
+
+	if stats.Projects[0] != "beta" || stats.Projects[1] != "alpha" {
+		t.Fatalf("expected recency order [beta alpha], got %v", stats.Projects[:2])
+	}
+}
+
+func TestSessionsOrderedByMostRecentActivity(t *testing.T) {
+	s := newTestStore(t)
+
+	_, err := s.db.Exec(
+		`INSERT INTO sessions (id, project, directory, started_at) VALUES
+		 (?, ?, ?, ?),
+		 (?, ?, ?, ?)`,
+		"s-older", "engram", "/tmp/engram", "2026-02-01 09:00:00",
+		"s-newer", "engram", "/tmp/engram", "2026-02-02 09:00:00",
+	)
+	if err != nil {
+		t.Fatalf("insert sessions: %v", err)
+	}
+
+	_, err = s.db.Exec(
+		`INSERT INTO observations (session_id, type, title, content, project, scope, normalized_hash, revision_count, duplicate_count, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?)`,
+		"s-older", "note", "latest", "session old got new activity", "engram", "project", hashNormalized("session old got new activity"), "2026-02-03 09:00:00", "2026-02-03 09:00:00",
+	)
+	if err != nil {
+		t.Fatalf("insert latest observation: %v", err)
+	}
+
+	all, err := s.AllSessions("", 10)
+	if err != nil {
+		t.Fatalf("all sessions: %v", err)
+	}
+	if len(all) < 2 {
+		t.Fatalf("expected at least 2 sessions, got %d", len(all))
+	}
+	if all[0].ID != "s-older" {
+		t.Fatalf("expected s-older first in all sessions, got %s", all[0].ID)
+	}
+
+	recent, err := s.RecentSessions("", 10)
+	if err != nil {
+		t.Fatalf("recent sessions: %v", err)
+	}
+	if len(recent) < 2 {
+		t.Fatalf("expected at least 2 recent sessions, got %d", len(recent))
+	}
+	if recent[0].ID != "s-older" {
+		t.Fatalf("expected s-older first in recent sessions, got %s", recent[0].ID)
+	}
+}
