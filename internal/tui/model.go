@@ -206,7 +206,9 @@ func loadSessionObservations(s *store.Store, sessionID string) tea.Cmd {
 
 func installAgent(agentName string) tea.Cmd {
 	return func() tea.Msg {
-		result, err := setup.Install(agentName)
+		result, err := installAgentFn(agentName)
 		return setupInstallMsg{result: result, err: err}
 	}
 }
+
+var installAgentFn = setup.Install

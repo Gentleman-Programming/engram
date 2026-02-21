@@ -16,14 +16,20 @@ import (
 	"github.com/alanbuscaglia/engram/internal/store"
 )
 
+var loadServerStats = func(s *store.Store) (*store.Stats, error) {
+	return s.Stats()
+}
+
 type Server struct {
-	store *store.Store
-	mux   *http.ServeMux
-	port  int
+	store  *store.Store
+	mux    *http.ServeMux
+	port   int
+	listen func(network, address string) (net.Listener, error)
+	serve  func(net.Listener, http.Handler) error
 }
 
 func New(s *store.Store, port int) *Server {
-	srv := &Server{store: s, port: port}
+	srv := &Server{store: s, port: port, listen: net.Listen, serve: http.Serve}
 	srv.mux = http.NewServeMux()
 	srv.routes()
 	return srv
@@ -31,12 +37,21 @@ func New(s *store.Store, port int) *Server {
 
 func (s *Server) Start() error {
 	addr := fmt.Sprintf("127.0.0.1:%d", s.port)
-	ln, err := net.Listen("tcp", addr)
+	listenFn := s.listen
+	if listenFn == nil {
+		listenFn = net.Listen
+	}
+	serveFn := s.serve
+	if serveFn == nil {
+		serveFn = http.Serve
+	}
+
+	ln, err := listenFn("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("engram server: listen %s: %w", addr, err)
 	}
 	log.Printf("[engram] HTTP server listening on %s", addr)
-	return http.Serve(ln, s.mux)
+	return serveFn(ln, s.mux)
 }
 
 func (s *Server) Handler() http.Handler {
@@ -419,7 +434,7 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	stats, err := s.store.Stats()
+	stats, err := loadServerStats(s.store)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
