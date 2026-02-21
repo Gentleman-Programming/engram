@@ -33,10 +33,49 @@ import (
 // Falls back to "dev" for local builds.
 var version = "dev"
 
+var (
+	storeNew      = store.New
+	newHTTPServer = server.New
+	startHTTP     = (*server.Server).Start
+
+	newMCPServer = mcp.NewServer
+	serveMCP     = mcpserver.ServeStdio
+
+	newTUIModel   = tui.New
+	newTeaProgram = tea.NewProgram
+	runTeaProgram = (*tea.Program).Run
+
+	setupSupportedAgents = setup.SupportedAgents
+	setupInstallAgent    = setup.Install
+	scanInputLine        = fmt.Scanln
+
+	storeSearch = func(s *store.Store, query string, opts store.SearchOptions) ([]store.SearchResult, error) {
+		return s.Search(query, opts)
+	}
+	storeAddObservation = func(s *store.Store, p store.AddObservationParams) (int64, error) { return s.AddObservation(p) }
+	storeTimeline       = func(s *store.Store, observationID int64, before, after int) (*store.TimelineResult, error) {
+		return s.Timeline(observationID, before, after)
+	}
+	storeFormatContext = func(s *store.Store, project, scope string) (string, error) { return s.FormatContext(project, scope) }
+	storeStats         = func(s *store.Store) (*store.Stats, error) { return s.Stats() }
+	storeExport        = func(s *store.Store) (*store.ExportData, error) { return s.Export() }
+	jsonMarshalIndent  = json.MarshalIndent
+
+	syncStatus = func(sy *engramsync.Syncer) (localChunks int, remoteChunks int, pendingImport int, err error) {
+		return sy.Status()
+	}
+	syncImport = func(sy *engramsync.Syncer) (*engramsync.ImportResult, error) { return sy.Import() }
+	syncExport = func(sy *engramsync.Syncer, createdBy, project string) (*engramsync.SyncResult, error) {
+		return sy.Export(createdBy, project)
+	}
+
+	exitFunc = os.Exit
+)
+
 func main() {
 	if len(os.Args) < 2 {
 		printUsage()
-		os.Exit(1)
+		exitFunc(1)
 	}
 
 	cfg := store.DefaultConfig()
@@ -78,7 +117,7 @@ func main() {
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", os.Args[1])
 		printUsage()
-		os.Exit(1)
+		exitFunc(1)
 	}
 }
 
@@ -98,41 +137,41 @@ func cmdServe(cfg store.Config) {
 		}
 	}
 
-	s, err := store.New(cfg)
+	s, err := storeNew(cfg)
 	if err != nil {
 		fatal(err)
 	}
 	defer s.Close()
 
-	srv := server.New(s, port)
-	if err := srv.Start(); err != nil {
+	srv := newHTTPServer(s, port)
+	if err := startHTTP(srv); err != nil {
 		fatal(err)
 	}
 }
 
 func cmdMCP(cfg store.Config) {
-	s, err := store.New(cfg)
+	s, err := storeNew(cfg)
 	if err != nil {
 		fatal(err)
 	}
 	defer s.Close()
 
-	mcpSrv := mcp.NewServer(s)
-	if err := mcpserver.ServeStdio(mcpSrv); err != nil {
+	mcpSrv := newMCPServer(s)
+	if err := serveMCP(mcpSrv); err != nil {
 		fatal(err)
 	}
 }
 
 func cmdTUI(cfg store.Config) {
-	s, err := store.New(cfg)
+	s, err := storeNew(cfg)
 	if err != nil {
 		fatal(err)
 	}
 	defer s.Close()
 
-	model := tui.New(s)
-	p := tea.NewProgram(model)
-	if _, err := p.Run(); err != nil {
+	model := newTUIModel(s)
+	p := newTeaProgram(model)
+	if _, err := runTeaProgram(p); err != nil {
 		fatal(err)
 	}
 }
@@ -140,7 +179,7 @@ func cmdTUI(cfg store.Config) {
 func cmdSearch(cfg store.Config) {
 	if len(os.Args) < 3 {
 		fmt.Fprintln(os.Stderr, "usage: engram search <query> [--type TYPE] [--project PROJECT] [--scope SCOPE] [--limit N]")
-		os.Exit(1)
+		exitFunc(1)
 	}
 
 	// Collect the query (everything that's not a flag)
@@ -179,16 +218,16 @@ func cmdSearch(cfg store.Config) {
 	query := strings.Join(queryParts, " ")
 	if query == "" {
 		fmt.Fprintln(os.Stderr, "error: search query is required")
-		os.Exit(1)
+		exitFunc(1)
 	}
 
-	s, err := store.New(cfg)
+	s, err := storeNew(cfg)
 	if err != nil {
 		fatal(err)
 	}
 	defer s.Close()
 
-	results, err := s.Search(query, opts)
+	results, err := storeSearch(s, query, opts)
 	if err != nil {
 		fatal(err)
 	}
@@ -214,7 +253,7 @@ func cmdSearch(cfg store.Config) {
 func cmdSave(cfg store.Config) {
 	if len(os.Args) < 4 {
 		fmt.Fprintln(os.Stderr, "usage: engram save <title> <content> [--type TYPE] [--project PROJECT] [--scope SCOPE] [--topic TOPIC_KEY]")
-		os.Exit(1)
+		exitFunc(1)
 	}
 
 	title := os.Args[2]
@@ -249,14 +288,14 @@ func cmdSave(cfg store.Config) {
 		}
 	}
 
-	s, err := store.New(cfg)
+	s, err := storeNew(cfg)
 	if err != nil {
 		fatal(err)
 	}
 	defer s.Close()
 
 	s.CreateSession("manual-save", project, "")
-	id, err := s.AddObservation(store.AddObservationParams{
+	id, err := storeAddObservation(s, store.AddObservationParams{
 		SessionID: "manual-save",
 		Type:      typ,
 		Title:     title,
@@ -275,13 +314,13 @@ func cmdSave(cfg store.Config) {
 func cmdTimeline(cfg store.Config) {
 	if len(os.Args) < 3 {
 		fmt.Fprintln(os.Stderr, "usage: engram timeline <observation_id> [--before N] [--after N]")
-		os.Exit(1)
+		exitFunc(1)
 	}
 
 	obsID, err := strconv.ParseInt(os.Args[2], 10, 64)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: invalid observation id %q\n", os.Args[2])
-		os.Exit(1)
+		exitFunc(1)
 	}
 
 	before, after := 5, 5
@@ -304,13 +343,13 @@ func cmdTimeline(cfg store.Config) {
 		}
 	}
 
-	s, err := store.New(cfg)
+	s, err := storeNew(cfg)
 	if err != nil {
 		fatal(err)
 	}
 	defer s.Close()
 
-	result, err := s.Timeline(obsID, before, after)
+	result, err := storeTimeline(s, obsID, before, after)
 	if err != nil {
 		fatal(err)
 	}
@@ -354,13 +393,13 @@ func cmdContext(cfg store.Config) {
 		project = os.Args[2]
 	}
 
-	s, err := store.New(cfg)
+	s, err := storeNew(cfg)
 	if err != nil {
 		fatal(err)
 	}
 	defer s.Close()
 
-	ctx, err := s.FormatContext(project, "")
+	ctx, err := storeFormatContext(s, project, "")
 	if err != nil {
 		fatal(err)
 	}
@@ -374,13 +413,13 @@ func cmdContext(cfg store.Config) {
 }
 
 func cmdStats(cfg store.Config) {
-	s, err := store.New(cfg)
+	s, err := storeNew(cfg)
 	if err != nil {
 		fatal(err)
 	}
 	defer s.Close()
 
-	stats, err := s.Stats()
+	stats, err := storeStats(s)
 	if err != nil {
 		fatal(err)
 	}
@@ -404,18 +443,18 @@ func cmdExport(cfg store.Config) {
 		outFile = os.Args[2]
 	}
 
-	s, err := store.New(cfg)
+	s, err := storeNew(cfg)
 	if err != nil {
 		fatal(err)
 	}
 	defer s.Close()
 
-	data, err := s.Export()
+	data, err := storeExport(s)
 	if err != nil {
 		fatal(err)
 	}
 
-	out, err := json.MarshalIndent(data, "", "  ")
+	out, err := jsonMarshalIndent(data, "", "  ")
 	if err != nil {
 		fatal(err)
 	}
@@ -433,7 +472,7 @@ func cmdExport(cfg store.Config) {
 func cmdImport(cfg store.Config) {
 	if len(os.Args) < 3 {
 		fmt.Fprintln(os.Stderr, "usage: engram import <file.json>")
-		os.Exit(1)
+		exitFunc(1)
 	}
 
 	inFile := os.Args[2]
@@ -447,7 +486,7 @@ func cmdImport(cfg store.Config) {
 		fatal(fmt.Errorf("parse %s: %w", inFile, err))
 	}
 
-	s, err := store.New(cfg)
+	s, err := storeNew(cfg)
 	if err != nil {
 		fatal(err)
 	}
@@ -497,7 +536,7 @@ func cmdSync(cfg store.Config) {
 
 	syncDir := ".engram"
 
-	s, err := store.New(cfg)
+	s, err := storeNew(cfg)
 	if err != nil {
 		fatal(err)
 	}
@@ -506,7 +545,7 @@ func cmdSync(cfg store.Config) {
 	sy := engramsync.New(s, syncDir)
 
 	if doStatus {
-		local, remote, pending, err := sy.Status()
+		local, remote, pending, err := syncStatus(sy)
 		if err != nil {
 			fatal(err)
 		}
@@ -518,7 +557,7 @@ func cmdSync(cfg store.Config) {
 	}
 
 	if doImport {
-		result, err := sy.Import()
+		result, err := syncImport(sy)
 		if err != nil {
 			fatal(err)
 		}
@@ -548,7 +587,7 @@ func cmdSync(cfg store.Config) {
 	} else {
 		fmt.Printf("Exporting memories for project %q...\n", project)
 	}
-	result, err := sy.Export(username, project)
+	result, err := syncExport(sy, username, project)
 	if err != nil {
 		fatal(err)
 	}
@@ -572,11 +611,11 @@ func cmdSync(cfg store.Config) {
 }
 
 func cmdSetup() {
-	agents := setup.SupportedAgents()
+	agents := setupSupportedAgents()
 
 	// If agent name given directly: engram setup opencode
 	if len(os.Args) > 2 && !strings.HasPrefix(os.Args[2], "-") {
-		result, err := setup.Install(os.Args[2])
+		result, err := setupInstallAgent(os.Args[2])
 		if err != nil {
 			fatal(err)
 		}
@@ -599,18 +638,18 @@ func cmdSetup() {
 
 	fmt.Print("Enter choice (1-", len(agents), "): ")
 	var input string
-	fmt.Scanln(&input)
+	scanInputLine(&input)
 
 	choice, err := strconv.Atoi(strings.TrimSpace(input))
 	if err != nil || choice < 1 || choice > len(agents) {
 		fmt.Fprintln(os.Stderr, "Invalid choice.")
-		os.Exit(1)
+		exitFunc(1)
 	}
 
 	selected := agents[choice-1]
 	fmt.Printf("\nInstalling %s plugin...\n", selected.Name)
 
-	result, err := setup.Install(selected.Name)
+	result, err := setupInstallAgent(selected.Name)
 	if err != nil {
 		fatal(err)
 	}
@@ -690,7 +729,7 @@ MCP Configuration (add to your agent's config):
 
 func fatal(err error) {
 	fmt.Fprintf(os.Stderr, "engram: %s\n", err)
-	os.Exit(1)
+	exitFunc(1)
 }
 
 func truncate(s string, max int) string {

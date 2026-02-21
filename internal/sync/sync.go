@@ -34,6 +34,23 @@ import (
 	"github.com/alanbuscaglia/engram/internal/store"
 )
 
+var (
+	jsonMarshalChunk    = json.Marshal
+	jsonMarshalManifest = json.MarshalIndent
+	osCreateFile        = os.Create
+	gzipWriterFactory   = func(f *os.File) gzipWriter { return gzip.NewWriter(f) }
+	osHostname          = os.Hostname
+	storeGetSynced      = func(s *store.Store) (map[string]bool, error) { return s.GetSyncedChunks() }
+	storeExportData     = func(s *store.Store) (*store.ExportData, error) { return s.Export() }
+	storeImportData     = func(s *store.Store, d *store.ExportData) (*store.ImportResult, error) { return s.Import(d) }
+	storeRecordSynced   = func(s *store.Store, chunkID string) error { return s.RecordSyncedChunk(chunkID) }
+)
+
+type gzipWriter interface {
+	Write(p []byte) (n int, err error)
+	Close() error
+}
+
 // ─── Manifest ────────────────────────────────────────────────────────────────
 
 // Manifest is the index file that lists all chunks.
@@ -110,7 +127,7 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 	}
 
 	// Get known chunk IDs from the store's sync tracking
-	knownChunks, err := sy.store.GetSyncedChunks()
+	knownChunks, err := storeGetSynced(sy.store)
 	if err != nil {
 		return nil, fmt.Errorf("get synced chunks: %w", err)
 	}
@@ -121,7 +138,7 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 	}
 
 	// Export all data from DB
-	data, err := sy.store.Export()
+	data, err := storeExportData(sy.store)
 	if err != nil {
 		return nil, fmt.Errorf("export data: %w", err)
 	}
@@ -143,7 +160,7 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 	}
 
 	// Serialize and compress the chunk
-	chunkJSON, err := json.Marshal(chunk)
+	chunkJSON, err := jsonMarshalChunk(chunk)
 	if err != nil {
 		return nil, fmt.Errorf("marshal chunk: %w", err)
 	}
@@ -179,7 +196,7 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 	}
 
 	// Record this chunk as synced in the local DB
-	if err := sy.store.RecordSyncedChunk(chunkID); err != nil {
+	if err := storeRecordSynced(sy.store, chunkID); err != nil {
 		return nil, fmt.Errorf("record synced chunk: %w", err)
 	}
 
@@ -205,7 +222,7 @@ func (sy *Syncer) Import() (*ImportResult, error) {
 	}
 
 	// Get chunks we've already imported
-	knownChunks, err := sy.store.GetSyncedChunks()
+	knownChunks, err := storeGetSynced(sy.store)
 	if err != nil {
 		return nil, fmt.Errorf("get synced chunks: %w", err)
 	}
@@ -243,13 +260,13 @@ func (sy *Syncer) Import() (*ImportResult, error) {
 			Prompts:      chunk.Prompts,
 		}
 
-		importResult, err := sy.store.Import(exportData)
+		importResult, err := storeImportData(sy.store, exportData)
 		if err != nil {
 			return nil, fmt.Errorf("import chunk %s: %w", entry.ID, err)
 		}
 
 		// Record this chunk as imported
-		if err := sy.store.RecordSyncedChunk(entry.ID); err != nil {
+		if err := storeRecordSynced(sy.store, entry.ID); err != nil {
 			return nil, fmt.Errorf("record chunk %s: %w", entry.ID, err)
 		}
 
@@ -269,7 +286,7 @@ func (sy *Syncer) Status() (localChunks int, remoteChunks int, pendingImport int
 		return 0, 0, 0, err
 	}
 
-	known, err := sy.store.GetSyncedChunks()
+	known, err := storeGetSynced(sy.store)
 	if err != nil {
 		return 0, 0, 0, err
 	}
@@ -307,7 +324,7 @@ func (sy *Syncer) readManifest() (*Manifest, error) {
 
 func (sy *Syncer) writeManifest(m *Manifest) error {
 	path := filepath.Join(sy.syncDir, "manifest.json")
-	data, err := json.MarshalIndent(m, "", "  ")
+	data, err := jsonMarshalManifest(m, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal manifest: %w", err)
 	}
@@ -408,13 +425,13 @@ func normalizeTime(t string) string {
 // ─── Gzip I/O ────────────────────────────────────────────────────────────────
 
 func writeGzip(path string, data []byte) error {
-	f, err := os.Create(path)
+	f, err := osCreateFile(path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 
-	gz := gzip.NewWriter(f)
+	gz := gzipWriterFactory(f)
 	if _, err := gz.Write(data); err != nil {
 		return err
 	}
@@ -458,7 +475,7 @@ func GetUsername() string {
 	if u := os.Getenv("USERNAME"); u != "" {
 		return u
 	}
-	hostname, _ := os.Hostname()
+	hostname, _ := osHostname()
 	if hostname != "" {
 		return hostname
 	}

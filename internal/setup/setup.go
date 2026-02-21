@@ -17,6 +17,30 @@ import (
 	"strings"
 )
 
+var (
+	runtimeGOOS = runtime.GOOS
+	userHomeDir = os.UserHomeDir
+	lookPathFn  = exec.LookPath
+	runCommand  = func(name string, args ...string) ([]byte, error) {
+		return exec.Command(name, args...).CombinedOutput()
+	}
+	openCodeReadFile = func(path string) ([]byte, error) {
+		return openCodeFS.ReadFile(path)
+	}
+	openCodeWriteFileFn                = os.WriteFile
+	readFileFn                         = os.ReadFile
+	writeFileFn                        = os.WriteFile
+	jsonMarshalFn                      = json.Marshal
+	jsonMarshalIndentFn                = json.MarshalIndent
+	injectOpenCodeMCPFn                = injectOpenCodeMCP
+	injectGeminiMCPFn                  = injectGeminiMCP
+	writeGeminiSystemPromptFn          = writeGeminiSystemPrompt
+	ensureGeminiEnvOverrideFn          = ensureGeminiEnvOverride
+	writeCodexMemoryInstructionFilesFn = writeCodexMemoryInstructionFiles
+	injectCodexMCPFn                   = injectCodexMCP
+	injectCodexMemoryConfigFn          = injectCodexMemoryConfig
+)
+
 //go:embed plugins/opencode/*
 var openCodeFS embed.FS
 
@@ -186,19 +210,19 @@ func installOpenCode() (*Result, error) {
 		return nil, fmt.Errorf("create plugin dir %s: %w", dir, err)
 	}
 
-	data, err := openCodeFS.ReadFile("plugins/opencode/engram.ts")
+	data, err := openCodeReadFile("plugins/opencode/engram.ts")
 	if err != nil {
 		return nil, fmt.Errorf("read embedded engram.ts: %w", err)
 	}
 
 	dest := filepath.Join(dir, "engram.ts")
-	if err := os.WriteFile(dest, data, 0644); err != nil {
+	if err := openCodeWriteFileFn(dest, data, 0644); err != nil {
 		return nil, fmt.Errorf("write %s: %w", dest, err)
 	}
 
 	// Register engram MCP server in opencode.json
 	files := 1
-	if err := injectOpenCodeMCP(); err != nil {
+	if err := injectOpenCodeMCPFn(); err != nil {
 		// Non-fatal: plugin works, MCP just needs manual config
 		fmt.Fprintf(os.Stderr, "warning: could not auto-register MCP server in opencode.json: %v\n", err)
 		fmt.Fprintf(os.Stderr, "  Add manually to your opencode.json under \"mcp\":\n")
@@ -222,7 +246,7 @@ func injectOpenCodeMCP() error {
 
 	// Read existing config (or start with empty object)
 	var config map[string]json.RawMessage
-	data, err := os.ReadFile(configPath)
+	data, err := readFileFn(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			config = make(map[string]json.RawMessage)
@@ -256,21 +280,21 @@ func injectOpenCodeMCP() error {
 		"command": []string{"engram", "mcp"},
 		"enabled": true,
 	}
-	entryJSON, err := json.Marshal(engramEntry)
+	entryJSON, err := jsonMarshalFn(engramEntry)
 	if err != nil {
 		return fmt.Errorf("marshal engram entry: %w", err)
 	}
 	mcpBlock["engram"] = json.RawMessage(entryJSON)
 
 	// Write mcp block back to config
-	mcpJSON, err := json.Marshal(mcpBlock)
+	mcpJSON, err := jsonMarshalFn(mcpBlock)
 	if err != nil {
 		return fmt.Errorf("marshal mcp block: %w", err)
 	}
 	config["mcp"] = json.RawMessage(mcpJSON)
 
 	// Write config back with indentation
-	output, err := json.MarshalIndent(config, "", "  ")
+	output, err := jsonMarshalIndentFn(config, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
@@ -284,9 +308,9 @@ func injectOpenCodeMCP() error {
 
 // openCodeConfigPath returns the path to opencode.json.
 func openCodeConfigPath() string {
-	home, _ := os.UserHomeDir()
+	home, _ := userHomeDir()
 
-	switch runtime.GOOS {
+	switch runtimeGOOS {
 	case "darwin", "linux":
 		if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
 			return filepath.Join(xdg, "opencode", "opencode.json")
@@ -306,14 +330,13 @@ func openCodeConfigPath() string {
 
 func installClaudeCode() (*Result, error) {
 	// Check that claude CLI is available
-	claudeBin, err := exec.LookPath("claude")
+	claudeBin, err := lookPathFn("claude")
 	if err != nil {
 		return nil, fmt.Errorf("claude CLI not found in PATH — install Claude Code first: https://docs.anthropic.com/en/docs/claude-code")
 	}
 
 	// Step 1: Add marketplace (idempotent — if already added, claude will say so)
-	addCmd := exec.Command(claudeBin, "plugin", "marketplace", "add", claudeCodeMarketplace)
-	addOut, err := addCmd.CombinedOutput()
+	addOut, err := runCommand(claudeBin, "plugin", "marketplace", "add", claudeCodeMarketplace)
 	addOutputStr := strings.TrimSpace(string(addOut))
 	if err != nil {
 		// If marketplace is already added, that's fine
@@ -323,8 +346,7 @@ func installClaudeCode() (*Result, error) {
 	}
 
 	// Step 2: Install the plugin
-	installCmd := exec.Command(claudeBin, "plugin", "install", "engram")
-	installOut, err := installCmd.CombinedOutput()
+	installOut, err := runCommand(claudeBin, "plugin", "install", "engram")
 	installOutputStr := strings.TrimSpace(string(installOut))
 	if err != nil {
 		// If plugin is already installed, that's fine
@@ -344,15 +366,15 @@ func installClaudeCode() (*Result, error) {
 
 func installGeminiCLI() (*Result, error) {
 	path := geminiConfigPath()
-	if err := injectGeminiMCP(path); err != nil {
+	if err := injectGeminiMCPFn(path); err != nil {
 		return nil, err
 	}
 
-	if err := writeGeminiSystemPrompt(); err != nil {
+	if err := writeGeminiSystemPromptFn(); err != nil {
 		return nil, err
 	}
 
-	if err := ensureGeminiEnvOverride(); err != nil {
+	if err := ensureGeminiEnvOverrideFn(); err != nil {
 		return nil, err
 	}
 
@@ -395,24 +417,24 @@ func injectGeminiMCP(configPath string) error {
 		"command": "engram",
 		"args":    []string{"mcp"},
 	}
-	entryJSON, err := json.Marshal(engramEntry)
+	entryJSON, err := jsonMarshalFn(engramEntry)
 	if err != nil {
 		return fmt.Errorf("marshal engram entry: %w", err)
 	}
 	mcpServers["engram"] = json.RawMessage(entryJSON)
 
-	mcpJSON, err := json.Marshal(mcpServers)
+	mcpJSON, err := jsonMarshalFn(mcpServers)
 	if err != nil {
 		return fmt.Errorf("marshal mcpServers block: %w", err)
 	}
 	config["mcpServers"] = json.RawMessage(mcpJSON)
 
-	output, err := json.MarshalIndent(config, "", "  ")
+	output, err := jsonMarshalIndentFn(config, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
 
-	if err := os.WriteFile(configPath, output, 0644); err != nil {
+	if err := writeFileFn(configPath, output, 0644); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
 
@@ -439,7 +461,7 @@ func ensureGeminiEnvOverride() error {
 	}
 
 	line := "GEMINI_SYSTEM_MD=1"
-	content, err := os.ReadFile(envPath)
+	content, err := readFileFn(envPath)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("read gemini env file: %w", err)
 	}
@@ -450,7 +472,7 @@ func ensureGeminiEnvOverride() error {
 		if trimmed == line || strings.HasPrefix(trimmed, "GEMINI_SYSTEM_MD=") {
 			if trimmed != line {
 				text = strings.ReplaceAll(text, existing, line)
-				if err := os.WriteFile(envPath, []byte(strings.TrimSpace(text)+"\n"), 0644); err != nil {
+				if err := writeFileFn(envPath, []byte(strings.TrimSpace(text)+"\n"), 0644); err != nil {
 					return fmt.Errorf("write gemini env file: %w", err)
 				}
 			}
@@ -464,7 +486,7 @@ func ensureGeminiEnvOverride() error {
 		text = strings.TrimRight(text, "\n") + "\n" + line + "\n"
 	}
 
-	if err := os.WriteFile(envPath, []byte(text), 0644); err != nil {
+	if err := writeFileFn(envPath, []byte(text), 0644); err != nil {
 		return fmt.Errorf("write gemini env file: %w", err)
 	}
 
@@ -476,17 +498,17 @@ func ensureGeminiEnvOverride() error {
 func installCodex() (*Result, error) {
 	path := codexConfigPath()
 
-	instructionsPath, err := writeCodexMemoryInstructionFiles()
+	instructionsPath, err := writeCodexMemoryInstructionFilesFn()
 	if err != nil {
 		return nil, err
 	}
 
-	if err := injectCodexMCP(path); err != nil {
+	if err := injectCodexMCPFn(path); err != nil {
 		return nil, err
 	}
 
 	compactPromptPath := codexCompactPromptPath()
-	if err := injectCodexMemoryConfig(path, instructionsPath, compactPromptPath); err != nil {
+	if err := injectCodexMemoryConfigFn(path, instructionsPath, compactPromptPath); err != nil {
 		return nil, err
 	}
 
@@ -502,13 +524,13 @@ func injectCodexMCP(configPath string) error {
 		return fmt.Errorf("create config dir: %w", err)
 	}
 
-	data, err := os.ReadFile(configPath)
+	data, err := readFileFn(configPath)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("read config: %w", err)
 	}
 
 	updated := upsertCodexEngramBlock(string(data))
-	if err := os.WriteFile(configPath, []byte(updated), 0644); err != nil {
+	if err := writeFileFn(configPath, []byte(updated), 0644); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
 
@@ -534,7 +556,7 @@ func writeCodexMemoryInstructionFiles() (string, error) {
 }
 
 func injectCodexMemoryConfig(configPath, instructionsPath, compactPromptPath string) error {
-	data, err := os.ReadFile(configPath)
+	data, err := readFileFn(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			data = nil
@@ -547,7 +569,7 @@ func injectCodexMemoryConfig(configPath, instructionsPath, compactPromptPath str
 	content = upsertTopLevelTOMLString(content, "model_instructions_file", instructionsPath)
 	content = upsertTopLevelTOMLString(content, "experimental_compact_prompt_file", compactPromptPath)
 
-	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+	if err := writeFileFn(configPath, []byte(content), 0644); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
 
@@ -613,20 +635,15 @@ func upsertTopLevelTOMLString(content, key, value string) string {
 	out = append(out, lineValue)
 	out = append(out, cleaned[insertAt:]...)
 
-	base := strings.TrimSpace(strings.Join(out, "\n"))
-	if base == "" {
-		return ""
-	}
-
-	return base + "\n"
+	return strings.TrimSpace(strings.Join(out, "\n")) + "\n"
 }
 
 // ─── Platform paths ──────────────────────────────────────────────────────────
 
 func openCodePluginDir() string {
-	home, _ := os.UserHomeDir()
+	home, _ := userHomeDir()
 
-	switch runtime.GOOS {
+	switch runtimeGOOS {
 	case "darwin", "linux":
 		if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
 			return filepath.Join(xdg, "opencode", "plugins")
@@ -643,9 +660,9 @@ func openCodePluginDir() string {
 }
 
 func geminiConfigPath() string {
-	home, _ := os.UserHomeDir()
+	home, _ := userHomeDir()
 
-	switch runtime.GOOS {
+	switch runtimeGOOS {
 	case "windows":
 		if appData := os.Getenv("APPDATA"); appData != "" {
 			return filepath.Join(appData, "gemini", "settings.json")
@@ -665,9 +682,9 @@ func geminiEnvPath() string {
 }
 
 func codexConfigPath() string {
-	home, _ := os.UserHomeDir()
+	home, _ := userHomeDir()
 
-	switch runtime.GOOS {
+	switch runtimeGOOS {
 	case "windows":
 		if appData := os.Getenv("APPDATA"); appData != "" {
 			return filepath.Join(appData, "codex", "config.toml")

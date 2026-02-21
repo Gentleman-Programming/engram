@@ -15,6 +15,12 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
+var suggestTopicKey = store.SuggestTopicKey
+
+var loadMCPStats = func(s *store.Store) (*store.Stats, error) {
+	return s.Stats()
+}
+
 func NewServer(s *store.Store) *server.MCPServer {
 	srv := server.NewMCPServer(
 		"engram",
@@ -407,7 +413,7 @@ func handleSave(s *store.Store) server.ToolHandlerFunc {
 		if sessionID == "" {
 			sessionID = "manual-save"
 		}
-		suggestedTopicKey := store.SuggestTopicKey(typ, title, content)
+		suggestedTopicKey := suggestTopicKey(typ, title, content)
 
 		// Ensure the session exists
 		s.CreateSession(sessionID, project, "")
@@ -443,7 +449,7 @@ func handleSuggestTopicKey() server.ToolHandlerFunc {
 			return mcp.NewToolResultError("provide title or content to suggest a topic_key"), nil
 		}
 
-		topicKey := store.SuggestTopicKey(typ, title, content)
+		topicKey := suggestTopicKey(typ, title, content)
 		if topicKey == "" {
 			return mcp.NewToolResultError("could not suggest topic_key from input"), nil
 		}
@@ -569,7 +575,7 @@ func handleContext(s *store.Store) server.ToolHandlerFunc {
 
 func handleStats(s *store.Store) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		stats, err := s.Stats()
+		stats, err := loadMCPStats(s)
 		if err != nil {
 			return mcp.NewToolResultError("Failed to get stats: " + err.Error()), nil
 		}
