@@ -1,98 +1,90 @@
 ---
 name: engram-memory
-description: "ALWAYS ACTIVE — Persistent memory protocol. You MUST save decisions, conventions, bugs, and discoveries to engram proactively. Do NOT wait for the user to ask."
+description: "ALWAYS ACTIVE — Persistent memory protocol. Triggers: save decisions/bugs/patterns/discoveries. Search: before repeat work. Summary: before done/listo."
+triggers:
+  - decision made
+  - bug fixed
+  - pattern discovered
+  - session ending
+  - context compacted
+  - starting similar work
 ---
 
-# Engram Persistent Memory — Protocol
+## Purpose
 
-You have access to Engram, a persistent memory system that survives across sessions and compactions.
-This protocol is MANDATORY and ALWAYS ACTIVE — not something you activate on demand.
+Manage persistent memory across sessions using Engram tools. Save non-obvious knowledge
+automatically. Search before repeating work. Always close sessions with a summary.
 
-## PROACTIVE SAVE TRIGGERS (mandatory — do NOT wait for user to ask)
+## Variables
 
-Call `mem_save` IMMEDIATELY and WITHOUT BEING ASKED after any of these:
-
-### After decisions or conventions
-- Architecture or design decision made
-- Team convention documented or established
-- Workflow change agreed upon
-- Tool or library choice made with tradeoffs
-
-### After completing work
-- Bug fix completed (include root cause)
-- Feature implemented with non-obvious approach
-- Notion/Jira/GitHub artifact created or updated with significant content
-- Configuration change or environment setup done
-
-### After discoveries
-- Non-obvious discovery about the codebase
-- Gotcha, edge case, or unexpected behavior found
-- Pattern established (naming, structure, convention)
-- User preference or constraint learned
-
-### Self-check — ask yourself after EVERY task:
-> "Did I just make a decision, fix a bug, learn something non-obvious, or establish a convention? If yes, call mem_save NOW."
-
-Format for `mem_save`:
-- **title**: Verb + what — short, searchable (e.g. "Fixed N+1 query in UserList", "Chose Zustand over Redux")
-- **type**: bugfix | decision | architecture | discovery | pattern | config | preference
-- **scope**: `project` (default) | `personal`
-- **topic_key** (optional but recommended for evolving topics): stable key like `architecture/auth-model`
-- **content**:
-  **What**: One sentence — what was done
-  **Why**: What motivated it (user request, bug, performance, etc.)
-  **Where**: Files or paths affected
-  **Learned**: Gotchas, edge cases, things that surprised you (omit if none)
-
-### Topic update rules (mandatory)
-
-- Different topics MUST NOT overwrite each other (example: architecture decision vs bugfix)
-- If the same topic evolves, call `mem_save` with the same `topic_key` so memory is updated (upsert) instead of creating a new observation
-- If unsure about the key, call `mem_suggest_topic_key` first, then reuse that key consistently
-- If you already know the exact ID to fix, use `mem_update`
-
-## WHEN TO SEARCH MEMORY
-
-When the user asks to recall something — any variation of "remember", "recall", "what did we do",
-"how did we solve", "recordar", "acordate", "qué hicimos", or references to past work:
-1. First call `mem_context` — checks recent session history (fast, cheap)
-2. If not found, call `mem_search` with relevant keywords (FTS5 full-text search)
-3. If you find a match, use `mem_get_observation` for full untruncated content
-
-Also search memory PROACTIVELY when:
-- Starting work on something that might have been done before
-- The user mentions a topic you have no context on — check if past sessions covered it
-
-## SESSION CLOSE PROTOCOL (mandatory)
-
-Before ending a session or saying "done" / "listo" / "that's it", you MUST:
-1. Call `mem_session_summary` with this structure:
-
-## Goal
-[What we were working on this session]
+- **mem_save**: Save an observation (decision, bugfix, pattern, discovery, config, preference)
+- **mem_search**: Full-text search across all observations (FTS5)
+- **mem_context**: Fetch context from recent sessions for this project
+- **mem_session_summary**: Structured summary of current session
+- **mem_update**: Update an existing observation by ID
+- **mem_suggest_topic_key**: Get a canonical key for upsert-safe topic tracking
+- **agent_name**: Your agent identifier (e.g., "backend", "frontend") — use in scope field
 
 ## Instructions
-[User preferences or constraints discovered — skip if none]
 
-## Discoveries
-- [Technical findings, gotchas, non-obvious learnings]
+1. **Save proactively** — do not wait for the user to ask
+2. **Use topic_key for evolving topics** — same key = upsert (no duplicates)
+3. **Search before starting** — check if this was done before
+4. **Always close with summary** — mem_session_summary before "done"
+5. **After compaction** — mem_session_summary first, then mem_context, then continue
 
-## Accomplished
-- [Completed items with key details]
+## Workflow
 
-## Next Steps
-- [What remains to be done — for the next session]
+1. Check: Does this trigger match a Cookbook case? → find matching If/Then/Example
+2. Execute: Call the appropriate tool with the specified fields
+3. Verify: Confirm the response includes an ID (save) or content (search)
 
-## Relevant Files
-- path/to/file — [what it does or what changed]
+## Cookbook
 
-This is NOT optional. If you skip this, the next session starts blind.
+<If : You just made an architecture or design decision>
+<Then : Call mem_save with type=decision, include topic_key like "architecture/auth-model">
+<Example : mem_save(title="Chose SQLAlchemy over raw SQL", type="decision", topic_key="architecture/orm-choice", content="What: Selected SQLAlchemy\nWhy: Team familiarity + migration support\nWhere: models/\nLearned: async session requires AsyncSession, not Session")>
 
-## AFTER COMPACTION
+<If : You just fixed a bug>
+<Then : Call mem_save with type=bugfix, include root cause and affected files>
+<Example : mem_save(title="Fixed N+1 query in UserList", type="bugfix", content="What: Added .joinedload(User.roles)\nWhy: ORM was issuing per-row queries\nWhere: api/users.py:list_users\nLearned: SQLAlchemy lazy loads by default — always check explain()")>
 
-If you see a message about compaction or context reset, or if you see "FIRST ACTION REQUIRED" in your context:
-1. IMMEDIATELY call `mem_session_summary` with the compacted summary content — this persists what was done before compaction
-2. Then call `mem_context` to recover any additional context from previous sessions
-3. Only THEN continue working
+<If : You discovered a non-obvious pattern or gotcha>
+<Then : Call mem_save with type=pattern or type=discovery, short searchable title>
+<Example : mem_save(title="Pydantic v2 model_validate replaces parse_obj", type="pattern", content="What: parse_obj() removed in Pydantic v2\nWhy: API breaking change\nWhere: all schemas\nLearned: Use model_validate() everywhere")>
 
-Do not skip step 1. Without it, everything done before compaction is lost from memory.
+<If : You learned a user preference or constraint>
+<Then : Call mem_save with type=preference, scope=personal>
+<Example : mem_save(title="User prefers Spanish in code comments", type="preference", scope="personal", content="Always write inline comments in Spanish, docstrings in English")>
+
+<If : You completed a significant feature or config setup>
+<Then : Call mem_save with type=decision or type=config, list affected files>
+<Example : mem_save(title="Added Celery beat for async email queue", type="config", content="What: Configured Celery + Redis\nWhere: docker-compose.yml, workers/email.py\nLearned: CELERY_TASK_SERIALIZER must be json not pickle for Redis 7+")>
+
+<If : A topic was already saved and you have an update>
+<Then : Call mem_save with the SAME topic_key to upsert (update in place)>
+<Example : mem_save(title="Auth model update: added refresh tokens", topic_key="architecture/auth-model", type="decision", content="Updated: Added JWT refresh token rotation\nPrevious: stateless JWT only")>
+
+<If : The user asks "what did we do", "remember", "acordate", "recall", or references past work>
+<Then : First call mem_context (fast), then mem_search if not found>
+<Example : mem_context(project="my-project") → if empty → mem_search(query="auth JWT tokens")>
+
+<If : You are starting work on something that might have been done before>
+<Then : Call mem_search proactively before starting>
+<Example : Starting auth work → mem_search(query="authentication JWT session") → if found, read existing decisions first>
+
+<If : You are saying "done", "listo", "that's it", or ending a session>
+<Then : Call mem_session_summary FIRST before any closing message>
+<Example : mem_session_summary(goal="Implement payment flow", discoveries=["Stripe requires idempotency keys"], accomplished=["Created checkout session endpoint", "Added webhook handler"], next_steps=["Add retry logic"], relevant_files=["api/payments.py", "webhooks/stripe.py"])>
+
+<If : Context compaction just happened (you see a compaction notice or FIRST ACTION REQUIRED)>
+<Then : Call mem_session_summary with compacted content FIRST, then mem_context, then resume>
+<Example : mem_session_summary(goal="[from compacted summary]", accomplished=["[from compacted summary]"], next_steps=["[from compacted summary]"]) → then mem_context() → then continue work>
+
+<If : You are a subagent (invoked via Task) and finishing your task>
+<Then : Include "## Key Learnings:" section in your response with numbered list>
+<Example : ## Key Learnings:\n\n1. [Specific technical insight from this task]\n2. [Pattern discovered or best practice applied]\n3. [Reusable knowledge for future tasks]>
+
+<If : You are unsure what topic_key to use for an evolving topic>
+<Then : Call mem_suggest_topic_key with a description, use the suggested key consistently>
+<Example : mem_suggest_topic_key(description="our choice of ORM and query patterns") → returns "architecture/orm-strategy" → use this key every time>
