@@ -120,3 +120,46 @@ func TestHandleSaveDoesNotSuggestWhenTopicKeyProvided(t *testing.T) {
 		t.Fatalf("did not expect suggestion when topic_key provided, got %q", text)
 	}
 }
+
+func TestHandleCapturePassiveExtractsAndSaves(t *testing.T) {
+	s := newMCPTestStore(t)
+	h := handleCapturePassive(s)
+
+	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"content": "## Key Learnings:\n\n1. bcrypt cost=12 is the right balance for our server\n2. JWT refresh tokens need atomic rotation to prevent races\n",
+		"project": "engram",
+	}}}
+
+	res, err := h(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %s", callResultText(t, res))
+	}
+
+	text := callResultText(t, res)
+	if !strings.Contains(text, "extracted=2") {
+		t.Fatalf("expected extracted=2 in response, got %q", text)
+	}
+	if !strings.Contains(text, "saved=2") {
+		t.Fatalf("expected saved=2 in response, got %q", text)
+	}
+}
+
+func TestHandleCapturePassiveRequiresContent(t *testing.T) {
+	s := newMCPTestStore(t)
+	h := handleCapturePassive(s)
+
+	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"project": "engram",
+	}}}
+
+	res, err := h(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("expected tool error when content is missing")
+	}
+}

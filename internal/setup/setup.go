@@ -97,6 +97,20 @@ Before ending a session or saying "done" / "listo" / "that's it", you MUST:
 
 This is NOT optional. If you skip this, the next session starts blind.
 
+### PASSIVE CAPTURE — automatic learning extraction
+
+When completing a task or subtask, include a "## Key Learnings:" section at the end of your response
+with numbered items. Engram will automatically extract and save these as observations.
+
+Example:
+## Key Learnings:
+
+1. bcrypt cost=12 is the right balance for our server performance
+2. JWT refresh tokens need atomic rotation to prevent race conditions
+
+You can also call mem_capture_passive(content) directly with any text that contains a learning section.
+This is a safety net — it captures knowledge even if you forget to call mem_save explicitly.
+
 ### AFTER COMPACTION
 
 If you see a message about compaction or context reset, or if you see "FIRST ACTION REQUIRED" in your context:

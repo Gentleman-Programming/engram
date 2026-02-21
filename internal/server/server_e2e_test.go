@@ -171,3 +171,78 @@ func TestObservationsTopicUpsertAndDeleteE2E(t *testing.T) {
 		t.Fatalf("expected bug observation in search results")
 	}
 }
+
+func TestPassiveCaptureEndpointE2E(t *testing.T) {
+	_, ts := newE2EServer(t)
+	client := ts.Client()
+
+	// Create session
+	sessionResp := postJSON(t, client, ts.URL+"/sessions", map[string]any{
+		"id":        "s-passive",
+		"project":   "engram",
+		"directory": "/tmp/engram",
+	})
+	if sessionResp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 creating session, got %d", sessionResp.StatusCode)
+	}
+	sessionResp.Body.Close()
+
+	// POST passive capture with learnings
+	captureResp := postJSON(t, client, ts.URL+"/observations/passive", map[string]any{
+		"session_id": "s-passive",
+		"project":    "engram",
+		"source":     "subagent-stop",
+		"content":    "## Key Learnings:\n\n1. bcrypt cost=12 is the right balance for our server performance\n2. JWT refresh tokens need atomic rotation to prevent race conditions\n",
+	})
+	if captureResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 passive capture, got %d", captureResp.StatusCode)
+	}
+	body := decodeJSON[map[string]any](t, captureResp)
+	if int(body["extracted"].(float64)) != 2 {
+		t.Fatalf("expected 2 extracted, got %v", body["extracted"])
+	}
+	if int(body["saved"].(float64)) != 2 {
+		t.Fatalf("expected 2 saved, got %v", body["saved"])
+	}
+
+	// Verify observations are searchable
+	searchResp, err := client.Get(ts.URL + "/search?q=bcrypt&project=engram&limit=10")
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if searchResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 search, got %d", searchResp.StatusCode)
+	}
+	results := decodeJSON[[]map[string]any](t, searchResp)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 search result, got %d", len(results))
+	}
+}
+
+func TestPassiveCaptureEndpointEmptyContentE2E(t *testing.T) {
+	_, ts := newE2EServer(t)
+	client := ts.Client()
+
+	sessionResp := postJSON(t, client, ts.URL+"/sessions", map[string]any{
+		"id":        "s-empty",
+		"project":   "engram",
+		"directory": "/tmp/engram",
+	})
+	if sessionResp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 creating session, got %d", sessionResp.StatusCode)
+	}
+	sessionResp.Body.Close()
+
+	captureResp := postJSON(t, client, ts.URL+"/observations/passive", map[string]any{
+		"session_id": "s-empty",
+		"content":    "just some text without any learning section",
+		"project":    "engram",
+	})
+	if captureResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for empty capture, got %d", captureResp.StatusCode)
+	}
+	body := decodeJSON[map[string]any](t, captureResp)
+	if int(body["extracted"].(float64)) != 0 {
+		t.Fatalf("expected 0 extracted, got %v", body["extracted"])
+	}
+}

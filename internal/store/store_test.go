@@ -540,6 +540,205 @@ func TestPromptProjectNullScan(t *testing.T) {
 	}
 }
 
+// ─── Passive Capture Tests ───────────────────────────────────────────────────
+
+func TestExtractLearningsNumberedList(t *testing.T) {
+	text := `Some preamble text here.
+
+## Key Learnings:
+
+1. bcrypt cost=12 is the right balance for our server performance
+2. JWT refresh tokens need atomic rotation to prevent race conditions
+3. Always validate the audience claim in JWT tokens before trusting them
+
+## Next Steps
+- something else
+`
+	learnings := ExtractLearnings(text)
+	if len(learnings) != 3 {
+		t.Fatalf("expected 3 learnings, got %d: %v", len(learnings), learnings)
+	}
+	if !strings.Contains(learnings[0], "bcrypt") {
+		t.Fatalf("expected first learning about bcrypt, got %q", learnings[0])
+	}
+}
+
+func TestExtractLearningsSpanishHeader(t *testing.T) {
+	text := `## Aprendizajes Clave:
+
+1. El costo de bcrypt=12 es el balance correcto para nuestro servidor
+2. Los refresh tokens de JWT necesitan rotacion atomica
+`
+	learnings := ExtractLearnings(text)
+	if len(learnings) != 2 {
+		t.Fatalf("expected 2 learnings, got %d: %v", len(learnings), learnings)
+	}
+}
+
+func TestExtractLearningsBulletList(t *testing.T) {
+	text := `### Learnings:
+
+- bcrypt cost=12 is the right balance for our server performance
+- JWT refresh tokens need atomic rotation to prevent race conditions
+`
+	learnings := ExtractLearnings(text)
+	if len(learnings) != 2 {
+		t.Fatalf("expected 2 learnings, got %d: %v", len(learnings), learnings)
+	}
+}
+
+func TestExtractLearningsIgnoresShortItems(t *testing.T) {
+	text := `## Key Learnings:
+
+1. too short
+2. bcrypt cost=12 is the right balance for our server performance
+3. also short
+`
+	learnings := ExtractLearnings(text)
+	if len(learnings) != 1 {
+		t.Fatalf("expected 1 learning (short ones filtered), got %d: %v", len(learnings), learnings)
+	}
+}
+
+func TestExtractLearningsNoSection(t *testing.T) {
+	text := `This is just regular text without any learning section headers.
+It has multiple lines but no ## Key Learnings or similar.
+`
+	learnings := ExtractLearnings(text)
+	if len(learnings) != 0 {
+		t.Fatalf("expected 0 learnings, got %d: %v", len(learnings), learnings)
+	}
+}
+
+func TestExtractLearningsUsesLastSection(t *testing.T) {
+	text := `## Key Learnings:
+
+1. This is from the first section and should be ignored
+
+Some other text here.
+
+## Key Learnings:
+
+1. This is from the last section and should be captured as the real one
+`
+	learnings := ExtractLearnings(text)
+	if len(learnings) != 1 {
+		t.Fatalf("expected 1 learning from last section, got %d: %v", len(learnings), learnings)
+	}
+	if !strings.Contains(learnings[0], "last section") {
+		t.Fatalf("expected learning from last section, got %q", learnings[0])
+	}
+}
+
+func TestPassiveCaptureStoresLearnings(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	text := `## Key Learnings:
+
+1. bcrypt cost=12 is the right balance for our server performance
+2. JWT refresh tokens need atomic rotation to prevent race conditions
+`
+	result, err := s.PassiveCapture(PassiveCaptureParams{
+		SessionID: "s1",
+		Content:   text,
+		Project:   "engram",
+		Source:    "test",
+	})
+	if err != nil {
+		t.Fatalf("passive capture: %v", err)
+	}
+	if result.Extracted != 2 {
+		t.Fatalf("expected 2 extracted, got %d", result.Extracted)
+	}
+	if result.Saved != 2 {
+		t.Fatalf("expected 2 saved, got %d", result.Saved)
+	}
+
+	obs, err := s.AllObservations("engram", "", 10)
+	if err != nil {
+		t.Fatalf("all observations: %v", err)
+	}
+	if len(obs) != 2 {
+		t.Fatalf("expected 2 observations, got %d", len(obs))
+	}
+	for _, o := range obs {
+		if o.Type != "passive" {
+			t.Fatalf("expected type=passive, got %q", o.Type)
+		}
+	}
+}
+
+func TestPassiveCaptureEmptyContent(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	result, err := s.PassiveCapture(PassiveCaptureParams{
+		SessionID: "s1",
+		Content:   "",
+		Project:   "engram",
+		Source:    "test",
+	})
+	if err != nil {
+		t.Fatalf("passive capture: %v", err)
+	}
+	if result.Extracted != 0 || result.Saved != 0 {
+		t.Fatalf("expected 0 extracted and 0 saved, got %d/%d", result.Extracted, result.Saved)
+	}
+}
+
+func TestPassiveCaptureDedupesAgainstExistingObservations(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	// First: agent saves actively via mem_save
+	_, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "decision",
+		Title:     "bcrypt cost",
+		Content:   "bcrypt cost=12 is the right balance for our server performance",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add active observation: %v", err)
+	}
+
+	// Then: passive capture fires with overlapping content
+	text := `## Key Learnings:
+
+1. bcrypt cost=12 is the right balance for our server performance
+2. JWT refresh tokens need atomic rotation to prevent race conditions
+`
+	result, err := s.PassiveCapture(PassiveCaptureParams{
+		SessionID: "s1",
+		Content:   text,
+		Project:   "engram",
+		Source:    "test",
+	})
+	if err != nil {
+		t.Fatalf("passive capture: %v", err)
+	}
+	if result.Extracted != 2 {
+		t.Fatalf("expected 2 extracted, got %d", result.Extracted)
+	}
+	if result.Saved != 1 {
+		t.Fatalf("expected 1 saved (1 deduped), got %d", result.Saved)
+	}
+	if result.Duplicates != 1 {
+		t.Fatalf("expected 1 duplicate, got %d", result.Duplicates)
+	}
+}
+
 func TestStatsProjectsOrderedByMostRecentObservation(t *testing.T) {
 	s := newTestStore(t)
 
