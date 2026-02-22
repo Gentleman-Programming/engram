@@ -7,6 +7,32 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// ─── Logo ────────────────────────────────────────────────────────────────────
+
+func renderLogo() string {
+	brandLines := []string{
+		`    ______  _   ________  ____  ___    __  ___`,
+		`   / ____/ / | / / ____/ / __ \/   |  /  |/  /`,
+		`  / __/   /  |/ / / __  / /_/ / /| | / /|_/ / `,
+		` / /___  / /|  / /_/ / / _, _/ ___ |/ /  / /  `,
+		`/_____/ /_/ |_/\____/ /_/ |_/_/  |_/_/  /_/   `,
+	}
+
+	colors := []lipgloss.Color{colorTeal, colorLavender, colorMauve, colorLavender, colorTeal}
+	taglineStyle := lipgloss.NewStyle().Foreground(colorSubtext).Italic(true)
+
+	var b strings.Builder
+	for i, line := range brandLines {
+		style := lipgloss.NewStyle().Foreground(colors[i]).Bold(true)
+		b.WriteString(style.Render(line))
+		b.WriteString("\n")
+	}
+	b.WriteString(taglineStyle.Render("   engram — An elephant never forgets"))
+	b.WriteString("\n")
+
+	return b.String()
+}
+
 // ─── View (main router) ─────────────────────────────────────────────────────
 
 func (m Model) View() string {
@@ -48,9 +74,9 @@ func (m Model) View() string {
 func (m Model) viewDashboard() string {
 	var b strings.Builder
 
-	// Header
-	b.WriteString(headerStyle.Render("  engram — Persistent Memory for AI Agents"))
-	b.WriteString("\n\n")
+	// Logo header
+	b.WriteString(renderLogo())
+	b.WriteString("\n")
 
 	// Stats card
 	if m.Stats != nil {
