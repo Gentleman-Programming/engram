@@ -51,6 +51,13 @@ engram/
 │       ├── styles.go               # Lipgloss styles (Catppuccin Mocha palette)
 │       ├── update.go               # Update(), handleKeyPress(), per-screen handlers
 │       └── view.go                 # View(), per-screen renderers
+├── plugin/
+│   └── claude-code/
+│       ├── .claude-plugin/plugin.json
+│       ├── commands/               # Slash commands (/engram:health, etc.)
+│       ├── hooks/hooks.json        # Session lifecycle hooks
+│       ├── scripts/                # Hook shell scripts
+│       └── skills/memory/SKILL.md  # Always-active memory protocol
 ├── skills/
 │   └── gentleman-bubbletea/
 │       └── SKILL.md                # Bubbletea TUI patterns reference
@@ -445,6 +452,37 @@ The `tool.execute.after` hook receives:
 ### ENGRAM_TOOLS (excluded from tool count)
 
 `mem_search`, `mem_save`, `mem_update`, `mem_delete`, `mem_suggest_topic_key`, `mem_save_prompt`, `mem_session_summary`, `mem_context`, `mem_stats`, `mem_timeline`, `mem_get_observation`, `mem_session_start`, `mem_session_end`
+
+---
+
+## Claude Code Plugin
+
+Install with `claude plugin install engram` from a project that has the plugin, or point Claude Code to the `plugin/claude-code/` directory.
+
+### Slash Commands
+
+| Command | Description |
+|---|---|
+| `/engram:health` | Check if the engram server is running and healthy |
+| `/engram:search <query>` | Search engram memories using FTS5 full-text search |
+| `/engram:stats` | Show memory system statistics (sessions, observations, projects) |
+| `/engram:context` | Show recent memory context for the current project |
+| `/engram:recall <query>` | Smart progressive recall — checks context first, then searches, then fetches full content |
+
+### Always-Active Skills
+
+| Skill | Description |
+|---|---|
+| `engram:memory` | Persistent memory protocol — auto-saves decisions, conventions, bugs, and discoveries |
+
+### Hooks
+
+| Hook | Trigger | Description |
+|---|---|---|
+| `session-start.sh` | Session start | Starts engram session tracking |
+| `session-stop.sh` | Session stop | Ends engram session with summary |
+| `subagent-stop.sh` | Subagent stop | Captures learnings from subagent output |
+| `post-compaction.sh` | Post compaction | Saves checkpoint before context compression |
 
 ---
 
