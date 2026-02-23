@@ -467,7 +467,6 @@ Install with `claude plugin install engram` from a project that has the plugin, 
 | `/engram:search <query>` | Search engram memories using FTS5 full-text search |
 | `/engram:stats` | Show memory system statistics (sessions, observations, projects) |
 | `/engram:context` | Show recent memory context for the current project |
-| `/engram:recall <query>` | Smart progressive recall — checks context first, then searches, then fetches full content |
 
 ### Always-Active Skills
 
