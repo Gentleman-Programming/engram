@@ -234,7 +234,7 @@ func (m Model) handleSearchInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "esc":
 		m.SearchInput.Blur()
-		m.Screen = m.PrevScreen
+		m.Screen = ScreenDashboard
 		m.Cursor = 0
 		return m, nil
 	}
@@ -248,7 +248,7 @@ func (m Model) handleSearchInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) handleSearchKeys(key string) (tea.Model, tea.Cmd) {
 	switch key {
 	case "esc", "q":
-		m.Screen = m.PrevScreen
+		m.Screen = ScreenDashboard
 		m.Cursor = 0
 		return m, nil
 	case "i", "/":

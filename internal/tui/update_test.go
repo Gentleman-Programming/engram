@@ -567,6 +567,86 @@ func TestHandleSearchResultsAndObservationDetailRemainingBranches(t *testing.T) 
 	}
 }
 
+func TestSearchEscapeFlowNoLoop(t *testing.T) {
+	// Verifies the full escape chain never loops back:
+	// Dashboard → Search → Results → ObsDetail → Esc → Results → Esc → Search → Esc → Dashboard
+
+	m := New(nil, "")
+	m.Height = 20
+	m.SearchResults = []store.SearchResult{{Observation: store.Observation{ID: 42}}}
+
+	// Step 1: from SearchResults, enter ObservationDetail — PrevScreen = ScreenSearchResults
+	m.Screen = ScreenSearchResults
+	m.Cursor = 0
+	updatedModel, _ := m.handleSearchResultsKeys("enter")
+	m = updatedModel.(Model)
+	if m.PrevScreen != ScreenSearchResults {
+		t.Fatalf("after enter, PrevScreen should be ScreenSearchResults, got %v", m.PrevScreen)
+	}
+
+	// Step 2: from ObservationDetail, Esc → back to SearchResults (via PrevScreen)
+	m.Screen = ScreenObservationDetail
+	m.SelectedObservation = &store.Observation{ID: 42}
+	updatedModel, _ = m.handleObservationDetailKeys("esc")
+	m = updatedModel.(Model)
+	if m.Screen != ScreenSearchResults {
+		t.Fatalf("esc from ObservationDetail should go to ScreenSearchResults, got %v", m.Screen)
+	}
+
+	// Step 3: from SearchResults, Esc → back to ScreenSearch, PrevScreen reset to Dashboard
+	m.Screen = ScreenSearchResults
+	updatedModel, _ = m.handleSearchResultsKeys("esc")
+	m = updatedModel.(Model)
+	if m.Screen != ScreenSearch {
+		t.Fatalf("esc from SearchResults should go to ScreenSearch, got %v", m.Screen)
+	}
+	if m.PrevScreen != ScreenDashboard {
+		t.Fatalf("esc from SearchResults should reset PrevScreen to ScreenDashboard, got %v", m.PrevScreen)
+	}
+
+	// Step 4: from Search (no input focused), Esc → always Dashboard, never loops
+	m.Screen = ScreenSearch
+	updatedModel, _ = m.handleSearchKeys("esc")
+	m = updatedModel.(Model)
+	if m.Screen != ScreenDashboard {
+		t.Fatalf("esc from Search should always go to ScreenDashboard, got %v", m.Screen)
+	}
+
+	// Step 5: from Search input focused, Esc → always Dashboard, never loops
+	m.Screen = ScreenSearch
+	m.PrevScreen = ScreenSearchResults // simulate stale PrevScreen — must NOT be used
+	m.SearchInput.Focus()
+	updatedModel, _ = m.handleSearchInputKeys(tea.KeyMsg{Type: tea.KeyEscape})
+	m = updatedModel.(Model)
+	if m.Screen != ScreenDashboard {
+		t.Fatalf("esc from SearchInput should always go to ScreenDashboard regardless of PrevScreen, got %v", m.Screen)
+	}
+}
+
+func TestSearchInputClearedOnEnterFromDashboard(t *testing.T) {
+	// Verifies the search input is cleared each time search is opened from dashboard
+	m := New(nil, "")
+	m.Screen = ScreenDashboard
+	m.SearchInput.SetValue("old query")
+
+	// Open via keyboard shortcut "s"
+	updatedModel, _ := m.handleDashboardKeys("s")
+	m = updatedModel.(Model)
+	if m.SearchInput.Value() != "" {
+		t.Fatalf("search input should be cleared when opening search, got %q", m.SearchInput.Value())
+	}
+
+	// Open via dashboard selection (menu item 0)
+	m.Screen = ScreenDashboard
+	m.SearchInput.SetValue("another stale query")
+	m.Cursor = 0
+	updatedModel, _ = m.handleDashboardSelection()
+	m = updatedModel.(Model)
+	if m.SearchInput.Value() != "" {
+		t.Fatalf("search input should be cleared on dashboard selection, got %q", m.SearchInput.Value())
+	}
+}
+
 func TestHandleSessionsAndSetupRemainingBranches(t *testing.T) {
 	fx := newTestFixture(t)
 	m := New(fx.store, "")
