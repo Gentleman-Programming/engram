@@ -888,3 +888,450 @@ func TestHandleGetObservationIncludesTopicAndToolMetadata(t *testing.T) {
 		t.Fatalf("expected topic and tool metadata in output, got %q", text)
 	}
 }
+
+// ─── Tool Profile Tests ─────────────────────────────────────────────────────
+
+func TestResolveToolsEmpty(t *testing.T) {
+	result := ResolveTools("")
+	if result != nil {
+		t.Fatalf("expected nil for empty input, got %v", result)
+	}
+}
+
+func TestResolveToolsAll(t *testing.T) {
+	result := ResolveTools("all")
+	if result != nil {
+		t.Fatalf("expected nil for 'all', got %v", result)
+	}
+}
+
+func TestResolveToolsAgentProfile(t *testing.T) {
+	result := ResolveTools("agent")
+	if result == nil {
+		t.Fatal("expected non-nil allowlist for 'agent'")
+	}
+
+	expectedTools := []string{
+		"mem_save", "mem_search", "mem_context", "mem_session_summary",
+		"mem_session_start", "mem_session_end", "mem_get_observation",
+		"mem_suggest_topic_key", "mem_capture_passive", "mem_save_prompt",
+		"mem_update", // skills explicitly say "use mem_update when you have an exact ID to correct"
+	}
+	for _, tool := range expectedTools {
+		if !result[tool] {
+			t.Errorf("agent profile missing tool: %s", tool)
+		}
+	}
+
+	// Admin-only tools should NOT be in agent profile
+	adminOnly := []string{"mem_delete", "mem_stats", "mem_timeline"}
+	for _, tool := range adminOnly {
+		if result[tool] {
+			t.Errorf("agent profile should NOT contain admin tool: %s", tool)
+		}
+	}
+
+	if len(result) != len(expectedTools) {
+		t.Errorf("agent profile has %d tools, expected %d", len(result), len(expectedTools))
+	}
+}
+
+func TestResolveToolsAdminProfile(t *testing.T) {
+	result := ResolveTools("admin")
+	if result == nil {
+		t.Fatal("expected non-nil allowlist for 'admin'")
+	}
+
+	expectedTools := []string{"mem_delete", "mem_stats", "mem_timeline"}
+	for _, tool := range expectedTools {
+		if !result[tool] {
+			t.Errorf("admin profile missing tool: %s", tool)
+		}
+	}
+
+	if len(result) != len(expectedTools) {
+		t.Errorf("admin profile has %d tools, expected %d", len(result), len(expectedTools))
+	}
+}
+
+func TestResolveToolsCombinedProfiles(t *testing.T) {
+	result := ResolveTools("agent,admin")
+	if result == nil {
+		t.Fatal("expected non-nil allowlist for combined profiles")
+	}
+
+	// Should have all 14 tools
+	allTools := []string{
+		"mem_save", "mem_search", "mem_context", "mem_session_summary",
+		"mem_session_start", "mem_session_end", "mem_get_observation",
+		"mem_suggest_topic_key", "mem_capture_passive", "mem_save_prompt",
+		"mem_update", "mem_delete", "mem_stats", "mem_timeline",
+	}
+	for _, tool := range allTools {
+		if !result[tool] {
+			t.Errorf("combined profile missing tool: %s", tool)
+		}
+	}
+}
+
+func TestResolveToolsIndividualNames(t *testing.T) {
+	result := ResolveTools("mem_save,mem_search")
+	if result == nil {
+		t.Fatal("expected non-nil allowlist")
+	}
+
+	if !result["mem_save"] || !result["mem_search"] {
+		t.Fatalf("expected mem_save and mem_search, got %v", result)
+	}
+
+	if len(result) != 2 {
+		t.Errorf("expected 2 tools, got %d", len(result))
+	}
+}
+
+func TestResolveToolsMixedProfileAndNames(t *testing.T) {
+	result := ResolveTools("admin,mem_save")
+	if result == nil {
+		t.Fatal("expected non-nil allowlist")
+	}
+
+	// Should have admin tools + mem_save
+	if !result["mem_save"] {
+		t.Error("missing mem_save")
+	}
+	if !result["mem_stats"] {
+		t.Error("missing mem_stats from admin profile")
+	}
+	if !result["mem_timeline"] {
+		t.Error("missing mem_timeline from admin profile")
+	}
+}
+
+func TestResolveToolsAllInMixed(t *testing.T) {
+	result := ResolveTools("agent,all")
+	if result != nil {
+		t.Fatalf("expected nil when 'all' is in the mix, got %v", result)
+	}
+}
+
+func TestResolveToolsWhitespace(t *testing.T) {
+	result := ResolveTools("  agent  ")
+	if result == nil {
+		t.Fatal("expected non-nil for agent with whitespace")
+	}
+	if !result["mem_save"] {
+		t.Error("agent profile should include mem_save")
+	}
+}
+
+func TestResolveToolsCommaWhitespace(t *testing.T) {
+	result := ResolveTools("mem_save , mem_search")
+	if result == nil {
+		t.Fatal("expected non-nil allowlist")
+	}
+	if !result["mem_save"] || !result["mem_search"] {
+		t.Fatalf("expected both tools, got %v", result)
+	}
+}
+
+func TestResolveToolsEmptyTokenBetweenCommas(t *testing.T) {
+	result := ResolveTools("mem_save,,mem_search")
+	if result == nil {
+		t.Fatal("expected non-nil allowlist")
+	}
+	if !result["mem_save"] || !result["mem_search"] {
+		t.Fatalf("expected mem_save and mem_search in result, got %v", result)
+	}
+}
+
+func TestResolveToolsAllAfterRealTool(t *testing.T) {
+	result := ResolveTools("mem_save,all")
+	if result != nil {
+		t.Fatalf("expected nil when 'all' appears anywhere in list, got %v", result)
+	}
+}
+
+func TestResolveToolsOnlyCommas(t *testing.T) {
+	result := ResolveTools(",,,")
+	if result != nil {
+		t.Fatalf("expected nil when input is only commas (empty tokens), got %v", result)
+	}
+}
+
+func TestShouldRegisterNilAllowlist(t *testing.T) {
+	if !shouldRegister("anything", nil) {
+		t.Error("nil allowlist should allow everything")
+	}
+}
+
+func TestShouldRegisterWithAllowlist(t *testing.T) {
+	allowlist := map[string]bool{"mem_save": true, "mem_search": true}
+
+	if !shouldRegister("mem_save", allowlist) {
+		t.Error("mem_save should be allowed")
+	}
+	if shouldRegister("mem_delete", allowlist) {
+		t.Error("mem_delete should NOT be allowed")
+	}
+}
+
+func TestNewServerWithToolsAgentProfile(t *testing.T) {
+	s := newMCPTestStore(t)
+	allowlist := ResolveTools("agent")
+
+	srv := NewServerWithTools(s, allowlist)
+	if srv == nil {
+		t.Fatal("expected MCP server instance")
+	}
+
+	tools := srv.ListTools()
+
+	// Agent tools should be present (11 tools)
+	agentTools := []string{
+		"mem_save", "mem_search", "mem_context", "mem_session_summary",
+		"mem_session_start", "mem_session_end", "mem_get_observation",
+		"mem_suggest_topic_key", "mem_capture_passive", "mem_save_prompt",
+		"mem_update",
+	}
+	for _, name := range agentTools {
+		if tools[name] == nil {
+			t.Errorf("agent profile: expected tool %q to be registered", name)
+		}
+	}
+
+	// Admin-only tools should NOT be present
+	adminTools := []string{"mem_delete", "mem_stats", "mem_timeline"}
+	for _, name := range adminTools {
+		if tools[name] != nil {
+			t.Errorf("agent profile: tool %q should NOT be registered", name)
+		}
+	}
+}
+
+func TestNewServerWithToolsAdminProfile(t *testing.T) {
+	s := newMCPTestStore(t)
+	allowlist := ResolveTools("admin")
+
+	srv := NewServerWithTools(s, allowlist)
+	if srv == nil {
+		t.Fatal("expected MCP server instance")
+	}
+
+	tools := srv.ListTools()
+
+	// Admin tools should be present (3 tools)
+	adminTools := []string{"mem_delete", "mem_stats", "mem_timeline"}
+	for _, name := range adminTools {
+		if tools[name] == nil {
+			t.Errorf("admin profile: expected tool %q to be registered", name)
+		}
+	}
+
+	// Agent-only tools should NOT be present
+	agentOnlyTools := []string{"mem_save", "mem_search", "mem_context", "mem_update"}
+	for _, name := range agentOnlyTools {
+		if tools[name] != nil {
+			t.Errorf("admin profile: tool %q should NOT be registered", name)
+		}
+	}
+}
+
+func TestNewServerWithToolsNilRegistersAll(t *testing.T) {
+	s := newMCPTestStore(t)
+
+	srv := NewServerWithTools(s, nil)
+	if srv == nil {
+		t.Fatal("expected MCP server instance")
+	}
+
+	tools := srv.ListTools()
+
+	allTools := []string{
+		"mem_save", "mem_search", "mem_context", "mem_session_summary",
+		"mem_session_start", "mem_session_end", "mem_get_observation",
+		"mem_suggest_topic_key", "mem_capture_passive", "mem_save_prompt",
+		"mem_update", "mem_delete", "mem_stats", "mem_timeline",
+	}
+
+	for _, name := range allTools {
+		if tools[name] == nil {
+			t.Errorf("nil allowlist: expected tool %q to be registered", name)
+		}
+	}
+
+	if len(tools) != len(allTools) {
+		t.Errorf("expected %d tools with nil allowlist, got %d", len(allTools), len(tools))
+	}
+}
+
+func TestNewServerWithToolsIndividualSelection(t *testing.T) {
+	s := newMCPTestStore(t)
+	allowlist := ResolveTools("mem_save,mem_search")
+
+	srv := NewServerWithTools(s, allowlist)
+	tools := srv.ListTools()
+
+	if tools["mem_save"] == nil {
+		t.Error("expected mem_save to be registered")
+	}
+	if tools["mem_search"] == nil {
+		t.Error("expected mem_search to be registered")
+	}
+	if len(tools) != 2 {
+		t.Errorf("expected exactly 2 tools, got %d", len(tools))
+	}
+}
+
+func TestNewServerBackwardsCompatible(t *testing.T) {
+	s := newMCPTestStore(t)
+
+	// NewServer (no tools filter) should register all tools
+	srv := NewServer(s)
+	tools := srv.ListTools()
+
+	// 11 agent + 3 admin = 14 total
+	if len(tools) != 14 {
+		t.Errorf("NewServer should register all 14 tools, got %d", len(tools))
+	}
+}
+
+func TestProfileConsistency(t *testing.T) {
+	// Verify that agent + admin = all 14 tools
+	combined := make(map[string]bool)
+	for tool := range ProfileAgent {
+		combined[tool] = true
+	}
+	for tool := range ProfileAdmin {
+		combined[tool] = true
+	}
+
+	if len(combined) != 14 {
+		t.Errorf("agent + admin should cover all 14 tools, got %d", len(combined))
+	}
+
+	// Verify no overlap between profiles
+	for tool := range ProfileAgent {
+		if ProfileAdmin[tool] {
+			t.Errorf("tool %q appears in both agent and admin profiles", tool)
+		}
+	}
+}
+
+// ─── Server Instructions ─────────────────────────────────────────────────────
+
+func TestServerInstructionsConstantIsNonEmpty(t *testing.T) {
+	if serverInstructions == "" {
+		t.Fatal("serverInstructions should not be empty — it drives Tool Search discovery")
+	}
+	// Must mention key tool names so Tool Search can index them
+	for _, keyword := range []string{"mem_save", "mem_search", "mem_context", "mem_session_summary"} {
+		if !strings.Contains(serverInstructions, keyword) {
+			t.Errorf("serverInstructions should mention %q for Tool Search indexing", keyword)
+		}
+	}
+}
+
+// ─── Tool Annotations ────────────────────────────────────────────────────────
+
+func TestCoreToolsAreNotDeferred(t *testing.T) {
+	s := newMCPTestStore(t)
+	srv := NewServer(s)
+	tools := srv.ListTools()
+
+	coreTools := []string{"mem_save", "mem_search", "mem_context", "mem_session_summary"}
+	for _, name := range coreTools {
+		tool := tools[name]
+		if tool == nil {
+			t.Errorf("core tool %q should be registered", name)
+			continue
+		}
+		if tool.Tool.DeferLoading {
+			t.Errorf("core tool %q should NOT have DeferLoading=true — it must always be in context", name)
+		}
+	}
+}
+
+func TestNonCoreToolsAreDeferred(t *testing.T) {
+	s := newMCPTestStore(t)
+	srv := NewServer(s)
+	tools := srv.ListTools()
+
+	deferredTools := []string{
+		"mem_update", "mem_suggest_topic_key", "mem_delete",
+		"mem_save_prompt", "mem_stats", "mem_timeline",
+		"mem_get_observation", "mem_session_start", "mem_session_end",
+		"mem_capture_passive",
+	}
+	for _, name := range deferredTools {
+		tool := tools[name]
+		if tool == nil {
+			t.Errorf("deferred tool %q should be registered", name)
+			continue
+		}
+		if !tool.Tool.DeferLoading {
+			t.Errorf("non-core tool %q should have DeferLoading=true", name)
+		}
+	}
+}
+
+func TestAllToolsHaveAnnotations(t *testing.T) {
+	s := newMCPTestStore(t)
+	srv := NewServer(s)
+	tools := srv.ListTools()
+
+	for name, tool := range tools {
+		ann := tool.Tool.Annotations
+		if ann.Title == "" {
+			t.Errorf("tool %q should have a Title annotation", name)
+		}
+		// Every tool must explicitly set ReadOnlyHint and DestructiveHint
+		if ann.ReadOnlyHint == nil {
+			t.Errorf("tool %q should have ReadOnlyHint set", name)
+		}
+		if ann.DestructiveHint == nil {
+			t.Errorf("tool %q should have DestructiveHint set", name)
+		}
+	}
+}
+
+func TestReadOnlyToolAnnotations(t *testing.T) {
+	s := newMCPTestStore(t)
+	srv := NewServer(s)
+	tools := srv.ListTools()
+
+	readOnlyTools := []string{
+		"mem_search", "mem_context", "mem_get_observation",
+		"mem_suggest_topic_key", "mem_stats", "mem_timeline",
+	}
+	for _, name := range readOnlyTools {
+		tool := tools[name]
+		if tool == nil {
+			continue
+		}
+		ann := tool.Tool.Annotations
+		if ann.ReadOnlyHint == nil || !*ann.ReadOnlyHint {
+			t.Errorf("tool %q should be marked readOnly", name)
+		}
+		if ann.DestructiveHint == nil || *ann.DestructiveHint {
+			t.Errorf("tool %q should NOT be marked destructive", name)
+		}
+	}
+}
+
+func TestDestructiveToolAnnotation(t *testing.T) {
+	s := newMCPTestStore(t)
+	srv := NewServer(s)
+	tools := srv.ListTools()
+
+	tool := tools["mem_delete"]
+	if tool == nil {
+		t.Fatal("mem_delete should be registered")
+	}
+	ann := tool.Tool.Annotations
+	if ann.DestructiveHint == nil || !*ann.DestructiveHint {
+		t.Error("mem_delete should be marked destructive")
+	}
+	if ann.ReadOnlyHint == nil || *ann.ReadOnlyHint {
+		t.Error("mem_delete should NOT be marked readOnly")
+	}
+}

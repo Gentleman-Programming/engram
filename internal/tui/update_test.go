@@ -11,7 +11,7 @@ import (
 )
 
 func TestUpdateHandlesWindowSizeAndCtrlC(t *testing.T) {
-	m := New(nil)
+	m := New(nil, "")
 
 	updatedModel, cmd := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	updated := updatedModel.(Model)
@@ -30,7 +30,7 @@ func TestUpdateHandlesWindowSizeAndCtrlC(t *testing.T) {
 
 func TestUpdateSearchInputFocusedHandlesEscAndEnter(t *testing.T) {
 	fx := newTestFixture(t)
-	m := New(fx.store)
+	m := New(fx.store, "")
 	m.Screen = ScreenSearch
 	m.PrevScreen = ScreenDashboard
 	m.SearchInput.Focus()
@@ -47,7 +47,7 @@ func TestUpdateSearchInputFocusedHandlesEscAndEnter(t *testing.T) {
 		t.Fatal("esc should not return command")
 	}
 
-	m = New(fx.store)
+	m = New(fx.store, "")
 	m.Screen = ScreenSearch
 	m.PrevScreen = ScreenDashboard
 	m.SearchInput.Focus()
@@ -64,7 +64,7 @@ func TestUpdateSearchInputFocusedHandlesEscAndEnter(t *testing.T) {
 }
 
 func TestUpdateSearchResultsAndDetailScreenTransitions(t *testing.T) {
-	m := New(nil)
+	m := New(nil, "")
 	m.Screen = ScreenSearchResults
 	m.Height = 14
 	m.SearchResults = []store.SearchResult{
@@ -97,7 +97,7 @@ func TestUpdateSearchResultsAndDetailScreenTransitions(t *testing.T) {
 
 func TestUpdateObservationDetailEscRefreshesPrevScreen(t *testing.T) {
 	fx := newTestFixture(t)
-	m := New(fx.store)
+	m := New(fx.store, "")
 	m.Screen = ScreenObservationDetail
 	m.PrevScreen = ScreenRecent
 	m.DetailScroll = 3
@@ -117,7 +117,7 @@ func TestUpdateObservationDetailEscRefreshesPrevScreen(t *testing.T) {
 
 func TestUpdateSetupFlowAndSpinnerTick(t *testing.T) {
 	fx := newTestFixture(t)
-	m := New(fx.store)
+	m := New(fx.store, "")
 	m.Screen = ScreenSetup
 	m.SetupAgents = []setup.Agent{{Name: "opencode", Description: "OpenCode", InstallDir: "/tmp"}}
 	m.SetupDone = true
@@ -150,7 +150,7 @@ func TestUpdateSetupFlowAndSpinnerTick(t *testing.T) {
 
 func TestHandleDashboardAndSearchKeyPaths(t *testing.T) {
 	fx := newTestFixture(t)
-	m := New(fx.store)
+	m := New(fx.store, "")
 
 	updatedModel, _ := m.handleDashboardKeys("s")
 	updated := updatedModel.(Model)
@@ -158,7 +158,7 @@ func TestHandleDashboardAndSearchKeyPaths(t *testing.T) {
 		t.Fatal("dashboard shortcut should open focused search")
 	}
 
-	m = New(fx.store)
+	m = New(fx.store, "")
 	m.Cursor = 1
 	updatedModel, cmd := m.handleDashboardSelection()
 	updated = updatedModel.(Model)
@@ -169,7 +169,7 @@ func TestHandleDashboardAndSearchKeyPaths(t *testing.T) {
 		t.Fatal("recent selection should load observations")
 	}
 
-	m = New(fx.store)
+	m = New(fx.store, "")
 	m.Cursor = 2
 	updatedModel, cmd = m.handleDashboardSelection()
 	updated = updatedModel.(Model)
@@ -180,7 +180,7 @@ func TestHandleDashboardAndSearchKeyPaths(t *testing.T) {
 		t.Fatal("sessions selection should load sessions")
 	}
 
-	m = New(fx.store)
+	m = New(fx.store, "")
 	m.Cursor = 3
 	updatedModel, cmd = m.handleDashboardSelection()
 	updated = updatedModel.(Model)
@@ -191,7 +191,7 @@ func TestHandleDashboardAndSearchKeyPaths(t *testing.T) {
 		t.Fatal("setup selection should not return command")
 	}
 
-	m = New(nil)
+	m = New(nil, "")
 	m.Screen = ScreenSearch
 	m.PrevScreen = ScreenDashboard
 	updatedModel, _ = m.handleSearchKeys("esc")
@@ -200,7 +200,7 @@ func TestHandleDashboardAndSearchKeyPaths(t *testing.T) {
 		t.Fatalf("screen = %v, want %v", updated.Screen, ScreenDashboard)
 	}
 
-	m = New(nil)
+	m = New(nil, "")
 	m.Screen = ScreenSearch
 	updatedModel, _ = m.handleSearchKeys("/")
 	updated = updatedModel.(Model)
@@ -211,7 +211,7 @@ func TestHandleDashboardAndSearchKeyPaths(t *testing.T) {
 
 func TestHandleRecentTimelineSessionsAndDetailKeyPaths(t *testing.T) {
 	fx := newTestFixture(t)
-	m := New(fx.store)
+	m := New(fx.store, "")
 	m.Height = 14
 	m.Screen = ScreenRecent
 	m.RecentObservations = []store.Observation{{ID: fx.obsID}, {ID: fx.secondObs}, {ID: 33}, {ID: 44}}
@@ -241,7 +241,7 @@ func TestHandleRecentTimelineSessionsAndDetailKeyPaths(t *testing.T) {
 		t.Fatal("recent esc should return dashboard and refresh stats")
 	}
 
-	m = New(fx.store)
+	m = New(fx.store, "")
 	m.Screen = ScreenTimeline
 	m.PrevScreen = ScreenDashboard
 	m.Scroll = 2
@@ -256,7 +256,7 @@ func TestHandleRecentTimelineSessionsAndDetailKeyPaths(t *testing.T) {
 		t.Fatal("timeline esc should return previous screen and refresh")
 	}
 
-	m = New(fx.store)
+	m = New(fx.store, "")
 	m.Height = 12
 	m.Screen = ScreenSessions
 	m.Sessions = []store.SessionSummary{{ID: fx.sessionID}, {ID: fx.otherSession}, {ID: "s3"}, {ID: "s4"}, {ID: "s5"}, {ID: "s6"}}
@@ -273,7 +273,7 @@ func TestHandleRecentTimelineSessionsAndDetailKeyPaths(t *testing.T) {
 		t.Fatal("sessions enter should load selected session observations")
 	}
 
-	m = New(fx.store)
+	m = New(fx.store, "")
 	m.Height = 18
 	m.Screen = ScreenSessionDetail
 	m.SelectedSessionIdx = 0
@@ -302,7 +302,7 @@ func TestHandleRecentTimelineSessionsAndDetailKeyPaths(t *testing.T) {
 }
 
 func TestRefreshScreen(t *testing.T) {
-	m := New(newTestFixture(t).store)
+	m := New(newTestFixture(t).store, "")
 
 	if cmd := m.refreshScreen(ScreenDashboard); cmd == nil {
 		t.Fatal("dashboard refresh should return stats command")
@@ -319,7 +319,7 @@ func TestRefreshScreen(t *testing.T) {
 }
 
 func TestUpdateDataMessageBranches(t *testing.T) {
-	m := New(nil)
+	m := New(nil, "")
 
 	updatedModel, _ := m.Update(statsLoadedMsg{err: errors.New("stats err")})
 	updated := updatedModel.(Model)
@@ -437,7 +437,7 @@ func TestUpdateDataMessageBranches(t *testing.T) {
 }
 
 func TestHandleKeyPressRouterAndClearsError(t *testing.T) {
-	m := New(nil)
+	m := New(nil, "")
 	m.ErrorMsg = "old error"
 
 	for _, screen := range []Screen{
@@ -462,7 +462,7 @@ func TestHandleKeyPressRouterAndClearsError(t *testing.T) {
 }
 
 func TestHandleDashboardKeysAndSelectionRemainingBranches(t *testing.T) {
-	m := New(nil)
+	m := New(nil, "")
 
 	m.Cursor = 0
 	updatedModel, _ := m.handleDashboardKeys("up")
@@ -508,7 +508,7 @@ func TestHandleDashboardKeysAndSelectionRemainingBranches(t *testing.T) {
 }
 
 func TestHandleSearchResultsAndObservationDetailRemainingBranches(t *testing.T) {
-	m := New(nil)
+	m := New(nil, "")
 	m.Height = 16
 	m.Screen = ScreenSearchResults
 
@@ -569,7 +569,7 @@ func TestHandleSearchResultsAndObservationDetailRemainingBranches(t *testing.T) 
 
 func TestHandleSessionsAndSetupRemainingBranches(t *testing.T) {
 	fx := newTestFixture(t)
-	m := New(fx.store)
+	m := New(fx.store, "")
 	m.Height = 12
 	m.Sessions = []store.SessionSummary{{ID: "s1"}, {ID: "s2"}, {ID: "s3"}, {ID: "s4"}, {ID: "s5"}, {ID: "s6"}}
 
@@ -591,7 +591,7 @@ func TestHandleSessionsAndSetupRemainingBranches(t *testing.T) {
 		t.Fatal("sessions enter with no sessions should not return command")
 	}
 
-	m = New(fx.store)
+	m = New(fx.store, "")
 	m.Screen = ScreenSetup
 	m.SetupInstalling = true
 	updatedModel, cmd = m.handleSetupKeys("esc")
@@ -647,7 +647,7 @@ func TestHandleSessionsAndSetupRemainingBranches(t *testing.T) {
 
 func TestAdditionalKeyAliasAndBoundaryBranches(t *testing.T) {
 	fx := newTestFixture(t)
-	m := New(fx.store)
+	m := New(fx.store, "")
 
 	// handleKeyPress default branch (unknown screen)
 	m.Screen = Screen(999)
@@ -657,7 +657,7 @@ func TestAdditionalKeyAliasAndBoundaryBranches(t *testing.T) {
 	}
 
 	// Search input remaining branches
-	m = New(fx.store)
+	m = New(fx.store, "")
 	m.Screen = ScreenSearch
 	m.PrevScreen = ScreenDashboard
 	m.SearchInput.Focus()
@@ -671,14 +671,14 @@ func TestAdditionalKeyAliasAndBoundaryBranches(t *testing.T) {
 	}
 
 	// Dashboard alias branch
-	m = New(nil)
+	m = New(nil, "")
 	updatedModel, _ = m.handleDashboardKeys("/")
 	if updatedModel.(Model).Screen != ScreenSearch {
 		t.Fatal("dashboard slash should open search")
 	}
 
 	// Search results aliases and boundaries
-	m = New(fx.store)
+	m = New(fx.store, "")
 	m.Height = 14
 	m.SearchResults = []store.SearchResult{{Observation: store.Observation{ID: 1}}, {Observation: store.Observation{ID: 2}}, {Observation: store.Observation{ID: 3}}, {Observation: store.Observation{ID: 4}}}
 	m.Cursor = 0
@@ -697,7 +697,7 @@ func TestAdditionalKeyAliasAndBoundaryBranches(t *testing.T) {
 	}
 
 	// Recent aliases/boundaries
-	m = New(fx.store)
+	m = New(fx.store, "")
 	m.Height = 14
 	m.RecentObservations = []store.Observation{{ID: 1}}
 	m.Cursor = 0
@@ -712,14 +712,14 @@ func TestAdditionalKeyAliasAndBoundaryBranches(t *testing.T) {
 	}
 
 	// Timeline down branch
-	m = New(nil)
+	m = New(nil, "")
 	updatedModel, _ = m.handleTimelineKeys("down")
 	if updatedModel.(Model).Scroll != 1 {
 		t.Fatal("timeline down should increment scroll")
 	}
 
 	// Sessions esc/q branches
-	m = New(fx.store)
+	m = New(fx.store, "")
 	m.Screen = ScreenSessions
 	updatedModel, cmd = m.handleSessionsKeys("q")
 	if updatedModel.(Model).Screen != ScreenDashboard || cmd == nil {
@@ -727,7 +727,7 @@ func TestAdditionalKeyAliasAndBoundaryBranches(t *testing.T) {
 	}
 
 	// Session detail boundary and q branch
-	m = New(fx.store)
+	m = New(fx.store, "")
 	m.Height = 16
 	m.Screen = ScreenSessionDetail
 	m.SelectedSessionIdx = 0
@@ -742,7 +742,7 @@ func TestAdditionalKeyAliasAndBoundaryBranches(t *testing.T) {
 	}
 
 	// Setup q/esc branch with no install state
-	m = New(fx.store)
+	m = New(fx.store, "")
 	m.Screen = ScreenSetup
 	updatedModel, cmd = m.handleSetupKeys("q")
 	if updatedModel.(Model).Screen != ScreenDashboard || cmd == nil {
@@ -754,7 +754,7 @@ func TestNavigationScrollAndSelectionBranches(t *testing.T) {
 	fx := newTestFixture(t)
 
 	// Dashboard increment/decrement and enter path
-	m := New(fx.store)
+	m := New(fx.store, "")
 	m.Cursor = 1
 	updatedModel, _ := m.handleDashboardKeys("up")
 	if updatedModel.(Model).Cursor != 0 {
@@ -770,7 +770,7 @@ func TestNavigationScrollAndSelectionBranches(t *testing.T) {
 	}
 
 	// Search results scroll-up branch
-	m = New(fx.store)
+	m = New(fx.store, "")
 	m.Height = 14
 	m.SearchResults = []store.SearchResult{{Observation: store.Observation{ID: 1}}, {Observation: store.Observation{ID: 2}}, {Observation: store.Observation{ID: 3}}}
 	m.Cursor = 2
@@ -782,7 +782,7 @@ func TestNavigationScrollAndSelectionBranches(t *testing.T) {
 	}
 
 	// Recent scroll-up branch
-	m = New(fx.store)
+	m = New(fx.store, "")
 	m.Height = 14
 	m.RecentObservations = []store.Observation{{ID: 1}, {ID: 2}, {ID: 3}}
 	m.Cursor = 2
@@ -794,7 +794,7 @@ func TestNavigationScrollAndSelectionBranches(t *testing.T) {
 	}
 
 	// Sessions scroll-up branch
-	m = New(fx.store)
+	m = New(fx.store, "")
 	m.Height = 12
 	m.Sessions = []store.SessionSummary{{ID: "s1"}, {ID: "s2"}, {ID: "s3"}}
 	m.Cursor = 2
@@ -806,7 +806,7 @@ func TestNavigationScrollAndSelectionBranches(t *testing.T) {
 	}
 
 	// Session detail scroll-up branch
-	m = New(fx.store)
+	m = New(fx.store, "")
 	m.Height = 16
 	m.SessionObservations = []store.Observation{{ID: 1}, {ID: 2}, {ID: 3}}
 	m.Cursor = 2

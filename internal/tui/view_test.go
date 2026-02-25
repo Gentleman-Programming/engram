@@ -31,7 +31,7 @@ func TestTruncateStr(t *testing.T) {
 }
 
 func TestRenderObservationListItem(t *testing.T) {
-	m := New(nil)
+	m := New(nil, "")
 	m.Cursor = 1
 	project := "engram"
 
@@ -60,7 +60,7 @@ func TestRenderObservationListItem(t *testing.T) {
 }
 
 func TestViewRouterAndErrorRendering(t *testing.T) {
-	m := New(nil)
+	m := New(nil, "")
 	m.Screen = Screen(999)
 	m.ErrorMsg = "boom"
 
@@ -74,7 +74,7 @@ func TestViewRouterAndErrorRendering(t *testing.T) {
 }
 
 func TestViewSearchResultsAndScrollIndicator(t *testing.T) {
-	m := New(nil)
+	m := New(nil, "")
 	m.Screen = ScreenSearchResults
 	m.Height = 14
 	m.SearchQuery = "needle"
@@ -101,7 +101,7 @@ func TestViewSearchResultsAndScrollIndicator(t *testing.T) {
 }
 
 func TestViewSetupBranches(t *testing.T) {
-	m := New(nil)
+	m := New(nil, "")
 	m.Screen = ScreenSetup
 
 	m.SetupInstalling = true
@@ -131,7 +131,7 @@ func TestViewSetupBranches(t *testing.T) {
 }
 
 func TestViewDashboardSearchAndRecent(t *testing.T) {
-	m := New(nil)
+	m := New(nil, "")
 	m.Cursor = 1
 	m.Stats = &store.Stats{
 		TotalSessions:     3,
@@ -191,7 +191,7 @@ func TestViewDashboardSearchAndRecent(t *testing.T) {
 }
 
 func TestViewObservationDetailTimelineSessionsAndSessionDetail(t *testing.T) {
-	m := New(nil)
+	m := New(nil, "")
 	m.Height = 22
 
 	out := m.viewObservationDetail()
@@ -293,7 +293,7 @@ func TestViewObservationDetailTimelineSessionsAndSessionDetail(t *testing.T) {
 }
 
 func TestViewRouterCoversAllScreens(t *testing.T) {
-	m := New(nil)
+	m := New(nil, "")
 	m.Stats = &store.Stats{}
 	m.SearchResults = []store.SearchResult{{Observation: store.Observation{ID: 1, Type: "bugfix", Title: "t", Content: "c", CreatedAt: "now"}}}
 	m.SearchQuery = "q"
@@ -331,7 +331,7 @@ func TestViewRouterCoversAllScreens(t *testing.T) {
 }
 
 func TestViewSetupRemainingBranches(t *testing.T) {
-	m := New(nil)
+	m := New(nil, "")
 	m.Screen = ScreenSetup
 	m.SetupAgents = []setup.Agent{
 		{Name: "claude-code", Description: "Claude Code", InstallDir: "/tmp/claude"},

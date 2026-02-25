@@ -63,7 +63,7 @@ func newTestFixture(t *testing.T) testFixture {
 }
 
 func TestNewInitializesModelDefaults(t *testing.T) {
-	m := New(nil)
+	m := New(nil, "")
 
 	if m.Screen != ScreenDashboard {
 		t.Fatalf("screen = %v, want %v", m.Screen, ScreenDashboard)
@@ -83,7 +83,7 @@ func TestNewInitializesModelDefaults(t *testing.T) {
 }
 
 func TestInitReturnsCommand(t *testing.T) {
-	m := New(newTestFixture(t).store)
+	m := New(newTestFixture(t).store, "")
 	if cmd := m.Init(); cmd == nil {
 		t.Fatal("init should return a startup command")
 	}

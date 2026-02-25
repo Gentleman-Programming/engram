@@ -78,6 +78,7 @@ func stubRuntimeHooks(t *testing.T) {
 	oldNewHTTPServer := newHTTPServer
 	oldStartHTTP := startHTTP
 	oldNewMCPServer := newMCPServer
+	oldNewMCPServerWithTools := newMCPServerWithTools
 	oldServeMCP := serveMCP
 	oldNewTUIModel := newTUIModel
 	oldNewTeaProgram := newTeaProgram
@@ -102,8 +103,11 @@ func stubRuntimeHooks(t *testing.T) {
 	newMCPServer = func(s *store.Store) *mcpserver.MCPServer {
 		return mcpserver.NewMCPServer("test", "0", mcpserver.WithRecovery())
 	}
+	newMCPServerWithTools = func(s *store.Store, allowlist map[string]bool) *mcpserver.MCPServer {
+		return mcpserver.NewMCPServer("test", "0", mcpserver.WithRecovery())
+	}
 	serveMCP = func(_ *mcpserver.MCPServer, _ ...mcpserver.StdioOption) error { return nil }
-	newTUIModel = func(_ *store.Store) tui.Model { return tui.New(nil) }
+	newTUIModel = func(_ *store.Store) tui.Model { return tui.New(nil, "") }
 	newTeaProgram = func(tea.Model, ...tea.ProgramOption) *tea.Program { return &tea.Program{} }
 	runTeaProgram = func(*tea.Program) (tea.Model, error) { return nil, nil }
 	setupSupportedAgents = setup.SupportedAgents
@@ -137,6 +141,7 @@ func stubRuntimeHooks(t *testing.T) {
 		newHTTPServer = oldNewHTTPServer
 		startHTTP = oldStartHTTP
 		newMCPServer = oldNewMCPServer
+		newMCPServerWithTools = oldNewMCPServerWithTools
 		serveMCP = oldServeMCP
 		newTUIModel = oldNewTUIModel
 		newTeaProgram = oldNewTeaProgram
@@ -905,5 +910,89 @@ func TestCommandErrorSeamsAndUncoveredBranches(t *testing.T) {
 		withArgs(t, "engram", "setup")
 		_, stderr, recovered := captureOutputAndRecover(t, func() { cmdSetup() })
 		assertFatal(t, stderr, recovered, "forced setup error")
+	})
+}
+
+func TestCmdMCP(t *testing.T) {
+	cfg := testConfig(t)
+	stubRuntimeHooks(t)
+	stubExitWithPanic(t)
+
+	assertFatal := func(t *testing.T, stderr string, recovered any, want string) {
+		t.Helper()
+		code, ok := recovered.(exitCode)
+		if !ok || int(code) != 1 {
+			t.Fatalf("expected exit code 1 panic, got %v", recovered)
+		}
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("expected stderr to contain %q, got %q", want, stderr)
+		}
+	}
+
+	t.Run("no tools filter uses newMCPServer", func(t *testing.T) {
+		called := false
+		newMCPServer = func(s *store.Store) *mcpserver.MCPServer {
+			called = true
+			return mcpserver.NewMCPServer("test", "0")
+		}
+		withArgs(t, "engram", "mcp")
+		_, stderr, recovered := captureOutputAndRecover(t, func() { cmdMCP(cfg) })
+		if recovered != nil || stderr != "" {
+			t.Fatalf("expected clean run, got panic=%v stderr=%q", recovered, stderr)
+		}
+		if !called {
+			t.Fatal("expected newMCPServer to be called")
+		}
+	})
+
+	t.Run("--tools flag uses newMCPServerWithTools", func(t *testing.T) {
+		var gotAllowlist map[string]bool
+		newMCPServerWithTools = func(s *store.Store, allowlist map[string]bool) *mcpserver.MCPServer {
+			gotAllowlist = allowlist
+			return mcpserver.NewMCPServer("test", "0")
+		}
+		withArgs(t, "engram", "mcp", "--tools=agent")
+		_, stderr, recovered := captureOutputAndRecover(t, func() { cmdMCP(cfg) })
+		if recovered != nil || stderr != "" {
+			t.Fatalf("expected clean run, got panic=%v stderr=%q", recovered, stderr)
+		}
+		if gotAllowlist == nil {
+			t.Fatal("expected newMCPServerWithTools to be called with non-nil allowlist")
+		}
+	})
+
+	t.Run("--tools as separate arg uses newMCPServerWithTools", func(t *testing.T) {
+		var gotAllowlist map[string]bool
+		newMCPServerWithTools = func(s *store.Store, allowlist map[string]bool) *mcpserver.MCPServer {
+			gotAllowlist = allowlist
+			return mcpserver.NewMCPServer("test", "0")
+		}
+		withArgs(t, "engram", "mcp", "--tools", "agent")
+		_, stderr, recovered := captureOutputAndRecover(t, func() { cmdMCP(cfg) })
+		if recovered != nil || stderr != "" {
+			t.Fatalf("expected clean run, got panic=%v stderr=%q", recovered, stderr)
+		}
+		if gotAllowlist == nil {
+			t.Fatal("expected newMCPServerWithTools to be called with non-nil allowlist")
+		}
+	})
+
+	t.Run("storeNew failure calls fatal", func(t *testing.T) {
+		storeNew = func(cfg store.Config) (*store.Store, error) {
+			return nil, errors.New("db open failed")
+		}
+		withArgs(t, "engram", "mcp")
+		_, stderr, recovered := captureOutputAndRecover(t, func() { cmdMCP(cfg) })
+		assertFatal(t, stderr, recovered, "db open failed")
+	})
+
+	t.Run("serveMCP failure calls fatal", func(t *testing.T) {
+		storeNew = store.New
+		serveMCP = func(_ *mcpserver.MCPServer, _ ...mcpserver.StdioOption) error {
+			return errors.New("stdio failed")
+		}
+		withArgs(t, "engram", "mcp")
+		_, stderr, recovered := captureOutputAndRecover(t, func() { cmdMCP(cfg) })
+		assertFatal(t, stderr, recovered, "stdio failed")
 	})
 }
