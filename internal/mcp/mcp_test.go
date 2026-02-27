@@ -1318,6 +1318,66 @@ func TestReadOnlyToolAnnotations(t *testing.T) {
 	}
 }
 
+// ─── Issue #25: Session collision regression tests ──────────────────────────
+
+func TestDefaultSessionIDScopedByProject(t *testing.T) {
+	if got := defaultSessionID(""); got != "manual-save" {
+		t.Fatalf("expected manual-save for empty project, got %q", got)
+	}
+	if got := defaultSessionID("engram"); got != "manual-save-engram" {
+		t.Fatalf("expected manual-save-engram, got %q", got)
+	}
+	if got := defaultSessionID("my-app"); got != "manual-save-my-app" {
+		t.Fatalf("expected manual-save-my-app, got %q", got)
+	}
+}
+
+func TestHandleSaveCreatesProjectScopedSession(t *testing.T) {
+	s := newMCPTestStore(t)
+	h := handleSave(s)
+
+	// Save from project A without session_id
+	reqA := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "Decision A",
+		"content": "Architecture for project A",
+		"type":    "architecture",
+		"project": "projectA",
+	}}}
+	resA, err := h(context.Background(), reqA)
+	if err != nil || resA.IsError {
+		t.Fatalf("save A: err=%v isError=%v", err, resA.IsError)
+	}
+
+	// Save from project B without session_id
+	reqB := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "Decision B",
+		"content": "Architecture for project B",
+		"type":    "architecture",
+		"project": "projectB",
+	}}}
+	resB, err := h(context.Background(), reqB)
+	if err != nil || resB.IsError {
+		t.Fatalf("save B: err=%v isError=%v", err, resB.IsError)
+	}
+
+	// Verify separate sessions exist for each project
+	sessA, err := s.GetSession("manual-save-projectA")
+	if err != nil {
+		t.Fatalf("expected session manual-save-projectA to exist: %v", err)
+	}
+	if sessA.Project != "projectA" {
+		t.Fatalf("expected project=projectA, got %q", sessA.Project)
+	}
+
+	sessB, err := s.GetSession("manual-save-projectB")
+	if err != nil {
+		t.Fatalf("expected session manual-save-projectB to exist: %v", err)
+	}
+	if sessB.Project != "projectB" {
+		t.Fatalf("expected project=projectB, got %q", sessB.Project)
+	}
+}
+
 func TestDestructiveToolAnnotation(t *testing.T) {
 	s := newMCPTestStore(t)
 	srv := NewServer(s)

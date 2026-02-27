@@ -224,7 +224,7 @@ Examples:
 					mcp.Description("Category: decision, architecture, bugfix, pattern, config, discovery, learning (default: manual)"),
 				),
 				mcp.WithString("session_id",
-					mcp.Description("Session ID to associate with (default: manual-save)"),
+					mcp.Description("Session ID to associate with (default: manual-save-{project})"),
 				),
 				mcp.WithString("project",
 					mcp.Description("Project name"),
@@ -342,7 +342,7 @@ Examples:
 					mcp.Description("The user's prompt text"),
 				),
 				mcp.WithString("session_id",
-					mcp.Description("Session ID to associate with (default: manual-save)"),
+					mcp.Description("Session ID to associate with (default: manual-save-{project})"),
 				),
 				mcp.WithString("project",
 					mcp.Description("Project name"),
@@ -482,7 +482,7 @@ GUIDELINES:
 					mcp.Description("Full session summary using the Goal/Instructions/Discoveries/Accomplished/Files format"),
 				),
 				mcp.WithString("session_id",
-					mcp.Description("Session ID (default: manual-save)"),
+					mcp.Description("Session ID (default: manual-save-{project})"),
 				),
 				mcp.WithString("project",
 					mcp.Required(),
@@ -563,7 +563,7 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 					mcp.Description("The text output containing a '## Key Learnings:' section with numbered or bulleted items"),
 				),
 				mcp.WithString("session_id",
-					mcp.Description("Session ID (default: manual-save)"),
+					mcp.Description("Session ID (default: manual-save-{project})"),
 				),
 				mcp.WithString("project",
 					mcp.Description("Project name"),
@@ -632,7 +632,7 @@ func handleSave(s *store.Store) server.ToolHandlerFunc {
 			typ = "manual"
 		}
 		if sessionID == "" {
-			sessionID = "manual-save"
+			sessionID = defaultSessionID(project)
 		}
 		suggestedTopicKey := suggestTopicKey(typ, title, content)
 
@@ -746,7 +746,7 @@ func handleSavePrompt(s *store.Store) server.ToolHandlerFunc {
 		project, _ := req.GetArguments()["project"].(string)
 
 		if sessionID == "" {
-			sessionID = "manual-save"
+			sessionID = defaultSessionID(project)
 		}
 
 		// Ensure the session exists
@@ -913,7 +913,7 @@ func handleSessionSummary(s *store.Store) server.ToolHandlerFunc {
 		project, _ := req.GetArguments()["project"].(string)
 
 		if sessionID == "" {
-			sessionID = "manual-save"
+			sessionID = defaultSessionID(project)
 		}
 
 		// Ensure the session exists
@@ -973,7 +973,7 @@ func handleCapturePassive(s *store.Store) server.ToolHandlerFunc {
 		}
 
 		if sessionID == "" {
-			sessionID = "manual-save"
+			sessionID = defaultSessionID(project)
 			_ = s.CreateSession(sessionID, project, "")
 		}
 
@@ -999,6 +999,16 @@ func handleCapturePassive(s *store.Store) server.ToolHandlerFunc {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+// defaultSessionID returns a project-scoped default session ID.
+// If project is non-empty: "manual-save-{project}"
+// If project is empty: "manual-save"
+func defaultSessionID(project string) string {
+	if project == "" {
+		return "manual-save"
+	}
+	return "manual-save-" + project
+}
 
 func intArg(req mcp.CallToolRequest, key string, defaultVal int) int {
 	v, ok := req.GetArguments()[key].(float64)

@@ -2443,3 +2443,55 @@ func TestStoreUncoveredBranchesPushToHundred(t *testing.T) {
 		}
 	})
 }
+
+// ─── Issue #25: Session collision regression tests ──────────────────────────
+
+func TestCreateSessionUpsertsEmptyProjectAndDirectory(t *testing.T) {
+	s := newTestStore(t)
+
+	// Create session with empty project/directory (simulates first MCP call without context)
+	if err := s.CreateSession("sess-upsert", "", ""); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	// Second call with real project/directory should fill in the blanks
+	if err := s.CreateSession("sess-upsert", "projectA", "/tmp/a"); err != nil {
+		t.Fatalf("upsert session: %v", err)
+	}
+
+	sess, err := s.GetSession("sess-upsert")
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if sess.Project != "projectA" {
+		t.Fatalf("expected project=projectA after upsert, got %q", sess.Project)
+	}
+	if sess.Directory != "/tmp/a" {
+		t.Fatalf("expected directory=/tmp/a after upsert, got %q", sess.Directory)
+	}
+}
+
+func TestCreateSessionDoesNotOverwriteExistingProject(t *testing.T) {
+	s := newTestStore(t)
+
+	// Create session with project A
+	if err := s.CreateSession("sess-preserve", "projectA", "/tmp/a"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	// Second call with project B should NOT overwrite
+	if err := s.CreateSession("sess-preserve", "projectB", "/tmp/b"); err != nil {
+		t.Fatalf("upsert session: %v", err)
+	}
+
+	sess, err := s.GetSession("sess-preserve")
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if sess.Project != "projectA" {
+		t.Fatalf("expected project=projectA (preserved), got %q", sess.Project)
+	}
+	if sess.Directory != "/tmp/a" {
+		t.Fatalf("expected directory=/tmp/a (preserved), got %q", sess.Directory)
+	}
+}

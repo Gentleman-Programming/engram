@@ -315,9 +315,13 @@ func cmdSave(cfg store.Config) {
 	}
 	defer s.Close()
 
-	s.CreateSession("manual-save", project, "")
+	sessionID := "manual-save"
+	if project != "" {
+		sessionID = "manual-save-" + project
+	}
+	s.CreateSession(sessionID, project, "")
 	id, err := storeAddObservation(s, store.AddObservationParams{
-		SessionID: "manual-save",
+		SessionID: sessionID,
 		Type:      typ,
 		Title:     title,
 		Content:   content,

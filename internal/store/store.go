@@ -516,7 +516,10 @@ func (s *Store) migrate() error {
 
 func (s *Store) CreateSession(id, project, directory string) error {
 	_, err := s.db.Exec(
-		`INSERT OR IGNORE INTO sessions (id, project, directory) VALUES (?, ?, ?)`,
+		`INSERT INTO sessions (id, project, directory) VALUES (?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET
+		   project   = CASE WHEN sessions.project = '' THEN excluded.project ELSE sessions.project END,
+		   directory = CASE WHEN sessions.directory = '' THEN excluded.directory ELSE sessions.directory END`,
 		id, project, directory,
 	)
 	return err
