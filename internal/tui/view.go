@@ -566,6 +566,23 @@ func (m Model) viewSetup() string {
 		return b.String()
 	}
 
+	// Show allowlist prompt after successful claude-code install
+	if m.SetupAllowlistPrompt && m.SetupResult != nil {
+		successMsg := fmt.Sprintf("Installed %s plugin", m.SetupResult.Agent)
+		b.WriteString(fmt.Sprintf("\n  %s %s\n\n",
+			lipgloss.NewStyle().Bold(true).Foreground(colorGreen).Render("✓"),
+			lipgloss.NewStyle().Bold(true).Foreground(colorGreen).Render(successMsg)))
+
+		b.WriteString(sectionHeadingStyle.Render("  Permissions Allowlist"))
+		b.WriteString("\n\n")
+		b.WriteString(detailContentStyle.Render("  Add engram tools to ~/.claude/settings.json allowlist?"))
+		b.WriteString("\n")
+		b.WriteString(timestampStyle.Render("  This prevents Claude Code from asking permission on every tool call."))
+		b.WriteString("\n\n")
+		b.WriteString(helpStyle.Render("  [y] Yes  [n] No"))
+		return b.String()
+	}
+
 	// Show result after install
 	if m.SetupDone {
 		if m.SetupError != "" {
@@ -597,6 +614,17 @@ func (m Model) viewSetup() string {
 			case "claude-code":
 				b.WriteString(sectionHeadingStyle.Render("  Next Steps"))
 				b.WriteString("\n")
+				if m.SetupAllowlistApplied {
+					b.WriteString(fmt.Sprintf("  %s %s\n",
+						lipgloss.NewStyle().Bold(true).Foreground(colorGreen).Render("✓"),
+						detailContentStyle.Render("Engram tools added to allowlist")))
+				} else if m.SetupAllowlistError != "" {
+					b.WriteString(fmt.Sprintf("  %s %s\n",
+						lipgloss.NewStyle().Bold(true).Foreground(colorRed).Render("✗"),
+						detailContentStyle.Render("Allowlist update failed: "+m.SetupAllowlistError)))
+					b.WriteString(detailContentStyle.Render("  Add manually to permissions.allow in ~/.claude/settings.json"))
+					b.WriteString("\n")
+				}
 				b.WriteString(detailContentStyle.Render("1. Restart Claude Code — the plugin is active immediately"))
 				b.WriteString("\n")
 				b.WriteString(detailContentStyle.Render("2. Verify with: claude plugin list"))

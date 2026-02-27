@@ -97,13 +97,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case setupInstallMsg:
 		m.SetupInstalling = false
-		m.SetupDone = true
 		if msg.err != nil {
+			m.SetupDone = true
 			m.SetupError = msg.err.Error()
 			return m, nil
 		}
 		m.SetupResult = msg.result
 		m.SetupError = ""
+		// For claude-code, show allowlist prompt before marking done
+		if msg.result != nil && msg.result.Agent == "claude-code" {
+			m.SetupAllowlistPrompt = true
+			return m, nil
+		}
+		m.SetupDone = true
 		return m, nil
 
 	case spinner.TickMsg:
@@ -490,6 +496,26 @@ func (m Model) handleSetupKeys(key string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Allowlist prompt: y/n
+	if m.SetupAllowlistPrompt {
+		switch key {
+		case "y", "Y":
+			m.SetupAllowlistPrompt = false
+			m.SetupDone = true
+			if err := addClaudeCodeAllowlistFn(); err != nil {
+				m.SetupAllowlistError = err.Error()
+			} else {
+				m.SetupAllowlistApplied = true
+			}
+			return m, nil
+		case "n", "N", "esc":
+			m.SetupAllowlistPrompt = false
+			m.SetupDone = true
+			return m, nil
+		}
+		return m, nil
+	}
+
 	// After install completed, any key goes back
 	if m.SetupDone {
 		switch key {
@@ -499,6 +525,8 @@ func (m Model) handleSetupKeys(key string) (tea.Model, tea.Cmd) {
 			m.SetupDone = false
 			m.SetupResult = nil
 			m.SetupError = ""
+			m.SetupAllowlistApplied = false
+			m.SetupAllowlistError = ""
 			return m, loadStats(m.store)
 		}
 		return m, nil

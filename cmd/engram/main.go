@@ -47,9 +47,10 @@ var (
 	newTeaProgram = tea.NewProgram
 	runTeaProgram = (*tea.Program).Run
 
-	setupSupportedAgents = setup.SupportedAgents
-	setupInstallAgent    = setup.Install
-	scanInputLine        = fmt.Scanln
+	setupSupportedAgents        = setup.SupportedAgents
+	setupInstallAgent           = setup.Install
+	setupAddClaudeCodeAllowlist = setup.AddClaudeCodeAllowlist
+	scanInputLine               = fmt.Scanln
 
 	storeSearch = func(s *store.Store, query string, opts store.SearchOptions) ([]store.SearchResult, error) {
 		return s.Search(query, opts)
@@ -686,6 +687,24 @@ func printPostInstall(agent string) {
 		fmt.Println("  1. Restart OpenCode — plugin + MCP server are ready")
 		fmt.Println("  2. Run 'engram serve &' for session tracking (HTTP API)")
 	case "claude-code":
+		// Offer to add engram tools to the permissions allowlist
+		fmt.Print("\nAdd engram tools to ~/.claude/settings.json allowlist?\n")
+		fmt.Print("This prevents Claude Code from asking permission on every tool call.\n")
+		fmt.Print("Add to allowlist? (y/N): ")
+		var answer string
+		scanInputLine(&answer)
+		answer = strings.TrimSpace(strings.ToLower(answer))
+		if answer == "y" || answer == "yes" {
+			if err := setupAddClaudeCodeAllowlist(); err != nil {
+				fmt.Fprintf(os.Stderr, "  warning: could not update allowlist: %v\n", err)
+				fmt.Fprintln(os.Stderr, "  You can add them manually to permissions.allow in ~/.claude/settings.json")
+			} else {
+				fmt.Println("  ✓ Engram tools added to allowlist")
+			}
+		} else {
+			fmt.Println("  Skipped. You can add them later to permissions.allow in ~/.claude/settings.json")
+		}
+
 		fmt.Println("\nNext steps:")
 		fmt.Println("  1. Restart Claude Code — the plugin is active immediately")
 		fmt.Println("  2. Verify with: claude plugin list")

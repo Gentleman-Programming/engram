@@ -366,3 +366,55 @@ func TestViewSetupRemainingBranches(t *testing.T) {
 		t.Fatal("setup done without result/error should still render return help")
 	}
 }
+
+func TestViewSetupAllowlistPrompt(t *testing.T) {
+	t.Run("renders allowlist prompt", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen = ScreenSetup
+		m.SetupAllowlistPrompt = true
+		m.SetupResult = &setup.Result{Agent: "claude-code", Destination: "claude plugin system"}
+
+		out := m.viewSetup()
+		if !strings.Contains(out, "Installed claude-code plugin") {
+			t.Fatal("prompt should show install success")
+		}
+		if !strings.Contains(out, "Permissions Allowlist") {
+			t.Fatal("prompt should show allowlist heading")
+		}
+		if !strings.Contains(out, "settings.json") {
+			t.Fatal("prompt should mention settings.json")
+		}
+		if !strings.Contains(out, "[y] Yes") || !strings.Contains(out, "[n] No") {
+			t.Fatal("prompt should show y/n options")
+		}
+	})
+
+	t.Run("renders applied state", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen = ScreenSetup
+		m.SetupDone = true
+		m.SetupResult = &setup.Result{Agent: "claude-code", Destination: "claude plugin system"}
+		m.SetupAllowlistApplied = true
+
+		out := m.viewSetup()
+		if !strings.Contains(out, "tools added to allowlist") {
+			t.Fatal("should show allowlist success")
+		}
+	})
+
+	t.Run("renders error state", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen = ScreenSetup
+		m.SetupDone = true
+		m.SetupResult = &setup.Result{Agent: "claude-code", Destination: "claude plugin system"}
+		m.SetupAllowlistError = "permission denied"
+
+		out := m.viewSetup()
+		if !strings.Contains(out, "Allowlist update failed") {
+			t.Fatal("should show allowlist error")
+		}
+		if !strings.Contains(out, "permission denied") {
+			t.Fatal("should show error message")
+		}
+	})
+}

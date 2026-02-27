@@ -118,13 +118,16 @@ type Model struct {
 	SessionDetailScroll int
 
 	// Setup
-	SetupAgents         []setup.Agent
-	SetupResult         *setup.Result
-	SetupError          string
-	SetupDone           bool
-	SetupInstalling     bool
-	SetupInstallingName string // agent name being installed (for display)
-	SetupSpinner        spinner.Model
+	SetupAgents           []setup.Agent
+	SetupResult           *setup.Result
+	SetupError            string
+	SetupDone             bool
+	SetupInstalling       bool
+	SetupInstallingName   string // agent name being installed (for display)
+	SetupAllowlistPrompt  bool   // true = showing y/n prompt for allowlist
+	SetupAllowlistApplied bool   // true = allowlist was added successfully
+	SetupAllowlistError   string // error message if allowlist injection failed
+	SetupSpinner          spinner.Model
 }
 
 // New creates a new TUI model connected to the given store.
@@ -214,3 +217,4 @@ func installAgent(agentName string) tea.Cmd {
 }
 
 var installAgentFn = setup.Install
+var addClaudeCodeAllowlistFn = setup.AddClaudeCodeAllowlist

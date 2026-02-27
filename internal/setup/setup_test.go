@@ -28,6 +28,7 @@ func resetSetupSeams(t *testing.T) {
 	oldWriteCodexMemoryInstructionFilesFn := writeCodexMemoryInstructionFilesFn
 	oldInjectCodexMCPFn := injectCodexMCPFn
 	oldInjectCodexMemoryConfigFn := injectCodexMemoryConfigFn
+	oldAddClaudeCodeAllowlistFn := addClaudeCodeAllowlistFn
 
 	t.Cleanup(func() {
 		runtimeGOOS = oldRuntimeGOOS
@@ -47,6 +48,7 @@ func resetSetupSeams(t *testing.T) {
 		writeCodexMemoryInstructionFilesFn = oldWriteCodexMemoryInstructionFilesFn
 		injectCodexMCPFn = oldInjectCodexMCPFn
 		injectCodexMemoryConfigFn = oldInjectCodexMemoryConfigFn
+		addClaudeCodeAllowlistFn = oldAddClaudeCodeAllowlistFn
 	})
 }
 
@@ -1333,6 +1335,325 @@ func TestAdditionalHelperBranches(t *testing.T) {
 		_, err := writeCodexMemoryInstructionFiles()
 		if err == nil || !strings.Contains(err.Error(), "create codex instructions dir") {
 			t.Fatalf("expected create instructions dir error, got %v", err)
+		}
+	})
+}
+
+func TestAddClaudeCodeAllowlist(t *testing.T) {
+	t.Run("creates file from scratch", func(t *testing.T) {
+		resetSetupSeams(t)
+		home := useTestHome(t)
+
+		if err := AddClaudeCodeAllowlist(); err != nil {
+			t.Fatalf("AddClaudeCodeAllowlist() failed: %v", err)
+		}
+
+		settingsPath := filepath.Join(home, ".claude", "settings.json")
+		raw, err := os.ReadFile(settingsPath)
+		if err != nil {
+			t.Fatalf("read settings: %v", err)
+		}
+
+		var cfg map[string]any
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			t.Fatalf("parse settings: %v", err)
+		}
+
+		perms, ok := cfg["permissions"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected permissions object")
+		}
+
+		allowRaw, ok := perms["allow"].([]any)
+		if !ok {
+			t.Fatalf("expected allow array")
+		}
+
+		if len(allowRaw) != len(claudeCodeMCPTools) {
+			t.Fatalf("expected %d tools, got %d", len(claudeCodeMCPTools), len(allowRaw))
+		}
+
+		for i, tool := range claudeCodeMCPTools {
+			if allowRaw[i] != tool {
+				t.Fatalf("expected tool %q at index %d, got %q", tool, i, allowRaw[i])
+			}
+		}
+	})
+
+	t.Run("preserves existing entries", func(t *testing.T) {
+		resetSetupSeams(t)
+		home := useTestHome(t)
+
+		settingsPath := filepath.Join(home, ".claude", "settings.json")
+		if err := os.MkdirAll(filepath.Dir(settingsPath), 0755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+
+		existing := `{"attribution":{"commit":""},"permissions":{"allow":["Read","Write","Glob"],"deny":["Read(.env)"]}}`
+		if err := os.WriteFile(settingsPath, []byte(existing), 0644); err != nil {
+			t.Fatalf("write initial settings: %v", err)
+		}
+
+		if err := AddClaudeCodeAllowlist(); err != nil {
+			t.Fatalf("AddClaudeCodeAllowlist() failed: %v", err)
+		}
+
+		raw, err := os.ReadFile(settingsPath)
+		if err != nil {
+			t.Fatalf("read settings: %v", err)
+		}
+
+		var cfg map[string]any
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			t.Fatalf("parse settings: %v", err)
+		}
+
+		// Check attribution preserved
+		if _, ok := cfg["attribution"]; !ok {
+			t.Fatalf("expected attribution key to be preserved")
+		}
+
+		perms := cfg["permissions"].(map[string]any)
+
+		// Check deny preserved
+		deny, ok := perms["deny"].([]any)
+		if !ok || len(deny) != 1 || deny[0] != "Read(.env)" {
+			t.Fatalf("expected deny list preserved, got %#v", perms["deny"])
+		}
+
+		// Check allow has original + new entries
+		allow := perms["allow"].([]any)
+		expectedLen := 3 + len(claudeCodeMCPTools)
+		if len(allow) != expectedLen {
+			t.Fatalf("expected %d allow entries, got %d", expectedLen, len(allow))
+		}
+
+		// First 3 should be original
+		if allow[0] != "Read" || allow[1] != "Write" || allow[2] != "Glob" {
+			t.Fatalf("expected original entries preserved at start, got %v %v %v", allow[0], allow[1], allow[2])
+		}
+	})
+
+	t.Run("idempotent when all tools present", func(t *testing.T) {
+		resetSetupSeams(t)
+		home := useTestHome(t)
+
+		settingsPath := filepath.Join(home, ".claude", "settings.json")
+		if err := os.MkdirAll(filepath.Dir(settingsPath), 0755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+
+		// Write settings with all tools already present
+		allowJSON, _ := json.Marshal(claudeCodeMCPTools)
+		initial := `{"permissions":{"allow":` + string(allowJSON) + `}}`
+		if err := os.WriteFile(settingsPath, []byte(initial), 0644); err != nil {
+			t.Fatalf("write initial settings: %v", err)
+		}
+
+		beforeRaw, _ := os.ReadFile(settingsPath)
+
+		if err := AddClaudeCodeAllowlist(); err != nil {
+			t.Fatalf("AddClaudeCodeAllowlist() failed: %v", err)
+		}
+
+		afterRaw, _ := os.ReadFile(settingsPath)
+
+		// File should not have been rewritten (early return)
+		if string(afterRaw) != string(beforeRaw) {
+			t.Fatalf("expected file unchanged when all tools present")
+		}
+	})
+
+	t.Run("partial existing adds only missing", func(t *testing.T) {
+		resetSetupSeams(t)
+		home := useTestHome(t)
+
+		settingsPath := filepath.Join(home, ".claude", "settings.json")
+		if err := os.MkdirAll(filepath.Dir(settingsPath), 0755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+
+		// Include 3 of 11 tools
+		partial := []string{
+			claudeCodeMCPTools[0],
+			claudeCodeMCPTools[3],
+			claudeCodeMCPTools[7],
+		}
+		allowJSON, _ := json.Marshal(partial)
+		initial := `{"permissions":{"allow":` + string(allowJSON) + `}}`
+		if err := os.WriteFile(settingsPath, []byte(initial), 0644); err != nil {
+			t.Fatalf("write initial settings: %v", err)
+		}
+
+		if err := AddClaudeCodeAllowlist(); err != nil {
+			t.Fatalf("AddClaudeCodeAllowlist() failed: %v", err)
+		}
+
+		raw, err := os.ReadFile(settingsPath)
+		if err != nil {
+			t.Fatalf("read settings: %v", err)
+		}
+
+		var cfg map[string]any
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			t.Fatalf("parse settings: %v", err)
+		}
+
+		allow := cfg["permissions"].(map[string]any)["allow"].([]any)
+		if len(allow) != len(claudeCodeMCPTools) {
+			t.Fatalf("expected %d tools (no duplicates), got %d", len(claudeCodeMCPTools), len(allow))
+		}
+
+		// Verify no duplicates
+		seen := make(map[string]int)
+		for _, entry := range allow {
+			seen[entry.(string)]++
+		}
+		for tool, count := range seen {
+			if count > 1 {
+				t.Fatalf("duplicate tool entry: %q (count %d)", tool, count)
+			}
+		}
+	})
+
+	t.Run("read error returns error", func(t *testing.T) {
+		resetSetupSeams(t)
+		home := useTestHome(t)
+
+		settingsPath := filepath.Join(home, ".claude", "settings.json")
+		if err := os.MkdirAll(settingsPath, 0755); err != nil {
+			t.Fatalf("mkdir as file: %v", err)
+		}
+
+		err := AddClaudeCodeAllowlist()
+		if err == nil || !strings.Contains(err.Error(), "read settings") {
+			t.Fatalf("expected read settings error, got %v", err)
+		}
+	})
+
+	t.Run("invalid JSON returns error", func(t *testing.T) {
+		resetSetupSeams(t)
+		home := useTestHome(t)
+
+		settingsPath := filepath.Join(home, ".claude", "settings.json")
+		if err := os.MkdirAll(filepath.Dir(settingsPath), 0755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(settingsPath, []byte("{broken"), 0644); err != nil {
+			t.Fatalf("write invalid json: %v", err)
+		}
+
+		err := AddClaudeCodeAllowlist()
+		if err == nil || !strings.Contains(err.Error(), "parse settings") {
+			t.Fatalf("expected parse settings error, got %v", err)
+		}
+	})
+
+	t.Run("invalid permissions returns error", func(t *testing.T) {
+		resetSetupSeams(t)
+		home := useTestHome(t)
+
+		settingsPath := filepath.Join(home, ".claude", "settings.json")
+		if err := os.MkdirAll(filepath.Dir(settingsPath), 0755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(settingsPath, []byte(`{"permissions":"bad"}`), 0644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+
+		err := AddClaudeCodeAllowlist()
+		if err == nil || !strings.Contains(err.Error(), "parse permissions") {
+			t.Fatalf("expected parse permissions error, got %v", err)
+		}
+	})
+
+	t.Run("invalid allow list returns error", func(t *testing.T) {
+		resetSetupSeams(t)
+		home := useTestHome(t)
+
+		settingsPath := filepath.Join(home, ".claude", "settings.json")
+		if err := os.MkdirAll(filepath.Dir(settingsPath), 0755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(settingsPath, []byte(`{"permissions":{"allow":"bad"}}`), 0644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+
+		err := AddClaudeCodeAllowlist()
+		if err == nil || !strings.Contains(err.Error(), "parse allow list") {
+			t.Fatalf("expected parse allow list error, got %v", err)
+		}
+	})
+
+	t.Run("marshal allow list error", func(t *testing.T) {
+		resetSetupSeams(t)
+		useTestHome(t)
+
+		jsonMarshalFn = func(any) ([]byte, error) {
+			return nil, errors.New("marshal boom")
+		}
+
+		err := AddClaudeCodeAllowlist()
+		if err == nil || !strings.Contains(err.Error(), "marshal allow list") {
+			t.Fatalf("expected marshal allow list error, got %v", err)
+		}
+	})
+
+	t.Run("marshal permissions error", func(t *testing.T) {
+		resetSetupSeams(t)
+		useTestHome(t)
+
+		calls := 0
+		jsonMarshalFn = func(v any) ([]byte, error) {
+			calls++
+			if calls == 2 {
+				return nil, errors.New("marshal perms boom")
+			}
+			return json.Marshal(v)
+		}
+
+		err := AddClaudeCodeAllowlist()
+		if err == nil || !strings.Contains(err.Error(), "marshal permissions") {
+			t.Fatalf("expected marshal permissions error, got %v", err)
+		}
+	})
+
+	t.Run("marshal settings error", func(t *testing.T) {
+		resetSetupSeams(t)
+		useTestHome(t)
+
+		jsonMarshalIndentFn = func(any, string, string) ([]byte, error) {
+			return nil, errors.New("indent boom")
+		}
+
+		err := AddClaudeCodeAllowlist()
+		if err == nil || !strings.Contains(err.Error(), "marshal settings") {
+			t.Fatalf("expected marshal settings error, got %v", err)
+		}
+	})
+
+	t.Run("write error returns error", func(t *testing.T) {
+		resetSetupSeams(t)
+		useTestHome(t)
+
+		writeFileFn = func(string, []byte, os.FileMode) error {
+			return errors.New("write boom")
+		}
+
+		err := AddClaudeCodeAllowlist()
+		if err == nil || !strings.Contains(err.Error(), "write settings") {
+			t.Fatalf("expected write settings error, got %v", err)
+		}
+	})
+
+	t.Run("claudeCodeSettingsPath uses home dir", func(t *testing.T) {
+		resetSetupSeams(t)
+		userHomeDir = func() (string, error) { return "/test/home", nil }
+
+		got := claudeCodeSettingsPath()
+		expected := filepath.Join("/test/home", ".claude", "settings.json")
+		if got != expected {
+			t.Fatalf("expected %q, got %q", expected, got)
 		}
 	})
 }

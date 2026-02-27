@@ -39,6 +39,7 @@ var (
 	writeCodexMemoryInstructionFilesFn = writeCodexMemoryInstructionFiles
 	injectCodexMCPFn                   = injectCodexMCP
 	injectCodexMemoryConfigFn          = injectCodexMemoryConfig
+	addClaudeCodeAllowlistFn           = AddClaudeCodeAllowlist
 )
 
 //go:embed plugins/opencode/*
@@ -59,6 +60,23 @@ type Result struct {
 }
 
 const claudeCodeMarketplace = "Gentleman-Programming/engram"
+
+// claudeCodeMCPTools are the MCP tool names registered by the engram plugin
+// in Claude Code. Adding these to ~/.claude/settings.json permissions.allow
+// prevents Claude Code from prompting for confirmation on every tool call.
+var claudeCodeMCPTools = []string{
+	"mcp__plugin_engram_engram__mem_capture_passive",
+	"mcp__plugin_engram_engram__mem_context",
+	"mcp__plugin_engram_engram__mem_get_observation",
+	"mcp__plugin_engram_engram__mem_save",
+	"mcp__plugin_engram_engram__mem_save_prompt",
+	"mcp__plugin_engram_engram__mem_search",
+	"mcp__plugin_engram_engram__mem_session_end",
+	"mcp__plugin_engram_engram__mem_session_start",
+	"mcp__plugin_engram_engram__mem_session_summary",
+	"mcp__plugin_engram_engram__mem_suggest_topic_key",
+	"mcp__plugin_engram_engram__mem_update",
+}
 const codexEngramBlock = "[mcp_servers.engram]\ncommand = \"engram\"\nargs = [\"mcp\", \"--tools=agent\"]"
 
 const memoryProtocolMarkdown = `## Engram Persistent Memory — Protocol
@@ -360,6 +378,99 @@ func installClaudeCode() (*Result, error) {
 		Destination: "claude plugin system (managed by Claude Code)",
 		Files:       0, // managed by claude, not by us
 	}, nil
+}
+
+func claudeCodeSettingsPath() string {
+	home, _ := userHomeDir()
+	return filepath.Join(home, ".claude", "settings.json")
+}
+
+// AddClaudeCodeAllowlist adds engram MCP tool names to ~/.claude/settings.json
+// permissions.allow so Claude Code doesn't prompt for confirmation on each call.
+// Idempotent: skips tools already present in the list.
+func AddClaudeCodeAllowlist() error {
+	settingsPath := claudeCodeSettingsPath()
+
+	// Read existing settings (or start fresh)
+	var config map[string]json.RawMessage
+	data, err := readFileFn(settingsPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			config = make(map[string]json.RawMessage)
+		} else {
+			return fmt.Errorf("read settings: %w", err)
+		}
+	} else {
+		if err := json.Unmarshal(data, &config); err != nil {
+			return fmt.Errorf("parse settings: %w", err)
+		}
+	}
+
+	// Parse or create permissions block
+	var permissions map[string]json.RawMessage
+	if raw, exists := config["permissions"]; exists {
+		if err := json.Unmarshal(raw, &permissions); err != nil {
+			return fmt.Errorf("parse permissions: %w", err)
+		}
+	} else {
+		permissions = make(map[string]json.RawMessage)
+	}
+
+	// Parse or create allow list
+	var allowList []string
+	if raw, exists := permissions["allow"]; exists {
+		if err := json.Unmarshal(raw, &allowList); err != nil {
+			return fmt.Errorf("parse allow list: %w", err)
+		}
+	}
+
+	// Build set of existing entries for O(1) lookup
+	existing := make(map[string]bool, len(allowList))
+	for _, entry := range allowList {
+		existing[entry] = true
+	}
+
+	// Add only missing tools
+	added := 0
+	for _, tool := range claudeCodeMCPTools {
+		if !existing[tool] {
+			allowList = append(allowList, tool)
+			added++
+		}
+	}
+
+	if added == 0 {
+		return nil // all tools already present
+	}
+
+	// Write back
+	allowJSON, err := jsonMarshalFn(allowList)
+	if err != nil {
+		return fmt.Errorf("marshal allow list: %w", err)
+	}
+	permissions["allow"] = json.RawMessage(allowJSON)
+
+	permJSON, err := jsonMarshalFn(permissions)
+	if err != nil {
+		return fmt.Errorf("marshal permissions: %w", err)
+	}
+	config["permissions"] = json.RawMessage(permJSON)
+
+	output, err := jsonMarshalIndentFn(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal settings: %w", err)
+	}
+
+	// Ensure ~/.claude/ directory exists
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0755); err != nil {
+		return fmt.Errorf("create settings dir: %w", err)
+	}
+
+	if err := writeFileFn(settingsPath, output, 0644); err != nil {
+		return fmt.Errorf("write settings: %w", err)
+	}
+
+	return nil
 }
 
 // ─── Gemini CLI ──────────────────────────────────────────────────────────────

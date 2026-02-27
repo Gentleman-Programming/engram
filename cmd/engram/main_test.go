@@ -154,7 +154,6 @@ func TestPrintPostInstall(t *testing.T) {
 		expects []string
 	}{
 		{agent: "opencode", expects: []string{"Restart OpenCode", "engram serve &"}},
-		{agent: "claude-code", expects: []string{"Restart Claude Code", "claude plugin list"}},
 		{agent: "gemini-cli", expects: []string{"Restart Gemini CLI", "~/.gemini/settings.json"}},
 		{agent: "codex", expects: []string{"Restart Codex", "~/.codex/config.toml"}},
 		{agent: "unknown", expects: nil},
@@ -176,6 +175,90 @@ func TestPrintPostInstall(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPrintPostInstallClaudeCodeAllowlist(t *testing.T) {
+	t.Run("user accepts allowlist", func(t *testing.T) {
+		oldScan := scanInputLine
+		oldAllowlist := setupAddClaudeCodeAllowlist
+		t.Cleanup(func() {
+			scanInputLine = oldScan
+			setupAddClaudeCodeAllowlist = oldAllowlist
+		})
+
+		scanInputLine = func(a ...any) (int, error) {
+			ptr := a[0].(*string)
+			*ptr = "y"
+			return 1, nil
+		}
+		allowlistCalled := false
+		setupAddClaudeCodeAllowlist = func() error {
+			allowlistCalled = true
+			return nil
+		}
+
+		stdout, _ := captureOutput(t, func() { printPostInstall("claude-code") })
+		if !allowlistCalled {
+			t.Fatalf("expected AddClaudeCodeAllowlist to be called")
+		}
+		if !strings.Contains(stdout, "tools added to allowlist") {
+			t.Fatalf("expected success message, got: %q", stdout)
+		}
+		if !strings.Contains(stdout, "Restart Claude Code") {
+			t.Fatalf("expected next steps, got: %q", stdout)
+		}
+	})
+
+	t.Run("user declines allowlist", func(t *testing.T) {
+		oldScan := scanInputLine
+		oldAllowlist := setupAddClaudeCodeAllowlist
+		t.Cleanup(func() {
+			scanInputLine = oldScan
+			setupAddClaudeCodeAllowlist = oldAllowlist
+		})
+
+		scanInputLine = func(a ...any) (int, error) {
+			ptr := a[0].(*string)
+			*ptr = "n"
+			return 1, nil
+		}
+		allowlistCalled := false
+		setupAddClaudeCodeAllowlist = func() error {
+			allowlistCalled = true
+			return nil
+		}
+
+		stdout, _ := captureOutput(t, func() { printPostInstall("claude-code") })
+		if allowlistCalled {
+			t.Fatalf("expected AddClaudeCodeAllowlist NOT to be called")
+		}
+		if !strings.Contains(stdout, "Skipped") {
+			t.Fatalf("expected skip message, got: %q", stdout)
+		}
+	})
+
+	t.Run("allowlist error shows warning", func(t *testing.T) {
+		oldScan := scanInputLine
+		oldAllowlist := setupAddClaudeCodeAllowlist
+		t.Cleanup(func() {
+			scanInputLine = oldScan
+			setupAddClaudeCodeAllowlist = oldAllowlist
+		})
+
+		scanInputLine = func(a ...any) (int, error) {
+			ptr := a[0].(*string)
+			*ptr = "y"
+			return 1, nil
+		}
+		setupAddClaudeCodeAllowlist = func() error {
+			return os.ErrPermission
+		}
+
+		_, stderr := captureOutput(t, func() { printPostInstall("claude-code") })
+		if !strings.Contains(stderr, "warning") {
+			t.Fatalf("expected warning in stderr, got: %q", stderr)
+		}
+	})
 }
 
 func TestCmdSaveAndSearch(t *testing.T) {
