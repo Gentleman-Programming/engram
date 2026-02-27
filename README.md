@@ -575,11 +575,13 @@ engram setup opencode
 
 The plugin auto-starts the HTTP server if it's not already running — no manual `engram serve` needed.
 
+> **Local model compatibility:** The plugin works with all models, including local ones served via llama.cpp, Ollama, or similar. The Memory Protocol is concatenated into the existing system prompt (not added as a separate system message), so models with strict Jinja templates (Qwen, Mistral/Ministral) work correctly.
+
 The plugin:
 - **Auto-starts** the engram server if not running
 - **Auto-imports** git-synced memories from `.engram/manifest.json` if present in the project
 - **Creates sessions** on-demand via `ensureSession()` (resilient to restarts/reconnects)
-- **Injects the Memory Protocol** into the agent's system prompt via `chat.system.transform` — strict rules for when to save, when to search, and a mandatory session close protocol
+- **Injects the Memory Protocol** into the agent's system prompt via `chat.system.transform` — strict rules for when to save, when to search, and a mandatory session close protocol. The protocol is concatenated into the existing system message (not pushed as a separate one), ensuring compatibility with models that only accept a single system block (Qwen, Mistral/Ministral via llama.cpp, etc.)
 - **Injects previous session context** into the compaction prompt
 - **Instructs the compressor** to tell the new agent to persist the compacted summary via `mem_session_summary`
 - **Strips `<private>` tags** before sending data
@@ -601,7 +603,7 @@ The OpenCode plugin uses a defense-in-depth strategy to ensure memories survive 
 
 | Layer | Mechanism | Survives Compaction? |
 |-------|-----------|---------------------|
-| **System Prompt** | `MEMORY_INSTRUCTIONS` injected via `chat.system.transform` | Always present |
+| **System Prompt** | `MEMORY_INSTRUCTIONS` concatenated into existing system prompt via `chat.system.transform` | Always present |
 | **Compaction Hook** | Auto-saves checkpoint + injects context + reminds compressor | Fires during compaction |
 | **Agent Config** | "After compaction, call `mem_context`" in agent prompt | Always present |
 
