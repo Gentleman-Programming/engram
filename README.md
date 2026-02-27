@@ -9,6 +9,7 @@
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> &bull;
+  <a href="#install-on-windows">Windows</a> &bull;
   <a href="#how-it-works">How It Works</a> &bull;
   <a href="#agent-setup">Agent Setup</a> &bull;
   <a href="CONTRIBUTING.md">Contributing</a> &bull;
@@ -35,7 +36,7 @@ SQLite + FTS5 (~/.engram/engram.db)
 
 ## Quick Start
 
-### Install via Homebrew (recommended)
+### Install via Homebrew (macOS / Linux)
 
 ```bash
 brew install gentleman-programming/tap/engram
@@ -52,7 +53,37 @@ brew update && brew upgrade engram
 > brew uninstall --cask engram 2>/dev/null; brew install gentleman-programming/tap/engram
 > ```
 
-### Install from source
+### Install on Windows
+
+**Option A: Download the binary (recommended)**
+
+1. Go to [GitHub Releases](https://github.com/Gentleman-Programming/engram/releases)
+2. Download `engram_<version>_windows_amd64.zip` (or `arm64` for ARM devices)
+3. Extract `engram.exe` to a folder in your `PATH` (e.g. `C:\Users\<you>\bin\`)
+
+```powershell
+# Example: extract and add to PATH (PowerShell)
+Expand-Archive engram_*_windows_amd64.zip -DestinationPath "$env:USERPROFILE\bin"
+# Add to PATH permanently (run once):
+[Environment]::SetEnvironmentVariable("Path", "$env:USERPROFILE\bin;" + [Environment]::GetEnvironmentVariable("Path", "User"), "User")
+```
+
+**Option B: Install from source**
+
+```powershell
+git clone https://github.com/Gentleman-Programming/engram.git
+cd engram
+go install ./cmd/engram
+# Binary goes to %GOPATH%\bin\engram.exe (typically %USERPROFILE%\go\bin\)
+```
+
+> **Windows notes:**
+> - Data is stored in `%USERPROFILE%\.engram\engram.db`
+> - Override with `ENGRAM_DATA_DIR` environment variable
+> - All core features work natively: CLI, MCP server, TUI, HTTP API, Git Sync
+> - No WSL required for the core binary — it's a native Windows executable
+
+### Install from source (macOS / Linux)
 
 ```bash
 git clone https://github.com/Gentleman-Programming/engram.git
@@ -60,9 +91,18 @@ cd engram
 go install ./cmd/engram
 ```
 
-### Download binary
+### Download binary (all platforms)
 
 Grab the latest release for your platform from [GitHub Releases](https://github.com/Gentleman-Programming/engram/releases).
+
+| Platform | File |
+|----------|------|
+| macOS (Apple Silicon) | `engram_<version>_darwin_arm64.tar.gz` |
+| macOS (Intel) | `engram_<version>_darwin_amd64.tar.gz` |
+| Linux (x86_64) | `engram_<version>_linux_amd64.tar.gz` |
+| Linux (ARM64) | `engram_<version>_linux_arm64.tar.gz` |
+| Windows (x86_64) | `engram_<version>_windows_amd64.zip` |
+| Windows (ARM64) | `engram_<version>_windows_arm64.zip` |
 
 Then set up your agent's plugin:
 
@@ -183,7 +223,7 @@ Engram works with **any MCP-compatible agent**. Add it to your agent's MCP confi
 
 ### OpenCode
 
-> **Prerequisite**: Install the `engram` binary first (via [Homebrew](#install-via-homebrew-recommended), [binary download](#download-binary), or [source](#install-from-source)). The plugin needs it for the MCP server and session tracking.
+> **Prerequisite**: Install the `engram` binary first (via [Homebrew](#install-via-homebrew-macOS--linux), [Windows binary](#install-on-windows), [binary download](#download-binary-all-platforms), or [source](#install-from-source-macos--linux)). The plugin needs it for the MCP server and session tracking.
 
 **Recommended: Full setup with one command** — installs the plugin AND registers the MCP server in `opencode.json` automatically:
 
@@ -201,9 +241,11 @@ The plugin also needs the HTTP server running for session tracking:
 engram serve &
 ```
 
+> **Windows**: On Windows, `engram setup opencode` writes to `%APPDATA%\opencode\plugins\` and `%APPDATA%\opencode\opencode.json` automatically. To run the server in the background: `Start-Process engram -ArgumentList "serve" -WindowStyle Hidden` (PowerShell) or just run `engram serve` in a separate terminal.
+
 **Alternative: Manual MCP-only setup** (no plugin, just the 13 memory tools):
 
-Add to your `opencode.json` (global: `~/.config/opencode/opencode.json` or project-level):
+Add to your `opencode.json` (global: `~/.config/opencode/opencode.json` or project-level; on Windows: `%APPDATA%\opencode\opencode.json`):
 
 ```json
 {
@@ -221,7 +263,7 @@ See [OpenCode Plugin](#opencode-plugin) for details on what the plugin provides 
 
 ### Claude Code
 
-> **Prerequisite**: Install the `engram` binary first (via [Homebrew](#install-via-homebrew-recommended), [binary download](#download-binary), or [source](#install-from-source)). The plugin needs it for the MCP server and session tracking scripts.
+> **Prerequisite**: Install the `engram` binary first (via [Homebrew](#install-via-homebrew-macOS--linux), [Windows binary](#install-on-windows), [binary download](#download-binary-all-platforms), or [source](#install-from-source-macos--linux)). The plugin needs it for the MCP server and session tracking scripts.
 
 **Option A: Plugin via marketplace (recommended)** — full session management, auto-import, compaction recovery, and Memory Protocol skill:
 
@@ -257,6 +299,8 @@ Add to your `.claude/settings.json` (project) or `~/.claude/settings.json` (glob
 
 With bare MCP, add a [Surviving Compaction](#surviving-compaction-recommended) prompt to your `CLAUDE.md` so the agent remembers to use Engram after context resets.
 
+> **Windows note:** The Claude Code plugin hooks use bash scripts. On Windows, Claude Code runs hooks through Git Bash (bundled with [Git for Windows](https://gitforwindows.org/)) or WSL. If hooks don't fire, ensure `bash` is available in your `PATH`. Alternatively, use **Option C (Bare MCP)** which works natively on Windows without any shell dependency.
+
 See [Claude Code Plugin](#claude-code-plugin) for details on what the plugin provides.
 
 ### Gemini CLI
@@ -268,11 +312,11 @@ engram setup gemini-cli
 ```
 
 `engram setup gemini-cli` now does three things:
-- Registers `mcpServers.engram` in `~/.gemini/settings.json`
+- Registers `mcpServers.engram` in `~/.gemini/settings.json` (Windows: `%APPDATA%\gemini\settings.json`)
 - Writes `~/.gemini/system.md` with the Engram Memory Protocol (includes post-compaction recovery)
 - Ensures `~/.gemini/.env` contains `GEMINI_SYSTEM_MD=1` so Gemini actually loads that system prompt
 
-Manual alternative: add to your `~/.gemini/settings.json` (global) or `.gemini/settings.json` (project):
+Manual alternative: add to your `~/.gemini/settings.json` (global) or `.gemini/settings.json` (project); on Windows: `%APPDATA%\gemini\settings.json`:
 
 
 ```json
@@ -301,11 +345,11 @@ engram setup codex
 ```
 
 `engram setup codex` now does three things:
-- Registers `[mcp_servers.engram]` in `~/.codex/config.toml`
+- Registers `[mcp_servers.engram]` in `~/.codex/config.toml` (Windows: `%APPDATA%\codex\config.toml`)
 - Writes `~/.codex/engram-instructions.md` with the Engram Memory Protocol
 - Writes `~/.codex/engram-compact-prompt.md` and points `experimental_compact_prompt_file` to it, so compaction output includes a required memory-save instruction
 
-Manual alternative: add to your `~/.codex/config.toml`:
+Manual alternative: add to your `~/.codex/config.toml` (Windows: `%APPDATA%\codex\config.toml`):
 
 ```toml
 model_instructions_file = "~/.codex/engram-instructions.md"
@@ -318,7 +362,7 @@ args = ["mcp"]
 
 ### Cursor
 
-Add to your `.cursor/mcp.json`:
+Add to your `.cursor/mcp.json` (same path on all platforms — it's project-relative):
 
 ```json
 {
@@ -331,9 +375,11 @@ Add to your `.cursor/mcp.json`:
 }
 ```
 
+> **Windows**: Make sure `engram.exe` is in your `PATH`. Cursor resolves MCP commands from the system PATH.
+
 ### Windsurf
 
-Add to your `~/.windsurf/mcp.json`:
+Add to your `~/.windsurf/mcp.json` (Windows: `%USERPROFILE%\.windsurf\mcp.json`):
 
 ```json
 {
@@ -663,14 +709,26 @@ engram/
 - **Go 1.25+** to build from source (not needed if installing via Homebrew or downloading a binary)
 - That's it. No runtime dependencies.
 
-The binary includes SQLite (via [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite) — pure Go, no CGO).
+The binary includes SQLite (via [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite) — pure Go, no CGO). Works natively on **macOS**, **Linux**, and **Windows** (x86_64 and ARM64).
 
 ## Environment Variables
 
 | Variable | Description | Default |
 |---|---|---|
-| `ENGRAM_DATA_DIR` | Data directory | `~/.engram` |
+| `ENGRAM_DATA_DIR` | Data directory | `~/.engram` (Windows: `%USERPROFILE%\.engram`) |
 | `ENGRAM_PORT` | HTTP server port | `7437` |
+
+### Windows Config Paths
+
+When using `engram setup`, config files are written to platform-appropriate locations:
+
+| Agent | macOS / Linux | Windows |
+|-------|---------------|---------|
+| OpenCode | `~/.config/opencode/` | `%APPDATA%\opencode\` |
+| Gemini CLI | `~/.gemini/` | `%APPDATA%\gemini\` |
+| Codex | `~/.codex/` | `%APPDATA%\codex\` |
+| Claude Code | Managed by `claude` CLI | Managed by `claude` CLI |
+| Data directory | `~/.engram/` | `%USERPROFILE%\.engram\` |
 
 ## License
 
