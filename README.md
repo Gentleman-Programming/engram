@@ -127,8 +127,10 @@ engram setup gemini-cli
 # Codex — MCP auto-registration
 engram setup codex
 
-# VS Code / Antigravity — add MCP server via CLI
+# VS Code — add MCP server via CLI
 code --add-mcp "{\"name\":\"engram\",\"command\":\"engram\",\"args\":[\"mcp\"]}"
+
+# Antigravity — add via MCP Store (see Agent Setup below)
 
 # Or interactive (asks which agent)
 engram setup
@@ -427,13 +429,13 @@ See [Surviving Compaction](#surviving-compaction-recommended) for the minimal ve
 
 ### Antigravity
 
-[Antigravity](https://antigravity.google) is Google's AI-first IDE, built on VS Code. It uses the same MCP configuration format.
+[Antigravity](https://antigravity.google) is Google's AI-first IDE with native MCP and skill support.
 
-Add to `.vscode/mcp.json` in your project (same as VS Code):
+**Add the MCP server** — open the MCP Store (`...` dropdown in the agent panel) → **Manage MCP Servers** → **View raw config**, and add to `~/.gemini/antigravity/mcp_config.json`:
 
 ```json
 {
-  "servers": {
+  "mcpServers": {
     "engram": {
       "command": "engram",
       "args": ["mcp"]
@@ -442,11 +444,11 @@ Add to `.vscode/mcp.json` in your project (same as VS Code):
 }
 ```
 
-Or use the Command Palette: **MCP: Add Server** → configure `engram` with command `engram` and args `["mcp"]`.
+**Adding the Memory Protocol** (recommended):
 
-> Antigravity supports VS Code extensions, so any VS Code MCP configuration works identically.
+Add the Memory Protocol as a global rule in `~/.gemini/GEMINI.md`, or as a workspace rule in `.agent/rules/`. See [DOCS.md](DOCS.md#memory-protocol-full-text) for the full text, or use the minimal version from [Surviving Compaction](#surviving-compaction-recommended).
 
-**Memory Protocol:** Antigravity follows the same instructions paths as VS Code. See the [VS Code section](#vs-code-copilot--claude-code-extension) above for how to add the Memory Protocol via `.github/copilot-instructions.md`.
+> **Note:** Antigravity has its own skill, rule, and MCP systems separate from VS Code. Do not use `.vscode/mcp.json`.
 
 ### Cursor
 
@@ -514,7 +516,15 @@ You have access to Engram persistent memory via MCP tools (mem_save, mem_search,
 - After any compaction or context reset, call `mem_context` to recover session state before continuing.
 ```
 
-**For VS Code / Antigravity** (`.github/copilot-instructions.md` or custom instructions):
+**For VS Code** (`.github/copilot-instructions.md` or custom instructions):
+```markdown
+## Memory
+You have access to Engram persistent memory via MCP tools (mem_save, mem_search, mem_session_summary, etc.).
+- Save proactively after significant work — don't wait to be asked.
+- After any compaction or context reset, call `mem_context` to recover session state before continuing.
+```
+
+**For Antigravity** (`~/.gemini/GEMINI.md` or `.agent/rules/`):
 ```markdown
 ## Memory
 You have access to Engram persistent memory via MCP tools (mem_save, mem_search, mem_session_summary, etc.).
@@ -831,7 +841,7 @@ When using `engram setup`, config files are written to platform-appropriate loca
 | Codex | `~/.codex/` | `%APPDATA%\codex\` |
 | Claude Code | Managed by `claude` CLI | Managed by `claude` CLI |
 | VS Code | `.vscode/mcp.json` (workspace) | `.vscode\mcp.json` (workspace) |
-| Antigravity | `.vscode/mcp.json` (workspace) | `.vscode\mcp.json` (workspace) |
+| Antigravity | `~/.gemini/antigravity/mcp_config.json` | `%USERPROFILE%\.gemini\antigravity\mcp_config.json` |
 | Data directory | `~/.engram/` | `%USERPROFILE%\.engram\` |
 
 ## License
