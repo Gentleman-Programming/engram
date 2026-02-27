@@ -320,9 +320,19 @@ export const Engram: Plugin = async (ctx) => {
     // ─── System Prompt: Always-on memory instructions ──────────
     // Injects MEMORY_INSTRUCTIONS into the system prompt of every message.
     // This ensures the agent ALWAYS knows about Engram, even after compaction.
+    //
+    // We append to the last existing system entry instead of pushing a new one.
+    // Some models (Qwen3.5, Mistral/Ministral via llama.cpp) reject multiple
+    // system messages — their Jinja chat templates only allow a single system
+    // block at the beginning. By concatenating, we avoid adding extra system
+    // messages that would break these models. See: GitHub issue #23.
 
     "experimental.chat.system.transform": async (_input, output) => {
-      output.system.push(MEMORY_INSTRUCTIONS)
+      if (output.system.length > 0) {
+        output.system[output.system.length - 1] += "\n\n" + MEMORY_INSTRUCTIONS
+      } else {
+        output.system.push(MEMORY_INSTRUCTIONS)
+      }
     },
 
     // ─── Compaction Hook: Persist memory + inject context ──────────
