@@ -24,10 +24,10 @@
 
 Your AI coding agent forgets everything when the session ends. Engram gives it a brain.
 
-A **Go binary** with SQLite + FTS5 full-text search, exposed via CLI, HTTP API, MCP server, and an interactive TUI. Works with **any agent** that supports MCP — OpenCode, Claude Code, Cursor, Windsurf, or anything else.
+A **Go binary** with SQLite + FTS5 full-text search, exposed via CLI, HTTP API, MCP server, and an interactive TUI. Works with **any agent** that supports MCP — Claude Code, OpenCode, Gemini CLI, Codex, VS Code (Copilot), Antigravity, Cursor, Windsurf, or anything else.
 
 ```
-Agent (OpenCode / Claude Code / Cursor / Windsurf / ...)
+Agent (Claude Code / OpenCode / Gemini CLI / Codex / VS Code / Antigravity / ...)
     ↓ MCP stdio
 Engram (single Go binary)
     ↓
@@ -127,11 +127,14 @@ engram setup gemini-cli
 # Codex — MCP auto-registration
 engram setup codex
 
+# VS Code / Antigravity — add MCP server via CLI
+code --add-mcp "{\"name\":\"engram\",\"command\":\"engram\",\"args\":[\"mcp\"]}"
+
 # Or interactive (asks which agent)
 engram setup
 ```
 
-See [Agent Setup](#agent-setup) for manual configuration or other agents (Cursor, Windsurf, Gemini, Codex).
+See [Agent Setup](#agent-setup) for manual configuration or other agents (VS Code, Antigravity, Cursor, Windsurf).
 
 That's it. No Node.js, no Python, no Bun, no Docker, no ChromaDB, no vector database, no worker processes. **One binary, one SQLite file.**
 
@@ -323,6 +326,8 @@ engram setup gemini-cli
 - Writes `~/.gemini/system.md` with the Engram Memory Protocol (includes post-compaction recovery)
 - Ensures `~/.gemini/.env` contains `GEMINI_SYSTEM_MD=1` so Gemini actually loads that system prompt
 
+> `engram setup gemini-cli` automatically writes the full Memory Protocol to `~/.gemini/system.md`, so the agent knows exactly when to save, search, and close sessions. No additional configuration needed.
+
 Manual alternative: add to your `~/.gemini/settings.json` (global) or `.gemini/settings.json` (project); on Windows: `%APPDATA%\gemini\settings.json`:
 
 
@@ -356,6 +361,8 @@ engram setup codex
 - Writes `~/.codex/engram-instructions.md` with the Engram Memory Protocol
 - Writes `~/.codex/engram-compact-prompt.md` and points `experimental_compact_prompt_file` to it, so compaction output includes a required memory-save instruction
 
+> `engram setup codex` automatically writes the full Memory Protocol to `~/.codex/engram-instructions.md` and a compaction recovery prompt to `~/.codex/engram-compact-prompt.md`. No additional configuration needed.
+
 Manual alternative: add to your `~/.codex/config.toml` (Windows: `%APPDATA%\codex\config.toml`):
 
 ```toml
@@ -366,6 +373,80 @@ experimental_compact_prompt_file = "~/.codex/engram-compact-prompt.md"
 command = "engram"
 args = ["mcp"]
 ```
+
+### VS Code (Copilot / Claude Code Extension)
+
+VS Code supports MCP servers natively in its chat panel (Copilot agent mode). This works with **any** AI agent running inside VS Code — Copilot, Claude Code extension, or any other MCP-compatible chat provider.
+
+**Option A: Workspace config** (recommended for teams — commit to source control):
+
+Add to `.vscode/mcp.json` in your project:
+
+```json
+{
+  "servers": {
+    "engram": {
+      "command": "engram",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+**Option B: User profile** (global, available across all workspaces):
+
+1. Open Command Palette (`Cmd+Shift+P` / `Ctrl+Shift+P`)
+2. Run **MCP: Open User Configuration**
+3. Add the same `engram` server entry above
+
+**Option C: CLI one-liner:**
+
+```bash
+code --add-mcp "{\"name\":\"engram\",\"command\":\"engram\",\"args\":[\"mcp\"]}"
+```
+
+> **Using Claude Code extension in VS Code?** The Claude Code extension runs inside VS Code but uses its own MCP config. Follow the [Claude Code](#claude-code) instructions above — the `.claude/settings.json` config works whether you use Claude Code as a CLI or as a VS Code extension.
+
+> **Windows**: Make sure `engram.exe` is in your `PATH`. VS Code resolves MCP commands from the system PATH.
+
+**Adding the Memory Protocol** (recommended — teaches the agent when to save and search memories):
+
+Without the Memory Protocol, the agent has the tools but doesn't know WHEN to use them. Add these instructions to your agent's prompt:
+
+**For Copilot:** Create or edit `.github/copilot-instructions.md` in your project and paste the Memory Protocol from [DOCS.md](DOCS.md#memory-protocol-full-text).
+
+**For any VS Code chat extension:** Add the Memory Protocol text to your extension's custom instructions or system prompt configuration.
+
+The Memory Protocol tells the agent:
+- **When to save** — after bugfixes, decisions, discoveries, config changes, patterns
+- **When to search** — reactive ("remember", "recall") + proactive (overlapping past work)
+- **Session close** — mandatory `mem_session_summary` before ending
+- **After compaction** — recover state with `mem_context`
+
+See [Surviving Compaction](#surviving-compaction-recommended) for the minimal version, or [DOCS.md](DOCS.md#memory-protocol-full-text) for the full Memory Protocol text you can copy-paste.
+
+### Antigravity
+
+[Antigravity](https://antigravity.google) is Google's AI-first IDE, built on VS Code. It uses the same MCP configuration format.
+
+Add to `.vscode/mcp.json` in your project (same as VS Code):
+
+```json
+{
+  "servers": {
+    "engram": {
+      "command": "engram",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Or use the Command Palette: **MCP: Add Server** → configure `engram` with command `engram` and args `["mcp"]`.
+
+> Antigravity supports VS Code extensions, so any VS Code MCP configuration works identically.
+
+**Memory Protocol:** Antigravity follows the same instructions paths as VS Code. See the [VS Code section](#vs-code-copilot--claude-code-extension) above for how to add the Memory Protocol via `.github/copilot-instructions.md`.
 
 ### Cursor
 
@@ -384,6 +465,8 @@ Add to your `.cursor/mcp.json` (same path on all platforms — it's project-rela
 
 > **Windows**: Make sure `engram.exe` is in your `PATH`. Cursor resolves MCP commands from the system PATH.
 
+> **Memory Protocol:** Add the Memory Protocol instructions to your `.cursorrules` file. See [DOCS.md](DOCS.md#memory-protocol-full-text) for the full text, or use the minimal version from [Surviving Compaction](#surviving-compaction-recommended).
+
 ### Windsurf
 
 Add to your `~/.windsurf/mcp.json` (Windows: `%USERPROFILE%\.windsurf\mcp.json`):
@@ -398,6 +481,8 @@ Add to your `~/.windsurf/mcp.json` (Windows: `%USERPROFILE%\.windsurf\mcp.json`)
   }
 }
 ```
+
+> **Memory Protocol:** Add the Memory Protocol instructions to your `.windsurfrules` file. See [DOCS.md](DOCS.md#memory-protocol-full-text) for the full text.
 
 ### Any other MCP agent
 
@@ -422,6 +507,14 @@ Save memories proactively with mem_save after significant work.
 ```
 
 **For Gemini CLI** (`GEMINI.md`):
+```markdown
+## Memory
+You have access to Engram persistent memory via MCP tools (mem_save, mem_search, mem_session_summary, etc.).
+- Save proactively after significant work — don't wait to be asked.
+- After any compaction or context reset, call `mem_context` to recover session state before continuing.
+```
+
+**For VS Code / Antigravity** (`.github/copilot-instructions.md` or custom instructions):
 ```markdown
 ## Memory
 You have access to Engram persistent memory via MCP tools (mem_save, mem_search, mem_session_summary, etc.).
@@ -737,6 +830,8 @@ When using `engram setup`, config files are written to platform-appropriate loca
 | Gemini CLI | `~/.gemini/` | `%APPDATA%\gemini\` |
 | Codex | `~/.codex/` | `%APPDATA%\codex\` |
 | Claude Code | Managed by `claude` CLI | Managed by `claude` CLI |
+| VS Code | `.vscode/mcp.json` (workspace) | `.vscode\mcp.json` (workspace) |
+| Antigravity | `.vscode/mcp.json` (workspace) | `.vscode\mcp.json` (workspace) |
 | Data directory | `~/.engram/` | `%USERPROFILE%\.engram\` |
 
 ## License

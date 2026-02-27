@@ -78,6 +78,7 @@ var claudeCodeMCPTools = []string{
 	"mcp__plugin_engram_engram__mem_suggest_topic_key",
 	"mcp__plugin_engram_engram__mem_update",
 }
+
 const codexEngramBlock = "[mcp_servers.engram]\ncommand = \"engram\"\nargs = [\"mcp\", \"--tools=agent\"]"
 
 const memoryProtocolMarkdown = `## Engram Persistent Memory — Protocol
@@ -97,11 +98,20 @@ Call mem_save IMMEDIATELY after any of these:
 Format for mem_save:
 - **title**: Verb + what — short, searchable (e.g. "Fixed N+1 query in UserList", "Chose Zustand over Redux")
 - **type**: bugfix | decision | architecture | discovery | pattern | config | preference
+- **scope**: project (default) | personal
+- **topic_key** (optional, recommended for evolving decisions): stable key like architecture/auth-model
 - **content**:
   **What**: One sentence — what was done
   **Why**: What motivated it (user request, bug, performance, etc.)
   **Where**: Files or paths affected
   **Learned**: Gotchas, edge cases, things that surprised you (omit if none)
+
+### Topic update rules (mandatory)
+
+- Different topics must not overwrite each other (e.g. architecture vs bugfix)
+- Reuse the same topic_key to update an evolving topic instead of creating new observations
+- If unsure about the key, call mem_suggest_topic_key first and then reuse it
+- Use mem_update when you have an exact observation ID to correct
 
 ### WHEN TO SEARCH MEMORY
 
