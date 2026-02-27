@@ -1378,6 +1378,100 @@ func TestHandleSaveCreatesProjectScopedSession(t *testing.T) {
 	}
 }
 
+func TestHandleSavePromptCreatesProjectScopedSession(t *testing.T) {
+	s := newMCPTestStore(t)
+	h := handleSavePrompt(s)
+
+	reqA := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"content": "How do I set up auth?",
+		"project": "alpha",
+	}}}
+	resA, err := h(context.Background(), reqA)
+	if err != nil || resA.IsError {
+		t.Fatalf("save prompt A: err=%v isError=%v", err, resA.IsError)
+	}
+
+	reqB := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"content": "How do I deploy?",
+		"project": "beta",
+	}}}
+	resB, err := h(context.Background(), reqB)
+	if err != nil || resB.IsError {
+		t.Fatalf("save prompt B: err=%v isError=%v", err, resB.IsError)
+	}
+
+	if _, err := s.GetSession("manual-save-alpha"); err != nil {
+		t.Fatalf("expected session manual-save-alpha: %v", err)
+	}
+	if _, err := s.GetSession("manual-save-beta"); err != nil {
+		t.Fatalf("expected session manual-save-beta: %v", err)
+	}
+}
+
+func TestHandleSessionSummaryCreatesProjectScopedSession(t *testing.T) {
+	s := newMCPTestStore(t)
+	h := handleSessionSummary(s)
+
+	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"content": "Worked on auth module",
+		"project": "gamma",
+	}}}
+	res, err := h(context.Background(), req)
+	if err != nil || res.IsError {
+		t.Fatalf("session summary: err=%v isError=%v", err, res.IsError)
+	}
+
+	if _, err := s.GetSession("manual-save-gamma"); err != nil {
+		t.Fatalf("expected session manual-save-gamma: %v", err)
+	}
+}
+
+func TestHandleCapturePassiveCreatesProjectScopedSession(t *testing.T) {
+	s := newMCPTestStore(t)
+	h := handleCapturePassive(s)
+
+	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"content": "## Key Learnings:\nAuth needs rate limiting",
+		"project": "delta",
+	}}}
+	res, err := h(context.Background(), req)
+	if err != nil || res.IsError {
+		t.Fatalf("capture passive: err=%v isError=%v text=%s", err, res.IsError, callResultText(t, res))
+	}
+
+	if _, err := s.GetSession("manual-save-delta"); err != nil {
+		t.Fatalf("expected session manual-save-delta: %v", err)
+	}
+}
+
+func TestExplicitSessionIDBypassesDefault(t *testing.T) {
+	s := newMCPTestStore(t)
+	h := handleSave(s)
+
+	// Provide explicit session_id — should NOT use defaultSessionID
+	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":      "Explicit session test",
+		"content":    "Testing explicit session ID",
+		"type":       "discovery",
+		"project":    "myproject",
+		"session_id": "custom-session-123",
+	}}}
+	res, err := h(context.Background(), req)
+	if err != nil || res.IsError {
+		t.Fatalf("save: err=%v isError=%v", err, res.IsError)
+	}
+
+	// Should use the explicit session, NOT "manual-save-myproject"
+	if _, err := s.GetSession("custom-session-123"); err != nil {
+		t.Fatalf("expected custom-session-123: %v", err)
+	}
+	// The default session should NOT exist
+	_, err = s.GetSession("manual-save-myproject")
+	if err == nil {
+		t.Fatal("manual-save-myproject should NOT exist when explicit session_id provided")
+	}
+}
+
 func TestDestructiveToolAnnotation(t *testing.T) {
 	s := newMCPTestStore(t)
 	srv := NewServer(s)

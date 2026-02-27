@@ -2495,3 +2495,65 @@ func TestCreateSessionDoesNotOverwriteExistingProject(t *testing.T) {
 		t.Fatalf("expected directory=/tmp/a (preserved), got %q", sess.Directory)
 	}
 }
+
+func TestCreateSessionPartialUpsert(t *testing.T) {
+	s := newTestStore(t)
+
+	t.Run("fills directory when project already set", func(t *testing.T) {
+		if err := s.CreateSession("sess-partial-1", "myproject", ""); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		// Second call fills directory but project stays
+		if err := s.CreateSession("sess-partial-1", "other", "/new/dir"); err != nil {
+			t.Fatalf("upsert: %v", err)
+		}
+		sess, err := s.GetSession("sess-partial-1")
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		if sess.Project != "myproject" {
+			t.Fatalf("project should be preserved, got %q", sess.Project)
+		}
+		if sess.Directory != "/new/dir" {
+			t.Fatalf("directory should be filled, got %q", sess.Directory)
+		}
+	})
+
+	t.Run("fills project when directory already set", func(t *testing.T) {
+		if err := s.CreateSession("sess-partial-2", "", "/existing/dir"); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		if err := s.CreateSession("sess-partial-2", "newproject", ""); err != nil {
+			t.Fatalf("upsert: %v", err)
+		}
+		sess, err := s.GetSession("sess-partial-2")
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		if sess.Project != "newproject" {
+			t.Fatalf("project should be filled, got %q", sess.Project)
+		}
+		if sess.Directory != "/existing/dir" {
+			t.Fatalf("directory should be preserved, got %q", sess.Directory)
+		}
+	})
+
+	t.Run("both empty stays empty", func(t *testing.T) {
+		if err := s.CreateSession("sess-partial-3", "", ""); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		if err := s.CreateSession("sess-partial-3", "", ""); err != nil {
+			t.Fatalf("upsert: %v", err)
+		}
+		sess, err := s.GetSession("sess-partial-3")
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		if sess.Project != "" {
+			t.Fatalf("project should stay empty, got %q", sess.Project)
+		}
+		if sess.Directory != "" {
+			t.Fatalf("directory should stay empty, got %q", sess.Directory)
+		}
+	})
+}
