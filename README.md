@@ -75,6 +75,10 @@ git clone https://github.com/Gentleman-Programming/engram.git
 cd engram
 go install ./cmd/engram
 # Binary goes to %GOPATH%\bin\engram.exe (typically %USERPROFILE%\go\bin\)
+
+# Optional: build with version stamp (otherwise `engram version` shows "dev")
+$v = git describe --tags --always
+go build -ldflags="-X main.version=local-$v" -o engram.exe ./cmd/engram
 ```
 
 > **Windows notes:**
@@ -89,6 +93,9 @@ go install ./cmd/engram
 git clone https://github.com/Gentleman-Programming/engram.git
 cd engram
 go install ./cmd/engram
+
+# Optional: build with version stamp (otherwise `engram version` shows "dev")
+go build -ldflags="-X main.version=local-$(git describe --tags --always)" -o engram ./cmd/engram
 ```
 
 ### Download binary (all platforms)
