@@ -15,6 +15,7 @@ func resetSetupSeams(t *testing.T) {
 	oldUserHomeDir := userHomeDir
 	oldLookPathFn := lookPathFn
 	oldRunCommand := runCommand
+	oldStatFn := statFn
 	oldOpenCodeReadFile := openCodeReadFile
 	oldOpenCodeWriteFileFn := openCodeWriteFileFn
 	oldReadFileFn := readFileFn
@@ -35,6 +36,7 @@ func resetSetupSeams(t *testing.T) {
 		userHomeDir = oldUserHomeDir
 		lookPathFn = oldLookPathFn
 		runCommand = oldRunCommand
+		statFn = oldStatFn
 		openCodeReadFile = oldOpenCodeReadFile
 		openCodeWriteFileFn = oldOpenCodeWriteFileFn
 		readFileFn = oldReadFileFn
@@ -1656,4 +1658,121 @@ func TestAddClaudeCodeAllowlist(t *testing.T) {
 			t.Fatalf("expected %q, got %q", expected, got)
 		}
 	})
+}
+
+// ─── Issue #18: opencode.jsonc regression tests ─────────────────────────────
+
+func TestStripJSONC(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"no comments", `{"key":"value"}`, `{"key":"value"}`},
+		{"single line comment", "{\n// comment\n\"key\":\"value\"}", "{\n\n\"key\":\"value\"}"},
+		{"multi line comment", "{/* block */\"key\":\"value\"}", "{\"key\":\"value\"}"},
+		{"comment inside string preserved", `{"key":"val // not a comment"}`, `{"key":"val // not a comment"}`},
+		{"escaped quote in string", `{"key":"val\"ue"}`, `{"key":"val\"ue"}`},
+		{"trailing single-line comment", "{\"key\":\"value\" // inline\n}", "{\"key\":\"value\" \n}"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := string(stripJSONC([]byte(tt.input)))
+			if got != tt.want {
+				t.Fatalf("stripJSONC(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestOpenCodeConfigPathPrefersJSONC(t *testing.T) {
+	resetSetupSeams(t)
+	home := useTestHome(t)
+	runtimeGOOS = "linux"
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	// When .jsonc exists, return .jsonc path
+	statFn = func(name string) (os.FileInfo, error) {
+		if strings.HasSuffix(name, "opencode.jsonc") {
+			return nil, nil // exists
+		}
+		return nil, os.ErrNotExist
+	}
+
+	got := openCodeConfigPath()
+	expected := filepath.Join(home, ".config", "opencode", "opencode.jsonc")
+	if got != expected {
+		t.Fatalf("expected %s, got %s", expected, got)
+	}
+}
+
+func TestOpenCodeConfigPathFallsBackToJSON(t *testing.T) {
+	resetSetupSeams(t)
+	home := useTestHome(t)
+	runtimeGOOS = "linux"
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	// When .jsonc does NOT exist, return .json path
+	statFn = func(name string) (os.FileInfo, error) {
+		return nil, os.ErrNotExist
+	}
+
+	got := openCodeConfigPath()
+	expected := filepath.Join(home, ".config", "opencode", "opencode.json")
+	if got != expected {
+		t.Fatalf("expected %s, got %s", expected, got)
+	}
+}
+
+func TestInjectOpenCodeMCPHandlesJSONC(t *testing.T) {
+	resetSetupSeams(t)
+	home := useTestHome(t)
+	runtimeGOOS = "linux"
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	configDir := filepath.Join(home, ".config", "opencode")
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	// Create a .jsonc file with comments
+	jsoncPath := filepath.Join(configDir, "opencode.jsonc")
+	content := `{
+  // This is a comment
+  "theme": "kanagawa",
+  "mcp": {
+    /* existing server */
+    "other": {"type": "local", "command": ["foo"]}
+  }
+}`
+	if err := os.WriteFile(jsoncPath, []byte(content), 0644); err != nil {
+		t.Fatalf("write jsonc: %v", err)
+	}
+
+	// statFn should find the .jsonc file
+	statFn = os.Stat
+
+	if err := injectOpenCodeMCP(); err != nil {
+		t.Fatalf("injectOpenCodeMCP with JSONC failed: %v", err)
+	}
+
+	// Verify engram was added to the .jsonc file
+	raw, err := os.ReadFile(jsoncPath)
+	if err != nil {
+		t.Fatalf("read result: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("result should be valid JSON: %v", err)
+	}
+	mcp, ok := cfg["mcp"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected mcp object in result")
+	}
+	if _, ok := mcp["engram"]; !ok {
+		t.Fatalf("expected engram to be registered")
+	}
+	if _, ok := mcp["other"]; !ok {
+		t.Fatalf("expected existing 'other' entry to be preserved")
+	}
 }

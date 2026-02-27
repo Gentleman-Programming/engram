@@ -27,6 +27,7 @@ var (
 	openCodeReadFile = func(path string) ([]byte, error) {
 		return openCodeFS.ReadFile(path)
 	}
+	statFn                             = os.Stat
 	openCodeWriteFileFn                = os.WriteFile
 	readFileFn                         = os.ReadFile
 	writeFileFn                        = os.WriteFile
@@ -272,7 +273,8 @@ func injectOpenCodeMCP() error {
 			return fmt.Errorf("read config: %w", err)
 		}
 	} else {
-		if err := json.Unmarshal(data, &config); err != nil {
+		cleaned := stripJSONC(data)
+		if err := json.Unmarshal(cleaned, &config); err != nil {
 			return fmt.Errorf("parse config: %w", err)
 		}
 	}
@@ -317,31 +319,92 @@ func injectOpenCodeMCP() error {
 		return fmt.Errorf("marshal config: %w", err)
 	}
 
-	if err := os.WriteFile(configPath, output, 0644); err != nil {
+	if err := writeFileFn(configPath, output, 0644); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
 
 	return nil
 }
 
-// openCodeConfigPath returns the path to opencode.json.
+// openCodeConfigPath returns the path to the OpenCode config file.
+// It checks for opencode.jsonc first (preferred), then falls back to opencode.json.
 func openCodeConfigPath() string {
+	dir := openCodeConfigDir()
+	jsonc := filepath.Join(dir, "opencode.jsonc")
+	if _, err := statFn(jsonc); err == nil {
+		return jsonc
+	}
+	return filepath.Join(dir, "opencode.json")
+}
+
+// openCodeConfigDir returns the directory containing the OpenCode config.
+func openCodeConfigDir() string {
 	home, _ := userHomeDir()
 
 	switch runtimeGOOS {
 	case "darwin", "linux":
 		if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-			return filepath.Join(xdg, "opencode", "opencode.json")
+			return filepath.Join(xdg, "opencode")
 		}
-		return filepath.Join(home, ".config", "opencode", "opencode.json")
+		return filepath.Join(home, ".config", "opencode")
 	case "windows":
 		if appData := os.Getenv("APPDATA"); appData != "" {
-			return filepath.Join(appData, "opencode", "opencode.json")
+			return filepath.Join(appData, "opencode")
 		}
-		return filepath.Join(home, "AppData", "Roaming", "opencode", "opencode.json")
+		return filepath.Join(home, "AppData", "Roaming", "opencode")
 	default:
-		return filepath.Join(home, ".config", "opencode", "opencode.json")
+		return filepath.Join(home, ".config", "opencode")
 	}
+}
+
+// stripJSONC removes single-line (//) and multi-line (/* */) comments
+// from JSONC content, returning valid JSON. Comments inside quoted strings
+// are preserved.
+func stripJSONC(data []byte) []byte {
+	var out []byte
+	i := 0
+	for i < len(data) {
+		// Handle strings — pass through verbatim
+		if data[i] == '"' {
+			out = append(out, data[i])
+			i++
+			for i < len(data) && data[i] != '"' {
+				if data[i] == '\\' && i+1 < len(data) {
+					out = append(out, data[i], data[i+1])
+					i += 2
+					continue
+				}
+				out = append(out, data[i])
+				i++
+			}
+			if i < len(data) {
+				out = append(out, data[i])
+				i++
+			}
+			continue
+		}
+		// Single-line comment
+		if i+1 < len(data) && data[i] == '/' && data[i+1] == '/' {
+			for i < len(data) && data[i] != '\n' {
+				i++
+			}
+			continue
+		}
+		// Multi-line comment
+		if i+1 < len(data) && data[i] == '/' && data[i+1] == '*' {
+			i += 2
+			for i+1 < len(data) && !(data[i] == '*' && data[i+1] == '/') {
+				i++
+			}
+			if i+1 < len(data) {
+				i += 2
+			}
+			continue
+		}
+		out = append(out, data[i])
+		i++
+	}
+	return out
 }
 
 // ─── Claude Code ─────────────────────────────────────────────────────────────
