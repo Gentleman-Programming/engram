@@ -1674,6 +1674,12 @@ func TestStripJSONC(t *testing.T) {
 		{"comment inside string preserved", `{"key":"val // not a comment"}`, `{"key":"val // not a comment"}`},
 		{"escaped quote in string", `{"key":"val\"ue"}`, `{"key":"val\"ue"}`},
 		{"trailing single-line comment", "{\"key\":\"value\" // inline\n}", "{\"key\":\"value\" \n}"},
+		{"empty input", "", ""},
+		{"only comments", "// nothing here\n/* also nothing */", "\n"},
+		{"comment at EOF without newline", "{\"a\":1}// trailing", "{\"a\":1}"},
+		{"unterminated multi-line comment", "{\"a\":1}/* never closed", "{\"a\":1}"},
+		{"block comment with stars", "{/* ** fancy ** */\"a\":1}", "{\"a\":1}"},
+		{"multi-line block comment preserves newlines", "{\n/* line1\nline2 */\n\"a\":1}", "{\n\n\"a\":1}"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1719,6 +1725,46 @@ func TestOpenCodeConfigPathFallsBackToJSON(t *testing.T) {
 
 	got := openCodeConfigPath()
 	expected := filepath.Join(home, ".config", "opencode", "opencode.json")
+	if got != expected {
+		t.Fatalf("expected %s, got %s", expected, got)
+	}
+}
+
+func TestOpenCodeConfigPathXDGWithJSONC(t *testing.T) {
+	resetSetupSeams(t)
+	_ = useTestHome(t)
+	runtimeGOOS = "linux"
+	t.Setenv("XDG_CONFIG_HOME", "/custom/xdg")
+
+	statFn = func(name string) (os.FileInfo, error) {
+		if strings.HasSuffix(name, "opencode.jsonc") {
+			return nil, nil
+		}
+		return nil, os.ErrNotExist
+	}
+
+	got := openCodeConfigPath()
+	expected := filepath.Join("/custom/xdg", "opencode", "opencode.jsonc")
+	if got != expected {
+		t.Fatalf("expected %s, got %s", expected, got)
+	}
+}
+
+func TestOpenCodeConfigPathWindowsWithJSONC(t *testing.T) {
+	resetSetupSeams(t)
+	_ = useTestHome(t)
+	runtimeGOOS = "windows"
+	t.Setenv("APPDATA", "C:/Users/test/AppData/Roaming")
+
+	statFn = func(name string) (os.FileInfo, error) {
+		if strings.HasSuffix(name, "opencode.jsonc") {
+			return nil, nil
+		}
+		return nil, os.ErrNotExist
+	}
+
+	got := openCodeConfigPath()
+	expected := filepath.Join("C:/Users/test/AppData/Roaming", "opencode", "opencode.jsonc")
 	if got != expected {
 		t.Fatalf("expected %s, got %s", expected, got)
 	}

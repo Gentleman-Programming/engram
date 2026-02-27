@@ -397,7 +397,9 @@ func stripJSONC(data []byte) []byte {
 				i++
 			}
 			if i+1 < len(data) {
-				i += 2
+				i += 2 // skip past */
+			} else {
+				i = len(data) // unterminated: consume everything
 			}
 			continue
 		}
