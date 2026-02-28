@@ -399,7 +399,10 @@ Add to `.vscode/mcp.json` in your project:
 
 1. Open Command Palette (`Cmd+Shift+P` / `Ctrl+Shift+P`)
 2. Run **MCP: Open User Configuration**
-3. Add the same `engram` server entry above
+3. Add the same `engram` server entry above to VS Code User `mcp.json`:
+   - macOS: `~/Library/Application Support/Code/User/mcp.json`
+   - Linux: `~/.config/Code/User/mcp.json`
+   - Windows: `%APPDATA%\Code\User\mcp.json`
 
 **Option C: CLI one-liner:**
 
@@ -415,7 +418,12 @@ code --add-mcp "{\"name\":\"engram\",\"command\":\"engram\",\"args\":[\"mcp\"]}"
 
 Without the Memory Protocol, the agent has the tools but doesn't know WHEN to use them. Add these instructions to your agent's prompt:
 
-**For Copilot:** Create or edit `.github/copilot-instructions.md` in your project and paste the Memory Protocol from [DOCS.md](DOCS.md#memory-protocol-full-text).
+**For Copilot:** Create a `.instructions.md` file in the VS Code User `prompts/` folder and paste the Memory Protocol from [DOCS.md](DOCS.md#memory-protocol-full-text).
+
+Recommended file path:
+- macOS: `~/Library/Application Support/Code/User/prompts/engram-memory.instructions.md`
+- Linux: `~/.config/Code/User/prompts/engram-memory.instructions.md`
+- Windows: `%APPDATA%\Code\User\prompts\engram-memory.instructions.md`
 
 **For any VS Code chat extension:** Add the Memory Protocol text to your extension's custom instructions or system prompt configuration.
 
@@ -516,7 +524,7 @@ You have access to Engram persistent memory via MCP tools (mem_save, mem_search,
 - After any compaction or context reset, call `mem_context` to recover session state before continuing.
 ```
 
-**For VS Code** (`.github/copilot-instructions.md` or custom instructions):
+**For VS Code** (`Code/User/prompts/*.instructions.md` or custom instructions):
 ```markdown
 ## Memory
 You have access to Engram persistent memory via MCP tools (mem_save, mem_search, mem_session_summary, etc.).
@@ -840,7 +848,7 @@ When using `engram setup`, config files are written to platform-appropriate loca
 | Gemini CLI | `~/.gemini/` | `%APPDATA%\gemini\` |
 | Codex | `~/.codex/` | `%APPDATA%\codex\` |
 | Claude Code | Managed by `claude` CLI | Managed by `claude` CLI |
-| VS Code | `.vscode/mcp.json` (workspace) | `.vscode\mcp.json` (workspace) |
+| VS Code | `.vscode/mcp.json` (workspace) or `~/Library/Application Support/Code/User/mcp.json` (user) | `.vscode\mcp.json` (workspace) or `%APPDATA%\Code\User\mcp.json` (user) |
 | Antigravity | `~/.gemini/antigravity/mcp_config.json` | `%USERPROFILE%\.gemini\antigravity\mcp_config.json` |
 | Data directory | `~/.engram/` | `%USERPROFILE%\.engram\` |
 
