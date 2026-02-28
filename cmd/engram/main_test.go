@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/alanbuscaglia/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/internal/store"
 )
 
 func testConfig(t *testing.T) store.Config {

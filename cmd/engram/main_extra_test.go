@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
-	engramsrv "github.com/alanbuscaglia/engram/internal/server"
-	"github.com/alanbuscaglia/engram/internal/setup"
-	"github.com/alanbuscaglia/engram/internal/store"
-	engramsync "github.com/alanbuscaglia/engram/internal/sync"
-	"github.com/alanbuscaglia/engram/internal/tui"
+	engramsrv "github.com/Gentleman-Programming/engram/internal/server"
+	"github.com/Gentleman-Programming/engram/internal/setup"
+	"github.com/Gentleman-Programming/engram/internal/store"
+	engramsync "github.com/Gentleman-Programming/engram/internal/sync"
+	"github.com/Gentleman-Programming/engram/internal/tui"
 
 	tea "github.com/charmbracelet/bubbletea"
 	mcpserver "github.com/mark3labs/mcp-go/server"

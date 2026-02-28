@@ -18,7 +18,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/alanbuscaglia/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/internal/store"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )

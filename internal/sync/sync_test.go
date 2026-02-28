@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alanbuscaglia/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/internal/store"
 )
 
 func newTestStore(t *testing.T) *store.Store {

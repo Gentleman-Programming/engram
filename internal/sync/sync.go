@@ -31,7 +31,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/alanbuscaglia/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/internal/store"
 )
 
 var (

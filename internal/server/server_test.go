@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/alanbuscaglia/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/internal/store"
 )
 
 type stubListener struct{}

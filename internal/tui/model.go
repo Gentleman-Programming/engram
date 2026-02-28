@@ -10,8 +10,8 @@
 package tui
 
 import (
-	"github.com/alanbuscaglia/engram/internal/setup"
-	"github.com/alanbuscaglia/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/internal/setup"
+	"github.com/Gentleman-Programming/engram/internal/store"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"

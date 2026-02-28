@@ -13,7 +13,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/alanbuscaglia/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/internal/store"
 )
 
 var loadServerStats = func(s *store.Store) (*store.Stats, error) {
