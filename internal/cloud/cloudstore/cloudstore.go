@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -484,6 +485,9 @@ func (cs *CloudStore) GetObservation(userID string, id int64) (*CloudObservation
 		&o.CreatedAt, &o.UpdatedAt, &o.DeletedAt,
 	)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("cloudstore: get observation: %w", ErrNotFound)
+		}
 		return nil, fmt.Errorf("cloudstore: get observation: %w", err)
 	}
 	return &o, nil
@@ -634,6 +638,9 @@ func (cs *CloudStore) GetPrompt(userID string, id int64) (*CloudPrompt, error) {
 		id, userID,
 	).Scan(&p.ID, &p.UserID, &p.SessionID, &p.Content, &p.Project, &p.CreatedAt)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("cloudstore: get prompt: %w", ErrNotFound)
+		}
 		return nil, fmt.Errorf("cloudstore: get prompt: %w", err)
 	}
 	return &p, nil
@@ -663,6 +670,9 @@ func (cs *CloudStore) GetChunk(userID, chunkID string) ([]byte, error) {
 		userID, chunkID,
 	).Scan(&data)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("cloudstore: get chunk: %w", ErrNotFound)
+		}
 		return nil, fmt.Errorf("cloudstore: get chunk: %w", err)
 	}
 	return data, nil

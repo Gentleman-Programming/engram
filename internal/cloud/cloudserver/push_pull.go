@@ -1,7 +1,6 @@
 package cloudserver
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -273,15 +272,7 @@ func (s *CloudServer) handlePullChunk(w http.ResponseWriter, r *http.Request) {
 
 	data, err := s.store.GetChunk(userID, chunkID)
 	if err != nil {
-		if isDBConnectionError(err) {
-			jsonError(w, http.StatusServiceUnavailable, "database unavailable")
-			return
-		}
-		if errors.Is(err, sql.ErrNoRows) || data == nil {
-			jsonError(w, http.StatusNotFound, "chunk not found")
-			return
-		}
-		jsonError(w, http.StatusNotFound, "chunk not found")
+		writeStoreError(w, err, "failed to fetch chunk")
 		return
 	}
 

@@ -10,6 +10,9 @@ import (
 
 var ErrProjectSyncPaused = errors.New("cloudstore: project sync paused")
 
+// ErrNotFound is returned when a requested resource does not exist in the store.
+var ErrNotFound = errors.New("cloudstore: not found")
+
 type ProjectSyncControl struct {
 	Project      string  `json:"project"`
 	SyncEnabled  bool    `json:"sync_enabled"`
