@@ -26,23 +26,39 @@ func validateRegisterRequest(username, email, password string) error {
 		return fmt.Errorf("username must be at most %d characters", maxUsernameLen)
 	}
 	for _, r := range username {
-		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' && r != '-' {
-			return fmt.Errorf("username may only contain letters, digits, underscores, and hyphens")
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' && r != '-' && r != '.' {
+			return fmt.Errorf("username may only contain letters, digits, underscores, hyphens, and dots")
 		}
 	}
 
-	// Email — basic structure check: must have exactly one @, and a dot after it
+	// Email — basic structure check: must have @ with content before it.
+	// The domain check only requires a dot when the domain has more than one
+	// segment, so user@localhost is accepted for local/dev environments.
 	atIdx := strings.Index(email, "@")
 	if atIdx < 1 {
 		return fmt.Errorf("email must contain an @ sign")
 	}
 	domain := email[atIdx+1:]
-	if !strings.Contains(domain, ".") || strings.HasPrefix(domain, ".") || strings.HasSuffix(domain, ".") {
+	if domain == "" {
 		return fmt.Errorf("email domain is invalid")
 	}
+	if strings.HasPrefix(domain, ".") || strings.HasSuffix(domain, ".") {
+		return fmt.Errorf("email domain is invalid")
+	}
+	// If the domain contains a dot, it must not be empty on either side.
+	if dotIdx := strings.Index(domain, "."); dotIdx != -1 {
+		if dotIdx == 0 || dotIdx == len(domain)-1 {
+			return fmt.Errorf("email domain is invalid")
+		}
+	}
 
-	// Password length — mirrors the 8-char floor in auth.ErrWeakPassword,
-	// but we add an upper bound to guard against bcrypt cost explosion (>72 bytes).
+	// Password length — defense in depth alongside auth.ErrWeakPassword.
+	// Minimum mirrors the 8-char floor enforced by the auth layer.
+	// Maximum guards against bcrypt silently truncating passwords longer
+	// than 72 bytes, which would make them weaker than the user expects.
+	if len(password) < 8 {
+		return fmt.Errorf("password must be at least 8 characters")
+	}
 	if len(password) > 72 {
 		return fmt.Errorf("password must be at most 72 characters")
 	}

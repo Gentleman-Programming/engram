@@ -26,6 +26,36 @@ func TestValidateRegisterRequest(t *testing.T) {
 			email:    "jane@example.com",
 			password: "supersecret",
 		},
+		{
+			name:     "username with dot",
+			username: "alan.b",
+			email:    "alan@example.com",
+			password: "supersecret",
+		},
+		{
+			name:     "username with unicode letters",
+			username: "señor_dev",
+			email:    "senor@example.com",
+			password: "supersecret",
+		},
+		{
+			name:     "email with localhost domain",
+			username: "janedoe",
+			email:    "jane@localhost",
+			password: "supersecret",
+		},
+		{
+			name:     "password exactly 8 chars is valid",
+			username: "janedoe",
+			email:    "jane@example.com",
+			password: "12345678",
+		},
+		{
+			name:     "password exactly 72 chars is valid",
+			username: "janedoe",
+			email:    "jane@example.com",
+			password: strings.Repeat("a", 72),
+		},
 		// Username
 		{
 			name:     "username too short",
@@ -49,7 +79,7 @@ func TestValidateRegisterRequest(t *testing.T) {
 			wantErr:  "username may only contain",
 		},
 		{
-			name:     "username with special chars",
+			name:     "username with @ sign",
 			username: "jane@doe",
 			email:    "jane@example.com",
 			password: "supersecret",
@@ -71,13 +101,6 @@ func TestValidateRegisterRequest(t *testing.T) {
 			wantErr:  "email must contain an @",
 		},
 		{
-			name:     "email domain no dot",
-			username: "janedoe",
-			email:    "jane@localhost",
-			password: "supersecret",
-			wantErr:  "email domain is invalid",
-		},
-		{
 			name:     "email domain starts with dot",
 			username: "janedoe",
 			email:    "jane@.example.com",
@@ -93,17 +116,18 @@ func TestValidateRegisterRequest(t *testing.T) {
 		},
 		// Password
 		{
+			name:     "password too short",
+			username: "janedoe",
+			email:    "jane@example.com",
+			password: "1234567",
+			wantErr:  "password must be at least 8",
+		},
+		{
 			name:     "password over 72 chars",
 			username: "janedoe",
 			email:    "jane@example.com",
 			password: strings.Repeat("a", 73),
 			wantErr:  "password must be at most 72",
-		},
-		{
-			name:     "password exactly 72 chars is valid",
-			username: "janedoe",
-			email:    "jane@example.com",
-			password: strings.Repeat("a", 72),
 		},
 	}
 
