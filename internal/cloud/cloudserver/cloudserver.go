@@ -164,6 +164,10 @@ func (s *CloudServer) handleRegister(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, "username, email, and password are required")
 		return
 	}
+	if err := validateRegisterRequest(body.Username, body.Email, body.Password); err != nil {
+		jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	result, err := s.auth.Register(body.Username, body.Email, body.Password)
 	if err != nil {
@@ -302,12 +306,17 @@ func (s *CloudServer) handleSearch(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, "q parameter is required")
 		return
 	}
+	limit := queryInt(r, "limit", 10)
+	if err := validateSearchParams(query, limit); err != nil {
+		jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	results, err := s.store.Search(userID, query, cloudstore.CloudSearchOptions{
 		Type:    r.URL.Query().Get("type"),
 		Project: r.URL.Query().Get("project"),
 		Scope:   r.URL.Query().Get("scope"),
-		Limit:   queryInt(r, "limit", 10),
+		Limit:   limit,
 	})
 	if err != nil {
 		writeStoreError(w, err, err.Error())
