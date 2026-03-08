@@ -224,6 +224,9 @@ func (cs *CloudStore) GetUserByUsername(username string) (*CloudUser, error) {
 		username,
 	).Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.APIKeyHash, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("cloudstore: get user by username: %w", ErrNotFound)
+		}
 		return nil, fmt.Errorf("cloudstore: get user by username: %w", err)
 	}
 	return &u, nil
@@ -238,6 +241,9 @@ func (cs *CloudStore) GetUserByEmail(email string) (*CloudUser, error) {
 		email,
 	).Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.APIKeyHash, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("cloudstore: get user by email: %w", ErrNotFound)
+		}
 		return nil, fmt.Errorf("cloudstore: get user by email: %w", err)
 	}
 	return &u, nil
@@ -252,6 +258,9 @@ func (cs *CloudStore) GetUserByAPIKeyHash(hash string) (*CloudUser, error) {
 		hash,
 	).Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.APIKeyHash, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("cloudstore: get user by api key hash: %w", ErrNotFound)
+		}
 		return nil, fmt.Errorf("cloudstore: get user by api key hash: %w", err)
 	}
 	return &u, nil
@@ -266,6 +275,9 @@ func (cs *CloudStore) GetUserByID(userID string) (*CloudUser, error) {
 		userID,
 	).Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.APIKeyHash, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("cloudstore: get user by id: %w", ErrNotFound)
+		}
 		return nil, fmt.Errorf("cloudstore: get user by id: %w", err)
 	}
 	return &u, nil
@@ -372,6 +384,9 @@ func (cs *CloudStore) GetSession(userID, sessionID string) (*CloudSession, error
 		sessionID, userID,
 	).Scan(&s.ID, &s.UserID, &s.Project, &s.Directory, &s.StartedAt, &s.EndedAt, &s.Summary)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("cloudstore: get session: %w", ErrNotFound)
+		}
 		return nil, fmt.Errorf("cloudstore: get session: %w", err)
 	}
 	return &s, nil
