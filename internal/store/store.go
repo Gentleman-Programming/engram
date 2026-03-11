@@ -46,6 +46,7 @@ type Observation struct {
 	Project        *string `json:"project,omitempty"`
 	Scope          string  `json:"scope"`
 	TopicKey       *string `json:"topic_key,omitempty"`
+	Author         string  `json:"author,omitempty"`
 	RevisionCount  int     `json:"revision_count"`
 	DuplicateCount int     `json:"duplicate_count"`
 	LastSeenAt     *string `json:"last_seen_at,omitempty"`
@@ -85,6 +86,7 @@ type TimelineEntry struct {
 	Project        *string `json:"project,omitempty"`
 	Scope          string  `json:"scope"`
 	TopicKey       *string `json:"topic_key,omitempty"`
+	Author         string  `json:"author,omitempty"`
 	RevisionCount  int     `json:"revision_count"`
 	DuplicateCount int     `json:"duplicate_count"`
 	LastSeenAt     *string `json:"last_seen_at,omitempty"`
@@ -187,6 +189,7 @@ type SyncMutation struct {
 	Payload    string  `json:"payload"`
 	Source     string  `json:"source"`
 	Project    string  `json:"project"`
+	Author     string  `json:"author,omitempty"`
 	OccurredAt string  `json:"occurred_at"`
 	AckedAt    *string `json:"acked_at,omitempty"`
 }
@@ -215,6 +218,7 @@ type syncObservationPayload struct {
 	Project    *string `json:"project,omitempty"`
 	Scope      string  `json:"scope"`
 	TopicKey   *string `json:"topic_key,omitempty"`
+	Author     string  `json:"author,omitempty"`
 	Deleted    bool    `json:"deleted,omitempty"`
 	DeletedAt  *string `json:"deleted_at,omitempty"`
 	HardDelete bool    `json:"hard_delete,omitempty"`
@@ -553,6 +557,7 @@ func (s *Store) migrate() error {
 		{name: "last_seen_at", definition: "TEXT"},
 		{name: "updated_at", definition: "TEXT NOT NULL DEFAULT ''"},
 		{name: "deleted_at", definition: "TEXT"},
+		{name: "author", definition: "TEXT NOT NULL DEFAULT ''"},
 	}
 	for _, c := range observationColumns {
 		if err := s.addColumnIfNotExists("observations", c.name, c.definition); err != nil {
@@ -845,7 +850,7 @@ func (s *Store) AllObservations(project, scope string, limit int) ([]Observation
 
 	query := `
 		SELECT o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
-		       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.created_at, o.updated_at, o.deleted_at
+		       o.scope, o.topic_key, ifnull(o.author, '') as author, o.revision_count, o.duplicate_count, o.last_seen_at, o.created_at, o.updated_at, o.deleted_at
 		FROM observations o
 		WHERE o.deleted_at IS NULL
 	`
@@ -874,7 +879,7 @@ func (s *Store) SessionObservations(sessionID string, limit int) ([]Observation,
 
 	query := `
 		SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
-		       scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
+		       scope, topic_key, ifnull(author, '') as author, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
 		FROM observations
 		WHERE session_id = ? AND deleted_at IS NULL
 		ORDER BY created_at ASC
@@ -1017,7 +1022,7 @@ func (s *Store) RecentObservations(project, scope string, limit int) ([]Observat
 
 	query := `
 		SELECT o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
-		       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.created_at, o.updated_at, o.deleted_at
+		       o.scope, o.topic_key, ifnull(o.author, '') as author, o.revision_count, o.duplicate_count, o.last_seen_at, o.created_at, o.updated_at, o.deleted_at
 		FROM observations o
 		WHERE o.deleted_at IS NULL
 	`
@@ -1151,13 +1156,13 @@ func (s *Store) SearchPrompts(query string, project string, limit int) ([]Prompt
 func (s *Store) GetObservation(id int64) (*Observation, error) {
 	row := s.db.QueryRow(
 		`SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
-		        scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
+		        scope, topic_key, ifnull(author, '') as author, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
 		 FROM observations WHERE id = ? AND deleted_at IS NULL`, id,
 	)
 	var o Observation
 	if err := row.Scan(
 		&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content,
-		&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt,
+		&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.Author, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt,
 		&o.CreatedAt, &o.UpdatedAt, &o.DeletedAt,
 	); err != nil {
 		return nil, err
@@ -1309,7 +1314,7 @@ func (s *Store) Timeline(observationID int64, before, after int) (*TimelineResul
 	// 3. Get observations BEFORE the focus (same session, older, chronological order)
 	beforeRows, err := s.queryItHook(s.db, `
 		SELECT id, session_id, type, title, content, tool_name, project,
-		       scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
+		       scope, topic_key, ifnull(author, '') as author, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
 		FROM observations
 		WHERE session_id = ? AND id < ? AND deleted_at IS NULL
 		ORDER BY id DESC
@@ -1325,7 +1330,7 @@ func (s *Store) Timeline(observationID int64, before, after int) (*TimelineResul
 		var e TimelineEntry
 		if err := beforeRows.Scan(
 			&e.ID, &e.SessionID, &e.Type, &e.Title, &e.Content,
-			&e.ToolName, &e.Project, &e.Scope, &e.TopicKey, &e.RevisionCount, &e.DuplicateCount, &e.LastSeenAt,
+			&e.ToolName, &e.Project, &e.Scope, &e.TopicKey, &e.Author, &e.RevisionCount, &e.DuplicateCount, &e.LastSeenAt,
 			&e.CreatedAt, &e.UpdatedAt, &e.DeletedAt,
 		); err != nil {
 			return nil, err
@@ -1343,7 +1348,7 @@ func (s *Store) Timeline(observationID int64, before, after int) (*TimelineResul
 	// 4. Get observations AFTER the focus (same session, newer, chronological order)
 	afterRows, err := s.queryItHook(s.db, `
 		SELECT id, session_id, type, title, content, tool_name, project,
-		       scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
+		       scope, topic_key, ifnull(author, '') as author, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
 		FROM observations
 		WHERE session_id = ? AND id > ? AND deleted_at IS NULL
 		ORDER BY id ASC
@@ -1359,7 +1364,7 @@ func (s *Store) Timeline(observationID int64, before, after int) (*TimelineResul
 		var e TimelineEntry
 		if err := afterRows.Scan(
 			&e.ID, &e.SessionID, &e.Type, &e.Title, &e.Content,
-			&e.ToolName, &e.Project, &e.Scope, &e.TopicKey, &e.RevisionCount, &e.DuplicateCount, &e.LastSeenAt,
+			&e.ToolName, &e.Project, &e.Scope, &e.TopicKey, &e.Author, &e.RevisionCount, &e.DuplicateCount, &e.LastSeenAt,
 			&e.CreatedAt, &e.UpdatedAt, &e.DeletedAt,
 		); err != nil {
 			return nil, err
@@ -1401,7 +1406,7 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 
 	sql := `
 		SELECT o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
-		       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.created_at, o.updated_at, o.deleted_at,
+		       o.scope, o.topic_key, ifnull(o.author, '') as author, o.revision_count, o.duplicate_count, o.last_seen_at, o.created_at, o.updated_at, o.deleted_at,
 		       fts.rank
 		FROM observations_fts fts
 		JOIN observations o ON o.id = fts.rowid
@@ -1438,7 +1443,7 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 		var sr SearchResult
 		if err := rows.Scan(
 			&sr.ID, &sr.SyncID, &sr.SessionID, &sr.Type, &sr.Title, &sr.Content,
-			&sr.ToolName, &sr.Project, &sr.Scope, &sr.TopicKey, &sr.RevisionCount, &sr.DuplicateCount,
+			&sr.ToolName, &sr.Project, &sr.Scope, &sr.TopicKey, &sr.Author, &sr.RevisionCount, &sr.DuplicateCount,
 			&sr.LastSeenAt, &sr.CreatedAt, &sr.UpdatedAt, &sr.DeletedAt,
 			&sr.Rank,
 		); err != nil {
@@ -1523,8 +1528,12 @@ func (s *Store) FormatContext(project, scope string) (string, error) {
 	if len(observations) > 0 {
 		b.WriteString("### Recent Observations\n")
 		for _, obs := range observations {
-			fmt.Fprintf(&b, "- [%s] **%s**: %s\n",
-				obs.Type, obs.Title, truncate(obs.Content, 300))
+			authorTag := ""
+			if obs.Author != "" {
+				authorTag = fmt.Sprintf(" (by %s)", obs.Author)
+			}
+			fmt.Fprintf(&b, "- [%s] **%s**%s: %s\n",
+				obs.Type, obs.Title, authorTag, truncate(obs.Content, 300))
 		}
 		b.WriteString("\n")
 	}
@@ -1562,7 +1571,7 @@ func (s *Store) Export() (*ExportData, error) {
 	// Observations
 	obsRows, err := s.queryItHook(s.db,
 		`SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
-		        scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
+		        scope, topic_key, ifnull(author, '') as author, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
 		 FROM observations ORDER BY id`,
 	)
 	if err != nil {
@@ -1573,7 +1582,7 @@ func (s *Store) Export() (*ExportData, error) {
 		var o Observation
 		if err := obsRows.Scan(
 			&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content,
-			&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt,
+			&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.Author, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt,
 			&o.CreatedAt, &o.UpdatedAt, &o.DeletedAt,
 		); err != nil {
 			return nil, err
@@ -1953,6 +1962,10 @@ func (s *Store) ApplyPulledMutation(targetKey string, mutation SyncMutation) err
 			if err := decodeSyncPayload([]byte(mutation.Payload), &payload); err != nil {
 				return err
 			}
+			// Propagate author from the mutation (set by team sync for cross-user observations).
+			if mutation.Author != "" && payload.Author == "" {
+				payload.Author = mutation.Author
+			}
 			if mutation.Op == SyncOpDelete {
 				if err := s.applyObservationDeleteTx(tx, payload); err != nil {
 					return err
@@ -1987,12 +2000,12 @@ func (s *Store) ApplyPulledMutation(targetKey string, mutation SyncMutation) err
 func (s *Store) GetObservationBySyncID(syncID string) (*Observation, error) {
 	row := s.db.QueryRow(
 		`SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
-		        scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
+		        scope, topic_key, ifnull(author, '') as author, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
 		 FROM observations WHERE sync_id = ? AND deleted_at IS NULL ORDER BY id DESC LIMIT 1`,
 		syncID,
 	)
 	var o Observation
-	if err := row.Scan(&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content, &o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt); err != nil {
+	if err := row.Scan(&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content, &o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.Author, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt); err != nil {
 		return nil, err
 	}
 	return &o, nil
@@ -2363,11 +2376,11 @@ func decodeSyncPayload(payload []byte, dest any) error {
 func (s *Store) getObservationTx(tx *sql.Tx, id int64) (*Observation, error) {
 	row := tx.QueryRow(
 		`SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
-		        scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
+		        scope, topic_key, ifnull(author, '') as author, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
 		 FROM observations WHERE id = ? AND deleted_at IS NULL`, id,
 	)
 	var o Observation
-	if err := row.Scan(&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content, &o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt); err != nil {
+	if err := row.Scan(&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content, &o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.Author, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt); err != nil {
 		return nil, err
 	}
 	return &o, nil
@@ -2375,7 +2388,7 @@ func (s *Store) getObservationTx(tx *sql.Tx, id int64) (*Observation, error) {
 
 func (s *Store) getObservationBySyncIDTx(tx *sql.Tx, syncID string, includeDeleted bool) (*Observation, error) {
 	query := `SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
-		        scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
+		        scope, topic_key, ifnull(author, '') as author, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
 		 FROM observations WHERE sync_id = ?`
 	if !includeDeleted {
 		query += ` AND deleted_at IS NULL`
@@ -2383,7 +2396,7 @@ func (s *Store) getObservationBySyncIDTx(tx *sql.Tx, syncID string, includeDelet
 	query += ` ORDER BY id DESC LIMIT 1`
 	row := tx.QueryRow(query, syncID)
 	var o Observation
-	if err := row.Scan(&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content, &o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt); err != nil {
+	if err := row.Scan(&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content, &o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.Author, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt); err != nil {
 		return nil, err
 	}
 	return &o, nil
@@ -2421,20 +2434,27 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 	existing, err := s.getObservationBySyncIDTx(tx, payload.SyncID, true)
 	if err == sql.ErrNoRows {
 		_, err = s.execHook(tx,
-			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, updated_at, deleted_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, datetime('now'), NULL)`,
-			payload.SyncID, payload.SessionID, payload.Type, payload.Title, payload.Content, payload.ToolName, payload.Project, normalizeScope(payload.Scope), payload.TopicKey, hashNormalized(payload.Content),
+			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, author, revision_count, duplicate_count, updated_at, deleted_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, datetime('now'), NULL)`,
+			payload.SyncID, payload.SessionID, payload.Type, payload.Title, payload.Content, payload.ToolName, payload.Project, normalizeScope(payload.Scope), payload.TopicKey, hashNormalized(payload.Content), payload.Author,
 		)
 		return err
 	}
 	if err != nil {
 		return err
 	}
+	// Preserve existing author if the incoming payload doesn't provide one.
+	// This prevents echo mutations (re-pushed by the local user) from clearing
+	// the author that was set by a cross-user team sync pull.
+	authorToUse := payload.Author
+	if authorToUse == "" && existing.Author != "" {
+		authorToUse = existing.Author
+	}
 	_, err = s.execHook(tx,
 		`UPDATE observations
-		 SET session_id = ?, type = ?, title = ?, content = ?, tool_name = ?, project = ?, scope = ?, topic_key = ?, normalized_hash = ?, revision_count = revision_count + 1, updated_at = datetime('now'), deleted_at = NULL
+		 SET session_id = ?, type = ?, title = ?, content = ?, tool_name = ?, project = ?, scope = ?, topic_key = ?, normalized_hash = ?, author = ?, revision_count = revision_count + 1, updated_at = datetime('now'), deleted_at = NULL
 		 WHERE id = ?`,
-		payload.SessionID, payload.Type, payload.Title, payload.Content, payload.ToolName, payload.Project, normalizeScope(payload.Scope), payload.TopicKey, hashNormalized(payload.Content), existing.ID,
+		payload.SessionID, payload.Type, payload.Title, payload.Content, payload.ToolName, payload.Project, normalizeScope(payload.Scope), payload.TopicKey, hashNormalized(payload.Content), authorToUse, existing.ID,
 	)
 	return err
 }
@@ -2495,7 +2515,7 @@ func (s *Store) queryObservations(query string, args ...any) ([]Observation, err
 		var o Observation
 		if err := rows.Scan(
 			&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content,
-			&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt,
+			&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.Author, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt,
 			&o.CreatedAt, &o.UpdatedAt, &o.DeletedAt,
 		); err != nil {
 			return nil, err
@@ -2590,6 +2610,7 @@ func (s *Store) migrateLegacyObservationsTable() error {
 			created_at TEXT    NOT NULL DEFAULT (datetime('now')),
 			updated_at TEXT    NOT NULL DEFAULT (datetime('now')),
 			deleted_at TEXT,
+			author     TEXT    NOT NULL DEFAULT '',
 			FOREIGN KEY (session_id) REFERENCES sessions(id)
 		);
 	`); err != nil {
@@ -2600,7 +2621,7 @@ func (s *Store) migrateLegacyObservationsTable() error {
 		INSERT INTO observations_migrated (
 			id, sync_id, session_id, type, title, content, tool_name, project,
 			scope, topic_key, normalized_hash, revision_count, duplicate_count,
-			last_seen_at, created_at, updated_at, deleted_at
+			last_seen_at, created_at, updated_at, deleted_at, author
 		)
 		SELECT
 			CASE
@@ -2623,7 +2644,8 @@ func (s *Store) migrateLegacyObservationsTable() error {
 			last_seen_at,
 			COALESCE(NULLIF(created_at, ''), datetime('now')),
 			COALESCE(NULLIF(updated_at, ''), NULLIF(created_at, ''), datetime('now')),
-			deleted_at
+			deleted_at,
+			COALESCE(NULLIF(author, ''), '')
 		FROM observations
 		ORDER BY rowid;
 	`); err != nil {

@@ -1030,6 +1030,7 @@ func (cs *CloudStore) UserProjects(userID string) ([]string, error) {
 type CloudMutation struct {
 	Seq        int64           `json:"seq"`
 	UserID     string          `json:"user_id"`
+	Author     string          `json:"author,omitempty"`
 	Entity     string          `json:"entity"`
 	EntityKey  string          `json:"entity_key"`
 	Op         string          `json:"op"`

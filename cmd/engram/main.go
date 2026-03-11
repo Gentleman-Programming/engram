@@ -215,12 +215,15 @@ func tryStartAutosync(s *store.Store, dataDir string) (*autosync.Manager, contex
 		return nil, nil
 	}
 
-	// Configure token refresh if available.
-	if cc, err := loadCloudConfig(dataDir); err == nil && cc != nil && cc.ServerURL == serverURL && cc.RefreshToken != "" {
-		rt.SetTokenRefresher(cc.RefreshToken, func(newToken string) error {
-			cc.Token = newToken
-			return saveCloudConfig(dataDir, cc)
-		})
+	// Configure token refresh and team sync if available.
+	if cc, err := loadCloudConfig(dataDir); err == nil && cc != nil && cc.ServerURL == serverURL {
+		if cc.RefreshToken != "" {
+			rt.SetTokenRefresher(cc.RefreshToken, func(newToken string) error {
+				cc.Token = newToken
+				return saveCloudConfig(dataDir, cc)
+			})
+		}
+		rt.SetTeamSync(cc.IsTeamSyncEnabled())
 	}
 
 	cfg := autosyncDefaultCg()
@@ -1018,6 +1021,19 @@ type CloudConfig struct {
 	RefreshToken string `json:"refresh_token,omitempty"`
 	UserID       string `json:"user_id"`
 	Username     string `json:"username"`
+	TeamSync     *bool  `json:"team_sync,omitempty"` // nil = enabled (default true)
+}
+
+// IsTeamSyncEnabled returns whether team sync is enabled.
+// Defaults to true if not explicitly set. Can also be overridden via ENGRAM_TEAM_SYNC env var.
+func (cc *CloudConfig) IsTeamSyncEnabled() bool {
+	if v := os.Getenv("ENGRAM_TEAM_SYNC"); v != "" {
+		return v != "false" && v != "0"
+	}
+	if cc != nil && cc.TeamSync != nil {
+		return *cc.TeamSync
+	}
+	return true // default enabled
 }
 
 func cloudConfigPath(dataDir string) string {
@@ -1614,6 +1630,9 @@ func cmdCloudEnroll(cfg store.Config) {
 	}
 
 	fmt.Printf("Project %q enrolled for cloud sync.\n", project)
+
+	// Best-effort: push enrollment list to server for team sync.
+	pushEnrollmentsToServer(cfg, s)
 }
 
 // cmdCloudUnenroll removes a project from cloud sync enrollment.
@@ -1637,6 +1656,44 @@ func cmdCloudUnenroll(cfg store.Config) {
 	}
 
 	fmt.Printf("Project %q unenrolled from cloud sync.\n", project)
+
+	// Best-effort: push updated enrollment list to server for team sync.
+	pushEnrollmentsToServer(cfg, s)
+}
+
+// pushEnrollmentsToServer pushes the current enrolled project list to the
+// cloud server so other team members can see shared project observations.
+// This is best-effort — failures are logged but don't block the command.
+func pushEnrollmentsToServer(cfg store.Config, s *store.Store) {
+	serverURL, token, err := resolveCloudClientConfig(cfg.DataDir, "", "", true)
+	if err != nil || serverURL == "" || token == "" {
+		return // no cloud config, skip silently
+	}
+
+	rt, err := remoteTransportNew(serverURL, token)
+	if err != nil {
+		return
+	}
+	if cc, loadErr := loadCloudConfig(cfg.DataDir); loadErr == nil && cc != nil && cc.ServerURL == serverURL && cc.RefreshToken != "" {
+		rt.SetTokenRefresher(cc.RefreshToken, func(newToken string) error {
+			cc.Token = newToken
+			return saveCloudConfig(cfg.DataDir, cc)
+		})
+	}
+
+	enrolled, err := s.ListEnrolledProjects()
+	if err != nil {
+		return
+	}
+	projects := make([]string, len(enrolled))
+	for i, ep := range enrolled {
+		projects[i] = ep.Project
+	}
+	if err := rt.SyncEnrollments(projects); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not sync enrollments to server: %v\n", err)
+	} else {
+		fmt.Println("Enrollment list synced to cloud server (team sync enabled).")
+	}
 }
 
 // cmdCloudProjects lists all projects currently enrolled for cloud sync.

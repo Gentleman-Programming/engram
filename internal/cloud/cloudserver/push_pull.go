@@ -347,7 +347,9 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 }
 
 // handleMutationPull returns mutations for the authenticated user with seq > since_seq.
-// GET /sync/mutations/pull?since_seq=N&limit=M
+// When team_sync=true (default), also includes observation mutations from teammates
+// enrolled in the same projects (excludes personal-scoped observations).
+// GET /sync/mutations/pull?since_seq=N&limit=M&team_sync=true
 //
 // Response: {"mutations": [...], "has_more": bool}
 func (s *CloudServer) handleMutationPull(w http.ResponseWriter, r *http.Request) {
@@ -369,11 +371,76 @@ func (s *CloudServer) handleMutationPull(w http.ResponseWriter, r *http.Request)
 		limit = 1000
 	}
 
-	result, err := s.store.PullMutations(userID, sinceSeq, limit)
+	// Check if team sync is requested (defaults to true).
+	teamSync := r.URL.Query().Get("team_sync")
+	useTeamSync := teamSync != "false"
+
+	var result *cloudstore.PullMutationsResult
+	var err error
+	if useTeamSync {
+		result, err = s.store.PullMutationsWithTeamSync(userID, sinceSeq, limit)
+	} else {
+		result, err = s.store.PullMutations(userID, sinceSeq, limit)
+	}
 	if err != nil {
 		writeStoreError(w, err, "failed to pull mutations: "+err.Error())
 		return
 	}
 
 	jsonResponse(w, http.StatusOK, result)
+}
+
+// ─── Enrollment Sync Handler ─────────────────────────────────────────────────
+
+// handleEnrollmentSync receives a list of enrolled projects from a client and
+// syncs them to the server. This enables cross-user team sync.
+// POST /sync/enrollments
+//
+// Request body: {"projects": ["project-a", "project-b"]}
+// Response: {"status": "synced", "project_count": N}
+func (s *CloudServer) handleEnrollmentSync(w http.ResponseWriter, r *http.Request) {
+	userID := getUserID(r)
+
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB limit
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, "failed to read body: "+err.Error())
+		return
+	}
+
+	var req struct {
+		Projects []string `json:"projects"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+
+	if err := s.store.SyncEnrollments(userID, req.Projects); err != nil {
+		writeStoreError(w, err, "failed to sync enrollments: "+err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"status":        "synced",
+		"project_count": len(req.Projects),
+	})
+}
+
+// handleEnrollmentList returns the user's current server-side enrollment list.
+// GET /sync/enrollments
+//
+// Response: {"projects": ["project-a", "project-b"]}
+func (s *CloudServer) handleEnrollmentList(w http.ResponseWriter, r *http.Request) {
+	userID := getUserID(r)
+
+	projects, err := s.store.ListEnrolledProjects(userID)
+	if err != nil {
+		writeStoreError(w, err, "failed to list enrollments: "+err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"projects": projects,
+	})
 }

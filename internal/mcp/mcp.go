@@ -608,8 +608,12 @@ func handleSearch(s *store.Store) server.ToolHandlerFunc {
 			if r.Project != nil {
 				project = fmt.Sprintf(" | project: %s", *r.Project)
 			}
-			fmt.Fprintf(&b, "[%d] #%d (%s) — %s\n    %s\n    %s%s | scope: %s\n\n",
-				i+1, r.ID, r.Type, r.Title,
+			authorTag := ""
+			if r.Author != "" {
+				authorTag = fmt.Sprintf(" (by %s)", r.Author)
+			}
+			fmt.Fprintf(&b, "[%d] #%d (%s) — %s%s\n    %s\n    %s%s | scope: %s\n\n",
+				i+1, r.ID, r.Type, r.Title, authorTag,
 				truncate(r.Content, 300),
 				r.CreatedAt, project, r.Scope)
 		}
@@ -906,13 +910,17 @@ func handleGetObservation(s *store.Store) server.ToolHandlerFunc {
 		if obs.ToolName != nil {
 			toolName = fmt.Sprintf("\nTool: %s", *obs.ToolName)
 		}
+		authorMeta := ""
+		if obs.Author != "" {
+			authorMeta = fmt.Sprintf("\nAuthor: %s", obs.Author)
+		}
 		duplicateMeta := fmt.Sprintf("\nDuplicates: %d", obs.DuplicateCount)
 		revisionMeta := fmt.Sprintf("\nRevisions: %d", obs.RevisionCount)
 
 		result := fmt.Sprintf("#%d [%s] %s\n%s\nSession: %s%s%s\nCreated: %s",
 			obs.ID, obs.Type, obs.Title,
 			obs.Content,
-			obs.SessionID, project+scope+topic, toolName+duplicateMeta+revisionMeta,
+			obs.SessionID, project+scope+topic+authorMeta, toolName+duplicateMeta+revisionMeta,
 			obs.CreatedAt,
 		)
 

@@ -2049,7 +2049,8 @@ func TestMigrationInternalErrorAndNoopBranches(t *testing.T) {
 					last_seen_at TEXT,
 					created_at TEXT,
 					updated_at TEXT,
-					deleted_at TEXT
+					deleted_at TEXT,
+					author TEXT
 				);
 				INSERT INTO observations (id, session_id, type, title, content, project, created_at, updated_at)
 				VALUES (1, 's1', 'bugfix', 'legacy', 'legacy row', 'engram', datetime('now'), datetime('now'));
@@ -2792,7 +2793,8 @@ func TestStoreUncoveredBranchesPushToHundred(t *testing.T) {
 				last_seen_at TEXT,
 				created_at TEXT,
 				updated_at TEXT,
-				deleted_at TEXT
+				deleted_at TEXT,
+				author TEXT NOT NULL DEFAULT ''
 			);
 			INSERT INTO observations (id, session_id, type, title, content, project, created_at, updated_at)
 			VALUES (1, 's1', 'bugfix', 'legacy', 'legacy row', 'engram', datetime('now'), datetime('now'));
@@ -2827,7 +2829,8 @@ func TestStoreUncoveredBranchesPushToHundred(t *testing.T) {
 						last_seen_at TEXT,
 						created_at TEXT,
 						updated_at TEXT,
-						deleted_at TEXT
+						deleted_at TEXT,
+						author TEXT NOT NULL DEFAULT ''
 					);
 					INSERT INTO observations (id, session_id, type, title, content, project, created_at, updated_at)
 					VALUES (1, 's1', 'bugfix', 'legacy', 'legacy row', 'engram', datetime('now'), datetime('now'));

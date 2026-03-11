@@ -353,6 +353,7 @@ func (m *Manager) pull(ctx context.Context) error {
 				Op:         rm.Op,
 				Payload:    string(rm.Payload),
 				Source:     store.SyncSourceRemote,
+				Author:     rm.Author,
 				OccurredAt: rm.OccurredAt,
 			}
 			if err := m.store.ApplyPulledMutation(m.cfg.TargetKey, localMut); err != nil {

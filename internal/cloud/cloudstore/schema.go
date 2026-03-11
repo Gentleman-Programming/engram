@@ -127,4 +127,14 @@ CREATE TABLE IF NOT EXISTS cloud_mutations (
     occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_cloud_mutations_user_seq ON cloud_mutations(user_id, seq);
+
+-- ── Project Enrollments (tracks which users are enrolled in which projects) ──
+CREATE TABLE IF NOT EXISTS cloud_project_enrollments (
+    user_id     UUID NOT NULL REFERENCES cloud_users(id) ON DELETE CASCADE,
+    project     TEXT NOT NULL,
+    enrolled_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (user_id, project)
+);
+CREATE INDEX IF NOT EXISTS idx_cloud_enrollments_project ON cloud_project_enrollments(project);
+CREATE INDEX IF NOT EXISTS idx_cloud_enrollments_user    ON cloud_project_enrollments(user_id);
 `

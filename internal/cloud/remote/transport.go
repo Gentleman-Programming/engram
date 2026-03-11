@@ -31,6 +31,7 @@ type RemoteTransport struct {
 	mu             sync.Mutex
 	refreshToken   string
 	onTokenRefresh func(string) error
+	teamSync       bool // enable cross-user team sync on pull (default: true)
 }
 
 // NewRemoteTransport creates a RemoteTransport targeting the given cloud server.
@@ -47,6 +48,7 @@ func NewRemoteTransport(baseURL, token string) (*RemoteTransport, error) {
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
+		teamSync: true, // enabled by default
 	}, nil
 }
 
@@ -56,6 +58,15 @@ func (rt *RemoteTransport) SetTokenRefresher(refreshToken string, onTokenRefresh
 	defer rt.mu.Unlock()
 	rt.refreshToken = strings.TrimSpace(refreshToken)
 	rt.onTokenRefresh = onTokenRefresh
+}
+
+// SetTeamSync enables or disables cross-user team sync on pull operations.
+// When enabled (default), pull requests include observation mutations from
+// teammates enrolled in the same projects.
+func (rt *RemoteTransport) SetTeamSync(enabled bool) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	rt.teamSync = enabled
 }
 
 func validateBaseURL(raw string) (string, error) {
@@ -376,6 +387,7 @@ type PushMutationsResult struct {
 // PullMutationResult represents a single mutation returned by the server.
 type PullMutationResult struct {
 	Seq        int64           `json:"seq"`
+	Author     string          `json:"author,omitempty"`
 	Entity     string          `json:"entity"`
 	EntityKey  string          `json:"entity_key"`
 	Op         string          `json:"op"`
@@ -422,13 +434,22 @@ func (rt *RemoteTransport) PushMutations(mutations []MutationEntry) (*PushMutati
 }
 
 // PullMutations fetches mutations from the cloud server since a given sequence.
-// GET /sync/mutations/pull?since_seq=N&limit=M
+// When teamSync is true (via the transport setting), includes cross-user
+// observation mutations from teammates enrolled in the same projects.
+// GET /sync/mutations/pull?since_seq=N&limit=M&team_sync=true|false
 func (rt *RemoteTransport) PullMutations(sinceSeq int64, limit int) (*PullMutationsResponse, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 
-	u := fmt.Sprintf("%s/sync/mutations/pull?since_seq=%d&limit=%d", rt.baseURL, sinceSeq, limit)
+	teamSyncParam := "true"
+	rt.mu.Lock()
+	if !rt.teamSync {
+		teamSyncParam = "false"
+	}
+	rt.mu.Unlock()
+
+	u := fmt.Sprintf("%s/sync/mutations/pull?since_seq=%d&limit=%d&team_sync=%s", rt.baseURL, sinceSeq, limit, teamSyncParam)
 	req, err := http.NewRequest("GET", u, nil)
 	if err != nil {
 		return nil, fmt.Errorf("cloud: build mutation pull request: %w", err)
@@ -450,6 +471,63 @@ func (rt *RemoteTransport) PullMutations(sinceSeq int64, limit int) (*PullMutati
 		return nil, fmt.Errorf("cloud: decode mutation pull response: %w", err)
 	}
 	return &result, nil
+}
+
+// ─── Enrollment Sync ─────────────────────────────────────────────────────────
+
+// SyncEnrollments pushes the client's enrolled project list to the server.
+// POST /sync/enrollments
+func (rt *RemoteTransport) SyncEnrollments(projects []string) error {
+	body, err := json.Marshal(map[string]any{"projects": projects})
+	if err != nil {
+		return fmt.Errorf("cloud: marshal enrollment sync: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", rt.baseURL+"/sync/enrollments", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("cloud: build enrollment sync request: %w", err)
+	}
+	rt.setAuthorization(req)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := rt.doWithRetry(req)
+	if err != nil {
+		return fmt.Errorf("cloud: enrollment sync: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return rt.httpError("enrollment sync", resp)
+	}
+	return nil
+}
+
+// ListEnrollments fetches the server-side enrolled project list.
+// GET /sync/enrollments
+func (rt *RemoteTransport) ListEnrollments() ([]string, error) {
+	req, err := http.NewRequest("GET", rt.baseURL+"/sync/enrollments", nil)
+	if err != nil {
+		return nil, fmt.Errorf("cloud: build enrollment list request: %w", err)
+	}
+	rt.setAuthorization(req)
+
+	resp, err := rt.doWithRetry(req)
+	if err != nil {
+		return nil, fmt.Errorf("cloud: enrollment list: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, rt.httpError("enrollment list", resp)
+	}
+
+	var result struct {
+		Projects []string `json:"projects"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("cloud: decode enrollment list: %w", err)
+	}
+	return result.Projects, nil
 }
 
 // ─── Data Conversion ─────────────────────────────────────────────────────────

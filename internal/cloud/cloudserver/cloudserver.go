@@ -112,6 +112,10 @@ func (s *CloudServer) routes() {
 	s.mux.HandleFunc("POST /sync/mutations/push", s.withAuth(s.handleMutationPush))
 	s.mux.HandleFunc("GET /sync/mutations/pull", s.withAuth(s.handleMutationPull))
 
+	// Enrollment sync routes (auth required) — for team/cross-user sync
+	s.mux.HandleFunc("POST /sync/enrollments", s.withAuth(s.handleEnrollmentSync))
+	s.mux.HandleFunc("GET /sync/enrollments", s.withAuth(s.handleEnrollmentList))
+
 	// Search & context (auth required)
 	s.mux.HandleFunc("GET /sync/search", s.withAuth(s.handleSearch))
 	s.mux.HandleFunc("GET /sync/context", s.withAuth(s.handleContext))
