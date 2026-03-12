@@ -13,7 +13,12 @@ ENGRAM_URL="http://127.0.0.1:${ENGRAM_PORT}"
 INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
-PROJECT=$(basename "$CWD")
+# Allow project name override via .engram-project file in the repo root
+if [ -n "$CWD" ] && [ -f "${CWD}/.engram-project" ]; then
+  PROJECT=$(tr -d '[:space:]' < "${CWD}/.engram-project")
+else
+  PROJECT=$(basename "$CWD")
+fi
 
 # Ensure engram server is running
 if ! curl -sf "${ENGRAM_URL}/health" --max-time 1 > /dev/null 2>&1; then

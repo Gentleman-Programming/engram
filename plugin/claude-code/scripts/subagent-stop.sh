@@ -13,7 +13,12 @@ INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 OUTPUT=$(echo "$INPUT" | jq -r '.stdout // empty')
-PROJECT=$(basename "$CWD")
+# Allow project name override via .engram-project file in the repo root
+if [ -n "$CWD" ] && [ -f "${CWD}/.engram-project" ]; then
+  PROJECT=$(tr -d '[:space:]' < "${CWD}/.engram-project")
+else
+  PROJECT=$(basename "$CWD")
+fi
 
 # Nothing to capture if no output
 [ -z "$OUTPUT" ] && exit 0

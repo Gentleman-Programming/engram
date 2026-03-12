@@ -15,6 +15,8 @@
  */
 
 import type { Plugin } from "@opencode-ai/plugin"
+import { readFileSync, existsSync } from "fs"
+import { join } from "path"
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -154,6 +156,12 @@ async function isEngramRunning(): Promise<boolean> {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function extractProjectName(directory: string): string {
+  // Allow project name override via .engram-project file in the repo root
+  const overridePath = join(directory, ".engram-project")
+  if (existsSync(overridePath)) {
+    const name = readFileSync(overridePath, "utf-8").trim()
+    if (name) return name
+  }
   return directory.split("/").pop() ?? "unknown"
 }
 
