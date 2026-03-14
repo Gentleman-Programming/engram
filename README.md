@@ -73,13 +73,19 @@ Expand-Archive engram_*_windows_amd64.zip -DestinationPath "$env:USERPROFILE\bin
 ```powershell
 git clone https://github.com/Gentleman-Programming/engram.git
 cd engram
-go install ./cmd/engram
-# Binary goes to %GOPATH%\bin\engram.exe (typically %USERPROFILE%\go\bin\)
 
-# Optional: build with version stamp (otherwise `engram version` shows "dev")
+# Option A: Install directly with version stamp (Recommended)
+go install -ldflags="-X main.version=$(git describe --tags --always)" ./cmd/engram
+
+# Option B: Build and move to PATH manually
 $v = git describe --tags --always
-go build -ldflags="-X main.version=local-$v" -o engram.exe ./cmd/engram
+go build -ldflags="-X main.version=$v" -o engram.exe ./cmd/engram
+# Move to a directory in your PATH (e.g., %USERPROFILE%\bin)
 ```
+
+> **Version stamp:** Without the `-ldflags` flag, `engram version` shows "dev". Use either option above to embed the git version.
+>
+> **Important:** `go install` places the binary in `%GOPATH%\bin` (usually `%USERPROFILE%\go\bin`), which must be in your `PATH`. `go build -o engram.exe` creates the binary in the current directory — move it to a directory in your `PATH` or it won't be found. If `engram version` still shows "dev" after building, you're likely running an older copy from `%GOPATH%\bin` — check with `where engram`.
 
 > **Windows notes:**
 > - Data is stored in `%USERPROFILE%\.engram\engram.db`
@@ -92,11 +98,17 @@ go build -ldflags="-X main.version=local-$v" -o engram.exe ./cmd/engram
 ```bash
 git clone https://github.com/Gentleman-Programming/engram.git
 cd engram
-go install ./cmd/engram
 
-# Optional: build with version stamp (otherwise `engram version` shows "dev")
-go build -ldflags="-X main.version=local-$(git describe --tags --always)" -o engram ./cmd/engram
+# Option A: Install directly with version stamp (Recommended)
+go install -ldflags="-X main.version=$(git describe --tags --always)" ./cmd/engram
+
+# Option B: Build and move to PATH manually
+go build -ldflags="-X main.version=$(git describe --tags --always)" -o /usr/local/bin/engram ./cmd/engram
 ```
+
+> **Version stamp:** Without the `-ldflags` flag, `engram version` shows "dev". Use either option above to embed the git version.
+>
+> **Important:** `go install` places the binary in `$GOPATH/bin` (usually `~/go/bin`), which must be in your `PATH`. `go build -o engram` creates the binary in the current directory — move it to a directory in your `PATH` (e.g. `/usr/local/bin/`) or it won't be found. If `engram version` still shows "dev" after building, you're likely running an older copy from `$GOPATH/bin` — check with `which engram`.
 
 ### Download binary (all platforms)
 
@@ -276,6 +288,11 @@ See [OpenCode Plugin](#opencode-plugin) for details on what the plugin provides 
 ### Claude Code
 
 > **Prerequisite**: Install the `engram` binary first (via [Homebrew](#install-via-homebrew-macOS--linux), [Windows binary](#install-on-windows), [binary download](#download-binary-all-platforms), or [source](#install-from-source-macos--linux)). The plugin needs it for the MCP server and session tracking scripts.
+
+> **Minimum CLI version:** The marketplace plugin requires **Claude Code CLI >= 2.1.70**. Check with `claude --version` and update with `claude update` if needed. Older versions fail with:
+> ```
+> ✘ Failed to add marketplace: Invalid schema: plugins.0.source: Invalid input
+> ```
 
 **Option A: Plugin via marketplace (recommended)** — full session management, auto-import, compaction recovery, and Memory Protocol skill:
 
