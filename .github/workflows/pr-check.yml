@@ -119,3 +119,4 @@ jobs:
             } else {
               core.info(`✅ PR has type label: ${typeLabels[0]}`);
             }
+
