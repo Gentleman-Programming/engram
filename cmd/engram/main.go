@@ -821,8 +821,8 @@ MCP Configuration (add to your agent's config):
     "mcp": {
       "engram": {
         "type": "stdio",
-        "command": "engram",
-        "args": ["mcp", "--tools=agent"]
+      	"command": ["engram", "mcp", "--tools=agent"],
+      	"enabled": true
       }
     }
   }
