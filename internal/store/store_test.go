@@ -4005,3 +4005,133 @@ func TestMigrateProjectIdempotent(t *testing.T) {
 		t.Fatal("second migration should be a no-op")
 	}
 }
+
+func TestRecallCountIncrementsOnSearch(t *testing.T) {
+	s := newTestStore(t)
+	s.CreateSession("s1", "proj", "/tmp")
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1", Type: "bugfix", Title: "recall test",
+		Content: "searchable recall content", Project: "proj", Scope: "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	obs, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("get observation: %v", err)
+	}
+	// GetObservation itself increments recall_count by 1
+	initialRecall := obs.RecallCount
+
+	results, err := s.Search("searchable recall", SearchOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected search results")
+	}
+
+	obs, err = s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("get observation after search: %v", err)
+	}
+	// After search (+1) and this GetObservation (+1), total should be initialRecall + 2
+	if obs.RecallCount != initialRecall+2 {
+		t.Fatalf("expected recall_count=%d after search + get, got %d", initialRecall+2, obs.RecallCount)
+	}
+	if obs.LastRecalledAt == nil {
+		t.Fatal("expected last_recalled_at to be set")
+	}
+}
+
+func TestRecallCountIncrementsOnGetObservation(t *testing.T) {
+	s := newTestStore(t)
+	s.CreateSession("s1", "proj", "/tmp")
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1", Type: "decision", Title: "get test",
+		Content: "some content", Project: "proj", Scope: "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	// First get: scans recall_count=0 (pre-increment), then bumps DB to 1
+	obs, _ := s.GetObservation(id)
+	if obs.RecallCount != 0 {
+		t.Fatalf("expected recall_count=0 on first get (pre-increment), got %d", obs.RecallCount)
+	}
+
+	// Second get: scans recall_count=1 (pre-increment), then bumps DB to 2
+	obs, _ = s.GetObservation(id)
+	if obs.RecallCount != 1 {
+		t.Fatalf("expected recall_count=1 on second get (pre-increment), got %d", obs.RecallCount)
+	}
+
+	// Third get: scans recall_count=2 (pre-increment), confirming increments stack
+	obs, _ = s.GetObservation(id)
+	if obs.RecallCount != 2 {
+		t.Fatalf("expected recall_count=2 on third get (pre-increment), got %d", obs.RecallCount)
+	}
+}
+
+func TestPromotedObservationsReturnsHighRecallOnly(t *testing.T) {
+	s := newTestStore(t)
+	s.CreateSession("s1", "proj", "/tmp")
+
+	// Create two observations
+	id1, _ := s.AddObservation(AddObservationParams{
+		SessionID: "s1", Type: "decision", Title: "popular fact",
+		Content: "widely recalled", Project: "proj", Scope: "project",
+	})
+	_, _ = s.AddObservation(AddObservationParams{
+		SessionID: "s1", Type: "decision", Title: "obscure fact",
+		Content: "never recalled", Project: "proj", Scope: "project",
+	})
+
+	// Manually bump recall_count for the popular observation
+	for i := 0; i < 5; i++ {
+		s.incrementRecall([]int64{id1})
+	}
+
+	// Query with threshold of 5
+	promoted, err := s.PromotedObservations("proj", "", 5, 10)
+	if err != nil {
+		t.Fatalf("promoted observations: %v", err)
+	}
+	if len(promoted) != 1 {
+		t.Fatalf("expected 1 promoted observation, got %d", len(promoted))
+	}
+	if promoted[0].ID != id1 {
+		t.Fatalf("expected promoted observation id=%d, got %d", id1, promoted[0].ID)
+	}
+	if promoted[0].RecallCount < 5 {
+		t.Fatalf("expected recall_count >= 5, got %d", promoted[0].RecallCount)
+	}
+}
+
+func TestPromotedObservationsExcludesDeleted(t *testing.T) {
+	s := newTestStore(t)
+	s.CreateSession("s1", "proj", "/tmp")
+
+	id, _ := s.AddObservation(AddObservationParams{
+		SessionID: "s1", Type: "decision", Title: "deleted popular",
+		Content: "was popular", Project: "proj", Scope: "project",
+	})
+
+	// Bump recall count
+	for i := 0; i < 10; i++ {
+		s.incrementRecall([]int64{id})
+	}
+
+	// Soft delete
+	s.DeleteObservation(id, false)
+
+	promoted, err := s.PromotedObservations("proj", "", 1, 10)
+	if err != nil {
+		t.Fatalf("promoted observations: %v", err)
+	}
+	if len(promoted) != 0 {
+		t.Fatalf("expected 0 promoted observations after delete, got %d", len(promoted))
+	}
+}

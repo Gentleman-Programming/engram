@@ -6,8 +6,8 @@
 //
 // Tool profiles allow agents to load only the tools they need:
 //
-//	engram mcp                    → all 14 tools (default)
-//	engram mcp --tools=agent      → 11 tools agents actually use (per skill files)
+//	engram mcp                    → all 15 tools (default)
+//	engram mcp --tools=agent      → 12 tools agents actually use (per skill files)
 //	engram mcp --tools=admin      → 3 tools for TUI/CLI (delete, stats, timeline)
 //	engram mcp --tools=agent,admin → combine profiles
 //	engram mcp --tools=mem_save,mem_search → individual tool names
@@ -56,6 +56,7 @@ var ProfileAgent = map[string]bool{
 	"mem_capture_passive":   true, // extract learnings from text — referenced in Gemini/Codex protocol
 	"mem_save_prompt":       true, // save user prompts
 	"mem_update":            true, // update observation by ID — skills say "use mem_update when you have an exact ID to correct"
+	"mem_promoted":          true, // frequently recalled observations — surface important context at session start
 }
 
 // ProfileAdmin contains tools for TUI, dashboards, and manual curation
@@ -580,6 +581,34 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 			handleCapturePassive(s),
 		)
 	}
+
+	// ─── mem_promoted (profile: agent, deferred) ────────────────────────
+	if shouldRegister("mem_promoted", allowlist) {
+		srv.AddTool(
+			mcp.NewTool("mem_promoted",
+				mcp.WithDescription("Get frequently recalled observations that have proven their value through repeated access. Use at session start to surface the most important context."),
+				mcp.WithDeferLoading(true),
+				mcp.WithTitleAnnotation("Get Promoted Memories"),
+				mcp.WithReadOnlyHintAnnotation(true),
+				mcp.WithDestructiveHintAnnotation(false),
+				mcp.WithIdempotentHintAnnotation(true),
+				mcp.WithOpenWorldHintAnnotation(false),
+				mcp.WithString("project",
+					mcp.Description("Filter by project name"),
+				),
+				mcp.WithString("scope",
+					mcp.Description("Filter by scope: project (default) or personal"),
+				),
+				mcp.WithNumber("min_recalls",
+					mcp.Description("Minimum recall count threshold (default: 5)"),
+				),
+				mcp.WithNumber("limit",
+					mcp.Description("Max results (default: 7)"),
+				),
+			),
+			handlePromoted(s),
+		)
+	}
 }
 
 // ─── Tool Handlers ───────────────────────────────────────────────────────────
@@ -1023,6 +1052,40 @@ func handleCapturePassive(s *store.Store) server.ToolHandlerFunc {
 			"Passive capture complete: extracted=%d saved=%d duplicates=%d",
 			result.Extracted, result.Saved, result.Duplicates,
 		)), nil
+	}
+}
+
+func handlePromoted(s *store.Store) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		project, _ := req.GetArguments()["project"].(string)
+		scope, _ := req.GetArguments()["scope"].(string)
+		minRecalls := intArg(req, "min_recalls", 5)
+		limit := intArg(req, "limit", 7)
+
+		results, err := s.PromotedObservations(project, scope, minRecalls, limit)
+		if err != nil {
+			return mcp.NewToolResultError("Failed to fetch promoted memories: " + err.Error()), nil
+		}
+
+		if len(results) == 0 {
+			return mcp.NewToolResultText("No promoted memories found."), nil
+		}
+
+		var b strings.Builder
+		fmt.Fprintf(&b, "Found %d promoted memories:\n\n", len(results))
+		for i, r := range results {
+			projectStr := ""
+			if r.Project != nil {
+				projectStr = fmt.Sprintf(" | project: %s", *r.Project)
+			}
+			preview := truncate(r.Content, 300)
+			fmt.Fprintf(&b, "[%d] #%d (%s) — %s [recalled %d times]\n    %s\n    %s%s | scope: %s\n\n",
+				i+1, r.ID, r.Type, r.Title, r.RecallCount,
+				preview,
+				r.CreatedAt, projectStr, r.Scope)
+		}
+
+		return mcp.NewToolResultText(b.String()), nil
 	}
 }
 

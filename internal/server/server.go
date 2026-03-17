@@ -131,6 +131,9 @@ func (s *Server) routes() {
 	// Stats
 	s.mux.HandleFunc("GET /stats", s.handleStats)
 
+	// Promoted (frequently recalled)
+	s.mux.HandleFunc("GET /promoted", s.handlePromoted)
+
 	// Project migration
 	s.mux.HandleFunc("POST /projects/migrate", s.handleMigrateProject)
 
@@ -491,6 +494,21 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonResponse(w, http.StatusOK, stats)
+}
+
+func (s *Server) handlePromoted(w http.ResponseWriter, r *http.Request) {
+	project := r.URL.Query().Get("project")
+	scope := r.URL.Query().Get("scope")
+	minRecalls := queryInt(r, "min_recalls", 5)
+	limit := queryInt(r, "limit", 7)
+
+	obs, err := s.store.PromotedObservations(project, scope, minRecalls, limit)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, obs)
 }
 
 // ─── Sync Status ─────────────────────────────────────────────────────────────
