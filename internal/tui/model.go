@@ -34,6 +34,7 @@ const (
 	ScreenSessions
 	ScreenSessionDetail
 	ScreenSetup
+	ScreenProjectSelector
 )
 
 // ─── Custom Messages ─────────────────────────────────────────────────────────
@@ -136,6 +137,13 @@ type Model struct {
 	SetupAllowlistApplied bool   // true = allowlist was added successfully
 	SetupAllowlistError   string // error message if allowlist injection failed
 	SetupSpinner          spinner.Model
+
+	// Project selector screen
+	ProjectSelectorItems   []string
+	ProjectSelectorChecked []bool
+	ProjectSelectorCursor  int
+	ProjectSelectorCounts  []int            // pending count per project (0 = unknown/not populated)
+	projectSelectorResultCh chan<- []string // unexported, write-only channel
 }
 
 // New creates a new TUI model connected to the given store.
@@ -156,6 +164,21 @@ func New(s *store.Store, version string) Model {
 		SearchInput:  ti,
 		SetupSpinner: sp,
 	}
+}
+
+// NewProjectSelector creates a TUI model pre-configured for the project
+// selection screen. items is the list of project names to display.
+// resultCh receives the selected project names when the user confirms,
+// or nil if the user cancels (q/esc/enter with nothing checked).
+func NewProjectSelector(s *store.Store, items []string, resultCh chan<- []string) Model {
+	m := New(s, "")
+	m.Screen = ScreenProjectSelector
+	m.ProjectSelectorItems = items
+	m.ProjectSelectorChecked = make([]bool, len(items))
+	m.ProjectSelectorCounts = make([]int, len(items)) // zeros — unknown count; extension point for future population
+	m.ProjectSelectorCursor = 0
+	m.projectSelectorResultCh = resultCh
+	return m
 }
 
 // Init loads initial data (stats for the dashboard).

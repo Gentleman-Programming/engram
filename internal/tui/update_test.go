@@ -830,6 +830,216 @@ func TestAdditionalKeyAliasAndBoundaryBranches(t *testing.T) {
 	}
 }
 
+// ─── Project Selector Tests ────────────────────────────────────────────────────
+
+func TestHandleProjectSelectorKeysCursorNavigation(t *testing.T) {
+	items := []string{"alpha", "beta", "gamma"}
+	resultCh := make(chan []string, 1)
+	m := NewProjectSelector(nil, items, resultCh)
+
+	// j moves cursor down (not past end)
+	t.Run("j moves cursor down", func(t *testing.T) {
+		m.ProjectSelectorCursor = 0
+		updatedModel, cmd := m.handleProjectSelectorKeys("j")
+		updated := updatedModel.(Model)
+		if updated.ProjectSelectorCursor != 1 {
+			t.Fatalf("cursor = %d, want 1", updated.ProjectSelectorCursor)
+		}
+		if cmd != nil {
+			t.Fatal("j should not return command")
+		}
+	})
+
+	t.Run("j does not go past last item", func(t *testing.T) {
+		m.ProjectSelectorCursor = len(items) - 1
+		updatedModel, _ := m.handleProjectSelectorKeys("j")
+		updated := updatedModel.(Model)
+		if updated.ProjectSelectorCursor != len(items)-1 {
+			t.Fatalf("cursor = %d, want %d (clamped at bottom)", updated.ProjectSelectorCursor, len(items)-1)
+		}
+	})
+
+	t.Run("k moves cursor up", func(t *testing.T) {
+		m.ProjectSelectorCursor = 2
+		updatedModel, cmd := m.handleProjectSelectorKeys("k")
+		updated := updatedModel.(Model)
+		if updated.ProjectSelectorCursor != 1 {
+			t.Fatalf("cursor = %d, want 1", updated.ProjectSelectorCursor)
+		}
+		if cmd != nil {
+			t.Fatal("k should not return command")
+		}
+	})
+
+	t.Run("k does not go past 0", func(t *testing.T) {
+		m.ProjectSelectorCursor = 0
+		updatedModel, _ := m.handleProjectSelectorKeys("k")
+		updated := updatedModel.(Model)
+		if updated.ProjectSelectorCursor != 0 {
+			t.Fatalf("cursor = %d, want 0 (clamped at top)", updated.ProjectSelectorCursor)
+		}
+	})
+
+	t.Run("down arrow moves cursor down", func(t *testing.T) {
+		m.ProjectSelectorCursor = 0
+		updatedModel, _ := m.handleProjectSelectorKeys("down")
+		updated := updatedModel.(Model)
+		if updated.ProjectSelectorCursor != 1 {
+			t.Fatalf("cursor = %d, want 1", updated.ProjectSelectorCursor)
+		}
+	})
+
+	t.Run("up arrow moves cursor up", func(t *testing.T) {
+		m.ProjectSelectorCursor = 2
+		updatedModel, _ := m.handleProjectSelectorKeys("up")
+		updated := updatedModel.(Model)
+		if updated.ProjectSelectorCursor != 1 {
+			t.Fatalf("cursor = %d, want 1", updated.ProjectSelectorCursor)
+		}
+	})
+}
+
+func TestHandleProjectSelectorKeysSpaceToggle(t *testing.T) {
+	items := []string{"alpha", "beta", "gamma"}
+	resultCh := make(chan []string, 1)
+	m := NewProjectSelector(nil, items, resultCh)
+
+	t.Run("space toggles checked state on at cursor", func(t *testing.T) {
+		m.ProjectSelectorCursor = 1
+		updatedModel, cmd := m.handleProjectSelectorKeys(" ")
+		updated := updatedModel.(Model)
+		if !updated.ProjectSelectorChecked[1] {
+			t.Fatal("space should set checked to true")
+		}
+		if cmd != nil {
+			t.Fatal("space should not return command")
+		}
+	})
+
+	t.Run("space toggles checked state off again", func(t *testing.T) {
+		m.ProjectSelectorCursor = 1
+		m.ProjectSelectorChecked[1] = true
+		updatedModel, _ := m.handleProjectSelectorKeys(" ")
+		updated := updatedModel.(Model)
+		if updated.ProjectSelectorChecked[1] {
+			t.Fatal("second space should toggle back to false")
+		}
+	})
+
+	t.Run("space does not panic with empty items", func(t *testing.T) {
+		emptyResultCh := make(chan []string, 1)
+		emptyModel := NewProjectSelector(nil, []string{}, emptyResultCh)
+		// Should not panic — guard in handler checks len > 0
+		emptyModel.handleProjectSelectorKeys(" ")
+	})
+}
+
+func TestHandleProjectSelectorKeysEnterWithSelection(t *testing.T) {
+	items := []string{"alpha", "beta", "gamma"}
+	resultCh := make(chan []string, 1)
+	m := NewProjectSelector(nil, items, resultCh)
+
+	// Check alpha and gamma
+	m.ProjectSelectorChecked[0] = true
+	m.ProjectSelectorChecked[2] = true
+
+	updatedModel, cmd := m.handleProjectSelectorKeys("enter")
+	_ = updatedModel
+
+	// cmd should be tea.Quit
+	if cmd == nil {
+		t.Fatal("enter should return quit command")
+	}
+
+	// Channel should have received the selected projects
+	selected, ok := <-resultCh
+	if !ok {
+		t.Fatal("channel should not be closed")
+	}
+	if len(selected) != 2 {
+		t.Fatalf("selected = %v, want [alpha, gamma]", selected)
+	}
+	if selected[0] != "alpha" || selected[1] != "gamma" {
+		t.Fatalf("selected = %v, want [alpha, gamma]", selected)
+	}
+}
+
+func TestHandleProjectSelectorKeysEnterNothingChecked(t *testing.T) {
+	items := []string{"alpha", "beta", "gamma"}
+	resultCh := make(chan []string, 1)
+	m := NewProjectSelector(nil, items, resultCh)
+	// No items checked — all ProjectSelectorChecked are false
+
+	updatedModel, cmd := m.handleProjectSelectorKeys("enter")
+	_ = updatedModel
+
+	if cmd == nil {
+		t.Fatal("enter should return quit command even with nothing checked")
+	}
+
+	// Channel should have received nil (cancel → CWD fallback, not empty export)
+	selected, ok := <-resultCh
+	if !ok {
+		t.Fatal("channel should not be closed")
+	}
+	if selected != nil {
+		t.Fatalf("enter with nothing checked should send nil to channel, got %v", selected)
+	}
+}
+
+func TestHandleProjectSelectorKeysQAndEsc(t *testing.T) {
+	items := []string{"alpha", "beta"}
+
+	t.Run("q sends nil and quits", func(t *testing.T) {
+		resultCh := make(chan []string, 1)
+		m := NewProjectSelector(nil, items, resultCh)
+
+		_, cmd := m.handleProjectSelectorKeys("q")
+		if cmd == nil {
+			t.Fatal("q should return quit command")
+		}
+		selected, ok := <-resultCh
+		if !ok {
+			t.Fatal("channel should not be closed")
+		}
+		if selected != nil {
+			t.Fatalf("q should send nil to channel, got %v", selected)
+		}
+	})
+
+	t.Run("esc sends nil and quits", func(t *testing.T) {
+		resultCh := make(chan []string, 1)
+		m := NewProjectSelector(nil, items, resultCh)
+
+		_, cmd := m.handleProjectSelectorKeys("esc")
+		if cmd == nil {
+			t.Fatal("esc should return quit command")
+		}
+		selected, ok := <-resultCh
+		if !ok {
+			t.Fatal("channel should not be closed")
+		}
+		if selected != nil {
+			t.Fatalf("esc should send nil to channel, got %v", selected)
+		}
+	})
+}
+
+func TestHandleProjectSelectorKeysRouterIncludesScreen(t *testing.T) {
+	// Verify that ScreenProjectSelector is in the key-press router and clears error.
+	items := []string{"alpha"}
+	resultCh := make(chan []string, 1)
+	m := NewProjectSelector(nil, items, resultCh)
+	m.ErrorMsg = "old error"
+
+	// An unknown key should go through the router without panic and clear error
+	updatedModel, _ := m.handleKeyPress("x")
+	updated := updatedModel.(Model)
+	if updated.ErrorMsg != "" {
+		t.Fatalf("ScreenProjectSelector should clear error on key press, got %q", updated.ErrorMsg)
+	}
+}
+
 func TestNavigationScrollAndSelectionBranches(t *testing.T) {
 	fx := newTestFixture(t)
 
