@@ -78,6 +78,8 @@ func (m Model) View() string {
 		content = m.viewSessionDetail()
 	case ScreenSetup:
 		content = m.viewSetup()
+	case ScreenProjectSelector:
+		content = viewProjectSelector(m)
 	default:
 		content = "Unknown screen"
 	}
@@ -661,6 +663,45 @@ func (m Model) viewSetup() string {
 	}
 
 	b.WriteString(helpStyle.Render("\n  j/k navigate • enter install • esc back"))
+
+	return b.String()
+}
+
+// ─── Project Selector ────────────────────────────────────────────────────────
+
+func viewProjectSelector(m Model) string {
+	var b strings.Builder
+
+	b.WriteString(headerStyle.Render("  Select Projects to Sync"))
+	b.WriteString("\n")
+	b.WriteString(helpStyle.Render("  space toggle • enter confirm • q cancel"))
+	b.WriteString("\n\n")
+
+	if len(m.ProjectSelectorItems) == 0 {
+		b.WriteString(noResultsStyle.Render("No projects found."))
+		return b.String()
+	}
+
+	for i, item := range m.ProjectSelectorItems {
+		checkbox := "[ ]"
+		if m.ProjectSelectorChecked[i] {
+			checkbox = lipgloss.NewStyle().Foreground(colorGreen).Bold(true).Render("[x]")
+		}
+
+		label := item
+		if i < len(m.ProjectSelectorCounts) && m.ProjectSelectorCounts[i] > 0 {
+			label = fmt.Sprintf("%s (%d pending)", item, m.ProjectSelectorCounts[i])
+		}
+
+		if m.ProjectSelectorCursor == i {
+			line := fmt.Sprintf("▸ %s %s", checkbox, label)
+			b.WriteString(menuSelectedStyle.Render(line))
+		} else {
+			line := fmt.Sprintf("  %s %s", checkbox, label)
+			b.WriteString(menuItemStyle.Render(line))
+		}
+		b.WriteString("\n")
+	}
 
 	return b.String()
 }

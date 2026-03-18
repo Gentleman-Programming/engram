@@ -154,6 +154,8 @@ func (m Model) handleKeyPress(key string) (tea.Model, tea.Cmd) {
 		return m.handleSessionDetailKeys(key)
 	case ScreenSetup:
 		return m.handleSetupKeys(key)
+	case ScreenProjectSelector:
+		return m.handleProjectSelectorKeys(key)
 	}
 	return m, nil
 }
@@ -558,6 +560,53 @@ func (m Model) handleSetupKeys(key string) (tea.Model, tea.Cmd) {
 		return m, loadStats(m.store)
 	}
 	return m, nil
+}
+
+// ─── Project Selector ─────────────────────────────────────────────────────────
+
+func (m Model) handleProjectSelectorKeys(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "j", "down":
+		if m.ProjectSelectorCursor < len(m.ProjectSelectorItems)-1 {
+			m.ProjectSelectorCursor++
+		}
+	case "k", "up":
+		if m.ProjectSelectorCursor > 0 {
+			m.ProjectSelectorCursor--
+		}
+	case " ":
+		if len(m.ProjectSelectorChecked) > 0 {
+			m.ProjectSelectorChecked[m.ProjectSelectorCursor] = !m.ProjectSelectorChecked[m.ProjectSelectorCursor]
+		}
+	case "enter":
+		selected := collectSelected(m)
+		if m.projectSelectorResultCh != nil {
+			m.projectSelectorResultCh <- selected
+		}
+		return m, tea.Quit
+	case "q", "esc":
+		if m.projectSelectorResultCh != nil {
+			m.projectSelectorResultCh <- nil
+		}
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
+// collectSelected returns the names of checked projects, or nil if none are checked.
+//
+// nil return means "cancelled" — the caller (cmdSync) treats this as
+// "fall through to CWD default", NOT as "export nothing".
+// An empty non-nil slice would mean "export nothing" but we never produce that.
+// Entering with zero items checked is intentionally treated the same as q/esc.
+func collectSelected(m Model) []string {
+	var selected []string
+	for i, checked := range m.ProjectSelectorChecked {
+		if checked {
+			selected = append(selected, m.ProjectSelectorItems[i])
+		}
+	}
+	return selected // nil if nothing checked — caller treats nil as cancel → CWD default
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

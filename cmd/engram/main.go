@@ -31,6 +31,7 @@ import (
 	versioncheck "github.com/Gentleman-Programming/engram/internal/version"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/term"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
@@ -589,28 +590,25 @@ func cmdSync(cfg store.Config) {
 	doStatus := false
 	doAll := false
 	project := ""
+	projectsFlag := ""
 	for i := 2; i < len(os.Args); i++ {
-		switch os.Args[i] {
-		case "--import":
+		switch {
+		case os.Args[i] == "--import":
 			doImport = true
-		case "--status":
+		case os.Args[i] == "--status":
 			doStatus = true
-		case "--all":
+		case os.Args[i] == "--all":
 			doAll = true
-		case "--project":
-			if i+1 < len(os.Args) {
-				project = os.Args[i+1]
-				i++
-			}
-		}
-	}
-
-	// Default project to current directory name (so sync only exports
-	// memories for THIS project, not everything in the global DB).
-	// --all skips project filtering entirely — exports everything.
-	if !doAll && project == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			project = filepath.Base(cwd)
+		case os.Args[i] == "--project" && i+1 < len(os.Args):
+			project = os.Args[i+1]
+			i++
+		case strings.HasPrefix(os.Args[i], "--projects="):
+			// Task 1.1: --projects=val (equals syntax)
+			projectsFlag = strings.TrimPrefix(os.Args[i], "--projects=")
+		case os.Args[i] == "--projects" && i+1 < len(os.Args):
+			// Task 1.1: --projects val (space syntax)
+			projectsFlag = os.Args[i+1]
+			i++
 		}
 	}
 
@@ -660,34 +658,179 @@ func cmdSync(cfg store.Config) {
 		return
 	}
 
-	// Export: DB → new chunk
-	username := engramsync.GetUsername()
-	if doAll {
-		fmt.Println("Exporting ALL memories (all projects)...")
-	} else {
-		fmt.Printf("Exporting memories for project %q...\n", project)
-	}
-	result, err := syncExport(sy, username, project)
+	// Task 1.3: TTY detection
+	isTTY := term.IsTerminal(os.Stdin.Fd())
+
+	// Task 1.2 + 1.3: Resolve projects via precedence chain
+	selected, err := resolveProjects(s, doAll, projectsFlag, project, isTTY)
 	if err != nil {
 		fatal(err)
 	}
 
-	if result.IsEmpty {
-		if doAll {
-			fmt.Println("Nothing new to sync — all memories already exported.")
-		} else {
-			fmt.Printf("Nothing new to sync for project %q — all memories already exported.\n", project)
-		}
+	// Task 1.3: empty slice = cancelled
+	if selected != nil && len(selected) == 0 {
+		fmt.Println("Sync cancelled.")
 		return
 	}
 
-	fmt.Printf("Created chunk %s\n", result.ChunkID)
-	fmt.Printf("  Sessions:     %d\n", result.SessionsExported)
-	fmt.Printf("  Observations: %d\n", result.ObservationsExported)
-	fmt.Printf("  Prompts:      %d\n", result.PromptsExported)
-	fmt.Println()
-	fmt.Println("Add to git:")
-	fmt.Printf("  git add .engram/ && git commit -m \"sync engram memories\"\n")
+	// Export: DB → new chunk
+	username := engramsync.GetUsername()
+
+	// Task 1.4: Export loop
+	// nil = export all (--all path, preserve existing behavior)
+	if selected == nil {
+		fmt.Println("Exporting ALL memories (all projects)...")
+		result, err := syncExport(sy, username, "")
+		if err != nil {
+			fatal(err)
+		}
+
+		if result.IsEmpty {
+			fmt.Println("Nothing new to sync — all memories already exported.")
+			return
+		}
+
+		fmt.Printf("Created chunk %s\n", result.ChunkID)
+		fmt.Printf("  Sessions:     %d\n", result.SessionsExported)
+		fmt.Printf("  Observations: %d\n", result.ObservationsExported)
+		fmt.Printf("  Prompts:      %d\n", result.PromptsExported)
+		fmt.Println()
+		fmt.Println("Add to git:")
+		fmt.Printf("  git add .engram/ && git commit -m \"sync engram memories\"\n")
+	} else if len(selected) == 1 {
+		// Single project: preserve existing --project output format for backward compat
+		proj := selected[0]
+		fmt.Printf("Exporting memories for project %q...\n", proj)
+		result, err := syncExport(sy, username, proj)
+		if err != nil {
+			fatal(err)
+		}
+
+		if result.IsEmpty {
+			fmt.Printf("Nothing new to sync for project %q — all memories already exported.\n", proj)
+			return
+		}
+
+		fmt.Printf("Created chunk %s\n", result.ChunkID)
+		fmt.Printf("  Sessions:     %d\n", result.SessionsExported)
+		fmt.Printf("  Observations: %d\n", result.ObservationsExported)
+		fmt.Printf("  Prompts:      %d\n", result.PromptsExported)
+		fmt.Println()
+		fmt.Println("Add to git:")
+		fmt.Printf("  git add .engram/ && git commit -m \"sync engram memories\"\n")
+	} else {
+		// Multi-project loop: iterate selected projects, accumulate results
+		totalSessions, totalObs, totalPrompts, exported := 0, 0, 0, 0
+		for _, proj := range selected {
+			result, err := syncExport(sy, username, proj)
+			if err != nil {
+				fatal(err)
+			}
+			if result.IsEmpty {
+				fmt.Printf("  %s: nothing new to sync\n", proj)
+				continue
+			}
+			fmt.Printf("  %s: chunk %s (%d obs)\n", proj, result.ChunkID, result.ObservationsExported)
+			totalSessions += result.SessionsExported
+			totalObs += result.ObservationsExported
+			totalPrompts += result.PromptsExported
+			exported++
+		}
+		if exported == 0 {
+			fmt.Println("Nothing new to sync — all projects already up to date.")
+			return
+		}
+		fmt.Printf("\nExported %d project(s): %d sessions, %d observations, %d prompts\n", exported, totalSessions, totalObs, totalPrompts)
+		fmt.Println("\nAdd to git:")
+		fmt.Printf("  git add .engram/ && git commit -m \"sync engram memories\"\n")
+	}
+}
+
+// resolveProjects determines which projects to export based on flag precedence.
+//
+// Precedence (highest to lowest):
+//  1. doAll → return nil (nil = export all, no filter)
+//  2. projectsFlag non-empty → parse comma-separated, trim, deduplicate
+//  3. projectFlag non-empty → return []string{projectFlag}
+//  4. isTTY → return nil for now (stub: TUI will be wired in Phase 5)
+//  5. CWD default → filepath.Base(os.Getwd()) → return []string{cwd}
+//
+// Return semantics:
+//   - nil   = export all (--all path)
+//   - []string{...} = specific projects to export
+//   - []string{}    = cancelled (caller should print "Sync cancelled." and return)
+func resolveProjects(s *store.Store, doAll bool, projectsFlag, projectFlag string, isTTY bool) ([]string, error) {
+	// 1. --all flag → export everything
+	if doAll {
+		if projectsFlag != "" {
+			fmt.Fprintln(os.Stderr, "warning: --all overrides --projects")
+		}
+		return nil, nil
+	}
+
+	// 2. --projects flag → parse comma-separated list, trim whitespace, deduplicate
+	// Falls through to CWD default if all values were blank (e.g. --projects=" ")
+	if projectsFlag != "" {
+		parts := strings.Split(projectsFlag, ",")
+		seen := map[string]bool{}
+		var result []string
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p != "" && !seen[p] {
+				seen[p] = true
+				result = append(result, p)
+			}
+		}
+		if len(result) > 0 {
+			return result, nil
+		}
+		// All values were blank — fall through to lower precedence
+	}
+
+	// 3. --project flag (singular) → single project
+	if projectFlag != "" {
+		return []string{projectFlag}, nil
+	}
+
+	// 4. TTY → prompt user; if y, launch TUI project selector
+	if isTTY {
+		fmt.Print("Show projects pending sync? [y/n]: ")
+		var answer string
+		fmt.Scanln(&answer)
+		answer = strings.ToLower(strings.TrimSpace(answer))
+		if answer == "y" || answer == "yes" {
+			stats, err := storeStats(s)
+			if err != nil {
+				return nil, fmt.Errorf("get projects: %w", err)
+			}
+			if len(stats.Projects) == 0 {
+				fmt.Println("No projects found in memory.")
+				return []string{}, nil // empty = nothing to sync → "Sync cancelled."
+			}
+			resultCh := make(chan []string, 1)
+			m := tui.NewProjectSelector(s, stats.Projects, resultCh)
+			p := newTeaProgram(m)
+			if _, err := runTeaProgram(p); err != nil {
+				return nil, fmt.Errorf("project selector: %w", err)
+			}
+			selected := <-resultCh
+			// nil means cancelled (q/esc or enter with zero items checked) →
+			// fall through to CWD default below
+			if selected != nil {
+				return selected, nil
+			}
+			// fall through to CWD default
+		}
+		// User answered "n" or cancelled → fall through to CWD default
+	}
+
+	// 5. CWD default → use current directory name as project filter
+	if cwd, err := os.Getwd(); err == nil {
+		return []string{filepath.Base(cwd)}, nil
+	}
+
+	// If we can't determine CWD, export all as a safe fallback
+	return nil, nil
 }
 
 func cmdSetup() {

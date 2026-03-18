@@ -579,3 +579,102 @@ func TestCmdSearchLocalMode(t *testing.T) {
 		t.Fatalf("expected local search results, got: %q", stdout)
 	}
 }
+
+// TestResolveProjects covers the full precedence chain of resolveProjects().
+// The isTTY=true path (interactive TUI) is not unit-tested here because it
+// requires a real terminal and interactive input — that path is covered by
+// manual/integration testing only.
+func TestResolveProjects(t *testing.T) {
+	cfg := testConfig(t)
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	tests := []struct {
+		name         string
+		doAll        bool
+		projectsFlag string
+		projectFlag  string
+		isTTY        bool
+		cwdName      string  // if non-empty, chdir to a temp dir with this base name
+		wantNil      bool    // true = expect nil return
+		wantProjects []string
+	}{
+		{
+			name:         "doAll=true returns nil regardless of flags",
+			doAll:        true,
+			wantNil:      true,
+		},
+		{
+			name:         "doAll=true wins over --projects flag",
+			doAll:        true,
+			projectsFlag: "engram,dots",
+			wantNil:      true,
+		},
+		{
+			name:         "projectsFlag comma-separated returns trimmed deduplicated list",
+			projectsFlag: "engram,dots",
+			wantProjects: []string{"engram", "dots"},
+		},
+		{
+			name:         "projectsFlag with extra whitespace is trimmed",
+			projectsFlag: " engram , dots ",
+			wantProjects: []string{"engram", "dots"},
+		},
+		{
+			name:         "projectsFlag with duplicates deduplicates",
+			projectsFlag: "engram,engram,dots",
+			wantProjects: []string{"engram", "dots"},
+		},
+		{
+			name:        "projectFlag (singular) returns single-item slice",
+			projectFlag: "myproject",
+			wantProjects: []string{"myproject"},
+		},
+		{
+			name:         "non-TTY with no flags returns CWD-based default",
+			isTTY:        false,
+			cwdName:      "my-repo",
+			wantProjects: []string{"my-repo"},
+		},
+		{
+			name:         "projectsFlag takes precedence over projectFlag",
+			projectsFlag: "alpha,beta",
+			projectFlag:  "gamma",
+			wantProjects: []string{"alpha", "beta"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.cwdName != "" {
+				dir := filepath.Join(t.TempDir(), tc.cwdName)
+				if err := os.MkdirAll(dir, 0755); err != nil {
+					t.Fatalf("mkdir: %v", err)
+				}
+				withCwd(t, dir)
+			}
+
+			got, err := resolveProjects(s, tc.doAll, tc.projectsFlag, tc.projectFlag, tc.isTTY)
+			if err != nil {
+				t.Fatalf("resolveProjects returned error: %v", err)
+			}
+			if tc.wantNil {
+				if got != nil {
+					t.Fatalf("expected nil, got %v", got)
+				}
+				return
+			}
+			if len(got) != len(tc.wantProjects) {
+				t.Fatalf("got %v, want %v", got, tc.wantProjects)
+			}
+			for i, want := range tc.wantProjects {
+				if got[i] != want {
+					t.Fatalf("got[%d] = %q, want %q", i, got[i], want)
+				}
+			}
+		})
+	}
+}
