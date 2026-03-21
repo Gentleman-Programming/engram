@@ -59,7 +59,12 @@ The OpenCode plugin uses a defense-in-depth strategy to ensure memories survive 
 
 ## Claude Code Plugin
 
-For [Claude Code](https://docs.anthropic.com/en/docs/claude-code) users, a plugin adds enhanced session management using Claude's native hook and skill system:
+For [Claude Code](https://docs.anthropic.com/en/docs/claude-code) users, a plugin adds enhanced session management using Claude's native hook and skill system.
+
+> **Minimum CLI version:** The marketplace plugin requires **Claude Code CLI >= 2.1.70**. Check with `claude --version` and update with `claude update` if needed. Older versions fail with:
+> ```
+> ✘ Failed to add marketplace: Invalid schema: plugins.0.source: Invalid input
+> ```
 
 ```bash
 # Install via Claude Code marketplace (recommended)

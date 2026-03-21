@@ -66,6 +66,11 @@ See [Plugins → OpenCode Plugin](PLUGINS.md#opencode-plugin) for details on wha
 
 > **Prerequisite**: Install the `engram` binary first (via [Homebrew](INSTALLATION.md#homebrew-macos--linux), [Windows binary](INSTALLATION.md#windows), [binary download](INSTALLATION.md#download-binary-all-platforms), or [source](INSTALLATION.md#install-from-source-macos--linux)). The plugin needs it for the MCP server and session tracking scripts.
 
+> **Minimum CLI version:** The marketplace plugin requires **Claude Code CLI >= 2.1.70**. Check with `claude --version` and update with `claude update` if needed. Older versions fail with:
+> ```
+> ✘ Failed to add marketplace: Invalid schema: plugins.0.source: Invalid input
+> ```
+
 **Option A: Plugin via marketplace (recommended)** — full session management, auto-import, compaction recovery, and Memory Protocol skill:
 
 ```bash
