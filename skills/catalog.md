@@ -17,3 +17,4 @@
 - visual-language: TUI-aligned visual identity and spacing rules.
 - business-rules: sync, admin policy, and product rule guardrails.
 - cultural-norms: collaboration and quality norms for contributors and agents.
+- backlog-triage: audit open issues/PRs, classify items, and produce an actionable maintainer report.

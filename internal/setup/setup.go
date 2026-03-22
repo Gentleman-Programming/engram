@@ -1,9 +1,15 @@
 // Package setup handles agent plugin installation.
 //
-// - OpenCode: copies embedded plugin file to ~/.config/opencode/plugins/
-// - Claude Code: runs `claude plugin marketplace add` + `claude plugin install`
-// - Gemini CLI: injects MCP registration in ~/.gemini/settings.json
-// - Codex: injects MCP registration in ~/.codex/config.toml
+//   - OpenCode: copies embedded plugin file to ~/.config/opencode/plugins/
+//     (patching ENGRAM_BIN to bake in the absolute binary path as a final
+//     fallback) and injects MCP registration in opencode.json using the
+//     resolved absolute binary path so child processes never require PATH
+//     resolution in headless/systemd environments.
+//   - Claude Code: runs `claude plugin marketplace add` + `claude plugin install`,
+//     then writes a durable MCP config to ~/.claude/mcp/engram.json using the
+//     absolute binary path so the subprocess never needs PATH resolution.
+//   - Gemini CLI: injects MCP registration in ~/.gemini/settings.json
+//   - Codex: injects MCP registration in ~/.codex/config.toml
 package setup
 
 import (
@@ -18,10 +24,11 @@ import (
 )
 
 var (
-	runtimeGOOS = runtime.GOOS
-	userHomeDir = os.UserHomeDir
-	lookPathFn  = exec.LookPath
-	runCommand  = func(name string, args ...string) ([]byte, error) {
+	runtimeGOOS  = runtime.GOOS
+	userHomeDir  = os.UserHomeDir
+	lookPathFn   = exec.LookPath
+	osExecutable = os.Executable
+	runCommand   = func(name string, args ...string) ([]byte, error) {
 		return exec.Command(name, args...).CombinedOutput()
 	}
 	openCodeReadFile = func(path string) ([]byte, error) {
@@ -36,10 +43,11 @@ var (
 	injectOpenCodeMCPFn                = injectOpenCodeMCP
 	injectGeminiMCPFn                  = injectGeminiMCP
 	writeGeminiSystemPromptFn          = writeGeminiSystemPrompt
-writeCodexMemoryInstructionFilesFn = writeCodexMemoryInstructionFiles
+	writeCodexMemoryInstructionFilesFn = writeCodexMemoryInstructionFiles
 	injectCodexMCPFn                   = injectCodexMCP
 	injectCodexMemoryConfigFn          = injectCodexMemoryConfig
 	addClaudeCodeAllowlistFn           = AddClaudeCodeAllowlist
+	writeClaudeCodeUserMCPFn           = writeClaudeCodeUserMCP
 )
 
 //go:embed plugins/opencode/*
@@ -78,7 +86,20 @@ var claudeCodeMCPTools = []string{
 	"mcp__plugin_engram_engram__mem_update",
 }
 
+// codexEngramBlock is the canonical Codex TOML MCP block.
+// Command is always the bare "engram" name in this constant because
+// upsertCodexEngramBlock generates the actual content via codexEngramBlockStr()
+// which uses resolveEngramCommand() at runtime. This constant is kept for tests
+// that verify idempotency against the already-written string when os.Executable
+// returns "engram" (fallback path).
 const codexEngramBlock = "[mcp_servers.engram]\ncommand = \"engram\"\nargs = [\"mcp\", \"--tools=agent\"]"
+
+// codexEngramBlockStr returns the Codex TOML block for the engram MCP server,
+// using the resolved absolute binary path from os.Executable().
+func codexEngramBlockStr() string {
+	cmd := resolveEngramCommand()
+	return "[mcp_servers.engram]\ncommand = " + fmt.Sprintf("%q", cmd) + "\nargs = [\"mcp\", \"--tools=agent\"]"
+}
 
 const memoryProtocolMarkdown = `## Engram Persistent Memory — Protocol
 
@@ -232,6 +253,42 @@ func Install(agentName string) (*Result, error) {
 
 // ─── OpenCode ────────────────────────────────────────────────────────────────
 
+// patchEngramBINLine rewrites the ENGRAM_BIN constant declaration in the
+// plugin source so the installed copy contains an absolute fallback path.
+//
+// Original line in source:
+//
+//	const ENGRAM_BIN = process.env.ENGRAM_BIN ?? "engram"
+//
+// Patched line in installed copy:
+//
+//	const ENGRAM_BIN = process.env.ENGRAM_BIN ?? Bun.which("engram") ?? "/abs/path/engram"
+//
+// Priority (left to right, first truthy wins):
+//  1. ENGRAM_BIN env var — explicit user override, always respected.
+//  2. Bun.which("engram") — runtime PATH lookup; works in interactive shells.
+//  3. Absolute baked-in path — works in headless/systemd where PATH is stripped.
+//
+// If absBin is already bare "engram" (os.Executable fallback) we don't add it
+// as the third fallback because it would be redundant with Bun.which("engram").
+func patchEngramBINLine(src []byte, absBin string) []byte {
+	const marker = `const ENGRAM_BIN = process.env.ENGRAM_BIN ?? "engram"`
+
+	var replacement string
+	if absBin == "engram" {
+		// os.Executable failed — add Bun.which but no baked-in absolute path
+		replacement = `const ENGRAM_BIN = process.env.ENGRAM_BIN ?? Bun.which("engram") ?? "engram"`
+	} else {
+		// Normal case: bake in the absolute path as final fallback
+		replacement = fmt.Sprintf(
+			`const ENGRAM_BIN = process.env.ENGRAM_BIN ?? Bun.which("engram") ?? %q`,
+			absBin,
+		)
+	}
+
+	return []byte(strings.Replace(string(src), marker, replacement, 1))
+}
+
 func installOpenCode() (*Result, error) {
 	dir := openCodePluginDir()
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -243,6 +300,14 @@ func installOpenCode() (*Result, error) {
 		return nil, fmt.Errorf("read embedded engram.ts: %w", err)
 	}
 
+	// Patch ENGRAM_BIN in the installed copy so the plugin can find the binary
+	// in headless/systemd environments where PATH may not include user tool dirs.
+	// The installed file gets a baked-in absolute path while still honoring
+	// process.env.ENGRAM_BIN (explicit user override) and Bun.which("engram")
+	// (runtime PATH lookup when PATH is available). The source plugin file is
+	// not modified — it keeps the simple env-var form for development flexibility.
+	data = patchEngramBINLine(data, resolveEngramCommand())
+
 	dest := filepath.Join(dir, "engram.ts")
 	if err := openCodeWriteFileFn(dest, data, 0644); err != nil {
 		return nil, fmt.Errorf("write %s: %w", dest, err)
@@ -252,9 +317,10 @@ func installOpenCode() (*Result, error) {
 	files := 1
 	if err := injectOpenCodeMCPFn(); err != nil {
 		// Non-fatal: plugin works, MCP just needs manual config
+		cmd := resolveEngramCommand()
 		fmt.Fprintf(os.Stderr, "warning: could not auto-register MCP server in opencode.json: %v\n", err)
 		fmt.Fprintf(os.Stderr, "  Add manually to your opencode.json under \"mcp\":\n")
-		fmt.Fprintf(os.Stderr, "  \"engram\": { \"type\": \"local\", \"command\": [\"engram\", \"mcp\", \"--tools=agent\"], \"enabled\": true }\n")
+		fmt.Fprintf(os.Stderr, "  \"engram\": { \"type\": \"local\", \"command\": [%q, \"mcp\", \"--tools=agent\"], \"enabled\": true }\n", cmd)
 	} else {
 		files = 2
 	}
@@ -303,10 +369,12 @@ func injectOpenCodeMCP() error {
 		return nil // already registered, nothing to do
 	}
 
-	// Add engram MCP entry (agent profile — only tools agents need)
+	// Add engram MCP entry (agent profile — only tools agents need).
+	// Use resolveEngramCommand() so Windows users (and headless Linux setups
+	// where PATH is not inherited) get the absolute binary path.
 	engramEntry := map[string]interface{}{
 		"type":    "local",
-		"command": []string{"engram", "mcp", "--tools=agent"},
+		"command": []string{resolveEngramCommand(), "mcp", "--tools=agent"},
 		"enabled": true,
 	}
 	entryJSON, err := jsonMarshalFn(engramEntry)
@@ -439,11 +507,73 @@ func installClaudeCode() (*Result, error) {
 		}
 	}
 
+	// Step 3: Write a durable user-level MCP config at ~/.claude/mcp/engram.json
+	// with the absolute binary path. This survives plugin cache auto-updates and
+	// works on Windows where MCP subprocesses may not inherit PATH.
+	files := 0
+	if err := writeClaudeCodeUserMCPFn(); err != nil {
+		// Non-fatal: the plugin still works via the plugin cache .mcp.json.
+		// Warn so Windows users know to check their PATH if tools don't appear.
+		fmt.Fprintf(os.Stderr, "warning: could not write user MCP config (~/.claude/mcp/engram.json): %v\n", err)
+		fmt.Fprintf(os.Stderr, "  The plugin is installed but MCP may not start on Windows if engram is not in PATH.\n")
+	} else {
+		files = 1
+	}
+
 	return &Result{
 		Agent:       "claude-code",
-		Destination: "claude plugin system (managed by Claude Code)",
-		Files:       0, // managed by claude, not by us
+		Destination: claudeCodeMCPDir(),
+		Files:       files,
 	}, nil
+}
+
+// claudeCodeMCPDir returns the directory for user-level Claude Code MCP configs.
+// Files placed here are NOT managed by the plugin system and survive plugin updates.
+func claudeCodeMCPDir() string {
+	home, _ := userHomeDir()
+	return filepath.Join(home, ".claude", "mcp")
+}
+
+// claudeCodeUserMCPPath returns the path for the engram MCP config in the
+// user-level MCP directory.
+func claudeCodeUserMCPPath() string {
+	return filepath.Join(claudeCodeMCPDir(), "engram.json")
+}
+
+// writeClaudeCodeUserMCP writes ~/.claude/mcp/engram.json with the absolute
+// path to the engram binary. This is idempotent — it always writes (overwrites)
+// so that if the binary moves (e.g. brew upgrade), running setup again fixes it.
+// Using os.Executable() instead of PATH lookup ensures the correct binary is
+// referenced even when PATH is not propagated to MCP subprocesses (Windows).
+func writeClaudeCodeUserMCP() error {
+	exe, err := osExecutable()
+	if err != nil {
+		return fmt.Errorf("resolve binary path: %w", err)
+	}
+	// Resolve any symlinks so the path is stable across package manager updates.
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+
+	entry := map[string]any{
+		"command": exe,
+		"args":    []string{"mcp", "--tools=agent"},
+	}
+	data, err := jsonMarshalIndentFn(entry, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal mcp config: %w", err)
+	}
+
+	dir := claudeCodeMCPDir()
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("create mcp dir: %w", err)
+	}
+
+	if err := writeFileFn(claudeCodeUserMCPPath(), data, 0644); err != nil {
+		return fmt.Errorf("write mcp config: %w", err)
+	}
+
+	return nil
 }
 
 func claudeCodeSettingsPath() string {
@@ -593,7 +723,7 @@ func injectGeminiMCP(configPath string) error {
 	}
 
 	engramEntry := map[string]any{
-		"command": "engram",
+		"command": resolveEngramCommand(),
 		"args":    []string{"mcp", "--tools=agent"},
 	}
 	entryJSON, err := jsonMarshalFn(engramEntry)
@@ -618,6 +748,22 @@ func injectGeminiMCP(configPath string) error {
 	}
 
 	return nil
+}
+
+// resolveEngramCommand returns the absolute path to the engram binary.
+// It uses os.Executable() so that headless/systemd environments (where PATH
+// is not reliably inherited by child processes) still find the binary.
+// EvalSymlinks makes the path stable across package-manager upgrades.
+// Falls back to bare "engram" only if os.Executable() itself fails.
+func resolveEngramCommand() string {
+	exe, err := osExecutable()
+	if err != nil {
+		return "engram" // fallback to PATH-based name
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	return exe
 }
 
 func writeGeminiSystemPrompt() error {
@@ -771,11 +917,12 @@ func upsertCodexEngramBlock(content string) string {
 	}
 
 	base := strings.TrimSpace(strings.Join(kept, "\n"))
+	block := codexEngramBlockStr()
 	if base == "" {
-		return codexEngramBlock + "\n"
+		return block + "\n"
 	}
 
-	return base + "\n\n" + codexEngramBlock + "\n"
+	return base + "\n\n" + block + "\n"
 }
 
 func upsertTopLevelTOMLString(content, key, value string) string {

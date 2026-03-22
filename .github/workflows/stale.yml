@@ -1,0 +1,41 @@
+name: Stale Issues and PRs
+
+on:
+  schedule:
+    - cron: '0 9 * * 1'  # Every Monday at 9am UTC
+  workflow_dispatch:
+
+jobs:
+  stale:
+    name: Mark and close stale items
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/stale@v9
+        with:
+          stale-issue-message: >
+            This issue has been inactive for 30 days. If it's still relevant,
+            please leave a comment with updated context or a reproduction.
+            Otherwise it will be closed in 14 days.
+
+            If you're waiting for a maintainer response, feel free to ping
+            with a comment — we don't auto-close approved issues.
+          close-issue-message: >
+            Closing due to inactivity. Feel free to reopen with updated
+            context, a fresh reproduction, or new information.
+          stale-pr-message: >
+            This PR has been inactive for 30 days. Please rebase, update it,
+            or leave a comment — otherwise it will be closed in 14 days.
+          close-pr-message: >
+            Closing due to inactivity. Feel free to reopen when the PR is
+            ready to continue. If you need help getting unstuck, open a
+            Discussion or comment on the linked issue.
+          days-before-stale: 30
+          days-before-close: 14
+          stale-issue-label: 'status:stale'
+          stale-pr-label: 'status:stale'
+          exempt-issue-labels: 'status:approved,status:in-progress,priority:high,priority:critical'
+          exempt-pr-labels: 'status:in-progress'
+          close-issue-label: 'status:wontfix'

@@ -206,12 +206,22 @@ export const Engram: Plugin = async (ctx) => {
   // Track which sessions we've already ensured exist in engram
   const knownSessions = new Set<string>()
 
+  // Track sub-agent session IDs so we can suppress their tool-hook registrations.
+  // Sub-agents (Task() calls) have a parentID or a title ending in " subagent)".
+  // We must not register them as top-level Engram sessions — they cause session
+  // inflation (e.g. 170 sessions for 1 real conversation, issue #116).
+  const subAgentSessions = new Set<string>()
+
   /**
    * Ensure a session exists in engram. Idempotent — calls POST /sessions
    * which uses INSERT OR IGNORE. Safe to call multiple times.
+   *
+   * Silently skips sub-agent sessions (tracked in `subAgentSessions`).
    */
   async function ensureSession(sessionId: string): Promise<void> {
     if (!sessionId || knownSessions.has(sessionId)) return
+    // Do not register sub-agent sessions in Engram (issue #116).
+    if (subAgentSessions.has(sessionId)) return
     knownSessions.add(sessionId)
     await engramFetch("/sessions", {
       method: "POST",
@@ -272,18 +282,40 @@ export const Engram: Plugin = async (ctx) => {
     event: async ({ event }) => {
       // --- Session Created ---
       if (event.type === "session.created") {
-        const sessionId = (event.properties as any)?.id
-        if (sessionId) {
+        // Bug fix (#116): session data is nested under event.properties.info,
+        // not event.properties directly.
+        const info = (event.properties as any)?.info
+        const sessionId = info?.id
+        const parentID = info?.parentID
+        const title: string = info?.title ?? ""
+
+        // Sub-agent sessions (created via Task()) must NOT be registered as
+        // top-level Engram sessions. They cause massive session inflation
+        // (e.g. 170 sessions for 1 real conversation).
+        //
+        // Detection heuristics:
+        //   - parentID is set on all Task() sub-agent sessions
+        //   - title ends with " subagent)" as a secondary signal
+        const isSubAgent = !!parentID || title.endsWith(" subagent)")
+
+        if (sessionId && !isSubAgent) {
           await ensureSession(sessionId)
+        } else if (sessionId && isSubAgent) {
+          // Remember this as a sub-agent session so tool-hook calls
+          // to ensureSession() are also suppressed for it.
+          subAgentSessions.add(sessionId)
         }
       }
 
       // --- Session Deleted ---
       if (event.type === "session.deleted") {
-        const sessionId = (event.properties as any)?.id
+        // Same properties.info path as session.created.
+        const info = (event.properties as any)?.info
+        const sessionId = info?.id
         if (sessionId) {
           toolCounts.delete(sessionId)
           knownSessions.delete(sessionId)
+          subAgentSessions.delete(sessionId)
         }
       }
 

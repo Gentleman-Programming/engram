@@ -1,6 +1,6 @@
 name: Bug Report
 description: Report a bug in engram
-labels: ["bug", "status:needs-review"]
+labels: ["type:bug", "status:needs-review"]
 body:
   - type: markdown
     attributes:

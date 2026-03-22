@@ -79,10 +79,24 @@ All five checks must pass before a PR can be merged.
 |-------|---------|
 | `status:needs-review` | Awaiting maintainer review (auto-applied to new issues) |
 | `status:approved` | Approved for implementation — PRs can now be opened |
+| `status:in-progress` | Actively being worked on — auto-exempt from stale bot |
+| `status:blocked` | Blocked by another issue or external dependency |
+| `status:stale` | No activity for 30 days — auto-applied by stale bot |
+| `status:wontfix` | Intentionally not fixing — applied when closing stale/rejected items |
 
 ### Priority Labels (set by maintainers)
 
 `priority:high`, `priority:medium`, `priority:low`
+
+> Issues with `priority:high` and `status:approved` are never auto-closed by the stale bot.
+
+### Effort Labels (set by maintainers, for contributor guidance)
+
+| Label | Meaning |
+|-------|---------|
+| `effort:small` | < 1 hour — good starting point for new contributors |
+| `effort:medium` | 1–4 hours |
+| `effort:large` | > 4 hours or spans multiple files |
 
 ---
 
@@ -140,6 +154,31 @@ Use a **hybrid format**:
 Why hybrid:
 - Structured base protects correctness and architecture intent
 - Cookbook improves execution consistency for common flows
+
+---
+
+## Maintainer Triage Cadence
+
+Engram uses a lightweight, regular cadence so contributors know what to expect.
+
+| Activity | Frequency | What Happens |
+|----------|-----------|-------------|
+| New issue triage | Within 2 days | Maintainer labels + approves or closes |
+| PR review | Within 7 days | Maintainer reviews + requests changes or merges |
+| Backlog sweep | Weekly (Monday) | Stale bot runs; approved/blocked issues reassessed |
+| Label audit | Monthly | Orphan labels removed; accuracy check |
+| Dependabot PRs | Weekly | Review merged or deferred |
+
+If you haven't received a response within 7 days on a PR or issue, a single ping comment is welcome.
+
+---
+
+## What Gets Closed Without Merging
+
+- PRs opened without an approved issue
+- PRs that fail CI and aren't updated within 30 days
+- Issues that are vague, a duplicate, or belong in [Discussions](https://github.com/Gentleman-Programming/engram/discussions)
+- Issues with no response to a maintainer question after 14 days
 
 ---
 

@@ -1,6 +1,6 @@
 name: Feature Request
 description: Suggest a new feature or improvement for engram
-labels: ["enhancement", "status:needs-review"]
+labels: ["type:feature", "status:needs-review"]
 body:
   - type: markdown
     attributes:

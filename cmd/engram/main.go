@@ -82,7 +82,7 @@ var (
 	exitFunc = os.Exit
 
 	stdinScanner = func() *bufio.Scanner { return bufio.NewScanner(os.Stdin) }
-	userHomeDir        = os.UserHomeDir
+	userHomeDir  = os.UserHomeDir
 )
 
 func main() {
@@ -767,6 +767,8 @@ func printPostInstall(agent string) {
 		fmt.Println("\nNext steps:")
 		fmt.Println("  1. Restart Claude Code — the plugin is active immediately")
 		fmt.Println("  2. Verify with: claude plugin list")
+		fmt.Println("  3. MCP config written to ~/.claude/mcp/engram.json using absolute binary path")
+		fmt.Println("     (survives plugin auto-updates; re-run 'engram setup claude-code' if you move the binary)")
 	case "gemini-cli":
 		fmt.Println("\nNext steps:")
 		fmt.Println("  1. Restart Gemini CLI so MCP config is reloaded")

@@ -1,0 +1,85 @@
+# Label definitions for Gentleman-Programming/engram
+#
+# This file documents the canonical label set for this repo.
+# Apply labels via gh CLI (run from repo root, requires write access):
+#
+#   gh label create "<name>" --color "<hex>" --description "<desc>" --repo Gentleman-Programming/engram
+#
+# Or use a tool like github-label-sync:
+#   npx github-label-sync --labels .github/labels.yml Gentleman-Programming/engram
+
+# --- Type labels (required on every PR — pick exactly one) ---
+- name: "type:bug"
+  color: "d73a4a"
+  description: "Bug fix"
+
+- name: "type:feature"
+  color: "a2eeef"
+  description: "New feature"
+
+- name: "type:docs"
+  color: "0075ca"
+  description: "Documentation only"
+
+- name: "type:refactor"
+  color: "7B68EE"
+  description: "Code refactoring (no behavior change)"
+
+- name: "type:chore"
+  color: "ededed"
+  description: "Maintenance, tooling, dependencies"
+
+- name: "type:breaking-change"
+  color: "B60205"
+  description: "Breaking change — requires major version bump"
+
+# --- Status labels (set by maintainers) ---
+- name: "status:needs-review"
+  color: "fbca04"
+  description: "Awaiting maintainer review"
+
+- name: "status:approved"
+  color: "0E8A16"
+  description: "Approved for implementation"
+
+- name: "status:in-progress"
+  color: "1d76db"
+  description: "Actively being worked on — exempt from stale bot"
+
+- name: "status:blocked"
+  color: "b60205"
+  description: "Blocked by another issue or external dependency"
+
+- name: "status:stale"
+  color: "ededed"
+  description: "No activity for 30 days — auto-applied by stale bot"
+
+- name: "status:wontfix"
+  color: "ffffff"
+  description: "Intentionally not fixing"
+
+# --- Priority labels (set by maintainers) ---
+- name: "priority:high"
+  color: "B60205"
+  description: "High priority — exempt from stale bot"
+
+- name: "priority:medium"
+  color: "fbca04"
+  description: "Medium priority"
+
+- name: "priority:low"
+  color: "0E8A16"
+  description: "Low priority"
+
+# --- Effort labels (for contributor guidance) ---
+- name: "effort:small"
+  color: "d4edda"
+  description: "< 1 hour — good for new contributors"
+
+- name: "effort:medium"
+  color: "fff3cd"
+  description: "1–4 hours"
+
+- name: "effort:large"
+  color: "f8d7da"
+  description: "> 4 hours or spans multiple files"

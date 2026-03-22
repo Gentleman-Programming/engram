@@ -1,0 +1,80 @@
+name: Documentation Improvement
+description: Report missing, outdated, or unclear documentation
+labels: ["type:docs", "status:needs-review"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        # 📖 Documentation Improvement
+
+        Found something missing, wrong, or confusing in the docs? Help us improve.
+
+        > **How this works:**
+        > 1. You submit this issue → it gets `status:needs-review` automatically
+        > 2. A maintainer reviews it → adds `status:approved` if accepted
+        > 3. Only then should a PR be opened to fix it
+        >
+        > See [CONTRIBUTING.md](https://github.com/Gentleman-Programming/engram/blob/main/CONTRIBUTING.md) for the full workflow.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: "📋 Pre-flight Checks"
+      description: Please confirm before submitting.
+      options:
+        - label: I searched [existing issues](https://github.com/Gentleman-Programming/engram/issues) and this is not a duplicate
+          required: true
+        - label: I have a link to the specific doc page or section that needs improvement
+          required: true
+
+  - type: dropdown
+    id: doc_file
+    attributes:
+      label: "📄 Which Document?"
+      description: Where is the documentation issue?
+      options:
+        - README.md
+        - CONTRIBUTING.md
+        - docs/INSTALLATION.md
+        - docs/AGENT-SETUP.md
+        - docs/ARCHITECTURE.md
+        - docs/PLUGINS.md
+        - docs/COMPARISON.md
+        - DOCS.md
+        - A skill in skills/
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: "🔍 What's Wrong or Missing?"
+      description: What is incorrect, unclear, or absent? Include the specific section if possible.
+      placeholder: |
+        The section "X" in docs/AGENT-SETUP.md says "..." but this is incorrect because...
+        The README is missing an example for...
+    validations:
+      required: true
+
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: "💡 Suggested Improvement"
+      description: What should it say instead? Draft the correct content if you can.
+      placeholder: |
+        It should say...
+        Example:
+        ```bash
+        engram <corrected-command>
+        ```
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: "📎 Additional Context"
+      description: Links, screenshots, or anything else that helps.
+    validations:
+      required: false
