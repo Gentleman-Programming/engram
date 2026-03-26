@@ -88,7 +88,13 @@ Call `mem_save` IMMEDIATELY after ANY of these:
 - User mentions a topic you have no context on
 - User's FIRST message references the project, a feature, or a problem — call `mem_search` with keywords from their message to check for prior work before responding
 
-### SESSION CLOSE — before saying "done"/"listo":
+### SUB-AGENT SCOPE
+If you are a sub-agent or delegated task (launched by an orchestrator/parent agent):
+- DO NOT call `mem_session_start`, `mem_session_end`, or `mem_session_summary`
+- You MAY call `mem_save` once for important discoveries, and `mem_search`/`mem_context` as needed
+- Return your result to the parent agent when done — that is your only "close" action
+
+### SESSION CLOSE — TOP-LEVEL AGENT ONLY, before saying "done"/"listo":
 Call `mem_session_summary` with: Goal, Discoveries, Accomplished, Next Steps, Relevant Files.
 PROTOCOL
 

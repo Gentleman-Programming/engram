@@ -60,12 +60,18 @@ Call `mem_save` IMMEDIATELY after ANY of these:
 - Starting work on something that might have been done before
 - User mentions a topic you have no context on
 
-### SESSION CLOSE — before saying "done"/"listo":
+### SUB-AGENT SCOPE
+If you are a sub-agent or delegated task (launched by an orchestrator/parent agent):
+- DO NOT call `mem_session_start`, `mem_session_end`, or `mem_session_summary`
+- You MAY call `mem_save` once for important discoveries, and `mem_search`/`mem_context` as needed
+- Return your result to the parent agent when done — that is your only "close" action
+
+### SESSION CLOSE — TOP-LEVEL AGENT ONLY, before saying "done"/"listo":
 Call `mem_session_summary` with: Goal, Discoveries, Accomplished, Next Steps, Relevant Files.
 
 ---
 
-CRITICAL INSTRUCTION POST-COMPACTION — follow these steps IN ORDER:
+CRITICAL INSTRUCTION POST-COMPACTION (TOP-LEVEL AGENT ONLY) — follow these steps IN ORDER:
 PROTOCOL
 
 printf "\n1. FIRST: Call mem_session_summary with the content of the compacted summary above. Use project: '%s'.\n" "$PROJECT"

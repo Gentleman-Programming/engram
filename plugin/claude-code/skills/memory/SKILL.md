@@ -88,9 +88,20 @@ Also search memory PROACTIVELY when:
 - The user mentions a topic you have no context on — check if past sessions covered it
 - The user's FIRST message references the project, a feature, or a problem — call `mem_search` with keywords from their message to check for prior work before responding
 
-## SESSION CLOSE PROTOCOL (mandatory)
+## SUB-AGENT / DELEGATED TASK SCOPE
 
-Before ending a session or saying "done" / "listo" / "that's it", you MUST:
+If you are running as a sub-agent, delegated task, or background worker (i.e., you were launched by an orchestrator or parent agent to perform a specific task):
+- **DO NOT** call `mem_session_start`, `mem_session_end`, or `mem_session_summary`
+- **DO NOT** follow the SESSION CLOSE PROTOCOL below
+- You MAY call `mem_save` for genuinely important discoveries (once, not repeatedly)
+- You MAY call `mem_search` or `mem_context` if needed for your task
+- When your task is complete, return your result to the parent agent. That is your only "close" action.
+
+Session lifecycle (start, summary, end) is the responsibility of the TOP-LEVEL agent that directly interacts with the human user.
+
+## SESSION CLOSE PROTOCOL (mandatory — TOP-LEVEL AGENT ONLY)
+
+Before ending a TOP-LEVEL session (direct human conversation) or saying "done" / "listo" / "that's it", you MUST:
 1. Call `mem_session_summary` with this structure:
 
 ## Goal
@@ -113,7 +124,7 @@ Before ending a session or saying "done" / "listo" / "that's it", you MUST:
 
 This is NOT optional. If you skip this, the next session starts blind.
 
-## AFTER COMPACTION
+## AFTER COMPACTION (TOP-LEVEL AGENT ONLY)
 
 If you see a message about compaction or context reset:
 1. IMMEDIATELY call `mem_session_summary` with the compacted summary content — this persists what was done before compaction
