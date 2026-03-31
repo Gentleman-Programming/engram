@@ -15,8 +15,12 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/store"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -56,6 +60,10 @@ var ProfileAgent = map[string]bool{
 	"mem_capture_passive":   true, // extract learnings from text — referenced in Gemini/Codex protocol
 	"mem_save_prompt":       true, // save user prompts
 	"mem_update":            true, // update observation by ID — skills say "use mem_update when you have an exact ID to correct"
+	"mem_vector_search":     true, // semantic search via engram-vector sidecar on :7438
+	"mem_promote":           true, // promote observation to hot cache
+	"mem_demote":            true, // remove observation from hot cache
+	"mem_hot":               true, // list all hot cache observations
 }
 
 // ProfileAdmin contains tools for TUI, dashboards, and manual curation
@@ -123,10 +131,13 @@ CORE TOOLS (always available — use without ToolSearch):
   mem_session_summary — save end-of-session summary (MANDATORY before saying "done")
   mem_get_observation — get full untruncated content of a search result by ID
   mem_save_prompt — save user prompt for context
+  mem_promote — promote observation to hot cache (always in context)
+  mem_demote — remove observation from hot cache (search-only)
+  mem_hot — list all hot cache observations
 
 DEFERRED TOOLS (use ToolSearch when needed):
   mem_update, mem_suggest_topic_key, mem_session_start, mem_session_end,
-  mem_stats, mem_delete, mem_timeline, mem_capture_passive
+  mem_stats, mem_delete, mem_timeline, mem_capture_passive, mem_vector_search
 
 PROACTIVE SAVE RULE: Call mem_save immediately after ANY decision, bug fix, discovery, or convention — not just when asked.`
 
@@ -581,6 +592,69 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 			handleCapturePassive(s),
 		)
 	}
+
+	// ─── mem_vector_search (profile: agent, deferred) ────────────────────
+	if shouldRegister("mem_vector_search", allowlist) {
+		srv.AddTool(
+			mcp.NewTool("mem_vector_search",
+				mcp.WithDescription("Semantic vector search over memories using embeddings. Use this when keyword search (mem_search) misses — finds memories by meaning, not exact words. E.g. searching 'authentication tokens' finds 'switched from sessions to JWT'."),
+				mcp.WithDeferLoading(true),
+				mcp.WithTitleAnnotation("Vector Search Memory"),
+				mcp.WithReadOnlyHintAnnotation(true),
+				mcp.WithDestructiveHintAnnotation(false),
+				mcp.WithIdempotentHintAnnotation(true),
+				mcp.WithOpenWorldHintAnnotation(false),
+				mcp.WithString("query",
+					mcp.Required(),
+					mcp.Description("Search query — natural language concept or description"),
+				),
+				mcp.WithString("project",
+					mcp.Description("Filter by project name"),
+				),
+				mcp.WithNumber("limit",
+					mcp.Description("Max results (default: 10)"),
+				),
+			),
+			handleVectorSearch(s),
+		)
+	}
+
+	// ─── mem_promote (profile: agent) ────────────────────────────────────
+	if shouldRegister("mem_promote", allowlist) {
+		srv.AddTool(
+			mcp.NewTool("mem_promote",
+				mcp.WithDescription("Promote an observation to the hot cache (always in context). Use for important decisions, preferences, or references you want available every session."),
+				mcp.WithTitleAnnotation("Promote to Hot Cache"),
+				mcp.WithNumber("id", mcp.Required(), mcp.Description("The observation ID to promote")),
+			),
+			handlePromote(s),
+		)
+	}
+
+	// ─── mem_demote (profile: agent) ─────────────────────────────────────
+	if shouldRegister("mem_demote", allowlist) {
+		srv.AddTool(
+			mcp.NewTool("mem_demote",
+				mcp.WithDescription("Remove an observation from the hot cache (search-only). Use to free hot cache space or remove outdated context."),
+				mcp.WithTitleAnnotation("Demote from Hot Cache"),
+				mcp.WithNumber("id", mcp.Required(), mcp.Description("The observation ID to demote")),
+			),
+			handleDemote(s),
+		)
+	}
+
+	// ─── mem_hot (profile: agent) ────────────────────────────────────────
+	if shouldRegister("mem_hot", allowlist) {
+		srv.AddTool(
+			mcp.NewTool("mem_hot",
+				mcp.WithDescription("List all observations in the hot cache (always in context). Optionally filter by project."),
+				mcp.WithTitleAnnotation("List Hot Cache"),
+				mcp.WithReadOnlyHintAnnotation(true),
+				mcp.WithString("project", mcp.Description("Filter by project name")),
+			),
+			handleHot(s),
+		)
+	}
 }
 
 // ─── Tool Handlers ───────────────────────────────────────────────────────────
@@ -624,6 +698,82 @@ func handleSearch(s *store.Store) server.ToolHandlerFunc {
 				i+1, r.ID, r.Type, r.Title,
 				preview,
 				r.CreatedAt, project, r.Scope)
+		}
+		if anyTruncated {
+			fmt.Fprintf(&b, "---\nResults above are previews (300 chars). To read the full content of a specific memory, call mem_get_observation(id: <ID>).\n")
+		}
+
+		return mcp.NewToolResultText(b.String()), nil
+	}
+}
+
+func handleVectorSearch(s *store.Store) server.ToolHandlerFunc {
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	type vectorResult struct {
+		ID    int64   `json:"id"`
+		Score float64 `json:"score"`
+	}
+
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		query, _ := req.GetArguments()["query"].(string)
+		project, _ := req.GetArguments()["project"].(string)
+		limit := intArg(req, "limit", 10)
+
+		// Build request to engram-vector sidecar
+		reqBody := map[string]any{
+			"query": query,
+			"limit": limit,
+		}
+		if project != "" {
+			reqBody["project"] = project
+		}
+		body, _ := json.Marshal(reqBody)
+
+		resp, err := client.Post("http://127.0.0.1:7438/search", "application/json",
+			strings.NewReader(string(body)))
+		if err != nil {
+			return mcp.NewToolResultError("Vector search unavailable (engram-vector sidecar not running). Use mem_search for keyword search."), nil
+		}
+		defer resp.Body.Close()
+
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return mcp.NewToolResultError("Failed to read vector search response"), nil
+		}
+
+		var results []vectorResult
+		if err := json.Unmarshal(respBody, &results); err != nil {
+			return mcp.NewToolResultError("Failed to parse vector search response"), nil
+		}
+
+		if len(results) == 0 {
+			return mcp.NewToolResultText(fmt.Sprintf("No semantic matches found for: %q", query)), nil
+		}
+
+		// Enrich results with observation data from the store
+		var b strings.Builder
+		fmt.Fprintf(&b, "Found %d semantic matches:\n\n", len(results))
+		anyTruncated := false
+		for i, vr := range results {
+			obs, err := s.GetObservation(vr.ID)
+			if err != nil {
+				fmt.Fprintf(&b, "[%d] #%d (score: %.2f) — [observation not found]\n\n", i+1, vr.ID, vr.Score)
+				continue
+			}
+			projectStr := ""
+			if obs.Project != nil {
+				projectStr = fmt.Sprintf(" | project: %s", *obs.Project)
+			}
+			preview := truncate(obs.Content, 300)
+			if len(obs.Content) > 300 {
+				anyTruncated = true
+				preview += " [preview]"
+			}
+			fmt.Fprintf(&b, "[%d] #%d (score: %.2f, %s) — %s\n    %s\n    %s%s | scope: %s\n\n",
+				i+1, obs.ID, vr.Score, obs.Type, obs.Title,
+				preview,
+				obs.CreatedAt, projectStr, obs.Scope)
 		}
 		if anyTruncated {
 			fmt.Fprintf(&b, "---\nResults above are previews (300 chars). To read the full content of a specific memory, call mem_get_observation(id: <ID>).\n")
@@ -1061,4 +1211,58 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return string(runes[:max]) + "..."
+}
+
+func handlePromote(s *store.Store) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		id := int64(req.GetArguments()["id"].(float64))
+		if err := s.SetHot(id, true); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		obs, err := s.GetObservation(id)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		out, _ := json.Marshal(obs)
+		return mcp.NewToolResultText(string(out)), nil
+	}
+}
+
+func handleDemote(s *store.Store) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		id := int64(req.GetArguments()["id"].(float64))
+		if err := s.SetHot(id, false); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		obs, err := s.GetObservation(id)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		out, _ := json.Marshal(obs)
+		return mcp.NewToolResultText(string(out)), nil
+	}
+}
+
+func handleHot(s *store.Store) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		project, _ := req.GetArguments()["project"].(string)
+		obs, err := s.HotObservations(project)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		type summary struct {
+			ID        int64   `json:"id"`
+			Title     string  `json:"title"`
+			Type      string  `json:"type"`
+			Project   *string `json:"project"`
+			UpdatedAt string  `json:"updated_at"`
+			Hot       bool    `json:"hot"`
+		}
+		summaries := make([]summary, len(obs))
+		for i, o := range obs {
+			summaries[i] = summary{o.ID, o.Title, o.Type, o.Project, o.UpdatedAt, o.Hot}
+		}
+		out, _ := json.Marshal(summaries)
+		return mcp.NewToolResultText(string(out)), nil
+	}
 }

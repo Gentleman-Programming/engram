@@ -928,7 +928,11 @@ func TestResolveToolsAgentProfile(t *testing.T) {
 		"mem_save", "mem_search", "mem_context", "mem_session_summary",
 		"mem_session_start", "mem_session_end", "mem_get_observation",
 		"mem_suggest_topic_key", "mem_capture_passive", "mem_save_prompt",
-		"mem_update", // skills explicitly say "use mem_update when you have an exact ID to correct"
+		"mem_update",       // skills explicitly say "use mem_update when you have an exact ID to correct"
+		"mem_vector_search", // semantic search via engram-vector sidecar
+		"mem_promote",      // promote observation to hot cache
+		"mem_demote",       // remove observation from hot cache
+		"mem_hot",          // list all hot cache observations
 	}
 	for _, tool := range expectedTools {
 		if !result[tool] {
@@ -1485,6 +1489,114 @@ func TestExplicitSessionIDBypassesDefault(t *testing.T) {
 	_, err = s.GetSession("manual-save-myproject")
 	if err == nil {
 		t.Fatal("manual-save-myproject should NOT exist when explicit session_id provided")
+	}
+}
+
+func TestHandlePromoteAndDemote(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("s-hot", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "s-hot",
+		Type:      "decision",
+		Title:     "Important decision",
+		Content:   "Use JWT for auth",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	// mem_promote: valid ID → returns observation with hot=true
+	promote := handlePromote(s)
+	promoteReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"id": float64(id),
+	}}}
+	promoteRes, err := promote(context.Background(), promoteReq)
+	if err != nil {
+		t.Fatalf("promote handler error: %v", err)
+	}
+	if promoteRes.IsError {
+		t.Fatalf("unexpected promote error: %s", callResultText(t, promoteRes))
+	}
+	if !strings.Contains(callResultText(t, promoteRes), `"hot":true`) {
+		t.Fatalf("expected hot=true in promote response, got %s", callResultText(t, promoteRes))
+	}
+
+	// mem_demote: hot observation → returns observation with hot=false
+	demote := handleDemote(s)
+	demoteReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"id": float64(id),
+	}}}
+	demoteRes, err := demote(context.Background(), demoteReq)
+	if err != nil {
+		t.Fatalf("demote handler error: %v", err)
+	}
+	if demoteRes.IsError {
+		t.Fatalf("unexpected demote error: %s", callResultText(t, demoteRes))
+	}
+	if !strings.Contains(callResultText(t, demoteRes), `"hot":false`) {
+		t.Fatalf("expected hot=false in demote response, got %s", callResultText(t, demoteRes))
+	}
+}
+
+func TestHandleHotObservations(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("s-hot2", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "s-hot2",
+		Type:      "decision",
+		Title:     "Hot observation",
+		Content:   "This one is hot",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	if err := s.SetHot(id, true); err != nil {
+		t.Fatalf("set hot: %v", err)
+	}
+
+	// mem_hot → returns list of hot observation summaries
+	hot := handleHot(s)
+	hotReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"project": "engram",
+	}}}
+	hotRes, err := hot(context.Background(), hotReq)
+	if err != nil {
+		t.Fatalf("hot handler error: %v", err)
+	}
+	if hotRes.IsError {
+		t.Fatalf("unexpected hot error: %s", callResultText(t, hotRes))
+	}
+	text := callResultText(t, hotRes)
+	if !strings.Contains(text, "Hot observation") {
+		t.Fatalf("expected hot observation title in response, got %s", text)
+	}
+	if !strings.Contains(text, `"hot":true`) {
+		t.Fatalf("expected hot=true in hot list response, got %s", text)
+	}
+}
+
+func TestHandlePromoteNonExistentID(t *testing.T) {
+	s := newMCPTestStore(t)
+
+	// mem_promote with non-existent ID → returns error
+	promote := handlePromote(s)
+	promoteReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"id": float64(9999),
+	}}}
+	promoteRes, err := promote(context.Background(), promoteReq)
+	if err != nil {
+		t.Fatalf("promote handler error: %v", err)
+	}
+	if !promoteRes.IsError {
+		t.Fatalf("expected promote to return tool error for non-existent ID")
 	}
 }
 
