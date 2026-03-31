@@ -4,7 +4,8 @@
 # Usage: bash import-auto-memory.sh [memory-dir]
 # Default memory-dir: ~/.claude/projects/-home-zach/memory/
 
-set -euo pipefail
+set -uo pipefail
+# Note: not using -e because individual command failures in the loop are handled explicitly
 
 ENGRAM_PORT="${ENGRAM_PORT:-7437}"
 ENGRAM_URL="http://127.0.0.1:${ENGRAM_PORT}"
@@ -61,9 +62,10 @@ for FILE in "$MEMORY_DIR"/*.md; do
     continue
   fi
 
-  # Extract body (everything after second ---)
-  BODY=$(echo "$CONTENT" | sed '1,/^---$/d' | sed '1,/^---$/d')
-  if [ -z "$BODY" ]; then
+  # Extract body (everything after second ---) using awk to count fences
+  BODY=$(echo "$CONTENT" | awk 'BEGIN{n=0} /^---$/{n++; next} n>=2{print}')
+  BODY_TRIMMED=$(echo "$BODY" | sed '/^$/d' | head -1)
+  if [ -z "$BODY_TRIMMED" ]; then
     echo "SKIP (empty body): $BASENAME"
     SKIPPED=$((SKIPPED + 1))
     continue
