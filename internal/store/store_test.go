@@ -4158,3 +4158,49 @@ func TestGarbageCollectHotPreservesManuallyPromotedNonProject(t *testing.T) {
 		t.Fatalf("expected 0 demoted for manually promoted decision, got %d", demoted)
 	}
 }
+
+func TestAddObservationNormalizesLearningType(t *testing.T) {
+	s := newTestStore(t)
+	s.CreateSession("s1", "testproj", "/tmp")
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1", Type: "learning", Title: "A learning", Content: "c", Project: "testproj",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	obs, _ := s.GetObservation(id)
+	if obs.Type != "discovery" {
+		t.Fatalf("expected type 'discovery', got %q", obs.Type)
+	}
+}
+
+func TestAddObservationAutoPromotesHot(t *testing.T) {
+	s := newTestStore(t)
+	s.CreateSession("s1", "testproj", "/tmp")
+	for _, typ := range []string{"user", "feedback", "reference"} {
+		id, err := s.AddObservation(AddObservationParams{
+			SessionID: "s1", Type: typ, Title: "Auto " + typ, Content: "c", Project: "testproj",
+		})
+		if err != nil {
+			t.Fatalf("type %s: %v", typ, err)
+		}
+		obs, _ := s.GetObservation(id)
+		if !obs.Hot {
+			t.Fatalf("expected type %q to be auto-promoted to hot", typ)
+		}
+	}
+}
+
+func TestAddObservationDoesNotAutoPromoteOtherTypes(t *testing.T) {
+	s := newTestStore(t)
+	s.CreateSession("s1", "testproj", "/tmp")
+	for _, typ := range []string{"decision", "bugfix", "project", "architecture"} {
+		id, _ := s.AddObservation(AddObservationParams{
+			SessionID: "s1", Type: typ, Title: "Cold " + typ, Content: "c", Project: "testproj",
+		})
+		obs, _ := s.GetObservation(id)
+		if obs.Hot {
+			t.Fatalf("expected type %q to NOT be auto-promoted", typ)
+		}
+	}
+}

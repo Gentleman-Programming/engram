@@ -962,6 +962,12 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 	normHash := hashNormalized(content)
 	topicKey := normalizeTopicKey(p.TopicKey)
 
+	// Normalize learning → discovery
+	obsType := p.Type
+	if strings.EqualFold(obsType, "learning") || strings.EqualFold(obsType, "learn") {
+		obsType = "discovery"
+	}
+
 	var observationID int64
 	err := s.withTx(func(tx *sql.Tx) error {
 		var obs *Observation
@@ -990,7 +996,7 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 					     last_seen_at = datetime('now'),
 					     updated_at = datetime('now')
 					 WHERE id = ?`,
-					p.Type,
+					obsType,
 					title,
 					content,
 					nullableString(p.ToolName),
@@ -1005,6 +1011,11 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 					return err
 				}
 				observationID = existingID
+				if shouldAutoPromote(obsType) {
+					if _, err := s.execHook(tx, "UPDATE observations SET hot = 1 WHERE id = ?", observationID); err != nil {
+						return err
+					}
+				}
 				return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpUpsert, observationPayloadFromObservation(obs))
 			}
 			if err != sql.ErrNoRows {
@@ -1025,7 +1036,7 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 			   AND datetime(created_at) >= datetime('now', ?)
 			 ORDER BY created_at DESC
 			 LIMIT 1`,
-			normHash, nullableString(p.Project), scope, p.Type, title, window,
+			normHash, nullableString(p.Project), scope, obsType, title, window,
 		).Scan(&existingID)
 		if err == nil {
 			if _, err := s.execHook(tx,
@@ -1053,7 +1064,7 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 		res, err := s.execHook(tx,
 			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, updated_at)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, datetime('now'), datetime('now'))`,
-			syncID, p.SessionID, p.Type, title, content,
+			syncID, p.SessionID, obsType, title, content,
 			nullableString(p.ToolName), nullableString(p.Project), scope, nullableString(topicKey), normHash,
 		)
 		if err != nil {
@@ -1062,6 +1073,11 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 		observationID, err = res.LastInsertId()
 		if err != nil {
 			return err
+		}
+		if shouldAutoPromote(obsType) {
+			if _, err := s.execHook(tx, "UPDATE observations SET hot = 1 WHERE id = ?", observationID); err != nil {
+				return err
+			}
 		}
 		obs, err = s.getObservationTx(tx, observationID)
 		if err != nil {
@@ -1262,6 +1278,16 @@ func (s *Store) HotObservations(project string) ([]Observation, error) {
 	}
 	query += " ORDER BY o.type, o.updated_at DESC"
 	return s.queryObservations(query, args...)
+}
+
+// shouldAutoPromote returns true for observation types that should be
+// automatically marked as hot when saved.
+func shouldAutoPromote(typ string) bool {
+	switch strings.ToLower(typ) {
+	case "user", "feedback", "reference":
+		return true
+	}
+	return false
 }
 
 // GarbageCollectHot demotes stale hot observations.
