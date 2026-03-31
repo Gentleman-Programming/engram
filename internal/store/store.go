@@ -1264,6 +1264,24 @@ func (s *Store) HotObservations(project string) ([]Observation, error) {
 	return s.queryObservations(query, args...)
 }
 
+// GarbageCollectHot demotes stale hot observations.
+// Only "project" type observations older than 30 days are demoted.
+// user, feedback, reference, and manually-promoted other types are preserved.
+func (s *Store) GarbageCollectHot() (int64, error) {
+	res, err := s.execHook(s.db, `
+		UPDATE observations
+		SET hot = 0
+		WHERE hot = 1
+		  AND deleted_at IS NULL
+		  AND type = 'project'
+		  AND updated_at < datetime('now', '-30 days')
+	`)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observation, error) {
 	var updated *Observation
 	err := s.withTx(func(tx *sql.Tx) error {

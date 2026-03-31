@@ -4104,3 +4104,57 @@ func TestHotObservationsExcludesDeleted(t *testing.T) {
 		t.Fatalf("expected 0 hot observations after soft delete, got %d", len(obs))
 	}
 }
+
+func TestGarbageCollectHotDemotesStaleProject(t *testing.T) {
+	s := newTestStore(t)
+	s.CreateSession("s1", "testproj", "/tmp")
+	id, _ := s.AddObservation(AddObservationParams{
+		SessionID: "s1", Type: "project", Title: "Old project", Content: "c", Project: "testproj",
+	})
+	s.SetHot(id, true)
+	_, err := s.db.Exec("UPDATE observations SET updated_at = datetime('now', '-31 days') WHERE id = ?", id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	demoted, err := s.GarbageCollectHot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if demoted != 1 {
+		t.Fatalf("expected 1 demoted, got %d", demoted)
+	}
+	obs, _ := s.HotObservations("")
+	if len(obs) != 0 {
+		t.Fatalf("expected 0 hot after GC, got %d", len(obs))
+	}
+}
+
+func TestGarbageCollectHotPreservesUserFeedbackReference(t *testing.T) {
+	s := newTestStore(t)
+	s.CreateSession("s1", "testproj", "/tmp")
+	for _, typ := range []string{"user", "feedback", "reference"} {
+		id, _ := s.AddObservation(AddObservationParams{
+			SessionID: "s1", Type: typ, Title: "Old " + typ, Content: "c", Project: "testproj",
+		})
+		s.SetHot(id, true)
+		s.db.Exec("UPDATE observations SET updated_at = datetime('now', '-90 days') WHERE id = ?", id)
+	}
+	demoted, _ := s.GarbageCollectHot()
+	if demoted != 0 {
+		t.Fatalf("expected 0 demoted for user/feedback/reference, got %d", demoted)
+	}
+}
+
+func TestGarbageCollectHotPreservesManuallyPromotedNonProject(t *testing.T) {
+	s := newTestStore(t)
+	s.CreateSession("s1", "testproj", "/tmp")
+	id, _ := s.AddObservation(AddObservationParams{
+		SessionID: "s1", Type: "decision", Title: "Old decision", Content: "c", Project: "testproj",
+	})
+	s.SetHot(id, true)
+	s.db.Exec("UPDATE observations SET updated_at = datetime('now', '-90 days') WHERE id = ?", id)
+	demoted, _ := s.GarbageCollectHot()
+	if demoted != 0 {
+		t.Fatalf("expected 0 demoted for manually promoted decision, got %d", demoted)
+	}
+}
