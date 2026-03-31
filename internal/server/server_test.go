@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -414,4 +415,61 @@ func TestHandleStatsReturnsInternalServerErrorOnLoaderError(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("expected 500 stats response, got %d", rec.Code)
 	}
+}
+
+func TestHandleHotObservations(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	st.CreateSession("s1", "proj", "/tmp")
+	st.AddObservation(store.AddObservationParams{
+		SessionID: "s1", Type: "user", Title: "Hot", Content: "c", Project: "proj",
+	})
+	req := httptest.NewRequest("GET", "/observations/hot", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != 200 { t.Fatalf("expected 200, got %d", w.Code) }
+	var obs []store.Observation
+	json.NewDecoder(w.Body).Decode(&obs)
+	if len(obs) < 1 { t.Fatalf("expected at least 1 hot observation") }
+}
+
+func TestHandleHotObservationsFilterByProject(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	st.CreateSession("s1", "proj-a", "/tmp")
+	st.CreateSession("s2", "proj-b", "/tmp")
+	st.AddObservation(store.AddObservationParams{SessionID: "s1", Type: "user", Title: "A", Content: "c", Project: "proj-a"})
+	st.AddObservation(store.AddObservationParams{SessionID: "s2", Type: "user", Title: "B", Content: "c", Project: "proj-b"})
+	req := httptest.NewRequest("GET", "/observations/hot?project=proj-a", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	var obs []store.Observation
+	json.NewDecoder(w.Body).Decode(&obs)
+	if len(obs) != 1 || obs[0].Title != "A" { t.Fatalf("expected 1 proj-a observation, got %d", len(obs)) }
+}
+
+func TestHandleSetHot(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	st.CreateSession("s1", "proj", "/tmp")
+	id, _ := st.AddObservation(store.AddObservationParams{SessionID: "s1", Type: "decision", Title: "Cold", Content: "c", Project: "proj"})
+	body := bytes.NewBufferString(`{"hot": true}`)
+	req := httptest.NewRequest("PUT", fmt.Sprintf("/observations/%d/hot", id), body)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != 200 { t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String()) }
+	obs, _ := st.HotObservations("")
+	if len(obs) != 1 { t.Fatalf("expected 1 hot observation after promote, got %d", len(obs)) }
+}
+
+func TestHandleGarbageCollectHot(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	req := httptest.NewRequest("POST", "/observations/hot/gc", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != 200 { t.Fatalf("expected 200, got %d", w.Code) }
+	var result map[string]any
+	json.NewDecoder(w.Body).Decode(&result)
+	if result["demoted"].(float64) != 0 { t.Fatalf("expected 0 demoted in fresh store, got %v", result["demoted"]) }
 }

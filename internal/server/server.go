@@ -109,6 +109,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PATCH /observations/{id}", s.handleUpdateObservation)
 	s.mux.HandleFunc("DELETE /observations/{id}", s.handleDeleteObservation)
 
+	// Hot cache
+	s.mux.HandleFunc("GET /observations/hot", s.handleHotObservations)
+	s.mux.HandleFunc("PUT /observations/{id}/hot", s.handleSetHot)
+	s.mux.HandleFunc("POST /observations/hot/gc", s.handleGarbageCollectHot)
+
 	// Search
 	s.mux.HandleFunc("GET /search", s.handleSearch)
 
@@ -560,6 +565,49 @@ func (s *Server) handleMigrateProject(w http.ResponseWriter, r *http.Request) {
 		"sessions":     result.SessionsUpdated,
 		"prompts":      result.PromptsUpdated,
 	})
+}
+
+// ─── Hot Cache ───────────────────────────────────────────────────────────────
+
+func (s *Server) handleHotObservations(w http.ResponseWriter, r *http.Request) {
+	project := r.URL.Query().Get("project")
+	obs, err := s.store.HotObservations(project)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	jsonResponse(w, http.StatusOK, obs)
+}
+
+func (s *Server) handleSetHot(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid observation id")
+		return
+	}
+	var body struct {
+		Hot bool `json:"hot"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if err := s.store.SetHot(id, body.Hot); err != nil {
+		jsonError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	s.notifyWrite()
+	jsonResponse(w, http.StatusOK, map[string]any{"id": id, "hot": body.Hot})
+}
+
+func (s *Server) handleGarbageCollectHot(w http.ResponseWriter, r *http.Request) {
+	demoted, err := s.store.GarbageCollectHot()
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"demoted": demoted})
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
