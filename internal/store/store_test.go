@@ -4035,3 +4035,72 @@ func TestMigrationAddsHotIndex(t *testing.T) {
 		t.Fatalf("expected idx_observations_hot index, got count=%d", count)
 	}
 }
+
+func TestHotObservations(t *testing.T) {
+	s := newTestStore(t)
+	s.CreateSession("s1", "testproj", "/tmp")
+
+	id1, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1", Type: "user", Title: "Hot one", Content: "content1", Project: "testproj",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.AddObservation(AddObservationParams{
+		SessionID: "s1", Type: "decision", Title: "Cold one", Content: "content2", Project: "testproj",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.SetHot(id1, true); err != nil {
+		t.Fatal(err)
+	}
+
+	obs, err := s.HotObservations("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(obs) != 1 {
+		t.Fatalf("expected 1 hot observation, got %d", len(obs))
+	}
+	if obs[0].Title != "Hot one" {
+		t.Fatalf("expected 'Hot one', got %q", obs[0].Title)
+	}
+}
+
+func TestHotObservationsFiltersByProject(t *testing.T) {
+	s := newTestStore(t)
+	s.CreateSession("s1", "proj-a", "/tmp")
+	s.CreateSession("s2", "proj-b", "/tmp")
+
+	id1, _ := s.AddObservation(AddObservationParams{
+		SessionID: "s1", Type: "user", Title: "A obs", Content: "c", Project: "proj-a",
+	})
+	id2, _ := s.AddObservation(AddObservationParams{
+		SessionID: "s2", Type: "user", Title: "B obs", Content: "c", Project: "proj-b",
+	})
+	s.SetHot(id1, true)
+	s.SetHot(id2, true)
+
+	obs, _ := s.HotObservations("proj-a")
+	if len(obs) != 1 || obs[0].Title != "A obs" {
+		t.Fatalf("expected 1 proj-a observation, got %d", len(obs))
+	}
+}
+
+func TestHotObservationsExcludesDeleted(t *testing.T) {
+	s := newTestStore(t)
+	s.CreateSession("s1", "testproj", "/tmp")
+
+	id1, _ := s.AddObservation(AddObservationParams{
+		SessionID: "s1", Type: "user", Title: "Will delete", Content: "c", Project: "testproj",
+	})
+	s.SetHot(id1, true)
+	s.DeleteObservation(id1, false) // soft delete
+
+	obs, _ := s.HotObservations("")
+	if len(obs) != 0 {
+		t.Fatalf("expected 0 hot observations after soft delete, got %d", len(obs))
+	}
+}
