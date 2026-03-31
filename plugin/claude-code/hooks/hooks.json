@@ -3,24 +3,13 @@
   "hooks": {
     "SessionStart": [
       {
-        "matcher": "startup|clear",
+        "matcher": "startup|clear|compact",
         "hooks": [
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/scripts/session-start.sh",
             "timeout": 10,
             "statusMessage": "Loading engram memory..."
-          }
-        ]
-      },
-      {
-        "matcher": "compact",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/post-compaction.sh",
-            "timeout": 10,
-            "statusMessage": "Recovering engram context after compaction..."
           }
         ]
       }
