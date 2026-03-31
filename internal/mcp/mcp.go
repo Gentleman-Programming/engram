@@ -1215,7 +1215,11 @@ func truncate(s string, max int) string {
 
 func handlePromote(s *store.Store) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		id := int64(req.GetArguments()["id"].(float64))
+		idRaw, ok := req.GetArguments()["id"].(float64)
+		if !ok {
+			return mcp.NewToolResultError("id is required and must be a number"), nil
+		}
+		id := int64(idRaw)
 		if err := s.SetHot(id, true); err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -1230,7 +1234,11 @@ func handlePromote(s *store.Store) server.ToolHandlerFunc {
 
 func handleDemote(s *store.Store) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		id := int64(req.GetArguments()["id"].(float64))
+		idRaw, ok := req.GetArguments()["id"].(float64)
+		if !ok {
+			return mcp.NewToolResultError("id is required and must be a number"), nil
+		}
+		id := int64(idRaw)
 		if err := s.SetHot(id, false); err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}

@@ -26,7 +26,7 @@ fi
 # Note: there is no GET /sessions/:id endpoint. Use GET /sessions/recent and filter.
 SESSION_START=""
 if [ -n "$SESSION_ID" ]; then
-  SESSION_START=$(curl -sf "${ENGRAM_URL}/sessions/recent?limit=10" --max-time 0.2 2>/dev/null \
+  SESSION_START=$(curl -sf "${ENGRAM_URL}/sessions/recent?limit=50" --max-time 0.2 2>/dev/null \
     | jq -r --arg sid "$SESSION_ID" '[.[] | select(.id == $sid)][0].started_at // empty' 2>/dev/null)
 fi
 

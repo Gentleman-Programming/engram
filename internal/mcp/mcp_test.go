@@ -977,12 +977,13 @@ func TestResolveToolsCombinedProfiles(t *testing.T) {
 		t.Fatal("expected non-nil allowlist for combined profiles")
 	}
 
-	// Should have all 14 tools
+	// Should have all 18 tools
 	allTools := []string{
 		"mem_save", "mem_search", "mem_context", "mem_session_summary",
 		"mem_session_start", "mem_session_end", "mem_get_observation",
 		"mem_suggest_topic_key", "mem_capture_passive", "mem_save_prompt",
 		"mem_update", "mem_delete", "mem_stats", "mem_timeline",
+		"mem_vector_search", "mem_promote", "mem_demote", "mem_hot",
 	}
 	for _, tool := range allTools {
 		if !result[tool] {
@@ -1168,6 +1169,7 @@ func TestNewServerWithToolsNilRegistersAll(t *testing.T) {
 		"mem_session_start", "mem_session_end", "mem_get_observation",
 		"mem_suggest_topic_key", "mem_capture_passive", "mem_save_prompt",
 		"mem_update", "mem_delete", "mem_stats", "mem_timeline",
+		"mem_vector_search", "mem_promote", "mem_demote", "mem_hot",
 	}
 
 	for _, name := range allTools {
@@ -1206,14 +1208,14 @@ func TestNewServerBackwardsCompatible(t *testing.T) {
 	srv := NewServer(s)
 	tools := srv.ListTools()
 
-	// 11 agent + 3 admin = 14 total
-	if len(tools) != 14 {
-		t.Errorf("NewServer should register all 14 tools, got %d", len(tools))
+	// 15 agent + 3 admin = 18 total
+	if len(tools) != 18 {
+		t.Errorf("NewServer should register all 18 tools, got %d", len(tools))
 	}
 }
 
 func TestProfileConsistency(t *testing.T) {
-	// Verify that agent + admin = all 14 tools
+	// Verify that agent + admin = all 18 tools
 	combined := make(map[string]bool)
 	for tool := range ProfileAgent {
 		combined[tool] = true
@@ -1222,8 +1224,8 @@ func TestProfileConsistency(t *testing.T) {
 		combined[tool] = true
 	}
 
-	if len(combined) != 14 {
-		t.Errorf("agent + admin should cover all 14 tools, got %d", len(combined))
+	if len(combined) != 18 {
+		t.Errorf("agent + admin should cover all 18 tools, got %d", len(combined))
 	}
 
 	// Verify no overlap between profiles

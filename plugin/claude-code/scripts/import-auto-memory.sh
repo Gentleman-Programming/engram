@@ -74,13 +74,14 @@ for FILE in "$MEMORY_DIR"/*.md; do
   EXISTING=$(curl -sf "${ENGRAM_URL}/search?q=${ENCODED_TITLE}&limit=3" --max-time 1 2>/dev/null)
   if [ -n "$EXISTING" ] && [ "$EXISTING" != "[]" ] && [ "$EXISTING" != "null" ]; then
     # Check word overlap between import title and existing titles
-    IMPORT_WORDS=$(echo "$TITLE" | tr '[:upper:]' '[:lower:]' | tr -cs '[:alnum:]' '\n' | sort -u)
+    IMPORT_WORDS=$(printf '%s %s' "$TITLE" "$(echo "$BODY" | tr -s '[:space:]' ' ' | cut -d' ' -f1-200)" | tr '[:upper:]' '[:lower:]' | tr -cs '[:alnum:]' '\n' | sort -u)
     IMPORT_COUNT=$(echo "$IMPORT_WORDS" | wc -l)
     MATCH_FOUND=false
     for i in $(seq 0 2); do
       EXISTING_TITLE=$(echo "$EXISTING" | jq -r ".[$i].title // empty" 2>/dev/null)
+      EXISTING_CONTENT=$(echo "$EXISTING" | jq -r ".[$i].content // empty" 2>/dev/null)
       [ -z "$EXISTING_TITLE" ] && continue
-      EXISTING_WORDS=$(echo "$EXISTING_TITLE" | tr '[:upper:]' '[:lower:]' | tr -cs '[:alnum:]' '\n' | sort -u)
+      EXISTING_WORDS=$(printf '%s %s' "$EXISTING_TITLE" "$(echo "$EXISTING_CONTENT" | tr -s '[:space:]' ' ' | cut -d' ' -f1-200)" | tr '[:upper:]' '[:lower:]' | tr -cs '[:alnum:]' '\n' | sort -u)
       OVERLAP=$(comm -12 <(echo "$IMPORT_WORDS") <(echo "$EXISTING_WORDS") | wc -l)
       if [ "$IMPORT_COUNT" -gt 0 ] && [ "$(( OVERLAP * 100 / IMPORT_COUNT ))" -ge 80 ]; then
         echo "SKIP (>80% overlap with: '$EXISTING_TITLE'): $BASENAME"

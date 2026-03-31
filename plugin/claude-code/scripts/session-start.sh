@@ -86,15 +86,25 @@ ${ITEMS}
   done
 fi
 
-# Apply 15KB size cap per spec (soft limit)
+# Apply 15KB size cap per spec (soft limit, line-based truncation)
 HOT_SIZE=$(printf '%s' "$HOT_MARKDOWN" | wc -c)
 if [ "$HOT_SIZE" -gt 15360 ]; then
-  # Truncate to ~15KB and append note
-  HOT_MARKDOWN=$(printf '%s' "$HOT_MARKDOWN" | head -c 15360)
-  TRUNCATED_COUNT=$((HOT_COUNT - $(printf '%s' "$HOT_MARKDOWN" | grep -c '^- \*\*')))
-  HOT_MARKDOWN="${HOT_MARKDOWN}
-...
-(${TRUNCATED_COUNT} observations omitted — size cap. Use mem_hot() to see all, mem_demote(id) to free space.)"
+  # Truncate by lines to avoid cutting mid-observation
+  TRUNCATED=""
+  CURRENT_SIZE=0
+  while IFS= read -r LINE; do
+    LINE_SIZE=$(printf '%s\n' "$LINE" | wc -c)
+    if [ $((CURRENT_SIZE + LINE_SIZE)) -gt 15360 ]; then
+      break
+    fi
+    TRUNCATED="${TRUNCATED}${LINE}
+"
+    CURRENT_SIZE=$((CURRENT_SIZE + LINE_SIZE))
+  done <<< "$HOT_MARKDOWN"
+  RENDERED_COUNT=$(printf '%s' "$TRUNCATED" | grep -c '^- \*\*' || true)
+  OMITTED_COUNT=$((HOT_COUNT - RENDERED_COUNT))
+  HOT_MARKDOWN="${TRUNCATED}
+(${OMITTED_COUNT} observations omitted — size cap. Use mem_hot() to see all, mem_demote(id) to free space.)"
 fi
 
 # Output unified protocol + hot cache
