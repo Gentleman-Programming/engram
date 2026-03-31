@@ -4005,3 +4005,33 @@ func TestMigrateProjectIdempotent(t *testing.T) {
 		t.Fatal("second migration should be a no-op")
 	}
 }
+
+func TestMigrationAddsHotColumn(t *testing.T) {
+	s := newTestStore(t)
+
+	var count int
+	err := s.db.QueryRow(
+		"SELECT COUNT(*) FROM pragma_table_info('observations') WHERE name = 'hot'",
+	).Scan(&count)
+	if err != nil {
+		t.Fatalf("pragma query: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected hot column to exist, got count=%d", count)
+	}
+}
+
+func TestMigrationAddsHotIndex(t *testing.T) {
+	s := newTestStore(t)
+
+	var count int
+	err := s.db.QueryRow(
+		"SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_observations_hot'",
+	).Scan(&count)
+	if err != nil {
+		t.Fatalf("index query: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected idx_observations_hot index, got count=%d", count)
+	}
+}

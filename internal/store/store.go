@@ -667,6 +667,16 @@ func (s *Store) migrate() error {
 		return err
 	}
 
+	// Hot cache column for unified memory system
+	if err := s.addColumnIfNotExists("observations", "hot", "BOOLEAN NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if _, err := s.execHook(s.db, `
+		CREATE INDEX IF NOT EXISTS idx_observations_hot ON observations(hot) WHERE hot = 1;
+	`); err != nil {
+		return err
+	}
+
 	// Prompts FTS triggers (separate idempotent check)
 	var promptTrigger string
 	err = s.db.QueryRow(
