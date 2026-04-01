@@ -75,6 +75,18 @@ Format for `mem_save`:
 - If unsure about the key, call `mem_suggest_topic_key` first, then reuse that key consistently
 - If you already know the exact ID to fix, use `mem_update`
 
+## SESSION START (mandatory)
+
+Your FIRST action in every session — before responding to any user message — is to call `mem_context`.
+
+Do this even if the first message seems unrelated to prior work (a pasted error, a build log, a greeting).
+One call. Two seconds. Prevents a blind session.
+
+If context shows prior work relevant to what the user is asking → use it immediately, don't re-explore what's already known.
+If context is empty or irrelevant → proceed normally.
+
+Do NOT skip this step. The cost of one call is negligible. The cost of a blind session is losing everything the previous session built.
+
 ## WHEN TO SEARCH MEMORY
 
 When the user asks to recall something — any variation of "remember", "recall", "what did we do",
