@@ -3,7 +3,7 @@
 #
 # Injects up to 3 components into systemMessage on every turn:
 # 1. Memory save nudge (conditional: >15min since last save, session >5min)
-# 2. File manifest (from PostToolUse tracking, if available)
+# 2. File manifest (parsed from session transcript)
 # 3. RTK redirect instruction (always)
 
 ENGRAM_PORT="${ENGRAM_PORT:-7437}"
@@ -15,13 +15,13 @@ source "${SCRIPT_DIR}/_helpers.sh"
 INPUT=$(cat)
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
+TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path // empty')
 PROJECT=$(detect_project "$CWD")
 
 # --- Component 1: Memory nudge (conditional) ---
 NUDGE=""
 
 if [ -n "$PROJECT" ]; then
-  # Check session age — skip nudge if session < 5 minutes
   SESSION_START=""
   if [ -n "$SESSION_ID" ]; then
     SESSION_START=$(curl -sf "${ENGRAM_URL}/sessions/recent?limit=50" --max-time 0.2 2>/dev/null \
@@ -39,7 +39,6 @@ if [ -n "$PROJECT" ]; then
   fi
 
   if [ "$SESSION_OLD_ENOUGH" = "true" ]; then
-    # Check last save time
     ENCODED_PROJECT=$(printf '%s' "$PROJECT" | jq -sRr @uri)
     LAST_SAVE_JSON=$(curl -sf \
       "${ENGRAM_URL}/observations/recent?project=${ENCODED_PROJECT}&limit=1" \
@@ -61,28 +60,34 @@ if [ -n "$PROJECT" ]; then
   fi
 fi
 
-# --- Component 2: File manifest (from PostToolUse tracking) ---
+# --- Component 2: File manifest (from session transcript) ---
 MANIFEST=""
-if [ -n "$SESSION_ID" ]; then
-  TRACK_FILE="/tmp/engram-claude-${SESSION_ID}-filereads.json"
-  if [ -f "$TRACK_FILE" ]; then
-    NOW_EPOCH=$(date "+%s")
-    MANIFEST=$(cat "$TRACK_FILE" | jq -r --argjson now "$NOW_EPOCH" '
-      [.[] | {
-        file_path: .file_path,
-        bytes: .bytes,
-        ago: (($now - (.timestamp | sub("\\.[0-9]+Z$"; "Z") | fromdate)) |
-          if . < 60 then "\(.)s ago"
-          elif . < 3600 then "\(. / 60 | floor)m ago"
-          else "\(. / 3600 | floor)h ago"
-          end),
-        kb: ((.bytes / 1024 * 10 | floor) / 10)
-      }] |
-      if length == 0 then ""
-      else "## Files in Context\nThese files were recently read. Do not re-read unless editing:\n" +
-        (map("- \(.file_path | split("/") | .[-2:] | join("/")) (\(.ago), \(.kb) KB)") | join("\n"))
-      end
-    ' 2>/dev/null || true)
+if [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ]; then
+  # Extract unique file paths from Read tool calls and rtk read Bash calls
+  # Only look at assistant messages with tool_use
+  MANIFEST=$(grep '"tool_use"' "$TRANSCRIPT_PATH" 2>/dev/null | jq -r '
+    .message.content[]? |
+    select(.type == "tool_use") |
+    if .name == "Read" then .input.file_path // empty
+    elif .name == "Bash" then
+      (.input.command // "") |
+      capture("^rtk read\\s+(?:-[a-zA-Z]\\s+)*(?<path>\\S+)") |
+      .path // empty
+    else empty
+    end
+  ' 2>/dev/null | sort -u | tail -15 | while read -r fp; do
+    [ -z "$fp" ] && continue
+    # Expand ~
+    fp="${fp/#\~/$HOME}"
+    if [ -f "$fp" ]; then
+      KB=$(( $(stat -c '%s' "$fp" 2>/dev/null || echo 0) / 1024 ))
+      SHORT=$(echo "$fp" | rev | cut -d/ -f1-2 | rev)
+      echo "- ${SHORT} (${KB} KB)"
+    fi
+  done)
+
+  if [ -n "$MANIFEST" ]; then
+    MANIFEST="## Files in Context\nThese files were recently read. Do not re-read unless editing:\n${MANIFEST}"
   fi
 fi
 
