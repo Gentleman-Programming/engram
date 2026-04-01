@@ -10,10 +10,13 @@
 package tui
 
 import (
+	"os"
+
 	"github.com/Gentleman-Programming/engram/internal/setup"
 	"github.com/Gentleman-Programming/engram/internal/store"
 	"github.com/Gentleman-Programming/engram/internal/version"
 
+	osc52 "github.com/aymanbagabas/go-osc52/v2"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -83,6 +86,9 @@ type setupInstallMsg struct {
 	err    error
 }
 
+type clipboardCopiedMsg struct{ err error }
+type copyFeedbackClearMsg struct{}
+
 // ─── Model ───────────────────────────────────────────────────────────────────
 
 type Model struct {
@@ -125,6 +131,9 @@ type Model struct {
 	SelectedSessionIdx  int
 	SessionObservations []store.Observation
 	SessionDetailScroll int
+
+	// Clipboard
+	CopyFeedback string
 
 	// Setup
 	SetupAgents           []setup.Agent
@@ -229,6 +238,13 @@ func installAgent(agentName string) tea.Cmd {
 	return func() tea.Msg {
 		result, err := installAgentFn(agentName)
 		return setupInstallMsg{result: result, err: err}
+	}
+}
+
+func copyToClipboard(text string) tea.Cmd {
+	return func() tea.Msg {
+		_, err := osc52.New(text).WriteTo(os.Stderr)
+		return clipboardCopiedMsg{err: err}
 	}
 }
 

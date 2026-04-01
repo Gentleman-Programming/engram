@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"time"
+
 	"github.com/Gentleman-Programming/engram/internal/setup"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
@@ -124,6 +126,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.SetupSpinner, cmd = m.SetupSpinner.Update(msg)
 			return m, cmd
 		}
+		return m, nil
+
+	case clipboardCopiedMsg:
+		if msg.err != nil {
+			m.CopyFeedback = "✗ Copy failed"
+		} else {
+			m.CopyFeedback = "✓ Copied!"
+		}
+		return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
+			return copyFeedbackClearMsg{}
+		})
+
+	case copyFeedbackClearMsg:
+		m.CopyFeedback = ""
 		return m, nil
 	}
 
@@ -307,6 +323,11 @@ func (m Model) handleSearchResultsKeys(key string) (tea.Model, tea.Cmd) {
 			m.PrevScreen = ScreenSearchResults
 			return m, loadTimeline(m.store, obsID)
 		}
+	case "c":
+		if len(m.SearchResults) > 0 && m.Cursor < len(m.SearchResults) {
+			r := m.SearchResults[m.Cursor]
+			return m, copyToClipboard(r.Content)
+		}
 	case "/", "s":
 		m.PrevScreen = ScreenSearchResults
 		m.Screen = ScreenSearch
@@ -358,6 +379,11 @@ func (m Model) handleRecentKeys(key string) (tea.Model, tea.Cmd) {
 			m.PrevScreen = ScreenRecent
 			return m, loadTimeline(m.store, obsID)
 		}
+	case "c":
+		if len(m.RecentObservations) > 0 && m.Cursor < len(m.RecentObservations) {
+			obs := m.RecentObservations[m.Cursor]
+			return m, copyToClipboard(obs.Content)
+		}
 	case "esc", "q":
 		m.Screen = ScreenDashboard
 		m.Cursor = 0
@@ -381,6 +407,10 @@ func (m Model) handleObservationDetailKeys(key string) (tea.Model, tea.Cmd) {
 		// View timeline for this observation
 		if m.SelectedObservation != nil {
 			return m, loadTimeline(m.store, m.SelectedObservation.ID)
+		}
+	case "c":
+		if m.SelectedObservation != nil {
+			return m, copyToClipboard(m.SelectedObservation.Content)
 		}
 	case "esc", "q":
 		m.Screen = m.PrevScreen
@@ -483,6 +513,11 @@ func (m Model) handleSessionDetailKeys(key string) (tea.Model, tea.Cmd) {
 			obsID := m.SessionObservations[m.Cursor].ID
 			m.PrevScreen = ScreenSessionDetail
 			return m, loadTimeline(m.store, obsID)
+		}
+	case "c":
+		if len(m.SessionObservations) > 0 && m.Cursor < len(m.SessionObservations) {
+			obs := m.SessionObservations[m.Cursor]
+			return m, copyToClipboard(obs.Content)
 		}
 	case "esc", "q":
 		m.Screen = ScreenSessions

@@ -88,6 +88,15 @@ func (m Model) View() string {
 		content += "\n" + errorStyle.Render("Error: "+m.ErrorMsg)
 	}
 
+	// Show copy feedback
+	if m.CopyFeedback != "" {
+		fbStyle := lipgloss.NewStyle().Bold(true).Foreground(colorGreen)
+		if strings.HasPrefix(m.CopyFeedback, "✗") {
+			fbStyle = lipgloss.NewStyle().Bold(true).Foreground(colorRed)
+		}
+		content += "\n" + fbStyle.Render(m.CopyFeedback)
+	}
+
 	return appStyle.Render(content)
 }
 
@@ -226,7 +235,7 @@ func (m Model) viewSearchResults() string {
 			timestampStyle.Render(fmt.Sprintf("showing %d-%d of %d", m.Scroll+1, end, resultCount))))
 	}
 
-	b.WriteString(helpStyle.Render("\n  j/k navigate • enter detail • t timeline • / search • esc back"))
+	b.WriteString(helpStyle.Render("\n  j/k navigate • enter detail • c copy • t timeline • / search • esc back"))
 
 	return b.String()
 }
@@ -268,7 +277,7 @@ func (m Model) viewRecent() string {
 			timestampStyle.Render(fmt.Sprintf("showing %d-%d of %d", m.Scroll+1, end, count))))
 	}
 
-	b.WriteString(helpStyle.Render("\n  j/k navigate • enter detail • t timeline • esc back"))
+	b.WriteString(helpStyle.Render("\n  j/k navigate • enter detail • c copy • t timeline • esc back"))
 
 	return b.String()
 }
@@ -363,7 +372,7 @@ func (m Model) viewObservationDetail() string {
 			timestampStyle.Render(fmt.Sprintf("line %d-%d of %d", m.DetailScroll+1, end, len(contentLines)))))
 	}
 
-	b.WriteString(helpStyle.Render("\n  j/k scroll • t timeline • esc back"))
+	b.WriteString(helpStyle.Render("\n  j/k scroll • c copy • t timeline • esc back"))
 
 	return b.String()
 }
@@ -553,7 +562,7 @@ func (m Model) viewSessionDetail() string {
 			timestampStyle.Render(fmt.Sprintf("showing %d-%d of %d", m.SessionDetailScroll+1, end, count))))
 	}
 
-	b.WriteString(helpStyle.Render("\n  j/k navigate • enter detail • t timeline • esc back"))
+	b.WriteString(helpStyle.Render("\n  j/k navigate • enter detail • c copy • t timeline • esc back"))
 
 	return b.String()
 }
