@@ -21,6 +21,11 @@ type Provider interface {
 
 	// ModelName returns the model identifier used for tracking.
 	ModelName() string
+
+	// MaxChars returns the maximum text length (in characters) the provider
+	// can handle. Text exceeding this limit will be truncated before embedding.
+	// Returns 0 if no limit is known (no truncation applied).
+	MaxChars() int
 }
 
 // Config holds the configuration for an embedding provider.

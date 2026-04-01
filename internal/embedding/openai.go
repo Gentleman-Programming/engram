@@ -100,3 +100,9 @@ func (p *OpenAIProvider) Dimensions() int {
 func (p *OpenAIProvider) ModelName() string {
 	return p.model
 }
+
+// MaxChars returns a conservative character limit for OpenAI embedding models.
+// All current OpenAI embedding models support 8,191 tokens.
+func (p *OpenAIProvider) MaxChars() int {
+	return 8191 * 2 // ~2 chars per token for mixed code/prose
+}

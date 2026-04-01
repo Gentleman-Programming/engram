@@ -43,6 +43,7 @@ func (m *mockEmbedder) Embed(_ context.Context, text string) ([]float32, error) 
 
 func (m *mockEmbedder) Dimensions() int  { return m.dims }
 func (m *mockEmbedder) ModelName() string { return m.model }
+func (m *mockEmbedder) MaxChars() int    { return 0 } // no limit in tests
 
 func newTestStoreWithEmbeddings(t *testing.T) (*Store, *mockEmbedder) {
 	t.Helper()

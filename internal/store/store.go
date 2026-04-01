@@ -976,20 +976,16 @@ func (s *Store) SessionObservations(sessionID string, limit int) ([]Observation,
 
 // ─── Embeddings ─────────────────────────────────────────────────────────────
 
-// maxEmbeddingChars is the maximum text length sent to embedding providers.
-// Conservative limit: nomic-embed-text supports 8192 tokens (~6K chars of mixed
-// prose/code). Larger models (OpenAI) handle more but we use the lowest common
-// denominator. Title + first ~6K chars captures the most important semantics.
-const maxEmbeddingChars = 6000
-
-// truncateForEmbedding trims text to maxEmbeddingChars and logs a warning if truncated.
-func truncateForEmbedding(observationID int64, text string) string {
-	if len(text) <= maxEmbeddingChars {
+// truncateForEmbedding trims text to the provider's MaxChars limit and logs a warning.
+// If the provider reports 0 (no known limit), the text is passed through unchanged.
+func (s *Store) truncateForEmbedding(observationID int64, text string) string {
+	maxChars := s.embedder.MaxChars()
+	if maxChars <= 0 || len(text) <= maxChars {
 		return text
 	}
-	log.Printf("[engram] WARNING: observation %d text truncated for embedding (%d chars → %d chars). Consider splitting into smaller observations.",
-		observationID, len(text), maxEmbeddingChars)
-	return text[:maxEmbeddingChars]
+	log.Printf("[engram] WARNING: observation %d text truncated for embedding (%d chars → %d chars, model %s max). Consider splitting into smaller observations.",
+		observationID, len(text), maxChars, s.embedder.ModelName())
+	return text[:maxChars]
 }
 
 // generateEmbedding creates and stores an embedding for the given observation.
@@ -998,7 +994,7 @@ func (s *Store) generateEmbedding(observationID int64, text string) {
 	if s.embedder == nil {
 		return
 	}
-	text = truncateForEmbedding(observationID, text)
+	text = s.truncateForEmbedding(observationID, text)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -1023,7 +1019,7 @@ func (s *Store) GenerateEmbeddingSync(observationID int64, text string) error {
 	if s.embedder == nil {
 		return nil
 	}
-	text = truncateForEmbedding(observationID, text)
+	text = s.truncateForEmbedding(observationID, text)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

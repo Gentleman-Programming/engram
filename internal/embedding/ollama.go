@@ -92,3 +92,28 @@ func (p *OllamaProvider) Dimensions() int {
 func (p *OllamaProvider) ModelName() string {
 	return p.model
 }
+
+// MaxChars returns a conservative character limit based on the model's token context.
+// Ollama models vary widely: nomic-embed-text=8192 tokens, mxbai-embed-large=512 tokens.
+func (p *OllamaProvider) MaxChars() int {
+	return ollamaModelMaxChars(p.model)
+}
+
+// ollamaModelMaxChars returns the max character limit for known Ollama embedding models.
+// Token-to-char ratios vary wildly: English prose ~4 chars/token, but markdown with
+// code blocks, pipes, and special characters can be ~1.5 chars/token. We use empirically
+// tested limits that work with real-world mixed content.
+func ollamaModelMaxChars(model string) int {
+	// Empirically tested max chars for known models (real markdown/code content).
+	known := map[string]int{
+		"nomic-embed-text":       6000, // 8192 tokens, tested with markdown/code
+		"mxbai-embed-large":      500,  // 512 tokens, very limited
+		"all-minilm":             250,  // 256 tokens
+		"snowflake-arctic-embed": 500,  // 512 tokens
+	}
+	if maxChars, ok := known[model]; ok {
+		return maxChars
+	}
+	// Unknown model — conservative default.
+	return 6000
+}
