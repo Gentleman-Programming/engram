@@ -8,9 +8,14 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/_helpers.sh"
 
-INPUT=$(cat)
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
-TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty')
+# Save stdin to temp file — JSON may contain newlines in string values
+# which break echo "$VAR" | jq
+INPUT_FILE=$(mktemp)
+trap "rm -f '$INPUT_FILE'" EXIT
+cat > "$INPUT_FILE"
+
+SESSION_ID=$(jq -r '.session_id // empty' "$INPUT_FILE")
+TOOL_NAME=$(jq -r '.tool_name // empty' "$INPUT_FILE")
 
 # No session ID = can't track
 if [ -z "$SESSION_ID" ]; then
@@ -24,11 +29,11 @@ TRACK_FILE="/tmp/engram-claude-${SESSION_ID}-filereads.json"
 FILE_PATH=""
 case "$TOOL_NAME" in
   Read)
-    FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty')
+    FILE_PATH=$(jq -r '.tool_input.file_path // empty' "$INPUT_FILE")
     ;;
   Bash)
     # Conservative: only match "rtk read <path>" pattern
-    CMD=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
+    CMD=$(jq -r '.tool_input.command // empty' "$INPUT_FILE")
     FILE_PATH=$(echo "$CMD" | grep -oP '^rtk read\s+(?:-[a-zA-Z]\s+)*\K\S+' 2>/dev/null || true)
     ;;
   *)
@@ -44,16 +49,16 @@ if [ -z "$FILE_PATH" ]; then
   exit 0
 fi
 
-# Estimate output bytes from tool_result
-BYTES=$(echo "$INPUT" | jq -r '
-  .tool_result //
+# Estimate output bytes from tool_response
+BYTES=$(jq -r '
   .tool_response //
+  .tool_result //
   "" |
   if type == "string" then length
   elif type == "object" then (tostring | length)
   else 0
   end
-')
+' "$INPUT_FILE" 2>/dev/null || echo "0")
 
 # Read existing tracking file (or start empty)
 if [ -f "$TRACK_FILE" ]; then
