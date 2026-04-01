@@ -6,19 +6,23 @@
 package store
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/Gentleman-Programming/engram/internal/embedding"
 	_ "modernc.org/sqlite"
 )
 
@@ -281,9 +285,22 @@ func (s *Store) MaxObservationLength() int {
 // ─── Store ───────────────────────────────────────────────────────────────────
 
 type Store struct {
-	db    *sql.DB
-	cfg   Config
-	hooks storeHooks
+	db       *sql.DB
+	cfg      Config
+	hooks    storeHooks
+	embedder embedding.Provider // nil when embeddings disabled
+}
+
+// SetEmbeddingProvider configures an optional embedding provider for hybrid search.
+// When set, embeddings are generated asynchronously on observation save/update
+// and used alongside FTS5 for improved search results.
+func (s *Store) SetEmbeddingProvider(p embedding.Provider) {
+	s.embedder = p
+}
+
+// EmbeddingProvider returns the configured embedding provider, or nil.
+func (s *Store) EmbeddingProvider() embedding.Provider {
+	return s.embedder
 }
 
 type execer interface {
@@ -600,6 +617,20 @@ func (s *Store) migrate() error {
 		UPDATE sync_mutations
 		SET project = COALESCE(json_extract(payload, '$.project'), '')
 		WHERE project = '' AND payload != ''
+	`); err != nil {
+		return err
+	}
+
+	// Vector search: observation embeddings table (opt-in, only populated when an embedding provider is configured).
+	if _, err := s.execHook(s.db, `
+		CREATE TABLE IF NOT EXISTS observation_embeddings (
+			observation_id INTEGER PRIMARY KEY,
+			embedding      BLOB NOT NULL,
+			model          TEXT NOT NULL,
+			dimensions     INTEGER NOT NULL,
+			created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+			FOREIGN KEY (observation_id) REFERENCES observations(id) ON DELETE CASCADE
+		)
 	`); err != nil {
 		return err
 	}
@@ -943,6 +974,126 @@ func (s *Store) SessionObservations(sessionID string, limit int) ([]Observation,
 	return s.queryObservations(query, sessionID, limit)
 }
 
+// ─── Embeddings ─────────────────────────────────────────────────────────────
+
+// generateEmbedding creates and stores an embedding for the given observation.
+// Safe to call from a goroutine — logs errors instead of returning them.
+func (s *Store) generateEmbedding(observationID int64, text string) {
+	if s.embedder == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	vec, err := s.embedder.Embed(ctx, text)
+	if err != nil {
+		log.Printf("[engram] embedding failed for observation %d: %v", observationID, err)
+		return
+	}
+
+	blob := embedding.SerializeFloat32(vec)
+	if _, err := s.db.Exec(
+		`INSERT OR REPLACE INTO observation_embeddings (observation_id, embedding, model, dimensions) VALUES (?, ?, ?, ?)`,
+		observationID, blob, s.embedder.ModelName(), len(vec),
+	); err != nil {
+		log.Printf("[engram] save embedding failed for observation %d: %v", observationID, err)
+	}
+}
+
+// GenerateEmbeddingSync creates and stores an embedding synchronously. Used for testing.
+func (s *Store) GenerateEmbeddingSync(observationID int64, text string) error {
+	if s.embedder == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	vec, err := s.embedder.Embed(ctx, text)
+	if err != nil {
+		return fmt.Errorf("embed: %w", err)
+	}
+
+	blob := embedding.SerializeFloat32(vec)
+	_, err = s.db.Exec(
+		`INSERT OR REPLACE INTO observation_embeddings (observation_id, embedding, model, dimensions) VALUES (?, ?, ?, ?)`,
+		observationID, blob, s.embedder.ModelName(), len(vec),
+	)
+	return err
+}
+
+// BackfillEmbeddings generates embeddings for all observations that don't have one yet.
+func (s *Store) BackfillEmbeddings(batchSize int, progress func(done, total int)) error {
+	if s.embedder == nil {
+		return fmt.Errorf("no embedding provider configured")
+	}
+
+	var total int
+	if err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM observations o
+		LEFT JOIN observation_embeddings e ON o.id = e.observation_id
+		WHERE o.deleted_at IS NULL AND e.observation_id IS NULL
+	`).Scan(&total); err != nil {
+		return fmt.Errorf("count observations: %w", err)
+	}
+
+	if total == 0 {
+		return nil
+	}
+
+	done := 0
+	for {
+		rows, err := s.db.Query(`
+			SELECT o.id, o.title, o.content FROM observations o
+			LEFT JOIN observation_embeddings e ON o.id = e.observation_id
+			WHERE o.deleted_at IS NULL AND e.observation_id IS NULL
+			ORDER BY o.id LIMIT ?
+		`, batchSize)
+		if err != nil {
+			return fmt.Errorf("fetch batch: %w", err)
+		}
+
+		var batch []struct {
+			id      int64
+			title   string
+			content string
+		}
+		for rows.Next() {
+			var item struct {
+				id      int64
+				title   string
+				content string
+			}
+			if err := rows.Scan(&item.id, &item.title, &item.content); err != nil {
+				rows.Close()
+				return fmt.Errorf("scan: %w", err)
+			}
+			batch = append(batch, item)
+		}
+		rows.Close()
+
+		if len(batch) == 0 {
+			break
+		}
+
+		for _, item := range batch {
+			if err := s.GenerateEmbeddingSync(item.id, item.title+" "+item.content); err != nil {
+				log.Printf("[engram] backfill embedding failed for observation %d: %v", item.id, err)
+				continue
+			}
+			done++
+			if progress != nil {
+				progress(done, total)
+			}
+		}
+
+		if len(batch) < batchSize {
+			break
+		}
+	}
+
+	return nil
+}
+
 // ─── Observations ────────────────────────────────────────────────────────────
 
 func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
@@ -1070,6 +1221,12 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+
+	// Generate embedding asynchronously after successful commit.
+	if s.embedder != nil {
+		go s.generateEmbedding(observationID, title+" "+content)
+	}
+
 	return observationID, nil
 }
 
@@ -1238,6 +1395,8 @@ func (s *Store) GetObservation(id int64) (*Observation, error) {
 }
 
 func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observation, error) {
+	contentChanged := p.Title != nil || p.Content != nil
+
 	var updated *Observation
 	err := s.withTx(func(tx *sql.Tx) error {
 		obs, err := s.getObservationTx(tx, id)
@@ -1307,6 +1466,12 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 	if err != nil {
 		return nil, err
 	}
+
+	// Re-embed if title or content changed.
+	if contentChanged && s.embedder != nil && updated != nil {
+		go s.generateEmbedding(id, updated.Title+" "+updated.Content)
+	}
+
 	return updated, nil
 }
 
@@ -1557,8 +1722,8 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 		seen[dr.ID] = true
 	}
 
-	var results []SearchResult
-	results = append(results, directResults...)
+	var ftsResults []SearchResult
+	ftsResults = append(ftsResults, directResults...)
 	for rows.Next() {
 		var sr SearchResult
 		if err := rows.Scan(
@@ -1570,17 +1735,150 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 			return nil, err
 		}
 		if !seen[sr.ID] {
-			results = append(results, sr)
+			ftsResults = append(ftsResults, sr)
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 
+	// If no embedding provider configured, return FTS5 results only (original behavior).
+	if s.embedder == nil {
+		if len(ftsResults) > limit {
+			ftsResults = ftsResults[:limit]
+		}
+		return ftsResults, nil
+	}
+
+	// ─── Hybrid search: merge FTS5 + vector results via RRF ─────────────
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	queryVec, err := s.embedder.Embed(ctx, query)
+	if err != nil {
+		// Embedding failed — fall back to FTS5 results only.
+		log.Printf("[engram] query embedding failed, falling back to FTS5: %v", err)
+		if len(ftsResults) > limit {
+			ftsResults = ftsResults[:limit]
+		}
+		return ftsResults, nil
+	}
+
+	// Load embeddings with the same filters applied.
+	vecResults := s.vectorSearch(queryVec, opts, limit*3)
+
+	// Build ID lists for RRF merge.
+	ftsIDs := make([]int64, len(ftsResults))
+	for i, r := range ftsResults {
+		ftsIDs[i] = r.ID
+	}
+	vecIDs := make([]int64, len(vecResults))
+	for i, r := range vecResults {
+		vecIDs[i] = r.ObservationID
+	}
+
+	rrfScores := embedding.MergeRRF(ftsIDs, vecIDs, 60)
+
+	// Collect all unique observation IDs and build a lookup for existing results.
+	obsMap := make(map[int64]SearchResult)
+	for _, r := range ftsResults {
+		obsMap[r.ID] = r
+	}
+
+	// For vector-only results not in FTS, load the full observation.
+	for _, vr := range vecResults {
+		if _, exists := obsMap[vr.ObservationID]; !exists {
+			obs, err := s.GetObservation(vr.ObservationID)
+			if err != nil || obs == nil {
+				continue
+			}
+			obsMap[vr.ObservationID] = SearchResult{Observation: *obs}
+		}
+	}
+
+	// Build final results sorted by RRF score descending.
+	type scoredResult struct {
+		result SearchResult
+		score  float64
+	}
+	var scored []scoredResult
+	for id, score := range rrfScores {
+		if sr, ok := obsMap[id]; ok {
+			sr.Rank = score // Use RRF score as rank (higher is better in hybrid mode)
+			scored = append(scored, scoredResult{result: sr, score: score})
+		}
+	}
+	sort.Slice(scored, func(i, j int) bool {
+		return scored[i].score > scored[j].score
+	})
+
+	var results []SearchResult
+	for _, s := range scored {
+		results = append(results, s.result)
+		if len(results) >= limit {
+			break
+		}
+	}
+
+	return results, nil
+}
+
+// vectorSearch performs brute-force cosine similarity search over stored embeddings.
+func (s *Store) vectorSearch(queryVec []float32, opts SearchOptions, limit int) []embedding.VectorSearchResult {
+	sqlQ := `
+		SELECT e.observation_id, e.embedding
+		FROM observation_embeddings e
+		JOIN observations o ON o.id = e.observation_id
+		WHERE o.deleted_at IS NULL
+	`
+	var args []any
+
+	if opts.Type != "" {
+		sqlQ += " AND o.type = ?"
+		args = append(args, opts.Type)
+	}
+	if opts.Project != "" {
+		sqlQ += " AND o.project = ?"
+		args = append(args, opts.Project)
+	}
+	if opts.Scope != "" {
+		sqlQ += " AND o.scope = ?"
+		args = append(args, normalizeScope(opts.Scope))
+	}
+
+	rows, err := s.db.Query(sqlQ, args...)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var results []embedding.VectorSearchResult
+	for rows.Next() {
+		var id int64
+		var blob []byte
+		if err := rows.Scan(&id, &blob); err != nil {
+			continue
+		}
+		vec := embedding.DeserializeFloat32(blob)
+		if vec == nil {
+			continue
+		}
+		sim := embedding.CosineSimilarity(queryVec, vec)
+		results = append(results, embedding.VectorSearchResult{
+			ObservationID: id,
+			Similarity:    sim,
+		})
+	}
+
+	// Sort by similarity descending.
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Similarity > results[j].Similarity
+	})
+
 	if len(results) > limit {
 		results = results[:limit]
 	}
-	return results, nil
+	return results
 }
 
 // ─── Stats ───────────────────────────────────────────────────────────────────
