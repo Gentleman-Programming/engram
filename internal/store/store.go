@@ -976,12 +976,30 @@ func (s *Store) SessionObservations(sessionID string, limit int) ([]Observation,
 
 // ─── Embeddings ─────────────────────────────────────────────────────────────
 
+// maxEmbeddingChars is the maximum text length sent to embedding providers.
+// Conservative limit: nomic-embed-text supports 8192 tokens (~6K chars of mixed
+// prose/code). Larger models (OpenAI) handle more but we use the lowest common
+// denominator. Title + first ~6K chars captures the most important semantics.
+const maxEmbeddingChars = 6000
+
+// truncateForEmbedding trims text to maxEmbeddingChars and logs a warning if truncated.
+func truncateForEmbedding(observationID int64, text string) string {
+	if len(text) <= maxEmbeddingChars {
+		return text
+	}
+	log.Printf("[engram] WARNING: observation %d text truncated for embedding (%d chars → %d chars). Consider splitting into smaller observations.",
+		observationID, len(text), maxEmbeddingChars)
+	return text[:maxEmbeddingChars]
+}
+
 // generateEmbedding creates and stores an embedding for the given observation.
 // Safe to call from a goroutine — logs errors instead of returning them.
 func (s *Store) generateEmbedding(observationID int64, text string) {
 	if s.embedder == nil {
 		return
 	}
+	text = truncateForEmbedding(observationID, text)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -1005,6 +1023,8 @@ func (s *Store) GenerateEmbeddingSync(observationID int64, text string) error {
 	if s.embedder == nil {
 		return nil
 	}
+	text = truncateForEmbedding(observationID, text)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
