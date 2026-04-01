@@ -48,17 +48,6 @@
           }
         ]
       }
-    ],
-    "PostToolUse": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/post-tool-use.sh",
-            "timeout": 2
-          }
-        ]
-      }
     ]
   }
 }
