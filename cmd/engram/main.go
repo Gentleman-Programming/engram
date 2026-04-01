@@ -198,6 +198,8 @@ func cmdServe(cfg store.Config) {
 	}
 	defer s.Close()
 
+	configureEmbeddings(s, "", "", "")
+
 	srv := newHTTPServer(s, port)
 
 	// Graceful shutdown on SIGINT/SIGTERM.
