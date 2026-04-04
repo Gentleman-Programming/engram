@@ -55,6 +55,29 @@ Windows, Linux, and other install methods → [docs/INSTALLATION.md](docs/INSTAL
 
 Full per-agent config, Memory Protocol, and compaction survival → [docs/AGENT-SETUP.md](docs/AGENT-SETUP.md)
 
+### PicoClaw
+
+[PicoClaw](https://github.com/sipeed/picoclaw) is an ultra-lightweight AI assistant in Go that runs on $10 hardware. Add Engram to your PicoClaw config:
+
+```json
+{
+  "tools": {
+    "mcp": {
+      "enabled": true,
+      "servers": {
+        "engram": {
+          "enabled": true,
+          "command": "engram",
+          "args": ["mcp", "--tools=agent", "--project=my-assistant"]
+        }
+      }
+    }
+  }
+}
+```
+
+PicoClaw's native MCP client connects to Engram via stdio, giving your agent persistent memory across Telegram, Discord, and other channels. Tested on Raspberry Pi Zero 2 W with both running under 30MB RAM combined.
+
 That's it. No Node.js, no Python, no Docker. **One binary, one SQLite file.**
 
 ## How It Works
