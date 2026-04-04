@@ -18,6 +18,10 @@ builds:
     goarch:
       - amd64
       - arm64
+      - arm
+    goarm:
+      - "6"
+      - "7"
     ldflags:
       - -s -w -X main.version={{.Version}}
 
