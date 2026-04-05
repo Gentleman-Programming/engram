@@ -1,0 +1,24 @@
+{
+  "name": "engram",
+  "version": "0.1.0",
+  "description": "Persistent memory for AI coding agents from Codex via MCP",
+  "author": {
+    "name": "Gentleman-Programming",
+    "url": "https://github.com/Gentleman-Programming/engram"
+  },
+  "homepage": "https://github.com/Gentleman-Programming/engram",
+  "repository": "https://github.com/Gentleman-Programming/engram",
+  "keywords": [
+    "mcp",
+    "codex"
+  ],
+  "mcpServers": "./.mcp.json",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Engram",
+    "shortDescription": "Persistent memory for AI coding agents from Codex via MCP",
+    "longDescription": "Persistent memory system for AI coding agents. Agent-agnostic Go binary with SQLite + FTS5, MCP server, HTTP API, CLI, and TUI.",
+    "category": "Memory",
+    "websiteURL": "https://github.com/Gentleman-Programming/engram"
+  }
+}

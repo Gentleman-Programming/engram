@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "engram": {
+      "command": "engram",
+      "args": [
+        "serve"
+      ]
+    }
+  }
+}
