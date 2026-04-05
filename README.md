@@ -57,7 +57,7 @@ Full per-agent config, Memory Protocol, and compaction survival → [docs/AGENT-
 
 ### PicoClaw
 
-[PicoClaw](https://github.com/sipeed/picoclaw) is an ultra-lightweight AI assistant in Go that runs on $10 hardware. Add Engram to your PicoClaw config:
+[PicoClaw](https://github.com/sipeed/picoclaw) is an ultra-lightweight AI assistant in Go that runs on $10 hardware. Add the following to PicoClaw's `config.json` under `tools.mcp.servers` (only the `engram` server entry — `command` and `args` — is universal across MCP clients):
 
 ```json
 {
