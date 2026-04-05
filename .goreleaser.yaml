@@ -22,13 +22,18 @@ builds:
     goarm:
       - "6"
       - "7"
+    ignore:
+      - goos: darwin
+        goarch: arm
+      - goos: windows
+        goarch: arm
     ldflags:
       - -s -w -X main.version={{.Version}}
 
 archives:
   - formats:
       - tar.gz
-    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{- if .Arm }}v{{ .Arm }}{{ end }}"
     format_overrides:
       - goos: windows
         formats:
