@@ -168,6 +168,23 @@ command = "engram"
 args = ["mcp"]
 ```
 
+### Codex troubleshooting: `Transport closed` on Engram tools
+
+If Codex shows an error like `tool call failed ... Caused by: Transport closed`, the MCP stdio channel is usually stale.
+
+This commonly happens after:
+- replacing `engram.exe`
+- editing Codex MCP config or instruction files
+- force-stopping running `engram` processes
+
+Recovery sequence:
+1. Start a new Codex chat (or reload VS Code window).
+2. If it still fails, restart VS Code completely.
+3. Retry one Engram tool call (`mem_save` or `mem_context`) to confirm recovery.
+
+Operational note:
+- Treat binary/config updates as session-boundary changes. After updates, restart the Codex session to avoid stale MCP transport handles.
+
 ---
 
 ## VS Code (Copilot / Claude Code Extension)
