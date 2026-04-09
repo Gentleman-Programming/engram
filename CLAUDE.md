@@ -48,8 +48,32 @@ See `AGENTS.md` for full skill routing table.
 - **Deploy**: Local CLI tool installed via `go install` or homebrew
 - **Open source**: Apache-2.0 license, CONTRIBUTING.md, CODEOWNERS present
 
+## Vault Reference (Biblioteca de Conocimiento)
+
+Cuando algo falle con una herramienta del ecosistema, PRIMERO consultar:
+`C:\Users\iUser\repos\claude-workspace\vault\{herramienta}\AGENT.md`
+
+Bibliotecas disponibles: vercel, supabase, n8n, google-sheets, docker-swarm,
+claude-code, windows, nextjs, engram-memory, powershell, inmoautos, villas,
+ios-apple, telegram, traefik, wordpress.
+
+Si el error es nuevo, agregarlo al catalogo despues de resolverlo.
+
 ## Gotchas
 - FTS5 MATCH syntax ≠ LIKE — special chars crash queries if not sanitized
 - `mem_search` results are TRUNCATED — always follow with `mem_get_observation` for full content
 - Project name fragmentation: 28 different names in Engram for 1 ecosystem — use canonical names only
 - Plugin startup hook injects protocol into every session — keep it LEAN
+
+
+## Vault Reference (Biblioteca de Conocimiento)
+
+Cuando algo falle con una herramienta del ecosistema, PRIMERO consultar:
+`C:\Users\iUser\repos\claude-workspace\vault\{herramienta}\AGENT.md`
+
+Bibliotecas disponibles: vercel, supabase, n8n, google-sheets, docker-swarm,
+claude-code, windows, nextjs, engram-memory, powershell, inmoautos, villas,
+ios-apple, telegram, traefik, wordpress.
+
+Si el error es nuevo, agregarlo al catalogo despues de resolverlo.
+
