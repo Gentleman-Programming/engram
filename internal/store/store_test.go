@@ -4439,3 +4439,112 @@ func TestCountObservationsForProject(t *testing.T) {
 		t.Errorf("expected 0 for beta, got %d", count)
 	}
 }
+
+func TestSearchRankingNormalization(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	// 1. Add a Semantic result (Distance 0 -> Rank -15.0) 
+	// We'll use the same content as the query to get Distance 0
+	semanticContent := "Semantic search is extremely powerful for finding related concepts."
+	semanticID, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Title:     "Semantic Match",
+		Content:   semanticContent,
+		Project:   "engram",
+	})
+	if err != nil {
+		t.Fatalf("add semantic result: %v", err)
+	}
+
+	// 2. Add a weak FTS5 match (Rank around -1.0 to -2.0)
+	_, err = s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Title:     "Weak match",
+		Content:   "This just mentions search once.",
+		Project:   "engram",
+	})
+	if err != nil {
+		t.Fatalf("add weak fts result: %v", err)
+	}
+
+	// Run search. The semantic match (Distance 0) should have Rank -15.0
+	// Weak FTS5 usually doesn't reach -15.0.
+	results, err := s.Search(semanticContent, SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+
+	if len(results) == 0 {
+		t.Fatalf("no results found")
+	}
+
+	foundSemantic := false
+	for _, r := range results {
+		if r.ID == semanticID {
+			foundSemantic = true
+			if r.Rank >= 0 {
+				t.Errorf("expected negative rank for semantic match, got %f", r.Rank)
+			}
+			// Verify it's exactly -15.0 for distance 0
+			if r.Rank != -15.0 {
+				t.Errorf("expected rank -15.0 for distance 0, got %f", r.Rank)
+			}
+		}
+	}
+
+	if !foundSemantic {
+		t.Errorf("semantic match not found in results")
+	}
+
+	// The first result should be our semantic match because -15.0 is very strong
+	if results[0].ID != semanticID {
+		t.Errorf("expected first result to be semantic match (ID %d), got ID %d with rank %f", semanticID, results[0].ID, results[0].Rank)
+	}
+}
+
+func TestSanitizeFTSSecurity(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "internal quotes",
+			input:    `class="btn"`,
+			expected: `"class=""btn"""`,
+		},
+		{
+			name:     "mixed quotes and phrases",
+			input:    `error en "user_id"`,
+			expected: `"error" "en" "user_id"`,
+		},
+		{
+			name:     "multiple internal quotes",
+			input:    `id="1" name="test"`,
+			expected: `"id=""1""" "name=""test"""`,
+		},
+		{
+			name:     "already quoted word",
+			input:    `"user_id"`,
+			expected: `"user_id"`,
+		},
+		{
+			name:     "special characters",
+			input:    `select * from table!`,
+			expected: `"select" "*" "from" "table!"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sanitizeFTS(tt.input)
+			if got != tt.expected {
+				t.Errorf("sanitizeFTS(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}

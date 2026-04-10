@@ -12,14 +12,19 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/Gentleman-Programming/engram/internal/store/turboquant"
 )
 
 var openDB = sql.Open
@@ -46,6 +51,7 @@ type Observation struct {
 	Project        *string `json:"project,omitempty"`
 	Scope          string  `json:"scope"`
 	TopicKey       *string `json:"topic_key,omitempty"`
+	SimHash        int64   `json:"simhash"`
 	RevisionCount  int     `json:"revision_count"`
 	DuplicateCount int     `json:"duplicate_count"`
 	LastSeenAt     *string `json:"last_seen_at,omitempty"`
@@ -85,6 +91,7 @@ type TimelineEntry struct {
 	Project        *string `json:"project,omitempty"`
 	Scope          string  `json:"scope"`
 	TopicKey       *string `json:"topic_key,omitempty"`
+	SimHash        int64   `json:"simhash"`
 	RevisionCount  int     `json:"revision_count"`
 	DuplicateCount int     `json:"duplicate_count"`
 	LastSeenAt     *string `json:"last_seen_at,omitempty"`
@@ -281,9 +288,13 @@ func (s *Store) MaxObservationLength() int {
 // ─── Store ───────────────────────────────────────────────────────────────────
 
 type Store struct {
-	db    *sql.DB
-	cfg   Config
-	hooks storeHooks
+	db                 *sql.DB
+	cfg                Config
+	hooks              storeHooks
+	mu                 sync.RWMutex
+	cache              *turboquant.TurboCache
+	newCacheInProgress *turboquant.TurboCache // Used to prevent race during reindex
+	reindexUpdatedIDs  *sync.Map              // Track IDs updated during reindexing
 }
 
 type execer interface {
@@ -400,6 +411,20 @@ func New(cfg Config) (*Store, error) {
 		return nil, fmt.Errorf("engram: create data dir: %w", err)
 	}
 
+	// Apply sensible defaults if missing from Config struct
+	if cfg.MaxObservationLength <= 0 {
+		cfg.MaxObservationLength = 100000
+	}
+	if cfg.MaxSearchResults <= 0 {
+		cfg.MaxSearchResults = 20
+	}
+	if cfg.MaxContextResults <= 0 {
+		cfg.MaxContextResults = 20
+	}
+	if cfg.DedupeWindow <= 0 {
+		cfg.DedupeWindow = 15 * time.Minute
+	}
+
 	dbPath := filepath.Join(cfg.DataDir, "engram.db")
 	db, err := openDB("sqlite", dbPath)
 	if err != nil {
@@ -420,10 +445,20 @@ func New(cfg Config) (*Store, error) {
 	}
 
 	s := &Store{db: db, cfg: cfg, hooks: defaultStoreHooks()}
+	s.cache = turboquant.NewTurboCache()
+	s.reindexUpdatedIDs = &sync.Map{}
+
 	if err := s.migrate(); err != nil {
+		db.Close()
 		return nil, fmt.Errorf("engram: migration: %w", err)
 	}
+
+	if err := s.loadSemanticCache(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("engram: load semantic cache: %w", err)
+	}
 	if err := s.repairEnrolledProjectSyncMutations(); err != nil {
+		db.Close()
 		return nil, fmt.Errorf("engram: repair enrolled sync journal: %w", err)
 	}
 
@@ -458,6 +493,7 @@ func (s *Store) migrate() error {
 			project    TEXT,
 			scope      TEXT    NOT NULL DEFAULT 'project',
 			topic_key  TEXT,
+			simhash    INTEGER,
 			normalized_hash TEXT,
 			revision_count INTEGER NOT NULL DEFAULT 1,
 			duplicate_count INTEGER NOT NULL DEFAULT 1,
@@ -548,6 +584,7 @@ func (s *Store) migrate() error {
 		{name: "sync_id", definition: "TEXT"},
 		{name: "scope", definition: "TEXT NOT NULL DEFAULT 'project'"},
 		{name: "topic_key", definition: "TEXT"},
+		{name: "simhash", definition: "INTEGER"},
 		{name: "normalized_hash", definition: "TEXT"},
 		{name: "revision_count", definition: "INTEGER NOT NULL DEFAULT 1"},
 		{name: "duplicate_count", definition: "INTEGER NOT NULL DEFAULT 1"},
@@ -614,6 +651,9 @@ func (s *Store) migrate() error {
 		return err
 	}
 	if _, err := s.execHook(s.db, `UPDATE observations SET duplicate_count = 1 WHERE duplicate_count IS NULL OR duplicate_count < 1`); err != nil {
+		return err
+	}
+	if _, err := s.execHook(s.db, `UPDATE observations SET simhash = 0 WHERE simhash IS NULL`); err != nil {
 		return err
 	}
 	if _, err := s.execHook(s.db, `UPDATE observations SET updated_at = created_at WHERE updated_at IS NULL OR updated_at = ''`); err != nil {
@@ -905,7 +945,7 @@ func (s *Store) AllObservations(project, scope string, limit int) ([]Observation
 
 	query := `
 		SELECT o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
-		       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.created_at, o.updated_at, o.deleted_at
+		       o.scope, o.topic_key, ifnull(o.simhash, 0) as simhash, o.revision_count, o.duplicate_count, o.last_seen_at, o.created_at, o.updated_at, o.deleted_at
 		FROM observations o
 		WHERE o.deleted_at IS NULL
 	`
@@ -934,7 +974,7 @@ func (s *Store) SessionObservations(sessionID string, limit int) ([]Observation,
 
 	query := `
 		SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
-		       scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
+		       scope, topic_key, ifnull(simhash, 0) as simhash, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
 		FROM observations
 		WHERE session_id = ? AND deleted_at IS NULL
 		ORDER BY created_at ASC
@@ -954,15 +994,17 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 	content := stripPrivateTags(p.Content)
 
 	if len(content) > s.cfg.MaxObservationLength {
-		content = content[:s.cfg.MaxObservationLength] + "... [truncated]"
+		content = truncate(content, s.cfg.MaxObservationLength) + "... [truncated]"
 	}
 	scope := normalizeScope(p.Scope)
 	normHash := hashNormalized(content)
+	simHash := turboquant.ComputeSimHash(content)
 	topicKey := normalizeTopicKey(p.TopicKey)
 
 	var observationID int64
+	var isUpdate bool
+
 	err := s.withTx(func(tx *sql.Tx) error {
-		var obs *Observation
 		if topicKey != "" {
 			var existingID int64
 			err := tx.QueryRow(
@@ -983,6 +1025,7 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 					     content = ?,
 					     tool_name = ?,
 					     topic_key = ?,
+					     simhash = ?,
 					     normalized_hash = ?,
 					     revision_count = revision_count + 1,
 					     last_seen_at = datetime('now'),
@@ -993,17 +1036,20 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 					content,
 					nullableString(p.ToolName),
 					nullableString(topicKey),
+					int64(simHash),
 					normHash,
 					existingID,
 				); err != nil {
 					return err
 				}
-				obs, err = s.getObservationTx(tx, existingID)
+				observationID = existingID
+				obsToSync, err := s.getObservationTx(tx, existingID)
 				if err != nil {
 					return err
 				}
-				observationID = existingID
-				return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpUpsert, observationPayloadFromObservation(obs))
+				isUpdate = true
+
+				return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obsToSync.SyncID, SyncOpUpsert, observationPayloadFromObservation(obsToSync))
 			}
 			if err != sql.ErrNoRows {
 				return err
@@ -1036,12 +1082,14 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 			); err != nil {
 				return err
 			}
-			obs, err = s.getObservationTx(tx, existingID)
+			observationID = existingID
+			obsToSync, err := s.getObservationTx(tx, existingID)
 			if err != nil {
 				return err
 			}
-			observationID = existingID
-			return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpUpsert, observationPayloadFromObservation(obs))
+			isUpdate = true
+
+			return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obsToSync.SyncID, SyncOpUpsert, observationPayloadFromObservation(obsToSync))
 		}
 		if err != sql.ErrNoRows {
 			return err
@@ -1049,10 +1097,10 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 
 		syncID := newSyncID("obs")
 		res, err := s.execHook(tx,
-			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, datetime('now'), datetime('now'))`,
+			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, simhash, normalized_hash, revision_count, duplicate_count, last_seen_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, datetime('now'), datetime('now'))`,
 			syncID, p.SessionID, p.Type, title, content,
-			nullableString(p.ToolName), nullableString(p.Project), scope, nullableString(topicKey), normHash,
+			nullableString(p.ToolName), nullableString(p.Project), scope, nullableString(topicKey), int64(simHash), normHash,
 		)
 		if err != nil {
 			return err
@@ -1061,15 +1109,36 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 		if err != nil {
 			return err
 		}
-		obs, err = s.getObservationTx(tx, observationID)
+		obsToSync, err := s.getObservationTx(tx, observationID)
 		if err != nil {
 			return err
 		}
-		return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpUpsert, observationPayloadFromObservation(obs))
+		return s.enqueueSyncMutationTx(tx, SyncEntityObservation, syncID, SyncOpUpsert, observationPayloadFromObservation(obsToSync))
 	})
 	if err != nil {
 		return 0, err
 	}
+
+	// Update semantic cache AFTER successful commit
+	s.mu.Lock()
+	if isUpdate {
+		s.cache.Remove(observationID)
+		if s.newCacheInProgress != nil {
+			s.newCacheInProgress.Remove(observationID)
+			s.reindexUpdatedIDs.Store(observationID, true)
+		}
+	}
+	if simHash != 0 {
+		s.cache.Add(turboquant.BlockSignature(simHash), observationID)
+	}
+	if s.newCacheInProgress != nil {
+		if simHash != 0 {
+			s.newCacheInProgress.Add(turboquant.BlockSignature(simHash), observationID)
+		}
+		s.reindexUpdatedIDs.Store(observationID, true)
+	}
+	s.mu.Unlock()
+
 	return observationID, nil
 }
 
@@ -1083,7 +1152,7 @@ func (s *Store) RecentObservations(project, scope string, limit int) ([]Observat
 
 	query := `
 		SELECT o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
-		       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.created_at, o.updated_at, o.deleted_at
+		       o.scope, o.topic_key, ifnull(o.simhash, 0) as simhash, o.revision_count, o.duplicate_count, o.last_seen_at, o.created_at, o.updated_at, o.deleted_at
 		FROM observations o
 		WHERE o.deleted_at IS NULL
 	`
@@ -1112,7 +1181,7 @@ func (s *Store) AddPrompt(p AddPromptParams) (int64, error) {
 
 	content := stripPrivateTags(p.Content)
 	if len(content) > s.cfg.MaxObservationLength {
-		content = content[:s.cfg.MaxObservationLength] + "... [truncated]"
+		content = truncate(content, s.cfg.MaxObservationLength) + "... [truncated]"
 	}
 
 	var promptID int64
@@ -1184,6 +1253,9 @@ func (s *Store) SearchPrompts(query string, project string, limit int) ([]Prompt
 	}
 
 	ftsQuery := sanitizeFTS(query)
+	if ftsQuery == "" {
+		return nil, nil // SQL logic error: malformed MATCH expression
+	}
 
 	sql := `
 		SELECT p.id, ifnull(p.sync_id, '') as sync_id, p.session_id, p.content, ifnull(p.project, '') as project, p.created_at
@@ -1223,13 +1295,13 @@ func (s *Store) SearchPrompts(query string, project string, limit int) ([]Prompt
 func (s *Store) GetObservation(id int64) (*Observation, error) {
 	row := s.db.QueryRow(
 		`SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
-		        scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
+		        scope, topic_key, ifnull(simhash, 0) as simhash, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
 		 FROM observations WHERE id = ? AND deleted_at IS NULL`, id,
 	)
 	var o Observation
 	if err := row.Scan(
 		&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content,
-		&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt,
+		&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.SimHash, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt,
 		&o.CreatedAt, &o.UpdatedAt, &o.DeletedAt,
 	); err != nil {
 		return nil, err
@@ -1239,6 +1311,7 @@ func (s *Store) GetObservation(id int64) (*Observation, error) {
 
 func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observation, error) {
 	var updated *Observation
+	var simHash turboquant.BlockSignature
 	err := s.withTx(func(tx *sql.Tx) error {
 		obs, err := s.getObservationTx(tx, id)
 		if err != nil {
@@ -1261,7 +1334,7 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 		if p.Content != nil {
 			content = stripPrivateTags(*p.Content)
 			if len(content) > s.cfg.MaxObservationLength {
-				content = content[:s.cfg.MaxObservationLength] + "... [truncated]"
+				content = truncate(content, s.cfg.MaxObservationLength) + "... [truncated]"
 			}
 		}
 		if p.Project != nil {
@@ -1274,6 +1347,8 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 			topicKey = normalizeTopicKey(*p.TopicKey)
 		}
 
+		simHash = turboquant.ComputeSimHash(content)
+
 		if _, err := s.execHook(tx,
 			`UPDATE observations
 			 SET type = ?,
@@ -1282,6 +1357,7 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 			     project = ?,
 			     scope = ?,
 			     topic_key = ?,
+			     simhash = ?,
 			     normalized_hash = ?,
 			     revision_count = revision_count + 1,
 			     updated_at = datetime('now')
@@ -1292,6 +1368,7 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 			nullableString(project),
 			scope,
 			nullableString(topicKey),
+			int64(simHash),
 			hashNormalized(content),
 			id,
 		); err != nil {
@@ -1307,11 +1384,30 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 	if err != nil {
 		return nil, err
 	}
+
+	// Update semantic cache AFTER successful commit
+	s.mu.Lock()
+	s.cache.Remove(id)
+	if s.newCacheInProgress != nil {
+		s.newCacheInProgress.Remove(id)
+		s.reindexUpdatedIDs.Store(id, true)
+	}
+	if simHash != 0 {
+		s.cache.Add(simHash, updated.ID)
+	}
+	if s.newCacheInProgress != nil {
+		if simHash != 0 {
+			s.newCacheInProgress.Add(simHash, updated.ID)
+		}
+		s.reindexUpdatedIDs.Store(id, true)
+	}
+	s.mu.Unlock()
+
 	return updated, nil
 }
 
 func (s *Store) DeleteObservation(id int64, hardDelete bool) error {
-	return s.withTx(func(tx *sql.Tx) error {
+	err := s.withTx(func(tx *sql.Tx) error {
 		obs, err := s.getObservationTx(tx, id)
 		if err == sql.ErrNoRows {
 			return nil
@@ -1340,13 +1436,30 @@ func (s *Store) DeleteObservation(id int64, hardDelete bool) error {
 			}
 		}
 
-		return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpDelete, syncObservationPayload{
+		if err := s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpDelete, syncObservationPayload{
 			SyncID:     obs.SyncID,
 			Deleted:    true,
 			DeletedAt:  &deletedAt,
 			HardDelete: hardDelete,
-		})
+		}); err != nil {
+			return err
+		}
+
+		return nil
 	})
+	if err != nil {
+		return err
+	}
+
+	// Sync in-memory cache AFTER successful commit
+	s.mu.Lock()
+	s.cache.Remove(id)
+	if s.newCacheInProgress != nil {
+		s.newCacheInProgress.Remove(id)
+		s.reindexUpdatedIDs.Store(id, true)
+	}
+	s.mu.Unlock()
+	return nil
 }
 
 // ─── Timeline ────────────────────────────────────────────────────────────────
@@ -1381,7 +1494,7 @@ func (s *Store) Timeline(observationID int64, before, after int) (*TimelineResul
 	// 3. Get observations BEFORE the focus (same session, older, chronological order)
 	beforeRows, err := s.queryItHook(s.db, `
 		SELECT id, session_id, type, title, content, tool_name, project,
-		       scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
+		       scope, topic_key, ifnull(simhash, 0) as simhash, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
 		FROM observations
 		WHERE session_id = ? AND id < ? AND deleted_at IS NULL
 		ORDER BY id DESC
@@ -1397,7 +1510,7 @@ func (s *Store) Timeline(observationID int64, before, after int) (*TimelineResul
 		var e TimelineEntry
 		if err := beforeRows.Scan(
 			&e.ID, &e.SessionID, &e.Type, &e.Title, &e.Content,
-			&e.ToolName, &e.Project, &e.Scope, &e.TopicKey, &e.RevisionCount, &e.DuplicateCount, &e.LastSeenAt,
+			&e.ToolName, &e.Project, &e.Scope, &e.TopicKey, &e.SimHash, &e.RevisionCount, &e.DuplicateCount, &e.LastSeenAt,
 			&e.CreatedAt, &e.UpdatedAt, &e.DeletedAt,
 		); err != nil {
 			return nil, err
@@ -1415,7 +1528,7 @@ func (s *Store) Timeline(observationID int64, before, after int) (*TimelineResul
 	// 4. Get observations AFTER the focus (same session, newer, chronological order)
 	afterRows, err := s.queryItHook(s.db, `
 		SELECT id, session_id, type, title, content, tool_name, project,
-		       scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
+		       scope, topic_key, ifnull(simhash, 0) as simhash, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
 		FROM observations
 		WHERE session_id = ? AND id > ? AND deleted_at IS NULL
 		ORDER BY id ASC
@@ -1431,7 +1544,7 @@ func (s *Store) Timeline(observationID int64, before, after int) (*TimelineResul
 		var e TimelineEntry
 		if err := afterRows.Scan(
 			&e.ID, &e.SessionID, &e.Type, &e.Title, &e.Content,
-			&e.ToolName, &e.Project, &e.Scope, &e.TopicKey, &e.RevisionCount, &e.DuplicateCount, &e.LastSeenAt,
+			&e.ToolName, &e.Project, &e.Scope, &e.TopicKey, &e.SimHash, &e.RevisionCount, &e.DuplicateCount, &e.LastSeenAt,
 			&e.CreatedAt, &e.UpdatedAt, &e.DeletedAt,
 		); err != nil {
 			return nil, err
@@ -1460,9 +1573,8 @@ func (s *Store) Timeline(observationID int64, before, after int) (*TimelineResul
 // ─── Search (FTS5) ───────────────────────────────────────────────────────────
 
 func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error) {
-	// Normalize project filter so "Engram" finds records stored as "engram"
+	// 1. Setup filters and limits
 	opts.Project, _ = NormalizeProject(opts.Project)
-
 	limit := opts.Limit
 	if limit <= 0 {
 		limit = 10
@@ -1471,16 +1583,20 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 		limit = s.cfg.MaxSearchResults
 	}
 
-	var directResults []SearchResult
+	// Prepare tracking for hybrid merge
+	seen := make(map[int64]bool)
+	var results []SearchResult
+	querySimHash := turboquant.ComputeSimHash(query)
+
+	// 2. Direct Topic Match (if query looks like a topic key)
 	if strings.Contains(query, "/") {
 		tkSQL := `
 			SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
-			       scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
+			       scope, topic_key, ifnull(simhash, 0) as simhash, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
 			FROM observations
 			WHERE topic_key = ? AND deleted_at IS NULL
 		`
 		tkArgs := []any{query}
-
 		if opts.Type != "" {
 			tkSQL += " AND type = ?"
 			tkArgs = append(tkArgs, opts.Type)
@@ -1493,7 +1609,6 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 			tkSQL += " AND scope = ?"
 			tkArgs = append(tkArgs, normalizeScope(opts.Scope))
 		}
-
 		tkSQL += " ORDER BY updated_at DESC LIMIT ?"
 		tkArgs = append(tkArgs, limit)
 
@@ -1504,83 +1619,322 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 				var sr SearchResult
 				if err := tkRows.Scan(
 					&sr.ID, &sr.SyncID, &sr.SessionID, &sr.Type, &sr.Title, &sr.Content,
-					&sr.ToolName, &sr.Project, &sr.Scope, &sr.TopicKey, &sr.RevisionCount, &sr.DuplicateCount,
+					&sr.ToolName, &sr.Project, &sr.Scope, &sr.TopicKey, &sr.SimHash, &sr.RevisionCount, &sr.DuplicateCount,
 					&sr.LastSeenAt, &sr.CreatedAt, &sr.UpdatedAt, &sr.DeletedAt,
 				); err != nil {
 					break
 				}
-				sr.Rank = -1000
-				directResults = append(directResults, sr)
+				sr.Rank = -1000 // Topic matches are highly prioritized
+				if !seen[sr.ID] {
+					results = append(results, sr)
+					seen[sr.ID] = true
+				}
 			}
 		}
 	}
 
-	// Sanitize query for FTS5 — wrap each term in quotes to avoid syntax errors
+	// 3. Lexical Search (FTS5)
 	ftsQuery := sanitizeFTS(query)
-
-	sqlQ := `
-		SELECT o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
-		       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.created_at, o.updated_at, o.deleted_at,
+	if ftsQuery != "" {
+		sqlQ := `
+			SELECT o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
+		       o.scope, o.topic_key, ifnull(o.simhash, 0) as simhash, o.revision_count, o.duplicate_count, o.last_seen_at, o.created_at, o.updated_at, o.deleted_at,
 		       fts.rank
 		FROM observations_fts fts
-		JOIN observations o ON o.id = fts.rowid
-		WHERE observations_fts MATCH ? AND o.deleted_at IS NULL
-	`
-	args := []any{ftsQuery}
+			JOIN observations o ON o.id = fts.rowid
+			WHERE observations_fts MATCH ? AND o.deleted_at IS NULL
+		`
+		args := []any{ftsQuery}
 
-	if opts.Type != "" {
-		sqlQ += " AND o.type = ?"
-		args = append(args, opts.Type)
-	}
+		if opts.Type != "" {
+			sqlQ += " AND o.type = ?"
+			args = append(args, opts.Type)
+		}
 
-	if opts.Project != "" {
-		sqlQ += " AND o.project = ?"
-		args = append(args, opts.Project)
-	}
+		if opts.Project != "" {
+			sqlQ += " AND o.project = ?"
+			args = append(args, opts.Project)
+		}
 
-	if opts.Scope != "" {
-		sqlQ += " AND o.scope = ?"
-		args = append(args, normalizeScope(opts.Scope))
-	}
+		if opts.Scope != "" {
+			sqlQ += " AND o.scope = ?"
+			args = append(args, normalizeScope(opts.Scope))
+		}
 
-	sqlQ += " ORDER BY fts.rank LIMIT ?"
-	args = append(args, limit)
+		sqlQ += " ORDER BY fts.rank LIMIT ?"
+		args = append(args, limit)
 
-	rows, err := s.queryItHook(s.db, sqlQ, args...)
-	if err != nil {
-		return nil, fmt.Errorf("search: %w", err)
-	}
-	defer rows.Close()
+		rows, err := s.queryItHook(s.db, sqlQ, args...)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var sr SearchResult
+				if err := rows.Scan(
+					&sr.ID, &sr.SyncID, &sr.SessionID, &sr.Type, &sr.Title, &sr.Content,
+					&sr.ToolName, &sr.Project, &sr.Scope, &sr.TopicKey, &sr.SimHash, &sr.RevisionCount, &sr.DuplicateCount,
+					&sr.LastSeenAt, &sr.CreatedAt, &sr.UpdatedAt, &sr.DeletedAt,
+					&sr.Rank,
+				); err != nil {
+					return nil, err
+				}
 
-	seen := make(map[int64]bool)
-	for _, dr := range directResults {
-		seen[dr.ID] = true
-	}
+				// Calculate similarity boost using SimHash Hamming distance
+				distance := turboquant.HammingDistance(querySimHash, turboquant.BlockSignature(sr.SimHash))
+				if distance < 12 { // Significant similarity boost
+					sr.Rank -= float64(12-distance) * 0.8
+				}
 
-	var results []SearchResult
-	results = append(results, directResults...)
-	for rows.Next() {
-		var sr SearchResult
-		if err := rows.Scan(
-			&sr.ID, &sr.SyncID, &sr.SessionID, &sr.Type, &sr.Title, &sr.Content,
-			&sr.ToolName, &sr.Project, &sr.Scope, &sr.TopicKey, &sr.RevisionCount, &sr.DuplicateCount,
-			&sr.LastSeenAt, &sr.CreatedAt, &sr.UpdatedAt, &sr.DeletedAt,
-			&sr.Rank,
-		); err != nil {
+				if !seen[sr.ID] {
+					results = append(results, sr)
+					seen[sr.ID] = true
+				}
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
+			}
+		} else {
+			log.Printf("engram: FTS5 search error (possible index corruption): %v", err)
 			return nil, err
 		}
-		if !seen[sr.ID] {
-			results = append(results, sr)
+	}
+
+	// 4. Semantic Expansion (TurboQuant)
+	s.mu.RLock()
+	cache := s.cache
+	inProgress := s.newCacheInProgress
+
+	// Use a map to deduplicate semantic matches, preferring smaller distance.
+	// If the same ID exists in both caches, the inProgress one often represents
+	// the state during reindexing.
+	matchMap := make(map[int64]int) // ID -> Distance
+	for _, m := range cache.FindNearestN(querySimHash, 10) {
+		matchMap[m.ID] = m.Distance
+	}
+	if inProgress != nil {
+		for _, m := range inProgress.FindNearestN(querySimHash, 10) {
+			if dist, exists := matchMap[m.ID]; !exists || m.Distance <= dist {
+				matchMap[m.ID] = m.Distance
+			}
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+	s.mu.RUnlock()
+
+	semanticIDs := make([]int64, 0, len(matchMap))
+	idToDist := make(map[int64]int)
+	for id, dist := range matchMap {
+		if dist < 20 {
+			semanticIDs = append(semanticIDs, id)
+			idToDist[id] = dist
+		}
 	}
+
+	if len(semanticIDs) > 0 {
+		placeholders := make([]string, len(semanticIDs))
+		args := make([]any, len(semanticIDs))
+		for i, id := range semanticIDs {
+			placeholders[i] = "?"
+			args[i] = id
+		}
+
+		queryBatch := fmt.Sprintf(`
+			SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
+			       scope, topic_key, ifnull(simhash, 0) as simhash, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
+			FROM observations
+			WHERE id IN (%s) AND deleted_at IS NULL
+		`, strings.Join(placeholders, ","))
+
+		obsBatch, err := s.queryObservations(queryBatch, args...)
+		if err == nil {
+			for _, obs := range obsBatch {
+				dist := idToDist[obs.ID]
+				// Map the distance to a competitive negative BM25 score.
+				semanticRank := -15.0 + (float64(dist) * 0.5)
+
+				if seen[obs.ID] {
+					// Update existing result rank if semantic match is stronger
+					for i := range results {
+						if results[i].ID == obs.ID {
+							if semanticRank < results[i].Rank {
+								results[i].Rank = semanticRank
+							}
+							break
+						}
+					}
+					continue
+				}
+
+				if len(results) >= limit*2 {
+					break
+				}
+
+				// Apply metadata filters (Project, Scope, Type) to semantic matches
+				matchProject := derefString(obs.Project)
+				if opts.Project != "" && matchProject != opts.Project {
+					continue
+				}
+				if opts.Scope != "" && obs.Scope != normalizeScope(opts.Scope) {
+					continue
+				}
+				if opts.Type != "" && obs.Type != opts.Type {
+					continue
+				}
+
+				results = append(results, SearchResult{
+					Observation: obs,
+					Rank:        semanticRank,
+				})
+				seen[obs.ID] = true
+			}
+		}
+	}
+
+	// ─── Post-Processing ──────────────────────────────────────────────────────────
+
+	// MANDATORY: Sort combined results by rank (FTS5 rank: lower is better)
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Rank < results[j].Rank
+	})
 
 	if len(results) > limit {
 		results = results[:limit]
 	}
 	return results, nil
+}
+
+func (s *Store) loadSemanticCache() error {
+	rows, err := s.db.Query("SELECT id, simhash FROM observations WHERE deleted_at IS NULL AND simhash != 0")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	newCache := turboquant.NewTurboCache()
+	for rows.Next() {
+		var id int64
+		var sig int64
+		if err := rows.Scan(&id, &sig); err != nil {
+			return err
+		}
+		newCache.Add(turboquant.BlockSignature(sig), id)
+	}
+
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	s.cache = newCache
+	s.mu.Unlock()
+
+	return nil
+}
+
+// ReindexTurboQuant recomputes SimHash for all active observations,
+// updates the DB, and rebuilds the in-memory cache.
+func (s *Store) ReindexTurboQuant() (int, error) {
+	rows, err := s.queryHook(s.db, "SELECT id, content FROM observations WHERE deleted_at IS NULL")
+	if err != nil {
+		return 0, fmt.Errorf("reindex: fetch obs: %w", err)
+	}
+	defer rows.Close()
+
+	// Build a new cache in background to avoid search blindness
+	newCache := turboquant.NewTurboCache()
+	s.mu.Lock()
+	s.newCacheInProgress = newCache
+	s.reindexUpdatedIDs = &sync.Map{} // Reset tracking for concurrent updates
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.newCacheInProgress = nil
+		s.mu.Unlock()
+	}()
+
+	count := 0
+	const batchSize = 500
+	var currentBatch []struct {
+		id  int64
+		sig turboquant.BlockSignature
+	}
+
+	flushBatch := func() (int, error) {
+		s.mu.Lock()
+		var filteredBatch []struct {
+			id  int64
+			sig turboquant.BlockSignature
+		}
+		for _, item := range currentBatch {
+			if _, updated := s.reindexUpdatedIDs.Load(item.id); !updated {
+				filteredBatch = append(filteredBatch, item)
+			}
+		}
+		s.mu.Unlock()
+
+		if len(filteredBatch) == 0 {
+			return 0, nil
+		}
+
+		tx, err := s.beginTxHook()
+		if err != nil {
+			return 0, err
+		}
+		defer tx.Rollback()
+
+		for _, item := range filteredBatch {
+			if _, err := s.execHook(tx, "UPDATE observations SET simhash = ? WHERE id = ?", int64(item.sig), item.id); err != nil {
+				return 0, err
+			}
+		}
+		return len(filteredBatch), s.commitHook(tx)
+	}
+
+	for rows.Next() {
+		var id int64
+		var content string
+		if err := rows.Scan(&id, &content); err != nil {
+			return 0, err
+		}
+
+		sig := turboquant.ComputeSimHash(content)
+
+		// Skip if this ID was updated concurrently during the reindex scan.
+		// We use the lock to ensure atomicity between the check and the add,
+		// preventing a race where an update happens between Load and Add.
+		s.mu.Lock()
+		if _, updated := s.reindexUpdatedIDs.Load(id); !updated {
+			newCache.Add(sig, id)
+			currentBatch = append(currentBatch, struct {
+				id  int64
+				sig turboquant.BlockSignature
+			}{id, sig})
+		}
+		s.mu.Unlock()
+
+		if len(currentBatch) >= batchSize {
+			n, err := flushBatch()
+			if err != nil {
+				return count, fmt.Errorf("reindex: batch flush: %w", err)
+			}
+			count += n
+			currentBatch = currentBatch[:0]
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return count, fmt.Errorf("reindex: rows loop: %w", err)
+	}
+
+	n, err := flushBatch()
+	if err != nil {
+		return count, fmt.Errorf("reindex: final batch flush: %w", err)
+	}
+	count += n
+
+	// Hot-swap the cache pointer (Atomic-safe with RWMutex)
+	s.mu.Lock()
+	s.cache = newCache
+	s.mu.Unlock()
+	return count, nil
 }
 
 // ─── Stats ───────────────────────────────────────────────────────────────────
@@ -1626,11 +1980,28 @@ func (s *Store) FormatContext(project, scope string) (string, error) {
 		return "", err
 	}
 
+	var b strings.Builder
+
 	if len(sessions) == 0 && len(observations) == 0 && len(prompts) == 0 {
-		return "", nil
+		// FALLBACK: If current project is empty, fetch general context from ALL projects
+		// to provide a "global" knowledge base as per the user's philosophy.
+		observations, _ = s.RecentObservations("", "", s.cfg.MaxContextResults)
+		if len(observations) == 0 {
+			return "", nil
+		}
+		b.WriteString("## Global Memory (Cross-Project)\n\n")
+		b.WriteString("No specific memories for this project yet. Showing recent global discoveries:\n\n")
+		for _, obs := range observations {
+			projectTag := ""
+			if obs.Project != nil && *obs.Project != "" {
+				projectTag = fmt.Sprintf(" [%s]", *obs.Project)
+			}
+			fmt.Fprintf(&b, "- [%s]%s **%s**: %s\n",
+				obs.Type, projectTag, obs.Title, truncate(obs.Content, 300))
+		}
+		return b.String(), nil
 	}
 
-	var b strings.Builder
 	b.WriteString("## Memory from Previous Sessions\n\n")
 
 	if len(sessions) > 0 {
@@ -1696,7 +2067,7 @@ func (s *Store) Export() (*ExportData, error) {
 	// Observations
 	obsRows, err := s.queryItHook(s.db,
 		`SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
-		        scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
+		        scope, topic_key, ifnull(simhash, 0) as simhash, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
 		 FROM observations ORDER BY id`,
 	)
 	if err != nil {
@@ -1707,7 +2078,7 @@ func (s *Store) Export() (*ExportData, error) {
 		var o Observation
 		if err := obsRows.Scan(
 			&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content,
-			&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt,
+			&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.SimHash, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt,
 			&o.CreatedAt, &o.UpdatedAt, &o.DeletedAt,
 		); err != nil {
 			return nil, err
@@ -1766,8 +2137,8 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 	// Import observations (use new IDs — AUTOINCREMENT)
 	for _, obs := range data.Observations {
 		_, err := s.execHook(tx,
-			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, simhash, normalized_hash, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			normalizeExistingSyncID(obs.SyncID, "obs"),
 			obs.SessionID,
 			obs.Type,
@@ -1777,6 +2148,7 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 			obs.Project,
 			normalizeScope(obs.Scope),
 			nullableString(normalizeTopicKey(derefString(obs.TopicKey))),
+			int64(obs.SimHash),
 			hashNormalized(obs.Content),
 			maxInt(obs.RevisionCount, 1),
 			maxInt(obs.DuplicateCount, 1),
@@ -2121,12 +2493,12 @@ func (s *Store) ApplyPulledMutation(targetKey string, mutation SyncMutation) err
 func (s *Store) GetObservationBySyncID(syncID string) (*Observation, error) {
 	row := s.db.QueryRow(
 		`SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
-		        scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
+		        scope, topic_key, ifnull(simhash, 0) as simhash, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
 		 FROM observations WHERE sync_id = ? AND deleted_at IS NULL ORDER BY id DESC LIMIT 1`,
 		syncID,
 	)
 	var o Observation
-	if err := row.Scan(&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content, &o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt); err != nil {
+	if err := row.Scan(&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content, &o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.SimHash, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt); err != nil {
 		return nil, err
 	}
 	return &o, nil
@@ -2843,11 +3215,11 @@ func decodeSyncPayload(payload []byte, dest any) error {
 func (s *Store) getObservationTx(tx *sql.Tx, id int64) (*Observation, error) {
 	row := tx.QueryRow(
 		`SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
-		        scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
+		        scope, topic_key, ifnull(simhash, 0) as simhash, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
 		 FROM observations WHERE id = ? AND deleted_at IS NULL`, id,
 	)
 	var o Observation
-	if err := row.Scan(&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content, &o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt); err != nil {
+	if err := row.Scan(&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content, &o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.SimHash, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt); err != nil {
 		return nil, err
 	}
 	return &o, nil
@@ -2855,7 +3227,7 @@ func (s *Store) getObservationTx(tx *sql.Tx, id int64) (*Observation, error) {
 
 func (s *Store) getObservationBySyncIDTx(tx *sql.Tx, syncID string, includeDeleted bool) (*Observation, error) {
 	query := `SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
-		        scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
+		        scope, topic_key, ifnull(simhash, 0) as simhash, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
 		 FROM observations WHERE sync_id = ?`
 	if !includeDeleted {
 		query += ` AND deleted_at IS NULL`
@@ -2863,7 +3235,7 @@ func (s *Store) getObservationBySyncIDTx(tx *sql.Tx, syncID string, includeDelet
 	query += ` ORDER BY id DESC LIMIT 1`
 	row := tx.QueryRow(query, syncID)
 	var o Observation
-	if err := row.Scan(&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content, &o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt); err != nil {
+	if err := row.Scan(&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content, &o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.SimHash, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt); err != nil {
 		return nil, err
 	}
 	return &o, nil
@@ -2901,9 +3273,9 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 	existing, err := s.getObservationBySyncIDTx(tx, payload.SyncID, true)
 	if err == sql.ErrNoRows {
 		_, err = s.execHook(tx,
-			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, updated_at, deleted_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, datetime('now'), NULL)`,
-			payload.SyncID, payload.SessionID, payload.Type, payload.Title, payload.Content, payload.ToolName, payload.Project, normalizeScope(payload.Scope), payload.TopicKey, hashNormalized(payload.Content),
+			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, simhash, normalized_hash, revision_count, duplicate_count, updated_at, deleted_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, datetime('now'), NULL)`,
+			payload.SyncID, payload.SessionID, payload.Type, payload.Title, payload.Content, payload.ToolName, payload.Project, normalizeScope(payload.Scope), payload.TopicKey, int64(turboquant.ComputeSimHash(payload.Content)), hashNormalized(payload.Content),
 		)
 		return err
 	}
@@ -2912,9 +3284,9 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 	}
 	_, err = s.execHook(tx,
 		`UPDATE observations
-		 SET session_id = ?, type = ?, title = ?, content = ?, tool_name = ?, project = ?, scope = ?, topic_key = ?, normalized_hash = ?, revision_count = revision_count + 1, updated_at = datetime('now'), deleted_at = NULL
+		 SET session_id = ?, type = ?, title = ?, content = ?, tool_name = ?, project = ?, scope = ?, topic_key = ?, simhash = ?, normalized_hash = ?, revision_count = revision_count + 1, updated_at = datetime('now'), deleted_at = NULL
 		 WHERE id = ?`,
-		payload.SessionID, payload.Type, payload.Title, payload.Content, payload.ToolName, payload.Project, normalizeScope(payload.Scope), payload.TopicKey, hashNormalized(payload.Content), existing.ID,
+		payload.SessionID, payload.Type, payload.Title, payload.Content, payload.ToolName, payload.Project, normalizeScope(payload.Scope), payload.TopicKey, int64(turboquant.ComputeSimHash(payload.Content)), hashNormalized(payload.Content), existing.ID,
 	)
 	return err
 }
@@ -2975,7 +3347,7 @@ func (s *Store) queryObservations(query string, args ...any) ([]Observation, err
 		var o Observation
 		if err := rows.Scan(
 			&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content,
-			&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt,
+			&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.SimHash, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt,
 			&o.CreatedAt, &o.UpdatedAt, &o.DeletedAt,
 		); err != nil {
 			return nil, err
@@ -3063,6 +3435,7 @@ func (s *Store) migrateLegacyObservationsTable() error {
 			project    TEXT,
 			scope      TEXT    NOT NULL DEFAULT 'project',
 			topic_key  TEXT,
+			simhash    INTEGER,
 			normalized_hash TEXT,
 			revision_count INTEGER NOT NULL DEFAULT 1,
 			duplicate_count INTEGER NOT NULL DEFAULT 1,
@@ -3079,7 +3452,7 @@ func (s *Store) migrateLegacyObservationsTable() error {
 	if _, err := s.execHook(tx, `
 		INSERT INTO observations_migrated (
 			id, sync_id, session_id, type, title, content, tool_name, project,
-			scope, topic_key, normalized_hash, revision_count, duplicate_count,
+			scope, topic_key, simhash, normalized_hash, revision_count, duplicate_count,
 			last_seen_at, created_at, updated_at, deleted_at
 		)
 		SELECT
@@ -3097,6 +3470,7 @@ func (s *Store) migrateLegacyObservationsTable() error {
 			project,
 			CASE WHEN scope IS NULL OR scope = '' THEN 'project' ELSE scope END,
 			NULLIF(topic_key, ''),
+			0,
 			normalized_hash,
 			CASE WHEN revision_count IS NULL OR revision_count < 1 THEN 1 ELSE revision_count END,
 			CASE WHEN duplicate_count IS NULL OR duplicate_count < 1 THEN 1 ELSE duplicate_count END,
@@ -3381,11 +3755,19 @@ func stripPrivateTags(s string) string {
 
 // sanitizeFTS wraps each word in quotes so FTS5 doesn't choke on special chars.
 // "fix auth bug" → `"fix" "auth" "bug"`
+// It correctly escapes internal double quotes to prevent malformed MATCH syntax.
 func sanitizeFTS(query string) string {
 	words := strings.Fields(query)
 	for i, w := range words {
-		// Strip existing quotes to avoid double-quoting
-		w = strings.Trim(w, `"`)
+		// Only strip wrapping quotes if they exist as a balanced pair
+		if len(w) >= 2 && strings.HasPrefix(w, `"`) && strings.HasSuffix(w, `"`) {
+			w = w[1 : len(w)-1]
+		}
+
+		// Escape any remaining internal double quotes by doubling them
+		w = strings.ReplaceAll(w, `"`, `""`)
+
+		// Wrap the result in quotes for FTS5
 		words[i] = `"` + w + `"`
 	}
 	return strings.Join(words, " ")
