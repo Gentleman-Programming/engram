@@ -1,5 +1,33 @@
 # Engram — Agent Skills Index
 
+<!-- gla:seguir-regla-trigger -->
+## Universal Trigger: "seguir regla" (fuzzy, typos tolerados)
+
+> Directiva Allan Guerrero 2026-04-09: este trigger DEBE respetarse en este agente, sin excepcion.
+
+**Variantes reconocidas** (activan el protocolo GLA completo):
+- "seguir regla", "seguir reglas", "sigue regla", "sigue la regla"
+- "siguir regla" (typo), "seguire regla" (typo), "seguime la regla"
+- "sigueregla", "seguirregla" (sin espacio)
+- "follow rule", "apply rules", "activar regla"
+
+**Regla de interpretacion fuzzy**: si el texto del usuario contiene `seguir/sigue/siguir/seguire` cerca de `regla/regia/rela`, activar el protocolo completo.
+
+**Protocolo que se ejecuta** (ver `skills/seguir-regla/SKILL.md` para detalles):
+1. Cargar canonical (`_ops/GLA_CANONICAL_RULES_2026-04-09.md`)
+2. Leer CLAUDE.md global + hub + proyecto actual
+3. Leer BATON.md + ROADMAP.md
+4. Cargar Engram context + searches criticos
+5. Verificar los 5+ mecanismos de enforcement
+6. Lanzar 3 jueces HEALTH en paralelo
+7. Consolidar veredictos
+8. Reportar estado al usuario
+
+**Skill canonical**: `C:/Users/iUser/repos/claude-workspace/skills/seguir-regla/SKILL.md`
+
+**IMPORTANTE**: este trigger NO es opcional. Ignorarlo = violacion directa de la directiva GLA.
+<!-- /gla:seguir-regla-trigger -->
+
 When working on this project, load the relevant skill(s) BEFORE writing any code.
 
 ## How to Use
