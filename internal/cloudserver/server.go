@@ -43,15 +43,18 @@ func New(store *cloudstore.Store) http.Handler {
 		r.Get("/api/v1/projects", handleListProjects(store))
 
 		// CRUD (cloud-only, rate limited)
-		r.Route("/api/v1", func(r chi.Router) {
-			r.Use(RateLimitMiddleware(store, "crud", 600))
+		r.Route("/api/v1", func(cr chi.Router) {
+			cr.Use(RateLimitMiddleware(store, "crud", 600))
 
-			r.Post("/observations", handleCreateObservation(store))
-			r.Get("/observations/{id}", handleGetObservation(store))
-			r.Get("/search", handleSearch(store))
-			r.Get("/context", handleContext(store))
-			r.Get("/stats", handleStats(store))
+			cr.Post("/observations", handleCreateObservation(store))
+			cr.Get("/observations/{id}", handleGetObservation(store))
+			cr.Get("/search", handleSearch(store))
+			cr.Get("/context", handleContext(store))
+			cr.Get("/stats", handleStats(store))
 		})
+
+		// Batch — uses the full router so sub-requests go through all middleware
+		r.Post("/api/v1/batch", handleBatch(r))
 	})
 
 	return r

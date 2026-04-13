@@ -626,3 +626,83 @@ func TestIntegration_Stats(t *testing.T) {
 		t.Fatalf("expected 1 prompt, got %d", stats.TotalPrompts)
 	}
 }
+
+// Task 6.4: Maintenance jobs run without error
+func TestIntegration_Maintenance(t *testing.T) {
+	s := newTestCloudStore(t)
+	ctx := context.Background()
+
+	// Insert some data that maintenance should clean
+	_, _ = s.pool.Exec(ctx,
+		"INSERT INTO idempotency_keys (key, response, created_at) VALUES ('old-key', '{}', now() - interval '48 hours')")
+	_, _ = s.pool.Exec(ctx,
+		"INSERT INTO idempotency_keys (key, response, created_at) VALUES ('fresh-key', '{}', now())")
+
+	userID, _, _ := s.CreateUser(ctx, "Alice", "alice@test.com")
+	_, _ = s.pool.Exec(ctx,
+		"INSERT INTO rate_limits (user_id, endpoint, window_start) VALUES ($1, 'push', now() - interval '2 hours')", userID)
+
+	result, err := s.RunMaintenance(ctx)
+	if err != nil {
+		t.Fatalf("maintenance: %v", err)
+	}
+
+	if result.IdempotencyKeysDeleted != 1 {
+		t.Fatalf("expected 1 idempotency key deleted, got %d", result.IdempotencyKeysDeleted)
+	}
+	if result.RateLimitsDeleted != 1 {
+		t.Fatalf("expected 1 rate limit deleted, got %d", result.RateLimitsDeleted)
+	}
+
+	// Fresh key should still exist
+	var count int
+	s.pool.QueryRow(ctx, "SELECT COUNT(*) FROM idempotency_keys WHERE key = 'fresh-key'").Scan(&count)
+	if count != 1 {
+		t.Fatal("fresh idempotency key should not be deleted")
+	}
+}
+
+// Task 6.5: Context endpoint returns formatted output
+func TestIntegration_GetContext(t *testing.T) {
+	s := newTestCloudStore(t)
+	ctx := context.Background()
+
+	userID, _, _ := s.CreateUser(ctx, "Alice", "alice@test.com")
+	_, _ = s.CreateProject(ctx, "proj")
+	_ = s.AddMember(ctx, "proj", "alice@test.com", "member")
+
+	// Push data
+	_, _ = s.ProcessPush(ctx, []Mutation{
+		{Seq: 1, Entity: "session", EntityKey: "s1", Op: "upsert",
+			Payload: map[string]any{"id": "s1", "project": "proj", "directory": "/tmp", "started_at": "2026-04-13T10:00:00Z"}},
+		{Seq: 2, Entity: "observation", EntityKey: "obs-1", Op: "upsert",
+			Payload: map[string]any{"sync_id": "obs-1", "session_id": "s1", "type": "decision", "title": "Use Go", "content": "Chose Go for backend", "scope": "project"}},
+	}, userID, "proj")
+
+	result, err := s.GetContext(ctx, "proj", userID)
+	if err != nil {
+		t.Fatalf("get context: %v", err)
+	}
+	if result == "" {
+		t.Fatal("expected non-empty context")
+	}
+	if !contains(result, "Memory from Previous Sessions") {
+		t.Fatal("expected context header")
+	}
+	if !contains(result, "Use Go") {
+		t.Fatal("expected observation in context")
+	}
+}
+
+func contains(s, sub string) bool {
+	return len(s) >= len(sub) && searchString(s, sub)
+}
+
+func searchString(s, sub string) bool {
+	for i := 0; i <= len(s)-len(sub); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}

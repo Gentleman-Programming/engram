@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/cloudserver"
 	"github.com/Gentleman-Programming/engram/internal/cloudstore"
@@ -60,6 +61,9 @@ func cmdServe() {
 		Addr:    ":" + port,
 		Handler: handler,
 	}
+
+	// Start maintenance loop (cleanup every hour)
+	go store.StartMaintenanceLoop(ctx, 1*time.Hour)
 
 	// Start server in goroutine
 	go func() {
