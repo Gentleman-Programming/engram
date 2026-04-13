@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/Gentleman-Programming/engram/internal/cloudstore"
+	"github.com/Gentleman-Programming/engram/internal/types"
 )
 
 const version = "0.1.0"
@@ -176,32 +177,125 @@ func handleListProjects(store *cloudstore.Store) http.HandlerFunc {
 
 func handleCreateObservation(store *cloudstore.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Placeholder — will be fully implemented in Phase 2.5
-		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "not yet implemented"})
+		userID := UserIDFromContext(r.Context())
+
+		var req struct {
+			SessionID string `json:"session_id"`
+			Type      string `json:"type"`
+			Title     string `json:"title"`
+			Content   string `json:"content"`
+			ToolName  string `json:"tool_name,omitempty"`
+			Project   string `json:"project"`
+			Scope     string `json:"scope,omitempty"`
+			TopicKey  string `json:"topic_key,omitempty"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+			return
+		}
+		if req.Project == "" || req.Title == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project and title required"})
+			return
+		}
+
+		isMember, _ := store.IsMember(r.Context(), req.Project, userID)
+		if !isMember {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "not a member"})
+			return
+		}
+
+		params := types.AddObservationParams{
+			SessionID: req.SessionID, Type: req.Type, Title: req.Title,
+			Content: req.Content, ToolName: req.ToolName, Scope: req.Scope, TopicKey: req.TopicKey,
+		}
+		obsID, err := store.CreateObservation(r.Context(), params, req.Project, userID)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]string{"id": obsID})
 	}
 }
 
 func handleGetObservation(store *cloudstore.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "not yet implemented"})
+		userID := UserIDFromContext(r.Context())
+		id := chi.URLParam(r, "id")
+		project := r.URL.Query().Get("project")
+		if project == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project required"})
+			return
+		}
+
+		obs, err := store.GetObservation(r.Context(), id, project, userID)
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
+		writeJSON(w, http.StatusOK, obs)
 	}
 }
 
 func handleSearch(store *cloudstore.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "not yet implemented"})
+		userID := UserIDFromContext(r.Context())
+		query := r.URL.Query().Get("q")
+		project := r.URL.Query().Get("project")
+		limit := queryInt(r, "limit", 20)
+
+		if query == "" || project == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "q and project required"})
+			return
+		}
+
+		isMember, _ := store.IsMember(r.Context(), project, userID)
+		if !isMember {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "not a member"})
+			return
+		}
+
+		results, err := store.Search(r.Context(), query, project, userID, limit)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"results": results, "count": len(results)})
 	}
 }
 
 func handleContext(store *cloudstore.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "not yet implemented"})
+		userID := UserIDFromContext(r.Context())
+		project := r.URL.Query().Get("project")
+		if project == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project required"})
+			return
+		}
+
+		ctx, err := store.GetContext(r.Context(), project, userID)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"context": ctx})
 	}
 }
 
 func handleStats(store *cloudstore.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "not yet implemented"})
+		userID := UserIDFromContext(r.Context())
+		project := r.URL.Query().Get("project")
+		if project == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project required"})
+			return
+		}
+
+		stats, err := store.GetStats(r.Context(), project, userID)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, stats)
 	}
 }
 

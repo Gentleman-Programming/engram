@@ -6,6 +6,8 @@ import (
 	"context"
 	"os"
 	"testing"
+
+	"github.com/Gentleman-Programming/engram/internal/types"
 )
 
 const defaultTestDSN = "postgres://engram:testpass@localhost:5433/engram_test?sslmode=disable"
@@ -481,5 +483,146 @@ func TestIntegration_FullPushPullCycle(t *testing.T) {
 	).Scan(&revCount)
 	if revCount != 1 {
 		t.Fatalf("expected 1 revision for arch/pattern, got %d", revCount)
+	}
+}
+
+// Task 5.6: CRUD create + read observation
+func TestIntegration_CRUDObservation(t *testing.T) {
+	s := newTestCloudStore(t)
+	ctx := context.Background()
+
+	userID, _, _ := s.CreateUser(ctx, "Alice", "alice@test.com")
+	_, _ = s.CreateProject(ctx, "proj")
+	_ = s.AddMember(ctx, "proj", "alice@test.com", "member")
+
+	// Create
+	params := types.AddObservationParams{
+		SessionID: "s1", Type: "decision", Title: "Use PostgreSQL",
+		Content: "Chose PostgreSQL for cloud sync", Scope: "project",
+		TopicKey: "infra/database",
+	}
+	obsID, err := s.CreateObservation(ctx, params, "proj", userID)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if obsID == "" {
+		t.Fatal("expected non-empty obsID")
+	}
+
+	// Read
+	obs, err := s.GetObservation(ctx, obsID, "proj", userID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if obs.Title != "Use PostgreSQL" {
+		t.Fatalf("expected title 'Use PostgreSQL', got '%s'", obs.Title)
+	}
+
+	// Create with same topic_key → should overwrite (LWW), previous saved as revision
+	params2 := types.AddObservationParams{
+		SessionID: "s1", Type: "decision", Title: "Use CockroachDB",
+		Content: "Changed to CockroachDB", Scope: "project",
+		TopicKey: "infra/database",
+	}
+	obsID2, err := s.CreateObservation(ctx, params2, "proj", userID)
+	if err != nil {
+		t.Fatalf("create conflict: %v", err)
+	}
+	// Should update the same observation (same topic_key)
+	if obsID2 != obsID {
+		t.Fatalf("expected same obsID on topic_key conflict, got %s vs %s", obsID2, obsID)
+	}
+
+	// Verify revision was created
+	var revCount int
+	s.pool.QueryRow(ctx, "SELECT COUNT(*) FROM observation_revisions WHERE project = 'proj'").Scan(&revCount)
+	if revCount != 1 {
+		t.Fatalf("expected 1 revision, got %d", revCount)
+	}
+}
+
+// Task 5.7: Search finds observation by content via tsvector
+func TestIntegration_Search(t *testing.T) {
+	s := newTestCloudStore(t)
+	ctx := context.Background()
+
+	userID, _, _ := s.CreateUser(ctx, "Alice", "alice@test.com")
+	_, _ = s.CreateProject(ctx, "proj")
+	_ = s.AddMember(ctx, "proj", "alice@test.com", "member")
+
+	// Push some observations
+	_, _ = s.ProcessPush(ctx, []Mutation{
+		{Seq: 1, Entity: "observation", EntityKey: "obs-jwt", Op: "upsert",
+			Payload: map[string]any{"sync_id": "obs-jwt", "session_id": "s1", "type": "decision",
+				"title": "JWT authentication middleware", "content": "Implemented JWT token validation with refresh rotation", "scope": "project"}},
+		{Seq: 2, Entity: "observation", EntityKey: "obs-db", Op: "upsert",
+			Payload: map[string]any{"sync_id": "obs-db", "session_id": "s1", "type": "bugfix",
+				"title": "Fixed database connection pool", "content": "Resolved connection leak in pgxpool", "scope": "project"}},
+	}, userID, "proj")
+
+	// Search for JWT
+	results, err := s.Search(ctx, "JWT authentication", "proj", userID, 10)
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected search results for 'JWT authentication'")
+	}
+	if results[0].Title != "JWT authentication middleware" {
+		t.Fatalf("expected first result to be JWT obs, got '%s'", results[0].Title)
+	}
+
+	// Search for pgxpool
+	results2, err := s.Search(ctx, "pgxpool connection", "proj", userID, 10)
+	if err != nil {
+		t.Fatalf("search pgxpool: %v", err)
+	}
+	if len(results2) == 0 {
+		t.Fatal("expected search results for 'pgxpool connection'")
+	}
+
+	// Search for nonexistent term
+	results3, err := s.Search(ctx, "kubernetes helm chart", "proj", userID, 10)
+	if err != nil {
+		t.Fatalf("search nonexistent: %v", err)
+	}
+	if len(results3) != 0 {
+		t.Fatalf("expected 0 results for nonexistent term, got %d", len(results3))
+	}
+}
+
+// Task 5.8: Stats returns correct counts
+func TestIntegration_Stats(t *testing.T) {
+	s := newTestCloudStore(t)
+	ctx := context.Background()
+
+	userID, _, _ := s.CreateUser(ctx, "Alice", "alice@test.com")
+	_, _ = s.CreateProject(ctx, "proj")
+	_ = s.AddMember(ctx, "proj", "alice@test.com", "member")
+
+	// Push data
+	_, _ = s.ProcessPush(ctx, []Mutation{
+		{Seq: 1, Entity: "observation", EntityKey: "o1", Op: "upsert",
+			Payload: map[string]any{"sync_id": "o1", "session_id": "s1", "type": "decision", "title": "T1", "content": "C1", "scope": "project"}},
+		{Seq: 2, Entity: "observation", EntityKey: "o2", Op: "upsert",
+			Payload: map[string]any{"sync_id": "o2", "session_id": "s1", "type": "bugfix", "title": "T2", "content": "C2", "scope": "project"}},
+		{Seq: 3, Entity: "session", EntityKey: "s1", Op: "upsert",
+			Payload: map[string]any{"id": "s1", "project": "proj", "directory": "/tmp", "started_at": "2026-04-13T10:00:00Z"}},
+		{Seq: 4, Entity: "prompt", EntityKey: "p1", Op: "upsert",
+			Payload: map[string]any{"sync_id": "p1", "session_id": "s1", "content": "test prompt", "project": "proj"}},
+	}, userID, "proj")
+
+	stats, err := s.GetStats(ctx, "proj", userID)
+	if err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	if stats.TotalObservations != 2 {
+		t.Fatalf("expected 2 observations, got %d", stats.TotalObservations)
+	}
+	if stats.TotalSessions != 1 {
+		t.Fatalf("expected 1 session, got %d", stats.TotalSessions)
+	}
+	if stats.TotalPrompts != 1 {
+		t.Fatalf("expected 1 prompt, got %d", stats.TotalPrompts)
 	}
 }
