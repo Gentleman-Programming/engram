@@ -3197,13 +3197,6 @@ func nullableString(s string) *string {
 	return &s
 }
 
-func truncate(s string, max int) string {
-	runes := []rune(s)
-	if len(runes) <= max {
-		return s
-	}
-	return string(runes[:max]) + "..."
-}
 
 func normalizeScope(scope string) string {
 	v := strings.TrimSpace(strings.ToLower(scope))

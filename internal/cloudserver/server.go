@@ -4,6 +4,7 @@ package cloudserver
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -309,15 +310,9 @@ func queryInt(r *http.Request, key string, defaultVal int) int {
 	if v == "" {
 		return defaultVal
 	}
-	var n int
-	if _, err := json.Number(v).Int64(); err == nil {
-		// simple int parse
-		for _, c := range v {
-			if c >= '0' && c <= '9' {
-				n = n*10 + int(c-'0')
-			}
-		}
-		return n
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return defaultVal
 	}
-	return defaultVal
+	return n
 }
