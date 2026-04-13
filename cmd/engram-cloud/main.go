@@ -7,10 +7,12 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 
+	"github.com/Gentleman-Programming/engram/internal/cloudserver"
 	"github.com/Gentleman-Programming/engram/internal/cloudstore"
 )
 
@@ -53,17 +55,26 @@ func cmdServe() {
 		log.Fatalf("failed to run migrations: %v", err)
 	}
 
-	log.Printf("engram-cloud %s starting on port %s", version, port)
+	handler := cloudserver.New(store)
+	srv := &http.Server{
+		Addr:    ":" + port,
+		Handler: handler,
+	}
 
-	// Server wiring will be added in Phase 2.2+
-	_ = port
-	_ = ctx
-
-	log.Println("engram-cloud: server ready (routes not yet wired)")
+	// Start server in goroutine
+	go func() {
+		log.Printf("engram-cloud %s listening on :%s", version, port)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server error: %v", err)
+		}
+	}()
 
 	// Wait for shutdown signal
 	<-ctx.Done()
 	log.Println("engram-cloud: shutting down")
+	if err := srv.Shutdown(context.Background()); err != nil {
+		log.Printf("shutdown error: %v", err)
+	}
 }
 
 func envOr(key, fallback string) string {
