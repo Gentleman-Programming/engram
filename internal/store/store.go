@@ -59,6 +59,8 @@ type Observation struct {
 	Project        *string `json:"project,omitempty"`
 	Scope          string  `json:"scope"`
 	TopicKey       *string `json:"topic_key,omitempty"`
+	CreatedBy      string  `json:"created_by,omitempty"`
+	UpdatedBy      string  `json:"updated_by,omitempty"`
 	RevisionCount  int     `json:"revision_count"`
 	DuplicateCount int     `json:"duplicate_count"`
 	LastSeenAt     *string `json:"last_seen_at,omitempty"`
@@ -228,6 +230,8 @@ type syncObservationPayload struct {
 	Project    *string `json:"project,omitempty"`
 	Scope      string  `json:"scope"`
 	TopicKey   *string `json:"topic_key,omitempty"`
+	CreatedBy  string  `json:"created_by,omitempty"`
+	UpdatedBy  string  `json:"updated_by,omitempty"`
 	Deleted    bool    `json:"deleted,omitempty"`
 	DeletedAt  *string `json:"deleted_at,omitempty"`
 	HardDelete bool    `json:"hard_delete,omitempty"`
@@ -708,6 +712,11 @@ func (s *Store) migrate() error {
 		if _, err := s.execHook(s.db, promptTriggers); err != nil {
 			return err
 		}
+	}
+
+	// Cloud sync prerequisite migrations (M1-M3)
+	if err := s.migrateCloudSync(); err != nil {
+		return err
 	}
 
 	return nil
@@ -1857,21 +1866,48 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 		result.SessionsImported += int(n)
 	}
 
-	// Import observations (use new IDs — AUTOINCREMENT)
+	// Import observations with idempotent upsert (ON CONFLICT by sync_id + project)
 	for _, obs := range data.Observations {
+		syncID := normalizeExistingSyncID(obs.SyncID, "obs")
+		scope := normalizeScope(obs.Scope)
+		topicKey := nullableString(normalizeTopicKey(derefString(obs.TopicKey)))
+		normHash := hashNormalized(obs.Content)
+
+		// Check if this sync_id already exists to distinguish insert vs update
+		var exists bool
+		if syncID != "" {
+			var cnt int
+			_ = tx.QueryRow("SELECT COUNT(*) FROM observations WHERE sync_id = ? AND ifnull(project,'') = ifnull(?,'') AND sync_id != ''", syncID, obs.Project).Scan(&cnt)
+			exists = cnt > 0
+		}
+
 		_, err := s.execHook(tx,
 			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			normalizeExistingSyncID(obs.SyncID, "obs"),
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(sync_id, project) WHERE sync_id IS NOT NULL AND sync_id != ''
+			 DO UPDATE SET
+				title = excluded.title,
+				content = excluded.content,
+				type = excluded.type,
+				tool_name = excluded.tool_name,
+				scope = excluded.scope,
+				topic_key = excluded.topic_key,
+				normalized_hash = excluded.normalized_hash,
+				revision_count = excluded.revision_count,
+				duplicate_count = excluded.duplicate_count,
+				last_seen_at = excluded.last_seen_at,
+				updated_at = excluded.updated_at,
+				deleted_at = excluded.deleted_at`,
+			syncID,
 			obs.SessionID,
 			obs.Type,
 			obs.Title,
 			obs.Content,
 			obs.ToolName,
 			obs.Project,
-			normalizeScope(obs.Scope),
-			nullableString(normalizeTopicKey(derefString(obs.TopicKey))),
-			hashNormalized(obs.Content),
+			scope,
+			topicKey,
+			normHash,
 			maxInt(obs.RevisionCount, 1),
 			maxInt(obs.DuplicateCount, 1),
 			obs.LastSeenAt,
@@ -1882,7 +1918,11 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 		if err != nil {
 			return nil, fmt.Errorf("import observation %d: %w", obs.ID, err)
 		}
-		result.ObservationsImported++
+		if exists {
+			result.ObservationsUpdated++
+		} else {
+			result.ObservationsImported++
+		}
 	}
 
 	// Import prompts
@@ -1908,6 +1948,7 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 type ImportResult struct {
 	SessionsImported     int `json:"sessions_imported"`
 	ObservationsImported int `json:"observations_imported"`
+	ObservationsUpdated  int `json:"observations_updated"`
 	PromptsImported      int `json:"prompts_imported"`
 }
 
@@ -2974,6 +3015,8 @@ func observationPayloadFromObservation(obs *Observation) syncObservationPayload 
 		Project:   obs.Project,
 		Scope:     obs.Scope,
 		TopicKey:  obs.TopicKey,
+		CreatedBy: obs.CreatedBy,
+		UpdatedBy: obs.UpdatedBy,
 	}
 }
 
@@ -3077,6 +3120,95 @@ func (s *Store) queryObservations(query string, args ...any) ([]Observation, err
 		results = append(results, o)
 	}
 	return results, rows.Err()
+}
+
+// migrateCloudSync performs cloud sync prerequisite migrations:
+// M1: Dedup (sync_id, project) pairs + create unique partial index
+// M2: Add created_by, updated_by columns to observations
+// M3: Create sync_cloud_config table
+func (s *Store) migrateCloudSync() error {
+	// M1: Deduplicate existing (sync_id, project) pairs and create unique index.
+	// Delete older duplicates (keep highest id = most recent).
+	// Run inside a transaction so index creation failure rolls back the deletes.
+	tx, err := s.beginTxHook()
+	if err != nil {
+		return fmt.Errorf("migrateCloudSync: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Delete older duplicates — keep the row with MAX(id) per (sync_id, project)
+	if _, err := s.execHook(tx, `
+		DELETE FROM observations
+		WHERE sync_id IS NOT NULL AND sync_id != ''
+		  AND id NOT IN (
+			SELECT MAX(id) FROM observations
+			WHERE sync_id IS NOT NULL AND sync_id != ''
+			GROUP BY sync_id, project
+		  )
+	`); err != nil {
+		return fmt.Errorf("migrateCloudSync: dedup observations: %w", err)
+	}
+
+	// Clean up orphaned sync_mutations referencing deleted sync_ids
+	if _, err := s.execHook(tx, `
+		DELETE FROM sync_mutations
+		WHERE entity = 'observation'
+		  AND entity_key NOT IN (
+			SELECT sync_id FROM observations WHERE sync_id IS NOT NULL AND sync_id != ''
+		  )
+		  AND entity_key LIKE 'obs-%'
+	`); err != nil {
+		return fmt.Errorf("migrateCloudSync: cleanup sync_mutations: %w", err)
+	}
+
+	// Create the unique partial index (fails if duplicates still exist → tx rollback)
+	if _, err := s.execHook(tx, `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_obs_sync_id_project
+		ON observations(sync_id, project)
+		WHERE sync_id IS NOT NULL AND sync_id != ''
+	`); err != nil {
+		return fmt.Errorf("migrateCloudSync: create unique index: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("migrateCloudSync: commit M1: %w", err)
+	}
+
+	// M2: Add created_by and updated_by columns
+	if err := s.addColumnIfNotExists("observations", "created_by", "TEXT"); err != nil {
+		return fmt.Errorf("migrateCloudSync: add created_by: %w", err)
+	}
+	if err := s.addColumnIfNotExists("observations", "updated_by", "TEXT"); err != nil {
+		return fmt.Errorf("migrateCloudSync: add updated_by: %w", err)
+	}
+
+	// M3: Create sync_cloud_config table
+	if _, err := s.execHook(s.db, `
+		CREATE TABLE IF NOT EXISTS sync_cloud_config (
+			key   TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		)
+	`); err != nil {
+		return fmt.Errorf("migrateCloudSync: create sync_cloud_config: %w", err)
+	}
+
+	return nil
+}
+
+// GetCloudConfig reads a value from sync_cloud_config. Returns empty string if not found.
+func (s *Store) GetCloudConfig(key string) string {
+	var value string
+	err := s.db.QueryRow("SELECT value FROM sync_cloud_config WHERE key = ?", key).Scan(&value)
+	if err != nil {
+		return ""
+	}
+	return value
+}
+
+// SetCloudConfig writes a key/value to sync_cloud_config (upsert).
+func (s *Store) SetCloudConfig(key, value string) error {
+	_, err := s.db.Exec("INSERT OR REPLACE INTO sync_cloud_config (key, value) VALUES (?, ?)", key, value)
+	return err
 }
 
 func (s *Store) addColumnIfNotExists(tableName, columnName, definition string) error {
