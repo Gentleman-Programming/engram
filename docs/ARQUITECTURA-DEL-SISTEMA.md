@@ -9,7 +9,7 @@ Referencia tecnica de la arquitectura interna, estructura de modulos y diseno de
 ## Tabla de Contenidos
 
 - [Que es Engram?](#que-es-engram)
-- [Principios de Diseno](#principios-de-diseno)
+- [Principios de Diseno](#principios-de-diseño)
 - [Vista General del Sistema](#vista-general-del-sistema)
 - [Mapa de Paquetes](#mapa-de-paquetes)
 - [Flujo de Datos](#flujo-de-datos)
@@ -349,6 +349,69 @@ engram cloud unenroll <proyecto># Deshabilitar sync para un proyecto
 engram mcp --backend cloud      # Usar RemoteStore (solo cloud)
 engram mcp --backend local-sync # Usar store local + SyncClient
 ```
+
+---
+
+## Skills de Proyecto (Planificado)
+
+Las skills son **conocimiento de proyecto versionado y controlado por roles**, almacenadas como observaciones con `type: "skill"`. Representan decisiones de arquitectura, convenciones de codigo, elecciones de tecnologia y patrones que definen como se debe construir un proyecto.
+
+### Por que Skills?
+
+Las observaciones regulares (fixes de bugs, notas de sesion) son efimeras — cualquier miembro del equipo puede crearlas y modificarlas. Las skills son **conocimiento gobernado**: solo roles autorizados pueden editarlas, cada cambio queda auditado, y se puede hacer rollback.
+
+### Como Funcionan
+
+Las skills son observaciones con enforcement de politicas especial:
+
+```
+Observation {
+    type:      "skill"
+    scope:     "project"
+    topic_key: "skill/architecture"    ← organizacion jerarquica
+    content:   "## Modulos\n..."       ← markdown libre
+    project:   "my-api"
+}
+```
+
+- **Cero cambios de schema para almacenamiento** — las skills usan la tabla de observaciones existente
+- **Busqueda FTS5/tsvector** — funciona automaticamente
+- **Sync via push/pull** — sin cambios al protocolo de sincronizacion
+- **Resolucion de conflictos LWW** — igual que cualquier observacion con topic_key
+
+### Jerarquia de Roles
+
+| Rol | Nivel | Editar Skills | Eliminar Skills | Gestionar Miembros |
+|-----|-------|---------------|-----------------|---------------------|
+| `viewer` | 1 | No | No | No |
+| `member` | 2 | No | No | No |
+| `senior` | 3 | Si (si la politica lo permite) | No | No |
+| `lead` | 4 | Si | Si (si la politica lo permite) | No |
+| `owner` | 5 | Si | Si | Si |
+
+Cada proyecto puede configurar el rol minimo requerido para editar y eliminar skills via `project_skill_policies`.
+
+### Versionado Obligatorio
+
+Cada edicion de una skill crea una revision antes de sobreescribir — no solo en conflictos LWW. El historial completo de versiones se preserva y se puede consultar.
+
+### Log de Auditoria
+
+Tabla append-only `skill_audit_log` que registra cada creacion, edicion, eliminacion y rollback con usuario, timestamp y numeros de revision.
+
+### Rollback
+
+Restaurar una version anterior crea una NUEVA version (la historia nunca se reescribe):
+
+```
+v1 (Juan) → v2 (Maria) → v3 (Pedro, edicion mala) → v4 (rollback a v2)
+```
+
+### Enforcement Server-Side
+
+Los chequeos de permisos ocurren en cloudserver, no en el cliente. Los desarrolladores offline pueden editar skills localmente — el servidor acepta o rechaza (403) en el push. Esto preserva el modelo local-first.
+
+Proposal completo: [openspec/changes/project-skills/proposal.md](../openspec/changes/project-skills/proposal.md)
 
 ---
 

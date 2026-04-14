@@ -350,6 +350,69 @@ engram mcp --backend local-sync # Use local store + SyncClient
 
 ---
 
+## Project Skills (Planned)
+
+Skills are **role-controlled, versioned project knowledge** stored as observations with `type: "skill"`. They represent architecture decisions, coding conventions, technology choices, and patterns that define how a project should be built.
+
+### Why Skills?
+
+Regular observations (bug fixes, session notes) are ephemeral — any team member can create and modify them. Skills are **governed knowledge**: only authorized roles can edit them, every change is audited, and rollback is supported.
+
+### How They Work
+
+Skills are observations with special policy enforcement:
+
+```
+Observation {
+    type:      "skill"
+    scope:     "project"
+    topic_key: "skill/architecture"    ← hierarchical organization
+    content:   "## Modules\n..."       ← free-form markdown
+    project:   "my-api"
+}
+```
+
+- **Zero schema changes for storage** — skills use the existing observations table
+- **FTS5/tsvector search** — works automatically
+- **Sync via push/pull** — no changes to the sync protocol
+- **LWW conflict resolution** — same as any observation with topic_key
+
+### Role Hierarchy
+
+| Role | Level | Edit Skills | Delete Skills | Manage Members |
+|------|-------|-------------|---------------|----------------|
+| `viewer` | 1 | No | No | No |
+| `member` | 2 | No | No | No |
+| `senior` | 3 | Yes (if policy allows) | No | No |
+| `lead` | 4 | Yes | Yes (if policy allows) | No |
+| `owner` | 5 | Yes | Yes | Yes |
+
+Each project can configure the minimum role required for editing and deleting skills via `project_skill_policies`.
+
+### Mandatory Versioning
+
+Every skill edit creates a revision before overwriting — not just on LWW conflicts. The full version history is preserved and queryable.
+
+### Audit Log
+
+Append-only `skill_audit_log` table records every create, edit, delete, and rollback with user, timestamp, and revision numbers.
+
+### Rollback
+
+Restoring a previous version creates a NEW version (history is never rewritten):
+
+```
+v1 (Juan) → v2 (Maria) → v3 (Pedro, bad edit) → v4 (rollback to v2)
+```
+
+### Server-Side Enforcement
+
+Permission checks happen in cloudserver, not in the client. Offline developers can edit skills locally — the server accepts or rejects (403) on push. This preserves the local-first model.
+
+Full proposal: [openspec/changes/project-skills/proposal.md](../openspec/changes/project-skills/proposal.md)
+
+---
+
 ## Testing Strategy
 
 | Layer | Approach | Count |
