@@ -18,7 +18,7 @@ func (s *Store) CreateObservation(ctx context.Context, p types.AddObservationPar
 	}
 	defer tx.Rollback(ctx)
 
-	seq, err := NextSeq(ctx, tx)
+	seq, err := NextSeq(ctx, tx, project)
 	if err != nil {
 		return "", err
 	}
@@ -42,11 +42,13 @@ func (s *Store) CreateObservation(ctx context.Context, p types.AddObservationPar
 
 		if err == nil {
 			// Conflict — save revision, then update
-			_, _ = tx.Exec(ctx, `
+			if _, err := tx.Exec(ctx, `
 				INSERT INTO observation_revisions (observation_id, project, title, content, type, topic_key, updated_by, revision_number)
 				SELECT id, project, title, content, type, topic_key, updated_by, revision_count
 				FROM observations WHERE id = $1
-			`, existingID)
+			`, existingID); err != nil {
+				return "", fmt.Errorf("save revision: %w", err)
+			}
 
 			_, err = tx.Exec(ctx, `
 				UPDATE observations SET

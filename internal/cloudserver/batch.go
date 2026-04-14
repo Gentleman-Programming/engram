@@ -2,9 +2,12 @@ package cloudserver
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+
+	"github.com/go-chi/chi/v5"
 )
 
 // BatchOperation represents a single operation in a batch request.
@@ -18,6 +21,21 @@ type BatchOperation struct {
 type BatchResult struct {
 	Status int             `json:"status"`
 	Body   json.RawMessage `json:"body"`
+}
+
+// batchContext wraps a parent context but strips chi's route context key
+// so sub-requests get fresh routing, while preserving cancellation, deadline,
+// and auth values from the parent.
+type batchContext struct {
+	context.Context
+}
+
+func (c batchContext) Value(key any) any {
+	// Strip chi's route context to avoid 405 on sub-requests
+	if key == chi.RouteCtxKey {
+		return nil
+	}
+	return c.Context.Value(key)
 }
 
 // handleBatch executes multiple operations sequentially in a single HTTP round trip.
@@ -41,9 +59,13 @@ func handleBatch(handler http.Handler) http.HandlerFunc {
 			return
 		}
 
+		// Build a context that preserves parent cancellation/deadline and auth values,
+		// but strips chi's routing state. Mark as batch-internal to skip redundant auth.
+		parentCtx := r.Context()
+		subCtx := context.WithValue(batchContext{parentCtx}, ctxBatchInternal, true)
+
 		results := make([]BatchResult, len(req.Operations))
 		for i, op := range req.Operations {
-			// Create a sub-request that inherits auth context from the parent
 			var body *bytes.Reader
 			if op.Body != nil {
 				body = bytes.NewReader(op.Body)
@@ -51,7 +73,7 @@ func handleBatch(handler http.Handler) http.HandlerFunc {
 				body = bytes.NewReader(nil)
 			}
 
-			subReq, err := http.NewRequestWithContext(r.Context(), op.Method, op.Path, body)
+			subReq, err := http.NewRequestWithContext(subCtx, op.Method, op.Path, body)
 			if err != nil {
 				results[i] = BatchResult{
 					Status: http.StatusBadRequest,
@@ -60,9 +82,6 @@ func handleBatch(handler http.Handler) http.HandlerFunc {
 				continue
 			}
 
-			// Copy auth headers from parent request
-			subReq.Header.Set("Authorization", r.Header.Get("Authorization"))
-			subReq.Header.Set("X-Engram-Protocol", r.Header.Get("X-Engram-Protocol"))
 			subReq.Header.Set("Content-Type", "application/json")
 
 			// Execute against the router

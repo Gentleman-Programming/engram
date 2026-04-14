@@ -112,13 +112,26 @@ CREATE TABLE IF NOT EXISTS prompts (
 
 CREATE INDEX IF NOT EXISTS idx_prompts_server_seq ON prompts(server_seq);
 
--- Server sequence counter (monotonic, no gaps)
-CREATE TABLE IF NOT EXISTS server_seq_counter (
-    id    INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
-    value BIGINT NOT NULL DEFAULT 0
-);
+-- Server sequence counter (per-project, monotonic, no gaps)
+-- Migration: convert single-row counter to per-project if old schema exists
+DO $$ BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'server_seq_counter' AND column_name = 'id'
+    ) THEN
+        -- Old single-row table exists — drop and recreate as per-project
+        DROP TABLE server_seq_counter;
+        CREATE TABLE server_seq_counter (
+            project TEXT PRIMARY KEY,
+            value   BIGINT NOT NULL DEFAULT 0
+        );
+    END IF;
+END $$;
 
-INSERT INTO server_seq_counter (value) VALUES (0) ON CONFLICT DO NOTHING;
+CREATE TABLE IF NOT EXISTS server_seq_counter (
+    project TEXT PRIMARY KEY,
+    value   BIGINT NOT NULL DEFAULT 0
+);
 
 -- Sync cursors
 CREATE TABLE IF NOT EXISTS sync_cursors (

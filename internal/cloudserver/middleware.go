@@ -14,8 +14,9 @@ import (
 type contextKey string
 
 const (
-	ctxUserID  contextKey = "user_id"
-	ctxProtoVer contextKey = "protocol_version"
+	ctxUserID        contextKey = "user_id"
+	ctxProtoVer      contextKey = "protocol_version"
+	ctxBatchInternal contextKey = "batch_internal"
 
 	minProtocolVersion     = 1
 	currentProtocolVersion = 1
@@ -33,6 +34,12 @@ func UserIDFromContext(ctx context.Context) string {
 func AuthMiddleware(store *cloudstore.Store) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Batch sub-requests already have auth context — skip redundant DB lookup
+			if r.Context().Value(ctxBatchInternal) != nil && UserIDFromContext(r.Context()) != "" {
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			auth := r.Header.Get("Authorization")
 			if !strings.HasPrefix(auth, "Bearer ") {
 				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing or invalid Authorization header"})
@@ -55,6 +62,12 @@ func AuthMiddleware(store *cloudstore.Store) func(http.Handler) http.Handler {
 // ProtocolVersionMiddleware checks the X-Engram-Protocol header.
 func ProtocolVersionMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Batch sub-requests already have protocol version in context
+		if r.Context().Value(ctxBatchInternal) != nil && r.Context().Value(ctxProtoVer) != nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		verStr := r.Header.Get("X-Engram-Protocol")
 		if verStr == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "X-Engram-Protocol header required"})

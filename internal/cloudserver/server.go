@@ -67,7 +67,7 @@ func handleHealth(store *cloudstore.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var seqVal int64
 		pgOK := "connected"
-		if err := store.Pool().QueryRow(r.Context(), "SELECT value FROM server_seq_counter").Scan(&seqVal); err != nil {
+		if err := store.Pool().QueryRow(r.Context(), "SELECT COALESCE(SUM(value), 0) FROM server_seq_counter").Scan(&seqVal); err != nil {
 			pgOK = "error: " + err.Error()
 		}
 		writeJSON(w, http.StatusOK, map[string]any{

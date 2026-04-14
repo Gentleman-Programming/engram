@@ -35,6 +35,7 @@ type Conflict struct {
 func (s *Store) ProcessPush(ctx context.Context, mutations []Mutation, userID, project string) (*PushResult, error) {
 	result := &PushResult{}
 	var maxClientSeq int64
+	var maxServerSeq int64
 
 	for _, m := range mutations {
 		if m.Seq > maxClientSeq {
@@ -43,45 +44,52 @@ func (s *Store) ProcessPush(ctx context.Context, mutations []Mutation, userID, p
 
 		switch m.Entity {
 		case "observation":
-			conflict, err := s.processObservationMutation(ctx, m, userID, project)
+			seq, conflict, err := s.processObservationMutation(ctx, m, userID, project)
 			if err != nil {
 				return nil, fmt.Errorf("push obs %s: %w", m.EntityKey, err)
 			}
 			if conflict != nil {
 				result.Conflicts = append(result.Conflicts, *conflict)
 			}
+			if seq > maxServerSeq {
+				maxServerSeq = seq
+			}
 		case "session":
-			if err := s.processSessionMutation(ctx, m, userID, project); err != nil {
+			seq, err := s.processSessionMutation(ctx, m, userID, project)
+			if err != nil {
 				return nil, fmt.Errorf("push session %s: %w", m.EntityKey, err)
 			}
+			if seq > maxServerSeq {
+				maxServerSeq = seq
+			}
 		case "prompt":
-			if err := s.processPromptMutation(ctx, m, userID, project); err != nil {
+			seq, err := s.processPromptMutation(ctx, m, userID, project)
+			if err != nil {
 				return nil, fmt.Errorf("push prompt %s: %w", m.EntityKey, err)
+			}
+			if seq > maxServerSeq {
+				maxServerSeq = seq
 			}
 		default:
 			return nil, fmt.Errorf("unknown entity type: %s", m.Entity)
 		}
 	}
 
-	// Get current server_seq for the response
-	var currentSeq int64
-	_ = s.pool.QueryRow(ctx, "SELECT value FROM server_seq_counter").Scan(&currentSeq)
-
 	result.AckedSeq = maxClientSeq
-	result.ServerSeq = currentSeq
+	result.ServerSeq = maxServerSeq
 	return result, nil
 }
 
-func (s *Store) processObservationMutation(ctx context.Context, m Mutation, userID, project string) (*Conflict, error) {
+func (s *Store) processObservationMutation(ctx context.Context, m Mutation, userID, project string) (int64, *Conflict, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return nil, err
+		return 0, nil, err
 	}
 	defer tx.Rollback(ctx)
 
-	seq, err := NextSeq(ctx, tx)
+	seq, err := NextSeq(ctx, tx, project)
 	if err != nil {
-		return nil, err
+		return 0, nil, err
 	}
 
 	p := m.Payload
@@ -98,9 +106,9 @@ func (s *Store) processObservationMutation(ctx context.Context, m Mutation, user
 			WHERE sync_id = $3 AND project = $4
 		`, seq, userID, syncID, project)
 		if err != nil {
-			return nil, err
+			return 0, nil, err
 		}
-		return nil, tx.Commit(ctx)
+		return seq, nil, tx.Commit(ctx)
 	}
 
 	// Upsert: check for topic_key conflict
@@ -121,7 +129,7 @@ func (s *Store) processObservationMutation(ctx context.Context, m Mutation, user
 				FROM observations WHERE id = $1
 			`, existingID)
 			if err != nil {
-				return nil, fmt.Errorf("save revision: %w", err)
+				return 0, nil, fmt.Errorf("save revision: %w", err)
 			}
 
 			_, err = tx.Exec(ctx, `
@@ -135,11 +143,11 @@ func (s *Store) processObservationMutation(ctx context.Context, m Mutation, user
 				nullStr(strVal(p, "tool_name")), scope, topicKey,
 				userID, seq, existingID)
 			if err != nil {
-				return nil, fmt.Errorf("overwrite obs: %w", err)
+				return 0, nil, fmt.Errorf("overwrite obs: %w", err)
 			}
 
 			conflict = &Conflict{TopicKey: topicKey, Winner: syncID, RevisionSaved: true}
-			return conflict, tx.Commit(ctx)
+			return seq, conflict, tx.Commit(ctx)
 		}
 	}
 
@@ -156,22 +164,22 @@ func (s *Store) processObservationMutation(ctx context.Context, m Mutation, user
 		strVal(p, "content"), nullStr(strVal(p, "tool_name")), project, scope,
 		nullStr(topicKey), userID, seq)
 	if err != nil {
-		return nil, err
+		return 0, nil, err
 	}
 
-	return conflict, tx.Commit(ctx)
+	return seq, conflict, tx.Commit(ctx)
 }
 
-func (s *Store) processSessionMutation(ctx context.Context, m Mutation, userID, project string) error {
+func (s *Store) processSessionMutation(ctx context.Context, m Mutation, userID, project string) (int64, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer tx.Rollback(ctx)
 
-	seq, err := NextSeq(ctx, tx)
+	seq, err := NextSeq(ctx, tx, project)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	p := m.Payload
@@ -193,22 +201,22 @@ func (s *Store) processSessionMutation(ctx context.Context, m Mutation, userID, 
 	`, syncID, project, strVal(p, "directory"), userID, startedAt,
 		nullStr(strVal(p, "ended_at")), nullStr(strVal(p, "summary")), seq)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
-	return tx.Commit(ctx)
+	return seq, tx.Commit(ctx)
 }
 
-func (s *Store) processPromptMutation(ctx context.Context, m Mutation, userID, project string) error {
+func (s *Store) processPromptMutation(ctx context.Context, m Mutation, userID, project string) (int64, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer tx.Rollback(ctx)
 
-	seq, err := NextSeq(ctx, tx)
+	seq, err := NextSeq(ctx, tx, project)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	p := m.Payload
@@ -224,10 +232,10 @@ func (s *Store) processPromptMutation(ctx context.Context, m Mutation, userID, p
 			content = EXCLUDED.content, server_seq = EXCLUDED.server_seq
 	`, syncID, strVal(p, "session_id"), strVal(p, "content"), project, userID, seq)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
-	return tx.Commit(ctx)
+	return seq, tx.Commit(ctx)
 }
 
 // helpers
