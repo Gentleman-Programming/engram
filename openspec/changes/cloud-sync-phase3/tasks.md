@@ -139,14 +139,12 @@ Exit criteria: All 5 cloud subcommands work end-to-end with a real store.
 Entry criteria: Tier 1 endpoints (T09–T11) complete.
 Exit criteria: PassiveCapture and MigrateProject endpoints added and tested.
 
-- [ ] T26 Add `POST /api/v1/passive-capture` endpoint (REQ-REMOTE-006) [M] [depends: T09, T10]
-      Files: `cloudserver/server.go`, `cloudserver/store.go`
-      Tests: YES — `cloudserver/server_test.go`
-        - PassiveCapture creates session + observations atomically
-        - Returns numeric_id of created session
+- [x] T26 Add `POST /api/v1/passive-capture` endpoint (REQ-REMOTE-006) [M] [depends: T09, T10]
+      Files: `internal/cloudstore/queries.go`, `internal/cloudserver/server.go`, `internal/cloudserver/server_test.go`
+      Tests: YES (integration) — 2 tests: PassiveCapture + NonMember 403
 
-- [ ] T27 Add `POST /api/v1/projects/migrate` endpoint (REQ-REMOTE-006) [M] [depends: T09]
-      Files: `cloudserver/server.go`, `cloudserver/store.go`
+- [x] T27 Add `POST /api/v1/projects/migrate` endpoint (REQ-REMOTE-006) [M] [depends: T09]
+      Files: `internal/cloudstore/queries.go`, `internal/cloudserver/server.go`, `internal/cloudserver/server_test.go`
       Tests: YES — `cloudserver/server_test.go`
         - MigrateProject renames all entities from old project to new project
         - Auth required, membership check enforced

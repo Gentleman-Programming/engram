@@ -62,6 +62,12 @@ func New(store *cloudstore.Store) http.Handler {
 			cr.Get("/prompts/search", handleSearchPrompts(store))
 		})
 
+		// Tier 2 composite endpoints
+		r.With(RateLimitMiddleware(store, "crud", 600)).
+			Post("/api/v1/passive-capture", handlePassiveCapture(store))
+		r.With(RateLimitMiddleware(store, "crud", 600)).
+			Post("/api/v1/projects/migrate", handleMigrateProject(store))
+
 		// Batch — uses the full router so sub-requests go through all middleware
 		r.Post("/api/v1/batch", handleBatch(r))
 	})
@@ -308,6 +314,71 @@ func handleStats(store *cloudstore.Store) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, stats)
+	}
+}
+
+// ─── Tier 2 Composite Endpoints (T26-T27) ───────────────────────────────────
+
+func handlePassiveCapture(store *cloudstore.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID := UserIDFromContext(r.Context())
+
+		var req cloudstore.PassiveCaptureRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+			return
+		}
+
+		// Infer project from first observation or require it in a wrapper.
+		project := r.URL.Query().Get("project")
+		if project == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project required"})
+			return
+		}
+
+		if ok, _ := store.IsMember(r.Context(), project, userID); !ok {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "not a member"})
+			return
+		}
+
+		result, err := store.PassiveCapture(r.Context(), req, userID, project)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
+	}
+}
+
+func handleMigrateProject(store *cloudstore.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID := UserIDFromContext(r.Context())
+
+		var req struct {
+			OldProject string `json:"old_project"`
+			NewProject string `json:"new_project"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+			return
+		}
+		if req.OldProject == "" || req.NewProject == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "old_project and new_project required"})
+			return
+		}
+
+		// Must be member of the old project.
+		if ok, _ := store.IsMember(r.Context(), req.OldProject, userID); !ok {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "not a member of old project"})
+			return
+		}
+
+		result, err := store.MigrateProject(r.Context(), req.OldProject, req.NewProject, userID)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
 	}
 }
 

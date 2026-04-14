@@ -684,3 +684,87 @@ func TestHTTP_SearchPromptsMissingParams(t *testing.T) {
 		t.Errorf("expected 400 without q param, got %d", rec.Code)
 	}
 }
+
+// ─── Phase 5: Tier 2 Composite Endpoints ────────────────────────────────────
+
+func TestHTTP_PassiveCapture(t *testing.T) {
+	env := newTestEnv(t)
+
+	rec := env.do(t, "POST", "/api/v1/passive-capture?project="+env.project, map[string]any{
+		"session_id": "pc-session-1",
+		"observations": []map[string]any{
+			{"type": "discovery", "title": "Finding 1", "content": "Discovered something important"},
+			{"type": "decision", "title": "Decision 1", "content": "Decided to use approach X"},
+		},
+	}, env.authHeaders())
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	body := decodeBody(t, rec)
+	if saved, _ := body["saved"].(float64); saved != 2 {
+		t.Errorf("expected saved=2, got %v", body["saved"])
+	}
+	if nid, _ := body["session_numeric_id"].(float64); nid <= 0 {
+		t.Errorf("expected positive session_numeric_id, got %v", body["session_numeric_id"])
+	}
+
+	// Verify observations were actually created.
+	rec2 := env.do(t, "GET", "/api/v1/sessions/pc-session-1/observations?project="+env.project, nil, env.authHeaders())
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("expected 200 for session obs, got %d", rec2.Code)
+	}
+	body2 := decodeBody(t, rec2)
+	obs, _ := body2["observations"].([]any)
+	if len(obs) != 2 {
+		t.Errorf("expected 2 observations in session, got %d", len(obs))
+	}
+}
+
+func TestHTTP_PassiveCapture_NonMember(t *testing.T) {
+	env := newTestEnv(t)
+	rec := env.do(t, "POST", "/api/v1/passive-capture?project=other-proj", map[string]any{
+		"session_id":   "sess-x",
+		"observations": []map[string]any{},
+	}, env.authHeaders())
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for non-member, got %d", rec.Code)
+	}
+}
+
+func TestHTTP_MigrateProject(t *testing.T) {
+	env := newTestEnv(t)
+	pushTestData(t, env, 3) // creates sess-read-1 + 3 observations in test-proj
+
+	rec := env.do(t, "POST", "/api/v1/projects/migrate", map[string]any{
+		"old_project": env.project,
+		"new_project": "migrated-proj",
+	}, env.authHeaders())
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	body := decodeBody(t, rec)
+	if migrated, _ := body["migrated"].(bool); !migrated {
+		t.Error("expected migrated=true")
+	}
+	if obsCount, _ := body["observations_updated"].(float64); obsCount != 3 {
+		t.Errorf("expected 3 observations migrated, got %v", body["observations_updated"])
+	}
+	if sessCount, _ := body["sessions_updated"].(float64); sessCount != 1 {
+		t.Errorf("expected 1 session migrated, got %v", body["sessions_updated"])
+	}
+}
+
+func TestHTTP_MigrateProject_NonMember(t *testing.T) {
+	env := newTestEnv(t)
+	rec := env.do(t, "POST", "/api/v1/projects/migrate", map[string]any{
+		"old_project": "not-my-project",
+		"new_project": "new-name",
+	}, env.authHeaders())
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for non-member, got %d", rec.Code)
+	}
+}

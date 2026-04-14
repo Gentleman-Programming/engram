@@ -271,6 +271,163 @@ func (s *Store) SearchPrompts(ctx context.Context, query, project, userID string
 	return scanPromptRows(rows)
 }
 
+// ─── PassiveCapture (T26) ────────────────────────────────────────────────────
+
+// PassiveCapture creates a session (if needed) and stores extracted observations atomically.
+// This is a simplified cloud version — the learning extraction happens client-side;
+// the server receives pre-extracted observations.
+func (s *Store) PassiveCapture(ctx context.Context, req PassiveCaptureRequest, userID, project string) (*PassiveCaptureResult, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Ensure session exists.
+	sessionSyncID := req.SessionID
+	if sessionSyncID != "" {
+		seq, seqErr := NextSeq(ctx, tx, project)
+		if seqErr != nil {
+			return nil, seqErr
+		}
+		_, err = tx.Exec(ctx, `
+			INSERT INTO sessions (sync_id, project, user_id, started_at, server_seq)
+			VALUES ($1, $2, $3, now(), $4)
+			ON CONFLICT (sync_id, project) DO NOTHING
+		`, sessionSyncID, project, userID, seq)
+		if err != nil {
+			return nil, fmt.Errorf("ensure session: %w", err)
+		}
+	}
+
+	// Insert each observation.
+	saved := 0
+	for _, obs := range req.Observations {
+		seq, seqErr := NextSeq(ctx, tx, project)
+		if seqErr != nil {
+			return nil, seqErr
+		}
+
+		syncID := obs.SyncID
+		if syncID == "" {
+			syncID = "obs-" + randomHex(8)
+		}
+		scope := obs.Scope
+		if scope == "" {
+			scope = "project"
+		}
+
+		_, err = tx.Exec(ctx, `
+			INSERT INTO observations (sync_id, session_id, type, title, content, tool_name,
+				project, scope, topic_key, created_by, updated_by, server_seq)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10, $11)
+			ON CONFLICT (sync_id, project) DO UPDATE SET
+				title = EXCLUDED.title, content = EXCLUDED.content, type = EXCLUDED.type,
+				updated_by = EXCLUDED.updated_by, updated_at = now(), server_seq = EXCLUDED.server_seq
+		`, syncID, sessionSyncID, obs.Type, obs.Title, obs.Content,
+			nullStr(obs.ToolName), project, scope, nullStr(obs.TopicKey), userID, seq)
+		if err != nil {
+			return nil, fmt.Errorf("insert observation: %w", err)
+		}
+		saved++
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+
+	// Get session numeric_id.
+	var sessionNumericID int64
+	if sessionSyncID != "" {
+		_ = s.pool.QueryRow(ctx,
+			`SELECT numeric_id FROM sessions WHERE sync_id = $1 AND project = $2`,
+			sessionSyncID, project).Scan(&sessionNumericID)
+	}
+
+	return &PassiveCaptureResult{
+		SessionNumericID: sessionNumericID,
+		Saved:            saved,
+	}, nil
+}
+
+// PassiveCaptureRequest is the input for the passive-capture endpoint.
+type PassiveCaptureRequest struct {
+	SessionID    string                      `json:"session_id"`
+	Observations []PassiveCaptureObservation `json:"observations"`
+}
+
+// PassiveCaptureObservation is a single observation in a passive capture request.
+type PassiveCaptureObservation struct {
+	SyncID   string `json:"sync_id,omitempty"`
+	Type     string `json:"type"`
+	Title    string `json:"title"`
+	Content  string `json:"content"`
+	ToolName string `json:"tool_name,omitempty"`
+	Scope    string `json:"scope,omitempty"`
+	TopicKey string `json:"topic_key,omitempty"`
+}
+
+// PassiveCaptureResult is the response from passive-capture.
+type PassiveCaptureResult struct {
+	SessionNumericID int64 `json:"session_numeric_id"`
+	Saved            int   `json:"saved"`
+}
+
+// ─── MigrateProject (T27) ───────────────────────────────────────────────────
+
+// MigrateProject renames all entities from oldProject to newProject.
+func (s *Store) MigrateProject(ctx context.Context, oldProject, newProject, userID string) (*MigrateProjectResult, error) {
+	if oldProject == "" || newProject == "" || oldProject == newProject {
+		return &MigrateProjectResult{}, nil
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var result MigrateProjectResult
+
+	tag, err := tx.Exec(ctx, `UPDATE observations SET project = $1 WHERE project = $2`, newProject, oldProject)
+	if err != nil {
+		return nil, fmt.Errorf("migrate observations: %w", err)
+	}
+	result.ObservationsUpdated = tag.RowsAffected()
+
+	tag, err = tx.Exec(ctx, `UPDATE sessions SET project = $1 WHERE project = $2`, newProject, oldProject)
+	if err != nil {
+		return nil, fmt.Errorf("migrate sessions: %w", err)
+	}
+	result.SessionsUpdated = tag.RowsAffected()
+
+	tag, err = tx.Exec(ctx, `UPDATE prompts SET project = $1 WHERE project = $2`, newProject, oldProject)
+	if err != nil {
+		return nil, fmt.Errorf("migrate prompts: %w", err)
+	}
+	result.PromptsUpdated = tag.RowsAffected()
+
+	tag, err = tx.Exec(ctx, `UPDATE observation_revisions SET project = $1 WHERE project = $2`, newProject, oldProject)
+	if err != nil {
+		return nil, fmt.Errorf("migrate revisions: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+
+	result.Migrated = result.ObservationsUpdated > 0 || result.SessionsUpdated > 0 || result.PromptsUpdated > 0
+	return &result, nil
+}
+
+// MigrateProjectResult is the response from project migration.
+type MigrateProjectResult struct {
+	Migrated            bool  `json:"migrated"`
+	ObservationsUpdated int64 `json:"observations_updated"`
+	SessionsUpdated     int64 `json:"sessions_updated"`
+	PromptsUpdated      int64 `json:"prompts_updated"`
+}
+
 // ─── Row scanners ────────────────────────────────────────────────────────────
 
 // scanObservationRows scans observation rows into maps. Expects columns:
