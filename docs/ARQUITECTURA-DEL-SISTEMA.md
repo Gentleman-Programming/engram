@@ -68,8 +68,7 @@ Un unico binario en Go con SQLite + FTS5 (busqueda full-text), expuesto via CLI,
               ┌────────────┼─────────────┐
               │            │             │
        ┌──────▼──────┐    │      ┌──────▼──────┐
-       │ store.Store  │    │      │ RemoteStore │ (planificado)
-       │ (SQLite+FTS5)│    │      │ (proxy HTTP)│
+       │ store.Store  │    │      │ RemoteStore │        │ (SQLite+FTS5)│    │      │ (proxy HTTP)│
        └──────┬──────┘    │      └─────────────┘
               │            │
        ┌──────▼──────┐    │
@@ -186,7 +185,7 @@ Escrituras de otros miembros del equipo:
                store.ApplyPulledMutation() → SQLite
 ```
 
-### Modo Cloud-Only (`--backend cloud`, planificado)
+### Modo Cloud-Only (`--backend cloud`)
 
 ```
 Agente escribe → herramienta MCP → RemoteStore → HTTP POST → engram-cloud → PostgreSQL
@@ -247,12 +246,12 @@ Agente lee     → herramienta MCP → RemoteStore → HTTP GET  → engram-clou
 
 ### Fases de Implementacion
 
-| Fase | Estado | Descripcion |
-|------|--------|-------------|
-| **Fase 1** | Completa | Migraciones de esquema, extraccion de StoreInterface, triggers de sync_mutations, idempotencia de importacion |
-| **Fase 2** | Completa | Cloud server MVP — esquema PostgreSQL, autenticacion, protocolo push/pull, CRUD, busqueda tsvector, endpoint batch, rate limiting, mantenimiento. 32 tests de integracion. |
-| **Fase 3** | En Progreso | Integracion del cliente — wrapper HTTP, configuracion, SyncClient (push/pull/debounce/backoff). 32 tests unitarios. Pendiente: RemoteStore, comandos CLI, flag --backend. |
-| **Fase 4** | Planificada | Auto-sync, monitoreo, hardening para produccion |
+| Fase | Descripcion |
+|------|-------------|
+| **Fase 1** | Migraciones de esquema, extraccion de StoreInterface, triggers de sync_mutations, idempotencia de importacion |
+| **Fase 2** | Cloud server — esquema PostgreSQL, autenticacion, protocolo push/pull, CRUD, busqueda tsvector, endpoint batch, rate limiting, mantenimiento |
+| **Fase 3** | Integracion del cliente — wrapper HTTP, configuracion, SyncClient (push/pull/debounce/backoff), RemoteStore, comandos CLI, flag --backend |
+| **Fase 4** | Auto-sync, monitoreo, hardening para produccion |
 
 ### Protocolo de Sincronizacion
 
@@ -332,13 +331,13 @@ La sincronizacion es un **enriquecimiento asincrono**, no un prerequisito. El st
 
 Autenticacion: `Authorization: Bearer <api_key>` + `X-Engram-Protocol: 1`.
 
-### Planificado: RemoteStore
+### RemoteStore
 
 `RemoteStore` implementara `StoreInterface` proxeando cada operacion al servidor cloud via HTTP. Sin estado — sin SQLite local, sin cache. Para equipos que quieren una unica fuente de verdad en el cloud sin almacenamiento local.
 
 Las operaciones de escritura se rutean a traves del protocolo push (`POST /sync/push`) como pushes de una sola mutacion, retornando el ID numerico asignado por el servidor. Las operaciones de lectura llaman a endpoints dedicados.
 
-### Planificado: Comandos CLI Cloud
+### Comandos CLI Cloud
 
 ```bash
 engram cloud setup              # Configurar conexion cloud
@@ -352,7 +351,7 @@ engram mcp --backend local-sync # Usar store local + SyncClient
 
 ---
 
-## Skills de Proyecto (Planificado)
+## Skills de Proyecto
 
 Las skills son **conocimiento de proyecto versionado y controlado por roles**, almacenadas como observaciones con `type: "skill"`. Representan decisiones de arquitectura, convenciones de codigo, elecciones de tecnologia y patrones que definen como se debe construir un proyecto.
 
@@ -374,7 +373,7 @@ Observation {
 }
 ```
 
-- **Cero cambios de schema para almacenamiento** — las skills usan la tabla de observaciones existente
+- **Cero cambios de schema para almacenamiento** — las skills usan la tabla de observaciones
 - **Busqueda FTS5/tsvector** — funciona automaticamente
 - **Sync via push/pull** — sin cambios al protocolo de sincronizacion
 - **Resolucion de conflictos LWW** — igual que cualquier observacion con topic_key
@@ -411,11 +410,10 @@ v1 (Juan) → v2 (Maria) → v3 (Pedro, edicion mala) → v4 (rollback a v2)
 
 Los chequeos de permisos ocurren en cloudserver, no en el cliente. Los desarrolladores offline pueden editar skills localmente — el servidor acepta o rechaza (403) en el push. Esto preserva el modelo local-first.
 
-Proposal completo: [openspec/changes/project-skills/proposal.md](../openspec/changes/project-skills/proposal.md)
 
 ---
 
-## Dashboard (Planificado)
+## Dashboard
 
 Una interfaz web embebida servida por el mismo binario `engram-cloud`. Sin deploy de frontend separado — los templates HTML y assets estaticos se compilan dentro del binario via `go:embed`.
 
@@ -427,7 +425,7 @@ Una interfaz web embebida servida por el mismo binario `engram-cloud`. Sin deplo
 | Templates | Go `html/template` | Zero dependencias, embebido en binario |
 | Estilos | CSS custom (~5kb) | Sin pipeline de build de Tailwind |
 | Markdown | goldmark (Go puro) | Rendering server-side para preview de skills |
-| Auth | Cookie de sesion + API key | Reutiliza la infraestructura de auth existente |
+| Auth | Cookie de sesion + API key | Reutiliza la infraestructura de auth |
 
 ### Paginas
 
@@ -447,9 +445,9 @@ Una interfaz web embebida servida por el mismo binario `engram-cloud`. Sin deplo
 ```
 engram-cloud serve
     │
-    ├── /api/v1/...        ← API JSON (existente)
-    ├── /dashboard/...     ← HTML server-rendered (nuevo)
-    └── /static/...        ← Assets embebidos via go:embed (nuevo)
+    ├── /api/v1/...        ← API JSON
+    ├── /dashboard/...     ← HTML server-rendered
+    └── /static/...        ← Assets embebidos via go:embed
 ```
 
 Todos los handlers del dashboard llaman a los mismos metodos de cloudstore que la API — no hay capa de datos separada. El dashboard es puramente una capa de presentacion.
@@ -462,7 +460,6 @@ engram cloud skills import ./docs/conventions/ [--project my-api]
 
 Escanea recursivamente una carpeta buscando archivos `*.md`, deriva el `topic_key` de la ruta del archivo (`conventions/testing.md` → `skill/conventions/testing`), y crea/actualiza skills via el protocolo push. Idempotente — archivos sin cambios se saltan, cambios crean revisiones.
 
-Proposal completo: [openspec/changes/dashboard/proposal.md](../openspec/changes/dashboard/proposal.md)
 
 ---
 
@@ -474,7 +471,7 @@ Proposal completo: [openspec/changes/dashboard/proposal.md](../openspec/changes/
 | `internal/cloudstore` | Tests de integracion con PostgreSQL real (docker) | 16 |
 | `internal/cloudserver` | Tests de integracion con httptest + PostgreSQL real | 17 |
 | `internal/remote` | Tests unitarios con servidores mock httptest | 32 |
-| `internal/tui` | teatest de Bubbletea para transiciones de teclas y renderizado | existentes |
+| `internal/tui` | teatest de Bubbletea para transiciones de teclas y renderizado | — |
 
 ```bash
 # Tests unitarios (rapidos, sin dependencias externas)
