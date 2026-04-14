@@ -125,35 +125,25 @@ Exit criteria: `internal/remote/sync.go` complete, all tests pass including debo
 Entry criteria: T05 (config load/save), T13 (push path), T15 (pull path) complete.
 Exit criteria: All 5 cloud subcommands work end-to-end with a real store.
 
-- [ ] T21 Wire `engram cloud` subcommand group in main.go [S] [depends: T05]
-      Files: `cmd/engram/main.go`
+- [x] T21 Wire `engram cloud` subcommand group in main.go [S] [depends: T05]
+      Files: `cmd/engram/main.go`, `cmd/engram/cloud.go`
       Tests: no — subcommand scaffolding only
 
-- [ ] T22 Implement `engram cloud setup` (REQ-CLI-001) [M] [depends: T21, T05, T03]
-      Files: `cmd/engram/main.go`
-      Tests: YES — use httptest server
-        - Valid credentials → config saved, output contains "Connected successfully"
-        - Bad API key (401) → config NOT saved, output contains error message
+- [x] T22 Implement `engram cloud setup` (REQ-CLI-001) [M] [depends: T21, T05, T03]
+      Files: `cmd/engram/cloud.go`, `cmd/engram/cloud_test.go`
+      Tests: YES — 2 tests (valid credentials + bad API key)
 
-- [ ] T23 Implement `engram cloud sync` (REQ-CLI-002) [M] [depends: T21, T13, T15]
-      Files: `cmd/engram/main.go`
-      Tests: YES — use httptest server
-        - 3 pending + 5 remote → output shows pushed=3 pulled=5
-        - No config → exit 1 with setup hint
+- [x] T23 Implement `engram cloud sync` (REQ-CLI-002) [M] [depends: T21, T13, T15]
+      Files: `cmd/engram/cloud.go`, `cmd/engram/cloud_test.go`
+      Tests: YES — 2 tests (output format with pushed/pulled counts + no config)
 
-- [ ] T24 Implement `engram cloud status` (REQ-CLI-003) [M] [depends: T21, T05, T03]
-      Files: `cmd/engram/main.go`
-      Tests: YES — use httptest server
-        - Healthy server → all 6 fields present in output, exit 0
-        - Server unreachable → health shows "unreachable", local fields still display
+- [x] T24 Implement `engram cloud status` (REQ-CLI-003) [M] [depends: T21, T05, T03]
+      Files: `cmd/engram/cloud.go`, `cmd/engram/cloud_test.go`
+      Tests: YES — 2 tests (healthy + unreachable server)
 
-- [ ] T25 Implement `engram cloud enroll` and `engram cloud unenroll` (REQ-CLI-004, REQ-CLI-005) [S] [depends: T21]
-      Files: `cmd/engram/main.go`
-      Tests: YES
-        - Enroll new project → IsProjectEnrolled returns true, output "Enrolled: myapp"
-        - Enroll already-enrolled → output "Already enrolled", exit 0
-        - Unenroll enrolled → output "Unenrolled: myapp"
-        - Unenroll non-enrolled → output "Not enrolled", exit 0
+- [x] T25 Implement `engram cloud enroll` and `engram cloud unenroll` (REQ-CLI-004, REQ-CLI-005) [S] [depends: T21]
+      Files: `cmd/engram/cloud.go`, `cmd/engram/cloud_test.go`
+      Tests: YES — 4 tests (enroll, already-enrolled, unenroll, not-enrolled)
 
 ---
 

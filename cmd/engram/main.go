@@ -171,6 +171,8 @@ func main() {
 		cmdObsidianExport(cfg)
 	case "projects":
 		cmdProjects(cfg)
+	case "cloud":
+		cmdCloud(cfg)
 	case "setup":
 		cmdSetup()
 	case "version", "--version", "-v":
@@ -1548,6 +1550,12 @@ Commands:
                      Merge similar project names into one canonical name
                        --all      Scan ALL projects for similar name groups
                        --dry-run  Preview what would be merged (no changes)
+  cloud <command>    Cloud sync management
+                       setup      Configure cloud server connection
+                       sync       Push local changes and pull remote changes
+                       status     Show cloud sync status
+                       enroll     Enroll a project for cloud sync
+                       unenroll   Remove a project from cloud sync
   setup [agent]      Install/setup agent integration (opencode, claude-code, gemini-cli, codex)
   sync               Export new memories as compressed chunk to .engram/
                        --import   Import new chunks from .engram/ into local DB
