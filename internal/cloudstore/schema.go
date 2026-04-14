@@ -162,4 +162,42 @@ CREATE TABLE IF NOT EXISTS rate_limits (
 );
 
 CREATE INDEX IF NOT EXISTS idx_rate_limits_ttl ON rate_limits(window_start);
+
+-- Phase 3: Add numeric_id for RemoteStore ID mapping (int64 proxy for UUID PKs)
+DO $$ BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'observations' AND column_name = 'numeric_id'
+    ) THEN
+        CREATE SEQUENCE observations_numeric_id_seq;
+        ALTER TABLE observations ADD COLUMN numeric_id BIGINT DEFAULT nextval('observations_numeric_id_seq') NOT NULL;
+        ALTER SEQUENCE observations_numeric_id_seq OWNED BY observations.numeric_id;
+    END IF;
+END $$;
+
+DO $$ BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'sessions' AND column_name = 'numeric_id'
+    ) THEN
+        CREATE SEQUENCE sessions_numeric_id_seq;
+        ALTER TABLE sessions ADD COLUMN numeric_id BIGINT DEFAULT nextval('sessions_numeric_id_seq') NOT NULL;
+        ALTER SEQUENCE sessions_numeric_id_seq OWNED BY sessions.numeric_id;
+    END IF;
+END $$;
+
+DO $$ BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'prompts' AND column_name = 'numeric_id'
+    ) THEN
+        CREATE SEQUENCE prompts_numeric_id_seq;
+        ALTER TABLE prompts ADD COLUMN numeric_id BIGINT DEFAULT nextval('prompts_numeric_id_seq') NOT NULL;
+        ALTER SEQUENCE prompts_numeric_id_seq OWNED BY prompts.numeric_id;
+    END IF;
+END $$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_obs_numeric_id ON observations(numeric_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_numeric_id ON sessions(numeric_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_prompts_numeric_id ON prompts(numeric_id);
 `

@@ -18,9 +18,10 @@ type Mutation struct {
 
 // PushResult is the response to a push request.
 type PushResult struct {
-	AckedSeq  int64      `json:"acked_seq"`
-	ServerSeq int64      `json:"server_seq"`
-	Conflicts []Conflict `json:"conflicts,omitempty"`
+	AckedSeq  int64            `json:"acked_seq"`
+	ServerSeq int64            `json:"server_seq"`
+	Conflicts []Conflict       `json:"conflicts,omitempty"`
+	EntityIDs map[string]int64 `json:"entity_ids,omitempty"` // sync_id → numeric_id
 }
 
 // Conflict describes a topic_key collision resolved by LWW.
@@ -33,7 +34,9 @@ type Conflict struct {
 // ProcessPush processes a batch of mutations from a client push.
 // Each mutation runs in its own transaction with advisory lock for seq assignment.
 func (s *Store) ProcessPush(ctx context.Context, mutations []Mutation, userID, project string) (*PushResult, error) {
-	result := &PushResult{}
+	result := &PushResult{
+		EntityIDs: make(map[string]int64),
+	}
 	var maxClientSeq int64
 	var maxServerSeq int64
 
@@ -73,11 +76,51 @@ func (s *Store) ProcessPush(ctx context.Context, mutations []Mutation, userID, p
 		default:
 			return nil, fmt.Errorf("unknown entity type: %s", m.Entity)
 		}
+
+		// Collect numeric_id for the created/updated entity.
+		if nid := s.entityNumericID(ctx, m, project); nid > 0 {
+			result.EntityIDs[m.EntityKey] = nid
+		}
 	}
 
 	result.AckedSeq = maxClientSeq
 	result.ServerSeq = maxServerSeq
 	return result, nil
+}
+
+// entityNumericID queries the numeric_id for an entity after a mutation.
+func (s *Store) entityNumericID(ctx context.Context, m Mutation, project string) int64 {
+	var numericID int64
+	var syncID string
+
+	switch m.Entity {
+	case "observation":
+		syncID = strVal(m.Payload, "sync_id")
+		if syncID == "" {
+			syncID = m.EntityKey
+		}
+		_ = s.pool.QueryRow(ctx,
+			`SELECT numeric_id FROM observations WHERE sync_id = $1 AND project = $2`,
+			syncID, project).Scan(&numericID)
+	case "session":
+		syncID = strVal(m.Payload, "id")
+		if syncID == "" {
+			syncID = m.EntityKey
+		}
+		_ = s.pool.QueryRow(ctx,
+			`SELECT numeric_id FROM sessions WHERE sync_id = $1 AND project = $2`,
+			syncID, project).Scan(&numericID)
+	case "prompt":
+		syncID = strVal(m.Payload, "sync_id")
+		if syncID == "" {
+			syncID = m.EntityKey
+		}
+		_ = s.pool.QueryRow(ctx,
+			`SELECT numeric_id FROM prompts WHERE sync_id = $1 AND project = $2`,
+			syncID, project).Scan(&numericID)
+	}
+
+	return numericID
 }
 
 func (s *Store) processObservationMutation(ctx context.Context, m Mutation, userID, project string) (int64, *Conflict, error) {

@@ -42,38 +42,25 @@ Exit criteria: `internal/remote/client.go` and `internal/remote/config.go` compi
 Entry criteria: Phase 1 foundation complete.
 Exit criteria: 8 new GET endpoints added to cloud server, all pass tests.
 
-- [ ] T07 Add `numeric_id BIGSERIAL` column migration to cloud Postgres tables [M] [depends: T01]
-      Files: `cloudserver/migrations/` (new migration file), `cloudserver/store.go`
-      Tests: YES — migration test verifying column exists and sequences backfill existing rows
-        - observations, sessions, prompts tables all get numeric_id
-        - Existing rows get sequential numeric_id values via backfill
+- [x] T07 Add `numeric_id BIGSERIAL` column migration to cloud Postgres tables [M] [depends: T01]
+      Files: `internal/cloudstore/schema.go`
+      Tests: YES (integration) — migration adds numeric_id BIGSERIAL + unique index to all 3 tables
 
-- [ ] T08 Extend `PushResult` with `EntityIDs map[string]int64` (Decision 4) [S] [depends: T07]
-      Files: `cloudserver/server.go` (PushResult struct), `cloudserver/store.go` (ProcessPush return)
-      Tests: YES — update existing push tests to assert entity_ids map is populated in response
+- [x] T08 Extend `PushResult` with `EntityIDs map[string]int64` (Decision 4) [S] [depends: T07]
+      Files: `internal/cloudstore/push.go`
+      Tests: YES (integration) — TestHTTP_PushReturnsEntityIDs verifies entity_ids map in response
 
-- [ ] T09 Add Tier 1 read endpoints: sessions (REQ-REMOTE-006) [M] [depends: T07]
-      Files: `cloudserver/server.go`
-      Tests: YES — `cloudserver/server_test.go`
-        - GET /api/v1/sessions?project=&limit= → RecentSessions
-        - GET /api/v1/sessions/all?project=&limit= → AllSessions
-        - GET /api/v1/sessions/{id}/observations → SessionObservations
-        - Auth required on all three
-        - Correct project scoping
+- [x] T09 Add Tier 1 read endpoints: sessions (REQ-REMOTE-006) [M] [depends: T07]
+      Files: `internal/cloudstore/queries.go`, `internal/cloudserver/server.go`, `internal/cloudserver/server_test.go`
+      Tests: YES (integration) — 3 tests: ListRecentSessions, ListAllSessions, SessionObservations
 
-- [ ] T10 Add Tier 1 read endpoints: observations and timeline (REQ-REMOTE-006) [M] [depends: T07]
-      Files: `cloudserver/server.go`
-      Tests: YES — `cloudserver/server_test.go`
-        - GET /api/v1/observations/list?project=&scope=&limit= → RecentObservations
-        - GET /api/v1/observations/all?project=&scope=&limit= → AllObservations
-        - GET /api/v1/observations/{id}/timeline → Timeline
-        - numeric_id present in all observation responses
+- [x] T10 Add Tier 1 read endpoints: observations and timeline (REQ-REMOTE-006) [M] [depends: T07]
+      Files: `internal/cloudstore/queries.go`, `internal/cloudserver/server.go`, `internal/cloudserver/server_test.go`
+      Tests: YES (integration) — 3 tests: ListRecentObservations, ListAllObservations, Timeline
 
-- [ ] T11 Add Tier 1 read endpoints: prompts (REQ-REMOTE-006) [S] [depends: T07]
-      Files: `cloudserver/server.go`
-      Tests: YES — `cloudserver/server_test.go`
-        - GET /api/v1/prompts?project=&limit= → RecentPrompts
-        - GET /api/v1/prompts/search?q=&project=&limit= → SearchPrompts
+- [x] T11 Add Tier 1 read endpoints: prompts (REQ-REMOTE-006) [S] [depends: T07]
+      Files: `internal/cloudstore/queries.go`, `internal/cloudserver/server.go`, `internal/cloudserver/server_test.go`
+      Tests: YES (integration) — 3 tests: ListRecentPrompts, SearchPrompts, SearchPromptsMissingParams
 
 ---
 

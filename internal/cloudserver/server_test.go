@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -475,5 +476,211 @@ func TestHTTP_PushPullHappyPath(t *testing.T) {
 	entities, _ := pullResult["entities"].([]any)
 	if len(entities) == 0 {
 		t.Fatal("expected entities from pull")
+	}
+}
+
+// ─── Phase 2: Tier 1 Read Endpoints ─────────────────────────────────────────
+
+// pushTestData pushes a session + observations via the push endpoint and returns the push result.
+func pushTestData(t *testing.T, env *testEnv, count int) map[string]any {
+	t.Helper()
+	mutations := []map[string]any{
+		{"seq": 1, "entity": "session", "entity_key": "sess-read-1",
+			"op": "upsert", "occurred_at": "2026-04-14T10:00:00Z",
+			"payload": map[string]any{"id": "sess-read-1", "directory": "/tmp", "started_at": "2026-04-14T10:00:00Z"}},
+	}
+	for i := 1; i <= count; i++ {
+		mutations = append(mutations, map[string]any{
+			"seq": int64(i + 1), "entity": "observation", "entity_key": fmt.Sprintf("obs-read-%d", i),
+			"op": "upsert", "occurred_at": "2026-04-14T10:00:00Z",
+			"payload": map[string]any{
+				"sync_id":    fmt.Sprintf("obs-read-%d", i),
+				"session_id": "sess-read-1",
+				"type":       "decision",
+				"title":      fmt.Sprintf("Observation %d", i),
+				"content":    fmt.Sprintf("Content for observation %d", i),
+				"scope":      "project",
+			},
+		})
+	}
+
+	rec := env.do(t, "POST", "/api/v1/sync/push", map[string]any{
+		"device_id": "test-device",
+		"project":   env.project,
+		"mutations": mutations,
+	}, env.authHeaders())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("push test data: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	return decodeBody(t, rec)
+}
+
+func TestHTTP_PushReturnsEntityIDs(t *testing.T) {
+	env := newTestEnv(t)
+	result := pushTestData(t, env, 2)
+
+	entityIDs, ok := result["entity_ids"].(map[string]any)
+	if !ok {
+		t.Fatal("expected entity_ids map in push result")
+	}
+
+	// Session + 2 observations = 3 entity IDs
+	if len(entityIDs) < 3 {
+		t.Errorf("expected at least 3 entity_ids, got %d: %v", len(entityIDs), entityIDs)
+	}
+
+	// Each entity ID should be a positive number
+	for key, val := range entityIDs {
+		nid, ok := val.(float64) // JSON numbers decode as float64
+		if !ok || nid <= 0 {
+			t.Errorf("entity_ids[%s] = %v, expected positive number", key, val)
+		}
+	}
+}
+
+func TestHTTP_ListRecentSessions(t *testing.T) {
+	env := newTestEnv(t)
+	pushTestData(t, env, 2)
+
+	rec := env.do(t, "GET", "/api/v1/sessions?project="+env.project+"&limit=10", nil, env.authHeaders())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	body := decodeBody(t, rec)
+	sessions, _ := body["sessions"].([]any)
+	if len(sessions) == 0 {
+		t.Fatal("expected at least 1 session")
+	}
+	s0, _ := sessions[0].(map[string]any)
+	if s0["sync_id"] != "sess-read-1" {
+		t.Errorf("expected sync_id=sess-read-1, got %v", s0["sync_id"])
+	}
+	if _, ok := s0["numeric_id"]; !ok {
+		t.Error("expected numeric_id field in session")
+	}
+}
+
+func TestHTTP_ListAllSessions(t *testing.T) {
+	env := newTestEnv(t)
+	pushTestData(t, env, 1)
+
+	rec := env.do(t, "GET", "/api/v1/sessions/all?project="+env.project, nil, env.authHeaders())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	body := decodeBody(t, rec)
+	sessions, _ := body["sessions"].([]any)
+	if len(sessions) == 0 {
+		t.Fatal("expected at least 1 session")
+	}
+}
+
+func TestHTTP_SessionObservations(t *testing.T) {
+	env := newTestEnv(t)
+	pushTestData(t, env, 3)
+
+	rec := env.do(t, "GET", "/api/v1/sessions/sess-read-1/observations?project="+env.project, nil, env.authHeaders())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	body := decodeBody(t, rec)
+	obs, _ := body["observations"].([]any)
+	if len(obs) != 3 {
+		t.Errorf("expected 3 observations, got %d", len(obs))
+	}
+}
+
+func TestHTTP_ListRecentObservations(t *testing.T) {
+	env := newTestEnv(t)
+	pushTestData(t, env, 5)
+
+	rec := env.do(t, "GET", "/api/v1/observations/list?project="+env.project+"&limit=3", nil, env.authHeaders())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	body := decodeBody(t, rec)
+	obs, _ := body["observations"].([]any)
+	if len(obs) != 3 {
+		t.Errorf("expected 3 observations (limit=3), got %d", len(obs))
+	}
+}
+
+func TestHTTP_ListAllObservations(t *testing.T) {
+	env := newTestEnv(t)
+	pushTestData(t, env, 5)
+
+	rec := env.do(t, "GET", "/api/v1/observations/all?project="+env.project, nil, env.authHeaders())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	body := decodeBody(t, rec)
+	obs, _ := body["observations"].([]any)
+	if len(obs) < 5 {
+		t.Errorf("expected at least 5 observations, got %d", len(obs))
+	}
+}
+
+func TestHTTP_ListRecentPrompts(t *testing.T) {
+	env := newTestEnv(t)
+	// Push prompts via mutation
+	rec := env.do(t, "POST", "/api/v1/sync/push", map[string]any{
+		"device_id": "test-device",
+		"project":   env.project,
+		"mutations": []map[string]any{
+			{"seq": 1, "entity": "prompt", "entity_key": "prompt-1",
+				"op": "upsert", "occurred_at": "2026-04-14T10:00:00Z",
+				"payload": map[string]any{"sync_id": "prompt-1", "session_id": "sess-1", "content": "How do I implement auth?"}},
+			{"seq": 2, "entity": "prompt", "entity_key": "prompt-2",
+				"op": "upsert", "occurred_at": "2026-04-14T10:01:00Z",
+				"payload": map[string]any{"sync_id": "prompt-2", "session_id": "sess-1", "content": "Fix the database migration"}},
+		},
+	}, env.authHeaders())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("push prompts: expected 200, got %d", rec.Code)
+	}
+
+	rec = env.do(t, "GET", "/api/v1/prompts?project="+env.project+"&limit=10", nil, env.authHeaders())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	body := decodeBody(t, rec)
+	prompts, _ := body["prompts"].([]any)
+	if len(prompts) != 2 {
+		t.Errorf("expected 2 prompts, got %d", len(prompts))
+	}
+}
+
+func TestHTTP_SearchPrompts(t *testing.T) {
+	env := newTestEnv(t)
+	// Push prompts
+	env.do(t, "POST", "/api/v1/sync/push", map[string]any{
+		"device_id": "test-device",
+		"project":   env.project,
+		"mutations": []map[string]any{
+			{"seq": 1, "entity": "prompt", "entity_key": "prompt-s1",
+				"op": "upsert", "occurred_at": "2026-04-14T10:00:00Z",
+				"payload": map[string]any{"sync_id": "prompt-s1", "session_id": "sess-1", "content": "How do I implement auth?"}},
+			{"seq": 2, "entity": "prompt", "entity_key": "prompt-s2",
+				"op": "upsert", "occurred_at": "2026-04-14T10:01:00Z",
+				"payload": map[string]any{"sync_id": "prompt-s2", "session_id": "sess-1", "content": "Fix the database migration"}},
+		},
+	}, env.authHeaders())
+
+	rec := env.do(t, "GET", "/api/v1/prompts/search?q=auth&project="+env.project, nil, env.authHeaders())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	body := decodeBody(t, rec)
+	prompts, _ := body["prompts"].([]any)
+	if len(prompts) != 1 {
+		t.Errorf("expected 1 prompt matching 'auth', got %d", len(prompts))
+	}
+}
+
+func TestHTTP_SearchPromptsMissingParams(t *testing.T) {
+	env := newTestEnv(t)
+	rec := env.do(t, "GET", "/api/v1/prompts/search?project="+env.project, nil, env.authHeaders())
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 without q param, got %d", rec.Code)
 	}
 }

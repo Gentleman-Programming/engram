@@ -49,9 +49,17 @@ func New(store *cloudstore.Store) http.Handler {
 
 			cr.Post("/observations", handleCreateObservation(store))
 			cr.Get("/observations/{id}", handleGetObservation(store))
+			cr.Get("/observations/list", handleListRecentObservations(store))
+			cr.Get("/observations/all", handleListAllObservations(store))
+			cr.Get("/observations/{id}/timeline", handleGetObservationTimeline(store))
 			cr.Get("/search", handleSearch(store))
 			cr.Get("/context", handleContext(store))
 			cr.Get("/stats", handleStats(store))
+			cr.Get("/sessions", handleListRecentSessions(store))
+			cr.Get("/sessions/all", handleListAllSessions(store))
+			cr.Get("/sessions/{id}/observations", handleGetSessionObservations(store))
+			cr.Get("/prompts", handleListRecentPrompts(store))
+			cr.Get("/prompts/search", handleSearchPrompts(store))
 		})
 
 		// Batch — uses the full router so sub-requests go through all middleware
@@ -300,6 +308,189 @@ func handleStats(store *cloudstore.Store) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, stats)
+	}
+}
+
+// ─── Tier 1 Read Endpoints (T09-T11) ────────────────────────────────────────
+
+func handleListRecentSessions(store *cloudstore.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID := UserIDFromContext(r.Context())
+		project := r.URL.Query().Get("project")
+		limit := queryInt(r, "limit", 10)
+		if project == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project required"})
+			return
+		}
+		if ok, _ := store.IsMember(r.Context(), project, userID); !ok {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "not a member"})
+			return
+		}
+		sessions, err := store.ListRecentSessions(r.Context(), project, limit)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"sessions": sessions})
+	}
+}
+
+func handleListAllSessions(store *cloudstore.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID := UserIDFromContext(r.Context())
+		project := r.URL.Query().Get("project")
+		limit := queryInt(r, "limit", 100)
+		if project == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project required"})
+			return
+		}
+		if ok, _ := store.IsMember(r.Context(), project, userID); !ok {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "not a member"})
+			return
+		}
+		sessions, err := store.ListAllSessions(r.Context(), project, limit)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"sessions": sessions})
+	}
+}
+
+func handleGetSessionObservations(store *cloudstore.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID := UserIDFromContext(r.Context())
+		sessionID := chi.URLParam(r, "id")
+		project := r.URL.Query().Get("project")
+		if project == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project required"})
+			return
+		}
+		if ok, _ := store.IsMember(r.Context(), project, userID); !ok {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "not a member"})
+			return
+		}
+		obs, err := store.GetSessionObservations(r.Context(), sessionID, project, userID)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"observations": obs})
+	}
+}
+
+func handleListRecentObservations(store *cloudstore.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID := UserIDFromContext(r.Context())
+		project := r.URL.Query().Get("project")
+		scope := r.URL.Query().Get("scope")
+		limit := queryInt(r, "limit", 20)
+		if project == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project required"})
+			return
+		}
+		if ok, _ := store.IsMember(r.Context(), project, userID); !ok {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "not a member"})
+			return
+		}
+		obs, err := store.ListRecentObservations(r.Context(), project, scope, userID, limit)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"observations": obs})
+	}
+}
+
+func handleListAllObservations(store *cloudstore.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID := UserIDFromContext(r.Context())
+		project := r.URL.Query().Get("project")
+		scope := r.URL.Query().Get("scope")
+		limit := queryInt(r, "limit", 100)
+		if project == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project required"})
+			return
+		}
+		if ok, _ := store.IsMember(r.Context(), project, userID); !ok {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "not a member"})
+			return
+		}
+		obs, err := store.ListAllObservations(r.Context(), project, scope, userID, limit)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"observations": obs})
+	}
+}
+
+func handleGetObservationTimeline(store *cloudstore.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID := UserIDFromContext(r.Context())
+		obsID := chi.URLParam(r, "id")
+		project := r.URL.Query().Get("project")
+		before := queryInt(r, "before", 5)
+		after := queryInt(r, "after", 5)
+		if project == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project required"})
+			return
+		}
+		if ok, _ := store.IsMember(r.Context(), project, userID); !ok {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "not a member"})
+			return
+		}
+		timeline, err := store.GetTimeline(r.Context(), obsID, project, userID, before, after)
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
+		writeJSON(w, http.StatusOK, timeline)
+	}
+}
+
+func handleListRecentPrompts(store *cloudstore.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID := UserIDFromContext(r.Context())
+		project := r.URL.Query().Get("project")
+		limit := queryInt(r, "limit", 20)
+		if project == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project required"})
+			return
+		}
+		if ok, _ := store.IsMember(r.Context(), project, userID); !ok {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "not a member"})
+			return
+		}
+		prompts, err := store.ListRecentPrompts(r.Context(), project, userID, limit)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"prompts": prompts})
+	}
+}
+
+func handleSearchPrompts(store *cloudstore.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID := UserIDFromContext(r.Context())
+		query := r.URL.Query().Get("q")
+		project := r.URL.Query().Get("project")
+		limit := queryInt(r, "limit", 20)
+		if query == "" || project == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "q and project required"})
+			return
+		}
+		if ok, _ := store.IsMember(r.Context(), project, userID); !ok {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "not a member"})
+			return
+		}
+		prompts, err := store.SearchPrompts(r.Context(), query, project, userID, limit)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"prompts": prompts, "count": len(prompts)})
 	}
 }
 
