@@ -32,20 +32,16 @@ func newTestCloudStore(t *testing.T) *Store {
 		t.Fatalf("migrations: %v", err)
 	}
 
-	// Clean all tables for test isolation
+	// Clean all tables for test isolation (order respects FK dependencies)
 	tables := []string{
 		"rate_limits", "idempotency_keys", "sync_cursors",
 		"observation_revisions", "prompts", "sessions", "observations",
-		"project_members", "projects", "users",
+		"project_members", "projects", "users", "server_seq_counter",
 	}
 	for _, table := range tables {
 		if _, err := s.pool.Exec(ctx, "DELETE FROM "+table); err != nil {
 			t.Fatalf("clean %s: %v", table, err)
 		}
-	}
-	// Reset seq counter
-	if _, err := s.pool.Exec(ctx, "UPDATE server_seq_counter SET value = 0"); err != nil {
-		t.Fatalf("reset seq: %v", err)
 	}
 
 	t.Cleanup(func() { s.Close() })
@@ -75,13 +71,13 @@ func TestIntegration_SchemaCreation(t *testing.T) {
 		}
 	}
 
-	// seq counter should have value=0
-	var seqVal int64
-	if err := s.pool.QueryRow(ctx, "SELECT value FROM server_seq_counter").Scan(&seqVal); err != nil {
-		t.Fatalf("read seq: %v", err)
+	// seq counter should be empty (per-project rows created on demand)
+	var seqCount int
+	if err := s.pool.QueryRow(ctx, "SELECT COUNT(*) FROM server_seq_counter").Scan(&seqCount); err != nil {
+		t.Fatalf("read seq count: %v", err)
 	}
-	if seqVal != 0 {
-		t.Errorf("expected seq=0, got %d", seqVal)
+	if seqCount != 0 {
+		t.Errorf("expected 0 seq counter rows (created on demand), got %d", seqCount)
 	}
 }
 
@@ -691,6 +687,98 @@ func TestIntegration_GetContext(t *testing.T) {
 	}
 	if !contains(result, "Use Go") {
 		t.Fatal("expected observation in context")
+	}
+}
+
+// Task: Concurrent pushes to different projects succeed independently with distinct seqs
+func TestIntegration_ConcurrentPushDifferentProjects(t *testing.T) {
+	s := newTestCloudStore(t)
+	ctx := context.Background()
+
+	// Setup: two projects, two users
+	userA, _, _ := s.CreateUser(ctx, "Alice", "alice@test.com")
+	userB, _, _ := s.CreateUser(ctx, "Bob", "bob@test.com")
+	_, _ = s.CreateProject(ctx, "proj-alpha")
+	_, _ = s.CreateProject(ctx, "proj-beta")
+	_ = s.AddMember(ctx, "proj-alpha", "alice@test.com", "member")
+	_ = s.AddMember(ctx, "proj-beta", "bob@test.com", "member")
+
+	// Concurrent pushes to different projects should both succeed
+	errCh := make(chan error, 2)
+
+	go func() {
+		_, err := s.ProcessPush(ctx, []Mutation{{
+			Seq: 1, Entity: "observation", EntityKey: "obs-a1", Op: "upsert",
+			Payload: map[string]any{
+				"sync_id": "obs-a1", "session_id": "s1", "type": "decision",
+				"title": "Alpha obs", "content": "Project Alpha", "scope": "project",
+			},
+		}}, userA, "proj-alpha")
+		errCh <- err
+	}()
+
+	go func() {
+		_, err := s.ProcessPush(ctx, []Mutation{{
+			Seq: 1, Entity: "observation", EntityKey: "obs-b1", Op: "upsert",
+			Payload: map[string]any{
+				"sync_id": "obs-b1", "session_id": "s2", "type": "decision",
+				"title": "Beta obs", "content": "Project Beta", "scope": "project",
+			},
+		}}, userB, "proj-beta")
+		errCh <- err
+	}()
+
+	for i := 0; i < 2; i++ {
+		if err := <-errCh; err != nil {
+			t.Fatalf("concurrent push %d failed: %v", i, err)
+		}
+	}
+
+	// Verify both observations exist with distinct server_seq
+	var seqAlpha, seqBeta int64
+	err := s.pool.QueryRow(ctx,
+		"SELECT server_seq FROM observations WHERE sync_id = 'obs-a1' AND project = 'proj-alpha'",
+	).Scan(&seqAlpha)
+	if err != nil {
+		t.Fatalf("get alpha seq: %v", err)
+	}
+	err = s.pool.QueryRow(ctx,
+		"SELECT server_seq FROM observations WHERE sync_id = 'obs-b1' AND project = 'proj-beta'",
+	).Scan(&seqBeta)
+	if err != nil {
+		t.Fatalf("get beta seq: %v", err)
+	}
+
+	// Both should have valid seqs (> 0) and they should be different
+	if seqAlpha < 1 || seqBeta < 1 {
+		t.Fatalf("expected seq >= 1, got alpha=%d beta=%d", seqAlpha, seqBeta)
+	}
+
+	// Same-project serial pushes should produce monotonic seqs
+	result1, err := s.ProcessPush(ctx, []Mutation{{
+		Seq: 2, Entity: "observation", EntityKey: "obs-a2", Op: "upsert",
+		Payload: map[string]any{
+			"sync_id": "obs-a2", "session_id": "s1", "type": "decision",
+			"title": "Alpha obs 2", "content": "Second", "scope": "project",
+		},
+	}}, userA, "proj-alpha")
+	if err != nil {
+		t.Fatalf("serial push 1: %v", err)
+	}
+
+	result2, err := s.ProcessPush(ctx, []Mutation{{
+		Seq: 3, Entity: "observation", EntityKey: "obs-a3", Op: "upsert",
+		Payload: map[string]any{
+			"sync_id": "obs-a3", "session_id": "s1", "type": "decision",
+			"title": "Alpha obs 3", "content": "Third", "scope": "project",
+		},
+	}}, userA, "proj-alpha")
+	if err != nil {
+		t.Fatalf("serial push 2: %v", err)
+	}
+
+	if result2.ServerSeq <= result1.ServerSeq {
+		t.Fatalf("expected monotonic seq: %d should be > %d", result2.ServerSeq, result1.ServerSeq)
 	}
 }
 
