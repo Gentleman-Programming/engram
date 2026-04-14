@@ -107,6 +107,68 @@ engram sync --status           # Check sync status
 
 Full sync documentation → [DOCS.md](DOCS.md)
 
+## Cloud Server (Multi-User Sync)
+
+For teams sharing memories across multiple developers. Uses PostgreSQL for conflict resolution and real-time sync.
+
+```
+Clients (engram local instances)
+    ↓ HTTP push/pull
+engram-cloud (Go binary + PostgreSQL)
+    ↓
+PostgreSQL + tsvector search
+```
+
+### Setup
+
+```bash
+# 1. Start PostgreSQL
+docker run -d --name engram-pg -p 5432:5432 \
+  -e POSTGRES_USER=engram -e POSTGRES_PASSWORD=secret -e POSTGRES_DB=engram_cloud \
+  postgres:16-alpine
+
+# 2. Run the cloud server
+export ENGRAM_CLOUD_DB="postgres://engram:secret@localhost:5432/engram_cloud?sslmode=disable"
+engram-cloud serve
+```
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ENGRAM_CLOUD_DB` | `postgres://localhost:5432/engram_cloud?sslmode=disable` | PostgreSQL connection string |
+| `ENGRAM_CLOUD_PORT` | `7438` | HTTP listen port |
+
+### API Endpoints
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/api/v1/health` | No | Health check + PostgreSQL status |
+| POST | `/api/v1/sync/push` | Yes | Push mutations (observations, sessions, prompts) |
+| GET | `/api/v1/sync/pull` | Yes | Pull changes since cursor |
+| POST | `/api/v1/observations` | Yes | Create observation directly |
+| GET | `/api/v1/observations/{id}` | Yes | Get observation by ID |
+| GET | `/api/v1/search` | Yes | Full-text search (tsvector) |
+| GET | `/api/v1/context` | Yes | Get formatted context |
+| GET | `/api/v1/stats` | Yes | Project statistics |
+| GET | `/api/v1/projects` | Yes | List user's projects |
+| POST | `/api/v1/auth/rotate-key` | Yes | Rotate API key |
+| POST | `/api/v1/batch` | Yes | Execute multiple operations in one round trip |
+
+Authentication: `Authorization: Bearer <api_key>` + `X-Engram-Protocol: 1` headers required for protected endpoints.
+
+### Running Tests
+
+```bash
+# Start the test database
+docker run -d --name engram-test-pg -p 5433:5432 \
+  -e POSTGRES_USER=engram -e POSTGRES_PASSWORD=testpass -e POSTGRES_DB=engram_test \
+  postgres:16-alpine
+
+# Run integration tests (30 tests: 15 cloudstore + 15 cloudserver)
+go test -tags integration -v ./internal/cloudstore/ ./internal/cloudserver/
+```
+
 ## CLI Reference
 
 | Command | Description |
@@ -126,6 +188,8 @@ Full sync documentation → [DOCS.md](DOCS.md)
 | `engram projects list\|consolidate\|prune` | Manage project names |
 | `engram obsidian-export` | Export to Obsidian vault (beta) |
 | `engram version` | Show version |
+| `engram-cloud serve` | Start cloud sync server |
+| `engram-cloud version` | Show cloud server version |
 
 Full CLI with all flags → [docs/ARCHITECTURE.md#cli-reference](docs/ARCHITECTURE.md#cli-reference)
 
@@ -142,6 +206,7 @@ Full CLI with all flags → [docs/ARCHITECTURE.md#cli-reference](docs/ARCHITECTU
 | [Obsidian Brain](docs/beta/obsidian-brain.md) | Export memories as Obsidian knowledge graph (beta) |
 | [Contributing](CONTRIBUTING.md) | Contribution workflow + standards |
 | [Full Docs](DOCS.md) | Complete technical reference |
+| Cloud Server | Multi-user sync setup + API (see [Cloud Server](#cloud-server-multi-user-sync) above) |
 
 ## License
 
