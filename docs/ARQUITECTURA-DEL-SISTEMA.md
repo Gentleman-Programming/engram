@@ -415,6 +415,57 @@ Proposal completo: [openspec/changes/project-skills/proposal.md](../openspec/cha
 
 ---
 
+## Dashboard (Planificado)
+
+Una interfaz web embebida servida por el mismo binario `engram-cloud`. Sin deploy de frontend separado — los templates HTML y assets estaticos se compilan dentro del binario via `go:embed`.
+
+### Tecnologia
+
+| Componente | Eleccion | Razon |
+|-----------|----------|-------|
+| Interactividad | htmx 2.x (14kb) | Actualizaciones parciales de pagina, sin framework JS, sin build step |
+| Templates | Go `html/template` | Zero dependencias, embebido en binario |
+| Estilos | CSS custom (~5kb) | Sin pipeline de build de Tailwind |
+| Markdown | goldmark (Go puro) | Rendering server-side para preview de skills |
+| Auth | Cookie de sesion + API key | Reutiliza la infraestructura de auth existente |
+
+### Paginas
+
+```
+/dashboard/
+├── /login              ← Autenticacion con API key
+├── /memories           ← Buscar, filtrar, ver observaciones
+├── /skills             ← Listar por categoria, editar, historial de revisiones, rollback
+├── /skills/{topic_key} ← Vista detalle con markdown renderizado
+├── /members            ← Gestion de usuarios, asignacion de roles por proyecto
+├── /audit              ← Timeline de cambios en skills con filtros
+└── /projects           ← Estadisticas, salud del sync, proyectos enrollados
+```
+
+### Arquitectura
+
+```
+engram-cloud serve
+    │
+    ├── /api/v1/...        ← API JSON (existente)
+    ├── /dashboard/...     ← HTML server-rendered (nuevo)
+    └── /static/...        ← Assets embebidos via go:embed (nuevo)
+```
+
+Todos los handlers del dashboard llaman a los mismos metodos de cloudstore que la API — no hay capa de datos separada. El dashboard es puramente una capa de presentacion.
+
+### Ingesta de Skills desde el Filesystem
+
+```bash
+engram cloud skills import ./docs/conventions/ [--project my-api]
+```
+
+Escanea recursivamente una carpeta buscando archivos `*.md`, deriva el `topic_key` de la ruta del archivo (`conventions/testing.md` → `skill/conventions/testing`), y crea/actualiza skills via el protocolo push. Idempotente — archivos sin cambios se saltan, cambios crean revisiones.
+
+Proposal completo: [openspec/changes/dashboard/proposal.md](../openspec/changes/dashboard/proposal.md)
+
+---
+
 ## Estrategia de Testing
 
 | Capa | Enfoque | Cantidad |

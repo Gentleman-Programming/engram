@@ -413,6 +413,57 @@ Full proposal: [openspec/changes/project-skills/proposal.md](../openspec/changes
 
 ---
 
+## Dashboard (Planned)
+
+An embedded web UI served by the same `engram-cloud` binary. No separate frontend deployment — HTML templates and static assets are compiled into the binary via `go:embed`.
+
+### Technology
+
+| Component | Choice | Reason |
+|-----------|--------|--------|
+| Interactivity | htmx 2.x (14kb) | Partial page updates, no JS framework, no build step |
+| Templates | Go `html/template` | Zero dependency, embedded in binary |
+| Styling | Custom CSS (~5kb) | No Tailwind build pipeline |
+| Markdown | goldmark (pure Go) | Server-side rendering for skill preview |
+| Auth | Session cookie + API key | Reuses existing auth infrastructure |
+
+### Pages
+
+```
+/dashboard/
+├── /login              ← API key authentication
+├── /memories           ← Search, filter, view observations
+├── /skills             ← List by category, edit, revision history, rollback
+├── /skills/{topic_key} ← Detail view with rendered markdown
+├── /members            ← User management, role assignment per project
+├── /audit              ← Skill change timeline with filters
+└── /projects           ← Stats, sync health, enrolled projects
+```
+
+### Architecture
+
+```
+engram-cloud serve
+    │
+    ├── /api/v1/...        ← JSON API (existing)
+    ├── /dashboard/...     ← HTML server-rendered (new)
+    └── /static/...        ← Embedded assets via go:embed (new)
+```
+
+All dashboard handlers call the same cloudstore methods as the API — no separate data layer. The dashboard is purely a presentation layer.
+
+### Skill Ingestion from Filesystem
+
+```bash
+engram cloud skills import ./docs/conventions/ [--project my-api]
+```
+
+Recursively scans a folder for `*.md` files, derives `topic_key` from the file path (`conventions/testing.md` → `skill/conventions/testing`), and creates/updates skills via the push protocol. Idempotent — unchanged files are skipped, changes create revisions.
+
+Full proposal: [openspec/changes/dashboard/proposal.md](../openspec/changes/dashboard/proposal.md)
+
+---
+
 ## Testing Strategy
 
 | Layer | Approach | Count |
