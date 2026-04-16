@@ -34,6 +34,7 @@ import (
 	"github.com/Gentleman-Programming/engram/internal/store"
 	engramsync "github.com/Gentleman-Programming/engram/internal/sync"
 	"github.com/Gentleman-Programming/engram/internal/tui"
+	"github.com/Gentleman-Programming/engram/internal/types"
 	versioncheck "github.com/Gentleman-Programming/engram/internal/version"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -202,13 +203,53 @@ func cmdServe(cfg store.Config) {
 		}
 	}
 
+	// Parse and validate --backend flag BEFORE opening the store (REQ-BACKEND-004).
+	backend := parseBackendFlag(2)
+	if err := validateBackend(backend); err != nil {
+		fmt.Fprintln(os.Stderr, "engram: "+err.Error())
+		exitFunc(1)
+		return
+	}
+	if backend == "" {
+		backend = "local"
+	}
+
 	s, err := storeNew(cfg)
 	if err != nil {
 		fatal(err)
 	}
 	defer s.Close()
 
-	srv := newHTTPServer(s, port)
+	// Build the effective store based on --backend mode.
+	var effectiveStore types.StoreInterface
+	var sc syncClientIface
+
+	switch backend {
+	case "local": // REQ-BACKEND-001: identical to current behavior
+		effectiveStore = s
+
+	case "cloud": // REQ-BACKEND-002: RemoteStore from CloudConfig
+		rs, err := newRemoteStore(s)
+		if err != nil {
+			fatal(err)
+		}
+		effectiveStore = rs
+
+	case "local-sync": // REQ-BACKEND-003: *store.Store + SyncClient
+		effectiveStore = s
+		sc, err = syncClientFactory(s, cfg)
+		if err != nil {
+			fatal(err)
+		}
+	}
+
+	srv := newHTTPServer(effectiveStore, port)
+
+	// Wire onWrite for local-sync autosync notification.
+	if sc != nil {
+		srv.SetOnWrite(sc.SchedulePush)
+		syncClientStart(sc, context.Background())
+	}
 
 	// Graceful shutdown on SIGINT/SIGTERM.
 	sigCh := make(chan os.Signal, 1)
@@ -216,6 +257,9 @@ func cmdServe(cfg store.Config) {
 	go func() {
 		<-sigCh
 		log.Println("[engram] shutting down...")
+		if sc != nil {
+			syncClientStop(sc)
+		}
 		exitFunc(0)
 	}()
 
@@ -225,7 +269,7 @@ func cmdServe(cfg store.Config) {
 }
 
 func cmdMCP(cfg store.Config) {
-	// Parse --tools and --project flags
+	// Parse --tools, --project, and --backend flags.
 	toolsFilter := ""
 	projectOverride := ""
 	for i := 2; i < len(os.Args); i++ {
@@ -240,6 +284,17 @@ func cmdMCP(cfg store.Config) {
 			projectOverride = os.Args[i+1]
 			i++
 		}
+	}
+
+	// Validate --backend flag BEFORE opening the store (REQ-BACKEND-004).
+	backend := parseBackendFlag(2)
+	if err := validateBackend(backend); err != nil {
+		fmt.Fprintln(os.Stderr, "engram: "+err.Error())
+		exitFunc(1)
+		return
+	}
+	if backend == "" {
+		backend = "local"
 	}
 
 	// Project detection chain: --project flag → ENGRAM_PROJECT env → git detection
@@ -261,12 +316,28 @@ func cmdMCP(cfg store.Config) {
 	}
 	defer s.Close()
 
+	// Build the effective store based on --backend mode.
+	var effectiveStore types.StoreInterface
+
+	switch backend {
+	case "local": // REQ-BACKEND-001
+		effectiveStore = s
+	case "cloud": // REQ-BACKEND-002
+		rs, err := newRemoteStore(s)
+		if err != nil {
+			fatal(err)
+		}
+		effectiveStore = rs
+	case "local-sync": // REQ-BACKEND-003: local store (sync client not needed for MCP)
+		effectiveStore = s
+	}
+
 	mcpCfg := mcp.MCPConfig{
 		DefaultProject: detectedProject,
 	}
 
 	allowlist := resolveMCPTools(toolsFilter)
-	mcpSrv := newMCPServerWithConfig(s, mcpCfg, allowlist)
+	mcpSrv := newMCPServerWithConfig(effectiveStore, mcpCfg, allowlist)
 
 	if err := serveMCP(mcpSrv); err != nil {
 		fatal(err)

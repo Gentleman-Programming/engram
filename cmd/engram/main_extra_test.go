@@ -17,6 +17,7 @@ import (
 	"github.com/Gentleman-Programming/engram/internal/store"
 	engramsync "github.com/Gentleman-Programming/engram/internal/sync"
 	"github.com/Gentleman-Programming/engram/internal/tui"
+	"github.com/Gentleman-Programming/engram/internal/types"
 	versioncheck "github.com/Gentleman-Programming/engram/internal/version"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -101,12 +102,12 @@ func stubRuntimeHooks(t *testing.T) {
 	oldCheckForUpdates := checkForUpdates
 
 	storeNew = store.New
-	newHTTPServer = func(s *store.Store, _ int) *engramsrv.Server { return engramsrv.New(s, 0) }
+	newHTTPServer = func(s types.StoreInterface, _ int) *engramsrv.Server { return engramsrv.New(s, 0) }
 	startHTTP = func(_ *engramsrv.Server) error { return nil }
-	newMCPServer = func(s *store.Store) *mcpserver.MCPServer {
+	newMCPServer = func(s types.StoreInterface) *mcpserver.MCPServer {
 		return mcpserver.NewMCPServer("test", "0", mcpserver.WithRecovery())
 	}
-	newMCPServerWithTools = func(s *store.Store, allowlist map[string]bool) *mcpserver.MCPServer {
+	newMCPServerWithTools = func(s types.StoreInterface, allowlist map[string]bool) *mcpserver.MCPServer {
 		return mcpserver.NewMCPServer("test", "0", mcpserver.WithRecovery())
 	}
 	serveMCP = func(_ *mcpserver.MCPServer, _ ...mcpserver.StdioOption) error { return nil }
@@ -220,7 +221,7 @@ func TestCmdServeParsesPortAndErrors(t *testing.T) {
 			withArgs(t, args...)
 
 			seenPort := -1
-			newHTTPServer = func(s *store.Store, port int) *engramsrv.Server {
+			newHTTPServer = func(s types.StoreInterface, port int) *engramsrv.Server {
 				seenPort = port
 				return engramsrv.New(s, 0)
 			}
@@ -941,7 +942,7 @@ func TestCmdMCP(t *testing.T) {
 
 	t.Run("no tools filter uses newMCPServerWithConfig with nil allowlist", func(t *testing.T) {
 		called := false
-		newMCPServerWithConfig = func(s *store.Store, mcpCfg mcp.MCPConfig, allowlist map[string]bool) *mcpserver.MCPServer {
+		newMCPServerWithConfig = func(s types.StoreInterface, mcpCfg mcp.MCPConfig, allowlist map[string]bool) *mcpserver.MCPServer {
 			called = true
 			if allowlist != nil {
 				t.Errorf("expected nil allowlist for no tools filter, got %v", allowlist)
@@ -960,7 +961,7 @@ func TestCmdMCP(t *testing.T) {
 
 	t.Run("--tools flag uses newMCPServerWithConfig with non-nil allowlist", func(t *testing.T) {
 		var gotAllowlist map[string]bool
-		newMCPServerWithConfig = func(s *store.Store, mcpCfg mcp.MCPConfig, allowlist map[string]bool) *mcpserver.MCPServer {
+		newMCPServerWithConfig = func(s types.StoreInterface, mcpCfg mcp.MCPConfig, allowlist map[string]bool) *mcpserver.MCPServer {
 			gotAllowlist = allowlist
 			return mcpserver.NewMCPServer("test", "0")
 		}
@@ -976,7 +977,7 @@ func TestCmdMCP(t *testing.T) {
 
 	t.Run("--tools as separate arg uses newMCPServerWithConfig with non-nil allowlist", func(t *testing.T) {
 		var gotAllowlist map[string]bool
-		newMCPServerWithConfig = func(s *store.Store, mcpCfg mcp.MCPConfig, allowlist map[string]bool) *mcpserver.MCPServer {
+		newMCPServerWithConfig = func(s types.StoreInterface, mcpCfg mcp.MCPConfig, allowlist map[string]bool) *mcpserver.MCPServer {
 			gotAllowlist = allowlist
 			return mcpserver.NewMCPServer("test", "0")
 		}

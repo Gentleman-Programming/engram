@@ -13,6 +13,7 @@ import (
 	"github.com/Gentleman-Programming/engram/internal/mcp"
 	"github.com/Gentleman-Programming/engram/internal/obsidian"
 	"github.com/Gentleman-Programming/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/internal/types"
 	versioncheck "github.com/Gentleman-Programming/engram/internal/version"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
@@ -858,7 +859,7 @@ func TestCmdMCPDetectsProjectFromFlag(t *testing.T) {
 	var capturedCfg mcp.MCPConfig
 	oldNew := newMCPServerWithConfig
 	t.Cleanup(func() { newMCPServerWithConfig = oldNew })
-	newMCPServerWithConfig = func(s *store.Store, mcpCfg mcp.MCPConfig, allowlist map[string]bool) *mcpserver.MCPServer {
+	newMCPServerWithConfig = func(s types.StoreInterface, mcpCfg mcp.MCPConfig, allowlist map[string]bool) *mcpserver.MCPServer {
 		capturedCfg = mcpCfg
 		// Return a valid server so serveMCP doesn't panic
 		return oldNew(s, mcpCfg, allowlist)
@@ -887,7 +888,7 @@ func TestCmdMCPDetectsProjectFromEnv(t *testing.T) {
 	var capturedCfg mcp.MCPConfig
 	oldNew := newMCPServerWithConfig
 	t.Cleanup(func() { newMCPServerWithConfig = oldNew })
-	newMCPServerWithConfig = func(s *store.Store, mcpCfg mcp.MCPConfig, allowlist map[string]bool) *mcpserver.MCPServer {
+	newMCPServerWithConfig = func(s types.StoreInterface, mcpCfg mcp.MCPConfig, allowlist map[string]bool) *mcpserver.MCPServer {
 		capturedCfg = mcpCfg
 		return oldNew(s, mcpCfg, allowlist)
 	}
@@ -917,7 +918,7 @@ func TestCmdMCPDetectsProjectFromGit(t *testing.T) {
 	var capturedCfg mcp.MCPConfig
 	oldNew := newMCPServerWithConfig
 	t.Cleanup(func() { newMCPServerWithConfig = oldNew })
-	newMCPServerWithConfig = func(s *store.Store, mcpCfg mcp.MCPConfig, allowlist map[string]bool) *mcpserver.MCPServer {
+	newMCPServerWithConfig = func(s types.StoreInterface, mcpCfg mcp.MCPConfig, allowlist map[string]bool) *mcpserver.MCPServer {
 		capturedCfg = mcpCfg
 		return oldNew(s, mcpCfg, allowlist)
 	}

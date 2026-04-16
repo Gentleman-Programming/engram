@@ -195,23 +195,23 @@ Exit criteria: RemoteStore passes compile-time interface check and all unit test
 Entry criteria: T28–T31 (RemoteStore), T12–T20 (SyncClient) complete.
 Exit criteria: `--backend cloud` and `--backend local-sync` work end-to-end; `--backend local` unchanged.
 
-- [ ] T32 Update `server.New` signature to accept `types.StoreInterface` (Decision 5) [M] [depends: T28]
+- [x] T32 Update `server.New` signature to accept `types.StoreInterface` (Decision 5) [M] [depends: T28]
       Files: `internal/server/server.go` (or equivalent HTTP server entrypoint)
       Tests: YES — existing server tests must still pass; SetOnWrite only called when underlying type is *store.Store
 
-- [ ] T33 Update `mcp.NewServerWithConfig` signature to accept `types.StoreInterface` (Decision 5) [M] [depends: T28]
+- [x] T33 Update `mcp.NewServerWithConfig` signature to accept `types.StoreInterface` (Decision 5) [M] [depends: T28]
       Files: `cmd/engram/main.go` or MCP handler entrypoint
       Tests: YES — existing MCP tests must still pass
 
-- [ ] T34 Implement `--backend` flag parsing and store creation fork in `cmdServe` and `cmdMCP` (REQ-BACKEND-001 through REQ-BACKEND-004) [M] [depends: T32, T33, T28, T12]
-      Files: `cmd/engram/main.go`
-      Tests: YES
-        - --backend local → behavior identical to current (REQ-BACKEND-001)
-        - --backend cloud → RemoteStore created, passed to handlers (REQ-BACKEND-002)
-        - --backend local-sync → store.Store + SyncClient.Start, non-blocking startup (REQ-BACKEND-003)
-        - --backend local-sync → SyncClient.Stop called on SIGTERM (REQ-BACKEND-003)
-        - --backend foo → exit 1 with usage error before store init (REQ-BACKEND-004)
-        - Missing or invalid cloud config with --backend cloud → error at startup
+- [x] T34 Implement `--backend` flag parsing and store creation fork in `cmdServe` and `cmdMCP` (REQ-BACKEND-001 through REQ-BACKEND-004) [M] [depends: T32, T33, T28, T12]
+      Files: `cmd/engram/main.go`, `cmd/engram/backend.go`
+      Tests: YES — 7 tests covering all 4 modes + missing config + SIGTERM shutdown
+        - --backend local → behavior identical to current (REQ-BACKEND-001) ✓
+        - --backend cloud → RemoteStore created, passed to handlers (REQ-BACKEND-002) ✓
+        - --backend local-sync → store.Store + SyncClient.Start, non-blocking startup (REQ-BACKEND-003) ✓
+        - --backend local-sync → SyncClient.Stop called on SIGTERM (REQ-BACKEND-003) ✓
+        - --backend foo → exit 1 with usage error before store init (REQ-BACKEND-004) ✓
+        - Missing or invalid cloud config with --backend cloud → error at startup ✓
 
 ---
 
