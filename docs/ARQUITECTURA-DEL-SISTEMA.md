@@ -54,33 +54,33 @@ Un unico binario en Go con SQLite + FTS5 (busqueda full-text), expuesto via CLI,
 │  (CLI sync cloud)                       (Sync via git)              │
 └───────────┬──────────────┬───────────────┬──────────────────────────┘
             │              │               │
-     ┌──────▼──────┐ ┌────▼─────┐  ┌──────▼──────┐
-     │ internal/mcp│ │ internal/│  │ internal/tui│
-     │ (15 tools)  │ │ server   │  │ (Bubbletea) │
-     └──────┬──────┘ └────┬─────┘  └──────┬──────┘
+     ┌──────▼──────┐ ┌────▼─────┐   ┌──────▼──────┐
+     │ internal/mcp│ │ internal/│   │ internal/tui│
+     │ (15 tools)  │ │ server   │   │ (Bubbletea) │
+     └──────┬──────┘ └─────┬────┘   └──────┬──────┘
             │              │               │
             └──────────────┼───────────────┘
                            │
-                    ┌──────▼──────┐
+                    ┌──────▼───────┐
                     │StoreInterface│  ← contrato (internal/types)
-                    └──────┬──────┘
+                    └──────┬───────┘
                            │
               ┌────────────┼─────────────┐
               │            │             │
-       ┌──────▼──────┐    │      ┌──────▼──────┐
-       │ store.Store  │    │      │ RemoteStore │        │ (SQLite+FTS5)│    │      │ (proxy HTTP)│
-       └──────┬──────┘    │      └─────────────┘
+       ┌──────▼──────┐     │      ┌──────▼──────┐
+       │ store.Store │     │      │ RemoteStore │        │ (SQLite+FTS5)│    │      │ (proxy HTTP)│
+       └──────┬──────┘     │      └─────────────┘
               │            │
-       ┌──────▼──────┐    │
+       ┌──────▼──────┐     │
        │ SyncClient   │    │
        │ (push/pull)  │    │
-       └──────┬──────┘    │
+       └──────┬──────┘     │
               │            │
               ▼            ▼
        ┌────────────────────────┐
        │  Servidor engram-cloud │  (cmd/engram-cloud)
        │  cloudserver (chi)     │
-       │  cloudstore (pgx/v5)  │
+       │  cloudstore (pgx/v5)   │
        │  PostgreSQL + tsvector │
        └────────────────────────┘
 ```
@@ -271,8 +271,8 @@ Agente lee     → herramienta MCP → RemoteStore → HTTP GET  → engram-clou
 
 ```
 ┌──────────────── SyncClient ─────────────────┐
-│                                              │
-│  Goroutine de Push      Goroutine de Pull    │
+│                                             │
+│  Goroutine de Push      Goroutine de Pull   │
 │  ┌─────────────┐        ┌─────────────┐     │
 │  │ Debounce    │        │ Ticker      │     │
 │  │ (10s luego  │        │ (cada 120s) │     │
@@ -280,8 +280,8 @@ Agente lee     → herramienta MCP → RemoteStore → HTTP GET  → engram-clou
 │  │  ultima     │        │             │     │
 │  │  escritura) │        │             │     │
 │  └──────┬──────┘        └──────┬──────┘     │
-│         │                      │             │
-│         ▼                      ▼             │
+│         │                      │            │
+│         ▼                      ▼            │
 │  ┌─────────────┐        ┌─────────────┐     │
 │  │ PushOnce()  │        │ PullOnce()  │     │
 │  │ - Lease     │        │ - Cursor    │     │
@@ -289,11 +289,11 @@ Agente lee     → herramienta MCP → RemoteStore → HTTP GET  → engram-clou
 │  │ - POST      │        │ - Aplicar   │     │
 │  │ - ACK       │        │ - Avanzar   │     │
 │  └─────────────┘        └─────────────┘     │
-│                                              │
-│  Backoff: 30s → 60s → 120s → 300s (max)    │
-│  Guard de enrollment: solo sync enrollados   │
-│  Shutdown graceful: flush + liberar lease    │
-└──────────────────────────────────────────────┘
+│                                             │
+│  Backoff: 30s → 60s → 120s → 300s (max)     │
+│  Guard de enrollment: solo sync enrollados  │
+│  Shutdown graceful: flush + liberar lease   │
+└─────────────────────────────────────────────┘
 ```
 
 ### Mitigacion de Syncs Grandes: Pull en Background por Chunks
