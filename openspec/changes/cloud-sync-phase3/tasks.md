@@ -156,11 +156,11 @@ Exit criteria: PassiveCapture and MigrateProject endpoints added and tested.
 Entry criteria: T03 (Client), T07 (numeric_id), T08 (PushResult.EntityIDs), T09–T11 (Tier 1 endpoints), T26–T27 (Tier 2) complete.
 Exit criteria: RemoteStore passes compile-time interface check and all unit tests.
 
-- [ ] T28 Implement `RemoteStore` struct, constructor, compile-time interface check (REQ-REMOTE-001) [S] [depends: T03, T07]
+- [x] T28 Implement `RemoteStore` struct, constructor, compile-time interface check (REQ-REMOTE-001) [S] [depends: T03, T07]
       Files: `internal/remote/store.go`
       Tests: no — skeleton with `var _ types.StoreInterface = (*RemoteStore)(nil)`
 
-- [ ] T29 Implement RemoteStore read methods via Tier 1 endpoints (REQ-REMOTE-002 through REQ-REMOTE-005) [L] [depends: T28, T09, T10, T11]
+- [x] T29 Implement RemoteStore read methods via Tier 1 endpoints (REQ-REMOTE-002 through REQ-REMOTE-005) [L] [depends: T28, T09, T10, T11]
       Files: `internal/remote/store.go`
       Tests: YES — `internal/remote/store_test.go`
         - GetObservation → GET /api/v1/observations/{id}, uses numeric_id
@@ -173,7 +173,7 @@ Exit criteria: RemoteStore passes compile-time interface check and all unit test
         - RecentPrompts, SearchPrompts
         - ErrNotFound → types.ErrObservationNotFound mapping (REQ-REMOTE-005)
 
-- [ ] T30 Implement RemoteStore write methods via sync/push (Decision 4) [L] [depends: T28, T08]
+- [x] T30 Implement RemoteStore write methods via sync/push (Decision 4) [L] [depends: T28, T08]
       Files: `internal/remote/store.go`
       Tests: YES — `internal/remote/store_test.go`
         - AddObservation → POST /api/v1/sync/push, returns server numeric_id
@@ -182,7 +182,7 @@ Exit criteria: RemoteStore passes compile-time interface check and all unit test
         - UpdateObservation, DeleteObservation via push mutations
         - AddPrompt, DeletePrompt via push mutations
 
-- [ ] T31 Implement RemoteStore composite methods (REQ-REMOTE-006 Tier 2) [M] [depends: T28, T26, T27]
+- [x] T31 Implement RemoteStore composite methods (REQ-REMOTE-006 Tier 2) [M] [depends: T28, T26, T27]
       Files: `internal/remote/store.go`
       Tests: YES — `internal/remote/store_test.go`
         - PassiveCapture → POST /api/v1/passive-capture
