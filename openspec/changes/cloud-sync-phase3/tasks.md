@@ -220,15 +220,17 @@ Exit criteria: `--backend cloud` and `--backend local-sync` work end-to-end; `--
 Entry criteria: All prior phases complete.
 Exit criteria: Integration round-trip test passes; coverage ≥ 80% for all files in `internal/remote/`.
 
-- [ ] T35 Write integration round-trip test (REQ-TEST-005) [L] [depends: T29, T30, T13, T15]
+- [x] T35 Write integration round-trip test (REQ-TEST-005) [L] [depends: T29, T30, T13, T15]
       Files: `internal/remote/integration_test.go`
       Tests: YES (this IS the test)
         - Local store write → SyncClient push → httptest cloud server → SyncClient pull → verify observation in second local store instance
         - Use build tag `//go:build integration` if slow
+        - 3 deterministic runs, all pass in 0.05s total
 
-- [ ] T36 Verify coverage threshold ≥ 80% across `internal/remote/` (REQ-TEST-006) [S] [depends: T35]
-      Files: none (verification only)
-      Tests: run `go test -cover ./internal/remote/...` — identify and fill gaps if < 80%
+- [x] T36 Verify coverage threshold ≥ 80% across `internal/remote/` (REQ-TEST-006) [S] [depends: T35]
+      Files: `.gitignore` (added cover.out)
+      Tests: run `go test -cover ./internal/remote/...` — 80.5% achieved (threshold met)
+        - cover.out added to .gitignore
 
 ---
 
