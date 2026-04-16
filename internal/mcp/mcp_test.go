@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/internal/types"
 	mcppkg "github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -815,7 +816,7 @@ func TestHandleContextWithSessionOnlyUsesNoneProjects(t *testing.T) {
 
 func TestHandleStatsReturnsErrorWhenLoaderFails(t *testing.T) {
 	prev := loadMCPStats
-	loadMCPStats = func(s *store.Store) (*store.Stats, error) {
+	loadMCPStats = func(s types.StoreInterface) (*store.Stats, error) {
 		return nil, errors.New("stats unavailable")
 	}
 	t.Cleanup(func() {
@@ -2005,5 +2006,99 @@ func TestSessionStartUsesDefaultSessionID(t *testing.T) {
 	realScore := activity.ActivityScore("real-unique-session-id")
 	if realScore != "" {
 		t.Fatalf("expected no activity under real session ID, got: %q", realScore)
+	}
+}
+
+// ─── T33: NewServerWithConfig accepts types.StoreInterface ───────────────────
+
+// mcpStoreInterfaceStub satisfies types.StoreInterface with no-op implementations.
+// It is NOT a *store.Store — used to verify type-assertion safety in MCP.
+type mcpStoreInterfaceStub struct{}
+
+func (s *mcpStoreInterfaceStub) GetObservation(id int64) (*store.Observation, error) {
+	return &store.Observation{ID: id}, nil
+}
+func (s *mcpStoreInterfaceStub) Search(query string, opts store.SearchOptions) ([]store.SearchResult, error) {
+	return nil, nil
+}
+func (s *mcpStoreInterfaceStub) RecentSessions(project string, limit int) ([]store.SessionSummary, error) {
+	return nil, nil
+}
+func (s *mcpStoreInterfaceStub) AllSessions(project string, limit int) ([]store.SessionSummary, error) {
+	return nil, nil
+}
+func (s *mcpStoreInterfaceStub) SessionObservations(sessionID string, limit int) ([]store.Observation, error) {
+	return nil, nil
+}
+func (s *mcpStoreInterfaceStub) RecentObservations(project, scope string, limit int) ([]store.Observation, error) {
+	return nil, nil
+}
+func (s *mcpStoreInterfaceStub) AllObservations(project, scope string, limit int) ([]store.Observation, error) {
+	return nil, nil
+}
+func (s *mcpStoreInterfaceStub) FormatContext(project, scope string) (string, error) { return "", nil }
+func (s *mcpStoreInterfaceStub) Timeline(observationID int64, before, after int) (*store.TimelineResult, error) {
+	return &store.TimelineResult{}, nil
+}
+func (s *mcpStoreInterfaceStub) Stats() (*store.Stats, error) { return &store.Stats{}, nil }
+func (s *mcpStoreInterfaceStub) RecentPrompts(project string, limit int) ([]store.Prompt, error) {
+	return nil, nil
+}
+func (s *mcpStoreInterfaceStub) SearchPrompts(query, project string, limit int) ([]store.Prompt, error) {
+	return nil, nil
+}
+func (s *mcpStoreInterfaceStub) CreateSession(id, project, directory string) error { return nil }
+func (s *mcpStoreInterfaceStub) EndSession(id, summary string) error               { return nil }
+func (s *mcpStoreInterfaceStub) DeleteSession(id string) error                     { return nil }
+func (s *mcpStoreInterfaceStub) AddObservation(p store.AddObservationParams) (int64, error) {
+	return 1, nil
+}
+func (s *mcpStoreInterfaceStub) UpdateObservation(id int64, p store.UpdateObservationParams) (*store.Observation, error) {
+	return &store.Observation{ID: id}, nil
+}
+func (s *mcpStoreInterfaceStub) DeleteObservation(id int64, hardDelete bool) error { return nil }
+func (s *mcpStoreInterfaceStub) AddPrompt(p store.AddPromptParams) (int64, error)  { return 1, nil }
+func (s *mcpStoreInterfaceStub) DeletePrompt(id int64) error                       { return nil }
+func (s *mcpStoreInterfaceStub) PassiveCapture(p store.PassiveCaptureParams) (*store.PassiveCaptureResult, error) {
+	return &store.PassiveCaptureResult{}, nil
+}
+func (s *mcpStoreInterfaceStub) MigrateProject(oldName, newName string) (*store.MigrateResult, error) {
+	return &store.MigrateResult{}, nil
+}
+
+func TestNewServerWithConfigAcceptsStoreInterface(t *testing.T) {
+	// NewServerWithConfig must accept types.StoreInterface, not just *store.Store.
+	stub := &mcpStoreInterfaceStub{}
+	srv := NewServerWithConfig(stub, MCPConfig{DefaultProject: "test"}, nil)
+	if srv == nil {
+		t.Fatal("expected non-nil MCP server from non-*store.Store implementation")
+	}
+}
+
+func TestMergeProjectsToolReturnsErrorWithNonLocalStore(t *testing.T) {
+	// When MCP server is backed by a non-*store.Store, mem_merge_projects must
+	// return a tool error (not panic), since MergeProjects is local-only.
+	stub := &mcpStoreInterfaceStub{}
+	activity := NewSessionActivity(10 * time.Minute)
+	srv := newServerWithActivity(stub, MCPConfig{}, nil, activity)
+	if srv == nil {
+		t.Fatal("expected non-nil server")
+	}
+
+	handler := handleMergeProjects(stub)
+	req := mcppkg.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"from": "project-a",
+		"to":   "project-b",
+	}
+	result, err := handler(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if !result.IsError {
+		t.Fatalf("expected tool error result for non-local store MergeProjects, got: %+v", result)
 	}
 }

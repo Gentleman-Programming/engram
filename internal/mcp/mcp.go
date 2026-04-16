@@ -21,9 +21,25 @@ import (
 
 	projectpkg "github.com/Gentleman-Programming/engram/internal/project"
 	"github.com/Gentleman-Programming/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/internal/types"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
+
+// projectMerger is the local-only capability for merging project names.
+// Only *store.Store implements this; RemoteStore does not.
+type projectMerger interface {
+	MergeProjects(sources []string, canonical string) (*store.MergeResult, error)
+}
+
+// localStoreExtras groups local-SQLite-only capabilities used by MCP tools
+// for UX hints (project similarity, content length warnings).
+// When backing store is a RemoteStore these features are gracefully skipped.
+type localStoreExtras interface {
+	ListProjectNames() ([]string, error)
+	CountObservationsForProject(project string) (int, error)
+	MaxObservationLength() int
+}
 
 // MCPConfig holds configuration for the MCP server.
 type MCPConfig struct {
@@ -32,7 +48,7 @@ type MCPConfig struct {
 
 var suggestTopicKey = store.SuggestTopicKey
 
-var loadMCPStats = func(s *store.Store) (*store.Stats, error) {
+var loadMCPStats = func(s types.StoreInterface) (*store.Stats, error) {
 	return s.Stats()
 }
 
@@ -115,7 +131,7 @@ func ResolveTools(input string) map[string]bool {
 }
 
 // NewServer creates an MCP server with ALL tools registered (backwards compatible).
-func NewServer(s *store.Store) *server.MCPServer {
+func NewServer(s types.StoreInterface) *server.MCPServer {
 	return NewServerWithConfig(s, MCPConfig{}, nil)
 }
 
@@ -140,17 +156,17 @@ PROACTIVE SAVE RULE: Call mem_save immediately after ANY decision, bug fix, disc
 
 // NewServerWithTools creates an MCP server registering only the tools in
 // the allowlist. If allowlist is nil, all tools are registered.
-func NewServerWithTools(s *store.Store, allowlist map[string]bool) *server.MCPServer {
+func NewServerWithTools(s types.StoreInterface, allowlist map[string]bool) *server.MCPServer {
 	return NewServerWithConfig(s, MCPConfig{}, allowlist)
 }
 
 // NewServerWithConfig creates an MCP server with full configuration including
 // default project detection and optional tool allowlist.
-func NewServerWithConfig(s *store.Store, cfg MCPConfig, allowlist map[string]bool) *server.MCPServer {
+func NewServerWithConfig(s types.StoreInterface, cfg MCPConfig, allowlist map[string]bool) *server.MCPServer {
 	return newServerWithActivity(s, cfg, allowlist, NewSessionActivity(10*time.Minute))
 }
 
-func newServerWithActivity(s *store.Store, cfg MCPConfig, allowlist map[string]bool, activity *SessionActivity) *server.MCPServer {
+func newServerWithActivity(s types.StoreInterface, cfg MCPConfig, allowlist map[string]bool, activity *SessionActivity) *server.MCPServer {
 	srv := server.NewMCPServer(
 		"engram",
 		"0.1.0",
@@ -171,7 +187,7 @@ func shouldRegister(name string, allowlist map[string]bool) bool {
 	return allowlist[name]
 }
 
-func registerTools(srv *server.MCPServer, s *store.Store, cfg MCPConfig, allowlist map[string]bool, activity *SessionActivity) {
+func registerTools(srv *server.MCPServer, s types.StoreInterface, cfg MCPConfig, allowlist map[string]bool, activity *SessionActivity) {
 	// ─── mem_search (profile: agent, core — always in context) ─────────
 	if shouldRegister("mem_search", allowlist) {
 		srv.AddTool(
@@ -630,7 +646,7 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 
 // ─── Tool Handlers ───────────────────────────────────────────────────────────
 
-func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
+func handleSearch(s types.StoreInterface, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		query, _ := req.GetArguments()["query"].(string)
 		typ, _ := req.GetArguments()["type"].(string)
@@ -692,7 +708,7 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 	}
 }
 
-func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
+func handleSave(s types.StoreInterface, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		title, _ := req.GetArguments()["title"].(string)
 		content, _ := req.GetArguments()["content"].(string)
@@ -718,24 +734,27 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		}
 		suggestedTopicKey := suggestTopicKey(typ, title, content)
 
-		// Check for similar existing projects (only when this project has no existing observations)
+		// Check for similar existing projects (only when this project has no existing observations).
+		// This is a local-store UX hint — skipped gracefully for remote backends.
 		var similarWarning string
 		if project != "" {
-			existingNames, _ := s.ListProjectNames()
-			isNew := true
-			for _, e := range existingNames {
-				if e == project {
-					isNew = false
-					break
+			if extras, ok := s.(localStoreExtras); ok {
+				existingNames, _ := extras.ListProjectNames()
+				isNew := true
+				for _, e := range existingNames {
+					if e == project {
+						isNew = false
+						break
+					}
 				}
-			}
-			if isNew && len(existingNames) > 0 {
-				matches := projectpkg.FindSimilar(project, existingNames, 3)
-				if len(matches) > 0 {
-					bestMatch := matches[0].Name
-					// Cheap count query instead of full ListProjectsWithStats
-					obsCount, _ := s.CountObservationsForProject(bestMatch)
-					similarWarning = fmt.Sprintf("⚠️ Project %q has no memories. Similar project found: %q (%d memories). Consider using that name instead.", project, bestMatch, obsCount)
+				if isNew && len(existingNames) > 0 {
+					matches := projectpkg.FindSimilar(project, existingNames, 3)
+					if len(matches) > 0 {
+						bestMatch := matches[0].Name
+						// Cheap count query instead of full ListProjectsWithStats
+						obsCount, _ := extras.CountObservationsForProject(bestMatch)
+						similarWarning = fmt.Sprintf("⚠️ Project %q has no memories. Similar project found: %q (%d memories). Consider using that name instead.", project, bestMatch, obsCount)
+					}
 				}
 			}
 		}
@@ -743,7 +762,12 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		// Ensure the session exists
 		s.CreateSession(sessionID, project, "")
 
-		truncated := len(content) > s.MaxObservationLength()
+		// MaxObservationLength is a local-store hint; use 0 (no truncation warning) for remote.
+		maxLen := 0
+		if extras, ok := s.(localStoreExtras); ok {
+			maxLen = extras.MaxObservationLength()
+		}
+		truncated := maxLen > 0 && len(content) > maxLen
 
 		_, err := s.AddObservation(store.AddObservationParams{
 			SessionID: sessionID,
@@ -765,7 +789,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 			msg += fmt.Sprintf("\nSuggested topic_key: %s", suggestedTopicKey)
 		}
 		if truncated {
-			msg += fmt.Sprintf("\n⚠ WARNING: Content was truncated from %d to %d chars. Consider splitting into smaller observations.", len(content), s.MaxObservationLength())
+			msg += fmt.Sprintf("\n⚠ WARNING: Content was truncated from %d to %d chars. Consider splitting into smaller observations.", len(content), maxLen)
 		}
 		if normWarning != "" {
 			msg += "\n" + normWarning
@@ -796,7 +820,7 @@ func handleSuggestTopicKey() server.ToolHandlerFunc {
 	}
 }
 
-func handleUpdate(s *store.Store) server.ToolHandlerFunc {
+func handleUpdate(s types.StoreInterface) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		id := int64(intArg(req, "id", 0))
 		if id == 0 {
@@ -838,14 +862,16 @@ func handleUpdate(s *store.Store) server.ToolHandlerFunc {
 		}
 
 		msg := fmt.Sprintf("Memory updated: #%d %q (%s, scope=%s)", obs.ID, obs.Title, obs.Type, obs.Scope)
-		if contentLen > s.MaxObservationLength() {
-			msg += fmt.Sprintf("\n⚠ WARNING: Content was truncated from %d to %d chars. Consider splitting into smaller observations.", contentLen, s.MaxObservationLength())
+		if extras, ok := s.(localStoreExtras); ok {
+			if maxLen := extras.MaxObservationLength(); contentLen > maxLen {
+				msg += fmt.Sprintf("\n⚠ WARNING: Content was truncated from %d to %d chars. Consider splitting into smaller observations.", contentLen, maxLen)
+			}
 		}
 		return mcp.NewToolResultText(msg), nil
 	}
 }
 
-func handleDelete(s *store.Store) server.ToolHandlerFunc {
+func handleDelete(s types.StoreInterface) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		id := int64(intArg(req, "id", 0))
 		if id == 0 {
@@ -865,7 +891,7 @@ func handleDelete(s *store.Store) server.ToolHandlerFunc {
 	}
 }
 
-func handleSavePrompt(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
+func handleSavePrompt(s types.StoreInterface, cfg MCPConfig) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		content, _ := req.GetArguments()["content"].(string)
 		sessionID, _ := req.GetArguments()["session_id"].(string)
@@ -897,7 +923,7 @@ func handleSavePrompt(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 	}
 }
 
-func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
+func handleContext(s types.StoreInterface, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		project, _ := req.GetArguments()["project"].(string)
 		scope, _ := req.GetArguments()["scope"].(string)
@@ -939,7 +965,7 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 	}
 }
 
-func handleStats(s *store.Store) server.ToolHandlerFunc {
+func handleStats(s types.StoreInterface) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		stats, err := loadMCPStats(s)
 		if err != nil {
@@ -960,7 +986,7 @@ func handleStats(s *store.Store) server.ToolHandlerFunc {
 	}
 }
 
-func handleTimeline(s *store.Store) server.ToolHandlerFunc {
+func handleTimeline(s types.StoreInterface) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		observationID := int64(intArg(req, "observation_id", 0))
 		if observationID == 0 {
@@ -1012,7 +1038,7 @@ func handleTimeline(s *store.Store) server.ToolHandlerFunc {
 	}
 }
 
-func handleGetObservation(s *store.Store) server.ToolHandlerFunc {
+func handleGetObservation(s types.StoreInterface) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		id := int64(intArg(req, "id", 0))
 		if id == 0 {
@@ -1051,7 +1077,7 @@ func handleGetObservation(s *store.Store) server.ToolHandlerFunc {
 	}
 }
 
-func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
+func handleSessionSummary(s types.StoreInterface, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		content, _ := req.GetArguments()["content"].(string)
 		sessionID, _ := req.GetArguments()["session_id"].(string)
@@ -1089,7 +1115,7 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 	}
 }
 
-func handleSessionStart(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
+func handleSessionStart(s types.StoreInterface, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		id, _ := req.GetArguments()["id"].(string)
 		project, _ := req.GetArguments()["project"].(string)
@@ -1111,7 +1137,7 @@ func handleSessionStart(s *store.Store, cfg MCPConfig, activity *SessionActivity
 	}
 }
 
-func handleSessionEnd(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
+func handleSessionEnd(s types.StoreInterface, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		id, _ := req.GetArguments()["id"].(string)
 		summary, _ := req.GetArguments()["summary"].(string)
@@ -1132,7 +1158,7 @@ func handleSessionEnd(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 	}
 }
 
-func handleCapturePassive(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
+func handleCapturePassive(s types.StoreInterface, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		content, _ := req.GetArguments()["content"].(string)
 		sessionID, _ := req.GetArguments()["session_id"].(string)
@@ -1177,8 +1203,14 @@ func handleCapturePassive(s *store.Store, cfg MCPConfig, activity *SessionActivi
 	}
 }
 
-func handleMergeProjects(s *store.Store) server.ToolHandlerFunc {
+func handleMergeProjects(s types.StoreInterface) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		// MergeProjects is a local-only operation — only *store.Store supports it.
+		merger, ok := s.(projectMerger)
+		if !ok {
+			return mcp.NewToolResultError("mem_merge_projects is not supported with a cloud-only backend"), nil
+		}
+
 		fromStr, _ := req.GetArguments()["from"].(string)
 		to, _ := req.GetArguments()["to"].(string)
 
@@ -1198,7 +1230,7 @@ func handleMergeProjects(s *store.Store) server.ToolHandlerFunc {
 			return mcp.NewToolResultError("at least one source project name is required in 'from'"), nil
 		}
 
-		result, err := s.MergeProjects(sources, to)
+		result, err := merger.MergeProjects(sources, to)
 		if err != nil {
 			return mcp.NewToolResultError("Merge failed: " + err.Error()), nil
 		}
