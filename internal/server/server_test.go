@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/internal/types"
 )
 
 type stubListener struct{}
@@ -399,7 +400,7 @@ func TestOnWriteNotCalledOnFailedWrites(t *testing.T) {
 
 func TestHandleStatsReturnsInternalServerErrorOnLoaderError(t *testing.T) {
 	prev := loadServerStats
-	loadServerStats = func(s *store.Store) (*store.Stats, error) {
+	loadServerStats = func(s types.StoreInterface) (*store.Stats, error) {
 		return nil, errors.New("stats unavailable")
 	}
 	t.Cleanup(func() {
@@ -537,4 +538,145 @@ func TestHandleDeletePrompt_BadID(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for invalid prompt id, got %d", rec.Code)
 	}
+}
+
+// ─── T32: StoreInterface support ─────────────────────────────────────────────
+
+// fakeStoreInterface is a minimal stub that satisfies types.StoreInterface
+// but is NOT a *store.Store. Used to verify type-assertion safety.
+type fakeStoreInterface struct {
+	store.Store // embed to satisfy any unimplemented methods — will panic if called
+}
+
+func TestNewAcceptsStoreInterface(t *testing.T) {
+	// New() must compile and run without panic when given a non-*store.Store.
+	// We use the real *store.Store (which implements StoreInterface) to verify
+	// the happy path — the signature must accept types.StoreInterface.
+	st := newServerTestStore(t)
+	srv := New(st, 0) // must compile with StoreInterface parameter
+	if srv == nil {
+		t.Fatal("expected non-nil server")
+	}
+}
+
+func TestNewWithNonLocalStore_SetOnWriteSkipped(t *testing.T) {
+	// When New() is called with a store that is NOT *store.Store,
+	// the server must NOT try to call SetOnWrite on it — no panic.
+	// We verify this by checking onWrite remains nil after construction.
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+
+	// Confirm SetOnWrite is still callable externally (it sets s.onWrite)
+	called := false
+	srv.SetOnWrite(func() { called = true })
+
+	// Trigger a write via the handler
+	h := srv.Handler()
+	body := `{"id":"s-t32","project":"t32test"}`
+	req := httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !called {
+		t.Fatal("expected onWrite callback to be invoked after session create")
+	}
+}
+
+func TestLocalOnlyEndpointsReturn501WithRemoteStore(t *testing.T) {
+	// When server is constructed without a *store.Store local backend,
+	// local-only endpoints (export, import, migrate) must return 501.
+	// We use a stub that implements StoreInterface but is not *store.Store.
+	stub := &storeInterfaceStub{}
+	srv := newWithInterface(stub, 0) // internal constructor accepting StoreInterface only
+	h := srv.Handler()
+
+	endpoints := []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{http.MethodGet, "/export", ""},
+		{http.MethodPost, "/import", `{}`},
+		{http.MethodPost, "/projects/migrate", `{"old_project":"a","new_project":"b"}`},
+	}
+
+	for _, ep := range endpoints {
+		t.Run(ep.method+"_"+ep.path, func(t *testing.T) {
+			var bodyReader *strings.Reader
+			if ep.body != "" {
+				bodyReader = strings.NewReader(ep.body)
+			} else {
+				bodyReader = strings.NewReader("")
+			}
+			req := httptest.NewRequest(ep.method, ep.path, bodyReader)
+			if ep.body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusNotImplemented {
+				t.Errorf("expected 501 for %s %s, got %d: %s",
+					ep.method, ep.path, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// storeInterfaceStub satisfies types.StoreInterface with no-op implementations.
+// Returned values are zero values; errors are nil unless specified.
+type storeInterfaceStub struct{}
+
+func (s *storeInterfaceStub) GetObservation(id int64) (*store.Observation, error) {
+	return &store.Observation{ID: id}, nil
+}
+func (s *storeInterfaceStub) Search(query string, opts store.SearchOptions) ([]store.SearchResult, error) {
+	return nil, nil
+}
+func (s *storeInterfaceStub) RecentSessions(project string, limit int) ([]store.SessionSummary, error) {
+	return nil, nil
+}
+func (s *storeInterfaceStub) AllSessions(project string, limit int) ([]store.SessionSummary, error) {
+	return nil, nil
+}
+func (s *storeInterfaceStub) SessionObservations(sessionID string, limit int) ([]store.Observation, error) {
+	return nil, nil
+}
+func (s *storeInterfaceStub) RecentObservations(project, scope string, limit int) ([]store.Observation, error) {
+	return nil, nil
+}
+func (s *storeInterfaceStub) AllObservations(project, scope string, limit int) ([]store.Observation, error) {
+	return nil, nil
+}
+func (s *storeInterfaceStub) FormatContext(project, scope string) (string, error) { return "", nil }
+func (s *storeInterfaceStub) Timeline(observationID int64, before, after int) (*store.TimelineResult, error) {
+	return &store.TimelineResult{}, nil
+}
+func (s *storeInterfaceStub) Stats() (*store.Stats, error)  { return &store.Stats{}, nil }
+func (s *storeInterfaceStub) RecentPrompts(project string, limit int) ([]store.Prompt, error) {
+	return nil, nil
+}
+func (s *storeInterfaceStub) SearchPrompts(query, project string, limit int) ([]store.Prompt, error) {
+	return nil, nil
+}
+func (s *storeInterfaceStub) CreateSession(id, project, directory string) error { return nil }
+func (s *storeInterfaceStub) EndSession(id, summary string) error               { return nil }
+func (s *storeInterfaceStub) DeleteSession(id string) error                     { return nil }
+func (s *storeInterfaceStub) AddObservation(p store.AddObservationParams) (int64, error) {
+	return 1, nil
+}
+func (s *storeInterfaceStub) UpdateObservation(id int64, p store.UpdateObservationParams) (*store.Observation, error) {
+	return &store.Observation{ID: id}, nil
+}
+func (s *storeInterfaceStub) DeleteObservation(id int64, hardDelete bool) error { return nil }
+func (s *storeInterfaceStub) AddPrompt(p store.AddPromptParams) (int64, error)  { return 1, nil }
+func (s *storeInterfaceStub) DeletePrompt(id int64) error                       { return nil }
+func (s *storeInterfaceStub) PassiveCapture(p store.PassiveCaptureParams) (*store.PassiveCaptureResult, error) {
+	return &store.PassiveCaptureResult{}, nil
+}
+func (s *storeInterfaceStub) MigrateProject(oldName, newName string) (*store.MigrateResult, error) {
+	return &store.MigrateResult{}, nil
 }

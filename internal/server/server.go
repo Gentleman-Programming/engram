@@ -16,9 +16,10 @@ import (
 	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/internal/types"
 )
 
-var loadServerStats = func(s *store.Store) (*store.Stats, error) {
+var loadServerStats = func(s types.StoreInterface) (*store.Stats, error) {
 	return s.Stats()
 }
 
@@ -38,7 +39,8 @@ type SyncStatus struct {
 }
 
 type Server struct {
-	store      *store.Store
+	store      types.StoreInterface
+	localStore *store.Store // non-nil only when backend is *store.Store; nil for RemoteStore
 	mux        *http.ServeMux
 	port       int
 	listen     func(network, address string) (net.Listener, error)
@@ -47,8 +49,21 @@ type Server struct {
 	syncStatus SyncStatusProvider
 }
 
-func New(s *store.Store, port int) *Server {
+// New creates an HTTP server using the given store. The store parameter accepts
+// any types.StoreInterface — both *store.Store (local SQLite) and RemoteStore
+// (cloud proxy) are valid. Local-only operations (export, import, migrate) are
+// available only when a *store.Store is provided; they return 501 otherwise.
+func New(s types.StoreInterface, port int) *Server {
+	return newWithInterface(s, port)
+}
+
+// newWithInterface is the internal constructor used by New and tests.
+func newWithInterface(s types.StoreInterface, port int) *Server {
 	srv := &Server{store: s, port: port, listen: net.Listen, serve: http.Serve}
+	// Type-assert to detect a local SQLite store. RemoteStore has no localStore.
+	if ls, ok := s.(*store.Store); ok {
+		srv.localStore = ls
+	}
 	srv.mux = http.NewServeMux()
 	srv.routes()
 	return srv
@@ -478,7 +493,11 @@ func (s *Server) handleDeletePrompt(w http.ResponseWriter, r *http.Request) {
 // ─── Export / Import ─────────────────────────────────────────────────────────
 
 func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
-	data, err := s.store.Export()
+	if s.localStore == nil {
+		jsonError(w, http.StatusNotImplemented, "export is only available with a local store backend")
+		return
+	}
+	data, err := s.localStore.Export()
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -491,6 +510,10 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
+	if s.localStore == nil {
+		jsonError(w, http.StatusNotImplemented, "import is only available with a local store backend")
+		return
+	}
 	// Limit body to 50MB
 	r.Body = http.MaxBytesReader(w, r.Body, 50<<20)
 	body, err := io.ReadAll(r.Body)
@@ -505,7 +528,7 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := s.store.Import(&data)
+	result, err := s.localStore.Import(&data)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -536,7 +559,6 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-
 	jsonResponse(w, http.StatusOK, stats)
 }
 
@@ -565,6 +587,10 @@ func (s *Server) handleSyncStatus(w http.ResponseWriter, r *http.Request) {
 // ─── Project Migration ───────────────────────────────────────────────────────
 
 func (s *Server) handleMigrateProject(w http.ResponseWriter, r *http.Request) {
+	if s.localStore == nil {
+		jsonError(w, http.StatusNotImplemented, "project migration is only available with a local store backend")
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<10) // 1 KB max
 	var body struct {
 		OldProject string `json:"old_project"`
@@ -583,7 +609,7 @@ func (s *Server) handleMigrateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := s.store.MigrateProject(body.OldProject, body.NewProject)
+	result, err := s.localStore.MigrateProject(body.OldProject, body.NewProject)
 	if err != nil {
 		log.Printf("[engram] project migration failed: %v", err)
 		jsonError(w, http.StatusInternalServerError, "migration failed")
