@@ -542,12 +542,6 @@ func TestHandleDeletePrompt_BadID(t *testing.T) {
 
 // ─── T32: StoreInterface support ─────────────────────────────────────────────
 
-// fakeStoreInterface is a minimal stub that satisfies types.StoreInterface
-// but is NOT a *store.Store. Used to verify type-assertion safety.
-type fakeStoreInterface struct {
-	store.Store // embed to satisfy any unimplemented methods — will panic if called
-}
-
 func TestNewAcceptsStoreInterface(t *testing.T) {
 	// New() must compile and run without panic when given a non-*store.Store.
 	// We use the real *store.Store (which implements StoreInterface) to verify
