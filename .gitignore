@@ -10,6 +10,10 @@
 # Export files
 engram-export.json
 
+# Test coverage
+cover.out
+*.coverprofile
+
 # OS
 .DS_Store
 Thumbs.db
