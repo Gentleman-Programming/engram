@@ -22,6 +22,7 @@ func New(store *cloudstore.Store) http.Handler {
 	// Global middleware
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RealIP)
+	r.Use(RequestLogMiddleware(nil))
 
 	// Health (no auth)
 	r.Get("/api/v1/health", handleHealth(store))

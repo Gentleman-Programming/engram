@@ -3,6 +3,7 @@ package cloudserver
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -147,4 +148,72 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
+}
+
+// MaskAPIKey redacts sensitive token material for safe logging and error
+// messages. Accepts a raw token, a "Bearer <token>" header value, or any
+// other string (passed through if no sensitive pattern is recognised).
+//
+// engram tokens ("engram_sk_<hex>") are revealed only by their first four
+// and last four hex digits. Shorter engram tokens are fully masked. Opaque
+// bearer values without the engram prefix are replaced by "***masked***"
+// so a future change of token format does not silently start leaking.
+func MaskAPIKey(s string) string {
+	if s == "" {
+		return ""
+	}
+	if rest, ok := strings.CutPrefix(s, "Bearer "); ok {
+		if rest == "" {
+			return "Bearer "
+		}
+		return "Bearer " + maskTokenValue(rest)
+	}
+	if strings.HasPrefix(s, "engram_sk_") {
+		return maskTokenValue(s)
+	}
+	return s
+}
+
+func maskTokenValue(tok string) string {
+	const prefix = "engram_sk_"
+	if !strings.HasPrefix(tok, prefix) {
+		return "***masked***"
+	}
+	body := strings.TrimPrefix(tok, prefix)
+	if len(body) < 12 {
+		return prefix + "****"
+	}
+	return prefix + body[:4] + "…" + body[len(body)-4:]
+}
+
+// statusRecorder wraps http.ResponseWriter to capture the status code
+// written by the handler so the request logger can report it.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (sr *statusRecorder) WriteHeader(code int) {
+	sr.status = code
+	sr.ResponseWriter.WriteHeader(code)
+}
+
+// RequestLogMiddleware logs one line per HTTP request: method, path,
+// status code, and duration. It NEVER logs the Authorization header or
+// any other request header — if a future change wants headers in the log,
+// route them through MaskAPIKey first.
+//
+// Pass a nil logger to use the package-default log.Default().
+func RequestLogMiddleware(logger *log.Logger) func(http.Handler) http.Handler {
+	if logger == nil {
+		logger = log.Default()
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			start := time.Now()
+			rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+			next.ServeHTTP(rec, r)
+			logger.Printf("%s %s %d %s", r.Method, r.URL.Path, rec.status, time.Since(start))
+		})
+	}
 }
