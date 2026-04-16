@@ -343,7 +343,7 @@ type Client struct {
 **Request flow:**
 ```
 caller → client.get/post/delete
-  → buildRequest (set headers: X-API-Key, User-Agent, X-Engram-Protocol: 1)
+  → buildRequest (set headers: Authorization: Bearer <apiKey>, User-Agent, X-Engram-Protocol: 1)
   → attempt loop (max 3):
       → http.Do(req.WithContext(attemptCtx))
       → if 429/5xx: sleep(backoff + jitter) → retry
@@ -818,7 +818,7 @@ RemoteStore method called
 - Test no retry on 401.
 - Test context cancellation stops retries.
 - Test backoff timing (verify delays are in expected range).
-- Test headers: X-API-Key, User-Agent, X-Engram-Protocol.
+- Test headers: Authorization (Bearer scheme), User-Agent, X-Engram-Protocol.
 
 **`config_test.go`:**
 - Real SQLite store (in-memory) for load/save tests.

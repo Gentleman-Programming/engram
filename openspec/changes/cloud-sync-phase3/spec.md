@@ -23,12 +23,12 @@ The HTTP client MUST be a single shared instance with connection pooling and con
 - Then a single TCP connection is reused (no new dial per request)
 
 ### REQ-CLIENT-002 — API key authentication
-Every request MUST include the `X-API-Key` header with the configured API key.
+Every request MUST include the `Authorization: Bearer <apiKey>` header. This matches the cloud server's `AuthMiddleware` (`internal/cloudserver/middleware.go`), which validates a Bearer token and rejects any other scheme with HTTP 401. An earlier draft of this spec proposed `X-API-Key`; the Bearer scheme was chosen to reuse standard HTTP semantics and align with the cloud server and every other authenticated client in the codebase (`internal/version/check.go`, `cmd/engram/cloud_test.go`).
 
 **Scenario: Authenticated request**
 - Given a `Client` with `apiKey = "tok-abc"`
 - When any method (`get`, `post`, `delete`) is called
-- Then the outgoing HTTP request contains header `X-API-Key: tok-abc`
+- Then the outgoing HTTP request contains header `Authorization: Bearer tok-abc`
 
 **Edge case:** Empty API key — `Client` MUST return `ErrUnauthorized` at construction time without making any network call.
 
