@@ -190,14 +190,23 @@ func (e *Exporter) Export() (*ExportResult, error) {
 		}
 
 		// Determine target file path
+		// Sanitize project and type to prevent path traversal attacks
 		project := "unknown"
 		if obs.Project != nil && *obs.Project != "" {
-			project = *obs.Project
+			project = sanitizePathComponent(*obs.Project)
 		}
+		obsType := sanitizePathComponent(obs.Type)
 		slug := Slugify(obs.Title, obs.ID)
-		relPath := filepath.Join(project, obs.Type, slug+".md")
-		absDir := filepath.Join(engRoot, project, obs.Type)
+		relPath := filepath.Join(project, obsType, slug+".md")
+		absDir := filepath.Join(engRoot, project, obsType)
 		absPath := filepath.Join(engRoot, relPath)
+
+		// Defense-in-depth: verify the resolved path stays within engRoot
+		absPath = filepath.Clean(absPath)
+		if !strings.HasPrefix(absPath, filepath.Clean(engRoot)+string(os.PathSeparator)) {
+			result.Errors = append(result.Errors, fmt.Errorf("path traversal detected for observation %d, skipping", obs.ID))
+			continue
+		}
 
 		// Create directory
 		if err := os.MkdirAll(absDir, 0755); err != nil {
@@ -312,4 +321,27 @@ func obsTopicPrefix(obs store.Observation) string {
 		return ""
 	}
 	return topicPrefix(*obs.TopicKey)
+}
+
+// sanitizePathComponent removes path separators, "..", and other potentially
+// dangerous characters from user-controlled input to prevent path traversal attacks.
+func sanitizePathComponent(s string) string {
+	s = strings.ReplaceAll(s, "..", "")
+	s = strings.ReplaceAll(s, string(os.PathSeparator), "-")
+	s = strings.ReplaceAll(s, "/", "-")
+	s = strings.ReplaceAll(s, "\\", "-")
+
+	for _, char := range []string{":", "*", "?", "\"", "<", ">", "|"} {
+		s = strings.ReplaceAll(s, char, "")
+	}
+
+	for strings.Contains(s, "--") {
+		s = strings.ReplaceAll(s, "--", "-")
+	}
+
+	s = strings.Trim(s, " -")
+	if s == "" {
+		return "unknown"
+	}
+	return s
 }
