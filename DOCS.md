@@ -70,10 +70,10 @@ All endpoints return JSON. Server listens on `127.0.0.1:7437`.
 
 ### Observations
 
-- `POST /observations` — Add observation. Body: `{session_id, type, title, content, tool_name?, project?, scope?, topic_key?}`
+- `POST /observations` — Add observation. Body: `{session_id, type, title, content, tool_name?, project?, scope?, topic_key?, tags?}`
 - `GET /observations/recent` — Recent observations. Query: `?project=X&scope=project|personal&limit=N`
 - `GET /observations/{id}` — Get single observation by ID
-- `PATCH /observations/{id}` — Update fields. Body: `{title?, content?, type?, project?, scope?, topic_key?}`
+- `PATCH /observations/{id}` — Update fields. Body: `{title?, content?, type?, project?, scope?, topic_key?, tags?}`
 - `DELETE /observations/{id}` — Delete observation (`?hard=true` for hard delete, soft delete by default)
 
 ### Search
@@ -139,6 +139,7 @@ Save structured observations. The tool description teaches agents the format:
 - **type**: `decision` | `architecture` | `bugfix` | `pattern` | `config` | `discovery` | `learning`
 - **scope**: `project` (default) | `personal`
 - **topic_key**: optional canonical topic id (e.g. `architecture/auth-model`) used to upsert evolving memories
+- **tags**: optional free-form labels for multi-dimensional filtering (comma-separated, e.g. `"auth,supabase,critical"`)
 - **content**: Structured with `**What**`, `**Why**`, `**Where**`, `**Learned**`
 
 Exact duplicate saves are deduplicated in a rolling time window using a normalized content hash + project + scope + type + title.
@@ -146,7 +147,7 @@ When `topic_key` is provided, `mem_save` upserts the latest observation in the s
 
 ### mem_update
 
-Update an observation by ID. Supports partial updates for `title`, `content`, `type`, `project`, `scope`, and `topic_key`.
+Update an observation by ID. Supports partial updates for `title`, `content`, `type`, `project`, `scope`, `topic_key`, and `tags`.
 
 ### mem_suggest_topic_key
 
