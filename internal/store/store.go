@@ -2560,33 +2560,39 @@ func (s *Store) MergeProjects(sources []string, canonical string) (*MergeResult,
 
 	err := s.withTx(func(tx *sql.Tx) error {
 		for _, src := range sources {
-			src, _ = NormalizeProject(src)
-			if src == "" || src == canonical {
+			srcNorm, _ := NormalizeProject(src)
+			if srcNorm == "" {
+				continue
+			}
+			// Only skip if the source is already the exact same name as canonical
+			// (not just the same after normalization). If names normalize to the
+			// same value, they are variants of the same project and should be merged.
+			if src == canonical {
 				continue
 			}
 
-			res, err := s.execHook(tx, `UPDATE observations SET project = ? WHERE project = ?`, canonical, src)
+			res, err := s.execHook(tx, `UPDATE observations SET project = ? WHERE project = ?`, canonical, srcNorm)
 			if err != nil {
-				return fmt.Errorf("merge observations %q → %q: %w", src, canonical, err)
+				return fmt.Errorf("merge observations %q → %q: %w", srcNorm, canonical, err)
 			}
 			n, _ := res.RowsAffected()
 			result.ObservationsUpdated += n
 
-			res, err = s.execHook(tx, `UPDATE sessions SET project = ? WHERE project = ?`, canonical, src)
+			res, err = s.execHook(tx, `UPDATE sessions SET project = ? WHERE project = ?`, canonical, srcNorm)
 			if err != nil {
-				return fmt.Errorf("merge sessions %q → %q: %w", src, canonical, err)
+				return fmt.Errorf("merge sessions %q → %q: %w", srcNorm, canonical, err)
 			}
 			n, _ = res.RowsAffected()
 			result.SessionsUpdated += n
 
-			res, err = s.execHook(tx, `UPDATE user_prompts SET project = ? WHERE project = ?`, canonical, src)
+			res, err = s.execHook(tx, `UPDATE user_prompts SET project = ? WHERE project = ?`, canonical, srcNorm)
 			if err != nil {
-				return fmt.Errorf("merge prompts %q → %q: %w", src, canonical, err)
+				return fmt.Errorf("merge prompts %q → %q: %w", srcNorm, canonical, err)
 			}
 			n, _ = res.RowsAffected()
 			result.PromptsUpdated += n
 
-			result.SourcesMerged = append(result.SourcesMerged, src)
+			result.SourcesMerged = append(result.SourcesMerged, srcNorm)
 		}
 		// Enqueue sync mutations so cloud sync picks up the merged records.
 		// Same pattern used by EnrollProject.
