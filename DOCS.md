@@ -67,6 +67,7 @@ All endpoints return JSON. Server listens on `127.0.0.1:7437`.
 - `POST /sessions` — Create session. Body: `{id, project, directory}`
 - `POST /sessions/{id}/end` — End session. Body: `{summary}`
 - `GET /sessions/recent` — Recent sessions. Query: `?project=X&limit=N`
+- `DELETE /sessions/{id}` — Delete a session. Returns `{id, status: "deleted"}`. Response codes: 200 (success), 400 (missing id), 404 (not found), 409 (has observations), 500 (error). Note: Does NOT trigger autosync notification to avoid re-creating from remote.
 
 ### Observations
 
@@ -74,7 +75,7 @@ All endpoints return JSON. Server listens on `127.0.0.1:7437`.
 - `GET /observations/recent` — Recent observations. Query: `?project=X&scope=project|personal&limit=N`
 - `GET /observations/{id}` — Get single observation by ID
 - `PATCH /observations/{id}` — Update fields. Body: `{title?, content?, type?, project?, scope?, topic_key?}`
-- `DELETE /observations/{id}` — Delete observation (`?hard=true` for hard delete, soft delete by default)
+- `DELETE /observations/{id}` — Delete observation. Query: `?hard=true` for permanent deletion (soft delete by default). Returns `{id, status: "deleted", hard_delete: bool}`. Response codes: 200 (success), 400 (invalid id), 500 (error)
 
 ### Search
 
@@ -89,6 +90,7 @@ All endpoints return JSON. Server listens on `127.0.0.1:7437`.
 - `POST /prompts` — Save user prompt. Body: `{session_id, content, project?}`
 - `GET /prompts/recent` — Recent prompts. Query: `?project=X&limit=N`
 - `GET /prompts/search` — Search prompts. Query: `?q=QUERY&project=X&limit=N`
+- `DELETE /prompts/{id}` — Delete a prompt. Returns `{id, status: "deleted"}`. Response codes: 200 (success), 400 (invalid id), 404 (not found), 500 (error)
 
 ### Context
 
