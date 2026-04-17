@@ -122,6 +122,7 @@ All endpoints return JSON. Server listens on `127.0.0.1:7437`.
 | `ENGRAM_DATA_DIR` | Override data directory | `~/.engram` |
 | `ENGRAM_PORT` | Override HTTP server port | `7437` |
 | `ENGRAM_PROJECT` | Override project name for MCP server | auto-detected via git |
+| `ENGRAM_TIMEZONE` | Display timestamps in specified timezone (IANA format, e.g. `America/Bogota`, `Europe/London`) | UTC |
 
 ---
 

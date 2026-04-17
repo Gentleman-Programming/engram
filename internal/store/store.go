@@ -1735,7 +1735,7 @@ func (s *Store) FormatContext(project, scope string) (string, error) {
 				summary = fmt.Sprintf(": %s", truncate(*sess.Summary, 200))
 			}
 			fmt.Fprintf(&b, "- **%s** (%s)%s [%d observations]\n",
-				sess.Project, sess.StartedAt, summary, sess.ObservationCount)
+				sess.Project, formatTimestamp(sess.StartedAt), summary, sess.ObservationCount)
 		}
 		b.WriteString("\n")
 	}
@@ -1743,7 +1743,7 @@ func (s *Store) FormatContext(project, scope string) (string, error) {
 	if len(prompts) > 0 {
 		b.WriteString("### Recent User Prompts\n")
 		for _, p := range prompts {
-			fmt.Fprintf(&b, "- %s: %s\n", p.CreatedAt, truncate(p.Content, 200))
+			fmt.Fprintf(&b, "- %s: %s\n", formatTimestamp(p.CreatedAt), truncate(p.Content, 200))
 		}
 		b.WriteString("\n")
 	}
@@ -3649,4 +3649,25 @@ func ClassifyTool(toolName string) string {
 // Now returns the current time formatted for SQLite.
 func Now() string {
 	return time.Now().UTC().Format("2006-01-02 15:04:05")
+}
+
+// formatTimestamp converts a UTC RFC3339 timestamp to the user's configured timezone.
+// If ENGRAM_TIMEZONE is not set or invalid, returns the original timestamp unchanged.
+func formatTimestamp(utcTimestamp string) string {
+	tz := os.Getenv("ENGRAM_TIMEZONE")
+	if tz == "" {
+		return utcTimestamp
+	}
+
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		return utcTimestamp
+	}
+
+	t, err := time.Parse(time.RFC3339, utcTimestamp)
+	if err != nil {
+		return utcTimestamp
+	}
+
+	return t.In(loc).Format(time.RFC3339)
 }
