@@ -26,6 +26,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Gentleman-Programming/engram/internal/agents"
 	"github.com/Gentleman-Programming/engram/internal/claudecode"
 	"github.com/Gentleman-Programming/engram/internal/mcp"
 	"github.com/Gentleman-Programming/engram/internal/obsidian"
@@ -178,6 +179,8 @@ func main() {
 		cmdClaudeCodeSync(cfg)
 	case "projects":
 		cmdProjects(cfg)
+	case "agents":
+		cmdAgents()
 	case "setup":
 		cmdSetup()
 	case "version", "--version", "-v":
@@ -1135,6 +1138,84 @@ func cmdProjectsList(cfg store.Config) {
 	}
 }
 
+// cmdAgents shows AI agent usage statistics across different agents.
+func cmdAgents() {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fatal(fmt.Errorf("could not determine home directory: %w", err))
+	}
+
+	jsonOutput := false
+	if len(os.Args) > 2 && os.Args[2] == "--json" {
+		jsonOutput = true
+	}
+
+	stats, err := agents.DetectAgents(home)
+	if err != nil {
+		fatal(fmt.Errorf("failed to detect agents: %w", err))
+	}
+
+	if jsonOutput {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(stats); err != nil {
+			fatal(fmt.Errorf("json encode: %w", err))
+		}
+		return
+	}
+
+	// Text output
+	if len(stats.Agents) == 0 {
+		fmt.Println("No AI agents detected on this system.")
+		return
+	}
+
+	// Find max sessions for bar scaling
+	maxSessions := 0
+	totalSessions := 0
+	for _, a := range stats.Agents {
+		if a.Sessions > maxSessions {
+			maxSessions = a.Sessions
+		}
+		totalSessions += a.Sessions
+	}
+
+	fmt.Println()
+	fmt.Println("  AI Agent Usage Statistics")
+	fmt.Println("  ─────────────────────────")
+	fmt.Println()
+
+	for _, a := range stats.Agents {
+		// Calculate percentage
+		pct := 0
+		if totalSessions > 0 {
+			pct = (a.Sessions * 100) / totalSessions
+		}
+
+		// Draw bar
+		barLen := 20
+		barFill := 0
+		if maxSessions > 0 {
+			barFill = (a.Sessions * barLen) / maxSessions
+		}
+		bar := strings.Repeat("█", barFill) + strings.Repeat("░", barLen-barFill)
+
+		fmt.Printf("  %-12s %s %3d%%  (%d sessions)\n", a.Agent, bar, pct, a.Sessions)
+		if a.Projects > 0 {
+			fmt.Printf("              %d projects\n", a.Projects)
+		}
+		if a.FirstSeen != "" && a.FirstSeen != a.LastSeen {
+			fmt.Printf("              %s → %s\n", a.FirstSeen, a.LastSeen)
+		} else if a.FirstSeen != "" {
+			fmt.Printf("              Active since %s\n", a.FirstSeen)
+		}
+		fmt.Println()
+	}
+
+	fmt.Printf("  Total: %d sessions across %d agents\n", totalSessions, len(stats.Agents))
+	fmt.Println()
+}
+
 // projectGroup represents a set of project names that should be merged.
 type projectGroup struct {
 	Names     []string
@@ -1704,6 +1785,8 @@ Commands:
   import <file>      Import memories from a JSON export file
   projects list      List all projects with observation, session, and prompt counts
   projects consolidate [--all] [--dry-run]
+                     Merge similar project names into one canonical name
+  agents [--json]    Show AI agent usage statistics (reads Claude Code, Gemini, etc.)
                      Merge similar project names into one canonical name
                        --all      Scan ALL projects for similar name groups
                        --dry-run  Preview what would be merged (no changes)
