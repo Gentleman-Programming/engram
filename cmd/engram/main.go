@@ -26,6 +26,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Gentleman-Programming/engram/internal/claudecode"
 	"github.com/Gentleman-Programming/engram/internal/mcp"
 	"github.com/Gentleman-Programming/engram/internal/obsidian"
 	"github.com/Gentleman-Programming/engram/internal/project"
@@ -169,6 +170,12 @@ func main() {
 		cmdSync(cfg)
 	case "obsidian-export":
 		cmdObsidianExport(cfg)
+	case "claude-code-export":
+		cmdClaudeCodeExport(cfg)
+	case "claude-code-import":
+		cmdClaudeCodeImport(cfg)
+	case "claude-code-sync":
+		cmdClaudeCodeSync(cfg)
 	case "projects":
 		cmdProjects(cfg)
 	case "setup":
@@ -918,6 +925,158 @@ func cmdObsidianExport(cfg store.Config) {
 	}
 }
 
+// ─── Claude Code Memory Sync ─────────────────────────────────────────────────
+
+func cmdClaudeCodeExport(cfg store.Config) {
+	claudeProjectsDir, project, dryRun := parseClaudeCodeFlags()
+
+	if claudeProjectsDir == "" {
+		home, err := userHomeDir()
+		if err != nil {
+			fatal(fmt.Errorf("could not determine home directory: %w", err))
+		}
+		claudeProjectsDir = filepath.Join(home, ".claude", "projects")
+	}
+
+	s, err := storeNew(cfg)
+	if err != nil {
+		fatal(err)
+	}
+	defer s.Close()
+
+	exp := claudecode.NewExporter(s, claudecode.ExportConfig{
+		ClaudeProjectsDir: claudeProjectsDir,
+		Project:         project,
+		DryRun:         dryRun,
+	})
+
+	result, err := exp.Export()
+	if err != nil {
+		fatal(err)
+	}
+
+	fmt.Printf("Claude Code export complete\n")
+	fmt.Printf("  Created: %d\n", result.Created)
+	fmt.Printf("  Updated: %d\n", result.Updated)
+	fmt.Printf("  Skipped: %d\n", result.Skipped)
+	if len(result.Errors) > 0 {
+		fmt.Fprintf(os.Stderr, "  Errors: %d\n", len(result.Errors))
+		for _, e := range result.Errors {
+			fmt.Fprintf(os.Stderr, "    - %v\n", e)
+		}
+	}
+}
+
+func cmdClaudeCodeImport(cfg store.Config) {
+	claudeProjectsDir, project, dryRun := parseClaudeCodeFlags()
+
+	if claudeProjectsDir == "" {
+		home, err := userHomeDir()
+		if err != nil {
+			fatal(fmt.Errorf("could not determine home directory: %w", err))
+		}
+		claudeProjectsDir = filepath.Join(home, ".claude", "projects")
+	}
+
+	s, err := storeNew(cfg)
+	if err != nil {
+		fatal(err)
+	}
+	defer s.Close()
+
+	imp := claudecode.NewImporter(s, claudecode.ImportConfig{
+		ClaudeProjectsDir: claudeProjectsDir,
+		Project:         project,
+		DryRun:         dryRun,
+	})
+
+	result, err := imp.Import()
+	if err != nil {
+		fatal(err)
+	}
+
+	fmt.Printf("Claude Code import complete\n")
+	fmt.Printf("  Imported: %d\n", result.Imported)
+	fmt.Printf("  Skipped:  %d\n", result.Skipped)
+	if len(result.Errors) > 0 {
+		fmt.Fprintf(os.Stderr, "  Errors: %d\n", len(result.Errors))
+		for _, e := range result.Errors {
+			fmt.Fprintf(os.Stderr, "    - %v\n", e)
+		}
+	}
+}
+
+func cmdClaudeCodeSync(cfg store.Config) {
+	claudeProjectsDir, project, dryRun := parseClaudeCodeFlags()
+
+	if claudeProjectsDir == "" {
+		home, err := userHomeDir()
+		if err != nil {
+			fatal(fmt.Errorf("could not determine home directory: %w", err))
+		}
+		claudeProjectsDir = filepath.Join(home, ".claude", "projects")
+	}
+
+	s, err := storeNew(cfg)
+	if err != nil {
+		fatal(err)
+	}
+	defer s.Close()
+
+	syncer := claudecode.NewSyncer(s, claudecode.SyncConfig{
+		ClaudeProjectsDir: claudeProjectsDir,
+		Project:         project,
+		DryRun:          dryRun,
+	})
+
+	result, err := syncer.FullSync()
+	if err != nil {
+		fatal(err)
+	}
+
+	fmt.Printf("Claude Code sync complete\n")
+	if result.ExportResult != nil {
+		fmt.Printf("  Export: created=%d updated=%d skipped=%d\n",
+			result.ExportResult.Created,
+			result.ExportResult.Updated,
+			result.ExportResult.Skipped)
+	}
+	if result.ImportResult != nil {
+		fmt.Printf("  Import: imported=%d skipped=%d\n",
+			result.ImportResult.Imported,
+			result.ImportResult.Skipped)
+	}
+	if len(result.Errors) > 0 {
+		fmt.Fprintf(os.Stderr, "  Errors: %d\n", len(result.Errors))
+		for _, e := range result.Errors {
+			fmt.Fprintf(os.Stderr, "    - %v\n", e)
+		}
+	}
+}
+
+// parseClaudeCodeFlags parses common flags for Claude Code sync commands.
+func parseClaudeCodeFlags() (claudeProjectsDir, project string, dryRun bool) {
+	for i := 2; i < len(os.Args); i++ {
+		switch os.Args[i] {
+		case "--claude-projects-dir":
+			if i+1 < len(os.Args) {
+				claudeProjectsDir = os.Args[i+1]
+				i++
+			}
+		case "--project":
+			if i+1 < len(os.Args) {
+				project = os.Args[i+1]
+				i++
+			}
+		case "--dry-run":
+			dryRun = true
+		default:
+			// Unknown flag, ignore
+		}
+	}
+	return
+}
+
 func cmdProjects(cfg store.Config) {
 	// Route: engram projects list | engram projects consolidate [--all] [--dry-run]
 	subCmd := "list"
@@ -1563,6 +1722,19 @@ Commands:
                        --graph-config  Graph layout mode: preserve|force|skip (default: preserve)
                        --watch         Enable auto-sync mode (runs on interval until Ctrl+C)
                        --interval      Sync interval for --watch mode (default: 10m, minimum: 1m)
+  claude-code-export  Export memories to Claude Code's native memory folder
+                       --claude-projects-dir  Path to Claude projects dir (default: ~/.claude/projects)
+                       --project       Filter export to a single project (optional)
+                       --dry-run       Preview what would be exported (no files written)
+  claude-code-import  Import memories from Claude Code's native memory folder
+                       --claude-projects-dir  Path to Claude projects dir (default: ~/.claude/projects)
+                       --project       Filter import to a single project (optional)
+                       --dry-run       Preview what would be imported (no records written)
+  claude-code-sync    Bidirectional sync between Engram and Claude Code memory
+                       --claude-projects-dir  Path to Claude projects dir (default: ~/.claude/projects)
+                       --project       Filter sync to a single project (optional)
+                       --dry-run       Preview what would be synced (no changes made)
+                       Exports Engram memories to Claude Code, then imports new Claude Code memories.
 
   version            Print version
   help               Show this help
