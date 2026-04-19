@@ -16,9 +16,13 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/Gentleman-Programming/engram/internal/claudecode"
 	projectpkg "github.com/Gentleman-Programming/engram/internal/project"
 	"github.com/Gentleman-Programming/engram/internal/store"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -647,6 +651,33 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 
 		sessionID := defaultSessionID(project)
 		activity.RecordToolCall(sessionID)
+
+		// Lazy import from Claude Code memory folder (best-effort, non-blocking)
+		// This brings in memories saved by Claude Code native without user needing
+		// to manually run claude-code-import. Consistent with lazy-loading philosophy.
+		go func() {
+			claudeProjectsDir := os.Getenv("CLAUDE_PROJECTS_DIR")
+			if claudeProjectsDir == "" {
+				if home, err := os.UserHomeDir(); err == nil {
+					claudeProjectsDir = filepath.Join(home, ".claude", "projects")
+				}
+			}
+			if claudeProjectsDir == "" {
+				return
+			}
+			syncer := claudecode.NewSyncer(s, claudecode.SyncConfig{
+				ClaudeProjectsDir: claudeProjectsDir,
+				Project:          project,
+			})
+			result, err := syncer.ImportOnly()
+			if err != nil {
+				log.Printf("[engram] lazy claude-code import: %v", err)
+				return
+			}
+			if result.Imported > 0 {
+				log.Printf("[engram] lazy import: %d memories from Claude Code", result.Imported)
+			}
+		}()
 
 		results, err := s.Search(query, store.SearchOptions{
 			Type:    typ,
