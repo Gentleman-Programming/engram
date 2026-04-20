@@ -1,6 +1,6 @@
 module github.com/Gentleman-Programming/engram
 
-go 1.24.2
+go 1.26.2
 
 require (
 	github.com/charmbracelet/bubbles v1.0.0
