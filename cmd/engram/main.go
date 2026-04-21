@@ -155,6 +155,8 @@ func main() {
 		cmdSearch(cfg)
 	case "save":
 		cmdSave(cfg)
+	case "delete":
+		cmdDelete(cfg)
 	case "timeline":
 		cmdTimeline(cfg)
 	case "context":
@@ -424,6 +426,42 @@ func cmdSave(cfg store.Config) {
 	}
 
 	fmt.Printf("Memory saved: #%d %q (%s)\n", id, title, typ)
+}
+
+func cmdDelete(cfg store.Config) {
+	if len(os.Args) < 3 {
+		fmt.Fprintln(os.Stderr, "usage: engram delete <observation_id> [--hard]")
+		exitFunc(1)
+	}
+
+	obsID, err := strconv.ParseInt(os.Args[2], 10, 64)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: invalid observation id %q\n", os.Args[2])
+		exitFunc(1)
+	}
+
+	hard := false
+	for i := 3; i < len(os.Args); i++ {
+		if os.Args[i] == "--hard" {
+			hard = true
+		}
+	}
+
+	s, err := storeNew(cfg)
+	if err != nil {
+		fatal(err)
+	}
+	defer s.Close()
+
+	if err := s.DeleteObservation(obsID, hard); err != nil {
+		fatal(err)
+	}
+
+	hardLabel := ""
+	if hard {
+		hardLabel = " (hard)"
+	}
+	fmt.Printf("Observation #%d deleted%s\n", obsID, hardLabel)
 }
 
 func cmdTimeline(cfg store.Config) {
@@ -1538,6 +1576,7 @@ Commands:
   tui                Launch interactive terminal UI
   search <query>     Search memories [--type TYPE] [--project PROJECT] [--scope SCOPE] [--limit N]
   save <title> <msg> Save a memory  [--type TYPE] [--project PROJECT] [--scope SCOPE]
+  delete <obs_id>    Delete an observation [--hard] (soft-delete by default)
   timeline <obs_id>  Show chronological context around an observation [--before N] [--after N]
   context [project]  Show recent context from previous sessions
   stats              Show memory system statistics
