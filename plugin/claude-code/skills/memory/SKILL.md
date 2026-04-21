@@ -75,13 +75,25 @@ Format for `mem_save`:
 - If unsure about the key, call `mem_suggest_topic_key` first, then reuse that key consistently
 - If you already know the exact ID to fix, use `mem_update`
 
-## WHEN TO SEARCH MEMORY
+## WHEN TO SEARCH MEMORY (retrieval chain — mandatory order)
 
 When the user asks to recall something — any variation of "remember", "recall", "what did we do",
-"how did we solve", "recordar", "acordate", "qué hicimos", or references to past work:
-1. First call `mem_context` — checks recent session history (fast, cheap)
-2. If not found, call `mem_search` with relevant keywords (FTS5 full-text search)
-3. If you find a match, use `mem_get_observation` for full untruncated content
+"how did we solve", "recordar", "acordate", "qué hicimos", or references to past work,
+follow this chain IN ORDER:
+
+1. `mem_context(project)` — recent session history (fast, cheap)
+2. `mem_search(query)` — FTS5 full-text search across all sessions
+3. If steps 1-2 return nothing useful AND an external knowledge-base MCP is available
+   (e.g. Obsidian with `obsidian_search_notes`/`obsidian_read_note`, or Notion, or any
+   file-based MCP), search there as a fallback.
+   - If the knowledge base returns useful context, **rehidrate**: call `mem_save` with
+     a summary of what was found so future searches at Level 1-2 will find it.
+4. Only after exhausting ALL available sources, say "no prior context found"
+
+**NEVER say "I don't have context" after only checking engram.** If a knowledge-base
+MCP is connected, you MUST search it before giving up.
+
+Use `mem_get_observation(id)` for full untruncated content of any search result.
 
 Also search memory PROACTIVELY when:
 - Starting work on something that might have been done before

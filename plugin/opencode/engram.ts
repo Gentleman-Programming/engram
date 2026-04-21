@@ -76,10 +76,20 @@ Topic rules:
 ### WHEN TO SEARCH MEMORY
 
 When the user asks to recall something — any variation of "remember", "recall", "what did we do",
-"how did we solve", "recordar", "acordate", "qué hicimos", or references to past work:
-1. First call \`mem_context\` — checks recent session history (fast, cheap)
-2. If not found, call \`mem_search\` with relevant keywords (FTS5 full-text search)
-3. If you find a match, use \`mem_get_observation\` for full untruncated content
+"how did we solve", "recordar", "acordate", "qué hicimos", or references to past work,
+follow this retrieval chain IN ORDER:
+
+1. \`mem_context(project)\` — recent session history (fast, cheap)
+2. \`mem_search(query)\` — FTS5 full-text search across all sessions
+3. If steps 1-2 return nothing useful AND an external knowledge-base MCP is available
+   (e.g. Obsidian, Notion), search there as fallback. If found, rehidrate by calling
+   \`mem_save\` with a summary so future searches find it at Level 1-2.
+4. Only after exhausting ALL available sources, say "no prior context found"
+
+NEVER say "I don't have context" after only checking engram. If a knowledge-base
+MCP is connected, you MUST search it before giving up.
+
+Use \`mem_get_observation(id)\` for full untruncated content of any search result.
 
 Also search memory PROACTIVELY when:
 - Starting work on something that might have been done before

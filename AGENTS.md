@@ -32,4 +32,5 @@ When working on this project, load the relevant skill(s) BEFORE writing any code
 | `engram-ui-elements` | Adding or changing dashboard UI components or connected browsing flows. | [`skills/ui-elements/SKILL.md`](skills/ui-elements/SKILL.md) |
 | `engram-visual-language` | Any dashboard styling, typography, spacing, or visual identity change. | [`skills/visual-language/SKILL.md`](skills/visual-language/SKILL.md) |
 | `engram-backlog-triage` | Auditing open issues or PRs, triaging the backlog, or reviewing contributor submissions as a maintainer. | [`skills/backlog-triage/SKILL.md`](skills/backlog-triage/SKILL.md) |
+| `engram-knowledge-recall` | Any context retrieval, recall request, session start, or working on a topic with no prior context. Requires Engram + an external knowledge-base MCP (Obsidian, Notion, etc.). | [`skills/knowledge-recall/SKILL.md`](skills/knowledge-recall/SKILL.md) |
 | `gentleman-bubbletea` | When editing Go files in installer/internal/tui/, working on TUI screens, or adding new UI features. | [`skills/gentleman-bubbletea/SKILL.md`](skills/gentleman-bubbletea/SKILL.md) |
