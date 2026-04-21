@@ -14,7 +14,7 @@ This is the complete technical reference for Engram. For getting started, see th
 |---------|-----------------|
 | [Database Schema](#database-schema) | Tables, FTS5, SQLite config |
 | [HTTP API](#http-api-endpoints) | All REST endpoints with request/response details |
-| [MCP Tools](#mcp-tools-15-tools) | Detailed reference for all 15 memory tools |
+| [MCP Tools](#mcp-tools-16-tools) | Detailed reference for all 16 memory tools |
 | [Memory Protocol](#memory-protocol) | When/how agents should use the tools |
 | [Project Name Normalization](#project-name-normalization) | Auto-detection, normalization, similar-project warnings |
 | [Features](#features) | FTS5 search, timeline, privacy, git sync, compression |
@@ -67,6 +67,7 @@ All endpoints return JSON. Server listens on `127.0.0.1:7437`.
 - `POST /sessions` — Create session. Body: `{id, project, directory}`
 - `POST /sessions/{id}/end` — End session. Body: `{summary}`
 - `GET /sessions/recent` — Recent sessions. Query: `?project=X&limit=N`
+- `DELETE /sessions/{id}` — Delete empty session. Returns 409 if session has observations.
 
 ### Observations
 
@@ -78,7 +79,7 @@ All endpoints return JSON. Server listens on `127.0.0.1:7437`.
 
 ### Search
 
-- `GET /search` — FTS5 search. Query: `?q=QUERY&type=TYPE&project=PROJECT&scope=SCOPE&limit=N`
+- `GET /search` — FTS5 search. Query: `?q=QUERY&type=TYPE&project=PROJECT&scope=SCOPE&limit=N&since=DATE&until=DATE`
 
 ### Timeline
 
@@ -89,6 +90,7 @@ All endpoints return JSON. Server listens on `127.0.0.1:7437`.
 - `POST /prompts` — Save user prompt. Body: `{session_id, content, project?}`
 - `GET /prompts/recent` — Recent prompts. Query: `?project=X&limit=N`
 - `GET /prompts/search` — Search prompts. Query: `?q=QUERY&project=X&limit=N`
+- `DELETE /prompts/{id}` — Delete a prompt by ID. Returns 404 if not found.
 
 ### Context
 
@@ -125,11 +127,17 @@ All endpoints return JSON. Server listens on `127.0.0.1:7437`.
 
 ---
 
-## MCP Tools (15 tools)
+## MCP Tools (16 tools)
 
 ### mem_search
 
 Search persistent memory across all sessions. Supports FTS5 full-text search with type/project/scope/limit filters.
+
+- **query** (required): Search query — natural language or keywords. Empty queries are rejected.
+- **since**: Filter observations created on or after this date (YYYY-MM-DD or RFC3339).
+- **until**: Filter observations created on or before this date (YYYY-MM-DD or RFC3339).
+
+Invalid date formats return an explicit error (SQLite's `datetime()` silently ignores bad input, so validation happens in Go).
 
 ### mem_save
 
@@ -163,6 +171,9 @@ Save user prompts — records what the user asked so future sessions have contex
 ### mem_context
 
 Get recent memory context from previous sessions — shows sessions, prompts, and observations, with optional scope filtering for observations.
+
+- **since**: Filter to sessions/observations on or after this date (YYYY-MM-DD or RFC3339).
+- **until**: Filter to sessions/observations on or before this date (YYYY-MM-DD or RFC3339).
 
 ### mem_stats
 
@@ -199,6 +210,15 @@ Mark a session as completed with optional summary.
 ### mem_capture_passive
 
 Extract structured learnings from text output. Looks for `## Key Learnings:` sections and saves each numbered/bulleted item as a separate observation. Duplicates are automatically skipped.
+
+### mem_sessions
+
+List sessions within a date range. Shows session date, project, and observation count.
+
+- **since**: Filter sessions started on or after this date (YYYY-MM-DD or RFC3339).
+- **until**: Filter sessions started on or before this date (YYYY-MM-DD or RFC3339).
+- **project**: Filter by project name (optional).
+- **limit**: Max results (default: 20, max: 50).
 
 ### mem_merge_projects
 
@@ -331,11 +351,18 @@ Use `engram projects consolidate` to interactively merge variant project names, 
 
 ## Features
 
+### Input Validation
+
+- **Empty queries**: `Search()` rejects blank/whitespace-only queries before they reach FTS5 (which would crash on `MATCH ""`).
+- **Date filters**: `since` and `until` accept only `YYYY-MM-DD` or RFC3339 formats. Invalid strings (e.g. `"yesterday"`, `"hace 3 dias"`) return an explicit error instead of being silently ignored by SQLite's `datetime()`.
+- **Required fields**: `mem_save` validates that `title` and `content` are non-empty after trimming whitespace.
+- **Import normalization**: Project names from imported JSON/sync data are normalized (lowercase, trimmed, collapsed hyphens) to match local conventions.
+
 ### Full-Text Search (FTS5)
 
-- Searches across title, content, tool_name, type, and project
-- Query sanitization: wraps each word in quotes to avoid FTS5 syntax errors
-- Supports type and project filters
+- Searches across title, content, tool_name, type, project, and topic_key
+- Query sanitization: wraps each word in quotes to avoid FTS5 syntax errors on special characters (`()`, `*`, `+`, `"`)
+- Supports type, project, scope, since, and until filters
 
 ### Timeline (Progressive Disclosure)
 
