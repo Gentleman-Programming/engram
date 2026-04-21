@@ -1573,7 +1573,7 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 			FROM observations
 			WHERE topic_key = ? AND deleted_at IS NULL
 		`
-		tkArgs := []any{query}
+		tkArgs := []any{normalizeTopicKey(query)}
 
 		if opts.Type != "" {
 			tkSQL += " AND type = ?"
@@ -3475,11 +3475,15 @@ func stripPrivateTags(s string) string {
 
 // sanitizeFTS wraps each word in quotes so FTS5 doesn't choke on special chars.
 // "fix auth bug" → `"fix" "auth" "bug"`
+// FTS5 special characters (.*+?^${}()|[\]) are stripped by strings.Fields so only "/" remains as a potential issue.
 func sanitizeFTS(query string) string {
 	words := strings.Fields(query)
 	for i, w := range words {
 		// Strip existing quotes to avoid double-quoting
 		w = strings.Trim(w, `"`)
+		// Escape forward slashes — FTS5 MATCH treats unescaped "/" as a query operator,
+		// which would cause a "malformed FTS5 query" error when searching topic keys like "sdd/summa-kit/spec".
+		w = strings.ReplaceAll(w, "/", "\\/")
 		words[i] = `"` + w + `"`
 	}
 	return strings.Join(words, " ")
