@@ -156,7 +156,7 @@ func TestScopeFiltersSearchAndContext(t *testing.T) {
 		t.Fatalf("expected 1 personal-scope result, got %d", len(personalResults))
 	}
 
-	ctx, err := s.FormatContext("engram", "personal")
+	ctx, err := s.FormatContext("engram", "personal", "", "")
 	if err != nil {
 		t.Fatalf("format context personal: %v", err)
 	}
@@ -998,7 +998,7 @@ func TestSessionsOrderedByMostRecentActivity(t *testing.T) {
 		t.Fatalf("expected s-older first in all sessions, got %s", all[0].ID)
 	}
 
-	recent, err := s.RecentSessions("", 10)
+	recent, err := s.RecentSessions("", 10, "", "")
 	if err != nil {
 		t.Fatalf("recent sessions: %v", err)
 	}
@@ -1590,7 +1590,7 @@ func TestStoreAdditionalQueryAndMutationBranches(t *testing.T) {
 		t.Fatalf("expected search results")
 	}
 
-	ctx, err := s.FormatContext("", "project")
+	ctx, err := s.FormatContext("", "project", "", "")
 	if err != nil {
 		t.Fatalf("format context: %v", err)
 	}
@@ -1612,7 +1612,7 @@ func TestStoreErrorBranchesWithClosedDatabase(t *testing.T) {
 	if _, err := s.AllSessions("", 1); err == nil {
 		t.Fatalf("expected AllSessions error when db is closed")
 	}
-	if _, err := s.RecentSessions("", 1); err == nil {
+	if _, err := s.RecentSessions("", 1, "", ""); err == nil {
 		t.Fatalf("expected RecentSessions error when db is closed")
 	}
 	if _, err := s.SearchPrompts("x", "", 1); err == nil {
@@ -1755,7 +1755,7 @@ func TestMigrationAndHelperEdgeBranches(t *testing.T) {
 
 	t.Run("format context empty returns empty string", func(t *testing.T) {
 		s := newTestStore(t)
-		ctx, err := s.FormatContext("", "")
+		ctx, err := s.FormatContext("", "", "", "")
 		if err != nil {
 			t.Fatalf("format context: %v", err)
 		}
@@ -2212,7 +2212,7 @@ func TestHookFallbacksAndAdditionalBranches(t *testing.T) {
 			t.Fatalf("add observation proj-b: %v", err)
 		}
 
-		recent, err := s.RecentSessions("proj-a", 0)
+		recent, err := s.RecentSessions("proj-a", 0, "", "")
 		if err != nil {
 			t.Fatalf("recent sessions filtered: %v", err)
 		}
@@ -2244,7 +2244,7 @@ func TestHookFallbacksAndAdditionalBranches(t *testing.T) {
 			t.Fatalf("expected one session observation, got %d", len(sessionObs))
 		}
 
-		recentObs, err := s.RecentObservations("proj-a", "project", 0)
+		recentObs, err := s.RecentObservations("proj-a", "project", 0, "", "")
 		if err != nil {
 			t.Fatalf("recent observations default limit: %v", err)
 		}
@@ -2296,7 +2296,7 @@ func TestHookFallbacksAndAdditionalBranches(t *testing.T) {
 		t.Run("recent sessions error", func(t *testing.T) {
 			s := newTestStore(t)
 			_ = s.Close()
-			if _, err := s.FormatContext("", ""); err == nil {
+			if _, err := s.FormatContext("", "", "", ""); err == nil {
 				t.Fatalf("expected format context to fail from recent sessions")
 			}
 		})
@@ -2309,7 +2309,7 @@ func TestHookFallbacksAndAdditionalBranches(t *testing.T) {
 			if _, err := s.db.Exec("DROP TABLE observations"); err != nil {
 				t.Fatalf("drop observations: %v", err)
 			}
-			if _, err := s.FormatContext("", ""); err == nil {
+			if _, err := s.FormatContext("", "", "", ""); err == nil {
 				t.Fatalf("expected format context to fail from recent observations")
 			}
 		})
@@ -2322,7 +2322,7 @@ func TestHookFallbacksAndAdditionalBranches(t *testing.T) {
 			if _, err := s.db.Exec("DROP TABLE user_prompts"); err != nil {
 				t.Fatalf("drop prompts: %v", err)
 			}
-			if _, err := s.FormatContext("", ""); err == nil {
+			if _, err := s.FormatContext("", "", "", ""); err == nil {
 				t.Fatalf("expected format context to fail from recent prompts")
 			}
 		})
@@ -2532,7 +2532,7 @@ func TestStoreUncoveredBranchesPushToHundred(t *testing.T) {
 		}
 
 		setScanErr("FROM sessions s")
-		if _, err := s.RecentSessions("", 10); err == nil {
+		if _, err := s.RecentSessions("", 10, "", ""); err == nil {
 			t.Fatalf("expected recent sessions scan error")
 		}
 
@@ -2723,7 +2723,7 @@ func TestStoreUncoveredBranchesPushToHundred(t *testing.T) {
 			}
 			return origQueryIt(db, query, args...)
 		}
-		if _, err := s.FormatContext("engram", "project"); err == nil {
+		if _, err := s.FormatContext("engram", "project", "", ""); err == nil {
 			t.Fatalf("expected format context observations error")
 		}
 
@@ -2741,7 +2741,7 @@ func TestStoreUncoveredBranchesPushToHundred(t *testing.T) {
 			t.Fatalf("end session: %v", err)
 		}
 		s.hooks.queryIt = origQueryIt
-		ctx, err := s.FormatContext("engram", "project")
+		ctx, err := s.FormatContext("engram", "project", "", "")
 		if err != nil {
 			t.Fatalf("format context with summary: %v", err)
 		}
@@ -3948,13 +3948,13 @@ func TestMigrateProject(t *testing.T) {
 	}
 
 	// Verify old project has no records
-	obs, _ := s.RecentObservations(old, "", 10)
+	obs, _ := s.RecentObservations(old, "", 10, "", "")
 	if len(obs) != 0 {
 		t.Fatalf("expected 0 observations under old name, got %d", len(obs))
 	}
 
 	// Verify new project has the records
-	obs, _ = s.RecentObservations(new_, "", 10)
+	obs, _ = s.RecentObservations(new_, "", 10, "", "")
 	if len(obs) != 1 {
 		t.Fatalf("expected 1 observation under new name, got %d", len(obs))
 	}
@@ -4133,7 +4133,7 @@ func TestRecentObservationsNormalizesProjectFilter(t *testing.T) {
 	}
 
 	// Query with uppercase project name
-	obs, err := s.RecentObservations("ENGRAM", "", 10)
+	obs, err := s.RecentObservations("ENGRAM", "", 10, "", "")
 	if err != nil {
 		t.Fatalf("RecentObservations: %v", err)
 	}
@@ -4326,7 +4326,7 @@ func TestMergeProjects(t *testing.T) {
 	}
 
 	// All records from engram-memory should now be under "engram"
-	obs, err := s.RecentObservations("engram", "", 20)
+	obs, err := s.RecentObservations("engram", "", 20, "", "")
 	if err != nil {
 		t.Fatalf("RecentObservations: %v", err)
 	}
@@ -4335,7 +4335,7 @@ func TestMergeProjects(t *testing.T) {
 	}
 
 	// engram-memory should have 0 observations
-	obsMerged, err := s.RecentObservations("engram-memory", "", 10)
+	obsMerged, err := s.RecentObservations("engram-memory", "", 10, "", "")
 	if err != nil {
 		t.Fatalf("RecentObservations engram-memory: %v", err)
 	}
@@ -4454,7 +4454,7 @@ func TestDeleteSession_EmptySession(t *testing.T) {
 	}
 
 	// Session should be gone.
-	sessions, err := s.RecentSessions("proj", 10)
+	sessions, err := s.RecentSessions("proj", 10, "", "")
 	if err != nil {
 		t.Fatalf("recent sessions: %v", err)
 	}

@@ -126,7 +126,7 @@ func stubRuntimeHooks(t *testing.T) {
 		return s.Timeline(observationID, before, after)
 	}
 	storeFormatContext = func(s *store.Store, project, scope string) (string, error) {
-		return s.FormatContext(project, scope)
+		return s.FormatContext(project, scope, "", "")
 	}
 	storeStats = func(s *store.Store) (*store.Stats, error) { return s.Stats() }
 	storeExport = func(s *store.Store) (*store.ExportData, error) { return s.Export() }
@@ -850,6 +850,8 @@ func TestCommandErrorSeamsAndUncoveredBranches(t *testing.T) {
 		storeFormatContext = func(*store.Store, string, string) (string, error) {
 			return "", errors.New("forced context error")
 		}
+		// Note: signature stays (store, project, scope) because storeFormatContext is a wrapper
+		// that calls FormatContext(project, scope, "", "") internally
 		_, stderr, recovered := captureOutputAndRecover(t, func() { cmdContext(cfg) })
 		assertFatal(t, stderr, recovered, "forced context error")
 	})

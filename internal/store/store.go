@@ -120,6 +120,8 @@ type SearchOptions struct {
 	Project string `json:"project,omitempty"`
 	Scope   string `json:"scope,omitempty"`
 	Limit   int    `json:"limit,omitempty"`
+	Since   string `json:"since,omitempty"` // YYYY-MM-DD or RFC3339
+	Until   string `json:"until,omitempty"` // YYYY-MM-DD or RFC3339
 }
 
 type AddObservationParams struct {
@@ -828,7 +830,14 @@ func (s *Store) GetSession(id string) (*Session, error) {
 	return &sess, nil
 }
 
-func (s *Store) RecentSessions(project string, limit int) ([]SessionSummary, error) {
+func (s *Store) RecentSessions(project string, limit int, since, until string) ([]SessionSummary, error) {
+	if err := validateDate(since); err != nil {
+		return nil, fmt.Errorf("recent sessions: invalid since: %w", err)
+	}
+	if err := validateDate(until); err != nil {
+		return nil, fmt.Errorf("recent sessions: invalid until: %w", err)
+	}
+
 	// Normalize project filter for case-insensitive matching
 	project, _ = NormalizeProject(project)
 
@@ -848,6 +857,14 @@ func (s *Store) RecentSessions(project string, limit int) ([]SessionSummary, err
 	if project != "" {
 		query += " AND s.project = ?"
 		args = append(args, project)
+	}
+	if since != "" {
+		query += " AND datetime(s.started_at) >= datetime(?)"
+		args = append(args, since)
+	}
+	if until != "" {
+		query += " AND datetime(s.started_at) <= datetime(?)"
+		args = append(args, until)
 	}
 
 	query += " GROUP BY s.id ORDER BY MAX(COALESCE(o.created_at, s.started_at)) DESC LIMIT ?"
@@ -1086,7 +1103,14 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 	return observationID, nil
 }
 
-func (s *Store) RecentObservations(project, scope string, limit int) ([]Observation, error) {
+func (s *Store) RecentObservations(project, scope string, limit int, since, until string) ([]Observation, error) {
+	if err := validateDate(since); err != nil {
+		return nil, fmt.Errorf("recent observations: invalid since: %w", err)
+	}
+	if err := validateDate(until); err != nil {
+		return nil, fmt.Errorf("recent observations: invalid until: %w", err)
+	}
+
 	// Normalize project filter for case-insensitive matching
 	project, _ = NormalizeProject(project)
 
@@ -1109,6 +1133,14 @@ func (s *Store) RecentObservations(project, scope string, limit int) ([]Observat
 	if scope != "" {
 		query += " AND o.scope = ?"
 		args = append(args, normalizeScope(scope))
+	}
+	if since != "" {
+		query += " AND datetime(o.created_at) >= datetime(?)"
+		args = append(args, since)
+	}
+	if until != "" {
+		query += " AND datetime(o.created_at) <= datetime(?)"
+		args = append(args, until)
 	}
 
 	query += " ORDER BY o.created_at DESC LIMIT ?"
@@ -1554,6 +1586,20 @@ func (s *Store) Timeline(observationID int64, before, after int) (*TimelineResul
 // ─── Search (FTS5) ───────────────────────────────────────────────────────────
 
 func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error) {
+	// Reject blank queries before they reach FTS5 — MATCH "" crashes SQLite.
+	if strings.TrimSpace(query) == "" {
+		return nil, fmt.Errorf("search: query cannot be empty")
+	}
+
+	// Validate date filters eagerly so callers get a clear error instead of
+	// silent pass-through (SQLite datetime() returns NULL for invalid strings).
+	if err := validateDate(opts.Since); err != nil {
+		return nil, fmt.Errorf("search: invalid since: %w", err)
+	}
+	if err := validateDate(opts.Until); err != nil {
+		return nil, fmt.Errorf("search: invalid until: %w", err)
+	}
+
 	// Normalize project filter so "Engram" finds records stored as "engram"
 	opts.Project, _ = NormalizeProject(opts.Project)
 
@@ -1586,6 +1632,14 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 		if opts.Scope != "" {
 			tkSQL += " AND scope = ?"
 			tkArgs = append(tkArgs, normalizeScope(opts.Scope))
+		}
+		if opts.Since != "" {
+			tkSQL += " AND datetime(created_at) >= datetime(?)"
+			tkArgs = append(tkArgs, opts.Since)
+		}
+		if opts.Until != "" {
+			tkSQL += " AND datetime(created_at) <= datetime(?)"
+			tkArgs = append(tkArgs, opts.Until)
 		}
 
 		tkSQL += " ORDER BY updated_at DESC LIMIT ?"
@@ -1635,6 +1689,14 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 	if opts.Scope != "" {
 		sqlQ += " AND o.scope = ?"
 		args = append(args, normalizeScope(opts.Scope))
+	}
+	if opts.Since != "" {
+		sqlQ += " AND datetime(o.created_at) >= datetime(?)"
+		args = append(args, opts.Since)
+	}
+	if opts.Until != "" {
+		sqlQ += " AND datetime(o.created_at) <= datetime(?)"
+		args = append(args, opts.Until)
 	}
 
 	sqlQ += " ORDER BY fts.rank LIMIT ?"
@@ -1704,13 +1766,13 @@ func (s *Store) Stats() (*Stats, error) {
 
 // ─── Context Formatting ─────────────────────────────────────────────────────
 
-func (s *Store) FormatContext(project, scope string) (string, error) {
-	sessions, err := s.RecentSessions(project, 5)
+func (s *Store) FormatContext(project, scope string, since, until string) (string, error) {
+	sessions, err := s.RecentSessions(project, 5, since, until)
 	if err != nil {
 		return "", err
 	}
 
-	observations, err := s.RecentObservations(project, scope, s.cfg.MaxContextResults)
+	observations, err := s.RecentObservations(project, scope, s.cfg.MaxContextResults, since, until)
 	if err != nil {
 		return "", err
 	}
@@ -1845,6 +1907,8 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 
 	// Import sessions (skip duplicates)
 	for _, sess := range data.Sessions {
+		// Normalize project from external data to match local conventions
+		sess.Project, _ = NormalizeProject(sess.Project)
 		res, err := s.execHook(tx,
 			`INSERT OR IGNORE INTO sessions (id, project, directory, started_at, ended_at, summary)
 			 VALUES (?, ?, ?, ?, ?, ?)`,
@@ -1859,6 +1923,11 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 
 	// Import observations (use new IDs — AUTOINCREMENT)
 	for _, obs := range data.Observations {
+		// Normalize project from external data
+		if obs.Project != nil {
+			normalized, _ := NormalizeProject(*obs.Project)
+			obs.Project = &normalized
+		}
 		_, err := s.execHook(tx,
 			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -3475,6 +3544,21 @@ func stripPrivateTags(s string) string {
 
 // sanitizeFTS wraps each word in quotes so FTS5 doesn't choke on special chars.
 // "fix auth bug" → `"fix" "auth" "bug"`
+// validateDate returns an error if s is neither empty, a YYYY-MM-DD date, nor
+// an RFC3339 timestamp. SQLite's datetime() silently returns NULL for invalid
+// strings, which would make date filters silently no-op.
+func validateDate(s string) error {
+	if s == "" {
+		return nil
+	}
+	for _, layout := range []string{time.RFC3339, "2006-01-02"} {
+		if _, err := time.Parse(layout, s); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid date %q: expected YYYY-MM-DD or RFC3339", s)
+}
+
 func sanitizeFTS(query string) string {
 	words := strings.Fields(query)
 	for i, w := range words {

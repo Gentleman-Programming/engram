@@ -196,7 +196,7 @@ func (s *Server) handleRecentSessions(w http.ResponseWriter, r *http.Request) {
 	project := r.URL.Query().Get("project")
 	limit := queryInt(r, "limit", 5)
 
-	sessions, err := s.store.RecentSessions(project, limit)
+	sessions, err := s.store.RecentSessions(project, limit, "", "")
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -252,7 +252,7 @@ func (s *Server) handleRecentObservations(w http.ResponseWriter, r *http.Request
 	scope := r.URL.Query().Get("scope")
 	limit := queryInt(r, "limit", 20)
 
-	obs, err := s.store.RecentObservations(project, scope, limit)
+	obs, err := s.store.RecentObservations(project, scope, limit, "", "")
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -273,6 +273,8 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		Project: r.URL.Query().Get("project"),
 		Scope:   r.URL.Query().Get("scope"),
 		Limit:   queryInt(r, "limit", 10),
+		Since:   r.URL.Query().Get("since"),
+		Until:   r.URL.Query().Get("until"),
 	})
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
@@ -521,7 +523,7 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 	project := r.URL.Query().Get("project")
 	scope := r.URL.Query().Get("scope")
 
-	context, err := s.store.FormatContext(project, scope)
+	context, err := s.store.FormatContext(project, scope, "", "")
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return

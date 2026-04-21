@@ -63,6 +63,7 @@ var ProfileAgent = map[string]bool{
 	"mem_capture_passive":   true, // extract learnings from text — referenced in Gemini/Codex protocol
 	"mem_save_prompt":       true, // save user prompts
 	"mem_update":            true, // update observation by ID — skills say "use mem_update when you have an exact ID to correct"
+	"mem_sessions":          true, // list sessions by date range
 }
 
 // ProfileAdmin contains tools for TUI, dashboards, and manual curation
@@ -174,33 +175,39 @@ func shouldRegister(name string, allowlist map[string]bool) bool {
 func registerTools(srv *server.MCPServer, s *store.Store, cfg MCPConfig, allowlist map[string]bool, activity *SessionActivity) {
 	// ─── mem_search (profile: agent, core — always in context) ─────────
 	if shouldRegister("mem_search", allowlist) {
-		srv.AddTool(
-			mcp.NewTool("mem_search",
-				mcp.WithDescription("Search your persistent memory across all sessions. Use this to find past decisions, bugs fixed, patterns used, files changed, or any context from previous coding sessions."),
-				mcp.WithTitleAnnotation("Search Memory"),
-				mcp.WithReadOnlyHintAnnotation(true),
-				mcp.WithDestructiveHintAnnotation(false),
-				mcp.WithIdempotentHintAnnotation(true),
-				mcp.WithOpenWorldHintAnnotation(false),
-				mcp.WithString("query",
-					mcp.Required(),
-					mcp.Description("Search query — natural language or keywords"),
+			srv.AddTool(
+				mcp.NewTool("mem_search",
+					mcp.WithDescription("Search your persistent memory across all sessions. Use this to find past decisions, bugs fixed, patterns used, files changed, or any context from previous coding sessions."),
+					mcp.WithTitleAnnotation("Search Memory"),
+					mcp.WithReadOnlyHintAnnotation(true),
+					mcp.WithDestructiveHintAnnotation(false),
+					mcp.WithIdempotentHintAnnotation(true),
+					mcp.WithOpenWorldHintAnnotation(false),
+					mcp.WithString("query",
+						mcp.Required(),
+						mcp.Description("Search query — natural language or keywords"),
+					),
+					mcp.WithString("type",
+						mcp.Description("Filter by type: tool_use, file_change, command, file_read, search, manual, decision, architecture, bugfix, pattern"),
+					),
+					mcp.WithString("project",
+						mcp.Description("Filter by project name"),
+					),
+					mcp.WithString("scope",
+						mcp.Description("Filter by scope: project (default) or personal"),
+					),
+					mcp.WithNumber("limit",
+						mcp.Description("Max results (default: 10, max: 20)"),
+					),
+					mcp.WithString("since",
+						mcp.Description("Filter observations created on or after this date (YYYY-MM-DD or RFC3339)"),
+					),
+					mcp.WithString("until",
+						mcp.Description("Filter observations created on or before this date (YYYY-MM-DD or RFC3339)"),
+					),
 				),
-				mcp.WithString("type",
-					mcp.Description("Filter by type: tool_use, file_change, command, file_read, search, manual, decision, architecture, bugfix, pattern"),
-				),
-				mcp.WithString("project",
-					mcp.Description("Filter by project name"),
-				),
-				mcp.WithString("scope",
-					mcp.Description("Filter by scope: project (default) or personal"),
-				),
-				mcp.WithNumber("limit",
-					mcp.Description("Max results (default: 10, max: 20)"),
-				),
-			),
-			handleSearch(s, cfg, activity),
-		)
+				handleSearch(s, cfg, activity),
+			)
 	}
 
 	// ─── mem_save (profile: agent, core — always in context) ───────────
@@ -379,25 +386,58 @@ Examples:
 
 	// ─── mem_context (profile: agent, core — always in context) ────────
 	if shouldRegister("mem_context", allowlist) {
+			srv.AddTool(
+				mcp.NewTool("mem_context",
+					mcp.WithDescription("Get recent memory context from previous sessions. Shows recent sessions and observations to understand what was done before."),
+					mcp.WithTitleAnnotation("Get Memory Context"),
+					mcp.WithReadOnlyHintAnnotation(true),
+					mcp.WithDestructiveHintAnnotation(false),
+					mcp.WithIdempotentHintAnnotation(true),
+					mcp.WithOpenWorldHintAnnotation(false),
+					mcp.WithString("project",
+						mcp.Description("Filter by project (omit for all projects)"),
+					),
+					mcp.WithString("scope",
+						mcp.Description("Filter observations by scope: project (default) or personal"),
+					),
+					mcp.WithNumber("limit",
+						mcp.Description("Number of observations to retrieve (default: 20)"),
+					),
+					mcp.WithString("since",
+						mcp.Description("Filter sessions/observations created on or after this date (YYYY-MM-DD or RFC3339)"),
+					),
+					mcp.WithString("until",
+						mcp.Description("Filter sessions/observations created on or before this date (YYYY-MM-DD or RFC3339)"),
+					),
+			),
+			handleContext(s, cfg, activity),
+		)
+	}
+
+	// ─── mem_sessions (profile: agent, core) ────────────────────────────
+	if shouldRegister("mem_sessions", allowlist) {
 		srv.AddTool(
-			mcp.NewTool("mem_context",
-				mcp.WithDescription("Get recent memory context from previous sessions. Shows recent sessions and observations to understand what was done before."),
-				mcp.WithTitleAnnotation("Get Memory Context"),
+			mcp.NewTool("mem_sessions",
+				mcp.WithDescription("List sessions within a date range. Shows session date, project, and observation count. Use this to discover what work was done on a specific day or week."),
+				mcp.WithTitleAnnotation("List Sessions by Date"),
 				mcp.WithReadOnlyHintAnnotation(true),
 				mcp.WithDestructiveHintAnnotation(false),
 				mcp.WithIdempotentHintAnnotation(true),
 				mcp.WithOpenWorldHintAnnotation(false),
+				mcp.WithString("since",
+					mcp.Description("Filter sessions started on or after this date (YYYY-MM-DD or RFC3339)"),
+				),
+				mcp.WithString("until",
+					mcp.Description("Filter sessions started on or before this date (YYYY-MM-DD or RFC3339)"),
+				),
 				mcp.WithString("project",
 					mcp.Description("Filter by project (omit for all projects)"),
 				),
-				mcp.WithString("scope",
-					mcp.Description("Filter observations by scope: project (default) or personal"),
-				),
 				mcp.WithNumber("limit",
-					mcp.Description("Number of observations to retrieve (default: 20)"),
+					mcp.Description("Max results (default: 20, max: 50)"),
 				),
 			),
-			handleContext(s, cfg, activity),
+			handleSessions(s, cfg, activity),
 		)
 	}
 
@@ -637,12 +677,10 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		project, _ := req.GetArguments()["project"].(string)
 		scope, _ := req.GetArguments()["scope"].(string)
 		limit := intArg(req, "limit", 10)
+		since, _ := req.GetArguments()["since"].(string)
+		until, _ := req.GetArguments()["until"].(string)
 
-		// Apply default project when LLM sends empty
-		if project == "" {
-			project = cfg.DefaultProject
-		}
-		// Normalize project name
+		// Normalize project name (empty = search all projects)
 		project, _ = store.NormalizeProject(project)
 
 		sessionID := defaultSessionID(project)
@@ -653,6 +691,8 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			Project: project,
 			Scope:   scope,
 			Limit:   limit,
+			Since:   since,
+			Until:   until,
 		})
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Search error: %s. Try simpler keywords.", err)), nil
@@ -701,6 +741,15 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		project, _ := req.GetArguments()["project"].(string)
 		scope, _ := req.GetArguments()["scope"].(string)
 		topicKey, _ := req.GetArguments()["topic_key"].(string)
+
+		// Validate required fields. The MCP schema marks them Required() but
+		// Go type assertions silently return "" for missing/null arguments.
+		if strings.TrimSpace(title) == "" {
+			return mcp.NewToolResultError("title is required and cannot be empty"), nil
+		}
+		if strings.TrimSpace(content) == "" {
+			return mcp.NewToolResultError("content is required and cannot be empty"), nil
+		}
 
 		// Apply default project when LLM sends empty
 		if project == "" {
@@ -901,17 +950,16 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		project, _ := req.GetArguments()["project"].(string)
 		scope, _ := req.GetArguments()["scope"].(string)
+		since, _ := req.GetArguments()["since"].(string)
+		until, _ := req.GetArguments()["until"].(string)
 
-		// Apply default project when LLM sends empty
-		if project == "" {
-			project = cfg.DefaultProject
-		}
+		// Normalize project name (empty = all projects)
 		project, _ = store.NormalizeProject(project)
 
 		sessionID := defaultSessionID(project)
 		activity.RecordToolCall(sessionID)
 
-		context, err := s.FormatContext(project, scope)
+		context, err := s.FormatContext(project, scope, since, until)
 		if err != nil {
 			return mcp.NewToolResultError("Failed to get context: " + err.Error()), nil
 		}
@@ -1238,6 +1286,46 @@ func boolArg(req mcp.CallToolRequest, key string, defaultVal bool) bool {
 		return defaultVal
 	}
 	return v
+}
+
+func handleSessions(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		since, _ := req.GetArguments()["since"].(string)
+		until, _ := req.GetArguments()["until"].(string)
+		project, _ := req.GetArguments()["project"].(string)
+		limit := intArg(req, "limit", 20)
+		if limit > 50 {
+			limit = 50
+		}
+
+		project, _ = store.NormalizeProject(project)
+
+		sessions, err := s.RecentSessions(project, limit, since, until)
+		if err != nil {
+			return mcp.NewToolResultError("Failed to list sessions: " + err.Error()), nil
+		}
+
+		if len(sessions) == 0 {
+			return mcp.NewToolResultText("No sessions found for the given filters."), nil
+		}
+
+		var b strings.Builder
+		fmt.Fprintf(&b, "Found %d sessions:\n\n", len(sessions))
+		for _, sess := range sessions {
+			summary := ""
+			if sess.Summary != nil {
+				summary = fmt.Sprintf(" — %s", truncate(*sess.Summary, 100))
+			}
+			ended := ""
+			if sess.EndedAt != nil {
+				ended = fmt.Sprintf(" (ended %s)", *sess.EndedAt)
+			}
+			fmt.Fprintf(&b, "- %s | %s%s%s [%d observations]\n",
+				sess.StartedAt, sess.Project, ended, summary, sess.ObservationCount)
+		}
+
+		return mcp.NewToolResultText(b.String()), nil
+	}
 }
 
 func truncate(s string, max int) string {

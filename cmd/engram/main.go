@@ -85,7 +85,7 @@ var (
 	storeTimeline       = func(s *store.Store, observationID int64, before, after int) (*store.TimelineResult, error) {
 		return s.Timeline(observationID, before, after)
 	}
-	storeFormatContext = func(s *store.Store, project, scope string) (string, error) { return s.FormatContext(project, scope) }
+	storeFormatContext = func(s *store.Store, project, scope string) (string, error) { return s.FormatContext(project, scope, "", "") }
 	storeStats         = func(s *store.Store) (*store.Stats, error) { return s.Stats() }
 	storeExport        = func(s *store.Store) (*store.ExportData, error) { return s.Export() }
 	jsonMarshalIndent  = json.MarshalIndent
@@ -287,7 +287,7 @@ func cmdTUI(cfg store.Config) {
 
 func cmdSearch(cfg store.Config) {
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "usage: engram search <query> [--type TYPE] [--project PROJECT] [--scope SCOPE] [--limit N]")
+		fmt.Fprintln(os.Stderr, "usage: engram search <query> [--type TYPE] [--project PROJECT] [--scope SCOPE] [--limit N] [--since DATE] [--until DATE]")
 		exitFunc(1)
 	}
 
@@ -317,6 +317,16 @@ func cmdSearch(cfg store.Config) {
 		case "--scope":
 			if i+1 < len(os.Args) {
 				opts.Scope = os.Args[i+1]
+				i++
+			}
+		case "--since":
+			if i+1 < len(os.Args) {
+				opts.Since = os.Args[i+1]
+				i++
+			}
+		case "--until":
+			if i+1 < len(os.Args) {
+				opts.Until = os.Args[i+1]
 				i++
 			}
 		default:
