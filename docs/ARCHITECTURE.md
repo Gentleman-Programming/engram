@@ -136,6 +136,10 @@ engram/
 │       └── view.go                 # Rendering, per-screen views
 ├── plugin/
 │   ├── opencode/engram.ts          # OpenCode adapter plugin
+│   ├── pi/                          # Pi extension (global install, notify-only startup)
+│   │   ├── package.json             # Includes top-level `pi` manifest
+│   │   ├── extensions/engram.ts
+│   │   └── skills/engram/SKILL.md
 │   └── claude-code/                # Claude Code plugin (hooks + skill)
 │       ├── .claude-plugin/plugin.json
 │       ├── .mcp.json
@@ -156,7 +160,7 @@ engram/
 ## CLI Reference
 
 ```
-engram setup [agent]      Install/setup agent integration (opencode, claude-code, gemini-cli, codex)
+engram setup [agent]      Install/setup agent integration (opencode, claude-code, gemini-cli, codex, pi)
 engram serve [port]       Start HTTP API server (default: 7437)
 engram mcp                Start MCP server (stdio transport)
 engram tui                Launch interactive terminal UI
@@ -181,5 +185,5 @@ engram version            Show version
 ## Next Steps
 
 - [Agent Setup](AGENT-SETUP.md) — connect your agent to Engram
-- [Plugins](PLUGINS.md) — what the OpenCode and Claude Code plugins add
+- [Plugins](PLUGINS.md) — what the OpenCode, Claude Code, and Pi integrations add
 - [Obsidian Brain](beta/obsidian-brain.md) — visualize memories as a knowledge graph (beta)

@@ -1599,6 +1599,43 @@ func TestStoreAdditionalQueryAndMutationBranches(t *testing.T) {
 	}
 }
 
+func TestPassiveCaptureRedactsPrivateTagsBeforePersisting(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s-passive-private", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	content := "## Key Learnings:\n1. Keep token <private>super-secret-token</private> away from persisted memory always."
+	result, err := s.PassiveCapture(PassiveCaptureParams{
+		SessionID: "s-passive-private",
+		Content:   content,
+		Project:   "engram",
+		Source:    "pi-passive-test",
+	})
+	if err != nil {
+		t.Fatalf("passive capture: %v", err)
+	}
+	if result.Saved != 1 {
+		t.Fatalf("expected one saved learning, got %+v", result)
+	}
+
+	obs, err := s.RecentObservations("engram", "project", 1)
+	if err != nil {
+		t.Fatalf("recent observations: %v", err)
+	}
+	if len(obs) != 1 {
+		t.Fatalf("expected one observation from passive capture, got %d", len(obs))
+	}
+
+	if !strings.Contains(obs[0].Content, "[REDACTED]") {
+		t.Fatalf("expected redaction marker in passive capture content, got %q", obs[0].Content)
+	}
+	if strings.Contains(obs[0].Content, "super-secret-token") {
+		t.Fatalf("secret leaked into passive capture content: %q", obs[0].Content)
+	}
+}
+
 func TestStoreErrorBranchesWithClosedDatabase(t *testing.T) {
 	s := newTestStore(t)
 
@@ -1653,6 +1690,64 @@ func TestEndSessionEdgeCases(t *testing.T) {
 	}
 	if sess.Summary != nil {
 		t.Fatalf("expected empty summary to persist as NULL, got %q", *sess.Summary)
+	}
+}
+
+func TestEndSessionPreservesHighSignalSummaryOnShutdownMetadata(t *testing.T) {
+	s := newTestStore(t)
+
+	const preservedSummary = "## Goal\nDocumented high-signal summary"
+	const shutdownSummary = "shutdown reason=exit target=app"
+	if err := s.CreateSession("s-preserve", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if err := s.EndSession("s-preserve", preservedSummary); err != nil {
+		t.Fatalf("seed high-signal summary: %v", err)
+	}
+
+	const fixedEndedAt = "2000-01-01 00:00:00"
+	if _, err := s.db.Exec(`UPDATE sessions SET ended_at = ? WHERE id = ?`, fixedEndedAt, "s-preserve"); err != nil {
+		t.Fatalf("set fixed ended_at: %v", err)
+	}
+
+	if err := s.EndSession("s-preserve", shutdownSummary); err != nil {
+		t.Fatalf("shutdown metadata end session: %v", err)
+	}
+
+	sess, err := s.GetSession("s-preserve")
+	if err != nil {
+		t.Fatalf("get preserved session: %v", err)
+	}
+	if sess.Summary == nil || *sess.Summary != preservedSummary {
+		t.Fatalf("expected preserved high-signal summary, got %+v", sess.Summary)
+	}
+	if sess.EndedAt == nil || *sess.EndedAt == fixedEndedAt {
+		t.Fatalf("expected ended_at refreshed on shutdown, got %+v", sess.EndedAt)
+	}
+
+	if err := s.EndSession("s-preserve", "fresh high-signal summary"); err != nil {
+		t.Fatalf("high-signal overwrite should remain allowed: %v", err)
+	}
+	sess, err = s.GetSession("s-preserve")
+	if err != nil {
+		t.Fatalf("get overwritten session: %v", err)
+	}
+	if sess.Summary == nil || *sess.Summary != "fresh high-signal summary" {
+		t.Fatalf("expected high-signal overwrite to apply, got %+v", sess.Summary)
+	}
+
+	if err := s.CreateSession("s-low-only", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create low-only session: %v", err)
+	}
+	if err := s.EndSession("s-low-only", shutdownSummary); err != nil {
+		t.Fatalf("end low-only session: %v", err)
+	}
+	lowOnly, err := s.GetSession("s-low-only")
+	if err != nil {
+		t.Fatalf("get low-only session: %v", err)
+	}
+	if lowOnly.Summary == nil || *lowOnly.Summary != shutdownSummary {
+		t.Fatalf("expected low-signal summary to persist when no prior summary exists, got %+v", lowOnly.Summary)
 	}
 }
 

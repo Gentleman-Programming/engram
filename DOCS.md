@@ -65,7 +65,7 @@ All endpoints return JSON. Server listens on `127.0.0.1:7437`.
 ### Sessions
 
 - `POST /sessions` — Create session. Body: `{id, project, directory}`
-- `POST /sessions/{id}/end` — End session. Body: `{summary}`
+- `POST /sessions/{id}/end` — End session and set `ended_at`. Body: `{summary}`. If an existing non-empty summary is already stored, low-signal shutdown metadata summaries (`shutdown reason=... target=...`) are ignored to preserve the higher-signal summary.
 - `GET /sessions/recent` — Recent sessions. Query: `?project=X&limit=N`
 
 ### Observations

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -17,6 +18,7 @@ func resetSetupSeams(t *testing.T) {
 	oldRunCommand := runCommand
 	oldStatFn := statFn
 	oldOpenCodeReadFile := openCodeReadFile
+	oldPiReadFile := piReadFile
 	oldOpenCodeWriteFileFn := openCodeWriteFileFn
 	oldReadFileFn := readFileFn
 	oldWriteFileFn := writeFileFn
@@ -39,6 +41,7 @@ func resetSetupSeams(t *testing.T) {
 		runCommand = oldRunCommand
 		statFn = oldStatFn
 		openCodeReadFile = oldOpenCodeReadFile
+		piReadFile = oldPiReadFile
 		openCodeWriteFileFn = oldOpenCodeWriteFileFn
 		readFileFn = oldReadFileFn
 		writeFileFn = oldWriteFileFn
@@ -68,12 +71,16 @@ func TestSupportedAgentsIncludesGeminiAndCodex(t *testing.T) {
 
 	var hasGemini bool
 	var hasCodex bool
+	var hasPi bool
 	for _, agent := range agents {
 		if agent.Name == "gemini-cli" {
 			hasGemini = true
 		}
 		if agent.Name == "codex" {
 			hasCodex = true
+		}
+		if agent.Name == "pi" {
+			hasPi = true
 		}
 	}
 
@@ -82,6 +89,693 @@ func TestSupportedAgentsIncludesGeminiAndCodex(t *testing.T) {
 	}
 	if !hasCodex {
 		t.Fatalf("expected codex in supported agents")
+	}
+	if !hasPi {
+		t.Fatalf("expected pi in supported agents")
+	}
+}
+
+func TestInstallPiCreatesGlobalAssetsAndIsIdempotent(t *testing.T) {
+	resetSetupSeams(t)
+	home := useTestHome(t)
+	runtimeGOOS = "linux"
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "xdg"))
+
+	lookPathFn = func(file string) (string, error) {
+		if file != "pi" {
+			t.Fatalf("expected pi binary lookup, got %q", file)
+		}
+		return "/usr/bin/pi", nil
+	}
+
+	var installCalls int
+	runCommand = func(name string, args ...string) ([]byte, error) {
+		if name != "/usr/bin/pi" {
+			t.Fatalf("expected pi binary path, got %q", name)
+		}
+		if len(args) != 2 || args[0] != "install" {
+			t.Fatalf("expected 'pi install <package-dir>', got %q %v", name, args)
+		}
+		installCalls++
+		return []byte("ok"), nil
+	}
+
+	result, err := Install("pi")
+	if err != nil {
+		t.Fatalf("install pi: %v", err)
+	}
+
+	if result.Agent != "pi" {
+		t.Fatalf("unexpected agent in result: %q", result.Agent)
+	}
+
+	if result.Files != 4 {
+		t.Fatalf("expected 4 setup actions (3 files + installer), got %d", result.Files)
+	}
+
+	if !strings.HasSuffix(result.Destination, filepath.Join("pi-coding-agent", "packages", "engram")) {
+		t.Fatalf("unexpected install destination: %q", result.Destination)
+	}
+
+	extensionPath := filepath.Join(result.Destination, "extensions", "engram.ts")
+	if _, err := os.Stat(extensionPath); err != nil {
+		t.Fatalf("expected extensions/engram.ts to exist: %v", err)
+	}
+
+	packagePath := filepath.Join(result.Destination, "package.json")
+	if _, err := os.Stat(packagePath); err != nil {
+		t.Fatalf("expected package.json to exist: %v", err)
+	}
+
+	skillPath := filepath.Join(result.Destination, "skills", "engram", "SKILL.md")
+	if _, err := os.Stat(skillPath); err != nil {
+		t.Fatalf("expected skill file to exist: %v", err)
+	}
+
+	if installCalls != 1 {
+		t.Fatalf("expected one pi install invocation, got %d", installCalls)
+	}
+
+	if _, err := Install("pi"); err != nil {
+		t.Fatalf("second install should be idempotent: %v", err)
+	}
+
+	if installCalls != 2 {
+		t.Fatalf("expected second run to invoke installer again, got %d calls", installCalls)
+	}
+
+	if _, err := os.Stat(filepath.Join(home, "xdg", "pi-coding-agent", "config.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected setup to avoid writing guessed pi config internals")
+	}
+}
+
+func TestInstallPiFailsWithClearErrorWhenPiBinaryMissing(t *testing.T) {
+	resetSetupSeams(t)
+	useTestHome(t)
+	runtimeGOOS = "linux"
+
+	lookPathFn = func(file string) (string, error) {
+		if file != "pi" {
+			t.Fatalf("expected pi lookup, got %q", file)
+		}
+		return "", errors.New("not found")
+	}
+
+	_, err := Install("pi")
+	if err == nil {
+		t.Fatalf("expected missing pi binary error")
+	}
+	if !strings.Contains(err.Error(), "pi CLI not found") {
+		t.Fatalf("expected clear pi missing error, got %v", err)
+	}
+}
+
+func TestInstallPiReadEmbeddedError(t *testing.T) {
+	resetSetupSeams(t)
+	runtimeGOOS = "linux"
+	useTestHome(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	piReadFile = func(path string) ([]byte, error) {
+		return nil, errors.New("missing embedded asset")
+	}
+
+	_, err := Install("pi")
+	if err == nil || !strings.Contains(err.Error(), "read embedded") {
+		t.Fatalf("expected embedded read error, got %v", err)
+	}
+}
+
+func TestInstallPiOfflineGlobalAndStableAcrossOSVariants(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		goos       string
+		useXDG     bool
+		useAppData bool
+	}{
+		{name: "linux-xdg", goos: "linux", useXDG: true},
+		{name: "darwin-default", goos: "darwin"},
+		{name: "windows-appdata", goos: "windows", useAppData: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetSetupSeams(t)
+			home := useTestHome(t)
+			runtimeGOOS = tc.goos
+
+			t.Setenv("XDG_CONFIG_HOME", "")
+			t.Setenv("APPDATA", "")
+			if tc.useXDG {
+				t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "xdg"))
+			}
+			if tc.useAppData {
+				t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
+			}
+
+			lookPathFn = func(file string) (string, error) {
+				if file != "pi" {
+					t.Fatalf("expected pi lookup, got %q", file)
+				}
+				return "/usr/local/bin/pi", nil
+			}
+
+			var invokedInstall bool
+			runCommand = func(name string, args ...string) ([]byte, error) {
+				if name != "/usr/local/bin/pi" {
+					t.Fatalf("expected resolved pi binary, got %q", name)
+				}
+				if len(args) != 2 || args[0] != "install" {
+					t.Fatalf("expected 'pi install <path>', got %s %v", name, args)
+				}
+				invokedInstall = true
+				return []byte("installed"), nil
+			}
+
+			result, err := Install("pi")
+			if err != nil {
+				t.Fatalf("install pi: %v", err)
+			}
+
+			if result.Agent != "pi" {
+				t.Fatalf("unexpected agent in result: %q", result.Agent)
+			}
+			if result.Files != 4 {
+				t.Fatalf("expected 4 setup actions (3 files + installer), got %d", result.Files)
+			}
+
+			expectedConfigDir := filepath.Join(home, ".config", "pi-coding-agent")
+			if tc.useXDG {
+				expectedConfigDir = filepath.Join(home, "xdg", "pi-coding-agent")
+			}
+			if tc.useAppData {
+				expectedConfigDir = filepath.Join(home, "AppData", "Roaming", "pi-coding-agent")
+			}
+
+			expectedDest := filepath.Join(expectedConfigDir, "packages", "engram")
+			if result.Destination != expectedDest {
+				t.Fatalf("unexpected destination. want=%q got=%q", expectedDest, result.Destination)
+			}
+
+			mustExist := []string{
+				filepath.Join(expectedDest, "extensions", "engram.ts"),
+				filepath.Join(expectedDest, "package.json"),
+				filepath.Join(expectedDest, "skills", "engram", "SKILL.md"),
+			}
+			for _, path := range mustExist {
+				if _, err := os.Stat(path); err != nil {
+					t.Fatalf("expected asset %s: %v", path, err)
+				}
+			}
+
+			if !invokedInstall {
+				t.Fatalf("expected pi install invocation for %s", tc.name)
+			}
+
+			if _, err := Install("pi"); err != nil {
+				t.Fatalf("second install should be idempotent: %v", err)
+			}
+
+			if _, err := os.Stat(filepath.Join(expectedConfigDir, "config.json")); !os.IsNotExist(err) {
+				t.Fatalf("expected setup to avoid writing pi config.json for %s", tc.name)
+			}
+		})
+	}
+}
+
+func TestPiContractChecklistFixtureIncludesRequiredAssumptions(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "pi-contract.json"))
+	if err != nil {
+		t.Fatalf("read pi contract fixture: %v", err)
+	}
+
+	type contractItem struct {
+		Status string `json:"status"`
+	}
+
+	var checklist map[string]contractItem
+	if err := json.Unmarshal(raw, &checklist); err != nil {
+		t.Fatalf("parse pi contract fixture: %v", err)
+	}
+
+	required := []string{
+		"global_install_paths",
+		"extension_manifest_schema",
+		"lifecycle_hooks",
+		"compaction_hook_payload",
+		"notification_api",
+	}
+
+	for _, key := range required {
+		item, ok := checklist[key]
+		if !ok {
+			t.Fatalf("missing contract key %q", key)
+		}
+		if item.Status == "" {
+			t.Fatalf("expected non-empty status for %q", key)
+		}
+	}
+}
+
+func TestPiPackageManifestDeclaresExtensionsAndSkills(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "plugin", "pi", "package.json"))
+	if err != nil {
+		t.Fatalf("read pi package manifest: %v", err)
+	}
+
+	var manifest struct {
+		Type     string   `json:"type"`
+		Keywords []string `json:"keywords"`
+		Pi struct {
+			Extensions []string `json:"extensions"`
+			Skills     []string `json:"skills"`
+		} `json:"pi"`
+		PeerDependencies map[string]string `json:"peerDependencies"`
+	}
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		t.Fatalf("parse pi package manifest: %v", err)
+	}
+
+	if len(manifest.Pi.Extensions) != 1 || manifest.Pi.Extensions[0] != "./extensions/engram.ts" {
+		t.Fatalf("expected pi.extensions to include ./extensions/engram.ts, got %#v", manifest.Pi.Extensions)
+	}
+	if len(manifest.Pi.Skills) != 1 || manifest.Pi.Skills[0] != "./skills" {
+		t.Fatalf("expected pi.skills to include ./skills, got %#v", manifest.Pi.Skills)
+	}
+	if manifest.Type != "module" {
+		t.Fatalf("expected package type module, got %q", manifest.Type)
+	}
+	if !slices.Contains(manifest.Keywords, "pi-package") {
+		t.Fatalf("expected package keywords to include pi-package, got %#v", manifest.Keywords)
+	}
+	if got := manifest.PeerDependencies["@mariozechner/pi-coding-agent"]; got != "*" {
+		t.Fatalf("expected peer dependency @mariozechner/pi-coding-agent to be '*', got %q", got)
+	}
+	if got := manifest.PeerDependencies["typebox"]; got != "*" {
+		t.Fatalf("expected peer dependency typebox to be '*', got %q", got)
+	}
+}
+
+func TestPiSkillIncludesRequiredFrontmatterMetadata(t *testing.T) {
+	tests := []struct {
+		name string
+		read func() ([]byte, error)
+	}{
+		{
+			name: "source skill",
+			read: func() ([]byte, error) {
+				return os.ReadFile(filepath.Join("..", "..", "plugin", "pi", "skills", "engram", "SKILL.md"))
+			},
+		},
+		{
+			name: "embedded skill",
+			read: func() ([]byte, error) {
+				return piReadFile("plugins/pi/skills/engram/SKILL.md")
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := tc.read()
+			if err != nil {
+				t.Fatalf("read pi skill: %v", err)
+			}
+
+			content := string(raw)
+			if !strings.HasPrefix(content, "---\n") {
+				t.Fatalf("expected YAML frontmatter delimiter at top of skill")
+			}
+			if !strings.Contains(content, "\nname: engram\n") {
+				t.Fatalf("expected frontmatter to include name: engram")
+			}
+			if !strings.Contains(content, "\ndescription:") {
+				t.Fatalf("expected frontmatter to include description field")
+			}
+			if !strings.Contains(content, "\n---\n\n## Engram Persistent Memory") {
+				t.Fatalf("expected markdown body after frontmatter")
+			}
+		})
+	}
+}
+
+func TestPiEmbeddedAssetsMatchSourceFiles(t *testing.T) {
+	tests := []struct {
+		sourcePath   string
+		embeddedPath string
+	}{
+		{sourcePath: filepath.Join("..", "..", "plugin", "pi", "extensions", "engram.ts"), embeddedPath: "plugins/pi/extensions/engram.ts"},
+		{sourcePath: filepath.Join("..", "..", "plugin", "pi", "package.json"), embeddedPath: "plugins/pi/package.json"},
+		{sourcePath: filepath.Join("..", "..", "plugin", "pi", "skills", "engram", "SKILL.md"), embeddedPath: "plugins/pi/skills/engram/SKILL.md"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.embeddedPath, func(t *testing.T) {
+			source, err := os.ReadFile(tc.sourcePath)
+			if err != nil {
+				t.Fatalf("read source asset: %v", err)
+			}
+
+			embedded, err := piReadFile(tc.embeddedPath)
+			if err != nil {
+				t.Fatalf("read embedded asset: %v", err)
+			}
+
+			if string(source) != string(embedded) {
+				t.Fatalf("embedded asset drift for %s; run go generate ./internal/setup/", tc.embeddedPath)
+			}
+		})
+	}
+}
+
+func TestPiExtensionHasNotifyOnlyStartupAndCompactionRecovery(t *testing.T) {
+	tests := []struct {
+		name string
+		read func() ([]byte, error)
+	}{
+		{
+			name: "source extension",
+			read: func() ([]byte, error) {
+				return os.ReadFile(filepath.Join("..", "..", "plugin", "pi", "extensions", "engram.ts"))
+			},
+		},
+		{
+			name: "embedded extension",
+			read: func() ([]byte, error) {
+				return piReadFile("plugins/pi/extensions/engram.ts")
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := tc.read()
+			if err != nil {
+				t.Fatalf("read pi extension: %v", err)
+			}
+			src := string(raw)
+
+			if strings.Contains(src, "engramFetch(\"/context") || strings.Contains(src, "engramFetch(`/context") {
+				t.Fatalf("pi extension must not auto-inject /context at startup")
+			}
+
+			mustContain := []string{
+				"import type { ExtensionAPI } from \"@mariozechner/pi-coding-agent\"",
+				"import { Type } from \"typebox\"",
+				"import { spawn } from \"node:child_process\"",
+				"type BackendReadiness = {",
+				"const BACKEND_STARTUP_POLL_MS = [120, 240, 360, 600, 900]",
+				"function sleep(ms: number): Promise<void>",
+				"startupAttempted: boolean",
+				"startupError:",
+				"await sleep(BACKEND_STARTUP_POLL_MS[attempt])",
+				"/health",
+				"/sessions",
+				"/sessions/${encodeURIComponent(sessionId)}/end",
+				"FIRST ACTION REQUIRED",
+				"pi.on(\"session_start\", async (event, ctx)",
+				"pi.on(\"session_shutdown\", async (event, ctx)",
+				"pi.on(\"input\", async (event, ctx)",
+				"pi.on(\"session_before_compact\", async (event, ctx)",
+				"pi.on(\"session_compact\", async (event, ctx)",
+				"ctx.cwd",
+				"ctx.sessionManager.getSessionFile()",
+				"ctx.ui.notify(STARTUP_NOTICE, \"info\")",
+				"function observationsFromRecentResult(result: unknown): unknown[]",
+				"if (Array.isArray(result)) return result",
+				"const directObservations = (result as { observations?: unknown[] }).observations",
+				"const dataObservations = wrappedData.observations",
+				"const observations = observationsFromRecentResult(result)",
+				"if (observations.length > 0 && ctx.hasUI && ctx.ui?.notify)",
+				"event.reason",
+				"event.text",
+				"event.source === \"extension\"",
+				"pi.registerTool({",
+				"name: \"mem_search\"",
+				"name: \"mem_context\"",
+				"name: \"mem_save\"",
+				"name: \"mem_session_summary\"",
+				"name: \"mem_get_observation\"",
+				"name: \"mem_save_prompt\"",
+				"label:",
+				"description:",
+				"parameters: Type.Object({",
+				"async execute(toolCallId, params, signal, onUpdate, ctx)",
+				"promptSnippet",
+				"promptGuidelines",
+				"function successToolResult(summary: string, details: unknown)",
+				"function failureToolResult(message: string, details: Record<string, unknown> = {})",
+				"function backendFailureToolResult(toolName: string, readiness: BackendReadiness)",
+				"Engram auto-start failed for",
+				"const child = spawn(ENGRAM_BIN, [\"serve\"], {",
+				"detached: true",
+				"if (typeof child.unref === \"function\")",
+				"child.unref()",
+				"content: [{ type: \"text\", text: summary }]",
+				"isError: true",
+				"function extractObservationSummaryFields(payload: unknown)",
+				"const nestedObservation = record.observation",
+				"const nestedData = record.data",
+				"const titlePreview = summary.title ? redactPrivateTags(summary.title) : \"\"",
+				"const contentPreview = summary.content ? redactPrivateTags(summary.content) : \"\"",
+				"Loaded observation #${id}. ${preview}",
+				"pi.registerCommand(\"engram-recovery\"",
+				"ctx.ui.notify(COMPACTION_RECOVERY_NOTICE, \"info\")",
+				"return COMPACTION_RECOVERY_NOTICE",
+				"function compactionInstruction(): string",
+				"function prependInstruction(target: unknown, instruction: string): boolean",
+				"function injectCompactionInstruction(event: any): boolean",
+				"function extractCompactionSummary(event: any): string",
+				"event?.compactionEntry",
+				"event?.compaction",
+				"event?.summary",
+				"summary: compactedSummary",
+				"Compaction summary saved to Engram. Use mem_context to restore continuity.",
+				"Compaction summary unavailable. Use /engram-recovery, then mem_context manually.",
+				"[REDACTED]",
+			}
+
+			for _, token := range mustContain {
+				if !strings.Contains(src, token) {
+					t.Fatalf("expected extension source to include %q", token)
+				}
+			}
+
+			requiredTools := []string{
+				"mem_search",
+				"mem_context",
+				"mem_save",
+				"mem_session_summary",
+				"mem_get_observation",
+				"mem_save_prompt",
+			}
+			for _, toolName := range requiredTools {
+				nameToken := `name: "` + toolName + `"`
+				start := strings.Index(src, nameToken)
+				if start < 0 {
+					t.Fatalf("expected object-shaped registerTool to include %q", nameToken)
+				}
+
+				block := src[start:]
+				if next := strings.Index(block[len(nameToken):], "pi.registerTool({"); next >= 0 {
+					block = block[:len(nameToken)+next]
+				}
+
+				for _, required := range []string{
+					"label:",
+					"description:",
+					"parameters: Type.Object({",
+					"async execute(toolCallId, params, signal, onUpdate, ctx)",
+					"const ready = await ensureBackend()",
+					"if (!ready.ok)",
+					"return backendFailureToolResult(",
+					"return summarizeToolResult(",
+				} {
+					if !strings.Contains(block, required) {
+						t.Fatalf("expected %s registration block to include %q", toolName, required)
+					}
+				}
+
+				readyPos := strings.Index(block, "const ready = await ensureBackend()")
+				if readyPos < 0 {
+					t.Fatalf("expected %s registration block to call readiness helper", toolName)
+				}
+
+				requestPos := -1
+				for _, token := range []string{"const result = await engramFetch(", "const result = await postJSON("} {
+					if idx := strings.Index(block, token); idx >= 0 && (requestPos < 0 || idx < requestPos) {
+						requestPos = idx
+					}
+				}
+				if requestPos >= 0 && requestPos < readyPos {
+					t.Fatalf("expected %s registration block to perform HTTP request only after readiness check", toolName)
+				}
+
+				for _, forbidden := range []string{
+					"return engramFetch(",
+					"return postJSON(",
+					"return null",
+				} {
+					if strings.Contains(block, forbidden) {
+						t.Fatalf("expected %s registration block to avoid raw transport return %q", toolName, forbidden)
+					}
+				}
+			}
+
+			mustNotContain := []string{
+				"Bun.spawn(",
+				"recent.length > 0",
+				"console.info",
+				"payload.sessionId",
+				"payload.project",
+				"payload.directory",
+				"onPrompt",
+				"onPassiveCapture",
+				"onCompaction",
+				"pi.registerTool(\"",
+				"inputSchema:",
+				"pi.registerCommand({",
+				"engram.memory.recovery",
+				"engram:memory:recovery",
+			}
+			for _, token := range mustNotContain {
+				if strings.Contains(src, token) {
+					t.Fatalf("expected extension source to avoid unvalidated Pi hook %q", token)
+				}
+			}
+
+			sessionStartHook := "pi.on(\"session_start\", async (event, ctx)"
+			sessionStart := strings.Index(src, sessionStartHook)
+			if sessionStart < 0 {
+				t.Fatalf("expected extension source to include hook %q", sessionStartHook)
+			}
+
+			sessionStartBlock := src[sessionStart:]
+			if next := strings.Index(sessionStartBlock[len(sessionStartHook):], "pi.on(\"session_shutdown\""); next >= 0 {
+				sessionStartBlock = sessionStartBlock[:len(sessionStartHook)+next]
+			}
+
+			for _, forbidden := range []string{"/context", "mem_context("} {
+				if strings.Contains(sessionStartBlock, forbidden) {
+					t.Fatalf("expected session_start block to avoid automatic context loading via %q", forbidden)
+				}
+			}
+			for _, required := range []string{
+				"const ready = await ensureBackend()",
+				"if (!ready.ok) return",
+				"observationsFromRecentResult(result)",
+				"ctx.ui.notify(STARTUP_NOTICE, \"info\")",
+			} {
+				if !strings.Contains(sessionStartBlock, required) {
+					t.Fatalf("expected session_start block to include %q", required)
+				}
+			}
+
+			hookBlocks := []string{"pi.on(\"session_before_compact\"", "pi.on(\"session_compact\""}
+			for _, hook := range hookBlocks {
+				start := strings.Index(src, hook)
+				if start < 0 {
+					t.Fatalf("expected extension source to include hook %q", hook)
+				}
+
+				block := src[start:]
+				if next := strings.Index(block[len(hook):], "pi.on("); next >= 0 {
+					block = block[:len(hook)+next]
+				}
+
+				for _, forbidden := range []string{"/context", "mem_context("} {
+					if strings.Contains(block, forbidden) {
+						t.Fatalf("expected %s block to avoid automatic context loading via %q", hook, forbidden)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestPiDocsDescribeNativeMemoryToolsAndReloadChecklist(t *testing.T) {
+	docs := []struct {
+		name string
+		path string
+		must []string
+	}{
+		{
+			name: "agent setup",
+			path: filepath.Join("..", "..", "docs", "AGENT-SETUP.md"),
+			must: []string{
+				"mem_search",
+				"mem_context",
+				"mem_save",
+				"mem_session_summary",
+				"mem_get_observation",
+				"mem_save_prompt",
+				"/reload",
+				"/engram-recovery",
+				"ENGRAM_BIN=/path/to/engram",
+				"stop Engram backend, then call native mem_search",
+				"run `/compact`, then verify compaction summary persistence",
+			},
+		},
+		{
+			name: "plugins guide",
+			path: filepath.Join("..", "..", "docs", "PLUGINS.md"),
+			must: []string{
+				"pi.registerTool()",
+				"ctx.ui.notify",
+				"/engram-recovery",
+				"ENGRAM_BIN",
+				"native Pi tools (not MCP-first)",
+			},
+		},
+	}
+
+	for _, doc := range docs {
+		t.Run(doc.name, func(t *testing.T) {
+			raw, err := os.ReadFile(doc.path)
+			if err != nil {
+				t.Fatalf("read %s: %v", doc.path, err)
+			}
+
+			content := string(raw)
+			for _, token := range doc.must {
+				if !strings.Contains(content, token) {
+					t.Fatalf("expected %s to include %q", doc.path, token)
+				}
+			}
+
+			if strings.Contains(content, "engram:memory:recovery") {
+				t.Fatalf("expected %s to stop referencing legacy command engram:memory:recovery", doc.path)
+			}
+			if strings.Contains(content, "Pi uses MCP as the primary integration") {
+				t.Fatalf("expected %s to avoid MCP-first Pi positioning", doc.path)
+			}
+		})
+	}
+}
+
+func TestPiSkillReferencesRecoverySlashCommand(t *testing.T) {
+	skills := []string{
+		filepath.Join("..", "..", "plugin", "pi", "skills", "engram", "SKILL.md"),
+		filepath.Join("plugins", "pi", "skills", "engram", "SKILL.md"),
+	}
+
+	for _, skillPath := range skills {
+		raw, err := os.ReadFile(skillPath)
+		if err != nil {
+			t.Fatalf("read %s: %v", skillPath, err)
+		}
+
+		content := string(raw)
+		if !strings.Contains(content, "/engram-recovery") {
+			t.Fatalf("expected %s to include /engram-recovery", skillPath)
+		}
+		if strings.Contains(content, "engram:memory:recovery") {
+			t.Fatalf("expected %s to stop referencing engram:memory:recovery", skillPath)
+		}
+		if strings.Contains(content, "when MCP is available") {
+			t.Fatalf("expected %s to describe native Pi tools, not MCP-gated tooling", skillPath)
+		}
+		if !strings.Contains(content, "Compaction hook behavior") {
+			t.Fatalf("expected %s to document compaction hook behavior", skillPath)
+		}
 	}
 }
 

@@ -279,6 +279,30 @@ func TestCmdMCPAndTUIBranches(t *testing.T) {
 	}
 }
 
+func TestCmdSetupInteractiveListsPi(t *testing.T) {
+	stubRuntimeHooks(t)
+	stubExitWithPanic(t)
+
+	// Trigger interactive mode by passing a flag-like second arg.
+	withArgs(t, "engram", "setup", "--interactive")
+	scanInputLine = func(a ...any) (int, error) {
+		ptr := a[0].(*string)
+		*ptr = "1"
+		return 1, nil
+	}
+	setupInstallAgent = func(agent string) (*setup.Result, error) {
+		return &setup.Result{Agent: agent, Destination: "/tmp/dest", Files: 1}, nil
+	}
+
+	stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdSetup() })
+	if recovered != nil {
+		t.Fatalf("setup should not exit in interactive mode, panic=%v stderr=%q", recovered, stderr)
+	}
+	if !strings.Contains(stdout, "pi") {
+		t.Fatalf("expected interactive setup list to include pi, got: %q", stdout)
+	}
+}
+
 func TestCmdSetupDirectAndInteractive(t *testing.T) {
 	stubRuntimeHooks(t)
 	stubExitWithPanic(t)

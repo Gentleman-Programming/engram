@@ -397,6 +397,82 @@ func TestOnWriteNotCalledOnFailedWrites(t *testing.T) {
 	}
 }
 
+func TestPiFlowPrivacyTagsAreRedactedThroughServerEndpoints(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	if err := st.CreateSession("pi-session", "engram", "/tmp"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	obsReq := httptest.NewRequest(http.MethodPost, "/observations", strings.NewReader(`{"session_id":"pi-session","type":"note","title":"Title <private>secret-title</private>","content":"Body <private>secret-body</private>"}`))
+	obsReq.Header.Set("Content-Type", "application/json")
+	obsRec := httptest.NewRecorder()
+	h.ServeHTTP(obsRec, obsReq)
+	if obsRec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 saving observation, got %d", obsRec.Code)
+	}
+
+	var obsCreated map[string]any
+	if err := json.NewDecoder(obsRec.Body).Decode(&obsCreated); err != nil {
+		t.Fatalf("decode observation create response: %v", err)
+	}
+	obsID := int(obsCreated["id"].(float64))
+
+	getObsReq := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/observations/%d", obsID), nil)
+	getObsRec := httptest.NewRecorder()
+	h.ServeHTTP(getObsRec, getObsReq)
+	if getObsRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 fetching observation, got %d", getObsRec.Code)
+	}
+
+	var obs map[string]any
+	if err := json.NewDecoder(getObsRec.Body).Decode(&obs); err != nil {
+		t.Fatalf("decode observation response: %v", err)
+	}
+
+	obsTitle := obs["title"].(string)
+	obsContent := obs["content"].(string)
+	if !strings.Contains(obsTitle, "[REDACTED]") || !strings.Contains(obsContent, "[REDACTED]") {
+		t.Fatalf("expected redaction markers in observation, got title=%q content=%q", obsTitle, obsContent)
+	}
+	if strings.Contains(obsTitle, "secret-title") || strings.Contains(obsContent, "secret-body") {
+		t.Fatalf("private payload leaked in observation, got title=%q content=%q", obsTitle, obsContent)
+	}
+
+	promptReq := httptest.NewRequest(http.MethodPost, "/prompts", strings.NewReader(`{"session_id":"pi-session","project":"engram","content":"Prompt <private>secret-prompt</private>"}`))
+	promptReq.Header.Set("Content-Type", "application/json")
+	promptRec := httptest.NewRecorder()
+	h.ServeHTTP(promptRec, promptReq)
+	if promptRec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 saving prompt, got %d", promptRec.Code)
+	}
+
+	recentReq := httptest.NewRequest(http.MethodGet, "/prompts/recent?project=engram&limit=1", nil)
+	recentRec := httptest.NewRecorder()
+	h.ServeHTTP(recentRec, recentReq)
+	if recentRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for recent prompts, got %d", recentRec.Code)
+	}
+
+	var prompts []map[string]any
+	if err := json.NewDecoder(recentRec.Body).Decode(&prompts); err != nil {
+		t.Fatalf("decode recent prompts response: %v", err)
+	}
+	if len(prompts) != 1 {
+		t.Fatalf("expected one recent prompt, got %d", len(prompts))
+	}
+
+	promptContent := prompts[0]["content"].(string)
+	if !strings.Contains(promptContent, "[REDACTED]") {
+		t.Fatalf("expected redaction marker in prompt content, got %q", promptContent)
+	}
+	if strings.Contains(promptContent, "secret-prompt") {
+		t.Fatalf("private prompt content leaked: %q", promptContent)
+	}
+}
+
 func TestHandleStatsReturnsInternalServerErrorOnLoaderError(t *testing.T) {
 	prev := loadServerStats
 	loadServerStats = func(s *store.Store) (*store.Stats, error) {

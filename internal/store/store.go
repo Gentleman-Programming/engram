@@ -25,6 +25,8 @@ import (
 
 var openDB = sql.Open
 
+var shutdownMetadataSummaryPattern = regexp.MustCompile(`^shutdown reason=.* target=.*$`)
+
 // sqliteConstraintForeignKey is the extended SQLite result code for a foreign-key
 // constraint violation (SQLITE_CONSTRAINT_FOREIGNKEY = 787).
 // See https://www.sqlite.org/rescode.html#constraint_foreignkey
@@ -782,9 +784,27 @@ func (s *Store) CreateSession(id, project, directory string) error {
 
 func (s *Store) EndSession(id string, summary string) error {
 	return s.withTx(func(tx *sql.Tx) error {
+		var project, directory string
+		var existingSummary *string
+		err := tx.QueryRow(
+			`SELECT project, directory, summary FROM sessions WHERE id = ?`,
+			id,
+		).Scan(&project, &directory, &existingSummary)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+
+		summaryToPersist := nullableString(summary)
+		if shouldPreserveSessionSummary(existingSummary, summary) {
+			summaryToPersist = existingSummary
+		}
+
 		res, err := s.execHook(tx,
 			`UPDATE sessions SET ended_at = datetime('now'), summary = ? WHERE id = ?`,
-			nullableString(summary), id,
+			summaryToPersist, id,
 		)
 		if err != nil {
 			return err
@@ -798,12 +818,11 @@ func (s *Store) EndSession(id string, summary string) error {
 		}
 
 		var endedAt string
-		var project, directory string
 		var storedSummary *string
 		if err := tx.QueryRow(
-			`SELECT project, directory, ended_at, summary FROM sessions WHERE id = ?`,
+			`SELECT ended_at, summary FROM sessions WHERE id = ?`,
 			id,
-		).Scan(&project, &directory, &endedAt, &storedSummary); err != nil {
+		).Scan(&endedAt, &storedSummary); err != nil {
 			return err
 		}
 
@@ -3247,6 +3266,17 @@ func nullableString(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+func shouldPreserveSessionSummary(existingSummary *string, incomingSummary string) bool {
+	if existingSummary == nil || strings.TrimSpace(*existingSummary) == "" {
+		return false
+	}
+	return isShutdownMetadataSummary(incomingSummary)
+}
+
+func isShutdownMetadataSummary(summary string) bool {
+	return shutdownMetadataSummaryPattern.MatchString(strings.TrimSpace(summary))
 }
 
 func truncate(s string, max int) string {

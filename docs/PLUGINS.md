@@ -4,6 +4,7 @@
 
 - [OpenCode Plugin](#opencode-plugin)
 - [Claude Code Plugin](#claude-code-plugin)
+- [Pi Extension (Contract Assumptions)](#pi-extension-contract-assumptions)
 - [Privacy](#privacy)
 
 ---
@@ -117,6 +118,47 @@ plugin/claude-code/
 - **When to search** memory (reactive + proactive)
 - **Session close protocol** — mandatory `mem_session_summary` before ending
 - **After compaction** — 3-step recovery: persist summary → load context → continue
+
+---
+
+## Pi Extension (Contract Assumptions)
+
+`engram setup pi` installs a **global**, **offline** Pi bundle from embedded assets by using Pi's official installer:
+
+- materializes package at `~/.config/pi-coding-agent/packages/engram`
+- package includes:
+  - `package.json` with top-level `pi.extensions` + `pi.skills`
+  - `extensions/engram.ts`
+  - `skills/engram/SKILL.md`
+- runs `pi install <local-package-dir>` (no network fetch, no guessed config internals)
+
+The current adapter keeps a strict thin boundary: TypeScript only forwards lifecycle and memory-capture transport to Engram HTTP APIs. Memory semantics remain in Go core.
+
+Runtime behavior (official Pi-native shape):
+- extension export uses `export default function (pi: ExtensionAPI)`
+- lifecycle handlers use `(event, ctx)` and derive project/session from `ctx.cwd` + `ctx.sessionManager.getSessionFile()`
+- startup notices use `ctx.ui.notify(...)` (never `console.info`)
+- memory tools are registered natively through `pi.registerTool()` with canonical names:
+  - `mem_search`
+  - `mem_context`
+  - `mem_save`
+  - `mem_session_summary`
+  - `mem_get_observation`
+  - `mem_save_prompt`
+- all tool/event payloads apply `<private>...</private>` redaction before forwarding
+- backend auto-start uses `ENGRAM_BIN` override first (if set), then falls back to `engram` from PATH
+
+Pi positioning: native Pi tools (not MCP-first). Engram keeps canonical `mem_*` names directly in Pi via `pi.registerTool()` and keeps `/engram-recovery` as a manual fallback command.
+
+Pi contract assumptions are tracked in `internal/setup/testdata/pi-contract.json` and enforced by deterministic runtime harness tests (`go test ./internal/setup -run TestPiExtensionRuntimeHarnessDeterministic`), while startup policy stays conservative:
+
+- notify when relevant memory exists
+- do **not** auto-inject prior context
+- validated lifecycle hooks: `session_start`, `session_shutdown`, `input`, `session_before_compact`, `session_compact`
+- recovery guidance available through `/engram-recovery` command (`FIRST ACTION REQUIRED` text)
+- compaction recovery is conservative: extension prepends `FIRST ACTION REQUIRED` via customInstructions when available, otherwise falls back to a UI notification
+
+If Pi contract details differ in newer Pi releases, update the fixture + runtime harness + installer paths before widening behavior.
 
 ---
 

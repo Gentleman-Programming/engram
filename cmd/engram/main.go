@@ -1516,6 +1516,12 @@ func printPostInstall(agent string) {
 		fmt.Println("  1. Restart Codex so MCP config is reloaded")
 		fmt.Println("  2. Verify ~/.codex/config.toml has [mcp_servers.engram]")
 		fmt.Println("  3. Verify model_instructions_file + experimental_compact_prompt_file are set")
+	case "pi":
+		fmt.Println("\nNext steps:")
+		fmt.Println("  1. Restart pi-coding-agent so the installed package is loaded")
+		fmt.Println("  2. Verify startup banner includes Engram extension/skill")
+		fmt.Println("  3. Setup materializes ~/.config/pi-coding-agent/packages/engram and runs 'pi install <that-path>'")
+		fmt.Println("  4. Re-run 'engram setup pi' after package changes to re-install from local embedded assets")
 	}
 }
 
@@ -1548,7 +1554,7 @@ Commands:
                      Merge similar project names into one canonical name
                        --all      Scan ALL projects for similar name groups
                        --dry-run  Preview what would be merged (no changes)
-  setup [agent]      Install/setup agent integration (opencode, claude-code, gemini-cli, codex)
+  setup [agent]      Install/setup agent integration (opencode, claude-code, gemini-cli, codex, pi)
   sync               Export new memories as compressed chunk to .engram/
                        --import   Import new chunks from .engram/ into local DB
                        --status   Show sync status (local vs remote chunks)

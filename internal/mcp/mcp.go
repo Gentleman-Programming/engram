@@ -16,6 +16,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -78,6 +79,17 @@ var ProfileAdmin = map[string]bool{
 var Profiles = map[string]map[string]bool{
 	"agent": ProfileAgent,
 	"admin": ProfileAdmin,
+}
+
+// AgentProfileToolNames returns the canonical agent tool surface in stable order.
+// Keep this list mem_* only to preserve cross-agent compatibility (including Pi).
+func AgentProfileToolNames() []string {
+	names := make([]string, 0, len(ProfileAgent))
+	for name := range ProfileAgent {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // ResolveTools takes a comma-separated string of profile names and/or

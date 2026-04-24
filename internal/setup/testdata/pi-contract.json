@@ -1,0 +1,22 @@
+{
+  "global_install_paths": {
+    "status": "validated",
+    "notes": "Pi local package materialization path uses ~/.config/pi-coding-agent (or APPDATA on Windows) before invoking 'pi install <local-package-dir>'"
+  },
+  "extension_manifest_schema": {
+    "status": "validated",
+    "notes": "Working package shape uses package.json top-level 'pi' manifest with pi.extensions + pi.skills"
+  },
+  "lifecycle_hooks": {
+    "status": "validated",
+    "notes": "Official Pi hooks are covered by deterministic runtime harness execution in CI (`internal/setup/TestPiExtensionRuntimeHarnessDeterministic`) plus manual Pi smoke checks for real host parity."
+  },
+  "compaction_hook_payload": {
+    "status": "validated",
+    "notes": "Compaction hooks are validated in deterministic runtime harness for instruction injection and graceful fallback behavior; manual `/compact` smoke tests remain recommended for upstream version drift checks."
+  },
+  "notification_api": {
+    "status": "validated",
+    "notes": "Official Pi ctx.ui.notify primitive is used for startup memory-available notices and compaction recovery notifications; startup remains notify-only with no automatic context injection."
+  }
+}

@@ -12,6 +12,7 @@ Engram works with **any MCP-compatible agent**. Pick your agent below.
 | OpenCode | `engram setup opencode` | [Details](#opencode) |
 | Gemini CLI | `engram setup gemini-cli` | [Details](#gemini-cli) |
 | Codex | `engram setup codex` | [Details](#codex) |
+| Pi | `engram setup pi` | [Details](#pi) |
 | VS Code | `code --add-mcp '{"name":"engram","command":"engram","args":["mcp"]}'` | [Details](#vs-code-copilot--claude-code-extension) |
 | Antigravity | Manual JSON config | [Details](#antigravity) |
 | Cursor | Manual JSON config | [Details](#cursor) |
@@ -167,6 +168,93 @@ experimental_compact_prompt_file = "~/.codex/engram-compact-prompt.md"
 command = "engram"
 args = ["mcp"]
 ```
+
+---
+
+## Pi
+
+Recommended: one command for global, offline setup:
+
+```bash
+engram setup pi
+```
+
+`engram setup pi` materializes a local embedded package and runs Pi's official installer:
+- Local package path: `~/.config/pi-coding-agent/packages/engram`
+- Package assets:
+  - `package.json` (with top-level `pi` manifest)
+  - `extensions/engram.ts`
+  - `skills/engram/SKILL.md`
+- Installer invocation: `pi install ~/.config/pi-coding-agent/packages/engram`
+
+No guessed edits to `~/.config/pi-coding-agent/config.json` are performed by Engram.
+
+Policy defaults for Pi support:
+- notify-only at session start when relevant memory exists
+- no automatic full-context injection
+- extension lifecycle uses validated events: `session_start`, `session_shutdown`, `input`, `session_before_compact`, `session_compact`
+- native Pi tools are registered via `pi.registerTool()` with canonical names: `mem_search`, `mem_context`, `mem_save`, `mem_session_summary`, `mem_get_observation`, `mem_save_prompt`
+- compaction recovery guidance is available via extension command `/engram-recovery`
+
+After install, run `/reload` in Pi so the extension and tools are reloaded in the current client process.
+
+> Pi contract fields (hook names, manifest schema, notification API) are tracked in `internal/setup/testdata/pi-contract.json` and exercised by deterministic runtime harness tests (`go test ./internal/setup -run TestPiExtensionRuntimeHarnessDeterministic`). Update both if upstream behavior differs.
+
+### Pi Manual E2E Checklist
+
+Use this when validating a real Pi installation outside CI:
+
+1. **Global install + offline path**
+   - Disconnect network (or block outbound) and run `engram setup pi`.
+   - Confirm local package exists at `~/.config/pi-coding-agent/packages/engram`.
+   - Confirm `engram setup pi` invokes `pi install <local-package-dir>`.
+2. **Extension load**
+   - Start Pi and verify startup banner lists Engram extension/skill.
+3. **Auto-start parity**
+   - Stop Engram backend, then call native mem_search from Pi in a fresh session (`stop Engram backend, then call native mem_search`).
+   - Confirm extension checks `/health` and attempts `engram serve` before tool/lifecycle calls.
+4. **Session lifecycle hooks**
+   - Start Pi, run `/reload`, then begin and quit a session.
+   - Verify `session_start` emits `POST /sessions` and `session_shutdown` emits `POST /sessions/{id}/end` (shutdown metadata must not overwrite an existing non-empty/high-signal summary).
+   - Search for session start/end evidence in Engram storage/logs if those traces are available in your environment.
+5. **Native memory tools + prompt capture**
+   - Confirm Pi lists native tools `mem_search`, `mem_context`, `mem_save`, `mem_session_summary`, `mem_get_observation`, `mem_save_prompt`.
+   - Trigger an input turn and verify `input` hook emits `POST /prompts`.
+   - Verify extension-generated input (`event.source === "extension"`) is not double-captured.
+6. **Notify-only startup policy**
+   - Seed memory for the project, start a new Pi session.
+   - Confirm extension announces memory availability through `ctx.ui.notify(...)` but does **not** auto-fetch/inject `/context`.
+7. **Recovery guidance + compaction hooks**
+   - Run `/engram-recovery` and verify message starts with `FIRST ACTION REQUIRED`.
+   - Run `/compact`, then verify compaction summary persistence (`run `/compact`, then verify compaction summary persistence`) via `POST /sessions/{id}/end` or recovery notification fallback.
+   - After compaction, call `mem_context` manually (no automatic context injection).
+8. **Privacy sanitization**
+   - Start/end session values containing `<private>...</private>` and verify outbound payloads are `[REDACTED]`.
+
+### Pi Troubleshooting: Duplicate package installs
+
+If Pi reports shortcut/skill conflicts that reference unrelated packages (for example stale `pi-btw` temp installs), clean those duplicates separately from Engram:
+
+1. List installed Pi packages and identify duplicate or malformed temporary paths.
+2. Remove only the stale duplicate package directories (do **not** remove `~/.config/pi-coding-agent/packages/engram`).
+3. Re-run `pi install ~/.config/pi-coding-agent/packages/engram` or `engram setup pi`.
+
+These conflicts are environment cleanup issues, not Engram runtime behavior.
+
+### Pi Troubleshooting: Auto-start cannot find Engram binary
+
+If native `mem_*` calls report auto-start failures, Pi could be resolving an old/invalid `engram` binary from `PATH`.
+
+1. Verify `engram` in your shell resolves to the expected binary (`which engram` / `command -v engram`).
+2. Ensure that binary is available in the environment used to launch Pi.
+3. If needed, launch Pi with an explicit override: `ENGRAM_BIN=/path/to/engram pi`
+
+`ENGRAM_BIN` takes precedence over the default binary lookup inside the Pi extension.
+
+If any checkpoint fails due Pi API differences, update:
+- `internal/setup/testdata/pi-contract.json` (assumptions)
+- `plugin/pi/extensions/engram.ts` + embedded copy via `go generate ./internal/setup/`
+- this checklist section
 
 ---
 

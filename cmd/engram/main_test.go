@@ -164,6 +164,9 @@ func TestPrintUsage(t *testing.T) {
 	if !strings.Contains(stdout, "search <query>") || !strings.Contains(stdout, "setup [agent]") {
 		t.Fatalf("usage missing expected commands: %q", stdout)
 	}
+	if !strings.Contains(stdout, "setup [agent]      Install/setup agent integration (opencode, claude-code, gemini-cli, codex, pi)") {
+		t.Fatalf("usage missing pi setup target: %q", stdout)
+	}
 }
 
 func TestPrintPostInstall(t *testing.T) {
@@ -174,6 +177,7 @@ func TestPrintPostInstall(t *testing.T) {
 		{agent: "opencode", expects: []string{"Restart OpenCode", "engram serve &"}},
 		{agent: "gemini-cli", expects: []string{"Restart Gemini CLI", "~/.gemini/settings.json"}},
 		{agent: "codex", expects: []string{"Restart Codex", "~/.codex/config.toml"}},
+		{agent: "pi", expects: []string{"Restart pi-coding-agent", "pi install", "~/.config/pi-coding-agent/packages/engram"}},
 		{agent: "unknown", expects: nil},
 	}
 

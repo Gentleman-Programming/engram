@@ -10,6 +10,7 @@
 //     absolute binary path so the subprocess never needs PATH resolution.
 //   - Gemini CLI: injects MCP registration in ~/.gemini/settings.json
 //   - Codex: injects MCP registration in ~/.codex/config.toml
+//   - Pi: materializes embedded local package and runs `pi install <package-dir>`
 package setup
 
 import (
@@ -34,6 +35,9 @@ var (
 	openCodeReadFile = func(path string) ([]byte, error) {
 		return openCodeFS.ReadFile(path)
 	}
+	piReadFile = func(path string) ([]byte, error) {
+		return piFS.ReadFile(path)
+	}
 	statFn                             = os.Stat
 	openCodeWriteFileFn                = os.WriteFile
 	readFileFn                         = os.ReadFile
@@ -52,6 +56,9 @@ var (
 
 //go:embed plugins/opencode/*
 var openCodeFS embed.FS
+
+//go:embed plugins/pi/* plugins/pi/extensions/* plugins/pi/skills/* plugins/pi/skills/engram/*
+var piFS embed.FS
 
 // Agent represents a supported AI coding agent.
 type Agent struct {
@@ -232,6 +239,11 @@ func SupportedAgents() []Agent {
 			Description: "Codex — MCP registration plus model/compaction instruction files",
 			InstallDir:  codexConfigPath(),
 		},
+		{
+			Name:        "pi",
+			Description: "pi-coding-agent — Native extension + skill with notify-only memory startup",
+			InstallDir:  piPackageDir(),
+		},
 	}
 }
 
@@ -246,9 +258,64 @@ func Install(agentName string) (*Result, error) {
 		return installGeminiCLI()
 	case "codex":
 		return installCodex()
+	case "pi":
+		return installPi()
 	default:
-		return nil, fmt.Errorf("unknown agent: %q (supported: opencode, claude-code, gemini-cli, codex)", agentName)
+		return nil, fmt.Errorf("unknown agent: %q (supported: opencode, claude-code, gemini-cli, codex, pi)", agentName)
 	}
+}
+
+func installPi() (*Result, error) {
+	packageDir := piPackageDir()
+	if err := os.MkdirAll(packageDir, 0755); err != nil {
+		return nil, fmt.Errorf("create pi package dir %s: %w", packageDir, err)
+	}
+
+	assets := []struct {
+		embedded string
+		dest     string
+	}{
+		{embedded: "plugins/pi/package.json", dest: filepath.Join(packageDir, "package.json")},
+		{embedded: "plugins/pi/extensions/engram.ts", dest: filepath.Join(packageDir, "extensions", "engram.ts")},
+		{embedded: "plugins/pi/skills/engram/SKILL.md", dest: filepath.Join(packageDir, "skills", "engram", "SKILL.md")},
+	}
+
+	filesWritten := 0
+	for _, asset := range assets {
+		content, err := piReadFile(asset.embedded)
+		if err != nil {
+			return nil, fmt.Errorf("read embedded %s: %w", filepath.Base(asset.dest), err)
+		}
+
+		assetDir := filepath.Dir(asset.dest)
+		if err := os.MkdirAll(assetDir, 0755); err != nil {
+			return nil, fmt.Errorf("create pi asset dir %s: %w", assetDir, err)
+		}
+		if err := writeFileFn(asset.dest, content, 0644); err != nil {
+			return nil, fmt.Errorf("write %s: %w", asset.dest, err)
+		}
+		filesWritten++
+	}
+
+	piBin, err := lookPathFn("pi")
+	if err != nil {
+		return nil, fmt.Errorf("pi CLI not found in PATH. Install pi-coding-agent and rerun 'engram setup pi': %w", err)
+	}
+
+	output, err := runCommand(piBin, "install", packageDir)
+	if err != nil {
+		trimmed := strings.TrimSpace(string(output))
+		if trimmed != "" {
+			return nil, fmt.Errorf("run pi install %s: %w: %s", packageDir, err, trimmed)
+		}
+		return nil, fmt.Errorf("run pi install %s: %w", packageDir, err)
+	}
+
+	return &Result{
+		Agent:       "pi",
+		Destination: packageDir,
+		Files:       filesWritten + 1,
+	}, nil
 }
 
 // ─── OpenCode ────────────────────────────────────────────────────────────────
@@ -1004,4 +1071,25 @@ func codexInstructionsPath() string {
 
 func codexCompactPromptPath() string {
 	return filepath.Join(filepath.Dir(codexConfigPath()), "engram-compact-prompt.md")
+}
+
+func piConfigDir() string {
+	home, _ := userHomeDir()
+
+	if runtimeGOOS == "windows" {
+		if appData := os.Getenv("APPDATA"); appData != "" {
+			return filepath.Join(appData, "pi-coding-agent")
+		}
+		return filepath.Join(home, "AppData", "Roaming", "pi-coding-agent")
+	}
+
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		return filepath.Join(xdg, "pi-coding-agent")
+	}
+
+	return filepath.Join(home, ".config", "pi-coding-agent")
+}
+
+func piPackageDir() string {
+	return filepath.Join(piConfigDir(), "packages", "engram")
 }

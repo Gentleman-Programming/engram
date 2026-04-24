@@ -50,10 +50,13 @@ Windows, Linux, and other install methods → [docs/INSTALLATION.md](docs/INSTAL
 | OpenCode | `engram setup opencode` |
 | Gemini CLI | `engram setup gemini-cli` |
 | Codex | `engram setup codex` |
+| Pi | `engram setup pi` |
 | VS Code | `code --add-mcp '{"name":"engram","command":"engram","args":["mcp"]}'` |
 | Cursor / Windsurf / Any MCP | See [docs/AGENT-SETUP.md](docs/AGENT-SETUP.md) |
 
 Full per-agent config, Memory Protocol, and compaction survival → [docs/AGENT-SETUP.md](docs/AGENT-SETUP.md)
+
+> Pi note: `engram setup pi` uses Pi's official installer (`pi install <local-embedded-package>`) from offline embedded assets.
 
 That's it. No Node.js, no Python, no Docker. **One binary, one SQLite file.**
 
@@ -136,7 +139,7 @@ Full CLI with all flags → [docs/ARCHITECTURE.md#cli-reference](docs/ARCHITECTU
 | [Installation](docs/INSTALLATION.md) | All install methods + platform support |
 | [Agent Setup](docs/AGENT-SETUP.md) | Per-agent configuration + Memory Protocol |
 | [Architecture](docs/ARCHITECTURE.md) | How it works + MCP tools + project structure |
-| [Plugins](docs/PLUGINS.md) | OpenCode & Claude Code plugin details |
+| [Plugins](docs/PLUGINS.md) | OpenCode, Claude Code, and Pi integration details |
 | [Comparison](docs/COMPARISON.md) | Why Engram vs claude-mem |
 | [Intended Usage](docs/intended-usage.md) | Mental model — how Engram is meant to be used |
 | [Obsidian Brain](docs/beta/obsidian-brain.md) | Export memories as Obsidian knowledge graph (beta) |

@@ -950,6 +950,55 @@ func TestResolveToolsAgentProfile(t *testing.T) {
 	}
 }
 
+func TestPiAgentToolSurfaceStaysCanonical(t *testing.T) {
+	toolNames := AgentProfileToolNames()
+	if len(toolNames) == 0 {
+		t.Fatal("expected non-empty agent tool surface")
+	}
+
+	required := []string{
+		"mem_save", "mem_search", "mem_context", "mem_session_summary",
+		"mem_session_start", "mem_session_end", "mem_get_observation",
+		"mem_suggest_topic_key", "mem_capture_passive", "mem_save_prompt",
+		"mem_update",
+	}
+
+	seen := make(map[string]bool, len(toolNames))
+	for _, name := range toolNames {
+		seen[name] = true
+		if strings.HasPrefix(name, "engram_") {
+			t.Fatalf("pi/agent surface must stay canonical mem_* names; found alias %q", name)
+		}
+	}
+
+	for _, name := range required {
+		if !seen[name] {
+			t.Fatalf("missing required agent tool %q for Pi integration", name)
+		}
+	}
+}
+
+func TestAgentProfileToolNamesMatchesAgentProfileMap(t *testing.T) {
+	names := AgentProfileToolNames()
+	allowlist := ResolveTools("agent")
+
+	if len(names) != len(allowlist) {
+		t.Fatalf("tool name count mismatch: names=%d allowlist=%d", len(names), len(allowlist))
+	}
+
+	for i := 1; i < len(names); i++ {
+		if names[i-1] > names[i] {
+			t.Fatalf("expected sorted output, got %q before %q", names[i-1], names[i])
+		}
+	}
+
+	for _, name := range names {
+		if !allowlist[name] {
+			t.Fatalf("name %q missing in agent allowlist", name)
+		}
+	}
+}
+
 func TestResolveToolsAdminProfile(t *testing.T) {
 	result := ResolveTools("admin")
 	if result == nil {
