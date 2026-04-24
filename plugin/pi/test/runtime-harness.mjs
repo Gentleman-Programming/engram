@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import os from "node:os"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
-import { readFile, writeFile } from "node:fs/promises"
+import { readFile, rm, writeFile } from "node:fs/promises"
 
 const extensionPath = process.argv[2]
 if (!extensionPath) {
@@ -56,8 +56,13 @@ source = source.replace(
 const transformedPath = path.join(os.tmpdir(), `engram-pi-runtime-${Date.now()}.ts`)
 await writeFile(transformedPath, source)
 
-const moduleUnderTest = await import(`${pathToFileURL(transformedPath).href}?v=${Date.now()}`)
-assert.equal(typeof moduleUnderTest.default, "function", "default export must be a function")
+let moduleUnderTest
+try {
+  moduleUnderTest = await import(`${pathToFileURL(transformedPath).href}?v=${Date.now()}`)
+  assert.equal(typeof moduleUnderTest.default, "function", "default export must be a function")
+} finally {
+  await rm(transformedPath, { force: true })
+}
 
 if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout !== "function") {
   AbortSignal.timeout = () => undefined

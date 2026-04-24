@@ -251,7 +251,7 @@ If native `mem_*` calls report auto-start failures, Pi could be resolving an old
 
 `ENGRAM_BIN` takes precedence over the default binary lookup inside the Pi extension.
 
-If any checkpoint fails due Pi API differences, update:
+If any checkpoint fails due to Pi API differences, update:
 - `internal/setup/testdata/pi-contract.json` (assumptions)
 - `plugin/pi/extensions/engram.ts` + embedded copy via `go generate ./internal/setup/`
 - this checklist section

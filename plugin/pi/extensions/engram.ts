@@ -286,28 +286,32 @@ function queryString(params: Record<string, unknown>): string {
   return qs.length > 0 ? `?${qs}` : ""
 }
 
-function observationsFromRecentResult(result: unknown): unknown[] {
-	if (Array.isArray(result)) return result
-	if (!result || typeof result !== "object") return []
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object"
+}
 
-  const directObservations = (result as { observations?: unknown[] }).observations
+function observationsFromRecentResult(result: unknown): unknown[] {
+  if (Array.isArray(result)) return result
+  if (!isRecord(result)) return []
+
+  const directObservations = result.observations
   if (Array.isArray(directObservations)) return directObservations
 
-	const wrappedData = (result as { data?: unknown }).data
-	if (Array.isArray(wrappedData)) return wrappedData
-	if (wrappedData && typeof wrappedData === "object") {
-		const dataObservations = wrappedData.observations
-		if (Array.isArray(dataObservations)) return dataObservations
+  const wrappedData = result.data
+  if (Array.isArray(wrappedData)) return wrappedData
+  if (isRecord(wrappedData)) {
+    const dataObservations = wrappedData.observations
+    if (Array.isArray(dataObservations)) return dataObservations
 
-		const nestedData = (wrappedData as { data?: unknown }).data
-		if (Array.isArray(nestedData)) return nestedData
-		if (nestedData && typeof nestedData === "object") {
-			const nestedObservations = (nestedData as { observations?: unknown[] }).observations
-			if (Array.isArray(nestedObservations)) return nestedObservations
-		}
-	}
+    const nestedData = wrappedData.data
+    if (Array.isArray(nestedData)) return nestedData
+    if (isRecord(nestedData)) {
+      const nestedObservations = nestedData.observations
+      if (Array.isArray(nestedObservations)) return nestedObservations
+    }
+  }
 
-	return []
+  return []
 }
 
 async function isRunning(): Promise<boolean> {
