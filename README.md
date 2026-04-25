@@ -184,6 +184,16 @@ Full CLI with all flags → [docs/ARCHITECTURE.md#cli-reference](docs/ARCHITECTU
 
 > **Dashboard contributors**: if you modify `.templ` files in `internal/cloud/dashboard/`, run `make templ` to regenerate before committing. See [DOCS.md — Dashboard templ regeneration](DOCS.md#dashboard-templ-regeneration).
 
+## Companion Plugins
+
+Community plugins built on top of engram:
+
+| Plugin | Description |
+|--------|-------------|
+| [atlas-for-engram](https://github.com/Kirilgitlsiiejah/atlas-for-engram) | Atlas-pool injection + retrieval for Obsidian Web Clipper workflows. Bridges raw clips to project-scoped engram memory with provenance hooks. Cross-OS (Windows/macOS/Linux), MIT. |
+
+These are independent community projects, not officially affiliated with engram.
+
 ## License
 
 MIT
