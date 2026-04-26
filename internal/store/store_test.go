@@ -7004,3 +7004,159 @@ func TestAddObservation_DecayNotAppliedToExistingRows(t *testing.T) {
 		t.Errorf("revision must not overwrite review_after: was %q, now %q", ra1, ra2)
 	}
 }
+
+func TestBM25RankingOrdersTitleAboveTopicKeyAboveContent(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	// Observation with "kubernetes" in title only
+	_, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "decision",
+		Title:     "kubernetes deployment strategy",
+		Content:   "we decided on rolling updates for the cluster",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add title-match obs: %v", err)
+	}
+
+	// Observation with "kubernetes" in topic_key only
+	_, err = s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "decision",
+		Title:     "container orchestration setup",
+		Content:   "we decided on orchestration for the cluster",
+		Project:   "engram",
+		Scope:     "project",
+		TopicKey:  "infra/kubernetes-config",
+	})
+	if err != nil {
+		t.Fatalf("add topic-match obs: %v", err)
+	}
+
+	// Observation with "kubernetes" in content only
+	_, err = s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "decision",
+		Title:     "infrastructure notes",
+		Content:   "we migrated everything to kubernetes last quarter",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add content-match obs: %v", err)
+	}
+
+	results, err := s.Search("kubernetes", SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+
+	if len(results) < 3 {
+		t.Fatalf("expected at least 3 results, got %d", len(results))
+	}
+
+	// With BM25 weights (title=5, topic_key=3, content=1):
+	// title-match should rank highest, then topic_key-match, then content-match
+	if !strings.Contains(results[0].Title, "kubernetes") {
+		t.Fatalf("expected first result to have 'kubernetes' in title (title-match), got %q", results[0].Title)
+	}
+	if results[0].TopicKey != nil && strings.Contains(*results[0].TopicKey, "kubernetes") {
+		// First result should be the title-match, not the topic-match
+	} else if !strings.Contains(results[0].Title, "kubernetes") {
+		t.Fatalf("first result should be the title-match observation")
+	}
+
+	// The topic_key match should come before the content-only match
+	topicIdx := -1
+	contentIdx := -1
+	for i, r := range results {
+		if r.TopicKey != nil && strings.Contains(*r.TopicKey, "kubernetes") {
+			topicIdx = i
+		}
+		if r.Title == "infrastructure notes" {
+			contentIdx = i
+		}
+	}
+	if topicIdx == -1 || contentIdx == -1 {
+		t.Fatalf("could not find topic-match (idx=%d) or content-match (idx=%d) in results", topicIdx, contentIdx)
+	}
+	if topicIdx > contentIdx {
+		t.Fatalf("expected topic_key match (idx=%d) to rank above content match (idx=%d) with BM25 weights", topicIdx, contentIdx)
+	}
+}
+
+func TestBM25DoesNotAffectTopicKeyDirectRoute(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	_, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "architecture",
+		Title:     "JWT auth middleware",
+		Content:   "Use JWT for all API endpoints",
+		Project:   "engram",
+		Scope:     "project",
+		TopicKey:  "auth/jwt",
+	})
+	if err != nil {
+		t.Fatalf("add obs: %v", err)
+	}
+
+	// Query containing "/" triggers the direct topic_key route
+	results, err := s.Search("auth/jwt", SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+
+	if len(results) == 0 {
+		t.Fatalf("expected at least 1 result from direct topic_key route")
+	}
+
+	if results[0].Rank != -1000 {
+		t.Fatalf("expected Rank=-1000 for direct topic_key match, got %f", results[0].Rank)
+	}
+}
+
+func TestBM25SearchReturnsNoSQLErrors(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	// Add at least one observation so the FTS table isn't empty
+	_, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "note",
+		Title:     "test observation",
+		Content:   "some content for testing",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add obs: %v", err)
+	}
+
+	// Test various edge-case queries that should not produce SQL errors
+	edgeCases := []string{
+		"normal query",
+		"special chars: @#$%^&*()",
+		strings.Repeat("a", 500), // very long query
+	}
+
+	for _, q := range edgeCases {
+		_, err := s.Search(q, SearchOptions{Project: "engram", Limit: 10})
+		if err != nil {
+			t.Fatalf("search with query %q returned error: %v", q[:min(len(q), 50)], err)
+		}
+	}
+}
