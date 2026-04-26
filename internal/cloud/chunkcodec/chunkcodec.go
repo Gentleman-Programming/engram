@@ -339,7 +339,10 @@ func normalizeMutationPayload(entity, op, payload, project string) (normalizedPa
 			return "", "", fmt.Errorf("session payload id is required")
 		}
 		if op == store.SyncOpUpsert && body.Directory == "" {
-			return "", "", fmt.Errorf("session payload directory is required for upsert")
+			// Tolerate missing directory — MCP server may omit it when generating
+			// session upsert mutations (e.g. manual-save sessions). Use a safe
+			// fallback so cloud sync is not blocked. See: github.com/Gentleman-Programming/engram/issues/249
+			body.Directory = "."
 		}
 		if op == store.SyncOpDelete {
 			body.Directory = ""
