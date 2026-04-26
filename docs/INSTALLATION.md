@@ -44,18 +44,24 @@ go install github.com/Gentleman-Programming/engram/cmd/engram@latest
 
 Ensure `%GOPATH%\bin` (or `%USERPROFILE%\go\bin`) is on your `PATH`.
 
-**Option B: Build from source**
+**Option B: Build from source (with version stamp)**
+
+If you want the exact version string in `engram version`, build it manually:
 
 ```powershell
 git clone https://github.com/Gentleman-Programming/engram.git
 cd engram
-go install ./cmd/engram
-# Binary goes to %GOPATH%\bin\engram.exe (typically %USERPROFILE%\go\bin\)
 
-# Optional: build with version stamp (otherwise `engram version` shows "dev")
+# 1. Compile with version stamp
 $v = git describe --tags --always
 go build -ldflags="-X main.version=local-$v" -o engram.exe ./cmd/engram
+
+# 2. Move to a folder in your PATH
+# (e.g. C:\Users\<you>\bin\ or similar)
 ```
+
+> [!NOTE]
+> Running `go install ./cmd/engram` puts the binary in `%GOPATH%\bin` (usually `%USERPROFILE%\go\bin\`) but sets the version to `"dev"`. To get the proper version string, you must use `go build` with `-ldflags` as shown above.
 
 **Option C: Download the prebuilt binary**
 
@@ -103,11 +109,16 @@ Expand-Archive engram_*_windows_amd64.zip -DestinationPath "$env:USERPROFILE\bin
 ```bash
 git clone https://github.com/Gentleman-Programming/engram.git
 cd engram
-go install ./cmd/engram
 
-# Optional: build with version stamp (otherwise `engram version` shows "dev")
+# Build with version stamp
 go build -ldflags="-X main.version=local-$(git describe --tags --always)" -o engram ./cmd/engram
+
+# Move to your PATH (e.g. /usr/local/bin or ~/bin)
+sudo mv engram /usr/local/bin/
 ```
+
+> [!NOTE]
+> Running `go install ./cmd/engram` puts the binary in `$GOPATH/bin` (usually `~/go/bin/`) but sets the version to `"dev"`. To get the proper version string, you must use `go build` with `-ldflags` as shown above.
 
 ---
 

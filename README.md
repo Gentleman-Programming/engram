@@ -44,6 +44,9 @@ brew install gentleman-programming/tap/engram
 
 Windows, Linux, and other install methods → [docs/INSTALLATION.md](docs/INSTALLATION.md)
 
+> [!TIP]
+> Installing from source via `go build`? Use `-ldflags` to set the version string, or it will show as `"dev"`. See [Installation Guide](docs/INSTALLATION.md#install-from-source-macos--linux).
+
 ### Setup Your Agent
 
 | Agent | One-liner |

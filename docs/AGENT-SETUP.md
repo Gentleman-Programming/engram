@@ -169,7 +169,9 @@ claude plugin marketplace add Gentleman-Programming/engram
 claude plugin install engram
 ```
 
-That's it. The plugin registers the MCP server, hooks, and Memory Protocol skill automatically.
+> [!IMPORTANT]
+> **Minimum Claude Code version:** Marketplace installation requires Claude Code CLI **>= 2.1.70**.
+> If you see `Failed to add marketplace: Invalid schema: plugins.0.source`, please update with `claude update`.
 
 **Option B: Plugin via `engram setup`** — same plugin, installed from the embedded binary:
 
