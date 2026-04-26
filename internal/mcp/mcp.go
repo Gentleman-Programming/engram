@@ -96,6 +96,7 @@ var ProfileAgent = map[string]bool{
 	"mem_update":            true, // update observation by ID — skills say "use mem_update when you have an exact ID to correct"
 	"mem_current_project":   true, // detect current project — recommended first call for agents (REQ-313)
 	"mem_judge":             true, // record verdict on a pending memory conflict (REQ-003, Phase D)
+	"mem_consolidate":       true, // atomic merge N observations into 1 — garbage collection for agents
 }
 
 // ProfileAdmin contains tools for TUI, dashboards, and manual curation
@@ -360,6 +361,45 @@ Examples:
 				),
 			),
 			handleUpdate(s),
+		)
+	}
+
+	// ─── mem_consolidate (profile: agent) ────────────────────────────────
+	if shouldRegister("mem_consolidate", allowlist) {
+		srv.AddTool(
+			mcp.NewTool("mem_consolidate",
+				mcp.WithDescription(`Atomically merge multiple observations into one. Soft-deletes the source observations and creates a new consolidated observation in a single transaction. If the insert fails, all deletes are rolled back.
+
+Use this when an agent has accumulated multiple related observations over time (e.g., iterations on the same architecture decision) and wants to clean up into a single, authoritative observation.`),
+				mcp.WithDeferLoading(true),
+				mcp.WithTitleAnnotation("Consolidate Memories"),
+				mcp.WithReadOnlyHintAnnotation(false),
+				mcp.WithDestructiveHintAnnotation(true),
+				mcp.WithIdempotentHintAnnotation(false),
+				mcp.WithOpenWorldHintAnnotation(false),
+				mcp.WithArray("ids_to_delete",
+					mcp.Required(),
+					mcp.Description("Array of observation IDs to soft-delete and consolidate"),
+				),
+				mcp.WithString("new_title",
+					mcp.Required(),
+					mcp.Description("Title for the new consolidated observation"),
+				),
+				mcp.WithString("new_content",
+					mcp.Required(),
+					mcp.Description("Content for the new consolidated observation"),
+				),
+				mcp.WithString("type",
+					mcp.Description("Category: decision, architecture, bugfix, pattern, config, discovery, learning (default: manual)"),
+				),
+				mcp.WithString("scope",
+					mcp.Description("Scope: project (default) or personal"),
+				),
+				mcp.WithString("topic_key",
+					mcp.Description("Optional topic key for the consolidated observation"),
+				),
+			),
+			handleConsolidate(s, cfg, activity),
 		)
 	}
 
@@ -1028,6 +1068,78 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		// Update detRes to reflect normalized project for envelope accuracy
 		detRes.Project = project
 		return respondWithProject(detRes, msg, extra), nil
+	}
+}
+
+func handleConsolidate(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		newTitle, _ := req.GetArguments()["new_title"].(string)
+		newContent, _ := req.GetArguments()["new_content"].(string)
+		typ, _ := req.GetArguments()["type"].(string)
+		scope, _ := req.GetArguments()["scope"].(string)
+		topicKey, _ := req.GetArguments()["topic_key"].(string)
+
+		// Parse ids_to_delete from JSON array
+		rawIDs, _ := req.GetArguments()["ids_to_delete"].([]interface{})
+		var idsToDelete []int64
+		for _, raw := range rawIDs {
+			switch v := raw.(type) {
+			case float64:
+				idsToDelete = append(idsToDelete, int64(v))
+			case json.Number:
+				n, _ := v.Int64()
+				idsToDelete = append(idsToDelete, n)
+			}
+		}
+
+		if len(idsToDelete) == 0 {
+			return mcp.NewToolResultError("ids_to_delete is required and must contain at least one ID"), nil
+		}
+		if newTitle == "" {
+			return mcp.NewToolResultError("new_title is required"), nil
+		}
+		if newContent == "" {
+			return mcp.NewToolResultError("new_content is required"), nil
+		}
+
+		// Auto-detect project (same pattern as handleSave)
+		detRes, err := resolveWriteProject()
+		if err != nil {
+			return errorWithMeta("ambiguous_project",
+				fmt.Sprintf("Cannot determine project: %s", err),
+				detRes.AvailableProjects,
+			), nil
+		}
+		project := detRes.Project
+		normalized, _ := store.NormalizeProject(project)
+		project = normalized
+
+		if typ == "" {
+			typ = "manual"
+		}
+		sessionID := defaultSessionID(project)
+
+		// Ensure the session exists
+		s.CreateSession(sessionID, project, "")
+
+		newID, err := s.Consolidate(idsToDelete, store.AddObservationParams{
+			SessionID: sessionID,
+			Type:      typ,
+			Title:     newTitle,
+			Content:   newContent,
+			Project:   project,
+			Scope:     scope,
+			TopicKey:  topicKey,
+		})
+		if err != nil {
+			return mcp.NewToolResultError("Failed to consolidate: " + err.Error()), nil
+		}
+
+		activity.RecordSave(defaultSessionID(project))
+
+		msg := fmt.Sprintf("Consolidated %d observations into new observation #%d: %q", len(idsToDelete), newID, newTitle)
+		detRes.Project = project
+		return respondWithProject(detRes, msg, nil), nil
 	}
 }
 

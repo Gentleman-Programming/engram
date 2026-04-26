@@ -2449,6 +2449,84 @@ func (s *Store) DeleteObservation(id int64, hardDelete bool) error {
 	})
 }
 
+// Consolidate atomically soft-deletes source observations and creates a new
+// consolidated observation in a single transaction. If the INSERT fails, all
+// soft-deletes are rolled back. Non-existent IDs are silently ignored.
+func (s *Store) Consolidate(idsToDelete []int64, p AddObservationParams) (int64, error) {
+	p.Project, _ = NormalizeProject(p.Project)
+	title := stripPrivateTags(p.Title)
+	content := stripPrivateTags(p.Content)
+	if len(content) > s.cfg.MaxObservationLength {
+		content = content[:s.cfg.MaxObservationLength] + "... [truncated]"
+	}
+	scope := normalizeScope(p.Scope)
+	normHash := hashNormalized(content)
+	topicKey := normalizeTopicKey(p.TopicKey)
+
+	var observationID int64
+	err := s.withTx(func(tx *sql.Tx) error {
+		// Phase 1: Soft-delete sources (ignore non-existent)
+		for _, id := range idsToDelete {
+			obs, err := s.getObservationTx(tx, id)
+			if err == sql.ErrNoRows {
+				continue // silently ignore non-existent or already-deleted
+			}
+			if err != nil {
+				return err
+			}
+
+			deletedAt := Now()
+			if _, err := s.execHook(tx,
+				`UPDATE observations
+				 SET deleted_at = datetime('now'),
+				     updated_at = datetime('now')
+				 WHERE id = ? AND deleted_at IS NULL`,
+				id,
+			); err != nil {
+				return err
+			}
+			if err := tx.QueryRow(`SELECT deleted_at FROM observations WHERE id = ?`, id).Scan(&deletedAt); err != nil {
+				return err
+			}
+			if err := s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpDelete, syncObservationPayload{
+				SyncID:    obs.SyncID,
+				SessionID: obs.SessionID,
+				Project:   obs.Project,
+				Deleted:   true,
+				DeletedAt: &deletedAt,
+			}); err != nil {
+				return err
+			}
+		}
+
+		// Phase 2: Insert new consolidated observation
+		syncID := newSyncID("obs")
+		res, err := s.execHook(tx,
+			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, datetime('now'), datetime('now'))`,
+			syncID, p.SessionID, p.Type, title, content,
+			nullableString(p.ToolName), nullableString(p.Project), scope, nullableString(topicKey), normHash,
+		)
+		if err != nil {
+			return err
+		}
+		observationID, err = res.LastInsertId()
+		if err != nil {
+			return err
+		}
+		obs, err := s.getObservationTx(tx, observationID)
+		if err != nil {
+			return err
+		}
+		return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpUpsert, observationPayloadFromObservation(obs))
+	})
+	if err != nil {
+		return 0, err
+	}
+	return observationID, nil
+}
+
+
 // ─── Timeline ────────────────────────────────────────────────────────────────
 //
 // Timeline provides chronological context around a specific observation.

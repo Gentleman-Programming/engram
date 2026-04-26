@@ -7004,3 +7004,200 @@ func TestAddObservation_DecayNotAppliedToExistingRows(t *testing.T) {
 		t.Errorf("revision must not overwrite review_after: was %q, now %q", ra1, ra2)
 	}
 }
+
+func TestConsolidateDeletesSourcesAndCreatesNewObservation(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	var ids []int64
+	for i := 0; i < 3; i++ {
+		id, err := s.AddObservation(AddObservationParams{
+			SessionID: "s1",
+			Type:      "decision",
+			Title:     fmt.Sprintf("old observation %d", i),
+			Content:   fmt.Sprintf("old content %d", i),
+			Project:   "engram",
+			Scope:     "project",
+		})
+		if err != nil {
+			t.Fatalf("add obs %d: %v", i, err)
+		}
+		ids = append(ids, id)
+	}
+
+	newID, err := s.Consolidate(ids, AddObservationParams{
+		SessionID: "s1",
+		Type:      "decision",
+		Title:     "consolidated observation",
+		Content:   "merged content from 3 sources",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("consolidate: %v", err)
+	}
+
+	if newID == 0 {
+		t.Fatalf("expected non-zero new observation ID")
+	}
+
+	// Verify source observations are soft-deleted
+	for _, id := range ids {
+		var deletedAt *string
+		err := s.db.QueryRow("SELECT deleted_at FROM observations WHERE id = ?", id).Scan(&deletedAt)
+		if err != nil {
+			t.Fatalf("query deleted_at for id %d: %v", id, err)
+		}
+		if deletedAt == nil {
+			t.Fatalf("expected obs %d to be soft-deleted, but deleted_at is NULL", id)
+		}
+	}
+
+	// Verify new observation exists and is not deleted
+	newObs, err := s.GetObservation(newID)
+	if err != nil {
+		t.Fatalf("get new obs: %v", err)
+	}
+	if newObs.Title != "consolidated observation" {
+		t.Fatalf("expected title 'consolidated observation', got %q", newObs.Title)
+	}
+	if newObs.SyncID == "" {
+		t.Fatalf("expected new obs to have a sync_id")
+	}
+}
+
+func TestConsolidateIsAtomic(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	id1, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "decision",
+		Title:     "should survive rollback",
+		Content:   "this should not be deleted if insert fails",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add obs: %v", err)
+	}
+
+	// Empty session_id should cause the INSERT to fail (NOT NULL constraint)
+	_, err = s.Consolidate([]int64{id1}, AddObservationParams{
+		SessionID: "", // this should cause failure
+		Type:      "decision",
+		Title:     "should fail",
+		Content:   "should fail",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err == nil {
+		t.Fatalf("expected error when consolidating with empty session_id")
+	}
+
+	// Original observation should still be active (rollback)
+	var deletedAt *string
+	qErr := s.db.QueryRow("SELECT deleted_at FROM observations WHERE id = ?", id1).Scan(&deletedAt)
+	if qErr != nil {
+		t.Fatalf("query deleted_at: %v", qErr)
+	}
+	if deletedAt != nil {
+		t.Fatalf("expected obs %d to NOT be soft-deleted after rollback, but deleted_at = %v", id1, *deletedAt)
+	}
+}
+
+func TestConsolidateEnqueuesSyncMutations(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	var ids []int64
+	for i := 0; i < 3; i++ {
+		id, err := s.AddObservation(AddObservationParams{
+			SessionID: "s1",
+			Type:      "decision",
+			Title:     fmt.Sprintf("obs for sync test %d", i),
+			Content:   fmt.Sprintf("content %d", i),
+			Project:   "engram",
+			Scope:     "project",
+		})
+		if err != nil {
+			t.Fatalf("add obs %d: %v", i, err)
+		}
+		ids = append(ids, id)
+	}
+
+	// Clear existing sync_mutations from AddObservation calls
+	if _, err := s.db.Exec("DELETE FROM sync_mutations"); err != nil {
+		t.Fatalf("clear sync_mutations: %v", err)
+	}
+
+	_, err := s.Consolidate(ids, AddObservationParams{
+		SessionID: "s1",
+		Type:      "decision",
+		Title:     "consolidated",
+		Content:   "merged",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("consolidate: %v", err)
+	}
+
+	// Should have 3 delete mutations + 1 upsert mutation = 4 total
+	var deleteCount, upsertCount int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM sync_mutations WHERE op = 'delete'").Scan(&deleteCount); err != nil {
+		t.Fatalf("count deletes: %v", err)
+	}
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM sync_mutations WHERE op = 'upsert'").Scan(&upsertCount); err != nil {
+		t.Fatalf("count upserts: %v", err)
+	}
+
+	if deleteCount != 3 {
+		t.Fatalf("expected 3 delete sync mutations, got %d", deleteCount)
+	}
+	if upsertCount != 1 {
+		t.Fatalf("expected 1 upsert sync mutation, got %d", upsertCount)
+	}
+}
+
+func TestConsolidateIgnoresNonExistentIDs(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	// Consolidate with non-existent IDs — should not error, new obs should still be created
+	newID, err := s.Consolidate([]int64{999999}, AddObservationParams{
+		SessionID: "s1",
+		Type:      "decision",
+		Title:     "consolidated from nothing",
+		Content:   "this should still be created",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("consolidate with non-existent IDs should not error: %v", err)
+	}
+
+	if newID == 0 {
+		t.Fatalf("expected non-zero new observation ID even with non-existent source IDs")
+	}
+
+	newObs, err := s.GetObservation(newID)
+	if err != nil {
+		t.Fatalf("get new obs: %v", err)
+	}
+	if newObs.Title != "consolidated from nothing" {
+		t.Fatalf("expected title 'consolidated from nothing', got %q", newObs.Title)
+	}
+}
