@@ -1368,17 +1368,17 @@ func (s *Store) evaluateCloudUpgradeLegacyMutationTx(tx *sql.Tx, mutation SyncMu
 		if strings.TrimSpace(mutation.EntityKey) != "" && strings.TrimSpace(mutation.EntityKey) != body.ID {
 			return blocked(UpgradeReasonBlockedLegacyMutationManual, fmt.Sprintf("session entity_key %q does not match payload id %q", mutation.EntityKey, body.ID)), nil
 		}
+		// BUGFIX #249: Directory is now optional for session upserts.
+		// If directory is empty, attempt to infer from existing session in local DB.
+		// If cannot infer, allow empty directory instead of blocking.
 		if op == SyncOpUpsert && body.Directory == "" {
 			var directory string
 			err := tx.QueryRow(`SELECT ifnull(directory, '') FROM sessions WHERE id = ?`, body.ID).Scan(&directory)
-			if errors.Is(err, sql.ErrNoRows) || strings.TrimSpace(directory) == "" {
-				return blocked(UpgradeReasonBlockedLegacyMutationManual, "session payload directory is required and cannot be inferred from local state"), nil
+			if err == nil && strings.TrimSpace(directory) != "" {
+				body.Directory = strings.TrimSpace(directory)
+				changed = true
 			}
-			if err != nil {
-				return cloudUpgradeLegacyMutationEvaluation{}, err
-			}
-			body.Directory = strings.TrimSpace(directory)
-			changed = true
+			// If no existing session or empty directory, allow empty - don't block
 		}
 		if !changed {
 			return cloudUpgradeLegacyMutationEvaluation{}, nil

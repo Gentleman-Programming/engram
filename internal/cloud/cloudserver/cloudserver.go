@@ -543,9 +543,11 @@ func validateDirectChunkArrayEntries(chunk engramsync.ChunkData) error {
 		if strings.TrimSpace(session.ID) == "" {
 			return fmt.Errorf("sessions[%d].id is required", i)
 		}
-		if strings.TrimSpace(session.Directory) == "" {
-			return fmt.Errorf("sessions[%d].directory is required", i)
-		}
+		// BUGFIX #249: Directory is now optional for sessions.
+		// This allows MCP server and other sources to create sessions without
+		// specifying a directory. Empty directory is tolerated.
+		// See: https://github.com/Gentleman-Programming/engram/issues/249
+		_ = i // Directory validation removed - now optional
 	}
 
 	for i, observation := range chunk.Observations {

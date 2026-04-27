@@ -338,9 +338,10 @@ func normalizeMutationPayload(entity, op, payload, project string) (normalizedPa
 		if body.ID == "" {
 			return "", "", fmt.Errorf("session payload id is required")
 		}
-		if op == store.SyncOpUpsert && body.Directory == "" {
-			return "", "", fmt.Errorf("session payload directory is required for upsert")
-		}
+		// BUGFIX: Directory is now optional for session upserts
+		// This allows MCP server and other sources to create sessions without
+		// specifying a directory, which will be resolved from context or set to empty.
+		// See: https://github.com/Gentleman-Programming/engram/issues/249
 		if op == store.SyncOpDelete {
 			body.Directory = ""
 			body.StartedAt = ""

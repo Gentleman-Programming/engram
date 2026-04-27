@@ -55,7 +55,9 @@ func TestReadManifestParsesMachineActionableErrorPayload(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"error_class":"repairable","error_code":"upgrade_repairable_payload_invalid","error":"invalid push payload: sessions[0].directory is required"}`))
+		// BUGFIX #249: Use observation title error instead of session directory
+		// because directory is now optional for sessions.
+		_, _ = w.Write([]byte(`{"error_class":"repairable","error_code":"upgrade_repairable_payload_invalid","error":"invalid push payload: observations[0].title is required"}`))
 	}))
 	defer srv.Close()
 
@@ -81,7 +83,8 @@ func TestReadManifestParsesMachineActionableErrorPayload(t *testing.T) {
 	if !statusErr.IsRepairableMigrationFailure() {
 		t.Fatalf("expected IsRepairableMigrationFailure=true, got false")
 	}
-	if !strings.Contains(statusErr.Error(), "sessions[0].directory is required") {
+	// BUGFIX #249: Check for observation title error instead of session directory
+	if !strings.Contains(statusErr.Error(), "observations[0].title is required") {
 		t.Fatalf("expected error message to preserve actionable detail, got %q", statusErr.Error())
 	}
 }

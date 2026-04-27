@@ -693,7 +693,9 @@ func TestHandlerPushValidationErrorsExposeMachineActionableClasses(t *testing.T)
 
 	t.Run("invalid payload is repairable class", func(t *testing.T) {
 		srv := New(&fakeStore{}, fakeAuth{}, 0)
-		body := bytes.NewBufferString(`{"project":"proj-a","created_by":"tester","data":{"sessions":[{"id":"s-1"}]}}`)
+		// BUGFIX #249: Use observation without title instead of session without directory
+		// because directory is now optional for sessions.
+		body := bytes.NewBufferString(`{"project":"proj-a","created_by":"tester","data":{"observations":[{"sync_id":"obs-1","session_id":"s-1","type":"decision","content":"test","scope":"project"}]}}`)
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sync/push", body))
 		if rec.Code != http.StatusBadRequest {
@@ -706,7 +708,7 @@ func TestHandlerPushValidationErrorsExposeMachineActionableClasses(t *testing.T)
 		if payload.ErrorCode != "upgrade_repairable_payload_invalid" {
 			t.Fatalf("expected upgrade_repairable_payload_invalid, got %q", payload.ErrorCode)
 		}
-		if !strings.Contains(payload.Error, "sessions[0].directory is required") {
+		if !strings.Contains(payload.Error, "observations[0].title is required") {
 			t.Fatalf("expected detailed validation error, got %q", payload.Error)
 		}
 	})
@@ -1007,11 +1009,14 @@ func TestHandlerPushRejectsMutationUpsertsMissingRequiredFields(t *testing.T) {
 		payload string
 		wantErr string
 	}{
-		{
-			name:    "session upsert missing directory",
-			payload: `{"mutations":[{"entity":"session","entity_key":"s-1","op":"upsert","payload":"{\"id\":\"s-1\"}"}]}`,
-			wantErr: "session payload directory is required for upsert",
-		},
+		// BUGFIX #249: Directory is now optional for session upserts
+		// This allows MCP server and other sources to create sessions without specifying a directory.
+		// See: https://github.com/Gentleman-Programming/engram/issues/249
+		// {
+		// 	name:    "session upsert missing directory",
+		// 	payload: `{"mutations":[{"entity":"session","entity_key":"s-1","op":"upsert","payload":"{\"id\":\"s-1\"}"}]}`,
+		// 	wantErr: "session payload directory is required for upsert",
+		// },
 		{
 			name:    "observation upsert missing title",
 			payload: `{"mutations":[{"entity":"observation","entity_key":"obs-1","op":"upsert","payload":"{\"sync_id\":\"obs-1\",\"session_id\":\"s-1\",\"type\":\"decision\",\"content\":\"c\",\"scope\":\"project\"}"}]}`,
@@ -1048,11 +1053,14 @@ func TestHandlerPushRejectsDirectChunkArraysMissingRequiredFields(t *testing.T) 
 		payload string
 		wantErr string
 	}{
-		{
-			name:    "session missing directory",
-			payload: `{"sessions":[{"id":"s-1"}]}`,
-			wantErr: "sessions[0].directory is required",
-		},
+		// BUGFIX #249: Directory is now optional for sessions.
+		// This test case has been removed as empty directory is now tolerated.
+		// See: https://github.com/Gentleman-Programming/engram/issues/249
+		// {
+		// 	name:    "session missing directory",
+		// 	payload: `{"sessions":[{"id":"s-1"}]}`,
+		// 	wantErr: "sessions[0].directory is required",
+		// },
 		{
 			name:    "observation missing sync_id",
 			payload: `{"sessions":[{"id":"s-1","directory":"/tmp/s-1"}],"observations":[{"session_id":"s-1","type":"decision","title":"t","content":"c","scope":"project"}]}`,
