@@ -97,7 +97,7 @@ That's it. The plugin registers the MCP server, hooks, and Memory Protocol skill
 engram setup claude-code
 ```
 
-During setup, you'll be asked whether to add engram tools to `~/.claude/settings.json` permissions allowlist — this prevents Claude Code from prompting for confirmation on every memory operation.
+During setup, you'll be asked whether to add engram's agent-profile MCP tools to `~/.claude/settings.json` `permissions.allow`. The setup writes entries for both the durable user-level MCP server id (`mcp__engram__...`) and the plugin-scoped server id used by older Claude Code plugin installs, so re-running setup repairs stale or incomplete allowlists without adding startup delay.
 
 **Option C: Bare MCP** — all 17 tools by default, no session management:
 

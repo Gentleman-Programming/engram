@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -1735,6 +1737,35 @@ func TestAdditionalHelperBranches(t *testing.T) {
 	})
 }
 
+func TestClaudeCodePermissionTools(t *testing.T) {
+	tools := claudeCodePermissionTools(map[string]bool{
+		"mem_search":          true,
+		"mem_current_project": true,
+		"mem_stats":           false,
+	})
+
+	want := []string{
+		"mcp__engram__mem_current_project",
+		"mcp__engram__mem_search",
+		"mcp__plugin_engram_engram__mem_current_project",
+		"mcp__plugin_engram_engram__mem_search",
+	}
+	if !reflect.DeepEqual(tools, want) {
+		t.Fatalf("unexpected permissions:\nwant %#v\n got %#v", want, tools)
+	}
+
+	for _, tool := range []string{
+		"mcp__engram__mem_current_project",
+		"mcp__engram__mem_judge",
+		"mcp__plugin_engram_engram__mem_current_project",
+		"mcp__plugin_engram_engram__mem_judge",
+	} {
+		if !slices.Contains(claudeCodeMCPTools, tool) {
+			t.Fatalf("claudeCodeMCPTools missing current agent permission %q", tool)
+		}
+	}
+}
+
 func TestAddClaudeCodeAllowlist(t *testing.T) {
 	t.Run("creates file from scratch", func(t *testing.T) {
 		resetSetupSeams(t)
@@ -1869,7 +1900,7 @@ func TestAddClaudeCodeAllowlist(t *testing.T) {
 			t.Fatalf("mkdir: %v", err)
 		}
 
-		// Include 3 of 11 tools
+		// Include 3 tools and verify only the missing permissions are appended.
 		partial := []string{
 			claudeCodeMCPTools[0],
 			claudeCodeMCPTools[3],

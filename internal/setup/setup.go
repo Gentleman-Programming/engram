@@ -20,7 +20,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
+
+	"github.com/Gentleman-Programming/engram/internal/mcp"
 )
 
 var (
@@ -73,21 +76,32 @@ const claudeCodeMarketplace = "Gentleman-Programming/engram"
 
 const openCodeSubagentStatuslinePlugin = "opencode-subagent-statusline"
 
-// claudeCodeMCPTools are the MCP tool names registered by the engram plugin
-// in Claude Code. Adding these to ~/.claude/settings.json permissions.allow
-// prevents Claude Code from prompting for confirmation on every tool call.
-var claudeCodeMCPTools = []string{
-	"mcp__plugin_engram_engram__mem_capture_passive",
-	"mcp__plugin_engram_engram__mem_context",
-	"mcp__plugin_engram_engram__mem_get_observation",
-	"mcp__plugin_engram_engram__mem_save",
-	"mcp__plugin_engram_engram__mem_save_prompt",
-	"mcp__plugin_engram_engram__mem_search",
-	"mcp__plugin_engram_engram__mem_session_end",
-	"mcp__plugin_engram_engram__mem_session_start",
-	"mcp__plugin_engram_engram__mem_session_summary",
-	"mcp__plugin_engram_engram__mem_suggest_topic_key",
-	"mcp__plugin_engram_engram__mem_update",
+// claudeCodeMCPTools are the MCP tool permission names for the agent profile
+// registered by the engram Claude Code plugin and durable user-level MCP config.
+// Adding these to ~/.claude/settings.json permissions.allow prevents Claude Code
+// from prompting for confirmation on every tool call.
+var claudeCodeMCPTools = claudeCodePermissionTools(mcp.ResolveTools("agent"))
+
+func claudeCodePermissionTools(agentTools map[string]bool) []string {
+	toolNames := make([]string, 0, len(agentTools))
+	for toolName, enabled := range agentTools {
+		if enabled {
+			toolNames = append(toolNames, toolName)
+		}
+	}
+	sort.Strings(toolNames)
+
+	// Claude Code's bare/user-level MCP config uses the server id "engram".
+	// Older plugin installs have been observed with a plugin-scoped server id;
+	// allowlisting both forms is harmless and keeps re-running setup idempotent.
+	prefixes := []string{"mcp__engram__", "mcp__plugin_engram_engram__"}
+	permissions := make([]string, 0, len(toolNames)*len(prefixes))
+	for _, prefix := range prefixes {
+		for _, toolName := range toolNames {
+			permissions = append(permissions, prefix+toolName)
+		}
+	}
+	return permissions
 }
 
 // codexEngramBlock is the canonical Codex TOML MCP block.

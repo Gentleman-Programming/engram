@@ -151,7 +151,7 @@ For authenticated mode, upgrade flow, dashboard behavior, reason codes, and full
 |---------|-------------|
 | `engram setup [agent]` | Install agent integration |
 | `engram serve [port]` | Start HTTP API (default: 7437) |
-| `engram mcp` | Start MCP server (stdio) |
+| `engram mcp [--tools=PROFILE]` | Start MCP server (stdio transport) |
 | `engram tui` | Launch terminal UI |
 | `engram search <query>` | Search memories |
 | `engram save <title> <msg>` | Save a memory |
