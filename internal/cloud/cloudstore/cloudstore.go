@@ -70,6 +70,12 @@ func (cs *CloudStore) SetDashboardAllowedProjects(projects []string) {
 		if project == "" {
 			continue
 		}
+		// WILDCARD SUPPORT: If "*" is present, allow all projects (empty map means no filtering)
+		if project == "*" {
+			cs.dashboardAllowedScopes = make(map[string]struct{})
+			cs.invalidateDashboardReadModel()
+			return
+		}
 		cs.dashboardAllowedScopes[project] = struct{}{}
 	}
 	cs.invalidateDashboardReadModel()

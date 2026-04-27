@@ -220,6 +220,11 @@ func authorizeProjectAgainstAllowlist(project string, allowed map[string]struct{
 	if len(allowed) == 0 {
 		return fmt.Errorf("cloud project allowlist is not configured")
 	}
+	// WILDCARD SUPPORT: If "*" is in the allowlist, permit any project.
+	// This is useful for local development and testing.
+	if _, ok := allowed["*"]; ok {
+		return nil
+	}
 	normalized, _ := store.NormalizeProject(project)
 	normalized = strings.TrimSpace(normalized)
 	if normalized == "" {
