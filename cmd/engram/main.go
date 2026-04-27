@@ -1098,9 +1098,12 @@ func cmdImport(cfg store.Config) {
 	}
 
 	fmt.Printf("Imported from %s\n", inFile)
-	fmt.Printf("  Sessions:     %d\n", result.SessionsImported)
-	fmt.Printf("  Observations: %d\n", result.ObservationsImported)
-	fmt.Printf("  Prompts:      %d\n", result.PromptsImported)
+	fmt.Printf("  Sessions:                %d\n", result.SessionsImported)
+	fmt.Printf("  Observations inserted:   %d\n", result.ObservationsInserted)
+	fmt.Printf("  Observations updated:    %d\n", result.ObservationsUpdated)
+	fmt.Printf("  Observations skipped:    %d\n", result.ObservationsSkipped)
+	fmt.Printf("  Prompts inserted:        %d\n", result.PromptsInserted)
+	fmt.Printf("  Prompts skipped:         %d\n", result.PromptsSkipped)
 }
 
 func cmdSync(cfg store.Config) {
@@ -1262,9 +1265,12 @@ func cmdSync(cfg store.Config) {
 		} else {
 			fmt.Printf("Imported %d new chunk(s) from .engram/\n", result.ChunksImported)
 		}
-		fmt.Printf("  Sessions:     %d\n", result.SessionsImported)
-		fmt.Printf("  Observations: %d\n", result.ObservationsImported)
-		fmt.Printf("  Prompts:      %d\n", result.PromptsImported)
+		fmt.Printf("  Sessions:                %d\n", result.SessionsImported)
+		fmt.Printf("  Observations inserted:   %d\n", result.ObservationsInserted)
+		fmt.Printf("  Observations updated:    %d\n", result.ObservationsUpdated)
+		fmt.Printf("  Observations skipped:    %d\n", result.ObservationsSkipped)
+		fmt.Printf("  Prompts inserted:        %d\n", result.PromptsInserted)
+		fmt.Printf("  Prompts skipped:         %d\n", result.PromptsSkipped)
 		if result.ChunksSkipped > 0 {
 			fmt.Printf("  Skipped:      %d (already imported)\n", result.ChunksSkipped)
 		}

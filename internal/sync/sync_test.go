@@ -286,7 +286,7 @@ func TestExportImportFlowWithProjectFilter(t *testing.T) {
 	if importResult.ChunksImported != 1 || importResult.ChunksSkipped != 0 {
 		t.Fatalf("unexpected chunk import counts: %+v", importResult)
 	}
-	if importResult.SessionsImported != 1 || importResult.ObservationsImported != 1 || importResult.PromptsImported != 1 {
+	if importResult.SessionsImported != 1 || importResult.ObservationsInserted != 1 || importResult.PromptsInserted != 1 {
 		t.Fatalf("unexpected imported row counts: %+v", importResult)
 	}
 
@@ -1874,11 +1874,11 @@ func TestEstimateMutationImportResultDeduplicatesEffectiveMutations(t *testing.T
 	if res.SessionsImported != 1 {
 		t.Fatalf("expected deduped session count=1, got %d", res.SessionsImported)
 	}
-	if res.ObservationsImported != 1 {
-		t.Fatalf("expected deduped observation count=1, got %d", res.ObservationsImported)
+	if res.ObservationsInserted != 1 {
+		t.Fatalf("expected deduped observation count=1, got %d", res.ObservationsInserted)
 	}
-	if res.PromptsImported != 0 {
-		t.Fatalf("expected prompt final delete to count as 0 imports, got %d", res.PromptsImported)
+	if res.PromptsInserted != 0 {
+		t.Fatalf("expected prompt final delete to count as 0 inserts, got %d", res.PromptsInserted)
 	}
 }
 

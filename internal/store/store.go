@@ -871,7 +871,8 @@ func (s *Store) migrate() error {
 	if _, err := s.execHook(s.db, `UPDATE observations SET updated_at = created_at WHERE updated_at IS NULL OR updated_at = ''`); err != nil {
 		return err
 	}
-	if _, err := s.execHook(s.db, `UPDATE observations SET sync_id = 'obs-' || lower(hex(randomblob(16))) WHERE sync_id IS NULL OR sync_id = ''`); err != nil {
+	// 8 bytes (16 hex chars) matches newSyncID's format so backfilled and Go-generated IDs share a single shape.
+	if _, err := s.execHook(s.db, `UPDATE observations SET sync_id = 'obs-' || lower(hex(randomblob(8))) WHERE sync_id IS NULL OR sync_id = ''`); err != nil {
 		return err
 	}
 
@@ -881,7 +882,7 @@ func (s *Store) migrate() error {
 	if _, err := s.execHook(s.db, `UPDATE prompt_tombstones SET project = '' WHERE project IS NULL`); err != nil {
 		return err
 	}
-	if _, err := s.execHook(s.db, `UPDATE user_prompts SET sync_id = 'prompt-' || lower(hex(randomblob(16))) WHERE sync_id IS NULL OR sync_id = ''`); err != nil {
+	if _, err := s.execHook(s.db, `UPDATE user_prompts SET sync_id = 'prompt-' || lower(hex(randomblob(8))) WHERE sync_id IS NULL OR sync_id = ''`); err != nil {
 		return err
 	}
 	if _, err := s.execHook(s.db, `INSERT OR IGNORE INTO sync_state (target_key, lifecycle, updated_at) VALUES ('cloud', 'idle', datetime('now'))`); err != nil {
@@ -2941,45 +2942,99 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 		result.SessionsImported += int(n)
 	}
 
-	// Import observations (use new IDs — AUTOINCREMENT)
+	// Import observations with LWW resolution by sync_id.
+	// No UNIQUE(sync_id) constraint exists; we resolve conflicts manually.
 	for _, obs := range data.Observations {
-		_, err := s.execHook(tx,
-			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			normalizeExistingSyncID(obs.SyncID, "obs"),
-			obs.SessionID,
-			obs.Type,
-			obs.Title,
-			obs.Content,
-			obs.ToolName,
-			obs.Project,
-			normalizeScope(obs.Scope),
-			nullableString(normalizeTopicKey(derefString(obs.TopicKey))),
-			hashNormalized(obs.Content),
-			maxInt(obs.RevisionCount, 1),
-			maxInt(obs.DuplicateCount, 1),
-			obs.LastSeenAt,
-			obs.CreatedAt,
-			obs.UpdatedAt,
-			obs.DeletedAt,
+		syncID := normalizeExistingSyncID(obs.SyncID, "obs")
+
+		var (
+			localID        int64
+			localUpdatedAt string
 		)
-		if err != nil {
-			return nil, fmt.Errorf("import observation %d: %w", obs.ID, err)
+		row := tx.QueryRow(`SELECT id, updated_at FROM observations WHERE sync_id = ? LIMIT 1`, syncID)
+		err := row.Scan(&localID, &localUpdatedAt)
+		switch {
+		case err == sql.ErrNoRows:
+			if _, err := s.execHook(tx,
+				`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				syncID,
+				obs.SessionID,
+				obs.Type,
+				obs.Title,
+				obs.Content,
+				obs.ToolName,
+				obs.Project,
+				normalizeScope(obs.Scope),
+				nullableString(normalizeTopicKey(derefString(obs.TopicKey))),
+				hashNormalized(obs.Content),
+				maxInt(obs.RevisionCount, 1),
+				maxInt(obs.DuplicateCount, 1),
+				obs.LastSeenAt,
+				obs.CreatedAt,
+				obs.UpdatedAt,
+				obs.DeletedAt,
+			); err != nil {
+				return nil, fmt.Errorf("import observation %d: %w", obs.ID, err)
+			}
+			result.ObservationsInserted++
+		case err != nil:
+			return nil, fmt.Errorf("import observation %d: lookup: %w", obs.ID, err)
+		default:
+			if obs.UpdatedAt > localUpdatedAt {
+				if _, err := s.execHook(tx,
+					`UPDATE observations
+					 SET session_id=?, type=?, title=?, content=?, tool_name=?, project=?,
+					     scope=?, topic_key=?, normalized_hash=?, revision_count=?,
+					     duplicate_count=?, last_seen_at=?, created_at=?, updated_at=?, deleted_at=?
+					 WHERE id = ?`,
+					obs.SessionID,
+					obs.Type,
+					obs.Title,
+					obs.Content,
+					obs.ToolName,
+					obs.Project,
+					normalizeScope(obs.Scope),
+					nullableString(normalizeTopicKey(derefString(obs.TopicKey))),
+					hashNormalized(obs.Content),
+					maxInt(obs.RevisionCount, 1),
+					maxInt(obs.DuplicateCount, 1),
+					obs.LastSeenAt,
+					obs.CreatedAt,
+					obs.UpdatedAt,
+					obs.DeletedAt,
+					localID,
+				); err != nil {
+					return nil, fmt.Errorf("import observation %d: update: %w", obs.ID, err)
+				}
+				result.ObservationsUpdated++
+			} else {
+				result.ObservationsSkipped++
+			}
 		}
-		result.ObservationsImported++
 	}
 
-	// Import prompts
+	// Import prompts with skip-if-exists policy (prompts are immutable; no updated_at).
 	for _, p := range data.Prompts {
-		_, err := s.execHook(tx,
-			`INSERT INTO user_prompts (sync_id, session_id, content, project, created_at)
-			 VALUES (?, ?, ?, ?, ?)`,
-			normalizeExistingSyncID(p.SyncID, "prompt"), p.SessionID, p.Content, p.Project, p.CreatedAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("import prompt %d: %w", p.ID, err)
+		syncID := normalizeExistingSyncID(p.SyncID, "prompt")
+
+		var localID int64
+		err := tx.QueryRow(`SELECT id FROM user_prompts WHERE sync_id = ? LIMIT 1`, syncID).Scan(&localID)
+		switch {
+		case err == sql.ErrNoRows:
+			if _, err := s.execHook(tx,
+				`INSERT INTO user_prompts (sync_id, session_id, content, project, created_at)
+				 VALUES (?, ?, ?, ?, ?)`,
+				syncID, p.SessionID, p.Content, p.Project, p.CreatedAt,
+			); err != nil {
+				return nil, fmt.Errorf("import prompt %d: %w", p.ID, err)
+			}
+			result.PromptsInserted++
+		case err != nil:
+			return nil, fmt.Errorf("import prompt %d: lookup: %w", p.ID, err)
+		default:
+			result.PromptsSkipped++
 		}
-		result.PromptsImported++
 	}
 
 	if err := s.commitHook(tx); err != nil {
@@ -2991,8 +3046,11 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 
 type ImportResult struct {
 	SessionsImported     int `json:"sessions_imported"`
-	ObservationsImported int `json:"observations_imported"`
-	PromptsImported      int `json:"prompts_imported"`
+	ObservationsInserted int `json:"observations_inserted"`
+	ObservationsUpdated  int `json:"observations_updated"`
+	ObservationsSkipped  int `json:"observations_skipped"`
+	PromptsInserted      int `json:"prompts_inserted"`
+	PromptsSkipped       int `json:"prompts_skipped"`
 }
 
 // ─── Sync Chunk Tracking ─────────────────────────────────────────────────────
@@ -5169,7 +5227,7 @@ func (s *Store) migrateLegacyObservationsTable() error {
 				WHEN ROW_NUMBER() OVER (PARTITION BY id ORDER BY rowid) = 1 THEN CAST(id AS INTEGER)
 				ELSE NULL
 			END,
-			'obs-' || lower(hex(randomblob(16))),
+			'obs-' || lower(hex(randomblob(8))),
 			session_id,
 			COALESCE(NULLIF(type, ''), 'manual'),
 			COALESCE(NULLIF(title, ''), 'Untitled observation'),

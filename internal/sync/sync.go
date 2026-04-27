@@ -108,8 +108,11 @@ type ImportResult struct {
 	ChunksImported       int `json:"chunks_imported"`
 	ChunksSkipped        int `json:"chunks_skipped"` // Already imported
 	SessionsImported     int `json:"sessions_imported"`
-	ObservationsImported int `json:"observations_imported"`
-	PromptsImported      int `json:"prompts_imported"`
+	ObservationsInserted int `json:"observations_inserted"`
+	ObservationsUpdated  int `json:"observations_updated"`
+	ObservationsSkipped  int `json:"observations_skipped"`
+	PromptsInserted      int `json:"prompts_inserted"`
+	PromptsSkipped       int `json:"prompts_skipped"`
 }
 
 // ─── Syncer ──────────────────────────────────────────────────────────────────
@@ -572,8 +575,11 @@ func (sy *Syncer) Import() (*ImportResult, error) {
 
 		result.ChunksImported++
 		result.SessionsImported += importResult.SessionsImported
-		result.ObservationsImported += importResult.ObservationsImported
-		result.PromptsImported += importResult.PromptsImported
+		result.ObservationsInserted += importResult.ObservationsInserted
+		result.ObservationsUpdated += importResult.ObservationsUpdated
+		result.ObservationsSkipped += importResult.ObservationsSkipped
+		result.PromptsInserted += importResult.PromptsInserted
+		result.PromptsSkipped += importResult.PromptsSkipped
 	}
 
 	return result, nil
@@ -623,8 +629,11 @@ func (sy *Syncer) importCloudEntriesDependencySafe(entries []ChunkEntry, knownCh
 			knownChunks[entry.ID] = true
 			result.ChunksImported++
 			result.SessionsImported += importResult.SessionsImported
-			result.ObservationsImported += importResult.ObservationsImported
-			result.PromptsImported += importResult.PromptsImported
+			result.ObservationsInserted += importResult.ObservationsInserted
+			result.ObservationsUpdated += importResult.ObservationsUpdated
+			result.ObservationsSkipped += importResult.ObservationsSkipped
+			result.PromptsInserted += importResult.PromptsInserted
+			result.PromptsSkipped += importResult.PromptsSkipped
 			delete(lastErrors, entry.ID)
 			progress = true
 		}
@@ -871,9 +880,9 @@ func estimateMutationImportResult(chunk ChunkData) *store.ImportResult {
 		case store.SyncEntitySession:
 			res.SessionsImported++
 		case store.SyncEntityObservation:
-			res.ObservationsImported++
+			res.ObservationsInserted++
 		case store.SyncEntityPrompt:
-			res.PromptsImported++
+			res.PromptsInserted++
 		}
 	}
 	return res

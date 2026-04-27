@@ -1223,7 +1223,7 @@ func TestSessionObservationsAddPromptImportAndSyncChunks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("import: %v", err)
 	}
-	if imported.SessionsImported < 1 || imported.ObservationsImported < 1 || imported.PromptsImported < 1 {
+	if imported.SessionsImported < 1 || imported.ObservationsInserted < 1 || imported.PromptsInserted < 1 {
 		t.Fatalf("expected non-zero import counts, got %+v", imported)
 	}
 
@@ -7002,5 +7002,289 @@ func TestAddObservation_DecayNotAppliedToExistingRows(t *testing.T) {
 	// review_after MUST NOT have been updated by the revision (original value preserved).
 	if ra1 != ra2 {
 		t.Errorf("revision must not overwrite review_after: was %q, now %q", ra1, ra2)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Sync ID Resolution & LWW (Import refactor)
+// ---------------------------------------------------------------------------
+
+// seedImportFixture creates a session, an observation, and a prompt in src,
+// returns the resulting export. Useful for round-trip Import tests.
+func seedImportFixture(t *testing.T) (*Store, *ExportData) {
+	t.Helper()
+	src := newTestStore(t)
+	if err := src.CreateSession("imp-sess", "imp-proj", "/tmp/imp"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := src.AddObservation(AddObservationParams{
+		SessionID: "imp-sess",
+		Type:      "decision",
+		Title:     "Pick SQLite",
+		Content:   "Decision content for sync-id resolution test",
+		Project:   "imp-proj",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	if _, err := src.AddPrompt(AddPromptParams{
+		SessionID: "imp-sess",
+		Content:   "User prompt body",
+		Project:   "imp-proj",
+	}); err != nil {
+		t.Fatalf("add prompt: %v", err)
+	}
+	exported, err := src.Export()
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	return src, exported
+}
+
+func TestImportLWWIdempotentReimport(t *testing.T) {
+	_, exported := seedImportFixture(t)
+
+	dst := newTestStore(t)
+	first, err := dst.Import(exported)
+	if err != nil {
+		t.Fatalf("first import: %v", err)
+	}
+	if first.ObservationsInserted != 1 || first.PromptsInserted != 1 {
+		t.Fatalf("first import: expected 1/1 inserts, got %+v", first)
+	}
+
+	second, err := dst.Import(exported)
+	if err != nil {
+		t.Fatalf("second import: %v", err)
+	}
+	if second.ObservationsInserted != 0 {
+		t.Fatalf("second import: expected 0 obs inserts, got %d", second.ObservationsInserted)
+	}
+	if second.ObservationsSkipped != 1 {
+		t.Fatalf("second import: expected 1 obs skipped, got %d", second.ObservationsSkipped)
+	}
+	if second.PromptsInserted != 0 {
+		t.Fatalf("second import: expected 0 prompt inserts, got %d", second.PromptsInserted)
+	}
+	if second.PromptsSkipped != 1 {
+		t.Fatalf("second import: expected 1 prompt skipped, got %d", second.PromptsSkipped)
+	}
+}
+
+func TestImportLWWUpdatesNewerObservation(t *testing.T) {
+	_, exported := seedImportFixture(t)
+
+	dst := newTestStore(t)
+	if _, err := dst.Import(exported); err != nil {
+		t.Fatalf("seed import: %v", err)
+	}
+
+	exported.Observations[0].UpdatedAt = "2099-01-01 00:00:00"
+	exported.Observations[0].Title = "Pick SQLite (updated)"
+
+	res, err := dst.Import(exported)
+	if err != nil {
+		t.Fatalf("update import: %v", err)
+	}
+	if res.ObservationsUpdated != 1 {
+		t.Fatalf("expected 1 obs updated, got %+v", res)
+	}
+	if res.ObservationsInserted != 0 || res.ObservationsSkipped != 0 {
+		t.Fatalf("expected only updates, got %+v", res)
+	}
+
+	var title string
+	if err := dst.db.QueryRow(`SELECT title FROM observations WHERE sync_id = ?`, exported.Observations[0].SyncID).Scan(&title); err != nil {
+		t.Fatalf("read updated row: %v", err)
+	}
+	if title != "Pick SQLite (updated)" {
+		t.Fatalf("expected updated title, got %q", title)
+	}
+}
+
+func TestImportLWWSkipsOlderObservation(t *testing.T) {
+	_, exported := seedImportFixture(t)
+
+	dst := newTestStore(t)
+	if _, err := dst.Import(exported); err != nil {
+		t.Fatalf("seed import: %v", err)
+	}
+
+	if _, err := dst.db.Exec(
+		`UPDATE observations SET updated_at = ?, title = ? WHERE sync_id = ?`,
+		"2099-01-01 00:00:00", "Local newer", exported.Observations[0].SyncID,
+	); err != nil {
+		t.Fatalf("bump local updated_at: %v", err)
+	}
+
+	res, err := dst.Import(exported)
+	if err != nil {
+		t.Fatalf("re-import: %v", err)
+	}
+	if res.ObservationsSkipped != 1 || res.ObservationsUpdated != 0 {
+		t.Fatalf("expected skip when local is newer, got %+v", res)
+	}
+
+	var title string
+	if err := dst.db.QueryRow(`SELECT title FROM observations WHERE sync_id = ?`, exported.Observations[0].SyncID).Scan(&title); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if title != "Local newer" {
+		t.Fatalf("expected local title preserved, got %q", title)
+	}
+}
+
+func TestImportLWWPromptsAreImmutable(t *testing.T) {
+	_, exported := seedImportFixture(t)
+
+	dst := newTestStore(t)
+	if _, err := dst.Import(exported); err != nil {
+		t.Fatalf("seed import: %v", err)
+	}
+
+	exported.Prompts[0].Content = "rewritten remotely"
+
+	res, err := dst.Import(exported)
+	if err != nil {
+		t.Fatalf("re-import: %v", err)
+	}
+	if res.PromptsSkipped != 1 || res.PromptsInserted != 0 {
+		t.Fatalf("expected prompt skipped, got %+v", res)
+	}
+
+	var content string
+	if err := dst.db.QueryRow(`SELECT content FROM user_prompts WHERE sync_id = ?`, exported.Prompts[0].SyncID).Scan(&content); err != nil {
+		t.Fatalf("read prompt: %v", err)
+	}
+	if content != "User prompt body" {
+		t.Fatalf("expected original prompt content, got %q", content)
+	}
+}
+
+func TestImportLWWPreservesDeletedAtOnInsert(t *testing.T) {
+	_, exported := seedImportFixture(t)
+
+	deletedAt := "2026-04-26 12:00:00"
+	exported.Observations[0].DeletedAt = &deletedAt
+
+	dst := newTestStore(t)
+	res, err := dst.Import(exported)
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if res.ObservationsInserted != 1 {
+		t.Fatalf("expected 1 obs inserted, got %+v", res)
+	}
+
+	var deleted sql.NullString
+	if err := dst.db.QueryRow(`SELECT deleted_at FROM observations WHERE sync_id = ?`, exported.Observations[0].SyncID).Scan(&deleted); err != nil {
+		t.Fatalf("read deleted_at: %v", err)
+	}
+	if !deleted.Valid || deleted.String != deletedAt {
+		t.Fatalf("expected deleted_at preserved, got valid=%v value=%q", deleted.Valid, deleted.String)
+	}
+}
+
+func TestImportLWWSoftDeletePropagatesViaLWW(t *testing.T) {
+	_, exported := seedImportFixture(t)
+
+	dst := newTestStore(t)
+	if _, err := dst.Import(exported); err != nil {
+		t.Fatalf("seed import: %v", err)
+	}
+
+	deletedAt := "2099-01-01 00:00:00"
+	exported.Observations[0].DeletedAt = &deletedAt
+	exported.Observations[0].UpdatedAt = "2099-01-01 00:00:00"
+
+	res, err := dst.Import(exported)
+	if err != nil {
+		t.Fatalf("propagation import: %v", err)
+	}
+	if res.ObservationsUpdated != 1 {
+		t.Fatalf("expected 1 obs updated, got %+v", res)
+	}
+
+	var deleted sql.NullString
+	if err := dst.db.QueryRow(`SELECT deleted_at FROM observations WHERE sync_id = ?`, exported.Observations[0].SyncID).Scan(&deleted); err != nil {
+		t.Fatalf("read deleted_at: %v", err)
+	}
+	if !deleted.Valid {
+		t.Fatalf("expected local row to be soft-deleted after LWW propagation")
+	}
+}
+
+func TestImportLWWRestorationViaLWW(t *testing.T) {
+	_, exported := seedImportFixture(t)
+
+	dst := newTestStore(t)
+	if _, err := dst.Import(exported); err != nil {
+		t.Fatalf("seed import: %v", err)
+	}
+
+	if _, err := dst.db.Exec(
+		`UPDATE observations SET deleted_at = ?, updated_at = ? WHERE sync_id = ?`,
+		"2026-01-01 00:00:00", "2026-01-01 00:00:00", exported.Observations[0].SyncID,
+	); err != nil {
+		t.Fatalf("locally soft-delete: %v", err)
+	}
+
+	exported.Observations[0].DeletedAt = nil
+	exported.Observations[0].UpdatedAt = "2099-01-01 00:00:00"
+
+	res, err := dst.Import(exported)
+	if err != nil {
+		t.Fatalf("restore import: %v", err)
+	}
+	if res.ObservationsUpdated != 1 {
+		t.Fatalf("expected 1 obs updated (restoration), got %+v", res)
+	}
+
+	var deleted sql.NullString
+	if err := dst.db.QueryRow(`SELECT deleted_at FROM observations WHERE sync_id = ?`, exported.Observations[0].SyncID).Scan(&deleted); err != nil {
+		t.Fatalf("read deleted_at: %v", err)
+	}
+	if deleted.Valid {
+		t.Fatalf("expected deleted_at cleared after LWW restoration, got %q", deleted.String)
+	}
+}
+
+func TestImportResultHasGranularCounters(t *testing.T) {
+	_, exported := seedImportFixture(t)
+
+	dst := newTestStore(t)
+	res, err := dst.Import(exported)
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	// All six granular counters must be present and behave as expected on a fresh import.
+	if res.SessionsImported != 1 {
+		t.Errorf("SessionsImported: want 1, got %d", res.SessionsImported)
+	}
+	if res.ObservationsInserted != 1 || res.ObservationsUpdated != 0 || res.ObservationsSkipped != 0 {
+		t.Errorf("observation counters: %+v", res)
+	}
+	if res.PromptsInserted != 1 || res.PromptsSkipped != 0 {
+		t.Errorf("prompt counters: %+v", res)
+	}
+}
+
+func TestNewSyncIDFormatConsistency(t *testing.T) {
+	for i := 0; i < 100; i++ {
+		got := newSyncID("obs")
+		if !strings.HasPrefix(got, "obs-") {
+			t.Fatalf("missing 'obs-' prefix: %q", got)
+		}
+		hexPart := strings.TrimPrefix(got, "obs-")
+		if len(hexPart) != 16 {
+			t.Fatalf("expected 16-char hex tail, got %d in %q", len(hexPart), got)
+		}
+		for _, c := range hexPart {
+			isHex := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+			if !isHex {
+				t.Fatalf("non-hex char %q in %q", c, got)
+			}
+		}
 	}
 }
