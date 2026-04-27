@@ -3617,5 +3617,4 @@ func TestCmdMCP(t *testing.T) {
 		_, stderr, recovered := captureOutputAndRecover(t, func() { cmdMCP(cfg) })
 		assertFatal(t, stderr, recovered, "stdio failed")
 	})
-
 }

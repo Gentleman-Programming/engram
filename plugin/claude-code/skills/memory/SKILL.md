@@ -17,10 +17,10 @@ They are available immediately — no manual ToolSearch needed.
 - `mem_get_observation`, `mem_suggest_topic_key`, `mem_update`
 - `mem_session_start`, `mem_session_end`, `mem_save_prompt`
 
-**Fallback**: If tools are unexpectedly unavailable, trigger ToolSearch manually:
-```
-select:mcp__plugin_engram_engram__mem_save,mcp__plugin_engram_engram__mem_search,mcp__plugin_engram_engram__mem_context,mcp__plugin_engram_engram__mem_session_summary,mcp__plugin_engram_engram__mem_get_observation,mcp__plugin_engram_engram__mem_suggest_topic_key,mcp__plugin_engram_engram__mem_update,mcp__plugin_engram_engram__mem_session_start,mcp__plugin_engram_engram__mem_session_end,mcp__plugin_engram_engram__mem_save_prompt
-```
+**Fallback**: If tools are unexpectedly unavailable, run `engram setup claude-code`
+again and restart Claude Code. Setup repairs the durable MCP config and
+permissions allowlist for both current (`mcp__engram__...`) and older
+plugin-scoped (`mcp__plugin_engram_engram__...`) server ids.
 
 Admin tools (deferred — use ToolSearch only if needed):
 - `mem_stats`, `mem_delete`, `mem_timeline`, `mem_capture_passive`
