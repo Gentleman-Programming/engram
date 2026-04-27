@@ -5700,3 +5700,82 @@ func (s *Store) ListObservationSyncPayloads() ([]any, error) {
 	}
 	return payloads, nil
 }
+
+// RelatedObservation is a sibling observation surfaced by RelatedByTopicKeys.
+type RelatedObservation struct {
+	ID    int64
+	Title string
+}
+
+// InsertObservationForTest inserts an observation row without going through
+// AddObservation's topic_key UPSERT path. Intended ONLY for tests that need
+// to seed multiple sibling rows sharing (topic_key, project, scope).
+func (s *Store) InsertObservationForTest(syncID, sessionID, obsType, title, content, project, scope, topicKey, normalizedHash string) (int64, error) {
+	res, err := s.db.Exec(`
+		INSERT INTO observations (sync_id, session_id, type, title, content, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, datetime('now'), datetime('now'))
+	`, syncID, sessionID, obsType, title, content, project, scope, topicKey, normalizedHash)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// RelatedByTopicKeys retrieves up to 5 sibling observations per topic_key for
+// implicit graph-linking. Filters by project + scope and excludes the given IDs.
+func (s *Store) RelatedByTopicKeys(keys []string, project, scope string, excludeIDs []int64) (map[string][]RelatedObservation, error) {
+	if len(keys) == 0 {
+		return make(map[string][]RelatedObservation), nil
+	}
+
+	keysPlaceholders := make([]string, len(keys))
+	args := make([]interface{}, 0, len(keys)+2+len(excludeIDs))
+	for i, k := range keys {
+		keysPlaceholders[i] = "?"
+		args = append(args, k)
+	}
+	args = append(args, project, scope)
+
+	excludeClause := ""
+	if len(excludeIDs) > 0 {
+		excludePlaceholders := make([]string, len(excludeIDs))
+		for i, id := range excludeIDs {
+			excludePlaceholders[i] = "?"
+			args = append(args, id)
+		}
+		excludeClause = " AND id NOT IN (" + strings.Join(excludePlaceholders, ",") + ")"
+	}
+
+	query := fmt.Sprintf(`
+		SELECT id, title, topic_key
+		FROM observations
+		WHERE topic_key IN (%s)
+		  AND deleted_at IS NULL
+		  AND project = ?
+		  AND scope = ?
+		  %s
+		ORDER BY updated_at DESC
+	`, strings.Join(keysPlaceholders, ","), excludeClause)
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("related by topic keys query: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string][]RelatedObservation)
+	for rows.Next() {
+		var obs RelatedObservation
+		var topicKey string
+		if err := rows.Scan(&obs.ID, &obs.Title, &topicKey); err != nil {
+			return nil, fmt.Errorf("scan related observation: %w", err)
+		}
+		if len(result[topicKey]) < 5 {
+			result[topicKey] = append(result[topicKey], obs)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows iteration: %w", err)
+	}
+	return result, nil
+}

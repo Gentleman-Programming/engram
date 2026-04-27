@@ -3900,3 +3900,78 @@ func TestHandleSave_MCPConfig_OverridesDefaults(t *testing.T) {
 		}
 	}
 }
+
+func TestSearchIncludesRelatedMetadata(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	project := "graph-link-project"
+
+	if err := s.CreateSession("s1", project, "/tmp/proj"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	// Use the direct-insert test helper to bypass AddObservation's topic_key
+	// UPSERT path — two observations sharing topic_key + project + scope
+	// would otherwise collapse into one row.
+	if _, err := s.InsertObservationForTest("sync-primary", "s1", "bugfix", "Primary", "Primary content here", project, "project", "auth/jwt", "h-primary"); err != nil {
+		t.Fatalf("insert primary: %v", err)
+	}
+	// Sibling has distinct lexicon so it does NOT match the FTS query — it
+	// must arrive only via the implicit-graph topic lookup.
+	if _, err := s.InsertObservationForTest("sync-sibling", "s1", "decision", "Sibling Note", "unrelated lexical content", project, "project", "auth/jwt", "h-sibling"); err != nil {
+		t.Fatalf("insert sibling: %v", err)
+	}
+
+	search := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"query":   "Primary",
+		"project": project,
+	}}}
+	res, err := search(context.Background(), req)
+	if err != nil || res.IsError {
+		t.Fatalf("search err: %v isError: %v", err, res.IsError)
+	}
+
+	output := callResultText(t, res)
+	if !strings.Contains(output, "Related Context (from graph):") {
+		t.Fatalf("expected related context section, got:\n%s", output)
+	}
+	if !strings.Contains(output, `Related (topic \"auth/jwt\"):`) {
+		t.Fatalf("expected per-topic header, got:\n%s", output)
+	}
+	if !strings.Contains(output, "Sibling Note") {
+		t.Fatalf("expected related observation title in output, got:\n%s", output)
+	}
+}
+
+func TestSearchNoRelatedWhenNoTopicKeys(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	project := "no-topic-project"
+
+	if err := s.CreateSession("s1", project, "/tmp/proj"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.AddObservation(store.AddObservationParams{SessionID: "s1", Type: "bugfix", Title: "Standalone issue", Content: "Standalone content", Project: project, Scope: "project"}); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+
+	search := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"query":   "Standalone",
+		"project": project,
+	}}}
+	res, err := search(context.Background(), req)
+	if err != nil || res.IsError {
+		t.Fatalf("search err: %v isError: %v", err, res.IsError)
+	}
+
+	output := callResultText(t, res)
+	if strings.Contains(output, "Related Context (from graph):") {
+		t.Fatalf("did not expect related context section, got:\n%s", output)
+	}
+}

@@ -7004,3 +7004,168 @@ func TestAddObservation_DecayNotAppliedToExistingRows(t *testing.T) {
 		t.Errorf("revision must not overwrite review_after: was %q, now %q", ra1, ra2)
 	}
 }
+
+func TestRelatedByTopicKeysReturnsSiblings(t *testing.T) {
+	s := newTestStore(t)
+
+	// Create a session to use for observations
+	if err := s.CreateSession("sess-1", "proj", "/tmp/proj"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	// Insert 3 observations directly to bypass upsert logic
+	for i := 1; i <= 3; i++ {
+		_, err := s.db.Exec(`
+			INSERT INTO observations (sync_id, session_id, type, title, content, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, datetime('now'), datetime('now'))
+		`, fmt.Sprintf("sync-%d", i), "sess-1", "bugfix", fmt.Sprintf("Obs %d", i), "content", "proj", "project", "auth/jwt", fmt.Sprintf("hash%d", i))
+		if err != nil {
+			t.Fatalf("insert %d: %v", i, err)
+		}
+	}
+
+	// Get the inserted IDs
+	var id1, id2, id3 int64
+	s.db.QueryRow("SELECT id FROM observations WHERE title = 'Obs 1'").Scan(&id1)
+	s.db.QueryRow("SELECT id FROM observations WHERE title = 'Obs 2'").Scan(&id2)
+	s.db.QueryRow("SELECT id FROM observations WHERE title = 'Obs 3'").Scan(&id3)
+
+	res, err := s.RelatedByTopicKeys([]string{"auth/jwt"}, "proj", "project", []int64{id1})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	siblings, ok := res["auth/jwt"]
+	if !ok {
+		t.Fatalf("expected key auth/jwt in result")
+	}
+
+	if len(siblings) != 2 {
+		t.Fatalf("expected 2 siblings, got %d", len(siblings))
+	}
+
+	foundId2 := false
+	foundId3 := false
+	for _, sib := range siblings {
+		if sib.ID == id2 {
+			foundId2 = true
+		}
+		if sib.ID == id3 {
+			foundId3 = true
+		}
+	}
+
+	if !foundId2 || !foundId3 {
+		t.Fatalf("expected id2 and id3 in siblings, got: %+v", siblings)
+	}
+}
+
+func TestRelatedByTopicKeysExcludesDeleted(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("sess-1", "proj", "/tmp/proj"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	// Insert 2 observations directly
+	_, err := s.db.Exec(`
+		INSERT INTO observations (sync_id, session_id, type, title, content, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, datetime('now'), datetime('now'))
+	`, "sync-1", "sess-1", "bugfix", "Obs 1", "content", "proj", "project", "auth/jwt", "hash1")
+	if err != nil {
+		t.Fatalf("insert 1: %v", err)
+	}
+	_, err = s.db.Exec(`
+		INSERT INTO observations (sync_id, session_id, type, title, content, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, datetime('now'), datetime('now'))
+	`, "sync-2", "sess-1", "bugfix", "Obs 2", "content", "proj", "project", "auth/jwt", "hash2")
+	if err != nil {
+		t.Fatalf("insert 2: %v", err)
+	}
+
+	var id1, id2 int64
+	s.db.QueryRow("SELECT id FROM observations WHERE title = 'Obs 1'").Scan(&id1)
+	s.db.QueryRow("SELECT id FROM observations WHERE title = 'Obs 2'").Scan(&id2)
+
+	s.DeleteObservation(id2, false)
+
+	res, err := s.RelatedByTopicKeys([]string{"auth/jwt"}, "proj", "project", []int64{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	siblings := res["auth/jwt"]
+	if len(siblings) != 1 {
+		t.Fatalf("expected 1 sibling, got %d", len(siblings))
+	}
+
+	if siblings[0].ID != id1 {
+		t.Fatalf("expected id1 in siblings")
+	}
+}
+
+func TestRelatedByTopicKeysRespectsProjectScope(t *testing.T) {
+	s := newTestStore(t)
+
+	s.CreateSession("sess-1", "proj", "/tmp/proj")
+	s.CreateSession("sess-2", "other", "/tmp/other")
+
+	s.db.Exec(`
+		INSERT INTO observations (sync_id, session_id, type, title, content, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, datetime('now'), datetime('now'))
+	`, "sync-1", "sess-1", "bugfix", "Proj 1 Obs", "content", "proj", "project", "auth/jwt", "hash1")
+
+	s.db.Exec(`
+		INSERT INTO observations (sync_id, session_id, type, title, content, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, datetime('now'), datetime('now'))
+	`, "sync-2", "sess-2", "bugfix", "Other Proj Obs", "content", "other", "project", "auth/jwt", "hash2")
+
+	res, err := s.RelatedByTopicKeys([]string{"auth/jwt"}, "proj", "project", []int64{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	siblings := res["auth/jwt"]
+	if len(siblings) != 1 {
+		t.Fatalf("expected 1 sibling from proj, got %d", len(siblings))
+	}
+	if siblings[0].Title != "Proj 1 Obs" {
+		t.Fatalf("expected Proj 1 Obs, got %s", siblings[0].Title)
+	}
+}
+
+func TestRelatedByTopicKeysLimitsTo5PerKey(t *testing.T) {
+	s := newTestStore(t)
+
+	s.CreateSession("sess-1", "proj", "/tmp/proj")
+
+	for i := 0; i < 10; i++ {
+		s.db.Exec(`
+			INSERT INTO observations (sync_id, session_id, type, title, content, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, datetime('now'), datetime('now'))
+		`, fmt.Sprintf("sync-%d", i), "sess-1", "bugfix", fmt.Sprintf("Obs %d", i), "content", "proj", "project", "auth/jwt", fmt.Sprintf("hash%d", i))
+	}
+
+	res, err := s.RelatedByTopicKeys([]string{"auth/jwt"}, "proj", "project", []int64{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	siblings := res["auth/jwt"]
+	if len(siblings) != 5 {
+		t.Fatalf("expected exactly 5 siblings (limit), got %d", len(siblings))
+	}
+}
+
+func TestRelatedByTopicKeysEmptyKeysNoQuery(t *testing.T) {
+	s := newTestStore(t)
+
+	res, err := s.RelatedByTopicKeys([]string{}, "proj", "project", []int64{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(res) != 0 {
+		t.Fatalf("expected empty result map, got len %d", len(res))
+	}
+}

@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -833,7 +834,33 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		var b strings.Builder
 		fmt.Fprintf(&b, "Found %d memories:\n\n", len(results))
 		anyTruncated := false
+
+		// Track seen IDs and group topic_keys by (project, scope) so the
+		// related-by-topic lookup respects the same project/scope partition
+		// the search ran in.
+		type psKey struct {
+			project string
+			scope   string
+		}
+		seenIDs := make(map[int64]bool)
+		excludeByPS := make(map[psKey][]int64)
+		keysByPS := make(map[psKey]map[string]bool)
+
 		for i, r := range results {
+			seenIDs[r.ID] = true
+			if r.TopicKey != nil && *r.TopicKey != "" {
+				resultProject := ""
+				if r.Project != nil {
+					resultProject = *r.Project
+				}
+				k := psKey{project: resultProject, scope: r.Scope}
+				if keysByPS[k] == nil {
+					keysByPS[k] = make(map[string]bool)
+				}
+				keysByPS[k][*r.TopicKey] = true
+				excludeByPS[k] = append(excludeByPS[k], r.ID)
+			}
+
 			projectDisplay := ""
 			if r.Project != nil {
 				projectDisplay = fmt.Sprintf(" | project: %s", *r.Project)
@@ -871,6 +898,49 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		}
 		if anyTruncated {
 			fmt.Fprintf(&b, "---\nResults above are previews (300 chars). To read the full content of a specific memory, call mem_get_observation(id: <ID>).\n")
+		}
+
+		// Implicit graph-linking: append topic_key siblings, grouped by topic.
+		if len(keysByPS) > 0 {
+			grouped := make(map[string][]store.RelatedObservation)
+			for ps, keysSet := range keysByPS {
+				keys := make([]string, 0, len(keysSet))
+				for k := range keysSet {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys)
+
+				rel, err := s.RelatedByTopicKeys(keys, ps.project, ps.scope, excludeByPS[ps])
+				if err != nil || len(rel) == 0 {
+					continue
+				}
+				for tk, sibs := range rel {
+					for _, sib := range sibs {
+						if seenIDs[sib.ID] {
+							continue
+						}
+						grouped[tk] = append(grouped[tk], sib)
+					}
+				}
+			}
+
+			if len(grouped) > 0 {
+				topics := make([]string, 0, len(grouped))
+				for tk := range grouped {
+					topics = append(topics, tk)
+				}
+				sort.Strings(topics)
+
+				b.WriteString("\n---\nRelated Context (from graph):\n")
+				for _, tk := range topics {
+					sibs := grouped[tk]
+					parts := make([]string, 0, len(sibs))
+					for _, sib := range sibs {
+						parts = append(parts, fmt.Sprintf("ID %d (%s)", sib.ID, sib.Title))
+					}
+					fmt.Fprintf(&b, "Related (topic %q): %s\n", tk, strings.Join(parts, ", "))
+				}
+			}
 		}
 
 		if nudge := activity.NudgeIfNeeded(sessionID); nudge != "" {
