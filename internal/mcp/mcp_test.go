@@ -2606,8 +2606,13 @@ func TestMemSave_IgnoresLLMProject(t *testing.T) {
 	}
 }
 
-// TestMemSave_AmbiguousEnvelope asserts error_code=="ambiguous_project", no write (REQ-309).
-func TestMemSave_AmbiguousEnvelope(t *testing.T) {
+// TestMemSave_AmbiguousFallback asserts that save succeeds with basename
+// fallback when cwd is parent of multiple git repos. Previously this returned
+// error_code=="ambiguous_project" (REQ-309 strict mode), but that was a
+// regression vs v1.12.0 — see issue #248. The handler now uses cwd basename
+// as project name and emits a warning so the save can proceed in workspaces
+// containing multiple repos.
+func TestMemSave_AmbiguousFallback(t *testing.T) {
 	parent := t.TempDir()
 	for _, name := range []string{"repo-x", "repo-y"} {
 		child := filepath.Join(parent, name)
@@ -2622,23 +2627,28 @@ func TestMemSave_AmbiguousEnvelope(t *testing.T) {
 	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"title":   "should not be saved",
-		"content": "ambiguous test",
+		"title":   "ambiguous fallback test",
+		"content": "saved under cwd basename",
 		"type":    "manual",
 	}}}
 	res, err := h(context.Background(), req)
 	if err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
-	if !res.IsError {
-		t.Fatal("expected error result for ambiguous project")
+	if res.IsError {
+		t.Fatalf("expected success after ambiguous fallback, got error: %s", callResultText(t, res))
 	}
 	text := callResultText(t, res)
-	if !strings.Contains(text, "ambiguous_project") {
-		t.Errorf("expected error_code 'ambiguous_project', got: %q", text)
+	if !strings.Contains(text, "warning") {
+		t.Errorf("expected warning in response envelope, got: %q", text)
 	}
-	if !strings.Contains(text, "available_projects") {
-		t.Errorf("expected available_projects in error, got: %q", text)
+	if !strings.Contains(text, "dir_basename") {
+		t.Errorf("expected project_source 'dir_basename' in response, got: %q", text)
+	}
+	// Project should be the parent dir basename (lowercased).
+	expectedProject := strings.ToLower(filepath.Base(parent))
+	if !strings.Contains(text, `"project":"`+expectedProject+`"`) {
+		t.Errorf("expected project=%q in response, got: %q", expectedProject, text)
 	}
 }
 
@@ -2967,8 +2977,11 @@ func TestResolveWriteProject_AutoDetects(t *testing.T) {
 	}
 }
 
-// TestResolveWriteProject_AmbiguousError: assert errors.Is(err, ErrAmbiguousProject)
-func TestResolveWriteProject_AmbiguousError(t *testing.T) {
+// TestResolveWriteProject_AmbiguousFallback asserts that ambiguous cwd
+// (parent of multiple git repos) no longer errors — it falls back to
+// filepath.Base(cwd) lowercased, with Source=SourceDirBasename and a
+// non-empty Warning. See issue #248 (regression vs v1.12.0).
+func TestResolveWriteProject_AmbiguousFallback(t *testing.T) {
 	parent := t.TempDir()
 	for _, name := range []string{"repo-a", "repo-b"} {
 		child := filepath.Join(parent, name)
@@ -2979,9 +2992,19 @@ func TestResolveWriteProject_AmbiguousError(t *testing.T) {
 	}
 	t.Chdir(parent)
 
-	_, err := resolveWriteProject()
-	if !errors.Is(err, project.ErrAmbiguousProject) {
-		t.Errorf("expected ErrAmbiguousProject, got %v", err)
+	res, err := resolveWriteProject()
+	if err != nil {
+		t.Fatalf("expected nil error after ambiguous fallback, got %v", err)
+	}
+	if res.Source != project.SourceDirBasename {
+		t.Errorf("expected Source=%q, got %q", project.SourceDirBasename, res.Source)
+	}
+	expectedProject := strings.ToLower(filepath.Base(parent))
+	if res.Project != expectedProject {
+		t.Errorf("expected Project=%q, got %q", expectedProject, res.Project)
+	}
+	if res.Warning == "" {
+		t.Error("expected non-empty Warning explaining the fallback")
 	}
 }
 
@@ -3296,8 +3319,10 @@ func TestMemSessionSummary_AutoDetectsProject(t *testing.T) {
 	}
 }
 
-// TestMemSessionSummary_AmbiguousReturnsError: ambiguous cwd returns error (REQ-309).
-func TestMemSessionSummary_AmbiguousReturnsError(t *testing.T) {
+// TestMemSessionSummary_AmbiguousFallback: ambiguous cwd falls back to
+// basename rather than erroring (issue #248). Session summary must succeed
+// with a warning and project_source=dir_basename.
+func TestMemSessionSummary_AmbiguousFallback(t *testing.T) {
 	parent := t.TempDir()
 	for _, name := range []string{"repo-summary-1", "repo-summary-2"} {
 		child := filepath.Join(parent, name)
@@ -3313,26 +3338,31 @@ func TestMemSessionSummary_AmbiguousReturnsError(t *testing.T) {
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{
 		Params: mcppkg.CallToolParams{Arguments: map[string]any{
-			"content": "## Goal\nAmbiguous test",
+			"content": "## Goal\nAmbiguous fallback test",
 		}},
 	})
 	if err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
-	if !res.IsError {
-		t.Fatal("expected error for ambiguous project in session_summary")
+	if res.IsError {
+		t.Fatalf("expected success with basename fallback, got error: %s", callResultText(t, res))
 	}
 	text := callResultText(t, res)
-	if !strings.Contains(text, "ambiguous_project") {
-		t.Errorf("expected error_code ambiguous_project, got: %q", text)
+	if !strings.Contains(text, "warning") {
+		t.Errorf("expected warning explaining the fallback, got: %q", text)
+	}
+	if !strings.Contains(text, "dir_basename") {
+		t.Errorf("expected project_source 'dir_basename', got: %q", text)
 	}
 }
 
 // ─── Judgment Round 1 Hotfix tests ───────────────────────────────────────────
 
-// JW1: TestWriteTool_AmbiguousErrorUsesCwdRepos_NotAllProjects
-// When cwd is ambiguous, error must list the repos in cwd — NOT all store projects.
-func TestWriteTool_AmbiguousErrorUsesCwdRepos_NotAllProjects(t *testing.T) {
+// JW1: TestWriteTool_AmbiguousFallbackWarningListsCwdRepos
+// When cwd is ambiguous, write succeeds with basename fallback. The warning
+// message must list the repos found in cwd — NOT all projects in the store —
+// so the user knows which children triggered the fallback. (issue #248)
+func TestWriteTool_AmbiguousFallbackWarningListsCwdRepos(t *testing.T) {
 	// Set up an ambiguous parent dir with 2 git repos.
 	parent := t.TempDir()
 	for _, name := range []string{"repo-cwd-a", "repo-cwd-b"} {
@@ -3345,7 +3375,7 @@ func TestWriteTool_AmbiguousErrorUsesCwdRepos_NotAllProjects(t *testing.T) {
 	t.Chdir(parent)
 
 	s := newMCPTestStore(t)
-	// Seed an unrelated project in the store — this must NOT appear in error.
+	// Seed an unrelated project in the store — this must NOT appear in warning.
 	if err := s.CreateSession("sess-unrelated", "unrelated-store-project", "/tmp"); err != nil {
 		t.Fatal(err)
 	}
@@ -3360,20 +3390,20 @@ func TestWriteTool_AmbiguousErrorUsesCwdRepos_NotAllProjects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
-	if !res.IsError {
-		t.Fatal("expected error for ambiguous cwd")
+	if res.IsError {
+		t.Fatalf("expected success with basename fallback, got error: %s", callResultText(t, res))
 	}
 	text := callResultText(t, res)
-	// Must list cwd repos (repo-cwd-a, repo-cwd-b).
+	// Warning must list cwd repos (repo-cwd-a, repo-cwd-b).
 	if !strings.Contains(text, "repo-cwd-a") {
-		t.Errorf("available_projects must contain repo-cwd-a (cwd repo); got: %q", text)
+		t.Errorf("warning must mention repo-cwd-a (cwd repo); got: %q", text)
 	}
 	if !strings.Contains(text, "repo-cwd-b") {
-		t.Errorf("available_projects must contain repo-cwd-b (cwd repo); got: %q", text)
+		t.Errorf("warning must mention repo-cwd-b (cwd repo); got: %q", text)
 	}
 	// Must NOT list the unrelated store project.
 	if strings.Contains(text, "unrelated-store-project") {
-		t.Errorf("available_projects must NOT list all store projects; got: %q", text)
+		t.Errorf("warning must NOT list unrelated store projects; got: %q", text)
 	}
 }
 
@@ -3547,11 +3577,10 @@ func TestHandleContext_EnvelopeProjectMatchesQueryProject(t *testing.T) {
 	}
 }
 
-// JR2-3 RED: TestHandleGetObservation_DegradedPathNoEnvelope
-// When the cwd is ambiguous (multiple git repos), resolveReadProject returns an error.
-// The handler must degrade gracefully: IsError=false, result contains observation content,
-// and the response is NOT JSON (no project_source envelope field).
-func TestHandleGetObservation_DegradedPathNoEnvelope(t *testing.T) {
+// TestHandleGetObservation_AmbiguousFallbackEnvelope: ambiguous cwd no
+// longer triggers the degraded path — the read tool succeeds with the
+// basename fallback and includes the envelope (with warning). See issue #248.
+func TestHandleGetObservation_AmbiguousFallbackEnvelope(t *testing.T) {
 	// Create a parent dir with two child git repos → ambiguous cwd.
 	parent := t.TempDir()
 	for _, name := range []string{"repo-a", "repo-b"} {
@@ -3564,15 +3593,15 @@ func TestHandleGetObservation_DegradedPathNoEnvelope(t *testing.T) {
 	t.Chdir(parent)
 
 	s := newMCPTestStore(t)
-	if err := s.CreateSession("sess-degraded", "degraded-project", "/tmp"); err != nil {
+	if err := s.CreateSession("sess-fallback", "fallback-project", "/tmp"); err != nil {
 		t.Fatal(err)
 	}
 	obsID, err := s.AddObservation(store.AddObservationParams{
-		SessionID: "sess-degraded",
+		SessionID: "sess-fallback",
 		Type:      "manual",
-		Title:     "degraded obs title",
-		Content:   "degraded obs content",
-		Project:   "degraded-project",
+		Title:     "fallback obs title",
+		Content:   "fallback obs content",
+		Project:   "fallback-project",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -3588,18 +3617,19 @@ func TestHandleGetObservation_DegradedPathNoEnvelope(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if res.IsError {
-		t.Fatalf("degraded path must not return IsError=true; text=%q", callResultText(t, res))
+		t.Fatalf("expected success with basename fallback; text=%q", callResultText(t, res))
 	}
 	text := callResultText(t, res)
-	if !strings.Contains(text, "degraded obs content") {
-		t.Errorf("degraded path must contain observation content; got: %q", text)
+	if !strings.Contains(text, "fallback obs content") {
+		t.Errorf("response must contain observation content; got: %q", text)
 	}
-	// The degraded path returns plain text (no JSON envelope), so project_source must be absent.
-	var m map[string]any
-	if json.Unmarshal([]byte(text), &m) == nil {
-		if _, hasSource := m["project_source"]; hasSource {
-			t.Error("degraded path must NOT include 'project_source' envelope field")
-		}
+	// With the fallback, the response is the JSON envelope, so project_source
+	// must be present and equal "dir_basename".
+	if !strings.Contains(text, "project_source") {
+		t.Errorf("envelope must include 'project_source'; got: %q", text)
+	}
+	if !strings.Contains(text, "dir_basename") {
+		t.Errorf("project_source should be 'dir_basename' on ambiguous cwd; got: %q", text)
 	}
 }
 

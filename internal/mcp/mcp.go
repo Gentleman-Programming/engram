@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -1627,7 +1628,16 @@ func (e *unknownProjectError) Error() string {
 }
 
 // resolveWriteProject detects the current project from the process working
-// directory. Returns ErrAmbiguousProject if cwd is a parent of multiple repos.
+// directory.
+//
+// On ErrAmbiguousProject (cwd is parent of multiple git child repos), falls
+// back to filepath.Base(cwd) for parity with the CLI wrapper DetectProject().
+// This avoids breaking write tools when the MCP server is launched from a
+// workspace folder that contains multiple cloned repositories — a common
+// setup that worked in v1.12.0 and regressed when DetectProjectFull added
+// Case 4. The fallback sets Source=SourceDirBasename and emits a Warning
+// so consumers know the project name was derived from the workspace name
+// rather than a specific repo. See issue #248.
 func resolveWriteProject() (projectpkg.DetectionResult, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -1635,6 +1645,21 @@ func resolveWriteProject() (projectpkg.DetectionResult, error) {
 	}
 	res := projectpkg.DetectProjectFull(cwd)
 	if res.Error != nil {
+		if errors.Is(res.Error, projectpkg.ErrAmbiguousProject) {
+			base := filepath.Base(cwd)
+			if base == "" || base == "." {
+				base = "unknown"
+			}
+			absDir, _ := filepath.Abs(cwd)
+			available := res.AvailableProjects
+			res = projectpkg.DetectionResult{
+				Project: strings.ToLower(strings.TrimSpace(base)),
+				Source:  projectpkg.SourceDirBasename,
+				Path:    absDir,
+				Warning: "cwd is parent of multiple git repos; using basename as project name. Available children: " + strings.Join(available, ", "),
+			}
+			return res, nil
+		}
 		return res, res.Error
 	}
 	return res, nil
