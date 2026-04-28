@@ -531,9 +531,18 @@ func main() {
 	}
 
 	// Check for updates on every invocation.
-	if result := checkForUpdates(version); result.Status != versioncheck.StatusUpToDate && result.Message != "" {
-		fmt.Fprintln(os.Stderr, result.Message)
-		fmt.Fprintln(os.Stderr)
+	// For long-running server subcommands (mcp, serve) run asynchronously so the
+	// server starts immediately without blocking on a network request.
+	printUpdate := func() {
+		if result := checkForUpdates(version); result.Status != versioncheck.StatusUpToDate && result.Message != "" {
+			fmt.Fprintln(os.Stderr, result.Message)
+			fmt.Fprintln(os.Stderr)
+		}
+	}
+	if os.Args[1] == "mcp" || os.Args[1] == "serve" {
+		go printUpdate()
+	} else {
+		printUpdate()
 	}
 
 	cfg, cfgErr := store.DefaultConfig()

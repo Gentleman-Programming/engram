@@ -13,6 +13,7 @@ import (
 	"github.com/Gentleman-Programming/engram/internal/mcp"
 	"github.com/Gentleman-Programming/engram/internal/obsidian"
 	"github.com/Gentleman-Programming/engram/internal/setup"
+	engramsrv "github.com/Gentleman-Programming/engram/internal/server"
 	"github.com/Gentleman-Programming/engram/internal/store"
 	engramsync "github.com/Gentleman-Programming/engram/internal/sync"
 	versioncheck "github.com/Gentleman-Programming/engram/internal/version"
@@ -689,6 +690,51 @@ func TestMainPrintsUpdateFailuresAndUpdates(t *testing.T) {
 			t.Fatalf("stderr = %q, want empty", stderr)
 		}
 	})
+}
+
+func TestMCPAndServeDoNotBlockOnUpdateCheck(t *testing.T) {
+	for _, subcmd := range []string{"mcp", "serve"} {
+		t.Run(subcmd, func(t *testing.T) {
+			resetMainSeams(t)
+			stubExitWithPanic(t)
+			withArgs(t, "engram", subcmd)
+
+			unblock := make(chan struct{})
+			started := make(chan struct{})
+
+			checkForUpdates = func(string) versioncheck.CheckResult {
+				<-unblock
+				return versioncheck.CheckResult{Status: versioncheck.StatusUpToDate}
+			}
+
+			switch subcmd {
+			case "mcp":
+				oldServeMCP := serveMCP
+				serveMCP = func(s *mcpserver.MCPServer, opts ...mcpserver.StdioOption) error {
+					close(started)
+					return oldServeMCP(s, opts...)
+				}
+				t.Cleanup(func() { serveMCP = oldServeMCP })
+			case "serve":
+				oldStartHTTP := startHTTP
+				startHTTP = func(s *engramsrv.Server) error {
+					close(started)
+					return oldStartHTTP(s)
+				}
+				t.Cleanup(func() { startHTTP = oldStartHTTP })
+			}
+
+			go func() { main() }()
+
+			select {
+			case <-started:
+			case <-time.After(2 * time.Second):
+				t.Errorf("%s subcommand blocked on checkForUpdates — expected async startup", subcmd)
+			}
+
+			close(unblock)
+		})
+	}
 }
 
 func TestMainExitPaths(t *testing.T) {
