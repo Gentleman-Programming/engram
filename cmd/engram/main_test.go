@@ -695,7 +695,7 @@ func TestMainPrintsUpdateFailuresAndUpdates(t *testing.T) {
 func TestMCPAndServeDoNotBlockOnUpdateCheck(t *testing.T) {
 	for _, subcmd := range []string{"mcp", "serve"} {
 		t.Run(subcmd, func(t *testing.T) {
-			resetMainSeams(t)
+			stubRuntimeHooks(t)
 			stubExitWithPanic(t)
 			withArgs(t, "engram", subcmd)
 
