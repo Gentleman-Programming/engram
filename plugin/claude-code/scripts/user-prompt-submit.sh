@@ -11,7 +11,7 @@
 # MUST exit 0 always and output valid JSON — otherwise Claude Code blocks the message.
 
 ENGRAM_PORT="${ENGRAM_PORT:-7437}"
-ENGRAM_URL="http://127.0.0.1:${ENGRAM_PORT}"
+ENGRAM_URL="${ENGRAM_URL:-http://127.0.0.1:${ENGRAM_PORT}}"
 
 # Load shared helpers
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

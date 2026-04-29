@@ -200,6 +200,7 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 |---|---|---|
 | `ENGRAM_DATA_DIR` | Override data directory | `~/.engram` |
 | `ENGRAM_PORT` | Override HTTP server port | `7437` |
+| `ENGRAM_URL` | Override the URL Claude Code hooks talk to (multi-machine / remote backend setups). When set to a non-default value, the hooks will not auto-spawn a local `engram serve`. | `http://127.0.0.1:${ENGRAM_PORT}` |
 | `ENGRAM_PROJECT` | Override project name for MCP server | auto-detected via git |
 
 ### Cloud CLI (opt-in)

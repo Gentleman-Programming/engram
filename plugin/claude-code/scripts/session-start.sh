@@ -7,7 +7,8 @@
 # 4. Injects Memory Protocol instructions + memory context
 
 ENGRAM_PORT="${ENGRAM_PORT:-7437}"
-ENGRAM_URL="http://127.0.0.1:${ENGRAM_PORT}"
+ENGRAM_URL_DEFAULT="http://127.0.0.1:${ENGRAM_PORT}"
+ENGRAM_URL="${ENGRAM_URL:-${ENGRAM_URL_DEFAULT}}"
 IMPORT_TIMEOUT_SECS=8
 LOCK_TTL_SECS=$((IMPORT_TIMEOUT_SECS + 4))
 LOCK_METADATA_STALE_SECS=$((LOCK_TTL_SECS * 5))
@@ -23,10 +24,15 @@ CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 OLD_PROJECT=$(basename "$CWD")
 PROJECT=$(detect_project "$CWD")
 
-# Ensure engram server is running
-if ! curl -sf "${ENGRAM_URL}/health" --max-time 1 > /dev/null 2>&1; then
-  engram serve &>/dev/null &
-  sleep 0.5
+# Ensure engram server is running.
+# Only auto-spawn `engram serve` when ENGRAM_URL is the default localhost URL.
+# If the user pointed ENGRAM_URL at a remote backend (e.g. NAS, k8s, dev container),
+# spawning a local binary would be wrong — fail silent and let the remote answer.
+if [ "$ENGRAM_URL" = "$ENGRAM_URL_DEFAULT" ]; then
+  if ! curl -sf "${ENGRAM_URL}/health" --max-time 1 > /dev/null 2>&1; then
+    engram serve &>/dev/null &
+    sleep 0.5
+  fi
 fi
 
 # Migrate project name if it changed (one-time, idempotent)

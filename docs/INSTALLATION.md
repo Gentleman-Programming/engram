@@ -141,6 +141,7 @@ The binary includes SQLite (via [modernc.org/sqlite](https://pkg.go.dev/modernc.
 |---|---|---|
 | `ENGRAM_DATA_DIR` | Data directory | `~/.engram` (Windows: `%USERPROFILE%\.engram`) |
 | `ENGRAM_PORT` | HTTP server port | `7437` |
+| `ENGRAM_URL` | Override the URL Claude Code hooks talk to (multi-machine / remote backend setups). When set to a non-default value, the hooks will not auto-spawn a local `engram serve`. | `http://127.0.0.1:${ENGRAM_PORT}` |
 
 ---
 
