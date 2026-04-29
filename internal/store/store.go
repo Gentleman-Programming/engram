@@ -2762,6 +2762,64 @@ SELECT 1 FROM (
 	return true, nil
 }
 
+// ResolveProjectName looks up a project name with a two-stage fallback so that
+// callers can match stored projects regardless of casing variants:
+//
+//  1. Case-sensitive exact match (fast path, identical to ProjectExists).
+//  2. Case-insensitive fallback using COLLATE NOCASE — returns the canonical
+//     stored casing (e.g. "E3") so downstream queries can use the exact form.
+//
+// Returns the canonical stored name when found. When multiple casings exist in
+// the store (e.g. both "E3" and "e3"), the case-sensitive match wins; the
+// fallback only fires when the case-sensitive match fails. This preserves the
+// invariant that distinct casings remain addressable while making the common
+// "search for 'E3', stored as 'e3'" case work transparently.
+func (s *Store) ResolveProjectName(input string) (canonical string, exists bool, err error) {
+	if input == "" {
+		return "", false, nil
+	}
+	// Stage 1: case-sensitive (BINARY collation, default in SQLite).
+	const exactQuery = `
+SELECT project FROM (
+  SELECT project FROM observations WHERE project = ? AND deleted_at IS NULL
+  UNION ALL
+  SELECT project FROM sessions WHERE project = ?
+  UNION ALL
+  SELECT project FROM user_prompts WHERE project = ?
+  UNION ALL
+  SELECT project FROM sync_enrolled_projects WHERE project = ?
+) LIMIT 1`
+	var found string
+	err = s.db.QueryRow(exactQuery, input, input, input, input).Scan(&found)
+	if err == nil {
+		return found, true, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", false, err
+	}
+
+	// Stage 2: case-insensitive fallback. Using COLLATE NOCASE on the WHERE
+	// clauses lets SQLite match without re-indexing.
+	const ciQuery = `
+SELECT project FROM (
+  SELECT project FROM observations WHERE project = ? COLLATE NOCASE AND deleted_at IS NULL
+  UNION ALL
+  SELECT project FROM sessions WHERE project = ? COLLATE NOCASE
+  UNION ALL
+  SELECT project FROM user_prompts WHERE project = ? COLLATE NOCASE
+  UNION ALL
+  SELECT project FROM sync_enrolled_projects WHERE project = ? COLLATE NOCASE
+) LIMIT 1`
+	err = s.db.QueryRow(ciQuery, input, input, input, input).Scan(&found)
+	if err == nil {
+		return found, true, nil
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	return "", false, err
+}
+
 // ─── Context Formatting ─────────────────────────────────────────────────────
 
 func (s *Store) FormatContext(project, scope string) (string, error) {
@@ -5409,7 +5467,8 @@ func normalizeScope(scope string) string {
 }
 
 // NormalizeProject applies canonical project name normalization:
-// lowercase + trim whitespace + collapse consecutive hyphens/underscores.
+// lowercase + trim whitespace + collapse consecutive hyphens/underscores +
+// reject filesystem paths (sanitize to basename with warning).
 // Returns the normalized name and a warning message if the name was changed
 // (empty string if no change was needed).
 // Exported so MCP and CLI handlers can surface the warning to users.
@@ -5417,6 +5476,22 @@ func NormalizeProject(project string) (normalized string, warning string) {
 	if project == "" {
 		return "", ""
 	}
+
+	// Defensive sanitization: if the input looks like an absolute filesystem
+	// path (e.g. "C:\Users\maicolj" or "/home/foo/repos/bar"), it slipped past
+	// the project detection layer (probably a fallback that used cwd verbatim).
+	// Reduce it to just the basename so we never persist paths as project names.
+	pathLike, sanitized := sanitizePathLike(project)
+	if pathLike {
+		// Continue normalizing the sanitized basename through the regular pipeline
+		// and surface a warning so the caller knows the original was a path.
+		regular, _ := NormalizeProject(sanitized)
+		if regular == "" {
+			regular = "unknown"
+		}
+		return regular, fmt.Sprintf("⚠️ Project name looked like a filesystem path; sanitized to basename: %q → %q", project, regular)
+	}
+
 	n := strings.TrimSpace(strings.ToLower(project))
 	// Collapse multiple consecutive hyphens
 	for strings.Contains(n, "--") {
@@ -5430,6 +5505,44 @@ func NormalizeProject(project string) (normalized string, warning string) {
 		return n, ""
 	}
 	return n, fmt.Sprintf("⚠️ Project name normalized: %q → %q", project, n)
+}
+
+// sanitizePathLike detects whether s looks like a filesystem path and, if so,
+// returns the basename. Detection covers:
+//   - Windows drive paths: "C:\foo" or "C:/foo"
+//   - UNC paths:           "\\server\share"
+//   - Unix absolute paths: "/foo/bar"
+//   - Anything containing a directory separator and more than one segment
+//     (e.g. "src/scripts" — not a project name).
+//
+// Single-segment values without separators (e.g. "my-project") are returned
+// unchanged with pathLike=false.
+func sanitizePathLike(s string) (pathLike bool, basename string) {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return false, ""
+	}
+	hasBackslash := strings.Contains(trimmed, `\`)
+	hasForwardSlash := strings.Contains(trimmed, `/`)
+	if !hasBackslash && !hasForwardSlash {
+		return false, trimmed
+	}
+	// At least one separator → treat as path. Use forward slashes uniformly
+	// and take the last non-empty segment as the basename.
+	uniform := strings.ReplaceAll(trimmed, `\`, `/`)
+	uniform = strings.TrimRight(uniform, `/`)
+	parts := strings.Split(uniform, `/`)
+	for i := len(parts) - 1; i >= 0; i-- {
+		seg := strings.TrimSpace(parts[i])
+		// Skip drive letters like "C:" and empty segments from leading slashes.
+		if seg == "" || (len(seg) == 2 && seg[1] == ':') {
+			continue
+		}
+		return true, seg
+	}
+	// Fallback: nothing useful → mark as path-like with empty basename so caller
+	// can fall back to "unknown" via the recursion above.
+	return true, ""
 }
 
 // SuggestTopicKey generates a stable topic key suggestion from type/title/content.

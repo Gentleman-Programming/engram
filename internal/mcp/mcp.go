@@ -1661,8 +1661,30 @@ func (e *unknownProjectError) Error() string {
 	return "unknown project: " + e.Name
 }
 
+// defaultProjectFallback, when non-empty, is used as the project name whenever
+// auto-detection from cwd returns ErrAmbiguousProject. This unblocks the
+// out-of-the-box experience for MCP clients (Claude Code, OpenCode) whose
+// process cwd lives in a directory that contains multiple git repos — those
+// clients have no way to `cd` into a specific repo from inside the agent.
+//
+// The fallback is opt-in: it is only set when the operator launches the MCP
+// server with `engram mcp --default-project NAME`. Default behavior (empty
+// string) preserves the historical "fail fast on ambiguity" contract.
+var defaultProjectFallback string
+
+// SetDefaultProjectFallback configures the project name used as fallback when
+// cwd-based detection returns ErrAmbiguousProject. Pass an empty string to
+// disable the fallback (default behavior). Intended to be called once at
+// server startup from cmdMCP, before tool handlers begin serving requests.
+func SetDefaultProjectFallback(name string) {
+	defaultProjectFallback = strings.TrimSpace(name)
+}
+
 // resolveWriteProject detects the current project from the process working
-// directory. Returns ErrAmbiguousProject if cwd is a parent of multiple repos.
+// directory. Behavior on ambiguous cwd (parent of multiple repos):
+//   - If SetDefaultProjectFallback was called with a non-empty name, returns
+//     that name with Source="default_fallback" and a Warning.
+//   - Otherwise returns ErrAmbiguousProject (historical behavior).
 func resolveWriteProject() (projectpkg.DetectionResult, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -1670,6 +1692,16 @@ func resolveWriteProject() (projectpkg.DetectionResult, error) {
 	}
 	res := projectpkg.DetectProjectFull(cwd)
 	if res.Error != nil {
+		if errors.Is(res.Error, projectpkg.ErrAmbiguousProject) && defaultProjectFallback != "" {
+			normalized, _ := store.NormalizeProject(defaultProjectFallback)
+			return projectpkg.DetectionResult{
+				Project:           normalized,
+				Source:            "default_fallback",
+				Path:              res.Path,
+				Warning:           fmt.Sprintf("ambiguous cwd; using --default-project=%q", normalized),
+				AvailableProjects: res.AvailableProjects,
+			}, nil
+		}
 		return res, res.Error
 	}
 	return res, nil
@@ -1677,17 +1709,38 @@ func resolveWriteProject() (projectpkg.DetectionResult, error) {
 
 // resolveReadProject validates an optional project override against the store.
 // If override is empty, falls back to auto-detection from cwd.
-// JW2: normalizes the override (lowercase+trim) before ProjectExists lookup so
-// that e.g. "MyApp" and "  myapp  " both resolve to the stored "myapp".
+// JW2: normalizes the override (lowercase+trim) before lookup so that e.g.
+// "MyApp" and "  myapp  " both resolve to the stored "myapp".
+//
+// Lookup uses Store.ResolveProjectName which falls back to case-insensitive
+// matching when the case-sensitive lookup misses. This fixes the legitimate
+// case where a user passes "E3" but the store has "E3" (case-sensitive
+// previously erroneously reported "Project 'e3' not found"). When the
+// case-insensitive fallback finds a hit, the canonical stored casing is used
+// for downstream queries — preserving the invariant that distinct casings
+// (if both are in the store) remain individually addressable.
 func resolveReadProject(s *store.Store, override string) (projectpkg.DetectionResult, error) {
 	override = strings.TrimSpace(override)
 	if override == "" {
 		return resolveWriteProject()
 	}
 	normalized, _ := store.NormalizeProject(override)
-	exists, err := s.ProjectExists(normalized)
+
+	// Try the normalized form first (matches the legacy invariant that names
+	// are stored lowercase). If that misses, ResolveProjectName falls back to
+	// case-insensitive lookup and returns the actual stored casing.
+	canonical, exists, err := s.ResolveProjectName(normalized)
 	if err != nil {
 		return projectpkg.DetectionResult{}, err
+	}
+	if !exists {
+		// Last attempt: try the raw override exactly as the user typed it,
+		// in case it was stored with a casing that survives normalization
+		// (e.g. legacy stored "E3" matches user-supplied "E3").
+		canonical, exists, err = s.ResolveProjectName(override)
+		if err != nil {
+			return projectpkg.DetectionResult{}, err
+		}
 	}
 	if !exists {
 		// Collect available projects for the error.
@@ -1698,7 +1751,7 @@ func resolveReadProject(s *store.Store, override string) (projectpkg.DetectionRe
 		}
 	}
 	return projectpkg.DetectionResult{
-		Project: normalized,
+		Project: canonical, // canonical stored casing, not the normalized input
 		Source:  projectpkg.SourceExplicitOverride, // JR2-2: use named constant
 		Path:    "",
 	}, nil

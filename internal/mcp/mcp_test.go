@@ -3201,9 +3201,79 @@ func TestResolveWriteProject_AmbiguousError(t *testing.T) {
 	}
 	t.Chdir(parent)
 
+	// Ensure no fallback is configured for this case (other test in this file
+	// may have set it; reset to preserve historical behavior).
+	t.Cleanup(func() { SetDefaultProjectFallback("") })
+	SetDefaultProjectFallback("")
+
 	_, err := resolveWriteProject()
 	if !errors.Is(err, project.ErrAmbiguousProject) {
 		t.Errorf("expected ErrAmbiguousProject, got %v", err)
+	}
+}
+
+// TestResolveWriteProject_AmbiguousFallback covers the fallback path added by
+// the --default-project flag: when the operator launches the MCP server with
+// `engram mcp --default-project=general`, an ambiguous cwd no longer raises
+// ambiguous_project — the call returns a DetectionResult whose Project is the
+// configured fallback and Source is "default_fallback", with a Warning so
+// callers (and the user) can see the rationale in the response envelope.
+func TestResolveWriteProject_AmbiguousFallback(t *testing.T) {
+	parent := t.TempDir()
+	for _, name := range []string{"repo-a", "repo-b"} {
+		child := filepath.Join(parent, name)
+		if err := os.MkdirAll(child, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		initTestGitRepo(t, child)
+	}
+	t.Chdir(parent)
+
+	t.Cleanup(func() { SetDefaultProjectFallback("") })
+	SetDefaultProjectFallback("general")
+
+	res, err := resolveWriteProject()
+	if err != nil {
+		t.Fatalf("expected fallback to swallow ambiguous error, got %v", err)
+	}
+	if res.Project != "general" {
+		t.Errorf("Project = %q; want %q", res.Project, "general")
+	}
+	if res.Source != "default_fallback" {
+		t.Errorf("Source = %q; want %q", res.Source, "default_fallback")
+	}
+	if res.Warning == "" {
+		t.Error("expected non-empty Warning describing the fallback")
+	}
+	if len(res.AvailableProjects) != 2 {
+		t.Errorf("AvailableProjects len = %d; want 2 (the ambiguous candidates)", len(res.AvailableProjects))
+	}
+}
+
+// TestSetDefaultProjectFallback_NormalizesAndTrims ensures the fallback name is
+// stored as a trimmed, normalized project identifier so callers do not need to
+// pre-format the --default-project flag value.
+func TestSetDefaultProjectFallback_NormalizesAndTrims(t *testing.T) {
+	t.Cleanup(func() { SetDefaultProjectFallback("") })
+
+	parent := t.TempDir()
+	for _, name := range []string{"repo-a", "repo-b"} {
+		child := filepath.Join(parent, name)
+		if err := os.MkdirAll(child, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		initTestGitRepo(t, child)
+	}
+	t.Chdir(parent)
+
+	SetDefaultProjectFallback("  General  ") // whitespace + casing
+
+	res, err := resolveWriteProject()
+	if err != nil {
+		t.Fatalf("resolveWriteProject: %v", err)
+	}
+	if res.Project != "general" {
+		t.Errorf("Project = %q; want %q (input should be trimmed + lowercased)", res.Project, "general")
 	}
 }
 

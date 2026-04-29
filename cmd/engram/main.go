@@ -806,13 +806,27 @@ func tryStartAutosync(ctx context.Context, s *store.Store, cfg store.Config) (au
 }
 
 func cmdMCP(cfg store.Config) {
-	// Parse --tools flag. Project is always auto-detected from cwd at call time (JR2-4).
+	// Parse flags:
+	//   --tools=PROFILE         (filter exposed tools)
+	//   --default-project NAME  (fallback project name when cwd is ambiguous)
+	// Project is always auto-detected from cwd at call time (JR2-4); the
+	// --default-project flag only kicks in when detection returns
+	// ErrAmbiguousProject (cwd has multiple git repos as children — common on
+	// home directories for MCP clients like Claude Code / OpenCode).
 	toolsFilter := ""
+	defaultProject := ""
 	for i := 2; i < len(os.Args); i++ {
-		if strings.HasPrefix(os.Args[i], "--tools=") {
-			toolsFilter = strings.TrimPrefix(os.Args[i], "--tools=")
-		} else if os.Args[i] == "--tools" && i+1 < len(os.Args) {
+		arg := os.Args[i]
+		switch {
+		case strings.HasPrefix(arg, "--tools="):
+			toolsFilter = strings.TrimPrefix(arg, "--tools=")
+		case arg == "--tools" && i+1 < len(os.Args):
 			toolsFilter = os.Args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--default-project="):
+			defaultProject = strings.TrimPrefix(arg, "--default-project=")
+		case arg == "--default-project" && i+1 < len(os.Args):
+			defaultProject = os.Args[i+1]
 			i++
 		}
 	}
@@ -822,6 +836,10 @@ func cmdMCP(cfg store.Config) {
 		fatal(err)
 	}
 	defer s.Close()
+
+	if defaultProject != "" {
+		mcp.SetDefaultProjectFallback(defaultProject)
+	}
 
 	mcpCfg := mcp.MCPConfig{}
 	allowlist := resolveMCPTools(toolsFilter)
@@ -1667,7 +1685,25 @@ type projectGroup struct {
 
 // groupSimilarProjects groups projects by name similarity and shared directories.
 // Uses a simple union-find approach.
+// maxSharedProjectsForDirMatch caps how many distinct projects may share a
+// single directory before that directory is treated as too "noisy" to be a
+// meaningful fingerprint. Without this cap, a directory like the user's home
+// (which dozens of unrelated projects' sessions transit through) would
+// transitively unite every project into a single component via union-find.
+//
+// 3 is a deliberately conservative number: a real rename or move shows up as
+// 1–2 project rows pointing to the same directory, never more.
+const maxSharedProjectsForDirMatch = 3
+
 func groupSimilarProjects(projects []store.ProjectStats) []projectGroup {
+	return groupSimilarProjectsWithMode(projects, false)
+}
+
+// groupSimilarProjectsWithMode groups projects with optional strict-similarity
+// behavior. When strictSimilarity=true, only name-based similarity is used —
+// shared-directory union is skipped entirely. This is safer for stores where
+// many projects share noisy parent directories (e.g. $HOME).
+func groupSimilarProjectsWithMode(projects []store.ProjectStats, strictSimilarity bool) []projectGroup {
 	n := len(projects)
 	if n == 0 {
 		return nil
@@ -1711,18 +1747,38 @@ func groupSimilarProjects(projects []store.ProjectStats) []projectGroup {
 		}
 	}
 
-	// Group by shared directory
-	dirToProjects := make(map[string][]int)
-	for i, p := range projects {
-		for _, dir := range p.Directories {
-			if dir != "" {
-				dirToProjects[dir] = append(dirToProjects[dir], i)
+	// Group by shared directory — opt-out via strictSimilarity, and also
+	// skip directories that are touched by more than maxSharedProjectsForDirMatch
+	// distinct projects. A directory shared by 5+ projects is almost always
+	// $HOME or some other non-fingerprint location, not a rename signal — and
+	// blindly unioning over it produces the catastrophic transitive cluster
+	// where, for example, gis ↔ jarvis ↔ forge get merged into "general".
+	if !strictSimilarity {
+		dirToProjects := make(map[string][]int)
+		for i, p := range projects {
+			for _, dir := range p.Directories {
+				if dir != "" {
+					dirToProjects[dir] = append(dirToProjects[dir], i)
+				}
 			}
 		}
-	}
-	for _, idxs := range dirToProjects {
-		for k := 1; k < len(idxs); k++ {
-			union(idxs[0], idxs[k])
+		for _, idxs := range dirToProjects {
+			// Distinct count (a project may appear multiple times in idxs if it
+			// recorded the same directory under multiple sessions).
+			seen := make(map[int]bool, len(idxs))
+			distinct := 0
+			for _, idx := range idxs {
+				if !seen[idx] {
+					seen[idx] = true
+					distinct++
+				}
+			}
+			if distinct > maxSharedProjectsForDirMatch {
+				continue // noisy parent path — skip to avoid transitive cluster
+			}
+			for k := 1; k < len(idxs); k++ {
+				union(idxs[0], idxs[k])
+			}
 		}
 	}
 
@@ -1766,12 +1822,15 @@ func groupSimilarProjects(projects []store.ProjectStats) []projectGroup {
 func cmdProjectsConsolidate(cfg store.Config) {
 	doAll := false
 	dryRun := false
+	strictSimilarity := false
 	for i := 3; i < len(os.Args); i++ {
 		switch os.Args[i] {
 		case "--all":
 			doAll = true
 		case "--dry-run":
 			dryRun = true
+		case "--strict-similarity":
+			strictSimilarity = true
 		}
 	}
 
@@ -1917,7 +1976,7 @@ func cmdProjectsConsolidate(cfg store.Config) {
 		fatal(err)
 	}
 
-	groups := groupSimilarProjects(projects)
+	groups := groupSimilarProjectsWithMode(projects, strictSimilarity)
 
 	if len(groups) == 0 {
 		fmt.Println("No similar project name groups found.")
@@ -2215,12 +2274,16 @@ Usage:
 
 Commands:
   serve [port]       Start HTTP API server (default: 7437)
-  mcp [--tools=PROFILE] [--project=NAME]
+  mcp [--tools=PROFILE] [--default-project=NAME]
                      Start MCP server (stdio transport, for any AI agent)
                        Profiles: agent (11 tools), admin (4 tools), all (default, 15)
                        Combine: --tools=agent,admin or pick individual tools
-                       --project  Override detected project name (default: git remote → cwd)
-                       Example: engram mcp --tools=agent
+                       --default-project  Project name used as fallback when cwd
+                                          contains multiple git repos (otherwise
+                                          mem_save returns ambiguous_project).
+                                          Recommended for clients whose cwd is
+                                          $HOME (Claude Code, OpenCode, etc.).
+                       Example: engram mcp --tools=agent --default-project=general
   tui                Launch interactive terminal UI
   search <query>     Search memories [--type TYPE] [--project PROJECT] [--scope SCOPE] [--limit N]
   save <title> <msg> Save a memory  [--type TYPE] [--project PROJECT] [--scope SCOPE]
@@ -2230,9 +2293,14 @@ Commands:
   export [file]      Export all memories to JSON (default: engram-export.json)
   import <file>      Import memories from a JSON export file
   projects list      List all projects with observation, session, and prompt counts
-  projects consolidate [--all] [--dry-run]
+  projects consolidate [--all] [--dry-run] [--strict-similarity]
                      Merge similar project names into one canonical name
-                       --all      Scan ALL projects for similar name groups
+                       --all                  Scan ALL projects for similar name groups
+                       --dry-run              Preview matches without merging
+                       --strict-similarity    Group only by name similarity (skip
+                                              shared-directory union — safer when
+                                              many projects share noisy parent
+                                              paths like $HOME)
                        --dry-run  Preview what would be merged (no changes)
   setup [agent]      Install/setup agent integration (opencode, claude-code, gemini-cli, codex)
   sync               Export new memories as compressed chunk to .engram/

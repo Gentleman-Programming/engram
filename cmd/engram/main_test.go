@@ -1446,3 +1446,72 @@ func TestObsidianExportWatchModeCallsInjectedWatcher(t *testing.T) {
 		t.Fatalf("expected non-nil Logf in WatcherConfig")
 	}
 }
+
+// TestGroupSimilarProjects_NoisyDirectoryNotMerged covers the regression where
+// groupSimilarProjects produced a single 46-project component because every
+// project shared a directory like $HOME (transitively unioned through that
+// noisy parent path). With the maxSharedProjectsForDirMatch cap, a directory
+// touched by more than 3 distinct projects is no longer used as a fingerprint
+// and unrelated projects stay in separate components.
+func TestGroupSimilarProjects_NoisyDirectoryNotMerged(t *testing.T) {
+	noisy := "/home/user"
+	// Names deliberately chosen with large pairwise Levenshtein distances so
+	// no name-similarity edges are created. The only thing they share is the
+	// directory — which exceeds the noisy threshold and is therefore ignored.
+	projects := []store.ProjectStats{
+		{Name: "redis-cache", ObservationCount: 10, Directories: []string{noisy}},
+		{Name: "postgres-db", ObservationCount: 20, Directories: []string{noisy}},
+		{Name: "frontend-ui", ObservationCount: 30, Directories: []string{noisy}},
+		{Name: "backend-api", ObservationCount: 40, Directories: []string{noisy}},
+		{Name: "metrics-svc", ObservationCount: 50, Directories: []string{noisy}},
+	}
+
+	groups := groupSimilarProjects(projects)
+
+	if len(groups) != 0 {
+		t.Errorf("expected 0 groups (noisy dir filtered), got %d: %+v", len(groups), groups)
+	}
+}
+
+// TestGroupSimilarProjects_LegitimateRenameStillMerges ensures the noisy-dir
+// filter does not over-correct and break the legitimate rename use case where
+// 2 projects share a unique directory (e.g. sdd-agent-team renamed to
+// agent-teams-lite, both rooted at the same path).
+func TestGroupSimilarProjects_LegitimateRenameStillMerges(t *testing.T) {
+	uniqueDir := "/home/user/repos/agent-teams-lite"
+	projects := []store.ProjectStats{
+		{Name: "sdd-agent-team", ObservationCount: 5, Directories: []string{uniqueDir}},
+		{Name: "agent-teams-lite", ObservationCount: 50, Directories: []string{uniqueDir}},
+		{Name: "unrelated-project", ObservationCount: 10, Directories: []string{"/home/user/other"}},
+	}
+
+	groups := groupSimilarProjects(projects)
+
+	if len(groups) != 1 {
+		t.Fatalf("expected 1 group (rename via shared dir), got %d", len(groups))
+	}
+	if len(groups[0].Names) != 2 {
+		t.Errorf("expected 2 projects in group, got %d: %v", len(groups[0].Names), groups[0].Names)
+	}
+	if groups[0].Canonical != "agent-teams-lite" {
+		t.Errorf("Canonical = %q; want %q (highest obs count)", groups[0].Canonical, "agent-teams-lite")
+	}
+}
+
+// TestGroupSimilarProjectsWithMode_StrictDisablesDirUnion verifies the
+// --strict-similarity flag: even when 2 projects share a unique directory
+// they are NOT merged unless their names also match. This is the safest mode
+// for stores where the user has reason to distrust directory-based grouping.
+func TestGroupSimilarProjectsWithMode_StrictDisablesDirUnion(t *testing.T) {
+	uniqueDir := "/home/user/repos/agent-teams-lite"
+	projects := []store.ProjectStats{
+		{Name: "sdd-agent-team", ObservationCount: 5, Directories: []string{uniqueDir}},
+		{Name: "agent-teams-lite", ObservationCount: 50, Directories: []string{uniqueDir}},
+	}
+
+	groups := groupSimilarProjectsWithMode(projects, true /* strictSimilarity */)
+
+	if len(groups) != 0 {
+		t.Errorf("expected 0 groups in strict mode (names not similar enough), got %d: %+v", len(groups), groups)
+	}
+}

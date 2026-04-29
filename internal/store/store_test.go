@@ -5866,6 +5866,187 @@ func TestNormalizeProjectFunction(t *testing.T) {
 	}
 }
 
+// TestNormalizeProject_PathLike covers the path-sanitization branch added to
+// fix the bug where the MCP server, when it could not auto-detect a project
+// from cwd, persisted observations under a project named after the absolute
+// path (e.g. "C:\Users\maicolj"). NormalizeProject now detects path-like input
+// and reduces it to the basename with a warning, so even if a path slips
+// through the detection layer it will not pollute the project list.
+func TestNormalizeProject_PathLike(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		wantName    string
+		wantWarning bool
+	}{
+		{
+			name:        "windows drive path",
+			input:       `C:\Users\maicolj`,
+			wantName:    "maicolj",
+			wantWarning: true,
+		},
+		{
+			name:        "windows drive path with forward slashes",
+			input:       `C:/Users/Foo/.opencode`,
+			wantName:    ".opencode",
+			wantWarning: true,
+		},
+		{
+			name:        "unix absolute path",
+			input:       "/home/foo/repos/bar",
+			wantName:    "bar",
+			wantWarning: true,
+		},
+		{
+			name:        "relative path with forward slash",
+			input:       "src/scripts",
+			wantName:    "scripts",
+			wantWarning: true,
+		},
+		{
+			name:        "unc path",
+			input:       `\\server\share\folder`,
+			wantName:    "folder",
+			wantWarning: true,
+		},
+		{
+			name:        "trailing separator",
+			input:       `C:\SDK\jarvis\`,
+			wantName:    "jarvis",
+			wantWarning: true,
+		},
+		{
+			name:        "drive root only",
+			input:       `C:\`,
+			wantName:    "unknown", // recursive call into normalize hits empty basename → unknown
+			wantWarning: true,
+		},
+		{
+			name:        "plain name with no separators is untouched",
+			input:       "my-project",
+			wantName:    "my-project",
+			wantWarning: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, warning := NormalizeProject(tc.input)
+			if got != tc.wantName {
+				t.Errorf("NormalizeProject(%q) name = %q, want %q", tc.input, got, tc.wantName)
+			}
+			if tc.wantWarning && warning == "" {
+				t.Errorf("NormalizeProject(%q) expected a warning, got empty string", tc.input)
+			}
+			if !tc.wantWarning && warning != "" {
+				t.Errorf("NormalizeProject(%q) expected no warning, got %q", tc.input, warning)
+			}
+		})
+	}
+}
+
+// TestResolveProjectName_CaseInsensitive covers the bug where a search filter
+// like project="E3" reported "Project 'e3' not found" even though the store
+// contained an observation under project="E3" — typical for legacy data
+// imported before NormalizeProject became authoritative. The new helper falls
+// back to a COLLATE NOCASE lookup and returns the canonical stored casing so
+// downstream queries can match exactly.
+//
+// The test bypasses CreateSession (which normalizes on write) and writes the
+// row with the original casing directly via SQL, simulating data that
+// pre-dates the lowercase invariant.
+func TestResolveProjectName_CaseInsensitive(t *testing.T) {
+	s := newTestStore(t)
+
+	// Seed legacy-shaped data: a session row stored with capitalized "E3".
+	if _, err := s.db.Exec(
+		`INSERT INTO sessions (id, project, directory, started_at) VALUES (?, ?, ?, ?)`,
+		"sess-legacy-e3", "E3", "/tmp", 0,
+	); err != nil {
+		t.Fatalf("seed legacy session: %v", err)
+	}
+
+	tests := []struct {
+		name          string
+		input         string
+		wantCanonical string
+		wantExists    bool
+	}{
+		{
+			name:          "exact match preserves casing",
+			input:         "E3",
+			wantCanonical: "E3",
+			wantExists:    true,
+		},
+		{
+			name:          "lowercase input falls back to capitalized stored project",
+			input:         "e3",
+			wantCanonical: "E3",
+			wantExists:    true,
+		},
+		{
+			name:          "truly unknown project returns false",
+			input:         "does-not-exist",
+			wantCanonical: "",
+			wantExists:    false,
+		},
+		{
+			name:          "empty input returns false without error",
+			input:         "",
+			wantCanonical: "",
+			wantExists:    false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			canonical, exists, err := s.ResolveProjectName(tc.input)
+			if err != nil {
+				t.Fatalf("ResolveProjectName(%q) error: %v", tc.input, err)
+			}
+			if exists != tc.wantExists {
+				t.Errorf("ResolveProjectName(%q) exists = %v, want %v", tc.input, exists, tc.wantExists)
+			}
+			if canonical != tc.wantCanonical {
+				t.Errorf("ResolveProjectName(%q) canonical = %q, want %q",
+					tc.input, canonical, tc.wantCanonical)
+			}
+		})
+	}
+}
+
+// TestResolveProjectName_PrefersExactCaseWhenBothExist verifies that when the
+// store contains BOTH "E3" and "e3" (rare but possible after data import),
+// an input matching one casing exactly resolves to that casing — not the
+// other variant. This preserves addressability of distinct casings.
+func TestResolveProjectName_PrefersExactCaseWhenBothExist(t *testing.T) {
+	s := newTestStore(t)
+
+	for _, casing := range []string{"E3", "e3"} {
+		if _, err := s.db.Exec(
+			`INSERT INTO sessions (id, project, directory, started_at) VALUES (?, ?, ?, ?)`,
+			"sess-"+casing, casing, "/tmp", 0,
+		); err != nil {
+			t.Fatalf("seed session %q: %v", casing, err)
+		}
+	}
+
+	// Exact matches must return the queried casing, not the other.
+	for _, casing := range []string{"E3", "e3"} {
+		canonical, exists, err := s.ResolveProjectName(casing)
+		if err != nil {
+			t.Fatalf("ResolveProjectName(%q): %v", casing, err)
+		}
+		if !exists {
+			t.Errorf("ResolveProjectName(%q) exists=false; want true", casing)
+		}
+		if canonical != casing {
+			t.Errorf("ResolveProjectName(%q) canonical = %q; want %q (exact-case match must win)",
+				casing, canonical, casing)
+		}
+	}
+}
+
 func TestAddObservationNormalizesProject(t *testing.T) {
 	s := newTestStore(t)
 
