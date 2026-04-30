@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/cloud/cloudstore"
+	"github.com/Gentleman-Programming/engram/internal/store"
+	engramsync "github.com/Gentleman-Programming/engram/internal/sync"
 )
 
 // ─── Fakes for mutation tests ─────────────────────────────────────────────────
@@ -48,6 +50,125 @@ func (s *fakeMutationStore) IsProjectSyncEnabled(project string) (bool, error) {
 		return enabled, nil
 	}
 	return true, nil // default: enabled
+}
+
+func (s *fakeMutationStore) WriteChunk(ctx context.Context, project string, chunkID, createdBy, clientCreatedAt string, payload []byte) error {
+	if _, exists := s.chunks[chunkID]; exists {
+		return s.fakeStore.WriteChunk(ctx, project, chunkID, createdBy, clientCreatedAt, payload)
+	}
+	if err := s.fakeStore.WriteChunk(ctx, project, chunkID, createdBy, clientCreatedAt, payload); err != nil {
+		return err
+	}
+	var chunk engramsync.ChunkData
+	if err := json.Unmarshal(payload, &chunk); err != nil {
+		return err
+	}
+	batch := make([]MutationEntry, 0, len(chunk.Sessions)+len(chunk.Observations)+len(chunk.Prompts))
+	for _, session := range chunk.Sessions {
+		body, _ := json.Marshal(session)
+		batch = append(batch, MutationEntry{Project: project, Entity: store.SyncEntitySession, EntityKey: strings.TrimSpace(session.ID), Op: store.SyncOpUpsert, Payload: body})
+	}
+	for _, observation := range chunk.Observations {
+		body, _ := json.Marshal(observation)
+		batch = append(batch, MutationEntry{Project: project, Entity: store.SyncEntityObservation, EntityKey: strings.TrimSpace(observation.SyncID), Op: store.SyncOpUpsert, Payload: body})
+	}
+	for _, prompt := range chunk.Prompts {
+		body, _ := json.Marshal(prompt)
+		batch = append(batch, MutationEntry{Project: project, Entity: store.SyncEntityPrompt, EntityKey: strings.TrimSpace(prompt.SyncID), Op: store.SyncOpUpsert, Payload: body})
+	}
+	_, err := s.InsertMutationBatch(ctx, batch)
+	return err
+}
+
+func TestChunkPushMaterializesMutationsForAutosyncPull(t *testing.T) {
+	ms := newFakeMutationStore()
+	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
+	body := strings.NewReader(`{
+		"project":"proj-a",
+		"created_by":"tester",
+		"data":{
+			"sessions":[{"id":"s-1","directory":"/tmp/s-1","started_at":"2026-04-29T10:00:00Z"}],
+			"observations":[{"sync_id":"obs-1","session_id":"s-1","type":"decision","title":"Decision","content":"Content","scope":"project","created_at":"2026-04-29T10:01:00Z","updated_at":"2026-04-29T10:01:00Z"}],
+			"prompts":[{"sync_id":"prompt-1","session_id":"s-1","content":"Prompt","created_at":"2026-04-29T10:02:00Z"}]
+		}
+	}`)
+
+	pushRec := httptest.NewRecorder()
+	pushReq := httptest.NewRequest(http.MethodPost, "/sync/push", body)
+	pushReq.Header.Set("Authorization", "Bearer secret")
+	pushReq.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(pushRec, pushReq)
+	if pushRec.Code != http.StatusOK {
+		t.Fatalf("expected chunk push 200, got %d body=%q", pushRec.Code, pushRec.Body.String())
+	}
+	if len(ms.chunks) != 1 {
+		t.Fatalf("expected one stored chunk, got %d", len(ms.chunks))
+	}
+	if len(ms.mutations) != 3 {
+		t.Fatalf("expected 3 materialized mutations, got %d: %+v", len(ms.mutations), ms.mutations)
+	}
+	if ms.mutations[0].Entity != store.SyncEntitySession || ms.mutations[1].Entity != store.SyncEntityObservation || ms.mutations[2].Entity != store.SyncEntityPrompt {
+		t.Fatalf("expected session/observation/prompt order, got %+v", ms.mutations)
+	}
+	if ms.mutations[1].Project != "proj-a" || ms.mutations[1].EntityKey != "obs-1" || ms.mutations[1].Op != store.SyncOpUpsert {
+		t.Fatalf("unexpected materialized observation mutation: %+v", ms.mutations[1])
+	}
+
+	pullRec := httptest.NewRecorder()
+	pullReq := httptest.NewRequest(http.MethodGet, "/sync/mutations/pull?since_seq=0&limit=100", nil)
+	pullReq.Header.Set("Authorization", "Bearer secret")
+	srv.Handler().ServeHTTP(pullRec, pullReq)
+	if pullRec.Code != http.StatusOK {
+		t.Fatalf("expected mutation pull 200, got %d body=%q", pullRec.Code, pullRec.Body.String())
+	}
+	var pulled struct {
+		Mutations []StoredMutation `json:"mutations"`
+	}
+	if err := json.NewDecoder(pullRec.Body).Decode(&pulled); err != nil {
+		t.Fatalf("decode pull response: %v", err)
+	}
+	if len(pulled.Mutations) != 3 || pulled.Mutations[1].Entity != store.SyncEntityObservation || pulled.Mutations[1].EntityKey != "obs-1" {
+		t.Fatalf("expected pulled observation mutation after chunk push, got %+v", pulled.Mutations)
+	}
+}
+
+func TestChunkPushReplayDoesNotDuplicateMaterializedMutations(t *testing.T) {
+	ms := newFakeMutationStore()
+	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
+	body := `{"project":"proj-a","created_by":"tester","data":{"sessions":[{"id":"s-1","directory":"/tmp/s-1"}],"observations":[{"sync_id":"obs-1","session_id":"s-1","type":"decision","title":"Decision","content":"Content","scope":"project"}]}}`
+
+	for i := 0; i < 2; i++ {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/sync/push", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer secret")
+		req.Header.Set("Content-Type", "application/json")
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("push %d expected 200, got %d body=%q", i+1, rec.Code, rec.Body.String())
+		}
+	}
+	if len(ms.chunks) != 1 {
+		t.Fatalf("expected one stored chunk after replay, got %d", len(ms.chunks))
+	}
+	if len(ms.mutations) != 2 {
+		t.Fatalf("expected replay to keep 2 materialized mutations, got %d: %+v", len(ms.mutations), ms.mutations)
+	}
+}
+
+func TestMalformedChunkRejectsBeforeMaterialization(t *testing.T) {
+	ms := newFakeMutationStore()
+	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sync/push", strings.NewReader(`{"project":"proj-a","created_by":"tester","data":{"observations":[{"sync_id":"obs-1","session_id":"missing","type":"decision","title":"Decision","content":"Content","scope":"project"}]}}`))
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected malformed chunk 400, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if len(ms.chunks) != 0 || len(ms.mutations) != 0 {
+		t.Fatalf("expected no chunk or mutation after malformed push, chunks=%d mutations=%d", len(ms.chunks), len(ms.mutations))
+	}
 }
 
 func (s *fakeMutationStore) InsertMutationBatch(ctx context.Context, batch []MutationEntry) ([]int64, error) {
@@ -892,6 +1013,244 @@ func (a *simpleProjectAuth) AuthorizeProject(_ string) error {
 	return nil // allow all projects for this auth
 }
 
+// ─── REQ-006, REQ-008: Relation payload validation tests (Phase D) ───────────
+
+// TestHandleMutationPush_ValidRelation_Returns200 (D.1a) verifies REQ-006 happy
+// path: a complete relation payload with all 6 required fields returns HTTP 200.
+func TestHandleMutationPush_ValidRelation_Returns200(t *testing.T) {
+	ms := newFakeMutationStore()
+	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
+
+	payload := json.RawMessage(`{
+		"sync_id":         "rel-001",
+		"source_id":       "obs-src-001",
+		"target_id":       "obs-tgt-001",
+		"judgment_status": "judged",
+		"marked_by_actor": "alice",
+		"marked_by_kind":  "human",
+		"relation":        "conflicts_with",
+		"project":         "proj-a"
+	}`)
+	entries := []MutationEntry{
+		{Project: "proj-a", Entity: "relation", EntityKey: "rel-001", Op: "upsert", Payload: payload},
+	}
+	body := marshalPushRequest(t, entries)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", body)
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("D.1a: expected 200 for valid relation, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if len(ms.mutations) != 1 {
+		t.Fatalf("D.1a: expected 1 mutation stored, got %d", len(ms.mutations))
+	}
+}
+
+// TestHandleMutationPush_RelationMissingEachRequiredField (D.1b) verifies
+// REQ-006 negative: each required field individually absent returns HTTP 400
+// with the correct field name in the response body.
+func TestHandleMutationPush_RelationMissingEachRequiredField(t *testing.T) {
+	requiredFields := []struct {
+		name    string
+		payload json.RawMessage
+	}{
+		{
+			name: "sync_id",
+			payload: json.RawMessage(`{
+				"source_id":       "obs-src",
+				"target_id":       "obs-tgt",
+				"judgment_status": "judged",
+				"marked_by_actor": "alice",
+				"marked_by_kind":  "human"
+			}`),
+		},
+		{
+			name: "source_id",
+			payload: json.RawMessage(`{
+				"sync_id":         "rel-001",
+				"target_id":       "obs-tgt",
+				"judgment_status": "judged",
+				"marked_by_actor": "alice",
+				"marked_by_kind":  "human"
+			}`),
+		},
+		{
+			name: "target_id",
+			payload: json.RawMessage(`{
+				"sync_id":         "rel-001",
+				"source_id":       "obs-src",
+				"judgment_status": "judged",
+				"marked_by_actor": "alice",
+				"marked_by_kind":  "human"
+			}`),
+		},
+		{
+			name: "judgment_status",
+			payload: json.RawMessage(`{
+				"sync_id":         "rel-001",
+				"source_id":       "obs-src",
+				"target_id":       "obs-tgt",
+				"marked_by_actor": "alice",
+				"marked_by_kind":  "human"
+			}`),
+		},
+		{
+			name: "marked_by_actor",
+			payload: json.RawMessage(`{
+				"sync_id":         "rel-001",
+				"source_id":       "obs-src",
+				"target_id":       "obs-tgt",
+				"judgment_status": "judged",
+				"marked_by_kind":  "human"
+			}`),
+		},
+		{
+			name: "marked_by_kind",
+			payload: json.RawMessage(`{
+				"sync_id":         "rel-001",
+				"source_id":       "obs-src",
+				"target_id":       "obs-tgt",
+				"judgment_status": "judged",
+				"marked_by_actor": "alice"
+			}`),
+		},
+	}
+
+	for _, tc := range requiredFields {
+		t.Run("missing_"+tc.name, func(t *testing.T) {
+			ms := newFakeMutationStore()
+			srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
+
+			entries := []MutationEntry{
+				{Project: "proj-a", Entity: "relation", EntityKey: "rel-001", Op: "upsert", Payload: tc.payload},
+			}
+			body := marshalPushRequest(t, entries)
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", body)
+			req.Header.Set("Authorization", "Bearer secret")
+			req.Header.Set("Content-Type", "application/json")
+			srv.Handler().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("D.1b missing %q: expected 400, got %d body=%q", tc.name, rec.Code, rec.Body.String())
+			}
+			// Verify no entry was stored (atomic batch)
+			if len(ms.mutations) != 0 {
+				t.Fatalf("D.1b missing %q: expected 0 mutations stored, got %d", tc.name, len(ms.mutations))
+			}
+			// Verify the missing field name appears in the response
+			var resp struct {
+				Error   string       `json:"error"`
+				Invalid []struct {
+					Field  string `json:"field"`
+					Index  int    `json:"index"`
+					Entity string `json:"entity"`
+				} `json:"invalid"`
+			}
+			if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+				t.Fatalf("D.1b missing %q: decode 400 body: %v; body=%q", tc.name, err, rec.Body.String())
+			}
+			if len(resp.Invalid) == 0 {
+				t.Fatalf("D.1b missing %q: expected invalid list in 400 body, got none; body=%q", tc.name, rec.Body.String())
+			}
+			if resp.Invalid[0].Field != tc.name {
+				t.Errorf("D.1b missing %q: expected field=%q in invalid[0], got %q", tc.name, tc.name, resp.Invalid[0].Field)
+			}
+		})
+	}
+}
+
+// TestHandleMutationPush_PartialBatch_Atomic (D.1c) verifies REQ-006 edge case:
+// a 2-entry batch with one valid and one invalid relation → 400, neither stored.
+func TestHandleMutationPush_PartialBatch_Atomic(t *testing.T) {
+	ms := newFakeMutationStore()
+	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
+
+	validPayload := json.RawMessage(`{
+		"sync_id":         "rel-001",
+		"source_id":       "obs-src-001",
+		"target_id":       "obs-tgt-001",
+		"judgment_status": "judged",
+		"marked_by_actor": "alice",
+		"marked_by_kind":  "human"
+	}`)
+	// Invalid: missing target_id
+	invalidPayload := json.RawMessage(`{
+		"sync_id":         "rel-002",
+		"source_id":       "obs-src-002",
+		"judgment_status": "judged",
+		"marked_by_actor": "bob",
+		"marked_by_kind":  "human"
+	}`)
+	entries := []MutationEntry{
+		{Project: "proj-a", Entity: "relation", EntityKey: "rel-001", Op: "upsert", Payload: validPayload},
+		{Project: "proj-a", Entity: "relation", EntityKey: "rel-002", Op: "upsert", Payload: invalidPayload},
+	}
+	body := marshalPushRequest(t, entries)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", body)
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("D.1c: expected 400 for partial-batch with invalid entry, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	// Atomic rejection: neither entry stored
+	if len(ms.mutations) != 0 {
+		t.Fatalf("D.1c: expected 0 mutations stored (atomic batch rejection), got %d", len(ms.mutations))
+	}
+	// Response must include the offending index (1)
+	var resp struct {
+		Invalid []struct {
+			Index int `json:"index"`
+		} `json:"invalid"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("D.1c: decode 400 body: %v", err)
+	}
+	if len(resp.Invalid) == 0 {
+		t.Fatalf("D.1c: expected invalid list in response, got none")
+	}
+	if resp.Invalid[0].Index != 1 {
+		t.Errorf("D.1c: expected offending index=1, got %d", resp.Invalid[0].Index)
+	}
+}
+
+// TestHandleMutationPush_LegacyObsMissingOptional_Returns200 (D.1d) verifies
+// REQ-008: legacy observation entity with only sync_id in payload → HTTP 200.
+// No new required fields for legacy entities — backwards compatibility preserved.
+func TestHandleMutationPush_LegacyObsMissingOptional_Returns200(t *testing.T) {
+	ms := newFakeMutationStore()
+	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
+
+	// Minimal observation payload: only sync_id, no optional fields
+	minimalPayload := json.RawMessage(`{"sync_id":"obs-001","title":"My observation"}`)
+	entries := []MutationEntry{
+		{Project: "proj-a", Entity: "observation", EntityKey: "obs-001", Op: "upsert", Payload: minimalPayload},
+	}
+	body := marshalPushRequest(t, entries)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", body)
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("D.1d: expected 200 for legacy obs with minimal payload, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if len(ms.mutations) != 1 {
+		t.Fatalf("D.1d: expected 1 mutation stored, got %d", len(ms.mutations))
+	}
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 func newMutationTestServer(ms *fakeMutationStore, token string, projects []string) *CloudServer {
@@ -1200,5 +1559,138 @@ func TestMutationPullResponseEnvelopeHasProjectFields(t *testing.T) {
 	_ = json.Unmarshal(bodyBytes, &raw)
 	if _, ok := raw["project_path"]; !ok {
 		t.Error("project_path field must be present in pull response JSON")
+	}
+}
+
+// ─── Phase G — Integration tests (G.4, G.5): server validation + backwards compat ──
+
+// TestRelationSync_ServerValidation_MissingField (G.4) verifies REQ-006:
+// Push a relation payload missing `judgment_status` → 400 with `missing` listing
+// the field. Push a valid relation immediately after → 200.
+func TestRelationSync_ServerValidation_MissingField(t *testing.T) {
+	ms := newFakeMutationStore()
+	srv := newMutationTestServer(ms, "secret", []string{"proj-g4"})
+
+	// Push 1: missing judgment_status → must return 400.
+	invalidPayload := json.RawMessage(`{
+		"sync_id":         "rel-g4-001",
+		"source_id":       "obs-src-g4",
+		"target_id":       "obs-tgt-g4",
+		"marked_by_actor": "agent:test",
+		"marked_by_kind":  "agent"
+	}`)
+	entries := []MutationEntry{
+		{Project: "proj-g4", Entity: "relation", EntityKey: "rel-g4-001", Op: "upsert", Payload: invalidPayload},
+	}
+	body := marshalPushRequest(t, entries)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", body)
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("G.4: expected 400 for missing judgment_status, got %d body=%q", rec.Code, rec.Body.String())
+	}
+
+	// Verify the missing field name appears in the response body.
+	var errResp struct {
+		Invalid []struct {
+			Field string `json:"field"`
+		} `json:"invalid"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&errResp); err != nil {
+		t.Fatalf("G.4: decode 400 body: %v", err)
+	}
+	if len(errResp.Invalid) == 0 {
+		t.Fatal("G.4: expected non-empty 'invalid' list in 400 response")
+	}
+	if errResp.Invalid[0].Field != "judgment_status" {
+		t.Errorf("G.4: expected field='judgment_status' in invalid[0], got %q", errResp.Invalid[0].Field)
+	}
+
+	// Verify nothing was stored.
+	if len(ms.mutations) != 0 {
+		t.Fatalf("G.4: expected 0 mutations stored after 400, got %d", len(ms.mutations))
+	}
+
+	// Push 2: valid relation payload immediately after → must return 200.
+	validPayload := json.RawMessage(`{
+		"sync_id":         "rel-g4-002",
+		"source_id":       "obs-src-g4",
+		"target_id":       "obs-tgt-g4",
+		"judgment_status": "judged",
+		"marked_by_actor": "agent:test",
+		"marked_by_kind":  "agent",
+		"relation":        "conflicts_with",
+		"project":         "proj-g4"
+	}`)
+	entries2 := []MutationEntry{
+		{Project: "proj-g4", Entity: "relation", EntityKey: "rel-g4-002", Op: "upsert", Payload: validPayload},
+	}
+	body2 := marshalPushRequest(t, entries2)
+
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", body2)
+	req2.Header.Set("Authorization", "Bearer secret")
+	req2.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec2, req2)
+
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("G.4: expected 200 for valid relation after 400, got %d body=%q", rec2.Code, rec2.Body.String())
+	}
+	if len(ms.mutations) != 1 {
+		t.Fatalf("G.4: expected 1 mutation stored after valid push, got %d", len(ms.mutations))
+	}
+}
+
+// TestRelationSync_BackwardsCompat_LegacyClient (G.5) verifies REQ-008:
+// An older client that pushes only session + observation mutations (no entity='relation')
+// succeeds with HTTP 200. No behavior change for legacy entities.
+func TestRelationSync_BackwardsCompat_LegacyClient(t *testing.T) {
+	ms := newFakeMutationStore()
+	srv := newMutationTestServer(ms, "secret", []string{"proj-g5"})
+
+	// Simulate a legacy client push: session + observation only, no relation.
+	sessionPayload := json.RawMessage(`{"sync_id":"ses-g5-001","directory":"/tmp/g5"}`)
+	obsPayload := json.RawMessage(`{"sync_id":"obs-g5-001","title":"Legacy observation"}`)
+
+	entries := []MutationEntry{
+		{Project: "proj-g5", Entity: "session", EntityKey: "ses-g5-001", Op: "upsert", Payload: sessionPayload},
+		{Project: "proj-g5", Entity: "observation", EntityKey: "obs-g5-001", Op: "upsert", Payload: obsPayload},
+	}
+	body := marshalPushRequest(t, entries)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", body)
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("G.5: expected 200 for legacy client push (session+obs only), got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if len(ms.mutations) != 2 {
+		t.Fatalf("G.5: expected 2 mutations stored (session+obs), got %d", len(ms.mutations))
+	}
+
+	// Triangulation: verify entity types were stored correctly (no mutation is 'relation').
+	for i, m := range ms.mutations {
+		if m.Entity == "relation" {
+			t.Errorf("G.5: mutation[%d] has entity='relation' — legacy client must not produce relation mutations; got entity=%q", i, m.Entity)
+		}
+	}
+
+	// Verify the two legacy entities are in the stored mutations.
+	entities := make(map[string]bool)
+	for _, m := range ms.mutations {
+		entities[m.Entity] = true
+	}
+	if !entities["session"] {
+		t.Error("G.5: expected 'session' entity in stored mutations")
+	}
+	if !entities["observation"] {
+		t.Error("G.5: expected 'observation' entity in stored mutations")
 	}
 }

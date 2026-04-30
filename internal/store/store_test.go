@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -40,9 +41,11 @@ func newTestStore(t *testing.T) *Store {
 }
 
 type fakeRows struct {
-	next    []bool
-	scanErr error
-	err     error
+	next     []bool
+	scanErr  error
+	err      error
+	closeErr error
+	closed   bool
 }
 
 func (f *fakeRows) Next() bool {
@@ -63,7 +66,8 @@ func (f *fakeRows) Err() error {
 }
 
 func (f *fakeRows) Close() error {
-	return nil
+	f.closed = true
+	return f.closeErr
 }
 
 func TestAddObservationDeduplicatesWithinWindow(t *testing.T) {
@@ -511,7 +515,6 @@ func TestNewMigratesLegacyUserPromptsSyncIDSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query prompt columns: %v", err)
 	}
-	defer rows.Close()
 	for rows.Next() {
 		var cid int
 		var name, columnType string
@@ -526,7 +529,11 @@ func TestNewMigratesLegacyUserPromptsSyncIDSchema(t *testing.T) {
 		}
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		t.Fatalf("iterate prompt columns: %v", err)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatalf("close prompt columns: %v", err)
 	}
 	if !hasSyncIDColumn {
 		t.Fatalf("expected user_prompts.sync_id column after migration")
@@ -3610,6 +3617,66 @@ func TestHookFallbacksAndAdditionalBranches(t *testing.T) {
 	})
 }
 
+func TestSQLiteWriteRetryRetriesTransientLockErrors(t *testing.T) {
+	oldBackoffs := sqliteWriteRetryBackoffs
+	sqliteWriteRetryBackoffs = []time.Duration{0, 0, 0}
+	t.Cleanup(func() { sqliteWriteRetryBackoffs = oldBackoffs })
+
+	t.Run("begin lock is retried and succeeds", func(t *testing.T) {
+		s := newTestStore(t)
+		origBegin := s.hooks.beginTx
+		attempts := 0
+		s.hooks.beginTx = func(db *sql.DB) (*sql.Tx, error) {
+			attempts++
+			if attempts < 3 {
+				return nil, errors.New("database is locked")
+			}
+			return origBegin(db)
+		}
+
+		if err := s.CreateSession("retry-session", "retry-project", "/tmp/retry-project"); err != nil {
+			t.Fatalf("expected retry to succeed, got %v", err)
+		}
+		if attempts != 3 {
+			t.Fatalf("expected 3 begin attempts, got %d", attempts)
+		}
+	})
+
+	t.Run("non lock error is not retried", func(t *testing.T) {
+		s := newTestStore(t)
+		attempts := 0
+		s.hooks.beginTx = func(_ *sql.DB) (*sql.Tx, error) {
+			attempts++
+			return nil, errors.New("permanent begin failure")
+		}
+
+		err := s.CreateSession("no-retry-session", "retry-project", "/tmp/retry-project")
+		if err == nil || !strings.Contains(err.Error(), "permanent begin failure") {
+			t.Fatalf("expected permanent error, got %v", err)
+		}
+		if attempts != 1 {
+			t.Fatalf("expected one attempt for permanent error, got %d", attempts)
+		}
+	})
+
+	t.Run("lock errors remain bounded", func(t *testing.T) {
+		s := newTestStore(t)
+		attempts := 0
+		s.hooks.beginTx = func(_ *sql.DB) (*sql.Tx, error) {
+			attempts++
+			return nil, errors.New("SQLITE_BUSY: database is locked")
+		}
+
+		err := s.CreateSession("bounded-session", "retry-project", "/tmp/retry-project")
+		if err == nil || !isRetryableSQLiteLockError(err) {
+			t.Fatalf("expected retryable lock error after exhaustion, got %v", err)
+		}
+		if attempts != len(sqliteWriteRetryBackoffs)+1 {
+			t.Fatalf("expected bounded attempts=%d, got %d", len(sqliteWriteRetryBackoffs)+1, attempts)
+		}
+	})
+}
+
 func TestStoreUncoveredBranchesPushToHundred(t *testing.T) {
 	t.Run("new open database hook error", func(t *testing.T) {
 		orig := openDB
@@ -3900,6 +3967,56 @@ func TestStoreUncoveredBranchesPushToHundred(t *testing.T) {
 			t.Fatalf("expected legacy migrate pragma scan error")
 		}
 
+		s.hooks.queryIt = origQueryIt
+	})
+
+	t.Run("migration helpers close rows on scan errors", func(t *testing.T) {
+		s := newTestStore(t)
+		if _, err := s.db.Exec(`CREATE TABLE extra_table (id INTEGER)`); err != nil {
+			t.Fatalf("create extra table: %v", err)
+		}
+
+		cases := []struct {
+			name        string
+			queryNeedle string
+			run         func() error
+		}{
+			{
+				name:        "add column",
+				queryNeedle: "PRAGMA table_info(extra_table)",
+				run:         func() error { return s.addColumnIfNotExists("extra_table", "n3", "TEXT") },
+			},
+			{
+				name:        "sync chunks migration",
+				queryNeedle: "PRAGMA table_info(sync_chunks)",
+				run:         s.migrateSyncChunksTable,
+			},
+			{
+				name:        "legacy observations migration",
+				queryNeedle: "PRAGMA table_info(observations)",
+				run:         s.migrateLegacyObservationsTable,
+			},
+		}
+
+		origQueryIt := s.hooks.queryIt
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				forcedRows := &fakeRows{next: []bool{true}, scanErr: errors.New("forced migration scan error")}
+				s.hooks.queryIt = func(db queryer, query string, args ...any) (rowScanner, error) {
+					if strings.Contains(query, tc.queryNeedle) {
+						return forcedRows, nil
+					}
+					return origQueryIt(db, query, args...)
+				}
+
+				if err := tc.run(); err == nil {
+					t.Fatalf("expected scan error")
+				}
+				if !forcedRows.closed {
+					t.Fatalf("expected rows to be closed after scan error")
+				}
+			})
+		}
 		s.hooks.queryIt = origQueryIt
 	})
 
@@ -5164,6 +5281,63 @@ func TestListPendingSyncMutationsIncludesProject(t *testing.T) {
 	}
 }
 
+func TestCountPendingNonEnrolledSyncMutations(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.EnrollProject("enrolled-project"); err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	for i, project := range []string{"alpha", "alpha", "beta", "enrolled-project"} {
+		if _, err := s.db.Exec(
+			`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			DefaultSyncTargetKey,
+			SyncEntityObservation,
+			fmt.Sprintf("key-%s-%d", project, i),
+			SyncOpUpsert,
+			`{}`,
+			SyncSourceLocal,
+			project,
+		); err != nil {
+			t.Fatalf("insert mutation for %s: %v", project, err)
+		}
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, '')`,
+		DefaultSyncTargetKey, SyncEntityObservation, "global-key", SyncOpUpsert, `{}`, SyncSourceLocal,
+	); err != nil {
+		t.Fatalf("insert global mutation: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project, acked_at) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+		DefaultSyncTargetKey, SyncEntityObservation, "acked-alpha", SyncOpUpsert, `{}`, SyncSourceLocal, "alpha",
+	); err != nil {
+		t.Fatalf("insert acked mutation: %v", err)
+	}
+	if _, err := s.db.Exec(`INSERT OR IGNORE INTO sync_state (target_key, lifecycle, updated_at) VALUES (?, 'idle', datetime('now'))`, "cloud:other"); err != nil {
+		t.Fatalf("insert other sync state: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"cloud:other", SyncEntityObservation, "other-target-alpha", SyncOpUpsert, `{}`, SyncSourceLocal, "alpha",
+	); err != nil {
+		t.Fatalf("insert other target mutation: %v", err)
+	}
+
+	counts, err := s.CountPendingNonEnrolledSyncMutations(DefaultSyncTargetKey)
+	if err != nil {
+		t.Fatalf("count pending non-enrolled: %v", err)
+	}
+	want := []PendingSyncMutationProjectCount{{Project: "alpha", Count: 2}, {Project: "beta", Count: 1}}
+	if len(counts) != len(want) {
+		t.Fatalf("expected %d counts, got %#v", len(want), counts)
+	}
+	for i := range want {
+		if counts[i] != want[i] {
+			t.Fatalf("count[%d]: expected %#v, got %#v", i, want[i], counts[i])
+		}
+	}
+}
+
 // ─── Phase 3: extractProjectFromPayload ──────────────────────────────────────
 
 func TestExtractProjectFromSessionPayload(t *testing.T) {
@@ -6041,6 +6215,100 @@ func TestMergeProjectsCanonicalInSources(t *testing.T) {
 	}
 }
 
+func TestMergeProjectsNormalizesAliasSourcesWithoutLosingLegacyRows(t *testing.T) {
+	s := newTestStore(t)
+
+	if _, err := s.db.Exec(`INSERT INTO sessions (id, project, directory) VALUES (?, ?, ?)`, "legacy-session", "Engram Memory", "/work/engram"); err != nil {
+		t.Fatalf("seed legacy session: %v", err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO observations (sync_id, session_id, type, title, content, project, scope, normalized_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, "legacy-obs", "legacy-session", "decision", "legacy", "legacy content", "Engram Memory", "project", "legacy-hash"); err != nil {
+		t.Fatalf("seed legacy observation: %v", err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO user_prompts (sync_id, session_id, content, project) VALUES (?, ?, ?, ?)`, "legacy-prompt", "legacy-session", "legacy prompt", "Engram Memory"); err != nil {
+		t.Fatalf("seed legacy prompt: %v", err)
+	}
+
+	result, err := s.MergeProjects([]string{"Engram Memory"}, "engram")
+	if err != nil {
+		t.Fatalf("MergeProjects: %v", err)
+	}
+	if result.ObservationsUpdated != 1 || result.SessionsUpdated != 1 || result.PromptsUpdated != 1 {
+		t.Fatalf("unexpected merge result: %+v", result)
+	}
+	if len(result.SourcesMerged) != 1 || result.SourcesMerged[0] != "engram memory" {
+		t.Fatalf("SourcesMerged = %v, want [engram memory]", result.SourcesMerged)
+	}
+
+	for _, table := range []string{"sessions", "observations", "user_prompts"} {
+		var count int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM `+table+` WHERE project = ?`, "Engram Memory").Scan(&count); err != nil {
+			t.Fatalf("count legacy rows in %s: %v", table, err)
+		}
+		if count != 0 {
+			t.Fatalf("%s still has %d legacy project rows", table, count)
+		}
+	}
+}
+
+func TestMergeProjectsConsolidatesDeterministicAliasSpellings(t *testing.T) {
+	s := newTestStore(t)
+
+	for i, project := range []string{"Engram Memory", "engram memory", "engram-memory", "engram_memory"} {
+		sessionID := fmt.Sprintf("alias-session-%d", i)
+		if _, err := s.db.Exec(`INSERT INTO sessions (id, project, directory) VALUES (?, ?, ?)`, sessionID, project, "/work/engram"); err != nil {
+			t.Fatalf("seed alias session %q: %v", project, err)
+		}
+		if _, err := s.db.Exec(`INSERT INTO observations (sync_id, session_id, type, title, content, project, scope, normalized_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, fmt.Sprintf("alias-obs-%d", i), sessionID, "decision", "alias", "alias content", project, "project", fmt.Sprintf("alias-hash-%d", i)); err != nil {
+			t.Fatalf("seed alias observation %q: %v", project, err)
+		}
+		if _, err := s.db.Exec(`INSERT INTO user_prompts (sync_id, session_id, content, project) VALUES (?, ?, ?, ?)`, fmt.Sprintf("alias-prompt-%d", i), sessionID, "alias prompt", project); err != nil {
+			t.Fatalf("seed alias prompt %q: %v", project, err)
+		}
+	}
+
+	result, err := s.MergeProjects([]string{"Engram Memory"}, "engram")
+	if err != nil {
+		t.Fatalf("MergeProjects: %v", err)
+	}
+	if result.ObservationsUpdated != 4 || result.SessionsUpdated != 4 || result.PromptsUpdated != 4 {
+		t.Fatalf("unexpected merge result: %+v", result)
+	}
+}
+
+func TestMergeProjectsAliasVariantsDoNotRewriteCanonicalProject(t *testing.T) {
+	s := newTestStore(t)
+
+	if _, err := s.db.Exec(`INSERT INTO sessions (id, project, directory) VALUES (?, ?, ?)`, "canonical-session", "engram-memory", "/work/engram"); err != nil {
+		t.Fatalf("seed canonical session: %v", err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO sessions (id, project, directory) VALUES (?, ?, ?)`, "source-session", "Engram Memory", "/work/engram"); err != nil {
+		t.Fatalf("seed source session: %v", err)
+	}
+
+	result, err := s.MergeProjects([]string{"Engram Memory"}, "engram-memory")
+	if err != nil {
+		t.Fatalf("MergeProjects: %v", err)
+	}
+	if result.SessionsUpdated != 1 {
+		t.Fatalf("SessionsUpdated = %d, want 1", result.SessionsUpdated)
+	}
+	var canonicalRows int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE project = ?`, "engram-memory").Scan(&canonicalRows); err != nil {
+		t.Fatalf("count canonical rows: %v", err)
+	}
+	if canonicalRows != 2 {
+		t.Fatalf("canonical rows = %d, want 2", canonicalRows)
+	}
+}
+
+func TestNewLimitsSQLiteConnectionPoolToSingleOpenConnection(t *testing.T) {
+	s := newTestStore(t)
+	stats := s.db.Stats()
+	if stats.MaxOpenConnections != 1 {
+		t.Fatalf("MaxOpenConnections = %d, want 1", stats.MaxOpenConnections)
+	}
+}
+
 func TestCountObservationsForProject(t *testing.T) {
 	s := newTestStore(t)
 
@@ -6509,6 +6777,71 @@ func TestProjectExists_KnownViaEnrollmentOnly(t *testing.T) {
 	}
 	if !exists {
 		t.Error("enrolled-only-project must be found via sync_enrolled_projects UNION ALL branch")
+	}
+}
+
+// ─── Doctor diagnostic helpers ───────────────────────────────────────────────
+
+func TestListDiagnosticSessionsScopesByProject(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("manual-save-engram", "engram", "/work/engram"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := s.CreateSession("manual-save-other", "other", "/work/other"); err != nil {
+		t.Fatalf("CreateSession other: %v", err)
+	}
+	sessions, err := s.ListDiagnosticSessions("engram")
+	if err != nil {
+		t.Fatalf("ListDiagnosticSessions: %v", err)
+	}
+	if len(sessions) != 1 || sessions[0].ID != "manual-save-engram" || sessions[0].Name != "manual-save-engram" {
+		t.Fatalf("sessions=%+v", sessions)
+	}
+}
+
+func TestListPendingProjectMutationsAndPayloadValidation(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.db.Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`, DefaultSyncTargetKey, SyncEntityObservation, "obs-1", SyncOpUpsert, `{"sync_id":"obs-1"}`, SyncSourceLocal, "engram"); err != nil {
+		t.Fatalf("insert pending mutation: %v", err)
+	}
+	mutations, err := s.ListPendingProjectMutations("engram")
+	if err != nil {
+		t.Fatalf("ListPendingProjectMutations: %v", err)
+	}
+	if len(mutations) != 1 {
+		t.Fatalf("mutations=%+v", mutations)
+	}
+	validation := ValidateSyncMutationPayload(mutations[0].Entity, mutations[0].Op, mutations[0].Payload, mutations[0].EntityKey)
+	if validation.ReasonCode != "sync_mutation_payload_missing_required_fields" {
+		t.Fatalf("validation=%+v", validation)
+	}
+	if strings.Join(validation.MissingFields, ",") != "session_id,type,title,content,scope" {
+		t.Fatalf("missing fields=%v", validation.MissingFields)
+	}
+}
+
+func TestReadSQLiteLockSnapshotDoesNotMutateApplicationRows(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s1", "engram", "/work/engram"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	var before int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sessions`).Scan(&before); err != nil {
+		t.Fatalf("count before: %v", err)
+	}
+	snapshot, err := s.ReadSQLiteLockSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("ReadSQLiteLockSnapshot: %v", err)
+	}
+	var after int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sessions`).Scan(&after); err != nil {
+		t.Fatalf("count after: %v", err)
+	}
+	if before != after {
+		t.Fatalf("session count changed: before=%d after=%d", before, after)
+	}
+	if snapshot.JournalMode == "" || snapshot.BusyTimeoutMS <= 0 {
+		t.Fatalf("snapshot=%+v", snapshot)
 	}
 }
 

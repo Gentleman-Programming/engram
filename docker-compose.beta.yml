@@ -1,0 +1,53 @@
+# Engram Beta — Phases 2 + 3 + 4 community testing
+#
+# Spins up an ISOLATED cloud (postgres + engram cloud serve) on non-default
+# ports + container names + volume so your production engram cloud setup
+# is left completely untouched.
+#
+# Usage:
+#   docker compose -f docker-compose.beta.yml up -d
+#   (build local binary: go build -o ./engram-beta ./cmd/engram)
+#   (point client at beta: see docs/BETA_TESTING.md)
+#
+# Cleanup:
+#   docker compose -f docker-compose.beta.yml down -v
+
+services:
+  postgres-beta:
+    image: postgres:16-alpine
+    container_name: engram-beta-postgres
+    environment:
+      POSTGRES_USER: engram_beta
+      POSTGRES_PASSWORD: beta_test_pw
+      POSTGRES_DB: engram_beta
+    ports:
+      - "127.0.0.1:25432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U engram_beta -d engram_beta"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - engram-beta-pg:/var/lib/postgresql/data
+
+  cloud-beta:
+    build:
+      context: .
+      dockerfile: docker/cloud/Dockerfile
+    container_name: engram-beta-cloud
+    depends_on:
+      postgres-beta:
+        condition: service_healthy
+    environment:
+      ENGRAM_DATABASE_URL: postgres://engram_beta:beta_test_pw@postgres-beta:5432/engram_beta?sslmode=disable
+      ENGRAM_JWT_SECRET: beta-jwt-secret-local-only-CHANGE-ME-32chars
+      ENGRAM_CLOUD_TOKEN: beta-token-CHANGE-ME-please-32chars
+      ENGRAM_CLOUD_ALLOWED_PROJECTS: beta-test,beta-conflicts,beta-team-a,beta-team-b
+      ENGRAM_CLOUD_HOST: 0.0.0.0
+      ENGRAM_PORT: "28080"
+    ports:
+      - "127.0.0.1:28080:28080"
+    command: ["cloud", "serve"]
+
+volumes:
+  engram-beta-pg:
