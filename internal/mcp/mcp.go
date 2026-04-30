@@ -325,6 +325,9 @@ Examples:
 				mcp.WithString("topic_key",
 					mcp.Description("Optional topic identifier for upserts (e.g. architecture/auth-model). Reuses and updates the latest observation in same project+scope."),
 				),
+				mcp.WithString("directory",
+					mcp.Description("Working directory for project resolution. Defaults to server CWD (REQ-308 contract). Set explicitly when using a remote MCP server where the server CWD differs from the client's project context."),
+				),
 			),
 			queuedWriteHandler(writeQueue, handleSave(s, cfg, activity)),
 		)
@@ -359,6 +362,9 @@ Examples:
 				),
 				mcp.WithString("topic_key",
 					mcp.Description("New topic key (normalized internally)"),
+				),
+				mcp.WithString("directory",
+					mcp.Description("Working directory for project resolution. Defaults to server CWD (REQ-308 contract). Set explicitly when using a remote MCP server where the server CWD differs from the client's project context."),
 				),
 			),
 			queuedWriteHandler(writeQueue, handleUpdate(s)),
@@ -429,6 +435,9 @@ Examples:
 				),
 				mcp.WithString("session_id",
 					mcp.Description("Session ID to associate with (default: manual-save-{project})"),
+				),
+				mcp.WithString("directory",
+					mcp.Description("Working directory for project resolution. Defaults to server CWD (REQ-308 contract). Set explicitly when using a remote MCP server where the server CWD differs from the client's project context."),
 				),
 			),
 			queuedWriteHandler(writeQueue, handleSavePrompt(s, cfg)),
@@ -570,6 +579,9 @@ GUIDELINES:
 				mcp.WithString("session_id",
 					mcp.Description("Session ID (default: manual-save-{project})"),
 				),
+				mcp.WithString("directory",
+					mcp.Description("Working directory for project resolution. Defaults to server CWD (REQ-308 contract). Set explicitly when using a remote MCP server where the server CWD differs from the client's project context."),
+				),
 				// project field intentionally omitted — auto-detect only (REQ-308 write-tool contract)
 			),
 			queuedWriteHandler(writeQueue, handleSessionSummary(s, cfg, activity)),
@@ -617,6 +629,9 @@ GUIDELINES:
 				mcp.WithString("summary",
 					mcp.Description("Summary of what was accomplished"),
 				),
+				mcp.WithString("directory",
+					mcp.Description("Working directory for project resolution. Defaults to server CWD (REQ-308 contract). Set explicitly when using a remote MCP server where the server CWD differs from the client's project context."),
+				),
 			),
 			queuedWriteHandler(writeQueue, handleSessionEnd(s, cfg, activity)),
 		)
@@ -646,6 +661,9 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 				),
 				mcp.WithString("source",
 					mcp.Description("Source identifier (e.g. 'subagent-stop', 'session-end')"),
+				),
+				mcp.WithString("directory",
+					mcp.Description("Working directory for project resolution. Defaults to server CWD (REQ-308 contract). Set explicitly when using a remote MCP server where the server CWD differs from the client's project context."),
 				),
 			),
 			queuedWriteHandler(writeQueue, handleCapturePassive(s, cfg, activity)),
@@ -892,10 +910,15 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		sessionID, _ := req.GetArguments()["session_id"].(string)
 		scope, _ := req.GetArguments()["scope"].(string)
 		topicKey, _ := req.GetArguments()["topic_key"].(string)
+		directory, _ := req.GetArguments()["directory"].(string)
+		explicitDirectory := strings.TrimSpace(directory)
 		// project field intentionally not read — auto-detect only (REQ-308)
 
-		// Auto-detect project from cwd; fail fast on ambiguous (REQ-308, REQ-309)
-		detRes, err := resolveWriteProject()
+		// Auto-detect project from cwd; fail fast on ambiguous (REQ-308, REQ-309).
+		// When the client supplies a non-empty `directory`, resolve the project
+		// from that path instead of the server's cwd — needed for remote/HTTP-mode
+		// MCP servers where the server cwd is unrelated to the client's project.
+		detRes, err := resolveWriteProjectWithDirectory(explicitDirectory)
 		if err != nil {
 			// JW1: use AvailableProjects from detection result (repos in cwd),
 			// NOT stats.Projects (all store projects).
@@ -1099,8 +1122,11 @@ func handleUpdate(s *store.Store) server.ToolHandlerFunc {
 			msg += fmt.Sprintf("\n⚠ WARNING: Content was truncated from %d to %d chars. Consider splitting into smaller observations.", contentLen, s.MaxObservationLength())
 		}
 
-		// Auto-detect for envelope; tolerant — don't fail update on resolution error
-		detRes, detErr := resolveWriteProject()
+		// Auto-detect for envelope; tolerant — don't fail update on resolution error.
+		// Honor optional `directory` for remote MCP servers (matches mem_session_start).
+		directory, _ := req.GetArguments()["directory"].(string)
+		explicitDirectory := strings.TrimSpace(directory)
+		detRes, detErr := resolveWriteProjectWithDirectory(explicitDirectory)
 		if detErr != nil {
 			// Still return success for the update itself.
 			return mcp.NewToolResultText(msg), nil
@@ -1133,9 +1159,11 @@ func handleSavePrompt(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		content, _ := req.GetArguments()["content"].(string)
 		sessionID, _ := req.GetArguments()["session_id"].(string)
+		directory, _ := req.GetArguments()["directory"].(string)
+		explicitDirectory := strings.TrimSpace(directory)
 		// project field intentionally not read — auto-detect only (REQ-308)
 
-		detRes, err := resolveWriteProject()
+		detRes, err := resolveWriteProjectWithDirectory(explicitDirectory)
 		if err != nil {
 			// JW1: use AvailableProjects from detection result (repos in cwd).
 			return errorWithMeta("ambiguous_project",
@@ -1373,10 +1401,13 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		content, _ := req.GetArguments()["content"].(string)
 		sessionID, _ := req.GetArguments()["session_id"].(string)
+		directory, _ := req.GetArguments()["directory"].(string)
+		explicitDirectory := strings.TrimSpace(directory)
 		// project field intentionally not read — auto-detect only (REQ-308 write-tool contract)
 
-		// Auto-detect project from cwd; fail fast on ambiguous (REQ-308, REQ-309)
-		detRes, err := resolveWriteProject()
+		// Auto-detect project from cwd; fail fast on ambiguous (REQ-308, REQ-309).
+		// Honor optional `directory` for remote MCP servers.
+		detRes, err := resolveWriteProjectWithDirectory(explicitDirectory)
 		if err != nil {
 			// JW1: use AvailableProjects from detection result (repos in cwd).
 			return errorWithMeta("ambiguous_project",
@@ -1420,7 +1451,7 @@ func handleSessionStart(s *store.Store, cfg MCPConfig, activity *SessionActivity
 		explicitDirectory := strings.TrimSpace(directory)
 		// project field intentionally not read — auto-detect only (REQ-308)
 
-		detRes, err := resolveSessionStartProject(explicitDirectory)
+		detRes, err := resolveWriteProjectWithDirectory(explicitDirectory)
 		if err != nil {
 			// JW1: use AvailableProjects from detection result (repos in cwd).
 			return errorWithMeta("ambiguous_project",
@@ -1447,7 +1478,17 @@ func handleSessionStart(s *store.Store, cfg MCPConfig, activity *SessionActivity
 	}
 }
 
-func resolveSessionStartProject(explicitDirectory string) (projectpkg.DetectionResult, error) {
+// resolveWriteProjectWithDirectory resolves the project for a write tool that
+// accepts an optional, client-supplied directory. When explicitDirectory is
+// empty, falls back to resolveWriteProject() (REQ-308: auto-detect from server
+// CWD). When non-empty, runs DetectProjectFull on it; if detection falls all
+// the way back to SourceDirBasename, prefers the server-CWD fallback to avoid
+// minting bogus projects from arbitrary client paths.
+//
+// This is the same logic that resolveSessionStartProject used to encode for
+// mem_session_start (commits e092095, 5f3329f); the helper is named neutrally
+// so all write handlers can share it.
+func resolveWriteProjectWithDirectory(explicitDirectory string) (projectpkg.DetectionResult, error) {
 	if explicitDirectory == "" {
 		return resolveWriteProject()
 	}
@@ -1465,9 +1506,11 @@ func handleSessionEnd(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		id, _ := req.GetArguments()["id"].(string)
 		summary, _ := req.GetArguments()["summary"].(string)
+		directory, _ := req.GetArguments()["directory"].(string)
+		explicitDirectory := strings.TrimSpace(directory)
 		// project field intentionally not read — auto-detect only (REQ-308)
 
-		detRes, err := resolveWriteProject()
+		detRes, err := resolveWriteProjectWithDirectory(explicitDirectory)
 		if err != nil {
 			// For session end, still complete the operation even if project resolution fails.
 			// Use basename fallback.
@@ -1496,9 +1539,11 @@ func handleCapturePassive(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		content, _ := req.GetArguments()["content"].(string)
 		sessionID, _ := req.GetArguments()["session_id"].(string)
 		source, _ := req.GetArguments()["source"].(string)
+		directory, _ := req.GetArguments()["directory"].(string)
+		explicitDirectory := strings.TrimSpace(directory)
 		// project field intentionally not read — auto-detect only (REQ-308)
 
-		detRes, err := resolveWriteProject()
+		detRes, err := resolveWriteProjectWithDirectory(explicitDirectory)
 		if err != nil {
 			// JW1: use AvailableProjects from detection result (repos in cwd).
 			return errorWithMeta("ambiguous_project",

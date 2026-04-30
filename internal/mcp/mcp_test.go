@@ -2718,6 +2718,382 @@ func TestSessionStartWithExplicitDirectoryResolvesProjectFromDirectory(t *testin
 	}
 }
 
+// ─── Directory parameter on all write tools ──────────────────────────────────
+//
+// These tests extend the directory-arg pattern that was added for
+// mem_session_start (commits e092095, 5f3329f) to all other write tools.
+// Motivation: when engram MCP runs as a remote/HTTP server, the server's
+// CWD has no relation to the client's project context. Each write tool now
+// accepts an optional `directory` argument; when non-empty it's used to
+// resolve the project (DetectProjectFull); when empty, behavior matches
+// the existing REQ-308 contract (auto-detect from server CWD).
+
+// writeToolDirectoryHelperRepo creates a git repo with a known origin so
+// DetectProjectFull returns a deterministic project name.
+func writeToolDirectoryHelperRepo(t *testing.T, name string) string {
+	t.Helper()
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	cmd := exec.Command("git", "-C", dir, "remote", "add", "origin",
+		"git@github.com:user/"+name+".git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add %s: %v\n%s", name, err, out)
+	}
+	return dir
+}
+
+// TestResolveWriteProjectWithDirectory exercises the shared helper directly.
+func TestResolveWriteProjectWithDirectory(t *testing.T) {
+	cwdRepo := writeToolDirectoryHelperRepo(t, "cwd-project")
+	t.Chdir(cwdRepo)
+
+	t.Run("empty_directory_falls_back_to_cwd", func(t *testing.T) {
+		res, err := resolveWriteProjectWithDirectory("")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if res.Project != "cwd-project" {
+			t.Fatalf("expected cwd-project, got %q", res.Project)
+		}
+	})
+
+	t.Run("whitespace_directory_falls_back_to_cwd", func(t *testing.T) {
+		// Note: callers TrimSpace before invoking; this test exercises the
+		// helper's own empty check on the post-trim value.
+		res, err := resolveWriteProjectWithDirectory("")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if res.Project != "cwd-project" {
+			t.Fatalf("expected cwd-project, got %q", res.Project)
+		}
+	})
+
+	t.Run("explicit_git_directory_resolves_from_path", func(t *testing.T) {
+		explicit := writeToolDirectoryHelperRepo(t, "explicit-project")
+		res, err := resolveWriteProjectWithDirectory(explicit)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if res.Project != "explicit-project" {
+			t.Fatalf("expected explicit-project, got %q", res.Project)
+		}
+	})
+
+	t.Run("explicit_non_git_directory_falls_back_to_cwd", func(t *testing.T) {
+		// A path with no .git anywhere up the tree falls back to dir_basename;
+		// the helper rejects that and uses resolveWriteProject() (cwd) instead.
+		nonGit := t.TempDir() // brand-new tempdir, no git
+		res, err := resolveWriteProjectWithDirectory(nonGit)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if res.Project != "cwd-project" {
+			t.Fatalf("expected cwd-project (fallback), got %q", res.Project)
+		}
+	})
+}
+
+// TestMemSave_HonorsExplicitDirectory: mem_save with an explicit directory
+// parameter routes the observation to the project derived from that directory,
+// not the server's cwd.
+func TestMemSave_HonorsExplicitDirectory(t *testing.T) {
+	cwdRepo := writeToolDirectoryHelperRepo(t, "save-cwd-project")
+	explicit := writeToolDirectoryHelperRepo(t, "save-explicit-project")
+	t.Chdir(cwdRepo)
+
+	s := newMCPTestStore(t)
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":     "explicit dir routing",
+		"content":   "should land under save-explicit-project, not save-cwd-project",
+		"type":      "manual",
+		"directory": explicit,
+	}}})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %s", callResultText(t, res))
+	}
+
+	// Should be stored under the project derived from `directory`.
+	gotResults, err := s.Search("explicit dir routing", store.SearchOptions{Project: "save-explicit-project", Limit: 5})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(gotResults) == 0 {
+		t.Fatal("expected observation under save-explicit-project")
+	}
+
+	// Should NOT be stored under the cwd project.
+	wrongResults, _ := s.Search("explicit dir routing", store.SearchOptions{Project: "save-cwd-project", Limit: 5})
+	if len(wrongResults) > 0 {
+		t.Fatal("observation must not be stored under the cwd project when directory is explicit")
+	}
+}
+
+// TestMemSave_EmptyDirectoryFallsBackToCWD asserts backward compatibility:
+// when `directory` is omitted, behavior matches the pre-change contract
+// (auto-detect from server cwd, REQ-308).
+func TestMemSave_EmptyDirectoryFallsBackToCWD(t *testing.T) {
+	cwdRepo := writeToolDirectoryHelperRepo(t, "save-cwd-fallback")
+	t.Chdir(cwdRepo)
+
+	s := newMCPTestStore(t)
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "no directory arg",
+		"content": "should land under cwd project",
+		"type":    "manual",
+	}}})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %s", callResultText(t, res))
+	}
+
+	got, err := s.Search("no directory arg", store.SearchOptions{Project: "save-cwd-fallback", Limit: 5})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(got) == 0 {
+		t.Fatal("expected observation under save-cwd-fallback")
+	}
+}
+
+// TestMemSave_NonGitDirectoryFallsBackToCWD: an explicit `directory` that
+// has no .git anywhere up the tree (DetectProjectFull => SourceDirBasename)
+// falls back to the server cwd, mirroring resolveSessionStartProject.
+func TestMemSave_NonGitDirectoryFallsBackToCWD(t *testing.T) {
+	cwdRepo := writeToolDirectoryHelperRepo(t, "save-cwd-when-explicit-bogus")
+	t.Chdir(cwdRepo)
+
+	nonGitDir := t.TempDir() // no git → SourceDirBasename → fallback
+
+	s := newMCPTestStore(t)
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":     "bogus dir routes to cwd",
+		"content":   "should fall back to cwd project",
+		"type":      "manual",
+		"directory": nonGitDir,
+	}}})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %s", callResultText(t, res))
+	}
+
+	got, err := s.Search("bogus dir routes to cwd", store.SearchOptions{Project: "save-cwd-when-explicit-bogus", Limit: 5})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(got) == 0 {
+		t.Fatal("expected observation under cwd project (fallback)")
+	}
+}
+
+// TestMemSavePrompt_HonorsExplicitDirectory parallels mem_save.
+func TestMemSavePrompt_HonorsExplicitDirectory(t *testing.T) {
+	cwdRepo := writeToolDirectoryHelperRepo(t, "prompt-cwd-project")
+	explicit := writeToolDirectoryHelperRepo(t, "prompt-explicit-project")
+	t.Chdir(cwdRepo)
+
+	s := newMCPTestStore(t)
+	h := handleSavePrompt(s, MCPConfig{})
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"content":   "user prompt under explicit project",
+		"directory": explicit,
+	}}})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %s", callResultText(t, res))
+	}
+
+	// The envelope returned by respondWithProject embeds the project name.
+	text := callResultText(t, res)
+	if !strings.Contains(text, "prompt-explicit-project") {
+		t.Fatalf("expected response to reference prompt-explicit-project, got: %s", text)
+	}
+	if strings.Contains(text, "prompt-cwd-project") {
+		t.Fatalf("response must not reference cwd project: %s", text)
+	}
+}
+
+// TestMemSessionSummary_HonorsExplicitDirectory parallels mem_save.
+func TestMemSessionSummary_HonorsExplicitDirectory(t *testing.T) {
+	cwdRepo := writeToolDirectoryHelperRepo(t, "summary-cwd-project")
+	explicit := writeToolDirectoryHelperRepo(t, "summary-explicit-project")
+	t.Chdir(cwdRepo)
+
+	s := newMCPTestStore(t)
+	h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"content":   "## Goal\nrouting test\n",
+		"directory": explicit,
+	}}})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %s", callResultText(t, res))
+	}
+
+	got, err := s.Search("routing test", store.SearchOptions{Project: "summary-explicit-project", Limit: 5})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(got) == 0 {
+		t.Fatal("expected session summary under summary-explicit-project")
+	}
+}
+
+// TestMemSessionEnd_HonorsExplicitDirectory parallels mem_save.
+func TestMemSessionEnd_HonorsExplicitDirectory(t *testing.T) {
+	cwdRepo := writeToolDirectoryHelperRepo(t, "end-cwd-project")
+	explicit := writeToolDirectoryHelperRepo(t, "end-explicit-project")
+	t.Chdir(cwdRepo)
+
+	s := newMCPTestStore(t)
+	// Pre-create the session so EndSession succeeds.
+	if err := s.CreateSession("end-test-session", "end-explicit-project", explicit); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	h := handleSessionEnd(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"id":        "end-test-session",
+		"summary":   "all done",
+		"directory": explicit,
+	}}})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %s", callResultText(t, res))
+	}
+
+	text := callResultText(t, res)
+	if !strings.Contains(text, "end-explicit-project") {
+		t.Fatalf("expected envelope to reference end-explicit-project, got: %s", text)
+	}
+}
+
+// TestMemCapturePassive_HonorsExplicitDirectory parallels mem_save.
+func TestMemCapturePassive_HonorsExplicitDirectory(t *testing.T) {
+	cwdRepo := writeToolDirectoryHelperRepo(t, "passive-cwd-project")
+	explicit := writeToolDirectoryHelperRepo(t, "passive-explicit-project")
+	t.Chdir(cwdRepo)
+
+	s := newMCPTestStore(t)
+	h := handleCapturePassive(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"content":   "## Key Learnings:\n1. directory parameter routes passive captures correctly\n",
+		"directory": explicit,
+	}}})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %s", callResultText(t, res))
+	}
+
+	got, err := s.Search("directory parameter routes passive", store.SearchOptions{Project: "passive-explicit-project", Limit: 5})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(got) == 0 {
+		t.Fatal("expected passive capture under passive-explicit-project")
+	}
+}
+
+// TestMemUpdate_HonorsExplicitDirectory: update is tolerant — if directory
+// resolves successfully, the envelope project_source/project_path reflects the
+// supplied directory rather than the server cwd.
+func TestMemUpdate_HonorsExplicitDirectory(t *testing.T) {
+	cwdRepo := writeToolDirectoryHelperRepo(t, "update-cwd-project")
+	explicit := writeToolDirectoryHelperRepo(t, "update-explicit-project")
+	t.Chdir(cwdRepo)
+
+	s := newMCPTestStore(t)
+	// Seed a session + observation to update (FK requires the session first).
+	if err := s.CreateSession("update-test-session", "update-explicit-project", explicit); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "update-test-session",
+		Type:      "manual",
+		Title:     "before",
+		Content:   "before content",
+		Project:   "update-explicit-project",
+	})
+	if err != nil {
+		t.Fatalf("seed observation: %v", err)
+	}
+
+	h := handleUpdate(s)
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"id":        float64(id),
+		"title":     "after",
+		"directory": explicit,
+	}}})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %s", callResultText(t, res))
+	}
+
+	text := callResultText(t, res)
+	if !strings.Contains(text, "update-explicit-project") {
+		t.Fatalf("expected envelope to reference update-explicit-project, got: %s", text)
+	}
+	if strings.Contains(text, "update-cwd-project") {
+		t.Fatalf("response must not reference cwd project: %s", text)
+	}
+}
+
+// TestWriteToolsHaveDirectoryArg asserts each write tool advertises a
+// `directory` property in its input schema.
+func TestWriteToolsHaveDirectoryArg(t *testing.T) {
+	s := newMCPTestStore(t)
+	srv := NewServer(s)
+
+	writeTools := []string{
+		"mem_save",
+		"mem_save_prompt",
+		"mem_session_start",
+		"mem_session_end",
+		"mem_session_summary",
+		"mem_capture_passive",
+		"mem_update",
+	}
+
+	for _, toolName := range writeTools {
+		t.Run(toolName, func(t *testing.T) {
+			st := srv.GetTool(toolName)
+			if st == nil {
+				t.Fatalf("tool %q not registered", toolName)
+			}
+			props := st.Tool.InputSchema.Properties
+			if _, hasDir := props["directory"]; !hasDir {
+				t.Errorf("tool %q must advertise 'directory' in schema", toolName)
+			}
+		})
+	}
+}
+
 // ─── Batch 4: Write handler schema + auto-detect ─────────────────────────────
 
 // TestWriteSchema_NoProjectField asserts that the 6 write tools do NOT include
