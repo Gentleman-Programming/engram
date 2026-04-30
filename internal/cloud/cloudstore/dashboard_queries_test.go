@@ -1227,6 +1227,274 @@ func TestStandaloneCloudMutationDeleteWinsBySeq(t *testing.T) {
 	}
 }
 
+func TestCloudMutationsDefineCurrentObservationStateWhenChunksContainHistory(t *testing.T) {
+	chunks := []dashboardChunkRow{
+		{
+			chunkID:   "chunk-history-1",
+			project:   "engram",
+			createdBy: "doctor@example.com",
+			createdAt: time.Date(2026, 4, 20, 9, 0, 0, 0, time.UTC),
+			parsed: parseMustChunk(t, []byte(`{
+				"observations":[
+					{"sync_id":"obs-historical-1","session_id":"sess-history","project":"engram","type":"decision","title":"historical one","created_at":"2026-04-20T09:10:00Z"},
+					{"sync_id":"obs-historical-2","session_id":"sess-history","project":"engram","type":"decision","title":"historical two","created_at":"2026-04-20T09:20:00Z"},
+					{"sync_id":"obs-current","session_id":"sess-current","project":"engram","type":"decision","title":"stale chunk title","created_at":"2026-04-20T09:30:00Z"}
+				]
+			}`)),
+		},
+	}
+	currentPayload, err := json.Marshal(map[string]any{
+		"sync_id":    "obs-current",
+		"session_id": "sess-current",
+		"project":    "engram",
+		"type":       "decision",
+		"title":      "current mutation title",
+		"created_at": "2026-04-21T09:30:00Z",
+	})
+	if err != nil {
+		t.Fatalf("marshal current mutation payload: %v", err)
+	}
+
+	model, err := buildDashboardReadModelFromRows(chunks, []dashboardMutationRow{
+		{seq: 200, project: "engram", entity: "observation", entityKey: "obs-current", op: "upsert", payload: currentPayload, occurredAt: time.Date(2026, 4, 21, 9, 30, 0, 0, time.UTC)},
+	})
+	if err != nil {
+		t.Fatalf("buildDashboardReadModelFromRows: %v", err)
+	}
+
+	detail, ok := model.projectDetails["engram"]
+	if !ok {
+		t.Fatal("expected engram project detail")
+	}
+	if detail.Stats.Observations != 1 {
+		t.Fatalf("expected current observation count=1, got %d (%+v)", detail.Stats.Observations, detail.Observations)
+	}
+	if len(detail.Observations) != 1 {
+		t.Fatalf("expected exactly one current observation row, got %d", len(detail.Observations))
+	}
+	if detail.Observations[0].SyncID != "obs-current" {
+		t.Fatalf("expected only obs-current to remain, got %q", detail.Observations[0].SyncID)
+	}
+	if detail.Observations[0].Title != "current mutation title" {
+		t.Fatalf("expected mutation payload to win, got %q", detail.Observations[0].Title)
+	}
+}
+
+func TestCloudMutationCurrentStatePruningIsProjectScoped(t *testing.T) {
+	chunks := []dashboardChunkRow{
+		{
+			chunkID:   "chunk-project-a",
+			project:   "project-a",
+			createdBy: "doctor@example.com",
+			createdAt: time.Date(2026, 4, 20, 9, 0, 0, 0, time.UTC),
+			parsed: parseMustChunk(t, []byte(`{
+				"observations":[
+					{"sync_id":"obs-a-history","session_id":"sess-a","project":"project-a","type":"decision","title":"historical a","created_at":"2026-04-20T09:10:00Z"},
+					{"sync_id":"obs-a-current","session_id":"sess-a","project":"project-a","type":"decision","title":"current a chunk","created_at":"2026-04-20T09:20:00Z"}
+				]
+			}`)),
+		},
+		{
+			chunkID:   "chunk-project-b",
+			project:   "project-b",
+			createdBy: "doctor@example.com",
+			createdAt: time.Date(2026, 4, 20, 10, 0, 0, 0, time.UTC),
+			parsed: parseMustChunk(t, []byte(`{
+				"observations":[
+					{"sync_id":"obs-b-chunk-only","session_id":"sess-b","project":"project-b","type":"decision","title":"chunk only b","created_at":"2026-04-20T10:10:00Z"}
+				]
+			}`)),
+		},
+	}
+	currentPayload, err := json.Marshal(map[string]any{
+		"sync_id":    "obs-a-current",
+		"session_id": "sess-a",
+		"project":    "project-a",
+		"type":       "decision",
+		"title":      "current a mutation",
+		"created_at": "2026-04-21T09:30:00Z",
+	})
+	if err != nil {
+		t.Fatalf("marshal current mutation payload: %v", err)
+	}
+
+	model, err := buildDashboardReadModelFromRows(chunks, []dashboardMutationRow{
+		{seq: 201, project: "project-a", entity: "observation", entityKey: "obs-a-current", op: "upsert", payload: currentPayload, occurredAt: time.Date(2026, 4, 21, 9, 30, 0, 0, time.UTC)},
+	})
+	if err != nil {
+		t.Fatalf("buildDashboardReadModelFromRows: %v", err)
+	}
+
+	detailA := model.projectDetails["project-a"]
+	if detailA.Stats.Observations != 1 || len(detailA.Observations) != 1 || detailA.Observations[0].SyncID != "obs-a-current" {
+		t.Fatalf("expected project-a pruning to keep only current observation, got %+v", detailA.Observations)
+	}
+	detailB := model.projectDetails["project-b"]
+	if detailB.Stats.Observations != 1 || len(detailB.Observations) != 1 || detailB.Observations[0].SyncID != "obs-b-chunk-only" {
+		t.Fatalf("expected project-b chunk-only observation to survive project-a pruning, got %+v", detailB.Observations)
+	}
+}
+
+func TestCloudMutationSessionPruningPreservesReferencedParentSession(t *testing.T) {
+	chunks := []dashboardChunkRow{
+		{
+			chunkID:   "chunk-parent-session",
+			project:   "engram",
+			createdBy: "doctor@example.com",
+			createdAt: time.Date(2026, 4, 20, 9, 0, 0, 0, time.UTC),
+			parsed: parseMustChunk(t, []byte(`{
+				"sessions":[
+					{"id":"sess-parent","project":"engram","started_at":"2026-04-20T09:00:00Z"},
+					{"id":"sess-stale","project":"engram","started_at":"2026-04-20T08:00:00Z"}
+				],
+				"observations":[
+					{"sync_id":"obs-current-parent","session_id":"sess-parent","project":"engram","type":"decision","title":"current child","created_at":"2026-04-20T09:10:00Z"}
+				]
+			}`)),
+		},
+	}
+	sessionPayload, err := json.Marshal(map[string]any{
+		"id":         "sess-current-other",
+		"project":    "engram",
+		"started_at": "2026-04-21T09:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("marshal session mutation payload: %v", err)
+	}
+	obsPayload, err := json.Marshal(map[string]any{
+		"sync_id":    "obs-current-parent",
+		"session_id": "sess-parent",
+		"project":    "engram",
+		"type":       "decision",
+		"title":      "current child mutation",
+		"created_at": "2026-04-21T09:10:00Z",
+	})
+	if err != nil {
+		t.Fatalf("marshal observation mutation payload: %v", err)
+	}
+
+	model, err := buildDashboardReadModelFromRows(chunks, []dashboardMutationRow{
+		{seq: 210, project: "engram", entity: "session", entityKey: "sess-current-other", op: "upsert", payload: sessionPayload, occurredAt: time.Date(2026, 4, 21, 9, 0, 0, 0, time.UTC)},
+		{seq: 211, project: "engram", entity: "observation", entityKey: "obs-current-parent", op: "upsert", payload: obsPayload, occurredAt: time.Date(2026, 4, 21, 9, 10, 0, 0, time.UTC)},
+	})
+	if err != nil {
+		t.Fatalf("buildDashboardReadModelFromRows: %v", err)
+	}
+
+	detail := model.projectDetails["engram"]
+	if detail.Stats.Observations != 1 || len(detail.Observations) != 1 {
+		t.Fatalf("expected one retained current observation, got %+v", detail.Observations)
+	}
+	seenParent := false
+	seenStale := false
+	for _, session := range detail.Sessions {
+		switch session.SessionID {
+		case "sess-parent":
+			seenParent = true
+		case "sess-stale":
+			seenStale = true
+		}
+	}
+	if !seenParent {
+		t.Fatalf("expected parent session referenced by retained observation to survive pruning, got %+v", detail.Sessions)
+	}
+	if seenStale {
+		t.Fatalf("expected unreferenced stale session to be pruned, got %+v", detail.Sessions)
+	}
+}
+
+func TestDashboardCurrentStateKeepsDuplicateEntityKeysAcrossProjects(t *testing.T) {
+	chunks := []dashboardChunkRow{
+		{
+			chunkID:   "chunk-duplicate-project-a",
+			project:   "project-a",
+			createdBy: "doctor@example.com",
+			createdAt: time.Date(2026, 4, 20, 9, 0, 0, 0, time.UTC),
+			parsed: parseMustChunk(t, []byte(`{
+				"sessions":[{"id":"shared-session","project":"project-a","started_at":"2026-04-20T09:00:00Z","summary":"project a session"}],
+				"observations":[{"sync_id":"shared-observation","session_id":"shared-session","project":"project-a","type":"decision","title":"project a observation","created_at":"2026-04-20T09:10:00Z"}],
+				"prompts":[{"sync_id":"shared-prompt","session_id":"shared-session","project":"project-a","content":"project a prompt","created_at":"2026-04-20T09:20:00Z"}]
+			}`)),
+		},
+		{
+			chunkID:   "chunk-duplicate-project-b",
+			project:   "project-b",
+			createdBy: "doctor@example.com",
+			createdAt: time.Date(2026, 4, 20, 10, 0, 0, 0, time.UTC),
+			parsed: parseMustChunk(t, []byte(`{
+				"sessions":[{"id":"shared-session","project":"project-b","started_at":"2026-04-20T10:00:00Z","summary":"project b session"}],
+				"observations":[{"sync_id":"shared-observation","session_id":"shared-session","project":"project-b","type":"decision","title":"project b observation","created_at":"2026-04-20T10:10:00Z"}],
+				"prompts":[{"sync_id":"shared-prompt","session_id":"shared-session","project":"project-b","content":"project b prompt","created_at":"2026-04-20T10:20:00Z"}]
+			}`)),
+		},
+	}
+	sessionPayloadA, err := json.Marshal(map[string]any{"id": "shared-session", "project": "project-a", "started_at": "2026-04-20T09:00:00Z", "summary": "project a mutation session"})
+	if err != nil {
+		t.Fatalf("marshal project-a session payload: %v", err)
+	}
+	sessionPayloadB, err := json.Marshal(map[string]any{"id": "shared-session", "project": "project-b", "started_at": "2026-04-20T10:00:00Z", "summary": "project b mutation session"})
+	if err != nil {
+		t.Fatalf("marshal project-b session payload: %v", err)
+	}
+	observationPayloadA, err := json.Marshal(map[string]any{"sync_id": "shared-observation", "session_id": "shared-session", "project": "project-a", "type": "decision", "title": "project a mutation observation", "created_at": "2026-04-20T09:10:00Z"})
+	if err != nil {
+		t.Fatalf("marshal project-a observation payload: %v", err)
+	}
+	observationPayloadB, err := json.Marshal(map[string]any{"sync_id": "shared-observation", "session_id": "shared-session", "project": "project-b", "type": "decision", "title": "project b mutation observation", "created_at": "2026-04-20T10:10:00Z"})
+	if err != nil {
+		t.Fatalf("marshal project-b observation payload: %v", err)
+	}
+	promptPayloadA, err := json.Marshal(map[string]any{"sync_id": "shared-prompt", "session_id": "shared-session", "project": "project-a", "content": "project a mutation prompt", "created_at": "2026-04-20T09:20:00Z"})
+	if err != nil {
+		t.Fatalf("marshal project-a prompt payload: %v", err)
+	}
+	promptPayloadB, err := json.Marshal(map[string]any{"sync_id": "shared-prompt", "session_id": "shared-session", "project": "project-b", "content": "project b mutation prompt", "created_at": "2026-04-20T10:20:00Z"})
+	if err != nil {
+		t.Fatalf("marshal project-b prompt payload: %v", err)
+	}
+
+	model, err := buildDashboardReadModelFromRows(chunks, []dashboardMutationRow{
+		{seq: 300, project: "project-a", entity: "session", entityKey: "shared-session", op: "upsert", payload: sessionPayloadA, occurredAt: time.Date(2026, 4, 21, 9, 0, 0, 0, time.UTC)},
+		{seq: 301, project: "project-b", entity: "session", entityKey: "shared-session", op: "upsert", payload: sessionPayloadB, occurredAt: time.Date(2026, 4, 21, 10, 0, 0, 0, time.UTC)},
+		{seq: 302, project: "project-a", entity: "observation", entityKey: "shared-observation", op: "upsert", payload: observationPayloadA, occurredAt: time.Date(2026, 4, 21, 9, 10, 0, 0, time.UTC)},
+		{seq: 303, project: "project-b", entity: "observation", entityKey: "shared-observation", op: "upsert", payload: observationPayloadB, occurredAt: time.Date(2026, 4, 21, 10, 10, 0, 0, time.UTC)},
+		{seq: 304, project: "project-a", entity: "prompt", entityKey: "shared-prompt", op: "upsert", payload: promptPayloadA, occurredAt: time.Date(2026, 4, 21, 9, 20, 0, 0, time.UTC)},
+		{seq: 305, project: "project-b", entity: "prompt", entityKey: "shared-prompt", op: "upsert", payload: promptPayloadB, occurredAt: time.Date(2026, 4, 21, 10, 20, 0, 0, time.UTC)},
+	})
+	if err != nil {
+		t.Fatalf("buildDashboardReadModelFromRows: %v", err)
+	}
+
+	assertDuplicateProjectDetail := func(project, sessionSummary, observationTitle, promptContent string) {
+		t.Helper()
+		detail, ok := model.projectDetails[project]
+		if !ok {
+			t.Fatalf("expected project detail for %s", project)
+		}
+		if detail.Stats.Sessions != 1 || len(detail.Sessions) != 1 {
+			t.Fatalf("expected one session for %s, stats=%+v rows=%+v", project, detail.Stats, detail.Sessions)
+		}
+		if detail.Sessions[0].SessionID != "shared-session" || detail.Sessions[0].Summary != sessionSummary {
+			t.Fatalf("unexpected session for %s: %+v", project, detail.Sessions[0])
+		}
+		if detail.Stats.Observations != 1 || len(detail.Observations) != 1 {
+			t.Fatalf("expected one observation for %s, stats=%+v rows=%+v", project, detail.Stats, detail.Observations)
+		}
+		if detail.Observations[0].SyncID != "shared-observation" || detail.Observations[0].Title != observationTitle {
+			t.Fatalf("unexpected observation for %s: %+v", project, detail.Observations[0])
+		}
+		if detail.Stats.Prompts != 1 || len(detail.Prompts) != 1 {
+			t.Fatalf("expected one prompt for %s, stats=%+v rows=%+v", project, detail.Stats, detail.Prompts)
+		}
+		if detail.Prompts[0].SyncID != "shared-prompt" || detail.Prompts[0].Content != promptContent {
+			t.Fatalf("unexpected prompt for %s: %+v", project, detail.Prompts[0])
+		}
+	}
+
+	assertDuplicateProjectDetail("project-a", "project a mutation session", "project a mutation observation", "project a mutation prompt")
+	assertDuplicateProjectDetail("project-b", "project b mutation session", "project b mutation observation", "project b mutation prompt")
+}
+
 // ─── R5-4: Dedicated not-found error sentinels ───────────────────────────────
 
 // TestSessionDetailNotFoundReturnsSessionNotFoundError asserts that

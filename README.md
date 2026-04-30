@@ -69,17 +69,17 @@ That's it. No Node.js, no Python, no Docker. **One binary, one SQLite file.**
 
 Full details on session lifecycle, topic keys, and memory hygiene → [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 
-## MCP Tools (17)
+## MCP Tools (18)
 
 | Category | Tools |
 |----------|-------|
 | **Save & Update** | `mem_save`, `mem_update`, `mem_delete`, `mem_suggest_topic_key` |
 | **Search & Retrieve** | `mem_search`, `mem_context`, `mem_timeline`, `mem_get_observation` |
 | **Session Lifecycle** | `mem_session_start`, `mem_session_end`, `mem_session_summary` |
-| **Conflict Surfacing** | `mem_judge` |
+| **Conflict Surfacing** | `mem_judge`, `mem_compare` |
 | **Utilities** | `mem_save_prompt`, `mem_stats`, `mem_capture_passive`, `mem_merge_projects`, `mem_current_project` |
 
-Full tool reference with parameters → [DOCS.md#mcp-tools-17-tools](DOCS.md#mcp-tools-17-tools)
+Full tool reference with parameters → [DOCS.md#mcp-tools-18-tools](DOCS.md#mcp-tools-18-tools)
 
 ## Terminal UI
 
@@ -126,6 +126,15 @@ engram sync --cloud --project smoke-project
 
 Cloud mode is always project-scoped (`--project` is required; `engram sync --cloud --all` is intentionally blocked).
 Known repairable cloud sync/upsert/canonicalization failures keep the original error visible and recommend the explicit `doctor`/`repair` flow below; Engram never auto-applies repair from sync or autosync.
+For blocked cloud sync, `transport_failed`, or legacy session directory repair, see [Engram Cloud Troubleshooting](docs/engram-cloud/troubleshooting.md).
+If cloud sync stays blocked after `doctor`/`repair`, download the rescue helper and run the recommended exported-row repair:
+
+```bash
+tools/repair-missing-session-directory.sh --apply --interactive --fix-exported <project>
+engram sync --cloud --project <project>
+```
+
+`--fix-exported` repairs local exported `sessions[].directory` and `observations[]` required fields that can still break the final push after `doctor` reports ready. For sequential legacy `sync_mutations` blockers, use `tools/repair-missing-session-directory.sh --apply --interactive --all <project>`.
 
 **After upgrading `engram` while an MCP client is already running:**
 
@@ -153,6 +162,126 @@ For authenticated mode, upgrade flow, dashboard behavior, reason codes, and full
 - [Engram Cloud quickstart](docs/engram-cloud/quickstart.md)
 - [DOCS.md — Cloud CLI reference](DOCS.md#cloud-cli-opt-in)
 - [DOCS.md — Cloud Autosync](DOCS.md#cloud-autosync)
+
+## Steps to Test (Beta — Phases 2+3+4)
+
+Try the new memory-conflict-surfacing features in **complete isolation** from your existing engram setup. Docker uses non-default ports + a separate data dir + a beta-only token, so your prod cloud and `~/.engram/` are untouched. Cleanup is one command.
+
+**What's in the beta**:
+- 🔄 Cloud sync of conflict relations cross-machine
+- 🔍 `engram conflicts` CLI + HTTP API for retroactive audit + scan
+- 🧠 `--semantic` scan that uses **your existing Claude Code or OpenCode CLI** to catch vocabulary-different conflicts ("Hexagonal" ↔ "Ports and Adapters") — **$0 if you're on a Pro/Max/Plus subscription**
+
+### Setup (4 commands)
+
+```bash
+git clone https://github.com/Gentleman-Programming/engram.git engram-beta-repo
+cd engram-beta-repo && git checkout feat/memory-conflict-surfacing-cloud-sync
+docker compose -f docker-compose.beta.yml up -d
+go build -o ./engram-beta ./cmd/engram
+
+# Isolated env (does NOT touch ~/.engram or your prod cloud)
+export ENGRAM_DATA_DIR=/tmp/engram-beta-data
+export ENGRAM_CLOUD_SERVER=http://127.0.0.1:28080
+export ENGRAM_CLOUD_TOKEN=beta-token-CHANGE-ME-please-32chars
+mkdir -p "$ENGRAM_DATA_DIR"
+```
+
+### Use cases
+
+**1️⃣ Phase 1 — Conflict detection on save (sanity)**
+
+```bash
+./engram-beta save \
+  "Use Clean Architecture" \
+  "Layers: entities, use cases, adapters." \
+  --type architecture --project beta-test
+
+./engram-beta save \
+  "Use Hexagonal Architecture" \
+  "Ports and adapters separate domain from infra." \
+  --type architecture --project beta-test
+```
+
+✅ Second save returns `candidates[]` with the first memory's id.
+
+**2️⃣ Phase 2 — Cloud sync of relations cross-machine**
+
+```bash
+./engram-beta cloud enroll beta-test
+./engram-beta sync --cloud --project beta-test
+./engram-beta cloud status
+
+# Simulate a "second machine"
+ENGRAM_DATA_DIR=/tmp/engram-beta-data-2 ./engram-beta cloud enroll beta-test
+ENGRAM_DATA_DIR=/tmp/engram-beta-data-2 ./engram-beta sync --cloud --project beta-test
+ENGRAM_DATA_DIR=/tmp/engram-beta-data-2 ./engram-beta search "Architecture"
+```
+
+✅ The "second machine" sees memories synced from the first.
+
+**3️⃣ Phase 3 — Admin CLI + HTTP API**
+
+```bash
+./engram-beta conflicts list --project beta-test
+./engram-beta conflicts stats --project beta-test
+./engram-beta conflicts scan --project beta-test --dry-run
+./engram-beta conflicts scan --project beta-test --apply --max-insert 10
+
+# In another terminal: ./engram-beta serve
+curl -s "http://127.0.0.1:7437/conflicts?project=beta-test" | jq
+```
+
+✅ List/scan/stats return sensible data.
+
+**4️⃣ Phase 4 — Semantic LLM-judge (the killer feature) 🎯**
+
+```bash
+export ENGRAM_AGENT_CLI=claude   # or opencode
+
+./engram-beta conflicts scan --project beta-test --semantic --apply \
+  --max-semantic 5 --concurrency 3 --yes
+```
+
+✅ Your agent's LLM judges semantic similarity. **$0 if on a subscription**.
+
+**5️⃣ The case keyword search NEVER catches**
+
+Vocabulary-different but semantically-conflicting:
+
+```bash
+./engram-beta save \
+  "Use Postgres for the user database" \
+  "Postgres 15 is our SQL store for users." \
+  --type architecture --project beta-test
+
+./engram-beta save \
+  "We migrated to MongoDB last quarter" \
+  "Document store now backs the user collection. SQL is gone." \
+  --type decision --project beta-test
+
+./engram-beta conflicts scan --project beta-test --semantic --apply \
+  --max-semantic 5 --yes
+
+./engram-beta conflicts list --project beta-test --status judged
+```
+
+✅ The LLM detects `supersedes` / `conflicts_with` with high confidence — FTS5 alone would not, because "Postgres" and "MongoDB" share no words.
+
+### Cleanup (zero residue)
+
+```bash
+docker compose -f docker-compose.beta.yml down -v
+rm -rf /tmp/engram-beta-data /tmp/engram-beta-data-2 ./engram-beta
+```
+
+Your production engram is fully untouched throughout.
+
+### Full guide + troubleshooting
+
+→ [docs/BETA_TESTING.md](docs/BETA_TESTING.md)
+
+→ Report feedback: [issues with `beta-phase-2-3-4` label](https://github.com/Gentleman-Programming/engram/issues)
 
 ## CLI Reference
 

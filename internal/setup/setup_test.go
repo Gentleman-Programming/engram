@@ -1802,6 +1802,140 @@ func TestClaudeCodeUserPromptHookUsesCurrentMCPServerID(t *testing.T) {
 	}
 }
 
+func TestClaudeCodeUserPromptHookDefersProjectDetectionUntilNeeded(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "plugin", "claude-code", "scripts", "user-prompt-submit.sh"))
+	if err != nil {
+		t.Fatalf("read user prompt hook: %v", err)
+	}
+	text := string(data)
+
+	sessionParse := strings.Index(text, "SESSION_ID=$(echo \"$INPUT\" | jq -r '.session_id // empty')")
+	if sessionParse < 0 {
+		t.Fatalf("user prompt hook missing expected session parsing structure")
+	}
+	sessionKeyBranchRel := strings.Index(text[sessionParse:], "if [ -n \"$SESSION_ID\" ]; then")
+	sessionKeyBranch := -1
+	if sessionKeyBranchRel >= 0 {
+		sessionKeyBranch = sessionParse + sessionKeyBranchRel
+	}
+	if sessionParse < 0 || sessionKeyBranch < 0 {
+		t.Fatalf("user prompt hook missing expected session parsing/keying structure")
+	}
+	if preKey := text[sessionParse:sessionKeyBranch]; strings.Contains(preKey, "detect_project") {
+		t.Fatalf("user prompt hook must not detect project before session_id-first keying")
+	}
+
+	fallbackDetect := "PROJECT=$(detect_project \"$CWD\")\n  SAFE_PROJECT="
+	if !strings.Contains(text, fallbackDetect) {
+		t.Fatalf("user prompt hook should detect project only for the no-session_id fallback key")
+	}
+
+	subsequentMarker := strings.Index(text, "# SUBSEQUENT MESSAGES")
+	if subsequentMarker < 0 {
+		t.Fatalf("user prompt hook missing subsequent-message section")
+	}
+	if !strings.Contains(text[subsequentMarker:], "PROJECT=$(detect_project \"$CWD\")") {
+		t.Fatalf("user prompt hook should detect project for subsequent nudge logic after first-message handling")
+	}
+}
+
+func TestClaudeCodeUserPromptHookHasWindowsGitBashSafePath(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "plugin", "claude-code", "scripts", "user-prompt-submit.sh"))
+	if err != nil {
+		t.Fatalf("read user prompt hook: %v", err)
+	}
+	text := string(data)
+
+	safePath := strings.Index(text, "if is_windows_bash &&")
+	scriptDir := strings.Index(text, "SCRIPT_DIR=\"$(cd")
+	if safePath < 0 {
+		t.Fatalf("user prompt hook missing Windows Git Bash safe path")
+	}
+	if scriptDir < 0 || scriptDir < safePath {
+		t.Fatalf("Windows Git Bash safe path must run before dirname/pwd helper setup")
+	}
+
+	blockEnd := strings.Index(text[safePath:], "# Load shared helpers after the Windows-safe fast path")
+	if blockEnd < 0 {
+		t.Fatalf("Windows Git Bash safe path missing explicit end marker")
+	}
+	block := text[safePath : safePath+blockEnd]
+	for _, forkHeavy := range []string{"jq", "curl", "git ", "date ", "dirname", "touch", "$("} {
+		if strings.Contains(block, forkHeavy) {
+			t.Fatalf("Windows Git Bash safe path should avoid fork-heavy %q", forkHeavy)
+		}
+	}
+	if !strings.Contains(block, "printf '%s\\n' '{}'") {
+		t.Fatalf("Windows Git Bash subsequent prompts should degrade to a fast empty response")
+	}
+}
+
+func TestClaudeCodeUserPromptHookSanitizesWindowsSafeSessionKey(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "plugin", "claude-code", "scripts", "user-prompt-submit.sh"))
+	if err != nil {
+		t.Fatalf("read user prompt hook: %v", err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		"sanitize_session_key_part()",
+		"[[ \"$char\" =~ [a-zA-Z0-9_-] ]]",
+		"SESSION_KEY=\"engram-claude-${JSON_VALUE}-tools-loaded\"",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("user prompt hook missing Windows session key sanitization fragment %q", want)
+		}
+	}
+}
+
+func TestClaudeCodeUserPromptHookIncludesPowerShellFallback(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "plugin", "claude-code", "scripts", "user-prompt-submit.ps1"))
+	if err != nil {
+		t.Fatalf("read PowerShell user prompt hook: %v", err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		"[Console]::In.ReadToEnd()",
+		"ConvertFrom-Json",
+		"mcp__engram__mem_context",
+		"Write-EmptyHookResponse",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("PowerShell user prompt hook missing %q", want)
+		}
+	}
+}
+
+func TestClaudeCodeUserPromptSubmitHookTimeout(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "plugin", "claude-code", "hooks", "hooks.json"))
+	if err != nil {
+		t.Fatalf("read Claude Code hooks config: %v", err)
+	}
+
+	var cfg struct {
+		Hooks map[string][]struct {
+			Hooks []struct {
+				Command string `json:"command"`
+				Timeout int    `json:"timeout"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("parse Claude Code hooks config: %v", err)
+	}
+
+	entries := cfg.Hooks["UserPromptSubmit"]
+	if len(entries) != 1 || len(entries[0].Hooks) != 1 {
+		t.Fatalf("expected one UserPromptSubmit command hook, got %#v", entries)
+	}
+	hook := entries[0].Hooks[0]
+	if hook.Command != "${CLAUDE_PLUGIN_ROOT}/scripts/user-prompt-submit.sh" {
+		t.Fatalf("unexpected UserPromptSubmit command %q", hook.Command)
+	}
+	if hook.Timeout != 2 {
+		t.Fatalf("UserPromptSubmit timeout = %d, want 2", hook.Timeout)
+	}
+}
+
 func TestAddClaudeCodeAllowlist(t *testing.T) {
 	t.Run("creates file from scratch", func(t *testing.T) {
 		resetSetupSeams(t)

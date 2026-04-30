@@ -13,6 +13,7 @@ import (
 
 	"github.com/Gentleman-Programming/engram/internal/cloud"
 	"github.com/Gentleman-Programming/engram/internal/cloud/chunkcodec"
+	"github.com/Gentleman-Programming/engram/internal/store"
 	engramsync "github.com/Gentleman-Programming/engram/internal/sync"
 	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -230,8 +231,27 @@ func (cs *CloudStore) WriteChunk(ctx context.Context, project, chunkID, createdB
 		return fmt.Errorf("cloudstore: read existing chunk: %w", err)
 	}
 
+	chunk, err := parseChunkData(payload)
+	if err != nil {
+		return fmt.Errorf("cloudstore: parse chunk for materialization: %w", err)
+	}
+	mutations, err := materializedChunkMutations(project, chunk)
+	if err != nil {
+		return err
+	}
+
+	tx, err := cs.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("cloudstore: begin write chunk tx: %w", err)
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
 	counts := summarizeChunk(payload)
-	_, err = cs.db.ExecContext(ctx, `
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO cloud_chunks (project_name, chunk_id, created_by, client_created_at, payload, sessions_count, observations_count, prompts_count)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
 		project, strings.TrimSpace(chunkID), strings.TrimSpace(createdBy), originCreatedAt, payload, counts.sessions, counts.observations, counts.prompts)
@@ -246,9 +266,16 @@ func (cs *CloudStore) WriteChunk(ctx context.Context, project, chunkID, createdB
 		}
 		return fmt.Errorf("cloudstore: write chunk: %w", err)
 	}
-	if err := cs.indexChunkSessions(ctx, project, payload); err != nil {
+	if err := cs.indexChunkSessionsWith(ctx, tx, project, payload); err != nil {
 		return err
 	}
+	if err := insertMaterializedMutations(ctx, tx, mutations); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("cloudstore: commit write chunk: %w", err)
+	}
+	tx = nil
 	cs.invalidateDashboardReadModel()
 	return nil
 }
@@ -296,16 +323,85 @@ func (cs *CloudStore) KnownSessionIDs(ctx context.Context, project string) (map[
 }
 
 func (cs *CloudStore) indexChunkSessions(ctx context.Context, project string, payload []byte) error {
+	return cs.indexChunkSessionsWith(ctx, cs.db, project, payload)
+}
+
+type chunkSessionIndexer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+func (cs *CloudStore) indexChunkSessionsWith(ctx context.Context, execer chunkSessionIndexer, project string, payload []byte) error {
 	sessionIDs := collectSessionIDsFromPayload(payload)
 	if len(sessionIDs) == 0 {
 		return nil
 	}
 	for sessionID := range sessionIDs {
-		if _, err := cs.db.ExecContext(ctx,
+		if _, err := execer.ExecContext(ctx,
 			`INSERT INTO cloud_project_sessions (project_name, session_id) VALUES ($1, $2) ON CONFLICT (project_name, session_id) DO NOTHING`,
 			project, sessionID,
 		); err != nil {
 			return fmt.Errorf("cloudstore: index session %q: %w", sessionID, err)
+		}
+	}
+	return nil
+}
+
+func materializedChunkMutations(project string, chunk engramsync.ChunkData) ([]MutationEntry, error) {
+	project = strings.TrimSpace(project)
+	entries := make([]MutationEntry, 0, len(chunk.Sessions)+len(chunk.Observations)+len(chunk.Prompts))
+
+	for i, session := range chunk.Sessions {
+		entityKey := strings.TrimSpace(session.ID)
+		if entityKey == "" {
+			return nil, fmt.Errorf("cloudstore: materialize chunk: sessions[%d].id is required", i)
+		}
+		payload, err := json.Marshal(session)
+		if err != nil {
+			return nil, fmt.Errorf("cloudstore: materialize chunk session %q: %w", entityKey, err)
+		}
+		entries = append(entries, MutationEntry{Project: project, Entity: store.SyncEntitySession, EntityKey: entityKey, Op: store.SyncOpUpsert, Payload: payload})
+	}
+
+	for i, observation := range chunk.Observations {
+		entityKey := strings.TrimSpace(observation.SyncID)
+		if entityKey == "" {
+			return nil, fmt.Errorf("cloudstore: materialize chunk: observations[%d].sync_id is required", i)
+		}
+		payload, err := json.Marshal(observation)
+		if err != nil {
+			return nil, fmt.Errorf("cloudstore: materialize chunk observation %q: %w", entityKey, err)
+		}
+		entries = append(entries, MutationEntry{Project: project, Entity: store.SyncEntityObservation, EntityKey: entityKey, Op: store.SyncOpUpsert, Payload: payload})
+	}
+
+	for i, prompt := range chunk.Prompts {
+		entityKey := strings.TrimSpace(prompt.SyncID)
+		if entityKey == "" {
+			return nil, fmt.Errorf("cloudstore: materialize chunk: prompts[%d].sync_id is required", i)
+		}
+		payload, err := json.Marshal(prompt)
+		if err != nil {
+			return nil, fmt.Errorf("cloudstore: materialize chunk prompt %q: %w", entityKey, err)
+		}
+		entries = append(entries, MutationEntry{Project: project, Entity: store.SyncEntityPrompt, EntityKey: entityKey, Op: store.SyncOpUpsert, Payload: payload})
+	}
+
+	return entries, nil
+}
+
+func insertMaterializedMutations(ctx context.Context, tx *sql.Tx, entries []MutationEntry) error {
+	for _, entry := range entries {
+		payload := entry.Payload
+		if len(payload) == 0 {
+			payload = json.RawMessage("{}")
+		}
+		_, err := tx.ExecContext(ctx, `
+			INSERT INTO cloud_mutations (project, entity, entity_key, op, payload)
+			VALUES ($1, $2, $3, $4, $5)`,
+			strings.TrimSpace(entry.Project), strings.TrimSpace(entry.Entity), strings.TrimSpace(entry.EntityKey), strings.TrimSpace(entry.Op), payload,
+		)
+		if err != nil {
+			return fmt.Errorf("cloudstore: insert materialized chunk mutation %s/%s/%s: %w", entry.Project, entry.Entity, entry.EntityKey, err)
 		}
 	}
 	return nil

@@ -109,6 +109,18 @@ type dashboardReadModel struct {
 	admin          DashboardAdminOverview
 }
 
+type dashboardEntityKey struct {
+	project   string
+	entityKey string
+}
+
+func newDashboardEntityKey(project, entityKey string) dashboardEntityKey {
+	return dashboardEntityKey{
+		project:   strings.TrimSpace(project),
+		entityKey: strings.TrimSpace(entityKey),
+	}
+}
+
 func buildDashboardReadModel(chunks []dashboardChunkRow) (dashboardReadModel, error) {
 	return buildDashboardReadModelFromRows(chunks, nil)
 }
@@ -133,9 +145,9 @@ func buildDashboardReadModelFromRows(chunks []dashboardChunkRow, mutationRows []
 	contributorProjects := make(map[string]map[string]struct{})
 	projectContributors := make(map[string]map[string]*DashboardContributorRow)
 
-	sessions := make(map[string]DashboardSessionRow)
-	observations := make(map[string]DashboardObservationRow)
-	prompts := make(map[string]DashboardPromptRow)
+	sessions := make(map[dashboardEntityKey]DashboardSessionRow)
+	observations := make(map[dashboardEntityKey]DashboardObservationRow)
+	prompts := make(map[dashboardEntityKey]DashboardPromptRow)
 
 	for _, chunk := range ordered {
 		project := strings.TrimSpace(chunk.project)
@@ -157,7 +169,8 @@ func buildDashboardReadModelFromRows(chunks []dashboardChunkRow, mutationRows []
 			// sets started_at+project; close chunk sets ended_at+summary but omits them).
 			// Inherit any non-empty field from the existing row before calling upsert.
 			trimmedID := strings.TrimSpace(session.ID)
-			if existing, ok := sessions[trimmedID]; ok {
+			sessionProject := resolveProjectValue(session.Project, project)
+			if existing, ok := sessions[newDashboardEntityKey(sessionProject, trimmedID)]; ok {
 				if session.StartedAt == "" {
 					session.StartedAt = existing.StartedAt
 				}
@@ -175,16 +188,16 @@ func buildDashboardReadModelFromRows(chunks []dashboardChunkRow, mutationRows []
 					session.Project = existing.Project
 				}
 			}
-			upsertDashboardSession(sessions, session.ID, resolveProjectValue(session.Project, project), session.StartedAt, endedAt, summary, session.Directory)
+			upsertDashboardSession(sessions, session.ID, sessionProject, session.StartedAt, endedAt, summary, session.Directory)
 		}
 		for _, obs := range chunk.parsed.Observations {
-			if obs.DeletedAt != nil && strings.TrimSpace(*obs.DeletedAt) != "" {
-				delete(observations, strings.TrimSpace(obs.SyncID))
-				continue
-			}
 			obsProject := project
 			if obs.Project != nil {
 				obsProject = resolveProjectValue(*obs.Project, project)
+			}
+			if obs.DeletedAt != nil && strings.TrimSpace(*obs.DeletedAt) != "" {
+				delete(observations, newDashboardEntityKey(obsProject, obs.SyncID))
+				continue
 			}
 			topicKey := ""
 			if obs.TopicKey != nil {
@@ -264,6 +277,7 @@ func buildDashboardReadModelFromRows(chunks []dashboardChunkRow, mutationRows []
 			return dashboardReadModel{}, fmt.Errorf("cloudstore: invalid dashboard mutation payload in cloud_mutations seq %d: %w", mutationRow.seq, err)
 		}
 	}
+	pruneDashboardEntitiesWithoutCloudMutation(orderedMutations, sessions, observations, prompts)
 
 	projects := make(map[string]*DashboardProjectRow, len(projectChunkCounts))
 	detailSessions := make(map[string][]DashboardSessionRow)
@@ -378,6 +392,82 @@ func buildDashboardReadModelFromRows(chunks []dashboardChunkRow, mutationRows []
 	}, nil
 }
 
+func pruneDashboardEntitiesWithoutCloudMutation(
+	mutationRows []dashboardMutationRow,
+	sessions map[dashboardEntityKey]DashboardSessionRow,
+	observations map[dashboardEntityKey]DashboardObservationRow,
+	prompts map[dashboardEntityKey]DashboardPromptRow,
+) {
+	// cloud_chunks remain audit history, but once cloud_mutations has rows for an
+	// entity type, dashboard browser counts should reflect the mutation-backed
+	// current-state keys instead of treating every historical chunk payload row as
+	// currently visible.
+	currentKeys := make(map[string]map[string]map[string]struct{})
+	for _, row := range mutationRows {
+		entity := strings.TrimSpace(row.entity)
+		project := strings.TrimSpace(row.project)
+		key := strings.TrimSpace(row.entityKey)
+		if entity == "" || project == "" || key == "" {
+			continue
+		}
+		if currentKeys[entity] == nil {
+			currentKeys[entity] = make(map[string]map[string]struct{})
+		}
+		if currentKeys[entity][project] == nil {
+			currentKeys[entity][project] = make(map[string]struct{})
+		}
+		currentKeys[entity][project][key] = struct{}{}
+	}
+
+	if keys, ok := currentKeys[store.SyncEntityObservation]; ok {
+		pruneDashboardRowsWithoutCloudMutation(observations, keys, func(row DashboardObservationRow) string { return row.Project }, nil)
+	}
+	if keys, ok := currentKeys[store.SyncEntityPrompt]; ok {
+		pruneDashboardRowsWithoutCloudMutation(prompts, keys, func(row DashboardPromptRow) string { return row.Project }, nil)
+	}
+
+	referencedSessions := make(map[string]map[string]struct{})
+	addReferencedSession := func(project, sessionID string) {
+		project = strings.TrimSpace(project)
+		sessionID = strings.TrimSpace(sessionID)
+		if project == "" || sessionID == "" {
+			return
+		}
+		if referencedSessions[project] == nil {
+			referencedSessions[project] = make(map[string]struct{})
+		}
+		referencedSessions[project][sessionID] = struct{}{}
+	}
+	for _, row := range observations {
+		addReferencedSession(row.Project, row.SessionID)
+	}
+	for _, row := range prompts {
+		addReferencedSession(row.Project, row.SessionID)
+	}
+	if keys, ok := currentKeys[store.SyncEntitySession]; ok {
+		pruneDashboardRowsWithoutCloudMutation(sessions, keys, func(row DashboardSessionRow) string { return row.Project }, referencedSessions)
+	}
+}
+
+func pruneDashboardRowsWithoutCloudMutation[T any](rows map[dashboardEntityKey]T, currentKeys map[string]map[string]struct{}, projectOf func(T) string, preserveKeys map[string]map[string]struct{}) {
+	for key := range rows {
+		trimmedKey := strings.TrimSpace(key.entityKey)
+		project := strings.TrimSpace(projectOf(rows[key]))
+		if keys, ok := preserveKeys[project]; ok {
+			if _, preserved := keys[trimmedKey]; preserved {
+				continue
+			}
+		}
+		keys, ok := currentKeys[project]
+		if !ok {
+			continue
+		}
+		if _, ok := keys[trimmedKey]; !ok {
+			delete(rows, key)
+		}
+	}
+}
+
 func resolveProjectValue(primary string, fallback string) string {
 	if value := strings.TrimSpace(primary); value != "" {
 		return value
@@ -385,13 +475,14 @@ func resolveProjectValue(primary string, fallback string) string {
 	return strings.TrimSpace(fallback)
 }
 
-func upsertDashboardSession(sessions map[string]DashboardSessionRow, sessionID, project, startedAt, endedAt, summary, directory string) {
+func upsertDashboardSession(sessions map[dashboardEntityKey]DashboardSessionRow, sessionID, project, startedAt, endedAt, summary, directory string) {
 	key := strings.TrimSpace(sessionID)
 	if key == "" {
 		return
 	}
-	sessions[key] = DashboardSessionRow{
-		Project:   strings.TrimSpace(project),
+	trimmedProject := strings.TrimSpace(project)
+	sessions[newDashboardEntityKey(trimmedProject, key)] = DashboardSessionRow{
+		Project:   trimmedProject,
 		SessionID: key,
 		StartedAt: strings.TrimSpace(startedAt),
 		EndedAt:   strings.TrimSpace(endedAt),
@@ -400,14 +491,15 @@ func upsertDashboardSession(sessions map[string]DashboardSessionRow, sessionID, 
 	}
 }
 
-func upsertDashboardObservation(observations map[string]DashboardObservationRow, syncID, project, sessionID, obsType, title, content, topicKey, toolName, chunkID, createdAt string) {
+func upsertDashboardObservation(observations map[dashboardEntityKey]DashboardObservationRow, syncID, project, sessionID, obsType, title, content, topicKey, toolName, chunkID, createdAt string) {
 	key := strings.TrimSpace(syncID)
 	if key == "" {
 		return
 	}
-	observations[key] = DashboardObservationRow{
+	trimmedProject := strings.TrimSpace(project)
+	observations[newDashboardEntityKey(trimmedProject, key)] = DashboardObservationRow{
 		SyncID:    key,
-		Project:   strings.TrimSpace(project),
+		Project:   trimmedProject,
 		SessionID: strings.TrimSpace(sessionID),
 		ChunkID:   strings.TrimSpace(chunkID),
 		Type:      strings.TrimSpace(obsType),
@@ -419,14 +511,15 @@ func upsertDashboardObservation(observations map[string]DashboardObservationRow,
 	}
 }
 
-func upsertDashboardPrompt(prompts map[string]DashboardPromptRow, syncID, project, sessionID, content, chunkID, createdAt string) {
+func upsertDashboardPrompt(prompts map[dashboardEntityKey]DashboardPromptRow, syncID, project, sessionID, content, chunkID, createdAt string) {
 	key := strings.TrimSpace(syncID)
 	if key == "" {
 		return
 	}
-	prompts[key] = DashboardPromptRow{
+	trimmedProject := strings.TrimSpace(project)
+	prompts[newDashboardEntityKey(trimmedProject, key)] = DashboardPromptRow{
 		SyncID:    key,
-		Project:   strings.TrimSpace(project),
+		Project:   trimmedProject,
 		SessionID: strings.TrimSpace(sessionID),
 		ChunkID:   strings.TrimSpace(chunkID),
 		Content:   strings.TrimSpace(content),
@@ -473,9 +566,9 @@ type dashboardPromptMutationPayload struct {
 func applyDashboardMutation(
 	chunkProject string,
 	mutation store.SyncMutation,
-	sessions map[string]DashboardSessionRow,
-	observations map[string]DashboardObservationRow,
-	prompts map[string]DashboardPromptRow,
+	sessions map[dashboardEntityKey]DashboardSessionRow,
+	observations map[dashboardEntityKey]DashboardObservationRow,
+	prompts map[dashboardEntityKey]DashboardPromptRow,
 ) error {
 	entity := strings.TrimSpace(mutation.Entity)
 	op := strings.TrimSpace(mutation.Op)
@@ -488,8 +581,9 @@ func applyDashboardMutation(
 			return err
 		}
 		key := resolveProjectValue(entityKey, body.ID)
+		project := resolveProjectValue(body.Project, chunkProject)
 		if op == store.SyncOpDelete || body.Deleted || body.HardDelete || (body.DeletedAt != nil && strings.TrimSpace(*body.DeletedAt) != "") {
-			delete(sessions, strings.TrimSpace(key))
+			delete(sessions, newDashboardEntityKey(project, key))
 			return nil
 		}
 		// C3 + R2-5: Preserve close fields and StartedAt from a prior sessions-array pass.
@@ -498,7 +592,7 @@ func applyDashboardMutation(
 		existingEndedAt := ""
 		existingSummary := ""
 		existingDirectory := ""
-		if existing, ok := sessions[strings.TrimSpace(key)]; ok {
+		if existing, ok := sessions[newDashboardEntityKey(project, key)]; ok {
 			existingStartedAt = existing.StartedAt
 			existingEndedAt = existing.EndedAt
 			existingSummary = existing.Summary
@@ -520,25 +614,25 @@ func applyDashboardMutation(
 		if resolvedDirectory == "" {
 			resolvedDirectory = existingDirectory
 		}
-		upsertDashboardSession(sessions, key, resolveProjectValue(body.Project, chunkProject), resolvedStartedAt, resolvedEndedAt, resolvedSummary, resolvedDirectory)
+		upsertDashboardSession(sessions, key, project, resolvedStartedAt, resolvedEndedAt, resolvedSummary, resolvedDirectory)
 	case store.SyncEntityObservation:
 		var body dashboardObservationMutationPayload
 		if err := chunkcodec.DecodeSyncMutationPayload(mutation.Payload, &body); err != nil {
 			return err
 		}
 		key := resolveProjectValue(entityKey, body.SyncID)
-		if op == store.SyncOpDelete || body.Deleted || body.HardDelete {
-			delete(observations, strings.TrimSpace(key))
-			return nil
-		}
 		project := strings.TrimSpace(chunkProject)
 		if body.Project != nil {
 			project = resolveProjectValue(*body.Project, project)
 		}
 		if project == "" {
-			if session, ok := sessions[strings.TrimSpace(body.SessionID)]; ok {
+			if session, ok := sessions[newDashboardEntityKey(project, body.SessionID)]; ok {
 				project = strings.TrimSpace(session.Project)
 			}
+		}
+		if op == store.SyncOpDelete || body.Deleted || body.HardDelete {
+			delete(observations, newDashboardEntityKey(project, key))
+			return nil
 		}
 		// R2-6 + prior fixes: Preserve all scalar fields from a prior observations-array pass.
 		// Mutations may carry only a subset of fields; any empty field inherits the stored value.
@@ -550,7 +644,7 @@ func applyDashboardMutation(
 		existingTopicKey := ""
 		existingToolName := ""
 		existingCreatedAt := ""
-		if existing, ok := observations[strings.TrimSpace(key)]; ok {
+		if existing, ok := observations[newDashboardEntityKey(project, key)]; ok {
 			existingChunkID = existing.ChunkID
 			existingSessionID = existing.SessionID
 			existingType = existing.Type
@@ -595,18 +689,18 @@ func applyDashboardMutation(
 			return err
 		}
 		key := resolveProjectValue(entityKey, body.SyncID)
-		if op == store.SyncOpDelete || body.Deleted || body.HardDelete {
-			delete(prompts, strings.TrimSpace(key))
-			return nil
-		}
 		project := strings.TrimSpace(chunkProject)
 		if body.Project != nil {
 			project = resolveProjectValue(*body.Project, project)
 		}
 		if project == "" {
-			if session, ok := sessions[strings.TrimSpace(body.SessionID)]; ok {
+			if session, ok := sessions[newDashboardEntityKey(project, body.SessionID)]; ok {
 				project = strings.TrimSpace(session.Project)
 			}
+		}
+		if op == store.SyncOpDelete || body.Deleted || body.HardDelete {
+			delete(prompts, newDashboardEntityKey(project, key))
+			return nil
 		}
 		// C2: Preserve ChunkID from a prior prompts-array pass — mutations do not
 		// carry which chunk they originated from, so inherit the stored value.
@@ -616,7 +710,7 @@ func applyDashboardMutation(
 		existingPromptContent := ""
 		existingPromptSessionID := ""
 		existingPromptCreatedAt := ""
-		if existing, ok := prompts[strings.TrimSpace(key)]; ok {
+		if existing, ok := prompts[newDashboardEntityKey(project, key)]; ok {
 			existingPromptChunkID = existing.ChunkID
 			existingPromptContent = existing.Content
 			existingPromptSessionID = existing.SessionID
