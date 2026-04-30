@@ -3258,6 +3258,127 @@ func TestResolveWriteProject_AutoDetects(t *testing.T) {
 	}
 }
 
+func TestResolveWriteProject_UsesConfigFromRepoRootSubdir(t *testing.T) {
+	root := t.TempDir()
+	initTestGitRepo(t, root)
+	configDir := filepath.Join(root, ".engram")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(`{"project_name":"canonical-project"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	subdir := filepath.Join(root, "cmd", "tool")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(subdir)
+
+	res, err := resolveWriteProject()
+	if err != nil {
+		t.Fatalf("resolveWriteProject: %v", err)
+	}
+	if res.Source != project.SourceConfig || res.Project != "canonical-project" {
+		t.Fatalf("expected config project, got source=%q project=%q", res.Source, res.Project)
+	}
+}
+
+func TestResolveWriteProject_InvalidConfigFailsClearly(t *testing.T) {
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, ".engram")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(`{"project_name":"bad/name"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	_, err := resolveWriteProject()
+	if !errors.Is(err, project.ErrInvalidConfig) || !strings.Contains(err.Error(), "project_name") {
+		t.Fatalf("expected clear invalid config project_name error, got %v", err)
+	}
+}
+
+func TestHandleSaveInvalidConfigFailsClearly(t *testing.T) {
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, ".engram")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(`{"project_name":""}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title": "should fail", "content": "invalid config", "type": "decision",
+	}}})
+	if err != nil {
+		t.Fatalf("handleSave: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("expected invalid config to fail write, got %q", callResultText(t, res))
+	}
+	body := callResultJSON(t, res)
+	if body["error_code"] != "invalid_project_config" || !strings.Contains(body["message"].(string), "project_name") {
+		t.Fatalf("expected clear invalid project config error, got %v", body)
+	}
+}
+
+func TestHandleSaveAndPromptUseConfigProjectForWrites(t *testing.T) {
+	root := t.TempDir()
+	initTestGitRepo(t, root)
+	configDir := filepath.Join(root, ".engram")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(`{"project_name":"config-locked"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	subdir := filepath.Join(root, "internal", "pkg")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(subdir)
+
+	s := newMCPTestStore(t)
+	save := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	res, err := save(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title": "config write", "content": "memory saved under config project", "type": "decision",
+	}}})
+	if err != nil || res.IsError {
+		t.Fatalf("mem_save failed: err=%v isError=%v text=%q", err, res.IsError, callResultText(t, res))
+	}
+	body := callResultJSON(t, res)
+	if body["project"] != "config-locked" || body["project_source"] != project.SourceConfig {
+		t.Fatalf("expected mem_save config envelope, got %v", body)
+	}
+
+	prompt := handleSavePrompt(s, MCPConfig{})
+	res, err = prompt(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"content": "prompt saved under config project",
+	}}})
+	if err != nil || res.IsError {
+		t.Fatalf("mem_save_prompt failed: err=%v isError=%v text=%q", err, res.IsError, callResultText(t, res))
+	}
+	body = callResultJSON(t, res)
+	if body["project"] != "config-locked" || body["project_source"] != project.SourceConfig {
+		t.Fatalf("expected mem_save_prompt config envelope, got %v", body)
+	}
+
+	obs, err := s.Search("memory saved under config project", store.SearchOptions{Project: "config-locked", Limit: 5})
+	if err != nil || len(obs) != 1 {
+		t.Fatalf("expected observation written to config project, obs=%d err=%v", len(obs), err)
+	}
+	prompts, err := s.RecentPrompts("config-locked", 5)
+	if err != nil || len(prompts) != 1 {
+		t.Fatalf("expected prompt written to config project, prompts=%d err=%v", len(prompts), err)
+	}
+}
+
 // TestResolveWriteProject_AmbiguousError: assert errors.Is(err, ErrAmbiguousProject)
 func TestResolveWriteProject_AmbiguousError(t *testing.T) {
 	parent := t.TempDir()

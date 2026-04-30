@@ -27,7 +27,17 @@ Engram works with **any MCP-compatible agent**. Pick your agent below.
 
 ### Project auto-detection (important)
 
-**Do not pass `project` to write tools.** Engram auto-detects the project from the server's working directory (cwd) using git remote URL, repo root name, or directory basename. Agents that include `project` in `mem_save` or similar calls will have that argument silently discarded.
+**Do not pass `project` to write tools.** Engram auto-detects the project from the server's working directory (cwd) using `.engram/config.json`, git remote URL, repo root name, or directory basename. Agents that include `project` in `mem_save` or similar calls will have that argument silently discarded.
+
+To lock write tools to the canonical project for a repo, add `.engram/config.json` at the repo root:
+
+```json
+{
+  "project_name": "sias-app"
+}
+```
+
+When present, `project_name` is used for writes from the repo and its subdirectories and overrides lower-confidence cwd/git detection. This is a write lock only: read tools can still use an explicit `project` filter when you need to query another existing project. Empty or invalid `project_name` values fail writes loudly instead of falling back silently.
 
 **Recommended first call:** `mem_current_project` — confirms which project Engram detected before you start writing. Returns `project_source` (how it was detected) and `available_projects` (if cwd is ambiguous).
 
