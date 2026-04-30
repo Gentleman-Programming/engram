@@ -1,6 +1,8 @@
 package cloudstore
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
@@ -8,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/cloud"
+	"github.com/Gentleman-Programming/engram/internal/cloud/chunkcodec"
 	"github.com/Gentleman-Programming/engram/internal/store"
 	engramsync "github.com/Gentleman-Programming/engram/internal/sync"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -225,6 +228,121 @@ func TestSortManifestRowsBreaksServerTimeTiesByChunkID(t *testing.T) {
 	wantOrder := []string{"a", "b"}
 	if !slices.Equal(gotOrder, wantOrder) {
 		t.Fatalf("expected deterministic chunk-id tie-break ordering %v, got %v", wantOrder, gotOrder)
+	}
+}
+
+func TestMaterializedChunkMutationsBuildsOrderedUpserts(t *testing.T) {
+	project := "proj-materialize"
+	chunk := parseMustChunk(t, []byte(`{
+		"sessions":[{"id":"s-1","project":"proj-materialize","directory":"/tmp/s-1","started_at":"2026-04-29T10:00:00Z"}],
+		"observations":[{"sync_id":"obs-1","session_id":"s-1","project":"proj-materialize","type":"decision","title":"Decision","content":"Content","scope":"project","created_at":"2026-04-29T10:01:00Z","updated_at":"2026-04-29T10:01:00Z"}],
+		"prompts":[{"sync_id":"prompt-1","session_id":"s-1","project":"proj-materialize","content":"Prompt","created_at":"2026-04-29T10:02:00Z"}]
+	}`))
+
+	entries, err := materializedChunkMutations(project, chunk)
+	if err != nil {
+		t.Fatalf("materializedChunkMutations: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("expected 3 entries, got %d", len(entries))
+	}
+
+	want := []struct {
+		entity string
+		key    string
+	}{
+		{store.SyncEntitySession, "s-1"},
+		{store.SyncEntityObservation, "obs-1"},
+		{store.SyncEntityPrompt, "prompt-1"},
+	}
+	for i, entry := range entries {
+		if entry.Project != project || entry.Entity != want[i].entity || entry.EntityKey != want[i].key || entry.Op != store.SyncOpUpsert {
+			t.Fatalf("entry %d mismatch: %+v", i, entry)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(entry.Payload, &payload); err != nil {
+			t.Fatalf("entry %d payload is not object JSON: %v", i, err)
+		}
+		if payload["project"] != project {
+			t.Fatalf("entry %d payload project mismatch: %v", i, payload["project"])
+		}
+	}
+}
+
+func TestMaterializedChunkMutationsRejectsMissingSyncIDs(t *testing.T) {
+	tests := []struct {
+		name  string
+		chunk engramsync.ChunkData
+		want  string
+	}{
+		{
+			name:  "observation missing sync id",
+			chunk: engramsync.ChunkData{Observations: []store.Observation{{SessionID: "s-1"}}},
+			want:  "observations[0].sync_id is required",
+		},
+		{
+			name:  "prompt missing sync id",
+			chunk: engramsync.ChunkData{Prompts: []store.Prompt{{SessionID: "s-1"}}},
+			want:  "prompts[0].sync_id is required",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := materializedChunkMutations("proj-a", tt.chunk)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected %q error, got %v", tt.want, err)
+			}
+		})
+	}
+}
+
+func TestWriteChunkMaterializesMutationsAndIsReplayIdempotent(t *testing.T) {
+	cs := openTestCloudStore(t)
+	project := "test-chunk-materialize-" + strings.ReplaceAll(time.Now().UTC().Format("20060102150405.000000000"), ".", "-")
+	payload, err := chunkcodec.CanonicalizeForProject([]byte(`{
+		"sessions":[{"id":"s-1","directory":"/tmp/s-1","started_at":"2026-04-29T10:00:00Z"}],
+		"observations":[{"sync_id":"obs-1","session_id":"s-1","type":"decision","title":"Decision","content":"Content","scope":"project","created_at":"2026-04-29T10:01:00Z","updated_at":"2026-04-29T10:01:00Z"}],
+		"prompts":[{"sync_id":"prompt-1","session_id":"s-1","content":"Prompt","created_at":"2026-04-29T10:02:00Z"}]
+	}`), project)
+	if err != nil {
+		t.Fatalf("canonicalize chunk: %v", err)
+	}
+	chunkID := chunkIDFromPayload(payload)
+
+	if err := cs.WriteChunk(context.Background(), project, chunkID, "tester", "2026-04-29T10:03:00Z", payload); err != nil {
+		t.Fatalf("WriteChunk: %v", err)
+	}
+	stored, err := cs.ReadChunk(context.Background(), project, chunkID)
+	if err != nil {
+		t.Fatalf("ReadChunk: %v", err)
+	}
+	if string(normalizeJSON(stored)) != string(normalizeJSON(payload)) {
+		t.Fatalf("stored chunk payload mismatch")
+	}
+
+	mutations, _, _, err := cs.ListMutationsSince(context.Background(), 0, 100, []string{project})
+	if err != nil {
+		t.Fatalf("ListMutationsSince: %v", err)
+	}
+	if len(mutations) != 3 {
+		t.Fatalf("expected 3 materialized mutations, got %d: %+v", len(mutations), mutations)
+	}
+	if mutations[0].Entity != store.SyncEntitySession || mutations[1].Entity != store.SyncEntityObservation || mutations[2].Entity != store.SyncEntityPrompt {
+		t.Fatalf("expected session/observation/prompt order, got %+v", mutations)
+	}
+	if mutations[1].EntityKey != "obs-1" || mutations[1].Op != store.SyncOpUpsert || mutations[1].Project != project {
+		t.Fatalf("unexpected observation mutation: %+v", mutations[1])
+	}
+
+	if err := cs.WriteChunk(context.Background(), project, chunkID, "tester", "2026-04-29T10:03:00Z", payload); err != nil {
+		t.Fatalf("replay WriteChunk: %v", err)
+	}
+	mutationsAfterReplay, _, _, err := cs.ListMutationsSince(context.Background(), 0, 100, []string{project})
+	if err != nil {
+		t.Fatalf("ListMutationsSince after replay: %v", err)
+	}
+	if len(mutationsAfterReplay) != 3 {
+		t.Fatalf("expected replay not to duplicate mutations, got %d: %+v", len(mutationsAfterReplay), mutationsAfterReplay)
 	}
 }
 

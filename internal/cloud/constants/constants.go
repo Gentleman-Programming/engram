@@ -5,12 +5,13 @@ import "github.com/Gentleman-Programming/engram/internal/store"
 const (
 	TargetKeyCloud = store.DefaultSyncTargetKey
 
-	ReasonBlockedUnenrolled = "blocked_unenrolled"
-	ReasonPaused            = "paused"
-	ReasonAuthRequired      = "auth_required"
-	ReasonPolicyForbidden   = "policy_forbidden"
-	ReasonTransportFailed   = "transport_failed"
-	ReasonCloudConfigError  = "cloud_config_error"
+	ReasonBlockedUnenrolled           = "blocked_unenrolled"
+	ReasonNonEnrolledPendingMutations = "non_enrolled_pending_mutations"
+	ReasonPaused                      = "paused"
+	ReasonAuthRequired                = "auth_required"
+	ReasonPolicyForbidden             = "policy_forbidden"
+	ReasonTransportFailed             = "transport_failed"
+	ReasonCloudConfigError            = "cloud_config_error"
 
 	UpgradeStatusReady   = "ready"
 	UpgradeStatusBlocked = "blocked"
@@ -39,6 +40,7 @@ const (
 
 var DeterministicReasons = []string{
 	ReasonBlockedUnenrolled,
+	ReasonNonEnrolledPendingMutations,
 	ReasonPaused,
 	ReasonAuthRequired,
 	ReasonPolicyForbidden,

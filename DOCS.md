@@ -14,7 +14,7 @@ This is the complete technical reference for Engram. For getting started, see th
 |---------|-----------------|
 | [Database Schema](#database-schema) | Tables, FTS5, SQLite config |
 | [HTTP API](#http-api-endpoints) | All REST endpoints with request/response details |
-| [MCP Tools](#mcp-tools-17-tools) | Detailed reference for all 17 memory tools |
+| [MCP Tools](#mcp-tools-18-tools) | Detailed reference for all 18 memory tools |
 | [MCP Project Resolution](#mcp-project-resolution) | Auto-detection algorithm, response envelope, tool categories |
 | [Memory Protocol](#memory-protocol) | When/how agents should use the tools |
 | [Project Name Normalization](#project-name-normalization) | Auto-detection, normalization, similar-project warnings |
@@ -46,6 +46,8 @@ For other docs:
 - **user_prompts** — `id` (INTEGER PK AUTOINCREMENT), `session_id` (FK), `content`, `project`, `created_at`
 - **prompts_fts** — FTS5 virtual table synced via triggers (`content`, `project`)
 - **sync_chunks** — `target_key` (TEXT), `chunk_id` (TEXT), `imported_at`; composite PK (`target_key`, `chunk_id`) for target-scoped chunk tracking
+- **memory_relations** — stores conflict-surfacing verdicts from `mem_judge`; columns include `sync_id` (TEXT PK), `source_id`, `target_id`, `relation`, `judgment_status` (`pending` | `judged`), `reason`, `evidence`, `confidence`, `marked_by_actor`, `marked_by_kind`, `marked_by_model`, `session_id`, `project`. Syncs across machines via cloud autosync when the project is enrolled.
+- **sync_apply_deferred** — holds pulled mutations that could not be applied locally due to a missing FK dependency (e.g. relation references an observation not yet present); columns: `sync_id` (TEXT PK), `entity`, `payload`, `apply_status` (`deferred` | `applied` | `dead`), `retry_count`, `last_error`, `last_attempted_at`, `first_seen_at`. Rows with `apply_status='dead'` have exceeded the retry cap (5 attempts) and will not be retried automatically.
 
 ### SQLite Configuration
 
@@ -119,7 +121,7 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
   - `200` when deleted
   - `404` when session does not exist
   - `409` when session still has observations (delete/migrate observations first)
-  - `409` when the session's project is enrolled for cloud sync (session deletion is blocked to avoid local/cloud divergence)
+  - For cloud-enrolled projects: returns `200` and additionally enqueues a `session/delete` mutation that propagates the deletion to cloud replicas
 
 ### Observations
 
@@ -172,6 +174,139 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 
 - `POST /projects/migrate` — Migrate observations between project names. Body: `{old_project, new_project}`
 
+### Conflict Audit (admin — local runtime only)
+
+These endpoints are served by `engram serve` on the local runtime only. They are not exposed on the cloud runtime. All routes are additive — no existing routes changed.
+
+#### GET /conflicts
+
+List `memory_relations` rows with optional filters.
+
+Query params: `project` (string), `status` (string — `pending` | `judged`), `since` (RFC3339), `limit` (int, default 50, max 500 — silently clamped).
+
+Response:
+```json
+{
+  "relations": [
+    {
+      "id": 42,
+      "sync_id": "rel-abc123",
+      "source_id": 10,
+      "target_id": 20,
+      "relation": "conflicts_with",
+      "judgment_status": "pending",
+      "created_at": "2026-01-15T12:00:00Z"
+    }
+  ],
+  "total": 80
+}
+```
+
+#### GET /conflicts/{relation_id}
+
+Get full detail for one relation row, including source and target observation snippets.
+
+- `200` with full relation + `source_snippet` + `target_snippet`
+- `404` with JSON `{"error": "not found"}` when `relation_id` does not exist
+- `400` with JSON error body when `relation_id` is not a valid integer
+
+#### GET /conflicts/stats
+
+Aggregate counts for the project (or global when `project` query param is omitted).
+
+Response:
+```json
+{
+  "pending": 3,
+  "accepted": 1,
+  "rejected": 0,
+  "deferred": 4,
+  "dead": 1
+}
+```
+
+#### POST /conflicts/scan
+
+Run conflict candidate scan for a project. Synchronous.
+
+Request body:
+```json
+{
+  "project": "my-project",
+  "apply": false,
+  "max_insert": 100,
+  "semantic": false,
+  "concurrency": 5,
+  "timeout_per_call_seconds": 60,
+  "max_semantic": 100
+}
+```
+
+- `apply: false` (default) — dry-run; reports candidates without inserting rows
+- `apply: true` — inserts new pending relation rows up to `max_insert` cap (default 100)
+- `semantic: true` — after FTS5 lexical scan, run LLM-judge semantic detection on candidate pairs. Requires `ENGRAM_AGENT_CLI` to be set on the server to `claude` or `opencode`.
+- `concurrency` — worker pool size for parallel LLM calls (default 5, range 1–20)
+- `timeout_per_call_seconds` — per-LLM-call timeout in seconds (default 60, range 1–600)
+- `max_semantic` — hard cap on LLM calls per scan (default 100); scan stops collecting new pairs once reached
+- Missing `project` field returns `400`
+- `concurrency` outside [1, 20] or `timeout_per_call_seconds` outside [1, 600] returns `400`
+
+Response:
+```json
+{
+  "candidates_found": 5,
+  "inserted": 0,
+  "semantic_judged": 0,
+  "semantic_skipped": 0,
+  "semantic_errors": 0
+}
+```
+
+`semantic_judged`, `semantic_skipped`, and `semantic_errors` are always present (zero when `semantic: false`).
+
+When `apply: true` and the cap is reached, a `warning` field is included:
+```json
+{
+  "candidates_found": 150,
+  "inserted": 50,
+  "warning": "cap reached: stopped after 50 inserts"
+}
+```
+
+#### GET /conflicts/deferred
+
+List rows from `sync_apply_deferred`. Query params: `status` (string — `deferred` | `dead` | `applied`), `limit` (int, default 50, max 500).
+
+Response:
+```json
+{
+  "rows": [
+    {
+      "sync_id": "obs_xyz",
+      "entity": "relation",
+      "apply_status": "deferred",
+      "retry_count": 2,
+      "last_error": "source FK not found",
+      "created_at": "2026-01-15T12:00:00Z"
+    }
+  ],
+  "total": 3
+}
+```
+
+#### POST /conflicts/deferred/replay
+
+Call `ReplayDeferred()` synchronously. Returns counts of rows processed.
+
+Response:
+```json
+{
+  "retried": 4,
+  "succeeded": 3,
+  "dead": 1
+}
+```
+
 ### Sync Status (local runtime only)
 
 - `GET /sync/status` — Runtime sync-state status for the local node (`engram serve` only).
@@ -185,6 +320,8 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
   - `last_sync_at`
   - `reason_code`
   - `reason_message`
+  - `deferred_count` — number of pulled mutations awaiting retry (FK dependency not yet local)
+  - `dead_count` — number of pulled mutations that exhausted retries (5 failures) and will not be retried
   - `upgrade` (nested object)
     - `stage`
     - `reason_code`
@@ -201,6 +338,49 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 | `ENGRAM_DATA_DIR` | Override data directory | `~/.engram` |
 | `ENGRAM_PORT` | Override HTTP server port | `7437` |
 | `ENGRAM_PROJECT` | Override project name for MCP server | auto-detected via git |
+
+### Conflict Audit CLI (admin)
+
+The `engram conflicts` sub-command provides admin/maintainer access to the conflict layer. It is NOT for end users — end users interact with conflicts via the normal agent conversation flow.
+
+When `--project` is omitted, the cwd-detected project is used.
+
+```
+engram conflicts list [--project <name>] [--status <pending|judged>] [--since <RFC3339>] [--limit <N>]
+```
+List `memory_relations` rows. Output: label-colon aligned columns (relation_id, relation_type, judgment_status, created_at).
+
+```
+engram conflicts show <relation_id>
+```
+Show full detail for one relation: relation_id, relation_type, judgment_status, sync_id, created_at, source observation snippet, target observation snippet. Exits non-zero when relation_id does not exist.
+
+```
+engram conflicts stats [--project <name>]
+```
+Print aggregate counts: pending, accepted, rejected relation rows plus deferred and dead queue sizes.
+
+```
+engram conflicts scan [--project <name>] [--dry-run] [--apply] [--max-insert <N>]
+                      [--semantic] [--concurrency <N>] [--timeout-per-call <N>]
+                      [--max-semantic <N>] [--yes]
+```
+Walk observations for the project, run FindCandidates, and report or insert new pending relation rows.
+- `--dry-run` (default): reports candidates found; 0 rows inserted.
+- `--apply`: inserts up to `--max-insert` (default 100) new rows; prints WARNING when cap is reached.
+- `--semantic`: enable LLM-judge semantic detection beyond FTS5 lexical candidates. Catches vocabulary-different concepts (e.g., "Hexagonal Architecture" vs "Ports and Adapters"). Requires `ENGRAM_AGENT_CLI=claude` or `ENGRAM_AGENT_CLI=opencode`.
+- `--concurrency N`: worker pool size for parallel LLM calls (default 5, max 20).
+- `--timeout-per-call N`: per-LLM-call timeout in seconds (default 60).
+- `--max-semantic N`: hard cap on LLM calls per scan run (default 100).
+- `--yes`: skip the cost-estimate confirmation prompt before LLM calls.
+
+```
+engram conflicts deferred [--project <name>] [--status <deferred|dead|applied>] [--limit <N>] [--inspect <sync_id>] [--replay]
+```
+Inspect or replay the `sync_apply_deferred` queue.
+- Default: list rows with sync_id, status, retry_count, created_at.
+- `--inspect <sync_id>`: print full decoded payload for one row; exits non-zero when not found.
+- `--replay`: call `ReplayDeferred()` and print retried/succeeded/dead counts.
 
 ### Cloud CLI (opt-in)
 
@@ -398,11 +578,24 @@ Returns success even when cwd is ambiguous — empty `project` + non-empty `avai
 
 ---
 
-## MCP Tools (17 tools)
+## MCP Tools (18 tools)
 
 ### mem_search
 
 Search persistent memory across all sessions. Supports FTS5 full-text search with type/project/scope/limit filters.
+
+When an observation has judged relations in `memory_relations`, the result entry includes annotation lines immediately after the title/content block:
+
+```
+supersedes: #<id> (<title>)       — this memory supersedes another
+superseded_by: #<id> (<title>)    — another memory supersedes this one
+conflicts: #<id> (<title>)        — judged conflict with another memory
+conflict: contested by #<id> (pending)  — pending (not yet judged)
+```
+
+Multiple annotation lines appear when multiple relations apply — one per related observation. Titles are retrieved via JOIN (no N+1 queries). When the related observation has been deleted, `(deleted)` replaces the title. Agent parsers should match by prefix — these prefixes are stable across versions (REQ-012).
+
+Pending relations (from `mem_save` conflict surfacing, before `mem_judge` is called) produce the `conflict: contested by #<id> (pending)` form. Judged relations produce the enriched form with title.
 
 ### mem_save
 
@@ -494,7 +687,27 @@ Parameters:
 
 Re-judging an existing relation overwrites it (deliberate revision). Two agents judging the same pair persist as separate rows — Phase 1 surfaces both; cross-actor reconciliation is Phase 2.
 
-Search results subsequently expose annotation lines like `supersedes: #<id>` and `superseded_by: #<id>` so the recalling agent sees relevant verdicts at-a-glance. The structured `supersedes[]`, `superseded_by[]`, and `conflicts[]` fields are also attached per result.
+Search results subsequently expose annotation lines like `supersedes: #<id> (<title>)`, `superseded_by: #<id> (<title>)`, and `conflicts: #<id> (<title>)` so the recalling agent sees relevant verdicts at-a-glance. For enrolled projects with autosync enabled, judgments propagate to other machines via the cloud mutation pipeline — the annotation appears in `mem_search` results on any machine that has pulled the relevant mutations.
+
+### mem_compare
+
+Records a verdict on a semantic comparison between two memories. The agent reads both memories, judges the relationship using its LLM reasoning, and calls `mem_compare` to persist the verdict. Unlike `mem_judge` (which resolves a pre-existing `pending` candidate surfaced by `mem_save`), `mem_compare` creates a new relation row directly — useful for proactive semantic analysis that goes beyond FTS5 lexical matching.
+
+Available in the `agent` profile (`engram mcp --tools=agent`).
+
+Parameters:
+- **memory_id_a** (required): int — observation ID of the first memory
+- **memory_id_b** (required): int — observation ID of the second memory
+- **relation** (required): string — one of `conflicts_with` | `supersedes` | `scoped` | `related` | `compatible` | `not_conflict`
+- **confidence** (required): float 0.0..1.0
+- **reasoning** (required): string — explanation of the verdict (max 200 chars)
+- **model** (optional): string — model name for provenance (e.g. `"claude-haiku-4-5"`)
+
+Behavior:
+- Persists a relation row via `JudgeBySemantic` with system provenance (`marked_by_kind="system"`, `marked_by_actor="engram"`)
+- Idempotent: the same `(source_id, target_id)` pair updates the existing row rather than inserting a duplicate
+- `not_conflict` verdicts are no-ops — acknowledged but not persisted, matching the scan flow contract
+- Cross-project relations are rejected with an error
 
 ---
 
@@ -876,6 +1089,8 @@ Missing `ENGRAM_CLOUD_TOKEN` or `ENGRAM_CLOUD_SERVER` logs an `ERROR` and disabl
 Note: when the cloud server returns 404 on mutation endpoints, the transport logs `[autosync] cloud mutation endpoint returned 404 (server_unsupported)` and the transport-level `ErrorCode` is `"server_unsupported"`, but the manager surfaces this as `reason_code: transport_failed`.
 
 ### Troubleshooting
+
+For a step-by-step recovery guide covering `chunk_id does not match payload content hash`, `session payload directory is required`, and the temporary missing-directory repair helper, see [Engram Cloud Troubleshooting](docs/engram-cloud/troubleshooting.md).
 
 **`transport_failed` with `server_unsupported` in logs**: The cloud server does not yet implement `POST /sync/mutations/push` or `GET /sync/mutations/pull`. Deploy a server version that includes these endpoints before enabling `ENGRAM_CLOUD_AUTOSYNC=1`. Check logs for the line containing `server_unsupported`.
 

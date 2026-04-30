@@ -191,6 +191,8 @@ engram sync --cloud --project my-project
 | `paused` | Project sync paused in cloud control plane |
 | `transport_failed` | Cloud transport/network operation failed |
 
+For concrete recovery steps, see [Engram Cloud Troubleshooting](./troubleshooting.md).
+
 ---
 
 <details>
@@ -229,4 +231,5 @@ Rules that matter:
 
 - Deep runtime/env reference: [DOCS.md — Cloud CLI](../../DOCS.md#cloud-cli-opt-in)
 - Background sync mode: [DOCS.md — Cloud Autosync](../../DOCS.md#cloud-autosync)
+- Cloud sync failures: [Troubleshooting](./troubleshooting.md)
 - Branding assets and usage: [Branding](./branding.md)

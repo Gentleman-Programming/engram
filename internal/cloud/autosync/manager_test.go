@@ -16,16 +16,19 @@ import (
 // ─── Fakes ───────────────────────────────────────────────────────────────────
 
 type fakeLocalStore struct {
-	mu             sync.Mutex
-	mutations      []store.SyncMutation
-	syncState      *store.SyncState
-	leaseOwner     string
-	pushErr        error
-	pullErr        error
-	failureMessage string
-	appliedMuts    []store.SyncMutation
-	acquireGranted bool
-	skipAckN       int64
+	mu                sync.Mutex
+	mutations         []store.SyncMutation
+	syncState         *store.SyncState
+	leaseOwner        string
+	pushErr           error
+	pullErr           error
+	failureMessage    string
+	blockedReason     string
+	blockedMessage    string
+	appliedMuts       []store.SyncMutation
+	acquireGranted    bool
+	ackedSeqs         []int64
+	nonEnrolledCounts []store.PendingSyncMutationProjectCount
 }
 
 func newFakeLocalStore() *fakeLocalStore {
@@ -64,14 +67,19 @@ func (s *fakeLocalStore) ListPendingSyncMutations(_ string, limit int) ([]store.
 	return s.mutations[:n], nil
 }
 
-func (s *fakeLocalStore) AckSyncMutations(_ string, _ int64) error { return nil }
-
-func (s *fakeLocalStore) AckSyncMutationSeqs(_ string, _ []int64) error { return nil }
-
-func (s *fakeLocalStore) SkipAckNonEnrolledMutations(_ string) (int64, error) {
+func (s *fakeLocalStore) CountPendingNonEnrolledSyncMutations(_ string) ([]store.PendingSyncMutationProjectCount, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.skipAckN, nil
+	return append([]store.PendingSyncMutationProjectCount(nil), s.nonEnrolledCounts...), nil
+}
+
+func (s *fakeLocalStore) AckSyncMutations(_ string, _ int64) error { return nil }
+
+func (s *fakeLocalStore) AckSyncMutationSeqs(_ string, seqs []int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ackedSeqs = append(s.ackedSeqs, seqs...)
+	return nil
 }
 
 func (s *fakeLocalStore) AcquireSyncLease(_, owner string, ttl time.Duration, now time.Time) (bool, error) {
@@ -108,7 +116,23 @@ func (s *fakeLocalStore) MarkSyncFailure(_, message string, _ time.Time) error {
 	return nil
 }
 
+func (s *fakeLocalStore) MarkSyncBlocked(_, reasonCode, message string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.blockedReason = reasonCode
+	s.blockedMessage = message
+	return nil
+}
+
 func (s *fakeLocalStore) MarkSyncHealthy(_ string) error { return nil }
+
+// Phase E: deferred replay stubs — base fakeLocalStore always returns zero counts
+// and no error. Tests that need real replay behavior use fakeLocalStoreWithDeferred.
+func (s *fakeLocalStore) ReplayDeferred() (store.ReplayDeferredResult, error) {
+	return store.ReplayDeferredResult{}, nil
+}
+
+func (s *fakeLocalStore) CountDeferredAndDead() (int, int, error) { return 0, 0, nil }
 
 // ─── Fake Transport ───────────────────────────────────────────────────────────
 
@@ -120,6 +144,7 @@ type fakeCloudTransport struct {
 	pullCalls  int32
 	pushResult *PushMutationsResult
 	pullResult *PullMutationsResponse
+	pushed     [][]MutationEntry
 }
 
 type fakeRepairableCloudError struct{ msg string }
@@ -135,13 +160,15 @@ func newFakeTransport() *fakeCloudTransport {
 	}
 }
 
-func (t *fakeCloudTransport) PushMutations(_ []MutationEntry) (*PushMutationsResult, error) {
+func (t *fakeCloudTransport) PushMutations(mutations []MutationEntry) (*PushMutationsResult, error) {
 	atomic.AddInt32(&t.pushCalls, 1)
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.pushErr != nil {
 		return nil, t.pushErr
 	}
+	batch := append([]MutationEntry(nil), mutations...)
+	t.pushed = append(t.pushed, batch)
 	return t.pushResult, nil
 }
 
@@ -153,6 +180,77 @@ func (t *fakeCloudTransport) PullMutations(_ int64, _ int) (*PullMutationsRespon
 		return nil, t.pullErr
 	}
 	return t.pullResult, nil
+}
+
+// ─── Push ack safety regressions ─────────────────────────────────────────────
+
+func TestManagerPushNoPendingDoesNotPushOrAck(t *testing.T) {
+	ls := newFakeLocalStore()
+	tr := newFakeTransport()
+	mgr := New(ls, tr, DefaultConfig())
+
+	if err := mgr.push(context.Background()); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+
+	if got := atomic.LoadInt32(&tr.pushCalls); got != 0 {
+		t.Fatalf("expected no transport push without pending mutations, got %d calls", got)
+	}
+	ls.mu.Lock()
+	acked := append([]int64(nil), ls.ackedSeqs...)
+	ls.mu.Unlock()
+	if len(acked) != 0 {
+		t.Fatalf("expected no ack without pending mutations, got %v", acked)
+	}
+}
+
+func TestManagerPushAcksPendingMutationsAfterTransportSuccess(t *testing.T) {
+	ls := newFakeLocalStore()
+	ls.mutations = []store.SyncMutation{
+		{Seq: 1, Entity: "obs", EntityKey: "k1", Op: "upsert", Project: "proj-a", Payload: `{"id":"1"}`},
+		{Seq: 2, Entity: "obs", EntityKey: "k2", Op: "upsert", Project: "proj-a", Payload: `{"id":"2"}`},
+	}
+	tr := newFakeTransport()
+	tr.pushResult = &PushMutationsResult{AcceptedSeqs: []int64{1, 2}}
+	mgr := New(ls, tr, DefaultConfig())
+
+	if err := mgr.push(context.Background()); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+
+	if got := atomic.LoadInt32(&tr.pushCalls); got != 1 {
+		t.Fatalf("expected one transport push, got %d", got)
+	}
+	ls.mu.Lock()
+	acked := append([]int64(nil), ls.ackedSeqs...)
+	ls.mu.Unlock()
+	if fmt.Sprint(acked) != "[1 2]" {
+		t.Fatalf("expected acked seqs [1 2] after successful push, got %v", acked)
+	}
+}
+
+func TestManagerPushDoesNotAckWhenTransportFails(t *testing.T) {
+	ls := newFakeLocalStore()
+	ls.mutations = []store.SyncMutation{
+		{Seq: 1, Entity: "obs", EntityKey: "k1", Op: "upsert", Project: "proj-a", Payload: `{"id":"1"}`},
+	}
+	tr := newFakeTransport()
+	tr.pushErr = errors.New("transport down")
+	mgr := New(ls, tr, DefaultConfig())
+
+	if err := mgr.push(context.Background()); err == nil {
+		t.Fatal("expected push to fail")
+	}
+
+	if got := atomic.LoadInt32(&tr.pushCalls); got != 1 {
+		t.Fatalf("expected one transport push attempt, got %d", got)
+	}
+	ls.mu.Lock()
+	acked := append([]int64(nil), ls.ackedSeqs...)
+	ls.mu.Unlock()
+	if len(acked) != 0 {
+		t.Fatalf("expected no ack after failed transport push, got %v", acked)
+	}
 }
 
 // ─── Phase + lifecycle tests (REQ-204) ───────────────────────────────────────
@@ -879,6 +977,44 @@ func TestManagerSurfacesPolicyForbiddenOn403(t *testing.T) {
 		mgr.Status().Phase, mgr.Status().ReasonCode)
 }
 
+func TestManagerBlocksWhenOnlyNonEnrolledPendingMutationsRemain(t *testing.T) {
+	ls := newFakeLocalStore()
+	ls.nonEnrolledCounts = []store.PendingSyncMutationProjectCount{
+		{Project: "alpha", Count: 2},
+		{Project: "beta", Count: 1},
+	}
+	tr := newFakeTransport()
+	cfg := DefaultConfig()
+	mgr := New(ls, tr, cfg)
+
+	mgr.cycle(context.Background())
+
+	if got := atomic.LoadInt32(&tr.pushCalls); got != 0 {
+		t.Fatalf("expected no push calls for non-enrolled pending mutations, got %d", got)
+	}
+	if got := atomic.LoadInt32(&tr.pullCalls); got != 0 {
+		t.Fatalf("expected blocked cycle to skip pull, got %d", got)
+	}
+	if len(ls.ackedSeqs) != 0 {
+		t.Fatalf("expected no acked mutations, got %v", ls.ackedSeqs)
+	}
+	st := mgr.Status()
+	if st.Phase != PhasePushFailed {
+		t.Fatalf("expected push_failed status, got %q", st.Phase)
+	}
+	if st.ReasonCode != "non_enrolled_pending_mutations" {
+		t.Fatalf("expected non-enrolled reason code, got %q", st.ReasonCode)
+	}
+	for _, want := range []string{"alpha=2", "beta=1", "engram cloud enroll <project>"} {
+		if !strings.Contains(st.ReasonMessage, want) {
+			t.Fatalf("expected reason message to contain %q, got %q", want, st.ReasonMessage)
+		}
+	}
+	if ls.blockedReason != st.ReasonCode || ls.blockedMessage != st.ReasonMessage {
+		t.Fatalf("expected blocked state persisted, reason=%q message=%q", ls.blockedReason, ls.blockedMessage)
+	}
+}
+
 // ─── BW4: Re-entry guard ─────────────────────────────────────────────────────
 
 // TestManagerRunIsNotReentryable verifies BW4:
@@ -933,6 +1069,256 @@ func (t *errTransport) PullMutations(_ int64, _ int) (*PullMutationsResponse, er
 		return nil, t.pullErr
 	}
 	return &PullMutationsResponse{Mutations: []PulledMutation{}}, nil
+}
+
+// ─── Phase E: Autosync resilience tests (REQ-007, REQ-008) ──────────────────
+
+// E.1a — ReplayDeferred_RetriesAndApplies:
+// A deferred row exists; when the missing observation arrives and
+// replayDeferred is called, the row is applied and removed from
+// sync_apply_deferred.
+func TestReplayDeferred_RetriesAndApplies(t *testing.T) {
+	ls := &fakeLocalStoreWithDeferred{fakeLocalStore: *newFakeLocalStore()}
+	tr := newFakeTransport()
+	cfg := DefaultConfig()
+	cfg.DebounceDuration = 10 * time.Millisecond
+	cfg.PollInterval = 10 * time.Millisecond
+
+	// Pre-load a deferred row.
+	ls.mu.Lock()
+	ls.deferredRows = []DeferredRow{{
+		SyncID:      "rel-1",
+		Entity:      "relation",
+		Payload:     `{"sync_id":"rel-1"}`,
+		RetryCount:  0,
+		ApplyStatus: "deferred",
+	}}
+	ls.mu.Unlock()
+
+	// ReplayDeferred must be called by pull; simulate it resolving successfully.
+	mgr := New(ls, tr, cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	go mgr.Run(ctx)
+
+	deadline := time.Now().Add(400 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		ls.mu.Lock()
+		called := ls.replayDeferredCalled
+		ls.mu.Unlock()
+		if called {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("ReplayDeferred was not called during pull cycle")
+}
+
+// E.1b — ReplayDeferred_DeadAfterFiveRetries:
+// A row at retry_count=4 with dep still missing → after replayDeferred
+// the row must have apply_status='dead'.
+func TestReplayDeferred_DeadAfterFiveRetries(t *testing.T) {
+	ls := &fakeLocalStoreWithDeferred{fakeLocalStore: *newFakeLocalStore()}
+	tr := newFakeTransport()
+	cfg := DefaultConfig()
+	cfg.DebounceDuration = 10 * time.Millisecond
+	cfg.PollInterval = 10 * time.Millisecond
+
+	ls.mu.Lock()
+	ls.deferredRows = []DeferredRow{{
+		SyncID:      "rel-dead",
+		Entity:      "relation",
+		Payload:     `{"sync_id":"rel-dead"}`,
+		RetryCount:  4,
+		ApplyStatus: "deferred",
+	}}
+	// Always return FK-missing for this deferred row.
+	ls.replayErr = store.ErrRelationFKMissing
+	ls.mu.Unlock()
+
+	mgr := New(ls, tr, cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	go mgr.Run(ctx)
+
+	deadline := time.Now().Add(400 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		ls.mu.Lock()
+		called := ls.replayDeferredCalled
+		ls.mu.Unlock()
+		if called {
+			// Verify dead count incremented.
+			ls.mu.Lock()
+			deadCalled := ls.markDeadCalled
+			ls.mu.Unlock()
+			if !deadCalled {
+				t.Fatal("MarkApplyDead not called after retry_count reached 5")
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("ReplayDeferred was not called during pull cycle")
+}
+
+// E.1c — ReplayDeferred_DeadRowNotRetried:
+// A dead row must NOT be retried by replayDeferred.
+func TestReplayDeferred_DeadRowNotRetried(t *testing.T) {
+	ls := &fakeLocalStoreWithDeferred{fakeLocalStore: *newFakeLocalStore()}
+	tr := newFakeTransport()
+	cfg := DefaultConfig()
+	cfg.DebounceDuration = 10 * time.Millisecond
+	cfg.PollInterval = 10 * time.Millisecond
+
+	// Dead row — should not be picked up.
+	ls.mu.Lock()
+	ls.deferredRows = []DeferredRow{{
+		SyncID:      "rel-already-dead",
+		Entity:      "relation",
+		Payload:     `{"sync_id":"rel-already-dead"}`,
+		RetryCount:  5,
+		ApplyStatus: "dead",
+	}}
+	ls.mu.Unlock()
+
+	mgr := New(ls, tr, cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	go mgr.Run(ctx)
+
+	deadline := time.Now().Add(400 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		ls.mu.Lock()
+		called := ls.replayDeferredCalled
+		ls.mu.Unlock()
+		if called {
+			// Dead row must never have been applied.
+			ls.mu.Lock()
+			appliedCount := len(ls.appliedMuts)
+			ls.mu.Unlock()
+			if appliedCount != 0 {
+				t.Fatalf("dead row should never be applied; got %d applied mutations", appliedCount)
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("ReplayDeferred was not called during pull cycle")
+}
+
+// E.1d — Pull_LegacyEntityNonFKError_StillHalts (REQ-008):
+// A legacy entity (observation) apply error must halt the pull loop;
+// cursor must not advance.
+func TestPull_LegacyEntityNonFKError_StillHalts(t *testing.T) {
+	ls := &fakeLocalStoreWithDeferred{fakeLocalStore: *newFakeLocalStore()}
+	tr := newFakeTransport()
+
+	// Inject a pulled legacy mutation.
+	tr.mu.Lock()
+	tr.pullResult = &PullMutationsResponse{
+		Mutations: []PulledMutation{{
+			Seq:    10,
+			Entity: "observation",
+			Op:     "upsert",
+			Payload: []byte(`{"sync_id":"obs-fail","title":"test"}`),
+		}},
+		HasMore: false,
+	}
+	tr.mu.Unlock()
+
+	// Legacy apply error (non-FK) must halt.
+	ls.mu.Lock()
+	ls.pullErr = errors.New("legacy apply error (non-FK)")
+	ls.mu.Unlock()
+
+	cfg := DefaultConfig()
+	cfg.DebounceDuration = 10 * time.Millisecond
+	cfg.PollInterval = 10 * time.Millisecond
+
+	mgr := New(ls, tr, cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	go mgr.Run(ctx)
+
+	deadline := time.Now().Add(400 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		st := mgr.Status()
+		if st.Phase == PhasePullFailed {
+			// Confirm cursor did not advance (SyncState.LastPulledSeq must be 0).
+			ls.mu.Lock()
+			cursorSeq := ls.syncState.LastPulledSeq
+			ls.mu.Unlock()
+			if cursorSeq != 0 {
+				t.Fatalf("cursor advanced to %d despite legacy pull error; expected 0", cursorSeq)
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("expected PhasePullFailed for legacy non-FK error, got %q", mgr.Status().Phase)
+}
+
+// ─── DeferredRow type for fake store ─────────────────────────────────────────
+
+// DeferredRow is a minimal representation of a sync_apply_deferred row used in tests.
+type DeferredRow struct {
+	SyncID      string
+	Entity      string
+	Payload     string
+	RetryCount  int
+	ApplyStatus string
+}
+
+// fakeLocalStoreWithDeferred extends fakeLocalStore with replay support.
+type fakeLocalStoreWithDeferred struct {
+	fakeLocalStore
+	deferredRows        []DeferredRow
+	replayDeferredCalled bool
+	markDeadCalled       bool
+	replayErr           error
+}
+
+func (s *fakeLocalStoreWithDeferred) ReplayDeferred() (store.ReplayDeferredResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.replayDeferredCalled = true
+
+	var res store.ReplayDeferredResult
+	for i := range s.deferredRows {
+		row := &s.deferredRows[i]
+		if row.ApplyStatus == "dead" {
+			continue // Dead rows must not be retried.
+		}
+		res.Retried++
+		if s.replayErr != nil {
+			row.RetryCount++
+			if row.RetryCount >= 5 {
+				row.ApplyStatus = "dead"
+				s.markDeadCalled = true
+				res.Dead++
+			} else {
+				res.Failed++
+			}
+		} else {
+			row.ApplyStatus = "applied"
+			res.Succeeded++
+		}
+	}
+	return res, nil
+}
+
+func (s *fakeLocalStoreWithDeferred) CountDeferredAndDead() (deferred, dead int, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, row := range s.deferredRows {
+		switch row.ApplyStatus {
+		case "deferred":
+			deferred++
+		case "dead":
+			dead++
+		}
+	}
+	return deferred, dead, nil
 }
 
 // ─── Helper types ─────────────────────────────────────────────────────────────
