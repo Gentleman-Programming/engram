@@ -31,6 +31,7 @@ import (
 	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
 	"github.com/Gentleman-Programming/engram/internal/cloud/remote"
 	"github.com/Gentleman-Programming/engram/internal/cloud/syncguidance"
+	"github.com/Gentleman-Programming/engram/internal/diagnostic"
 	"github.com/Gentleman-Programming/engram/internal/mcp"
 	"github.com/Gentleman-Programming/engram/internal/obsidian"
 	"github.com/Gentleman-Programming/engram/internal/project"
@@ -94,6 +95,14 @@ var (
 	storeStats         = func(s *store.Store) (*store.Stats, error) { return s.Stats() }
 	storeExport        = func(s *store.Store) (*store.ExportData, error) { return s.Export() }
 	jsonMarshalIndent  = json.MarshalIndent
+	runDiagnostics     = func(ctx context.Context, s *store.Store, project, check string) (diagnostic.Report, error) {
+		runner := diagnostic.NewRunner()
+		scope := diagnostic.Scope{Store: s, Project: project, Now: time.Now()}
+		if strings.TrimSpace(check) != "" {
+			return runner.RunOne(ctx, scope, check)
+		}
+		return runner.RunAll(ctx, scope)
+	}
 
 	syncStatus = func(sy *engramsync.Syncer) (localChunks int, remoteChunks int, pendingImport int, err error) {
 		return sy.Status()
@@ -124,6 +133,10 @@ var (
 
 	// newObsidianWatcher is injectable for testing.
 	newObsidianWatcher = obsidian.NewWatcher
+
+	// agentRunnerFactory is injectable for testing. In production it delegates to
+	// llm.NewRunner; tests substitute a fake to avoid real CLI invocations.
+	agentRunnerFactory = defaultAgentRunnerFactory
 )
 
 type cloudSyncStatus struct {
@@ -482,8 +495,51 @@ func preflightCloudSync(s *store.Store, cfg store.Config, project string, mutate
 			}
 			return nil, fmt.Errorf("cloud sync blocked_unenrolled: %s", message)
 		}
+		if err := preflightCloudSyncLegacyMutations(s, project, targetKey, mutateState); err != nil {
+			return nil, err
+		}
 	}
 	return cc, nil
+}
+
+func preflightCloudSyncLegacyMutations(s *store.Store, project, targetKey string, mutateState bool) error {
+	report, err := s.DiagnoseCloudUpgradeLegacyMutations(project)
+	if err != nil {
+		return fmt.Errorf("cloud sync legacy mutation preflight: %w", err)
+	}
+	if report.BlockedCount == 0 && report.RepairableCount == 0 {
+		return nil
+	}
+
+	reasonCode := store.UpgradeReasonRepairableLegacyMutationPayload
+	message := fmt.Sprintf(
+		"legacy mutation payloads require repair before cloud sync for project %q: run `engram cloud upgrade doctor --project %s` then `engram cloud upgrade repair --project %s --apply`",
+		project, project, project,
+	)
+	if report.BlockedCount > 0 {
+		reasonCode = store.UpgradeReasonBlockedLegacyMutationManual
+		first := firstBlockedLegacyMutationFinding(report)
+		message = fmt.Sprintf(
+			"legacy mutation payloads require manual action before cloud sync for project %q (seq=%d entity=%s op=%s): %s; inspect with `engram cloud upgrade doctor --project %s` and run `engram cloud upgrade repair --project %s --apply` for deterministic repairs",
+			project, first.Seq, first.Entity, first.Op, first.Message, project, project,
+		)
+	}
+	if mutateState {
+		_ = s.MarkSyncBlocked(targetKey, reasonCode, message)
+	}
+	return fmt.Errorf("cloud sync %s: %s", reasonCode, message)
+}
+
+func firstBlockedLegacyMutationFinding(report store.CloudUpgradeLegacyMutationReport) store.CloudUpgradeLegacyMutationFinding {
+	for _, finding := range report.Findings {
+		if !finding.Repairable {
+			return finding
+		}
+	}
+	if len(report.Findings) > 0 {
+		return report.Findings[0]
+	}
+	return store.CloudUpgradeLegacyMutationFinding{}
 }
 
 func cloudTargetKeyForProject(project string) string {
@@ -530,10 +586,11 @@ func main() {
 		exitFunc(1)
 	}
 
-	// Check for updates on every invocation.
-	if result := checkForUpdates(version); result.Status != versioncheck.StatusUpToDate && result.Message != "" {
-		fmt.Fprintln(os.Stderr, result.Message)
-		fmt.Fprintln(os.Stderr)
+	if shouldCheckForUpdates(os.Args[1:]) {
+		printUpdateCheckResult(checkForUpdates(version))
+	}
+	if handleConfigFreeCommand(os.Args[1:]) {
+		return
 	}
 
 	cfg, cfgErr := store.DefaultConfig()
@@ -571,6 +628,10 @@ func main() {
 		cmdSave(cfg)
 	case "timeline":
 		cmdTimeline(cfg)
+	case "conflicts":
+		cmdConflicts(cfg)
+	case "doctor":
+		cmdDoctor(cfg)
 	case "context":
 		cmdContext(cfg)
 	case "stats":
@@ -600,6 +661,50 @@ func main() {
 	}
 }
 
+func shouldCheckForUpdates(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	command := strings.ToLower(strings.TrimSpace(args[0]))
+	switch command {
+	case "mcp", "serve":
+		return false
+	case "cloud":
+		return len(args) < 2 || strings.ToLower(strings.TrimSpace(args[1])) != "serve"
+	}
+	return true
+}
+
+func handleConfigFreeCommand(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(args[0])) {
+	case "version", "--version", "-v":
+		fmt.Printf("engram %s\n", version)
+		return true
+	case "help", "--help", "-h":
+		printUsage()
+		return true
+	case "cloud":
+		if len(args) >= 2 {
+			subcommand := strings.ToLower(strings.TrimSpace(args[1]))
+			if subcommand == "--help" || subcommand == "-h" || subcommand == "help" {
+				cmdCloud(store.Config{})
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func printUpdateCheckResult(result versioncheck.CheckResult) {
+	if result.Status != versioncheck.StatusUpToDate && result.Message != "" {
+		fmt.Fprintln(os.Stderr, result.Message)
+		fmt.Fprintln(os.Stderr)
+	}
+}
+
 // ─── Commands ────────────────────────────────────────────────────────────────
 
 func cmdServe(cfg store.Config) {
@@ -623,6 +728,13 @@ func cmdServe(cfg store.Config) {
 	defer s.Close()
 
 	srv := newHTTPServer(s, port)
+
+	// Wire the semantic runner factory and prompt builder for POST /conflicts/scan.
+	// Both live in cmd/engram so internal/server avoids a direct dependency on internal/llm.
+	srv.SetRunnerFactory(agentRunnerFactory)
+	srv.SetPromptBuilder(func(a, b store.ObservationSnippet) string {
+		return llmBuildPrompt(a, b)
+	})
 
 	// Graceful shutdown context — cancelled on SIGINT/SIGTERM.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -882,7 +994,13 @@ func cmdSave(cfg store.Config) {
 	if project != "" {
 		sessionID = "manual-save-" + project
 	}
-	s.CreateSession(sessionID, project, "")
+	cwd, err := os.Getwd()
+	if err != nil {
+		fatal(err)
+	}
+	if err := s.CreateSession(sessionID, project, cwd); err != nil {
+		fatal(err)
+	}
 	id, err := storeAddObservation(s, store.AddObservationParams{
 		SessionID: sessionID,
 		Type:      typ,
@@ -1116,6 +1234,9 @@ func cmdSync(cfg store.Config) {
 	projectProvided := false
 	for i := 2; i < len(os.Args); i++ {
 		switch os.Args[i] {
+		case "--help", "-h", "help":
+			printSyncUsage()
+			return
 		case "--import":
 			doImport = true
 		case "--status":
@@ -1321,6 +1442,12 @@ func cmdSync(cfg store.Config) {
 	fmt.Println()
 	fmt.Println("Add to git:")
 	fmt.Printf("  git add .engram/ && git commit -m \"sync engram memories\"\n")
+}
+
+func printSyncUsage() {
+	fmt.Println("usage: engram sync [--import | --status] [--all] [--cloud --project PROJECT]")
+	fmt.Println("Local sync exports project-scoped chunks to .engram/ by default.")
+	fmt.Println("Cloud sync requires an explicit --project and never runs from --help.")
 }
 
 // storeAdapter wraps *store.Store to satisfy obsidian.StoreReader.
@@ -2128,6 +2255,13 @@ Commands:
   search <query>     Search memories [--type TYPE] [--project PROJECT] [--scope SCOPE] [--limit N]
   save <title> <msg> Save a memory  [--type TYPE] [--project PROJECT] [--scope SCOPE]
   timeline <obs_id>  Show chronological context around an observation [--before N] [--after N]
+  conflicts <sub>   Inspect and manage memory conflict relations
+                       list     --project P  --status S  --since RFC3339  --limit N
+                       show     <relation_id>
+                       stats    --project P
+                       scan     --project P  [--dry-run]  [--apply]  [--max-insert N]
+                        deferred [--status S]  [--limit N]  [--inspect SYNC_ID]  [--replay]
+  doctor             Run read-only operational diagnostics [--json] [--project P] [--check CODE]
   context [project]  Show recent context from previous sessions
   stats              Show memory system statistics
   export [file]      Export all memories to JSON (default: engram-export.json)

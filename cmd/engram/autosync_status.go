@@ -60,6 +60,9 @@ func (a *autosyncStatusAdapter) mapPhase(st autosync.Status) server.SyncStatus {
 		ConsecutiveFailures: st.ConsecutiveFailures,
 		BackoffUntil:        st.BackoffUntil,
 		LastSyncAt:          st.LastSyncAt,
+		// Phase E: propagate deferred/dead counts from autosync.Status.
+		DeferredCount: st.DeferredCount,
+		DeadCount:     st.DeadCount,
 	}
 
 	switch st.Phase {
@@ -79,7 +82,11 @@ func (a *autosyncStatusAdapter) mapPhase(st autosync.Status) server.SyncStatus {
 		} else {
 			base.ReasonCode = "transport_failed"
 		}
-		base.ReasonMessage = st.LastError
+		if st.ReasonMessage != "" {
+			base.ReasonMessage = st.ReasonMessage
+		} else {
+			base.ReasonMessage = st.LastError
+		}
 
 	case autosync.PhaseDisabled:
 		base.Phase = "degraded"

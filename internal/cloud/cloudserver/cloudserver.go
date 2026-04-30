@@ -458,8 +458,7 @@ func (s *CloudServer) handlePushChunk(w http.ResponseWriter, r *http.Request) {
 	computedChunkID := chunkIDFromPayload(normalizedData)
 	providedChunkID := strings.TrimSpace(req.ChunkID)
 	if providedChunkID != "" && providedChunkID != computedChunkID {
-		writeActionableError(w, http.StatusBadRequest, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodePayloadInvalid, fmt.Sprintf("chunk_id does not match payload content hash (expected %s)", computedChunkID))
-		return
+		log.Printf("cloudserver: chunk_id mismatch for project %q: client=%q server=%q; accepting server-canonicalized payload", project, providedChunkID, computedChunkID)
 	}
 	clientCreatedAt := strings.TrimSpace(req.ClientCreatedAt)
 	if clientCreatedAt != "" {

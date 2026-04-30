@@ -220,6 +220,117 @@ func TestDetectProjectFull_Case1_Remote(t *testing.T) {
 	}
 }
 
+func TestDetectProjectFull_ConfigFromRepoRootOverridesRemoteFromSubdir(t *testing.T) {
+	root := t.TempDir()
+	initGit(t, root)
+	cmd := exec.Command("git", "-C", root, "remote", "add", "origin", "git@github.com:testuser/wrong-remote.git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+	configDir := filepath.Join(root, ".engram")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(`{"project_name":"Canonical App"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	subdir := filepath.Join(root, "src", "pkg")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	res := DetectProjectFull(subdir)
+
+	if res.Error != nil {
+		t.Fatalf("unexpected config detection error: %v", res.Error)
+	}
+	if res.Source != SourceConfig || res.Project != "canonical app" {
+		t.Fatalf("expected config project canonical app, got source=%q project=%q", res.Source, res.Project)
+	}
+	gotPath, _ := filepath.EvalSymlinks(res.Path)
+	wantPath, _ := filepath.EvalSymlinks(root)
+	if got, want := gotPath, wantPath; got != want {
+		t.Fatalf("expected config path %q, got %q", want, got)
+	}
+}
+
+func TestDetectProjectFull_InvalidConfigFailsClearly(t *testing.T) {
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, ".engram")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(`{"project_name":"   "}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res := DetectProjectFull(dir)
+
+	if !errors.Is(res.Error, ErrInvalidConfig) {
+		t.Fatalf("expected ErrInvalidConfig, got source=%q err=%v", res.Source, res.Error)
+	}
+	if res.Source != SourceConfig || !strings.Contains(res.Error.Error(), "project_name") {
+		t.Fatalf("expected clear config project_name error, got %+v", res)
+	}
+}
+
+func TestDetectProjectFull_DoesNotInheritParentConfigOutsideGitRepo(t *testing.T) {
+	parent := t.TempDir()
+	configDir := filepath.Join(parent, ".engram")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(`{"project_name":"parent-lock"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(parent, "plain-child")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	res := DetectProjectFull(child)
+
+	if res.Error != nil {
+		t.Fatalf("unexpected detection error: %v", res.Error)
+	}
+	if res.Source != SourceDirBasename || res.Project != "plain-child" {
+		t.Fatalf("expected child basename without inheriting parent config, got source=%q project=%q", res.Source, res.Project)
+	}
+	if got, want := res.Path, child; got != want {
+		t.Fatalf("expected child path %q, got %q", want, got)
+	}
+}
+
+func TestDetectProjectFull_InvalidRepoConfigFromSubdirFailsClearly(t *testing.T) {
+	root := t.TempDir()
+	initGit(t, root)
+	configDir := filepath.Join(root, ".engram")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(`{"project_name":"bad/name"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	subdir := filepath.Join(root, "cmd", "tool")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	res := DetectProjectFull(subdir)
+
+	if !errors.Is(res.Error, ErrInvalidConfig) {
+		t.Fatalf("expected ErrInvalidConfig from repo config, got source=%q err=%v", res.Source, res.Error)
+	}
+	if res.Source != SourceConfig || !strings.Contains(res.Error.Error(), "project_name") {
+		t.Fatalf("expected clear repo config project_name error, got %+v", res)
+	}
+	gotPath, _ := filepath.EvalSymlinks(res.Path)
+	wantPath, _ := filepath.EvalSymlinks(root)
+	if got, want := gotPath, wantPath; got != want {
+		t.Fatalf("expected invalid config path %q, got %q", want, got)
+	}
+}
+
 // TestDetectProjectFull_Case1_PathIsRepoRoot asserts that Case 1 (git_remote)
 // sets Path to the git repository root, not the input directory (JS2).
 // When called from a subdir of a remote-configured repo, Path should equal the

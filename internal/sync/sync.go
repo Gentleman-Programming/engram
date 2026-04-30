@@ -52,7 +52,6 @@ var (
 	storeAckMutationSeq = func(s *store.Store, targetKey string, seqs []int64) error {
 		return s.AckSyncMutationSeqs(targetKey, seqs)
 	}
-	storeImportData       = func(s *store.Store, d *store.ExportData) (*store.ImportResult, error) { return s.Import(d) }
 	storeApplyPulledChunk = func(s *store.Store, targetKey, chunkID string, mutations []store.SyncMutation) error {
 		return s.ApplyPulledChunk(targetKey, chunkID, mutations)
 	}
@@ -511,11 +510,12 @@ func (sy *Syncer) Import() (*ImportResult, error) {
 		return nil, fmt.Errorf("get synced chunks: %w", err)
 	}
 
-	result := &ImportResult{}
 	entries := manifest.Chunks
 	if sy.cloudMode {
-		return sy.importCloudEntriesDependencySafe(entries, knownChunks)
+		return sy.importEntriesDependencySafe(entries, knownChunks, importModeCloud)
 	}
+	return sy.importEntriesDependencySafe(entries, knownChunks, importModeLocal)
+}
 
 	for _, entry := range entries {
 		// Skip already-imported chunks
@@ -582,13 +582,18 @@ func (sy *Syncer) Import() (*ImportResult, error) {
 		result.PromptsSkipped += importResult.PromptsSkipped
 	}
 
-	return result, nil
-}
+type importMode string
 
-func (sy *Syncer) importCloudEntriesDependencySafe(entries []ChunkEntry, knownChunks map[string]bool) (*ImportResult, error) {
+const (
+	importModeLocal importMode = "local"
+	importModeCloud importMode = "cloud"
+)
+
+func (sy *Syncer) importEntriesDependencySafe(entries []ChunkEntry, knownChunks map[string]bool, mode importMode) (*ImportResult, error) {
 	result := &ImportResult{}
 	pendingEntries := make([]ChunkEntry, 0, len(entries))
 	for _, entry := range entries {
+		// Skip already-imported chunks
 		if knownChunks[entry.ID] {
 			result.ChunksSkipped++
 			continue
@@ -606,10 +611,15 @@ func (sy *Syncer) importCloudEntriesDependencySafe(entries []ChunkEntry, knownCh
 		nextPending := make([]ChunkEntry, 0, len(pendingEntries))
 
 		for _, entry := range pendingEntries {
+			// Read the chunk via transport
 			chunkJSON, err := sy.transport.ReadChunk(entry.ID)
 			if err != nil {
 				if errors.Is(err, ErrChunkNotFound) {
-					return nil, fmt.Errorf("read chunk %s: manifest references missing remote chunk", entry.ID)
+					if mode == importModeCloud {
+						return nil, fmt.Errorf("read chunk %s: manifest references missing remote chunk", entry.ID)
+					}
+					result.ChunksSkipped++
+					continue
 				}
 				return nil, fmt.Errorf("read chunk %s: %w", entry.ID, err)
 			}
@@ -619,14 +629,16 @@ func (sy *Syncer) importCloudEntriesDependencySafe(entries []ChunkEntry, knownCh
 				return nil, fmt.Errorf("parse chunk %s: %w", entry.ID, err)
 			}
 
-			if err := sy.importCloudChunk(entry.ID, chunk); err != nil {
-				lastErrors[entry.ID] = err
+			if err := sy.importMutationChunk(entry.ID, chunk); err != nil {
+				lastErrors[entry.ID] = importDependencyError(chunk, err)
 				nextPending = append(nextPending, entry)
 				continue
 			}
 
 			importResult := estimateMutationImportResult(chunk)
 			knownChunks[entry.ID] = true
+			delete(lastErrors, entry.ID)
+
 			result.ChunksImported++
 			result.SessionsImported += importResult.SessionsImported
 			result.ObservationsInserted += importResult.ObservationsInserted
@@ -634,13 +646,18 @@ func (sy *Syncer) importCloudEntriesDependencySafe(entries []ChunkEntry, knownCh
 			result.ObservationsSkipped += importResult.ObservationsSkipped
 			result.PromptsInserted += importResult.PromptsInserted
 			result.PromptsSkipped += importResult.PromptsSkipped
+      result.ObservationsImported += importResult.ObservationsImported
+			result.PromptsImported += importResult.PromptsImported
 			delete(lastErrors, entry.ID)
 			progress = true
 		}
 
 		if !progress {
+			if len(nextPending) == 0 {
+				return result, nil
+			}
 			stalled := nextPending[0]
-			return nil, fmt.Errorf("dependency-safe cloud import stalled after %d pass(es); chunk %s: %w", pass, stalled.ID, lastErrors[stalled.ID])
+			return nil, fmt.Errorf("dependency-safe %s import stalled after %d pass(es); chunk %s: %w", mode, pass, stalled.ID, lastErrors[stalled.ID])
 		}
 
 		pendingEntries = nextPending
@@ -649,10 +666,24 @@ func (sy *Syncer) importCloudEntriesDependencySafe(entries []ChunkEntry, knownCh
 	return result, nil
 }
 
-func (sy *Syncer) importCloudChunk(chunkID string, chunk ChunkData) error {
+func (sy *Syncer) importMutationChunk(chunkID string, chunk ChunkData) error {
 	mutations := buildImportMutations(chunk)
 	mutations = orderMutationsForApply(mutations)
 	return storeApplyPulledChunk(sy.store, sy.chunkTrackingTargetKey(""), chunkID, mutations)
+}
+
+func importDependencyError(chunk ChunkData, err error) error {
+	mutations := buildImportMutations(chunk)
+	referenced := referencedSessionIDsFromNonSessionUpserts(mutations)
+	if len(referenced) == 0 {
+		return err
+	}
+	sessions := make([]string, 0, len(referenced))
+	for sessionID := range referenced {
+		sessions = append(sessions, sessionID)
+	}
+	sort.Strings(sessions)
+	return fmt.Errorf("%w; pending session dependencies: %s", err, strings.Join(sessions, ", "))
 }
 
 func buildImportMutations(chunk ChunkData) []store.SyncMutation {

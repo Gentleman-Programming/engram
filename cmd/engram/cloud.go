@@ -133,6 +133,11 @@ func cmdCloud(cfg store.Config) {
 		fmt.Fprintln(os.Stderr, "supported subcommands: status, enroll, config, serve, upgrade")
 		exitFunc(1)
 	}
+	if os.Args[2] == "--help" || os.Args[2] == "-h" || os.Args[2] == "help" {
+		fmt.Println("usage: engram cloud <subcommand> [options]")
+		fmt.Println("supported subcommands: status, enroll, config, serve, upgrade")
+		return
+	}
 
 	switch os.Args[2] {
 	case "status":
@@ -547,18 +552,57 @@ func cmdCloudStatus(cfg store.Config) {
 			fmt.Println("Auth status: ready (insecure local-dev mode: ENGRAM_CLOUD_INSECURE_NO_AUTH=1)")
 			fmt.Println("Sync readiness: ready for explicit --project sync (project must be enrolled)")
 			fmt.Println("Warning: bearer auth is disabled in insecure mode; do not use in production")
+			printCloudStatusSyncDiagnostic(cfg)
 			return
 		}
 		fmt.Println("Auth status: token not configured (client token is optional at preflight)")
 		fmt.Println("Sync readiness: ready to attempt explicit --project sync (project must be enrolled)")
 		fmt.Println("Hint: if the remote server enforces bearer auth, set ENGRAM_CLOUD_TOKEN")
+		printCloudStatusSyncDiagnostic(cfg)
 		return
 	}
 	fmt.Println("Auth status: ready (token provided via runtime cloud config)")
 	fmt.Println("Sync readiness: ready for explicit --project sync (project must be enrolled)")
+	printCloudStatusSyncDiagnostic(cfg)
+}
+
+func printCloudStatusSyncDiagnostic(cfg store.Config) {
+	if _, err := os.Stat(filepath.Join(cfg.DataDir, "engram.db")); err != nil {
+		return
+	}
+	s, err := storeNew(cfg)
+	if err != nil {
+		fmt.Printf("Sync diagnostic: unavailable (%v)\n", err)
+		return
+	}
+	defer s.Close()
+	state, err := s.GetSyncState(constants.TargetKeyCloud)
+	if err != nil || state == nil {
+		return
+	}
+	code := strings.TrimSpace(derefString(state.ReasonCode))
+	message := strings.TrimSpace(derefString(state.ReasonMessage))
+	if code == "" && message == "" {
+		return
+	}
+	fmt.Printf("Sync diagnostic: %s\n", state.Lifecycle)
+	if code != "" {
+		fmt.Printf("reason_code: %s\n", code)
+	}
+	if message != "" {
+		fmt.Printf("reason_message: %s\n", message)
+	}
 }
 
 func cmdCloudEnroll(cfg store.Config) {
+	if len(os.Args) >= 4 {
+		arg := strings.TrimSpace(os.Args[3])
+		if arg == "--help" || arg == "-h" || arg == "help" {
+			fmt.Println("usage: engram cloud enroll <project>")
+			fmt.Println("Enroll a local-first project for explicit cloud replication.")
+			return
+		}
+	}
 	if len(os.Args) < 4 || strings.TrimSpace(os.Args[3]) == "" {
 		fmt.Fprintln(os.Stderr, "usage: engram cloud enroll <project>")
 		exitFunc(1)

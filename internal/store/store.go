@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -30,6 +31,17 @@ var openDB = sql.Open
 // See https://www.sqlite.org/rescode.html#constraint_foreignkey
 const sqliteConstraintForeignKey = 787
 
+const (
+	sqlitePrimaryBusy   = 5
+	sqlitePrimaryLocked = 6
+)
+
+var sqliteWriteRetryBackoffs = []time.Duration{
+	10 * time.Millisecond,
+	25 * time.Millisecond,
+	50 * time.Millisecond,
+}
+
 // Sentinel errors returned by delete operations so callers can use errors.Is.
 var (
 	ErrSessionNotFound        = errors.New("session not found")
@@ -37,6 +49,27 @@ var (
 	ErrSessionDeleteBlocked   = errors.New("session deletion is blocked while cloud sync enrollment is active")
 	ErrObservationNotFound    = errors.New("observation not found")
 	ErrPromptNotFound         = errors.New("prompt not found")
+)
+
+// Sentinel errors for relation sync apply path (Phase 2).
+var (
+	// ErrRelationFKMissing is returned by applyRelationUpsertTx when one or
+	// both observations referenced by the relation payload do not exist locally
+	// yet. The caller must write the mutation to sync_apply_deferred and ACK
+	// the sequence so the cursor does not stall.
+	ErrRelationFKMissing = errors.New("relation FK precondition not met: referenced observation missing")
+
+	// ErrCrossProjectRelation is returned by JudgeRelation when the source and
+	// target observations belong to different projects. The write is rejected
+	// entirely; no memory_relations row is created and no sync mutation is
+	// enqueued.
+	ErrCrossProjectRelation = errors.New("relation rejected: source and target observations are in different projects")
+
+	// ErrApplyDead is returned when a deferred relation payload cannot be
+	// decoded or fails a hard validation. The row is written to
+	// sync_apply_deferred with apply_status='dead' and is never retried
+	// automatically; Phase 3 adds a republish CLI.
+	ErrApplyDead = errors.New("relation apply permanently failed: payload invalid or undecodable")
 )
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -172,6 +205,7 @@ const (
 	SyncEntitySession     = "session"
 	SyncEntityObservation = "observation"
 	SyncEntityPrompt      = "prompt"
+	SyncEntityRelation    = "relation"
 
 	SyncOpUpsert = "upsert"
 	SyncOpDelete = "delete"
@@ -221,6 +255,11 @@ type SyncMutation struct {
 	Project    string  `json:"project"`
 	OccurredAt string  `json:"occurred_at"`
 	AckedAt    *string `json:"acked_at,omitempty"`
+}
+
+type PendingSyncMutationProjectCount struct {
+	Project string `json:"project"`
+	Count   int64  `json:"count"`
 }
 
 const (
@@ -340,6 +379,31 @@ type syncPromptPayload struct {
 	HardDelete bool    `json:"hard_delete,omitempty"`
 }
 
+// syncRelationPayload is the wire format for a memory_relations row sent over
+// the sync_mutations / cloud_mutations rails (entity = 'relation', op = 'upsert').
+//
+// Phase 2 design §1: 13-field subset of the 17-column memory_relations row.
+// Excluded: id (local autoincrement, not portable), superseded_at,
+// superseded_by_relation_id (Phase 3 supersede chain).
+// omitempty matches the style of syncSessionPayload / syncObservationPayload.
+type syncRelationPayload struct {
+	SyncID         string   `json:"sync_id"`
+	SourceID       string   `json:"source_id"`
+	TargetID       string   `json:"target_id"`
+	Relation       string   `json:"relation"`
+	Reason         *string  `json:"reason,omitempty"`
+	Evidence       *string  `json:"evidence,omitempty"`
+	Confidence     *float64 `json:"confidence,omitempty"`
+	JudgmentStatus string   `json:"judgment_status"`
+	MarkedByActor  *string  `json:"marked_by_actor,omitempty"`
+	MarkedByKind   *string  `json:"marked_by_kind,omitempty"`
+	MarkedByModel  *string  `json:"marked_by_model,omitempty"`
+	SessionID      *string  `json:"session_id,omitempty"`
+	Project        string   `json:"project"`
+	CreatedAt      string   `json:"created_at"`
+	UpdatedAt      string   `json:"updated_at"`
+}
+
 // ExportData is the full serializable dump of the engram database.
 type ExportData struct {
 	Version      string        `json:"version"`
@@ -434,6 +498,13 @@ func (r sqlRowScanner) Close() error {
 	return r.rows.Close()
 }
 
+func closeRowsWithError(rows rowScanner, err error) error {
+	if closeErr := rows.Close(); closeErr != nil {
+		return errors.Join(err, closeErr)
+	}
+	return err
+}
+
 type storeHooks struct {
 	exec    func(db execer, query string, args ...any) (sql.Result, error)
 	query   func(db queryer, query string, args ...any) (*sql.Rows, error)
@@ -518,6 +589,7 @@ func New(cfg Config) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("engram: open database: %w", err)
 	}
+	db.SetMaxOpenConns(1)
 
 	// SQLite performance pragmas
 	pragmas := []string{
@@ -558,6 +630,7 @@ func newWithoutRepair(cfg Config) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("engram: open database: %w", err)
 	}
+	db.SetMaxOpenConns(1)
 
 	pragmas := []string{
 		"PRAGMA journal_mode = WAL",
@@ -957,6 +1030,32 @@ func (s *Store) migrate() error {
 		if _, err := s.execHook(s.db, promptTriggers); err != nil {
 			return err
 		}
+	}
+
+	// Phase 3: add republish CLI, surface dead rows via mem_status.
+	if _, err := s.execHook(s.db, `
+		CREATE TABLE IF NOT EXISTS sync_apply_deferred (
+			sync_id           TEXT    PRIMARY KEY,
+			entity            TEXT    NOT NULL,
+			payload           TEXT    NOT NULL,
+			apply_status      TEXT    NOT NULL DEFAULT 'deferred',
+			retry_count       INTEGER NOT NULL DEFAULT 0,
+			last_error        TEXT,
+			last_attempted_at TEXT,
+			first_seen_at     TEXT    NOT NULL DEFAULT (datetime('now'))
+		);
+		CREATE INDEX IF NOT EXISTS idx_sad_status_seen
+			ON sync_apply_deferred(apply_status, first_seen_at);
+	`); err != nil {
+		return err
+	}
+
+	// Phase 3b: composite index for conflict-audit list/count queries.
+	if _, err := s.execHook(s.db, `
+		CREATE INDEX IF NOT EXISTS idx_memrel_status_created
+			ON memory_relations(judgment_status, created_at DESC);
+	`); err != nil {
+		return err
 	}
 
 	return nil
@@ -1776,7 +1875,7 @@ func (s *Store) RecentSessions(project string, limit int) ([]SessionSummary, err
 		args = append(args, project)
 	}
 
-	query += " GROUP BY s.id ORDER BY MAX(COALESCE(o.created_at, s.started_at)) DESC LIMIT ?"
+	query += " GROUP BY s.id ORDER BY MAX(datetime(COALESCE(o.created_at, s.started_at))) DESC, s.id DESC LIMIT ?"
 	args = append(args, limit)
 
 	rows, err := s.queryItHook(s.db, query, args...)
@@ -1816,7 +1915,7 @@ func (s *Store) AllSessions(project string, limit int) ([]SessionSummary, error)
 		args = append(args, project)
 	}
 
-	query += " GROUP BY s.id ORDER BY MAX(COALESCE(o.created_at, s.started_at)) DESC LIMIT ?"
+	query += " GROUP BY s.id ORDER BY MAX(datetime(COALESCE(o.created_at, s.started_at))) DESC, s.id DESC LIMIT ?"
 	args = append(args, limit)
 
 	rows, err := s.queryItHook(s.db, query, args...)
@@ -1859,7 +1958,7 @@ func (s *Store) AllObservations(project, scope string, limit int) ([]Observation
 		args = append(args, normalizeScope(scope))
 	}
 
-	query += " ORDER BY o.created_at DESC LIMIT ?"
+	query += " ORDER BY datetime(o.created_at) DESC, o.id DESC LIMIT ?"
 	args = append(args, limit)
 
 	return s.queryObservations(query, args...)
@@ -2051,7 +2150,7 @@ func (s *Store) RecentObservations(project, scope string, limit int) ([]Observat
 		args = append(args, normalizeScope(scope))
 	}
 
-	query += " ORDER BY o.created_at DESC LIMIT ?"
+	query += " ORDER BY datetime(o.created_at) DESC, o.id DESC LIMIT ?"
 	args = append(args, limit)
 
 	return s.queryObservations(query, args...)
@@ -3166,6 +3265,34 @@ func (s *Store) ListPendingSyncMutationsAfterSeq(targetKey string, afterSeq int6
 	return mutations, rows.Err()
 }
 
+func (s *Store) CountPendingNonEnrolledSyncMutations(targetKey string) ([]PendingSyncMutationProjectCount, error) {
+	targetKey = normalizeSyncTargetKey(targetKey)
+	rows, err := s.queryItHook(s.db, `
+		SELECT sm.project, COUNT(*)
+		FROM sync_mutations sm
+		LEFT JOIN sync_enrolled_projects sep ON sm.project = sep.project
+		WHERE sm.target_key = ?
+		  AND sm.acked_at IS NULL
+		  AND sm.project != ''
+		  AND sep.project IS NULL
+		GROUP BY sm.project
+		ORDER BY sm.project ASC`, targetKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	counts := []PendingSyncMutationProjectCount{}
+	for rows.Next() {
+		var count PendingSyncMutationProjectCount
+		if err := rows.Scan(&count.Project, &count.Count); err != nil {
+			return nil, err
+		}
+		counts = append(counts, count)
+	}
+	return counts, rows.Err()
+}
+
 // SkipAckNonEnrolledMutations acks (marks as skipped) all pending mutations
 // that belong to non-enrolled projects, preventing journal bloat. Empty-project
 // mutations are never skipped — they always sync regardless of enrollment.
@@ -3607,8 +3734,45 @@ func (s *Store) ApplyPulledMutation(targetKey string, mutation SyncMutation) err
 			return nil
 		}
 
-		if err := s.applyPulledMutationTx(tx, mutation); err != nil {
-			return err
+		applyErr := s.applyPulledMutationTx(tx, mutation)
+		if applyErr != nil {
+			// Phase E: per-entity skip+log policy (design §9).
+			// For relation FK misses, write to sync_apply_deferred and ACK the seq
+			// so the cursor can advance. All other errors propagate and halt the pull.
+			if mutation.Entity == SyncEntityRelation && errors.Is(applyErr, ErrRelationFKMissing) {
+				log.Printf("[store] ApplyPulledMutation: relation FK miss seq=%d entity_key=%s — deferring",
+					mutation.Seq, mutation.EntityKey)
+				if _, deferErr := s.execHook(tx, `
+					INSERT INTO sync_apply_deferred
+						(sync_id, entity, payload, apply_status, retry_count, first_seen_at)
+					VALUES (?, ?, ?, 'deferred', 0, datetime('now'))
+					ON CONFLICT(sync_id) DO UPDATE SET
+						payload            = excluded.payload,
+						last_attempted_at  = datetime('now')
+				`, mutation.EntityKey, mutation.Entity, mutation.Payload); deferErr != nil {
+					return fmt.Errorf("ApplyPulledMutation: write deferred row: %w", deferErr)
+				}
+				// Fall through to advance the cursor (ACK the seq).
+			} else if mutation.Entity == SyncEntityRelation && errors.Is(applyErr, ErrApplyDead) {
+				// Payload is permanently undecodable — write directly as dead and ACK.
+				// There is no point retrying; a malformed payload will never become valid.
+				log.Printf("[store] ApplyPulledMutation: relation payload dead seq=%d entity_key=%s err=%v — marking dead",
+					mutation.Seq, mutation.EntityKey, applyErr)
+				if _, deferErr := s.execHook(tx, `
+					INSERT INTO sync_apply_deferred
+						(sync_id, entity, payload, apply_status, retry_count, first_seen_at)
+					VALUES (?, ?, ?, 'dead', 0, datetime('now'))
+					ON CONFLICT(sync_id) DO UPDATE SET
+						payload           = excluded.payload,
+						apply_status      = 'dead',
+						last_attempted_at = datetime('now')
+				`, mutation.EntityKey, mutation.Entity, mutation.Payload); deferErr != nil {
+					return fmt.Errorf("ApplyPulledMutation: write dead row: %w", deferErr)
+				}
+				// Fall through to advance the cursor (ACK the seq).
+			} else {
+				return applyErr
+			}
 		}
 
 		_, err = s.execHook(tx,
@@ -4031,34 +4195,51 @@ func (s *Store) MergeProjects(sources []string, canonical string) (*MergeResult,
 	result := &MergeResult{Canonical: canonical}
 
 	err := s.withTx(func(tx *sql.Tx) error {
-		for _, src := range sources {
-			src, _ = NormalizeProject(src)
-			if src == "" || src == canonical {
+		seenSources := make(map[string]struct{})
+		for _, srcInput := range sources {
+			srcNormalized, _ := NormalizeProject(srcInput)
+			if srcNormalized == "" || srcNormalized == canonical {
+				continue
+			}
+			if _, seen := seenSources[srcNormalized]; seen {
+				continue
+			}
+			seenSources[srcNormalized] = struct{}{}
+
+			sourceVariants := projectMergeSourceVariants(srcInput, srcNormalized, canonical)
+			if len(sourceVariants) == 0 {
 				continue
 			}
 
-			res, err := s.execHook(tx, `UPDATE observations SET project = ? WHERE project = ?`, canonical, src)
+			placeholders := sqlPlaceholders(len(sourceVariants))
+			args := make([]any, 0, len(sourceVariants)+1)
+			args = append(args, canonical)
+			for _, variant := range sourceVariants {
+				args = append(args, variant)
+			}
+
+			res, err := s.execHook(tx, `UPDATE observations SET project = ? WHERE project IN (`+placeholders+`)`, args...)
 			if err != nil {
-				return fmt.Errorf("merge observations %q → %q: %w", src, canonical, err)
+				return fmt.Errorf("merge observations %q → %q: %w", srcNormalized, canonical, err)
 			}
 			n, _ := res.RowsAffected()
 			result.ObservationsUpdated += n
 
-			res, err = s.execHook(tx, `UPDATE sessions SET project = ? WHERE project = ?`, canonical, src)
+			res, err = s.execHook(tx, `UPDATE sessions SET project = ? WHERE project IN (`+placeholders+`)`, args...)
 			if err != nil {
-				return fmt.Errorf("merge sessions %q → %q: %w", src, canonical, err)
+				return fmt.Errorf("merge sessions %q → %q: %w", srcNormalized, canonical, err)
 			}
 			n, _ = res.RowsAffected()
 			result.SessionsUpdated += n
 
-			res, err = s.execHook(tx, `UPDATE user_prompts SET project = ? WHERE project = ?`, canonical, src)
+			res, err = s.execHook(tx, `UPDATE user_prompts SET project = ? WHERE project IN (`+placeholders+`)`, args...)
 			if err != nil {
-				return fmt.Errorf("merge prompts %q → %q: %w", src, canonical, err)
+				return fmt.Errorf("merge prompts %q → %q: %w", srcNormalized, canonical, err)
 			}
 			n, _ = res.RowsAffected()
 			result.PromptsUpdated += n
 
-			result.SourcesMerged = append(result.SourcesMerged, src)
+			result.SourcesMerged = append(result.SourcesMerged, srcNormalized)
 		}
 		// Enqueue sync mutations so cloud sync picks up the merged records.
 		// Same pattern used by EnrollProject.
@@ -4069,6 +4250,45 @@ func (s *Store) MergeProjects(sources []string, canonical string) (*MergeResult,
 	}
 
 	return result, nil
+}
+
+// sqlPlaceholders returns a comma-separated list of parameter markers only.
+// Values are still passed separately through query arguments; no user data is
+// interpolated into SQL here.
+func sqlPlaceholders(count int) string {
+	return strings.TrimRight(strings.Repeat("?,", count), ",")
+}
+
+func projectMergeSourceVariants(rawSource, normalizedSource, canonical string) []string {
+	seen := make(map[string]struct{})
+	variants := make([]string, 0, 5)
+	// Match both the historical raw project name and its normalized form so
+	// legacy rows are migrated without reintroducing canonical-source churn.
+	candidates := []string{strings.TrimSpace(rawSource), normalizedSource}
+	parts := strings.FieldsFunc(normalizedSource, func(r rune) bool {
+		return r == ' ' || r == '-' || r == '_'
+	})
+	if len(parts) > 1 {
+		for _, sep := range []string{" ", "-", "_"} {
+			candidates = append(candidates, strings.Join(parts, sep))
+		}
+	}
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" || candidate == canonical {
+			continue
+		}
+		candidateNormalized, _ := NormalizeProject(candidate)
+		if candidateNormalized == canonical {
+			continue
+		}
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		variants = append(variants, candidate)
+	}
+	return variants
 }
 
 // ─── Project Pruning ─────────────────────────────────────────────────────────
@@ -4124,15 +4344,46 @@ func (s *Store) PruneProject(project string) (*PruneResult, error) {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 func (s *Store) withTx(fn func(tx *sql.Tx) error) error {
-	tx, err := s.beginTxHook()
-	if err != nil {
-		return err
+	return withSQLiteWriteRetry(func() error {
+		tx, err := s.beginTxHook()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		if err := fn(tx); err != nil {
+			return err
+		}
+		return s.commitHook(tx)
+	})
+}
+
+func withSQLiteWriteRetry(fn func() error) error {
+	var lastErr error
+	for attempt := 0; attempt <= len(sqliteWriteRetryBackoffs); attempt++ {
+		if err := fn(); err != nil {
+			lastErr = err
+			if !isRetryableSQLiteLockError(err) || attempt == len(sqliteWriteRetryBackoffs) {
+				return err
+			}
+			time.Sleep(sqliteWriteRetryBackoffs[attempt])
+			continue
+		}
+		return nil
 	}
-	defer tx.Rollback()
-	if err := fn(tx); err != nil {
-		return err
+	return lastErr
+}
+
+func isRetryableSQLiteLockError(err error) bool {
+	if err == nil {
+		return false
 	}
-	return s.commitHook(tx)
+	var sqliteErr *sqlite.Error
+	if errors.As(err, &sqliteErr) {
+		primaryCode := sqliteErr.Code() & 0xff
+		return primaryCode == sqlitePrimaryBusy || primaryCode == sqlitePrimaryLocked
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "database is locked") || strings.Contains(msg, "database is busy") || strings.Contains(msg, "sqlite_busy") || strings.Contains(msg, "sqlite_locked")
 }
 
 func (s *Store) createSessionTx(tx *sql.Tx, id, project, directory string) error {
@@ -4257,12 +4508,13 @@ func (s *Store) repairEnrolledProjectSyncMutations() error {
 	for rows.Next() {
 		var project string
 		if err := rows.Scan(&project); err != nil {
-			rows.Close()
-			return err
+			return closeRowsWithError(rows, err)
 		}
 		projects = append(projects, project)
 	}
-	rows.Close()
+	if err := rows.Close(); err != nil {
+		return err
+	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
@@ -4313,12 +4565,13 @@ func (s *Store) backfillSessionSyncMutationsTx(tx *sql.Tx, project string) error
 	for rows.Next() {
 		var payload syncSessionPayload
 		if err := rows.Scan(&payload.ID, &payload.Project, &payload.Directory, &payload.StartedAt, &payload.EndedAt, &payload.Summary); err != nil {
-			rows.Close()
-			return err
+			return closeRowsWithError(rows, err)
 		}
 		pending = append(pending, payload)
 	}
-	rows.Close()
+	if err := rows.Close(); err != nil {
+		return err
+	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
@@ -4379,12 +4632,13 @@ func (s *Store) backfillObservationSyncMutationsTx(tx *sql.Tx, project string) e
 			&payload.CreatedAt,
 			&payload.UpdatedAt,
 		); err != nil {
-			rows.Close()
-			return err
+			return closeRowsWithError(rows, err)
 		}
 		pending = append(pending, payload)
 	}
-	rows.Close()
+	if err := rows.Close(); err != nil {
+		return err
+	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
@@ -4427,14 +4681,15 @@ func (s *Store) backfillObservationSyncMutationsTx(tx *sql.Tx, project string) e
 	for deletedRows.Next() {
 		var payload syncObservationPayload
 		if err := deletedRows.Scan(&payload.SyncID, &payload.SessionID, &payload.Project, &payload.DeletedAt); err != nil {
-			deletedRows.Close()
-			return err
+			return closeRowsWithError(deletedRows, err)
 		}
 		payload.Deleted = true
 		payload.HardDelete = false
 		deletedPending = append(deletedPending, payload)
 	}
-	deletedRows.Close()
+	if err := deletedRows.Close(); err != nil {
+		return err
+	}
 	if err := deletedRows.Err(); err != nil {
 		return err
 	}
@@ -4478,12 +4733,13 @@ func (s *Store) backfillPromptSyncMutationsTx(tx *sql.Tx, project string) error 
 	for rows.Next() {
 		var payload syncPromptPayload
 		if err := rows.Scan(&payload.SyncID, &payload.SessionID, &payload.Content, &payload.Project, &payload.CreatedAt); err != nil {
-			rows.Close()
-			return err
+			return closeRowsWithError(rows, err)
 		}
 		pending = append(pending, payload)
 	}
-	rows.Close()
+	if err := rows.Close(); err != nil {
+		return err
+	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
@@ -4525,14 +4781,15 @@ func (s *Store) backfillPromptSyncMutationsTx(tx *sql.Tx, project string) error 
 	for tombstoneRows.Next() {
 		var payload syncPromptPayload
 		if err := tombstoneRows.Scan(&payload.SyncID, &payload.SessionID, &payload.Project, &payload.DeletedAt); err != nil {
-			tombstoneRows.Close()
-			return err
+			return closeRowsWithError(tombstoneRows, err)
 		}
 		payload.Deleted = true
 		payload.HardDelete = true
 		tombstonePending = append(tombstonePending, payload)
 	}
-	tombstoneRows.Close()
+	if err := tombstoneRows.Close(); err != nil {
+		return err
+	}
 	if err := tombstoneRows.Err(); err != nil {
 		return err
 	}
@@ -4657,6 +4914,8 @@ func (s *Store) resolveSessionProjectTx(tx *sql.Tx, sessionID string) (string, e
 
 func (s *Store) applyPulledMutationTx(tx *sql.Tx, mutation SyncMutation) error {
 	switch mutation.Entity {
+	case SyncEntityRelation:
+		return s.applyRelationUpsertTx(tx, mutation)
 	case SyncEntitySession:
 		var payload syncSessionPayload
 		if err := decodeSyncPayload([]byte(mutation.Payload), &payload); err != nil {
@@ -4692,6 +4951,82 @@ func (s *Store) applyPulledMutationTx(tx *sql.Tx, mutation SyncMutation) error {
 	}
 }
 
+// applyRelationUpsertTx handles a pulled mutation with entity='relation' and
+// op='upsert'. It implements the pull-side behavior for Phase 2:
+//
+//  1. JSON-decode the payload into syncRelationPayload. Decode errors return
+//     ErrApplyDead (non-retryable).
+//  2. Verify both source and target observations exist locally by sync_id.
+//     If either is missing, return ErrRelationFKMissing. The caller must write
+//     the raw mutation to sync_apply_deferred and ACK the seq.
+//  3. INSERT INTO memory_relations with ON CONFLICT(sync_id) DO UPDATE
+//     (last-write-wins, preserving the original created_at).
+//  4. On successful apply, DELETE any pre-existing deferred row for this sync_id
+//     so it is not retried unnecessarily.
+func (s *Store) applyRelationUpsertTx(tx *sql.Tx, mutation SyncMutation) error {
+	// Step 1: decode payload.
+	var p syncRelationPayload
+	if err := decodeSyncPayload([]byte(mutation.Payload), &p); err != nil {
+		return fmt.Errorf("%w: decode relation payload: %v", ErrApplyDead, err)
+	}
+
+	// Step 1b: required field validation — missing source_id or target_id is not
+	// a retryable FK miss; it is a permanent payload defect (ErrApplyDead).
+	if strings.TrimSpace(p.SourceID) == "" || strings.TrimSpace(p.TargetID) == "" {
+		return fmt.Errorf("%w: relation payload missing required source_id or target_id", ErrApplyDead)
+	}
+
+	// Step 2: FK precondition — both observations must exist locally (by sync_id).
+	var obsCount int
+	if err := tx.QueryRow(
+		`SELECT count(*) FROM observations WHERE sync_id IN (?, ?)`,
+		p.SourceID, p.TargetID,
+	).Scan(&obsCount); err != nil {
+		return fmt.Errorf("applyRelationUpsertTx: check observations: %w", err)
+	}
+	if obsCount < 2 {
+		return ErrRelationFKMissing
+	}
+
+	// Step 3: upsert into memory_relations keyed on sync_id (idempotent re-apply).
+	if _, err := s.execHook(tx, `
+		INSERT INTO memory_relations
+			(sync_id, source_id, target_id, relation, reason, evidence, confidence,
+			 judgment_status, marked_by_actor, marked_by_kind, marked_by_model,
+			 session_id, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(sync_id) DO UPDATE SET
+			source_id       = excluded.source_id,
+			target_id       = excluded.target_id,
+			relation        = excluded.relation,
+			reason          = excluded.reason,
+			evidence        = excluded.evidence,
+			confidence      = excluded.confidence,
+			judgment_status = excluded.judgment_status,
+			marked_by_actor = excluded.marked_by_actor,
+			marked_by_kind  = excluded.marked_by_kind,
+			marked_by_model = excluded.marked_by_model,
+			session_id      = excluded.session_id,
+			updated_at      = excluded.updated_at
+	`,
+		p.SyncID, p.SourceID, p.TargetID, p.Relation,
+		p.Reason, p.Evidence, p.Confidence,
+		p.JudgmentStatus, p.MarkedByActor, p.MarkedByKind, p.MarkedByModel,
+		p.SessionID, p.CreatedAt, p.UpdatedAt,
+	); err != nil {
+		return fmt.Errorf("applyRelationUpsertTx: upsert: %w", err)
+	}
+
+	// Step 4: clean up deferred row if one exists (resolves any prior FK-miss deferral).
+	if _, err := s.execHook(tx,
+		`DELETE FROM sync_apply_deferred WHERE sync_id = ?`, p.SyncID,
+	); err != nil {
+		return fmt.Errorf("applyRelationUpsertTx: clear deferred: %w", err)
+	}
+
+	return nil
+}
+
 // extractProjectFromPayload returns the project string from a sync payload struct.
 // It handles both string and *string Project fields across all entity payload types.
 // Returns empty string if the payload has no project or project is nil.
@@ -4709,6 +5044,8 @@ func extractProjectFromPayload(payload any) string {
 			return *p.Project
 		}
 		return ""
+	case syncRelationPayload:
+		return p.Project
 	default:
 		// Fallback: marshal to JSON and extract $.project via json.Unmarshal.
 		data, err := json.Marshal(payload)
@@ -5043,7 +5380,6 @@ func (s *Store) addColumnIfNotExists(tableName, columnName, definition string) e
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 
 	for rows.Next() {
 		var cid int
@@ -5052,13 +5388,18 @@ func (s *Store) addColumnIfNotExists(tableName, columnName, definition string) e
 		var defaultValue any
 		var pk int
 		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
-			return err
+			return closeRowsWithError(rows, err)
 		}
 		if name == columnName {
+			rows.Close()
 			return nil
 		}
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
 		return err
 	}
 
@@ -5071,7 +5412,6 @@ func (s *Store) migrateSyncChunksTable() error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 
 	hasTargetKey := false
 	targetKeyPK := 0
@@ -5083,7 +5423,7 @@ func (s *Store) migrateSyncChunksTable() error {
 		var defaultValue any
 		var pk int
 		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
-			return err
+			return closeRowsWithError(rows, err)
 		}
 		switch name {
 		case "target_key":
@@ -5094,6 +5434,10 @@ func (s *Store) migrateSyncChunksTable() error {
 		}
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
 		return err
 	}
 
@@ -5157,7 +5501,6 @@ func (s *Store) migrateLegacyObservationsTable() error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 
 	var hasID bool
 	var idIsPrimaryKey bool
@@ -5168,7 +5511,7 @@ func (s *Store) migrateLegacyObservationsTable() error {
 		var defaultValue any
 		var pk int
 		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
-			return err
+			return closeRowsWithError(rows, err)
 		}
 		if name == "id" {
 			hasID = true
@@ -5177,6 +5520,10 @@ func (s *Store) migrateLegacyObservationsTable() error {
 		}
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
 		return err
 	}
 
@@ -5723,6 +6070,243 @@ func (s *Store) CountRelationSyncMutations() (int, error) {
 		return 0, fmt.Errorf("CountRelationSyncMutations: %w", err)
 	}
 	return count, nil
+}
+
+// ─── Phase E: sync_apply_deferred helpers ────────────────────────────────────
+
+// ReplayDeferredResult holds counts returned by ReplayDeferred.
+type ReplayDeferredResult struct {
+	Retried   int
+	Succeeded int
+	Failed    int
+	Dead      int
+}
+
+// ReplayDeferred retries all rows in sync_apply_deferred with apply_status='deferred'
+// (up to 50 per call, ordered by first_seen_at). For each row:
+//   - Calls applyPulledMutationTx inside a transaction.
+//   - On success: the apply itself deletes the deferred row (applyRelationUpsertTx
+//     already includes DELETE FROM sync_apply_deferred on success path).
+//   - On ErrRelationFKMissing: increments retry_count; if retry_count reaches 5,
+//     marks apply_status='dead'. Otherwise updates last_error + last_attempted_at.
+//   - On ErrApplyDead or other decode errors: marks apply_status='dead'.
+//
+// Dead rows are never retried. Idempotent: calling twice in one cycle does not
+// double-retry because successful rows are deleted and failed rows update retry_count
+// in place.
+//
+// Returns counts (retried, succeeded, failed, dead) for caller logging.
+func (s *Store) ReplayDeferred() (result ReplayDeferredResult, err error) {
+	const limit = 50
+	const deadThreshold = 5
+
+	rows, err := s.db.Query(`
+		SELECT sync_id, entity, payload, retry_count
+		FROM sync_apply_deferred
+		WHERE apply_status = 'deferred'
+		ORDER BY first_seen_at
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return result, fmt.Errorf("ReplayDeferred: list deferred: %w", err)
+	}
+
+	type deferredRow struct {
+		syncID     string
+		entity     string
+		payload    string
+		retryCount int
+	}
+
+	var pending []deferredRow
+	for rows.Next() {
+		var r deferredRow
+		if err := rows.Scan(&r.syncID, &r.entity, &r.payload, &r.retryCount); err != nil {
+			rows.Close()
+			return result, fmt.Errorf("ReplayDeferred: scan: %w", err)
+		}
+		pending = append(pending, r)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return result, fmt.Errorf("ReplayDeferred: rows error: %w", err)
+	}
+
+	for _, row := range pending {
+		result.Retried++
+		mut := SyncMutation{
+			Entity:  row.entity,
+			Op:      SyncOpUpsert,
+			Payload: row.payload,
+			Source:  SyncSourceRemote,
+		}
+
+		applyErr := s.withTx(func(tx *sql.Tx) error {
+			return s.applyPulledMutationTx(tx, mut)
+		})
+
+		if applyErr == nil {
+			// Success: applyRelationUpsertTx already deleted the deferred row.
+			result.Succeeded++
+			log.Printf("[store] replayDeferred: applied sync_id=%s", row.syncID)
+			continue
+		}
+
+		// Classify the error and update the deferred row.
+		newRetry := row.retryCount + 1
+		var newStatus string
+		if errors.Is(applyErr, ErrRelationFKMissing) && newRetry < deadThreshold {
+			// Still retryable.
+			newStatus = "deferred"
+			result.Failed++
+		} else {
+			// Dead: either retry cap reached or non-retryable error.
+			newStatus = "dead"
+			result.Dead++
+			log.Printf("[store] replayDeferred: marking dead sync_id=%s retry_count=%d err=%v",
+				row.syncID, newRetry, applyErr)
+		}
+
+		if _, uErr := s.db.Exec(`
+			UPDATE sync_apply_deferred
+			SET retry_count = ?, apply_status = ?, last_error = ?, last_attempted_at = datetime('now')
+			WHERE sync_id = ?
+		`, newRetry, newStatus, applyErr.Error(), row.syncID); uErr != nil {
+			log.Printf("[store] replayDeferred: update row sync_id=%s: %v", row.syncID, uErr)
+		}
+	}
+
+	return result, nil
+}
+
+// CountDeferredAndDead returns the count of rows in sync_apply_deferred grouped
+// by apply_status. Only 'deferred' and 'dead' statuses are counted; 'applied'
+// rows (if any) are not included.
+func (s *Store) CountDeferredAndDead() (deferred, dead int, err error) {
+	rows, err := s.db.Query(`
+		SELECT apply_status, count(*)
+		FROM sync_apply_deferred
+		WHERE apply_status IN ('deferred', 'dead')
+		GROUP BY apply_status
+	`)
+	if err != nil {
+		return 0, 0, fmt.Errorf("CountDeferredAndDead: query: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var status string
+		var n int
+		if err := rows.Scan(&status, &n); err != nil {
+			return 0, 0, fmt.Errorf("CountDeferredAndDead: scan: %w", err)
+		}
+		switch status {
+		case "deferred":
+			deferred = n
+		case "dead":
+			dead = n
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, 0, fmt.Errorf("CountDeferredAndDead: rows error: %w", err)
+	}
+	return deferred, dead, nil
+}
+
+// ─── Phase 3: ListDeferred / GetDeferred ─────────────────────────────────────
+
+// ListDeferred returns rows from sync_apply_deferred with optional status filter
+// and pagination. The payload field is decoded to map[string]any; on malformed
+// JSON, PayloadValid is false and PayloadRaw is preserved.
+func (s *Store) ListDeferred(opts ListDeferredOptions) ([]DeferredRow, error) {
+	query := `
+		SELECT sync_id, entity, payload, apply_status, retry_count,
+		       last_error, last_attempted_at, first_seen_at
+		FROM sync_apply_deferred
+		WHERE 1=1`
+	var args []any
+
+	if opts.Status != "" {
+		query += ` AND apply_status = ?`
+		args = append(args, opts.Status)
+	}
+	query += ` ORDER BY first_seen_at`
+	if opts.Limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, opts.Limit)
+	}
+	if opts.Offset > 0 {
+		query += ` OFFSET ?`
+		args = append(args, opts.Offset)
+	}
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("ListDeferred: query: %w", err)
+	}
+	defer rows.Close()
+
+	var result []DeferredRow
+	for rows.Next() {
+		row, err := scanDeferredRow(rows)
+		if err != nil {
+			return nil, fmt.Errorf("ListDeferred: scan: %w", err)
+		}
+		result = append(result, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ListDeferred: rows error: %w", err)
+	}
+	if result == nil {
+		result = []DeferredRow{}
+	}
+	return result, nil
+}
+
+// GetDeferred returns a single row from sync_apply_deferred by sync_id.
+// Returns an error wrapping "not found" when no row exists (matches FindCandidates style).
+func (s *Store) GetDeferred(syncID string) (DeferredRow, error) {
+	row := s.db.QueryRow(`
+		SELECT sync_id, entity, payload, apply_status, retry_count,
+		       last_error, last_attempted_at, first_seen_at
+		FROM sync_apply_deferred
+		WHERE sync_id = ?
+	`, syncID)
+	result, err := scanDeferredRow(row)
+	if err == sql.ErrNoRows {
+		return DeferredRow{}, fmt.Errorf("GetDeferred: deferred row %q not found", syncID)
+	}
+	if err != nil {
+		return DeferredRow{}, fmt.Errorf("GetDeferred: %w", err)
+	}
+	return result, nil
+}
+
+// scannable is a common interface for *sql.Row and *sql.Rows.Scan.
+type scannable interface {
+	Scan(dest ...any) error
+}
+
+// scanDeferredRow scans a single sync_apply_deferred row into a DeferredRow.
+// The payload is decoded to map[string]any; malformed JSON sets PayloadValid=false.
+func scanDeferredRow(row scannable) (DeferredRow, error) {
+	var r DeferredRow
+	var rawPayload string
+	if err := row.Scan(
+		&r.SyncID, &r.Entity, &rawPayload, &r.ApplyStatus, &r.RetryCount,
+		&r.LastError, &r.LastAttemptedAt, &r.FirstSeenAt,
+	); err != nil {
+		return r, err
+	}
+	r.PayloadRaw = rawPayload
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(rawPayload), &decoded); err == nil {
+		r.Payload = decoded
+		r.PayloadValid = true
+	} else {
+		r.PayloadValid = false
+	}
+	return r, nil
 }
 
 // ListObservationSyncPayloads returns the decoded payloads of all sync_mutations

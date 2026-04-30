@@ -88,6 +88,21 @@ func writeManifestFile(t *testing.T, dir string, m *Manifest) {
 	}
 }
 
+func writeLocalChunkFile(t *testing.T, dir, id string, chunk ChunkData) {
+	t.Helper()
+	payload, err := json.Marshal(chunk)
+	if err != nil {
+		t.Fatalf("marshal chunk %s: %v", id, err)
+	}
+	chunksDir := filepath.Join(dir, "chunks")
+	if err := os.MkdirAll(chunksDir, 0o755); err != nil {
+		t.Fatalf("mkdir chunks: %v", err)
+	}
+	if err := writeGzip(filepath.Join(chunksDir, id+".jsonl.gz"), payload); err != nil {
+		t.Fatalf("write gzip chunk %s: %v", id, err)
+	}
+}
+
 func resetSyncTestHooks(t *testing.T) {
 	t.Helper()
 	origJSONMarshalChunk := jsonMarshalChunk
@@ -100,7 +115,6 @@ func resetSyncTestHooks(t *testing.T) {
 	origStoreExportDataForProject := storeExportDataForProject
 	origStoreListMutationsAfterSeq := storeListMutationsAfterSeq
 	origStoreAckMutationSeq := storeAckMutationSeq
-	origStoreImportData := storeImportData
 	origStoreApplyPulledChunk := storeApplyPulledChunk
 	origStoreRecordSynced := storeRecordSynced
 
@@ -115,7 +129,6 @@ func resetSyncTestHooks(t *testing.T) {
 		storeExportDataForProject = origStoreExportDataForProject
 		storeListMutationsAfterSeq = origStoreListMutationsAfterSeq
 		storeAckMutationSeq = origStoreAckMutationSeq
-		storeImportData = origStoreImportData
 		storeApplyPulledChunk = origStoreApplyPulledChunk
 		storeRecordSynced = origStoreRecordSynced
 	})
@@ -960,8 +973,8 @@ func TestImportBranches(t *testing.T) {
 		}
 
 		sy := New(s, syncDir)
-		if _, err := sy.Import(); err == nil || !strings.Contains(err.Error(), "import chunk") {
-			t.Fatalf("expected import chunk error, got %v", err)
+		if _, err := sy.Import(); err == nil || !strings.Contains(err.Error(), "dependency-safe local import stalled") || !strings.Contains(err.Error(), "missing-session") {
+			t.Fatalf("expected dependency-safe local import error, got %v", err)
 		}
 	})
 
@@ -1004,15 +1017,128 @@ func TestImportBranches(t *testing.T) {
 			t.Fatalf("write gzip chunk: %v", err)
 		}
 
-		storeRecordSynced = func(_ *store.Store, _, _ string) error {
-			return errors.New("forced import record fail")
+		storeApplyPulledChunk = func(_ *store.Store, _, _ string, _ []store.SyncMutation) error {
+			return errors.New("forced apply pulled chunk fail")
 		}
 
 		sy := New(s, syncDir)
-		if _, err := sy.Import(); err == nil || !strings.Contains(err.Error(), "record chunk") {
-			t.Fatalf("expected record chunk error, got %v", err)
+		if _, err := sy.Import(); err == nil || !strings.Contains(err.Error(), "dependency-safe local import stalled") || !strings.Contains(err.Error(), "forced apply pulled chunk fail") {
+			t.Fatalf("expected apply pulled chunk import error, got %v", err)
 		}
 	})
+}
+
+func TestLocalImportDependencySafeAcrossChunksRegardlessManifestOrder(t *testing.T) {
+	s := newTestStore(t)
+	syncDir := t.TempDir()
+	project := "proj-a"
+
+	writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{
+		{ID: "chunk-dependent", CreatedAt: "2025-01-02T00:00:00Z"},
+		{ID: "chunk-session", CreatedAt: "2025-01-01T00:00:00Z"},
+	}})
+	writeLocalChunkFile(t, syncDir, "chunk-dependent", ChunkData{
+		Observations: []store.Observation{{SyncID: "obs-cross-chunk", SessionID: "sess-cross-chunk", Type: "note", Title: "cross", Content: "cross chunk observation", Project: &project, Scope: "project", CreatedAt: "2025-01-02 00:00:00", UpdatedAt: "2025-01-02 00:00:00"}},
+		Prompts:      []store.Prompt{{SyncID: "prompt-cross-chunk", SessionID: "sess-cross-chunk", Content: "cross chunk prompt", Project: project, CreatedAt: "2025-01-02 00:01:00"}},
+	})
+	writeLocalChunkFile(t, syncDir, "chunk-session", ChunkData{
+		Sessions: []store.Session{{ID: "sess-cross-chunk", Project: project, Directory: "/tmp/proj-a", StartedAt: "2025-01-01 00:00:00"}},
+	})
+
+	res, err := New(s, syncDir).Import()
+	if err != nil {
+		t.Fatalf("local import should retry dependency chunks safely: %v", err)
+	}
+	if res.ChunksImported != 2 || res.SessionsImported != 1 || res.ObservationsImported != 1 || res.PromptsImported != 1 {
+		t.Fatalf("unexpected import result: %+v", res)
+	}
+	if _, err := s.GetSession("sess-cross-chunk"); err != nil {
+		t.Fatalf("expected session imported: %v", err)
+	}
+	results, err := s.Search("cross chunk observation", store.SearchOptions{Project: project, Limit: 5})
+	if err != nil || len(results) != 1 {
+		t.Fatalf("expected imported observation, results=%d err=%v", len(results), err)
+	}
+	prompts, err := s.RecentPrompts(project, 5)
+	if err != nil || len(prompts) != 1 {
+		t.Fatalf("expected imported prompt, prompts=%d err=%v", len(prompts), err)
+	}
+}
+
+func TestLocalImportOrdersExplicitMutationsAndDirectArraysSafely(t *testing.T) {
+	s := newTestStore(t)
+	syncDir := t.TempDir()
+	project := "proj-a"
+	chunkID := "mixed-local"
+
+	writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: chunkID, CreatedAt: "2025-01-01T00:00:00Z"}}})
+	writeLocalChunkFile(t, syncDir, chunkID, ChunkData{
+		Sessions:     []store.Session{{ID: "sess-mixed", Project: project, Directory: "/tmp/proj-a", StartedAt: "2025-01-01 00:00:00"}},
+		Observations: []store.Observation{{SyncID: "obs-direct-mixed", SessionID: "sess-mixed", Type: "note", Title: "direct", Content: "direct local observation", Project: &project, Scope: "project", CreatedAt: "2025-01-01 00:01:00", UpdatedAt: "2025-01-01 00:01:00"}},
+		Mutations: []store.SyncMutation{{
+			Entity:    store.SyncEntityPrompt,
+			EntityKey: "prompt-explicit-mixed",
+			Op:        store.SyncOpUpsert,
+			Payload:   `{"sync_id":"prompt-explicit-mixed","session_id":"sess-mixed","content":"explicit prompt after session","project":"proj-a","created_at":"2025-01-01 00:02:00"}`,
+		}},
+	})
+
+	if _, err := New(s, syncDir).Import(); err != nil {
+		t.Fatalf("local import should order synthesized sessions before direct and explicit dependents: %v", err)
+	}
+	if _, err := s.GetSession("sess-mixed"); err != nil {
+		t.Fatalf("expected mixed session imported: %v", err)
+	}
+	results, err := s.Search("direct local observation", store.SearchOptions{Project: project, Limit: 5})
+	if err != nil || len(results) != 1 {
+		t.Fatalf("expected direct observation, results=%d err=%v", len(results), err)
+	}
+	prompts, err := s.RecentPrompts(project, 5)
+	if err != nil || len(prompts) != 1 || prompts[0].SyncID != "prompt-explicit-mixed" {
+		t.Fatalf("expected explicit prompt imported, prompts=%+v err=%v", prompts, err)
+	}
+}
+
+func TestLocalImportMissingSessionStallsWithUsefulError(t *testing.T) {
+	s := newTestStore(t)
+	syncDir := t.TempDir()
+	chunkID := "missing-session"
+	writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: chunkID, CreatedAt: "2025-01-01T00:00:00Z"}}})
+	writeLocalChunkFile(t, syncDir, chunkID, ChunkData{Observations: []store.Observation{{SyncID: "obs-missing-session", SessionID: "does-not-exist", Type: "note", Title: "missing", Content: "missing dependency", Scope: "project", CreatedAt: "2025-01-01 00:00:00", UpdatedAt: "2025-01-01 00:00:00"}}})
+
+	_, err := New(s, syncDir).Import()
+	if err == nil {
+		t.Fatal("expected missing session dependency to stall")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "dependency-safe local import stalled") || !strings.Contains(msg, chunkID) || !strings.Contains(msg, "does-not-exist") {
+		t.Fatalf("expected useful dependency-safe stall error, got %v", err)
+	}
+}
+
+func TestLocalImportSkipsAlreadyImportedChunksIdempotently(t *testing.T) {
+	resetSyncTestHooks(t)
+	s := newTestStore(t)
+	syncDir := t.TempDir()
+	chunkID := "idempotent-local"
+	writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: chunkID, CreatedAt: "2025-01-01T00:00:00Z"}}})
+	writeLocalChunkFile(t, syncDir, chunkID, ChunkData{Sessions: []store.Session{{ID: "sess-idempotent", Project: "proj-a", Directory: "/tmp/proj-a", StartedAt: "2025-01-01 00:00:00"}}})
+
+	if _, err := New(s, syncDir).Import(); err != nil {
+		t.Fatalf("first import: %v", err)
+	}
+	applyCalls := 0
+	storeApplyPulledChunk = func(_ *store.Store, _, _ string, _ []store.SyncMutation) error {
+		applyCalls++
+		return errors.New("already imported chunks should not be applied")
+	}
+	res, err := New(s, syncDir).Import()
+	if err != nil {
+		t.Fatalf("second import should skip known chunk: %v", err)
+	}
+	if res.ChunksImported != 0 || res.ChunksSkipped != 1 || applyCalls != 0 {
+		t.Fatalf("expected idempotent skip without apply, result=%+v applyCalls=%d", res, applyCalls)
+	}
 }
 
 func TestManifestReadWrite(t *testing.T) {

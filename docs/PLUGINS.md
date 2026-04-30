@@ -82,7 +82,7 @@ claude --plugin-dir ./plugin/claude-code
 
 | Feature | Bare MCP | Plugin |
 |---------|----------|--------|
-| MCP tools available | 17 default (`engram mcp`) | 13 agent-profile tools (`engram mcp --tools=agent`) |
+| MCP tools available | 18 default (`engram mcp`) | 14 agent-profile tools (`engram mcp --tools=agent`) |
 | Session tracking (auto-start) | ✗ | ✓ |
 | Auto-import git-synced memories | ✗ | ✓ |
 | Compaction recovery | ✗ | ✓ |
@@ -99,6 +99,8 @@ plugin/claude-code/
 ├── scripts/
 │   ├── session-start.sh           # Ensures server, creates session, imports chunks, injects context
 │   ├── post-compaction.sh         # Injects previous context + recovery instructions
+│   ├── user-prompt-submit.sh      # Loads MCP tools on first prompt; Windows Git Bash safe mode
+│   ├── user-prompt-submit.ps1     # Optional Windows-native fallback for locked-down endpoints
 │   ├── subagent-stop.sh           # Passive capture trigger on subagent completion
 │   └── session-stop.sh            # Logs end-of-session event
 └── skills/memory/SKILL.md         # Memory Protocol (when to save, search, close, recover)
@@ -116,6 +118,37 @@ plugin/claude-code/
 1. Injects the previous session context + compacted summary
 2. Tells the agent: "FIRST ACTION REQUIRED — call `mem_session_summary` with this content before doing anything else"
 3. This ensures no work is lost when context is compressed
+
+**On user prompt submit**:
+1. The first prompt injects a ToolSearch instruction so Claude Code loads Engram MCP tools before responding.
+2. Later prompts may inject a save reminder if the local Engram API is fast and available.
+3. On Windows Git Bash/MSYS2, the hook uses a bash-builtin-only safe path to avoid fork-heavy helpers (`jq`, `git`, `curl`, `date`). In that mode first-prompt ToolSearch still works, but later save reminders degrade to `{}` so prompt submission stays fast.
+
+If Git Bash itself is blocked by enterprise security tooling, `scripts/user-prompt-submit.ps1` is provided as a native PowerShell fallback for manual hook testing or local override.
+
+PowerShell local override/testing example for locked-down Windows endpoints:
+
+```powershell
+# Test the native fallback directly. First run emits ToolSearch; second run emits {}.
+'{"session_id":"edr/test:1"}' | pwsh -NoProfile -ExecutionPolicy Bypass -File "C:\path\to\engram\plugin\claude-code\scripts\user-prompt-submit.ps1"
+
+# Local Claude Code override in .claude/settings.json or user settings:
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"C:\\path\\to\\engram\\plugin\\claude-code\\scripts\\user-prompt-submit.ps1\"",
+            "timeout": 2
+          }
+        ]
+      }
+    ]
+  }
+}
+```
 
 **Memory Protocol skill** (always available):
 - Strict rules for **when to save** (mandatory after bugfixes, decisions, discoveries)
@@ -161,12 +194,52 @@ After a verdict is recorded, `mem_search` annotations surface as follows:
 
 | Relation verdict | Annotation in `mem_search` results |
 |-----------------|-----------------------------------|
-| `supersedes` | `supersedes: #<id>` on the source observation; `superseded_by: #<id>` on the target |
+| `supersedes` | `supersedes: #<id> (<title>)` on the source observation; `superseded_by: #<id> (<title>)` on the target |
+| `supersedes` (target deleted) | `supersedes: #<id> (deleted)` — falls back to `(deleted)` when the related observation is missing |
+| `conflicts_with` (judged) | `conflicts: #<id> (<title>)` on both observations — one line per conflict |
 | `pending` (not yet judged) | `conflict: contested by #<id> (pending)` on both observations |
-| `conflicts_with` | No annotation line. Judgment is stored in `memory_relations` but not surfaced in search results in Phase 1. |
-| `compatible`, `related`, `scoped`, `not_conflict` | No annotation line. Judgment is stored but not surfaced in Phase 1. |
+| `compatible`, `related`, `scoped`, `not_conflict` | No annotation line. Judgment is stored but not surfaced. |
 
-> **Known gap**: `conflicts_with` judgments are persisted and queryable in `memory_relations` but do not produce a visible annotation in `mem_search` output. Only `supersedes` and `pending` relations produce annotation lines. This is by design for Phase 1 — a `conflicts_with` annotation format is not yet defined.
+### Multi-actor sync_id namespace
+
+Multiple agents can independently analyze the same pair of observations and each produce a distinct `memory_relations` row — even if they refer to the same `(source_id, target_id)` pair. Each row receives its own unique `sync_id`, so there is **no uniqueness constraint** on `(source_id, target_id)`.
+
+Consequences for annotation parsers:
+
+- `mem_search` may return **duplicate annotation lines** with the `conflicts:` prefix for the same `(source, target)` pair — one line per relation row. This is intentional, not a bug.
+- Each line represents a distinct verdict from a distinct actor.
+- The provenance fields `marked_by_actor`, `marked_by_kind`, and `marked_by_model` on the `memory_relations` row identify which agent produced each verdict.
+- When displaying or resolving conflicts, parsers MUST treat each `conflicts:` line as a separate entry keyed on the relation's `sync_id`, not on the observation pair.
+
+Example: two agents both flag observations `#10` and `#20` as conflicting. The `mem_search` result for observation `#10` may include:
+
+```
+conflicts: #20 (Some title)
+conflicts: #20 (Some title)
+```
+
+Both lines are valid. Match by prefix and process all entries — do not deduplicate based on target ID alone.
+
+### Annotation format contract (REQ-012)
+
+The annotation format is a stable, versioned contract. Agent parsers use prefix-based matching — these prefixes will not change in Phase 3:
+
+```
+supersedes: #<id> (<title>)
+superseded_by: #<id> (<title>)
+conflicts: #<id> (<title>)
+conflict: contested by #<id> (pending)
+```
+
+Multiple entries appear on separate lines (one per related observation), in query-return order. The `<title>` is retrieved via JOIN at search time (no N+1 queries). When the related observation has been deleted, `(deleted)` replaces the title.
+
+> **Parser note**: match by prefix (`supersedes:`, `superseded_by:`, `conflicts:`, `conflict:`). The format `#<integer-id> (<title>)` within parentheses is stable. Do not attempt to parse the title itself — it may contain any characters.
+
+### Cloud sync for judgments
+
+When a project is enrolled in Engram Cloud and autosync is enabled, `mem_judge` verdicts sync across machines. The `memory_relations` table propagates via the standard mutation push/pull cycle — the same pipeline used for observations and sessions. Judgments appear in `mem_search` annotations on any machine that has pulled the relevant mutations.
+
+Relations where the referenced observation does not yet exist locally are deferred (see `sync_apply_deferred`) and retried automatically on subsequent pull cycles.
 
 ### mem_save envelope fields (conflict surfacing)
 
@@ -182,6 +255,90 @@ When `mem_save` detects candidates, the JSON response includes:
 | `sync_id` | string | Stable sync ID of the just-saved observation |
 
 Old clients that read only the `result` string continue to work — these fields are additive.
+
+---
+
+## Admin Observability (conflict layer)
+
+Phase 3 adds an admin-facing observability layer over the conflict/relation system. This is NOT for end users — end users continue to interact with conflicts via the normal agent conversation flow (Phase 1). The tools below are for operators and maintainers who need to inspect or audit the `memory_relations` and `sync_apply_deferred` tables directly.
+
+### engram conflicts CLI
+
+The `engram conflicts <sub-command>` command provides read and scan access to the conflict layer from the terminal. It is intended for maintainers, not for agents or end users.
+
+| Sub-command | What it does |
+|-------------|-------------|
+| `engram conflicts list` | List `memory_relations` rows with optional `--project`, `--status`, `--since`, `--limit` filters |
+| `engram conflicts show <id>` | Show full detail for one relation row (source/target observation snippets) |
+| `engram conflicts stats` | Aggregate counts grouped by relation type and judgment status; includes deferred and dead queue sizes |
+| `engram conflicts scan` | Walk observations for a project, find conflict candidates, and (with `--apply`) insert new pending relation rows up to a `--max-insert` cap |
+| `engram conflicts deferred` | Inspect and replay rows in `sync_apply_deferred`; supports `--status`, `--inspect <sync_id>`, and `--replay` |
+
+When `--project` is omitted, the command falls back to the cwd-detected project (same resolution as all other `engram` commands).
+
+`engram conflicts scan` also supports `--semantic` for LLM-judge semantic detection beyond FTS5 lexical candidates. This catches vocabulary-different concepts that share no keywords (e.g., "Hexagonal Architecture" vs "Ports and Adapters"). Set `ENGRAM_AGENT_CLI=claude` or `ENGRAM_AGENT_CLI=opencode` before running. Additional flags: `--concurrency N` (default 5), `--timeout-per-call N` seconds (default 60), `--max-semantic N` (default 100), `--yes` (skip confirmation).
+
+> **Subscription note**: `--semantic` uses your existing agent CLI quota (Claude Pro/Max, OpenCode subscription). Engram itself adds no extra cost — you pay only what your LLM provider charges for the prompts.
+
+For the full HTTP API reference and CLI flag details, see [DOCS.md](../DOCS.md).
+
+### HTTP endpoints
+
+All six `/conflicts/*` endpoints are served by `engram serve` on the local runtime (`127.0.0.1:7437`). They are not exposed on the cloud runtime. Full request/response documentation is in [DOCS.md](../DOCS.md).
+
+| Route | Purpose |
+|-------|---------|
+| `GET /conflicts` | Paginated list of relation rows |
+| `GET /conflicts/{relation_id}` | Single relation detail |
+| `GET /conflicts/stats` | Aggregate counts |
+| `POST /conflicts/scan` | Run scan (dry-run or apply) |
+| `GET /conflicts/deferred` | List deferred queue |
+| `POST /conflicts/deferred/replay` | Trigger ReplayDeferred cycle |
+
+---
+
+## MCP Tool Reference — mem_compare
+
+`mem_compare` is available in the `agent` profile (`engram mcp --tools=agent`). It is NOT exposed in the `admin` profile.
+
+### Purpose
+
+Records a verdict on a semantic comparison between two memories. The agent reads both memories, judges their relationship using its LLM reasoning, and calls `mem_compare` to persist the verdict. Unlike `mem_judge` (which resolves a pre-existing `pending` candidate surfaced by `mem_save`), `mem_compare` creates a new relation row directly — useful for proactive analysis that goes beyond FTS5 lexical matching.
+
+### Parameters
+
+| Parameter | Required | Type | Description |
+|-----------|----------|------|-------------|
+| `memory_id_a` | yes | int | Observation ID of the first memory |
+| `memory_id_b` | yes | int | Observation ID of the second memory |
+| `relation` | yes | string | One of: `conflicts_with` | `supersedes` | `scoped` | `related` | `compatible` | `not_conflict` |
+| `confidence` | yes | float | 0.0..1.0 |
+| `reasoning` | yes | string | Explanation of the verdict (max 200 chars) |
+| `model` | no | string | Model name for provenance (e.g. `"claude-haiku-4-5"`) |
+
+### Behavior
+
+On success, `mem_compare`:
+- Persists a relation row with system provenance (`marked_by_kind="system"`, `marked_by_actor="engram"`)
+- Is idempotent: the same `(source_id, target_id)` pair updates the existing row rather than inserting a duplicate
+- Returns `{"sync_id": "<rel-hex>"}` on a persisted verdict
+
+`not_conflict` verdicts are no-ops — the call succeeds and returns `{"sync_id": ""}` but no row is written, matching the scan flow contract.
+
+Cross-project relations (where `memory_id_a` and `memory_id_b` belong to different projects) are rejected with an error.
+
+### When to call mem_compare
+
+`mem_compare` is intended for agent-initiated semantic audit workflows, not for routine memory saves. Typical usage:
+
+```
+# Agent reads two memories, judges their relation, calls mem_compare
+mem_compare(memory_id_a=18, memory_id_b=42, relation="supersedes",
+            confidence=0.85, reasoning="New arch decision replaces the older one",
+            model="claude-haiku-4-5")
+```
+
+For the conflict surfacing flow triggered by `mem_save` (where candidates are surfaced automatically), use `mem_judge` instead.
 
 ---
 

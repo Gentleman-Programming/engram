@@ -646,13 +646,59 @@ func TestHandlerPushRejectsNormalizedEmptyProject(t *testing.T) {
 	}
 }
 
-func TestHandlerPushRejectsChunkIDPayloadMismatch(t *testing.T) {
-	srv := New(&fakeStore{}, fakeAuth{}, 0)
-	body := bytes.NewBufferString(`{"chunk_id":"deadbeef","project":"proj-a","created_by":"tester","data":{"sessions":[{"id":"s-1"}]}}`)
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sync/push", body))
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d body=%q", rec.Code, rec.Body.String())
+func TestHandlerPushUsesServerHashWhenClientChunkIDMissingOrMismatched(t *testing.T) {
+	payload := []byte(`{"sessions":[{"id":"s-1","directory":"/tmp/s-1"}]}`)
+	normalizedPayload, err := coerceChunkProject(payload, "proj-a")
+	if err != nil {
+		t.Fatalf("coerce payload: %v", err)
+	}
+	wantChunkID := chunkIDFromPayload(normalizedPayload)
+	tests := []struct {
+		name            string
+		requestChunkID  string
+		forbiddenStored string
+	}{
+		{name: "mismatched chunk id", requestChunkID: "deadbeef", forbiddenStored: "deadbeef"},
+		{name: "empty chunk id", requestChunkID: "", forbiddenStored: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := &fakeStore{}
+			srv := New(st, fakeAuth{}, 0)
+			body := bytes.NewBufferString(`{"chunk_id":"` + tt.requestChunkID + `","project":"proj-a","created_by":"tester","data":` + string(payload) + `}`)
+
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sync/push", body))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d body=%q", rec.Code, rec.Body.String())
+			}
+			var response struct {
+				ChunkID string `json:"chunk_id"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if response.ChunkID != wantChunkID {
+				t.Fatalf("expected response chunk_id %q, got %q", wantChunkID, response.ChunkID)
+			}
+			if _, ok := st.chunks[wantChunkID]; !ok {
+				t.Fatalf("expected store write under server chunk_id %q", wantChunkID)
+			}
+			for storedChunkID := range st.chunks {
+				if storedChunkID == "" {
+					t.Fatalf("expected stored chunk_id to be non-empty")
+				}
+				if storedChunkID != wantChunkID {
+					t.Fatalf("expected stored chunk_id %q, got %q", wantChunkID, storedChunkID)
+				}
+			}
+			if tt.forbiddenStored != "" {
+				if _, ok := st.chunks[tt.forbiddenStored]; ok {
+					t.Fatalf("expected client chunk_id %q not to be used for storage", tt.forbiddenStored)
+				}
+			}
+		})
 	}
 }
 
