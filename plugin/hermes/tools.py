@@ -27,7 +27,6 @@ ENGRAM_TOOLS = frozenset([
     "mem_get_observation",
     "mem_save_prompt",
     "mem_timeline",
-    "mem_stats",
     "mem_session_start",
     "mem_session_end",
     "mem_judge",

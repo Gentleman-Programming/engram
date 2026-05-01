@@ -21,6 +21,8 @@ provides_tools:
 provides_hooks:
   - pre_llm_call
   - post_tool_call
+  - on_session_start
+  - on_session_end
 requires_env:
   - name: ENGRAM_PORT
     description: "Port where engram serve runs (default: 7437)"

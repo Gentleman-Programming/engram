@@ -228,11 +228,6 @@ def register(ctx) -> None:
         handler=tools.mem_timeline,
     )
     ctx.register_tool(
-        name="mem_stats",
-        schema=schemas.MEM_STATS,
-        handler=tools.mem_stats,
-    )
-    ctx.register_tool(
         name="mem_judge",
         schema=schemas.MEM_JUDGE,
         handler=tools.mem_judge,
