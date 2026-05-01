@@ -6227,6 +6227,18 @@ func TestDeleteProject_DeletesHistoricalProjectNameVariants(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed deferred 2: %v", err)
 	}
+	for _, targetKey := range []string{"cloud:engram-memory", "cloud:engram_memory", "cloud:engram memory"} {
+		if _, err := s.db.Exec(`INSERT INTO sync_chunks (target_key, chunk_id) VALUES (?, ?)`, targetKey, "chunk-"+targetKey); err != nil {
+			t.Fatalf("seed sync chunk for %s: %v", targetKey, err)
+		}
+		if _, err := s.db.Exec(
+			`INSERT OR REPLACE INTO sync_state (target_key, lifecycle, last_enqueued_seq, last_acked_seq, last_pulled_seq, updated_at)
+			 VALUES (?, 'pending', 5, 1, 2, datetime('now'))`,
+			targetKey,
+		); err != nil {
+			t.Fatalf("seed sync state for %s: %v", targetKey, err)
+		}
+	}
 
 	result, err := s.DeleteProject("engram-memory")
 	if err != nil {
@@ -6249,6 +6261,12 @@ func TestDeleteProject_DeletesHistoricalProjectNameVariants(t *testing.T) {
 		{"prompts underscore", `SELECT COUNT(*) FROM user_prompts WHERE project = 'engram_memory'`},
 		{"prompt tombstones upper-space", `SELECT COUNT(*) FROM prompt_tombstones WHERE project = 'ENGRAM MEMORY'`},
 		{"sync mutations hyphen", `SELECT COUNT(*) FROM sync_mutations WHERE project = 'engram-memory'`},
+		{"sync chunks hyphen target", `SELECT COUNT(*) FROM sync_chunks WHERE target_key = 'cloud:engram-memory'`},
+		{"sync chunks underscore target", `SELECT COUNT(*) FROM sync_chunks WHERE target_key = 'cloud:engram_memory'`},
+		{"sync chunks space target", `SELECT COUNT(*) FROM sync_chunks WHERE target_key = 'cloud:engram memory'`},
+		{"sync state hyphen target", `SELECT COUNT(*) FROM sync_state WHERE target_key = 'cloud:engram-memory'`},
+		{"sync state underscore target", `SELECT COUNT(*) FROM sync_state WHERE target_key = 'cloud:engram_memory'`},
+		{"sync state space target", `SELECT COUNT(*) FROM sync_state WHERE target_key = 'cloud:engram memory'`},
 		{"enrollment title-case", `SELECT COUNT(*) FROM sync_enrolled_projects WHERE project = 'Engram Memory'`},
 		{"upgrade state spaced", `SELECT COUNT(*) FROM cloud_upgrade_state WHERE project = 'engram memory'`},
 		{"deferred title-case payload", `SELECT COUNT(*) FROM sync_apply_deferred WHERE sync_id = 'sad-variant-1'`},
