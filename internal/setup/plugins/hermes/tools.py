@@ -25,7 +25,6 @@ ENGRAM_TOOLS = frozenset([
     "mem_context",
     "mem_session_summary",
     "mem_get_observation",
-    "mem_suggest_topic_key",
     "mem_save_prompt",
     "mem_timeline",
     "mem_stats",
@@ -116,7 +115,7 @@ def _extract_project(directory: str) -> str:
         if result.returncode == 0:
             url = result.stdout.strip()
             if url:
-                name = url.replace(".git", "").split("/")[-1]
+                name = os.path.basename(url).replace(".git", "")
                 if name:
                     return name
     except Exception:
@@ -356,21 +355,6 @@ def mem_get_observation(args: dict, **kwargs) -> str:
         return json.dumps({"error": str(e)})
 
 
-def mem_suggest_topic_key(args: dict, **kwargs) -> str:
-    """Suggest a stable topic_key for memory upserts. Endpoint: POST /observations/suggest-topic."""
-    try:
-        result = _engram_fetch("/observations/suggest-topic", method="POST", body={
-            "title": args.get("title", ""),
-            "content": args.get("content", ""),
-            "type": args.get("type"),
-        })
-        if result is None:
-            return json.dumps({"error": "Engram server not reachable."})
-        return json.dumps(result, indent=2)
-    except Exception as e:
-        return json.dumps({"error": str(e)})
-
-
 def mem_save_prompt(args: dict, **kwargs) -> str:
     """Save a user prompt for context. Endpoint: POST /observations (type=prompt)."""
     try:
@@ -403,7 +387,7 @@ def mem_session_start(args: dict, **kwargs) -> str:
         directory = args.get("directory", "")
 
         # Use passive capture to register the session
-        result = _engram_fetch("/passive", method="POST", body={
+        result = _engram_fetch("/observations/passive", method="POST", body={
             "session_id": session_id,
             "content": f"Session started: {project}" + (f" | {directory}" if directory else ""),
             "project": project,
@@ -427,7 +411,7 @@ def mem_session_end(args: dict, **kwargs) -> str:
         project = _current_project or "unknown"
         session_id = args.get("id") or default_session_id(project)
 
-        result = _engram_fetch("/passive", method="POST", body={
+        result = _engram_fetch("/observations/passive", method="POST", body={
             "session_id": session_id,
             "content": f"Session ended: {project}",
             "project": project,
@@ -521,7 +505,7 @@ def mem_capture_passive(args: dict, **kwargs) -> str:
     try:
         project = _current_project or "unknown"
         session_id = args.get("session_id") or default_session_id(project)
-        result = _engram_fetch("/passive", method="POST", body={
+        result = _engram_fetch("/observations/passive", method="POST", body={
             "session_id": session_id,
             "content": args.get("content", ""),
             "project": project,

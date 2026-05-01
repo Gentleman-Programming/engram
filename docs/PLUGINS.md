@@ -96,7 +96,7 @@ The plugin registers Engram tools with Hermes via the `register()` lifecycle hoo
 
 - Hermes Agent with plugin support
 - Engram installed and accessible on `$PATH`
-- Hermes version that supports `post_tool_call` hooks
+- Hermes version that supports `post_tool_call` hooks (pre_llm_call for memory injection, post_tool_call for passive capture)
 
 ### Manual setup
 

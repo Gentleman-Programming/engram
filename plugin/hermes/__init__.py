@@ -8,9 +8,8 @@ Flow:
     Hermes events → this plugin → HTTP calls → engram serve → SQLite
 
 Hooks:
-    pre_llm_call    → inject memory instructions into system prompt
-    on_session_start → register session in engram
-    on_session_end   → persist session summary
+    pre_llm_call     → inject memory instructions into system prompt
+    post_tool_call   → passive capture after tool execution
 """
 
 import logging
@@ -53,7 +52,7 @@ Format for `mem_save`:
 Topic rules:
 - Different topics must not overwrite each other
 - Reuse same `topic_key` to update an evolving topic
-- If unsure about the key, call `mem_suggest_topic_key` first
+- If unsure about the key, pick a descriptive kebab-case name (e.g. `arch-auth-model`)
 
 ### WHEN TO SEARCH MEMORY
 
@@ -207,11 +206,6 @@ def register(ctx) -> None:
         name="mem_get_observation",
         schema=schemas.MEM_GET_OBSERVATION,
         handler=tools.mem_get_observation,
-    )
-    ctx.register_tool(
-        name="mem_suggest_topic_key",
-        schema=schemas.MEM_SUGGEST_TOPIC_KEY,
-        handler=tools.mem_suggest_topic_key,
     )
     ctx.register_tool(
         name="mem_save_prompt",

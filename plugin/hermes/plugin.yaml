@@ -10,7 +10,6 @@ provides_tools:
   - mem_context
   - mem_session_summary
   - mem_get_observation
-  - mem_suggest_topic_key
   - mem_save_prompt
   - mem_session_start
   - mem_session_end

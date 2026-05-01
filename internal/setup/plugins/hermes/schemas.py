@@ -195,25 +195,6 @@ MEM_GET_OBSERVATION = {
     },
 }
 
-MEM_SUGGEST_TOPIC_KEY = {
-    "name": "mem_suggest_topic_key",
-    "description": (
-        "Suggest a stable topic_key for memory upserts. Use before mem_save when you want "
-        "evolving topics (like architecture decisions) to update a single observation over time."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "title": {"type": "string", "description": "Observation title (preferred input)."},
-            "content": {"type": "string", "description": "Observation content used as fallback if title is empty."},
-            "type": {
-                "type": "string",
-                "enum": ["decision", "architecture", "bugfix", "discovery", "pattern", "config"],
-            },
-        },
-    },
-}
-
 MEM_SAVE_PROMPT = {
     "name": "mem_save_prompt",
     "description": "Save a user prompt for context. Use this to record what the user asked — their intent, questions, and requests.",
