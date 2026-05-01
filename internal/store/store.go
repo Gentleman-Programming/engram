@@ -4197,12 +4197,20 @@ func (s *Store) DeleteProject(project string) (*DeleteProjectResult, error) {
 		// Existence check across core project-owned entities.
 		var exists bool
 		if err := tx.QueryRow(`SELECT EXISTS(
-			SELECT 1 FROM observations WHERE project = ?
+			SELECT 1 FROM observations
+			 WHERE project = ?
+			    OR session_id IN (SELECT id FROM sessions WHERE project = ?)
 			UNION ALL
 			SELECT 1 FROM sessions WHERE project = ?
 			UNION ALL
-			SELECT 1 FROM user_prompts WHERE project = ?
-		)`, project, project, project).Scan(&exists); err != nil {
+			SELECT 1 FROM user_prompts
+			 WHERE project = ?
+			    OR session_id IN (SELECT id FROM sessions WHERE project = ?)
+			UNION ALL
+			SELECT 1 FROM prompt_tombstones
+			 WHERE project = ?
+			    OR session_id IN (SELECT id FROM sessions WHERE project = ?)
+		)`, project, project, project, project, project, project, project).Scan(&exists); err != nil {
 			return fmt.Errorf("delete project: check existence: %w", err)
 		}
 
@@ -4213,20 +4221,36 @@ func (s *Store) DeleteProject(project string) (*DeleteProjectResult, error) {
 			UPDATE memory_relations
 			SET judgment_status = 'orphaned',
 			    updated_at      = datetime('now')
-			WHERE source_id IN (SELECT sync_id FROM observations WHERE project = ?)
-			   OR target_id IN (SELECT sync_id FROM observations WHERE project = ?)
-		`, project, project); err != nil {
+			WHERE source_id IN (
+				SELECT sync_id FROM observations
+				 WHERE project = ?
+				    OR session_id IN (SELECT id FROM sessions WHERE project = ?)
+			)
+			   OR target_id IN (
+				SELECT sync_id FROM observations
+				 WHERE project = ?
+				    OR session_id IN (SELECT id FROM sessions WHERE project = ?)
+			)
+		`, project, project, project, project); err != nil {
 			return fmt.Errorf("delete project: orphan memory_relations: %w", err)
 		}
 
 		// Order matters for referential integrity: observations -> prompts -> sessions.
-		if res, err := s.execHook(tx, `DELETE FROM observations WHERE project = ?`, project); err != nil {
+		if res, err := s.execHook(tx, `
+			DELETE FROM observations
+			 WHERE project = ?
+			    OR session_id IN (SELECT id FROM sessions WHERE project = ?)
+		`, project, project); err != nil {
 			return fmt.Errorf("delete project: observations: %w", err)
 		} else {
 			result.ObservationsDeleted, _ = res.RowsAffected()
 		}
 
-		if res, err := s.execHook(tx, `DELETE FROM user_prompts WHERE project = ?`, project); err != nil {
+		if res, err := s.execHook(tx, `
+			DELETE FROM user_prompts
+			 WHERE project = ?
+			    OR session_id IN (SELECT id FROM sessions WHERE project = ?)
+		`, project, project); err != nil {
 			return fmt.Errorf("delete project: prompts: %w", err)
 		} else {
 			result.PromptsDeleted, _ = res.RowsAffected()
@@ -4256,7 +4280,11 @@ func (s *Store) DeleteProject(project string) (*DeleteProjectResult, error) {
 			result.SyncDeferredDeleted, _ = res.RowsAffected()
 		}
 
-		if res, err := s.execHook(tx, `DELETE FROM prompt_tombstones WHERE project = ?`, project); err != nil {
+		if res, err := s.execHook(tx, `
+			DELETE FROM prompt_tombstones
+			 WHERE project = ?
+			    OR session_id IN (SELECT id FROM sessions WHERE project = ?)
+		`, project, project); err != nil {
 			return fmt.Errorf("delete project: prompt_tombstones: %w", err)
 		} else {
 			result.PromptTombstonesDeleted, _ = res.RowsAffected()

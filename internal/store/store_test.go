@@ -5989,12 +5989,32 @@ func TestDeleteProject_HardDeleteCascadeAndSyncCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetObservation(rel): %v", err)
 	}
+	derivedObsID, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-del", Type: "decision", Title: "derived obs", Content: "derived by session", Project: "", Scope: "project",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation(derived): %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE observations SET project = NULL WHERE id = ?`, derivedObsID); err != nil {
+		t.Fatalf("force derived observation project=NULL: %v", err)
+	}
+	derivedObs, err := s.GetObservation(derivedObsID)
+	if err != nil {
+		t.Fatalf("GetObservation(derived): %v", err)
+	}
 	if _, err := s.execHook(s.db,
 		`INSERT INTO memory_relations (sync_id, source_id, target_id, relation, judgment_status)
 		 VALUES (?, ?, ?, 'related', 'judged')`,
 		"rel-proj-delete", relObs.SyncID, "external-target-sync",
 	); err != nil {
 		t.Fatalf("seed memory_relations: %v", err)
+	}
+	if _, err := s.execHook(s.db,
+		`INSERT INTO memory_relations (sync_id, source_id, target_id, relation, judgment_status)
+		 VALUES (?, ?, ?, 'related', 'judged')`,
+		"rel-proj-delete-derived", derivedObs.SyncID, "external-target-sync",
+	); err != nil {
+		t.Fatalf("seed memory_relations(derived): %v", err)
 	}
 	if err := s.EnrollProject(project); err != nil {
 		t.Fatalf("EnrollProject: %v", err)
@@ -6013,6 +6033,21 @@ func TestDeleteProject_HardDeleteCascadeAndSyncCleanup(t *testing.T) {
 	}
 	if err := s.DeletePrompt(promptID); err != nil {
 		t.Fatalf("DeletePrompt: %v", err)
+	}
+	if err := s.CreateSession("s-del-3", project, "/tmp"); err != nil {
+		t.Fatalf("CreateSession3: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO user_prompts (sync_id, session_id, content, project) VALUES (?, ?, ?, NULL)`,
+		"prompt-null-project", "s-del-3", "prompt with null project",
+	); err != nil {
+		t.Fatalf("seed user_prompts project=NULL: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO prompt_tombstones (sync_id, session_id, project, deleted_at) VALUES (?, ?, '', datetime('now'))`,
+		"pt-derived-proj-delete", "s-del-3",
+	); err != nil {
+		t.Fatalf("seed prompt_tombstones derived project: %v", err)
 	}
 
 	if _, err := s.execHook(s.db,
@@ -6037,10 +6072,13 @@ func TestDeleteProject_HardDeleteCascadeAndSyncCleanup(t *testing.T) {
 	var n int
 	for _, q := range []string{
 		`SELECT COUNT(*) FROM observations WHERE project = 'proj-delete'`,
+		`SELECT COUNT(*) FROM observations WHERE session_id IN (SELECT id FROM sessions WHERE project = 'proj-delete')`,
 		`SELECT COUNT(*) FROM user_prompts WHERE project = 'proj-delete'`,
+		`SELECT COUNT(*) FROM user_prompts WHERE session_id IN (SELECT id FROM sessions WHERE project = 'proj-delete')`,
 		`SELECT COUNT(*) FROM sessions WHERE project = 'proj-delete'`,
 		`SELECT COUNT(*) FROM sync_mutations WHERE project = 'proj-delete'`,
 		`SELECT COUNT(*) FROM prompt_tombstones WHERE project = 'proj-delete'`,
+		`SELECT COUNT(*) FROM prompt_tombstones WHERE session_id IN (SELECT id FROM sessions WHERE project = 'proj-delete')`,
 		`SELECT COUNT(*) FROM sync_enrolled_projects WHERE project = 'proj-delete'`,
 		`SELECT COUNT(*) FROM cloud_upgrade_state WHERE project = 'proj-delete'`,
 		`SELECT COUNT(*) FROM sync_apply_deferred WHERE json_valid(payload)=1 AND ifnull(json_extract(payload,'$.project'),'')='proj-delete'`,
@@ -6059,6 +6097,12 @@ func TestDeleteProject_HardDeleteCascadeAndSyncCleanup(t *testing.T) {
 	}
 	if status != "orphaned" {
 		t.Fatalf("expected relation judgment_status=orphaned, got %q", status)
+	}
+	if err := s.db.QueryRow(`SELECT judgment_status FROM memory_relations WHERE sync_id = 'rel-proj-delete-derived'`).Scan(&status); err != nil {
+		t.Fatalf("query orphaned relation(derived) status: %v", err)
+	}
+	if status != "orphaned" {
+		t.Fatalf("expected derived relation judgment_status=orphaned, got %q", status)
 	}
 }
 
