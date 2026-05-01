@@ -181,12 +181,13 @@ def ensure_session(session_id: str) -> None:
     if session_id in _subagent_sessions:
         return  # Don't register sub-agents
 
-    _known_sessions.add(session_id)
-    _engram_fetch("/sessions", method="POST", body={
+    response = _engram_fetch("/sessions", method="POST", body={
         "id": session_id,
         "project": _current_project,
         "directory": _current_directory,
     })
+    if response is not None:
+        _known_sessions.add(session_id)
 
 
 def capture_prompt(session_id: str, content: str) -> None:
