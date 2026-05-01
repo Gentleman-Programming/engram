@@ -6186,6 +6186,86 @@ func TestDeleteProject_NoOpForUnknownProject(t *testing.T) {
 	}
 }
 
+func TestDeleteProject_DeletesHistoricalProjectNameVariants(t *testing.T) {
+	s := newTestStore(t)
+
+	if _, err := s.db.Exec(`INSERT INTO sessions (id, project, directory) VALUES (?, ?, ?)`, "legacy-sess-1", "Engram Memory", "/tmp"); err != nil {
+		t.Fatalf("seed session legacy-sess-1: %v", err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO sessions (id, project, directory) VALUES (?, ?, ?)`, "legacy-sess-2", "engram_memory", "/tmp"); err != nil {
+		t.Fatalf("seed session legacy-sess-2: %v", err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO observations (sync_id, session_id, type, title, content, project, scope, normalized_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, "legacy-obs-1", "legacy-sess-1", "decision", "legacy", "legacy", "Engram Memory", "project", "legacy-hash-1"); err != nil {
+		t.Fatalf("seed observation: %v", err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO user_prompts (sync_id, session_id, content, project) VALUES (?, ?, ?, ?)`, "legacy-prompt-1", "legacy-sess-2", "legacy", "engram_memory"); err != nil {
+		t.Fatalf("seed prompt: %v", err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO prompt_tombstones (sync_id, session_id, project, deleted_at) VALUES (?, ?, ?, datetime('now'))`, "legacy-pt-1", "legacy-sess-2", "ENGRAM MEMORY"); err != nil {
+		t.Fatalf("seed prompt tombstone: %v", err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`, DefaultSyncTargetKey, SyncEntitySession, "legacy-sess-1", SyncOpUpsert, `{"session_id":"legacy-sess-1"}`, SyncSourceLocal, "engram-memory"); err != nil {
+		t.Fatalf("seed sync mutation: %v", err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO sync_enrolled_projects (project) VALUES (?)`, "Engram Memory"); err != nil {
+		t.Fatalf("seed enrollment: %v", err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO cloud_upgrade_state (project, stage, repair_class, updated_at) VALUES (?, ?, ?, datetime('now'))`, "engram memory", UpgradeStagePlanned, UpgradeRepairClassNone); err != nil {
+		t.Fatalf("seed cloud upgrade state: %v", err)
+	}
+	if _, err := s.execHook(s.db,
+		`INSERT INTO sync_apply_deferred (sync_id, entity, payload, apply_status, retry_count, first_seen_at)
+		 VALUES (?, ?, ?, 'deferred', 0, datetime('now'))`,
+		"sad-variant-1", SyncEntityObservation, `{"project":"Engram Memory","sync_id":"legacy-obs-1"}`,
+	); err != nil {
+		t.Fatalf("seed deferred 1: %v", err)
+	}
+	if _, err := s.execHook(s.db,
+		`INSERT INTO sync_apply_deferred (sync_id, entity, payload, apply_status, retry_count, first_seen_at)
+		 VALUES (?, ?, ?, 'deferred', 0, datetime('now'))`,
+		"sad-variant-2", SyncEntityObservation, `{"project":"engram_memory","sync_id":"legacy-obs-2"}`,
+	); err != nil {
+		t.Fatalf("seed deferred 2: %v", err)
+	}
+
+	result, err := s.DeleteProject("engram-memory")
+	if err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
+	if !result.Deleted {
+		t.Fatalf("expected deleted=true for variant-backed delete")
+	}
+	if result.SyncDeferredDeleted != 2 {
+		t.Fatalf("SyncDeferredDeleted = %d, want 2", result.SyncDeferredDeleted)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		query string
+	}{
+		{"sessions title-case", `SELECT COUNT(*) FROM sessions WHERE project = 'Engram Memory'`},
+		{"sessions underscore", `SELECT COUNT(*) FROM sessions WHERE project = 'engram_memory'`},
+		{"observations title-case", `SELECT COUNT(*) FROM observations WHERE project = 'Engram Memory'`},
+		{"prompts underscore", `SELECT COUNT(*) FROM user_prompts WHERE project = 'engram_memory'`},
+		{"prompt tombstones upper-space", `SELECT COUNT(*) FROM prompt_tombstones WHERE project = 'ENGRAM MEMORY'`},
+		{"sync mutations hyphen", `SELECT COUNT(*) FROM sync_mutations WHERE project = 'engram-memory'`},
+		{"enrollment title-case", `SELECT COUNT(*) FROM sync_enrolled_projects WHERE project = 'Engram Memory'`},
+		{"upgrade state spaced", `SELECT COUNT(*) FROM cloud_upgrade_state WHERE project = 'engram memory'`},
+		{"deferred title-case payload", `SELECT COUNT(*) FROM sync_apply_deferred WHERE sync_id = 'sad-variant-1'`},
+		{"deferred underscore payload", `SELECT COUNT(*) FROM sync_apply_deferred WHERE sync_id = 'sad-variant-2'`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var count int
+			if err := s.db.QueryRow(tc.query).Scan(&count); err != nil {
+				t.Fatalf("query count: %v", err)
+			}
+			if count != 0 {
+				t.Fatalf("expected 0 rows, got %d", count)
+			}
+		})
+	}
+}
+
 // ─── Phase 2: project-name-drift — NormalizeProject, ListProjectNames,
 //              ListProjectsWithStats, MergeProjects tests ─────────────────────
 

@@ -4195,25 +4195,35 @@ func (s *Store) DeleteProject(project string) (*DeleteProjectResult, error) {
 
 	result := &DeleteProjectResult{Project: project}
 	err := s.withTx(func(tx *sql.Tx) error {
+		projectVariants, err := s.projectDeleteVariantsTx(tx, project)
+		if err != nil {
+			return fmt.Errorf("delete project: resolve variants: %w", err)
+		}
+		projectPlaceholders := sqlPlaceholders(len(projectVariants))
+		projectArgs := make([]any, 0, len(projectVariants))
+		for _, variant := range projectVariants {
+			projectArgs = append(projectArgs, variant)
+		}
+
 		projectTargetKey := syncTargetKeyForNormalizedProject(project)
 
 		// Existence check across core project-owned entities.
 		var exists bool
 		if err := tx.QueryRow(`SELECT EXISTS(
 			SELECT 1 FROM observations
-			 WHERE project = ?
-			    OR session_id IN (SELECT id FROM sessions WHERE project = ?)
+			 WHERE project IN (`+projectPlaceholders+`)
+			    OR session_id IN (SELECT id FROM sessions WHERE project IN (`+projectPlaceholders+`))
 			UNION ALL
-			SELECT 1 FROM sessions WHERE project = ?
+			SELECT 1 FROM sessions WHERE project IN (`+projectPlaceholders+`)
 			UNION ALL
 			SELECT 1 FROM user_prompts
-			 WHERE project = ?
-			    OR session_id IN (SELECT id FROM sessions WHERE project = ?)
+			 WHERE project IN (`+projectPlaceholders+`)
+			    OR session_id IN (SELECT id FROM sessions WHERE project IN (`+projectPlaceholders+`))
 			UNION ALL
 			SELECT 1 FROM prompt_tombstones
-			 WHERE project = ?
-			    OR session_id IN (SELECT id FROM sessions WHERE project = ?)
-		)`, project, project, project, project, project, project, project).Scan(&exists); err != nil {
+			 WHERE project IN (`+projectPlaceholders+`)
+			    OR session_id IN (SELECT id FROM sessions WHERE project IN (`+projectPlaceholders+`))
+		)`, repeatArgs(projectArgs, 7)...).Scan(&exists); err != nil {
 			return fmt.Errorf("delete project: check existence: %w", err)
 		}
 
@@ -4226,24 +4236,24 @@ func (s *Store) DeleteProject(project string) (*DeleteProjectResult, error) {
 			    updated_at      = datetime('now')
 			WHERE source_id IN (
 				SELECT sync_id FROM observations
-				 WHERE project = ?
-				    OR session_id IN (SELECT id FROM sessions WHERE project = ?)
+				 WHERE project IN (`+projectPlaceholders+`)
+				    OR session_id IN (SELECT id FROM sessions WHERE project IN (`+projectPlaceholders+`))
 			)
 			   OR target_id IN (
 				SELECT sync_id FROM observations
-				 WHERE project = ?
-				    OR session_id IN (SELECT id FROM sessions WHERE project = ?)
+				 WHERE project IN (`+projectPlaceholders+`)
+				    OR session_id IN (SELECT id FROM sessions WHERE project IN (`+projectPlaceholders+`))
 			)
-		`, project, project, project, project); err != nil {
+		`, repeatArgs(projectArgs, 4)...); err != nil {
 			return fmt.Errorf("delete project: orphan memory_relations: %w", err)
 		}
 
 		// Order matters for referential integrity: observations -> prompts -> sessions.
 		if res, err := s.execHook(tx, `
 			DELETE FROM observations
-			 WHERE project = ?
-			    OR session_id IN (SELECT id FROM sessions WHERE project = ?)
-		`, project, project); err != nil {
+			 WHERE project IN (`+projectPlaceholders+`)
+			    OR session_id IN (SELECT id FROM sessions WHERE project IN (`+projectPlaceholders+`))
+		`, append(projectArgs, projectArgs...)...); err != nil {
 			return fmt.Errorf("delete project: observations: %w", err)
 		} else {
 			result.ObservationsDeleted, _ = res.RowsAffected()
@@ -4251,16 +4261,16 @@ func (s *Store) DeleteProject(project string) (*DeleteProjectResult, error) {
 
 		if res, err := s.execHook(tx, `
 			DELETE FROM user_prompts
-			 WHERE project = ?
-			    OR session_id IN (SELECT id FROM sessions WHERE project = ?)
-		`, project, project); err != nil {
+			 WHERE project IN (`+projectPlaceholders+`)
+			    OR session_id IN (SELECT id FROM sessions WHERE project IN (`+projectPlaceholders+`))
+		`, append(projectArgs, projectArgs...)...); err != nil {
 			return fmt.Errorf("delete project: prompts: %w", err)
 		} else {
 			result.PromptsDeleted, _ = res.RowsAffected()
 		}
 
 		// Project-scoped sync/materialization metadata cleanup.
-		if res, err := s.execHook(tx, `DELETE FROM sync_mutations WHERE project = ?`, project); err != nil {
+		if res, err := s.execHook(tx, `DELETE FROM sync_mutations WHERE project IN (`+projectPlaceholders+`)`, projectArgs...); err != nil {
 			return fmt.Errorf("delete project: sync_mutations: %w", err)
 		} else {
 			result.SyncMutationsDeleted, _ = res.RowsAffected()
@@ -4271,30 +4281,38 @@ func (s *Store) DeleteProject(project string) (*DeleteProjectResult, error) {
 			}
 		}
 
-		if res, err := s.execHook(tx,
-			`DELETE FROM sync_apply_deferred
-			 WHERE json_valid(payload) = 1
-			   AND ifnull(json_extract(payload, '$.project'), '') = ?`,
-			project,
-		); err != nil {
-			return fmt.Errorf("delete project: sync_apply_deferred: %w", err)
-		} else {
+		deferredSyncIDs, err := s.syncDeferredProjectSyncIDsTx(tx, project)
+		if err != nil {
+			return fmt.Errorf("delete project: resolve deferred variants: %w", err)
+		}
+		if len(deferredSyncIDs) > 0 {
+			deferredPlaceholders := sqlPlaceholders(len(deferredSyncIDs))
+			deferredArgs := make([]any, 0, len(deferredSyncIDs))
+			for _, id := range deferredSyncIDs {
+				deferredArgs = append(deferredArgs, id)
+			}
+			res, err := s.execHook(tx, `DELETE FROM sync_apply_deferred WHERE sync_id IN (`+deferredPlaceholders+`)`, deferredArgs...)
+			if err != nil {
+				return fmt.Errorf("delete project: sync_apply_deferred: %w", err)
+			}
 			result.SyncDeferredDeleted, _ = res.RowsAffected()
+		} else {
+			result.SyncDeferredDeleted = 0
 		}
 
 		// Delete prompt tombstones BEFORE sessions, so session-derived tombstones
 		// (project NULL/empty + session_id in project) are still matchable.
 		if res, err := s.execHook(tx, `
 			DELETE FROM prompt_tombstones
-			 WHERE project = ?
-			    OR session_id IN (SELECT id FROM sessions WHERE project = ?)
-		`, project, project); err != nil {
+			 WHERE project IN (`+projectPlaceholders+`)
+			    OR session_id IN (SELECT id FROM sessions WHERE project IN (`+projectPlaceholders+`))
+		`, append(projectArgs, projectArgs...)...); err != nil {
 			return fmt.Errorf("delete project: prompt_tombstones: %w", err)
 		} else {
 			result.PromptTombstonesDeleted, _ = res.RowsAffected()
 		}
 
-		if res, err := s.execHook(tx, `DELETE FROM sessions WHERE project = ?`, project); err != nil {
+		if res, err := s.execHook(tx, `DELETE FROM sessions WHERE project IN (`+projectPlaceholders+`)`, projectArgs...); err != nil {
 			return fmt.Errorf("delete project: sessions: %w", err)
 		} else {
 			result.SessionsDeleted, _ = res.RowsAffected()
@@ -4312,13 +4330,13 @@ func (s *Store) DeleteProject(project string) (*DeleteProjectResult, error) {
 			result.SyncStateDeleted, _ = res.RowsAffected()
 		}
 
-		if res, err := s.execHook(tx, `DELETE FROM sync_enrolled_projects WHERE project = ?`, project); err != nil {
+		if res, err := s.execHook(tx, `DELETE FROM sync_enrolled_projects WHERE project IN (`+projectPlaceholders+`)`, projectArgs...); err != nil {
 			return fmt.Errorf("delete project: sync_enrolled_projects: %w", err)
 		} else {
 			result.EnrollmentDeleted, _ = res.RowsAffected()
 		}
 
-		if res, err := s.execHook(tx, `DELETE FROM cloud_upgrade_state WHERE project = ?`, project); err != nil {
+		if res, err := s.execHook(tx, `DELETE FROM cloud_upgrade_state WHERE project IN (`+projectPlaceholders+`)`, projectArgs...); err != nil {
 			return fmt.Errorf("delete project: cloud_upgrade_state: %w", err)
 		} else {
 			result.UpgradeStateDeleted, _ = res.RowsAffected()
@@ -4337,6 +4355,114 @@ func (s *Store) DeleteProject(project string) (*DeleteProjectResult, error) {
 	}
 
 	return result, nil
+}
+
+func (s *Store) projectDeleteVariantsTx(tx *sql.Tx, normalizedProject string) ([]string, error) {
+	targetAlias := projectAliasKey(normalizedProject)
+	seen := map[string]struct{}{normalizedProject: {}}
+	variants := []string{normalizedProject}
+
+	rows, err := s.queryItHook(tx, `
+		SELECT project FROM observations WHERE project IS NOT NULL AND trim(project) != ''
+		UNION
+		SELECT project FROM sessions WHERE project IS NOT NULL AND trim(project) != ''
+		UNION
+		SELECT project FROM user_prompts WHERE project IS NOT NULL AND trim(project) != ''
+		UNION
+		SELECT project FROM prompt_tombstones WHERE project IS NOT NULL AND trim(project) != ''
+		UNION
+		SELECT project FROM sync_mutations WHERE project IS NOT NULL AND trim(project) != ''
+		UNION
+		SELECT project FROM sync_enrolled_projects WHERE project IS NOT NULL AND trim(project) != ''
+		UNION
+		SELECT project FROM cloud_upgrade_state WHERE project IS NOT NULL AND trim(project) != ''
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var candidate string
+		if err := rows.Scan(&candidate); err != nil {
+			return nil, err
+		}
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		if projectAliasKey(candidate) != targetAlias {
+			continue
+		}
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		variants = append(variants, candidate)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return variants, nil
+}
+
+func (s *Store) syncDeferredProjectSyncIDsTx(tx *sql.Tx, normalizedProject string) ([]string, error) {
+	targetAlias := projectAliasKey(normalizedProject)
+	rows, err := s.queryItHook(tx, `
+		SELECT sync_id, ifnull(json_extract(payload, '$.project'), '')
+		FROM sync_apply_deferred
+		WHERE json_valid(payload) = 1
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	ids := make([]string, 0)
+	for rows.Next() {
+		var syncID, payloadProject string
+		if err := rows.Scan(&syncID, &payloadProject); err != nil {
+			return nil, err
+		}
+		payloadProject = strings.TrimSpace(payloadProject)
+		if payloadProject == "" {
+			continue
+		}
+		if projectAliasKey(payloadProject) == targetAlias {
+			ids = append(ids, syncID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return ids, nil
+}
+
+func repeatArgs(args []any, times int) []any {
+	if times <= 0 || len(args) == 0 {
+		return nil
+	}
+	out := make([]any, 0, len(args)*times)
+	for i := 0; i < times; i++ {
+		out = append(out, args...)
+	}
+	return out
+}
+
+func projectAliasKey(project string) string {
+	project, _ = NormalizeProject(project)
+	if project == "" {
+		return ""
+	}
+	parts := strings.FieldsFunc(project, func(r rune) bool {
+		return r == ' ' || r == '-' || r == '_'
+	})
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "|")
 }
 
 // ─── Project Queries ──────────────────────────────────────────────────────────
