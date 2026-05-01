@@ -432,14 +432,14 @@ def mem_session_end(args: dict, **kwargs) -> str:
 
 
 def mem_timeline(args: dict, **kwargs) -> str:
-    """Get timeline of observations for a project. Endpoint: GET /observations?project=...&scope=...&limit=..."""
+    """Get timeline of observations for a project. Endpoint: GET /timeline?project=...&scope=...&limit=..."""
     try:
         params = {"project": args.get("project", _current_project or "")}
         if args.get("scope"):
             params["scope"] = args["scope"]
         if args.get("limit"):
             params["limit"] = str(args["limit"])
-        result = _engram_fetch("/observations", method="GET", params=params)
+        result = _engram_fetch("/timeline", method="GET", params=params)
         if result is None:
             return json.dumps({"error": "Engram server not reachable."})
         return json.dumps(result, indent=2)
@@ -448,17 +448,14 @@ def mem_timeline(args: dict, **kwargs) -> str:
 
 
 def mem_stats(args: dict, **kwargs) -> str:
-    """Get memory statistics. Endpoint: GET /stats?project=..."""
-    try:
-        params = {}
-        if args.get("project"):
-            params["project"] = args["project"]
-        result = _engram_fetch("/stats", method="GET", params=params)
-        if result is None:
-            return json.dumps({"error": "Engram server not reachable."})
-        return json.dumps(result, indent=2)
-    except Exception as e:
-        return json.dumps({"error": str(e)})
+    """Get memory statistics.
+
+    The HTTP server does not expose a /stats endpoint. Use the MCP server
+    (engram mcp --tools=agent) to access this capability."""
+    return json.dumps({
+        "error": "mem_stats is not available via the Engram HTTP API.",
+        "details": "The Hermes plugin previously called GET /stats, but that route is not exposed by the Engram HTTP server.",
+    })
 
 
 def mem_judge(args: dict, **kwargs) -> str:
