@@ -103,6 +103,7 @@ Do not skip step 1 — without it, everything before compaction is lost.
 
 # ─── Hook Callbacks ───────────────────────────────────────────────────────────
 
+
 def _on_pre_llm_call(
     session_id: str,
     user_message: str,
@@ -123,7 +124,9 @@ def _on_pre_llm_call(
     # Inject context from previous sessions on first turn
     injected = {}
     if is_first_turn and session_id:
-        context_data = tools._engram_fetch("/context", params={"project": tools._current_project})
+        context_data = tools._engram_fetch(
+            "/context", params={"project": tools._current_project}
+        )
         if context_data and context_data.get("context"):
             injected["context"] = context_data["context"]
 
@@ -146,11 +149,17 @@ def _on_session_start(session_id: str, model: str, platform: str, **kwargs) -> N
     parent_id = kwargs.get("parent_session_id") or kwargs.get("parent_id")
     if parent_id:
         tools.mark_subagent(session_id)
-        logger.debug("Sub-agent session detected: %s (parent: %s)", session_id, parent_id)
+        logger.debug(
+            "Sub-agent session detected: %s (parent: %s)", session_id, parent_id
+        )
         return
 
     tools.ensure_session(session_id)
-    logger.debug("Session registered in engram: %s (project: %s)", session_id, tools._current_project)
+    logger.debug(
+        "Session registered in engram: %s (project: %s)",
+        session_id,
+        tools._current_project,
+    )
 
 
 def _on_session_end(
@@ -186,64 +195,100 @@ def _on_post_tool_call(
 
 # ─── Plugin Registration ──────────────────────────────────────────────────────
 
+
 def register(ctx) -> None:
     """
     Wire schemas to handlers and register lifecycle hooks.
     Called exactly once at Hermes startup.
     """
     # ── Tools ──────────────────────────────────────────────────────────────
-    ctx.register_tool(name="mem_search", schema=schemas.MEM_SEARCH, handler=tools.mem_search)
-    ctx.register_tool(name="mem_save", schema=schemas.MEM_SAVE, handler=tools.mem_save)
-    ctx.register_tool(name="mem_update", schema=schemas.MEM_UPDATE, handler=tools.mem_update)
-    ctx.register_tool(name="mem_delete", schema=schemas.MEM_DELETE, handler=tools.mem_delete)
-    ctx.register_tool(name="mem_context", schema=schemas.MEM_CONTEXT, handler=tools.mem_context)
+    ctx.register_tool(
+        name="mem_search",
+        toolset="engram",
+        schema=schemas.MEM_SEARCH,
+        handler=tools.mem_search,
+    )
+    ctx.register_tool(
+        name="mem_save",
+        toolset="engram",
+        schema=schemas.MEM_SAVE,
+        handler=tools.mem_save,
+    )
+    ctx.register_tool(
+        name="mem_update",
+        toolset="engram",
+        schema=schemas.MEM_UPDATE,
+        handler=tools.mem_update,
+    )
+    ctx.register_tool(
+        name="mem_delete",
+        toolset="engram",
+        schema=schemas.MEM_DELETE,
+        handler=tools.mem_delete,
+    )
+    ctx.register_tool(
+        name="mem_context",
+        toolset="engram",
+        schema=schemas.MEM_CONTEXT,
+        handler=tools.mem_context,
+    )
     ctx.register_tool(
         name="mem_session_summary",
+        toolset="engram",
         schema=schemas.MEM_SESSION_SUMMARY,
         handler=tools.mem_session_summary,
     )
     ctx.register_tool(
         name="mem_get_observation",
+        toolset="engram",
         schema=schemas.MEM_GET_OBSERVATION,
         handler=tools.mem_get_observation,
     )
     ctx.register_tool(
         name="mem_save_prompt",
+        toolset="engram",
         schema=schemas.MEM_SAVE_PROMPT,
         handler=tools.mem_save_prompt,
     )
     ctx.register_tool(
         name="mem_session_start",
+        toolset="engram",
         schema=schemas.MEM_SESSION_START,
         handler=tools.mem_session_start,
     )
     ctx.register_tool(
         name="mem_session_end",
+        toolset="engram",
         schema=schemas.MEM_SESSION_END,
         handler=tools.mem_session_end,
     )
     ctx.register_tool(
         name="mem_timeline",
+        toolset="engram",
         schema=schemas.MEM_TIMELINE,
         handler=tools.mem_timeline,
     )
     ctx.register_tool(
         name="mem_judge",
+        toolset="engram",
         schema=schemas.MEM_JUDGE,
         handler=tools.mem_judge,
     )
     ctx.register_tool(
         name="mem_doctor",
+        toolset="engram",
         schema=schemas.MEM_DOCTOR,
         handler=tools.mem_doctor,
     )
     ctx.register_tool(
         name="mem_current_project",
+        toolset="engram",
         schema=schemas.MEM_CURRENT_PROJECT,
         handler=tools.mem_current_project,
     )
     ctx.register_tool(
         name="mem_capture_passive",
+        toolset="engram",
         schema=schemas.MEM_CAPTURE_PASSIVE,
         handler=tools.mem_capture_passive,
     )
