@@ -6359,6 +6359,97 @@ func TestCountObservationsForProject(t *testing.T) {
 
 // ─── DeleteSession tests ─────────────────────────────────────────────────────
 
+func TestRecentObservationsOrderByCreatedAtBeforeID(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s-recent-created", "proj", "/tmp"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	rows := []struct {
+		id        int64
+		title     string
+		createdAt string
+	}{
+		{id: 100, title: "older-high-id", createdAt: "2025-01-01 00:00:00"},
+		{id: 50, title: "newer-low-id", createdAt: "2025-01-02 00:00:00"},
+	}
+	for _, row := range rows {
+		if _, err := s.db.Exec(`INSERT INTO observations (id, sync_id, session_id, type, title, content, project, scope, normalized_hash, revision_count, duplicate_count, created_at, updated_at)
+			VALUES (?, ?, 's-recent-created', 'note', ?, ?, 'proj', 'project', ?, 1, 1, ?, ?)`, row.id, fmt.Sprintf("obs-%d", row.id), row.title, row.title, row.title, row.createdAt, row.createdAt); err != nil {
+			t.Fatalf("insert observation %d: %v", row.id, err)
+		}
+	}
+
+	obs, err := s.RecentObservations("proj", "project", 10)
+	if err != nil {
+		t.Fatalf("RecentObservations: %v", err)
+	}
+	if len(obs) < 2 || obs[0].Title != "newer-low-id" || obs[1].Title != "older-high-id" {
+		t.Fatalf("expected created_at desc before id desc, got %+v", obs)
+	}
+}
+
+func TestRecentObservationsSameTimestampTiesByIDDesc(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s-recent-tie", "proj", "/tmp"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	for _, id := range []int64{10, 20} {
+		if _, err := s.db.Exec(`INSERT INTO observations (id, sync_id, session_id, type, title, content, project, scope, normalized_hash, revision_count, duplicate_count, created_at, updated_at)
+			VALUES (?, ?, 's-recent-tie', 'note', ?, ?, 'proj', 'project', ?, 1, 1, '2025-01-01 00:00:00', '2025-01-01 00:00:00')`, id, fmt.Sprintf("obs-tie-%d", id), fmt.Sprintf("tie-%d", id), fmt.Sprintf("tie-%d", id), fmt.Sprintf("hash-%d", id)); err != nil {
+			t.Fatalf("insert observation %d: %v", id, err)
+		}
+	}
+
+	obs, err := s.RecentObservations("proj", "project", 10)
+	if err != nil {
+		t.Fatalf("RecentObservations: %v", err)
+	}
+	if len(obs) < 2 || obs[0].ID != 20 || obs[1].ID != 10 {
+		t.Fatalf("expected id desc tie-breaker, got %+v", obs)
+	}
+}
+
+func TestRecentSessionsOrderByLatestCreatedAtDeterministically(t *testing.T) {
+	s := newTestStore(t)
+	for _, sess := range []struct {
+		id        string
+		startedAt string
+	}{
+		{id: "sess-a", startedAt: "2025-01-01 00:00:00"},
+		{id: "sess-b", startedAt: "2025-01-01 00:00:00"},
+		{id: "sess-c", startedAt: "2025-01-01 00:00:00"},
+	} {
+		if err := s.CreateSession(sess.id, "proj", "/tmp"); err != nil {
+			t.Fatalf("create session %s: %v", sess.id, err)
+		}
+		if _, err := s.db.Exec(`UPDATE sessions SET started_at = ? WHERE id = ?`, sess.startedAt, sess.id); err != nil {
+			t.Fatalf("update session %s: %v", sess.id, err)
+		}
+	}
+	for _, row := range []struct {
+		id        int64
+		sessionID string
+		createdAt string
+	}{
+		{id: 1, sessionID: "sess-a", createdAt: "2025-01-03 00:00:00"},
+		{id: 2, sessionID: "sess-b", createdAt: "2025-01-02 00:00:00"},
+		{id: 3, sessionID: "sess-c", createdAt: "2025-01-03 00:00:00"},
+	} {
+		if _, err := s.db.Exec(`INSERT INTO observations (id, sync_id, session_id, type, title, content, project, scope, normalized_hash, revision_count, duplicate_count, created_at, updated_at)
+			VALUES (?, ?, ?, 'note', ?, ?, 'proj', 'project', ?, 1, 1, ?, ?)`, row.id, fmt.Sprintf("obs-session-%d", row.id), row.sessionID, row.sessionID, row.sessionID, fmt.Sprintf("hash-session-%d", row.id), row.createdAt, row.createdAt); err != nil {
+			t.Fatalf("insert observation %d: %v", row.id, err)
+		}
+	}
+
+	sessions, err := s.RecentSessions("proj", 10)
+	if err != nil {
+		t.Fatalf("RecentSessions: %v", err)
+	}
+	if len(sessions) < 3 || sessions[0].ID != "sess-c" || sessions[1].ID != "sess-a" || sessions[2].ID != "sess-b" {
+		t.Fatalf("expected latest created_at desc with session id desc tie-breaker, got %+v", sessions)
+	}
+}
+
 func TestDeleteSession_EmptySession(t *testing.T) {
 	s := newTestStore(t)
 

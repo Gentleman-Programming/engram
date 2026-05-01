@@ -1001,12 +1001,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		// Auto-detect project from cwd; fail fast on ambiguous (REQ-308, REQ-309)
 		detRes, err := resolveWriteProject()
 		if err != nil {
-			// JW1: use AvailableProjects from detection result (repos in cwd),
-			// NOT stats.Projects (all store projects).
-			return errorWithMeta("ambiguous_project",
-				fmt.Sprintf("Cannot determine project: %s", err),
-				detRes.AvailableProjects,
-			), nil
+			return writeProjectErrorResult(detRes, err), nil
 		}
 		project := detRes.Project
 
@@ -1241,11 +1236,7 @@ func handleSavePrompt(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 
 		detRes, err := resolveWriteProject()
 		if err != nil {
-			// JW1: use AvailableProjects from detection result (repos in cwd).
-			return errorWithMeta("ambiguous_project",
-				fmt.Sprintf("Cannot determine project: %s", err),
-				detRes.AvailableProjects,
-			), nil
+			return writeProjectErrorResult(detRes, err), nil
 		}
 		project, _ := store.NormalizeProject(detRes.Project)
 
@@ -1523,11 +1514,7 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		// Auto-detect project from cwd; fail fast on ambiguous (REQ-308, REQ-309)
 		detRes, err := resolveWriteProject()
 		if err != nil {
-			// JW1: use AvailableProjects from detection result (repos in cwd).
-			return errorWithMeta("ambiguous_project",
-				fmt.Sprintf("Cannot determine project: %s", err),
-				detRes.AvailableProjects,
-			), nil
+			return writeProjectErrorResult(detRes, err), nil
 		}
 		project, _ := store.NormalizeProject(detRes.Project)
 
@@ -1567,11 +1554,7 @@ func handleSessionStart(s *store.Store, cfg MCPConfig, activity *SessionActivity
 
 		detRes, err := resolveSessionStartProject(explicitDirectory)
 		if err != nil {
-			// JW1: use AvailableProjects from detection result (repos in cwd).
-			return errorWithMeta("ambiguous_project",
-				fmt.Sprintf("Cannot determine project: %s", err),
-				detRes.AvailableProjects,
-			), nil
+			return writeProjectErrorResult(detRes, err), nil
 		}
 		project, _ := store.NormalizeProject(detRes.Project)
 
@@ -1614,6 +1597,9 @@ func handleSessionEnd(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 
 		detRes, err := resolveWriteProject()
 		if err != nil {
+			if errors.Is(err, projectpkg.ErrInvalidConfig) {
+				return writeProjectErrorResult(detRes, err), nil
+			}
 			// For session end, still complete the operation even if project resolution fails.
 			// Use basename fallback.
 			cwd, _ := os.Getwd()
@@ -1645,11 +1631,7 @@ func handleCapturePassive(s *store.Store, cfg MCPConfig, activity *SessionActivi
 
 		detRes, err := resolveWriteProject()
 		if err != nil {
-			// JW1: use AvailableProjects from detection result (repos in cwd).
-			return errorWithMeta("ambiguous_project",
-				fmt.Sprintf("Cannot determine project: %s", err),
-				detRes.AvailableProjects,
-			), nil
+			return writeProjectErrorResult(detRes, err), nil
 		}
 		project, _ := store.NormalizeProject(detRes.Project)
 
@@ -1947,6 +1929,14 @@ func respondWithProject(res projectpkg.DetectionResult, text string, extra map[s
 	return mcp.NewToolResultText(string(out))
 }
 
+func writeProjectErrorResult(res projectpkg.DetectionResult, err error) *mcp.CallToolResult {
+	code := "ambiguous_project"
+	if errors.Is(err, projectpkg.ErrInvalidConfig) {
+		code = "invalid_project_config"
+	}
+	return errorWithMeta(code, fmt.Sprintf("Cannot determine project: %s", err), res.AvailableProjects)
+}
+
 // errorWithMeta returns a structured tool error result with error_code,
 // message, available_projects, and a hint for resolution.
 func errorWithMeta(code, msg string, availableProjects []string) *mcp.CallToolResult {
@@ -1960,6 +1950,8 @@ func errorWithMeta(code, msg string, availableProjects []string) *mcp.CallToolRe
 		envelope["hint"] = "Use mem_current_project to inspect detection results, or cd into one of the listed repositories."
 	case "unknown_project":
 		envelope["hint"] = "Use one of the available_projects values, or omit project to auto-detect."
+	case "invalid_project_config":
+		envelope["hint"] = "Fix .engram/config.json so project_name is a non-empty project name."
 	}
 	out, _ := jsonMarshal(envelope)
 	result := mcp.NewToolResultText(string(out))

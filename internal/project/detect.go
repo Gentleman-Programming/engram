@@ -7,7 +7,9 @@ package project
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +21,10 @@ import (
 // multiple git repositories and we cannot auto-select one.
 var ErrAmbiguousProject = errors.New("ambiguous project: multiple git repos found in cwd")
 
+// ErrInvalidConfig is returned when .engram/config.json exists but cannot be
+// used as a project write lock.
+var ErrInvalidConfig = errors.New("invalid .engram/config.json")
+
 // Source constants describe how the project name was resolved.
 const (
 	SourceGitRemote        = "git_remote"        // derived from git remote origin URL
@@ -28,6 +34,7 @@ const (
 	SourceAmbiguous        = "ambiguous"         // cwd contains multiple git repos (Case 4)
 	SourceExplicitOverride = "explicit_override" // JR2-2: caller explicitly supplied a project name
 	SourceRequestBody      = "request_body"      // REQ-414: project came from the request body (server-side, no filesystem path)
+	SourceConfig           = "config"            // derived from .engram/config.json project_name
 )
 
 // noiseSet lists directory names that are skipped during child-repo scanning.
@@ -74,6 +81,10 @@ func DetectProjectFull(dir string) DetectionResult {
 	// Guard against arg injection.
 	if strings.HasPrefix(dir, "-") {
 		dir = "./" + dir
+	}
+
+	if res, ok := detectFromConfig(dir); ok {
+		return res
 	}
 
 	// ── Case 1: git_remote ──────────────────────────────────────────────
@@ -152,6 +163,75 @@ basename:
 		Source:  SourceDirBasename,
 		Path:    absDir,
 	}
+}
+
+type configFile struct {
+	ProjectName string `json:"project_name"`
+}
+
+func detectFromConfig(dir string) (DetectionResult, bool) {
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		absDir = dir
+	}
+
+	// Project config is a project/repo lock, not a global ancestor setting. When
+	// cwd is inside git, only the repository root may define the lock. This keeps
+	// ~/.engram/config.json (the global data directory) from being inherited by
+	// every directory under $HOME.
+	if gitRoot := detectGitRootDir(absDir); gitRoot != "" {
+		return readConfigAt(gitRoot)
+	}
+
+	// Outside git, accept only the current directory's config. Do not walk to
+	// arbitrary parents such as $HOME.
+	return readConfigAt(absDir)
+}
+
+func readConfigAt(projectDir string) (DetectionResult, bool) {
+	configPath := filepath.Join(projectDir, ".engram", "config.json")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return DetectionResult{}, false
+		}
+		return invalidConfigResult(projectDir, fmt.Errorf("read %s: %w", configPath, err)), true
+	}
+
+	var cfg configFile
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return invalidConfigResult(projectDir, fmt.Errorf("parse %s: %w", configPath, err)), true
+	}
+	projectName, err := normalizeConfigProjectName(cfg.ProjectName)
+	if err != nil {
+		return invalidConfigResult(projectDir, err), true
+	}
+	return DetectionResult{Project: projectName, Source: SourceConfig, Path: projectDir}, true
+}
+
+func invalidConfigResult(path string, err error) DetectionResult {
+	return DetectionResult{
+		Project: "",
+		Source:  SourceConfig,
+		Path:    path,
+		Error:   fmt.Errorf("%w: %v", ErrInvalidConfig, err),
+	}
+}
+
+func normalizeConfigProjectName(projectName string) (string, error) {
+	trimmed := strings.TrimSpace(projectName)
+	if trimmed == "" {
+		return "", fmt.Errorf("%w: project_name is required", ErrInvalidConfig)
+	}
+	if strings.ContainsAny(trimmed, `/\\`) {
+		return "", fmt.Errorf("%w: project_name must be a name, not a path", ErrInvalidConfig)
+	}
+	for _, r := range trimmed {
+		if r < 0x20 || r == 0x7f {
+			return "", fmt.Errorf("%w: project_name contains control characters", ErrInvalidConfig)
+		}
+	}
+	return normalize(trimmed), nil
 }
 
 // detectGitRootDir returns the git repository root for dir, or "" if not in a repo.
