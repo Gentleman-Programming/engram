@@ -4189,14 +4189,13 @@ func (s *Store) MigrateProject(oldName, newName string) (*MigrateResult, error) 
 // It removes all project-owned local data and project-scoped sync metadata.
 func (s *Store) DeleteProject(project string) (*DeleteProjectResult, error) {
 	project, _ = NormalizeProject(project)
-	project = strings.TrimSpace(project)
 	if project == "" {
 		return nil, ErrProjectNameRequired
 	}
 
 	result := &DeleteProjectResult{Project: project}
 	err := s.withTx(func(tx *sql.Tx) error {
-		projectTargetKey := syncTargetKeyForProject(project)
+		projectTargetKey := syncTargetKeyForNormalizedProject(project)
 
 		// Existence check across core project-owned entities.
 		var exists bool
@@ -4265,6 +4264,11 @@ func (s *Store) DeleteProject(project string) (*DeleteProjectResult, error) {
 			return fmt.Errorf("delete project: sync_mutations: %w", err)
 		} else {
 			result.SyncMutationsDeleted, _ = res.RowsAffected()
+			if result.SyncMutationsDeleted > 0 {
+				if err := s.reconcileSyncStateAfterMutationPruneTx(tx, DefaultSyncTargetKey); err != nil {
+					return fmt.Errorf("delete project: reconcile sync_state: %w", err)
+				}
+			}
 		}
 
 		if res, err := s.execHook(tx,
@@ -5199,11 +5203,57 @@ func (s *Store) enqueueSyncMutationTx(tx *sql.Tx, entity, entityKey, op string, 
 
 func syncTargetKeyForProject(project string) string {
 	project, _ = NormalizeProject(project)
-	project = strings.TrimSpace(project)
+	return syncTargetKeyForNormalizedProject(project)
+}
+
+func syncTargetKeyForNormalizedProject(project string) string {
 	if project == "" {
 		return DefaultSyncTargetKey
 	}
 	return fmt.Sprintf("%s:%s", DefaultSyncTargetKey, project)
+}
+
+func (s *Store) reconcileSyncStateAfterMutationPruneTx(tx *sql.Tx, targetKey string) error {
+	targetKey = normalizeSyncTargetKey(targetKey)
+	state, err := s.getSyncStateTx(tx, targetKey)
+	if err != nil {
+		return err
+	}
+
+	var remaining int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE target_key = ? AND acked_at IS NULL`, targetKey).Scan(&remaining); err != nil {
+		return err
+	}
+
+	acked := state.LastAckedSeq
+	if remaining == 0 && state.LastEnqueuedSeq > acked {
+		acked = state.LastEnqueuedSeq
+	}
+
+	lifecycle := SyncLifecyclePending
+	if remaining == 0 {
+		lifecycle = SyncLifecycleHealthy
+	}
+	if isActivelyDegradedState(state, time.Now().UTC()) {
+		lifecycle = SyncLifecycleDegraded
+	}
+
+	if lifecycle == SyncLifecycleDegraded {
+		_, err = s.execHook(tx,
+			`UPDATE sync_state
+			 SET last_acked_seq = ?, lifecycle = ?, updated_at = datetime('now')
+			 WHERE target_key = ?`,
+			acked, lifecycle, targetKey,
+		)
+	} else {
+		_, err = s.execHook(tx,
+			`UPDATE sync_state
+			 SET last_acked_seq = ?, lifecycle = ?, consecutive_failures = 0, backoff_until = NULL, reason_code = NULL, reason_message = NULL, last_error = NULL, updated_at = datetime('now')
+			 WHERE target_key = ?`,
+			acked, lifecycle, targetKey,
+		)
+	}
+	return err
 }
 
 func extractSessionIDFromPayload(payload any) string {

@@ -6117,6 +6117,61 @@ func TestDeleteProject_HardDeleteCascadeAndSyncCleanup(t *testing.T) {
 	if status != "orphaned" {
 		t.Fatalf("expected derived relation judgment_status=orphaned, got %q", status)
 	}
+
+	globalState, err := s.GetSyncState(DefaultSyncTargetKey)
+	if err != nil {
+		t.Fatalf("GetSyncState(default): %v", err)
+	}
+	if globalState.Lifecycle != SyncLifecycleHealthy {
+		t.Fatalf("expected default sync_state lifecycle=%q after deleting final pending project rows, got %q", SyncLifecycleHealthy, globalState.Lifecycle)
+	}
+	if globalState.LastAckedSeq != globalState.LastEnqueuedSeq {
+		t.Fatalf("expected default sync_state to reconcile acked/enqueued after mutation prune, got acked=%d enqueued=%d", globalState.LastAckedSeq, globalState.LastEnqueuedSeq)
+	}
+}
+
+func TestDeleteProject_PreservesGlobalPendingSyncStateForOtherProjects(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("sess-alpha", "alpha", "/tmp"); err != nil {
+		t.Fatalf("CreateSession(alpha): %v", err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{SessionID: "sess-alpha", Type: "decision", Title: "alpha", Content: "keep me", Project: "alpha", Scope: "project"}); err != nil {
+		t.Fatalf("AddObservation(alpha): %v", err)
+	}
+	if err := s.EnrollProject("alpha"); err != nil {
+		t.Fatalf("EnrollProject(alpha): %v", err)
+	}
+	if err := s.CreateSession("sess-beta", "beta", "/tmp"); err != nil {
+		t.Fatalf("CreateSession(beta): %v", err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{SessionID: "sess-beta", Type: "decision", Title: "beta", Content: "delete me", Project: "beta", Scope: "project"}); err != nil {
+		t.Fatalf("AddObservation(beta): %v", err)
+	}
+
+	if _, err := s.DeleteProject("beta"); err != nil {
+		t.Fatalf("DeleteProject(beta): %v", err)
+	}
+
+	globalState, err := s.GetSyncState(DefaultSyncTargetKey)
+	if err != nil {
+		t.Fatalf("GetSyncState(default): %v", err)
+	}
+	if globalState.Lifecycle != SyncLifecyclePending {
+		t.Fatalf("expected default sync_state lifecycle=%q while another project's mutations remain pending, got %q", SyncLifecyclePending, globalState.Lifecycle)
+	}
+
+	pending, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 20)
+	if err != nil {
+		t.Fatalf("ListPendingSyncMutations: %v", err)
+	}
+	if len(pending) == 0 {
+		t.Fatal("expected pending sync mutations for remaining project")
+	}
+	for _, mutation := range pending {
+		if mutation.Project == "beta" {
+			t.Fatalf("expected deleted project mutations to be removed from pending queue: %+v", mutation)
+		}
+	}
 }
 
 func TestDeleteProject_NoOpForUnknownProject(t *testing.T) {
