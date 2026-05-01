@@ -824,6 +824,30 @@ func TestHandleDeleteProject_Success(t *testing.T) {
 	}
 }
 
+func TestHandleDeleteProject_NoOpProjectReturnsNotFound(t *testing.T) {
+	srv := New(newServerTestStore(t), 0)
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodDelete, "/projects/does-not-exist", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for no-op delete, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["status"] != "not_found" {
+		t.Fatalf("expected status=not_found, got %v", resp["status"])
+	}
+	if resp["deleted"] != false {
+		t.Fatalf("expected deleted=false, got %v", resp["deleted"])
+	}
+}
+
 func TestHandleDeleteProject_MissingProject(t *testing.T) {
 	srv := New(newServerTestStore(t), 0)
 	h := srv.Handler()

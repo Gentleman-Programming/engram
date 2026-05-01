@@ -5979,6 +5979,23 @@ func TestDeleteProject_HardDeleteCascadeAndSyncCleanup(t *testing.T) {
 	if _, err := s.AddPrompt(AddPromptParams{SessionID: "s-del", Content: "prompt", Project: project}); err != nil {
 		t.Fatalf("AddPrompt: %v", err)
 	}
+	relObsID, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-del", Type: "decision", Title: "rel obs", Content: "relation source", Project: project, Scope: "project",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation(rel): %v", err)
+	}
+	relObs, err := s.GetObservation(relObsID)
+	if err != nil {
+		t.Fatalf("GetObservation(rel): %v", err)
+	}
+	if _, err := s.execHook(s.db,
+		`INSERT INTO memory_relations (sync_id, source_id, target_id, relation, judgment_status)
+		 VALUES (?, ?, ?, 'related', 'judged')`,
+		"rel-proj-delete", relObs.SyncID, "external-target-sync",
+	); err != nil {
+		t.Fatalf("seed memory_relations: %v", err)
+	}
 	if err := s.EnrollProject(project); err != nil {
 		t.Fatalf("EnrollProject: %v", err)
 	}
@@ -6034,6 +6051,14 @@ func TestDeleteProject_HardDeleteCascadeAndSyncCleanup(t *testing.T) {
 		if n != 0 {
 			t.Fatalf("expected 0 rows after project delete for query %q, got %d", q, n)
 		}
+	}
+
+	var status string
+	if err := s.db.QueryRow(`SELECT judgment_status FROM memory_relations WHERE sync_id = 'rel-proj-delete'`).Scan(&status); err != nil {
+		t.Fatalf("query orphaned relation status: %v", err)
+	}
+	if status != "orphaned" {
+		t.Fatalf("expected relation judgment_status=orphaned, got %q", status)
 	}
 }
 

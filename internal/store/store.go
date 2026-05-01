@@ -50,6 +50,7 @@ var (
 	ErrSessionDeleteBlocked   = errors.New("session deletion is blocked while cloud sync enrollment is active")
 	ErrObservationNotFound    = errors.New("observation not found")
 	ErrPromptNotFound         = errors.New("prompt not found")
+	ErrProjectNameRequired    = errors.New("project name must not be empty")
 )
 
 // Sentinel errors for relation sync apply path (Phase 2).
@@ -4188,7 +4189,7 @@ func (s *Store) DeleteProject(project string) (*DeleteProjectResult, error) {
 	project, _ = NormalizeProject(project)
 	project = strings.TrimSpace(project)
 	if project == "" {
-		return nil, fmt.Errorf("project name must not be empty")
+		return nil, ErrProjectNameRequired
 	}
 
 	result := &DeleteProjectResult{Project: project}
@@ -4203,6 +4204,19 @@ func (s *Store) DeleteProject(project string) (*DeleteProjectResult, error) {
 			SELECT 1 FROM user_prompts WHERE project = ?
 		)`, project, project, project).Scan(&exists); err != nil {
 			return fmt.Errorf("delete project: check existence: %w", err)
+		}
+
+		// Before deleting observations, mark any related memory_relations as orphaned.
+		// memory_relations stores sync_id text keys (no FK to observations), so this
+		// explicit update prevents dangling "pending/judged" relations after delete.
+		if _, err := s.execHook(tx, `
+			UPDATE memory_relations
+			SET judgment_status = 'orphaned',
+			    updated_at      = datetime('now')
+			WHERE source_id IN (SELECT sync_id FROM observations WHERE project = ?)
+			   OR target_id IN (SELECT sync_id FROM observations WHERE project = ?)
+		`, project, project); err != nil {
+			return fmt.Errorf("delete project: orphan memory_relations: %w", err)
 		}
 
 		// Order matters for referential integrity: observations -> prompts -> sessions.
