@@ -1191,8 +1191,8 @@ func injectHermesMCP() error {
 		// Parse existing YAML
 		var tmp map[string]interface{}
 		if err := yaml.Unmarshal(data, &tmp); err != nil {
-			// Fall back: treat file as empty to avoid breaking the config
-			config = make(map[string]interface{})
+			// Return error instead of silently clobbering the user's config
+			return fmt.Errorf("failed to parse config.yaml: %w", err)
 		} else {
 			config = tmp
 		}

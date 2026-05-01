@@ -14,7 +14,6 @@ provides_tools:
   - mem_session_start
   - mem_session_end
   - mem_timeline
-  - mem_stats
   - mem_judge
   - mem_doctor
   - mem_current_project
@@ -22,8 +21,6 @@ provides_tools:
 provides_hooks:
   - pre_llm_call
   - post_tool_call
-  - on_session_start
-  - on_session_end
 requires_env:
   - name: ENGRAM_PORT
     description: "Port where engram serve runs (default: 7437)"
