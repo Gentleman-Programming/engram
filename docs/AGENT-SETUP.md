@@ -17,6 +17,7 @@ Engram works with **any MCP-compatible agent**. Pick your agent below.
 |-------|-----------|---------------|
 | Claude Code | `claude plugin marketplace add Gentleman-Programming/engram && claude plugin install engram` | [Details](#claude-code) |
 | OpenCode | `engram setup opencode` | [Details](#opencode) |
+| Hermes Agent | `engram setup hermes-agent` | [Details](#hermes-agent) |
 | Gemini CLI | `engram setup gemini-cli` | [Details](#gemini-cli) |
 | Codex | `engram setup codex` | [Details](#codex) |
 | VS Code | `code --add-mcp '{"name":"engram","command":"engram","args":["mcp"]}'` | [Details](#vs-code-copilot--claude-code-extension) |
@@ -143,6 +144,56 @@ PowerShell fallback test and local override example:
 ```
 
 See [Plugins → Claude Code Plugin](PLUGINS.md#claude-code-plugin) for details on what the plugin provides.
+
+---
+
+## Hermes Agent
+
+Recommended: one command to set up the Engram plugin + MCP server:
+
+```bash
+engram setup hermes-agent
+```
+
+`engram setup hermes-agent` does three things:
+
+1. **Copies the Engram plugin** to `~/.hermes/plugins/engram/` — the plugin provides persistent memory tools (`mem_save`, `mem_search`, `mem_context`, etc.) that Hermes Agent can call as native tools
+2. **Registers the engram MCP server** in `~/.hermes/config.yaml` under `mcp_servers` so the Engram MCP endpoint becomes available to any agent configured with Hermes
+3. **Prints manual fallback** instructions if the config injection fails (non-fatal — the plugin still works)
+
+### What the plugin provides
+
+Once installed, Hermes Agent has access to Engram memory tools via the plugin interface:
+
+- `mem_save` — persist decisions, bug fixes, patterns, and discoveries
+- `mem_search` — cross-session recall of past decisions and implementations
+- `mem_session_summary` — structured end-of-session summaries
+- `mem_context` — recover context from recent sessions
+
+### Requirements
+
+- Hermes Agent installed (`hermes agent`)
+- Engram installed (`engram`)
+- Hermes version with plugin support
+
+### Manual fallback
+
+If `engram setup hermes-agent` fails, add manually to `~/.hermes/config.yaml`:
+
+```yaml
+mcp_servers:
+  engram:
+    command: engram   # or full path: /home/user/.local/bin/engram
+    args: ["mcp", "--tools=agent"]
+    timeout: 60
+```
+
+And copy the plugin files manually:
+
+```bash
+mkdir -p ~/.hermes/plugins/engram
+cp internal/setup/plugins/hermes/* ~/.hermes/plugins/engram/
+```
 
 ---
 

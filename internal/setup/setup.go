@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/Gentleman-Programming/engram/internal/mcp"
+	"gopkg.in/yaml.v3"
 )
 
 var (
@@ -37,6 +38,10 @@ var (
 	openCodeReadFile = func(path string) ([]byte, error) {
 		return openCodeFS.ReadFile(path)
 	}
+	hermesReadFile  = func(path string) ([]byte, error) {
+		return hermesFS.ReadFile(path)
+	}
+	hermesWriteFileFn = os.WriteFile
 	statFn                             = os.Stat
 	openCodeWriteFileFn                = os.WriteFile
 	readFileFn                         = os.ReadFile
@@ -56,6 +61,9 @@ var (
 
 //go:embed plugins/opencode/*
 var openCodeFS embed.FS
+
+//go:embed plugins/hermes/*
+var hermesFS embed.FS
 
 // Agent represents a supported AI coding agent.
 type Agent struct {
@@ -250,6 +258,11 @@ func SupportedAgents() []Agent {
 			Description: "Codex — MCP registration plus model/compaction instruction files",
 			InstallDir:  codexConfigPath(),
 		},
+		{
+			Name:        "hermes-agent",
+			Description: "Hermes Agent — Python plugin with hooks, pre/post-tool, and Memory Protocol",
+			InstallDir:  hermesPluginsDir(),
+		},
 	}
 }
 
@@ -264,8 +277,10 @@ func Install(agentName string) (*Result, error) {
 		return installGeminiCLI()
 	case "codex":
 		return installCodex()
+	case "hermes-agent":
+		return installHermesAgent()
 	default:
-		return nil, fmt.Errorf("unknown agent: %q (supported: opencode, claude-code, gemini-cli, codex)", agentName)
+		return nil, fmt.Errorf("unknown agent: %q (supported: opencode, claude-code, gemini-cli, codex, hermes-agent)", agentName)
 	}
 }
 
@@ -1095,4 +1110,123 @@ func codexInstructionsPath() string {
 
 func codexCompactPromptPath() string {
 	return filepath.Join(filepath.Dir(codexConfigPath()), "engram-compact-prompt.md")
+}
+
+// hermesPluginsDir returns the path to the Hermes Agent engram plugin directory.
+func hermesPluginsDir() string {
+	home, _ := userHomeDir()
+	return filepath.Join(home, ".hermes", "plugins", "engram")
+}
+
+// hermesConfigPath returns the path to the Hermes Agent config file.
+func hermesConfigPath() string {
+	home, _ := userHomeDir()
+	return filepath.Join(home, ".hermes", "config.yaml")
+}
+
+// installHermesAgent installs the Engram plugin for Hermes Agent:
+// - Copies Python plugin files to ~/.hermes/plugins/engram/
+// - Injects the engram MCP server entry into ~/.hermes/config.yaml
+func installHermesAgent() (*Result, error) {
+	// ── 1. Copy plugin files ───────────────────────────────────────────────
+	pluginDir := hermesPluginsDir()
+	if err := os.MkdirAll(pluginDir, 0755); err != nil {
+		return nil, fmt.Errorf("create plugin dir %s: %w", pluginDir, err)
+	}
+
+	entries, err := hermesFS.ReadDir("plugins/hermes")
+	if err != nil {
+		return nil, fmt.Errorf("read embedded plugin directory: %w", err)
+	}
+
+	files := 0
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		data, err := hermesFS.ReadFile("plugins/hermes/" + entry.Name())
+		if err != nil {
+			return nil, fmt.Errorf("read embedded file %s: %w", entry.Name(), err)
+		}
+		dest := filepath.Join(pluginDir, entry.Name())
+		if err := hermesWriteFileFn(dest, data, 0644); err != nil {
+			return nil, fmt.Errorf("write %s: %w", dest, err)
+		}
+		files++
+	}
+
+	// ── 2. Inject MCP server into config.yaml ──────────────────────────────
+	if err := injectHermesMCP(); err != nil {
+		// Non-fatal: plugin works, MCP just needs manual config
+		cmd := resolveEngramCommand()
+		fmt.Fprintf(os.Stderr, "warning: could not auto-register MCP server in config.yaml: %v\n", err)
+		fmt.Fprintf(os.Stderr, "  Add manually to your ~/.hermes/config.yaml under mcp_servers:\n")
+		fmt.Fprintf(os.Stderr, "  engram:\n    command: %q\n    args: [\"mcp\", \"--tools=agent\"]\n    timeout: 60\n", cmd)
+	} else {
+		files++
+	}
+
+	return &Result{
+		Agent:       "hermes-agent",
+		Destination: pluginDir,
+		Files:       files,
+	}, nil
+}
+
+// injectHermesMCP adds the engram MCP server entry to ~/.hermes/config.yaml.
+// It reads the existing YAML config, adds/updates the engram entry under
+// "mcp_servers", and writes it back preserving all other settings.
+func injectHermesMCP() error {
+	configPath := hermesConfigPath()
+
+	// Read existing config (or start with empty)
+	var config map[string]interface{}
+	data, err := readFileFn(configPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("read config: %w", err)
+		}
+		config = make(map[string]interface{})
+	} else {
+		// Parse existing YAML
+		var tmp map[string]interface{}
+		if err := yaml.Unmarshal(data, &tmp); err != nil {
+			// Fall back: treat file as empty to avoid breaking the config
+			config = make(map[string]interface{})
+		} else {
+			config = tmp
+		}
+	}
+
+	// Parse or create the "mcp_servers" block
+	mcpServers, ok := config["mcp_servers"].(map[string]interface{})
+	if !ok {
+		mcpServers = make(map[string]interface{})
+		config["mcp_servers"] = mcpServers
+	}
+
+	// Check if engram is already registered
+	if _, exists := mcpServers["engram"]; exists {
+		return nil // already registered
+	}
+
+	// Build engram MCP entry
+	cmd := resolveEngramCommand()
+	mcpServers["engram"] = map[string]interface{}{
+		"command": cmd,
+		"args":    []string{"mcp", "--tools=agent"},
+		"timeout": 60,
+	}
+
+	// Write back as YAML
+	output, err := yaml.Marshal(config)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+
+	if err := writeFileFn(configPath, output, 0644); err != nil {
+		return fmt.Errorf("write config: %w", err)
+	}
+
+	return nil
 }

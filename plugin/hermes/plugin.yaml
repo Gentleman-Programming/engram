@@ -1,0 +1,31 @@
+name: engram
+version: 1.0.0
+description: Engram persistent memory for Hermes Agent — remembers across sessions, bugs, and compactions. Connects to engram serve (http://127.0.0.1:7437).
+author: Gentleman Programming
+provides_tools:
+  - mem_search
+  - mem_save
+  - mem_update
+  - mem_delete
+  - mem_context
+  - mem_session_summary
+  - mem_get_observation
+  - mem_suggest_topic_key
+  - mem_save_prompt
+  - mem_session_start
+  - mem_session_end
+  - mem_timeline
+  - mem_stats
+  - mem_judge
+  - mem_doctor
+  - mem_current_project
+  - mem_capture_passive
+provides_hooks:
+  - pre_llm_call
+  - post_tool_call
+  - on_session_start
+  - on_session_end
+requires_env:
+  - name: ENGRAM_PORT
+    description: "Port where engram serve runs (default: 7437)"
+    secret: false

@@ -2226,6 +2226,12 @@ func printPostInstall(result *setup.Result) {
 		fmt.Println("  1. Restart Codex so MCP config is reloaded")
 		fmt.Println("  2. Verify ~/.codex/config.toml has [mcp_servers.engram]")
 		fmt.Println("  3. Verify model_instructions_file + experimental_compact_prompt_file are set")
+	case "hermes-agent":
+		fmt.Println("\nNext steps:")
+		fmt.Println("  1. Restart Hermes Agent so plugin + MCP are loaded")
+		fmt.Println("  2. Verify ~/.hermes/config.yaml has mcp_servers.engram")
+		fmt.Println("  3. Verify ~/.hermes/plugins/engram/ contains __init__.py, tools.py, schemas.py, plugin.yaml")
+		fmt.Println("  4. Run 'engram serve &' if you want HTTP session tracking (passive capture)")
 	}
 }
 
@@ -2265,7 +2271,7 @@ Commands:
                      Merge similar project names into one canonical name
                        --all      Scan ALL projects for similar name groups
                        --dry-run  Preview what would be merged (no changes)
-  setup [agent]      Install/setup agent integration (opencode, claude-code, gemini-cli, codex)
+  setup [agent]      Install/setup agent integration (opencode, claude-code, gemini-cli, codex, hermes-agent)
   sync               Export new memories as compressed chunk to .engram/
                          --import   Import new chunks from .engram/ into local DB
                          --status   Show sync status

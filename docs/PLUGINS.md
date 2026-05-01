@@ -7,6 +7,7 @@
 > Validation boundary (current): plugin scripts are validated for memory/session workflows, not as cloud bootstrap orchestrators. Use CLI for cloud config/auth/enrollment/upgrade.
 
 - [OpenCode Plugin](#opencode-plugin)
+- [Hermes Agent Plugin](#hermes-agent-plugin)
 - [Claude Code Plugin](#claude-code-plugin)
 - [Privacy](#privacy)
 
@@ -59,6 +60,62 @@ The OpenCode plugin uses a defense-in-depth strategy to ensure memories survive 
 | **System Prompt** | `MEMORY_INSTRUCTIONS` concatenated into existing system prompt via `chat.system.transform` | Always present |
 | **Compaction Hook** | Auto-saves checkpoint + injects context + reminds compressor | Fires during compaction |
 | **Agent Config** | "After compaction, call `mem_context`" in agent prompt | Always present |
+
+---
+
+## Hermes Agent Plugin
+
+For [Hermes Agent](https://hermes-agent.nousresearch.com) users, a Python plugin provides persistent memory tools via Hermes's native plugin interface, plus automatic MCP server registration:
+
+```bash
+engram setup hermes-agent
+```
+
+`engram setup hermes-agent` performs two actions:
+
+1. **Plugin installation** — copies `__init__.py`, `tools.py`, `schemas.py`, and `plugin.yaml` to `~/.hermes/plugins/engram/`
+2. **MCP registration** — injects the engram MCP server entry into `~/.hermes/config.yaml` under `mcp_servers`
+
+### Tools available
+
+The plugin exposes the Engram memory API as native Hermes tools:
+
+| Tool | Purpose |
+|------|---------|
+| `mem_save` | Persist decisions, bug fixes, patterns, discoveries |
+| `mem_search` | Cross-session recall of past work |
+| `mem_context` | Recover recent session context |
+| `mem_session_summary` | Structured end-of-session summaries |
+| `mem_get_observation` | Retrieve full untruncated observation by ID |
+
+### How it works
+
+The plugin registers Engram tools with Hermes via the `register()` lifecycle hook. Each tool call is forwarded to the Engram MCP endpoint (`http://localhost:PORT/sessions/{id}/mcp`). Hermes automatically injects the session ID via the passive capture mechanism, so tools operate on the current session without explicit ID passing.
+
+### Requirements
+
+- Hermes Agent with plugin support
+- Engram installed and accessible on `$PATH`
+- Hermes version that supports `post_tool_call` hooks
+
+### Manual setup
+
+If `engram setup hermes-agent` fails, copy the plugin manually:
+
+```bash
+mkdir -p ~/.hermes/plugins/engram
+cp internal/setup/plugins/hermes/* ~/.hermes/plugins/engram/
+```
+
+And add to `~/.hermes/config.yaml`:
+
+```yaml
+mcp_servers:
+  engram:
+    command: engram
+    args: ["mcp", "--tools=agent"]
+    timeout: 60
+```
 
 ---
 
