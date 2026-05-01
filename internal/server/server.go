@@ -894,6 +894,7 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.notifyWrite()
 	jsonResponse(w, http.StatusOK, map[string]any{
 		"status":                    "deleted",
 		"project":                   result.Project,
@@ -903,6 +904,8 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 		"sessions_deleted":          result.SessionsDeleted,
 		"sync_mutations_deleted":    result.SyncMutationsDeleted,
 		"sync_deferred_deleted":     result.SyncDeferredDeleted,
+		"sync_chunks_deleted":       result.SyncChunksDeleted,
+		"sync_state_deleted":        result.SyncStateDeleted,
 		"prompt_tombstones_deleted": result.PromptTombstonesDeleted,
 		"enrollment_deleted":        result.EnrollmentDeleted,
 		"upgrade_state_deleted":     result.UpgradeStateDeleted,

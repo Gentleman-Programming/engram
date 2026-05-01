@@ -790,6 +790,11 @@ func TestHandleDeleteProject_Success(t *testing.T) {
 	srv := New(st, 0)
 	h := srv.Handler()
 
+	var writeCount atomic.Int32
+	srv.SetOnWrite(func() {
+		writeCount.Add(1)
+	})
+
 	if err := st.CreateSession("sess-proj-del", "proj-del", "/tmp"); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -821,6 +826,15 @@ func TestHandleDeleteProject_Success(t *testing.T) {
 	}
 	if resp["deleted"] != true {
 		t.Fatalf("expected deleted=true, got %v", resp["deleted"])
+	}
+	if _, ok := resp["sync_chunks_deleted"].(float64); !ok {
+		t.Fatalf("expected sync_chunks_deleted numeric field, got %T (%v)", resp["sync_chunks_deleted"], resp["sync_chunks_deleted"])
+	}
+	if _, ok := resp["sync_state_deleted"].(float64); !ok {
+		t.Fatalf("expected sync_state_deleted numeric field, got %T (%v)", resp["sync_state_deleted"], resp["sync_state_deleted"])
+	}
+	if writeCount.Load() != 1 {
+		t.Fatalf("expected onWrite notification after project delete, got %d", writeCount.Load())
 	}
 }
 
