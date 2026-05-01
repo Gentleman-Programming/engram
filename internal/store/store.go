@@ -4122,6 +4122,8 @@ type DeleteProjectResult struct {
 	SessionsDeleted         int64  `json:"sessions_deleted"`
 	SyncMutationsDeleted    int64  `json:"sync_mutations_deleted"`
 	SyncDeferredDeleted     int64  `json:"sync_deferred_deleted"`
+	SyncChunksDeleted       int64  `json:"sync_chunks_deleted"`
+	SyncStateDeleted        int64  `json:"sync_state_deleted"`
 	PromptTombstonesDeleted int64  `json:"prompt_tombstones_deleted"`
 	EnrollmentDeleted       int64  `json:"enrollment_deleted"`
 	UpgradeStateDeleted     int64  `json:"upgrade_state_deleted"`
@@ -4194,6 +4196,8 @@ func (s *Store) DeleteProject(project string) (*DeleteProjectResult, error) {
 
 	result := &DeleteProjectResult{Project: project}
 	err := s.withTx(func(tx *sql.Tx) error {
+		projectTargetKey := syncTargetKeyForProject(project)
+
 		// Existence check across core project-owned entities.
 		var exists bool
 		if err := tx.QueryRow(`SELECT EXISTS(
@@ -4256,12 +4260,6 @@ func (s *Store) DeleteProject(project string) (*DeleteProjectResult, error) {
 			result.PromptsDeleted, _ = res.RowsAffected()
 		}
 
-		if res, err := s.execHook(tx, `DELETE FROM sessions WHERE project = ?`, project); err != nil {
-			return fmt.Errorf("delete project: sessions: %w", err)
-		} else {
-			result.SessionsDeleted, _ = res.RowsAffected()
-		}
-
 		// Project-scoped sync/materialization metadata cleanup.
 		if res, err := s.execHook(tx, `DELETE FROM sync_mutations WHERE project = ?`, project); err != nil {
 			return fmt.Errorf("delete project: sync_mutations: %w", err)
@@ -4280,6 +4278,8 @@ func (s *Store) DeleteProject(project string) (*DeleteProjectResult, error) {
 			result.SyncDeferredDeleted, _ = res.RowsAffected()
 		}
 
+		// Delete prompt tombstones BEFORE sessions, so session-derived tombstones
+		// (project NULL/empty + session_id in project) are still matchable.
 		if res, err := s.execHook(tx, `
 			DELETE FROM prompt_tombstones
 			 WHERE project = ?
@@ -4288,6 +4288,24 @@ func (s *Store) DeleteProject(project string) (*DeleteProjectResult, error) {
 			return fmt.Errorf("delete project: prompt_tombstones: %w", err)
 		} else {
 			result.PromptTombstonesDeleted, _ = res.RowsAffected()
+		}
+
+		if res, err := s.execHook(tx, `DELETE FROM sessions WHERE project = ?`, project); err != nil {
+			return fmt.Errorf("delete project: sessions: %w", err)
+		} else {
+			result.SessionsDeleted, _ = res.RowsAffected()
+		}
+
+		if res, err := s.execHook(tx, `DELETE FROM sync_chunks WHERE target_key = ?`, projectTargetKey); err != nil {
+			return fmt.Errorf("delete project: sync_chunks: %w", err)
+		} else {
+			result.SyncChunksDeleted, _ = res.RowsAffected()
+		}
+
+		if res, err := s.execHook(tx, `DELETE FROM sync_state WHERE target_key = ?`, projectTargetKey); err != nil {
+			return fmt.Errorf("delete project: sync_state: %w", err)
+		} else {
+			result.SyncStateDeleted, _ = res.RowsAffected()
 		}
 
 		if res, err := s.execHook(tx, `DELETE FROM sync_enrolled_projects WHERE project = ?`, project); err != nil {
@@ -4305,6 +4323,7 @@ func (s *Store) DeleteProject(project string) (*DeleteProjectResult, error) {
 		result.Deleted = exists ||
 			result.ObservationsDeleted > 0 || result.PromptsDeleted > 0 || result.SessionsDeleted > 0 ||
 			result.SyncMutationsDeleted > 0 || result.SyncDeferredDeleted > 0 ||
+			result.SyncChunksDeleted > 0 || result.SyncStateDeleted > 0 ||
 			result.PromptTombstonesDeleted > 0 || result.EnrollmentDeleted > 0 || result.UpgradeStateDeleted > 0
 
 		return nil

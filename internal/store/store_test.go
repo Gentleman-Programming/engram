@@ -6060,6 +6060,17 @@ func TestDeleteProject_HardDeleteCascadeAndSyncCleanup(t *testing.T) {
 	if err := s.SaveCloudUpgradeState(CloudUpgradeState{Project: project, Stage: UpgradeStagePlanned, RepairClass: UpgradeRepairClassNone}); err != nil {
 		t.Fatalf("SaveCloudUpgradeState: %v", err)
 	}
+	projectTargetKey := syncTargetKeyForProject(project)
+	if _, err := s.db.Exec(`INSERT INTO sync_chunks (target_key, chunk_id) VALUES (?, ?)`, projectTargetKey, "chunk-proj-delete"); err != nil {
+		t.Fatalf("seed sync_chunks project target: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT OR REPLACE INTO sync_state (target_key, lifecycle, last_enqueued_seq, last_acked_seq, last_pulled_seq, updated_at)
+		 VALUES (?, 'pending', 10, 7, 9, datetime('now'))`,
+		projectTargetKey,
+	); err != nil {
+		t.Fatalf("seed sync_state project target: %v", err)
+	}
 
 	result, err := s.DeleteProject(project)
 	if err != nil {
@@ -6072,13 +6083,15 @@ func TestDeleteProject_HardDeleteCascadeAndSyncCleanup(t *testing.T) {
 	var n int
 	for _, q := range []string{
 		`SELECT COUNT(*) FROM observations WHERE project = 'proj-delete'`,
-		`SELECT COUNT(*) FROM observations WHERE session_id IN (SELECT id FROM sessions WHERE project = 'proj-delete')`,
+		`SELECT COUNT(*) FROM observations WHERE session_id IN ('s-del', 's-del-2', 's-del-3')`,
 		`SELECT COUNT(*) FROM user_prompts WHERE project = 'proj-delete'`,
-		`SELECT COUNT(*) FROM user_prompts WHERE session_id IN (SELECT id FROM sessions WHERE project = 'proj-delete')`,
+		`SELECT COUNT(*) FROM user_prompts WHERE session_id IN ('s-del', 's-del-2', 's-del-3')`,
 		`SELECT COUNT(*) FROM sessions WHERE project = 'proj-delete'`,
 		`SELECT COUNT(*) FROM sync_mutations WHERE project = 'proj-delete'`,
 		`SELECT COUNT(*) FROM prompt_tombstones WHERE project = 'proj-delete'`,
-		`SELECT COUNT(*) FROM prompt_tombstones WHERE session_id IN (SELECT id FROM sessions WHERE project = 'proj-delete')`,
+		`SELECT COUNT(*) FROM prompt_tombstones WHERE session_id IN ('s-del', 's-del-2', 's-del-3')`,
+		`SELECT COUNT(*) FROM sync_chunks WHERE target_key = 'cloud:proj-delete'`,
+		`SELECT COUNT(*) FROM sync_state WHERE target_key = 'cloud:proj-delete'`,
 		`SELECT COUNT(*) FROM sync_enrolled_projects WHERE project = 'proj-delete'`,
 		`SELECT COUNT(*) FROM cloud_upgrade_state WHERE project = 'proj-delete'`,
 		`SELECT COUNT(*) FROM sync_apply_deferred WHERE json_valid(payload)=1 AND ifnull(json_extract(payload,'$.project'),'')='proj-delete'`,
