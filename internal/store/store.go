@@ -4113,6 +4113,19 @@ type MigrateResult struct {
 	PromptsUpdated      int64 `json:"prompts_updated"`
 }
 
+type DeleteProjectResult struct {
+	Deleted                 bool   `json:"deleted"`
+	Project                 string `json:"project"`
+	ObservationsDeleted     int64  `json:"observations_deleted"`
+	PromptsDeleted          int64  `json:"prompts_deleted"`
+	SessionsDeleted         int64  `json:"sessions_deleted"`
+	SyncMutationsDeleted    int64  `json:"sync_mutations_deleted"`
+	SyncDeferredDeleted     int64  `json:"sync_deferred_deleted"`
+	PromptTombstonesDeleted int64  `json:"prompt_tombstones_deleted"`
+	EnrollmentDeleted       int64  `json:"enrollment_deleted"`
+	UpgradeStateDeleted     int64  `json:"upgrade_state_deleted"`
+}
+
 func (s *Store) MigrateProject(oldName, newName string) (*MigrateResult, error) {
 	if oldName == "" || newName == "" || oldName == newName {
 		return &MigrateResult{}, nil
@@ -4161,6 +4174,98 @@ func (s *Store) MigrateProject(oldName, newName string) (*MigrateResult, error) 
 		// Enqueue sync mutations so cloud sync picks up the migrated records.
 		// Same pattern used by EnrollProject and MergeProjects.
 		return s.backfillProjectSyncMutationsTx(tx, newName)
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return result, nil
+}
+
+// DeleteProject performs a hard, transactional project-wide delete.
+// It removes all project-owned local data and project-scoped sync metadata.
+func (s *Store) DeleteProject(project string) (*DeleteProjectResult, error) {
+	project, _ = NormalizeProject(project)
+	project = strings.TrimSpace(project)
+	if project == "" {
+		return nil, fmt.Errorf("project name must not be empty")
+	}
+
+	result := &DeleteProjectResult{Project: project}
+	err := s.withTx(func(tx *sql.Tx) error {
+		// Existence check across core project-owned entities.
+		var exists bool
+		if err := tx.QueryRow(`SELECT EXISTS(
+			SELECT 1 FROM observations WHERE project = ?
+			UNION ALL
+			SELECT 1 FROM sessions WHERE project = ?
+			UNION ALL
+			SELECT 1 FROM user_prompts WHERE project = ?
+		)`, project, project, project).Scan(&exists); err != nil {
+			return fmt.Errorf("delete project: check existence: %w", err)
+		}
+
+		// Order matters for referential integrity: observations -> prompts -> sessions.
+		if res, err := s.execHook(tx, `DELETE FROM observations WHERE project = ?`, project); err != nil {
+			return fmt.Errorf("delete project: observations: %w", err)
+		} else {
+			result.ObservationsDeleted, _ = res.RowsAffected()
+		}
+
+		if res, err := s.execHook(tx, `DELETE FROM user_prompts WHERE project = ?`, project); err != nil {
+			return fmt.Errorf("delete project: prompts: %w", err)
+		} else {
+			result.PromptsDeleted, _ = res.RowsAffected()
+		}
+
+		if res, err := s.execHook(tx, `DELETE FROM sessions WHERE project = ?`, project); err != nil {
+			return fmt.Errorf("delete project: sessions: %w", err)
+		} else {
+			result.SessionsDeleted, _ = res.RowsAffected()
+		}
+
+		// Project-scoped sync/materialization metadata cleanup.
+		if res, err := s.execHook(tx, `DELETE FROM sync_mutations WHERE project = ?`, project); err != nil {
+			return fmt.Errorf("delete project: sync_mutations: %w", err)
+		} else {
+			result.SyncMutationsDeleted, _ = res.RowsAffected()
+		}
+
+		if res, err := s.execHook(tx,
+			`DELETE FROM sync_apply_deferred
+			 WHERE json_valid(payload) = 1
+			   AND ifnull(json_extract(payload, '$.project'), '') = ?`,
+			project,
+		); err != nil {
+			return fmt.Errorf("delete project: sync_apply_deferred: %w", err)
+		} else {
+			result.SyncDeferredDeleted, _ = res.RowsAffected()
+		}
+
+		if res, err := s.execHook(tx, `DELETE FROM prompt_tombstones WHERE project = ?`, project); err != nil {
+			return fmt.Errorf("delete project: prompt_tombstones: %w", err)
+		} else {
+			result.PromptTombstonesDeleted, _ = res.RowsAffected()
+		}
+
+		if res, err := s.execHook(tx, `DELETE FROM sync_enrolled_projects WHERE project = ?`, project); err != nil {
+			return fmt.Errorf("delete project: sync_enrolled_projects: %w", err)
+		} else {
+			result.EnrollmentDeleted, _ = res.RowsAffected()
+		}
+
+		if res, err := s.execHook(tx, `DELETE FROM cloud_upgrade_state WHERE project = ?`, project); err != nil {
+			return fmt.Errorf("delete project: cloud_upgrade_state: %w", err)
+		} else {
+			result.UpgradeStateDeleted, _ = res.RowsAffected()
+		}
+
+		result.Deleted = exists ||
+			result.ObservationsDeleted > 0 || result.PromptsDeleted > 0 || result.SessionsDeleted > 0 ||
+			result.SyncMutationsDeleted > 0 || result.SyncDeferredDeleted > 0 ||
+			result.PromptTombstonesDeleted > 0 || result.EnrollmentDeleted > 0 || result.UpgradeStateDeleted > 0
+
+		return nil
 	})
 	if err != nil {
 		return nil, err

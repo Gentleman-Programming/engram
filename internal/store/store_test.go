@@ -5963,6 +5963,92 @@ func TestMigrateProjectIdempotent(t *testing.T) {
 	}
 }
 
+func TestDeleteProject_HardDeleteCascadeAndSyncCleanup(t *testing.T) {
+	s := newTestStore(t)
+	project := "proj-delete"
+
+	if err := s.CreateSession("s-del", project, "/tmp"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	obsID, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-del", Type: "decision", Title: "del obs", Content: "delete me", Project: project, Scope: "project",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+	if _, err := s.AddPrompt(AddPromptParams{SessionID: "s-del", Content: "prompt", Project: project}); err != nil {
+		t.Fatalf("AddPrompt: %v", err)
+	}
+	if err := s.EnrollProject(project); err != nil {
+		t.Fatalf("EnrollProject: %v", err)
+	}
+
+	// Generate project-scoped sync rows and tombstones/deferred metadata.
+	if err := s.DeleteObservation(obsID, true); err != nil {
+		t.Fatalf("DeleteObservation(hard): %v", err)
+	}
+	if err := s.CreateSession("s-del-2", project, "/tmp"); err != nil {
+		t.Fatalf("CreateSession2: %v", err)
+	}
+	promptID, err := s.AddPrompt(AddPromptParams{SessionID: "s-del-2", Content: "prompt2", Project: project})
+	if err != nil {
+		t.Fatalf("AddPrompt2: %v", err)
+	}
+	if err := s.DeletePrompt(promptID); err != nil {
+		t.Fatalf("DeletePrompt: %v", err)
+	}
+
+	if _, err := s.execHook(s.db,
+		`INSERT INTO sync_apply_deferred (sync_id, entity, payload, apply_status, retry_count, first_seen_at)
+		 VALUES (?, ?, ?, ?, 0, datetime('now'))`,
+		"sad-proj-delete", "observation", `{"project":"proj-delete","sync_id":"obs-x"}`, "deferred",
+	); err != nil {
+		t.Fatalf("seed sync_apply_deferred: %v", err)
+	}
+	if err := s.SaveCloudUpgradeState(CloudUpgradeState{Project: project, Stage: UpgradeStagePlanned, RepairClass: UpgradeRepairClassNone}); err != nil {
+		t.Fatalf("SaveCloudUpgradeState: %v", err)
+	}
+
+	result, err := s.DeleteProject(project)
+	if err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
+	if !result.Deleted {
+		t.Fatalf("expected deleted=true")
+	}
+
+	var n int
+	for _, q := range []string{
+		`SELECT COUNT(*) FROM observations WHERE project = 'proj-delete'`,
+		`SELECT COUNT(*) FROM user_prompts WHERE project = 'proj-delete'`,
+		`SELECT COUNT(*) FROM sessions WHERE project = 'proj-delete'`,
+		`SELECT COUNT(*) FROM sync_mutations WHERE project = 'proj-delete'`,
+		`SELECT COUNT(*) FROM prompt_tombstones WHERE project = 'proj-delete'`,
+		`SELECT COUNT(*) FROM sync_enrolled_projects WHERE project = 'proj-delete'`,
+		`SELECT COUNT(*) FROM cloud_upgrade_state WHERE project = 'proj-delete'`,
+		`SELECT COUNT(*) FROM sync_apply_deferred WHERE json_valid(payload)=1 AND ifnull(json_extract(payload,'$.project'),'')='proj-delete'`,
+	} {
+		if err := s.db.QueryRow(q).Scan(&n); err != nil {
+			t.Fatalf("query %q: %v", q, err)
+		}
+		if n != 0 {
+			t.Fatalf("expected 0 rows after project delete for query %q, got %d", q, n)
+		}
+	}
+}
+
+func TestDeleteProject_NoOpForUnknownProject(t *testing.T) {
+	s := newTestStore(t)
+
+	result, err := s.DeleteProject("does-not-exist")
+	if err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
+	if result.Deleted {
+		t.Fatalf("expected deleted=false for no-op project")
+	}
+}
+
 // ─── Phase 2: project-name-drift — NormalizeProject, ListProjectNames,
 //              ListProjectsWithStats, MergeProjects tests ─────────────────────
 

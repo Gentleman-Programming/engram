@@ -785,6 +785,58 @@ func TestHandleDeletePrompt_BadID(t *testing.T) {
 	}
 }
 
+func TestHandleDeleteProject_Success(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	if err := st.CreateSession("sess-proj-del", "proj-del", "/tmp"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := st.AddObservation(store.AddObservationParams{
+		SessionID: "sess-proj-del", Type: "decision", Title: "x", Content: "y", Project: "proj-del", Scope: "project",
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	if _, err := st.AddPrompt(store.AddPromptParams{SessionID: "sess-proj-del", Content: "prompt", Project: "proj-del"}); err != nil {
+		t.Fatalf("add prompt: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/projects/proj-del", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["status"] != "deleted" {
+		t.Fatalf("expected status=deleted, got %v", resp["status"])
+	}
+	if resp["project"] != "proj-del" {
+		t.Fatalf("expected project=proj-del, got %v", resp["project"])
+	}
+	if resp["deleted"] != true {
+		t.Fatalf("expected deleted=true, got %v", resp["deleted"])
+	}
+}
+
+func TestHandleDeleteProject_MissingProject(t *testing.T) {
+	srv := New(newServerTestStore(t), 0)
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodDelete, "/projects/", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for unmatched route, got %d", rec.Code)
+	}
+}
+
 // ─── Phase E.1e — /sync/status exposes deferred + dead counts (REQ-007) ─────
 
 // TestSyncStatus_IncludesDeferredAndDeadCounts: 3 deferred + 1 dead →

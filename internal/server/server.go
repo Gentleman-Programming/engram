@@ -221,9 +221,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /stats", s.handleStats)
 	s.mux.HandleFunc("GET /doctor", s.handleDoctor)
 
-	// Project detection / migration
+	// Project detection / migration / deletion
 	s.mux.HandleFunc("GET /project/current", s.handleCurrentProject)
 	s.mux.HandleFunc("POST /projects/migrate", requireAuth(s.handleMigrateProject))
+	s.mux.HandleFunc("DELETE /projects/{project}", requireAuth(s.handleDeleteProject))
 
 	// Sync status (degraded-state visibility for autosync)
 	s.mux.HandleFunc("GET /sync/status", s.handleSyncStatus)
@@ -864,6 +865,38 @@ func (s *Server) handleMigrateProject(w http.ResponseWriter, r *http.Request) {
 		"observations": result.ObservationsUpdated,
 		"sessions":     result.SessionsUpdated,
 		"prompts":      result.PromptsUpdated,
+	})
+}
+
+func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
+	project := strings.TrimSpace(r.PathValue("project"))
+	if project == "" {
+		jsonError(w, http.StatusBadRequest, "project is required")
+		return
+	}
+
+	result, err := s.store.DeleteProject(project)
+	if err != nil {
+		if strings.Contains(err.Error(), "must not be empty") {
+			jsonError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"status":                    "deleted",
+		"project":                   result.Project,
+		"deleted":                   result.Deleted,
+		"observations_deleted":      result.ObservationsDeleted,
+		"prompts_deleted":           result.PromptsDeleted,
+		"sessions_deleted":          result.SessionsDeleted,
+		"sync_mutations_deleted":    result.SyncMutationsDeleted,
+		"sync_deferred_deleted":     result.SyncDeferredDeleted,
+		"prompt_tombstones_deleted": result.PromptTombstonesDeleted,
+		"enrollment_deleted":        result.EnrollmentDeleted,
+		"upgrade_state_deleted":     result.UpgradeStateDeleted,
 	})
 }
 
