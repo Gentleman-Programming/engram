@@ -141,6 +141,12 @@ def _truncate(s: str, max_chars: int) -> str:
     return s[:max_chars] + "..." if len(s) > max_chars else s
 
 
+def default_session_id(project: str) -> str:
+    """Generate a default session ID from project name for Hermes context."""
+    safe = "".join(c if c.isalnum() else "_" for c in project)
+    return f"hermes-{safe}" if safe else "hermes-default"
+
+
 def _strip_private(s: str) -> str:
     """Strip <private>...</private> tags before sending to engram."""
     import re
@@ -456,39 +462,35 @@ def mem_stats(args: dict, **kwargs) -> str:
 
 
 def mem_judge(args: dict, **kwargs) -> str:
-    """Record a verdict on a pending memory conflict. Endpoint: POST /observations/{id}/judge."""
-    try:
-        judgment_id = args.get("judgment_id")
-        relation = args.get("relation")
-        reason = args.get("reason", "")
-        confidence = args.get("confidence", 1.0)
-        if not judgment_id or not relation:
-            return json.dumps({"error": "judgment_id and relation are required"})
-        result = _engram_fetch("/judge", method="POST", body={
-            "judgment_id": judgment_id,
-            "relation": relation,
-            "reason": reason,
-            "confidence": confidence,
-        })
-        if result is None:
-            return json.dumps({"error": "Engram server not reachable."})
-        return json.dumps(result, indent=2)
-    except Exception as e:
-        return json.dumps({"error": str(e)})
+    """Record a verdict on a pending memory conflict.
+
+    The HTTP server does not expose a /judge endpoint. Use the MCP server
+    (engram mcp --tools=agent) to access this tool.
+    """
+    return json.dumps({
+        "error": "mem_judge is not available via the Engram HTTP API.",
+        "details": (
+            "The Hermes plugin uses direct HTTP requests, but the /judge route "
+            "is not exposed. Route this tool through the MCP server instead: "
+            "ensure mcp_servers.engram is configured in ~/.hermes/config.yaml."
+        ),
+    })
 
 
 def mem_doctor(args: dict, **kwargs) -> str:
-    """Run operational diagnostics. Endpoint: GET /doctor?project=..."""
-    try:
-        params = {}
-        if args.get("project"):
-            params["project"] = args["project"]
-        result = _engram_fetch("/doctor", method="GET", params=params)
-        if result is None:
-            return json.dumps({"error": "Engram server not reachable."})
-        return json.dumps(result, indent=2)
-    except Exception as e:
-        return json.dumps({"error": str(e)})
+    """Run operational diagnostics.
+
+    The HTTP server does not expose a /doctor endpoint. Use the MCP server
+    (engram mcp --tools=agent) to access this tool.
+    """
+    return json.dumps({
+        "error": "mem_doctor is not available via the Engram HTTP API.",
+        "details": (
+            "The Hermes plugin uses direct HTTP requests, but the /doctor route "
+            "is not exposed. Route this tool through the MCP server instead: "
+            "ensure mcp_servers.engram is configured in ~/.hermes/config.yaml."
+        ),
+    })
 
 
 def mem_current_project(args: dict, **kwargs) -> str:

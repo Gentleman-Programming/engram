@@ -9,6 +9,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func resetSetupSeams(t *testing.T) {
@@ -2904,3 +2906,123 @@ func TestPluginSubAgentFiltering(t *testing.T) {
 		t.Fatalf("session.deleted handler must clean up subAgentSessions set")
 	}
 }
+
+// ─── Hermes Agent MCP injection tests ─────────────────────────────────────────
+
+func TestInjectHermesMCPBasic(t *testing.T) {
+	resetSetupSeams(t)
+	home := useTestHome(t)
+	runtimeGOOS = "linux"
+	osExecutable = func() (string, error) { return "/usr/local/bin/engram", nil }
+
+	_ = home // suppress unused variable (hermesConfigPath uses userHomeDir seam)
+	configPath := hermesConfigPath()
+	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+
+	if err := injectHermesMCP(); err != nil {
+		t.Fatalf("injectHermesMCP failed: %v", err)
+	}
+
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+
+	var cfg map[string]any
+	if err := yaml.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	mcpServers, ok := cfg["mcp_servers"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected mcp_servers object")
+	}
+	engram, ok := mcpServers["engram"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected engram entry in mcp_servers")
+	}
+	if engram["command"] == "" {
+		t.Fatalf("expected engram.command to be set")
+	}
+}
+
+func TestInjectHermesMCPIdempotent(t *testing.T) {
+	resetSetupSeams(t)
+	home := useTestHome(t)
+	runtimeGOOS = "linux"
+	osExecutable = func() (string, error) { return "/usr/local/bin/engram", nil }
+
+	_ = home // suppress unused variable (hermesConfigPath uses userHomeDir seam)
+	configPath := hermesConfigPath()
+	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+
+	if err := injectHermesMCP(); err != nil {
+		t.Fatalf("injectHermesMCP first call failed: %v", err)
+	}
+	if err := injectHermesMCP(); err != nil {
+		t.Fatalf("injectHermesMCP should be idempotent: %v", err)
+	}
+
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	var cfg map[string]any
+	if err := yaml.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	mcpServers := cfg["mcp_servers"].(map[string]any)
+	if len(mcpServers) != 1 {
+		t.Fatalf("expected exactly 1 mcp_servers entry, got %d", len(mcpServers))
+	}
+}
+
+func TestInjectHermesMCPPreservesExisting(t *testing.T) {
+	resetSetupSeams(t)
+	home := useTestHome(t)
+	runtimeGOOS = "linux"
+	osExecutable = func() (string, error) { return "/usr/local/bin/engram", nil }
+
+	_ = home // suppress unused variable (hermesConfigPath uses userHomeDir seam)
+	configPath := hermesConfigPath()
+	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	initial := `plugins:
+  other-plugin: true
+mcp_servers:
+  claude:
+    command: claude
+`
+	if err := os.WriteFile(configPath, []byte(initial), 0644); err != nil {
+		t.Fatalf("write initial config: %v", err)
+	}
+
+	if err := injectHermesMCP(); err != nil {
+		t.Fatalf("injectHermesMCP failed: %v", err)
+	}
+
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	var cfg map[string]any
+	if err := yaml.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+
+	if _, ok := cfg["plugins"]; !ok {
+		t.Fatalf("expected existing 'plugins' key to be preserved")
+	}
+	mcpServers := cfg["mcp_servers"].(map[string]any)
+	if _, ok := mcpServers["claude"]; !ok {
+		t.Fatalf("expected existing claude mcp_servers entry to be preserved")
+	}
+	if _, ok := mcpServers["engram"]; !ok {
+		t.Fatalf("expected engram mcp_servers entry to be added")
+	}
+}
+

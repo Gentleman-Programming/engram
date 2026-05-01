@@ -123,7 +123,7 @@ def _on_pre_llm_call(
     # Inject context from previous sessions on first turn
     injected = {}
     if is_first_turn and session_id:
-        context_data = tools._engram_fetch("/context", body={"project": tools._current_project})
+        context_data = tools._engram_fetch("/context", params={"project": tools._current_project})
         if context_data and context_data.get("context"):
             injected["context"] = context_data["context"]
 

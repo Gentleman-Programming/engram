@@ -90,21 +90,28 @@ The plugin exposes the Engram memory API as native Hermes tools:
 
 ### How it works
 
-The plugin registers Engram tools with Hermes via the `register()` lifecycle hook. Each tool call is forwarded to the Engram MCP endpoint (`http://localhost:PORT/sessions/{id}/mcp`). Hermes automatically injects the session ID via the passive capture mechanism, so tools operate on the current session without explicit ID passing.
+The plugin registers Engram tools with Hermes via the `register()` lifecycle hook. Tool handlers make direct HTTP requests to the Engram serve REST API (e.g. `/search`, `/observations`, `/context`, `/timeline`) rather than forwarding through an MCP session endpoint. Hermes provides session context via its passive capture/hooks integration, so tools operate on the current session without requiring explicit session IDs from callers.
 
 ### Requirements
 
 - Hermes Agent with plugin support
 - Engram installed and accessible on `$PATH`
-- Hermes version that supports `post_tool_call` hooks (pre_llm_call for memory injection, post_tool_call for passive capture)
+- Engram serve running (`engram serve`) — the plugin's HTTP tool operations require it
+- Hermes version that supports `pre_llm_call` hooks (for memory context injection) and `post_tool_call` hooks (for passive capture)
 
 ### Manual setup
 
-If `engram setup hermes-agent` fails, copy the plugin manually:
+If `engram setup hermes-agent` fails, install the plugin files from the Engram repository:
 
 ```bash
 mkdir -p ~/.hermes/plugins/engram
-cp internal/setup/plugins/hermes/* ~/.hermes/plugins/engram/
+# From a checkout of the engram repository:
+cp plugin/hermes/* ~/.hermes/plugins/engram/
+# Or download directly from GitHub:
+curl -fsSL https://raw.githubusercontent.com/Gentleman-Programming/engram/main/plugin/hermes/__init__.py -o ~/.hermes/plugins/engram/__init__.py
+curl -fsSL https://raw.githubusercontent.com/Gentleman-Programming/engram/main/plugin/hermes/tools.py    -o ~/.hermes/plugins/engram/tools.py
+curl -fsSL https://raw.githubusercontent.com/Gentleman-Programming/engram/main/plugin/hermes/schemas.py   -o ~/.hermes/plugins/engram/schemas.py
+curl -fsSL https://raw.githubusercontent.com/Gentleman-Programming/engram/main/plugin/hermes/plugin.yaml  -o ~/.hermes/plugins/engram/plugin.yaml
 ```
 
 And add to `~/.hermes/config.yaml`:

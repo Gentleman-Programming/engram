@@ -2231,7 +2231,8 @@ func printPostInstall(result *setup.Result) {
 		fmt.Println("  1. Restart Hermes Agent so plugin + MCP are loaded")
 		fmt.Println("  2. Verify ~/.hermes/config.yaml has mcp_servers.engram")
 		fmt.Println("  3. Verify ~/.hermes/plugins/engram/ contains __init__.py, tools.py, schemas.py, plugin.yaml")
-		fmt.Println("  4. Run 'engram serve &' if you want HTTP session tracking (passive capture)")
+		fmt.Println("  4. Run 'engram serve &' — required: plugin tool operations (mem_search, mem_save,")
+		fmt.Println("     mem_context, etc.) all hit the Engram HTTP server, not MCP.")
 	}
 }
 
