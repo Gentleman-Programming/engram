@@ -293,6 +293,13 @@ def register(ctx) -> None:
         handler=tools.mem_capture_passive,
     )
 
+    ctx.register_tool(
+        name="mem_stats",
+        toolset="engram",
+        schema=schemas.MEM_STATS,
+        handler=tools.mem_stats,
+    )
+
     # ── Lifecycle Hooks ────────────────────────────────────────────────────
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
     ctx.register_hook("on_session_start", _on_session_start)
