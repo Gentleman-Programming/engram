@@ -54,12 +54,26 @@ def _engram_fetch(
     params: Optional[dict] = None,
     timeout: float = 5.0,
 ) -> Optional[dict]:
-    """Call engram serve HTTP API. Returns None if server is unreachable."""
+    """Call engram serve HTTP API.
+
+    Returns None only when the server is completely unreachable (ConnectionError).
+    For HTTP 4xx/5xx responses, returns a dict describing the error so callers can
+    surface the real failure instead of a misleading "server not reachable" message.
+    """
     try:
         url = f"{ENGRAM_URL}{path}"
         resp = _get_session().request(
             method, url, json=body, params=params, timeout=timeout
         )
+        if resp.status_code >= 400:
+            try:
+                payload = resp.json()
+                return {
+                    "error": payload.get("error") or payload.get("message") or str(resp.status_code),
+                    "status": resp.status_code,
+                }
+            except Exception:
+                return {"error": resp.text or str(resp.status_code), "status": resp.status_code}
         resp.raise_for_status()
         return resp.json()
     except requests.exceptions.ConnectionError:
@@ -474,17 +488,19 @@ def mem_judge(args: dict, **kwargs) -> str:
 
 
 def mem_doctor(args: dict, **kwargs) -> str:
-    """Run operational diagnostics. Endpoint: GET /doctor?project=..."""
-    try:
-        params = {}
-        if args.get("project"):
-            params["project"] = args["project"]
-        result = _engram_fetch("/doctor", method="GET", params=params)
-        if result is None:
-            return json.dumps({"error": "Engram server not reachable."})
-        return json.dumps(result, indent=2)
-    except Exception as e:
-        return json.dumps({"error": str(e)})
+    """Run operational diagnostics.
+
+    The HTTP server does not expose a /doctor endpoint. Use the MCP server
+    (engram mcp --tools=agent) to access this tool.
+    """
+    return json.dumps({
+        "error": "mem_doctor is not available via the Engram HTTP API.",
+        "details": (
+            "The Hermes plugin uses direct HTTP requests, but the /doctor route "
+            "is not exposed. Route this tool through the MCP server instead: "
+            "ensure mcp_servers.engram is configured in ~/.hermes/config.yaml."
+        ),
+    })
 
 
 def mem_current_project(args: dict, **kwargs) -> str:

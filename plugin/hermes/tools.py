@@ -54,12 +54,26 @@ def _engram_fetch(
     params: Optional[dict] = None,
     timeout: float = 5.0,
 ) -> Optional[dict]:
-    """Call engram serve HTTP API. Returns None if server is unreachable."""
+    """Call engram serve HTTP API.
+
+    Returns None only when the server is completely unreachable (ConnectionError).
+    For HTTP 4xx/5xx responses, returns a dict describing the error so callers can
+    surface the real failure instead of a misleading "server not reachable" message.
+    """
     try:
         url = f"{ENGRAM_URL}{path}"
         resp = _get_session().request(
             method, url, json=body, params=params, timeout=timeout
         )
+        if resp.status_code >= 400:
+            try:
+                payload = resp.json()
+                return {
+                    "error": payload.get("error") or payload.get("message") or str(resp.status_code),
+                    "status": resp.status_code,
+                }
+            except Exception:
+                return {"error": resp.text or str(resp.status_code), "status": resp.status_code}
         resp.raise_for_status()
         return resp.json()
     except requests.exceptions.ConnectionError:
