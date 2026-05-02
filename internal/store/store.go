@@ -2084,6 +2084,13 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 			return err
 		}
 
+		// Ensure the session exists before inserting the observation.
+		// This handles the case where an observation is created via HTTP API
+		// or tool call before a session has been explicitly registered.
+		if err := s.createSessionTx(tx, p.SessionID, p.Project, ""); err != nil {
+			return err
+		}
+
 		syncID := newSyncID("obs")
 		res, err := s.execHook(tx,
 			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, updated_at)

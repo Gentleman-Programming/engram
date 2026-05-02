@@ -1079,21 +1079,30 @@ func TestPassiveCaptureDedupesAgainstExistingObservations(t *testing.T) {
 	}
 }
 
-func TestPassiveCaptureReturnsErrorWhenSessionDoesNotExist(t *testing.T) {
+func TestPassiveCaptureCreatesSessionIfNotExists(t *testing.T) {
 	s := newTestStore(t)
 
 	text := `## Key Learnings:
 
-1. This learning is long enough to attempt insert and fail without session
-`
-	_, err := s.PassiveCapture(PassiveCaptureParams{
+1. This learning is long enough to be saved even without pre-existing session`
+	// Session "missing-session" does NOT exist in the store.
+	// PassiveCapture should auto-create it and save successfully.
+	result, err := s.PassiveCapture(PassiveCaptureParams{
 		SessionID: "missing-session",
 		Content:   text,
 		Project:   "engram",
 		Source:    "test",
 	})
-	if err == nil {
-		t.Fatalf("expected error when session does not exist")
+	if err != nil {
+		t.Fatalf("passive capture should succeed even without pre-existing session: %v", err)
+	}
+	// ExtractLearnings parses "1. ..." lines as individual learnings.
+	// One "## Key Learnings:" section with one "- ..." bullet = 1 learning.
+	if result.Extracted == 0 {
+		t.Fatalf("expected at least 1 extracted learning, got %d", result.Extracted)
+	}
+	if result.Saved < 1 {
+		t.Fatalf("expected at least 1 saved observation, got %d", result.Saved)
 	}
 }
 
