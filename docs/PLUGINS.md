@@ -31,6 +31,7 @@ The plugin auto-starts the HTTP server if it's not already running — no manual
 ### What the Plugin Does
 
 The plugin:
+
 - **Auto-starts** the engram server if not running
 - **Auto-imports** git-synced memories from `.engram/manifest.json` if present in the project
 - **Creates sessions** on-demand via `ensureSession()` (resilient to restarts/reconnects)
@@ -55,11 +56,11 @@ The plugin injects a strict protocol into every agent message:
 
 The OpenCode plugin uses a defense-in-depth strategy to ensure memories survive compaction:
 
-| Layer | Mechanism | Survives Compaction? |
-|-------|-----------|---------------------|
-| **System Prompt** | `MEMORY_INSTRUCTIONS` concatenated into existing system prompt via `chat.system.transform` | Always present |
-| **Compaction Hook** | Auto-saves checkpoint + injects context + reminds compressor | Fires during compaction |
-| **Agent Config** | "After compaction, call `mem_context`" in agent prompt | Always present |
+| Layer               | Mechanism                                                                                  | Survives Compaction?    |
+| ------------------- | ------------------------------------------------------------------------------------------ | ----------------------- |
+| **System Prompt**   | `MEMORY_INSTRUCTIONS` concatenated into existing system prompt via `chat.system.transform` | Always present          |
+| **Compaction Hook** | Auto-saves checkpoint + injects context + reminds compressor                               | Fires during compaction |
+| **Agent Config**    | "After compaction, call `mem_context`" in agent prompt                                     | Always present          |
 
 ---
 
@@ -80,13 +81,13 @@ engram setup hermes-agent
 
 The plugin exposes the Engram memory API as native Hermes tools:
 
-| Tool | Purpose |
-|------|---------|
-| `mem_save` | Persist decisions, bug fixes, patterns, discoveries |
-| `mem_search` | Cross-session recall of past work |
-| `mem_context` | Recover recent session context |
-| `mem_session_summary` | Structured end-of-session summaries |
-| `mem_get_observation` | Retrieve full untruncated observation by ID |
+| Tool                  | Purpose                                             |
+| --------------------- | --------------------------------------------------- |
+| `mem_save`            | Persist decisions, bug fixes, patterns, discoveries |
+| `mem_search`          | Cross-session recall of past work                   |
+| `mem_context`         | Recover recent session context                      |
+| `mem_session_summary` | Structured end-of-session summaries                 |
+| `mem_get_observation` | Retrieve full untruncated observation by ID         |
 
 ### How it works
 
@@ -106,7 +107,10 @@ If `engram setup hermes-agent` fails, install the plugin files from the Engram r
 ```bash
 mkdir -p ~/.hermes/plugins/engram
 # From a checkout of the engram repository:
-cp plugin/hermes/* ~/.hermes/plugins/engram/
+cp plugin/hermes/__init__.py ~/.hermes/plugins/engram/__init__.py
+cp plugin/hermes/tools.py ~/.hermes/plugins/engram/tools.py
+cp plugin/hermes/schemas.py ~/.hermes/plugins/engram/schemas.py
+cp plugin/hermes/plugin.yaml ~/.hermes/plugins/engram/plugin.yaml
 # Or download directly from GitHub:
 curl -fsSL https://raw.githubusercontent.com/Gentleman-Programming/engram/main/plugin/hermes/__init__.py -o ~/.hermes/plugins/engram/__init__.py
 curl -fsSL https://raw.githubusercontent.com/Gentleman-Programming/engram/main/plugin/hermes/tools.py    -o ~/.hermes/plugins/engram/tools.py
@@ -144,14 +148,14 @@ claude --plugin-dir ./plugin/claude-code
 
 ### What the Plugin Provides (vs bare MCP)
 
-| Feature | Bare MCP | Plugin |
-|---------|----------|--------|
-| MCP tools available | 18 default (`engram mcp`) | 14 agent-profile tools (`engram mcp --tools=agent`) |
-| Session tracking (auto-start) | ✗ | ✓ |
-| Auto-import git-synced memories | ✗ | ✓ |
-| Compaction recovery | ✗ | ✓ |
-| Memory Protocol skill | ✗ | ✓ |
-| Previous session context injection | ✗ | ✓ |
+| Feature                            | Bare MCP                  | Plugin                                              |
+| ---------------------------------- | ------------------------- | --------------------------------------------------- |
+| MCP tools available                | 18 default (`engram mcp`) | 14 agent-profile tools (`engram mcp --tools=agent`) |
+| Session tracking (auto-start)      | ✗                         | ✓                                                   |
+| Auto-import git-synced memories    | ✗                         | ✓                                                   |
+| Compaction recovery                | ✗                         | ✓                                                   |
+| Memory Protocol skill              | ✗                         | ✓                                                   |
+| Previous session context injection | ✗                         | ✓                                                   |
 
 ### Plugin Structure
 
@@ -173,17 +177,20 @@ plugin/claude-code/
 ### How It Works
 
 **On session start** (`startup`):
+
 1. Ensures the engram HTTP server is running
 2. Creates a new session via the API
 3. Auto-imports git-synced chunks from `.engram/manifest.json` (if present)
 4. Injects previous session context into Claude's initial context
 
 **On compaction** (`compact`):
+
 1. Injects the previous session context + compacted summary
 2. Tells the agent: "FIRST ACTION REQUIRED — call `mem_session_summary` with this content before doing anything else"
 3. This ensures no work is lost when context is compressed
 
 **On user prompt submit**:
+
 1. The first prompt injects a ToolSearch instruction so Claude Code loads Engram MCP tools before responding.
 2. Later prompts may inject a save reminder if the local Engram API is fast and available.
 3. On Windows Git Bash/MSYS2, the hook uses a bash-builtin-only safe path to avoid fork-heavy helpers (`jq`, `git`, `curl`, `date`). In that mode first-prompt ToolSearch still works, but later save reminders degrade to `{}` so prompt submission stays fast.
@@ -215,6 +222,7 @@ PowerShell local override/testing example for locked-down Windows endpoints:
 ```
 
 **Memory Protocol skill** (always available):
+
 - Strict rules for **when to save** (mandatory after bugfixes, decisions, discoveries)
 - **When to search** memory (reactive + proactive)
 - **Session close protocol** — mandatory `mem_session_summary` before ending
@@ -232,18 +240,19 @@ Records a verdict on a pending memory conflict surfaced by `mem_save`. When `mem
 
 ### Parameters
 
-| Parameter | Required | Type | Description |
-|-----------|----------|------|-------------|
-| `judgment_id` | yes | string | From `candidates[].judgment_id` in the `mem_save` response. Format: `rel-<hex>`. |
-| `relation` | yes | string | One of: `related`, `compatible`, `scoped`, `conflicts_with`, `supersedes`, `not_conflict` |
-| `reason` | no | string | Free-text explanation of the verdict |
-| `evidence` | no | string | Supporting evidence (JSON or free text; e.g., user's exact words) |
-| `confidence` | no | float | 0.0..1.0 — default 1.0; clamped to range |
-| `session_id` | no | string | Session ID for provenance (auto-detected if omitted) |
+| Parameter     | Required | Type   | Description                                                                               |
+| ------------- | -------- | ------ | ----------------------------------------------------------------------------------------- |
+| `judgment_id` | yes      | string | From `candidates[].judgment_id` in the `mem_save` response. Format: `rel-<hex>`.          |
+| `relation`    | yes      | string | One of: `related`, `compatible`, `scoped`, `conflicts_with`, `supersedes`, `not_conflict` |
+| `reason`      | no       | string | Free-text explanation of the verdict                                                      |
+| `evidence`    | no       | string | Supporting evidence (JSON or free text; e.g., user's exact words)                         |
+| `confidence`  | no       | float  | 0.0..1.0 — default 1.0; clamped to range                                                  |
+| `session_id`  | no       | string | Session ID for provenance (auto-detected if omitted)                                      |
 
 ### Behavior
 
 On success, `mem_judge`:
+
 - Flips `judgment_status` from `pending` to `judged` on the matching `memory_relations` row
 - Persists `relation`, `reason`, `evidence`, `confidence`, actor provenance (`actor="agent"`, `marked_by_kind="agent"`), and `session_id`
 - Returns the updated relation row as JSON
@@ -256,13 +265,13 @@ Re-judging an already-judged `judgment_id` overwrites the verdict (deliberate re
 
 After a verdict is recorded, `mem_search` annotations surface as follows:
 
-| Relation verdict | Annotation in `mem_search` results |
-|-----------------|-----------------------------------|
-| `supersedes` | `supersedes: #<id> (<title>)` on the source observation; `superseded_by: #<id> (<title>)` on the target |
-| `supersedes` (target deleted) | `supersedes: #<id> (deleted)` — falls back to `(deleted)` when the related observation is missing |
-| `conflicts_with` (judged) | `conflicts: #<id> (<title>)` on both observations — one line per conflict |
-| `pending` (not yet judged) | `conflict: contested by #<id> (pending)` on both observations |
-| `compatible`, `related`, `scoped`, `not_conflict` | No annotation line. Judgment is stored but not surfaced. |
+| Relation verdict                                  | Annotation in `mem_search` results                                                                      |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `supersedes`                                      | `supersedes: #<id> (<title>)` on the source observation; `superseded_by: #<id> (<title>)` on the target |
+| `supersedes` (target deleted)                     | `supersedes: #<id> (deleted)` — falls back to `(deleted)` when the related observation is missing       |
+| `conflicts_with` (judged)                         | `conflicts: #<id> (<title>)` on both observations — one line per conflict                               |
+| `pending` (not yet judged)                        | `conflict: contested by #<id> (pending)` on both observations                                           |
+| `compatible`, `related`, `scoped`, `not_conflict` | No annotation line. Judgment is stored but not surfaced.                                                |
 
 ### Multi-actor sync_id namespace
 
@@ -309,14 +318,14 @@ Relations where the referenced observation does not yet exist locally are deferr
 
 When `mem_save` detects candidates, the JSON response includes:
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `judgment_required` | bool | `true` when candidates were found; `false` otherwise |
-| `judgment_status` | string | `"pending"` (only present when `judgment_required: true`) |
-| `judgment_id` | string | Convenience: the first candidate's `judgment_id` (use `candidates[].judgment_id` for multi-candidate loops) |
-| `candidates` | array | Each entry has `id`, `sync_id`, `title`, `type`, `score`, `judgment_id`, and optionally `topic_key` |
-| `id` | int | Internal ID of the just-saved observation |
-| `sync_id` | string | Stable sync ID of the just-saved observation |
+| Field               | Type   | Description                                                                                                 |
+| ------------------- | ------ | ----------------------------------------------------------------------------------------------------------- |
+| `judgment_required` | bool   | `true` when candidates were found; `false` otherwise                                                        |
+| `judgment_status`   | string | `"pending"` (only present when `judgment_required: true`)                                                   |
+| `judgment_id`       | string | Convenience: the first candidate's `judgment_id` (use `candidates[].judgment_id` for multi-candidate loops) |
+| `candidates`        | array  | Each entry has `id`, `sync_id`, `title`, `type`, `score`, `judgment_id`, and optionally `topic_key`         |
+| `id`                | int    | Internal ID of the just-saved observation                                                                   |
+| `sync_id`           | string | Stable sync ID of the just-saved observation                                                                |
 
 Old clients that read only the `result` string continue to work — these fields are additive.
 
@@ -330,13 +339,13 @@ Phase 3 adds an admin-facing observability layer over the conflict/relation syst
 
 The `engram conflicts <sub-command>` command provides read and scan access to the conflict layer from the terminal. It is intended for maintainers, not for agents or end users.
 
-| Sub-command | What it does |
-|-------------|-------------|
-| `engram conflicts list` | List `memory_relations` rows with optional `--project`, `--status`, `--since`, `--limit` filters |
-| `engram conflicts show <id>` | Show full detail for one relation row (source/target observation snippets) |
-| `engram conflicts stats` | Aggregate counts grouped by relation type and judgment status; includes deferred and dead queue sizes |
-| `engram conflicts scan` | Walk observations for a project, find conflict candidates, and (with `--apply`) insert new pending relation rows up to a `--max-insert` cap |
-| `engram conflicts deferred` | Inspect and replay rows in `sync_apply_deferred`; supports `--status`, `--inspect <sync_id>`, and `--replay` |
+| Sub-command                  | What it does                                                                                                                                |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `engram conflicts list`      | List `memory_relations` rows with optional `--project`, `--status`, `--since`, `--limit` filters                                            |
+| `engram conflicts show <id>` | Show full detail for one relation row (source/target observation snippets)                                                                  |
+| `engram conflicts stats`     | Aggregate counts grouped by relation type and judgment status; includes deferred and dead queue sizes                                       |
+| `engram conflicts scan`      | Walk observations for a project, find conflict candidates, and (with `--apply`) insert new pending relation rows up to a `--max-insert` cap |
+| `engram conflicts deferred`  | Inspect and replay rows in `sync_apply_deferred`; supports `--status`, `--inspect <sync_id>`, and `--replay`                                |
 
 When `--project` is omitted, the command falls back to the cwd-detected project (same resolution as all other `engram` commands).
 
@@ -350,14 +359,14 @@ For the full HTTP API reference and CLI flag details, see [DOCS.md](../DOCS.md).
 
 All six `/conflicts/*` endpoints are served by `engram serve` on the local runtime (`127.0.0.1:7437`). They are not exposed on the cloud runtime. Full request/response documentation is in [DOCS.md](../DOCS.md).
 
-| Route | Purpose |
-|-------|---------|
-| `GET /conflicts` | Paginated list of relation rows |
-| `GET /conflicts/{relation_id}` | Single relation detail |
-| `GET /conflicts/stats` | Aggregate counts |
-| `POST /conflicts/scan` | Run scan (dry-run or apply) |
-| `GET /conflicts/deferred` | List deferred queue |
-| `POST /conflicts/deferred/replay` | Trigger ReplayDeferred cycle |
+| Route                             | Purpose                         |
+| --------------------------------- | ------------------------------- |
+| `GET /conflicts`                  | Paginated list of relation rows |
+| `GET /conflicts/{relation_id}`    | Single relation detail          |
+| `GET /conflicts/stats`            | Aggregate counts                |
+| `POST /conflicts/scan`            | Run scan (dry-run or apply)     |
+| `GET /conflicts/deferred`         | List deferred queue             |
+| `POST /conflicts/deferred/replay` | Trigger ReplayDeferred cycle    |
 
 ---
 
@@ -371,18 +380,19 @@ Records a verdict on a semantic comparison between two memories. The agent reads
 
 ### Parameters
 
-| Parameter | Required | Type | Description |
-|-----------|----------|------|-------------|
-| `memory_id_a` | yes | int | Observation ID of the first memory |
-| `memory_id_b` | yes | int | Observation ID of the second memory |
-| `relation` | yes | string | One of: `conflicts_with` | `supersedes` | `scoped` | `related` | `compatible` | `not_conflict` |
-| `confidence` | yes | float | 0.0..1.0 |
-| `reasoning` | yes | string | Explanation of the verdict (max 200 chars) |
-| `model` | no | string | Model name for provenance (e.g. `"claude-haiku-4-5"`) |
+| Parameter     | Required | Type   | Description                                           |
+| ------------- | -------- | ------ | ----------------------------------------------------- | ------------ | -------- | --------- | ------------ | -------------- |
+| `memory_id_a` | yes      | int    | Observation ID of the first memory                    |
+| `memory_id_b` | yes      | int    | Observation ID of the second memory                   |
+| `relation`    | yes      | string | One of: `conflicts_with`                              | `supersedes` | `scoped` | `related` | `compatible` | `not_conflict` |
+| `confidence`  | yes      | float  | 0.0..1.0                                              |
+| `reasoning`   | yes      | string | Explanation of the verdict (max 200 chars)            |
+| `model`       | no       | string | Model name for provenance (e.g. `"claude-haiku-4-5"`) |
 
 ### Behavior
 
 On success, `mem_compare`:
+
 - Persists a relation row with system provenance (`marked_by_kind="system"`, `marked_by_actor="engram"`)
 - Is idempotent: the same `(source_id, target_id)` pair updates the existing row rather than inserting a duplicate
 - Returns `{"sync_id": "<rel-hex>"}` on a persisted verdict

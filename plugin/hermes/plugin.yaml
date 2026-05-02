@@ -18,6 +18,7 @@ provides_tools:
   - mem_doctor
   - mem_current_project
   - mem_capture_passive
+  - mem_stats
 provides_hooks:
   - pre_llm_call
   - post_tool_call

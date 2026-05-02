@@ -172,6 +172,10 @@ func (s *Server) routes() {
 
 	// Stats
 	s.mux.HandleFunc("GET /stats", s.handleStats)
+	// Doctor
+	s.mux.HandleFunc("GET /doctor", s.handleDoctor)
+	// Judge
+	s.mux.HandleFunc("POST /judge", s.handleJudge)
 
 	// Project migration
 	s.mux.HandleFunc("POST /projects/migrate", s.handleMigrateProject)
