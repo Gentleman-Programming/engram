@@ -17,22 +17,24 @@ ENGRAM_URL = f"http://127.0.0.1:{ENGRAM_PORT}"
 ENGRAM_BIN = os.environ.get("ENGRAM_BIN", "engram")
 
 # Engram's own MCP tools — don't count these in session stats
-ENGRAM_TOOLS = frozenset([
-    "mem_search",
-    "mem_save",
-    "mem_update",
-    "mem_delete",
-    "mem_context",
-    "mem_session_summary",
-    "mem_get_observation",
-    "mem_save_prompt",
-    "mem_timeline",
-    "mem_session_start",
-    "mem_session_end",
-    "mem_judge",
-    "mem_doctor",
-    "mem_current_project",
-])
+ENGRAM_TOOLS = frozenset(
+    [
+        "mem_search",
+        "mem_save",
+        "mem_update",
+        "mem_delete",
+        "mem_context",
+        "mem_session_summary",
+        "mem_get_observation",
+        "mem_save_prompt",
+        "mem_timeline",
+        "mem_session_start",
+        "mem_session_end",
+        "mem_judge",
+        "mem_doctor",
+        "mem_current_project",
+    ]
+)
 
 # ─── HTTP Client ───────────────────────────────────────────────────────────────
 
@@ -69,11 +71,16 @@ def _engram_fetch(
             try:
                 payload = resp.json()
                 return {
-                    "error": payload.get("error") or payload.get("message") or str(resp.status_code),
+                    "error": payload.get("error")
+                    or payload.get("message")
+                    or str(resp.status_code),
                     "status": resp.status_code,
                 }
             except Exception:
-                return {"error": resp.text or str(resp.status_code), "status": resp.status_code}
+                return {
+                    "error": resp.text or str(resp.status_code),
+                    "status": resp.status_code,
+                }
         resp.raise_for_status()
         return resp.json()
     except requests.exceptions.ConnectionError:
@@ -106,6 +113,7 @@ def _ensure_server() -> bool:
         )
         # Give it time to start
         import time
+
         for _ in range(10):
             time.sleep(0.3)
             if _is_engram_running():
@@ -118,12 +126,15 @@ def _ensure_server() -> bool:
 
 # ─── Session helpers ──────────────────────────────────────────────────────────
 
+
 def _extract_project(directory: str) -> str:
     """Extract project name from git remote origin URL."""
     try:
         result = subprocess.run(
             ["git", "-C", directory, "remote", "get-url", "origin"],
-            capture_output=True, text=True, timeout=3,
+            capture_output=True,
+            text=True,
+            timeout=3,
         )
         if result.returncode == 0:
             url = result.stdout.strip()
@@ -138,16 +149,18 @@ def _extract_project(directory: str) -> str:
     try:
         result = subprocess.run(
             ["git", "-C", directory, "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, timeout=3,
+            capture_output=True,
+            text=True,
+            timeout=3,
         )
         if result.returncode == 0:
             root = result.stdout.strip()
             if root:
-                return root.split("/")[-1]
+                return os.path.basename(os.path.normpath(root))
     except Exception:
         pass
 
-    return directory.split("/")[-1] or "unknown"
+    return os.path.basename(os.path.normpath(directory)) or "unknown"
 
 
 def _truncate(s: str, max_chars: int) -> str:
@@ -163,6 +176,7 @@ def default_session_id(project: str) -> str:
 def _strip_private(s: str) -> str:
     """Strip <private>...</private> tags before sending to engram."""
     import re
+
     return re.sub(r"<private>[\s\S]*?</private>", "[REDACTED]", s).strip()
 
 
@@ -200,11 +214,15 @@ def ensure_session(session_id: str) -> None:
     if session_id in _subagent_sessions:
         return  # Don't register sub-agents
 
-    response = _engram_fetch("/sessions", method="POST", body={
-        "id": session_id,
-        "project": _current_project,
-        "directory": _current_directory,
-    })
+    response = _engram_fetch(
+        "/sessions",
+        method="POST",
+        body={
+            "id": session_id,
+            "project": _current_project,
+            "directory": _current_directory,
+        },
+    )
     if response is not None:
         _known_sessions.add(session_id)
 
@@ -219,11 +237,15 @@ def capture_prompt(session_id: str, content: str) -> None:
         return
 
     ensure_session(session_id)
-    _engram_fetch("/prompts", method="POST", body={
-        "session_id": session_id,
-        "content": content,
-        "project": _current_project,
-    })
+    _engram_fetch(
+        "/prompts",
+        method="POST",
+        body={
+            "session_id": session_id,
+            "content": content,
+            "project": _current_project,
+        },
+    )
 
 
 def capture_tool_call(session_id: str, tool_name: str) -> None:
@@ -248,6 +270,7 @@ def clear_session(session_id: Optional[str]) -> None:
 # ─── Tool Handlers ────────────────────────────────────────────────────────────
 # Each receives (args: dict, **kwargs) → JSON string
 
+
 def mem_search(args: dict, **kwargs) -> str:
     """Search persistent memory. Endpoint: GET /search?q=...&project=...&type=...&scope=...&limit=..."""
     try:
@@ -265,7 +288,9 @@ def mem_search(args: dict, **kwargs) -> str:
 
         result = _engram_fetch("/search", method="GET", body=None, params=params)
         if result is None:
-            return json.dumps({"error": "Engram server not reachable. Is 'engram serve' running?"})
+            return json.dumps(
+                {"error": "Engram server not reachable. Is 'engram serve' running?"}
+            )
         return json.dumps(result, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -273,14 +298,18 @@ def mem_search(args: dict, **kwargs) -> str:
 
 def mem_save(args: dict, **kwargs) -> str:
     try:
-        result = _engram_fetch("/observations", method="POST", body={
-            "title": args.get("title", ""),
-            "content": args.get("content", ""),
-            "type": args.get("type", "learning"),
-            "scope": args.get("scope", "project"),
-            "topic_key": args.get("topic_key"),
-            "project": _current_project,
-        })
+        result = _engram_fetch(
+            "/observations",
+            method="POST",
+            body={
+                "title": args.get("title", ""),
+                "content": args.get("content", ""),
+                "type": args.get("type", "learning"),
+                "scope": args.get("scope", "project"),
+                "topic_key": args.get("topic_key"),
+                "project": _current_project,
+            },
+        )
         if result is None:
             return json.dumps({"error": "Engram server not reachable."})
         return json.dumps(result, indent=2)
@@ -301,7 +330,9 @@ def mem_update(args: dict, **kwargs) -> str:
             if field in args and args[field] is not None:
                 patch_body[field] = args[field]
 
-        result = _engram_fetch(f"/observations/{obs_id}", method="PATCH", body=patch_body)
+        result = _engram_fetch(
+            f"/observations/{obs_id}", method="PATCH", body=patch_body
+        )
         if result is None:
             return json.dumps({"error": "Engram server not reachable."})
         return json.dumps(result, indent=2)
@@ -348,13 +379,17 @@ def mem_session_summary(args: dict, **kwargs) -> str:
         session_id = args.get("session_id") or default_session_id(project)
         content = args.get("content", "")
 
-        result = _engram_fetch("/observations", method="POST", body={
-            "session_id": session_id,
-            "type": "session_summary",
-            "title": f"Session summary: {project}",
-            "content": content,
-            "project": project,
-        })
+        result = _engram_fetch(
+            "/observations",
+            method="POST",
+            body={
+                "session_id": session_id,
+                "type": "session_summary",
+                "title": f"Session summary: {project}",
+                "content": content,
+                "project": project,
+            },
+        )
         if result is None:
             return json.dumps({"error": "Engram server not reachable."})
         return json.dumps(result, indent=2)
@@ -380,13 +415,17 @@ def mem_save_prompt(args: dict, **kwargs) -> str:
     try:
         project = _current_project or "unknown"
         session_id = args.get("session_id") or default_session_id(project)
-        result = _engram_fetch("/observations", method="POST", body={
-            "session_id": session_id,
-            "type": "prompt",
-            "title": "User prompt",
-            "content": args.get("content", ""),
-            "project": project,
-        })
+        result = _engram_fetch(
+            "/observations",
+            method="POST",
+            body={
+                "session_id": session_id,
+                "type": "prompt",
+                "title": "User prompt",
+                "content": args.get("content", ""),
+                "project": project,
+            },
+        )
         if result is None:
             return json.dumps({"error": "Engram server not reachable."})
         return json.dumps(result, indent=2)
@@ -407,19 +446,26 @@ def mem_session_start(args: dict, **kwargs) -> str:
         directory = args.get("directory", "")
 
         # Use passive capture to register the session
-        result = _engram_fetch("/observations/passive", method="POST", body={
-            "session_id": session_id,
-            "content": f"Session started: {project}" + (f" | {directory}" if directory else ""),
-            "project": project,
-            "source": "session_start",
-        })
+        result = _engram_fetch(
+            "/observations/passive",
+            method="POST",
+            body={
+                "session_id": session_id,
+                "content": f"Session started: {project}"
+                + (f" | {directory}" if directory else ""),
+                "project": project,
+                "source": "session_start",
+            },
+        )
         # Passive capture is best-effort — return success even if server unreachable
         if result is None:
-            return json.dumps({
-                "id": None,
-                "message": f"Session registered locally (engram server may be offline). "
-                           f"ID={session_id}, project={project}",
-            })
+            return json.dumps(
+                {
+                    "id": None,
+                    "message": f"Session registered locally (engram server may be offline). "
+                    f"ID={session_id}, project={project}",
+                }
+            )
         return json.dumps(result, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -431,14 +477,20 @@ def mem_session_end(args: dict, **kwargs) -> str:
         project = _current_project or "unknown"
         session_id = args.get("id") or default_session_id(project)
 
-        result = _engram_fetch("/observations/passive", method="POST", body={
-            "session_id": session_id,
-            "content": f"Session ended: {project}",
-            "project": project,
-            "source": "session_end",
-        })
+        result = _engram_fetch(
+            "/observations/passive",
+            method="POST",
+            body={
+                "session_id": session_id,
+                "content": f"Session ended: {project}",
+                "project": project,
+                "source": "session_end",
+            },
+        )
         if result is None:
-            return json.dumps({"message": f"Session end noted locally. ID={session_id}"})
+            return json.dumps(
+                {"message": f"Session end noted locally. ID={session_id}"}
+            )
         return json.dumps(result, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -465,10 +517,12 @@ def mem_stats(args: dict, **kwargs) -> str:
 
     The HTTP server does not expose a /stats endpoint. Use the MCP server
     (engram mcp --tools=agent) to access this capability."""
-    return json.dumps({
-        "error": "mem_stats is not available via the Engram HTTP API.",
-        "details": "The Hermes plugin previously called GET /stats, but that route is not exposed by the Engram HTTP server.",
-    })
+    return json.dumps(
+        {
+            "error": "mem_stats is not available via the Engram HTTP API.",
+            "details": "The Hermes plugin previously called GET /stats, but that route is not exposed by the Engram HTTP server.",
+        }
+    )
 
 
 def mem_judge(args: dict, **kwargs) -> str:
@@ -477,14 +531,16 @@ def mem_judge(args: dict, **kwargs) -> str:
     The HTTP server does not expose a /judge endpoint. Use the MCP server
     (engram mcp --tools=agent) to access this tool.
     """
-    return json.dumps({
-        "error": "mem_judge is not available via the Engram HTTP API.",
-        "details": (
-            "The Hermes plugin uses direct HTTP requests, but the /judge route "
-            "is not exposed. Route this tool through the MCP server instead: "
-            "ensure mcp_servers.engram is configured in ~/.hermes/config.yaml."
-        ),
-    })
+    return json.dumps(
+        {
+            "error": "mem_judge is not available via the Engram HTTP API.",
+            "details": (
+                "The Hermes plugin uses direct HTTP requests, but the /judge route "
+                "is not exposed. Route this tool through the MCP server instead: "
+                "ensure mcp_servers.engram is configured in ~/.hermes/config.yaml."
+            ),
+        }
+    )
 
 
 def mem_doctor(args: dict, **kwargs) -> str:
@@ -493,24 +549,28 @@ def mem_doctor(args: dict, **kwargs) -> str:
     The HTTP server does not expose a /doctor endpoint. Use the MCP server
     (engram mcp --tools=agent) to access this tool.
     """
-    return json.dumps({
-        "error": "mem_doctor is not available via the Engram HTTP API.",
-        "details": (
-            "The Hermes plugin uses direct HTTP requests, but the /doctor route "
-            "is not exposed. Route this tool through the MCP server instead: "
-            "ensure mcp_servers.engram is configured in ~/.hermes/config.yaml."
-        ),
-    })
+    return json.dumps(
+        {
+            "error": "mem_doctor is not available via the Engram HTTP API.",
+            "details": (
+                "The Hermes plugin uses direct HTTP requests, but the /doctor route "
+                "is not exposed. Route this tool through the MCP server instead: "
+                "ensure mcp_servers.engram is configured in ~/.hermes/config.yaml."
+            ),
+        }
+    )
 
 
 def mem_current_project(args: dict, **kwargs) -> str:
     """Detect current project from working directory. Uses _current_project set by hook."""
     project = _current_project or "unknown"
-    return json.dumps({
-        "project": project,
-        "directory": _current_directory or os.getcwd(),
-        "source": "hermes_plugin",
-    })
+    return json.dumps(
+        {
+            "project": project,
+            "directory": _current_directory or os.getcwd(),
+            "source": "hermes_plugin",
+        }
+    )
 
 
 def mem_capture_passive(args: dict, **kwargs) -> str:
@@ -518,12 +578,16 @@ def mem_capture_passive(args: dict, **kwargs) -> str:
     try:
         project = _current_project or "unknown"
         session_id = args.get("session_id") or default_session_id(project)
-        result = _engram_fetch("/observations/passive", method="POST", body={
-            "session_id": session_id,
-            "content": args.get("content", ""),
-            "project": project,
-            "source": args.get("source", "passive_capture"),
-        })
+        result = _engram_fetch(
+            "/observations/passive",
+            method="POST",
+            body={
+                "session_id": session_id,
+                "content": args.get("content", ""),
+                "project": project,
+                "source": args.get("source", "passive_capture"),
+            },
+        )
         if result is None:
             return json.dumps({"error": "Engram server not reachable."})
         return json.dumps(result, indent=2)
