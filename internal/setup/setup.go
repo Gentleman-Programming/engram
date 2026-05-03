@@ -24,7 +24,6 @@ import (
 	"strings"
 
 	"github.com/Gentleman-Programming/engram/internal/mcp"
-	"gopkg.in/yaml.v3"
 )
 
 var (
@@ -1118,15 +1117,8 @@ func hermesPluginsDir() string {
 	return filepath.Join(home, ".hermes", "plugins", "engram")
 }
 
-// hermesConfigPath returns the path to the Hermes Agent config file.
-func hermesConfigPath() string {
-	home, _ := userHomeDir()
-	return filepath.Join(home, ".hermes", "config.yaml")
-}
-
 // installHermesAgent installs the Engram plugin for Hermes Agent:
 // - Copies Python plugin files to ~/.hermes/plugins/engram/
-// - Injects the engram MCP server entry into ~/.hermes/config.yaml
 func installHermesAgent() (*Result, error) {
 	// ── 1. Copy plugin files ───────────────────────────────────────────────
 	pluginDir := hermesPluginsDir()
@@ -1155,17 +1147,6 @@ func installHermesAgent() (*Result, error) {
 		files++
 	}
 
-	// ── 2. Inject MCP server into config.yaml ──────────────────────────────
-	if err := injectHermesMCP(); err != nil {
-		// Non-fatal: plugin works, MCP just needs manual config
-		cmd := resolveEngramCommand()
-		fmt.Fprintf(os.Stderr, "warning: could not auto-register MCP server in config.yaml: %v\n", err)
-		fmt.Fprintf(os.Stderr, "  Add manually to your ~/.hermes/config.yaml under mcp_servers:\n")
-		fmt.Fprintf(os.Stderr, "  engram:\n    command: %q\n    args: [\"mcp\", \"--tools=agent\"]\n    timeout: 60\n", cmd)
-	} else {
-		files++
-	}
-
 	return &Result{
 		Agent:       "hermes-agent",
 		Destination: pluginDir,
@@ -1173,60 +1154,4 @@ func installHermesAgent() (*Result, error) {
 	}, nil
 }
 
-// injectHermesMCP adds the engram MCP server entry to ~/.hermes/config.yaml.
-// It reads the existing YAML config, adds/updates the engram entry under
-// "mcp_servers", and writes it back preserving all other settings.
-func injectHermesMCP() error {
-	configPath := hermesConfigPath()
 
-	// Read existing config (or start with empty)
-	var config map[string]interface{}
-	data, err := readFileFn(configPath)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			return fmt.Errorf("read config: %w", err)
-		}
-		config = make(map[string]interface{})
-	} else {
-		// Parse existing YAML
-		var tmp map[string]interface{}
-		if err := yaml.Unmarshal(data, &tmp); err != nil {
-			// Return error instead of silently clobbering the user's config
-			return fmt.Errorf("failed to parse config.yaml: %w", err)
-		} else {
-			config = tmp
-		}
-	}
-
-	// Parse or create the "mcp_servers" block
-	mcpServers, ok := config["mcp_servers"].(map[string]interface{})
-	if !ok {
-		mcpServers = make(map[string]interface{})
-		config["mcp_servers"] = mcpServers
-	}
-
-	// Check if engram is already registered
-	if _, exists := mcpServers["engram"]; exists {
-		return nil // already registered
-	}
-
-	// Build engram MCP entry
-	cmd := resolveEngramCommand()
-	mcpServers["engram"] = map[string]interface{}{
-		"command": cmd,
-		"args":    []string{"mcp", "--tools=agent"},
-		"timeout": 60,
-	}
-
-	// Write back as YAML
-	output, err := yaml.Marshal(config)
-	if err != nil {
-		return fmt.Errorf("marshal config: %w", err)
-	}
-
-	if err := writeFileFn(configPath, output, 0644); err != nil {
-		return fmt.Errorf("write config: %w", err)
-	}
-
-	return nil
-}
