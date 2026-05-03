@@ -223,8 +223,18 @@ def ensure_session(session_id: str) -> None:
             "directory": _current_directory,
         },
     )
-    if response is not None and response.get("status", 200) < 400:
-        _known_sessions.add(session_id)
+    if response is None:
+        return
+
+    status = response.get("status")
+    if isinstance(status, int) and status >= 400:
+        logger.warning(
+            "failed to register engram session %s: %s",
+            session_id,
+            response.get("error") or status,
+        )
+        return
+    _known_sessions.add(session_id)
 
 
 def capture_prompt(session_id: str, content: str) -> None:
