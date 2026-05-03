@@ -161,51 +161,79 @@ See [Plugins → Claude Code Plugin](PLUGINS.md#claude-code-plugin) for details 
 
 ## Hermes Agent
 
-Recommended: one command to set up the Engram plugin + MCP server:
+Recommended: one command to set up the Engram plugin:
 
 ```bash
 engram setup hermes-agent
 ```
 
-`engram setup hermes-agent` does three things:
+`engram setup hermes-agent` copies the Engram plugin to `~/.hermes/plugins/engram/` — the plugin provides persistent memory tools (`mem_save`, `mem_search`, `mem_context`, etc.) that Hermes Agent can call as native tools.
 
-1. **Copies the Engram plugin** to `~/.hermes/plugins/engram/` — the plugin provides persistent memory tools (`mem_save`, `mem_search`, `mem_context`, etc.) that Hermes Agent can call as native tools
-2. **Registers the engram MCP server** in `~/.hermes/config.yaml` under `mcp_servers` so the Engram MCP endpoint becomes available to any agent configured with Hermes
-3. **Prints manual fallback** instructions if the config injection fails (non-fatal — the plugin still works)
+### Setup steps
+
+After installation, enable the plugin:
+
+```bash
+hermes plugins enable engram
+```
+
+Then restart Hermes Agent for the plugin to take effect.
 
 ### What the plugin provides
 
-Once installed, Hermes Agent has access to Engram memory tools via the plugin interface:
+Once enabled, Hermes Agent has access to Engram memory tools via the plugin interface:
 
 - `mem_save` — persist decisions, bug fixes, patterns, and discoveries
 - `mem_search` — cross-session recall of past decisions and implementations
 - `mem_session_summary` — structured end-of-session summaries
 - `mem_context` — recover context from recent sessions
+- `mem_current_project` — detect current project for memory scoping
+- `mem_get_observation` — retrieve full content of specific memories
+- `mem_timeline` — chronological view of project activity
 
 ### Requirements
 
 - Hermes Agent installed (`hermes agent`)
 - Engram installed (`engram`)
 - Hermes version with plugin support
+- Engram server running (`engram serve &`)
 
-### Manual fallback
+### Manual setup
 
-If `engram setup hermes-agent` fails, add manually to `~/.hermes/config.yaml`:
+If `engram setup hermes-agent` fails:
 
-```yaml
-mcp_servers:
-  engram:
-    command: engram # or full path: /home/user/.local/bin/engram
-    args: ["mcp", "--tools=agent"]
-    timeout: 60
-```
+1. Copy plugin files manually:
+   ```bash
+   mkdir -p ~/.hermes/plugins/engram
+   cp plugin/hermes/* ~/.hermes/plugins/engram/
+   ```
 
-And copy the plugin files manually:
+2. Enable the plugin:
+   ```bash
+   hermes plugins enable engram
+   ```
 
-```bash
-mkdir -p ~/.hermes/plugins/engram
-cp plugins/hermes/* ~/.hermes/plugins/engram/
-```
+3. Restart Hermes Agent
+
+### Architecture
+
+The plugin communicates with Engram via HTTP API calls to `http://127.0.0.1:7437` (configurable via `ENGRAM_PORT`). All memory operations go through the Engram server, ensuring consistency with other agent integrations.
+
+### Troubleshooting
+
+**Plugin not showing up in Hermes:**
+1. Verify plugin files exist: `ls ~/.hermes/plugins/engram/`
+2. Check plugin is enabled: `hermes plugins list`
+3. If not enabled, run: `hermes plugins enable engram`
+
+**Tools not working:**
+1. Ensure Engram server is running: `engram serve &`
+2. Test API connectivity: `curl http://127.0.0.1:7437/health`
+3. Check Hermes logs for HTTP errors
+
+**Permission errors during setup:**
+1. Ensure `~/.hermes/plugins/` directory is writable
+2. Try manual installation steps above
 
 ---
 

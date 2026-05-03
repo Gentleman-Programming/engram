@@ -66,16 +66,20 @@ The OpenCode plugin uses a defense-in-depth strategy to ensure memories survive 
 
 ## Hermes Agent Plugin
 
-For [Hermes Agent](https://hermes-agent.nousresearch.com) users, a Python plugin provides persistent memory tools via Hermes's native plugin interface, plus automatic MCP server registration:
+For [Hermes Agent](https://hermes-agent.nousresearch.com) users, a Python plugin provides persistent memory tools via Hermes's native plugin interface:
 
 ```bash
 engram setup hermes-agent
 ```
 
-`engram setup hermes-agent` performs two actions:
+`engram setup hermes-agent` installs the plugin by copying `__init__.py`, `tools.py`, `schemas.py`, and `plugin.yaml` to `~/.hermes/plugins/engram/`.
 
-1. **Plugin installation** — copies `__init__.py`, `tools.py`, `schemas.py`, and `plugin.yaml` to `~/.hermes/plugins/engram/`
-2. **MCP registration** — injects the engram MCP server entry into `~/.hermes/config.yaml` under `mcp_servers`
+After installation, enable the plugin and restart Hermes Agent:
+
+```bash
+hermes plugins enable engram
+# Then restart Hermes Agent
+```
 
 ### Tools available
 
@@ -88,45 +92,49 @@ The plugin exposes the Engram memory API as native Hermes tools:
 | `mem_context`         | Recover recent session context                      |
 | `mem_session_summary` | Structured end-of-session summaries                 |
 | `mem_get_observation` | Retrieve full untruncated observation by ID         |
+| `mem_current_project` | Auto-detect current project for memory scoping      |
+| `mem_timeline`        | Chronological view of project activity             |
+| `mem_save_prompt`     | Record user prompts for session context            |
 
 ### How it works
 
-The plugin registers Engram tools with Hermes via the `register()` lifecycle hook. Tool handlers make direct HTTP requests to the Engram serve REST API (e.g. `/search`, `/observations`, `/context`, `/timeline`) rather than forwarding through an MCP session endpoint. Hermes provides session context via its passive capture/hooks integration, so tools operate on the current session without requiring explicit session IDs from callers.
+The plugin registers Engram tools with Hermes via the `register()` lifecycle hook. Tool handlers make direct HTTP requests to the Engram server REST API (e.g. `/search`, `/observations`, `/context`, `/timeline`). Hermes provides session context via its passive capture/hooks integration, so tools operate on the current session without requiring explicit session IDs from callers.
 
 ### Requirements
 
 - Hermes Agent with plugin support
 - Engram installed and accessible on `$PATH`
-- Engram serve running (`engram serve`) — the plugin's HTTP tool operations require it
+- Engram server running (`engram serve &`) — the plugin's HTTP operations require it
 - Hermes version that supports `pre_llm_call` hooks (for memory context injection) and `post_tool_call` hooks (for passive capture)
 
 ### Manual setup
 
-If `engram setup hermes-agent` fails, install the plugin files from the Engram repository:
+If `engram setup hermes-agent` fails, install the plugin files manually:
 
-```bash
-mkdir -p ~/.hermes/plugins/engram
-# From a checkout of the engram repository:
-cp plugin/hermes/__init__.py ~/.hermes/plugins/engram/__init__.py
-cp plugin/hermes/tools.py ~/.hermes/plugins/engram/tools.py
-cp plugin/hermes/schemas.py ~/.hermes/plugins/engram/schemas.py
-cp plugin/hermes/plugin.yaml ~/.hermes/plugins/engram/plugin.yaml
-# Or download directly from GitHub:
-curl -fsSL https://raw.githubusercontent.com/Gentleman-Programming/engram/main/plugin/hermes/__init__.py -o ~/.hermes/plugins/engram/__init__.py
-curl -fsSL https://raw.githubusercontent.com/Gentleman-Programming/engram/main/plugin/hermes/tools.py    -o ~/.hermes/plugins/engram/tools.py
-curl -fsSL https://raw.githubusercontent.com/Gentleman-Programming/engram/main/plugin/hermes/schemas.py   -o ~/.hermes/plugins/engram/schemas.py
-curl -fsSL https://raw.githubusercontent.com/Gentleman-Programming/engram/main/plugin/hermes/plugin.yaml  -o ~/.hermes/plugins/engram/plugin.yaml
-```
+1. **Install plugin files** from the Engram repository:
+   ```bash
+   mkdir -p ~/.hermes/plugins/engram
+   # From a checkout of the engram repository:
+   cp plugin/hermes/__init__.py ~/.hermes/plugins/engram/__init__.py
+   cp plugin/hermes/tools.py ~/.hermes/plugins/engram/tools.py
+   cp plugin/hermes/schemas.py ~/.hermes/plugins/engram/schemas.py
+   cp plugin/hermes/plugin.yaml ~/.hermes/plugins/engram/plugin.yaml
+   ```
 
-And add to `~/.hermes/config.yaml`:
+   Or download directly from GitHub:
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/Gentleman-Programming/engram/main/plugin/hermes/__init__.py -o ~/.hermes/plugins/engram/__init__.py
+   curl -fsSL https://raw.githubusercontent.com/Gentleman-Programming/engram/main/plugin/hermes/tools.py    -o ~/.hermes/plugins/engram/tools.py
+   curl -fsSL https://raw.githubusercontent.com/Gentleman-Programming/engram/main/plugin/hermes/schemas.py   -o ~/.hermes/plugins/engram/schemas.py
+   curl -fsSL https://raw.githubusercontent.com/Gentleman-Programming/engram/main/plugin/hermes/plugin.yaml  -o ~/.hermes/plugins/engram/plugin.yaml
+   ```
 
-```yaml
-mcp_servers:
-  engram:
-    command: engram
-    args: ["mcp", "--tools=agent"]
-    timeout: 60
-```
+2. **Enable the plugin:**
+   ```bash
+   hermes plugins enable engram
+   ```
+
+3. **Restart Hermes Agent** for the plugin to take effect.
 
 ---
 
