@@ -536,8 +536,7 @@ def mem_judge(args: dict, **kwargs) -> str:
             "error": "mem_judge is not available via the Engram HTTP API.",
             "details": (
                 "The Hermes plugin uses direct HTTP requests, but the /judge route "
-                "is not exposed. Route this tool through the MCP server instead: "
-                "ensure mcp_servers.engram is configured in ~/.hermes/config.yaml."
+                "is not exposed. This tool is not available through the plugin interface."
             ),
         }
     )
@@ -554,8 +553,7 @@ def mem_doctor(args: dict, **kwargs) -> str:
             "error": "mem_doctor is not available via the Engram HTTP API.",
             "details": (
                 "The Hermes plugin uses direct HTTP requests, but the /doctor route "
-                "is not exposed. Route this tool through the MCP server instead: "
-                "ensure mcp_servers.engram is configured in ~/.hermes/config.yaml."
+                "is not exposed. This tool is not available through the plugin interface."
             ),
         }
     )
@@ -595,6 +593,39 @@ def mem_capture_passive(args: dict, **kwargs) -> str:
         return json.dumps({"error": str(e)})
 
 
+# ─── Helper Functions ────────────────────────────────────────────────────────
+
+
+def default_session_id(project: str) -> str:
+    """Generate a default session ID based on project and timestamp."""
+    import time
+    import hashlib
+    
+    timestamp = str(int(time.time()))
+    session_key = f"{project}-{timestamp}"
+    return hashlib.md5(session_key.encode()).hexdigest()[:12]
+
+
 # ─── Tool Registry ────────────────────────────────────────────────────────────
 # Maps schema name → handler function.
 # Each receives (args: dict, **kwargs) → JSON string
+
+TOOL_REGISTRY = {
+    "mem_search": mem_search,
+    "mem_save": mem_save,
+    "mem_update": mem_update,
+    "mem_delete": mem_delete,
+    "mem_context": mem_context,
+    "mem_session_summary": mem_session_summary,
+    "mem_get_observation": mem_get_observation,
+    "mem_suggest_topic_key": mem_suggest_topic_key,
+    "mem_save_prompt": mem_save_prompt,
+    "mem_session_start": mem_session_start,
+    "mem_session_end": mem_session_end,
+    "mem_timeline": mem_timeline,
+    "mem_stats": mem_stats,
+    "mem_judge": mem_judge,
+    "mem_doctor": mem_doctor,
+    "mem_current_project": mem_current_project,
+    "mem_capture_passive": mem_capture_passive,
+}
