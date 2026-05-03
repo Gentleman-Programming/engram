@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -328,6 +329,12 @@ Examples:
 				mcp.WithString("topic_key",
 					mcp.Description("Optional topic identifier for upserts (e.g. architecture/auth-model). Reuses and updates the latest observation in same project+scope."),
 				),
+				mcp.WithString("project",
+					mcp.Description("Optional recovery target only after ambiguous_project. Ignored unless project_choice_reason is user_selected_after_ambiguous_project."),
+				),
+				mcp.WithString("project_choice_reason",
+					mcp.Description("Must be user_selected_after_ambiguous_project, and only after the user explicitly chose one of available_projects from an ambiguous_project error."),
+				),
 			),
 			queuedWriteHandler(writeQueue, handleSave(s, cfg, activity)),
 		)
@@ -432,6 +439,12 @@ Examples:
 				),
 				mcp.WithString("session_id",
 					mcp.Description("Session ID to associate with (default: manual-save-{project})"),
+				),
+				mcp.WithString("project",
+					mcp.Description("Optional recovery target only after ambiguous_project. Ignored unless project_choice_reason is user_selected_after_ambiguous_project."),
+				),
+				mcp.WithString("project_choice_reason",
+					mcp.Description("Must be user_selected_after_ambiguous_project, and only after the user explicitly chose one of available_projects from an ambiguous_project error."),
 				),
 			),
 			queuedWriteHandler(writeQueue, handleSavePrompt(s, cfg)),
@@ -996,10 +1009,12 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		sessionID, _ := req.GetArguments()["session_id"].(string)
 		scope, _ := req.GetArguments()["scope"].(string)
 		topicKey, _ := req.GetArguments()["topic_key"].(string)
-		// project field intentionally not read — auto-detect only (REQ-308)
+		projectChoice, _ := req.GetArguments()["project"].(string)
+		projectChoiceReason, _ := req.GetArguments()["project_choice_reason"].(string)
 
-		// Auto-detect project from cwd; fail fast on ambiguous (REQ-308, REQ-309)
-		detRes, err := resolveWriteProject()
+		// Auto-detect project from cwd; only allow explicit user-selected recovery
+		// after ErrAmbiguousProject (issue #306).
+		detRes, err := resolveWriteProjectWithChoice(projectChoice, projectChoiceReason)
 		if err != nil {
 			return writeProjectErrorResult(detRes, err), nil
 		}
@@ -1232,9 +1247,10 @@ func handleSavePrompt(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		content, _ := req.GetArguments()["content"].(string)
 		sessionID, _ := req.GetArguments()["session_id"].(string)
-		// project field intentionally not read — auto-detect only (REQ-308)
+		projectChoice, _ := req.GetArguments()["project"].(string)
+		projectChoiceReason, _ := req.GetArguments()["project_choice_reason"].(string)
 
-		detRes, err := resolveWriteProject()
+		detRes, err := resolveWriteProjectWithChoice(projectChoice, projectChoiceReason)
 		if err != nil {
 			return writeProjectErrorResult(detRes, err), nil
 		}
@@ -1866,6 +1882,15 @@ func (e *unknownProjectError) Error() string {
 	return "unknown project: " + e.Name
 }
 
+type invalidProjectChoiceError struct {
+	Name              string
+	AvailableProjects []string
+}
+
+func (e *invalidProjectChoiceError) Error() string {
+	return "invalid project choice: " + e.Name
+}
+
 // resolveWriteProject detects the current project from the process working
 // directory. Returns ErrAmbiguousProject if cwd is a parent of multiple repos.
 func resolveWriteProject() (projectpkg.DetectionResult, error) {
@@ -1878,6 +1903,81 @@ func resolveWriteProject() (projectpkg.DetectionResult, error) {
 		return res, res.Error
 	}
 	return res, nil
+}
+
+// resolveWriteProjectWithChoice preserves normal write resolution authority and
+// only uses an explicit project choice as a recovery path from ErrAmbiguousProject.
+func resolveWriteProjectWithChoice(projectChoice, reason string) (projectpkg.DetectionResult, error) {
+	res, err := resolveWriteProject()
+	if err == nil {
+		// Non-ambiguous config/git/autodetect remains authoritative. Ignore any
+		// supplied project choice so agents cannot drift writes to arbitrary buckets.
+		return res, nil
+	}
+	if !errors.Is(err, projectpkg.ErrAmbiguousProject) {
+		return res, err
+	}
+
+	if strings.TrimSpace(reason) != projectpkg.SourceUserSelectedAfterAmbiguousProject {
+		return res, err
+	}
+
+	choice := strings.TrimSpace(projectChoice)
+	if choice == "" || !containsProjectChoice(res.AvailableProjects, choice) {
+		return res, &invalidProjectChoiceError{
+			Name:              choice,
+			AvailableProjects: res.AvailableProjects,
+		}
+	}
+
+	res.Project = choice
+	res.Source = projectpkg.SourceUserSelectedAfterAmbiguousProject
+	res.Path = resolveAmbiguousChoicePath(res.Path, choice)
+	res.Warning = "project selected by user after ambiguous_project recovery"
+	return res, nil
+}
+
+func containsProjectChoice(available []string, choice string) bool {
+	choice = strings.TrimSpace(choice)
+	for _, candidate := range available {
+		if strings.TrimSpace(candidate) == choice {
+			return true
+		}
+	}
+	return false
+}
+
+func resolveAmbiguousChoicePath(ambiguousParent, choice string) string {
+	parent := strings.TrimSpace(ambiguousParent)
+	if parent == "" || strings.TrimSpace(choice) == "" {
+		return ""
+	}
+
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return ""
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		// Match the same name shape used by project.DetectProjectFull for
+		// available_projects: trim + lowercase only. Do not use store.NormalizeProject
+		// here because it collapses repeated '-'/'_' and can create collisions.
+		if strings.TrimSpace(strings.ToLower(entry.Name())) != choice {
+			continue
+		}
+		childPath := filepath.Join(parent, entry.Name())
+		if _, err := os.Stat(filepath.Join(childPath, ".git")); err != nil {
+			continue
+		}
+		absChild, err := filepath.Abs(childPath)
+		if err != nil {
+			return childPath
+		}
+		return absChild
+	}
+	return ""
 }
 
 // resolveReadProject validates an optional project override against the store.
@@ -1934,6 +2034,19 @@ func writeProjectErrorResult(res projectpkg.DetectionResult, err error) *mcp.Cal
 	if errors.Is(err, projectpkg.ErrInvalidConfig) {
 		code = "invalid_project_config"
 	}
+	var choiceErr *invalidProjectChoiceError
+	if errors.As(err, &choiceErr) {
+		if choiceErr.Name == "" {
+			return errorWithMeta("invalid_project_choice",
+				"Project choice is empty; choose exactly one value from available_projects and retry with project_choice_reason=user_selected_after_ambiguous_project",
+				choiceErr.AvailableProjects,
+			)
+		}
+		return errorWithMeta("invalid_project_choice",
+			fmt.Sprintf("Project choice %q is not one of available_projects", choiceErr.Name),
+			choiceErr.AvailableProjects,
+		)
+	}
 	return errorWithMeta(code, fmt.Sprintf("Cannot determine project: %s", err), res.AvailableProjects)
 }
 
@@ -1947,7 +2060,9 @@ func errorWithMeta(code, msg string, availableProjects []string) *mcp.CallToolRe
 	}
 	switch code {
 	case "ambiguous_project":
-		envelope["hint"] = "Use mem_current_project to inspect detection results, or cd into one of the listed repositories."
+		envelope["hint"] = "Ask the user to choose one of available_projects, then retry mem_save or mem_save_prompt with project and project_choice_reason=user_selected_after_ambiguous_project; alternatively cd into the target repo or add repo .engram/config.json."
+	case "invalid_project_choice":
+		envelope["hint"] = "Use exactly one of available_projects after asking the user, or cd into the target repo, or add repo .engram/config.json."
 	case "unknown_project":
 		envelope["hint"] = "Use one of the available_projects values, or omit project to auto-detect."
 	case "invalid_project_config":
