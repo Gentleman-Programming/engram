@@ -2228,11 +2228,11 @@ func printPostInstall(result *setup.Result) {
 		fmt.Println("  3. Verify model_instructions_file + experimental_compact_prompt_file are set")
 	case "hermes-agent":
 		fmt.Println("\nNext steps:")
-		fmt.Println("  1. Restart Hermes Agent so plugin + MCP are loaded")
-		fmt.Println("  2. Verify ~/.hermes/config.yaml has mcp_servers.engram")
+		fmt.Println("  1. Enable the plugin: hermes plugins enable engram")
+		fmt.Println("  2. Restart Hermes Agent so plugin is loaded")
 		fmt.Println("  3. Verify ~/.hermes/plugins/engram/ contains __init__.py, tools.py, schemas.py, plugin.yaml")
 		fmt.Println("  4. Run 'engram serve &' — required: plugin tool operations (mem_search, mem_save,")
-		fmt.Println("     mem_context, etc.) all hit the Engram HTTP server, not MCP.")
+		fmt.Println("     mem_context, etc.) all hit the Engram HTTP server.")
 	}
 }
 
