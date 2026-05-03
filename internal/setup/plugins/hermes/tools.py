@@ -298,10 +298,12 @@ def mem_search(args: dict, **kwargs) -> str:
 
 def mem_save(args: dict, **kwargs) -> str:
     try:
+        session_id = args.get("session_id") or default_session_id(_current_project)
         result = _engram_fetch(
             "/observations",
             method="POST",
             body={
+                "session_id": session_id,
                 "title": args.get("title", ""),
                 "content": args.get("content", ""),
                 "type": args.get("type", "learning"),
