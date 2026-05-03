@@ -593,19 +593,6 @@ def mem_capture_passive(args: dict, **kwargs) -> str:
         return json.dumps({"error": str(e)})
 
 
-# ─── Helper Functions ────────────────────────────────────────────────────────
-
-
-def default_session_id(project: str) -> str:
-    """Generate a default session ID based on project and timestamp."""
-    import time
-    import hashlib
-    
-    timestamp = str(int(time.time()))
-    session_key = f"{project}-{timestamp}"
-    return hashlib.md5(session_key.encode()).hexdigest()[:12]
-
-
 # ─── Tool Registry ────────────────────────────────────────────────────────────
 # Maps schema name → handler function.
 # Each receives (args: dict, **kwargs) → JSON string
@@ -618,7 +605,6 @@ TOOL_REGISTRY = {
     "mem_context": mem_context,
     "mem_session_summary": mem_session_summary,
     "mem_get_observation": mem_get_observation,
-    "mem_suggest_topic_key": mem_suggest_topic_key,
     "mem_save_prompt": mem_save_prompt,
     "mem_session_start": mem_session_start,
     "mem_session_end": mem_session_end,
