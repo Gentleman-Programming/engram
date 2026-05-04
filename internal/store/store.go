@@ -1443,7 +1443,7 @@ func (s *Store) evaluateCloudUpgradeLegacyMutationTx(tx *sql.Tx, mutation SyncMu
 	}
 
 	supported := (entity == SyncEntitySession && (op == SyncOpUpsert || op == SyncOpDelete)) ||
-		((entity == SyncEntityObservation || entity == SyncEntityPrompt) && (op == SyncOpUpsert || op == SyncOpDelete))
+		((entity == SyncEntityObservation || entity == SyncEntityPrompt || entity == SyncEntityRelation) && (op == SyncOpUpsert || op == SyncOpDelete))
 	if !supported {
 		return blocked(UpgradeReasonBlockedLegacyMutationManual, fmt.Sprintf("unsupported legacy mutation %q/%q", entity, op)), nil
 	}
@@ -1619,6 +1619,130 @@ func (s *Store) evaluateCloudUpgradeLegacyMutationTx(tx *sql.Tx, mutation SyncMu
 			return cloudUpgradeLegacyMutationEvaluation{}, err
 		}
 		return repairable("prompt payload is missing required fields for canonical bootstrap", "repair fills missing prompt fields from local prompts table", string(encoded)), nil
+
+	case SyncEntityRelation:
+		var body syncRelationPayload
+		if err := decodeSyncPayload([]byte(payload), &body); err != nil {
+			return blocked(UpgradeReasonBlockedLegacyMutationManual, fmt.Sprintf("decode relation payload: %v", err)), nil
+		}
+		body.SyncID = strings.TrimSpace(body.SyncID)
+		body.SourceID = strings.TrimSpace(body.SourceID)
+		body.TargetID = strings.TrimSpace(body.TargetID)
+		body.Relation = strings.TrimSpace(body.Relation)
+		body.JudgmentStatus = strings.TrimSpace(body.JudgmentStatus)
+		body.Project = strings.TrimSpace(body.Project)
+		body.CreatedAt = strings.TrimSpace(body.CreatedAt)
+		body.UpdatedAt = strings.TrimSpace(body.UpdatedAt)
+		changed := false
+		if body.SyncID == "" && strings.TrimSpace(mutation.EntityKey) != "" {
+			body.SyncID = strings.TrimSpace(mutation.EntityKey)
+			changed = true
+		}
+		if body.SyncID == "" {
+			return blocked(UpgradeReasonBlockedLegacyMutationManual, "relation payload sync_id is required"), nil
+		}
+		if strings.TrimSpace(mutation.EntityKey) != "" && strings.TrimSpace(mutation.EntityKey) != body.SyncID {
+			return blocked(UpgradeReasonBlockedLegacyMutationManual, fmt.Sprintf("relation entity_key %q does not match payload sync_id %q", mutation.EntityKey, body.SyncID)), nil
+		}
+		if op == SyncOpUpsert {
+			var local syncRelationPayload
+			err := tx.QueryRow(
+				`SELECT sync_id, ifnull(source_id,''), ifnull(target_id,''), relation, reason, evidence, confidence, judgment_status, ifnull(marked_by_actor,''), ifnull(marked_by_kind,''), ifnull(marked_by_model,''), ifnull(session_id,''), created_at, updated_at FROM memory_relations WHERE sync_id = ?`,
+				body.SyncID,
+			).Scan(&local.SyncID, &local.SourceID, &local.TargetID, &local.Relation, &local.Reason, &local.Evidence, &local.Confidence, &local.JudgmentStatus, &local.MarkedByActor, &local.MarkedByKind, &local.MarkedByModel, &local.SessionID, &local.CreatedAt, &local.UpdatedAt)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return cloudUpgradeLegacyMutationEvaluation{}, err
+			}
+			if strings.TrimSpace(body.SourceID) == "" && err == nil && strings.TrimSpace(local.SourceID) != "" {
+				body.SourceID = strings.TrimSpace(local.SourceID)
+				changed = true
+			}
+			if strings.TrimSpace(body.TargetID) == "" && err == nil && strings.TrimSpace(local.TargetID) != "" {
+				body.TargetID = strings.TrimSpace(local.TargetID)
+				changed = true
+			}
+			if body.Relation == "" && err == nil && strings.TrimSpace(local.Relation) != "" {
+				body.Relation = strings.TrimSpace(local.Relation)
+				changed = true
+			}
+			if body.Reason == nil && err == nil && local.Reason != nil {
+				body.Reason = local.Reason
+				changed = true
+			}
+			if body.Evidence == nil && err == nil && local.Evidence != nil {
+				body.Evidence = local.Evidence
+				changed = true
+			}
+			if body.Confidence == nil && err == nil && local.Confidence != nil {
+				body.Confidence = local.Confidence
+				changed = true
+			}
+			if body.JudgmentStatus == "" && err == nil && strings.TrimSpace(local.JudgmentStatus) != "" {
+				body.JudgmentStatus = strings.TrimSpace(local.JudgmentStatus)
+				changed = true
+			}
+			if body.MarkedByActor == nil && err == nil && local.MarkedByActor != nil {
+				body.MarkedByActor = local.MarkedByActor
+				changed = true
+			}
+			if body.MarkedByKind == nil && err == nil && local.MarkedByKind != nil {
+				body.MarkedByKind = local.MarkedByKind
+				changed = true
+			}
+			if body.MarkedByModel == nil && err == nil && local.MarkedByModel != nil {
+				body.MarkedByModel = local.MarkedByModel
+				changed = true
+			}
+			if body.SessionID == nil && err == nil && local.SessionID != nil {
+				body.SessionID = local.SessionID
+				changed = true
+			}
+			if body.Project == "" && err == nil && strings.TrimSpace(local.Project) != "" {
+				body.Project = strings.TrimSpace(local.Project)
+				changed = true
+			}
+			if body.CreatedAt == "" && err == nil && strings.TrimSpace(local.CreatedAt) != "" {
+				body.CreatedAt = strings.TrimSpace(local.CreatedAt)
+				changed = true
+			}
+			if body.UpdatedAt == "" && err == nil && strings.TrimSpace(local.UpdatedAt) != "" {
+				body.UpdatedAt = strings.TrimSpace(local.UpdatedAt)
+				changed = true
+			}
+			missing := []string{}
+			if strings.TrimSpace(body.SourceID) == "" {
+				missing = append(missing, "source_id")
+			}
+			if strings.TrimSpace(body.TargetID) == "" {
+				missing = append(missing, "target_id")
+			}
+			if body.Relation == "" {
+				missing = append(missing, "relation")
+			}
+			if body.JudgmentStatus == "" {
+				missing = append(missing, "judgment_status")
+			}
+			if body.Project == "" {
+				missing = append(missing, "project")
+			}
+			if body.CreatedAt == "" {
+				missing = append(missing, "created_at")
+			}
+			if body.UpdatedAt == "" {
+				missing = append(missing, "updated_at")
+			}
+			if len(missing) > 0 {
+				return blocked(UpgradeReasonBlockedLegacyMutationManual, fmt.Sprintf("relation payload missing required upsert fields: %s", strings.Join(missing, ", "))), nil
+			}
+		}
+		if !changed {
+			return cloudUpgradeLegacyMutationEvaluation{}, nil
+		}
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			return cloudUpgradeLegacyMutationEvaluation{}, err
+		}
+		return repairable("relation payload is missing required fields for canonical bootstrap", "repair fills missing relation fields from local memory_relations table", string(encoded)), nil
 	}
 
 	return cloudUpgradeLegacyMutationEvaluation{}, nil

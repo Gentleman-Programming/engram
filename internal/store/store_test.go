@@ -1986,6 +1986,116 @@ func TestUpgradeRepairDryRunAndApply(t *testing.T) {
 			t.Fatalf("expected no remaining legacy findings after repair, got %+v", after)
 		}
 	})
+
+	t.Run("legacy relation mutation required fields are detected and repaired from authoritative local state", func(t *testing.T) {
+		s := newTestStore(t)
+		if err := s.CreateSession("legacy-rel-s1", "legacy-rel-proj", "/tmp/legacy-rel"); err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		if _, err := s.AddObservation(AddObservationParams{SessionID: "legacy-rel-s1", Type: "decision", Title: "Authoritative title", Content: "Authoritative content", Project: "legacy-rel-proj", Scope: "project"}); err != nil {
+			t.Fatalf("add observation: %v", err)
+		}
+		if err := s.EnrollProject("legacy-rel-proj"); err != nil {
+			t.Fatalf("enroll project: %v", err)
+		}
+
+		var sourceSyncID, targetSyncID string
+		if err := s.db.QueryRow(`SELECT sync_id FROM observations WHERE session_id = ? ORDER BY id ASC LIMIT 1`, "legacy-rel-s1").Scan(&sourceSyncID); err != nil {
+			t.Fatalf("lookup source observation sync id: %v", err)
+		}
+		if err := s.db.QueryRow(`SELECT sync_id FROM observations WHERE session_id = ? ORDER BY id DESC LIMIT 1`, "legacy-rel-s1").Scan(&targetSyncID); err != nil {
+			t.Fatalf("lookup target observation sync id: %v", err)
+		}
+
+		relSyncID := "rel-test-1234567890abcdef"
+		reason := "test reason"
+		evidence := "test evidence"
+		confidence := 0.95
+		markedByActor := "agent"
+		markedByKind := "agent"
+		markedByModel := "model-x"
+		if _, err := s.db.Exec(`
+			INSERT INTO memory_relations (sync_id, source_id, target_id, relation, reason, evidence, confidence, judgment_status, marked_by_actor, marked_by_kind, marked_by_model, created_at, updated_at)
+			VALUES (?, ?, ?, 'related', ?, ?, ?, 'judged', ?, ?, ?, datetime('now'), datetime('now'))
+		`, relSyncID, sourceSyncID, targetSyncID, reason, evidence, confidence, markedByActor, markedByKind, markedByModel); err != nil {
+			t.Fatalf("insert local relation: %v", err)
+		}
+
+		payload := `{"sync_id":"` + relSyncID + `","source_id":"` + sourceSyncID + `","relation":"related","judgment_status":"judged","project":"legacy-rel-proj","created_at":"2026-05-04 00:00:00","updated_at":"2026-05-04 00:00:00"}`
+		if _, err := s.execHook(s.db,
+			`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			DefaultSyncTargetKey,
+			SyncEntityRelation,
+			relSyncID,
+			SyncOpUpsert,
+			payload,
+			SyncSourceLocal,
+			"legacy-rel-proj",
+		); err != nil {
+			t.Fatalf("insert malformed legacy relation mutation: %v", err)
+		}
+
+		diagnosis, err := s.DiagnoseCloudUpgradeLegacyMutations("legacy-rel-proj")
+		if err != nil {
+			t.Fatalf("diagnose legacy relation mutations: %v", err)
+		}
+		if diagnosis.RepairableCount == 0 || diagnosis.BlockedCount != 0 {
+			t.Fatalf("expected repairable-only diagnosis for relation, got %+v", diagnosis)
+		}
+		if len(diagnosis.Findings) == 0 || !diagnosis.Findings[0].Repairable {
+			t.Fatalf("expected at least one repairable relation finding, got %+v", diagnosis.Findings)
+		}
+
+		report, err := s.RepairCloudUpgrade("legacy-rel-proj", true)
+		if err != nil {
+			t.Fatalf("repair legacy relation payload gaps: %v", err)
+		}
+		if report.Class != UpgradeRepairClassRepairable || !report.Applied {
+			t.Fatalf("expected applied repairable result for relation, got %+v", report)
+		}
+
+		var repairedPayload string
+		if err := s.db.QueryRow(`
+			SELECT payload FROM sync_mutations
+			WHERE target_key = ? AND project = ? AND entity = ? AND entity_key = ? AND op = ?
+			ORDER BY seq DESC LIMIT 1
+		`, DefaultSyncTargetKey, "legacy-rel-proj", SyncEntityRelation, relSyncID, SyncOpUpsert).Scan(&repairedPayload); err != nil {
+			t.Fatalf("load repaired relation payload: %v", err)
+		}
+		var repaired syncRelationPayload
+		if err := decodeSyncPayload([]byte(repairedPayload), &repaired); err != nil {
+			t.Fatalf("decode repaired relation payload: %v", err)
+		}
+		if strings.TrimSpace(repaired.TargetID) == "" {
+			t.Fatalf("expected repaired payload target_id from authoritative local relation, got %+v", repaired)
+		}
+		if repaired.Reason == nil || *repaired.Reason != reason {
+			t.Fatalf("expected repaired payload reason from authoritative local relation, got %+v", repaired)
+		}
+		if repaired.Evidence == nil || *repaired.Evidence != evidence {
+			t.Fatalf("expected repaired payload evidence from authoritative local relation, got %+v", repaired)
+		}
+		if repaired.Confidence == nil || *repaired.Confidence != confidence {
+			t.Fatalf("expected repaired payload confidence from authoritative local relation, got %+v", repaired)
+		}
+		if repaired.MarkedByActor == nil || *repaired.MarkedByActor != markedByActor {
+			t.Fatalf("expected repaired payload marked_by_actor from authoritative local relation, got %+v", repaired)
+		}
+		if repaired.MarkedByKind == nil || *repaired.MarkedByKind != markedByKind {
+			t.Fatalf("expected repaired payload marked_by_kind from authoritative local relation, got %+v", repaired)
+		}
+		if repaired.MarkedByModel == nil || *repaired.MarkedByModel != markedByModel {
+			t.Fatalf("expected repaired payload marked_by_model from authoritative local relation, got %+v", repaired)
+		}
+
+		after, err := s.DiagnoseCloudUpgradeLegacyMutations("legacy-rel-proj")
+		if err != nil {
+			t.Fatalf("diagnose after relation repair: %v", err)
+		}
+		if after.RepairableCount != 0 || after.BlockedCount != 0 || len(after.Findings) != 0 {
+			t.Fatalf("expected no remaining legacy relation findings after repair, got %+v", after)
+		}
+	})
 }
 
 func TestRollbackCloudUpgradeSafetyBoundary(t *testing.T) {
