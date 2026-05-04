@@ -46,19 +46,20 @@ type staticStatusProvider struct{ status dashboard.SyncStatus }
 func (s staticStatusProvider) Status() dashboard.SyncStatus { return s.status }
 
 type CloudServer struct {
-	store          ChunkStore
-	auth           Authenticator
-	projectAuth    ProjectAuthorizer
-	dashboardAdmin string
-	port           int
-	host           string
-	mux            *http.ServeMux
-	syncStatus     dashboard.SyncStatusProvider
-	listenAndServe func(addr string, handler http.Handler) error
+	store            ChunkStore
+	auth             Authenticator
+	projectAuth      ProjectAuthorizer
+	dashboardAdmin   string
+	port             int
+	host             string
+	maxPushBodyBytes int64
+	mux              *http.ServeMux
+	syncStatus       dashboard.SyncStatusProvider
+	listenAndServe   func(addr string, handler http.Handler) error
 }
 
 const defaultHost = "127.0.0.1"
-const maxPushBodyBytes int64 = 8 * 1024 * 1024
+const defaultMaxPushBodyBytes int64 = 8 * 1024 * 1024
 const maxDashboardLoginBodyBytes int64 = 16 * 1024
 const dashboardSessionCookieName = "engram_dashboard_token"
 
@@ -88,18 +89,27 @@ func WithDashboardAdminToken(adminToken string) Option {
 	}
 }
 
+func WithMaxPushBodyBytes(maxBytes int64) Option {
+	return func(s *CloudServer) {
+		if maxBytes > 0 {
+			s.maxPushBodyBytes = maxBytes
+		}
+	}
+}
+
 func New(store ChunkStore, authSvc Authenticator, port int, opts ...Option) *CloudServer {
 	s := &CloudServer{
-		store: store,
-		auth:  authSvc,
-		port:  port,
-		host:  defaultHost,
+		store:            store,
+		auth:             authSvc,
+		port:             port,
+		host:             defaultHost,
+		maxPushBodyBytes: defaultMaxPushBodyBytes,
 		syncStatus: staticStatusProvider{status: dashboard.SyncStatus{
 			Phase:         "degraded",
 			ReasonCode:    constants.ReasonTransportFailed,
 			ReasonMessage: "sync status provider is unavailable",
 		}},
-		listenAndServe: http.ListenAndServe,
+		listenAndServe:   http.ListenAndServe,
 	}
 	if projectAuthorizer, ok := authSvc.(ProjectAuthorizer); ok {
 		s.projectAuth = projectAuthorizer
@@ -346,7 +356,7 @@ func (s *CloudServer) handlePullChunk(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *CloudServer) handlePushChunk(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxPushBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxPushBodyBytes)
 	var req struct {
 		ChunkID         string          `json:"chunk_id"`
 		CreatedBy       string          `json:"created_by"`
@@ -357,7 +367,7 @@ func (s *CloudServer) handlePushChunk(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
-			writeActionableError(w, http.StatusRequestEntityTooLarge, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodePayloadTooLarge, fmt.Sprintf("push payload too large (max %d bytes)", maxPushBodyBytes))
+			writeActionableError(w, http.StatusRequestEntityTooLarge, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodePayloadTooLarge, fmt.Sprintf("push payload too large (max %d bytes)", s.maxPushBodyBytes))
 			return
 		}
 		writeActionableError(w, http.StatusBadRequest, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodePayloadInvalid, fmt.Sprintf("invalid push payload: %v", err))

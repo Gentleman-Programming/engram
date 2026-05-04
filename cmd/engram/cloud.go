@@ -106,6 +106,7 @@ var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
 			authenticator,
 			cfg.Port,
 			cloudserver.WithHost(cfg.BindHost),
+			cloudserver.WithMaxPushBodyBytes(cfg.MaxPushBodyBytes),
 			cloudserver.WithProjectAuthorizer(projectAuth),
 			cloudserver.WithDashboardAdminToken(cfg.AdminToken),
 			cloudserver.WithSyncStatusProvider(cloudDashboardStatusProvider{store: cs, projects: allowedProjects}),

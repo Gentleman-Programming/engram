@@ -1588,6 +1588,7 @@ func TestCmdCloudServeStartsCloudRuntime(t *testing.T) {
 	t.Setenv("ENGRAM_CLOUD_HOST", "0.0.0.0")
 	t.Setenv("ENGRAM_CLOUD_TOKEN", "token-abc")
 	t.Setenv("ENGRAM_CLOUD_ALLOWED_PROJECTS", "proj-a")
+	t.Setenv("ENGRAM_CLOUD_MAX_PUSH_BYTES", "16777216")
 
 	var seen cloud.Config
 	runtimeStub := &stubCloudRuntimeServer{}
@@ -1611,6 +1612,9 @@ func TestCmdCloudServeStartsCloudRuntime(t *testing.T) {
 	}
 	if seen.BindHost != "0.0.0.0" {
 		t.Fatalf("expected cloud runtime config bind host from env, got %q", seen.BindHost)
+	}
+	if seen.MaxPushBodyBytes != 16777216 {
+		t.Fatalf("expected cloud runtime config max push bytes from env, got %d", seen.MaxPushBodyBytes)
 	}
 }
 

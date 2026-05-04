@@ -323,6 +323,33 @@ func TestMutationPushEndpointBatchTooLarge(t *testing.T) {
 	}
 }
 
+func TestMutationPushEndpointRejectsOversizedPayloadUsingConfiguredMax(t *testing.T) {
+	ms := newFakeMutationStore()
+	srv := New(ms, multiProjectAuth{token: "secret", projects: []string{"proj-a"}}, 0, WithMaxPushBodyBytes(64))
+	tooLarge := strings.Repeat("x", 65)
+	body := bytes.NewBufferString(`{"entries":[{"project":"proj-a","entity":"observation","entity_key":"obs-1","op":"upsert","payload":"` + tooLarge + `"}]}`)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", body)
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	payload := decodeActionableError(t, rec)
+	if payload.ErrorClass != "repairable" {
+		t.Fatalf("expected repairable error class, got %q", payload.ErrorClass)
+	}
+	if payload.ErrorCode != "upgrade_repairable_payload_too_large" {
+		t.Fatalf("expected payload too large error code, got %q", payload.ErrorCode)
+	}
+	if payload.Error != "push payload too large (max 64 bytes)" {
+		t.Fatalf("expected configured max in error, got %q", payload.Error)
+	}
+}
+
 func TestMutationPushEndpointEmptyBatch(t *testing.T) {
 	// JC1: empty batch → 400 empty_batch (changed from prior 200 behavior).
 	// Empty batches carry no project info; they cannot be pause-gated or audited.

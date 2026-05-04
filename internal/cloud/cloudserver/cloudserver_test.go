@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	cloudauth "github.com/Gentleman-Programming/engram/internal/cloud/auth"
+	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
 	"github.com/Gentleman-Programming/engram/internal/cloud/cloudstore"
 	"github.com/Gentleman-Programming/engram/internal/cloud/dashboard"
 	"github.com/Gentleman-Programming/engram/internal/store"
@@ -776,7 +777,7 @@ func TestHandlerProjectScopeForbiddenReturnsPolicyClassPayload(t *testing.T) {
 
 func TestHandlerPushRejectsOversizedPayload(t *testing.T) {
 	srv := New(&fakeStore{}, fakeAuth{}, 0)
-	tooLarge := strings.Repeat("x", int(maxPushBodyBytes)+1)
+	tooLarge := strings.Repeat("x", int(defaultMaxPushBodyBytes)+1)
 	body := bytes.NewBufferString(`{"project":"proj-a","created_by":"tester","data":"` + tooLarge + `"}`)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sync/push", body))
@@ -785,6 +786,27 @@ func TestHandlerPushRejectsOversizedPayload(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "payload too large") {
 		t.Fatalf("expected clear oversized payload error, got body=%q", rec.Body.String())
+	}
+}
+
+func TestHandlerPushRejectsOversizedPayloadUsingConfiguredMax(t *testing.T) {
+	srv := New(&fakeStore{}, fakeAuth{}, 0, WithMaxPushBodyBytes(32))
+	tooLarge := strings.Repeat("x", 33)
+	body := bytes.NewBufferString(`{"project":"proj-a","created_by":"tester","data":"` + tooLarge + `"}`)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sync/push", body))
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	payload := decodeActionableError(t, rec)
+	if payload.ErrorClass != constants.UpgradeErrorClassRepairable {
+		t.Fatalf("expected repairable error class, got %q", payload.ErrorClass)
+	}
+	if payload.ErrorCode != constants.UpgradeErrorCodePayloadTooLarge {
+		t.Fatalf("expected payload too large code, got %q", payload.ErrorCode)
+	}
+	if payload.Error != "push payload too large (max 32 bytes)" {
+		t.Fatalf("expected configured max in error, got %q", payload.Error)
 	}
 }
 

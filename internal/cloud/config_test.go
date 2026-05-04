@@ -31,6 +31,41 @@ func TestConfigFromEnvAllowedProjects(t *testing.T) {
 	}
 }
 
+func TestConfigFromEnvMaxPushBodyBytes(t *testing.T) {
+	t.Run("default remains 8 MiB", func(t *testing.T) {
+		t.Setenv("ENGRAM_CLOUD_MAX_PUSH_BYTES", "")
+		cfg := ConfigFromEnv()
+		if cfg.MaxPushBodyBytes != DefaultMaxPushBodyBytes {
+			t.Fatalf("expected default max push bytes %d, got %d", DefaultMaxPushBodyBytes, cfg.MaxPushBodyBytes)
+		}
+	})
+
+	t.Run("env override works", func(t *testing.T) {
+		t.Setenv("ENGRAM_CLOUD_MAX_PUSH_BYTES", "67108864")
+		cfg := ConfigFromEnv()
+		if cfg.MaxPushBodyBytes != 67108864 {
+			t.Fatalf("expected env override 67108864, got %d", cfg.MaxPushBodyBytes)
+		}
+	})
+
+	for _, tc := range []struct {
+		name  string
+		value string
+	}{
+		{name: "invalid keeps default", value: "not-a-number"},
+		{name: "zero keeps default", value: "0"},
+		{name: "negative keeps default", value: "-1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("ENGRAM_CLOUD_MAX_PUSH_BYTES", tc.value)
+			cfg := ConfigFromEnv()
+			if cfg.MaxPushBodyBytes != DefaultMaxPushBodyBytes {
+				t.Fatalf("expected default max push bytes %d for %q, got %d", DefaultMaxPushBodyBytes, tc.value, cfg.MaxPushBodyBytes)
+			}
+		})
+	}
+}
+
 func TestIsDefaultJWTSecret(t *testing.T) {
 	t.Run("default secret returns true", func(t *testing.T) {
 		if !IsDefaultJWTSecret(DefaultJWTSecret) {
