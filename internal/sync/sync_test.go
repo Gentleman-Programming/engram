@@ -2254,6 +2254,138 @@ func TestGetUsernameAndManifestSummary(t *testing.T) {
 	})
 }
 
+// TestBootstrapProjectEnsuresSessionMutationsBeforeObservations verifies that
+// when an observation mutation references a session that has no pending session
+// mutation (because the session was created before sync enrollment or its mutation
+// was already acked), the export push batch synthesizes and includes a session
+// upsert mutation that appears BEFORE any dependent observation mutations.
+//
+// Without this fix, Client B pulling from cloud_mutations would encounter an
+// observation mutation referencing a non-existent session row → FOREIGN KEY error.
+func TestBootstrapProjectEnsuresSessionMutationsBeforeObservations(t *testing.T) {
+	s := newTestStore(t)
+	project := "proj-bootstrap-orphan"
+
+	// Enroll project so mutations are tracked.
+	if err := s.EnrollProject(project); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+
+	// Create session via normal API — this enqueues a session mutation.
+	if err := s.CreateSession("sess-orphan", project, "/tmp/bootstrap-orphan"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	// List pending mutations and ack the session mutation so it no longer appears
+	// as pending. This simulates a session created before enrollment whose mutation
+	// was already pushed in a prior export cycle.
+	pending, err := s.ListPendingSyncMutations(store.DefaultSyncTargetKey, 10)
+	if err != nil {
+		t.Fatalf("list pending mutations: %v", err)
+	}
+	var sessionSeqs []int64
+	for _, m := range pending {
+		if m.Entity == store.SyncEntitySession && m.EntityKey == "sess-orphan" {
+			sessionSeqs = append(sessionSeqs, m.Seq)
+		}
+	}
+	if len(sessionSeqs) == 0 {
+		t.Fatal("expected at least one pending session mutation before ack")
+	}
+	if err := s.AckSyncMutationSeqs(store.DefaultSyncTargetKey, sessionSeqs); err != nil {
+		t.Fatalf("ack session mutation: %v", err)
+	}
+
+	// Now add an observation — this enqueues an obs mutation referencing sess-orphan.
+	// sess-orphan has NO pending session mutation but the session still exists in the DB.
+	if _, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "sess-orphan",
+		Type:      "decision",
+		Title:     "Orphan observation",
+		Content:   "Observation with no corresponding session mutation pending",
+		Project:   project,
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	// Confirm: pending mutations now contain only obs (no session mutation).
+	pending2, err := s.ListPendingSyncMutations(store.DefaultSyncTargetKey, 20)
+	if err != nil {
+		t.Fatalf("list pending after ack: %v", err)
+	}
+	for _, m := range pending2 {
+		if m.Entity == store.SyncEntitySession && m.EntityKey == "sess-orphan" {
+			t.Fatal("session mutation should be acked; found pending session mutation")
+		}
+	}
+	hasObsMut := false
+	for _, m := range pending2 {
+		if m.Entity == store.SyncEntityObservation {
+			hasObsMut = true
+		}
+	}
+	if !hasObsMut {
+		t.Fatal("expected at least one pending observation mutation")
+	}
+
+	// Export via cloud syncer — this is what bootstrap calls.
+	transport := newFakeCloudTransport()
+	sy := NewCloudWithTransport(s, transport, project)
+	if _, err := sy.Export("test-bootstrap", project); err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+
+	if transport.writeChunkCalls == 0 {
+		t.Fatal("expected Export to write at least one chunk")
+	}
+
+	// Decode the chunk written to the transport.
+	// The data is CanonicalizeForProject JSON (not gzipped in the fake transport).
+	var rawChunk map[string]any
+	for _, data := range transport.chunks {
+		if err := json.Unmarshal(data, &rawChunk); err != nil {
+			t.Fatalf("unmarshal chunk: %v", err)
+		}
+		break // take the first (only) chunk
+	}
+
+	mutationsRaw, ok := rawChunk["mutations"].([]any)
+	if !ok {
+		t.Fatalf("chunk mutations field missing or not an array; raw: %#v", rawChunk["mutations"])
+	}
+
+	// Verify: a session mutation for sess-orphan appears before any observation mutation.
+	sessionMutIdx := -1
+	obsMutIdx := -1
+	for i, m := range mutationsRaw {
+		entry, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		entity, _ := entry["entity"].(string)
+		entityKey, _ := entry["entity_key"].(string)
+		switch {
+		case entity == store.SyncEntitySession && strings.TrimSpace(entityKey) == "sess-orphan":
+			sessionMutIdx = i
+		case entity == store.SyncEntityObservation:
+			if obsMutIdx == -1 {
+				obsMutIdx = i
+			}
+		}
+	}
+
+	if sessionMutIdx == -1 {
+		t.Errorf("chunk.Mutations must include a session mutation for sess-orphan (referenced by obs), but none found; mutations: %#v", mutationsRaw)
+	}
+	if obsMutIdx == -1 {
+		t.Error("chunk.Mutations must include an observation mutation")
+	}
+	if sessionMutIdx != -1 && obsMutIdx != -1 && sessionMutIdx > obsMutIdx {
+		t.Errorf("session mutation (idx %d) must appear before observation mutation (idx %d) in chunk.Mutations", sessionMutIdx, obsMutIdx)
+	}
+}
+
 func TestChunkTrackingTargetKeyScopesBySyncTarget(t *testing.T) {
 	local := &Syncer{cloudMode: false}
 	if got := local.chunkTrackingTargetKey(""); got != store.LocalChunkTargetKey {

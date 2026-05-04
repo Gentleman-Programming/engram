@@ -1186,9 +1186,99 @@ func (sy *Syncer) filterByPendingMutations(data *store.ExportData, project strin
 			chunk.Sessions = append(chunk.Sessions, session)
 		}
 	}
+	// Issue #293: ensure every session referenced by obs/prompt mutations in the
+	// push batch has a corresponding session upsert mutation.  If the session was
+	// created before sync enrollment (or its mutation was already acked), it won't
+	// appear in selectedMutations.  A receiving client that applies mutations from
+	// cloud_mutations in seq order would fail with FOREIGN KEY constraint when it
+	// encounters an observation for a session that was never inserted via mutations.
+	//
+	// We apply the same dependency-closure logic used on the pull side by
+	// buildImportMutations: collect the session IDs referenced by obs/prompt
+	// mutations, subtract those already covered by explicit session mutations, and
+	// synthesize upsert mutations for the remainder from data.Sessions.
+	selectedMutations = ensureSessionMutationsBeforeObservations(selectedMutations, data.Sessions)
 	chunk.Mutations = selectedMutations
 
 	return chunk, seqs, nil
+}
+
+// ensureSessionMutationsBeforeObservations inspects the pending mutations batch
+// and prepends synthesized session upsert mutations for any session that is
+// referenced by an observation or prompt upsert but has no explicit session
+// mutation in the batch.  This prevents FOREIGN KEY failures on the receiving
+// client when mutations are applied in seq order from cloud_mutations.
+func ensureSessionMutationsBeforeObservations(mutations []store.SyncMutation, sessions []store.Session) []store.SyncMutation {
+	// Index sessions by ID for fast lookup.
+	sessionByID := make(map[string]store.Session, len(sessions))
+	for _, s := range sessions {
+		sessionByID[strings.TrimSpace(s.ID)] = s
+	}
+
+	// Find session IDs that already have an explicit session mutation in the batch.
+	coveredSessions := make(map[string]struct{})
+	for _, m := range mutations {
+		if m.Entity == store.SyncEntitySession && m.Op == store.SyncOpUpsert {
+			coveredSessions[strings.TrimSpace(m.EntityKey)] = struct{}{}
+		}
+	}
+
+	// Collect session IDs referenced by obs/prompt upserts that are NOT covered.
+	missing := make(map[string]struct{})
+	for _, m := range mutations {
+		if m.Op != store.SyncOpUpsert {
+			continue
+		}
+		if m.Entity != store.SyncEntityObservation && m.Entity != store.SyncEntityPrompt {
+			continue
+		}
+		var payload struct {
+			SessionID string `json:"session_id"`
+		}
+		if err := decodeSyncPayloadForProject([]byte(m.Payload), &payload); err != nil {
+			continue
+		}
+		sessionID := strings.TrimSpace(payload.SessionID)
+		if sessionID == "" {
+			continue
+		}
+		if _, ok := coveredSessions[sessionID]; ok {
+			continue
+		}
+		if _, ok := sessionByID[sessionID]; ok {
+			missing[sessionID] = struct{}{}
+		}
+	}
+
+	if len(missing) == 0 {
+		return mutations
+	}
+
+	// Synthesize session upsert mutations for the missing sessions.
+	synthesized := make([]store.SyncMutation, 0, len(missing))
+	for sessionID := range missing {
+		sess := sessionByID[sessionID]
+		payload, err := json.Marshal(map[string]any{
+			"id":         sess.ID,
+			"project":    sess.Project,
+			"directory":  sess.Directory,
+			"started_at": sess.StartedAt,
+			"ended_at":   sess.EndedAt,
+			"summary":    sess.Summary,
+		})
+		if err != nil {
+			continue
+		}
+		synthesized = append(synthesized, store.SyncMutation{
+			Entity:    store.SyncEntitySession,
+			EntityKey: strings.TrimSpace(sess.ID),
+			Op:        store.SyncOpUpsert,
+			Payload:   string(payload),
+		})
+	}
+
+	// Prepend synthesized session mutations so they arrive before dependents.
+	return append(synthesized, mutations...)
 }
 
 func (sy *Syncer) listPendingMutationsForExport() ([]store.SyncMutation, error) {
