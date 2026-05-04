@@ -21,7 +21,7 @@ This is the complete technical reference for Engram. For getting started, see th
 | [Features](#features) | FTS5 search, timeline, privacy, git sync, compression |
 | [TUI](#terminal-ui-tui) | Screens, navigation, architecture |
 | [Running as a Service](#running-as-a-service) | systemd setup |
-| [Design Decisions](#design-decisions) | Why Go, why SQLite, why no auto-capture |
+| [Design Decisions](#design-decisions) | Why Go, why SQLite, why no raw auto-capture |
 
 For other docs:
 
@@ -547,9 +547,11 @@ Every successful tool response includes these fields:
 
 Error responses include `available_projects` when the error is `ambiguous_project` or `unknown_project`.
 
-### Write tools (no project arg)
+### Write tools (cwd-detected project, limited recovery override)
 
-`mem_save`, `mem_save_prompt`, `mem_session_start`, `mem_session_end`, `mem_session_summary`, `mem_capture_passive`, `mem_update` — project is auto-detected from cwd. Any `project` argument the LLM sends is silently discarded.
+`mem_session_start`, `mem_session_end`, `mem_session_summary`, `mem_capture_passive`, and `mem_update` auto-detect project from cwd. Any `project` argument the LLM sends is ignored.
+
+`mem_save` and `mem_save_prompt` also auto-detect project from cwd by default, but they accept one narrow recovery override: after a previous `ambiguous_project` error, the agent may retry with `project=<one of available_projects>` and `project_choice_reason=user_selected_after_ambiguous_project`. Without that exact reason, LLM-supplied `project` is ignored so routine writes cannot drift across project names.
 
 ### Read tools (optional project override)
 
@@ -605,6 +607,7 @@ Save structured observations. The tool description teaches agents the format:
 - **type**: `decision` | `architecture` | `bugfix` | `pattern` | `config` | `discovery` | `learning`
 - **scope**: `project` (default) | `personal`
 - **topic_key**: optional canonical topic id (e.g. `architecture/auth-model`) used to upsert evolving memories
+- **capture_prompt**: optional boolean, default `true`; when current prompt context is available in the same MCP process for the same project/session, Engram best-effort records it alongside the observation. If that process-local context is unavailable or prompt capture fails, `mem_save` still succeeds. Automated pipeline saves such as SDD artifacts should pass `false`.
 - **content**: Structured with `**What**`, `**Why**`, `**Where**`, `**Learned**`
 
 Exact duplicate saves are deduplicated in a rolling time window using a normalized content hash + project + scope + type + title.
@@ -625,6 +628,7 @@ Delete an observation by ID. Uses soft-delete by default (`deleted_at`); optiona
 ### mem_save_prompt
 
 Save user prompts — records what the user asked so future sessions have context about user goals.
+When called in the same MCP process, this also feeds process-local current prompt context used by later `mem_save` calls with `capture_prompt=true`. The same MCP process lifecycle must receive the prompt context before the later save; prompt capture is best-effort and `mem_save` still succeeds when no context is available.
 
 ### mem_context
 
@@ -907,9 +911,11 @@ Instead of a separate LLM service, the agent itself compresses observations. The
 - **Per-action** (`mem_save`): Structured summaries (What/Why/Where/Learned)
 - **Session summary** (`mem_session_summary`): Comprehensive end-of-session summary (Goal/Instructions/Discoveries/Accomplished/Files)
 
-### No Raw Auto-Capture
+### No Raw Tool-Call Auto-Capture
 
-All memory comes from the agent itself — no firehose of raw tool calls. Why? Raw tool calls (`edit: {file: "foo.go"}`, `bash: {command: "go build"}`) are noisy and pollute FTS5 search. The agent's curated summaries are higher signal, more searchable, and don't bloat the database. Shell history and git provide the raw audit trail.
+Engram does not record a firehose of raw tool calls. Raw tool calls (`edit: {file: "foo.go"}`, `bash: {command: "go build"}`) are noisy and pollute FTS5 search. The agent's curated summaries are higher signal, more searchable, and don't bloat the database. Shell history and git provide the raw audit trail.
+
+Since v1.15.3, `mem_save` can also best-effort attach the current user prompt when prompt context was already provided to the same MCP process for the same project/session (typically by `mem_save_prompt`) and `capture_prompt` is not disabled. That is not raw event capture: it stores user intent tied to a curated save, and the save still succeeds if prompt context is missing.
 
 ---
 
@@ -986,7 +992,7 @@ WantedBy=default.target
 4. **Agent-driven compression** — The agent already has an LLM. No separate compression service.
 5. **Privacy at two layers** — Strip in plugin AND store. Defense in depth.
 6. **Pure Go SQLite (modernc.org/sqlite)** — No CGO means true cross-platform binary distribution.
-7. **No raw auto-capture** — The agent saves curated summaries. Shell history and git provide the raw audit trail.
+7. **No raw tool-call auto-capture** — The agent saves curated summaries; `mem_save` may best-effort capture process-local prompt context tied to that save, but Engram does not ingest raw tool-call firehoses. Shell history and git provide the raw audit trail.
 8. **TUI with Bubbletea** — Interactive terminal UI following Gentleman Bubbletea patterns.
 
 ---

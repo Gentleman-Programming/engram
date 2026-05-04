@@ -27,7 +27,7 @@ Engram works with **any MCP-compatible agent**. Pick your agent below.
 
 ### Project auto-detection (important)
 
-**Do not pass `project` to write tools.** Engram auto-detects the project from the server's working directory (cwd) using `.engram/config.json`, git remote URL, repo root name, or directory basename. Agents that include `project` in `mem_save` or similar calls will have that argument silently discarded.
+**Do not pass `project` to write tools during normal operation.** Engram auto-detects the project from the server's working directory (cwd) using `.engram/config.json`, git remote URL, repo root name, or directory basename. Agents that include `project` in `mem_save` or similar calls will have that argument ignored unless they are using the explicit ambiguous-project recovery flow below.
 
 To lock write tools to the canonical project for a repo, add `.engram/config.json` at the repo root:
 
@@ -40,6 +40,76 @@ To lock write tools to the canonical project for a repo, add `.engram/config.jso
 When present, `project_name` is used for writes from the repo and its subdirectories and overrides lower-confidence cwd/git detection. This is a write lock only: read tools can still use an explicit `project` filter when you need to query another existing project. Empty or invalid `project_name` values fail writes loudly instead of falling back silently.
 
 **Recommended first call:** `mem_current_project` — confirms which project Engram detected before you start writing. Returns `project_source` (how it was detected) and `available_projects` (if cwd is ambiguous).
+
+If a write tool returns `ambiguous_project`, the agent must not guess. This happens when the MCP server is started from a parent directory that contains multiple repositories, for example:
+
+```text
+/Users/you/work
+├── alan-thegentleman/
+├── angular-18-jest-playwright/
+└── engram/
+```
+
+The first write fails with an error like:
+
+```json
+{
+  "error_code": "ambiguous_project",
+  "available_projects": [
+    "alan-thegentleman",
+    "angular-18-jest-playwright",
+    "engram"
+  ]
+}
+```
+
+Ask the user to choose exactly one value from `available_projects`, then retry only `mem_save` or `mem_save_prompt` with both recovery fields:
+
+```json
+{
+  "project": "chosen-project-from-available-projects",
+  "project_choice_reason": "user_selected_after_ambiguous_project"
+}
+```
+
+On success, Engram writes to the selected project and reports the recovery source:
+
+```json
+{
+  "project": "engram",
+  "project_source": "user_selected_after_ambiguous_project",
+  "project_path": "/Users/you/work/engram"
+}
+```
+
+### Ambiguous-project recovery rules
+
+This is a narrow rescue path, not a free-form project override:
+
+- Recovery is accepted only after cwd detection failed with `ambiguous_project`.
+- `project_choice_reason` must be exactly `user_selected_after_ambiguous_project`.
+- `project`, after trimming surrounding whitespace, must exactly match one of the reported `available_projects`.
+- Normalized variants and guesses are rejected: if `available_projects` contains `foo--bar`, retry with `foo--bar`, not `foo-bar`.
+- Empty or whitespace-only choices are rejected.
+- In all non-ambiguous cases, `.engram/config.json`/git/cwd detection remains authoritative and the explicit `project` field is ignored.
+
+Mental model:
+
+```text
+mem_save fails with ambiguous_project
+        ↓
+Engram returns available_projects
+        ↓
+agent asks the user to choose one exact value
+        ↓
+agent retries with project + project_choice_reason
+        ↓
+Engram validates the choice came from ambiguity
+        ↓
+Engram saves to the selected project
+```
+
+Alternatives: `cd` into the target repo before starting the MCP server, or add repo `.engram/config.json`.
 
 **Read tools** (`mem_search`, `mem_context`, `mem_get_observation`, `mem_stats`, `mem_timeline`) accept an optional `project` override validated against the store. Omit it to auto-detect.
 
