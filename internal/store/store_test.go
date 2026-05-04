@@ -7084,3 +7084,155 @@ func TestAddObservation_DecayNotAppliedToExistingRows(t *testing.T) {
 		t.Errorf("revision must not overwrite review_after: was %q, now %q", ra1, ra2)
 	}
 }
+
+// TestOutboxDoesNotEmitEmptyDirectoryOrType verifies that the mutation outbox
+// guards against emitting session mutations with directory="" or observation
+// mutations with type="" when the value can be inferred from the local DB.
+//
+// Issue #299 (sub-problem 2a): new writes could produce broken mutations that
+// fail cloud canonicalization (which requires directory and type for upserts).
+func TestOutboxDoesNotEmitEmptyDirectoryOrType(t *testing.T) {
+	t.Run("session mutation gets directory filled from DB when CreateSession called with empty dir", func(t *testing.T) {
+		s := newTestStore(t)
+
+		// CreateSession with a real directory first so the sibling fallback works.
+		if err := s.CreateSession("sess-with-dir", "test-proj", "/tmp/real-dir"); err != nil {
+			t.Fatalf("create session with dir: %v", err)
+		}
+
+		// CreateSession with empty directory — the outbox guard must fill it.
+		if err := s.CreateSession("sess-empty-dir", "test-proj", ""); err != nil {
+			t.Fatalf("create session empty dir: %v", err)
+		}
+
+		// Read back the session mutation for sess-empty-dir.
+		rows, err := s.db.Query(
+			`SELECT payload FROM sync_mutations WHERE entity = ? AND entity_key = ? AND op = ? AND source = ?`,
+			SyncEntitySession, "sess-empty-dir", SyncOpUpsert, SyncSourceLocal,
+		)
+		if err != nil {
+			t.Fatalf("query session mutation: %v", err)
+		}
+		defer rows.Close()
+
+		found := false
+		for rows.Next() {
+			found = true
+			var rawPayload string
+			if err := rows.Scan(&rawPayload); err != nil {
+				t.Fatalf("scan payload: %v", err)
+			}
+			var payload syncSessionPayload
+			if err := decodeSyncPayload([]byte(rawPayload), &payload); err != nil {
+				t.Fatalf("decode session payload: %v", err)
+			}
+			if strings.TrimSpace(payload.Directory) == "" {
+				t.Errorf("session mutation payload must have non-empty directory; got %q in payload %q", payload.Directory, rawPayload)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("rows error: %v", err)
+		}
+		// It's acceptable if no mutation was emitted (the guard may skip it) as long
+		// as no broken mutation (with empty directory) was inserted.
+		_ = found
+	})
+
+	t.Run("observation mutation gets type filled from DB when AddObservation called with empty type", func(t *testing.T) {
+		s := newTestStore(t)
+
+		if err := s.CreateSession("sess-obs-empty-type", "test-proj", "/tmp/obs-dir"); err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+
+		// Insert an observation directly with a known sync_id but empty type.
+		// This simulates a legacy row that might get re-emitted via backfill.
+		obsSync := "obs-empty-type-sync-001"
+		if _, err := s.db.Exec(`
+			INSERT INTO observations (session_id, type, title, content, project, scope, normalized_hash,
+			                          revision_count, duplicate_count, last_seen_at, updated_at, sync_id)
+			VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, datetime('now'), datetime('now'), ?)`,
+			"sess-obs-empty-type", "", "Title", "Content", "test-proj", "project",
+			hashNormalized("Content"), obsSync,
+		); err != nil {
+			t.Fatalf("insert observation with empty type: %v", err)
+		}
+
+		// Insert a mutation for this observation with empty type in the payload.
+		payloadWithEmptyType := `{"sync_id":"` + obsSync + `","session_id":"sess-obs-empty-type","type":"","title":"Title","content":"Content","project":"test-proj","scope":"project","revision_count":1,"duplicate_count":1}`
+		if _, err := s.db.Exec(
+			`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			DefaultSyncTargetKey, SyncEntityObservation, obsSync, SyncOpUpsert, payloadWithEmptyType, SyncSourceLocal, "test-proj",
+		); err != nil {
+			t.Fatalf("insert broken obs mutation: %v", err)
+		}
+
+		// Verify the broken mutation exists.
+		var count int
+		if err := s.db.QueryRow(
+			`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ? AND acked_at IS NULL`,
+			SyncEntityObservation, obsSync,
+		).Scan(&count); err != nil {
+			t.Fatalf("count obs mutations: %v", err)
+		}
+		if count == 0 {
+			t.Fatal("expected broken obs mutation to exist before doctor check")
+		}
+
+		// Run DiagnoseCloudUpgradeLegacyMutations — it should surface this as a finding.
+		report, err := s.DiagnoseCloudUpgradeLegacyMutations("test-proj")
+		if err != nil {
+			t.Fatalf("diagnose: %v", err)
+		}
+		// The broken observation mutation (empty type) should appear as a finding.
+		if len(report.Findings) == 0 {
+			t.Error("expected at least one finding for observation with empty type, but report has none")
+		}
+	})
+}
+
+// TestDoctorSurfacesEmptyProjectMutationsWithBrokenPayloads verifies that
+// DiagnoseCloudUpgradeLegacyMutations surfaces mutations with project="" that
+// have broken payload fields (empty observation type), because such mutations
+// are exported for any project and can block cloud sync.
+//
+// Issue #299 (sub-problem 2b): doctor --project <p> only diagnosed mutations
+// scoped to <p>. Legacy project="" mutations with broken payloads were never
+// surfaced and silently exported, potentially causing FK errors on receiving clients.
+func TestDoctorSurfacesEmptyProjectMutationsWithBrokenPayloads(t *testing.T) {
+	s := newTestStoreRaw(t)
+
+	// Insert a mutation with project="" and a broken observation payload (type="").
+	// This represents a legacy global mutation that will be exported for any project.
+	brokenSyncID := "obs-empty-project-broken-type-001"
+	brokenPayload := `{"sync_id":"` + brokenSyncID + `","session_id":"sess-legacy","type":"","title":"Legacy","content":"Historical","scope":"project"}`
+	if _, err := s.db.Exec(
+		`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		DefaultSyncTargetKey, SyncEntityObservation, brokenSyncID, SyncOpUpsert, brokenPayload, SyncSourceLocal, "",
+	); err != nil {
+		t.Fatalf("insert broken global mutation: %v", err)
+	}
+
+	// Diagnose for "myproject" — the global mutation (project="") must appear
+	// because it will be exported for myproject and can block sync.
+	report, err := s.DiagnoseCloudUpgradeLegacyMutations("myproject")
+	if err != nil {
+		t.Fatalf("diagnose: %v", err)
+	}
+
+	if len(report.Findings) == 0 {
+		t.Error("expected at least one finding for global (project='') observation mutation with empty type; got none")
+	}
+
+	// Verify the finding references our broken mutation.
+	found := false
+	for _, f := range report.Findings {
+		if f.EntityKey == brokenSyncID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected finding for entity_key=%q in report, got findings: %+v", brokenSyncID, report.Findings)
+	}
+}

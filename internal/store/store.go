@@ -1289,10 +1289,12 @@ func (s *Store) withReadTx(fn func(tx *sql.Tx) ([]cloudUpgradeLegacyMutationEval
 }
 
 func (s *Store) listPendingProjectMutationsTx(tx *sql.Tx, project string) ([]SyncMutation, error) {
+	// Issue #299 (2b): also include mutations with project="" (global mutations)
+	// because they are exported for any project and can block cloud sync if broken.
 	rows, err := s.queryItHook(tx, `
 		SELECT seq, target_key, entity, entity_key, op, payload, source, project, occurred_at, acked_at
 		FROM sync_mutations
-		WHERE target_key = ? AND project = ? AND acked_at IS NULL
+		WHERE target_key = ? AND (project = ? OR project = '') AND acked_at IS NULL
 		ORDER BY seq ASC
 	`, DefaultSyncTargetKey, project)
 	if err != nil {
@@ -4502,6 +4504,59 @@ func (s *Store) backfillPromptSyncMutationsTx(tx *sql.Tx, project string) error 
 }
 
 func (s *Store) enqueueSyncMutationTx(tx *sql.Tx, entity, entityKey, op string, payload any) error {
+	// Issue #299 (2a): guard against emitting mutations with broken payload fields
+	// that would fail cloud canonicalization (which enforces non-empty directory for
+	// session upserts and non-empty type for observation upserts).
+	//
+	// When directory or type is empty, try to fill from the local DB.  If the value
+	// cannot be inferred, skip the mutation to avoid inserting an un-canon-izable row.
+	if op == SyncOpUpsert {
+		switch p := payload.(type) {
+		case syncSessionPayload:
+			if strings.TrimSpace(p.Directory) == "" {
+				// Try to fill directory from the sessions table.
+				var directory string
+				err := tx.QueryRow(
+					`SELECT ifnull(directory, '') FROM sessions WHERE id = ?`, strings.TrimSpace(p.ID),
+				).Scan(&directory)
+				if err != nil && !errors.Is(err, sql.ErrNoRows) {
+					return err
+				}
+				// Fall back to a sibling session in the same project (manual-save-{project} pattern).
+				if strings.TrimSpace(directory) == "" && strings.TrimSpace(p.Project) != "" {
+					_ = tx.QueryRow(
+						`SELECT ifnull(directory, '') FROM sessions WHERE project = ? AND trim(directory) != '' LIMIT 1`,
+						strings.TrimSpace(p.Project),
+					).Scan(&directory)
+				}
+				if strings.TrimSpace(directory) == "" {
+					// Cannot determine directory — skip this mutation to avoid emitting a broken payload.
+					return nil
+				}
+				p.Directory = strings.TrimSpace(directory)
+				payload = p
+			}
+		case syncObservationPayload:
+			if strings.TrimSpace(p.Type) == "" {
+				// Try to fill type from the observations table.
+				var obsType string
+				err := tx.QueryRow(
+					`SELECT ifnull(type, '') FROM observations WHERE sync_id = ? ORDER BY id DESC LIMIT 1`,
+					strings.TrimSpace(p.SyncID),
+				).Scan(&obsType)
+				if err != nil && !errors.Is(err, sql.ErrNoRows) {
+					return err
+				}
+				if strings.TrimSpace(obsType) == "" {
+					// Cannot determine type — skip this mutation.
+					return nil
+				}
+				p.Type = strings.TrimSpace(obsType)
+				payload = p
+			}
+		}
+	}
+
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return err
