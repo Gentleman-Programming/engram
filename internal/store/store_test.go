@@ -1979,6 +1979,86 @@ func TestUpgradeRepairDryRunAndApply(t *testing.T) {
 			t.Fatalf("expected no remaining legacy findings after repair, got %+v", after)
 		}
 	})
+
+	t.Run("session upsert with empty directory falls back to sibling session directory in same project", func(t *testing.T) {
+		// Reproduce the real-world scenario: a manual-save-{project} session has
+		// directory="" in both the mutation payload and the sessions table, but
+		// other sessions for the same project have the real directory path.
+		// Repair must fall back to any sibling session with a non-empty directory
+		// instead of blocking with manual-action-required.
+		s := newTestStore(t)
+
+		// Enroll the project (required for repair to run).
+		if err := s.EnrollProject("fallback-proj"); err != nil {
+			t.Fatalf("enroll project: %v", err)
+		}
+
+		// Create a sibling session with a real directory.
+		if err := s.CreateSession("real-s1", "fallback-proj", "/tmp/real-project"); err != nil {
+			t.Fatalf("create sibling session: %v", err)
+		}
+
+		// Insert the manual-save session with empty directory (mirrors manual-save-api-parqueos).
+		if _, err := s.execHook(s.db,
+			`INSERT INTO sessions (id, project, directory) VALUES (?, ?, ?)`,
+			"manual-save-fallback-proj", "fallback-proj", "",
+		); err != nil {
+			t.Fatalf("insert empty-dir session: %v", err)
+		}
+
+		// Insert the blocking legacy mutation: session/upsert with directory="".
+		if _, err := s.execHook(s.db,
+			`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			DefaultSyncTargetKey,
+			SyncEntitySession,
+			"manual-save-fallback-proj",
+			SyncOpUpsert,
+			`{"id":"manual-save-fallback-proj","project":"fallback-proj","directory":""}`,
+			SyncSourceLocal,
+			"fallback-proj",
+		); err != nil {
+			t.Fatalf("insert legacy session mutation: %v", err)
+		}
+
+		diagnosis, err := s.DiagnoseCloudUpgradeLegacyMutations("fallback-proj")
+		if err != nil {
+			t.Fatalf("diagnose: %v", err)
+		}
+		if diagnosis.BlockedCount != 0 {
+			t.Fatalf("expected repairable diagnosis via sibling fallback, got blocked: %+v", diagnosis)
+		}
+		if diagnosis.RepairableCount == 0 {
+			t.Fatalf("expected at least one repairable finding, got %+v", diagnosis)
+		}
+
+		report, err := s.RepairCloudUpgrade("fallback-proj", true)
+		if err != nil {
+			t.Fatalf("repair: %v", err)
+		}
+		if report.Class != UpgradeRepairClassRepairable || !report.Applied {
+			t.Fatalf("expected applied repairable result, got %+v", report)
+		}
+
+		// Confirm the repaired payload has the sibling's directory.
+		var repairedPayload string
+		if err := s.db.QueryRow(`
+			SELECT payload FROM sync_mutations
+			WHERE target_key = ? AND project = ? AND entity = ? AND entity_key = ? AND op = ?
+			ORDER BY seq DESC LIMIT 1
+		`, DefaultSyncTargetKey, "fallback-proj", SyncEntitySession, "manual-save-fallback-proj", SyncOpUpsert).Scan(&repairedPayload); err != nil {
+			t.Fatalf("load repaired payload: %v", err)
+		}
+		var repaired syncSessionPayload
+		if err := decodeSyncPayload([]byte(repairedPayload), &repaired); err != nil {
+			t.Fatalf("decode repaired payload: %v", err)
+		}
+		if strings.TrimSpace(repaired.Directory) == "" {
+			t.Fatalf("expected repaired payload to have directory from sibling session, got empty: %+v", repaired)
+		}
+		if repaired.Directory != "/tmp/real-project" {
+			t.Fatalf("expected directory=/tmp/real-project, got %q", repaired.Directory)
+		}
+	})
 }
 
 func TestRollbackCloudUpgradeSafetyBoundary(t *testing.T) {

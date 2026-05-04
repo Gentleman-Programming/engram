@@ -1371,11 +1371,24 @@ func (s *Store) evaluateCloudUpgradeLegacyMutationTx(tx *sql.Tx, mutation SyncMu
 		if op == SyncOpUpsert && body.Directory == "" {
 			var directory string
 			err := tx.QueryRow(`SELECT ifnull(directory, '') FROM sessions WHERE id = ?`, body.ID).Scan(&directory)
-			if errors.Is(err, sql.ErrNoRows) || strings.TrimSpace(directory) == "" {
-				return blocked(UpgradeReasonBlockedLegacyMutationManual, "session payload directory is required and cannot be inferred from local state"), nil
-			}
-			if err != nil {
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return cloudUpgradeLegacyMutationEvaluation{}, err
+			}
+			// If the session row is missing or has an empty directory, fall back to
+			// any sibling session in the same project that has a real directory.
+			// This covers the manual-save-{project} pattern where the session row
+			// itself has directory="" but other sessions for the project are valid.
+			if strings.TrimSpace(directory) == "" {
+				err2 := tx.QueryRow(
+					`SELECT ifnull(directory, '') FROM sessions WHERE project = ? AND trim(directory) != '' LIMIT 1`,
+					mutation.Project,
+				).Scan(&directory)
+				if err2 != nil && !errors.Is(err2, sql.ErrNoRows) {
+					return cloudUpgradeLegacyMutationEvaluation{}, err2
+				}
+			}
+			if strings.TrimSpace(directory) == "" {
+				return blocked(UpgradeReasonBlockedLegacyMutationManual, "session payload directory is required and cannot be inferred from local state"), nil
 			}
 			body.Directory = strings.TrimSpace(directory)
 			changed = true
