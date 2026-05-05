@@ -4798,6 +4798,10 @@ func TestHandleSearch_AllProjects(t *testing.T) {
 
 	body := callResultJSON(t, allProjectsRes)
 	text, _ := body["result"].(string)
+	expectedDetRes, err := resolveWriteProject()
+	if err != nil {
+		t.Fatalf("resolveWriteProject for expected envelope: %v", err)
+	}
 	if !strings.Contains(text, "Project A decision") {
 		t.Errorf("all_projects=true should find 'Project A decision', got:\n%s", text)
 	}
@@ -4807,8 +4811,11 @@ func TestHandleSearch_AllProjects(t *testing.T) {
 	if !strings.Contains(text, "Found 2 memories") {
 		t.Errorf("all_projects=true should find 2 memories, got:\n%s", text)
 	}
-	if body["project_source"] != project.SourceRequestBody {
-		t.Errorf("all_projects=true project_source = %v, want %q", body["project_source"], project.SourceRequestBody)
+	if body["project_source"] != expectedDetRes.Source {
+		t.Errorf("all_projects=true project_source = %v, want %q", body["project_source"], expectedDetRes.Source)
+	}
+	if body["project"] != expectedDetRes.Project {
+		t.Errorf("all_projects=true project = %v, want %q", body["project"], expectedDetRes.Project)
 	}
 	if body["all_projects"] != true {
 		t.Errorf("all_projects=true response should include all_projects=true, got: %#v", body["all_projects"])

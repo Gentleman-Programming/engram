@@ -877,16 +877,15 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 
 		// When all_projects is true, skip project resolution and search globally
 		if allProjects {
-			// For global search, create a minimal detection result without a specific project.
-			detRes = projectpkg.DetectionResult{
-				Project: "",
-				Source:  projectpkg.SourceRequestBody,
-				Path:    "",
-			}
+			// Best-effort detect the current project for envelope metadata and activity
+			// tracking, but do not let detection failures block global search.
+			detRes = detectCurrentProjectBestEffort()
 			project = "" // Empty project triggers global search in Store.Search
 			extra["all_projects"] = true
-			sessionID = defaultSessionID("global")
-			activity.RecordToolCall(sessionID)
+			if detRes.Project != "" {
+				sessionID = defaultSessionID(detRes.Project)
+				activity.RecordToolCall(sessionID)
+			}
 		} else {
 			// Resolve project: validate override or auto-detect (REQ-310, REQ-311)
 			var err error
@@ -1936,6 +1935,18 @@ func resolveReadProject(s *store.Store, override string) (projectpkg.DetectionRe
 		Source:  projectpkg.SourceExplicitOverride, // JR2-2: use named constant
 		Path:    "",
 	}, nil
+}
+
+func detectCurrentProjectBestEffort() projectpkg.DetectionResult {
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = "."
+	}
+	res := projectpkg.DetectProjectFull(cwd)
+	if res.Error != nil {
+		return projectpkg.DetectionResult{}
+	}
+	return res
 }
 
 // respondWithProject wraps a tool result by prepending the project envelope
