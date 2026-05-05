@@ -60,13 +60,13 @@ This does three things:
 2. Adds the `engram` MCP server entry to your `opencode.json` with `--tools=agent` (14 agent-facing tools)
 3. Adds `opencode-subagent-statusline` to your `tui.json` or `tui.jsonc` so OpenCode shows sub-agent activity in the sidebar/home footer
 
-The plugin auto-starts the HTTP server if needed for session tracking, so manual startup is not part of the normal setup flow. If your environment blocks background processes, run it manually:
+The plugin auto-starts the HTTP server if needed for session tracking, so manual startup is not part of the normal setup flow. If your environment blocks background processes, run it in a separate terminal instead:
 
 ```bash
-engram serve &
+engram serve
 ```
 
-> **Windows**: OpenCode uses `~/.config/opencode/` on Windows too (it does not read `%APPDATA%\opencode\`). `engram setup opencode` writes to `~/.config/opencode/plugins/` and `~/.config/opencode/opencode.json`. To run the server in the background: `Start-Process engram -ArgumentList "serve" -WindowStyle Hidden` (PowerShell) or just run `engram serve` in a separate terminal.
+> **Windows**: OpenCode uses `~/.config/opencode/` on Windows too (it does not read `%APPDATA%\opencode\`). `engram setup opencode` writes to `~/.config/opencode/plugins/` and `~/.config/opencode/opencode.json`. If background processes are restricted, run `engram serve` in a separate terminal. If you specifically want a background PowerShell process and your environment allows it, you can use `Start-Process engram -ArgumentList "serve" -WindowStyle Hidden`.
 
 **Alternative: Manual MCP-only setup** (no plugin, all 18 tools by default):
 

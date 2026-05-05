@@ -23,7 +23,7 @@ engram setup opencode
 # Or manually: cp plugin/opencode/engram.ts ~/.config/opencode/plugins/
 ```
 
-The plugin auto-starts the HTTP server if it's not already running — no manual `engram serve` needed in normal operation. If your environment blocks background processes, start `engram serve` manually as a fallback.
+The plugin auto-starts the HTTP server if it's not already running — no manual `engram serve` needed in normal operation. If your environment blocks background processes, run `engram serve` in a separate terminal as a fallback.
 
 > **Local model compatibility:** The plugin works with all models, including local ones served via llama.cpp, Ollama, or similar. The Memory Protocol is concatenated into the existing system prompt (not added as a separate system message), so models with strict Jinja templates (Qwen, Mistral/Ministral) work correctly.
 

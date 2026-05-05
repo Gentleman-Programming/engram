@@ -20,7 +20,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"runtime/debug"
 	"sort"
 	"strconv"
@@ -79,7 +78,6 @@ var (
 	runTeaProgram = (*tea.Program).Run
 
 	checkForUpdates = versioncheck.CheckLatest
-	currentGOOS     = runtime.GOOS
 
 	setupSupportedAgents        = setup.SupportedAgents
 	setupInstallAgent           = setup.Install
@@ -2191,7 +2189,7 @@ func printPostInstall(result *setup.Result) {
 		fmt.Println("\nNext steps:")
 		fmt.Println("  1. Restart OpenCode — plugin + MCP server are ready")
 		fmt.Println("  2. Session tracking auto-starts the HTTP server when needed")
-		fmt.Printf("  3. %s\n", opencodeManualServeFallback())
+		fmt.Println("  3. If background processes are blocked, run 'engram serve' in a separate terminal")
 		if result.TUIPluginEnabled {
 			fmt.Println("\nAlso enabled: opencode-subagent-statusline in tui.json — sub-agent activity in the sidebar/footer.")
 		}
@@ -2230,13 +2228,6 @@ func printPostInstall(result *setup.Result) {
 		fmt.Println("  2. Verify ~/.codex/config.toml has [mcp_servers.engram]")
 		fmt.Println("  3. Verify model_instructions_file + experimental_compact_prompt_file are set")
 	}
-}
-
-func opencodeManualServeFallback() string {
-	if currentGOOS == "windows" {
-		return "If background processes are blocked, start the server manually with 'Start-Process engram -ArgumentList \"serve\" -WindowStyle Hidden' or run 'engram serve' in a separate terminal"
-	}
-	return "If background processes are blocked, run 'engram serve &' manually"
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

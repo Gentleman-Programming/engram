@@ -191,40 +191,22 @@ func TestPrintUsage(t *testing.T) {
 }
 
 func TestPrintPostInstall(t *testing.T) {
-	oldGOOS := currentGOOS
-	t.Cleanup(func() { currentGOOS = oldGOOS })
-
 	tests := []struct {
 		name       string
-		goos       string
 		result     *setup.Result
 		expects    []string
 		notExpects []string
 	}{
 		{
 			name:    "opencode with subagent monitor enabled",
-			goos:    "linux",
 			result:  &setup.Result{Agent: "opencode", TUIPluginEnabled: true},
-			expects: []string{"Restart OpenCode", "opencode-subagent-statusline", "auto-starts the HTTP server", "If background processes are blocked, run 'engram serve &' manually"},
+			expects: []string{"Restart OpenCode", "opencode-subagent-statusline", "auto-starts the HTTP server", "If background processes are blocked, run 'engram serve' in a separate terminal"},
 		},
 		{
 			name:       "opencode with subagent monitor not enabled",
-			goos:       "linux",
 			result:     &setup.Result{Agent: "opencode", TUIPluginEnabled: false},
-			expects:    []string{"Restart OpenCode", "auto-starts the HTTP server", "If background processes are blocked, run 'engram serve &' manually"},
+			expects:    []string{"Restart OpenCode", "auto-starts the HTTP server", "If background processes are blocked, run 'engram serve' in a separate terminal"},
 			notExpects: []string{"opencode-subagent-statusline"},
-		},
-		{
-			name:   "opencode on windows shows windows fallback",
-			goos:   "windows",
-			result: &setup.Result{Agent: "opencode", TUIPluginEnabled: false},
-			expects: []string{
-				"Restart OpenCode",
-				"auto-starts the HTTP server",
-				"Start-Process engram -ArgumentList \"serve\" -WindowStyle Hidden",
-				"run 'engram serve' in a separate terminal",
-			},
-			notExpects: []string{"engram serve &' manually", "opencode-subagent-statusline"},
 		},
 		{
 			name:    "gemini-cli",
@@ -244,9 +226,6 @@ func TestPrintPostInstall(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.goos != "" {
-				currentGOOS = tc.goos
-			}
 			stdout, stderr := captureOutput(t, func() { printPostInstall(tc.result) })
 			if stderr != "" {
 				t.Fatalf("expected no stderr, got: %q", stderr)
