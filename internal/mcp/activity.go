@@ -19,6 +19,12 @@ type sessionState struct {
 	toolCallCount int
 	saveCount     int
 	startedAt     time.Time
+	currentPrompt *promptContext
+}
+
+type promptContext struct {
+	project string
+	content string
 }
 
 // NewSessionActivity creates a new activity tracker with the given nudge threshold.
@@ -61,6 +67,31 @@ func (a *SessionActivity) RecordSave(sessionID string) {
 	s := a.getOrCreate(sessionID)
 	s.saveCount++
 	s.lastSaveAt = a.now()
+}
+
+// RecordPrompt stores the latest user prompt observed for a session. MCP does
+// not currently receive user prompts on every tool call, so callers must feed
+// this explicitly when prompt text is available.
+func (a *SessionActivity) RecordPrompt(sessionID, project, content string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	s := a.getOrCreate(sessionID)
+	s.currentPrompt = &promptContext{project: project, content: content}
+}
+
+// CurrentPrompt returns the latest prompt for the session when it belongs to the
+// same project as the save operation.
+func (a *SessionActivity) CurrentPrompt(sessionID, project string) (string, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	s, ok := a.sessions[sessionID]
+	if !ok || s.currentPrompt == nil {
+		return "", false
+	}
+	if s.currentPrompt.project != project || s.currentPrompt.content == "" {
+		return "", false
+	}
+	return s.currentPrompt.content, true
 }
 
 // NudgeIfNeeded returns a reminder string if too much time has passed since

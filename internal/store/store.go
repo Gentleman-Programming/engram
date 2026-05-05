@@ -2161,10 +2161,7 @@ func (s *Store) AddPrompt(p AddPromptParams) (int64, error) {
 	// Normalize project name before storing
 	p.Project, _ = NormalizeProject(p.Project)
 
-	content := stripPrivateTags(p.Content)
-	if len(content) > s.cfg.MaxObservationLength {
-		content = content[:s.cfg.MaxObservationLength] + "... [truncated]"
-	}
+	content := s.preparePromptContent(p.Content)
 
 	var promptID int64
 	err := s.withTx(func(tx *sql.Tx) error {
@@ -2199,6 +2196,66 @@ func (s *Store) AddPrompt(p AddPromptParams) (int64, error) {
 		return 0, err
 	}
 	return promptID, nil
+}
+
+func (s *Store) AddPromptIfMissing(p AddPromptParams) (int64, bool, error) {
+	p.Project, _ = NormalizeProject(p.Project)
+	content := s.preparePromptContent(p.Content)
+
+	var promptID int64
+	inserted := false
+	err := s.withTx(func(tx *sql.Tx) error {
+		err := tx.QueryRow(
+			`SELECT id FROM user_prompts WHERE session_id = ? AND ifnull(project, '') = ? AND content = ? ORDER BY id DESC LIMIT 1`,
+			p.SessionID, p.Project, content,
+		).Scan(&promptID)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+
+		syncID := newSyncID("prompt")
+		res, err := s.execHook(tx,
+			`INSERT INTO user_prompts (sync_id, session_id, content, project) VALUES (?, ?, ?, ?)`,
+			syncID, p.SessionID, content, nullableString(p.Project),
+		)
+		if err != nil {
+			return err
+		}
+		promptID, err = res.LastInsertId()
+		if err != nil {
+			return err
+		}
+		var createdAt string
+		if err := tx.QueryRow(`SELECT created_at FROM user_prompts WHERE id = ?`, promptID).Scan(&createdAt); err != nil {
+			return err
+		}
+		if _, err := s.execHook(tx, `DELETE FROM prompt_tombstones WHERE sync_id = ?`, syncID); err != nil {
+			return err
+		}
+		inserted = true
+		return s.enqueueSyncMutationTx(tx, SyncEntityPrompt, syncID, SyncOpUpsert, syncPromptPayload{
+			SyncID:    syncID,
+			SessionID: p.SessionID,
+			Content:   content,
+			Project:   nullableString(p.Project),
+			CreatedAt: createdAt,
+		})
+	})
+	if err != nil {
+		return 0, false, err
+	}
+	return promptID, inserted, nil
+}
+
+func (s *Store) preparePromptContent(content string) string {
+	content = stripPrivateTags(content)
+	if len(content) > s.cfg.MaxObservationLength {
+		content = content[:s.cfg.MaxObservationLength] + "... [truncated]"
+	}
+	return content
 }
 
 func (s *Store) RecentPrompts(project string, limit int) ([]Prompt, error) {

@@ -39,7 +39,7 @@ The plugin:
 - **Strips `<private>` tags** before sending data
 - **Enables** `opencode-subagent-statusline` in `tui.json` or `tui.jsonc` during `engram setup opencode`, adding a live sub-agent monitor to OpenCode's sidebar/home footer. To disable it later, remove `"opencode-subagent-statusline"` from the `"plugin"` array in your TUI config and restart OpenCode.
 
-**No raw tool call recording** — the agent handles all memory via `mem_save` and `mem_session_summary`.
+**No raw tool call recording** — the agent handles memory through curated saves such as `mem_save` and `mem_session_summary`. `mem_save` may best-effort attach prompt context, but only when that prompt was already fed to the same MCP process lifecycle.
 
 ### Memory Protocol (injected via system prompt)
 
@@ -255,6 +255,12 @@ When `mem_save` detects candidates, the JSON response includes:
 | `sync_id` | string | Stable sync ID of the just-saved observation |
 
 Old clients that read only the `result` string continue to work — these fields are additive.
+
+### mem_save prompt capture
+
+`mem_save` accepts `capture_prompt` as an optional boolean. The default is `true`: if the same MCP process lifecycle already has the current user prompt for the same project and session, Engram best-effort stores it in `user_prompts` using exact project + session + content dedupe. Passing `capture_prompt=false` skips that prompt capture path and is intended for automated artifacts such as SDD progress saves.
+
+If no current prompt is available to the MCP process, or if best-effort prompt capture fails, `mem_save` still succeeds and no prompt is invented from the observation content. Plugins/protocol hooks that can observe user prompts must feed that prompt context before relying on automatic capture. Calling `mem_save_prompt` in the same MCP process records the prompt and makes it available to later `mem_save` calls for the same project/session; a different MCP process lifecycle does not inherit that in-memory prompt context.
 
 ---
 

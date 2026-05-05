@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -495,10 +496,15 @@ func TestTryStartAutosyncReturnsStopFn(t *testing.T) {
 // Run exits immediately (no goroutines); Stop is synchronous and calls stopFn.
 // BR2-3: Used to stub newAutosyncManager in tests.
 type fakeStartableManager struct {
+	runFn  func(context.Context)
 	stopFn func()
 }
 
-func (f *fakeStartableManager) Run(_ context.Context) {} // exits immediately — no goroutine spawned
+func (f *fakeStartableManager) Run(ctx context.Context) {
+	if f.runFn != nil {
+		f.runFn(ctx)
+	}
+} // exits immediately — no goroutine spawned unless runFn blocks
 func (f *fakeStartableManager) Stop() {
 	if f.stopFn != nil {
 		f.stopFn()
@@ -3933,6 +3939,45 @@ func TestCmdMCP(t *testing.T) {
 		}
 	})
 
+	t.Run("cloud autosync env with token and server starts and stops manager", func(t *testing.T) {
+		t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "1")
+		t.Setenv("ENGRAM_CLOUD_TOKEN", "tok")
+		t.Setenv("ENGRAM_CLOUD_SERVER", "http://localhost:9999")
+
+		runStarted := make(chan struct{}, 1)
+		stopCalled := make(chan struct{}, 1)
+		oldNewAutosyncManager := newAutosyncManager
+		newAutosyncManager = func(_ *store.Store, _ autosync.CloudTransport, _ autosync.Config) startableAutosyncManager {
+			return &fakeStartableManager{
+				runFn:  func(context.Context) { runStarted <- struct{}{} },
+				stopFn: func() { stopCalled <- struct{}{} },
+			}
+		}
+		t.Cleanup(func() { newAutosyncManager = oldNewAutosyncManager })
+
+		serveMCP = func(_ *mcpserver.MCPServer, _ ...mcpserver.StdioOption) error {
+			select {
+			case <-runStarted:
+				return nil
+			case <-time.After(time.Second):
+				t.Fatal("expected MCP autosync manager to start before serving returned")
+				return nil
+			}
+		}
+
+		withArgs(t, "engram", "mcp")
+		_, _, recovered := captureOutputAndRecover(t, func() { cmdMCP(cfg) })
+		if recovered != nil {
+			t.Fatalf("expected clean run, got panic=%v", recovered)
+		}
+		select {
+		case <-stopCalled:
+			// expected
+		default:
+			t.Fatal("expected MCP autosync manager to stop after stdio server exits")
+		}
+	})
+
 	t.Run("storeNew failure calls fatal", func(t *testing.T) {
 		storeNew = func(cfg store.Config) (*store.Store, error) {
 			return nil, errors.New("db open failed")
@@ -3951,4 +3996,207 @@ func TestCmdMCP(t *testing.T) {
 		_, stderr, recovered := captureOutputAndRecover(t, func() { cmdMCP(cfg) })
 		assertFatal(t, stderr, recovered, "stdio failed")
 	})
+}
+
+func TestCmdMCPAutosyncPushesWriteDuringServe(t *testing.T) {
+	cfg := testConfig(t)
+	stubExitWithPanic(t)
+
+	var mu sync.Mutex
+	var pushed []autosync.MutationEntry
+	observationPushed := make(chan struct{})
+	var closeObservationPushed sync.Once
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		switch r.URL.Path {
+		case "/sync/mutations/push":
+			var req struct {
+				Entries []autosync.MutationEntry `json:"entries"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+
+			mu.Lock()
+			pushed = append(pushed, req.Entries...)
+			for _, entry := range req.Entries {
+				if entry.Project == "engram" && entry.Entity == store.SyncEntityObservation && strings.Contains(string(entry.Payload), "mcp autosync proof") {
+					closeObservationPushed.Do(func() { close(observationPushed) })
+				}
+			}
+			mu.Unlock()
+
+			seqs := make([]int64, len(req.Entries))
+			for i := range seqs {
+				seqs[i] = int64(i + 1)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"accepted_seqs": seqs})
+
+		case "/sync/mutations/pull":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"mutations":  []any{},
+				"has_more":   false,
+				"latest_seq": 0,
+			})
+
+		default:
+			http.Error(w, "not found", http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "1")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "test-token")
+	t.Setenv("ENGRAM_CLOUD_SERVER", srv.URL)
+
+	oldStoreNew := storeNew
+	oldNewMCPServerWithConfig := newMCPServerWithConfig
+	oldServeMCP := serveMCP
+	oldNewAutosyncManager := newAutosyncManager
+	storeNew = store.New
+	t.Cleanup(func() {
+		storeNew = oldStoreNew
+		newMCPServerWithConfig = oldNewMCPServerWithConfig
+		serveMCP = oldServeMCP
+		newAutosyncManager = oldNewAutosyncManager
+	})
+
+	var mcpStore *store.Store
+	newMCPServerWithConfig = func(s *store.Store, _ mcp.MCPConfig, _ map[string]bool) *mcpserver.MCPServer {
+		mcpStore = s
+		return mcpserver.NewMCPServer("test", "0")
+	}
+	newAutosyncManager = func(s *store.Store, transport autosync.CloudTransport, cfg autosync.Config) startableAutosyncManager {
+		cfg.DebounceDuration = 5 * time.Millisecond
+		cfg.PollInterval = 10 * time.Millisecond
+		cfg.BaseBackoff = 20 * time.Millisecond
+		cfg.MaxBackoff = 50 * time.Millisecond
+		return autosync.New(s, transport, cfg)
+	}
+	serveMCP = func(_ *mcpserver.MCPServer, _ ...mcpserver.StdioOption) error {
+		if mcpStore == nil {
+			return errors.New("MCP store was not wired into server construction")
+		}
+		if err := mcpStore.EnrollProject("engram"); err != nil {
+			return fmt.Errorf("enroll project: %w", err)
+		}
+		if err := mcpStore.CreateSession("mcp-autosync-session", "engram", t.TempDir()); err != nil {
+			return fmt.Errorf("create session: %w", err)
+		}
+		if _, err := mcpStore.AddObservation(store.AddObservationParams{
+			SessionID: "mcp-autosync-session",
+			Type:      "bugfix",
+			Title:     "mcp autosync proof",
+			Content:   "mcp autosync proof mutation created during stdio serving",
+			Project:   "engram",
+			Scope:     "project",
+		}); err != nil {
+			return fmt.Errorf("add observation: %w", err)
+		}
+
+		select {
+		case <-observationPushed:
+			return nil
+		case <-time.After(2 * time.Second):
+			return errors.New("timed out waiting for autosync to push MCP write")
+		}
+	}
+
+	withArgs(t, "engram", "mcp")
+	_, stderr, recovered := captureOutputAndRecover(t, func() { cmdMCP(cfg) })
+	if recovered != nil || stderr != "" {
+		t.Fatalf("expected MCP autosync proof to complete cleanly, panic=%v stderr=%q", recovered, stderr)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(pushed) == 0 {
+		t.Fatal("expected remote mutation endpoint to receive at least one pushed mutation")
+	}
+}
+
+func TestCmdMCPAutosyncPollTickerPullsDuringServe(t *testing.T) {
+	cfg := testConfig(t)
+	stubExitWithPanic(t)
+
+	pullCalled := make(chan struct{})
+	var closePullCalled sync.Once
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		switch r.URL.Path {
+		case "/sync/mutations/pull":
+			if r.Method != http.MethodGet {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			closePullCalled.Do(func() { close(pullCalled) })
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"mutations":  []any{},
+				"has_more":   false,
+				"latest_seq": 0,
+			})
+
+		case "/sync/mutations/push":
+			http.Error(w, "unexpected push without MCP write", http.StatusInternalServerError)
+
+		default:
+			http.Error(w, "not found", http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "1")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "test-token")
+	t.Setenv("ENGRAM_CLOUD_SERVER", srv.URL)
+
+	oldStoreNew := storeNew
+	oldNewMCPServerWithConfig := newMCPServerWithConfig
+	oldServeMCP := serveMCP
+	oldNewAutosyncManager := newAutosyncManager
+	storeNew = store.New
+	t.Cleanup(func() {
+		storeNew = oldStoreNew
+		newMCPServerWithConfig = oldNewMCPServerWithConfig
+		serveMCP = oldServeMCP
+		newAutosyncManager = oldNewAutosyncManager
+	})
+
+	newMCPServerWithConfig = func(s *store.Store, _ mcp.MCPConfig, _ map[string]bool) *mcpserver.MCPServer {
+		return mcpserver.NewMCPServer("test", "0")
+	}
+	newAutosyncManager = func(s *store.Store, transport autosync.CloudTransport, cfg autosync.Config) startableAutosyncManager {
+		cfg.DebounceDuration = time.Hour
+		cfg.PollInterval = 10 * time.Millisecond
+		cfg.BaseBackoff = 20 * time.Millisecond
+		cfg.MaxBackoff = 50 * time.Millisecond
+		return autosync.New(s, transport, cfg)
+	}
+	serveMCP = func(_ *mcpserver.MCPServer, _ ...mcpserver.StdioOption) error {
+		select {
+		case <-pullCalled:
+			return nil
+		case <-time.After(2 * time.Second):
+			return errors.New("timed out waiting for autosync poll ticker pull during MCP serve")
+		}
+	}
+
+	withArgs(t, "engram", "mcp")
+	_, stderr, recovered := captureOutputAndRecover(t, func() { cmdMCP(cfg) })
+	if recovered != nil || stderr != "" {
+		t.Fatalf("expected MCP autosync poll ticker proof to complete cleanly, panic=%v stderr=%q", recovered, stderr)
+	}
 }

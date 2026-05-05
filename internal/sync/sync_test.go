@@ -948,15 +948,11 @@ func TestImportBranches(t *testing.T) {
 		})
 
 		chunk := ChunkData{
-			Observations: []store.Observation{{
-				ID:        1,
-				SessionID: "missing-session",
-				Type:      "bugfix",
-				Title:     "broken",
-				Content:   "missing session should violate FK",
-				Scope:     "project",
-				CreatedAt: "2025-01-01 00:00:01",
-				UpdatedAt: "2025-01-01 00:00:01",
+			Mutations: []store.SyncMutation{{
+				Entity:    "unknown",
+				EntityKey: "broken-entity",
+				Op:        store.SyncOpUpsert,
+				Payload:   `{}`,
 			}},
 		}
 		payload, err := json.Marshal(chunk)
@@ -973,7 +969,7 @@ func TestImportBranches(t *testing.T) {
 		}
 
 		sy := New(s, syncDir)
-		if _, err := sy.Import(); err == nil || !strings.Contains(err.Error(), "dependency-safe local import stalled") || !strings.Contains(err.Error(), "missing-session") {
+		if _, err := sy.Import(); err == nil || !strings.Contains(err.Error(), "dependency-safe local import stalled") || !strings.Contains(err.Error(), "unknown sync entity") {
 			t.Fatalf("expected dependency-safe local import error, got %v", err)
 		}
 	})
@@ -1052,8 +1048,12 @@ func TestLocalImportDependencySafeAcrossChunksRegardlessManifestOrder(t *testing
 	if res.ChunksImported != 2 || res.SessionsImported != 1 || res.ObservationsImported != 1 || res.PromptsImported != 1 {
 		t.Fatalf("unexpected import result: %+v", res)
 	}
-	if _, err := s.GetSession("sess-cross-chunk"); err != nil {
+	sess, err := s.GetSession("sess-cross-chunk")
+	if err != nil {
 		t.Fatalf("expected session imported: %v", err)
+	}
+	if sess.Directory != "/tmp/proj-a" {
+		t.Fatalf("expected real session chunk to win, got %+v", sess)
 	}
 	results, err := s.Search("cross chunk observation", store.SearchOptions{Project: project, Limit: 5})
 	if err != nil || len(results) != 1 {
@@ -1099,20 +1099,38 @@ func TestLocalImportOrdersExplicitMutationsAndDirectArraysSafely(t *testing.T) {
 	}
 }
 
-func TestLocalImportMissingSessionStallsWithUsefulError(t *testing.T) {
+func TestLocalImportRecoversLegacyChunkWithMissingSessionStub(t *testing.T) {
 	s := newTestStore(t)
 	syncDir := t.TempDir()
-	chunkID := "missing-session"
+	chunkID := "aaf7a13f"
+	project := "proj-a"
 	writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: chunkID, CreatedAt: "2025-01-01T00:00:00Z"}}})
-	writeLocalChunkFile(t, syncDir, chunkID, ChunkData{Observations: []store.Observation{{SyncID: "obs-missing-session", SessionID: "does-not-exist", Type: "note", Title: "missing", Content: "missing dependency", Scope: "project", CreatedAt: "2025-01-01 00:00:00", UpdatedAt: "2025-01-01 00:00:00"}}})
+	writeLocalChunkFile(t, syncDir, chunkID, ChunkData{
+		Observations: []store.Observation{{SyncID: "obs-missing-session", SessionID: "does-not-exist", Type: "note", Title: "missing", Content: "missing dependency", Project: &project, Scope: "project", CreatedAt: "2025-01-01 00:00:00", UpdatedAt: "2025-01-01 00:00:00"}},
+		Prompts:      []store.Prompt{{SyncID: "prompt-missing-session", SessionID: "does-not-exist", Content: "prompt should be preserved", Project: project, CreatedAt: "2025-01-01 00:00:01"}},
+	})
 
-	_, err := New(s, syncDir).Import()
-	if err == nil {
-		t.Fatal("expected missing session dependency to stall")
+	res, err := New(s, syncDir).Import()
+	if err != nil {
+		t.Fatalf("local import should recover malformed legacy missing session chunk: %v", err)
 	}
-	msg := err.Error()
-	if !strings.Contains(msg, "dependency-safe local import stalled") || !strings.Contains(msg, chunkID) || !strings.Contains(msg, "does-not-exist") {
-		t.Fatalf("expected useful dependency-safe stall error, got %v", err)
+	if res.ChunksImported != 1 || res.SessionsImported != 1 || res.ObservationsImported != 1 || res.PromptsImported != 1 {
+		t.Fatalf("unexpected import result: %+v", res)
+	}
+	sess, err := s.GetSession("does-not-exist")
+	if err != nil {
+		t.Fatalf("expected recovered stub session: %v", err)
+	}
+	if sess.Project != project || sess.Directory != "(recovered-missing-session)" {
+		t.Fatalf("unexpected recovered session: %+v", sess)
+	}
+	results, err := s.Search("missing dependency", store.SearchOptions{Project: project, Limit: 5})
+	if err != nil || len(results) != 1 {
+		t.Fatalf("expected recovered observation, results=%d err=%v", len(results), err)
+	}
+	prompts, err := s.RecentPrompts(project, 5)
+	if err != nil || len(prompts) != 1 || prompts[0].SyncID != "prompt-missing-session" {
+		t.Fatalf("expected recovered prompt, prompts=%+v err=%v", prompts, err)
 	}
 }
 
