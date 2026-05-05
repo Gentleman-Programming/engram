@@ -133,6 +133,7 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 
 - `POST /observations` — Add observation. Body: `{session_id, type, title, content, tool_name?, project?, scope?, topic_key?}`
 - `GET /observations/recent` — Recent observations. Query: `?project=X&scope=project|personal&limit=N`
+- `GET /observations` — List observations. Query: `?project=X&limit=N&sort=created_at:desc`. Same behaviour as /recent; accepts sort parameter for plugin compatibility
 - `GET /observations/{id}` — Get single observation by ID
 - `PATCH /observations/{id}` — Update fields. Body: `{title?, content?, type?, project?, scope?, topic_key?}`
 - `DELETE /observations/{id}` — Delete observation (`?hard=true` for hard delete, soft delete by default)

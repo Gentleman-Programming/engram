@@ -1671,3 +1671,52 @@ func TestG2_ExistingRoutes_Unaffected(t *testing.T) {
 		t.Errorf("expected /stats 200 after Phase 3, got %d", statsRec.Code)
 	}
 }
+
+// TestHandleGetObservationsWithSort verifies the new GET /observations endpoint
+// returns 200 with the same behaviour as /observations/recent,
+func TestHandleGetObservationsWithSort(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	// Create session + observation to have data
+	if err := st.CreateSession("s-sort", "sortproj", "/tmp"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if _, err := st.AddObservation(store.AddObservationParams{
+		SessionID: "s-sort",
+		Type:      "decision",
+		Title:     "Sort test observation",
+		Content:   "Testing the sort parameter on GET /observations",
+		Project:   "sortproj",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+
+	// Test 1: GET /observations with sort parameter (exactly what the plugin uses)
+	req := httptest.NewRequest(http.MethodGet, "/observations?project=sortproj&limit=1&sort=created_at:desc", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for GET /observations with sort, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var observations []map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&observations); err != nil {
+		t.Fatalf("decode observations: %v", err)
+	}
+	if len(observations) == 0 {
+		t.Fatalf("expected at least 1 observation, got 0")
+	}
+
+	// Test 2: GET /observations without sort parameter - should also work
+	req2 := httptest.NewRequest(http.MethodGet, "/observations?project=sortproj&limit=1", nil)
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, req2)
+
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("expected 200 for GET /observations without sort, got %d", rec2.Code)
+	}
+}
