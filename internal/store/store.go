@@ -1647,7 +1647,7 @@ func (s *Store) evaluateCloudUpgradeLegacyMutationTx(tx *sql.Tx, mutation SyncMu
 		if op == SyncOpUpsert {
 			var local syncRelationPayload
 			err := tx.QueryRow(
-				`SELECT sync_id, ifnull(source_id,''), ifnull(target_id,''), relation, reason, evidence, confidence, judgment_status, ifnull(marked_by_actor,''), ifnull(marked_by_kind,''), ifnull(marked_by_model,''), ifnull(session_id,''), created_at, updated_at FROM memory_relations WHERE sync_id = ?`,
+				`SELECT sync_id, source_id, target_id, relation, reason, evidence, confidence, judgment_status, marked_by_actor, marked_by_kind, marked_by_model, session_id, created_at, updated_at FROM memory_relations WHERE sync_id = ?`,
 				body.SyncID,
 			).Scan(&local.SyncID, &local.SourceID, &local.TargetID, &local.Relation, &local.Reason, &local.Evidence, &local.Confidence, &local.JudgmentStatus, &local.MarkedByActor, &local.MarkedByKind, &local.MarkedByModel, &local.SessionID, &local.CreatedAt, &local.UpdatedAt)
 			if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -1697,10 +1697,10 @@ func (s *Store) evaluateCloudUpgradeLegacyMutationTx(tx *sql.Tx, mutation SyncMu
 				body.SessionID = local.SessionID
 				changed = true
 			}
-			if body.Project == "" && err == nil && strings.TrimSpace(local.Project) != "" {
-				body.Project = strings.TrimSpace(local.Project)
-				changed = true
-			}
+		if body.Project == "" && strings.TrimSpace(mutation.Project) != "" {
+			body.Project = strings.TrimSpace(mutation.Project)
+			changed = true
+		}
 			if body.CreatedAt == "" && err == nil && strings.TrimSpace(local.CreatedAt) != "" {
 				body.CreatedAt = strings.TrimSpace(local.CreatedAt)
 				changed = true
