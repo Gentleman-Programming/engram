@@ -60,7 +60,7 @@ This does three things:
 2. Adds the `engram` MCP server entry to your `opencode.json` with `--tools=agent` (14 agent-facing tools)
 3. Adds `opencode-subagent-statusline` to your `tui.json` or `tui.jsonc` so OpenCode shows sub-agent activity in the sidebar/home footer
 
-The plugin auto-starts the HTTP server if needed for session tracking. If your environment blocks background processes, run it manually:
+The plugin auto-starts the HTTP server if needed for session tracking, so manual startup is not part of the normal setup flow. If your environment blocks background processes, run it manually:
 
 ```bash
 engram serve &

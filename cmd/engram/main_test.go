@@ -200,12 +200,12 @@ func TestPrintPostInstall(t *testing.T) {
 		{
 			name:    "opencode with subagent monitor enabled",
 			result:  &setup.Result{Agent: "opencode", TUIPluginEnabled: true},
-			expects: []string{"Restart OpenCode", "opencode-subagent-statusline", "engram serve &"},
+			expects: []string{"Restart OpenCode", "opencode-subagent-statusline", "auto-starts the HTTP server", "engram serve &"},
 		},
 		{
 			name:       "opencode with subagent monitor not enabled",
 			result:     &setup.Result{Agent: "opencode", TUIPluginEnabled: false},
-			expects:    []string{"Restart OpenCode", "engram serve &"},
+			expects:    []string{"Restart OpenCode", "auto-starts the HTTP server", "engram serve &"},
 			notExpects: []string{"opencode-subagent-statusline"},
 		},
 		{
