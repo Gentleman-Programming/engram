@@ -4807,6 +4807,9 @@ func TestHandleSearch_AllProjects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveWriteProject for expected envelope: %v", err)
 	}
+	if expectedDetRes.Project != "" {
+		expectedDetRes.Project, _ = store.NormalizeProject(expectedDetRes.Project)
+	}
 	if !strings.Contains(text, "Project A decision") {
 		t.Errorf("all_projects=true should find 'Project A decision', got:\n%s", text)
 	}

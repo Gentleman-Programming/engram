@@ -894,10 +894,8 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 					extra["error_hint"] = "Use mem_current_project to inspect detection results, or search with an explicit project when you need a single project context."
 				}
 			}
-			if detRes.Project != "" {
-				sessionID = defaultSessionID(detRes.Project)
-				activity.RecordToolCall(sessionID)
-			}
+			sessionID = defaultSessionID(detRes.Project)
+			activity.RecordToolCall(sessionID)
 		} else {
 			// Resolve project: validate override or auto-detect (REQ-310, REQ-311)
 			var err error
