@@ -4745,3 +4745,104 @@ func TestMemSearch_AllThreeTypes_FormatExact(t *testing.T) {
 		t.Fatalf("expected %q, got:\n%s", wantSupersededBy, text)
 	}
 }
+
+func TestHandleSearch_AllProjects(t *testing.T) {
+	s := newMCPTestStore(t)
+
+	// Create sessions for two different projects
+	if err := s.CreateSession("sess1", "project-a", "/tmp/project-a"); err != nil {
+		t.Fatalf("create session 1: %v", err)
+	}
+	if err := s.CreateSession("sess2", "project-b", "/tmp/project-b"); err != nil {
+		t.Fatalf("create session 2: %v", err)
+	}
+
+	// Create observations in two different projects
+	_, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "sess1",
+		Type:      "manual",
+		Title:     "Project A decision",
+		Content:   "Decision made in project-a",
+		Project:   "project-a",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("failed to add obs in project-a: %v", err)
+	}
+
+	_, err = s.AddObservation(store.AddObservationParams{
+		SessionID: "sess2",
+		Type:      "manual",
+		Title:     "Project B decision",
+		Content:   "Decision made in project-b",
+		Project:   "project-b",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("failed to add obs in project-b: %v", err)
+	}
+
+	search := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	// Test 1: Search with all_projects=true should find both
+	allProjectsRes, err := search(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"query":        "decision",
+		"all_projects": true,
+	}}})
+	if err != nil {
+		t.Fatalf("search with all_projects error: %v", err)
+	}
+
+	text := callResultText(t, allProjectsRes)
+	if !strings.Contains(text, "Project A decision") {
+		t.Errorf("all_projects=true should find 'Project A decision', got:\n%s", text)
+	}
+	if !strings.Contains(text, "Project B decision") {
+		t.Errorf("all_projects=true should find 'Project B decision', got:\n%s", text)
+	}
+	if !strings.Contains(text, "Found 2 memories") {
+		t.Errorf("all_projects=true should find 2 memories, got:\n%s", text)
+	}
+
+	// Test 2: Search with explicit project should only find that project
+	singleProjectRes, err := search(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"query":   "decision",
+		"project": "project-a",
+	}}})
+	if err != nil {
+		t.Fatalf("search with explicit project error: %v", err)
+	}
+
+	text2 := callResultText(t, singleProjectRes)
+	if !strings.Contains(text2, "Project A decision") {
+		t.Errorf("project-specific search should find 'Project A decision', got:\n%s", text2)
+	}
+	if strings.Contains(text2, "Project B decision") {
+		t.Errorf("project-specific search should NOT find 'Project B decision', got:\n%s", text2)
+	}
+	if !strings.Contains(text2, "Found 1 memories") {
+		t.Errorf("project-specific search should find 1 memory, got:\n%s", text2)
+	}
+
+	// Test 3: Search with all_projects=false and explicit project should behave like project-specific
+	falseRes, err := search(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"query":        "decision",
+		"project":      "project-a",
+		"all_projects": false,
+	}}})
+	if err != nil {
+		t.Fatalf("search with all_projects=false error: %v", err)
+	}
+
+	text3 := callResultText(t, falseRes)
+	if !strings.Contains(text3, "Project A decision") {
+		t.Errorf("all_projects=false should find 'Project A decision', got:\n%s", text3)
+	}
+	if strings.Contains(text3, "Project B decision") {
+		t.Errorf("all_projects=false should NOT find 'Project B decision', got:\n%s", text3)
+	}
+	if !strings.Contains(text3, "Found 1 memories") {
+		t.Errorf("all_projects=false should find 1 memory, got:\n%s", text3)
+	}
+}
+

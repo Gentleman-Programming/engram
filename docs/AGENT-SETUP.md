@@ -43,6 +43,8 @@ When present, `project_name` is used for writes from the repo and its subdirecto
 
 **Read tools** (`mem_search`, `mem_context`, `mem_get_observation`, `mem_stats`, `mem_timeline`) accept an optional `project` override validated against the store. Omit it to auto-detect.
 
+**Cross-project search:** `mem_search` accepts an optional `all_projects` boolean parameter. When `true`, searches across all projects instead of restricting to the current/default project. When `false` or omitted, searches only in the current project. Useful when you need to recall context from a related project while working in another.
+
 ---
 
 ## OpenCode
