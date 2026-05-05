@@ -1144,9 +1144,15 @@ ENGRAM_CLOUD_AUTOSYNC=1 \
 ENGRAM_CLOUD_TOKEN=your-token \
 ENGRAM_CLOUD_SERVER=https://cloud.engram.example.com \
 engram serve
+
+# Or, for stdio MCP agents:
+ENGRAM_CLOUD_AUTOSYNC=1 \
+ENGRAM_CLOUD_TOKEN=your-token \
+ENGRAM_CLOUD_SERVER=https://cloud.engram.example.com \
+engram mcp
 ```
 
-Missing `ENGRAM_CLOUD_TOKEN` or `ENGRAM_CLOUD_SERVER` logs an `ERROR` and disables autosync gracefully — the server still starts.
+Missing `ENGRAM_CLOUD_TOKEN` or `ENGRAM_CLOUD_SERVER` logs an `ERROR` and disables autosync gracefully — `engram serve` or `engram mcp` still starts.
 
 ### Autosync Phase Table
 

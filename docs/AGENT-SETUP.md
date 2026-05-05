@@ -586,6 +586,7 @@ engram mcp
 ```
 
 The process logs `[autosync] started (server=...)` on success. Missing token or server URL logs `[autosync] ERROR: ...` and the process starts normally without autosync.
+For `engram mcp`, autosync runs for the lifetime of the stdio MCP process and is stopped when that process exits.
 
 ---
 

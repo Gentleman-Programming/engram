@@ -847,11 +847,30 @@ func cmdMCP(cfg store.Config) {
 	}
 	defer s.Close()
 
+	// Match `engram serve` autosync startup semantics for stdio MCP agents.
+	// Autosync remains opt-in via ENGRAM_CLOUD_AUTOSYNC=1 and never makes MCP
+	// startup fatal when cloud config is missing or invalid.
+	ctx, cancel := context.WithCancel(context.Background())
+	_, mgrStop := tryStartAutosync(ctx, s, cfg)
+	autosyncStopped := false
+	stopAutosync := func() {
+		if autosyncStopped {
+			return
+		}
+		autosyncStopped = true
+		cancel()
+		if mgrStop != nil {
+			mgrStop()
+		}
+	}
+	defer stopAutosync()
+
 	mcpCfg := mcp.MCPConfig{}
 	allowlist := resolveMCPTools(toolsFilter)
 	mcpSrv := newMCPServerWithConfig(s, mcpCfg, allowlist)
 
 	if err := serveMCP(mcpSrv); err != nil {
+		stopAutosync()
 		fatal(err)
 	}
 }
