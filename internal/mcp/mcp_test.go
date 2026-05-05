@@ -4792,8 +4792,12 @@ func TestHandleSearch_AllProjects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("search with all_projects error: %v", err)
 	}
+	if allProjectsRes.IsError {
+		t.Fatalf("search with all_projects unexpectedly errored: %s", callResultText(t, allProjectsRes))
+	}
 
-	text := callResultText(t, allProjectsRes)
+	body := callResultJSON(t, allProjectsRes)
+	text, _ := body["result"].(string)
 	if !strings.Contains(text, "Project A decision") {
 		t.Errorf("all_projects=true should find 'Project A decision', got:\n%s", text)
 	}
@@ -4802,6 +4806,12 @@ func TestHandleSearch_AllProjects(t *testing.T) {
 	}
 	if !strings.Contains(text, "Found 2 memories") {
 		t.Errorf("all_projects=true should find 2 memories, got:\n%s", text)
+	}
+	if body["project_source"] != project.SourceRequestBody {
+		t.Errorf("all_projects=true project_source = %v, want %q", body["project_source"], project.SourceRequestBody)
+	}
+	if body["all_projects"] != true {
+		t.Errorf("all_projects=true response should include all_projects=true, got: %#v", body["all_projects"])
 	}
 
 	// Test 2: Search with explicit project should only find that project
@@ -4844,5 +4854,24 @@ func TestHandleSearch_AllProjects(t *testing.T) {
 	if !strings.Contains(text3, "Found 1 memories") {
 		t.Errorf("all_projects=false should find 1 memory, got:\n%s", text3)
 	}
-}
 
+	// Test 4: project + all_projects=true should fail with structured invalid_arguments error
+	invalidRes, err := search(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"query":        "decision",
+		"project":      "project-a",
+		"all_projects": true,
+	}}})
+	if err != nil {
+		t.Fatalf("search with conflicting project/all_projects error: %v", err)
+	}
+	if !invalidRes.IsError {
+		t.Fatalf("expected conflicting project/all_projects request to fail, got: %s", callResultText(t, invalidRes))
+	}
+	invalidBody := callResultJSON(t, invalidRes)
+	if invalidBody["error_code"] != "invalid_arguments" {
+		t.Fatalf("invalid request error_code = %v, want invalid_arguments", invalidBody["error_code"])
+	}
+	if !strings.Contains(invalidBody["message"].(string), "project cannot be combined") {
+		t.Fatalf("unexpected invalid_arguments message: %v", invalidBody["message"])
+	}
+}

@@ -269,7 +269,7 @@ func registerTools(srv *server.MCPServer, s *store.Store, cfg MCPConfig, allowli
 					mcp.Description("Max results (default: 10, max: 20)"),
 				),
 				mcp.WithBoolean("all_projects",
-					mcp.Description("Search across all projects instead of restricting to current/default project. When true, searches globally. When false or omitted, searches only in the current project."),
+					mcp.Description("Search across all projects instead of restricting to the current auto-detected project. Cannot be combined with project. When true, searches globally. When false or omitted, searches only in the current auto-detected project."),
 				),
 			),
 			handleSearch(s, cfg, activity),
@@ -864,20 +864,27 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		scope, _ := req.GetArguments()["scope"].(string)
 		limit := intArg(req, "limit", 10)
 		allProjects, _ := req.GetArguments()["all_projects"].(bool)
+		projectOverride = strings.TrimSpace(projectOverride)
+
+		if allProjects && projectOverride != "" {
+			return invalidArgumentsError("project cannot be combined with all_projects=true", "Omit project when using all_projects=true, or set all_projects=false to search a specific project."), nil
+		}
 
 		var detRes projectpkg.DetectionResult
 		var project string
 		var sessionID string
+		extra := map[string]any{}
 
 		// When all_projects is true, skip project resolution and search globally
 		if allProjects {
-			// For global search, create a minimal detection result without a specific project
+			// For global search, create a minimal detection result without a specific project.
 			detRes = projectpkg.DetectionResult{
 				Project: "",
-				Source:  projectpkg.SourceExplicitOverride,
+				Source:  projectpkg.SourceRequestBody,
 				Path:    "",
 			}
 			project = "" // Empty project triggers global search in Store.Search
+			extra["all_projects"] = true
 			sessionID = defaultSessionID("global")
 			activity.RecordToolCall(sessionID)
 		} else {
@@ -914,7 +921,7 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 
 		if len(results) == 0 {
 			// JW4: use respondWithProject even for empty results.
-			return respondWithProject(detRes, fmt.Sprintf("No memories found for: %q", query), nil), nil
+			return respondWithProject(detRes, fmt.Sprintf("No memories found for: %q", query), extra), nil
 		}
 
 		// Batch-load relations for all results (REQ-002). Avoids N+1.
@@ -1006,7 +1013,7 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		}
 
 		// JW4: use respondWithProject for the success path (REQ-314).
-		return respondWithProject(detRes, b.String(), nil), nil
+		return respondWithProject(detRes, b.String(), extra), nil
 	}
 }
 
@@ -1974,6 +1981,20 @@ func errorWithMeta(code, msg string, availableProjects []string) *mcp.CallToolRe
 		envelope["hint"] = "Use one of the available_projects values, or omit project to auto-detect."
 	case "invalid_project_config":
 		envelope["hint"] = "Fix .engram/config.json so project_name is a non-empty project name."
+	}
+	out, _ := jsonMarshal(envelope)
+	result := mcp.NewToolResultText(string(out))
+	result.IsError = true
+	return result
+}
+
+func invalidArgumentsError(msg, hint string) *mcp.CallToolResult {
+	envelope := map[string]any{
+		"error_code": "invalid_arguments",
+		"message":    msg,
+	}
+	if hint != "" {
+		envelope["hint"] = hint
 	}
 	out, _ := jsonMarshal(envelope)
 	result := mcp.NewToolResultText(string(out))
