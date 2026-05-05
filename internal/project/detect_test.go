@@ -581,6 +581,100 @@ func TestDetectProject_MatchesFull(t *testing.T) {
 	}
 }
 
+// TestDetectProjectFull_HomeLikeConfigDoesNotLeakIntoNestedGitRepo asserts
+// that an ancestor `.engram/config.json` (e.g. one sitting at $HOME, the
+// scenario reported in #312) does NOT contaminate project detection for a
+// cwd that is inside a nested git repository several levels below.
+//
+// The repo's own root is the project lock; ancestor configs above it must be
+// ignored. This guards the multi-agent setup where each agent runs from its
+// own repo under a shared $HOME — every agent must resolve to its own repo
+// project, not the HOME-level project_name.
+func TestDetectProjectFull_HomeLikeConfigDoesNotLeakIntoNestedGitRepo(t *testing.T) {
+	homeLike := t.TempDir()
+	configDir := filepath.Join(homeLike, ".engram")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(`{"project_name":"home-lock"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Nested git repo a few levels below the HOME-like dir, with no config of
+	// its own. cwd is a subdirectory inside the repo (mirrors typical agent
+	// workflow: cwd is somewhere inside the repo tree, not necessarily root).
+	repoRoot := filepath.Join(homeLike, "repos", "agent-b")
+	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initGit(t, repoRoot)
+	cwd := filepath.Join(repoRoot, "src", "pkg")
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	res := DetectProjectFull(cwd)
+
+	if res.Error != nil {
+		t.Fatalf("unexpected detection error: %v", res.Error)
+	}
+	if res.Project == "home-lock" {
+		t.Fatalf("HOME-like ancestor config leaked into nested repo cwd: project=%q source=%q", res.Project, res.Source)
+	}
+	if res.Source != SourceGitRoot {
+		t.Fatalf("expected SourceGitRoot for nested repo without remote, got source=%q project=%q", res.Source, res.Project)
+	}
+	if res.Project != "agent-b" {
+		t.Fatalf("expected repo basename %q, got %q", "agent-b", res.Project)
+	}
+	gotPath, _ := filepath.EvalSymlinks(res.Path)
+	wantPath, _ := filepath.EvalSymlinks(repoRoot)
+	if gotPath != wantPath {
+		t.Fatalf("expected path %q, got %q", wantPath, gotPath)
+	}
+}
+
+// TestDetectProjectFull_HomeLikeConfigDoesNotLeakIntoDeeplyNestedNonGitCwd
+// asserts that an ancestor `.engram/config.json` does not contaminate a
+// deeply-nested cwd that is not inside a git repo. This is the second half
+// of the #312 scenario: agents that operate outside any git tree must still
+// resolve to their own cwd basename, not to the HOME-level project_name.
+func TestDetectProjectFull_HomeLikeConfigDoesNotLeakIntoDeeplyNestedNonGitCwd(t *testing.T) {
+	homeLike := t.TempDir()
+	configDir := filepath.Join(homeLike, ".engram")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(`{"project_name":"home-lock"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cwd := filepath.Join(homeLike, "workspaces", "team", "agent-c-data")
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	res := DetectProjectFull(cwd)
+
+	if res.Error != nil {
+		t.Fatalf("unexpected detection error: %v", res.Error)
+	}
+	if res.Project == "home-lock" {
+		t.Fatalf("HOME-like ancestor config leaked into deeply-nested non-git cwd: project=%q source=%q", res.Project, res.Source)
+	}
+	if res.Source != SourceDirBasename {
+		t.Fatalf("expected SourceDirBasename for non-git nested cwd, got source=%q project=%q", res.Source, res.Project)
+	}
+	if res.Project != "agent-c-data" {
+		t.Fatalf("expected cwd basename %q, got %q", "agent-c-data", res.Project)
+	}
+	gotPath, _ := filepath.EvalSymlinks(res.Path)
+	wantPath, _ := filepath.EvalSymlinks(cwd)
+	if gotPath != wantPath {
+		t.Fatalf("expected path %q, got %q", wantPath, gotPath)
+	}
+}
+
 // TestDetectProject_AmbiguousEmpty asserts DetectProject returns basename
 // (not empty) even on ambiguous cwd, maintaining CLI compat (REQ-307).
 func TestDetectProject_AmbiguousEmpty(t *testing.T) {
