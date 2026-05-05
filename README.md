@@ -11,6 +11,7 @@
   <a href="docs/INSTALLATION.md">Installation</a> &bull;
   <a href="docs/engram-cloud/README.md">Engram Cloud</a> &bull;
   <a href="docs/AGENT-SETUP.md">Agent Setup</a> &bull;
+  <a href="docs/TEAM-USAGE.md">Team Usage</a> &bull;
   <a href="docs/CODEBASE-GUIDE.md">Codebase Guide</a> &bull;
   <a href="docs/ARCHITECTURE.md">Architecture</a> &bull;
   <a href="docs/PLUGINS.md">Plugins</a> &bull;
@@ -56,6 +57,8 @@ Windows, Linux, and other install methods → [docs/INSTALLATION.md](docs/INSTAL
 | Cursor / Windsurf / Any MCP | See [docs/AGENT-SETUP.md](docs/AGENT-SETUP.md) |
 
 Full per-agent config, Memory Protocol, and compaction survival → [docs/AGENT-SETUP.md](docs/AGENT-SETUP.md)
+
+Using Engram across teammates and devices? See [docs/TEAM-USAGE.md](docs/TEAM-USAGE.md) for scope conventions, language rules, and sync workflows.
 
 That's it. No Node.js, no Python, no Docker. **One binary, one SQLite file.**
 

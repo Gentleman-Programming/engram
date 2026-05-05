@@ -30,6 +30,7 @@ For other docs:
 | [Installation](docs/INSTALLATION.md) | All install methods + platform support |
 | [Engram Cloud](docs/engram-cloud/README.md) | Cloud landing page, quickstart path, branding, and reference links |
 | [Agent Setup](docs/AGENT-SETUP.md) | Per-agent configuration + compaction survival |
+| [Team Usage](docs/TEAM-USAGE.md) | Scope conventions, language strategy, and sync guidance for shared memory |
 | [Codebase Guide](docs/CODEBASE-GUIDE.md) | Definitive guide to repository structure, package ownership, flows, and maintainer guardrails |
 | [Architecture](docs/ARCHITECTURE.md) | How it works, session lifecycle, CLI reference, project structure |
 | [Plugins](docs/PLUGINS.md) | OpenCode & Claude Code plugin details |
