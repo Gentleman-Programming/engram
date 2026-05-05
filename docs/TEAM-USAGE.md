@@ -65,6 +65,10 @@ This gives you a personal workspace without polluting the project's shared memor
 
 Scope and sync are related, but they are NOT the same concept.
 
+> **Important:** `scope: personal` is a retrieval/filtering hint, NOT a hard sync boundary.
+>
+> Today, project sync is exported by **project/session association**. It does **not** exclude rows just because their scope is `personal`. If a personal observation lives inside a project that you sync to teammates, that observation can still replicate.
+
 ### `project` scope
 
 - Intended for team-visible project memory
@@ -74,15 +78,25 @@ Scope and sync are related, but they are NOT the same concept.
 ### `personal` scope
 
 - Intended for your own private memory
-- Can still sync across **your own devices** if you use a personal sync workflow
-- Should not be mixed into a team-shared project memory repository
+- Does **not** automatically stay out of shared sync if it belongs to a synced project/session
+- Should not be treated as a privacy boundary inside a team-shared project database
 
 In other words:
 
-- **team sync target** → use for shared `project` memories
-- **personal sync target** → use for your own `personal` memories across machines
+- **team sync target** → use only with a database/project that contains memory you are comfortable sharing
+- **personal sync target** → use for your own `personal` memories across machines, in a separate Engram data set
 
-Do not treat `personal` as “throwaway.” It is still durable memory. It is just **not team memory**.
+Do not treat `personal` as “throwaway.” It is still durable memory. But ALSO do not treat it as automatically private once it sits inside a synced shared project.
+
+### Safe workflow today
+
+Until Engram has scope-aware sync boundaries, the safe team workflow is:
+
+1. Keep team-shared project memory in a database/data directory dedicated to shared work
+2. Keep private `personal` notes in a separate Engram database/data directory or separate non-shared workflow
+3. Do **not** commit or cloud-sync project data that contains personal notes you would not want replicated
+
+If you want both team memory and truly private memory, separate the storage/workflow first. Scope alone does not enforce that separation during sync.
 
 ---
 
@@ -136,7 +150,7 @@ If you are adopting Engram in a team, start with this simple policy:
 1. Save shared technical knowledge as `scope: project`
 2. Save private notes and personal workflows as `scope: personal`
 3. Use one shared language for `project` memories
-4. Keep team sync and personal sync separated
+4. Keep team sync and personal sync separated at the **storage/workflow** level, not just by scope
 5. When in doubt, ask: **should another teammate's agent retrieve this?**
 
 That policy is enough for most teams.
@@ -149,6 +163,7 @@ That policy is enough for most teams.
 
 - Use `personal` for your private notes
 - Sync those notes only through your own personal sync setup
+- Keep those notes in a separate Engram data directory/database from any team-shared project sync
 - Use `project` only for knowledge you want available to collaborators
 
 ### For teams
@@ -156,7 +171,7 @@ That policy is enough for most teams.
 - Decide the shared language first
 - Treat `project` as the team's memory layer
 - Encourage agents and humans to save decisions, bug fixes, and non-obvious discoveries there
-- Keep `personal` out of team-shared memory flows
+- Keep `personal` out of team-shared memory flows by separating storage, not by assuming scope will block sync
 
 This prevents the two most common failures:
 
