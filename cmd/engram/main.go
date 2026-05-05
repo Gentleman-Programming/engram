@@ -2239,22 +2239,23 @@ Usage:
 
 Commands:
   serve [port]       Start HTTP API server (default: 7437)
-  mcp [--tools=PROFILE] [--project=NAME]
+  mcp [--tools=PROFILE]
                      Start MCP server (stdio transport, for any AI agent)
-                       Profiles: agent (11 tools), admin (4 tools), all (default, 15)
+                       Profiles: agent (15 tools), admin (4 tools), all (default, 19)
                        Combine: --tools=agent,admin or pick individual tools
-                       --project  Override detected project name (default: git remote → cwd)
                        Example: engram mcp --tools=agent
   tui                Launch interactive terminal UI
   search <query>     Search memories [--type TYPE] [--project PROJECT] [--scope SCOPE] [--limit N]
   save <title> <msg> Save a memory  [--type TYPE] [--project PROJECT] [--scope SCOPE]
   timeline <obs_id>  Show chronological context around an observation [--before N] [--after N]
   conflicts <sub>   Inspect and manage memory conflict relations
-                       list     --project P  --status S  --since RFC3339  --limit N
+                       list     [--project P]  [--status S]  [--since RFC3339]  [--limit N]
                        show     <relation_id>
-                       stats    --project P
-                       scan     --project P  [--dry-run]  [--apply]  [--max-insert N]
-                        deferred [--status S]  [--limit N]  [--inspect SYNC_ID]  [--replay]
+                       stats    [--project P]
+                       scan     [--project P]  [--since RFC3339]  [--dry-run]  [--apply]  [--max-insert N]
+                                [--semantic]  [--concurrency N]  [--timeout-per-call SECONDS]
+                                [--max-semantic N]  [--yes]
+                       deferred [--status S]  [--limit N]  [--inspect SYNC_ID]  [--replay]
   doctor             Run read-only operational diagnostics [--json] [--project P] [--check CODE]
   context [project]  Show recent context from previous sessions
   stats              Show memory system statistics
@@ -2293,7 +2294,7 @@ Commands:
 Environment:
   ENGRAM_DATA_DIR    Override data directory (default: ~/.engram)
   ENGRAM_PORT        Override HTTP server port (default: 7437)
-  ENGRAM_PROJECT     Override auto-detected project name for MCP server
+  ENGRAM_PROJECT     Default project hint for serve sync status fallback
   ENGRAM_DATABASE_URL
                      Postgres DSN for engram cloud serve
   ENGRAM_CLOUD_HOST  Bind host for engram cloud serve (default: 127.0.0.1)

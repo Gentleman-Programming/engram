@@ -14,7 +14,7 @@ This is the complete technical reference for Engram. For getting started, see th
 |---------|-----------------|
 | [Database Schema](#database-schema) | Tables, FTS5, SQLite config |
 | [HTTP API](#http-api-endpoints) | All REST endpoints with request/response details |
-| [MCP Tools](#mcp-tools-18-tools) | Detailed reference for all 18 memory tools |
+| [MCP Tools](#mcp-tools-19-tools) | Detailed reference for all 19 memory tools |
 | [MCP Project Resolution](#mcp-project-resolution) | Auto-detection algorithm, response envelope, tool categories |
 | [Memory Protocol](#memory-protocol) | When/how agents should use the tools |
 | [Project Name Normalization](#project-name-normalization) | Auto-detection, normalization, similar-project warnings |
@@ -30,6 +30,7 @@ For other docs:
 | [Installation](docs/INSTALLATION.md) | All install methods + platform support |
 | [Engram Cloud](docs/engram-cloud/README.md) | Cloud landing page, quickstart path, branding, and reference links |
 | [Agent Setup](docs/AGENT-SETUP.md) | Per-agent configuration + compaction survival |
+| [Codebase Guide](docs/CODEBASE-GUIDE.md) | Definitive guide to repository structure, package ownership, flows, and maintainer guardrails |
 | [Architecture](docs/ARCHITECTURE.md) | How it works, session lifecycle, CLI reference, project structure |
 | [Plugins](docs/PLUGINS.md) | OpenCode & Claude Code plugin details |
 | [Comparison](docs/COMPARISON.md) | Why Engram vs claude-mem |
@@ -46,7 +47,7 @@ For other docs:
 - **user_prompts** — `id` (INTEGER PK AUTOINCREMENT), `session_id` (FK), `content`, `project`, `created_at`
 - **prompts_fts** — FTS5 virtual table synced via triggers (`content`, `project`)
 - **sync_chunks** — `target_key` (TEXT), `chunk_id` (TEXT), `imported_at`; composite PK (`target_key`, `chunk_id`) for target-scoped chunk tracking
-- **memory_relations** — stores conflict-surfacing verdicts from `mem_judge`; columns include `sync_id` (TEXT PK), `source_id`, `target_id`, `relation`, `judgment_status` (`pending` | `judged`), `reason`, `evidence`, `confidence`, `marked_by_actor`, `marked_by_kind`, `marked_by_model`, `session_id`, `project`. Syncs across machines via cloud autosync when the project is enrolled.
+- **memory_relations** — stores conflict-surfacing verdicts from `mem_judge`; columns include `id` (INTEGER PK AUTOINCREMENT), `sync_id` (TEXT UNIQUE), `source_id`, `target_id`, `relation`, `judgment_status` (`pending` | `judged` | `orphaned` | `ignored`), `reason`, `evidence`, `confidence`, `marked_by_actor`, `marked_by_kind`, `marked_by_model`, `session_id`. The SQLite table does not store a `project` column; project is carried in relation sync payloads and derived from joined observations for project-scoped listing. Syncs across machines via cloud autosync when the project is enrolled.
 - **sync_apply_deferred** — holds pulled mutations that could not be applied locally due to a missing FK dependency (e.g. relation references an observation not yet present); columns: `sync_id` (TEXT PK), `entity`, `payload`, `apply_status` (`deferred` | `applied` | `dead`), `retry_count`, `last_error`, `last_attempted_at`, `first_seen_at`. Rows with `apply_status='dead'` have exceeded the retry cap (5 attempts) and will not be retried automatically.
 
 ### SQLite Configuration
@@ -63,11 +64,12 @@ For other docs:
 Engram exposes two different runtimes. Keep routes split by runtime:
 
 - **Local runtime (`engram serve`, JSON on `127.0.0.1:7437`)**
+  - `GET /health` (local service health)
   - includes memory CRUD/search/context endpoints documented below
   - includes `GET /sync/status` (local node sync status)
 - **Cloud runtime (`engram cloud serve`)**
   - `GET /health` (cloud service health)
-  - `GET /sync/pull`, `GET /sync/pull/{chunkID}`, `POST /sync/push` (cloud sync transport)
+  - `GET /sync/pull`, `GET /sync/pull/{chunkID}`, `POST /sync/push`, `POST /sync/mutations/push`, `GET /sync/mutations/pull` (cloud sync transport)
   - `GET /dashboard/*` HTML routes (browser dashboard)
 
 Dashboard route tree (`engram cloud serve`):
@@ -102,6 +104,9 @@ Dashboard route tree (`engram cloud serve`):
   - `GET /dashboard/admin/users/list` (admin-gated; HTMX partial)
   - `GET /dashboard/admin/health` (admin-gated)
   - `POST /dashboard/admin/projects/{name}/sync` (admin-gated; toggle sync enabled/disabled)
+  - `GET /dashboard/admin/projects/{name}/sync/form` (admin-gated; HTMX partial)
+  - `GET /dashboard/admin/audit-log` (admin-gated)
+  - `GET /dashboard/admin/audit-log/list` (admin-gated; HTMX partial)
   - `GET /dashboard/sessions/{project}/{sessionID}` — session detail with observations + prompts sub-lists
   - `GET /dashboard/observations/{project}/{sessionID}/{syncID}` — observation detail
   - `GET /dashboard/prompts/{project}/{sessionID}/{syncID}` — prompt detail
@@ -110,7 +115,8 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 
 ### Health
 
-- `GET /health` — Returns `{"status": "ok", "service": "engram", "version": "<current>"}`
+- Local runtime (`engram serve`): `GET /health` — Returns `{"status": "ok", "service": "engram", "version": "0.1.0"}`
+- Cloud runtime (`engram cloud serve`): `GET /health` — Returns `{"status": "ok", "service": "engram-cloud"}`
 
 ### Sessions
 
@@ -182,23 +188,28 @@ These endpoints are served by `engram serve` on the local runtime only. They are
 
 List `memory_relations` rows with optional filters.
 
-Query params: `project` (string), `status` (string — `pending` | `judged`), `since` (RFC3339), `limit` (int, default 50, max 500 — silently clamped).
+Query params: `project` (string), `status` (string — raw `judgment_status`, currently `pending` | `judged` | `orphaned` | `ignored`), `since` (RFC3339), `limit` (int, default 50, max 500 — silently clamped), `offset` (int, default 0).
 
 Response:
 ```json
 {
+  "total": 80,
+  "limit": 50,
+  "offset": 0,
   "relations": [
     {
       "id": 42,
       "sync_id": "rel-abc123",
-      "source_id": 10,
-      "target_id": 20,
       "relation": "conflicts_with",
       "judgment_status": "pending",
-      "created_at": "2026-01-15T12:00:00Z"
+      "source_id": "obs-source123",
+      "source_title": "Original architecture decision",
+      "target_id": "obs-target456",
+      "target_title": "Updated architecture decision",
+      "created_at": "2026-01-15 12:00:00",
+      "updated_at": "2026-01-15 12:30:00"
     }
-  ],
-  "total": 80
+  ]
 }
 ```
 
@@ -207,7 +218,7 @@ Response:
 Get full detail for one relation row, including source and target observation snippets.
 
 - `200` with full relation + `source_snippet` + `target_snippet`
-- `404` with JSON `{"error": "not found"}` when `relation_id` does not exist
+- `404` with a JSON `error` containing the not-found message when `relation_id` does not exist
 - `400` with JSON error body when `relation_id` is not a valid integer
 
 #### GET /conflicts/stats
@@ -217,9 +228,15 @@ Aggregate counts for the project (or global when `project` query param is omitte
 Response:
 ```json
 {
-  "pending": 3,
-  "accepted": 1,
-  "rejected": 0,
+  "project": "my-project",
+  "by_relation": {
+    "conflicts_with": 3,
+    "supersedes": 1
+  },
+  "by_judgment_status": {
+    "pending": 3,
+    "judged": 1
+  },
   "deferred": 4,
   "dead": 1
 }
@@ -242,20 +259,26 @@ Request body:
 }
 ```
 
-- `apply: false` (default) — dry-run; reports candidates without inserting rows
-- `apply: true` — inserts new pending relation rows up to `max_insert` cap (default 100)
-- `semantic: true` — after FTS5 lexical scan, run LLM-judge semantic detection on candidate pairs. Requires `ENGRAM_AGENT_CLI` to be set on the server to `claude` or `opencode`.
-- `concurrency` — worker pool size for parallel LLM calls (default 5, range 1–20)
-- `timeout_per_call_seconds` — per-LLM-call timeout in seconds (default 60, range 1–600)
+- `apply: false` (default) — dry-run for the non-semantic lexical scan; reports candidates without inserting pending rows
+- `apply: true` — non-semantic lexical scan inserts new pending relation rows up to `max_insert` cap (default 100)
+- `semantic: true` — after FTS5 lexical scan, run LLM-judge semantic detection on the candidate pairs returned by `FindCandidates`. It does not discover totally lexically unrelated pairs on its own. Requires `ENGRAM_AGENT_CLI` to be set on the server to `claude` or `opencode`.
+- Semantic scans can persist non-`not_conflict` judged relations through `JudgeBySemantic` even when `apply: false`; `not_conflict` verdicts are not inserted.
+- `concurrency` — worker pool size for parallel LLM calls when `semantic: true` (default 5, range 1–20)
+- `timeout_per_call_seconds` — per-LLM-call timeout in seconds when `semantic: true` (default 60, range 1–600)
 - `max_semantic` — hard cap on LLM calls per scan (default 100); scan stops collecting new pairs once reached
 - Missing `project` field returns `400`
-- `concurrency` outside [1, 20] or `timeout_per_call_seconds` outside [1, 600] returns `400`
+- With `semantic: true`, `concurrency` outside [1, 20] or `timeout_per_call_seconds` outside [1, 600] returns `400`
 
 Response:
 ```json
 {
+  "project": "my-project",
+  "inspected": 25,
   "candidates_found": 5,
+  "already_related": 2,
   "inserted": 0,
+  "capped": false,
+  "dry_run": true,
   "semantic_judged": 0,
   "semantic_skipped": 0,
   "semantic_errors": 0
@@ -264,33 +287,55 @@ Response:
 
 `semantic_judged`, `semantic_skipped`, and `semantic_errors` are always present (zero when `semantic: false`).
 
-When `apply: true` and the cap is reached, a `warning` field is included:
+When any scan cap is reached, including `max_insert` for lexical apply scans or `max_semantic` for semantic scans, a `warning` field is included:
 ```json
 {
+  "project": "my-project",
+  "inspected": 250,
   "candidates_found": 150,
+  "already_related": 0,
   "inserted": 50,
-  "warning": "cap reached: stopped after 50 inserts"
+  "capped": true,
+  "dry_run": false,
+  "semantic_judged": 0,
+  "semantic_skipped": 0,
+  "semantic_errors": 0,
+  "warning": "cap reached: not all candidates were inserted"
 }
 ```
 
 #### GET /conflicts/deferred
 
-List rows from `sync_apply_deferred`. Query params: `status` (string — `deferred` | `dead` | `applied`), `limit` (int, default 50, max 500).
+List rows from `sync_apply_deferred`. Query params: `status` (string — `deferred` | `dead` | `applied`), `limit` (int, default 50, max 500), `offset` (int, default 0; accepted for pagination but not echoed in the response envelope).
 
 Response:
 ```json
 {
+  "total": 3,
+  "limit": 50,
   "rows": [
     {
-      "sync_id": "obs_xyz",
+      "sync_id": "rel-abc123",
       "entity": "relation",
+      "payload": {
+        "sync_id": "rel-abc123",
+        "source_id": "obs-source123",
+        "target_id": "obs-target456",
+        "relation": "conflicts_with",
+        "judgment_status": "pending",
+        "project": "my-project",
+        "created_at": "2026-01-15 12:00:00",
+        "updated_at": "2026-01-15 12:00:00"
+      },
+      "payload_raw": "{\"sync_id\":\"rel-abc123\",\"source_id\":\"obs-source123\",\"target_id\":\"obs-target456\",\"relation\":\"conflicts_with\",\"judgment_status\":\"pending\",\"project\":\"my-project\",\"created_at\":\"2026-01-15 12:00:00\",\"updated_at\":\"2026-01-15 12:00:00\"}",
+      "payload_valid": true,
       "apply_status": "deferred",
       "retry_count": 2,
       "last_error": "source FK not found",
-      "created_at": "2026-01-15T12:00:00Z"
+      "last_attempted_at": "2026-01-15 12:05:00",
+      "first_seen_at": "2026-01-15 12:00:00"
     }
-  ],
-  "total": 3
+  ]
 }
 ```
 
@@ -303,6 +348,7 @@ Response:
 {
   "retried": 4,
   "succeeded": 3,
+  "failed": 0,
   "dead": 1
 }
 ```
@@ -337,7 +383,7 @@ Response:
 |---|---|---|
 | `ENGRAM_DATA_DIR` | Override data directory | `~/.engram` |
 | `ENGRAM_PORT` | Override HTTP server port | `7437` |
-| `ENGRAM_PROJECT` | Override project name for MCP server | auto-detected via git |
+| `ENGRAM_PROJECT` | Default project for `engram serve` `GET /sync/status` when no `project` query param is supplied. When unset, cwd detection is used as the fallback. | cwd-detected project |
 
 ### Conflict Audit CLI (admin)
 
@@ -346,41 +392,44 @@ The `engram conflicts` sub-command provides admin/maintainer access to the confl
 When `--project` is omitted, the cwd-detected project is used.
 
 ```
-engram conflicts list [--project <name>] [--status <pending|judged>] [--since <RFC3339>] [--limit <N>]
+engram conflicts list [--project <name>] [--status <pending|judged|orphaned|ignored>] [--since <RFC3339>] [--limit <N>]
 ```
-List `memory_relations` rows. Output: label-colon aligned columns (relation_id, relation_type, judgment_status, created_at).
+List `memory_relations` rows. Output: label-colon aligned columns (`id`, `sync_id`, `relation`, `judgment_status`, `source`, `target`, `created_at`).
 
 ```
 engram conflicts show <relation_id>
 ```
-Show full detail for one relation: relation_id, relation_type, judgment_status, sync_id, created_at, source observation snippet, target observation snippet. Exits non-zero when relation_id does not exist.
+Show full detail for one relation: relation_id, sync_id, relation, judgment_status, created_at, updated_at, source_id, source_title, target_id, target_title. Exits non-zero when relation_id does not exist.
 
 ```
 engram conflicts stats [--project <name>]
 ```
-Print aggregate counts: pending, accepted, rejected relation rows plus deferred and dead queue sizes.
+Print aggregate grouped `judgment_status` counts (`pending` | `judged` | `orphaned` | `ignored`) plus deferred and dead queue sizes. When relation counts exist, also prints `By relation type` counts.
 
 ```
 engram conflicts scan [--project <name>] [--dry-run] [--apply] [--max-insert <N>]
+                      [--since <RFC3339>]
                       [--semantic] [--concurrency <N>] [--timeout-per-call <N>]
                       [--max-semantic <N>] [--yes]
 ```
 Walk observations for the project, run FindCandidates, and report or insert new pending relation rows.
-- `--dry-run` (default): reports candidates found; 0 rows inserted.
+- `--dry-run` (default): for non-semantic lexical scans, reports candidates found with 0 pending rows inserted.
 - `--apply`: inserts up to `--max-insert` (default 100) new rows; prints WARNING when cap is reached.
-- `--semantic`: enable LLM-judge semantic detection beyond FTS5 lexical candidates. Catches vocabulary-different concepts (e.g., "Hexagonal Architecture" vs "Ports and Adapters"). Requires `ENGRAM_AGENT_CLI=claude` or `ENGRAM_AGENT_CLI=opencode`.
+- `--since RFC3339`: scan only observations created at or after the timestamp.
+- `--semantic`: enable LLM-judge semantic detection on FTS5 candidate pairs returned by `FindCandidates`. It can improve verdict quality for candidates that share lexical terms, but it does not discover totally lexically unrelated pairs on its own. Requires `ENGRAM_AGENT_CLI=claude` or `ENGRAM_AGENT_CLI=opencode`.
+- With `--semantic`, non-`not_conflict` verdicts are persisted by `JudgeBySemantic` even in the default `--dry-run` mode; `not_conflict` verdicts remain no-op.
 - `--concurrency N`: worker pool size for parallel LLM calls (default 5, max 20).
 - `--timeout-per-call N`: per-LLM-call timeout in seconds (default 60).
 - `--max-semantic N`: hard cap on LLM calls per scan run (default 100).
 - `--yes`: skip the cost-estimate confirmation prompt before LLM calls.
 
 ```
-engram conflicts deferred [--project <name>] [--status <deferred|dead|applied>] [--limit <N>] [--inspect <sync_id>] [--replay]
+engram conflicts deferred [--status <deferred|dead|applied>] [--limit <N>] [--inspect <sync_id>] [--replay]
 ```
 Inspect or replay the `sync_apply_deferred` queue.
-- Default: list rows with sync_id, status, retry_count, created_at.
+- Default: list rows with sync_id, apply_status, retry_count, first_seen_at.
 - `--inspect <sync_id>`: print full decoded payload for one row; exits non-zero when not found.
-- `--replay`: call `ReplayDeferred()` and print retried/succeeded/dead counts.
+- `--replay`: call `ReplayDeferred()` and print retried/succeeded/failed/dead counts.
 
 ### Cloud CLI (opt-in)
 
@@ -393,6 +442,7 @@ Inspect or replay the `sync_apply_deferred` queue.
 - `engram cloud upgrade bootstrap --project <project> [--resume]` — resumable checkpointed enroll/push/verify flow
 - `engram cloud upgrade status --project <project>` — show upgrade stage/class/reason
 - `engram cloud upgrade rollback --project <project>` — restore pre-upgrade local snapshot before `bootstrap_verified`; blocked afterwards
+- `engram cloud repair materialize-mutations --project <project> (--dry-run|--apply)` — explicit server-side Postgres repair that backfills existing `cloud_mutations` into compatible `cloud_chunks` without deleting remote data
 
 Cloud auth token is provided at runtime via `ENGRAM_CLOUD_TOKEN` (not by a dedicated CLI subcommand).
 Cloud server startup fails closed when the token is missing unless `ENGRAM_CLOUD_INSECURE_NO_AUTH=1` is explicitly set for local insecure development.
@@ -400,7 +450,7 @@ Cloud server startup fails closed when the token is missing unless `ENGRAM_CLOUD
 Cloud server always requires `ENGRAM_CLOUD_ALLOWED_PROJECTS` (comma-separated), including insecure mode, so project scope remains server-enforced.
 `ENGRAM_CLOUD_TOKEN` + `ENGRAM_CLOUD_ALLOWED_PROJECTS` are server-side requirements for authenticated mode and must be configured before `engram cloud serve` (or compose startup).
 Authenticated mode also requires an explicit non-default `ENGRAM_JWT_SECRET`; implicit development defaults are rejected.
-Dashboard requests support browser login in authenticated mode: use `/dashboard/login` to exchange the bearer token for an HttpOnly dashboard cookie scoped to `/dashboard`. Protected `/dashboard/*` HTML routes require that cookie and do **not** treat raw `Authorization: Bearer ...` headers as an authenticated browser session. Sync API routes (`/sync/pull`, `/sync/push`) remain header-auth only. In insecure mode (`ENGRAM_CLOUD_INSECURE_NO_AUTH=1` + no `ENGRAM_CLOUD_TOKEN`), dashboard auth is bypassed and `/dashboard/login` redirects to `/dashboard/`.
+Dashboard requests support browser login in authenticated mode: use `/dashboard/login` to exchange the bearer token for an HttpOnly dashboard cookie scoped to `/dashboard`. Protected `/dashboard/*` HTML routes require that cookie and do **not** treat raw `Authorization: Bearer ...` headers as an authenticated browser session. Sync API routes (`/sync/pull`, `/sync/pull/{chunkID}`, `/sync/push`, `/sync/mutations/push`, `/sync/mutations/pull`) remain header-auth only. In insecure mode (`ENGRAM_CLOUD_INSECURE_NO_AUTH=1` + no `ENGRAM_CLOUD_TOKEN`), dashboard auth is bypassed and `/dashboard/login` redirects to `/dashboard/`.
 
 `ENGRAM_CLOUD_ADMIN` is optional in authenticated mode; when set, `/dashboard/admin` is allowed only for sessions established with that exact token.
 `ENGRAM_CLOUD_ADMIN` is rejected in insecure mode (`ENGRAM_CLOUD_INSECURE_NO_AUTH=1`) to avoid an incoherent admin/browser auth path.
@@ -434,6 +484,8 @@ ENGRAM_CLOUD_SYNC=1 engram sync --status --project my-project
 
 When `engram sync --cloud --project <project>` or autosync hits a known repairable cloud sync/upsert/canonicalization failure, Engram preserves the original error and appends guidance to run:
 
+### Cloud Upgrade Flow
+
 ```bash
 engram cloud upgrade doctor --project <project>
 engram cloud upgrade repair --project <project> --dry-run
@@ -442,6 +494,17 @@ engram sync --cloud --project <project>
 ```
 
 Sync/autosync never auto-applies repairs; only the explicit `repair --apply` command mutates local repairable upgrade state.
+
+For cloud servers that already accepted mutation pushes before mutation payloads were materialized into chunk history, run the server-side backfill against the Postgres DSN used by `engram cloud serve`:
+
+```bash
+ENGRAM_DATABASE_URL='postgres://...' engram cloud repair materialize-mutations --project <project> --dry-run
+ENGRAM_DATABASE_URL='postgres://...' engram cloud repair materialize-mutations --project <project> --apply
+```
+
+The backfill is project-scoped, non-destructive, and idempotent: it inserts missing compatible chunks and leaves existing `cloud_mutations` and chunks in place.
+
+`engram cloud serve` also runs this materialization repair automatically for every configured `ENGRAM_CLOUD_ALLOWED_PROJECTS` entry at startup. The explicit repair command remains available for operator verification, dry-runs, and re-running a project after an upgrade.
 
 ### Local Cloud Bring-Up (Docker + Postgres)
 
@@ -508,33 +571,36 @@ Cloud failure visibility must stay deterministic across supported surfaces:
 
 `engram sync --cloud --status --project <name>` is read-only: it does **not** mutate `/sync/status` lifecycle fields.
 
-Machine-actionable validation/policy failures from cloud sync routes (`/sync/pull`, `/sync/push`) include:
+Machine-actionable validation/policy failures from cloud sync routes include:
 
-- `error_class` (`repairable` | `blocked` | `policy`)
+- `error_class` (`repairable` | `blocked` | `policy` | `invalid_request`)
 - `error_code` (stable deterministic code)
 - `error` (human-readable message)
+
+This envelope is used consistently by `/sync/push` validation/control failures and by `/sync/pull` / `/sync/pull/{chunkID}` project-required or policy failures. `/sync/mutations/push` uses the envelope for empty batches, empty projects, project policy failures, and pause-control failures; relation-payload validation currently returns `error`, `reason_code`, and `invalid` instead. `/sync/mutations/pull` success responses include the project envelope, but internal listing errors currently use plain `http.Error`.
 
 ---
 
 ## MCP Project Resolution
 
-Engram resolves the project for every MCP tool call from the **server's working directory** (cwd), not from the LLM's arguments. This eliminates project drift caused by agents supplying different names for the same repo.
+Engram resolves the project at MCP tool call time from the **server process working directory** (cwd), not at MCP startup and not from arbitrary LLM arguments. This eliminates project drift caused by agents supplying different names for the same repo.
 
-### Detection algorithm (5 cases)
+### Detection algorithm
 
 | Case | Condition | Source | Project |
 |------|-----------|--------|---------|
-| 1 | cwd is a git root with `origin` remote | `git_remote` | repo name from remote URL |
-| 2 | cwd is inside a git repo (subdirectory) | `git_root` | git root's directory basename |
-| 3 | cwd has exactly one git-repo child | `git_child` | child repo name (warning included) |
-| 4 | cwd has multiple git-repo children | `ambiguous_project` error | — write tools fail fast |
-| 5 | no git repo near cwd | `dir_basename` | basename of cwd |
+| 1 | `.engram/config.json` exists at the repo root, or at cwd outside git | `config` | `project_name` from config |
+| 2 | cwd is a git root with `origin` remote | `git_remote` | repo name from remote URL |
+| 3 | cwd is inside a git repo (subdirectory) | `git_root` | git root's directory basename |
+| 4 | cwd has exactly one git-repo child | `git_child` | child repo name (warning included) |
+| 5 | cwd has multiple git-repo children | `ambiguous` error | — write tools fail fast |
+| 6 | no git repo near cwd | `dir_basename` | basename of cwd |
 
 Child scan constraints: depth=1, max 20 entries, 200ms timeout, skips hidden dirs and noise dirs (`node_modules`, `vendor`, `.venv`, `__pycache__`, `target`, `dist`, `build`, `.idea`, `.vscode`).
 
 ### Response envelope
 
-Every successful tool response includes these fields:
+Most successful MCP tool responses use this envelope:
 
 ```json
 {
@@ -547,19 +613,27 @@ Every successful tool response includes these fields:
 
 Error responses include `available_projects` when the error is `ambiguous_project` or `unknown_project`.
 
+Exceptions:
+- `mem_current_project` returns detection fields directly (`project`, `project_source`, `project_path`, `cwd`, `available_projects`, optional `warning` / `error_hint`) and does not wrap them in `result`.
+- `mem_doctor` returns the same JSON report shape as `engram doctor --json`; it uses read-project resolution before running diagnostics but does not wrap the report in the common MCP envelope.
+
 ### Write tools (cwd-detected project, limited recovery override)
 
-`mem_session_start`, `mem_session_end`, `mem_session_summary`, `mem_capture_passive`, and `mem_update` auto-detect project from cwd. Any `project` argument the LLM sends is ignored.
+`mem_session_start`, `mem_session_end`, `mem_session_summary`, and `mem_capture_passive` auto-detect project from cwd. Any `project` argument the LLM sends is ignored.
+
+`mem_update` uses ID-based updates and auto-detects project only for response envelope metadata. Its public schema does not expose `project`; raw legacy clients may still send a non-empty `project` argument, and the handler tolerates it as an observation project update for compatibility.
 
 `mem_save` and `mem_save_prompt` also auto-detect project from cwd by default, but they accept one narrow recovery override: after a previous `ambiguous_project` error, the agent may retry with `project=<one of available_projects>` and `project_choice_reason=user_selected_after_ambiguous_project`. Without that exact reason, LLM-supplied `project` is ignored so routine writes cannot drift across project names.
 
 ### Read tools (optional project override)
 
-`mem_search`, `mem_context`, `mem_timeline`, `mem_get_observation`, `mem_stats` — `project` is an optional argument. If supplied, it is validated against the store via `ProjectExists`. Unknown project names return a structured error with `available_projects`.
+`mem_search`, `mem_context`, `mem_timeline`, `mem_stats`, `mem_doctor` — `project` is an optional argument. If supplied, it is validated against the store via `ProjectExists`. Unknown project names return a structured error with `available_projects`. `mem_get_observation` resolves project from cwd for envelope metadata and does not accept a project override.
 
-### Admin tools (project required)
+### Admin tools
 
-`mem_delete`, `mem_merge_projects` — `project` remains required. Auto-detection is NOT applied to destructive operations.
+`mem_delete` is ID-based and requires `id`; optional `hard_delete=true` permanently deletes the observation. It does not accept or auto-detect `project`.
+
+`mem_merge_projects` requires `from` (comma-separated source project names) and `to` (canonical target project name). It does not accept or auto-detect `project`.
 
 ### mem_current_project
 
@@ -580,7 +654,7 @@ Returns success even when cwd is ambiguous — empty `project` + non-empty `avai
 
 ---
 
-## MCP Tools (18 tools)
+## MCP Tools (19 tools)
 
 ### mem_search
 
@@ -615,7 +689,7 @@ When `topic_key` is provided, `mem_save` upserts the latest observation in the s
 
 ### mem_update
 
-Update an observation by ID. Supports partial updates for `title`, `content`, `type`, `project`, `scope`, and `topic_key`.
+Update an observation by ID. Public schema supports partial updates for `title`, `content`, `type`, `scope`, and `topic_key`. For legacy/raw MCP clients, a non-empty `project` argument is still tolerated by the handler even though it is not exposed in the schema.
 
 ### mem_suggest_topic_key
 
@@ -672,11 +746,15 @@ Extract structured learnings from text output. Looks for `## Key Learnings:` sec
 
 ### mem_merge_projects
 
-**Admin tool.** Merge multiple project name variants into a single canonical name. Accepts an array of source project names and a target canonical name. All observations, sessions, and prompts from the source projects are reassigned to the canonical project.
+**Admin tool.** Merge multiple project name variants into a single canonical name. Requires `from` as a comma-separated list of source project names and `to` as the target canonical name. All observations, sessions, and prompts from the source projects are reassigned to the canonical project.
 
 ### mem_current_project
 
 Detect the current project from the working directory. Returns `project`, `project_source`, `project_path`, `cwd`, `available_projects`, and `warning`. Never returns an error — even on ambiguous cwd it returns success with an empty `project` and non-empty `available_projects`. Recommended as the first call when starting a session.
+
+### mem_doctor
+
+Run read-only operational diagnostics. Returns the same JSON report shape as `engram doctor --json`, with optional `project` and `check` filters. The optional `project` override is validated with read-project resolution before diagnostics run.
 
 ### mem_judge
 
@@ -685,7 +763,7 @@ Record a verdict on a pending memory conflict. When `mem_save` returns `candidat
 Parameters:
 - **judgment_id** (required): the `judgment_id` returned by `mem_save`
 - **relation** (required): `related` | `compatible` | `scoped` | `conflicts_with` | `supersedes` | `not_conflict`
-- **reason** (required): short text explaining the verdict
+- **reason** (optional): short text explaining the verdict
 - **evidence** (optional): free-form text or JSON the agent can use to justify the call (e.g., quoted excerpts from both memories)
 - **confidence** (optional, default 1.0): 0.0–1.0; if the value is below 0.7 the agent SHOULD ask the user before calling
 
@@ -821,12 +899,15 @@ All project names are normalized on write and read: **lowercase**, **trimmed**, 
 
 ### Auto-detection
 
-The MCP server auto-detects the project name at startup using a priority chain:
-1. `--project` flag
-2. `ENGRAM_PROJECT` environment variable
-3. Git remote origin URL (extracts repo name)
-4. Git repository root directory name
-5. Current working directory basename
+MCP tools resolve project names at call time using the shared detection chain:
+1. `.engram/config.json` `project_name` at the repo root, or at cwd outside git
+2. Git remote origin URL (extracts repo name)
+3. Git repository root directory name
+4. Single git-repo child of cwd
+5. Multiple git-repo children of cwd returns `ambiguous_project` with `available_projects`
+6. Current working directory basename
+
+The MCP command does not support startup-time `--project` or `ENGRAM_PROJECT` overrides; `engram mcp` only parses `--tools` for MCP tool allowlisting.
 
 ### Similar-project warnings
 
@@ -1098,7 +1179,7 @@ Note: when the cloud server returns 404 on mutation endpoints, the transport log
 
 For a step-by-step recovery guide covering `chunk_id does not match payload content hash`, `session payload directory is required`, and the temporary missing-directory repair helper, see [Engram Cloud Troubleshooting](docs/engram-cloud/troubleshooting.md).
 
-**`transport_failed` with `server_unsupported` in logs**: The cloud server does not yet implement `POST /sync/mutations/push` or `GET /sync/mutations/pull`. Deploy a server version that includes these endpoints before enabling `ENGRAM_CLOUD_AUTOSYNC=1`. Check logs for the line containing `server_unsupported`.
+**`transport_failed` with `server_unsupported` in logs**: Older pre-mutation cloud server deployments may not implement `POST /sync/mutations/push` or `GET /sync/mutations/pull`, causing 404 responses from those endpoints. Deploy a server version that includes these routes before enabling `ENGRAM_CLOUD_AUTOSYNC=1`. Check logs for the line containing `server_unsupported`.
 
 **Autosync not starting**: Check that `ENGRAM_CLOUD_AUTOSYNC` is exactly `"1"` (not `"true"` or `"yes"`), and that both `ENGRAM_CLOUD_TOKEN` and `ENGRAM_CLOUD_SERVER` are non-empty. The process logs an `[autosync] ERROR` line explaining which variable is missing.
 

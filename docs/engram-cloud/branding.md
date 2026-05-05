@@ -38,12 +38,18 @@ The elephant remains the identity anchor, extended for cloud continuity:
 ## Asset Set
 
 ```text
+assets/branding/engram-banner.png
+assets/branding/engram-logo-only.png
 assets/branding/engram-cloud-logo.png
 assets/branding/engram-cloud-elephant-network.png
 assets/branding/engram-cloud-elephant.png
 ```
 
 ### Preview
+
+![Engram Banner](../../assets/branding/engram-banner.png)
+
+<img src="../../assets/branding/engram-logo-only.png" alt="Engram Elephant Logo" width="320" />
 
 ![Engram Cloud Logo](../../assets/branding/engram-cloud-logo.png)
 
@@ -54,6 +60,15 @@ assets/branding/engram-cloud-elephant.png
 ---
 
 ## Intended Roles
+
+### `engram-banner.png`
+- Top-level README hero image
+- General project/release/social visual for Engram as a whole
+- Brand tagline carrier: “One Brain. Local or Cloud.”
+
+### `engram-logo-only.png`
+- Mascot-only identity mark
+- Avatar/icon/supporting visual where the full banner would be too wide
 
 ### `engram-cloud-logo.png`
 - Hero image in cloud docs
