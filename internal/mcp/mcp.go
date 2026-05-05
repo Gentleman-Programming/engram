@@ -885,6 +885,15 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			}
 			project = "" // Empty project triggers global search in Store.Search
 			extra["all_projects"] = true
+			if len(detRes.AvailableProjects) > 0 {
+				extra["available_projects"] = detRes.AvailableProjects
+			}
+			if detRes.Error != nil {
+				extra["warning"] = fmt.Sprintf("Current project detection was non-blocking: %s", detRes.Error)
+				if errors.Is(detRes.Error, projectpkg.ErrAmbiguousProject) {
+					extra["error_hint"] = "Use mem_current_project to inspect detection results, or search with an explicit project when you need a single project context."
+				}
+			}
 			if detRes.Project != "" {
 				sessionID = defaultSessionID(detRes.Project)
 				activity.RecordToolCall(sessionID)

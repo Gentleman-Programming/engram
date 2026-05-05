@@ -4747,6 +4747,10 @@ func TestMemSearch_AllThreeTypes_FormatExact(t *testing.T) {
 }
 
 func TestHandleSearch_AllProjects(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	t.Chdir(dir)
+
 	s := newMCPTestStore(t)
 
 	// Create sessions for two different projects
@@ -4787,6 +4791,7 @@ func TestHandleSearch_AllProjects(t *testing.T) {
 	// Test 1: Search with all_projects=true should find both
 	allProjectsRes, err := search(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"query":        "decision",
+		"scope":        "project",
 		"all_projects": true,
 	}}})
 	if err != nil {
