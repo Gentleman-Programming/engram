@@ -880,6 +880,9 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			// Best-effort detect the current project for envelope metadata and activity
 			// tracking, but do not let detection failures block global search.
 			detRes = detectCurrentProjectBestEffort()
+			if detRes.Project != "" {
+				detRes.Project, _ = store.NormalizeProject(detRes.Project)
+			}
 			project = "" // Empty project triggers global search in Store.Search
 			extra["all_projects"] = true
 			if detRes.Project != "" {
@@ -1942,11 +1945,7 @@ func detectCurrentProjectBestEffort() projectpkg.DetectionResult {
 	if err != nil {
 		cwd = "."
 	}
-	res := projectpkg.DetectProjectFull(cwd)
-	if res.Error != nil {
-		return projectpkg.DetectionResult{}
-	}
-	return res
+	return projectpkg.DetectProjectFull(cwd)
 }
 
 // respondWithProject wraps a tool result by prepending the project envelope
