@@ -1,16 +1,17 @@
 <p align="center">
-  <img width="1024" alt="Engram Cloud" src="assets/branding/engram-cloud-logo.png" />
+  <img width="1024" alt="Engram — One Brain. Local or Cloud." src="assets/branding/engram-banner.png" />
 </p>
 
 <p align="center">
   <strong>Persistent memory for AI coding agents</strong><br>
-  <em>Agent-agnostic. Single binary. Zero dependencies.</em>
+  <em>One brain. Local or cloud. Agent-agnostic, single binary, zero dependencies.</em>
 </p>
 
 <p align="center">
   <a href="docs/INSTALLATION.md">Installation</a> &bull;
   <a href="docs/engram-cloud/README.md">Engram Cloud</a> &bull;
   <a href="docs/AGENT-SETUP.md">Agent Setup</a> &bull;
+  <a href="docs/CODEBASE-GUIDE.md">Codebase Guide</a> &bull;
   <a href="docs/ARCHITECTURE.md">Architecture</a> &bull;
   <a href="docs/PLUGINS.md">Plugins</a> &bull;
   <a href="CONTRIBUTING.md">Contributing</a> &bull;
@@ -69,7 +70,7 @@ That's it. No Node.js, no Python, no Docker. **One binary, one SQLite file.**
 
 Full details on session lifecycle, topic keys, and memory hygiene → [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 
-## MCP Tools (18)
+## MCP Tools (19)
 
 | Category | Tools |
 |----------|-------|
@@ -77,9 +78,9 @@ Full details on session lifecycle, topic keys, and memory hygiene → [docs/ARCH
 | **Search & Retrieve** | `mem_search`, `mem_context`, `mem_timeline`, `mem_get_observation` |
 | **Session Lifecycle** | `mem_session_start`, `mem_session_end`, `mem_session_summary` |
 | **Conflict Surfacing** | `mem_judge`, `mem_compare` |
-| **Utilities** | `mem_save_prompt`, `mem_stats`, `mem_capture_passive`, `mem_merge_projects`, `mem_current_project` |
+| **Utilities** | `mem_save_prompt`, `mem_stats`, `mem_capture_passive`, `mem_merge_projects`, `mem_current_project`, `mem_doctor` |
 
-Full tool reference with parameters → [DOCS.md#mcp-tools-18-tools](DOCS.md#mcp-tools-18-tools)
+Full tool reference with parameters → [DOCS.md#mcp-tools-19-tools](DOCS.md#mcp-tools-19-tools)
 
 ## Terminal UI
 
@@ -170,7 +171,7 @@ Try the new memory-conflict-surfacing features in **complete isolation** from yo
 **What's in the beta**:
 - 🔄 Cloud sync of conflict relations cross-machine
 - 🔍 `engram conflicts` CLI + HTTP API for retroactive audit + scan
-- 🧠 `--semantic` scan that uses **your existing Claude Code or OpenCode CLI** to catch vocabulary-different conflicts ("Hexagonal" ↔ "Ports and Adapters") — **$0 if you're on a Pro/Max/Plus subscription**
+- 🧠 `--semantic` scan that uses **your existing Claude Code or OpenCode CLI** to judge FTS5 conflict candidates with LLM reasoning — **$0 if you're on a Pro/Max/Plus subscription**
 
 ### Setup (4 commands)
 
@@ -245,9 +246,9 @@ export ENGRAM_AGENT_CLI=claude   # or opencode
 
 ✅ Your agent's LLM judges semantic similarity. **$0 if on a subscription**.
 
-**5️⃣ The case keyword search NEVER catches**
+**5️⃣ The case where FTS5 finds a candidate, then the LLM judges meaning**
 
-Vocabulary-different but semantically-conflicting:
+Lexically related candidate titles with a semantic conflict:
 
 ```bash
 ./engram-beta save \
@@ -256,7 +257,7 @@ Vocabulary-different but semantically-conflicting:
   --type architecture --project beta-test
 
 ./engram-beta save \
-  "We migrated to MongoDB last quarter" \
+  "Replace the user database with MongoDB" \
   "Document store now backs the user collection. SQL is gone." \
   --type decision --project beta-test
 
@@ -266,7 +267,7 @@ Vocabulary-different but semantically-conflicting:
 ./engram-beta conflicts list --project beta-test --status judged
 ```
 
-✅ The LLM detects `supersedes` / `conflicts_with` with high confidence — FTS5 alone would not, because "Postgres" and "MongoDB" share no words.
+✅ FTS5 supplies the candidate pair through shared title terms like `user` / `database`; the LLM then judges whether it is `supersedes` / `conflicts_with`. `--semantic` does not discover totally lexically unrelated pairs on its own.
 
 ### Cleanup (zero residue)
 
@@ -313,6 +314,7 @@ Full CLI with all flags → [docs/ARCHITECTURE.md#cli-reference](docs/ARCHITECTU
 | [Installation](docs/INSTALLATION.md) | All install methods + platform support |
 | [Engram Cloud](docs/engram-cloud/README.md) | Cloud landing page, quickstart, branding, and deep links |
 | [Agent Setup](docs/AGENT-SETUP.md) | Per-agent configuration + Memory Protocol |
+| [Codebase Guide](docs/CODEBASE-GUIDE.md) | Guide to the repository structure, flows, and implementation landmarks |
 | [Architecture](docs/ARCHITECTURE.md) | How it works + MCP tools + project structure |
 | [Plugins](docs/PLUGINS.md) | OpenCode & Claude Code plugin details |
 | [Comparison](docs/COMPARISON.md) | Why Engram vs claude-mem |

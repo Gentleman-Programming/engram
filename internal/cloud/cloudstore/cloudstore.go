@@ -542,6 +542,51 @@ func (cs *CloudStore) migrate(ctx context.Context) error {
 		)`,
 		`ALTER TABLE cloud_chunks ADD COLUMN IF NOT EXISTS project_name TEXT`,
 		`ALTER TABLE cloud_chunks ADD COLUMN IF NOT EXISTS client_created_at TIMESTAMPTZ`,
+		`ALTER TABLE cloud_chunks ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`,
+		`ALTER TABLE cloud_chunks ADD COLUMN IF NOT EXISTS payload JSONB NOT NULL DEFAULT '{}'::jsonb`,
+		`ALTER TABLE cloud_chunks ADD COLUMN IF NOT EXISTS sessions_count INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE cloud_chunks ADD COLUMN IF NOT EXISTS observations_count INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE cloud_chunks ADD COLUMN IF NOT EXISTS prompts_count INTEGER NOT NULL DEFAULT 0`,
+		`DO $$ BEGIN
+			IF EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_schema = current_schema() AND table_name = 'cloud_chunks' AND column_name = 'imported_at'
+			) THEN
+				EXECUTE 'UPDATE cloud_chunks SET created_at = imported_at WHERE imported_at IS NOT NULL AND created_at IS NULL';
+			END IF;
+		END $$`,
+		`DO $$ BEGIN
+			IF EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_schema = current_schema() AND table_name = 'cloud_chunks' AND column_name = 'sessions'
+			) THEN
+				EXECUTE 'UPDATE cloud_chunks SET sessions_count = sessions WHERE sessions_count = 0 AND sessions IS NOT NULL';
+			END IF;
+		END $$`,
+		`DO $$ BEGIN
+			IF EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_schema = current_schema() AND table_name = 'cloud_chunks' AND column_name = 'memories'
+			) THEN
+				EXECUTE 'UPDATE cloud_chunks SET observations_count = memories WHERE observations_count = 0 AND memories IS NOT NULL';
+			END IF;
+		END $$`,
+		`DO $$ BEGIN
+			IF EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_schema = current_schema() AND table_name = 'cloud_chunks' AND column_name = 'prompts'
+			) THEN
+				EXECUTE 'UPDATE cloud_chunks SET prompts_count = prompts WHERE prompts_count = 0 AND prompts IS NOT NULL';
+			END IF;
+		END $$`,
+		`DO $$ BEGIN
+			IF EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_schema = current_schema() AND table_name = 'cloud_chunks' AND column_name = 'user_id'
+			) THEN
+				ALTER TABLE cloud_chunks ALTER COLUMN user_id DROP NOT NULL;
+			END IF;
+		END $$`,
 		`UPDATE cloud_chunks SET project_name = 'default' WHERE project_name IS NULL OR btrim(project_name) = ''`,
 		`ALTER TABLE cloud_chunks ALTER COLUMN project_name SET NOT NULL`,
 		`DO $$ BEGIN
@@ -572,6 +617,18 @@ func (cs *CloudStore) migrate(ctx context.Context) error {
 		    updated_by    TEXT,
 		    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
+		`DO $$ BEGIN
+			IF EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_schema = current_schema()
+				  AND table_name = 'cloud_project_controls'
+				  AND column_name = 'updated_by'
+				  AND udt_name = 'uuid'
+			) THEN
+				ALTER TABLE cloud_project_controls DROP CONSTRAINT IF EXISTS cloud_project_controls_updated_by_fkey;
+				ALTER TABLE cloud_project_controls ALTER COLUMN updated_by TYPE TEXT USING updated_by::text;
+			END IF;
+		END $$`,
 		`CREATE INDEX IF NOT EXISTS idx_cloud_project_controls_enabled ON cloud_project_controls(sync_enabled)`,
 		// cloud_mutations: journal for fine-grained mutation sync (REQ-200, REQ-201).
 		`CREATE TABLE IF NOT EXISTS cloud_mutations (
@@ -583,6 +640,17 @@ func (cs *CloudStore) migrate(ctx context.Context) error {
 			payload    JSONB NOT NULL DEFAULT '{}',
 			occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
+		`ALTER TABLE cloud_mutations ADD COLUMN IF NOT EXISTS project TEXT`,
+		`UPDATE cloud_mutations SET project = 'default' WHERE project IS NULL OR btrim(project) = ''`,
+		`ALTER TABLE cloud_mutations ALTER COLUMN project SET NOT NULL`,
+		`DO $$ BEGIN
+			IF EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_schema = current_schema() AND table_name = 'cloud_mutations' AND column_name = 'user_id'
+			) THEN
+				ALTER TABLE cloud_mutations ALTER COLUMN user_id DROP NOT NULL;
+			END IF;
+		END $$`,
 		`CREATE INDEX IF NOT EXISTS idx_cloud_mutations_project ON cloud_mutations(project)`,
 		`CREATE INDEX IF NOT EXISTS idx_cloud_mutations_seq ON cloud_mutations(seq)`,
 		// cloud_sync_audit_log: persistent audit trail for push-rejection events (REQ-400).
@@ -634,6 +702,16 @@ type StoredMutation struct {
 	OccurredAt string          `json:"occurred_at"`
 }
 
+type MutationChunkBackfillReport struct {
+	Project             string `json:"project"`
+	Applied             bool   `json:"applied"`
+	CandidateMutations  int    `json:"candidate_mutations"`
+	AlreadyMaterialized int    `json:"already_materialized"`
+	InvalidMutations    int    `json:"invalid_mutations"`
+	ChunksPlanned       int    `json:"chunks_planned"`
+	ChunksInserted      int    `json:"chunks_inserted"`
+}
+
 // InsertMutationBatch inserts a batch of mutations into the cloud_mutations journal.
 // Returns the sequence numbers assigned to each entry.
 // BW3: The entire batch is wrapped in a transaction — partial failures roll back
@@ -644,6 +722,10 @@ func (cs *CloudStore) InsertMutationBatch(ctx context.Context, batch []MutationE
 	}
 	if len(batch) == 0 {
 		return []int64{}, nil
+	}
+	chunks, err := materializedMutationBatchChunks(batch)
+	if err != nil {
+		return nil, err
 	}
 
 	tx, err := cs.db.BeginTx(ctx, nil)
@@ -679,12 +761,354 @@ func (cs *CloudStore) InsertMutationBatch(ctx context.Context, batch []MutationE
 		}
 		seqs = append(seqs, seq)
 	}
+	for _, chunk := range chunks {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO cloud_chunks (project_name, chunk_id, created_by, payload, sessions_count, observations_count, prompts_count)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)
+			ON CONFLICT (project_name, chunk_id) DO NOTHING`,
+			chunk.project, chunk.id, "mutation-push", chunk.payload, chunk.counts.sessions, chunk.counts.observations, chunk.counts.prompts,
+		); err != nil {
+			return nil, fmt.Errorf("cloudstore: materialize mutation batch chunk: %w", err)
+		}
+		if err := cs.indexChunkSessionsWith(ctx, tx, chunk.project, chunk.payload); err != nil {
+			return nil, err
+		}
+	}
 
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("cloudstore: commit mutation batch: %w", err)
 	}
 	tx = nil // mark committed so deferred Rollback is a no-op
+	if len(chunks) > 0 {
+		cs.invalidateDashboardReadModel()
+	}
 	return seqs, nil
+}
+
+const mutationBackfillChunkSize = 100
+
+func (cs *CloudStore) BackfillMutationChunks(ctx context.Context, project string, apply bool) (MutationChunkBackfillReport, error) {
+	if cs == nil || cs.db == nil {
+		return MutationChunkBackfillReport{}, fmt.Errorf("cloudstore: not initialized")
+	}
+	project = strings.TrimSpace(project)
+	if project == "" {
+		return MutationChunkBackfillReport{}, fmt.Errorf("cloudstore: project is required")
+	}
+
+	report := MutationChunkBackfillReport{Project: project, Applied: apply}
+	materialized, err := cs.existingChunkMutationSignatures(ctx, project)
+	if err != nil {
+		return MutationChunkBackfillReport{}, err
+	}
+
+	rows, err := cs.db.QueryContext(ctx, `
+		SELECT project, entity, entity_key, op, payload::text
+		FROM cloud_mutations
+		WHERE project = $1
+		ORDER BY seq ASC`, project)
+	if err != nil {
+		return MutationChunkBackfillReport{}, fmt.Errorf("cloudstore: query mutation chunk backfill candidates: %w", err)
+	}
+	defer rows.Close()
+
+	missing := make([]MutationEntry, 0)
+	for rows.Next() {
+		var entry MutationEntry
+		var payload string
+		if err := rows.Scan(&entry.Project, &entry.Entity, &entry.EntityKey, &entry.Op, &payload); err != nil {
+			return MutationChunkBackfillReport{}, fmt.Errorf("cloudstore: scan mutation chunk backfill candidate: %w", err)
+		}
+		if !isChunkMaterializableMutationEntity(entry.Entity) {
+			continue
+		}
+		entry.Payload = json.RawMessage(payload)
+		report.CandidateMutations++
+		sig, err := mutationEntrySignature(entry)
+		if err != nil {
+			report.InvalidMutations++
+			continue
+		}
+		if _, ok := materialized[sig]; ok {
+			report.AlreadyMaterialized++
+			continue
+		}
+		missing = append(missing, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return MutationChunkBackfillReport{}, fmt.Errorf("cloudstore: iterate mutation chunk backfill candidates: %w", err)
+	}
+
+	chunks := make([]materializedMutationChunk, 0)
+	for start := 0; start < len(missing); start += mutationBackfillChunkSize {
+		end := start + mutationBackfillChunkSize
+		if end > len(missing) {
+			end = len(missing)
+		}
+		batchChunks, err := materializedMutationBatchChunks(missing[start:end])
+		if err != nil {
+			return MutationChunkBackfillReport{}, err
+		}
+		chunks = append(chunks, batchChunks...)
+	}
+	report.ChunksPlanned = len(chunks)
+	if !apply || len(chunks) == 0 {
+		return report, nil
+	}
+
+	tx, err := cs.db.BeginTx(ctx, nil)
+	if err != nil {
+		return MutationChunkBackfillReport{}, fmt.Errorf("cloudstore: begin mutation chunk backfill tx: %w", err)
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	for _, chunk := range chunks {
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO cloud_chunks (project_name, chunk_id, created_by, payload, sessions_count, observations_count, prompts_count)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)
+			ON CONFLICT (project_name, chunk_id) DO NOTHING`,
+			chunk.project, chunk.id, "mutation-backfill", chunk.payload, chunk.counts.sessions, chunk.counts.observations, chunk.counts.prompts,
+		)
+		if err != nil {
+			return MutationChunkBackfillReport{}, fmt.Errorf("cloudstore: insert mutation chunk backfill: %w", err)
+		}
+		if affected, err := result.RowsAffected(); err == nil && affected > 0 {
+			report.ChunksInserted++
+		}
+		if err := cs.indexChunkSessionsWith(ctx, tx, chunk.project, chunk.payload); err != nil {
+			return MutationChunkBackfillReport{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return MutationChunkBackfillReport{}, fmt.Errorf("cloudstore: commit mutation chunk backfill: %w", err)
+	}
+	tx = nil
+	if report.ChunksInserted > 0 {
+		cs.invalidateDashboardReadModel()
+	}
+	return report, nil
+}
+
+func (cs *CloudStore) existingChunkMutationSignatures(ctx context.Context, project string) (map[string]struct{}, error) {
+	rows, err := cs.db.QueryContext(ctx, `SELECT payload FROM cloud_chunks WHERE project_name = $1`, project)
+	if err != nil {
+		return nil, fmt.Errorf("cloudstore: query existing chunk mutations: %w", err)
+	}
+	defer rows.Close()
+
+	signatures := make(map[string]struct{})
+	for rows.Next() {
+		var payload []byte
+		if err := rows.Scan(&payload); err != nil {
+			return nil, fmt.Errorf("cloudstore: scan existing chunk mutations: %w", err)
+		}
+		chunk, err := parseChunkData(payload)
+		if err != nil {
+			return nil, fmt.Errorf("cloudstore: parse existing chunk mutations: %w", err)
+		}
+		for _, mutation := range chunk.Mutations {
+			if !isChunkMaterializableMutationEntity(mutation.Entity) {
+				continue
+			}
+			sig, err := syncMutationSignature(mutation)
+			if err != nil {
+				return nil, fmt.Errorf("cloudstore: sign existing chunk mutation %s/%s/%s: %w", mutation.Project, mutation.Entity, mutation.EntityKey, err)
+			}
+			signatures[sig] = struct{}{}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("cloudstore: iterate existing chunk mutations: %w", err)
+	}
+	return signatures, nil
+}
+
+type materializedMutationChunk struct {
+	project string
+	id      string
+	payload []byte
+	counts  chunkSummary
+}
+
+func materializedMutationBatchChunks(batch []MutationEntry) ([]materializedMutationChunk, error) {
+	if len(batch) == 0 {
+		return nil, nil
+	}
+	groups := make(map[string][]MutationEntry)
+	order := make([]string, 0)
+	for i, entry := range batch {
+		project := strings.TrimSpace(entry.Project)
+		if project == "" {
+			return nil, fmt.Errorf("cloudstore: materialize mutation batch: entries[%d].project is required", i)
+		}
+		if _, ok := groups[project]; !ok {
+			order = append(order, project)
+		}
+		groups[project] = append(groups[project], entry)
+	}
+
+	chunks := make([]materializedMutationChunk, 0, len(order))
+	for _, project := range order {
+		payload, counts, err := materializedMutationBatchChunk(groups[project])
+		if err != nil {
+			return nil, err
+		}
+		if len(payload) == 0 {
+			continue
+		}
+		chunks = append(chunks, materializedMutationChunk{project: project, id: chunkIDFromPayload(payload), payload: payload, counts: counts})
+	}
+	return chunks, nil
+}
+
+func materializedMutationBatchChunk(batch []MutationEntry) ([]byte, chunkSummary, error) {
+	if len(batch) == 0 {
+		return nil, chunkSummary{}, nil
+	}
+	project := strings.TrimSpace(batch[0].Project)
+	chunk := engramsync.ChunkData{Mutations: make([]store.SyncMutation, 0, len(batch))}
+	for i, entry := range batch {
+		entryProject := strings.TrimSpace(entry.Project)
+		if entryProject == "" {
+			return nil, chunkSummary{}, fmt.Errorf("cloudstore: materialize mutation batch: entries[%d].project is required", i)
+		}
+		if project == "" {
+			project = entryProject
+		}
+		if entryProject != project {
+			return nil, chunkSummary{}, fmt.Errorf("cloudstore: materialize mutation batch: mixed projects %q and %q", project, entryProject)
+		}
+		entity := strings.TrimSpace(entry.Entity)
+		if !isChunkMaterializableMutationEntity(entity) {
+			continue
+		}
+
+		payload := entry.Payload
+		if len(payload) == 0 {
+			payload = json.RawMessage("{}")
+		}
+		chunk.Mutations = append(chunk.Mutations, store.SyncMutation{
+			Project:   entryProject,
+			Entity:    entity,
+			EntityKey: strings.TrimSpace(entry.EntityKey),
+			Op:        strings.TrimSpace(entry.Op),
+			Payload:   string(payload),
+		})
+
+		if strings.TrimSpace(entry.Op) != store.SyncOpUpsert {
+			continue
+		}
+		switch entity {
+		case store.SyncEntitySession:
+			var session store.Session
+			if err := json.Unmarshal(payload, &session); err != nil {
+				return nil, chunkSummary{}, fmt.Errorf("cloudstore: materialize mutation batch session %q: %w", entry.EntityKey, err)
+			}
+			if strings.TrimSpace(session.ID) == "" {
+				session.ID = strings.TrimSpace(entry.EntityKey)
+			}
+			chunk.Sessions = append(chunk.Sessions, session)
+		case store.SyncEntityObservation:
+			var observation store.Observation
+			if err := json.Unmarshal(payload, &observation); err != nil {
+				return nil, chunkSummary{}, fmt.Errorf("cloudstore: materialize mutation batch observation %q: %w", entry.EntityKey, err)
+			}
+			if strings.TrimSpace(observation.SyncID) == "" {
+				observation.SyncID = strings.TrimSpace(entry.EntityKey)
+			}
+			chunk.Observations = append(chunk.Observations, observation)
+		case store.SyncEntityPrompt:
+			var prompt store.Prompt
+			if err := json.Unmarshal(payload, &prompt); err != nil {
+				return nil, chunkSummary{}, fmt.Errorf("cloudstore: materialize mutation batch prompt %q: %w", entry.EntityKey, err)
+			}
+			if strings.TrimSpace(prompt.SyncID) == "" {
+				prompt.SyncID = strings.TrimSpace(entry.EntityKey)
+			}
+			chunk.Prompts = append(chunk.Prompts, prompt)
+		}
+	}
+	if len(chunk.Mutations) == 0 {
+		return nil, chunkSummary{}, nil
+	}
+
+	payload, err := json.Marshal(chunk)
+	if err != nil {
+		return nil, chunkSummary{}, fmt.Errorf("cloudstore: marshal materialized mutation batch chunk: %w", err)
+	}
+	payload, err = chunkcodec.CanonicalizeForProject(payload, project)
+	if err != nil {
+		return nil, chunkSummary{}, fmt.Errorf("cloudstore: canonicalize materialized mutation batch chunk: %w", err)
+	}
+	return payload, chunkSummary{sessions: len(chunk.Sessions), observations: len(chunk.Observations), prompts: len(chunk.Prompts)}, nil
+}
+
+func isChunkMaterializableMutationEntity(entity string) bool {
+	switch strings.TrimSpace(entity) {
+	case store.SyncEntitySession, store.SyncEntityObservation, store.SyncEntityPrompt:
+		return true
+	default:
+		return false
+	}
+}
+
+func mutationEntrySignature(entry MutationEntry) (string, error) {
+	project := strings.TrimSpace(entry.Project)
+	if project == "" {
+		return "", fmt.Errorf("project is required")
+	}
+	payload := entry.Payload
+	if len(payload) == 0 {
+		payload = json.RawMessage("{}")
+	}
+	doc := engramsync.ChunkData{Mutations: []store.SyncMutation{{
+		Project:   project,
+		Entity:    strings.TrimSpace(entry.Entity),
+		EntityKey: strings.TrimSpace(entry.EntityKey),
+		Op:        strings.TrimSpace(entry.Op),
+		Payload:   string(payload),
+	}}}
+	encoded, err := json.Marshal(doc)
+	if err != nil {
+		return "", err
+	}
+	canonical, err := chunkcodec.CanonicalizeForProject(encoded, project)
+	if err != nil {
+		return "", err
+	}
+	chunk, err := parseChunkData(canonical)
+	if err != nil {
+		return "", err
+	}
+	if len(chunk.Mutations) != 1 {
+		return "", fmt.Errorf("expected one canonical mutation, got %d", len(chunk.Mutations))
+	}
+	return syncMutationSignature(chunk.Mutations[0])
+}
+
+func syncMutationSignature(mutation store.SyncMutation) (string, error) {
+	normalized, err := canonicalMutationPayload([]byte(strings.TrimSpace(mutation.Payload)))
+	if err != nil {
+		return "", err
+	}
+	return strings.Join([]string{
+		strings.TrimSpace(mutation.Project),
+		strings.TrimSpace(mutation.Entity),
+		strings.TrimSpace(mutation.EntityKey),
+		strings.TrimSpace(mutation.Op),
+		normalized,
+	}, "\x00"), nil
+}
+
+func canonicalMutationPayload(payload []byte) (string, error) {
+	payload = normalizeJSON(payload)
+	if !json.Valid(payload) {
+		return "", fmt.Errorf("payload is not valid JSON")
+	}
+	return string(payload), nil
 }
 
 // ListMutationsSince returns mutations with seq > sinceSeq, filtered to allowedProjects.

@@ -41,10 +41,12 @@ func printConflictsUsage() {
 	fmt.Fprintln(os.Stderr, "usage: engram conflicts <subcommand> [options]")
 	fmt.Fprintln(os.Stderr, "subcommands: list, show, stats, scan, deferred")
 	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, "  list       --project P  --status S  --since RFC3339  --limit N")
+	fmt.Fprintln(os.Stderr, "  list       [--project P]  [--status S]  [--since RFC3339]  [--limit N]")
 	fmt.Fprintln(os.Stderr, "  show       <relation_id>")
-	fmt.Fprintln(os.Stderr, "  stats      --project P")
-	fmt.Fprintln(os.Stderr, "  scan       --project P  [--dry-run]  [--apply]  [--max-insert N]")
+	fmt.Fprintln(os.Stderr, "  stats      [--project P]")
+	fmt.Fprintln(os.Stderr, "  scan       [--project P]  [--since RFC3339]  [--dry-run]  [--apply]  [--max-insert N]")
+	fmt.Fprintln(os.Stderr, "             [--semantic]  [--concurrency N]  [--timeout-per-call SECONDS]")
+	fmt.Fprintln(os.Stderr, "             [--max-semantic N]  [--yes]")
 	fmt.Fprintln(os.Stderr, "  deferred   [--status S]  [--limit N]  [--inspect SYNC_ID]  [--replay]")
 }
 
@@ -465,7 +467,11 @@ func cmdConflictsScan(cfg store.Config) {
 	}
 
 	if result.Capped {
-		fmt.Printf("WARNING: max-insert cap of %d reached — stopped early. Re-run to continue.\n", maxInsert)
+		if semantic {
+			fmt.Printf("WARNING: max-semantic cap of %d reached — stopped early. Re-run to continue.\n", maxSemantic)
+		} else {
+			fmt.Printf("WARNING: max-insert cap of %d reached — stopped early. Re-run to continue.\n", maxInsert)
+		}
 	}
 }
 

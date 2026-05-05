@@ -84,6 +84,10 @@ var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
 		return nil, err
 	}
 	allowedProjects := normalizeAllowedProjects(cfg.AllowedProjects)
+	if err := backfillAllowedProjectMutationChunks(context.Background(), cs, allowedProjects); err != nil {
+		_ = cs.Close()
+		return nil, err
+	}
 	projectAuth := auth.NewProjectScopeAuthorizer(allowedProjects)
 	token := strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_TOKEN"))
 	cs.SetDashboardAllowedProjects(allowedProjects)
@@ -114,6 +118,22 @@ var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
 	}, nil
 }
 
+func backfillAllowedProjectMutationChunks(ctx context.Context, cs *cloudstore.CloudStore, projects []string) error {
+	for _, project := range projects {
+		report, err := cs.BackfillMutationChunks(ctx, project, true)
+		if err != nil {
+			return fmt.Errorf("cloud repair materialize-mutations for project %q: %w", project, err)
+		}
+		if report.CandidateMutations > 0 || report.ChunksInserted > 0 {
+			fmt.Fprintf(os.Stderr,
+				"engram cloud repair materialize-mutations: project=%s candidates=%d already_materialized=%d chunks_planned=%d chunks_inserted=%d\n",
+				report.Project, report.CandidateMutations, report.AlreadyMaterialized, report.ChunksPlanned, report.ChunksInserted,
+			)
+		}
+	}
+	return nil
+}
+
 var runUpgradeBootstrap = func(s *store.Store, project string, cc *cloudConfig) (*engramsync.UpgradeBootstrapResult, error) {
 	transport, err := remote.NewRemoteTransport(cc.ServerURL, cc.Token, project)
 	if err != nil {
@@ -130,12 +150,12 @@ type cloudConfig struct {
 func cmdCloud(cfg store.Config) {
 	if len(os.Args) < 3 {
 		fmt.Fprintln(os.Stderr, "usage: engram cloud <subcommand> [options]")
-		fmt.Fprintln(os.Stderr, "supported subcommands: status, enroll, config, serve, upgrade")
+		fmt.Fprintln(os.Stderr, "supported subcommands: status, enroll, config, serve, upgrade, repair")
 		exitFunc(1)
 	}
 	if os.Args[2] == "--help" || os.Args[2] == "-h" || os.Args[2] == "help" {
 		fmt.Println("usage: engram cloud <subcommand> [options]")
-		fmt.Println("supported subcommands: status, enroll, config, serve, upgrade")
+		fmt.Println("supported subcommands: status, enroll, config, serve, upgrade, repair")
 		return
 	}
 
@@ -150,11 +170,61 @@ func cmdCloud(cfg store.Config) {
 		cmdCloudServe()
 	case "upgrade":
 		cmdCloudUpgrade(cfg)
+	case "repair":
+		cmdCloudRepair()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown cloud command: %s\n", os.Args[2])
-		fmt.Fprintln(os.Stderr, "supported subcommands: status, enroll, config, serve, upgrade")
+		fmt.Fprintln(os.Stderr, "supported subcommands: status, enroll, config, serve, upgrade, repair")
 		exitFunc(1)
 	}
+}
+
+func cmdCloudRepair() {
+	if len(os.Args) < 4 || os.Args[3] == "--help" || os.Args[3] == "-h" || os.Args[3] == "help" {
+		fmt.Println("usage: engram cloud repair materialize-mutations --project <name> (--dry-run|--apply)")
+		fmt.Println("repairs existing cloud_mutations into compatible cloud_chunks without deleting remote data")
+		return
+	}
+	command := strings.TrimSpace(strings.ToLower(os.Args[3]))
+	if command != "materialize-mutations" {
+		fmt.Fprintf(os.Stderr, "unknown cloud repair command: %s\n", command)
+		fmt.Fprintln(os.Stderr, "supported cloud repair commands: materialize-mutations")
+		exitFunc(1)
+		return
+	}
+	project := parseCloudUpgradeProjectArg(os.Args[4:])
+	if project == "" {
+		fmt.Fprintln(os.Stderr, "usage: engram cloud repair materialize-mutations --project <name> (--dry-run|--apply)")
+		fmt.Fprintln(os.Stderr, "error: --project is required")
+		exitFunc(1)
+		return
+	}
+	dryRun := hasCloudUpgradeFlag(os.Args[4:], "--dry-run")
+	apply := hasCloudUpgradeFlag(os.Args[4:], "--apply")
+	if dryRun == apply {
+		fmt.Fprintln(os.Stderr, "usage: engram cloud repair materialize-mutations --project <name> (--dry-run|--apply)")
+		fmt.Fprintln(os.Stderr, "error: exactly one of --dry-run or --apply is required")
+		exitFunc(1)
+		return
+	}
+
+	cs, err := cloudstore.New(cloud.ConfigFromEnv())
+	if err != nil {
+		fatal(err)
+		return
+	}
+	defer cs.Close()
+	report, err := cs.BackfillMutationChunks(context.Background(), project, apply)
+	if err != nil {
+		fatal(err)
+		return
+	}
+	encoded, err := jsonMarshalIndent(report, "", "  ")
+	if err != nil {
+		fatal(err)
+		return
+	}
+	fmt.Println(string(encoded))
 }
 
 func cmdCloudUpgrade(cfg store.Config) {
