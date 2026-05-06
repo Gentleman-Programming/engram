@@ -83,6 +83,9 @@ Required runtime env vars:
 - `ENGRAM_CLOUD_HOST=0.0.0.0`
 - `ENGRAM_PORT=18080`
 
+Optional runtime env vars:
+- `ENGRAM_CLOUD_MAX_PUSH_BYTES` — maximum cloud push payload size in bytes. Default: `8388608` (8 MiB). Increase this if your initial project bootstrap or sync chunks exceed the default limit (e.g. set to `33554432` for 32 MiB). Must be between 1 MiB and 1 GiB; values outside that range fall back to the default with a warning logged.
+
 Dokploy guidance:
 1. Create a managed Postgres service.
 2. Create an app from image `ghcr.io/gentleman-programming/engram:latest`.

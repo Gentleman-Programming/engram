@@ -20,6 +20,8 @@ Breaking changes are always marked with a `type:breaking-change` label and docum
 
 <!-- Changes that are merged but not yet released are tracked here until the next tag. -->
 
+- feat(cloud): make push payload limit configurable via `ENGRAM_CLOUD_MAX_PUSH_BYTES` env var (#316)
+
 ### Cloud dashboard visual parity (`cloud-dashboard-visual-parity`)
 
 New and updated routes registered in `internal/cloud/dashboard/dashboard.go`:

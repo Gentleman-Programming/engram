@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -776,7 +777,7 @@ func TestHandlerProjectScopeForbiddenReturnsPolicyClassPayload(t *testing.T) {
 
 func TestHandlerPushRejectsOversizedPayload(t *testing.T) {
 	srv := New(&fakeStore{}, fakeAuth{}, 0)
-	tooLarge := strings.Repeat("x", int(maxPushBodyBytes)+1)
+	tooLarge := strings.Repeat("x", int(defaultMaxPushBodyBytes)+1)
 	body := bytes.NewBufferString(`{"project":"proj-a","created_by":"tester","data":"` + tooLarge + `"}`)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sync/push", body))
@@ -1519,5 +1520,63 @@ func TestInsecureModeLoginRedirects(t *testing.T) {
 	}
 	if loc := rec.Header().Get("Location"); loc != "/dashboard/" {
 		t.Fatalf("expected redirect to /dashboard/, got %q", loc)
+	}
+}
+
+func TestResolveMaxPushBodyBytes_Default(t *testing.T) {
+	t.Setenv("ENGRAM_CLOUD_MAX_PUSH_BYTES", "")
+	got := resolveMaxPushBodyBytes()
+	if got != defaultMaxPushBodyBytes {
+		t.Fatalf("expected default %d, got %d", defaultMaxPushBodyBytes, got)
+	}
+}
+
+func TestResolveMaxPushBodyBytes_ValidOverride(t *testing.T) {
+	want := int64(32 * 1024 * 1024) // 32 MiB
+	t.Setenv("ENGRAM_CLOUD_MAX_PUSH_BYTES", strconv.FormatInt(want, 10))
+	got := resolveMaxPushBodyBytes()
+	if got != want {
+		t.Fatalf("expected %d, got %d", want, got)
+	}
+}
+
+func TestResolveMaxPushBodyBytes_InvalidNonNumeric(t *testing.T) {
+	t.Setenv("ENGRAM_CLOUD_MAX_PUSH_BYTES", "not-a-number")
+	got := resolveMaxPushBodyBytes()
+	if got != defaultMaxPushBodyBytes {
+		t.Fatalf("expected default %d on invalid value, got %d", defaultMaxPushBodyBytes, got)
+	}
+}
+
+func TestResolveMaxPushBodyBytes_TooSmall(t *testing.T) {
+	t.Setenv("ENGRAM_CLOUD_MAX_PUSH_BYTES", "0")
+	got := resolveMaxPushBodyBytes()
+	if got != defaultMaxPushBodyBytes {
+		t.Fatalf("expected default %d when below min, got %d", defaultMaxPushBodyBytes, got)
+	}
+}
+
+func TestResolveMaxPushBodyBytes_TooLarge(t *testing.T) {
+	t.Setenv("ENGRAM_CLOUD_MAX_PUSH_BYTES", "9999999999999")
+	got := resolveMaxPushBodyBytes()
+	if got != defaultMaxPushBodyBytes {
+		t.Fatalf("expected default %d when above max, got %d", defaultMaxPushBodyBytes, got)
+	}
+}
+
+func TestHandlerPushRespectsEnvConfiguredLimit(t *testing.T) {
+	const customLimit = 2 * 1024 * 1024 // 2 MiB
+	t.Setenv("ENGRAM_CLOUD_MAX_PUSH_BYTES", strconv.FormatInt(customLimit, 10))
+	srv := New(&fakeStore{}, fakeAuth{}, 0)
+	if srv.maxPushBodyBytes != customLimit {
+		t.Fatalf("expected server.maxPushBodyBytes=%d, got %d", customLimit, srv.maxPushBodyBytes)
+	}
+	// A body just over the custom limit must be rejected with 413.
+	tooLarge := strings.Repeat("x", customLimit+1)
+	body := bytes.NewBufferString(`{"project":"proj-a","created_by":"tester","data":"` + tooLarge + `"}`)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sync/push", body))
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413 with custom limit, got %d body=%q", rec.Code, rec.Body.String())
 	}
 }

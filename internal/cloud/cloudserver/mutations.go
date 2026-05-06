@@ -61,7 +61,7 @@ const defaultPullLimit = 100
 // BC2: project authorization is enforced for every distinct project in the batch.
 // BW9: 409 pause response uses writeActionableError for structured error envelope.
 func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxPushBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxPushBodyBytes)
 
 	var req mutationPushEnvelope
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

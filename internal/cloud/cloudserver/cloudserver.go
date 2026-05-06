@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,20 +48,45 @@ type staticStatusProvider struct{ status dashboard.SyncStatus }
 func (s staticStatusProvider) Status() dashboard.SyncStatus { return s.status }
 
 type CloudServer struct {
-	store          ChunkStore
-	auth           Authenticator
-	projectAuth    ProjectAuthorizer
-	dashboardAdmin string
-	port           int
-	host           string
-	mux            *http.ServeMux
-	syncStatus     dashboard.SyncStatusProvider
-	listenAndServe func(addr string, handler http.Handler) error
+	store            ChunkStore
+	auth             Authenticator
+	projectAuth      ProjectAuthorizer
+	dashboardAdmin   string
+	port             int
+	host             string
+	mux              *http.ServeMux
+	syncStatus       dashboard.SyncStatusProvider
+	listenAndServe   func(addr string, handler http.Handler) error
+	maxPushBodyBytes int64
 }
 
 const defaultHost = "127.0.0.1"
-const maxPushBodyBytes int64 = 8 * 1024 * 1024
+const defaultMaxPushBodyBytes int64 = 8 * 1024 * 1024
+const minPushBodyBytes int64 = 1 * 1024 * 1024   // 1 MiB
+const maxPushBodyBytesLimit int64 = 1024 * 1024 * 1024 // 1 GiB
 const maxDashboardLoginBodyBytes int64 = 16 * 1024
+
+// resolveMaxPushBodyBytes reads ENGRAM_CLOUD_MAX_PUSH_BYTES from the environment
+// and returns the configured limit. If the variable is unset, empty, or invalid
+// (non-numeric or out of the [1 MiB, 1 GiB] range), it logs a warning and
+// returns defaultMaxPushBodyBytes (8 MiB) so existing deployments are unaffected.
+func resolveMaxPushBodyBytes() int64 {
+	raw := strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_MAX_PUSH_BYTES"))
+	if raw == "" {
+		return defaultMaxPushBodyBytes
+	}
+	v, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		log.Printf("[engram-cloud] ENGRAM_CLOUD_MAX_PUSH_BYTES=%q is not a valid integer; using default %d bytes", raw, defaultMaxPushBodyBytes)
+		return defaultMaxPushBodyBytes
+	}
+	if v < minPushBodyBytes || v > maxPushBodyBytesLimit {
+		log.Printf("[engram-cloud] ENGRAM_CLOUD_MAX_PUSH_BYTES=%d is out of range [%d, %d]; using default %d bytes", v, minPushBodyBytes, maxPushBodyBytesLimit, defaultMaxPushBodyBytes)
+		return defaultMaxPushBodyBytes
+	}
+	return v
+}
+
 const dashboardSessionCookieName = "engram_dashboard_token"
 
 var ErrDashboardSessionCodecRequired = errors.New("dashboard session codec is required for dashboard auth")
@@ -99,7 +126,8 @@ func New(store ChunkStore, authSvc Authenticator, port int, opts ...Option) *Clo
 			ReasonCode:    constants.ReasonTransportFailed,
 			ReasonMessage: "sync status provider is unavailable",
 		}},
-		listenAndServe: http.ListenAndServe,
+		listenAndServe:   http.ListenAndServe,
+		maxPushBodyBytes: resolveMaxPushBodyBytes(),
 	}
 	if projectAuthorizer, ok := authSvc.(ProjectAuthorizer); ok {
 		s.projectAuth = projectAuthorizer
@@ -346,7 +374,7 @@ func (s *CloudServer) handlePullChunk(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *CloudServer) handlePushChunk(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxPushBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxPushBodyBytes)
 	var req struct {
 		ChunkID         string          `json:"chunk_id"`
 		CreatedBy       string          `json:"created_by"`
@@ -357,7 +385,7 @@ func (s *CloudServer) handlePushChunk(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
-			writeActionableError(w, http.StatusRequestEntityTooLarge, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodePayloadTooLarge, fmt.Sprintf("push payload too large (max %d bytes)", maxPushBodyBytes))
+			writeActionableError(w, http.StatusRequestEntityTooLarge, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodePayloadTooLarge, fmt.Sprintf("push payload too large (max %d bytes)", s.maxPushBodyBytes))
 			return
 		}
 		writeActionableError(w, http.StatusBadRequest, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodePayloadInvalid, fmt.Sprintf("invalid push payload: %v", err))
