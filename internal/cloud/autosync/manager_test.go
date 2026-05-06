@@ -29,6 +29,9 @@ type fakeLocalStore struct {
 	acquireGranted    bool
 	ackedSeqs         []int64
 	nonEnrolledCounts []store.PendingSyncMutationProjectCount
+	// Phase F: seq-mapping tracking for tests.
+	seqMappings      [][3]int64 // [targetKey, localSeq, cloudSeq]
+	cursorsAdvanced   int
 }
 
 func newFakeLocalStore() *fakeLocalStore {
@@ -134,6 +137,30 @@ func (s *fakeLocalStore) ReplayDeferred() (store.ReplayDeferredResult, error) {
 
 func (s *fakeLocalStore) CountDeferredAndDead() (int, int, error) { return 0, 0, nil }
 
+// Phase F: seq-mapping stubs
+func (s *fakeLocalStore) StoreSyncSeqMapping(targetKey string, localSeq, cloudSeq int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.seqMappings = append(s.seqMappings, [3]int64{0, localSeq, cloudSeq})
+	_ = targetKey
+	return nil
+}
+func (s *fakeLocalStore) AdvanceUnifiedCursor(_ string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cursorsAdvanced++
+	return nil
+}
+
+func (s *fakeLocalStore) GetUnifiedCursor(_ string) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.syncState != nil {
+		return s.syncState.UnifiedCursor, nil
+	}
+	return 0, nil
+}
+
 // ─── Fake Transport ───────────────────────────────────────────────────────────
 
 type fakeCloudTransport struct {
@@ -145,6 +172,7 @@ type fakeCloudTransport struct {
 	pushResult *PushMutationsResult
 	pullResult *PullMutationsResponse
 	pushed     [][]MutationEntry
+	lastPullSince int64 // tracks the sinceSeq passed to PullMutations for verification
 }
 
 type fakeRepairableCloudError struct{ msg string }
@@ -172,10 +200,11 @@ func (t *fakeCloudTransport) PushMutations(mutations []MutationEntry) (*PushMuta
 	return t.pushResult, nil
 }
 
-func (t *fakeCloudTransport) PullMutations(_ int64, _ int) (*PullMutationsResponse, error) {
+func (t *fakeCloudTransport) PullMutations(sinceSeq int64, _ int) (*PullMutationsResponse, error) {
 	atomic.AddInt32(&t.pullCalls, 1)
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.lastPullSince = sinceSeq
 	if t.pullErr != nil {
 		return nil, t.pullErr
 	}
@@ -250,6 +279,189 @@ func TestManagerPushDoesNotAckWhenTransportFails(t *testing.T) {
 	ls.mu.Unlock()
 	if len(acked) != 0 {
 		t.Fatalf("expected no ack after failed transport push, got %v", acked)
+	}
+}
+
+// ─── Phase F: sync_seq_mapping + unified_cursor (REQ-SeqMap-001 → REQ-SeqMap-004) ──
+
+func TestManagerPush_CapturesCloudSeqsAndStoresMapping(t *testing.T) {
+	ls := newFakeLocalStore()
+	ls.mutations = []store.SyncMutation{
+		{Seq: 1, Entity: "obs", EntityKey: "k1", Op: "upsert", Project: "proj-a", Payload: `{"id":"1"}`},
+		{Seq: 2, Entity: "obs", EntityKey: "k2", Op: "upsert", Project: "proj-a", Payload: `{"id":"2"}`},
+		{Seq: 3, Entity: "obs", EntityKey: "k3", Op: "upsert", Project: "proj-a", Payload: `{"id":"3"}`},
+	}
+	tr := newFakeTransport()
+	// Cloud assigns BIGSERIAL seqs 101, 102, 103 (different from local seqs 1, 2, 3).
+	tr.pushResult = &PushMutationsResult{AcceptedSeqs: []int64{101, 102, 103}}
+	mgr := New(ls, tr, DefaultConfig())
+
+	if err := mgr.push(context.Background()); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+
+	// Verify StoreSyncSeqMapping was called for each entry.
+	ls.mu.Lock()
+	mappings := make([][3]int64, len(ls.seqMappings))
+	copy(mappings, ls.seqMappings)
+	ls.mu.Unlock()
+
+	// Only verify localSeq and cloudSeq (targetKey is always "cloud" from DefaultConfig).
+	wantLocalCloud := [][2]int64{{1, 101}, {2, 102}, {3, 103}}
+	if len(mappings) != len(wantLocalCloud) {
+		t.Fatalf("expected %d mappings, got %d", len(wantLocalCloud), len(mappings))
+	}
+	for i, w := range wantLocalCloud {
+		if mappings[i][1] != w[0] || mappings[i][2] != w[1] {
+			t.Fatalf("mapping[%d]: got (local=%d, cloud=%d), want (local=%d, cloud=%d)",
+				i, mappings[i][1], mappings[i][2], w[0], w[1])
+		}
+	}
+}
+
+func TestManagerPush_PartialBatchStoresOnlySuccessfulMappings(t *testing.T) {
+	ls := newFakeLocalStore()
+	ls.mutations = []store.SyncMutation{
+		{Seq: 1, Entity: "obs", EntityKey: "k1", Op: "upsert", Project: "proj-a", Payload: `{"id":"1"}`},
+		{Seq: 2, Entity: "obs", EntityKey: "k2", Op: "upsert", Project: "proj-a", Payload: `{"id":"2"}`},
+	}
+	tr := newFakeTransport()
+	// Only first entry succeeded; second entry failed (cloud seq = 0).
+	tr.pushResult = &PushMutationsResult{AcceptedSeqs: []int64{101, 0}}
+	mgr := New(ls, tr, DefaultConfig())
+
+	if err := mgr.push(context.Background()); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+
+	ls.mu.Lock()
+	mappings := append([][3]int64(nil), ls.seqMappings...)
+	ls.mu.Unlock()
+
+	// Only 1 mapping should be stored (for seq=1 → cloud 101).
+	if len(mappings) != 1 {
+		t.Fatalf("expected 1 mapping (successful entry only), got %d", len(mappings))
+	}
+	if mappings[0][1] != 1 || mappings[0][2] != 101 {
+		t.Fatalf("expected mapping (1, 101), got (%d, %d)", mappings[0][1], mappings[0][2])
+	}
+}
+
+func TestManagerPush_TransportFailureNoMappingStored(t *testing.T) {
+	ls := newFakeLocalStore()
+	ls.mutations = []store.SyncMutation{
+		{Seq: 1, Entity: "obs", EntityKey: "k1", Op: "upsert", Project: "proj-a", Payload: `{"id":"1"}`},
+	}
+	tr := newFakeTransport()
+	tr.pushErr = errors.New("transport down")
+	tr.pushResult = &PushMutationsResult{AcceptedSeqs: []int64{}} // empty on error
+	mgr := New(ls, tr, DefaultConfig())
+
+	err := mgr.push(context.Background())
+	if err == nil {
+		t.Fatal("expected push to fail")
+	}
+
+	ls.mu.Lock()
+	mappings := append([][3]int64(nil), ls.seqMappings...)
+	ls.mu.Unlock()
+
+	// No mappings should be stored on transport failure.
+	if len(mappings) != 0 {
+		t.Fatalf("expected 0 mappings on transport failure, got %d", len(mappings))
+	}
+}
+
+func TestManagerPush_UnifiedCursorAdvancesAfterPush(t *testing.T) {
+	ls := newFakeLocalStore()
+	ls.mutations = []store.SyncMutation{
+		{Seq: 1, Entity: "obs", EntityKey: "k1", Op: "upsert", Project: "proj-a", Payload: `{"id":"1"}`},
+		{Seq: 2, Entity: "obs", EntityKey: "k2", Op: "upsert", Project: "proj-a", Payload: `{"id":"2"}`},
+	}
+	tr := newFakeTransport()
+	tr.pushResult = &PushMutationsResult{AcceptedSeqs: []int64{101, 102}}
+	mgr := New(ls, tr, DefaultConfig())
+
+	if err := mgr.push(context.Background()); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+
+	ls.mu.Lock()
+	cursorsAdvanced := ls.cursorsAdvanced
+	ls.mu.Unlock()
+
+	if cursorsAdvanced != 1 {
+		t.Fatalf("expected AdvanceUnifiedCursor called once after push cycle, got %d", cursorsAdvanced)
+	}
+}
+
+func TestManagerPush_EmptyPushNoAdvanceCursor(t *testing.T) {
+	ls := newFakeLocalStore()
+	// No pending mutations.
+	tr := newFakeTransport()
+	tr.pushResult = &PushMutationsResult{AcceptedSeqs: []int64{}}
+	mgr := New(ls, tr, DefaultConfig())
+
+	if err := mgr.push(context.Background()); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+
+	ls.mu.Lock()
+	cursorsAdvanced := ls.cursorsAdvanced
+	ls.mu.Unlock()
+
+	// No advance call when there are no batches.
+	if cursorsAdvanced != 0 {
+		t.Fatalf("expected 0 AdvanceUnifiedCursor calls for empty push, got %d", cursorsAdvanced)
+	}
+}
+
+func TestManagerPush_MultipleBatchesAdvanceCursorOnce(t *testing.T) {
+	ls := newFakeLocalStore()
+	ls.mutations = []store.SyncMutation{
+		{Seq: 1, Entity: "obs", EntityKey: "k1", Op: "upsert", Project: "proj-a", Payload: `{"id":"1"}`},
+		{Seq: 2, Entity: "obs", EntityKey: "k2", Op: "upsert", Project: "proj-b", Payload: `{"id":"2"}`},
+	}
+	tr := newFakeTransport()
+	// Two batches: first returns [101], second returns [201].
+	tr.pushResult = &PushMutationsResult{AcceptedSeqs: []int64{101, 201}}
+	mgr := New(ls, tr, DefaultConfig())
+
+	if err := mgr.push(context.Background()); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+
+	ls.mu.Lock()
+	cursorsAdvanced := ls.cursorsAdvanced
+	ls.mu.Unlock()
+
+	// Should advance once after all batches complete.
+	if cursorsAdvanced != 1 {
+		t.Fatalf("expected 1 AdvanceUnifiedCursor call after multi-batch push, got %d", cursorsAdvanced)
+	}
+}
+
+func TestManagerPush_DoesNotStoreMappingWhenAcceptedSeqZero(t *testing.T) {
+	ls := newFakeLocalStore()
+	ls.mutations = []store.SyncMutation{
+		{Seq: 1, Entity: "obs", EntityKey: "k1", Op: "upsert", Project: "proj-a", Payload: `{"id":"1"}`},
+	}
+	tr := newFakeTransport()
+	// Cloud returns 0 for the entry (failure).
+	tr.pushResult = &PushMutationsResult{AcceptedSeqs: []int64{0}}
+	mgr := New(ls, tr, DefaultConfig())
+
+	if err := mgr.push(context.Background()); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+
+	ls.mu.Lock()
+	mappings := append([][3]int64(nil), ls.seqMappings...)
+	ls.mu.Unlock()
+
+	// No mapping stored for failed entry.
+	if len(mappings) != 0 {
+		t.Fatalf("expected 0 mappings for accepted_seq=0, got %d", len(mappings))
 	}
 }
 
@@ -1256,6 +1468,65 @@ func TestPull_LegacyEntityNonFKError_StillHalts(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatalf("expected PhasePullFailed for legacy non-FK error, got %q", mgr.Status().Phase)
+}
+
+// Regression: Pull must use UnifiedCursor, not LastPulledSeq.
+// After push advances unified_cursor, the next pull should start from UnifiedCursor
+// to avoid re-fetching mutations that were just pushed.
+func TestPull_UsesUnifiedCursor_NotLastPulledSeq(t *testing.T) {
+	ls := newFakeLocalStore()
+	tr := newFakeTransport()
+
+	// Simulate: after a push cycle, UnifiedCursor was advanced to 50.
+	// LastPulledSeq is still 0 (hasn't been updated via pull yet).
+	ls.syncState.UnifiedCursor = 50
+	ls.syncState.LastPulledSeq = 0
+
+	// Return a mutation with seq=51 to verify pull starts from 50.
+	tr.mu.Lock()
+	tr.pullResult = &PullMutationsResponse{
+		Mutations: []PulledMutation{{
+			Seq:    51,
+			Entity: "session",
+			Op:     "upsert",
+			Payload: []byte(`{"sync_id":"sess-1","title":"test"}`),
+		}},
+		HasMore: false,
+	}
+	tr.mu.Unlock()
+
+	cfg := DefaultConfig()
+	cfg.DebounceDuration = 10 * time.Millisecond
+	cfg.PollInterval = 10 * time.Millisecond
+
+	mgr := New(ls, tr, cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	go mgr.Run(ctx)
+
+	deadline := time.Now().Add(400 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		st := mgr.Status()
+		if st.Phase == PhaseHealthy && atomic.LoadInt32(&tr.pullCalls) > 0 {
+			// Verify pull was called with UnifiedCursor (50), not LastPulledSeq (0).
+			tr.mu.Lock()
+			gotSince := tr.lastPullSince
+			tr.mu.Unlock()
+			if gotSince != 50 {
+				t.Fatalf("pull called with sinceSeq=%d, want 50 (UnifiedCursor); LastPulledSeq=0 was ignored", gotSince)
+			}
+			// Verify mutation was applied.
+			ls.mu.Lock()
+			applied := len(ls.appliedMuts)
+			ls.mu.Unlock()
+			if applied != 1 {
+				t.Fatalf("expected 1 applied mutation, got %d", applied)
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("pull never completed; phase=%q pullCalls=%d", mgr.Status().Phase, atomic.LoadInt32(&tr.pullCalls))
 }
 
 // ─── DeferredRow type for fake store ─────────────────────────────────────────

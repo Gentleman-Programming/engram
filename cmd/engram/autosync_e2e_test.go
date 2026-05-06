@@ -342,6 +342,13 @@ func (s *autosyncFakeStore) MarkSyncBlocked(_, _, _ string) error { return nil }
 
 func (s *autosyncFakeStore) MarkSyncHealthy(_ string) error { return nil }
 
+// Phase F: seq-mapping stubs — no-ops for the E2E fake store.
+func (s *autosyncFakeStore) StoreSyncSeqMapping(_ string, _, _ int64) error { return nil }
+
+func (s *autosyncFakeStore) AdvanceUnifiedCursor(_ string) error { return nil }
+
+func (s *autosyncFakeStore) GetUnifiedCursor(_ string) (int64, error) { return 0, nil }
+
 // Phase E: deferred replay stubs — no-ops for the E2E fake store.
 func (s *autosyncFakeStore) ReplayDeferred() (store.ReplayDeferredResult, error) {
 	return store.ReplayDeferredResult{}, nil

@@ -91,6 +91,10 @@ type LocalStore interface {
 	// Phase E: deferred relation retry.
 	ReplayDeferred() (store.ReplayDeferredResult, error)
 	CountDeferredAndDead() (deferred, dead int, err error)
+	// Phase F: seq-mapping — local/cloud seq correlation for unified cursor.
+	StoreSyncSeqMapping(targetKey string, localSeq, cloudSeq int64) error
+	AdvanceUnifiedCursor(targetKey string) error
+	GetUnifiedCursor(targetKey string) (int64, error)
 }
 
 type nonEnrolledPendingError struct {
@@ -522,13 +526,30 @@ func (m *Manager) push(ctx context.Context) error {
 			seqs[i] = mut.Seq
 		}
 
-		_, err := m.transport.PushMutations(entries)
+		result, err := m.transport.PushMutations(entries)
 		if err != nil {
 			return fmt.Errorf("transport push project %q: %w", project, err)
+		}
+		// Store local→cloud seq mapping for every entry in the batch.
+		// This must be stored BEFORE AckSyncMutationSeqs so the correlation
+		// is persisted even if the process restarts mid-cycle.
+		for i, mut := range batch {
+			if result.AcceptedSeqs[i] > 0 {
+				if err := m.store.StoreSyncSeqMapping(m.cfg.TargetKey, mut.Seq, result.AcceptedSeqs[i]); err != nil {
+					return fmt.Errorf("store seq mapping local=%d cloud=%d: %w", mut.Seq, result.AcceptedSeqs[i], err)
+				}
+			}
 		}
 		if err := m.store.AckSyncMutationSeqs(m.cfg.TargetKey, seqs); err != nil {
 			return fmt.Errorf("ack project %q: %w", project, err)
 		}
+	}
+
+	// Advance unified_cursor to the highest cloud_seq in all batches pushed this cycle.
+	// This ensures the next pull cycle starts from the correct cloud seq, not re-fetching
+	// mutations that were just pushed.
+	if err := m.store.AdvanceUnifiedCursor(m.cfg.TargetKey); err != nil {
+		return fmt.Errorf("advance unified cursor: %w", err)
 	}
 
 	return nil
@@ -554,12 +575,10 @@ func (m *Manager) pull(ctx context.Context) error {
 			res.Retried, res.Succeeded, res.Failed, res.Dead)
 	}
 
-	state, err := m.store.GetSyncState(m.cfg.TargetKey)
+	sinceSeq, err := m.store.GetUnifiedCursor(m.cfg.TargetKey)
 	if err != nil {
-		return fmt.Errorf("get sync state: %w", err)
+		return fmt.Errorf("get unified cursor: %w", err)
 	}
-
-	sinceSeq := state.LastPulledSeq
 
 	for {
 		if ctx.Err() != nil {

@@ -241,6 +241,7 @@ type SyncState struct {
 	ReasonCode          *string `json:"reason_code,omitempty"`
 	ReasonMessage       *string `json:"reason_message,omitempty"`
 	LastError           *string `json:"last_error,omitempty"`
+	UnifiedCursor       int64   `json:"unified_cursor"`
 	UpdatedAt           string  `json:"updated_at"`
 }
 
@@ -1054,6 +1055,28 @@ func (s *Store) migrate() error {
 		CREATE INDEX IF NOT EXISTS idx_memrel_status_created
 			ON memory_relations(judgment_status, created_at DESC);
 	`); err != nil {
+		return err
+	}
+
+	// Phase 3c: sync_seq_mapping — correlates local seqs to cloud seqs from
+	// PushMutations result. Enables unified cursor in cloud seq space to prevent
+	// mutation duplication after restart.
+	if _, err := s.execHook(s.db, `
+		CREATE TABLE IF NOT EXISTS sync_seq_mapping (
+			local_seq   INTEGER NOT NULL,
+			cloud_seq   INTEGER NOT NULL,
+			target_key  TEXT    NOT NULL DEFAULT 'local',
+			synced_at   TEXT    NOT NULL DEFAULT (datetime('now')),
+			PRIMARY KEY (target_key, local_seq)
+		);
+		CREATE INDEX IF NOT EXISTS idx_sync_seq_mapping_cloud
+			ON sync_seq_mapping(target_key, cloud_seq);
+	`); err != nil {
+		return err
+	}
+
+	// Add unified_cursor column to sync_state (idempotent via addColumnIfNotExists).
+	if err := s.addColumnIfNotExists("sync_state", "unified_cursor", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 
@@ -3485,6 +3508,59 @@ func (s *Store) AckSyncMutationSeqs(targetKey string, seqs []int64) error {
 		}
 		return nil
 	})
+}
+
+// StoreSyncSeqMapping stores a local_seq → cloud_seq correlation for a pushed mutation.
+// Used by autosync to track which cloud seq corresponds to which local seq.
+//
+// Note: INSERT OR REPLACE uses PK (target_key, local_seq). If the same local_seq is
+// pushed twice (e.g., retry after failure), the second cloud_seq overwrites the first.
+// This is intentional: the latest cloud_seq is the authoritative one for that mutation,
+// and UnifiedCursor only advances forward — old entries are superseded anyway.
+func (s *Store) StoreSyncSeqMapping(targetKey string, localSeq, cloudSeq int64) error {
+	targetKey = normalizeSyncTargetKey(targetKey)
+	return s.withTx(func(tx *sql.Tx) error {
+		_, err := tx.Exec(`
+			INSERT OR REPLACE INTO sync_seq_mapping (target_key, local_seq, cloud_seq, synced_at)
+			VALUES (?, ?, ?, datetime('now'))`,
+			targetKey, localSeq, cloudSeq,
+		)
+		return err
+	})
+}
+
+// AdvanceUnifiedCursor advances sync_state.unified_cursor to the maximum cloud_seq
+// currently stored in sync_seq_mapping for the target.
+// Called after a successful push cycle to prevent pull from re-fetching just-pushed mutations.
+func (s *Store) AdvanceUnifiedCursor(targetKey string) error {
+	targetKey = normalizeSyncTargetKey(targetKey)
+	return s.withTx(func(tx *sql.Tx) error {
+		var maxCloudSeq int64
+		err := tx.QueryRow(`
+			SELECT COALESCE(MAX(cloud_seq), 0) FROM sync_seq_mapping WHERE target_key = ?`,
+			targetKey,
+		).Scan(&maxCloudSeq)
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(`
+			UPDATE sync_state SET unified_cursor = ?, updated_at = datetime('now')
+			WHERE target_key = ? AND unified_cursor < ?`,
+			maxCloudSeq, targetKey, maxCloudSeq,
+		)
+		return err
+	})
+}
+
+// GetUnifiedCursor returns the current unified_cursor value for a target.
+func (s *Store) GetUnifiedCursor(targetKey string) (int64, error) {
+	targetKey = normalizeSyncTargetKey(targetKey)
+	var cursor int64
+	err := s.db.QueryRow(`SELECT unified_cursor FROM sync_state WHERE target_key = ?`, targetKey).Scan(&cursor)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return cursor, err
 }
 
 func (s *Store) HasPendingSyncMutationsForProject(project string) (bool, error) {
