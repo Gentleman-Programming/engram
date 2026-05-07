@@ -212,6 +212,9 @@ func TestHandleSaveAutoCapturesCurrentPromptByDefault(t *testing.T) {
 
 func TestHandleSaveRecordsActivityForExplicitSessionID(t *testing.T) {
 	s := newMCPTestStore(t)
+	if err := s.CreateSession("custom-session-123", "engram", "/work/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
 	activity := NewSessionActivity(10 * time.Minute)
 	h := handleSave(s, MCPConfig{}, activity)
 
@@ -2240,6 +2243,9 @@ func TestHandleCapturePassiveCreatesProjectScopedSession(t *testing.T) {
 
 func TestExplicitSessionIDBypassesDefault(t *testing.T) {
 	s := newMCPTestStore(t)
+	if err := s.CreateSession("custom-session-123", "myproject", "/work/myproject"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
 	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	// Provide explicit session_id — should NOT use defaultSessionID
@@ -2602,9 +2608,24 @@ func TestHandleMergeProjectsIsDeferred(t *testing.T) {
 	}
 }
 
-// TestHandleSave_LLMProjectIgnored replaces the old override test — now LLM-supplied
-// project is always ignored; auto-detect is the only source (REQ-308).
-func TestHandleSave_LLMProjectIgnored(t *testing.T) {
+func TestAdminToolsSchema_OmitsProject(t *testing.T) {
+	s := newMCPTestStore(t)
+	srv := NewServer(s)
+
+	for _, toolName := range []string{"mem_delete", "mem_merge_projects"} {
+		t.Run(toolName, func(t *testing.T) {
+			st := srv.GetTool(toolName)
+			if st == nil {
+				t.Fatalf("tool %q not registered", toolName)
+			}
+			if _, hasProject := st.Tool.InputSchema.Properties["project"]; hasProject {
+				t.Fatalf("tool %q must not advertise project in schema", toolName)
+			}
+		})
+	}
+}
+
+func TestHandleSave_ExplicitProjectWinsOverAutoDetect(t *testing.T) {
 	// Set up a git repo so auto-detect returns a known project.
 	dir := t.TempDir()
 	initTestGitRepo(t, dir)
@@ -2616,28 +2637,41 @@ func TestHandleSave_LLMProjectIgnored(t *testing.T) {
 	t.Chdir(dir)
 
 	s := newMCPTestStore(t)
+	if err := s.CreateSession("explicit-existing-session", "llm-selected-project", "/work/llm-selected-project"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "explicit-existing-session",
+		Type:      "manual",
+		Title:     "existing backing memory",
+		Content:   "seed explicit project existence",
+		Project:   "llm-selected-project",
+	}); err != nil {
+		t.Fatalf("seed existing project: %v", err)
+	}
 	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"title":   "LLM project ignored test",
-		"content": "Should go to auto-detected project",
-		// LLM-supplied project — must be IGNORED per REQ-308
-		"project": "llm-wrong-project",
+		"title":   "explicit project override test",
+		"content": "Should go to explicit project",
+		"project": "llm-selected-project",
 	}}}
 	res, err := h(context.Background(), req)
 	if err != nil || res.IsError {
 		t.Fatalf("save: err=%v isError=%v text=%s", err, res.IsError, callResultText(t, res))
 	}
 
-	// Must NOT be in the LLM-supplied project.
-	obs, _ := s.RecentObservations("llm-wrong-project", "project", 5)
-	if len(obs) > 0 {
-		t.Fatal("observation must NOT be in LLM-supplied project")
+	body := callResultJSON(t, res)
+	if body["project"] != "llm-selected-project" || body["project_source"] != project.SourceExplicitOverride {
+		t.Fatalf("expected explicit project envelope, got %v", body)
 	}
-	// Must be in the auto-detected project.
-	obs2, err := s.RecentObservations("auto-detected-project", "project", 5)
+	obs, _ := s.RecentObservations("auto-detected-project", "project", 5)
+	if len(obs) > 0 {
+		t.Fatal("observation must not be in auto-detected project when explicit project is supplied")
+	}
+	obs2, err := s.RecentObservations("llm-selected-project", "project", 5)
 	if err != nil || len(obs2) == 0 {
-		t.Fatal("expected observation in auto-detected-project")
+		t.Fatal("expected observation in explicit project")
 	}
 }
 
@@ -2980,7 +3014,6 @@ func TestSessionStartWithExplicitDirectoryPreservesDirectory(t *testing.T) {
 	if sess.Directory != explicitDir {
 		t.Fatalf("expected directory=%q, got %q", explicitDir, sess.Directory)
 	}
-	assertSessionSyncMutationDirectory(t, s, "session-start-explicit", explicitDir)
 }
 
 func TestSessionStartWithExplicitDirectoryResolvesProjectFromDirectory(t *testing.T) {
@@ -3030,6 +3063,97 @@ func TestSessionStartWithExplicitDirectoryResolvesProjectFromDirectory(t *testin
 	}
 	if sess.Directory != explicitDir {
 		t.Fatalf("expected persisted directory=%q, got %q", explicitDir, sess.Directory)
+	}
+}
+
+func TestSessionStartWithExplicitDirectoryTrimsWhitespaceBeforePersisting(t *testing.T) {
+	s := newMCPTestStore(t)
+
+	workspace := t.TempDir()
+	repoDir := filepath.Join(workspace, "trimmed-repo")
+	if err := os.MkdirAll(filepath.Join(repoDir, "nested"), 0o755); err != nil {
+		t.Fatalf("create repo nested dir: %v", err)
+	}
+	initTestGitRepo(t, repoDir)
+	cmd := exec.Command("git", "-C", repoDir, "remote", "add", "origin",
+		"git@github.com:user/trimmed-session-project.git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add repo: %v\n%s", err, out)
+	}
+	t.Chdir(workspace)
+
+	trimmedDir := filepath.Join(repoDir, "nested")
+	rawDir := " \n\t" + trimmedDir + "\t "
+	start := handleSessionStart(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	res, err := start(context.Background(), mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"id":        "session-start-trimmed-directory",
+			"directory": rawDir,
+		}},
+	})
+	if err != nil || res.IsError {
+		t.Fatalf("session start: err=%v isError=%v text=%s", err, res.IsError, callResultText(t, res))
+	}
+
+	sess, err := s.GetSession("session-start-trimmed-directory")
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if sess.Project != "trimmed-session-project" {
+		t.Fatalf("expected trimmed explicit directory project, got %q", sess.Project)
+	}
+	if sess.Directory != trimmedDir {
+		t.Fatalf("expected trimmed persisted directory=%q, got %q", trimmedDir, sess.Directory)
+	}
+}
+
+func TestSessionStartWithExplicitPlainDirectoryUsesDirectoryBasenameProject(t *testing.T) {
+	s := newMCPTestStore(t)
+
+	workspace := t.TempDir()
+	wrongRepo := filepath.Join(workspace, "wrong-repo")
+	if err := os.MkdirAll(wrongRepo, 0o755); err != nil {
+		t.Fatalf("create wrong repo dir: %v", err)
+	}
+	initTestGitRepo(t, wrongRepo)
+	cmd := exec.Command("git", "-C", wrongRepo, "remote", "add", "origin",
+		"git@github.com:user/wrong-session-project.git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add wrong repo: %v\n%s", err, out)
+	}
+
+	explicitDir := filepath.Join(t.TempDir(), "plain-session-target")
+	if err := os.MkdirAll(explicitDir, 0o755); err != nil {
+		t.Fatalf("create explicit plain dir: %v", err)
+	}
+
+	t.Chdir(wrongRepo)
+
+	start := handleSessionStart(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	res, err := start(context.Background(), mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"id":        "session-start-explicit-plain-dir",
+			"directory": explicitDir,
+		}},
+	})
+	if err != nil || res.IsError {
+		t.Fatalf("session start: err=%v isError=%v text=%s", err, res.IsError, callResultText(t, res))
+	}
+
+	sess, err := s.GetSession("session-start-explicit-plain-dir")
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if sess.Project != "plain-session-target" {
+		t.Fatalf("expected explicit plain directory project, got %q", sess.Project)
+	}
+	if sess.Directory != explicitDir {
+		t.Fatalf("expected persisted directory=%q, got %q", explicitDir, sess.Directory)
+	}
+
+	body := callResultJSON(t, res)
+	if body["project"] != "plain-session-target" || body["project_source"] != project.SourceDirBasename {
+		t.Fatalf("expected dir_basename envelope for explicit plain directory, got %v", body)
 	}
 }
 
@@ -3115,26 +3239,36 @@ func TestMemSave_AutoDetectsProject(t *testing.T) {
 	}
 }
 
-// TestMemSave_IgnoresLLMProject asserts LLM-supplied project is silently discarded (REQ-308).
-func TestMemSave_IgnoresLLMProject(t *testing.T) {
+func TestMemSave_ExplicitProjectOverridesDetectedProject(t *testing.T) {
 	dir := t.TempDir()
 	initTestGitRepo(t, dir)
 	cmd := exec.Command("git", "-C", dir, "remote", "add", "origin",
-		"git@github.com:user/real-repo.git")
+		"git@github.com:user/process-cwd-project.git")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git remote add: %v\n%s", err, out)
 	}
 	t.Chdir(dir)
 
 	s := newMCPTestStore(t)
+	if err := s.CreateSession("existing-explicit-project", "explicit memory project", "/work/explicit-memory-project"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "existing-explicit-project",
+		Type:      "manual",
+		Title:     "seed explicit project",
+		Content:   "project already exists in store",
+		Project:   "explicit memory project",
+	}); err != nil {
+		t.Fatalf("seed existing project: %v", err)
+	}
 	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"title":   "should be real-repo",
-		"content": "test LLM override discarded",
+		"title":   "should be explicit project",
+		"content": "test explicit project precedence",
 		"type":    "manual",
-		// LLM sends a project name — must be ignored.
-		"project": "llm-supplied-wrong-project",
+		"project": "Explicit Memory Project",
 	}}}
 	res, err := h(context.Background(), req)
 	if err != nil {
@@ -3144,15 +3278,315 @@ func TestMemSave_IgnoresLLMProject(t *testing.T) {
 		t.Fatalf("unexpected error: %s", callResultText(t, res))
 	}
 
-	// Should NOT be stored under the LLM-supplied project.
-	wrongResults, _ := s.Search("should be real-repo", store.SearchOptions{Project: "llm-supplied-wrong-project", Limit: 5})
-	if len(wrongResults) > 0 {
-		t.Error("observation must NOT be stored under LLM-supplied project")
+	body := callResultJSON(t, res)
+	if body["project"] != "explicit memory project" || body["project_source"] != project.SourceExplicitOverride {
+		t.Fatalf("expected explicit project envelope, got %v", body)
 	}
-	// SHOULD be stored under the detected project.
-	correctResults, _ := s.Search("should be real-repo", store.SearchOptions{Project: "real-repo", Limit: 5})
+
+	wrongResults, _ := s.Search("should be explicit project", store.SearchOptions{Project: "process-cwd-project", Limit: 5})
+	if len(wrongResults) > 0 {
+		t.Error("observation must not be stored under process cwd project when explicit project is present")
+	}
+	correctResults, _ := s.Search("should be explicit project", store.SearchOptions{Project: "explicit memory project", Limit: 5})
 	if len(correctResults) == 0 {
-		t.Error("observation must be stored under auto-detected project 'real-repo'")
+		t.Error("observation must be stored under explicit project")
+	}
+}
+
+func TestMemSave_ExplicitProjectRejectsInvalidName(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "invalid explicit project must fail",
+		"content": "must not be saved",
+		"type":    "manual",
+		"project": "../not-a-project",
+	}}})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("expected invalid explicit project to fail")
+	}
+	body := callResultJSON(t, res)
+	if body["error_code"] != "invalid_project" {
+		t.Fatalf("expected invalid_project error, got %v", body)
+	}
+	obs, searchErr := s.Search("invalid explicit project must fail", store.SearchOptions{Project: "not-a-project", Limit: 5})
+	if searchErr != nil || len(obs) != 0 {
+		t.Fatalf("invalid explicit project must not receive writes, obs=%d err=%v", len(obs), searchErr)
+	}
+}
+
+func TestMemSave_ExplicitProjectTypoIsRejectedWithoutWrite(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	cmd := exec.Command("git", "-C", dir, "remote", "add", "origin",
+		"git@github.com:user/process-cwd-project.git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "explicit typo must fail",
+		"content": "must not be written anywhere",
+		"type":    "manual",
+		"project": "process-cwd-projecct",
+	}}})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("expected unbacked explicit project typo to fail")
+	}
+	body := callResultJSON(t, res)
+	if body["error_code"] != "unknown_project" {
+		t.Fatalf("expected unknown_project error, got %v", body)
+	}
+	wrongResults, _ := s.Search("explicit typo must fail", store.SearchOptions{Project: "process-cwd-projecct", Limit: 5})
+	if len(wrongResults) != 0 {
+		t.Fatal("explicit typo must not create a new project bucket")
+	}
+	autoResults, _ := s.Search("explicit typo must fail", store.SearchOptions{Project: "process-cwd-project", Limit: 5})
+	if len(autoResults) != 0 {
+		t.Fatal("explicit typo failure must not fall back to cwd-detected project")
+	}
+}
+
+func TestMemSave_UsesSessionProjectWhenProjectOmitted(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	cmd := exec.Command("git", "-C", dir, "remote", "add", "origin",
+		"git@github.com:user/process-session-fallback.git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("issue-334-session", "session-owned-project", "/work/session-owned-project"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":      "session project precedence",
+		"content":    "test session project association",
+		"type":       "manual",
+		"session_id": "issue-334-session",
+	}}})
+	if err != nil || res.IsError {
+		t.Fatalf("save: err=%v isError=%v text=%s", err, res.IsError, callResultText(t, res))
+	}
+	body := callResultJSON(t, res)
+	if body["project"] != "session-owned-project" || body["project_source"] != "session" {
+		t.Fatalf("expected session project envelope, got %v", body)
+	}
+	wrongResults, _ := s.Search("session project precedence", store.SearchOptions{Project: "process-session-fallback", Limit: 5})
+	if len(wrongResults) > 0 {
+		t.Fatal("observation must not fall back to process cwd when session has a project")
+	}
+	correctResults, _ := s.Search("session project precedence", store.SearchOptions{Project: "session-owned-project", Limit: 5})
+	if len(correctResults) != 1 {
+		t.Fatalf("expected observation under session project, got %d", len(correctResults))
+	}
+}
+
+func TestMemSave_MissingSessionIDFailsLoudly(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	cmd := exec.Command("git", "-C", dir, "remote", "add", "origin",
+		"git@github.com:user/process-session-missing.git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":      "missing session should fail",
+		"content":    "must not fall back to cwd detection",
+		"type":       "manual",
+		"session_id": "missing-session-334",
+	}}})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("expected missing session_id to fail")
+	}
+	body := callResultJSON(t, res)
+	if body["error_code"] != "unknown_session" {
+		t.Fatalf("expected unknown_session error, got %v", body)
+	}
+	wrongResults, _ := s.Search("missing session should fail", store.SearchOptions{Project: "process-session-missing", Limit: 5})
+	if len(wrongResults) != 0 {
+		t.Fatal("missing session must not fall back to cwd-detected project")
+	}
+}
+
+func TestMemSave_ExplicitProjectMustMatchExistingSessionProject(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("cross-project-session", "session-owned-project", "/work/session-owned-project"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":      "cross-project mismatch should fail",
+		"content":    "must not write",
+		"type":       "manual",
+		"project":    "other-project",
+		"session_id": "cross-project-session",
+	}}})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("expected explicit project + session mismatch to fail")
+	}
+	body := callResultJSON(t, res)
+	if body["error_code"] != "session_project_mismatch" {
+		t.Fatalf("expected session_project_mismatch, got %v", body)
+	}
+	obs, searchErr := s.Search("cross-project mismatch should fail", store.SearchOptions{Project: "other-project", Limit: 5})
+	if searchErr != nil || len(obs) != 0 {
+		t.Fatalf("mismatched explicit project must not receive write, obs=%d err=%v", len(obs), searchErr)
+	}
+}
+
+func TestMemSave_NonAmbiguousExplicitProjectIgnoresStaleRecoveryReason(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("store-backed-explicit", "explicit-target-project", "/work/explicit-target-project"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "store-backed-explicit",
+		Type:      "manual",
+		Title:     "store-backed project",
+		Content:   "existing project backing for stale-recovery test",
+		Project:   "explicit-target-project",
+	}); err != nil {
+		t.Fatalf("seed existing project: %v", err)
+	}
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":                 "stale recovery reason keeps explicit project",
+		"content":               "must write to explicit project on non-ambiguous cwd",
+		"type":                  "manual",
+		"project":               "explicit-target-project",
+		"project_choice_reason": project.SourceUserSelectedAfterAmbiguousProject,
+	}}})
+	if err != nil || res.IsError {
+		t.Fatalf("save with stale recovery reason failed: err=%v isError=%v text=%q", err, res.IsError, callResultText(t, res))
+	}
+	body := callResultJSON(t, res)
+	if body["project"] != "explicit-target-project" || body["project_source"] != project.SourceExplicitOverride {
+		t.Fatalf("expected explicit override envelope, got %v", body)
+	}
+	wrongResults, _ := s.Search("stale recovery reason keeps explicit project", store.SearchOptions{Project: filepath.Base(dir), Limit: 5})
+	if len(wrongResults) != 0 {
+		t.Fatal("stale recovery reason must not redirect write to cwd-detected project")
+	}
+	correctResults, _ := s.Search("stale recovery reason keeps explicit project", store.SearchOptions{Project: "explicit-target-project", Limit: 5})
+	if len(correctResults) != 1 {
+		t.Fatalf("expected explicit project write, got %d", len(correctResults))
+	}
+}
+
+func TestMemSave_NonAmbiguousExplicitProjectStillFailsSessionMismatchWithStaleRecoveryReason(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("stale-recovery-mismatch", "session-owned-project", "/work/session-owned-project"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":                 "stale recovery reason must not bypass mismatch",
+		"content":               "must not write",
+		"type":                  "manual",
+		"project":               "other-project",
+		"project_choice_reason": project.SourceUserSelectedAfterAmbiguousProject,
+		"session_id":            "stale-recovery-mismatch",
+	}}})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("expected stale recovery reason + session mismatch to fail")
+	}
+	body := callResultJSON(t, res)
+	if body["error_code"] != "session_project_mismatch" {
+		t.Fatalf("expected session_project_mismatch, got %v", body)
+	}
+	obs, searchErr := s.Search("stale recovery reason must not bypass mismatch", store.SearchOptions{Project: "other-project", Limit: 5})
+	if searchErr != nil || len(obs) != 0 {
+		t.Fatalf("mismatched explicit project must not receive write, obs=%d err=%v", len(obs), searchErr)
+	}
+}
+
+func TestMemSave_RepoConfigBeatsGitRemoteFallback(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	cmd := exec.Command("git", "-C", dir, "remote", "add", "origin",
+		"git@github.com:user/remote-fallback-project.git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+	configDir := filepath.Join(dir, ".engram")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("create config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(`{"project_name":"Configured MCP Project"}`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "config project precedence",
+		"content": "test repo config project lock",
+		"type":    "manual",
+	}}})
+	if err != nil || res.IsError {
+		t.Fatalf("save: err=%v isError=%v text=%s", err, res.IsError, callResultText(t, res))
+	}
+	body := callResultJSON(t, res)
+	if body["project"] != "configured mcp project" || body["project_source"] != project.SourceConfig {
+		t.Fatalf("expected config project envelope, got %v", body)
+	}
+	wrongResults, _ := s.Search("config project precedence", store.SearchOptions{Project: "remote-fallback-project", Limit: 5})
+	if len(wrongResults) > 0 {
+		t.Fatal("observation must not fall back to git remote when repo config exists")
+	}
+	correctResults, _ := s.Search("config project precedence", store.SearchOptions{Project: "configured mcp project", Limit: 5})
+	if len(correctResults) != 1 {
+		t.Fatalf("expected observation under config project, got %d", len(correctResults))
 	}
 }
 
@@ -3289,8 +3723,333 @@ func TestMemSave_AmbiguousChoiceRequiresExactAvailableProject(t *testing.T) {
 		t.Fatalf("exact trimmed choice should succeed: err=%v isError=%v text=%q", err, res.IsError, callResultText(t, res))
 	}
 	body = callResultJSON(t, res)
+	if body["project"] != "baz_qux" || body["project_source"] != project.SourceUserSelectedAfterAmbiguousProject {
+		t.Fatalf("expected exact ambiguous recovery project, got %v", body)
+	}
 	if body["project_path"] != filepath.Join(parent, "baz__qux") {
 		t.Fatalf("expected project_path to selected exact repo root, got %v", body)
+	}
+}
+
+func TestMemSave_AmbiguousRecoveryRequiresExactAvailableProjectRegression(t *testing.T) {
+	parent := t.TempDir()
+	for _, name := range []string{"repo-exact-a", "repo__exact__b"} {
+		child := filepath.Join(parent, name)
+		if err := os.MkdirAll(child, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		initTestGitRepo(t, child)
+	}
+	t.Chdir(parent)
+
+	s := newMCPTestStore(t)
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":                 "ambiguous exact-match regression",
+		"content":               "must reject normalized guess",
+		"type":                  "manual",
+		"project":               "repo-exact-b",
+		"project_choice_reason": project.SourceUserSelectedAfterAmbiguousProject,
+	}}})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("expected normalized guess to fail in ambiguous recovery")
+	}
+	body := callResultJSON(t, res)
+	if body["error_code"] != "invalid_project_choice" {
+		t.Fatalf("expected invalid_project_choice, got %v", body)
+	}
+
+	res, err = h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":                 "ambiguous exact-match regression success",
+		"content":               "must accept exact available project",
+		"type":                  "manual",
+		"project":               " repo__exact__b ",
+		"project_choice_reason": project.SourceUserSelectedAfterAmbiguousProject,
+	}}})
+	if err != nil || res.IsError {
+		t.Fatalf("exact ambiguous recovery should succeed: err=%v isError=%v text=%q", err, res.IsError, callResultText(t, res))
+	}
+	body = callResultJSON(t, res)
+	if body["project"] != "repo_exact_b" || body["project_source"] != project.SourceUserSelectedAfterAmbiguousProject {
+		t.Fatalf("expected exact available project recovery, got %v", body)
+	}
+}
+
+func TestMemSave_AmbiguousRecoveryRejectsNormalizationCollisions(t *testing.T) {
+	parent := t.TempDir()
+	for _, name := range []string{"foo--bar", "foo-bar"} {
+		child := filepath.Join(parent, name)
+		if err := os.MkdirAll(child, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		initTestGitRepo(t, child)
+	}
+	t.Chdir(parent)
+
+	s := newMCPTestStore(t)
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	for _, choice := range []string{"foo--bar", "foo-bar"} {
+		res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"title":                 "ambiguous collision must fail",
+			"content":               "must not save when ambiguous choices collapse",
+			"project":               choice,
+			"project_choice_reason": project.SourceUserSelectedAfterAmbiguousProject,
+		}}})
+		if err != nil {
+			t.Fatalf("handler error for %q: %v", choice, err)
+		}
+		if !res.IsError {
+			t.Fatalf("expected collision error for %q", choice)
+		}
+		body := callResultJSON(t, res)
+		if body["error_code"] != "project_name_collision" {
+			t.Fatalf("expected project_name_collision for %q, got %v", choice, body)
+		}
+		message, _ := body["message"].(string)
+		if !strings.Contains(message, "foo--bar") || !strings.Contains(message, "foo-bar") {
+			t.Fatalf("collision error for %q must name both colliding projects, got %v", choice, body)
+		}
+	}
+
+	obs, searchErr := s.Search("ambiguous collision must fail", store.SearchOptions{Project: "foo-bar", Limit: 10})
+	if searchErr != nil || len(obs) != 0 {
+		t.Fatalf("collision recovery must not write to collapsed bucket, obs=%d err=%v", len(obs), searchErr)
+	}
+}
+
+func TestMemSave_ExplicitBackedProjectRejectsAmbiguousNormalizationCollision(t *testing.T) {
+	parent := t.TempDir()
+	for _, name := range []string{"foo--bar", "foo-bar"} {
+		child := filepath.Join(parent, name)
+		if err := os.MkdirAll(child, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		initTestGitRepo(t, child)
+	}
+	t.Chdir(parent)
+
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("seed-collision", "foo-bar", "/tmp/foo-bar"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "seed-collision",
+		Type:      "manual",
+		Title:     "existing collapsed bucket",
+		Content:   "seed existing explicit project",
+		Project:   "foo-bar",
+	}); err != nil {
+		t.Fatalf("seed observation: %v", err)
+	}
+
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "explicit backed collision must fail",
+		"content": "must not write into preexisting collapsed bucket",
+		"project": "foo--bar",
+	}}})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("expected project_name_collision for explicit backed project")
+	}
+	body := callResultJSON(t, res)
+	if body["error_code"] != "project_name_collision" {
+		t.Fatalf("expected project_name_collision, got %v", body)
+	}
+	obs, searchErr := s.Search("explicit backed collision must fail", store.SearchOptions{Project: "foo-bar", Limit: 10})
+	if searchErr != nil || len(obs) != 0 {
+		t.Fatalf("explicit collision must not write to collapsed bucket, obs=%d err=%v", len(obs), searchErr)
+	}
+}
+
+func TestMemSave_ExplicitProjectRejectsCollapsedStoreBucket(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("store-bucket-owner", "foo-bar", "/tmp/foo-bar"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "store-bucket-owner",
+		Type:      "manual",
+		Title:     "existing foo-bar",
+		Content:   "seed explicit project bucket",
+		Project:   "foo-bar",
+	}); err != nil {
+		t.Fatalf("seed observation: %v", err)
+	}
+
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "collapsed store bucket must fail",
+		"content": "must not write into foo-bar via foo--bar",
+		"type":    "manual",
+		"project": "foo--bar",
+	}}})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("expected project_name_collision for collapsed store bucket")
+	}
+	body := callResultJSON(t, res)
+	if body["error_code"] != "project_name_collision" {
+		t.Fatalf("expected project_name_collision, got %v", body)
+	}
+	obs, searchErr := s.Search("collapsed store bucket must fail", store.SearchOptions{Project: "foo-bar", Limit: 10})
+	if searchErr != nil || len(obs) != 0 {
+		t.Fatalf("collapsed store bucket must not receive writes, obs=%d err=%v", len(obs), searchErr)
+	}
+}
+
+func TestMemSave_ExplicitProjectRejectsCollapsedSessionBucket(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("session-bucket-owner", "foo-bar", "/tmp/foo-bar"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":      "collapsed session bucket must fail",
+		"content":    "must not write into session-backed foo-bar via foo--bar",
+		"type":       "manual",
+		"project":    "foo--bar",
+		"session_id": "session-bucket-owner",
+	}}})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("expected project_name_collision for collapsed session bucket")
+	}
+	body := callResultJSON(t, res)
+	if body["error_code"] != "project_name_collision" {
+		t.Fatalf("expected project_name_collision, got %v", body)
+	}
+	obs, searchErr := s.Search("collapsed session bucket must fail", store.SearchOptions{Project: "foo-bar", Limit: 10})
+	if searchErr != nil || len(obs) != 0 {
+		t.Fatalf("collapsed session bucket must not receive writes, obs=%d err=%v", len(obs), searchErr)
+	}
+}
+
+func TestMemSave_ExplicitProjectAcceptsExactStoreProject(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("exact-store-owner", "foo-bar", "/tmp/foo-bar"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "exact-store-owner",
+		Type:      "manual",
+		Title:     "existing foo-bar exact",
+		Content:   "seed exact project bucket",
+		Project:   "foo-bar",
+	}); err != nil {
+		t.Fatalf("seed observation: %v", err)
+	}
+
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "exact foo-bar succeeds",
+		"content": "writes to exact existing foo-bar",
+		"type":    "manual",
+		"project": "foo-bar",
+	}}})
+	if err != nil || res.IsError {
+		t.Fatalf("exact explicit project should succeed: err=%v isError=%v text=%q", err, res.IsError, callResultText(t, res))
+	}
+	body := callResultJSON(t, res)
+	if body["project"] != "foo-bar" || body["project_source"] != project.SourceExplicitOverride {
+		t.Fatalf("expected explicit foo-bar envelope, got %v", body)
+	}
+	obs, searchErr := s.Search("exact foo-bar succeeds", store.SearchOptions{Project: "foo-bar", Limit: 10})
+	if searchErr != nil || len(obs) != 1 {
+		t.Fatalf("exact explicit project should write once, obs=%d err=%v", len(obs), searchErr)
+	}
+}
+
+func TestMemSave_OmittedProjectWithStaleRecoveryReasonFallsBackToSession(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("stale-empty-project-session", "session-owned-project", "/tmp/session-owned-project"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":                 "stale empty project uses session",
+		"content":               "session fallback must win when project is empty",
+		"type":                  "manual",
+		"project_choice_reason": project.SourceUserSelectedAfterAmbiguousProject,
+		"session_id":            "stale-empty-project-session",
+	}}})
+	if err != nil || res.IsError {
+		t.Fatalf("empty-project stale recovery should use session: err=%v isError=%v text=%q", err, res.IsError, callResultText(t, res))
+	}
+	body := callResultJSON(t, res)
+	if body["project"] != "session-owned-project" || body["project_source"] != project.SourceSessionProject {
+		t.Fatalf("expected session fallback envelope, got %v", body)
+	}
+	obs, searchErr := s.Search("stale empty project uses session", store.SearchOptions{Project: "session-owned-project", Limit: 10})
+	if searchErr != nil || len(obs) != 1 {
+		t.Fatalf("session fallback should write once, obs=%d err=%v", len(obs), searchErr)
+	}
+}
+
+func TestMemSave_ExplicitBlankProjectFailsWithoutFallback(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("blank-project-session", "session-owned-project", "/tmp/session-owned-project"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":      "blank explicit project must fail",
+		"content":    "must not write",
+		"type":       "manual",
+		"project":    " \t ",
+		"session_id": "blank-project-session",
+	}}})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("expected whitespace-only explicit project to fail")
+	}
+	body := callResultJSON(t, res)
+	if body["error_code"] != "invalid_project" {
+		t.Fatalf("expected invalid_project, got %v", body)
+	}
+	obs, searchErr := s.Search("blank explicit project must fail", store.SearchOptions{Project: "session-owned-project", Limit: 10})
+	if searchErr != nil || len(obs) != 0 {
+		t.Fatalf("blank explicit project must not fall back to session project, obs=%d err=%v", len(obs), searchErr)
+	}
+	obs, searchErr = s.Search("blank explicit project must fail", store.SearchOptions{Project: filepath.Base(dir), Limit: 10})
+	if searchErr != nil || len(obs) != 0 {
+		t.Fatalf("blank explicit project must not fall back to cwd project, obs=%d err=%v", len(obs), searchErr)
 	}
 }
 
@@ -3317,12 +4076,15 @@ func TestMemSave_AmbiguousEmptyProjectChoiceIsActionable(t *testing.T) {
 		t.Fatalf("handler error: %v", err)
 	}
 	if !res.IsError {
-		t.Fatal("expected invalid project choice for whitespace project")
+		t.Fatal("expected whitespace-only explicit project to fail")
 	}
 	body := callResultJSON(t, res)
-	message, _ := body["message"].(string)
-	if body["error_code"] != "invalid_project_choice" || !strings.Contains(message, "Project choice is empty") || !strings.Contains(message, "available_projects") {
-		t.Fatalf("expected actionable empty choice error, got %v", body)
+	if body["error_code"] != "invalid_project" {
+		t.Fatalf("expected invalid_project for whitespace-only explicit project, got %v", body)
+	}
+	obs, searchErr := s.Search("empty choice must fail", store.SearchOptions{Project: "repo-empty-a", Limit: 10})
+	if searchErr != nil || len(obs) != 0 {
+		t.Fatalf("whitespace-only explicit project must not write into detected projects, obs=%d err=%v", len(obs), searchErr)
 	}
 }
 
@@ -3348,15 +4110,9 @@ func TestMemSave_AmbiguousWithInventedProjectRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
-	if !res.IsError {
-		t.Fatal("expected invalid project choice error")
-	}
 	body := callResultJSON(t, res)
 	if body["error_code"] != "invalid_project_choice" {
 		t.Fatalf("expected invalid_project_choice, got %v", body)
-	}
-	if strings.Contains(callResultText(t, res), "invented-project\",\"available_projects") {
-		t.Fatalf("invented project must not be treated as available: %q", callResultText(t, res))
 	}
 	obs, err := s.Search("invented project memory", store.SearchOptions{Project: "invented-project", Limit: 5})
 	if err != nil || len(obs) != 0 {
@@ -3847,14 +4603,14 @@ func TestHandleSaveAndPromptUseConfigProjectForWrites(t *testing.T) {
 	save := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := save(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title": "config write", "content": "memory saved under config project", "type": "decision",
-		"project": "attempted-override", "project_choice_reason": project.SourceUserSelectedAfterAmbiguousProject,
+		"project": "config-locked", "project_choice_reason": project.SourceUserSelectedAfterAmbiguousProject,
 	}}})
 	if err != nil || res.IsError {
 		t.Fatalf("mem_save failed: err=%v isError=%v text=%q", err, res.IsError, callResultText(t, res))
 	}
 	body := callResultJSON(t, res)
-	if body["project"] != "config-locked" || body["project_source"] != project.SourceConfig {
-		t.Fatalf("expected mem_save config envelope, got %v", body)
+	if body["project"] != "config-locked" || body["project_source"] != project.SourceExplicitOverride {
+		t.Fatalf("expected mem_save explicit-project envelope, got %v", body)
 	}
 
 	prompt := handleSavePrompt(s, MCPConfig{}, nil)
@@ -3872,14 +4628,14 @@ func TestHandleSaveAndPromptUseConfigProjectForWrites(t *testing.T) {
 
 	obs, err := s.Search("memory saved under config project", store.SearchOptions{Project: "config-locked", Limit: 5})
 	if err != nil || len(obs) != 1 {
-		t.Fatalf("expected observation written to config project, obs=%d err=%v", len(obs), err)
+		t.Fatalf("expected observation written to config-backed explicit project, obs=%d err=%v", len(obs), err)
 	}
 	prompts, err := s.RecentPrompts("config-locked", 5)
 	if err != nil || len(prompts) != 1 {
 		t.Fatalf("expected prompt written to config project, prompts=%d err=%v", len(prompts), err)
 	}
 	if wrong, _ := s.Search("memory saved under config project", store.SearchOptions{Project: "attempted-override", Limit: 5}); len(wrong) != 0 {
-		t.Fatal("explicit project choice must not override non-ambiguous/config project")
+		t.Fatal("mem_save_prompt-only override text must not create an unrelated project bucket")
 	}
 }
 
