@@ -201,12 +201,13 @@ func TestPrintPostInstall(t *testing.T) {
 			name:    "opencode with subagent monitor enabled",
 			result:  &setup.Result{Agent: "opencode", TUIPluginEnabled: true},
 			expects: []string{"Restart OpenCode", "opencode-subagent-statusline", "auto-starts the HTTP server", "If background processes are blocked, run 'engram serve' in a separate terminal"},
+			notExpects: []string{"engram serve &", "Run 'engram serve &' for session tracking (HTTP API)"},
 		},
 		{
 			name:       "opencode with subagent monitor not enabled",
 			result:     &setup.Result{Agent: "opencode", TUIPluginEnabled: false},
 			expects:    []string{"Restart OpenCode", "auto-starts the HTTP server", "If background processes are blocked, run 'engram serve' in a separate terminal"},
-			notExpects: []string{"opencode-subagent-statusline"},
+			notExpects: []string{"opencode-subagent-statusline", "engram serve &", "Run 'engram serve &' for session tracking (HTTP API)"},
 		},
 		{
 			name:    "gemini-cli",
