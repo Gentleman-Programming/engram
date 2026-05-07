@@ -26,6 +26,7 @@ import (
 	"github.com/Gentleman-Programming/engram/internal/diagnostic"
 	projectpkg "github.com/Gentleman-Programming/engram/internal/project"
 	"github.com/Gentleman-Programming/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/internal/timeutil"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -949,7 +950,7 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			fmt.Fprintf(&b, "[%d] #%d (%s) — %s\n    %s\n    %s%s | scope: %s\n",
 				i+1, r.ID, r.Type, r.Title,
 				preview,
-				r.CreatedAt, projectDisplay, r.Scope)
+				timeutil.FormatLocal(r.CreatedAt), projectDisplay, r.Scope)
 
 			// Append relation annotations. Skip orphaned (filtered by store).
 			//
@@ -1484,7 +1485,7 @@ func handleTimeline(s *store.Store) server.ToolHandlerFunc {
 		// Focus observation (highlighted)
 		fmt.Fprintf(&b, ">>> #%d [%s] %s <<<\n", result.Focus.ID, result.Focus.Type, result.Focus.Title)
 		fmt.Fprintf(&b, "    %s\n", truncate(result.Focus.Content, 500))
-		fmt.Fprintf(&b, "    %s\n\n", result.Focus.CreatedAt)
+		fmt.Fprintf(&b, "    %s\n\n", timeutil.FormatLocal(result.Focus.CreatedAt))
 
 		// After entries
 		if len(result.After) > 0 {
@@ -1535,7 +1536,7 @@ func handleGetObservation(s *store.Store) server.ToolHandlerFunc {
 			obs.ID, obs.Type, obs.Title,
 			obs.Content,
 			obs.SessionID, obsProject+scope+topic, toolName+duplicateMeta+revisionMeta,
-			obs.CreatedAt,
+			timeutil.FormatLocal(obs.CreatedAt),
 		)
 
 		if detErr != nil {
