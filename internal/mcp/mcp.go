@@ -2398,10 +2398,7 @@ func resolveReadProject(s *store.Store, override string) (projectpkg.DetectionRe
 }
 
 func detectCurrentProjectBestEffort() projectpkg.DetectionResult {
-	res, err := resolveWriteProject()
-	if err != nil {
-		return res
-	}
+	res, _ := resolveWriteProject()
 	return res
 }
 
