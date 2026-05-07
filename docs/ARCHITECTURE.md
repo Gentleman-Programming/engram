@@ -42,7 +42,7 @@ Engram trusts the **agent** to decide what's worth remembering — not a firehos
 ```
 Session starts → Agent works → Agent saves memories proactively
                                     ↓
-Session ends → Agent writes session summary (Goal/Discoveries/Accomplished/Files)
+Session ends → Agent writes session summary (Goal/Discoveries/Accomplished/Next Steps/Files)
                                     ↓
 Next session starts → Previous session context is injected automatically
 ```
@@ -69,6 +69,9 @@ Next session starts → Previous session context is injected automatically
 | `mem_capture_passive` | Extract learnings from text output |
 | `mem_merge_projects` | Merge project name variants into canonical name (admin) |
 | `mem_current_project` | Detect project from cwd — never errors, recommended first call |
+| `mem_doctor` | Run read-only operational diagnostics for project detection and store health |
+| `mem_judge` | Record a verdict for a pending memory conflict surfaced by `mem_save` |
+| `mem_compare` | Persist a semantic relation verdict between two existing observations |
 
 ---
 
@@ -126,7 +129,7 @@ engram/
 ├── internal/
 │   ├── store/store.go              # Core: SQLite + FTS5 + all data ops
 │   ├── server/server.go            # HTTP REST API (port 7437)
-│   ├── mcp/mcp.go                  # MCP stdio server (18 tools)
+│   ├── mcp/mcp.go                  # MCP stdio server (19 tools)
 │   ├── setup/setup.go              # Agent plugin installer (go:embed)
 │   ├── cloud/                       # Optional cloud runtime (Postgres + dashboard)
 │   │   ├── cloudserver/             # /sync API + dashboard mount + auth/session bridge
