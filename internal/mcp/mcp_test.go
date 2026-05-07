@@ -6024,14 +6024,16 @@ func TestHandleSearch_AllProjects(t *testing.T) {
 	dir := t.TempDir()
 	initTestGitRepo(t, dir)
 	t.Chdir(dir)
+	sess1Dir := filepath.Join(dir, "sess1")
+	sess2Dir := filepath.Join(dir, "sess2")
 
 	s := newMCPTestStore(t)
 
 	// Create sessions for two different projects
-	if err := s.CreateSession("sess1", "project-a", "/tmp/project-a"); err != nil {
+	if err := s.CreateSession("sess1", "project-a", sess1Dir); err != nil {
 		t.Fatalf("create session 1: %v", err)
 	}
-	if err := s.CreateSession("sess2", "project-b", "/tmp/project-b"); err != nil {
+	if err := s.CreateSession("sess2", "project-b", sess2Dir); err != nil {
 		t.Fatalf("create session 2: %v", err)
 	}
 

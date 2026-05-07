@@ -2398,11 +2398,11 @@ func resolveReadProject(s *store.Store, override string) (projectpkg.DetectionRe
 }
 
 func detectCurrentProjectBestEffort() projectpkg.DetectionResult {
-	cwd, err := os.Getwd()
+	res, err := resolveWriteProject()
 	if err != nil {
-		cwd = "."
+		return res
 	}
-	return projectpkg.DetectProjectFull(cwd)
+	return res
 }
 
 // respondWithProject wraps a tool result by prepending the project envelope
