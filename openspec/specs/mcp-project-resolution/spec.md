@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Authoritative project resolution for all MCP tool calls. Eliminates LLM-supplied project names on writes by auto-detecting from the working directory. Validates optional overrides on reads. Exposes detection as a first-class discovery tool. Covers five cwd cases with structured results and error envelopes.
+Authoritative project resolution for MCP tool calls. `mem_save` accepts a validated explicit project selection, while other write tools keep their documented auto-detection behavior. Read tools that expose `project` validate optional overrides. The system exposes detection as a first-class discovery tool and covers cwd, directory, config, git, ambiguous, and basename cases with structured results and error envelopes.
 
 ---
 
@@ -162,29 +162,49 @@ The child-directory scan MUST operate at depth=1 only, inspect at most 20 direct
 - WHEN both `DetectProject` and `DetectProjectFull` are called with it
 - THEN `DetectProject` returns the same value as `DetectProjectFull(dir).Project`
 
-#### Scenario: Ambiguous cwd returns empty string (not an error)
+#### Scenario: Ambiguous cwd returns basename fallback for wrapper compatibility
 
 - GIVEN a directory that triggers `ErrAmbiguousProject`
 - WHEN `DetectProject` is called
-- THEN it returns `""` (the wrapper surfaces no error to the CLI caller)
+- THEN it returns the directory basename fallback (the wrapper surfaces no error to the CLI caller)
 
 ---
 
-### Requirement: REQ-308 Write Tools Remove project Field From Schema
+### Requirement: REQ-308 mem_save Validates Explicit Project Selection
 
-The MCP write tools (`mem_save`, `mem_save_prompt`, `mem_session_start`, `mem_session_end`, `mem_capture_passive`, `mem_update`) MUST NOT include a `project` field in their JSON schema. Each handler MUST call `resolveWriteProject` using the server's working directory and ignore any `project` argument supplied by the LLM.
+`mem_save` MAY expose and accept a `project` field as an explicit project selection, but it MUST validate that selection against known project context before writing. The explicit project MUST NOT create arbitrary buckets.
 
-#### Scenario: LLM-supplied project is silently discarded
+Validation and precedence rules for `mem_save` are:
 
-- GIVEN a call to `mem_save` with an explicit `project` argument
+- when `session_id` is present and `project` is omitted, use the existing session project.
+- when `project` is present, accept it only if it is backed by known store context OR matches the existing session project OR exactly matches the config-resolved cwd project.
+- when `project` is missing, unbacked, mismatched with the session project, collides after normalization, or depends on ambiguous cwd resolution without exact recovery context, fail loudly and do not write.
+- `mem_save_prompt` keeps its older cwd/default behavior plus ambiguous-project recovery support when applicable.
+- other write tools keep their documented auto-detect-only behavior.
+
+#### Scenario: Backed explicit project overrides cwd detection
+
+- GIVEN a call to `mem_save` with an explicit `project` argument that already exists in store context
 - WHEN the handler processes the request
-- THEN the observation is stored under the auto-detected project, not the LLM-supplied value, and no error is returned
+- THEN the observation is stored under that validated explicit project AND the response reports `project_source = "explicit_override"`
 
-#### Scenario: Schema omits project field
+#### Scenario: session_id without project uses the existing session project
+
+- GIVEN a call to `mem_save` with `session_id` and no `project`
+- WHEN the referenced session already has a project association
+- THEN the observation is stored under the session project, not the server cwd project
+
+#### Scenario: Unbacked or mismatched explicit project fails loudly
+
+- GIVEN a call to `mem_save` with an explicit `project` that is unknown, mismatched with the session project, or ambiguous after normalization
+- WHEN the handler processes the request
+- THEN the handler returns a structured error envelope AND no write occurs
+
+#### Scenario: mem_save schema exposes project for validated selection
 
 - GIVEN the MCP tool-list response
 - WHEN a client inspects the input schema for `mem_save`
-- THEN the schema has no `project` property
+- THEN the schema includes `project` (and ambiguous-recovery metadata) for validated explicit selection
 
 ---
 
@@ -206,9 +226,9 @@ When `resolveWriteProject` returns `ErrAmbiguousProject`, write tool handlers MU
 
 ---
 
-### Requirement: REQ-310 Read Tools Accept Optional project Field
+### Requirement: REQ-310 Read Tools Accept Supported Optional project Field
 
-The MCP read tools (`mem_search`, `mem_context`, `mem_timeline`, `mem_get_observation`, `mem_stats`) MUST include `project` as an OPTIONAL field in their JSON schema. When `project` is omitted or empty, the handler MUST fall back to auto-detection via `DetectProjectFull`.
+The MCP read tools that expose project-scoped list/search behavior (`mem_search`, `mem_context`, `mem_timeline`, `mem_stats`, `mem_doctor`) MUST include `project` as an OPTIONAL field in their JSON schema. When `project` is omitted or empty, the handler MUST fall back to auto-detection via `DetectProjectFull`. `mem_get_observation` is ID-based and does not accept a project override; it resolves project only for response metadata and may use a plain-text degraded response when cwd is ambiguous.
 
 #### Scenario: Omitted project falls back to auto-detect
 
@@ -216,9 +236,9 @@ The MCP read tools (`mem_search`, `mem_context`, `mem_timeline`, `mem_get_observ
 - WHEN the handler processes the request
 - THEN results are scoped to the auto-detected project
 
-#### Scenario: Explicit project is forwarded for validation
+#### Scenario: Explicit project is forwarded for validation by supported read tools
 
-- GIVEN a call to `mem_search` with `project: "known-project"`
+- GIVEN a call to a supported read tool such as `mem_search` with `project: "known-project"`
 - WHEN the handler processes the request
 - THEN `store.ProjectExists("known-project")` is called before executing the query
 
@@ -242,21 +262,21 @@ When a read tool receives a non-empty `project`, the handler MUST call `store.Pr
 
 ---
 
-### Requirement: REQ-312 Admin Tools Require Explicit project
+### Requirement: REQ-312 Admin Tools Bypass Project Resolution
 
-The admin tools (`mem_delete`, `mem_merge_projects`) MUST keep `project` as a REQUIRED field in their schema. Auto-detection is NOT applied to admin tools.
+The admin tools (`mem_delete`, `mem_merge_projects`) MUST remain outside the project-resolution contract. They do not accept `project`, do not auto-detect `project`, and operate on their own required identifiers/arguments.
 
-#### Scenario: Schema requires project
+#### Scenario: mem_delete schema omits project
 
 - GIVEN the MCP tool-list response
 - WHEN a client inspects the input schema for `mem_delete`
-- THEN the schema marks `project` as required
+- THEN the schema does not advertise a `project` field
 
-#### Scenario: Missing project returns validation error
+#### Scenario: mem_merge_projects schema omits project
 
-- GIVEN a call to `mem_delete` with no `project` argument
-- WHEN the handler processes the request
-- THEN a validation error is returned before any deletion occurs
+- GIVEN the MCP tool-list response
+- WHEN a client inspects the input schema for `mem_merge_projects`
+- THEN the schema does not advertise a `project` field
 
 ---
 
@@ -286,11 +306,11 @@ The system MUST register a new `mem_current_project` tool that returns `{project
 
 ### Requirement: REQ-314 Standardized Response Envelope
 
-Every MCP tool response MUST include `project`, `project_source`, and `project_path` fields reflecting the project used. Error responses MUST include `available_projects` whenever the error relates to project resolution.
+Project-aware MCP responses SHOULD include `project`, `project_source`, and `project_path` fields reflecting the resolved project used. Plain-text admin tools that do not participate in project resolution (`mem_delete`, `mem_merge_projects`), raw diagnostic reports (`mem_doctor`), and documented degraded/plain-text paths such as ambiguous-cwd `mem_get_observation` are exempt. Error responses MUST include `available_projects` whenever the error relates to project resolution.
 
-#### Scenario: Successful tool response includes project metadata
+#### Scenario: Successful project-aware tool response includes project metadata
 
-- GIVEN a successful call to any MCP tool (read or write)
+- GIVEN a successful call to an enveloped project-aware MCP tool (read or write)
 - WHEN the response is returned
 - THEN `project`, `project_source`, and `project_path` are present at the top level
 
@@ -338,11 +358,11 @@ Every MCP tool response MUST include `project`, `project_source`, and `project_p
 | REQ-305 | `TestDetectProjectFull_Case5_Basename`, `TestDetectProjectFull_Case5_Unusual` | `internal/project/detect_test.go` |
 | REQ-306 | `TestChildScan_ShortCircuit`, `TestChildScan_SkipNoise`, `TestChildScan_SkipHidden`, `TestChildScan_Timeout` | `internal/project/detect_test.go` |
 | REQ-307 | `TestDetectProject_MatchesFull`, `TestDetectProject_AmbiguousEmpty` | `internal/project/detect_test.go` |
-| REQ-308 | `TestWriteSchema_NoProjectField`, `TestMemSave_IgnoresLLMProject` | `internal/mcp/mcp_test.go` |
+| REQ-308 | `TestWriteSchema_ProjectFieldOnlyForAmbiguousRecovery`, `TestMemSave_AutoDetectsProject`, `TestMemSave_ExplicitProjectOverridesDetectedProject`, `TestMemSave_UsesSessionProjectWhenProjectOmitted`, `TestMemSave_MissingSessionIDFailsLoudly`, `TestMemSave_ExplicitProjectMustMatchExistingSessionProject`, `TestMemSave_AmbiguousChoiceRequiresExactAvailableProject`, `TestMemSave_ExplicitBackedProjectRejectsAmbiguousNormalizationCollision`, `TestMemSave_ExplicitProjectRejectsCollapsedStoreBucket` | `internal/mcp/mcp_test.go` |
 | REQ-309 | `TestMemSave_AmbiguousEnvelope`, `TestMemSave_SuccessEnvelope` | `internal/mcp/mcp_test.go` |
 | REQ-310 | `TestMemSearch_NoProjectAutoDetects`, `TestMemSearch_ExplicitProjectForwarded` | `internal/mcp/mcp_test.go` |
 | REQ-311 | `TestMemSearch_KnownProjectSucceeds`, `TestMemSearch_UnknownProjectError` | `internal/mcp/mcp_test.go` |
-| REQ-312 | `TestAdminSchema_ProjectRequired`, `TestMemDelete_MissingProjectError` | `internal/mcp/mcp_test.go` |
+| REQ-312 | `TestAdminToolsSchema_OmitsProject` | `internal/mcp/mcp_test.go` |
 | REQ-313 | `TestMemCurrentProject_NormalResult`, `TestMemCurrentProject_AmbiguousNoError`, `TestMemCurrentProject_WarningCase3` | `internal/mcp/mcp_test.go` |
-| REQ-314 | `TestAllTools_ResponseEnvelopeFields`, `TestErrorEnvelope_IncludesAvailableProjects` | `internal/mcp/mcp_test.go` |
+| REQ-314 | `TestAllTools_ReadResponseEnvelope_WithAssertions`, `TestErrorEnvelope_IncludesAvailableProjects` | `internal/mcp/mcp_test.go` |
 | REQ-315 | `TestProjectExists_Known`, `TestProjectExists_Unknown`, `TestProjectExists_EmptyStore` | `internal/store/store_test.go` |

@@ -583,13 +583,13 @@ This envelope is used consistently by `/sync/push` validation/control failures a
 
 ## MCP Project Resolution
 
-Engram resolves the project at MCP tool call time from the **server process working directory** (cwd), not at MCP startup and not from arbitrary LLM arguments. This eliminates project drift caused by agents supplying different names for the same repo.
+Engram resolves the project at MCP tool call time. The default source is the **server process working directory** (cwd), not MCP startup state, but some write tools have stronger context: `mem_session_start(directory=...)` resolves from the provided directory, and `mem_save` may use a validated explicit `project` or an existing `session_id` project before falling back to cwd detection. The explicit field is treated as a **validated selection**, not a free-form creation hint. This eliminates project drift caused by agents supplying different names for the same repo.
 
 ### Detection algorithm
 
 | Case | Condition | Source | Project |
 |------|-----------|--------|---------|
-| 1 | `.engram/config.json` exists at the repo root, or at cwd outside git | `config` | `project_name` from config |
+| 1 | nearest `.engram/config.json` exists within the enclosing git root, or at cwd outside git | `config` | `project_name` from config |
 | 2 | cwd is a git root with `origin` remote | `git_remote` | repo name from remote URL |
 | 3 | cwd is inside a git repo (subdirectory) | `git_root` | git root's directory basename |
 | 4 | cwd has exactly one git-repo child | `git_child` | child repo name (warning included) |
@@ -617,13 +617,28 @@ Exceptions:
 - `mem_current_project` returns detection fields directly (`project`, `project_source`, `project_path`, `cwd`, `available_projects`, optional `warning` / `error_hint`) and does not wrap them in `result`.
 - `mem_doctor` returns the same JSON report shape as `engram doctor --json`; it uses read-project resolution before running diagnostics but does not wrap the report in the common MCP envelope.
 
-### Write tools (cwd-detected project, limited recovery override)
+### Write tools (explicit/session/cwd project resolution)
 
-`mem_session_start`, `mem_session_end`, `mem_session_summary`, and `mem_capture_passive` auto-detect project from cwd. Any `project` argument the LLM sends is ignored.
+`mem_session_start` resolves from its explicit `directory` argument when supplied; otherwise it auto-detects from cwd. `mem_session_end`, `mem_session_summary`, and `mem_capture_passive` auto-detect project from cwd. Any `project` argument the LLM sends to these tools is ignored.
 
 `mem_update` uses ID-based updates and auto-detects project only for response envelope metadata. Its public schema does not expose `project`; raw legacy clients may still send a non-empty `project` argument, and the handler tolerates it as an observation project update for compatibility.
 
-`mem_save` and `mem_save_prompt` also auto-detect project from cwd by default, but they accept one narrow recovery override: after a previous `ambiguous_project` error, the agent may retry with `project=<one of available_projects>` and `project_choice_reason=user_selected_after_ambiguous_project`. Without that exact reason, LLM-supplied `project` is ignored so routine writes cannot drift across project names.
+`mem_save` resolves writes by precedence: validated explicit `project`, project already associated with `session_id`, repo/cwd detection (nearest `.engram/config.json` within the enclosing git root, git remote/root/child), then directory-basename fallback.
+
+Guardrails:
+- Invalid explicit `project` names fail loudly instead of silently falling back.
+- Valid-looking explicit `project` names are accepted only when backed by known context: an existing local project in the store, a matching existing session project, the nearest resolvable `.engram/config.json`, or exact ambiguous-project recovery after the user selected one available project.
+- An unbacked explicit `project` fails loudly and does not create a new bucket.
+- If a non-empty `session_id` is supplied and no session exists, `mem_save` fails with a structured error and does not write.
+- If both explicit `project` and `session_id` are supplied, they must resolve to the same normalized project or `mem_save` fails with a structured error and does not write.
+- `project_choice_reason=user_selected_after_ambiguous_project` is only honored when cwd resolution is actually ambiguous. On a non-ambiguous cwd, stale recovery flags do not override explicit-project precedence or session mismatch validation.
+- If ambiguous-project recovery is active, `project` must exactly match one of the previously returned `available_projects`; invented or normalized guesses are rejected.
+- Exact ambiguous-project choices can still fail with `project_name_collision` when multiple available names collapse to the same stored project bucket after normalization. Rename or disambiguate the colliding projects before retrying.
+- Ordinary explicit `mem_save(project=...)` calls can also fail with `project_name_collision` when the raw explicit name collapses into an existing config-backed, session-backed, or store-backed project bucket, such as `foo--bar` colliding with `foo-bar`.
+
+For monorepos, detection now honors the **nearest** `.engram/config.json` at or below the enclosing git root. That lets `repo/backend/.engram/config.json` and `repo/frontend/.engram/config.json` behave as independent projects without letting `~/.engram/config.json` leak into nested workspaces.
+
+`mem_save_prompt` keeps the older cwd/default behavior by default and only uses `project` for the narrow ambiguous-project recovery override: after a previous `ambiguous_project` error, the agent may retry with `project=<one of available_projects>` and `project_choice_reason=user_selected_after_ambiguous_project`.
 
 ### Read tools (optional project override)
 
@@ -729,6 +744,7 @@ Save comprehensive end-of-session summary:
 ## Instructions
 ## Discoveries
 ## Accomplished
+## Next Steps
 ## Relevant Files
 ```
 
@@ -900,7 +916,7 @@ All project names are normalized on write and read: **lowercase**, **trimmed**, 
 ### Auto-detection
 
 MCP tools resolve project names at call time using the shared detection chain:
-1. `.engram/config.json` `project_name` at the repo root, or at cwd outside git
+1. Nearest `.engram/config.json` `project_name` within the enclosing git root, or at cwd outside git
 2. Git remote origin URL (extracts repo name)
 3. Git repository root directory name
 4. Single git-repo child of cwd
@@ -990,7 +1006,7 @@ Instead of a separate LLM service, the agent itself compresses observations. The
 **Two levels:**
 
 - **Per-action** (`mem_save`): Structured summaries (What/Why/Where/Learned)
-- **Session summary** (`mem_session_summary`): Comprehensive end-of-session summary (Goal/Instructions/Discoveries/Accomplished/Files)
+- **Session summary** (`mem_session_summary`): Comprehensive end-of-session summary (Goal/Instructions/Discoveries/Accomplished/Next Steps/Files)
 
 ### No Raw Tool-Call Auto-Capture
 

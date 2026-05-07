@@ -254,6 +254,95 @@ func TestDetectProjectFull_ConfigFromRepoRootOverridesRemoteFromSubdir(t *testin
 	}
 }
 
+func TestDetectProjectFull_NearestSubprojectConfigOverridesRepoRoot(t *testing.T) {
+	root := t.TempDir()
+	initGit(t, root)
+
+	rootConfigDir := filepath.Join(root, ".engram")
+	if err := os.MkdirAll(rootConfigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rootConfigDir, "config.json"), []byte(`{"project_name":"mono-root"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	backend := filepath.Join(root, "backend")
+	backendConfigDir := filepath.Join(backend, ".engram")
+	if err := os.MkdirAll(backendConfigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(backendConfigDir, "config.json"), []byte(`{"project_name":"backend-service"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	backendSubdir := filepath.Join(backend, "internal", "handlers")
+	if err := os.MkdirAll(backendSubdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	res := DetectProjectFull(backendSubdir)
+
+	if res.Error != nil {
+		t.Fatalf("unexpected config detection error: %v", res.Error)
+	}
+	if res.Source != SourceConfig || res.Project != "backend-service" {
+		t.Fatalf("expected nearest subproject config, got source=%q project=%q", res.Source, res.Project)
+	}
+	gotPath, _ := filepath.EvalSymlinks(res.Path)
+	wantPath, _ := filepath.EvalSymlinks(backend)
+	if gotPath != wantPath {
+		t.Fatalf("expected backend config path %q, got %q", wantPath, gotPath)
+	}
+}
+
+func TestDetectProjectFull_MonorepoSubprojectConfigsResolveIndependently(t *testing.T) {
+	root := t.TempDir()
+	initGit(t, root)
+
+	backend := filepath.Join(root, "backend")
+	frontend := filepath.Join(root, "frontend")
+	for path, projectName := range map[string]string{
+		backend:  "backend-app",
+		frontend: "frontend-app",
+	} {
+		configDir := filepath.Join(path, ".engram")
+		if err := os.MkdirAll(configDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(`{"project_name":"`+projectName+`"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	backendSubdir := filepath.Join(backend, "cmd", "api")
+	frontendSubdir := filepath.Join(frontend, "src", "app")
+	if err := os.MkdirAll(backendSubdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(frontendSubdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	backendRes := DetectProjectFull(backendSubdir)
+	frontendRes := DetectProjectFull(frontendSubdir)
+
+	if backendRes.Error != nil || frontendRes.Error != nil {
+		t.Fatalf("unexpected monorepo config errors: backend=%v frontend=%v", backendRes.Error, frontendRes.Error)
+	}
+	if backendRes.Source != SourceConfig || backendRes.Project != "backend-app" {
+		t.Fatalf("expected backend config project, got %+v", backendRes)
+	}
+	if frontendRes.Source != SourceConfig || frontendRes.Project != "frontend-app" {
+		t.Fatalf("expected frontend config project, got %+v", frontendRes)
+	}
+	backendPath, _ := filepath.EvalSymlinks(backendRes.Path)
+	frontendPath, _ := filepath.EvalSymlinks(frontendRes.Path)
+	wantBackend, _ := filepath.EvalSymlinks(backend)
+	wantFrontend, _ := filepath.EvalSymlinks(frontend)
+	if backendPath != wantBackend || frontendPath != wantFrontend {
+		t.Fatalf("expected independent subproject roots, got backend=%q frontend=%q", backendRes.Path, frontendRes.Path)
+	}
+}
+
 func TestDetectProjectFull_InvalidConfigFailsClearly(t *testing.T) {
 	dir := t.TempDir()
 	configDir := filepath.Join(dir, ".engram")
@@ -328,6 +417,40 @@ func TestDetectProjectFull_InvalidRepoConfigFromSubdirFailsClearly(t *testing.T)
 	wantPath, _ := filepath.EvalSymlinks(root)
 	if got, want := gotPath, wantPath; got != want {
 		t.Fatalf("expected invalid config path %q, got %q", want, got)
+	}
+}
+
+func TestDetectProjectFull_DoesNotLeakHomeAncestorConfigIntoNestedRepo(t *testing.T) {
+	homeLike := t.TempDir()
+	homeConfigDir := filepath.Join(homeLike, ".engram")
+	if err := os.MkdirAll(homeConfigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(homeConfigDir, "config.json"), []byte(`{"project_name":"home-leak"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	workspace := filepath.Join(homeLike, "workspaces", "eng")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initGit(t, workspace)
+
+	projectDir := filepath.Join(workspace, "backend", "pkg")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	res := DetectProjectFull(projectDir)
+
+	if res.Error != nil {
+		t.Fatalf("unexpected detection error: %v", res.Error)
+	}
+	if res.Source != SourceGitRoot {
+		t.Fatalf("expected git-root fallback inside nested repo, got source=%q project=%q", res.Source, res.Project)
+	}
+	if res.Project != strings.ToLower(filepath.Base(workspace)) {
+		t.Fatalf("expected nested repo name %q, got %q", strings.ToLower(filepath.Base(workspace)), res.Project)
 	}
 }
 
