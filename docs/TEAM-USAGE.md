@@ -9,7 +9,7 @@ Engram works for both solo workflows and shared team memory. The important thing
 ## The Mental Model
 
 - `scope: project` = shared working memory for the project
-- `scope: personal` = your private workspace inside Engram
+- `scope: personal` = your personal workspace inside Engram (not a hard privacy boundary; see “Scope and Sync” — privacy requires separate storage/sync targets)
 
 Ask one question before saving:
 
