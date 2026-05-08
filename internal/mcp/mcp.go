@@ -339,6 +339,9 @@ Examples:
 				mcp.WithString("project_choice_reason",
 					mcp.Description("Must be user_selected_after_ambiguous_project, and only after the user explicitly chose one of available_projects from an ambiguous_project error."),
 				),
+				mcp.WithString("recovery_token",
+					mcp.Description("Short-lived token returned by an ambiguous_project error. Required with project_choice_reason=user_selected_after_ambiguous_project."),
+				),
 				mcp.WithBoolean("capture_prompt",
 					mcp.Description("Automatically capture the current user prompt when available (default: true). Set false for SDD artifacts or automated saves."),
 				),
@@ -452,6 +455,9 @@ Examples:
 				),
 				mcp.WithString("project_choice_reason",
 					mcp.Description("Must be user_selected_after_ambiguous_project, and only after the user explicitly chose one of available_projects from an ambiguous_project error."),
+				),
+				mcp.WithString("recovery_token",
+					mcp.Description("Short-lived token returned by an ambiguous_project error. Required with project_choice_reason=user_selected_after_ambiguous_project."),
 				),
 			),
 			queuedWriteHandler(writeQueue, handleSavePrompt(s, cfg, activity)),
@@ -1022,13 +1028,24 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		projectChoice, _ := req.GetArguments()["project"].(string)
 		_, explicitProjectProvided := req.GetArguments()["project"]
 		projectChoiceReason, _ := req.GetArguments()["project_choice_reason"].(string)
+		recoveryToken, _ := req.GetArguments()["recovery_token"].(string)
 		capturePrompt := boolArg(req, "capture_prompt", true)
+		recoverySessionID := sessionID
+		if strings.TrimSpace(recoverySessionID) == "" {
+			recoverySessionID = defaultSessionID("")
+		}
+		validateRecoveryToken := func(res projectpkg.DetectionResult, choice string) (bool, bool) {
+			if strings.TrimSpace(recoveryToken) == "" {
+				return false, false
+			}
+			return true, activity.ValidateAmbiguousProjectRecoveryToken(recoverySessionID, recoveryToken, strings.TrimSpace(choice), res.AvailableProjects, res.Path)
+		}
 
 		// Resolve write project using the full MCP precedence: explicit request,
 		// existing session association, repo config/directory detection, then cwd fallback.
-		detRes, err := resolveSaveWriteProject(s, projectChoice, explicitProjectProvided, projectChoiceReason, sessionID)
+		detRes, err := resolveSaveWriteProject(s, projectChoice, explicitProjectProvided, projectChoiceReason, sessionID, validateRecoveryToken)
 		if err != nil {
-			return writeProjectErrorResult(detRes, err), nil
+			return writeProjectErrorResult(activity, recoverySessionID, detRes, err), nil
 		}
 		project := detRes.Project
 
@@ -1271,10 +1288,21 @@ func handleSavePrompt(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 		sessionID, _ := req.GetArguments()["session_id"].(string)
 		projectChoice, _ := req.GetArguments()["project"].(string)
 		projectChoiceReason, _ := req.GetArguments()["project_choice_reason"].(string)
+		recoveryToken, _ := req.GetArguments()["recovery_token"].(string)
+		recoverySessionID := sessionID
+		if strings.TrimSpace(recoverySessionID) == "" {
+			recoverySessionID = defaultSessionID("")
+		}
+		validateRecoveryToken := func(res projectpkg.DetectionResult, choice string) (bool, bool) {
+			if strings.TrimSpace(recoveryToken) == "" {
+				return false, false
+			}
+			return true, activity.ValidateAmbiguousProjectRecoveryToken(recoverySessionID, recoveryToken, strings.TrimSpace(choice), res.AvailableProjects, res.Path)
+		}
 
-		detRes, err := resolveWriteProjectWithChoice(projectChoice, projectChoiceReason)
+		detRes, err := resolveWriteProjectWithChoice(projectChoice, projectChoiceReason, validateRecoveryToken)
 		if err != nil {
-			return writeProjectErrorResult(detRes, err), nil
+			return writeProjectErrorResult(activity, recoverySessionID, detRes, err), nil
 		}
 		project, _ := store.NormalizeProject(detRes.Project)
 
@@ -1556,7 +1584,7 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		// Auto-detect project from cwd; fail fast on ambiguous (REQ-308, REQ-309)
 		detRes, err := resolveWriteProject()
 		if err != nil {
-			return writeProjectErrorResult(detRes, err), nil
+			return writeProjectErrorResult(nil, "", detRes, err), nil
 		}
 		project, _ := store.NormalizeProject(detRes.Project)
 
@@ -1596,7 +1624,7 @@ func handleSessionStart(s *store.Store, cfg MCPConfig, activity *SessionActivity
 
 		detRes, err := resolveSessionStartProject(resolvedDirectory)
 		if err != nil {
-			return writeProjectErrorResult(detRes, err), nil
+			return writeProjectErrorResult(nil, "", detRes, err), nil
 		}
 		project, _ := store.NormalizeProject(detRes.Project)
 
@@ -1637,7 +1665,7 @@ func handleSessionEnd(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 		detRes, err := resolveWriteProject()
 		if err != nil {
 			if errors.Is(err, projectpkg.ErrInvalidConfig) {
-				return writeProjectErrorResult(detRes, err), nil
+				return writeProjectErrorResult(nil, "", detRes, err), nil
 			}
 			// For session end, still complete the operation even if project resolution fails.
 			// Use basename fallback.
@@ -1670,7 +1698,7 @@ func handleCapturePassive(s *store.Store, cfg MCPConfig, activity *SessionActivi
 
 		detRes, err := resolveWriteProject()
 		if err != nil {
-			return writeProjectErrorResult(detRes, err), nil
+			return writeProjectErrorResult(nil, "", detRes, err), nil
 		}
 		project, _ := store.NormalizeProject(detRes.Project)
 
@@ -1914,6 +1942,24 @@ func (e *invalidProjectChoiceError) Error() string {
 	return "invalid project choice: " + e.Name
 }
 
+type missingRecoveryTokenError struct {
+	Name              string
+	AvailableProjects []string
+}
+
+func (e *missingRecoveryTokenError) Error() string {
+	return "missing ambiguous project recovery token for project choice: " + e.Name
+}
+
+type invalidRecoveryTokenError struct {
+	Name              string
+	AvailableProjects []string
+}
+
+func (e *invalidRecoveryTokenError) Error() string {
+	return "invalid ambiguous project recovery token for project choice: " + e.Name
+}
+
 type invalidExplicitProjectError struct {
 	Name   string
 	Reason string
@@ -1968,9 +2014,11 @@ func resolveWriteProject() (projectpkg.DetectionResult, error) {
 	return res, nil
 }
 
+type ambiguousRecoveryTokenValidator func(projectpkg.DetectionResult, string) (provided bool, valid bool)
+
 // resolveWriteProjectWithChoice preserves normal write resolution authority and
 // only uses an explicit project choice as a recovery path from ErrAmbiguousProject.
-func resolveWriteProjectWithChoice(projectChoice, reason string) (projectpkg.DetectionResult, error) {
+func resolveWriteProjectWithChoice(projectChoice, reason string, validateToken ambiguousRecoveryTokenValidator) (projectpkg.DetectionResult, error) {
 	res, err := resolveWriteProject()
 	if err == nil {
 		// Non-ambiguous config/git/autodetect remains authoritative. Ignore any
@@ -1999,6 +2047,22 @@ func resolveWriteProjectWithChoice(projectChoice, reason string) (projectpkg.Det
 			CollidingProjects: colliding,
 		}
 	}
+	provided, valid := false, false
+	if validateToken != nil {
+		provided, valid = validateToken(res, choice)
+	}
+	if !provided {
+		return res, &missingRecoveryTokenError{
+			Name:              choice,
+			AvailableProjects: res.AvailableProjects,
+		}
+	}
+	if !valid {
+		return res, &invalidRecoveryTokenError{
+			Name:              choice,
+			AvailableProjects: res.AvailableProjects,
+		}
+	}
 
 	res.Project = choice
 	res.Source = projectpkg.SourceUserSelectedAfterAmbiguousProject
@@ -2007,7 +2071,7 @@ func resolveWriteProjectWithChoice(projectChoice, reason string) (projectpkg.Det
 	return res, nil
 }
 
-func resolveSaveWriteProject(s *store.Store, projectChoice string, explicitProjectProvided bool, reason, sessionID string) (projectpkg.DetectionResult, error) {
+func resolveSaveWriteProject(s *store.Store, projectChoice string, explicitProjectProvided bool, reason, sessionID string, validateToken ambiguousRecoveryTokenValidator) (projectpkg.DetectionResult, error) {
 	trimmedSessionID := strings.TrimSpace(sessionID)
 	trimmedProjectChoice := strings.TrimSpace(projectChoice)
 	trimmedReason := strings.TrimSpace(reason)
@@ -2096,7 +2160,7 @@ func resolveSaveWriteProject(s *store.Store, projectChoice string, explicitProje
 			}
 			if errors.Is(cwdErr, projectpkg.ErrAmbiguousProject) {
 				if trimmedReason == projectpkg.SourceUserSelectedAfterAmbiguousProject {
-					return resolveWriteProjectWithChoice(projectChoice, reason)
+					return resolveWriteProjectWithChoice(projectChoice, reason, validateToken)
 				}
 				return cwdRes, cwdErr
 			}
@@ -2124,7 +2188,7 @@ func resolveSaveWriteProject(s *store.Store, projectChoice string, explicitProje
 	}
 
 	if trimmedReason == projectpkg.SourceUserSelectedAfterAmbiguousProject && trimmedProjectChoice != "" {
-		res, err := resolveWriteProjectWithChoice(projectChoice, reason)
+		res, err := resolveWriteProjectWithChoice(projectChoice, reason, validateToken)
 		if err != nil {
 			return res, err
 		}
@@ -2379,7 +2443,7 @@ func respondWithProject(res projectpkg.DetectionResult, text string, extra map[s
 	return mcp.NewToolResultText(string(out))
 }
 
-func writeProjectErrorResult(res projectpkg.DetectionResult, err error) *mcp.CallToolResult {
+func writeProjectErrorResult(activity *SessionActivity, sessionID string, res projectpkg.DetectionResult, err error) *mcp.CallToolResult {
 	code := "ambiguous_project"
 	if errors.Is(err, projectpkg.ErrInvalidConfig) {
 		code = "invalid_project_config"
@@ -2395,6 +2459,20 @@ func writeProjectErrorResult(res projectpkg.DetectionResult, err error) *mcp.Cal
 		return errorWithMeta("invalid_project_choice",
 			fmt.Sprintf("Project choice %q is not one of available_projects", choiceErr.Name),
 			choiceErr.AvailableProjects,
+		)
+	}
+	var missingTokenErr *missingRecoveryTokenError
+	if errors.As(err, &missingTokenErr) {
+		return errorWithMeta("missing_recovery_token",
+			fmt.Sprintf("project_choice_reason=user_selected_after_ambiguous_project for %q requires the recovery_token from the ambiguous_project error", missingTokenErr.Name),
+			missingTokenErr.AvailableProjects,
+		)
+	}
+	var invalidTokenErr *invalidRecoveryTokenError
+	if errors.As(err, &invalidTokenErr) {
+		return errorWithMeta("invalid_recovery_token",
+			fmt.Sprintf("recovery_token is invalid, stale, or not valid for selected project %q", invalidTokenErr.Name),
+			invalidTokenErr.AvailableProjects,
 		)
 	}
 	var explicitErr *invalidExplicitProjectError
@@ -2435,7 +2513,39 @@ func writeProjectErrorResult(res projectpkg.DetectionResult, err error) *mcp.Cal
 			res.AvailableProjects,
 		)
 	}
-	return errorWithMeta(code, fmt.Sprintf("Cannot determine project: %s", err), res.AvailableProjects)
+	result := errorWithMeta(code, fmt.Sprintf("Cannot determine project: %s", err), res.AvailableProjects)
+	if code == "ambiguous_project" && activity != nil {
+		if strings.TrimSpace(sessionID) == "" {
+			sessionID = defaultSessionID("")
+		}
+		addErrorMetadata(result, map[string]any{
+			"recovery_token":    activity.IssueAmbiguousProjectRecoveryToken(sessionID, res.AvailableProjects, res.Path),
+			"token_ttl_seconds": int(ambiguousProjectRecoveryTTL.Seconds()),
+		})
+	}
+	return result
+}
+
+func addErrorMetadata(result *mcp.CallToolResult, metadata map[string]any) {
+	if result == nil || len(result.Content) == 0 || len(metadata) == 0 {
+		return
+	}
+	text, ok := mcp.AsTextContent(result.Content[0])
+	if !ok {
+		return
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal([]byte(text.Text), &envelope); err != nil {
+		return
+	}
+	for k, v := range metadata {
+		envelope[k] = v
+	}
+	out, err := jsonMarshal(envelope)
+	if err != nil {
+		return
+	}
+	result.Content[0] = mcp.NewTextContent(string(out))
 }
 
 // errorWithMeta returns a structured tool error result with error_code,
@@ -2451,6 +2561,10 @@ func errorWithMeta(code, msg string, availableProjects []string) *mcp.CallToolRe
 		envelope["hint"] = "Ask the user to choose one of available_projects, then retry mem_save or mem_save_prompt with project and project_choice_reason=user_selected_after_ambiguous_project; alternatively cd into the target repo or add repo .engram/config.json."
 	case "invalid_project_choice":
 		envelope["hint"] = "Use exactly one of available_projects after asking the user, or cd into the target repo, or add repo .engram/config.json."
+	case "missing_recovery_token":
+		envelope["hint"] = "Retry with the recovery_token returned by the ambiguous_project error after the user selects one available_projects value."
+	case "invalid_recovery_token":
+		envelope["hint"] = "Request a fresh ambiguous_project recovery_token and retry with the same session, cwd context, and selected available_projects value before it expires."
 	case "unknown_project":
 		envelope["hint"] = "Use one of the available_projects values, or omit project to auto-detect."
 	case "invalid_project_config":
