@@ -1,10 +1,16 @@
 package mcp
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
+	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 )
+
+const ambiguousProjectRecoveryTTL = 5 * time.Minute
 
 // SessionActivity tracks tool call activity for save reminders and activity scores.
 type SessionActivity struct {
@@ -15,16 +21,24 @@ type SessionActivity struct {
 }
 
 type sessionState struct {
-	lastSaveAt    time.Time
-	toolCallCount int
-	saveCount     int
-	startedAt     time.Time
-	currentPrompt *promptContext
+	lastSaveAt     time.Time
+	toolCallCount  int
+	saveCount      int
+	startedAt      time.Time
+	currentPrompt  *promptContext
+	recoveryTokens map[string]*ambiguousProjectRecovery
 }
 
 type promptContext struct {
 	project string
 	content string
+}
+
+type ambiguousProjectRecovery struct {
+	availableProjects []string
+	contextPath       string
+	expiresAt         time.Time
+	selectedProject   string
 }
 
 // NewSessionActivity creates a new activity tracker with the given nudge threshold.
@@ -34,6 +48,14 @@ func NewSessionActivity(nudgeAfter time.Duration) *SessionActivity {
 		nudgeAfter: nudgeAfter,
 		now:        time.Now,
 	}
+}
+
+func generateRecoveryToken() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("fallback-%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
 }
 
 func (a *SessionActivity) getOrCreate(sessionID string) *sessionState {
@@ -58,6 +80,57 @@ func (a *SessionActivity) ClearSession(sessionID string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	delete(a.sessions, sessionID)
+}
+
+func (a *SessionActivity) IssueAmbiguousProjectRecoveryToken(sessionID string, availableProjects []string, contextPath string) string {
+	if a == nil {
+		return ""
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	s := a.getOrCreate(sessionID)
+	if s.recoveryTokens == nil {
+		s.recoveryTokens = make(map[string]*ambiguousProjectRecovery)
+	}
+	token := generateRecoveryToken()
+	projects := append([]string(nil), availableProjects...)
+	slices.Sort(projects)
+	s.recoveryTokens[token] = &ambiguousProjectRecovery{
+		availableProjects: projects,
+		contextPath:       filepath.Clean(contextPath),
+		expiresAt:         a.now().Add(ambiguousProjectRecoveryTTL),
+	}
+	return token
+}
+
+func (a *SessionActivity) ValidateAmbiguousProjectRecoveryToken(sessionID, token, selectedProject string, availableProjects []string, contextPath string) bool {
+	if a == nil || token == "" || selectedProject == "" {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	s, ok := a.sessions[sessionID]
+	if !ok || s.recoveryTokens == nil {
+		return false
+	}
+	recovery, ok := s.recoveryTokens[token]
+	if !ok {
+		return false
+	}
+	if !recovery.expiresAt.IsZero() && !a.now().Before(recovery.expiresAt) {
+		delete(s.recoveryTokens, token)
+		return false
+	}
+	projects := append([]string(nil), availableProjects...)
+	slices.Sort(projects)
+	if !slices.Equal(recovery.availableProjects, projects) || recovery.contextPath != filepath.Clean(contextPath) {
+		return false
+	}
+	if recovery.selectedProject == "" {
+		recovery.selectedProject = selectedProject
+		return true
+	}
+	return recovery.selectedProject == selectedProject
 }
 
 // RecordSave increments the save counter and updates lastSaveAt.
