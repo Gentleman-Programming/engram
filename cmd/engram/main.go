@@ -2733,6 +2733,10 @@ Environment:
   ENGRAM_CLOUD_MAX_PUSH_BYTES
                      Max cloud push payload bytes (default: 8388608)
   ENGRAM_CLOUD_TOKEN Bearer token required in authenticated cloud serve mode
+  ENGRAM_CLOUD_EXTRA_HEADERS
+                     Comma-separated extra HTTP headers on every cloud sync request
+                     Format: "Key: Value, Key2: Value2"
+                     Authorization key is rejected (use ENGRAM_CLOUD_TOKEN instead)
   ENGRAM_CLOUD_INSECURE_NO_AUTH
                      Set to 1 ONLY for local insecure cloud serve mode (no auth)
                      Cannot be combined with ENGRAM_CLOUD_TOKEN

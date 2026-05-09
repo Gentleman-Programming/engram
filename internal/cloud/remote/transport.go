@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -18,10 +19,76 @@ import (
 )
 
 type RemoteTransport struct {
-	baseURL    string
-	token      string
-	project    string
-	httpClient *http.Client
+	baseURL      string
+	token        string
+	project      string
+	httpClient   *http.Client
+	extraHeaders map[string]string
+}
+
+// parseExtraHeaders parses a comma-separated list of "Key: Value" pairs.
+// Returns nil if raw is empty or all pairs are malformed/rejected.
+// Uses strings.IndexByte so values may contain colons (e.g. URLs).
+func parseExtraHeaders(raw string) map[string]string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+
+	pairs := strings.Split(raw, ",")
+	result := make(map[string]string, len(pairs))
+
+	for _, pair := range pairs {
+		pair = strings.TrimSpace(pair)
+		idx := strings.IndexByte(pair, ':')
+		if idx < 0 {
+			log.Printf("[cloud] WARN ENGRAM_CLOUD_EXTRA_HEADERS: skipping malformed pair %q (missing colon)", pair)
+			continue
+		}
+		key := strings.TrimSpace(pair[:idx])
+		value := strings.TrimSpace(pair[idx+1:])
+		if key == "" {
+			continue
+		}
+		// Canonicalize the key (e.g. x-trace-id → X-Trace-Id).
+		canonical := http.CanonicalHeaderKey(key)
+		// Reject Authorization regardless of original casing.
+		if canonical == "Authorization" {
+			log.Printf("[cloud] WARN ENGRAM_CLOUD_EXTRA_HEADERS: refusing to override Authorization header")
+			continue
+		}
+		result[canonical] = value
+	}
+
+	if len(result) == 0 {
+		return nil
+	}
+
+	// Log successful parse: emit sorted canonical key names (never values).
+	keys := make([]string, 0, len(result))
+	for k := range result {
+		keys = append(keys, k)
+	}
+	sortStrings(keys)
+	log.Printf("[cloud] ENGRAM_CLOUD_EXTRA_HEADERS: applying %d extra header(s): %s", len(result), strings.Join(keys, ", "))
+
+	return result
+}
+
+// sortStrings sorts a slice of strings in-place (insertion sort — small N, avoids importing sort).
+func sortStrings(ss []string) {
+	for i := 1; i < len(ss); i++ {
+		for j := i; j > 0 && ss[j] < ss[j-1]; j-- {
+			ss[j], ss[j-1] = ss[j-1], ss[j]
+		}
+	}
+}
+
+// applyExtraHeaders sets extra headers on the request after authorization.
+// Ranging over a nil map is legal in Go (no-op).
+func applyExtraHeaders(req *http.Request, extraHeaders map[string]string) {
+	for k, v := range extraHeaders {
+		req.Header.Set(k, v)
+	}
 }
 
 type HTTPStatusError struct {
@@ -88,9 +155,10 @@ func NewRemoteTransport(baseURL, token, project string) (*RemoteTransport, error
 		return nil, fmt.Errorf("cloud: project is required")
 	}
 	return &RemoteTransport{
-		baseURL: normalized,
-		token:   strings.TrimSpace(token),
-		project: project,
+		baseURL:      normalized,
+		token:        strings.TrimSpace(token),
+		project:      project,
+		extraHeaders: parseExtraHeaders(os.Getenv("ENGRAM_CLOUD_EXTRA_HEADERS")),
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -156,6 +224,7 @@ func (rt *RemoteTransport) ReadManifest() (*engramsync.Manifest, error) {
 		return nil, fmt.Errorf("cloud: build manifest request: %w", err)
 	}
 	rt.setAuthorization(req)
+	applyExtraHeaders(req, rt.extraHeaders)
 
 	resp, err := rt.httpClient.Do(req)
 	if err != nil {
@@ -209,6 +278,7 @@ func (rt *RemoteTransport) WriteChunk(chunkID string, data []byte, entry engrams
 	}
 	req.Header.Set("Content-Type", "application/json")
 	rt.setAuthorization(req)
+	applyExtraHeaders(req, rt.extraHeaders)
 
 	resp, err := rt.httpClient.Do(req)
 	if err != nil {
@@ -232,6 +302,7 @@ func (rt *RemoteTransport) ReadChunk(chunkID string) ([]byte, error) {
 		return nil, fmt.Errorf("cloud: build pull request: %w", err)
 	}
 	rt.setAuthorization(req)
+	applyExtraHeaders(req, rt.extraHeaders)
 	resp, err := rt.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("cloud: pull chunk %s: %w", chunkID, err)
@@ -295,9 +366,10 @@ func (rt *RemoteTransport) PullMutations(_ int64, _ int) (*PullMutationsResponse
 // Unlike RemoteTransport (which handles chunk-level sync), this operates on the
 // mutation journal and supports cursor-based pull.
 type MutationTransport struct {
-	baseURL    string
-	token      string
-	httpClient *http.Client
+	baseURL      string
+	token        string
+	httpClient   *http.Client
+	extraHeaders map[string]string
 }
 
 // NewMutationTransport creates a MutationTransport. baseURL must be a valid http/https URL.
@@ -308,8 +380,9 @@ func NewMutationTransport(baseURL, token string) (*MutationTransport, error) {
 		return nil, err
 	}
 	return &MutationTransport{
-		baseURL: normalized,
-		token:   strings.TrimSpace(token),
+		baseURL:      normalized,
+		token:        strings.TrimSpace(token),
+		extraHeaders: parseExtraHeaders(os.Getenv("ENGRAM_CLOUD_EXTRA_HEADERS")),
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -337,6 +410,7 @@ func (mt *MutationTransport) PushMutations(entries []MutationEntry) ([]int64, er
 	}
 	req.Header.Set("Content-Type", "application/json")
 	mt.setAuthorization(req)
+	applyExtraHeaders(req, mt.extraHeaders)
 
 	resp, err := mt.httpClient.Do(req)
 	if err != nil {
@@ -368,6 +442,7 @@ func (mt *MutationTransport) PullMutations(sinceSeq int64, limit int) (*PullMuta
 		return nil, fmt.Errorf("cloud: build mutation pull request: %w", err)
 	}
 	mt.setAuthorization(req)
+	applyExtraHeaders(req, mt.extraHeaders)
 
 	resp, err := mt.httpClient.Do(req)
 	if err != nil {

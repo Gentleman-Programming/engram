@@ -1414,11 +1414,12 @@ Autosync is a background push/pull replication service that keeps your local Eng
 
 Autosync is **opt-in**. Set all three environment variables before starting `engram serve` or `engram mcp`:
 
-| Variable                | Required          | Description                                                             |
-| ----------------------- | ----------------- | ----------------------------------------------------------------------- |
-| `ENGRAM_CLOUD_AUTOSYNC` | Yes (exact `"1"`) | Enables autosync. Any other value disables it.                          |
-| `ENGRAM_CLOUD_TOKEN`    | Yes               | Bearer token for the cloud server.                                      |
-| `ENGRAM_CLOUD_SERVER`   | Yes               | Base URL of the cloud server (e.g. `https://cloud.engram.example.com`). |
+| Variable                     | Required          | Description                                                                             |
+| ----------------------------- | ----------------- | ---------------------------------------------------------------------------------------- |
+| `ENGRAM_CLOUD_AUTOSYNC`       | Yes (exact `"1"`) | Enables autosync. Any other value disables it.                                          |
+| `ENGRAM_CLOUD_TOKEN`          | Yes               | Bearer token for the cloud server.                                                      |
+| `ENGRAM_CLOUD_SERVER`         | Yes               | Base URL of the cloud server (e.g. `https://cloud.engram.example.com`).                 |
+| `ENGRAM_CLOUD_EXTRA_HEADERS`  | No                | Comma-separated extra HTTP headers on every cloud request. Authorization key rejected.  |
 
 Example:
 
@@ -1436,6 +1437,30 @@ engram mcp
 ```
 
 Missing `ENGRAM_CLOUD_TOKEN` or `ENGRAM_CLOUD_SERVER` logs an `ERROR` and disables autosync gracefully — `engram serve` or `engram mcp` still starts.
+
+### Optional: Extra HTTP Headers
+
+`ENGRAM_CLOUD_EXTRA_HEADERS` lets you attach additional HTTP headers to every cloud sync request — useful for trace IDs, tenant routing, or proxy authentication.
+
+**Format**: comma-separated `Key: Value` pairs.
+
+```bash
+ENGRAM_CLOUD_EXTRA_HEADERS="X-Tenant-ID: acme, X-Trace-Id: deploy-42" \
+ENGRAM_CLOUD_AUTOSYNC=1 \
+ENGRAM_CLOUD_TOKEN=your-token \
+ENGRAM_CLOUD_SERVER=https://cloud.engram.example.com \
+engram serve
+```
+
+**Rules**:
+- Headers are applied after `Authorization` and cannot shadow the bearer token.
+- The `Authorization` key is rejected at parse time and logged as a warning. Use `ENGRAM_CLOUD_TOKEN` for authentication.
+- Malformed pairs (missing `:`) are skipped with a warning; remaining pairs are applied.
+- Header values are never logged. Only key names appear in startup logs.
+- Values may contain colons (e.g. URLs); only the first `:` in each pair acts as the separator.
+- Header keys are canonicalized (e.g. `x-trace-id` → `X-Trace-Id`); duplicates collapse with last-value-wins.
+
+Unset or empty: no extra headers added.
 
 ### Autosync Phase Table
 
