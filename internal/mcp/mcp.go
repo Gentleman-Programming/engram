@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -361,9 +362,9 @@ Examples:
 				mcp.WithDestructiveHintAnnotation(false),
 				mcp.WithIdempotentHintAnnotation(false),
 				mcp.WithOpenWorldHintAnnotation(false),
-				mcp.WithNumber("id",
-					mcp.Required(),
-					mcp.Description("Observation ID to update"),
+	mcp.WithString("id",
+			mcp.Required(),
+			mcp.Description("Observation ID to update (pass as string, e.g. \"10\")"),
 				),
 				mcp.WithString("title",
 					mcp.Description("New title"),
@@ -421,9 +422,9 @@ Examples:
 				mcp.WithDestructiveHintAnnotation(true),
 				mcp.WithIdempotentHintAnnotation(false),
 				mcp.WithOpenWorldHintAnnotation(false),
-				mcp.WithNumber("id",
-					mcp.Required(),
-					mcp.Description("Observation ID to delete"),
+	mcp.WithString("id",
+			mcp.Required(),
+			mcp.Description("Observation ID to delete (pass as string, e.g. \"10\")"),
 				),
 				mcp.WithBoolean("hard_delete",
 					mcp.Description("If true, permanently deletes the observation"),
@@ -516,9 +517,9 @@ Examples:
 				mcp.WithDestructiveHintAnnotation(false),
 				mcp.WithIdempotentHintAnnotation(true),
 				mcp.WithOpenWorldHintAnnotation(false),
-				mcp.WithNumber("observation_id",
-					mcp.Required(),
-					mcp.Description("The observation ID to center the timeline on (from mem_search results)"),
+	mcp.WithString("observation_id",
+			mcp.Required(),
+			mcp.Description("The observation ID to center the timeline on (pass as string, e.g. \"10\")"),
 				),
 				mcp.WithNumber("before",
 					mcp.Description("Number of observations to show before the focus (default: 5)"),
@@ -544,9 +545,9 @@ Examples:
 				mcp.WithDestructiveHintAnnotation(false),
 				mcp.WithIdempotentHintAnnotation(true),
 				mcp.WithOpenWorldHintAnnotation(false),
-				mcp.WithNumber("id",
-					mcp.Required(),
-					mcp.Description("The observation ID to retrieve"),
+	mcp.WithString("id",
+			mcp.Required(),
+			mcp.Description("The observation ID to retrieve (pass as string, e.g. \"10\")"),
 				),
 			),
 			handleGetObservation(s),
@@ -824,13 +825,13 @@ ERROR: Returns IsError=true if IDs are unknown, relation is invalid, or cross-pr
 				mcp.WithDestructiveHintAnnotation(false),
 				mcp.WithIdempotentHintAnnotation(true),
 				mcp.WithOpenWorldHintAnnotation(false),
-				mcp.WithNumber("memory_id_a",
-					mcp.Required(),
-					mcp.Description("Integer id of the first observation (from mem_search #id)"),
-				),
-				mcp.WithNumber("memory_id_b",
-					mcp.Required(),
-					mcp.Description("Integer id of the second observation (from mem_search #id)"),
+	mcp.WithString("memory_id_a",
+			mcp.Required(),
+			mcp.Description("Integer id of the first observation (pass as string, e.g. \"10\")"),
+		),
+		mcp.WithString("memory_id_b",
+			mcp.Required(),
+			mcp.Description("Integer id of the second observation (pass as string, e.g. \"10\")"),
 				),
 				mcp.WithString("relation",
 					mcp.Required(),
@@ -1816,17 +1817,15 @@ func handleJudge(s *store.Store, activity *SessionActivity) server.ToolHandlerFu
 // calls JudgeBySemantic. Returns the persisted relation's sync_id."
 func handleCompare(s *store.Store, _ *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		// --- required numeric IDs ---
-		rawA, okA := req.GetArguments()["memory_id_a"].(float64)
-		rawB, okB := req.GetArguments()["memory_id_b"].(float64)
-		if !okA {
-			return mcp.NewToolResultError("memory_id_a is required (integer observation id)"), nil
-		}
-		if !okB {
-			return mcp.NewToolResultError("memory_id_b is required (integer observation id)"), nil
-		}
-		idA := int64(rawA)
-		idB := int64(rawB)
+	// --- required numeric IDs (accept both string and number) ---
+	idA := int64(intArg(req, "memory_id_a", 0))
+	idB := int64(intArg(req, "memory_id_b", 0))
+	if idA == 0 {
+		return mcp.NewToolResultError("memory_id_a is required (integer observation id)"), nil
+	}
+	if idB == 0 {
+		return mcp.NewToolResultError("memory_id_b is required (integer observation id)"), nil
+	}
 
 		// --- required string fields ---
 		relation, _ := req.GetArguments()["relation"].(string)
@@ -2600,11 +2599,20 @@ func defaultSessionID(project string) string {
 }
 
 func intArg(req mcp.CallToolRequest, key string, defaultVal int) int {
-	v, ok := req.GetArguments()[key].(float64)
-	if !ok {
-		return defaultVal
+	args := req.GetArguments()
+	v, ok := args[key].(float64)
+	if ok {
+		return int(v)
 	}
-	return int(v)
+	// Fallback: accept string values (LLMs sometimes send "10" instead of 10)
+	s, ok := args[key].(string)
+	if ok {
+		n, err := strconv.Atoi(s)
+		if err == nil {
+			return n
+		}
+	}
+	return defaultVal
 }
 
 func boolArg(req mcp.CallToolRequest, key string, defaultVal bool) bool {
