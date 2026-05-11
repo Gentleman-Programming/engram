@@ -176,7 +176,7 @@ Alternatives: `cd` into the target repo before starting the MCP server, or add r
 
 **Read tools** (`mem_search`, `mem_context`, `mem_stats`, `mem_timeline`, `mem_doctor`) accept an optional `project` override validated against the store. Omit it to auto-detect. `mem_get_observation` is ID-based and does not accept a `project` override.
 
-**Cross-project search:** `mem_search` accepts an optional `all_projects` boolean parameter. When `true`, it searches across all projects instead of restricting to the current auto-detected project. When `false` or omitted, it searches only in the current auto-detected project. `all_projects` cannot be combined with `project`; if both are provided, the tool returns an `invalid_arguments` error. Useful when you need to recall context from a related project while working in another.
+**Cross-project search:** `mem_search` accepts an optional `all_projects` boolean parameter. When `true`, it searches across all projects instead of restricting to the current auto-detected project. When `false` or omitted, behavior is unchanged: use `project` if provided, otherwise auto-detect. `all_projects` cannot be combined with `project`; if both are provided, the tool returns an `invalid_arguments` error. Useful when you need to recall context from a related project while working in another.
 
 ---
 
