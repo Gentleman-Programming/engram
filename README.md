@@ -20,7 +20,7 @@
 
 ---
 
-> **engram** `/ˈen.ɡræm/` — *neuroscience*: the physical trace of a memory in the brain.
+> **engram** `/ˈen.ɡræm/` — _neuroscience_: the physical trace of a memory in the brain.
 
 Your AI coding agent forgets everything when the session ends. Engram gives it a brain.
 
@@ -46,19 +46,31 @@ Windows, Linux, and other install methods → [docs/INSTALLATION.md](docs/INSTAL
 
 ### Setup Your Agent
 
-| Agent | One-liner |
-|-------|-----------|
-| Claude Code | `claude plugin marketplace add Gentleman-Programming/engram && claude plugin install engram` |
-| Pi | `pi install npm:gentle-engram && pi install npm:pi-mcp-adapter && pi-engram init` |
-| OpenCode | `engram setup opencode` |
-| Gemini CLI | `engram setup gemini-cli` |
-| Codex | `engram setup codex` |
-| VS Code | `code --add-mcp '{"name":"engram","command":"engram","args":["mcp"]}'` |
-| Cursor / Windsurf / Any MCP | See [docs/AGENT-SETUP.md](docs/AGENT-SETUP.md) |
+| Agent                       | One-liner                                                                                    |
+| --------------------------- | -------------------------------------------------------------------------------------------- |
+| Claude Code                 | `claude plugin marketplace add Gentleman-Programming/engram && claude plugin install engram` |
+| Pi                          | `pi install npm:gentle-engram && pi install npm:pi-mcp-adapter && pi-engram init`            |
+| OpenCode                    | `engram setup opencode`                                                                      |
+| Gemini CLI                  | `engram setup gemini-cli`                                                                    |
+| Codex                       | `engram setup codex`                                                                         |
+| VS Code                     | `code --add-mcp '{"name":"engram","command":"engram","args":["mcp"]}'`                       |
+| Cursor / Windsurf / Any MCP | See [docs/AGENT-SETUP.md](docs/AGENT-SETUP.md)                                               |
 
 Full per-agent config, Memory Protocol, and compaction survival → [docs/AGENT-SETUP.md](docs/AGENT-SETUP.md)
 
 That's it. No Node.js, no Python, no Docker. **One binary, one SQLite file.**
+
+### Pi Package
+
+Engram has a first-class Pi package: [`gentle-engram`](plugin/pi/README.md).
+
+```bash
+pi install npm:gentle-engram
+pi install npm:pi-mcp-adapter
+pi-engram init
+```
+
+It gives Pi persistent project memory, compaction recovery, and shared memory with other MCP agents through the same local-or-cloud Engram brain. The package is part of the Gentleman Programming agentic-coding ecosystem alongside Gentle-AI, SDD, skills, and Engram Cloud.
 
 ## How It Works
 
@@ -73,13 +85,13 @@ Full details on session lifecycle, topic keys, and memory hygiene → [docs/ARCH
 
 ## MCP Tools (19)
 
-| Category | Tools |
-|----------|-------|
-| **Save & Update** | `mem_save`, `mem_update`, `mem_delete`, `mem_suggest_topic_key` |
-| **Search & Retrieve** | `mem_search`, `mem_context`, `mem_timeline`, `mem_get_observation` |
-| **Session Lifecycle** | `mem_session_start`, `mem_session_end`, `mem_session_summary` |
-| **Conflict Surfacing** | `mem_judge`, `mem_compare` |
-| **Utilities** | `mem_save_prompt`, `mem_stats`, `mem_capture_passive`, `mem_merge_projects`, `mem_current_project`, `mem_doctor` |
+| Category               | Tools                                                                                                            |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| **Save & Update**      | `mem_save`, `mem_update`, `mem_delete`, `mem_suggest_topic_key`                                                  |
+| **Search & Retrieve**  | `mem_search`, `mem_context`, `mem_timeline`, `mem_get_observation`                                               |
+| **Session Lifecycle**  | `mem_session_start`, `mem_session_end`, `mem_session_summary`                                                    |
+| **Conflict Surfacing** | `mem_judge`, `mem_compare`                                                                                       |
+| **Utilities**          | `mem_save_prompt`, `mem_stats`, `mem_capture_passive`, `mem_merge_projects`, `mem_current_project`, `mem_doctor` |
 
 Full tool reference with parameters → [DOCS.md#mcp-tools-19-tools](DOCS.md#mcp-tools-19-tools)
 
@@ -170,6 +182,7 @@ For authenticated mode, upgrade flow, dashboard behavior, reason codes, and full
 Try the new memory-conflict-surfacing features in **complete isolation** from your existing engram setup. Docker uses non-default ports + a separate data dir + a beta-only token, so your prod cloud and `~/.engram/` are untouched. Cleanup is one command.
 
 **What's in the beta**:
+
 - 🔄 Cloud sync of conflict relations cross-machine
 - 🔍 `engram conflicts` CLI + HTTP API for retroactive audit + scan
 - 🧠 `--semantic` scan that uses **your existing Claude Code or OpenCode CLI** to judge FTS5 conflict candidates with LLM reasoning — **$0 if you're on a Pro/Max/Plus subscription**
@@ -287,42 +300,42 @@ Your production engram is fully untouched throughout.
 
 ## CLI Reference
 
-| Command | Description |
-|---------|-------------|
-| `engram setup [agent]` | Install agent integration |
-| `engram serve [port]` | Start HTTP API (default: 7437) |
-| `engram mcp [--tools=PROFILE]` | Start MCP server (stdio transport) |
-| `engram tui` | Launch terminal UI |
-| `engram search <query>` | Search memories |
-| `engram save <title> <msg>` | Save a memory |
-| `engram timeline <obs_id>` | Chronological context |
-| `engram context [project]` | Recent session context |
-| `engram stats` | Memory statistics |
-| `engram export [file]` | Export to JSON |
-| `engram import <file>` | Import from JSON |
-| `engram sync` | Git sync export/import |
-| `engram cloud <subcommand>` | Opt-in cloud config/status/enrollment + cloud runtime (`serve`) |
-| `engram projects list\|consolidate\|prune` | Manage project names |
-| `engram obsidian-export` | Export to Obsidian vault (beta) |
-| `engram version` | Show version |
+| Command                                    | Description                                                     |
+| ------------------------------------------ | --------------------------------------------------------------- |
+| `engram setup [agent]`                     | Install agent integration                                       |
+| `engram serve [port]`                      | Start HTTP API (default: 7437)                                  |
+| `engram mcp [--tools=PROFILE]`             | Start MCP server (stdio transport)                              |
+| `engram tui`                               | Launch terminal UI                                              |
+| `engram search <query>`                    | Search memories                                                 |
+| `engram save <title> <msg>`                | Save a memory                                                   |
+| `engram timeline <obs_id>`                 | Chronological context                                           |
+| `engram context [project]`                 | Recent session context                                          |
+| `engram stats`                             | Memory statistics                                               |
+| `engram export [file]`                     | Export to JSON                                                  |
+| `engram import <file>`                     | Import from JSON                                                |
+| `engram sync`                              | Git sync export/import                                          |
+| `engram cloud <subcommand>`                | Opt-in cloud config/status/enrollment + cloud runtime (`serve`) |
+| `engram projects list\|consolidate\|prune` | Manage project names                                            |
+| `engram obsidian-export`                   | Export to Obsidian vault (beta)                                 |
+| `engram version`                           | Show version                                                    |
 
 Full CLI with all flags → [docs/ARCHITECTURE.md#cli-reference](docs/ARCHITECTURE.md#cli-reference)
 
 ## Documentation
 
-| Doc | Description |
-|-----|-------------|
-| [Installation](docs/INSTALLATION.md) | All install methods + platform support |
-| [Engram Cloud](docs/engram-cloud/README.md) | Cloud landing page, quickstart, branding, and deep links |
-| [Agent Setup](docs/AGENT-SETUP.md) | Per-agent configuration + Memory Protocol |
-| [Codebase Guide](docs/CODEBASE-GUIDE.md) | Guide to the repository structure, flows, and implementation landmarks |
-| [Architecture](docs/ARCHITECTURE.md) | How it works + MCP tools + project structure |
-| [Plugins](docs/PLUGINS.md) | OpenCode & Claude Code plugin details |
-| [Comparison](docs/COMPARISON.md) | Why Engram vs claude-mem |
-| [Intended Usage](docs/intended-usage.md) | Mental model — how Engram is meant to be used |
-| [Obsidian Brain](docs/beta/obsidian-brain.md) | Export memories as Obsidian knowledge graph (beta) |
-| [Contributing](CONTRIBUTING.md) | Contribution workflow + standards |
-| [Full Docs](DOCS.md) | Complete technical reference |
+| Doc                                           | Description                                                            |
+| --------------------------------------------- | ---------------------------------------------------------------------- |
+| [Installation](docs/INSTALLATION.md)          | All install methods + platform support                                 |
+| [Engram Cloud](docs/engram-cloud/README.md)   | Cloud landing page, quickstart, branding, and deep links               |
+| [Agent Setup](docs/AGENT-SETUP.md)            | Per-agent configuration + Memory Protocol                              |
+| [Codebase Guide](docs/CODEBASE-GUIDE.md)      | Guide to the repository structure, flows, and implementation landmarks |
+| [Architecture](docs/ARCHITECTURE.md)          | How it works + MCP tools + project structure                           |
+| [Plugins](docs/PLUGINS.md)                    | OpenCode & Claude Code plugin details                                  |
+| [Comparison](docs/COMPARISON.md)              | Why Engram vs claude-mem                                               |
+| [Intended Usage](docs/intended-usage.md)      | Mental model — how Engram is meant to be used                          |
+| [Obsidian Brain](docs/beta/obsidian-brain.md) | Export memories as Obsidian knowledge graph (beta)                     |
+| [Contributing](CONTRIBUTING.md)               | Contribution workflow + standards                                      |
+| [Full Docs](DOCS.md)                          | Complete technical reference                                           |
 
 > **Dashboard contributors**: if you modify `.templ` files in `internal/cloud/dashboard/`, run `make templ` to regenerate before committing. See [DOCS.md — Dashboard templ regeneration](DOCS.md#dashboard-templ-regeneration).
 
