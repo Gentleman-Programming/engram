@@ -2207,8 +2207,8 @@ func printPostInstall(result *setup.Result) {
 	case "opencode":
 		fmt.Println("\nNext steps:")
 		fmt.Println("  1. Restart OpenCode — plugin + MCP server are ready")
-		fmt.Println("  2. Session tracking auto-starts the HTTP server when needed")
-		fmt.Println("  3. If background processes are blocked, run 'engram serve' in a separate terminal")
+		fmt.Println("  2. The OpenCode plugin auto-starts the HTTP server when needed")
+		fmt.Println("  3. If background processes are blocked, run 'engram serve' in a separate terminal as a fallback")
 		if result.TUIPluginEnabled {
 			fmt.Println("\nAlso enabled: opencode-subagent-statusline in tui.json — sub-agent activity in the sidebar/footer.")
 		}
