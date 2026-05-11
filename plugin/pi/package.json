@@ -1,7 +1,7 @@
 {
   "name": "gentle-engram",
-  "version": "0.1.1",
-  "description": "Engram persistent memory integration for the Pi coding agent",
+  "version": "0.1.2",
+  "description": "Persistent memory for Pi agents — one local-or-cloud brain shared across sessions, compactions, and MCP agents",
   "type": "module",
   "license": "MIT",
   "author": "Gentleman Programming",
@@ -19,6 +19,13 @@
     "pi",
     "engram",
     "memory",
+    "persistent-memory",
+    "project-memory",
+    "compaction-recovery",
+    "agent-memory",
+    "ai-memory",
+    "engram-cloud",
+    "token-saving",
     "mcp",
     "coding-agent",
     "extension"
