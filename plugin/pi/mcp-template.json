@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "engram": {
+      "command": "node",
+      "args": [
+        "-e",
+        "const { spawn } = require('node:child_process'); const bin = process.env.ENGRAM_BIN || 'engram'; const child = spawn(bin, ['mcp', '--tools=agent'], { stdio: 'inherit' }); child.on('error', () => process.exit(127)); child.on('exit', (code, signal) => { if (typeof code === 'number') process.exit(code); process.kill(process.pid, signal || 'SIGTERM'); });"
+      ],
+      "lifecycle": "lazy",
+      "directTools": true
+    }
+  }
+}
