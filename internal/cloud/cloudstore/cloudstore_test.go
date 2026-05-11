@@ -1108,6 +1108,7 @@ func TestInsertMutationBatchInvalidatesDashboardReadModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
+	t.Cleanup(func() { db.Close() })
 
 	loadCalls := 0
 	cs := &CloudStore{db: db}
