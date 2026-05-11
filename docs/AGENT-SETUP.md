@@ -16,6 +16,7 @@ Engram works with **any MCP-compatible agent**. Pick your agent below.
 | Agent | One-liner | Manual Config |
 |-------|-----------|---------------|
 | Claude Code | `claude plugin marketplace add Gentleman-Programming/engram && claude plugin install engram` | [Details](#claude-code) |
+| Pi | `pi install npm:gentle-engram && pi install npm:pi-mcp-adapter && pi-engram init` | [Details](#pi) |
 | OpenCode | `engram setup opencode` | [Details](#opencode) |
 | Gemini CLI | `engram setup gemini-cli` | [Details](#gemini-cli) |
 | Codex | `engram setup codex` | [Details](#codex) |
@@ -24,6 +25,37 @@ Engram works with **any MCP-compatible agent**. Pick your agent below.
 | Cursor | Manual JSON config | [Details](#cursor) |
 | Windsurf | Manual JSON config | [Details](#windsurf) |
 | Any MCP agent | `engram mcp` (stdio) | [Details](#any-other-mcp-agent) |
+
+## Pi
+
+Install Engram's Pi package and the MCP adapter:
+
+```bash
+pi install npm:gentle-engram
+pi install npm:pi-mcp-adapter
+pi-engram init
+```
+
+Restart Pi after installation.
+
+The package has two paths:
+
+- **HTTP event capture**: the Pi extension sends prompts, summaries, and passive task learnings to `engram serve`.
+- **MCP tools**: `pi-mcp-adapter` exposes `mem_*` tools by launching `engram mcp --tools=agent`.
+
+Use an existing Engram HTTP server:
+
+```bash
+ENGRAM_URL=http://127.0.0.1:7437 pi
+```
+
+Use a custom Engram binary for MCP tools and local auto-start:
+
+```bash
+ENGRAM_BIN=/path/to/engram pi
+```
+
+If the binary is missing, the MCP launcher exits cleanly instead of crashing Pi with `spawn engram ENOENT`.
 
 ### Project auto-detection (important)
 

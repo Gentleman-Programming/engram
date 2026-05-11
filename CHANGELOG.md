@@ -20,6 +20,10 @@ Breaking changes are always marked with a `type:breaking-change` label and docum
 
 <!-- Changes that are merged but not yet released are tracked here until the next tag. -->
 
+### Pi package (`pi-engram`)
+
+- **feat(plugin):** add `gentle-engram` package for Pi marketplace installs, with HTTP event capture, Memory Protocol prompt injection, safe `engram mcp` launcher config, and `pi-engram init` setup helper.
+
 ### Cloud dashboard visual parity (`cloud-dashboard-visual-parity`)
 
 New and updated routes registered in `internal/cloud/dashboard/dashboard.go`:
