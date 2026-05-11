@@ -274,7 +274,7 @@ func registerTools(srv *server.MCPServer, s *store.Store, cfg MCPConfig, allowli
 					mcp.Description("Max results (default: 10, max: 20)"),
 				),
 				mcp.WithBoolean("all_projects",
-					mcp.Description("Search across all projects instead of restricting to the current auto-detected project. Cannot be combined with project. When true, searches globally. When false or omitted, searches only in the current auto-detected project."),
+					mcp.Description("Search across all projects. Cannot be combined with project. When true, searches globally. When false or omitted, behavior is unchanged: uses project if provided, otherwise the current auto-detected project."),
 				),
 			),
 			handleSearch(s, cfg, activity),
