@@ -1096,3 +1096,49 @@ func TestSetDashboardAllowedProjectsInvalidatesCachedReadModel(t *testing.T) {
 		t.Fatalf("expected allowlist update to invalidate read-model cache, got load count %d", loadCalls)
 	}
 }
+
+// TestInsertMutationBatchInvalidatesDashboardReadModel verifies that
+// InsertMutationBatch invalidates the dashboard read model cache even when no
+// materialized chunks are produced (e.g. relation-only batches).
+// Regression test for https://github.com/Gentleman-Programming/engram/issues/251
+func TestInsertMutationBatchInvalidatesDashboardReadModel(t *testing.T) {
+	// Reuse the partial-fail driver with a high failAfter so all INSERTs succeed.
+	resetPartialFailDriver(100)
+	db, err := sql.Open("cloudstore-partial-fail-driver", "dsn")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	loadCalls := 0
+	cs := &CloudStore{db: db}
+	cs.dashboardReadModelLoad = func() (dashboardReadModel, error) {
+		loadCalls++
+		return dashboardReadModel{}, nil
+	}
+
+	// Populate the cache by calling a dashboard query.
+	if _, err := cs.ListProjects(""); err != nil {
+		t.Fatalf("initial ListProjects: %v", err)
+	}
+	if loadCalls != 1 {
+		t.Fatalf("expected initial load count=1, got %d", loadCalls)
+	}
+
+	// Insert a batch containing ONLY non-materializable entities (relation).
+	// This produces zero chunks, so before the fix the cache was NOT invalidated.
+	batch := []MutationEntry{
+		{Project: "proj-a", Entity: "relation", EntityKey: "r1", Op: "upsert", Payload: json.RawMessage(`{"source_id":1,"target_id":2,"relation":"related"}`)},
+	}
+	if _, err := cs.InsertMutationBatch(context.Background(), batch); err != nil {
+		t.Fatalf("InsertMutationBatch: %v", err)
+	}
+
+	// After InsertMutationBatch, the cache must be invalidated.
+	// A new dashboard query should trigger a reload (loadCalls=2).
+	if _, err := cs.ListProjects(""); err != nil {
+		t.Fatalf("post-mutation ListProjects: %v", err)
+	}
+	if loadCalls != 2 {
+		t.Fatalf("expected InsertMutationBatch to invalidate dashboard cache (load count 2), got %d", loadCalls)
+	}
+}
