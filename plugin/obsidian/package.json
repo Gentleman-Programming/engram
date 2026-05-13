@@ -3,7 +3,14 @@
   "version": "1.0.0",
   "description": "Obsidian plugin to sync Engram persistent memory into your vault",
   "main": "main.js",
+  "private": true,
+  "files": [
+    "main.js",
+    "manifest.json",
+    "README.md"
+  ],
   "scripts": {
+    "preinstall": "npx lockfile-lint --path package-lock.json --type npm --allowed-hosts npm --validate-https --validate-integrity",
     "build": "node esbuild.config.mjs",
     "dev": "node esbuild.config.mjs --watch"
   },
@@ -12,6 +19,7 @@
   "devDependencies": {
     "@types/node": "^20.0.0",
     "esbuild": "^0.21.0",
+    "lockfile-lint": "^4.14.1",
     "obsidian": "^1.4.0",
     "typescript": "^5.0.0"
   }
