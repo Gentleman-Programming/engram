@@ -142,6 +142,52 @@ Types map to labels: `feat` → `type:feature`, `fix` → `type:bug`, `docs` →
 
 ---
 
+## npm Dependency Hygiene
+
+When adding npm dependencies to `plugin/pi` or `plugin/obsidian`:
+
+### Use `npq` for inspection
+
+Install once:
+
+```bash
+npm i -g npq
+```
+
+Then install new deps via:
+
+```bash
+npq install <package>
+```
+
+`npq` runs pre-flight checks (typosquats, install scripts, known vulns) before delegating to npm.
+
+### Honor the `.npmrc` defaults
+
+The repo `.npmrc` enforces:
+
+- `ignore-scripts=true` — third-party lifecycle scripts do NOT run on install
+- `allow-git=none` — git URLs as deps are rejected
+- `min-release-age=3` — packages newer than 3 days old are rejected
+
+If you have a legitimate reason to override these for local dev (e.g. `esbuild` postinstall), use a flag for that specific command — DO NOT edit `.npmrc`:
+
+```bash
+npm install --ignore-scripts=false esbuild
+```
+
+### Consult Snyk before merging
+
+For every new dep added in a PR, paste the Snyk Advisor link in the PR description:
+
+```
+https://snyk.io/advisor/npm-package/<name>
+```
+
+See [SECURITY.md](./SECURITY.md#vetting-new-dependencies) for the maintainer-side vetting checklist (provenance, transitive deps, install scripts).
+
+---
+
 ## Skill Authoring Standard
 
 Repository skills live in `skills/`.
