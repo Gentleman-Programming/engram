@@ -1,4 +1,4 @@
-package claudecode_test
+package plugin_test
 
 import (
 	"os"
@@ -16,18 +16,17 @@ func repoRoot(t *testing.T) string {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	// plugin/claude-code/assets_test.go -> up two directories
-	return filepath.Dir(filepath.Dir(filepath.Dir(file)))
+	// plugin/assets_test.go -> up one directory
+	return filepath.Dir(filepath.Dir(file))
 }
 
-// TestPluginClaudeCodeAssetsDoNotLeakSpanishTriggers walks the plugin's
-// injected assets (scripts/*.sh and skills/*/SKILL.md) and asserts that
-// none of them contain Spanish trigger tokens. Those tokens act as register
-// cues in the model's context and cause English sessions to drift into
-// Spanish even when language-lock rules are in place elsewhere.
-func TestPluginClaudeCodeAssetsDoNotLeakSpanishTriggers(t *testing.T) {
+// TestPluginAssetsDoNotLeakSpanishTriggers walks the injected assets of all
+// three plugins (claude-code, opencode, pi) and asserts that none of them
+// contain Spanish trigger tokens. Those tokens act as register cues in the
+// model's context and cause English sessions to drift into Spanish even when
+// language-lock rules are in place elsewhere.
+func TestPluginAssetsDoNotLeakSpanishTriggers(t *testing.T) {
 	root := repoRoot(t)
-	pluginRoot := filepath.Join(root, "plugin", "claude-code")
 
 	bannedTokens := []string{
 		`"dale"`,
@@ -46,8 +45,13 @@ func TestPluginClaudeCodeAssetsDoNotLeakSpanishTriggers(t *testing.T) {
 	targets := []struct {
 		pattern string
 	}{
-		{filepath.Join(pluginRoot, "scripts", "*.sh")},
-		{filepath.Join(pluginRoot, "skills", "*", "SKILL.md")},
+		// claude-code: shell scripts and skill markdown files
+		{filepath.Join(root, "plugin", "claude-code", "scripts", "*.sh")},
+		{filepath.Join(root, "plugin", "claude-code", "skills", "*", "SKILL.md")},
+		// opencode: TypeScript plugin adapter
+		{filepath.Join(root, "plugin", "opencode", "*.ts")},
+		// pi: TypeScript plugin adapter
+		{filepath.Join(root, "plugin", "pi", "*.ts")},
 	}
 
 	for _, target := range targets {
