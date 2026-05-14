@@ -154,6 +154,90 @@ func TestHandleSaveSuggestsTopicKeyWhenMissing(t *testing.T) {
 	if !strings.Contains(text, "Suggested topic_key: architecture/auth-architecture") {
 		t.Fatalf("expected suggestion in save response, got %q", text)
 	}
+
+	obs, err := s.RecentObservations("engram", "project", 5)
+	if err != nil {
+		t.Fatalf("recent observations: %v", err)
+	}
+	if len(obs) != 1 || obs[0].Content != "Define boundaries for auth middleware" {
+		t.Fatalf("expected persisted content, got %#v", obs)
+	}
+}
+
+func TestHandleSaveAcceptsObservationAliasForContent(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.EnrollProject("engram"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":       "Alias save",
+		"observation": "Body sent by older MCP clients",
+		"type":        "bugfix",
+		"project":     "engram",
+	}}})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected save error: %s", callResultText(t, res))
+	}
+
+	obs, err := s.RecentObservations("engram", "project", 5)
+	if err != nil {
+		t.Fatalf("recent observations: %v", err)
+	}
+	if len(obs) != 1 || obs[0].Content != "Body sent by older MCP clients" {
+		t.Fatalf("expected observation alias to persist content, got %#v", obs)
+	}
+
+	mutations, err := s.ListPendingSyncMutations(store.DefaultSyncTargetKey, 100)
+	if err != nil {
+		t.Fatalf("list pending sync mutations: %v", err)
+	}
+	for _, mutation := range mutations {
+		if mutation.Entity != store.SyncEntityObservation || mutation.Op != store.SyncOpUpsert {
+			continue
+		}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(mutation.Payload), &payload); err != nil {
+			t.Fatalf("decode observation sync payload: %v", err)
+		}
+		if payload["content"] != "Body sent by older MCP clients" {
+			t.Fatalf("expected sync payload content to be preserved, got %s", mutation.Payload)
+		}
+		return
+	}
+	t.Fatalf("expected pending observation upsert sync mutation, got %#v", mutations)
+}
+
+func TestHandleSaveRejectsMissingContent(t *testing.T) {
+	s := newMCPTestStore(t)
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "Missing body",
+		"type":    "bugfix",
+		"project": "engram",
+	}}})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("expected missing content to fail")
+	}
+	if !strings.Contains(callResultText(t, res), "content is required") {
+		t.Fatalf("expected content validation error, got %q", callResultText(t, res))
+	}
+
+	obs, err := s.RecentObservations("engram", "project", 5)
+	if err != nil {
+		t.Fatalf("recent observations: %v", err)
+	}
+	if len(obs) != 0 {
+		t.Fatalf("expected no observation to be written, got %#v", obs)
+	}
 }
 
 func TestHandleSaveAutoCapturesCurrentPromptByDefault(t *testing.T) {
@@ -5241,6 +5325,14 @@ func TestMemSaveSchemaIncludesCapturePrompt(t *testing.T) {
 	props := st.Tool.InputSchema.Properties
 	if _, ok := props["capture_prompt"]; !ok {
 		t.Fatal("mem_save schema must include capture_prompt")
+	}
+	if _, ok := props["observation"]; !ok {
+		t.Fatal("mem_save schema must include backward-compatible observation alias")
+	}
+	for _, required := range st.Tool.InputSchema.Required {
+		if required == "content" {
+			t.Fatal("mem_save schema must not require content when observation alias is accepted")
+		}
 	}
 }
 

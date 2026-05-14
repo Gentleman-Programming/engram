@@ -318,8 +318,10 @@ Examples:
 					mcp.Description("Short, searchable title (e.g. 'JWT auth middleware', 'Fixed N+1 query')"),
 				),
 				mcp.WithString("content",
-					mcp.Required(),
-					mcp.Description("Structured content using **What**, **Why**, **Where**, **Learned** format"),
+					mcp.Description("Structured content using **What**, **Why**, **Where**, **Learned** format. Required unless observation alias is provided."),
+				),
+				mcp.WithString("observation",
+					mcp.Description("Backward-compatible alias for content. Prefer content for new clients."),
 				),
 				mcp.WithString("type",
 					mcp.Description("Category: decision, architecture, bugfix, pattern, config, discovery, learning (default: manual)"),
@@ -1021,6 +1023,14 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		title, _ := req.GetArguments()["title"].(string)
 		content, _ := req.GetArguments()["content"].(string)
+		if strings.TrimSpace(content) == "" {
+			if observation, _ := req.GetArguments()["observation"].(string); strings.TrimSpace(observation) != "" {
+				content = observation
+			}
+		}
+		if strings.TrimSpace(content) == "" {
+			return mcp.NewToolResultError("content is required for mem_save (use content, or observation for backward-compatible clients)"), nil
+		}
 		typ, _ := req.GetArguments()["type"].(string)
 		sessionID, _ := req.GetArguments()["session_id"].(string)
 		scope, _ := req.GetArguments()["scope"].(string)

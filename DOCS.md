@@ -697,7 +697,8 @@ Save structured observations. The tool description teaches agents the format:
 - **scope**: `project` (default) | `personal`
 - **topic_key**: optional canonical topic id (e.g. `architecture/auth-model`) used to upsert evolving memories
 - **capture_prompt**: optional boolean, default `true`; when current prompt context is available in the same MCP process for the same project/session, Engram best-effort records it alongside the observation. If that process-local context is unavailable or prompt capture fails, `mem_save` still succeeds. Automated pipeline saves such as SDD artifacts should pass `false`.
-- **content**: Structured with `**What**`, `**Why**`, `**Where**`, `**Learned**`
+- **content**: Structured with `**What**`, `**Why**`, `**Where**`, `**Learned**`; required unless the legacy `observation` alias is provided
+- **observation**: backward-compatible alias for `content` for older/raw MCP clients; prefer `content` for new integrations
 
 Exact duplicate saves are deduplicated in a rolling time window using a normalized content hash + project + scope + type + title.
 When `topic_key` is provided, `mem_save` upserts the latest observation in the same `project + scope + topic_key`, incrementing `revision_count`.
