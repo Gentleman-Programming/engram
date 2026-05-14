@@ -10,6 +10,8 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { buildRecoveryNotice, extractCompactedSummary } from "./compaction-recovery.js";
+import { redactPrivateTags, redactUrlPath, redactValue } from "./private-redaction.js";
 
 const ENGRAM_PORT = Number.parseInt(process.env.ENGRAM_PORT ?? "7437", 10);
 const CONFIGURED_ENGRAM_URL = process.env.ENGRAM_URL?.trim() || undefined;
@@ -131,10 +133,10 @@ interface ToolEndEvent {
 
 async function engramFetch<TResponse = unknown>(path: string, opts: FetchOptions = {}): Promise<TResponse | null> {
   try {
-    const res = await fetch(`${ENGRAM_URL}${path}`, {
+    const res = await fetch(`${ENGRAM_URL}${redactUrlPath(path)}`, {
       method: opts.method ?? "GET",
       headers: opts.body ? { "Content-Type": "application/json" } : undefined,
-      body: opts.body ? JSON.stringify(opts.body) : undefined,
+      body: opts.body ? JSON.stringify(redactValue(opts.body)) : undefined,
     });
     return (await res.json()) as TResponse;
   } catch {
@@ -257,7 +259,7 @@ function truncate(str: string, max: number): string {
 }
 
 function stripPrivateTags(str: string): string {
-  return str.replace(/<private>[\s\S]*?<\/private>/gi, "[REDACTED]").trim();
+  return redactPrivateTags(str).trim();
 }
 
 function wait(ms: number): Promise<void> {
@@ -349,18 +351,28 @@ export default function registerEngram(pi: ExtensionAPI) {
     knownSessions.delete(sessionId);
   });
 
-  pi.on("session_compact", async (_event: unknown, ctx: SessionContext) => {
+  pi.on("session_compact", async (event: unknown, ctx: SessionContext) => {
     const sessionId = getSessionId(ctx);
     if (sessionId) await ensureSession(sessionId);
 
-    const data = await engramFetch<ContextResponse>(`/context?project=${encodeURIComponent(project)}`);
-    const recovery =
-      `CRITICAL INSTRUCTION FOR COMPACTED SUMMARY:\n` +
-      `The agent has access to Engram persistent memory via MCP tools.\n` +
-      `FIRST ACTION REQUIRED: Call mem_session_summary with the content of this compacted summary. ` +
-      `Use project: '${project}'. This preserves what was accomplished before compaction. Do this BEFORE any other work.`;
+    const summary = extractCompactedSummary(event);
+    if (sessionId && summary) {
+      await engramFetch("/observations", {
+        method: "POST",
+        body: {
+          session_id: sessionId,
+          type: "session_summary",
+          title: "Compaction recovery summary",
+          content: summary,
+          project,
+          scope: "project",
+          topic_key: "session/compaction-recovery",
+        },
+      });
+    }
 
-    pendingRecoveryNotice = data?.context ? `${data.context}\n\n${recovery}` : recovery;
+    const data = await engramFetch<ContextResponse>(`/context?project=${encodeURIComponent(project)}`);
+    pendingRecoveryNotice = buildRecoveryNotice(project, data?.context);
   });
 
   pi.on("before_agent_start", async (event: AgentStartEvent, ctx: SessionContext) => {

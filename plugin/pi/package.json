@@ -14,6 +14,9 @@
   "bin": {
     "pi-engram": "cli.js"
   },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
   "keywords": [
     "pi-package",
     "pi",
@@ -39,8 +42,11 @@
   "files": [
     "assets/",
     "cli.js",
+    "compaction-recovery.js",
     "index.ts",
     "mcp-template.json",
+    "private-redaction.js",
+    "test/",
     "README.md",
     "package.json"
   ],
