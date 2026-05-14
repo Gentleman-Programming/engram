@@ -44,6 +44,7 @@
     "cli.js",
     "compaction-recovery.js",
     "index.ts",
+    "memory-tool-chrome.js",
     "mcp-template.json",
     "private-redaction.js",
     "test/",
@@ -53,6 +54,10 @@
   "publishConfig": {
     "provenance": true,
     "access": "public"
+  },
+  "dependencies": {
+    "@earendil-works/pi-tui": "^0.74.0",
+    "typebox": "^1.1.38"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

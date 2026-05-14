@@ -91,15 +91,28 @@ Restart Pi after installation, then ask Pi what it remembers about the current p
 
 | Path         | Purpose                                                                                                                            |
 | ------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
-| Pi extension | Captures prompts/session events and injects the Memory Protocol so Pi knows when to save, search, summarize, and recover.          |
-| MCP tools    | Exposes `mem_search`, `mem_save`, `mem_context`, `mem_session_summary`, and the other Engram agent tools through `pi-mcp-adapter`. |
+| Pi extension | Captures prompts/session events, injects the Memory Protocol, and exposes compact Pi-native `mem_*` tools over the Engram HTTP server. |
+| MCP tools    | Keeps Engram's MCP surface available through `pi-mcp-adapter` for clients and flows that use MCP directly.                         |
 
 ```text
-Pi events -> gentle-engram extension -> ENGRAM_URL / engram serve -> SQLite
-Pi MCP tools -> pi-mcp-adapter -> ENGRAM_BIN / engram mcp -> SQLite
+Pi events/tools -> gentle-engram extension -> ENGRAM_URL / engram serve -> SQLite
+Pi MCP tools   -> pi-mcp-adapter -> ENGRAM_BIN / engram mcp -> SQLite
 ```
 
-HTTP event capture and MCP tools are separate paths. Engram currently exposes MCP over stdio, so direct MCP tools still need an Engram binary even when `ENGRAM_URL` points at a remote HTTP server.
+Pi-native compact tools use the same HTTP server path as event capture. MCP tools remain a separate stdio path, so direct MCP usage still needs an Engram binary even when `ENGRAM_URL` points at a remote HTTP server.
+
+## Compact memory tool rendering
+
+`gentle-engram` owns the Pi chrome for Engram memory tools by registering compact Pi-native `mem_*` tools in the companion package. When tools such as `mem_search`, `mem_context`, `mem_save`, `mem_session_summary`, and `mem_get_observation` run in Pi, the default collapsed view stays compact:
+
+```text
+🧠 search “auth model” …
+↳ ✓ 4 results
+```
+
+Normal memory activity also updates the status bar with short progress/result text such as `🧠 engram · search…` and `🧠 engram · ✓ 4 results`. The extension does not use notifications for normal memory operations.
+
+Full tool details remain available by expanding the tool output in Pi. If `gentle-engram` or the Engram server is not installed/running, the compact tool reports an error instead of implying memory is available.
 
 ## What Pi can remember
 
