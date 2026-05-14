@@ -10,6 +10,7 @@
 //     absolute binary path so the subprocess never needs PATH resolution.
 //   - Gemini CLI: injects MCP registration in ~/.gemini/settings.json
 //   - Codex: injects MCP registration in ~/.codex/config.toml
+//   - Pi: installs gentle-engram/pi-mcp-adapter packages and writes Pi MCP config
 package setup
 
 import (
@@ -75,6 +76,9 @@ type Result struct {
 const claudeCodeMarketplace = "Gentleman-Programming/engram"
 
 const openCodeSubagentStatuslinePlugin = "opencode-subagent-statusline"
+
+const piGentleEngramPackage = "npm:gentle-engram"
+const piMCPAdapterPackage = "npm:pi-mcp-adapter"
 
 // claudeCodeMCPTools are the MCP tool permission names for the agent profile
 // registered by the engram Claude Code plugin and durable user-level MCP config.
@@ -236,6 +240,11 @@ func SupportedAgents() []Agent {
 			InstallDir:  openCodePluginDir(),
 		},
 		{
+			Name:        "pi",
+			Description: "Pi — gentle-engram package plus pi-mcp-adapter MCP tools",
+			InstallDir:  piAgentDir(),
+		},
+		{
 			Name:        "claude-code",
 			Description: "Claude Code — Native plugin via marketplace (hooks, skills, MCP, compaction recovery)",
 			InstallDir:  "managed by claude plugin system",
@@ -258,6 +267,8 @@ func Install(agentName string) (*Result, error) {
 	switch agentName {
 	case "opencode":
 		return installOpenCode()
+	case "pi":
+		return installPi()
 	case "claude-code":
 		return installClaudeCode()
 	case "gemini-cli":
@@ -265,8 +276,162 @@ func Install(agentName string) (*Result, error) {
 	case "codex":
 		return installCodex()
 	default:
-		return nil, fmt.Errorf("unknown agent: %q (supported: opencode, claude-code, gemini-cli, codex)", agentName)
+		return nil, fmt.Errorf("unknown agent: %q (supported: opencode, pi, claude-code, gemini-cli, codex)", agentName)
 	}
+}
+
+// ─── Pi ──────────────────────────────────────────────────────────────────────
+
+func piAgentDir() string {
+	if dir := strings.TrimSpace(os.Getenv("PI_CODING_AGENT_DIR")); dir != "" {
+		return dir
+	}
+	home, err := userHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return filepath.Join(".pi", "agent")
+	}
+	return filepath.Join(home, ".pi", "agent")
+}
+
+func installPi() (*Result, error) {
+	if _, err := runCommand("pi", "install", piGentleEngramPackage); err != nil {
+		return nil, fmt.Errorf("install %s: %w", piGentleEngramPackage, err)
+	}
+	if _, err := runCommand("pi", "install", piMCPAdapterPackage); err != nil {
+		return nil, fmt.Errorf("install %s: %w", piMCPAdapterPackage, err)
+	}
+
+	agentDir := piAgentDir()
+	files := 0
+	settingsChanged, err := ensurePiPackageSettings(filepath.Join(agentDir, "settings.json"))
+	if err != nil {
+		return nil, err
+	}
+	if settingsChanged {
+		files++
+	}
+	mcpChanged, err := ensurePiMCPConfig(filepath.Join(agentDir, "mcp.json"))
+	if err != nil {
+		return nil, err
+	}
+	if mcpChanged {
+		files++
+	}
+
+	return &Result{Agent: "pi", Destination: agentDir, Files: files}, nil
+}
+
+func ensurePiPackageSettings(settingsPath string) (bool, error) {
+	config, err := readJSONConfig(settingsPath)
+	if err != nil {
+		return false, fmt.Errorf("read Pi settings: %w", err)
+	}
+	packages, err := readRawArrayField(config, "packages", settingsPath)
+	if err != nil {
+		return false, err
+	}
+	changed := false
+	for _, pkg := range []string{piGentleEngramPackage, piMCPAdapterPackage} {
+		if !rawArrayContainsString(packages, pkg) {
+			raw, err := jsonMarshalFn(pkg)
+			if err != nil {
+				return false, fmt.Errorf("marshal Pi package %q: %w", pkg, err)
+			}
+			packages = append(packages, raw)
+			changed = true
+		}
+	}
+	if !changed {
+		return false, nil
+	}
+	config["packages"], err = jsonMarshalFn(packages)
+	if err != nil {
+		return false, fmt.Errorf("marshal Pi packages: %w", err)
+	}
+	return true, writeJSONConfig(settingsPath, config)
+}
+
+func ensurePiMCPConfig(mcpPath string) (bool, error) {
+	config, err := readJSONConfig(mcpPath)
+	if err != nil {
+		return false, fmt.Errorf("read Pi MCP config: %w", err)
+	}
+	servers := make(map[string]json.RawMessage)
+	if raw, ok := config["mcpServers"]; ok {
+		if err := json.Unmarshal(raw, &servers); err != nil {
+			return false, fmt.Errorf("parse Pi mcpServers: %w", err)
+		}
+	}
+	if _, exists := servers["engram"]; exists {
+		return false, nil
+	}
+	server := map[string]any{
+		"command":     resolveEngramCommand(),
+		"args":        []string{"mcp", "--tools=agent"},
+		"lifecycle":   "lazy",
+		"directTools": true,
+	}
+	raw, err := jsonMarshalFn(server)
+	if err != nil {
+		return false, fmt.Errorf("marshal Pi Engram MCP server: %w", err)
+	}
+	servers["engram"] = raw
+	config["mcpServers"], err = jsonMarshalFn(servers)
+	if err != nil {
+		return false, fmt.Errorf("marshal Pi mcpServers: %w", err)
+	}
+	return true, writeJSONConfig(mcpPath, config)
+}
+
+func readJSONConfig(path string) (map[string]json.RawMessage, error) {
+	data, err := readFileFn(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return make(map[string]json.RawMessage), nil
+		}
+		return nil, err
+	}
+	var config map[string]json.RawMessage
+	if err := json.Unmarshal(data, &config); err != nil {
+		return nil, err
+	}
+	if config == nil {
+		return nil, fmt.Errorf("%s must contain a JSON object", path)
+	}
+	return config, nil
+}
+
+func writeJSONConfig(path string, config map[string]json.RawMessage) error {
+	output, err := jsonMarshalIndentFn(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal %s: %w", path, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("create %s: %w", filepath.Dir(path), err)
+	}
+	return writeFileFn(path, append(output, '\n'), 0644)
+}
+
+func readRawArrayField(config map[string]json.RawMessage, key, path string) ([]json.RawMessage, error) {
+	raw, ok := config[key]
+	if !ok {
+		return nil, nil
+	}
+	var values []json.RawMessage
+	if err := json.Unmarshal(raw, &values); err != nil {
+		return nil, fmt.Errorf("parse %s %q: %w", path, key, err)
+	}
+	return values, nil
+}
+
+func rawArrayContainsString(values []json.RawMessage, target string) bool {
+	for _, value := range values {
+		var decoded string
+		if err := json.Unmarshal(value, &decoded); err == nil && decoded == target {
+			return true
+		}
+	}
+	return false
 }
 
 // ─── OpenCode ────────────────────────────────────────────────────────────────

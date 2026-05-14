@@ -6911,6 +6911,17 @@ func TestListPendingProjectMutationsAndPayloadValidation(t *testing.T) {
 	}
 }
 
+func TestValidateSyncMutationPayloadRelationRequiresServerFields(t *testing.T) {
+	payload := `{"sync_id":"rel-1","source_id":"obs-a","target_id":"obs-b","relation":"conflicts_with","judgment_status":"judged","project":"engram"}`
+	validation := ValidateSyncMutationPayload(SyncEntityRelation, SyncOpUpsert, payload, "rel-1")
+	if validation.ReasonCode != "sync_mutation_payload_missing_required_fields" {
+		t.Fatalf("validation=%+v", validation)
+	}
+	if strings.Join(validation.MissingFields, ",") != "marked_by_actor,marked_by_kind" {
+		t.Fatalf("missing fields=%v", validation.MissingFields)
+	}
+}
+
 func TestReadSQLiteLockSnapshotDoesNotMutateApplicationRows(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.CreateSession("s1", "engram", "/work/engram"); err != nil {

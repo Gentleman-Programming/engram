@@ -10,6 +10,11 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
+import { buildRecoveryNotice, extractCompactedSummary } from "./compaction-recovery.js";
+import { compactResultStatus, humanToolName, renderCallText, renderResultText } from "./memory-tool-chrome.js";
+import { redactPrivateTags, redactUrlPath, redactValue } from "./private-redaction.js";
 
 const ENGRAM_PORT = Number.parseInt(process.env.ENGRAM_PORT ?? "7437", 10);
 const CONFIGURED_ENGRAM_URL = process.env.ENGRAM_URL?.trim() || undefined;
@@ -66,7 +71,7 @@ call \`mem_search\`, then \`mem_get_observation\` for full content.
 
 ### SESSION CLOSE PROTOCOL
 
-Before ending a session or saying "done" / "listo", call \`mem_session_summary\`
+Before ending a session or saying "done", call \`mem_session_summary\`
 with Goal, Instructions, Discoveries, Accomplished, Next Steps, and Relevant Files.
 
 ### AFTER COMPACTION
@@ -131,12 +136,14 @@ interface ToolEndEvent {
 
 async function engramFetch<TResponse = unknown>(path: string, opts: FetchOptions = {}): Promise<TResponse | null> {
   try {
-    const res = await fetch(`${ENGRAM_URL}${path}`, {
+    const res = await fetch(`${ENGRAM_URL}${redactUrlPath(path)}`, {
       method: opts.method ?? "GET",
       headers: opts.body ? { "Content-Type": "application/json" } : undefined,
-      body: opts.body ? JSON.stringify(opts.body) : undefined,
+      body: opts.body ? JSON.stringify(redactValue(opts.body)) : undefined,
     });
-    return (await res.json()) as TResponse;
+    const data = (await res.json()) as TResponse;
+    if (!res.ok) return null;
+    return data;
   } catch {
     return null;
   }
@@ -257,7 +264,7 @@ function truncate(str: string, max: number): string {
 }
 
 function stripPrivateTags(str: string): string {
-  return str.replace(/<private>[\s\S]*?<\/private>/gi, "[REDACTED]").trim();
+  return redactPrivateTags(str).trim();
 }
 
 function wait(ms: number): Promise<void> {
@@ -337,7 +344,229 @@ function getSessionId(ctx: SessionContext): string | undefined {
   return ctx.sessionManager.getSessionId();
 }
 
+const optionalString = (description: string) => Type.Optional(Type.String({ description }));
+const optionalNumber = (description: string) => Type.Optional(Type.Number({ description }));
+const optionalBoolean = (description: string) => Type.Optional(Type.Boolean({ description }));
+
+const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
+  mem_search: Type.Object({
+    query: Type.String({ description: "Search query — natural language or keywords" }),
+    type: optionalString("Filter by observation type"),
+    project: optionalString("Filter by project name"),
+    scope: optionalString("Filter by scope: project or personal"),
+    limit: optionalNumber("Max results"),
+  }),
+  mem_save: Type.Object({
+    title: Type.String({ description: "Short, searchable title" }),
+    content: Type.String({ description: "Structured memory content" }),
+    type: optionalString("Observation type/category"),
+    session_id: optionalString("Session ID to associate with"),
+    scope: optionalString("Scope: project or personal"),
+    topic_key: optionalString("Stable topic key for upserts"),
+    project: optionalString("Optional explicit project"),
+    capture_prompt: optionalBoolean("Capture current prompt when available"),
+  }),
+  mem_update: Type.Object({
+    id: Type.Number({ description: "Observation ID to update" }),
+    title: optionalString("New title"),
+    content: optionalString("New content"),
+    type: optionalString("New type/category"),
+    scope: optionalString("New scope"),
+    topic_key: optionalString("New topic key"),
+  }),
+  mem_delete: Type.Object({
+    id: Type.Number({ description: "Observation ID to delete" }),
+    hard_delete: optionalBoolean("Permanently delete the observation"),
+  }),
+  mem_suggest_topic_key: Type.Object({
+    type: optionalString("Observation type/category"),
+    title: optionalString("Observation title"),
+    content: optionalString("Observation content"),
+  }),
+  mem_save_prompt: Type.Object({
+    content: Type.String({ description: "The user's prompt text" }),
+    session_id: optionalString("Session ID to associate with"),
+    project: optionalString("Optional project"),
+  }),
+  mem_session_summary: Type.Object({
+    content: Type.String({ description: "Full session summary" }),
+    session_id: optionalString("Session ID"),
+  }),
+  mem_context: Type.Object({
+    project: optionalString("Filter by project"),
+    scope: optionalString("Filter observations by scope"),
+  }),
+  mem_stats: Type.Object({
+    project: optionalString("Project to echo in UI chrome"),
+  }),
+  mem_timeline: Type.Object({
+    observation_id: Type.Number({ description: "Observation ID to center on" }),
+    before: optionalNumber("Number of observations before"),
+    after: optionalNumber("Number of observations after"),
+    project: optionalString("Filter by project name"),
+  }),
+  mem_get_observation: Type.Object({
+    id: Type.Number({ description: "Observation ID to retrieve" }),
+  }),
+  mem_session_start: Type.Object({
+    id: Type.String({ description: "Unique session identifier" }),
+    directory: optionalString("Working directory"),
+  }),
+  mem_session_end: Type.Object({
+    id: Type.String({ description: "Session identifier to close" }),
+    summary: optionalString("Summary of what was accomplished"),
+  }),
+};
+
+function queryString(params: Record<string, unknown>): string {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null || value === "") continue;
+    query.set(key, String(value));
+  }
+  const encoded = query.toString();
+  return encoded ? `?${encoded}` : "";
+}
+
+function textResult(data: unknown): string {
+  if (typeof data === "string") return data;
+  if (data && typeof data === "object" && "context" in data && typeof (data as ContextResponse).context === "string") {
+    return (data as ContextResponse).context || "(empty context)";
+  }
+  return JSON.stringify(data ?? {}, null, 2);
+}
+
+function slugifyTopicKey(params: Record<string, unknown>): string {
+  const source = String(params.title || params.content || params.type || "memory");
+  const slug = source
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64);
+  return slug || "memory";
+}
+
+async function callMemoryTool(toolName: string, params: Record<string, unknown>, ctx: SessionContext): Promise<unknown> {
+  const sessionId = getSessionId(ctx);
+  const activeSessionId = String(params.session_id || sessionId || `manual-save-${project}`);
+
+  switch (toolName) {
+    case "mem_search":
+      return engramFetch(`/search${queryString({ q: params.query, type: params.type, project: params.project, scope: params.scope, limit: params.limit })}`);
+    case "mem_context":
+      return engramFetch(`/context${queryString({ project: params.project || project, scope: params.scope })}`);
+    case "mem_stats":
+      return engramFetch("/stats");
+    case "mem_timeline":
+      return engramFetch(`/timeline${queryString({ observation_id: params.observation_id, before: params.before, after: params.after, project: params.project })}`);
+    case "mem_get_observation":
+      return engramFetch(`/observations/${encodeURIComponent(String(params.id))}`);
+    case "mem_save":
+      await ensureSession(activeSessionId);
+      return engramFetch("/observations", {
+        method: "POST",
+        body: {
+          session_id: activeSessionId,
+          title: params.title,
+          content: params.content,
+          type: params.type || "manual",
+          project: params.project || project,
+          scope: params.scope || "project",
+          topic_key: params.topic_key,
+        },
+      });
+    case "mem_update":
+      return engramFetch(`/observations/${encodeURIComponent(String(params.id))}`, {
+        method: "PATCH",
+        body: {
+          title: params.title,
+          content: params.content,
+          type: params.type,
+          scope: params.scope,
+          topic_key: params.topic_key,
+        },
+      });
+    case "mem_delete":
+      return engramFetch(`/observations/${encodeURIComponent(String(params.id))}${queryString({ hard: params.hard_delete })}`, { method: "DELETE" });
+    case "mem_suggest_topic_key":
+      return { topic_key: slugifyTopicKey(params) };
+    case "mem_save_prompt":
+      await ensureSession(activeSessionId);
+      return engramFetch("/prompts", {
+        method: "POST",
+        body: { session_id: activeSessionId, content: params.content, project: params.project || project },
+      });
+    case "mem_session_summary":
+      await ensureSession(activeSessionId);
+      return engramFetch("/observations", {
+        method: "POST",
+        body: {
+          session_id: activeSessionId,
+          type: "session_summary",
+          title: "Session summary",
+          content: params.content,
+          project,
+          scope: "project",
+        },
+      });
+    case "mem_session_start":
+      return engramFetch("/sessions", {
+        method: "POST",
+        body: { id: params.id, project, directory: params.directory || directory || ctx.cwd },
+      });
+    case "mem_session_end":
+      return engramFetch(`/sessions/${encodeURIComponent(String(params.id))}/end`, {
+        method: "POST",
+        body: { summary: params.summary || "" },
+      });
+    default:
+      throw new Error(`Unsupported Engram memory tool: ${toolName}`);
+  }
+}
+
+async function executeMemoryTool(toolName: string, params: Record<string, unknown>, ctx: SessionContext & { hasUI?: boolean; ui?: { setStatus?: (key: string, text: string | undefined) => void } }) {
+  await initOnce(ctx.cwd);
+  const action = humanToolName(toolName);
+  ctx.ui?.setStatus?.("engram", `🧠 ${project} · ${action}…`);
+
+  try {
+    const data = await callMemoryTool(toolName, params, ctx);
+    if (data === null) throw new Error("Engram is unavailable");
+    const result = { content: [{ type: "text" as const, text: textResult(data) }], details: { data } };
+    ctx.ui?.setStatus?.("engram", `🧠 ${project} · ${compactResultStatus(toolName, result)}`);
+    return result;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    ctx.ui?.setStatus?.("engram", `🧠 ${project} · error`);
+    return { content: [{ type: "text" as const, text: message }], details: { error: message }, isError: true };
+  }
+}
+
+function registerMemoryTools(pi: ExtensionAPI): void {
+  for (const toolName of ENGRAM_TOOLS) {
+    pi.registerTool({
+      name: toolName,
+      label: `Engram: ${humanToolName(toolName)}`,
+      description: `Engram memory tool: ${humanToolName(toolName)}. Compact UI is provided by gentle-engram; persistence is handled by Engram when installed and running.`,
+      promptSnippet: `Engram memory: ${humanToolName(toolName)}`,
+      parameters: MEMORY_TOOL_SCHEMAS[toolName],
+      renderShell: "self",
+      async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+        return executeMemoryTool(toolName, params as Record<string, unknown>, ctx as SessionContext & { hasUI?: boolean; ui?: { setStatus?: (key: string, text: string | undefined) => void } });
+      },
+      renderCall(args) {
+        return new Text(renderCallText(toolName, args), 0, 0);
+      },
+      renderResult(result, options, _theme, context) {
+        return new Text(renderResultText(toolName, result, { expanded: options.expanded, isPartial: options.isPartial, isError: context.isError }), 0, 0);
+      },
+    });
+  }
+}
+
 export default function registerEngram(pi: ExtensionAPI) {
+  registerMemoryTools(pi);
   pi.on("session_start", async (_event: unknown, ctx: SessionContext) => {
     await initOnce(ctx.cwd);
   });
@@ -349,18 +578,28 @@ export default function registerEngram(pi: ExtensionAPI) {
     knownSessions.delete(sessionId);
   });
 
-  pi.on("session_compact", async (_event: unknown, ctx: SessionContext) => {
+  pi.on("session_compact", async (event: unknown, ctx: SessionContext) => {
     const sessionId = getSessionId(ctx);
     if (sessionId) await ensureSession(sessionId);
 
-    const data = await engramFetch<ContextResponse>(`/context?project=${encodeURIComponent(project)}`);
-    const recovery =
-      `CRITICAL INSTRUCTION FOR COMPACTED SUMMARY:\n` +
-      `The agent has access to Engram persistent memory via MCP tools.\n` +
-      `FIRST ACTION REQUIRED: Call mem_session_summary with the content of this compacted summary. ` +
-      `Use project: '${project}'. This preserves what was accomplished before compaction. Do this BEFORE any other work.`;
+    const summary = extractCompactedSummary(event);
+    if (sessionId && summary) {
+      await engramFetch("/observations", {
+        method: "POST",
+        body: {
+          session_id: sessionId,
+          type: "session_summary",
+          title: "Compaction recovery summary",
+          content: summary,
+          project,
+          scope: "project",
+          topic_key: "session/compaction-recovery",
+        },
+      });
+    }
 
-    pendingRecoveryNotice = data?.context ? `${data.context}\n\n${recovery}` : recovery;
+    const data = await engramFetch<ContextResponse>(`/context?project=${encodeURIComponent(project)}`);
+    pendingRecoveryNotice = buildRecoveryNotice(project, data?.context);
   });
 
   pi.on("before_agent_start", async (event: AgentStartEvent, ctx: SessionContext) => {

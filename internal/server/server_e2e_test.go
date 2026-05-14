@@ -393,6 +393,18 @@ func TestCoreReadHandlersAndHelpersE2E(t *testing.T) {
 		t.Fatalf("expected at least one recent session")
 	}
 
+	getSessionResp, err := client.Get(ts.URL + "/sessions/s-core")
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if getSessionResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 get session, got %d", getSessionResp.StatusCode)
+	}
+	getSession := decodeJSON[map[string]any](t, getSessionResp)
+	if getSession["started_at"] == "" || getSession["project"] != "engram" {
+		t.Fatalf("expected get session JSON with started_at/project, got %#v", getSession)
+	}
+
 	recentObsResp, err := client.Get(ts.URL + "/observations/recent?project=engram&scope=project&limit=bad")
 	if err != nil {
 		t.Fatalf("recent observations: %v", err)
@@ -403,6 +415,18 @@ func TestCoreReadHandlersAndHelpersE2E(t *testing.T) {
 	recentObs := decodeJSON[[]map[string]any](t, recentObsResp)
 	if len(recentObs) == 0 {
 		t.Fatalf("expected recent observations")
+	}
+
+	listObsResp, err := client.Get(ts.URL + "/observations?project=engram&limit=1&sort=created_at:desc")
+	if err != nil {
+		t.Fatalf("list observations compatibility endpoint: %v", err)
+	}
+	if listObsResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 list observations compatibility endpoint, got %d", listObsResp.StatusCode)
+	}
+	listObs := decodeJSON[[]map[string]any](t, listObsResp)
+	if len(listObs) != 1 || listObs[0]["title"] != "Core test" || listObs[0]["created_at"] == "" {
+		t.Fatalf("expected latest observation with created_at, got %#v", listObs)
 	}
 
 	timelineResp, err := client.Get(ts.URL + "/timeline?observation_id=" + strconv.FormatInt(obsID, 10) + "&before=bad&after=bad")

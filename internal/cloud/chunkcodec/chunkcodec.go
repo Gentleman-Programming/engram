@@ -260,6 +260,24 @@ type mutationPromptPayload struct {
 	HardDelete bool    `json:"hard_delete,omitempty"`
 }
 
+type mutationRelationPayload struct {
+	SyncID         string   `json:"sync_id"`
+	SourceID       string   `json:"source_id"`
+	TargetID       string   `json:"target_id"`
+	Relation       string   `json:"relation"`
+	Reason         *string  `json:"reason,omitempty"`
+	Evidence       *string  `json:"evidence,omitempty"`
+	Confidence     *float64 `json:"confidence,omitempty"`
+	JudgmentStatus string   `json:"judgment_status"`
+	MarkedByActor  *string  `json:"marked_by_actor,omitempty"`
+	MarkedByKind   *string  `json:"marked_by_kind,omitempty"`
+	MarkedByModel  *string  `json:"marked_by_model,omitempty"`
+	SessionID      *string  `json:"session_id,omitempty"`
+	Project        string   `json:"project"`
+	CreatedAt      string   `json:"created_at,omitempty"`
+	UpdatedAt      string   `json:"updated_at,omitempty"`
+}
+
 func normalizeChunkMutation(raw map[string]any, project string) (map[string]any, error) {
 	mutationJSON, err := json.Marshal(raw)
 	if err != nil {
@@ -318,6 +336,11 @@ func validateSupportedMutation(entity, op string) error {
 		return nil
 	case store.SyncEntityObservation, store.SyncEntityPrompt:
 		if op != store.SyncOpUpsert && op != store.SyncOpDelete {
+			return fmt.Errorf("unsupported mutation %q/%q", entity, op)
+		}
+		return nil
+	case store.SyncEntityRelation:
+		if op != store.SyncOpUpsert {
 			return fmt.Errorf("unsupported mutation %q/%q", entity, op)
 		}
 		return nil
@@ -420,6 +443,51 @@ func normalizeMutationPayload(entity, op, payload, project string) (normalizedPa
 		}
 		projectValue := project
 		body.Project = &projectValue
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			return "", "", fmt.Errorf("encode mutation payload: %w", err)
+		}
+		return string(encoded), body.SyncID, nil
+	case store.SyncEntityRelation:
+		var body mutationRelationPayload
+		if err := DecodeSyncMutationPayload(payload, &body); err != nil {
+			return "", "", fmt.Errorf("decode mutation payload: %w", err)
+		}
+		body.SyncID = strings.TrimSpace(body.SyncID)
+		body.SourceID = strings.TrimSpace(body.SourceID)
+		body.TargetID = strings.TrimSpace(body.TargetID)
+		body.Relation = strings.TrimSpace(body.Relation)
+		body.JudgmentStatus = strings.TrimSpace(body.JudgmentStatus)
+		if body.MarkedByActor != nil {
+			trimmed := strings.TrimSpace(*body.MarkedByActor)
+			body.MarkedByActor = &trimmed
+		}
+		if body.MarkedByKind != nil {
+			trimmed := strings.TrimSpace(*body.MarkedByKind)
+			body.MarkedByKind = &trimmed
+		}
+		if body.SyncID == "" {
+			return "", "", fmt.Errorf("relation payload sync_id is required for upsert")
+		}
+		if body.SourceID == "" {
+			return "", "", fmt.Errorf("relation payload source_id is required for upsert")
+		}
+		if body.TargetID == "" {
+			return "", "", fmt.Errorf("relation payload target_id is required for upsert")
+		}
+		if body.Relation == "" {
+			return "", "", fmt.Errorf("relation payload relation is required for upsert")
+		}
+		if body.JudgmentStatus == "" {
+			return "", "", fmt.Errorf("relation payload judgment_status is required for upsert")
+		}
+		if body.MarkedByActor == nil || *body.MarkedByActor == "" {
+			return "", "", fmt.Errorf("relation payload marked_by_actor is required for upsert")
+		}
+		if body.MarkedByKind == nil || *body.MarkedByKind == "" {
+			return "", "", fmt.Errorf("relation payload marked_by_kind is required for upsert")
+		}
+		body.Project = project
 		encoded, err := json.Marshal(body)
 		if err != nil {
 			return "", "", fmt.Errorf("encode mutation payload: %w", err)

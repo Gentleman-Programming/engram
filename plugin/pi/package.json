@@ -1,6 +1,6 @@
 {
   "name": "gentle-engram",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Persistent memory for Pi agents — one local-or-cloud brain shared across sessions, compactions, and MCP agents",
   "type": "module",
   "license": "MIT",
@@ -13,6 +13,9 @@
   },
   "bin": {
     "pi-engram": "cli.js"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
   },
   "keywords": [
     "pi-package",
@@ -39,14 +42,22 @@
   "files": [
     "assets/",
     "cli.js",
+    "compaction-recovery.js",
     "index.ts",
+    "memory-tool-chrome.js",
     "mcp-template.json",
+    "private-redaction.js",
+    "test/",
     "README.md",
     "package.json"
   ],
   "publishConfig": {
     "provenance": true,
     "access": "public"
+  },
+  "dependencies": {
+    "@earendil-works/pi-tui": "^0.74.0",
+    "typebox": "^1.1.38"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

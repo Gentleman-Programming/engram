@@ -5,6 +5,7 @@
 package server
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -141,10 +142,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /sessions", s.handleCreateSession)
 	s.mux.HandleFunc("POST /sessions/{id}/end", s.handleEndSession)
 	s.mux.HandleFunc("GET /sessions/recent", s.handleRecentSessions)
+	s.mux.HandleFunc("GET /sessions/{id}", s.handleGetSession)
 	s.mux.HandleFunc("DELETE /sessions/{id}", s.handleDeleteSession)
 
 	// Observations
 	s.mux.HandleFunc("POST /observations", s.handleAddObservation)
+	s.mux.HandleFunc("GET /observations", s.handleListObservations)
 	s.mux.HandleFunc("POST /observations/passive", s.handlePassiveCapture)
 	s.mux.HandleFunc("GET /observations/recent", s.handleRecentObservations)
 	s.mux.HandleFunc("PATCH /observations/{id}", s.handleUpdateObservation)
@@ -252,6 +255,20 @@ func (s *Server) handleRecentSessions(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, sessions)
 }
 
+func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
+	session, err := s.store.GetSession(r.PathValue("id"))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			jsonError(w, http.StatusNotFound, "session not found")
+			return
+		}
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, session)
+}
+
 func (s *Server) handleAddObservation(w http.ResponseWriter, r *http.Request) {
 	var body store.AddObservationParams
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -292,6 +309,16 @@ func (s *Server) handlePassiveCapture(w http.ResponseWriter, r *http.Request) {
 
 	s.notifyWrite()
 	jsonResponse(w, http.StatusOK, result)
+}
+
+func (s *Server) handleListObservations(w http.ResponseWriter, r *http.Request) {
+	sort := r.URL.Query().Get("sort")
+	if sort != "" && sort != "created_at:desc" {
+		jsonError(w, http.StatusBadRequest, "unsupported sort: use created_at:desc")
+		return
+	}
+
+	s.handleRecentObservations(w, r)
 }
 
 func (s *Server) handleRecentObservations(w http.ResponseWriter, r *http.Request) {
@@ -814,7 +841,8 @@ func (s *Server) handleListDeferred(w http.ResponseWriter, r *http.Request) {
 
 // handleScanConflicts serves POST /conflicts/scan
 // Body: {"project":"X","since":"...","apply":bool,"max_insert":int,
-//        "semantic":bool,"concurrency":int,"timeout_per_call_seconds":int,"max_semantic":int}
+//
+//	"semantic":bool,"concurrency":int,"timeout_per_call_seconds":int,"max_semantic":int}
 func (s *Server) handleScanConflicts(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Project   string `json:"project"`

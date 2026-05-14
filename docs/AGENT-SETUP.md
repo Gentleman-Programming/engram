@@ -7,28 +7,37 @@ Engram works with **any MCP-compatible agent**. Pick your agent below.
 > Cloud bootstrap automation in agent scripts/plugins is intentionally deferred in this rollout. Use `engram cloud ...` manually for now.
 >
 > Deferred validation scope for this rollout:
+>
 > - Setup/plugin scripts are **not** yet validated as cloud enrollment/login orchestrators.
 > - `engram setup ...` installs MCP/plugin integrations only; it does **not** auto-run `engram cloud config/enroll/upgrade`.
 > - Cloud onboarding contract remains CLI-first until script-level cloud flows are explicitly implemented.
 
 ## Quick Reference
 
-| Agent | One-liner | Manual Config |
-|-------|-----------|---------------|
-| Claude Code | `claude plugin marketplace add Gentleman-Programming/engram && claude plugin install engram` | [Details](#claude-code) |
-| Pi | `pi install npm:gentle-engram && pi install npm:pi-mcp-adapter && pi-engram init` | [Details](#pi) |
-| OpenCode | `engram setup opencode` | [Details](#opencode) |
-| Gemini CLI | `engram setup gemini-cli` | [Details](#gemini-cli) |
-| Codex | `engram setup codex` | [Details](#codex) |
-| VS Code | `code --add-mcp '{"name":"engram","command":"engram","args":["mcp"]}'` | [Details](#vs-code-copilot--claude-code-extension) |
-| Antigravity | Manual JSON config | [Details](#antigravity) |
-| Cursor | Manual JSON config | [Details](#cursor) |
-| Windsurf | Manual JSON config | [Details](#windsurf) |
-| Any MCP agent | `engram mcp` (stdio) | [Details](#any-other-mcp-agent) |
+| Agent         | One-liner                                                                                    | Manual Config                                      |
+| ------------- | -------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| Claude Code   | `claude plugin marketplace add Gentleman-Programming/engram && claude plugin install engram` | [Details](#claude-code)                            |
+| Pi            | `engram setup pi`                                                                            | [Details](#pi)                                     |
+| OpenCode      | `engram setup opencode`                                                                      | [Details](#opencode)                               |
+| Gemini CLI    | `engram setup gemini-cli`                                                                    | [Details](#gemini-cli)                             |
+| Codex         | `engram setup codex`                                                                         | [Details](#codex)                                  |
+| VS Code       | `code --add-mcp '{"name":"engram","command":"engram","args":["mcp"]}'`                       | [Details](#vs-code-copilot--claude-code-extension) |
+| Antigravity   | Manual JSON config                                                                           | [Details](#antigravity)                            |
+| Cursor        | Manual JSON config                                                                           | [Details](#cursor)                                 |
+| Windsurf      | Manual JSON config                                                                           | [Details](#windsurf)                               |
+| Any MCP agent | `engram mcp` (stdio)                                                                         | [Details](#any-other-mcp-agent)                    |
 
 ## Pi
 
-Install Engram's Pi package and the MCP adapter:
+Install Engram's Pi package, the MCP adapter, and Pi MCP config:
+
+```bash
+engram setup pi
+```
+
+`engram setup pi` runs `pi install npm:gentle-engram` and `pi install npm:pi-mcp-adapter`, then ensures Pi settings contain both packages and writes `mcpServers.engram` in the Pi agent MCP config when no Engram server is already configured. Existing `mcpServers.engram` entries are preserved.
+
+Manual equivalent:
 
 ```bash
 pi install npm:gentle-engram
@@ -189,6 +198,7 @@ engram setup opencode
 ```
 
 This does three things:
+
 1. Copies the plugin to `~/.config/opencode/plugins/engram.ts` (session tracking, Memory Protocol, compaction recovery)
 2. Adds the `engram` MCP server entry to your `opencode.json` with `--tools=agent` (15 agent-facing tools)
 3. Adds `opencode-subagent-statusline` to your `tui.json` or `tui.jsonc` so OpenCode shows sub-agent activity in the sidebar/home footer
@@ -298,6 +308,7 @@ engram setup gemini-cli
 ```
 
 `engram setup gemini-cli` now does three things:
+
 - Registers `mcpServers.engram` in `~/.gemini/settings.json` (Windows: `%APPDATA%\gemini\settings.json`)
 - Writes `~/.gemini/system.md` with the Engram Memory Protocol (includes post-compaction recovery)
 - Ensures `~/.gemini/.env` contains `GEMINI_SYSTEM_MD=1` so Gemini actually loads that system prompt
@@ -334,6 +345,7 @@ engram setup codex
 ```
 
 `engram setup codex` now does three things:
+
 - Registers `[mcp_servers.engram]` in `~/.codex/config.toml` (Windows: `%APPDATA%\codex\config.toml`)
 - Writes `~/.codex/engram-instructions.md` with the Engram Memory Protocol
 - Writes `~/.codex/engram-compact-prompt.md` and points `experimental_compact_prompt_file` to it, so compaction output includes a required memory-save instruction
@@ -398,6 +410,7 @@ Without the Memory Protocol, the agent has the tools but doesn't know WHEN to us
 **For Copilot:** Create a `.instructions.md` file in the VS Code User `prompts/` folder and paste the Memory Protocol from [DOCS.md](../DOCS.md#memory-protocol-full-text).
 
 Recommended file path:
+
 - macOS: `~/Library/Application Support/Code/User/prompts/engram-memory.instructions.md`
 - Linux: `~/.config/Code/User/prompts/engram-memory.instructions.md`
 - Windows: `%APPDATA%\Code\User\prompts\engram-memory.instructions.md`
@@ -405,6 +418,7 @@ Recommended file path:
 **For any VS Code chat extension:** Add the Memory Protocol text to your extension's custom instructions or system prompt configuration.
 
 The Memory Protocol tells the agent:
+
 - **When to save** — after bugfixes, decisions, discoveries, config changes, patterns
 - **When to search** — reactive ("remember", "recall") + proactive (overlapping past work)
 - **Session close** — mandatory `mem_session_summary` before ending
@@ -457,6 +471,7 @@ Add to your `.cursor/mcp.json` (same path on all platforms — it's project-rela
 > **Windows**: Make sure `engram.exe` is in your `PATH`. Cursor resolves MCP commands from the system PATH.
 
 > **Memory Protocol:** Cursor uses `.mdc` rule files stored in `.cursor/rules/` (Cursor 0.43+). Create an `engram.mdc` file (any name works — the `.mdc` extension is what matters) and place it in one of:
+>
 > - **Project-specific:** `.cursor/rules/engram.mdc` — commit to git so your whole team gets it
 > - **Global (all projects):** `~/.cursor/rules/engram.mdc` (Windows: `%USERPROFILE%\.cursor\rules\engram.mdc`) — create the directory if it doesn't exist
 >
@@ -496,39 +511,52 @@ The pattern is always the same — point your agent's MCP config to `engram mcp`
 When your agent compacts (summarizes long conversations to free context), it starts fresh — and might forget about Engram. To make memory truly resilient, add this to your agent's system prompt or config file:
 
 **For Claude Code** (`CLAUDE.md`):
+
 ```markdown
 ## Memory
+
 You have access to Engram persistent memory via MCP tools (mem_save, mem_search, mem_session_summary, etc.).
+
 - Save proactively after significant work — don't wait to be asked.
 - After any compaction or context reset, call `mem_context` to recover session state before continuing.
 ```
 
 **For OpenCode** (agent prompt in `opencode.json`):
+
 ```
 After any compaction or context reset, call mem_context to recover session state before continuing.
 Save memories proactively with mem_save after significant work.
 ```
 
 **For Gemini CLI** (`GEMINI.md`):
+
 ```markdown
 ## Memory
+
 You have access to Engram persistent memory via MCP tools (mem_save, mem_search, mem_session_summary, etc.).
+
 - Save proactively after significant work — don't wait to be asked.
 - After any compaction or context reset, call `mem_context` to recover session state before continuing.
 ```
 
 **For VS Code** (`Code/User/prompts/*.instructions.md` or custom instructions):
+
 ```markdown
 ## Memory
+
 You have access to Engram persistent memory via MCP tools (mem_save, mem_search, mem_session_summary, etc.).
+
 - Save proactively after significant work — don't wait to be asked.
 - After any compaction or context reset, call `mem_context` to recover session state before continuing.
 ```
 
 **For Antigravity** (`~/.gemini/GEMINI.md` or `.agent/rules/`):
+
 ```markdown
 ## Memory
+
 You have access to Engram persistent memory via MCP tools (mem_save, mem_search, mem_session_summary, etc.).
+
 - Save proactively after significant work — don't wait to be asked.
 - After any compaction or context reset, call `mem_context` to recover session state before continuing.
 ```
@@ -547,6 +575,7 @@ Save proactively after significant work. After context resets, call mem_context 
 ```
 
 **For Windsurf** (`.windsurfrules`):
+
 ```
 You have access to Engram persistent memory (mem_save, mem_search, mem_context).
 Save proactively after significant work. After context resets, call mem_context to recover state.
@@ -609,6 +638,7 @@ There is no separate dashboard or conflict list in Phase 1.
 ### What happens after judgment
 
 Once the agent calls `mem_judge` with a verdict:
+
 - The relation row is persisted with `judgment_status: "judged"` and the chosen `relation`.
 - If the relation is `supersedes`, future `mem_search` results show `supersedes: #<id> (<title>)` and `superseded_by: #<id> (<title>)` annotations on the affected observations, including the related memory's title.
 - If the relation is `conflicts_with`, future `mem_search` results show `conflicts: #<id> (<title>)` on both observations.

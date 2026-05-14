@@ -522,9 +522,15 @@ func (m *Manager) push(ctx context.Context) error {
 			seqs[i] = mut.Seq
 		}
 
-		_, err := m.transport.PushMutations(entries)
+		result, err := m.transport.PushMutations(entries)
 		if err != nil {
 			return fmt.Errorf("transport push project %q: %w", project, err)
+		}
+		if result == nil {
+			return fmt.Errorf("transport push project %q: missing accepted seqs for %d mutations", project, len(entries))
+		}
+		if len(result.AcceptedSeqs) != len(entries) {
+			return fmt.Errorf("transport push project %q: cloud accepted %d of %d mutations; refusing to ack local seqs", project, len(result.AcceptedSeqs), len(entries))
 		}
 		if err := m.store.AckSyncMutationSeqs(m.cfg.TargetKey, seqs); err != nil {
 			return fmt.Errorf("ack project %q: %w", project, err)

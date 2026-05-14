@@ -48,9 +48,9 @@ Call `mem_save` IMMEDIATELY and WITHOUT BEING ASKED after any of these:
 - User preference or constraint learned
 
 ### After user confirmation or rejection
-- User confirms a recommendation you made ("dale", "go with that", "sí", "perfect", "vamos con eso", "let's do that", "sounds good", "agreed")
-- User rejects an option or approach ("no, better X", "descartemos eso", "not that one", "quiero algo diferente")
-- User expresses a preference ("I prefer X over Y", "siempre hacé X", "me gusta más así", "always do it this way")
+- User confirms a recommendation you made ("go with that", "let's do that", "sounds good", "agreed", "perfect", or the equivalent in the user's language)
+- User rejects an option or approach ("no, better X", "not that one", or the equivalent in the user's language)
+- User expresses a preference ("I prefer X over Y", "always do it this way", or the equivalent in the user's language)
 - User makes a decision after you presented tradeoffs or options
 - A discussion concludes with a clear direction chosen — even if the agent proposed it
 
@@ -78,7 +78,7 @@ Format for `mem_save`:
 ## WHEN TO SEARCH MEMORY
 
 When the user asks to recall something — any variation of "remember", "recall", "what did we do",
-"how did we solve", "recordar", "acordate", "qué hicimos", or references to past work:
+"how did we solve", or the equivalent in the user's language, or references to past work:
 1. First call `mem_context` — checks recent session history (fast, cheap)
 2. If not found, call `mem_search` with relevant keywords (FTS5 full-text search)
 3. If you find a match, use `mem_get_observation` for full untruncated content
@@ -90,7 +90,7 @@ Also search memory PROACTIVELY when:
 
 ## SESSION CLOSE PROTOCOL (mandatory)
 
-Before ending a session or saying "done" / "listo" / "that's it", you MUST:
+Before ending a session or saying "done" / "that's it", you MUST:
 1. Call `mem_session_summary` with this structure:
 
 ## Goal

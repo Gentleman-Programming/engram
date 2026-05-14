@@ -76,7 +76,7 @@ Topic rules:
 ### WHEN TO SEARCH MEMORY
 
 When the user asks to recall something — any variation of "remember", "recall", "what did we do",
-"how did we solve", "recordar", "acordate", "qué hicimos", or references to past work:
+"how did we solve", or the equivalent in the user's language, or references to past work:
 1. First call \`mem_context\` — checks recent session history (fast, cheap)
 2. If not found, call \`mem_search\` with relevant keywords (FTS5 full-text search)
 3. If you find a match, use \`mem_get_observation\` for full untruncated content
@@ -88,7 +88,7 @@ Also search memory PROACTIVELY when:
 
 ### SESSION CLOSE PROTOCOL (mandatory)
 
-Before ending a session or saying "done" / "listo" / "that's it", you MUST:
+Before ending a session or saying "done" / "that's it", you MUST:
 1. Call \`mem_session_summary\` with this structure:
 
 ## Goal
