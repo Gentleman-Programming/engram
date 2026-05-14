@@ -49,7 +49,7 @@ Windows, Linux, and other install methods → [docs/INSTALLATION.md](docs/INSTAL
 | Agent                       | One-liner                                                                                    |
 | --------------------------- | -------------------------------------------------------------------------------------------- |
 | Claude Code                 | `claude plugin marketplace add Gentleman-Programming/engram && claude plugin install engram` |
-| Pi                          | `pi install npm:gentle-engram && pi install npm:pi-mcp-adapter && pi-engram init`            |
+| Pi                          | `engram setup pi`                                                                            |
 | OpenCode                    | `engram setup opencode`                                                                      |
 | Gemini CLI                  | `engram setup gemini-cli`                                                                    |
 | Codex                       | `engram setup codex`                                                                         |
@@ -65,9 +65,7 @@ That's it. No Node.js, no Python, no Docker. **One binary, one SQLite file.**
 Engram has a first-class Pi package: [`gentle-engram`](plugin/pi/README.md).
 
 ```bash
-pi install npm:gentle-engram
-pi install npm:pi-mcp-adapter
-pi-engram init
+engram setup pi
 ```
 
 It gives Pi persistent project memory, compaction recovery, and shared memory with other MCP agents through the same local-or-cloud Engram brain. The package is part of the Gentleman Programming agentic-coding ecosystem alongside Gentle-AI, SDD, skills, and Engram Cloud.

@@ -104,6 +104,71 @@ func TestStartUsesDefaultServeWhenServeNil(t *testing.T) {
 	}
 }
 
+func TestClaudeSaveNudgeCompatibilityRoutes(t *testing.T) {
+	st := newServerTestStore(t)
+	h := New(st, 0).Handler()
+
+	createReq := httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(`{"id":"s-nudge","project":"engram","directory":"/work/engram"}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createRec := httptest.NewRecorder()
+	h.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("expected session create 201, got %d", createRec.Code)
+	}
+
+	getSessionReq := httptest.NewRequest(http.MethodGet, "/sessions/s-nudge", nil)
+	getSessionRec := httptest.NewRecorder()
+	h.ServeHTTP(getSessionRec, getSessionReq)
+	if getSessionRec.Code != http.StatusOK {
+		t.Fatalf("expected session get 200, got %d body=%s", getSessionRec.Code, getSessionRec.Body.String())
+	}
+	var session map[string]any
+	if err := json.Unmarshal(getSessionRec.Body.Bytes(), &session); err != nil {
+		t.Fatalf("decode session: %v", err)
+	}
+	if session["started_at"] == "" || session["project"] != "engram" {
+		t.Fatalf("expected session JSON with started_at and project, got %#v", session)
+	}
+
+	for _, title := range []string{"Older save", "Newest save"} {
+		obsReq := httptest.NewRequest(http.MethodPost, "/observations", strings.NewReader(fmt.Sprintf(`{"session_id":"s-nudge","type":"note","title":%q,"content":"body","project":"engram"}`, title)))
+		obsReq.Header.Set("Content-Type", "application/json")
+		obsRec := httptest.NewRecorder()
+		h.ServeHTTP(obsRec, obsReq)
+		if obsRec.Code != http.StatusCreated {
+			t.Fatalf("expected observation create 201 for %q, got %d body=%s", title, obsRec.Code, obsRec.Body.String())
+		}
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/observations?project=engram&limit=1&sort=created_at:desc", nil)
+	listRec := httptest.NewRecorder()
+	h.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("expected observations list 200, got %d body=%s", listRec.Code, listRec.Body.String())
+	}
+	var obs []map[string]any
+	if err := json.Unmarshal(listRec.Body.Bytes(), &obs); err != nil {
+		t.Fatalf("decode observations: %v", err)
+	}
+	if len(obs) != 1 || obs[0]["title"] != "Newest save" || obs[0]["created_at"] == "" {
+		t.Fatalf("expected latest observation with created_at, got %#v", obs)
+	}
+
+	badSortReq := httptest.NewRequest(http.MethodGet, "/observations?sort=updated_at:desc", nil)
+	badSortRec := httptest.NewRecorder()
+	h.ServeHTTP(badSortRec, badSortReq)
+	if badSortRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unsupported sort, got %d", badSortRec.Code)
+	}
+
+	missingSessionReq := httptest.NewRequest(http.MethodGet, "/sessions/missing", nil)
+	missingSessionRec := httptest.NewRecorder()
+	h.ServeHTTP(missingSessionRec, missingSessionReq)
+	if missingSessionRec.Code != http.StatusNotFound {
+		t.Fatalf("expected missing session 404, got %d", missingSessionRec.Code)
+	}
+}
+
 func TestAdditionalServerErrorBranches(t *testing.T) {
 	st := newServerTestStore(t)
 	srv := New(st, 0)

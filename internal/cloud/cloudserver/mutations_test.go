@@ -1016,7 +1016,7 @@ func (a *simpleProjectAuth) AuthorizeProject(_ string) error {
 // ─── REQ-006, REQ-008: Relation payload validation tests (Phase D) ───────────
 
 // TestHandleMutationPush_ValidRelation_Returns200 (D.1a) verifies REQ-006 happy
-// path: a complete relation payload with all 6 required fields returns HTTP 200.
+// path: a complete relation payload with all required fields returns HTTP 200.
 func TestHandleMutationPush_ValidRelation_Returns200(t *testing.T) {
 	ms := newFakeMutationStore()
 	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
@@ -1025,6 +1025,7 @@ func TestHandleMutationPush_ValidRelation_Returns200(t *testing.T) {
 		"sync_id":         "rel-001",
 		"source_id":       "obs-src-001",
 		"target_id":       "obs-tgt-001",
+		"relation":        "conflicts_with",
 		"judgment_status": "judged",
 		"marked_by_actor": "alice",
 		"marked_by_kind":  "human",
@@ -1063,6 +1064,7 @@ func TestHandleMutationPush_RelationMissingEachRequiredField(t *testing.T) {
 			payload: json.RawMessage(`{
 				"source_id":       "obs-src",
 				"target_id":       "obs-tgt",
+				"relation":        "conflicts_with",
 				"judgment_status": "judged",
 				"marked_by_actor": "alice",
 				"marked_by_kind":  "human"
@@ -1073,6 +1075,7 @@ func TestHandleMutationPush_RelationMissingEachRequiredField(t *testing.T) {
 			payload: json.RawMessage(`{
 				"sync_id":         "rel-001",
 				"target_id":       "obs-tgt",
+				"relation":        "conflicts_with",
 				"judgment_status": "judged",
 				"marked_by_actor": "alice",
 				"marked_by_kind":  "human"
@@ -1083,6 +1086,18 @@ func TestHandleMutationPush_RelationMissingEachRequiredField(t *testing.T) {
 			payload: json.RawMessage(`{
 				"sync_id":         "rel-001",
 				"source_id":       "obs-src",
+				"relation":        "conflicts_with",
+				"judgment_status": "judged",
+				"marked_by_actor": "alice",
+				"marked_by_kind":  "human"
+			}`),
+		},
+		{
+			name: "relation",
+			payload: json.RawMessage(`{
+				"sync_id":         "rel-001",
+				"source_id":       "obs-src",
+				"target_id":       "obs-tgt",
 				"judgment_status": "judged",
 				"marked_by_actor": "alice",
 				"marked_by_kind":  "human"
@@ -1094,6 +1109,7 @@ func TestHandleMutationPush_RelationMissingEachRequiredField(t *testing.T) {
 				"sync_id":         "rel-001",
 				"source_id":       "obs-src",
 				"target_id":       "obs-tgt",
+				"relation":        "conflicts_with",
 				"marked_by_actor": "alice",
 				"marked_by_kind":  "human"
 			}`),
@@ -1104,6 +1120,7 @@ func TestHandleMutationPush_RelationMissingEachRequiredField(t *testing.T) {
 				"sync_id":         "rel-001",
 				"source_id":       "obs-src",
 				"target_id":       "obs-tgt",
+				"relation":        "conflicts_with",
 				"judgment_status": "judged",
 				"marked_by_kind":  "human"
 			}`),
@@ -1114,6 +1131,7 @@ func TestHandleMutationPush_RelationMissingEachRequiredField(t *testing.T) {
 				"sync_id":         "rel-001",
 				"source_id":       "obs-src",
 				"target_id":       "obs-tgt",
+				"relation":        "conflicts_with",
 				"judgment_status": "judged",
 				"marked_by_actor": "alice"
 			}`),
@@ -1145,7 +1163,7 @@ func TestHandleMutationPush_RelationMissingEachRequiredField(t *testing.T) {
 			}
 			// Verify the missing field name appears in the response
 			var resp struct {
-				Error   string       `json:"error"`
+				Error   string `json:"error"`
 				Invalid []struct {
 					Field  string `json:"field"`
 					Index  int    `json:"index"`
@@ -1175,6 +1193,7 @@ func TestHandleMutationPush_PartialBatch_Atomic(t *testing.T) {
 		"sync_id":         "rel-001",
 		"source_id":       "obs-src-001",
 		"target_id":       "obs-tgt-001",
+		"relation":        "conflicts_with",
 		"judgment_status": "judged",
 		"marked_by_actor": "alice",
 		"marked_by_kind":  "human"
@@ -1183,6 +1202,7 @@ func TestHandleMutationPush_PartialBatch_Atomic(t *testing.T) {
 	invalidPayload := json.RawMessage(`{
 		"sync_id":         "rel-002",
 		"source_id":       "obs-src-002",
+		"relation":        "conflicts_with",
 		"judgment_status": "judged",
 		"marked_by_actor": "bob",
 		"marked_by_kind":  "human"
@@ -1576,6 +1596,7 @@ func TestRelationSync_ServerValidation_MissingField(t *testing.T) {
 		"sync_id":         "rel-g4-001",
 		"source_id":       "obs-src-g4",
 		"target_id":       "obs-tgt-g4",
+		"relation":        "conflicts_with",
 		"marked_by_actor": "agent:test",
 		"marked_by_kind":  "agent"
 	}`)

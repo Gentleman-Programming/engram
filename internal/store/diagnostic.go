@@ -203,6 +203,8 @@ func ValidateSyncMutationPayload(entity, op, payload, entityKey string) SyncMuta
 			require("target_id")
 			require("relation")
 			require("judgment_status")
+			require("marked_by_actor")
+			require("marked_by_kind")
 			require("project")
 		}
 	default:

@@ -296,6 +296,124 @@ func TestInstallCodexInjectsTOMLAndIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestInstallPiInstallsPackagesAndWritesConfig(t *testing.T) {
+	resetSetupSeams(t)
+	agentDir := t.TempDir()
+	t.Setenv("PI_CODING_AGENT_DIR", agentDir)
+	osExecutable = func() (string, error) { return "/opt/engram/bin/engram", nil }
+
+	var commands []string
+	runCommand = func(name string, args ...string) ([]byte, error) {
+		commands = append(commands, name+" "+strings.Join(args, " "))
+		return []byte("ok"), nil
+	}
+
+	result, err := Install("pi")
+	if err != nil {
+		t.Fatalf("Install(pi) failed: %v", err)
+	}
+	if result.Agent != "pi" || result.Destination != agentDir || result.Files != 2 {
+		t.Fatalf("unexpected install result: %#v", result)
+	}
+	wantCommands := []string{"pi install npm:gentle-engram", "pi install npm:pi-mcp-adapter"}
+	if !reflect.DeepEqual(commands, wantCommands) {
+		t.Fatalf("unexpected pi install commands: got %#v want %#v", commands, wantCommands)
+	}
+
+	settingsRaw, err := os.ReadFile(filepath.Join(agentDir, "settings.json"))
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	var settings struct {
+		Packages []string `json:"packages"`
+	}
+	if err := json.Unmarshal(settingsRaw, &settings); err != nil {
+		t.Fatalf("parse settings: %v", err)
+	}
+	for _, pkg := range []string{"npm:gentle-engram", "npm:pi-mcp-adapter"} {
+		if !slices.Contains(settings.Packages, pkg) {
+			t.Fatalf("expected settings packages to include %q, got %#v", pkg, settings.Packages)
+		}
+	}
+
+	mcpRaw, err := os.ReadFile(filepath.Join(agentDir, "mcp.json"))
+	if err != nil {
+		t.Fatalf("read mcp: %v", err)
+	}
+	var mcpConfig struct {
+		MCPServers map[string]struct {
+			Command     string   `json:"command"`
+			Args        []string `json:"args"`
+			Lifecycle   string   `json:"lifecycle"`
+			DirectTools bool     `json:"directTools"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(mcpRaw, &mcpConfig); err != nil {
+		t.Fatalf("parse mcp: %v", err)
+	}
+	server, ok := mcpConfig.MCPServers["engram"]
+	if !ok {
+		t.Fatalf("expected mcpServers.engram in %#v", mcpConfig.MCPServers)
+	}
+	if server.Command != "/opt/engram/bin/engram" || !reflect.DeepEqual(server.Args, []string{"mcp", "--tools=agent"}) || server.Lifecycle != "lazy" || !server.DirectTools {
+		t.Fatalf("unexpected engram MCP server: %#v", server)
+	}
+}
+
+func TestInstallPiPreservesExistingEngramMCPServer(t *testing.T) {
+	resetSetupSeams(t)
+	agentDir := t.TempDir()
+	t.Setenv("PI_CODING_AGENT_DIR", agentDir)
+	runCommand = func(string, ...string) ([]byte, error) { return []byte("ok"), nil }
+
+	settingsPath := filepath.Join(agentDir, "settings.json")
+	mcpPath := filepath.Join(agentDir, "mcp.json")
+	if err := os.MkdirAll(agentDir, 0755); err != nil {
+		t.Fatalf("mkdir agent dir: %v", err)
+	}
+	if err := os.WriteFile(settingsPath, []byte(`{"packages":["npm:existing"]}`), 0644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	originalMCP := `{"mcpServers":{"engram":{"command":"custom-engram","args":["mcp"],"lifecycle":"eager"},"other":{"command":"other"}}}`
+	if err := os.WriteFile(mcpPath, []byte(originalMCP), 0644); err != nil {
+		t.Fatalf("write mcp: %v", err)
+	}
+
+	result, err := Install("pi")
+	if err != nil {
+		t.Fatalf("Install(pi) failed: %v", err)
+	}
+	if result.Files != 1 {
+		t.Fatalf("expected only settings to change, got files=%d", result.Files)
+	}
+	mcpAfter, err := os.ReadFile(mcpPath)
+	if err != nil {
+		t.Fatalf("read mcp after install: %v", err)
+	}
+	if string(mcpAfter) != originalMCP {
+		t.Fatalf("expected existing mcp server to be preserved, got %s", mcpAfter)
+	}
+
+	settingsRaw, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings after install: %v", err)
+	}
+	if !strings.Contains(string(settingsRaw), "npm:existing") || !strings.Contains(string(settingsRaw), "npm:gentle-engram") || !strings.Contains(string(settingsRaw), "npm:pi-mcp-adapter") {
+		t.Fatalf("expected settings packages to be preserved and extended, got %s", settingsRaw)
+	}
+}
+
+func TestInstallPiCommandFailure(t *testing.T) {
+	resetSetupSeams(t)
+	runCommand = func(name string, args ...string) ([]byte, error) {
+		return []byte("boom"), errors.New("exit 1")
+	}
+	_, err := Install("pi")
+	if err == nil || !strings.Contains(err.Error(), "install npm:gentle-engram") {
+		t.Fatalf("expected pi install error, got %v", err)
+	}
+}
+
 func TestInstallUnknownAgent(t *testing.T) {
 	resetSetupSeams(t)
 	_, err := Install("unknown")

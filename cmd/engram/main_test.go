@@ -166,6 +166,9 @@ func TestPrintUsage(t *testing.T) {
 	if !strings.Contains(stdout, "search <query>") || !strings.Contains(stdout, "setup [agent]") {
 		t.Fatalf("usage missing expected commands: %q", stdout)
 	}
+	if !strings.Contains(stdout, "opencode, pi, claude-code, gemini-cli, codex") {
+		t.Fatalf("usage missing pi setup agent: %q", stdout)
+	}
 	if !strings.Contains(stdout, "cloud <subcommand>") {
 		t.Fatalf("usage missing cloud command tree: %q", stdout)
 	}
@@ -198,15 +201,22 @@ func TestPrintPostInstall(t *testing.T) {
 		notExpects []string
 	}{
 		{
-			name:    "opencode with subagent monitor enabled",
-			result:  &setup.Result{Agent: "opencode", TUIPluginEnabled: true},
-			expects: []string{"Restart OpenCode", "opencode-subagent-statusline", "engram serve &"},
+			name:       "opencode with subagent monitor enabled",
+			result:     &setup.Result{Agent: "opencode", TUIPluginEnabled: true},
+			expects:    []string{"Restart OpenCode", "opencode-subagent-statusline", "auto-starts"},
+			notExpects: []string{"engram serve &"},
 		},
 		{
 			name:       "opencode with subagent monitor not enabled",
 			result:     &setup.Result{Agent: "opencode", TUIPluginEnabled: false},
-			expects:    []string{"Restart OpenCode", "engram serve &"},
-			notExpects: []string{"opencode-subagent-statusline"},
+			expects:    []string{"Restart OpenCode", "auto-starts"},
+			notExpects: []string{"opencode-subagent-statusline", "engram serve &"},
+		},
+		{
+			name:       "pi",
+			result:     &setup.Result{Agent: "pi"},
+			expects:    []string{"Restart Pi", "pi list"},
+			notExpects: []string{"ENGRAM_BIN"},
 		},
 		{
 			name:    "gemini-cli",
@@ -974,9 +984,6 @@ func TestCmdProjectsAllNoGroups(t *testing.T) {
 }
 
 func TestCmdMCPDetectsProjectFromFlag(t *testing.T) {
-	// JR2-4: --project flag is no longer used (dead code removed). The --project flag
-	// is now silently ignored; project is auto-detected from cwd at each MCP call.
-	// This test verifies cmdMCP still starts correctly when an unknown flag is passed.
 	cfg := testConfig(t)
 
 	var capturedCfg mcp.MCPConfig
@@ -998,9 +1005,9 @@ func TestCmdMCPDetectsProjectFromFlag(t *testing.T) {
 	withArgs(t, "engram", "mcp", "--project=myproject")
 	_, _ = captureOutput(t, func() { cmdMCP(cfg) })
 
-	// JW6: MCPConfig.DefaultProject removed — verify cmdMCP still calls newMCPServerWithConfig.
-	// The project flag is parsed but project is now auto-detected per call, not stored in config.
-	_ = capturedCfg // MCPConfig{} — no fields to assert
+	if capturedCfg.DefaultProject != "myproject" {
+		t.Fatalf("DefaultProject = %q; want myproject", capturedCfg.DefaultProject)
+	}
 }
 
 func TestCmdMCPDetectsProjectFromEnv(t *testing.T) {
@@ -1025,8 +1032,9 @@ func TestCmdMCPDetectsProjectFromEnv(t *testing.T) {
 	withArgs(t, "engram", "mcp")
 	_, _ = captureOutput(t, func() { cmdMCP(cfg) })
 
-	// JW6: MCPConfig.DefaultProject removed — just verify cmdMCP completes without panic.
-	_ = capturedCfg
+	if capturedCfg.DefaultProject != "env-project" {
+		t.Fatalf("DefaultProject = %q; want env-project", capturedCfg.DefaultProject)
+	}
 }
 
 func TestCmdMCPDetectsProjectFromGit(t *testing.T) {
@@ -1054,8 +1062,9 @@ func TestCmdMCPDetectsProjectFromGit(t *testing.T) {
 	withArgs(t, "engram", "mcp")
 	_, _ = captureOutput(t, func() { cmdMCP(cfg) })
 
-	// JW6: MCPConfig.DefaultProject removed — just verify cmdMCP completes without panic.
-	_ = capturedCfg
+	if capturedCfg.DefaultProject != "" {
+		t.Fatalf("DefaultProject = %q; want empty without flag/env", capturedCfg.DefaultProject)
+	}
 }
 
 func TestCmdSyncUsesDetectProject(t *testing.T) {
