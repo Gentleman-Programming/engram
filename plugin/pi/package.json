@@ -1,6 +1,6 @@
 {
   "name": "gentle-engram",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Persistent memory for Pi agents — one local-or-cloud brain shared across sessions, compactions, and MCP agents",
   "type": "module",
   "license": "MIT",
