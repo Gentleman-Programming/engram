@@ -71,7 +71,7 @@ call \`mem_search\`, then \`mem_get_observation\` for full content.
 
 ### SESSION CLOSE PROTOCOL
 
-Before ending a session or saying "done" / "listo", call \`mem_session_summary\`
+Before ending a session or saying "done", call \`mem_session_summary\`
 with Goal, Instructions, Discoveries, Accomplished, Next Steps, and Relevant Files.
 
 ### AFTER COMPACTION
