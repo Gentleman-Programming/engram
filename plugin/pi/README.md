@@ -110,6 +110,26 @@ HTTP event capture and MCP tools are separate paths. Engram currently exposes MC
 - Prompt context tied to meaningful saved observations
 - Cross-machine/team memory once a project is enrolled in Engram Cloud
 
+## Private blocks
+
+`gentle-engram` redacts explicit private blocks before sending captured prompts, passive observations, or compaction summaries to Engram:
+
+```text
+<private>
+this should not be persisted verbatim
+</private>
+```
+
+The persisted payload keeps the surrounding text but replaces the private block with `[REDACTED]`. Redaction is applied recursively to string values in outgoing JSON payloads and to query values in Engram HTTP requests.
+
+This is a lightweight convenience convention, not a full secret-scanning system. Do not rely on it to detect credentials automatically.
+
+## Compaction recovery
+
+When Pi emits a compaction lifecycle event, `gentle-engram` best-effort extracts a compacted summary from supported event fields and saves it as a `session_summary` observation with topic key `session/compaction-recovery`.
+
+Unsupported event shapes fail gracefully. The extension still injects a manual recovery instruction containing `FIRST ACTION REQUIRED`, so the next agent turn can call `mem_session_summary` if the Engram MCP tools are installed and active. If the tools are unavailable, save the compacted summary manually after Engram is available again.
+
 ## Local, sync, or cloud
 
 Engram can grow with your workflow:
