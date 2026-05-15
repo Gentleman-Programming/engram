@@ -1736,3 +1736,171 @@ func TestG2_ExistingRoutes_Unaffected(t *testing.T) {
 		t.Errorf("expected /stats 200 after Phase 3, got %d", statsRec.Code)
 	}
 }
+
+func TestProjectCurrentDoctorJudgeAndCompareRoutes(t *testing.T) {
+	st := newServerTestStore(t)
+	if err := st.CreateSession("s-parity", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	idA, err := st.AddObservation(store.AddObservationParams{SessionID: "s-parity", Type: "decision", Title: "Old auth", Content: "sessions", Project: "engram", Scope: "project"})
+	if err != nil {
+		t.Fatalf("AddObservation A: %v", err)
+	}
+	idB, err := st.AddObservation(store.AddObservationParams{SessionID: "s-parity", Type: "decision", Title: "New auth", Content: "jwt", Project: "engram", Scope: "project"})
+	if err != nil {
+		t.Fatalf("AddObservation B: %v", err)
+	}
+	obsA, _ := st.GetObservation(idA)
+	obsB, _ := st.GetObservation(idB)
+	if _, err := st.SaveRelation(store.SaveRelationParams{SyncID: "rel-http-parity", SourceID: obsA.SyncID, TargetID: obsB.SyncID}); err != nil {
+		t.Fatalf("SaveRelation: %v", err)
+	}
+
+	var writes int32
+	srv := New(st, 0)
+	srv.SetOnWrite(func() { atomic.AddInt32(&writes, 1) })
+	h := srv.Handler()
+
+	projectReq := httptest.NewRequest(http.MethodGet, "/project/current?cwd=/tmp/engram", nil)
+	projectRec := httptest.NewRecorder()
+	h.ServeHTTP(projectRec, projectReq)
+	if projectRec.Code != http.StatusOK {
+		t.Fatalf("expected current project 200, got %d body=%q", projectRec.Code, projectRec.Body.String())
+	}
+	var projectResp map[string]any
+	if err := json.Unmarshal(projectRec.Body.Bytes(), &projectResp); err != nil {
+		t.Fatalf("decode project response: %v", err)
+	}
+	if projectResp["project"] == "" || projectResp["cwd"] != "/tmp/engram" {
+		t.Fatalf("unexpected project response: %#v", projectResp)
+	}
+
+	doctorReq := httptest.NewRequest(http.MethodGet, "/doctor?project=engram&check=session_project_directory_mismatch", nil)
+	doctorRec := httptest.NewRecorder()
+	h.ServeHTTP(doctorRec, doctorReq)
+	if doctorRec.Code != http.StatusOK {
+		t.Fatalf("expected doctor 200, got %d body=%q", doctorRec.Code, doctorRec.Body.String())
+	}
+	var doctorResp map[string]any
+	if err := json.Unmarshal(doctorRec.Body.Bytes(), &doctorResp); err != nil {
+		t.Fatalf("decode doctor response: %v", err)
+	}
+	if doctorResp["project"] != "engram" || doctorResp["status"] == "" {
+		t.Fatalf("unexpected doctor response: %#v", doctorResp)
+	}
+
+	missingProjectDoctorReq := httptest.NewRequest(http.MethodGet, "/doctor?project=missing-project", nil)
+	missingProjectDoctorRec := httptest.NewRecorder()
+	h.ServeHTTP(missingProjectDoctorRec, missingProjectDoctorReq)
+	if missingProjectDoctorRec.Code != http.StatusNotFound {
+		t.Fatalf("expected doctor unknown project 404, got %d body=%q", missingProjectDoctorRec.Code, missingProjectDoctorRec.Body.String())
+	}
+	var missingDoctorResp map[string]any
+	if err := json.Unmarshal(missingProjectDoctorRec.Body.Bytes(), &missingDoctorResp); err != nil {
+		t.Fatalf("decode missing doctor response: %v", err)
+	}
+	if missingDoctorResp["code"] != "unknown_project" || missingDoctorResp["available_projects"] == nil {
+		t.Fatalf("expected structured unknown project response, got %#v", missingDoctorResp)
+	}
+
+	freshDetectedDoctorReq := httptest.NewRequest(http.MethodGet, "/doctor?cwd=/tmp/fresh-project", nil)
+	freshDetectedDoctorRec := httptest.NewRecorder()
+	h.ServeHTTP(freshDetectedDoctorRec, freshDetectedDoctorReq)
+	if freshDetectedDoctorRec.Code != http.StatusOK {
+		t.Fatalf("expected doctor fresh detected project 200, got %d body=%q", freshDetectedDoctorRec.Code, freshDetectedDoctorRec.Body.String())
+	}
+
+	mismatchObservationReq := httptest.NewRequest(http.MethodPost, "/observations", strings.NewReader(`{"session_id":"s-parity","type":"decision","title":"Wrong project","content":"body","project":"other"}`))
+	mismatchObservationRec := httptest.NewRecorder()
+	h.ServeHTTP(mismatchObservationRec, mismatchObservationReq)
+	if mismatchObservationRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected observation session/project mismatch 400, got %d body=%q", mismatchObservationRec.Code, mismatchObservationRec.Body.String())
+	}
+
+	mismatchPromptReq := httptest.NewRequest(http.MethodPost, "/prompts", strings.NewReader(`{"session_id":"s-parity","content":"prompt","project":"other"}`))
+	mismatchPromptRec := httptest.NewRecorder()
+	h.ServeHTTP(mismatchPromptRec, mismatchPromptReq)
+	if mismatchPromptRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected prompt session/project mismatch 400, got %d body=%q", mismatchPromptRec.Code, mismatchPromptRec.Body.String())
+	}
+
+	mismatchPassiveReq := httptest.NewRequest(http.MethodPost, "/observations/passive", strings.NewReader(`{"session_id":"s-parity","content":"## Key Learnings:\n- mismatch","project":"other"}`))
+	mismatchPassiveRec := httptest.NewRecorder()
+	h.ServeHTTP(mismatchPassiveRec, mismatchPassiveReq)
+	if mismatchPassiveRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected passive session/project mismatch 400, got %d body=%q", mismatchPassiveRec.Code, mismatchPassiveRec.Body.String())
+	}
+
+	invalidJudgeConfidenceReq := httptest.NewRequest(http.MethodPost, "/conflicts/judge", strings.NewReader(`{"judgment_id":"rel-http-parity","relation":"compatible","confidence":1.5}`))
+	invalidJudgeConfidenceRec := httptest.NewRecorder()
+	h.ServeHTTP(invalidJudgeConfidenceRec, invalidJudgeConfidenceReq)
+	if invalidJudgeConfidenceRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid judge confidence 400, got %d body=%q", invalidJudgeConfidenceRec.Code, invalidJudgeConfidenceRec.Body.String())
+	}
+
+	judgeReq := httptest.NewRequest(http.MethodPost, "/conflicts/judge", strings.NewReader(`{"judgment_id":"rel-http-parity","relation":"compatible","reason":"same migration","confidence":0.8,"session_id":"s-parity"}`))
+	judgeReq.Header.Set("Content-Type", "application/json")
+	judgeRec := httptest.NewRecorder()
+	h.ServeHTTP(judgeRec, judgeReq)
+	if judgeRec.Code != http.StatusOK {
+		t.Fatalf("expected judge 200, got %d body=%q", judgeRec.Code, judgeRec.Body.String())
+	}
+	var judgeResp map[string]any
+	if err := json.Unmarshal(judgeRec.Body.Bytes(), &judgeResp); err != nil {
+		t.Fatalf("decode judge response: %v", err)
+	}
+	if judgeResp["relation"] == nil {
+		t.Fatalf("expected relation envelope, got %#v", judgeResp)
+	}
+
+	compareReq := httptest.NewRequest(http.MethodPost, "/conflicts/compare", strings.NewReader(fmt.Sprintf(`{"memory_id_a":%d,"memory_id_b":%d,"relation":"related","confidence":0.91,"reasoning":"same auth topic","model":"test-model"}`, idA, idB)))
+	compareReq.Header.Set("Content-Type", "application/json")
+	compareRec := httptest.NewRecorder()
+	h.ServeHTTP(compareRec, compareReq)
+	if compareRec.Code != http.StatusOK {
+		t.Fatalf("expected compare 200, got %d body=%q", compareRec.Code, compareRec.Body.String())
+	}
+	var compareResp map[string]any
+	if err := json.Unmarshal(compareRec.Body.Bytes(), &compareResp); err != nil {
+		t.Fatalf("decode compare response: %v", err)
+	}
+	if compareResp["sync_id"] == "" {
+		t.Fatalf("expected persisted sync_id, got %#v", compareResp)
+	}
+	if atomic.LoadInt32(&writes) < 2 {
+		t.Fatalf("expected judge and compare writes to notify, got %d", writes)
+	}
+}
+
+func TestJudgeAndCompareRoutesValidateInput(t *testing.T) {
+	st := newServerTestStore(t)
+	h := New(st, 0).Handler()
+
+	judgeReq := httptest.NewRequest(http.MethodPost, "/conflicts/judge", strings.NewReader(`{"relation":"related"}`))
+	judgeRec := httptest.NewRecorder()
+	h.ServeHTTP(judgeRec, judgeReq)
+	if judgeRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected missing judgment_id 400, got %d body=%q", judgeRec.Code, judgeRec.Body.String())
+	}
+
+	missingConfidenceReq := httptest.NewRequest(http.MethodPost, "/conflicts/compare", strings.NewReader(`{"memory_id_a":1,"memory_id_b":2,"relation":"related","reasoning":"missing confidence"}`))
+	missingConfidenceRec := httptest.NewRecorder()
+	h.ServeHTTP(missingConfidenceRec, missingConfidenceReq)
+	if missingConfidenceRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected missing confidence 400, got %d body=%q", missingConfidenceRec.Code, missingConfidenceRec.Body.String())
+	}
+
+	invalidConfidenceReq := httptest.NewRequest(http.MethodPost, "/conflicts/compare", strings.NewReader(`{"memory_id_a":1,"memory_id_b":2,"relation":"related","confidence":1.5,"reasoning":"invalid confidence"}`))
+	invalidConfidenceRec := httptest.NewRecorder()
+	h.ServeHTTP(invalidConfidenceRec, invalidConfidenceReq)
+	if invalidConfidenceRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid confidence 400, got %d body=%q", invalidConfidenceRec.Code, invalidConfidenceRec.Body.String())
+	}
+
+	compareReq := httptest.NewRequest(http.MethodPost, "/conflicts/compare", strings.NewReader(`{"memory_id_a":999,"memory_id_b":1000,"relation":"related","confidence":0.9,"reasoning":"missing"}`))
+	compareRec := httptest.NewRecorder()
+	h.ServeHTTP(compareRec, compareReq)
+	if compareRec.Code != http.StatusNotFound {
+		t.Fatalf("expected missing observation 404, got %d body=%q", compareRec.Code, compareRec.Body.String())
+	}
+}

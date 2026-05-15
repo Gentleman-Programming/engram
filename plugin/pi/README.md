@@ -78,7 +78,7 @@ Engram includes a terminal UI for browsing sessions, observations, prompts, proj
 ## Quick start
 
 ```bash
-pi install npm:gentle-engram
+pi install npm:gentle-engram@0.1.5
 pi install npm:pi-mcp-adapter
 pi-engram init
 ```
@@ -89,21 +89,21 @@ Restart Pi after installation, then ask Pi what it remembers about the current p
 
 `gentle-engram` connects Pi to Engram through two complementary paths:
 
-| Path         | Purpose                                                                                                                            |
-| ------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Path         | Purpose                                                                                                                                |
+| ------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
 | Pi extension | Captures prompts/session events, injects the Memory Protocol, and exposes compact Pi-native `mem_*` tools over the Engram HTTP server. |
-| MCP tools    | Keeps Engram's MCP surface available through `pi-mcp-adapter` for clients and flows that use MCP directly.                         |
+| MCP tools    | Keeps Engram's MCP surface available through `pi-mcp-adapter` for clients and flows that use MCP directly.                             |
 
 ```text
 Pi events/tools -> gentle-engram extension -> ENGRAM_URL / engram serve -> SQLite
 Pi MCP tools   -> pi-mcp-adapter -> ENGRAM_BIN / engram mcp -> SQLite
 ```
 
-Pi-native compact tools use the same HTTP server path as event capture. MCP tools remain a separate stdio path, so direct MCP usage still needs an Engram binary even when `ENGRAM_URL` points at a remote HTTP server.
+Pi-native compact tools use the same HTTP server path as event capture, including project detection, diagnostics, passive capture, and conflict-judgment tools such as `mem_current_project`, `mem_doctor`, `mem_capture_passive`, `mem_judge`, and `mem_compare`. MCP tools remain a separate stdio path, so direct MCP usage still needs an Engram binary even when `ENGRAM_URL` points at a remote HTTP server. Engram MCP direct tools are not enabled by default in Pi to avoid duplicate raw `engram_mem_*` tool rows.
 
 ## Compact memory tool rendering
 
-`gentle-engram` owns the Pi chrome for Engram memory tools by registering compact Pi-native `mem_*` tools in the companion package. When tools such as `mem_search`, `mem_context`, `mem_save`, `mem_session_summary`, and `mem_get_observation` run in Pi, the default collapsed view stays compact:
+`gentle-engram` owns the Pi chrome for Engram memory tools by registering compact Pi-native `mem_*` tools in the companion package. When tools such as `mem_search`, `mem_context`, `mem_save`, `mem_session_summary`, `mem_get_observation`, `mem_judge`, and `mem_doctor` run in Pi, the default collapsed view stays compact:
 
 ```text
 🧠 search “auth model” …
@@ -159,7 +159,7 @@ Cloud is opt-in and project-scoped. Local SQLite remains the source of truth; cl
 
 - Pi coding agent with npm package support.
 - Engram installed as `engram` on `PATH`, or `ENGRAM_BIN` pointing at the binary.
-- `pi-mcp-adapter` for direct `mem_*` MCP tools.
+- `pi-mcp-adapter` only if you want the optional MCP gateway for compatibility/debugging; Pi-native `mem_*` tools come from `gentle-engram`.
 
 If you only want HTTP session capture against an already running Engram server, set `ENGRAM_URL` and the extension will not auto-start a local `engram serve` process.
 
@@ -189,8 +189,8 @@ If the binary is missing, Pi keeps running and memory degrades instead of crashi
 
 `pi-engram init` writes Pi-owned config in the Pi agent directory:
 
-- `settings.json`: ensures `npm:pi-mcp-adapter` and `npm:gentle-engram` are declared.
-- `mcp.json`: adds an `engram` MCP server that launches `engram mcp --tools=agent` through a safe Node wrapper.
+- `settings.json`: ensures `npm:pi-mcp-adapter` and `npm:gentle-engram@0.1.5` are declared.
+- `mcp.json`: adds an `engram` MCP server that launches `engram mcp --tools=agent` through a safe Node wrapper with `directTools: false`, so MCP remains available through the gateway without duplicating Pi-native `mem_*` tools.
 
 Existing `mcpServers.engram` entries are preserved unless you pass `--force`:
 

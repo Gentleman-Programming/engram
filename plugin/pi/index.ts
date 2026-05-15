@@ -6,9 +6,9 @@
  * are configured separately through pi-mcp-adapter and `engram mcp`.
  */
 
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
+import { basename, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -35,6 +35,11 @@ const ENGRAM_TOOLS = [
   "mem_get_observation",
   "mem_session_start",
   "mem_session_end",
+  "mem_current_project",
+  "mem_doctor",
+  "mem_capture_passive",
+  "mem_judge",
+  "mem_compare",
 ] as const;
 
 const ENGRAM_TOOL_NAMES = new Set<string>(ENGRAM_TOOLS);
@@ -109,12 +114,15 @@ interface MigrationBody {
   new_project: string;
 }
 
-interface ContextResponse {
-  context?: string;
+interface CurrentProjectResponse {
+  project?: string;
+  available_projects?: string[] | null;
+  warning?: string;
+  error_hint?: string;
 }
 
-interface ProjectConfig {
-  project_name?: unknown;
+interface ContextResponse {
+  context?: string;
 }
 
 interface SessionContext {
@@ -134,19 +142,54 @@ interface ToolEndEvent {
   result?: unknown;
 }
 
+class EngramHttpError extends Error {
+  constructor(message: string, readonly status: number, readonly data: unknown) {
+    super(message);
+    this.name = "EngramHttpError";
+  }
+}
+
 async function engramFetch<TResponse = unknown>(path: string, opts: FetchOptions = {}): Promise<TResponse | null> {
+  let res: Response;
   try {
-    const res = await fetch(`${ENGRAM_URL}${redactUrlPath(path)}`, {
+    res = await fetch(`${ENGRAM_URL}${redactUrlPath(path)}`, {
       method: opts.method ?? "GET",
       headers: opts.body ? { "Content-Type": "application/json" } : undefined,
       body: opts.body ? JSON.stringify(redactValue(opts.body)) : undefined,
     });
-    const data = (await res.json()) as TResponse;
-    if (!res.ok) return null;
-    return data;
   } catch {
     return null;
   }
+
+  let data: unknown = null;
+  try {
+    data = await res.json();
+  } catch {
+    data = null;
+  }
+
+  if (!res.ok) {
+    const message = data && typeof data === "object" && "error" in data && typeof data.error === "string"
+      ? data.error
+      : `Engram request failed with HTTP ${res.status}`;
+    throw new EngramHttpError(message, res.status, data);
+  }
+
+  return data as TResponse;
+}
+
+async function bestEffortEngramFetch<TResponse = unknown>(path: string, opts: FetchOptions = {}): Promise<TResponse | null> {
+  try {
+    return await engramFetch<TResponse>(path, opts);
+  } catch {
+    return null;
+  }
+}
+
+async function ensureSessionBestEffort(sessionId: string, sessionProject = project): Promise<void> {
+  try {
+    await ensureSession(sessionId, sessionProject);
+  } catch {}
 }
 
 async function isEngramRunning(): Promise<boolean> {
@@ -160,103 +203,13 @@ async function isEngramRunning(): Promise<boolean> {
   }
 }
 
-function normalizeProjectName(name: string): string {
-  const normalized = name.trim().toLowerCase();
-  return normalized || "unknown";
+function rawBasenameProjectName(directory: string): string {
+  const resolved = resolve(directory || ".");
+  return basename(resolved).trim() || "unknown";
 }
 
-function normalizeConfigProjectName(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined;
-  const trimmed = value.trim();
-  if (!trimmed || /[/\\]/.test(trimmed) || /[\x00-\x1f\x7f]/.test(trimmed)) return undefined;
-  return normalizeProjectName(trimmed);
-}
-
-function getGitRoot(directory: string): string | undefined {
-  try {
-    const result = spawnSync("git", ["-C", directory, "rev-parse", "--show-toplevel"], {
-      encoding: "utf8",
-    });
-    if (result.status === 0) {
-      return result.stdout?.trim() || undefined;
-    }
-  } catch {}
-  return undefined;
-}
-
-function readConfigProjectName(projectDir: string): string | undefined {
-  const configPath = join(projectDir, ".engram", "config.json");
-  if (!existsSync(configPath)) return undefined;
-  try {
-    const parsed = JSON.parse(readFileSync(configPath, "utf8")) as ProjectConfig;
-    return normalizeConfigProjectName(parsed.project_name);
-  } catch {
-    return undefined;
-  }
-}
-
-function detectConfigProjectName(directory: string): string | undefined {
-  const start = resolve(directory || ".");
-  const gitRoot = getGitRoot(start);
-  if (!gitRoot) return readConfigProjectName(start);
-
-  let current = start;
-  const stop = resolve(gitRoot);
-  for (;;) {
-    const projectName = readConfigProjectName(current);
-    if (projectName) return projectName;
-    if (current === stop) return undefined;
-    const parent = dirname(current);
-    if (parent === current) return undefined;
-    current = parent;
-  }
-}
-
-function detectGitRemoteProjectName(directory: string): string | undefined {
-  try {
-    const result = spawnSync("git", ["-C", directory, "remote", "get-url", "origin"], {
-      encoding: "utf8",
-    });
-    if (result.status === 0) {
-      const url = result.stdout?.trim();
-      const name = url?.replace(/\.git$/, "").split(/[/:]/).pop();
-      if (name) return normalizeProjectName(name);
-    }
-  } catch {}
-  return undefined;
-}
-
-function detectSingleChildGitProjectName(directory: string): string | undefined {
-  const noise = new Set(["node_modules", "vendor", ".venv", "__pycache__", "target", "dist", "build", ".idea", ".vscode"]);
-  const repos: string[] = [];
-  try {
-    for (const entry of readdirSync(directory).slice(0, 20)) {
-      if (entry.startsWith(".") || noise.has(entry)) continue;
-      const childPath = join(directory, entry);
-      try {
-        if (!statSync(childPath).isDirectory()) continue;
-        if (existsSync(join(childPath, ".git"))) repos.push(entry);
-        if (repos.length > 1) return undefined;
-      } catch {}
-    }
-  } catch {}
-  return repos.length === 1 ? repos[0] : undefined;
-}
-
-function extractProjectName(directory: string): string {
-  const configProject = detectConfigProjectName(directory);
-  if (configProject) return configProject;
-
-  const remoteProject = detectGitRemoteProjectName(directory);
-  if (remoteProject) return remoteProject;
-
-  const root = getGitRoot(directory);
-  if (root) return normalizeProjectName(basename(root));
-
-  const childProject = detectSingleChildGitProjectName(directory);
-  if (childProject) return normalizeProjectName(childProject);
-
-  return normalizeProjectName(basename(directory));
+function fallbackProjectName(directory: string): string {
+  return rawBasenameProjectName(directory).toLowerCase();
 }
 
 function truncate(str: string, max: number): string {
@@ -304,15 +257,60 @@ let initialized = false;
 let project = "unknown";
 let directory = "";
 let pendingRecoveryNotice: string | undefined;
+let projectResolutionError: string | undefined;
+let projectDetectionPending = false;
 
 const knownSessions = new Set<string>();
 const toolCounts = new Map<string, number>();
 
-async function ensureSession(sessionId: string): Promise<void> {
-  if (!sessionId || knownSessions.has(sessionId)) return;
-  knownSessions.add(sessionId);
-  const body: SessionBody = { id: sessionId, project, directory };
+async function ensureSession(sessionId: string, sessionProject = project): Promise<void> {
+  const key = `${sessionProject}:${sessionId}`;
+  if (!sessionId || knownSessions.has(key)) return;
+  knownSessions.add(key);
+  const body: SessionBody = { id: sessionId, project: sessionProject, directory };
   await engramFetch("/sessions", { method: "POST", body });
+}
+
+async function detectServerProject(cwd: string): Promise<CurrentProjectResponse | undefined> {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const detected = await bestEffortEngramFetch<CurrentProjectResponse>(`/project/current${queryString({ cwd })}`);
+    if (detected) return detected;
+    if (attempt < 4) await wait(200);
+  }
+  return undefined;
+}
+
+function applyDetectedProject(detected: CurrentProjectResponse | undefined): boolean {
+  if (!detected) {
+    projectDetectionPending = true;
+    return false;
+  }
+  projectDetectionPending = false;
+  if (detected.project) {
+    project = detected.project;
+    projectResolutionError = undefined;
+    return true;
+  }
+  const choices = detected.available_projects?.length ? ` Available projects: ${detected.available_projects.join(", ")}.` : "";
+  projectResolutionError = detected.error_hint || detected.warning || `Engram project detection did not resolve a project.${choices}`;
+  return false;
+}
+
+async function refreshProjectDetection(cwd: string): Promise<void> {
+  if (!projectDetectionPending && !projectResolutionError) return;
+  applyDetectedProject(await detectServerProject(cwd));
+}
+
+function forgetKnownSession(sessionId: string): void {
+  knownSessions.delete(sessionId);
+  for (const key of knownSessions) {
+    if (key.endsWith(`:${sessionId}`)) knownSessions.delete(key);
+  }
+}
+
+function requireResolvedProject(): void {
+  if (projectResolutionError) throw new Error(projectResolutionError);
+  if (projectDetectionPending) throw new Error("Engram project detection is unavailable; cannot safely choose a project");
 }
 
 async function initOnce(cwd: string): Promise<void> {
@@ -320,8 +318,8 @@ async function initOnce(cwd: string): Promise<void> {
   initialized = true;
   directory = cwd;
 
-  const oldProject = cwd.split("/").pop() ?? "unknown";
-  project = extractProjectName(cwd);
+  const oldProject = rawBasenameProjectName(cwd);
+  project = fallbackProjectName(cwd);
 
   const running = await isEngramRunning();
   if (!running && CONFIGURED_ENGRAM_URL === undefined) {
@@ -329,9 +327,14 @@ async function initOnce(cwd: string): Promise<void> {
     await wait(500);
   }
 
-  if (oldProject !== project) {
-    const body: MigrationBody = { old_project: oldProject, new_project: project };
-    await engramFetch("/projects/migrate", { method: "POST", body });
+  applyDetectedProject(await detectServerProject(cwd));
+
+  const migrationSources = new Set([oldProject, fallbackProjectName(cwd)]);
+  for (const sourceProject of migrationSources) {
+    if (sourceProject !== project) {
+      const body: MigrationBody = { old_project: sourceProject, new_project: project };
+      await bestEffortEngramFetch("/projects/migrate", { method: "POST", body });
+    }
   }
 
   const manifestFile = `${cwd}/.engram/manifest.json`;
@@ -416,6 +419,34 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
     id: Type.String({ description: "Session identifier to close" }),
     summary: optionalString("Summary of what was accomplished"),
   }),
+  mem_current_project: Type.Object({
+    cwd: optionalString("Working directory to inspect; defaults to Engram server cwd"),
+  }),
+  mem_doctor: Type.Object({
+    check: optionalString("Optional diagnostic check code to run"),
+    project: optionalString("Project to diagnose; defaults to current project"),
+  }),
+  mem_capture_passive: Type.Object({
+    content: Type.String({ description: "Text output containing a ## Key Learnings section" }),
+    session_id: optionalString("Session ID to associate with"),
+    source: optionalString("Source identifier, e.g. subagent-stop or session-end"),
+  }),
+  mem_judge: Type.Object({
+    judgment_id: Type.String({ description: "The relation judgment_id returned by mem_save candidates" }),
+    relation: Type.String({ description: "Verdict: related | compatible | scoped | conflicts_with | supersedes | not_conflict" }),
+    reason: optionalString("Free-text explanation of the verdict"),
+    evidence: optionalString("Supporting evidence as JSON or text"),
+    confidence: optionalNumber("Confidence score 0.0..1.0"),
+    session_id: optionalString("Session ID for provenance"),
+  }),
+  mem_compare: Type.Object({
+    memory_id_a: Type.Number({ description: "Integer id of the first observation" }),
+    memory_id_b: Type.Number({ description: "Integer id of the second observation" }),
+    relation: Type.String({ description: "Verdict: related | compatible | scoped | conflicts_with | supersedes | not_conflict" }),
+    confidence: Type.Number({ description: "Confidence score 0.0..1.0" }),
+    reasoning: Type.String({ description: "Brief explanation of the verdict" }),
+    model: optionalString("Model identifier for provenance"),
+  }),
 };
 
 function queryString(params: Record<string, unknown>): string {
@@ -449,12 +480,15 @@ function slugifyTopicKey(params: Record<string, unknown>): string {
 
 async function callMemoryTool(toolName: string, params: Record<string, unknown>, ctx: SessionContext): Promise<unknown> {
   const sessionId = getSessionId(ctx);
-  const activeSessionId = String(params.session_id || sessionId || `manual-save-${project}`);
+  const requestedProject = typeof params.project === "string" && params.project ? params.project : undefined;
+  const activeProject = requestedProject || project;
+  const activeSessionId = String(params.session_id || (requestedProject ? `manual-save-${requestedProject}` : sessionId) || `manual-save-${project}`);
 
   switch (toolName) {
     case "mem_search":
       return engramFetch(`/search${queryString({ q: params.query, type: params.type, project: params.project, scope: params.scope, limit: params.limit })}`);
     case "mem_context":
+      if (!params.project) requireResolvedProject();
       return engramFetch(`/context${queryString({ project: params.project || project, scope: params.scope })}`);
     case "mem_stats":
       return engramFetch("/stats");
@@ -463,7 +497,8 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
     case "mem_get_observation":
       return engramFetch(`/observations/${encodeURIComponent(String(params.id))}`);
     case "mem_save":
-      await ensureSession(activeSessionId);
+      if (!requestedProject) requireResolvedProject();
+      await ensureSession(activeSessionId, activeProject);
       return engramFetch("/observations", {
         method: "POST",
         body: {
@@ -471,7 +506,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
           title: params.title,
           content: params.content,
           type: params.type || "manual",
-          project: params.project || project,
+          project: activeProject,
           scope: params.scope || "project",
           topic_key: params.topic_key,
         },
@@ -492,12 +527,14 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
     case "mem_suggest_topic_key":
       return { topic_key: slugifyTopicKey(params) };
     case "mem_save_prompt":
-      await ensureSession(activeSessionId);
+      if (!requestedProject) requireResolvedProject();
+      await ensureSession(activeSessionId, activeProject);
       return engramFetch("/prompts", {
         method: "POST",
-        body: { session_id: activeSessionId, content: params.content, project: params.project || project },
+        body: { session_id: activeSessionId, content: params.content, project: activeProject },
       });
     case "mem_session_summary":
+      requireResolvedProject();
       await ensureSession(activeSessionId);
       return engramFetch("/observations", {
         method: "POST",
@@ -511,6 +548,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
         },
       });
     case "mem_session_start":
+      requireResolvedProject();
       return engramFetch("/sessions", {
         method: "POST",
         body: { id: params.id, project, directory: params.directory || directory || ctx.cwd },
@@ -520,6 +558,46 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
         method: "POST",
         body: { summary: params.summary || "" },
       });
+    case "mem_current_project":
+      return engramFetch(`/project/current${queryString({ cwd: params.cwd || ctx.cwd })}`);
+    case "mem_doctor":
+      return engramFetch(`/doctor${queryString({ project: params.project, check: params.check, cwd: params.project ? undefined : ctx.cwd })}`);
+    case "mem_capture_passive":
+      requireResolvedProject();
+      await ensureSession(activeSessionId);
+      return engramFetch("/observations/passive", {
+        method: "POST",
+        body: {
+          session_id: activeSessionId,
+          content: params.content,
+          project,
+          source: params.source || "pi-tool",
+        },
+      });
+    case "mem_judge":
+      return engramFetch("/conflicts/judge", {
+        method: "POST",
+        body: {
+          judgment_id: params.judgment_id,
+          relation: params.relation,
+          reason: params.reason,
+          evidence: params.evidence,
+          confidence: params.confidence,
+          session_id: params.session_id || sessionId,
+        },
+      });
+    case "mem_compare":
+      return engramFetch("/conflicts/compare", {
+        method: "POST",
+        body: {
+          memory_id_a: params.memory_id_a,
+          memory_id_b: params.memory_id_b,
+          relation: params.relation,
+          confidence: params.confidence,
+          reasoning: params.reasoning,
+          model: params.model,
+        },
+      });
     default:
       throw new Error(`Unsupported Engram memory tool: ${toolName}`);
   }
@@ -527,6 +605,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
 
 async function executeMemoryTool(toolName: string, params: Record<string, unknown>, ctx: SessionContext & { hasUI?: boolean; ui?: { setStatus?: (key: string, text: string | undefined) => void } }) {
   await initOnce(ctx.cwd);
+  await refreshProjectDetection(ctx.cwd);
   const action = humanToolName(toolName);
   ctx.ui?.setStatus?.("engram", `🧠 ${project} · ${action}…`);
 
@@ -534,12 +613,20 @@ async function executeMemoryTool(toolName: string, params: Record<string, unknow
     const data = await callMemoryTool(toolName, params, ctx);
     if (data === null) throw new Error("Engram is unavailable");
     const result = { content: [{ type: "text" as const, text: textResult(data) }], details: { data } };
+    if (toolName === "mem_doctor" && data && typeof data === "object" && "status" in data && data.status === "error") {
+      const errorResult = { ...result, isError: true };
+      ctx.ui?.setStatus?.("engram", `🧠 ${project} · ${compactResultStatus(toolName, errorResult)}`);
+      return errorResult;
+    }
     ctx.ui?.setStatus?.("engram", `🧠 ${project} · ${compactResultStatus(toolName, result)}`);
     return result;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    const details = error instanceof EngramHttpError
+      ? { error: message, http_status: error.status, data: error.data }
+      : { error: message };
     ctx.ui?.setStatus?.("engram", `🧠 ${project} · error`);
-    return { content: [{ type: "text" as const, text: message }], details: { error: message }, isError: true };
+    return { content: [{ type: "text" as const, text: message }], details, isError: true };
   }
 }
 
@@ -575,16 +662,19 @@ export default function registerEngram(pi: ExtensionAPI) {
     const sessionId = getSessionId(ctx);
     if (!sessionId) return;
     toolCounts.delete(sessionId);
-    knownSessions.delete(sessionId);
+    forgetKnownSession(sessionId);
   });
 
   pi.on("session_compact", async (event: unknown, ctx: SessionContext) => {
+    await initOnce(ctx.cwd);
+    await refreshProjectDetection(ctx.cwd);
+    if (projectDetectionPending || projectResolutionError) return;
     const sessionId = getSessionId(ctx);
-    if (sessionId) await ensureSession(sessionId);
+    if (sessionId) await ensureSessionBestEffort(sessionId);
 
     const summary = extractCompactedSummary(event);
     if (sessionId && summary) {
-      await engramFetch("/observations", {
+      await bestEffortEngramFetch("/observations", {
         method: "POST",
         body: {
           session_id: sessionId,
@@ -598,12 +688,13 @@ export default function registerEngram(pi: ExtensionAPI) {
       });
     }
 
-    const data = await engramFetch<ContextResponse>(`/context?project=${encodeURIComponent(project)}`);
+    const data = await bestEffortEngramFetch<ContextResponse>(`/context?project=${encodeURIComponent(project)}`);
     pendingRecoveryNotice = buildRecoveryNotice(project, data?.context);
   });
 
   pi.on("before_agent_start", async (event: AgentStartEvent, ctx: SessionContext) => {
     await initOnce(ctx.cwd);
+    await refreshProjectDetection(ctx.cwd);
     const sessionId = getSessionId(ctx);
     let systemPrompt = event.systemPrompt.length > 0 ? `${event.systemPrompt}\n\n${MEMORY_INSTRUCTIONS}` : MEMORY_INSTRUCTIONS;
 
@@ -613,14 +704,17 @@ export default function registerEngram(pi: ExtensionAPI) {
     }
 
     const finalContent = event.prompt?.trim();
+    if ((projectDetectionPending || projectResolutionError) && sessionId && finalContent && finalContent.length > 10) {
+      return { systemPrompt };
+    }
     if (sessionId && finalContent && finalContent.length > 10) {
-      await ensureSession(sessionId);
+      await ensureSessionBestEffort(sessionId);
       const body: PromptBody = {
         session_id: sessionId,
         content: stripPrivateTags(truncate(finalContent, 2000)),
         project,
       };
-      await engramFetch("/prompts", { method: "POST", body });
+      await bestEffortEngramFetch("/prompts", { method: "POST", body });
     }
 
     return { systemPrompt };
@@ -630,10 +724,12 @@ export default function registerEngram(pi: ExtensionAPI) {
     const toolName = event.toolName ?? "";
     if (ENGRAM_TOOL_NAMES.has(toolName.toLowerCase())) return;
 
+    await initOnce(ctx.cwd);
+    await refreshProjectDetection(ctx.cwd);
     const sessionId = getSessionId(ctx);
-    if (!sessionId) return;
+    if (!sessionId || projectDetectionPending || projectResolutionError) return;
 
-    await ensureSession(sessionId);
+    await ensureSessionBestEffort(sessionId);
     toolCounts.set(sessionId, (toolCounts.get(sessionId) ?? 0) + 1);
 
     if (toolName !== "Task" || event.result === undefined) return;
@@ -646,6 +742,6 @@ export default function registerEngram(pi: ExtensionAPI) {
       project,
       source: "task-complete",
     };
-    await engramFetch("/observations/passive", { method: "POST", body });
+    await bestEffortEngramFetch("/observations/passive", { method: "POST", body });
   });
 }

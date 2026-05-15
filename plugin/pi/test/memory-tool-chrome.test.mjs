@@ -23,6 +23,11 @@ const existingTools = [
   "mem_get_observation",
   "mem_session_start",
   "mem_session_end",
+  "mem_current_project",
+  "mem_doctor",
+  "mem_capture_passive",
+  "mem_judge",
+  "mem_compare",
 ];
 
 test("supported memory tools all have chrome metadata", () => {
@@ -38,6 +43,8 @@ test("compactToolArg prefers short meaningful identifiers", () => {
   assert.equal(compactToolArg("mem_save", { title: "Fixed the session recovery issue" }), "“Fixed the session recovery issue”");
   assert.equal(compactToolArg("mem_get_observation", { id: 42 }), "#42");
   assert.equal(compactToolArg("mem_context", { project: "engram" }), "“engram”");
+  assert.equal(compactToolArg("mem_compare", { memory_id_a: 42, memory_id_b: 43 }), "#42");
+  assert.equal(compactToolArg("mem_judge", { judgment_id: "rel-abc", relation: "related" }), "“rel-abc”");
 });
 
 test("compactToolArg truncates long text", () => {
@@ -51,6 +58,11 @@ test("compactResultStatus summarizes common Engram results", () => {
   assert.equal(compactResultStatus("mem_save", { details: { data: { id: 7 } } }), "✓ saved #7");
   assert.equal(compactResultStatus("mem_context", { details: { data: { context: "recent memory" } } }), "✓ loaded");
   assert.equal(compactResultStatus("mem_suggest_topic_key", { details: { data: { topic_key: "auth-model" } } }), "✓ auth-model");
+  assert.equal(compactResultStatus("mem_current_project", { details: { data: { project: "engram" } } }), "✓ engram");
+  assert.equal(compactResultStatus("mem_doctor", { details: { data: { status: "ok" } } }), "✓ ok");
+  assert.equal(compactResultStatus("mem_capture_passive", { details: { data: { saved: 2 } } }), "✓ captured 2");
+  assert.equal(compactResultStatus("mem_judge", { details: { data: { relation: { sync_id: "rel-1" } } } }), "✓ judged rel-1");
+  assert.equal(compactResultStatus("mem_compare", { details: { data: { sync_id: "rel-2" } } }), "✓ rel-2");
 });
 
 test("renderResultText keeps collapsed output compact and expanded output detailed", () => {

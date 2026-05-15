@@ -1824,12 +1824,8 @@ func handleJudge(s *store.Store, activity *SessionActivity) server.ToolHandlerFu
 		}
 		var confidence *float64
 		if v, ok := req.GetArguments()["confidence"].(float64); ok {
-			// Clamp to [0, 1] per design §6.3.
-			if v < 0 {
-				v = 0
-			}
-			if v > 1 {
-				v = 1
+			if v < 0 || v > 1 {
+				return mcp.NewToolResultError("confidence must be between 0.0 and 1.0"), nil
 			}
 			confidence = &v
 		}
@@ -1900,12 +1896,8 @@ func handleCompare(s *store.Store, _ *SessionActivity) server.ToolHandlerFunc {
 		if !okConf {
 			return mcp.NewToolResultError("confidence is required (float 0.0..1.0)"), nil
 		}
-		// Clamp to [0, 1].
-		if rawConf < 0 {
-			rawConf = 0
-		}
-		if rawConf > 1 {
-			rawConf = 1
+		if rawConf < 0 || rawConf > 1 {
+			return mcp.NewToolResultError("confidence must be between 0.0 and 1.0"), nil
 		}
 
 		// --- optional model ---

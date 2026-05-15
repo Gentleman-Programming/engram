@@ -12,6 +12,11 @@ const TOOL_LABELS = {
   mem_get_observation: "get observation",
   mem_session_start: "start session",
   mem_session_end: "end session",
+  mem_current_project: "current project",
+  mem_doctor: "doctor",
+  mem_capture_passive: "capture passive",
+  mem_judge: "judge",
+  mem_compare: "compare",
 };
 
 const ARG_KEYS = {
@@ -28,6 +33,11 @@ const ARG_KEYS = {
   mem_get_observation: ["id"],
   mem_session_start: ["id"],
   mem_session_end: ["id"],
+  mem_current_project: ["cwd"],
+  mem_doctor: ["check", "project"],
+  mem_capture_passive: ["source", "content"],
+  mem_judge: ["judgment_id", "relation"],
+  mem_compare: ["memory_id_a", "memory_id_b"],
 };
 
 export const SUPPORTED_MEMORY_TOOLS = Object.freeze(Object.keys(TOOL_LABELS));
@@ -52,7 +62,7 @@ export function compactToolArg(toolName, args = {}) {
   for (const key of keys) {
     const value = args?.[key];
     if (value === undefined || value === null || value === "") continue;
-    if (key === "id" || key === "observation_id") return `#${value}`;
+    if (key === "id" || key === "observation_id" || key === "memory_id_a" || key === "memory_id_b") return `#${value}`;
     return quote(value);
   }
   return "";
@@ -97,6 +107,11 @@ export function compactResultStatus(toolName, result, options = {}) {
   if (toolName === "mem_save_prompt") return data?.id ? `✓ prompt #${data.id}` : "✓ prompt saved";
   if (toolName === "mem_session_start") return "✓ started";
   if (toolName === "mem_session_end") return "✓ ended";
+  if (toolName === "mem_current_project") return data?.project ? `✓ ${data.project}` : "✓ detected";
+  if (toolName === "mem_doctor") return data?.status ? `✓ ${data.status}` : "✓ checked";
+  if (toolName === "mem_capture_passive") return `✓ captured ${data?.saved ?? count ?? 0}`;
+  if (toolName === "mem_judge") return data?.relation?.sync_id ? `✓ judged ${data.relation.sync_id}` : "✓ judged";
+  if (toolName === "mem_compare") return data?.sync_id ? `✓ ${data.sync_id}` : "✓ compared";
   return "✓ done";
 }
 
