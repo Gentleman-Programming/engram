@@ -1058,9 +1058,15 @@ func (s *Store) migrate() error {
 	}
 
 	// Phase: session-id-propagation (#386) — index for LookupActiveSession.
+	// Includes started_at DESC so the planner can satisfy ORDER BY started_at DESC
+	// directly from the index without a TEMP B-TREE sort step. DROP first to
+	// supersede any pre-existing index that lacked the sort column.
+	if _, err := s.execHook(s.db, `DROP INDEX IF EXISTS idx_sessions_active_lookup;`); err != nil {
+		return err
+	}
 	if _, err := s.execHook(s.db, `
 		CREATE INDEX IF NOT EXISTS idx_sessions_active_lookup
-			ON sessions(project, directory, ended_at);
+			ON sessions(project, directory, ended_at, started_at DESC);
 	`); err != nil {
 		return err
 	}

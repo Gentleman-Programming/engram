@@ -1721,16 +1721,16 @@ func handleCapturePassive(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		}
 		project, _ := store.NormalizeProject(detRes.Project)
 
+		if content == "" {
+			return mcp.NewToolResultError("content is required — include text with a '## Key Learnings:' section"), nil
+		}
+
 		if sessionID == "" {
 			sessionID = resolveImplicitSessionID(s, project)
 			_ = ensureImplicitSessionWithCWD(s, sessionID, project)
 		}
 
 		activity.RecordToolCall(sessionID)
-
-		if content == "" {
-			return mcp.NewToolResultError("content is required — include text with a '## Key Learnings:' section"), nil
-		}
 
 		if source == "" {
 			source = "mcp-passive"

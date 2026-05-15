@@ -6994,3 +6994,46 @@ func TestHandleSessionEndClearsActivityByExplicitID(t *testing.T) {
 		t.Fatalf("expected defaultSessionID activity untouched, got %q", score)
 	}
 }
+
+// TestHandleCapturePassiveEmptyContentDoesNotMutate verifies that the
+// empty-content error path returns early without creating a session row in the
+// DB or recording activity. A previous reorder of resolveImplicitSessionID
+// inadvertently placed ensureImplicitSessionWithCWD and RecordToolCall above
+// the content guard, so invalid calls were leaving side effects behind
+// (spurious session rows + inflated activity counters).
+func TestHandleCapturePassiveEmptyContentDoesNotMutate(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	cmd := exec.Command("git", "-C", dir, "remote", "add", "origin",
+		"git@github.com:user/capture-passive-empty-content.git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	project := "capture-passive-empty-content"
+	activity := NewSessionActivity(10 * time.Minute)
+	h := handleCapturePassive(s, MCPConfig{}, activity)
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{}},
+	})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("expected tool error when content is empty, got %q", callResultText(t, res))
+	}
+
+	// No session row should have been created on the error path.
+	defaultID := defaultSessionID(project)
+	if sess, err := s.GetSession(defaultID); err == nil && sess != nil {
+		t.Fatalf("expected no session row created for empty-content call, found id=%q", sess.ID)
+	}
+
+	// No activity should have been recorded on the error path.
+	if score := activity.ActivityScore(defaultID); score != "" {
+		t.Fatalf("expected no activity for empty-content call, got %q", score)
+	}
+}
