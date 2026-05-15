@@ -34,6 +34,7 @@ func TestLookupActiveSessionReturnsMostRecentWhenMultipleOpen(t *testing.T) {
 		t.Fatalf("CreateSession old: %v", err)
 	}
 	// Small sleep to ensure started_at differs — SQLite datetime('now') has 1-second resolution.
+	// TODO: tighten if started_at gains sub-second resolution.
 	time.Sleep(1100 * time.Millisecond)
 	if err := s.CreateSession("uuid-new", "myproject", "/work/myproject"); err != nil {
 		t.Fatalf("CreateSession new: %v", err)

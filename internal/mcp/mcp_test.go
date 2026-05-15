@@ -2870,34 +2870,34 @@ func TestSessionEndClearsActivity(t *testing.T) {
 	t.Chdir(dir)
 
 	activity := NewSessionActivity(10 * time.Minute)
-	project := "myproject"
-	sessionID := defaultSessionID(project)
+	// Activity must be seeded under the explicit session id that will be ended.
+	explicitID := "real-session-id"
 
 	// Record some activity
-	activity.RecordToolCall(sessionID)
-	activity.RecordSave(sessionID)
+	activity.RecordToolCall(explicitID)
+	activity.RecordSave(explicitID)
 
 	// Verify activity exists
-	score := activity.ActivityScore(sessionID)
+	score := activity.ActivityScore(explicitID)
 	if score == "" {
 		t.Fatal("expected activity score before session end")
 	}
 
 	// Create session in store so EndSession works
-	s.CreateSession("real-session-id", project, "")
+	s.CreateSession(explicitID, "myproject", "")
 
 	end := handleSessionEnd(s, MCPConfig{}, activity)
 	_, err := end(context.Background(), mcppkg.CallToolRequest{
 		Params: mcppkg.CallToolParams{Arguments: map[string]any{
-			"id": "real-session-id",
+			"id": explicitID,
 		}},
 	})
 	if err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
 
-	// Activity should be cleared
-	score = activity.ActivityScore(sessionID)
+	// Activity must be cleared under the explicit session id.
+	score = activity.ActivityScore(explicitID)
 	if score != "" {
 		t.Fatalf("expected empty activity after session end, got: %q", score)
 	}
@@ -2937,7 +2937,7 @@ func TestCapturePassiveRecordsToolCall(t *testing.T) {
 	}
 }
 
-func TestSessionStartUsesDefaultSessionID(t *testing.T) {
+func TestSessionStartRecordsActivityUnderExplicitID(t *testing.T) {
 	s := newMCPTestStore(t)
 
 	// Set up a git repo so resolveWriteProject returns a predictable name.
@@ -2963,17 +2963,17 @@ func TestSessionStartUsesDefaultSessionID(t *testing.T) {
 		t.Fatalf("handler error: %v", err)
 	}
 
-	// Activity should be recorded under defaultSessionID, not the real session ID
-	defaultSID := defaultSessionID(project)
-	score := activity.ActivityScore(defaultSID)
-	if !strings.Contains(score, "1 tool call") {
-		t.Fatalf("expected activity under defaultSessionID, got: %q", score)
+	// Activity must be recorded under the explicit session id, not defaultSessionID.
+	realScore := activity.ActivityScore("real-unique-session-id")
+	if !strings.Contains(realScore, "1 tool call") {
+		t.Fatalf("expected activity under explicit session ID, got: %q", realScore)
 	}
 
-	// The real session ID should NOT have activity
-	realScore := activity.ActivityScore("real-unique-session-id")
-	if realScore != "" {
-		t.Fatalf("expected no activity under real session ID, got: %q", realScore)
+	// The default bucket must be empty.
+	defaultSID := defaultSessionID(project)
+	score := activity.ActivityScore(defaultSID)
+	if score != "" {
+		t.Fatalf("expected no activity under defaultSessionID, got: %q", score)
 	}
 }
 
@@ -6702,6 +6702,18 @@ func TestHandleSavePromptResolvesToActiveHookSession(t *testing.T) {
 	if err == nil {
 		t.Fatal("manual-save-prompt-hook-project should NOT exist when UUID session resolved")
 	}
+
+	// Positively verify the prompt row landed in the UUID session.
+	prompts, err := s.RecentPrompts("prompt-hook-project", 10)
+	if err != nil {
+		t.Fatalf("RecentPrompts: %v", err)
+	}
+	if len(prompts) != 1 {
+		t.Fatalf("expected 1 prompt row, got %d", len(prompts))
+	}
+	if prompts[0].SessionID != uuidSession {
+		t.Fatalf("expected prompt.session_id=%q, got %q", uuidSession, prompts[0].SessionID)
+	}
 }
 
 // TestHandleSessionSummaryResolvesToActiveHookSession verifies handleSessionSummary
@@ -6796,5 +6808,189 @@ func TestHandleCapturePassiveResolvesToActiveHookSession(t *testing.T) {
 	}
 	if len(manualObs) != 0 {
 		t.Fatalf("expected 0 obs in manual-save session, got %d (should be in UUID session)", len(manualObs))
+	}
+}
+
+// TestHandleSessionSummaryActivityScoreUsesResolvedSession verifies that
+// handleSessionSummary reads the activity score from the resolved UUID session,
+// not from defaultSessionID(project). Before the fix, score was always empty for
+// UUID sessions because ActivityScore was called with the wrong key.
+func TestHandleSessionSummaryActivityScoreUsesResolvedSession(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	cmd := exec.Command("git", "-C", dir, "remote", "add", "origin",
+		"git@github.com:user/summary-activity-uuid-project.git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	uuidSession := "uuid-summary-activity"
+	if err := s.CreateSession(uuidSession, "summary-activity-uuid-project", dir); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	activity := NewSessionActivity(10 * time.Minute)
+	// Record activity under the UUID session — this is what the resolved session
+	// will be when handleSessionSummary runs.
+	for i := 0; i < 7; i++ {
+		activity.RecordToolCall(uuidSession)
+	}
+	activity.RecordSave(uuidSession)
+
+	h := handleSessionSummary(s, MCPConfig{}, activity)
+	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"content": "## Goal\nTest activity score keying",
+	}}}
+	res, err := h(context.Background(), req)
+	if err != nil || res.IsError {
+		t.Fatalf("sessionSummary: err=%v isError=%v text=%s", err, res.IsError, callResultText(t, res))
+	}
+
+	text := callResultText(t, res)
+	// The score must appear — only possible if ActivityScore used uuidSession, not defaultSessionID.
+	if !strings.Contains(text, "Session activity:") {
+		t.Fatalf("expected activity score in response; got %q\n(score would be absent if keyed on defaultSessionID instead of resolved UUID)", text)
+	}
+	if !strings.Contains(text, "7 tool calls") {
+		t.Fatalf("expected 7 tool calls in score, got: %q", text)
+	}
+}
+
+// TestHandleCapturePassiveActivityRecordedUnderResolvedSession verifies that
+// handleCapturePassive records the tool-call increment under the resolved UUID
+// session, not under defaultSessionID(project). Before the fix, the activity
+// call happened before resolveImplicitSessionID, so it always landed on the
+// default bucket.
+func TestHandleCapturePassiveActivityRecordedUnderResolvedSession(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	cmd := exec.Command("git", "-C", dir, "remote", "add", "origin",
+		"git@github.com:user/capture-passive-uuid-project.git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	uuidSession := "uuid-capture-passive-activity"
+	if err := s.CreateSession(uuidSession, "capture-passive-uuid-project", dir); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	activity := NewSessionActivity(10 * time.Minute)
+	h := handleCapturePassive(s, MCPConfig{}, activity)
+	_, err := h(context.Background(), mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"content": "## Key Learnings:\n1. Activity must land on the UUID session",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+
+	// Activity must be under the UUID session.
+	uuidScore := activity.ActivityScore(uuidSession)
+	if !strings.Contains(uuidScore, "1 tool call") {
+		t.Fatalf("expected 1 tool call under UUID session %q, got %q", uuidSession, uuidScore)
+	}
+	// The default bucket must be empty.
+	defaultID := defaultSessionID("capture-passive-uuid-project")
+	defaultScore := activity.ActivityScore(defaultID)
+	if defaultScore != "" {
+		t.Fatalf("expected no activity under defaultSessionID %q, got %q", defaultID, defaultScore)
+	}
+}
+
+// TestHandleSessionStartRecordsActivityUnderExplicitID verifies that
+// handleSessionStart records the tool call against the explicit session id
+// passed in the request (the UUID the caller is naming), not defaultSessionID.
+// The pre-existing behaviour recorded under the wrong bucket, making
+// handleSessionStart's own activity invisible when the session was later
+// looked up by its UUID.
+func TestHandleSessionStartRecordsActivityUnderExplicitID(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	cmd := exec.Command("git", "-C", dir, "remote", "add", "origin",
+		"git@github.com:user/session-start-uuid-project.git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	activity := NewSessionActivity(10 * time.Minute)
+	explicitID := "explicit-uuid-session-start"
+
+	start := handleSessionStart(s, MCPConfig{}, activity)
+	_, err := start(context.Background(), mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"id": explicitID,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+
+	// Activity must be under the explicit session id, not defaultSessionID.
+	explicitScore := activity.ActivityScore(explicitID)
+	if !strings.Contains(explicitScore, "1 tool call") {
+		t.Fatalf("expected 1 tool call under explicit session ID %q, got %q", explicitID, explicitScore)
+	}
+	defaultID := defaultSessionID("session-start-uuid-project")
+	defaultScore := activity.ActivityScore(defaultID)
+	if defaultScore != "" {
+		t.Fatalf("expected no activity under defaultSessionID %q, got %q", defaultID, defaultScore)
+	}
+}
+
+// TestHandleSessionEndClearsActivityByExplicitID verifies that handleSessionEnd
+// clears activity for the explicit session id in the request, not for
+// defaultSessionID(project). Before the fix, ClearSession used the wrong key,
+// leaving the real session's activity in memory and clearing an unrelated bucket.
+func TestHandleSessionEndClearsActivityByExplicitID(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	cmd := exec.Command("git", "-C", dir, "remote", "add", "origin",
+		"git@github.com:user/session-end-uuid-project.git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	activity := NewSessionActivity(10 * time.Minute)
+	explicitID := "explicit-uuid-session-end"
+
+	// Seed activity under the explicit session id that will be ended.
+	activity.RecordToolCall(explicitID)
+	activity.RecordSave(explicitID)
+
+	// Also seed the defaultSessionID bucket to confirm it is NOT touched.
+	defaultID := defaultSessionID("session-end-uuid-project")
+	activity.RecordToolCall(defaultID)
+
+	// Create and end the session.
+	if err := s.CreateSession(explicitID, "session-end-uuid-project", dir); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	end := handleSessionEnd(s, MCPConfig{}, activity)
+	_, err := end(context.Background(), mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"id": explicitID,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+
+	// Activity for the explicit session must be cleared.
+	if score := activity.ActivityScore(explicitID); score != "" {
+		t.Fatalf("expected activity cleared for explicit session %q, got %q", explicitID, score)
+	}
+	// The default bucket must remain untouched.
+	if score := activity.ActivityScore(defaultID); !strings.Contains(score, "1 tool call") {
+		t.Fatalf("expected defaultSessionID activity untouched, got %q", score)
 	}
 }

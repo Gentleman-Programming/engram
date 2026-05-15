@@ -1626,7 +1626,7 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		}
 
 		msg := fmt.Sprintf("Session summary saved for project %q", project)
-		if score := activity.ActivityScore(defaultSessionID(project)); score != "" {
+		if score := activity.ActivityScore(sessionID); score != "" {
 			msg += "\n" + score
 		}
 		detRes.Project = project
@@ -1647,7 +1647,7 @@ func handleSessionStart(s *store.Store, cfg MCPConfig, activity *SessionActivity
 		}
 		project, _ := store.NormalizeProject(detRes.Project)
 
-		activity.RecordToolCall(defaultSessionID(project))
+		activity.RecordToolCall(id)
 		if resolvedDirectory == "" {
 			resolvedDirectory = strings.TrimSpace(detRes.Path)
 			if resolvedDirectory == "" {
@@ -1701,7 +1701,7 @@ func handleSessionEnd(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 			return mcp.NewToolResultError("Failed to end session: " + err.Error()), nil
 		}
 
-		activity.ClearSession(defaultSessionID(project))
+		activity.ClearSession(id)
 
 		detRes.Project = project
 		return respondWithProject(detRes, fmt.Sprintf("Session %q completed", id), nil), nil
@@ -1721,15 +1721,15 @@ func handleCapturePassive(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		}
 		project, _ := store.NormalizeProject(detRes.Project)
 
-		activity.RecordToolCall(defaultSessionID(project))
-
-		if content == "" {
-			return mcp.NewToolResultError("content is required — include text with a '## Key Learnings:' section"), nil
-		}
-
 		if sessionID == "" {
 			sessionID = resolveImplicitSessionID(s, project)
 			_ = ensureImplicitSessionWithCWD(s, sessionID, project)
+		}
+
+		activity.RecordToolCall(sessionID)
+
+		if content == "" {
+			return mcp.NewToolResultError("content is required — include text with a '## Key Learnings:' section"), nil
 		}
 
 		if source == "" {
