@@ -6519,3 +6519,282 @@ func TestProcessOverrideSaveHandlerWritesToDefaultProject(t *testing.T) {
 		t.Fatalf("results in trusted project = %d; want 1", len(results))
 	}
 }
+
+// ─── Phase: session-id-propagation (#386) ────────────────────────────────────
+//
+// These tests verify that mem_save and its sibling handlers resolve to the
+// UUID session created by the Claude Code SessionStart hook when one is open
+// for the current (project, cwd), instead of falling back to manual-save-{project}.
+
+// TestHandleSaveResolvesToActiveHookSession verifies that handleSave attaches
+// the observation to the UUID session created by the SessionStart hook when
+// no explicit session_id is provided and an active session matches (project, cwd).
+func TestHandleSaveResolvesToActiveHookSession(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	cmd := exec.Command("git", "-C", dir, "remote", "add", "origin",
+		"git@github.com:user/hook-session-project.git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	// Simulate what the SessionStart hook does: create a UUID session
+	// for (project, cwd) before the MCP tools are called.
+	uuidSession := "uuid-hook-abc123"
+	if err := s.CreateSession(uuidSession, "hook-session-project", dir); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "Hook session test",
+		"content": "This should land in the UUID session",
+		"type":    "discovery",
+	}}}
+	res, err := h(context.Background(), req)
+	if err != nil || res.IsError {
+		t.Fatalf("save: err=%v isError=%v text=%s", err, res.IsError, callResultText(t, res))
+	}
+
+	// The observation must be in the UUID session, NOT in manual-save-hook-session-project.
+	obs, err := s.SessionObservations(uuidSession, 10)
+	if err != nil {
+		t.Fatalf("SessionObservations uuid: %v", err)
+	}
+	if len(obs) != 1 {
+		t.Fatalf("expected 1 observation in UUID session, got %d", len(obs))
+	}
+	manualObs, err := s.SessionObservations(defaultSessionID("hook-session-project"), 10)
+	if err != nil {
+		t.Fatalf("SessionObservations manual: %v", err)
+	}
+	if len(manualObs) != 0 {
+		t.Fatalf("expected 0 observations in manual-save session, got %d", len(manualObs))
+	}
+}
+
+// TestHandleSaveFallsBackToManualSaveWhenNoActiveSession verifies the current
+// fallback behavior is preserved when no matching open session exists.
+func TestHandleSaveFallsBackToManualSaveWhenNoActiveSession(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	cmd := exec.Command("git", "-C", dir, "remote", "add", "origin",
+		"git@github.com:user/no-hook-project.git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	// No active session created — should fall back to manual-save-no-hook-project.
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "Fallback test",
+		"content": "Should land in manual-save session",
+		"type":    "discovery",
+	}}}
+	res, err := h(context.Background(), req)
+	if err != nil || res.IsError {
+		t.Fatalf("save: err=%v isError=%v text=%s", err, res.IsError, callResultText(t, res))
+	}
+
+	manualID := defaultSessionID("no-hook-project")
+	obs, err := s.SessionObservations(manualID, 10)
+	if err != nil {
+		t.Fatalf("SessionObservations manual: %v", err)
+	}
+	if len(obs) != 1 {
+		t.Fatalf("expected 1 observation in manual-save session, got %d", len(obs))
+	}
+}
+
+// TestHandleSaveIgnoresEndedSession verifies that an ended session is not
+// resolved as the active session — the fallback wins instead.
+func TestHandleSaveIgnoresEndedSession(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	cmd := exec.Command("git", "-C", dir, "remote", "add", "origin",
+		"git@github.com:user/ended-session-project.git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	uuidSession := "uuid-ended-session"
+	if err := s.CreateSession(uuidSession, "ended-session-project", dir); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := s.EndSession(uuidSession, "closed"); err != nil {
+		t.Fatalf("EndSession: %v", err)
+	}
+
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "Ended session test",
+		"content": "Should land in manual-save (session ended)",
+		"type":    "discovery",
+	}}}
+	res, err := h(context.Background(), req)
+	if err != nil || res.IsError {
+		t.Fatalf("save: err=%v isError=%v text=%s", err, res.IsError, callResultText(t, res))
+	}
+
+	// Must NOT be in the ended UUID session.
+	uuidObs, err := s.SessionObservations(uuidSession, 10)
+	if err != nil {
+		t.Fatalf("SessionObservations uuid: %v", err)
+	}
+	if len(uuidObs) != 0 {
+		t.Fatalf("expected 0 obs in ended session, got %d", len(uuidObs))
+	}
+	// Must be in the fallback manual-save session.
+	manualID := defaultSessionID("ended-session-project")
+	manualObs, err := s.SessionObservations(manualID, 10)
+	if err != nil {
+		t.Fatalf("SessionObservations manual: %v", err)
+	}
+	if len(manualObs) != 1 {
+		t.Fatalf("expected 1 obs in fallback session, got %d", len(manualObs))
+	}
+}
+
+// TestHandleSavePromptResolvesToActiveHookSession verifies handleSavePrompt
+// attaches to the UUID session when a matching open session exists.
+func TestHandleSavePromptResolvesToActiveHookSession(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	cmd := exec.Command("git", "-C", dir, "remote", "add", "origin",
+		"git@github.com:user/prompt-hook-project.git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	uuidSession := "uuid-prompt-hook"
+	if err := s.CreateSession(uuidSession, "prompt-hook-project", dir); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	h := handleSavePrompt(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"content": "What is the capital of France?",
+	}}}
+	res, err := h(context.Background(), req)
+	if err != nil || res.IsError {
+		t.Fatalf("savePrompt: err=%v isError=%v text=%s", err, res.IsError, callResultText(t, res))
+	}
+
+	// Prompt must land in the UUID session, NOT manual-save-prompt-hook-project.
+	// We verify by checking sessions — the UUID session should show as active
+	// and the manual-save session must not exist.
+	sess, err := s.GetSession(uuidSession)
+	if err != nil {
+		t.Fatalf("GetSession uuid: %v", err)
+	}
+	if sess == nil {
+		t.Fatal("expected uuid session to exist")
+	}
+	_, err = s.GetSession(defaultSessionID("prompt-hook-project"))
+	if err == nil {
+		t.Fatal("manual-save-prompt-hook-project should NOT exist when UUID session resolved")
+	}
+}
+
+// TestHandleSessionSummaryResolvesToActiveHookSession verifies handleSessionSummary
+// attaches the session_summary observation to the UUID session.
+func TestHandleSessionSummaryResolvesToActiveHookSession(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	cmd := exec.Command("git", "-C", dir, "remote", "add", "origin",
+		"git@github.com:user/summary-hook-project.git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	uuidSession := "uuid-summary-hook"
+	if err := s.CreateSession(uuidSession, "summary-hook-project", dir); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"content": "## Goal\nFixed the bug\n## Accomplished\n- Fixed it",
+	}}}
+	res, err := h(context.Background(), req)
+	if err != nil || res.IsError {
+		t.Fatalf("sessionSummary: err=%v isError=%v text=%s", err, res.IsError, callResultText(t, res))
+	}
+
+	// The session_summary observation must be in the UUID session.
+	obs, err := s.SessionObservations(uuidSession, 10)
+	if err != nil {
+		t.Fatalf("SessionObservations uuid: %v", err)
+	}
+	if len(obs) != 1 {
+		t.Fatalf("expected 1 obs in UUID session, got %d", len(obs))
+	}
+	if obs[0].Type != "session_summary" {
+		t.Fatalf("expected type=session_summary, got %q", obs[0].Type)
+	}
+	// Manual-save session must have zero observations.
+	manualID := defaultSessionID("summary-hook-project")
+	manualObs, err := s.SessionObservations(manualID, 10)
+	if err != nil {
+		t.Fatalf("SessionObservations manual: %v", err)
+	}
+	if len(manualObs) != 0 {
+		t.Fatalf("expected 0 obs in manual-save session, got %d", len(manualObs))
+	}
+}
+
+// TestHandleCapturePassiveResolvesToActiveHookSession verifies handleCapturePassive
+// attaches passive-capture observations to the UUID session.
+func TestHandleCapturePassiveResolvesToActiveHookSession(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	cmd := exec.Command("git", "-C", dir, "remote", "add", "origin",
+		"git@github.com:user/passive-hook-project.git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	uuidSession := "uuid-passive-hook"
+	if err := s.CreateSession(uuidSession, "passive-hook-project", dir); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	h := handleCapturePassive(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"content": "## Key Learnings:\n1. Rate limiting prevents authentication abuse attacks",
+	}}}
+	res, err := h(context.Background(), req)
+	if err != nil || res.IsError {
+		t.Fatalf("capturePassive: err=%v isError=%v text=%s", err, res.IsError, callResultText(t, res))
+	}
+
+	// Extracted observations must land in the UUID session.
+	obs, err := s.SessionObservations(uuidSession, 10)
+	if err != nil {
+		t.Fatalf("SessionObservations uuid: %v", err)
+	}
+	if len(obs) == 0 {
+		t.Fatal("expected at least 1 observation in UUID session from passive capture")
+	}
+	// Manual-save session must have zero observations.
+	manualID := defaultSessionID("passive-hook-project")
+	manualObs, err := s.SessionObservations(manualID, 10)
+	if err != nil {
+		t.Fatalf("SessionObservations manual: %v", err)
+	}
+	if len(manualObs) != 0 {
+		t.Fatalf("expected 0 obs in manual-save session, got %d (should be in UUID session)", len(manualObs))
+	}
+}

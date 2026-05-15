@@ -1057,6 +1057,14 @@ func (s *Store) migrate() error {
 		return err
 	}
 
+	// Phase: session-id-propagation (#386) — index for LookupActiveSession.
+	if _, err := s.execHook(s.db, `
+		CREATE INDEX IF NOT EXISTS idx_sessions_active_lookup
+			ON sessions(project, directory, ended_at);
+	`); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -2048,6 +2056,33 @@ func (s *Store) RecentSessions(project string, limit int) ([]SessionSummary, err
 		results = append(results, ss)
 	}
 	return results, rows.Err()
+}
+
+// LookupActiveSession returns the ID of the most recent open session matching
+// (project, directory), or "" if none exists. "Open" means ended_at IS NULL.
+// Returns "" without error when project or directory is empty.
+// This is the store-side half of the fix for #386: it lets MCP tool calls
+// without an explicit session_id resolve to the UUID session created by the
+// Claude Code SessionStart hook instead of falling back to manual-save-{project}.
+func (s *Store) LookupActiveSession(project, directory string) (string, error) {
+	if project == "" || directory == "" {
+		return "", nil
+	}
+	var id string
+	err := s.db.QueryRow(
+		`SELECT id FROM sessions
+		 WHERE project = ? AND directory = ? AND ended_at IS NULL
+		 ORDER BY started_at DESC
+		 LIMIT 1`,
+		project, directory,
+	).Scan(&id)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return id, nil
 }
 
 // AllSessions returns recent sessions ordered by most recent first (for TUI browsing).

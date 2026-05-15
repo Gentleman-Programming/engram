@@ -1076,7 +1076,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 			typ = "manual"
 		}
 		if sessionID == "" {
-			sessionID = defaultSessionID(project)
+			sessionID = resolveImplicitSessionID(s, project)
 		}
 		suggestedTopicKey := suggestTopicKey(typ, title, content)
 
@@ -1326,7 +1326,7 @@ func handleSavePrompt(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 		project, _ := store.NormalizeProject(detRes.Project)
 
 		if sessionID == "" {
-			sessionID = defaultSessionID(project)
+			sessionID = resolveImplicitSessionID(s, project)
 		}
 
 		// Ensure the implicit MCP session exists with the current working directory.
@@ -1608,7 +1608,7 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		project, _ := store.NormalizeProject(detRes.Project)
 
 		if sessionID == "" {
-			sessionID = defaultSessionID(project)
+			sessionID = resolveImplicitSessionID(s, project)
 		}
 
 		// Ensure the implicit MCP session exists with the current working directory.
@@ -1728,7 +1728,7 @@ func handleCapturePassive(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		}
 
 		if sessionID == "" {
-			sessionID = defaultSessionID(project)
+			sessionID = resolveImplicitSessionID(s, project)
 			_ = ensureImplicitSessionWithCWD(s, sessionID, project)
 		}
 
@@ -2654,6 +2654,20 @@ func defaultSessionID(project string) string {
 		return "manual-save"
 	}
 	return "manual-save-" + project
+}
+
+// resolveImplicitSessionID returns the ID of an open hook-registered session
+// matching (project, current working directory) if one exists; otherwise it
+// falls back to defaultSessionID(project). This lets MCP tool calls without
+// an explicit session_id arg attach to the real UUID session created by the
+// SessionStart hook (POST /sessions), instead of pooling into
+// manual-save-{project}. Fixes #386.
+func resolveImplicitSessionID(s *store.Store, project string) string {
+	cwd := currentWorkingDirectory()
+	if id, err := s.LookupActiveSession(project, cwd); err == nil && id != "" {
+		return id
+	}
+	return defaultSessionID(project)
 }
 
 func intArg(req mcp.CallToolRequest, key string, defaultVal int) int {
