@@ -2903,7 +2903,11 @@ func TestSessionEndClearsActivity(t *testing.T) {
 	}
 }
 
-func TestCapturePassiveRecordsToolCall(t *testing.T) {
+// TestCapturePassiveRecordsToolCallFallbackPath exercises the fallback when no
+// active hook session matches (resolveImplicitSessionID falls back to
+// defaultSessionID). The UUID resolution path is covered by
+// TestHandleCapturePassiveActivityRecordedUnderResolvedSession.
+func TestCapturePassiveRecordsToolCallFallbackPath(t *testing.T) {
 	s := newMCPTestStore(t)
 
 	// Set up a git repo so resolveWriteProject returns a predictable name.
@@ -7035,5 +7039,73 @@ func TestHandleCapturePassiveEmptyContentDoesNotMutate(t *testing.T) {
 	// No activity should have been recorded on the error path.
 	if score := activity.ActivityScore(defaultID); score != "" {
 		t.Fatalf("expected no activity for empty-content call, got %q", score)
+	}
+}
+
+// TestMemSaveSkipsSessionUpsertWhenResolvedToExistingUUID verifies that when
+// mem_save resolves to an already-existing UUID session (lookup hit), it does
+// NOT enqueue a new SyncOpUpsert session mutation. Previously, ensureImplicit-
+// SessionWithCWD ran unconditionally, flooding the sync queue on busy sessions.
+func TestMemSaveSkipsSessionUpsertWhenResolvedToExistingUUID(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	cmd := exec.Command("git", "-C", dir, "remote", "add", "origin",
+		"git@github.com:user/no-spurious-sync-project.git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	project := "no-spurious-sync-project"
+	uuidSession := "uuid-no-spurious-sync"
+
+	// Enroll the project so ListPendingSyncMutations returns its mutations.
+	if err := s.EnrollProject(project); err != nil {
+		t.Fatalf("EnrollProject: %v", err)
+	}
+
+	// Register a UUID session at the current working directory so that
+	// resolveImplicitSessionID will hit it rather than fall back.
+	if err := s.CreateSession(uuidSession, project, dir); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	// Count session UPSERT mutations for the UUID session already in the queue
+	// (from the CreateSession above). We baseline here and verify no new ones
+	// appear after mem_save resolves to the existing UUID session.
+	countSessionUpserts := func() int {
+		mutations, err := s.ListPendingSyncMutations(store.DefaultSyncTargetKey, 200)
+		if err != nil {
+			t.Fatalf("list pending sync mutations: %v", err)
+		}
+		n := 0
+		for _, m := range mutations {
+			if m.Entity == store.SyncEntitySession && m.EntityKey == uuidSession && m.Op == store.SyncOpUpsert {
+				n++
+			}
+		}
+		return n
+	}
+	baseline := countSessionUpserts()
+
+	// Call mem_save without an explicit session_id — handler must resolve to
+	// the UUID session and must NOT call ensureImplicitSessionWithCWD again.
+	activity := NewSessionActivity(10 * time.Minute)
+	h := handleSave(s, MCPConfig{}, activity)
+	res, err := h(context.Background(), mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"title":   "No spurious sync test",
+			"content": "content",
+		}},
+	})
+	if err != nil || res.IsError {
+		t.Fatalf("handleSave: err=%v isError=%v text=%s", err, res.IsError, callResultText(t, res))
+	}
+
+	// Verify that the session UPSERT count did not grow after mem_save.
+	if after := countSessionUpserts(); after != baseline {
+		t.Fatalf("expected %d session UPSERT mutations for %q (no growth), got %d — spurious ensure detected",
+			baseline, uuidSession, after)
 	}
 }

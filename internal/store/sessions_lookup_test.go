@@ -2,7 +2,6 @@ package store
 
 import (
 	"testing"
-	"time"
 )
 
 // TestLookupActiveSessionReturnsMatchingOpenSession verifies that
@@ -33,11 +32,16 @@ func TestLookupActiveSessionReturnsMostRecentWhenMultipleOpen(t *testing.T) {
 	if err := s.CreateSession("uuid-old", "myproject", "/work/myproject"); err != nil {
 		t.Fatalf("CreateSession old: %v", err)
 	}
-	// Small sleep to ensure started_at differs — SQLite datetime('now') has 1-second resolution.
-	// TODO: tighten if started_at gains sub-second resolution.
-	time.Sleep(1100 * time.Millisecond)
 	if err := s.CreateSession("uuid-new", "myproject", "/work/myproject"); err != nil {
 		t.Fatalf("CreateSession new: %v", err)
+	}
+	// Write deterministic started_at values so the test does not depend on
+	// datetime('now') sub-second timing or sleep to force ordering.
+	if _, err := s.db.Exec(`UPDATE sessions SET started_at = '2026-01-01T00:00:01Z' WHERE id = 'uuid-old'`); err != nil {
+		t.Fatalf("set started_at old: %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE sessions SET started_at = '2026-01-01T00:00:02Z' WHERE id = 'uuid-new'`); err != nil {
+		t.Fatalf("set started_at new: %v", err)
 	}
 
 	got, err := s.LookupActiveSession("myproject", "/work/myproject")

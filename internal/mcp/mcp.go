@@ -1076,7 +1076,16 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 			typ = "manual"
 		}
 		if sessionID == "" {
-			sessionID = resolveImplicitSessionID(s, project)
+			var sessionFound bool
+			sessionID, sessionFound = resolveImplicitSessionID(s, project)
+			// Skip ensure when we resolved to an existing UUID session — the UPSERT
+			// is a DB no-op but still enqueues a SyncOpUpsert mutation every call.
+			if !sessionFound {
+				_ = ensureImplicitSessionWithCWD(s, sessionID, project)
+			}
+		} else {
+			// Caller-provided session ID: preserve pre-existing auto-create behavior.
+			_ = ensureImplicitSessionWithCWD(s, sessionID, project)
 		}
 		suggestedTopicKey := suggestTopicKey(typ, title, content)
 
@@ -1100,9 +1109,6 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 				}
 			}
 		}
-
-		// Ensure the implicit MCP session exists with the current working directory.
-		_ = ensureImplicitSessionWithCWD(s, sessionID, project)
 
 		truncated := len(content) > s.MaxObservationLength()
 
@@ -1326,11 +1332,16 @@ func handleSavePrompt(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 		project, _ := store.NormalizeProject(detRes.Project)
 
 		if sessionID == "" {
-			sessionID = resolveImplicitSessionID(s, project)
+			var sessionFound bool
+			sessionID, sessionFound = resolveImplicitSessionID(s, project)
+			// Skip ensure when we resolved to an existing UUID session to avoid spurious sync mutations.
+			if !sessionFound {
+				_ = ensureImplicitSessionWithCWD(s, sessionID, project)
+			}
+		} else {
+			// Caller-provided session ID: preserve pre-existing auto-create behavior.
+			_ = ensureImplicitSessionWithCWD(s, sessionID, project)
 		}
-
-		// Ensure the implicit MCP session exists with the current working directory.
-		_ = ensureImplicitSessionWithCWD(s, sessionID, project)
 
 		_, err = s.AddPrompt(store.AddPromptParams{
 			SessionID: sessionID,
@@ -1608,11 +1619,16 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		project, _ := store.NormalizeProject(detRes.Project)
 
 		if sessionID == "" {
-			sessionID = resolveImplicitSessionID(s, project)
+			var sessionFound bool
+			sessionID, sessionFound = resolveImplicitSessionID(s, project)
+			// Skip ensure when we resolved to an existing UUID session to avoid spurious sync mutations.
+			if !sessionFound {
+				_ = ensureImplicitSessionWithCWD(s, sessionID, project)
+			}
+		} else {
+			// Caller-provided session ID: preserve pre-existing auto-create behavior.
+			_ = ensureImplicitSessionWithCWD(s, sessionID, project)
 		}
-
-		// Ensure the implicit MCP session exists with the current working directory.
-		_ = ensureImplicitSessionWithCWD(s, sessionID, project)
 
 		_, err = s.AddObservation(store.AddObservationParams{
 			SessionID: sessionID,
@@ -1726,9 +1742,16 @@ func handleCapturePassive(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		}
 
 		if sessionID == "" {
-			sessionID = resolveImplicitSessionID(s, project)
-			_ = ensureImplicitSessionWithCWD(s, sessionID, project)
+			var sessionFound bool
+			sessionID, sessionFound = resolveImplicitSessionID(s, project)
+			// Skip ensure when we resolved to an existing UUID session to avoid spurious sync mutations.
+			if !sessionFound {
+				_ = ensureImplicitSessionWithCWD(s, sessionID, project)
+			}
 		}
+		// Note: when sessionID was provided by the caller we do NOT call
+		// ensureImplicitSessionWithCWD — this preserves the original behavior
+		// (the FK constraint must fire if the explicit session does not exist).
 
 		activity.RecordToolCall(sessionID)
 
@@ -2662,12 +2685,22 @@ func defaultSessionID(project string) string {
 // an explicit session_id arg attach to the real UUID session created by the
 // SessionStart hook (POST /sessions), instead of pooling into
 // manual-save-{project}. Fixes #386.
-func resolveImplicitSessionID(s *store.Store, project string) string {
+//
+// The bool return is true when an existing UUID session was found (lookup hit),
+// false when the function fell back to defaultSessionID. Callers use this to
+// skip ensureImplicitSessionWithCWD when the session already exists, preventing
+// spurious SyncOpUpsert mutations on every tool call during an active session.
+func resolveImplicitSessionID(s *store.Store, project string) (string, bool) {
 	cwd := currentWorkingDirectory()
-	if id, err := s.LookupActiveSession(project, cwd); err == nil && id != "" {
-		return id
+	if id, err := s.LookupActiveSession(project, cwd); err != nil {
+		// Non-fatal: log the error so operators can diagnose DB issues (e.g.
+		// transient WAL lock) that would otherwise silently route writes into
+		// manual-save-{project} with no signal. Mirror the pattern at line 1129.
+		fmt.Fprintf(os.Stderr, "engram: LookupActiveSession error (non-fatal): %v\n", err)
+	} else if id != "" {
+		return id, true
 	}
-	return defaultSessionID(project)
+	return defaultSessionID(project), false
 }
 
 func intArg(req mcp.CallToolRequest, key string, defaultVal int) int {
