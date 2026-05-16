@@ -1986,6 +1986,158 @@ func TestUpgradeRepairDryRunAndApply(t *testing.T) {
 			t.Fatalf("expected no remaining legacy findings after repair, got %+v", after)
 		}
 	})
+
+	t.Run("repair applies repairable mutations even when a blocker is queued ahead of them", func(t *testing.T) {
+		s := newTestStore(t)
+		// Repairable session: local row has a directory we can backfill from.
+		if err := s.CreateSession("mix-recoverable", "mix-proj", "/tmp/mix"); err != nil {
+			t.Fatalf("create recoverable session: %v", err)
+		}
+		// Enroll BEFORE the orphan row exists so EnrollProject's backfill pass
+		// does not enqueue an extra (also-blocked) session mutation for it.
+		if err := s.EnrollProject("mix-proj"); err != nil {
+			t.Fatalf("enroll project: %v", err)
+		}
+		// Unrecoverable session: local row exists but the directory is empty,
+		// so the repair pass cannot infer a value (mirrors the legacy
+		// orphan-session shape reported by users on engram <= v1.15.13).
+		if _, err := s.execHook(s.db,
+			`INSERT INTO sessions (id, project, directory, started_at) VALUES (?, ?, '', datetime('now'))`,
+			"mix-orphan", "mix-proj",
+		); err != nil {
+			t.Fatalf("seed orphan session row: %v", err)
+		}
+
+		// Insert the BLOCKED mutation first so it gets a lower seq than the
+		// repairable one. The pre-fix code reported Findings[0]'s details,
+		// which exposed the wrong seq when Findings[0] happened to be the
+		// repairable mutation. Here we want the orphan to legitimately be the
+		// blocker no matter the ordering.
+		if _, err := s.execHook(s.db,
+			`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			DefaultSyncTargetKey, SyncEntitySession, "mix-orphan", SyncOpUpsert,
+			`{"id":"mix-orphan","project":"mix-proj","directory":""}`,
+			SyncSourceLocal, "mix-proj",
+		); err != nil {
+			t.Fatalf("insert blocked mutation: %v", err)
+		}
+		if _, err := s.execHook(s.db,
+			`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			DefaultSyncTargetKey, SyncEntitySession, "mix-recoverable", SyncOpUpsert,
+			`{"id":"mix-recoverable","project":"mix-proj","directory":""}`,
+			SyncSourceLocal, "mix-proj",
+		); err != nil {
+			t.Fatalf("insert repairable mutation: %v", err)
+		}
+
+		// Dry-run: must surface both buckets and identify the orphan as the blocker.
+		dryRun, err := s.RepairCloudUpgrade("mix-proj", false)
+		if err != nil {
+			t.Fatalf("dry-run repair: %v", err)
+		}
+		if dryRun.Class != UpgradeRepairClassBlocked || dryRun.Applied {
+			t.Fatalf("dry-run should report blocked + applied=false, got %+v", dryRun)
+		}
+		if !strings.Contains(dryRun.Message, "1 repairable payload(s) would apply") ||
+			!strings.Contains(dryRun.Message, "1 would remain blocked") ||
+			!strings.Contains(dryRun.Message, `entity_key="mix-orphan"`) {
+			t.Fatalf("dry-run message should describe both buckets and name the orphan entity_key, got %q", dryRun.Message)
+		}
+
+		// Apply: the repairable mutation must be patched in place, the blocker
+		// must remain queued, and Applied must be true (we did do work).
+		applied, err := s.RepairCloudUpgrade("mix-proj", true)
+		if err != nil {
+			t.Fatalf("apply repair: %v", err)
+		}
+		if applied.Class != UpgradeRepairClassBlocked || !applied.Applied {
+			t.Fatalf("apply should report blocked + applied=true (partial success), got %+v", applied)
+		}
+		if !strings.Contains(applied.Message, "applied 1 repairable payload(s)") ||
+			!strings.Contains(applied.Message, "1 remain blocked") {
+			t.Fatalf("apply message should note partial success and remaining blocker, got %q", applied.Message)
+		}
+
+		var repaired, stillBroken string
+		if err := s.db.QueryRow(`SELECT payload FROM sync_mutations WHERE entity_key = ? AND acked_at IS NULL`, "mix-recoverable").Scan(&repaired); err != nil {
+			t.Fatalf("load repaired mutation payload: %v", err)
+		}
+		if strings.Contains(repaired, `"directory":""`) {
+			t.Fatalf("expected mix-recoverable payload to have directory backfilled, got %s", repaired)
+		}
+		if err := s.db.QueryRow(`SELECT payload FROM sync_mutations WHERE entity_key = ? AND acked_at IS NULL`, "mix-orphan").Scan(&stillBroken); err != nil {
+			t.Fatalf("load orphan mutation payload: %v", err)
+		}
+		if !strings.Contains(stillBroken, `"directory":""`) {
+			t.Fatalf("orphan payload should remain unchanged, got %s", stillBroken)
+		}
+
+		after, err := s.DiagnoseCloudUpgradeLegacyMutations("mix-proj")
+		if err != nil {
+			t.Fatalf("diagnose after partial repair: %v", err)
+		}
+		if after.RepairableCount != 0 || after.BlockedCount != 1 {
+			t.Fatalf("expected only the orphan to remain after partial repair, got %+v", after)
+		}
+	})
+
+	t.Run("blocker error message names the unrecoverable seq even when a lower-seq repairable exists", func(t *testing.T) {
+		s := newTestStore(t)
+		if err := s.CreateSession("ord-recoverable", "ord-proj", "/tmp/ord"); err != nil {
+			t.Fatalf("create recoverable session: %v", err)
+		}
+		if err := s.EnrollProject("ord-proj"); err != nil {
+			t.Fatalf("enroll project: %v", err)
+		}
+		if _, err := s.execHook(s.db,
+			`INSERT INTO sessions (id, project, directory, started_at) VALUES (?, ?, '', datetime('now'))`,
+			"ord-orphan", "ord-proj",
+		); err != nil {
+			t.Fatalf("seed orphan session row: %v", err)
+		}
+
+		// Repairable goes in FIRST (lowest seq). Previously Findings[0] would
+		// be this repairable row, and the error message would report its seq
+		// even though it is not the actual blocker.
+		if _, err := s.execHook(s.db,
+			`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			DefaultSyncTargetKey, SyncEntitySession, "ord-recoverable", SyncOpUpsert,
+			`{"id":"ord-recoverable","project":"ord-proj","directory":""}`,
+			SyncSourceLocal, "ord-proj",
+		); err != nil {
+			t.Fatalf("insert repairable mutation: %v", err)
+		}
+		var repairableSeq int64
+		if err := s.db.QueryRow(`SELECT seq FROM sync_mutations WHERE entity_key = ? AND project = ?`, "ord-recoverable", "ord-proj").Scan(&repairableSeq); err != nil {
+			t.Fatalf("lookup repairable seq: %v", err)
+		}
+
+		if _, err := s.execHook(s.db,
+			`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			DefaultSyncTargetKey, SyncEntitySession, "ord-orphan", SyncOpUpsert,
+			`{"id":"ord-orphan","project":"ord-proj","directory":""}`,
+			SyncSourceLocal, "ord-proj",
+		); err != nil {
+			t.Fatalf("insert blocked mutation: %v", err)
+		}
+		var orphanSeq int64
+		if err := s.db.QueryRow(`SELECT seq FROM sync_mutations WHERE entity_key = ? AND project = ?`, "ord-orphan", "ord-proj").Scan(&orphanSeq); err != nil {
+			t.Fatalf("lookup orphan seq: %v", err)
+		}
+
+		report, err := s.RepairCloudUpgrade("ord-proj", false)
+		if err != nil {
+			t.Fatalf("dry-run repair: %v", err)
+		}
+		wantSeq := fmt.Sprintf("seq=%d", orphanSeq)
+		wrongSeq := fmt.Sprintf("seq=%d", repairableSeq)
+		if !strings.Contains(report.Message, wantSeq) {
+			t.Fatalf("error message should reference the blocked seq %d, got %q", orphanSeq, report.Message)
+		}
+		if strings.Contains(report.Message, wrongSeq) {
+			t.Fatalf("error message must NOT reference the repairable seq %d, got %q", repairableSeq, report.Message)
+		}
+	})
 }
 
 func TestRollbackCloudUpgradeSafetyBoundary(t *testing.T) {
