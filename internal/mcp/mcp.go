@@ -2695,7 +2695,8 @@ func resolveImplicitSessionID(s *store.Store, project string) (string, bool) {
 	if id, err := s.LookupActiveSession(project, cwd); err != nil {
 		// Non-fatal: log the error so operators can diagnose DB issues (e.g.
 		// transient WAL lock) that would otherwise silently route writes into
-		// manual-save-{project} with no signal. Mirror the pattern at line 1129.
+		// manual-save-{project} with no signal. See auto prompt capture error
+		// log in handleSave for the same pattern.
 		fmt.Fprintf(os.Stderr, "engram: LookupActiveSession error (non-fatal): %v\n", err)
 	} else if id != "" {
 		return id, true
