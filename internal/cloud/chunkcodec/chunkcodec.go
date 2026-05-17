@@ -316,8 +316,13 @@ func validateSupportedMutation(entity, op string) error {
 			return fmt.Errorf("unsupported mutation %q/%q", entity, op)
 		}
 		return nil
-	case store.SyncEntityObservation, store.SyncEntityPrompt, store.SyncEntityRelation:
+	case store.SyncEntityObservation, store.SyncEntityPrompt:
 		if op != store.SyncOpUpsert && op != store.SyncOpDelete {
+			return fmt.Errorf("unsupported mutation %q/%q", entity, op)
+		}
+		return nil
+	case store.SyncEntityRelation:
+		if op != store.SyncOpUpsert {
 			return fmt.Errorf("unsupported mutation %q/%q", entity, op)
 		}
 		return nil
@@ -453,6 +458,14 @@ func normalizeMutationPayload(entity, op, payload, project string) (normalizedPa
 		body.TargetID = strings.TrimSpace(body.TargetID)
 		body.Relation = strings.TrimSpace(body.Relation)
 		body.JudgmentStatus = strings.TrimSpace(body.JudgmentStatus)
+		if body.MarkedByActor != nil {
+			trimmed := strings.TrimSpace(*body.MarkedByActor)
+			body.MarkedByActor = &trimmed
+		}
+		if body.MarkedByKind != nil {
+			trimmed := strings.TrimSpace(*body.MarkedByKind)
+			body.MarkedByKind = &trimmed
+		}
 		body.Project = strings.TrimSpace(body.Project)
 		body.CreatedAt = strings.TrimSpace(body.CreatedAt)
 		body.UpdatedAt = strings.TrimSpace(body.UpdatedAt)
@@ -471,6 +484,12 @@ func normalizeMutationPayload(entity, op, payload, project string) (normalizedPa
 			}
 			if body.JudgmentStatus == "" {
 				return "", "", fmt.Errorf("relation payload judgment_status is required for upsert")
+			}
+			if body.MarkedByActor == nil || *body.MarkedByActor == "" {
+				return "", "", fmt.Errorf("relation payload marked_by_actor is required for upsert")
+			}
+			if body.MarkedByKind == nil || *body.MarkedByKind == "" {
+				return "", "", fmt.Errorf("relation payload marked_by_kind is required for upsert")
 			}
 			if body.CreatedAt == "" {
 				return "", "", fmt.Errorf("relation payload created_at is required for upsert")

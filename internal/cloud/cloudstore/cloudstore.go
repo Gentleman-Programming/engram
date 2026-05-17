@@ -1048,7 +1048,7 @@ func materializedMutationBatchChunk(batch []MutationEntry) ([]byte, chunkSummary
 
 func isChunkMaterializableMutationEntity(entity string) bool {
 	switch strings.TrimSpace(entity) {
-	case store.SyncEntitySession, store.SyncEntityObservation, store.SyncEntityPrompt:
+	case store.SyncEntitySession, store.SyncEntityObservation, store.SyncEntityPrompt, store.SyncEntityRelation:
 		return true
 	default:
 		return false

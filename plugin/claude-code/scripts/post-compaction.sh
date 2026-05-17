@@ -56,11 +56,11 @@ Call `mem_save` IMMEDIATELY after ANY of these:
 **Self-check after EVERY task**: "Did I just make a decision, fix a bug, learn something, or establish a convention? If yes → mem_save NOW."
 
 ### SEARCH MEMORY when:
-- User asks to recall anything ("remember", "what did we do", "acordate", "qué hicimos")
+- User asks to recall anything ("remember", "what did we do", or the equivalent in the user's language)
 - Starting work on something that might have been done before
 - User mentions a topic you have no context on
 
-### SESSION CLOSE — before saying "done"/"listo":
+### SESSION CLOSE — before saying "done":
 Call `mem_session_summary` with: Goal, Discoveries, Accomplished, Next Steps, Relevant Files.
 
 ---

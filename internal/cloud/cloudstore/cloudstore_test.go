@@ -140,6 +140,47 @@ func TestMaterializedMutationBatchChunkIncludesObservationAlongsidePromptAndSess
 	}
 }
 
+func TestMaterializedMutationBatchChunkCarriesRelationMutationWithoutTypedRows(t *testing.T) {
+	relationPayload := json.RawMessage(`{
+		"sync_id":"rel-04081be99000bdf5",
+		"source_id":"obs-a",
+		"target_id":"obs-b",
+		"relation":"conflicts_with",
+		"judgment_status":"judged",
+		"marked_by_actor":"agent-a",
+		"marked_by_kind":"agent",
+		"marked_by_model":"model-a",
+		"project":"sias-app",
+		"created_at":"2026-05-04T01:49:52Z",
+		"updated_at":"2026-05-04T01:50:00Z"
+	}`)
+
+	payload, counts, err := materializedMutationBatchChunk([]MutationEntry{
+		{Project: "sias-app", Entity: store.SyncEntityRelation, EntityKey: "rel-04081be99000bdf5", Op: store.SyncOpUpsert, Payload: relationPayload},
+	})
+	if err != nil {
+		t.Fatalf("materializedMutationBatchChunk: %v", err)
+	}
+	if counts.sessions != 0 || counts.observations != 0 || counts.prompts != 0 {
+		t.Fatalf("relation-only mutation chunk must not increment typed counts, got %+v", counts)
+	}
+
+	var chunk engramsync.ChunkData
+	if err := json.Unmarshal(payload, &chunk); err != nil {
+		t.Fatalf("decode materialized chunk: %v", err)
+	}
+	if len(chunk.Sessions) != 0 || len(chunk.Observations) != 0 || len(chunk.Prompts) != 0 {
+		t.Fatalf("relation-only mutation must not create typed rows, got sessions=%d observations=%d prompts=%d", len(chunk.Sessions), len(chunk.Observations), len(chunk.Prompts))
+	}
+	if len(chunk.Mutations) != 1 {
+		t.Fatalf("expected relation mutation retained for replay, got %d", len(chunk.Mutations))
+	}
+	mutation := chunk.Mutations[0]
+	if mutation.Entity != store.SyncEntityRelation || mutation.EntityKey != "rel-04081be99000bdf5" || mutation.Project != "sias-app" {
+		t.Fatalf("expected canonical relation mutation, got %+v", mutation)
+	}
+}
+
 func TestMaterializedMutationBatchChunksKeepProjectsSeparate(t *testing.T) {
 	chunks, err := materializedMutationBatchChunks([]MutationEntry{
 		{Project: "proj-a", Entity: store.SyncEntityPrompt, EntityKey: "prompt-a", Op: store.SyncOpUpsert, Payload: json.RawMessage(`{"sync_id":"prompt-a","session_id":"sess-a","content":"a"}`)},

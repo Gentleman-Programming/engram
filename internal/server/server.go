@@ -5,6 +5,7 @@
 package server
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Gentleman-Programming/engram/internal/diagnostic"
+	projectpkg "github.com/Gentleman-Programming/engram/internal/project"
 	"github.com/Gentleman-Programming/engram/internal/store"
 )
 
@@ -141,10 +144,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /sessions", s.handleCreateSession)
 	s.mux.HandleFunc("POST /sessions/{id}/end", s.handleEndSession)
 	s.mux.HandleFunc("GET /sessions/recent", s.handleRecentSessions)
+	s.mux.HandleFunc("GET /sessions/{id}", s.handleGetSession)
 	s.mux.HandleFunc("DELETE /sessions/{id}", s.handleDeleteSession)
 
 	// Observations
 	s.mux.HandleFunc("POST /observations", s.handleAddObservation)
+	s.mux.HandleFunc("GET /observations", s.handleListObservations)
 	s.mux.HandleFunc("POST /observations/passive", s.handlePassiveCapture)
 	s.mux.HandleFunc("GET /observations/recent", s.handleRecentObservations)
 	s.mux.HandleFunc("PATCH /observations/{id}", s.handleUpdateObservation)
@@ -170,10 +175,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /export", s.handleExport)
 	s.mux.HandleFunc("POST /import", s.handleImport)
 
-	// Stats
+	// Stats / diagnostics
 	s.mux.HandleFunc("GET /stats", s.handleStats)
+	s.mux.HandleFunc("GET /doctor", s.handleDoctor)
 
-	// Project migration
+	// Project detection / migration
+	s.mux.HandleFunc("GET /project/current", s.handleCurrentProject)
 	s.mux.HandleFunc("POST /projects/migrate", s.handleMigrateProject)
 
 	// Sync status (degraded-state visibility for autosync)
@@ -184,6 +191,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /conflicts/stats", s.handleConflictsStats)
 	s.mux.HandleFunc("GET /conflicts/deferred", s.handleListDeferred)
 	s.mux.HandleFunc("POST /conflicts/scan", s.handleScanConflicts)
+	s.mux.HandleFunc("POST /conflicts/judge", s.handleJudgeConflict)
+	s.mux.HandleFunc("POST /conflicts/compare", s.handleCompareMemories)
 	s.mux.HandleFunc("POST /conflicts/deferred/replay", s.handleReplayDeferred)
 	s.mux.HandleFunc("GET /conflicts/{relation_id}", s.handleGetConflict)
 }
@@ -252,6 +261,20 @@ func (s *Server) handleRecentSessions(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, sessions)
 }
 
+func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
+	session, err := s.store.GetSession(r.PathValue("id"))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			jsonError(w, http.StatusNotFound, "session not found")
+			return
+		}
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, session)
+}
+
 func (s *Server) handleAddObservation(w http.ResponseWriter, r *http.Request) {
 	var body store.AddObservationParams
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -260,6 +283,9 @@ func (s *Server) handleAddObservation(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.SessionID == "" || body.Title == "" || body.Content == "" {
 		jsonError(w, http.StatusBadRequest, "session_id, title, and content are required")
+		return
+	}
+	if !s.validateSessionProject(w, body.SessionID, body.Project) {
 		return
 	}
 
@@ -283,6 +309,9 @@ func (s *Server) handlePassiveCapture(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, "session_id is required")
 		return
 	}
+	if !s.validateSessionProject(w, body.SessionID, body.Project) {
+		return
+	}
 
 	result, err := s.store.PassiveCapture(body)
 	if err != nil {
@@ -292,6 +321,16 @@ func (s *Server) handlePassiveCapture(w http.ResponseWriter, r *http.Request) {
 
 	s.notifyWrite()
 	jsonResponse(w, http.StatusOK, result)
+}
+
+func (s *Server) handleListObservations(w http.ResponseWriter, r *http.Request) {
+	sort := r.URL.Query().Get("sort")
+	if sort != "" && sort != "created_at:desc" {
+		jsonError(w, http.StatusBadRequest, "unsupported sort: use created_at:desc")
+		return
+	}
+
+	s.handleRecentObservations(w, r)
 }
 
 func (s *Server) handleRecentObservations(w http.ResponseWriter, r *http.Request) {
@@ -437,6 +476,9 @@ func (s *Server) handleAddPrompt(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.SessionID == "" || body.Content == "" {
 		jsonError(w, http.StatusBadRequest, "session_id and content are required")
+		return
+	}
+	if !s.validateSessionProject(w, body.SessionID, body.Project) {
 		return
 	}
 
@@ -607,6 +649,102 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonResponse(w, http.StatusOK, stats)
+}
+
+func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
+	projectName := strings.TrimSpace(r.URL.Query().Get("project"))
+	if projectName != "" {
+		projectName, _ = store.NormalizeProject(projectName)
+		exists, err := s.store.ProjectExists(projectName)
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if !exists {
+			available, err := s.store.ListProjectNames()
+			if err != nil {
+				jsonError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			jsonErrorWithFields(w, http.StatusNotFound, fmt.Sprintf("project %q not found", projectName), map[string]any{
+				"code":               "unknown_project",
+				"available_projects": available,
+			})
+			return
+		}
+	} else {
+		cwd := strings.TrimSpace(r.URL.Query().Get("cwd"))
+		if cwd == "" {
+			var err error
+			cwd, err = os.Getwd()
+			if err != nil {
+				jsonError(w, http.StatusInternalServerError, "failed to detect cwd: "+err.Error())
+				return
+			}
+		}
+		res := projectpkg.DetectProjectFull(cwd)
+		if res.Error != nil {
+			code := "project_detection_failed"
+			if len(res.AvailableProjects) > 0 {
+				code = "ambiguous_project"
+			}
+			jsonErrorWithFields(w, http.StatusBadRequest, "project detection failed: "+res.Error.Error(), map[string]any{
+				"code":               code,
+				"available_projects": res.AvailableProjects,
+			})
+			return
+		}
+		projectName, _ = store.NormalizeProject(res.Project)
+	}
+
+	check := strings.TrimSpace(r.URL.Query().Get("check"))
+	runner := diagnostic.NewRunner()
+	scope := diagnostic.Scope{Store: s.store, Project: projectName, Now: time.Now()}
+	var (
+		report diagnostic.Report
+		err    error
+	)
+	if check != "" {
+		report, err = runner.RunOne(r.Context(), scope, check)
+	} else {
+		report, err = runner.RunAll(r.Context(), scope)
+	}
+	if err != nil {
+		report = diagnostic.ErrorReport(projectName, err)
+	}
+
+	jsonResponse(w, http.StatusOK, report)
+}
+
+// ─── Project Detection ───────────────────────────────────────────────────────
+
+func (s *Server) handleCurrentProject(w http.ResponseWriter, r *http.Request) {
+	cwd := strings.TrimSpace(r.URL.Query().Get("cwd"))
+	if cwd == "" {
+		var err error
+		cwd, err = os.Getwd()
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, "failed to detect cwd: "+err.Error())
+			return
+		}
+	}
+
+	res := projectpkg.DetectProjectFull(cwd)
+	payload := map[string]any{
+		"project":            res.Project,
+		"project_source":     res.Source,
+		"project_path":       res.Path,
+		"cwd":                cwd,
+		"available_projects": res.AvailableProjects,
+	}
+	if res.Warning != "" {
+		payload["warning"] = res.Warning
+	}
+	if res.Error != nil {
+		payload["error_hint"] = res.Error.Error()
+	}
+
+	jsonResponse(w, http.StatusOK, payload)
 }
 
 // ─── Sync Status ─────────────────────────────────────────────────────────────
@@ -814,7 +952,8 @@ func (s *Server) handleListDeferred(w http.ResponseWriter, r *http.Request) {
 
 // handleScanConflicts serves POST /conflicts/scan
 // Body: {"project":"X","since":"...","apply":bool,"max_insert":int,
-//        "semantic":bool,"concurrency":int,"timeout_per_call_seconds":int,"max_semantic":int}
+//
+//	"semantic":bool,"concurrency":int,"timeout_per_call_seconds":int,"max_semantic":int}
 func (s *Server) handleScanConflicts(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Project   string `json:"project"`
@@ -939,6 +1078,133 @@ func (s *Server) handleScanConflicts(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, resp)
 }
 
+// handleJudgeConflict serves POST /conflicts/judge.
+// Body: {"judgment_id":"rel-...","relation":"related|compatible|scoped|conflicts_with|supersedes|not_conflict", ...}
+func (s *Server) handleJudgeConflict(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		JudgmentID string   `json:"judgment_id"`
+		Relation   string   `json:"relation"`
+		Reason     string   `json:"reason"`
+		Evidence   string   `json:"evidence"`
+		Confidence *float64 `json:"confidence"`
+		SessionID  string   `json:"session_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(body.JudgmentID) == "" {
+		jsonError(w, http.StatusBadRequest, "judgment_id is required")
+		return
+	}
+	if strings.TrimSpace(body.Relation) == "" {
+		jsonError(w, http.StatusBadRequest, "relation is required")
+		return
+	}
+
+	var reason *string
+	if body.Reason != "" {
+		reason = &body.Reason
+	}
+	var evidence *string
+	if body.Evidence != "" {
+		evidence = &body.Evidence
+	}
+	if body.Confidence != nil && (*body.Confidence < 0 || *body.Confidence > 1) {
+		jsonError(w, http.StatusBadRequest, "confidence must be between 0.0 and 1.0")
+		return
+	}
+
+	relation, err := s.store.JudgeRelation(store.JudgeRelationParams{
+		JudgmentID:    body.JudgmentID,
+		Relation:      body.Relation,
+		Reason:        reason,
+		Evidence:      evidence,
+		Confidence:    body.Confidence,
+		MarkedByActor: "agent",
+		MarkedByKind:  "agent",
+		SessionID:     body.SessionID,
+	})
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	s.notifyWrite()
+	jsonResponse(w, http.StatusOK, map[string]any{"relation": relation})
+}
+
+// handleCompareMemories serves POST /conflicts/compare.
+// Body: {"memory_id_a":1,"memory_id_b":2,"relation":"related", "confidence":0.9, "reasoning":"..."}
+func (s *Server) handleCompareMemories(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		MemoryIDA  int64    `json:"memory_id_a"`
+		MemoryIDB  int64    `json:"memory_id_b"`
+		Relation   string   `json:"relation"`
+		Confidence *float64 `json:"confidence"`
+		Reasoning  string   `json:"reasoning"`
+		Model      string   `json:"model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if body.MemoryIDA == 0 {
+		jsonError(w, http.StatusBadRequest, "memory_id_a is required")
+		return
+	}
+	if body.MemoryIDB == 0 {
+		jsonError(w, http.StatusBadRequest, "memory_id_b is required")
+		return
+	}
+	if strings.TrimSpace(body.Relation) == "" {
+		jsonError(w, http.StatusBadRequest, "relation is required")
+		return
+	}
+	if strings.TrimSpace(body.Reasoning) == "" {
+		jsonError(w, http.StatusBadRequest, "reasoning is required")
+		return
+	}
+	if body.Confidence == nil {
+		jsonError(w, http.StatusBadRequest, "confidence is required")
+		return
+	}
+	confidence := *body.Confidence
+	if confidence < 0 || confidence > 1 {
+		jsonError(w, http.StatusBadRequest, "confidence must be between 0.0 and 1.0")
+		return
+	}
+
+	obsA, err := s.store.GetObservation(body.MemoryIDA)
+	if err != nil {
+		jsonError(w, http.StatusNotFound, fmt.Sprintf("observation id=%d not found: %s", body.MemoryIDA, err))
+		return
+	}
+	obsB, err := s.store.GetObservation(body.MemoryIDB)
+	if err != nil {
+		jsonError(w, http.StatusNotFound, fmt.Sprintf("observation id=%d not found: %s", body.MemoryIDB, err))
+		return
+	}
+
+	syncID, err := s.store.JudgeBySemantic(store.JudgeBySemanticParams{
+		SourceID:   obsA.SyncID,
+		TargetID:   obsB.SyncID,
+		Relation:   body.Relation,
+		Confidence: confidence,
+		Reasoning:  body.Reasoning,
+		Model:      body.Model,
+	})
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if syncID != "" {
+		s.notifyWrite()
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"sync_id": syncID})
+}
+
 // handleReplayDeferred serves POST /conflicts/deferred/replay
 func (s *Server) handleReplayDeferred(w http.ResponseWriter, r *http.Request) {
 	result, err := s.store.ReplayDeferred()
@@ -991,6 +1257,32 @@ func (s *Server) handleGetConflict(w http.ResponseWriter, r *http.Request) {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+func (s *Server) validateSessionProject(w http.ResponseWriter, sessionID, projectName string) bool {
+	if strings.TrimSpace(projectName) == "" {
+		return true
+	}
+	projectName, _ = store.NormalizeProject(projectName)
+	session, err := s.store.GetSession(sessionID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			jsonError(w, http.StatusNotFound, "session not found")
+			return false
+		}
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return false
+	}
+	sessionProject, _ := store.NormalizeProject(session.Project)
+	if sessionProject != "" && sessionProject != projectName {
+		jsonErrorWithFields(w, http.StatusBadRequest, "session project does not match requested project", map[string]any{
+			"code":            "session_project_mismatch",
+			"session_project": sessionProject,
+			"project":         projectName,
+		})
+		return false
+	}
+	return true
+}
+
 func jsonResponse(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -999,6 +1291,14 @@ func jsonResponse(w http.ResponseWriter, status int, data any) {
 
 func jsonError(w http.ResponseWriter, status int, msg string) {
 	jsonResponse(w, status, map[string]string{"error": msg})
+}
+
+func jsonErrorWithFields(w http.ResponseWriter, status int, msg string, fields map[string]any) {
+	payload := map[string]any{"error": msg}
+	for key, value := range fields {
+		payload[key] = value
+	}
+	jsonResponse(w, status, payload)
 }
 
 func queryInt(r *http.Request, key string, defaultVal int) int {

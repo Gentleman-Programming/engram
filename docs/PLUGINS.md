@@ -82,7 +82,7 @@ claude --plugin-dir ./plugin/claude-code
 
 | Feature | Bare MCP | Plugin |
 |---------|----------|--------|
-| MCP tools available | 18 default (`engram mcp`) | 14 agent-profile tools (`engram mcp --tools=agent`) |
+| MCP tools available | 19 default (`engram mcp`) | 15 agent-profile tools (`engram mcp --tools=agent`) |
 | Session tracking (auto-start) | ✗ | ✓ |
 | Auto-import git-synced memories | ✗ | ✓ |
 | Compaction recovery | ✗ | ✓ |

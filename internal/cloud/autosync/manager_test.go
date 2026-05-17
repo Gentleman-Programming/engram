@@ -211,7 +211,7 @@ func TestManagerPushAcksPendingMutationsAfterTransportSuccess(t *testing.T) {
 		{Seq: 2, Entity: "obs", EntityKey: "k2", Op: "upsert", Project: "proj-a", Payload: `{"id":"2"}`},
 	}
 	tr := newFakeTransport()
-	tr.pushResult = &PushMutationsResult{AcceptedSeqs: []int64{1, 2}}
+	tr.pushResult = &PushMutationsResult{AcceptedSeqs: []int64{101, 102}}
 	mgr := New(ls, tr, DefaultConfig())
 
 	if err := mgr.push(context.Background()); err != nil {
@@ -225,7 +225,66 @@ func TestManagerPushAcksPendingMutationsAfterTransportSuccess(t *testing.T) {
 	acked := append([]int64(nil), ls.ackedSeqs...)
 	ls.mu.Unlock()
 	if fmt.Sprint(acked) != "[1 2]" {
-		t.Fatalf("expected acked seqs [1 2] after successful push, got %v", acked)
+		t.Fatalf("expected original local seqs [1 2] after successful push, got %v", acked)
+	}
+}
+
+func TestManagerPushDoesNotAckWhenAcceptedSeqCountMismatchesBatch(t *testing.T) {
+	tests := []struct {
+		name         string
+		pushResult   *PushMutationsResult
+		wantErrPiece string
+	}{
+		{
+			name:         "nil result",
+			pushResult:   nil,
+			wantErrPiece: "missing accepted seqs",
+		},
+		{
+			name:         "no accepted seqs",
+			pushResult:   &PushMutationsResult{AcceptedSeqs: []int64{}},
+			wantErrPiece: "accepted 0 of 2",
+		},
+		{
+			name:         "short accepted seqs",
+			pushResult:   &PushMutationsResult{AcceptedSeqs: []int64{101}},
+			wantErrPiece: "accepted 1 of 2",
+		},
+		{
+			name:         "long accepted seqs",
+			pushResult:   &PushMutationsResult{AcceptedSeqs: []int64{101, 102, 103}},
+			wantErrPiece: "accepted 3 of 2",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ls := newFakeLocalStore()
+			ls.mutations = []store.SyncMutation{
+				{Seq: 1, Entity: "obs", EntityKey: "k1", Op: "upsert", Project: "proj-a", Payload: `{"id":"1"}`},
+				{Seq: 2, Entity: "obs", EntityKey: "k2", Op: "upsert", Project: "proj-a", Payload: `{"id":"2"}`},
+			}
+			tr := newFakeTransport()
+			tr.pushResult = tt.pushResult
+			mgr := New(ls, tr, DefaultConfig())
+
+			err := mgr.push(context.Background())
+			if err == nil {
+				t.Fatal("expected push to fail on accepted seq mismatch")
+			}
+			if !strings.Contains(err.Error(), tt.wantErrPiece) {
+				t.Fatalf("expected error to contain %q, got %q", tt.wantErrPiece, err.Error())
+			}
+			if got := atomic.LoadInt32(&tr.pushCalls); got != 1 {
+				t.Fatalf("expected one transport push, got %d", got)
+			}
+			ls.mu.Lock()
+			acked := append([]int64(nil), ls.ackedSeqs...)
+			ls.mu.Unlock()
+			if len(acked) != 0 {
+				t.Fatalf("expected no ack on accepted seq mismatch, got %v", acked)
+			}
+		})
 	}
 }
 
@@ -1217,9 +1276,9 @@ func TestPull_LegacyEntityNonFKError_StillHalts(t *testing.T) {
 	tr.mu.Lock()
 	tr.pullResult = &PullMutationsResponse{
 		Mutations: []PulledMutation{{
-			Seq:    10,
-			Entity: "observation",
-			Op:     "upsert",
+			Seq:     10,
+			Entity:  "observation",
+			Op:      "upsert",
 			Payload: []byte(`{"sync_id":"obs-fail","title":"test"}`),
 		}},
 		HasMore: false,
@@ -1272,10 +1331,10 @@ type DeferredRow struct {
 // fakeLocalStoreWithDeferred extends fakeLocalStore with replay support.
 type fakeLocalStoreWithDeferred struct {
 	fakeLocalStore
-	deferredRows        []DeferredRow
+	deferredRows         []DeferredRow
 	replayDeferredCalled bool
 	markDeadCalled       bool
-	replayErr           error
+	replayErr            error
 }
 
 func (s *fakeLocalStoreWithDeferred) ReplayDeferred() (store.ReplayDeferredResult, error) {

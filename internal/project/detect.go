@@ -33,6 +33,7 @@ const (
 	SourceDirBasename      = "dir_basename"      // fallback: directory basename
 	SourceAmbiguous        = "ambiguous"         // cwd contains multiple git repos (Case 4)
 	SourceExplicitOverride = "explicit_override" // JR2-2: caller explicitly supplied a project name
+	SourceSessionProject   = "session"           // caller supplied a session_id with an existing project
 	// SourceUserSelectedAfterAmbiguousProject means an MCP write initially hit
 	// ErrAmbiguousProject and the caller provided an explicit user-selected
 	// project from the ambiguity result's available_projects list.
@@ -73,6 +74,7 @@ type DetectionResult struct {
 
 // DetectProjectFull resolves the project for dir using a 5-case algorithm:
 //
+//  0. config     — nearest .engram/config.json inside the enclosing repo/root
 //  1. git_remote — cwd is a git root with a remote → derive name from remote URL
 //  2. git_root   — cwd is inside a git repo → use repo root basename
 //  3. git_child  — cwd has exactly one git-repo child → auto-promote it
@@ -178,18 +180,40 @@ func detectFromConfig(dir string) (DetectionResult, bool) {
 	if err != nil {
 		absDir = dir
 	}
+	absDir = canonicalizePath(absDir)
 
 	// Project config is a project/repo lock, not a global ancestor setting. When
-	// cwd is inside git, only the repository root may define the lock. This keeps
-	// ~/.engram/config.json (the global data directory) from being inherited by
-	// every directory under $HOME.
-	if gitRoot := detectGitRootDir(absDir); gitRoot != "" {
-		return readConfigAt(gitRoot)
+	// cwd is inside git, walk upward only within the enclosing repository so a
+	// nearest subproject .engram/config.json can override the repo root without
+	// letting ~/.engram/config.json leak into nested workspaces under $HOME.
+	if gitRoot := canonicalizePath(detectGitRootDir(absDir)); gitRoot != "" {
+		return readNearestConfigAtOrBelow(absDir, gitRoot)
 	}
 
 	// Outside git, accept only the current directory's config. Do not walk to
 	// arbitrary parents such as $HOME.
 	return readConfigAt(absDir)
+}
+
+func readNearestConfigAtOrBelow(startDir, stopDir string) (DetectionResult, bool) {
+	current := filepath.Clean(startDir)
+	stop := filepath.Clean(stopDir)
+
+	for {
+		if res, ok := readConfigAt(current); ok {
+			return res, true
+		}
+		if current == stop {
+			break
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+
+	return DetectionResult{}, false
 }
 
 func readConfigAt(projectDir string) (DetectionResult, bool) {
@@ -220,6 +244,17 @@ func invalidConfigResult(path string, err error) DetectionResult {
 		Path:    path,
 		Error:   fmt.Errorf("%w: %v", ErrInvalidConfig, err),
 	}
+}
+
+func canonicalizePath(path string) string {
+	if path == "" {
+		return ""
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	return filepath.Clean(resolved)
 }
 
 func normalizeConfigProjectName(projectName string) (string, error) {
