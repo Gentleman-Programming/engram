@@ -2518,8 +2518,8 @@ func resolveReadProject(s *store.Store, override string) (projectpkg.DetectionRe
 	}, nil
 }
 
-func detectCurrentProjectBestEffort() projectpkg.DetectionResult {
-	res, _ := resolveWriteProject()
+func detectCurrentProjectBestEffort(defaultProject string) projectpkg.DetectionResult {
+	res, _ := resolveWriteProjectWithProcessOverride(defaultProject)
 	return res
 }
 
