@@ -167,11 +167,15 @@ func NewServer(s *store.Store) *server.MCPServer {
 }
 
 // serverInstructions tells MCP clients when to use Engram's tools.
-// 7 core tools are eager (always in context). The rest are deferred
-// and require ToolSearch to load.
+// Tools are split into two pools via the defer_loading annotation:
+//   - eager  (defer_loading=false): clients should keep them in context
+//   - deferred (defer_loading=true): clients load them via Tool Search on demand
+// NOTE: Claude Code currently ignores defer_loading for tools that arrive
+// through a plugin (prefix mcp__plugin_*) and treats all of them as deferred.
+// The CLAUDE CODE PLUGIN USERS block below documents the workaround.
 const serverInstructions = `Engram provides persistent memory that survives across sessions and compactions.
 
-CORE TOOLS (always available — use without ToolSearch):
+EAGER TOOLS (defer_loading=false — keep in context by default):
   mem_save — save decisions, bugs, discoveries, conventions PROACTIVELY (do not wait to be asked)
   mem_search — find past work, decisions, or context from previous sessions
   mem_context — get recent session history (call at session start or after compaction)
@@ -180,9 +184,16 @@ CORE TOOLS (always available — use without ToolSearch):
   mem_save_prompt — save user prompt for context
   mem_current_project — detect current project from cwd (recommended first call)
 
-DEFERRED TOOLS (use ToolSearch when needed):
+DEFERRED TOOLS (defer_loading=true — load via Tool Search when needed):
   mem_update, mem_suggest_topic_key, mem_session_start, mem_session_end,
   mem_stats, mem_delete, mem_timeline, mem_capture_passive, mem_merge_projects
+
+CLAUDE CODE PLUGIN USERS — IMPORTANT: When Engram runs as a Claude Code plugin
+(tools arrive with the prefix mcp__plugin_engram_engram__*), Claude Code
+currently treats ALL tools as deferred regardless of the defer_loading flag.
+Before calling any engram tool, load its schema first:
+  ToolSearch(query: "select:mcp__plugin_engram_engram__<tool_name>")
+Once a tool's schema is loaded it stays callable for the rest of the session.
 
 PROACTIVE SAVE RULE: Call mem_save immediately after ANY decision, bug fix, discovery, or convention — not just when asked.
 

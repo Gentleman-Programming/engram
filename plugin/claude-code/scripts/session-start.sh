@@ -143,10 +143,13 @@ cat <<'PROTOCOL'
 
 You have engram memory tools. This protocol is MANDATORY and ALWAYS ACTIVE.
 
-### CORE TOOLS — always available, no ToolSearch needed
-mem_save, mem_search, mem_context, mem_session_summary, mem_get_observation, mem_save_prompt
+### MEMORY TOOLS — load via ToolSearch before first call
+Claude Code currently treats ALL Engram plugin tools as deferred (prefix `mcp__plugin_engram_engram__*`) regardless of the server's `defer_loading` flag. Before calling any engram tool, load its schema with:
+  ToolSearch(query: "select:mcp__plugin_engram_engram__<tool_name>")
+Once loaded, the tool stays callable for the rest of the session.
 
-Use ToolSearch for other tools: mem_update, mem_suggest_topic_key, mem_session_start, mem_session_end, mem_stats, mem_delete, mem_timeline, mem_capture_passive
+Load early (used the most): mem_save, mem_search, mem_context, mem_session_summary, mem_get_observation, mem_save_prompt, mem_current_project
+Load on demand: mem_update, mem_suggest_topic_key, mem_session_start, mem_session_end, mem_stats, mem_delete, mem_timeline, mem_capture_passive
 
 ### PROACTIVE SAVE — do NOT wait for user to ask
 Call `mem_save` IMMEDIATELY after ANY of these:
