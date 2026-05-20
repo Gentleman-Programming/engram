@@ -3,6 +3,7 @@ package cloudserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -57,14 +58,20 @@ const defaultPullLimit = 100
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
 // handleMutationPush handles POST /sync/mutations/push.
-// REQ-200: bearer auth, body limit 8 MiB, batch size cap 100, pause gate (409 on sync_enabled=false).
+// REQ-200: bearer auth, configurable body limit defaulting to 8 MiB, batch size cap 100, pause gate (409 on sync_enabled=false).
 // BC2: project authorization is enforced for every distinct project in the batch.
 // BW9: 409 pause response uses writeActionableError for structured error envelope.
 func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request) {
+	maxPushBodyBytes := s.pushBodyLimit()
 	r.Body = http.MaxBytesReader(w, r.Body, maxPushBodyBytes)
 
 	var req mutationPushEnvelope
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			writeActionableError(w, http.StatusRequestEntityTooLarge, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodePayloadTooLarge, fmt.Sprintf("push payload too large (max %d bytes)", maxPushBodyBytes))
+			return
+		}
 		http.Error(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
 		return
 	}

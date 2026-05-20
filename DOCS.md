@@ -548,6 +548,7 @@ Cloud runtime envs for `engram cloud serve`:
 | `ENGRAM_DATABASE_URL`           | yes                      | Postgres DSN for cloud chunk storage/dashboard read model                             |
 | `ENGRAM_PORT`                   | no                       | Runtime port (default `8080`)                                                         |
 | `ENGRAM_CLOUD_HOST`             | no                       | Bind host (default `127.0.0.1`; use `0.0.0.0` for containers)                         |
+| `ENGRAM_CLOUD_MAX_PUSH_BYTES`   | no                       | Max chunk/mutation push request body bytes (default `8388608`)                        |
 | `ENGRAM_CLOUD_ALLOWED_PROJECTS` | yes                      | Comma-separated allowlist; always required (authenticated + insecure modes)           |
 | `ENGRAM_CLOUD_TOKEN`            | yes (authenticated mode) | Enables bearer auth mode                                                              |
 | `ENGRAM_JWT_SECRET`             | yes (authenticated mode) | Must be explicitly set and non-default when token mode is enabled                     |

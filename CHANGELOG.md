@@ -21,6 +21,10 @@ Breaking changes are always marked with a `type:breaking-change` label and docum
 
 <!-- Changes that are merged but not yet released are tracked here until the next tag. -->
 
+### Cloud sync
+
+- **fix(cloud):** make chunk and mutation push payload limits configurable with `ENGRAM_CLOUD_MAX_PUSH_BYTES` while preserving the 8 MiB default.
+
 ### Pi package (`pi-engram`)
 
 - **fix(plugin):** allow `mem_session_summary` to accept an explicit `project` fallback when automatic project detection is unavailable.
@@ -49,7 +53,7 @@ New and updated routes registered in `internal/cloud/dashboard/dashboard.go`:
 Background mutation-based replication for `engram serve` and `engram mcp`:
 
 - **feat(autosync):** `internal/cloud/autosync.Manager` — lease-guarded background push/pull goroutine enabled by `ENGRAM_CLOUD_AUTOSYNC=1` + `ENGRAM_CLOUD_TOKEN` + `ENGRAM_CLOUD_SERVER`
-- **feat(cloudserver):** add `POST /sync/mutations/push` (batch up to 100 mutations, 8 MiB body cap, per-project auth + pause gate returning HTTP 409 `sync-paused`)
+- **feat(cloudserver):** add `POST /sync/mutations/push` (batch up to 100 mutations, configurable body cap defaulting to 8 MiB, per-project auth + pause gate returning HTTP 409 `sync-paused`)
 - **feat(cloudserver):** add `GET /sync/mutations/pull?since_seq=N&limit=M` (server-side filtered by enrolled projects; fail-closed when `EnrolledProjectsProvider` not implemented)
 - **feat(autosync):** phases: `idle`, `pushing`, `pulling`, `healthy`, `push_failed`, `pull_failed`, `backoff`, `disabled`
 - **feat(autosync):** reason codes: `transport_failed`, `auth_required`, `policy_forbidden`, `server_unsupported`, `internal_error`, `sync-paused`
