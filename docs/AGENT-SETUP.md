@@ -49,8 +49,8 @@ Restart Pi after installation.
 
 The package has two paths:
 
-- **HTTP event capture**: the Pi extension sends prompts, summaries, and passive task learnings to `engram serve`.
-- **MCP tools**: `pi-mcp-adapter` exposes `mem_*` tools by launching `engram mcp --tools=agent`.
+- **HTTP event capture**: the Pi extension sends prompts, summaries, passive task learnings, and compact Pi-native `mem_*` tool calls to `engram serve`.
+- **MCP gateway**: `pi-mcp-adapter` exposes Engram's MCP surface by launching `engram mcp --tools=agent` and is also used by other Pi MCP integrations such as Notion.
 
 Use an existing Engram HTTP server:
 
