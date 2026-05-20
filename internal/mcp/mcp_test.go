@@ -6519,3 +6519,77 @@ func TestProcessOverrideSaveHandlerWritesToDefaultProject(t *testing.T) {
 		t.Fatalf("results in trusted project = %d; want 1", len(results))
 	}
 }
+
+// Issue #391: scope=personal must not be intersected with auto-detected project.
+func TestHandleSearchPersonalScopeCrossProject(t *testing.T) {
+	s := newMCPTestStore(t)
+
+	for _, spec := range []struct {
+		session, project, title, content string
+	}{
+		{"s-proj-a", "proj-a", "Color preference", "Always use blue syntax highlighting"},
+		{"s-proj-b", "proj-b", "Unrelated", "Database migration checklist"},
+	} {
+		if err := s.CreateSession(spec.session, spec.project, "/tmp/"+spec.project); err != nil {
+			t.Fatalf("create session %s: %v", spec.session, err)
+		}
+		if _, err := s.AddObservation(store.AddObservationParams{
+			SessionID: spec.session,
+			Type:      "preference",
+			Title:     spec.title,
+			Content:   spec.content,
+			Project:   spec.project,
+			Scope:     "personal",
+		}); err != nil {
+			t.Fatalf("add observation: %v", err)
+		}
+	}
+
+	search := handleSearch(s, MCPConfig{DefaultProject: "proj-b"}, NewSessionActivity(10*time.Minute))
+	res, err := search(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"query": "blue syntax",
+		"scope": "personal",
+	}}})
+	if err != nil {
+		t.Fatalf("search handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected search error: %s", callResultText(t, res))
+	}
+	text := callResultText(t, res)
+	if !strings.Contains(text, "Color preference") {
+		t.Fatalf("expected cross-project personal hit from proj-a, got: %s", text)
+	}
+}
+
+func TestHandleContextPersonalScopeCrossProject(t *testing.T) {
+	s := newMCPTestStore(t)
+
+	if err := s.CreateSession("s-a", "proj-a", "/tmp/proj-a"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "s-a",
+		Type:      "preference",
+		Title:     "Editor font",
+		Content:   "Prefer JetBrains Mono 14pt",
+		Project:   "proj-a",
+		Scope:     "personal",
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	ctx := handleContext(s, MCPConfig{DefaultProject: "proj-b"}, NewSessionActivity(10*time.Minute))
+	res, err := ctx(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"scope": "personal",
+	}}})
+	if err != nil {
+		t.Fatalf("context handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected context error: %s", callResultText(t, res))
+	}
+	if !strings.Contains(callResultText(t, res), "Editor font") {
+		t.Fatalf("expected cross-project personal context from proj-a")
+	}
+}

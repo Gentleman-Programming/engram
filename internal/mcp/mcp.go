@@ -893,6 +893,16 @@ func handleCurrentProject(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc 
 	}
 }
 
+// filterProjectForScope returns the project SQL filter for read paths.
+// scope=personal with no explicit project override searches across all projects.
+func filterProjectForScope(resolvedProject, projectOverride, scope string) string {
+	if strings.TrimSpace(scope) == "personal" && strings.TrimSpace(projectOverride) == "" {
+		return ""
+	}
+	p, _ := store.NormalizeProject(resolvedProject)
+	return p
+}
+
 func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		query, _ := req.GetArguments()["query"].(string)
@@ -917,12 +927,14 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		project, _ = store.NormalizeProject(project)
 		detRes.Project = project // JR2-1: keep envelope in sync with normalized query project
 
+		queryProject := filterProjectForScope(project, projectOverride, scope)
+
 		sessionID := defaultSessionID(project)
 		activity.RecordToolCall(sessionID)
 
 		results, err := s.Search(query, store.SearchOptions{
 			Type:    typ,
-			Project: project,
+			Project: queryProject,
 			Scope:   scope,
 			Limit:   limit,
 		})
@@ -1371,10 +1383,12 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 		project, _ = store.NormalizeProject(project)
 		detRes.Project = project // JR2-1: keep envelope in sync with normalized query project
 
+		queryProject := filterProjectForScope(project, projectOverride, scope)
+
 		sessionID := defaultSessionID(project)
 		activity.RecordToolCall(sessionID)
 
-		contextResult, err := s.FormatContext(project, scope)
+		contextResult, err := s.FormatContext(queryProject, scope)
 		if err != nil {
 			return mcp.NewToolResultError("Failed to get context: " + err.Error()), nil
 		}
