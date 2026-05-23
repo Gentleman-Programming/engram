@@ -16,7 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"math"
 	"math/rand"
 	"runtime/debug"
@@ -356,7 +356,7 @@ func (m *Manager) safeRun(ctx context.Context) {
 	defer func() {
 		if r := recover(); r != nil {
 			stack := string(debug.Stack())
-			log.Printf("[autosync] PANIC in cycle: %v\n%s", r, stack)
+			slog.Error("PANIC in autosync cycle", "recover", r, "stack", stack)
 			m.mu.Lock()
 			m.status.Phase = PhaseBackoff
 			m.status.ReasonCode = "internal_error"
@@ -553,11 +553,9 @@ func (m *Manager) pull(ctx context.Context) error {
 	// This gives previously-deferred rows a chance to apply now that their
 	// referenced observations may have arrived.
 	if res, err := m.store.ReplayDeferred(); err != nil {
-		log.Printf("[autosync] replayDeferred error: %v", err)
-		// Non-fatal: log and continue — deferred replay failures must not halt pulls.
+		slog.Error("replayDeferred error", "error", err)
 	} else if res.Retried > 0 {
-		log.Printf("[autosync] replayDeferred: retried=%d succeeded=%d failed=%d dead=%d",
-			res.Retried, res.Succeeded, res.Failed, res.Dead)
+		slog.Info("replayDeferred", "retried", res.Retried, "succeeded", res.Succeeded, "failed", res.Failed, "dead", res.Dead)
 	}
 
 	state, err := m.store.GetSyncState(m.cfg.TargetKey)

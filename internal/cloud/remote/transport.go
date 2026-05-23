@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -408,7 +408,7 @@ func newMutationHTTPStatusError(operation string, statusCode int, body []byte) e
 	errorCode := strings.TrimSpace(payload.ErrorCode)
 	if statusCode == http.StatusNotFound {
 		errorCode = "server_unsupported"
-		log.Printf("[autosync] cloud mutation endpoint returned 404 (server_unsupported); deploy the new server first before enabling ENGRAM_CLOUD_AUTOSYNC=1")
+		slog.Warn("cloud mutation endpoint returned 404 (server_unsupported)")
 	}
 
 	return &HTTPStatusError{

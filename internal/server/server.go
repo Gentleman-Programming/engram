@@ -10,7 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -129,7 +129,7 @@ func (s *Server) Start() error {
 	if err != nil {
 		return fmt.Errorf("engram server: listen %s: %w", addr, err)
 	}
-	log.Printf("[engram] HTTP server listening on %s", addr)
+	slog.Info("HTTP server listening", "addr", addr)
 	return serveFn(ln, s.mux)
 }
 
@@ -801,7 +801,7 @@ func (s *Server) handleMigrateProject(w http.ResponseWriter, r *http.Request) {
 
 	result, err := s.store.MigrateProject(body.OldProject, body.NewProject)
 	if err != nil {
-		log.Printf("[engram] project migration failed: %v", err)
+		slog.Error("project migration failed", "error", err)
 		jsonError(w, http.StatusInternalServerError, "migration failed")
 		return
 	}
@@ -811,9 +811,11 @@ func (s *Server) handleMigrateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("[engram] migrated project %q → %q (obs: %d, sessions: %d, prompts: %d)",
-		body.OldProject, body.NewProject,
-		result.ObservationsUpdated, result.SessionsUpdated, result.PromptsUpdated)
+	slog.Info("project migrated",
+		"from", body.OldProject, "to", body.NewProject,
+		"observations", result.ObservationsUpdated,
+		"sessions", result.SessionsUpdated,
+		"prompts", result.PromptsUpdated)
 
 	jsonResponse(w, http.StatusOK, map[string]any{
 		"status":       "migrated",

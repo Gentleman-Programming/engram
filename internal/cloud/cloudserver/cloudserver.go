@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -127,7 +127,7 @@ func (s *CloudServer) Start() error {
 		host = defaultHost
 	}
 	addr := fmt.Sprintf("%s:%d", host, s.port)
-	log.Printf("[engram-cloud] listening on %s", addr)
+	slog.Info("cloud server listening", "addr", addr)
 	return s.listenAndServe(addr, s.Handler())
 }
 
@@ -434,10 +434,10 @@ func (s *CloudServer) handlePushChunk(w http.ResponseWriter, r *http.Request) {
 					Outcome:     cloudstore.AuditOutcomeRejectedProjectPaused,
 					ReasonCode:  "sync-paused",
 				}); aerr != nil {
-					log.Printf("cloudserver: audit insert failed (chunk push): %v", aerr)
+					slog.Error("audit insert failed", "error", aerr)
 				}
 			} else {
-				log.Printf("cloudserver: store (%T) does not implement InsertAuditEntry; audit skipped", s.store)
+				slog.Warn("store does not implement InsertAuditEntry; audit skipped")
 			}
 			// JW4: include project envelope fields in 409 response, consistent
 			// with the mutation push 409 envelope (REQ-414 parity for chunk path).
@@ -476,7 +476,7 @@ func (s *CloudServer) handlePushChunk(w http.ResponseWriter, r *http.Request) {
 	computedChunkID := chunkIDFromPayload(normalizedData)
 	providedChunkID := strings.TrimSpace(req.ChunkID)
 	if providedChunkID != "" && providedChunkID != computedChunkID {
-		log.Printf("cloudserver: chunk_id mismatch for project %q: client=%q server=%q; accepting server-canonicalized payload", project, providedChunkID, computedChunkID)
+		slog.Warn("chunk_id mismatch, accepting canonicalized", "provided", providedChunkID, "computed", computedChunkID)
 	}
 	clientCreatedAt := strings.TrimSpace(req.ClientCreatedAt)
 	if clientCreatedAt != "" {

@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -32,6 +33,7 @@ import (
 	"github.com/Gentleman-Programming/engram/internal/cloud/remote"
 	"github.com/Gentleman-Programming/engram/internal/cloud/syncguidance"
 	"github.com/Gentleman-Programming/engram/internal/diagnostic"
+	"github.com/Gentleman-Programming/engram/internal/logging"
 	"github.com/Gentleman-Programming/engram/internal/mcp"
 	"github.com/Gentleman-Programming/engram/internal/obsidian"
 	"github.com/Gentleman-Programming/engram/internal/project"
@@ -581,6 +583,8 @@ func cloudSyncFailureMessage(project string, syncErr error) string {
 }
 
 func main() {
+	logging.Init()
+
 	if len(os.Args) < 2 {
 		printUsage()
 		exitFunc(1)
@@ -599,7 +603,7 @@ func main() {
 		// that os.UserHomeDir() might have missed (e.g. MCP subprocesses on
 		// Windows where %USERPROFILE% is not propagated).
 		if home := resolveHomeFallback(); home != "" {
-			log.Printf("[engram] UserHomeDir failed, using fallback: %s", home)
+			slog.Warn("UserHomeDir failed, using fallback", "dir", home)
 			cfg = store.FallbackConfig(filepath.Join(home, ".engram"))
 		} else {
 			fatal(cfgErr)
@@ -757,7 +761,7 @@ func cmdServe(cfg store.Config) {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		log.Println("[engram] shutting down...")
+		slog.Info("shutting down")
 		cancel()
 		if mgrStop != nil {
 			mgrStop() // BW7: wait for Manager to release lease before exiting
@@ -795,7 +799,7 @@ func tryStartAutosync(ctx context.Context, s *store.Store, cfg store.Config) (au
 
 	cc, err := resolveCloudRuntimeConfig(cfg)
 	if err != nil {
-		log.Printf("[autosync] ERROR: cannot read cloud config: %v", err)
+		slog.Error("cannot read cloud config", "error", err)
 		return nil, nil
 	}
 
@@ -804,18 +808,18 @@ func tryStartAutosync(ctx context.Context, s *store.Store, cfg store.Config) (au
 
 	// REQ-211: token required.
 	if token == "" {
-		log.Printf("[autosync] ERROR: ENGRAM_CLOUD_TOKEN is required when ENGRAM_CLOUD_AUTOSYNC=1; autosync disabled")
+		slog.Error("ENGRAM_CLOUD_TOKEN required; autosync disabled")
 		return nil, nil
 	}
 	// REQ-211: server URL required.
 	if serverURL == "" {
-		log.Printf("[autosync] ERROR: ENGRAM_CLOUD_SERVER is required when ENGRAM_CLOUD_AUTOSYNC=1; autosync disabled")
+		slog.Error("ENGRAM_CLOUD_SERVER required; autosync disabled")
 		return nil, nil
 	}
 
 	remoteMT, err := remote.NewMutationTransport(serverURL, token)
 	if err != nil {
-		log.Printf("[autosync] ERROR: invalid server URL %q: %v; autosync disabled", serverURL, err)
+		slog.Error("invalid server URL", "url", serverURL, "error", err)
 		return nil, nil
 	}
 	transport := &mutationTransportAdapter{remote: remoteMT}
@@ -825,7 +829,7 @@ func tryStartAutosync(ctx context.Context, s *store.Store, cfg store.Config) (au
 	mgr := newAutosyncManager(s, transport, mgrCfg)
 
 	go mgr.Run(ctx)
-	log.Printf("[autosync] started (server=%s)", serverURL)
+	slog.Info("autosync started", "server", serverURL)
 	return mgr, mgr.Stop
 }
 
@@ -1630,9 +1634,9 @@ func cmdObsidianExport(cfg store.Config) {
 
 		if w != nil {
 			if runErr := w.Run(ctx); runErr != nil {
-				log.Printf("[engram] shutting down watch mode: %v", runErr)
+				slog.Info("shutting down watch mode", "error", runErr)
 			} else {
-				log.Printf("[engram] shutting down watch mode")
+				slog.Info("shutting down watch mode")
 			}
 		}
 		exitFunc(0)
@@ -2432,10 +2436,10 @@ func migrateOrphanedDB(correctDir string) {
 		}
 
 		// Found an orphaned DB — migrate it.
-		log.Printf("[engram] found orphaned database at %s, migrating to %s", candidate, correctDB)
+		slog.Info("found orphaned database, migrating", "from", candidate, "to", correctDB)
 
 		if err := os.MkdirAll(correctDir, 0755); err != nil {
-			log.Printf("[engram] migration failed (create dir): %v", err)
+			slog.Error("migration failed (create dir)", "error", err)
 			return
 		}
 
@@ -2447,7 +2451,7 @@ func migrateOrphanedDB(correctDir string) {
 				continue
 			}
 			if renameErr := os.Rename(src, dst); renameErr != nil {
-				log.Printf("[engram] migration failed (move %s): %v", filepath.Base(src), renameErr)
+				slog.Error("migration failed (move)", "path", filepath.Base(src), "error", renameErr)
 				return
 			}
 		}
@@ -2459,7 +2463,7 @@ func migrateOrphanedDB(correctDir string) {
 			os.Remove(orphanDir)
 		}
 
-		log.Printf("[engram] migration complete — memories recovered")
+		slog.Info("migration complete — memories recovered")
 		return
 	}
 }
