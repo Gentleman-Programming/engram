@@ -1600,8 +1600,8 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		sessionID, _ := req.GetArguments()["session_id"].(string)
 		// project field intentionally not read — auto-detect only (REQ-308 write-tool contract)
 
-		// Auto-detect project from cwd; fail fast on ambiguous (REQ-308, REQ-309)
-		detRes, err := resolveWriteProject()
+		// Auto-detect project from cwd; process-level override (--project / ENGRAM_PROJECT) takes precedence.
+		detRes, err := resolveWriteProjectWithProcessOverride(cfg.DefaultProject)
 		if err != nil {
 			return writeProjectErrorResult(nil, "", detRes, err), nil
 		}
