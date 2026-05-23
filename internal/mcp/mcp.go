@@ -271,7 +271,10 @@ func registerTools(srv *server.MCPServer, s *store.Store, cfg MCPConfig, allowli
 					mcp.Description("Filter by type: tool_use, file_change, command, file_read, search, manual, decision, architecture, bugfix, pattern"),
 				),
 				mcp.WithString("project",
-					mcp.Description("Filter by project name"),
+					mcp.Description("Filter by project name. Ignored when all_projects=true."),
+				),
+				mcp.WithBoolean("all_projects",
+					mcp.Description("Search across every project instead of the current one. When true, the project argument is ignored and results may come from any project. Useful for recalling decisions logged elsewhere when you don't know the project key."),
 				),
 				mcp.WithString("scope",
 					mcp.Description("Filter by scope: project (default) or personal"),
@@ -899,23 +902,35 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		typ, _ := req.GetArguments()["type"].(string)
 		projectOverride, _ := req.GetArguments()["project"].(string)
 		scope, _ := req.GetArguments()["scope"].(string)
+		allProjects := boolArg(req, "all_projects", false)
 		limit := intArg(req, "limit", 10)
 
-		// Resolve project: validate override or auto-detect (REQ-310, REQ-311)
-		detRes, err := resolveReadProjectWithProcessOverride(s, projectOverride, cfg.DefaultProject)
-		if err != nil {
-			var upe *unknownProjectError
-			if errors.As(err, &upe) {
-				return errorWithMeta("unknown_project",
-					fmt.Sprintf("Project %q not found in store", upe.Name),
-					upe.AvailableProjects,
-				), nil
+		// all_projects=true short-circuits project resolution: we search globally
+		// regardless of the project override or any auto-detected project. This
+		// keeps the cross-project flow independent of cwd-based detection so the
+		// agent can recall context from any project without knowing its key.
+		var detRes projectpkg.DetectionResult
+		var project string
+		if allProjects {
+			detRes = projectpkg.DetectionResult{Source: projectpkg.SourceAllProjects}
+		} else {
+			// Resolve project: validate override or auto-detect (REQ-310, REQ-311)
+			res, err := resolveReadProjectWithProcessOverride(s, projectOverride, cfg.DefaultProject)
+			if err != nil {
+				var upe *unknownProjectError
+				if errors.As(err, &upe) {
+					return errorWithMeta("unknown_project",
+						fmt.Sprintf("Project %q not found in store", upe.Name),
+						upe.AvailableProjects,
+					), nil
+				}
+				return mcp.NewToolResultError(fmt.Sprintf("Project resolution failed: %s", err)), nil
 			}
-			return mcp.NewToolResultError(fmt.Sprintf("Project resolution failed: %s", err)), nil
+			detRes = res
+			project = detRes.Project
+			project, _ = store.NormalizeProject(project)
+			detRes.Project = project // JR2-1: keep envelope in sync with normalized query project
 		}
-		project := detRes.Project
-		project, _ = store.NormalizeProject(project)
-		detRes.Project = project // JR2-1: keep envelope in sync with normalized query project
 
 		sessionID := defaultSessionID(project)
 		activity.RecordToolCall(sessionID)

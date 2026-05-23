@@ -760,6 +760,8 @@ Returns success even when cwd is ambiguous — empty `project` + non-empty `avai
 
 Search persistent memory across all sessions. Supports FTS5 full-text search with type/project/scope/limit filters.
 
+Set `all_projects: true` to search across every project instead of the resolved one. This bypasses project detection entirely and ignores the `project` argument, so an agent can recall a decision logged elsewhere without knowing the project key. The response envelope reports `project_source: "all_projects"` and an empty `project` to reflect the cross-project scope.
+
 When an observation has judged relations in `memory_relations`, the result entry includes annotation lines immediately after the title/content block:
 
 ```
