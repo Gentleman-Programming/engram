@@ -14,6 +14,7 @@
   <a href="docs/CODEBASE-GUIDE.md">Codebase Guide</a> &bull;
   <a href="docs/ARCHITECTURE.md">Architecture</a> &bull;
   <a href="docs/PLUGINS.md">Plugins</a> &bull;
+  <a href="docs/TEAM-USAGE.md">Team Usage</a> &bull;
   <a href="CONTRIBUTING.md">Contributing</a> &bull;
   <a href="DOCS.md">Full Docs</a>
 </p>
