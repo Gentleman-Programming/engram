@@ -44,3 +44,26 @@ func TestFormatLocal(t *testing.T) {
 		t.Errorf("Expected fallback to format something, got empty string")
 	}
 }
+
+// TestFormatLocalWithLayoutPreservesCallerLayout covers the dashboard use case:
+// UI surfaces pass a friendly layout (e.g. "02 Jan 2006 15:04") and still get
+// ENGRAM_TIMEZONE-aware conversion. The dashboard regression test in
+// internal/cloud/dashboard/helpers_test.go relies on this contract.
+func TestFormatLocalWithLayoutPreservesCallerLayout(t *testing.T) {
+	old := os.Getenv("ENGRAM_TIMEZONE")
+	defer os.Setenv("ENGRAM_TIMEZONE", old)
+	os.Setenv("ENGRAM_TIMEZONE", "America/Bogota") // UTC-5
+
+	// SQLite-style input → friendly dashboard layout output, in Bogota time.
+	got := FormatLocalWithLayout("2026-05-22 12:00:00", "02 Jan 2006 15:04")
+	want := "22 May 2026 07:00"
+	if got != want {
+		t.Errorf("FormatLocalWithLayout = %q, want %q", got, want)
+	}
+
+	// Unparseable input still round-trips unchanged, regardless of layout.
+	raw := "not-a-time"
+	if FormatLocalWithLayout(raw, "02 Jan 2006 15:04") != raw {
+		t.Errorf("expected unparseable input to be returned as-is")
+	}
+}
