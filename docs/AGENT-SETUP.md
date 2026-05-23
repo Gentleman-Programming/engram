@@ -35,12 +35,12 @@ Install Engram's Pi package, the MCP adapter, and Pi MCP config:
 engram setup pi
 ```
 
-`engram setup pi` runs `pi install npm:gentle-engram@0.1.5` and `pi install npm:pi-mcp-adapter`, then ensures Pi settings contain both packages and writes `mcpServers.engram` in the Pi agent MCP config when no Engram server is already configured. Existing `mcpServers.engram` entries are preserved.
+`engram setup pi` runs `pi install npm:gentle-engram@0.1.7` and `pi install npm:pi-mcp-adapter`, then ensures Pi settings contain both packages and writes `mcpServers.engram` in the Pi agent MCP config when no Engram server is already configured. Existing `mcpServers.engram` entries are preserved.
 
 Manual equivalent:
 
 ```bash
-pi install npm:gentle-engram@0.1.5
+pi install npm:gentle-engram@0.1.7
 pi install npm:pi-mcp-adapter
 pi-engram init
 ```
@@ -49,8 +49,8 @@ Restart Pi after installation.
 
 The package has two paths:
 
-- **HTTP event capture**: the Pi extension sends prompts, summaries, and passive task learnings to `engram serve`.
-- **MCP tools**: `pi-mcp-adapter` exposes `mem_*` tools by launching `engram mcp --tools=agent`.
+- **HTTP event capture**: the Pi extension sends prompts, summaries, passive task learnings, and compact Pi-native `mem_*` tool calls to `engram serve`.
+- **MCP gateway**: `pi-mcp-adapter` exposes Engram's MCP surface by launching `engram mcp --tools=agent` and is also used by other Pi MCP integrations such as Notion.
 
 Use an existing Engram HTTP server:
 

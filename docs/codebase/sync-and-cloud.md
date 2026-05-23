@@ -59,6 +59,8 @@ Business rule: **if sync is blocked, fail loudly and visibly**. No silent drops.
 - `GET /sync/mutations/pull`
 - `/dashboard/*`
 
+`POST /sync/push` and `POST /sync/mutations/push` enforce the server-side push request body limit from `ENGRAM_CLOUD_MAX_PUSH_BYTES` (default 8 MiB).
+
 For complete route details, use [DOCS.md — HTTP API Endpoints](../../DOCS.md#http-api-endpoints).
 
 ## Cloud store: `internal/cloud/cloudstore`

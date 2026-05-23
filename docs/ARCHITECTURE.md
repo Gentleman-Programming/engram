@@ -298,7 +298,7 @@ The cloud server exposes two routes registered in `cloudserver.go` and handled b
 | `POST` | `/sync/mutations/push` | Accept a batch of up to 100 mutations from the client |
 | `GET` | `/sync/mutations/pull` | Return mutations since a cursor, filtered by caller's enrolled projects |
 
-Both require `Authorization: Bearer <token>`. Push enforces the project-level sync pause (HTTP 409 on `sync_enabled=false`). Pull filters server-side.
+Both require `Authorization: Bearer <token>`. Push enforces the project-level sync pause (HTTP 409 on `sync_enabled=false`) and the configured cloud push body limit (`ENGRAM_CLOUD_MAX_PUSH_BYTES`, default 8 MiB). Pull filters server-side.
 
 ---
 

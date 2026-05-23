@@ -1395,6 +1395,26 @@ func TestMutationPushPausedWithCreatedBy(t *testing.T) {
 	}
 }
 
+func TestMutationPushRejectsOversizedPayload(t *testing.T) {
+	ms := newFakeMutationStore()
+	srv := New(ms, multiProjectAuth{token: "secret", projects: []string{"proj-a"}}, 0, WithMaxPushBodyBytes(128))
+	tooLarge := strings.Repeat("x", 129)
+	body := bytes.NewBufferString(`{"entries":[{"project":"proj-a","entity":"observation","entity_key":"obs-1","op":"upsert","payload":"` + tooLarge + `"}]}`)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", body)
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "payload too large") || !strings.Contains(rec.Body.String(), "max 128 bytes") {
+		t.Fatalf("expected clear oversized payload error with configured limit, got body=%q", rec.Body.String())
+	}
+}
+
 // TestMutationPushPausedWithoutCreatedByDefaultsUnknown verifies that missing
 // created_by defaults contributor to "unknown". REQ-406 scenario 2, 2.1.4.
 func TestMutationPushPausedWithoutCreatedByDefaultsUnknown(t *testing.T) {

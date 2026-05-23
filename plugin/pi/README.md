@@ -78,7 +78,7 @@ Engram includes a terminal UI for browsing sessions, observations, prompts, proj
 ## Quick start
 
 ```bash
-pi install npm:gentle-engram@0.1.5
+pi install npm:gentle-engram@0.1.7
 pi install npm:pi-mcp-adapter
 pi-engram init
 ```
@@ -189,7 +189,7 @@ If the binary is missing, Pi keeps running and memory degrades instead of crashi
 
 `pi-engram init` writes Pi-owned config in the Pi agent directory:
 
-- `settings.json`: ensures `npm:pi-mcp-adapter` and `npm:gentle-engram@0.1.5` are declared.
+- `settings.json`: ensures `npm:pi-mcp-adapter` and `npm:gentle-engram@0.1.7` are declared.
 - `mcp.json`: adds an `engram` MCP server that launches `engram mcp --tools=agent` through a safe Node wrapper with `directTools: false`, so MCP remains available through the gateway without duplicating Pi-native `mem_*` tools.
 
 Existing `mcpServers.engram` entries are preserved unless you pass `--force`:
@@ -210,7 +210,7 @@ The HTTP event-capture path mirrors Engram's normal project detection order as c
 4. single child git repo name
 5. current directory basename
 
-MCP tool calls still use Engram core's canonical project resolver at call time. For critical repos or monorepos, prefer an explicit `.engram/config.json`:
+MCP tool calls still use Engram core's canonical project resolver at call time. Pi-native tool calls ask the Engram HTTP server for `/project/current`; if that route is missing on an older running server, the adapter falls back to the nearest local `.engram/config.json` and returns a version-mismatch warning. For critical repos or monorepos, prefer an explicit `.engram/config.json`:
 
 ```json
 {
@@ -220,12 +220,15 @@ MCP tool calls still use Engram core's canonical project resolver at call time. 
 
 ## Troubleshooting
 
-| Symptom                                   | Fix                                                              |
-| ----------------------------------------- | ---------------------------------------------------------------- |
-| `mem_*` tools are missing                 | Install `pi-mcp-adapter`, run `pi-engram init`, then restart Pi. |
-| Pi cannot find `engram`                   | Set `ENGRAM_BIN=/absolute/path/to/engram`.                       |
-| Session capture should use another server | Set `ENGRAM_URL=http://host:7437`.                               |
-| Existing MCP config was not replaced      | Run `pi-engram init --force`.                                    |
+| Symptom                                                      | Fix                                                                                                                                                                                                                                                                     |
+| ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mem_*` tools are missing                                    | Install/verify `npm:gentle-engram@0.1.7`, run `pi-engram init`, then restart Pi. Keep `npm:pi-mcp-adapter` installed if you use MCP integrations such as Notion or direct MCP flows.                                                                                    |
+| Pi cannot find `engram`                                      | Set `ENGRAM_BIN=/absolute/path/to/engram`.                                                                                                                                                                                                                              |
+| Session capture should use another server                    | Set `ENGRAM_URL=http://host:7437`.                                                                                                                                                                                                                                      |
+| Pi shows `error MCP: 0/N servers` but `mem_*` works          | That status is Pi's global MCP gateway, not proof that Engram's Pi-native HTTP tools failed. Check `~/.pi/agent/mcp.json` for stale/unreachable servers such as remote OAuth services, and keep `npm:pi-mcp-adapter` installed if you use MCP integrations like Notion. |
+| Existing MCP config was not replaced                         | Run `pi-engram init --force`.                                                                                                                                                                                                                                           |
+| `mem_current_project` reports `/project/current` unsupported | Restart or upgrade the running `engram serve`; check `ENGRAM_URL`/`ENGRAM_BIN`. If `.engram/config.json` exists, Pi uses it as a temporary fallback.                                                                                                                    |
+| `mem_session_summary` cannot detect a project                | Ask the user which project should receive the summary, then retry `mem_session_summary` with `project: "name"`.                                                                                                                                                         |
 
 ## Next steps
 

@@ -7,8 +7,8 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
-import { basename, resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { basename, dirname, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -78,6 +78,8 @@ call \`mem_search\`, then \`mem_get_observation\` for full content.
 
 Before ending a session or saying "done", call \`mem_session_summary\`
 with Goal, Instructions, Discoveries, Accomplished, Next Steps, and Relevant Files.
+If \`mem_session_summary\` fails because Engram cannot detect a project, ask the user
+which project should receive the summary, then retry with \`project: "<name>"\`.
 
 ### AFTER COMPACTION
 
@@ -116,6 +118,9 @@ interface MigrationBody {
 
 interface CurrentProjectResponse {
   project?: string;
+  project_source?: string;
+  project_path?: string;
+  cwd?: string;
   available_projects?: string[] | null;
   warning?: string;
   error_hint?: string;
@@ -184,6 +189,46 @@ async function bestEffortEngramFetch<TResponse = unknown>(path: string, opts: Fe
   } catch {
     return null;
   }
+}
+
+function detectLocalConfigProject(cwd: string): CurrentProjectResponse | undefined {
+  let current = resolve(cwd || ".");
+  while (true) {
+    const configPath = `${current}/.engram/config.json`;
+    if (existsSync(configPath)) {
+      try {
+        const parsed = JSON.parse(readFileSync(configPath, "utf8")) as { project_name?: unknown };
+        const projectName = typeof parsed.project_name === "string" ? parsed.project_name.trim() : "";
+        if (projectName) {
+          return {
+            project: projectName,
+            project_source: "config",
+            project_path: current,
+            cwd,
+            warning: `Engram server at ${ENGRAM_URL} does not support /project/current; using ${configPath}. Upgrade or restart Engram for canonical project detection.`,
+          };
+        }
+        return {
+          cwd,
+          error_hint: `${configPath} exists but project_name is missing or empty. Fix the config or pass project explicitly.`,
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return { cwd, error_hint: `Could not read ${configPath}: ${message}` };
+      }
+    }
+
+    const parent = dirname(current);
+    if (parent === current) return undefined;
+    current = parent;
+  }
+}
+
+function projectCurrentUnsupportedError(cwd: string): CurrentProjectResponse {
+  return {
+    cwd,
+    error_hint: `Engram server at ${ENGRAM_URL} does not support /project/current. Upgrade or restart the running Engram server, verify ENGRAM_URL/ENGRAM_BIN, or pass project explicitly to project-capable memory tools.`,
+  };
 }
 
 async function ensureSessionBestEffort(sessionId: string, sessionProject = project): Promise<void> {
@@ -273,8 +318,14 @@ async function ensureSession(sessionId: string, sessionProject = project): Promi
 
 async function detectServerProject(cwd: string): Promise<CurrentProjectResponse | undefined> {
   for (let attempt = 0; attempt < 5; attempt += 1) {
-    const detected = await bestEffortEngramFetch<CurrentProjectResponse>(`/project/current${queryString({ cwd })}`);
-    if (detected) return detected;
+    try {
+      const detected = await engramFetch<CurrentProjectResponse>(`/project/current${queryString({ cwd })}`);
+      if (detected) return detected;
+    } catch (error) {
+      if (error instanceof EngramHttpError && error.status === 404) {
+        return detectLocalConfigProject(cwd) || projectCurrentUnsupportedError(cwd);
+      }
+    }
     if (attempt < 4) await wait(200);
   }
   return undefined;
@@ -394,6 +445,7 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
   mem_session_summary: Type.Object({
     content: Type.String({ description: "Full session summary" }),
     session_id: optionalString("Session ID"),
+    project: optionalString("Optional project to use when automatic detection is unavailable"),
   }),
   mem_context: Type.Object({
     project: optionalString("Filter by project"),
@@ -534,8 +586,8 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
         body: { session_id: activeSessionId, content: params.content, project: activeProject },
       });
     case "mem_session_summary":
-      requireResolvedProject();
-      await ensureSession(activeSessionId);
+      if (!requestedProject) requireResolvedProject();
+      await ensureSession(activeSessionId, activeProject);
       return engramFetch("/observations", {
         method: "POST",
         body: {
@@ -543,7 +595,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
           type: "session_summary",
           title: "Session summary",
           content: params.content,
-          project,
+          project: activeProject,
           scope: "project",
         },
       });
@@ -558,8 +610,17 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
         method: "POST",
         body: { summary: params.summary || "" },
       });
-    case "mem_current_project":
-      return engramFetch(`/project/current${queryString({ cwd: params.cwd || ctx.cwd })}`);
+    case "mem_current_project": {
+      const cwd = String(params.cwd || ctx.cwd);
+      try {
+        return await engramFetch(`/project/current${queryString({ cwd })}`);
+      } catch (error) {
+        if (error instanceof EngramHttpError && error.status === 404) {
+          return detectLocalConfigProject(cwd) || projectCurrentUnsupportedError(cwd);
+        }
+        throw error;
+      }
+    }
     case "mem_doctor":
       return engramFetch(`/doctor${queryString({ project: params.project, check: params.check, cwd: params.project ? undefined : ctx.cwd })}`);
     case "mem_capture_passive":

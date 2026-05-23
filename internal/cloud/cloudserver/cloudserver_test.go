@@ -775,16 +775,16 @@ func TestHandlerProjectScopeForbiddenReturnsPolicyClassPayload(t *testing.T) {
 }
 
 func TestHandlerPushRejectsOversizedPayload(t *testing.T) {
-	srv := New(&fakeStore{}, fakeAuth{}, 0)
-	tooLarge := strings.Repeat("x", int(maxPushBodyBytes)+1)
+	srv := New(&fakeStore{}, fakeAuth{}, 0, WithMaxPushBodyBytes(128))
+	tooLarge := strings.Repeat("x", 129)
 	body := bytes.NewBufferString(`{"project":"proj-a","created_by":"tester","data":"` + tooLarge + `"}`)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sync/push", body))
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("expected 413, got %d body=%q", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "payload too large") {
-		t.Fatalf("expected clear oversized payload error, got body=%q", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), "payload too large") || !strings.Contains(rec.Body.String(), "max 128 bytes") {
+		t.Fatalf("expected clear oversized payload error with configured limit, got body=%q", rec.Body.String())
 	}
 }
 

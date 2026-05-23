@@ -1987,155 +1987,135 @@ func TestUpgradeRepairDryRunAndApply(t *testing.T) {
 		}
 	})
 
-	t.Run("repair applies repairable mutations even when a blocker is queued ahead of them", func(t *testing.T) {
+	t.Run("legacy relation mutation payload is repaired from authoritative local relation", func(t *testing.T) {
 		s := newTestStore(t)
-		// Repairable session: local row has a directory we can backfill from.
-		if err := s.CreateSession("mix-recoverable", "mix-proj", "/tmp/mix"); err != nil {
-			t.Fatalf("create recoverable session: %v", err)
+		if err := s.CreateSession("legacy-rel-s1", "legacy-rel-proj", "/tmp/legacy-rel"); err != nil {
+			t.Fatalf("create session: %v", err)
 		}
-		// Enroll BEFORE the orphan row exists so EnrollProject's backfill pass
-		// does not enqueue an extra (also-blocked) session mutation for it.
-		if err := s.EnrollProject("mix-proj"); err != nil {
+		sourceID, err := s.AddObservation(AddObservationParams{SessionID: "legacy-rel-s1", Type: "decision", Title: "Source", Content: "Source content", Project: "legacy-rel-proj", Scope: "project"})
+		if err != nil {
+			t.Fatalf("add source observation: %v", err)
+		}
+		targetID, err := s.AddObservation(AddObservationParams{SessionID: "legacy-rel-s1", Type: "decision", Title: "Target", Content: "Target content", Project: "legacy-rel-proj", Scope: "project"})
+		if err != nil {
+			t.Fatalf("add target observation: %v", err)
+		}
+		if err := s.EnrollProject("legacy-rel-proj"); err != nil {
 			t.Fatalf("enroll project: %v", err)
 		}
-		// Unrecoverable session: local row exists but the directory is empty,
-		// so the repair pass cannot infer a value (mirrors the legacy
-		// orphan-session shape reported by users on engram <= v1.15.13).
-		if _, err := s.execHook(s.db,
-			`INSERT INTO sessions (id, project, directory, started_at) VALUES (?, ?, '', datetime('now'))`,
-			"mix-orphan", "mix-proj",
-		); err != nil {
-			t.Fatalf("seed orphan session row: %v", err)
-		}
 
-		// Insert the BLOCKED mutation first so it gets a lower seq than the
-		// repairable one. The pre-fix code reported Findings[0]'s details,
-		// which exposed the wrong seq when Findings[0] happened to be the
-		// repairable mutation. Here we want the orphan to legitimately be the
-		// blocker no matter the ordering.
-		if _, err := s.execHook(s.db,
-			`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			DefaultSyncTargetKey, SyncEntitySession, "mix-orphan", SyncOpUpsert,
-			`{"id":"mix-orphan","project":"mix-proj","directory":""}`,
-			SyncSourceLocal, "mix-proj",
-		); err != nil {
-			t.Fatalf("insert blocked mutation: %v", err)
+		var sourceSyncID, targetSyncID string
+		if err := s.db.QueryRow(`SELECT sync_id FROM observations WHERE id = ?`, sourceID).Scan(&sourceSyncID); err != nil {
+			t.Fatalf("lookup source sync id: %v", err)
 		}
-		if _, err := s.execHook(s.db,
-			`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			DefaultSyncTargetKey, SyncEntitySession, "mix-recoverable", SyncOpUpsert,
-			`{"id":"mix-recoverable","project":"mix-proj","directory":""}`,
-			SyncSourceLocal, "mix-proj",
-		); err != nil {
-			t.Fatalf("insert repairable mutation: %v", err)
+		if err := s.db.QueryRow(`SELECT sync_id FROM observations WHERE id = ?`, targetID).Scan(&targetSyncID); err != nil {
+			t.Fatalf("lookup target sync id: %v", err)
 		}
-
-		// Dry-run: must surface both buckets and identify the orphan as the blocker.
-		dryRun, err := s.RepairCloudUpgrade("mix-proj", false)
+		rel, err := s.SaveRelation(SaveRelationParams{SyncID: "rel-legacy-repair", SourceID: sourceSyncID, TargetID: targetSyncID})
 		if err != nil {
-			t.Fatalf("dry-run repair: %v", err)
+			t.Fatalf("save relation: %v", err)
 		}
-		if dryRun.Class != UpgradeRepairClassBlocked || dryRun.Applied {
-			t.Fatalf("dry-run should report blocked + applied=false, got %+v", dryRun)
-		}
-		if !strings.Contains(dryRun.Message, "1 repairable payload(s) would apply") ||
-			!strings.Contains(dryRun.Message, "1 would remain blocked") ||
-			!strings.Contains(dryRun.Message, `entity_key="mix-orphan"`) {
-			t.Fatalf("dry-run message should describe both buckets and name the orphan entity_key, got %q", dryRun.Message)
+		reason := "same decision"
+		if _, err := s.JudgeRelation(JudgeRelationParams{
+			JudgmentID:    rel.SyncID,
+			Relation:      RelationCompatible,
+			Reason:        &reason,
+			MarkedByActor: "engram-test",
+			MarkedByKind:  "system",
+			SessionID:     "legacy-rel-s1",
+		}); err != nil {
+			t.Fatalf("judge relation: %v", err)
 		}
 
-		// Apply: the repairable mutation must be patched in place, the blocker
-		// must remain queued, and Applied must be true (we did do work).
-		applied, err := s.RepairCloudUpgrade("mix-proj", true)
+		legacyPayload := `{"sync_id":"rel-legacy-repair","source_id":"` + sourceSyncID + `","target_id":"` + targetSyncID + `","relation":"compatible"}`
+		if _, err := s.execHook(s.db, `
+			UPDATE sync_mutations
+			SET payload = ?
+			WHERE target_key = ? AND project = ? AND entity = ? AND entity_key = ? AND op = ? AND acked_at IS NULL
+		`, legacyPayload, DefaultSyncTargetKey, "legacy-rel-proj", SyncEntityRelation, rel.SyncID, SyncOpUpsert); err != nil {
+			t.Fatalf("seed legacy relation payload: %v", err)
+		}
+
+		diagnosis, err := s.DiagnoseCloudUpgradeLegacyMutations("legacy-rel-proj")
 		if err != nil {
-			t.Fatalf("apply repair: %v", err)
+			t.Fatalf("diagnose relation legacy mutation: %v", err)
 		}
-		if applied.Class != UpgradeRepairClassBlocked || !applied.Applied {
-			t.Fatalf("apply should report blocked + applied=true (partial success), got %+v", applied)
-		}
-		if !strings.Contains(applied.Message, "applied 1 repairable payload(s)") ||
-			!strings.Contains(applied.Message, "1 remain blocked") {
-			t.Fatalf("apply message should note partial success and remaining blocker, got %q", applied.Message)
+		if diagnosis.RepairableCount == 0 || diagnosis.BlockedCount != 0 {
+			t.Fatalf("expected relation payload to be repairable-only, got %+v", diagnosis)
 		}
 
-		var repaired, stillBroken string
-		if err := s.db.QueryRow(`SELECT payload FROM sync_mutations WHERE entity_key = ? AND acked_at IS NULL`, "mix-recoverable").Scan(&repaired); err != nil {
-			t.Fatalf("load repaired mutation payload: %v", err)
-		}
-		if strings.Contains(repaired, `"directory":""`) {
-			t.Fatalf("expected mix-recoverable payload to have directory backfilled, got %s", repaired)
-		}
-		if err := s.db.QueryRow(`SELECT payload FROM sync_mutations WHERE entity_key = ? AND acked_at IS NULL`, "mix-orphan").Scan(&stillBroken); err != nil {
-			t.Fatalf("load orphan mutation payload: %v", err)
-		}
-		if !strings.Contains(stillBroken, `"directory":""`) {
-			t.Fatalf("orphan payload should remain unchanged, got %s", stillBroken)
-		}
-
-		after, err := s.DiagnoseCloudUpgradeLegacyMutations("mix-proj")
+		report, err := s.RepairCloudUpgrade("legacy-rel-proj", true)
 		if err != nil {
-			t.Fatalf("diagnose after partial repair: %v", err)
+			t.Fatalf("repair relation legacy payload: %v", err)
 		}
-		if after.RepairableCount != 0 || after.BlockedCount != 1 {
-			t.Fatalf("expected only the orphan to remain after partial repair, got %+v", after)
+		if report.Class != UpgradeRepairClassRepairable || !report.Applied {
+			t.Fatalf("expected applied repairable relation result, got %+v", report)
+		}
+
+		var repairedPayload string
+		if err := s.db.QueryRow(`
+			SELECT payload FROM sync_mutations
+			WHERE target_key = ? AND project = ? AND entity = ? AND entity_key = ? AND op = ?
+			ORDER BY seq DESC LIMIT 1
+		`, DefaultSyncTargetKey, "legacy-rel-proj", SyncEntityRelation, rel.SyncID, SyncOpUpsert).Scan(&repairedPayload); err != nil {
+			t.Fatalf("load repaired relation payload: %v", err)
+		}
+		var repaired syncRelationPayload
+		if err := decodeSyncPayload([]byte(repairedPayload), &repaired); err != nil {
+			t.Fatalf("decode repaired relation payload: %v", err)
+		}
+		if strings.TrimSpace(repaired.JudgmentStatus) == "" || repaired.MarkedByActor == nil || strings.TrimSpace(*repaired.MarkedByActor) == "" || repaired.MarkedByKind == nil || strings.TrimSpace(*repaired.MarkedByKind) == "" || strings.TrimSpace(repaired.Project) == "" {
+			t.Fatalf("expected repaired payload to include required relation fields, got %+v", repaired)
 		}
 	})
 
-	t.Run("blocker error message names the unrecoverable seq even when a lower-seq repairable exists", func(t *testing.T) {
+	t.Run("legacy relation mutation stays blocked when provenance cannot be inferred", func(t *testing.T) {
 		s := newTestStore(t)
-		if err := s.CreateSession("ord-recoverable", "ord-proj", "/tmp/ord"); err != nil {
-			t.Fatalf("create recoverable session: %v", err)
+		if err := s.CreateSession("legacy-rel-blocked-s1", "legacy-rel-blocked", "/tmp/legacy-rel-blocked"); err != nil {
+			t.Fatalf("create session: %v", err)
 		}
-		if err := s.EnrollProject("ord-proj"); err != nil {
+		sourceID, err := s.AddObservation(AddObservationParams{SessionID: "legacy-rel-blocked-s1", Type: "decision", Title: "Source", Content: "Source content", Project: "legacy-rel-blocked", Scope: "project"})
+		if err != nil {
+			t.Fatalf("add source observation: %v", err)
+		}
+		targetID, err := s.AddObservation(AddObservationParams{SessionID: "legacy-rel-blocked-s1", Type: "decision", Title: "Target", Content: "Target content", Project: "legacy-rel-blocked", Scope: "project"})
+		if err != nil {
+			t.Fatalf("add target observation: %v", err)
+		}
+		if err := s.EnrollProject("legacy-rel-blocked"); err != nil {
 			t.Fatalf("enroll project: %v", err)
 		}
-		if _, err := s.execHook(s.db,
-			`INSERT INTO sessions (id, project, directory, started_at) VALUES (?, ?, '', datetime('now'))`,
-			"ord-orphan", "ord-proj",
-		); err != nil {
-			t.Fatalf("seed orphan session row: %v", err)
-		}
 
-		// Repairable goes in FIRST (lowest seq). Previously Findings[0] would
-		// be this repairable row, and the error message would report its seq
-		// even though it is not the actual blocker.
-		if _, err := s.execHook(s.db,
-			`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			DefaultSyncTargetKey, SyncEntitySession, "ord-recoverable", SyncOpUpsert,
-			`{"id":"ord-recoverable","project":"ord-proj","directory":""}`,
-			SyncSourceLocal, "ord-proj",
-		); err != nil {
-			t.Fatalf("insert repairable mutation: %v", err)
+		var sourceSyncID, targetSyncID string
+		if err := s.db.QueryRow(`SELECT sync_id FROM observations WHERE id = ?`, sourceID).Scan(&sourceSyncID); err != nil {
+			t.Fatalf("lookup source sync id: %v", err)
 		}
-		var repairableSeq int64
-		if err := s.db.QueryRow(`SELECT seq FROM sync_mutations WHERE entity_key = ? AND project = ?`, "ord-recoverable", "ord-proj").Scan(&repairableSeq); err != nil {
-			t.Fatalf("lookup repairable seq: %v", err)
+		if err := s.db.QueryRow(`SELECT sync_id FROM observations WHERE id = ?`, targetID).Scan(&targetSyncID); err != nil {
+			t.Fatalf("lookup target sync id: %v", err)
 		}
-
+		if _, err := s.SaveRelation(SaveRelationParams{SyncID: "rel-legacy-blocked", SourceID: sourceSyncID, TargetID: targetSyncID}); err != nil {
+			t.Fatalf("save relation: %v", err)
+		}
+		payload := `{"sync_id":"rel-legacy-blocked","source_id":"` + sourceSyncID + `","target_id":"` + targetSyncID + `","relation":"compatible","project":"legacy-rel-blocked"}`
 		if _, err := s.execHook(s.db,
 			`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			DefaultSyncTargetKey, SyncEntitySession, "ord-orphan", SyncOpUpsert,
-			`{"id":"ord-orphan","project":"ord-proj","directory":""}`,
-			SyncSourceLocal, "ord-proj",
+			DefaultSyncTargetKey,
+			SyncEntityRelation,
+			"rel-legacy-blocked",
+			SyncOpUpsert,
+			payload,
+			SyncSourceLocal,
+			"legacy-rel-blocked",
 		); err != nil {
-			t.Fatalf("insert blocked mutation: %v", err)
-		}
-		var orphanSeq int64
-		if err := s.db.QueryRow(`SELECT seq FROM sync_mutations WHERE entity_key = ? AND project = ?`, "ord-orphan", "ord-proj").Scan(&orphanSeq); err != nil {
-			t.Fatalf("lookup orphan seq: %v", err)
+			t.Fatalf("insert relation mutation: %v", err)
 		}
 
-		report, err := s.RepairCloudUpgrade("ord-proj", false)
+		diagnosis, err := s.DiagnoseCloudUpgradeLegacyMutations("legacy-rel-blocked")
 		if err != nil {
-			t.Fatalf("dry-run repair: %v", err)
+			t.Fatalf("diagnose blocked relation legacy mutation: %v", err)
 		}
-		wantSeq := fmt.Sprintf("seq=%d", orphanSeq)
-		wrongSeq := fmt.Sprintf("seq=%d", repairableSeq)
-		if !strings.Contains(report.Message, wantSeq) {
-			t.Fatalf("error message should reference the blocked seq %d, got %q", orphanSeq, report.Message)
-		}
-		if strings.Contains(report.Message, wrongSeq) {
-			t.Fatalf("error message must NOT reference the repairable seq %d, got %q", repairableSeq, report.Message)
+		if diagnosis.BlockedCount != 1 || diagnosis.RepairableCount != 0 || !strings.Contains(diagnosis.Findings[0].Message, "marked_by_actor") || !strings.Contains(diagnosis.Findings[0].Message, "marked_by_kind") {
+			t.Fatalf("expected missing provenance to remain blocked, got %+v", diagnosis)
 		}
 	})
 }

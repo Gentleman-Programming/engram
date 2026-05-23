@@ -181,6 +181,7 @@ func TestPrintUsage(t *testing.T) {
 	for _, token := range []string{
 		"ENGRAM_DATABASE_URL",
 		"ENGRAM_CLOUD_HOST",
+		"ENGRAM_CLOUD_MAX_PUSH_BYTES",
 		"ENGRAM_CLOUD_TOKEN",
 		"ENGRAM_CLOUD_INSECURE_NO_AUTH",
 		"Cannot be combined with ENGRAM_CLOUD_TOKEN",
