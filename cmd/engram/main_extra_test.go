@@ -412,6 +412,9 @@ func TestMainDispatchServeMCPAndTUI(t *testing.T) {
 func TestStoreInitFailurePaths(t *testing.T) {
 	stubRuntimeHooks(t)
 	stubExitWithPanic(t)
+	// SA-PATCH-ENGRAM 2026-05-24: bypass U-37 validator for test fixtures
+	// that use short test content ("t","c"). Production CLI keeps strict mode.
+	t.Setenv("ENGRAM_SKIP_VALIDATOR", "1")
 	cfg := testConfig(t)
 	importFile := filepath.Join(t.TempDir(), "import.json")
 	if err := os.WriteFile(importFile, []byte(`{"version":"0.1.0","exported_at":"2026-01-01T00:00:00Z","sessions":[],"observations":[],"prompts":[]}`), 0644); err != nil {
@@ -501,6 +504,9 @@ func TestMainDispatchRemainingCommands(t *testing.T) {
 
 	dataDir := t.TempDir()
 	t.Setenv("ENGRAM_DATA_DIR", dataDir)
+	// SA-PATCH-ENGRAM 2026-05-24: bypass U-37 validator for test fixtures
+	// that use short test content ("t","c"). Production CLI keeps strict mode.
+	t.Setenv("ENGRAM_SKIP_VALIDATOR", "1")
 
 	seedCfg, scErr := store.DefaultConfig()
 	if scErr != nil {

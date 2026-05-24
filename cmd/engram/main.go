@@ -350,9 +350,158 @@ func cmdSearch(cfg store.Config) {
 	}
 }
 
+// counterRefuteValidate enforces U-37 (Counter-Refute Empirical Mandatory)
+// at the CLI layer. Blocks phantom/overstated claims that lack empirical
+// evidence signals.
+//
+// Returns ok=true if content passes; ok=false with reason if it must be blocked.
+//
+// Bypass: set ENGRAM_SKIP_VALIDATOR=1 in env, or pass --no-validate flag.
+//
+// Patch source: SA-PATCH-ENGRAM Wave 22 / 2026-05-24 (Test 15 fix).
+func counterRefuteValidate(title, content string) (ok bool, reason string) {
+	if os.Getenv("ENGRAM_SKIP_VALIDATOR") == "1" {
+		return true, ""
+	}
+	for _, a := range os.Args {
+		if a == "--no-validate" {
+			return true, ""
+		}
+	}
+
+	combined := strings.ToLower(title + "\n" + content)
+
+	// Phantom signals — overstated claims, no-evidence keywords
+	phantomKeywords := []string{
+		"100% complete",
+		"100% done",
+		"100% ready",
+		"all pass",
+		"all clear",
+		"all green",
+		"todo verde",
+		"sin pendientes",
+		"zero issues",
+		"zero errors",
+		"phantom claim",
+		"test phantom",
+		"no evidence",
+		"creo que funciona",
+		"deberia funcionar",
+		"should work",
+	}
+	phantomHits := 0
+	for _, k := range phantomKeywords {
+		if strings.Contains(combined, k) {
+			phantomHits++
+		}
+	}
+
+	// Empirical signals — tool outputs, file paths, SHA, timestamps, LOC patterns
+	empiricalSubstrings := []string{
+		"wc -l",
+		"grep ",
+		"gh api",
+		"gh pr",
+		"git log",
+		"git diff",
+		"git status",
+		"test-path",
+		"measure-object",
+		"curl ",
+		"http/1.1",
+		"http/2",
+		" 200 ok",
+		" 404 ",
+		" 500 ",
+		"insertions(+)",
+		"deletions(-)",
+		"c:/",
+		"c:\\",
+		"/c/users/",
+		"/root/",
+		"_ops/",
+		"skills/",
+		"vault/",
+		" loc",
+		" lines",
+		"sha256",
+		"sha1",
+		"md5",
+		"$(",
+		"docker exec",
+		"docker logs",
+		"docker ps",
+		"psql ",
+		"select ",
+		"insert ",
+		"update ",
+	}
+	empiricalHits := 0
+	for _, s := range empiricalSubstrings {
+		if strings.Contains(combined, s) {
+			empiricalHits++
+		}
+	}
+
+	// ISO timestamp 2026-MM-DDTHH (basic)
+	hasISO := false
+	if i := strings.Index(combined, "2026-"); i >= 0 && i+10 < len(combined) {
+		rest := combined[i+5:]
+		if len(rest) >= 5 && rest[2] == '-' {
+			hasISO = true
+		}
+	}
+	if hasISO {
+		empiricalHits++
+	}
+
+	// Hex SHA pattern (7+ consecutive hex chars after space or start)
+	hasHex := false
+	hexRun := 0
+	for _, c := range combined {
+		if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') {
+			hexRun++
+			if hexRun >= 7 {
+				hasHex = true
+				break
+			}
+		} else {
+			hexRun = 0
+		}
+	}
+	if hasHex {
+		empiricalHits++
+	}
+
+	// Numeric counts ("123 LOC", "45 files", "200 ok") — heuristic
+	hasNumericCount := false
+	for i := 0; i < len(combined)-1; i++ {
+		if combined[i] >= '0' && combined[i] <= '9' {
+			hasNumericCount = true
+			break
+		}
+	}
+	if hasNumericCount {
+		empiricalHits++
+	}
+
+	// Decision: block if phantom signals present AND empirical hits below threshold
+	if phantomHits > 0 && empiricalHits < 2 {
+		return false, fmt.Sprintf("phantom_signals=%d empirical_signals=%d (need >=2 empirical when phantom present)", phantomHits, empiricalHits)
+	}
+
+	// Decision: block if content very short AND no empirical signals
+	if len(strings.TrimSpace(content)) < 40 && empiricalHits == 0 {
+		return false, fmt.Sprintf("content_too_short_and_no_empirical (len=%d empirical=0)", len(content))
+	}
+
+	return true, ""
+}
+
 func cmdSave(cfg store.Config) {
 	if len(os.Args) < 4 {
-		fmt.Fprintln(os.Stderr, "usage: engram save <title> <content> [--type TYPE] [--project PROJECT] [--scope SCOPE] [--topic TOPIC_KEY]")
+		fmt.Fprintln(os.Stderr, "usage: engram save <title> <content> [--type TYPE] [--project PROJECT] [--scope SCOPE] [--topic TOPIC_KEY] [--no-validate]")
 		exitFunc(1)
 	}
 
@@ -385,7 +534,20 @@ func cmdSave(cfg store.Config) {
 				topicKey = os.Args[i+1]
 				i++
 			}
+		case "--no-validate":
+			// handled by counterRefuteValidate via os.Args scan
 		}
+	}
+
+	// U-37 Counter-Refute Empirical Mandatory — CLI native enforcement.
+	// Bypass: ENGRAM_SKIP_VALIDATOR=1 env var or --no-validate flag.
+	if ok, reason := counterRefuteValidate(title, content); !ok {
+		fmt.Fprintln(os.Stderr, "engram save BLOCKED by U-37 counter-refute validator:")
+		fmt.Fprintln(os.Stderr, "  reason: "+reason)
+		fmt.Fprintln(os.Stderr, "  hint: include empirical evidence (tool output, file paths, SHA, LOC counts, ISO timestamps)")
+		fmt.Fprintln(os.Stderr, "  bypass (use only for legitimate non-empirical saves): set ENGRAM_SKIP_VALIDATOR=1 or pass --no-validate")
+		fmt.Fprintln(os.Stderr, "  patch: SA-PATCH-ENGRAM Wave 22 / 2026-05-24")
+		exitFunc(1)
 	}
 
 	s, err := storeNew(cfg)
