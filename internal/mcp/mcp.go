@@ -726,6 +726,12 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 				mcp.WithDestructiveHintAnnotation(false),
 				mcp.WithIdempotentHintAnnotation(true),
 				mcp.WithOpenWorldHintAnnotation(false),
+				mcp.WithString("cwd",
+					mcp.Description("Optional working directory path of the client"),
+				),
+				mcp.WithString("directory",
+					mcp.Description("Optional working directory path of the client (alias for cwd)"),
+				),
 			),
 			handleCurrentProject(s, cfg),
 		)
@@ -868,7 +874,13 @@ ERROR: Returns IsError=true if IDs are unknown, relation is invalid, or cross-pr
 // detection info is available (REQ-313).
 func handleCurrentProject(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		cwd, _ := os.Getwd()
+		cwd, _ := req.GetArguments()["cwd"].(string)
+		if cwd == "" {
+			cwd, _ = req.GetArguments()["directory"].(string)
+		}
+		if cwd == "" {
+			cwd, _ = os.Getwd()
+		}
 		res := projectpkg.DetectProjectFull(cwd)
 		if processRes, ok := processProjectResult(cfg.DefaultProject); ok {
 			res = processRes
@@ -1600,12 +1612,29 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		sessionID, _ := req.GetArguments()["session_id"].(string)
 		// project field intentionally not read — auto-detect only (REQ-308 write-tool contract)
 
-		// Auto-detect project from cwd; fail fast on ambiguous (REQ-308, REQ-309)
-		detRes, err := resolveWriteProject()
-		if err != nil {
-			return writeProjectErrorResult(nil, "", detRes, err), nil
+		var project string
+		var detRes projectpkg.DetectionResult
+		var err error
+
+		if sessionID != "" {
+			if sess, errSess := s.GetSession(sessionID); errSess == nil {
+				project = sess.Project
+				detRes = projectpkg.DetectionResult{
+					Project: project,
+					Source:  projectpkg.SourceSessionProject,
+					Path:    sess.Directory,
+				}
+			}
 		}
-		project, _ := store.NormalizeProject(detRes.Project)
+
+		if project == "" {
+			detRes, err = resolveWriteProject()
+			if err != nil {
+				return writeProjectErrorResult(nil, "", detRes, err), nil
+			}
+			project = detRes.Project
+		}
+		project, _ = store.NormalizeProject(project)
 
 		if sessionID == "" {
 			sessionID = defaultSessionID(project)
@@ -1681,21 +1710,39 @@ func handleSessionEnd(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 		summary, _ := req.GetArguments()["summary"].(string)
 		// project field intentionally not read — auto-detect only (REQ-308)
 
-		detRes, err := resolveWriteProject()
-		if err != nil {
-			if errors.Is(err, projectpkg.ErrInvalidConfig) {
-				return writeProjectErrorResult(nil, "", detRes, err), nil
-			}
-			// For session end, still complete the operation even if project resolution fails.
-			// Use basename fallback.
-			cwd, _ := os.Getwd()
-			detRes = projectpkg.DetectionResult{
-				Project: projectpkg.DetectProject(cwd),
-				Source:  "dir_basename",
-				Path:    cwd,
+		var project string
+		var detRes projectpkg.DetectionResult
+		var err error
+
+		if id != "" {
+			if sess, errSess := s.GetSession(id); errSess == nil {
+				project = sess.Project
+				detRes = projectpkg.DetectionResult{
+					Project: project,
+					Source:  projectpkg.SourceSessionProject,
+					Path:    sess.Directory,
+				}
 			}
 		}
-		project, _ := store.NormalizeProject(detRes.Project)
+
+		if project == "" {
+			detRes, err = resolveWriteProject()
+			if err != nil {
+				if errors.Is(err, projectpkg.ErrInvalidConfig) {
+					return writeProjectErrorResult(nil, "", detRes, err), nil
+				}
+				// For session end, still complete the operation even if project resolution fails.
+				// Use basename fallback.
+				cwd, _ := os.Getwd()
+				detRes = projectpkg.DetectionResult{
+					Project: projectpkg.DetectProject(cwd),
+					Source:  "dir_basename",
+					Path:    cwd,
+				}
+			}
+			project = detRes.Project
+		}
+		project, _ = store.NormalizeProject(project)
 
 		if err := s.EndSession(id, summary); err != nil {
 			return mcp.NewToolResultError("Failed to end session: " + err.Error()), nil
