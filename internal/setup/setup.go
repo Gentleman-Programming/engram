@@ -255,6 +255,11 @@ func SupportedAgents() []Agent {
 			InstallDir:  geminiConfigPath(),
 		},
 		{
+			Name:        "antigravity",
+			Description: "Antigravity — MCP registration for Antigravity CLI and IDE plus system rules",
+			InstallDir:  antigravityConfigPath(),
+		},
+		{
 			Name:        "codex",
 			Description: "Codex — MCP registration plus model/compaction instruction files",
 			InstallDir:  codexConfigPath(),
@@ -273,10 +278,12 @@ func Install(agentName string) (*Result, error) {
 		return installClaudeCode()
 	case "gemini-cli":
 		return installGeminiCLI()
+	case "antigravity":
+		return installAntigravity()
 	case "codex":
 		return installCodex()
 	default:
-		return nil, fmt.Errorf("unknown agent: %q (supported: opencode, pi, claude-code, gemini-cli, codex)", agentName)
+		return nil, fmt.Errorf("unknown agent: %q (supported: opencode, pi, claude-code, gemini-cli, antigravity, codex)", agentName)
 	}
 }
 
@@ -1261,3 +1268,105 @@ func codexInstructionsPath() string {
 func codexCompactPromptPath() string {
 	return filepath.Join(filepath.Dir(codexConfigPath()), "engram-compact-prompt.md")
 }
+
+func installAntigravity() (*Result, error) {
+	path := antigravityConfigPath()
+	if err := injectAntigravityMCP(path); err != nil {
+		return nil, err
+	}
+
+	if err := writeAntigravitySystemPrompt(); err != nil {
+		return nil, err
+	}
+
+	return &Result{
+		Agent:       "antigravity",
+		Destination: filepath.Dir(path),
+		Files:       2,
+	}, nil
+}
+
+func antigravityConfigPath() string {
+	home, _ := userHomeDir()
+
+	switch runtimeGOOS {
+	case "windows":
+		if appData := os.Getenv("APPDATA"); appData != "" {
+			return filepath.Join(appData, "gemini", "config", "mcp_config.json")
+		}
+		return filepath.Join(home, "AppData", "Roaming", "gemini", "config", "mcp_config.json")
+	default:
+		return filepath.Join(home, ".gemini", "config", "mcp_config.json")
+	}
+}
+
+func injectAntigravityMCP(configPath string) error {
+	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+
+	var config map[string]json.RawMessage
+	data, err := readFileFn(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			config = make(map[string]json.RawMessage)
+		} else {
+			return fmt.Errorf("read config: %w", err)
+		}
+	} else {
+		if err := json.Unmarshal(data, &config); err != nil {
+			return fmt.Errorf("parse config: %w", err)
+		}
+	}
+
+	var mcpServers map[string]json.RawMessage
+	if raw, exists := config["mcpServers"]; exists {
+		if err := json.Unmarshal(raw, &mcpServers); err != nil {
+			return fmt.Errorf("parse mcpServers block: %w", err)
+		}
+	} else {
+		mcpServers = make(map[string]json.RawMessage)
+	}
+
+	engramEntry := map[string]any{
+		"command": resolveEngramCommand(),
+		"args":    []string{"mcp", "--tools=agent"},
+	}
+	entryJSON, err := jsonMarshalFn(engramEntry)
+	if err != nil {
+		return fmt.Errorf("marshal engram entry: %w", err)
+	}
+	mcpServers["engram"] = json.RawMessage(entryJSON)
+
+	mcpJSON, err := jsonMarshalFn(mcpServers)
+	if err != nil {
+		return fmt.Errorf("marshal mcpServers block: %w", err)
+	}
+	config["mcpServers"] = json.RawMessage(mcpJSON)
+
+	output, err := jsonMarshalIndentFn(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+
+	if err := writeFileFn(configPath, output, 0644); err != nil {
+		return fmt.Errorf("write config: %w", err)
+	}
+
+	return nil
+}
+
+func writeAntigravitySystemPrompt() error {
+	home, _ := userHomeDir()
+	systemPath := filepath.Join(home, ".gemini", "GEMINI.md")
+	if err := os.MkdirAll(filepath.Dir(systemPath), 0755); err != nil {
+		return fmt.Errorf("create gemini system prompt dir: %w", err)
+	}
+
+	if err := writeFileFn(systemPath, []byte(memoryProtocolMarkdown), 0644); err != nil {
+		return fmt.Errorf("write gemini system prompt: %w", err)
+	}
+
+	return nil
+}
+
