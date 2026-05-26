@@ -3022,3 +3022,60 @@ func TestPluginSubAgentFiltering(t *testing.T) {
 		t.Fatalf("session.deleted handler must clean up subAgentSessions set")
 	}
 }
+
+// ─── Antigravity setup tests ──────────────────────────────────────────────────
+
+func TestInstallAntigravity(t *testing.T) {
+	t.Run("installAntigravity resolves desktop variant first", func(t *testing.T) {
+		resetSetupSeams(t)
+		home := useTestHome(t)
+		
+		// Create the desktop folder to simulate its existence
+		desktopDir := filepath.Join(home, ".gemini", "antigravity-desktop")
+		if err := os.MkdirAll(desktopDir, 0755); err != nil {
+			t.Fatalf("mkdir desktop: %v", err)
+		}
+		
+		// Set executable fallback
+		osExecutable = func() (string, error) { return "/usr/local/bin/engram", nil }
+		
+		res, err := installAntigravity()
+		if err != nil {
+			t.Fatalf("installAntigravity failed: %v", err)
+		}
+		
+		if res.Destination != desktopDir {
+			t.Fatalf("expected destination %q, got %q", desktopDir, res.Destination)
+		}
+		
+		// Check that mcp_config.json was written to the desktop folder
+		configPath := filepath.Join(desktopDir, "mcp_config.json")
+		if _, err := os.Stat(configPath); err != nil {
+			t.Fatalf("mcp_config.json not found at %s: %v", configPath, err)
+		}
+	})
+
+	t.Run("installAntigravity falls back to cli variant", func(t *testing.T) {
+		resetSetupSeams(t)
+		home := useTestHome(t)
+		
+		// Set executable fallback
+		osExecutable = func() (string, error) { return "/usr/local/bin/engram", nil }
+		
+		res, err := installAntigravity()
+		if err != nil {
+			t.Fatalf("installAntigravity failed: %v", err)
+		}
+		
+		cliDir := filepath.Join(home, ".gemini", "antigravity-cli")
+		if res.Destination != cliDir {
+			t.Fatalf("expected destination %q, got %q", cliDir, res.Destination)
+		}
+		
+		configPath := filepath.Join(cliDir, "mcp_config.json")
+		if _, err := os.Stat(configPath); err != nil {
+			t.Fatalf("mcp_config.json not found at %s: %v", configPath, err)
+		}
+	})
+}
+

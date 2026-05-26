@@ -256,7 +256,7 @@ func SupportedAgents() []Agent {
 		},
 		{
 			Name:        "antigravity",
-			Description: "Antigravity — MCP registration for Antigravity CLI and IDE plus system rules",
+			Description: "Antigravity — MCP registration for Antigravity CLI and Desktop plus system rules",
 			InstallDir:  antigravityConfigPath(),
 		},
 		{
@@ -1289,15 +1289,11 @@ func installAntigravity() (*Result, error) {
 func antigravityConfigPath() string {
 	home, _ := userHomeDir()
 
-	switch runtimeGOOS {
-	case "windows":
-		if appData := os.Getenv("APPDATA"); appData != "" {
-			return filepath.Join(appData, "gemini", "config", "mcp_config.json")
-		}
-		return filepath.Join(home, "AppData", "Roaming", "gemini", "config", "mcp_config.json")
-	default:
-		return filepath.Join(home, ".gemini", "config", "mcp_config.json")
+	desktopDir := filepath.Join(home, ".gemini", "antigravity-desktop")
+	if _, err := os.Stat(desktopDir); err == nil {
+		return filepath.Join(desktopDir, "mcp_config.json")
 	}
+	return filepath.Join(home, ".gemini", "antigravity-cli", "mcp_config.json")
 }
 
 func injectAntigravityMCP(configPath string) error {
