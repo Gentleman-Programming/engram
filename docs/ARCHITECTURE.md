@@ -89,7 +89,7 @@ Token-efficient memory retrieval — don't dump everything, drill in:
 
 ## Memory Hygiene
 
-- `mem_save` now supports `scope` (`project` default, `personal` optional)
+- `mem_save` now supports `scope` (`project` default, `personal` and `global` also accepted)
 - `mem_save` also supports `topic_key`; with a topic key, saves become upserts (same project+scope+topic updates the existing memory)
 - `mem_save` supports `capture_prompt` (`true` by default). When the same MCP process lifecycle has current prompt context for the same project and session, it best-effort records that prompt alongside the observation. The prompt context must be fed before the later `mem_save` (typically via `mem_save_prompt`); `mem_save` still succeeds if context is unavailable or prompt capture fails. Automated saves such as SDD artifacts should pass `capture_prompt=false`.
 - Exact dedupe prevents repeated inserts in a rolling window (hash + project + scope + type + title)
@@ -172,6 +172,7 @@ engram mcp                Start MCP server (stdio transport)
 engram tui                Launch interactive terminal UI
 engram search <query>     Search memories
 engram save <title> <msg> Save a memory
+engram delete <obs_id>    Delete an observation [--hard] (soft-delete by default; --hard removes permanently)
 engram timeline <obs_id>  Chronological context around an observation
 engram context [project]  Recent context from previous sessions
 engram stats              Memory statistics
@@ -181,6 +182,9 @@ engram sync               Export new memories as compressed chunk to .engram/
 engram sync --all         Export ALL projects (ignore directory-based filter)
 engram sync --cloud --project <name>
                           Sync against configured cloud endpoint (project-scoped)
+engram conflicts <sub>    Inspect and manage memory conflict relations
+                            list, show, stats, scan, deferred
+engram doctor             Run read-only operational diagnostics [--json] [--project P] [--check CODE]
 engram cloud status       Show cloud runtime/config status
 engram cloud config --server <url>
                           Configure cloud server URL
@@ -196,10 +200,15 @@ engram obsidian-export    Export memories to Obsidian vault (beta)
 engram version            Show version
 ```
 
+Local server auth:
+
+- `ENGRAM_HTTP_TOKEN`: optional Bearer auth for `engram serve`. When set, the following routes require `Authorization: Bearer <token>`: `DELETE /sessions/{id}`, `DELETE /observations/{id}`, `DELETE /prompts/{id}`, `GET /export`, `POST /import`, `POST /projects/migrate`. Comparison is constant-time; token is read per-request. When unset, all routes are open (zero-config default).
+- `ENGRAM_TIMEZONE`: IANA zone name for timestamp display in TUI and cloud dashboard (e.g. `America/New_York`). Falls back to system local when unset or invalid.
+
 Cloud constraints (current behavior):
 
 - Cloud is opt-in replication/shared access; local SQLite remains source of truth.
-- `engram cloud serve` requires `ENGRAM_CLOUD_ALLOWED_PROJECTS` in both token-auth and insecure no-auth mode.
+- `engram cloud serve` requires `ENGRAM_CLOUD_ALLOWED_PROJECTS` in both token-auth and insecure no-auth mode. Use `*` to allow all projects (dev/internal deploys) — bypasses per-project name enforcement while still requiring a non-empty project on each request.
 - Authenticated cloud serve requires `ENGRAM_CLOUD_TOKEN` + explicit non-default `ENGRAM_JWT_SECRET`.
 - Insecure local-dev mode (`ENGRAM_CLOUD_INSECURE_NO_AUTH=1`) still requires the project allowlist and must not be used in production.
 

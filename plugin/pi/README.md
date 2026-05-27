@@ -192,6 +192,8 @@ If the binary is missing, Pi keeps running and memory degrades instead of crashi
 - `settings.json`: ensures `npm:pi-mcp-adapter` and `npm:gentle-engram@0.1.7` are declared.
 - `mcp.json`: adds an `engram` MCP server that launches `engram mcp --tools=agent` through a safe Node wrapper with `directTools: false`, so MCP remains available through the gateway without duplicating Pi-native `mem_*` tools.
 
+`engram setup pi` also auto-pins `npmCommand` in Pi's `settings.json` when [mise](https://mise.jdx.dev/) is detected in `PATH`. It sets `npmCommand` to `["mise", "exec", "node@<version>", "--", "npm"]` so Pi always uses the mise-managed Node version. Existing `npmCommand` values are never overwritten; if mise is not found, this step is a no-op.
+
 Existing `mcpServers.engram` entries are preserved unless you pass `--force`:
 
 ```bash

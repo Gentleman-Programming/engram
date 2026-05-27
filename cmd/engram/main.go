@@ -2378,6 +2378,21 @@ Environment:
   ENGRAM_DATA_DIR    Override data directory (default: ~/.engram)
   ENGRAM_PORT        Override HTTP server port (default: 7437)
   ENGRAM_PROJECT     Default project hint for serve sync status fallback
+  ENGRAM_HTTP_TOKEN  Optional Bearer auth for local HTTP server (engram serve).
+                     When set, the following routes require Authorization: Bearer <token>:
+                       DELETE /sessions/{id}, DELETE /observations/{id}, DELETE /prompts/{id},
+                       GET /export, POST /import, POST /projects/migrate
+                     Comparison is constant-time. Token is read per-request (no restart needed).
+                     When unset, all routes are open (zero-config default).
+  ENGRAM_TIMEZONE    Timezone for timestamp display in TUI and cloud dashboard.
+                     Accepts any IANA zone name (e.g. America/New_York, Europe/Berlin).
+                     Falls back to system local time when unset or invalid.
+  ENGRAM_AGENT_CLI   LLM runner for conflicts scan --semantic (claude or opencode)
+  ENGRAM_CLOUD_AUTOSYNC
+                     Set to 1 to enable background autosync; also requires
+                     ENGRAM_CLOUD_TOKEN and ENGRAM_CLOUD_SERVER
+  ENGRAM_CLOUD_SERVER
+                     Cloud server URL used by autosync and engram sync --cloud
   ENGRAM_DATABASE_URL
                      Postgres DSN for engram cloud serve
   ENGRAM_CLOUD_HOST  Bind host for engram cloud serve (default: 127.0.0.1)
@@ -2389,12 +2404,13 @@ Environment:
                      Cannot be combined with ENGRAM_CLOUD_TOKEN
                      Cannot be combined with ENGRAM_CLOUD_ADMIN
   ENGRAM_CLOUD_ALLOWED_PROJECTS
-	                     Comma-separated project allowlist enforced by cloud server
-	                     Required for cloud serve in BOTH token auth and insecure no-auth mode
-	ENGRAM_JWT_SECRET   Required in authenticated cloud serve mode (ENGRAM_CLOUD_TOKEN set);
-	                     must be explicitly set to a non-default value
-	ENGRAM_CLOUD_ADMIN  Optional admin-only dashboard token in authenticated mode
-	                     Ignored/rejected in insecure mode (ENGRAM_CLOUD_INSECURE_NO_AUTH=1)
+                     Comma-separated project allowlist enforced by cloud server.
+                     Required for cloud serve in BOTH token auth and insecure no-auth mode.
+                     Use * to allow all projects (dev/internal deploys).
+  ENGRAM_JWT_SECRET  Required in authenticated cloud serve mode (ENGRAM_CLOUD_TOKEN set);
+                     must be explicitly set to a non-default value
+  ENGRAM_CLOUD_ADMIN Optional admin-only dashboard token in authenticated mode
+                     Ignored/rejected in insecure mode (ENGRAM_CLOUD_INSECURE_NO_AUTH=1)
 
 MCP Configuration (add to your agent's config):
   {

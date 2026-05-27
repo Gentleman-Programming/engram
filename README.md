@@ -106,7 +106,7 @@ engram tui
   <img src="assets/tui-search.png" alt="TUI Search Results" width="400" />
 </p>
 
-**Navigation**: `j/k` vim keys, `Enter` to drill in, `/` to search, `Esc` back. Catppuccin Mocha theme.
+**Navigation**: `j/k` vim keys, `Enter` to drill in, `c` to copy content to clipboard (OSC 52), `/` to search, `Esc` back. Catppuccin Mocha theme.
 
 ## Git Sync
 
@@ -137,6 +137,7 @@ engram sync --cloud --project smoke-project
 ```
 
 Cloud mode is always project-scoped (`--project` is required; `engram sync --cloud --all` is intentionally blocked).
+`ENGRAM_CLOUD_ALLOWED_PROJECTS` is required for `engram cloud serve` in both token-auth and insecure modes. Set it to `*` to allow all projects (useful for dev/internal deploys) — this bypasses per-project name enforcement while still requiring a non-empty project on each request.
 Known repairable cloud sync/upsert/canonicalization failures keep the original error visible and recommend the explicit `doctor`/`repair` flow below; Engram never auto-applies repair from sync or autosync.
 For blocked cloud sync, `transport_failed`, or legacy session directory repair, see [Engram Cloud Troubleshooting](docs/engram-cloud/troubleshooting.md).
 If cloud sync stays blocked after `doctor`/`repair`, download the rescue helper and run the recommended exported-row repair:
@@ -306,18 +307,34 @@ Your production engram is fully untouched throughout.
 | `engram tui`                               | Launch terminal UI                                              |
 | `engram search <query>`                    | Search memories                                                 |
 | `engram save <title> <msg>`                | Save a memory                                                   |
+| `engram delete <obs_id>`                   | Delete an observation (soft by default; `--hard` removes permanently) |
 | `engram timeline <obs_id>`                 | Chronological context                                           |
 | `engram context [project]`                 | Recent session context                                          |
 | `engram stats`                             | Memory statistics                                               |
 | `engram export [file]`                     | Export to JSON                                                  |
 | `engram import <file>`                     | Import from JSON                                                |
 | `engram sync`                              | Git sync export/import                                          |
+| `engram conflicts <sub>`                   | Inspect and manage memory conflict relations                    |
+| `engram doctor`                            | Run read-only operational diagnostics                           |
 | `engram cloud <subcommand>`                | Opt-in cloud config/status/enrollment + cloud runtime (`serve`) |
 | `engram projects list\|consolidate\|prune` | Manage project names                                            |
 | `engram obsidian-export`                   | Export to Obsidian vault (beta)                                 |
 | `engram version`                           | Show version                                                    |
 
 Full CLI with all flags → [docs/ARCHITECTURE.md#cli-reference](docs/ARCHITECTURE.md#cli-reference)
+
+### Key Environment Variables
+
+| Variable                        | Description                                                                                                            | Default        |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | -------------- |
+| `ENGRAM_DATA_DIR`               | Override data directory                                                                                                | `~/.engram`    |
+| `ENGRAM_PORT`                   | Override HTTP server port                                                                                              | `7437`         |
+| `ENGRAM_HTTP_TOKEN`             | Optional Bearer auth for local HTTP server. When set, destructive and export routes require `Authorization: Bearer <token>`. Unset = open (zero-config default). | (unset) |
+| `ENGRAM_TIMEZONE`               | Timezone for timestamp display in TUI and cloud dashboard (e.g. `America/New_York`). Falls back to system local when unset or invalid. | system local |
+| `ENGRAM_CLOUD_AUTOSYNC`         | Set to `1` to enable background autosync (also requires `ENGRAM_CLOUD_TOKEN` + `ENGRAM_CLOUD_SERVER`).                 | (unset)        |
+| `ENGRAM_CLOUD_ALLOWED_PROJECTS` | Comma-separated project allowlist for `engram cloud serve`. Use `*` to allow all projects.                             | (unset)        |
+
+Full environment variable reference → [DOCS.md#environment-variables](DOCS.md#environment-variables)
 
 ## Documentation
 
