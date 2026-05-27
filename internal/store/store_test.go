@@ -1986,6 +1986,138 @@ func TestUpgradeRepairDryRunAndApply(t *testing.T) {
 			t.Fatalf("expected no remaining legacy findings after repair, got %+v", after)
 		}
 	})
+
+	t.Run("legacy relation mutation payload is repaired from authoritative local relation", func(t *testing.T) {
+		s := newTestStore(t)
+		if err := s.CreateSession("legacy-rel-s1", "legacy-rel-proj", "/tmp/legacy-rel"); err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		sourceID, err := s.AddObservation(AddObservationParams{SessionID: "legacy-rel-s1", Type: "decision", Title: "Source", Content: "Source content", Project: "legacy-rel-proj", Scope: "project"})
+		if err != nil {
+			t.Fatalf("add source observation: %v", err)
+		}
+		targetID, err := s.AddObservation(AddObservationParams{SessionID: "legacy-rel-s1", Type: "decision", Title: "Target", Content: "Target content", Project: "legacy-rel-proj", Scope: "project"})
+		if err != nil {
+			t.Fatalf("add target observation: %v", err)
+		}
+		if err := s.EnrollProject("legacy-rel-proj"); err != nil {
+			t.Fatalf("enroll project: %v", err)
+		}
+
+		var sourceSyncID, targetSyncID string
+		if err := s.db.QueryRow(`SELECT sync_id FROM observations WHERE id = ?`, sourceID).Scan(&sourceSyncID); err != nil {
+			t.Fatalf("lookup source sync id: %v", err)
+		}
+		if err := s.db.QueryRow(`SELECT sync_id FROM observations WHERE id = ?`, targetID).Scan(&targetSyncID); err != nil {
+			t.Fatalf("lookup target sync id: %v", err)
+		}
+		rel, err := s.SaveRelation(SaveRelationParams{SyncID: "rel-legacy-repair", SourceID: sourceSyncID, TargetID: targetSyncID})
+		if err != nil {
+			t.Fatalf("save relation: %v", err)
+		}
+		reason := "same decision"
+		if _, err := s.JudgeRelation(JudgeRelationParams{
+			JudgmentID:    rel.SyncID,
+			Relation:      RelationCompatible,
+			Reason:        &reason,
+			MarkedByActor: "engram-test",
+			MarkedByKind:  "system",
+			SessionID:     "legacy-rel-s1",
+		}); err != nil {
+			t.Fatalf("judge relation: %v", err)
+		}
+
+		legacyPayload := `{"sync_id":"rel-legacy-repair","source_id":"` + sourceSyncID + `","target_id":"` + targetSyncID + `","relation":"compatible"}`
+		if _, err := s.execHook(s.db, `
+			UPDATE sync_mutations
+			SET payload = ?
+			WHERE target_key = ? AND project = ? AND entity = ? AND entity_key = ? AND op = ? AND acked_at IS NULL
+		`, legacyPayload, DefaultSyncTargetKey, "legacy-rel-proj", SyncEntityRelation, rel.SyncID, SyncOpUpsert); err != nil {
+			t.Fatalf("seed legacy relation payload: %v", err)
+		}
+
+		diagnosis, err := s.DiagnoseCloudUpgradeLegacyMutations("legacy-rel-proj")
+		if err != nil {
+			t.Fatalf("diagnose relation legacy mutation: %v", err)
+		}
+		if diagnosis.RepairableCount == 0 || diagnosis.BlockedCount != 0 {
+			t.Fatalf("expected relation payload to be repairable-only, got %+v", diagnosis)
+		}
+
+		report, err := s.RepairCloudUpgrade("legacy-rel-proj", true)
+		if err != nil {
+			t.Fatalf("repair relation legacy payload: %v", err)
+		}
+		if report.Class != UpgradeRepairClassRepairable || !report.Applied {
+			t.Fatalf("expected applied repairable relation result, got %+v", report)
+		}
+
+		var repairedPayload string
+		if err := s.db.QueryRow(`
+			SELECT payload FROM sync_mutations
+			WHERE target_key = ? AND project = ? AND entity = ? AND entity_key = ? AND op = ?
+			ORDER BY seq DESC LIMIT 1
+		`, DefaultSyncTargetKey, "legacy-rel-proj", SyncEntityRelation, rel.SyncID, SyncOpUpsert).Scan(&repairedPayload); err != nil {
+			t.Fatalf("load repaired relation payload: %v", err)
+		}
+		var repaired syncRelationPayload
+		if err := decodeSyncPayload([]byte(repairedPayload), &repaired); err != nil {
+			t.Fatalf("decode repaired relation payload: %v", err)
+		}
+		if strings.TrimSpace(repaired.JudgmentStatus) == "" || repaired.MarkedByActor == nil || strings.TrimSpace(*repaired.MarkedByActor) == "" || repaired.MarkedByKind == nil || strings.TrimSpace(*repaired.MarkedByKind) == "" || strings.TrimSpace(repaired.Project) == "" {
+			t.Fatalf("expected repaired payload to include required relation fields, got %+v", repaired)
+		}
+	})
+
+	t.Run("legacy relation mutation stays blocked when provenance cannot be inferred", func(t *testing.T) {
+		s := newTestStore(t)
+		if err := s.CreateSession("legacy-rel-blocked-s1", "legacy-rel-blocked", "/tmp/legacy-rel-blocked"); err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		sourceID, err := s.AddObservation(AddObservationParams{SessionID: "legacy-rel-blocked-s1", Type: "decision", Title: "Source", Content: "Source content", Project: "legacy-rel-blocked", Scope: "project"})
+		if err != nil {
+			t.Fatalf("add source observation: %v", err)
+		}
+		targetID, err := s.AddObservation(AddObservationParams{SessionID: "legacy-rel-blocked-s1", Type: "decision", Title: "Target", Content: "Target content", Project: "legacy-rel-blocked", Scope: "project"})
+		if err != nil {
+			t.Fatalf("add target observation: %v", err)
+		}
+		if err := s.EnrollProject("legacy-rel-blocked"); err != nil {
+			t.Fatalf("enroll project: %v", err)
+		}
+
+		var sourceSyncID, targetSyncID string
+		if err := s.db.QueryRow(`SELECT sync_id FROM observations WHERE id = ?`, sourceID).Scan(&sourceSyncID); err != nil {
+			t.Fatalf("lookup source sync id: %v", err)
+		}
+		if err := s.db.QueryRow(`SELECT sync_id FROM observations WHERE id = ?`, targetID).Scan(&targetSyncID); err != nil {
+			t.Fatalf("lookup target sync id: %v", err)
+		}
+		if _, err := s.SaveRelation(SaveRelationParams{SyncID: "rel-legacy-blocked", SourceID: sourceSyncID, TargetID: targetSyncID}); err != nil {
+			t.Fatalf("save relation: %v", err)
+		}
+		payload := `{"sync_id":"rel-legacy-blocked","source_id":"` + sourceSyncID + `","target_id":"` + targetSyncID + `","relation":"compatible","project":"legacy-rel-blocked"}`
+		if _, err := s.execHook(s.db,
+			`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			DefaultSyncTargetKey,
+			SyncEntityRelation,
+			"rel-legacy-blocked",
+			SyncOpUpsert,
+			payload,
+			SyncSourceLocal,
+			"legacy-rel-blocked",
+		); err != nil {
+			t.Fatalf("insert relation mutation: %v", err)
+		}
+
+		diagnosis, err := s.DiagnoseCloudUpgradeLegacyMutations("legacy-rel-blocked")
+		if err != nil {
+			t.Fatalf("diagnose blocked relation legacy mutation: %v", err)
+		}
+		if diagnosis.BlockedCount != 1 || diagnosis.RepairableCount != 0 || !strings.Contains(diagnosis.Findings[0].Message, "marked_by_actor") || !strings.Contains(diagnosis.Findings[0].Message, "marked_by_kind") {
+			t.Fatalf("expected missing provenance to remain blocked, got %+v", diagnosis)
+		}
+	})
 }
 
 func TestRollbackCloudUpgradeSafetyBoundary(t *testing.T) {
@@ -6907,6 +7039,17 @@ func TestListPendingProjectMutationsAndPayloadValidation(t *testing.T) {
 		t.Fatalf("validation=%+v", validation)
 	}
 	if strings.Join(validation.MissingFields, ",") != "session_id,type,title,content,scope" {
+		t.Fatalf("missing fields=%v", validation.MissingFields)
+	}
+}
+
+func TestValidateSyncMutationPayloadRelationRequiresServerFields(t *testing.T) {
+	payload := `{"sync_id":"rel-1","source_id":"obs-a","target_id":"obs-b","relation":"conflicts_with","judgment_status":"judged","project":"engram"}`
+	validation := ValidateSyncMutationPayload(SyncEntityRelation, SyncOpUpsert, payload, "rel-1")
+	if validation.ReasonCode != "sync_mutation_payload_missing_required_fields" {
+		t.Fatalf("validation=%+v", validation)
+	}
+	if strings.Join(validation.MissingFields, ",") != "marked_by_actor,marked_by_kind" {
 		t.Fatalf("missing fields=%v", validation.MissingFields)
 	}
 }

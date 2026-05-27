@@ -1,0 +1,20 @@
+{
+  "name": "engram",
+  "image": "mcr.microsoft.com/devcontainers/javascript-node:24",
+  "runArgs": [
+    "--security-opt=no-new-privileges:true",
+    "--cap-drop=ALL",
+    "--cap-add=CHOWN",
+    "--cap-add=SETUID",
+    "--cap-add=SETGID"
+  ],
+  "containerEnv": {
+    "NODE_OPTIONS": "--disable-proto=delete"
+  },
+  "features": {
+    "ghcr.io/devcontainers/features/go:1": {
+      "version": "1.25"
+    }
+  },
+  "postCreateCommand": "echo 'Run: cd plugin/obsidian && npm ci --ignore-scripts'"
+}

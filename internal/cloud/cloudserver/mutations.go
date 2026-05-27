@@ -3,6 +3,7 @@ package cloudserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -57,14 +58,20 @@ const defaultPullLimit = 100
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
 // handleMutationPush handles POST /sync/mutations/push.
-// REQ-200: bearer auth, body limit 8 MiB, batch size cap 100, pause gate (409 on sync_enabled=false).
+// REQ-200: bearer auth, configurable body limit defaulting to 8 MiB, batch size cap 100, pause gate (409 on sync_enabled=false).
 // BC2: project authorization is enforced for every distinct project in the batch.
 // BW9: 409 pause response uses writeActionableError for structured error envelope.
 func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request) {
+	maxPushBodyBytes := s.pushBodyLimit()
 	r.Body = http.MaxBytesReader(w, r.Body, maxPushBodyBytes)
 
 	var req mutationPushEnvelope
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			writeActionableError(w, http.StatusRequestEntityTooLarge, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodePayloadTooLarge, fmt.Sprintf("push payload too large (max %d bytes)", maxPushBodyBytes))
+			return
+		}
 		http.Error(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
 		return
 	}
@@ -170,7 +177,7 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 	}
 
 	// REQ-006 / REQ-008: Validate each entry's payload before storage.
-	// Relation entries are strictly validated (all 6 required fields).
+	// Relation entries are strictly validated (all required fields).
 	// Legacy entities (session, observation, prompt) use the lenient floor only.
 	// Any failure rejects the ENTIRE batch (atomic — no partial inserts).
 	var invalid []map[string]any
@@ -289,7 +296,7 @@ func (s *CloudServer) handleMutationPull(w http.ResponseWriter, r *http.Request)
 
 // ─── REQ-006 / REQ-008: Per-entity payload validation ────────────────────────
 
-// relationRequiredFields lists the 6 fields that MUST be present and non-empty
+// relationRequiredFields lists the fields that MUST be present and non-empty
 // in every relation mutation payload (REQ-006). This list is the stable
 // validation contract — Phase 3 MUST NOT remove or rename these fields without
 // a wire-format version bump.
@@ -297,12 +304,13 @@ var relationRequiredFields = []string{
 	"sync_id",
 	"source_id",
 	"target_id",
+	"relation",
 	"judgment_status",
 	"marked_by_actor",
 	"marked_by_kind",
 }
 
-// validateRelationPayload checks that all 6 required relation fields are present
+// validateRelationPayload checks that all required relation fields are present
 // and non-empty in the decoded payload map.
 // Returns (missingField, false) when any required field is absent or empty,
 // or ("", true) when all required fields are present.

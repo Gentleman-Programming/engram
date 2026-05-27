@@ -1,0 +1,35 @@
+name: Publish gentle-engram
+
+on:
+  push:
+    tags:
+      - "pi-v*"
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Ensure npm supports OIDC trusted publishing (>= 11.5.1)
+        run: |
+          CURRENT=$(npm --version)
+          echo "Bundled npm: $CURRENT"
+          if [ "$(printf '%s\n11.5.1\n' "$CURRENT" | sort -V | head -1)" != "11.5.1" ]; then
+            echo "Upgrading to npm@11.5.1 for OIDC support..."
+            npm install -g npm@11.5.1
+          fi
+          echo "Active npm: $(npm --version)"
+
+      - name: Publish to npm with provenance
+        working-directory: plugin/pi
+        run: npm publish --provenance --access public

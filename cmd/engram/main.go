@@ -831,13 +831,27 @@ func tryStartAutosync(ctx context.Context, s *store.Store, cfg store.Config) (au
 }
 
 func cmdMCP(cfg store.Config) {
-	// Parse --tools flag. Project is always auto-detected from cwd at call time (JR2-4).
 	toolsFilter := ""
+	projectOverride := strings.TrimSpace(os.Getenv("ENGRAM_PROJECT"))
 	for i := 2; i < len(os.Args); i++ {
 		if strings.HasPrefix(os.Args[i], "--tools=") {
 			toolsFilter = strings.TrimPrefix(os.Args[i], "--tools=")
 		} else if os.Args[i] == "--tools" && i+1 < len(os.Args) {
 			toolsFilter = os.Args[i+1]
+			i++
+		} else if strings.HasPrefix(os.Args[i], "--project=") {
+			projectOverride = strings.TrimSpace(strings.TrimPrefix(os.Args[i], "--project="))
+			if projectOverride == "" {
+				fatal(fmt.Errorf("--project requires a value"))
+			}
+		} else if os.Args[i] == "--project" {
+			if i+1 >= len(os.Args) {
+				fatal(fmt.Errorf("--project requires a value"))
+			}
+			projectOverride = strings.TrimSpace(os.Args[i+1])
+			if projectOverride == "" {
+				fatal(fmt.Errorf("--project requires a value"))
+			}
 			i++
 		}
 	}
@@ -866,7 +880,7 @@ func cmdMCP(cfg store.Config) {
 	}
 	defer stopAutosync()
 
-	mcpCfg := mcp.MCPConfig{}
+	mcpCfg := mcp.MCPConfig{DefaultProject: projectOverride}
 	allowlist := resolveMCPTools(toolsFilter)
 	mcpSrv := newMCPServerWithConfig(s, mcpCfg, allowlist)
 
@@ -2208,10 +2222,14 @@ func printPostInstall(result *setup.Result) {
 	case "opencode":
 		fmt.Println("\nNext steps:")
 		fmt.Println("  1. Restart OpenCode — plugin + MCP server are ready")
-		fmt.Println("  2. Run 'engram serve &' for session tracking (HTTP API)")
+		fmt.Println("  2. The plugin auto-starts the Engram HTTP server when needed")
 		if result.TUIPluginEnabled {
 			fmt.Println("\nAlso enabled: opencode-subagent-statusline in tui.json — sub-agent activity in the sidebar/footer.")
 		}
+	case "pi":
+		fmt.Println("\nNext steps:")
+		fmt.Println("  1. Restart Pi so packages and MCP config are reloaded")
+		fmt.Println("  2. Verify with: pi list")
 	case "claude-code":
 		// Offer to add engram tools to the permissions allowlist
 		fmt.Print("\nAdd engram tools to ~/.claude/settings.json allowlist?\n")
@@ -2286,7 +2304,7 @@ Commands:
                      Merge similar project names into one canonical name
                        --all      Scan ALL projects for similar name groups
                        --dry-run  Preview what would be merged (no changes)
-  setup [agent]      Install/setup agent integration (opencode, claude-code, gemini-cli, codex)
+  setup [agent]      Install/setup agent integration (opencode, pi, claude-code, gemini-cli, codex)
   sync               Export new memories as compressed chunk to .engram/
                          --import   Import new chunks from .engram/ into local DB
                          --status   Show sync status
@@ -2318,6 +2336,8 @@ Environment:
   ENGRAM_DATABASE_URL
                      Postgres DSN for engram cloud serve
   ENGRAM_CLOUD_HOST  Bind host for engram cloud serve (default: 127.0.0.1)
+  ENGRAM_CLOUD_MAX_PUSH_BYTES
+                     Max cloud push payload bytes (default: 8388608)
   ENGRAM_CLOUD_TOKEN Bearer token required in authenticated cloud serve mode
   ENGRAM_CLOUD_INSECURE_NO_AUTH
                      Set to 1 ONLY for local insecure cloud serve mode (no auth)

@@ -158,19 +158,19 @@ Call `mem_save` IMMEDIATELY after ANY of these:
 - Pattern established (naming, structure, approach)
 - User preference or constraint learned
 - Feature implemented with non-obvious approach
-- User confirms your recommendation ("dale", "go with that", "sounds good", "sí, esa")
-- User rejects an approach or expresses a preference ("no, better X", "I prefer X", "siempre hacé X")
+- User confirms your recommendation ("go with that", "sounds good", or the equivalent in the user's language)
+- User rejects an approach or expresses a preference ("no, better X", "I prefer X", or the equivalent in the user's language)
 - Discussion concludes with a clear direction chosen
 
 **Self-check after EVERY task**: "Did I or the user just make a decision, confirm a recommendation, express a preference, fix a bug, learn something, or establish a convention? If yes → mem_save NOW."
 
 ### SEARCH MEMORY when:
-- User asks to recall anything ("remember", "what did we do", "acordate", "qué hicimos")
+- User asks to recall anything ("remember", "what did we do", or the equivalent in the user's language)
 - Starting work on something that might have been done before
 - User mentions a topic you have no context on
 - User's FIRST message references the project, a feature, or a problem — call `mem_search` with keywords from their message to check for prior work before responding
 
-### SESSION CLOSE — before saying "done"/"listo":
+### SESSION CLOSE — before saying "done":
 Call `mem_session_summary` with: Goal, Discoveries, Accomplished, Next Steps, Relevant Files.
 PROTOCOL
 
