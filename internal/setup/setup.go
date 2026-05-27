@@ -53,6 +53,11 @@ var (
 	injectCodexMemoryConfigFn          = injectCodexMemoryConfig
 	addClaudeCodeAllowlistFn           = AddClaudeCodeAllowlist
 	writeClaudeCodeUserMCPFn           = writeClaudeCodeUserMCP
+
+	// resolveMiseNodeVersionFn resolves the active Node version managed by mise.
+	// It runs "mise current node" and returns the result as a "node@X.Y.Z" specifier.
+	// Returns an empty string when the version cannot be determined.
+	resolveMiseNodeVersionFn = resolveMiseNodeVersion
 )
 
 //go:embed plugins/opencode/*
@@ -302,14 +307,26 @@ func installPi() (*Result, error) {
 	}
 
 	agentDir := piAgentDir()
+	settingsPath := filepath.Join(agentDir, "settings.json")
 	files := 0
-	settingsChanged, err := ensurePiPackageSettings(filepath.Join(agentDir, "settings.json"))
+
+	// ensurePiNpmCommand must run before ensurePiPackageSettings so that a single
+	// write covers both npm command pinning and package list updates when both are
+	// needed on a fresh install. If npmCommand was already set we still proceed and
+	// let ensurePiPackageSettings handle the packages field independently.
+	npmChanged, err := ensurePiNpmCommand(settingsPath)
 	if err != nil {
 		return nil, err
 	}
-	if settingsChanged {
+
+	settingsChanged, err := ensurePiPackageSettings(settingsPath)
+	if err != nil {
+		return nil, err
+	}
+	if npmChanged || settingsChanged {
 		files++
 	}
+
 	mcpChanged, err := ensurePiMCPConfig(filepath.Join(agentDir, "mcp.json"))
 	if err != nil {
 		return nil, err
@@ -349,6 +366,60 @@ func ensurePiPackageSettings(settingsPath string) (bool, error) {
 		return false, fmt.Errorf("marshal Pi packages: %w", err)
 	}
 	return true, writeJSONConfig(settingsPath, config)
+}
+
+// ensurePiNpmCommand pins the npm command in Pi's settings.json when mise is
+// detected. This prevents Node version drift from silently changing which npm
+// root Pi uses for package lookups and installs.
+//
+// Behavior:
+//   - If mise is not found in PATH: no-op (returns false, nil).
+//   - If npmCommand already exists in settings.json: no-op (returns false, nil).
+//   - Otherwise: writes npmCommand as ["mise", "exec", "<node-spec>", "--", "npm"].
+//
+// The node spec is resolved via "mise current node". If resolution fails,
+// the bare "node" tool name is used so mise still picks the active version.
+func ensurePiNpmCommand(settingsPath string) (bool, error) {
+	if _, err := lookPathFn("mise"); err != nil {
+		return false, nil // mise not present — nothing to pin
+	}
+
+	config, err := readJSONConfig(settingsPath)
+	if err != nil {
+		return false, fmt.Errorf("read Pi settings for npmCommand: %w", err)
+	}
+
+	if _, exists := config["npmCommand"]; exists {
+		return false, nil // user already configured npmCommand — preserve it
+	}
+
+	nodeSpec := resolveMiseNodeVersionFn()
+	if nodeSpec == "" {
+		nodeSpec = "node" // fallback: let mise pick the active version at runtime
+	}
+
+	npmCmd := []string{"mise", "exec", nodeSpec, "--", "npm"}
+	raw, err := jsonMarshalFn(npmCmd)
+	if err != nil {
+		return false, fmt.Errorf("marshal Pi npmCommand: %w", err)
+	}
+	config["npmCommand"] = raw
+	return true, writeJSONConfig(settingsPath, config)
+}
+
+// resolveMiseNodeVersion returns the active Node version managed by mise as a
+// versioned spec string (e.g. "node@22.12.0"). Returns an empty string when
+// the version cannot be determined.
+func resolveMiseNodeVersion() string {
+	out, err := runCommand("mise", "current", "node")
+	if err != nil {
+		return ""
+	}
+	version := strings.TrimSpace(string(out))
+	if version == "" {
+		return ""
+	}
+	return "node@" + version
 }
 
 func ensurePiMCPConfig(mcpPath string) (bool, error) {

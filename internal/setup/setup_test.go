@@ -34,6 +34,7 @@ func resetSetupSeams(t *testing.T) {
 	oldAddClaudeCodeAllowlistFn := addClaudeCodeAllowlistFn
 	oldOsExecutable := osExecutable
 	oldWriteClaudeCodeUserMCPFn := writeClaudeCodeUserMCPFn
+	oldResolveMiseNodeVersionFn := resolveMiseNodeVersionFn
 
 	t.Cleanup(func() {
 		runtimeGOOS = oldRuntimeGOOS
@@ -57,6 +58,7 @@ func resetSetupSeams(t *testing.T) {
 		addClaudeCodeAllowlistFn = oldAddClaudeCodeAllowlistFn
 		osExecutable = oldOsExecutable
 		writeClaudeCodeUserMCPFn = oldWriteClaudeCodeUserMCPFn
+		resolveMiseNodeVersionFn = oldResolveMiseNodeVersionFn
 	})
 }
 
@@ -411,6 +413,235 @@ func TestInstallPiCommandFailure(t *testing.T) {
 	_, err := Install("pi")
 	if err == nil || !strings.Contains(err.Error(), "install npm:gentle-engram@0.1.7") {
 		t.Fatalf("expected pi install error, got %v", err)
+	}
+}
+
+// TestEnsurePiNpmCommandWritesMiseCommand verifies that when mise is detected
+// and no npmCommand exists in settings.json, a stable mise-pinned command is written.
+func TestEnsurePiNpmCommandWritesMiseCommand(t *testing.T) {
+	resetSetupSeams(t)
+	agentDir := t.TempDir()
+	settingsPath := filepath.Join(agentDir, "settings.json")
+
+	// mise is found in PATH
+	lookPathFn = func(file string) (string, error) {
+		if file == "mise" {
+			return "/usr/local/bin/mise", nil
+		}
+		return "", errors.New("not found")
+	}
+	// mise current node returns a version
+	resolveMiseNodeVersionFn = func() string { return "node@22.12.0" }
+
+	changed, err := ensurePiNpmCommand(settingsPath)
+	if err != nil {
+		t.Fatalf("ensurePiNpmCommand failed: %v", err)
+	}
+	if !changed {
+		t.Fatalf("expected changed=true when mise detected and no npmCommand set")
+	}
+
+	raw, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	var settings map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		t.Fatalf("parse settings: %v", err)
+	}
+	npmCmdRaw, ok := settings["npmCommand"]
+	if !ok {
+		t.Fatalf("expected npmCommand in settings, got %s", raw)
+	}
+	var npmCmd []string
+	if err := json.Unmarshal(npmCmdRaw, &npmCmd); err != nil {
+		t.Fatalf("parse npmCommand: %v", err)
+	}
+	want := []string{"mise", "exec", "node@22.12.0", "--", "npm"}
+	if !reflect.DeepEqual(npmCmd, want) {
+		t.Fatalf("expected npmCommand %v, got %v", want, npmCmd)
+	}
+}
+
+// TestEnsurePiNpmCommandPreservesExisting verifies that an existing npmCommand
+// in settings.json is never overwritten (idempotent / user-override safe).
+func TestEnsurePiNpmCommandPreservesExisting(t *testing.T) {
+	resetSetupSeams(t)
+	agentDir := t.TempDir()
+	settingsPath := filepath.Join(agentDir, "settings.json")
+
+	existing := `{"npmCommand":["mise","exec","node@20.0.0","--","npm"]}`
+	if err := os.WriteFile(settingsPath, []byte(existing), 0644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	// mise is found — but should NOT overwrite the user's existing command
+	lookPathFn = func(file string) (string, error) {
+		if file == "mise" {
+			return "/usr/local/bin/mise", nil
+		}
+		return "", errors.New("not found")
+	}
+	resolveMiseNodeVersionFn = func() string { return "node@25.9.0" }
+
+	changed, err := ensurePiNpmCommand(settingsPath)
+	if err != nil {
+		t.Fatalf("ensurePiNpmCommand failed: %v", err)
+	}
+	if changed {
+		t.Fatalf("expected changed=false when npmCommand already set")
+	}
+
+	raw, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	if string(raw) != existing {
+		t.Fatalf("expected settings to be unchanged, got %s", raw)
+	}
+}
+
+// TestEnsurePiNpmCommandNoMise verifies that when mise is not found,
+// no npmCommand is written.
+func TestEnsurePiNpmCommandNoMise(t *testing.T) {
+	resetSetupSeams(t)
+	agentDir := t.TempDir()
+	settingsPath := filepath.Join(agentDir, "settings.json")
+
+	// mise not found
+	lookPathFn = func(file string) (string, error) {
+		return "", errors.New("not found")
+	}
+
+	changed, err := ensurePiNpmCommand(settingsPath)
+	if err != nil {
+		t.Fatalf("ensurePiNpmCommand failed: %v", err)
+	}
+	if changed {
+		t.Fatalf("expected changed=false when mise is not detected")
+	}
+
+	// settings.json should not have been created
+	if _, err := os.Stat(settingsPath); err == nil {
+		t.Fatalf("expected settings.json not to be created when mise is absent")
+	}
+}
+
+// TestEnsurePiNpmCommandMiseVersionFallback verifies that when mise is found
+// but the version cannot be resolved, "node" is used as the spec fallback.
+func TestEnsurePiNpmCommandMiseVersionFallback(t *testing.T) {
+	resetSetupSeams(t)
+	agentDir := t.TempDir()
+	settingsPath := filepath.Join(agentDir, "settings.json")
+
+	lookPathFn = func(file string) (string, error) {
+		if file == "mise" {
+			return "/usr/local/bin/mise", nil
+		}
+		return "", errors.New("not found")
+	}
+	// version resolution fails — returns empty string
+	resolveMiseNodeVersionFn = func() string { return "" }
+
+	changed, err := ensurePiNpmCommand(settingsPath)
+	if err != nil {
+		t.Fatalf("ensurePiNpmCommand failed: %v", err)
+	}
+	if !changed {
+		t.Fatalf("expected changed=true even when version resolution fails")
+	}
+
+	raw, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	var settings map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		t.Fatalf("parse settings: %v", err)
+	}
+	var npmCmd []string
+	if err := json.Unmarshal(settings["npmCommand"], &npmCmd); err != nil {
+		t.Fatalf("parse npmCommand: %v", err)
+	}
+	// Fallback: mise exec node -- npm (no version specifier)
+	want := []string{"mise", "exec", "node", "--", "npm"}
+	if !reflect.DeepEqual(npmCmd, want) {
+		t.Fatalf("expected fallback npmCommand %v, got %v", want, npmCmd)
+	}
+}
+
+// TestInstallPiWritesNpmCommandWhenMiseDetected verifies that the full
+// installPi() flow writes npmCommand to settings.json when mise is available.
+func TestInstallPiWritesNpmCommandWhenMiseDetected(t *testing.T) {
+	resetSetupSeams(t)
+	agentDir := t.TempDir()
+	t.Setenv("PI_CODING_AGENT_DIR", agentDir)
+	osExecutable = func() (string, error) { return "/opt/engram/bin/engram", nil }
+	runCommand = func(string, ...string) ([]byte, error) { return []byte("ok"), nil }
+
+	lookPathFn = func(file string) (string, error) {
+		if file == "mise" {
+			return "/usr/local/bin/mise", nil
+		}
+		return "", errors.New("not found")
+	}
+	resolveMiseNodeVersionFn = func() string { return "node@25.9.0" }
+
+	result, err := Install("pi")
+	if err != nil {
+		t.Fatalf("Install(pi) failed: %v", err)
+	}
+	// settings.json changed (packages + npmCommand) + mcp.json
+	if result.Files != 2 {
+		t.Fatalf("expected 2 files written, got %d", result.Files)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(agentDir, "settings.json"))
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	var settings map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		t.Fatalf("parse settings: %v", err)
+	}
+	var npmCmd []string
+	if err := json.Unmarshal(settings["npmCommand"], &npmCmd); err != nil {
+		t.Fatalf("parse npmCommand: %v", err)
+	}
+	want := []string{"mise", "exec", "node@25.9.0", "--", "npm"}
+	if !reflect.DeepEqual(npmCmd, want) {
+		t.Fatalf("expected npmCommand %v, got %v", want, npmCmd)
+	}
+}
+
+// TestInstallPiNoNpmCommandWhenNoMise verifies that installPi() does not write
+// npmCommand when mise is absent.
+func TestInstallPiNoNpmCommandWhenNoMise(t *testing.T) {
+	resetSetupSeams(t)
+	agentDir := t.TempDir()
+	t.Setenv("PI_CODING_AGENT_DIR", agentDir)
+	osExecutable = func() (string, error) { return "/opt/engram/bin/engram", nil }
+	runCommand = func(string, ...string) ([]byte, error) { return []byte("ok"), nil }
+
+	lookPathFn = func(file string) (string, error) {
+		return "", errors.New("not found")
+	}
+
+	_, err := Install("pi")
+	if err != nil {
+		t.Fatalf("Install(pi) failed: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(agentDir, "settings.json"))
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	var settings map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		t.Fatalf("parse settings: %v", err)
+	}
+	if _, ok := settings["npmCommand"]; ok {
+		t.Fatalf("expected no npmCommand when mise is absent, got %s", raw)
 	}
 }
 
