@@ -1603,9 +1603,12 @@ func TestResolveCloudRuntimeConfigReturnsErrorWhenPersistedConfigUnreadable(t *t
 	}
 }
 
-func TestResolveCloudRuntimeConfigIgnoresPersistedTokenWithoutEnvOverride(t *testing.T) {
+func TestResolveCloudRuntimeConfigUsesPersistedTokenAsFallback(t *testing.T) {
+	// Issue #343: when ENGRAM_CLOUD_TOKEN is not set, the token stored in
+	// cloud.json must be used so that `engram sync --cloud` works without
+	// requiring users to export the env var in every shell session.
 	cfg := testConfig(t)
-	if err := saveCloudConfig(cfg, &cloudConfig{ServerURL: "https://cloud.example.test", Token: "legacy-token"}); err != nil {
+	if err := saveCloudConfig(cfg, &cloudConfig{ServerURL: "https://cloud.example.test", Token: "file-token"}); err != nil {
 		t.Fatalf("save cloud config: %v", err)
 	}
 	t.Setenv("ENGRAM_CLOUD_TOKEN", "")
@@ -1617,8 +1620,8 @@ func TestResolveCloudRuntimeConfigIgnoresPersistedTokenWithoutEnvOverride(t *tes
 	if runtimeCfg == nil {
 		t.Fatal("expected non-nil cloud runtime config")
 	}
-	if runtimeCfg.Token != "" {
-		t.Fatalf("expected persisted legacy token to be ignored, got %q", runtimeCfg.Token)
+	if runtimeCfg.Token != "file-token" {
+		t.Fatalf("expected persisted token %q as fallback, got %q", "file-token", runtimeCfg.Token)
 	}
 	if runtimeCfg.ServerURL != "https://cloud.example.test" {
 		t.Fatalf("expected server URL to remain available, got %q", runtimeCfg.ServerURL)
