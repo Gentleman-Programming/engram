@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"time"
+
 	"github.com/Gentleman-Programming/engram/internal/setup"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
@@ -115,6 +117,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.SetupDone = true
+		return m, nil
+
+	case clipboardCopiedMsg:
+		// Emit the OSC 52 sequence to stdout so the terminal copies the content,
+		// set the feedback label, and schedule its removal after 2 seconds.
+		m.CopyFeedback = "✓ Copied!"
+		return m, tea.Batch(
+			tea.Println(msg.sequence),
+			clearFeedbackAfter(2*time.Second),
+		)
+
+	case clipboardClearMsg:
+		m.CopyFeedback = ""
 		return m, nil
 
 	case spinner.TickMsg:
@@ -300,6 +315,10 @@ func (m Model) handleSearchResultsKeys(key string) (tea.Model, tea.Cmd) {
 			m.PrevScreen = ScreenSearchResults
 			return m, loadObservationDetail(m.store, obsID)
 		}
+	case "c":
+		if len(m.SearchResults) > 0 && m.Cursor < len(m.SearchResults) {
+			return m, copyToClipboard(m.SearchResults[m.Cursor].Content)
+		}
 	case "t":
 		// Timeline for selected result
 		if len(m.SearchResults) > 0 && m.Cursor < len(m.SearchResults) {
@@ -352,6 +371,10 @@ func (m Model) handleRecentKeys(key string) (tea.Model, tea.Cmd) {
 			m.PrevScreen = ScreenRecent
 			return m, loadObservationDetail(m.store, obsID)
 		}
+	case "c":
+		if len(m.RecentObservations) > 0 && m.Cursor < len(m.RecentObservations) {
+			return m, copyToClipboard(m.RecentObservations[m.Cursor].Content)
+		}
 	case "t":
 		if len(m.RecentObservations) > 0 && m.Cursor < len(m.RecentObservations) {
 			obsID := m.RecentObservations[m.Cursor].ID
@@ -377,6 +400,10 @@ func (m Model) handleObservationDetailKeys(key string) (tea.Model, tea.Cmd) {
 		}
 	case "down", "j":
 		m.DetailScroll++
+	case "c":
+		if m.SelectedObservation != nil {
+			return m, copyToClipboard(m.SelectedObservation.Content)
+		}
 	case "t":
 		// View timeline for this observation
 		if m.SelectedObservation != nil {
@@ -477,6 +504,10 @@ func (m Model) handleSessionDetailKeys(key string) (tea.Model, tea.Cmd) {
 			obsID := m.SessionObservations[m.Cursor].ID
 			m.PrevScreen = ScreenSessionDetail
 			return m, loadObservationDetail(m.store, obsID)
+		}
+	case "c":
+		if len(m.SessionObservations) > 0 && m.Cursor < len(m.SessionObservations) {
+			return m, copyToClipboard(m.SessionObservations[m.Cursor].Content)
 		}
 	case "t":
 		if len(m.SessionObservations) > 0 && m.Cursor < len(m.SessionObservations) {
