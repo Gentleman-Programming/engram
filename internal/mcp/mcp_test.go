@@ -6519,3 +6519,132 @@ func TestProcessOverrideSaveHandlerWritesToDefaultProject(t *testing.T) {
 		t.Fatalf("results in trusted project = %d; want 1", len(results))
 	}
 }
+
+// TestHandleSearchPersonalScopeIgnoresCWDProject verifies that when scope=personal
+// and no explicit project is given, handleSearch returns personal memories from
+// ALL projects rather than filtering to the cwd-detected project (issue #391).
+func TestHandleSearchPersonalScopeIgnoresCWDProject(t *testing.T) {
+	s := newMCPTestStore(t)
+
+	// Create sessions and personal observations in two distinct projects.
+	if err := s.CreateSession("sess-proj-a", "project-alpha", "/tmp/project-alpha"); err != nil {
+		t.Fatalf("create session project-alpha: %v", err)
+	}
+	if err := s.CreateSession("sess-proj-b", "project-beta", "/tmp/project-beta"); err != nil {
+		t.Fatalf("create session project-beta: %v", err)
+	}
+
+	_, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "sess-proj-a",
+		Type:      "decision",
+		Title:     "personal cross-project preference",
+		Content:   "always use structured logging",
+		Project:   "project-alpha",
+		Scope:     "personal",
+	})
+	if err != nil {
+		t.Fatalf("add personal observation project-alpha: %v", err)
+	}
+
+	_, err = s.AddObservation(store.AddObservationParams{
+		SessionID: "sess-proj-b",
+		Type:      "decision",
+		Title:     "personal note from beta",
+		Content:   "prefer context-based cancellation",
+		Project:   "project-beta",
+		Scope:     "personal",
+	})
+	if err != nil {
+		t.Fatalf("add personal observation project-beta: %v", err)
+	}
+
+	// Simulate cwd being project-alpha's directory; the handler should NOT filter
+	// results to project-alpha when scope=personal is requested without an explicit project.
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	h := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"query": "personal",
+		"scope": "personal",
+		// no "project" argument — must NOT default to cwd project
+	}}})
+	if err != nil {
+		t.Fatalf("search handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", callResultText(t, res))
+	}
+
+	text := callResultText(t, res)
+	// Both personal memories must be visible regardless of cwd project.
+	if !strings.Contains(text, "personal cross-project preference") {
+		t.Errorf("expected personal memory from project-alpha in results; got: %s", text)
+	}
+	if !strings.Contains(text, "personal note from beta") {
+		t.Errorf("expected personal memory from project-beta in results; got: %s", text)
+	}
+}
+
+// TestHandleContextPersonalScopeIgnoresCWDProject verifies that when scope=personal
+// and no explicit project is given, handleContext returns personal observations from
+// ALL projects rather than filtering to the cwd-detected project (issue #391).
+func TestHandleContextPersonalScopeIgnoresCWDProject(t *testing.T) {
+	s := newMCPTestStore(t)
+
+	if err := s.CreateSession("ctx-sess-a", "ctx-alpha", "/tmp/ctx-alpha"); err != nil {
+		t.Fatalf("create session ctx-alpha: %v", err)
+	}
+	if err := s.CreateSession("ctx-sess-b", "ctx-beta", "/tmp/ctx-beta"); err != nil {
+		t.Fatalf("create session ctx-beta: %v", err)
+	}
+
+	_, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "ctx-sess-a",
+		Type:      "pattern",
+		Title:     "personal pattern from alpha",
+		Content:   "use table-driven tests everywhere",
+		Project:   "ctx-alpha",
+		Scope:     "personal",
+	})
+	if err != nil {
+		t.Fatalf("add personal observation ctx-alpha: %v", err)
+	}
+
+	_, err = s.AddObservation(store.AddObservationParams{
+		SessionID: "ctx-sess-b",
+		Type:      "pattern",
+		Title:     "personal pattern from beta",
+		Content:   "prefer explicit error wrapping",
+		Project:   "ctx-beta",
+		Scope:     "personal",
+	})
+	if err != nil {
+		t.Fatalf("add personal observation ctx-beta: %v", err)
+	}
+
+	// Simulate cwd being ctx-alpha's directory.
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	h := handleContext(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"scope": "personal",
+		// no "project" argument — must NOT default to cwd project
+	}}})
+	if err != nil {
+		t.Fatalf("context handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", callResultText(t, res))
+	}
+
+	text := callResultText(t, res)
+	// Both personal observations must appear in the context output.
+	if !strings.Contains(text, "personal pattern from alpha") {
+		t.Errorf("expected personal memory from ctx-alpha in context; got: %s", text)
+	}
+	if !strings.Contains(text, "personal pattern from beta") {
+		t.Errorf("expected personal memory from ctx-beta in context; got: %s", text)
+	}
+}

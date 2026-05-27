@@ -917,12 +917,20 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		project, _ = store.NormalizeProject(project)
 		detRes.Project = project // JR2-1: keep envelope in sync with normalized query project
 
+		// REQ-391: personal scope is cross-project by definition. When scope=personal
+		// and no explicit project override was provided, clear the project filter so
+		// memories from all projects are visible (not just the cwd-detected one).
+		searchProject := project
+		if scope == "personal" && strings.TrimSpace(projectOverride) == "" {
+			searchProject = ""
+		}
+
 		sessionID := defaultSessionID(project)
 		activity.RecordToolCall(sessionID)
 
 		results, err := s.Search(query, store.SearchOptions{
 			Type:    typ,
-			Project: project,
+			Project: searchProject,
 			Scope:   scope,
 			Limit:   limit,
 		})
@@ -1371,10 +1379,18 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 		project, _ = store.NormalizeProject(project)
 		detRes.Project = project // JR2-1: keep envelope in sync with normalized query project
 
+		// REQ-391: personal scope is cross-project by definition. When scope=personal
+		// and no explicit project override was provided, clear the project filter so
+		// observations from all projects are returned (not just the cwd-detected one).
+		contextProject := project
+		if scope == "personal" && strings.TrimSpace(projectOverride) == "" {
+			contextProject = ""
+		}
+
 		sessionID := defaultSessionID(project)
 		activity.RecordToolCall(sessionID)
 
-		contextResult, err := s.FormatContext(project, scope)
+		contextResult, err := s.FormatContext(contextProject, scope)
 		if err != nil {
 			return mcp.NewToolResultError("Failed to get context: " + err.Error()), nil
 		}
