@@ -252,6 +252,44 @@ func TestDashboardSessionTokenRejectsWhenConfiguredBearerChanges(t *testing.T) {
 	}
 }
 
+// TestAuthorizeBearerTokenConstantTimeComparison is a correctness guard for the
+// constant-time token comparison at auth.go:253. A correct token must be accepted
+// and any wrong token must be rejected, preserving behavior after the
+// timing-safe hmac.Equal replacement (security issue #350).
+func TestAuthorizeBearerTokenConstantTimeComparison(t *testing.T) {
+	svc, err := NewService(&cloudstore.CloudStore{}, strings.Repeat("x", 32))
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	svc.SetBearerToken("correct-token")
+
+	correct := httptest.NewRequest("GET", "/sync/pull", nil)
+	correct.Header.Set("Authorization", "Bearer correct-token")
+	if err := svc.Authorize(correct); err != nil {
+		t.Fatalf("correct token must be accepted, got %v", err)
+	}
+
+	wrong := httptest.NewRequest("GET", "/sync/pull", nil)
+	wrong.Header.Set("Authorization", "Bearer wrong-token")
+	if err := svc.Authorize(wrong); err == nil {
+		t.Fatal("wrong token must be rejected")
+	}
+
+	// A token that is a prefix of the correct one must also be rejected.
+	prefix := httptest.NewRequest("GET", "/sync/pull", nil)
+	prefix.Header.Set("Authorization", "Bearer correct-toke")
+	if err := svc.Authorize(prefix); err == nil {
+		t.Fatal("prefix of correct token must be rejected")
+	}
+
+	// A token that is a superset of the correct one must also be rejected.
+	super := httptest.NewRequest("GET", "/sync/pull", nil)
+	super.Header.Set("Authorization", "Bearer correct-token-extra")
+	if err := svc.Authorize(super); err == nil {
+		t.Fatal("superset of correct token must be rejected")
+	}
+}
+
 func TestDashboardSessionTokenSupportsAdditionalDashboardCredential(t *testing.T) {
 	svc, err := NewService(&cloudstore.CloudStore{}, strings.Repeat("x", 32))
 	if err != nil {
