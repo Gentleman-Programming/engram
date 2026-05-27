@@ -290,6 +290,67 @@ func TestAuthorizeBearerTokenConstantTimeComparison(t *testing.T) {
 	}
 }
 
+// TestAuthorizeProjectWildcard tests that a single "*" in the allowlist permits any project.
+func TestAuthorizeProjectWildcard(t *testing.T) {
+	svc, err := NewService(&cloudstore.CloudStore{}, strings.Repeat("x", 32))
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+
+	// "*" alone must allow any project.
+	svc.SetAllowedProjects([]string{"*"})
+	if err := svc.AuthorizeProject("any-project"); err != nil {
+		t.Fatalf("wildcard allowlist must permit any project, got %v", err)
+	}
+	if err := svc.AuthorizeProject("ANOTHER-ONE"); err != nil {
+		t.Fatalf("wildcard allowlist must permit uppercased project, got %v", err)
+	}
+	if err := svc.AuthorizeProject("team-foo"); err != nil {
+		t.Fatalf("wildcard allowlist must permit prefixed project, got %v", err)
+	}
+}
+
+// TestAuthorizeProjectWildcardMixedWithExact tests that "*" in a mixed list still allows all.
+func TestAuthorizeProjectWildcardMixedWithExact(t *testing.T) {
+	svc, err := NewService(&cloudstore.CloudStore{}, strings.Repeat("x", 32))
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+
+	svc.SetAllowedProjects([]string{"proj-a", "*"})
+	if err := svc.AuthorizeProject("anything-at-all"); err != nil {
+		t.Fatalf("wildcard in mixed list must still permit any project, got %v", err)
+	}
+}
+
+// TestProjectScopeAuthorizerWildcard tests that NewProjectScopeAuthorizer also respects "*".
+func TestProjectScopeAuthorizerWildcard(t *testing.T) {
+	authorizer := NewProjectScopeAuthorizer([]string{"*"})
+	if err := authorizer.AuthorizeProject("any-project"); err != nil {
+		t.Fatalf("wildcard authorizer must permit any project, got %v", err)
+	}
+	if err := authorizer.AuthorizeProject("team-foo"); err != nil {
+		t.Fatalf("wildcard authorizer must permit team-prefixed project, got %v", err)
+	}
+}
+
+// TestAuthorizeProjectExactMatchStillWorksAfterWildcardChange verifies backward compatibility.
+func TestAuthorizeProjectExactMatchStillWorksAfterWildcardChange(t *testing.T) {
+	svc, err := NewService(&cloudstore.CloudStore{}, strings.Repeat("x", 32))
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+
+	// Exact allowlist: only listed projects pass.
+	svc.SetAllowedProjects([]string{"proj-a", "proj-b"})
+	if err := svc.AuthorizeProject("proj-a"); err != nil {
+		t.Fatalf("exact match must still be allowed, got %v", err)
+	}
+	if err := svc.AuthorizeProject("proj-c"); !errors.Is(err, ErrProjectNotAllowed) {
+		t.Fatalf("unlisted project must be rejected, got %v", err)
+	}
+}
+
 func TestDashboardSessionTokenSupportsAdditionalDashboardCredential(t *testing.T) {
 	svc, err := NewService(&cloudstore.CloudStore{}, strings.Repeat("x", 32))
 	if err != nil {

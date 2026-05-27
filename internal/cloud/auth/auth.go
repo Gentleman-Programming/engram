@@ -22,16 +22,18 @@ var ErrInvalidDashboardSessionToken = errors.New("invalid dashboard session toke
 var ErrProjectNotAllowed = errors.New("project is not allowed for this token")
 
 type Service struct {
-	store         *cloudstore.CloudStore
-	expectedToken string
-	dashboardAuth map[string]struct{}
-	allowed       map[string]struct{}
-	jwtSecret     []byte
-	now           func() time.Time
+	store          *cloudstore.CloudStore
+	expectedToken  string
+	dashboardAuth  map[string]struct{}
+	allowed        map[string]struct{}
+	allowedAll     bool
+	jwtSecret      []byte
+	now            func() time.Time
 }
 
 type ProjectScopeAuthorizer struct {
-	allowed map[string]struct{}
+	allowed    map[string]struct{}
+	allowedAll bool
 }
 
 func NewService(store *cloudstore.CloudStore, jwtSecret string) (*Service, error) {
@@ -153,7 +155,12 @@ func (s *Service) SetDashboardSessionTokens(tokens []string) {
 
 func (s *Service) SetAllowedProjects(projects []string) {
 	s.allowed = make(map[string]struct{})
+	s.allowedAll = false
 	for _, project := range projects {
+		if strings.TrimSpace(project) == "*" {
+			s.allowedAll = true
+			return
+		}
 		normalized, _ := store.NormalizeProject(project)
 		normalized = strings.TrimSpace(normalized)
 		if normalized == "" {
@@ -164,6 +171,14 @@ func (s *Service) SetAllowedProjects(projects []string) {
 }
 
 func (s *Service) AuthorizeProject(project string) error {
+	if s.allowedAll {
+		normalized, _ := store.NormalizeProject(project)
+		normalized = strings.TrimSpace(normalized)
+		if normalized == "" {
+			return fmt.Errorf("project is required")
+		}
+		return nil
+	}
 	return authorizeProjectAgainstAllowlist(project, s.allowed)
 }
 
@@ -171,15 +186,27 @@ func (s *Service) AuthorizeProject(project string) error {
 // authorized to serve. Used by cloudserver's mutation pull to filter mutations
 // to the caller's enrolled projects (REQ-202).
 //
+// When the wildcard "*" is configured, nil is returned to signal "no project
+// filter" — callers must treat nil as "allow all" (matching the ListMutationsSince
+// nil-means-all contract).
+//
 // The interface is cloudserver.EnrolledProjectsProvider; this method makes
 // *Service satisfy it without importing cloudserver (structural assertion).
 func (s *Service) EnrolledProjects() []string {
+	if s.allowedAll {
+		return nil
+	}
 	return sortedAllowlist(s.allowed)
 }
 
 func (a *ProjectScopeAuthorizer) SetAllowedProjects(projects []string) {
 	a.allowed = make(map[string]struct{})
+	a.allowedAll = false
 	for _, project := range projects {
+		if strings.TrimSpace(project) == "*" {
+			a.allowedAll = true
+			return
+		}
 		normalized, _ := store.NormalizeProject(project)
 		normalized = strings.TrimSpace(normalized)
 		if normalized == "" {
@@ -190,6 +217,14 @@ func (a *ProjectScopeAuthorizer) SetAllowedProjects(projects []string) {
 }
 
 func (a *ProjectScopeAuthorizer) AuthorizeProject(project string) error {
+	if a.allowedAll {
+		normalized, _ := store.NormalizeProject(project)
+		normalized = strings.TrimSpace(normalized)
+		if normalized == "" {
+			return fmt.Errorf("project is required")
+		}
+		return nil
+	}
 	return authorizeProjectAgainstAllowlist(project, a.allowed)
 }
 
@@ -197,7 +232,13 @@ func (a *ProjectScopeAuthorizer) AuthorizeProject(project string) error {
 // Matches the cloudserver.EnrolledProjectsProvider contract so mutation pull
 // can filter server-side by the caller's enrolled projects (REQ-202) rather
 // than fail-closing to an empty result set.
+//
+// When the wildcard "*" is configured, nil is returned to signal "no project
+// filter" (matching the ListMutationsSince nil-means-all contract).
 func (a *ProjectScopeAuthorizer) EnrolledProjects() []string {
+	if a.allowedAll {
+		return nil
+	}
 	return sortedAllowlist(a.allowed)
 }
 

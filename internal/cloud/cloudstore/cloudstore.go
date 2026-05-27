@@ -22,6 +22,7 @@ import (
 type CloudStore struct {
 	db                     *sql.DB
 	dashboardAllowedScopes map[string]struct{}
+	dashboardAllowedAll    bool
 	dashboardReadModelMu   sync.RWMutex
 	dashboardReadModel     dashboardReadModel
 	dashboardReadModelOK   bool
@@ -65,9 +66,16 @@ func (cs *CloudStore) SetDashboardAllowedProjects(projects []string) {
 	if cs == nil {
 		return
 	}
+	cs.dashboardAllowedAll = false
 	cs.dashboardAllowedScopes = make(map[string]struct{})
 	for _, project := range projects {
 		project = strings.TrimSpace(project)
+		if project == "*" {
+			cs.dashboardAllowedAll = true
+			cs.dashboardAllowedScopes = nil
+			cs.invalidateDashboardReadModel()
+			return
+		}
 		if project == "" {
 			continue
 		}
