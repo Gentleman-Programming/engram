@@ -6907,3 +6907,64 @@ func TestHandleSearchWithoutAllProjectsStillScopesToCurrentProject(t *testing.T)
 		t.Fatalf("beta result should not leak into a scoped search; got: %s", text)
 	}
 }
+
+// TestHandleSearchLegacyMixedCaseProject reproduces issue #146:
+// mem_search returns empty when the DB contains observations stored under a
+// mixed-case project name (e.g. "Ebook2Audio") but the query uses the
+// normalized lowercase name (e.g. "ebook2audio") — or vice versa.
+//
+// The MCP path calls resolveReadProject which normalizes the override to
+// lowercase, then checks ProjectExists with the lowercase name. Previously
+// ProjectExists used a case-sensitive "project = ?" match and returned false
+// for mixed-case legacy data, causing handleSearch to return unknown_project.
+func TestHandleSearchLegacyMixedCaseProject(t *testing.T) {
+	s := newMCPTestStore(t)
+
+	// Insert session and observation directly with a mixed-case project name
+	// to simulate data created by a pre-normalization version of engram.
+	legacyProject := "Ebook2Audio"
+	if _, err := s.DB().Exec(
+		`INSERT INTO sessions (id, project, directory) VALUES (?, ?, ?)`,
+		"legacy-mcp-sess", legacyProject, "/tmp/ebook",
+	); err != nil {
+		t.Fatalf("insert legacy session: %v", err)
+	}
+	if _, err := s.DB().Exec(`
+		INSERT INTO observations (session_id, type, title, content, project, scope)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		"legacy-mcp-sess", "bugfix",
+		"Fixed progress reuse in DisplayManager",
+		"Corrected progress bar reuse so prior run state is not carried over",
+		legacyProject, "project",
+	); err != nil {
+		t.Fatalf("insert legacy observation: %v", err)
+	}
+	if _, err := s.DB().Exec(
+		`INSERT INTO observations_fts(observations_fts) VALUES('rebuild')`,
+	); err != nil {
+		t.Fatalf("rebuild FTS: %v", err)
+	}
+
+	search := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	// The agent passes the project name as typed (mixed-case). handleSearch
+	// normalizes it to lowercase and must still resolve and return results.
+	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"query":   "progress bar",
+		"project": "Ebook2Audio", // as a user would type it
+		"limit":   5.0,
+	}}}
+
+	res, err := search(context.Background(), req)
+	if err != nil {
+		t.Fatalf("search handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("handleSearch returned error for legacy mixed-case project: %s", callResultText(t, res))
+	}
+
+	text := callResultText(t, res)
+	if !strings.Contains(text, "Found") || strings.Contains(text, "No memories found") {
+		t.Fatalf("expected search results for legacy project, got: %s", text)
+	}
+}

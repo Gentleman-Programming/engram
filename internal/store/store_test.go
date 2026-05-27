@@ -7715,3 +7715,82 @@ func TestGetDeferred_NotFound(t *testing.T) {
 		t.Errorf("expected error to contain 'not found'; got %q", err.Error())
 	}
 }
+
+// TestSearchLegacyMixedCaseProject reproduces issue #146:
+// observations stored with a mixed-case project name (legacy data pre-normalization)
+// must be found when searched with a normalized (lowercase) project name.
+//
+// Previously, Search and ProjectExists used case-sensitive "project = ?" which
+// caused all MCP tool calls to return empty results for such projects.
+func TestSearchLegacyMixedCaseProject(t *testing.T) {
+	s := newTestStore(t)
+
+	// Insert a session and observation directly with mixed-case project name,
+	// bypassing AddObservation normalization to simulate legacy data.
+	legacyProject := "Ebook2Audio"
+	_, err := s.db.Exec(
+		`INSERT INTO sessions (id, project, directory) VALUES (?, ?, ?)`,
+		"legacy-mixed-sess", legacyProject, "/tmp/ebook",
+	)
+	if err != nil {
+		t.Fatalf("insert legacy session: %v", err)
+	}
+
+	_, err = s.db.Exec(`
+		INSERT INTO observations (session_id, type, title, content, project, scope)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		"legacy-mixed-sess", "bugfix",
+		"Fixed log routing in DisplayManager",
+		"Corrected log routing so debug output goes to stderr not stdout",
+		legacyProject, "project",
+	)
+	if err != nil {
+		t.Fatalf("insert legacy observation: %v", err)
+	}
+
+	// Re-build FTS index so the new row is searchable.
+	if _, err := s.db.Exec(`INSERT INTO observations_fts(observations_fts) VALUES('rebuild')`); err != nil {
+		t.Fatalf("rebuild FTS: %v", err)
+	}
+
+	normalizedProject := "ebook2audio"
+
+	// ProjectExists must find the legacy project via case-insensitive match.
+	exists, err := s.ProjectExists(normalizedProject)
+	if err != nil {
+		t.Fatalf("ProjectExists error: %v", err)
+	}
+	if !exists {
+		t.Error("ProjectExists returned false for mixed-case legacy project; want true")
+	}
+
+	// Search must return the observation when filtering by normalized project name.
+	results, err := s.Search("log routing", SearchOptions{
+		Project: normalizedProject,
+		Limit:   10,
+	})
+	if err != nil {
+		t.Fatalf("Search error: %v", err)
+	}
+	if len(results) == 0 {
+		t.Error("Search returned 0 results for legacy mixed-case project; want >=1")
+	}
+
+	// RecentObservations (used by mem_context) must also find the data.
+	obs, err := s.RecentObservations(normalizedProject, "", 10)
+	if err != nil {
+		t.Fatalf("RecentObservations error: %v", err)
+	}
+	if len(obs) == 0 {
+		t.Error("RecentObservations returned 0 results for legacy mixed-case project; want >=1")
+	}
+
+	// RecentSessions (used by mem_context) must also find the session.
+	sessions, err := s.RecentSessions(normalizedProject, 5)
+	if err != nil {
+		t.Fatalf("RecentSessions error: %v", err)
+	}
+	if len(sessions) == 0 {
+		t.Error("RecentSessions returned 0 results for legacy mixed-case project; want >=1")
+	}
+}
