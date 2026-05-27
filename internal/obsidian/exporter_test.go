@@ -1,6 +1,8 @@
 package obsidian
 
 import (
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/internal/store"
@@ -544,6 +546,120 @@ func TestExporterCallsGraphConfig(t *testing.T) {
 			t.Errorf("expected .obsidian/graph.json to NOT be created with zero-value GraphConfig, but it exists")
 		}
 	})
+}
+
+// ─── Security: TestPathTraversalPrevention (Issue #180) ──────────────────────
+
+// TestPathTraversalPrevention asserts that malicious Project or Type values
+// containing path traversal sequences (e.g. "../../etc") or absolute paths
+// cannot produce output files that escape the {vault}/engram/ export root.
+func TestPathTraversalPrevention(t *testing.T) {
+	traversalCases := []struct {
+		name    string
+		project string
+		obsType string
+	}{
+		{
+			name:    "dotdot in project",
+			project: "../../etc",
+			obsType: "bugfix",
+		},
+		{
+			name:    "dotdot in type",
+			project: "myproject",
+			obsType: "../../etc",
+		},
+		{
+			name:    "dotdot in both",
+			project: "../../tmp",
+			obsType: "../../../var",
+		},
+		{
+			name:    "absolute path in project",
+			project: "/etc",
+			obsType: "bugfix",
+		},
+		{
+			name:    "absolute path in type",
+			project: "myproject",
+			obsType: "/etc",
+		},
+		{
+			name:    "nested traversal",
+			project: "foo/../../../secret",
+			obsType: "bugfix",
+		},
+	}
+
+	for _, tc := range traversalCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+
+			ms := &mockStore{
+				exportData: &store.ExportData{
+					Sessions: []store.Session{
+						{ID: "sess-1", Project: tc.project},
+					},
+					Observations: []store.Observation{
+						{
+							ID:        1,
+							SessionID: "sess-1",
+							Type:      tc.obsType,
+							Title:     "Traversal Test",
+							Content:   "malicious content",
+							Scope:     "project",
+							CreatedAt: "2026-01-01T10:00:00Z",
+							UpdatedAt: "2026-01-01T10:00:00Z",
+							Project:   strPtr(tc.project),
+						},
+					},
+					Prompts: []store.Prompt{},
+				},
+			}
+
+			cfg := ExportConfig{VaultPath: dir}
+			exp := NewExporter(ms, cfg)
+			result, err := exp.Export()
+			if err != nil {
+				t.Fatalf("Export() returned unexpected error: %v", err)
+			}
+
+			// The observation must either be sanitized (created inside engRoot)
+			// or skipped due to invalid path — it must NOT escape the export root.
+			engRoot := dir + "/engram"
+
+			// Walk everything that was written and assert containment.
+			err = walkDir(dir, func(path string) {
+				// engRoot itself and state/hub files are fine — only check obs files.
+				if !isContainedIn(path, engRoot) {
+					t.Errorf("file written OUTSIDE export root: %s (engRoot=%s)", path, engRoot)
+				}
+			})
+			if err != nil {
+				t.Fatalf("walkDir: %v", err)
+			}
+
+			// If a file was created, verify its absolute clean path is under engRoot.
+			if result != nil && result.Created > 0 {
+				// Retrieve the state to find which relative path was recorded.
+				stateFile := engRoot + "/.engram-sync-state.json"
+				state, readErr := ReadState(stateFile)
+				if readErr != nil {
+					t.Fatalf("ReadState: %v", readErr)
+				}
+				for id, relPath := range state.Files {
+					absPath := filepath.Join(engRoot, relPath)
+					cleanAbs := filepath.Clean(absPath)
+					cleanRoot := filepath.Clean(engRoot)
+					if !strings.HasPrefix(cleanAbs, cleanRoot+string(filepath.Separator)) &&
+						cleanAbs != cleanRoot {
+						t.Errorf("obs %d: state path escapes export root: %s (engRoot=%s)", id, cleanAbs, cleanRoot)
+					}
+				}
+			}
+		})
+	}
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
