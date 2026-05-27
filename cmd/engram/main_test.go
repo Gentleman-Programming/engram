@@ -1456,3 +1456,103 @@ func TestObsidianExportWatchModeCallsInjectedWatcher(t *testing.T) {
 		t.Fatalf("expected non-nil Logf in WatcherConfig")
 	}
 }
+
+// ─── Delete command tests ─────────────────────────────────────────────────────
+
+func TestCmdDeleteSoftDeleteSuccess(t *testing.T) {
+	cfg := testConfig(t)
+	id := mustSeedObservation(t, cfg, "s-del", "proj-del", "decision", "to-delete", "delete me", "project")
+
+	withArgs(t, "engram", "delete", strconv.FormatInt(id, 10))
+	stdout, stderr := captureOutput(t, func() { cmdDelete(cfg) })
+	if stderr != "" {
+		t.Fatalf("expected no stderr, got: %q", stderr)
+	}
+	if !strings.Contains(stdout, "deleted") {
+		t.Fatalf("expected deletion confirmation, got: %q", stdout)
+	}
+	if !strings.Contains(stdout, strconv.FormatInt(id, 10)) {
+		t.Fatalf("expected id in output, got: %q", stdout)
+	}
+}
+
+func TestCmdDeleteHardDeleteSuccess(t *testing.T) {
+	cfg := testConfig(t)
+	id := mustSeedObservation(t, cfg, "s-del2", "proj-del2", "decision", "hard-delete", "hard delete me", "project")
+
+	withArgs(t, "engram", "delete", strconv.FormatInt(id, 10), "--hard")
+	stdout, stderr := captureOutput(t, func() { cmdDelete(cfg) })
+	if stderr != "" {
+		t.Fatalf("expected no stderr, got: %q", stderr)
+	}
+	if !strings.Contains(stdout, "deleted") {
+		t.Fatalf("expected deletion confirmation, got: %q", stdout)
+	}
+	if !strings.Contains(stdout, strconv.FormatInt(id, 10)) {
+		t.Fatalf("expected id in output, got: %q", stdout)
+	}
+}
+
+func TestCmdDeleteNonExistentID(t *testing.T) {
+	cfg := testConfig(t)
+
+	exited := false
+	oldExit := exitFunc
+	exitFunc = func(code int) { exited = true }
+	t.Cleanup(func() { exitFunc = oldExit })
+
+	withArgs(t, "engram", "delete", "999999")
+	_, stderr := captureOutput(t, func() { cmdDelete(cfg) })
+
+	if !exited {
+		t.Fatalf("expected exitFunc to be called for non-existent observation")
+	}
+	if !strings.Contains(stderr, "not found") && !strings.Contains(stderr, "observation") {
+		t.Fatalf("expected not-found error in stderr, got: %q", stderr)
+	}
+}
+
+func TestCmdDeleteMissingIDArg(t *testing.T) {
+	cfg := testConfig(t)
+
+	exited := false
+	oldExit := exitFunc
+	exitFunc = func(code int) { exited = true }
+	t.Cleanup(func() { exitFunc = oldExit })
+
+	withArgs(t, "engram", "delete")
+	_, stderr := captureOutput(t, func() { cmdDelete(cfg) })
+
+	if !exited {
+		t.Fatalf("expected exitFunc to be called when no ID arg provided")
+	}
+	if !strings.Contains(stderr, "usage") {
+		t.Fatalf("expected usage message in stderr, got: %q", stderr)
+	}
+}
+
+func TestCmdDeleteInvalidIDArg(t *testing.T) {
+	cfg := testConfig(t)
+
+	exited := false
+	oldExit := exitFunc
+	exitFunc = func(code int) { exited = true }
+	t.Cleanup(func() { exitFunc = oldExit })
+
+	withArgs(t, "engram", "delete", "not-a-number")
+	_, stderr := captureOutput(t, func() { cmdDelete(cfg) })
+
+	if !exited {
+		t.Fatalf("expected exitFunc to be called for invalid id")
+	}
+	if !strings.Contains(stderr, "invalid") {
+		t.Fatalf("expected invalid id error in stderr, got: %q", stderr)
+	}
+}
+
+func TestCmdDeleteInUsage(t *testing.T) {
+	stdout, _ := captureOutput(t, func() { printUsage() })
+	if !strings.Contains(stdout, "delete") {
+		t.Fatalf("expected 'delete' in usage output, got: %q", stdout)
+	}
+}

@@ -88,7 +88,8 @@ var (
 	storeSearch = func(s *store.Store, query string, opts store.SearchOptions) ([]store.SearchResult, error) {
 		return s.Search(query, opts)
 	}
-	storeAddObservation = func(s *store.Store, p store.AddObservationParams) (int64, error) { return s.AddObservation(p) }
+	storeAddObservation       = func(s *store.Store, p store.AddObservationParams) (int64, error) { return s.AddObservation(p) }
+	storeDeleteObservation    = func(s *store.Store, id int64, hard bool) error { return s.DeleteObservation(id, hard) }
 	storeTimeline       = func(s *store.Store, observationID int64, before, after int) (*store.TimelineResult, error) {
 		return s.Timeline(observationID, before, after)
 	}
@@ -628,6 +629,8 @@ func main() {
 		cmdSearch(cfg)
 	case "save":
 		cmdSave(cfg)
+	case "delete":
+		cmdDelete(cfg)
 	case "timeline":
 		cmdTimeline(cfg)
 	case "conflicts":
@@ -1050,6 +1053,46 @@ func cmdSave(cfg store.Config) {
 	}
 
 	fmt.Printf("Memory saved: #%d %q (%s)\n", id, title, typ)
+}
+
+func cmdDelete(cfg store.Config) {
+	if len(os.Args) < 3 {
+		fmt.Fprintln(os.Stderr, "usage: engram delete <observation_id> [--hard]")
+		exitFunc(1)
+		return
+	}
+
+	id, err := strconv.ParseInt(os.Args[2], 10, 64)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: invalid observation id %q\n", os.Args[2])
+		exitFunc(1)
+		return
+	}
+
+	hard := false
+	for i := 3; i < len(os.Args); i++ {
+		if os.Args[i] == "--hard" {
+			hard = true
+		}
+	}
+
+	s, err := storeNew(cfg)
+	if err != nil {
+		fatal(err)
+		return
+	}
+	defer s.Close()
+
+	if err := storeDeleteObservation(s, id, hard); err != nil {
+		fatal(err)
+		return
+	}
+
+	kind := "soft-deleted"
+	if hard {
+		kind = "hard-deleted"
+	}
+	fmt.Printf("Observation #%d %s\n", id, kind)
 }
 
 func cmdTimeline(cfg store.Config) {
@@ -2286,6 +2329,7 @@ Commands:
   tui                Launch interactive terminal UI
   search <query>     Search memories [--type TYPE] [--project PROJECT] [--scope SCOPE] [--limit N]
   save <title> <msg> Save a memory  [--type TYPE] [--project PROJECT] [--scope SCOPE]
+  delete <obs_id>    Delete an observation [--hard] (soft-delete by default; --hard removes permanently)
   timeline <obs_id>  Show chronological context around an observation [--before N] [--after N]
   conflicts <sub>   Inspect and manage memory conflict relations
                        list     [--project P]  [--status S]  [--since RFC3339]  [--limit N]
