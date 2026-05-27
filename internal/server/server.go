@@ -5,6 +5,8 @@
 package server
 
 import (
+	"crypto/hmac"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -114,6 +116,46 @@ func (s *Server) notifyWrite() {
 	}
 }
 
+// requireAuth wraps h with optional Bearer-token authentication.
+//
+// When the ENGRAM_HTTP_TOKEN environment variable is set, every request to the
+// wrapped handler must supply a matching "Authorization: Bearer <token>" header.
+// Comparison is constant-time to prevent timing attacks. When the env var is
+// unset the handler is called directly — zero-config is preserved.
+//
+// The token is read from the environment on every request so that the server
+// does not need to restart when the variable changes.
+func requireAuth(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := os.Getenv("ENGRAM_HTTP_TOKEN")
+		if token == "" {
+			// No token configured → open access (zero-config default).
+			h(w, r)
+			return
+		}
+
+		authHeader := r.Header.Get("Authorization")
+		const prefix = "Bearer "
+		if !strings.HasPrefix(authHeader, prefix) {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="engram"`)
+			jsonError(w, http.StatusUnauthorized, "authorization required")
+			return
+		}
+
+		provided := authHeader[len(prefix):]
+		// Use constant-time comparison via hmac.Equal to prevent timing attacks.
+		if !hmac.Equal([]byte(provided), []byte(token)) {
+			// Extra defense: also absorb timing via subtle.ConstantTimeCompare (same algo).
+			_ = subtle.ConstantTimeCompare([]byte(provided), []byte(token))
+			w.Header().Set("WWW-Authenticate", `Bearer realm="engram"`)
+			jsonError(w, http.StatusUnauthorized, "invalid token")
+			return
+		}
+
+		h(w, r)
+	}
+}
+
 func (s *Server) Start() error {
 	addr := fmt.Sprintf("127.0.0.1:%d", s.port)
 	listenFn := s.listen
@@ -145,7 +187,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /sessions/{id}/end", s.handleEndSession)
 	s.mux.HandleFunc("GET /sessions/recent", s.handleRecentSessions)
 	s.mux.HandleFunc("GET /sessions/{id}", s.handleGetSession)
-	s.mux.HandleFunc("DELETE /sessions/{id}", s.handleDeleteSession)
+	s.mux.HandleFunc("DELETE /sessions/{id}", requireAuth(s.handleDeleteSession))
 
 	// Observations
 	s.mux.HandleFunc("POST /observations", s.handleAddObservation)
@@ -153,7 +195,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /observations/passive", s.handlePassiveCapture)
 	s.mux.HandleFunc("GET /observations/recent", s.handleRecentObservations)
 	s.mux.HandleFunc("PATCH /observations/{id}", s.handleUpdateObservation)
-	s.mux.HandleFunc("DELETE /observations/{id}", s.handleDeleteObservation)
+	s.mux.HandleFunc("DELETE /observations/{id}", requireAuth(s.handleDeleteObservation))
 
 	// Search
 	s.mux.HandleFunc("GET /search", s.handleSearch)
@@ -166,14 +208,14 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /prompts", s.handleAddPrompt)
 	s.mux.HandleFunc("GET /prompts/recent", s.handleRecentPrompts)
 	s.mux.HandleFunc("GET /prompts/search", s.handleSearchPrompts)
-	s.mux.HandleFunc("DELETE /prompts/{id}", s.handleDeletePrompt)
+	s.mux.HandleFunc("DELETE /prompts/{id}", requireAuth(s.handleDeletePrompt))
 
 	// Context
 	s.mux.HandleFunc("GET /context", s.handleContext)
 
-	// Export / Import
-	s.mux.HandleFunc("GET /export", s.handleExport)
-	s.mux.HandleFunc("POST /import", s.handleImport)
+	// Export / Import — sensitive: full data read and bulk mutation.
+	s.mux.HandleFunc("GET /export", requireAuth(s.handleExport))
+	s.mux.HandleFunc("POST /import", requireAuth(s.handleImport))
 
 	// Stats / diagnostics
 	s.mux.HandleFunc("GET /stats", s.handleStats)
@@ -181,7 +223,7 @@ func (s *Server) routes() {
 
 	// Project detection / migration
 	s.mux.HandleFunc("GET /project/current", s.handleCurrentProject)
-	s.mux.HandleFunc("POST /projects/migrate", s.handleMigrateProject)
+	s.mux.HandleFunc("POST /projects/migrate", requireAuth(s.handleMigrateProject))
 
 	// Sync status (degraded-state visibility for autosync)
 	s.mux.HandleFunc("GET /sync/status", s.handleSyncStatus)

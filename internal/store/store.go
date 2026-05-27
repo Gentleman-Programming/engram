@@ -538,6 +538,11 @@ func defaultStoreHooks() storeHooks {
 	}
 }
 
+// DB returns the underlying *sql.DB. Intended for test helpers and integration
+// tests that need to inject raw rows (e.g. legacy data with non-normalized
+// project names) without going through the Store's public API.
+func (s *Store) DB() *sql.DB { return s.db }
+
 func (s *Store) execHook(db execer, query string, args ...any) (sql.Result, error) {
 	if s.hooks.exec != nil {
 		return s.hooks.exec(db, query, args...)
@@ -2027,7 +2032,7 @@ func (s *Store) RecentSessions(project string, limit int) ([]SessionSummary, err
 	args := []any{}
 
 	if project != "" {
-		query += " AND s.project = ?"
+		query += " AND LOWER(s.project) = ?"
 		args = append(args, project)
 	}
 
@@ -2298,7 +2303,7 @@ func (s *Store) RecentObservations(project, scope string, limit int) ([]Observat
 	args := []any{}
 
 	if project != "" {
-		query += " AND o.project = ?"
+		query += " AND LOWER(o.project) = ?"
 		args = append(args, project)
 	}
 	if scope != "" {
@@ -2899,7 +2904,7 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 			tkArgs = append(tkArgs, opts.Type)
 		}
 		if opts.Project != "" {
-			tkSQL += " AND project = ?"
+			tkSQL += " AND LOWER(project) = ?"
 			tkArgs = append(tkArgs, opts.Project)
 		}
 		if opts.Scope != "" {
@@ -2947,7 +2952,7 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 	}
 
 	if opts.Project != "" {
-		sqlQ += " AND o.project = ?"
+		sqlQ += " AND LOWER(o.project) = ?"
 		args = append(args, opts.Project)
 	}
 
@@ -3029,15 +3034,19 @@ func (s *Store) Stats() (*Stats, error) {
 // The sync_enrolled_projects branch ensures a project enrolled via EnrollProject()
 // without any other data is still recognized (JC1).
 func (s *Store) ProjectExists(name string) (bool, error) {
+	// Use LOWER(project) = ? so legacy data stored with mixed-case names
+	// (created before project normalization was enforced on writes) is found
+	// when queried with the current normalized (lowercase) name. The caller
+	// is expected to pass an already-normalized name (NormalizeProject result).
 	const query = `
 SELECT 1 FROM (
-  SELECT project FROM observations WHERE project = ? AND deleted_at IS NULL
+  SELECT project FROM observations WHERE LOWER(project) = ? AND deleted_at IS NULL
   UNION ALL
-  SELECT project FROM sessions WHERE project = ?
+  SELECT project FROM sessions WHERE LOWER(project) = ?
   UNION ALL
-  SELECT project FROM user_prompts WHERE project = ?
+  SELECT project FROM user_prompts WHERE LOWER(project) = ?
   UNION ALL
-  SELECT project FROM sync_enrolled_projects WHERE project = ?
+  SELECT project FROM sync_enrolled_projects WHERE LOWER(project) = ?
 ) LIMIT 1`
 	var dummy int
 	err := s.db.QueryRow(query, name, name, name, name).Scan(&dummy)
