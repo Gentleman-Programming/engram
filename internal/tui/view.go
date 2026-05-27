@@ -3,8 +3,8 @@ package tui
 import (
 	"fmt"
 	"strings"
-	"time"
 
+	"github.com/Gentleman-Programming/engram/internal/timeutil"
 	"github.com/Gentleman-Programming/engram/internal/version"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -713,16 +713,7 @@ func (m Model) renderObservationListItem(index int, id int64, obsType, title, co
 
 // localTime converts a UTC timestamp string from SQLite to local time for display.
 func localTime(utc string) string {
-	for _, layout := range []string{
-		"2006-01-02 15:04:05",
-		time.RFC3339,
-		time.RFC3339Nano,
-	} {
-		if t, err := time.Parse(layout, utc); err == nil {
-			return t.UTC().Local().Format("2006-01-02 15:04:05")
-		}
-	}
-	return utc // unparseable — return as-is
+	return timeutil.FormatLocal(utc)
 }
 
 func truncateStr(s string, max int) string {

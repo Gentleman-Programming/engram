@@ -244,6 +244,17 @@ claude plugin install engram
 
 That's it. The plugin registers the MCP server, hooks, and Memory Protocol skill automatically.
 
+> **If the marketplace command fails with a schema error**
+>
+> Older Claude Code CLI versions cannot parse some plugin manifest fields and will reject `claude plugin marketplace add` with messages like `Invalid schema: plugins.0.source: Invalid input`. The fix is to update the CLI:
+>
+> ```bash
+> claude --version  # check what you have
+> claude update     # upgrade to the latest
+> ```
+>
+> Then re-run the marketplace command. If you cannot update for some reason, **Option C (Bare MCP)** below works on any Claude Code version because it does not go through the marketplace.
+
 **Option B: Plugin via `engram setup`** — same plugin, installed from the embedded binary:
 
 ```bash

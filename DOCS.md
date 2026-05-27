@@ -514,7 +514,7 @@ Inspect or replay the `sync_apply_deferred` queue.
 
 ### Cloud CLI (opt-in)
 
-- `engram cloud status` — show current cloud config state plus auth/sync readiness without mutating local state
+- `engram cloud status` — show current cloud config state plus auth/sync readiness without mutating local state. When cloud is configured, also probes the local `engram serve` daemon at `127.0.0.1:7437` (respects `ENGRAM_PORT`) and prints a `Local daemon:` line (`running` / `not running` / `unreachable`) so you can detect a silently dead autosync. Exit code is unaffected; the line is informational
 - `engram cloud enroll <project>` — enroll one project for cloud replication
 - `engram cloud config --server <url>` — persist cloud server URL to `~/.engram/cloud.json`
 - `engram cloud serve` — run cloud backend API + dashboard (`/dashboard`) using Postgres config from env
@@ -759,6 +759,8 @@ Returns success even when cwd is ambiguous — empty `project` + non-empty `avai
 ### mem_search
 
 Search persistent memory across all sessions. Supports FTS5 full-text search with type/project/scope/limit filters.
+
+Set `all_projects: true` to search across every project instead of the resolved one. This bypasses project detection entirely and ignores the `project` argument, so an agent can recall a decision logged elsewhere without knowing the project key. The response envelope reports `project_source: "all_projects"` and an empty `project` to reflect the cross-project scope.
 
 When an observation has judged relations in `memory_relations`, the result entry includes annotation lines immediately after the title/content block:
 
@@ -1150,7 +1152,9 @@ Interactive Bubbletea-based terminal UI. Launch with `engram tui`.
 
 ## Running as a Service
 
-### Using systemd
+Without a service supervisor, `engram serve` dies whenever the binary is replaced (e.g. on `brew upgrade engram`) or the host reboots, and autosync stops silently. The templates below restart it automatically. Use `engram cloud status` afterwards to confirm — the `Local daemon:` line should report `running on port 7437`.
+
+### Using systemd (Linux)
 
 1. Move binary to `~/.local/bin` (ensure it's in your `$PATH`)
 2. Create directories: `mkdir -p ~/.engram ~/.config/systemd/user`
@@ -1175,6 +1179,59 @@ Environment=ENGRAM_DATA_DIR=%h/.engram
 [Install]
 WantedBy=default.target
 ```
+
+### Using launchd (macOS)
+
+This is the recommended setup for Homebrew users on macOS. With `KeepAlive=true`, launchd relaunches `engram serve` automatically after `brew upgrade engram` replaces the binary, so autosync survives upgrades.
+
+1. Find your binary path: `which engram` (typically `/opt/homebrew/bin/engram` on Apple Silicon or `/usr/local/bin/engram` on Intel)
+2. Create the data dir if missing: `mkdir -p ~/.engram`
+3. Create `~/Library/LaunchAgents/com.gentleman-programming.engram.plist` with the contents below — replace `<HOME>` with the absolute path of your home directory (`echo $HOME`) and adjust the binary path if `which engram` returned something different
+4. Load it: `launchctl load ~/Library/LaunchAgents/com.gentleman-programming.engram.plist`
+5. Verify: `launchctl list | grep engram` and `engram cloud status` (the `Local daemon:` line should report `running on port 7437`)
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.gentleman-programming.engram</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/engram</string>
+        <string>serve</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string><HOME></string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>ENGRAM_DATA_DIR</key>
+        <string><HOME>/.engram</string>
+        <!-- Uncomment and fill these to enable cloud autosync:
+        <key>ENGRAM_CLOUD_AUTOSYNC</key>
+        <string>1</string>
+        <key>ENGRAM_CLOUD_SERVER</key>
+        <string>https://your-cloud-host</string>
+        <key>ENGRAM_CLOUD_TOKEN</key>
+        <string>your-cloud-token</string>
+        -->
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string><HOME>/.engram/serve.out.log</string>
+    <key>StandardErrorPath</key>
+    <string><HOME>/.engram/serve.err.log</string>
+</dict>
+</plist>
+```
+
+To unload (stop and disable): `launchctl unload ~/Library/LaunchAgents/com.gentleman-programming.engram.plist`. To reload after editing the plist: unload, then load again.
+
+> **Note on `brew upgrade`:** launchd does not expand `$HOME` or `~` inside plist values, which is why the template uses literal absolute paths.
 
 ---
 

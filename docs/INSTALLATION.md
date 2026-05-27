@@ -29,6 +29,8 @@ brew update && brew upgrade engram
 > brew uninstall --cask engram 2>/dev/null; brew install gentleman-programming/tap/engram
 > ```
 
+> **Keep `engram serve` running across `brew upgrade`?** On macOS, `brew upgrade engram` replaces the binary and kills any running `engram serve` process — autosync stops silently until you relaunch it. To make autosync survive upgrades and reboots, use the launchd template in [Running as a Service → Using launchd (macOS)](../DOCS.md#using-launchd-macos). Run `engram cloud status` afterwards: the `Local daemon:` line should report `running`.
+
 ---
 
 ## Windows
@@ -51,11 +53,28 @@ git clone https://github.com/Gentleman-Programming/engram.git
 cd engram
 go install ./cmd/engram
 # Binary goes to %GOPATH%\bin\engram.exe (typically %USERPROFILE%\go\bin\)
-
-# Optional: build with version stamp (otherwise `engram version` shows "dev")
-$v = git describe --tags --always
-go build -ldflags="-X main.version=local-$v" -o engram.exe ./cmd/engram
 ```
+
+> **Want a real version string instead of `dev`?**
+>
+> `go install` always stamps the binary as `dev`. To get a meaningful version, pick one of these — not both. Running them both leaves two binaries on disk and `engram version` keeps reporting `dev` because PATH still resolves to the `go install` build.
+>
+> **Option B1 — version-stamped `go install` (binary stays on PATH):**
+>
+> ```powershell
+> $v = git describe --tags --always
+> go install -ldflags="-X main.version=local-$v" ./cmd/engram
+> ```
+>
+> **Option B2 — `go build` and move the result onto PATH:**
+>
+> ```powershell
+> $v = git describe --tags --always
+> go build -ldflags="-X main.version=local-$v" -o engram.exe ./cmd/engram
+> Move-Item -Force engram.exe "$env:USERPROFILE\go\bin\engram.exe"
+> ```
+>
+> After either option, `engram version` should print `local-<git-describe>` instead of `dev`.
 
 **Option C: Download the prebuilt binary**
 
@@ -104,10 +123,27 @@ Expand-Archive engram_*_windows_amd64.zip -DestinationPath "$env:USERPROFILE\bin
 git clone https://github.com/Gentleman-Programming/engram.git
 cd engram
 go install ./cmd/engram
-
-# Optional: build with version stamp (otherwise `engram version` shows "dev")
-go build -ldflags="-X main.version=local-$(git describe --tags --always)" -o engram ./cmd/engram
+# Binary goes to $GOPATH/bin (typically ~/go/bin/)
 ```
+
+> **Want a real version string instead of `dev`?**
+>
+> `go install` always stamps the binary as `dev`. To get a meaningful version, pick one of these — not both. Running them both leaves two binaries on disk and `engram version` keeps reporting `dev` because PATH still resolves to the `go install` build.
+>
+> **Option 1 — version-stamped `go install` (binary stays on PATH):**
+>
+> ```bash
+> go install -ldflags="-X main.version=local-$(git describe --tags --always)" ./cmd/engram
+> ```
+>
+> **Option 2 — `go build` and move the result onto PATH:**
+>
+> ```bash
+> go build -ldflags="-X main.version=local-$(git describe --tags --always)" -o engram ./cmd/engram
+> mv engram "$(go env GOPATH)/bin/engram"
+> ```
+>
+> After either option, `engram version` should print `local-<git-describe>` instead of `dev`.
 
 ---
 
