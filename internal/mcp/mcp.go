@@ -1600,8 +1600,15 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		sessionID, _ := req.GetArguments()["session_id"].(string)
 		// project field intentionally not read — auto-detect only (REQ-308 write-tool contract)
 
-		// Auto-detect project from cwd; fail fast on ambiguous (REQ-308, REQ-309)
-		detRes, err := resolveWriteProject()
+		// Reject empty/whitespace-only content before any project resolution (#393).
+		if strings.TrimSpace(content) == "" {
+			return mcp.NewToolResultError("content is required for mem_session_summary"), nil
+		}
+
+		// Honour process-level project override (cfg.DefaultProject) set via
+		// ENGRAM_PROJECT or `engram mcp --project` (#403/#413). Falls back to cwd
+		// detection when no override is configured.
+		detRes, err := resolveWriteProjectWithProcessOverride(cfg.DefaultProject)
 		if err != nil {
 			return writeProjectErrorResult(nil, "", detRes, err), nil
 		}
