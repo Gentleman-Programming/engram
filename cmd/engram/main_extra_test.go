@@ -155,6 +155,7 @@ func stubRuntimeHooks(t *testing.T) {
 	oldSyncExport := syncExport
 	oldNewCloudAutosyncManager := newCloudAutosyncManager
 	oldCheckForUpdates := checkForUpdates
+	oldCloudDaemonProbe := cloudDaemonProbe
 
 	storeNew = store.New
 	newHTTPServer = func(s *store.Store, _ int) *engramsrv.Server { return engramsrv.New(s, 0) }
@@ -198,6 +199,9 @@ func stubRuntimeHooks(t *testing.T) {
 	checkForUpdates = func(string) versioncheck.CheckResult {
 		return versioncheck.CheckResult{Status: versioncheck.StatusUpToDate}
 	}
+	cloudDaemonProbe = func(_ context.Context, port int) daemonProbeResult {
+		return daemonProbeResult{Status: daemonProbeRunning, Port: port}
+	}
 
 	t.Cleanup(func() {
 		storeNew = oldStoreNew
@@ -224,6 +228,7 @@ func stubRuntimeHooks(t *testing.T) {
 		syncExport = oldSyncExport
 		newCloudAutosyncManager = oldNewCloudAutosyncManager
 		checkForUpdates = oldCheckForUpdates
+		cloudDaemonProbe = oldCloudDaemonProbe
 	})
 }
 
@@ -728,6 +733,114 @@ func TestCmdCloudStatusDistinguishesAuthAndSyncReadiness(t *testing.T) {
 		}
 		if !strings.Contains(stdout, "Auth status: ready") || !strings.Contains(stdout, "Sync readiness: ready") {
 			t.Fatalf("expected ready readiness output, got %q", stdout)
+		}
+	})
+}
+
+func TestCmdCloudStatusEmitsLocalDaemonLine(t *testing.T) {
+	stubExitWithPanic(t)
+	stubRuntimeHooks(t)
+
+	cfg := testConfig(t)
+
+	t.Run("not configured suppresses daemon probe", func(t *testing.T) {
+		t.Setenv("ENGRAM_CLOUD_TOKEN", "")
+		t.Setenv("ENGRAM_CLOUD_SERVER", "")
+		t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "")
+
+		// Override the probe with a sentinel so we can detect any accidental call.
+		probed := false
+		prev := cloudDaemonProbe
+		cloudDaemonProbe = func(_ context.Context, port int) daemonProbeResult {
+			probed = true
+			return daemonProbeResult{Status: daemonProbeRunning, Port: port}
+		}
+		t.Cleanup(func() { cloudDaemonProbe = prev })
+
+		notConfiguredCfg := testConfig(t)
+		withArgs(t, "engram", "cloud", "status")
+		stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloud(notConfiguredCfg) })
+		if recovered != nil || stderr != "" {
+			t.Fatalf("cloud status should succeed, panic=%v stderr=%q", recovered, stderr)
+		}
+		if !strings.Contains(stdout, "not configured") {
+			t.Fatalf("expected not-configured output, got %q", stdout)
+		}
+		if probed {
+			t.Fatalf("daemon probe must not run when cloud is not configured")
+		}
+		if strings.Contains(stdout, "Local daemon:") {
+			t.Fatalf("expected no daemon line in not-configured output, got %q", stdout)
+		}
+	})
+
+	if err := saveCloudConfig(cfg, &cloudConfig{ServerURL: "https://cloud.example.test"}); err != nil {
+		t.Fatalf("save cloud config: %v", err)
+	}
+
+	t.Run("configured prints running daemon line", func(t *testing.T) {
+		t.Setenv("ENGRAM_CLOUD_TOKEN", "token-abc")
+		t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "")
+
+		prev := cloudDaemonProbe
+		cloudDaemonProbe = func(_ context.Context, port int) daemonProbeResult {
+			return daemonProbeResult{Status: daemonProbeRunning, Port: port}
+		}
+		t.Cleanup(func() { cloudDaemonProbe = prev })
+
+		withArgs(t, "engram", "cloud", "status")
+		stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloud(cfg) })
+		if recovered != nil || stderr != "" {
+			t.Fatalf("cloud status should succeed, panic=%v stderr=%q", recovered, stderr)
+		}
+		if !strings.Contains(stdout, "Local daemon: running on port") {
+			t.Fatalf("expected running daemon line, got %q", stdout)
+		}
+	})
+
+	t.Run("configured prints recovery hint when daemon is down", func(t *testing.T) {
+		t.Setenv("ENGRAM_CLOUD_TOKEN", "token-abc")
+		t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "")
+
+		prev := cloudDaemonProbe
+		cloudDaemonProbe = func(_ context.Context, port int) daemonProbeResult {
+			return daemonProbeResult{Status: daemonProbeNotRunning, Port: port}
+		}
+		t.Cleanup(func() { cloudDaemonProbe = prev })
+
+		withArgs(t, "engram", "cloud", "status")
+		stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloud(cfg) })
+		if recovered != nil || stderr != "" {
+			t.Fatalf("cloud status should succeed when daemon is down, panic=%v stderr=%q", recovered, stderr)
+		}
+		if !strings.Contains(stdout, "Local daemon: not running on port") {
+			t.Fatalf("expected not-running daemon line, got %q", stdout)
+		}
+		if !strings.Contains(stdout, "engram serve") {
+			t.Fatalf("expected recovery hint mentioning `engram serve`, got %q", stdout)
+		}
+	})
+
+	t.Run("insecure mode also prints daemon line", func(t *testing.T) {
+		t.Setenv("ENGRAM_CLOUD_TOKEN", "")
+		t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "1")
+
+		prev := cloudDaemonProbe
+		cloudDaemonProbe = func(_ context.Context, port int) daemonProbeResult {
+			return daemonProbeResult{Status: daemonProbeRunning, Port: port}
+		}
+		t.Cleanup(func() { cloudDaemonProbe = prev })
+
+		withArgs(t, "engram", "cloud", "status")
+		stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloud(cfg) })
+		if recovered != nil || stderr != "" {
+			t.Fatalf("cloud status should succeed, panic=%v stderr=%q", recovered, stderr)
+		}
+		if !strings.Contains(stdout, "insecure local-dev mode") {
+			t.Fatalf("expected insecure-mode banner, got %q", stdout)
+		}
+		if !strings.Contains(stdout, "Local daemon: running on port") {
+			t.Fatalf("expected running daemon line in insecure mode, got %q", stdout)
 		}
 	})
 }
