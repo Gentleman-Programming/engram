@@ -6519,3 +6519,132 @@ func TestProcessOverrideSaveHandlerWritesToDefaultProject(t *testing.T) {
 		t.Fatalf("results in trusted project = %d; want 1", len(results))
 	}
 }
+
+// seedCrossProjectMemories inserts one observation per project so cross-project
+// search tests have something to find. Returns the session IDs created.
+func seedCrossProjectMemories(t *testing.T, s *store.Store) {
+	t.Helper()
+	type seed struct {
+		session string
+		project string
+		title   string
+		content string
+	}
+	seeds := []seed{
+		{"s-alpha", "alpha", "Auth middleware in alpha", "JWT auth middleware decided here"},
+		{"s-beta", "beta", "Auth middleware in beta", "Different auth approach for beta"},
+		{"s-gamma", "gamma", "Logging only", "Nothing about authentication here"},
+	}
+	for _, sd := range seeds {
+		if err := s.CreateSession(sd.session, sd.project, "/tmp/"+sd.project); err != nil {
+			t.Fatalf("create session %s: %v", sd.session, err)
+		}
+		if _, err := s.AddObservation(store.AddObservationParams{
+			SessionID: sd.session,
+			Type:      "decision",
+			Title:     sd.title,
+			Content:   sd.content,
+			Project:   sd.project,
+			Scope:     "project",
+		}); err != nil {
+			t.Fatalf("add observation %s: %v", sd.project, err)
+		}
+	}
+}
+
+func TestHandleSearchAllProjectsReturnsResultsFromEveryProject(t *testing.T) {
+	s := newMCPTestStore(t)
+	seedCrossProjectMemories(t, s)
+
+	search := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"query":        "auth middleware",
+		"all_projects": true,
+		"limit":        5.0,
+	}}}
+
+	res, err := search(context.Background(), req)
+	if err != nil {
+		t.Fatalf("search handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected search error: %s", callResultText(t, res))
+	}
+
+	text := callResultText(t, res)
+	if !strings.Contains(text, "alpha") {
+		t.Fatalf("expected result from alpha, got: %s", text)
+	}
+	if !strings.Contains(text, "beta") {
+		t.Fatalf("expected result from beta, got: %s", text)
+	}
+
+	// Envelope must reflect cross-project search, not a single resolved project.
+	var envelope map[string]any
+	if err := json.Unmarshal([]byte(text), &envelope); err != nil {
+		t.Fatalf("envelope is not JSON: %v\n%s", err, text)
+	}
+	if got := envelope["project_source"]; got != project.SourceAllProjects {
+		t.Fatalf("project_source = %v; want %q", got, project.SourceAllProjects)
+	}
+	if got := envelope["project"]; got != "" {
+		t.Fatalf("project = %v; want empty string for cross-project search", got)
+	}
+}
+
+func TestHandleSearchAllProjectsOverridesProjectArg(t *testing.T) {
+	s := newMCPTestStore(t)
+	seedCrossProjectMemories(t, s)
+
+	search := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	// Pass both project="alpha" and all_projects=true: all_projects must win.
+	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"query":        "auth middleware",
+		"project":      "alpha",
+		"all_projects": true,
+		"limit":        5.0,
+	}}}
+
+	res, err := search(context.Background(), req)
+	if err != nil {
+		t.Fatalf("search handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected search error: %s", callResultText(t, res))
+	}
+
+	text := callResultText(t, res)
+	if !strings.Contains(text, "beta") {
+		t.Fatalf("expected result from beta even when project=alpha was supplied; got: %s", text)
+	}
+}
+
+func TestHandleSearchWithoutAllProjectsStillScopesToCurrentProject(t *testing.T) {
+	s := newMCPTestStore(t)
+	seedCrossProjectMemories(t, s)
+
+	search := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	// Default behavior: project="alpha", no all_projects flag → only alpha matches.
+	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"query":   "auth middleware",
+		"project": "alpha",
+		"limit":   5.0,
+	}}}
+
+	res, err := search(context.Background(), req)
+	if err != nil {
+		t.Fatalf("search handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected search error: %s", callResultText(t, res))
+	}
+
+	text := callResultText(t, res)
+	if !strings.Contains(text, "alpha") {
+		t.Fatalf("expected result from alpha, got: %s", text)
+	}
+	if strings.Contains(text, "beta") {
+		t.Fatalf("beta result should not leak into a scoped search; got: %s", text)
+	}
+}
+
