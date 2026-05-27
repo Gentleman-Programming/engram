@@ -623,17 +623,20 @@ func cmdCloudStatus(cfg store.Config) {
 			fmt.Println("Auth status: ready (insecure local-dev mode: ENGRAM_CLOUD_INSECURE_NO_AUTH=1)")
 			fmt.Println("Sync readiness: ready for explicit --project sync (project must be enrolled)")
 			fmt.Println("Warning: bearer auth is disabled in insecure mode; do not use in production")
+			printCloudStatusDaemonProbe()
 			printCloudStatusSyncDiagnostic(cfg)
 			return
 		}
 		fmt.Println("Auth status: token not configured (client token is optional at preflight)")
 		fmt.Println("Sync readiness: ready to attempt explicit --project sync (project must be enrolled)")
 		fmt.Println("Hint: if the remote server enforces bearer auth, set ENGRAM_CLOUD_TOKEN")
+		printCloudStatusDaemonProbe()
 		printCloudStatusSyncDiagnostic(cfg)
 		return
 	}
 	fmt.Println("Auth status: ready (token provided via runtime cloud config)")
 	fmt.Println("Sync readiness: ready for explicit --project sync (project must be enrolled)")
+	printCloudStatusDaemonProbe()
 	printCloudStatusSyncDiagnostic(cfg)
 }
 

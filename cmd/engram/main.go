@@ -39,6 +39,7 @@ import (
 	"github.com/Gentleman-Programming/engram/internal/setup"
 	"github.com/Gentleman-Programming/engram/internal/store"
 	engramsync "github.com/Gentleman-Programming/engram/internal/sync"
+	"github.com/Gentleman-Programming/engram/internal/timeutil"
 	"github.com/Gentleman-Programming/engram/internal/tui"
 	versioncheck "github.com/Gentleman-Programming/engram/internal/version"
 
@@ -975,7 +976,7 @@ func cmdSearch(cfg store.Config) {
 		fmt.Printf("[%d] #%d (%s) — %s\n    %s\n    %s%s | scope: %s\n\n",
 			i+1, r.ID, r.Type, r.Title,
 			truncate(r.Content, 300),
-			r.CreatedAt, project, r.Scope)
+			timeutil.FormatLocal(r.CreatedAt), project, r.Scope)
 	}
 }
 
@@ -1115,7 +1116,7 @@ func cmdTimeline(cfg store.Config) {
 	// Focus
 	fmt.Printf(">>> #%d [%s] %s <<<\n", result.Focus.ID, result.Focus.Type, result.Focus.Title)
 	fmt.Printf("    %s\n", truncate(result.Focus.Content, 500))
-	fmt.Printf("    %s\n\n", result.Focus.CreatedAt)
+	fmt.Printf("    %s\n\n", timeutil.FormatLocal(result.Focus.CreatedAt))
 
 	// After
 	if len(result.After) > 0 {

@@ -40,6 +40,7 @@ const (
 	SourceUserSelectedAfterAmbiguousProject = "user_selected_after_ambiguous_project"
 	SourceRequestBody                       = "request_body" // REQ-414: project came from the request body (server-side, no filesystem path)
 	SourceConfig                            = "config"       // derived from .engram/config.json project_name
+	SourceAllProjects                       = "all_projects" // caller asked for cross-project search (no single project resolved)
 )
 
 // noiseSet lists directory names that are skipped during child-repo scanning.
