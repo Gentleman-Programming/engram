@@ -38,6 +38,32 @@ func NewExporter(s StoreReader, cfg ExportConfig) *Exporter {
 	return &Exporter{store: s, config: cfg}
 }
 
+// sanitizePathComponent strips path separators and dot-dot sequences from a
+// single path component (project name or observation type), preventing path
+// traversal attacks when the value is used inside filepath.Join.
+// Any slash, backslash, or ".." element is replaced with "_".
+func sanitizePathComponent(s string) string {
+	// Replace OS separators with underscore.
+	s = strings.ReplaceAll(s, string(filepath.Separator), "_")
+	s = strings.ReplaceAll(s, "/", "_")
+	s = strings.ReplaceAll(s, "\\", "_")
+
+	// Replace ".." with "__" to neutralise traversal.
+	s = strings.ReplaceAll(s, "..", "__")
+
+	// filepath.Clean on a single component that contains no separators is a
+	// no-op, but run it anyway to normalise any remaining oddities (e.g. trailing
+	// dots on Windows). We re-apply the separator guard afterwards because Clean
+	// can introduce a leading "/" on absolute-looking inputs on Unix.
+	clean := filepath.Clean(s)
+	clean = strings.ReplaceAll(clean, string(filepath.Separator), "_")
+	clean = strings.ReplaceAll(clean, "/", "_")
+	if clean == "" || clean == "." {
+		clean = "_"
+	}
+	return clean
+}
+
 // SetGraphConfig sets the GraphConfig mode on this exporter's config.
 // This is used by Watcher to force GraphConfigSkip on subsequent cycles (REQ-WATCH-06).
 func (e *Exporter) SetGraphConfig(mode GraphConfigMode) {
@@ -189,15 +215,26 @@ func (e *Exporter) Export() (*ExportResult, error) {
 			}
 		}
 
-		// Determine target file path
+		// Determine target file path — sanitize project and type to prevent
+		// path traversal (issue #180): strip separators and dot-dot sequences,
+		// then verify the resolved absolute path stays inside engRoot.
 		project := "unknown"
 		if obs.Project != nil && *obs.Project != "" {
-			project = *obs.Project
+			project = sanitizePathComponent(*obs.Project)
 		}
+		obsType := sanitizePathComponent(obs.Type)
 		slug := Slugify(obs.Title, obs.ID)
-		relPath := filepath.Join(project, obs.Type, slug+".md")
-		absDir := filepath.Join(engRoot, project, obs.Type)
+		relPath := filepath.Join(project, obsType, slug+".md")
+		absDir := filepath.Join(engRoot, project, obsType)
 		absPath := filepath.Join(engRoot, relPath)
+
+		// Containment check: reject any path that escapes engRoot after cleaning.
+		cleanRoot := filepath.Clean(engRoot)
+		cleanPath := filepath.Clean(absPath)
+		if !strings.HasPrefix(cleanPath, cleanRoot+string(filepath.Separator)) {
+			result.Errors = append(result.Errors, fmt.Errorf("unsafe path rejected (would escape export root): %s", cleanPath))
+			continue
+		}
 
 		// Create directory
 		if err := os.MkdirAll(absDir, 0755); err != nil {

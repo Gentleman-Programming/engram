@@ -3,6 +3,7 @@ package obsidian
 import (
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // mkdirAll creates the given directory path (all parents), used in tests.
@@ -47,4 +48,24 @@ func countFilesInDir(t interface {
 		}
 	}
 	return count
+}
+
+// walkDir walks all regular files under root and calls fn for each absolute path.
+func walkDir(root string, fn func(path string)) error {
+	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			fn(path)
+		}
+		return nil
+	})
+}
+
+// isContainedIn reports whether path is inside (or equal to) root after cleaning.
+func isContainedIn(path, root string) bool {
+	cleanPath := filepath.Clean(path)
+	cleanRoot := filepath.Clean(root)
+	return strings.HasPrefix(cleanPath, cleanRoot+string(filepath.Separator)) || cleanPath == cleanRoot
 }

@@ -6649,6 +6649,137 @@ func TestHandleContextPersonalScopeIgnoresCWDProject(t *testing.T) {
 	}
 }
 
+// ─── #403/#413: handleSessionSummary process-override tests ──────────────────
+
+// TestSessionSummary_ProcessOverrideWritesToDefaultProject verifies that when
+// cfg.DefaultProject is set (process-level override via ENGRAM_PROJECT / --project),
+// handleSessionSummary writes under that project instead of falling back to cwd
+// detection. Mirrors TestProcessOverrideSaveHandlerWritesToDefaultProject for save.
+func TestSessionSummary_ProcessOverrideWritesToDefaultProject(t *testing.T) {
+	// Use a temp dir that has no git repo — without the fix, resolveWriteProject()
+	// would return an error or a wrong project; with the fix it uses the override.
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	h := handleSessionSummary(s, MCPConfig{DefaultProject: "Trusted Project"}, NewSessionActivity(10*time.Minute))
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"content": "## Goal\nProcess override session summary",
+	}}})
+	if err != nil || res.IsError {
+		t.Fatalf("session summary error: err=%v isError=%v text=%q", err, res.IsError, callResultText(t, res))
+	}
+
+	obs, err := s.RecentObservations("trusted project", "project", 5)
+	if err != nil {
+		t.Fatalf("RecentObservations: %v", err)
+	}
+	if len(obs) == 0 {
+		t.Fatal("expected session_summary observation under 'trusted project' (process override); got none")
+	}
+
+	m := callResultJSON(t, res)
+	if got := m["project"]; got != "trusted project" {
+		t.Errorf("response envelope project = %v; want 'trusted project'", got)
+	}
+	if got := m["project_source"]; got != sourceProcessOverride {
+		t.Errorf("response envelope project_source = %v; want %s", got, sourceProcessOverride)
+	}
+}
+
+// TestSessionSummary_ProcessOverrideBypassesAmbiguousCWD verifies that an
+// ambiguous cwd (parent dir with multiple git repos) is bypassed when
+// cfg.DefaultProject is set.
+func TestSessionSummary_ProcessOverrideBypassesAmbiguousCWD(t *testing.T) {
+	parent := t.TempDir()
+	for _, name := range []string{"repo-ss-1", "repo-ss-2"} {
+		child := filepath.Join(parent, name)
+		if err := os.MkdirAll(child, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		initTestGitRepo(t, child)
+	}
+	t.Chdir(parent)
+
+	s := newMCPTestStore(t)
+	h := handleSessionSummary(s, MCPConfig{DefaultProject: "override-project"}, NewSessionActivity(10*time.Minute))
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"content": "## Goal\nAmbiguous override test",
+	}}})
+	if err != nil || res.IsError {
+		t.Fatalf("expected success via process override; err=%v isError=%v text=%q", err, res.IsError, callResultText(t, res))
+	}
+
+	obs, err := s.RecentObservations("override-project", "project", 5)
+	if err != nil {
+		t.Fatalf("RecentObservations: %v", err)
+	}
+	if len(obs) == 0 {
+		t.Fatal("expected session_summary under 'override-project'; got none")
+	}
+}
+
+// ─── #393: handleSessionSummary empty-content guard tests ────────────────────
+
+// TestSessionSummary_EmptyContentRejected verifies that an empty content string
+// is rejected before AddObservation is called, mirroring the guard in handleSave.
+func TestSessionSummary_EmptyContentRejected(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"content": "",
+	}}})
+	if err != nil {
+		t.Fatalf("handler returned Go error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("expected tool error for empty content; got success")
+	}
+	text := callResultText(t, res)
+	if !strings.Contains(text, "content") {
+		t.Errorf("error message should mention 'content'; got: %q", text)
+	}
+
+	// No observation must have been persisted.
+	obs, err := s.RecentObservations("", "project", 10)
+	if err != nil {
+		t.Fatalf("RecentObservations: %v", err)
+	}
+	if len(obs) != 0 {
+		t.Fatalf("expected 0 observations after empty-content rejection; got %d", len(obs))
+	}
+}
+
+// TestSessionSummary_WhitespaceOnlyContentRejected verifies that whitespace-only
+// content is also rejected (mirrors handleSave behaviour).
+func TestSessionSummary_WhitespaceOnlyContentRejected(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"content": "   \n\t  ",
+	}}})
+	if err != nil {
+		t.Fatalf("handler returned Go error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("expected tool error for whitespace-only content; got success")
+	}
+}
+
+// ─── #408/#346: cross-project search and timezone tests ──────────────────────
+
 // seedCrossProjectMemories inserts one observation per project so cross-project
 // search tests have something to find. Returns the session IDs created.
 func seedCrossProjectMemories(t *testing.T, s *store.Store) {

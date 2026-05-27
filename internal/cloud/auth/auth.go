@@ -250,7 +250,7 @@ func (s *Service) Authorize(r *http.Request) error {
 	if token == "" {
 		return fmt.Errorf("bearer token is required")
 	}
-	if token != s.expectedToken {
+	if !hmac.Equal([]byte(token), []byte(s.expectedToken)) {
 		return fmt.Errorf("invalid bearer token")
 	}
 	return nil
