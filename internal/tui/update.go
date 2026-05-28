@@ -1,9 +1,12 @@
 package tui
 
 import (
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/setup"
+	"github.com/Gentleman-Programming/engram/internal/store"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -112,11 +115,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case sessionDeletedMsg:
-		m.SessionDeletePrompt = false
-		m.SessionDeleteID = ""
-		m.SessionDeleteProject = ""
+		m = m.resetSessionDeleteState()
 		if msg.err != nil {
-			m.ErrorMsg = msg.err.Error()
+			m.ErrorMsg = sessionDeleteErrorMessage(msg.sessionID, msg.err)
 			return m, nil
 		}
 		return m, loadRecentSessions(m.store)
@@ -459,18 +460,22 @@ func (m Model) handleTimelineKeys(key string) (tea.Model, tea.Cmd) {
 // ─── Sessions ────────────────────────────────────────────────────────────────
 
 func (m Model) handleSessionsKeys(key string) (tea.Model, tea.Cmd) {
+	if m.SessionDeleting {
+		return m, nil
+	}
 	if m.SessionDeletePrompt {
 		switch key {
 		case "y", "Y":
 			if m.SessionDeleteID == "" {
-				m.SessionDeletePrompt = false
+				m = m.resetSessionDeleteState()
 				return m, nil
 			}
-			return m, deleteSession(m.store, m.SessionDeleteID)
-		case "n", "N", "esc":
+			sessionID := m.SessionDeleteID
 			m.SessionDeletePrompt = false
-			m.SessionDeleteID = ""
-			m.SessionDeleteProject = ""
+			m.SessionDeleting = true
+			return m, deleteSession(m.store, sessionID)
+		case "n", "N", "esc":
+			m = m.resetSessionDeleteState()
 			return m, nil
 		}
 		return m, nil
@@ -514,9 +519,7 @@ func (m Model) handleSessionsKeys(key string) (tea.Model, tea.Cmd) {
 		m.Screen = ScreenDashboard
 		m.Cursor = 0
 		m.Scroll = 0
-		m.SessionDeletePrompt = false
-		m.SessionDeleteID = ""
-		m.SessionDeleteProject = ""
+		m = m.resetSessionDeleteState()
 		return m, loadStats(m.store)
 	}
 	return m, nil
@@ -639,6 +642,24 @@ func (m Model) handleSetupKeys(key string) (tea.Model, tea.Cmd) {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+func (m Model) resetSessionDeleteState() Model {
+	m.SessionDeletePrompt = false
+	m.SessionDeleting = false
+	m.SessionDeleteID = ""
+	m.SessionDeleteProject = ""
+	return m
+}
+
+func sessionDeleteErrorMessage(sessionID string, err error) string {
+	if errors.Is(err, store.ErrSessionHasObservations) {
+		return fmt.Sprintf("Cannot delete session %q: it still has observations. Delete or move observations first.", sessionID)
+	}
+	if errors.Is(err, store.ErrSessionNotFound) {
+		return fmt.Sprintf("Cannot delete session %q: session not found.", sessionID)
+	}
+	return fmt.Sprintf("Failed to delete session %q: %v", sessionID, err)
+}
 
 // refreshScreen returns the appropriate data-loading Cmd for a given screen.
 // Used when navigating back so lists show fresh data from the DB.

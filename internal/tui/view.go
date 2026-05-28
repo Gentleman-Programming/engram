@@ -451,6 +451,15 @@ func (m Model) viewSessions() string {
 	b.WriteString(headerStyle.Render(header))
 	b.WriteString("\n")
 
+	if m.SessionDeleting {
+		b.WriteString("\n")
+		b.WriteString(sectionHeadingStyle.Render("  Deleting Session"))
+		b.WriteString("\n\n")
+		b.WriteString(detailContentStyle.Render(fmt.Sprintf("  Deleting session %q...", m.SessionDeleteID)))
+		b.WriteString("\n")
+		return b.String()
+	}
+
 	if m.SessionDeletePrompt {
 		b.WriteString("\n")
 		b.WriteString(sectionHeadingStyle.Render("  Confirm Session Delete"))

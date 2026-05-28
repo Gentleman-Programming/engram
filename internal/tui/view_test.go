@@ -328,6 +328,13 @@ func TestViewSessionsDeletePrompt(t *testing.T) {
 	if !strings.Contains(out, "[y] Delete") || !strings.Contains(out, "[n] Cancel") || !strings.Contains(out, "[esc] Cancel") {
 		t.Fatal("delete prompt should render y/n/esc options")
 	}
+
+	m.SessionDeletePrompt = false
+	m.SessionDeleting = true
+	out = m.viewSessions()
+	if !strings.Contains(out, "Deleting Session") || !strings.Contains(out, "session-1") {
+		t.Fatal("deleting state should render selected session context")
+	}
 }
 
 func TestViewRouterCoversAllScreens(t *testing.T) {

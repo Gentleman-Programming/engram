@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/internal/setup"
@@ -324,7 +325,7 @@ func TestSessionDeletePromptFlow(t *testing.T) {
 		if cmd != nil {
 			t.Fatal("esc cancel should not return command")
 		}
-		if updated.SessionDeletePrompt || updated.SessionDeleteID != "" || updated.SessionDeleteProject != "" {
+		if updated.SessionDeletePrompt || updated.SessionDeleting || updated.SessionDeleteID != "" || updated.SessionDeleteProject != "" {
 			t.Fatal("esc cancel should clear delete prompt state")
 		}
 
@@ -335,7 +336,7 @@ func TestSessionDeletePromptFlow(t *testing.T) {
 		if cmd != nil {
 			t.Fatal("n cancel should not return command")
 		}
-		if updated.SessionDeletePrompt || updated.SessionDeleteID != "" || updated.SessionDeleteProject != "" {
+		if updated.SessionDeletePrompt || updated.SessionDeleting || updated.SessionDeleteID != "" || updated.SessionDeleteProject != "" {
 			t.Fatal("n cancel should clear delete prompt state")
 		}
 	})
@@ -354,6 +355,12 @@ func TestSessionDeletePromptFlow(t *testing.T) {
 		if cmd == nil {
 			t.Fatal("confirm should return delete command")
 		}
+		if updated.SessionDeletePrompt || !updated.SessionDeleting {
+			t.Fatal("confirm should close prompt and mark delete in progress")
+		}
+		if _, secondCmd := updated.handleSessionsKeys("y"); secondCmd != nil {
+			t.Fatal("second confirm while deleting should be ignored")
+		}
 
 		msg := cmd().(sessionDeletedMsg)
 		if msg.err != nil {
@@ -361,7 +368,7 @@ func TestSessionDeletePromptFlow(t *testing.T) {
 		}
 		updatedModel, refreshCmd := updated.Update(msg)
 		updated = updatedModel.(Model)
-		if updated.SessionDeletePrompt || updated.SessionDeleteID != "" {
+		if updated.SessionDeletePrompt || updated.SessionDeleting || updated.SessionDeleteID != "" {
 			t.Fatal("delete result should clear prompt state")
 		}
 		if refreshCmd == nil {
@@ -394,11 +401,29 @@ func TestSessionDeletePromptFlow(t *testing.T) {
 		if refreshCmd != nil {
 			t.Fatal("failed delete should not refresh sessions")
 		}
-		if updated.ErrorMsg == "" {
-			t.Fatal("failed delete should surface error message")
+		if updated.ErrorMsg == "" || !strings.Contains(updated.ErrorMsg, "Cannot delete session") {
+			t.Fatalf("failed delete should surface contextual error message, got %q", updated.ErrorMsg)
 		}
-		if updated.SessionDeletePrompt {
+		if updated.SessionDeletePrompt || updated.SessionDeleting {
 			t.Fatal("failed delete should close prompt")
+		}
+	})
+
+	t.Run("nil store returns graceful error", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen = ScreenSessions
+		m.Sessions = []store.SessionSummary{{ID: "session-missing-store", Project: "engram"}}
+
+		updatedModel, _ := m.handleSessionsKeys("d")
+		updated := updatedModel.(Model)
+		_, cmd := updated.handleSessionsKeys("y")
+		if cmd == nil {
+			t.Fatal("confirm should return delete command")
+		}
+
+		msg := cmd().(sessionDeletedMsg)
+		if msg.err == nil {
+			t.Fatal("nil store delete should return an error message")
 		}
 	})
 

@@ -10,6 +10,8 @@
 package tui
 
 import (
+	"errors"
+
 	"github.com/Gentleman-Programming/engram/internal/setup"
 	"github.com/Gentleman-Programming/engram/internal/store"
 	"github.com/Gentleman-Programming/engram/internal/version"
@@ -131,6 +133,7 @@ type Model struct {
 	SessionObservations  []store.Observation
 	SessionDetailScroll  int
 	SessionDeletePrompt  bool
+	SessionDeleting      bool
 	SessionDeleteID      string
 	SessionDeleteProject string
 
@@ -238,6 +241,9 @@ func loadSessionObservations(s *store.Store, sessionID string) tea.Cmd {
 
 func deleteSession(s *store.Store, sessionID string) tea.Cmd {
 	return func() tea.Msg {
+		if s == nil {
+			return sessionDeletedMsg{sessionID: sessionID, err: errors.New("store is unavailable")}
+		}
 		err := s.DeleteSession(sessionID)
 		return sessionDeletedMsg{sessionID: sessionID, err: err}
 	}
