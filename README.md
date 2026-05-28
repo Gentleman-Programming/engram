@@ -308,6 +308,9 @@ Your production engram is fully untouched throughout.
 | `engram search <query>`                    | Search memories                                                 |
 | `engram save <title> <msg>`                | Save a memory                                                   |
 | `engram delete <obs_id>`                   | Delete an observation (soft by default; `--hard` removes permanently) |
+| `engram delete session <id>`               | Delete a session by ID (must have no observations)                    |
+| `engram delete prompt <id>`                | Delete a prompt by ID (permanent)                                     |
+| `engram delete project <name> [--hard]`    | Cascade-delete a project: soft-deletes observations by default (`--hard` removes permanently and also removes sessions) |
 | `engram timeline <obs_id>`                 | Chronological context                                           |
 | `engram context [project]`                 | Recent session context                                          |
 | `engram stats`                             | Memory statistics                                               |

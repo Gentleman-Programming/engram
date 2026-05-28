@@ -88,8 +88,13 @@ var (
 	storeSearch = func(s *store.Store, query string, opts store.SearchOptions) ([]store.SearchResult, error) {
 		return s.Search(query, opts)
 	}
-	storeAddObservation       = func(s *store.Store, p store.AddObservationParams) (int64, error) { return s.AddObservation(p) }
-	storeDeleteObservation    = func(s *store.Store, id int64, hard bool) error { return s.DeleteObservation(id, hard) }
+	storeAddObservation    = func(s *store.Store, p store.AddObservationParams) (int64, error) { return s.AddObservation(p) }
+	storeDeleteObservation = func(s *store.Store, id int64, hard bool) error { return s.DeleteObservation(id, hard) }
+	storeDeleteSession     = func(s *store.Store, id string) error { return s.DeleteSession(id) }
+	storeDeletePrompt      = func(s *store.Store, id int64) error { return s.DeletePrompt(id) }
+	storeDeleteProject     = func(s *store.Store, name string, hard bool) (*store.DeleteProjectResult, error) {
+		return s.DeleteProject(name, hard)
+	}
 	storeTimeline       = func(s *store.Store, observationID int64, before, after int) (*store.TimelineResult, error) {
 		return s.Timeline(observationID, before, after)
 	}
@@ -1058,6 +1063,30 @@ func cmdSave(cfg store.Config) {
 func cmdDelete(cfg store.Config) {
 	if len(os.Args) < 3 {
 		fmt.Fprintln(os.Stderr, "usage: engram delete <observation_id> [--hard]")
+		fmt.Fprintln(os.Stderr, "       engram delete session  <id>")
+		fmt.Fprintln(os.Stderr, "       engram delete prompt   <id>")
+		fmt.Fprintln(os.Stderr, "       engram delete project  <name> [--hard]")
+		exitFunc(1)
+		return
+	}
+
+	sub := os.Args[2]
+	switch sub {
+	case "session":
+		cmdDeleteSession(cfg)
+	case "prompt":
+		cmdDeletePrompt(cfg)
+	case "project":
+		cmdDeleteProject(cfg)
+	default:
+		// Backward-compat: treat the second arg as a numeric observation ID.
+		cmdDeleteObservation(cfg)
+	}
+}
+
+func cmdDeleteObservation(cfg store.Config) {
+	if len(os.Args) < 3 {
+		fmt.Fprintln(os.Stderr, "usage: engram delete <observation_id> [--hard]")
 		exitFunc(1)
 		return
 	}
@@ -1093,6 +1122,93 @@ func cmdDelete(cfg store.Config) {
 		kind = "hard-deleted"
 	}
 	fmt.Printf("Observation #%d %s\n", id, kind)
+}
+
+func cmdDeleteSession(cfg store.Config) {
+	if len(os.Args) < 4 {
+		fmt.Fprintln(os.Stderr, "usage: engram delete session <id>")
+		exitFunc(1)
+		return
+	}
+
+	id := os.Args[3]
+
+	s, err := storeNew(cfg)
+	if err != nil {
+		fatal(err)
+		return
+	}
+	defer s.Close()
+
+	if err := storeDeleteSession(s, id); err != nil {
+		fatal(err)
+		return
+	}
+	fmt.Printf("Session %q deleted\n", id)
+}
+
+func cmdDeletePrompt(cfg store.Config) {
+	if len(os.Args) < 4 {
+		fmt.Fprintln(os.Stderr, "usage: engram delete prompt <id>")
+		exitFunc(1)
+		return
+	}
+
+	id, err := strconv.ParseInt(os.Args[3], 10, 64)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: invalid prompt id %q\n", os.Args[3])
+		exitFunc(1)
+		return
+	}
+
+	s, err := storeNew(cfg)
+	if err != nil {
+		fatal(err)
+		return
+	}
+	defer s.Close()
+
+	if err := storeDeletePrompt(s, id); err != nil {
+		fatal(err)
+		return
+	}
+	fmt.Printf("Prompt #%d deleted\n", id)
+}
+
+func cmdDeleteProject(cfg store.Config) {
+	if len(os.Args) < 4 {
+		fmt.Fprintln(os.Stderr, "usage: engram delete project <name> [--hard]")
+		exitFunc(1)
+		return
+	}
+
+	name := os.Args[3]
+	hard := false
+	for i := 4; i < len(os.Args); i++ {
+		if os.Args[i] == "--hard" {
+			hard = true
+		}
+	}
+
+	s, err := storeNew(cfg)
+	if err != nil {
+		fatal(err)
+		return
+	}
+	defer s.Close()
+
+	result, err := storeDeleteProject(s, name, hard)
+	if err != nil {
+		fatal(err)
+		return
+	}
+
+	kind := "soft-deleted"
+	if hard {
+		kind = "hard-deleted"
+	}
+	fmt.Printf("Project %q %s: %d observation(s), %d prompt(s), %d session(s)\n",
+		result.Project, kind, result.ObservationsDeleted, result.PromptsDeleted, result.SessionsDeleted)
 }
 
 func cmdTimeline(cfg store.Config) {
@@ -2330,6 +2446,13 @@ Commands:
   search <query>     Search memories [--type TYPE] [--project PROJECT] [--scope SCOPE] [--limit N]
   save <title> <msg> Save a memory  [--type TYPE] [--project PROJECT] [--scope SCOPE]
   delete <obs_id>    Delete an observation [--hard] (soft-delete by default; --hard removes permanently)
+  delete session <id>
+                     Delete a session by ID (session must have no observations)
+  delete prompt <id>
+                     Delete a prompt by ID (permanent)
+  delete project <name> [--hard]
+                     Cascade-delete a project: soft-deletes observations (or hard if --hard),
+                     removes prompts; with --hard also removes sessions
   timeline <obs_id>  Show chronological context around an observation [--before N] [--after N]
   conflicts <sub>   Inspect and manage memory conflict relations
                        list     [--project P]  [--status S]  [--since RFC3339]  [--limit N]
