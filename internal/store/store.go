@@ -50,6 +50,7 @@ var (
 	ErrSessionDeleteBlocked   = errors.New("session deletion is blocked while cloud sync enrollment is active")
 	ErrObservationNotFound    = errors.New("observation not found")
 	ErrPromptNotFound         = errors.New("prompt not found")
+	ErrProjectNotFound        = errors.New("project not found")
 	ErrProjectNameRequired    = errors.New("project name must not be empty")
 )
 
@@ -4117,6 +4118,7 @@ type MigrateResult struct {
 type DeleteProjectResult struct {
 	Deleted                 bool   `json:"deleted"`
 	Project                 string `json:"project"`
+	HardDelete              bool   `json:"hard_delete"`
 	ObservationsDeleted     int64  `json:"observations_deleted"`
 	PromptsDeleted          int64  `json:"prompts_deleted"`
 	SessionsDeleted         int64  `json:"sessions_deleted"`
@@ -4186,18 +4188,19 @@ func (s *Store) MigrateProject(oldName, newName string) (*MigrateResult, error) 
 	return result, nil
 }
 
-// DeleteProject performs a hard, transactional project-wide delete.
-// It removes all project-owned local data and project-scoped sync metadata.
+// DeleteProject performs a transactional project-wide delete.
+// Hard deletes remove project-owned local data and project-scoped sync metadata.
+// Soft deletes mark observations deleted and remove prompts, but keep sessions for FK safety.
 // Related memory_relations rows are orphaned, not deleted, so audit history is preserved.
-// Unknown projects are a successful no-op and return Deleted=false.
-func (s *Store) DeleteProject(project string) (*DeleteProjectResult, error) {
+// Unknown projects return ErrProjectNotFound.
+func (s *Store) DeleteProject(project string, hardDelete bool) (*DeleteProjectResult, error) {
 	rawProject := project
 	project, _ = NormalizeProject(project)
 	if project == "" {
 		return nil, ErrProjectNameRequired
 	}
 
-	result := &DeleteProjectResult{Project: project}
+	result := &DeleteProjectResult{Project: project, HardDelete: hardDelete}
 	err := s.withTx(func(tx *sql.Tx) error {
 		projectVariants := append([]string{project}, projectMergeSourceVariants(rawProject, project, "")...)
 		projectArgs := make([]any, 0, len(projectVariants))
@@ -4249,6 +4252,36 @@ func (s *Store) DeleteProject(project string) (*DeleteProjectResult, error) {
 			    OR session_id IN (SELECT id FROM sessions WHERE lower(trim(project)) IN (`+projectPlaceholders+`))
 		)`, repeatArgs(projectArgs, 7)...).Scan(&exists); err != nil {
 			return fmt.Errorf("delete project: check existence: %w", err)
+		}
+
+		if !hardDelete {
+			if !exists {
+				return fmt.Errorf("%w: %q", ErrProjectNotFound, project)
+			}
+			res, err := s.execHook(tx, `
+				UPDATE observations
+				SET deleted_at = datetime('now'),
+				    updated_at = datetime('now')
+				WHERE deleted_at IS NULL
+				  AND (lower(trim(project)) IN (`+projectPlaceholders+`)
+				       OR session_id IN (SELECT id FROM sessions WHERE lower(trim(project)) IN (`+projectPlaceholders+`)))
+			`, repeatArgs(projectArgs, 2)...)
+			if err != nil {
+				return fmt.Errorf("delete project: soft-delete observations: %w", err)
+			}
+			result.ObservationsDeleted, _ = res.RowsAffected()
+
+			res, err = s.execHook(tx, `
+				DELETE FROM user_prompts
+				 WHERE lower(trim(project)) IN (`+projectPlaceholders+`)
+				    OR session_id IN (SELECT id FROM sessions WHERE lower(trim(project)) IN (`+projectPlaceholders+`))
+			`, repeatArgs(projectArgs, 2)...)
+			if err != nil {
+				return fmt.Errorf("delete project: delete prompts: %w", err)
+			}
+			result.PromptsDeleted, _ = res.RowsAffected()
+			result.Deleted = true
+			return nil
 		}
 
 		mutationTargetKeys := make(map[string]struct{})
@@ -4388,6 +4421,9 @@ func (s *Store) DeleteProject(project string) (*DeleteProjectResult, error) {
 			result.MemoryRelationsOrphaned > 0 || result.SyncMutationsDeleted > 0 || result.SyncDeferredDeleted > 0 ||
 			result.SyncChunksDeleted > 0 || result.SyncStateDeleted > 0 ||
 			result.PromptTombstonesDeleted > 0 || result.EnrollmentDeleted > 0 || result.UpgradeStateDeleted > 0
+		if !result.Deleted {
+			return fmt.Errorf("%w: %q", ErrProjectNotFound, project)
+		}
 
 		return nil
 	})

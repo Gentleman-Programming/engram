@@ -173,6 +173,13 @@ engram tui                Launch interactive terminal UI
 engram search <query>     Search memories
 engram save <title> <msg> Save a memory
 engram delete <obs_id>    Delete an observation [--hard] (soft-delete by default; --hard removes permanently)
+engram delete session <id>
+                          Delete a session by ID (session must have no observations)
+engram delete prompt <id>
+                          Delete a prompt by ID (permanent)
+engram delete project <name> [--hard]
+                          Cascade-delete a project: soft-deletes observations (or hard-deletes
+                          with --hard, which also removes sessions); always removes prompts
 engram timeline <obs_id>  Chronological context around an observation
 engram context [project]  Recent context from previous sessions
 engram stats              Memory statistics

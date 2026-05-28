@@ -875,10 +875,18 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := s.store.DeleteProject(project)
+	result, err := s.store.DeleteProject(project, true)
 	if err != nil {
 		if errors.Is(err, store.ErrProjectNameRequired) {
 			jsonError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if errors.Is(err, store.ErrProjectNotFound) {
+			jsonResponse(w, http.StatusNotFound, map[string]any{
+				"status":  "not_found",
+				"project": project,
+				"deleted": false,
+			})
 			return
 		}
 		jsonError(w, http.StatusInternalServerError, err.Error())
