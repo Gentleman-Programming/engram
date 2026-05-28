@@ -261,6 +261,11 @@ function truncate(str: string, max: number): string {
   return str.length > max ? `${str.slice(0, max)}...` : str;
 }
 
+function errorStatusLabel(message: string): string {
+  if (/ambiguous project/i.test(message)) return "ambiguous project";
+  return "error";
+}
+
 function stripPrivateTags(str: string): string {
   return redactPrivateTags(str).trim();
 }
@@ -686,7 +691,7 @@ async function executeMemoryTool(toolName: string, params: Record<string, unknow
     const details = error instanceof EngramHttpError
       ? { error: message, http_status: error.status, data: error.data }
       : { error: message };
-    ctx.ui?.setStatus?.("engram", `🧠 ${project} · error`);
+    ctx.ui?.setStatus?.("engram", `🧠 ${project} · ${errorStatusLabel(message)}`);
     return { content: [{ type: "text" as const, text: message }], details, isError: true };
   }
 }
