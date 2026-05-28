@@ -302,6 +302,120 @@ func TestHandleRecentTimelineSessionsAndDetailKeyPaths(t *testing.T) {
 	}
 }
 
+func TestSessionDeletePromptFlow(t *testing.T) {
+	t.Run("opens and cancels prompt", func(t *testing.T) {
+		fx := newTestFixture(t)
+		m := New(fx.store, "")
+		m.Screen = ScreenSessions
+		m.Sessions = []store.SessionSummary{{ID: fx.sessionID, Project: "engram"}, {ID: fx.otherSession, Project: "engram"}}
+		m.Cursor = 1
+
+		updatedModel, cmd := m.handleSessionsKeys("d")
+		updated := updatedModel.(Model)
+		if cmd != nil {
+			t.Fatal("opening delete prompt should not return command")
+		}
+		if !updated.SessionDeletePrompt || updated.SessionDeleteID != fx.otherSession || updated.SessionDeleteProject != "engram" {
+			t.Fatalf("delete prompt state = prompt:%v id:%q project:%q", updated.SessionDeletePrompt, updated.SessionDeleteID, updated.SessionDeleteProject)
+		}
+
+		updatedModel, cmd = updated.handleSessionsKeys("esc")
+		updated = updatedModel.(Model)
+		if cmd != nil {
+			t.Fatal("esc cancel should not return command")
+		}
+		if updated.SessionDeletePrompt || updated.SessionDeleteID != "" || updated.SessionDeleteProject != "" {
+			t.Fatal("esc cancel should clear delete prompt state")
+		}
+
+		updatedModel, _ = m.handleSessionsKeys("d")
+		updated = updatedModel.(Model)
+		updatedModel, cmd = updated.handleSessionsKeys("n")
+		updated = updatedModel.(Model)
+		if cmd != nil {
+			t.Fatal("n cancel should not return command")
+		}
+		if updated.SessionDeletePrompt || updated.SessionDeleteID != "" || updated.SessionDeleteProject != "" {
+			t.Fatal("n cancel should clear delete prompt state")
+		}
+	})
+
+	t.Run("confirm deletes empty session and refreshes", func(t *testing.T) {
+		fx := newTestFixture(t)
+		m := New(fx.store, "")
+		m.Screen = ScreenSessions
+		m.Sessions = []store.SessionSummary{{ID: fx.sessionID, Project: "engram"}, {ID: fx.otherSession, Project: "engram"}}
+		m.Cursor = 1
+
+		updatedModel, _ := m.handleSessionsKeys("d")
+		updated := updatedModel.(Model)
+		updatedModel, cmd := updated.handleSessionsKeys("y")
+		updated = updatedModel.(Model)
+		if cmd == nil {
+			t.Fatal("confirm should return delete command")
+		}
+
+		msg := cmd().(sessionDeletedMsg)
+		if msg.err != nil {
+			t.Fatalf("delete command error: %v", msg.err)
+		}
+		updatedModel, refreshCmd := updated.Update(msg)
+		updated = updatedModel.(Model)
+		if updated.SessionDeletePrompt || updated.SessionDeleteID != "" {
+			t.Fatal("delete result should clear prompt state")
+		}
+		if refreshCmd == nil {
+			t.Fatal("successful delete should refresh sessions")
+		}
+		if err := fx.store.DeleteSession(fx.otherSession); !errors.Is(err, store.ErrSessionNotFound) {
+			t.Fatalf("session should be deleted, got err %v", err)
+		}
+	})
+
+	t.Run("blocked delete shows store error", func(t *testing.T) {
+		fx := newTestFixture(t)
+		m := New(fx.store, "")
+		m.Screen = ScreenSessions
+		m.Sessions = []store.SessionSummary{{ID: fx.sessionID, Project: "engram"}}
+
+		updatedModel, _ := m.handleSessionsKeys("d")
+		updated := updatedModel.(Model)
+		_, cmd := updated.handleSessionsKeys("y")
+		if cmd == nil {
+			t.Fatal("confirm should return delete command")
+		}
+
+		msg := cmd().(sessionDeletedMsg)
+		if !errors.Is(msg.err, store.ErrSessionHasObservations) {
+			t.Fatalf("expected ErrSessionHasObservations, got %v", msg.err)
+		}
+		updatedModel, refreshCmd := updated.Update(msg)
+		updated = updatedModel.(Model)
+		if refreshCmd != nil {
+			t.Fatal("failed delete should not refresh sessions")
+		}
+		if updated.ErrorMsg == "" {
+			t.Fatal("failed delete should surface error message")
+		}
+		if updated.SessionDeletePrompt {
+			t.Fatal("failed delete should close prompt")
+		}
+	})
+
+	t.Run("delete key ignored without sessions", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen = ScreenSessions
+		updatedModel, cmd := m.handleSessionsKeys("d")
+		updated := updatedModel.(Model)
+		if cmd != nil {
+			t.Fatal("delete with no sessions should not return command")
+		}
+		if updated.SessionDeletePrompt {
+			t.Fatal("delete with no sessions should not open prompt")
+		}
+	})
+}
+
 func TestRefreshScreen(t *testing.T) {
 	m := New(newTestFixture(t).store, "")
 

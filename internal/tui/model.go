@@ -78,6 +78,11 @@ type sessionObservationsMsg struct {
 	err          error
 }
 
+type sessionDeletedMsg struct {
+	sessionID string
+	err       error
+}
+
 type setupInstallMsg struct {
 	result *setup.Result
 	err    error
@@ -121,10 +126,13 @@ type Model struct {
 	Timeline *store.TimelineResult
 
 	// Sessions
-	Sessions            []store.SessionSummary
-	SelectedSessionIdx  int
-	SessionObservations []store.Observation
-	SessionDetailScroll int
+	Sessions             []store.SessionSummary
+	SelectedSessionIdx   int
+	SessionObservations  []store.Observation
+	SessionDetailScroll  int
+	SessionDeletePrompt  bool
+	SessionDeleteID      string
+	SessionDeleteProject string
 
 	// Clipboard feedback
 	CopyFeedback string // "✓ Copied!" or "" — shown for 2 s after copy
@@ -225,6 +233,13 @@ func loadSessionObservations(s *store.Store, sessionID string) tea.Cmd {
 	return func() tea.Msg {
 		obs, err := s.SessionObservations(sessionID, 200)
 		return sessionObservationsMsg{observations: obs, err: err}
+	}
+}
+
+func deleteSession(s *store.Store, sessionID string) tea.Cmd {
+	return func() tea.Msg {
+		err := s.DeleteSession(sessionID)
+		return sessionDeletedMsg{sessionID: sessionID, err: err}
 	}
 }
 
