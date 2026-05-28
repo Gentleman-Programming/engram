@@ -2277,7 +2277,7 @@ func TestClaudeCodeUserPromptSubmitHookTimeout(t *testing.T) {
 		t.Fatalf("expected one UserPromptSubmit command hook, got %#v", entries)
 	}
 	hook := entries[0].Hooks[0]
-	if hook.Command != "${CLAUDE_PLUGIN_ROOT}/scripts/user-prompt-submit.sh" {
+	if hook.Command != "\"${CLAUDE_PLUGIN_ROOT}/scripts/user-prompt-submit.sh\"" {
 		t.Fatalf("unexpected UserPromptSubmit command %q", hook.Command)
 	}
 	if hook.Timeout != 2 {
