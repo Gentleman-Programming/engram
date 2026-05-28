@@ -376,6 +376,30 @@ command = "engram"
 args = ["mcp"]
 ```
 
+### Troubleshooting: "MCP Transport closed"
+
+Codex communicates with Engram over a stdio MCP session that is started fresh each time Codex launches. If that session becomes stale — for example after replacing the `engram` binary, editing `config.toml` or the instruction files, or force-stopping an `engram` process — subsequent tool calls fail with:
+
+```
+Transport closed
+```
+
+**Recovery sequence**
+
+1. Close the current Codex chat or window entirely.
+2. If any `engram` processes are still running, stop them:
+   - macOS/Linux: `pkill -x engram`
+   - Windows: `taskkill /IM engram.exe /F`
+3. Open a new Codex chat. Codex starts a fresh `engram mcp` stdio process on launch, which clears the stale session.
+
+**Prevention**
+
+- After replacing `engram.exe` / the `engram` binary, always start a new Codex chat before using memory tools.
+- After editing `~/.codex/config.toml`, `engram-instructions.md`, or `engram-compact-prompt.md`, restart Codex to pick up the new config.
+- Avoid force-killing `engram` while a Codex session is active; prefer closing the chat first so Codex can shut down the MCP process cleanly.
+
+> **Windows note:** On Windows the stale process is most commonly left behind after an in-place binary replacement. The `taskkill` command above reliably clears it. If Codex shows the error immediately on a fresh chat, confirm that the new `engram.exe` is in `PATH` and that no older copy is shadowing it.
+
 ---
 
 ## VS Code (Copilot / Claude Code Extension)
