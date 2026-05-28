@@ -366,10 +366,14 @@ func TestSessionDeletePromptFlow(t *testing.T) {
 		if msg.err != nil {
 			t.Fatalf("delete command error: %v", msg.err)
 		}
+		updated.ErrorMsg = "stale delete error"
 		updatedModel, refreshCmd := updated.Update(msg)
 		updated = updatedModel.(Model)
 		if updated.SessionDeletePrompt || updated.SessionDeleting || updated.SessionDeleteID != "" {
 			t.Fatal("delete result should clear prompt state")
+		}
+		if updated.ErrorMsg != "" {
+			t.Fatalf("successful delete should clear stale error, got %q", updated.ErrorMsg)
 		}
 		if refreshCmd == nil {
 			t.Fatal("successful delete should refresh sessions")
@@ -543,6 +547,23 @@ func TestUpdateDataMessageBranches(t *testing.T) {
 	updated = updatedModel.(Model)
 	if len(updated.Sessions) != 1 {
 		t.Fatal("sessions should be updated")
+	}
+
+	screenModel := New(nil, "")
+	screenModel.Screen = ScreenSearch
+	screenModel.Cursor = 5
+	screenModel.Scroll = 4
+	updatedModel, _ = screenModel.Update(recentSessionsMsg{sessions: sessions})
+	updated = updatedModel.(Model)
+	if updated.Cursor != 5 || updated.Scroll != 4 {
+		t.Fatalf("sessions refresh outside sessions screen should not clamp cursor/scroll, got %d/%d", updated.Cursor, updated.Scroll)
+	}
+
+	screenModel.Screen = ScreenSessions
+	updatedModel, _ = screenModel.Update(recentSessionsMsg{sessions: sessions})
+	updated = updatedModel.(Model)
+	if updated.Cursor != 0 || updated.Scroll != 0 {
+		t.Fatalf("sessions refresh on sessions screen should clamp cursor/scroll, got %d/%d", updated.Cursor, updated.Scroll)
 	}
 
 	updatedModel, _ = m.Update(sessionObservationsMsg{err: errors.New("session detail err")})

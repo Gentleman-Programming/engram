@@ -92,13 +92,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.Sessions = msg.sessions
-		if len(m.Sessions) == 0 {
-			m.Cursor = 0
-			m.Scroll = 0
-		} else if m.Cursor >= len(m.Sessions) {
-			m.Cursor = len(m.Sessions) - 1
-			if m.Scroll > m.Cursor {
-				m.Scroll = m.Cursor
+		if m.Screen == ScreenSessions {
+			if len(m.Sessions) == 0 {
+				m.Cursor = 0
+				m.Scroll = 0
+			} else if m.Cursor >= len(m.Sessions) {
+				m.Cursor = len(m.Sessions) - 1
+				if m.Scroll > m.Cursor {
+					m.Scroll = m.Cursor
+				}
 			}
 		}
 		return m, nil
@@ -120,6 +122,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ErrorMsg = sessionDeleteErrorMessage(msg.sessionID, msg.err)
 			return m, nil
 		}
+		m.ErrorMsg = ""
 		return m, loadRecentSessions(m.store)
 
 	case setupInstallMsg:
