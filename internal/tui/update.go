@@ -463,10 +463,10 @@ func (m Model) handleTimelineKeys(key string) (tea.Model, tea.Cmd) {
 // ─── Sessions ────────────────────────────────────────────────────────────────
 
 func (m Model) handleSessionsKeys(key string) (tea.Model, tea.Cmd) {
-	if m.SessionDeleting {
+	switch m.SessionDeleteState {
+	case SessionDeleteStateDeleting:
 		return m, nil
-	}
-	if m.SessionDeletePrompt {
+	case SessionDeleteStatePrompt:
 		switch key {
 		case "y", "Y":
 			if m.SessionDeleteID == "" {
@@ -474,8 +474,7 @@ func (m Model) handleSessionsKeys(key string) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			sessionID := m.SessionDeleteID
-			m.SessionDeletePrompt = false
-			m.SessionDeleting = true
+			m.SessionDeleteState = SessionDeleteStateDeleting
 			return m, deleteSession(m.store, sessionID)
 		case "n", "N", "esc":
 			m = m.resetSessionDeleteState()
@@ -511,10 +510,10 @@ func (m Model) handleSessionsKeys(key string) (tea.Model, tea.Cmd) {
 			sessionID := m.Sessions[m.Cursor].ID
 			return m, loadSessionObservations(m.store, sessionID)
 		}
-	case "d":
+	case "d", "D":
 		if len(m.Sessions) > 0 && m.Cursor < len(m.Sessions) {
 			session := m.Sessions[m.Cursor]
-			m.SessionDeletePrompt = true
+			m.SessionDeleteState = SessionDeleteStatePrompt
 			m.SessionDeleteID = session.ID
 			m.SessionDeleteProject = session.Project
 		}
@@ -647,8 +646,7 @@ func (m Model) handleSetupKeys(key string) (tea.Model, tea.Cmd) {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 func (m Model) resetSessionDeleteState() Model {
-	m.SessionDeletePrompt = false
-	m.SessionDeleting = false
+	m.SessionDeleteState = SessionDeleteStateNone
 	m.SessionDeleteID = ""
 	m.SessionDeleteProject = ""
 	return m

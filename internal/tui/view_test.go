@@ -314,7 +314,7 @@ func TestViewSessionsDeletePrompt(t *testing.T) {
 	m := New(nil, "")
 	m.Screen = ScreenSessions
 	m.Sessions = []store.SessionSummary{{ID: "session-1", Project: "engram", StartedAt: "2026-01-01"}}
-	m.SessionDeletePrompt = true
+	m.SessionDeleteState = SessionDeleteStatePrompt
 	m.SessionDeleteID = "session-1"
 	m.SessionDeleteProject = "engram"
 
@@ -329,8 +329,7 @@ func TestViewSessionsDeletePrompt(t *testing.T) {
 		t.Fatal("delete prompt should render y/n/esc options")
 	}
 
-	m.SessionDeletePrompt = false
-	m.SessionDeleting = true
+	m.SessionDeleteState = SessionDeleteStateDeleting
 	out = m.viewSessions()
 	if !strings.Contains(out, "Deleting Session") || !strings.Contains(out, "session-1") {
 		t.Fatal("deleting state should render selected session context")

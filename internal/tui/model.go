@@ -38,6 +38,14 @@ const (
 	ScreenSetup
 )
 
+type SessionDeleteState int
+
+const (
+	SessionDeleteStateNone SessionDeleteState = iota
+	SessionDeleteStatePrompt
+	SessionDeleteStateDeleting
+)
+
 // ─── Custom Messages ─────────────────────────────────────────────────────────
 
 type updateCheckMsg struct {
@@ -132,8 +140,7 @@ type Model struct {
 	SelectedSessionIdx   int
 	SessionObservations  []store.Observation
 	SessionDetailScroll  int
-	SessionDeletePrompt  bool
-	SessionDeleting      bool
+	SessionDeleteState   SessionDeleteState
 	SessionDeleteID      string
 	SessionDeleteProject string
 

@@ -311,13 +311,13 @@ func TestSessionDeletePromptFlow(t *testing.T) {
 		m.Sessions = []store.SessionSummary{{ID: fx.sessionID, Project: "engram"}, {ID: fx.otherSession, Project: "engram"}}
 		m.Cursor = 1
 
-		updatedModel, cmd := m.handleSessionsKeys("d")
+		updatedModel, cmd := m.handleSessionsKeys("D")
 		updated := updatedModel.(Model)
 		if cmd != nil {
 			t.Fatal("opening delete prompt should not return command")
 		}
-		if !updated.SessionDeletePrompt || updated.SessionDeleteID != fx.otherSession || updated.SessionDeleteProject != "engram" {
-			t.Fatalf("delete prompt state = prompt:%v id:%q project:%q", updated.SessionDeletePrompt, updated.SessionDeleteID, updated.SessionDeleteProject)
+		if updated.SessionDeleteState != SessionDeleteStatePrompt || updated.SessionDeleteID != fx.otherSession || updated.SessionDeleteProject != "engram" {
+			t.Fatalf("delete prompt state = state:%v id:%q project:%q", updated.SessionDeleteState, updated.SessionDeleteID, updated.SessionDeleteProject)
 		}
 
 		updatedModel, cmd = updated.handleSessionsKeys("esc")
@@ -325,7 +325,7 @@ func TestSessionDeletePromptFlow(t *testing.T) {
 		if cmd != nil {
 			t.Fatal("esc cancel should not return command")
 		}
-		if updated.SessionDeletePrompt || updated.SessionDeleting || updated.SessionDeleteID != "" || updated.SessionDeleteProject != "" {
+		if updated.SessionDeleteState != SessionDeleteStateNone || updated.SessionDeleteID != "" || updated.SessionDeleteProject != "" {
 			t.Fatal("esc cancel should clear delete prompt state")
 		}
 
@@ -336,7 +336,7 @@ func TestSessionDeletePromptFlow(t *testing.T) {
 		if cmd != nil {
 			t.Fatal("n cancel should not return command")
 		}
-		if updated.SessionDeletePrompt || updated.SessionDeleting || updated.SessionDeleteID != "" || updated.SessionDeleteProject != "" {
+		if updated.SessionDeleteState != SessionDeleteStateNone || updated.SessionDeleteID != "" || updated.SessionDeleteProject != "" {
 			t.Fatal("n cancel should clear delete prompt state")
 		}
 	})
@@ -355,7 +355,7 @@ func TestSessionDeletePromptFlow(t *testing.T) {
 		if cmd == nil {
 			t.Fatal("confirm should return delete command")
 		}
-		if updated.SessionDeletePrompt || !updated.SessionDeleting {
+		if updated.SessionDeleteState != SessionDeleteStateDeleting {
 			t.Fatal("confirm should close prompt and mark delete in progress")
 		}
 		if _, secondCmd := updated.handleSessionsKeys("y"); secondCmd != nil {
@@ -369,7 +369,7 @@ func TestSessionDeletePromptFlow(t *testing.T) {
 		updated.ErrorMsg = "stale delete error"
 		updatedModel, refreshCmd := updated.Update(msg)
 		updated = updatedModel.(Model)
-		if updated.SessionDeletePrompt || updated.SessionDeleting || updated.SessionDeleteID != "" {
+		if updated.SessionDeleteState != SessionDeleteStateNone || updated.SessionDeleteID != "" {
 			t.Fatal("delete result should clear prompt state")
 		}
 		if updated.ErrorMsg != "" {
@@ -408,7 +408,7 @@ func TestSessionDeletePromptFlow(t *testing.T) {
 		if updated.ErrorMsg == "" || !strings.Contains(updated.ErrorMsg, "Cannot delete session") {
 			t.Fatalf("failed delete should surface contextual error message, got %q", updated.ErrorMsg)
 		}
-		if updated.SessionDeletePrompt || updated.SessionDeleting {
+		if updated.SessionDeleteState != SessionDeleteStateNone {
 			t.Fatal("failed delete should close prompt")
 		}
 	})
@@ -439,7 +439,7 @@ func TestSessionDeletePromptFlow(t *testing.T) {
 		if cmd != nil {
 			t.Fatal("delete with no sessions should not return command")
 		}
-		if updated.SessionDeletePrompt {
+		if updated.SessionDeleteState != SessionDeleteStateNone {
 			t.Fatal("delete with no sessions should not open prompt")
 		}
 	})
