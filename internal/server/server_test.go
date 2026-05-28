@@ -827,6 +827,9 @@ func TestHandleDeleteProject_Success(t *testing.T) {
 	if resp["deleted"] != true {
 		t.Fatalf("expected deleted=true, got %v", resp["deleted"])
 	}
+	if _, ok := resp["memory_relations_orphaned"].(float64); !ok {
+		t.Fatalf("expected memory_relations_orphaned numeric field, got %T (%v)", resp["memory_relations_orphaned"], resp["memory_relations_orphaned"])
+	}
 	if _, ok := resp["sync_chunks_deleted"].(float64); !ok {
 		t.Fatalf("expected sync_chunks_deleted numeric field, got %T (%v)", resp["sync_chunks_deleted"], resp["sync_chunks_deleted"])
 	}

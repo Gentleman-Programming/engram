@@ -6079,6 +6079,9 @@ func TestDeleteProject_HardDeleteCascadeAndSyncCleanup(t *testing.T) {
 	if !result.Deleted {
 		t.Fatalf("expected deleted=true")
 	}
+	if result.MemoryRelationsOrphaned != 2 {
+		t.Fatalf("MemoryRelationsOrphaned = %d, want 2", result.MemoryRelationsOrphaned)
+	}
 
 	var n int
 	for _, q := range []string{
@@ -6141,6 +6144,21 @@ func TestDeleteProject_PreservesGlobalPendingSyncStateForOtherProjects(t *testin
 	if err := s.EnrollProject("alpha"); err != nil {
 		t.Fatalf("EnrollProject(alpha): %v", err)
 	}
+	customTargetKey := "cloud:shared-target"
+	if _, err := s.db.Exec(
+		`INSERT OR REPLACE INTO sync_state (target_key, lifecycle, last_enqueued_seq, last_acked_seq, last_pulled_seq, updated_at)
+		 VALUES (?, 'pending', 7, 3, 0, datetime('now'))`,
+		customTargetKey,
+	); err != nil {
+		t.Fatalf("seed custom target sync_state: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		customTargetKey, SyncEntitySession, "sess-beta-custom", SyncOpDelete, `{"session_id":"sess-beta-custom"}`, SyncSourceLocal, "beta",
+	); err != nil {
+		t.Fatalf("seed custom target sync_mutation: %v", err)
+	}
 	if err := s.CreateSession("sess-beta", "beta", "/tmp"); err != nil {
 		t.Fatalf("CreateSession(beta): %v", err)
 	}
@@ -6171,6 +6189,17 @@ func TestDeleteProject_PreservesGlobalPendingSyncStateForOtherProjects(t *testin
 		if mutation.Project == "beta" {
 			t.Fatalf("expected deleted project mutations to be removed from pending queue: %+v", mutation)
 		}
+	}
+
+	customState, err := s.GetSyncState(customTargetKey)
+	if err != nil {
+		t.Fatalf("GetSyncState(custom): %v", err)
+	}
+	if customState.Lifecycle != SyncLifecycleHealthy {
+		t.Fatalf("expected custom target lifecycle=%q after pruning its deleted-project mutation, got %q", SyncLifecycleHealthy, customState.Lifecycle)
+	}
+	if customState.LastAckedSeq != customState.LastEnqueuedSeq {
+		t.Fatalf("expected custom target acked/enqueued to reconcile, got acked=%d enqueued=%d", customState.LastAckedSeq, customState.LastEnqueuedSeq)
 	}
 }
 

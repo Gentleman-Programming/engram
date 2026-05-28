@@ -4120,6 +4120,7 @@ type DeleteProjectResult struct {
 	ObservationsDeleted     int64  `json:"observations_deleted"`
 	PromptsDeleted          int64  `json:"prompts_deleted"`
 	SessionsDeleted         int64  `json:"sessions_deleted"`
+	MemoryRelationsOrphaned int64  `json:"memory_relations_orphaned"`
 	SyncMutationsDeleted    int64  `json:"sync_mutations_deleted"`
 	SyncDeferredDeleted     int64  `json:"sync_deferred_deleted"`
 	SyncChunksDeleted       int64  `json:"sync_chunks_deleted"`
@@ -4187,6 +4188,8 @@ func (s *Store) MigrateProject(oldName, newName string) (*MigrateResult, error) 
 
 // DeleteProject performs a hard, transactional project-wide delete.
 // It removes all project-owned local data and project-scoped sync metadata.
+// Related memory_relations rows are orphaned, not deleted, so audit history is preserved.
+// Unknown projects are a successful no-op and return Deleted=false.
 func (s *Store) DeleteProject(project string) (*DeleteProjectResult, error) {
 	rawProject := project
 	project, _ = NormalizeProject(project)
@@ -4196,23 +4199,32 @@ func (s *Store) DeleteProject(project string) (*DeleteProjectResult, error) {
 
 	result := &DeleteProjectResult{Project: project}
 	err := s.withTx(func(tx *sql.Tx) error {
-		projectVariants := projectMergeSourceVariants(rawProject, project, "")
-		projectPlaceholders := sqlPlaceholders(len(projectVariants))
+		projectVariants := append([]string{project}, projectMergeSourceVariants(rawProject, project, "")...)
 		projectArgs := make([]any, 0, len(projectVariants))
 		projectTargetKeys := make([]string, 0, len(projectVariants))
+		seenProjects := make(map[string]struct{}, len(projectVariants))
 		seenTargetKeys := make(map[string]struct{}, len(projectVariants))
 		for _, variant := range projectVariants {
 			lowered := strings.ToLower(strings.TrimSpace(variant))
 			if lowered == "" {
 				continue
 			}
+			if _, ok := seenProjects[lowered]; ok {
+				continue
+			}
+			seenProjects[lowered] = struct{}{}
 			projectArgs = append(projectArgs, lowered)
+
 			targetKey := syncTargetKeyForNormalizedProject(lowered)
 			if _, ok := seenTargetKeys[targetKey]; !ok {
 				seenTargetKeys[targetKey] = struct{}{}
 				projectTargetKeys = append(projectTargetKeys, targetKey)
 			}
 		}
+		if len(projectArgs) == 0 {
+			return ErrProjectNameRequired
+		}
+		projectPlaceholders := sqlPlaceholders(len(projectArgs))
 		projectTargetPlaceholders := sqlPlaceholders(len(projectTargetKeys))
 		projectTargetArgs := make([]any, 0, len(projectTargetKeys))
 		for _, targetKey := range projectTargetKeys {
@@ -4239,10 +4251,30 @@ func (s *Store) DeleteProject(project string) (*DeleteProjectResult, error) {
 			return fmt.Errorf("delete project: check existence: %w", err)
 		}
 
+		mutationTargetKeys := make(map[string]struct{})
+		rows, err := tx.Query(`SELECT DISTINCT target_key FROM sync_mutations WHERE lower(trim(project)) IN (`+projectPlaceholders+`)`, projectArgs...)
+		if err != nil {
+			return fmt.Errorf("delete project: list sync mutation targets: %w", err)
+		}
+		for rows.Next() {
+			var targetKey string
+			if err := rows.Scan(&targetKey); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("delete project: scan sync mutation target: %w", err)
+			}
+			mutationTargetKeys[normalizeSyncTargetKey(targetKey)] = struct{}{}
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("delete project: close sync mutation targets: %w", err)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("delete project: iterate sync mutation targets: %w", err)
+		}
+
 		// Before deleting observations, mark any related memory_relations as orphaned.
 		// memory_relations stores sync_id text keys (no FK to observations), so this
 		// explicit update prevents dangling "pending/judged" relations after delete.
-		if _, err := s.execHook(tx, `
+		res, err := s.execHook(tx, `
 			UPDATE memory_relations
 			SET judgment_status = 'orphaned',
 			    updated_at      = datetime('now')
@@ -4256,99 +4288,104 @@ func (s *Store) DeleteProject(project string) (*DeleteProjectResult, error) {
 				 WHERE lower(trim(project)) IN (`+projectPlaceholders+`)
 				    OR session_id IN (SELECT id FROM sessions WHERE lower(trim(project)) IN (`+projectPlaceholders+`))
 			)
-		`, repeatArgs(projectArgs, 4)...); err != nil {
+		`, repeatArgs(projectArgs, 4)...)
+		if err != nil {
 			return fmt.Errorf("delete project: orphan memory_relations: %w", err)
 		}
+		result.MemoryRelationsOrphaned, _ = res.RowsAffected()
 
 		// Order matters for referential integrity: observations -> prompts -> sessions.
-		if res, err := s.execHook(tx, `
+		res, err = s.execHook(tx, `
 			DELETE FROM observations
 			 WHERE lower(trim(project)) IN (`+projectPlaceholders+`)
 			    OR session_id IN (SELECT id FROM sessions WHERE lower(trim(project)) IN (`+projectPlaceholders+`))
-		`, append(projectArgs, projectArgs...)...); err != nil {
+		`, repeatArgs(projectArgs, 2)...)
+		if err != nil {
 			return fmt.Errorf("delete project: observations: %w", err)
-		} else {
-			result.ObservationsDeleted, _ = res.RowsAffected()
 		}
+		result.ObservationsDeleted, _ = res.RowsAffected()
 
-		if res, err := s.execHook(tx, `
+		res, err = s.execHook(tx, `
 			DELETE FROM user_prompts
 			 WHERE lower(trim(project)) IN (`+projectPlaceholders+`)
 			    OR session_id IN (SELECT id FROM sessions WHERE lower(trim(project)) IN (`+projectPlaceholders+`))
-		`, append(projectArgs, projectArgs...)...); err != nil {
+		`, repeatArgs(projectArgs, 2)...)
+		if err != nil {
 			return fmt.Errorf("delete project: prompts: %w", err)
-		} else {
-			result.PromptsDeleted, _ = res.RowsAffected()
 		}
+		result.PromptsDeleted, _ = res.RowsAffected()
 
 		// Project-scoped sync/materialization metadata cleanup.
-		if res, err := s.execHook(tx, `DELETE FROM sync_mutations WHERE lower(trim(project)) IN (`+projectPlaceholders+`)`, projectArgs...); err != nil {
+		res, err = s.execHook(tx, `DELETE FROM sync_mutations WHERE lower(trim(project)) IN (`+projectPlaceholders+`)`, projectArgs...)
+		if err != nil {
 			return fmt.Errorf("delete project: sync_mutations: %w", err)
-		} else {
-			result.SyncMutationsDeleted, _ = res.RowsAffected()
-			if result.SyncMutationsDeleted > 0 {
-				if err := s.reconcileSyncStateAfterMutationPruneTx(tx, DefaultSyncTargetKey); err != nil {
-					return fmt.Errorf("delete project: reconcile sync_state: %w", err)
-				}
+		}
+		result.SyncMutationsDeleted, _ = res.RowsAffected()
+		for targetKey := range mutationTargetKeys {
+			if _, deletedLater := seenTargetKeys[targetKey]; deletedLater {
+				continue
+			}
+			if err := s.reconcileSyncStateAfterMutationPruneTx(tx, targetKey); err != nil {
+				return fmt.Errorf("delete project: reconcile sync_state %q: %w", targetKey, err)
 			}
 		}
 
-		if res, err := s.execHook(tx,
+		res, err = s.execHook(tx,
 			`DELETE FROM sync_apply_deferred
 			 WHERE json_valid(payload) = 1
 			   AND lower(trim(ifnull(json_extract(payload, '$.project'), ''))) IN (`+projectPlaceholders+`)`,
 			projectArgs...,
-		); err != nil {
+		)
+		if err != nil {
 			return fmt.Errorf("delete project: sync_apply_deferred: %w", err)
-		} else {
-			result.SyncDeferredDeleted, _ = res.RowsAffected()
 		}
+		result.SyncDeferredDeleted, _ = res.RowsAffected()
 
 		// Delete prompt tombstones BEFORE sessions, so session-derived tombstones
 		// (project NULL/empty + session_id in project) are still matchable.
-		if res, err := s.execHook(tx, `
+		res, err = s.execHook(tx, `
 			DELETE FROM prompt_tombstones
 			 WHERE lower(trim(project)) IN (`+projectPlaceholders+`)
 			    OR session_id IN (SELECT id FROM sessions WHERE lower(trim(project)) IN (`+projectPlaceholders+`))
-		`, append(projectArgs, projectArgs...)...); err != nil {
+		`, repeatArgs(projectArgs, 2)...)
+		if err != nil {
 			return fmt.Errorf("delete project: prompt_tombstones: %w", err)
-		} else {
-			result.PromptTombstonesDeleted, _ = res.RowsAffected()
 		}
+		result.PromptTombstonesDeleted, _ = res.RowsAffected()
 
-		if res, err := s.execHook(tx, `DELETE FROM sessions WHERE lower(trim(project)) IN (`+projectPlaceholders+`)`, projectArgs...); err != nil {
+		res, err = s.execHook(tx, `DELETE FROM sessions WHERE lower(trim(project)) IN (`+projectPlaceholders+`)`, projectArgs...)
+		if err != nil {
 			return fmt.Errorf("delete project: sessions: %w", err)
-		} else {
-			result.SessionsDeleted, _ = res.RowsAffected()
 		}
+		result.SessionsDeleted, _ = res.RowsAffected()
 
-		if res, err := s.execHook(tx, `DELETE FROM sync_chunks WHERE target_key IN (`+projectTargetPlaceholders+`)`, projectTargetArgs...); err != nil {
+		res, err = s.execHook(tx, `DELETE FROM sync_chunks WHERE target_key IN (`+projectTargetPlaceholders+`)`, projectTargetArgs...)
+		if err != nil {
 			return fmt.Errorf("delete project: sync_chunks: %w", err)
-		} else {
-			result.SyncChunksDeleted, _ = res.RowsAffected()
 		}
+		result.SyncChunksDeleted, _ = res.RowsAffected()
 
-		if res, err := s.execHook(tx, `DELETE FROM sync_state WHERE target_key IN (`+projectTargetPlaceholders+`)`, projectTargetArgs...); err != nil {
+		res, err = s.execHook(tx, `DELETE FROM sync_state WHERE target_key IN (`+projectTargetPlaceholders+`)`, projectTargetArgs...)
+		if err != nil {
 			return fmt.Errorf("delete project: sync_state: %w", err)
-		} else {
-			result.SyncStateDeleted, _ = res.RowsAffected()
 		}
+		result.SyncStateDeleted, _ = res.RowsAffected()
 
-		if res, err := s.execHook(tx, `DELETE FROM sync_enrolled_projects WHERE lower(trim(project)) IN (`+projectPlaceholders+`)`, projectArgs...); err != nil {
+		res, err = s.execHook(tx, `DELETE FROM sync_enrolled_projects WHERE lower(trim(project)) IN (`+projectPlaceholders+`)`, projectArgs...)
+		if err != nil {
 			return fmt.Errorf("delete project: sync_enrolled_projects: %w", err)
-		} else {
-			result.EnrollmentDeleted, _ = res.RowsAffected()
 		}
+		result.EnrollmentDeleted, _ = res.RowsAffected()
 
-		if res, err := s.execHook(tx, `DELETE FROM cloud_upgrade_state WHERE lower(trim(project)) IN (`+projectPlaceholders+`)`, projectArgs...); err != nil {
+		res, err = s.execHook(tx, `DELETE FROM cloud_upgrade_state WHERE lower(trim(project)) IN (`+projectPlaceholders+`)`, projectArgs...)
+		if err != nil {
 			return fmt.Errorf("delete project: cloud_upgrade_state: %w", err)
-		} else {
-			result.UpgradeStateDeleted, _ = res.RowsAffected()
 		}
+		result.UpgradeStateDeleted, _ = res.RowsAffected()
 
 		result.Deleted = exists ||
 			result.ObservationsDeleted > 0 || result.PromptsDeleted > 0 || result.SessionsDeleted > 0 ||
-			result.SyncMutationsDeleted > 0 || result.SyncDeferredDeleted > 0 ||
+			result.MemoryRelationsOrphaned > 0 || result.SyncMutationsDeleted > 0 || result.SyncDeferredDeleted > 0 ||
 			result.SyncChunksDeleted > 0 || result.SyncStateDeleted > 0 ||
 			result.PromptTombstonesDeleted > 0 || result.EnrollmentDeleted > 0 || result.UpgradeStateDeleted > 0
 
@@ -4371,6 +4408,7 @@ func repeatArgs(args []any, times int) []any {
 	}
 	return out
 }
+
 // ─── Project Queries ──────────────────────────────────────────────────────────
 
 // ProjectNameCount holds a project name and how many observations it has.

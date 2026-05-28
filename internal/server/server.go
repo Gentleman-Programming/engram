@@ -902,6 +902,7 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 		"observations_deleted":      result.ObservationsDeleted,
 		"prompts_deleted":           result.PromptsDeleted,
 		"sessions_deleted":          result.SessionsDeleted,
+		"memory_relations_orphaned": result.MemoryRelationsOrphaned,
 		"sync_mutations_deleted":    result.SyncMutationsDeleted,
 		"sync_deferred_deleted":     result.SyncDeferredDeleted,
 		"sync_chunks_deleted":       result.SyncChunksDeleted,
