@@ -112,6 +112,13 @@ Pi-native compact tools use the same HTTP server path as event capture, includin
 
 Normal memory activity also updates the status bar with short progress/result text such as `🧠 engram · search…` and `🧠 engram · ✓ 4 results`. The extension does not use notifications for normal memory operations.
 
+When a tool call fails because Engram cannot determine which project to use, the status bar shows an actionable label instead of the generic `error`:
+
+| Status bar label           | Meaning                                                                                               |
+| -------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `🧠 repos · ambiguous project` | Pi was started from a directory that contains multiple git repos. Run Pi from inside a single repo, or add `.engram/config.json` with `project_name` to the parent directory. |
+| `🧠 repos · error`         | A different tool or network error occurred. Expand the tool output in Pi for the full error message.  |
+
 Full tool details remain available by expanding the tool output in Pi. If `gentle-engram` or the Engram server is not installed/running, the compact tool reports an error instead of implying memory is available.
 
 ## What Pi can remember
@@ -231,6 +238,7 @@ MCP tool calls still use Engram core's canonical project resolver at call time. 
 | Existing MCP config was not replaced                         | Run `pi-engram init --force`.                                                                                                                                                                                                                                           |
 | `mem_current_project` reports `/project/current` unsupported | Restart or upgrade the running `engram serve`; check `ENGRAM_URL`/`ENGRAM_BIN`. If `.engram/config.json` exists, Pi uses it as a temporary fallback.                                                                                                                    |
 | `mem_session_summary` cannot detect a project                | Ask the user which project should receive the summary, then retry `mem_session_summary` with `project: "name"`.                                                                                                                                                         |
+| Status bar shows `🧠 repos · ambiguous project`             | Pi was started from a parent directory that contains multiple git repos. Run Pi from inside a single repo, or add `.engram/config.json` with `"project_name": "my-project"` to the ambiguous directory.                                                                 |
 
 ## Next steps
 
