@@ -182,11 +182,17 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
   - `project` and `check` are optional; omitted `project` uses current project detection
   - Unknown explicit projects return `404` with `{error, code:"unknown_project", available_projects:[...]}`
 
-### Project Detection / Migration
+### Project Detection / Migration / Deletion
 
 - `GET /project/current` — Detect the current project. Query: `?cwd=/path/to/repo`
   - Always returns a success envelope with `{project, project_source, project_path, cwd, available_projects}` plus optional `warning`/`error_hint`
 - `POST /projects/migrate` — Migrate observations between project names. Body: `{old_project, new_project}`
+- `DELETE /projects/{project}` — Destructively delete a whole project and project-owned local data.
+  - Requires `Authorization: Bearer <token>` when `ENGRAM_HTTP_TOKEN` is set
+  - Deletes project observations, prompts, sessions, sync metadata, enrolled-project state, and cloud-upgrade state in one transaction
+  - Orphans cross-project memory relations that pointed at deleted observations
+  - Returns `200` with deletion counts when anything was deleted
+  - Returns `404` with `code:"not_found"` when the project has no local data to delete
 
 ### Conflict Audit (admin — local runtime only)
 
@@ -458,7 +464,7 @@ Response:
 | `ENGRAM_DATA_DIR`               | Override data directory                                                                                                                                                                                                                                   | `~/.engram`          |
 | `ENGRAM_PORT`                   | Override HTTP server port                                                                                                                                                                                                                                 | `7437`               |
 | `ENGRAM_PROJECT`                | Default project for `engram serve` `GET /sync/status` when no `project` query param is supplied. When unset, cwd detection is used as the fallback.                                                                                                       | cwd-detected project |
-| `ENGRAM_HTTP_TOKEN`             | Optional Bearer auth for the local HTTP server. When set, the following routes require `Authorization: Bearer <token>`: `DELETE /sessions/{id}`, `DELETE /observations/{id}`, `DELETE /prompts/{id}`, `GET /export`, `POST /import`, `POST /projects/migrate`. Comparison is constant-time. Token is read at request time (no restart needed). When unset, all routes are open (zero-config default). | (unset — open) |
+| `ENGRAM_HTTP_TOKEN`             | Optional Bearer auth for the local HTTP server. When set, the following routes require `Authorization: Bearer <token>`: `DELETE /sessions/{id}`, `DELETE /observations/{id}`, `DELETE /prompts/{id}`, `GET /export`, `POST /import`, `POST /projects/migrate`, `DELETE /projects/{project}`. Comparison is constant-time. Token is read at request time (no restart needed). When unset, all routes are open (zero-config default). | (unset — open) |
 | `ENGRAM_TIMEZONE`               | Timezone for timestamp display in the TUI and cloud dashboard. Accepts any IANA zone name (e.g. `America/New_York`, `Europe/Berlin`). Falls back to system local time when unset or invalid.                                                               | system local         |
 | `ENGRAM_AGENT_CLI`              | LLM runner name used by `engram conflicts scan --semantic` and the HTTP `/conflicts/scan` endpoint. Accepted values: `claude`, `opencode`.                                                                                                                | (unset)              |
 | `ENGRAM_CLOUD_AUTOSYNC`         | Set to `1` to enable background autosync. Requires `ENGRAM_CLOUD_TOKEN` and `ENGRAM_CLOUD_SERVER` to also be set.                                                                                                                                         | (unset — disabled)   |
