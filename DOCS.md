@@ -1251,6 +1251,45 @@ To unload (stop and disable): `launchctl unload ~/Library/LaunchAgents/com.gentl
 
 > **Note on `brew upgrade`:** launchd does not expand `$HOME` or `~` inside plist values, which is why the template uses literal absolute paths.
 
+### Using Windows Task Scheduler
+
+Windows Task Scheduler is the native service equivalent on Windows. It restarts `engram serve` on login and after reboots, keeping autosync alive without a third-party service manager.
+
+**Setup steps:**
+
+1. Confirm `engram.exe` is in your `PATH`: open PowerShell and run `Get-Command engram`.
+2. Set `ENGRAM_CLOUD_TOKEN` (and any other cloud vars) as a **user or system environment variable** in System Properties → Advanced → Environment Variables. Task Scheduler does not inherit session environment variables, so tokens set in your shell profile or in `$env:...` within a PowerShell session will not be visible to the scheduled task.
+3. Create the scheduled task by running the PowerShell snippet below in an elevated terminal (Run as Administrator), or import it manually through the Task Scheduler GUI.
+4. Verify: after the next login (or trigger manually), run `engram cloud status` — the `Local daemon:` line should report `running on port 7437`.
+
+```powershell
+$action  = New-ScheduledTaskAction `
+    -Execute  "powershell.exe" `
+    -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -Command `"Start-Process engram -ArgumentList 'serve' -NoNewWindow`""
+
+$trigger = New-ScheduledTaskTrigger -AtLogOn
+
+$settings = New-ScheduledTaskSettingsSet `
+    -ExecutionTimeLimit (New-TimeSpan -Hours 0) `
+    -RestartCount 5 `
+    -RestartInterval (New-TimeSpan -Minutes 1) `
+    -StartWhenAvailable
+
+Register-ScheduledTask `
+    -TaskName    "EngramMemoryServer" `
+    -Action      $action `
+    -Trigger     $trigger `
+    -Settings    $settings `
+    -RunLevel    Limited `
+    -Description "Engram persistent memory server (engram serve)"
+```
+
+> **Environment variables:** `ENGRAM_CLOUD_TOKEN`, `ENGRAM_CLOUD_SERVER`, `ENGRAM_CLOUD_AUTOSYNC`, and `ENGRAM_DATA_DIR` must be set as persistent user or system environment variables (Control Panel → System → Advanced → Environment Variables) so Task Scheduler can read them. Variables you `export` or set with `$env:` in a terminal session are not visible to scheduled tasks.
+
+> **Logs:** To capture stdout/stderr, redirect output in the PowerShell command string, for example: `... -Command "Start-Process engram -ArgumentList 'serve' -NoNewWindow -RedirectStandardOutput '$env:USERPROFILE\.engram\serve.out.log' -RedirectStandardError '$env:USERPROFILE\.engram\serve.err.log'"`. Ensure the log files are opened with UTF-8 encoding (`-Encoding UTF8`) if you post-process them.
+
+> **Stopping the task:** `Stop-ScheduledTask -TaskName "EngramMemoryServer"` or `Unregister-ScheduledTask -TaskName "EngramMemoryServer" -Confirm:$false` to remove it entirely.
+
 ---
 
 ## Design Decisions

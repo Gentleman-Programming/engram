@@ -102,22 +102,101 @@ Token-efficient memory retrieval — don't dump everything, drill in:
 
 ## Topic Key Workflow (Recommended)
 
-Use this when a topic evolves over time (architecture, long-running feature decisions, etc.):
+### What topic_key is
 
-```text
-1. mem_suggest_topic_key(type="architecture", title="Auth architecture")
-2. mem_save(..., topic_key="architecture-auth-architecture")
-3. Later change on same topic -> mem_save(..., same topic_key)
-   => existing observation is updated (revision_count++)
+`topic_key` turns `mem_save` into an **upsert**: if a memory with the same `project + scope + topic_key` already exists, the existing observation is updated in place (`revision_count++`) instead of creating a new row. Without a `topic_key`, every `mem_save` creates a new observation even when the content describes the same evolving topic.
+
+Use topic keys for knowledge that changes over time: architecture decisions, long-running feature notes, recurring patterns, configuration choices. Skip them for one-off bugs, single facts, or anything that does not evolve.
+
+### Format convention
+
+Topic keys follow **slash-separated lowercase kebab-case**:
+
+```
+family/specific-description
 ```
 
-Different topics should use different keys (e.g. `architecture/auth-model` vs `bug/auth-nil-panic`) so they never overwrite each other.
+Examples:
+- `architecture/auth-model`
+- `bug/nil-panic-in-user-list`
+- `decision/database-choice`
+- `pattern/error-handling-convention`
+- `config/ci-environment`
 
-`mem_suggest_topic_key` now applies a family heuristic for consistency across sessions:
+**Why this format?** SQLite FTS5 tokenises on word boundaries. Lowercase kebab-case ensures the key fragments are individually searchable and do not create unexpected FTS5 token splits.
 
-- `architecture/*` for architecture/design/ADR-like changes
-- `bug/*` for fixes, regressions, errors, panics
-- `decision/*`, `pattern/*`, `config/*`, `discovery/*`, `learning/*` when detected
+**Anti-patterns to avoid:**
+
+| Anti-pattern | Problem | Correct form |
+|---|---|---|
+| `authModel` | camelCase breaks FTS5 tokenisation | `architecture/auth-model` |
+| `auth model` | spaces create accidental multi-token keys | `architecture/auth-model` |
+| `ARCHITECTURE/AUTH` | uppercase is inconsistent with FTS5 normalisation | `architecture/auth-model` |
+| `auth/model/v2/final` | more than 2 levels — use `v2` in the description | `architecture/auth-model-v2` |
+| `bugfix` | no slash — looks like a family with no description | `bug/auth-nil-panic` |
+
+### Decision table — when to use topic_key
+
+| Situation | Use topic_key? | Reasoning |
+|---|---|---|
+| Architecture or design decision that may evolve | Yes | Keeps history in one observation, incrementing `revision_count` |
+| Long-running feature work (spans multiple sessions) | Yes | Single source of truth across sessions |
+| A pattern or convention established for the project | Yes | One canonical entry, updated as the pattern matures |
+| Bug fix that was self-contained and is now closed | No | A single observation is fine; no future updates expected |
+| One-off discovery or fact | No | Creating a key you will never reuse adds noise |
+| Multiple independent decisions on the same broad topic | No — use distinct keys | Different decisions must have different keys or they will overwrite each other |
+
+### The mem_suggest_topic_key-first workflow
+
+When you are not sure which key to use, call `mem_suggest_topic_key` before `mem_save`. It applies a family heuristic based on the observation type and title, returning a suggested key you can use directly or adjust:
+
+```text
+1. mem_suggest_topic_key(type="architecture", title="Auth model")
+   → returns: "architecture/auth-model"
+
+2. mem_save(..., topic_key="architecture/auth-model")
+   → creates new observation (revision_count=1)
+
+3. (later session) mem_save(..., topic_key="architecture/auth-model")
+   → updates existing observation (revision_count=2)
+```
+
+`mem_suggest_topic_key` families:
+
+- `architecture/*` — architecture, design, ADR-like observations
+- `bug/*` — bug fixes, regressions, panics, error root causes
+- `decision/*` — explicit decisions with tradeoffs
+- `pattern/*` — naming conventions, structural patterns, coding standards
+- `config/*` — configuration and environment setup
+- `discovery/*` — non-obvious findings about the codebase
+- `learning/*` — team knowledge and onboarding notes
+
+If none of these families fit, it is usually fine to skip the key and let `mem_save` create a plain observation.
+
+### Hierarchical keys — max 2 levels
+
+Keys are organisational only; there is no parent–child relationship in the store. Two levels (`family/description`) cover almost every case. Use the description segment to add specificity rather than adding more slashes:
+
+```
+architecture/auth-model          ✓ two levels, specific
+architecture/auth-model-v2       ✓ version in description
+architecture/auth/model/detail   ✗ three levels — flatten to two
+```
+
+### Lifecycle and pruning
+
+Topic keys are not pruned automatically. An observation updated via upsert keeps a single row with the latest content and an incremented `revision_count`. Use `mem_delete` to remove an observation (soft-delete by default) when a topic is no longer relevant. Soft-deleted observations are excluded from search and context but their IDs remain in the store for audit purposes. Use `--hard` to remove them permanently.
+
+### Scope interaction
+
+`topic_key` upsert is scoped to `project + scope + topic_key`. The same key used with different scopes creates independent observations:
+
+```
+project=engram, scope=project, topic_key=architecture/auth-model  → observation A
+project=engram, scope=personal, topic_key=architecture/auth-model → observation B (independent)
+```
+
+This means a `personal` note on the same topic does not overwrite the shared `project` observation.
 
 ---
 
