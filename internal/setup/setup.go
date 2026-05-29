@@ -195,7 +195,9 @@ Before ending a session or saying "done" / "listo" / "that's it", you MUST:
 ## Relevant Files
 - path/to/file — [what it does or what changed]
 
-This is NOT optional. If you skip this, the next session starts blind.
+2. Call mem_session_end to formally close the session.
+
+This is NOT optional. If you skip this, the next session starts blind and leaves orphaned sessions.
 
 ### PASSIVE CAPTURE — automatic learning extraction
 
