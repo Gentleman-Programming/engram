@@ -27,7 +27,7 @@ Scope is a **search and filter signal**, not a privacy boundary. Concretely:
 
 ### What scope does NOT do today
 
-Scope **does not filter sync**. When a project is enrolled for cloud sync (or when you run `engram sync` locally), both `project` and `personal` observations of that project are exported and shared with whoever has access to the sync target.
+Scope **does not filter sync**. Sync operates by **project/session association**, not by scope: when a project is enrolled for cloud sync (or when you run `engram sync` locally), both `project` and `personal` observations of that project are exported and shared with whoever has access to the sync target.
 
 If you need true isolation for personal notes, two workarounds work today:
 
