@@ -1497,6 +1497,105 @@ func TestAuditLogE2E_MutationPushPausedThenListRendered(t *testing.T) {
 	}
 }
 
+// TestValidateLoginTokenAdminComparisonGuard is a correctness guard for the
+// constant-time admin token comparison inside validateLoginToken (cloudserver.go:160).
+// A correct admin token must be accepted and a wrong one rejected, preserving
+// behavior after the timing-safe hmac.Equal replacement (security issue #350).
+func TestValidateLoginTokenAdminComparisonGuard(t *testing.T) {
+	authSvc, err := cloudauth.NewService(&cloudstore.CloudStore{}, strings.Repeat("x", 32))
+	if err != nil {
+		t.Fatalf("new auth service: %v", err)
+	}
+	authSvc.SetBearerToken("sync-token")
+	authSvc.SetDashboardSessionTokens([]string{"admin-token"})
+	srv := New(&fakeStore{}, authSvc, 0, WithDashboardAdminToken("admin-token"))
+
+	// Correct admin token must authenticate and redirect to dashboard.
+	goodLogin := httptest.NewRecorder()
+	goodReq := httptest.NewRequest(http.MethodPost, "/dashboard/login", strings.NewReader("token=admin-token"))
+	goodReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	srv.Handler().ServeHTTP(goodLogin, goodReq)
+	if goodLogin.Code != http.StatusSeeOther {
+		t.Fatalf("correct admin token must authenticate, got %d body=%q", goodLogin.Code, goodLogin.Body.String())
+	}
+
+	// Wrong token must be rejected (re-render login form).
+	badLogin := httptest.NewRecorder()
+	badReq := httptest.NewRequest(http.MethodPost, "/dashboard/login", strings.NewReader("token=wrong-token"))
+	badReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	srv.Handler().ServeHTTP(badLogin, badReq)
+	if badLogin.Code == http.StatusSeeOther {
+		t.Fatalf("wrong admin token must be rejected, got %d", badLogin.Code)
+	}
+	for _, cookie := range badLogin.Result().Cookies() {
+		if cookie.Name == dashboardSessionCookieName {
+			t.Fatal("wrong admin token must not set session cookie")
+		}
+	}
+}
+
+// TestIsDashboardAdminComparisonGuard is a correctness guard for the
+// constant-time admin token comparison inside isDashboardAdmin (cloudserver.go:320).
+// A valid admin session cookie must grant admin access and a wrong one must not,
+// preserving behavior after the timing-safe hmac.Equal replacement (security issue #350).
+func TestIsDashboardAdminComparisonGuard(t *testing.T) {
+	authSvc, err := cloudauth.NewService(&cloudstore.CloudStore{}, strings.Repeat("x", 32))
+	if err != nil {
+		t.Fatalf("new auth service: %v", err)
+	}
+	authSvc.SetBearerToken("sync-token")
+	authSvc.SetDashboardSessionTokens([]string{"admin-token"})
+	srv := New(&fakeStore{}, authSvc, 0, WithDashboardAdminToken("admin-token"))
+
+	// Establish a valid admin session cookie via login.
+	loginRec := httptest.NewRecorder()
+	loginReq := httptest.NewRequest(http.MethodPost, "/dashboard/login", strings.NewReader("token=admin-token"))
+	loginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	srv.Handler().ServeHTTP(loginRec, loginReq)
+	if loginRec.Code != http.StatusSeeOther {
+		t.Fatalf("setup: expected admin login to succeed, got %d body=%q", loginRec.Code, loginRec.Body.String())
+	}
+	adminCookies := loginRec.Result().Cookies()
+
+	// Admin session must grant access to /dashboard/admin.
+	adminRec := httptest.NewRecorder()
+	adminReq := httptest.NewRequest(http.MethodGet, "/dashboard/admin", nil)
+	for _, c := range adminCookies {
+		adminReq.AddCookie(c)
+	}
+	srv.Handler().ServeHTTP(adminRec, adminReq)
+	if adminRec.Code != http.StatusOK {
+		t.Fatalf("valid admin session must access /dashboard/admin, got %d body=%q", adminRec.Code, adminRec.Body.String())
+	}
+
+	// Non-admin session (sync-token login) must not access /dashboard/admin.
+	authSvc2, err := cloudauth.NewService(&cloudstore.CloudStore{}, strings.Repeat("x", 32))
+	if err != nil {
+		t.Fatalf("new auth service 2: %v", err)
+	}
+	authSvc2.SetBearerToken("sync-token")
+	authSvc2.SetDashboardSessionTokens([]string{"admin-token"})
+	srv2 := New(&fakeStore{}, authSvc2, 0, WithDashboardAdminToken("admin-token"))
+
+	syncLoginRec := httptest.NewRecorder()
+	syncLoginReq := httptest.NewRequest(http.MethodPost, "/dashboard/login", strings.NewReader("token=sync-token"))
+	syncLoginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	srv2.Handler().ServeHTTP(syncLoginRec, syncLoginReq)
+	if syncLoginRec.Code != http.StatusSeeOther {
+		t.Fatalf("setup: sync-token login must succeed, got %d body=%q", syncLoginRec.Code, syncLoginRec.Body.String())
+	}
+
+	nonAdminRec := httptest.NewRecorder()
+	nonAdminReq := httptest.NewRequest(http.MethodGet, "/dashboard/admin", nil)
+	for _, c := range syncLoginRec.Result().Cookies() {
+		nonAdminReq.AddCookie(c)
+	}
+	srv2.Handler().ServeHTTP(nonAdminRec, nonAdminReq)
+	if nonAdminRec.Code == http.StatusOK {
+		t.Fatalf("non-admin session must not access /dashboard/admin, got %d", nonAdminRec.Code)
+	}
+}
+
 // TestInsecureModeLoginRedirects asserts that GET /dashboard/login with auth==nil
 // returns 303 to /dashboard/ (login is a no-op in insecure mode). Satisfies REQ-110.
 func TestInsecureModeLoginRedirects(t *testing.T) {

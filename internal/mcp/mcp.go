@@ -26,6 +26,7 @@ import (
 	"github.com/Gentleman-Programming/engram/internal/diagnostic"
 	projectpkg "github.com/Gentleman-Programming/engram/internal/project"
 	"github.com/Gentleman-Programming/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/internal/timeutil"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -271,7 +272,10 @@ func registerTools(srv *server.MCPServer, s *store.Store, cfg MCPConfig, allowli
 					mcp.Description("Filter by type: tool_use, file_change, command, file_read, search, manual, decision, architecture, bugfix, pattern"),
 				),
 				mcp.WithString("project",
-					mcp.Description("Filter by project name"),
+					mcp.Description("Filter by project name. Ignored when all_projects=true."),
+				),
+				mcp.WithBoolean("all_projects",
+					mcp.Description("Search across every project instead of the current one. When true, the project argument is ignored and results may come from any project. Useful for recalling decisions logged elsewhere when you don't know the project key."),
 				),
 				mcp.WithString("scope",
 					mcp.Description("Filter by scope: project (default) or personal"),
@@ -899,30 +903,50 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		typ, _ := req.GetArguments()["type"].(string)
 		projectOverride, _ := req.GetArguments()["project"].(string)
 		scope, _ := req.GetArguments()["scope"].(string)
+		allProjects := boolArg(req, "all_projects", false)
 		limit := intArg(req, "limit", 10)
 
-		// Resolve project: validate override or auto-detect (REQ-310, REQ-311)
-		detRes, err := resolveReadProjectWithProcessOverride(s, projectOverride, cfg.DefaultProject)
-		if err != nil {
-			var upe *unknownProjectError
-			if errors.As(err, &upe) {
-				return errorWithMeta("unknown_project",
-					fmt.Sprintf("Project %q not found in store", upe.Name),
-					upe.AvailableProjects,
-				), nil
+		// all_projects=true short-circuits project resolution: we search globally
+		// regardless of the project override or any auto-detected project. This
+		// keeps the cross-project flow independent of cwd-based detection so the
+		// agent can recall context from any project without knowing its key.
+		var detRes projectpkg.DetectionResult
+		var project string
+		if allProjects {
+			detRes = projectpkg.DetectionResult{Source: projectpkg.SourceAllProjects}
+		} else {
+			// Resolve project: validate override or auto-detect (REQ-310, REQ-311)
+			res, err := resolveReadProjectWithProcessOverride(s, projectOverride, cfg.DefaultProject)
+			if err != nil {
+				var upe *unknownProjectError
+				if errors.As(err, &upe) {
+					return errorWithMeta("unknown_project",
+						fmt.Sprintf("Project %q not found in store", upe.Name),
+						upe.AvailableProjects,
+					), nil
+				}
+				return mcp.NewToolResultError(fmt.Sprintf("Project resolution failed: %s", err)), nil
 			}
-			return mcp.NewToolResultError(fmt.Sprintf("Project resolution failed: %s", err)), nil
+			detRes = res
+			project = detRes.Project
+			project, _ = store.NormalizeProject(project)
+			detRes.Project = project // JR2-1: keep envelope in sync with normalized query project
 		}
-		project := detRes.Project
-		project, _ = store.NormalizeProject(project)
-		detRes.Project = project // JR2-1: keep envelope in sync with normalized query project
+
+		// REQ-391: personal scope is cross-project by definition. When scope=personal
+		// and no explicit project override was provided, clear the project filter so
+		// memories from all projects are visible (not just the cwd-detected one).
+		searchProject := project
+		if scope == "personal" && strings.TrimSpace(projectOverride) == "" {
+			searchProject = ""
+		}
 
 		sessionID := defaultSessionID(project)
 		activity.RecordToolCall(sessionID)
 
 		results, err := s.Search(query, store.SearchOptions{
 			Type:    typ,
-			Project: project,
+			Project: searchProject,
 			Scope:   scope,
 			Limit:   limit,
 		})
@@ -966,7 +990,7 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			fmt.Fprintf(&b, "[%d] #%d (%s) — %s\n    %s\n    %s%s | scope: %s\n",
 				i+1, r.ID, r.Type, r.Title,
 				preview,
-				r.CreatedAt, projectDisplay, r.Scope)
+				timeutil.FormatLocal(r.CreatedAt), projectDisplay, r.Scope)
 
 			// Append relation annotations. Skip orphaned (filtered by store).
 			//
@@ -1371,10 +1395,18 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 		project, _ = store.NormalizeProject(project)
 		detRes.Project = project // JR2-1: keep envelope in sync with normalized query project
 
+		// REQ-391: personal scope is cross-project by definition. When scope=personal
+		// and no explicit project override was provided, clear the project filter so
+		// observations from all projects are returned (not just the cwd-detected one).
+		contextProject := project
+		if scope == "personal" && strings.TrimSpace(projectOverride) == "" {
+			contextProject = ""
+		}
+
 		sessionID := defaultSessionID(project)
 		activity.RecordToolCall(sessionID)
 
-		contextResult, err := s.FormatContext(project, scope)
+		contextResult, err := s.FormatContext(contextProject, scope)
 		if err != nil {
 			return mcp.NewToolResultError("Failed to get context: " + err.Error()), nil
 		}
@@ -1531,7 +1563,7 @@ func handleTimeline(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 		// Focus observation (highlighted)
 		fmt.Fprintf(&b, ">>> #%d [%s] %s <<<\n", result.Focus.ID, result.Focus.Type, result.Focus.Title)
 		fmt.Fprintf(&b, "    %s\n", truncate(result.Focus.Content, 500))
-		fmt.Fprintf(&b, "    %s\n\n", result.Focus.CreatedAt)
+		fmt.Fprintf(&b, "    %s\n\n", timeutil.FormatLocal(result.Focus.CreatedAt))
 
 		// After entries
 		if len(result.After) > 0 {
@@ -1582,7 +1614,7 @@ func handleGetObservation(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc 
 			obs.ID, obs.Type, obs.Title,
 			obs.Content,
 			obs.SessionID, obsProject+scope+topic, toolName+duplicateMeta+revisionMeta,
-			obs.CreatedAt,
+			timeutil.FormatLocal(obs.CreatedAt),
 		)
 
 		if detErr != nil {
@@ -1600,8 +1632,15 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		sessionID, _ := req.GetArguments()["session_id"].(string)
 		// project field intentionally not read — auto-detect only (REQ-308 write-tool contract)
 
-		// Auto-detect project from cwd; fail fast on ambiguous (REQ-308, REQ-309)
-		detRes, err := resolveWriteProject()
+		// Reject empty/whitespace-only content before any project resolution (#393).
+		if strings.TrimSpace(content) == "" {
+			return mcp.NewToolResultError("content is required for mem_session_summary"), nil
+		}
+
+		// Honour process-level project override (cfg.DefaultProject) set via
+		// ENGRAM_PROJECT or `engram mcp --project` (#403/#413). Falls back to cwd
+		// detection when no override is configured.
+		detRes, err := resolveWriteProjectWithProcessOverride(cfg.DefaultProject)
 		if err != nil {
 			return writeProjectErrorResult(nil, "", detRes, err), nil
 		}

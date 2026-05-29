@@ -7715,3 +7715,327 @@ func TestGetDeferred_NotFound(t *testing.T) {
 		t.Errorf("expected error to contain 'not found'; got %q", err.Error())
 	}
 }
+
+func TestNormalizeScopeHandlesGlobal(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"global", "global"},
+		{"Global", "global"},
+		{"GLOBAL", "global"},
+		{"  global  ", "global"},
+		{"personal", "personal"},
+		{"Personal", "personal"},
+		{"project", "project"},
+		{"Project", "project"},
+		{"", "project"},
+		{"unknown", "project"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			got := normalizeScope(tc.input)
+			if got != tc.want {
+				t.Errorf("normalizeScope(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSearchLegacyMixedCaseProject reproduces issue #146:
+// observations stored with a mixed-case project name (legacy data pre-normalization)
+// must be found when searched with a normalized (lowercase) project name.
+//
+// Previously, Search and ProjectExists used case-sensitive "project = ?" which
+// caused all MCP tool calls to return empty results for such projects.
+func TestSearchLegacyMixedCaseProject(t *testing.T) {
+	s := newTestStore(t)
+
+	// Insert a session and observation directly with mixed-case project name,
+	// bypassing AddObservation normalization to simulate legacy data.
+	legacyProject := "Ebook2Audio"
+	_, err := s.db.Exec(
+		`INSERT INTO sessions (id, project, directory) VALUES (?, ?, ?)`,
+		"legacy-mixed-sess", legacyProject, "/tmp/ebook",
+	)
+	if err != nil {
+		t.Fatalf("insert legacy session: %v", err)
+	}
+
+	_, err = s.db.Exec(`
+		INSERT INTO observations (session_id, type, title, content, project, scope)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		"legacy-mixed-sess", "bugfix",
+		"Fixed log routing in DisplayManager",
+		"Corrected log routing so debug output goes to stderr not stdout",
+		legacyProject, "project",
+	)
+	if err != nil {
+		t.Fatalf("insert legacy observation: %v", err)
+	}
+
+	// Re-build FTS index so the new row is searchable.
+	if _, err := s.db.Exec(`INSERT INTO observations_fts(observations_fts) VALUES('rebuild')`); err != nil {
+		t.Fatalf("rebuild FTS: %v", err)
+	}
+
+	normalizedProject := "ebook2audio"
+
+	// ProjectExists must find the legacy project via case-insensitive match.
+	exists, err := s.ProjectExists(normalizedProject)
+	if err != nil {
+		t.Fatalf("ProjectExists error: %v", err)
+	}
+	if !exists {
+		t.Error("ProjectExists returned false for mixed-case legacy project; want true")
+	}
+
+	// Search must return the observation when filtering by normalized project name.
+	results, err := s.Search("log routing", SearchOptions{
+		Project: normalizedProject,
+		Limit:   10,
+	})
+	if err != nil {
+		t.Fatalf("Search error: %v", err)
+	}
+	if len(results) == 0 {
+		t.Error("Search returned 0 results for legacy mixed-case project; want >=1")
+	}
+
+	// RecentObservations (used by mem_context) must also find the data.
+	obs, err := s.RecentObservations(normalizedProject, "", 10)
+	if err != nil {
+		t.Fatalf("RecentObservations error: %v", err)
+	}
+	if len(obs) == 0 {
+		t.Error("RecentObservations returned 0 results for legacy mixed-case project; want >=1")
+	}
+
+	// RecentSessions (used by mem_context) must also find the session.
+	sessions, err := s.RecentSessions(normalizedProject, 5)
+	if err != nil {
+		t.Fatalf("RecentSessions error: %v", err)
+	}
+	if len(sessions) == 0 {
+		t.Error("RecentSessions returned 0 results for legacy mixed-case project; want >=1")
+	}
+}
+
+// ─── DeleteProject tests ──────────────────────────────────────────────────────
+
+func TestDeleteProjectCascadesAllEntities(t *testing.T) {
+	s := newTestStore(t)
+
+	// Seed: one session with two observations and one prompt.
+	if err := s.CreateSession("s-del-proj-1", "alpha", "/tmp/alpha"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	obsID1, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-del-proj-1",
+		Type:      "decision",
+		Title:     "obs-one",
+		Content:   "content one",
+		Project:   "alpha",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add obs 1: %v", err)
+	}
+	_, err = s.AddObservation(AddObservationParams{
+		SessionID: "s-del-proj-1",
+		Type:      "bugfix",
+		Title:     "obs-two",
+		Content:   "content two",
+		Project:   "alpha",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add obs 2: %v", err)
+	}
+	_, err = s.AddPrompt(AddPromptParams{SessionID: "s-del-proj-1", Content: "prompt one", Project: "alpha"})
+	if err != nil {
+		t.Fatalf("add prompt: %v", err)
+	}
+
+	result, err := s.DeleteProject("alpha", true)
+	if err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
+
+	if result.Project != "alpha" {
+		t.Errorf("result.Project = %q, want %q", result.Project, "alpha")
+	}
+	if result.ObservationsDeleted != 2 {
+		t.Errorf("ObservationsDeleted = %d, want 2", result.ObservationsDeleted)
+	}
+	if result.PromptsDeleted != 1 {
+		t.Errorf("PromptsDeleted = %d, want 1", result.PromptsDeleted)
+	}
+	if result.SessionsDeleted != 1 {
+		t.Errorf("SessionsDeleted = %d, want 1", result.SessionsDeleted)
+	}
+
+	// Verify rows are gone.
+	var obsCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE session_id = ?`, "s-del-proj-1").Scan(&obsCount); err != nil {
+		t.Fatalf("count observations: %v", err)
+	}
+	if obsCount != 0 {
+		t.Errorf("expected 0 observations after hard delete, got %d", obsCount)
+	}
+
+	var sessionCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE project = ?`, "alpha").Scan(&sessionCount); err != nil {
+		t.Fatalf("count sessions: %v", err)
+	}
+	if sessionCount != 0 {
+		t.Errorf("expected 0 sessions after DeleteProject, got %d", sessionCount)
+	}
+
+	var promptCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM user_prompts WHERE project = ?`, "alpha").Scan(&promptCount); err != nil {
+		t.Fatalf("count prompts: %v", err)
+	}
+	if promptCount != 0 {
+		t.Errorf("expected 0 prompts after DeleteProject, got %d", promptCount)
+	}
+
+	// Hard-deleted obs must also be gone from the table itself.
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE id = ?`, obsID1).Scan(&obsCount); err != nil {
+		t.Fatalf("count obs by id: %v", err)
+	}
+	if obsCount != 0 {
+		t.Errorf("expected obs #%d to be hard-deleted, got count %d", obsID1, obsCount)
+	}
+}
+
+func TestDeleteProjectSoftDeleteObservations(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s-del-proj-soft", "beta", "/tmp/beta"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	_, err := s.AddPrompt(AddPromptParams{SessionID: "s-del-proj-soft", Content: "p", Project: "beta"})
+	if err != nil {
+		t.Fatalf("add prompt: %v", err)
+	}
+	obsID, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-del-proj-soft",
+		Type:      "decision",
+		Title:     "soft-obs",
+		Content:   "content",
+		Project:   "beta",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add obs: %v", err)
+	}
+
+	result, err := s.DeleteProject("beta", false)
+	if err != nil {
+		t.Fatalf("DeleteProject soft: %v", err)
+	}
+	if result.ObservationsDeleted != 1 {
+		t.Errorf("ObservationsDeleted = %d, want 1", result.ObservationsDeleted)
+	}
+	if result.PromptsDeleted != 1 {
+		t.Errorf("PromptsDeleted = %d, want 1", result.PromptsDeleted)
+	}
+
+	// Observation row must still exist but have deleted_at set.
+	var deletedAt *string
+	if err := s.db.QueryRow(`SELECT deleted_at FROM observations WHERE id = ?`, obsID).Scan(&deletedAt); err != nil {
+		t.Fatalf("scan deleted_at: %v", err)
+	}
+	if deletedAt == nil {
+		t.Errorf("expected deleted_at to be set after soft-delete, got nil")
+	}
+
+	// Prompts must be removed.
+	var promptCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM user_prompts WHERE project = ?`, "beta").Scan(&promptCount); err != nil {
+		t.Fatalf("count prompts: %v", err)
+	}
+	if promptCount != 0 {
+		t.Errorf("expected 0 prompts after soft DeleteProject, got %d", promptCount)
+	}
+
+	// Sessions must NOT be removed in soft-delete mode (FK constraint from soft-deleted obs).
+	var sessionCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE project = ?`, "beta").Scan(&sessionCount); err != nil {
+		t.Fatalf("count sessions: %v", err)
+	}
+	if sessionCount != 1 {
+		t.Errorf("expected sessions to remain intact after soft DeleteProject, got count %d", sessionCount)
+	}
+	// SessionsDeleted must be 0 in soft mode.
+	if result.SessionsDeleted != 0 {
+		t.Errorf("expected SessionsDeleted = 0 in soft mode, got %d", result.SessionsDeleted)
+	}
+}
+
+func TestDeleteProjectUnknownProjectReturnsError(t *testing.T) {
+	s := newTestStore(t)
+	_, err := s.DeleteProject("nonexistent-project-xyz", true)
+	if err == nil {
+		t.Fatal("expected error for unknown project, got nil")
+	}
+	if !errors.Is(err, ErrProjectNotFound) {
+		t.Errorf("expected ErrProjectNotFound, got %v", err)
+	}
+}
+
+func TestDeleteProjectEmptyNameReturnsError(t *testing.T) {
+	s := newTestStore(t)
+	_, err := s.DeleteProject("", true)
+	if err == nil {
+		t.Fatal("expected error for empty project name, got nil")
+	}
+}
+
+func TestDeleteProjectOrphansMemoryRelations(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s-del-proj-rel", "gamma", "/tmp/gamma"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	obsID, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-del-proj-rel",
+		Type:      "decision",
+		Title:     "rel-obs",
+		Content:   "content",
+		Project:   "gamma",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add obs: %v", err)
+	}
+
+	// Get sync_id of the observation for the relation.
+	var syncID string
+	if err := s.db.QueryRow(`SELECT sync_id FROM observations WHERE id = ?`, obsID).Scan(&syncID); err != nil {
+		t.Fatalf("get sync_id: %v", err)
+	}
+
+	// Insert a fake relation that references this observation.
+	relSyncID := "rel-" + syncID
+	if _, err := s.db.Exec(`
+		INSERT INTO memory_relations (sync_id, source_id, target_id, relation, judgment_status, created_at, updated_at)
+		VALUES (?, ?, 'other-obs', 'related', 'pending', datetime('now'), datetime('now'))
+	`, relSyncID, syncID); err != nil {
+		t.Fatalf("insert relation: %v", err)
+	}
+
+	if _, err := s.DeleteProject("gamma", true); err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
+
+	// The relation must be orphaned, not deleted.
+	var judgmentStatus string
+	if err := s.db.QueryRow(`SELECT judgment_status FROM memory_relations WHERE sync_id = ?`, relSyncID).Scan(&judgmentStatus); err != nil {
+		t.Fatalf("scan relation judgment_status: %v", err)
+	}
+	if judgmentStatus != "orphaned" {
+		t.Errorf("expected relation judgment_status = orphaned after hard delete, got %q", judgmentStatus)
+	}
+}

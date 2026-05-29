@@ -6519,3 +6519,452 @@ func TestProcessOverrideSaveHandlerWritesToDefaultProject(t *testing.T) {
 		t.Fatalf("results in trusted project = %d; want 1", len(results))
 	}
 }
+
+// TestHandleSearchPersonalScopeIgnoresCWDProject verifies that when scope=personal
+// and no explicit project is given, handleSearch returns personal memories from
+// ALL projects rather than filtering to the cwd-detected project (issue #391).
+func TestHandleSearchPersonalScopeIgnoresCWDProject(t *testing.T) {
+	s := newMCPTestStore(t)
+
+	// Create sessions and personal observations in two distinct projects.
+	if err := s.CreateSession("sess-proj-a", "project-alpha", "/tmp/project-alpha"); err != nil {
+		t.Fatalf("create session project-alpha: %v", err)
+	}
+	if err := s.CreateSession("sess-proj-b", "project-beta", "/tmp/project-beta"); err != nil {
+		t.Fatalf("create session project-beta: %v", err)
+	}
+
+	_, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "sess-proj-a",
+		Type:      "decision",
+		Title:     "personal cross-project preference",
+		Content:   "always use structured logging",
+		Project:   "project-alpha",
+		Scope:     "personal",
+	})
+	if err != nil {
+		t.Fatalf("add personal observation project-alpha: %v", err)
+	}
+
+	_, err = s.AddObservation(store.AddObservationParams{
+		SessionID: "sess-proj-b",
+		Type:      "decision",
+		Title:     "personal note from beta",
+		Content:   "prefer context-based cancellation",
+		Project:   "project-beta",
+		Scope:     "personal",
+	})
+	if err != nil {
+		t.Fatalf("add personal observation project-beta: %v", err)
+	}
+
+	// Simulate cwd being project-alpha's directory; the handler should NOT filter
+	// results to project-alpha when scope=personal is requested without an explicit project.
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	h := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"query": "personal",
+		"scope": "personal",
+		// no "project" argument — must NOT default to cwd project
+	}}})
+	if err != nil {
+		t.Fatalf("search handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", callResultText(t, res))
+	}
+
+	text := callResultText(t, res)
+	// Both personal memories must be visible regardless of cwd project.
+	if !strings.Contains(text, "personal cross-project preference") {
+		t.Errorf("expected personal memory from project-alpha in results; got: %s", text)
+	}
+	if !strings.Contains(text, "personal note from beta") {
+		t.Errorf("expected personal memory from project-beta in results; got: %s", text)
+	}
+}
+
+// TestHandleContextPersonalScopeIgnoresCWDProject verifies that when scope=personal
+// and no explicit project is given, handleContext returns personal observations from
+// ALL projects rather than filtering to the cwd-detected project (issue #391).
+func TestHandleContextPersonalScopeIgnoresCWDProject(t *testing.T) {
+	s := newMCPTestStore(t)
+
+	if err := s.CreateSession("ctx-sess-a", "ctx-alpha", "/tmp/ctx-alpha"); err != nil {
+		t.Fatalf("create session ctx-alpha: %v", err)
+	}
+	if err := s.CreateSession("ctx-sess-b", "ctx-beta", "/tmp/ctx-beta"); err != nil {
+		t.Fatalf("create session ctx-beta: %v", err)
+	}
+
+	_, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "ctx-sess-a",
+		Type:      "pattern",
+		Title:     "personal pattern from alpha",
+		Content:   "use table-driven tests everywhere",
+		Project:   "ctx-alpha",
+		Scope:     "personal",
+	})
+	if err != nil {
+		t.Fatalf("add personal observation ctx-alpha: %v", err)
+	}
+
+	_, err = s.AddObservation(store.AddObservationParams{
+		SessionID: "ctx-sess-b",
+		Type:      "pattern",
+		Title:     "personal pattern from beta",
+		Content:   "prefer explicit error wrapping",
+		Project:   "ctx-beta",
+		Scope:     "personal",
+	})
+	if err != nil {
+		t.Fatalf("add personal observation ctx-beta: %v", err)
+	}
+
+	// Simulate cwd being ctx-alpha's directory.
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	h := handleContext(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"scope": "personal",
+		// no "project" argument — must NOT default to cwd project
+	}}})
+	if err != nil {
+		t.Fatalf("context handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", callResultText(t, res))
+	}
+
+	text := callResultText(t, res)
+	// Both personal observations must appear in the context output.
+	if !strings.Contains(text, "personal pattern from alpha") {
+		t.Errorf("expected personal memory from ctx-alpha in context; got: %s", text)
+	}
+	if !strings.Contains(text, "personal pattern from beta") {
+		t.Errorf("expected personal memory from ctx-beta in context; got: %s", text)
+	}
+}
+
+// ─── #403/#413: handleSessionSummary process-override tests ──────────────────
+
+// TestSessionSummary_ProcessOverrideWritesToDefaultProject verifies that when
+// cfg.DefaultProject is set (process-level override via ENGRAM_PROJECT / --project),
+// handleSessionSummary writes under that project instead of falling back to cwd
+// detection. Mirrors TestProcessOverrideSaveHandlerWritesToDefaultProject for save.
+func TestSessionSummary_ProcessOverrideWritesToDefaultProject(t *testing.T) {
+	// Use a temp dir that has no git repo — without the fix, resolveWriteProject()
+	// would return an error or a wrong project; with the fix it uses the override.
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	h := handleSessionSummary(s, MCPConfig{DefaultProject: "Trusted Project"}, NewSessionActivity(10*time.Minute))
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"content": "## Goal\nProcess override session summary",
+	}}})
+	if err != nil || res.IsError {
+		t.Fatalf("session summary error: err=%v isError=%v text=%q", err, res.IsError, callResultText(t, res))
+	}
+
+	obs, err := s.RecentObservations("trusted project", "project", 5)
+	if err != nil {
+		t.Fatalf("RecentObservations: %v", err)
+	}
+	if len(obs) == 0 {
+		t.Fatal("expected session_summary observation under 'trusted project' (process override); got none")
+	}
+
+	m := callResultJSON(t, res)
+	if got := m["project"]; got != "trusted project" {
+		t.Errorf("response envelope project = %v; want 'trusted project'", got)
+	}
+	if got := m["project_source"]; got != sourceProcessOverride {
+		t.Errorf("response envelope project_source = %v; want %s", got, sourceProcessOverride)
+	}
+}
+
+// TestSessionSummary_ProcessOverrideBypassesAmbiguousCWD verifies that an
+// ambiguous cwd (parent dir with multiple git repos) is bypassed when
+// cfg.DefaultProject is set.
+func TestSessionSummary_ProcessOverrideBypassesAmbiguousCWD(t *testing.T) {
+	parent := t.TempDir()
+	for _, name := range []string{"repo-ss-1", "repo-ss-2"} {
+		child := filepath.Join(parent, name)
+		if err := os.MkdirAll(child, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		initTestGitRepo(t, child)
+	}
+	t.Chdir(parent)
+
+	s := newMCPTestStore(t)
+	h := handleSessionSummary(s, MCPConfig{DefaultProject: "override-project"}, NewSessionActivity(10*time.Minute))
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"content": "## Goal\nAmbiguous override test",
+	}}})
+	if err != nil || res.IsError {
+		t.Fatalf("expected success via process override; err=%v isError=%v text=%q", err, res.IsError, callResultText(t, res))
+	}
+
+	obs, err := s.RecentObservations("override-project", "project", 5)
+	if err != nil {
+		t.Fatalf("RecentObservations: %v", err)
+	}
+	if len(obs) == 0 {
+		t.Fatal("expected session_summary under 'override-project'; got none")
+	}
+}
+
+// ─── #393: handleSessionSummary empty-content guard tests ────────────────────
+
+// TestSessionSummary_EmptyContentRejected verifies that an empty content string
+// is rejected before AddObservation is called, mirroring the guard in handleSave.
+func TestSessionSummary_EmptyContentRejected(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"content": "",
+	}}})
+	if err != nil {
+		t.Fatalf("handler returned Go error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("expected tool error for empty content; got success")
+	}
+	text := callResultText(t, res)
+	if !strings.Contains(text, "content") {
+		t.Errorf("error message should mention 'content'; got: %q", text)
+	}
+
+	// No observation must have been persisted.
+	obs, err := s.RecentObservations("", "project", 10)
+	if err != nil {
+		t.Fatalf("RecentObservations: %v", err)
+	}
+	if len(obs) != 0 {
+		t.Fatalf("expected 0 observations after empty-content rejection; got %d", len(obs))
+	}
+}
+
+// TestSessionSummary_WhitespaceOnlyContentRejected verifies that whitespace-only
+// content is also rejected (mirrors handleSave behaviour).
+func TestSessionSummary_WhitespaceOnlyContentRejected(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"content": "   \n\t  ",
+	}}})
+	if err != nil {
+		t.Fatalf("handler returned Go error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("expected tool error for whitespace-only content; got success")
+	}
+}
+
+// ─── #408/#346: cross-project search and timezone tests ──────────────────────
+
+// seedCrossProjectMemories inserts one observation per project so cross-project
+// search tests have something to find. Returns the session IDs created.
+func seedCrossProjectMemories(t *testing.T, s *store.Store) {
+	t.Helper()
+	type seed struct {
+		session string
+		project string
+		title   string
+		content string
+	}
+	seeds := []seed{
+		{"s-alpha", "alpha", "Auth middleware in alpha", "JWT auth middleware decided here"},
+		{"s-beta", "beta", "Auth middleware in beta", "Different auth approach for beta"},
+		{"s-gamma", "gamma", "Logging only", "Nothing about authentication here"},
+	}
+	for _, sd := range seeds {
+		if err := s.CreateSession(sd.session, sd.project, "/tmp/"+sd.project); err != nil {
+			t.Fatalf("create session %s: %v", sd.session, err)
+		}
+		if _, err := s.AddObservation(store.AddObservationParams{
+			SessionID: sd.session,
+			Type:      "decision",
+			Title:     sd.title,
+			Content:   sd.content,
+			Project:   sd.project,
+			Scope:     "project",
+		}); err != nil {
+			t.Fatalf("add observation %s: %v", sd.project, err)
+		}
+	}
+}
+
+func TestHandleSearchAllProjectsReturnsResultsFromEveryProject(t *testing.T) {
+	s := newMCPTestStore(t)
+	seedCrossProjectMemories(t, s)
+
+	search := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"query":        "auth middleware",
+		"all_projects": true,
+		"limit":        5.0,
+	}}}
+
+	res, err := search(context.Background(), req)
+	if err != nil {
+		t.Fatalf("search handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected search error: %s", callResultText(t, res))
+	}
+
+	text := callResultText(t, res)
+	if !strings.Contains(text, "alpha") {
+		t.Fatalf("expected result from alpha, got: %s", text)
+	}
+	if !strings.Contains(text, "beta") {
+		t.Fatalf("expected result from beta, got: %s", text)
+	}
+
+	// Envelope must reflect cross-project search, not a single resolved project.
+	var envelope map[string]any
+	if err := json.Unmarshal([]byte(text), &envelope); err != nil {
+		t.Fatalf("envelope is not JSON: %v\n%s", err, text)
+	}
+	if got := envelope["project_source"]; got != project.SourceAllProjects {
+		t.Fatalf("project_source = %v; want %q", got, project.SourceAllProjects)
+	}
+	if got := envelope["project"]; got != "" {
+		t.Fatalf("project = %v; want empty string for cross-project search", got)
+	}
+}
+
+func TestHandleSearchAllProjectsOverridesProjectArg(t *testing.T) {
+	s := newMCPTestStore(t)
+	seedCrossProjectMemories(t, s)
+
+	search := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	// Pass both project="alpha" and all_projects=true: all_projects must win.
+	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"query":        "auth middleware",
+		"project":      "alpha",
+		"all_projects": true,
+		"limit":        5.0,
+	}}}
+
+	res, err := search(context.Background(), req)
+	if err != nil {
+		t.Fatalf("search handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected search error: %s", callResultText(t, res))
+	}
+
+	text := callResultText(t, res)
+	if !strings.Contains(text, "beta") {
+		t.Fatalf("expected result from beta even when project=alpha was supplied; got: %s", text)
+	}
+}
+
+func TestHandleSearchWithoutAllProjectsStillScopesToCurrentProject(t *testing.T) {
+	s := newMCPTestStore(t)
+	seedCrossProjectMemories(t, s)
+
+	search := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	// Default behavior: project="alpha", no all_projects flag → only alpha matches.
+	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"query":   "auth middleware",
+		"project": "alpha",
+		"limit":   5.0,
+	}}}
+
+	res, err := search(context.Background(), req)
+	if err != nil {
+		t.Fatalf("search handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected search error: %s", callResultText(t, res))
+	}
+
+	text := callResultText(t, res)
+	if !strings.Contains(text, "alpha") {
+		t.Fatalf("expected result from alpha, got: %s", text)
+	}
+	if strings.Contains(text, "beta") {
+		t.Fatalf("beta result should not leak into a scoped search; got: %s", text)
+	}
+}
+
+// TestHandleSearchLegacyMixedCaseProject reproduces issue #146:
+// mem_search returns empty when the DB contains observations stored under a
+// mixed-case project name (e.g. "Ebook2Audio") but the query uses the
+// normalized lowercase name (e.g. "ebook2audio") — or vice versa.
+//
+// The MCP path calls resolveReadProject which normalizes the override to
+// lowercase, then checks ProjectExists with the lowercase name. Previously
+// ProjectExists used a case-sensitive "project = ?" match and returned false
+// for mixed-case legacy data, causing handleSearch to return unknown_project.
+func TestHandleSearchLegacyMixedCaseProject(t *testing.T) {
+	s := newMCPTestStore(t)
+
+	// Insert session and observation directly with a mixed-case project name
+	// to simulate data created by a pre-normalization version of engram.
+	legacyProject := "Ebook2Audio"
+	if _, err := s.DB().Exec(
+		`INSERT INTO sessions (id, project, directory) VALUES (?, ?, ?)`,
+		"legacy-mcp-sess", legacyProject, "/tmp/ebook",
+	); err != nil {
+		t.Fatalf("insert legacy session: %v", err)
+	}
+	if _, err := s.DB().Exec(`
+		INSERT INTO observations (session_id, type, title, content, project, scope)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		"legacy-mcp-sess", "bugfix",
+		"Fixed progress reuse in DisplayManager",
+		"Corrected progress bar reuse so prior run state is not carried over",
+		legacyProject, "project",
+	); err != nil {
+		t.Fatalf("insert legacy observation: %v", err)
+	}
+	if _, err := s.DB().Exec(
+		`INSERT INTO observations_fts(observations_fts) VALUES('rebuild')`,
+	); err != nil {
+		t.Fatalf("rebuild FTS: %v", err)
+	}
+
+	search := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	// The agent passes the project name as typed (mixed-case). handleSearch
+	// normalizes it to lowercase and must still resolve and return results.
+	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"query":   "progress bar",
+		"project": "Ebook2Audio", // as a user would type it
+		"limit":   5.0,
+	}}}
+
+	res, err := search(context.Background(), req)
+	if err != nil {
+		t.Fatalf("search handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("handleSearch returned error for legacy mixed-case project: %s", callResultText(t, res))
+	}
+
+	text := callResultText(t, res)
+	if !strings.Contains(text, "Found") || strings.Contains(text, "No memories found") {
+		t.Fatalf("expected search results for legacy project, got: %s", text)
+	}
+}

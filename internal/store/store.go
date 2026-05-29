@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Gentleman-Programming/engram/internal/timeutil"
 	sqlite "modernc.org/sqlite"
 )
 
@@ -49,6 +50,7 @@ var (
 	ErrSessionDeleteBlocked   = errors.New("session deletion is blocked while cloud sync enrollment is active")
 	ErrObservationNotFound    = errors.New("observation not found")
 	ErrPromptNotFound         = errors.New("prompt not found")
+	ErrProjectNotFound        = errors.New("project not found")
 )
 
 // Sentinel errors for relation sync apply path (Phase 2).
@@ -536,6 +538,11 @@ func defaultStoreHooks() storeHooks {
 		},
 	}
 }
+
+// DB returns the underlying *sql.DB. Intended for test helpers and integration
+// tests that need to inject raw rows (e.g. legacy data with non-normalized
+// project names) without going through the Store's public API.
+func (s *Store) DB() *sql.DB { return s.db }
 
 func (s *Store) execHook(db execer, query string, args ...any) (sql.Result, error) {
 	if s.hooks.exec != nil {
@@ -2026,7 +2033,7 @@ func (s *Store) RecentSessions(project string, limit int) ([]SessionSummary, err
 	args := []any{}
 
 	if project != "" {
-		query += " AND s.project = ?"
+		query += " AND LOWER(s.project) = ?"
 		args = append(args, project)
 	}
 
@@ -2297,7 +2304,7 @@ func (s *Store) RecentObservations(project, scope string, limit int) ([]Observat
 	args := []any{}
 
 	if project != "" {
-		query += " AND o.project = ?"
+		query += " AND LOWER(o.project) = ?"
 		args = append(args, project)
 	}
 	if scope != "" {
@@ -2898,7 +2905,7 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 			tkArgs = append(tkArgs, opts.Type)
 		}
 		if opts.Project != "" {
-			tkSQL += " AND project = ?"
+			tkSQL += " AND LOWER(project) = ?"
 			tkArgs = append(tkArgs, opts.Project)
 		}
 		if opts.Scope != "" {
@@ -2946,7 +2953,7 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 	}
 
 	if opts.Project != "" {
-		sqlQ += " AND o.project = ?"
+		sqlQ += " AND LOWER(o.project) = ?"
 		args = append(args, opts.Project)
 	}
 
@@ -3028,15 +3035,19 @@ func (s *Store) Stats() (*Stats, error) {
 // The sync_enrolled_projects branch ensures a project enrolled via EnrollProject()
 // without any other data is still recognized (JC1).
 func (s *Store) ProjectExists(name string) (bool, error) {
+	// Use LOWER(project) = ? so legacy data stored with mixed-case names
+	// (created before project normalization was enforced on writes) is found
+	// when queried with the current normalized (lowercase) name. The caller
+	// is expected to pass an already-normalized name (NormalizeProject result).
 	const query = `
 SELECT 1 FROM (
-  SELECT project FROM observations WHERE project = ? AND deleted_at IS NULL
+  SELECT project FROM observations WHERE LOWER(project) = ? AND deleted_at IS NULL
   UNION ALL
-  SELECT project FROM sessions WHERE project = ?
+  SELECT project FROM sessions WHERE LOWER(project) = ?
   UNION ALL
-  SELECT project FROM user_prompts WHERE project = ?
+  SELECT project FROM user_prompts WHERE LOWER(project) = ?
   UNION ALL
-  SELECT project FROM sync_enrolled_projects WHERE project = ?
+  SELECT project FROM sync_enrolled_projects WHERE LOWER(project) = ?
 ) LIMIT 1`
 	var dummy int
 	err := s.db.QueryRow(query, name, name, name, name).Scan(&dummy)
@@ -3082,7 +3093,7 @@ func (s *Store) FormatContext(project, scope string) (string, error) {
 				summary = fmt.Sprintf(": %s", truncate(*sess.Summary, 200))
 			}
 			fmt.Fprintf(&b, "- **%s** (%s)%s [%d observations]\n",
-				sess.Project, sess.StartedAt, summary, sess.ObservationCount)
+				sess.Project, timeutil.FormatLocal(sess.StartedAt), summary, sess.ObservationCount)
 		}
 		b.WriteString("\n")
 	}
@@ -3090,7 +3101,7 @@ func (s *Store) FormatContext(project, scope string) (string, error) {
 	if len(prompts) > 0 {
 		b.WriteString("### Recent User Prompts\n")
 		for _, p := range prompts {
-			fmt.Fprintf(&b, "- %s: %s\n", p.CreatedAt, truncate(p.Content, 200))
+			fmt.Fprintf(&b, "- %s: %s\n", timeutil.FormatLocal(p.CreatedAt), truncate(p.Content, 200))
 		}
 		b.WriteString("\n")
 	}
@@ -4496,6 +4507,111 @@ func (s *Store) PruneProject(project string) (*PruneResult, error) {
 	return result, nil
 }
 
+// ─── Delete Project ───────────────────────────────────────────────────────────
+
+// DeleteProjectResult summarises a cascade project deletion.
+type DeleteProjectResult struct {
+	Project              string `json:"project"`
+	ObservationsDeleted  int64  `json:"observations_deleted"`
+	PromptsDeleted       int64  `json:"prompts_deleted"`
+	SessionsDeleted      int64  `json:"sessions_deleted"`
+	HardDelete           bool   `json:"hard_delete"`
+}
+
+// DeleteProject removes all data associated with a project in a single
+// transaction.
+//
+// When hardDelete is true: observation rows are permanently removed, prompts
+// are hard-deleted, and sessions are hard-deleted. memory_relations that
+// reference any removed observation are marked orphaned (audit history).
+//
+// When hardDelete is false: observations are soft-deleted (deleted_at set),
+// and prompts are hard-deleted. Sessions are NOT removed in this path because
+// observations.session_id is a NOT NULL FK to sessions — removing sessions
+// while soft-deleted observation rows still reference them would violate the FK
+// constraint. The session rows remain and can be cleaned up with
+// engram delete session <id> once the observations are purged.
+//
+// Returns ErrProjectNotFound when no sessions or observations exist for the
+// given project name.
+func (s *Store) DeleteProject(project string, hardDelete bool) (*DeleteProjectResult, error) {
+	project = strings.TrimSpace(project)
+	if project == "" {
+		return nil, fmt.Errorf("project name must not be empty")
+	}
+
+	result := &DeleteProjectResult{Project: project, HardDelete: hardDelete}
+
+	err := s.withTx(func(tx *sql.Tx) error {
+		// Existence check: at least one session or observation must exist.
+		var sessionCount int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM sessions WHERE project = ?`, project).Scan(&sessionCount); err != nil {
+			return fmt.Errorf("delete project: count sessions: %w", err)
+		}
+		var obsCount int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM observations WHERE project = ?`, project).Scan(&obsCount); err != nil {
+			return fmt.Errorf("delete project: count observations: %w", err)
+		}
+		if sessionCount == 0 && obsCount == 0 {
+			return fmt.Errorf("%w: %q", ErrProjectNotFound, project)
+		}
+
+		// 1. Delete/soft-delete observations.
+		if hardDelete {
+			// Orphan memory_relations rows that reference any observation in this project.
+			if _, err := s.execHook(tx, `
+				UPDATE memory_relations
+				SET judgment_status = 'orphaned',
+				    updated_at      = datetime('now')
+				WHERE source_id IN (SELECT sync_id FROM observations WHERE project = ?)
+				   OR target_id IN (SELECT sync_id FROM observations WHERE project = ?)
+			`, project, project); err != nil {
+				return fmt.Errorf("delete project: orphan relations: %w", err)
+			}
+			res, err := s.execHook(tx, `DELETE FROM observations WHERE project = ?`, project)
+			if err != nil {
+				return fmt.Errorf("delete project: hard-delete observations: %w", err)
+			}
+			result.ObservationsDeleted, _ = res.RowsAffected()
+		} else {
+			res, err := s.execHook(tx, `
+				UPDATE observations
+				SET deleted_at = datetime('now'),
+				    updated_at = datetime('now')
+				WHERE project = ? AND deleted_at IS NULL
+			`, project)
+			if err != nil {
+				return fmt.Errorf("delete project: soft-delete observations: %w", err)
+			}
+			result.ObservationsDeleted, _ = res.RowsAffected()
+		}
+
+		// 2. Delete prompts for the project (no soft-delete mechanism exists).
+		res, err := s.execHook(tx, `DELETE FROM user_prompts WHERE project = ?`, project)
+		if err != nil {
+			return fmt.Errorf("delete project: delete prompts: %w", err)
+		}
+		result.PromptsDeleted, _ = res.RowsAffected()
+
+		// 3. Delete sessions — only when hard-deleting, because observation rows
+		//    reference sessions via a NOT NULL FK and soft-deleted rows are still
+		//    present in the table.
+		if hardDelete {
+			res, err = s.execHook(tx, `DELETE FROM sessions WHERE project = ?`, project)
+			if err != nil {
+				return fmt.Errorf("delete project: delete sessions: %w", err)
+			}
+			result.SessionsDeleted, _ = res.RowsAffected()
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 func (s *Store) withTx(fn func(tx *sql.Tx) error) error {
@@ -5806,10 +5922,12 @@ func truncate(s string, max int) string {
 
 func normalizeScope(scope string) string {
 	v := strings.TrimSpace(strings.ToLower(scope))
-	if v == "personal" {
-		return "personal"
+	switch v {
+	case "personal", "global":
+		return v
+	default:
+		return "project"
 	}
-	return "project"
 }
 
 // NormalizeProject applies canonical project name normalization:

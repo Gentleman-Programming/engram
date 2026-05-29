@@ -2,6 +2,7 @@ package cloudserver
 
 import (
 	"context"
+	"crypto/hmac"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -157,7 +158,7 @@ func (s *CloudServer) routes() {
 		if token == "" {
 			return fmt.Errorf("bearer token is required")
 		}
-		if adminToken := strings.TrimSpace(s.dashboardAdmin); adminToken != "" && token == adminToken {
+		if adminToken := strings.TrimSpace(s.dashboardAdmin); adminToken != "" && hmac.Equal([]byte(token), []byte(adminToken)) {
 			return nil
 		}
 		if s.auth == nil {
@@ -258,7 +259,7 @@ func (s *CloudServer) authorizeDashboardRequest(r *http.Request) error {
 	if strings.TrimSpace(bearerToken) == "" {
 		return fmt.Errorf("dashboard session token is empty")
 	}
-	if adminToken := strings.TrimSpace(s.dashboardAdmin); adminToken != "" && bearerToken == adminToken {
+	if adminToken := strings.TrimSpace(s.dashboardAdmin); adminToken != "" && hmac.Equal([]byte(bearerToken), []byte(adminToken)) {
 		return nil
 	}
 	req, _ := http.NewRequest(http.MethodGet, "/dashboard", nil)
@@ -317,7 +318,7 @@ func (s *CloudServer) isDashboardAdmin(r *http.Request) bool {
 	if err != nil {
 		return false
 	}
-	return token == adminToken
+	return hmac.Equal([]byte(token), []byte(adminToken))
 }
 
 func (s *CloudServer) handlePullManifest(w http.ResponseWriter, r *http.Request) {

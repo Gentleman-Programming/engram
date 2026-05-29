@@ -15,3 +15,15 @@ test("project detection 404 falls back to local config or diagnostic", () => {
   assert.match(source, /error\.status === 404[\s\S]*detectLocalConfigProject\(cwd\) \|\| projectCurrentUnsupportedError\(cwd\)/);
   assert.match(source, /does not support \/project\/current/);
 });
+
+test("ambiguous_project error maps to actionable status label, not generic 'error'", () => {
+  // The status bar must NOT show the generic 'error' label for ambiguous project conditions.
+  // Instead it should show an actionable label such as 'ambiguous project'.
+  assert.match(source, /function errorStatusLabel\(/);
+  // Verify the function maps ambiguous project messages to the actionable label
+  assert.match(source, /ambiguous project/);
+  // Verify executeMemoryTool uses errorStatusLabel instead of the bare 'error' string
+  assert.match(source, /errorStatusLabel\(message\)/);
+  // The bare '· error' hardcoded string should no longer be present in the catch block
+  assert.doesNotMatch(source, /setStatus\?\.\("engram",\s*`🧠 \$\{project\} · error`\)/);
+});

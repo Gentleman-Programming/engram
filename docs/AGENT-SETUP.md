@@ -37,6 +37,8 @@ engram setup pi
 
 `engram setup pi` runs `pi install npm:gentle-engram@0.1.7` and `pi install npm:pi-mcp-adapter`, then ensures Pi settings contain both packages and writes `mcpServers.engram` in the Pi agent MCP config when no Engram server is already configured. Existing `mcpServers.engram` entries are preserved.
 
+When [mise](https://mise.jdx.dev/) is detected in `PATH`, `engram setup pi` also auto-pins `npmCommand` in Pi's `settings.json` to `["mise", "exec", "node@<version>", "--", "npm"]`, preventing Node version drift from silently changing which npm root Pi uses. If `npmCommand` already exists in `settings.json`, the existing value is preserved. This step is a no-op when mise is not installed.
+
 Manual equivalent:
 
 ```bash
@@ -244,6 +246,17 @@ claude plugin install engram
 
 That's it. The plugin registers the MCP server, hooks, and Memory Protocol skill automatically.
 
+> **If the marketplace command fails with a schema error**
+>
+> Older Claude Code CLI versions cannot parse some plugin manifest fields and will reject `claude plugin marketplace add` with messages like `Invalid schema: plugins.0.source: Invalid input`. The fix is to update the CLI:
+>
+> ```bash
+> claude --version  # check what you have
+> claude update     # upgrade to the latest
+> ```
+>
+> Then re-run the marketplace command. If you cannot update for some reason, **Option C (Bare MCP)** below works on any Claude Code version because it does not go through the marketplace.
+
 **Option B: Plugin via `engram setup`** — same plugin, installed from the embedded binary:
 
 ```bash
@@ -269,7 +282,7 @@ Add to your `.claude/settings.json` (project) or `~/.claude/settings.json` (glob
 
 With bare MCP, add a [Surviving Compaction](#surviving-compaction-recommended) prompt to your `CLAUDE.md` so the agent remembers to use Engram after context resets.
 
-> **Windows note:** The Claude Code plugin hooks use bash scripts. On Windows, Claude Code runs hooks through Git Bash (bundled with [Git for Windows](https://gitforwindows.org/)) or WSL. The `UserPromptSubmit` hook automatically switches to a fork-light safe path under Git Bash/MSYS2: the first-prompt ToolSearch still runs, while later save-reminder checks are skipped so prompt submission does not block. If Git Bash itself is blocked by Defender/EDR, the plugin also ships `scripts/user-prompt-submit.ps1` as a native PowerShell fallback for local override/testing. **Option C (Bare MCP)** remains the no-hook fallback and works natively on Windows without any shell dependency.
+> **Windows note:** The Claude Code plugin hooks use bash scripts. On Windows, Claude Code runs hooks through Git Bash (bundled with [Git for Windows](https://gitforwindows.org/)) or WSL. The `UserPromptSubmit` hook automatically switches to a fork-light safe path under Git Bash/MSYS2: the first-prompt ToolSearch still runs, while later save-reminder checks are skipped so prompt submission does not block. If Git Bash itself is blocked by Defender/EDR, the plugin also ships `scripts/user-prompt-submit.ps1` as a native PowerShell fallback for local override/testing. **Option C (Bare MCP)** remains the no-hook fallback and works natively on Windows without any shell dependency. Windows usernames containing spaces (e.g. `C:\Users\John Doe\...`) are supported — all hook commands quote `${CLAUDE_PLUGIN_ROOT}` so the path is passed as a single argument even when it contains spaces.
 
 PowerShell fallback test and local override example:
 
@@ -362,6 +375,30 @@ experimental_compact_prompt_file = "~/.codex/engram-compact-prompt.md"
 command = "engram"
 args = ["mcp"]
 ```
+
+### Troubleshooting: "MCP Transport closed"
+
+Codex communicates with Engram over a stdio MCP session that is started fresh each time Codex launches. If that session becomes stale — for example after replacing the `engram` binary, editing `config.toml` or the instruction files, or force-stopping an `engram` process — subsequent tool calls fail with:
+
+```
+Transport closed
+```
+
+**Recovery sequence**
+
+1. Close the current Codex chat or window entirely.
+2. If any `engram` processes are still running, stop them:
+   - macOS/Linux: `pkill -x engram`
+   - Windows: `taskkill /IM engram.exe /F`
+3. Open a new Codex chat. Codex starts a fresh `engram mcp` stdio process on launch, which clears the stale session.
+
+**Prevention**
+
+- After replacing `engram.exe` / the `engram` binary, always start a new Codex chat before using memory tools.
+- After editing `~/.codex/config.toml`, `engram-instructions.md`, or `engram-compact-prompt.md`, restart Codex to pick up the new config.
+- Avoid force-killing `engram` while a Codex session is active; prefer closing the chat first so Codex can shut down the MCP process cleanly.
+
+> **Windows note:** On Windows the stale process is most commonly left behind after an in-place binary replacement. The `taskkill` command above reliably clears it. If Codex shows the error immediately on a fresh chat, confirm that the new `engram.exe` is in `PATH` and that no older copy is shadowing it.
 
 ---
 

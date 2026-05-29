@@ -3,8 +3,8 @@ package tui
 import (
 	"fmt"
 	"strings"
-	"time"
 
+	"github.com/Gentleman-Programming/engram/internal/timeutil"
 	"github.com/Gentleman-Programming/engram/internal/version"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -86,6 +86,11 @@ func (m Model) View() string {
 	// Show error if present
 	if m.ErrorMsg != "" {
 		content += "\n" + errorStyle.Render("Error: "+m.ErrorMsg)
+	}
+
+	// Show clipboard copy feedback if present
+	if m.CopyFeedback != "" {
+		content += "\n" + copyFeedbackStyle.Render(m.CopyFeedback)
 	}
 
 	return appStyle.Render(content)
@@ -226,7 +231,7 @@ func (m Model) viewSearchResults() string {
 			timestampStyle.Render(fmt.Sprintf("showing %d-%d of %d", m.Scroll+1, end, resultCount))))
 	}
 
-	b.WriteString(helpStyle.Render("\n  j/k navigate • enter detail • t timeline • / search • esc back"))
+	b.WriteString(helpStyle.Render("\n  j/k navigate • enter detail • c copy • t timeline • / search • esc back"))
 
 	return b.String()
 }
@@ -268,7 +273,7 @@ func (m Model) viewRecent() string {
 			timestampStyle.Render(fmt.Sprintf("showing %d-%d of %d", m.Scroll+1, end, count))))
 	}
 
-	b.WriteString(helpStyle.Render("\n  j/k navigate • enter detail • t timeline • esc back"))
+	b.WriteString(helpStyle.Render("\n  j/k navigate • enter detail • c copy • t timeline • esc back"))
 
 	return b.String()
 }
@@ -363,7 +368,7 @@ func (m Model) viewObservationDetail() string {
 			timestampStyle.Render(fmt.Sprintf("line %d-%d of %d", m.DetailScroll+1, end, len(contentLines)))))
 	}
 
-	b.WriteString(helpStyle.Render("\n  j/k scroll • t timeline • esc back"))
+	b.WriteString(helpStyle.Render("\n  j/k scroll • c copy • t timeline • esc back"))
 
 	return b.String()
 }
@@ -553,7 +558,7 @@ func (m Model) viewSessionDetail() string {
 			timestampStyle.Render(fmt.Sprintf("showing %d-%d of %d", m.SessionDetailScroll+1, end, count))))
 	}
 
-	b.WriteString(helpStyle.Render("\n  j/k navigate • enter detail • t timeline • esc back"))
+	b.WriteString(helpStyle.Render("\n  j/k navigate • enter detail • c copy • t timeline • esc back"))
 
 	return b.String()
 }
@@ -713,16 +718,7 @@ func (m Model) renderObservationListItem(index int, id int64, obsType, title, co
 
 // localTime converts a UTC timestamp string from SQLite to local time for display.
 func localTime(utc string) string {
-	for _, layout := range []string{
-		"2006-01-02 15:04:05",
-		time.RFC3339,
-		time.RFC3339Nano,
-	} {
-		if t, err := time.Parse(layout, utc); err == nil {
-			return t.UTC().Local().Format("2006-01-02 15:04:05")
-		}
-	}
-	return utc // unparseable — return as-is
+	return timeutil.FormatLocal(utc)
 }
 
 func truncateStr(s string, max int) string {

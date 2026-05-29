@@ -39,6 +39,7 @@ import (
 	"github.com/Gentleman-Programming/engram/internal/setup"
 	"github.com/Gentleman-Programming/engram/internal/store"
 	engramsync "github.com/Gentleman-Programming/engram/internal/sync"
+	"github.com/Gentleman-Programming/engram/internal/timeutil"
 	"github.com/Gentleman-Programming/engram/internal/tui"
 	versioncheck "github.com/Gentleman-Programming/engram/internal/version"
 
@@ -87,7 +88,13 @@ var (
 	storeSearch = func(s *store.Store, query string, opts store.SearchOptions) ([]store.SearchResult, error) {
 		return s.Search(query, opts)
 	}
-	storeAddObservation = func(s *store.Store, p store.AddObservationParams) (int64, error) { return s.AddObservation(p) }
+	storeAddObservation    = func(s *store.Store, p store.AddObservationParams) (int64, error) { return s.AddObservation(p) }
+	storeDeleteObservation = func(s *store.Store, id int64, hard bool) error { return s.DeleteObservation(id, hard) }
+	storeDeleteSession     = func(s *store.Store, id string) error { return s.DeleteSession(id) }
+	storeDeletePrompt      = func(s *store.Store, id int64) error { return s.DeletePrompt(id) }
+	storeDeleteProject     = func(s *store.Store, name string, hard bool) (*store.DeleteProjectResult, error) {
+		return s.DeleteProject(name, hard)
+	}
 	storeTimeline       = func(s *store.Store, observationID int64, before, after int) (*store.TimelineResult, error) {
 		return s.Timeline(observationID, before, after)
 	}
@@ -445,9 +452,10 @@ func resolveCloudRuntimeConfig(cfg store.Config) (*cloudConfig, error) {
 	if cc == nil {
 		cc = &cloudConfig{}
 	}
-	// Legacy persisted tokens in cloud.json are intentionally ignored at runtime.
-	// Runtime auth must come from ENGRAM_CLOUD_TOKEN.
-	cc.Token = ""
+	// ENGRAM_CLOUD_TOKEN overrides any token stored in cloud.json.
+	// When the env var is absent, the persisted token from cloud.json is used
+	// as a fallback so that `engram sync --cloud` works without requiring the
+	// env var to be set in every shell session (fix for issue #343).
 	if v := strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_SERVER")); v != "" {
 		cc.ServerURL = v
 	}
@@ -626,6 +634,8 @@ func main() {
 		cmdSearch(cfg)
 	case "save":
 		cmdSave(cfg)
+	case "delete":
+		cmdDelete(cfg)
 	case "timeline":
 		cmdTimeline(cfg)
 	case "conflicts":
@@ -975,7 +985,7 @@ func cmdSearch(cfg store.Config) {
 		fmt.Printf("[%d] #%d (%s) — %s\n    %s\n    %s%s | scope: %s\n\n",
 			i+1, r.ID, r.Type, r.Title,
 			truncate(r.Content, 300),
-			r.CreatedAt, project, r.Scope)
+			timeutil.FormatLocal(r.CreatedAt), project, r.Scope)
 	}
 }
 
@@ -1050,6 +1060,157 @@ func cmdSave(cfg store.Config) {
 	fmt.Printf("Memory saved: #%d %q (%s)\n", id, title, typ)
 }
 
+func cmdDelete(cfg store.Config) {
+	if len(os.Args) < 3 {
+		fmt.Fprintln(os.Stderr, "usage: engram delete <observation_id> [--hard]")
+		fmt.Fprintln(os.Stderr, "       engram delete session  <id>")
+		fmt.Fprintln(os.Stderr, "       engram delete prompt   <id>")
+		fmt.Fprintln(os.Stderr, "       engram delete project  <name> [--hard]")
+		exitFunc(1)
+		return
+	}
+
+	sub := os.Args[2]
+	switch sub {
+	case "session":
+		cmdDeleteSession(cfg)
+	case "prompt":
+		cmdDeletePrompt(cfg)
+	case "project":
+		cmdDeleteProject(cfg)
+	default:
+		// Backward-compat: treat the second arg as a numeric observation ID.
+		cmdDeleteObservation(cfg)
+	}
+}
+
+func cmdDeleteObservation(cfg store.Config) {
+	if len(os.Args) < 3 {
+		fmt.Fprintln(os.Stderr, "usage: engram delete <observation_id> [--hard]")
+		exitFunc(1)
+		return
+	}
+
+	id, err := strconv.ParseInt(os.Args[2], 10, 64)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: invalid observation id %q\n", os.Args[2])
+		exitFunc(1)
+		return
+	}
+
+	hard := false
+	for i := 3; i < len(os.Args); i++ {
+		if os.Args[i] == "--hard" {
+			hard = true
+		}
+	}
+
+	s, err := storeNew(cfg)
+	if err != nil {
+		fatal(err)
+		return
+	}
+	defer s.Close()
+
+	if err := storeDeleteObservation(s, id, hard); err != nil {
+		fatal(err)
+		return
+	}
+
+	kind := "soft-deleted"
+	if hard {
+		kind = "hard-deleted"
+	}
+	fmt.Printf("Observation #%d %s\n", id, kind)
+}
+
+func cmdDeleteSession(cfg store.Config) {
+	if len(os.Args) < 4 {
+		fmt.Fprintln(os.Stderr, "usage: engram delete session <id>")
+		exitFunc(1)
+		return
+	}
+
+	id := os.Args[3]
+
+	s, err := storeNew(cfg)
+	if err != nil {
+		fatal(err)
+		return
+	}
+	defer s.Close()
+
+	if err := storeDeleteSession(s, id); err != nil {
+		fatal(err)
+		return
+	}
+	fmt.Printf("Session %q deleted\n", id)
+}
+
+func cmdDeletePrompt(cfg store.Config) {
+	if len(os.Args) < 4 {
+		fmt.Fprintln(os.Stderr, "usage: engram delete prompt <id>")
+		exitFunc(1)
+		return
+	}
+
+	id, err := strconv.ParseInt(os.Args[3], 10, 64)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: invalid prompt id %q\n", os.Args[3])
+		exitFunc(1)
+		return
+	}
+
+	s, err := storeNew(cfg)
+	if err != nil {
+		fatal(err)
+		return
+	}
+	defer s.Close()
+
+	if err := storeDeletePrompt(s, id); err != nil {
+		fatal(err)
+		return
+	}
+	fmt.Printf("Prompt #%d deleted\n", id)
+}
+
+func cmdDeleteProject(cfg store.Config) {
+	if len(os.Args) < 4 {
+		fmt.Fprintln(os.Stderr, "usage: engram delete project <name> [--hard]")
+		exitFunc(1)
+		return
+	}
+
+	name := os.Args[3]
+	hard := false
+	for i := 4; i < len(os.Args); i++ {
+		if os.Args[i] == "--hard" {
+			hard = true
+		}
+	}
+
+	s, err := storeNew(cfg)
+	if err != nil {
+		fatal(err)
+		return
+	}
+	defer s.Close()
+
+	result, err := storeDeleteProject(s, name, hard)
+	if err != nil {
+		fatal(err)
+		return
+	}
+
+	kind := "soft-deleted"
+	if hard {
+		kind = "hard-deleted"
+	}
+	fmt.Printf("Project %q %s: %d observation(s), %d prompt(s), %d session(s)\n",
+		result.Project, kind, result.ObservationsDeleted, result.PromptsDeleted, result.SessionsDeleted)
+}
+
 func cmdTimeline(cfg store.Config) {
 	if len(os.Args) < 3 {
 		fmt.Fprintln(os.Stderr, "usage: engram timeline <observation_id> [--before N] [--after N]")
@@ -1115,7 +1276,7 @@ func cmdTimeline(cfg store.Config) {
 	// Focus
 	fmt.Printf(">>> #%d [%s] %s <<<\n", result.Focus.ID, result.Focus.Type, result.Focus.Title)
 	fmt.Printf("    %s\n", truncate(result.Focus.Content, 500))
-	fmt.Printf("    %s\n\n", result.Focus.CreatedAt)
+	fmt.Printf("    %s\n\n", timeutil.FormatLocal(result.Focus.CreatedAt))
 
 	// After
 	if len(result.After) > 0 {
@@ -2284,6 +2445,14 @@ Commands:
   tui                Launch interactive terminal UI
   search <query>     Search memories [--type TYPE] [--project PROJECT] [--scope SCOPE] [--limit N]
   save <title> <msg> Save a memory  [--type TYPE] [--project PROJECT] [--scope SCOPE]
+  delete <obs_id>    Delete an observation [--hard] (soft-delete by default; --hard removes permanently)
+  delete session <id>
+                     Delete a session by ID (session must have no observations)
+  delete prompt <id>
+                     Delete a prompt by ID (permanent)
+  delete project <name> [--hard]
+                     Cascade-delete a project: soft-deletes observations (or hard if --hard),
+                     removes prompts; with --hard also removes sessions
   timeline <obs_id>  Show chronological context around an observation [--before N] [--after N]
   conflicts <sub>   Inspect and manage memory conflict relations
                        list     [--project P]  [--status S]  [--since RFC3339]  [--limit N]
@@ -2332,6 +2501,21 @@ Environment:
   ENGRAM_DATA_DIR    Override data directory (default: ~/.engram)
   ENGRAM_PORT        Override HTTP server port (default: 7437)
   ENGRAM_PROJECT     Default project hint for serve sync status fallback
+  ENGRAM_HTTP_TOKEN  Optional Bearer auth for local HTTP server (engram serve).
+                     When set, the following routes require Authorization: Bearer <token>:
+                       DELETE /sessions/{id}, DELETE /observations/{id}, DELETE /prompts/{id},
+                       GET /export, POST /import, POST /projects/migrate
+                     Comparison is constant-time. Token is read per-request (no restart needed).
+                     When unset, all routes are open (zero-config default).
+  ENGRAM_TIMEZONE    Timezone for timestamp display in TUI and cloud dashboard.
+                     Accepts any IANA zone name (e.g. America/New_York, Europe/Berlin).
+                     Falls back to system local time when unset or invalid.
+  ENGRAM_AGENT_CLI   LLM runner for conflicts scan --semantic (claude or opencode)
+  ENGRAM_CLOUD_AUTOSYNC
+                     Set to 1 to enable background autosync; also requires
+                     ENGRAM_CLOUD_TOKEN and ENGRAM_CLOUD_SERVER
+  ENGRAM_CLOUD_SERVER
+                     Cloud server URL used by autosync and engram sync --cloud
   ENGRAM_DATABASE_URL
                      Postgres DSN for engram cloud serve
   ENGRAM_CLOUD_HOST  Bind host for engram cloud serve (default: 127.0.0.1)
@@ -2343,12 +2527,13 @@ Environment:
                      Cannot be combined with ENGRAM_CLOUD_TOKEN
                      Cannot be combined with ENGRAM_CLOUD_ADMIN
   ENGRAM_CLOUD_ALLOWED_PROJECTS
-	                     Comma-separated project allowlist enforced by cloud server
-	                     Required for cloud serve in BOTH token auth and insecure no-auth mode
-	ENGRAM_JWT_SECRET   Required in authenticated cloud serve mode (ENGRAM_CLOUD_TOKEN set);
-	                     must be explicitly set to a non-default value
-	ENGRAM_CLOUD_ADMIN  Optional admin-only dashboard token in authenticated mode
-	                     Ignored/rejected in insecure mode (ENGRAM_CLOUD_INSECURE_NO_AUTH=1)
+                     Comma-separated project allowlist enforced by cloud server.
+                     Required for cloud serve in BOTH token auth and insecure no-auth mode.
+                     Use * to allow all projects (dev/internal deploys).
+  ENGRAM_JWT_SECRET  Required in authenticated cloud serve mode (ENGRAM_CLOUD_TOKEN set);
+                     must be explicitly set to a non-default value
+  ENGRAM_CLOUD_ADMIN Optional admin-only dashboard token in authenticated mode
+                     Ignored/rejected in insecure mode (ENGRAM_CLOUD_INSECURE_NO_AUTH=1)
 
 MCP Configuration (add to your agent's config):
   {

@@ -49,6 +49,12 @@ var (
 			Bold(true).
 			Padding(0, 1)
 
+	// Clipboard copy feedback ("✓ Copied!")
+	copyFeedbackStyle = lipgloss.NewStyle().
+				Foreground(colorGreen).
+				Bold(true).
+				Padding(0, 1)
+
 	// Update available banner
 	updateBannerStyle = lipgloss.NewStyle().
 				Foreground(colorYellow).

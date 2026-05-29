@@ -126,6 +126,9 @@ type Model struct {
 	SessionObservations []store.Observation
 	SessionDetailScroll int
 
+	// Clipboard feedback
+	CopyFeedback string // "✓ Copied!" or "" — shown for 2 s after copy
+
 	// Setup
 	SetupAgents           []setup.Agent
 	SetupResult           *setup.Result

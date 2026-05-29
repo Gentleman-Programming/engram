@@ -734,7 +734,11 @@ func applyDashboardMutation(
 }
 
 func (m dashboardReadModel) scoped(allowed map[string]struct{}) dashboardReadModel {
+	// Empty map or wildcard sentinel "*" means no filtering.
 	if len(allowed) == 0 {
+		return m
+	}
+	if _, ok := allowed["*"]; ok {
 		return m
 	}
 	projects := make([]DashboardProjectRow, 0, len(m.projects))
@@ -1047,6 +1051,9 @@ func (cs *CloudStore) normalizeDashboardProject(project string) (string, error) 
 	if project == "" {
 		return "", fmt.Errorf("%w", ErrDashboardProjectInvalid)
 	}
+	if cs.dashboardAllowedAll {
+		return project, nil
+	}
 	if len(cs.dashboardAllowedScopes) > 0 {
 		if _, ok := cs.dashboardAllowedScopes[project]; !ok {
 			return "", fmt.Errorf("%w", ErrDashboardProjectForbidden)
@@ -1095,7 +1102,7 @@ func (cs *CloudStore) loadChunkRows(project string) ([]dashboardChunkRow, error)
 	project = strings.TrimSpace(project)
 	query := `SELECT chunk_id, project_name, created_by, created_at, payload FROM cloud_chunks`
 	args := []any{}
-	if project == "" && len(cs.dashboardAllowedScopes) > 0 {
+	if project == "" && !cs.dashboardAllowedAll && len(cs.dashboardAllowedScopes) > 0 {
 		allowed := make([]string, 0, len(cs.dashboardAllowedScopes))
 		for name := range cs.dashboardAllowedScopes {
 			allowed = append(allowed, name)
@@ -1105,7 +1112,7 @@ func (cs *CloudStore) loadChunkRows(project string) ([]dashboardChunkRow, error)
 		args = append(args, allowed)
 	}
 	if project != "" {
-		if len(cs.dashboardAllowedScopes) > 0 {
+		if !cs.dashboardAllowedAll && len(cs.dashboardAllowedScopes) > 0 {
 			if _, ok := cs.dashboardAllowedScopes[project]; !ok {
 				return []dashboardChunkRow{}, nil
 			}
@@ -1152,7 +1159,7 @@ func (cs *CloudStore) loadMutationRows(project string) ([]dashboardMutationRow, 
 	project = strings.TrimSpace(project)
 	query := `SELECT seq, project, entity, entity_key, op, payload::text, occurred_at FROM cloud_mutations`
 	args := []any{}
-	if project == "" && len(cs.dashboardAllowedScopes) > 0 {
+	if project == "" && !cs.dashboardAllowedAll && len(cs.dashboardAllowedScopes) > 0 {
 		allowed := make([]string, 0, len(cs.dashboardAllowedScopes))
 		for name := range cs.dashboardAllowedScopes {
 			allowed = append(allowed, name)
@@ -1162,7 +1169,7 @@ func (cs *CloudStore) loadMutationRows(project string) ([]dashboardMutationRow, 
 		args = append(args, allowed)
 	}
 	if project != "" {
-		if len(cs.dashboardAllowedScopes) > 0 {
+		if !cs.dashboardAllowedAll && len(cs.dashboardAllowedScopes) > 0 {
 			if _, ok := cs.dashboardAllowedScopes[project]; !ok {
 				return []dashboardMutationRow{}, nil
 			}
