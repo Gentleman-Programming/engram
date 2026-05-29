@@ -2437,11 +2437,13 @@ Usage:
 
 Commands:
   serve [port]       Start HTTP API server (default: 7437)
-  mcp [--tools=PROFILE]
+  mcp [--tools=PROFILE] [--project NAME]
                      Start MCP server (stdio transport, for any AI agent)
                        Profiles: agent (15 tools), admin (4 tools), all (default, 19)
                        Combine: --tools=agent,admin or pick individual tools
                        Example: engram mcp --tools=agent
+                       --project NAME  Set process-level default project (overrides cwd detection).
+                                       Also accepted as ENGRAM_PROJECT=NAME env var.
   tui                Launch interactive terminal UI
   search <query>     Search memories [--type TYPE] [--project PROJECT] [--scope SCOPE] [--limit N]
   save <title> <msg> Save a memory  [--type TYPE] [--project PROJECT] [--scope SCOPE]
@@ -2500,7 +2502,9 @@ Commands:
 Environment:
   ENGRAM_DATA_DIR    Override data directory (default: ~/.engram)
   ENGRAM_PORT        Override HTTP server port (default: 7437)
-  ENGRAM_PROJECT     Default project hint for serve sync status fallback
+  ENGRAM_PROJECT     Process-level default project override.
+                     For "engram serve": fallback for GET /sync/status with no project param.
+                     For "engram mcp": sets DefaultProject, overriding cwd detection for all tools.
   ENGRAM_HTTP_TOKEN  Optional Bearer auth for local HTTP server (engram serve).
                      When set, the following routes require Authorization: Bearer <token>:
                        DELETE /sessions/{id}, DELETE /observations/{id}, DELETE /prompts/{id},

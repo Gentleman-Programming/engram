@@ -457,7 +457,7 @@ Response:
 | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
 | `ENGRAM_DATA_DIR`               | Override data directory                                                                                                                                                                                                                                   | `~/.engram`          |
 | `ENGRAM_PORT`                   | Override HTTP server port                                                                                                                                                                                                                                 | `7437`               |
-| `ENGRAM_PROJECT`                | Default project for `engram serve` `GET /sync/status` when no `project` query param is supplied. When unset, cwd detection is used as the fallback.                                                                                                       | cwd-detected project |
+| `ENGRAM_PROJECT`                | Process-level default project override. For `engram serve`: used as the fallback when `GET /sync/status` receives no `project` query param. For `engram mcp`: sets `MCPConfig.DefaultProject`, which takes precedence over cwd detection for all read and write tools for the lifetime of that MCP process. When unset, cwd detection is used as the fallback. | cwd-detected project |
 | `ENGRAM_HTTP_TOKEN`             | Optional Bearer auth for the local HTTP server. When set, the following routes require `Authorization: Bearer <token>`: `DELETE /sessions/{id}`, `DELETE /observations/{id}`, `DELETE /prompts/{id}`, `GET /export`, `POST /import`, `POST /projects/migrate`. Comparison is constant-time. Token is read at request time (no restart needed). When unset, all routes are open (zero-config default). | (unset — open) |
 | `ENGRAM_TIMEZONE`               | Timezone for timestamp display in the TUI and cloud dashboard. Accepts any IANA zone name (e.g. `America/New_York`, `Europe/Berlin`). Falls back to system local time when unset or invalid.                                                               | system local         |
 | `ENGRAM_AGENT_CLI`              | LLM runner name used by `engram conflicts scan --semantic` and the HTTP `/conflicts/scan` endpoint. Accepted values: `claude`, `opencode`.                                                                                                                | (unset)              |
@@ -1038,7 +1038,7 @@ MCP tools resolve project names at call time using the shared detection chain:
 5. Multiple git-repo children of cwd returns `ambiguous_project` with `available_projects`
 6. Current working directory basename
 
-The MCP command does not support startup-time `--project` or `ENGRAM_PROJECT` overrides; `engram mcp` only parses `--tools` for MCP tool allowlisting.
+`engram mcp` accepts a process-level default project via `--project <name>` / `--project=<name>` or `ENGRAM_PROJECT=<name>`. This override takes precedence over cwd detection for all read and write tools throughout the lifetime of that MCP process. It is a trusted startup-time value — use it when the host cannot supply a reliable cwd (VS Code, WSL, CI, Docker).
 
 ### Similar-project warnings
 
