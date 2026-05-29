@@ -20,7 +20,7 @@ source "${SCRIPT_DIR}/_helpers.sh"
 INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
-OLD_PROJECT=$(basename "$CWD")
+OLD_PROJECT=$(basename "$CWD" | tr '[:upper:]' '[:lower:]')
 PROJECT=$(detect_project "$CWD")
 
 # Ensure engram server is running

@@ -1100,7 +1100,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 			typ = "manual"
 		}
 		if sessionID == "" {
-			sessionID = defaultSessionID(project)
+			sessionID = resolveFallbackSessionID(s, project)
 		}
 		suggestedTopicKey := suggestTopicKey(typ, title, content)
 
@@ -1350,7 +1350,7 @@ func handleSavePrompt(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 		project, _ := store.NormalizeProject(detRes.Project)
 
 		if sessionID == "" {
-			sessionID = defaultSessionID(project)
+			sessionID = resolveFallbackSessionID(s, project)
 		}
 
 		// Ensure the implicit MCP session exists with the current working directory.
@@ -1647,7 +1647,7 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		project, _ := store.NormalizeProject(detRes.Project)
 
 		if sessionID == "" {
-			sessionID = defaultSessionID(project)
+			sessionID = resolveFallbackSessionID(s, project)
 		}
 
 		// Ensure the implicit MCP session exists with the current working directory.
@@ -1767,7 +1767,7 @@ func handleCapturePassive(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		}
 
 		if sessionID == "" {
-			sessionID = defaultSessionID(project)
+			sessionID = resolveFallbackSessionID(s, project)
 			_ = ensureImplicitSessionWithCWD(s, sessionID, project)
 		}
 
@@ -2693,6 +2693,27 @@ func defaultSessionID(project string) string {
 		return "manual-save"
 	}
 	return "manual-save-" + project
+}
+
+// resolveFallbackSessionID resolves the session a write should attach to when
+// the caller did not provide an explicit session_id.
+//
+// It first consults the persisted sessions table for the most recent active
+// (un-ended) session of the project (issue #386). The SessionStart hook
+// registers a UUID session via the HTTP server, a SEPARATE process from this
+// MCP (stdio) server; the two share only the SQLite store, so the active
+// session must be resolved from disk rather than from any in-process map.
+//
+// When no active session exists for the project (or the store query fails for
+// any reason), it falls back to the manual-save-{project} session, preserving
+// the prior behavior for projects with no live session.
+func resolveFallbackSessionID(s *store.Store, project string) string {
+	if s != nil {
+		if id, ok, err := s.MostRecentActiveSession(project); err == nil && ok {
+			return id
+		}
+	}
+	return defaultSessionID(project)
 }
 
 func intArg(req mcp.CallToolRequest, key string, defaultVal int) int {

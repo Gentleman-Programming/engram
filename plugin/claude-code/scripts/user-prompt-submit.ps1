@@ -5,6 +5,13 @@
 # fork emulation is slowed or blocked by Defender/EDR. Keep this script small
 # and dependency-free; it must never block prompt submission.
 
+# Ensure UTF-8 output so JSON payloads with non-ASCII characters are not
+# mangled when Claude Code reads this hook's stdout. Without this, Windows
+# defaults to the system codepage (e.g. CP1252/CP850) which corrupts
+# multi-byte characters in the systemMessage JSON (issue #421).
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+[Console]::InputEncoding  = [System.Text.Encoding]::UTF8
+
 $ErrorActionPreference = 'SilentlyContinue'
 
 function Write-EmptyHookResponse {

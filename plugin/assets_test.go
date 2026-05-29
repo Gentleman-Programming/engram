@@ -1,6 +1,7 @@
 package plugin_test
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -75,5 +76,72 @@ func TestPluginAssetsDoNotLeakSpanishTriggers(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// marketplaceJSON is the minimal structure of .claude-plugin/marketplace.json
+// needed to extract the version declared for the engram plugin entry.
+type marketplaceJSON struct {
+	Plugins []struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	} `json:"plugins"`
+}
+
+// pluginJSON is the structure of plugin/claude-code/.claude-plugin/plugin.json.
+type pluginJSON struct {
+	Version string `json:"version"`
+}
+
+// TestPluginVersionsMatch asserts that the version declared in
+// .claude-plugin/marketplace.json matches the version in
+// plugin/claude-code/.claude-plugin/plugin.json.
+//
+// A mismatch between these two files causes Claude Code to silently skip
+// installation or re-download the plugin on every run because it sees the
+// cached version as stale.
+func TestPluginVersionsMatch(t *testing.T) {
+	root := repoRoot(t)
+
+	// Read marketplace.json
+	marketplacePath := filepath.Join(root, ".claude-plugin", "marketplace.json")
+	marketplaceData, err := os.ReadFile(marketplacePath)
+	if err != nil {
+		t.Fatalf("cannot read marketplace.json: %v", err)
+	}
+	var marketplace marketplaceJSON
+	if err := json.Unmarshal(marketplaceData, &marketplace); err != nil {
+		t.Fatalf("cannot parse marketplace.json: %v", err)
+	}
+
+	// Read plugin.json
+	pluginPath := filepath.Join(root, "plugin", "claude-code", ".claude-plugin", "plugin.json")
+	pluginData, err := os.ReadFile(pluginPath)
+	if err != nil {
+		t.Fatalf("cannot read plugin.json: %v", err)
+	}
+	var plugin pluginJSON
+	if err := json.Unmarshal(pluginData, &plugin); err != nil {
+		t.Fatalf("cannot parse plugin.json: %v", err)
+	}
+
+	// Find the engram plugin entry in marketplace.json
+	var marketplaceVersion string
+	for _, p := range marketplace.Plugins {
+		if p.Name == "engram" {
+			marketplaceVersion = p.Version
+			break
+		}
+	}
+	if marketplaceVersion == "" {
+		t.Fatal("marketplace.json contains no plugin entry named 'engram'")
+	}
+
+	if marketplaceVersion != plugin.Version {
+		t.Errorf(
+			"plugin version mismatch: marketplace.json declares %q but plugin/claude-code/.claude-plugin/plugin.json declares %q — keep them in sync",
+			marketplaceVersion,
+			plugin.Version,
+		)
 	}
 }

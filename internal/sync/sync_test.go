@@ -2198,6 +2198,55 @@ func TestFilterFunctionsAndTimeNormalization(t *testing.T) {
 	}
 }
 
+// TestFilterNewDataIncludesEditedObservations verifies that an observation whose
+// CreatedAt is before the sync cutoff but whose UpdatedAt is after the cutoff is
+// included in the filtered export (issue #447).
+func TestFilterNewDataIncludesEditedObservations(t *testing.T) {
+	data := &store.ExportData{
+		Version:    "0.1.0",
+		ExportedAt: "2025-01-01 00:00:00",
+		Observations: []store.Observation{
+			// created before cutoff, never edited -> should be EXCLUDED
+			{ID: 1, SessionID: "s1", CreatedAt: "2025-01-01 09:00:00", UpdatedAt: "2025-01-01 09:00:00"},
+			// created before cutoff, edited AFTER cutoff -> should be INCLUDED
+			{ID: 2, SessionID: "s1", CreatedAt: "2025-01-01 09:00:00", UpdatedAt: "2025-01-01 11:00:00"},
+			// created after cutoff -> should be INCLUDED (existing behaviour)
+			{ID: 3, SessionID: "s1", CreatedAt: "2025-01-01 11:00:00", UpdatedAt: "2025-01-01 11:00:00"},
+		},
+	}
+
+	cutoff := "2025-01-01T10:30:00Z"
+	sy := New(nil, t.TempDir())
+	filtered := sy.filterNewData(data, cutoff)
+
+	ids := make([]int64, 0, len(filtered.Observations))
+	for _, o := range filtered.Observations {
+		ids = append(ids, o.ID)
+	}
+
+	// ID 1 must be absent; IDs 2 and 3 must be present.
+	for _, id := range ids {
+		if id == 1 {
+			t.Fatalf("filterNewData included observation ID 1 (stale, unedited) — should have been excluded; ids=%v", ids)
+		}
+	}
+	found2, found3 := false, false
+	for _, id := range ids {
+		if id == 2 {
+			found2 = true
+		}
+		if id == 3 {
+			found3 = true
+		}
+	}
+	if !found2 {
+		t.Fatalf("filterNewData excluded observation ID 2 (edited after cutoff) — should have been included; ids=%v", ids)
+	}
+	if !found3 {
+		t.Fatalf("filterNewData excluded observation ID 3 (created after cutoff) — should have been included; ids=%v", ids)
+	}
+}
+
 func TestFilterByProjectEntityLevel(t *testing.T) {
 	projA := "proj-a"
 

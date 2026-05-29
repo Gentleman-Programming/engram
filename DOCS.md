@@ -458,7 +458,7 @@ Response:
 | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
 | `ENGRAM_DATA_DIR`               | Override data directory                                                                                                                                                                                                                                   | `~/.engram`          |
 | `ENGRAM_PORT`                   | Override HTTP server port                                                                                                                                                                                                                                 | `7437`               |
-| `ENGRAM_PROJECT`                | Default project for `engram serve` `GET /sync/status` when no `project` query param is supplied. When unset, cwd detection is used as the fallback.                                                                                                       | cwd-detected project |
+| `ENGRAM_PROJECT`                | Process-level default project override. For `engram serve`: used as the fallback when `GET /sync/status` receives no `project` query param. For `engram mcp`: sets `MCPConfig.DefaultProject`, which takes precedence over cwd detection for all read and write tools for the lifetime of that MCP process. When unset, cwd detection is used as the fallback. | cwd-detected project |
 | `ENGRAM_HTTP_TOKEN`             | Optional Bearer auth for the local HTTP server. When set, the following routes require `Authorization: Bearer <token>`: `DELETE /sessions/{id}`, `DELETE /observations/{id}`, `DELETE /prompts/{id}`, `GET /export`, `POST /import`, `POST /projects/migrate`. Comparison is constant-time. Token is read at request time (no restart needed). When unset, all routes are open (zero-config default). | (unset — open) |
 | `ENGRAM_TIMEZONE`               | Timezone for timestamp display in the TUI and cloud dashboard. Accepts any IANA zone name (e.g. `America/New_York`, `Europe/Berlin`). Falls back to system local time when unset or invalid.                                                               | system local         |
 | `ENGRAM_AGENT_CLI`              | LLM runner name used by `engram conflicts scan --semantic` and the HTTP `/conflicts/scan` endpoint. Accepted values: `claude`, `opencode`.                                                                                                                | (unset)              |
@@ -1039,7 +1039,7 @@ MCP tools resolve project names at call time using the shared detection chain:
 5. Multiple git-repo children of cwd returns `ambiguous_project` with `available_projects`
 6. Current working directory basename
 
-The MCP command does not support startup-time `--project` or `ENGRAM_PROJECT` overrides; `engram mcp` only parses `--tools` for MCP tool allowlisting.
+`engram mcp` accepts a process-level default project via `--project <name>` / `--project=<name>` or `ENGRAM_PROJECT=<name>`. This override takes precedence over cwd detection for all read and write tools throughout the lifetime of that MCP process. It is a trusted startup-time value — use it when the host cannot supply a reliable cwd (VS Code, WSL, CI, Docker).
 
 ### Similar-project warnings
 
@@ -1251,6 +1251,45 @@ This is the recommended setup for Homebrew users on macOS. With `KeepAlive=true`
 To unload (stop and disable): `launchctl unload ~/Library/LaunchAgents/com.gentleman-programming.engram.plist`. To reload after editing the plist: unload, then load again.
 
 > **Note on `brew upgrade`:** launchd does not expand `$HOME` or `~` inside plist values, which is why the template uses literal absolute paths.
+
+### Using Windows Task Scheduler
+
+Windows Task Scheduler is the native service equivalent on Windows. It restarts `engram serve` on login and after reboots, keeping autosync alive without a third-party service manager.
+
+**Setup steps:**
+
+1. Confirm `engram.exe` is in your `PATH`: open PowerShell and run `Get-Command engram`.
+2. Set `ENGRAM_CLOUD_TOKEN` (and any other cloud vars) as a **user or system environment variable** in System Properties → Advanced → Environment Variables. Task Scheduler does not inherit session environment variables, so tokens set in your shell profile or in `$env:...` within a PowerShell session will not be visible to the scheduled task.
+3. Create the scheduled task by running the PowerShell snippet below in an elevated terminal (Run as Administrator), or import it manually through the Task Scheduler GUI.
+4. Verify: after the next login (or trigger manually), run `engram cloud status` — the `Local daemon:` line should report `running on port 7437`.
+
+```powershell
+$action  = New-ScheduledTaskAction `
+    -Execute  "powershell.exe" `
+    -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -Command `"Start-Process engram -ArgumentList 'serve' -NoNewWindow`""
+
+$trigger = New-ScheduledTaskTrigger -AtLogOn
+
+$settings = New-ScheduledTaskSettingsSet `
+    -ExecutionTimeLimit (New-TimeSpan -Hours 0) `
+    -RestartCount 5 `
+    -RestartInterval (New-TimeSpan -Minutes 1) `
+    -StartWhenAvailable
+
+Register-ScheduledTask `
+    -TaskName    "EngramMemoryServer" `
+    -Action      $action `
+    -Trigger     $trigger `
+    -Settings    $settings `
+    -RunLevel    Limited `
+    -Description "Engram persistent memory server (engram serve)"
+```
+
+> **Environment variables:** `ENGRAM_CLOUD_TOKEN`, `ENGRAM_CLOUD_SERVER`, `ENGRAM_CLOUD_AUTOSYNC`, and `ENGRAM_DATA_DIR` must be set as persistent user or system environment variables (Control Panel → System → Advanced → Environment Variables) so Task Scheduler can read them. Variables you `export` or set with `$env:` in a terminal session are not visible to scheduled tasks.
+
+> **Logs:** To capture stdout/stderr, redirect output in the PowerShell command string, for example: `... -Command "Start-Process engram -ArgumentList 'serve' -NoNewWindow -RedirectStandardOutput '$env:USERPROFILE\.engram\serve.out.log' -RedirectStandardError '$env:USERPROFILE\.engram\serve.err.log'"`. Ensure the log files are opened with UTF-8 encoding (`-Encoding UTF8`) if you post-process them.
+
+> **Stopping the task:** `Stop-ScheduledTask -TaskName "EngramMemoryServer"` or `Unregister-ScheduledTask -TaskName "EngramMemoryServer" -Confirm:$false` to remove it entirely.
 
 ---
 

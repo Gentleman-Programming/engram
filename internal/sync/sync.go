@@ -1112,7 +1112,7 @@ func (sy *Syncer) filterNewData(data *store.ExportData, lastChunkTime string) *C
 	}
 
 	for _, o := range data.Observations {
-		if normalizeTime(o.CreatedAt) > cutoff {
+		if normalizeTime(o.CreatedAt) > cutoff || normalizeTime(o.UpdatedAt) > cutoff {
 			chunk.Observations = append(chunk.Observations, o)
 		}
 	}

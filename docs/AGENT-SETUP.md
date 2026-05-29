@@ -310,6 +310,35 @@ PowerShell fallback test and local override example:
 
 See [Plugins → Claude Code Plugin](PLUGINS.md#claude-code-plugin) for details on what the plugin provides.
 
+### Troubleshooting: Claude Code plugin install on Linux
+
+If `claude plugin install engram` fails on Linux with an error like:
+
+```
+EXDEV: cross-device link not permitted
+```
+
+this is a Node.js `fs.rename` limitation, not an Engram bug. Node uses `fs.rename` to move the downloaded plugin archive from the system temp directory (`/tmp`) to the plugin destination under your home directory. On many Linux systems `/tmp` and `/home` live on separate filesystems (common with `tmpfs` on `/tmp`), and the kernel rejects cross-device renames.
+
+**One-shot workaround** — set `TMPDIR` to a location on the same filesystem as your home directory before running the install:
+
+```bash
+mkdir -p ~/.cache/claude-tmp
+TMPDIR=~/.cache/claude-tmp claude plugin install engram
+```
+
+**Permanent fix** — add the export to your shell rc file so all future `claude plugin install` commands work without the prefix:
+
+```bash
+# ~/.bashrc or ~/.zshrc
+export TMPDIR="$HOME/.cache/claude-tmp"
+mkdir -p "$TMPDIR"
+```
+
+Then reload your shell (`source ~/.bashrc`) and re-run the install.
+
+> This is an upstream Claude Code CLI limitation that affects any plugin installed via `claude plugin install`, not just Engram. Docker-based environments are typically not affected because the container's `/tmp` and `/home` usually share the same overlay filesystem.
+
 ---
 
 ## Gemini CLI
@@ -462,6 +491,50 @@ The Memory Protocol tells the agent:
 - **After compaction** — recover state with `mem_context`
 
 See [Surviving Compaction](#surviving-compaction-recommended) for the minimal version, or [DOCS.md](../DOCS.md#memory-protocol-full-text) for the full Memory Protocol text you can copy-paste.
+
+### Project detection in VS Code, WSL, and CI
+
+VS Code, WSL, and most CI runners start the MCP server process without inheriting the shell's working directory, so cwd-based project detection may resolve to the wrong project or fall back to a directory basename you don't recognise.
+
+The reliable fix is to pin the project explicitly at startup time. Both forms below work:
+
+**Flag form** (recommended — visible in config):
+
+```json
+{
+  "servers": {
+    "engram": {
+      "command": "engram",
+      "args": ["mcp", "--project=my-project", "--tools=agent"]
+    }
+  }
+}
+```
+
+**Environment variable form** (useful when the config format does not support extra args, or when you want to override without editing the config file):
+
+```json
+{
+  "servers": {
+    "engram": {
+      "command": "engram",
+      "args": ["mcp", "--tools=agent"],
+      "env": {
+        "ENGRAM_PROJECT": "my-project"
+      }
+    }
+  }
+}
+```
+
+Both `--project=my-project` and `ENGRAM_PROJECT=my-project` set `MCPConfig.DefaultProject`, which takes precedence over cwd detection for every read and write tool for the lifetime of that MCP process.
+
+> The `--project` flag and `ENGRAM_PROJECT` env var are the same mechanism. If both are supplied, the flag wins. The value must match an existing project name in your Engram store; unknown names are rejected so typos fail loudly instead of silently creating a new project bucket.
+
+Same pattern applies to:
+- WSL terminals where VS Code opens a remote window (`\\wsl$\...` paths) — the MCP server process runs inside WSL but VS Code does not forward the workspace directory as cwd.
+- CI pipelines (GitHub Actions, GitLab CI, etc.) where the agent runs in a container and the checkout path differs from the project name you use locally.
+- Any Docker-based agent host where the container cwd does not match your Engram project name.
 
 ---
 

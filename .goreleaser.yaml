@@ -20,6 +20,9 @@ builds:
       - arm64
     ldflags:
       - -s -w -X main.version={{.Version}}
+    hooks:
+      post:
+        - cmd: sh -c 'if [ "{{ .Os }}" = "darwin" ] && command -v codesign >/dev/null 2>&1; then codesign --force --sign - "{{ .Path }}"; fi'
 
 archives:
   - formats:

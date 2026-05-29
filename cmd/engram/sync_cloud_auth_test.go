@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/Gentleman-Programming/engram/internal/cloud/autosync"
 	"github.com/Gentleman-Programming/engram/internal/store"
 )
 
@@ -118,4 +120,57 @@ func TestSyncCloudSendsAuthorizationHeaderFromFileToken(t *testing.T) {
 	if !strings.EqualFold(gotAuth, wantAuth) {
 		t.Fatalf("expected Authorization header %q, got %q (file token not forwarded)", wantAuth, gotAuth)
 	}
+}
+
+// TestTryStartAutosyncUsesFileToken asserts that tryStartAutosync picks up the
+// cloud token from cloud.json when ENGRAM_CLOUD_TOKEN env var is absent (issue #421).
+// This is the Windows Task Scheduler scenario: the background process runs in a
+// separate session context without the env var, so the token must come from the
+// persisted config file.
+func TestTryStartAutosyncUsesFileToken(t *testing.T) {
+	cfg := testConfig(t)
+	t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "1")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "")  // env var absent — must fall back to file
+	t.Setenv("ENGRAM_CLOUD_SERVER", "") // env var absent — server from file too
+
+	const fileToken = "file-only-token-421"
+	if err := saveCloudConfig(cfg, &cloudConfig{
+		ServerURL: "http://127.0.0.1:19998",
+		Token:     fileToken,
+	}); err != nil {
+		t.Fatalf("save cloud config: %v", err)
+	}
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer s.Close()
+
+	// Track whether the manager factory was reached.
+	managerCreated := false
+	old := newAutosyncManager
+	newAutosyncManager = func(_ *store.Store, _ autosync.CloudTransport, _ autosync.Config) startableAutosyncManager {
+		managerCreated = true
+		return &fakeStartableManager{}
+	}
+	defer func() { newAutosyncManager = old }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mgr, stopFn := tryStartAutosync(ctx, s, cfg)
+
+	// If the file-token fallback is missing, tryStartAutosync returns (nil, nil)
+	// because cc.Token is empty after resolveCloudRuntimeConfig ignores the file.
+	if mgr == nil {
+		t.Fatal("tryStartAutosync returned nil manager when token is only in cloud.json — file token fallback not working for autosync startup (issue #421)")
+	}
+	if stopFn == nil {
+		t.Fatal("expected non-nil stop function when manager starts successfully")
+	}
+	if !managerCreated {
+		t.Fatal("newAutosyncManager factory was never reached — tryStartAutosync aborted before creating manager")
+	}
+	stopFn()
 }

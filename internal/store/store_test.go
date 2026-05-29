@@ -2118,6 +2118,148 @@ func TestUpgradeRepairDryRunAndApply(t *testing.T) {
 			t.Fatalf("expected missing provenance to remain blocked, got %+v", diagnosis)
 		}
 	})
+
+	// Regression test for GitHub issue #446: when both repairable and blocked
+	// mutations coexist, RepairCloudUpgrade(apply=true) must apply the
+	// repairable subset and return Applied:true with Class=Blocked (and the
+	// message must reference the actual blocker, not the low-seq repairable
+	// entry that happens to be first in Findings order).
+	t.Run("partial apply: repairable mutations applied even when a blocker is queued", func(t *testing.T) {
+		s := newTestStore(t)
+		if err := s.CreateSession("partial-repair-s1", "partial-repair-proj", "/tmp/partial-repair"); err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+
+		// Create an observation so we have authoritative local state for the
+		// repairable mutation.
+		obsID, err := s.AddObservation(AddObservationParams{
+			SessionID: "partial-repair-s1",
+			Type:      "decision",
+			Title:     "Authoritative title",
+			Content:   "Authoritative content",
+			Project:   "partial-repair-proj",
+			Scope:     "project",
+		})
+		if err != nil {
+			t.Fatalf("add observation: %v", err)
+		}
+		if err := s.EnrollProject("partial-repair-proj"); err != nil {
+			t.Fatalf("enroll project: %v", err)
+		}
+
+		// Look up the observation's sync_id for payload construction.
+		var obsSyncID string
+		if err := s.db.QueryRow(`SELECT sync_id FROM observations WHERE id = ?`, obsID).Scan(&obsSyncID); err != nil {
+			t.Fatalf("lookup observation sync_id: %v", err)
+		}
+
+		// Insert a REPAIRABLE observation mutation (missing title — low seq,
+		// will naturally come before the blocker we insert next).
+		repairablePayload := `{"sync_id":"` + obsSyncID + `","session_id":"partial-repair-s1","type":"decision","content":"legacy payload missing title","scope":"project"}`
+		if _, err := s.execHook(s.db,
+			`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			DefaultSyncTargetKey,
+			SyncEntityObservation,
+			obsSyncID,
+			SyncOpUpsert,
+			repairablePayload,
+			SyncSourceLocal,
+			"partial-repair-proj",
+		); err != nil {
+			t.Fatalf("insert repairable observation mutation: %v", err)
+		}
+
+		// Create two observations for source/target of the relation we use as
+		// the blocker mutation.
+		srcID, err := s.AddObservation(AddObservationParams{SessionID: "partial-repair-s1", Type: "decision", Title: "Src", Content: "src", Project: "partial-repair-proj", Scope: "project"})
+		if err != nil {
+			t.Fatalf("add source observation: %v", err)
+		}
+		dstID, err := s.AddObservation(AddObservationParams{SessionID: "partial-repair-s1", Type: "decision", Title: "Dst", Content: "dst", Project: "partial-repair-proj", Scope: "project"})
+		if err != nil {
+			t.Fatalf("add dest observation: %v", err)
+		}
+		var srcSyncID, dstSyncID string
+		if err := s.db.QueryRow(`SELECT sync_id FROM observations WHERE id = ?`, srcID).Scan(&srcSyncID); err != nil {
+			t.Fatalf("lookup src sync_id: %v", err)
+		}
+		if err := s.db.QueryRow(`SELECT sync_id FROM observations WHERE id = ?`, dstID).Scan(&dstSyncID); err != nil {
+			t.Fatalf("lookup dst sync_id: %v", err)
+		}
+
+		// Insert a BLOCKED relation mutation (missing provenance — high seq,
+		// comes after the repairable entry so Findings[0] would point to the
+		// repairable entry without the fix).
+		const blockerEntityKey = "rel-partial-blocked-446"
+		blockerPayload := `{"sync_id":"` + blockerEntityKey + `","source_id":"` + srcSyncID + `","target_id":"` + dstSyncID + `","relation":"compatible","project":"partial-repair-proj"}`
+		if _, err := s.execHook(s.db,
+			`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			DefaultSyncTargetKey,
+			SyncEntityRelation,
+			blockerEntityKey,
+			SyncOpUpsert,
+			blockerPayload,
+			SyncSourceLocal,
+			"partial-repair-proj",
+		); err != nil {
+			t.Fatalf("insert blocked relation mutation: %v", err)
+		}
+
+		// Confirm pre-conditions: diagnosis must see exactly one repairable
+		// and one blocked entry.
+		diag, err := s.DiagnoseCloudUpgradeLegacyMutations("partial-repair-proj")
+		if err != nil {
+			t.Fatalf("pre-condition diagnose: %v", err)
+		}
+		if diag.RepairableCount != 1 || diag.BlockedCount != 1 {
+			t.Fatalf("expected 1 repairable + 1 blocked pre-condition, got %+v", diag)
+		}
+
+		// Find the seq of the blocked finding so we can assert the message
+		// references the right entry.
+		var blockerSeq int64
+		for _, f := range diag.Findings {
+			if !f.Repairable {
+				blockerSeq = f.Seq
+				break
+			}
+		}
+		if blockerSeq == 0 {
+			t.Fatal("pre-condition: could not locate blocked finding seq")
+		}
+		// Also verify that Findings[0] is NOT the blocker (i.e. lowest-seq is
+		// the repairable one); this is the exact condition that triggered the
+		// wrong-message bug.
+		if diag.Findings[0].Seq == blockerSeq {
+			t.Fatalf("pre-condition: expected Findings[0] to be repairable (lowest seq), but got blocker seq=%d", blockerSeq)
+		}
+
+		// === THE ACTUAL ASSERTION ===
+		// With apply=true, repairable mutations must be applied and the
+		// report must still surface the blocker clearly.
+		report, err := s.RepairCloudUpgrade("partial-repair-proj", true)
+		if err != nil {
+			t.Fatalf("repair with mixed repairable+blocker: %v", err)
+		}
+
+		// Applied MUST be true: at least the repairable mutation was applied.
+		if !report.Applied {
+			t.Fatalf("expected Applied=true (repairable subset was processed), got %+v", report)
+		}
+		// Class MUST be Blocked because the non-repairable mutation is still present.
+		if report.Class != UpgradeRepairClassBlocked {
+			t.Fatalf("expected Class=%q, got %q (full report: %+v)", UpgradeRepairClassBlocked, report.Class, report)
+		}
+		// The message must name the BLOCKER seq, not the repairable entry.
+		blockerSeqStr := fmt.Sprintf("seq=%d", blockerSeq)
+		if !strings.Contains(report.Message, blockerSeqStr) {
+			t.Fatalf("expected message to reference blocker seq (%s), got %q", blockerSeqStr, report.Message)
+		}
+		// The message must also include entity_key for debuggability.
+		if !strings.Contains(report.Message, blockerEntityKey) {
+			t.Fatalf("expected message to include entity_key=%q, got %q", blockerEntityKey, report.Message)
+		}
+	})
 }
 
 func TestRollbackCloudUpgradeSafetyBoundary(t *testing.T) {
@@ -8037,5 +8179,113 @@ func TestDeleteProjectOrphansMemoryRelations(t *testing.T) {
 	}
 	if judgmentStatus != "orphaned" {
 		t.Errorf("expected relation judgment_status = orphaned after hard delete, got %q", judgmentStatus)
+	}
+}
+
+func TestMostRecentActiveSessionReturnsUnEndedSession(t *testing.T) {
+	s := newTestStore(t)
+
+	// A hook-registered UUID session, never ended.
+	if err := s.CreateSession("uuid-active-1", "engram", "/work/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	id, ok, err := s.MostRecentActiveSession("engram")
+	if err != nil {
+		t.Fatalf("MostRecentActiveSession: %v", err)
+	}
+	if !ok || id != "uuid-active-1" {
+		t.Fatalf("expected active session uuid-active-1, got id=%q ok=%v", id, ok)
+	}
+}
+
+func TestMostRecentActiveSessionSkipsEndedSessions(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("uuid-ended-1", "engram", "/work/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if err := s.EndSession("uuid-ended-1", "done"); err != nil {
+		t.Fatalf("end session: %v", err)
+	}
+
+	_, ok, err := s.MostRecentActiveSession("engram")
+	if err != nil {
+		t.Fatalf("MostRecentActiveSession: %v", err)
+	}
+	if ok {
+		t.Fatalf("expected no active session when the only session is ended, got ok=%v", ok)
+	}
+}
+
+func TestMostRecentActiveSessionNoSessionsReturnsFalse(t *testing.T) {
+	s := newTestStore(t)
+
+	_, ok, err := s.MostRecentActiveSession("engram")
+	if err != nil {
+		t.Fatalf("MostRecentActiveSession: %v", err)
+	}
+	if ok {
+		t.Fatalf("expected ok=false for a project with no sessions, got ok=%v", ok)
+	}
+}
+
+func TestMostRecentActiveSessionPicksMostRecentWhenMultipleActive(t *testing.T) {
+	s := newTestStore(t)
+
+	// Two un-ended UUID sessions for the same project; the newer started_at wins.
+	if err := s.CreateSession("uuid-old", "engram", "/work/engram"); err != nil {
+		t.Fatalf("create old session: %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE sessions SET started_at = ? WHERE id = ?`, "2025-01-01 00:00:00", "uuid-old"); err != nil {
+		t.Fatalf("backdate old session: %v", err)
+	}
+	if err := s.CreateSession("uuid-new", "engram", "/work/engram"); err != nil {
+		t.Fatalf("create new session: %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE sessions SET started_at = ? WHERE id = ?`, "2025-06-01 00:00:00", "uuid-new"); err != nil {
+		t.Fatalf("set new session started_at: %v", err)
+	}
+
+	id, ok, err := s.MostRecentActiveSession("engram")
+	if err != nil {
+		t.Fatalf("MostRecentActiveSession: %v", err)
+	}
+	if !ok || id != "uuid-new" {
+		t.Fatalf("expected most recent active session uuid-new, got id=%q ok=%v", id, ok)
+	}
+}
+
+func TestMostRecentActiveSessionIgnoresManualSaveSessions(t *testing.T) {
+	s := newTestStore(t)
+
+	// The manual-save fallback session is also un-ended, but it must NOT be
+	// resolved as "the active session" — otherwise resolution becomes circular.
+	if err := s.CreateSession("manual-save-engram", "engram", "/work/engram"); err != nil {
+		t.Fatalf("create manual-save session: %v", err)
+	}
+
+	_, ok, err := s.MostRecentActiveSession("engram")
+	if err != nil {
+		t.Fatalf("MostRecentActiveSession: %v", err)
+	}
+	if ok {
+		t.Fatalf("expected manual-save session to be ignored, got ok=%v", ok)
+	}
+}
+
+func TestMostRecentActiveSessionScopedByProject(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("uuid-other-proj", "other", "/work/other"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	_, ok, err := s.MostRecentActiveSession("engram")
+	if err != nil {
+		t.Fatalf("MostRecentActiveSession: %v", err)
+	}
+	if ok {
+		t.Fatalf("expected no active session for engram when only 'other' has one, got ok=%v", ok)
 	}
 }

@@ -324,6 +324,126 @@ func TestHandleSaveRecordsActivityForExplicitSessionID(t *testing.T) {
 	}
 }
 
+// TestHandleSaveResolvesActiveSessionFromStore reproduces issue #386: the
+// SessionStart hook registers a UUID session via POST /sessions (a separate
+// process from the MCP server, sharing only the SQLite store). A later
+// mem_save with no explicit session_id must attach to that UUID session,
+// resolved from the persisted sessions table — NOT fall back to
+// manual-save-{project}. The two processes never share in-memory state, so
+// store-based resolution is the only thing that survives the process split.
+func TestHandleSaveResolvesActiveSessionFromStore(t *testing.T) {
+	s := newMCPTestStore(t)
+
+	// Simulate the SessionStart hook registering a UUID session (POST /sessions
+	// ultimately calls store.CreateSession).
+	const uuidSession = "0c8e7f2a-1b34-4d9e-9a77-aaaabbbbcccc"
+	if err := s.CreateSession(uuidSession, "engram", "/work/engram"); err != nil {
+		t.Fatalf("create UUID session: %v", err)
+	}
+
+	// mem_save with NO session_id — exactly what the proactive protocol does.
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "Active session resolution",
+		"content": "**What**: saved without session_id\n**Why**: repro for #386",
+		"type":    "bugfix",
+		"project": "engram",
+	}}})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected save error: %s", callResultText(t, res))
+	}
+
+	obs, err := s.RecentObservations("engram", "project", 5)
+	if err != nil {
+		t.Fatalf("recent observations: %v", err)
+	}
+	if len(obs) == 0 {
+		t.Fatalf("expected at least one observation, got none")
+	}
+	if obs[0].SessionID != uuidSession {
+		t.Fatalf("expected observation to attach to active UUID session %q, got %q (regression #386: fell back to manual-save)", uuidSession, obs[0].SessionID)
+	}
+}
+
+// TestHandleSaveFallsBackToManualSaveWhenNoActiveSession is the regression
+// guard for the preserved behavior: when there is no un-ended session for the
+// project, mem_save with no session_id must still use manual-save-{project}.
+func TestHandleSaveFallsBackToManualSaveWhenNoActiveSession(t *testing.T) {
+	s := newMCPTestStore(t)
+
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "No active session",
+		"content": "**What**: saved with no active session\n**Why**: fallback regression guard",
+		"type":    "bugfix",
+		"project": "engram",
+	}}})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected save error: %s", callResultText(t, res))
+	}
+
+	obs, err := s.RecentObservations("engram", "project", 5)
+	if err != nil {
+		t.Fatalf("recent observations: %v", err)
+	}
+	if len(obs) == 0 {
+		t.Fatalf("expected at least one observation, got none")
+	}
+	if want := defaultSessionID("engram"); obs[0].SessionID != want {
+		t.Fatalf("expected fallback to %q with no active session, got %q", want, obs[0].SessionID)
+	}
+}
+
+// TestHandleSaveResolvesMostRecentActiveSession covers the multi-session edge
+// case: two un-ended sessions exist; mem_save must attach to the most recent.
+func TestHandleSaveResolvesMostRecentActiveSession(t *testing.T) {
+	s := newMCPTestStore(t)
+
+	if err := s.CreateSession("uuid-older", "engram", "/work/engram"); err != nil {
+		t.Fatalf("create older session: %v", err)
+	}
+	if _, err := s.DB().Exec(`UPDATE sessions SET started_at = ? WHERE id = ?`, "2025-01-01 00:00:00", "uuid-older"); err != nil {
+		t.Fatalf("backdate older session: %v", err)
+	}
+	if err := s.CreateSession("uuid-newer", "engram", "/work/engram"); err != nil {
+		t.Fatalf("create newer session: %v", err)
+	}
+	if _, err := s.DB().Exec(`UPDATE sessions SET started_at = ? WHERE id = ?`, "2025-06-01 00:00:00", "uuid-newer"); err != nil {
+		t.Fatalf("set newer session started_at: %v", err)
+	}
+
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "Most recent active session",
+		"content": "**What**: saved with two active sessions\n**Why**: multi-session edge case",
+		"type":    "bugfix",
+		"project": "engram",
+	}}})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected save error: %s", callResultText(t, res))
+	}
+
+	obs, err := s.RecentObservations("engram", "project", 5)
+	if err != nil {
+		t.Fatalf("recent observations: %v", err)
+	}
+	if len(obs) == 0 {
+		t.Fatalf("expected at least one observation, got none")
+	}
+	if obs[0].SessionID != "uuid-newer" {
+		t.Fatalf("expected most recent active session uuid-newer, got %q", obs[0].SessionID)
+	}
+}
+
 func TestHandleSaveWithNilActivityStillSucceeds(t *testing.T) {
 	s := newMCPTestStore(t)
 	h := handleSave(s, MCPConfig{}, nil)
