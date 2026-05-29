@@ -6145,8 +6145,15 @@ func stripPrivateTags(s string) string {
 	return result
 }
 
-// sanitizeFTS wraps each word in quotes so FTS5 doesn't choke on special chars.
-// "fix auth bug" → `"fix" "auth" "bug"`
+// sanitizeFTS wraps each word in quotes so FTS5 doesn't choke on special chars,
+// then joins them with OR so the query matches documents containing ANY term.
+// "fix auth bug" → `"fix" OR "auth" OR "bug"`
+//
+// Joining with OR (instead of a space, which FTS5 treats as an implicit AND)
+// is what makes multi-word / natural-language queries usable: an AND query
+// requires EVERY term to appear in a single document and returns 0 hits for
+// almost all real queries. Relevance is preserved by the callers' ORDER BY
+// fts.rank (bm25): documents matching more — and rarer — terms still rank highest.
 func sanitizeFTS(query string) string {
 	words := strings.Fields(query)
 	for i, w := range words {
@@ -6154,7 +6161,7 @@ func sanitizeFTS(query string) string {
 		w = strings.Trim(w, `"`)
 		words[i] = `"` + w + `"`
 	}
-	return strings.Join(words, " ")
+	return strings.Join(words, " OR ")
 }
 
 // ─── Passive Capture ─────────────────────────────────────────────────────────
