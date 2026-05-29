@@ -13,7 +13,7 @@ detect_project() {
   if [ -n "$url" ]; then
     # Handles both SSH (git@github.com:user/repo.git) and HTTPS (https://github.com/user/repo.git)
     local name
-    name=$(echo "$url" | sed 's/\.git$//' | sed 's|.*[/:]||')
+    name=$(echo "$url" | sed 's/\.git$//' | sed 's|.*[/:]||' | tr '[:upper:]' '[:lower:]')
     if [ -n "$name" ]; then
       echo "$name"
       return
@@ -24,10 +24,10 @@ detect_project() {
   local root
   root=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)
   if [ -n "$root" ]; then
-    basename "$root"
+    basename "$root" | tr '[:upper:]' '[:lower:]'
     return
   fi
 
   # Final fallback: cwd basename (current behavior)
-  basename "$dir"
+  basename "$dir" | tr '[:upper:]' '[:lower:]'
 }

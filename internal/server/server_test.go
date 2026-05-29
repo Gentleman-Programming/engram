@@ -1904,3 +1904,47 @@ func TestJudgeAndCompareRoutesValidateInput(t *testing.T) {
 		t.Fatalf("expected missing observation 404, got %d body=%q", compareRec.Code, compareRec.Body.String())
 	}
 }
+
+// TestMigrateProjectCaseOnlySkipped asserts that POST /projects/migrate
+// returns status "skipped" when old_project and new_project differ only by
+// case — fixing #438 where the exact-string comparison let case-only renames
+// slip through and create duplicate projects.
+//
+// The test seeds a session under "repo_name" so that the store would actually
+// migrate if the server did not guard against case-only differences first.
+func TestMigrateProjectCaseOnlySkipped(t *testing.T) {
+	st := newServerTestStore(t)
+	h := New(st, 0).Handler()
+
+	// Seed a session under the lowercase project name so the store has data
+	// to migrate; without the fix the handler would call store.MigrateProject
+	// and rename "repo_name" → "Repo_Name", creating a duplicate.
+	seedReq := httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(
+		`{"id":"s-case-migrate","project":"repo_name","directory":"/tmp/repo"}`,
+	))
+	seedReq.Header.Set("Content-Type", "application/json")
+	seedRec := httptest.NewRecorder()
+	h.ServeHTTP(seedRec, seedReq)
+	if seedRec.Code != http.StatusCreated {
+		t.Fatalf("seed session: expected 201, got %d body=%s", seedRec.Code, seedRec.Body.String())
+	}
+
+	body := bytes.NewBufferString(`{"old_project":"repo_name","new_project":"Repo_Name"}`)
+	req := httptest.NewRequest(http.MethodPost, "/projects/migrate", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["status"] != "skipped" {
+		t.Fatalf("expected status=skipped for case-only difference, got %v (full response: %#v)", resp["status"], resp)
+	}
+}
