@@ -23,15 +23,23 @@ CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 OLD_PROJECT=$(basename "$CWD" | tr '[:upper:]' '[:lower:]')
 PROJECT=$(detect_project "$CWD")
 
-# Ensure engram server is running
+# Ensure engram server is running.
+# Detach the daemon from the parent shell's job control: start it in a new
+# session with no controlling terminal so a Ctrl-Z (SIGTSTP) or SIGHUP on the
+# terminal can't suspend it. A suspended daemon keeps the port bound but stops
+# answering, which hangs every later hook curl and leaks processes over time.
 if ! curl -sf "${ENGRAM_URL}/health" --max-time 1 > /dev/null 2>&1; then
-  engram serve &>/dev/null &
+  if command -v setsid > /dev/null 2>&1; then
+    setsid engram serve < /dev/null > /dev/null 2>&1 &
+  else
+    nohup engram serve < /dev/null > /dev/null 2>&1 &
+  fi
   sleep 0.5
 fi
 
 # Migrate project name if it changed (one-time, idempotent)
 if [ "$OLD_PROJECT" != "$PROJECT" ] && [ -n "$OLD_PROJECT" ] && [ -n "$PROJECT" ]; then
-  curl -sf "${ENGRAM_URL}/projects/migrate" \
+  curl -sf --max-time 3 "${ENGRAM_URL}/projects/migrate" \
     -X POST \
     -H "Content-Type: application/json" \
     -d "$(jq -n --arg old "$OLD_PROJECT" --arg new "$PROJECT" \
@@ -41,7 +49,7 @@ fi
 
 # Create session
 if [ -n "$SESSION_ID" ] && [ -n "$PROJECT" ]; then
-  curl -sf "${ENGRAM_URL}/sessions" \
+  curl -sf --max-time 3 "${ENGRAM_URL}/sessions" \
     -X POST \
     -H "Content-Type: application/json" \
     -d "$(jq -n --arg id "$SESSION_ID" --arg project "$PROJECT" --arg dir "$CWD" \

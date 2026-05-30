@@ -14,7 +14,9 @@ if [ -z "$SESSION_ID" ]; then
   exit 0
 fi
 
-curl -sf "${ENGRAM_URL}/sessions/${SESSION_ID}/end" \
+# --max-time bounds the request: if the daemon is unreachable or unresponsive
+# the curl fails fast instead of hanging forever and leaking a process per stop.
+curl -sf --max-time 3 "${ENGRAM_URL}/sessions/${SESSION_ID}/end" \
   -X POST \
   -H "Content-Type: application/json" \
   -d '{}' \
