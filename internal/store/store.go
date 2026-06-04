@@ -6227,8 +6227,13 @@ func stripPrivateTags(s string) string {
 func sanitizeFTS(query string) string {
 	words := strings.Fields(query)
 	for i, w := range words {
-		// Strip existing quotes to avoid double-quoting
+		// Strip surrounding quotes to avoid double-quoting
 		w = strings.Trim(w, `"`)
+		// Escape any remaining interior double-quotes by doubling them, as
+		// required for an FTS5 string literal. Without this, a token like
+		// foo"bar produces the unbalanced phrase "foo"bar" and SQLite rejects
+		// the whole query with "unterminated string", surfacing as an HTTP 500.
+		w = strings.ReplaceAll(w, `"`, `""`)
 		words[i] = `"` + w + `"`
 	}
 	return strings.Join(words, " ")

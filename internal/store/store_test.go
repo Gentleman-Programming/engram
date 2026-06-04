@@ -8289,3 +8289,67 @@ func TestMostRecentActiveSessionScopedByProject(t *testing.T) {
 		t.Fatalf("expected no active session for engram when only 'other' has one, got ok=%v", ok)
 	}
 }
+
+// TestSearchWithEmbeddedQuoteDoesNotCrash is a regression test for a 500 in the
+// /search endpoint. A search token containing an interior double-quote (e.g.
+// foo"bar) was wrapped by sanitizeFTS into the unbalanced FTS5 phrase
+// `"foo"bar"`, which SQLite rejected with "unterminated string", so Store.Search
+// (and the HTTP handler that wraps it) returned an error instead of results.
+// After the fix, interior quotes are escaped by doubling, the query succeeds, and
+// it still matches the literal token.
+func TestSearchWithEmbeddedQuoteDoesNotCrash(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "decision",
+		Title:     "Config token",
+		Content:   `the value is foo"bar in the config file`,
+		Project:   "engram",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	// Inputs that previously produced an unbalanced FTS5 phrase and a 500.
+	for _, q := range []string{`foo"bar`, `a"b"c`, `"`, `he said "hi`} {
+		if _, err := s.Search(q, SearchOptions{Project: "engram", Limit: 10}); err != nil {
+			t.Fatalf("Search(%q) returned error (should be handled gracefully): %v", q, err)
+		}
+	}
+
+	// The fix must remain functional, not just non-crashing: searching the
+	// embedded-quote token still finds the observation that contains it.
+	results, err := s.Search(`foo"bar`, SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("Search(foo\"bar): %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result for embedded-quote token, got %d", len(results))
+	}
+	if results[0].Title != "Config token" {
+		t.Fatalf("expected to match \"Config token\", got %q", results[0].Title)
+	}
+}
+
+// TestSanitizeFTSPreservesPlainQueries guards backward compatibility: normal
+// multi-word queries and user-supplied surrounding quotes must keep producing
+// the same per-term quoting they did before the embedded-quote fix.
+func TestSanitizeFTSPreservesPlainQueries(t *testing.T) {
+	cases := map[string]string{
+		"fix auth bug":     `"fix" "auth" "bug"`,
+		`"quoted phrase"`:  `"quoted" "phrase"`,
+		"single":           `"single"`,
+		`foo"bar`:          `"foo""bar"`,
+		"":                 "",
+		"   ":              "",
+	}
+	for in, want := range cases {
+		if got := sanitizeFTS(in); got != want {
+			t.Errorf("sanitizeFTS(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
