@@ -3039,7 +3039,12 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 		args = append(args, normalizeScope(opts.Scope))
 	}
 
-	sqlQ += " ORDER BY fts.rank LIMIT ?"
+	// Weighted bm25: favor matches in `title` (10×) and `topic_key` (8×) over
+	// `content` (2×) so the OR-recall expansion in sanitizeFTS still surfaces the
+	// most on-topic observation first instead of any doc that merely shares a
+	// common term. Column order matches the FTS5 schema:
+	// title, content, tool_name, type, project, topic_key. (regtime/fts-tuning)
+	sqlQ += " ORDER BY bm25(observations_fts, 10.0, 2.0, 1.0, 1.0, 1.0, 8.0) LIMIT ?"
 	args = append(args, limit)
 
 	rows, err := s.queryItHook(s.db, sqlQ, args...)
@@ -6222,16 +6227,31 @@ func stripPrivateTags(s string) string {
 	return result
 }
 
-// sanitizeFTS wraps each word in quotes so FTS5 doesn't choke on special chars.
-// "fix auth bug" → `"fix" "auth" "bug"`
+// sanitizeFTS turns a query into an FTS5 MATCH expression that favors RECALL.
+// Each term becomes a quoted PREFIX token and terms are joined with OR:
+//   "How long have Mel married" → `"how"* OR "long"* OR "have"* OR "mel"* OR "married"*`
+//
+// Rationale (regtime/fts-tuning, 2026-06): the prior implementation quoted each
+// term and joined with SPACES, which is FTS5 implicit-AND — every term had to
+// match, so natural-language / paraphrased / multi-term queries returned
+// nothing even when the answer was stored verbatim (measured 0% recall on a
+// LoCoMo slice). OR restores recall; the bm25 `ORDER BY fts.rank` in Search()
+// still ranks documents matching more (and rarer) terms on top, so precision
+// is preserved at the head of the result list. Prefix (`*`) additionally makes
+// "mel" match "melanie", "delet" match "deleted", etc. Internal quotes are
+// escaped ("" = a literal " inside an FTS5 string).
 func sanitizeFTS(query string) string {
 	words := strings.Fields(query)
-	for i, w := range words {
-		// Strip existing quotes to avoid double-quoting
+	terms := make([]string, 0, len(words))
+	for _, w := range words {
 		w = strings.Trim(w, `"`)
-		words[i] = `"` + w + `"`
+		if w == "" {
+			continue
+		}
+		w = strings.ReplaceAll(w, `"`, `""`)
+		terms = append(terms, `"`+w+`"*`)
 	}
-	return strings.Join(words, " ")
+	return strings.Join(terms, " OR ")
 }
 
 // ─── Passive Capture ─────────────────────────────────────────────────────────
