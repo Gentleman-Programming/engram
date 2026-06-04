@@ -1056,6 +1056,15 @@ func (s *Store) migrate() error {
 		return err
 	}
 
+	// Phase 3 — CRITICAL-2: preserve the sync op (upsert vs delete) so that a
+	// deferred delete is replayed as a delete, not silently converted to an upsert.
+	// addColumnIfNotExists is idempotent: a no-op when the column already exists.
+	if err := s.addColumnIfNotExists(
+		"sync_apply_deferred", "op", "TEXT NOT NULL DEFAULT 'upsert'",
+	); err != nil {
+		return err
+	}
+
 	// Phase 3b: composite index for conflict-audit list/count queries.
 	if _, err := s.execHook(s.db, `
 		CREATE INDEX IF NOT EXISTS idx_memrel_status_created
@@ -3982,17 +3991,21 @@ func (s *Store) ApplyPulledMutation(targetKey string, mutation SyncMutation) err
 			// Phase E: per-entity skip+log policy (design §9).
 			// For relation FK misses, write to sync_apply_deferred and ACK the seq
 			// so the cursor can advance. All other errors propagate and halt the pull.
+			isLegacyEntity := mutation.Entity == SyncEntityObservation ||
+				mutation.Entity == SyncEntitySession ||
+				mutation.Entity == SyncEntityPrompt
 			if mutation.Entity == SyncEntityRelation && errors.Is(applyErr, ErrRelationFKMissing) {
 				log.Printf("[store] ApplyPulledMutation: relation FK miss seq=%d entity_key=%s — deferring",
 					mutation.Seq, mutation.EntityKey)
 				if _, deferErr := s.execHook(tx, `
 					INSERT INTO sync_apply_deferred
-						(sync_id, entity, payload, apply_status, retry_count, first_seen_at)
-					VALUES (?, ?, ?, 'deferred', 0, datetime('now'))
+						(sync_id, entity, op, payload, apply_status, retry_count, first_seen_at)
+					VALUES (?, ?, ?, ?, 'deferred', 0, datetime('now'))
 					ON CONFLICT(sync_id) DO UPDATE SET
+						op                 = excluded.op,
 						payload            = excluded.payload,
 						last_attempted_at  = datetime('now')
-				`, mutation.EntityKey, mutation.Entity, mutation.Payload); deferErr != nil {
+				`, mutation.EntityKey, mutation.Entity, mutation.Op, mutation.Payload); deferErr != nil {
 					return fmt.Errorf("ApplyPulledMutation: write deferred row: %w", deferErr)
 				}
 				// Fall through to advance the cursor (ACK the seq).
@@ -4003,14 +4016,32 @@ func (s *Store) ApplyPulledMutation(targetKey string, mutation SyncMutation) err
 					mutation.Seq, mutation.EntityKey, applyErr)
 				if _, deferErr := s.execHook(tx, `
 					INSERT INTO sync_apply_deferred
-						(sync_id, entity, payload, apply_status, retry_count, first_seen_at)
-					VALUES (?, ?, ?, 'dead', 0, datetime('now'))
+						(sync_id, entity, op, payload, apply_status, retry_count, first_seen_at)
+					VALUES (?, ?, ?, ?, 'dead', 0, datetime('now'))
 					ON CONFLICT(sync_id) DO UPDATE SET
+						op                = excluded.op,
 						payload           = excluded.payload,
 						apply_status      = 'dead',
 						last_attempted_at = datetime('now')
-				`, mutation.EntityKey, mutation.Entity, mutation.Payload); deferErr != nil {
+				`, mutation.EntityKey, mutation.Entity, mutation.Op, mutation.Payload); deferErr != nil {
 					return fmt.Errorf("ApplyPulledMutation: write dead row: %w", deferErr)
+				}
+				// Fall through to advance the cursor (ACK the seq).
+			} else if isLegacyEntity && isSQLiteFKConstraintError(applyErr) {
+				// Legacy entity (observation/session/prompt) arrived before its parent
+				// session exists locally. Defer instead of halting the pull stream.
+				log.Printf("[store] ApplyPulledMutation: legacy FK miss seq=%d entity=%s entity_key=%s — deferring",
+					mutation.Seq, mutation.Entity, mutation.EntityKey)
+				if _, deferErr := s.execHook(tx, `
+					INSERT INTO sync_apply_deferred
+						(sync_id, entity, op, payload, apply_status, retry_count, first_seen_at)
+					VALUES (?, ?, ?, ?, 'deferred', 0, datetime('now'))
+					ON CONFLICT(sync_id) DO UPDATE SET
+						op                = excluded.op,
+						payload           = excluded.payload,
+						last_attempted_at = datetime('now')
+				`, mutation.EntityKey, mutation.Entity, mutation.Op, mutation.Payload); deferErr != nil {
+					return fmt.Errorf("ApplyPulledMutation: write deferred legacy row: %w", deferErr)
 				}
 				// Fall through to advance the cursor (ACK the seq).
 			} else {
@@ -4063,9 +4094,34 @@ func (s *Store) ApplyPulledChunk(targetKey, chunkID string, mutations []SyncMuta
 			mutation.Seq = seq
 			mutation.TargetKey = targetKey
 			mutation.Source = SyncSourceRemote
-			if err := s.applyPulledMutationTx(tx, mutation); err != nil {
-				return fmt.Errorf("apply chunk mutation %d: %w", i, err)
+			applyErr := s.applyPulledMutationTx(tx, mutation)
+			if applyErr == nil {
+				continue
 			}
+			// WARNING-3: legacy entities (observation/session/prompt) with an FK
+			// miss in a chunk must be deferred — not returned as an error — so the
+			// rest of the chunk can be applied.  This mirrors the per-mutation
+			// deferral logic in ApplyPulledMutation (design §9).
+			isLegacyEntity := mutation.Entity == SyncEntityObservation ||
+				mutation.Entity == SyncEntitySession ||
+				mutation.Entity == SyncEntityPrompt
+			if isLegacyEntity && isSQLiteFKConstraintError(applyErr) {
+				log.Printf("[store] ApplyPulledChunk: legacy FK miss chunk=%s entity=%s entity_key=%s — deferring",
+					chunkID, mutation.Entity, mutation.EntityKey)
+				if _, deferErr := s.execHook(tx, `
+					INSERT INTO sync_apply_deferred
+						(sync_id, entity, op, payload, apply_status, retry_count, first_seen_at)
+					VALUES (?, ?, ?, ?, 'deferred', 0, datetime('now'))
+					ON CONFLICT(sync_id) DO UPDATE SET
+						op                = excluded.op,
+						payload           = excluded.payload,
+						last_attempted_at = datetime('now')
+				`, mutation.EntityKey, mutation.Entity, mutation.Op, mutation.Payload); deferErr != nil {
+					return fmt.Errorf("ApplyPulledChunk: write deferred legacy row: %w", deferErr)
+				}
+				continue // ACK this mutation; move on to the next in the chunk.
+			}
+			return fmt.Errorf("apply chunk mutation %d: %w", i, applyErr)
 		}
 
 		if _, err := s.execHook(tx,
@@ -4719,6 +4775,21 @@ func withSQLiteWriteRetry(fn func() error) error {
 		return nil
 	}
 	return lastErr
+}
+
+// isSQLiteFKConstraintError returns true when err is a SQLite foreign-key
+// constraint violation (extended result code 787 / SQLITE_CONSTRAINT_FOREIGNKEY).
+// Falls back to a string check for robustness in test environments where the
+// driver may wrap the error differently.
+func isSQLiteFKConstraintError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var sqliteErr *sqlite.Error
+	if errors.As(err, &sqliteErr) {
+		return sqliteErr.Code() == sqliteConstraintForeignKey
+	}
+	return strings.Contains(err.Error(), "FOREIGN KEY constraint failed")
 }
 
 func isRetryableSQLiteLockError(err error) bool {
@@ -6451,7 +6522,7 @@ func (s *Store) ReplayDeferred() (result ReplayDeferredResult, err error) {
 	const deadThreshold = 5
 
 	rows, err := s.db.Query(`
-		SELECT sync_id, entity, payload, retry_count
+		SELECT sync_id, entity, COALESCE(op, 'upsert'), payload, retry_count
 		FROM sync_apply_deferred
 		WHERE apply_status = 'deferred'
 		ORDER BY first_seen_at
@@ -6464,6 +6535,7 @@ func (s *Store) ReplayDeferred() (result ReplayDeferredResult, err error) {
 	type deferredRow struct {
 		syncID     string
 		entity     string
+		op         string
 		payload    string
 		retryCount int
 	}
@@ -6471,7 +6543,7 @@ func (s *Store) ReplayDeferred() (result ReplayDeferredResult, err error) {
 	var pending []deferredRow
 	for rows.Next() {
 		var r deferredRow
-		if err := rows.Scan(&r.syncID, &r.entity, &r.payload, &r.retryCount); err != nil {
+		if err := rows.Scan(&r.syncID, &r.entity, &r.op, &r.payload, &r.retryCount); err != nil {
 			rows.Close()
 			return result, fmt.Errorf("ReplayDeferred: scan: %w", err)
 		}
@@ -6486,17 +6558,33 @@ func (s *Store) ReplayDeferred() (result ReplayDeferredResult, err error) {
 		result.Retried++
 		mut := SyncMutation{
 			Entity:  row.entity,
-			Op:      SyncOpUpsert,
+			Op:      row.op, // CRITICAL-2: preserve original op (delete vs upsert)
 			Payload: row.payload,
 			Source:  SyncSourceRemote,
 		}
 
+		// WARNING-2: apply and deferred-row cleanup run in the SAME transaction.
+		// If the process dies between apply and cleanup, the row would be retried
+		// unnecessarily. Moving the DELETE inside withTx makes them atomic.
+		// For relations, applyRelationUpsertTx already deletes the deferred row
+		// inside the tx; the extra DELETE here is a no-op for those.
 		applyErr := s.withTx(func(tx *sql.Tx) error {
-			return s.applyPulledMutationTx(tx, mut)
+			if err := s.applyPulledMutationTx(tx, mut); err != nil {
+				return err
+			}
+			// Delete the deferred row inside the same transaction so the apply
+			// and the cleanup are atomic — no double-retry if the process crashes
+			// between commit and a separate DELETE statement.
+			if _, delErr := s.execHook(tx,
+				`DELETE FROM sync_apply_deferred WHERE sync_id = ?`, row.syncID,
+			); delErr != nil {
+				// Non-fatal: the apply succeeded; log and carry on.
+				log.Printf("[store] replayDeferred: cleanup deferred row sync_id=%s: %v", row.syncID, delErr)
+			}
+			return nil
 		})
 
 		if applyErr == nil {
-			// Success: applyRelationUpsertTx already deleted the deferred row.
 			result.Succeeded++
 			log.Printf("[store] replayDeferred: applied sync_id=%s", row.syncID)
 			continue
@@ -6505,7 +6593,9 @@ func (s *Store) ReplayDeferred() (result ReplayDeferredResult, err error) {
 		// Classify the error and update the deferred row.
 		newRetry := row.retryCount + 1
 		var newStatus string
-		if errors.Is(applyErr, ErrRelationFKMissing) && newRetry < deadThreshold {
+		isRetryableFKMiss := errors.Is(applyErr, ErrRelationFKMissing) ||
+			isSQLiteFKConstraintError(applyErr)
+		if isRetryableFKMiss && newRetry < deadThreshold {
 			// Still retryable.
 			newStatus = "deferred"
 			result.Failed++
@@ -6570,7 +6660,7 @@ func (s *Store) CountDeferredAndDead() (deferred, dead int, err error) {
 // JSON, PayloadValid is false and PayloadRaw is preserved.
 func (s *Store) ListDeferred(opts ListDeferredOptions) ([]DeferredRow, error) {
 	query := `
-		SELECT sync_id, entity, payload, apply_status, retry_count,
+		SELECT sync_id, entity, COALESCE(op, 'upsert'), payload, apply_status, retry_count,
 		       last_error, last_attempted_at, first_seen_at
 		FROM sync_apply_deferred
 		WHERE 1=1`
@@ -6617,7 +6707,7 @@ func (s *Store) ListDeferred(opts ListDeferredOptions) ([]DeferredRow, error) {
 // Returns an error wrapping "not found" when no row exists (matches FindCandidates style).
 func (s *Store) GetDeferred(syncID string) (DeferredRow, error) {
 	row := s.db.QueryRow(`
-		SELECT sync_id, entity, payload, apply_status, retry_count,
+		SELECT sync_id, entity, COALESCE(op, 'upsert'), payload, apply_status, retry_count,
 		       last_error, last_attempted_at, first_seen_at
 		FROM sync_apply_deferred
 		WHERE sync_id = ?
@@ -6643,7 +6733,7 @@ func scanDeferredRow(row scannable) (DeferredRow, error) {
 	var r DeferredRow
 	var rawPayload string
 	if err := row.Scan(
-		&r.SyncID, &r.Entity, &rawPayload, &r.ApplyStatus, &r.RetryCount,
+		&r.SyncID, &r.Entity, &r.Op, &rawPayload, &r.ApplyStatus, &r.RetryCount,
 		&r.LastError, &r.LastAttemptedAt, &r.FirstSeenAt,
 	); err != nil {
 		return r, err

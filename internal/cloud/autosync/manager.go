@@ -589,9 +589,11 @@ func (m *Manager) pull(ctx context.Context) error {
 				OccurredAt: rm.OccurredAt,
 			}
 			// Phase E: per-entity error policy (design §9).
-			// ApplyPulledMutation handles relation FK misses internally by writing
-			// to sync_apply_deferred and returning nil — the cursor advances normally.
-			// All other errors (legacy entities, decode errors) propagate and halt the pull.
+			// ApplyPulledMutation handles FK misses by writing to sync_apply_deferred
+			// and returning nil — the cursor advances normally. This covers both
+			// relation FK misses and legacy entities (observation/session/prompt) whose
+			// parent session is not yet present locally; both defer instead of halting.
+			// Decode errors and other unrecoverable failures propagate and halt the pull.
 			if err := m.store.ApplyPulledMutation(m.cfg.TargetKey, localMut); err != nil {
 				return fmt.Errorf("apply pulled mutation seq=%d: %w", rm.Seq, err)
 			}

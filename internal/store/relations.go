@@ -129,6 +129,7 @@ type RelationStats struct {
 type DeferredRow struct {
 	SyncID          string         `json:"sync_id"`
 	Entity          string         `json:"entity"`
+	Op              string         `json:"op"`
 	Payload         map[string]any `json:"payload,omitempty"`
 	PayloadRaw      string         `json:"payload_raw"`
 	PayloadValid    bool           `json:"payload_valid"`

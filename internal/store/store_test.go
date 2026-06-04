@@ -2679,6 +2679,9 @@ func TestApplyPulledObservationPreservesChronologyAndRevisionMetadata(t *testing
 func TestApplyPulledChunkIsAtomicAndRetrySafe(t *testing.T) {
 	s := newTestStore(t)
 
+	// A chunk with an unrecoverable (non-FK-miss) error: an unknown entity type
+	// triggers the "unknown sync entity" path and is NOT a deferrable FK miss,
+	// so it must roll back the entire chunk (true atomicity test).
 	badChunk := []SyncMutation{
 		{
 			Entity:    SyncEntitySession,
@@ -2687,16 +2690,17 @@ func TestApplyPulledChunkIsAtomicAndRetrySafe(t *testing.T) {
 			Payload:   `{"id":"chunk-session","project":"engram","directory":"/remote"}`,
 		},
 		{
-			Entity:    SyncEntityObservation,
-			EntityKey: "chunk-obs-bad",
+			Entity:    "unknown_entity_type", // triggers an unrecoverable error
+			EntityKey: "chunk-bad-entity",
 			Op:        SyncOpUpsert,
-			Payload:   `{"sync_id":"chunk-obs-bad","session_id":"missing-session","type":"note","title":"bad","content":"fails fk","project":"engram","scope":"project"}`,
+			Payload:   `{}`,
 		},
 	}
 
 	if err := s.ApplyPulledChunk(DefaultSyncTargetKey, "chunk-retry-safe", badChunk); err == nil {
-		t.Fatal("expected chunk apply error for invalid observation payload")
+		t.Fatal("expected chunk apply error for unrecoverable mutation")
 	}
+	// Atomicity: the session in the same chunk must have been rolled back.
 	if _, err := s.GetSession("chunk-session"); err == nil {
 		t.Fatal("expected chunk session upsert to roll back after failed chunk apply")
 	}

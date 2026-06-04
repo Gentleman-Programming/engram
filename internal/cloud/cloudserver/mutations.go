@@ -333,17 +333,47 @@ func validateRelationPayload(payload json.RawMessage) (string, bool) {
 	return "", true
 }
 
-// validateLegacyPayload is a no-op for legacy entities (session, observation,
-// prompt). REQ-008: these entities have no new required payload fields — their
-// push/pull behavior is UNCHANGED from before Phase 2. Any tightening of legacy
-// payload validation is a breaking change and must not be done here.
-func validateLegacyPayload(_ string, _ json.RawMessage) (string, bool) {
+// validateLegacyPayload validates legacy entity payloads (session, observation,
+// prompt). For a session upsert, directory is required unless the session is
+// being deleted. Delete forms are: deleted=true, hard_delete=true, or a
+// non-empty deleted_at value — matching the server-side isSessionDeletePayload
+// semantics. All other legacy entities pass unconditionally — their pull/push
+// behavior is UNCHANGED from before Phase 2.
+func validateLegacyPayload(entity string, payload json.RawMessage) (string, bool) {
+	if entity != "session" {
+		return "", true
+	}
+	var p struct {
+		Deleted    bool    `json:"deleted"`
+		HardDelete bool    `json:"hard_delete"`
+		DeletedAt  *string `json:"deleted_at"`
+		Directory  string  `json:"directory"`
+	}
+	if err := json.Unmarshal(payload, &p); err != nil {
+		// Malformed JSON: pass through; other validators surface decode errors.
+		return "", true
+	}
+	// Any delete form exempts the directory requirement.
+	if p.Deleted || p.HardDelete {
+		return "", true
+	}
+	if p.DeletedAt != nil && strings.TrimSpace(*p.DeletedAt) != "" {
+		return "", true
+	}
+	if strings.TrimSpace(p.Directory) == "" {
+		return "directory", false
+	}
 	return "", true
 }
 
 // validateMutationEntry dispatches to the correct validator for the entry's
 // entity type. Returns (missingField, false) on validation failure.
+// Delete operations (op=="delete") bypass payload validation entirely — the
+// payload may be minimal or empty for tombstone deletes.
 func validateMutationEntry(entry MutationEntry) (string, bool) {
+	if entry.Op == "delete" {
+		return "", true
+	}
 	switch entry.Entity {
 	case "relation":
 		return validateRelationPayload(entry.Payload)

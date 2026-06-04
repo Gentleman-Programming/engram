@@ -1271,6 +1271,175 @@ func TestHandleMutationPush_LegacyObsMissingOptional_Returns200(t *testing.T) {
 	}
 }
 
+// ─── Bug A: validateLegacyPayload rejects sessions without directory ──────────
+
+// TestHandleMutationPush_SessionMissingDirectory_Returns400 (Bug A) verifies
+// that a session mutation without a directory field is rejected with 400 and
+// the "directory" field name in the error response.
+func TestHandleMutationPush_SessionMissingDirectory_Returns400(t *testing.T) {
+	ms := newFakeMutationStore()
+	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
+
+	// Session payload with no directory field — must be rejected.
+	payloadNone := json.RawMessage(`{"id":"ses-001"}`)
+	// Session payload with empty directory — must also be rejected.
+	payloadEmpty := json.RawMessage(`{"id":"ses-002","directory":""}`)
+
+	cases := []struct {
+		name    string
+		payload json.RawMessage
+	}{
+		{"no directory field", payloadNone},
+		{"empty directory", payloadEmpty},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			entries := []MutationEntry{
+				{Project: "proj-a", Entity: "session", EntityKey: "ses-001", Op: "upsert", Payload: tc.payload},
+			}
+			body := marshalPushRequest(t, entries)
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", body)
+			req.Header.Set("Authorization", "Bearer secret")
+			req.Header.Set("Content-Type", "application/json")
+			srv.Handler().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("Bug A %s: expected 400, got %d body=%q", tc.name, rec.Code, rec.Body.String())
+			}
+			// The error response must name the missing field.
+			var resp struct {
+				Invalid []struct {
+					Field string `json:"field"`
+				} `json:"invalid"`
+			}
+			if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+				t.Fatalf("Bug A %s: decode response: %v", tc.name, err)
+			}
+			if len(resp.Invalid) == 0 || resp.Invalid[0].Field != "directory" {
+				t.Errorf("Bug A %s: expected field='directory' in invalid[0], got %+v", tc.name, resp.Invalid)
+			}
+			// Nothing must be stored.
+			if len(ms.mutations) != 0 {
+				t.Errorf("Bug A %s: expected 0 mutations stored, got %d", tc.name, len(ms.mutations))
+			}
+		})
+	}
+}
+
+// TestHandleMutationPush_SessionWithDirectory_Returns200 (Bug A happy-path)
+// verifies that a session mutation WITH a directory still passes through.
+func TestHandleMutationPush_SessionWithDirectory_Returns200(t *testing.T) {
+	ms := newFakeMutationStore()
+	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
+
+	entries := []MutationEntry{
+		{
+			Project:   "proj-a",
+			Entity:    "session",
+			EntityKey: "ses-ok",
+			Op:        "upsert",
+			Payload:   json.RawMessage(`{"id":"ses-ok","directory":"/home/user/proj"}`),
+		},
+	}
+	body := marshalPushRequest(t, entries)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", body)
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Bug A happy path: expected 200 for session with directory, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if len(ms.mutations) != 1 {
+		t.Fatalf("Bug A happy path: expected 1 mutation stored, got %d", len(ms.mutations))
+	}
+}
+
+// TestHandleMutationPush_DeletedSessionWithoutDirectory_Returns200 verifies
+// that a deleted session without a directory is NOT rejected (deleted=true exemption).
+func TestHandleMutationPush_DeletedSessionWithoutDirectory_Returns200(t *testing.T) {
+	ms := newFakeMutationStore()
+	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
+
+	entries := []MutationEntry{
+		{
+			Project:   "proj-a",
+			Entity:    "session",
+			EntityKey: "ses-del",
+			Op:        "upsert",
+			Payload:   json.RawMessage(`{"id":"ses-del","deleted":true}`),
+		},
+	}
+	body := marshalPushRequest(t, entries)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", body)
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Bug A deleted session: expected 200, got %d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleMutationPush_SessionDeleteVariants_Returns200 verifies that all
+// delete forms (hard_delete=true, deleted_at set, op=="delete") bypass the
+// directory requirement — matching the server-side isSessionDeletePayload
+// semantics exactly (CRITICAL-1).
+func TestHandleMutationPush_SessionDeleteVariants_Returns200(t *testing.T) {
+	cases := []struct {
+		name    string
+		op      string
+		payload json.RawMessage
+	}{
+		{
+			name:    "hard_delete=true without directory",
+			op:      "upsert",
+			payload: json.RawMessage(`{"id":"ses-hd","hard_delete":true}`),
+		},
+		{
+			name:    "deleted_at set without directory",
+			op:      "upsert",
+			payload: json.RawMessage(`{"id":"ses-da","deleted_at":"2026-01-01T00:00:00Z"}`),
+		},
+		{
+			name:    "op=delete without directory",
+			op:      "delete",
+			payload: json.RawMessage(`{"id":"ses-op"}`),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ms := newFakeMutationStore()
+			srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
+
+			entries := []MutationEntry{
+				{
+					Project:   "proj-a",
+					Entity:    "session",
+					EntityKey: "ses-del-variant",
+					Op:        tc.op,
+					Payload:   tc.payload,
+				},
+			}
+			body := marshalPushRequest(t, entries)
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", body)
+			req.Header.Set("Authorization", "Bearer secret")
+			req.Header.Set("Content-Type", "application/json")
+			srv.Handler().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("CRITICAL-1 %s: expected 200, got %d body=%q",
+					tc.name, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 func newMutationTestServer(ms *fakeMutationStore, token string, projects []string) *CloudServer {
