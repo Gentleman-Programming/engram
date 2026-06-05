@@ -7088,3 +7088,50 @@ func TestHandleSearchLegacyMixedCaseProject(t *testing.T) {
 		t.Fatalf("expected search results for legacy project, got: %s", text)
 	}
 }
+
+func TestHandleSaveRejectsEmptyTitle(t *testing.T) {
+	cases := []struct {
+		name  string
+		title any
+	}{
+		{"missing title", nil},
+		{"empty string", ""},
+		{"only whitespace", "   \t\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newMCPTestStore(t)
+			h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+			args := map[string]any{
+				"content": "Body with no usable title",
+				"type":    "bugfix",
+				"project": "engram",
+			}
+			if tc.title != nil {
+				args["title"] = tc.title
+			}
+
+			res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: args}})
+			if err != nil {
+				t.Fatalf("handler error: %v", err)
+			}
+			if !res.IsError {
+				t.Fatalf("expected an error result for empty title, got success")
+			}
+			text := callResultText(t, res)
+			if !strings.Contains(text, "title is required") {
+				t.Fatalf("expected 'title is required' in error, got %q", text)
+			}
+
+			// Nothing should have been persisted.
+			obs, err := s.RecentObservations("engram", "project", 5)
+			if err != nil {
+				t.Fatalf("recent observations: %v", err)
+			}
+			if len(obs) != 0 {
+				t.Fatalf("expected no persisted observations, got %d", len(obs))
+			}
+		})
+	}
+}
