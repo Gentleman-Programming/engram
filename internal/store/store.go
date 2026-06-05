@@ -2230,6 +2230,17 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 	title := stripPrivateTags(p.Title)
 	content := stripPrivateTags(p.Content)
 
+	// Reject empty titles before touching the DB. This mirrors the rule
+	// ValidateSyncMutationPayload enforces on the sync path (observation
+	// upserts require a non-empty title). We validate the post-strip value
+	// because that is exactly what gets persisted and later pushed to the
+	// cloud server. Without this, an empty title is accepted locally and the
+	// failure only surfaces later when sync rejects the mutation, silently
+	// blocking the queue with no feedback to the caller. See issue #459.
+	if strings.TrimSpace(title) == "" {
+		return 0, fmt.Errorf("observation title is required (non-empty after trimming whitespace)")
+	}
+
 	if len(content) > s.cfg.MaxObservationLength {
 		content = content[:s.cfg.MaxObservationLength] + "... [truncated]"
 	}
