@@ -8289,3 +8289,54 @@ func TestMostRecentActiveSessionScopedByProject(t *testing.T) {
 		t.Fatalf("expected no active session for engram when only 'other' has one, got ok=%v", ok)
 	}
 }
+
+func TestAddObservationRejectsEmptyTitle(t *testing.T) {
+	cases := []struct {
+		name  string
+		title string
+	}{
+		{"empty string", ""},
+		{"only spaces", "   "},
+		{"only tabs and newlines", "\t\n  \n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			_, err := s.AddObservation(AddObservationParams{
+				SessionID: "s1",
+				Type:      "decision",
+				Title:     tc.title,
+				Content:   "some content",
+				Project:   "engram",
+				Scope:     "project",
+			})
+			if err == nil {
+				t.Fatal("expected error for empty title, got nil")
+			}
+			if !strings.Contains(err.Error(), "title is required") {
+				t.Errorf("expected 'title is required' in error, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestAddObservationAcceptsNonEmptyTitle(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "decision",
+		Title:     "Valid title",
+		Content:   "some content",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error for valid title: %v", err)
+	}
+	if id == 0 {
+		t.Fatal("expected a non-zero observation id")
+	}
+}
