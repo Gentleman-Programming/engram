@@ -1064,6 +1064,14 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		if strings.TrimSpace(content) == "" {
 			return mcp.NewToolResultError("content is required for mem_save (use content, or observation for backward-compatible clients)"), nil
 		}
+		// Reject empty titles early with an agent-actionable message. The store
+		// enforces the same rule (single source of truth), but returning here
+		// lets us tell the model exactly what to provide on retry instead of
+		// surfacing a generic store error. An empty title would otherwise be
+		// accepted and silently block cloud sync downstream. See issue #459.
+		if strings.TrimSpace(title) == "" {
+			return mcp.NewToolResultError("title is required for mem_save — pass a short, searchable title (e.g. 'Fixed N+1 query in UserList', 'Decision: use OpenTofu over Terraform'). Empty titles silently block cloud sync (issue #459)."), nil
+		}
 		typ, _ := req.GetArguments()["type"].(string)
 		sessionID, _ := req.GetArguments()["session_id"].(string)
 		scope, _ := req.GetArguments()["scope"].(string)
