@@ -95,7 +95,7 @@ var (
 	storeDeleteProject     = func(s *store.Store, name string, hard bool) (*store.DeleteProjectResult, error) {
 		return s.DeleteProject(name, hard)
 	}
-	storeTimeline       = func(s *store.Store, observationID int64, before, after int) (*store.TimelineResult, error) {
+	storeTimeline = func(s *store.Store, observationID int64, before, after int) (*store.TimelineResult, error) {
 		return s.Timeline(observationID, before, after)
 	}
 	storeFormatContext = func(s *store.Store, project, scope string) (string, error) { return s.FormatContext(project, scope) }
@@ -2417,6 +2417,13 @@ func printPostInstall(result *setup.Result) {
 		fmt.Println("  2. Verify with: claude plugin list")
 		fmt.Println("  3. MCP config written to ~/.claude/mcp/engram.json using absolute binary path")
 		fmt.Println("     (survives plugin auto-updates; re-run 'engram setup claude-code' if you move the binary)")
+	case "claude-desktop":
+		fmt.Println("\nNext steps:")
+		fmt.Println("  1. Open the generated .mcpb file with Claude Desktop")
+		fmt.Printf("     %s\n", result.Destination)
+		fmt.Println("  2. Or install it from Claude Desktop Settings -> Extensions -> Advanced settings")
+		fmt.Println("  3. Restart Claude Desktop if the Engram tools do not appear immediately")
+		fmt.Println("  4. Re-run 'engram setup claude-desktop' if you move or upgrade the Engram binary")
 	case "gemini-cli":
 		fmt.Println("\nNext steps:")
 		fmt.Println("  1. Restart Gemini CLI so MCP config is reloaded")
@@ -2477,7 +2484,7 @@ Commands:
                      Merge similar project names into one canonical name
                        --all      Scan ALL projects for similar name groups
                        --dry-run  Preview what would be merged (no changes)
-  setup [agent]      Install/setup agent integration (opencode, pi, claude-code, gemini-cli, codex)
+  setup [agent]      Install/setup agent integration (opencode, pi, claude-code, claude-desktop, gemini-cli, codex)
   sync               Export new memories as compressed chunk to .engram/
                          --import   Import new chunks from .engram/ into local DB
                          --status   Show sync status

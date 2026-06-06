@@ -17,6 +17,7 @@ Engram works with **any MCP-compatible agent**. Pick your agent below.
 | Agent         | One-liner                                                                                    | Manual Config                                      |
 | ------------- | -------------------------------------------------------------------------------------------- | -------------------------------------------------- |
 | Claude Code   | `claude plugin marketplace add Gentleman-Programming/engram && claude plugin install engram` | [Details](#claude-code)                            |
+| Claude Desktop | `engram setup claude-desktop`                                                               | [Details](#claude-desktop)                         |
 | Pi            | `engram setup pi`                                                                            | [Details](#pi)                                     |
 | OpenCode      | `engram setup opencode`                                                                      | [Details](#opencode)                               |
 | Gemini CLI    | `engram setup gemini-cli`                                                                    | [Details](#gemini-cli)                             |
@@ -26,6 +27,37 @@ Engram works with **any MCP-compatible agent**. Pick your agent below.
 | Cursor        | Manual JSON config                                                                           | [Details](#cursor)                                 |
 | Windsurf      | Manual JSON config                                                                           | [Details](#windsurf)                               |
 | Any MCP agent | `engram mcp` (stdio)                                                                         | [Details](#any-other-mcp-agent)                    |
+
+## Claude Desktop
+
+Generate a local MCPB bundle for Claude Desktop regular chats and Cowork spaces:
+
+```bash
+engram setup claude-desktop
+```
+
+This writes:
+
+```text
+~/.engram/mcpb/engram-claude-desktop.mcpb
+```
+
+Open the generated `.mcpb` file with Claude Desktop, or install it from
+Claude Desktop Settings → Extensions → Advanced settings → Install Extension.
+
+The bundle launches the local Engram MCP server with the agent tool profile:
+
+```json
+{
+  "command": "/absolute/path/to/engram",
+  "args": ["mcp", "--tools=agent"]
+}
+```
+
+Use this when you want Engram memory in normal Claude Desktop conversations,
+including Cowork spaces, without manually editing `claude_desktop_config.json`.
+Re-run `engram setup claude-desktop` if you move or upgrade the Engram binary
+and Claude Desktop can no longer start the MCP server.
 
 ## Pi
 

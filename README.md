@@ -50,6 +50,7 @@ Windows, Linux, and other install methods → [docs/INSTALLATION.md](docs/INSTAL
 | Agent                       | One-liner                                                                                    |
 | --------------------------- | -------------------------------------------------------------------------------------------- |
 | Claude Code                 | `claude plugin marketplace add Gentleman-Programming/engram && claude plugin install engram` |
+| Claude Desktop              | `engram setup claude-desktop`                                                                |
 | Pi                          | `engram setup pi`                                                                            |
 | OpenCode                    | `engram setup opencode`                                                                      |
 | Gemini CLI                  | `engram setup gemini-cli`                                                                    |

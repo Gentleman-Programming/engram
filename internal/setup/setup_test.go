@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"archive/zip"
 	"encoding/json"
 	"errors"
 	"os"
@@ -69,17 +70,21 @@ func useTestHome(t *testing.T) string {
 	return home
 }
 
-func TestSupportedAgentsIncludesGeminiAndCodex(t *testing.T) {
+func TestSupportedAgentsIncludesGeminiCodexAndClaudeDesktop(t *testing.T) {
 	agents := SupportedAgents()
 
 	var hasGemini bool
 	var hasCodex bool
+	var hasClaudeDesktop bool
 	for _, agent := range agents {
 		if agent.Name == "gemini-cli" {
 			hasGemini = true
 		}
 		if agent.Name == "codex" {
 			hasCodex = true
+		}
+		if agent.Name == "claude-desktop" {
+			hasClaudeDesktop = true
 		}
 	}
 
@@ -88,6 +93,73 @@ func TestSupportedAgentsIncludesGeminiAndCodex(t *testing.T) {
 	}
 	if !hasCodex {
 		t.Fatalf("expected codex in supported agents")
+	}
+	if !hasClaudeDesktop {
+		t.Fatalf("expected claude-desktop in supported agents")
+	}
+}
+
+func TestInstallClaudeDesktopWritesMCPBBundle(t *testing.T) {
+	resetSetupSeams(t)
+	home := useTestHome(t)
+	osExecutable = func() (string, error) {
+		return filepath.Join(home, "bin", "engram"), nil
+	}
+
+	result, err := Install("claude-desktop")
+	if err != nil {
+		t.Fatalf("Install(claude-desktop) failed: %v", err)
+	}
+	if result.Agent != "claude-desktop" {
+		t.Fatalf("expected claude-desktop result, got %#v", result)
+	}
+	wantPath := filepath.Join(home, ".engram", "mcpb", "engram-claude-desktop.mcpb")
+	if result.Destination != wantPath {
+		t.Fatalf("unexpected bundle path: got %s want %s", result.Destination, wantPath)
+	}
+	if result.Files != 1 {
+		t.Fatalf("expected one generated bundle, got %d", result.Files)
+	}
+
+	zr, err := zip.OpenReader(wantPath)
+	if err != nil {
+		t.Fatalf("open generated mcpb: %v", err)
+	}
+	defer zr.Close()
+
+	var manifest map[string]any
+	var sawReadme bool
+	for _, file := range zr.File {
+		switch file.Name {
+		case "manifest.json":
+			rc, err := file.Open()
+			if err != nil {
+				t.Fatalf("open manifest: %v", err)
+			}
+			if err := json.NewDecoder(rc).Decode(&manifest); err != nil {
+				_ = rc.Close()
+				t.Fatalf("decode manifest: %v", err)
+			}
+			_ = rc.Close()
+		case "README.md":
+			sawReadme = true
+		}
+	}
+	if manifest == nil {
+		t.Fatalf("generated mcpb should contain manifest.json")
+	}
+	if !sawReadme {
+		t.Fatalf("generated mcpb should contain README.md")
+	}
+
+	server := manifest["server"].(map[string]any)
+	mcpConfig := server["mcp_config"].(map[string]any)
+	if got := mcpConfig["command"]; got != filepath.Join(home, "bin", "engram") {
+		t.Fatalf("unexpected command: %v", got)
+	}
+	args := mcpConfig["args"].([]any)
+	if len(args) != 2 || args[0] != "mcp" || args[1] != "--tools=agent" {
+		t.Fatalf("unexpected args: %#v", args)
 	}
 }
 

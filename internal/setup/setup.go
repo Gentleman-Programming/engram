@@ -11,12 +11,16 @@
 //   - Gemini CLI: injects MCP registration in ~/.gemini/settings.json
 //   - Codex: injects MCP registration in ~/.codex/config.toml
 //   - Pi: installs gentle-engram/pi-mcp-adapter packages and writes Pi MCP config
+//   - Claude Desktop: writes a local .mcpb bundle for one-click Claude Desktop install
 package setup
 
 import (
+	"archive/zip"
+	"bytes"
 	"embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -255,6 +259,11 @@ func SupportedAgents() []Agent {
 			InstallDir:  "managed by claude plugin system",
 		},
 		{
+			Name:        "claude-desktop",
+			Description: "Claude Desktop — MCPB bundle for regular Claude/Cowork chats",
+			InstallDir:  claudeDesktopMCPBPath(),
+		},
+		{
 			Name:        "gemini-cli",
 			Description: "Gemini CLI — MCP registration plus system prompt compaction recovery",
 			InstallDir:  geminiConfigPath(),
@@ -276,12 +285,14 @@ func Install(agentName string) (*Result, error) {
 		return installPi()
 	case "claude-code":
 		return installClaudeCode()
+	case "claude-desktop":
+		return installClaudeDesktop()
 	case "gemini-cli":
 		return installGeminiCLI()
 	case "codex":
 		return installCodex()
 	default:
-		return nil, fmt.Errorf("unknown agent: %q (supported: opencode, pi, claude-code, gemini-cli, codex)", agentName)
+		return nil, fmt.Errorf("unknown agent: %q (supported: opencode, pi, claude-code, claude-desktop, gemini-cli, codex)", agentName)
 	}
 }
 
@@ -803,6 +814,120 @@ func stripJSONC(data []byte) []byte {
 		i++
 	}
 	return out
+}
+
+// ─── Claude Desktop ──────────────────────────────────────────────────────────
+
+func installClaudeDesktop() (*Result, error) {
+	path := claudeDesktopMCPBPath()
+	if err := writeClaudeDesktopMCPB(path); err != nil {
+		return nil, err
+	}
+	return &Result{Agent: "claude-desktop", Destination: path, Files: 1}, nil
+}
+
+func claudeDesktopMCPBPath() string {
+	home, err := userHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return filepath.Join(".engram", "mcpb", "engram-claude-desktop.mcpb")
+	}
+	return filepath.Join(home, ".engram", "mcpb", "engram-claude-desktop.mcpb")
+}
+
+func writeClaudeDesktopMCPB(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("create MCPB dir: %w", err)
+	}
+
+	manifest, err := jsonMarshalIndentFn(claudeDesktopMCPBManifest(resolveEngramCommand()), "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal Claude Desktop MCPB manifest: %w", err)
+	}
+
+	readme := []byte(strings.Join([]string{
+		"# Engram for Claude Desktop",
+		"",
+		"This private MCPB bundle connects Claude Desktop regular chats and Cowork spaces",
+		"to the local Engram MCP server.",
+		"",
+		"It launches:",
+		"",
+		"`engram mcp --tools=agent`",
+		"",
+		"Open this .mcpb file with Claude Desktop, or install it from Settings ->",
+		"Extensions -> Advanced settings -> Install Extension.",
+		"",
+		"Notes:",
+		"- The bundle uses the absolute Engram binary path detected when it was generated.",
+		"- Re-run `engram setup claude-desktop` if you move or upgrade Engram and the path changes.",
+		"- The agent tool profile is used intentionally; admin tools are not exposed.",
+		"",
+	}, "\n"))
+
+	files := map[string][]byte{
+		"manifest.json": manifest,
+		"README.md":     readme,
+	}
+	if err := writeZipFile(path, files); err != nil {
+		return fmt.Errorf("write Claude Desktop MCPB: %w", err)
+	}
+	return nil
+}
+
+func claudeDesktopMCPBManifest(command string) map[string]any {
+	return map[string]any{
+		"manifest_version": "0.3",
+		"name":             "engram-claude-desktop",
+		"display_name":     "Engram Memory for Claude Desktop",
+		"version":          "1.0.0",
+		"description":      "Connects Claude Desktop regular chats and Cowork spaces to the local Engram persistent memory MCP server.",
+		"long_description": "Launches the local Engram binary as an MCP stdio server using the safe agent tool profile.",
+		"author": map[string]any{
+			"name": "Gentleman Programming",
+		},
+		"documentation": "https://github.com/Gentleman-Programming/engram/blob/main/docs/AGENT-SETUP.md#claude-desktop",
+		"support":       "https://github.com/Gentleman-Programming/engram/issues",
+		"server": map[string]any{
+			"type":        "binary",
+			"entry_point": "external:engram",
+			"mcp_config": map[string]any{
+				"command": command,
+				"args":    []string{"mcp", "--tools=agent"},
+				"env":     map[string]string{},
+			},
+		},
+		"tools_generated": true,
+		"keywords":        []string{"memory", "mcp", "claude", "claude-desktop", "engram"},
+		"license":         "MIT",
+		"compatibility": map[string]any{
+			"platforms": []string{"darwin", "win32", "linux"},
+		},
+	}
+}
+
+func writeZipFile(path string, files map[string][]byte) error {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		w, err := zw.Create(name)
+		if err != nil {
+			_ = zw.Close()
+			return err
+		}
+		if _, err := io.Copy(w, bytes.NewReader(files[name])); err != nil {
+			_ = zw.Close()
+			return err
+		}
+	}
+	if err := zw.Close(); err != nil {
+		return err
+	}
+	return writeFileFn(path, buf.Bytes(), 0644)
 }
 
 // ─── Claude Code ─────────────────────────────────────────────────────────────

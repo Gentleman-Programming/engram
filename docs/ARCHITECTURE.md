@@ -245,7 +245,7 @@ engram/
 ## CLI Reference
 
 ```
-engram setup [agent]      Install/setup agent integration (opencode, claude-code, gemini-cli, codex)
+engram setup [agent]      Install/setup agent integration (opencode, pi, claude-code, claude-desktop, gemini-cli, codex)
 engram serve [port]       Start HTTP API server (default: 7437)
 engram mcp                Start MCP server (stdio transport)
 engram tui                Launch interactive terminal UI

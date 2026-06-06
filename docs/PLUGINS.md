@@ -8,7 +8,25 @@
 
 - [OpenCode Plugin](#opencode-plugin)
 - [Claude Code Plugin](#claude-code-plugin)
+- [Claude Desktop MCPB](#claude-desktop-mcpb)
 - [Privacy](#privacy)
+
+---
+
+## Claude Desktop MCPB
+
+Claude Desktop does not use Claude Code hooks or skills, so Engram ships a
+small MCPB bundle generator instead of a full lifecycle plugin:
+
+```bash
+engram setup claude-desktop
+```
+
+The generated `.mcpb` installs Engram as a local MCP stdio server for regular
+Claude Desktop chats and Cowork spaces, using `engram mcp --tools=agent`.
+It does not auto-start the HTTP server, inject compaction recovery prompts, or
+modify `claude_desktop_config.json` directly. For those richer lifecycle hooks,
+use the Claude Code plugin.
 
 ---
 
