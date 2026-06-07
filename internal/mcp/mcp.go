@@ -6,8 +6,8 @@
 //
 // Tool profiles allow agents to load only the tools they need:
 //
-//	engram mcp                    → all 19 tools (default)
-//	engram mcp --tools=agent      → 15 tools agents actually use (per skill files)
+//	engram mcp                    → all 22 tools (default)
+//	engram mcp --tools=agent      → 18 tools agents actually use (per skill files)
 //	engram mcp --tools=admin      → 4 tools for TUI/CLI (delete, stats, timeline, merge)
 //	engram mcp --tools=agent,admin → combine profiles
 //	engram mcp --tools=mem_save,mem_search → individual tool names
@@ -85,7 +85,10 @@ func ensureImplicitSessionWithCWD(s *store.Store, sessionID, project string) err
 // "agent" — tools AI agents use during coding sessions:
 //   mem_save, mem_search, mem_context, mem_session_summary,
 //   mem_session_start, mem_session_end, mem_get_observation,
-//   mem_suggest_topic_key, mem_capture_passive, mem_save_prompt
+//   mem_suggest_topic_key, mem_capture_passive, mem_save_prompt,
+//   mem_update, mem_current_project, mem_judge, mem_compare,
+//   mem_doctor, mem_session_heartbeat, mem_session_status,
+//   mem_active_sessions
 //
 // "admin" — tools for manual curation, TUI, and dashboards:
 //   mem_update, mem_delete, mem_stats, mem_timeline, mem_merge_projects
@@ -111,6 +114,9 @@ var ProfileAgent = map[string]bool{
 	"mem_judge":             true, // record verdict on a pending memory conflict (REQ-003, Phase D)
 	"mem_compare":           true, // persist an agent-judged semantic verdict via JudgeBySemantic (REQ-011, Phase G)
 	"mem_doctor":            true, // read-only operational diagnostics for agents
+	"mem_session_heartbeat": true, // session bus: heartbeat with task description
+	"mem_session_status":    true, // session bus: store detailed JSON status
+	"mem_active_sessions":   true, // session bus: list active sessions in project
 }
 
 // ProfileAdmin contains tools for TUI, dashboards, and manual curation
@@ -663,6 +669,77 @@ GUIDELINES:
 				),
 			),
 			queuedWriteHandler(writeQueue, handleSessionEnd(s, cfg, activity)),
+		)
+	}
+
+	// ─── mem_session_heartbeat (profile: agent, deferred) ─────────────────
+	// Session bus: sends a heartbeat with current task description and receives
+	// the list of other active sessions for the same project.
+	if shouldRegister("mem_session_heartbeat", allowlist) {
+		srv.AddTool(
+			mcp.NewTool("mem_session_heartbeat",
+				mcp.WithDescription("Send a session heartbeat with current task info. Returns the list of other active sessions in the same project so agents know what else is happening in real time."),
+				mcp.WithDeferLoading(true),
+				mcp.WithTitleAnnotation("Session Heartbeat"),
+				mcp.WithReadOnlyHintAnnotation(false),
+				mcp.WithDestructiveHintAnnotation(false),
+				mcp.WithIdempotentHintAnnotation(true),
+				mcp.WithOpenWorldHintAnnotation(false),
+				mcp.WithString("session_id",
+					mcp.Required(),
+					mcp.Description("Current session identifier"),
+				),
+				mcp.WithString("current_task",
+					mcp.Required(),
+					mcp.Description("Short description of what this session is currently doing (e.g. 'editing Hero.astro', 'SDD apply dark-mode')"),
+				),
+			),
+			queuedWriteHandler(writeQueue, handleSessionHeartbeat(s, cfg, activity)),
+		)
+	}
+
+	// ─── mem_session_status (profile: agent, deferred) ────────────────────
+	// Writes a richer JSON status blob for detailed cross-session visibility.
+	if shouldRegister("mem_session_status", allowlist) {
+		srv.AddTool(
+			mcp.NewTool("mem_session_status",
+				mcp.WithDescription("Store a detailed JSON status for the current session. This appears in the active sessions list returned by heartbeats, giving other sessions richer context about what you're doing."),
+				mcp.WithDeferLoading(true),
+				mcp.WithTitleAnnotation("Update Session Status"),
+				mcp.WithReadOnlyHintAnnotation(false),
+				mcp.WithDestructiveHintAnnotation(false),
+				mcp.WithIdempotentHintAnnotation(true),
+				mcp.WithOpenWorldHintAnnotation(false),
+				mcp.WithString("session_id",
+					mcp.Required(),
+					mcp.Description("Current session identifier"),
+				),
+				mcp.WithString("status",
+					mcp.Required(),
+					mcp.Description("JSON string with status details (e.g. {\"phase\":\"implement\",\"progress\":\"3/7 tasks\",\"blockers\":[]})"),
+				),
+			),
+			queuedWriteHandler(writeQueue, handleSessionStatus(s, cfg, activity)),
+		)
+	}
+
+	// ─── mem_active_sessions (profile: agent, deferred) ───────────────────
+	// Read-only list of active sessions for the current project.
+	if shouldRegister("mem_active_sessions", allowlist) {
+		srv.AddTool(
+			mcp.NewTool("mem_active_sessions",
+				mcp.WithDescription("List all sessions currently active in this project (sent a heartbeat within the last 2 minutes). Use this to see what other agents are working on right now."),
+				mcp.WithDeferLoading(true),
+				mcp.WithTitleAnnotation("Active Sessions"),
+				mcp.WithReadOnlyHintAnnotation(true),
+				mcp.WithDestructiveHintAnnotation(false),
+				mcp.WithIdempotentHintAnnotation(true),
+				mcp.WithOpenWorldHintAnnotation(false),
+				mcp.WithString("project",
+					mcp.Description("Filter by project (auto-detected if omitted)"),
+				),
+			),
+			handleActiveSessions(s, activity, cfg),
 		)
 	}
 
@@ -1744,6 +1821,124 @@ func handleSessionEnd(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 
 		detRes.Project = project
 		return respondWithProject(detRes, fmt.Sprintf("Session %q completed", id), nil), nil
+	}
+}
+
+// ─── Session Bus Handlers ─────────────────────────────────────────────────────
+
+func handleSessionHeartbeat(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		sessionID, _ := req.GetArguments()["session_id"].(string)
+		currentTask, _ := req.GetArguments()["current_task"].(string)
+
+		if strings.TrimSpace(sessionID) == "" {
+			return mcp.NewToolResultError("session_id is required"), nil
+		}
+
+		detRes, err := resolveWriteProject()
+		if err != nil {
+			return writeProjectErrorResult(nil, "", detRes, err), nil
+		}
+		project, _ := store.NormalizeProject(detRes.Project)
+
+		if err := s.UpsertHeartbeat(sessionID, project, currentTask); err != nil {
+			return mcp.NewToolResultError("Failed to register heartbeat: " + err.Error()), nil
+		}
+
+		activity.RecordToolCall(defaultSessionID(project))
+
+		// Return active sessions so the caller knows what else is happening
+		sessions, err := s.ActiveSessions(project)
+		if err != nil {
+			return mcp.NewToolResultError("Heartbeat saved but failed to read active sessions: " + err.Error()), nil
+		}
+
+		// Build a compact summary
+		var b strings.Builder
+		fmt.Fprintf(&b, "Heartbeat registered for session %q.\n", sessionID)
+		if len(sessions) <= 1 {
+			b.WriteString("No other active sessions for this project.")
+		} else {
+			fmt.Fprintf(&b, "%d other active session(s):\n", len(sessions)-1)
+			for _, as := range sessions {
+				if as.SessionID == sessionID {
+					continue
+				}
+				fmt.Fprintf(&b, "  • %s — %s\n", as.SessionID, as.CurrentTask)
+			}
+		}
+
+		return respondWithProject(detRes, b.String(), nil), nil
+	}
+}
+
+func handleSessionStatus(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		sessionID, _ := req.GetArguments()["session_id"].(string)
+		status, _ := req.GetArguments()["status"].(string)
+
+		if strings.TrimSpace(sessionID) == "" {
+			return mcp.NewToolResultError("session_id is required"), nil
+		}
+		if strings.TrimSpace(status) == "" {
+			return mcp.NewToolResultError("status is required"), nil
+		}
+
+		detRes, err := resolveWriteProject()
+		if err != nil {
+			return writeProjectErrorResult(nil, "", detRes, err), nil
+		}
+		project, _ := store.NormalizeProject(detRes.Project)
+
+		if err := s.UpdateSessionStatus(sessionID, status); err != nil {
+			return mcp.NewToolResultError("Failed to update status: " + err.Error()), nil
+		}
+
+		activity.RecordToolCall(defaultSessionID(project))
+
+		return respondWithProject(detRes, fmt.Sprintf("Status updated for session %q.", sessionID), nil), nil
+	}
+}
+
+func handleActiveSessions(s *store.Store, activity *SessionActivity, cfg MCPConfig) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		projectArg, _ := req.GetArguments()["project"].(string)
+
+		detRes, err := resolveReadProjectWithProcessOverride(s, projectArg, cfg.DefaultProject)
+		if err != nil {
+			return respondWithProject(detRes, "", nil), nil
+		}
+
+		project := detRes.Project
+		project, _ = store.NormalizeProject(project)
+		detRes.Project = project
+
+		activity.RecordToolCall(defaultSessionID(project))
+
+		sessions, err := s.ActiveSessions(project)
+		if err != nil {
+			return mcp.NewToolResultError("Failed to list active sessions: " + err.Error()), nil
+		}
+
+		sessionList := make([]map[string]any, 0, len(sessions))
+		for _, as := range sessions {
+			sessionList = append(sessionList, map[string]any{
+				"session_id":   as.SessionID,
+				"current_task": as.CurrentTask,
+				"last_seen":    as.LastSeen,
+			})
+		}
+
+		envelope := map[string]any{
+			"project":        detRes.Project,
+			"project_source": detRes.Source,
+			"project_path":   detRes.Path,
+			"result":         fmt.Sprintf("%d active session(s) for project %q.", len(sessions), project),
+			"sessions":       sessionList,
+			"stale_count":    0,
+		}
+		out, _ := jsonMarshal(envelope)
+		return mcp.NewToolResultText(string(out)), nil
 	}
 }
 

@@ -118,6 +118,15 @@ type SessionSummary struct {
 	ObservationCount int     `json:"observation_count"`
 }
 
+type ActiveSession struct {
+	SessionID   string `json:"session_id"`
+	Project     string `json:"project"`
+	Directory   string `json:"directory"`
+	CurrentTask string `json:"current_task"`
+	StatusBlob  string `json:"status_blob,omitempty"`
+	LastSeen    string `json:"last_seen"`
+}
+
 type Stats struct {
 	TotalSessions     int      `json:"total_sessions"`
 	TotalObservations int      `json:"total_observations"`
@@ -2220,6 +2229,82 @@ func (s *Store) SessionObservations(sessionID string, limit int) ([]Observation,
 	return s.queryObservations(query, sessionID, limit)
 }
 
+// ─── Session Heartbeats ─────────────────────────────────────────────────────
+
+// heartbeatStaleSeconds defines how long a session is considered active after
+// its last heartbeat before being cleaned up as stale.
+const heartbeatStaleSeconds = 120 // 2 minutes
+
+// UpsertHeartbeat registers a session heartbeat with the current task description.
+// Idempotent — re-calling updates last_seen and current_task.
+func (s *Store) UpsertHeartbeat(sessionID, project, currentTask string) error {
+	project, _ = NormalizeProject(project)
+	return s.withTx(func(tx *sql.Tx) error {
+		_, err := tx.Exec(`
+			INSERT INTO session_heartbeats (session_id, project, current_task, last_seen)
+			VALUES (?, ?, ?, datetime('now'))
+			ON CONFLICT(session_id) DO UPDATE SET
+				current_task = excluded.current_task,
+				last_seen = datetime('now')
+		`, sessionID, project, currentTask)
+		return err
+	})
+}
+
+// UpdateSessionStatus writes a JSON status blob for a session. Used by
+// mem_session_status to store richer context (progress, blockers, etc.).
+func (s *Store) UpdateSessionStatus(sessionID, statusBlob string) error {
+	return s.withTx(func(tx *sql.Tx) error {
+		_, err := tx.Exec(`
+			UPDATE session_heartbeats SET status_blob = ?, last_seen = datetime('now')
+			WHERE session_id = ?
+		`, statusBlob, sessionID)
+		return err
+	})
+}
+
+// CleanStaleHeartbeats removes heartbeat records where last_seen is older than
+// heartbeatStaleSeconds. Called automatically by ActiveSessions before reading.
+func (s *Store) CleanStaleHeartbeats() error {
+	_, err := s.execHook(s.db, `
+		DELETE FROM session_heartbeats
+		WHERE last_seen < datetime('now', ?)
+	`, fmt.Sprintf("-%d seconds", heartbeatStaleSeconds))
+	return err
+}
+
+// ActiveSessions returns all sessions that have sent a heartbeat within the
+// staleness window, joined with their session metadata. Stale records are
+// cleaned before the read.
+func (s *Store) ActiveSessions(project string) ([]ActiveSession, error) {
+	project, _ = NormalizeProject(project)
+
+	// Clean stale before reading
+	_ = s.CleanStaleHeartbeats()
+
+	rows, err := s.queryItHook(s.db, `
+		SELECT sh.session_id, sh.project, COALESCE(s.directory, ''), sh.current_task, sh.status_blob, sh.last_seen
+		FROM session_heartbeats sh
+		LEFT JOIN sessions s ON s.id = sh.session_id
+		WHERE LOWER(sh.project) = ?
+		ORDER BY sh.last_seen DESC
+	`, project)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var sessions []ActiveSession
+	for rows.Next() {
+		var as ActiveSession
+		if err := rows.Scan(&as.SessionID, &as.Project, &as.Directory, &as.CurrentTask, &as.StatusBlob, &as.LastSeen); err != nil {
+			return nil, err
+		}
+		sessions = append(sessions, as)
+	}
+	return sessions, rows.Err()
+}
+
 // ─── Observations ────────────────────────────────────────────────────────────
 
 func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
@@ -3863,8 +3948,26 @@ func (s *Store) AcquireSyncLease(targetKey, owner string, ttl time.Duration, now
 			leaseUntil, err := time.Parse(time.RFC3339, *state.LeaseUntil)
 			if err == nil && leaseUntil.After(now) && derefString(state.LeaseOwner) != "" && derefString(state.LeaseOwner) != owner {
 				acquired = false
-				return nil
-			}
+	// Session heartbeat — real-time session bus for cross-session awareness.
+	// Sessions send periodic heartbeats (via mem_session_heartbeat) to register
+	// liveness. ActiveSessions() returns sessions seen within the last 2 minutes.
+	// Stale entries are cleaned on every read.
+	if _, err := s.execHook(s.db, `
+		CREATE TABLE IF NOT EXISTS session_heartbeats (
+			session_id   TEXT PRIMARY KEY,
+			project      TEXT NOT NULL,
+			current_task TEXT NOT NULL DEFAULT '',
+			status_blob  TEXT NOT NULL DEFAULT '{}',
+			last_seen    TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+		CREATE INDEX IF NOT EXISTS idx_sh_project ON session_heartbeats(project);
+		CREATE INDEX IF NOT EXISTS idx_sh_lastseen ON session_heartbeats(last_seen);
+	`); err != nil {
+		return err
+	}
+
+	return nil
+}
 		}
 		leaseUntil := now.Add(ttl).UTC().Format(time.RFC3339)
 		_, err = s.execHook(tx,

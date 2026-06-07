@@ -228,6 +228,11 @@ func (s *Server) routes() {
 	// Sync status (degraded-state visibility for autosync)
 	s.mux.HandleFunc("GET /sync/status", s.handleSyncStatus)
 
+	// Session bus (real-time cross-session awareness)
+	s.mux.HandleFunc("POST /sessions/{id}/heartbeat", s.handleSessionHeartbeat)
+	s.mux.HandleFunc("POST /sessions/{id}/status", s.handleSessionStatus)
+	s.mux.HandleFunc("GET /sessions/active", s.handleActiveSessions)
+
 	// Conflicts — CRITICAL ORDER: literals before wildcard (Go 1.22 mux panics on overlap)
 	s.mux.HandleFunc("GET /conflicts", s.handleListConflicts)
 	s.mux.HandleFunc("GET /conflicts/stats", s.handleConflictsStats)
@@ -315,6 +320,98 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonResponse(w, http.StatusOK, session)
+}
+
+// ─── Session Bus Handlers ─────────────────────────────────────────────────────
+
+func (s *Server) handleSessionHeartbeat(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Project     string `json:"project"`
+		CurrentTask string `json:"current_task"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+
+	sessionID := r.PathValue("id")
+	if sessionID == "" {
+		jsonError(w, http.StatusBadRequest, "session id is required")
+		return
+	}
+	if body.Project == "" {
+		jsonError(w, http.StatusBadRequest, "project is required")
+		return
+	}
+
+	if err := s.store.UpsertHeartbeat(sessionID, body.Project, body.CurrentTask); err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Return active sessions for the project
+	sessions, err := s.store.ActiveSessions(body.Project)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"status":         "ok",
+		"session_id":     sessionID,
+		"active_sessions": sessions,
+		"count":          len(sessions),
+	})
+}
+
+func (s *Server) handleSessionStatus(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+
+	sessionID := r.PathValue("id")
+	if sessionID == "" {
+		jsonError(w, http.StatusBadRequest, "session id is required")
+		return
+	}
+	if body.Status == "" {
+		jsonError(w, http.StatusBadRequest, "status is required")
+		return
+	}
+
+	if err := s.store.UpdateSessionStatus(sessionID, body.Status); err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]string{
+		"status":     "ok",
+		"session_id": sessionID,
+	})
+}
+
+func (s *Server) handleActiveSessions(w http.ResponseWriter, r *http.Request) {
+	project := r.URL.Query().Get("project")
+	if project == "" {
+		jsonError(w, http.StatusBadRequest, "project query param is required")
+		return
+	}
+
+	sessions, err := s.store.ActiveSessions(project)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"project":  project,
+		"sessions": sessions,
+		"count":    len(sessions),
+	})
 }
 
 func (s *Server) handleAddObservation(w http.ResponseWriter, r *http.Request) {
