@@ -1959,8 +1959,7 @@ func (s *Store) migrateFTSTopicKey() error {
 		);
 		INSERT INTO observations_fts(rowid, title, content, tool_name, type, project, topic_key)
 		SELECT id, title, content, tool_name, type, project, topic_key
-		FROM observations
-		WHERE deleted_at IS NULL;
+		FROM observations;
 
 		CREATE TRIGGER obs_fts_insert AFTER INSERT ON observations BEGIN
 			INSERT INTO observations_fts(rowid, title, content, tool_name, type, project, topic_key)
@@ -6043,8 +6042,7 @@ func (s *Store) migrateLegacyObservationsTable() error {
 		);
 		INSERT INTO observations_fts(rowid, title, content, tool_name, type, project, topic_key)
 		SELECT id, title, content, tool_name, type, project, topic_key
-		FROM observations
-		WHERE deleted_at IS NULL;
+		FROM observations;
 	`); err != nil {
 		return fmt.Errorf("migrate legacy observations: rebuild fts: %w", err)
 	}

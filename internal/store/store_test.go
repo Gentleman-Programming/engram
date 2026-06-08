@@ -393,6 +393,7 @@ func TestSearchIncludeDeletedIsOptIn(t *testing.T) {
 		Content:   "needle deleted content",
 		Project:   "engram",
 		Scope:     "project",
+		TopicKey:  "recoverable/needle",
 	})
 	if err != nil {
 		t.Fatalf("AddObservation: %v", err)
@@ -419,6 +420,26 @@ func TestSearchIncludeDeletedIsOptIn(t *testing.T) {
 	}
 	if len(includeDeletedResults) != 1 || includeDeletedResults[0].ID != id || !IsObservationDeleted(includeDeletedResults[0].Observation) {
 		t.Fatalf("include-deleted search results = %+v, want deleted id %d", includeDeletedResults, id)
+	}
+
+	defaultTopicResults, err := s.Search("recoverable/needle", SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("Search topic default: %v", err)
+	}
+	if len(defaultTopicResults) != 0 {
+		t.Fatalf("default topic-key search returned deleted results: %+v", defaultTopicResults)
+	}
+
+	includeDeletedTopicResults, err := s.Search("recoverable/needle", SearchOptions{
+		Project:        "engram",
+		Limit:          10,
+		IncludeDeleted: true,
+	})
+	if err != nil {
+		t.Fatalf("Search topic include deleted: %v", err)
+	}
+	if len(includeDeletedTopicResults) != 1 || includeDeletedTopicResults[0].ID != id || !IsObservationDeleted(includeDeletedTopicResults[0].Observation) {
+		t.Fatalf("include-deleted topic search results = %+v, want deleted id %d", includeDeletedTopicResults, id)
 	}
 }
 
@@ -612,6 +633,91 @@ func TestNewMigratesLegacyObservationIDSchema(t *testing.T) {
 	}
 	if newID <= 0 {
 		t.Fatalf("expected autoincrement id after migration, got %d", newID)
+	}
+}
+
+func TestSearchIncludeDeletedFindsLegacySoftDeletedObservationAfterFTSRebuild(t *testing.T) {
+	dataDir := t.TempDir()
+	dbPath := filepath.Join(dataDir, "engram.db")
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open legacy db: %v", err)
+	}
+
+	_, err = db.Exec(`
+		CREATE TABLE sessions (
+			id TEXT PRIMARY KEY,
+			project TEXT NOT NULL,
+			directory TEXT NOT NULL,
+			started_at TEXT NOT NULL DEFAULT (datetime('now')),
+			ended_at TEXT,
+			summary TEXT
+		);
+		CREATE TABLE observations (
+			id INT,
+			session_id TEXT,
+			type TEXT,
+			title TEXT,
+			content TEXT,
+			tool_name TEXT,
+			project TEXT,
+			scope TEXT,
+			topic_key TEXT,
+			normalized_hash TEXT,
+			revision_count INTEGER,
+			duplicate_count INTEGER,
+			last_seen_at TEXT,
+			created_at TEXT,
+			updated_at TEXT,
+			deleted_at TEXT
+		);
+		INSERT INTO sessions (id, project, directory) VALUES ('legacy-deleted-sess', 'engram', '/tmp/engram');
+		INSERT INTO observations (
+			id, session_id, type, title, content, project, scope, topic_key,
+			normalized_hash, revision_count, duplicate_count, created_at, updated_at, deleted_at
+		)
+		VALUES (
+			42, 'legacy-deleted-sess', 'decision', 'Legacy deleted memory',
+			'legacy recoverable deleted content', 'engram', 'project', 'legacy/recoverable',
+			?, 1, 1, '2024-01-03 12:00:00', '2024-01-03 12:00:00', '2024-01-04 12:00:00'
+		);
+	`, hashNormalized("legacy recoverable deleted content"))
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("seed legacy db: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close legacy db: %v", err)
+	}
+
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = dataDir
+
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("new store after legacy schema: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	defaultResults, err := s.Search("recoverable deleted", SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("Search default: %v", err)
+	}
+	if len(defaultResults) != 0 {
+		t.Fatalf("default search returned deleted legacy result: %+v", defaultResults)
+	}
+
+	includeDeletedResults, err := s.Search("recoverable deleted", SearchOptions{
+		Project:        "engram",
+		Limit:          10,
+		IncludeDeleted: true,
+	})
+	if err != nil {
+		t.Fatalf("Search include deleted: %v", err)
+	}
+	if len(includeDeletedResults) != 1 || includeDeletedResults[0].Content != "legacy recoverable deleted content" || !IsObservationDeleted(includeDeletedResults[0].Observation) {
+		t.Fatalf("include-deleted legacy search results = %+v, want deleted migrated row", includeDeletedResults)
 	}
 }
 
