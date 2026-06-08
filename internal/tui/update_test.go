@@ -433,6 +433,64 @@ func TestUpdateDataMessageBranches(t *testing.T) {
 		t.Fatal("session observations message should open session detail and reset cursor/scroll")
 	}
 
+	m = New(nil, "")
+	m.Screen = ScreenDashboard
+	m.Cursor = 4
+	m.Scroll = 3
+	updatedModel, _ = m.Update(trashObservationsMsg{observations: obsList})
+	updated = updatedModel.(Model)
+	if updated.Screen != ScreenDashboard {
+		t.Fatalf("delayed trash message should not change screen, got %v", updated.Screen)
+	}
+	if updated.Cursor != 4 || updated.Scroll != 3 {
+		t.Fatalf("delayed trash message changed cursor/scroll to %d/%d", updated.Cursor, updated.Scroll)
+	}
+	if len(updated.TrashObservations) != 1 {
+		t.Fatal("trash observations should still update when message arrives off-screen")
+	}
+
+	m.Screen = ScreenTrash
+	m.Cursor = 5
+	m.Scroll = 2
+	updatedModel, _ = m.Update(trashObservationsMsg{observations: obsList})
+	updated = updatedModel.(Model)
+	if updated.Screen != ScreenTrash || updated.Cursor != 0 || updated.Scroll != 0 {
+		t.Fatal("trash message on trash screen should keep trash screen and reset cursor/scroll")
+	}
+
+	m = New(newTestFixture(t).store, "")
+	m.Screen = ScreenRecent
+	m.ErrorMsg = "old error"
+	updatedModel, cmd := m.Update(observationDeletedMsg{id: 1})
+	updated = updatedModel.(Model)
+	if updated.ErrorMsg != "" || cmd == nil {
+		t.Fatal("successful observation delete message should clear error and refresh current screen")
+	}
+
+	m.Screen = ScreenTrash
+	m.ErrorMsg = "old error"
+	updatedModel, cmd = m.Update(observationRestoredMsg{id: 1})
+	updated = updatedModel.(Model)
+	if updated.ErrorMsg != "" || cmd == nil {
+		t.Fatal("successful observation restore message should clear error and refresh current screen")
+	}
+
+	m.Screen = ScreenTrash
+	m.ErrorMsg = "old error"
+	updatedModel, cmd = m.Update(observationPurgedMsg{id: 1})
+	updated = updatedModel.(Model)
+	if updated.ErrorMsg != "" || cmd == nil {
+		t.Fatal("successful observation purge message should clear error and refresh current screen")
+	}
+
+	m.Screen = ScreenSessions
+	m.ErrorMsg = "old error"
+	updatedModel, cmd = m.Update(sessionDeletedMsg{sessionID: "s1"})
+	updated = updatedModel.(Model)
+	if updated.ErrorMsg != "" || cmd == nil {
+		t.Fatal("successful session delete message should clear error and refresh current screen")
+	}
+
 	updated.SetupInstalling = true
 	updatedModel, _ = updated.Update(setupInstallMsg{err: errors.New("setup err")})
 	updated = updatedModel.(Model)

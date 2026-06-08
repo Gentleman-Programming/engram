@@ -108,34 +108,43 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.TrashObservations = msg.observations
-		m.Screen = ScreenTrash
-		m.Cursor = 0
-		m.Scroll = 0
+		if m.Screen == ScreenTrash {
+			m.Cursor = 0
+			m.Scroll = 0
+		}
 		return m, nil
 
 	case observationDeletedMsg:
 		if msg.err != nil {
 			m.ErrorMsg = msg.err.Error()
+			return m, nil
 		}
-		return m, nil
+		m.ErrorMsg = ""
+		return m, m.refreshScreen(m.Screen)
 
 	case observationPurgedMsg:
 		if msg.err != nil {
 			m.ErrorMsg = msg.err.Error()
+			return m, nil
 		}
-		return m, nil
+		m.ErrorMsg = ""
+		return m, m.refreshScreen(m.Screen)
 
 	case observationRestoredMsg:
 		if msg.err != nil {
 			m.ErrorMsg = msg.err.Error()
+			return m, nil
 		}
-		return m, nil
+		m.ErrorMsg = ""
+		return m, m.refreshScreen(m.Screen)
 
 	case sessionDeletedMsg:
 		if msg.err != nil {
 			m.ErrorMsg = msg.err.Error()
+			return m, nil
 		}
-		return m, nil
+		m.ErrorMsg = ""
+		return m, m.refreshScreen(m.Screen)
 
 	case setupInstallMsg:
 		m.SetupInstalling = false
@@ -657,10 +666,20 @@ func (m Model) refreshScreen(screen Screen) tea.Cmd {
 	switch screen {
 	case ScreenDashboard:
 		return loadStats(m.store)
+	case ScreenSearchResults:
+		if m.SearchQuery != "" {
+			return searchMemories(m.store, m.SearchQuery)
+		}
+		return nil
 	case ScreenRecent:
 		return loadRecentObservations(m.store)
 	case ScreenSessions:
 		return loadRecentSessions(m.store)
+	case ScreenSessionDetail:
+		if m.SelectedSessionIdx >= 0 && m.SelectedSessionIdx < len(m.Sessions) {
+			return loadSessionObservations(m.store, m.Sessions[m.SelectedSessionIdx].ID)
+		}
+		return nil
 	case ScreenTrash:
 		return loadTrashObservations(m.store)
 	default:

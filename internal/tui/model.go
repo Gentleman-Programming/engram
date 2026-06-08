@@ -232,7 +232,7 @@ func loadRecentObservations(s *store.Store) tea.Cmd {
 
 func loadObservationDetail(s *store.Store, id int64) tea.Cmd {
 	return func() tea.Msg {
-		obs, err := s.GetObservation(id)
+		obs, err := s.GetObservationIncludingDeleted(id)
 		return observationDetailMsg{observation: obs, err: err}
 	}
 }
@@ -240,7 +240,102 @@ func loadObservationDetail(s *store.Store, id int64) tea.Cmd {
 func loadTimeline(s *store.Store, obsID int64) tea.Cmd {
 	return func() tea.Msg {
 		tl, err := s.Timeline(obsID, 10, 10)
+		if err != nil {
+			if deletedTimeline, deletedErr := loadDeletedFocusTimeline(s, obsID, 10, 10); deletedErr == nil {
+				tl = deletedTimeline
+				err = nil
+			}
+		}
 		return timelineMsg{timeline: tl, err: err}
+	}
+}
+
+const deletedFocusTimelineSessionLimit = 10000
+
+func loadDeletedFocusTimeline(s *store.Store, obsID int64, before, after int) (*store.TimelineResult, error) {
+	focus, err := s.GetObservationIncludingDeleted(obsID)
+	if err != nil {
+		return nil, err
+	}
+	if !store.IsObservationDeleted(*focus) {
+		return nil, store.ErrObservationNotFound
+	}
+
+	session, _ := s.GetSession(focus.SessionID)
+	observations, err := s.SessionObservationsWithOptions(focus.SessionID, store.ObservationListOptions{
+		Limit:          deletedFocusTimelineSessionLimit,
+		IncludeDeleted: true,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	focusIdx := -1
+	for i, obs := range observations {
+		if obs.ID == obsID {
+			focusIdx = i
+			break
+		}
+	}
+
+	beforeEntries := make([]store.TimelineEntry, 0, before)
+	if focusIdx > 0 {
+		for i := focusIdx - 1; i >= 0 && len(beforeEntries) < before; i-- {
+			obs := observations[i]
+			if store.IsObservationDeleted(obs) {
+				continue
+			}
+			beforeEntries = append(beforeEntries, timelineEntryFromObservation(obs))
+		}
+		for i, j := 0, len(beforeEntries)-1; i < j; i, j = i+1, j-1 {
+			beforeEntries[i], beforeEntries[j] = beforeEntries[j], beforeEntries[i]
+		}
+	}
+
+	afterEntries := make([]store.TimelineEntry, 0, after)
+	if focusIdx >= 0 {
+		for i := focusIdx + 1; i < len(observations) && len(afterEntries) < after; i++ {
+			obs := observations[i]
+			if store.IsObservationDeleted(obs) {
+				continue
+			}
+			afterEntries = append(afterEntries, timelineEntryFromObservation(obs))
+		}
+	}
+
+	totalActive := 0
+	for _, obs := range observations {
+		if !store.IsObservationDeleted(obs) {
+			totalActive++
+		}
+	}
+
+	return &store.TimelineResult{
+		Focus:        *focus,
+		Before:       beforeEntries,
+		After:        afterEntries,
+		SessionInfo:  session,
+		TotalInRange: totalActive,
+	}, nil
+}
+
+func timelineEntryFromObservation(obs store.Observation) store.TimelineEntry {
+	return store.TimelineEntry{
+		ID:             obs.ID,
+		SessionID:      obs.SessionID,
+		Type:           obs.Type,
+		Title:          obs.Title,
+		Content:        obs.Content,
+		ToolName:       obs.ToolName,
+		Project:        obs.Project,
+		Scope:          obs.Scope,
+		TopicKey:       obs.TopicKey,
+		RevisionCount:  obs.RevisionCount,
+		DuplicateCount: obs.DuplicateCount,
+		LastSeenAt:     obs.LastSeenAt,
+		CreatedAt:      obs.CreatedAt,
+		UpdatedAt:      obs.UpdatedAt,
+		DeletedAt:      obs.DeletedAt,
 	}
 }
 

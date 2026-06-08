@@ -166,6 +166,24 @@ func TestDataLoadingCommands(t *testing.T) {
 		}
 	})
 
+	t.Run("loadDeletedObservationDetail", func(t *testing.T) {
+		deletedFx := newTestFixture(t)
+		if err := deletedFx.store.DeleteObservation(deletedFx.secondObs, false); err != nil {
+			t.Fatalf("DeleteObservation: %v", err)
+		}
+		msg := loadObservationDetail(deletedFx.store, deletedFx.secondObs)()
+		loaded, ok := msg.(observationDetailMsg)
+		if !ok {
+			t.Fatalf("message type = %T", msg)
+		}
+		if loaded.err != nil {
+			t.Fatalf("unexpected error: %v", loaded.err)
+		}
+		if loaded.observation == nil || loaded.observation.ID != deletedFx.secondObs || !store.IsObservationDeleted(*loaded.observation) {
+			t.Fatalf("unexpected deleted observation detail: %+v", loaded.observation)
+		}
+	})
+
 	t.Run("loadTimeline", func(t *testing.T) {
 		msg := loadTimeline(fx.store, fx.secondObs)()
 		loaded, ok := msg.(timelineMsg)
@@ -177,6 +195,27 @@ func TestDataLoadingCommands(t *testing.T) {
 		}
 		if loaded.timeline == nil || loaded.timeline.Focus.ID != fx.secondObs {
 			t.Fatalf("unexpected timeline focus: %+v", loaded.timeline)
+		}
+	})
+
+	t.Run("loadDeletedTimeline", func(t *testing.T) {
+		deletedFx := newTestFixture(t)
+		if err := deletedFx.store.DeleteObservation(deletedFx.secondObs, false); err != nil {
+			t.Fatalf("DeleteObservation: %v", err)
+		}
+		msg := loadTimeline(deletedFx.store, deletedFx.secondObs)()
+		loaded, ok := msg.(timelineMsg)
+		if !ok {
+			t.Fatalf("message type = %T", msg)
+		}
+		if loaded.err != nil {
+			t.Fatalf("unexpected error: %v", loaded.err)
+		}
+		if loaded.timeline == nil || loaded.timeline.Focus.ID != deletedFx.secondObs || !store.IsObservationDeleted(loaded.timeline.Focus) {
+			t.Fatalf("unexpected deleted timeline focus: %+v", loaded.timeline)
+		}
+		if len(loaded.timeline.Before) == 0 || loaded.timeline.Before[0].ID != deletedFx.obsID {
+			t.Fatalf("deleted timeline before entries = %+v, want active neighbor %d", loaded.timeline.Before, deletedFx.obsID)
 		}
 	})
 
