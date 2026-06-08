@@ -5889,6 +5889,16 @@ func (s *Store) applyObservationDeleteTx(tx *sql.Tx, payload syncObservationPayl
 		return err
 	}
 	if payload.HardDelete {
+		if strings.TrimSpace(existing.SyncID) != "" {
+			if _, err := s.execHook(tx, `
+				UPDATE memory_relations
+				SET judgment_status = 'orphaned',
+				    updated_at      = datetime('now')
+				WHERE source_id = ? OR target_id = ?
+			`, existing.SyncID, existing.SyncID); err != nil {
+				return fmt.Errorf("orphan memory_relations after pulled hard-delete: %w", err)
+			}
+		}
 		_, err = s.execHook(tx, `DELETE FROM observations WHERE id = ?`, existing.ID)
 		return err
 	}

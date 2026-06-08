@@ -2807,6 +2807,63 @@ func TestApplyRemoteMutationIdempotent(t *testing.T) {
 	}
 }
 
+func TestApplyPulledObservationHardDeleteOrphansRelations(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("remote-hard-delete-session", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	obsID, err := s.AddObservation(AddObservationParams{
+		SessionID: "remote-hard-delete-session",
+		Type:      "decision",
+		Title:     "Remote hard delete",
+		Content:   "relation should become audit history",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	obs, err := s.GetObservation(obsID)
+	if err != nil {
+		t.Fatalf("get observation: %v", err)
+	}
+	relSyncID := "rel-" + obs.SyncID
+	if _, err := s.db.Exec(`
+		INSERT INTO memory_relations (sync_id, source_id, target_id, relation, judgment_status, created_at, updated_at)
+		VALUES (?, ?, 'other-remote-sync-id', 'related', 'accepted', datetime('now'), datetime('now'))
+	`, relSyncID, obs.SyncID); err != nil {
+		t.Fatalf("insert relation: %v", err)
+	}
+
+	mutation := SyncMutation{
+		Seq:       44,
+		TargetKey: DefaultSyncTargetKey,
+		Entity:    SyncEntityObservation,
+		EntityKey: obs.SyncID,
+		Op:        SyncOpDelete,
+		Payload:   fmt.Sprintf(`{"sync_id":"%s","deleted":true,"hard_delete":true}`, obs.SyncID),
+	}
+	if err := s.ApplyPulledMutation(DefaultSyncTargetKey, mutation); err != nil {
+		t.Fatalf("apply pulled hard delete: %v", err)
+	}
+
+	var obsCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE sync_id = ?`, obs.SyncID).Scan(&obsCount); err != nil {
+		t.Fatalf("count observations: %v", err)
+	}
+	if obsCount != 0 {
+		t.Fatalf("hard-deleted observation count = %d, want 0", obsCount)
+	}
+
+	var status string
+	if err := s.db.QueryRow(`SELECT judgment_status FROM memory_relations WHERE sync_id = ?`, relSyncID).Scan(&status); err != nil {
+		t.Fatalf("scan relation status: %v", err)
+	}
+	if status != "orphaned" {
+		t.Fatalf("relation status = %q, want orphaned", status)
+	}
+}
+
 func TestApplyPulledMutationClearsDegradedReasonFields(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.MarkSyncBlocked(DefaultSyncTargetKey, "blocked_unenrolled", "project not enrolled"); err != nil {
