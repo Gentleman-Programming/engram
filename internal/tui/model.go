@@ -33,6 +33,7 @@ const (
 	ScreenTimeline
 	ScreenSessions
 	ScreenSessionDetail
+	ScreenTrash
 	ScreenSetup
 )
 
@@ -78,6 +79,32 @@ type sessionObservationsMsg struct {
 	err          error
 }
 
+type trashObservationsMsg struct {
+	observations []store.Observation
+	err          error
+}
+
+type observationDeletedMsg struct {
+	id  int64
+	err error
+}
+
+type observationPurgedMsg struct {
+	id  int64
+	err error
+}
+
+type observationRestoredMsg struct {
+	id  int64
+	err error
+}
+
+type sessionDeletedMsg struct {
+	sessionID string
+	result    *store.DeleteSessionCascadeResult
+	err       error
+}
+
 type setupInstallMsg struct {
 	result *setup.Result
 	err    error
@@ -112,6 +139,9 @@ type Model struct {
 
 	// Recent observations
 	RecentObservations []store.Observation
+
+	// Recycle bin
+	TrashObservations []store.Observation
 
 	// Observation detail
 	SelectedObservation *store.Observation
@@ -188,14 +218,14 @@ func loadStats(s *store.Store) tea.Cmd {
 
 func searchMemories(s *store.Store, query string) tea.Cmd {
 	return func() tea.Msg {
-		results, err := s.Search(query, store.SearchOptions{Limit: 50})
+		results, err := s.Search(query, store.SearchOptions{Limit: 50, IncludeDeleted: true})
 		return searchResultsMsg{results: results, query: query, err: err}
 	}
 }
 
 func loadRecentObservations(s *store.Store) tea.Cmd {
 	return func() tea.Msg {
-		obs, err := s.AllObservations("", "", 50)
+		obs, err := s.AllObservationsWithOptions(store.ObservationListOptions{Limit: 50, IncludeDeleted: true})
 		return recentObservationsMsg{observations: obs, err: err}
 	}
 }
@@ -223,8 +253,40 @@ func loadRecentSessions(s *store.Store) tea.Cmd {
 
 func loadSessionObservations(s *store.Store, sessionID string) tea.Cmd {
 	return func() tea.Msg {
-		obs, err := s.SessionObservations(sessionID, 200)
+		obs, err := s.SessionObservationsWithOptions(sessionID, store.ObservationListOptions{Limit: 200, IncludeDeleted: true})
 		return sessionObservationsMsg{observations: obs, err: err}
+	}
+}
+
+func loadTrashObservations(s *store.Store) tea.Cmd {
+	return func() tea.Msg {
+		obs, err := s.DeletedObservations(200)
+		return trashObservationsMsg{observations: obs, err: err}
+	}
+}
+
+func deleteObservationCmd(s *store.Store, id int64) tea.Cmd {
+	return func() tea.Msg {
+		return observationDeletedMsg{id: id, err: s.DeleteObservation(id, false)}
+	}
+}
+
+func purgeObservationCmd(s *store.Store, id int64) tea.Cmd {
+	return func() tea.Msg {
+		return observationPurgedMsg{id: id, err: s.PurgeObservation(id)}
+	}
+}
+
+func restoreObservationCmd(s *store.Store, id int64) tea.Cmd {
+	return func() tea.Msg {
+		return observationRestoredMsg{id: id, err: s.RestoreObservation(id)}
+	}
+}
+
+func deleteSessionCascadeCmd(s *store.Store, sessionID string) tea.Cmd {
+	return func() tea.Msg {
+		result, err := s.DeleteSessionCascade(sessionID)
+		return sessionDeletedMsg{sessionID: sessionID, result: result, err: err}
 	}
 }
 

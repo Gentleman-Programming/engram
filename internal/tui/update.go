@@ -102,6 +102,41 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.SessionDetailScroll = 0
 		return m, nil
 
+	case trashObservationsMsg:
+		if msg.err != nil {
+			m.ErrorMsg = msg.err.Error()
+			return m, nil
+		}
+		m.TrashObservations = msg.observations
+		m.Screen = ScreenTrash
+		m.Cursor = 0
+		m.Scroll = 0
+		return m, nil
+
+	case observationDeletedMsg:
+		if msg.err != nil {
+			m.ErrorMsg = msg.err.Error()
+		}
+		return m, nil
+
+	case observationPurgedMsg:
+		if msg.err != nil {
+			m.ErrorMsg = msg.err.Error()
+		}
+		return m, nil
+
+	case observationRestoredMsg:
+		if msg.err != nil {
+			m.ErrorMsg = msg.err.Error()
+		}
+		return m, nil
+
+	case sessionDeletedMsg:
+		if msg.err != nil {
+			m.ErrorMsg = msg.err.Error()
+		}
+		return m, nil
+
 	case setupInstallMsg:
 		m.SetupInstalling = false
 		if msg.err != nil {
@@ -168,6 +203,8 @@ func (m Model) handleKeyPress(key string) (tea.Model, tea.Cmd) {
 		return m.handleSessionsKeys(key)
 	case ScreenSessionDetail:
 		return m.handleSessionDetailKeys(key)
+	case ScreenTrash:
+		return m.handleTrashKeys(key)
 	case ScreenSetup:
 		return m.handleSetupKeys(key)
 	}
@@ -180,6 +217,7 @@ var dashboardMenuItems = []string{
 	"Search memories",
 	"Recent observations",
 	"Browse sessions",
+	"Recycle bin",
 	"Setup agent plugin",
 	"Quit",
 }
@@ -230,7 +268,13 @@ func (m Model) handleDashboardSelection() (tea.Model, tea.Cmd) {
 		m.Cursor = 0
 		m.Scroll = 0
 		return m, loadRecentSessions(m.store)
-	case 3: // Setup
+	case 3: // Recycle bin
+		m.PrevScreen = ScreenDashboard
+		m.Screen = ScreenTrash
+		m.Cursor = 0
+		m.Scroll = 0
+		return m, loadTrashObservations(m.store)
+	case 4: // Setup
 		m.PrevScreen = ScreenDashboard
 		m.Screen = ScreenSetup
 		m.Cursor = 0
@@ -241,7 +285,7 @@ func (m Model) handleDashboardSelection() (tea.Model, tea.Cmd) {
 		m.SetupInstalling = false
 		m.SetupInstallingName = ""
 		return m, nil
-	case 4: // Quit
+	case 5: // Quit
 		return m, tea.Quit
 	}
 	return m, nil
@@ -524,6 +568,19 @@ func (m Model) handleSessionDetailKeys(key string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// ─── Trash ───────────────────────────────────────────────────────────────────
+
+func (m Model) handleTrashKeys(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "esc", "q":
+		m.Screen = ScreenDashboard
+		m.Cursor = 0
+		m.Scroll = 0
+		return m, loadStats(m.store)
+	}
+	return m, nil
+}
+
 // ─── Setup ───────────────────────────────────────────────────────────────────
 
 func (m Model) handleSetupKeys(key string) (tea.Model, tea.Cmd) {
@@ -604,6 +661,8 @@ func (m Model) refreshScreen(screen Screen) tea.Cmd {
 		return loadRecentObservations(m.store)
 	case ScreenSessions:
 		return loadRecentSessions(m.store)
+	case ScreenTrash:
+		return loadTrashObservations(m.store)
 	default:
 		return nil
 	}

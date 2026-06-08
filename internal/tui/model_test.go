@@ -209,6 +209,99 @@ func TestDataLoadingCommands(t *testing.T) {
 	})
 }
 
+func TestTUILoadersIncludeDeletedObservations(t *testing.T) {
+	fx := newTestFixture(t)
+	if err := fx.store.DeleteObservation(fx.secondObs, false); err != nil {
+		t.Fatalf("DeleteObservation: %v", err)
+	}
+
+	recentMsg := loadRecentObservations(fx.store)()
+	recent, ok := recentMsg.(recentObservationsMsg)
+	if !ok {
+		t.Fatalf("recent message type = %T", recentMsg)
+	}
+	if recent.err != nil {
+		t.Fatalf("recent loader error: %v", recent.err)
+	}
+	foundDeleted := false
+	for _, obs := range recent.observations {
+		if obs.ID == fx.secondObs {
+			foundDeleted = store.IsObservationDeleted(obs)
+		}
+	}
+	if !foundDeleted {
+		t.Fatalf("recent loader did not include deleted observation id %d: %+v", fx.secondObs, recent.observations)
+	}
+
+	sessionMsg := loadSessionObservations(fx.store, fx.sessionID)()
+	session, ok := sessionMsg.(sessionObservationsMsg)
+	if !ok {
+		t.Fatalf("session message type = %T", sessionMsg)
+	}
+	if session.err != nil {
+		t.Fatalf("session loader error: %v", session.err)
+	}
+	foundDeleted = false
+	for _, obs := range session.observations {
+		if obs.ID == fx.secondObs {
+			foundDeleted = store.IsObservationDeleted(obs)
+		}
+	}
+	if !foundDeleted {
+		t.Fatalf("session loader did not include deleted observation id %d: %+v", fx.secondObs, session.observations)
+	}
+
+	searchMsg := searchMemories(fx.store, "timeline sibling")()
+	search, ok := searchMsg.(searchResultsMsg)
+	if !ok {
+		t.Fatalf("search message type = %T", searchMsg)
+	}
+	if search.err != nil {
+		t.Fatalf("search loader error: %v", search.err)
+	}
+	foundDeleted = false
+	for _, result := range search.results {
+		if result.ID == fx.secondObs {
+			foundDeleted = store.IsObservationDeleted(result.Observation)
+		}
+	}
+	if !foundDeleted {
+		t.Fatalf("search loader did not include deleted observation id %d: %+v", fx.secondObs, search.results)
+	}
+}
+
+func TestLoadTrashObservationsReturnsDeletedRows(t *testing.T) {
+	fx := newTestFixture(t)
+	if err := fx.store.DeleteObservation(fx.obsID, false); err != nil {
+		t.Fatalf("DeleteObservation: %v", err)
+	}
+
+	msg := loadTrashObservations(fx.store)()
+	loaded, ok := msg.(trashObservationsMsg)
+	if !ok {
+		t.Fatalf("trash message type = %T", msg)
+	}
+	if loaded.err != nil {
+		t.Fatalf("trash loader error: %v", loaded.err)
+	}
+	if len(loaded.observations) == 0 {
+		t.Fatal("trash loader returned no observations")
+	}
+
+	foundDeleted := false
+	for _, obs := range loaded.observations {
+		if !store.IsObservationDeleted(obs) {
+			t.Fatalf("trash loader included active observation: %+v", obs)
+		}
+		if obs.ID == fx.obsID {
+			foundDeleted = true
+		}
+	}
+	if !foundDeleted {
+		t.Fatalf("trash loader did not include deleted observation id %d: %+v", fx.obsID, loaded.observations)
+	}
+}
+
 func TestInstallAgentCommand(t *testing.T) {
 	original := installAgentFn
 	t.Cleanup(func() { installAgentFn = original })
