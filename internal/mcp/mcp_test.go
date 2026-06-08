@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -843,8 +844,69 @@ func TestHandleSearchAndCRUDHandlers(t *testing.T) {
 	if delRes.IsError {
 		t.Fatalf("unexpected delete error: %s", callResultText(t, delRes))
 	}
-	if !strings.Contains(callResultText(t, delRes), "permanently deleted") {
-		t.Fatalf("expected hard delete message")
+	deleteText := callResultText(t, delRes)
+	if !strings.Contains(deleteText, "soft-deleted") {
+		t.Fatalf("expected soft delete message, got %q", deleteText)
+	}
+	if strings.Contains(deleteText, "permanently deleted") {
+		t.Fatalf("MCP delete must not report permanent deletion, got %q", deleteText)
+	}
+}
+
+func TestHandleDeleteAlwaysSoftDeletesAndPreservesContent(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("s-delete", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	obsID, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "s-delete",
+		Type:      "decision",
+		Title:     "Preserve me",
+		Content:   "Original content must remain available in the recycle bin",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	deleteHandler := handleDelete(s)
+	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"id":          float64(obsID),
+		"hard_delete": true,
+	}}}
+	res, err := deleteHandler(context.Background(), req)
+	if err != nil {
+		t.Fatalf("delete handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected delete error: %s", callResultText(t, res))
+	}
+	deleteText := callResultText(t, res)
+	if !strings.Contains(deleteText, "soft-deleted") || !strings.Contains(deleteText, "recycle bin") {
+		t.Fatalf("expected recycle-bin soft delete message, got %q", deleteText)
+	}
+	if strings.Contains(deleteText, "permanently deleted") {
+		t.Fatalf("MCP delete must never report permanent deletion, got %q", deleteText)
+	}
+
+	if _, err := s.GetObservation(obsID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetObservation after soft delete err = %v, want sql.ErrNoRows", err)
+	}
+
+	deleted, err := s.GetObservationIncludingDeleted(obsID)
+	if err != nil {
+		t.Fatalf("GetObservationIncludingDeleted: %v", err)
+	}
+	if deleted.DeletedAt == nil || *deleted.DeletedAt == "" {
+		t.Fatalf("expected deleted_at to be set, got %#v", deleted.DeletedAt)
+	}
+	if deleted.Title != "Preserve me" {
+		t.Fatalf("title after delete = %q, want %q", deleted.Title, "Preserve me")
+	}
+	if deleted.Content != "Original content must remain available in the recycle bin" {
+		t.Fatalf("content after delete = %q", deleted.Content)
 	}
 }
 
@@ -2476,7 +2538,7 @@ func TestExplicitSessionIDBypassesDefault(t *testing.T) {
 	}
 }
 
-func TestDestructiveToolAnnotation(t *testing.T) {
+func TestNewServerToolAnnotations(t *testing.T) {
 	s := newMCPTestStore(t)
 	srv := NewServer(s)
 	tools := srv.ListTools()
@@ -2491,6 +2553,22 @@ func TestDestructiveToolAnnotation(t *testing.T) {
 	}
 	if ann.ReadOnlyHint == nil || *ann.ReadOnlyHint {
 		t.Error("mem_delete should NOT be marked readOnly")
+	}
+	if !tool.Tool.DeferLoading {
+		t.Error("mem_delete should have DeferLoading=true")
+	}
+	props := tool.Tool.InputSchema.Properties
+	if _, ok := props["id"]; !ok {
+		t.Fatal("mem_delete schema must include id")
+	}
+	if _, ok := props["hard_delete"]; ok {
+		t.Fatal("mem_delete schema must not advertise hard_delete")
+	}
+	if strings.Contains(tool.Tool.Description, "hard_delete") || strings.Contains(tool.Tool.Description, "permanent") {
+		t.Fatalf("mem_delete description must not advertise hard delete, got %q", tool.Tool.Description)
+	}
+	if !strings.Contains(tool.Tool.Description, "recycle bin") {
+		t.Fatalf("mem_delete description should mention recycle bin semantics, got %q", tool.Tool.Description)
 	}
 }
 

@@ -426,7 +426,7 @@ Examples:
 	if shouldRegister("mem_delete", allowlist) {
 		srv.AddTool(
 			mcp.NewTool("mem_delete",
-				mcp.WithDescription("Delete an observation by ID. Soft-delete by default; set hard_delete=true for permanent deletion."),
+				mcp.WithDescription("Soft-delete an observation by ID, moving it to the recycle bin while preserving content for TUI restoration."),
 				mcp.WithDeferLoading(true),
 				mcp.WithTitleAnnotation("Delete Memory"),
 				mcp.WithReadOnlyHintAnnotation(false),
@@ -436,9 +436,6 @@ Examples:
 				mcp.WithNumber("id",
 					mcp.Required(),
 					mcp.Description("Observation ID to delete"),
-				),
-				mcp.WithBoolean("hard_delete",
-					mcp.Description("If true, permanently deletes the observation"),
 				),
 			),
 			queuedWriteHandler(writeQueue, handleDelete(s)),
@@ -1312,16 +1309,11 @@ func handleDelete(s *store.Store) server.ToolHandlerFunc {
 			return mcp.NewToolResultError("id is required"), nil
 		}
 
-		hardDelete := boolArg(req, "hard_delete", false)
-		if err := s.DeleteObservation(id, hardDelete); err != nil {
+		if err := s.DeleteObservation(id, false); err != nil {
 			return mcp.NewToolResultError("Failed to delete memory: " + err.Error()), nil
 		}
 
-		mode := "soft-deleted"
-		if hardDelete {
-			mode = "permanently deleted"
-		}
-		return mcp.NewToolResultText(fmt.Sprintf("Memory #%d %s", id, mode)), nil
+		return mcp.NewToolResultText(fmt.Sprintf("Memory #%d soft-deleted and moved to the recycle bin", id)), nil
 	}
 }
 
