@@ -673,17 +673,24 @@ func (m Model) handleTrashKeys(key string) (tea.Model, tea.Cmd) {
 func (m Model) handleConfirmDeleteKeys(key string) (tea.Model, tea.Cmd) {
 	switch key {
 	case "y", "Y", "enter":
-		switch m.Confirm.Action {
+		action := m.Confirm.Action
+		observationID := m.Confirm.ObservationID
+		sessionID := m.Confirm.SessionID
+		returnScreen := m.Confirm.ReturnScreen
+		m.Confirm = confirmState{}
+		m.Screen = returnScreen
+
+		switch action {
 		case confirmPurgeObservation:
-			if m.Confirm.ObservationID == 0 {
+			if observationID == 0 {
 				return m, nil
 			}
-			return m, purgeObservationCmd(m.store, m.Confirm.ObservationID)
+			return m, purgeObservationCmd(m.store, observationID)
 		case confirmDeleteSession:
-			if m.Confirm.SessionID == "" {
+			if sessionID == "" {
 				return m, nil
 			}
-			return m, deleteSessionCascadeCmd(m.store, m.Confirm.SessionID)
+			return m, deleteSessionCascadeCmd(m.store, sessionID)
 		}
 	case "n", "N", "esc", "q":
 		returnScreen := m.Confirm.ReturnScreen

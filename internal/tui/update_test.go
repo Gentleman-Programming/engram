@@ -616,9 +616,16 @@ func TestTUIConfirmDeleteKeys(t *testing.T) {
 				ReturnScreen:  ScreenTrash,
 			}
 
-			_, cmd := m.handleConfirmDeleteKeys(key)
+			updatedModel, cmd := m.handleConfirmDeleteKeys(key)
+			updated := updatedModel.(Model)
 			if cmd == nil {
 				t.Fatalf("%s should return purge command", key)
+			}
+			if updated.Screen != ScreenTrash {
+				t.Fatalf("%s should leave confirmation for return screen, got %v", key, updated.Screen)
+			}
+			if updated.Confirm != (confirmState{}) {
+				t.Fatalf("%s should clear confirm state before command returns: %+v", key, updated.Confirm)
 			}
 			if _, ok := cmd().(observationPurgedMsg); !ok {
 				t.Fatalf("%s command should purge observation", key)
@@ -635,9 +642,16 @@ func TestTUIConfirmDeleteKeys(t *testing.T) {
 				ReturnScreen: ScreenSessions,
 			}
 
-			_, cmd := m.handleConfirmDeleteKeys(key)
+			updatedModel, cmd := m.handleConfirmDeleteKeys(key)
+			updated := updatedModel.(Model)
 			if cmd == nil {
 				t.Fatalf("%s should return session cascade command", key)
+			}
+			if updated.Screen != ScreenSessions {
+				t.Fatalf("%s should leave confirmation for return screen, got %v", key, updated.Screen)
+			}
+			if updated.Confirm != (confirmState{}) {
+				t.Fatalf("%s should clear confirm state before command returns: %+v", key, updated.Confirm)
 			}
 			if _, ok := cmd().(sessionDeletedMsg); !ok {
 				t.Fatalf("%s command should delete session cascade", key)

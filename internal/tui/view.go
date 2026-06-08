@@ -77,6 +77,8 @@ func (m Model) View() string {
 		content = m.viewSessions()
 	case ScreenSessionDetail:
 		content = m.viewSessionDetail()
+	case ScreenConfirmDelete:
+		content = m.viewConfirmDelete()
 	case ScreenSetup:
 		content = m.viewSetup()
 	default:
@@ -559,6 +561,25 @@ func (m Model) viewSessionDetail() string {
 	}
 
 	b.WriteString(helpStyle.Render("\n  j/k navigate • enter detail • c copy • t timeline • esc back"))
+
+	return b.String()
+}
+
+// ─── Confirm Delete ──────────────────────────────────────────────────────────
+
+func (m Model) viewConfirmDelete() string {
+	var b strings.Builder
+
+	title := m.Confirm.Title
+	if strings.TrimSpace(title) == "" {
+		title = "Confirm delete"
+	}
+
+	b.WriteString(headerStyle.Render("  " + title))
+	b.WriteString("\n\n")
+	b.WriteString(detailContentStyle.Render(m.Confirm.Body))
+	b.WriteString("\n\n")
+	b.WriteString(helpStyle.Render("  y/enter confirm - n/esc cancel"))
 
 	return b.String()
 }

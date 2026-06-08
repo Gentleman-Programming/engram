@@ -77,6 +77,29 @@ func TestViewRouterAndErrorRendering(t *testing.T) {
 	}
 }
 
+func TestViewConfirmDeleteSafetyPrompt(t *testing.T) {
+	m := New(nil, "")
+	m.Screen = ScreenConfirmDelete
+	m.Confirm = confirmState{
+		Title: "Delete session",
+		Body:  "This will permanently delete all 2 memories in session \"session-1\". This operation cannot be recovered.",
+	}
+
+	out := m.View()
+	if strings.Contains(out, "Unknown screen") {
+		t.Fatal("confirmation screen should not fall through to unknown screen")
+	}
+	if !strings.Contains(out, "Delete session") {
+		t.Fatal("confirmation title should be visible")
+	}
+	if !strings.Contains(out, "permanently delete all 2 memories") || !strings.Contains(out, "cannot be recovered") {
+		t.Fatalf("confirmation body should be visible, got %q", out)
+	}
+	if !strings.Contains(out, "y/enter confirm") || !strings.Contains(out, "n/esc cancel") {
+		t.Fatalf("confirmation help should show confirm/cancel keys, got %q", out)
+	}
+}
+
 func TestViewSearchResultsAndScrollIndicator(t *testing.T) {
 	m := New(nil, "")
 	m.Screen = ScreenSearchResults
