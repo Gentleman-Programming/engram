@@ -263,6 +263,165 @@ func TestUpdateAndSoftDeleteExcludedFromSearchAndTimeline(t *testing.T) {
 	}
 }
 
+func TestObservationDeletedDerivedFromDeletedAtAndContentPreserved(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("sess-deleted-derived", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "sess-deleted-derived",
+		Type:      "decision",
+		Title:     "Recoverable memory",
+		Content:   "recover me exactly",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+
+	if err := s.DeleteObservation(id, false); err != nil {
+		t.Fatalf("DeleteObservation soft: %v", err)
+	}
+
+	var content string
+	var deletedAt *string
+	if err := s.db.QueryRow(`SELECT content, deleted_at FROM observations WHERE id = ?`, id).Scan(&content, &deletedAt); err != nil {
+		t.Fatalf("scan observation row: %v", err)
+	}
+	if content != "recover me exactly" {
+		t.Fatalf("soft delete changed content: got %q", content)
+	}
+	if deletedAt == nil || strings.TrimSpace(*deletedAt) == "" {
+		t.Fatalf("soft delete did not set deleted_at")
+	}
+
+	obs, err := s.GetObservationIncludingDeleted(id)
+	if err != nil {
+		t.Fatalf("GetObservationIncludingDeleted: %v", err)
+	}
+	if obs.DeletedAt == nil || strings.TrimSpace(*obs.DeletedAt) == "" {
+		t.Fatalf("DeletedAt = %v, want non-empty deleted_at", obs.DeletedAt)
+	}
+	if obs.Content != "recover me exactly" {
+		t.Fatalf("include-deleted observation content = %q", obs.Content)
+	}
+}
+
+func TestTUIIncludeDeletedObservationQueries(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("sess-include-deleted", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	activeID, err := s.AddObservation(AddObservationParams{
+		SessionID: "sess-include-deleted",
+		Type:      "decision",
+		Title:     "Active memory",
+		Content:   "active memory content",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation active: %v", err)
+	}
+	deletedID, err := s.AddObservation(AddObservationParams{
+		SessionID: "sess-include-deleted",
+		Type:      "bugfix",
+		Title:     "Deleted memory",
+		Content:   "deleted memory content",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation deleted: %v", err)
+	}
+	if err := s.DeleteObservation(deletedID, false); err != nil {
+		t.Fatalf("DeleteObservation soft: %v", err)
+	}
+
+	defaultObs, err := s.AllObservations("engram", "project", 10)
+	if err != nil {
+		t.Fatalf("AllObservations: %v", err)
+	}
+	if len(defaultObs) != 1 || defaultObs[0].ID != activeID {
+		t.Fatalf("default observations = %+v, want only active id %d", defaultObs, activeID)
+	}
+
+	allObs, err := s.AllObservationsWithOptions(ObservationListOptions{
+		Project:        "engram",
+		Scope:          "project",
+		Limit:          10,
+		IncludeDeleted: true,
+	})
+	if err != nil {
+		t.Fatalf("AllObservationsWithOptions: %v", err)
+	}
+	if len(allObs) != 2 {
+		t.Fatalf("include-deleted observations len = %d, want 2: %+v", len(allObs), allObs)
+	}
+	foundDeleted := false
+	for _, obs := range allObs {
+		if obs.ID == deletedID {
+			foundDeleted = IsObservationDeleted(obs)
+		}
+	}
+	if !foundDeleted {
+		t.Fatalf("deleted observation did not have deleted_at set: %+v", allObs)
+	}
+
+	sessionObs, err := s.SessionObservationsWithOptions("sess-include-deleted", ObservationListOptions{
+		Limit:          10,
+		IncludeDeleted: true,
+	})
+	if err != nil {
+		t.Fatalf("SessionObservationsWithOptions: %v", err)
+	}
+	if len(sessionObs) != 2 {
+		t.Fatalf("include-deleted session observations len = %d, want 2: %+v", len(sessionObs), sessionObs)
+	}
+}
+
+func TestSearchIncludeDeletedIsOptIn(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("sess-search-deleted", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "sess-search-deleted",
+		Type:      "decision",
+		Title:     "Needle deleted memory",
+		Content:   "needle deleted content",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+	if err := s.DeleteObservation(id, false); err != nil {
+		t.Fatalf("DeleteObservation soft: %v", err)
+	}
+
+	defaultResults, err := s.Search("needle deleted", SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("Search default: %v", err)
+	}
+	if len(defaultResults) != 0 {
+		t.Fatalf("default search returned deleted results: %+v", defaultResults)
+	}
+
+	includeDeletedResults, err := s.Search("needle deleted", SearchOptions{
+		Project:        "engram",
+		Limit:          10,
+		IncludeDeleted: true,
+	})
+	if err != nil {
+		t.Fatalf("Search include deleted: %v", err)
+	}
+	if len(includeDeletedResults) != 1 || includeDeletedResults[0].ID != id || !IsObservationDeleted(includeDeletedResults[0].Observation) {
+		t.Fatalf("include-deleted search results = %+v, want deleted id %d", includeDeletedResults, id)
+	}
+}
+
 func TestTopicKeyUpsertUpdatesSameTopicWithoutCreatingNewRow(t *testing.T) {
 	s := newTestStore(t)
 

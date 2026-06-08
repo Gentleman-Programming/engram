@@ -153,10 +153,18 @@ type TimelineResult struct {
 }
 
 type SearchOptions struct {
-	Type    string `json:"type,omitempty"`
-	Project string `json:"project,omitempty"`
-	Scope   string `json:"scope,omitempty"`
-	Limit   int    `json:"limit,omitempty"`
+	Type           string `json:"type,omitempty"`
+	Project        string `json:"project,omitempty"`
+	Scope          string `json:"scope,omitempty"`
+	Limit          int    `json:"limit,omitempty"`
+	IncludeDeleted bool   `json:"include_deleted,omitempty"`
+}
+
+type ObservationListOptions struct {
+	Project        string
+	Scope          string
+	Limit          int
+	IncludeDeleted bool
 }
 
 type AddObservationParams struct {
@@ -2176,35 +2184,74 @@ func (s *Store) AllSessions(project string, limit int) ([]SessionSummary, error)
 
 // AllObservations returns recent observations ordered by most recent first (for TUI browsing).
 func (s *Store) AllObservations(project, scope string, limit int) ([]Observation, error) {
-	if limit <= 0 {
-		limit = s.cfg.MaxContextResults
+	return s.AllObservationsWithOptions(ObservationListOptions{
+		Project: project,
+		Scope:   scope,
+		Limit:   limit,
+	})
+}
+
+func (s *Store) AllObservationsWithOptions(opts ObservationListOptions) ([]Observation, error) {
+	if opts.Limit <= 0 {
+		opts.Limit = s.cfg.MaxContextResults
 	}
+	opts.Project, _ = NormalizeProject(opts.Project)
 
 	query := `
 		SELECT o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
 		       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.created_at, o.updated_at, o.deleted_at
 		FROM observations o
-		WHERE o.deleted_at IS NULL
+		WHERE 1=1
 	`
 	args := []any{}
 
-	if project != "" {
-		query += " AND o.project = ?"
-		args = append(args, project)
+	if !opts.IncludeDeleted {
+		query += " AND o.deleted_at IS NULL"
 	}
-	if scope != "" {
+	if opts.Project != "" {
+		query += " AND LOWER(o.project) = ?"
+		args = append(args, opts.Project)
+	}
+	if opts.Scope != "" {
 		query += " AND o.scope = ?"
-		args = append(args, normalizeScope(scope))
+		args = append(args, normalizeScope(opts.Scope))
 	}
 
 	query += " ORDER BY datetime(o.created_at) DESC, o.id DESC LIMIT ?"
-	args = append(args, limit)
+	args = append(args, opts.Limit)
 
 	return s.queryObservations(query, args...)
 }
 
 // SessionObservations returns all observations for a specific session.
 func (s *Store) SessionObservations(sessionID string, limit int) ([]Observation, error) {
+	return s.SessionObservationsWithOptions(sessionID, ObservationListOptions{Limit: limit})
+}
+
+func (s *Store) SessionObservationsWithOptions(sessionID string, opts ObservationListOptions) ([]Observation, error) {
+	if opts.Limit <= 0 {
+		opts.Limit = 200
+	}
+
+	query := `
+		SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
+		       scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
+		FROM observations
+		WHERE session_id = ?
+	`
+	args := []any{sessionID}
+
+	if !opts.IncludeDeleted {
+		query += " AND deleted_at IS NULL"
+	}
+
+	query += " ORDER BY created_at ASC LIMIT ?"
+	args = append(args, opts.Limit)
+
+	return s.queryObservations(query, args...)
+}
+
+func (s *Store) DeletedObservations(limit int) ([]Observation, error) {
 	if limit <= 0 {
 		limit = 200
 	}
@@ -2213,11 +2260,11 @@ func (s *Store) SessionObservations(sessionID string, limit int) ([]Observation,
 		SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
 		       scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
 		FROM observations
-		WHERE session_id = ? AND deleted_at IS NULL
-		ORDER BY created_at ASC
+		WHERE deleted_at IS NOT NULL
+		ORDER BY datetime(deleted_at) DESC, id DESC
 		LIMIT ?
 	`
-	return s.queryObservations(query, sessionID, limit)
+	return s.queryObservations(query, limit)
 }
 
 // ─── Observations ────────────────────────────────────────────────────────────
@@ -2717,6 +2764,23 @@ func (s *Store) GetObservation(id int64) (*Observation, error) {
 	return &o, nil
 }
 
+func (s *Store) GetObservationIncludingDeleted(id int64) (*Observation, error) {
+	row := s.db.QueryRow(
+		`SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
+		        scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
+		 FROM observations WHERE id = ?`, id,
+	)
+	var o Observation
+	if err := row.Scan(
+		&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content,
+		&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt,
+		&o.CreatedAt, &o.UpdatedAt, &o.DeletedAt,
+	); err != nil {
+		return nil, err
+	}
+	return &o, nil
+}
+
 func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observation, error) {
 	var updated *Observation
 	err := s.withTx(func(tx *sql.Tx) error {
@@ -2973,10 +3037,13 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 			SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
 			       scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
 			FROM observations
-			WHERE topic_key = ? AND deleted_at IS NULL
+			WHERE topic_key = ?
 		`
 		tkArgs := []any{query}
 
+		if !opts.IncludeDeleted {
+			tkSQL += " AND deleted_at IS NULL"
+		}
 		if opts.Type != "" {
 			tkSQL += " AND type = ?"
 			tkArgs = append(tkArgs, opts.Type)
@@ -3020,10 +3087,13 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 		       fts.rank
 		FROM observations_fts fts
 		JOIN observations o ON o.id = fts.rowid
-		WHERE observations_fts MATCH ? AND o.deleted_at IS NULL
+		WHERE observations_fts MATCH ?
 	`
 	args := []any{ftsQuery}
 
+	if !opts.IncludeDeleted {
+		sqlQ += " AND o.deleted_at IS NULL"
+	}
 	if opts.Type != "" {
 		sqlQ += " AND o.type = ?"
 		args = append(args, opts.Type)
@@ -4588,11 +4658,11 @@ func (s *Store) PruneProject(project string) (*PruneResult, error) {
 
 // DeleteProjectResult summarises a cascade project deletion.
 type DeleteProjectResult struct {
-	Project              string `json:"project"`
-	ObservationsDeleted  int64  `json:"observations_deleted"`
-	PromptsDeleted       int64  `json:"prompts_deleted"`
-	SessionsDeleted      int64  `json:"sessions_deleted"`
-	HardDelete           bool   `json:"hard_delete"`
+	Project             string `json:"project"`
+	ObservationsDeleted int64  `json:"observations_deleted"`
+	PromptsDeleted      int64  `json:"prompts_deleted"`
+	SessionsDeleted     int64  `json:"sessions_deleted"`
+	HardDelete          bool   `json:"hard_delete"`
 }
 
 // DeleteProject removes all data associated with a project in a single
@@ -5721,6 +5791,10 @@ func (s *Store) queryObservations(query string, args ...any) ([]Observation, err
 		results = append(results, o)
 	}
 	return results, rows.Err()
+}
+
+func IsObservationDeleted(o Observation) bool {
+	return o.DeletedAt != nil && strings.TrimSpace(*o.DeletedAt) != ""
 }
 
 func (s *Store) addColumnIfNotExists(tableName, columnName, definition string) error {
