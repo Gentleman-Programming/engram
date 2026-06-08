@@ -43,6 +43,12 @@ var (
 			Foreground(colorSubtext).
 			MarginTop(1)
 
+	// Destructive action warning
+	warningStyle = lipgloss.NewStyle().
+			Foreground(colorRed).
+			Bold(true).
+			Padding(0, 1)
+
 	// Error message
 	errorStyle = lipgloss.NewStyle().
 			Foreground(colorRed).
@@ -116,10 +122,26 @@ var (
 				Bold(true).
 				PaddingLeft(1)
 
+	// Deleted list item (normal)
+	deletedItemStyle = lipgloss.NewStyle().
+				Foreground(colorRed).
+				PaddingLeft(2)
+
+	// Deleted list item (selected/cursor)
+	deletedSelectedStyle = lipgloss.NewStyle().
+				Foreground(colorRed).
+				Bold(true).
+				PaddingLeft(1)
+
 	// Observation type badge
 	typeBadgeStyle = lipgloss.NewStyle().
 			Foreground(colorPeach).
 			Bold(true)
+
+	// Deleted observation marker
+	deletedBadgeStyle = lipgloss.NewStyle().
+				Foreground(colorRed).
+				Bold(true)
 
 	// Observation ID
 	idStyle = lipgloss.NewStyle().

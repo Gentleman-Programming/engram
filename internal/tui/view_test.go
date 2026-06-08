@@ -39,15 +39,14 @@ func TestRenderObservationListItem(t *testing.T) {
 	m.Cursor = 1
 	project := "engram"
 
-	line := m.renderObservationListItem(
-		1,
-		42,
-		"bugfix",
-		"Title here",
-		"content line 1\ncontent line 2",
-		"2026-01-01",
-		&project,
-	)
+	line := m.renderObservationListItem(1, store.Observation{
+		ID:        42,
+		Type:      "bugfix",
+		Title:     "Title here",
+		Content:   "content line 1\ncontent line 2",
+		CreatedAt: "2026-01-01",
+		Project:   &project,
+	})
 
 	if !strings.Contains(line, "▸") {
 		t.Fatal("selected item should include cursor marker")
@@ -97,6 +96,114 @@ func TestViewConfirmDeleteSafetyPrompt(t *testing.T) {
 	}
 	if !strings.Contains(out, "y/enter confirm") || !strings.Contains(out, "n/esc cancel") {
 		t.Fatalf("confirmation help should show confirm/cancel keys, got %q", out)
+	}
+}
+
+func TestViewRendersDeletedObservationStatus(t *testing.T) {
+	deletedAt := "2026-06-08 10:00:00"
+	project := "engram"
+	deletedObservation := store.Observation{
+		ID:        7,
+		Type:      "decision",
+		Title:     "Deleted title",
+		Content:   "deleted content survives",
+		CreatedAt: "2026-06-08",
+		Project:   &project,
+		DeletedAt: &deletedAt,
+	}
+
+	tests := []struct {
+		name string
+		view func(Model) string
+	}{
+		{
+			name: "search results",
+			view: func(m Model) string {
+				m.Screen = ScreenSearchResults
+				m.SearchQuery = "deleted"
+				m.SearchResults = []store.SearchResult{{Observation: deletedObservation}}
+				return m.viewSearchResults()
+			},
+		},
+		{
+			name: "recent",
+			view: func(m Model) string {
+				m.Screen = ScreenRecent
+				m.RecentObservations = []store.Observation{deletedObservation}
+				return m.viewRecent()
+			},
+		},
+		{
+			name: "session detail",
+			view: func(m Model) string {
+				m.Screen = ScreenSessionDetail
+				m.Sessions = []store.SessionSummary{{ID: "session-1", Project: "engram", StartedAt: "2026-06-08"}}
+				m.SelectedSessionIdx = 0
+				m.SessionObservations = []store.Observation{deletedObservation}
+				return m.viewSessionDetail()
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := New(nil, "")
+			m.Height = 14
+
+			out := tt.view(m)
+			if !strings.Contains(out, "[deleted]") {
+				t.Fatalf("deleted marker missing from %s view: %q", tt.name, out)
+			}
+			if !strings.Contains(out, "Deleted title") || !strings.Contains(out, "deleted content survives") {
+				t.Fatalf("deleted observation content should stay visible in %s view: %q", tt.name, out)
+			}
+			if !strings.Contains(out, "r restore") || !strings.Contains(out, "d delete") {
+				t.Fatalf("deleted observation help missing restore/delete keys in %s view: %q", tt.name, out)
+			}
+		})
+	}
+}
+
+func TestViewTrashAndConfirmation(t *testing.T) {
+	deletedAt := "2026-06-08 10:00:00"
+	m := New(nil, "")
+	m.Screen = ScreenTrash
+	m.Height = 14
+	m.TrashObservations = []store.Observation{
+		{ID: 9, Type: "bugfix", Title: "Trash memory", Content: "trash content remains", CreatedAt: "2026-06-08", DeletedAt: &deletedAt},
+	}
+
+	out := m.View()
+	if !strings.Contains(out, "Recycle Bin") || !strings.Contains(out, "[deleted]") {
+		t.Fatalf("trash view missing title or deleted marker: %q", out)
+	}
+	if !strings.Contains(out, "Trash memory") || !strings.Contains(out, "trash content remains") {
+		t.Fatalf("trash view should show original deleted memory content: %q", out)
+	}
+	if !strings.Contains(out, "r restore") || !strings.Contains(out, "d delete forever") {
+		t.Fatalf("trash view missing restore/delete help: %q", out)
+	}
+
+	m.TrashObservations = nil
+	out = m.View()
+	if !strings.Contains(out, "No deleted memories") {
+		t.Fatalf("trash view missing empty state: %q", out)
+	}
+
+	m.Screen = ScreenConfirmDelete
+	m.Confirm = confirmState{
+		Title: "Delete session",
+		Body:  "This will permanently delete all 3 memories in session \"sess-full\". This operation cannot be recovered.",
+	}
+	out = m.View()
+	if !strings.Contains(out, "Delete session") || !strings.Contains(out, "permanently delete all 3 memories") {
+		t.Fatalf("confirmation title/body missing: %q", out)
+	}
+	if !strings.Contains(out, "cannot be recovered") {
+		t.Fatalf("confirmation warning missing: %q", out)
+	}
+	if !strings.Contains(out, "y/enter confirm") || !strings.Contains(out, "n/esc cancel") {
+		t.Fatalf("confirmation help missing confirm/cancel keys: %q", out)
 	}
 }
 
@@ -335,6 +442,7 @@ func TestViewObservationDetailTimelineSessionsAndSessionDetail(t *testing.T) {
 
 func TestViewRouterCoversAllScreens(t *testing.T) {
 	m := New(nil, "")
+	deletedAt := "2026-06-08 10:00:00"
 	m.Stats = &store.Stats{}
 	m.SearchResults = []store.SearchResult{{Observation: store.Observation{ID: 1, Type: "bugfix", Title: "t", Content: "c", CreatedAt: "now"}}}
 	m.SearchQuery = "q"
@@ -344,6 +452,8 @@ func TestViewRouterCoversAllScreens(t *testing.T) {
 	m.Sessions = []store.SessionSummary{{ID: "s1", Project: "engram", StartedAt: "now", ObservationCount: 1}}
 	m.SelectedSessionIdx = 0
 	m.SessionObservations = []store.Observation{{ID: 1, Type: "bugfix", Title: "t", Content: "c", CreatedAt: "now"}}
+	m.TrashObservations = []store.Observation{{ID: 2, Type: "bugfix", Title: "deleted t", Content: "deleted c", CreatedAt: "now", DeletedAt: &deletedAt}}
+	m.Confirm = confirmState{Title: "Delete memory forever", Body: "This operation cannot be recovered."}
 	m.SetupAgents = []setup.Agent{{Name: "opencode", Description: "OpenCode", InstallDir: "/tmp"}}
 	m.Height = 20
 
@@ -359,6 +469,8 @@ func TestViewRouterCoversAllScreens(t *testing.T) {
 		{screen: ScreenTimeline, want: "Timeline"},
 		{screen: ScreenSessions, want: "Sessions"},
 		{screen: ScreenSessionDetail, want: "Session:"},
+		{screen: ScreenTrash, want: "Recycle Bin"},
+		{screen: ScreenConfirmDelete, want: "cannot be recovered"},
 		{screen: ScreenSetup, want: "Setup"},
 	}
 

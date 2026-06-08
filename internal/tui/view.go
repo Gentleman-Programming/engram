@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Gentleman-Programming/engram/internal/store"
 	"github.com/Gentleman-Programming/engram/internal/timeutil"
 	"github.com/Gentleman-Programming/engram/internal/version"
 	"github.com/charmbracelet/lipgloss"
@@ -77,6 +78,8 @@ func (m Model) View() string {
 		content = m.viewSessions()
 	case ScreenSessionDetail:
 		content = m.viewSessionDetail()
+	case ScreenTrash:
+		content = m.viewTrash()
 	case ScreenConfirmDelete:
 		content = m.viewConfirmDelete()
 	case ScreenSetup:
@@ -224,7 +227,7 @@ func (m Model) viewSearchResults() string {
 
 	for i := m.Scroll; i < end; i++ {
 		r := m.SearchResults[i]
-		b.WriteString(m.renderObservationListItem(i, r.ID, r.Type, r.Title, r.Content, r.CreatedAt, r.Project))
+		b.WriteString(m.renderObservationListItem(i, r.Observation))
 	}
 
 	// Scroll indicator
@@ -233,7 +236,7 @@ func (m Model) viewSearchResults() string {
 			timestampStyle.Render(fmt.Sprintf("showing %d-%d of %d", m.Scroll+1, end, resultCount))))
 	}
 
-	b.WriteString(helpStyle.Render("\n  j/k navigate • enter detail • c copy • t timeline • / search • esc back"))
+	b.WriteString(helpStyle.Render("\n  j/k navigate • enter detail • c copy • t timeline • r restore • d delete • / search • esc back"))
 
 	return b.String()
 }
@@ -267,7 +270,7 @@ func (m Model) viewRecent() string {
 
 	for i := m.Scroll; i < end; i++ {
 		o := m.RecentObservations[i]
-		b.WriteString(m.renderObservationListItem(i, o.ID, o.Type, o.Title, o.Content, o.CreatedAt, o.Project))
+		b.WriteString(m.renderObservationListItem(i, o))
 	}
 
 	if count > visibleItems {
@@ -275,7 +278,7 @@ func (m Model) viewRecent() string {
 			timestampStyle.Render(fmt.Sprintf("showing %d-%d of %d", m.Scroll+1, end, count))))
 	}
 
-	b.WriteString(helpStyle.Render("\n  j/k navigate • enter detail • c copy • t timeline • esc back"))
+	b.WriteString(helpStyle.Render("\n  j/k navigate • enter detail • c copy • t timeline • r restore • d delete • esc back"))
 
 	return b.String()
 }
@@ -500,7 +503,7 @@ func (m Model) viewSessions() string {
 			timestampStyle.Render(fmt.Sprintf("showing %d-%d of %d", m.Scroll+1, end, count))))
 	}
 
-	b.WriteString(helpStyle.Render("\n  j/k navigate • enter view session • esc back"))
+	b.WriteString(helpStyle.Render("\n  j/k navigate • enter view session • d delete • esc back"))
 
 	return b.String()
 }
@@ -552,7 +555,7 @@ func (m Model) viewSessionDetail() string {
 
 	for i := m.SessionDetailScroll; i < end; i++ {
 		o := m.SessionObservations[i]
-		b.WriteString(m.renderObservationListItem(i, o.ID, o.Type, o.Title, o.Content, o.CreatedAt, o.Project))
+		b.WriteString(m.renderObservationListItem(i, o))
 	}
 
 	if count > visibleItems {
@@ -560,7 +563,48 @@ func (m Model) viewSessionDetail() string {
 			timestampStyle.Render(fmt.Sprintf("showing %d-%d of %d", m.SessionDetailScroll+1, end, count))))
 	}
 
-	b.WriteString(helpStyle.Render("\n  j/k navigate • enter detail • c copy • t timeline • esc back"))
+	b.WriteString(helpStyle.Render("\n  j/k navigate • enter detail • c copy • t timeline • r restore • d delete • esc back"))
+
+	return b.String()
+}
+
+// ─── Recycle Bin ─────────────────────────────────────────────────────────────
+
+func (m Model) viewTrash() string {
+	var b strings.Builder
+
+	count := len(m.TrashObservations)
+	header := fmt.Sprintf("  Recycle Bin - %d deleted", count)
+	b.WriteString(headerStyle.Render(header))
+	b.WriteString("\n")
+
+	if count == 0 {
+		b.WriteString(noResultsStyle.Render("No deleted memories."))
+		b.WriteString("\n\n")
+		b.WriteString(helpStyle.Render("  esc back"))
+		return b.String()
+	}
+
+	visibleItems := (m.Height - 8) / 2
+	if visibleItems < 3 {
+		visibleItems = 3
+	}
+
+	end := m.Scroll + visibleItems
+	if end > count {
+		end = count
+	}
+
+	for i := m.Scroll; i < end; i++ {
+		b.WriteString(m.renderObservationListItem(i, m.TrashObservations[i]))
+	}
+
+	if count > visibleItems {
+		b.WriteString(fmt.Sprintf("\n  %s",
+			timestampStyle.Render(fmt.Sprintf("showing %d-%d of %d", m.Scroll+1, end, count))))
+	}
+
+	b.WriteString(helpStyle.Render("\n  j/k navigate - enter detail - r restore - d delete forever - esc back"))
 
 	return b.String()
 }
@@ -577,7 +621,7 @@ func (m Model) viewConfirmDelete() string {
 
 	b.WriteString(headerStyle.Render("  " + title))
 	b.WriteString("\n\n")
-	b.WriteString(detailContentStyle.Render(m.Confirm.Body))
+	b.WriteString(warningStyle.Render(m.Confirm.Body))
 	b.WriteString("\n\n")
 	b.WriteString(helpStyle.Render("  y/enter confirm - n/esc cancel"))
 
@@ -705,12 +749,28 @@ func (m Model) viewSetup() string {
 
 // ─── Shared Renderers ────────────────────────────────────────────────────────
 
-func (m Model) renderObservationListItem(index int, id int64, obsType, title, content, createdAt string, project *string) string {
+func (m Model) renderObservationListItem(index int, o store.Observation) string {
+	id := o.ID
+	obsType := o.Type
+	title := o.Title
+	content := o.Content
+	createdAt := o.CreatedAt
+	project := o.Project
+
 	cursor := "  "
 	style := listItemStyle
+	previewStyle := contentPreviewStyle
+	deleted := store.IsObservationDeleted(o)
+	if deleted {
+		style = deletedItemStyle
+		previewStyle = deletedItemStyle.PaddingLeft(4)
+	}
 	if index == m.Cursor {
 		cursor = "▸ "
 		style = listSelectedStyle
+		if deleted {
+			style = deletedSelectedStyle
+		}
 	}
 
 	proj := ""
@@ -718,18 +778,24 @@ func (m Model) renderObservationListItem(index int, id int64, obsType, title, co
 		proj = "  " + projectStyle.Render(*project)
 	}
 
-	line := fmt.Sprintf("%s%s %s %s%s  %s\n",
+	deletedMarker := ""
+	if deleted {
+		deletedMarker = " " + deletedBadgeStyle.Render("[deleted]")
+	}
+
+	line := fmt.Sprintf("%s%s %s %s%s%s  %s\n",
 		cursor,
 		idStyle.Render(fmt.Sprintf("#%-5d", id)),
 		typeBadgeStyle.Render(fmt.Sprintf("[%-12s]", obsType)),
 		style.Render(truncateStr(title, 50)),
+		deletedMarker,
 		proj,
 		timestampStyle.Render(localTime(createdAt)))
 
 	// Content preview on second line
 	preview := truncateStr(content, 80)
 	if preview != "" {
-		line += contentPreviewStyle.Render(preview) + "\n"
+		line += previewStyle.Render(preview) + "\n"
 	}
 
 	return line
