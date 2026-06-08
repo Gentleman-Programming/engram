@@ -1524,6 +1524,39 @@ func TestSessionsOrderedByMostRecentActivity(t *testing.T) {
 	}
 }
 
+func TestAllSessionsCountsSoftDeletedObservations(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s-deleted-only", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	obsID, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-deleted-only",
+		Type:      "decision",
+		Title:     "Deleted-only memory",
+		Content:   "Still permanently deleted by session cascade",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	if err := s.DeleteObservation(obsID, false); err != nil {
+		t.Fatalf("soft delete observation: %v", err)
+	}
+
+	sessions, err := s.AllSessions("engram", 10)
+	if err != nil {
+		t.Fatalf("all sessions: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("sessions = %+v, want one session", sessions)
+	}
+	if sessions[0].ObservationCount != 1 {
+		t.Fatalf("ObservationCount = %d, want 1 for soft-deleted observation", sessions[0].ObservationCount)
+	}
+}
+
 func TestSessionObservationsAddPromptImportAndSyncChunks(t *testing.T) {
 	s := newTestStore(t)
 

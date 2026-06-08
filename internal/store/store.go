@@ -2168,7 +2168,7 @@ func (s *Store) AllSessions(project string, limit int) ([]SessionSummary, error)
 		SELECT s.id, s.project, s.started_at, s.ended_at, s.summary,
 		       COUNT(o.id) as observation_count
 		FROM sessions s
-		LEFT JOIN observations o ON o.session_id = s.id AND o.deleted_at IS NULL
+		LEFT JOIN observations o ON o.session_id = s.id
 		WHERE 1=1
 	`
 	args := []any{}
