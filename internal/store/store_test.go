@@ -721,6 +721,88 @@ func TestSearchIncludeDeletedFindsLegacySoftDeletedObservationAfterFTSRebuild(t 
 	}
 }
 
+func TestSearchIncludeDeletedRepairsCurrentFTSMissingDeletedRows(t *testing.T) {
+	dataDir := t.TempDir()
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = dataDir
+	cfg.DedupeWindow = time.Hour
+
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	if err := s.CreateSession("current-fts-repair-sess", "engram", "/tmp/engram"); err != nil {
+		_ = s.Close()
+		t.Fatalf("CreateSession: %v", err)
+	}
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "current-fts-repair-sess",
+		Type:      "decision",
+		Title:     "Current deleted memory",
+		Content:   "current schema recoverable deleted content",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		_ = s.Close()
+		t.Fatalf("AddObservation: %v", err)
+	}
+	if err := s.DeleteObservation(id, false); err != nil {
+		_ = s.Close()
+		t.Fatalf("DeleteObservation soft: %v", err)
+	}
+
+	if _, err := s.db.Exec(`
+		DROP TABLE observations_fts;
+		CREATE VIRTUAL TABLE observations_fts USING fts5(
+			title,
+			content,
+			tool_name,
+			type,
+			project,
+			topic_key,
+			content='observations',
+			content_rowid='id'
+		);
+		INSERT INTO observations_fts(rowid, title, content, tool_name, type, project, topic_key)
+		SELECT id, title, content, tool_name, type, project, topic_key
+		FROM observations
+		WHERE deleted_at IS NULL;
+	`); err != nil {
+		_ = s.Close()
+		t.Fatalf("simulate active-only fts rebuild: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store before reopen: %v", err)
+	}
+
+	reopened, err := New(cfg)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+
+	defaultResults, err := reopened.Search("recoverable deleted", SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("Search default: %v", err)
+	}
+	if len(defaultResults) != 0 {
+		t.Fatalf("default search returned deleted current-schema result: %+v", defaultResults)
+	}
+
+	includeDeletedResults, err := reopened.Search("recoverable deleted", SearchOptions{
+		Project:        "engram",
+		Limit:          10,
+		IncludeDeleted: true,
+	})
+	if err != nil {
+		t.Fatalf("Search include deleted: %v", err)
+	}
+	if len(includeDeletedResults) != 1 || includeDeletedResults[0].ID != id || !IsObservationDeleted(includeDeletedResults[0].Observation) {
+		t.Fatalf("include-deleted current-schema search results = %+v, want repaired deleted id %d", includeDeletedResults, id)
+	}
+}
+
 func TestNewMigratesLegacyUserPromptsSyncIDSchema(t *testing.T) {
 	dataDir := t.TempDir()
 	dbPath := filepath.Join(dataDir, "engram.db")

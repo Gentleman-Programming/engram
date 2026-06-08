@@ -1015,6 +1015,9 @@ func (s *Store) migrate() error {
 	if err := s.migrateFTSTopicKey(); err != nil {
 		return err
 	}
+	if err := s.repairObservationFTSDeletedRows(); err != nil {
+		return err
+	}
 
 	// Prompts FTS triggers (separate idempotent check)
 	var promptTrigger string
@@ -1979,6 +1982,20 @@ func (s *Store) migrateFTSTopicKey() error {
 		END;
 	`); err != nil {
 		return fmt.Errorf("migrate fts topic_key: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) repairObservationFTSDeletedRows() error {
+	var deletedCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE deleted_at IS NOT NULL`).Scan(&deletedCount); err != nil {
+		return fmt.Errorf("repair observations fts: count deleted rows: %w", err)
+	}
+	if deletedCount == 0 {
+		return nil
+	}
+	if _, err := s.execHook(s.db, `INSERT INTO observations_fts(observations_fts) VALUES('rebuild')`); err != nil {
+		return fmt.Errorf("repair observations fts: %w", err)
 	}
 	return nil
 }
