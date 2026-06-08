@@ -1,9 +1,11 @@
 package tui
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/setup"
+	"github.com/Gentleman-Programming/engram/internal/store"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -120,7 +122,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.ErrorMsg = ""
-		return m, m.refreshScreen(m.Screen)
+		return m.finishOperationRefresh()
 
 	case observationPurgedMsg:
 		if msg.err != nil {
@@ -128,7 +130,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.ErrorMsg = ""
-		return m, m.refreshScreen(m.Screen)
+		return m.finishOperationRefresh()
 
 	case observationRestoredMsg:
 		if msg.err != nil {
@@ -136,7 +138,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.ErrorMsg = ""
-		return m, m.refreshScreen(m.Screen)
+		return m.finishOperationRefresh()
 
 	case sessionDeletedMsg:
 		if msg.err != nil {
@@ -144,7 +146,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.ErrorMsg = ""
-		return m, m.refreshScreen(m.Screen)
+		return m.finishOperationRefresh()
 
 	case setupInstallMsg:
 		m.SetupInstalling = false
@@ -214,6 +216,8 @@ func (m Model) handleKeyPress(key string) (tea.Model, tea.Cmd) {
 		return m.handleSessionDetailKeys(key)
 	case ScreenTrash:
 		return m.handleTrashKeys(key)
+	case ScreenConfirmDelete:
+		return m.handleConfirmDeleteKeys(key)
 	case ScreenSetup:
 		return m.handleSetupKeys(key)
 	}
@@ -379,6 +383,14 @@ func (m Model) handleSearchResultsKeys(key string) (tea.Model, tea.Cmd) {
 			m.PrevScreen = ScreenSearchResults
 			return m, loadTimeline(m.store, obsID)
 		}
+	case "delete", "d":
+		if obs, ok := m.selectedSearchObservation(); ok {
+			return m.deleteOrPurgeObservation(obs, ScreenSearchResults)
+		}
+	case "r":
+		if obs, ok := m.selectedSearchObservation(); ok {
+			return m.restoreObservation(obs)
+		}
 	case "/", "s":
 		m.PrevScreen = ScreenSearchResults
 		m.Screen = ScreenSearch
@@ -433,6 +445,14 @@ func (m Model) handleRecentKeys(key string) (tea.Model, tea.Cmd) {
 			obsID := m.RecentObservations[m.Cursor].ID
 			m.PrevScreen = ScreenRecent
 			return m, loadTimeline(m.store, obsID)
+		}
+	case "delete", "d":
+		if obs, ok := m.selectedRecentObservation(); ok {
+			return m.deleteOrPurgeObservation(obs, ScreenRecent)
+		}
+	case "r":
+		if obs, ok := m.selectedRecentObservation(); ok {
+			return m.restoreObservation(obs)
 		}
 	case "esc", "q":
 		m.Screen = ScreenDashboard
@@ -520,6 +540,24 @@ func (m Model) handleSessionsKeys(key string) (tea.Model, tea.Cmd) {
 			sessionID := m.Sessions[m.Cursor].ID
 			return m, loadSessionObservations(m.store, sessionID)
 		}
+	case "delete", "d":
+		if len(m.Sessions) > 0 && m.Cursor >= 0 && m.Cursor < len(m.Sessions) {
+			session := m.Sessions[m.Cursor]
+			body := fmt.Sprintf("This will permanently delete empty session %q. This operation cannot be recovered.", session.ID)
+			if session.ObservationCount > 0 {
+				body = fmt.Sprintf("This will permanently delete all %d memories in session %q. This operation cannot be recovered.", session.ObservationCount, session.ID)
+			}
+			m.Screen = ScreenConfirmDelete
+			m.Confirm = confirmState{
+				Action:           confirmDeleteSession,
+				Title:            "Delete session",
+				Body:             body,
+				SessionID:        session.ID,
+				ReturnScreen:     ScreenSessions,
+				ObservationCount: session.ObservationCount,
+			}
+			return m, nil
+		}
 	case "esc", "q":
 		m.Screen = ScreenDashboard
 		m.Cursor = 0
@@ -568,6 +606,14 @@ func (m Model) handleSessionDetailKeys(key string) (tea.Model, tea.Cmd) {
 			m.PrevScreen = ScreenSessionDetail
 			return m, loadTimeline(m.store, obsID)
 		}
+	case "delete", "d":
+		if obs, ok := m.selectedSessionObservation(); ok {
+			return m.deleteOrPurgeObservation(obs, ScreenSessionDetail)
+		}
+	case "r":
+		if obs, ok := m.selectedSessionObservation(); ok {
+			return m.restoreObservation(obs)
+		}
 	case "esc", "q":
 		m.Screen = ScreenSessions
 		m.Cursor = m.SelectedSessionIdx
@@ -580,12 +626,70 @@ func (m Model) handleSessionDetailKeys(key string) (tea.Model, tea.Cmd) {
 // ─── Trash ───────────────────────────────────────────────────────────────────
 
 func (m Model) handleTrashKeys(key string) (tea.Model, tea.Cmd) {
+	visibleItems := (m.Height - 8) / 2
+	if visibleItems < 3 {
+		visibleItems = 3
+	}
+
 	switch key {
+	case "up", "k":
+		if m.Cursor > 0 {
+			m.Cursor--
+			if m.Cursor < m.Scroll {
+				m.Scroll = m.Cursor
+			}
+		}
+	case "down", "j":
+		if m.Cursor < len(m.TrashObservations)-1 {
+			m.Cursor++
+			if m.Cursor >= m.Scroll+visibleItems {
+				m.Scroll = m.Cursor - visibleItems + 1
+			}
+		}
+	case "enter":
+		if obs, ok := m.selectedTrashObservation(); ok {
+			m.PrevScreen = ScreenTrash
+			return m, loadObservationDetail(m.store, obs.ID)
+		}
+	case "delete", "d":
+		if obs, ok := m.selectedTrashObservation(); ok {
+			return m.deleteOrPurgeObservation(obs, ScreenTrash)
+		}
+	case "r":
+		if obs, ok := m.selectedTrashObservation(); ok {
+			return m.restoreObservation(obs)
+		}
 	case "esc", "q":
 		m.Screen = ScreenDashboard
 		m.Cursor = 0
 		m.Scroll = 0
 		return m, loadStats(m.store)
+	}
+	return m, nil
+}
+
+// ─── Confirm Delete ──────────────────────────────────────────────────────────
+
+func (m Model) handleConfirmDeleteKeys(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "y", "Y", "enter":
+		switch m.Confirm.Action {
+		case confirmPurgeObservation:
+			if m.Confirm.ObservationID == 0 {
+				return m, nil
+			}
+			return m, purgeObservationCmd(m.store, m.Confirm.ObservationID)
+		case confirmDeleteSession:
+			if m.Confirm.SessionID == "" {
+				return m, nil
+			}
+			return m, deleteSessionCascadeCmd(m.store, m.Confirm.SessionID)
+		}
+	case "n", "N", "esc", "q":
+		returnScreen := m.Confirm.ReturnScreen
+		m.Confirm = confirmState{}
+		m.Screen = returnScreen
+		return m, nil
 	}
 	return m, nil
 }
@@ -659,6 +763,64 @@ func (m Model) handleSetupKeys(key string) (tea.Model, tea.Cmd) {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+func (m Model) selectedSearchObservation() (store.Observation, bool) {
+	if len(m.SearchResults) == 0 || m.Cursor < 0 || m.Cursor >= len(m.SearchResults) {
+		return store.Observation{}, false
+	}
+	return m.SearchResults[m.Cursor].Observation, true
+}
+
+func (m Model) selectedRecentObservation() (store.Observation, bool) {
+	if len(m.RecentObservations) == 0 || m.Cursor < 0 || m.Cursor >= len(m.RecentObservations) {
+		return store.Observation{}, false
+	}
+	return m.RecentObservations[m.Cursor], true
+}
+
+func (m Model) selectedSessionObservation() (store.Observation, bool) {
+	if len(m.SessionObservations) == 0 || m.Cursor < 0 || m.Cursor >= len(m.SessionObservations) {
+		return store.Observation{}, false
+	}
+	return m.SessionObservations[m.Cursor], true
+}
+
+func (m Model) selectedTrashObservation() (store.Observation, bool) {
+	if len(m.TrashObservations) == 0 || m.Cursor < 0 || m.Cursor >= len(m.TrashObservations) {
+		return store.Observation{}, false
+	}
+	return m.TrashObservations[m.Cursor], true
+}
+
+func (m Model) deleteOrPurgeObservation(obs store.Observation, returnScreen Screen) (tea.Model, tea.Cmd) {
+	if store.IsObservationDeleted(obs) {
+		m.Screen = ScreenConfirmDelete
+		m.Confirm = confirmState{
+			Action:        confirmPurgeObservation,
+			Title:         "Delete memory forever",
+			Body:          fmt.Sprintf("Permanently delete memory #%d. This operation cannot be recovered.", obs.ID),
+			ObservationID: obs.ID,
+			ReturnScreen:  returnScreen,
+		}
+		return m, nil
+	}
+	return m, deleteObservationCmd(m.store, obs.ID)
+}
+
+func (m Model) restoreObservation(obs store.Observation) (tea.Model, tea.Cmd) {
+	if !store.IsObservationDeleted(obs) {
+		return m, nil
+	}
+	return m, restoreObservationCmd(m.store, obs.ID)
+}
+
+func (m Model) finishOperationRefresh() (tea.Model, tea.Cmd) {
+	if m.Screen == ScreenConfirmDelete {
+		m.Screen = m.Confirm.ReturnScreen
+	}
+	m.Confirm = confirmState{}
+	return m, m.refreshScreen(m.Screen)
+}
 
 // refreshScreen returns the appropriate data-loading Cmd for a given screen.
 // Used when navigating back so lists show fresh data from the DB.

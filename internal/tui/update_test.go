@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/internal/setup"
@@ -310,6 +311,429 @@ func TestHandleRecentTimelineSessionsAndDetailKeyPaths(t *testing.T) {
 	updated = updatedModel.(Model)
 	if updated.Screen != ScreenSessions || cmd == nil {
 		t.Fatal("session detail esc should return to sessions and refresh list")
+	}
+}
+
+func TestTUIDeleteRestoreAndPurgeKeysForObservationLists(t *testing.T) {
+	deletedAt := "2026-06-08 10:00:00"
+
+	t.Run("active observations delete without confirmation", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			key    string
+			model  func(testFixture) Model
+			handle func(Model, string) (tea.Model, tea.Cmd)
+		}{
+			{
+				name: "search results d",
+				key:  "d",
+				model: func(fx testFixture) Model {
+					m := New(fx.store, "")
+					m.Screen = ScreenSearchResults
+					m.SearchResults = []store.SearchResult{{Observation: store.Observation{ID: fx.obsID}}}
+					return m
+				},
+				handle: func(m Model, key string) (tea.Model, tea.Cmd) {
+					return m.handleSearchResultsKeys(key)
+				},
+			},
+			{
+				name: "recent delete",
+				key:  "delete",
+				model: func(fx testFixture) Model {
+					m := New(fx.store, "")
+					m.Screen = ScreenRecent
+					m.RecentObservations = []store.Observation{{ID: fx.obsID}}
+					return m
+				},
+				handle: func(m Model, key string) (tea.Model, tea.Cmd) {
+					return m.handleRecentKeys(key)
+				},
+			},
+			{
+				name: "session detail d",
+				key:  "d",
+				model: func(fx testFixture) Model {
+					m := New(fx.store, "")
+					m.Screen = ScreenSessionDetail
+					m.SessionObservations = []store.Observation{{ID: fx.obsID}}
+					return m
+				},
+				handle: func(m Model, key string) (tea.Model, tea.Cmd) {
+					return m.handleSessionDetailKeys(key)
+				},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				fx := newTestFixture(t)
+				m := tc.model(fx)
+
+				updatedModel, cmd := tc.handle(m, tc.key)
+				updated := updatedModel.(Model)
+				if cmd == nil {
+					t.Fatal("active delete should return delete command")
+				}
+				if updated.Screen == ScreenConfirmDelete || updated.Confirm.Action != confirmNone {
+					t.Fatalf("active delete opened confirmation: screen=%v confirm=%+v", updated.Screen, updated.Confirm)
+				}
+				msg := cmd()
+				if _, ok := msg.(observationDeletedMsg); !ok {
+					t.Fatalf("delete command message type = %T", msg)
+				}
+			})
+		}
+	})
+
+	t.Run("deleted observations delete opens purge confirmation", func(t *testing.T) {
+		for _, tc := range []struct {
+			name         string
+			key          string
+			returnScreen Screen
+			model        func(testFixture) Model
+			handle       func(Model, string) (tea.Model, tea.Cmd)
+		}{
+			{
+				name:         "search results delete",
+				key:          "delete",
+				returnScreen: ScreenSearchResults,
+				model: func(fx testFixture) Model {
+					m := New(fx.store, "")
+					m.Screen = ScreenSearchResults
+					m.SearchResults = []store.SearchResult{{Observation: store.Observation{ID: fx.secondObs, DeletedAt: &deletedAt}}}
+					return m
+				},
+				handle: func(m Model, key string) (tea.Model, tea.Cmd) {
+					return m.handleSearchResultsKeys(key)
+				},
+			},
+			{
+				name:         "recent d",
+				key:          "d",
+				returnScreen: ScreenRecent,
+				model: func(fx testFixture) Model {
+					m := New(fx.store, "")
+					m.Screen = ScreenRecent
+					m.RecentObservations = []store.Observation{{ID: fx.secondObs, DeletedAt: &deletedAt}}
+					return m
+				},
+				handle: func(m Model, key string) (tea.Model, tea.Cmd) {
+					return m.handleRecentKeys(key)
+				},
+			},
+			{
+				name:         "session detail delete",
+				key:          "delete",
+				returnScreen: ScreenSessionDetail,
+				model: func(fx testFixture) Model {
+					m := New(fx.store, "")
+					m.Screen = ScreenSessionDetail
+					m.SessionObservations = []store.Observation{{ID: fx.secondObs, DeletedAt: &deletedAt}}
+					return m
+				},
+				handle: func(m Model, key string) (tea.Model, tea.Cmd) {
+					return m.handleSessionDetailKeys(key)
+				},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				fx := newTestFixture(t)
+				m := tc.model(fx)
+
+				updatedModel, cmd := tc.handle(m, tc.key)
+				updated := updatedModel.(Model)
+				if cmd != nil {
+					t.Fatal("deleted observation delete should not return command before confirmation")
+				}
+				if updated.Screen != ScreenConfirmDelete {
+					t.Fatalf("screen = %v, want %v", updated.Screen, ScreenConfirmDelete)
+				}
+				if updated.Confirm.Action != confirmPurgeObservation || updated.Confirm.ObservationID != fx.secondObs || updated.Confirm.ReturnScreen != tc.returnScreen {
+					t.Fatalf("confirm = %+v", updated.Confirm)
+				}
+			})
+		}
+	})
+
+	t.Run("restore only runs for deleted observations", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			model  func(testFixture, *string) Model
+			handle func(Model, string) (tea.Model, tea.Cmd)
+		}{
+			{
+				name: "search results",
+				model: func(fx testFixture, deletedAt *string) Model {
+					m := New(fx.store, "")
+					m.Screen = ScreenSearchResults
+					m.SearchResults = []store.SearchResult{{Observation: store.Observation{ID: fx.secondObs, DeletedAt: deletedAt}}}
+					return m
+				},
+				handle: func(m Model, key string) (tea.Model, tea.Cmd) {
+					return m.handleSearchResultsKeys(key)
+				},
+			},
+			{
+				name: "recent",
+				model: func(fx testFixture, deletedAt *string) Model {
+					m := New(fx.store, "")
+					m.Screen = ScreenRecent
+					m.RecentObservations = []store.Observation{{ID: fx.secondObs, DeletedAt: deletedAt}}
+					return m
+				},
+				handle: func(m Model, key string) (tea.Model, tea.Cmd) {
+					return m.handleRecentKeys(key)
+				},
+			},
+			{
+				name: "session detail",
+				model: func(fx testFixture, deletedAt *string) Model {
+					m := New(fx.store, "")
+					m.Screen = ScreenSessionDetail
+					m.SessionObservations = []store.Observation{{ID: fx.secondObs, DeletedAt: deletedAt}}
+					return m
+				},
+				handle: func(m Model, key string) (tea.Model, tea.Cmd) {
+					return m.handleSessionDetailKeys(key)
+				},
+			},
+		} {
+			t.Run(tc.name+" deleted", func(t *testing.T) {
+				fx := newTestFixture(t)
+				if err := fx.store.DeleteObservation(fx.secondObs, false); err != nil {
+					t.Fatalf("DeleteObservation: %v", err)
+				}
+				m := tc.model(fx, &deletedAt)
+
+				_, cmd := tc.handle(m, "r")
+				if cmd == nil {
+					t.Fatal("restore should return command for deleted observation")
+				}
+				msg := cmd()
+				if _, ok := msg.(observationRestoredMsg); !ok {
+					t.Fatalf("restore command message type = %T", msg)
+				}
+			})
+
+			t.Run(tc.name+" active", func(t *testing.T) {
+				fx := newTestFixture(t)
+				m := tc.model(fx, nil)
+
+				updatedModel, cmd := tc.handle(m, "r")
+				updated := updatedModel.(Model)
+				if cmd != nil {
+					t.Fatal("restore should no-op for active observation")
+				}
+				if updated.Screen == ScreenConfirmDelete || updated.Confirm.Action != confirmNone {
+					t.Fatalf("active restore changed confirmation state: screen=%v confirm=%+v", updated.Screen, updated.Confirm)
+				}
+			})
+		}
+	})
+}
+
+func TestTUITrashKeysRestoreAndPurge(t *testing.T) {
+	deletedAt := "2026-06-08 10:00:00"
+	fx := newTestFixture(t)
+	if err := fx.store.DeleteObservation(fx.obsID, false); err != nil {
+		t.Fatalf("DeleteObservation: %v", err)
+	}
+
+	m := New(fx.store, "")
+	m.Screen = ScreenTrash
+	m.Height = 14
+	m.TrashObservations = []store.Observation{
+		{ID: fx.obsID, DeletedAt: &deletedAt},
+		{ID: fx.secondObs, DeletedAt: &deletedAt},
+		{ID: 33, DeletedAt: &deletedAt},
+		{ID: 44, DeletedAt: &deletedAt},
+	}
+	m.Cursor = 2
+
+	updatedModel, _ := m.handleTrashKeys("down")
+	updated := updatedModel.(Model)
+	if updated.Cursor != 3 || updated.Scroll != 1 {
+		t.Fatalf("trash down cursor/scroll = %d/%d, want 3/1", updated.Cursor, updated.Scroll)
+	}
+	updatedModel, _ = updated.handleTrashKeys("up")
+	updated = updatedModel.(Model)
+	if updated.Cursor != 2 || updated.Scroll != 1 {
+		t.Fatalf("trash up cursor/scroll = %d/%d, want 2/1", updated.Cursor, updated.Scroll)
+	}
+
+	m.Cursor = 0
+	updatedModel, cmd := m.handleTrashKeys("r")
+	updated = updatedModel.(Model)
+	if cmd == nil {
+		t.Fatal("trash r should return restore command")
+	}
+	if updated.Screen != ScreenTrash {
+		t.Fatalf("trash r screen = %v, want %v", updated.Screen, ScreenTrash)
+	}
+	if _, ok := cmd().(observationRestoredMsg); !ok {
+		t.Fatalf("trash restore command message type unexpected")
+	}
+
+	updatedModel, cmd = m.handleTrashKeys("delete")
+	updated = updatedModel.(Model)
+	if cmd != nil {
+		t.Fatal("trash delete should wait for confirmation")
+	}
+	if updated.Screen != ScreenConfirmDelete || updated.Confirm.Action != confirmPurgeObservation || updated.Confirm.ReturnScreen != ScreenTrash {
+		t.Fatalf("trash delete confirmation = screen %v confirm %+v", updated.Screen, updated.Confirm)
+	}
+
+	updatedModel, cmd = m.handleTrashKeys("enter")
+	updated = updatedModel.(Model)
+	if updated.PrevScreen != ScreenTrash || cmd == nil {
+		t.Fatal("trash enter should request detail with previous screen set to trash")
+	}
+
+	updatedModel, cmd = m.handleTrashKeys("esc")
+	updated = updatedModel.(Model)
+	if updated.Screen != ScreenDashboard || updated.Cursor != 0 || updated.Scroll != 0 || cmd == nil {
+		t.Fatal("trash esc should return dashboard and refresh stats")
+	}
+	m.Screen = ScreenTrash
+	updatedModel, cmd = m.handleTrashKeys("q")
+	updated = updatedModel.(Model)
+	if updated.Screen != ScreenDashboard || cmd == nil {
+		t.Fatal("trash q should return dashboard and refresh stats")
+	}
+}
+
+func TestTUIConfirmDeleteKeys(t *testing.T) {
+	for _, key := range []string{"y", "Y", "enter"} {
+		t.Run("purge "+key, func(t *testing.T) {
+			fx := newTestFixture(t)
+			if err := fx.store.DeleteObservation(fx.obsID, false); err != nil {
+				t.Fatalf("DeleteObservation: %v", err)
+			}
+			m := New(fx.store, "")
+			m.Screen = ScreenConfirmDelete
+			m.Confirm = confirmState{
+				Action:        confirmPurgeObservation,
+				ObservationID: fx.obsID,
+				ReturnScreen:  ScreenTrash,
+			}
+
+			_, cmd := m.handleConfirmDeleteKeys(key)
+			if cmd == nil {
+				t.Fatalf("%s should return purge command", key)
+			}
+			if _, ok := cmd().(observationPurgedMsg); !ok {
+				t.Fatalf("%s command should purge observation", key)
+			}
+		})
+
+		t.Run("delete session "+key, func(t *testing.T) {
+			fx := newTestFixture(t)
+			m := New(fx.store, "")
+			m.Screen = ScreenConfirmDelete
+			m.Confirm = confirmState{
+				Action:       confirmDeleteSession,
+				SessionID:    fx.otherSession,
+				ReturnScreen: ScreenSessions,
+			}
+
+			_, cmd := m.handleConfirmDeleteKeys(key)
+			if cmd == nil {
+				t.Fatalf("%s should return session cascade command", key)
+			}
+			if _, ok := cmd().(sessionDeletedMsg); !ok {
+				t.Fatalf("%s command should delete session cascade", key)
+			}
+		})
+	}
+
+	for _, key := range []string{"n", "N", "esc", "q"} {
+		t.Run("cancel "+key, func(t *testing.T) {
+			m := New(nil, "")
+			m.Screen = ScreenConfirmDelete
+			m.Confirm = confirmState{
+				Action:        confirmPurgeObservation,
+				ObservationID: 12,
+				ReturnScreen:  ScreenTrash,
+			}
+
+			updatedModel, cmd := m.handleConfirmDeleteKeys(key)
+			updated := updatedModel.(Model)
+			if cmd != nil {
+				t.Fatalf("%s cancel should not return command", key)
+			}
+			if updated.Screen != ScreenTrash {
+				t.Fatalf("%s cancel screen = %v, want %v", key, updated.Screen, ScreenTrash)
+			}
+			if updated.Confirm != (confirmState{}) {
+				t.Fatalf("%s cancel should clear confirm state: %+v", key, updated.Confirm)
+			}
+		})
+	}
+
+	t.Run("operation result returns from confirmation before refresh", func(t *testing.T) {
+		fx := newTestFixture(t)
+		m := New(fx.store, "")
+		m.Screen = ScreenConfirmDelete
+		m.Confirm = confirmState{Action: confirmPurgeObservation, ReturnScreen: ScreenTrash, ObservationID: fx.obsID}
+
+		updatedModel, cmd := m.Update(observationPurgedMsg{id: fx.obsID})
+		updated := updatedModel.(Model)
+		if updated.Screen != ScreenTrash || updated.Confirm != (confirmState{}) || cmd == nil {
+			t.Fatalf("purge result should return to trash, clear confirm, and refresh: screen=%v confirm=%+v cmd=%v", updated.Screen, updated.Confirm, cmd)
+		}
+
+		m.Screen = ScreenConfirmDelete
+		m.Confirm = confirmState{Action: confirmDeleteSession, ReturnScreen: ScreenSessions, SessionID: fx.sessionID}
+		updatedModel, cmd = m.Update(sessionDeletedMsg{sessionID: fx.sessionID})
+		updated = updatedModel.(Model)
+		if updated.Screen != ScreenSessions || updated.Confirm != (confirmState{}) || cmd == nil {
+			t.Fatalf("session delete result should return to sessions, clear confirm, and refresh: screen=%v confirm=%+v cmd=%v", updated.Screen, updated.Confirm, cmd)
+		}
+	})
+}
+
+func TestTUIDeleteNonEmptySessionRequiresConfirmation(t *testing.T) {
+	fx := newTestFixture(t)
+	m := New(fx.store, "")
+	m.Screen = ScreenSessions
+	m.Sessions = []store.SessionSummary{
+		{ID: fx.sessionID, ObservationCount: 2},
+		{ID: fx.otherSession, ObservationCount: 0},
+	}
+
+	updatedModel, cmd := m.handleSessionsKeys("d")
+	updated := updatedModel.(Model)
+	if cmd != nil {
+		t.Fatal("session delete should not run command before confirmation")
+	}
+	if updated.Screen != ScreenConfirmDelete || updated.Confirm.Action != confirmDeleteSession || updated.Confirm.SessionID != fx.sessionID {
+		t.Fatalf("non-empty session confirmation = screen %v confirm %+v", updated.Screen, updated.Confirm)
+	}
+	if updated.Confirm.ReturnScreen != ScreenSessions || updated.Confirm.ObservationCount != 2 {
+		t.Fatalf("non-empty session return/count = %v/%d", updated.Confirm.ReturnScreen, updated.Confirm.ObservationCount)
+	}
+	if !strings.Contains(updated.Confirm.Body, "permanently delete all 2 memories") || !strings.Contains(updated.Confirm.Body, "cannot be recovered") {
+		t.Fatalf("warning body = %q", updated.Confirm.Body)
+	}
+	if _, err := fx.store.GetSession(fx.sessionID); err != nil {
+		t.Fatalf("session was deleted before confirmation: %v", err)
+	}
+
+	m.Cursor = 1
+	updatedModel, cmd = m.handleSessionsKeys("delete")
+	updated = updatedModel.(Model)
+	if cmd != nil {
+		t.Fatal("empty session delete should also wait for confirmation")
+	}
+	if updated.Screen != ScreenConfirmDelete || updated.Confirm.SessionID != fx.otherSession || updated.Confirm.ObservationCount != 0 {
+		t.Fatalf("empty session confirmation = screen %v confirm %+v", updated.Screen, updated.Confirm)
+	}
+
+	_, cmd = updated.handleConfirmDeleteKeys("enter")
+	if cmd == nil {
+		t.Fatal("empty session confirmation should return cascade command")
+	}
+	if _, ok := cmd().(sessionDeletedMsg); !ok {
+		t.Fatalf("empty session confirmation command should cascade delete")
 	}
 }
 

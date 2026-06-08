@@ -34,8 +34,27 @@ const (
 	ScreenSessions
 	ScreenSessionDetail
 	ScreenTrash
+	ScreenConfirmDelete
 	ScreenSetup
 )
+
+type confirmAction int
+
+const (
+	confirmNone confirmAction = iota
+	confirmPurgeObservation
+	confirmDeleteSession
+)
+
+type confirmState struct {
+	Action           confirmAction
+	Title            string
+	Body             string
+	ObservationID    int64
+	SessionID        string
+	ReturnScreen     Screen
+	ObservationCount int
+}
 
 // ─── Custom Messages ─────────────────────────────────────────────────────────
 
@@ -142,6 +161,9 @@ type Model struct {
 
 	// Recycle bin
 	TrashObservations []store.Observation
+
+	// Destructive action confirmation
+	Confirm confirmState
 
 	// Observation detail
 	SelectedObservation *store.Observation
