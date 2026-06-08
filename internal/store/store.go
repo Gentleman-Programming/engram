@@ -2639,6 +2639,13 @@ func (s *Store) SearchPrompts(query string, project string, limit int) ([]Prompt
 
 // ─── Delete Session ──────────────────────────────────────────────────────────
 
+type DeleteSessionCascadeResult struct {
+	SessionID           string `json:"session_id"`
+	ObservationsDeleted int64  `json:"observations_deleted"`
+	PromptsDeleted      int64  `json:"prompts_deleted"`
+	SessionsDeleted     int64  `json:"sessions_deleted"`
+}
+
 // DeleteSession hard-deletes a session and its prompts.
 // It returns ErrSessionHasObservations if the session has any observations
 // (including soft-deleted ones) to prevent orphaned rows.
@@ -2713,6 +2720,121 @@ func (s *Store) DeleteSession(id string) error {
 
 		return nil
 	})
+}
+
+func (s *Store) DeleteSessionCascade(id string) (*DeleteSessionCascadeResult, error) {
+	result := &DeleteSessionCascadeResult{SessionID: id}
+	err := s.withTx(func(tx *sql.Tx) error {
+		var project string
+		if err := tx.QueryRow(`SELECT project FROM sessions WHERE id = ?`, id).Scan(&project); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("%w: %q", ErrSessionNotFound, id)
+			}
+			return fmt.Errorf("delete session cascade: load session: %w", err)
+		}
+
+		var enrolled int
+		if err := tx.QueryRow(`SELECT 1 FROM sync_enrolled_projects WHERE project = ? LIMIT 1`, project).Scan(&enrolled); err != nil {
+			if !errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("delete session cascade: check enrollment: %w", err)
+			}
+		}
+
+		rows, err := s.queryItHook(tx, `
+			SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
+			       scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
+			FROM observations
+			WHERE session_id = ?
+			ORDER BY id ASC
+		`, id)
+		if err != nil {
+			return fmt.Errorf("delete session cascade: list observations: %w", err)
+		}
+		var observations []Observation
+		for rows.Next() {
+			var obs Observation
+			if err := rows.Scan(
+				&obs.ID, &obs.SyncID, &obs.SessionID, &obs.Type, &obs.Title, &obs.Content,
+				&obs.ToolName, &obs.Project, &obs.Scope, &obs.TopicKey, &obs.RevisionCount, &obs.DuplicateCount, &obs.LastSeenAt,
+				&obs.CreatedAt, &obs.UpdatedAt, &obs.DeletedAt,
+			); err != nil {
+				return closeRowsWithError(rows, fmt.Errorf("delete session cascade: scan observation: %w", err))
+			}
+			observations = append(observations, obs)
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("delete session cascade: close observations: %w", err)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("delete session cascade: list observations: %w", err)
+		}
+
+		now := Now()
+		for _, obs := range observations {
+			if strings.TrimSpace(obs.SyncID) == "" {
+				continue
+			}
+			if _, err := s.execHook(tx, `
+				UPDATE memory_relations
+				SET judgment_status = 'orphaned',
+				    updated_at      = datetime('now')
+				WHERE source_id = ? OR target_id = ?
+			`, obs.SyncID, obs.SyncID); err != nil {
+				return fmt.Errorf("delete session cascade: orphan memory_relations: %w", err)
+			}
+			deletedAt := now
+			if obs.DeletedAt != nil && strings.TrimSpace(*obs.DeletedAt) != "" {
+				deletedAt = *obs.DeletedAt
+			}
+			if err := s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpDelete, syncObservationPayload{
+				SyncID:     obs.SyncID,
+				SessionID:  obs.SessionID,
+				Project:    obs.Project,
+				Deleted:    true,
+				DeletedAt:  &deletedAt,
+				HardDelete: true,
+			}); err != nil {
+				return fmt.Errorf("delete session cascade: enqueue observation hard-delete: %w", err)
+			}
+		}
+
+		res, err := s.execHook(tx, `DELETE FROM observations WHERE session_id = ?`, id)
+		if err != nil {
+			return fmt.Errorf("delete session cascade: delete observations: %w", err)
+		}
+		result.ObservationsDeleted, _ = res.RowsAffected()
+
+		res, err = s.execHook(tx, `DELETE FROM user_prompts WHERE session_id = ?`, id)
+		if err != nil {
+			return fmt.Errorf("delete session cascade: remove prompts: %w", err)
+		}
+		result.PromptsDeleted, _ = res.RowsAffected()
+
+		res, err = s.execHook(tx, `DELETE FROM sessions WHERE id = ?`, id)
+		if err != nil {
+			return fmt.Errorf("delete session cascade: delete session: %w", err)
+		}
+		result.SessionsDeleted, _ = res.RowsAffected()
+		if result.SessionsDeleted == 0 {
+			return fmt.Errorf("%w: %q", ErrSessionNotFound, id)
+		}
+
+		if enrolled == 1 {
+			if err := s.enqueueSyncMutationTx(tx, SyncEntitySession, id, SyncOpDelete, syncSessionPayload{
+				ID:        id,
+				Project:   project,
+				DeletedAt: &now,
+			}); err != nil {
+				return fmt.Errorf("delete session cascade: enqueue session mutation: %w", err)
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // ─── Delete Prompt ───────────────────────────────────────────────────────────
@@ -2921,6 +3043,81 @@ func (s *Store) DeleteObservation(id int64, hardDelete bool) error {
 			Deleted:    true,
 			DeletedAt:  &deletedAt,
 			HardDelete: hardDelete,
+		})
+	})
+}
+
+func (s *Store) RestoreObservation(id int64) error {
+	return s.withTx(func(tx *sql.Tx) error {
+		if _, err := s.getObservationByIDTx(tx, id, true); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrObservationNotFound
+			}
+			return err
+		}
+		if _, err := s.execHook(tx, `
+			UPDATE observations
+			SET deleted_at = NULL,
+			    updated_at = datetime('now')
+			WHERE id = ?
+		`, id); err != nil {
+			return err
+		}
+
+		restored, err := s.getObservationTx(tx, id)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(restored.SyncID) == "" {
+			return nil
+		}
+		payload := observationPayloadFromObservation(restored)
+		payload.Deleted = false
+		payload.DeletedAt = nil
+		payload.HardDelete = false
+		return s.enqueueSyncMutationTx(tx, SyncEntityObservation, restored.SyncID, SyncOpUpsert, payload)
+	})
+}
+
+func (s *Store) PurgeObservation(id int64) error {
+	return s.withTx(func(tx *sql.Tx) error {
+		obs, err := s.getObservationByIDTx(tx, id, true)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrObservationNotFound
+			}
+			return err
+		}
+
+		if strings.TrimSpace(obs.SyncID) != "" {
+			if _, err := s.execHook(tx, `
+				UPDATE memory_relations
+				SET judgment_status = 'orphaned',
+				    updated_at      = datetime('now')
+				WHERE source_id = ? OR target_id = ?
+			`, obs.SyncID, obs.SyncID); err != nil {
+				return fmt.Errorf("orphan memory_relations after purge: %w", err)
+			}
+		}
+
+		if _, err := s.execHook(tx, `DELETE FROM observations WHERE id = ?`, id); err != nil {
+			return err
+		}
+
+		if strings.TrimSpace(obs.SyncID) == "" {
+			return nil
+		}
+		deletedAt := Now()
+		if obs.DeletedAt != nil && strings.TrimSpace(*obs.DeletedAt) != "" {
+			deletedAt = *obs.DeletedAt
+		}
+		return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpDelete, syncObservationPayload{
+			SyncID:     obs.SyncID,
+			SessionID:  obs.SessionID,
+			Project:    obs.Project,
+			Deleted:    true,
+			DeletedAt:  &deletedAt,
+			HardDelete: true,
 		})
 	})
 }
@@ -5512,11 +5709,17 @@ func decodeSyncPayload(payload []byte, dest any) error {
 }
 
 func (s *Store) getObservationTx(tx *sql.Tx, id int64) (*Observation, error) {
-	row := tx.QueryRow(
-		`SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
+	return s.getObservationByIDTx(tx, id, false)
+}
+
+func (s *Store) getObservationByIDTx(tx *sql.Tx, id int64, includeDeleted bool) (*Observation, error) {
+	query := `SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
 		        scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
-		 FROM observations WHERE id = ? AND deleted_at IS NULL`, id,
-	)
+		 FROM observations WHERE id = ?`
+	if !includeDeleted {
+		query += ` AND deleted_at IS NULL`
+	}
+	row := tx.QueryRow(query, id)
 	var o Observation
 	if err := row.Scan(&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content, &o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt); err != nil {
 		return nil, err

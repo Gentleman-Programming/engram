@@ -3287,6 +3287,90 @@ func TestDeleteObservationHardDeleteDerivesProjectFromSessionWhenEntityProjectEm
 	}
 }
 
+func TestRestoreObservationClearsDeletedAtAndPreservesContent(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("sess-restore", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "sess-restore",
+		Type:      "decision",
+		Title:     "Restore memory",
+		Content:   "restore this content",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+	if err := s.DeleteObservation(id, false); err != nil {
+		t.Fatalf("DeleteObservation soft: %v", err)
+	}
+	if err := s.RestoreObservation(id); err != nil {
+		t.Fatalf("RestoreObservation: %v", err)
+	}
+
+	obs, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("GetObservation after restore: %v", err)
+	}
+	if obs.DeletedAt != nil {
+		t.Fatalf("restored observation still deleted: %+v", obs)
+	}
+	if obs.Content != "restore this content" {
+		t.Fatalf("restored content = %q", obs.Content)
+	}
+}
+
+func TestPurgeObservationRemovesDeletedObservationAndOrphansRelations(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("sess-purge", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "sess-purge",
+		Type:      "decision",
+		Title:     "Purge memory",
+		Content:   "purge this content",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+	obs, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("GetObservation: %v", err)
+	}
+	if _, err := s.db.Exec(`
+		INSERT INTO memory_relations (sync_id, source_id, target_id, relation, judgment_status, created_at, updated_at)
+		VALUES (?, ?, 'other-sync-id', 'related', 'pending', datetime('now'), datetime('now'))
+	`, "rel-"+obs.SyncID, obs.SyncID); err != nil {
+		t.Fatalf("insert relation: %v", err)
+	}
+	if err := s.DeleteObservation(id, false); err != nil {
+		t.Fatalf("DeleteObservation soft: %v", err)
+	}
+	if err := s.PurgeObservation(id); err != nil {
+		t.Fatalf("PurgeObservation: %v", err)
+	}
+
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE id = ?`, id).Scan(&count); err != nil {
+		t.Fatalf("count observation: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("purged observation count = %d, want 0", count)
+	}
+	var status string
+	if err := s.db.QueryRow(`SELECT judgment_status FROM memory_relations WHERE sync_id = ?`, "rel-"+obs.SyncID).Scan(&status); err != nil {
+		t.Fatalf("scan relation: %v", err)
+	}
+	if status != "orphaned" {
+		t.Fatalf("relation status = %q, want orphaned", status)
+	}
+}
+
 func TestDeleteObservationNotFound(t *testing.T) {
 	s := newTestStore(t)
 	err := s.DeleteObservation(999999, false)
@@ -7222,6 +7306,73 @@ func TestDeleteSession_HasSoftDeletedObservations(t *testing.T) {
 	err = s.DeleteSession("sess-soft")
 	if !errors.Is(err, ErrSessionHasObservations) {
 		t.Fatalf("expected ErrSessionHasObservations for soft-deleted obs, got: %v", err)
+	}
+}
+
+func TestDeleteSessionCascadePermanentlyDeletesSessionMemories(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("sess-cascade", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	firstID, err := s.AddObservation(AddObservationParams{
+		SessionID: "sess-cascade",
+		Type:      "decision",
+		Title:     "First cascade memory",
+		Content:   "first cascade content",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation first: %v", err)
+	}
+	secondID, err := s.AddObservation(AddObservationParams{
+		SessionID: "sess-cascade",
+		Type:      "bugfix",
+		Title:     "Second cascade memory",
+		Content:   "second cascade content",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation second: %v", err)
+	}
+	if _, err := s.AddPrompt(AddPromptParams{
+		SessionID: "sess-cascade",
+		Content:   "cascade prompt",
+		Project:   "engram",
+	}); err != nil {
+		t.Fatalf("AddPrompt: %v", err)
+	}
+	if err := s.DeleteObservation(secondID, false); err != nil {
+		t.Fatalf("DeleteObservation soft: %v", err)
+	}
+
+	result, err := s.DeleteSessionCascade("sess-cascade")
+	if err != nil {
+		t.Fatalf("DeleteSessionCascade: %v", err)
+	}
+	if result.SessionID != "sess-cascade" {
+		t.Fatalf("SessionID = %q, want sess-cascade", result.SessionID)
+	}
+	if result.ObservationsDeleted != 2 {
+		t.Fatalf("ObservationsDeleted = %d, want 2", result.ObservationsDeleted)
+	}
+	if result.PromptsDeleted != 1 {
+		t.Fatalf("PromptsDeleted = %d, want 1", result.PromptsDeleted)
+	}
+	if result.SessionsDeleted != 1 {
+		t.Fatalf("SessionsDeleted = %d, want 1", result.SessionsDeleted)
+	}
+
+	var obsCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE id IN (?, ?)`, firstID, secondID).Scan(&obsCount); err != nil {
+		t.Fatalf("count observations: %v", err)
+	}
+	if obsCount != 0 {
+		t.Fatalf("cascade observation count = %d, want 0", obsCount)
+	}
+	if _, err := s.GetSession("sess-cascade"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetSession after cascade err = %v, want sql.ErrNoRows", err)
 	}
 }
 
