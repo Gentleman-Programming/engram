@@ -109,6 +109,8 @@ engram tui
 
 **Navigation**: `j/k` vim keys, `Enter` to drill in, `c` to copy content to clipboard (OSC 52), `/` to search, `Esc` back. Catppuccin Mocha theme.
 
+The TUI can show deleted memories in Search memories, Recent observations, Browse sessions, and Recycle Bin; deleted rows render red with `[deleted]`, can be restored with `r`, and can be permanently removed with `d` after confirmation.
+
 ## Git Sync
 
 Share memories across machines. Uses compressed chunks — no merge conflicts, no huge files.

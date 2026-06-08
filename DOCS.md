@@ -745,7 +745,7 @@ For monorepos, detection now honors the **nearest** `.engram/config.json` at or 
 
 ### Admin tools
 
-`mem_delete` is ID-based and requires `id`; optional `hard_delete=true` permanently deletes the observation. It does not accept or auto-detect `project`.
+`mem_delete` is ID-based and requires `id`; it always soft-deletes by setting `deleted_at` while preserving the original content and metadata. It does not accept or auto-detect `project`, and it does not expose permanent deletion.
 
 `mem_merge_projects` requires `from` (comma-separated source project names) and `to` (canonical target project name). It does not accept or auto-detect `project`.
 
@@ -816,7 +816,7 @@ Suggest a stable `topic_key` from `type + title` (or content fallback). Uses fam
 
 ### mem_delete
 
-Delete an observation by ID. Uses soft-delete by default (`deleted_at`); optional hard-delete for permanent removal.
+Soft-delete an observation by ID. The MCP tool always sets `deleted_at` while preserving the original content and metadata; permanent removal is handled by local curation flows such as the TUI Recycle Bin, not by MCP.
 
 ### mem_save_prompt
 
@@ -1149,12 +1149,15 @@ Interactive Bubbletea-based terminal UI. Launch with `engram tui`.
 | **Timeline**            | Chronological context around an observation (before/after)        |
 | **Sessions**            | Browse all sessions                                               |
 | **Session Detail**      | Observations within a specific session                            |
+| **Recycle Bin**         | Deleted memories with restore and permanent-delete actions        |
 
 ### Navigation
 
 - `j/k` or arrow keys — Navigate lists
 - `Enter` — Select / drill into detail
 - `c` — Copy observation content to clipboard (OSC 52; works in search results, recent list, detail, and session views)
+- `r` — Restore a deleted observation from deleted-memory views
+- `d` or `delete` — Delete the selected item after confirmation; deleted observations can be permanently removed from deleted-memory views
 - `t` — View timeline for selected observation
 - `s` or `/` — Quick search from any screen
 - `Esc` or `q` — Go back / quit
@@ -1164,6 +1167,7 @@ Interactive Bubbletea-based terminal UI. Launch with `engram tui`.
 
 - **Catppuccin Mocha** color palette
 - **`(active)` badge** — shown next to sessions and observations from active sessions, sorted to top
+- **Deleted-memory rows** — Search memories, Recent observations, Browse sessions, and Recycle Bin can include deleted observations; they render red with `[deleted]`
 - **Scroll indicators** — position in long lists (e.g. "showing 1-20 of 50")
 - **2-line items** — each observation shows title + content preview
 

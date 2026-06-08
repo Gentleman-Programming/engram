@@ -55,7 +55,7 @@ Next session starts → Previous session context is injected automatically
 |------|---------|
 | `mem_save` | Save a structured observation (decision, bugfix, pattern, etc.); best-effort captures process-local current prompt context when available unless `capture_prompt=false` |
 | `mem_update` | Update an existing observation by ID |
-| `mem_delete` | Delete an observation (soft-delete by default, hard-delete optional) |
+| `mem_delete` | Soft-delete an observation by setting `deleted_at` while preserving content |
 | `mem_suggest_topic_key` | Suggest a stable `topic_key` for evolving topics before saving |
 | `mem_search` | Full-text search across all memories |
 | `mem_session_summary` | Save end-of-session summary |
@@ -95,8 +95,9 @@ Token-efficient memory retrieval — don't dump everything, drill in:
 - Exact dedupe prevents repeated inserts in a rolling window (hash + project + scope + type + title)
 - Duplicates update metadata (`duplicate_count`, `last_seen_at`, `updated_at`) instead of creating new rows
 - Topic upserts increment `revision_count` so evolving decisions stay in one memory
-- `mem_delete` uses soft-delete by default (`deleted_at`), with optional hard delete
-- `mem_search`, `mem_context`, recent lists, and timeline ignore soft-deleted observations
+- MCP `mem_delete` soft-deletes by setting `deleted_at` while preserving content and metadata
+- `mem_search`, `mem_context`, recent lists, and timeline ignore soft-deleted observations by default; TUI browse paths can opt into deleted rows for restore workflows
+- The TUI Recycle Bin can restore deleted observations or permanently purge them after confirmation
 
 ---
 
@@ -185,7 +186,7 @@ architecture/auth/model/detail   ✗ three levels — flatten to two
 
 ### Lifecycle and pruning
 
-Topic keys are not pruned automatically. An observation updated via upsert keeps a single row with the latest content and an incremented `revision_count`. Use `mem_delete` to remove an observation (soft-delete by default) when a topic is no longer relevant. Soft-deleted observations are excluded from search and context but their IDs remain in the store for audit purposes. Use `--hard` to remove them permanently.
+Topic keys are not pruned automatically. An observation updated via upsert keeps a single row with the latest content and an incremented `revision_count`. Use `mem_delete` to soft-delete an observation when a topic is no longer relevant. Soft-deleted observations are excluded from default search and context, while IDs and content remain in the store for audit and restore workflows. The TUI Recycle Bin can restore them or permanently purge them after confirmation.
 
 ### Scope interaction
 
