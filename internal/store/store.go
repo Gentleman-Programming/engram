@@ -153,10 +153,11 @@ type TimelineResult struct {
 }
 
 type SearchOptions struct {
-	Type    string `json:"type,omitempty"`
-	Project string `json:"project,omitempty"`
-	Scope   string `json:"scope,omitempty"`
-	Limit   int    `json:"limit,omitempty"`
+	Type      string `json:"type,omitempty"`
+	Project   string `json:"project,omitempty"`
+	Scope     string `json:"scope,omitempty"`
+	Limit     int    `json:"limit,omitempty"`
+	MatchMode string `json:"match_mode,omitempty"` // "all" (default) | "any"
 }
 
 type AddObservationParams struct {
@@ -2956,6 +2957,14 @@ func (s *Store) Timeline(observationID int64, before, after int) (*TimelineResul
 // ─── Search (FTS5) ───────────────────────────────────────────────────────────
 
 func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error) {
+	// Validate match_mode early so invalid values always error regardless of query shape.
+	switch opts.MatchMode {
+	case "", "all", "any":
+		// valid
+	default:
+		return nil, fmt.Errorf("invalid match_mode %q: must be \"all\" or \"any\"", opts.MatchMode)
+	}
+
 	// Normalize project filter so "Engram" finds records stored as "engram"
 	opts.Project, _ = NormalizeProject(opts.Project)
 
@@ -3011,8 +3020,13 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 		}
 	}
 
-	// Sanitize query for FTS5 — wrap each term in quotes to avoid syntax errors
-	ftsQuery := sanitizeFTS(query)
+	// Build FTS5 query: "all" (default) uses AND semantics; "any" uses OR for broader recall.
+	var ftsQuery string
+	if opts.MatchMode == "any" {
+		ftsQuery = sanitizeFTSCandidates(query)
+	} else {
+		ftsQuery = sanitizeFTS(query)
+	}
 
 	sqlQ := `
 		SELECT o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,

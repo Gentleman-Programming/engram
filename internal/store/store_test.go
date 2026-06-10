@@ -8289,3 +8289,121 @@ func TestMostRecentActiveSessionScopedByProject(t *testing.T) {
 		t.Fatalf("expected no active session for engram when only 'other' has one, got ok=%v", ok)
 	}
 }
+
+// ─── match_mode tests (issue #352) ──────────────────────────────────────────
+
+// seedMatchModeFixture creates a session and three observations with partial
+// token overlap — no single observation contains all three query tokens.
+//
+//	obs1: title "Auth session middleware"       content ""
+//	obs2: title "Compliance audit notes"        content "session policy"
+//	obs3: title "OAuth tokens"                  content "auth and compliance"
+func seedMatchModeFixture(t *testing.T, s *Store) {
+	t.Helper()
+	if err := s.CreateSession("s-matchmode", "engram", "/tmp"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	obs := []AddObservationParams{
+		{SessionID: "s-matchmode", Type: "decision", Title: "Auth session middleware", Content: "", Project: "engram", Scope: "project"},
+		{SessionID: "s-matchmode", Type: "decision", Title: "Compliance audit notes", Content: "session policy", Project: "engram", Scope: "project"},
+		{SessionID: "s-matchmode", Type: "decision", Title: "OAuth tokens", Content: "auth and compliance", Project: "engram", Scope: "project"},
+	}
+	for _, p := range obs {
+		if _, err := s.AddObservation(p); err != nil {
+			t.Fatalf("seed observation %q: %v", p.Title, err)
+		}
+	}
+}
+
+// TestSearchMatchMode_DefaultIsAND verifies that the default (AND) behaviour
+// returns 0 results when no single observation contains all query tokens.
+func TestSearchMatchMode_DefaultIsAND(t *testing.T) {
+	s := newTestStore(t)
+	seedMatchModeFixture(t, s)
+
+	results, err := s.Search("auth compliance session", SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("Search error: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("expected 0 results for AND query, got %d", len(results))
+	}
+}
+
+// TestSearchMatchMode_AllExplicit verifies that MatchMode "all" behaves
+// identically to the default AND mode.
+func TestSearchMatchMode_AllExplicit(t *testing.T) {
+	s := newTestStore(t)
+	seedMatchModeFixture(t, s)
+
+	results, err := s.Search("auth compliance session", SearchOptions{Project: "engram", Limit: 10, MatchMode: "all"})
+	if err != nil {
+		t.Fatalf("Search error: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("expected 0 results for explicit match_mode=all, got %d", len(results))
+	}
+}
+
+// TestSearchMatchMode_Any verifies that MatchMode "any" returns all three
+// observations because each contains at least one of the query tokens.
+func TestSearchMatchMode_Any(t *testing.T) {
+	s := newTestStore(t)
+	seedMatchModeFixture(t, s)
+
+	results, err := s.Search("auth compliance session", SearchOptions{Project: "engram", Limit: 10, MatchMode: "any"})
+	if err != nil {
+		t.Fatalf("Search error: %v", err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("expected 3 results for match_mode=any, got %d", len(results))
+	}
+}
+
+// TestSearchMatchMode_InvalidReturnsError verifies that an unrecognised
+// match_mode value returns an explicit error regardless of query shape.
+func TestSearchMatchMode_InvalidReturnsError(t *testing.T) {
+	s := newTestStore(t)
+	seedMatchModeFixture(t, s)
+
+	_, err := s.Search("auth compliance session", SearchOptions{Project: "engram", Limit: 10, MatchMode: "or"})
+	if err == nil {
+		t.Fatalf("expected error for invalid match_mode, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid match_mode") {
+		t.Fatalf("expected error to contain \"invalid match_mode\", got: %v", err)
+	}
+}
+
+// TestSearchMatchMode_SingleToken verifies that a single-token query returns
+// the same result regardless of match_mode (both modes are equivalent for one
+// token because AND and OR over a single term are identical).
+func TestSearchMatchMode_SingleToken(t *testing.T) {
+	s := newTestStore(t)
+	seedMatchModeFixture(t, s)
+
+	defaultRes, err := s.Search("auth", SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("default Search error: %v", err)
+	}
+	anyRes, err := s.Search("auth", SearchOptions{Project: "engram", Limit: 10, MatchMode: "any"})
+	if err != nil {
+		t.Fatalf("any Search error: %v", err)
+	}
+	if len(defaultRes) != len(anyRes) {
+		t.Fatalf("single-token results differ: default=%d any=%d", len(defaultRes), len(anyRes))
+	}
+}
+
+// TestSearchMatchMode_EmptyQueryAnyReturnsError pins that Search("", …{MatchMode:"any"})
+// returns an error — the FTS5 engine rejects an empty match expression, and this
+// behaviour is the same as the default AND mode with an empty query.
+func TestSearchMatchMode_EmptyQueryAnyReturnsError(t *testing.T) {
+	s := newTestStore(t)
+	seedMatchModeFixture(t, s)
+
+	_, err := s.Search("", SearchOptions{Project: "engram", Limit: 10, MatchMode: "any"})
+	if err == nil {
+		t.Fatal("expected error for empty query with match_mode=any, got nil")
+	}
+}
