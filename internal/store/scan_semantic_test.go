@@ -260,11 +260,12 @@ func TestScanProject_Semantic_DryRunDoesNotPersist(t *testing.T) {
 	}
 }
 
-// ─── C.5b — TestScanProject_Semantic_NotConflictSkipped ──────────────────────
+// ─── C.5b — TestScanProject_Semantic_NotConflictPersisted ───────────────────
 
-// TestScanProject_Semantic_NotConflictSkipped verifies that verdicts of
-// "not_conflict" are counted in SemanticSkipped and do NOT produce relation rows.
-func TestScanProject_Semantic_NotConflictSkipped(t *testing.T) {
+// TestScanProject_Semantic_NotConflictPersisted verifies that verdicts of
+// "not_conflict" from automated scans are now persisted (counted in
+// SemanticJudged) and produce a relation row with relation='not_conflict'.
+func TestScanProject_Semantic_NotConflictPersisted(t *testing.T) {
 	s := newTestStore(t)
 	seedSimilarPair(t, s, "sem-skip-project")
 
@@ -291,19 +292,17 @@ func TestScanProject_Semantic_NotConflictSkipped(t *testing.T) {
 		t.Fatalf("ScanProject: %v", err)
 	}
 
-	if result.SemanticSkipped == 0 {
-		t.Errorf("SemanticSkipped: want > 0; got 0 (CandidatesFound=%d)", result.CandidatesFound)
-	}
-	if result.SemanticJudged != 0 {
-		t.Errorf("SemanticJudged: want 0; got %d", result.SemanticJudged)
+	if result.SemanticJudged == 0 {
+		t.Errorf("SemanticJudged: want > 0; got 0 (not_conflict should now be persisted)")
 	}
 
 	var count int
 	_ = s.db.QueryRow(
-		`SELECT count(*) FROM memory_relations WHERE marked_by_actor = 'engram'`,
+		`SELECT count(*) FROM memory_relations
+		 WHERE marked_by_actor = 'engram' AND relation = 'not_conflict'`,
 	).Scan(&count)
-	if count != 0 {
-		t.Errorf("expected no 'engram' relation rows for not_conflict; got %d", count)
+	if count == 0 {
+		t.Errorf("expected not_conflict relation rows from ScanProject; got 0")
 	}
 }
 

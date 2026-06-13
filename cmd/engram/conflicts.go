@@ -134,10 +134,11 @@ func cmdConflictsList(cfg store.Config) {
 	defer s.Close()
 
 	opts := store.ListRelationsOptions{
-		Project:   proj,
-		Status:    statusFlag,
-		SinceTime: sinceTime,
-		Limit:     limit,
+		Project:            proj,
+		Status:             statusFlag,
+		ExcludeNotConflict: true,
+		SinceTime:          sinceTime,
+		Limit:              limit,
 	}
 
 	items, err := s.ListRelations(opts)

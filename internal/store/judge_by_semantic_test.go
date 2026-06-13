@@ -140,11 +140,11 @@ func TestJudgeBySemantic_UpsertIdempotency(t *testing.T) {
 	}
 }
 
-// ─── C.2c — TestJudgeBySemantic_NotConflictIsNoOp ────────────────────────────
+// ─── C.2c — TestJudgeBySemantic_NotConflictPersists ─────────────────────────
 
-// TestJudgeBySemantic_NotConflictIsNoOp verifies that passing Relation="not_conflict"
-// inserts no row and returns an empty sync_id without error.
-func TestJudgeBySemantic_NotConflictIsNoOp(t *testing.T) {
+// TestJudgeBySemantic_NotConflictPersists verifies that passing Relation="not_conflict"
+// inserts a row and returns a non-empty sync_id, so the pair is tracked as evaluated.
+func TestJudgeBySemantic_NotConflictPersists(t *testing.T) {
 	s := setupRelationsStore(t)
 
 	_, syncA := addTestObs(t, s, "Unrelated auth decision", "decision", "testproject", "project")
@@ -161,20 +161,20 @@ func TestJudgeBySemantic_NotConflictIsNoOp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("JudgeBySemantic(not_conflict): unexpected error: %v", err)
 	}
-	if syncID != "" {
-		t.Errorf("JudgeBySemantic(not_conflict): expected empty sync_id; got %q", syncID)
+	if syncID == "" {
+		t.Errorf("JudgeBySemantic(not_conflict): expected non-empty sync_id; got empty")
 	}
 
-	// No row must exist for this pair.
+	// A row must exist for this pair with relation = 'not_conflict'.
 	var count int
 	if err := s.db.QueryRow(
-		`SELECT count(*) FROM memory_relations WHERE source_id = ? OR target_id = ?`,
-		syncA, syncA,
+		`SELECT count(*) FROM memory_relations WHERE source_id = ? AND target_id = ? AND relation = 'not_conflict'`,
+		syncA, syncB,
 	).Scan(&count); err != nil {
 		t.Fatalf("count query: %v", err)
 	}
-	if count != 0 {
-		t.Errorf("expected 0 rows for not_conflict pair; got %d", count)
+	if count != 1 {
+		t.Errorf("expected 1 not_conflict row for pair; got %d", count)
 	}
 }
 
@@ -381,8 +381,8 @@ func TestJudgeBySemantic_CrossProjectRejected(t *testing.T) {
 
 // ─── C.2f — TestJudgeBySemantic_AllValidRelations ────────────────────────────
 
-// TestJudgeBySemantic_AllValidRelations verifies that all 5 non-not_conflict
-// relation verbs are accepted by JudgeBySemantic.
+// TestJudgeBySemantic_AllValidRelations verifies that all 6 relation verbs
+// (including not_conflict) are accepted and persisted by JudgeBySemantic.
 func TestJudgeBySemantic_AllValidRelations(t *testing.T) {
 	validRelations := []string{
 		RelationRelated,
@@ -390,6 +390,7 @@ func TestJudgeBySemantic_AllValidRelations(t *testing.T) {
 		RelationScoped,
 		RelationConflictsWith,
 		RelationSupersedes,
+		RelationNotConflict,
 	}
 
 	for _, rel := range validRelations {

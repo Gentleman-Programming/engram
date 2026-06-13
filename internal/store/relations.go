@@ -102,6 +102,9 @@ type ListRelationsOptions struct {
 	Project string
 	// Status filters by judgment_status. Empty means no status filter.
 	Status string
+	// ExcludeNotConflict removes rows with relation='not_conflict' from results.
+	// Set to true for conflict-focused views (dashboard, CLI conflicts list).
+	ExcludeNotConflict bool
 	// SinceTime filters to rows created_at >= SinceTime. Zero value means no filter.
 	SinceTime time.Time
 	// Limit caps the number of rows returned. 0 or negative means no limit.
@@ -227,7 +230,8 @@ type JudgeBySemanticParams struct {
 	// TargetID is the TEXT sync_id of the target observation (required).
 	TargetID string
 	// Relation is the verdict verb (required); must be in validRelationVerbs.
-	// Passing "not_conflict" is a no-op: no row is inserted and no error is returned.
+	// Including "not_conflict" which persists a row to track that the pair was
+	// evaluated and found non-conflicting.
 	Relation string
 	// Confidence is the LLM's self-reported confidence score [0.0, 1.0].
 	Confidence float64
@@ -735,8 +739,10 @@ func validateCrossProjectGuard(tx *sql.Tx, sourceID, targetID string) error {
 // the memory_relations table with system provenance (marked_by_kind="system",
 // marked_by_actor="engram", marked_by_model=params.Model).
 //
-// When params.Relation is "not_conflict" the call is a no-op: no row is inserted
-// and an empty sync_id is returned without error.
+// When params.Relation is "not_conflict", a row is still inserted (or an
+// existing pending row is updated) so the pair is tracked as evaluated.
+// This resolves any pending relation annotation and prevents ScanProject
+// from re-inserting the pair on subsequent scans.
 //
 // Idempotency: if a row already exists for (source_id, target_id) in either
 // direction, the existing row is updated (UPSERT). The returned sync_id is
@@ -758,11 +764,6 @@ func (s *Store) JudgeBySemantic(p JudgeBySemanticParams) (string, error) {
 	}
 	if !isValidConfidence(p.Confidence) {
 		return "", fmt.Errorf("JudgeBySemantic: confidence %v is out of range [0.0, 1.0]", p.Confidence)
-	}
-
-	// not_conflict is a no-op.
-	if p.Relation == RelationNotConflict {
-		return "", nil
 	}
 
 	var resultSyncID string
@@ -1220,6 +1221,9 @@ func buildRelationsQuery(opts ListRelationsOptions, countOnly bool) (string, []a
 		query += ` AND r.judgment_status = ?`
 		args = append(args, opts.Status)
 	}
+	if opts.ExcludeNotConflict {
+		query += ` AND r.relation != 'not_conflict'`
+	}
 	if !opts.SinceTime.IsZero() {
 		query += ` AND r.created_at >= ?`
 		args = append(args, opts.SinceTime.UTC().Format("2006-01-02T15:04:05Z"))
@@ -1253,6 +1257,7 @@ func (s *Store) GetRelationStats(project string) (RelationStats, error) {
 	}
 
 	// Build query: when project is non-empty, filter via JOIN to observations.
+	// not_conflict rows are excluded — this is a conflict stats view.
 	var q string
 	var args []any
 	if project != "" {
@@ -1261,7 +1266,8 @@ func (s *Store) GetRelationStats(project string) (RelationStats, error) {
 			FROM memory_relations r
 			LEFT JOIN observations src ON src.sync_id = r.source_id AND src.deleted_at IS NULL
 			LEFT JOIN observations tgt ON tgt.sync_id = r.target_id AND tgt.deleted_at IS NULL
-			WHERE ifnull(src.project,'') = ? OR ifnull(tgt.project,'') = ?
+			WHERE (ifnull(src.project,'') = ? OR ifnull(tgt.project,'') = ?)
+			  AND r.relation != 'not_conflict'
 			GROUP BY r.relation, r.judgment_status
 		`
 		args = []any{project, project}
@@ -1269,6 +1275,7 @@ func (s *Store) GetRelationStats(project string) (RelationStats, error) {
 		q = `
 			SELECT relation, judgment_status, count(*) AS cnt
 			FROM memory_relations
+			WHERE relation != 'not_conflict'
 			GROUP BY relation, judgment_status
 		`
 	}
@@ -1311,9 +1318,9 @@ func (s *Store) GetRelationStats(project string) (RelationStats, error) {
 //
 // Phase 4 extension: when ScanOptions.Semantic is true, after the FTS5 candidate
 // collection a bounded worker pool calls Runner.Compare on each pair. Applied
-// scans persist non-"not_conflict" verdicts via JudgeBySemantic, while dry-runs
-// report their semantic results without persistence. Semantic=false (zero value)
-// preserves Phase 3 behaviour exactly.
+// scans persist all verdicts (including not_conflict) via JudgeBySemantic, while
+// dry-runs report their semantic results without persistence. Semantic=false (zero
+// value) preserves Phase 3 behaviour exactly.
 //
 // Returns a ScanResult with counts, a continuation cursor when another page
 // remains, and whether an insert or semantic cap was hit.
@@ -1578,13 +1585,6 @@ scan:
 						return
 					}
 
-					if verdict.Relation == RelationNotConflict && isValidConfidence(verdict.Confidence) {
-						mu.Lock()
-						result.SemanticSkipped++
-						mu.Unlock()
-						return
-					}
-
 					// Dry-runs evaluate and count valid verdicts without persistence.
 					// Invalid verdicts still flow through JudgeBySemantic so existing
 					// semantic error behavior remains unchanged.
@@ -1599,7 +1599,8 @@ scan:
 						return
 					}
 
-					// Validate and persist non-skipped verdict.
+					// Persist the verdict, including not_conflict, so the pair is tracked
+					// as evaluated and is not offered again.
 					_, judgeErr := s.JudgeBySemantic(JudgeBySemanticParams{
 						SourceID:   pair.sourceSnippet.SyncID,
 						TargetID:   pair.candidateSnippet.SyncID,
