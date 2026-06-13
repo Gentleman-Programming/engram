@@ -14,7 +14,7 @@ This is the complete technical reference for Engram. For getting started, see th
 | --------------------------------------------------------- | ------------------------------------------------------------ |
 | [Database Schema](#database-schema)                       | Tables, FTS5, SQLite config                                  |
 | [HTTP API](#http-api-endpoints)                           | All REST endpoints with request/response details             |
-| [MCP Tools](#mcp-tools-19-tools)                          | Detailed reference for all 19 memory tools                   |
+| [MCP Tools](#mcp-tools-20-tools)                          | Detailed reference for all 20 memory tools                   |
 | [MCP Project Resolution](#mcp-project-resolution)         | Auto-detection algorithm, response envelope, tool categories |
 | [Memory Protocol](#memory-protocol)                       | When/how agents should use the tools                         |
 | [Project Name Normalization](#project-name-normalization) | Auto-detection, normalization, similar-project warnings      |
@@ -768,7 +768,7 @@ Returns success even when cwd is ambiguous — empty `project` + non-empty `avai
 
 ---
 
-## MCP Tools (19 tools)
+## MCP Tools (20 tools)
 
 ### mem_search
 
@@ -777,6 +777,8 @@ Search persistent memory across all sessions. Supports FTS5 full-text search wit
 Set `all_projects: true` to search across every project instead of the resolved one. This bypasses project detection entirely and ignores the `project` argument, so an agent can recall a decision logged elsewhere without knowing the project key. The response envelope reports `project_source: "all_projects"` and an empty `project` to reflect the cross-project scope.
 
 Scope values accepted by the `scope` parameter: `project` (default), `personal`, `global`. When `scope: personal` is passed without an explicit `project` override, the project filter is cleared and personal observations are searched across all projects (cross-project personal scope).
+
+Each structured search result includes lifecycle metadata: `state` (`active` or `needs_review`) and, when set, `review_after`. Text output also appends `state: needs_review` for stale observations.
 
 When an observation has judged relations in `memory_relations`, the result entry includes annotation lines immediately after the title/content block:
 
@@ -805,10 +807,22 @@ Save structured observations. The tool description teaches agents the format:
 
 Exact duplicate saves are deduplicated in a rolling time window using a normalized content hash + project + scope + type + title.
 When `topic_key` is provided, `mem_save` upserts the latest observation in the same `project + scope + topic_key`, incrementing `revision_count`.
+Save responses include lifecycle metadata for the saved observation: computed `state` (`active` or `needs_review`) and `review_after` when the observation type has a review cycle.
 
 ### mem_update
 
 Update an observation by ID. Public schema supports partial updates for `title`, `content`, `type`, `scope`, and `topic_key`. For legacy/raw MCP clients, a non-empty `project` argument is still tolerated by the handler even though it is not exposed in the schema.
+
+### mem_review
+
+Review observation lifecycle state. Available in the `agent` profile (`engram mcp --tools=agent`).
+
+Actions:
+
+- `action: "list"` — returns observations whose `review_after` has passed. Optional parameters: `project` and `limit` (default 10).
+- `action: "mark_reviewed"` — requires `observation_id`; resets that observation's local review cycle using its type decay policy. The legacy `id` alias is accepted for compatibility.
+
+`mark_reviewed` is local-only for now: `review_after` is intentionally not part of sync payloads in this phase, so resetting the review cycle does not enqueue a sync mutation or propagate to other machines.
 
 ### mem_suggest_topic_key
 

@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/timeutil"
 	"github.com/Gentleman-Programming/engram/internal/version"
@@ -222,7 +223,7 @@ func (m Model) viewSearchResults() string {
 
 	for i := m.Scroll; i < end; i++ {
 		r := m.SearchResults[i]
-		b.WriteString(m.renderObservationListItem(i, r.ID, r.Type, r.Title, r.Content, r.CreatedAt, r.Project))
+		b.WriteString(m.renderObservationListItem(i, r.ID, r.Type, r.Title, r.Content, r.CreatedAt, r.Project, r.State(), r.ReviewAfter))
 	}
 
 	// Scroll indicator
@@ -265,7 +266,7 @@ func (m Model) viewRecent() string {
 
 	for i := m.Scroll; i < end; i++ {
 		o := m.RecentObservations[i]
-		b.WriteString(m.renderObservationListItem(i, o.ID, o.Type, o.Title, o.Content, o.CreatedAt, o.Project))
+		b.WriteString(m.renderObservationListItem(i, o.ID, o.Type, o.Title, o.Content, o.CreatedAt, o.Project, o.State(), o.ReviewAfter))
 	}
 
 	if count > visibleItems {
@@ -312,6 +313,16 @@ func (m Model) viewObservationDetail() string {
 	b.WriteString(fmt.Sprintf("%s %s\n",
 		detailLabelStyle.Render("Created:"),
 		timestampStyle.Render(localTime(obs.CreatedAt))))
+
+	b.WriteString(fmt.Sprintf("%s %s\n",
+		detailLabelStyle.Render("State:"),
+		renderObservationState(obs.State())))
+
+	if obs.ReviewAfter != nil {
+		b.WriteString(fmt.Sprintf("%s %s\n",
+			detailLabelStyle.Render("Review:"),
+			timestampStyle.Render(formatReviewDate(*obs.ReviewAfter))))
+	}
 
 	if obs.ToolName != nil {
 		b.WriteString(fmt.Sprintf("%s %s\n",
@@ -550,7 +561,7 @@ func (m Model) viewSessionDetail() string {
 
 	for i := m.SessionDetailScroll; i < end; i++ {
 		o := m.SessionObservations[i]
-		b.WriteString(m.renderObservationListItem(i, o.ID, o.Type, o.Title, o.Content, o.CreatedAt, o.Project))
+		b.WriteString(m.renderObservationListItem(i, o.ID, o.Type, o.Title, o.Content, o.CreatedAt, o.Project, o.State(), o.ReviewAfter))
 	}
 
 	if count > visibleItems {
@@ -684,7 +695,7 @@ func (m Model) viewSetup() string {
 
 // ─── Shared Renderers ────────────────────────────────────────────────────────
 
-func (m Model) renderObservationListItem(index int, id int64, obsType, title, content, createdAt string, project *string) string {
+func (m Model) renderObservationListItem(index int, id int64, obsType, title, content, createdAt string, project *string, state string, reviewAfter *string) string {
 	cursor := "  "
 	style := listItemStyle
 	if index == m.Cursor {
@@ -697,10 +708,16 @@ func (m Model) renderObservationListItem(index int, id int64, obsType, title, co
 		proj = "  " + projectStyle.Render(*project)
 	}
 
-	line := fmt.Sprintf("%s%s %s %s%s  %s\n",
+	stateBadge := ""
+	if state == "needs_review" {
+		stateBadge = " " + stateWarningBadgeStyle.Render("[needs_review]")
+	}
+
+	line := fmt.Sprintf("%s%s %s%s %s%s  %s\n",
 		cursor,
 		idStyle.Render(fmt.Sprintf("#%-5d", id)),
 		typeBadgeStyle.Render(fmt.Sprintf("[%-12s]", obsType)),
+		stateBadge,
 		style.Render(truncateStr(title, 50)),
 		proj,
 		timestampStyle.Render(localTime(createdAt)))
@@ -719,6 +736,27 @@ func (m Model) renderObservationListItem(index int, id int64, obsType, title, co
 // localTime converts a UTC timestamp string from SQLite to local time for display.
 func localTime(utc string) string {
 	return timeutil.FormatLocal(utc)
+}
+
+func renderObservationState(state string) string {
+	if state == "needs_review" {
+		return stateWarningBadgeStyle.Render(state)
+	}
+	return detailValueStyle.Render(state)
+}
+
+func formatReviewDate(value string) string {
+	trimmed := strings.TrimSpace(value)
+	formats := []string{"2006-01-02 15:04:05", time.RFC3339, time.RFC3339Nano, "2006-01-02"}
+	for _, layout := range formats {
+		if parsed, err := time.Parse(layout, trimmed); err == nil {
+			return parsed.Format("2006-01-02")
+		}
+	}
+	if len(trimmed) >= len("2006-01-02") {
+		return trimmed[:len("2006-01-02")]
+	}
+	return trimmed
 }
 
 func truncateStr(s string, max int) string {

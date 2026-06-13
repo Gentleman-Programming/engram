@@ -111,6 +111,7 @@ var ProfileAgent = map[string]bool{
 	"mem_judge":             true, // record verdict on a pending memory conflict (REQ-003, Phase D)
 	"mem_compare":           true, // persist an agent-judged semantic verdict via JudgeBySemantic (REQ-011, Phase G)
 	"mem_doctor":            true, // read-only operational diagnostics for agents
+	"mem_review":            true, // list/mark observations whose review_after lifecycle is stale
 }
 
 // ProfileAdmin contains tools for TUI, dashboards, and manual curation
@@ -182,7 +183,7 @@ CORE TOOLS (always available — use without ToolSearch):
   mem_current_project — detect current project from cwd (recommended first call)
 
 DEFERRED TOOLS (use ToolSearch when needed):
-  mem_update, mem_suggest_topic_key, mem_session_start, mem_session_end,
+  mem_update, mem_review, mem_suggest_topic_key, mem_session_start, mem_session_end,
   mem_stats, mem_delete, mem_timeline, mem_capture_passive, mem_merge_projects
 
 PROACTIVE SAVE RULE: Call mem_save immediately after ANY decision, bug fix, discovery, or convention — not just when asked.
@@ -394,6 +395,27 @@ Examples:
 				),
 			),
 			queuedWriteHandler(writeQueue, handleUpdate(s)),
+		)
+	}
+
+	// ─── mem_review (profile: agent, deferred) ──────────────────────────
+	if shouldRegister("mem_review", allowlist) {
+		srv.AddTool(
+			mcp.NewTool("mem_review",
+				mcp.WithDescription("Review observation lifecycle state. action=list returns observations whose review_after has passed; action=mark_reviewed resets one observation's review_after using its type decay policy."),
+				mcp.WithDeferLoading(true),
+				mcp.WithTitleAnnotation("Review Memories"),
+				mcp.WithReadOnlyHintAnnotation(false),
+				mcp.WithDestructiveHintAnnotation(false),
+				mcp.WithIdempotentHintAnnotation(false),
+				mcp.WithOpenWorldHintAnnotation(false),
+				mcp.WithString("action", mcp.Required(), mcp.Description("Action: list | mark_reviewed")),
+				mcp.WithString("project", mcp.Description("Optional project filter for action=list; omit to list all projects.")),
+				mcp.WithNumber("limit", mcp.Description("Max results for action=list (default: 10).")),
+				mcp.WithNumber("observation_id", mcp.Description("Observation id for action=mark_reviewed.")),
+				mcp.WithNumber("id", mcp.Description("Backward-compatible alias for observation_id.")),
+			),
+			queuedWriteHandler(writeQueue, handleReview(s, cfg)),
 		)
 	}
 
@@ -977,6 +999,7 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		var b strings.Builder
 		fmt.Fprintf(&b, "Found %d memories:\n\n", len(results))
 		anyTruncated := false
+		structuredResults := make([]map[string]any, 0, len(results))
 		for i, r := range results {
 			projectDisplay := ""
 			if r.Project != nil {
@@ -987,10 +1010,29 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 				anyTruncated = true
 				preview += " [preview]"
 			}
-			fmt.Fprintf(&b, "[%d] #%d (%s) — %s\n    %s\n    %s%s | scope: %s\n",
+			stateDisplay := ""
+			if r.State() == store.ObservationStateNeedsReview {
+				stateDisplay = " | state: needs_review"
+			}
+			fmt.Fprintf(&b, "[%d] #%d (%s) — %s\n    %s\n    %s%s | scope: %s%s\n",
 				i+1, r.ID, r.Type, r.Title,
 				preview,
-				timeutil.FormatLocal(r.CreatedAt), projectDisplay, r.Scope)
+				timeutil.FormatLocal(r.CreatedAt), projectDisplay, r.Scope, stateDisplay)
+			entry := map[string]any{
+				"id":      r.ID,
+				"sync_id": r.SyncID,
+				"title":   r.Title,
+				"type":    r.Type,
+				"state":   r.State(),
+				"scope":   r.Scope,
+			}
+			if r.Project != nil {
+				entry["project"] = *r.Project
+			}
+			if r.ReviewAfter != nil {
+				entry["review_after"] = *r.ReviewAfter
+			}
+			structuredResults = append(structuredResults, entry)
 
 			// Append relation annotations. Skip orphaned (filtered by store).
 			//
@@ -1048,7 +1090,7 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		}
 
 		// JW4: use respondWithProject for the success path (REQ-314).
-		return respondWithProject(detRes, b.String(), nil), nil
+		return respondWithProject(detRes, b.String(), map[string]any{"results": structuredResults}), nil
 	}
 }
 
@@ -1198,6 +1240,10 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 			savedSyncID = obs.SyncID
 			extra["id"] = savedID
 			extra["sync_id"] = savedSyncID
+			extra["state"] = obs.State()
+			if obs.ReviewAfter != nil {
+				extra["review_after"] = *obs.ReviewAfter
+			}
 		}
 
 		if len(candidates) > 0 {
@@ -1302,6 +1348,107 @@ func handleUpdate(s *store.Store) server.ToolHandlerFunc {
 			return mcp.NewToolResultText(msg), nil
 		}
 		return respondWithProject(detRes, msg, nil), nil
+	}
+}
+
+func handleReview(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		action, _ := req.GetArguments()["action"].(string)
+		switch strings.TrimSpace(action) {
+		case "list":
+			projectFilter, _ := req.GetArguments()["project"].(string)
+			limit := intArg(req, "limit", 10)
+			detRes := projectpkg.DetectionResult{Project: projectFilter, Source: projectpkg.SourceAllProjects}
+			if strings.TrimSpace(projectFilter) != "" {
+				var err error
+				detRes, err = resolveReadProject(s, projectFilter)
+				if err != nil {
+					var upe *unknownProjectError
+					if errors.As(err, &upe) {
+						return errorWithMeta("unknown_project",
+							fmt.Sprintf("Project %q not found in store", upe.Name),
+							upe.AvailableProjects,
+						), nil
+					}
+					return mcp.NewToolResultError(fmt.Sprintf("Project resolution failed: %s", err)), nil
+				}
+				projectFilter = detRes.Project
+			} else if res, err := resolveReadProjectWithProcessOverride(s, "", cfg.DefaultProject); err == nil {
+				detRes = res
+				detRes.Source = projectpkg.SourceAllProjects
+			}
+
+			observations, err := s.ObservationsNeedingReview(projectFilter, limit)
+			if err != nil {
+				return mcp.NewToolResultError("Review list error: " + err.Error()), nil
+			}
+
+			structured := make([]map[string]any, 0, len(observations))
+			if len(observations) == 0 {
+				return respondWithProject(detRes, "No memories need review.", map[string]any{"observations": structured}), nil
+			}
+
+			var b strings.Builder
+			fmt.Fprintf(&b, "Found %d memories needing review:\n\n", len(observations))
+			for i, obs := range observations {
+				projectDisplay := ""
+				if obs.Project != nil {
+					projectDisplay = fmt.Sprintf(" | project: %s", *obs.Project)
+				}
+				reviewDisplay := ""
+				if obs.ReviewAfter != nil {
+					reviewDisplay = fmt.Sprintf(" | review_after: %s", *obs.ReviewAfter)
+				}
+				fmt.Fprintf(&b, "[%d] #%d (%s) — %s\n    state: %s%s%s\n",
+					i+1, obs.ID, obs.Type, obs.Title, obs.State(), projectDisplay, reviewDisplay)
+
+				entry := map[string]any{
+					"id":      obs.ID,
+					"sync_id": obs.SyncID,
+					"title":   obs.Title,
+					"type":    obs.Type,
+					"state":   obs.State(),
+				}
+				if obs.Project != nil {
+					entry["project"] = *obs.Project
+				}
+				if obs.ReviewAfter != nil {
+					entry["review_after"] = *obs.ReviewAfter
+				}
+				structured = append(structured, entry)
+			}
+			return respondWithProject(detRes, b.String(), map[string]any{"observations": structured}), nil
+
+		case "mark_reviewed":
+			id := int64(intArg(req, "observation_id", 0))
+			if id == 0 {
+				id = int64(intArg(req, "id", 0))
+			}
+			if id == 0 {
+				return mcp.NewToolResultError("observation_id is required for mark_reviewed"), nil
+			}
+			if err := s.MarkReviewed(id); err != nil {
+				return mcp.NewToolResultError("Failed to mark reviewed: " + err.Error()), nil
+			}
+			obs, err := s.GetObservation(id)
+			if err != nil {
+				return mcp.NewToolResultError("Marked reviewed but failed to reload observation: " + err.Error()), nil
+			}
+			extra := map[string]any{"id": obs.ID, "sync_id": obs.SyncID, "state": obs.State()}
+			if obs.ReviewAfter != nil {
+				extra["review_after"] = *obs.ReviewAfter
+			}
+			detRes, detErr := resolveReadProjectWithProcessOverride(s, "", cfg.DefaultProject)
+			msg := fmt.Sprintf("Memory marked reviewed: #%d %q (%s)", obs.ID, obs.Title, obs.Type)
+			if detErr != nil {
+				out, _ := jsonMarshal(map[string]any{"result": msg, "id": obs.ID, "sync_id": obs.SyncID, "state": obs.State()})
+				return mcp.NewToolResultText(string(out)), nil
+			}
+			return respondWithProject(detRes, msg, extra), nil
+
+		default:
+			return mcp.NewToolResultError("action must be one of: list, mark_reviewed"), nil
+		}
 	}
 }
 

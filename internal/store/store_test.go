@@ -7714,6 +7714,175 @@ func TestAddObservation_DecayNotAppliedToExistingRows(t *testing.T) {
 	}
 }
 
+func TestObservationState(t *testing.T) {
+	future := time.Now().UTC().Add(time.Hour).Format("2006-01-02 15:04:05")
+	past := time.Now().UTC().Add(-time.Hour).Format("2006-01-02 15:04:05")
+
+	if got := (Observation{}).State(); got != ObservationStateActive {
+		t.Fatalf("nil review_after state = %q, want active", got)
+	}
+	if got := (Observation{ReviewAfter: &future}).State(); got != ObservationStateActive {
+		t.Fatalf("future review_after state = %q, want active", got)
+	}
+	if got := (Observation{ReviewAfter: &past}).State(); got != ObservationStateNeedsReview {
+		t.Fatalf("past review_after state = %q, want needs_review", got)
+	}
+}
+
+func TestObservationsNeedingReview(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("review-sess", "review-proj", "/tmp/review"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	staleID, err := s.AddObservation(AddObservationParams{SessionID: "review-sess", Type: "decision", Title: "stale", Content: "stale content", Project: "review-proj"})
+	if err != nil {
+		t.Fatalf("add stale: %v", err)
+	}
+	futureID, err := s.AddObservation(AddObservationParams{SessionID: "review-sess", Type: "decision", Title: "future", Content: "future content", Project: "review-proj"})
+	if err != nil {
+		t.Fatalf("add future: %v", err)
+	}
+	otherID, err := s.AddObservation(AddObservationParams{SessionID: "review-sess", Type: "decision", Title: "other", Content: "other content", Project: "other-proj"})
+	if err != nil {
+		t.Fatalf("add other: %v", err)
+	}
+
+	past := time.Now().UTC().Add(-24 * time.Hour).Format("2006-01-02 15:04:05")
+	future := time.Now().UTC().Add(24 * time.Hour).Format("2006-01-02 15:04:05")
+	if _, err := s.db.Exec(`UPDATE observations SET review_after = ? WHERE id IN (?, ?)`, past, staleID, otherID); err != nil {
+		t.Fatalf("backdate review_after: %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE observations SET review_after = ? WHERE id = ?`, future, futureID); err != nil {
+		t.Fatalf("future review_after: %v", err)
+	}
+
+	got, err := s.ObservationsNeedingReview("review-proj", 10)
+	if err != nil {
+		t.Fatalf("ObservationsNeedingReview(project): %v", err)
+	}
+	if len(got) != 1 || got[0].ID != staleID || got[0].State() != ObservationStateNeedsReview {
+		t.Fatalf("project review list = %#v, want only staleID", got)
+	}
+
+	all, err := s.ObservationsNeedingReview("", 10)
+	if err != nil {
+		t.Fatalf("ObservationsNeedingReview(all): %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("all review list len = %d, want 2: %#v", len(all), all)
+	}
+}
+
+func TestObservationsNeedingReviewExcludesDeletedObservations(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("review-deleted-sess", "review-deleted-proj", "/tmp/review"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	activeID, err := s.AddObservation(AddObservationParams{SessionID: "review-deleted-sess", Type: "decision", Title: "active", Content: "active content", Project: "review-deleted-proj"})
+	if err != nil {
+		t.Fatalf("add active: %v", err)
+	}
+	deletedID, err := s.AddObservation(AddObservationParams{SessionID: "review-deleted-sess", Type: "decision", Title: "deleted", Content: "deleted content", Project: "review-deleted-proj"})
+	if err != nil {
+		t.Fatalf("add deleted: %v", err)
+	}
+	past := time.Now().UTC().Add(-24 * time.Hour).Format("2006-01-02 15:04:05")
+	if _, err := s.db.Exec(`UPDATE observations SET review_after = ? WHERE id IN (?, ?)`, past, activeID, deletedID); err != nil {
+		t.Fatalf("backdate review_after: %v", err)
+	}
+	if err := s.DeleteObservation(deletedID, false); err != nil {
+		t.Fatalf("delete observation: %v", err)
+	}
+
+	got, err := s.ObservationsNeedingReview("review-deleted-proj", 10)
+	if err != nil {
+		t.Fatalf("ObservationsNeedingReview(project): %v", err)
+	}
+	if len(got) != 1 || got[0].ID != activeID {
+		t.Fatalf("review list = %#v, want only activeID", got)
+	}
+}
+
+func TestMarkReviewedResetsReviewAfter(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("mark-reviewed-sess", "mark-reviewed-proj", "/tmp/review"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	decisionID, err := s.AddObservation(AddObservationParams{SessionID: "mark-reviewed-sess", Type: "decision", Title: "decision", Content: "decision content", Project: "mark-reviewed-proj"})
+	if err != nil {
+		t.Fatalf("add decision: %v", err)
+	}
+	manualID, err := s.AddObservation(AddObservationParams{SessionID: "mark-reviewed-sess", Type: "manual", Title: "manual", Content: "manual content", Project: "mark-reviewed-proj"})
+	if err != nil {
+		t.Fatalf("add manual: %v", err)
+	}
+	past := time.Now().UTC().Add(-24 * time.Hour).Format("2006-01-02 15:04:05")
+	if _, err := s.db.Exec(`UPDATE observations SET review_after = ? WHERE id IN (?, ?)`, past, decisionID, manualID); err != nil {
+		t.Fatalf("backdate review_after: %v", err)
+	}
+
+	start := time.Now().UTC()
+	if err := s.MarkReviewed(decisionID); err != nil {
+		t.Fatalf("MarkReviewed decision: %v", err)
+	}
+	reviewAfter, reviewNull, _, _ := queryDecayFields(t, s, decisionID)
+	if reviewNull {
+		t.Fatal("decision review_after should be reset, got NULL")
+	}
+	withinDays(t, "mark reviewed decision", reviewAfter, start.AddDate(0, decayDecisionMonths, 0), 2)
+	obs, err := s.GetObservation(decisionID)
+	if err != nil {
+		t.Fatalf("GetObservation decision: %v", err)
+	}
+	if obs.State() != ObservationStateActive {
+		t.Fatalf("reviewed decision state = %q, want active", obs.State())
+	}
+
+	if err := s.MarkReviewed(manualID); err != nil {
+		t.Fatalf("MarkReviewed manual: %v", err)
+	}
+	_, manualReviewNull, _, _ := queryDecayFields(t, s, manualID)
+	if !manualReviewNull {
+		t.Fatal("manual review_after should be NULL after mark reviewed")
+	}
+}
+
+func TestMarkReviewedDoesNotEnqueueSyncMutation(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnrollProject("mark-reviewed-sync-proj"); err != nil {
+		t.Fatalf("EnrollProject: %v", err)
+	}
+	if err := s.CreateSession("mark-reviewed-sync-sess", "mark-reviewed-sync-proj", "/tmp/review-sync"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	obsID, err := s.AddObservation(AddObservationParams{SessionID: "mark-reviewed-sync-sess", Type: "decision", Title: "decision", Content: "decision content", Project: "mark-reviewed-sync-proj"})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+	past := time.Now().UTC().Add(-24 * time.Hour).Format("2006-01-02 15:04:05")
+	if _, err := s.db.Exec(`UPDATE observations SET review_after = ? WHERE id = ?`, past, obsID); err != nil {
+		t.Fatalf("backdate review_after: %v", err)
+	}
+
+	before, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 10)
+	if err != nil {
+		t.Fatalf("ListPendingSyncMutations before: %v", err)
+	}
+	if err := s.MarkReviewed(obsID); err != nil {
+		t.Fatalf("MarkReviewed: %v", err)
+	}
+	after, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 10)
+	if err != nil {
+		t.Fatalf("ListPendingSyncMutations after: %v", err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("MarkReviewed enqueued sync mutation: before=%d after=%d", len(before), len(after))
+	}
+}
+
 // ─── C.2 [RED] — ListDeferred / GetDeferred ──────────────────────────────────
 
 // seedDeferredRow is a test helper that inserts a row into sync_apply_deferred.
