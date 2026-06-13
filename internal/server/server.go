@@ -1001,10 +1001,11 @@ func (s *Server) handleListConflicts(w http.ResponseWriter, r *http.Request) {
 	offset := queryInt(r, "offset", 0)
 
 	opts := store.ListRelationsOptions{
-		Project: project,
-		Status:  status,
-		Limit:   limit,
-		Offset:  offset,
+		Project:            project,
+		Status:             status,
+		ExcludeNotConflict: true,
+		Limit:              limit,
+		Offset:             offset,
 	}
 
 	sinceStr := r.URL.Query().Get("since")
@@ -1025,9 +1026,10 @@ func (s *Server) handleListConflicts(w http.ResponseWriter, r *http.Request) {
 
 	// Count without limit/offset for the total field.
 	countOpts := store.ListRelationsOptions{
-		Project:   project,
-		Status:    status,
-		SinceTime: opts.SinceTime,
+		Project:            project,
+		Status:             status,
+		ExcludeNotConflict: true,
+		SinceTime:          opts.SinceTime,
 	}
 	total, err := s.store.CountRelations(countOpts)
 	if err != nil {

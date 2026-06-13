@@ -26,13 +26,13 @@ var ErrSemanticPromptBuilderRequired = errors.New("semantic scan requires a non-
 // Valid relation type values. Type compatibility is NOT enforced in Phase 1;
 // the agent does that judgment.
 const (
-	RelationPending      = "pending"
-	RelationRelated      = "related"
-	RelationCompatible   = "compatible"
-	RelationScoped       = "scoped"
+	RelationPending       = "pending"
+	RelationRelated       = "related"
+	RelationCompatible    = "compatible"
+	RelationScoped        = "scoped"
 	RelationConflictsWith = "conflicts_with"
-	RelationSupersedes   = "supersedes"
-	RelationNotConflict  = "not_conflict"
+	RelationSupersedes    = "supersedes"
+	RelationNotConflict   = "not_conflict"
 )
 
 // Valid judgment_status values.
@@ -93,6 +93,9 @@ type ListRelationsOptions struct {
 	Project string
 	// Status filters by judgment_status. Empty means no status filter.
 	Status string
+	// ExcludeNotConflict removes rows with relation='not_conflict' from results.
+	// Set to true for conflict-focused views (dashboard, CLI conflicts list).
+	ExcludeNotConflict bool
 	// SinceTime filters to rows created_at >= SinceTime. Zero value means no filter.
 	SinceTime time.Time
 	// Limit caps the number of rows returned. 0 or negative means no limit.
@@ -118,11 +121,11 @@ type RelationListItem struct {
 
 // RelationStats holds aggregate counts of relations for a project.
 type RelationStats struct {
-	Project         string         `json:"project"`
-	ByRelation      map[string]int `json:"by_relation"`
+	Project          string         `json:"project"`
+	ByRelation       map[string]int `json:"by_relation"`
 	ByJudgmentStatus map[string]int `json:"by_judgment_status"`
-	DeferredCount   int            `json:"deferred"`
-	DeadCount       int            `json:"dead"`
+	DeferredCount    int            `json:"deferred"`
+	DeadCount        int            `json:"dead"`
 }
 
 // DeferredRow represents a row in sync_apply_deferred with the payload decoded.
@@ -141,13 +144,13 @@ type DeferredRow struct {
 
 // ScanResult holds the output of a ScanProject call.
 type ScanResult struct {
-	Project            string `json:"project"`
-	Inspected          int    `json:"inspected"`
-	CandidatesFound    int    `json:"candidates_found"`
-	AlreadyRelated     int    `json:"already_related"`
-	RelationsInserted  int    `json:"inserted"`
-	Capped             bool   `json:"capped"`
-	DryRun             bool   `json:"dry_run"`
+	Project           string `json:"project"`
+	Inspected         int    `json:"inspected"`
+	CandidatesFound   int    `json:"candidates_found"`
+	AlreadyRelated    int    `json:"already_related"`
+	RelationsInserted int    `json:"inserted"`
+	Capped            bool   `json:"capped"`
+	DryRun            bool   `json:"dry_run"`
 
 	// Semantic counters — populated only when ScanOptions.Semantic is true.
 	// Zero-value is safe for existing JSON consumers.
@@ -203,7 +206,8 @@ type JudgeBySemanticParams struct {
 	// TargetID is the TEXT sync_id of the target observation (required).
 	TargetID string
 	// Relation is the verdict verb (required); must be in validRelationVerbs.
-	// Passing "not_conflict" is a no-op: no row is inserted and no error is returned.
+	// Including "not_conflict" which persists a row to track that the pair was
+	// evaluated and found non-conflicting.
 	Relation string
 	// Confidence is the LLM's self-reported confidence score [0.0, 1.0].
 	Confidence float64
@@ -244,31 +248,31 @@ type Candidate struct {
 
 // Relation represents a row in memory_relations.
 type Relation struct {
-	ID                    int64    `json:"id"`
-	SyncID                string   `json:"sync_id"`
-	SourceID              string   `json:"source_id"`
-	TargetID              string   `json:"target_id"`
-	Relation              string   `json:"relation"`
-	Reason                *string  `json:"reason,omitempty"`
-	Evidence              *string  `json:"evidence,omitempty"`
-	Confidence            *float64 `json:"confidence,omitempty"`
-	JudgmentStatus        string   `json:"judgment_status"`
-	MarkedByActor         *string  `json:"marked_by_actor,omitempty"`
-	MarkedByKind          *string  `json:"marked_by_kind,omitempty"`
-	MarkedByModel         *string  `json:"marked_by_model,omitempty"`
-	SessionID             *string  `json:"session_id,omitempty"`
-	CreatedAt             string   `json:"created_at"`
-	UpdatedAt             string   `json:"updated_at"`
+	ID             int64    `json:"id"`
+	SyncID         string   `json:"sync_id"`
+	SourceID       string   `json:"source_id"`
+	TargetID       string   `json:"target_id"`
+	Relation       string   `json:"relation"`
+	Reason         *string  `json:"reason,omitempty"`
+	Evidence       *string  `json:"evidence,omitempty"`
+	Confidence     *float64 `json:"confidence,omitempty"`
+	JudgmentStatus string   `json:"judgment_status"`
+	MarkedByActor  *string  `json:"marked_by_actor,omitempty"`
+	MarkedByKind   *string  `json:"marked_by_kind,omitempty"`
+	MarkedByModel  *string  `json:"marked_by_model,omitempty"`
+	SessionID      *string  `json:"session_id,omitempty"`
+	CreatedAt      string   `json:"created_at"`
+	UpdatedAt      string   `json:"updated_at"`
 
 	// Annotation fields — populated by GetRelationsForObservations via LEFT JOIN.
 	// Excluded from JSON output (used only for in-process annotation building).
 	// REQ-005, REQ-012 | Design §7, §8.
-	SourceIntID     int64  `json:"-"` // integer primary key of source observation
-	SourceTitle     string `json:"-"` // title of source observation; empty if missing/deleted
-	SourceMissing   bool   `json:"-"` // true if source is soft-deleted or not found
-	TargetIntID     int64  `json:"-"` // integer primary key of target observation
-	TargetTitle     string `json:"-"` // title of target observation; empty if missing/deleted
-	TargetMissing   bool   `json:"-"` // true if target is soft-deleted or not found
+	SourceIntID   int64  `json:"-"` // integer primary key of source observation
+	SourceTitle   string `json:"-"` // title of source observation; empty if missing/deleted
+	SourceMissing bool   `json:"-"` // true if source is soft-deleted or not found
+	TargetIntID   int64  `json:"-"` // integer primary key of target observation
+	TargetTitle   string `json:"-"` // title of target observation; empty if missing/deleted
+	TargetMissing bool   `json:"-"` // true if target is soft-deleted or not found
 }
 
 // ObservationRelations groups relations for a single observation, split by role.
@@ -282,7 +286,7 @@ type ObservationRelations struct {
 // SaveRelationParams holds the inputs for SaveRelation.
 type SaveRelationParams struct {
 	// SyncID is the unique identifier for this relation row (format: rel-<16hex>).
-	SyncID   string
+	SyncID string
 	// SourceID is the TEXT sync_id of the source observation.
 	SourceID string
 	// TargetID is the TEXT sync_id of the target observation.
@@ -292,23 +296,23 @@ type SaveRelationParams struct {
 // JudgeRelationParams holds the inputs for JudgeRelation.
 type JudgeRelationParams struct {
 	// JudgmentID is the sync_id of the relation row to update (required).
-	JudgmentID    string
+	JudgmentID string
 	// Relation is the verdict verb (required); must be one of validRelationVerbs.
-	Relation      string
+	Relation string
 	// Reason is an optional free-text explanation.
-	Reason        *string
+	Reason *string
 	// Evidence is optional free-form JSON or text evidence.
-	Evidence      *string
+	Evidence *string
 	// Confidence is optional 0..1 confidence score.
-	Confidence    *float64
+	Confidence *float64
 	// MarkedByActor is the actor identifier (e.g. "agent:claude-sonnet-4-6" or "user").
 	MarkedByActor string
 	// MarkedByKind is the actor kind ("agent", "human", "system").
-	MarkedByKind  string
+	MarkedByKind string
 	// MarkedByModel is the model ID (may be empty for human actors).
 	MarkedByModel string
 	// SessionID is the session in which the judgment was made (optional).
-	SessionID     string
+	SessionID string
 }
 
 // ─── FindCandidates ───────────────────────────────────────────────────────────
@@ -734,8 +738,10 @@ func validateCrossProjectGuard(tx *sql.Tx, sourceID, targetID string) error {
 // the memory_relations table with system provenance (marked_by_kind="system",
 // marked_by_actor="engram", marked_by_model=params.Model).
 //
-// When params.Relation is "not_conflict" the call is a no-op: no row is inserted
-// and an empty sync_id is returned without error.
+// When params.Relation is "not_conflict", a row is still inserted (or an
+// existing pending row is updated) so the pair is tracked as evaluated.
+// This resolves any pending relation annotation and prevents ScanProject
+// from re-inserting the pair on subsequent scans.
 //
 // Idempotency: if a row already exists for (source_id, target_id) in either
 // direction, the existing row is updated (UPSERT). The returned sync_id is
@@ -757,11 +763,6 @@ func (s *Store) JudgeBySemantic(p JudgeBySemanticParams) (string, error) {
 	}
 	if p.Confidence < 0.0 || p.Confidence > 1.0 {
 		return "", fmt.Errorf("JudgeBySemantic: confidence %v is out of range [0.0, 1.0]", p.Confidence)
-	}
-
-	// not_conflict is a no-op.
-	if p.Relation == RelationNotConflict {
-		return "", nil
 	}
 
 	var resultSyncID string
@@ -1137,6 +1138,9 @@ func buildRelationsQuery(opts ListRelationsOptions, countOnly bool) (string, []a
 		query += ` AND r.judgment_status = ?`
 		args = append(args, opts.Status)
 	}
+	if opts.ExcludeNotConflict {
+		query += ` AND r.relation != 'not_conflict'`
+	}
 	if !opts.SinceTime.IsZero() {
 		query += ` AND r.created_at >= ?`
 		args = append(args, opts.SinceTime.UTC().Format("2006-01-02T15:04:05Z"))
@@ -1170,6 +1174,7 @@ func (s *Store) GetRelationStats(project string) (RelationStats, error) {
 	}
 
 	// Build query: when project is non-empty, filter via JOIN to observations.
+	// not_conflict rows are excluded — this is a conflict stats view.
 	var q string
 	var args []any
 	if project != "" {
@@ -1178,7 +1183,8 @@ func (s *Store) GetRelationStats(project string) (RelationStats, error) {
 			FROM memory_relations r
 			LEFT JOIN observations src ON src.sync_id = r.source_id AND src.deleted_at IS NULL
 			LEFT JOIN observations tgt ON tgt.sync_id = r.target_id AND tgt.deleted_at IS NULL
-			WHERE ifnull(src.project,'') = ? OR ifnull(tgt.project,'') = ?
+			WHERE (ifnull(src.project,'') = ? OR ifnull(tgt.project,'') = ?)
+			  AND r.relation != 'not_conflict'
 			GROUP BY r.relation, r.judgment_status
 		`
 		args = []any{project, project}
@@ -1186,6 +1192,7 @@ func (s *Store) GetRelationStats(project string) (RelationStats, error) {
 		q = `
 			SELECT relation, judgment_status, count(*) AS cnt
 			FROM memory_relations
+			WHERE relation != 'not_conflict'
 			GROUP BY relation, judgment_status
 		`
 	}
@@ -1228,8 +1235,8 @@ func (s *Store) GetRelationStats(project string) (RelationStats, error) {
 //
 // Phase 4 extension: when ScanOptions.Semantic is true, after the FTS5 candidate
 // collection a bounded worker pool calls Runner.Compare on each pair and persists
-// non-"not_conflict" verdicts via JudgeBySemantic. Semantic=false (zero value)
-// preserves Phase 3 behaviour exactly.
+// all verdicts (including not_conflict) via JudgeBySemantic. Semantic=false (zero
+// value) preserves Phase 3 behaviour exactly.
 //
 // Returns a ScanResult with counts of inspected observations, candidates found,
 // already-related pairs skipped, relations inserted, and whether the cap was hit.
@@ -1468,14 +1475,8 @@ func (s *Store) ScanProject(opts ScanOptions) (ScanResult, error) {
 						return
 					}
 
-					if verdict.Relation == RelationNotConflict {
-						mu.Lock()
-						result.SemanticSkipped++
-						mu.Unlock()
-						return
-					}
-
-					// Persist non-not_conflict verdict.
+					// Persist verdict (including not_conflict — it resolves the
+					// pending row so the pair is tracked as evaluated).
 					_, judgeErr := s.JudgeBySemantic(JudgeBySemanticParams{
 						SourceID:   pair.sourceSnippet.SyncID,
 						TargetID:   pair.candidateSnippet.SyncID,

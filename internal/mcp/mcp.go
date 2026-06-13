@@ -893,11 +893,11 @@ PARAMS:
 
 BEHAVIOR:
   - Persists the verdict via JudgeBySemantic with system provenance (marked_by_actor="engram").
-  - not_conflict: no row is inserted; tool returns success with empty sync_id (the verdict is recorded but not stored — it means "we evaluated these and they do not conflict").
+  - not_conflict: inserts a row tracking that the pair was evaluated and found non-conflicting. This resolves any pending relation annotation and prevents ScanProject from re-inserting the pair.
   - Idempotent: calling again for the same pair updates the existing row.
   - Cross-project pairs are rejected.
 
-SUCCESS: Returns { "sync_id": "rel-..." } on persist, { "sync_id": "" } on not_conflict.
+SUCCESS: Returns { "sync_id": "rel-..." } on persist.
 ERROR: Returns IsError=true if IDs are unknown, relation is invalid, or cross-project pair.`),
 				mcp.WithTitleAnnotation("Compare Memory Pair (Persist Semantic Verdict)"),
 				mcp.WithReadOnlyHintAnnotation(false),
@@ -2184,7 +2184,6 @@ func handleCompare(s *store.Store, _ *SessionActivity) server.ToolHandlerFunc {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		// syncID is "" when relation == "not_conflict" (JudgeBySemantic no-op).
 		envelope := map[string]any{
 			"sync_id": syncID,
 		}
