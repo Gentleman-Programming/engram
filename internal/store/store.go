@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -129,6 +130,110 @@ func (o Observation) State() string {
 type SearchResult struct {
 	Observation
 	Rank float64 `json:"rank"`
+	// Confidence is a derived (never persisted) trust signal in [0,1].
+	Confidence      float64 `json:"confidence"`
+	ConfidenceLabel string  `json:"confidence_label"`
+}
+
+// ─── Confidence scoring ──────────────────────────────────────────────────────
+//
+// Confidence is a derived trust signal in [0,1], computed only from columns that
+// already exist on an observation. It lets retrieval tell a repeatedly-confirmed,
+// pinned, or recently-valid memory apart from a one-off, stale, or tentative one
+// — with no schema change and without asking the model to estimate anything
+// (which would invite hallucination). The number is read, never invented.
+const (
+	confidenceBase             = 0.5
+	confidenceDupStep          = 0.08 // per extra confirmation (duplicate_count-1)
+	confidenceDupMaxSteps      = 5    // → caps the confirmation bonus at +0.40
+	confidencePinnedBoost      = 0.20
+	confidenceStalenessPenalty = 0.30
+
+	// Re-rank blend weights and candidate over-fetch (see Search).
+	confidenceRelevanceWeight = 0.7
+	confidenceWeight          = 0.3
+	confidenceCandidateFactor = 3
+
+	// topicRankBoost is the synthetic rank assigned to topic_key direct hits so
+	// they sort ahead of FTS results. Re-ranking leaves these untouched.
+	topicRankBoost = -1000.0
+)
+
+// computeConfidence derives a [0,1] confidence score from existing columns.
+func computeConfidence(o Observation) float64 {
+	c := confidenceBase
+	if extra := o.DuplicateCount - 1; extra > 0 {
+		if extra > confidenceDupMaxSteps {
+			extra = confidenceDupMaxSteps
+		}
+		c += float64(extra) * confidenceDupStep
+	}
+	if o.Pinned {
+		c += confidencePinnedBoost
+	}
+	if o.State() == ObservationStateNeedsReview {
+		c -= confidenceStalenessPenalty
+	}
+	switch {
+	case c < 0:
+		return 0
+	case c > 1:
+		return 1
+	default:
+		return c
+	}
+}
+
+// confidenceLabel maps a score to a human-facing trust tier.
+func confidenceLabel(c float64) string {
+	switch {
+	case c >= 0.8:
+		return "confirmed"
+	case c >= 0.6:
+		return "likely"
+	case c >= 0.4:
+		return "tentative"
+	default:
+		return "unverified"
+	}
+}
+
+// rerankByConfidence reorders the FTS portion of results in place by a blend of
+// normalized lexical relevance and derived confidence. Topic-key hits (assigned
+// topicRankBoost and prepended by Search) are left pinned at the front.
+func rerankByConfidence(results []SearchResult) {
+	start := 0
+	for start < len(results) && results[start].Rank == topicRankBoost {
+		start++
+	}
+	fts := results[start:]
+	if len(fts) < 2 {
+		return
+	}
+
+	// bm25 rank: smaller (more negative) = more relevant.
+	minRank, maxRank := fts[0].Rank, fts[0].Rank
+	for _, r := range fts {
+		if r.Rank < minRank {
+			minRank = r.Rank
+		}
+		if r.Rank > maxRank {
+			maxRank = r.Rank
+		}
+	}
+	span := maxRank - minRank
+
+	score := func(r SearchResult) float64 {
+		relevanceNorm := 1.0
+		if span > 0 {
+			relevanceNorm = (maxRank - r.Rank) / span
+		}
+		return confidenceRelevanceWeight*relevanceNorm + confidenceWeight*r.Confidence
+	}
+
+	sort.SliceStable(fts, func(i, j int) bool {
+		return score(fts[i]) > score(fts[j])
+	})
 }
 
 type SessionSummary struct {
@@ -448,6 +553,9 @@ type Config struct {
 	MaxContextResults    int
 	MaxSearchResults     int
 	DedupeWindow         time.Duration
+	// ConfidenceRanking blends derived confidence into search ordering and
+	// surfaces it to callers. Defaults to true.
+	ConfidenceRanking bool
 }
 
 func DefaultConfig() (Config, error) {
@@ -461,6 +569,7 @@ func DefaultConfig() (Config, error) {
 		MaxContextResults:    20,
 		MaxSearchResults:     20,
 		DedupeWindow:         15 * time.Minute,
+		ConfidenceRanking:    true,
 	}, nil
 }
 
@@ -474,6 +583,7 @@ func FallbackConfig(dataDir string) Config {
 		MaxContextResults:    20,
 		MaxSearchResults:     20,
 		DedupeWindow:         15 * time.Minute,
+		ConfidenceRanking:    true,
 	}
 }
 
@@ -3147,7 +3257,7 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 				); err != nil {
 					break
 				}
-				sr.Rank = -1000
+				sr.Rank = topicRankBoost
 				directResults = append(directResults, sr)
 			}
 		}
@@ -3181,8 +3291,15 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 		args = append(args, normalizeScope(opts.Scope))
 	}
 
+	// When confidence ranking is on, over-fetch FTS candidates so a highly
+	// confirmed but lexically-weaker memory can still surface after re-ranking,
+	// instead of being cut by the bm25-only LIMIT before it is ever scored.
+	fetchLimit := limit
+	if s.cfg.ConfidenceRanking {
+		fetchLimit = limit * confidenceCandidateFactor
+	}
 	sqlQ += " ORDER BY fts.rank LIMIT ?"
-	args = append(args, limit)
+	args = append(args, fetchLimit)
 
 	rows, err := s.queryItHook(s.db, sqlQ, args...)
 	if err != nil {
@@ -3213,6 +3330,19 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+
+	// Populate derived confidence on every result (topic + FTS) so callers can
+	// surface it without a second lookup. Derived from existing columns only.
+	for i := range results {
+		results[i].Confidence = computeConfidence(results[i].Observation)
+		results[i].ConfidenceLabel = confidenceLabel(results[i].Confidence)
+	}
+
+	// Blend confidence into ordering for the FTS portion (topic hits stay first),
+	// then truncate to the caller's limit so the over-fetched pool is narrowed.
+	if s.cfg.ConfidenceRanking {
+		rerankByConfidence(results)
 	}
 
 	if len(results) > limit {

@@ -1048,24 +1048,39 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			if r.State() == store.ObservationStateNeedsReview {
 				stateDisplay = " | state: needs_review"
 			}
-			fmt.Fprintf(&b, "[%d] #%d (%s) — %s\n    %s\n    %s%s | scope: %s%s\n",
+			// Surface derived confidence + the evidence behind it (part D), so the
+			// agent can judge trust at search time without a second lookup.
+			confidenceDisplay := fmt.Sprintf(" | confidence: %s (%.2f)", r.ConfidenceLabel, r.Confidence)
+			if r.DuplicateCount > 1 {
+				confidenceDisplay += fmt.Sprintf(" | confirmed %d×", r.DuplicateCount)
+			}
+			if r.LastSeenAt != nil && strings.TrimSpace(*r.LastSeenAt) != "" {
+				confidenceDisplay += fmt.Sprintf(" | last seen: %s", timeutil.FormatLocal(*r.LastSeenAt))
+			}
+			fmt.Fprintf(&b, "[%d] #%d (%s) — %s\n    %s\n    %s%s | scope: %s%s%s\n",
 				i+1, r.ID, r.Type, r.Title,
 				preview,
-				timeutil.FormatLocal(r.CreatedAt), projectDisplay, r.Scope, stateDisplay)
+				timeutil.FormatLocal(r.CreatedAt), projectDisplay, r.Scope, stateDisplay, confidenceDisplay)
 			entry := map[string]any{
-				"id":      r.ID,
-				"sync_id": r.SyncID,
-				"title":   r.Title,
-				"type":    r.Type,
-				"state":   r.State(),
-				"scope":   r.Scope,
-				"pinned":  r.Pinned,
+				"id":               r.ID,
+				"sync_id":          r.SyncID,
+				"title":            r.Title,
+				"type":             r.Type,
+				"state":            r.State(),
+				"scope":            r.Scope,
+				"pinned":           r.Pinned,
+				"confidence":       r.Confidence,
+				"confidence_label": r.ConfidenceLabel,
+				"duplicate_count":  r.DuplicateCount,
 			}
 			if r.Project != nil {
 				entry["project"] = *r.Project
 			}
 			if r.ReviewAfter != nil {
 				entry["review_after"] = *r.ReviewAfter
+			}
+			if r.LastSeenAt != nil && strings.TrimSpace(*r.LastSeenAt) != "" {
+				entry["last_seen_at"] = *r.LastSeenAt
 			}
 			structuredResults = append(structuredResults, entry)
 
