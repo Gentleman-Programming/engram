@@ -9,6 +9,9 @@
 //     then writes a durable MCP config to ~/.claude/mcp/engram.json using the
 //     absolute binary path so the subprocess never needs PATH resolution.
 //   - Gemini CLI: injects MCP registration in ~/.gemini/settings.json
+//   - Antigravity CLI: injects MCP registration in ~/.gemini/config/mcp_config.json
+//     (shared across Antigravity CLI/IDE/SDK) and writes the Memory Protocol as a
+//     marker-delimited block in ~/.gemini/GEMINI.md
 //   - Codex: injects MCP registration in ~/.codex/config.toml
 //   - Pi: installs gentle-engram/pi-mcp-adapter packages and writes Pi MCP config
 package setup
@@ -48,6 +51,8 @@ var (
 	injectOpenCodeTUIPluginFn          = injectOpenCodeTUIPlugin
 	injectGeminiMCPFn                  = injectGeminiMCP
 	writeGeminiSystemPromptFn          = writeGeminiSystemPrompt
+	injectAntigravityMCPFn             = injectGeminiMCP
+	writeAntigravityContextFn          = writeAntigravityContext
 	writeCodexMemoryInstructionFilesFn = writeCodexMemoryInstructionFiles
 	injectCodexMCPFn                   = injectCodexMCP
 	injectCodexMemoryConfigFn          = injectCodexMemoryConfig
@@ -260,6 +265,11 @@ func SupportedAgents() []Agent {
 			InstallDir:  geminiConfigPath(),
 		},
 		{
+			Name:        "antigravity-cli",
+			Description: "Antigravity CLI — MCP registration in shared config plus Memory Protocol in GEMINI.md",
+			InstallDir:  antigravityMCPConfigPath(),
+		},
+		{
 			Name:        "codex",
 			Description: "Codex — MCP registration plus model/compaction instruction files",
 			InstallDir:  codexConfigPath(),
@@ -278,10 +288,12 @@ func Install(agentName string) (*Result, error) {
 		return installClaudeCode()
 	case "gemini-cli":
 		return installGeminiCLI()
+	case "antigravity-cli":
+		return installAntigravityCLI()
 	case "codex":
 		return installCodex()
 	default:
-		return nil, fmt.Errorf("unknown agent: %q (supported: opencode, pi, claude-code, gemini-cli, codex)", agentName)
+		return nil, fmt.Errorf("unknown agent: %q (supported: opencode, pi, claude-code, gemini-cli, antigravity-cli, codex)", agentName)
 	}
 }
 
@@ -1106,6 +1118,76 @@ func writeGeminiSystemPrompt() error {
 	return nil
 }
 
+// ─── Antigravity CLI ───────────────────────────────────────────────────────
+//
+// Antigravity shares the ~/.gemini/ root with Gemini CLI but reads MCP servers
+// from a different file: the unified ~/.gemini/config/mcp_config.json (shared by
+// the CLI, IDE, and SDK), NOT ~/.gemini/settings.json. Its agent context/rules
+// also live in ~/.gemini/GEMINI.md rather than Gemini CLI's system.md. Running
+// `engram setup gemini-cli` therefore does NOT configure Antigravity CLI.
+
+const antigravityContextBeginMarker = "<!-- BEGIN ENGRAM MEMORY PROTOCOL — managed by engram setup -->"
+const antigravityContextEndMarker = "<!-- END ENGRAM MEMORY PROTOCOL -->"
+
+func installAntigravityCLI() (*Result, error) {
+	mcpPath := antigravityMCPConfigPath()
+	// The MCP entry has the same shape as Gemini CLI's mcpServers block, so we
+	// reuse the generic injector against Antigravity's config path.
+	if err := injectAntigravityMCPFn(mcpPath); err != nil {
+		return nil, err
+	}
+
+	if err := writeAntigravityContextFn(); err != nil {
+		return nil, err
+	}
+
+	return &Result{
+		Agent:       "antigravity-cli",
+		Destination: filepath.Dir(mcpPath),
+		Files:       2,
+	}, nil
+}
+
+// writeAntigravityContext injects the Memory Protocol into ~/.gemini/GEMINI.md as
+// a marker-delimited block. Unlike Gemini CLI's dedicated system.md, GEMINI.md is
+// a general user context file that may already hold content, so we never clobber
+// it: the protocol block is replaced in place when present and appended otherwise,
+// making re-runs idempotent.
+func writeAntigravityContext() error {
+	path := antigravityContextPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("create antigravity context dir: %w", err)
+	}
+
+	block := antigravityContextBeginMarker + "\n\n" + memoryProtocolMarkdown + "\n" + antigravityContextEndMarker + "\n"
+
+	existing, err := readFileFn(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			if err := writeFileFn(path, []byte(block), 0644); err != nil {
+				return fmt.Errorf("write antigravity context: %w", err)
+			}
+			return nil
+		}
+		return fmt.Errorf("read antigravity context: %w", err)
+	}
+
+	text := strings.ReplaceAll(string(existing), "\r\n", "\n")
+	start := strings.Index(text, antigravityContextBeginMarker)
+	end := strings.Index(text, antigravityContextEndMarker)
+	if start != -1 && end != -1 && end > start {
+		end += len(antigravityContextEndMarker)
+		text = text[:start] + strings.TrimRight(block, "\n") + text[end:]
+	} else {
+		text = strings.TrimRight(text, "\n") + "\n\n" + block
+	}
+
+	if err := writeFileFn(path, []byte(text), 0644); err != nil {
+		return fmt.Errorf("write antigravity context: %w", err)
+	}
+	return nil
+}
+
 // removeGeminiEnvOverride removes any GEMINI_SYSTEM_MD line from ~/.gemini/.env.
 // Previous versions of engram added this line, but it causes Gemini CLI to look
 // for system.md relative to CWD instead of ~/.gemini/. Best-effort cleanup.
@@ -1309,6 +1391,21 @@ func geminiSystemPromptPath() string {
 
 func geminiEnvPath() string {
 	return filepath.Join(filepath.Dir(geminiConfigPath()), ".env")
+}
+
+// antigravityMCPConfigPath returns the shared Antigravity MCP config file.
+// Antigravity CLI/IDE/SDK read MCP servers from ~/.gemini/config/mcp_config.json
+// on all platforms (it lives under the home-dir .gemini folder, not %APPDATA%).
+func antigravityMCPConfigPath() string {
+	home, _ := userHomeDir()
+	return filepath.Join(home, ".gemini", "config", "mcp_config.json")
+}
+
+// antigravityContextPath returns ~/.gemini/GEMINI.md, Antigravity's global agent
+// context/rules file (distinct from Gemini CLI's system.md).
+func antigravityContextPath() string {
+	home, _ := userHomeDir()
+	return filepath.Join(home, ".gemini", "GEMINI.md")
 }
 
 func codexConfigPath() string {

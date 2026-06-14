@@ -53,6 +53,7 @@ Windows, Linux, and other install methods → [docs/INSTALLATION.md](docs/INSTAL
 | Pi                          | `engram setup pi`                                                                            |
 | OpenCode                    | `engram setup opencode`                                                                      |
 | Gemini CLI                  | `engram setup gemini-cli`                                                                    |
+| Antigravity CLI             | `engram setup antigravity-cli`                                                              |
 | Codex                       | `engram setup codex`                                                                         |
 | VS Code                     | `code --add-mcp '{"name":"engram","command":"engram","args":["mcp"]}'`                       |
 | Cursor / Windsurf / Any MCP | See [docs/AGENT-SETUP.md](docs/AGENT-SETUP.md)                                               |

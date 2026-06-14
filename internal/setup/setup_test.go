@@ -28,6 +28,8 @@ func resetSetupSeams(t *testing.T) {
 	oldInjectOpenCodeTUIPluginFn := injectOpenCodeTUIPluginFn
 	oldInjectGeminiMCPFn := injectGeminiMCPFn
 	oldWriteGeminiSystemPromptFn := writeGeminiSystemPromptFn
+	oldInjectAntigravityMCPFn := injectAntigravityMCPFn
+	oldWriteAntigravityContextFn := writeAntigravityContextFn
 	oldWriteCodexMemoryInstructionFilesFn := writeCodexMemoryInstructionFilesFn
 	oldInjectCodexMCPFn := injectCodexMCPFn
 	oldInjectCodexMemoryConfigFn := injectCodexMemoryConfigFn
@@ -52,6 +54,8 @@ func resetSetupSeams(t *testing.T) {
 		injectOpenCodeTUIPluginFn = oldInjectOpenCodeTUIPluginFn
 		injectGeminiMCPFn = oldInjectGeminiMCPFn
 		writeGeminiSystemPromptFn = oldWriteGeminiSystemPromptFn
+		injectAntigravityMCPFn = oldInjectAntigravityMCPFn
+		writeAntigravityContextFn = oldWriteAntigravityContextFn
 		writeCodexMemoryInstructionFilesFn = oldWriteCodexMemoryInstructionFilesFn
 		injectCodexMCPFn = oldInjectCodexMCPFn
 		injectCodexMemoryConfigFn = oldInjectCodexMemoryConfigFn
@@ -182,6 +186,150 @@ func TestInstallGeminiCLIInjectsMCPConfig(t *testing.T) {
 
 	if _, err := Install("gemini-cli"); err != nil {
 		t.Fatalf("second install should be idempotent: %v", err)
+	}
+}
+
+func TestSupportedAgentsIncludesAntigravityCLI(t *testing.T) {
+	var found bool
+	for _, agent := range SupportedAgents() {
+		if agent.Name == "antigravity-cli" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected antigravity-cli in supported agents")
+	}
+}
+
+func TestInstallAntigravityCLIInjectsMCPAndContext(t *testing.T) {
+	resetSetupSeams(t)
+	home := useTestHome(t)
+
+	result, err := Install("antigravity-cli")
+	if err != nil {
+		t.Fatalf("install antigravity-cli: %v", err)
+	}
+	if result.Agent != "antigravity-cli" {
+		t.Fatalf("unexpected agent in result: %q", result.Agent)
+	}
+	if result.Files != 2 {
+		t.Fatalf("expected 2 files written, got %d", result.Files)
+	}
+
+	// MCP must land in the shared Antigravity config, NOT ~/.gemini/settings.json.
+	mcpPath := filepath.Join(home, ".gemini", "config", "mcp_config.json")
+	raw, err := os.ReadFile(mcpPath)
+	if err != nil {
+		t.Fatalf("read mcp_config.json: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("parse mcp_config.json: %v", err)
+	}
+	mcpServers, ok := cfg["mcpServers"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected mcpServers object, got %#v", cfg["mcpServers"])
+	}
+	engram, ok := mcpServers["engram"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected mcpServers.engram object")
+	}
+	if cmd, ok := engram["command"].(string); !ok || cmd == "" || cmd == "engram" {
+		t.Fatalf("expected absolute command path, got %#v", engram["command"])
+	}
+
+	// settings.json (Gemini CLI's file) must NOT be touched.
+	if _, err := os.Stat(filepath.Join(home, ".gemini", "settings.json")); !os.IsNotExist(err) {
+		t.Fatalf("antigravity install must not write ~/.gemini/settings.json (err=%v)", err)
+	}
+
+	// Protocol must be in GEMINI.md inside the managed marker block.
+	ctxPath := filepath.Join(home, ".gemini", "GEMINI.md")
+	ctxRaw, err := os.ReadFile(ctxPath)
+	if err != nil {
+		t.Fatalf("read GEMINI.md: %v", err)
+	}
+	ctxText := string(ctxRaw)
+	if !strings.Contains(ctxText, antigravityContextBeginMarker) || !strings.Contains(ctxText, antigravityContextEndMarker) {
+		t.Fatalf("expected managed markers in GEMINI.md")
+	}
+	if !strings.Contains(ctxText, "### AFTER COMPACTION") {
+		t.Fatalf("expected Memory Protocol body in GEMINI.md")
+	}
+
+	// system.md (Gemini CLI's prompt file) must NOT be created.
+	if _, err := os.Stat(filepath.Join(home, ".gemini", "system.md")); !os.IsNotExist(err) {
+		t.Fatalf("antigravity install must not write ~/.gemini/system.md (err=%v)", err)
+	}
+}
+
+func TestInstallAntigravityCLIPreservesGeminiMdAndIsIdempotent(t *testing.T) {
+	resetSetupSeams(t)
+	home := useTestHome(t)
+
+	ctxPath := filepath.Join(home, ".gemini", "GEMINI.md")
+	if err := os.MkdirAll(filepath.Dir(ctxPath), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	userContent := "# My project rules\n\nAlways use tabs.\n"
+	if err := os.WriteFile(ctxPath, []byte(userContent), 0644); err != nil {
+		t.Fatalf("seed GEMINI.md: %v", err)
+	}
+
+	if _, err := Install("antigravity-cli"); err != nil {
+		t.Fatalf("first install: %v", err)
+	}
+	if _, err := Install("antigravity-cli"); err != nil {
+		t.Fatalf("second install (idempotent): %v", err)
+	}
+
+	raw, err := os.ReadFile(ctxPath)
+	if err != nil {
+		t.Fatalf("read GEMINI.md: %v", err)
+	}
+	text := string(raw)
+
+	if !strings.Contains(text, "Always use tabs.") {
+		t.Fatalf("user content must be preserved, got:\n%s", text)
+	}
+	if got := strings.Count(text, antigravityContextBeginMarker); got != 1 {
+		t.Fatalf("expected exactly one managed block after re-run, got %d", got)
+	}
+	if got := strings.Count(text, antigravityContextEndMarker); got != 1 {
+		t.Fatalf("expected exactly one end marker after re-run, got %d", got)
+	}
+}
+
+func TestInstallAntigravityCLIErrorPropagation(t *testing.T) {
+	t.Run("mcp inject error", func(t *testing.T) {
+		resetSetupSeams(t)
+		useTestHome(t)
+		injectAntigravityMCPFn = func(string) error { return errors.New("inject failed") }
+		if _, err := Install("antigravity-cli"); err == nil || !strings.Contains(err.Error(), "inject failed") {
+			t.Fatalf("expected inject error, got %v", err)
+		}
+	})
+
+	t.Run("context write error", func(t *testing.T) {
+		resetSetupSeams(t)
+		useTestHome(t)
+		injectAntigravityMCPFn = func(string) error { return nil }
+		writeAntigravityContextFn = func() error { return errors.New("context failed") }
+		if _, err := Install("antigravity-cli"); err == nil || !strings.Contains(err.Error(), "context failed") {
+			t.Fatalf("expected context error, got %v", err)
+		}
+	})
+}
+
+func TestAntigravityPathHelpers(t *testing.T) {
+	resetSetupSeams(t)
+	userHomeDir = func() (string, error) { return "/home/tester", nil }
+
+	if got := antigravityMCPConfigPath(); got != filepath.Join("/home/tester", ".gemini", "config", "mcp_config.json") {
+		t.Fatalf("unexpected antigravityMCPConfigPath: %s", got)
+	}
+	if got := antigravityContextPath(); got != filepath.Join("/home/tester", ".gemini", "GEMINI.md") {
+		t.Fatalf("unexpected antigravityContextPath: %s", got)
 	}
 }
 

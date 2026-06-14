@@ -2422,6 +2422,12 @@ func printPostInstall(result *setup.Result) {
 		fmt.Println("  1. Restart Gemini CLI so MCP config is reloaded")
 		fmt.Println("  2. Verify ~/.gemini/settings.json includes mcpServers.engram")
 		fmt.Println("  3. Verify ~/.gemini/system.md + ~/.gemini/.env exist for compaction recovery")
+	case "antigravity-cli":
+		fmt.Println("\nNext steps:")
+		fmt.Println("  1. Restart Antigravity CLI so MCP config is reloaded")
+		fmt.Println("  2. Verify ~/.gemini/config/mcp_config.json includes mcpServers.engram")
+		fmt.Println("  3. Verify the Engram Memory Protocol block exists in ~/.gemini/GEMINI.md")
+		fmt.Println("  4. Inspect connected servers with: agy inspect")
 	case "codex":
 		fmt.Println("\nNext steps:")
 		fmt.Println("  1. Restart Codex so MCP config is reloaded")
@@ -2477,7 +2483,7 @@ Commands:
                      Merge similar project names into one canonical name
                        --all      Scan ALL projects for similar name groups
                        --dry-run  Preview what would be merged (no changes)
-  setup [agent]      Install/setup agent integration (opencode, pi, claude-code, gemini-cli, codex)
+  setup [agent]      Install/setup agent integration (opencode, pi, claude-code, gemini-cli, antigravity-cli, codex)
   sync               Export new memories as compressed chunk to .engram/
                          --import   Import new chunks from .engram/ into local DB
                          --status   Show sync status

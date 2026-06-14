@@ -188,8 +188,9 @@ When using `engram setup`, config files are written to platform-appropriate loca
 |-------|---------------|---------|
 | OpenCode | `~/.config/opencode/` | `%APPDATA%\opencode\` |
 | Gemini CLI | `~/.gemini/` | `%APPDATA%\gemini\` |
+| Antigravity CLI | `~/.gemini/config/mcp_config.json` + `~/.gemini/GEMINI.md` | `%USERPROFILE%\.gemini\config\mcp_config.json` + `%USERPROFILE%\.gemini\GEMINI.md` |
 | Codex | `~/.codex/` | `%APPDATA%\codex\` |
 | Claude Code | Managed by `claude` CLI | Managed by `claude` CLI |
 | VS Code | `.vscode/mcp.json` (workspace) or `~/Library/Application Support/Code/User/mcp.json` (user) | `.vscode\mcp.json` (workspace) or `%APPDATA%\Code\User\mcp.json` (user) |
-| Antigravity | `~/.gemini/antigravity/mcp_config.json` | `%USERPROFILE%\.gemini\antigravity\mcp_config.json` |
+| Antigravity IDE | `~/.gemini/antigravity/mcp_config.json` | `%USERPROFILE%\.gemini\antigravity\mcp_config.json` |
 | Data directory | `~/.engram/` | `%USERPROFILE%\.engram\` |

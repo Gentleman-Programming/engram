@@ -166,7 +166,7 @@ func TestPrintUsage(t *testing.T) {
 	if !strings.Contains(stdout, "search <query>") || !strings.Contains(stdout, "setup [agent]") {
 		t.Fatalf("usage missing expected commands: %q", stdout)
 	}
-	if !strings.Contains(stdout, "opencode, pi, claude-code, gemini-cli, codex") {
+	if !strings.Contains(stdout, "opencode, pi, claude-code, gemini-cli, antigravity-cli, codex") {
 		t.Fatalf("usage missing pi setup agent: %q", stdout)
 	}
 	if !strings.Contains(stdout, "cloud <subcommand>") {
@@ -223,6 +223,11 @@ func TestPrintPostInstall(t *testing.T) {
 			name:    "gemini-cli",
 			result:  &setup.Result{Agent: "gemini-cli"},
 			expects: []string{"Restart Gemini CLI", "~/.gemini/settings.json"},
+		},
+		{
+			name:    "antigravity-cli",
+			result:  &setup.Result{Agent: "antigravity-cli"},
+			expects: []string{"Restart Antigravity CLI", "~/.gemini/config/mcp_config.json", "~/.gemini/GEMINI.md", "agy inspect"},
 		},
 		{
 			name:    "codex",

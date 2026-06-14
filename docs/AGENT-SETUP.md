@@ -20,9 +20,10 @@ Engram works with **any MCP-compatible agent**. Pick your agent below.
 | Pi            | `engram setup pi`                                                                            | [Details](#pi)                                     |
 | OpenCode      | `engram setup opencode`                                                                      | [Details](#opencode)                               |
 | Gemini CLI    | `engram setup gemini-cli`                                                                    | [Details](#gemini-cli)                             |
+| Antigravity CLI | `engram setup antigravity-cli`                                                             | [Details](#antigravity-cli)                        |
 | Codex         | `engram setup codex`                                                                         | [Details](#codex)                                  |
 | VS Code       | `code --add-mcp '{"name":"engram","command":"engram","args":["mcp"]}'`                       | [Details](#vs-code-copilot--claude-code-extension) |
-| Antigravity   | Manual JSON config                                                                           | [Details](#antigravity)                            |
+| Antigravity IDE | Manual JSON config                                                                         | [Details](#antigravity-ide)                        |
 | Cursor        | Manual JSON config                                                                           | [Details](#cursor)                                 |
 | Windsurf      | Manual JSON config                                                                           | [Details](#windsurf)                               |
 | Any MCP agent | `engram mcp` (stdio)                                                                         | [Details](#any-other-mcp-agent)                    |
@@ -378,6 +379,40 @@ gemini mcp add engram engram mcp
 
 ---
 
+## Antigravity CLI
+
+> This is the terminal coding agent (`agy`). For the Antigravity IDE, see [Antigravity IDE](#antigravity-ide).
+
+Recommended: one command to set up MCP + the Memory Protocol:
+
+```bash
+engram setup antigravity-cli
+```
+
+Antigravity shares the `~/.gemini/` root with Gemini CLI but reads from **different files**, so `engram setup gemini-cli` does **not** configure it. `engram setup antigravity-cli` does two things:
+
+- Registers `mcpServers.engram` in `~/.gemini/config/mcp_config.json` — the unified MCP config read by Antigravity CLI, IDE, and SDK (NOT `~/.gemini/settings.json`)
+- Writes the Engram Memory Protocol into `~/.gemini/GEMINI.md` as a marker-delimited block (`<!-- BEGIN ENGRAM MEMORY PROTOCOL … -->`). Existing content in `GEMINI.md` is preserved; re-running replaces only the managed block.
+
+After installing, restart Antigravity CLI and verify the server with `agy inspect`.
+
+Manual alternative — add to `~/.gemini/config/mcp_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "engram": {
+      "command": "engram",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Then add the Memory Protocol as a global rule in `~/.gemini/GEMINI.md` (or a workspace rule in `.agent/rules/`). See [DOCS.md](../DOCS.md#memory-protocol-full-text) for the full text.
+
+---
+
 ## Codex
 
 Recommended: one command to set up MCP + compaction recovery instructions:
@@ -538,7 +573,9 @@ Same pattern applies to:
 
 ---
 
-## Antigravity
+## Antigravity IDE
+
+> For the terminal agent (`agy`), see [Antigravity CLI](#antigravity-cli), which has a one-command installer.
 
 [Antigravity](https://antigravity.google) is Google's AI-first IDE with native MCP and skill support.
 

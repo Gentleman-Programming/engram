@@ -24,14 +24,14 @@ Agent
   │     ├── plugin/claude-code/scripts/*.sh / *.ps1
   │     └── plugin/claude-code/skills/memory/SKILL.md
   │
-  ├── Gemini / Codex setup
+  ├── Gemini CLI / Antigravity CLI / Codex setup
   │     └── internal/setup/setup.go
   │
-  └── VS Code / Antigravity / Cursor / Windsurf manual MCP
+  └── VS Code / Antigravity IDE / Cursor / Windsurf manual MCP
         └── JSON configuration documented in docs/AGENT-SETUP.md
 ```
 
-`internal/setup` does not install every possible integration. VS Code, Antigravity, Cursor, and Windsurf are manual MCP configuration paths documented in `docs/AGENT-SETUP.md`.
+`internal/setup` does not install every possible integration. VS Code, the Antigravity IDE, Cursor, and Windsurf are manual MCP configuration paths documented in `docs/AGENT-SETUP.md`. Note: the Antigravity **CLI** (`agy`) has an automated installer (`engram setup antigravity-cli`) — it is distinct from the Antigravity IDE, which remains manual.
 
 ## Thin plugin principle
 
