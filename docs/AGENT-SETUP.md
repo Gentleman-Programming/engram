@@ -20,12 +20,21 @@ Engram works with **any MCP-compatible agent**. Pick your agent below.
 | Pi            | `engram setup pi`                                                                            | [Details](#pi)                                     |
 | OpenCode      | `engram setup opencode`                                                                      | [Details](#opencode)                               |
 | Gemini CLI    | `engram setup gemini-cli`                                                                    | [Details](#gemini-cli)                             |
-| Codex         | `engram setup codex`                                                                         | [Details](#codex)                                  |
-| VS Code       | `code --add-mcp '{"name":"engram","command":"engram","args":["mcp"]}'`                       | [Details](#vs-code-copilot--claude-code-extension) |
-| Antigravity   | Manual JSON config                                                                           | [Details](#antigravity)                            |
-| Cursor        | Manual JSON config                                                                           | [Details](#cursor)                                 |
-| Windsurf      | Manual JSON config                                                                           | [Details](#windsurf)                               |
-| Any MCP agent | `engram mcp` (stdio)                                                                         | [Details](#any-other-mcp-agent)                    |
+| Codex           | `engram setup codex`                                                                         | [Details](#codex)                                  |
+| Antigravity CLI | `engram setup antigravity-cli`                                                               | [Details](#antigravity)                            |
+| Windsurf        | `engram setup windsurf`                                                                      | [Details](#windsurf)                               |
+| Qwen Code       | `engram setup qwen`                                                                          | [Details](#qwen-code)                              |
+| Kiro            | `engram setup kiro`                                                                          | [Details](#kiro)                                   |
+| Cursor          | `engram setup cursor`                                                                        | [Details](#cursor)                                 |
+| VS Code Copilot | `engram setup vscode-copilot`                                                                | [Details](#vs-code-copilot--claude-code-extension) |
+| Kilo Code       | `engram setup kilocode`                                                                      | [Details](#kilo-code)                              |
+| Any MCP agent   | `engram mcp` (stdio)                                                                         | [Details](#any-other-mcp-agent)                    |
+
+> **Native setup for all agents above.** `engram setup <agent>` writes the right
+> MCP registration (handling each client's config format — `mcpServers`,
+> `servers`, or OpenCode's `mcp` object) plus the Memory Protocol into that
+> agent's instruction surface, idempotently. The per-agent sections below describe
+> the exact files each command touches and the manual equivalent.
 
 ## Pi
 
@@ -435,6 +444,14 @@ Transport closed
 
 VS Code supports MCP servers natively in its chat panel (Copilot agent mode). This works with **any** AI agent running inside VS Code — Copilot, Claude Code extension, or any other MCP-compatible chat provider.
 
+**Automated (user profile):**
+
+```bash
+engram setup vscode-copilot
+```
+
+This registers the engram server under the `servers` object (with `type: stdio`) in your VS Code User `mcp.json` and writes a Copilot instructions file at `<User>/prompts/engram.instructions.md` (frontmatter `applyTo: "**"`). User dir per platform: macOS `~/Library/Application Support/Code/User/`, Linux `~/.config/Code/User/`, Windows `%APPDATA%\Code\User\`.
+
 **Option A: Workspace config** (recommended for teams — commit to source control):
 
 Add to `.vscode/mcp.json` in your project:
@@ -540,39 +557,53 @@ Same pattern applies to:
 
 ## Antigravity
 
-[Antigravity](https://antigravity.google) is Google's AI-first IDE with native MCP and skill support.
+[Antigravity](https://antigravity.google) is Google's AI-first IDE/CLI with native MCP and skill support.
 
-**Add the MCP server** — open the MCP Store (`...` dropdown in the agent panel) → **Manage MCP Servers** → **View raw config**, and add to `~/.gemini/antigravity/mcp_config.json`:
+**Automated:**
+
+```bash
+engram setup antigravity-cli
+```
+
+This registers `mcpServers.engram` in the shared `~/.gemini/config/mcp_config.json` (read by Antigravity CLI, IDE, and SDK) and writes the Memory Protocol as a marker-delimited block in `~/.gemini/GEMINI.md`, preserving any existing content.
+
+**Manual** — open the MCP Store (`...` dropdown in the agent panel) → **Manage MCP Servers** → **View raw config**, and add to `~/.gemini/config/mcp_config.json`:
 
 ```json
 {
   "mcpServers": {
     "engram": {
       "command": "engram",
-      "args": ["mcp"]
+      "args": ["mcp", "--tools=agent"]
     }
   }
 }
 ```
 
-**Adding the Memory Protocol** (recommended):
+Then add the Memory Protocol as a global rule in `~/.gemini/GEMINI.md`. See [DOCS.md](../DOCS.md#memory-protocol-full-text) for the full text.
 
-Add the Memory Protocol as a global rule in `~/.gemini/GEMINI.md`, or as a workspace rule in `.agent/rules/`. See [DOCS.md](../DOCS.md#memory-protocol-full-text) for the full text, or use the minimal version from [Surviving Compaction](#surviving-compaction-recommended).
-
-> **Note:** Antigravity has its own skill, rule, and MCP systems separate from VS Code. Do not use `.vscode/mcp.json`.
+> **Note:** Antigravity has its own skill, rule, and MCP systems separate from VS Code. Do not use `.vscode/mcp.json`. This is distinct from `engram setup gemini-cli`, which writes the Gemini CLI's own `settings.json` / `system.md`.
 
 ---
 
 ## Cursor
 
-Add to your `.cursor/mcp.json` (same path on all platforms — it's project-relative):
+**Automated:**
+
+```bash
+engram setup cursor
+```
+
+This registers `mcpServers.engram` in the global `~/.cursor/mcp.json` and writes an always-applied rule to `~/.cursor/rules/engram.mdc` (with the `alwaysApply: true` frontmatter Cursor needs).
+
+**Manual** — add to your `.cursor/mcp.json` (global: `~/.cursor/mcp.json`; or project-relative `.cursor/mcp.json`):
 
 ```json
 {
   "mcpServers": {
     "engram": {
       "command": "engram",
-      "args": ["mcp"]
+      "args": ["mcp", "--tools=agent"]
     }
   }
 }
@@ -593,20 +624,64 @@ Add to your `.cursor/mcp.json` (same path on all platforms — it's project-rela
 
 ## Windsurf
 
-Add to your `~/.windsurf/mcp.json` (Windows: `%USERPROFILE%\.windsurf\mcp.json`):
+**Automated:**
+
+```bash
+engram setup windsurf
+```
+
+This registers `mcpServers.engram` in `~/.codeium/windsurf/mcp_config.json` (Cascade's MCP config) and writes the Memory Protocol as a marker block in `~/.codeium/windsurf/memories/global_rules.md`.
+
+**Manual** — add to `~/.codeium/windsurf/mcp_config.json`:
 
 ```json
 {
   "mcpServers": {
     "engram": {
       "command": "engram",
-      "args": ["mcp"]
+      "args": ["mcp", "--tools=agent"]
     }
   }
 }
 ```
 
-> **Memory Protocol:** Add the Memory Protocol instructions to your `.windsurfrules` file. See [DOCS.md](../DOCS.md#memory-protocol-full-text) for the full text.
+> **Memory Protocol:** Add the Memory Protocol to `~/.codeium/windsurf/memories/global_rules.md`. See [DOCS.md](../DOCS.md#memory-protocol-full-text) for the full text.
+
+---
+
+## Qwen Code
+
+**Automated:**
+
+```bash
+engram setup qwen
+```
+
+Registers `mcpServers.engram` in `~/.qwen/settings.json` and writes the Memory Protocol as a marker block in `~/.qwen/QWEN.md`.
+
+---
+
+## Kiro
+
+**Automated:**
+
+```bash
+engram setup kiro
+```
+
+Registers `mcpServers.engram` in `~/.kiro/settings/mcp.json` and writes the Memory Protocol as a marker block in `~/.kiro/steering/engram.md`. (Kiro uses a split layout: MCP and steering live under `~/.kiro/` regardless of where the IDE keeps app settings.)
+
+---
+
+## Kilo Code
+
+**Automated:**
+
+```bash
+engram setup kilocode
+```
+
+Registers the engram server under the OpenCode-style `mcp` object in `~/.config/kilo/opencode.json` and writes the Memory Protocol as a marker block in `~/.config/kilo/AGENTS.md`.
 
 ---
 

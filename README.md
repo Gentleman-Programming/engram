@@ -54,8 +54,14 @@ Windows, Linux, and other install methods → [docs/INSTALLATION.md](docs/INSTAL
 | OpenCode                    | `engram setup opencode`                                                                      |
 | Gemini CLI                  | `engram setup gemini-cli`                                                                    |
 | Codex                       | `engram setup codex`                                                                         |
-| VS Code                     | `code --add-mcp '{"name":"engram","command":"engram","args":["mcp"]}'`                       |
-| Cursor / Windsurf / Any MCP | See [docs/AGENT-SETUP.md](docs/AGENT-SETUP.md)                                               |
+| Antigravity CLI             | `engram setup antigravity-cli`                                                               |
+| Windsurf                    | `engram setup windsurf`                                                                      |
+| Qwen Code                   | `engram setup qwen`                                                                          |
+| Kiro                        | `engram setup kiro`                                                                          |
+| Cursor                      | `engram setup cursor`                                                                        |
+| VS Code (Copilot)           | `engram setup vscode-copilot`                                                                |
+| Kilo Code                   | `engram setup kilocode`                                                                      |
+| Any other MCP client        | See [docs/AGENT-SETUP.md](docs/AGENT-SETUP.md)                                               |
 
 Full per-agent config, Memory Protocol, and compaction survival → [docs/AGENT-SETUP.md](docs/AGENT-SETUP.md)
 

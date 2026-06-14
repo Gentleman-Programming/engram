@@ -237,52 +237,30 @@ After that sentence, summarize:
 Keep it concise and high-signal.`
 
 // SupportedAgents returns the list of agents that have plugins available.
+// The list is derived from the registry (agentAdapters) so adding an agent there
+// surfaces it here and in `engram setup --help` automatically.
 func SupportedAgents() []Agent {
-	return []Agent{
-		{
-			Name:        "opencode",
-			Description: "OpenCode — TypeScript plugin with session tracking, compaction recovery, and Memory Protocol",
-			InstallDir:  openCodePluginDir(),
-		},
-		{
-			Name:        "pi",
-			Description: "Pi — gentle-engram package plus pi-mcp-adapter MCP tools",
-			InstallDir:  piAgentDir(),
-		},
-		{
-			Name:        "claude-code",
-			Description: "Claude Code — Native plugin via marketplace (hooks, skills, MCP, compaction recovery)",
-			InstallDir:  "managed by claude plugin system",
-		},
-		{
-			Name:        "gemini-cli",
-			Description: "Gemini CLI — MCP registration plus system prompt compaction recovery",
-			InstallDir:  geminiConfigPath(),
-		},
-		{
-			Name:        "codex",
-			Description: "Codex — MCP registration plus model/compaction instruction files",
-			InstallDir:  codexConfigPath(),
-		},
+	adapters := agentAdapters()
+	agents := make([]Agent, 0, len(adapters))
+	for _, a := range adapters {
+		agents = append(agents, Agent{
+			Name:        a.slug,
+			Description: a.description,
+			InstallDir:  a.displayDir(),
+		})
 	}
+	return agents
 }
 
-// Install installs the plugin for the given agent.
+// Install installs the plugin for the given agent by looking it up in the
+// registry and running its adapter (a bespoke installer or the generic driver).
 func Install(agentName string) (*Result, error) {
-	switch agentName {
-	case "opencode":
-		return installOpenCode()
-	case "pi":
-		return installPi()
-	case "claude-code":
-		return installClaudeCode()
-	case "gemini-cli":
-		return installGeminiCLI()
-	case "codex":
-		return installCodex()
-	default:
-		return nil, fmt.Errorf("unknown agent: %q (supported: opencode, pi, claude-code, gemini-cli, codex)", agentName)
+	for _, a := range agentAdapters() {
+		if a.slug == agentName {
+			return installFromAdapter(a)
+		}
 	}
+	return nil, fmt.Errorf("unknown agent: %q (supported: %s)", agentName, strings.Join(supportedSlugs(), ", "))
 }
 
 // ─── Pi ──────────────────────────────────────────────────────────────────────

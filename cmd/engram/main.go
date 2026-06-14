@@ -95,7 +95,7 @@ var (
 	storeDeleteProject     = func(s *store.Store, name string, hard bool) (*store.DeleteProjectResult, error) {
 		return s.DeleteProject(name, hard)
 	}
-	storeTimeline       = func(s *store.Store, observationID int64, before, after int) (*store.TimelineResult, error) {
+	storeTimeline = func(s *store.Store, observationID int64, before, after int) (*store.TimelineResult, error) {
 		return s.Timeline(observationID, before, after)
 	}
 	storeFormatContext = func(s *store.Store, project, scope string) (string, error) { return s.FormatContext(project, scope) }
@@ -2417,16 +2417,21 @@ func printPostInstall(result *setup.Result) {
 		fmt.Println("  2. Verify with: claude plugin list")
 		fmt.Println("  3. MCP config written to ~/.claude/mcp/engram.json using absolute binary path")
 		fmt.Println("     (survives plugin auto-updates; re-run 'engram setup claude-code' if you move the binary)")
-	case "gemini-cli":
-		fmt.Println("\nNext steps:")
-		fmt.Println("  1. Restart Gemini CLI so MCP config is reloaded")
-		fmt.Println("  2. Verify ~/.gemini/settings.json includes mcpServers.engram")
-		fmt.Println("  3. Verify ~/.gemini/system.md + ~/.gemini/.env exist for compaction recovery")
-	case "codex":
-		fmt.Println("\nNext steps:")
-		fmt.Println("  1. Restart Codex so MCP config is reloaded")
-		fmt.Println("  2. Verify ~/.codex/config.toml has [mcp_servers.engram]")
-		fmt.Println("  3. Verify model_instructions_file + experimental_compact_prompt_file are set")
+	default:
+		// Every other agent's "next steps" are declared as data in the registry,
+		// so the message is rendered generically instead of one case per agent.
+		printNextSteps(setup.PostInstallSteps(result.Agent))
+	}
+}
+
+// printNextSteps renders a numbered "Next steps" list, or nothing when empty.
+func printNextSteps(steps []string) {
+	if len(steps) == 0 {
+		return
+	}
+	fmt.Println("\nNext steps:")
+	for i, step := range steps {
+		fmt.Printf("  %d. %s\n", i+1, step)
 	}
 }
 
@@ -2477,7 +2482,9 @@ Commands:
                      Merge similar project names into one canonical name
                        --all      Scan ALL projects for similar name groups
                        --dry-run  Preview what would be merged (no changes)
-  setup [agent]      Install/setup agent integration (opencode, pi, claude-code, gemini-cli, codex)
+  setup [agent]      Install/setup agent integration (opencode, pi, claude-code,
+                     gemini-cli, codex, antigravity-cli, windsurf, qwen, kiro,
+                     cursor, vscode-copilot, kilocode)
   sync               Export new memories as compressed chunk to .engram/
                          --import   Import new chunks from .engram/ into local DB
                          --status   Show sync status

@@ -166,8 +166,10 @@ func TestPrintUsage(t *testing.T) {
 	if !strings.Contains(stdout, "search <query>") || !strings.Contains(stdout, "setup [agent]") {
 		t.Fatalf("usage missing expected commands: %q", stdout)
 	}
-	if !strings.Contains(stdout, "opencode, pi, claude-code, gemini-cli, codex") {
-		t.Fatalf("usage missing pi setup agent: %q", stdout)
+	for _, agent := range []string{"opencode", "pi", "claude-code", "gemini-cli", "codex", "antigravity-cli", "windsurf", "qwen", "kiro", "cursor", "vscode-copilot", "kilocode"} {
+		if !strings.Contains(stdout, agent) {
+			t.Fatalf("usage missing setup agent %q: %q", agent, stdout)
+		}
 	}
 	if !strings.Contains(stdout, "cloud <subcommand>") {
 		t.Fatalf("usage missing cloud command tree: %q", stdout)
@@ -228,6 +230,41 @@ func TestPrintPostInstall(t *testing.T) {
 			name:    "codex",
 			result:  &setup.Result{Agent: "codex"},
 			expects: []string{"Restart Codex", "~/.codex/config.toml"},
+		},
+		{
+			name:    "antigravity-cli",
+			result:  &setup.Result{Agent: "antigravity-cli"},
+			expects: []string{"Restart Antigravity", "~/.gemini/config/mcp_config.json", "~/.gemini/GEMINI.md"},
+		},
+		{
+			name:    "windsurf",
+			result:  &setup.Result{Agent: "windsurf"},
+			expects: []string{"Restart Windsurf", "~/.codeium/windsurf/mcp_config.json"},
+		},
+		{
+			name:    "qwen",
+			result:  &setup.Result{Agent: "qwen"},
+			expects: []string{"Restart Qwen Code", "~/.qwen/settings.json"},
+		},
+		{
+			name:    "kiro",
+			result:  &setup.Result{Agent: "kiro"},
+			expects: []string{"Restart Kiro", "~/.kiro/settings/mcp.json"},
+		},
+		{
+			name:    "cursor",
+			result:  &setup.Result{Agent: "cursor"},
+			expects: []string{"Restart Cursor", "~/.cursor/mcp.json", "engram.mdc"},
+		},
+		{
+			name:    "vscode-copilot",
+			result:  &setup.Result{Agent: "vscode-copilot"},
+			expects: []string{"Restart VS Code", "servers.engram", "engram.instructions.md"},
+		},
+		{
+			name:    "kilocode",
+			result:  &setup.Result{Agent: "kilocode"},
+			expects: []string{"Restart Kilo Code", "~/.config/kilo/opencode.json"},
 		},
 		{
 			name:   "unknown",
