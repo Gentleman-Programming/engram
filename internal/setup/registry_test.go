@@ -145,18 +145,35 @@ func TestInstallDeclarativeAgentsRegisterMCPAndInstructions(t *testing.T) {
 			if !strings.Contains(instr, "Engram Persistent Memory") {
 				t.Errorf("%s: instruction file missing protocol content", agent.slug)
 			}
-			if agent.style == markerBlock && !strings.Contains(instr, engramMarkerBegin) {
-				t.Errorf("%s: marker-block instruction missing begin marker", agent.slug)
+			if agent.style == markerBlock {
+				begin := strings.Index(instr, engramMarkerBegin)
+				end := strings.Index(instr, engramMarkerEnd)
+				if begin == -1 {
+					t.Errorf("%s: marker-block instruction missing begin marker", agent.slug)
+				}
+				if end == -1 {
+					t.Errorf("%s: marker-block instruction missing end marker", agent.slug)
+				}
+				if begin != -1 && end != -1 && end <= begin {
+					t.Errorf("%s: end marker (%d) does not follow begin marker (%d)", agent.slug, end, begin)
+				}
 			}
 
 			// Idempotency: second run does not duplicate the entry or marker block.
 			if _, err := Install(agent.slug); err != nil {
 				t.Fatalf("second Install(%s) failed: %v", agent.slug, err)
 			}
-			instr2Raw, _ := os.ReadFile(agent.instrPath())
+			instr2Raw, err := os.ReadFile(agent.instrPath())
+			if err != nil {
+				t.Fatalf("read instruction file after second install: %v", err)
+			}
 			if agent.style == markerBlock {
-				if n := strings.Count(string(instr2Raw), engramMarkerBegin); n != 1 {
+				instr2 := string(instr2Raw)
+				if n := strings.Count(instr2, engramMarkerBegin); n != 1 {
 					t.Errorf("%s: expected 1 marker block after re-run, got %d", agent.slug, n)
+				}
+				if n := strings.Count(instr2, engramMarkerEnd); n != 1 {
+					t.Errorf("%s: expected 1 marker end after re-run, got %d", agent.slug, n)
 				}
 			}
 		})
@@ -252,6 +269,59 @@ func TestInstallDeclarativeAgentMCPWriteError(t *testing.T) {
 
 	if _, err := Install("windsurf"); err == nil {
 		t.Fatalf("expected write error to propagate")
+	}
+}
+
+// TestInstallDeclarativeAgentInstructionWriteError verifies an instruction-surface
+// write failure propagates even when the MCP write succeeds: writeFileFn fails only
+// for the (non-JSON) instruction file so injectMCP — which goes through
+// writeJSONConfig — completes first.
+func TestInstallDeclarativeAgentInstructionWriteError(t *testing.T) {
+	stubRegistryEnv(t)
+	instrPath := windsurfRulesPath()
+	writeFileFn = func(path string, _ []byte, _ os.FileMode) error {
+		if path == instrPath {
+			return errors.New("disk full")
+		}
+		return os.WriteFile(path, nil, 0644)
+	}
+
+	if _, err := Install("windsurf"); err == nil {
+		t.Fatalf("expected instruction write error to propagate")
+	}
+}
+
+// TestInjectMCPHandlesNullServersObject guards the case where an existing config
+// stores the top-level servers key as JSON null — unmarshalling leaves the map
+// nil, and the engram assignment must not panic.
+func TestInjectMCPHandlesNullServersObject(t *testing.T) {
+	stubRegistryEnv(t)
+	path := windsurfMCPPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(`{"mcpServers":null}`), 0644); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+
+	if err := injectMCP(path, mcpServersObject); err != nil {
+		t.Fatalf("injectMCP with null servers: %v", err)
+	}
+	entry := readEngramEntry(t, path, "mcpServers")
+	if entry["command"] != testEngramBin {
+		t.Errorf("expected engram entry written, got %#v", entry)
+	}
+}
+
+// TestInstallDeclarativeAgentFailsOnUnresolvableHome verifies that a home-dir
+// lookup failure fails the install rather than silently writing to a relative
+// path under the current working directory.
+func TestInstallDeclarativeAgentFailsOnUnresolvableHome(t *testing.T) {
+	stubRegistryEnv(t)
+	userHomeDir = func() (string, error) { return "", errors.New("no home") }
+
+	if _, err := Install("windsurf"); err == nil {
+		t.Fatalf("expected install to fail when home is unresolvable")
 	}
 }
 

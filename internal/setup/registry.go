@@ -82,6 +82,23 @@ func (a agentAdapter) displayDir() string {
 	}
 }
 
+// userHome centralizes home-directory resolution for every declarative path
+// helper. It returns an error when no non-empty absolute home can be determined,
+// so callers never silently fall back to a relative path (which would write
+// agent config into the current working directory instead of the user config
+// root). Path helpers ignore the error because installFromAdapter validates
+// resolvability up front via this same function before any write happens.
+func userHome() (string, error) {
+	home, err := userHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user home directory: %w", err)
+	}
+	if strings.TrimSpace(home) == "" || !filepath.IsAbs(home) {
+		return "", fmt.Errorf("could not determine an absolute user home directory (got %q)", home)
+	}
+	return home, nil
+}
+
 // mcpTopKey returns the top-level JSON key under which servers are stored.
 func mcpTopKey(format mcpFormat) string {
 	switch format {
@@ -134,6 +151,11 @@ func injectMCP(path string, format mcpFormat) error {
 	if raw, ok := config[topKey]; ok {
 		if err := json.Unmarshal(raw, &servers); err != nil {
 			return fmt.Errorf("parse %s block in %s: %w", topKey, path, err)
+		}
+		// Unmarshalling a JSON null leaves the map nil; re-init so the engram
+		// assignment below doesn't panic on configs like "mcpServers": null.
+		if servers == nil {
+			servers = make(map[string]json.RawMessage)
 		}
 	}
 
@@ -210,6 +232,13 @@ func writeInstruction(ins instrSurface) error {
 func installFromAdapter(a agentAdapter) (*Result, error) {
 	if a.custom != nil {
 		return a.custom()
+	}
+
+	// Declarative path helpers build their destinations from the user home dir.
+	// Validate once here so an unresolvable home fails the install instead of
+	// silently writing config into the current working directory.
+	if _, err := userHome(); err != nil {
+		return nil, err
 	}
 
 	files := 0

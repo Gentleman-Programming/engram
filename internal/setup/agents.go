@@ -180,36 +180,36 @@ func vscodeInstructionsBody() string {
 // Gemini CLI's own settings.json / system.md surfaces.
 
 func antigravityMCPConfigPath() string {
-	home, _ := userHomeDir()
+	home, _ := userHome()
 	return filepath.Join(home, ".gemini", "config", "mcp_config.json")
 }
 
 func antigravityContextPath() string {
-	home, _ := userHomeDir()
+	home, _ := userHome()
 	return filepath.Join(home, ".gemini", "GEMINI.md")
 }
 
 // ─── Windsurf paths ──────────────────────────────────────────────────────────
 
 func windsurfMCPPath() string {
-	home, _ := userHomeDir()
+	home, _ := userHome()
 	return filepath.Join(home, ".codeium", "windsurf", "mcp_config.json")
 }
 
 func windsurfRulesPath() string {
-	home, _ := userHomeDir()
+	home, _ := userHome()
 	return filepath.Join(home, ".codeium", "windsurf", "memories", "global_rules.md")
 }
 
 // ─── Qwen Code paths ─────────────────────────────────────────────────────────
 
 func qwenSettingsPath() string {
-	home, _ := userHomeDir()
+	home, _ := userHome()
 	return filepath.Join(home, ".qwen", "settings.json")
 }
 
 func qwenContextPath() string {
-	home, _ := userHomeDir()
+	home, _ := userHome()
 	return filepath.Join(home, ".qwen", "QWEN.md")
 }
 
@@ -219,24 +219,24 @@ func qwenContextPath() string {
 // regardless of where the IDE keeps its app settings.
 
 func kiroMCPPath() string {
-	home, _ := userHomeDir()
+	home, _ := userHome()
 	return filepath.Join(home, ".kiro", "settings", "mcp.json")
 }
 
 func kiroSteeringPath() string {
-	home, _ := userHomeDir()
+	home, _ := userHome()
 	return filepath.Join(home, ".kiro", "steering", "engram.md")
 }
 
 // ─── Cursor paths ────────────────────────────────────────────────────────────
 
 func cursorMCPPath() string {
-	home, _ := userHomeDir()
+	home, _ := userHome()
 	return filepath.Join(home, ".cursor", "mcp.json")
 }
 
 func cursorRulesPath() string {
-	home, _ := userHomeDir()
+	home, _ := userHome()
 	return filepath.Join(home, ".cursor", "rules", "engram.mdc")
 }
 
@@ -244,7 +244,7 @@ func cursorRulesPath() string {
 
 // vscodeUserDir returns the platform-specific VS Code "User" config directory.
 func vscodeUserDir() string {
-	home, _ := userHomeDir()
+	home, _ := userHome()
 	switch runtimeGOOS {
 	case "windows":
 		if appData := os.Getenv("APPDATA"); appData != "" {
@@ -275,7 +275,7 @@ func vscodePromptPath() string {
 // its own ~/.config/kilo/ root.
 
 func kilocodeConfigDir() string {
-	home, _ := userHomeDir()
+	home, _ := userHome()
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
 		return filepath.Join(xdg, "kilo")
 	}
