@@ -254,6 +254,7 @@ func shouldRegister(name string, allowlist map[string]bool) bool {
 	return allowlist[name]
 }
 
+// registerTools registers all enabled MCP tools on the given server.
 func registerTools(srv *server.MCPServer, s *store.Store, cfg MCPConfig, allowlist map[string]bool, activity *SessionActivity) {
 	writeQueue := newWriteQueue(defaultMCPWriteQueueSize)
 
@@ -1659,6 +1660,7 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 	}
 }
 
+// handleStats returns a tool handler function for mem_stats.
 func handleStats(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		projectOverride, _ := req.GetArguments()["project"].(string)
@@ -1695,6 +1697,7 @@ func handleStats(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 	}
 }
 
+// DoctorToolHandler returns a tool handler function for mem_doctor.
 func DoctorToolHandler(s *store.Store) server.ToolHandlerFunc {
 	return handleDoctor(s, MCPConfig{})
 }
@@ -1802,6 +1805,7 @@ func handleTimeline(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 	}
 }
 
+// handleGetObservation returns a tool handler function for mem_get_observation.
 func handleGetObservation(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		id := int64(intArg(req, "id", 0))
@@ -1851,6 +1855,9 @@ func handleGetObservation(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc 
 	}
 }
 
+// handleSessionSummary returns a tool handler function that saves a comprehensive
+// end-of-session summary memory. It supports explicit project override matching
+// the precedence of mem_save.
 func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		content, _ := req.GetArguments()["content"].(string)
@@ -1869,6 +1876,7 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		if strings.TrimSpace(recoverySessionID) == "" {
 			recoverySessionID = defaultSessionID("")
 		}
+		// validateRecoveryToken verifies if a recovery token matches the request.
 		validateRecoveryToken := func(res projectpkg.DetectionResult, choice string) (bool, bool) {
 			if strings.TrimSpace(recoveryToken) == "" {
 				return false, false
@@ -2389,6 +2397,8 @@ func resolveWriteProjectWithChoice(projectChoice, reason string, validateToken a
 	return res, nil
 }
 
+// resolveSaveWriteProjectWithProcessOverride resolves the write project target
+// by applying the process-level project override before falling back to full precedence resolution.
 func resolveSaveWriteProjectWithProcessOverride(s *store.Store, projectChoice string, explicitProjectProvided bool, reason, sessionID string, validateToken ambiguousRecoveryTokenValidator, defaultProject string) (projectpkg.DetectionResult, error) {
 	if !explicitProjectProvided && strings.TrimSpace(projectChoice) == "" && strings.TrimSpace(sessionID) == "" && strings.TrimSpace(reason) == "" {
 		if processRes, ok := processProjectResult(defaultProject); ok {
@@ -2398,6 +2408,8 @@ func resolveSaveWriteProjectWithProcessOverride(s *store.Store, projectChoice st
 	return resolveSaveWriteProject(s, projectChoice, explicitProjectProvided, reason, sessionID, validateToken)
 }
 
+// resolveSaveWriteProject resolves the write project target using the full MCP precedence:
+// explicit request parameter, existing session association, or nearest configuration/directory detection.
 func resolveSaveWriteProject(s *store.Store, projectChoice string, explicitProjectProvided bool, reason, sessionID string, validateToken ambiguousRecoveryTokenValidator) (projectpkg.DetectionResult, error) {
 	trimmedSessionID := strings.TrimSpace(sessionID)
 	trimmedProjectChoice := strings.TrimSpace(projectChoice)
@@ -2779,6 +2791,8 @@ func respondWithProject(res projectpkg.DetectionResult, text string, extra map[s
 	return mcp.NewToolResultText(string(out))
 }
 
+// writeProjectErrorResult formats and returns a structured error result when project
+// resolution fails. It handles ambiguous project errors and invalid configs.
 func writeProjectErrorResult(activity *SessionActivity, sessionID string, res projectpkg.DetectionResult, err error) *mcp.CallToolResult {
 	code := "ambiguous_project"
 	if errors.Is(err, projectpkg.ErrInvalidConfig) {
