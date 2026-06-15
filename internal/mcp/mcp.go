@@ -670,7 +670,15 @@ GUIDELINES:
 				mcp.WithString("session_id",
 					mcp.Description("Session ID (default: manual-save-{project})"),
 				),
-				// project field intentionally omitted — auto-detect only (REQ-308 write-tool contract)
+				mcp.WithString("project",
+					mcp.Description("Optional explicit project for this memory. Accepted only when backed by known context (existing project, matching session, repo config, or ambiguous-project recovery); invalid or unbacked names fail loudly."),
+				),
+				mcp.WithString("project_choice_reason",
+					mcp.Description("Must be user_selected_after_ambiguous_project, and only after the user explicitly chose one of available_projects from an ambiguous_project error."),
+				),
+				mcp.WithString("recovery_token",
+					mcp.Description("Short-lived token returned by an ambiguous_project error. Required with project_choice_reason=user_selected_after_ambiguous_project."),
+				),
 			),
 			queuedWriteHandler(writeQueue, handleSessionSummary(s, cfg, activity)),
 		)
@@ -1847,21 +1855,36 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		content, _ := req.GetArguments()["content"].(string)
 		sessionID, _ := req.GetArguments()["session_id"].(string)
-		// project field intentionally not read — auto-detect only (REQ-308 write-tool contract)
+		projectChoice, _ := req.GetArguments()["project"].(string)
+		_, explicitProjectProvided := req.GetArguments()["project"]
+		projectChoiceReason, _ := req.GetArguments()["project_choice_reason"].(string)
+		recoveryToken, _ := req.GetArguments()["recovery_token"].(string)
 
 		// Reject empty/whitespace-only content before any project resolution (#393).
 		if strings.TrimSpace(content) == "" {
 			return mcp.NewToolResultError("content is required for mem_session_summary"), nil
 		}
 
-		// Honour process-level project override (cfg.DefaultProject) set via
-		// ENGRAM_PROJECT or `engram mcp --project` (#403/#413). Falls back to cwd
-		// detection when no override is configured.
-		detRes, err := resolveWriteProjectWithProcessOverride(cfg.DefaultProject)
-		if err != nil {
-			return writeProjectErrorResult(nil, "", detRes, err), nil
+		recoverySessionID := sessionID
+		if strings.TrimSpace(recoverySessionID) == "" {
+			recoverySessionID = defaultSessionID("")
 		}
-		project, _ := store.NormalizeProject(detRes.Project)
+		validateRecoveryToken := func(res projectpkg.DetectionResult, choice string) (bool, bool) {
+			if strings.TrimSpace(recoveryToken) == "" {
+				return false, false
+			}
+			return true, activity.ValidateAmbiguousProjectRecoveryToken(recoverySessionID, recoveryToken, strings.TrimSpace(choice), res.AvailableProjects, res.Path)
+		}
+
+		// Resolve write project using the full MCP precedence: explicit request,
+		// existing session association, process override, repo config/directory detection, then cwd fallback.
+		detRes, err := resolveSaveWriteProjectWithProcessOverride(s, projectChoice, explicitProjectProvided, projectChoiceReason, sessionID, validateRecoveryToken, cfg.DefaultProject)
+		if err != nil {
+			return writeProjectErrorResult(activity, recoverySessionID, detRes, err), nil
+		}
+		project := detRes.Project
+
+		project, _ = store.NormalizeProject(project)
 
 		if sessionID == "" {
 			sessionID = resolveFallbackSessionID(s, project)
