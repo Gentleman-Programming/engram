@@ -591,13 +591,22 @@ func (s *Store) JudgeRelation(p JudgeRelationParams) (*Relation, error) {
 	if err := s.withTx(func(tx *sql.Tx) error {
 		// ── Cross-project guard (Phase 2, REQ-003) ─────────────────────────
 		// Derive source and target project for enrollment checks and the guard.
-		// Missing observation → empty string (REQ-011 edge).
+		// Use the same session-fallback form as JudgeBySemantic so that enrolled
+		// projects whose observations have a blank project column (but whose session
+		// carries the project) are resolved correctly. Missing observation → empty
+		// string (REQ-011 edge) because the LEFT JOIN returns no row.
 		var srcProject, tgtProject string
 		_ = tx.QueryRow(
-			`SELECT ifnull(project,'') FROM observations WHERE sync_id = ?`, sourceID,
+			`SELECT coalesce(nullif(o.project,''), s.project, '')
+			   FROM observations o
+			   LEFT JOIN sessions s ON s.id = o.session_id
+			  WHERE o.sync_id = ?`, sourceID,
 		).Scan(&srcProject)
 		_ = tx.QueryRow(
-			`SELECT ifnull(project,'') FROM observations WHERE sync_id = ?`, targetID,
+			`SELECT coalesce(nullif(o.project,''), s.project, '')
+			   FROM observations o
+			   LEFT JOIN sessions s ON s.id = o.session_id
+			  WHERE o.sync_id = ?`, targetID,
 		).Scan(&tgtProject)
 
 		// Delegate to shared helper; reject cross-project pairs.
@@ -701,10 +710,16 @@ func (s *Store) JudgeRelation(p JudgeRelationParams) (*Relation, error) {
 func validateCrossProjectGuard(tx *sql.Tx, sourceID, targetID string) error {
 	var srcProject, tgtProject string
 	_ = tx.QueryRow(
-		`SELECT ifnull(project,'') FROM observations WHERE sync_id = ?`, sourceID,
+		`SELECT coalesce(nullif(o.project,''), s.project, '')
+		   FROM observations o
+		   LEFT JOIN sessions s ON s.id = o.session_id
+		  WHERE o.sync_id = ?`, sourceID,
 	).Scan(&srcProject)
 	_ = tx.QueryRow(
-		`SELECT ifnull(project,'') FROM observations WHERE sync_id = ?`, targetID,
+		`SELECT coalesce(nullif(o.project,''), s.project, '')
+		   FROM observations o
+		   LEFT JOIN sessions s ON s.id = o.session_id
+		  WHERE o.sync_id = ?`, targetID,
 	).Scan(&tgtProject)
 
 	if srcProject != "" && tgtProject != "" && srcProject != tgtProject {
@@ -815,7 +830,71 @@ func (s *Store) JudgeBySemantic(p JudgeBySemanticParams) (string, error) {
 		}
 
 		resultSyncID = existingSyncID
-		return nil
+
+		// ── Enqueue sync mutation when project is enrolled ─────────────────────
+		// Derive source project using the same session-fallback as the backfill
+		// SELECT: coalesce(nullif(obs.project,''), session.project, '').
+		// This prevents an empty Project in the enqueued payload when the
+		// observation's own project column is blank but the session carries it.
+		var srcProject, tgtProject string
+		_ = tx.QueryRow(
+			`SELECT coalesce(nullif(o.project,''), s.project, '')
+			   FROM observations o
+			   LEFT JOIN sessions s ON s.id = o.session_id
+			  WHERE o.sync_id = ?`, p.SourceID,
+		).Scan(&srcProject)
+		_ = tx.QueryRow(
+			`SELECT coalesce(nullif(o.project,''), s.project, '')
+			   FROM observations o
+			   LEFT JOIN sessions s ON s.id = o.session_id
+			  WHERE o.sync_id = ?`, p.TargetID,
+		).Scan(&tgtProject)
+
+		enrollCheckProject := srcProject
+		if enrollCheckProject == "" {
+			enrollCheckProject = tgtProject
+		}
+
+		var enrolled int
+		if err := tx.QueryRow(
+			`SELECT 1 FROM sync_enrolled_projects WHERE project = ? LIMIT 1`, enrollCheckProject,
+		).Scan(&enrolled); err != nil && err != sql.ErrNoRows {
+			return fmt.Errorf("JudgeBySemantic: check enrollment: %w", err)
+		}
+		if enrolled == 0 {
+			return nil // not enrolled — backfill will cover it on enrollment
+		}
+
+		// REQ-011: log at WARNING level when source observation is missing locally
+		// (project='' race condition). The server will reject with 400; this log
+		// is the local breadcrumb so the gap is not silently swallowed.
+		if srcProject == "" {
+			log.Printf("[store] WARNING: JudgeBySemantic enqueueing relation %s with project='' (source observation missing locally); server will reject", existingSyncID)
+		}
+
+		// Build payload from the freshly-written row.
+		rel, err := s.getRelationTx(tx, existingSyncID)
+		if err != nil {
+			return fmt.Errorf("JudgeBySemantic: read relation for enqueue: %w", err)
+		}
+		payload := syncRelationPayload{
+			SyncID:         rel.SyncID,
+			SourceID:       rel.SourceID,
+			TargetID:       rel.TargetID,
+			Relation:       rel.Relation,
+			Reason:         rel.Reason,
+			Evidence:       rel.Evidence,
+			Confidence:     rel.Confidence,
+			JudgmentStatus: rel.JudgmentStatus,
+			MarkedByActor:  rel.MarkedByActor,
+			MarkedByKind:   rel.MarkedByKind,
+			MarkedByModel:  rel.MarkedByModel,
+			SessionID:      rel.SessionID,
+			Project:        srcProject,
+			CreatedAt:      rel.CreatedAt,
+			UpdatedAt:      rel.UpdatedAt,
+		}
+		return s.enqueueSyncMutationTx(tx, SyncEntityRelation, rel.SyncID, SyncOpUpsert, payload)
 	}); err != nil {
 		return "", err
 	}

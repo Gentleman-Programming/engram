@@ -404,7 +404,14 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 
 		// Filter to only new data (created after last chunk)
 		chunk = sy.filterNewData(data, lastChunkTime)
-		chunk.Mutations = filterNewRelationMutations(relationMutations, lastChunkTime)
+
+		// Relations are filtered by chunk presence, not timestamp; see the
+		// rationale on filterRelationMutationsForExport and issue #353.
+		exportedRelations, err := sy.exportedRelationKeys(manifest)
+		if err != nil {
+			return nil, fmt.Errorf("scan exported relations: %w", err)
+		}
+		chunk.Mutations = filterRelationMutationsForExport(relationMutations, exportedRelations, lastChunkTime)
 	}
 
 	// Nothing new to export
@@ -1134,18 +1141,69 @@ func (sy *Syncer) filterNewData(data *store.ExportData, lastChunkTime string) *C
 	return chunk
 }
 
-func filterNewRelationMutations(mutations []store.SyncMutation, lastChunkTime string) []store.SyncMutation {
+// exportedRelationKeys returns the set of relation EntityKeys already present
+// in the chunks recorded by the manifest. The manifest itself does not track
+// relations, so the chunk contents are the source of truth for "has this
+// relation ever been exported".
+//
+// Cost: this reads every chunk listed in the manifest on each export. A
+// relation may live in any chunk, so the scan cannot stop early. For very long
+// sync histories this is O(total chunks); tracking relation keys in the
+// manifest would remove the rescan if it ever becomes a bottleneck.
+func (sy *Syncer) exportedRelationKeys(m *Manifest) (map[string]struct{}, error) {
+	keys := make(map[string]struct{})
+	if m == nil {
+		return keys, nil
+	}
+	for _, entry := range m.Chunks {
+		// Read through the transport (not the local filesystem directly) so the
+		// scan honors the active backend — the import path uses the same
+		// contract. A missing chunk surfaces as ErrChunkNotFound.
+		raw, err := sy.transport.ReadChunk(entry.ID)
+		if err != nil {
+			if errors.Is(err, ErrChunkNotFound) {
+				// The manifest can list chunks that live on another machine and
+				// were never pulled locally. A missing chunk contributes no known
+				// relations; at worst a relation is re-exported, which is an
+				// idempotent upsert — never a silent drop. A chunk that exists
+				// but cannot be read is a real fault and fails loudly below.
+				continue
+			}
+			return nil, fmt.Errorf("read chunk %s: %w", entry.ID, err)
+		}
+		var chunk ChunkData
+		if err := json.Unmarshal(raw, &chunk); err != nil {
+			return nil, fmt.Errorf("unmarshal chunk %s: %w", entry.ID, err)
+		}
+		for _, mutation := range chunk.Mutations {
+			if mutation.Entity == store.SyncEntityRelation {
+				keys[mutation.EntityKey] = struct{}{}
+			}
+		}
+	}
+	return keys, nil
+}
+
+// filterRelationMutationsForExport returns the relation mutations that still
+// need to be written to a chunk. A relation is exported when it is absent from
+// every prior chunk (covers brand-new relations and the upgrade/backfill case
+// where pre-existing relations never reached a chunk) or when it was updated
+// after the most recent chunk (so re-judged relations still propagate).
+// Presence is the source of truth; the timestamp only adds updates.
+func filterRelationMutationsForExport(mutations []store.SyncMutation, exported map[string]struct{}, lastChunkTime string) []store.SyncMutation {
 	if len(mutations) == 0 {
 		return nil
 	}
 	if lastChunkTime == "" {
-		return mutations
+		return mutations // first sync — nothing has been exported yet
 	}
 
 	cutoff := normalizeTime(lastChunkTime)
 	filtered := make([]store.SyncMutation, 0, len(mutations))
 	for _, mutation := range mutations {
-		if normalizeTime(mutation.OccurredAt) > cutoff {
+		_, alreadyExported := exported[mutation.EntityKey]
+		updatedSinceLastChunk := normalizeTime(mutation.OccurredAt) > cutoff
+		if !alreadyExported || updatedSinceLastChunk {
 			filtered = append(filtered, mutation)
 		}
 	}

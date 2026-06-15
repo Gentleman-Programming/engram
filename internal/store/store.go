@@ -5000,7 +5000,10 @@ func (s *Store) backfillProjectSyncMutationsTx(tx *sql.Tx, project string) error
 	if err := s.backfillObservationSyncMutationsTx(tx, project); err != nil {
 		return err
 	}
-	return s.backfillPromptSyncMutationsTx(tx, project)
+	if err := s.backfillPromptSyncMutationsTx(tx, project); err != nil {
+		return err
+	}
+	return s.backfillRelationSyncMutationsTx(tx, project)
 }
 
 // projectNeedsBackfill returns true when a project has any sessions, live observations,
@@ -5041,6 +5044,30 @@ func (s *Store) projectNeedsBackfill(project string) (bool, error) {
 			        WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = p.sync_id AND sm.source = ?
 			      )`,
 			args: []any{project, project, DefaultSyncTargetKey, SyncEntityPrompt, SyncSourceLocal},
+		},
+		{
+			// Count only fully-judged relations (not orphaned, not pending, with
+			// marked_by_actor/kind populated) whose source and target observations
+			// are locally available and that have no local upsert sync_mutations row.
+			// Mirrors the SELECT in backfillRelationSyncMutationsTx exactly — any
+			// divergence causes the fast-path skip to desync from the write path.
+			// Pending/unmarked rows lack marked_by_* and would be rejected by cloud
+			// validation (HTTP 400), so we exclude them from both the count and the
+			// backfill to avoid polluting the sync journal with undeliverable mutations.
+			q: `SELECT COUNT(*)
+			    FROM memory_relations r
+			    JOIN observations src ON src.sync_id = r.source_id AND src.deleted_at IS NULL
+			    JOIN observations tgt ON tgt.sync_id = r.target_id AND tgt.deleted_at IS NULL
+			    LEFT JOIN sessions src_s ON src_s.id = src.session_id
+			    WHERE r.judgment_status NOT IN (?, ?)
+			      AND ifnull(r.marked_by_actor, '') != ''
+			      AND ifnull(r.marked_by_kind, '') != ''
+			      AND coalesce(nullif(src.project, ''), src_s.project, '') = ?
+			      AND NOT EXISTS (
+			        SELECT 1 FROM sync_mutations sm
+			        WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = r.sync_id AND sm.source = ?
+			      )`,
+			args: []any{JudgmentStatusOrphaned, JudgmentStatusPending, project, DefaultSyncTargetKey, SyncEntityRelation, SyncSourceLocal},
 		},
 	}
 	for _, cq := range queries {
@@ -5355,6 +5382,87 @@ func (s *Store) backfillPromptSyncMutationsTx(tx *sql.Tx, project string) error 
 	// Phase 2: insert tombstone mutations.
 	for _, payload := range tombstonePending {
 		if err := s.enqueueSyncMutationTx(tx, SyncEntityPrompt, payload.SyncID, SyncOpDelete, payload); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// backfillRelationSyncMutationsTx creates sync_mutations rows for non-orphaned
+// relations that have no corresponding local sync_mutations row.
+//
+// This fills the cloud-journal gap described in issue #496: a relation can exist
+// in memory_relations with no sync_mutations row and therefore never replicates.
+//
+// Design mirrors backfillObservationSyncMutationsTx exactly:
+//   - Phase 1: collect all missing rows into a slice (close cursor first).
+//   - Phase 2: insert, avoiding the SQLite cursor-open-during-write busy loop.
+//
+// The SELECT mirrors ExportRelationMutations' join/orphan-filter structure
+// (join both observations, exclude orphaned status, exclude rows that already
+// have a local upsert mutation), but scopes by source-observation project only.
+// ExportRelationMutations additionally filters by tgt.project; the backfill
+// intentionally omits that filter to avoid skipping cross-project edges where
+// only the source belongs to this project.
+func (s *Store) backfillRelationSyncMutationsTx(tx *sql.Tx, project string) error {
+	// Only backfill fully-judged relations: exclude orphaned/pending and any row
+	// that is missing marked_by_actor or marked_by_kind.  Cloud validation
+	// (chunkcodec + server) hard-rejects mutations without those fields (HTTP 400),
+	// so enqueueing them would block the entire sync batch.
+	// This predicate must stay identical to the COUNT in projectNeedsBackfill.
+	rows, err := s.queryItHook(tx, `
+		SELECT r.sync_id, r.source_id, r.target_id, r.relation, r.reason, r.evidence, r.confidence,
+		       r.judgment_status, r.marked_by_actor, r.marked_by_kind, r.marked_by_model,
+		       r.session_id,
+		       coalesce(nullif(src.project, ''), src_s.project, ''),
+		       r.created_at, r.updated_at
+		FROM memory_relations r
+		JOIN observations src ON src.sync_id = r.source_id AND src.deleted_at IS NULL
+		JOIN observations tgt ON tgt.sync_id = r.target_id AND tgt.deleted_at IS NULL
+		LEFT JOIN sessions src_s ON src_s.id = src.session_id
+		WHERE r.judgment_status NOT IN (?, ?)
+		  AND ifnull(r.marked_by_actor, '') != ''
+		  AND ifnull(r.marked_by_kind, '') != ''
+		  AND coalesce(nullif(src.project, ''), src_s.project, '') = ?
+		  AND NOT EXISTS (
+		    SELECT 1 FROM sync_mutations sm
+		    WHERE sm.target_key = ?
+		      AND sm.entity = ?
+		      AND sm.entity_key = r.sync_id
+		      AND sm.source = ?
+		  )
+		ORDER BY r.created_at ASC, r.sync_id ASC`,
+		JudgmentStatusOrphaned, JudgmentStatusPending,
+		project,
+		DefaultSyncTargetKey, SyncEntityRelation, SyncSourceLocal,
+	)
+	if err != nil {
+		return err
+	}
+
+	// Phase 1: collect into memory before any INSERT to avoid cursor-open-during-write.
+	var pending []syncRelationPayload
+	for rows.Next() {
+		var p syncRelationPayload
+		if err := rows.Scan(
+			&p.SyncID, &p.SourceID, &p.TargetID, &p.Relation, &p.Reason, &p.Evidence, &p.Confidence,
+			&p.JudgmentStatus, &p.MarkedByActor, &p.MarkedByKind, &p.MarkedByModel,
+			&p.SessionID, &p.Project, &p.CreatedAt, &p.UpdatedAt,
+		); err != nil {
+			return closeRowsWithError(rows, err)
+		}
+		pending = append(pending, p)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	// Phase 2: insert now that the read cursor is closed.
+	for _, p := range pending {
+		if err := s.enqueueSyncMutationTx(tx, SyncEntityRelation, p.SyncID, SyncOpUpsert, p); err != nil {
 			return err
 		}
 	}
@@ -6635,12 +6743,16 @@ func Now() string {
 // ─── Test-accessor helpers (REQ-009 / Phase G integration tests) ──────────────
 
 // CountRelationSyncMutations returns the number of sync_mutations rows whose
-// entity is NOT 'session', 'observation', or 'prompt' — i.e., any entity that
-// would indicate memory_relations data leaking into sync. Used by integration
-// tests to assert that relation operations never enqueue sync mutations (REQ-009).
+// entity is NOT 'session', 'observation', or 'prompt'. Used by integration
+// tests to verify the enrollment gate: an UNENROLLED project must never enqueue
+// relation sync mutations (the enqueue in JudgeBySemantic/JudgeRelation is
+// guarded by an enrollment check). The test that calls this uses an unenrolled
+// store, so the count must remain zero.
 //
-// In Phase 1, only 'session', 'observation', and 'prompt' are valid entities.
-// Any other entity (e.g. 'relation', 'memory_relation') would be a regression.
+// Note: relation sync mutations ARE valid for enrolled projects (#313/#379/#383
+// enabled cloud relation sync; #496 extends it with backfill). This function
+// is not a blanket "relations are local-only" check — it is an enrollment-gate
+// regression guard scoped to the unenrolled test context that uses it.
 func (s *Store) CountRelationSyncMutations() (int, error) {
 	var count int
 	err := s.db.QueryRow(`

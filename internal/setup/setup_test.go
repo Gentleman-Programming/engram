@@ -1350,6 +1350,72 @@ func TestResolveEngramCommand(t *testing.T) {
 	})
 }
 
+// TestResolveEngramCommandHomebrewCellar guards against baking a versioned
+// Homebrew/Linuxbrew Cellar path into MCP client configs. Such paths (e.g.
+// .../Cellar/engram/1.16.1/bin/engram) are removed on `brew upgrade`, leaving
+// OpenCode/Codex with a stale command that fails to spawn (ENOENT). The command
+// must resolve to the stable <brew-prefix>/bin/engram symlink, or bare "engram"
+// when that symlink is missing.
+func TestResolveEngramCommandHomebrewCellar(t *testing.T) {
+	cases := []struct {
+		name         string
+		exe          string
+		stableOnDisk string // stable symlink present on disk; "" means none
+		want         string
+	}{
+		{
+			name:         "linuxbrew cellar maps to stable bin symlink",
+			exe:          "/home/linuxbrew/.linuxbrew/Cellar/engram/1.16.1/bin/engram",
+			stableOnDisk: "/home/linuxbrew/.linuxbrew/bin/engram",
+			want:         "/home/linuxbrew/.linuxbrew/bin/engram",
+		},
+		{
+			name:         "macos arm cellar maps to stable bin symlink",
+			exe:          "/opt/homebrew/Cellar/engram/1.16.1/bin/engram",
+			stableOnDisk: "/opt/homebrew/bin/engram",
+			want:         "/opt/homebrew/bin/engram",
+		},
+		{
+			name:         "macos intel cellar maps to stable bin symlink",
+			exe:          "/usr/local/Cellar/engram/1.16.1/bin/engram",
+			stableOnDisk: "/usr/local/bin/engram",
+			want:         "/usr/local/bin/engram",
+		},
+		{
+			name:         "cellar path with missing stable symlink falls back to bare name",
+			exe:          "/opt/homebrew/Cellar/engram/1.16.1/bin/engram",
+			stableOnDisk: "",
+			want:         "engram",
+		},
+		{
+			name:         "non-cellar absolute path is preserved",
+			exe:          "/opt/engram/bin/engram",
+			stableOnDisk: "",
+			want:         "/opt/engram/bin/engram",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resetSetupSeams(t)
+			osExecutable = func() (string, error) { return tc.exe, nil }
+			statFn = func(name string) (os.FileInfo, error) {
+				if tc.stableOnDisk != "" && filepath.ToSlash(name) == tc.stableOnDisk {
+					return nil, nil // exists
+				}
+				return nil, os.ErrNotExist
+			}
+
+			// Normalize separators so the comparison holds on Windows runners,
+			// where resolveEngramCommand returns OS-native separators via
+			// filepath.FromSlash while tc.want is written with forward slashes.
+			if got := filepath.ToSlash(resolveEngramCommand()); got != tc.want {
+				t.Fatalf("resolveEngramCommand() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestClaudeCodeMCPDirPaths(t *testing.T) {
 	resetSetupSeams(t)
 	userHomeDir = func() (string, error) { return "/home/tester", nil }

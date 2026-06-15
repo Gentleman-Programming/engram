@@ -624,15 +624,25 @@ func TestIncrementalRelationExport(t *testing.T) {
 		t.Fatalf("backdate rel-inc-1: %v", err)
 	}
 
-	// Write a manifest whose most-recent chunk CreatedAt sits between the
-	// backdated relation (2025-01-01) and "now", so the incremental filter will
-	// treat rel-inc-1 as already exported and rel-inc-2 as new.
+	// Write a prior chunk that genuinely CONTAINS rel-inc-1 as a relation
+	// mutation — that is what "already exported" actually means. Its CreatedAt
+	// (2025-06-01) sits between the backdated relation (2025-01-01) and "now",
+	// so the export must skip rel-inc-1 (present and not updated) and carry only
+	// rel-inc-2 (absent from every chunk).
 	chunksDir := filepath.Join(syncDir, "chunks")
 	if err := os.MkdirAll(chunksDir, 0o755); err != nil {
 		t.Fatalf("mkdir chunks: %v", err)
 	}
 	pastChunkID := "pastchunk00"
-	writeLocalChunkFile(t, syncDir, pastChunkID, ChunkData{})
+	writeLocalChunkFile(t, syncDir, pastChunkID, ChunkData{
+		// rel-inc-1 is genuinely present in this prior chunk, so
+		// exportedRelationKeys treats it as already exported and skips it.
+		Mutations: []store.SyncMutation{{
+			Entity:    store.SyncEntityRelation,
+			EntityKey: "rel-inc-1",
+			Op:        store.SyncOpUpsert,
+		}},
+	})
 	writeManifestFile(t, syncDir, &Manifest{
 		Version: 1,
 		Chunks:  []ChunkEntry{{ID: pastChunkID, CreatedBy: "alice", CreatedAt: "2025-06-01T00:00:00Z"}},
@@ -676,6 +686,159 @@ func TestIncrementalRelationExport(t *testing.T) {
 	}
 	if !result2.IsEmpty {
 		t.Fatal("expected second export (no new data) to be empty")
+	}
+}
+
+// TestLocalChunkExportBackfillsRelationsCreatedBeforeLastChunk reproduces the
+// upgrade/backfill gap from issue #353: relations that already existed before
+// relation-sync shipped (so they were never written into any prior chunk) have
+// an updated_at older than the latest chunk. The time-only incremental filter
+// treats them as "already exported" and silently drops them, even though no
+// chunk actually contains them.
+//
+// Expected behavior: a relation absent from every prior chunk must be exported
+// regardless of its timestamp. On current code this fails (zero relations).
+func TestLocalChunkExportBackfillsRelationsCreatedBeforeLastChunk(t *testing.T) {
+	s := newTestStore(t)
+	syncDir := filepath.Join(t.TempDir(), ".engram")
+
+	// Seed a relation, then backdate it so it predates the latest chunk —
+	// exactly the state of a project that judged relations before 1.16.3.
+	seedRelationForProject(t, s, "proj-a", "sess-backfill", "rel-backfill")
+	if _, err := s.DB().Exec(
+		`UPDATE memory_relations SET updated_at='2025-01-01 00:00:00', created_at='2025-01-01 00:00:00' WHERE sync_id='rel-backfill'`,
+	); err != nil {
+		t.Fatalf("backdate rel-backfill: %v", err)
+	}
+
+	// A prior chunk dated AFTER the relation but which does NOT contain it
+	// (observations were synced before relation-sync existed). This is the
+	// crucial difference from a genuinely already-exported relation.
+	chunksDir := filepath.Join(syncDir, "chunks")
+	if err := os.MkdirAll(chunksDir, 0o755); err != nil {
+		t.Fatalf("mkdir chunks: %v", err)
+	}
+	writeLocalChunkFile(t, syncDir, "pastchunk00", ChunkData{})
+	writeManifestFile(t, syncDir, &Manifest{
+		Version: 1,
+		Chunks:  []ChunkEntry{{ID: "pastchunk00", CreatedBy: "alice", CreatedAt: "2025-06-01T00:00:00Z"}},
+	})
+
+	result, err := New(s, syncDir).Export("alice", "proj-a")
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if result.IsEmpty {
+		t.Fatal("expected export to backfill the pre-existing relation, got empty result")
+	}
+
+	chunkJSON, err := readGzip(filepath.Join(syncDir, "chunks", result.ChunkID+".jsonl.gz"))
+	if err != nil {
+		t.Fatalf("read chunk: %v", err)
+	}
+	var chunk ChunkData
+	if err := json.Unmarshal(chunkJSON, &chunk); err != nil {
+		t.Fatalf("unmarshal chunk: %v", err)
+	}
+
+	found := false
+	for _, m := range chunk.Mutations {
+		if m.EntityKey == "rel-backfill" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("pre-existing relation rel-backfill absent from every chunk must be exported, got mutations %+v", chunk.Mutations)
+	}
+}
+
+// TestLocalChunkExportFailsLoudlyOnCorruptPriorChunk pins the new failure mode
+// introduced by reading prior chunks during export: a chunk file that exists
+// but cannot be decoded is a real fault and must fail loudly, never be skipped.
+// Skipping it would treat its relations as un-exported and could re-introduce a
+// drop on a later prune — the opposite of the "no silent drops" invariant.
+func TestLocalChunkExportFailsLoudlyOnCorruptPriorChunk(t *testing.T) {
+	s := newTestStore(t)
+	syncDir := filepath.Join(t.TempDir(), ".engram")
+	seedRelationForProject(t, s, "proj-a", "sess-corrupt", "rel-corrupt")
+
+	chunksDir := filepath.Join(syncDir, "chunks")
+	if err := os.MkdirAll(chunksDir, 0o755); err != nil {
+		t.Fatalf("mkdir chunks: %v", err)
+	}
+	corruptID := "corruptchunk"
+	if err := os.WriteFile(filepath.Join(chunksDir, corruptID+".jsonl.gz"), []byte("not a gzip stream"), 0o644); err != nil {
+		t.Fatalf("write corrupt chunk: %v", err)
+	}
+	writeManifestFile(t, syncDir, &Manifest{
+		Version: 1,
+		Chunks:  []ChunkEntry{{ID: corruptID, CreatedBy: "alice", CreatedAt: "2025-06-01T00:00:00Z"}},
+	})
+
+	if _, err := New(s, syncDir).Export("alice", "proj-a"); err == nil {
+		t.Fatal("expected Export to fail loudly on a corrupt prior chunk, got nil error")
+	}
+}
+
+// TestLocalChunkExportReexportsRelationUpdatedAfterLastChunk covers the second
+// branch of the export filter: a relation already present in a prior chunk but
+// re-judged after the latest chunk must be exported again so the update
+// propagates. A regression to pure presence-based filtering would silently drop
+// this update while every other relation test still passes.
+func TestLocalChunkExportReexportsRelationUpdatedAfterLastChunk(t *testing.T) {
+	s := newTestStore(t)
+	syncDir := filepath.Join(t.TempDir(), ".engram")
+
+	// rel-updated already lives in a prior chunk (already exported)...
+	seedRelationForProject(t, s, "proj-a", "sess-updated", "rel-updated")
+	// ...but it was re-judged AFTER that chunk's CreatedAt (2025-06-01).
+	if _, err := s.DB().Exec(
+		`UPDATE memory_relations SET updated_at='2025-07-01 00:00:00' WHERE sync_id='rel-updated'`,
+	); err != nil {
+		t.Fatalf("bump rel-updated: %v", err)
+	}
+
+	chunksDir := filepath.Join(syncDir, "chunks")
+	if err := os.MkdirAll(chunksDir, 0o755); err != nil {
+		t.Fatalf("mkdir chunks: %v", err)
+	}
+	writeLocalChunkFile(t, syncDir, "pastchunk00", ChunkData{
+		Mutations: []store.SyncMutation{{
+			Entity:    store.SyncEntityRelation,
+			EntityKey: "rel-updated",
+			Op:        store.SyncOpUpsert,
+		}},
+	})
+	writeManifestFile(t, syncDir, &Manifest{
+		Version: 1,
+		Chunks:  []ChunkEntry{{ID: "pastchunk00", CreatedBy: "alice", CreatedAt: "2025-06-01T00:00:00Z"}},
+	})
+
+	result, err := New(s, syncDir).Export("alice", "proj-a")
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if result.IsEmpty {
+		t.Fatal("expected export to re-export the updated relation, got empty result")
+	}
+
+	chunkJSON, err := readGzip(filepath.Join(syncDir, "chunks", result.ChunkID+".jsonl.gz"))
+	if err != nil {
+		t.Fatalf("read chunk: %v", err)
+	}
+	var chunk ChunkData
+	if err := json.Unmarshal(chunkJSON, &chunk); err != nil {
+		t.Fatalf("unmarshal chunk: %v", err)
+	}
+
+	found := false
+	for _, m := range chunk.Mutations {
+		if m.EntityKey == "rel-updated" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("relation updated after the last chunk must be re-exported, got mutations %+v", chunk.Mutations)
 	}
 }
 
