@@ -2908,7 +2908,7 @@ func errorWithMeta(code, msg string, availableProjects []string) *mcp.CallToolRe
 	}
 	switch code {
 	case "ambiguous_project":
-		envelope["hint"] = "Ask the user to choose one of available_projects, then retry mem_save or mem_save_prompt with project and project_choice_reason=user_selected_after_ambiguous_project; alternatively cd into the target repo or add repo .engram/config.json."
+		envelope["hint"] = "Ask the user to choose one of available_projects, then retry the same write tool (mem_save, mem_save_prompt, or mem_session_summary) with project and project_choice_reason=user_selected_after_ambiguous_project; alternatively cd into the target repo or add repo .engram/config.json."
 	case "invalid_project_choice":
 		envelope["hint"] = "Use exactly one of available_projects after asking the user, or cd into the target repo, or add repo .engram/config.json."
 	case "missing_recovery_token":
