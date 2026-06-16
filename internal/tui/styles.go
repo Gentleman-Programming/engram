@@ -121,6 +121,11 @@ var (
 			Foreground(colorPeach).
 			Bold(true)
 
+	// Observation lifecycle warning badge
+	stateWarningBadgeStyle = lipgloss.NewStyle().
+				Foreground(colorYellow).
+				Bold(true)
+
 	// Observation ID
 	idStyle = lipgloss.NewStyle().
 		Foreground(colorBlue)

@@ -1656,3 +1656,134 @@ func TestFindCandidates_SkipInsert_False_Regression(t *testing.T) {
 		t.Errorf("SkipInsert=false must insert pending rows when candidates exist; before=%d after=%d", beforeCount, afterCount)
 	}
 }
+
+// ─── ExportRelationMutations unit tests ──────────────────────────────────────
+
+// setupExportRelationsStore creates a store with two projects and seeded
+// judged relations for use by ExportRelationMutations tests.
+func setupExportRelationsStore(t *testing.T) (s *Store, relAlpha, relBeta string) {
+	t.Helper()
+	s = newTestStore(t)
+	if err := s.CreateSession("ses-exp-alpha", "alpha", "/tmp/exp-alpha"); err != nil {
+		t.Fatalf("CreateSession alpha: %v", err)
+	}
+	if err := s.CreateSession("ses-exp-beta", "beta", "/tmp/exp-beta"); err != nil {
+		t.Fatalf("CreateSession beta: %v", err)
+	}
+
+	_, syncA1 := addTestObsSession(t, s, "ses-exp-alpha", "Export alpha source", "decision", "alpha", "project")
+	_, syncA2 := addTestObsSession(t, s, "ses-exp-alpha", "Export alpha target", "decision", "alpha", "project")
+	_, syncB1 := addTestObsSession(t, s, "ses-exp-beta", "Export beta source", "decision", "beta", "project")
+	_, syncB2 := addTestObsSession(t, s, "ses-exp-beta", "Export beta target", "decision", "beta", "project")
+
+	relAlpha = newSyncID("rel")
+	if _, err := s.SaveRelation(SaveRelationParams{SyncID: relAlpha, SourceID: syncA1, TargetID: syncA2}); err != nil {
+		t.Fatalf("SaveRelation alpha: %v", err)
+	}
+	confidence := 0.9
+	if _, err := s.JudgeRelation(JudgeRelationParams{
+		JudgmentID:    relAlpha,
+		Relation:      RelationCompatible,
+		Confidence:    &confidence,
+		MarkedByActor: "test",
+		MarkedByKind:  "system",
+	}); err != nil {
+		t.Fatalf("JudgeRelation alpha: %v", err)
+	}
+
+	relBeta = newSyncID("rel")
+	if _, err := s.SaveRelation(SaveRelationParams{SyncID: relBeta, SourceID: syncB1, TargetID: syncB2}); err != nil {
+		t.Fatalf("SaveRelation beta: %v", err)
+	}
+	if _, err := s.JudgeRelation(JudgeRelationParams{
+		JudgmentID:    relBeta,
+		Relation:      RelationRelated,
+		Confidence:    &confidence,
+		MarkedByActor: "test",
+		MarkedByKind:  "system",
+	}); err != nil {
+		t.Fatalf("JudgeRelation beta: %v", err)
+	}
+	return
+}
+
+// TestExportRelationMutations_ProjectScoped verifies that a project-scoped call
+// returns only the mutations for observations in that project.
+func TestExportRelationMutations_ProjectScoped(t *testing.T) {
+	s, relAlpha, _ := setupExportRelationsStore(t)
+
+	mutations, err := s.ExportRelationMutations("alpha")
+	if err != nil {
+		t.Fatalf("ExportRelationMutations alpha: %v", err)
+	}
+	if len(mutations) != 1 {
+		t.Fatalf("expected 1 mutation for project alpha; got %d", len(mutations))
+	}
+	m := mutations[0]
+	if m.EntityKey != relAlpha {
+		t.Errorf("expected entity_key=%q; got %q", relAlpha, m.EntityKey)
+	}
+	if m.Entity != SyncEntityRelation {
+		t.Errorf("expected entity=%q; got %q", SyncEntityRelation, m.Entity)
+	}
+	if m.Op != SyncOpUpsert {
+		t.Errorf("expected op=%q; got %q", SyncOpUpsert, m.Op)
+	}
+	if m.Project != "alpha" {
+		t.Errorf("expected project=alpha; got %q", m.Project)
+	}
+}
+
+// TestExportRelationMutations_Unscoped verifies that an empty project string
+// returns all non-orphaned relation mutations across all projects.
+func TestExportRelationMutations_Unscoped(t *testing.T) {
+	s, relAlpha, relBeta := setupExportRelationsStore(t)
+
+	mutations, err := s.ExportRelationMutations("")
+	if err != nil {
+		t.Fatalf("ExportRelationMutations unscoped: %v", err)
+	}
+	if len(mutations) != 2 {
+		t.Fatalf("expected 2 mutations for unscoped call; got %d", len(mutations))
+	}
+	keys := make(map[string]bool, len(mutations))
+	for _, m := range mutations {
+		keys[m.EntityKey] = true
+	}
+	if !keys[relAlpha] {
+		t.Errorf("expected relAlpha=%q in unscoped export; got %v", relAlpha, keys)
+	}
+	if !keys[relBeta] {
+		t.Errorf("expected relBeta=%q in unscoped export; got %v", relBeta, keys)
+	}
+}
+
+// TestExportRelationMutations_ExcludesOrphaned verifies that relations with
+// judgment_status='orphaned' are excluded from the export.
+func TestExportRelationMutations_ExcludesOrphaned(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("ses-orphan-exp", "orph-proj", "/tmp/orph-exp"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	_, syncSrc := addTestObsSession(t, s, "ses-orphan-exp", "Orphan export source", "decision", "orph-proj", "project")
+	_, syncTgt := addTestObsSession(t, s, "ses-orphan-exp", "Orphan export target", "decision", "orph-proj", "project")
+
+	relSyncID := newSyncID("rel")
+	if _, err := s.SaveRelation(SaveRelationParams{SyncID: relSyncID, SourceID: syncSrc, TargetID: syncTgt}); err != nil {
+		t.Fatalf("SaveRelation: %v", err)
+	}
+	// Manually orphan the relation.
+	if _, err := s.db.Exec(`UPDATE memory_relations SET judgment_status='orphaned' WHERE sync_id=?`, relSyncID); err != nil {
+		t.Fatalf("orphan update: %v", err)
+	}
+
+	mutations, err := s.ExportRelationMutations("orph-proj")
+	if err != nil {
+		t.Fatalf("ExportRelationMutations: %v", err)
+	}
+	for _, m := range mutations {
+		if m.EntityKey == relSyncID {
+			t.Errorf("orphaned relation %q must not appear in ExportRelationMutations", relSyncID)
+		}
+	}
+}

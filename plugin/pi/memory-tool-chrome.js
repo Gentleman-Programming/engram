@@ -17,6 +17,7 @@ const TOOL_LABELS = {
   mem_capture_passive: "capture passive",
   mem_judge: "judge",
   mem_compare: "compare",
+  mem_review: "review",
 };
 
 const ARG_KEYS = {
@@ -38,6 +39,7 @@ const ARG_KEYS = {
   mem_capture_passive: ["source", "content"],
   mem_judge: ["judgment_id", "relation"],
   mem_compare: ["memory_id_a", "memory_id_b"],
+  mem_review: ["action", "project", "limit", "observation_id", "id"],
 };
 
 export const SUPPORTED_MEMORY_TOOLS = Object.freeze(Object.keys(TOOL_LABELS));
@@ -58,6 +60,8 @@ function quote(value) {
 }
 
 export function compactToolArg(toolName, args = {}) {
+  if (toolName === "mem_review") return compactReviewArg(args);
+
   const keys = ARG_KEYS[toolName] ?? [];
   for (const key of keys) {
     const value = args?.[key];
@@ -66,6 +70,19 @@ export function compactToolArg(toolName, args = {}) {
     return quote(value);
   }
   return "";
+}
+
+function compactReviewArg(args = {}) {
+  const parts = [];
+  if (args.action !== undefined && args.action !== null && args.action !== "") parts.push(String(args.action));
+
+  const id = args.observation_id ?? args.id;
+  if (id !== undefined && id !== null && id !== "") parts.push(`#${id}`);
+
+  if (args.project !== undefined && args.project !== null && args.project !== "") parts.push(quote(args.project));
+  if (args.limit !== undefined && args.limit !== null && args.limit !== "") parts.push(`limit ${args.limit}`);
+
+  return parts.join(" ");
 }
 
 function firstTextContent(result) {
@@ -83,6 +100,7 @@ function countItems(value) {
   if (Array.isArray(value?.observations)) return value.observations.length;
   if (Array.isArray(value?.sessions)) return value.sessions.length;
   if (Array.isArray(value?.prompts)) return value.prompts.length;
+  if (typeof value?.count === "number") return value.count;
   return undefined;
 }
 
@@ -112,6 +130,11 @@ export function compactResultStatus(toolName, result, options = {}) {
   if (toolName === "mem_capture_passive") return `✓ captured ${data?.saved ?? count ?? 0}`;
   if (toolName === "mem_judge") return data?.relation?.sync_id ? `✓ judged ${data.relation.sync_id}` : "✓ judged";
   if (toolName === "mem_compare") return data?.sync_id ? `✓ ${data.sync_id}` : "✓ compared";
+  if (toolName === "mem_review") {
+    if (count !== undefined) return `✓ ${count} need${count === 1 ? "s" : ""} review`;
+    const id = data?.id ?? data?.observation_id ?? data?.observation?.id;
+    return id ? `✓ reviewed #${id}` : "✓ reviewed";
+  }
   return "✓ done";
 }
 

@@ -131,6 +131,61 @@ func TestHandleSuggestTopicKeyRequiresInput(t *testing.T) {
 	}
 }
 
+func TestHandlePinAndUnpinObservation(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "s1",
+		Type:      "decision",
+		Title:     "Architecture choice",
+		Content:   "Keep critical context visible.",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": float64(id)}}}
+	res, err := handlePin(s, true)(context.Background(), req)
+	if err != nil {
+		t.Fatalf("pin handler: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected pin tool error: %s", callResultText(t, res))
+	}
+	obs, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("get pinned observation: %v", err)
+	}
+	if !obs.Pinned {
+		t.Fatalf("expected observation to be pinned")
+	}
+	if !strings.Contains(callResultText(t, res), `"pinned":true`) {
+		t.Fatalf("pin result should expose pinned=true, got %q", callResultText(t, res))
+	}
+
+	res, err = handlePin(s, false)(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unpin handler: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected unpin tool error: %s", callResultText(t, res))
+	}
+	obs, err = s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("get unpinned observation: %v", err)
+	}
+	if obs.Pinned {
+		t.Fatalf("expected observation to be unpinned")
+	}
+	if !strings.Contains(callResultText(t, res), `"pinned":false`) {
+		t.Fatalf("unpin result should expose pinned=false, got %q", callResultText(t, res))
+	}
+}
+
 func TestHandleSaveSuggestsTopicKeyWhenMissing(t *testing.T) {
 	s := newMCPTestStore(t)
 	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
@@ -787,6 +842,9 @@ func TestHandleSearchAndCRUDHandlers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("add observation: %v", err)
 	}
+	if err := s.PinObservation(obsID); err != nil {
+		t.Fatalf("pin observation: %v", err)
+	}
 
 	search := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 	searchReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -804,6 +862,18 @@ func TestHandleSearchAndCRUDHandlers(t *testing.T) {
 	}
 	if !strings.Contains(callResultText(t, searchRes), "Found 1 memories") {
 		t.Fatalf("expected non-empty search result")
+	}
+	searchBody := callResultJSON(t, searchRes)
+	results, ok := searchBody["results"].([]any)
+	if !ok || len(results) != 1 {
+		t.Fatalf("expected structured search results with lifecycle metadata, got %v", searchBody["results"])
+	}
+	firstResult, _ := results[0].(map[string]any)
+	if firstResult["state"] != store.ObservationStateActive {
+		t.Fatalf("expected search result state active, got %v", firstResult["state"])
+	}
+	if firstResult["pinned"] != true {
+		t.Fatalf("expected search result pinned=true, got %v", firstResult["pinned"])
 	}
 
 	update := handleUpdate(s)
@@ -845,6 +915,137 @@ func TestHandleSearchAndCRUDHandlers(t *testing.T) {
 	}
 	if !strings.Contains(callResultText(t, delRes), "permanently deleted") {
 		t.Fatalf("expected hard delete message")
+	}
+}
+
+func TestHandleSaveReturnsLifecycleState(t *testing.T) {
+	s := newMCPTestStore(t)
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "Lifecycle save",
+		"content": "Save response should expose lifecycle state",
+		"type":    "decision",
+		"project": "engram",
+	}}})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected save error: %s", callResultText(t, res))
+	}
+	body := callResultJSON(t, res)
+	if body["state"] != store.ObservationStateActive {
+		t.Fatalf("expected save response state active, got %v", body["state"])
+	}
+	if _, ok := body["review_after"].(string); !ok {
+		t.Fatalf("expected save response review_after for decision, got %v", body["review_after"])
+	}
+}
+
+func TestHandleReviewListAndMarkReviewed(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("s-review", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := s.AddObservation(store.AddObservationParams{SessionID: "s-review", Type: "decision", Title: "Review me", Content: "Needs lifecycle review", Project: "engram"})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	past := time.Now().UTC().Add(-time.Hour).Format("2006-01-02 15:04:05")
+	if _, err := s.DB().Exec(`UPDATE observations SET review_after = ? WHERE id = ?`, past, id); err != nil {
+		t.Fatalf("backdate review_after: %v", err)
+	}
+
+	h := handleReview(s, MCPConfig{})
+	listRes, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"action":  "list",
+		"project": "engram",
+		"limit":   5.0,
+	}}})
+	if err != nil {
+		t.Fatalf("review list handler error: %v", err)
+	}
+	if listRes.IsError {
+		t.Fatalf("unexpected review list error: %s", callResultText(t, listRes))
+	}
+	listBody := callResultJSON(t, listRes)
+	observations, ok := listBody["observations"].([]any)
+	if !ok || len(observations) != 1 {
+		t.Fatalf("expected one review observation, got %v", listBody["observations"])
+	}
+	entry, _ := observations[0].(map[string]any)
+	if entry["state"] != store.ObservationStateNeedsReview {
+		t.Fatalf("expected needs_review state, got %v", entry["state"])
+	}
+
+	markRes, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"action":         "mark_reviewed",
+		"observation_id": float64(id),
+	}}})
+	if err != nil {
+		t.Fatalf("mark reviewed handler error: %v", err)
+	}
+	if markRes.IsError {
+		t.Fatalf("unexpected mark reviewed error: %s", callResultText(t, markRes))
+	}
+	markBody := callResultJSON(t, markRes)
+	if markBody["state"] != store.ObservationStateActive {
+		t.Fatalf("expected active after mark_reviewed, got %v", markBody["state"])
+	}
+}
+
+func TestHandleReviewMarkReviewedAcceptsIDAlias(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("s-review-alias", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := s.AddObservation(store.AddObservationParams{SessionID: "s-review-alias", Type: "decision", Title: "Review alias", Content: "Needs lifecycle review", Project: "engram"})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	past := time.Now().UTC().Add(-time.Hour).Format("2006-01-02 15:04:05")
+	if _, err := s.DB().Exec(`UPDATE observations SET review_after = ? WHERE id = ?`, past, id); err != nil {
+		t.Fatalf("backdate review_after: %v", err)
+	}
+
+	h := handleReview(s, MCPConfig{})
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"action": "mark_reviewed",
+		"id":     float64(id),
+	}}})
+	if err != nil {
+		t.Fatalf("mark reviewed handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected mark reviewed error: %s", callResultText(t, res))
+	}
+	body := callResultJSON(t, res)
+	if body["state"] != store.ObservationStateActive {
+		t.Fatalf("expected active after id alias mark_reviewed, got %v", body["state"])
+	}
+}
+
+func TestHandleReviewListUnknownProjectReturnsStructuredError(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("s-review-project", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	h := handleReview(s, MCPConfig{})
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"action":  "list",
+		"project": "engarm",
+	}}})
+	if err != nil {
+		t.Fatalf("review list handler error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("expected unknown project error, got success: %s", callResultText(t, res))
+	}
+	body := callResultJSON(t, res)
+	if body["error_code"] != "unknown_project" {
+		t.Fatalf("expected unknown_project error, got %v", body)
 	}
 }
 
@@ -1418,6 +1619,9 @@ func TestResolveToolsAgentProfile(t *testing.T) {
 		"mem_judge",           // REQ-003: conflict verdict tool (Phase D)
 		"mem_compare",         // REQ-011: persist agent-judged semantic verdict (Phase G)
 		"mem_doctor",          // read-only operational diagnostics
+		"mem_review",          // lifecycle review list/maintenance
+		"mem_pin",             // local context priority
+		"mem_unpin",           // local context priority
 	}
 	for _, tool := range expectedTools {
 		if !result[tool] {
@@ -1462,13 +1666,13 @@ func TestResolveToolsCombinedProfiles(t *testing.T) {
 		t.Fatal("expected non-nil allowlist for combined profiles")
 	}
 
-	// Should have all 19 tools (mem_doctor added for operational diagnostics)
+	// Should have all agent and admin tools.
 	allTools := []string{
 		"mem_save", "mem_search", "mem_context", "mem_session_summary",
 		"mem_session_start", "mem_session_end", "mem_get_observation",
 		"mem_suggest_topic_key", "mem_capture_passive", "mem_save_prompt",
 		"mem_update", "mem_delete", "mem_stats", "mem_timeline", "mem_merge_projects",
-		"mem_current_project", "mem_judge", "mem_compare", "mem_doctor",
+		"mem_current_project", "mem_judge", "mem_compare", "mem_doctor", "mem_review", "mem_pin", "mem_unpin",
 	}
 	for _, tool := range allTools {
 		if !result[tool] {
@@ -2054,7 +2258,8 @@ func TestNewServerWithToolsNilRegistersAll(t *testing.T) {
 		"mem_session_start", "mem_session_end", "mem_get_observation",
 		"mem_suggest_topic_key", "mem_capture_passive", "mem_save_prompt",
 		"mem_update", "mem_delete", "mem_stats", "mem_timeline", "mem_merge_projects",
-		"mem_current_project", "mem_judge", "mem_compare", "mem_doctor",
+		"mem_current_project", "mem_judge", "mem_compare", "mem_doctor", "mem_review",
+		"mem_pin", "mem_unpin",
 	}
 
 	for _, name := range allTools {
@@ -2159,14 +2364,14 @@ func TestNewServerBackwardsCompatible(t *testing.T) {
 	srv := NewServer(s)
 	tools := srv.ListTools()
 
-	// 15 agent + 4 admin = 19 total (mem_doctor added for diagnostics)
-	if len(tools) != 19 {
-		t.Errorf("NewServer should register all 19 tools, got %d", len(tools))
+	// 18 agent + 4 admin = 22 total.
+	if len(tools) != 22 {
+		t.Errorf("NewServer should register all 22 tools, got %d", len(tools))
 	}
 }
 
 func TestProfileConsistency(t *testing.T) {
-	// Verify that agent + admin = all 19 tools
+	// Verify that agent + admin = all 22 tools
 	combined := make(map[string]bool)
 	for tool := range ProfileAgent {
 		combined[tool] = true
@@ -2175,9 +2380,9 @@ func TestProfileConsistency(t *testing.T) {
 		combined[tool] = true
 	}
 
-	// 15 agent + 4 admin = 19 total (mem_doctor added for diagnostics)
-	if len(combined) != 19 {
-		t.Errorf("agent + admin should cover all 19 tools, got %d", len(combined))
+	// 18 agent + 4 admin = 22 total.
+	if len(combined) != 22 {
+		t.Errorf("agent + admin should cover all 22 tools, got %d", len(combined))
 	}
 
 	// Verify no overlap between profiles
@@ -2505,9 +2710,9 @@ func TestNewServerWithConfig(t *testing.T) {
 		t.Fatal("expected MCP server instance")
 	}
 	tools := srv.ListTools()
-	// Should have all 19 tools (15 agent + 4 admin; mem_doctor added)
-	if len(tools) != 19 {
-		t.Errorf("NewServerWithConfig should register all 19 tools, got %d", len(tools))
+	// Should have all 22 tools (18 agent + 4 admin).
+	if len(tools) != 22 {
+		t.Errorf("NewServerWithConfig should register all 22 tools, got %d", len(tools))
 	}
 }
 

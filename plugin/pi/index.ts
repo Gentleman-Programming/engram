@@ -38,6 +38,7 @@ const ENGRAM_TOOLS = [
   "mem_current_project",
   "mem_doctor",
   "mem_capture_passive",
+  "mem_review",
   "mem_judge",
   "mem_compare",
 ] as const;
@@ -488,6 +489,13 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
     session_id: optionalString("Session ID to associate with"),
     source: optionalString("Source identifier, e.g. subagent-stop or session-end"),
   }),
+  mem_review: Type.Object({
+    action: Type.String({ description: "Action: list | mark_reviewed" }),
+    project: optionalString("Optional project filter for action=list"),
+    limit: optionalNumber("Max results for action=list"),
+    observation_id: optionalNumber("Observation id for action=mark_reviewed"),
+    id: optionalNumber("Alias for observation_id"),
+  }),
   mem_judge: Type.Object({
     judgment_id: Type.String({ description: "The relation judgment_id returned by mem_save candidates" }),
     relation: Type.String({ description: "Verdict: related | compatible | scoped | conflicts_with | supersedes | not_conflict" }),
@@ -640,6 +648,19 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
           source: params.source || "pi-tool",
         },
       });
+    case "mem_review": {
+      const action = String(params.action || "").trim();
+      if (action === "list") {
+        return engramFetch(`/review${queryString({ project: params.project, limit: params.limit })}`);
+      }
+      if (action === "mark_reviewed") {
+        return engramFetch("/review/mark_reviewed", {
+          method: "POST",
+          body: { observation_id: params.observation_id || params.id },
+        });
+      }
+      throw new Error("action must be one of: list, mark_reviewed");
+    }
     case "mem_judge":
       return engramFetch("/conflicts/judge", {
         method: "POST",

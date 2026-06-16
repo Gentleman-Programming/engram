@@ -28,6 +28,7 @@ const existingTools = [
   "mem_capture_passive",
   "mem_judge",
   "mem_compare",
+  "mem_review",
 ];
 
 test("supported memory tools all have chrome metadata", () => {
@@ -45,6 +46,9 @@ test("compactToolArg prefers short meaningful identifiers", () => {
   assert.equal(compactToolArg("mem_context", { project: "engram" }), "“engram”");
   assert.equal(compactToolArg("mem_compare", { memory_id_a: 42, memory_id_b: 43 }), "#42");
   assert.equal(compactToolArg("mem_judge", { judgment_id: "rel-abc", relation: "related" }), "“rel-abc”");
+  assert.equal(compactToolArg("mem_review", { action: "list", project: "engram", limit: 5 }), "list “engram” limit 5");
+  assert.equal(compactToolArg("mem_review", { action: "mark_reviewed", observation_id: 42 }), "mark_reviewed #42");
+  assert.equal(compactToolArg("mem_review", { action: "mark_reviewed", id: 43 }), "mark_reviewed #43");
 });
 
 test("compactToolArg truncates long text", () => {
@@ -63,6 +67,10 @@ test("compactResultStatus summarizes common Engram results", () => {
   assert.equal(compactResultStatus("mem_capture_passive", { details: { data: { saved: 2 } } }), "✓ captured 2");
   assert.equal(compactResultStatus("mem_judge", { details: { data: { relation: { sync_id: "rel-1" } } } }), "✓ judged rel-1");
   assert.equal(compactResultStatus("mem_compare", { details: { data: { sync_id: "rel-2" } } }), "✓ rel-2");
+  assert.equal(compactResultStatus("mem_review", { details: { data: { observations: [{ id: 1 }, { id: 2 }] } } }), "✓ 2 need review");
+  assert.equal(compactResultStatus("mem_review", { details: { data: { results: [{ id: 1 }] } } }), "✓ 1 needs review");
+  assert.equal(compactResultStatus("mem_review", { details: { data: { count: 0 } } }), "✓ 0 need review");
+  assert.equal(compactResultStatus("mem_review", { details: { data: { id: 42, state: "active" } } }), "✓ reviewed #42");
 });
 
 test("renderResultText keeps collapsed output compact and expanded output detailed", () => {
@@ -73,6 +81,20 @@ test("renderResultText keeps collapsed output compact and expanded output detail
 
   assert.equal(renderResultText("mem_search", result, { expanded: false }), "↳ ✓ 1 result");
   assert.equal(renderResultText("mem_search", result, { expanded: true }), "↳ ✓ 1 result\n\nfull details\nwith more content");
+});
+
+test("renderCallText and renderResultText summarize mem_review clearly", () => {
+  assert.equal(renderCallText("mem_review", { action: "list", project: "engram", limit: 3 }), "🧠 review list “engram” limit 3 …");
+  assert.equal(renderCallText("mem_review", { action: "mark_reviewed", observation_id: 99 }), "🧠 review mark_reviewed #99 …");
+
+  assert.equal(
+    renderResultText("mem_review", { details: { data: { observations: [{ id: 1 }, { id: 2 }, { id: 3 }] } } }, { expanded: false }),
+    "↳ ✓ 3 need review",
+  );
+  assert.equal(
+    renderResultText("mem_review", { details: { data: { id: 99, state: "active" } } }, { expanded: false }),
+    "↳ ✓ reviewed #99",
+  );
 });
 
 test("renderResultText shows running and error states compactly", () => {

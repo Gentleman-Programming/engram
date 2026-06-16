@@ -231,6 +231,108 @@ func TestAdditionalServerErrorBranches(t *testing.T) {
 	}
 }
 
+func TestHandleReviewListAndMarkReviewed(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	if err := st.CreateSession("s-http-review", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := st.AddObservation(store.AddObservationParams{SessionID: "s-http-review", Type: "decision", Title: "Review me", Content: "Needs lifecycle review", Project: "engram"})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	past := time.Now().UTC().Add(-time.Hour).Format("2006-01-02 15:04:05")
+	if _, err := st.DB().Exec(`UPDATE observations SET review_after = ? WHERE id = ?`, past, id); err != nil {
+		t.Fatalf("backdate review_after: %v", err)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/review?project=engram&limit=5", nil)
+	listRec := httptest.NewRecorder()
+	h.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("expected review list 200, got %d body=%s", listRec.Code, listRec.Body.String())
+	}
+	var listBody map[string]any
+	if err := json.NewDecoder(listRec.Body).Decode(&listBody); err != nil {
+		t.Fatalf("decode review list: %v", err)
+	}
+	observations, ok := listBody["observations"].([]any)
+	if !ok || len(observations) != 1 {
+		t.Fatalf("expected one review observation, got %#v", listBody["observations"])
+	}
+	entry, _ := observations[0].(map[string]any)
+	if entry["state"] != store.ObservationStateNeedsReview {
+		t.Fatalf("expected needs_review state, got %v", entry["state"])
+	}
+
+	markReq := httptest.NewRequest(http.MethodPost, "/review/mark_reviewed", strings.NewReader(fmt.Sprintf(`{"observation_id":%d}`, id)))
+	markReq.Header.Set("Content-Type", "application/json")
+	markRec := httptest.NewRecorder()
+	h.ServeHTTP(markRec, markReq)
+	if markRec.Code != http.StatusOK {
+		t.Fatalf("expected mark reviewed 200, got %d body=%s", markRec.Code, markRec.Body.String())
+	}
+	var markBody map[string]any
+	if err := json.NewDecoder(markRec.Body).Decode(&markBody); err != nil {
+		t.Fatalf("decode mark reviewed: %v", err)
+	}
+	if markBody["state"] != store.ObservationStateActive {
+		t.Fatalf("expected active after mark_reviewed, got %v", markBody["state"])
+	}
+}
+
+func TestHandleReviewMarkReviewedAcceptsIDAlias(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	if err := st.CreateSession("s-http-review-alias", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := st.AddObservation(store.AddObservationParams{SessionID: "s-http-review-alias", Type: "decision", Title: "Review alias", Content: "Needs lifecycle review", Project: "engram"})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	past := time.Now().UTC().Add(-time.Hour).Format("2006-01-02 15:04:05")
+	if _, err := st.DB().Exec(`UPDATE observations SET review_after = ? WHERE id = ?`, past, id); err != nil {
+		t.Fatalf("backdate review_after: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/review/mark_reviewed", strings.NewReader(fmt.Sprintf(`{"id":%d}`, id)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected mark reviewed alias 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleReviewMarkReviewedRequiresObservationID(t *testing.T) {
+	srv := New(newServerTestStore(t), 0)
+	req := httptest.NewRequest(http.MethodPost, "/review/mark_reviewed", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 when observation_id is missing, got %d", rec.Code)
+	}
+}
+
+func TestHandleReviewMarkReviewedReturnsNotFoundForUnknownObservation(t *testing.T) {
+	srv := New(newServerTestStore(t), 0)
+	req := httptest.NewRequest(http.MethodPost, "/review/mark_reviewed", strings.NewReader(`{"observation_id":999999}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for unknown observation, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestExportHonorsProjectQueryScope(t *testing.T) {
 	st := newServerTestStore(t)
 	srv := New(st, 0)
