@@ -8627,3 +8627,35 @@ func TestAddObservationAcceptsNonEmptyTitle(t *testing.T) {
 		t.Fatal("expected a non-zero observation id")
 	}
 }
+
+// TestAddObservationValidatesPostStripTitle pins the contract that the
+// non-empty check runs on the value *after* stripPrivateTags, which is what
+// actually gets persisted and pushed to the cloud (see issue #459). A title
+// made only of private tags is NOT empty post-strip: stripPrivateTags replaces
+// the tags with "[REDACTED]", so the observation is accepted and persisted with
+// that title. This guards against a refactor that moves validation before the
+// strip and silently changes the persisted value.
+func TestAddObservationValidatesPostStripTitle(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "decision",
+		Title:     "<private>secret</private>",
+		Content:   "some content",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("private-only title strips to a non-empty placeholder; expected accept, got: %v", err)
+	}
+	obs, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("get observation: %v", err)
+	}
+	if obs.Title != "[REDACTED]" {
+		t.Errorf("expected persisted title %q, got %q", "[REDACTED]", obs.Title)
+	}
+}
