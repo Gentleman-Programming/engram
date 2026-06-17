@@ -233,6 +233,57 @@ func TestUpdateObservationRejectsEmptyTitle(t *testing.T) {
 	}
 }
 
+// TestAddObservationRejectsEmptyTitle covers the POST /observations route after
+// the store-level empty-title validation change: a whitespace-only title (which
+// passes the raw `title == ""` pre-check) must be rejected with 400 by the
+// store sentinel, and an empty string by the pre-check — neither may persist.
+func TestAddObservationRejectsEmptyTitle(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	createReq := httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(`{"id":"s-add-empty","project":"engram"}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createRec := httptest.NewRecorder()
+	h.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("expected session create 201, got %d", createRec.Code)
+	}
+
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"empty string", `{"session_id":"s-add-empty","type":"note","title":"","content":"body","project":"engram"}`},
+		{"only whitespace", `{"session_id":"s-add-empty","type":"note","title":"   \t\n","content":"body","project":"engram"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/observations", strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400 for empty title, got %d body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+
+	// Nothing should have been persisted by the rejected requests.
+	listReq := httptest.NewRequest(http.MethodGet, "/observations?project=engram&limit=10", nil)
+	listRec := httptest.NewRecorder()
+	h.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("expected list 200, got %d", listRec.Code)
+	}
+	var obs []map[string]any
+	if err := json.Unmarshal(listRec.Body.Bytes(), &obs); err != nil {
+		t.Fatalf("decode observations: %v", err)
+	}
+	if len(obs) != 0 {
+		t.Fatalf("expected no persisted observations, got %d", len(obs))
+	}
+}
+
 func TestAdditionalServerErrorBranches(t *testing.T) {
 	st := newServerTestStore(t)
 	srv := New(st, 0)

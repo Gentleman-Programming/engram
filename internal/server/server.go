@@ -459,10 +459,10 @@ func (s *Server) handleUpdateObservation(w http.ResponseWriter, r *http.Request)
 		switch {
 		case errors.Is(err, store.ErrEmptyObservationTitle):
 			jsonError(w, http.StatusBadRequest, err.Error())
-		case errors.Is(err, store.ErrObservationNotFound):
+		case errors.Is(err, store.ErrObservationNotFound), errors.Is(err, sql.ErrNoRows):
 			jsonError(w, http.StatusNotFound, err.Error())
 		default:
-			jsonError(w, http.StatusNotFound, err.Error())
+			jsonError(w, http.StatusInternalServerError, err.Error())
 		}
 		return
 	}
