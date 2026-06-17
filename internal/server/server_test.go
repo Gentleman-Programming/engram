@@ -169,6 +169,70 @@ func TestClaudeSaveNudgeCompatibilityRoutes(t *testing.T) {
 	}
 }
 
+// TestUpdateObservationRejectsEmptyTitle covers the HTTP PATCH path used by the
+// gentle-engram (opencode) plugin, which forwards mem_update to
+// PATCH /observations/{id}. An empty or whitespace-only title must be rejected
+// with 400 (not persisted, not enqueued) and the original title preserved —
+// closing the stuck-sync class from issue #459 on the supported HTTP surface.
+func TestUpdateObservationRejectsEmptyTitle(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	createReq := httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(`{"id":"s-empty","project":"engram"}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createRec := httptest.NewRecorder()
+	h.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("expected session create 201, got %d", createRec.Code)
+	}
+
+	obsReq := httptest.NewRequest(http.MethodPost, "/observations", strings.NewReader(`{"session_id":"s-empty","type":"note","title":"Original","content":"body","project":"engram"}`))
+	obsReq.Header.Set("Content-Type", "application/json")
+	obsRec := httptest.NewRecorder()
+	h.ServeHTTP(obsRec, obsReq)
+	if obsRec.Code != http.StatusCreated {
+		t.Fatalf("expected observation create 201, got %d body=%s", obsRec.Code, obsRec.Body.String())
+	}
+	var created map[string]any
+	if err := json.Unmarshal(obsRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode created observation: %v", err)
+	}
+	id := int64(created["id"].(float64))
+
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"empty string", `{"title":""}`},
+		{"only whitespace", `{"title":"   \t\n"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/observations/%d", id), strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400 for empty title, got %d body=%s", rec.Code, rec.Body.String())
+			}
+
+			getReq := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/observations/%d", id), nil)
+			getRec := httptest.NewRecorder()
+			h.ServeHTTP(getRec, getReq)
+			if getRec.Code != http.StatusOK {
+				t.Fatalf("expected get 200, got %d", getRec.Code)
+			}
+			var got map[string]any
+			if err := json.Unmarshal(getRec.Body.Bytes(), &got); err != nil {
+				t.Fatalf("decode observation: %v", err)
+			}
+			if got["title"] != "Original" {
+				t.Fatalf("expected title unchanged %q, got %v", "Original", got["title"])
+			}
+		})
+	}
+}
+
 func TestAdditionalServerErrorBranches(t *testing.T) {
 	st := newServerTestStore(t)
 	srv := New(st, 0)

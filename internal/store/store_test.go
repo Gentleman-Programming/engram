@@ -8659,3 +8659,123 @@ func TestAddObservationValidatesPostStripTitle(t *testing.T) {
 		t.Errorf("expected persisted title %q, got %q", "[REDACTED]", obs.Title)
 	}
 }
+
+// TestUpdateObservationRejectsEmptyTitle pins the same invariant as
+// TestAddObservationRejectsEmptyTitle for the update path. mem_update and
+// PATCH /observations/{id} funnel through UpdateObservation; an explicit empty
+// or whitespace-only title must be rejected before it is persisted and enqueued
+// as a sync upsert the cloud server rejects (issue #459). The original title
+// must be left untouched.
+func TestUpdateObservationRejectsEmptyTitle(t *testing.T) {
+	cases := []struct {
+		name  string
+		title string
+	}{
+		{"empty string", ""},
+		{"only spaces", "   "},
+		{"only tabs and newlines", "\t\n  \n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+				t.Fatalf("create session: %v", err)
+			}
+			id, err := s.AddObservation(AddObservationParams{
+				SessionID: "s1",
+				Type:      "decision",
+				Title:     "Original title",
+				Content:   "some content",
+				Project:   "engram",
+				Scope:     "project",
+			})
+			if err != nil {
+				t.Fatalf("seed observation: %v", err)
+			}
+
+			_, err = s.UpdateObservation(id, UpdateObservationParams{Title: &tc.title})
+			if err == nil {
+				t.Fatal("expected error for empty title, got nil")
+			}
+			if !errors.Is(err, ErrEmptyObservationTitle) {
+				t.Errorf("expected ErrEmptyObservationTitle, got: %v", err)
+			}
+
+			// The original title must survive the rejected update.
+			obs, err := s.GetObservation(id)
+			if err != nil {
+				t.Fatalf("get observation: %v", err)
+			}
+			if obs.Title != "Original title" {
+				t.Errorf("expected title unchanged %q, got %q", "Original title", obs.Title)
+			}
+		})
+	}
+}
+
+// TestUpdateObservationValidatesPostStripTitle mirrors the AddObservation
+// post-strip contract on the update path: a title made only of private tags
+// strips to "[REDACTED]" (not empty), so the update is accepted and persisted
+// with that placeholder.
+func TestUpdateObservationValidatesPostStripTitle(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "decision",
+		Title:     "Original title",
+		Content:   "some content",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("seed observation: %v", err)
+	}
+
+	newTitle := "<private>secret</private>"
+	if _, err := s.UpdateObservation(id, UpdateObservationParams{Title: &newTitle}); err != nil {
+		t.Fatalf("private-only title strips to a non-empty placeholder; expected accept, got: %v", err)
+	}
+	obs, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("get observation: %v", err)
+	}
+	if obs.Title != "[REDACTED]" {
+		t.Errorf("expected persisted title %q, got %q", "[REDACTED]", obs.Title)
+	}
+}
+
+// TestUpdateObservationAcceptsContentOnlyUpdate guards that the title check does
+// not regress content-only updates: when Title is nil the existing (valid)
+// title is preserved and the update succeeds.
+func TestUpdateObservationAcceptsContentOnlyUpdate(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "decision",
+		Title:     "Original title",
+		Content:   "some content",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("seed observation: %v", err)
+	}
+
+	newContent := "updated content"
+	updated, err := s.UpdateObservation(id, UpdateObservationParams{Content: &newContent})
+	if err != nil {
+		t.Fatalf("content-only update should succeed, got: %v", err)
+	}
+	if updated.Title != "Original title" {
+		t.Errorf("expected title preserved %q, got %q", "Original title", updated.Title)
+	}
+	if updated.Content != newContent {
+		t.Errorf("expected content %q, got %q", newContent, updated.Content)
+	}
+}

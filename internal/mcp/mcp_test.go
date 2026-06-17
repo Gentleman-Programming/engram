@@ -1478,6 +1478,62 @@ func TestHandleUpdateAcceptsAllOptionalFields(t *testing.T) {
 	}
 }
 
+// TestHandleUpdateRejectsEmptyTitle pins that mem_update surfaces an
+// agent-actionable error when the new title is empty or whitespace-only, and
+// that the original title is left untouched. This closes the same stuck-sync
+// class as the save path (issue #459) on the update surface.
+func TestHandleUpdateRejectsEmptyTitle(t *testing.T) {
+	cases := []struct {
+		name  string
+		title string
+	}{
+		{"empty string", ""},
+		{"only whitespace", "   \t\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newMCPTestStore(t)
+			if err := s.CreateSession("s-empty-update", "engram", "/tmp/engram"); err != nil {
+				t.Fatalf("create session: %v", err)
+			}
+			id, err := s.AddObservation(store.AddObservationParams{
+				SessionID: "s-empty-update",
+				Type:      "decision",
+				Title:     "Original",
+				Content:   "Original content",
+				Project:   "engram",
+				Scope:     "project",
+			})
+			if err != nil {
+				t.Fatalf("add observation: %v", err)
+			}
+
+			res, err := handleUpdate(s)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+				"id":    float64(id),
+				"title": tc.title,
+			}}})
+			if err != nil {
+				t.Fatalf("update handler error: %v", err)
+			}
+			if !res.IsError {
+				t.Fatalf("expected an error result for empty title, got success")
+			}
+			if !strings.Contains(callResultText(t, res), "title is required") {
+				t.Fatalf("expected 'title is required' in error, got %q", callResultText(t, res))
+			}
+
+			// The original title must survive the rejected update.
+			obs, err := s.GetObservation(id)
+			if err != nil {
+				t.Fatalf("get observation: %v", err)
+			}
+			if obs.Title != "Original" {
+				t.Fatalf("expected title unchanged %q, got %q", "Original", obs.Title)
+			}
+		})
+	}
+}
+
 func TestHandleContextWithSessionOnlyUsesNoneProjects(t *testing.T) {
 	s := newMCPTestStore(t)
 	if err := s.CreateSession("s-context-none", "engram", "/tmp/engram"); err != nil {

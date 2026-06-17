@@ -51,6 +51,14 @@ var (
 	ErrObservationNotFound    = errors.New("observation not found")
 	ErrPromptNotFound         = errors.New("prompt not found")
 	ErrProjectNotFound        = errors.New("project not found")
+
+	// ErrEmptyObservationTitle is returned by AddObservation and
+	// UpdateObservation when the post-stripPrivateTags title is empty after
+	// trimming whitespace. The check runs on the persisted value because that is
+	// exactly what gets pushed to the cloud, where ValidateSyncMutationPayload
+	// rejects empty titles and silently stalls the sync queue (issue #459).
+	// Callers use errors.Is to map this to a 400-class response.
+	ErrEmptyObservationTitle = errors.New("observation title is required (non-empty after trimming whitespace)")
 )
 
 // Sentinel errors for relation sync apply path (Phase 2).
@@ -2263,7 +2271,7 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 	// failure only surfaces later when sync rejects the mutation, silently
 	// blocking the queue with no feedback to the caller. See issue #459.
 	if strings.TrimSpace(title) == "" {
-		return 0, fmt.Errorf("observation title is required (non-empty after trimming whitespace)")
+		return 0, ErrEmptyObservationTitle
 	}
 
 	if len(content) > s.cfg.MaxObservationLength {
@@ -2906,6 +2914,16 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 		}
 		if p.TopicKey != nil {
 			topicKey = normalizeTopicKey(*p.TopicKey)
+		}
+
+		// Reject empty titles before persisting. We validate the final post-strip
+		// value because that is what gets written and enqueued as a sync upsert.
+		// Without this, mem_update / PATCH /observations/{id} could persist an
+		// empty title and queue a mutation the cloud server rejects, silently
+		// stalling the sync queue — the same class AddObservation guards against
+		// (issue #459).
+		if strings.TrimSpace(title) == "" {
+			return ErrEmptyObservationTitle
 		}
 
 		if _, err := s.execHook(tx,
