@@ -650,6 +650,8 @@ func main() {
 		cmdProjects(cfg)
 	case "setup":
 		cmdSetup()
+	case "init":
+		cmdInit()
 	case "version", "--version", "-v":
 		fmt.Printf("engram %s\n", version)
 	case "help", "--help", "-h":
@@ -2304,6 +2306,7 @@ Commands:
                        --all      Scan ALL projects for similar name groups
                        --dry-run  Preview what would be merged (no changes)
   setup [agent]      Install/setup agent integration (opencode, pi, claude-code, gemini-cli, codex)
+  init [name]        Initialize an Engram project config for unversioned workspaces
   sync               Export new memories as compressed chunk to .engram/
                          --import   Import new chunks from .engram/ into local DB
                          --status   Show sync status
