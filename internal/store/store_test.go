@@ -8694,3 +8694,56 @@ func TestSearchMatchMode_EmptyQueryAnyReturnsError(t *testing.T) {
 		t.Fatal("expected error for empty query with match_mode=any, got nil")
 	}
 }
+
+func TestSearch_WeightedBM25Ranking(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s-bm25", "engram", "/tmp"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	// Observation A: query term in title (weight 5.0)
+	idA, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-bm25",
+		Type:      "decision",
+		Title:     "banana apple grape",
+		Content:   "nothing here",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation A: %v", err)
+	}
+
+	// Observation B: query term in content (weight 1.0)
+	idB, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-bm25",
+		Type:      "decision",
+		Title:     "nothing here",
+		Content:   "banana apple grape",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation B: %v", err)
+	}
+
+	results, err := s.Search("banana", SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("Search error: %v", err)
+	}
+
+	if len(results) < 2 {
+		t.Fatalf("expected at least 2 results, got %d", len(results))
+	}
+
+	// Since we order by rank, and rank is BM25, the title match (A) should be first (more relevant).
+	if results[0].ID != idA {
+		t.Errorf("expected observation A (title match) to rank higher than B (content match); got first: %d (title: %q, rank: %v), second: %d (title: %q, rank: %v)",
+			results[0].ID, results[0].Title, results[0].Rank, results[1].ID, results[1].Title, results[1].Rank)
+	}
+	if results[1].ID != idB {
+		t.Errorf("expected observation B (content match) to rank second; got second: %d (title: %q, rank: %v)",
+			results[1].ID, results[1].Title, results[1].Rank)
+	}
+}
