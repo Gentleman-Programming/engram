@@ -421,15 +421,21 @@ func TestConflictLoop_Orphaning(t *testing.T) {
 	}
 }
 
-// ─── G.4 — Sync regression test ─────────────────────────────────────────────
+// ─── G.4 — Sync enrollment-gate regression test ─────────────────────────────
 //
-// Verifies that memory_relations rows are NOT inserted into sync_mutations
-// (REQ-009: local-only relations in Phase 1). This is the regression guard.
+// Verifies that an UNENROLLED project never enqueues relation sync mutations.
+// The enqueue paths in JudgeRelation and JudgeBySemantic are guarded by an
+// enrollment check — this test is the regression guard for that gate.
 //
-// The assertion is entity-level, not count-level: no row in sync_mutations
-// should have entity = 'memory_relations' or 'relation' after any conflict
-// operation. Sessions and observations still produce their own sync mutations
-// as expected.
+// Note: relation cloud sync IS intentional for enrolled projects (#313/#379/
+// #383 enabled it; #496 extends it with backfill). This test uses an unenrolled
+// store (newMCPTestStore does not call EnrollProject), so the relation count
+// must remain zero — not because relations are local-only, but because the
+// enrollment gate must hold.
+//
+// The assertion is entity-level: no row in sync_mutations should have
+// entity = 'relation' after conflict operations on an unenrolled project.
+// Sessions and observations still produce their own sync mutations as expected.
 func TestConflictLoop_SyncRegression(t *testing.T) {
 	s := newMCPTestStore(t)
 	saveH := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
@@ -479,13 +485,14 @@ func TestConflictLoop_SyncRegression(t *testing.T) {
 			t.Fatalf("G.4 mem_judge: err=%v isError=%v", err, judgeRes.IsError)
 		}
 	} else {
-		t.Logf("G.4: no candidates returned after save B (FTS similarity below floor); judge step skipped — relation-entity assertion still covers REQ-009")
+		t.Logf("G.4: no candidates returned after save B (FTS similarity below floor); judge step skipped — enrollment-gate assertion still covers the unenrolled guard")
 	}
 
-	// ── Step 3: Assert no 'memory_relations' entity in sync_mutations. ────────
-	// REQ-009: memory_relations must not appear in the sync wire at all.
-	// Sessions ('session') and observations ('observation') are expected;
-	// any other entity type for relations would be a violation.
+	// ── Step 3: Assert no relation entity in sync_mutations (enrollment gate). ──
+	// This store is UNENROLLED — the enrollment gate in JudgeRelation /
+	// JudgeBySemantic must prevent any relation sync_mutations row from being
+	// written. Sessions ('session') and observations ('observation') are expected;
+	// a relation-entity row here would mean the enrollment guard was bypassed.
 	assertNoRelationSyncMutations(t, s)
 
 	// ── Step 4: Verify observation sync payloads exclude decay fields. ────────
@@ -619,9 +626,14 @@ func parseEnvelope(t *testing.T, label string, res *mcppkg.CallToolResult) map[s
 }
 
 // assertNoRelationSyncMutations verifies that NO sync_mutations rows reference
-// relation entities. REQ-009: memory_relations are local-only in Phase 1.
-// Sessions ('session') and observations ('observation') are expected entities;
-// any relation-entity row would be a regression.
+// relation entities on an UNENROLLED store. The enrollment gate in
+// JudgeRelation / JudgeBySemantic must prevent any relation row from being
+// written when the project is not enrolled. Sessions ('session') and
+// observations ('observation') are expected entities; a relation-entity row
+// in an unenrolled context means the enrollment guard was bypassed.
+//
+// Note: relation sync mutations ARE valid for enrolled projects (#313/#379/
+// #383/#496). This helper is intentionally scoped to the unenrolled test in G.4.
 func assertNoRelationSyncMutations(t *testing.T, s *store.Store) {
 	t.Helper()
 	count, err := s.CountRelationSyncMutations()
@@ -629,7 +641,7 @@ func assertNoRelationSyncMutations(t *testing.T, s *store.Store) {
 		t.Fatalf("G.4 CountRelationSyncMutations: %v", err)
 	}
 	if count > 0 {
-		t.Errorf("G.4 REQ-009 violated: found %d sync_mutations row(s) with relation entity — memory_relations must NOT sync in Phase 1", count)
+		t.Errorf("G.4 enrollment-gate violated: found %d sync_mutations row(s) with relation entity on unenrolled project — enrollment gate must prevent relation sync mutations", count)
 	}
 }
 

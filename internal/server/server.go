@@ -204,6 +204,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /timeline", s.handleTimeline)
 	s.mux.HandleFunc("GET /observations/{id}", s.handleGetObservation)
 
+	// Lifecycle review
+	s.mux.HandleFunc("GET /review", s.handleReviewList)
+	s.mux.HandleFunc("POST /review/mark_reviewed", s.handleReviewMarkReviewed)
+
 	// Prompts
 	s.mux.HandleFunc("POST /prompts", s.handleAddPrompt)
 	s.mux.HandleFunc("GET /prompts/recent", s.handleRecentPrompts)
@@ -506,6 +510,80 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonResponse(w, http.StatusOK, result)
+}
+
+func (s *Server) handleReviewList(w http.ResponseWriter, r *http.Request) {
+	project := r.URL.Query().Get("project")
+	limit := queryInt(r, "limit", 10)
+
+	observations, err := s.store.ObservationsNeedingReview(project, limit)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	structured := make([]map[string]any, 0, len(observations))
+	for _, obs := range observations {
+		structured = append(structured, reviewObservationPayload(obs))
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"observations": structured,
+		"count":        len(structured),
+	})
+}
+
+func (s *Server) handleReviewMarkReviewed(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ObservationID int64 `json:"observation_id"`
+		ID            int64 `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+
+	id := body.ObservationID
+	if id == 0 {
+		id = body.ID
+	}
+	if id == 0 {
+		jsonError(w, http.StatusBadRequest, "observation_id is required")
+		return
+	}
+
+	if err := s.store.MarkReviewed(id); err != nil {
+		if errors.Is(err, store.ErrObservationNotFound) {
+			jsonError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	obs, err := s.store.GetObservation(id)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "marked reviewed but failed to reload observation: "+err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, reviewObservationPayload(*obs))
+}
+
+func reviewObservationPayload(obs store.Observation) map[string]any {
+	payload := map[string]any{
+		"id":      obs.ID,
+		"sync_id": obs.SyncID,
+		"title":   obs.Title,
+		"type":    obs.Type,
+		"state":   obs.State(),
+	}
+	if obs.Project != nil {
+		payload["project"] = *obs.Project
+	}
+	if obs.ReviewAfter != nil {
+		payload["review_after"] = *obs.ReviewAfter
+	}
+	return payload
 }
 
 // ─── Prompts ─────────────────────────────────────────────────────────────────

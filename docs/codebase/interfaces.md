@@ -27,7 +27,7 @@ Important points:
 - `ambiguous_project` recovery requires the user to choose an exact project.
 - If `mem_save` returns conflict candidates, the agent must judge with `mem_judge` or ask when the relationship is sensitive.
 
-For tool parameters and envelopes, use [DOCS.md — MCP Tools](../../DOCS.md#mcp-tools-19-tools).
+For tool parameters and envelopes, use [DOCS.md — MCP Tools](../../DOCS.md#mcp-tools-20-tools).
 
 ## Local API: `internal/server`
 

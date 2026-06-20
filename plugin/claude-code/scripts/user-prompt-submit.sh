@@ -8,6 +8,11 @@
 # project. If it's been > 15 minutes AND the session has been active > 5
 # minutes, injects a nudge reminding the agent to save.
 #
+# The nudge is debounced per session: once shown, it stays quiet for
+# ENGRAM_NUDGE_COOLDOWN_SECS (default 900s) before it can fire again. Without
+# this, an agent that genuinely has nothing to save never resets the
+# last-save clock, so the reminder would fire on every single message forever.
+#
 # MUST exit 0 always and output valid JSON — otherwise Claude Code blocks the message.
 
 ENGRAM_PORT="${ENGRAM_PORT:-7437}"
@@ -228,10 +233,26 @@ fi
 NOW_EPOCH=$(date "+%s")
 ELAPSED=$(( NOW_EPOCH - LAST_EPOCH ))
 
-# Nudge if last save was > 15 minutes ago (900 seconds)
+# Nudge if last save was > 15 minutes ago (900 seconds), but debounce so we do
+# not repeat the reminder on every message while the agent has nothing to save.
 if [ "$ELAPSED" -gt 900 ]; then
-  OUTPUT=$(jq -n \
-    '{"systemMessage": "MEMORY REMINDER: It'\''s been over 15 minutes since your last save. If you'\''ve made decisions, discoveries, or completed significant work, call mem_save now."}')
+  NUDGE_COOLDOWN="${ENGRAM_NUDGE_COOLDOWN_SECS:-900}"
+  NUDGE_STATE_FILE="${STATE_FILE%-tools-loaded}-last-nudge"
+
+  LAST_NUDGE_EPOCH=""
+  if [ -f "$NUDGE_STATE_FILE" ]; then
+    read -r LAST_NUDGE_EPOCH < "$NUDGE_STATE_FILE" 2>/dev/null || LAST_NUDGE_EPOCH=""
+  fi
+  # Ignore a corrupt/non-numeric state file — treat as "never nudged".
+  case "$LAST_NUDGE_EPOCH" in
+    ''|*[!0-9]*) LAST_NUDGE_EPOCH="" ;;
+  esac
+
+  if [ -z "$LAST_NUDGE_EPOCH" ] || [ "$(( NOW_EPOCH - LAST_NUDGE_EPOCH ))" -ge "$NUDGE_COOLDOWN" ]; then
+    printf '%s' "$NOW_EPOCH" > "$NUDGE_STATE_FILE" 2>/dev/null || true
+    OUTPUT=$(jq -n \
+      '{"systemMessage": "MEMORY REMINDER: It'\''s been over 15 minutes since your last save. If you'\''ve made decisions, discoveries, or completed significant work, call mem_save now."}')
+  fi
 fi
 
 echo "$OUTPUT"

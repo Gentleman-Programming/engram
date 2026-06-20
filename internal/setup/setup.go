@@ -82,7 +82,7 @@ const claudeCodeMarketplace = "Gentleman-Programming/engram"
 
 const openCodeSubagentStatuslinePlugin = "opencode-subagent-statusline"
 
-const piGentleEngramPackage = "npm:gentle-engram@0.1.7"
+const piGentleEngramPackage = "npm:gentle-engram@0.1.8"
 const piMCPAdapterPackage = "npm:pi-mcp-adapter"
 
 // claudeCodeMCPTools are the MCP tool permission names for the agent profile
@@ -1077,11 +1077,18 @@ func injectGeminiMCP(configPath string) error {
 	return nil
 }
 
-// resolveEngramCommand returns the absolute path to the engram binary.
-// It uses os.Executable() so that headless/systemd environments (where PATH
-// is not reliably inherited by child processes) still find the binary.
-// EvalSymlinks makes the path stable across package-manager upgrades.
-// Falls back to bare "engram" only if os.Executable() itself fails.
+// resolveEngramCommand returns the most stable command to spawn the engram
+// binary. It uses os.Executable() so that headless/systemd environments (where
+// PATH is not reliably inherited by child processes) still find the binary.
+//
+// Homebrew (and Linuxbrew) resolve the `engram` symlink to a versioned Cellar
+// path such as /opt/homebrew/Cellar/engram/1.16.1/bin/engram. That path is
+// removed on the next `brew upgrade`, so baking it into MCP client configs
+// leaves a stale command that fails to spawn (ENOENT). When the resolved
+// executable points into a versioned Cellar directory we prefer the stable
+// <brew-prefix>/bin/engram symlink, which brew repoints at the current version,
+// so registrations survive upgrades. Falls back to bare "engram" only when
+// os.Executable() fails or the stable symlink is missing.
 func resolveEngramCommand() string {
 	exe, err := osExecutable()
 	if err != nil {
@@ -1090,7 +1097,36 @@ func resolveEngramCommand() string {
 	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
 		exe = resolved
 	}
+	if stable, ok := stableHomebrewEngramCommand(exe); ok {
+		return stable
+	}
 	return exe
+}
+
+// stableHomebrewEngramCommand maps a versioned Homebrew Cellar path to the
+// stable "<brew-prefix>/bin/engram" symlink that brew keeps pointing at the
+// current version. It returns ("", false) when exe is not a versioned Cellar
+// path, so non-Homebrew installs keep their resolved absolute path. When the
+// derived stable symlink does not exist on disk it falls back to the bare
+// "engram" name so the command still resolves via PATH.
+func stableHomebrewEngramCommand(exe string) (string, bool) {
+	const marker = "/Cellar/engram/"
+	clean := filepath.ToSlash(filepath.Clean(exe))
+	idx := strings.Index(clean, marker)
+	if idx < 0 {
+		return "", false
+	}
+	base := strings.ToLower(filepath.Base(clean))
+	if base != "engram" && base != "engram.exe" {
+		return "", false
+	}
+	// Everything before "/Cellar/" is the brew prefix, e.g. /opt/homebrew or
+	// /home/linuxbrew/.linuxbrew. The bin symlink lives directly under it.
+	stable := clean[:idx] + "/bin/engram"
+	if _, err := statFn(stable); err == nil {
+		return filepath.FromSlash(stable), true
+	}
+	return "engram", true
 }
 
 func writeGeminiSystemPrompt() error {

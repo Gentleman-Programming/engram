@@ -263,6 +263,124 @@ func TestUpdateAndSoftDeleteExcludedFromSearchAndTimeline(t *testing.T) {
 	}
 }
 
+func TestPinnedObservationsAndFormatContextPriority(t *testing.T) {
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = t.TempDir()
+	cfg.DedupeWindow = time.Hour
+	cfg.MaxContextResults = 2
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	titles := []string{"pinned architecture", "recent one", "recent two", "recent three"}
+	ids := make([]int64, 0, len(titles))
+	for i, title := range titles {
+		id, err := s.AddObservation(AddObservationParams{
+			SessionID: "s1",
+			Type:      "decision",
+			Title:     title,
+			Content:   fmt.Sprintf("content %d", i),
+			Project:   "engram",
+			Scope:     "project",
+		})
+		if err != nil {
+			t.Fatalf("add observation %q: %v", title, err)
+		}
+		ids = append(ids, id)
+		createdAt := fmt.Sprintf("2026-01-0%d 00:00:00", i+1)
+		if _, err := s.db.Exec(`UPDATE observations SET created_at = ?, updated_at = ? WHERE id = ?`, createdAt, createdAt, id); err != nil {
+			t.Fatalf("set created_at for %q: %v", title, err)
+		}
+	}
+	exportedBeforePin, err := s.ExportProject("engram")
+	if err != nil {
+		t.Fatalf("export project before pin: %v", err)
+	}
+	exportedBeforePinJSON, err := json.Marshal(exportedBeforePin)
+	if err != nil {
+		t.Fatalf("marshal export before pin: %v", err)
+	}
+	var updatedAtBeforePin string
+	if err := s.db.QueryRow(`SELECT updated_at FROM observations WHERE id = ?`, ids[0]).Scan(&updatedAtBeforePin); err != nil {
+		t.Fatalf("get updated_at before pin: %v", err)
+	}
+
+	if err := s.PinObservation(ids[0]); err != nil {
+		t.Fatalf("pin observation: %v", err)
+	}
+	var updatedAtAfterPin string
+	if err := s.db.QueryRow(`SELECT updated_at FROM observations WHERE id = ?`, ids[0]).Scan(&updatedAtAfterPin); err != nil {
+		t.Fatalf("get updated_at after pin: %v", err)
+	}
+	if updatedAtAfterPin != updatedAtBeforePin {
+		t.Fatalf("pin should not change updated_at: before=%q after=%q", updatedAtBeforePin, updatedAtAfterPin)
+	}
+	pinned, err := s.PinnedObservations("engram", "project")
+	if err != nil {
+		t.Fatalf("pinned observations: %v", err)
+	}
+	if len(pinned) != 1 || pinned[0].ID != ids[0] || !pinned[0].Pinned {
+		t.Fatalf("expected pinned observation %d, got %#v", ids[0], pinned)
+	}
+
+	ctx, err := s.FormatContext("engram", "project")
+	if err != nil {
+		t.Fatalf("format context: %v", err)
+	}
+	pinnedIdx := strings.Index(ctx, "### Pinned")
+	recentIdx := strings.Index(ctx, "### Recent Observations")
+	if pinnedIdx < 0 || recentIdx < 0 || pinnedIdx > recentIdx {
+		t.Fatalf("expected pinned section before recent observations, got:\n%s", ctx)
+	}
+	if !strings.Contains(ctx, "pinned architecture") {
+		t.Fatalf("expected pinned observation in context, got:\n%s", ctx)
+	}
+	if !strings.Contains(ctx, "recent three") || !strings.Contains(ctx, "recent two") {
+		t.Fatalf("expected max recent unpinned observations in context, got:\n%s", ctx)
+	}
+	if strings.Contains(ctx, "recent one") {
+		t.Fatalf("expected recent window to stay at MaxContextResults, got:\n%s", ctx)
+	}
+	exported, err := s.ExportProject("engram")
+	if err != nil {
+		t.Fatalf("export project: %v", err)
+	}
+	exportedJSON, err := json.Marshal(exported)
+	if err != nil {
+		t.Fatalf("marshal export: %v", err)
+	}
+	if strings.Contains(string(exportedJSON), `"pinned"`) {
+		t.Fatalf("pinned state must stay out of sync/export JSON, got %s", exportedJSON)
+	}
+	if string(exportedJSON) != string(exportedBeforePinJSON) {
+		t.Fatalf("pinning must not change export payload:\nbefore: %s\nafter:  %s", exportedBeforePinJSON, exportedJSON)
+	}
+
+	if err := s.UnpinObservation(ids[0]); err != nil {
+		t.Fatalf("unpin observation: %v", err)
+	}
+	var updatedAtAfterUnpin string
+	if err := s.db.QueryRow(`SELECT updated_at FROM observations WHERE id = ?`, ids[0]).Scan(&updatedAtAfterUnpin); err != nil {
+		t.Fatalf("get updated_at after unpin: %v", err)
+	}
+	if updatedAtAfterUnpin != updatedAtBeforePin {
+		t.Fatalf("unpin should not change updated_at: before=%q after=%q", updatedAtBeforePin, updatedAtAfterUnpin)
+	}
+	pinned, err = s.PinnedObservations("engram", "project")
+	if err != nil {
+		t.Fatalf("pinned observations after unpin: %v", err)
+	}
+	if len(pinned) != 0 {
+		t.Fatalf("expected no pinned observations after unpin, got %#v", pinned)
+	}
+}
+
 func TestTopicKeyUpsertUpdatesSameTopicWithoutCreatingNewRow(t *testing.T) {
 	s := newTestStore(t)
 
@@ -7711,6 +7829,175 @@ func TestAddObservation_DecayNotAppliedToExistingRows(t *testing.T) {
 	// review_after MUST NOT have been updated by the revision (original value preserved).
 	if ra1 != ra2 {
 		t.Errorf("revision must not overwrite review_after: was %q, now %q", ra1, ra2)
+	}
+}
+
+func TestObservationState(t *testing.T) {
+	future := time.Now().UTC().Add(time.Hour).Format("2006-01-02 15:04:05")
+	past := time.Now().UTC().Add(-time.Hour).Format("2006-01-02 15:04:05")
+
+	if got := (Observation{}).State(); got != ObservationStateActive {
+		t.Fatalf("nil review_after state = %q, want active", got)
+	}
+	if got := (Observation{ReviewAfter: &future}).State(); got != ObservationStateActive {
+		t.Fatalf("future review_after state = %q, want active", got)
+	}
+	if got := (Observation{ReviewAfter: &past}).State(); got != ObservationStateNeedsReview {
+		t.Fatalf("past review_after state = %q, want needs_review", got)
+	}
+}
+
+func TestObservationsNeedingReview(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("review-sess", "review-proj", "/tmp/review"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	staleID, err := s.AddObservation(AddObservationParams{SessionID: "review-sess", Type: "decision", Title: "stale", Content: "stale content", Project: "review-proj"})
+	if err != nil {
+		t.Fatalf("add stale: %v", err)
+	}
+	futureID, err := s.AddObservation(AddObservationParams{SessionID: "review-sess", Type: "decision", Title: "future", Content: "future content", Project: "review-proj"})
+	if err != nil {
+		t.Fatalf("add future: %v", err)
+	}
+	otherID, err := s.AddObservation(AddObservationParams{SessionID: "review-sess", Type: "decision", Title: "other", Content: "other content", Project: "other-proj"})
+	if err != nil {
+		t.Fatalf("add other: %v", err)
+	}
+
+	past := time.Now().UTC().Add(-24 * time.Hour).Format("2006-01-02 15:04:05")
+	future := time.Now().UTC().Add(24 * time.Hour).Format("2006-01-02 15:04:05")
+	if _, err := s.db.Exec(`UPDATE observations SET review_after = ? WHERE id IN (?, ?)`, past, staleID, otherID); err != nil {
+		t.Fatalf("backdate review_after: %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE observations SET review_after = ? WHERE id = ?`, future, futureID); err != nil {
+		t.Fatalf("future review_after: %v", err)
+	}
+
+	got, err := s.ObservationsNeedingReview("review-proj", 10)
+	if err != nil {
+		t.Fatalf("ObservationsNeedingReview(project): %v", err)
+	}
+	if len(got) != 1 || got[0].ID != staleID || got[0].State() != ObservationStateNeedsReview {
+		t.Fatalf("project review list = %#v, want only staleID", got)
+	}
+
+	all, err := s.ObservationsNeedingReview("", 10)
+	if err != nil {
+		t.Fatalf("ObservationsNeedingReview(all): %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("all review list len = %d, want 2: %#v", len(all), all)
+	}
+}
+
+func TestObservationsNeedingReviewExcludesDeletedObservations(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("review-deleted-sess", "review-deleted-proj", "/tmp/review"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	activeID, err := s.AddObservation(AddObservationParams{SessionID: "review-deleted-sess", Type: "decision", Title: "active", Content: "active content", Project: "review-deleted-proj"})
+	if err != nil {
+		t.Fatalf("add active: %v", err)
+	}
+	deletedID, err := s.AddObservation(AddObservationParams{SessionID: "review-deleted-sess", Type: "decision", Title: "deleted", Content: "deleted content", Project: "review-deleted-proj"})
+	if err != nil {
+		t.Fatalf("add deleted: %v", err)
+	}
+	past := time.Now().UTC().Add(-24 * time.Hour).Format("2006-01-02 15:04:05")
+	if _, err := s.db.Exec(`UPDATE observations SET review_after = ? WHERE id IN (?, ?)`, past, activeID, deletedID); err != nil {
+		t.Fatalf("backdate review_after: %v", err)
+	}
+	if err := s.DeleteObservation(deletedID, false); err != nil {
+		t.Fatalf("delete observation: %v", err)
+	}
+
+	got, err := s.ObservationsNeedingReview("review-deleted-proj", 10)
+	if err != nil {
+		t.Fatalf("ObservationsNeedingReview(project): %v", err)
+	}
+	if len(got) != 1 || got[0].ID != activeID {
+		t.Fatalf("review list = %#v, want only activeID", got)
+	}
+}
+
+func TestMarkReviewedResetsReviewAfter(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("mark-reviewed-sess", "mark-reviewed-proj", "/tmp/review"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	decisionID, err := s.AddObservation(AddObservationParams{SessionID: "mark-reviewed-sess", Type: "decision", Title: "decision", Content: "decision content", Project: "mark-reviewed-proj"})
+	if err != nil {
+		t.Fatalf("add decision: %v", err)
+	}
+	manualID, err := s.AddObservation(AddObservationParams{SessionID: "mark-reviewed-sess", Type: "manual", Title: "manual", Content: "manual content", Project: "mark-reviewed-proj"})
+	if err != nil {
+		t.Fatalf("add manual: %v", err)
+	}
+	past := time.Now().UTC().Add(-24 * time.Hour).Format("2006-01-02 15:04:05")
+	if _, err := s.db.Exec(`UPDATE observations SET review_after = ? WHERE id IN (?, ?)`, past, decisionID, manualID); err != nil {
+		t.Fatalf("backdate review_after: %v", err)
+	}
+
+	start := time.Now().UTC()
+	if err := s.MarkReviewed(decisionID); err != nil {
+		t.Fatalf("MarkReviewed decision: %v", err)
+	}
+	reviewAfter, reviewNull, _, _ := queryDecayFields(t, s, decisionID)
+	if reviewNull {
+		t.Fatal("decision review_after should be reset, got NULL")
+	}
+	withinDays(t, "mark reviewed decision", reviewAfter, start.AddDate(0, decayDecisionMonths, 0), 2)
+	obs, err := s.GetObservation(decisionID)
+	if err != nil {
+		t.Fatalf("GetObservation decision: %v", err)
+	}
+	if obs.State() != ObservationStateActive {
+		t.Fatalf("reviewed decision state = %q, want active", obs.State())
+	}
+
+	if err := s.MarkReviewed(manualID); err != nil {
+		t.Fatalf("MarkReviewed manual: %v", err)
+	}
+	_, manualReviewNull, _, _ := queryDecayFields(t, s, manualID)
+	if !manualReviewNull {
+		t.Fatal("manual review_after should be NULL after mark reviewed")
+	}
+}
+
+func TestMarkReviewedDoesNotEnqueueSyncMutation(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnrollProject("mark-reviewed-sync-proj"); err != nil {
+		t.Fatalf("EnrollProject: %v", err)
+	}
+	if err := s.CreateSession("mark-reviewed-sync-sess", "mark-reviewed-sync-proj", "/tmp/review-sync"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	obsID, err := s.AddObservation(AddObservationParams{SessionID: "mark-reviewed-sync-sess", Type: "decision", Title: "decision", Content: "decision content", Project: "mark-reviewed-sync-proj"})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+	past := time.Now().UTC().Add(-24 * time.Hour).Format("2006-01-02 15:04:05")
+	if _, err := s.db.Exec(`UPDATE observations SET review_after = ? WHERE id = ?`, past, obsID); err != nil {
+		t.Fatalf("backdate review_after: %v", err)
+	}
+
+	before, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 10)
+	if err != nil {
+		t.Fatalf("ListPendingSyncMutations before: %v", err)
+	}
+	if err := s.MarkReviewed(obsID); err != nil {
+		t.Fatalf("MarkReviewed: %v", err)
+	}
+	after, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 10)
+	if err != nil {
+		t.Fatalf("ListPendingSyncMutations after: %v", err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("MarkReviewed enqueued sync mutation: before=%d after=%d", len(before), len(after))
 	}
 }
 

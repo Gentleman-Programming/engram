@@ -317,7 +317,7 @@ func TestInstallPiInstallsPackagesAndWritesConfig(t *testing.T) {
 	if result.Agent != "pi" || result.Destination != agentDir || result.Files != 2 {
 		t.Fatalf("unexpected install result: %#v", result)
 	}
-	wantCommands := []string{"pi install npm:gentle-engram@0.1.7", "pi install npm:pi-mcp-adapter"}
+	wantCommands := []string{"pi install npm:gentle-engram@0.1.8", "pi install npm:pi-mcp-adapter"}
 	if !reflect.DeepEqual(commands, wantCommands) {
 		t.Fatalf("unexpected pi install commands: got %#v want %#v", commands, wantCommands)
 	}
@@ -332,7 +332,7 @@ func TestInstallPiInstallsPackagesAndWritesConfig(t *testing.T) {
 	if err := json.Unmarshal(settingsRaw, &settings); err != nil {
 		t.Fatalf("parse settings: %v", err)
 	}
-	for _, pkg := range []string{"npm:gentle-engram@0.1.7", "npm:pi-mcp-adapter"} {
+	for _, pkg := range []string{"npm:gentle-engram@0.1.8", "npm:pi-mcp-adapter"} {
 		if !slices.Contains(settings.Packages, pkg) {
 			t.Fatalf("expected settings packages to include %q, got %#v", pkg, settings.Packages)
 		}
@@ -400,7 +400,7 @@ func TestInstallPiPreservesExistingEngramMCPServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read settings after install: %v", err)
 	}
-	if !strings.Contains(string(settingsRaw), "npm:existing") || !strings.Contains(string(settingsRaw), "npm:gentle-engram@0.1.7") || !strings.Contains(string(settingsRaw), "npm:pi-mcp-adapter") {
+	if !strings.Contains(string(settingsRaw), "npm:existing") || !strings.Contains(string(settingsRaw), "npm:gentle-engram@0.1.8") || !strings.Contains(string(settingsRaw), "npm:pi-mcp-adapter") {
 		t.Fatalf("expected settings packages to be preserved and extended, got %s", settingsRaw)
 	}
 }
@@ -411,7 +411,7 @@ func TestInstallPiCommandFailure(t *testing.T) {
 		return []byte("boom"), errors.New("exit 1")
 	}
 	_, err := Install("pi")
-	if err == nil || !strings.Contains(err.Error(), "install npm:gentle-engram@0.1.7") {
+	if err == nil || !strings.Contains(err.Error(), "install npm:gentle-engram@0.1.8") {
 		t.Fatalf("expected pi install error, got %v", err)
 	}
 }
@@ -1348,6 +1348,72 @@ func TestResolveEngramCommand(t *testing.T) {
 			})
 		}
 	})
+}
+
+// TestResolveEngramCommandHomebrewCellar guards against baking a versioned
+// Homebrew/Linuxbrew Cellar path into MCP client configs. Such paths (e.g.
+// .../Cellar/engram/1.16.1/bin/engram) are removed on `brew upgrade`, leaving
+// OpenCode/Codex with a stale command that fails to spawn (ENOENT). The command
+// must resolve to the stable <brew-prefix>/bin/engram symlink, or bare "engram"
+// when that symlink is missing.
+func TestResolveEngramCommandHomebrewCellar(t *testing.T) {
+	cases := []struct {
+		name         string
+		exe          string
+		stableOnDisk string // stable symlink present on disk; "" means none
+		want         string
+	}{
+		{
+			name:         "linuxbrew cellar maps to stable bin symlink",
+			exe:          "/home/linuxbrew/.linuxbrew/Cellar/engram/1.16.1/bin/engram",
+			stableOnDisk: "/home/linuxbrew/.linuxbrew/bin/engram",
+			want:         "/home/linuxbrew/.linuxbrew/bin/engram",
+		},
+		{
+			name:         "macos arm cellar maps to stable bin symlink",
+			exe:          "/opt/homebrew/Cellar/engram/1.16.1/bin/engram",
+			stableOnDisk: "/opt/homebrew/bin/engram",
+			want:         "/opt/homebrew/bin/engram",
+		},
+		{
+			name:         "macos intel cellar maps to stable bin symlink",
+			exe:          "/usr/local/Cellar/engram/1.16.1/bin/engram",
+			stableOnDisk: "/usr/local/bin/engram",
+			want:         "/usr/local/bin/engram",
+		},
+		{
+			name:         "cellar path with missing stable symlink falls back to bare name",
+			exe:          "/opt/homebrew/Cellar/engram/1.16.1/bin/engram",
+			stableOnDisk: "",
+			want:         "engram",
+		},
+		{
+			name:         "non-cellar absolute path is preserved",
+			exe:          "/opt/engram/bin/engram",
+			stableOnDisk: "",
+			want:         "/opt/engram/bin/engram",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resetSetupSeams(t)
+			osExecutable = func() (string, error) { return tc.exe, nil }
+			statFn = func(name string) (os.FileInfo, error) {
+				if tc.stableOnDisk != "" && filepath.ToSlash(name) == tc.stableOnDisk {
+					return nil, nil // exists
+				}
+				return nil, os.ErrNotExist
+			}
+
+			// Normalize separators so the comparison holds on Windows runners,
+			// where resolveEngramCommand returns OS-native separators via
+			// filepath.FromSlash while tc.want is written with forward slashes.
+			if got := filepath.ToSlash(resolveEngramCommand()); got != tc.want {
+				t.Fatalf("resolveEngramCommand() = %q, want %q", got, tc.want)
+			}
+		})
+	}
 }
 
 func TestClaudeCodeMCPDirPaths(t *testing.T) {
