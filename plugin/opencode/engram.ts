@@ -316,6 +316,9 @@ export const Engram: Plugin = async (ctx) => {
         const info = (event.properties as any)?.info
         const sessionId = info?.id
         if (sessionId) {
+          await engramFetch(`/sessions/${encodeURIComponent(sessionId)}/end`, {
+            method: "POST",
+          })
           toolCounts.delete(sessionId)
           knownSessions.delete(sessionId)
           subAgentSessions.delete(sessionId)
