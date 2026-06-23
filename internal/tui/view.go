@@ -627,6 +627,18 @@ func (m Model) viewSetup() string {
 		if m.SetupError != "" {
 			b.WriteString(errorStyle.Render("  ✗ Installation failed: " + m.SetupError))
 			b.WriteString("\n\n")
+			if m.SetupResult != nil {
+				successMsg := fmt.Sprintf("Installed %s plugin", m.SetupResult.Agent)
+				if m.SetupResult.Files > 0 {
+					successMsg += fmt.Sprintf(" (%d files)", m.SetupResult.Files)
+				}
+				b.WriteString(fmt.Sprintf("  %s %s\n",
+					lipgloss.NewStyle().Bold(true).Foreground(colorGreen).Render("✓"),
+					lipgloss.NewStyle().Bold(true).Foreground(colorGreen).Render(successMsg)))
+				b.WriteString(fmt.Sprintf("  %s %s\n\n",
+					detailLabelStyle.Render("Location:"),
+					projectStyle.Render(m.SetupResult.Destination)))
+			}
 		} else if m.SetupResult != nil {
 			successMsg := fmt.Sprintf("Installed %s plugin", m.SetupResult.Agent)
 			if m.SetupResult.Files > 0 {

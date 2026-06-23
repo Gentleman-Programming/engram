@@ -144,6 +144,16 @@ func TestViewSetupBranches(t *testing.T) {
 	if !strings.Contains(out, "Installation failed") {
 		t.Fatal("error state should render failure message")
 	}
+
+	m.SetupError = "permission denied"
+	m.SetupResult = &setup.Result{Agent: "opencode, claude-code", Destination: "multiple locations", Files: 3, TUIPluginEnabled: true}
+	out = m.viewSetup()
+	if !strings.Contains(out, "Installed opencode, claude-code plugin") {
+		t.Fatal("error state should preserve partial success summary")
+	}
+	if !strings.Contains(out, "multiple locations") {
+		t.Fatal("error state should preserve partial success destination")
+	}
 }
 
 func TestViewDashboardSearchAndRecent(t *testing.T) {

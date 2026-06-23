@@ -254,29 +254,45 @@ func installAgents(agentNames []string) tea.Cmd {
 		for _, name := range names {
 			result, err := installAgentFn(name)
 			if err != nil {
+				if partial := aggregateSetupResults(results, totalFiles); partial != nil {
+					return setupInstallMsg{result: partial, err: err, needsAllowlist: needsAllowlist}
+				}
 				return setupInstallMsg{err: err}
 			}
 			if result != nil {
 				results = append(results, result)
 				totalFiles += result.Files
-			}
-			if name == "claude-code" {
-				needsAllowlist = true
+				needsAllowlist = needsAllowlist || result.Agent == "claude-code"
 			}
 		}
 
-		if len(results) == 1 {
-			return setupInstallMsg{result: results[0], needsAllowlist: needsAllowlist}
-		}
+		return setupInstallMsg{result: aggregateSetupResults(results, totalFiles), needsAllowlist: needsAllowlist}
+	}
+}
 
-		return setupInstallMsg{
-			result: &setup.Result{
-				Agent:       strings.Join(names, ", "),
-				Destination: "multiple locations",
-				Files:       totalFiles,
-			},
-			needsAllowlist: needsAllowlist,
+func aggregateSetupResults(results []*setup.Result, totalFiles int) *setup.Result {
+	if len(results) == 0 {
+		return nil
+	}
+	if len(results) == 1 {
+		return results[0]
+	}
+
+	agents := make([]string, 0, len(results))
+	tuiEnabled := false
+	for _, result := range results {
+		if result == nil {
+			continue
 		}
+		agents = append(agents, result.Agent)
+		tuiEnabled = tuiEnabled || result.TUIPluginEnabled
+	}
+
+	return &setup.Result{
+		Agent:            strings.Join(agents, ", "),
+		Destination:      "multiple locations",
+		Files:            totalFiles,
+		TUIPluginEnabled: tuiEnabled,
 	}
 }
 

@@ -421,14 +421,15 @@ func TestUpdateDataMessageBranches(t *testing.T) {
 	}
 
 	updated.SetupInstalling = true
-	updatedModel, _ = updated.Update(setupInstallMsg{err: errors.New("setup err")})
+	setupRes := &setup.Result{Agent: "opencode, claude-code", Destination: "multiple locations", Files: 3, TUIPluginEnabled: true}
+	updatedModel, _ = updated.Update(setupInstallMsg{result: setupRes, err: errors.New("setup err")})
 	updated = updatedModel.(Model)
-	if updated.SetupInstalling || !updated.SetupDone || updated.SetupError != "setup err" {
+	if updated.SetupInstalling || !updated.SetupDone || updated.SetupError != "setup err" || updated.SetupResult == nil {
 		t.Fatal("setup error should end install and surface setup error")
 	}
 
 	updated.SetupInstalling = true
-	setupRes := &setup.Result{Agent: "opencode", Destination: "/tmp", Files: 2}
+	setupRes = &setup.Result{Agent: "opencode", Destination: "/tmp", Files: 2}
 	updatedModel, _ = updated.Update(setupInstallMsg{result: setupRes})
 	updated = updatedModel.(Model)
 	if updated.SetupInstalling || !updated.SetupDone || updated.SetupResult == nil || updated.SetupError != "" {

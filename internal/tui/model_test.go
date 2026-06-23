@@ -2,6 +2,8 @@ package tui
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/internal/setup"
@@ -248,4 +250,49 @@ func TestInstallAgentCommand(t *testing.T) {
 			t.Fatalf("expected install error, got %v", res.err)
 		}
 	})
+}
+
+func TestInstallAgentsPartialFailurePreservesSuccessfulInstalls(t *testing.T) {
+	original := installAgentFn
+	t.Cleanup(func() { installAgentFn = original })
+
+	var installed []string
+	installAgentFn = func(agentName string) (*setup.Result, error) {
+		installed = append(installed, agentName)
+		switch agentName {
+		case "opencode":
+			return &setup.Result{Agent: agentName, Destination: "/tmp/opencode", Files: 1, TUIPluginEnabled: true}, nil
+		case "claude-code":
+			return &setup.Result{Agent: agentName, Destination: "/tmp/claude", Files: 2}, nil
+		default:
+			return nil, fmt.Errorf("install failed for %s", agentName)
+		}
+	}
+
+	msg := installAgents([]string{"opencode", "claude-code", "gemini-cli"})()
+	res, ok := msg.(setupInstallMsg)
+	if !ok {
+		t.Fatalf("message type = %T", msg)
+	}
+	if res.err == nil || !strings.Contains(res.err.Error(), "gemini-cli") {
+		t.Fatalf("expected partial failure for gemini-cli, got %v", res.err)
+	}
+	if res.result == nil {
+		t.Fatal("expected partial aggregate result")
+	}
+	if res.result.Agent != "opencode, claude-code" {
+		t.Fatalf("aggregate agents = %q, want %q", res.result.Agent, "opencode, claude-code")
+	}
+	if res.result.Files != 3 {
+		t.Fatalf("aggregate files = %d, want 3", res.result.Files)
+	}
+	if !res.result.TUIPluginEnabled {
+		t.Fatal("aggregate result should preserve TUIPluginEnabled")
+	}
+	if !res.needsAllowlist {
+		t.Fatal("partial success including claude-code should request allowlist")
+	}
+	if strings.Join(installed, ",") != "opencode,claude-code,gemini-cli" {
+		t.Fatalf("installed order = %q", strings.Join(installed, ","))
+	}
 }

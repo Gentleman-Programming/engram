@@ -105,12 +105,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case setupInstallMsg:
 		m.SetupInstalling = false
+		if msg.result != nil {
+			m.SetupResult = msg.result
+		}
 		if msg.err != nil {
 			m.SetupDone = true
 			m.SetupError = msg.err.Error()
 			return m, nil
 		}
-		m.SetupResult = msg.result
 		m.SetupError = ""
 		// For claude-code, show allowlist prompt before marking done
 		if msg.needsAllowlist {
