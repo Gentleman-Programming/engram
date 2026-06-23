@@ -2906,7 +2906,10 @@ func errorWithMeta(code, msg string, availableProjects []string) *mcp.CallToolRe
 	case "session_project_mismatch":
 		envelope["hint"] = "Use a project that matches the existing session, or omit session_id and write to a different project."
 	}
-	out, _ := jsonMarshal(envelope)
+	// Use json.Marshal (not jsonMarshal) because error envelopes may be
+	// round-tripped by addErrorMetadata which needs to json.Unmarshal the
+	// content to inject recovery_token and other metadata.
+	out, _ := json.Marshal(envelope)
 	result := mcp.NewToolResultText(string(out))
 	result.IsError = true
 	return result
