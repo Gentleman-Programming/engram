@@ -680,11 +680,29 @@ func (m Model) viewSetup() string {
 	b.WriteString(titleStyle.Render("  Select an agent to set up"))
 	b.WriteString("\n\n")
 
-	for i, agent := range m.SetupAgents {
+	visibleItems := setupVisibleAgents(m.Height)
+	start := m.SetupScroll
+	if start < 0 {
+		start = 0
+	}
+	if start > len(m.SetupAgents) {
+		start = len(m.SetupAgents)
+	}
+	end := start + visibleItems
+	if end > len(m.SetupAgents) {
+		end = len(m.SetupAgents)
+	}
+
+	for i := start; i < end; i++ {
+		agent := m.SetupAgents[i]
+		checkbox := "[ ] "
+		if m.SetupSelectedAgents[agent.Name] {
+			checkbox = "[x] "
+		}
 		if i == m.Cursor {
-			b.WriteString(menuSelectedStyle.Render("▸ " + agent.Description))
+			b.WriteString(menuSelectedStyle.Render("▸ " + checkbox + agent.Description))
 		} else {
-			b.WriteString(menuItemStyle.Render("  " + agent.Description))
+			b.WriteString(menuItemStyle.Render("  " + checkbox + agent.Description))
 		}
 		b.WriteString("\n")
 		b.WriteString(fmt.Sprintf("      %s %s\n\n",
@@ -692,7 +710,17 @@ func (m Model) viewSetup() string {
 			timestampStyle.Render(agent.InstallDir)))
 	}
 
-	b.WriteString(helpStyle.Render("\n  j/k navigate • enter install • esc back"))
+	if len(m.SetupAgents) > visibleItems {
+		b.WriteString(fmt.Sprintf("%s\n",
+			timestampStyle.Render(fmt.Sprintf("  showing %d-%d of %d", start+1, end, len(m.SetupAgents)))))
+	}
+
+	selectedCount := len(m.SetupSelectedAgents)
+	if selectedCount > 0 {
+		b.WriteString(timestampStyle.Render(fmt.Sprintf("  %d selected\n", selectedCount)))
+	}
+
+	b.WriteString(helpStyle.Render("\n  j/k scroll • space select • enter install • esc back"))
 
 	return b.String()
 }

@@ -10,6 +10,9 @@
 package tui
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/Gentleman-Programming/engram/internal/setup"
 	"github.com/Gentleman-Programming/engram/internal/store"
 	"github.com/Gentleman-Programming/engram/internal/version"
@@ -79,8 +82,9 @@ type sessionObservationsMsg struct {
 }
 
 type setupInstallMsg struct {
-	result *setup.Result
-	err    error
+	result         *setup.Result
+	err            error
+	needsAllowlist bool
 }
 
 // ─── Model ───────────────────────────────────────────────────────────────────
@@ -136,6 +140,8 @@ type Model struct {
 	SetupDone             bool
 	SetupInstalling       bool
 	SetupInstallingName   string // agent name being installed (for display)
+	SetupSelectedAgents   map[string]bool
+	SetupScroll           int
 	SetupAllowlistPrompt  bool   // true = showing y/n prompt for allowlist
 	SetupAllowlistApplied bool   // true = allowlist was added successfully
 	SetupAllowlistError   string // error message if allowlist injection failed
@@ -231,7 +237,46 @@ func loadSessionObservations(s *store.Store, sessionID string) tea.Cmd {
 func installAgent(agentName string) tea.Cmd {
 	return func() tea.Msg {
 		result, err := installAgentFn(agentName)
-		return setupInstallMsg{result: result, err: err}
+		return setupInstallMsg{result: result, err: err, needsAllowlist: agentName == "claude-code"}
+	}
+}
+
+func installAgents(agentNames []string) tea.Cmd {
+	names := append([]string(nil), agentNames...)
+	return func() tea.Msg {
+		if len(names) == 0 {
+			return setupInstallMsg{err: fmt.Errorf("no agents selected")}
+		}
+
+		var results []*setup.Result
+		totalFiles := 0
+		needsAllowlist := false
+		for _, name := range names {
+			result, err := installAgentFn(name)
+			if err != nil {
+				return setupInstallMsg{err: err}
+			}
+			if result != nil {
+				results = append(results, result)
+				totalFiles += result.Files
+			}
+			if name == "claude-code" {
+				needsAllowlist = true
+			}
+		}
+
+		if len(results) == 1 {
+			return setupInstallMsg{result: results[0], needsAllowlist: needsAllowlist}
+		}
+
+		return setupInstallMsg{
+			result: &setup.Result{
+				Agent:       strings.Join(names, ", "),
+				Destination: "multiple locations",
+				Files:       totalFiles,
+			},
+			needsAllowlist: needsAllowlist,
+		}
 	}
 }
 

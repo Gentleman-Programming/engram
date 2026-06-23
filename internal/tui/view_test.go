@@ -406,6 +406,34 @@ func TestViewSetupRemainingBranches(t *testing.T) {
 	}
 }
 
+func TestViewSetupShortTerminalRendersVisibleSelectionWindow(t *testing.T) {
+	m := New(nil, "")
+	m.Screen = ScreenSetup
+	m.Height = 11
+	m.Cursor = 1
+	m.SetupScroll = 1
+	m.SetupSelectedAgents = map[string]bool{"claude-code": true}
+	m.SetupAgents = []setup.Agent{
+		{Name: "opencode", Description: "OpenCode", InstallDir: "/tmp/opencode"},
+		{Name: "claude-code", Description: "Claude Code", InstallDir: "/tmp/claude"},
+		{Name: "gemini-cli", Description: "Gemini CLI", InstallDir: "/tmp/gemini"},
+	}
+
+	out := m.viewSetup()
+	if strings.Contains(out, "OpenCode") {
+		t.Fatal("setup view should not render agents above the scroll window")
+	}
+	if !strings.Contains(out, "▸ [x] Claude Code") {
+		t.Fatal("setup view should render selected cursor item")
+	}
+	if !strings.Contains(out, "showing 2-2 of 3") {
+		t.Fatal("setup view should render scroll indicator for overflowing agents")
+	}
+	if !strings.Contains(out, "space select") {
+		t.Fatal("setup help should mention multi-select key")
+	}
+}
+
 func TestViewSetupAllowlistPrompt(t *testing.T) {
 	t.Run("renders allowlist prompt", func(t *testing.T) {
 		m := New(nil, "")

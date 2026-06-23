@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/setup"
@@ -112,7 +113,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.SetupResult = msg.result
 		m.SetupError = ""
 		// For claude-code, show allowlist prompt before marking done
-		if msg.result != nil && msg.result.Agent == "claude-code" {
+		if msg.needsAllowlist {
 			m.SetupAllowlistPrompt = true
 			return m, nil
 		}
@@ -234,7 +235,9 @@ func (m Model) handleDashboardSelection() (tea.Model, tea.Cmd) {
 		m.PrevScreen = ScreenDashboard
 		m.Screen = ScreenSetup
 		m.Cursor = 0
+		m.SetupScroll = 0
 		m.SetupAgents = setup.SupportedAgents()
+		m.SetupSelectedAgents = make(map[string]bool)
 		m.SetupResult = nil
 		m.SetupError = ""
 		m.SetupDone = false
@@ -577,22 +580,81 @@ func (m Model) handleSetupKeys(key string) (tea.Model, tea.Cmd) {
 		if m.Cursor < len(m.SetupAgents)-1 {
 			m.Cursor++
 		}
+	case " ":
+		if len(m.SetupAgents) > 0 && m.Cursor < len(m.SetupAgents) {
+			if m.SetupSelectedAgents == nil {
+				m.SetupSelectedAgents = make(map[string]bool)
+			}
+			name := m.SetupAgents[m.Cursor].Name
+			if m.SetupSelectedAgents[name] {
+				delete(m.SetupSelectedAgents, name)
+			} else {
+				m.SetupSelectedAgents[name] = true
+			}
+		}
 	case "enter":
 		if len(m.SetupAgents) > 0 && m.Cursor < len(m.SetupAgents) {
-			agent := m.SetupAgents[m.Cursor]
+			selected := m.selectedSetupAgentNames()
+			if len(selected) == 0 {
+				selected = []string{m.SetupAgents[m.Cursor].Name}
+			}
 			m.SetupInstalling = true
-			m.SetupInstallingName = agent.Name
-			return m, tea.Batch(m.SetupSpinner.Tick, installAgent(agent.Name))
+			m.SetupInstallingName = strings.Join(selected, ", ")
+			return m, tea.Batch(m.SetupSpinner.Tick, installAgents(selected))
 		}
 	case "esc", "q":
 		m.Screen = ScreenDashboard
 		m.Cursor = 0
+		m.SetupScroll = 0
+		m.SetupSelectedAgents = nil
 		return m, loadStats(m.store)
 	}
+	m.clampSetupScroll()
 	return m, nil
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+func (m *Model) clampSetupScroll() {
+	visibleItems := setupVisibleAgents(m.Height)
+	if m.Cursor < m.SetupScroll {
+		m.SetupScroll = m.Cursor
+	}
+	if m.Cursor >= m.SetupScroll+visibleItems {
+		m.SetupScroll = m.Cursor - visibleItems + 1
+	}
+	maxScroll := len(m.SetupAgents) - visibleItems
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if m.SetupScroll > maxScroll {
+		m.SetupScroll = maxScroll
+	}
+	if m.SetupScroll < 0 {
+		m.SetupScroll = 0
+	}
+}
+
+func (m Model) selectedSetupAgentNames() []string {
+	if len(m.SetupSelectedAgents) == 0 {
+		return nil
+	}
+	selected := make([]string, 0, len(m.SetupSelectedAgents))
+	for _, agent := range m.SetupAgents {
+		if m.SetupSelectedAgents[agent.Name] {
+			selected = append(selected, agent.Name)
+		}
+	}
+	return selected
+}
+
+func setupVisibleAgents(height int) int {
+	visibleItems := (height - 8) / 3
+	if visibleItems < 1 {
+		return 1
+	}
+	return visibleItems
+}
 
 // refreshScreen returns the appropriate data-loading Cmd for a given screen.
 // Used when navigating back so lists show fresh data from the DB.

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/internal/setup"
@@ -697,6 +698,7 @@ func TestHandleSessionsAndSetupRemainingBranches(t *testing.T) {
 
 	m.SetupDone = false
 	m.SetupAgents = []setup.Agent{{Name: "opencode"}, {Name: "claude-code"}}
+	m.SetupSelectedAgents = make(map[string]bool)
 	m.Cursor = 0
 	updatedModel, _ = m.handleSetupKeys("up")
 	if updatedModel.(Model).Cursor != 0 {
@@ -709,6 +711,16 @@ func TestHandleSessionsAndSetupRemainingBranches(t *testing.T) {
 	updatedModel, _ = updatedModel.(Model).handleSetupKeys("up")
 	if updatedModel.(Model).Cursor != 0 {
 		t.Fatal("setup up with cursor>0 should decrement cursor")
+	}
+	updatedModel, _ = updatedModel.(Model).handleSetupKeys(" ")
+	updated = updatedModel.(Model)
+	if !updated.SetupSelectedAgents["opencode"] {
+		t.Fatal("setup space should select cursor agent")
+	}
+	updatedModel, _ = updated.handleSetupKeys(" ")
+	updated = updatedModel.(Model)
+	if updated.SetupSelectedAgents["opencode"] {
+		t.Fatal("setup space should deselect cursor agent")
 	}
 
 	original := installAgentFn
@@ -729,6 +741,60 @@ func TestHandleSessionsAndSetupRemainingBranches(t *testing.T) {
 	_, cmd = m.handleSetupKeys("enter")
 	if cmd != nil {
 		t.Fatal("setup enter with no agents should not return command")
+	}
+}
+
+func TestSetupScrollAndMultiSelectInstall(t *testing.T) {
+	m := New(nil, "")
+	m.Screen = ScreenSetup
+	m.Height = 11
+	m.SetupAgents = []setup.Agent{
+		{Name: "opencode"},
+		{Name: "claude-code"},
+		{Name: "gemini-cli"},
+		{Name: "codex"},
+	}
+	m.SetupSelectedAgents = make(map[string]bool)
+
+	updatedModel, _ := m.handleSetupKeys("down")
+	updated := updatedModel.(Model)
+	if updated.Cursor != 1 || updated.SetupScroll != 1 {
+		t.Fatalf("cursor/scroll = %d/%d, want 1/1", updated.Cursor, updated.SetupScroll)
+	}
+
+	updatedModel, _ = updated.handleSetupKeys(" ")
+	updated = updatedModel.(Model)
+	if !updated.SetupSelectedAgents["claude-code"] {
+		t.Fatal("space should select the visible cursor agent")
+	}
+	updatedModel, _ = updated.handleSetupKeys("down")
+	updated = updatedModel.(Model)
+	updatedModel, _ = updated.handleSetupKeys(" ")
+	updated = updatedModel.(Model)
+	if !updated.SetupSelectedAgents["gemini-cli"] {
+		t.Fatal("space should allow multiple selections")
+	}
+
+	var installed []string
+	original := installAgentFn
+	t.Cleanup(func() { installAgentFn = original })
+	installAgentFn = func(name string) (*setup.Result, error) {
+		installed = append(installed, name)
+		return &setup.Result{Agent: name, Destination: "/tmp/" + name, Files: 1}, nil
+	}
+
+	msg := installAgents(updated.selectedSetupAgentNames())().(setupInstallMsg)
+	if msg.err != nil {
+		t.Fatalf("installAgents returned error: %v", msg.err)
+	}
+	if !msg.needsAllowlist {
+		t.Fatal("multi-install with claude-code should request allowlist prompt")
+	}
+	if msg.result == nil || msg.result.Files != 2 || msg.result.Agent != "claude-code, gemini-cli" {
+		t.Fatalf("unexpected aggregate result: %#v", msg.result)
+	}
+	if strings.Join(installed, ",") != "claude-code,gemini-cli" {
+		t.Fatalf("installed order = %q", strings.Join(installed, ","))
 	}
 }
 
@@ -913,7 +979,7 @@ func TestSetupAllowlistPromptFlow(t *testing.T) {
 		m.SetupInstalling = true
 
 		result := &setup.Result{Agent: "claude-code", Destination: "claude plugin system", Files: 0}
-		updatedModel, _ := m.Update(setupInstallMsg{result: result})
+		updatedModel, _ := m.Update(setupInstallMsg{result: result, needsAllowlist: true})
 		updated := updatedModel.(Model)
 
 		if updated.SetupDone {
