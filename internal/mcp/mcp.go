@@ -2861,11 +2861,15 @@ func addErrorMetadata(result *mcp.CallToolResult, metadata map[string]any) {
 	}
 	var envelope map[string]any
 	if err := json.Unmarshal([]byte(text.Text), &envelope); err != nil {
+		// Content may be GCF-encoded; skip metadata injection rather
+		// than corrupt the output. Error metadata is best-effort.
 		return
 	}
 	for k, v := range metadata {
 		envelope[k] = v
 	}
+	// Re-serialize with jsonMarshal so the final output stays in the
+	// user's chosen format (JSON or GCF).
 	out, err := jsonMarshal(envelope)
 	if err != nil {
 		return
@@ -2907,13 +2911,22 @@ func errorWithMeta(code, msg string, availableProjects []string) *mcp.CallToolRe
 	return result
 }
 
+// _gcfEnabled is resolved once at first call and cached.
+var _gcfEnabled *bool
+
 // gcfEnabled returns true when the user has opted into GCF output format.
 func gcfEnabled() bool {
-	return os.Getenv("ENGRAM_OUTPUT_FORMAT") == "gcf"
+	if _gcfEnabled == nil {
+		v := os.Getenv("ENGRAM_OUTPUT_FORMAT") == "gcf"
+		_gcfEnabled = &v
+	}
+	return *_gcfEnabled
 }
 
 // jsonMarshal marshals v to JSON, or GCF when ENGRAM_OUTPUT_FORMAT=gcf.
-// Named to allow test injection if needed.
+// This is used for final MCP tool output only. Internal round-trips
+// (e.g. addErrorMetadata) use json.Marshal directly to avoid encoding
+// in a format that json.Unmarshal cannot read back.
 func jsonMarshal(v any) ([]byte, error) {
 	if gcfEnabled() {
 		return []byte(gcf.EncodeGeneric(v)), nil
