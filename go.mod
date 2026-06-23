@@ -4,6 +4,7 @@ go 1.25.10
 
 require (
 	github.com/a-h/templ v0.3.1001
+	github.com/blackwell-systems/gcf-go v1.3.1
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
@@ -19,7 +20,6 @@ require (
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
-	github.com/blackwell-systems/gcf-go v1.3.1 // indirect
 	github.com/buger/jsonparser v1.1.1 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/charmbracelet/colorprofile v0.4.1 // indirect

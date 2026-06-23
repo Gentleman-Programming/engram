@@ -2868,9 +2868,10 @@ func addErrorMetadata(result *mcp.CallToolResult, metadata map[string]any) {
 	for k, v := range metadata {
 		envelope[k] = v
 	}
-	// Re-serialize with jsonMarshal so the final output stays in the
-	// user's chosen format (JSON or GCF).
-	out, err := jsonMarshal(envelope)
+	// Re-serialize with json.Marshal (not jsonMarshal) because this is an
+	// internal round-trip: we just unmarshalled JSON, so we write JSON back.
+	// Error envelopes are small and don't benefit from GCF.
+	out, err := json.Marshal(envelope)
 	if err != nil {
 		return
 	}
