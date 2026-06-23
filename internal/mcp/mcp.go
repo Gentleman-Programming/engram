@@ -23,6 +23,8 @@ import (
 	"strings"
 	"time"
 
+	gcf "github.com/blackwell-systems/gcf-go"
+
 	"github.com/Gentleman-Programming/engram/internal/diagnostic"
 	projectpkg "github.com/Gentleman-Programming/engram/internal/project"
 	"github.com/Gentleman-Programming/engram/internal/store"
@@ -2905,8 +2907,17 @@ func errorWithMeta(code, msg string, availableProjects []string) *mcp.CallToolRe
 	return result
 }
 
-// jsonMarshal marshals v to JSON. Named to allow test injection if needed.
+// gcfEnabled returns true when the user has opted into GCF output format.
+func gcfEnabled() bool {
+	return os.Getenv("ENGRAM_OUTPUT_FORMAT") == "gcf"
+}
+
+// jsonMarshal marshals v to JSON, or GCF when ENGRAM_OUTPUT_FORMAT=gcf.
+// Named to allow test injection if needed.
 func jsonMarshal(v any) ([]byte, error) {
+	if gcfEnabled() {
+		return []byte(gcf.EncodeGeneric(v)), nil
+	}
 	return json.Marshal(v)
 }
 
