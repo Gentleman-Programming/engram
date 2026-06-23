@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	gcf "github.com/blackwell-systems/gcf-go"
@@ -2915,17 +2916,11 @@ func errorWithMeta(code, msg string, availableProjects []string) *mcp.CallToolRe
 	return result
 }
 
-// _gcfEnabled is resolved once at first call and cached.
-var _gcfEnabled *bool
-
 // gcfEnabled returns true when the user has opted into GCF output format.
-func gcfEnabled() bool {
-	if _gcfEnabled == nil {
-		v := os.Getenv("ENGRAM_OUTPUT_FORMAT") == "gcf"
-		_gcfEnabled = &v
-	}
-	return *_gcfEnabled
-}
+// Resolved once, thread-safe via sync.OnceValue.
+var gcfEnabled = sync.OnceValue(func() bool {
+	return os.Getenv("ENGRAM_OUTPUT_FORMAT") == "gcf"
+})
 
 // jsonMarshal marshals v to JSON, or GCF when ENGRAM_OUTPUT_FORMAT=gcf.
 // This is used for final MCP tool output only. Internal round-trips
