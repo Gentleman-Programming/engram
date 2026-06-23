@@ -111,7 +111,7 @@ Before ending a session or saying "done" / "that's it", you MUST:
 - path/to/file — [what it does or what changed]
 
 This is NOT optional. If you skip this, the next session starts blind.
-2. Call `mem_session_end`.
+2. Call `mem_session_end` with the active session id and an optional summary of work completed.
 
 ## AFTER COMPACTION
 

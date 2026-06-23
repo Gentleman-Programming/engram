@@ -110,6 +110,7 @@ Before ending a session or saying "done" / "that's it", you MUST:
 - path/to/file — [what it does or what changed]
 
 This is NOT optional. If you skip this, the next session starts blind.
+2. Call \`mem_session_end\` with the active session id and an optional summary of work completed.
 
 ### AFTER COMPACTION
 
@@ -225,7 +226,6 @@ export const Engram: Plugin = async (ctx) => {
     if (!sessionId || knownSessions.has(sessionId)) return
     // Do not register sub-agent sessions in Engram (issue #116).
     if (subAgentSessions.has(sessionId)) return
-    knownSessions.add(sessionId)
     await engramFetch("/sessions", {
       method: "POST",
       body: {
@@ -234,6 +234,7 @@ export const Engram: Plugin = async (ctx) => {
         directory: ctx.directory,
       },
     })
+    knownSessions.add(sessionId)
   }
 
   // Try to start engram server if not running
@@ -316,9 +317,11 @@ export const Engram: Plugin = async (ctx) => {
         const info = (event.properties as any)?.info
         const sessionId = info?.id
         if (sessionId) {
-          await engramFetch(`/sessions/${encodeURIComponent(sessionId)}/end`, {
-            method: "POST",
-          })
+          if (knownSessions.has(sessionId)) {
+            await engramFetch(`/sessions/${encodeURIComponent(sessionId)}/end`, {
+              method: "POST",
+            })
+          }
           toolCounts.delete(sessionId)
           knownSessions.delete(sessionId)
           subAgentSessions.delete(sessionId)
