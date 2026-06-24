@@ -1716,14 +1716,17 @@ func jsonMarshal(v any) ([]byte, error) {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-// defaultSessionID returns a project-scoped default session ID.
-// If project is non-empty: "manual-save-{project}"
-// If project is empty: "manual-save"
+// defaultSessionID returns a project-scoped, date-rotating default session ID.
+// Rotating by day prevents all observations from piling up in a single June
+// session when the binary is long-lived.
+// If project is non-empty: "manual-save-{project}-{YYYY-MM-DD}"
+// If project is empty: "manual-save-{YYYY-MM-DD}"
 func defaultSessionID(project string) string {
+	date := time.Now().UTC().Format("2006-01-02")
 	if project == "" {
-		return "manual-save"
+		return "manual-save-" + date
 	}
-	return "manual-save-" + project
+	return "manual-save-" + project + "-" + date
 }
 
 func intArg(req mcp.CallToolRequest, key string, defaultVal int) int {

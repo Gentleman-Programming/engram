@@ -81,6 +81,7 @@ type SessionSummary struct {
 	EndedAt          *string `json:"ended_at,omitempty"`
 	Summary          *string `json:"summary,omitempty"`
 	ObservationCount int     `json:"observation_count"`
+	LastActivityAt   string  `json:"last_activity_at"`
 }
 
 type Stats struct {
@@ -1763,7 +1764,8 @@ func (s *Store) RecentSessions(project string, limit int) ([]SessionSummary, err
 
 	query := `
 		SELECT s.id, s.project, s.started_at, s.ended_at, s.summary,
-		       COUNT(o.id) as observation_count
+		       COUNT(o.id) as observation_count,
+		       MAX(COALESCE(o.created_at, s.started_at)) as last_activity_at
 		FROM sessions s
 		LEFT JOIN observations o ON o.session_id = s.id AND o.deleted_at IS NULL
 		WHERE 1=1
@@ -1787,7 +1789,7 @@ func (s *Store) RecentSessions(project string, limit int) ([]SessionSummary, err
 	var results []SessionSummary
 	for rows.Next() {
 		var ss SessionSummary
-		if err := rows.Scan(&ss.ID, &ss.Project, &ss.StartedAt, &ss.EndedAt, &ss.Summary, &ss.ObservationCount); err != nil {
+		if err := rows.Scan(&ss.ID, &ss.Project, &ss.StartedAt, &ss.EndedAt, &ss.Summary, &ss.ObservationCount, &ss.LastActivityAt); err != nil {
 			return nil, err
 		}
 		results = append(results, ss)
@@ -1803,7 +1805,8 @@ func (s *Store) AllSessions(project string, limit int) ([]SessionSummary, error)
 
 	query := `
 		SELECT s.id, s.project, s.started_at, s.ended_at, s.summary,
-		       COUNT(o.id) as observation_count
+		       COUNT(o.id) as observation_count,
+		       MAX(COALESCE(o.created_at, s.started_at)) as last_activity_at
 		FROM sessions s
 		LEFT JOIN observations o ON o.session_id = s.id AND o.deleted_at IS NULL
 		WHERE 1=1
@@ -1827,7 +1830,7 @@ func (s *Store) AllSessions(project string, limit int) ([]SessionSummary, error)
 	var results []SessionSummary
 	for rows.Next() {
 		var ss SessionSummary
-		if err := rows.Scan(&ss.ID, &ss.Project, &ss.StartedAt, &ss.EndedAt, &ss.Summary, &ss.ObservationCount); err != nil {
+		if err := rows.Scan(&ss.ID, &ss.Project, &ss.StartedAt, &ss.EndedAt, &ss.Summary, &ss.ObservationCount, &ss.LastActivityAt); err != nil {
 			return nil, err
 		}
 		results = append(results, ss)
@@ -2144,6 +2147,9 @@ func (s *Store) SearchPrompts(query string, project string, limit int) ([]Prompt
 	}
 
 	ftsQuery := sanitizeFTS(query)
+	if ftsQuery == "" {
+		return nil, nil
+	}
 
 	sql := `
 		SELECT p.id, ifnull(p.sync_id, '') as sync_id, p.session_id, p.content, ifnull(p.project, '') as project, p.created_at
@@ -2617,6 +2623,13 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 
 	// Sanitize query for FTS5 — wrap each term in quotes to avoid syntax errors
 	ftsQuery := sanitizeFTS(query)
+	if ftsQuery == "" {
+		// Empty query: skip FTS block; return directResults (topic_key hits) up to limit.
+		if len(directResults) > limit {
+			directResults = directResults[:limit]
+		}
+		return directResults, nil
+	}
 
 	sqlQ := `
 		SELECT o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
@@ -2770,7 +2783,7 @@ func (s *Store) FormatContext(project, scope string) (string, error) {
 				summary = fmt.Sprintf(": %s", truncate(*sess.Summary, 200))
 			}
 			fmt.Fprintf(&b, "- **%s** (%s)%s [%d observations]\n",
-				sess.Project, sess.StartedAt, summary, sess.ObservationCount)
+				sess.Project, sess.LastActivityAt, summary, sess.ObservationCount)
 		}
 		b.WriteString("\n")
 	}
@@ -5467,16 +5480,28 @@ func stripPrivateTags(s string) string {
 	return result
 }
 
-// sanitizeFTS wraps each word in quotes so FTS5 doesn't choke on special chars.
-// "fix auth bug" → `"fix" "auth" "bug"`
+// sanitizeFTS wraps each term in quotes and joins them with OR so a query
+// matches observations sharing ANY term, ranked by relevance (BM25 via
+// ORDER BY fts.rank at the call sites). A bare space between quoted terms is
+// an implicit AND in FTS5, which made natural-language queries return nothing.
+// Empty terms are dropped and empty input yields "" — callers MUST guard
+// against passing "" to a MATCH clause (FTS5 errors on an empty match string).
+// All embedded double-quotes are stripped (not just trimmed from the ends) so a
+// term like `a"b` can't produce an unbalanced FTS5 string (`"a"b"` → syntax error).
+// Trade-off: for very long queries OR matches any obs sharing a single term;
+// BM25 (ORDER BY fts.rank) ranks fuller matches first, so recall wins over precision.
+// "fix auth bug" → `"fix" OR "auth" OR "bug"`
 func sanitizeFTS(query string) string {
 	words := strings.Fields(query)
-	for i, w := range words {
-		// Strip existing quotes to avoid double-quoting
-		w = strings.Trim(w, `"`)
-		words[i] = `"` + w + `"`
+	quoted := make([]string, 0, len(words))
+	for _, w := range words {
+		w = strings.ReplaceAll(w, `"`, "")
+		if w == "" {
+			continue
+		}
+		quoted = append(quoted, `"`+w+`"`)
 	}
-	return strings.Join(words, " ")
+	return strings.Join(quoted, " OR ")
 }
 
 // ─── Passive Capture ─────────────────────────────────────────────────────────

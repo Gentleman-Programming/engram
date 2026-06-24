@@ -1748,14 +1748,16 @@ func TestReadOnlyToolAnnotations(t *testing.T) {
 // ─── Issue #25: Session collision regression tests ──────────────────────────
 
 func TestDefaultSessionIDScopedByProject(t *testing.T) {
-	if got := defaultSessionID(""); got != "manual-save" {
-		t.Fatalf("expected manual-save for empty project, got %q", got)
+	date := time.Now().UTC().Format("2006-01-02")
+
+	if got := defaultSessionID(""); got != "manual-save-"+date {
+		t.Fatalf("expected manual-save-%s for empty project, got %q", date, got)
 	}
-	if got := defaultSessionID("engram"); got != "manual-save-engram" {
-		t.Fatalf("expected manual-save-engram, got %q", got)
+	if got := defaultSessionID("engram"); got != "manual-save-engram-"+date {
+		t.Fatalf("expected manual-save-engram-%s, got %q", date, got)
 	}
-	if got := defaultSessionID("my-app"); got != "manual-save-my-app" {
-		t.Fatalf("expected manual-save-my-app, got %q", got)
+	if got := defaultSessionID("my-app"); got != "manual-save-my-app-"+date {
+		t.Fatalf("expected manual-save-my-app-%s, got %q", date, got)
 	}
 }
 
@@ -1783,10 +1785,11 @@ func TestHandleSaveCreatesProjectScopedSession(t *testing.T) {
 		t.Fatalf("save: err=%v isError=%v text=%s", err, res.IsError, callResultText(t, res))
 	}
 
-	// Verify session was created with auto-detected project
-	sess, err := s.GetSession("manual-save-scoped-session-project")
+	// Verify session was created with auto-detected project (date-rotated ID)
+	date := time.Now().UTC().Format("2006-01-02")
+	sess, err := s.GetSession("manual-save-scoped-session-project-" + date)
 	if err != nil {
-		t.Fatalf("expected session manual-save-scoped-session-project to exist: %v", err)
+		t.Fatalf("expected session manual-save-scoped-session-project-%s to exist: %v", date, err)
 	}
 	if sess.Project != "scoped-session-project" {
 		t.Fatalf("expected project=scoped-session-project, got %q", sess.Project)
@@ -1815,8 +1818,9 @@ func TestHandleSavePromptCreatesProjectScopedSession(t *testing.T) {
 		t.Fatalf("save prompt: err=%v isError=%v", err, res.IsError)
 	}
 
-	if _, err := s.GetSession("manual-save-prompt-project"); err != nil {
-		t.Fatalf("expected session manual-save-prompt-project: %v", err)
+	date := time.Now().UTC().Format("2006-01-02")
+	if _, err := s.GetSession("manual-save-prompt-project-" + date); err != nil {
+		t.Fatalf("expected session manual-save-prompt-project-%s: %v", date, err)
 	}
 }
 
@@ -1843,8 +1847,9 @@ func TestHandleSessionSummaryCreatesProjectScopedSession(t *testing.T) {
 		t.Fatalf("session summary: err=%v isError=%v text=%s", err, res.IsError, callResultText(t, res))
 	}
 
-	if _, err := s.GetSession("manual-save-summary-session-project"); err != nil {
-		t.Fatalf("expected session manual-save-summary-session-project: %v", err)
+	date := time.Now().UTC().Format("2006-01-02")
+	if _, err := s.GetSession("manual-save-summary-session-project-" + date); err != nil {
+		t.Fatalf("expected session manual-save-summary-session-project-%s: %v", date, err)
 	}
 }
 
@@ -1870,8 +1875,9 @@ func TestHandleCapturePassiveCreatesProjectScopedSession(t *testing.T) {
 		t.Fatalf("capture passive: err=%v isError=%v text=%s", err, res.IsError, callResultText(t, res))
 	}
 
-	if _, err := s.GetSession("manual-save-capture-project"); err != nil {
-		t.Fatalf("expected session manual-save-capture-project: %v", err)
+	date := time.Now().UTC().Format("2006-01-02")
+	if _, err := s.GetSession("manual-save-capture-project-" + date); err != nil {
+		t.Fatalf("expected session manual-save-capture-project-%s: %v", date, err)
 	}
 }
 
@@ -1896,10 +1902,11 @@ func TestExplicitSessionIDBypassesDefault(t *testing.T) {
 	if _, err := s.GetSession("custom-session-123"); err != nil {
 		t.Fatalf("expected custom-session-123: %v", err)
 	}
-	// The default session should NOT exist
-	_, err = s.GetSession("manual-save-myproject")
+	// The default session (new date-rotated format) should NOT exist
+	date := time.Now().UTC().Format("2006-01-02")
+	_, err = s.GetSession("manual-save-myproject-" + date)
 	if err == nil {
-		t.Fatal("manual-save-myproject should NOT exist when explicit session_id provided")
+		t.Fatal("manual-save-myproject-" + date + " should NOT exist when explicit session_id provided")
 	}
 }
 

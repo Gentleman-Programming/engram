@@ -5762,6 +5762,46 @@ func TestSearchNormalizesProjectFilter(t *testing.T) {
 	}
 }
 
+// TestSearchMatchesAnyTermNotAll guards against a regression where sanitizeFTS
+// joined quoted terms with a bare space, which FTS5 interprets as an implicit
+// AND. Natural-language queries (the way agents actually search) then required
+// every single term to be present in one observation and returned nothing.
+// The desired behavior is OR-of-terms ranked by relevance (BM25), so a query
+// that overlaps partially with a stored record still surfaces it.
+func TestSearchMatchesAnyTermNotAll(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s1", "engram", "/tmp"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	_, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "discovery",
+		Title:     "Cash session reconciliation",
+		Content:   "Implemented cash session and tip allocation for the jau-pilot restaurant.",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+
+	// Only some of these terms appear in the stored observation ("jau-pilot",
+	// "cash", "session"); "workboard", "mario" and "deployment" do not.
+	// A conjunctive (AND) match returns 0; the relevance-ranked OR match finds it.
+	results, err := s.Search("jau-pilot workboard mario cash session deployment", SearchOptions{
+		Project: "engram",
+		Limit:   10,
+	})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatalf("expected ≥1 result for a multi-term query with partial overlap, got 0 (FTS treating terms as AND?)")
+	}
+}
+
 func TestRecentObservationsNormalizesProjectFilter(t *testing.T) {
 	s := newTestStore(t)
 
@@ -7002,5 +7042,184 @@ func TestAddObservation_DecayNotAppliedToExistingRows(t *testing.T) {
 	// review_after MUST NOT have been updated by the revision (original value preserved).
 	if ra1 != ra2 {
 		t.Errorf("revision must not overwrite review_after: was %q, now %q", ra1, ra2)
+	}
+}
+
+// ─── sanitizeFTS + Search regression tests ───────────────────────────────────
+
+// TestSearchRanksFullMatchAbovePartialMatch verifies that BM25 ranks an
+// observation matching more query terms above one matching fewer terms.
+func TestSearchRanksFullMatchAbovePartialMatch(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("rank-sess", "engram", "/tmp"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	// Obs A: only contains "cache"
+	_, err := s.AddObservation(AddObservationParams{
+		SessionID: "rank-sess",
+		Type:      "note",
+		Title:     "cache only",
+		Content:   "This observation only mentions cache.",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation A: %v", err)
+	}
+
+	// Obs B: contains "redis", "cache", and "session" — should rank higher for the 3-term query
+	_, err = s.AddObservation(AddObservationParams{
+		SessionID: "rank-sess",
+		Type:      "note",
+		Title:     "redis cache session",
+		Content:   "This observation covers redis, cache, and session management together.",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation B: %v", err)
+	}
+
+	results, err := s.Search("redis cache session", SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) < 2 {
+		t.Fatalf("expected >=2 results, got %d", len(results))
+	}
+
+	// BM25: more negative rank = better match. results[0] should be Obs B.
+	if results[0].Rank >= results[1].Rank {
+		t.Errorf("expected results[0].Rank (%v) < results[1].Rank (%v) — full-match should rank higher",
+			results[0].Rank, results[1].Rank)
+	}
+	if !strings.Contains(results[0].Title, "redis") {
+		t.Errorf("expected full-match observation first, got title=%q", results[0].Title)
+	}
+}
+
+// TestSearchPromptsMatchesAnyTermNotAll verifies that SearchPrompts uses OR
+// semantics: a prompt is returned if it matches ANY query term, not ALL.
+func TestSearchPromptsMatchesAnyTermNotAll(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("prompt-sess", "engram", "/tmp"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	_, err := s.AddPrompt(AddPromptParams{
+		SessionID: "prompt-sess",
+		Content:   "Fix the cash session reconciliation for jau-pilot restaurant",
+		Project:   "engram",
+	})
+	if err != nil {
+		t.Fatalf("AddPrompt: %v", err)
+	}
+
+	// Query includes terms not in the prompt ("workboard", "mario") — AND would return 0
+	results, err := s.SearchPrompts("jau-pilot workboard mario cash", "engram", 10)
+	if err != nil {
+		t.Fatalf("SearchPrompts: %v", err)
+	}
+	if len(results) < 1 {
+		t.Fatalf("expected >=1 result (OR semantics), got 0 — FTS treating terms as AND?")
+	}
+}
+
+// TestSanitizeFTSEdgeCases validates sanitizeFTS output for known inputs.
+func TestSanitizeFTSEdgeCases(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"", ""},
+		{"engram", `"engram"`},
+		{"jau-pilot", `"jau-pilot"`},
+		{"OR AND NOT", `"OR" OR "AND" OR "NOT"`},
+		{`"already quoted"`, `"already" OR "quoted"`},
+		{"fix auth bug", `"fix" OR "auth" OR "bug"`},
+		{`a"b`, `"ab"`},   // embedded quote stripped → no unbalanced FTS5 string
+		{`"`, ""},         // lone quote → empty term dropped
+	}
+
+	for _, tc := range cases {
+		got := sanitizeFTS(tc.input)
+		if got != tc.want {
+			t.Errorf("sanitizeFTS(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+// TestSearchEmptyQueryDoesNotPanic verifies that Search("", ...) does not
+// panic and returns either an empty list or a nil error.
+func TestSearchEmptyQueryDoesNotPanic(t *testing.T) {
+	s := newTestStore(t)
+
+	// Must not panic; error or empty slice are both acceptable.
+	results, err := s.Search("", SearchOptions{Limit: 10})
+	_ = results
+	_ = err
+	// If we reach here, no panic occurred.
+}
+
+// TestSearchSingleTermNoRegression ensures single-term search still works
+// after the sanitizeFTS refactor.
+func TestSearchSingleTermNoRegression(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("single-sess", "engram", "/tmp"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	_, err := s.AddObservation(AddObservationParams{
+		SessionID: "single-sess",
+		Type:      "note",
+		Title:     "tokenizer impl",
+		Content:   "Implemented a custom tokenizer for FTS5.",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+
+	results, err := s.Search("tokenizer", SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) < 1 {
+		t.Fatalf("expected >=1 result for single-term query, got 0")
+	}
+}
+
+// TestSearchHyphenatedTermMatchesExactly ensures hyphenated project names
+// (e.g. "jau-pilot") survive sanitizeFTS quoting and are found by Search.
+func TestSearchHyphenatedTermMatchesExactly(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("hyph-sess", "engram", "/tmp"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	_, err := s.AddObservation(AddObservationParams{
+		SessionID: "hyph-sess",
+		Type:      "note",
+		Title:     "jau-pilot config",
+		Content:   "Configuration notes for the jau-pilot project.",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+
+	results, err := s.Search("jau-pilot", SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) < 1 {
+		t.Fatalf("expected >=1 result for hyphenated term query, got 0")
 	}
 }
