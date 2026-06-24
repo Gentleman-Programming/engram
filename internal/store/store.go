@@ -101,6 +101,7 @@ type Observation struct {
 	LastSeenAt     *string `json:"last_seen_at,omitempty"`
 	ReviewAfter    *string `json:"review_after,omitempty"`
 	Pinned         bool    `json:"-"`
+	LocalOnly      bool    `json:"local_only,omitempty"`
 	CreatedAt      string  `json:"created_at"`
 	UpdatedAt      string  `json:"updated_at"`
 	DeletedAt      *string `json:"deleted_at,omitempty"`
@@ -191,6 +192,10 @@ type AddObservationParams struct {
 	Project   string `json:"project,omitempty"`
 	Scope     string `json:"scope,omitempty"`
 	TopicKey  string `json:"topic_key,omitempty"`
+	// LocalOnly prevents this observation from being enqueued for cloud sync.
+	// When an already-synced observation is updated with LocalOnly=true, a delete
+	// tombstone is enqueued so the cloud copy is removed.
+	LocalOnly bool `json:"local_only,omitempty"`
 }
 
 type UpdateObservationParams struct {
@@ -254,7 +259,7 @@ var decayReviewAfterMonths = map[string]int{
 }
 
 const observationSelectColumns = `id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
-	       scope, topic_key, revision_count, duplicate_count, last_seen_at, review_after, pinned, created_at, updated_at, deleted_at`
+	       scope, topic_key, revision_count, duplicate_count, last_seen_at, review_after, pinned, ifnull(local_only, 0) as local_only, created_at, updated_at, deleted_at`
 
 type SyncState struct {
 	TargetKey           string  `json:"target_key"`
@@ -893,6 +898,12 @@ func (s *Store) migrate() error {
 		if err := s.addColumnIfNotExists("observations", c.name, c.definition); err != nil {
 			return err
 		}
+	}
+
+	// ── local_only: per-memory cloud-sync opt-out ────────────────────────────
+	// Default 0 (sync enabled) — existing rows keep syncing; backward compatible.
+	if err := s.addColumnIfNotExists("observations", "local_only", "BOOLEAN NOT NULL DEFAULT 0"); err != nil {
+		return err
 	}
 
 	// ── Phase: memory-conflict-surfacing — B.2 ──────────────────────────────
@@ -2279,6 +2290,11 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 				topicKey, nullableString(p.Project), scope,
 			).Scan(&existingID)
 			if err == nil {
+				// Read existing to detect local_only flip before overwriting.
+				existingObs, err := s.getObservationTx(tx, existingID)
+				if err != nil {
+					return err
+				}
 				if _, err := s.execHook(tx,
 					`UPDATE observations
 					 SET type = ?,
@@ -2287,6 +2303,7 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 					     tool_name = ?,
 					     topic_key = ?,
 					     normalized_hash = ?,
+					     local_only = ?,
 					     revision_count = revision_count + 1,
 					     last_seen_at = datetime('now'),
 					     updated_at = datetime('now')
@@ -2297,6 +2314,7 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 					nullableString(p.ToolName),
 					nullableString(topicKey),
 					normHash,
+					p.LocalOnly,
 					existingID,
 				); err != nil {
 					return err
@@ -2306,6 +2324,19 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 					return err
 				}
 				observationID = existingID
+				// local_only flip false→true: tombstone the cloud copy.
+				if !existingObs.LocalOnly && p.LocalOnly {
+					return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpDelete, syncObservationPayload{
+						SyncID:    obs.SyncID,
+						SessionID: obs.SessionID,
+						Project:   obs.Project,
+						Deleted:   true,
+					})
+				}
+				// local_only: skip cloud sync.
+				if p.LocalOnly {
+					return nil
+				}
 				return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpUpsert, observationPayloadFromObservation(obs))
 			}
 			if err != sql.ErrNoRows {
@@ -2329,12 +2360,19 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 			normHash, nullableString(p.Project), scope, p.Type, title, window,
 		).Scan(&existingID)
 		if err == nil {
+			// Read existing to detect local_only flip before overwriting.
+			existingObs, err := s.getObservationTx(tx, existingID)
+			if err != nil {
+				return err
+			}
 			if _, err := s.execHook(tx,
 				`UPDATE observations
 				 SET duplicate_count = duplicate_count + 1,
+				     local_only = ?,
 				     last_seen_at = datetime('now'),
 				     updated_at = datetime('now')
 				 WHERE id = ?`,
+				p.LocalOnly,
 				existingID,
 			); err != nil {
 				return err
@@ -2344,6 +2382,19 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 				return err
 			}
 			observationID = existingID
+			// local_only flip false→true: tombstone the cloud copy.
+			if !existingObs.LocalOnly && p.LocalOnly {
+				return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpDelete, syncObservationPayload{
+					SyncID:    obs.SyncID,
+					SessionID: obs.SessionID,
+					Project:   obs.Project,
+					Deleted:   true,
+				})
+			}
+			// local_only: skip cloud sync.
+			if p.LocalOnly {
+				return nil
+			}
 			return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpUpsert, observationPayloadFromObservation(obs))
 		}
 		if err != sql.ErrNoRows {
@@ -2352,10 +2403,10 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 
 		syncID := newSyncID("obs")
 		res, err := s.execHook(tx,
-			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, datetime('now'), datetime('now'))`,
+			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, local_only, revision_count, duplicate_count, last_seen_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, datetime('now'), datetime('now'))`,
 			syncID, p.SessionID, p.Type, title, content,
-			nullableString(p.ToolName), nullableString(p.Project), scope, nullableString(topicKey), normHash,
+			nullableString(p.ToolName), nullableString(p.Project), scope, nullableString(topicKey), normHash, p.LocalOnly,
 		)
 		if err != nil {
 			return err
@@ -2381,6 +2432,10 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 		obs, err = s.getObservationTx(tx, observationID)
 		if err != nil {
 			return err
+		}
+		// local_only: skip cloud sync for this observation.
+		if p.LocalOnly {
+			return nil
 		}
 		return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpUpsert, observationPayloadFromObservation(obs))
 	})
@@ -6053,7 +6108,7 @@ func scanObservationRow(scanner observationScanner, o *Observation) error {
 	return scanner.Scan(
 		&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content,
 		&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt, &o.ReviewAfter,
-		&o.Pinned, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt,
+		&o.Pinned, &o.LocalOnly, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt,
 	)
 }
 

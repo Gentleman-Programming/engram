@@ -363,6 +363,9 @@ Examples:
 				mcp.WithBoolean("capture_prompt",
 					mcp.Description("Automatically capture the current user prompt when available (default: true). Set false for SDD artifacts or automated saves."),
 				),
+				mcp.WithBoolean("local_only",
+					mcp.Description("When true, save this observation locally only — never enqueue it for cloud sync. If the observation was previously synced, a delete tombstone is enqueued to remove it from the cloud."),
+				),
 			),
 			queuedWriteHandler(writeQueue, handleSave(s, cfg, activity)),
 		)
@@ -1195,6 +1198,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		projectChoiceReason, _ := req.GetArguments()["project_choice_reason"].(string)
 		recoveryToken, _ := req.GetArguments()["recovery_token"].(string)
 		capturePrompt := boolArg(req, "capture_prompt", true)
+		localOnly := boolArg(req, "local_only", false)
 		recoverySessionID := sessionID
 		if strings.TrimSpace(recoverySessionID) == "" {
 			recoverySessionID = defaultSessionID("")
@@ -1260,6 +1264,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 			Project:   project,
 			Scope:     scope,
 			TopicKey:  topicKey,
+			LocalOnly: localOnly,
 		})
 		if err != nil {
 			return mcp.NewToolResultError("Failed to save: " + err.Error()), nil
