@@ -13,6 +13,7 @@ import (
 	"github.com/Gentleman-Programming/engram/internal/cloud/cloudstore"
 	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
 	"github.com/Gentleman-Programming/engram/internal/project"
+	"github.com/Gentleman-Programming/engram/internal/scrub"
 )
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -199,6 +200,56 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Sensitive-data scrub (opt-in via ENGRAM_SCRUB). Runs BEFORE InsertMutationBatch
+	// — and therefore before FTS5 indexing — so nothing sensitive is ever persisted
+	// or made searchable. Findings carry NO matched value, so this is audit-safe.
+	if mode := scrub.ModeFromEnv(); mode != scrub.ModeOff {
+		var blocked []map[string]any
+		for i, entry := range req.Entries {
+			findings := scrub.Scan(entry.Payload)
+			if len(findings) == 0 {
+				continue
+			}
+			cats := make([]string, 0, len(findings))
+			entryBlocks := false
+			for _, f := range findings {
+				cats = append(cats, string(f.Category)+":"+f.Detector)
+				if f.Blocks(mode) {
+					entryBlocks = true
+				}
+			}
+			log.Printf("cloudserver: scrub %s flagged entry %d (entity=%s, blocks=%t): %s",
+				scrubModeName(mode), i, entry.Entity, entryBlocks, strings.Join(cats, ","))
+			if entryBlocks {
+				blocked = append(blocked, map[string]any{
+					"index":      i,
+					"entity":     entry.Entity,
+					"categories": cats,
+				})
+			}
+		}
+		if len(blocked) > 0 {
+			// Best-effort audit (no sensitive content recorded).
+			if auditor, ok := s.store.(interface {
+				InsertAuditEntry(ctx context.Context, entry cloudstore.AuditEntry) error
+			}); ok {
+				_ = auditor.InsertAuditEntry(r.Context(), cloudstore.AuditEntry{
+					Project:    primaryProject,
+					Action:     "scrub_blocked",
+					Outcome:    "rejected",
+					EntryCount: len(blocked),
+					ReasonCode: "scrub_blocked",
+				})
+			}
+			jsonResponse(w, http.StatusUnprocessableEntity, map[string]any{
+				"error":       "sensitive data detected; batch rejected",
+				"reason_code": "scrub_blocked",
+				"blocked":     blocked,
+			})
+			return
+		}
+	}
+
 	acceptedSeqs, err := ms.InsertMutationBatch(r.Context(), req.Entries)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("insert mutations: %v", err), http.StatusInternalServerError)
@@ -339,6 +390,18 @@ func validateRelationPayload(payload json.RawMessage) (string, bool) {
 // payload validation is a breaking change and must not be done here.
 func validateLegacyPayload(_ string, _ json.RawMessage) (string, bool) {
 	return "", true
+}
+
+// scrubModeName renders the scrub mode for log lines.
+func scrubModeName(m scrub.Mode) string {
+	switch m {
+	case scrub.ModeParanoid:
+		return "paranoid"
+	case scrub.ModeStrict:
+		return "strict"
+	default:
+		return "warn"
+	}
 }
 
 // validateMutationEntry dispatches to the correct validator for the entry's
