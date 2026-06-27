@@ -56,6 +56,12 @@ type MCPConfig struct {
 	// mem_save call (REQ-001). nil means "use the store default" (3).
 	// An explicit pointer value (including 0) is forwarded directly.
 	Limit *int
+
+	// AutoSave configures automatic memory persistence on lifecycle events.
+	// When enabled, Engram saves a consolidation observation at session end
+	// (and optionally after tool calls) without requiring explicit agent saves.
+	// See AutoSaveConfig for valid trigger names and deduplication behaviour.
+	AutoSave AutoSaveConfig
 }
 
 var suggestTopicKey = store.SuggestTopicKey
@@ -290,7 +296,7 @@ func registerTools(srv *server.MCPServer, s *store.Store, cfg MCPConfig, allowli
 					mcp.Description("Max results (default: 10, max: 20)"),
 				),
 			),
-			handleSearch(s, cfg, activity),
+			wrapWithPostToolUseCapture(handleSearch(s, cfg, activity), s, cfg),
 		)
 	}
 
@@ -553,7 +559,7 @@ Examples:
 				),
 				// JW7: limit param removed — schema advertised it but handleContext never read it.
 			),
-			handleContext(s, cfg, activity),
+			wrapWithPostToolUseCapture(handleContext(s, cfg, activity), s, cfg),
 		)
 	}
 
@@ -751,7 +757,7 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 					mcp.Description("Source identifier (e.g. 'subagent-stop', 'session-end')"),
 				),
 			),
-			queuedWriteHandler(writeQueue, handleCapturePassive(s, cfg, activity)),
+			wrapWithPostToolUseCapture(queuedWriteHandler(writeQueue, handleCapturePassive(s, cfg, activity)), s, cfg),
 		)
 	}
 
@@ -1965,6 +1971,23 @@ func handleSessionEnd(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 
 		if err := s.EndSession(id, summary); err != nil {
 			return mcp.NewToolResultError("Failed to end session: " + err.Error()), nil
+		}
+
+		// Auto-save hook: consolidate session observations when configured.
+		// Errors are logged and swallowed — auto-save failure must not block
+		// the session-end response.
+		if hasTrigger(cfg.AutoSave, autoSaveTriggerSessionEnd) {
+			// Prefer the session's registered project over CWD detection so the
+			// auto-save lands in the same project bucket as the session itself.
+			autoSaveProject := project
+			if sess, sessErr := s.GetSession(id); sessErr == nil && sess.Project != "" {
+				if np, _ := store.NormalizeProject(sess.Project); np != "" {
+					autoSaveProject = np
+				}
+			}
+			if autoErr := performSessionEndAutoSave(s, id, autoSaveProject); autoErr != nil {
+				fmt.Fprintf(os.Stderr, "engram: auto-save session-end error (non-fatal): %v\n", autoErr)
+			}
 		}
 
 		activity.ClearSession(defaultSessionID(project))
