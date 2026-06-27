@@ -114,6 +114,8 @@ func performSessionEndAutoSave(s *store.Store, sessionID, project string) error 
 
 	content := buildAutoSaveContent(sessionID, observations)
 	topicKey := autoSaveTopicKeyPrefix + sessionID
+	// len(observations) may be capped at autoSaveMaxObservations; the title
+	// reflects the fetched count, not necessarily the total session count.
 	title := fmt.Sprintf("Auto-save: session %s (%d observations)", sessionID, len(observations))
 
 	_, err = s.AddObservation(store.AddObservationParams{
