@@ -142,6 +142,67 @@ func TestPerformSessionEndAutoSaveNoObservations(t *testing.T) {
 	}
 }
 
+func TestPerformSessionEndAutoSaveAllFilteredOutNoSave(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("all-filtered-sess", "filtered-proj", "/tmp"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	autoSource := autoSaveSource
+
+	// Add only auto-save observations and personal-scope observations — both are
+	// filtered out by buildAutoSaveContent, so the no-op check should catch them.
+	_, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "all-filtered-sess",
+		Type:      "session_summary",
+		Title:     "Previous auto-save",
+		Content:   "An existing auto-save that should be skipped.",
+		Project:   "filtered-proj",
+		Scope:     "project",
+		ToolName:  &autoSource,
+	})
+	if err != nil {
+		t.Fatalf("add auto-save observation: %v", err)
+	}
+	_, err = s.AddObservation(store.AddObservationParams{
+		SessionID: "all-filtered-sess",
+		Type:      "note",
+		Title:     "Private note",
+		Content:   "Personal-scope content that must never be republished.",
+		Project:   "filtered-proj",
+		Scope:     "personal",
+	})
+	if err != nil {
+		t.Fatalf("add personal-scope observation: %v", err)
+	}
+
+	// performSessionEndAutoSave must return nil without creating a new observation.
+	if err := performSessionEndAutoSave(s, "all-filtered-sess", "filtered-proj"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	obs, err := s.AllObservations("filtered-proj", "project", 100)
+	if err != nil {
+		t.Fatalf("list observations: %v", err)
+	}
+	// Only the 1 original auto-save (project scope) — no new auto-save created.
+	for _, o := range obs {
+		if o.ToolName == nil || *o.ToolName != autoSaveSource {
+			t.Fatalf("unexpected non-auto observation created when all input was filtered: %+v", o)
+		}
+	}
+	// Count of new auto-saves should not have grown.
+	newAutoSaves := 0
+	for _, o := range obs {
+		if o.ToolName != nil && *o.ToolName == autoSaveSource && o.Title != "Previous auto-save" {
+			newAutoSaves++
+		}
+	}
+	if newAutoSaves != 0 {
+		t.Fatalf("expected no new auto-save observation when all inputs are filtered, got %d", newAutoSaves)
+	}
+}
+
 func TestPerformSessionEndAutoSaveCreatesConsolidationObservation(t *testing.T) {
 	s := newMCPTestStore(t)
 	if err := s.CreateSession("sess-abc", "proj-x", "/tmp"); err != nil {

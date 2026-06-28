@@ -108,15 +108,27 @@ func performSessionEndAutoSave(s *store.Store, sessionID, project string) error 
 	if err != nil {
 		return fmt.Errorf("auto-save session-end: list observations: %w", err)
 	}
-	if len(observations) == 0 {
+
+	// Count only the subset that buildAutoSaveContent will actually render
+	// (skipping prior auto-saves and personal-scope entries) so the no-op check
+	// and title reflect the saved content, not the raw fetch count.
+	n := 0
+	for _, obs := range observations {
+		if obs.ToolName != nil && *obs.ToolName == autoSaveSource {
+			continue
+		}
+		if obs.Scope == "personal" {
+			continue
+		}
+		n++
+	}
+	if n == 0 {
 		return nil
 	}
 
 	content := buildAutoSaveContent(sessionID, observations)
 	topicKey := autoSaveTopicKeyPrefix + sessionID
-	// len(observations) may be capped at autoSaveMaxObservations; the title
-	// reflects the fetched count, not necessarily the total session count.
-	title := fmt.Sprintf("Auto-save: session %s (%d observations)", sessionID, len(observations))
+	title := fmt.Sprintf("Auto-save: session %s (%d observations)", sessionID, n)
 
 	_, err = s.AddObservation(store.AddObservationParams{
 		SessionID: sessionID,
