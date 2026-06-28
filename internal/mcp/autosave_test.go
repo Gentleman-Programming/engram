@@ -104,6 +104,22 @@ func TestBuildAutoSaveContentSkipsAutoSavedObservations(t *testing.T) {
 	}
 }
 
+func TestBuildAutoSaveContentSkipsPersonalScopeObservations(t *testing.T) {
+	observations := []store.Observation{
+		{Type: "decision", Title: "Public decision", Scope: "project"},
+		{Type: "note", Title: "Private note", Scope: "personal"},
+	}
+
+	content := buildAutoSaveContent("sess-scope", observations)
+
+	if strings.Contains(content, "Private note") {
+		t.Fatalf("content must NOT include personal-scope titles, got: %q", content)
+	}
+	if !strings.Contains(content, "Public decision") {
+		t.Fatalf("content should include project-scope titles, got: %q", content)
+	}
+}
+
 // ─── performSessionEndAutoSave ────────────────────────────────────────────────
 
 func TestPerformSessionEndAutoSaveNoObservations(t *testing.T) {
@@ -305,6 +321,123 @@ func TestHandleSessionEndTriggersAutoSaveWhenEnabled(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected an auto-save observation after session-end, got observations: %v", obs)
+	}
+}
+
+func TestHandleSessionEndAutoSaveUsesSessionProject(t *testing.T) {
+	s := newMCPTestStore(t)
+
+	const sessID = "sess-proj-pref"
+	const sessProj = "explicit-session-project"
+
+	if err := s.CreateSession(sessID, sessProj, "/tmp"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	_, err := s.AddObservation(store.AddObservationParams{
+		SessionID: sessID,
+		Type:      "decision",
+		Title:     "Prefer session project for auto-save",
+		Content:   "The session's registered project should take precedence over CWD detection.",
+		Project:   sessProj,
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	cfg := MCPConfig{
+		AutoSave: AutoSaveConfig{
+			Enabled:  true,
+			Triggers: []string{autoSaveTriggerSessionEnd},
+		},
+	}
+	activity := NewSessionActivity(10 * time.Minute)
+	h := handleSessionEnd(s, cfg, activity)
+
+	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"id":      sessID,
+		"summary": "session ended",
+	}}}
+
+	res, err := h(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %s", callResultText(t, res))
+	}
+
+	// Auto-save must land in the session's own project, not whatever CWD detection returned.
+	obs, err := s.AllObservations(sessProj, "project", 100)
+	if err != nil {
+		t.Fatalf("list observations for %q: %v", sessProj, err)
+	}
+	var autoObs *store.Observation
+	for i := range obs {
+		if obs[i].ToolName != nil && *obs[i].ToolName == autoSaveSource {
+			autoObs = &obs[i]
+			break
+		}
+	}
+	if autoObs == nil {
+		t.Fatalf("expected auto-save observation in session project %q", sessProj)
+	}
+	if autoObs.Project == nil || *autoObs.Project != sessProj {
+		t.Fatalf("auto-save observation Project: want %q, got %v", sessProj, autoObs.Project)
+	}
+}
+
+func TestHandleSessionEndAutoSaveErrorIsSwallowed(t *testing.T) {
+	s := newMCPTestStore(t)
+
+	const sessID = "sess-autosave-fail"
+	const sessProj = "fail-proj"
+
+	if err := s.CreateSession(sessID, sessProj, "/tmp"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	_, err := s.AddObservation(store.AddObservationParams{
+		SessionID: sessID,
+		Type:      "decision",
+		Title:     "Some decision",
+		Content:   "Content of the decision.",
+		Project:   sessProj,
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	// Sabotage the observations table so performSessionEndAutoSave returns an error.
+	// EndSession only touches the sessions and sync_mutations tables, so it still succeeds.
+	if _, dbErr := s.DB().Exec("DROP TABLE observations"); dbErr != nil {
+		t.Fatalf("drop observations table: %v", dbErr)
+	}
+
+	cfg := MCPConfig{
+		AutoSave: AutoSaveConfig{
+			Enabled:  true,
+			Triggers: []string{autoSaveTriggerSessionEnd},
+		},
+	}
+	activity := NewSessionActivity(10 * time.Minute)
+	h := handleSessionEnd(s, cfg, activity)
+
+	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"id":      sessID,
+		"summary": "session ended",
+	}}}
+
+	res, err := h(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handler must not propagate a Go error when auto-save fails: %v", err)
+	}
+	if res == nil || res.IsError {
+		got := "<nil result>"
+		if res != nil {
+			got = callResultText(t, res)
+		}
+		t.Fatalf("handler must return a success MCP result even when auto-save fails; got IsError=true: %s", got)
 	}
 }
 

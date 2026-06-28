@@ -152,6 +152,11 @@ func buildAutoSaveContent(sessionID string, observations []store.Observation) st
 		if obs.ToolName != nil && *obs.ToolName == autoSaveSource {
 			continue
 		}
+		// Skip personal-scope observations so they are never republished into
+		// project scope via the session-end consolidation summary.
+		if obs.Scope == "personal" {
+			continue
+		}
 		if !seen[obs.Type] {
 			seen[obs.Type] = true
 			types = append(types, obs.Type)
