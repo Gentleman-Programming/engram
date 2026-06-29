@@ -43,12 +43,13 @@ type piImportEnvelope struct {
 }
 
 // piExportEnvelope is the Pi-compatible container returned by `engram pi export`.
+// Uses the "memories" field so the output can be directly re-imported via `engram pi import`.
 type piExportEnvelope struct {
-	Source      string             `json:"source"`
-	ExportedAt  string             `json:"exported_at"`
-	Project     string             `json:"project,omitempty"`
-	Observations []store.Observation `json:"observations"`
-	Count       int                `json:"count"`
+	Source     string            `json:"source"`
+	ExportedAt string            `json:"exported_at"`
+	Project    string            `json:"project,omitempty"`
+	Memories   []piMemoryRecord  `json:"memories"`
+	Count      int               `json:"count"`
 }
 
 // cmdPi is the entry point for the `engram pi` subcommand tree.
@@ -110,10 +111,13 @@ func cmdPiImport(cfg store.Config) {
 		case "--dry-run":
 			dryRun = true
 		case "--source":
-			if i+1 < len(os.Args) {
-				source = os.Args[i+1]
-				i++
+			if i+1 >= len(os.Args) {
+				fmt.Fprintln(os.Stderr, "--source requires a value")
+				exitFunc(1)
+				return
 			}
+			source = os.Args[i+1]
+			i++
 		case "--no-dedup":
 			noDedup = true
 		case "--redact-secrets":
@@ -144,6 +148,12 @@ func cmdPiImport(cfg store.Config) {
 	redactor := newPiRedactor(redactSecrets, redactKeys, redactLogs)
 	for i := range records {
 		records[i] = redactor.apply(records[i])
+	}
+
+	if dryRun {
+		fmt.Printf("pi import: would import %d, skipped(dedup) 0, failed 0 (source=%q, file=%s)\n",
+			len(records), source, inFile)
+		return
 	}
 
 	s, err := storeNew(cfg)
@@ -321,15 +331,21 @@ func cmdPiExport(cfg store.Config) {
 	for i := 3; i < len(os.Args); i++ {
 		switch os.Args[i] {
 		case "--format":
-			if i+1 < len(os.Args) {
-				format = os.Args[i+1]
-				i++
+			if i+1 >= len(os.Args) {
+				fmt.Fprintln(os.Stderr, "--format requires a value")
+				exitFunc(1)
+				return
 			}
+			format = os.Args[i+1]
+			i++
 		case "--project":
-			if i+1 < len(os.Args) {
-				project = os.Args[i+1]
-				i++
+			if i+1 >= len(os.Args) {
+				fmt.Fprintln(os.Stderr, "--project requires a value")
+				exitFunc(1)
+				return
 			}
+			project = os.Args[i+1]
+			i++
 		default:
 			fmt.Fprintf(os.Stderr, "unknown flag: %s\n", os.Args[i])
 			exitFunc(1)
@@ -360,12 +376,26 @@ func cmdPiExport(cfg store.Config) {
 		return
 	}
 
+	memories := make([]piMemoryRecord, 0, len(data.Observations))
+	for _, o := range data.Observations {
+		rec := piMemoryRecord{
+			Title:    o.Title,
+			Content:  o.Content,
+			Type:     o.Type,
+			Scope:    o.Scope,
+			TopicKey: derefString(o.TopicKey),
+		}
+		if o.Project != nil {
+			rec.Project = *o.Project
+		}
+		memories = append(memories, rec)
+	}
 	envelope := piExportEnvelope{
-		Source:       "engram",
-		ExportedAt:   data.ExportedAt,
-		Project:      project,
-		Observations: data.Observations,
-		Count:        len(data.Observations),
+		Source:     "engram",
+		ExportedAt: data.ExportedAt,
+		Project:    project,
+		Memories:   memories,
+		Count:      len(memories),
 	}
 
 	out, err := jsonMarshalIndent(envelope, "", "  ")
@@ -394,27 +424,43 @@ func cmdPiSearch(cfg store.Config) {
 	for i := 3; i < len(os.Args); i++ {
 		switch os.Args[i] {
 		case "--type":
-			if i+1 < len(os.Args) {
-				opts.Type = os.Args[i+1]
-				i++
+			if i+1 >= len(os.Args) {
+				fmt.Fprintln(os.Stderr, "--type requires a value")
+				exitFunc(1)
+				return
 			}
+			opts.Type = os.Args[i+1]
+			i++
 		case "--project":
-			if i+1 < len(os.Args) {
-				opts.Project = os.Args[i+1]
-				i++
+			if i+1 >= len(os.Args) {
+				fmt.Fprintln(os.Stderr, "--project requires a value")
+				exitFunc(1)
+				return
 			}
+			opts.Project = os.Args[i+1]
+			i++
 		case "--scope":
-			if i+1 < len(os.Args) {
-				opts.Scope = os.Args[i+1]
-				i++
+			if i+1 >= len(os.Args) {
+				fmt.Fprintln(os.Stderr, "--scope requires a value")
+				exitFunc(1)
+				return
 			}
+			opts.Scope = os.Args[i+1]
+			i++
 		case "--limit":
-			if i+1 < len(os.Args) {
-				if n, err := atoi(os.Args[i+1]); err == nil {
-					opts.Limit = n
-				}
-				i++
+			if i+1 >= len(os.Args) {
+				fmt.Fprintln(os.Stderr, "--limit requires a value")
+				exitFunc(1)
+				return
 			}
+			n, err := atoi(os.Args[i+1])
+			if err != nil || n <= 0 {
+				fmt.Fprintf(os.Stderr, "--limit must be a positive integer, got %q\n", os.Args[i+1])
+				exitFunc(1)
+				return
+			}
+			opts.Limit = n
+			i++
 		default:
 			queryParts = append(queryParts, os.Args[i])
 		}
@@ -575,7 +621,8 @@ func redactSecretPatterns(s string) string {
 var reKeyValueSecret = regexp.MustCompile(
 	`(?im)(` +
 		`(?:api[_-]?key|apikey|secret|secret[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|bearer|password|passwd|client[_-]?secret|private[_-]?key|aws[_-]?secret[_-]?access[_-]?key|token)\s*[:=]\s*` +
-		`|(?:authorization\s*[:=]\s*)?Bearer\s+` +
+		`|authorization\s*[:=]\s*[A-Za-z]+\s+` +
+		`|Bearer\s+` +
 		`)(["']?)([A-Za-z0-9_\-\.=]+)(["']?)`,
 )
 

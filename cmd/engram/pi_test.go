@@ -157,7 +157,7 @@ func TestCmdPiImportRoundTrip(t *testing.T) {
 	}
 }
 
-// TestCmdPiDryRunInsertsNothing confirms --dry-run never persists.
+// TestCmdPiDryRunInsertsNothing confirms --dry-run never persists observations or session rows.
 func TestCmdPiDryRunInsertsNothing(t *testing.T) {
 	cfg := testConfig(t)
 	inFile := filepath.Join(t.TempDir(), "pi-in.json")
@@ -172,6 +172,7 @@ func TestCmdPiDryRunInsertsNothing(t *testing.T) {
 		t.Fatalf("expected dry-run message, got: %s", stdout)
 	}
 
+	// Dry-run must not open the store at all: no observations and no session rows.
 	s, err := storeNew(cfg)
 	if err != nil {
 		t.Fatalf("storeNew: %v", err)
@@ -182,7 +183,17 @@ func TestCmdPiDryRunInsertsNothing(t *testing.T) {
 		t.Fatalf("search: %v", err)
 	}
 	if len(results) != 0 {
-		t.Fatalf("dry-run must not persist, found %d", len(results))
+		t.Fatalf("dry-run must not persist observations, found %d", len(results))
+	}
+	// Session must not exist either.
+	sessions, err := s.AllSessions("", 100)
+	if err != nil {
+		t.Fatalf("AllSessions: %v", err)
+	}
+	for _, sess := range sessions {
+		if strings.Contains(sess.ID, "pi-import") {
+			t.Fatalf("dry-run must not create session, found %q", sess.ID)
+		}
 	}
 }
 
@@ -206,7 +217,7 @@ func TestCmdPiExportAllAndProject(t *testing.T) {
 	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &env); err != nil {
 		t.Fatalf("export is not valid JSON: %v\n%s", err, stdout)
 	}
-	if env.Source != "engram" || env.Count != 2 || len(env.Observations) != 2 {
+	if env.Source != "engram" || env.Count != 2 || len(env.Memories) != 2 {
 		t.Fatalf("bad envelope: %+v", env)
 	}
 
@@ -220,8 +231,8 @@ func TestCmdPiExportAllAndProject(t *testing.T) {
 	if env2.Count != 1 || env2.Project != "proj-a" {
 		t.Fatalf("expected single proj-a observation, got %+v", env2)
 	}
-	if len(env2.Observations) != 1 || env2.Observations[0].Title != "A-title" {
-		t.Fatalf("unexpected project-scoped export: %+v", env2.Observations)
+	if len(env2.Memories) != 1 || env2.Memories[0].Title != "A-title" {
+		t.Fatalf("unexpected project-scoped export: %+v", env2.Memories)
 	}
 }
 
