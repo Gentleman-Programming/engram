@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,7 +14,6 @@ import (
 
 func cmdInit() {
 	var projectName string
-
 	if len(os.Args) > 2 {
 		projectName = os.Args[2]
 	}
@@ -32,8 +32,19 @@ func cmdInit() {
 		return
 	}
 
+	// We use DetectProjectFull to provide contextual help to the user
+	// when they didn't provide a project name explicitly.
 	if projectName == "" {
-		fmt.Printf("No git repository detected (or multiple repositories found).\n")
+		res := project.DetectProjectFull(cwd)
+		
+		if errors.Is(res.Error, project.ErrAmbiguousProject) {
+			fmt.Printf("Ambiguous workspace: Multiple git repositories detected in this directory.\n")
+		} else if res.Source == project.SourceDirBasename {
+			fmt.Printf("No git repository detected.\n")
+		} else {
+			fmt.Printf("Project detected as '%s' (source: %s).\n", res.Project, res.Source)
+		}
+
 		fmt.Printf("What should we name this project? ")
 		
 		reader := bufio.NewReader(os.Stdin)
@@ -50,14 +61,8 @@ func cmdInit() {
 		}
 	}
 
-	// Make sure the project name is valid by normalizing it
-	normalizedName := project.DetectProjectFull(cwd).Project
-	if normalizedName == "" {
-	    // If ambiguous, DetectProjectFull returns empty string for Project, so we fallback
-		normalizedName = strings.TrimSpace(strings.ToLower(projectName))
-	} else if projectName != "" {
-	    normalizedName = strings.TrimSpace(strings.ToLower(projectName))
-	}
+	// Make sure the project name is normalized (lowercase, trimmed)
+	normalizedName := strings.TrimSpace(strings.ToLower(projectName))
 
 	if err := os.MkdirAll(configDir, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to create .engram directory: %v\n", err)
