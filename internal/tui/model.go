@@ -34,6 +34,7 @@ const (
 	ScreenSessions
 	ScreenSessionDetail
 	ScreenSetup
+	ScreenCloudSettings
 )
 
 // ─── Custom Messages ─────────────────────────────────────────────────────────

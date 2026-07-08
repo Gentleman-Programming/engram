@@ -170,6 +170,8 @@ func (m Model) handleKeyPress(key string) (tea.Model, tea.Cmd) {
 		return m.handleSessionDetailKeys(key)
 	case ScreenSetup:
 		return m.handleSetupKeys(key)
+	case ScreenCloudSettings:
+		return m.handleCloudSettingsKeys(key)
 	}
 	return m, nil
 }
@@ -181,7 +183,15 @@ var dashboardMenuItems = []string{
 	"Recent observations",
 	"Browse sessions",
 	"Setup agent plugin",
+	"Cloud sync settings",
 	"Quit",
+}
+
+var cloudSettingsMenuItems = []string{
+	"Configure server",
+	"View status",
+	"Enroll projects",
+	"Back",
 }
 
 func (m Model) handleDashboardKeys(key string) (tea.Model, tea.Cmd) {
@@ -241,7 +251,12 @@ func (m Model) handleDashboardSelection() (tea.Model, tea.Cmd) {
 		m.SetupInstalling = false
 		m.SetupInstallingName = ""
 		return m, nil
-	case 4: // Quit
+	case 4: // Cloud sync settings
+		m.PrevScreen = ScreenDashboard
+		m.Screen = ScreenCloudSettings
+		m.Cursor = 0
+		return m, nil
+	case 5: // Quit
 		return m, tea.Quit
 	}
 	return m, nil
@@ -583,6 +598,32 @@ func (m Model) handleSetupKeys(key string) (tea.Model, tea.Cmd) {
 			m.SetupInstalling = true
 			m.SetupInstallingName = agent.Name
 			return m, tea.Batch(m.SetupSpinner.Tick, installAgent(agent.Name))
+		}
+	case "esc", "q":
+		m.Screen = ScreenDashboard
+		m.Cursor = 0
+		return m, loadStats(m.store)
+	}
+	return m, nil
+}
+
+// ─── Cloud Settings ──────────────────────────────────────────────────────────
+
+func (m Model) handleCloudSettingsKeys(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "up", "k":
+		if m.Cursor > 0 {
+			m.Cursor--
+		}
+	case "down", "j":
+		if m.Cursor < len(cloudSettingsMenuItems)-1 {
+			m.Cursor++
+		}
+	case "enter", " ":
+		if m.Cursor == len(cloudSettingsMenuItems)-1 { // Back
+			m.Screen = ScreenDashboard
+			m.Cursor = 0
+			return m, loadStats(m.store)
 		}
 	case "esc", "q":
 		m.Screen = ScreenDashboard
