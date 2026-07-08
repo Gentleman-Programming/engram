@@ -214,6 +214,9 @@ func TestLoadCloudConfigCommand(t *testing.T) {
 }
 
 func TestLoadCloudStatusCommand(t *testing.T) {
+	// This test asserts TokenSourceFile, so ensure the env var cannot override it.
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "")
+
 	fx := newTestFixture(t)
 	if err := os.WriteFile(filepath.Join(fx.store.DataDir(), "cloud.json"), []byte(`{"server_url":"https://cloud.example.com","token":"file-token"}`), 0o644); err != nil {
 		t.Fatalf("write cloud.json: %v", err)
@@ -252,6 +255,30 @@ func TestLoadCloudStatusCommand(t *testing.T) {
 	}
 	if loaded.lastSync == "" {
 		t.Fatal("lastSync should not be empty")
+	}
+}
+
+func TestLoadCloudStatusCommandIgnoresShellEnvVar(t *testing.T) {
+	// Simulate the shell setting ENGRAM_CLOUD_TOKEN; t.Setenv must scope the unset to this test.
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "shell-token")
+	// Intentionally override with empty string so the file token is used.
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "")
+
+	fx := newTestFixture(t)
+	if err := os.WriteFile(filepath.Join(fx.store.DataDir(), "cloud.json"), []byte(`{"server_url":"https://cloud.example.com","token":"file-token"}`), 0o644); err != nil {
+		t.Fatalf("write cloud.json: %v", err)
+	}
+
+	msg := loadCloudStatusCmd(fx.store)()
+	loaded, ok := msg.(cloudStatusLoadedMsg)
+	if !ok {
+		t.Fatalf("message type = %T", msg)
+	}
+	if loaded.err != nil {
+		t.Fatalf("unexpected error: %v", loaded.err)
+	}
+	if loaded.tokenSource != TokenSourceFile {
+		t.Fatalf("tokenSource = %q, want %q", loaded.tokenSource, TokenSourceFile)
 	}
 }
 
