@@ -3,10 +3,14 @@ package tui
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 const (
@@ -82,6 +86,47 @@ func effectiveCloudToken(dataDir string) string {
 		return ""
 	}
 	return strings.TrimSpace(cc.Token)
+}
+
+// pingCloudTransport can be overridden in tests to avoid real network calls.
+var pingCloudTransport http.RoundTripper = http.DefaultTransport
+
+func pingCloudServer(serverURL, token string) tea.Cmd {
+	return func() tea.Msg {
+		status, err := pingCloudServerStatus(serverURL, token)
+		return cloudPingMsg{status: status, err: err}
+	}
+}
+
+func pingCloudServerStatus(serverURL, token string) (string, error) {
+	validatedURL, err := validateCloudServerURL(serverURL)
+	if err != nil {
+		return "unreachable", err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, validatedURL+cloudHealthPath, nil)
+	if err != nil {
+		return "unreachable", err
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	client := &http.Client{Timeout: 3 * time.Second, Transport: pingCloudTransport}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "unreachable", err
+	}
+	defer resp.Body.Close()
+
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized:
+		return "unauthorized", nil
+	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		return "reachable", nil
+	default:
+		return "unreachable", fmt.Errorf("unexpected status %d", resp.StatusCode)
+	}
 }
 
 func validateCloudServerURL(raw string) (string, error) {
