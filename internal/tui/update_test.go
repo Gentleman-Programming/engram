@@ -1,7 +1,11 @@
 package tui
 
 import (
+	"bytes"
 	"errors"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/internal/setup"
@@ -388,6 +392,167 @@ func TestCloudConfigTabCyclesFocus(t *testing.T) {
 	updated = updatedModel.(Model)
 	if updated.CloudConfigFocus != cloudConfigFocusCancel {
 		t.Fatalf("shift+tab should wrap backwards, got %d", updated.CloudConfigFocus)
+	}
+}
+
+func TestCloudConfigSaveValidURLPersists(t *testing.T) {
+	fx := newTestFixture(t)
+	server := httptest.NewServer(httpHandlerWithStatus(200))
+	defer server.Close()
+
+	m := New(fx.store, "")
+	m.Screen = ScreenCloudConfig
+	m.CloudConfigInput.SetValue(server.URL)
+	m.CloudConfigFocus = cloudConfigFocusSave
+
+	updatedModel, cmd := m.handleCloudConfigKeys("enter")
+	updated := updatedModel.(Model)
+	if !updated.CloudConfigSaving {
+		t.Fatal("save should set saving state")
+	}
+
+	ping := cmd()
+	updatedModel, _ = updated.Update(ping)
+	updated = updatedModel.(Model)
+	if updated.Screen != ScreenCloudSettings {
+		t.Fatalf("reachable save should return to settings, got %v", updated.Screen)
+	}
+
+	b, err := os.ReadFile(filepath.Join(fx.store.DataDir(), "cloud.json"))
+	if err != nil {
+		t.Fatalf("read cloud.json: %v", err)
+	}
+	if !bytes.Contains(b, []byte(server.URL)) {
+		t.Fatalf("cloud.json should contain saved URL, got %s", string(b))
+	}
+}
+
+func TestCloudConfigSaveInvalidURLNoPersist(t *testing.T) {
+	fx := newTestFixture(t)
+	m := New(fx.store, "")
+	m.Screen = ScreenCloudConfig
+	m.CloudConfigInput.SetValue("not a url")
+	m.CloudConfigFocus = cloudConfigFocusSave
+
+	updatedModel, cmd := m.handleCloudConfigKeys("enter")
+	updated := updatedModel.(Model)
+	if updated.CloudConfigError == "" {
+		t.Fatal("malformed URL should set inline error")
+	}
+	if cmd != nil {
+		t.Fatal("malformed URL should not fire ping")
+	}
+
+	if _, err := os.Stat(filepath.Join(fx.store.DataDir(), "cloud.json")); err == nil {
+		t.Fatal("cloud.json should not be created for invalid URL")
+	}
+}
+
+func TestCloudConfigSaveUnreachableNoPersist(t *testing.T) {
+	fx := newTestFixture(t)
+	m := New(fx.store, "")
+	m.Screen = ScreenCloudConfig
+	m.CloudConfigInput.SetValue("https://localhost:1")
+	m.CloudConfigFocus = cloudConfigFocusSave
+
+	orig := pingCloudTransport
+	pingCloudTransport = &fakePingTransport{err: errors.New("connection refused")}
+	defer func() { pingCloudTransport = orig }()
+
+	updatedModel, cmd := m.handleCloudConfigKeys("enter")
+	updated := updatedModel.(Model)
+	if !updated.CloudConfigSaving {
+		t.Fatal("save should set saving state")
+	}
+
+	updatedModel, _ = updated.Update(cmd())
+	updated = updatedModel.(Model)
+	if updated.Screen != ScreenCloudConfig {
+		t.Fatalf("unreachable should stay on form, got %v", updated.Screen)
+	}
+	if updated.CloudConfigError == "" {
+		t.Fatal("unreachable should set error")
+	}
+
+	if _, err := os.Stat(filepath.Join(fx.store.DataDir(), "cloud.json")); err == nil {
+		t.Fatal("cloud.json should not be created for unreachable server")
+	}
+}
+
+func TestCloudConfigSaveUnauthorizedPersists(t *testing.T) {
+	fx := newTestFixture(t)
+	server := httptest.NewServer(httpHandlerWithStatus(401))
+	defer server.Close()
+
+	m := New(fx.store, "")
+	m.Screen = ScreenCloudConfig
+	m.CloudConfigInput.SetValue(server.URL)
+	m.CloudConfigFocus = cloudConfigFocusSave
+
+	updatedModel, cmd := m.handleCloudConfigKeys("enter")
+	updated := updatedModel.(Model)
+	ping := cmd()
+	updatedModel, _ = updated.Update(ping)
+	updated = updatedModel.(Model)
+	if updated.Screen != ScreenCloudSettings {
+		t.Fatalf("unauthorized save should still return to settings, got %v", updated.Screen)
+	}
+
+	b, err := os.ReadFile(filepath.Join(fx.store.DataDir(), "cloud.json"))
+	if err != nil {
+		t.Fatalf("read cloud.json: %v", err)
+	}
+	if !bytes.Contains(b, []byte(server.URL)) {
+		t.Fatalf("cloud.json should contain saved URL after 401, got %s", string(b))
+	}
+}
+
+func TestCloudConfigSavePreservesToken(t *testing.T) {
+	fx := newTestFixture(t)
+	server := httptest.NewServer(httpHandlerWithStatus(200))
+	defer server.Close()
+
+	if err := os.WriteFile(filepath.Join(fx.store.DataDir(), "cloud.json"), []byte(`{"server_url":"https://old.example.com","token":"existing-token"}`), 0o644); err != nil {
+		t.Fatalf("seed cloud.json: %v", err)
+	}
+
+	m := New(fx.store, "")
+	m.Screen = ScreenCloudConfig
+	m.CloudConfigInput.SetValue(server.URL)
+	m.CloudConfigFocus = cloudConfigFocusSave
+
+	updatedModel, cmd := m.handleCloudConfigKeys("enter")
+	updated := updatedModel.(Model)
+	updatedModel, _ = updated.Update(cmd())
+	updated = updatedModel.(Model)
+	if updated.Screen != ScreenCloudSettings {
+		t.Fatalf("save should return to settings, got %v", updated.Screen)
+	}
+
+	b, err := os.ReadFile(filepath.Join(fx.store.DataDir(), "cloud.json"))
+	if err != nil {
+		t.Fatalf("read cloud.json: %v", err)
+	}
+	if !bytes.Contains(b, []byte(`"token": "existing-token"`)) {
+		t.Fatalf("existing token must be preserved, got %s", string(b))
+	}
+}
+
+func TestCloudConfigSaveShowsSpinnerDuringPing(t *testing.T) {
+	fx := newTestFixture(t)
+	m := New(fx.store, "")
+	m.Screen = ScreenCloudConfig
+	m.CloudConfigInput.SetValue("https://cloud.example.com")
+	m.CloudConfigFocus = cloudConfigFocusSave
+
+	orig := pingCloudTransport
+	pingCloudTransport = &fakePingTransport{err: errors.New("connection refused")}
+	defer func() { pingCloudTransport = orig }()
+
+	updatedModel, _ := m.handleCloudConfigKeys("enter")
+	updated := updatedModel.(Model)
+	if !updated.CloudConfigSaving {
+		t.Fatal("CloudConfigSaving should be true during async ping")
 	}
 }
 

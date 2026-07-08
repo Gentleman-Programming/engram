@@ -134,6 +134,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.CloudConfigInput.Focus()
 		return m, nil
 
+	case cloudPingMsg:
+		m.CloudConfigSaving = false
+		m.CloudConfigPingStatus = msg.status
+		if msg.err != nil {
+			m.CloudConfigError = msg.err.Error()
+			return m, nil
+		}
+		if m.CloudConfigTest {
+			// Test-only ping: just show the status.
+			return m, nil
+		}
+		if msg.status == "reachable" || msg.status == "unauthorized" {
+			validatedURL, err := validateCloudServerURL(m.CloudConfigInput.Value())
+			if err != nil {
+				m.CloudConfigError = err.Error()
+				return m, nil
+			}
+			if err := saveCloudConfig(m.store.DataDir(), validatedURL); err != nil {
+				m.CloudConfigError = err.Error()
+				return m, nil
+			}
+			m.Screen = ScreenCloudSettings
+			m.Cursor = 0
+			m.CloudConfigFocus = cloudConfigFocusInput
+			return m, nil
+		}
+		m.CloudConfigError = "server is unreachable"
+		return m, nil
+
 	case clipboardCopiedMsg:
 		// Emit the OSC 52 sequence to stdout so the terminal copies the content,
 		// set the feedback label, and schedule its removal after 2 seconds.
@@ -752,6 +781,10 @@ func (m Model) activateCloudConfigFocus() (tea.Model, tea.Cmd) {
 		m.CloudConfigInput.Blur()
 		m.CloudConfigFocus = cloudConfigFocusSave
 		return m, nil
+	case cloudConfigFocusTest:
+		return m.runCloudConfigPing(true)
+	case cloudConfigFocusSave:
+		return m.runCloudConfigPing(false)
 	case cloudConfigFocusCancel:
 		m.CloudConfigInput.Blur()
 		m.Screen = ScreenCloudSettings
@@ -759,6 +792,19 @@ func (m Model) activateCloudConfigFocus() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, nil
+}
+
+func (m Model) runCloudConfigPing(testOnly bool) (tea.Model, tea.Cmd) {
+	m.CloudConfigError = ""
+	m.CloudConfigPingStatus = ""
+	validatedURL, err := validateCloudServerURL(m.CloudConfigInput.Value())
+	if err != nil {
+		m.CloudConfigError = err.Error()
+		return m, nil
+	}
+	m.CloudConfigTest = testOnly
+	m.CloudConfigSaving = !testOnly
+	return m, pingCloudServer(validatedURL, effectiveCloudToken(m.store.DataDir()))
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
