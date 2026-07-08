@@ -235,6 +235,155 @@ func TestViewCloudStatusHealthAndTokenBranches(t *testing.T) {
 	}
 }
 
+func TestViewCloudStatusParityFieldsConfigured(t *testing.T) {
+	m := New(nil, "")
+	m.Screen = ScreenCloudStatus
+	m.CloudStatusServerURL = "https://cloud.example.com"
+	m.CloudStatusTarget = "cloud"
+	m.CloudStatusAuthStatus = "ready (token provided via runtime cloud config)"
+	m.CloudStatusSyncReadiness = "ready for explicit --project sync (project must be enrolled)"
+	m.CloudStatusLocalDaemon = "running on port 7437"
+	m.CloudStatusHealth = "reachable"
+	m.CloudStatusTokenSource = TokenSourceEnv
+	m.CloudStatusLastSync = "2026-07-07 12:00:00"
+	m.CloudStatusPendingCount = 2
+	m.CloudStatusLastError = ""
+
+	out := m.View()
+	for _, want := range []string{"Cloud status:", "configured (target=cloud)"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("configured cloud status missing %q, got %q", want, out)
+		}
+	}
+	for _, want := range []string{"Auth status:", "ready (token provided via runtime cloud config)"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("auth status missing %q, got %q", want, out)
+		}
+	}
+	for _, want := range []string{"Sync readiness:", "ready for explicit --project sync (project must be enrolled)"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("sync readiness missing %q, got %q", want, out)
+		}
+	}
+	for _, want := range []string{"Local daemon:", "running on port 7437"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("local daemon missing %q, got %q", want, out)
+		}
+	}
+
+	// Existing fields must still render.
+	for _, want := range []string{"Server URL:", "Health:", "Token source:", "Last sync:", "Pending:", "Last error:"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("existing label %q missing from view, got %q", want, out)
+		}
+	}
+}
+
+func TestViewCloudStatusParityFieldsNoToken(t *testing.T) {
+	m := New(nil, "")
+	m.Screen = ScreenCloudStatus
+	m.CloudStatusServerURL = "https://cloud.example.com"
+	m.CloudStatusTarget = "cloud"
+	m.CloudStatusAuthStatus = "token not configured (client token is optional at preflight)"
+	m.CloudStatusAuthHint = "Hint: if the remote server enforces bearer auth, set ENGRAM_CLOUD_TOKEN"
+	m.CloudStatusSyncReadiness = "ready for explicit --project sync (project must be enrolled)"
+	m.CloudStatusLocalDaemon = "not running on port 7437"
+	m.CloudStatusDaemonHint = "Hint: run `engram serve` to resume autosync; on macOS see DOCS.md launchd template to keep it alive across upgrades"
+	m.CloudStatusHealth = "reachable"
+	m.CloudStatusTokenSource = TokenSourceNone
+
+	out := m.View()
+	for _, want := range []string{"Auth status:", "token not configured (client token is optional at preflight)"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("no-token auth status missing %q, got %q", want, out)
+		}
+	}
+	if !strings.Contains(out, "Hint: if the remote server enforces bearer auth, set ENGRAM_CLOUD_TOKEN") {
+		t.Fatalf("view should render auth hint, got %q", out)
+	}
+	if !strings.Contains(out, "not running on port 7437") {
+		t.Fatalf("view should render daemon not running, got %q", out)
+	}
+	if !strings.Contains(out, "Hint: run `engram serve` to resume autosync") {
+		t.Fatalf("view should render daemon hint, got %q", out)
+	}
+}
+
+func TestViewCloudStatusParityFieldsInsecure(t *testing.T) {
+	m := New(nil, "")
+	m.Screen = ScreenCloudStatus
+	m.CloudStatusServerURL = "https://cloud.example.com"
+	m.CloudStatusTarget = "cloud"
+	m.CloudStatusAuthStatus = "ready (insecure local-dev mode: ENGRAM_CLOUD_INSECURE_NO_AUTH=1)"
+	m.CloudStatusAuthWarning = "Warning: bearer auth is disabled in insecure mode; do not use in production"
+	m.CloudStatusSyncReadiness = "ready for explicit --project sync (project must be enrolled)"
+	m.CloudStatusLocalDaemon = "unreachable on port 7437"
+	m.CloudStatusHealth = "reachable"
+	m.CloudStatusTokenSource = TokenSourceNone
+
+	out := m.View()
+	for _, want := range []string{"Auth status:", "ready (insecure local-dev mode: ENGRAM_CLOUD_INSECURE_NO_AUTH=1)"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("insecure auth status missing %q, got %q", want, out)
+		}
+	}
+	if !strings.Contains(out, "Warning: bearer auth is disabled in insecure mode; do not use in production") {
+		t.Fatalf("view should render insecure warning, got %q", out)
+	}
+	if !strings.Contains(out, "unreachable on port 7437") {
+		t.Fatalf("view should render daemon unreachable, got %q", out)
+	}
+}
+
+func TestViewCloudStatusSyncDiagnostic(t *testing.T) {
+	m := New(nil, "")
+	m.Screen = ScreenCloudStatus
+	m.CloudStatusServerURL = "https://cloud.example.com"
+	m.CloudStatusTarget = "cloud"
+	m.CloudStatusAuthStatus = "ready (token provided via runtime cloud config)"
+	m.CloudStatusSyncReadiness = "ready for explicit --project sync (project must be enrolled)"
+	m.CloudStatusLocalDaemon = "running on port 7437"
+	m.CloudStatusHealth = "reachable"
+	m.CloudStatusTokenSource = TokenSourceEnv
+	m.CloudStatusSyncLifecycle = "degraded"
+	m.CloudStatusSyncReasonCode = "auth_required"
+	m.CloudStatusSyncReasonMessage = "token missing"
+
+	out := m.View()
+	if !strings.Contains(out, "Sync diagnostic:") {
+		t.Fatalf("view should render sync diagnostic label, got %q", out)
+	}
+	if !strings.Contains(out, "degraded") {
+		t.Fatalf("view should render lifecycle, got %q", out)
+	}
+	if !strings.Contains(out, "auth_required") {
+		t.Fatalf("view should render reason_code, got %q", out)
+	}
+	if !strings.Contains(out, "token missing") {
+		t.Fatalf("view should render reason_message, got %q", out)
+	}
+}
+
+func TestViewCloudStatusSyncDiagnosticOmittedWhenEmpty(t *testing.T) {
+	m := New(nil, "")
+	m.Screen = ScreenCloudStatus
+	m.CloudStatusServerURL = "https://cloud.example.com"
+	m.CloudStatusTarget = "cloud"
+	m.CloudStatusAuthStatus = "ready (token provided via runtime cloud config)"
+	m.CloudStatusSyncReadiness = "ready for explicit --project sync (project must be enrolled)"
+	m.CloudStatusLocalDaemon = "running on port 7437"
+	m.CloudStatusHealth = "reachable"
+	m.CloudStatusTokenSource = TokenSourceEnv
+	m.CloudStatusSyncLifecycle = ""
+	m.CloudStatusSyncReasonCode = ""
+	m.CloudStatusSyncReasonMessage = ""
+
+	out := m.View()
+	if strings.Contains(out, "Sync diagnostic:") {
+		t.Fatalf("view should omit sync diagnostic when empty, got %q", out)
+	}
+}
+
 func TestViewRouterAndErrorRendering(t *testing.T) {
 	m := New(nil, "")
 	m.Screen = Screen(999)

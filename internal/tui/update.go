@@ -145,6 +145,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.CloudStatusLastSync = msg.lastSync
 		m.CloudStatusPendingCount = msg.pendingCount
 		m.CloudStatusLastError = msg.lastError
+		m.CloudStatusTarget = msg.target
+		m.CloudStatusAuthStatus = msg.authStatus
+		m.CloudStatusAuthWarning = msg.authWarning
+		m.CloudStatusAuthHint = msg.authHint
+		m.CloudStatusSyncReadiness = msg.syncReadiness
+		m.CloudStatusLocalDaemon = msg.localDaemon
+		m.CloudStatusDaemonHint = msg.daemonHint
+		m.CloudStatusSyncLifecycle = msg.syncLifecycle
+		m.CloudStatusSyncReasonCode = msg.syncReasonCode
+		m.CloudStatusSyncReasonMessage = msg.syncReasonMessage
 		if m.CloudStatusServerURL != "" && m.store != nil {
 			// Reuse the existing ping helper (validated by T-03) to check health.
 			return m, pingCloudServer(m.CloudStatusServerURL, effectiveCloudToken(m.store.DataDir()))
@@ -718,9 +728,9 @@ func (m Model) handleCloudSettingsKeys(key string) (tea.Model, tea.Cmd) {
 			m.CloudConfigPingStatus = ""
 			m.CloudConfigSaving = false
 			m.CloudConfigTest = false
-			m.CloudConfigInput.SetValue("")
-			m.CloudConfigInput.Focus()
-			return m, loadCloudConfigCmd(m.store.DataDir())
+		m.CloudConfigInput.SetValue("")
+		m.CloudConfigInput.Focus()
+		return m, loadCloudConfigCmd(m.store.DataDir())
 		case 1: // View status
 			m.PrevScreen = ScreenCloudSettings
 			m.Screen = ScreenCloudStatus
@@ -732,8 +742,19 @@ func (m Model) handleCloudSettingsKeys(key string) (tea.Model, tea.Cmd) {
 			m.CloudStatusLastSync = ""
 			m.CloudStatusPendingCount = 0
 			m.CloudStatusLastError = ""
+			m.CloudStatusTarget = ""
+			m.CloudStatusAuthStatus = ""
+			m.CloudStatusAuthWarning = ""
+			m.CloudStatusAuthHint = ""
+			m.CloudStatusSyncReadiness = ""
+			m.CloudStatusLocalDaemon = ""
+			m.CloudStatusDaemonHint = ""
+			m.CloudStatusSyncLifecycle = ""
+			m.CloudStatusSyncReasonCode = ""
+			m.CloudStatusSyncReasonMessage = ""
 			return m, loadCloudStatusCmd(m.store)
 		case 2: // Enroll projects
+
 			m.PrevScreen = ScreenCloudSettings
 			m.Screen = ScreenCloudEnrollment
 			m.Cursor = 0

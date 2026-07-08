@@ -10,6 +10,11 @@
 package tui
 
 import (
+	"context"
+	"fmt"
+	"strings"
+
+	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
 	"github.com/Gentleman-Programming/engram/internal/setup"
 	"github.com/Gentleman-Programming/engram/internal/store"
 	"github.com/Gentleman-Programming/engram/internal/version"
@@ -107,12 +112,22 @@ type cloudPingMsg struct {
 }
 
 type cloudStatusLoadedMsg struct {
-	serverURL    string
-	tokenSource  string
-	lastSync     string
-	pendingCount int64
-	lastError    string
-	err          error
+	serverURL        string
+	tokenSource      string
+	lastSync         string
+	pendingCount     int64
+	lastError        string
+	target           string
+	authStatus       string
+	authWarning      string
+	authHint         string
+	syncReadiness    string
+	localDaemon      string
+	daemonHint       string
+	syncLifecycle    string
+	syncReasonCode   string
+	syncReasonMessage string
+	err              error
 }
 
 type cloudEnrollmentItem struct {
@@ -194,13 +209,23 @@ type Model struct {
 	CloudConfigTest       bool // true when the current ping is a test, not a save
 
 	// Cloud status
-	CloudStatusServerURL    string
-	CloudStatusTokenSource  string
-	CloudStatusHealth       string
-	CloudStatusLastSync     string
-	CloudStatusPendingCount int64
-	CloudStatusLastError    string
-	CloudStatusLoading      bool
+	CloudStatusServerURL         string
+	CloudStatusTokenSource       string
+	CloudStatusHealth            string
+	CloudStatusLastSync          string
+	CloudStatusPendingCount      int64
+	CloudStatusLastError         string
+	CloudStatusLoading           bool
+	CloudStatusTarget            string
+	CloudStatusAuthStatus        string
+	CloudStatusAuthWarning       string
+	CloudStatusAuthHint          string
+	CloudStatusSyncReadiness     string
+	CloudStatusLocalDaemon       string
+	CloudStatusDaemonHint        string
+	CloudStatusSyncLifecycle     string
+	CloudStatusSyncReasonCode    string
+	CloudStatusSyncReasonMessage string
 
 	// Cloud enrollment
 	CloudEnrollmentItems   []cloudEnrollmentItem
@@ -330,11 +355,11 @@ func loadCloudStatusCmd(s *store.Store) tea.Cmd {
 		if err != nil {
 			return cloudStatusLoadedMsg{err: err}
 		}
-		state, err := s.GetSyncState(store.DefaultSyncTargetKey)
+		state, err := s.GetSyncState(constants.TargetKeyCloud)
 		if err != nil {
 			return cloudStatusLoadedMsg{err: err}
 		}
-		count, err := s.CountPendingSyncMutations(store.DefaultSyncTargetKey)
+		count, err := s.CountPendingSyncMutations(constants.TargetKeyCloud)
 		if err != nil {
 			return cloudStatusLoadedMsg{err: err}
 		}
@@ -342,12 +367,75 @@ func loadCloudStatusCmd(s *store.Store) tea.Cmd {
 		if state.LastError != nil {
 			lastErr = *state.LastError
 		}
+
+		token := effectiveCloudToken(s.DataDir())
+		insecure := isInsecureNoAuth()
+		target := ""
+		authStatus := ""
+		authWarning := ""
+		authHint := ""
+		syncReadiness := ""
+		if cc.ServerURL != "" {
+			target = constants.TargetKeyCloud
+			if token != "" {
+				authStatus = "ready (token provided via runtime cloud config)"
+				syncReadiness = "ready for explicit --project sync (project must be enrolled)"
+			} else if insecure {
+				authStatus = "ready (insecure local-dev mode: ENGRAM_CLOUD_INSECURE_NO_AUTH=1)"
+				authWarning = "Warning: bearer auth is disabled in insecure mode; do not use in production"
+				syncReadiness = "ready for explicit --project sync (project must be enrolled)"
+			} else {
+				authStatus = "token not configured (client token is optional at preflight)"
+				authHint = "Hint: if the remote server enforces bearer auth, set ENGRAM_CLOUD_TOKEN"
+				syncReadiness = "ready for explicit --project sync (project must be enrolled)"
+			}
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), daemonProbeTimeout)
+		defer cancel()
+		port := resolveDaemonProbePort()
+		daemonRes := probeLocalDaemon(ctx, port)
+		localDaemon := ""
+		daemonHint := ""
+		switch daemonRes.Status {
+		case daemonProbeRunning:
+			localDaemon = fmt.Sprintf("running on port %d", daemonRes.Port)
+		case daemonProbeNotRunning:
+			localDaemon = fmt.Sprintf("not running on port %d", daemonRes.Port)
+			daemonHint = "Hint: run `engram serve` to resume autosync; on macOS see DOCS.md launchd template to keep it alive across upgrades"
+		default:
+			localDaemon = fmt.Sprintf("unreachable on port %d", daemonRes.Port)
+		}
+
+		syncLifecycle := ""
+		syncReasonCode := ""
+		syncReasonMessage := ""
+		if state != nil {
+			syncLifecycle = strings.TrimSpace(state.Lifecycle)
+			if state.ReasonCode != nil {
+				syncReasonCode = strings.TrimSpace(*state.ReasonCode)
+			}
+			if state.ReasonMessage != nil {
+				syncReasonMessage = strings.TrimSpace(*state.ReasonMessage)
+			}
+		}
+
 		return cloudStatusLoadedMsg{
-			serverURL:    cc.ServerURL,
-			tokenSource:  tokenSourceMessage(s.DataDir()),
-			lastSync:     state.UpdatedAt,
-			pendingCount: count,
-			lastError:    lastErr,
+			serverURL:         cc.ServerURL,
+			tokenSource:       tokenSourceMessage(s.DataDir()),
+			lastSync:          state.UpdatedAt,
+			pendingCount:      count,
+			lastError:         lastErr,
+			target:            target,
+			authStatus:        authStatus,
+			authWarning:       authWarning,
+			authHint:          authHint,
+			syncReadiness:     syncReadiness,
+			localDaemon:       localDaemon,
+			daemonHint:        daemonHint,
+			syncLifecycle:     syncLifecycle,
+			syncReasonCode:    syncReasonCode,
+			syncReasonMessage: syncReasonMessage,
 		}
 	}
 }

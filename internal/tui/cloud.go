@@ -1,12 +1,17 @@
 package tui
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -151,6 +156,76 @@ func validateCloudServerURL(raw string) (string, error) {
 	parsed.RawQuery = ""
 	parsed.Fragment = ""
 	return parsed.String(), nil
+}
+
+// isInsecureNoAuth mirrors cmd/engram/main.go:envBool for the
+// ENGRAM_CLOUD_INSECURE_NO_AUTH env var. Truthy values are "1", "true",
+// "yes" and "on" (case-insensitive, whitespace-trimmed).
+func isInsecureNoAuth() bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv("ENGRAM_CLOUD_INSECURE_NO_AUTH")))
+	return v == "1" || v == "true" || v == "yes" || v == "on"
+}
+
+// daemonProbeStatus describes the outcome of probing the local engram daemon.
+type daemonProbeStatus string
+
+const (
+	daemonProbeRunning     daemonProbeStatus = "running"
+	daemonProbeNotRunning  daemonProbeStatus = "not_running"
+	daemonProbeUnreachable daemonProbeStatus = "unreachable"
+)
+
+// daemonProbeResult captures the outcome of a single probe.
+type daemonProbeResult struct {
+	Status daemonProbeStatus
+	Port   int
+	Err    error
+}
+
+const defaultDaemonProbePort = 7437
+
+// daemonProbeTimeout is a var (not const) so tests can shorten it when
+// exercising slow paths.
+var daemonProbeTimeout = time.Second
+
+// daemonProbeTransport can be overridden in tests to avoid real network calls.
+var daemonProbeTransport http.RoundTripper = http.DefaultTransport
+
+// probeLocalDaemon mirrors cmd/engram/cloud_daemon_probe.go:defaultCloudDaemonProbe.
+// A dial error to 127.0.0.1 is interpreted as "not running"; any other error
+// (timeout, non-2xx response, malformed reply) maps to "unreachable".
+func probeLocalDaemon(ctx context.Context, port int) daemonProbeResult {
+	url := fmt.Sprintf("http://127.0.0.1:%d/health", port)
+	client := &http.Client{Timeout: daemonProbeTimeout, Transport: daemonProbeTransport}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return daemonProbeResult{Status: daemonProbeUnreachable, Port: port, Err: err}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		var opErr *net.OpError
+		if errors.As(err, &opErr) && opErr.Op == "dial" {
+			return daemonProbeResult{Status: daemonProbeNotRunning, Port: port, Err: err}
+		}
+		return daemonProbeResult{Status: daemonProbeUnreachable, Port: port, Err: err}
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return daemonProbeResult{Status: daemonProbeRunning, Port: port}
+	}
+	return daemonProbeResult{Status: daemonProbeUnreachable, Port: port}
+}
+
+// resolveDaemonProbePort mirrors cmd/engram/cloud_daemon_probe.go:resolveDaemonProbePort.
+// It reads ENGRAM_PORT and falls back to 7437.
+func resolveDaemonProbePort() int {
+	if p := strings.TrimSpace(os.Getenv("ENGRAM_PORT")); p != "" {
+		if n, err := strconv.Atoi(p); err == nil && n > 0 && n < 65536 {
+			return n
+		}
+	}
+	return defaultDaemonProbePort
 }
 
 

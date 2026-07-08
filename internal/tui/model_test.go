@@ -2,8 +2,10 @@ package tui
 
 import (
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/internal/setup"
@@ -314,6 +316,114 @@ func TestLoadCloudStatusCommandHandlesSyncStateError(t *testing.T) {
 	}
 	if loaded.err == nil {
 		t.Fatal("expected error when sync state cannot be read")
+	}
+}
+
+func TestLoadCloudStatusCommandPopulatesParityFields(t *testing.T) {
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "")
+	t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "")
+
+	origTransport := daemonProbeTransport
+	daemonProbeTransport = &fakePingTransport{statusCode: http.StatusOK}
+	defer func() { daemonProbeTransport = origTransport }()
+
+	fx := newTestFixture(t)
+	if err := os.WriteFile(filepath.Join(fx.store.DataDir(), "cloud.json"), []byte(`{"server_url":"https://cloud.example.com","token":"file-token"}`), 0o644); err != nil {
+		t.Fatalf("write cloud.json: %v", err)
+	}
+
+	msg := loadCloudStatusCmd(fx.store)()
+	loaded, ok := msg.(cloudStatusLoadedMsg)
+	if !ok {
+		t.Fatalf("message type = %T", msg)
+	}
+	if loaded.err != nil {
+		t.Fatalf("unexpected error: %v", loaded.err)
+	}
+	if loaded.target != "cloud" {
+		t.Fatalf("target = %q, want cloud", loaded.target)
+	}
+	if !strings.Contains(loaded.authStatus, "ready (token provided via runtime cloud config)") {
+		t.Fatalf("authStatus = %q", loaded.authStatus)
+	}
+	if !strings.Contains(loaded.syncReadiness, "ready for explicit --project sync") {
+		t.Fatalf("syncReadiness = %q", loaded.syncReadiness)
+	}
+	if !strings.Contains(loaded.localDaemon, "running on port") {
+		t.Fatalf("localDaemon = %q", loaded.localDaemon)
+	}
+	if loaded.authWarning != "" {
+		t.Fatalf("authWarning = %q, want empty", loaded.authWarning)
+	}
+	if loaded.authHint != "" {
+		t.Fatalf("authHint = %q, want empty", loaded.authHint)
+	}
+	if loaded.syncLifecycle == "" {
+		t.Fatal("syncLifecycle should not be empty")
+	}
+}
+
+func TestLoadCloudStatusCommandParityFieldsNoToken(t *testing.T) {
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "")
+	t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "")
+
+	origTransport := daemonProbeTransport
+	daemonProbeTransport = &fakePingTransport{statusCode: http.StatusOK}
+	defer func() { daemonProbeTransport = origTransport }()
+
+	fx := newTestFixture(t)
+	if err := os.WriteFile(filepath.Join(fx.store.DataDir(), "cloud.json"), []byte(`{"server_url":"https://cloud.example.com"}`), 0o644); err != nil {
+		t.Fatalf("write cloud.json: %v", err)
+	}
+
+	msg := loadCloudStatusCmd(fx.store)()
+	loaded, ok := msg.(cloudStatusLoadedMsg)
+	if !ok {
+		t.Fatalf("message type = %T", msg)
+	}
+	if loaded.err != nil {
+		t.Fatalf("unexpected error: %v", loaded.err)
+	}
+	if !strings.Contains(loaded.authStatus, "token not configured") {
+		t.Fatalf("authStatus = %q", loaded.authStatus)
+	}
+	if loaded.authHint == "" {
+		t.Fatal("authHint should be set when no token")
+	}
+	if loaded.authWarning != "" {
+		t.Fatalf("authWarning = %q, want empty", loaded.authWarning)
+	}
+}
+
+func TestLoadCloudStatusCommandParityFieldsInsecure(t *testing.T) {
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "")
+	t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "1")
+
+	origTransport := daemonProbeTransport
+	daemonProbeTransport = &fakePingTransport{statusCode: http.StatusOK}
+	defer func() { daemonProbeTransport = origTransport }()
+
+	fx := newTestFixture(t)
+	if err := os.WriteFile(filepath.Join(fx.store.DataDir(), "cloud.json"), []byte(`{"server_url":"https://cloud.example.com"}`), 0o644); err != nil {
+		t.Fatalf("write cloud.json: %v", err)
+	}
+
+	msg := loadCloudStatusCmd(fx.store)()
+	loaded, ok := msg.(cloudStatusLoadedMsg)
+	if !ok {
+		t.Fatalf("message type = %T", msg)
+	}
+	if loaded.err != nil {
+		t.Fatalf("unexpected error: %v", loaded.err)
+	}
+	if !strings.Contains(loaded.authStatus, "insecure local-dev mode") {
+		t.Fatalf("authStatus = %q", loaded.authStatus)
+	}
+	if loaded.authWarning == "" {
+		t.Fatal("authWarning should be set in insecure mode")
+	}
+	if loaded.authHint != "" {
+		t.Fatalf("authHint = %q, want empty in insecure mode", loaded.authHint)
 	}
 }
 

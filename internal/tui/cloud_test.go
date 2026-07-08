@@ -2,9 +2,12 @@ package tui
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -291,6 +294,128 @@ func TestSaveCloudConfigMalformedJSONReturnsError(t *testing.T) {
 
 	if err := saveCloudConfig(dir, "https://new.example.com"); err == nil {
 		t.Fatal("expected error for malformed cloud.json")
+	}
+}
+
+func TestIsInsecureNoAuth(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+		want bool
+	}{
+		{"empty", "", false},
+		{"1", "1", true},
+		{"true", "true", true},
+		{"True", "True", true},
+		{"TRUE", "TRUE", true},
+		{"yes", "yes", true},
+		{"on", "on", true},
+		{"0", "0", false},
+		{"false", "false", false},
+		{"no", "no", false},
+		{"whitespace 1", "  1  ", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", tt.env)
+			if got := isInsecureNoAuth(); got != tt.want {
+				t.Fatalf("isInsecureNoAuth() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveDaemonProbePort(t *testing.T) {
+	t.Run("default", func(t *testing.T) {
+		t.Setenv("ENGRAM_PORT", "")
+		if got := resolveDaemonProbePort(); got != 7437 {
+			t.Fatalf("port = %d, want 7437", got)
+		}
+	})
+	t.Run("custom", func(t *testing.T) {
+		t.Setenv("ENGRAM_PORT", "9999")
+		if got := resolveDaemonProbePort(); got != 9999 {
+			t.Fatalf("port = %d, want 9999", got)
+		}
+	})
+	t.Run("invalid falls back", func(t *testing.T) {
+		t.Setenv("ENGRAM_PORT", "not-a-number")
+		if got := resolveDaemonProbePort(); got != 7437 {
+			t.Fatalf("port = %d, want 7437", got)
+		}
+	})
+	t.Run("out of range high falls back", func(t *testing.T) {
+		t.Setenv("ENGRAM_PORT", "65536")
+		if got := resolveDaemonProbePort(); got != 7437 {
+			t.Fatalf("port = %d, want 7437", got)
+		}
+	})
+	t.Run("zero falls back", func(t *testing.T) {
+		t.Setenv("ENGRAM_PORT", "0")
+		if got := resolveDaemonProbePort(); got != 7437 {
+			t.Fatalf("port = %d, want 7437", got)
+		}
+	})
+}
+
+func TestProbeLocalDaemonRunning(t *testing.T) {
+	server := httptest.NewServer(httpHandlerWithStatus(http.StatusOK))
+	defer server.Close()
+
+	port := server.Listener.Addr().(*net.TCPAddr).Port
+	res := probeLocalDaemon(context.Background(), port)
+	if res.Status != daemonProbeRunning {
+		t.Fatalf("status = %q, want %q", res.Status, daemonProbeRunning)
+	}
+	if res.Port != port {
+		t.Fatalf("port = %d, want %d", res.Port, port)
+	}
+}
+
+func TestProbeLocalDaemonNotRunning(t *testing.T) {
+	server := httptest.NewServer(httpHandlerWithStatus(http.StatusOK))
+	server.Close()
+
+	port := server.Listener.Addr().(*net.TCPAddr).Port
+	res := probeLocalDaemon(context.Background(), port)
+	if res.Status != daemonProbeNotRunning {
+		t.Fatalf("status = %q, want %q", res.Status, daemonProbeNotRunning)
+	}
+}
+
+func TestProbeLocalDaemonUnreachable(t *testing.T) {
+	server := httptest.NewServer(httpHandlerWithStatus(http.StatusInternalServerError))
+	defer server.Close()
+
+	port := server.Listener.Addr().(*net.TCPAddr).Port
+	res := probeLocalDaemon(context.Background(), port)
+	if res.Status != daemonProbeUnreachable {
+		t.Fatalf("status = %q, want %q", res.Status, daemonProbeUnreachable)
+	}
+}
+
+func TestProbeLocalDaemonTransportInjectable(t *testing.T) {
+	orig := daemonProbeTransport
+	daemonProbeTransport = &fakePingTransport{statusCode: http.StatusOK}
+	defer func() { daemonProbeTransport = orig }()
+
+	res := probeLocalDaemon(context.Background(), 1234)
+	if res.Status != daemonProbeRunning {
+		t.Fatalf("status = %q, want %q", res.Status, daemonProbeRunning)
+	}
+	if res.Port != 1234 {
+		t.Fatalf("port = %d, want 1234", res.Port)
+	}
+}
+
+func TestProbeLocalDaemonDialError(t *testing.T) {
+	orig := daemonProbeTransport
+	daemonProbeTransport = &fakePingTransport{err: &net.OpError{Op: "dial", Err: errors.New("connection refused")}}
+	defer func() { daemonProbeTransport = orig }()
+
+	res := probeLocalDaemon(context.Background(), 1234)
+	if res.Status != daemonProbeNotRunning {
+		t.Fatalf("status = %q, want %q", res.Status, daemonProbeNotRunning)
 	}
 }
 

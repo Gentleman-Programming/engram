@@ -252,20 +252,69 @@ func (m Model) viewCloudStatus() string {
 		return b.String()
 	}
 
-	b.WriteString(renderCloudStatusRow("Server URL:", m.CloudStatusServerURL))
-	b.WriteString(renderCloudStatusRow("Health:", renderCloudHealth(m.CloudStatusHealth)))
-	b.WriteString(renderCloudStatusRow("Token source:", m.CloudStatusTokenSource))
-	b.WriteString(renderCloudStatusRow("Last sync:", m.CloudStatusLastSync))
-	b.WriteString(renderCloudStatusRow("Pending:", fmt.Sprintf("%d", m.CloudStatusPendingCount)))
+	// Wider label column so the new parity labels (e.g. "Sync diagnostic:")
+	// stay on a single line without affecting other screens.
+	labelStyle := detailLabelStyle.Width(18)
+	renderRow := func(label, value string) string {
+		return fmt.Sprintf("%s %s\n", labelStyle.Render(label), detailValueStyle.Render(value))
+	}
+
+	if m.CloudStatusTarget != "" {
+		b.WriteString(renderRow("Cloud status:", fmt.Sprintf("configured (target=%s)", m.CloudStatusTarget)))
+	}
+	b.WriteString(renderRow("Server URL:", m.CloudStatusServerURL))
+	if m.CloudStatusAuthStatus != "" {
+		b.WriteString(renderRow("Auth status:", m.CloudStatusAuthStatus))
+	}
+	if m.CloudStatusSyncReadiness != "" {
+		b.WriteString(renderRow("Sync readiness:", m.CloudStatusSyncReadiness))
+	}
+	if m.CloudStatusLocalDaemon != "" {
+		b.WriteString(renderRow("Local daemon:", m.CloudStatusLocalDaemon))
+	}
+	if m.CloudStatusAuthWarning != "" {
+		b.WriteString(renderRow("", m.CloudStatusAuthWarning))
+	}
+	if m.CloudStatusAuthHint != "" {
+		b.WriteString(renderRow("", m.CloudStatusAuthHint))
+	}
+	if m.CloudStatusDaemonHint != "" {
+		b.WriteString(renderRow("", m.CloudStatusDaemonHint))
+	}
+
+	b.WriteString("\n")
+
+	b.WriteString(renderRow("Health:", renderCloudHealth(m.CloudStatusHealth)))
+	b.WriteString(renderRow("Token source:", m.CloudStatusTokenSource))
+	b.WriteString(renderRow("Last sync:", m.CloudStatusLastSync))
+	b.WriteString(renderRow("Pending:", fmt.Sprintf("%d", m.CloudStatusPendingCount)))
 	lastError := m.CloudStatusLastError
 	if lastError == "" {
 		lastError = "none"
 	}
-	b.WriteString(renderCloudStatusRow("Last error:", lastError))
+	b.WriteString(renderRow("Last error:", lastError))
+
+	m.renderCloudStatusSyncDiagnostic(&b, renderRow)
 
 	b.WriteString(helpStyle.Render("\n  esc/q back"))
 
 	return b.String()
+}
+
+func (m Model) renderCloudStatusSyncDiagnostic(b *strings.Builder, renderRow func(string, string) string) {
+	if m.CloudStatusSyncLifecycle == "" && m.CloudStatusSyncReasonCode == "" && m.CloudStatusSyncReasonMessage == "" {
+		return
+	}
+	b.WriteString("\n")
+	if m.CloudStatusSyncLifecycle != "" {
+		b.WriteString(renderRow("Sync diagnostic:", m.CloudStatusSyncLifecycle))
+	}
+	if m.CloudStatusSyncReasonCode != "" {
+		b.WriteString(renderRow("  reason_code:", m.CloudStatusSyncReasonCode))
+	}
+	if m.CloudStatusSyncReasonMessage != "" {
+		b.WriteString(renderRow("  reason_message:", m.CloudStatusSyncReasonMessage))
+	}
 }
 
 func (m Model) viewCloudEnrollment() string {
