@@ -483,6 +483,11 @@ func (s *Store) MaxObservationLength() int {
 	return s.cfg.MaxObservationLength
 }
 
+// DataDir returns the configured data directory for the store.
+func (s *Store) DataDir() string {
+	return s.cfg.DataDir
+}
+
 // ─── Store ───────────────────────────────────────────────────────────────────
 
 type Store struct {

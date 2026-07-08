@@ -320,6 +320,77 @@ func TestCloudSettingsMenuNavigation(t *testing.T) {
 	}
 }
 
+func TestCloudConfigNavigation(t *testing.T) {
+	fx := newTestFixture(t)
+	m := New(fx.store, "")
+	m.Screen = ScreenCloudSettings
+	m.Cursor = 0 // Configure server
+
+	updatedModel, cmd := m.handleCloudSettingsKeys("enter")
+	updated := updatedModel.(Model)
+	if updated.Screen != ScreenCloudConfig {
+		t.Fatalf("enter on Configure server should open ScreenCloudConfig, got %v", updated.Screen)
+	}
+	if updated.CloudConfigFocus != cloudConfigFocusInput {
+		t.Fatalf("focus = %d, want input", updated.CloudConfigFocus)
+	}
+	if !updated.CloudConfigInput.Focused() {
+		t.Fatal("input should be focused on entry")
+	}
+	if cmd == nil {
+		t.Fatal("enter on Configure server should load cloud config")
+	}
+
+	updatedModel, _ = updated.handleCloudConfigKeys("esc")
+	updated = updatedModel.(Model)
+	if updated.Screen != ScreenCloudSettings {
+		t.Fatalf("esc from cloud config should return to settings, got %v", updated.Screen)
+	}
+}
+
+func TestCloudConfigTabCyclesFocus(t *testing.T) {
+	m := New(nil, "")
+	m.Screen = ScreenCloudConfig
+	m.CloudConfigFocus = cloudConfigFocusInput
+	m.CloudConfigInput.Focus()
+
+	updatedModel, _ := m.handleCloudConfigKeys("tab")
+	updated := updatedModel.(Model)
+	if updated.CloudConfigFocus != cloudConfigFocusTest {
+		t.Fatalf("tab should move focus to test, got %d", updated.CloudConfigFocus)
+	}
+	if updated.CloudConfigInput.Focused() {
+		t.Fatal("input should blur when focus leaves")
+	}
+
+	updatedModel, _ = updated.handleCloudConfigKeys("tab")
+	updated = updatedModel.(Model)
+	if updated.CloudConfigFocus != cloudConfigFocusSave {
+		t.Fatalf("tab should move focus to save, got %d", updated.CloudConfigFocus)
+	}
+
+	updatedModel, _ = updated.handleCloudConfigKeys("tab")
+	updated = updatedModel.(Model)
+	if updated.CloudConfigFocus != cloudConfigFocusCancel {
+		t.Fatalf("tab should move focus to cancel, got %d", updated.CloudConfigFocus)
+	}
+
+	updatedModel, _ = updated.handleCloudConfigKeys("tab")
+	updated = updatedModel.(Model)
+	if updated.CloudConfigFocus != cloudConfigFocusInput {
+		t.Fatalf("tab should wrap to input, got %d", updated.CloudConfigFocus)
+	}
+	if !updated.CloudConfigInput.Focused() {
+		t.Fatal("input should focus when wrapping back")
+	}
+
+	updatedModel, _ = updated.handleCloudConfigKeys("shift+tab")
+	updated = updatedModel.(Model)
+	if updated.CloudConfigFocus != cloudConfigFocusCancel {
+		t.Fatalf("shift+tab should wrap backwards, got %d", updated.CloudConfigFocus)
+	}
+}
+
 func TestHandleRecentTimelineSessionsAndDetailKeyPaths(t *testing.T) {
 	fx := newTestFixture(t)
 	m := New(fx.store, "")
@@ -568,6 +639,7 @@ func TestHandleKeyPressRouterAndClearsError(t *testing.T) {
 		ScreenSessionDetail,
 		ScreenSetup,
 		ScreenCloudSettings,
+		ScreenCloudConfig,
 	} {
 		m.Screen = screen
 		m.ErrorMsg = "old error"

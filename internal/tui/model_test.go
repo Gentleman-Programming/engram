@@ -2,6 +2,8 @@ package tui
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/internal/setup"
@@ -108,6 +110,51 @@ func TestScreenCloudSettingsConstant(t *testing.T) {
 			t.Fatalf("screen constant %d is duplicated", s)
 		}
 		seen[s] = true
+	}
+}
+
+func TestScreenCloudConfigConstant(t *testing.T) {
+	if ScreenCloudConfig != ScreenCloudSettings+1 {
+		t.Fatalf("ScreenCloudConfig = %d, want %d (ScreenCloudSettings+1)", ScreenCloudConfig, ScreenCloudSettings+1)
+	}
+
+	seen := map[Screen]bool{}
+	for _, s := range []Screen{
+		ScreenDashboard,
+		ScreenSearch,
+		ScreenSearchResults,
+		ScreenRecent,
+		ScreenObservationDetail,
+		ScreenTimeline,
+		ScreenSessions,
+		ScreenSessionDetail,
+		ScreenSetup,
+		ScreenCloudSettings,
+		ScreenCloudConfig,
+	} {
+		if seen[s] {
+			t.Fatalf("screen constant %d is duplicated", s)
+		}
+		seen[s] = true
+	}
+}
+
+func TestLoadCloudConfigCommand(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "cloud.json"), []byte(`{"server_url":"https://cloud.example.com","token":"file-token"}`), 0o644); err != nil {
+		t.Fatalf("write cloud.json: %v", err)
+	}
+
+	msg := loadCloudConfigCmd(dir)()
+	loaded, ok := msg.(cloudConfigLoadedMsg)
+	if !ok {
+		t.Fatalf("message type = %T", msg)
+	}
+	if loaded.err != nil {
+		t.Fatalf("unexpected error: %v", loaded.err)
+	}
+	if loaded.serverURL != "https://cloud.example.com" {
+		t.Fatalf("serverURL = %q", loaded.serverURL)
 	}
 }
 

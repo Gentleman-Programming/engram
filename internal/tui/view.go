@@ -82,6 +82,8 @@ func (m Model) View() string {
 		content = m.viewSetup()
 	case ScreenCloudSettings:
 		content = m.viewCloudSettings()
+	case ScreenCloudConfig:
+		content = m.viewCloudConfig()
 	default:
 		content = "Unknown screen"
 	}
@@ -176,6 +178,59 @@ func (m Model) viewCloudSettings() string {
 	b.WriteString("\n\n")
 	b.WriteString(renderMenu(cloudSettingsMenuItems, m.Cursor))
 	b.WriteString(helpStyle.Render("\n  j/k navigate • enter select • esc/q back"))
+
+	return b.String()
+}
+
+func (m Model) viewCloudConfig() string {
+	var b strings.Builder
+
+	b.WriteString(headerStyle.Render("  Configure cloud server"))
+	b.WriteString("\n\n")
+
+	b.WriteString(detailLabelStyle.Render("Server URL:"))
+	b.WriteString(" ")
+	if m.CloudConfigFocus == cloudConfigFocusInput {
+		b.WriteString(searchInputStyle.Render(m.CloudConfigInput.View()))
+	} else {
+		b.WriteString(detailValueStyle.Render(m.CloudConfigInput.View()))
+	}
+	b.WriteString("\n\n")
+
+	b.WriteString(detailLabelStyle.Render("Token:"))
+	b.WriteString(" ")
+	b.WriteString(detailValueStyle.Render(m.CloudConfigTokenSource))
+	b.WriteString("\n")
+	if m.CloudConfigTokenSource != TokenSourceEnv {
+		b.WriteString(timestampStyle.Render("  Set ENGRAM_CLOUD_TOKEN to override cloud.json.token"))
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
+
+	buttons := []string{"[Test]", "[Save]", "[Cancel]"}
+	for i, label := range buttons {
+		focus := i + 1 // input is 0
+		if focus == m.CloudConfigFocus {
+			b.WriteString(menuSelectedStyle.Render("▸ " + label))
+		} else {
+			b.WriteString(menuItemStyle.Render("  " + label))
+		}
+		b.WriteString(" ")
+	}
+	b.WriteString("\n")
+
+	if m.CloudConfigSaving {
+		b.WriteString("\n")
+		b.WriteString(m.SetupSpinner.View())
+		b.WriteString(" Pinging server...")
+		b.WriteString("\n")
+	} else if m.CloudConfigPingStatus != "" {
+		b.WriteString("\n")
+		b.WriteString(detailValueStyle.Render("Status: " + m.CloudConfigPingStatus))
+		b.WriteString("\n")
+	}
+
+	b.WriteString(helpStyle.Render("\n  tab/shift+tab cycle • enter select • esc/q back"))
 
 	return b.String()
 }

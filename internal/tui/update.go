@@ -27,6 +27,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.Screen == ScreenSearch && m.SearchInput.Focused() {
 			return m.handleSearchInputKeys(msg)
 		}
+		// If cloud config URL input is focused, let it handle typing
+		if m.Screen == ScreenCloudConfig && m.CloudConfigFocus == cloudConfigFocusInput && m.CloudConfigInput.Focused() {
+			return m.handleCloudConfigInputKeys(msg)
+		}
 		return m.handleKeyPress(msg.String())
 
 	// ─── Data loaded messages ────────────────────────────────────────────
@@ -119,6 +123,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.SetupDone = true
 		return m, nil
 
+	case cloudConfigLoadedMsg:
+		if msg.err != nil {
+			m.CloudConfigError = msg.err.Error()
+			return m, nil
+		}
+		m.CloudConfigServerURL = msg.serverURL
+		m.CloudConfigTokenSource = msg.tokenSource
+		m.CloudConfigInput.SetValue(msg.serverURL)
+		m.CloudConfigInput.Focus()
+		return m, nil
+
 	case clipboardCopiedMsg:
 		// Emit the OSC 52 sequence to stdout so the terminal copies the content,
 		// set the feedback label, and schedule its removal after 2 seconds.
@@ -172,6 +187,8 @@ func (m Model) handleKeyPress(key string) (tea.Model, tea.Cmd) {
 		return m.handleSetupKeys(key)
 	case ScreenCloudSettings:
 		return m.handleCloudSettingsKeys(key)
+	case ScreenCloudConfig:
+		return m.handleCloudConfigKeys(key)
 	}
 	return m, nil
 }
@@ -620,7 +637,20 @@ func (m Model) handleCloudSettingsKeys(key string) (tea.Model, tea.Cmd) {
 			m.Cursor++
 		}
 	case "enter", " ":
-		if m.Cursor == len(cloudSettingsMenuItems)-1 { // Back
+		switch m.Cursor {
+		case 0: // Configure server
+			m.PrevScreen = ScreenCloudSettings
+			m.Screen = ScreenCloudConfig
+			m.Cursor = 0
+			m.CloudConfigFocus = cloudConfigFocusInput
+			m.CloudConfigError = ""
+			m.CloudConfigPingStatus = ""
+			m.CloudConfigSaving = false
+			m.CloudConfigTest = false
+			m.CloudConfigInput.SetValue("")
+			m.CloudConfigInput.Focus()
+			return m, loadCloudConfigCmd(m.store.DataDir())
+		case len(cloudSettingsMenuItems) - 1: // Back
 			m.Screen = ScreenDashboard
 			m.Cursor = 0
 			return m, loadStats(m.store)
@@ -629,6 +659,104 @@ func (m Model) handleCloudSettingsKeys(key string) (tea.Model, tea.Cmd) {
 		m.Screen = ScreenDashboard
 		m.Cursor = 0
 		return m, loadStats(m.store)
+	}
+	return m, nil
+}
+
+// ─── Cloud Config ────────────────────────────────────────────────────────────
+
+func (m Model) handleCloudConfigInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "tab":
+		m.CloudConfigInput.Blur()
+		m.CloudConfigFocus = cloudConfigFocusTest
+		return m, nil
+	case "shift+tab":
+		m.CloudConfigInput.Blur()
+		m.CloudConfigFocus = cloudConfigFocusCancel
+		return m, nil
+	case "esc":
+		m.CloudConfigInput.Blur()
+		m.Screen = ScreenCloudSettings
+		m.CloudConfigFocus = cloudConfigFocusInput
+		return m, nil
+	case "enter":
+		m.CloudConfigInput.Blur()
+		m.CloudConfigFocus = cloudConfigFocusSave
+		return m, nil
+	}
+
+	var cmd tea.Cmd
+	m.CloudConfigInput, cmd = m.CloudConfigInput.Update(msg)
+	return m, cmd
+}
+
+func (m Model) handleCloudConfigKeys(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "esc", "q":
+		m.CloudConfigInput.Blur()
+		m.Screen = ScreenCloudSettings
+		m.CloudConfigFocus = cloudConfigFocusInput
+		return m, nil
+	case "tab":
+		m.CloudConfigFocus = nextCloudConfigFocus(m.CloudConfigFocus)
+		m.CloudConfigInput.Blur()
+		if m.CloudConfigFocus == cloudConfigFocusInput {
+			m.CloudConfigInput.Focus()
+		}
+		return m, nil
+	case "shift+tab":
+		m.CloudConfigFocus = prevCloudConfigFocus(m.CloudConfigFocus)
+		m.CloudConfigInput.Blur()
+		if m.CloudConfigFocus == cloudConfigFocusInput {
+			m.CloudConfigInput.Focus()
+		}
+		return m, nil
+	case "up", "k":
+		m.CloudConfigFocus = prevCloudConfigFocus(m.CloudConfigFocus)
+		m.CloudConfigInput.Blur()
+		if m.CloudConfigFocus == cloudConfigFocusInput {
+			m.CloudConfigInput.Focus()
+		}
+		return m, nil
+	case "down", "j":
+		m.CloudConfigFocus = nextCloudConfigFocus(m.CloudConfigFocus)
+		m.CloudConfigInput.Blur()
+		if m.CloudConfigFocus == cloudConfigFocusInput {
+			m.CloudConfigInput.Focus()
+		}
+		return m, nil
+	case "enter", " ":
+		return m.activateCloudConfigFocus()
+	}
+	return m, nil
+}
+
+func nextCloudConfigFocus(f int) int {
+	if f >= cloudConfigFocusCancel {
+		return cloudConfigFocusInput
+	}
+	return f + 1
+}
+
+func prevCloudConfigFocus(f int) int {
+	if f <= cloudConfigFocusInput {
+		return cloudConfigFocusCancel
+	}
+	return f - 1
+}
+
+func (m Model) activateCloudConfigFocus() (tea.Model, tea.Cmd) {
+	switch m.CloudConfigFocus {
+	case cloudConfigFocusInput:
+		m.CloudConfigInput.Blur()
+		m.CloudConfigFocus = cloudConfigFocusSave
+		return m, nil
+	case cloudConfigFocusCancel:
+		m.CloudConfigInput.Blur()
+		m.Screen = ScreenCloudSettings
+		m.CloudConfigFocus = cloudConfigFocusInput
+		return m, nil
 	}
 	return m, nil
 }
