@@ -2,6 +2,9 @@ package tui
 
 import (
 	"bytes"
+	"errors"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -88,6 +91,90 @@ func TestSaveCloudConfigWritesOnlyServerURLAndPreservesToken(t *testing.T) {
 	}
 	if !bytes.Contains(b, []byte(`"token": "file-token"`)) {
 		t.Fatalf("token was not preserved in %s", string(b))
+	}
+}
+
+func httpHandlerWithStatus(code int) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(code)
+	})
+}
+
+type fakePingTransport struct {
+	statusCode int
+	err        error
+}
+
+func (f *fakePingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &http.Response{
+		StatusCode: f.statusCode,
+		Body:       io.NopCloser(bytes.NewReader(nil)),
+		Request:    req,
+		Header:     make(http.Header),
+	}, nil
+}
+
+func TestPingCloudServerReachable(t *testing.T) {
+	orig := pingCloudTransport
+	pingCloudTransport = &fakePingTransport{statusCode: http.StatusOK}
+	defer func() { pingCloudTransport = orig }()
+
+	msg := pingCloudServer("https://cloud.example.com", "token")().(cloudPingMsg)
+	if msg.status != "reachable" {
+		t.Fatalf("status = %q, want reachable", msg.status)
+	}
+	if msg.err != nil {
+		t.Fatalf("unexpected err: %v", msg.err)
+	}
+}
+
+func TestPingCloudServerUnauthorized(t *testing.T) {
+	orig := pingCloudTransport
+	pingCloudTransport = &fakePingTransport{statusCode: http.StatusUnauthorized}
+	defer func() { pingCloudTransport = orig }()
+
+	msg := pingCloudServer("https://cloud.example.com", "token")().(cloudPingMsg)
+	if msg.status != "unauthorized" {
+		t.Fatalf("status = %q, want unauthorized", msg.status)
+	}
+}
+
+func TestPingCloudServerUnreachable(t *testing.T) {
+	orig := pingCloudTransport
+	pingCloudTransport = &fakePingTransport{err: errors.New("connection refused")}
+	defer func() { pingCloudTransport = orig }()
+
+	msg := pingCloudServer("https://cloud.example.com", "token")().(cloudPingMsg)
+	if msg.status != "unreachable" {
+		t.Fatalf("status = %q, want unreachable", msg.status)
+	}
+	if msg.err == nil {
+		t.Fatal("expected error for unreachable server")
+	}
+}
+
+func TestPingCloudServer5xxIsUnreachable(t *testing.T) {
+	orig := pingCloudTransport
+	pingCloudTransport = &fakePingTransport{statusCode: http.StatusServiceUnavailable}
+	defer func() { pingCloudTransport = orig }()
+
+	msg := pingCloudServer("https://cloud.example.com", "token")().(cloudPingMsg)
+	if msg.status != "unreachable" {
+		t.Fatalf("status = %q, want unreachable", msg.status)
+	}
+}
+
+func TestPingCloudServerMalformedURL(t *testing.T) {
+	orig := pingCloudTransport
+	pingCloudTransport = &fakePingTransport{}
+	defer func() { pingCloudTransport = orig }()
+
+	msg := pingCloudServer("not a url", "token")().(cloudPingMsg)
+	if msg.status != "unreachable" {
+		t.Fatalf("status = %q, want unreachable", msg.status)
 	}
 }
 
