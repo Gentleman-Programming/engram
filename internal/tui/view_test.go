@@ -199,6 +199,72 @@ func TestViewRouterAndErrorRendering(t *testing.T) {
 	}
 }
 
+func TestViewCloudEnrollmentRendersProjects(t *testing.T) {
+	m := New(nil, "")
+	m.Screen = ScreenCloudEnrollment
+	m.CloudEnrollmentItems = []cloudEnrollmentItem{
+		{project: "sias-app", enrolled: true},
+		{project: "dotfiles", enrolled: false},
+	}
+	m.Cursor = 1
+
+	out := m.viewCloudEnrollment()
+	if !strings.Contains(out, "Enroll projects") {
+		t.Fatal("view should render screen title")
+	}
+	if !strings.Contains(out, "sias-app") {
+		t.Fatal("view should render first project")
+	}
+	if !strings.Contains(out, "dotfiles") {
+		t.Fatal("view should render second project")
+	}
+	if !strings.Contains(out, "[enrolled]") {
+		t.Fatal("view should render enrolled badge")
+	}
+	if !strings.Contains(out, "[not enrolled]") {
+		t.Fatal("view should render not enrolled badge")
+	}
+}
+
+func TestViewCloudEnrollmentEmptyState(t *testing.T) {
+	m := New(nil, "")
+	m.Screen = ScreenCloudEnrollment
+	m.CloudEnrollmentItems = nil
+
+	out := m.viewCloudEnrollment()
+	if !strings.Contains(out, "No projects") {
+		t.Fatalf("view should show empty state, got %q", out)
+	}
+	if !strings.Contains(out, "esc back") {
+		t.Fatal("empty state should include esc back hint")
+	}
+}
+
+func TestViewCloudEnrollmentLongName(t *testing.T) {
+	m := New(nil, "")
+	m.Screen = ScreenCloudEnrollment
+	m.CloudEnrollmentItems = []cloudEnrollmentItem{
+		{project: strings.Repeat("a", 200), enrolled: false},
+	}
+	m.Cursor = 0
+
+	out := m.viewCloudEnrollment()
+	if !strings.Contains(out, "[not enrolled]") {
+		t.Fatal("view should render badge for long project name")
+	}
+}
+
+func TestViewCloudEnrollmentErrorSurfaced(t *testing.T) {
+	m := New(nil, "")
+	m.Screen = ScreenCloudEnrollment
+	m.CloudEnrollmentError = "database locked"
+
+	out := m.viewCloudEnrollment()
+	if !strings.Contains(out, "database locked") {
+		t.Fatal("view should render enrollment error")
+	}
+}
+
 func TestViewSearchResultsAndScrollIndicator(t *testing.T) {
 	m := New(nil, "")
 	m.Screen = ScreenSearchResults
@@ -471,6 +537,7 @@ func TestViewRouterCoversAllScreens(t *testing.T) {
 		{screen: ScreenCloudSettings, want: "Cloud sync settings"},
 		{screen: ScreenCloudConfig, want: "Configure cloud server"},
 		{screen: ScreenCloudStatus, want: "Cloud status"},
+		{screen: ScreenCloudEnrollment, want: "Enroll projects"},
 	}
 
 	for _, tt := range tests {

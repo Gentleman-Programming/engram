@@ -382,6 +382,220 @@ func TestCloudStatusNavigation(t *testing.T) {
 	}
 }
 
+func TestCloudEnrollmentNavigation(t *testing.T) {
+	fx := newTestFixture(t)
+	m := New(fx.store, "")
+	m.Screen = ScreenCloudSettings
+	m.Cursor = 2 // Enroll projects
+
+	updatedModel, cmd := m.handleCloudSettingsKeys("enter")
+	updated := updatedModel.(Model)
+	if updated.Screen != ScreenCloudEnrollment {
+		t.Fatalf("enter on Enroll projects should open ScreenCloudEnrollment, got %v", updated.Screen)
+	}
+	if !updated.CloudEnrollmentLoading {
+		t.Fatal("enrollment screen should set loading state")
+	}
+	if cmd == nil {
+		t.Fatal("enter on Enroll projects should load enrollment list")
+	}
+
+	updatedModel, _ = updated.handleCloudEnrollmentKeys("esc")
+	updated = updatedModel.(Model)
+	if updated.Screen != ScreenCloudSettings {
+		t.Fatalf("esc from enrollment should return to settings, got %v", updated.Screen)
+	}
+
+	m = New(fx.store, "")
+	m.Screen = ScreenCloudEnrollment
+	updatedModel, _ = m.handleCloudEnrollmentKeys("q")
+	updated = updatedModel.(Model)
+	if updated.Screen != ScreenCloudSettings {
+		t.Fatalf("q from enrollment should return to settings, got %v", updated.Screen)
+	}
+}
+
+func TestCloudEnrollmentLoadedMessage(t *testing.T) {
+	m := New(nil, "")
+	m.Screen = ScreenCloudEnrollment
+	m.CloudEnrollmentLoading = true
+
+	updatedModel, _ := m.Update(cloudEnrollmentLoadedMsg{
+		items: []cloudEnrollmentItem{
+			{project: "sias-app", enrolled: true},
+			{project: "dotfiles", enrolled: false},
+		},
+	})
+	updated := updatedModel.(Model)
+	if updated.CloudEnrollmentLoading {
+		t.Fatal("loaded message should clear loading state")
+	}
+	if len(updated.CloudEnrollmentItems) != 2 {
+		t.Fatalf("items = %d, want 2", len(updated.CloudEnrollmentItems))
+	}
+	if updated.CloudEnrollmentItems[0].project != "sias-app" || !updated.CloudEnrollmentItems[0].enrolled {
+		t.Fatal("first item should be sias-app enrolled")
+	}
+	if updated.CloudEnrollmentItems[1].project != "dotfiles" || updated.CloudEnrollmentItems[1].enrolled {
+		t.Fatal("second item should be dotfiles not enrolled")
+	}
+}
+
+func TestCloudEnrollmentToggleEnrollsProject(t *testing.T) {
+	fx := newTestFixture(t)
+	m := New(fx.store, "")
+	m.Screen = ScreenCloudEnrollment
+	m.CloudEnrollmentItems = []cloudEnrollmentItem{{project: "engram", enrolled: false}}
+	m.Cursor = 0
+
+	updatedModel, cmd := m.handleCloudEnrollmentKeys(" ")
+	updated := updatedModel.(Model)
+	if updated.CloudEnrollmentItems[0].enrolled {
+		t.Fatal("toggle should not mutate list until reload completes")
+	}
+	if cmd == nil {
+		t.Fatal("space on unenrolled project should return reload command")
+	}
+
+	msg := cmd()
+	loaded, ok := msg.(cloudEnrollmentLoadedMsg)
+	if !ok {
+		t.Fatalf("message type = %T", msg)
+	}
+	if loaded.err != nil {
+		t.Fatalf("unexpected reload error: %v", loaded.err)
+	}
+	if len(loaded.items) != 1 || !loaded.items[0].enrolled {
+		t.Fatal("engram should be enrolled after toggle")
+	}
+}
+
+func TestCloudEnrollmentToggleUnenrollsProject(t *testing.T) {
+	fx := newTestFixture(t)
+	if err := fx.store.EnrollProject("engram"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+
+	m := New(fx.store, "")
+	m.Screen = ScreenCloudEnrollment
+	m.CloudEnrollmentItems = []cloudEnrollmentItem{{project: "engram", enrolled: true}}
+	m.Cursor = 0
+
+	updatedModel, cmd := m.handleCloudEnrollmentKeys(" ")
+	updated := updatedModel.(Model)
+	if !updated.CloudEnrollmentItems[0].enrolled {
+		t.Fatal("toggle should not mutate list until reload completes")
+	}
+	if cmd == nil {
+		t.Fatal("space on enrolled project should return reload command")
+	}
+
+	msg := cmd()
+	loaded, ok := msg.(cloudEnrollmentLoadedMsg)
+	if !ok {
+		t.Fatalf("message type = %T", msg)
+	}
+	if loaded.err != nil {
+		t.Fatalf("unexpected reload error: %v", loaded.err)
+	}
+	if len(loaded.items) != 1 || loaded.items[0].enrolled {
+		t.Fatal("engram should be unenrolled after toggle")
+	}
+}
+
+func TestCloudEnrollmentToggleErrorSurfaced(t *testing.T) {
+	fx := newTestFixture(t)
+	if err := fx.store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	m := New(fx.store, "")
+	m.Screen = ScreenCloudEnrollment
+	m.CloudEnrollmentItems = []cloudEnrollmentItem{{project: "engram", enrolled: false}}
+	m.Cursor = 0
+
+	updatedModel, cmd := m.handleCloudEnrollmentKeys(" ")
+	updated := updatedModel.(Model)
+	if cmd == nil {
+		t.Fatal("space should return command even on error")
+	}
+
+	msg := cmd()
+	loaded, ok := msg.(cloudEnrollmentLoadedMsg)
+	if !ok {
+		t.Fatalf("message type = %T", msg)
+	}
+	if loaded.err == nil {
+		t.Fatal("expected error from closed store")
+	}
+	if updated.CloudEnrollmentError == "" {
+		t.Fatal("toggle error should be surfaced in model")
+	}
+}
+
+func TestCloudEnrollmentNavigationBoundaries(t *testing.T) {
+	m := New(nil, "")
+	m.Screen = ScreenCloudEnrollment
+	m.CloudEnrollmentItems = []cloudEnrollmentItem{
+		{project: "a", enrolled: false},
+		{project: "b", enrolled: true},
+		{project: "c", enrolled: false},
+	}
+	m.Cursor = 0
+
+	updatedModel, _ := m.handleCloudEnrollmentKeys("up")
+	if updatedModel.(Model).Cursor != 0 {
+		t.Fatal("up at top should stay at zero")
+	}
+
+	m.Cursor = 2
+	updatedModel, _ = m.handleCloudEnrollmentKeys("down")
+	if updatedModel.(Model).Cursor != 2 {
+		t.Fatal("down at bottom should stay at last item")
+	}
+
+	updatedModel, _ = m.handleCloudEnrollmentKeys("k")
+	if updatedModel.(Model).Cursor != 1 {
+		t.Fatal("k should decrement cursor")
+	}
+
+	updatedModel, _ = updatedModel.(Model).handleCloudEnrollmentKeys("j")
+	if updatedModel.(Model).Cursor != 2 {
+		t.Fatal("j should increment cursor")
+	}
+}
+
+func TestCloudEnrollmentSpaceOnEmptyListDoesNothing(t *testing.T) {
+	m := New(nil, "")
+	m.Screen = ScreenCloudEnrollment
+	m.CloudEnrollmentItems = nil
+
+	updatedModel, cmd := m.handleCloudEnrollmentKeys(" ")
+	updated := updatedModel.(Model)
+	if updated.Screen != ScreenCloudEnrollment {
+		t.Fatal("space on empty list should stay on screen")
+	}
+	if cmd != nil {
+		t.Fatal("space on empty list should not return command")
+	}
+}
+
+func TestCloudEnrollmentSpaceWithoutStoreDoesNothing(t *testing.T) {
+	m := New(nil, "")
+	m.Screen = ScreenCloudEnrollment
+	m.CloudEnrollmentItems = []cloudEnrollmentItem{{project: "engram", enrolled: false}}
+	m.Cursor = 0
+
+	updatedModel, cmd := m.handleCloudEnrollmentKeys(" ")
+	updated := updatedModel.(Model)
+	if updated.Screen != ScreenCloudEnrollment {
+		t.Fatal("space without store should stay on screen")
+	}
+	if cmd != nil {
+		t.Fatal("space without store should not return command")
+	}
+}
+
 func TestCloudStatusLoadedMessage(t *testing.T) {
 	fx := newTestFixture(t)
 	m := New(fx.store, "")
@@ -890,6 +1104,7 @@ func TestHandleKeyPressRouterAndClearsError(t *testing.T) {
 		ScreenCloudSettings,
 		ScreenCloudConfig,
 		ScreenCloudStatus,
+		ScreenCloudEnrollment,
 	} {
 		m.Screen = screen
 		m.ErrorMsg = "old error"

@@ -37,6 +37,7 @@ const (
 	ScreenCloudSettings
 	ScreenCloudConfig
 	ScreenCloudStatus
+	ScreenCloudEnrollment
 )
 
 // Cloud Config form focus positions.
@@ -112,6 +113,16 @@ type cloudStatusLoadedMsg struct {
 	pendingCount int64
 	lastError    string
 	err          error
+}
+
+type cloudEnrollmentItem struct {
+	project  string
+	enrolled bool
+}
+
+type cloudEnrollmentLoadedMsg struct {
+	items []cloudEnrollmentItem
+	err   error
 }
 
 // ─── Model ───────────────────────────────────────────────────────────────────
@@ -190,6 +201,11 @@ type Model struct {
 	CloudStatusPendingCount int64
 	CloudStatusLastError    string
 	CloudStatusLoading      bool
+
+	// Cloud enrollment
+	CloudEnrollmentItems   []cloudEnrollmentItem
+	CloudEnrollmentError   string
+	CloudEnrollmentLoading bool
 }
 
 // New creates a new TUI model connected to the given store.
@@ -333,5 +349,23 @@ func loadCloudStatusCmd(s *store.Store) tea.Cmd {
 			pendingCount: count,
 			lastError:    lastErr,
 		}
+	}
+}
+
+func loadCloudEnrollmentCmd(s *store.Store) tea.Cmd {
+	return func() tea.Msg {
+		names, err := s.ListProjectNames()
+		if err != nil {
+			return cloudEnrollmentLoadedMsg{err: err}
+		}
+		items := make([]cloudEnrollmentItem, 0, len(names))
+		for _, name := range names {
+			enrolled, err := s.IsProjectEnrolled(name)
+			if err != nil {
+				return cloudEnrollmentLoadedMsg{err: err}
+			}
+			items = append(items, cloudEnrollmentItem{project: name, enrolled: enrolled})
+		}
+		return cloudEnrollmentLoadedMsg{items: items}
 	}
 }

@@ -151,6 +151,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case cloudEnrollmentLoadedMsg:
+		m.CloudEnrollmentLoading = false
+		if msg.err != nil {
+			m.CloudEnrollmentError = msg.err.Error()
+			return m, nil
+		}
+		m.CloudEnrollmentItems = msg.items
+		m.CloudEnrollmentError = ""
+		return m, nil
+
 	case cloudPingMsg:
 		// Status screen and config screen share the same ping result type, but
 		// update different model fields.
@@ -248,6 +258,8 @@ func (m Model) handleKeyPress(key string) (tea.Model, tea.Cmd) {
 		return m.handleCloudConfigKeys(key)
 	case ScreenCloudStatus:
 		return m.handleCloudStatusKeys(key)
+	case ScreenCloudEnrollment:
+		return m.handleCloudEnrollmentKeys(key)
 	}
 	return m, nil
 }
@@ -721,6 +733,14 @@ func (m Model) handleCloudSettingsKeys(key string) (tea.Model, tea.Cmd) {
 			m.CloudStatusPendingCount = 0
 			m.CloudStatusLastError = ""
 			return m, loadCloudStatusCmd(m.store)
+		case 2: // Enroll projects
+			m.PrevScreen = ScreenCloudSettings
+			m.Screen = ScreenCloudEnrollment
+			m.Cursor = 0
+			m.CloudEnrollmentLoading = true
+			m.CloudEnrollmentItems = nil
+			m.CloudEnrollmentError = ""
+			return m, loadCloudEnrollmentCmd(m.store)
 		case len(cloudSettingsMenuItems) - 1: // Back
 			m.Screen = ScreenDashboard
 			m.Cursor = 0
@@ -741,6 +761,43 @@ func (m Model) handleCloudStatusKeys(key string) (tea.Model, tea.Cmd) {
 	case "esc", "q":
 		m.Screen = ScreenCloudSettings
 		m.Cursor = 1 // keep View status selected for smoother back navigation
+		return m, nil
+	}
+	return m, nil
+}
+
+// ─── Cloud Enrollment ────────────────────────────────────────────────────────
+
+func (m Model) handleCloudEnrollmentKeys(key string) (tea.Model, tea.Cmd) {
+	count := len(m.CloudEnrollmentItems)
+
+	switch key {
+	case "up", "k":
+		if m.Cursor > 0 {
+			m.Cursor--
+		}
+	case "down", "j":
+		if m.Cursor < count-1 {
+			m.Cursor++
+		}
+	case " ":
+		if count > 0 && m.Cursor < count && m.store != nil {
+			item := m.CloudEnrollmentItems[m.Cursor]
+			m.CloudEnrollmentError = ""
+			if item.enrolled {
+				if err := m.store.UnenrollProject(item.project); err != nil {
+					m.CloudEnrollmentError = err.Error()
+				}
+			} else {
+				if err := m.store.EnrollProject(item.project); err != nil {
+					m.CloudEnrollmentError = err.Error()
+				}
+			}
+			return m, loadCloudEnrollmentCmd(m.store)
+		}
+	case "esc", "q":
+		m.Screen = ScreenCloudSettings
+		m.Cursor = 2 // keep Enroll projects selected for smoother back navigation
 		return m, nil
 	}
 	return m, nil

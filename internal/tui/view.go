@@ -86,6 +86,8 @@ func (m Model) View() string {
 		content = m.viewCloudConfig()
 	case ScreenCloudStatus:
 		content = m.viewCloudStatus()
+	case ScreenCloudEnrollment:
+		content = m.viewCloudEnrollment()
 	default:
 		content = "Unknown screen"
 	}
@@ -262,6 +264,56 @@ func (m Model) viewCloudStatus() string {
 	b.WriteString(renderCloudStatusRow("Last error:", lastError))
 
 	b.WriteString(helpStyle.Render("\n  esc/q back"))
+
+	return b.String()
+}
+
+func (m Model) viewCloudEnrollment() string {
+	var b strings.Builder
+
+	b.WriteString(headerStyle.Render("  Enroll projects"))
+	b.WriteString("\n\n")
+
+	if len(m.CloudEnrollmentItems) == 0 {
+		b.WriteString(noResultsStyle.Render("No projects found."))
+		b.WriteString("\n\n")
+		if m.CloudEnrollmentError != "" {
+			b.WriteString(errorStyle.Render("Error: " + m.CloudEnrollmentError))
+			b.WriteString("\n")
+		}
+		b.WriteString(helpStyle.Render("  esc back"))
+		return b.String()
+	}
+
+	for i, item := range m.CloudEnrollmentItems {
+		cursor := "  "
+		style := listItemStyle
+		if i == m.Cursor {
+			cursor = "▸ "
+			style = listSelectedStyle
+		}
+
+		badge := "[not enrolled]"
+		badgeStyle := timestampStyle
+		if item.enrolled {
+			badge = "[enrolled]"
+			badgeStyle = lipgloss.NewStyle().Foreground(colorGreen).Bold(true)
+		}
+
+		line := fmt.Sprintf("%s%s  %s",
+			cursor,
+			style.Render(truncateStr(item.project, 50)),
+			badgeStyle.Render(badge))
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+
+	if m.CloudEnrollmentError != "" {
+		b.WriteString("\n")
+		b.WriteString(errorStyle.Render("Error: " + m.CloudEnrollmentError))
+	}
+
+	b.WriteString(helpStyle.Render("\n  j/k navigate • space toggle • esc/q back"))
 
 	return b.String()
 }

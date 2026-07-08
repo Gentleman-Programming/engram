@@ -166,6 +166,34 @@ func TestScreenCloudStatusConstant(t *testing.T) {
 	}
 }
 
+func TestScreenCloudEnrollmentConstant(t *testing.T) {
+	if ScreenCloudEnrollment != ScreenCloudStatus+1 {
+		t.Fatalf("ScreenCloudEnrollment = %d, want %d (ScreenCloudStatus+1)", ScreenCloudEnrollment, ScreenCloudStatus+1)
+	}
+
+	seen := map[Screen]bool{}
+	for _, s := range []Screen{
+		ScreenDashboard,
+		ScreenSearch,
+		ScreenSearchResults,
+		ScreenRecent,
+		ScreenObservationDetail,
+		ScreenTimeline,
+		ScreenSessions,
+		ScreenSessionDetail,
+		ScreenSetup,
+		ScreenCloudSettings,
+		ScreenCloudConfig,
+		ScreenCloudStatus,
+		ScreenCloudEnrollment,
+	} {
+		if seen[s] {
+			t.Fatalf("screen constant %d is duplicated", s)
+		}
+		seen[s] = true
+	}
+}
+
 func TestLoadCloudConfigCommand(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "cloud.json"), []byte(`{"server_url":"https://cloud.example.com","token":"file-token"}`), 0o644); err != nil {
@@ -259,6 +287,47 @@ func TestLoadCloudStatusCommandHandlesSyncStateError(t *testing.T) {
 	}
 	if loaded.err == nil {
 		t.Fatal("expected error when sync state cannot be read")
+	}
+}
+
+func TestLoadCloudEnrollmentCommand(t *testing.T) {
+	fx := newTestFixture(t)
+	if err := fx.store.EnrollProject("engram"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+
+	msg := loadCloudEnrollmentCmd(fx.store)()
+	loaded, ok := msg.(cloudEnrollmentLoadedMsg)
+	if !ok {
+		t.Fatalf("message type = %T", msg)
+	}
+	if loaded.err != nil {
+		t.Fatalf("unexpected error: %v", loaded.err)
+	}
+	if len(loaded.items) != 1 {
+		t.Fatalf("items = %d, want 1", len(loaded.items))
+	}
+	if loaded.items[0].project != "engram" {
+		t.Fatalf("project = %q, want engram", loaded.items[0].project)
+	}
+	if !loaded.items[0].enrolled {
+		t.Fatal("engram should be enrolled")
+	}
+}
+
+func TestLoadCloudEnrollmentCommandHandlesError(t *testing.T) {
+	fx := newTestFixture(t)
+	if err := fx.store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	msg := loadCloudEnrollmentCmd(fx.store)()
+	loaded, ok := msg.(cloudEnrollmentLoadedMsg)
+	if !ok {
+		t.Fatalf("message type = %T", msg)
+	}
+	if loaded.err == nil {
+		t.Fatal("expected error when store is closed")
 	}
 }
 
