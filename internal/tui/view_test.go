@@ -108,6 +108,56 @@ func TestViewCloudConfigRendersTokenSource(t *testing.T) {
 	}
 }
 
+func TestViewCloudConfigBranches(t *testing.T) {
+	// Empty input value and non-input focus renders value style.
+	m := New(nil, "")
+	m.Screen = ScreenCloudConfig
+	m.CloudConfigFocus = cloudConfigFocusTest
+	m.CloudConfigInput.SetValue("")
+	out := m.viewCloudConfig()
+	if !strings.Contains(out, "Server URL") {
+		t.Fatal("view should render URL label for empty input")
+	}
+
+	// Spinner branch during save.
+	m.CloudConfigFocus = cloudConfigFocusSave
+	m.CloudConfigInput.SetValue("https://cloud.example.com")
+	m.CloudConfigSaving = true
+	out = m.viewCloudConfig()
+	if !strings.Contains(out, "Pinging server") {
+		t.Fatalf("view should render spinner branch, got %q", out)
+	}
+
+	// Ping status branch.
+	m.CloudConfigSaving = false
+	m.CloudConfigPingStatus = "reachable"
+	out = m.viewCloudConfig()
+	if !strings.Contains(out, "Status: reachable") {
+		t.Fatalf("view should render ping status, got %q", out)
+	}
+
+	// Token source hint hidden for env token.
+	m.CloudConfigTokenSource = TokenSourceEnv
+	out = m.viewCloudConfig()
+	if strings.Contains(out, "Set ENGRAM_CLOUD_TOKEN") {
+		t.Fatal("env token source should not show fallback hint")
+	}
+
+	// Token source hint shown for file token.
+	m.CloudConfigTokenSource = TokenSourceFile
+	out = m.viewCloudConfig()
+	if !strings.Contains(out, "Set ENGRAM_CLOUD_TOKEN") {
+		t.Fatal("file token source should show fallback hint")
+	}
+
+	// Token source hint shown when no token.
+	m.CloudConfigTokenSource = TokenSourceNone
+	out = m.viewCloudConfig()
+	if !strings.Contains(out, "Set ENGRAM_CLOUD_TOKEN") {
+		t.Fatal("no token source should show fallback hint")
+	}
+}
+
 func TestViewCloudStatusRendersConfiguredState(t *testing.T) {
 	m := New(nil, "")
 	m.Screen = ScreenCloudStatus

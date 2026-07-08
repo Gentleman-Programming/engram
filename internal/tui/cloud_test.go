@@ -222,4 +222,76 @@ func TestValidateCloudServerURL(t *testing.T) {
 	}
 }
 
+func TestEffectiveCloudTokenEnvWins(t *testing.T) {
+	dir := t.TempDir()
+	writeCloudJSON(t, dir, `{"token":"file-token"}`)
+
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "env-token")
+	if got := effectiveCloudToken(dir); got != "env-token" {
+		t.Fatalf("token = %q, want %q", got, "env-token")
+	}
+}
+
+func TestEffectiveCloudTokenFileFallback(t *testing.T) {
+	dir := t.TempDir()
+	writeCloudJSON(t, dir, `{"token":"file-token"}`)
+
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "")
+	if got := effectiveCloudToken(dir); got != "file-token" {
+		t.Fatalf("token = %q, want %q", got, "file-token")
+	}
+}
+
+func TestEffectiveCloudTokenNone(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "")
+	if got := effectiveCloudToken(dir); got != "" {
+		t.Fatalf("token = %q, want empty", got)
+	}
+}
+
+func TestEffectiveCloudTokenTrimsWhitespace(t *testing.T) {
+	dir := t.TempDir()
+	writeCloudJSON(t, dir, `{"token":"  file-token  "}`)
+
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "")
+	if got := effectiveCloudToken(dir); got != "file-token" {
+		t.Fatalf("token = %q, want %q", got, "file-token")
+	}
+
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "  env-token  ")
+	if got := effectiveCloudToken(dir); got != "env-token" {
+		t.Fatalf("env token = %q, want %q", got, "env-token")
+	}
+}
+
+func TestSaveCloudConfigMissingFileCreatesNew(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := saveCloudConfig(dir, "https://new.example.com"); err != nil {
+		t.Fatalf("saveCloudConfig: %v", err)
+	}
+
+	b, err := os.ReadFile(filepath.Join(dir, "cloud.json"))
+	if err != nil {
+		t.Fatalf("read cloud.json: %v", err)
+	}
+	if !bytes.Contains(b, []byte(`"server_url": "https://new.example.com"`)) {
+		t.Fatalf("server_url not written in %s", string(b))
+	}
+	if bytes.Contains(b, []byte(`"token"`)) {
+		t.Fatalf("token must not appear in fresh save, got %s", string(b))
+	}
+}
+
+func TestSaveCloudConfigMalformedJSONReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	writeCloudJSON(t, dir, `{not json`)
+
+	if err := saveCloudConfig(dir, "https://new.example.com"); err == nil {
+		t.Fatal("expected error for malformed cloud.json")
+	}
+}
+
 

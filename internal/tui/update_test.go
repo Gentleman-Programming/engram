@@ -693,6 +693,159 @@ func TestCloudConfigTabCyclesFocus(t *testing.T) {
 	}
 }
 
+func TestCloudConfigInputKeys(t *testing.T) {
+	m := New(nil, "")
+	m.Screen = ScreenCloudConfig
+	m.CloudConfigFocus = cloudConfigFocusInput
+	m.CloudConfigInput.Focus()
+	m.CloudConfigInput.SetValue("https://cloud.example.com")
+
+	updatedModel, _ := m.handleCloudConfigInputKeys(tea.KeyMsg{Type: tea.KeyTab})
+	updated := updatedModel.(Model)
+	if updated.CloudConfigFocus != cloudConfigFocusTest {
+		t.Fatalf("tab should move focus to test, got %d", updated.CloudConfigFocus)
+	}
+	if updated.CloudConfigInput.Focused() {
+		t.Fatal("input should blur on tab")
+	}
+
+	updated.CloudConfigFocus = cloudConfigFocusInput
+	updated.CloudConfigInput.Focus()
+	updatedModel, _ = updated.handleCloudConfigInputKeys(tea.KeyMsg{Type: tea.KeyShiftTab})
+	updated = updatedModel.(Model)
+	if updated.CloudConfigFocus != cloudConfigFocusCancel {
+		t.Fatalf("shift+tab should move focus to cancel, got %d", updated.CloudConfigFocus)
+	}
+
+	updated.CloudConfigFocus = cloudConfigFocusInput
+	updated.CloudConfigInput.Focus()
+	updatedModel, _ = updated.handleCloudConfigInputKeys(tea.KeyMsg{Type: tea.KeyEnter})
+	updated = updatedModel.(Model)
+	if updated.CloudConfigFocus != cloudConfigFocusSave {
+		t.Fatalf("enter should move focus to save, got %d", updated.CloudConfigFocus)
+	}
+
+	updated.CloudConfigFocus = cloudConfigFocusInput
+	updated.CloudConfigInput.Focus()
+	updatedModel, _ = updated.handleCloudConfigInputKeys(tea.KeyMsg{Type: tea.KeyEscape})
+	updated = updatedModel.(Model)
+	if updated.Screen != ScreenCloudSettings {
+		t.Fatalf("esc should return to cloud settings, got %v", updated.Screen)
+	}
+	if updated.CloudConfigFocus != cloudConfigFocusInput {
+		t.Fatalf("esc should reset focus to input, got %d", updated.CloudConfigFocus)
+	}
+
+	updated = New(nil, "")
+	updated.Screen = ScreenCloudConfig
+	updated.CloudConfigFocus = cloudConfigFocusInput
+	updated.CloudConfigInput.Focus()
+	updatedModel, cmd := updated.handleCloudConfigInputKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	updated = updatedModel.(Model)
+	if updated.CloudConfigInput.Value() != "a" {
+		t.Fatalf("typed key should update input, got %q", updated.CloudConfigInput.Value())
+	}
+	if cmd == nil {
+		t.Fatal("typing key should return input update command")
+	}
+}
+
+func TestCloudConfigKeysVimAliasesAndUnknown(t *testing.T) {
+	m := New(nil, "")
+	m.Screen = ScreenCloudConfig
+	m.CloudConfigFocus = cloudConfigFocusTest
+
+	updatedModel, _ := m.handleCloudConfigKeys("k")
+	updated := updatedModel.(Model)
+	if updated.CloudConfigFocus != cloudConfigFocusInput {
+		t.Fatalf("k should move to input, got %d", updated.CloudConfigFocus)
+	}
+	if !updated.CloudConfigInput.Focused() {
+		t.Fatal("k moving to input should focus it")
+	}
+
+	updatedModel, _ = updated.handleCloudConfigKeys("j")
+	updated = updatedModel.(Model)
+	if updated.CloudConfigFocus != cloudConfigFocusTest {
+		t.Fatalf("j should move to test, got %d", updated.CloudConfigFocus)
+	}
+	if updated.CloudConfigInput.Focused() {
+		t.Fatal("j moving away from input should blur it")
+	}
+
+	updatedModel, cmd := updated.handleCloudConfigKeys("x")
+	updated = updatedModel.(Model)
+	if updated.CloudConfigFocus != cloudConfigFocusTest {
+		t.Fatalf("unknown key should not change focus, got %d", updated.CloudConfigFocus)
+	}
+	if cmd != nil {
+		t.Fatal("unknown key should not return command")
+	}
+}
+
+func TestActivateCloudConfigFocusTargets(t *testing.T) {
+	fx := newTestFixture(t)
+
+	// Input focus moves to Save without a command.
+	m := New(fx.store, "")
+	m.Screen = ScreenCloudConfig
+	m.CloudConfigFocus = cloudConfigFocusInput
+	m.CloudConfigInput.Focus()
+	updatedModel, cmd := m.activateCloudConfigFocus()
+	updated := updatedModel.(Model)
+	if updated.CloudConfigFocus != cloudConfigFocusSave {
+		t.Fatalf("input focus should move to save, got %d", updated.CloudConfigFocus)
+	}
+	if cmd != nil {
+		t.Fatal("input focus should not return command")
+	}
+
+	// Test focus starts a test ping.
+	m = New(fx.store, "")
+	m.Screen = ScreenCloudConfig
+	m.CloudConfigFocus = cloudConfigFocusTest
+	m.CloudConfigInput.SetValue("https://cloud.example.com")
+	updatedModel, cmd = m.activateCloudConfigFocus()
+	updated = updatedModel.(Model)
+	if !updated.CloudConfigTest {
+		t.Fatal("test focus should set CloudConfigTest")
+	}
+	if cmd == nil {
+		t.Fatal("test focus should return ping command")
+	}
+
+	// Save focus starts a save ping.
+	m = New(fx.store, "")
+	m.Screen = ScreenCloudConfig
+	m.CloudConfigFocus = cloudConfigFocusSave
+	m.CloudConfigInput.SetValue("https://cloud.example.com")
+	updatedModel, cmd = m.activateCloudConfigFocus()
+	updated = updatedModel.(Model)
+	if !updated.CloudConfigSaving {
+		t.Fatal("save focus should set CloudConfigSaving")
+	}
+	if cmd == nil {
+		t.Fatal("save focus should return ping command")
+	}
+
+	// Cancel focus returns to cloud settings.
+	m = New(fx.store, "")
+	m.Screen = ScreenCloudConfig
+	m.CloudConfigFocus = cloudConfigFocusCancel
+	m.CloudConfigInput.Focus()
+	updatedModel, cmd = m.activateCloudConfigFocus()
+	updated = updatedModel.(Model)
+	if updated.Screen != ScreenCloudSettings {
+		t.Fatalf("cancel focus should return to settings, got %v", updated.Screen)
+	}
+	if updated.CloudConfigFocus != cloudConfigFocusInput {
+		t.Fatalf("cancel focus should reset focus to input, got %d", updated.CloudConfigFocus)
+	}
+	if cmd != nil {
+		t.Fatal("cancel focus should not return command")
+	}
+}
+
 func TestCloudConfigSaveValidURLPersists(t *testing.T) {
 	fx := newTestFixture(t)
 	server := httptest.NewServer(httpHandlerWithStatus(200))
