@@ -75,6 +75,39 @@ func TestRenderObservationListItem(t *testing.T) {
 	}
 }
 
+func TestViewCloudConfigRendersTokenSource(t *testing.T) {
+	m := New(nil, "")
+	m.Screen = ScreenCloudConfig
+	m.CloudConfigServerURL = "https://cloud.example.com"
+	m.CloudConfigTokenSource = TokenSourceNone
+
+	out := m.View()
+	if !strings.Contains(out, "Configure cloud server") {
+		t.Fatal("view should render screen title")
+	}
+	if !strings.Contains(out, "Server URL") {
+		t.Fatal("view should render server URL label")
+	}
+	if !strings.Contains(out, "Token:") {
+		t.Fatal("view should render token label")
+	}
+	if !strings.Contains(out, TokenSourceNone) {
+		t.Fatalf("view should render token source %q", TokenSourceNone)
+	}
+
+	m.CloudConfigTokenSource = TokenSourceEnv
+	out = m.View()
+	if !strings.Contains(out, TokenSourceEnv) {
+		t.Fatalf("view should render env token source %q", TokenSourceEnv)
+	}
+
+	m.CloudConfigTokenSource = TokenSourceFile
+	out = m.View()
+	if !strings.Contains(out, TokenSourceFile) {
+		t.Fatalf("view should render file token source %q", TokenSourceFile)
+	}
+}
+
 func TestViewRouterAndErrorRendering(t *testing.T) {
 	m := New(nil, "")
 	m.Screen = Screen(999)
@@ -385,6 +418,7 @@ func TestViewRouterCoversAllScreens(t *testing.T) {
 		{screen: ScreenSessionDetail, want: "Session:"},
 		{screen: ScreenSetup, want: "Setup"},
 		{screen: ScreenCloudSettings, want: "Cloud sync settings"},
+		{screen: ScreenCloudConfig, want: "Configure cloud server"},
 	}
 
 	for _, tt := range tests {

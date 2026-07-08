@@ -1382,6 +1382,13 @@ func TestSessionObservationsAddPromptImportAndSyncChunks(t *testing.T) {
 	}
 }
 
+func TestStoreDataDir(t *testing.T) {
+	s := newTestStore(t)
+	if got := s.DataDir(); got == "" {
+		t.Fatal("DataDir should not be empty")
+	}
+}
+
 func TestStoreLocalSyncFoundationEnqueuesCoreMutations(t *testing.T) {
 	s := newTestStore(t)
 

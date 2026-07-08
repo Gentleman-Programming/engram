@@ -37,6 +37,15 @@ const (
 	ScreenSessionDetail
 	ScreenSetup
 	ScreenCloudSettings
+	ScreenCloudConfig
+)
+
+// Cloud Config form focus positions.
+const (
+	cloudConfigFocusInput = iota
+	cloudConfigFocusTest
+	cloudConfigFocusSave
+	cloudConfigFocusCancel
 )
 
 type SessionDeleteState int
@@ -96,6 +105,17 @@ type sessionDeletedMsg struct {
 
 type setupInstallMsg struct {
 	result *setup.Result
+	err    error
+}
+
+type cloudConfigLoadedMsg struct {
+	serverURL   string
+	tokenSource string
+	err         error
+}
+
+type cloudPingMsg struct {
+	status string
 	err    error
 }
 
@@ -159,6 +179,16 @@ type Model struct {
 	SetupAllowlistApplied bool   // true = allowlist was added successfully
 	SetupAllowlistError   string // error message if allowlist injection failed
 	SetupSpinner          spinner.Model
+
+	// Cloud config
+	CloudConfigInput      textinput.Model
+	CloudConfigServerURL  string
+	CloudConfigTokenSource string
+	CloudConfigError      string
+	CloudConfigFocus      int
+	CloudConfigPingStatus string
+	CloudConfigSaving     bool
+	CloudConfigTest       bool // true when the current ping is a test, not a save
 }
 
 // New creates a new TUI model connected to the given store.
@@ -168,16 +198,22 @@ func New(s *store.Store, version string) Model {
 	ti.CharLimit = 256
 	ti.Width = 60
 
+	ci := textinput.New()
+	ci.Placeholder = "https://cloud.example.com"
+	ci.CharLimit = 256
+	ci.Width = 60
+
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(colorLavender)
 
 	return Model{
-		store:        s,
-		Version:      version,
-		Screen:       ScreenDashboard,
-		SearchInput:  ti,
-		SetupSpinner: sp,
+		store:          s,
+		Version:        version,
+		Screen:         ScreenDashboard,
+		SearchInput:    ti,
+		CloudConfigInput: ci,
+		SetupSpinner:   sp,
 	}
 }
 
@@ -266,3 +302,17 @@ func installAgent(agentName string) tea.Cmd {
 
 var installAgentFn = setup.Install
 var addClaudeCodeAllowlistFn = setup.AddClaudeCodeAllowlist
+
+func loadCloudConfigCmd(dataDir string) tea.Cmd {
+	return func() tea.Msg {
+		cc, err := loadCloudConfig(dataDir)
+		if err != nil {
+			return cloudConfigLoadedMsg{err: err}
+		}
+		return cloudConfigLoadedMsg{
+			serverURL:   cc.ServerURL,
+			tokenSource: tokenSourceMessage(dataDir),
+			err:         nil,
+		}
+	}
+}
