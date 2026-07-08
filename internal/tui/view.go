@@ -84,6 +84,8 @@ func (m Model) View() string {
 		content = m.viewCloudSettings()
 	case ScreenCloudConfig:
 		content = m.viewCloudConfig()
+	case ScreenCloudStatus:
+		content = m.viewCloudStatus()
 	default:
 		content = "Unknown screen"
 	}
@@ -233,6 +235,50 @@ func (m Model) viewCloudConfig() string {
 	b.WriteString(helpStyle.Render("\n  tab/shift+tab cycle • enter select • esc/q back"))
 
 	return b.String()
+}
+
+func (m Model) viewCloudStatus() string {
+	var b strings.Builder
+
+	b.WriteString(headerStyle.Render("  Cloud status"))
+	b.WriteString("\n\n")
+
+	if m.CloudStatusServerURL == "" {
+		b.WriteString(noResultsStyle.Render("Cloud status: not configured"))
+		b.WriteString("\n")
+		b.WriteString(helpStyle.Render("\n  esc/q back"))
+		return b.String()
+	}
+
+	b.WriteString(renderCloudStatusRow("Server URL:", m.CloudStatusServerURL))
+	b.WriteString(renderCloudStatusRow("Health:", renderCloudHealth(m.CloudStatusHealth)))
+	b.WriteString(renderCloudStatusRow("Token source:", m.CloudStatusTokenSource))
+	b.WriteString(renderCloudStatusRow("Last sync:", m.CloudStatusLastSync))
+	b.WriteString(renderCloudStatusRow("Pending:", fmt.Sprintf("%d", m.CloudStatusPendingCount)))
+	lastError := m.CloudStatusLastError
+	if lastError == "" {
+		lastError = "none"
+	}
+	b.WriteString(renderCloudStatusRow("Last error:", lastError))
+
+	b.WriteString(helpStyle.Render("\n  esc/q back"))
+
+	return b.String()
+}
+
+func renderCloudStatusRow(label, value string) string {
+	return fmt.Sprintf("%s %s\n", detailLabelStyle.Render(label), detailValueStyle.Render(value))
+}
+
+func renderCloudHealth(health string) string {
+	switch health {
+	case "reachable":
+		return lipgloss.NewStyle().Foreground(colorGreen).Bold(true).Render("reachable")
+	case "unreachable":
+		return lipgloss.NewStyle().Foreground(colorRed).Bold(true).Render("unreachable")
+	default:
+		return lipgloss.NewStyle().Foreground(colorYellow).Render(health)
+	}
 }
 
 // renderMenu renders a vertical list of selectable menu items with a cursor.

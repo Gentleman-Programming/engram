@@ -139,6 +139,33 @@ func TestScreenCloudConfigConstant(t *testing.T) {
 	}
 }
 
+func TestScreenCloudStatusConstant(t *testing.T) {
+	if ScreenCloudStatus != ScreenCloudConfig+1 {
+		t.Fatalf("ScreenCloudStatus = %d, want %d (ScreenCloudConfig+1)", ScreenCloudStatus, ScreenCloudConfig+1)
+	}
+
+	seen := map[Screen]bool{}
+	for _, s := range []Screen{
+		ScreenDashboard,
+		ScreenSearch,
+		ScreenSearchResults,
+		ScreenRecent,
+		ScreenObservationDetail,
+		ScreenTimeline,
+		ScreenSessions,
+		ScreenSessionDetail,
+		ScreenSetup,
+		ScreenCloudSettings,
+		ScreenCloudConfig,
+		ScreenCloudStatus,
+	} {
+		if seen[s] {
+			t.Fatalf("screen constant %d is duplicated", s)
+		}
+		seen[s] = true
+	}
+}
+
 func TestLoadCloudConfigCommand(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "cloud.json"), []byte(`{"server_url":"https://cloud.example.com","token":"file-token"}`), 0o644); err != nil {
@@ -155,6 +182,83 @@ func TestLoadCloudConfigCommand(t *testing.T) {
 	}
 	if loaded.serverURL != "https://cloud.example.com" {
 		t.Fatalf("serverURL = %q", loaded.serverURL)
+	}
+}
+
+func TestLoadCloudStatusCommand(t *testing.T) {
+	fx := newTestFixture(t)
+	if err := os.WriteFile(filepath.Join(fx.store.DataDir(), "cloud.json"), []byte(`{"server_url":"https://cloud.example.com","token":"file-token"}`), 0o644); err != nil {
+		t.Fatalf("write cloud.json: %v", err)
+	}
+	if err := fx.store.EnrollProject("engram"); err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	// Adding an observation in an enrolled project creates a pending mutation.
+	if _, err := fx.store.AddObservation(store.AddObservationParams{
+		SessionID: fx.sessionID,
+		Type:      "decision",
+		Title:     "Cloud status test",
+		Content:   "pending mutation content",
+		Project:   "engram",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	msg := loadCloudStatusCmd(fx.store)()
+	loaded, ok := msg.(cloudStatusLoadedMsg)
+	if !ok {
+		t.Fatalf("message type = %T", msg)
+	}
+	if loaded.err != nil {
+		t.Fatalf("unexpected error: %v", loaded.err)
+	}
+	if loaded.serverURL != "https://cloud.example.com" {
+		t.Fatalf("serverURL = %q", loaded.serverURL)
+	}
+	if loaded.tokenSource != TokenSourceFile {
+		t.Fatalf("tokenSource = %q, want %q", loaded.tokenSource, TokenSourceFile)
+	}
+	if loaded.pendingCount < 1 {
+		t.Fatalf("pendingCount = %d, want >= 1", loaded.pendingCount)
+	}
+	if loaded.lastSync == "" {
+		t.Fatal("lastSync should not be empty")
+	}
+}
+
+func TestLoadCloudStatusCommandHandlesConfigError(t *testing.T) {
+	fx := newTestFixture(t)
+	if err := os.WriteFile(filepath.Join(fx.store.DataDir(), "cloud.json"), []byte(`not json`), 0o644); err != nil {
+		t.Fatalf("write cloud.json: %v", err)
+	}
+
+	msg := loadCloudStatusCmd(fx.store)()
+	loaded, ok := msg.(cloudStatusLoadedMsg)
+	if !ok {
+		t.Fatalf("message type = %T", msg)
+	}
+	if loaded.err == nil {
+		t.Fatal("expected error for malformed cloud.json")
+	}
+}
+
+func TestLoadCloudStatusCommandHandlesSyncStateError(t *testing.T) {
+	fx := newTestFixture(t)
+	if err := os.WriteFile(filepath.Join(fx.store.DataDir(), "cloud.json"), []byte(`{"server_url":"https://cloud.example.com"}`), 0o644); err != nil {
+		t.Fatalf("write cloud.json: %v", err)
+	}
+	if err := fx.store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	msg := loadCloudStatusCmd(fx.store)()
+	loaded, ok := msg.(cloudStatusLoadedMsg)
+	if !ok {
+		t.Fatalf("message type = %T", msg)
+	}
+	if loaded.err == nil {
+		t.Fatal("expected error when sync state cannot be read")
 	}
 }
 

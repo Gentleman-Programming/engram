@@ -352,6 +352,90 @@ func TestCloudConfigNavigation(t *testing.T) {
 	}
 }
 
+func TestCloudStatusNavigation(t *testing.T) {
+	fx := newTestFixture(t)
+	m := New(fx.store, "")
+	m.Screen = ScreenCloudSettings
+	m.Cursor = 1 // View status
+
+	updatedModel, cmd := m.handleCloudSettingsKeys("enter")
+	updated := updatedModel.(Model)
+	if updated.Screen != ScreenCloudStatus {
+		t.Fatalf("enter on View status should open ScreenCloudStatus, got %v", updated.Screen)
+	}
+	if cmd == nil {
+		t.Fatal("enter on View status should load cloud status")
+	}
+
+	updatedModel, _ = updated.handleCloudStatusKeys("esc")
+	updated = updatedModel.(Model)
+	if updated.Screen != ScreenCloudSettings {
+		t.Fatalf("esc from cloud status should return to settings, got %v", updated.Screen)
+	}
+
+	m = New(fx.store, "")
+	m.Screen = ScreenCloudStatus
+	updatedModel, _ = m.handleCloudStatusKeys("q")
+	updated = updatedModel.(Model)
+	if updated.Screen != ScreenCloudSettings {
+		t.Fatalf("q from cloud status should return to settings, got %v", updated.Screen)
+	}
+}
+
+func TestCloudStatusLoadedMessage(t *testing.T) {
+	fx := newTestFixture(t)
+	m := New(fx.store, "")
+	m.Screen = ScreenCloudStatus
+	updatedModel, cmd := m.Update(cloudStatusLoadedMsg{
+		serverURL:    "https://cloud.example.com",
+		tokenSource:  TokenSourceEnv,
+		lastSync:     "2026-07-07 12:00:00",
+		pendingCount: 3,
+		lastError:    "boom",
+	})
+	updated := updatedModel.(Model)
+	if updated.CloudStatusServerURL != "https://cloud.example.com" {
+		t.Fatalf("serverURL = %q", updated.CloudStatusServerURL)
+	}
+	if updated.CloudStatusTokenSource != TokenSourceEnv {
+		t.Fatalf("tokenSource = %q", updated.CloudStatusTokenSource)
+	}
+	if updated.CloudStatusLastSync != "2026-07-07 12:00:00" {
+		t.Fatalf("lastSync = %q", updated.CloudStatusLastSync)
+	}
+	if updated.CloudStatusPendingCount != 3 {
+		t.Fatalf("pendingCount = %d", updated.CloudStatusPendingCount)
+	}
+	if updated.CloudStatusLastError != "boom" {
+		t.Fatalf("lastError = %q", updated.CloudStatusLastError)
+	}
+	if cmd == nil {
+		t.Fatal("loaded status with server URL should trigger ping")
+	}
+}
+
+func TestCloudStatusPingUpdatesHealth(t *testing.T) {
+	m := New(nil, "")
+	m.Screen = ScreenCloudStatus
+	m.CloudStatusServerURL = "https://cloud.example.com"
+
+	updatedModel, _ := m.Update(cloudPingMsg{status: "reachable"})
+	updated := updatedModel.(Model)
+	if updated.CloudStatusHealth != "reachable" {
+		t.Fatalf("health = %q, want reachable", updated.CloudStatusHealth)
+	}
+
+	m.Screen = ScreenCloudStatus
+	updatedModel, _ = m.Update(cloudPingMsg{status: "unreachable", err: errors.New("timeout")})
+	updated = updatedModel.(Model)
+	if updated.CloudStatusHealth != "unreachable" {
+		t.Fatalf("health = %q, want unreachable", updated.CloudStatusHealth)
+	}
+	if updated.CloudStatusLastError != "timeout" {
+		t.Fatalf("lastError = %q, want timeout", updated.CloudStatusLastError)
+	}
+}
+
 func TestCloudConfigTabCyclesFocus(t *testing.T) {
 	m := New(nil, "")
 	m.Screen = ScreenCloudConfig
@@ -805,6 +889,7 @@ func TestHandleKeyPressRouterAndClearsError(t *testing.T) {
 		ScreenSetup,
 		ScreenCloudSettings,
 		ScreenCloudConfig,
+		ScreenCloudStatus,
 	} {
 		m.Screen = screen
 		m.ErrorMsg = "old error"

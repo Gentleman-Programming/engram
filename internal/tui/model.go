@@ -36,6 +36,7 @@ const (
 	ScreenSetup
 	ScreenCloudSettings
 	ScreenCloudConfig
+	ScreenCloudStatus
 )
 
 // Cloud Config form focus positions.
@@ -102,6 +103,15 @@ type cloudConfigLoadedMsg struct {
 type cloudPingMsg struct {
 	status string
 	err    error
+}
+
+type cloudStatusLoadedMsg struct {
+	serverURL    string
+	tokenSource  string
+	lastSync     string
+	pendingCount int64
+	lastError    string
+	err          error
 }
 
 // ─── Model ───────────────────────────────────────────────────────────────────
@@ -171,6 +181,15 @@ type Model struct {
 	CloudConfigPingStatus string
 	CloudConfigSaving     bool
 	CloudConfigTest       bool // true when the current ping is a test, not a save
+
+	// Cloud status
+	CloudStatusServerURL    string
+	CloudStatusTokenSource  string
+	CloudStatusHealth       string
+	CloudStatusLastSync     string
+	CloudStatusPendingCount int64
+	CloudStatusLastError    string
+	CloudStatusLoading      bool
 }
 
 // New creates a new TUI model connected to the given store.
@@ -285,6 +304,34 @@ func loadCloudConfigCmd(dataDir string) tea.Cmd {
 			serverURL:   cc.ServerURL,
 			tokenSource: tokenSourceMessage(dataDir),
 			err:         nil,
+		}
+	}
+}
+
+func loadCloudStatusCmd(s *store.Store) tea.Cmd {
+	return func() tea.Msg {
+		cc, err := loadCloudConfig(s.DataDir())
+		if err != nil {
+			return cloudStatusLoadedMsg{err: err}
+		}
+		state, err := s.GetSyncState(store.DefaultSyncTargetKey)
+		if err != nil {
+			return cloudStatusLoadedMsg{err: err}
+		}
+		count, err := s.CountPendingSyncMutations(store.DefaultSyncTargetKey)
+		if err != nil {
+			return cloudStatusLoadedMsg{err: err}
+		}
+		lastErr := ""
+		if state.LastError != nil {
+			lastErr = *state.LastError
+		}
+		return cloudStatusLoadedMsg{
+			serverURL:    cc.ServerURL,
+			tokenSource:  tokenSourceMessage(s.DataDir()),
+			lastSync:     state.UpdatedAt,
+			pendingCount: count,
+			lastError:    lastErr,
 		}
 	}
 }

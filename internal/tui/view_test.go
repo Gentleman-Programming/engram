@@ -108,6 +108,83 @@ func TestViewCloudConfigRendersTokenSource(t *testing.T) {
 	}
 }
 
+func TestViewCloudStatusRendersConfiguredState(t *testing.T) {
+	m := New(nil, "")
+	m.Screen = ScreenCloudStatus
+	m.CloudStatusServerURL = "https://cloud.example.com"
+	m.CloudStatusTokenSource = TokenSourceEnv
+	m.CloudStatusHealth = "reachable"
+	m.CloudStatusLastSync = "2026-07-07 12:00:00"
+	m.CloudStatusPendingCount = 2
+	m.CloudStatusLastError = "last fail"
+
+	out := m.View()
+	if !strings.Contains(out, "Cloud status") {
+		t.Fatal("view should render screen title")
+	}
+	if !strings.Contains(out, "https://cloud.example.com") {
+		t.Fatal("view should render server URL")
+	}
+	if !strings.Contains(out, "reachable") {
+		t.Fatal("view should render health")
+	}
+	if !strings.Contains(out, TokenSourceEnv) {
+		t.Fatal("view should render token source")
+	}
+	if !strings.Contains(out, "2026-07-07 12:00:00") {
+		t.Fatal("view should render last sync")
+	}
+	if !strings.Contains(out, "2") {
+		t.Fatal("view should render pending count")
+	}
+	if !strings.Contains(out, "last fail") {
+		t.Fatal("view should render last error")
+	}
+}
+
+func TestViewCloudStatusNotConfigured(t *testing.T) {
+	m := New(nil, "")
+	m.Screen = ScreenCloudStatus
+	m.CloudStatusServerURL = ""
+
+	out := m.View()
+	if !strings.Contains(out, "Cloud status: not configured") {
+		t.Fatalf("view should show not configured, got %q", out)
+	}
+}
+
+func TestViewCloudStatusHealthAndTokenBranches(t *testing.T) {
+	tests := []struct {
+		name        string
+		health      string
+		tokenSource string
+		pending     int64
+		lastError   string
+		want        []string
+	}{
+		{name: "reachable env", health: "reachable", tokenSource: TokenSourceEnv, pending: 0, lastError: "", want: []string{"reachable", TokenSourceEnv, "0"}},
+		{name: "unreachable file error", health: "unreachable", tokenSource: TokenSourceFile, pending: 5, lastError: "boom", want: []string{"unreachable", TokenSourceFile, "5", "boom"}},
+		{name: "unknown none", health: "unknown", tokenSource: TokenSourceNone, pending: 0, lastError: "", want: []string{"unknown", TokenSourceNone, "0"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := New(nil, "")
+			m.Screen = ScreenCloudStatus
+			m.CloudStatusServerURL = "https://cloud.example.com"
+			m.CloudStatusHealth = tt.health
+			m.CloudStatusTokenSource = tt.tokenSource
+			m.CloudStatusPendingCount = tt.pending
+			m.CloudStatusLastError = tt.lastError
+			out := m.View()
+			for _, w := range tt.want {
+				if !strings.Contains(out, w) {
+					t.Fatalf("output missing %q: %s", w, out)
+				}
+			}
+		})
+	}
+}
+
 func TestViewRouterAndErrorRendering(t *testing.T) {
 	m := New(nil, "")
 	m.Screen = Screen(999)
@@ -393,6 +470,7 @@ func TestViewRouterCoversAllScreens(t *testing.T) {
 		{screen: ScreenSetup, want: "Setup"},
 		{screen: ScreenCloudSettings, want: "Cloud sync settings"},
 		{screen: ScreenCloudConfig, want: "Configure cloud server"},
+		{screen: ScreenCloudStatus, want: "Cloud status"},
 	}
 
 	for _, tt := range tests {

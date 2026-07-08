@@ -1389,6 +1389,52 @@ func TestStoreDataDir(t *testing.T) {
 	}
 }
 
+func TestCountPendingSyncMutations(t *testing.T) {
+	s := newTestStore(t)
+
+	count, err := s.CountPendingSyncMutations(DefaultSyncTargetKey)
+	if err != nil {
+		t.Fatalf("CountPendingSyncMutations empty: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("count = %d, want 0", count)
+	}
+
+	if err := s.EnrollProject("engram"); err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	count, err = s.CountPendingSyncMutations(DefaultSyncTargetKey)
+	if err != nil {
+		t.Fatalf("CountPendingSyncMutations after session: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("count = %d, want 1", count)
+	}
+
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "bugfix",
+		Title:     "one",
+		Content:   "content",
+		Project:   "engram",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	count, err = s.CountPendingSyncMutations(DefaultSyncTargetKey)
+	if err != nil {
+		t.Fatalf("CountPendingSyncMutations after observation: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("count = %d, want 2", count)
+	}
+}
+
 func TestStoreLocalSyncFoundationEnqueuesCoreMutations(t *testing.T) {
 	s := newTestStore(t)
 

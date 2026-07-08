@@ -134,7 +134,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.CloudConfigInput.Focus()
 		return m, nil
 
+	case cloudStatusLoadedMsg:
+		m.CloudStatusLoading = false
+		if msg.err != nil {
+			m.CloudStatusLastError = msg.err.Error()
+			return m, nil
+		}
+		m.CloudStatusServerURL = msg.serverURL
+		m.CloudStatusTokenSource = msg.tokenSource
+		m.CloudStatusLastSync = msg.lastSync
+		m.CloudStatusPendingCount = msg.pendingCount
+		m.CloudStatusLastError = msg.lastError
+		if m.CloudStatusServerURL != "" && m.store != nil {
+			// Reuse the existing ping helper (validated by T-03) to check health.
+			return m, pingCloudServer(m.CloudStatusServerURL, effectiveCloudToken(m.store.DataDir()))
+		}
+		return m, nil
+
 	case cloudPingMsg:
+		// Status screen and config screen share the same ping result type, but
+		// update different model fields.
+		if m.Screen == ScreenCloudStatus {
+			m.CloudStatusHealth = msg.status
+			if msg.err != nil {
+				m.CloudStatusHealth = "unreachable"
+				m.CloudStatusLastError = msg.err.Error()
+				return m, nil
+			}
+			return m, nil
+		}
 		m.CloudConfigSaving = false
 		m.CloudConfigPingStatus = msg.status
 		if msg.err != nil {
@@ -218,6 +246,8 @@ func (m Model) handleKeyPress(key string) (tea.Model, tea.Cmd) {
 		return m.handleCloudSettingsKeys(key)
 	case ScreenCloudConfig:
 		return m.handleCloudConfigKeys(key)
+	case ScreenCloudStatus:
+		return m.handleCloudStatusKeys(key)
 	}
 	return m, nil
 }
@@ -679,6 +709,18 @@ func (m Model) handleCloudSettingsKeys(key string) (tea.Model, tea.Cmd) {
 			m.CloudConfigInput.SetValue("")
 			m.CloudConfigInput.Focus()
 			return m, loadCloudConfigCmd(m.store.DataDir())
+		case 1: // View status
+			m.PrevScreen = ScreenCloudSettings
+			m.Screen = ScreenCloudStatus
+			m.Cursor = 0
+			m.CloudStatusLoading = true
+			m.CloudStatusServerURL = ""
+			m.CloudStatusTokenSource = ""
+			m.CloudStatusHealth = ""
+			m.CloudStatusLastSync = ""
+			m.CloudStatusPendingCount = 0
+			m.CloudStatusLastError = ""
+			return m, loadCloudStatusCmd(m.store)
 		case len(cloudSettingsMenuItems) - 1: // Back
 			m.Screen = ScreenDashboard
 			m.Cursor = 0
@@ -688,6 +730,18 @@ func (m Model) handleCloudSettingsKeys(key string) (tea.Model, tea.Cmd) {
 		m.Screen = ScreenDashboard
 		m.Cursor = 0
 		return m, loadStats(m.store)
+	}
+	return m, nil
+}
+
+// ─── Cloud Status ────────────────────────────────────────────────────────────
+
+func (m Model) handleCloudStatusKeys(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "esc", "q":
+		m.Screen = ScreenCloudSettings
+		m.Cursor = 1 // keep View status selected for smoother back navigation
+		return m, nil
 	}
 	return m, nil
 }

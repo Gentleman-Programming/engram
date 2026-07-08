@@ -3766,6 +3766,25 @@ func (s *Store) CountPendingNonEnrolledSyncMutations(targetKey string) ([]Pendin
 	return counts, rows.Err()
 }
 
+// CountPendingSyncMutations returns the number of unacknowledged mutations for
+// the given target that are currently eligible to sync (global/project-empty or
+// enrolled projects).
+func (s *Store) CountPendingSyncMutations(targetKey string) (int64, error) {
+	targetKey = normalizeSyncTargetKey(targetKey)
+	var count int64
+	row := s.db.QueryRow(`
+		SELECT COUNT(*)
+		FROM sync_mutations sm
+		LEFT JOIN sync_enrolled_projects sep ON sm.project = sep.project
+		WHERE sm.target_key = ? AND sm.acked_at IS NULL
+		  AND (sm.project = '' OR sep.project IS NOT NULL)
+	`, targetKey)
+	if err := row.Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 // SkipAckNonEnrolledMutations acks (marks as skipped) all pending mutations
 // that belong to non-enrolled projects, preventing journal bloat. Empty-project
 // mutations are never skipped — they always sync regardless of enrollment.
