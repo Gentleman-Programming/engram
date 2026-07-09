@@ -1,14 +1,11 @@
-FROM --platform=$BUILDPLATFORM golang:1.25.10-alpine AS builder
-
-ARG TARGETOS
-ARG TARGETARCH
+FROM golang:1.25.10-alpine AS builder
 
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -o /out/engram ./cmd/engram
+RUN CGO_ENABLED=0 go build -o /out/engram ./cmd/engram
 
 RUN wget -O /out/us-west-2-bundle.pem https://truststore.pki.rds.amazonaws.com/us-west-2/us-west-2-bundle.pem
 
