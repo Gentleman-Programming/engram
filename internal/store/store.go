@@ -6587,6 +6587,11 @@ func sanitizeFTS(query string) string {
 	for i, w := range words {
 		// Strip existing quotes to avoid double-quoting
 		w = strings.Trim(w, `"`)
+		// Double interior double-quotes: FTS5 escapes a literal " inside a
+		// quoted phrase by doubling it (""). Without this, `hello"world`
+		// becomes `"hello"world"` — an unterminated string literal that crashes
+		// the query with "SQL logic error: unterminated string". See #574.
+		w = strings.ReplaceAll(w, `"`, `""`)
 		words[i] = `"` + w + `"`
 	}
 	return strings.Join(words, " ")

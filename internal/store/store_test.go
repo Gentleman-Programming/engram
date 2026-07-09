@@ -8802,3 +8802,31 @@ func TestSearch_WeightedBM25Ranking(t *testing.T) {
 			results[1].ID, results[1].Title, results[1].Rank)
 	}
 }
+
+// TestSanitizeFTS verifies sanitizeFTS escapes interior double-quotes per FTS5
+// string-literal rules, preventing "unterminated string" crashes on inputs like
+// `hello"world`. See issue #574.
+func TestSanitizeFTS(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"plain word", "foo", `"foo"`},
+		{"multiple words", "fix auth bug", `"fix" "auth" "bug"`},
+		{"interior double-quote (the bug)", `foo"bar`, `"foo""bar"`},
+		{"already quoted", `"hello"`, `"hello"`},
+		{"multiple interior quotes", `a"b"c`, `"a""b""c"`},
+		{"just quotes", `""`, `""`},
+		{"mixed quote and plain", `hello"world test`, `"hello""world" "test"`},
+		{"empty input", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sanitizeFTS(tc.input)
+			if got != tc.want {
+				t.Errorf("sanitizeFTS(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
