@@ -202,6 +202,9 @@ func (s *CloudServer) pushBodyLimit() int64 {
 func (s *CloudServer) routes() {
 	s.mux = http.NewServeMux()
 	s.mux.HandleFunc("GET /health", s.handleHealth)
+	// Nauta ingress routes /api/nauta-engram/* to this container without
+	// stripping the prefix, and health-checks /api/nauta-engram/health.
+	s.mux.HandleFunc("GET /api/nauta-engram/health", s.handleHealth)
 	var dashboardStore dashboard.DashboardStore
 	if store, ok := s.store.(dashboard.DashboardStore); ok {
 		dashboardStore = store
