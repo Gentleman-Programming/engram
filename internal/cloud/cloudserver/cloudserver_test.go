@@ -74,6 +74,60 @@ func TestHandlerPushRejectsInvalidClientCreatedAt(t *testing.T) {
 	}
 }
 
+func TestHandlerServesRoutesUnderIngressBasePath(t *testing.T) {
+	srv := New(&fakeStore{}, fakeAuth{}, 0)
+
+	health := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(health, httptest.NewRequest(http.MethodGet, ingressBasePath+"/health", nil))
+	if health.Code != http.StatusOK {
+		t.Fatalf("expected %s/health=200, got %d", ingressBasePath, health.Code)
+	}
+
+	// Sync routes must resolve under the ingress prefix too — anything but 404
+	// proves the route matched (the ingress forwards without stripping the prefix).
+	manifest := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(manifest, httptest.NewRequest(http.MethodGet, ingressBasePath+"/sync/pull?project=proj-a", nil))
+	if manifest.Code == http.StatusNotFound {
+		t.Fatalf("expected %s/sync/pull to resolve, got 404 body=%q", ingressBasePath, manifest.Body.String())
+	}
+}
+
+func TestHandlerRewritesDashboardResponsesUnderIngressBasePath(t *testing.T) {
+	srv := New(&fakeStore{}, fakeAuth{}, 0)
+
+	// Unauthenticated dashboard request must redirect within the prefix, or the
+	// browser lands on a path the ingress does not route.
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, ingressBasePath+"/dashboard", nil))
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("expected redirect for unauthenticated %s/dashboard, got %d", ingressBasePath, rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); !strings.HasPrefix(loc, ingressBasePath+"/dashboard/login") {
+		t.Fatalf("expected Location under %s/dashboard/login, got %q", ingressBasePath, loc)
+	}
+
+	// Login page HTML must reference dashboard URLs under the prefix.
+	login := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(login, httptest.NewRequest(http.MethodGet, ingressBasePath+"/dashboard/login", nil))
+	if login.Code != http.StatusOK {
+		t.Fatalf("expected %s/dashboard/login=200, got %d", ingressBasePath, login.Code)
+	}
+	body := login.Body.String()
+	if !strings.Contains(body, `"`+ingressBasePath+`/dashboard`) {
+		t.Fatalf("expected login HTML to contain prefixed dashboard URLs, got %q", body)
+	}
+	if strings.Contains(body, `"/dashboard`) {
+		t.Fatalf("expected no unprefixed dashboard URLs in login HTML, got %q", body)
+	}
+
+	// Non-prefixed access keeps emitting unprefixed URLs.
+	direct := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(direct, httptest.NewRequest(http.MethodGet, "/dashboard", nil))
+	if loc := direct.Header().Get("Location"); !strings.HasPrefix(loc, "/dashboard/login") {
+		t.Fatalf("expected direct Location under /dashboard/login, got %q", loc)
+	}
+}
+
 func (s *fakeStore) ReadChunk(_ context.Context, _ string, chunkID string) ([]byte, error) {
 	if s.errRead != nil {
 		return nil, s.errRead

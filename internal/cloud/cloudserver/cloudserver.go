@@ -185,11 +185,19 @@ func (s *CloudServer) Start() error {
 	return s.listenAndServe(addr, s.Handler())
 }
 
+// ingressBasePath is the prefix under which the Nauta ingress exposes this
+// service; the ingress does not strip it, so every route must also resolve
+// beneath it.
+const ingressBasePath = "/api/nauta-engram"
+
 func (s *CloudServer) Handler() http.Handler {
 	if s.mux == nil {
 		s.routes()
 	}
-	return s.mux
+	outer := http.NewServeMux()
+	outer.Handle("/", s.mux)
+	outer.Handle(ingressBasePath+"/", http.StripPrefix(ingressBasePath, prefixRewrite(ingressBasePath, s.mux)))
+	return outer
 }
 
 func (s *CloudServer) pushBodyLimit() int64 {
@@ -202,9 +210,6 @@ func (s *CloudServer) pushBodyLimit() int64 {
 func (s *CloudServer) routes() {
 	s.mux = http.NewServeMux()
 	s.mux.HandleFunc("GET /health", s.handleHealth)
-	// Nauta ingress routes /api/nauta-engram/* to this container without
-	// stripping the prefix, and health-checks /api/nauta-engram/health.
-	s.mux.HandleFunc("GET /api/nauta-engram/health", s.handleHealth)
 	var dashboardStore dashboard.DashboardStore
 	if store, ok := s.store.(dashboard.DashboardStore); ok {
 		dashboardStore = store
