@@ -82,6 +82,7 @@ For a direct registry-based deploy example, use:
 | Doc | Purpose |
 |---|---|
 | [Quickstart](./quickstart.md) | One recommended path first, then authenticated mode |
+| [macOS Autosync Setup](./engram-autosync-setup.md) | From zero to always-on autosync via launchd, with the verified root cause of stale cloud copies |
 | [GHCR Compose Example](./docker-compose.ghcr.yml) | Pull-and-run deployment sample for Dokploy/Coolify/Portainer/VPS |
 | [Branding](./branding.md) | Engram Cloud visual identity, asset usage, previews |
 | [Technical Cloud Reference](../../DOCS.md#cloud-cli-opt-in) | Full CLI + env/runtime details |

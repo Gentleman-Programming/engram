@@ -212,6 +212,7 @@ For authenticated mode, upgrade flow, dashboard behavior, reason codes, and full
 
 - [Engram Cloud docs landing](docs/engram-cloud/README.md)
 - [Engram Cloud quickstart](docs/engram-cloud/quickstart.md)
+- [Always-on autosync setup on macOS (launchd)](docs/engram-cloud/engram-autosync-setup.md)
 - [DOCS.md — Cloud CLI reference](DOCS.md#cloud-cli-opt-in)
 - [DOCS.md — Cloud Autosync](DOCS.md#cloud-autosync)
 
@@ -386,6 +387,7 @@ Full environment variable reference → [DOCS.md#environment-variables](DOCS.md#
 | --------------------------------------------- | ---------------------------------------------------------------------- |
 | [Installation](docs/INSTALLATION.md)          | All install methods + platform support                                 |
 | [Engram Cloud](docs/engram-cloud/README.md)   | Cloud landing page, quickstart, branding, and deep links               |
+| [macOS Autosync Setup](docs/engram-cloud/engram-autosync-setup.md) | From zero to always-on cloud autosync via launchd (install, enroll, daemon, verification) |
 | [Agent Setup](docs/AGENT-SETUP.md)            | Per-agent configuration + Memory Protocol                              |
 | [Codebase Guide](docs/CODEBASE-GUIDE.md)      | Guide to the repository structure, flows, and implementation landmarks |
 | [Architecture](docs/ARCHITECTURE.md)          | How it works + MCP tools + project structure                           |
