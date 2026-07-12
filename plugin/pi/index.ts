@@ -383,6 +383,7 @@ function spawnDetached(command: string, args: readonly string[], cwd?: string): 
     try {
       proc = spawn(command, [...args], {
         cwd,
+        windowsHide: true,
         detached: true,
         stdio: "ignore",
       });
