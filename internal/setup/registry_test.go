@@ -136,7 +136,12 @@ func TestInstallDeclarativeAgentsRegisterMCPAndInstructions(t *testing.T) {
 				}
 			}
 
-			// Instruction surface contains the protocol.
+			// Instruction surface contains the FULL protocol text. Declarative
+			// adapters (this table) are out of scope for --protocol=slim (see
+			// openspec/changes/setup-protocol-flag/proposal.md, Out of Scope):
+			// their protocol text is baked in at setup time from
+			// memoryProtocolMarkdown, not read at runtime, so it must always be
+			// the complete markdown — never a truncated/slim variant.
 			instrRaw, err := os.ReadFile(agent.instrPath())
 			if err != nil {
 				t.Fatalf("read instruction file %s: %v", agent.instrPath(), err)
@@ -144,6 +149,12 @@ func TestInstallDeclarativeAgentsRegisterMCPAndInstructions(t *testing.T) {
 			instr := string(instrRaw)
 			if !strings.Contains(instr, "Engram Persistent Memory") {
 				t.Errorf("%s: instruction file missing protocol content", agent.slug)
+			}
+			if !strings.Contains(instr, "SESSION CLOSE PROTOCOL") {
+				t.Errorf("%s: instruction file missing full-protocol SESSION CLOSE section (adapter is full-only, not slim-eligible)", agent.slug)
+			}
+			if !strings.Contains(instr, "AFTER COMPACTION") {
+				t.Errorf("%s: instruction file missing full-protocol AFTER COMPACTION section (adapter is full-only, not slim-eligible)", agent.slug)
 			}
 			if agent.style == markerBlock {
 				begin := strings.Index(instr, engramMarkerBegin)

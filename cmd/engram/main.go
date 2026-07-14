@@ -659,7 +659,9 @@ func main() {
 	case "projects":
 		cmdProjects(cfg)
 	case "setup":
-		cmdSetup()
+		cmdSetup(cfg)
+	case "protocol-mode":
+		cmdProtocolMode(cfg)
 	case "version", "--version", "-v":
 		fmt.Printf("engram %s\n", version)
 	case "help", "--help", "-h":
@@ -677,7 +679,7 @@ func shouldCheckForUpdates(args []string) bool {
 	}
 	command := strings.ToLower(strings.TrimSpace(args[0]))
 	switch command {
-	case "mcp", "serve":
+	case "mcp", "serve", "protocol-mode":
 		return false
 	case "cloud":
 		return len(args) < 2 || strings.ToLower(strings.TrimSpace(args[1])) != "serve"
@@ -2331,22 +2333,112 @@ func cmdProjectsPrune(cfg store.Config) {
 	fmt.Printf("\nPruned %d project(s): %d sessions, %d prompts removed.\n", len(selected), totalSessions, totalPrompts)
 }
 
-func cmdSetup() {
-	agents := setupSupportedAgents()
+// cmdSetup classifies os.Args[2:] with a two-pass, order-independent
+// algorithm (see openspec/changes/setup-protocol-flag/proposal.md,
+// Approach; JD-014 residual fix). The FIRST pass scans every token and only
+// accumulates classification state — it never dispatches mid-loop. This
+// guarantees a token like --protocol=<v> is always parsed regardless of
+// what precedes it (e.g. an earlier unrecognized hyphen-prefixed token no
+// longer short-circuits the loop before later tokens are read). The SECOND
+// pass dispatches once, in a fixed priority order, using the fully
+// accumulated state: helpSeen > extraBareSeen > unknownFlagSeen > slug
+// present > protocol-only > no args.
+func cmdSetup(cfg store.Config) {
+	args := os.Args[2:]
 
-	// If agent name given directly: engram setup opencode
-	if len(os.Args) > 2 && !strings.HasPrefix(os.Args[2], "-") {
-		result, err := setupInstallAgent(os.Args[2])
+	var (
+		helpSeen        bool
+		protocolRaw     string
+		protocolFlag    bool
+		slug            string
+		slugSeen        bool
+		extraBareSeen   bool
+		unknownFlagSeen bool
+	)
+
+	for i := 0; i < len(args); i++ {
+		token := args[i]
+		switch {
+		case token == "--help" || token == "-h" || token == "help":
+			helpSeen = true
+		case token == "--protocol":
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				protocolRaw = args[i+1]
+				i++
+			} else {
+				// Dangling --protocol: either it's the last token, or the
+				// next token is itself a flag (e.g. `--protocol --help`).
+				// Do NOT consume the next token as the value — leave it to
+				// be classified normally on the next iteration so
+				// `--protocol --help` still shows usage.
+				protocolRaw = ""
+			}
+			protocolFlag = true
+		case strings.HasPrefix(token, "--protocol="):
+			protocolRaw = strings.TrimPrefix(token, "--protocol=")
+			protocolFlag = true
+		case strings.HasPrefix(token, "-"):
+			// Unrecognized hyphen-prefixed token: record it but keep
+			// scanning so a --protocol appearing later is still parsed
+			// (JD-014 residual).
+			unknownFlagSeen = true
+		default:
+			if slugSeen {
+				extraBareSeen = true
+			} else {
+				slug = token
+				slugSeen = true
+			}
+		}
+	}
+
+	switch {
+	case helpSeen:
+		printSetupUsage()
+		return
+	case extraBareSeen:
+		fmt.Fprintln(os.Stderr, "usage: engram setup [<agent>] [--protocol=slim|full]")
+		exitFunc(1)
+		return
+	case unknownFlagSeen:
+		// Preserve the legacy fallback to the interactive menu (keeps
+		// TestCmdSetupHyphenArgFallsBackToInteractive green), but forward
+		// the already-parsed --protocol mode (if any) instead of dropping
+		// it (JD-014), regardless of the unknown flag's position.
+		mode := ""
+		if protocolFlag {
+			mode = resolveProtocolModeFlag(protocolRaw)
+		}
+		cmdSetupInteractive(cfg, mode)
+		return
+	case slugSeen:
+		result, err := setupInstallAgent(slug)
 		if err != nil {
 			fatal(err)
+		}
+		if protocolFlag {
+			applyProtocolMode(cfg, slug, resolveProtocolModeFlag(protocolRaw))
 		}
 		fmt.Printf("✓ Installed %s plugin (%d files)\n", result.Agent, result.Files)
 		fmt.Printf("  → %s\n", result.Destination)
 		printPostInstall(result)
-		return
+	default:
+		// No slug: interactive menu. Mode (if any) applies to whichever
+		// slug the user selects.
+		mode := ""
+		if protocolFlag {
+			mode = resolveProtocolModeFlag(protocolRaw)
+		}
+		cmdSetupInteractive(cfg, mode)
 	}
+}
 
-	// Interactive selection
+// cmdSetupInteractive renders the agent picker and installs the chosen
+// agent. mode is the already-resolved --protocol value ("slim"/"full") from
+// a slug-less invocation, or "" when --protocol was not given at all.
+func cmdSetupInteractive(cfg store.Config, mode string) {
+	agents := setupSupportedAgents()
+
 	fmt.Println("engram setup — Install agent plugin")
 	fmt.Println()
 	fmt.Println("Which agent do you want to set up?")
@@ -2374,10 +2466,115 @@ func cmdSetup() {
 	if err != nil {
 		fatal(err)
 	}
+	if mode != "" {
+		applyProtocolMode(cfg, selected.Name, mode)
+	}
 
 	fmt.Printf("✓ Installed %s plugin (%d files)\n", result.Agent, result.Files)
 	fmt.Printf("  → %s\n", result.Destination)
 	printPostInstall(result)
+}
+
+// printSetupUsage prints `engram setup --help` output. Its Flags section
+// MUST contain the literal "--protocol" (Guarantee 1); it must never read
+// stdin (Guarantee 2 — safe under a detached/non-TTY stdin).
+func printSetupUsage() {
+	fmt.Println("usage: engram setup [<agent>] [--protocol=slim|full]")
+	fmt.Println()
+	fmt.Println("Install an agent plugin (claude-code, opencode, codex, ...).")
+	fmt.Println("Without <agent>, shows an interactive menu.")
+	fmt.Println()
+	fmt.Println("Flags:")
+	fmt.Println("  --protocol=<slim|full>  Set the session-start protocol verbosity for the")
+	fmt.Println("                          installed agent slug (default: full). Unknown or")
+	fmt.Println("                          missing values fall back to full with a warning.")
+	fmt.Println("                          slim currently only takes effect for claude-code,")
+	fmt.Println("                          and only when the installed engram is >= 1.4.0.")
+	fmt.Println("  --help, -h              Show this help and exit.")
+}
+
+// resolveProtocolModeFlag normalizes a --protocol value to "slim" or "full".
+// Unknown or empty values fall back to "full" with a non-fatal stderr
+// warning — an invalid --protocol value never fails `engram setup`.
+func resolveProtocolModeFlag(raw string) string {
+	v := strings.ToLower(strings.TrimSpace(raw))
+	switch v {
+	case setup.ProtocolModeSlim:
+		return setup.ProtocolModeSlim
+	case setup.ProtocolModeFull:
+		return setup.ProtocolModeFull
+	default:
+		fmt.Fprintf(os.Stderr, "warning: unknown --protocol value %q, defaulting to full\n", raw)
+		return setup.ProtocolModeFull
+	}
+}
+
+// applyProtocolMode persists the resolved protocol mode for slug, using the
+// SAME cfg.DataDir main() resolved (ENGRAM_DATA_DIR override included) so the
+// `protocol-mode` subcommand's read path matches this write path (JD-005). A
+// write failure is reported as a non-fatal warning — it never fails setup.
+func applyProtocolMode(cfg store.Config, slug, mode string) {
+	if err := setup.WriteProtocolMode(cfg.DataDir, slug, mode); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not persist protocol mode: %v\n", err)
+	}
+}
+
+// cmdProtocolMode implements `engram protocol-mode <slug>`: prints "slim" to
+// stdout ONLY when the persisted mode for slug is "slim" AND the running
+// binary's version meets the slim floor (>= 1.4.0); any other case
+// (unrecognized slug, missing/corrupted mode file, version below floor,
+// unparseable version) prints "full". All branching lives here in Go so it
+// runs under `go test` — the Claude Code hook scripts only read this single
+// line of stdout.
+func cmdProtocolMode(cfg store.Config) {
+	if len(os.Args) < 3 {
+		fmt.Fprintln(os.Stderr, "usage: engram protocol-mode <slug>")
+		exitFunc(1)
+		return
+	}
+	slug := os.Args[2]
+
+	mode := setup.ReadProtocolMode(cfg.DataDir, slug)
+	if mode == setup.ProtocolModeSlim && meetsProtocolVersionFloor(version) {
+		fmt.Println(setup.ProtocolModeSlim)
+		return
+	}
+	fmt.Println(setup.ProtocolModeFull)
+}
+
+// protocolVersionFloor is the minimum engram version required to honor a
+// persisted "slim" protocol-mode: the slim status block relies on the
+// MCP serverInstructions duplication fix shipped in this release.
+var protocolVersionFloor = [3]int{1, 4, 0}
+
+// meetsProtocolVersionFloor reports whether v (e.g. "1.4.0", "v1.5.2", or the
+// build-time "dev" placeholder) is >= protocolVersionFloor. Any unparseable
+// or empty value returns false — the caller then falls back to "full".
+func meetsProtocolVersionFloor(v string) bool {
+	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
+	if v == "" || v == "dev" {
+		return false
+	}
+
+	segments := strings.SplitN(v, ".", 3)
+	var parts [3]int
+	for i, s := range segments {
+		if i >= 3 {
+			break
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(s))
+		if err != nil {
+			return false
+		}
+		parts[i] = n
+	}
+
+	for i := 0; i < 3; i++ {
+		if parts[i] != protocolVersionFloor[i] {
+			return parts[i] > protocolVersionFloor[i]
+		}
+	}
+	return true
 }
 
 func printPostInstall(result *setup.Result) {

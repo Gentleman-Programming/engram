@@ -1,0 +1,47 @@
+# openspec/config.yaml
+schema: spec-driven
+
+context: |
+  Tech stack: Go 1.25.10, MCP server (mark3labs/mcp-go), Bubble Tea TUI,
+  templ + htmx dashboard, pgx/sqlite storage, Docker/cloud deployment.
+  Architecture: internal/ packages by domain (store, mcp, server, cloud/*,
+  tui, timeutil); cmd/ entrypoints; plugin/ for editor integrations.
+  Testing: go test ./... (unit), go test -tags e2e ./internal/server/...
+  Style: repo-local skills/ + AGENTS.md index enforce TDD, thin plugins,
+  commit hygiene, and architecture guardrails.
+
+strict_tdd: true
+
+testing:
+  test_command: "go test ./..."
+  coverage_command: "go test -cover ./..."
+  e2e_command: "go test -tags e2e ./internal/server/..."
+  lint_command: ""
+  format_command: "gofmt -l ."
+  build_command: "go build ./..."
+  coverage_threshold: 0
+
+rules:
+  proposal:
+    - Include rollback plan for risky changes
+    - Reference the relevant repo-local skill(s) from AGENTS.md when applicable
+  specs:
+    - Use Given/When/Then for scenarios
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY)
+  design:
+    - Include sequence diagrams for complex flows
+    - Document architecture decisions with rationale
+    - Respect existing package boundaries (internal/store, internal/mcp, internal/cloud/*, internal/tui)
+  tasks:
+    - Group by phase, use hierarchical numbering
+    - Keep tasks completable in one session
+  apply:
+    - Follow existing code patterns
+    tdd: true
+    test_command: "go test ./..."
+  verify:
+    test_command: "go test ./... && go test -tags e2e ./internal/server/..."
+    build_command: "go build ./..."
+    coverage_threshold: 0
+  archive:
+    - Warn before merging destructive deltas
