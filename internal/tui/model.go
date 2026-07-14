@@ -115,11 +115,16 @@ type cloudStatusLoadedMsg struct {
 	err          error
 }
 
+// cloudEnrollmentItem represents a single project and its cloud enrollment
+// status, used by the enrollment list screen.
 type cloudEnrollmentItem struct {
 	project  string
 	enrolled bool
 }
 
+// cloudEnrollmentLoadedMsg is delivered when the enrollment list has been
+// loaded from the store, containing all known projects with their enrollment
+// state.
 type cloudEnrollmentLoadedMsg struct {
 	items []cloudEnrollmentItem
 	err   error
@@ -352,6 +357,9 @@ func loadCloudStatusCmd(s *store.Store) tea.Cmd {
 	}
 }
 
+// loadCloudEnrollmentCmd returns a tea.Cmd that fetches all project names
+// from the store along with their enrollment status, delivering the result
+// as a cloudEnrollmentLoadedMsg.
 func loadCloudEnrollmentCmd(s *store.Store) tea.Cmd {
 	return func() tea.Msg {
 		names, err := s.ListProjectNames()
