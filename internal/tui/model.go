@@ -303,6 +303,9 @@ func installAgent(agentName string) tea.Cmd {
 var installAgentFn = setup.Install
 var addClaudeCodeAllowlistFn = setup.AddClaudeCodeAllowlist
 
+// loadCloudConfigCmd returns a tea.Cmd that reads the cloud configuration
+// from disk and delivers a cloudConfigLoadedMsg containing the server URL
+// and token source label.
 func loadCloudConfigCmd(dataDir string) tea.Cmd {
 	return func() tea.Msg {
 		cc, err := loadCloudConfig(dataDir)
