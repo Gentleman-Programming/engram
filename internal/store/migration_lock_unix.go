@@ -3,31 +3,28 @@
 package store
 
 import (
-	"fmt"
+	"errors"
 	"os"
 	"syscall"
 )
 
-// acquireMigrationLock takes an exclusive advisory flock(2) on path, blocking
-// until it is granted, and returns a function that releases the lock. It
-// serializes whole processes around the migration suite so that the
-// destructive check-then-act rebuilds inside migrate() can never run twice
-// concurrently against the same database.
-//
-// The lock file is deliberately left in place after unlock: unlinking it
-// would open a race where a third process re-creates the path and flocks a
-// different inode, defeating the exclusion.
-func acquireMigrationLock(path string) (func(), error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
-	if err != nil {
-		return nil, fmt.Errorf("open migration lock file %q: %w", path, err)
+// tryLockMigrationFile attempts a non-blocking exclusive flock(2) on f.
+// It reports (false, nil) when another process (or file description) holds
+// the lock, so the caller can retry with backoff.
+func tryLockMigrationFile(f *os.File) (bool, error) {
+	err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	if err == nil {
+		return true, nil
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		_ = f.Close()
-		return nil, fmt.Errorf("flock migration lock file %q: %w", path, err)
+	// EWOULDBLOCK/EAGAIN: lock is held elsewhere. EINTR: interrupted by a
+	// signal. Both are retryable, not failures.
+	if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EINTR) {
+		return false, nil
 	}
-	return func() {
-		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-		_ = f.Close()
-	}, nil
+	return false, err
+}
+
+// unlockMigrationFile releases the flock taken by tryLockMigrationFile.
+func unlockMigrationFile(f *os.File) error {
+	return syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 }

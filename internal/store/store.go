@@ -15,11 +15,13 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -630,13 +632,14 @@ func newStore(cfg Config, withRepair bool) (*Store, error) {
 	}
 
 	dbPath := filepath.Join(cfg.DataDir, "engram.db")
-	db, err := openDB("sqlite", dbPath)
+	registerPersistWALHook()
+	db, err := openDB("sqlite", storeDSN(dbPath))
 	if err != nil {
 		return nil, fmt.Errorf("engram: open database: %w", err)
 	}
 	db.SetMaxOpenConns(1)
 
-	if err := configureSQLiteConnection(db); err != nil {
+	if err := primeConnection(db); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -649,10 +652,69 @@ func newStore(cfg Config, withRepair bool) (*Store, error) {
 	return s, nil
 }
 
-// walSwitchRetryBackoffs paces retries of the cold-start `journal_mode = WAL`
-// switch. Kept separate from sqliteWriteRetryBackoffs (used for row writes)
-// because the WAL switch races entire process cold-starts, which need a
-// longer tail to drain.
+// storeDSN builds the modernc.org/sqlite DSN for dbPath with the session
+// pragmas encoded as _pragma query parameters. The driver applies these to
+// EVERY physical connection it opens — including replacements the
+// database/sql pool creates after a context-cancelled query poisons a
+// connection (an interrupted modernc conn fails IsValid/ResetSession and is
+// silently discarded). Configuring only the first connection would leave
+// such replacements with busy_timeout 0 (#559 returns) and no persistent
+// WAL (#477 returns).
+//
+// Order also matters: busy_timeout must be active before the WAL switch;
+// the driver itself sorts busy_timeout ahead of the other _pragma params
+// (see modernc.org/sqlite applyQueryParams), so every fresh connection gets
+// the 5s busy handler before running journal_mode(WAL).
+//
+// The plain-path DSN form is used deliberately: modernc strips everything
+// after '?' from a non-"file:" DSN and passes the path through verbatim, so
+// no URL escaping of the path is needed (a literal '?' inside DataDir is the
+// only unsupported case, as in the driver generally).
+func storeDSN(dbPath string) string {
+	q := url.Values{}
+	for _, p := range []string{
+		"busy_timeout(5000)",
+		"journal_mode(WAL)",
+		"synchronous(NORMAL)",
+		"foreign_keys(1)",
+	} {
+		q.Add("_pragma", p)
+	}
+	return dbPath + "?" + q.Encode()
+}
+
+// persistWALHookOnce guards the process-global driver hook registration.
+var persistWALHookOnce sync.Once
+
+// registerPersistWALHook registers a modernc.org/sqlite connection hook that
+// enables SQLITE_FCNTL_PERSIST_WAL on every new physical connection, so a
+// pool-created replacement connection can never reintroduce the last-closer
+// WAL unlink (#477, #571).
+//
+// The hook is driver-global (it fires for every sqlite connection this
+// process opens, not just the store's), so it is registered exactly once and
+// kept best-effort: engram only opens its own databases, persist-WAL is
+// harmless-to-beneficial on ancillary opens (backups, diagnostics, tests),
+// and a VFS that does not support the file control must not break those
+// opens. The store's own database is strictly verified in primeConnection.
+func registerPersistWALHook() {
+	persistWALHookOnce.Do(func() {
+		sqlite.RegisterConnectionHook(func(conn sqlite.ExecQuerierContext, _ string) error {
+			if fc, ok := conn.(sqlite.FileControl); ok {
+				_, _ = fc.FileControlPersistWAL("main", 1)
+			}
+			return nil
+		})
+	})
+}
+
+// walSwitchRetryBackoffs paces retries of the first connection open during a
+// cold start. The DSN pragmas run inside driver.Open, so when several
+// processes race the rollback-journal→WAL conversion a losing open fails
+// with SQLITE_BUSY as a whole; the retry therefore wraps connection
+// acquisition rather than a single statement. Kept separate from
+// sqliteWriteRetryBackoffs (used for row writes) because the WAL switch
+// races entire process cold-starts, which need a longer tail to drain.
 var walSwitchRetryBackoffs = []time.Duration{
 	10 * time.Millisecond,
 	25 * time.Millisecond,
@@ -661,70 +723,44 @@ var walSwitchRetryBackoffs = []time.Duration{
 	200 * time.Millisecond,
 }
 
-// configureSQLiteConnection applies the session pragmas and enables
-// persistent WAL on the single pooled SQLite connection.
-//
-// Order matters: busy_timeout MUST be set before switching journal_mode to
-// WAL. On a cold start several engram processes race to perform the
-// rollback-journal→WAL conversion, and without a busy timeout the losers
-// fail immediately with SQLITE_BUSY (#559). The switch is additionally
-// wrapped in a bounded retry because busy_timeout does not cover every lock
-// path of a journal-mode change.
-func configureSQLiteConnection(db *sql.DB) error {
+// primeConnection forces the pool to open its first physical connection —
+// running the DSN pragmas — with a bounded cold-start retry, and then
+// verifies persistent WAL is active on the store's database. Replacement
+// connections repeat the same configuration automatically via the DSN
+// pragmas and the driver connection hook; once the database is in WAL mode
+// the journal_mode(WAL) pragma on those opens is a cheap no-op read, so the
+// cold-start SQLITE_BUSY window exists only here.
+func primeConnection(db *sql.DB) error {
 	ctx := context.Background()
 
-	// Pin the pool's single connection so every statement below — and the
-	// persist-WAL file control — lands on the same physical connection.
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		return fmt.Errorf("engram: acquire connection: %w", err)
-	}
-	defer conn.Close()
-
-	const busyTimeoutPragma = "PRAGMA busy_timeout = 5000"
-	if _, err := conn.ExecContext(ctx, busyTimeoutPragma); err != nil {
-		return fmt.Errorf("engram: pragma %q: %w", busyTimeoutPragma, err)
-	}
-
-	const walPragma = "PRAGMA journal_mode = WAL"
+	var conn *sql.Conn
 	var lastErr error
 	for attempt := 0; attempt <= len(walSwitchRetryBackoffs); attempt++ {
-		_, lastErr = conn.ExecContext(ctx, walPragma)
+		conn, lastErr = db.Conn(ctx)
 		if lastErr == nil {
 			break
 		}
 		if !isRetryableSQLiteLockError(lastErr) || attempt == len(walSwitchRetryBackoffs) {
-			return fmt.Errorf("engram: pragma %q: %w", walPragma, lastErr)
+			return fmt.Errorf("engram: open initial connection: %w", lastErr)
 		}
 		time.Sleep(walSwitchRetryBackoffs[attempt])
 	}
+	defer conn.Close()
 
-	for _, p := range []string{
-		"PRAGMA synchronous = NORMAL",
-		"PRAGMA foreign_keys = ON",
-	} {
-		if _, err := conn.ExecContext(ctx, p); err != nil {
-			return fmt.Errorf("engram: pragma %q: %w", p, err)
-		}
-	}
-
-	// Persistent WAL (SQLITE_FCNTL_PERSIST_WAL): keep the -wal/-shm files on
-	// disk when the last connection closes. Without it, SQLite's last-closer
-	// unlink — combined with divergent SHM views across process generations —
-	// can delete a live WAL out from under other processes and corrupt the
-	// database (#477, #571).
-	if err := conn.Raw(func(driverConn any) error {
+	return conn.Raw(func(driverConn any) error {
 		fc, ok := driverConn.(sqlite.FileControl)
 		if !ok {
-			return fmt.Errorf("driver connection %T does not implement sqlite.FileControl", driverConn)
+			return fmt.Errorf("engram: driver connection %T does not implement sqlite.FileControl", driverConn)
 		}
-		_, fcErr := fc.FileControlPersistWAL("main", 1)
-		return fcErr
-	}); err != nil {
-		return fmt.Errorf("engram: enable persistent WAL: %w", err)
-	}
-
-	return nil
+		mode, err := fc.FileControlPersistWAL("main", 1)
+		if err != nil {
+			return fmt.Errorf("engram: enable persistent WAL: %w", err)
+		}
+		if mode != 1 {
+			return fmt.Errorf("engram: persistent WAL not active (file control returned mode %d)", mode)
+		}
+		return nil
+	})
 }
 
 func (s *Store) Close() error {
@@ -740,12 +776,16 @@ func (s *Store) Close() error {
 // suite again on next startup.
 //
 // Gate semantics (runStartupMigrations):
-//   - user_version == schemaVersion → schema is current; skip migrate() and
-//     the startup repair entirely (fast, read-only startup).
+//   - user_version == schemaVersion → schema is current; skip migrate().
 //   - user_version <  schemaVersion → run migrate() under an exclusive
 //     inter-process lock, then stamp user_version.
 //   - user_version >  schemaVersion → database was migrated by a newer engram;
 //     warn and skip (never run old migrations against a newer schema).
+//
+// The enrolled-project sync repair is independent of the gate: it runs on
+// every open (self-healing, as before the gate existed) but inside the same
+// inter-process lock so concurrent startups cannot storm identical backfill
+// writes.
 const schemaVersion = 1
 
 // migrateRunCount counts executions of the gated migration block across the
@@ -753,8 +793,10 @@ const schemaVersion = 1
 // user_version gate skips migrations on already-current databases.
 var migrateRunCount atomic.Int64
 
-// runStartupMigrations runs migrate() (and, when withRepair is set, the
-// enrolled-project sync repair) exactly once per schema generation.
+// runStartupMigrations runs migrate() at most once per schema generation
+// (gated on PRAGMA user_version) and, when withRepair is set, the
+// enrolled-project sync repair on every open — both inside one exclusive
+// inter-process lock.
 //
 // Exclusivity is provided by an advisory file lock (acquireMigrationLock)
 // on <DataDir>/.migrate.lock rather than by one giant BEGIN IMMEDIATE
@@ -765,13 +807,22 @@ var migrateRunCount atomic.Int64
 // would still deadlock on the nested BEGINs. The file lock serializes whole
 // processes around the suite, and the destructive rebuild steps keep their
 // own per-step transactions for atomicity against crashes.
+//
+// The repair deliberately runs on every open — its self-healing behavior
+// predates the gate and must not regress — but it lives inside the same
+// exclusive lock so N concurrent startups cannot storm identical backfill
+// writes; the exclusive (not shared) lock is correct because the repair
+// writes when a backfill is needed. The per-open cost is small: the repair's
+// own fast path (projectNeedsBackfill) is read-only, so a healthy database
+// pays one brief lock acquisition plus a few reads.
 func (s *Store) runStartupMigrations(withRepair bool) error {
 	current, err := s.readUserVersion()
 	if err != nil {
 		return fmt.Errorf("engram: read user_version: %w", err)
 	}
-	if shouldSkipMigrations(current) {
-		return nil
+	skipMigrate := shouldSkipMigrations(current)
+	if skipMigrate && !withRepair {
+		return nil // schema current and no repair requested: nothing to do
 	}
 
 	unlock, err := acquireMigrationLock(filepath.Join(s.cfg.DataDir, ".migrate.lock"))
@@ -780,29 +831,35 @@ func (s *Store) runStartupMigrations(withRepair bool) error {
 	}
 	defer unlock()
 
-	// Double-check under the lock: another process may have completed the
-	// migration while this one was waiting on the lock.
-	current, err = s.readUserVersion()
-	if err != nil {
-		return fmt.Errorf("engram: re-read user_version: %w", err)
-	}
-	if shouldSkipMigrations(current) {
-		return nil
+	ranMigrate := false
+	if !skipMigrate {
+		// Double-check under the lock: another process may have completed
+		// the migration while this one was waiting on the lock.
+		current, err = s.readUserVersion()
+		if err != nil {
+			return fmt.Errorf("engram: re-read user_version: %w", err)
+		}
+		if !shouldSkipMigrations(current) {
+			migrateRunCount.Add(1)
+			if err := s.migrate(); err != nil {
+				return fmt.Errorf("engram: migration: %w", err)
+			}
+			ranMigrate = true
+		}
 	}
 
-	migrateRunCount.Add(1)
-	if err := s.migrate(); err != nil {
-		return fmt.Errorf("engram: migration: %w", err)
-	}
 	if withRepair {
 		if err := s.repairEnrolledProjectSyncMutations(); err != nil {
 			return fmt.Errorf("engram: repair enrolled sync journal: %w", err)
 		}
 	}
+
 	// Stamp only after the full block succeeded so a failed migration or
 	// repair is retried on the next startup (migrate() is idempotent).
-	if err := s.setUserVersion(schemaVersion); err != nil {
-		return fmt.Errorf("engram: set user_version: %w", err)
+	if ranMigrate {
+		if err := s.setUserVersion(schemaVersion); err != nil {
+			return fmt.Errorf("engram: set user_version: %w", err)
+		}
 	}
 	return nil
 }
