@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/timeutil"
@@ -644,15 +645,9 @@ func newStore(cfg Config, withRepair bool) (*Store, error) {
 	}
 
 	s := &Store{db: db, cfg: cfg, hooks: defaultStoreHooks()}
-	if err := s.migrate(); err != nil {
+	if err := s.runStartupMigrations(withRepair); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("engram: migration: %w", err)
-	}
-	if withRepair {
-		if err := s.repairEnrolledProjectSyncMutations(); err != nil {
-			_ = db.Close()
-			return nil, fmt.Errorf("engram: repair enrolled sync journal: %w", err)
-		}
+		return nil, err
 	}
 	return s, nil
 }
@@ -740,6 +735,109 @@ func (s *Store) Close() error {
 }
 
 // ─── Migrations ──────────────────────────────────────────────────────────────
+
+// schemaVersion is the store schema generation recorded in SQLite's
+// PRAGMA user_version. Version 1 corresponds to the fully-migrated v1.19.0
+// schema (the current migrate() suite). Bump this constant whenever migrate()
+// gains a new step so that databases stamped with an older version run the
+// suite again on next startup.
+//
+// Gate semantics (runStartupMigrations):
+//   - user_version == schemaVersion → schema is current; skip migrate() and
+//     the startup repair entirely (fast, read-only startup).
+//   - user_version <  schemaVersion → run migrate() under an exclusive
+//     inter-process lock, then stamp user_version.
+//   - user_version >  schemaVersion → database was migrated by a newer engram;
+//     warn and skip (never run old migrations against a newer schema).
+const schemaVersion = 1
+
+// migrateRunCount counts executions of the gated migration block across the
+// process. It exists for test observability only — asserting that the
+// user_version gate skips migrations on already-current databases.
+var migrateRunCount atomic.Int64
+
+// runStartupMigrations runs migrate() (and, when withRepair is set, the
+// enrolled-project sync repair) exactly once per schema generation.
+//
+// Exclusivity is provided by an advisory file lock (acquireMigrationLock)
+// on <DataDir>/.migrate.lock rather than by one giant BEGIN IMMEDIATE
+// transaction: migrate() executes dozens of statements through s.db and its
+// helper migrations (migrateSyncChunksTable, migrateLegacyObservationsTable)
+// open their own transactions internally, so wrapping the whole suite in a
+// single SQL transaction would require rewriting every migration helper and
+// would still deadlock on the nested BEGINs. The file lock serializes whole
+// processes around the suite, and the destructive rebuild steps keep their
+// own per-step transactions for atomicity against crashes.
+func (s *Store) runStartupMigrations(withRepair bool) error {
+	current, err := s.readUserVersion()
+	if err != nil {
+		return fmt.Errorf("engram: read user_version: %w", err)
+	}
+	if shouldSkipMigrations(current) {
+		return nil
+	}
+
+	unlock, err := acquireMigrationLock(filepath.Join(s.cfg.DataDir, ".migrate.lock"))
+	if err != nil {
+		return fmt.Errorf("engram: acquire migration lock: %w", err)
+	}
+	defer unlock()
+
+	// Double-check under the lock: another process may have completed the
+	// migration while this one was waiting on the lock.
+	current, err = s.readUserVersion()
+	if err != nil {
+		return fmt.Errorf("engram: re-read user_version: %w", err)
+	}
+	if shouldSkipMigrations(current) {
+		return nil
+	}
+
+	migrateRunCount.Add(1)
+	if err := s.migrate(); err != nil {
+		return fmt.Errorf("engram: migration: %w", err)
+	}
+	if withRepair {
+		if err := s.repairEnrolledProjectSyncMutations(); err != nil {
+			return fmt.Errorf("engram: repair enrolled sync journal: %w", err)
+		}
+	}
+	// Stamp only after the full block succeeded so a failed migration or
+	// repair is retried on the next startup (migrate() is idempotent).
+	if err := s.setUserVersion(schemaVersion); err != nil {
+		return fmt.Errorf("engram: set user_version: %w", err)
+	}
+	return nil
+}
+
+// shouldSkipMigrations reports whether the migration suite must be skipped
+// for the given user_version. A database stamped by a NEWER engram is left
+// untouched: running this binary's older migrations against a newer schema
+// is exactly the kind of blind rebuild that corrupts databases.
+func shouldSkipMigrations(current int) bool {
+	if current == schemaVersion {
+		return true
+	}
+	if current > schemaVersion {
+		log.Printf("[store] database schema version %d is newer than this binary's %d — skipping migrations (upgrade engram to manage this database)", current, schemaVersion)
+		return true
+	}
+	return false
+}
+
+func (s *Store) readUserVersion() (int, error) {
+	var v int
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
+		return 0, err
+	}
+	return v, nil
+}
+
+func (s *Store) setUserVersion(v int) error {
+	// PRAGMA does not support bound parameters; v is a trusted constant.
+	_, err := s.db.Exec(fmt.Sprintf("PRAGMA user_version = %d", v))
+	return err
+}
 
 func (s *Store) migrate() error {
 	schema := `
