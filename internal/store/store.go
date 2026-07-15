@@ -6,6 +6,7 @@
 package store
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -610,47 +611,16 @@ func (s *Store) commitHook(tx *sql.Tx) error {
 }
 
 func New(cfg Config) (*Store, error) {
-	if !filepath.IsAbs(cfg.DataDir) {
-		return nil, fmt.Errorf("engram: data directory must be an absolute path, got %q — set ENGRAM_DATA_DIR or ensure your home directory is resolvable", cfg.DataDir)
-	}
-	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
-		return nil, fmt.Errorf("engram: create data dir: %w", err)
-	}
-
-	dbPath := filepath.Join(cfg.DataDir, "engram.db")
-	db, err := openDB("sqlite", dbPath)
-	if err != nil {
-		return nil, fmt.Errorf("engram: open database: %w", err)
-	}
-	db.SetMaxOpenConns(1)
-
-	// SQLite performance pragmas
-	pragmas := []string{
-		"PRAGMA journal_mode = WAL",
-		"PRAGMA busy_timeout = 5000",
-		"PRAGMA synchronous = NORMAL",
-		"PRAGMA foreign_keys = ON",
-	}
-	for _, p := range pragmas {
-		if _, err := db.Exec(p); err != nil {
-			return nil, fmt.Errorf("engram: pragma %q: %w", p, err)
-		}
-	}
-
-	s := &Store{db: db, cfg: cfg, hooks: defaultStoreHooks()}
-	if err := s.migrate(); err != nil {
-		return nil, fmt.Errorf("engram: migration: %w", err)
-	}
-	if err := s.repairEnrolledProjectSyncMutations(); err != nil {
-		return nil, fmt.Errorf("engram: repair enrolled sync journal: %w", err)
-	}
-
-	return s, nil
+	return newStore(cfg, true)
 }
 
 // newWithoutRepair is the same as New but skips repairEnrolledProjectSyncMutations.
 // It exists solely to support tests that need to seed data and call repair manually.
 func newWithoutRepair(cfg Config) (*Store, error) {
+	return newStore(cfg, false)
+}
+
+func newStore(cfg Config, withRepair bool) (*Store, error) {
 	if !filepath.IsAbs(cfg.DataDir) {
 		return nil, fmt.Errorf("engram: data directory must be an absolute path, got %q — set ENGRAM_DATA_DIR or ensure your home directory is resolvable", cfg.DataDir)
 	}
@@ -665,23 +635,101 @@ func newWithoutRepair(cfg Config) (*Store, error) {
 	}
 	db.SetMaxOpenConns(1)
 
-	pragmas := []string{
-		"PRAGMA journal_mode = WAL",
-		"PRAGMA busy_timeout = 5000",
-		"PRAGMA synchronous = NORMAL",
-		"PRAGMA foreign_keys = ON",
-	}
-	for _, p := range pragmas {
-		if _, err := db.Exec(p); err != nil {
-			return nil, fmt.Errorf("engram: pragma %q: %w", p, err)
-		}
+	if err := configureSQLiteConnection(db); err != nil {
+		_ = db.Close()
+		return nil, err
 	}
 
 	s := &Store{db: db, cfg: cfg, hooks: defaultStoreHooks()}
 	if err := s.migrate(); err != nil {
+		_ = db.Close()
 		return nil, fmt.Errorf("engram: migration: %w", err)
 	}
+	if withRepair {
+		if err := s.repairEnrolledProjectSyncMutations(); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("engram: repair enrolled sync journal: %w", err)
+		}
+	}
 	return s, nil
+}
+
+// walSwitchRetryBackoffs paces retries of the cold-start `journal_mode = WAL`
+// switch. Kept separate from sqliteWriteRetryBackoffs (used for row writes)
+// because the WAL switch races entire process cold-starts, which need a
+// longer tail to drain.
+var walSwitchRetryBackoffs = []time.Duration{
+	10 * time.Millisecond,
+	25 * time.Millisecond,
+	50 * time.Millisecond,
+	100 * time.Millisecond,
+	200 * time.Millisecond,
+}
+
+// configureSQLiteConnection applies the session pragmas and enables
+// persistent WAL on the single pooled SQLite connection.
+//
+// Order matters: busy_timeout MUST be set before switching journal_mode to
+// WAL. On a cold start several engram processes race to perform the
+// rollback-journal→WAL conversion, and without a busy timeout the losers
+// fail immediately with SQLITE_BUSY (#559). The switch is additionally
+// wrapped in a bounded retry because busy_timeout does not cover every lock
+// path of a journal-mode change.
+func configureSQLiteConnection(db *sql.DB) error {
+	ctx := context.Background()
+
+	// Pin the pool's single connection so every statement below — and the
+	// persist-WAL file control — lands on the same physical connection.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("engram: acquire connection: %w", err)
+	}
+	defer conn.Close()
+
+	const busyTimeoutPragma = "PRAGMA busy_timeout = 5000"
+	if _, err := conn.ExecContext(ctx, busyTimeoutPragma); err != nil {
+		return fmt.Errorf("engram: pragma %q: %w", busyTimeoutPragma, err)
+	}
+
+	const walPragma = "PRAGMA journal_mode = WAL"
+	var lastErr error
+	for attempt := 0; attempt <= len(walSwitchRetryBackoffs); attempt++ {
+		_, lastErr = conn.ExecContext(ctx, walPragma)
+		if lastErr == nil {
+			break
+		}
+		if !isRetryableSQLiteLockError(lastErr) || attempt == len(walSwitchRetryBackoffs) {
+			return fmt.Errorf("engram: pragma %q: %w", walPragma, lastErr)
+		}
+		time.Sleep(walSwitchRetryBackoffs[attempt])
+	}
+
+	for _, p := range []string{
+		"PRAGMA synchronous = NORMAL",
+		"PRAGMA foreign_keys = ON",
+	} {
+		if _, err := conn.ExecContext(ctx, p); err != nil {
+			return fmt.Errorf("engram: pragma %q: %w", p, err)
+		}
+	}
+
+	// Persistent WAL (SQLITE_FCNTL_PERSIST_WAL): keep the -wal/-shm files on
+	// disk when the last connection closes. Without it, SQLite's last-closer
+	// unlink — combined with divergent SHM views across process generations —
+	// can delete a live WAL out from under other processes and corrupt the
+	// database (#477, #571).
+	if err := conn.Raw(func(driverConn any) error {
+		fc, ok := driverConn.(sqlite.FileControl)
+		if !ok {
+			return fmt.Errorf("driver connection %T does not implement sqlite.FileControl", driverConn)
+		}
+		_, fcErr := fc.FileControlPersistWAL("main", 1)
+		return fcErr
+	}); err != nil {
+		return fmt.Errorf("engram: enable persistent WAL: %w", err)
+	}
+
+	return nil
 }
 
 func (s *Store) Close() error {
