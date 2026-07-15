@@ -11,6 +11,7 @@ package store
 //     stamped by a newer engram.
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -310,6 +311,151 @@ func TestConcurrentColdStartProcesses(t *testing.T) {
 	}
 	if integrity != "ok" {
 		t.Errorf("integrity_check = %q, want ok", integrity)
+	}
+}
+
+// TestConnectionReplacementKeepsConfiguration guards the pool-replacement
+// regression: database/sql silently discards a modernc connection after a
+// context-cancelled query interrupts it (IsValid/ResetSession fail once
+// sqlite3_is_interrupted) and opens a fresh one. Because the pragmas travel
+// in the DSN and persist-WAL is applied by a driver connection hook, the
+// replacement connection must come up fully configured — busy_timeout 5000
+// (#559) and persistent WAL (#477) intact.
+func TestConnectionReplacementKeepsConfiguration(t *testing.T) {
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = t.TempDir()
+
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+
+	// Plant a session-scoped marker on the current physical connection.
+	// PRAGMA cache_size is per-connection and not part of the DSN, so its
+	// disappearance later proves the pool swapped in a new connection.
+	if _, err := s.db.Exec("PRAGMA cache_size = -12345"); err != nil {
+		t.Fatalf("set cache_size marker: %v", err)
+	}
+	var marker int
+	if err := s.db.QueryRow("PRAGMA cache_size").Scan(&marker); err != nil {
+		t.Fatalf("read cache_size marker: %v", err)
+	}
+	if marker != -12345 {
+		t.Fatalf("cache_size marker = %d, want -12345", marker)
+	}
+
+	// Interrupt a long-running query via context timeout. modernc's
+	// interruptOnDone calls sqlite3_interrupt, poisoning the connection so
+	// the pool discards it on release.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	var n int64
+	if err := s.db.QueryRowContext(ctx,
+		`WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c) SELECT count(*) FROM c`,
+	).Scan(&n); err == nil {
+		t.Fatal("expected the interrupted query to fail, it succeeded")
+	}
+
+	// The pool must have replaced the physical connection...
+	var cacheSize int
+	if err := s.db.QueryRow("PRAGMA cache_size").Scan(&cacheSize); err != nil {
+		t.Fatalf("query after interruption: %v", err)
+	}
+	if cacheSize == -12345 {
+		t.Fatal("cache_size marker survived — connection was not replaced; test cannot exercise the replacement path")
+	}
+
+	// ...and the replacement must be fully configured.
+	var busy int
+	if err := s.db.QueryRow("PRAGMA busy_timeout").Scan(&busy); err != nil {
+		t.Fatalf("read busy_timeout: %v", err)
+	}
+	if busy != 5000 {
+		t.Errorf("busy_timeout on replacement connection = %d, want 5000 (#559 regression)", busy)
+	}
+	var journalMode string
+	if err := s.db.QueryRow("PRAGMA journal_mode").Scan(&journalMode); err != nil {
+		t.Fatalf("read journal_mode: %v", err)
+	}
+	if !strings.EqualFold(journalMode, "wal") {
+		t.Errorf("journal_mode on replacement connection = %q, want wal", journalMode)
+	}
+	var foreignKeys int
+	if err := s.db.QueryRow("PRAGMA foreign_keys").Scan(&foreignKeys); err != nil {
+		t.Fatalf("read foreign_keys: %v", err)
+	}
+	if foreignKeys != 1 {
+		t.Errorf("foreign_keys on replacement connection = %d, want 1", foreignKeys)
+	}
+
+	// Persist-WAL must be held on the replacement connection (query mode -1).
+	conn, err := s.db.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("pin replacement connection: %v", err)
+	}
+	if err := conn.Raw(func(driverConn any) error {
+		fc, ok := driverConn.(interface {
+			FileControlPersistWAL(string, int) (int, error)
+		})
+		if !ok {
+			return fmt.Errorf("driver connection %T has no FileControlPersistWAL", driverConn)
+		}
+		mode, err := fc.FileControlPersistWAL("main", -1)
+		if err != nil {
+			return err
+		}
+		if mode != 1 {
+			return fmt.Errorf("persist-WAL mode on replacement connection = %d, want 1 (#477 regression)", mode)
+		}
+		return nil
+	}); err != nil {
+		t.Error(err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("release pinned connection: %v", err)
+	}
+
+	// End to end: write through the replacement connection, close, and the
+	// -wal file must survive.
+	if err := s.CreateSession("replacement-session", "replacement-project", cfg.DataDir); err != nil {
+		t.Fatalf("CreateSession on replacement connection: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	walPath := filepath.Join(cfg.DataDir, "engram.db-wal")
+	if _, err := os.Stat(walPath); err != nil {
+		t.Fatalf("-wal file was unlinked on close after connection replacement — persist-WAL was lost: %v", err)
+	}
+}
+
+func TestAcquireMigrationLockTimesOutWithDiagnostic(t *testing.T) {
+	origTimeout := migrationLockTimeout
+	migrationLockTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { migrationLockTimeout = origTimeout })
+
+	path := filepath.Join(t.TempDir(), ".migrate.lock")
+
+	unlock, err := acquireMigrationLock(path)
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+	defer unlock()
+
+	start := time.Now()
+	_, err = acquireMigrationLock(path)
+	if err == nil {
+		t.Fatal("second acquire succeeded while the first lock was held; want timeout error")
+	}
+	if elapsed := time.Since(start); elapsed < 300*time.Millisecond {
+		t.Errorf("timed out after %s, want at least the %s budget", elapsed, 300*time.Millisecond)
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("timeout error does not name the lock file: %v", err)
+	}
+	if !strings.Contains(err.Error(), "stuck engram process") {
+		t.Errorf("timeout error does not point at a stuck process: %v", err)
 	}
 }
 
