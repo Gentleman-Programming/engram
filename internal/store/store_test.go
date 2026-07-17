@@ -3445,6 +3445,61 @@ func TestMigrationAndHelperEdgeBranches(t *testing.T) {
 	})
 }
 
+func TestImportSkipsObservationWithExistingSyncID(t *testing.T) {
+	s := newTestStore(t)
+	now := Now()
+	project := "engram"
+	observations := make([]Observation, 3)
+	for i := range observations {
+		observations[i] = Observation{
+			SyncID:    fmt.Sprintf("obs-import-idempotent-%d", i),
+			SessionID: "import-session",
+			Type:      "bugfix",
+			Title:     fmt.Sprintf("idempotent import %d", i),
+			Content:   fmt.Sprintf("import observation %d once", i),
+			Project:   &project,
+			Scope:     "project",
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+	}
+	data := &ExportData{
+		Sessions: []Session{{
+			ID:        "import-session",
+			Project:   "engram",
+			Directory: "/tmp/engram",
+			StartedAt: now,
+		}},
+		Observations: observations,
+	}
+
+	first, err := s.Import(data)
+	if err != nil {
+		t.Fatalf("first import: %v", err)
+	}
+	if first.ObservationsImported != 3 {
+		t.Fatalf("first import observations = %d, want 3", first.ObservationsImported)
+	}
+
+	for attempt := 2; attempt <= 3; attempt++ {
+		result, err := s.Import(data)
+		if err != nil {
+			t.Fatalf("import attempt %d: %v", attempt, err)
+		}
+		if result.ObservationsImported != 0 {
+			t.Fatalf("import attempt %d observations = %d, want 0", attempt, result.ObservationsImported)
+		}
+	}
+
+	var count int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM observations WHERE sync_id LIKE 'obs-import-idempotent-%'").Scan(&count); err != nil {
+		t.Fatalf("count imported observations: %v", err)
+	}
+	if count != 3 {
+		t.Fatalf("stored observations = %d, want 3", count)
+	}
+}
+
 func TestExportImportEdgeBranches(t *testing.T) {
 	t.Run("export fails when observations query fails", func(t *testing.T) {
 		s := newTestStore(t)
