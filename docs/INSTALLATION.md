@@ -197,4 +197,5 @@ When using `engram setup`, config files are written to platform-appropriate loca
 | Cursor | `~/.cursor/mcp.json` + `~/.cursor/rules/engram.mdc` | `%USERPROFILE%\.cursor\...` |
 | VS Code Copilot | `~/.config/Code/User/mcp.json` + `.../prompts/engram.instructions.md` (macOS: `~/Library/Application Support/Code/User/`) | `%APPDATA%\Code\User\...` |
 | Kilo Code | `~/.config/kilo/opencode.json` + `~/.config/kilo/AGENTS.md` | `%USERPROFILE%\.config\kilo\...` |
+| Kimi Code | `~/.kimi-code/mcp.json` + `~/.kimi-code/AGENTS.md` | `%USERPROFILE%\.kimi-code\...` |
 | Data directory | `~/.engram/` | `%USERPROFILE%\.engram\` |

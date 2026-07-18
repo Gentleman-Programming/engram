@@ -160,6 +160,20 @@ func agentAdapters() []agentAdapter {
 				"Verify ~/.config/kilo/AGENTS.md has the Memory Protocol block",
 			},
 		},
+		{
+			slug:        "kimi",
+			description: "Kimi Code CLI — MCP registration in ~/.kimi-code/mcp.json plus AGENTS.md Memory Protocol",
+			mcpPath:     kimiMCPPath,
+			mcpFormat:   mcpServersObject,
+			instructions: []instrSurface{
+				{path: kimiAgentsPath, style: markerBlock, body: memoryProtocolMarkdown},
+			},
+			postInstall: []string{
+				"Restart Kimi Code so MCP config is reloaded",
+				"Verify ~/.kimi-code/mcp.json includes mcpServers.engram",
+				"Verify ~/.kimi-code/AGENTS.md has the Memory Protocol block",
+			},
+		},
 	}
 }
 
@@ -290,4 +304,27 @@ func kilocodeConfigPath() string {
 
 func kilocodeAgentsPath() string {
 	return filepath.Join(kilocodeConfigDir(), "AGENTS.md")
+}
+
+// ─── Kimi Code paths ─────────────────────────────────────────────────────────
+//
+// Kimi Code keeps all user-level data under KIMI_CODE_HOME (default
+// ~/.kimi-code on every platform, including Windows). MCP servers are declared
+// in mcp.json (top-level "mcpServers") and global agent instructions in
+// AGENTS.md; both live directly under the data root.
+
+func kimiCodeHome() string {
+	if dir := os.Getenv("KIMI_CODE_HOME"); dir != "" && filepath.IsAbs(dir) {
+		return dir
+	}
+	home, _ := userHome()
+	return filepath.Join(home, ".kimi-code")
+}
+
+func kimiMCPPath() string {
+	return filepath.Join(kimiCodeHome(), "mcp.json")
+}
+
+func kimiAgentsPath() string {
+	return filepath.Join(kimiCodeHome(), "AGENTS.md")
 }

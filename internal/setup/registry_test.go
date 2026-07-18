@@ -31,6 +31,7 @@ func declarativeAgents() []declarativeAgent {
 		{"cursor", cursorMCPPath, "mcpServers", mcpServersObject, cursorMemoryProtocolPath, wholeFile},
 		{"vscode-copilot", vscodeMCPPath, "servers", serversObject, vscodePromptPath, wholeFile},
 		{"kilocode", kilocodeConfigPath, "mcp", opencodeObject, kilocodeAgentsPath, markerBlock},
+		{"kimi", kimiMCPPath, "mcpServers", mcpServersObject, kimiAgentsPath, markerBlock},
 	}
 }
 
@@ -44,6 +45,7 @@ func stubRegistryEnv(t *testing.T) string {
 	osExecutable = func() (string, error) { return testEngramBin, nil }
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("APPDATA", "")
+	t.Setenv("KIMI_CODE_HOME", "")
 	return home
 }
 
@@ -58,7 +60,7 @@ func TestSupportedAgentsIncludesAllRegistryAgents(t *testing.T) {
 	want := []string{
 		"opencode", "pi", "claude-code", "gemini-cli", "codex",
 		"antigravity-cli", "windsurf", "qwen", "kiro", "cursor",
-		"vscode-copilot", "kilocode",
+		"vscode-copilot", "kilocode", "kimi",
 	}
 	for _, slug := range want {
 		if !got[slug] {
@@ -436,4 +438,31 @@ func TestConfigDirsIgnoreRelativeConfigHome(t *testing.T) {
 			t.Errorf("vscodeUserDir with relative APPDATA = %q, want %q", got, want)
 		}
 	})
+
+	t.Run("relative KIMI_CODE_HOME ignored", func(t *testing.T) {
+		t.Setenv("KIMI_CODE_HOME", "relative/kimi")
+		if got, want := kimiCodeHome(), filepath.Join(home, ".kimi-code"); got != want {
+			t.Errorf("kimiCodeHome with relative KIMI_CODE_HOME = %q, want %q", got, want)
+		}
+	})
+}
+
+// TestKimiCodeHomeHonorsAbsoluteEnv verifies an absolute KIMI_CODE_HOME
+// relocates both the MCP config and the AGENTS.md instruction surface.
+func TestKimiCodeHomeHonorsAbsoluteEnv(t *testing.T) {
+	resetSetupSeams(t)
+	useTestHome(t)
+
+	custom := filepath.Join(t.TempDir(), "kimi-home")
+	t.Setenv("KIMI_CODE_HOME", custom)
+
+	if got := kimiCodeHome(); got != custom {
+		t.Errorf("kimiCodeHome = %q, want %q", got, custom)
+	}
+	if got, want := kimiMCPPath(), filepath.Join(custom, "mcp.json"); got != want {
+		t.Errorf("kimiMCPPath = %q, want %q", got, want)
+	}
+	if got, want := kimiAgentsPath(), filepath.Join(custom, "AGENTS.md"); got != want {
+		t.Errorf("kimiAgentsPath = %q, want %q", got, want)
+	}
 }

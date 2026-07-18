@@ -61,6 +61,7 @@ Windows, Linux, and other install methods → [docs/INSTALLATION.md](docs/INSTAL
 | Cursor                      | `engram setup cursor`                                                                        |
 | VS Code (Copilot)           | `engram setup vscode-copilot`                                                                |
 | Kilo Code                   | `engram setup kilocode`                                                                      |
+| Kimi Code                   | `engram setup kimi`                                                                          |
 | Any other MCP client        | See [docs/AGENT-SETUP.md](docs/AGENT-SETUP.md)                                               |
 
 Full per-agent config, Memory Protocol, and compaction survival → [docs/AGENT-SETUP.md](docs/AGENT-SETUP.md)
