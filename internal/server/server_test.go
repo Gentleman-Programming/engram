@@ -1288,7 +1288,15 @@ func TestHandleListConflicts_ExcludesNotConflict(t *testing.T) {
 		t.Fatalf("expected relations array, got %T: %v", resp["relations"], resp["relations"])
 	}
 	if len(relations) != 1 {
-		t.Errorf("expected 1 relation (not_conflict filtered); got %d: %v", len(relations), relations)
+		t.Fatalf("expected exactly 1 relation (not_conflict filtered); got %d: %v", len(relations), relations)
+	}
+	// Positive verification: the kept row must be the pending one, not the not_conflict one.
+	rel0, ok := relations[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected relations[0] to be a map, got %T: %v", relations[0], relations[0])
+	}
+	if rel0["sync_id"] != "rel-exclud-pending" {
+		t.Errorf("expected kept relation sync_id=%q; got %v", "rel-exclud-pending", rel0["sync_id"])
 	}
 	total, ok := resp["total"].(float64)
 	if !ok {
