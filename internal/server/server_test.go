@@ -169,6 +169,124 @@ func TestClaudeSaveNudgeCompatibilityRoutes(t *testing.T) {
 	}
 }
 
+func TestHandleSearchForwardsMatchModeAndAllProjects(t *testing.T) {
+	st := newServerTestStore(t)
+	h := New(st, 0).Handler()
+
+	if err := st.CreateSession("sess-search-a", "proj-a", "/tmp/proj-a"); err != nil {
+		t.Fatalf("create session proj-a: %v", err)
+	}
+	if err := st.CreateSession("sess-search-b", "proj-b", "/tmp/proj-b"); err != nil {
+		t.Fatalf("create session proj-b: %v", err)
+	}
+	if _, err := st.AddObservation(store.AddObservationParams{
+		SessionID: "sess-search-a",
+		Type:      "note",
+		Title:     "Aurora project note",
+		Content:   "alpha content",
+		Project:   "proj-a",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add obs proj-a: %v", err)
+	}
+	if _, err := st.AddObservation(store.AddObservationParams{
+		SessionID: "sess-search-b",
+		Type:      "note",
+		Title:     "Nebula project note",
+		Content:   "beta content",
+		Project:   "proj-b",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add obs proj-b: %v", err)
+	}
+
+	search := func(url string) []map[string]any {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, url, nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected search 200, got %d body=%s", rec.Code, rec.Body.String())
+		}
+
+		var results []map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &results); err != nil {
+			t.Fatalf("decode search results: %v", err)
+		}
+		return results
+	}
+	titles := func(results []map[string]any) map[string]bool {
+		t.Helper()
+		seen := map[string]bool{}
+		for _, result := range results {
+			title, _ := result["title"].(string)
+			seen[title] = true
+		}
+		return seen
+	}
+
+	projectResults := search("/search?q=aurora+nebula&project=proj-a&match_mode=any&limit=10")
+	projectTitles := titles(projectResults)
+	if len(projectResults) != 1 || !projectTitles["Aurora project note"] {
+		t.Fatalf("expected match_mode=any to preserve the project filter by default, got %#v", projectResults)
+	}
+
+	allProjectResults := search("/search?q=aurora+nebula&project=proj-a&match_mode=any&all_projects=true&limit=10")
+	allProjectTitles := titles(allProjectResults)
+	if len(allProjectResults) != 2 || !allProjectTitles["Aurora project note"] || !allProjectTitles["Nebula project note"] {
+		t.Fatalf("expected all_projects=true to ignore project and return both project notes, got %#v", allProjectResults)
+	}
+}
+
+func TestHandleSearchAllowsEmptyMatchMode(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	if err := st.CreateSession("sess-search-default", "proj-default", "/tmp/proj-default"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := st.AddObservation(store.AddObservationParams{
+		SessionID: "sess-search-default",
+		Type:      "note",
+		Title:     "Aurora default match note",
+		Content:   "alpha content",
+		Project:   "proj-default",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/search?q=aurora&project=proj-default", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for empty match_mode, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var results []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &results); err != nil {
+		t.Fatalf("decode search results: %v", err)
+	}
+	if len(results) != 1 || results[0]["title"] != "Aurora default match note" {
+		t.Fatalf("expected default match_mode search to return seeded observation, got %#v", results)
+	}
+}
+
+func TestHandleSearchRejectsInvalidMatchMode(t *testing.T) {
+	srv := New(newServerTestStore(t), 0)
+	req := httptest.NewRequest(http.MethodGet, "/search?q=aurora&match_mode=or", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid match_mode, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "invalid match_mode") {
+		t.Fatalf("expected error body to mention invalid match_mode, got %q", rec.Body.String())
+	}
+}
+
 func TestAdditionalServerErrorBranches(t *testing.T) {
 	st := newServerTestStore(t)
 	srv := New(st, 0)

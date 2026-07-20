@@ -394,17 +394,30 @@ func (s *Server) handleRecentObservations(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
-	query := r.URL.Query().Get("q")
+	params := r.URL.Query()
+	query := params.Get("q")
 	if query == "" {
 		jsonError(w, http.StatusBadRequest, "q parameter is required")
 		return
 	}
 
+	project := params.Get("project")
+	if queryBool(r, "all_projects", false) {
+		project = ""
+	}
+
+	matchMode := params.Get("match_mode")
+	if matchMode != "" && matchMode != "all" && matchMode != "any" {
+		jsonError(w, http.StatusBadRequest, fmt.Sprintf("invalid match_mode %q: must be \"all\" or \"any\"", matchMode))
+		return
+	}
+
 	results, err := s.store.Search(query, store.SearchOptions{
-		Type:    r.URL.Query().Get("type"),
-		Project: r.URL.Query().Get("project"),
-		Scope:   r.URL.Query().Get("scope"),
-		Limit:   queryInt(r, "limit", 10),
+		Type:      params.Get("type"),
+		Project:   project,
+		Scope:     params.Get("scope"),
+		Limit:     queryInt(r, "limit", 10),
+		MatchMode: matchMode,
 	})
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())

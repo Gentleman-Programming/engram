@@ -137,7 +137,18 @@ fi
 ENCODED_PROJECT=$(printf '%s' "$PROJECT" | jq -sRr @uri)
 CONTEXT=$(curl -sf "${ENGRAM_URL}/context?project=${ENCODED_PROJECT}" --max-time 3 2>/dev/null | jq -r '.context // empty')
 
+# Resolve protocol verbosity mode for this slug. All slim/full branching
+# (including the engram-version floor check) lives in Go — see `engram
+# protocol-mode`. A missing/old engram binary or an unrecognized subcommand
+# never yields "slim" here, so this always defaults safely to full. $mode is
+# NEVER echoed/logged to this hook's own stdout.
+mode=$(engram protocol-mode claude-code 2>/dev/null)
+if [ "$mode" != "slim" ]; then
+  mode="full"
+fi
+
 # Inject Memory Protocol + context — stdout goes to Claude as additionalContext
+if [ "$mode" != "slim" ]; then
 cat <<'PROTOCOL'
 ## Engram Persistent Memory — ACTIVE PROTOCOL
 
@@ -173,6 +184,7 @@ Call `mem_save` IMMEDIATELY after ANY of these:
 ### SESSION CLOSE — before saying "done":
 Call `mem_session_summary` with: Goal, Discoveries, Accomplished, Next Steps, Relevant Files.
 PROTOCOL
+fi
 
 # Inject memory context if available
 if [ -n "$CONTEXT" ]; then

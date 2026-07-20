@@ -659,6 +659,9 @@ func TestUpdateChecksSkipCriticalStartupCommands(t *testing.T) {
 	if shouldCheckForUpdates([]string{"cloud", "serve"}) {
 		t.Fatal("cloud serve startup must not run update check")
 	}
+	if shouldCheckForUpdates([]string{"protocol-mode", "claude-code"}) {
+		t.Fatal("protocol-mode startup must not run update check")
+	}
 	if !shouldCheckForUpdates([]string{"version"}) {
 		t.Fatal("normal commands should keep update output")
 	}
@@ -2377,6 +2380,7 @@ func TestStoreSyncStatusProviderRequiresProjectEvenWhenCloudConfigured(t *testin
 func TestCmdSetupDirectAndInteractive(t *testing.T) {
 	stubRuntimeHooks(t)
 	stubExitWithPanic(t)
+	cfg := testConfig(t)
 
 	setupInstallAgent = func(agent string) (*setup.Result, error) {
 		if agent == "broken" {
@@ -2386,7 +2390,7 @@ func TestCmdSetupDirectAndInteractive(t *testing.T) {
 	}
 
 	withArgs(t, "engram", "setup", "codex")
-	out, errOut, recovered := captureOutputAndRecover(t, func() { cmdSetup() })
+	out, errOut, recovered := captureOutputAndRecover(t, func() { cmdSetup(cfg) })
 	if recovered != nil || errOut != "" {
 		t.Fatalf("direct setup should succeed, panic=%v stderr=%q", recovered, errOut)
 	}
@@ -2395,7 +2399,7 @@ func TestCmdSetupDirectAndInteractive(t *testing.T) {
 	}
 
 	withArgs(t, "engram", "setup", "broken")
-	_, errOut, recovered = captureOutputAndRecover(t, func() { cmdSetup() })
+	_, errOut, recovered = captureOutputAndRecover(t, func() { cmdSetup(cfg) })
 	if _, ok := recovered.(exitCode); !ok || !strings.Contains(errOut, "install failed") {
 		t.Fatalf("expected direct setup fatal, panic=%v stderr=%q", recovered, errOut)
 	}
@@ -2410,7 +2414,7 @@ func TestCmdSetupDirectAndInteractive(t *testing.T) {
 	}
 
 	withArgs(t, "engram", "setup")
-	out, errOut, recovered = captureOutputAndRecover(t, func() { cmdSetup() })
+	out, errOut, recovered = captureOutputAndRecover(t, func() { cmdSetup(cfg) })
 	if recovered != nil || errOut != "" {
 		t.Fatalf("interactive setup should succeed, panic=%v stderr=%q", recovered, errOut)
 	}
@@ -2424,7 +2428,7 @@ func TestCmdSetupDirectAndInteractive(t *testing.T) {
 		return 1, nil
 	}
 	withArgs(t, "engram", "setup")
-	_, errOut, recovered = captureOutputAndRecover(t, func() { cmdSetup() })
+	_, errOut, recovered = captureOutputAndRecover(t, func() { cmdSetup(cfg) })
 	if _, ok := recovered.(exitCode); !ok || !strings.Contains(errOut, "Invalid choice") {
 		t.Fatalf("expected invalid choice exit, panic=%v stderr=%q", recovered, errOut)
 	}
@@ -3749,6 +3753,7 @@ func TestCmdSearchAndSaveDanglingFlags(t *testing.T) {
 func TestCmdSetupHyphenArgFallsBackToInteractive(t *testing.T) {
 	stubRuntimeHooks(t)
 	stubExitWithPanic(t)
+	cfg := testConfig(t)
 
 	setupSupportedAgents = func() []setup.Agent {
 		return []setup.Agent{{Name: "codex", Description: "Codex", InstallDir: "/tmp/codex"}}
@@ -3763,7 +3768,7 @@ func TestCmdSetupHyphenArgFallsBackToInteractive(t *testing.T) {
 	}
 
 	withArgs(t, "engram", "setup", "--not-an-agent")
-	stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdSetup() })
+	stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdSetup(cfg) })
 	if recovered != nil || stderr != "" {
 		t.Fatalf("setup interactive fallback failed: panic=%v stderr=%q", recovered, stderr)
 	}
@@ -3987,7 +3992,7 @@ func TestCommandErrorSeamsAndUncoveredBranches(t *testing.T) {
 		}
 
 		withArgs(t, "engram", "setup")
-		_, stderr, recovered := captureOutputAndRecover(t, func() { cmdSetup() })
+		_, stderr, recovered := captureOutputAndRecover(t, func() { cmdSetup(cfg) })
 		assertFatal(t, stderr, recovered, "forced setup error")
 	})
 }

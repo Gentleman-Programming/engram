@@ -18,7 +18,7 @@
 | Change cloud transport | `internal/cloud/cloudserver/cloudserver.go` | `internal/cloud/cloudstore/cloudstore.go`, `docs/engram-cloud/README.md` |
 | Change the dashboard | `internal/cloud/dashboard/dashboard.go` | `internal/cloud/dashboard/*_templ.go`, `internal/cloud/dashboard/static/styles.css` |
 | Change cloud/dashboard auth | `internal/cloud/auth/auth.go` | `cmd/engram/cloud.go`, `internal/cloud/cloudserver/cloudserver.go` |
-| Change agent setup | `internal/setup/setup.go` | `plugin/`, `docs/AGENT-SETUP.md`, `docs/PLUGINS.md` |
+| Change agent setup | `internal/setup/registry.go`, `internal/setup/agents.go`, `internal/setup/setup.go` | `plugin/`, `docs/AGENT-SETUP.md`, `docs/PLUGINS.md` |
 | Change project detection | `internal/project/detect.go` | `internal/project/similar.go`, `docs/AGENT-SETUP.md` |
 | Change the TUI | `internal/tui/model.go` | `internal/tui/update.go`, `internal/tui/view.go`, `internal/tui/styles.go` |
 | Change Obsidian | `internal/obsidian/` | `plugin/obsidian/`, `docs/beta/obsidian-brain.md` |
@@ -41,7 +41,7 @@
 | `internal/cloud/dashboard` | Server-rendered browser UI, `/dashboard/*` routes, HTMX, templ components, navigation. | Enforce policies only visually; if it is a real rule, it must reach server/cloudstore. |
 | `internal/cloud/auth` | Bearer token, project-scope authorizer, signed dashboard sessions. | Create product rules outside its auth contract. |
 | `internal/project` | Project detection and normalization. | Access the store to correct data. |
-| `internal/setup` | Idempotent installation of agent integrations. | Orchestrate automatic cloud enrollment/login if it is not implemented and documented. |
+| `internal/setup` | Registry-driven agent installation: declarative adapters in `agents.go`, generic registry/injection machinery in `registry.go`, and custom installers in `setup.go`. | Orchestrate automatic cloud enrollment/login if it is not implemented and documented. |
 | `plugin/` | Thin adapters per agent/host. | Contain core behavior that should live in Go. |
 | `skills/` | Guardrails for contributor agents. | Replace specs, tests, or code. |
 | `docs/` | Usage, architecture, cloud, plugin, installation, and doctor guides. | Document unimplemented aspirations. |

@@ -16,6 +16,11 @@ type Config struct {
 	AdminToken       string
 	AllowedProjects  []string
 	MaxPushBodyBytes int64
+	// TokenPepper is the dedicated secret used to hash managed cloud tokens
+	// (see internal/cloud/auth.ManagedTokenHasher). It MUST be distinct from
+	// JWTSecret so rotating the dashboard/session signing secret does not
+	// implicitly rotate or invalidate stored managed token verifiers.
+	TokenPepper string
 }
 
 const DefaultJWTSecret = "engram-dev-jwt-secret-for-local-smoke-1234"
@@ -47,6 +52,9 @@ func ConfigFromEnv() Config {
 	}
 	if v := strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_ADMIN")); v != "" {
 		cfg.AdminToken = v
+	}
+	if v := strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_TOKEN_PEPPER")); v != "" {
+		cfg.TokenPepper = v
 	}
 	if v := strings.TrimSpace(os.Getenv("ENGRAM_PORT")); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {

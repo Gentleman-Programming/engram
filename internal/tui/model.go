@@ -10,6 +10,8 @@
 package tui
 
 import (
+	"errors"
+
 	"github.com/Gentleman-Programming/engram/internal/setup"
 	"github.com/Gentleman-Programming/engram/internal/store"
 	"github.com/Gentleman-Programming/engram/internal/version"
@@ -34,6 +36,14 @@ const (
 	ScreenSessions
 	ScreenSessionDetail
 	ScreenSetup
+)
+
+type SessionDeleteState int
+
+const (
+	SessionDeleteStateNone SessionDeleteState = iota
+	SessionDeleteStatePrompt
+	SessionDeleteStateDeleting
 )
 
 // ─── Custom Messages ─────────────────────────────────────────────────────────
@@ -76,6 +86,11 @@ type recentSessionsMsg struct {
 type sessionObservationsMsg struct {
 	observations []store.Observation
 	err          error
+}
+
+type sessionDeletedMsg struct {
+	sessionID string
+	err       error
 }
 
 type setupInstallMsg struct {
@@ -121,10 +136,13 @@ type Model struct {
 	Timeline *store.TimelineResult
 
 	// Sessions
-	Sessions            []store.SessionSummary
-	SelectedSessionIdx  int
-	SessionObservations []store.Observation
-	SessionDetailScroll int
+	Sessions             []store.SessionSummary
+	SelectedSessionIdx   int
+	SessionObservations  []store.Observation
+	SessionDetailScroll  int
+	SessionDeleteState   SessionDeleteState
+	SessionDeleteID      string
+	SessionDeleteProject string
 
 	// Clipboard feedback
 	CopyFeedback string // "✓ Copied!" or "" — shown for 2 s after copy
@@ -225,6 +243,16 @@ func loadSessionObservations(s *store.Store, sessionID string) tea.Cmd {
 	return func() tea.Msg {
 		obs, err := s.SessionObservations(sessionID, 200)
 		return sessionObservationsMsg{observations: obs, err: err}
+	}
+}
+
+func deleteSession(s *store.Store, sessionID string) tea.Cmd {
+	return func() tea.Msg {
+		if s == nil {
+			return sessionDeletedMsg{sessionID: sessionID, err: errors.New("store is unavailable")}
+		}
+		err := s.DeleteSession(sessionID)
+		return sessionDeletedMsg{sessionID: sessionID, err: err}
 	}
 }
 
