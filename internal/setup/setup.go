@@ -176,7 +176,10 @@ Also search memory PROACTIVELY when:
 ### SESSION CLOSE PROTOCOL (mandatory)
 
 Before ending a session or saying "done" / "listo" / "that's it", you MUST:
-1. Call mem_session_summary with this structure:
+1. Call mem_session_summary with the structure below.
+2. Call mem_session_end with the active session id and an optional summary of work completed.
+
+mem_session_summary structure:
 
 ## Goal
 [What we were working on this session]
@@ -197,7 +200,6 @@ Before ending a session or saying "done" / "listo" / "that's it", you MUST:
 - path/to/file — [what it does or what changed]
 
 This is NOT optional. If you skip this, the next session starts blind.
-2. Call mem_session_end with the active session id and an optional summary of work completed.
 
 ### PASSIVE CAPTURE — automatic learning extraction
 
