@@ -1499,7 +1499,9 @@ scan:
 
 			for candidateIndex, c := range candidates {
 				// In-scan dedup: canonical unordered pair key (smaller sync_id first)
-				// so {A,B} and {B,A} collide in the map.
+				// so {A,B} and {B,A} collide in the map. Mark seen immediately after
+				// the check — whether we queue, skip via DB pre-check, or skip via cap,
+				// we never want to reconsider the same unordered pair in this scan.
 				k1, k2 := obs.syncID, c.SyncID
 				if k1 > k2 {
 					k1, k2 = k2, k1
@@ -1508,6 +1510,7 @@ scan:
 				if seenPairs[pairKey] {
 					continue
 				}
+				seenPairs[pairKey] = true
 
 				// Pre-check: skip pairs that already have any relation row in either
 				// direction. SkipInsert=true above bypasses FindCandidates' built-in
@@ -1551,7 +1554,6 @@ scan:
 					result.Capped = true
 					break scan
 				}
-				seenPairs[pairKey] = true
 			}
 			continue
 		}
