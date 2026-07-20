@@ -1536,8 +1536,8 @@ func TestHandleScanConflicts_SemanticFalse_CountersZero(t *testing.T) {
 		t.Fatalf("decode response: %v", err)
 	}
 
-	// All three semantic counters must be present and zero.
-	for _, field := range []string{"semantic_judged", "semantic_skipped", "semantic_errors"} {
+	// Both semantic counters must be present and zero.
+	for _, field := range []string{"semantic_judged", "semantic_errors"} {
 		val, ok := resp[field]
 		if !ok {
 			t.Errorf("expected %q field in response; got keys: %v", field, resp)
@@ -1633,8 +1633,8 @@ func TestHandleScanConflicts_SemanticTrue_WithMockRunner(t *testing.T) {
 		t.Fatalf("decode response: %v", err)
 	}
 
-	// semantic_judged + semantic_skipped + semantic_errors should be present (values depend on FTS).
-	for _, field := range []string{"semantic_judged", "semantic_skipped", "semantic_errors"} {
+	// semantic_judged + semantic_errors should be present (values depend on FTS).
+	for _, field := range []string{"semantic_judged", "semantic_errors"} {
 		if _, ok := resp[field]; !ok {
 			t.Errorf("expected %q field in semantic=true response; got: %v", field, resp)
 		}

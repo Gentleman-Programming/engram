@@ -94,6 +94,45 @@ func TestFindCandidates_HappyPath(t *testing.T) {
 	}
 }
 
+// TestFindCandidates_SkipsExistingRelation verifies that FindCandidates does
+// NOT re-surface a pair that already has a relation row in memory_relations.
+// This is the core fix for issue #490: without this check, every save re-inserts
+// a fresh pending row for the same pair, causing the agent to re-evaluate it.
+func TestFindCandidates_SkipsExistingRelation(t *testing.T) {
+	s := setupRelationsStore(t)
+
+	// Seed a similar observation first.
+	_, _ = addTestObs(t, s, "We use sessions for auth token storage", "decision", "testproject", "project")
+
+	// Save second (target) observation with a similar title.
+	savedID, _ := addTestObs(t, s, "Switched from sessions to JWT for auth", "decision", "testproject", "project")
+
+	opts := CandidateOptions{
+		Project:   "testproject",
+		Scope:     "project",
+		Limit:     3,
+		BM25Floor: ptrFloat64(-2.0),
+	}
+
+	// First call: should surface the pair and insert a pending relation row.
+	firstCandidates, err := s.FindCandidates(savedID, opts)
+	if err != nil {
+		t.Fatalf("FindCandidates (first call): %v", err)
+	}
+	if len(firstCandidates) == 0 {
+		t.Fatal("first call: expected at least 1 candidate; got 0")
+	}
+
+	// Second call: same pair should NOT be re-surfaced — a relation row now exists.
+	secondCandidates, err := s.FindCandidates(savedID, opts)
+	if err != nil {
+		t.Fatalf("FindCandidates (second call): %v", err)
+	}
+	if len(secondCandidates) != 0 {
+		t.Errorf("expected 0 candidates on second call (pair already has relation row); got %d", len(secondCandidates))
+	}
+}
+
 // TestFindCandidates_EarlyBreakDoesNotSelfBlockWithSingleConnection verifies
 // that FindCandidates closes its FTS rows before follow-up QueryRow/Exec calls.
 // With SetMaxOpenConns(1), leaving rows open after the early-break path can

@@ -120,6 +120,13 @@ func TestHandleCompare_NotConflict_Persists(t *testing.T) {
 	if syncID == "" {
 		t.Fatalf("expected non-empty sync_id for not_conflict, got empty")
 	}
+	rel, err := s.GetRelation(syncID)
+	if err != nil {
+		t.Fatalf("expected persisted relation row for sync_id=%q: %v", syncID, err)
+	}
+	if rel.Relation != store.RelationNotConflict {
+		t.Fatalf("expected relation=%q, got %q", store.RelationNotConflict, rel.Relation)
+	}
 }
 
 // TestHandleCompare_MissingMemoryIDB — missing memory_id_b returns IsError=true.

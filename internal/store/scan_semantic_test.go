@@ -181,10 +181,12 @@ func TestScanProject_Semantic_NotConflictPersisted(t *testing.T) {
 	}
 
 	var count int
-	_ = s.db.QueryRow(
+	if err := s.db.QueryRow(
 		`SELECT count(*) FROM memory_relations
 		 WHERE marked_by_actor = 'engram' AND relation = 'not_conflict'`,
-	).Scan(&count)
+	).Scan(&count); err != nil {
+		t.Fatalf("count not_conflict relations: %v", err)
+	}
 	if count == 0 {
 		t.Errorf("expected not_conflict relation rows from ScanProject; got 0")
 	}
@@ -234,7 +236,7 @@ func TestScanProject_Semantic_ErrorIsolation(t *testing.T) {
 	}
 
 	// All attempted pairs must be counted as errors (runner always fails).
-	totalAttempted := result.SemanticJudged + result.SemanticSkipped + result.SemanticErrors
+	totalAttempted := result.SemanticJudged + result.SemanticErrors
 	if totalAttempted == 0 {
 		t.Logf("No semantic calls attempted (CandidatesFound=%d); skipping counter assertion", result.CandidatesFound)
 		return
@@ -287,10 +289,10 @@ func TestScanProject_Semantic_MaxSemanticCap(t *testing.T) {
 		t.Fatalf("ScanProject: %v", err)
 	}
 
-	total := result.SemanticJudged + result.SemanticSkipped + result.SemanticErrors
+	total := result.SemanticJudged + result.SemanticErrors
 	if total > 2 {
-		t.Errorf("MaxSemantic=2: expected total semantic calls <= 2; got %d (judged=%d, skipped=%d, errors=%d)",
-			total, result.SemanticJudged, result.SemanticSkipped, result.SemanticErrors)
+		t.Errorf("MaxSemantic=2: expected total semantic calls <= 2; got %d (judged=%d, errors=%d)",
+			total, result.SemanticJudged, result.SemanticErrors)
 	}
 }
 
@@ -318,7 +320,7 @@ func TestScanProject_Semantic_TimeoutCounted(t *testing.T) {
 		t.Fatalf("ScanProject must not return error on runner timeout; got: %v", err)
 	}
 
-	total := result.SemanticJudged + result.SemanticSkipped + result.SemanticErrors
+	total := result.SemanticJudged + result.SemanticErrors
 	if total > 0 && result.SemanticErrors == 0 {
 		t.Errorf("expected SemanticErrors > 0 when runner blocks beyond timeout; got errors=0 (total=%d)", total)
 	}
@@ -346,9 +348,6 @@ func TestScanProject_Semantic_BackwardsCompat(t *testing.T) {
 
 	if result.SemanticJudged != 0 {
 		t.Errorf("SemanticJudged: want 0; got %d", result.SemanticJudged)
-	}
-	if result.SemanticSkipped != 0 {
-		t.Errorf("SemanticSkipped: want 0; got %d", result.SemanticSkipped)
 	}
 	if result.SemanticErrors != 0 {
 		t.Errorf("SemanticErrors: want 0; got %d", result.SemanticErrors)
