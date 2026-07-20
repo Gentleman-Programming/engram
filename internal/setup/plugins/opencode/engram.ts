@@ -136,6 +136,9 @@ async function engramFetch(
       headers: opts.body ? { "Content-Type": "application/json" } : undefined,
       body: opts.body ? JSON.stringify(opts.body) : undefined,
     })
+    // Treat non-2xx as failure so callers can avoid false-positive side effects
+    // (e.g. marking a session known when POST /sessions did not succeed).
+    if (!res.ok) return null
     return await res.json()
   } catch {
     // Engram server not running — silently fail
@@ -228,7 +231,7 @@ export const Engram: Plugin = async (ctx) => {
     if (!sessionId || knownSessions.has(sessionId)) return
     // Do not register sub-agent sessions in Engram (issue #116).
     if (subAgentSessions.has(sessionId)) return
-    await engramFetch("/sessions", {
+    const created = await engramFetch("/sessions", {
       method: "POST",
       body: {
         id: sessionId,
@@ -236,7 +239,10 @@ export const Engram: Plugin = async (ctx) => {
         directory: ctx.directory,
       },
     })
-    knownSessions.add(sessionId)
+    // Only mark known after confirmed create so failed requests can retry.
+    if (created != null) {
+      knownSessions.add(sessionId)
+    }
   }
 
   // Try to start engram server if not running
@@ -320,12 +326,23 @@ export const Engram: Plugin = async (ctx) => {
         const sessionId = info?.id
         if (sessionId) {
           if (knownSessions.has(sessionId)) {
-            await engramFetch(`/sessions/${encodeURIComponent(sessionId)}/end`, {
-              method: "POST",
-            })
+            // session.deleted fires once — retry once inline, and only clear
+            // knownSessions after a confirmed /end (do not pretend it closed).
+            let ended = await engramFetch(
+              `/sessions/${encodeURIComponent(sessionId)}/end`,
+              { method: "POST" }
+            )
+            if (ended == null) {
+              ended = await engramFetch(
+                `/sessions/${encodeURIComponent(sessionId)}/end`,
+                { method: "POST" }
+              )
+            }
+            if (ended != null) {
+              knownSessions.delete(sessionId)
+            }
           }
           toolCounts.delete(sessionId)
-          knownSessions.delete(sessionId)
           subAgentSessions.delete(sessionId)
           lastNudgeTime.delete(sessionId)
         }
