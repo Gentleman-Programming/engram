@@ -1,9 +1,12 @@
 package tui
 
 import (
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/setup"
+	"github.com/Gentleman-Programming/engram/internal/store"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -89,6 +92,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.Sessions = msg.sessions
+		if m.Screen == ScreenSessions {
+			if len(m.Sessions) == 0 {
+				m.Cursor = 0
+				m.Scroll = 0
+			} else if m.Cursor >= len(m.Sessions) {
+				m.Cursor = len(m.Sessions) - 1
+				if m.Scroll > m.Cursor {
+					m.Scroll = m.Cursor
+				}
+			}
+		}
 		return m, nil
 
 	case sessionObservationsMsg:
@@ -101,6 +115,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.Cursor = 0
 		m.SessionDetailScroll = 0
 		return m, nil
+
+	case sessionDeletedMsg:
+		m = m.resetSessionDeleteState()
+		if msg.err != nil {
+			m.ErrorMsg = sessionDeleteErrorMessage(msg.sessionID, msg.err)
+			return m, nil
+		}
+		m.ErrorMsg = ""
+		return m, loadRecentSessions(m.store)
 
 	case setupInstallMsg:
 		m.SetupInstalling = false
@@ -170,6 +193,8 @@ func (m Model) handleKeyPress(key string) (tea.Model, tea.Cmd) {
 		return m.handleSessionDetailKeys(key)
 	case ScreenSetup:
 		return m.handleSetupKeys(key)
+	case ScreenCloudSettings:
+		return m.handleCloudSettingsKeys(key)
 	}
 	return m, nil
 }
@@ -181,7 +206,15 @@ var dashboardMenuItems = []string{
 	"Recent observations",
 	"Browse sessions",
 	"Setup agent plugin",
+	"Cloud sync settings",
 	"Quit",
+}
+
+var cloudSettingsMenuItems = []string{
+	"Configure server",
+	"View status",
+	"Enroll projects",
+	"Back",
 }
 
 func (m Model) handleDashboardKeys(key string) (tea.Model, tea.Cmd) {
@@ -241,7 +274,12 @@ func (m Model) handleDashboardSelection() (tea.Model, tea.Cmd) {
 		m.SetupInstalling = false
 		m.SetupInstallingName = ""
 		return m, nil
-	case 4: // Quit
+	case 4: // Cloud sync settings
+		m.PrevScreen = ScreenDashboard
+		m.Screen = ScreenCloudSettings
+		m.Cursor = 0
+		return m, nil
+	case 5: // Quit
 		return m, tea.Quit
 	}
 	return m, nil
@@ -440,6 +478,26 @@ func (m Model) handleTimelineKeys(key string) (tea.Model, tea.Cmd) {
 // ─── Sessions ────────────────────────────────────────────────────────────────
 
 func (m Model) handleSessionsKeys(key string) (tea.Model, tea.Cmd) {
+	switch m.SessionDeleteState {
+	case SessionDeleteStateDeleting:
+		return m, nil
+	case SessionDeleteStatePrompt:
+		switch key {
+		case "y", "Y":
+			if m.SessionDeleteID == "" {
+				m = m.resetSessionDeleteState()
+				return m, nil
+			}
+			sessionID := m.SessionDeleteID
+			m.SessionDeleteState = SessionDeleteStateDeleting
+			return m, deleteSession(m.store, sessionID)
+		case "n", "N", "esc":
+			m = m.resetSessionDeleteState()
+			return m, nil
+		}
+		return m, nil
+	}
+
 	visibleItems := m.Height - 8
 	if visibleItems < 5 {
 		visibleItems = 5
@@ -467,10 +525,18 @@ func (m Model) handleSessionsKeys(key string) (tea.Model, tea.Cmd) {
 			sessionID := m.Sessions[m.Cursor].ID
 			return m, loadSessionObservations(m.store, sessionID)
 		}
+	case "d", "D":
+		if len(m.Sessions) > 0 && m.Cursor < len(m.Sessions) {
+			session := m.Sessions[m.Cursor]
+			m.SessionDeleteState = SessionDeleteStatePrompt
+			m.SessionDeleteID = session.ID
+			m.SessionDeleteProject = session.Project
+		}
 	case "esc", "q":
 		m.Screen = ScreenDashboard
 		m.Cursor = 0
 		m.Scroll = 0
+		m = m.resetSessionDeleteState()
 		return m, loadStats(m.store)
 	}
 	return m, nil
@@ -592,7 +658,50 @@ func (m Model) handleSetupKeys(key string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// ─── Cloud Settings ──────────────────────────────────────────────────────────
+
+func (m Model) handleCloudSettingsKeys(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "up", "k":
+		if m.Cursor > 0 {
+			m.Cursor--
+		}
+	case "down", "j":
+		if m.Cursor < len(cloudSettingsMenuItems)-1 {
+			m.Cursor++
+		}
+	case "enter", " ":
+		if m.Cursor == len(cloudSettingsMenuItems)-1 { // Back
+			m.Screen = ScreenDashboard
+			m.Cursor = 0
+			return m, loadStats(m.store)
+		}
+	case "esc", "q":
+		m.Screen = ScreenDashboard
+		m.Cursor = 0
+		return m, loadStats(m.store)
+	}
+	return m, nil
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+func (m Model) resetSessionDeleteState() Model {
+	m.SessionDeleteState = SessionDeleteStateNone
+	m.SessionDeleteID = ""
+	m.SessionDeleteProject = ""
+	return m
+}
+
+func sessionDeleteErrorMessage(sessionID string, err error) string {
+	if errors.Is(err, store.ErrSessionHasObservations) {
+		return fmt.Sprintf("Cannot delete session %q: it still has observations. Delete or move observations first.", sessionID)
+	}
+	if errors.Is(err, store.ErrSessionNotFound) {
+		return fmt.Sprintf("Cannot delete session %q: session not found.", sessionID)
+	}
+	return fmt.Sprintf("Failed to delete session %q: %v", sessionID, err)
+}
 
 // refreshScreen returns the appropriate data-loading Cmd for a given screen.
 // Used when navigating back so lists show fresh data from the DB.

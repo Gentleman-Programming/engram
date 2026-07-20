@@ -49,7 +49,7 @@ Cloud auth token is runtime config:
 export ENGRAM_CLOUD_TOKEN="your-token"
 ```
 
-The local `~/.engram/cloud.json` stores the server URL. The token is intentionally read from the environment.
+The local `~/.engram/cloud.json` stores the server URL and may also store a `token` fallback. `ENGRAM_CLOUD_TOKEN` takes precedence over any token in `cloud.json`; if the env var is unset, Engram falls back to `cloud.json.token`. This fallback is intentional (issue #343) for use cases such as background autosync where exporting the env var on every shell is not practical.
 
 ---
 

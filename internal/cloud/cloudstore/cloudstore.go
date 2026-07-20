@@ -356,7 +356,7 @@ func (cs *CloudStore) indexChunkSessionsWith(ctx context.Context, execer chunkSe
 
 func materializedChunkMutations(project string, chunk engramsync.ChunkData) ([]MutationEntry, error) {
 	project = strings.TrimSpace(project)
-	entries := make([]MutationEntry, 0, len(chunk.Sessions)+len(chunk.Observations)+len(chunk.Prompts))
+	entries := make([]MutationEntry, 0, len(chunk.Sessions)+len(chunk.Observations)+len(chunk.Prompts)+len(chunk.Mutations))
 
 	for i, session := range chunk.Sessions {
 		entityKey := strings.TrimSpace(session.ID)
@@ -392,6 +392,30 @@ func materializedChunkMutations(project string, chunk engramsync.ChunkData) ([]M
 			return nil, fmt.Errorf("cloudstore: materialize chunk prompt %q: %w", entityKey, err)
 		}
 		entries = append(entries, MutationEntry{Project: project, Entity: store.SyncEntityPrompt, EntityKey: entityKey, Op: store.SyncOpUpsert, Payload: payload})
+	}
+
+	// Relations travel only as relation-entity entries in chunk.Mutations — there is no
+	// typed collection for them like Sessions/Observations/Prompts — so materialize them
+	// here to mirror the mutation-push path (#379). Session/observation/prompt mutations
+	// are already materialized from the typed collections above, so they are skipped to
+	// avoid duplicate cloud_mutations rows.
+	for i, mutation := range chunk.Mutations {
+		if strings.TrimSpace(mutation.Entity) != store.SyncEntityRelation {
+			continue
+		}
+		entityKey := strings.TrimSpace(mutation.EntityKey)
+		if entityKey == "" {
+			return nil, fmt.Errorf("cloudstore: materialize chunk: mutations[%d].entity_key is required for relation", i)
+		}
+		op := strings.TrimSpace(mutation.Op)
+		if op == "" {
+			op = store.SyncOpUpsert
+		}
+		payload := json.RawMessage(strings.TrimSpace(mutation.Payload))
+		if len(payload) == 0 {
+			payload = json.RawMessage("{}")
+		}
+		entries = append(entries, MutationEntry{Project: project, Entity: store.SyncEntityRelation, EntityKey: entityKey, Op: op, Payload: payload})
 	}
 
 	return entries, nil
