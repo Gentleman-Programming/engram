@@ -454,23 +454,18 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 	// so the existence check is the only dedup guard.
 	candidates := make([]Candidate, 0, len(raw))
 	for _, rc := range raw {
-		var exists int
-		if err := s.db.QueryRow(
-			`SELECT 1 FROM memory_relations
-			 WHERE (source_id = ? AND target_id = ?)
-			    OR (source_id = ? AND target_id = ?)
-			 LIMIT 1`,
-			sourceSyncID, rc.syncID, rc.syncID, sourceSyncID,
-		).Scan(&exists); err == nil {
-			// Pair already has a relation row — skip to avoid duplicates.
-			continue
-		} else if err != sql.ErrNoRows {
+		exists, err := s.relationExists(sourceSyncID, rc.syncID)
+		if err != nil {
 			log.Printf("[store] FindCandidates: existence check src=%s cand=%s: %v", sourceSyncID, rc.syncID, err)
+			continue
+		}
+		if exists {
+			// Pair already has a relation row — skip to avoid duplicates.
 			continue
 		}
 
 		judgmentID := newSyncID("rel")
-		_, err := s.db.Exec(`
+		_, err = s.db.Exec(`
 			INSERT INTO memory_relations
 				(sync_id, source_id, target_id, relation, judgment_status, created_at, updated_at)
 			VALUES (?, ?, ?, 'pending', 'pending', datetime('now'), datetime('now'))
@@ -721,6 +716,32 @@ func (s *Store) JudgeRelation(p JudgeRelationParams) (*Relation, error) {
 	}
 
 	return s.GetRelation(p.JudgmentID)
+}
+
+// ─── Shared relation helpers ──────────────────────────────────────────────────
+
+// relationExists reports whether a relation row exists for the unordered pair
+// (sourceSyncID, targetSyncID) in either direction. Shared by FindCandidates
+// and both ScanProject pre-checks (Phase 3 and semantic) to dedup pending-row
+// creation without re-surfacing already-evaluated pairs (issue #490).
+// memory_relations has no UNIQUE on (source_id, target_id), so this existence
+// check is the only dedup guard.
+func (s *Store) relationExists(sourceSyncID, targetSyncID string) (bool, error) {
+	var exists int
+	err := s.db.QueryRow(
+		`SELECT 1 FROM memory_relations
+		 WHERE (source_id = ? AND target_id = ?)
+		    OR (source_id = ? AND target_id = ?)
+		 LIMIT 1`,
+		sourceSyncID, targetSyncID, targetSyncID, sourceSyncID,
+	).Scan(&exists)
+	if err == nil {
+		return true, nil
+	}
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return false, err
 }
 
 // ─── Cross-project guard helper ───────────────────────────────────────────────
@@ -1404,18 +1425,13 @@ func (s *Store) ScanProject(opts ScanOptions) (ScanResult, error) {
 				// direction. SkipInsert=true above bypasses FindCandidates' built-in
 				// existence check, so we mirror the Phase 3 pre-check here to avoid
 				// wasting LLM calls on already-judged pairs from PREVIOUS scans.
-				var exists int
-				if err := s.db.QueryRow(
-					`SELECT 1 FROM memory_relations
-				 WHERE (source_id = ? AND target_id = ?)
-				    OR (source_id = ? AND target_id = ?)
-				 LIMIT 1`,
-					obs.syncID, c.SyncID, c.SyncID, obs.syncID,
-				).Scan(&exists); err == nil {
-					result.AlreadyRelated++
-					continue
-				} else if err != sql.ErrNoRows {
+				exists, err := s.relationExists(obs.syncID, c.SyncID)
+				if err != nil {
 					log.Printf("[store] ScanProject: semantic pre-check obs=%s cand=%s: %v", obs.syncID, c.SyncID, err)
+					continue
+				}
+				if exists {
+					result.AlreadyRelated++
 					continue
 				}
 
@@ -1458,18 +1474,13 @@ func (s *Store) ScanProject(opts ScanOptions) (ScanResult, error) {
 			}
 
 			// Pre-check: skip pairs that already have any relation row in either direction.
-			var exists int
-			if err := s.db.QueryRow(
-				`SELECT 1 FROM memory_relations
-				 WHERE (source_id = ? AND target_id = ?)
-				    OR (source_id = ? AND target_id = ?)
-				 LIMIT 1`,
-				obs.syncID, c.SyncID, c.SyncID, obs.syncID,
-			).Scan(&exists); err == nil {
-				result.AlreadyRelated++
-				continue
-			} else if err != sql.ErrNoRows {
+			exists, err := s.relationExists(obs.syncID, c.SyncID)
+			if err != nil {
 				log.Printf("[store] ScanProject: pre-check obs=%s cand=%s: %v", obs.syncID, c.SyncID, err)
+				continue
+			}
+			if exists {
+				result.AlreadyRelated++
 				continue
 			}
 
