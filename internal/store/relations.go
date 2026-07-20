@@ -174,9 +174,8 @@ type ScanResult struct {
 
 	// Semantic counters — populated only when ScanOptions.Semantic is true.
 	// Zero-value is safe for existing JSON consumers.
-	SemanticJudged  int `json:"semantic_judged"`
-	SemanticSkipped int `json:"semantic_skipped"`
-	SemanticErrors  int `json:"semantic_errors"`
+	SemanticJudged int `json:"semantic_judged"`
+	SemanticErrors int `json:"semantic_errors"`
 }
 
 // ObservationSnippet carries the fields needed by BuildPrompt to construct an
@@ -450,8 +449,27 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 	}
 
 	// Insert a pending relation row for each candidate.
+	// Skip pairs that already have a relation row in either direction — this
+	// prevents FindCandidates from re-surfacing already-evaluated pairs on every
+	// save (issue #490). memory_relations has no UNIQUE on (source_id, target_id),
+	// so the existence check is the only dedup guard.
 	candidates := make([]Candidate, 0, len(raw))
 	for _, rc := range raw {
+		var exists int
+		if err := s.db.QueryRow(
+			`SELECT 1 FROM memory_relations
+			 WHERE (source_id = ? AND target_id = ?)
+			    OR (source_id = ? AND target_id = ?)
+			 LIMIT 1`,
+			sourceSyncID, rc.syncID, rc.syncID, sourceSyncID,
+		).Scan(&exists); err == nil {
+			// Pair already has a relation row — skip to avoid duplicates.
+			continue
+		} else if err != sql.ErrNoRows {
+			log.Printf("[store] FindCandidates: existence check src=%s cand=%s: %v", sourceSyncID, rc.syncID, err)
+			continue
+		}
+
 		judgmentID := newSyncID("rel")
 		_, err := s.db.Exec(`
 			INSERT INTO memory_relations
@@ -1536,12 +1554,6 @@ scan:
 	// ── Phase 4: semantic worker pool ─────────────────────────────────────────
 	if !opts.Semantic || len(semanticPairs) == 0 {
 		return result, nil
-	}
-
-	type pairResult struct {
-		judged  int
-		skipped int
-		errors  int
 	}
 
 	pairCh := make(chan candidatePair, len(semanticPairs))
