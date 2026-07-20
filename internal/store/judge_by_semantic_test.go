@@ -140,6 +140,77 @@ func TestJudgeBySemantic_UpsertIdempotency(t *testing.T) {
 	}
 }
 
+// ─── C.2b2 — TestJudgeBySemantic_UpsertRewritesDirection ───────────────────
+
+// TestJudgeBySemantic_UpsertRewritesDirection verifies that when the bidirectional
+// existence check matches a row whose (source_id, target_id) direction is the
+// reverse of the caller's request, the UPDATE overwrites source_id and target_id
+// to match the caller's intent. Without this, directional verbs like "supersedes"
+// would be persisted with reversed polarity (e.g. "B supersedes A" stored when the
+// caller asked for "A supersedes B" because the existing row was (B, A, pending)).
+func TestJudgeBySemantic_UpsertRewritesDirection(t *testing.T) {
+	s := setupRelationsStore(t)
+
+	_, syncA := addTestObs(t, s, "JWT auth approach v1 decision", "decision", "testproject", "project")
+	_, syncB := addTestObs(t, s, "JWT auth approach v0 legacy", "decision", "testproject", "project")
+
+	// Seed a pending row in the reversed direction (B -> A) via SaveRelation.
+	// This simulates the case where FindCandidates created the row with the
+	// candidate as source and the original observation as target.
+	revRel, err := s.SaveRelation(SaveRelationParams{
+		SyncID: "rel-reversed-pending", SourceID: syncB, TargetID: syncA,
+	})
+	if err != nil || revRel == nil {
+		t.Fatalf("SaveRelation reversed: %v", err)
+	}
+
+	// Now JudgeBySemantic with A -> B, supersedes. The existence check must
+	// find the (B, A) row via the OR clause and UPDATE it.
+	syncID, err := s.JudgeBySemantic(JudgeBySemanticParams{
+		SourceID:   syncA,
+		TargetID:   syncB,
+		Relation:   "supersedes",
+		Confidence: 0.92,
+		Reasoning:  "v1 supersedes v0",
+		Model:      "test-model",
+	})
+	if err != nil {
+		t.Fatalf("JudgeBySemantic: %v", err)
+	}
+	if syncID != "rel-reversed-pending" {
+		t.Errorf("expected sync_id to match existing row; got %q", syncID)
+	}
+
+	// Verify the row was rewritten with the caller's direction.
+	rel, err := s.GetRelation(syncID)
+	if err != nil {
+		t.Fatalf("GetRelation: %v", err)
+	}
+	if rel.SourceID != syncA {
+		t.Errorf("source_id: want %q (caller's source); got %q", syncA, rel.SourceID)
+	}
+	if rel.TargetID != syncB {
+		t.Errorf("target_id: want %q (caller's target); got %q", syncB, rel.TargetID)
+	}
+	if rel.Relation != "supersedes" {
+		t.Errorf("relation: want %q; got %q", "supersedes", rel.Relation)
+	}
+
+	// Only one row must exist for this pair in either direction.
+	var count int
+	if err := s.db.QueryRow(
+		`SELECT count(*) FROM memory_relations
+		 WHERE (source_id = ? AND target_id = ?)
+		    OR (source_id = ? AND target_id = ?)`,
+		syncA, syncB, syncB, syncA,
+	).Scan(&count); err != nil {
+		t.Fatalf("count query: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 row for pair (either direction); got %d", count)
+	}
+}
+
 // ─── C.2c — TestJudgeBySemantic_NotConflictPersists ─────────────────────────
 
 // TestJudgeBySemantic_NotConflictPersists verifies that passing Relation="not_conflict"

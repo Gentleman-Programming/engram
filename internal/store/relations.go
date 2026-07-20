@@ -829,10 +829,16 @@ func (s *Store) JudgeBySemantic(p JudgeBySemanticParams) (string, error) {
 		} else if err != nil {
 			return fmt.Errorf("JudgeBySemantic: check existing: %w", err)
 		} else {
-			// Update existing row.
+			// Update existing row. The bidirectional existence check above may
+			// have matched a row whose (source_id, target_id) direction is the
+			// reverse of what the caller requested. Overwrite source_id and
+			// target_id so directional verbs (e.g. supersedes) are persisted
+			// with the caller's intended polarity.
 			if _, execErr := tx.Exec(`
 				UPDATE memory_relations
 				SET relation        = ?,
+				    source_id       = ?,
+				    target_id       = ?,
 				    judgment_status = 'judged',
 				    confidence      = ?,
 				    reason          = ?,
@@ -841,7 +847,7 @@ func (s *Store) JudgeBySemantic(p JudgeBySemanticParams) (string, error) {
 				    marked_by_model = ?,
 				    updated_at      = datetime('now')
 				WHERE sync_id = ?
-			`, p.Relation, confidence, p.Reasoning,
+			`, p.Relation, p.SourceID, p.TargetID, confidence, p.Reasoning,
 				actor, kind, modelPtr,
 				existingSyncID,
 			); execErr != nil {
@@ -1445,6 +1451,13 @@ func (s *Store) ScanProject(opts ScanOptions) (ScanResult, error) {
 	hasUnprocessedWork := func(candidateIndex, candidateCount int) bool {
 		return candidateIndex+1 < candidateCount
 	}
+	// seenPairs deduplicates unordered pairs within a single semantic scan. The
+	// DB pre-check below catches rows from PREVIOUS scans; it cannot catch the
+	// reciprocal candidate (B→A) within THIS scan because the goroutine that
+	// would persist (A→B) has not run yet. Without this map, both directions
+	// would pass the pre-check and be queued for the worker pool, wasting one
+	// LLM call (the second UPSERT would simply overwrite the first).
+	seenPairs := make(map[string]bool, len(observations)*4)
 
 scan:
 	for _, obs := range observations {
@@ -1485,14 +1498,27 @@ scan:
 			}
 
 			for candidateIndex, c := range candidates {
-				// Skip pairs that already have a relation in either direction. The
-				// SkipInsert query above intentionally does not perform this check.
+				// In-scan dedup: canonical unordered pair key (smaller sync_id first)
+				// so {A,B} and {B,A} collide in the map.
+				k1, k2 := obs.syncID, c.SyncID
+				if k1 > k2 {
+					k1, k2 = k2, k1
+				}
+				pairKey := k1 + "|" + k2
+				if seenPairs[pairKey] {
+					continue
+				}
+
+				// Pre-check: skip pairs that already have any relation row in either
+				// direction. SkipInsert=true above bypasses FindCandidates' built-in
+				// existence check, so we mirror the Phase 3 pre-check here to avoid
+				// wasting LLM calls on already-judged pairs from PREVIOUS scans.
 				var exists int
 				if err := s.db.QueryRow(
 					`SELECT 1 FROM memory_relations
-					 WHERE (source_id = ? AND target_id = ?)
-					    OR (source_id = ? AND target_id = ?)
-					 LIMIT 1`,
+				 WHERE (source_id = ? AND target_id = ?)
+				    OR (source_id = ? AND target_id = ?)
+				 LIMIT 1`,
 					obs.syncID, c.SyncID, c.SyncID, obs.syncID,
 				).Scan(&exists); err == nil {
 					result.AlreadyRelated++
@@ -1525,6 +1551,7 @@ scan:
 					result.Capped = true
 					break scan
 				}
+				seenPairs[pairKey] = true
 			}
 			continue
 		}
