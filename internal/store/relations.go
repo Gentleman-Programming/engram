@@ -1385,46 +1385,49 @@ func (s *Store) ScanProject(opts ScanOptions) (ScanResult, error) {
 				Content: srcContent,
 			}
 
-		for _, c := range candidates {
-			// In-scan dedup: canonical unordered pair key (smaller sync_id first)
-			// so {A,B} and {B,A} collide in the map.
-			k1, k2 := obs.syncID, c.SyncID
-			if k1 > k2 {
-				k1, k2 = k2, k1
-			}
-			pairKey := k1 + "|" + k2
-			if seenPairs[pairKey] {
-				continue
-			}
+			for _, c := range candidates {
+				// In-scan dedup: canonical unordered pair key (smaller sync_id first)
+				// so {A,B} and {B,A} collide in the map. Mark seen immediately after
+				// the check — whether we queue, skip via DB pre-check, or skip via cap,
+				// we never want to reconsider the same unordered pair in this scan.
+				k1, k2 := obs.syncID, c.SyncID
+				if k1 > k2 {
+					k1, k2 = k2, k1
+				}
+				pairKey := k1 + "|" + k2
+				if seenPairs[pairKey] {
+					continue
+				}
+				seenPairs[pairKey] = true
 
-			// Pre-check: skip pairs that already have any relation row in either
-			// direction. SkipInsert=true above bypasses FindCandidates' built-in
-			// existence check, so we mirror the Phase 3 pre-check here to avoid
-			// wasting LLM calls on already-judged pairs from PREVIOUS scans.
-			var exists int
-			if err := s.db.QueryRow(
-				`SELECT 1 FROM memory_relations
+				// Pre-check: skip pairs that already have any relation row in either
+				// direction. SkipInsert=true above bypasses FindCandidates' built-in
+				// existence check, so we mirror the Phase 3 pre-check here to avoid
+				// wasting LLM calls on already-judged pairs from PREVIOUS scans.
+				var exists int
+				if err := s.db.QueryRow(
+					`SELECT 1 FROM memory_relations
 				 WHERE (source_id = ? AND target_id = ?)
 				    OR (source_id = ? AND target_id = ?)
 				 LIMIT 1`,
-				obs.syncID, c.SyncID, c.SyncID, obs.syncID,
-			).Scan(&exists); err == nil {
-				result.AlreadyRelated++
-				continue
-			} else if err != sql.ErrNoRows {
-				log.Printf("[store] ScanProject: semantic pre-check obs=%s cand=%s: %v", obs.syncID, c.SyncID, err)
-				continue
-			}
+					obs.syncID, c.SyncID, c.SyncID, obs.syncID,
+				).Scan(&exists); err == nil {
+					result.AlreadyRelated++
+					continue
+				} else if err != sql.ErrNoRows {
+					log.Printf("[store] ScanProject: semantic pre-check obs=%s cand=%s: %v", obs.syncID, c.SyncID, err)
+					continue
+				}
 
-			if len(semanticPairs) >= maxSemantic {
-				// Cap reached — stop adding pairs.
-				result.Capped = true
-				break
-			}
-			var candTitle, candType, candContent string
-			_ = s.db.QueryRow(
-				`SELECT title, type, ifnull(content,'') FROM observations WHERE sync_id = ?`, c.SyncID,
-			).Scan(&candTitle, &candType, &candContent)
+				if len(semanticPairs) >= maxSemantic {
+					// Cap reached — stop adding pairs.
+					result.Capped = true
+					break
+				}
+				var candTitle, candType, candContent string
+				_ = s.db.QueryRow(
+					`SELECT title, type, ifnull(content,'') FROM observations WHERE sync_id = ?`, c.SyncID,
+				).Scan(&candTitle, &candType, &candContent)
 				semanticPairs = append(semanticPairs, candidatePair{
 					sourceSnippet: srcSnippet,
 					candidateSnippet: ObservationSnippet{
@@ -1435,7 +1438,6 @@ func (s *Store) ScanProject(opts ScanOptions) (ScanResult, error) {
 						Content: candContent,
 					},
 				})
-				seenPairs[pairKey] = true
 			}
 			if result.Capped {
 				log.Printf("[store] ScanProject: MaxSemantic cap (%d) reached; some pairs skipped", maxSemantic)
