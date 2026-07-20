@@ -1220,6 +1220,109 @@ func TestHandleListConflicts_DefaultLimit50(t *testing.T) {
 	}
 }
 
+// TestHandleListConflicts_ExcludesNotConflict verifies that GET /conflicts
+// filters not_conflict rows from both the relations array and the total count.
+// Seeds one pending pair and one not_conflict pair in the same project; only
+// the pending relation should appear (issue #490).
+func TestHandleListConflicts_ExcludesNotConflict(t *testing.T) {
+	st, _ := conflictsTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	// One session, four observations → two distinct pairs in the same project.
+	if err := st.CreateSession("ses-exclud", "excludproj", "/tmp/excludproj"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	addObs := func(title string) string {
+		id, err := st.AddObservation(store.AddObservationParams{
+			SessionID: "ses-exclud", Type: "decision",
+			Title: title, Content: title + " body",
+			Project: "excludproj", Scope: "project",
+		})
+		if err != nil {
+			t.Fatalf("AddObservation %s: %v", title, err)
+		}
+		obs, err := st.GetObservation(id)
+		if err != nil {
+			t.Fatalf("GetObservation %s: %v", title, err)
+		}
+		return obs.SyncID
+	}
+	srcA, tgtA := addObs("Src A"), addObs("Tgt A")
+	srcB, tgtB := addObs("Src B"), addObs("Tgt B")
+
+	// Pair A — pending (default); must appear in the response.
+	if _, err := st.SaveRelation(store.SaveRelationParams{
+		SyncID: "rel-exclud-pending", SourceID: srcA, TargetID: tgtA,
+	}); err != nil {
+		t.Fatalf("SaveRelation pending: %v", err)
+	}
+	// Pair B — judged not_conflict; must be filtered out.
+	if _, err := st.SaveRelation(store.SaveRelationParams{
+		SyncID: "rel-exclud-nc", SourceID: srcB, TargetID: tgtB,
+	}); err != nil {
+		t.Fatalf("SaveRelation not_conflict: %v", err)
+	}
+	if _, err := st.JudgeRelation(store.JudgeRelationParams{
+		JudgmentID: "rel-exclud-nc",
+		Relation:   store.RelationNotConflict,
+	}); err != nil {
+		t.Fatalf("JudgeRelation not_conflict: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/conflicts?project=excludproj", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	relations, ok := resp["relations"].([]any)
+	if !ok {
+		t.Fatalf("expected relations array, got %T: %v", resp["relations"], resp["relations"])
+	}
+	if len(relations) != 1 {
+		t.Errorf("expected 1 relation (not_conflict filtered); got %d: %v", len(relations), relations)
+	}
+	total, ok := resp["total"].(float64)
+	if !ok {
+		t.Fatalf("expected total field, got %T", resp["total"])
+	}
+	if total != 1 {
+		t.Errorf("expected total=1 (not_conflict filtered); got %v", total)
+	}
+}
+
+// TestHandleListConflicts_InvalidSince_400 verifies that a malformed since
+// query parameter returns 400 with a clear error body (RFC3339 parse failure).
+func TestHandleListConflicts_InvalidSince_400(t *testing.T) {
+	st, _ := conflictsTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/conflicts?since=not-a-date", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid since, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	errMsg, ok := resp["error"].(string)
+	if !ok || errMsg == "" {
+		t.Errorf("expected non-empty 'error' field in 400 response; got: %v", resp)
+	}
+}
+
 // ─── GET /conflicts/stats ─────────────────────────────────────────────────────
 
 func TestHandleConflictsStats_ProjectScoped(t *testing.T) {
@@ -1512,8 +1615,7 @@ func (m *mockSemanticRunner) Compare(_ context.Context, _ string) (store.Semanti
 }
 
 // TestHandleScanConflicts_SemanticFalse_CountersZero verifies that when semantic=false
-// (or omitted), the response includes semantic_judged=0, semantic_skipped=0,
-// semantic_errors=0.
+// (or omitted), the response includes semantic_judged=0 and semantic_errors=0.
 func TestHandleScanConflicts_SemanticFalse_CountersZero(t *testing.T) {
 	st, _ := conflictsTestStore(t)
 	srv := New(st, 0)

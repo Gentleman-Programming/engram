@@ -1157,7 +1157,8 @@ func buildRelationsQuery(opts ListRelationsOptions, countOnly bool) (string, []a
 		args = append(args, opts.Status)
 	}
 	if opts.ExcludeNotConflict {
-		query += ` AND r.relation != 'not_conflict'`
+		query += ` AND r.relation != ?`
+		args = append(args, RelationNotConflict)
 	}
 	if !opts.SinceTime.IsZero() {
 		query += ` AND r.created_at >= ?`
@@ -1181,9 +1182,11 @@ func buildRelationsQuery(opts ListRelationsOptions, countOnly bool) (string, []a
 
 // ─── Phase 3: GetRelationStats ─────────────────────────────────────────────────
 
-// GetRelationStats returns aggregate counts for a project's relations plus
-// the deferred and dead queue totals. Two queries are executed: one GROUP BY
-// and one delegated to CountDeferredAndDead.
+// GetRelationStats returns aggregate counts for a project's CONFLICT relations
+// plus the deferred and dead queue totals. not_conflict rows are excluded by
+// design — this view backs the conflicts dashboard and CLI (issue #490); use
+// ListRelations directly for inclusive relation enumeration. Two queries are
+// executed: one GROUP BY and one delegated to CountDeferredAndDead.
 func (s *Store) GetRelationStats(project string) (RelationStats, error) {
 	stats := RelationStats{
 		Project:          project,
@@ -1192,7 +1195,7 @@ func (s *Store) GetRelationStats(project string) (RelationStats, error) {
 	}
 
 	// Build query: when project is non-empty, filter via JOIN to observations.
-	// not_conflict rows are excluded — this is a conflict stats view.
+	// not_conflict rows are excluded — this is a conflict stats view (see #490).
 	var q string
 	var args []any
 	if project != "" {
@@ -1202,17 +1205,18 @@ func (s *Store) GetRelationStats(project string) (RelationStats, error) {
 			LEFT JOIN observations src ON src.sync_id = r.source_id AND src.deleted_at IS NULL
 			LEFT JOIN observations tgt ON tgt.sync_id = r.target_id AND tgt.deleted_at IS NULL
 			WHERE (ifnull(src.project,'') = ? OR ifnull(tgt.project,'') = ?)
-			  AND r.relation != 'not_conflict'
+			  AND r.relation != ?
 			GROUP BY r.relation, r.judgment_status
 		`
-		args = []any{project, project}
+		args = []any{project, project, RelationNotConflict}
 	} else {
 		q = `
 			SELECT relation, judgment_status, count(*) AS cnt
 			FROM memory_relations
-			WHERE relation != 'not_conflict'
+			WHERE relation != ?
 			GROUP BY relation, judgment_status
 		`
+		args = []any{RelationNotConflict}
 	}
 
 	rows, err := s.db.Query(q, args...)
@@ -1368,16 +1372,35 @@ func (s *Store) ScanProject(opts ScanOptions) (ScanResult, error) {
 				Content: srcContent,
 			}
 
-			for _, c := range candidates {
-				if len(semanticPairs) >= maxSemantic {
-					// Cap reached — stop adding pairs.
-					result.Capped = true
-					break
-				}
-				var candTitle, candType, candContent string
-				_ = s.db.QueryRow(
-					`SELECT title, type, ifnull(content,'') FROM observations WHERE sync_id = ?`, c.SyncID,
-				).Scan(&candTitle, &candType, &candContent)
+		for _, c := range candidates {
+			// Pre-check: skip pairs that already have any relation row in either
+			// direction. SkipInsert=true above bypasses FindCandidates' built-in
+			// existence check, so we mirror the Phase 3 pre-check here to avoid
+			// wasting LLM calls on already-judged pairs.
+			var exists int
+			if err := s.db.QueryRow(
+				`SELECT 1 FROM memory_relations
+				 WHERE (source_id = ? AND target_id = ?)
+				    OR (source_id = ? AND target_id = ?)
+				 LIMIT 1`,
+				obs.syncID, c.SyncID, c.SyncID, obs.syncID,
+			).Scan(&exists); err == nil {
+				result.AlreadyRelated++
+				continue
+			} else if err != sql.ErrNoRows {
+				log.Printf("[store] ScanProject: semantic pre-check obs=%s cand=%s: %v", obs.syncID, c.SyncID, err)
+				continue
+			}
+
+			if len(semanticPairs) >= maxSemantic {
+				// Cap reached — stop adding pairs.
+				result.Capped = true
+				break
+			}
+			var candTitle, candType, candContent string
+			_ = s.db.QueryRow(
+				`SELECT title, type, ifnull(content,'') FROM observations WHERE sync_id = ?`, c.SyncID,
+			).Scan(&candTitle, &candType, &candContent)
 				semanticPairs = append(semanticPairs, candidatePair{
 					sourceSnippet: srcSnippet,
 					candidateSnippet: ObservationSnippet{
