@@ -211,6 +211,116 @@ func TestHandleDashboardAndSearchKeyPaths(t *testing.T) {
 	}
 }
 
+func TestDashboardHasCloudSettingsMenuItem(t *testing.T) {
+	cloudIdx, quitIdx := -1, -1
+	for i, item := range dashboardMenuItems {
+		if item == "Cloud sync settings" {
+			cloudIdx = i
+		}
+		if item == "Quit" {
+			quitIdx = i
+		}
+	}
+	if cloudIdx < 0 {
+		t.Fatal("dashboard menu is missing Cloud sync settings item")
+	}
+	if quitIdx < 0 {
+		t.Fatal("dashboard menu is missing Quit item")
+	}
+	if cloudIdx >= quitIdx {
+		t.Fatalf("Cloud sync settings (%d) must appear before Quit (%d)", cloudIdx, quitIdx)
+	}
+}
+
+func TestCloudSettingsNavigation(t *testing.T) {
+	m := New(nil, "")
+	m.Cursor = 4 // Cloud sync settings
+
+	updatedModel, _ := m.handleDashboardSelection()
+	updated := updatedModel.(Model)
+	if updated.Screen != ScreenCloudSettings {
+		t.Fatalf("enter on Cloud sync settings should open ScreenCloudSettings, got %v", updated.Screen)
+	}
+	if updated.Cursor != 0 {
+		t.Fatalf("cursor should reset to 0 on entering cloud settings, got %d", updated.Cursor)
+	}
+
+	updatedModel, _ = updated.handleCloudSettingsKeys("esc")
+	updated = updatedModel.(Model)
+	if updated.Screen != ScreenDashboard {
+		t.Fatalf("esc from cloud settings should return to dashboard, got %v", updated.Screen)
+	}
+
+	m = New(nil, "")
+	m.Screen = ScreenCloudSettings
+	updatedModel, _ = m.handleCloudSettingsKeys("q")
+	updated = updatedModel.(Model)
+	if updated.Screen != ScreenDashboard {
+		t.Fatalf("q from cloud settings should return to dashboard, got %v", updated.Screen)
+	}
+}
+
+func TestCloudSettingsMenuNavigation(t *testing.T) {
+	m := New(nil, "")
+	m.Screen = ScreenCloudSettings
+
+	updatedModel, _ := m.handleCloudSettingsKeys("down")
+	updated := updatedModel.(Model)
+	if updated.Cursor != 1 {
+		t.Fatalf("down should move cursor to 1, got %d", updated.Cursor)
+	}
+
+	updatedModel, _ = updated.handleCloudSettingsKeys("j")
+	updated = updatedModel.(Model)
+	if updated.Cursor != 2 {
+		t.Fatalf("j should move cursor to 2, got %d", updated.Cursor)
+	}
+
+	updatedModel, _ = updated.handleCloudSettingsKeys("down")
+	updated = updatedModel.(Model)
+	if updated.Cursor != 3 {
+		t.Fatalf("down should move cursor to 3, got %d", updated.Cursor)
+	}
+
+	updatedModel, _ = updated.handleCloudSettingsKeys("down")
+	updated = updatedModel.(Model)
+	if updated.Cursor != 3 {
+		t.Fatalf("down at bottom should stay at 3, got %d", updated.Cursor)
+	}
+
+	updatedModel, _ = updated.handleCloudSettingsKeys("up")
+	updated = updatedModel.(Model)
+	if updated.Cursor != 2 {
+		t.Fatalf("up should move cursor to 2, got %d", updated.Cursor)
+	}
+
+	updatedModel, _ = updated.handleCloudSettingsKeys("k")
+	updated = updatedModel.(Model)
+	if updated.Cursor != 1 {
+		t.Fatalf("k should move cursor to 1, got %d", updated.Cursor)
+	}
+
+	m = New(nil, "")
+	m.Screen = ScreenCloudSettings
+	updatedModel, _ = m.handleCloudSettingsKeys("up")
+	updated = updatedModel.(Model)
+	if updated.Cursor != 0 {
+		t.Fatalf("up at top should stay at 0, got %d", updated.Cursor)
+	}
+
+	m = New(nil, "")
+	m.Screen = ScreenCloudSettings
+	m.Cursor = 3 // Back
+	updatedModel, cmd := m.handleCloudSettingsKeys("enter")
+	updated = updatedModel.(Model)
+	if updated.Screen != ScreenDashboard {
+		t.Fatalf("enter on Back should return to dashboard, got %v", updated.Screen)
+	}
+	if cmd == nil {
+		t.Fatal("enter on Back should refresh stats")
+	}
+}
+
 func TestHandleRecentTimelineSessionsAndDetailKeyPaths(t *testing.T) {
 	fx := newTestFixture(t)
 	m := New(fx.store, "")
@@ -617,6 +727,7 @@ func TestHandleKeyPressRouterAndClearsError(t *testing.T) {
 		ScreenSessions,
 		ScreenSessionDetail,
 		ScreenSetup,
+		ScreenCloudSettings,
 	} {
 		m.Screen = screen
 		m.ErrorMsg = "old error"
@@ -643,7 +754,7 @@ func TestHandleDashboardKeysAndSelectionRemainingBranches(t *testing.T) {
 		t.Fatal("cursor should stay at bottom boundary")
 	}
 
-	m.Cursor = 4
+	m.Cursor = 5
 	_, cmd := m.handleDashboardKeys(" ")
 	if cmd == nil {
 		t.Fatal("space on quit item should return quit command")
@@ -661,10 +772,10 @@ func TestHandleDashboardKeysAndSelectionRemainingBranches(t *testing.T) {
 		t.Fatal("cursor 0 selection should open search")
 	}
 
-	m.Cursor = 4
+	m.Cursor = 5
 	_, cmd = m.handleDashboardSelection()
 	if cmd == nil {
-		t.Fatal("cursor 4 selection should quit")
+		t.Fatal("cursor 5 selection should quit")
 	}
 
 	m.Cursor = 99

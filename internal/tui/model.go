@@ -36,6 +36,7 @@ const (
 	ScreenSessions
 	ScreenSessionDetail
 	ScreenSetup
+	ScreenCloudSettings
 )
 
 type SessionDeleteState int

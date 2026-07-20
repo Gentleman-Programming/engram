@@ -5623,9 +5623,9 @@ func TestHandleTimeline_ExplicitUnknownProjectError(t *testing.T) {
 
 // ─── F2: mem_session_summary schema + auto-detect tests ──────────────────────
 
-// TestMemSessionSummary_SchemaNoProjectField: mem_session_summary must NOT have
-// 'project' in its input schema (mirrors REQ-308 write-tool contract).
-func TestMemSessionSummary_SchemaNoProjectField(t *testing.T) {
+// TestMemSessionSummary_SchemaIncludesProjectField: mem_session_summary must have
+// 'project', 'project_choice_reason', and 'recovery_token' in its input schema.
+func TestMemSessionSummary_SchemaIncludesProjectField(t *testing.T) {
 	s := newMCPTestStore(t)
 	srv := NewServer(s)
 
@@ -5634,8 +5634,80 @@ func TestMemSessionSummary_SchemaNoProjectField(t *testing.T) {
 		t.Fatal("mem_session_summary not registered")
 	}
 	props := st.Tool.InputSchema.Properties
-	if _, hasProject := props["project"]; hasProject {
-		t.Error("mem_session_summary must not have 'project' in schema (write tool — auto-detect only)")
+	if _, hasProject := props["project"]; !hasProject {
+		t.Error("mem_session_summary must have 'project' in schema")
+	}
+	if _, hasReason := props["project_choice_reason"]; !hasReason {
+		t.Error("mem_session_summary must have 'project_choice_reason' in schema")
+	}
+	if _, hasToken := props["recovery_token"]; !hasToken {
+		t.Error("mem_session_summary must have 'recovery_token' in schema")
+	}
+}
+
+// TestMemSessionSummary_ExplicitProjectOverride: summary is stored under the explicit project provided.
+func TestMemSessionSummary_ExplicitProjectOverride(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	if err := s.EnrollProject("explicit-summary-project"); err != nil {
+		t.Fatal(err)
+	}
+	h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"content": "## Goal\nTest explicit project override",
+			"project": "explicit-summary-project",
+		}},
+	})
+	if err != nil || res.IsError {
+		t.Fatalf("session summary: err=%v isError=%v text=%q", err, res.IsError, callResultText(t, res))
+	}
+
+	obs, err := s.RecentObservations("explicit-summary-project", "project", 5)
+	if err != nil || len(obs) == 0 {
+		t.Fatal("expected session_summary observation under explicit project 'explicit-summary-project'")
+	}
+
+	m := callResultJSON(t, res)
+	if got := m["project"]; got != "explicit-summary-project" {
+		t.Errorf("response envelope project = %v; want 'explicit-summary-project'", got)
+	}
+}
+
+// TestMemSessionSummary_ResolveViaSessionID: summary is stored under the project associated with the session.
+func TestMemSessionSummary_ResolveViaSessionID(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("active-sess", "session-linked-project", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+
+	h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"content":    "## Goal\nTest project via session_id",
+			"session_id": "active-sess",
+		}},
+	})
+	if err != nil || res.IsError {
+		t.Fatalf("session summary: err=%v isError=%v text=%q", err, res.IsError, callResultText(t, res))
+	}
+
+	obs, err := s.RecentObservations("session-linked-project", "project", 5)
+	if err != nil || len(obs) == 0 {
+		t.Fatal("expected session_summary observation under session project 'session-linked-project'")
+	}
+
+	m := callResultJSON(t, res)
+	if got := m["project"]; got != "session-linked-project" {
+		t.Errorf("response envelope project = %v; want 'session-linked-project'", got)
 	}
 }
 

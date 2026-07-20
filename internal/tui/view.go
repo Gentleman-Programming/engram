@@ -80,6 +80,8 @@ func (m Model) View() string {
 		content = m.viewSessionDetail()
 	case ScreenSetup:
 		content = m.viewSetup()
+	case ScreenCloudSettings:
+		content = m.viewCloudSettings()
 	default:
 		content = "Unknown screen"
 	}
@@ -159,19 +161,36 @@ func (m Model) viewDashboard() string {
 	// Menu
 	b.WriteString(titleStyle.Render("  Actions"))
 	b.WriteString("\n")
+	b.WriteString(renderMenu(dashboardMenuItems, m.Cursor))
 
-	for i, item := range dashboardMenuItems {
-		if i == m.Cursor {
+	// Help
+	b.WriteString(helpStyle.Render("\n  j/k navigate • enter select • s search • q quit"))
+
+	return b.String()
+}
+
+func (m Model) viewCloudSettings() string {
+	var b strings.Builder
+
+	b.WriteString(headerStyle.Render("  Cloud sync settings"))
+	b.WriteString("\n\n")
+	b.WriteString(renderMenu(cloudSettingsMenuItems, m.Cursor))
+	b.WriteString(helpStyle.Render("\n  j/k navigate • enter select • esc/q back"))
+
+	return b.String()
+}
+
+// renderMenu renders a vertical list of selectable menu items with a cursor.
+func renderMenu(items []string, cursor int) string {
+	var b strings.Builder
+	for i, item := range items {
+		if i == cursor {
 			b.WriteString(menuSelectedStyle.Render("▸ " + item))
 		} else {
 			b.WriteString(menuItemStyle.Render("  " + item))
 		}
 		b.WriteString("\n")
 	}
-
-	// Help
-	b.WriteString(helpStyle.Render("\n  j/k navigate • enter select • s search • q quit"))
-
 	return b.String()
 }
 
