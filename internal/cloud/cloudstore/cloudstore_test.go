@@ -472,6 +472,11 @@ func TestMaterializedChunkMutationsRejectsMissingSyncIDs(t *testing.T) {
 			chunk: engramsync.ChunkData{Prompts: []store.Prompt{{SessionID: "s-1"}}},
 			want:  "prompts[0].sync_id is required",
 		},
+		{
+			name:  "relation missing entity key",
+			chunk: engramsync.ChunkData{Mutations: []store.SyncMutation{{Entity: store.SyncEntityRelation}}},
+			want:  "mutations[0].entity_key is required",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -480,6 +485,111 @@ func TestMaterializedChunkMutationsRejectsMissingSyncIDs(t *testing.T) {
 				t.Fatalf("expected %q error, got %v", tt.want, err)
 			}
 		})
+	}
+}
+
+func TestMaterializedChunkMutationsCarriesRelationFromChunkMutations(t *testing.T) {
+	project := "proj-materialize-rel"
+	relationPayload := `{"sync_id":"rel-1","source_id":"obs-a","target_id":"obs-b","relation":"related","project":"proj-materialize-rel"}`
+	chunk := engramsync.ChunkData{
+		Observations: []store.Observation{{SyncID: "obs-a"}, {SyncID: "obs-b"}},
+		Mutations: []store.SyncMutation{
+			{Project: project, Entity: store.SyncEntityRelation, EntityKey: "rel-1", Op: store.SyncOpUpsert, Payload: relationPayload},
+			// A session/observation mutation that mirrors a typed row (as the push
+			// materializer emits) must NOT produce a duplicate cloud_mutations entry.
+			{Project: project, Entity: store.SyncEntityObservation, EntityKey: "obs-a", Op: store.SyncOpUpsert, Payload: `{"sync_id":"obs-a"}`},
+		},
+	}
+
+	entries, err := materializedChunkMutations(project, chunk)
+	if err != nil {
+		t.Fatalf("materializedChunkMutations: %v", err)
+	}
+
+	// 2 observation upserts (from typed rows) + 1 relation (from chunk.Mutations); the
+	// duplicate observation mutation must be skipped.
+	if len(entries) != 3 {
+		t.Fatalf("expected 2 observations + 1 relation, got %d: %+v", len(entries), entries)
+	}
+
+	var relation *MutationEntry
+	for i := range entries {
+		if entries[i].Entity == store.SyncEntityRelation {
+			if relation != nil {
+				t.Fatalf("expected exactly one relation entry, got a duplicate: %+v", entries)
+			}
+			relation = &entries[i]
+		}
+	}
+	if relation == nil {
+		t.Fatalf("expected relation entry materialized from chunk.Mutations, got %+v", entries)
+	}
+	if relation.EntityKey != "rel-1" || relation.Op != store.SyncOpUpsert || relation.Project != project {
+		t.Fatalf("unexpected relation entry: %+v", *relation)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(relation.Payload, &payload); err != nil {
+		t.Fatalf("relation payload is not object JSON: %v", err)
+	}
+	if payload["sync_id"] != "rel-1" {
+		t.Fatalf("relation payload not preserved: %+v", payload)
+	}
+}
+
+func TestWriteChunkMaterializesRelationMutationIntoCloudMutations(t *testing.T) {
+	cs := openTestCloudStore(t)
+	project := "test-chunk-relation-" + strings.ReplaceAll(time.Now().UTC().Format("20060102150405.000000000"), ".", "-")
+	payload, err := chunkcodec.CanonicalizeForProject([]byte(`{
+		"observations":[
+			{"sync_id":"obs-a","session_id":"s-1","type":"decision","title":"A","content":"A","scope":"project","created_at":"2026-04-29T10:01:00Z","updated_at":"2026-04-29T10:01:00Z"},
+			{"sync_id":"obs-b","session_id":"s-1","type":"decision","title":"B","content":"B","scope":"project","created_at":"2026-04-29T10:01:00Z","updated_at":"2026-04-29T10:01:00Z"}
+		],
+		"mutations":[
+			{"entity":"relation","entity_key":"rel-1","op":"upsert","payload":"{\"sync_id\":\"rel-1\",\"source_id\":\"obs-a\",\"target_id\":\"obs-b\",\"relation\":\"related\"}"}
+		]
+	}`), project)
+	if err != nil {
+		t.Fatalf("canonicalize chunk: %v", err)
+	}
+	chunkID := chunkIDFromPayload(payload)
+
+	if err := cs.WriteChunk(context.Background(), project, chunkID, "tester", "2026-04-29T10:03:00Z", payload); err != nil {
+		t.Fatalf("WriteChunk: %v", err)
+	}
+
+	mutations, _, _, err := cs.ListMutationsSince(context.Background(), 0, 100, []string{project})
+	if err != nil {
+		t.Fatalf("ListMutationsSince: %v", err)
+	}
+	foundRelation := false
+	for _, m := range mutations {
+		if m.Entity == store.SyncEntityRelation && m.EntityKey == "rel-1" {
+			foundRelation = true
+			if m.Project != project || m.Op != store.SyncOpUpsert {
+				t.Fatalf("unexpected relation mutation: %+v", m)
+			}
+		}
+	}
+	if !foundRelation {
+		t.Fatalf("expected relation materialized into cloud_mutations, got %+v", mutations)
+	}
+
+	// Replay must stay idempotent — no duplicate relation row.
+	if err := cs.WriteChunk(context.Background(), project, chunkID, "tester", "2026-04-29T10:03:00Z", payload); err != nil {
+		t.Fatalf("replay WriteChunk: %v", err)
+	}
+	after, _, _, err := cs.ListMutationsSince(context.Background(), 0, 100, []string{project})
+	if err != nil {
+		t.Fatalf("ListMutationsSince after replay: %v", err)
+	}
+	relCount := 0
+	for _, m := range after {
+		if m.Entity == store.SyncEntityRelation && m.EntityKey == "rel-1" {
+			relCount++
+		}
+	}
+	if relCount != 1 {
+		t.Fatalf("expected exactly one relation row after replay, got %d", relCount)
 	}
 }
 

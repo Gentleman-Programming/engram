@@ -21,6 +21,12 @@ const CONFIGURED_ENGRAM_URL = process.env.ENGRAM_URL?.trim() || undefined;
 const ENGRAM_URL = CONFIGURED_ENGRAM_URL || `http://127.0.0.1:${ENGRAM_PORT}`;
 const ENGRAM_BIN = process.env.ENGRAM_BIN ?? "engram";
 
+const ENGRAM_FETCH_TIMEOUT_MS = 3000;
+const ENGRAM_FETCH_MAX_ATTEMPTS = 3;
+const ENGRAM_FETCH_BACKOFF_BASE_MS = 250;
+const ENGRAM_SELF_HEAL_INTERVAL_MS = 5000;
+const ENGRAM_SELF_HEAL_MAX_ATTEMPTS = 6;
+
 const ENGRAM_TOOLS = [
   "mem_search",
   "mem_save",
@@ -139,6 +145,11 @@ interface SessionContext {
   };
 }
 
+type MemoryToolContext = SessionContext & {
+  hasUI?: boolean;
+  ui?: { setStatus?: (key: string, text: string | undefined) => void };
+};
+
 interface AgentStartEvent {
   systemPrompt: string;
   prompt?: string;
@@ -161,20 +172,59 @@ class EngramHttpError extends Error {
   }
 }
 
+// Node rejects an AbortSignal.timeout() fetch with a DOMException named "TimeoutError",
+// which is an instanceof Error; a caller-supplied abort surfaces as "AbortError".
+function isTimeoutError(error: unknown): boolean {
+  return error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
+}
+
+// engramFetch resolves to null on failure and ~20 call sites depend on that fallthrough —
+// ensureSession in particular must not abort a mem_save just because session creation blipped.
+// So the timeout detail travels out-of-band instead of changing what any caller receives,
+// letting executeMemoryTool tell the truth about an ambiguous write without blast radius.
+let lastFetchTimeoutMethod: string | undefined;
+
+function takeLastFetchTimeoutMethod(): string | undefined {
+  const method = lastFetchTimeoutMethod;
+  lastFetchTimeoutMethod = undefined;
+  return method;
+}
+
 async function engramFetch<TResponse = unknown>(path: string, opts: FetchOptions = {}): Promise<TResponse | null> {
+  const method = opts.method ?? "GET";
+  // This call's outcome supersedes any earlier one. A tool call can issue several fetches
+  // (mem_save creates the session, then writes the observation); without this reset a timeout
+  // on the first leg would mislabel an unrelated failure on the second as "may already have
+  // been applied", telling the agent not to retry a write that never left the machine.
+  lastFetchTimeoutMethod = undefined;
   let res: Response | undefined;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  let timedOut = false;
+  for (let attempt = 0; attempt < ENGRAM_FETCH_MAX_ATTEMPTS; attempt += 1) {
     try {
       res = await fetch(`${ENGRAM_URL}${redactUrlPath(path)}`, {
-        method: opts.method ?? "GET",
+        method,
         headers: opts.body ? { "Content-Type": "application/json" } : undefined,
         body: opts.body ? JSON.stringify(redactValue(opts.body)) : undefined,
+        signal: AbortSignal.timeout(ENGRAM_FETCH_TIMEOUT_MS),
       });
       break;
-    } catch {
-      if (attempt < 2) await wait(150);
+    } catch (error) {
+      // A timeout means the request may already have reached the server, so re-sending it
+      // could duplicate a non-idempotent write (mem_save and friends carry no idempotency
+      // key). Only pre-send connection failures — the macOS wake-settle case this retry
+      // exists for — are safe to repeat, and a hung server will not recover by retrying.
+      if (isTimeoutError(error)) {
+        timedOut = true;
+        break;
+      }
+      if (attempt < ENGRAM_FETCH_MAX_ATTEMPTS - 1) await wait(ENGRAM_FETCH_BACKOFF_BASE_MS * 2 ** attempt);
     }
   }
+
+  // A timeout is NOT the same failure as an unreachable server, and reporting both as "could
+  // not reach" invites the caller to retry a write whose outcome is genuinely unknown. Record
+  // which it was so the tool layer can say what we do and do not know.
+  if (timedOut) lastFetchTimeoutMethod = method;
   if (!res) return null;
 
   let data: unknown = null;
@@ -257,6 +307,48 @@ async function isEngramRunning(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+function waitUnref(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
+}
+
+let engramSelfHealInFlight = false;
+// Keyed by session so a session that fails repeatedly is tracked once, and so a session that
+// shuts down mid-outage can be dropped instead of having its torn-down UI touched later.
+const engramSelfHealContexts = new Map<string | MemoryToolContext, MemoryToolContext>();
+
+// Pruning is by session id. A context with no resolvable session id is keyed by the ctx
+// object itself and cannot be pruned here, but it self-expires: the probe clears the whole
+// map within one cycle, and setStatus is optional-chained, so a torn-down UI is never a crash.
+function forgetSelfHealContext(sessionId: string): void {
+  engramSelfHealContexts.delete(sessionId);
+}
+
+function scheduleEngramSelfHeal(ctx: MemoryToolContext): void {
+  // Track every session that observed the outage: this module is shared by all sessions in
+  // the Pi process, so a single probe must clear the stale label on all of them, not just
+  // whichever session happened to fail first.
+  engramSelfHealContexts.set(getSessionId(ctx) ?? ctx, ctx);
+  if (engramSelfHealInFlight) return;
+  engramSelfHealInFlight = true;
+  void (async () => {
+    try {
+      for (let attempt = 0; attempt < ENGRAM_SELF_HEAL_MAX_ATTEMPTS; attempt += 1) {
+        await waitUnref(ENGRAM_SELF_HEAL_INTERVAL_MS);
+        if (await isEngramRunning()) {
+          for (const pending of engramSelfHealContexts.values()) pending.ui?.setStatus?.("engram", undefined);
+          return;
+        }
+      }
+    } finally {
+      engramSelfHealContexts.clear();
+      engramSelfHealInFlight = false;
+    }
+  })();
 }
 
 function rawBasenameProjectName(directory: string): string {
@@ -710,7 +802,17 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
   }
 }
 
-async function executeMemoryTool(toolName: string, params: Record<string, unknown>, ctx: SessionContext & { hasUI?: boolean; ui?: { setStatus?: (key: string, text: string | undefined) => void } }) {
+function unreachableMessage(timedOutMethod: string | undefined): string {
+  if (timedOutMethod && timedOutMethod !== "GET") {
+    return `gentle-engram timed out after ${ENGRAM_FETCH_TIMEOUT_MS}ms waiting for the Engram HTTP server at ${ENGRAM_URL}. The ${timedOutMethod} request may already have been applied — do NOT blindly retry it, or you may duplicate the write. Verify with mem_search or mem_doctor first.`;
+  }
+  if (timedOutMethod) {
+    return `gentle-engram timed out after ${ENGRAM_FETCH_TIMEOUT_MS}ms waiting for the Engram HTTP server at ${ENGRAM_URL}. The server accepted the connection but did not respond. Run mem_doctor or restart Engram.`;
+  }
+  return `gentle-engram could not reach the Engram HTTP server at ${ENGRAM_URL}. The Pi-native mem_* tools are registered, but the native memory provider is not currently responding. Run mem_doctor or restart Engram.`;
+}
+
+async function executeMemoryTool(toolName: string, params: Record<string, unknown>, ctx: MemoryToolContext) {
   await initOnce(ctx.cwd);
   await refreshProjectDetection(ctx.cwd);
   const action = humanToolName(toolName);
@@ -719,7 +821,7 @@ async function executeMemoryTool(toolName: string, params: Record<string, unknow
   try {
     const data = await callMemoryTool(toolName, params, ctx);
     if (data === null) {
-      throw new Error(`gentle-engram could not reach the Engram HTTP server at ${ENGRAM_URL}. The Pi-native mem_* tools are registered, but the native memory provider is not currently responding. Run mem_doctor or restart Engram.`);
+      throw new Error(unreachableMessage(takeLastFetchTimeoutMethod()));
     }
     const result = { content: [{ type: "text" as const, text: textResult(data) }], details: { data } };
     if (toolName === "mem_doctor" && data && typeof data === "object" && "status" in data && data.status === "error") {
@@ -735,6 +837,7 @@ async function executeMemoryTool(toolName: string, params: Record<string, unknow
       ? { error: message, http_status: error.status, data: error.data }
       : { error: message };
     ctx.ui?.setStatus?.("engram", `🧠 ${project} · ${errorStatusLabel(message)}`);
+    if (!(error instanceof EngramHttpError)) scheduleEngramSelfHeal(ctx);
     return { content: [{ type: "text" as const, text: message }], details, isError: true };
   }
 }
@@ -749,7 +852,7 @@ function registerMemoryTools(pi: ExtensionAPI): void {
       parameters: MEMORY_TOOL_SCHEMAS[toolName],
       renderShell: "self",
       async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-        return executeMemoryTool(toolName, params as Record<string, unknown>, ctx as SessionContext & { hasUI?: boolean; ui?: { setStatus?: (key: string, text: string | undefined) => void } });
+        return executeMemoryTool(toolName, params as Record<string, unknown>, ctx as MemoryToolContext);
       },
       renderCall(args) {
         return new Text(renderCallText(toolName, args), 0, 0);
@@ -772,6 +875,7 @@ export default function registerEngram(pi: ExtensionAPI) {
     if (!sessionId) return;
     toolCounts.delete(sessionId);
     forgetKnownSession(sessionId);
+    forgetSelfHealContext(sessionId);
   });
 
   pi.on("session_compact", async (event: unknown, ctx: SessionContext) => {
