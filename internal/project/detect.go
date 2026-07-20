@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -279,7 +278,7 @@ func detectGitRootDir(dir string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--show-toplevel")
+	cmd := newProjectCommandContext(ctx, "git", "-C", dir, "rev-parse", "--show-toplevel")
 	out, err := cmd.Output()
 	if err != nil {
 		return ""
@@ -378,7 +377,7 @@ func detectFromGitRemote(dir string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "git", "-C", dir, "remote", "get-url", "origin")
+	cmd := newProjectCommandContext(ctx, "git", "-C", dir, "remote", "get-url", "origin")
 	out, err := cmd.Output()
 	if err != nil {
 		return ""
