@@ -68,7 +68,7 @@ The sentence that organizes the whole repo:
 | Change chunk sync | `internal/sync/sync.go` | [Sync and Cloud](codebase/sync-and-cloud.md), `internal/sync/*_test.go`, `README.md#git-sync` |
 | Change cloud autosync | `internal/cloud/autosync/manager.go` | [Sync and Cloud](codebase/sync-and-cloud.md), `internal/cloud/remote/transport.go`, `DOCS.md#cloud-autosync` |
 | Change the dashboard | `internal/cloud/dashboard/dashboard.go` | [Dashboard](codebase/dashboard.md), `internal/cloud/dashboard/*_templ.go`, `internal/cloud/dashboard/static/styles.css` |
-| Change agent setup | `internal/setup/setup.go` | [Integrations](codebase/integrations.md), `plugin/`, `docs/AGENT-SETUP.md`, `docs/PLUGINS.md` |
+| Change agent setup | `internal/setup/registry.go`, `internal/setup/agents.go`, `internal/setup/setup.go` | [Integrations](codebase/integrations.md), `plugin/`, `docs/AGENT-SETUP.md`, `docs/PLUGINS.md` |
 | Prepare or review a large feature | `openspec/changes/*` | [Maintainer Playbook](codebase/maintainer-playbook.md), `openspec/specs/*`, `CONTRIBUTING.md` |
 
 ## Full technical reference stays in DOCS.md

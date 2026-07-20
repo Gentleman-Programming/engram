@@ -120,7 +120,7 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 			continue
 		}
 		seen[project] = struct{}{}
-		if !s.authorizeProjectScope(w, project) {
+		if !s.authorizeProjectScope(r.Context(), w, project) {
 			// authorizeProjectScope already wrote the 403 response.
 			return
 		}
@@ -242,7 +242,27 @@ func (s *CloudServer) handleMutationPull(w http.ResponseWriter, r *http.Request)
 	// EnrolledProjectsProvider, default to an empty allowedProjects slice
 	// (returns nothing) rather than nil (which returns everything).
 	var allowedProjects []string
-	if s.projectAuth != nil {
+	legacyProjectAuth := s.projectAuth != nil
+	if s.principalProject != nil {
+		principal, ok := PrincipalFromContext(r.Context())
+		if !ok {
+			writeActionableError(w, http.StatusForbidden, constants.UpgradeErrorClassPolicy, constants.ReasonPolicyForbidden, "forbidden: principal is required")
+			return
+		}
+		if usesManagedProjectGrants(principal) {
+			projects, err := s.principalProject.EnrolledProjectsForPrincipal(r.Context(), principal)
+			if err != nil {
+				writeActionableError(w, http.StatusForbidden, constants.UpgradeErrorClassPolicy, constants.ReasonPolicyForbidden, "forbidden: project is not allowed")
+				return
+			}
+			if projects == nil {
+				projects = []string{}
+			}
+			allowedProjects = projects
+			legacyProjectAuth = false
+		}
+	}
+	if legacyProjectAuth {
 		if ep, ok := s.projectAuth.(EnrolledProjectsProvider); ok {
 			allowedProjects = ep.EnrolledProjects()
 		} else {

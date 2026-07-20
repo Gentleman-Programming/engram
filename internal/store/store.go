@@ -3173,7 +3173,7 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 	sqlQ := `
 		SELECT o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
 		       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.review_after, o.pinned, o.created_at, o.updated_at, o.deleted_at,
-		       fts.rank
+		       bm25(observations_fts, 5.0, 1.0, 0.0, 0.0, 0.0, 3.0) as rank
 		FROM observations_fts fts
 		JOIN observations o ON o.id = fts.rowid
 		WHERE observations_fts MATCH ? AND o.deleted_at IS NULL
@@ -3195,7 +3195,7 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 		args = append(args, normalizeScope(opts.Scope))
 	}
 
-	sqlQ += " ORDER BY fts.rank LIMIT ?"
+	sqlQ += " ORDER BY rank LIMIT ?"
 	args = append(args, limit)
 
 	rows, err := s.queryItHook(s.db, sqlQ, args...)
@@ -3565,12 +3565,14 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 		result.SessionsImported += int(n)
 	}
 
-	// Import observations (use new IDs — AUTOINCREMENT)
+	// Import observations (use new IDs — AUTOINCREMENT, skip duplicate sync IDs)
 	for _, obs := range data.Observations {
-		_, err := s.execHook(tx,
+		syncID := normalizeExistingSyncID(obs.SyncID, "obs")
+		res, err := s.execHook(tx,
 			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, review_after, created_at, updated_at, deleted_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			normalizeExistingSyncID(obs.SyncID, "obs"),
+			 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+			 WHERE NOT EXISTS (SELECT 1 FROM observations WHERE sync_id = ?)`,
+			syncID,
 			obs.SessionID,
 			obs.Type,
 			obs.Title,
@@ -3587,11 +3589,13 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 			obs.CreatedAt,
 			obs.UpdatedAt,
 			obs.DeletedAt,
+			syncID,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("import observation %d: %w", obs.ID, err)
 		}
-		result.ObservationsImported++
+		n, _ := res.RowsAffected()
+		result.ObservationsImported += int(n)
 	}
 
 	// Import prompts
@@ -6583,6 +6587,11 @@ func sanitizeFTS(query string) string {
 	for i, w := range words {
 		// Strip existing quotes to avoid double-quoting
 		w = strings.Trim(w, `"`)
+		// Double interior double-quotes: FTS5 escapes a literal " inside a
+		// quoted phrase by doubling it (""). Without this, `hello"world`
+		// becomes `"hello"world"` — an unterminated string literal that crashes
+		// the query with "SQL logic error: unterminated string". See #574.
+		w = strings.ReplaceAll(w, `"`, `""`)
 		words[i] = `"` + w + `"`
 	}
 	return strings.Join(words, " ")

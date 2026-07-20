@@ -733,9 +733,9 @@ templ adminNav(active string) {
 			<a href="/dashboard/admin/projects">Projects</a>
 		}
 		if active == "users" {
-			<a href="/dashboard/admin/users" class="active">Users</a>
+			<a href="/dashboard/admin/users" class="active">Managed Users</a>
 		} else {
-			<a href="/dashboard/admin/users">Users</a>
+			<a href="/dashboard/admin/users">Managed Users</a>
 		}
 		if active == "health" {
 			<a href="/dashboard/admin/health" class="active">System Health</a>
@@ -881,56 +881,250 @@ templ AdminProjectsPage(controls []cloudstore.ProjectSyncControl) {
 	</section>
 }
 
-// AdminUsersListPartial renders only the admin users table + HtmxPaginationBar (no shell, no outer wrapper).
-// R5-2: used by /dashboard/admin/users/list so HTMX pagination works without full-page nav.
-// R6-1: outer <div id="admin-users-content"> removed — avoids duplicate IDs on HTMX innerHTML swap.
-templ AdminUsersListPartial(contributors []cloudstore.DashboardContributorRow, pg Pagination) {
-	if len(contributors) == 0 {
-		@EmptyState("No Contributors Yet", "No contributors have synced chunks to this cloud workspace yet.")
+// ManagedUsersListPartial renders only the managed-users table (no shell, no
+// outer wrapper, mirrors the R6-1 no-duplicate-ID convention used by the other
+// list partials). cloud-user-token-management PR4: renders cloud principals /
+// managed human users, NOT contributor analytics — contributors keep their
+// own separate surface at /dashboard/contributors. Managed user lists are not
+// paginated in the MVP: operator-managed accounts are expected to stay small
+// relative to synced contributor volume.
+templ ManagedUsersListPartial(users []cloudstore.HumanUser) {
+	if len(users) == 0 {
+		@EmptyState("No Managed Users Yet", "Create the first managed user above. Every managed user is deny-by-default and cannot sync any project until an admin grants one explicitly.")
 	} else {
 		<table class="data-table">
 			<thead>
 				<tr>
-					<th>Contributor</th>
-					<th>Chunks</th>
-					<th>Projects</th>
-					<th>Last Chunk</th>
+					<th>Username</th>
+					<th>Display Name</th>
+					<th>Role</th>
+					<th>Status</th>
+					<th>Created</th>
+					<th>Action</th>
 				</tr>
 			</thead>
 			<tbody>
-				for _, c := range contributors {
+				for _, u := range users {
 					<tr>
-						<td>{ c.CreatedBy }</td>
-						<td>{ fmt.Sprint(c.Chunks) }</td>
-						<td>{ fmt.Sprint(c.Projects) }</td>
-						<td>{ formatTimestampStr(c.LastChunkAt) }</td>
+						<td><a href={ templ.SafeURL("/dashboard/admin/users/" + url.PathEscape(u.PrincipalID)) }>{ u.Username }</a></td>
+						<td>{ u.DisplayName }</td>
+						<td>{ u.Role }</td>
+						<td>
+							if u.Enabled {
+								@StatusBadge("Enabled", "success")
+							} else {
+								@StatusBadge("Disabled", "danger")
+							}
+						</td>
+						<td>{ formatTimeValue(u.CreatedAt) }</td>
+						<td>
+							<form method="post" action={ templ.SafeURL("/dashboard/admin/users/" + url.PathEscape(u.PrincipalID) + managedUserToggleAction(u.Enabled)) } class="switch-form">
+								if u.Enabled {
+									<button type="submit" class="switch-button is-on">Disable</button>
+								} else {
+									<button type="submit" class="switch-button is-off">Enable</button>
+								}
+							</form>
+						</td>
 					</tr>
 				}
 			</tbody>
 		</table>
-		@HtmxPaginationBar(pg, "/dashboard/admin/users/list", "#admin-users-content", "")
 	}
 }
 
-// AdminUsersPage renders the admin users list shell.
-// R6-1: converted to hx-get/load pattern (mirrors ProjectsPage) — inline table removed.
-// The outer #admin-users-content div triggers an HTMX load of /dashboard/admin/users/list.
-templ AdminUsersPage() {
+// ManagedUsersPage renders the managed-users shell: a create-user form plus
+// the HTMX-loaded list partial. cloud-user-token-management PR4. Form POST
+// and mutation routes (create/enable/disable/tokens/grants) are owned by
+// internal/cloud/cloudserver, which enforces managed-admin authorization and
+// audit for every mutation; this page only renders the form and outcomes.
+templ ManagedUsersPage() {
 	<section class="frame-section">
 		<div class="section-header">
 			<div>
 				<p class="section-kicker">ADMIN SURFACE</p>
-				<h2>Admin Users</h2>
+				<h2>Managed Users</h2>
 			</div>
 		</div>
 		@adminNav("users")
-		<h3 class="section-block-title">Contributors</h3>
-		<div id="admin-users-content"
+		<div class="data-frame">
+			<p class="section-kicker">CREATE MANAGED USER</p>
+			<form method="post" action="/dashboard/admin/users" class="managed-user-form">
+				<input type="text" name="username" placeholder="Username" required autocomplete="off"/>
+				<input type="email" name="email" placeholder="Email (optional)" autocomplete="off"/>
+				<input type="text" name="display_name" placeholder="Display name (optional)" autocomplete="off"/>
+				<select name="role">
+					<option value="member">Member</option>
+					<option value="admin">Admin</option>
+				</select>
+				<button type="submit">Create User</button>
+			</form>
+			<p class="muted">New managed users are deny-by-default: they cannot sync any project until an admin grants one explicitly on the user's detail page.</p>
+		</div>
+		<h3 class="section-block-title">Managed Users</h3>
+		<div id="managed-users-content"
 			hx-get="/dashboard/admin/users/list"
 			hx-trigger="load"
 			hx-swap="innerHTML">
 			<p class="muted">Loading...</p>
 		</div>
+	</section>
+}
+
+// ManagedUserDetailPage renders a single managed user's profile plus its
+// token and project-grant management surfaces. cloud-user-token-management
+// PR4. All mutation forms (enable/disable, token create/revoke, grant
+// create/revoke) post to internal/cloud/cloudserver-owned routes that enforce
+// managed-admin authorization and audit; this page only renders state and
+// links to those routes — it never decides authorization itself.
+templ ManagedUserDetailPage(user cloudstore.HumanUser, tokens []cloudstore.PrincipalToken, grants []cloudstore.ProjectGrant) {
+	<section class="frame-section">
+		<div class="section-header">
+			<div>
+				<p class="section-kicker">MANAGED USER</p>
+				<h2>{ user.Username }</h2>
+			</div>
+			if user.Enabled {
+				@StatusBadge("Enabled", "success")
+			} else {
+				@StatusBadge("Disabled", "danger")
+			}
+		</div>
+		@adminNav("users")
+		<div class="data-frame">
+			<table>
+				<tbody>
+					<tr><th>Display Name</th><td>{ user.DisplayName }</td></tr>
+					<tr><th>Email</th><td>{ emptyDash(user.Email) }</td></tr>
+					<tr><th>Role</th><td>{ user.Role }</td></tr>
+					<tr><th>Created</th><td>{ formatTimeValue(user.CreatedAt) }</td></tr>
+				</tbody>
+			</table>
+			<form method="post" action={ templ.SafeURL("/dashboard/admin/users/" + url.PathEscape(user.PrincipalID) + managedUserToggleAction(user.Enabled)) } class="switch-form">
+				if user.Enabled {
+					<button type="submit" class="switch-button is-on">Disable User</button>
+				} else {
+					<button type="submit" class="switch-button is-off">Enable User</button>
+				}
+			</form>
+		</div>
+		<h3 class="section-block-title">Tokens</h3>
+		<div class="data-frame">
+			if user.Enabled {
+				<form method="post" action={ templ.SafeURL("/dashboard/admin/users/" + url.PathEscape(user.PrincipalID) + "/tokens") } class="managed-user-form">
+					<input type="text" name="name" placeholder="Token label (optional)" autocomplete="off"/>
+					<button type="submit">Create Token</button>
+				</form>
+				<p class="muted">Tokens are shown only once, immediately after creation. Engram Cloud cannot redisplay a raw token afterward — revoke it and create a new one if it is lost.</p>
+			} else {
+				<div class="policy-note danger-note">
+					<p><strong>Token creation unavailable.</strong> Enable this managed user before creating a managed token.</p>
+				</div>
+			}
+			if len(tokens) == 0 {
+				if user.Enabled {
+					@EmptyState("No Tokens", "This user has no managed tokens yet. Create one above to let it authenticate sync requests.")
+				} else {
+					@EmptyState("No Tokens", "This disabled user has no managed tokens. Enable the user before creating one.")
+				}
+			} else {
+				<table class="data-table">
+					<thead>
+						<tr>
+							<th>Prefix</th>
+							<th>Name</th>
+							<th>Created</th>
+							<th>Last Used</th>
+							<th>Status</th>
+							<th>Action</th>
+						</tr>
+					</thead>
+					<tbody>
+						for _, tok := range tokens {
+							<tr>
+								<td>{ tok.TokenPrefix }</td>
+								<td>{ emptyDash(tok.Name) }</td>
+								<td>{ formatTimeValue(tok.CreatedAt) }</td>
+								<td>{ formatTimePtr(tok.LastUsedAt) }</td>
+								<td>
+									if tok.RevokedAt != nil {
+										@StatusBadge("Revoked", "danger")
+									} else {
+										@StatusBadge("Active", "success")
+									}
+								</td>
+								<td>
+									if tok.RevokedAt == nil {
+										<form method="post" action={ templ.SafeURL("/dashboard/admin/tokens/" + url.PathEscape(tok.ID) + "/revoke") } class="switch-form">
+											<button type="submit" class="switch-button is-on">Revoke</button>
+										</form>
+									} else {
+										<span class="muted">-</span>
+									}
+								</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			}
+		</div>
+		<h3 class="section-block-title">Project Grants</h3>
+		<div class="data-frame">
+			<form method="post" action={ templ.SafeURL("/dashboard/admin/users/" + url.PathEscape(user.PrincipalID) + "/grants") } class="managed-user-form">
+				<input type="text" name="project" placeholder="Project name" required autocomplete="off"/>
+				<button type="submit">Grant Project</button>
+			</form>
+			if len(grants) == 0 {
+				@EmptyState("No Project Grants", "This user is deny-by-default: it cannot sync any project until an admin grants one explicitly above.")
+			} else {
+				<table class="data-table">
+					<thead>
+						<tr>
+							<th>Project</th>
+							<th>Granted</th>
+							<th>Action</th>
+						</tr>
+					</thead>
+					<tbody>
+						for _, g := range grants {
+							<tr>
+								<td>{ g.Project }</td>
+								<td>{ formatTimeValue(g.CreatedAt) }</td>
+								<td>
+									<form method="post" action={ templ.SafeURL("/dashboard/admin/users/" + url.PathEscape(user.PrincipalID) + "/grants/" + url.PathEscape(g.Project) + "/revoke") } class="switch-form">
+										<button type="submit" class="switch-button is-on">Revoke</button>
+									</form>
+								</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			}
+		</div>
+	</section>
+}
+
+// ManagedUserTokenCreatedPage renders the show-once raw token page immediately
+// after token creation. cloud-user-token-management PR4: this is the ONLY
+// place the raw token is ever rendered — token list/detail views only ever
+// receive cloudstore.PrincipalToken values (prefix/metadata, no hash, no raw
+// secret), and this page is reached only as a direct POST response body
+// (never a redirect target), so the raw token never appears in a URL, log
+// line, or browser history entry.
+templ ManagedUserTokenCreatedPage(user cloudstore.HumanUser, rawToken string, token cloudstore.PrincipalToken) {
+	<section class="frame-section">
+		<div class="section-header">
+			<div>
+				<p class="section-kicker">TOKEN CREATED</p>
+				<h2>Save this token now</h2>
+			</div>
+		</div>
+		<div class="data-frame policy-note danger-note">
+			<p><strong>This raw token is shown only once.</strong> Engram Cloud never stores or displays it again — copy it now and store it securely.</p>
+			<pre class="token-reveal">{ rawToken }</pre>
+			<p class="muted">Prefix { token.TokenPrefix } — { emptyDash(token.Name) } — created { formatTimeValue(token.CreatedAt) }</p>
+		</div>
+		<a href={ templ.SafeURL("/dashboard/admin/users/" + url.PathEscape(user.PrincipalID)) }>Back to { user.Username }</a>
 	</section>
 }
 

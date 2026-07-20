@@ -509,6 +509,45 @@ func buildAuditListURL(filter cloudstore.AuditFilter) string {
 	return base + "?" + q.Encode()
 }
 
+// formatTimeValue renders a time.Time value for dashboard display (managed
+// user / token / grant timestamps come back as time.Time from cloudstore,
+// unlike the string timestamps used by the sync-replicated dashboard rows).
+// Returns "-" for a zero value.
+func formatTimeValue(t time.Time) string {
+	if t.IsZero() {
+		return "-"
+	}
+	return t.UTC().Format(dashboardTimestampLayout)
+}
+
+// formatTimePtr renders an optional time.Time pointer, returning "Never" when
+// nil or zero (e.g. a token that has never been used).
+func formatTimePtr(t *time.Time) string {
+	if t == nil || t.IsZero() {
+		return "Never"
+	}
+	return formatTimeValue(*t)
+}
+
+// emptyDash returns "-" for an empty/whitespace-only string, otherwise the
+// trimmed original value. Used for optional managed-user/token fields.
+func emptyDash(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+// managedUserToggleAction returns the enable/disable form action suffix for a
+// managed user row, based on its current enabled state.
+func managedUserToggleAction(enabled bool) string {
+	if enabled {
+		return "/disable"
+	}
+	return "/enable"
+}
+
 // typeBadgeVariant returns a badge color variant for an observation type.
 func typeBadgeVariant(obsType string) string {
 	switch obsType {

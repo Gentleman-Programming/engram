@@ -85,6 +85,7 @@ Required runtime env vars:
 
 Optional runtime env vars:
 - `ENGRAM_CLOUD_MAX_PUSH_BYTES` (defaults to `8388608`)
+- `ENGRAM_CLOUD_TOKEN_PEPPER` (required to enable managed-token authentication on `engram cloud serve`, and to run `engram cloud bootstrap admin --issue-token`; see [Managed Users and CLI Bootstrap](#managed-users-and-cli-bootstrap) below)
 
 Dokploy guidance:
 1. Create a managed Postgres service.
@@ -130,6 +131,24 @@ Notes:
 - `ENGRAM_JWT_SECRET` must be an explicit, non-default strong secret in authenticated mode.
 - `ENGRAM_CLOUD_ALLOWED_PROJECTS` is required server-side and should be a comma-separated allowlist.
 - `ENGRAM_CLOUD_MAX_PUSH_BYTES` optionally raises or lowers the server-side limit for chunk and mutation push request bodies. Omit it to keep the default 8 MiB limit.
+
+## Managed Users and CLI Bootstrap
+
+`engram cloud bootstrap admin` creates the first **managed admin** (a `cloud_principals` row, distinct from the legacy `ENGRAM_CLOUD_TOKEN`/`ENGRAM_CLOUD_ADMIN` env-token model):
+
+```bash
+engram cloud bootstrap admin --username alice \
+  --grant-project my-project \
+  --issue-token first-token
+```
+
+- `--grant-project` may repeat; managed principals are deny-by-default (no grants means no sync access for that principal).
+- `--issue-token [name]` prints the raw managed token exactly once and requires `ENGRAM_CLOUD_TOKEN_PEPPER` to be set to a dedicated secret, separate from `ENGRAM_JWT_SECRET`.
+- Running bootstrap again once a managed admin exists is refused (no silent duplicate admin), and every attempt — accepted or refused — is recorded as a `bootstrap.cli` audit event.
+
+**Runtime authentication:** set `ENGRAM_CLOUD_TOKEN_PEPPER` (the same secret used at token-issuance time) on the `engram cloud serve` process to enable managed-token authentication — `engram cloud serve` then resolves managed tokens first, then falls back to the legacy `ENGRAM_CLOUD_TOKEN`/`ENGRAM_CLOUD_ADMIN` credentials, on every `/sync/*`, `/admin/*`, and dashboard-login request. If `ENGRAM_CLOUD_TOKEN_PEPPER` is not set, the server still starts normally and continues to authenticate only via the legacy env-token credentials. Full details: [DOCS.md — Managed users, tokens, and CLI bootstrap](../../DOCS.md#managed-users-tokens-and-cli-bootstrap).
+
+---
 
 Reference compose:
 

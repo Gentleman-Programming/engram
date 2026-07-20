@@ -82,6 +82,8 @@ func (a *SessionActivity) ClearSession(sessionID string) {
 	delete(a.sessions, sessionID)
 }
 
+// IssueAmbiguousProjectRecoveryToken generates and registers a new short-lived recovery token
+// for resolving ambiguous projects.
 func (a *SessionActivity) IssueAmbiguousProjectRecoveryToken(sessionID string, availableProjects []string, contextPath string) string {
 	if a == nil {
 		return ""
@@ -103,6 +105,8 @@ func (a *SessionActivity) IssueAmbiguousProjectRecoveryToken(sessionID string, a
 	return token
 }
 
+// ValidateAmbiguousProjectRecoveryToken verifies that a recovery token is valid, has not expired,
+// and matches the expected session, project choices, and path.
 func (a *SessionActivity) ValidateAmbiguousProjectRecoveryToken(sessionID, token, selectedProject string, availableProjects []string, contextPath string) bool {
 	if a == nil || token == "" || selectedProject == "" {
 		return false

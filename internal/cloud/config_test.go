@@ -59,6 +59,33 @@ func TestConfigFromEnvMaxPushBodyBytes(t *testing.T) {
 	}
 }
 
+func TestConfigFromEnvTokenPepper(t *testing.T) {
+	t.Run("default is empty", func(t *testing.T) {
+		t.Setenv("ENGRAM_CLOUD_TOKEN_PEPPER", "")
+		cfg := ConfigFromEnv()
+		if cfg.TokenPepper != "" {
+			t.Fatalf("expected empty token pepper by default, got %q", cfg.TokenPepper)
+		}
+	})
+
+	t.Run("env overrides token pepper", func(t *testing.T) {
+		t.Setenv("ENGRAM_CLOUD_TOKEN_PEPPER", "dedicated-cloud-token-pepper")
+		cfg := ConfigFromEnv()
+		if cfg.TokenPepper != "dedicated-cloud-token-pepper" {
+			t.Fatalf("expected token pepper override, got %q", cfg.TokenPepper)
+		}
+	})
+
+	t.Run("token pepper is independent from JWT secret", func(t *testing.T) {
+		t.Setenv("ENGRAM_JWT_SECRET", "session-signing-secret")
+		t.Setenv("ENGRAM_CLOUD_TOKEN_PEPPER", "dedicated-cloud-token-pepper")
+		cfg := ConfigFromEnv()
+		if cfg.TokenPepper == cfg.JWTSecret {
+			t.Fatalf("expected token pepper %q to differ from JWT secret %q", cfg.TokenPepper, cfg.JWTSecret)
+		}
+	})
+}
+
 func TestIsDefaultJWTSecret(t *testing.T) {
 	t.Run("default secret returns true", func(t *testing.T) {
 		if !IsDefaultJWTSecret(DefaultJWTSecret) {

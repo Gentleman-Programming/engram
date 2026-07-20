@@ -25,6 +25,17 @@ Breaking changes are always marked with a `type:breaking-change` label and docum
 
 - **fix(cloud):** make chunk and mutation push payload limits configurable with `ENGRAM_CLOUD_MAX_PUSH_BYTES` while preserving the 8 MiB default.
 
+### Cloud user token management (`cloud-user-token-management`)
+
+- **feat(cloud):** add principal/human-user/token/project-grant/audit storage foundation (`cloud_principals`, `cloud_human_users`, `cloud_principal_tokens`, `cloud_project_grants`, `cloud_auth_audit_log`) alongside existing sync tables.
+- **feat(cloud):** enforce managed-principal project grants for sync chunk/mutation push and pull while preserving legacy `ENGRAM_CLOUD_ALLOWED_PROJECTS` behavior.
+- **feat(cloud):** add managed admin API handlers (`/admin/users`, `/admin/users/{id}/tokens`, `/admin/users/{id}/grants`, and related enable/disable/revoke routes) and dashboard managed-user UX, with audit-backed mutations.
+- **feat(cloud):** add dashboard managed-principal sessions and first-admin dashboard bootstrap (`/dashboard/bootstrap`), including audit coverage for admin login and legacy-recovery actions.
+- **feat(cloud):** add `engram cloud bootstrap admin --username <name> [--email <email>] [--grant-project <project>]... [--issue-token [name]]` CLI command to create the first managed admin headlessly, with duplicate-bootstrap refusal and `bootstrap.cli` audit events.
+- **feat(cloud):** add `ENGRAM_CLOUD_TOKEN_PEPPER` for dedicated managed-token hashing, distinct from `ENGRAM_JWT_SECRET`.
+- **feat(cloud):** wire managed-token authentication into `engram cloud serve` — the runtime principal resolver now checks managed token storage first, then falls back to the legacy `ENGRAM_CLOUD_TOKEN`/`ENGRAM_CLOUD_ADMIN` credentials, on every `/sync/*`, `/admin/*`, and dashboard-login request. Requires `ENGRAM_CLOUD_TOKEN_PEPPER` to be set; without it, managed-token auth is disabled and the server starts in legacy-only mode exactly as before. See [DOCS.md — Managed users, tokens, and CLI bootstrap](DOCS.md#managed-users-tokens-and-cli-bootstrap).
+- **fix(cloud):** dashboard login/bootstrap audit events no longer send the legacy admin/sync principal's synthetic ID (e.g. `legacy:admin`) as `ActorPrincipalID`, which the real Postgres-backed audit table rejects (a non-numeric value against a `BIGINT` foreign key); this previously would have made every legacy admin dashboard login fail with a 500 once an admin identity store was configured.
+
 ### Pi package (`pi-engram`)
 
 - **fix(plugin):** allow `mem_session_summary` to accept an explicit `project` fallback when automatic project detection is unavailable.

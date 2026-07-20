@@ -6,9 +6,21 @@
 >
 > Validation boundary (current): plugin scripts are validated for memory/session workflows, not as cloud bootstrap orchestrators. Use CLI for cloud config/auth/enrollment/upgrade.
 
+- [Current plugin coverage](#current-plugin-coverage)
 - [OpenCode Plugin](#opencode-plugin)
 - [Claude Code Plugin](#claude-code-plugin)
 - [Privacy](#privacy)
+
+---
+
+## Current plugin coverage
+
+| Integration | Coverage |
+|---|---|
+| OpenCode | TypeScript plugin plus MCP registration via `engram setup opencode`. |
+| Claude Code | Marketplace/bundled plugin plus best-effort durable user MCP config via `engram setup claude-code`. |
+| Codex | Codex plugin assets under `plugin/codex/`; `engram setup codex` best-effort installs the marketplace plugin and writes MCP/instruction config. |
+| Pi | Pi package under `plugin/pi/` exposes Pi-native HTTP memory tools and configures MCP through `pi-mcp-adapter`. |
 
 ---
 

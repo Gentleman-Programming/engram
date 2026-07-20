@@ -28,7 +28,9 @@ type parityStoreStub struct {
 	syncControls  []cloudstore.ProjectSyncControl
 	distinctTypes []string
 	auditRows     []cloudstore.DashboardAuditRow
+	managedUsers  []cloudstore.HumanUser
 
+	errManagedUsers           error
 	errListProjects           error
 	errProjectDetail          error
 	errListContributors       error
@@ -205,6 +207,16 @@ func (s parityStoreStub) ListDistinctTypes() ([]string, error) {
 // ListAuditEntriesPaginated — no-op stub for interface parity (REQ-409).
 func (s parityStoreStub) ListAuditEntriesPaginated(_ context.Context, _ cloudstore.AuditFilter, _, _ int) ([]cloudstore.DashboardAuditRow, int, error) {
 	return s.auditRows, len(s.auditRows), nil
+}
+
+// ListHumanUsers satisfies ManagedUsersStore (cloud-user-token-management
+// PR4). Deliberately separate from the contributor fixtures above: managed
+// users and contributor analytics must stay distinct.
+func (s parityStoreStub) ListHumanUsers(context.Context) ([]cloudstore.HumanUser, error) {
+	if s.errManagedUsers != nil {
+		return nil, s.errManagedUsers
+	}
+	return s.managedUsers, nil
 }
 
 // ─── Batch 6 Tests ───────────────────────────────────────────────────────────
@@ -903,7 +915,7 @@ func countElementsWithClass(body string, class string) int {
 // newAuthedMux creates a test mux with a simple auth=ok query param gate.
 func newAuthedMux(store DashboardStore, isAdmin bool) *http.ServeMux {
 	mux := http.NewServeMux()
-	Mount(mux, MountConfig{
+	cfg := MountConfig{
 		RequireSession: func(r *http.Request) error {
 			if r.URL.Query().Get("auth") == "ok" {
 				return nil
@@ -912,7 +924,11 @@ func newAuthedMux(store DashboardStore, isAdmin bool) *http.ServeMux {
 		},
 		IsAdmin: func(_ *http.Request) bool { return isAdmin },
 		Store:   store,
-	})
+	}
+	if managed, ok := store.(ManagedUsersStore); ok {
+		cfg.ManagedUsers = managed
+	}
+	Mount(mux, cfg)
 	return mux
 }
 
@@ -1265,7 +1281,7 @@ func TestMountRouteParityAndHTTPFallbacks(t *testing.T) {
 // newAuthedAdminMux creates a test mux with admin=true.
 func newAuthedAdminMux(store DashboardStore) *http.ServeMux {
 	mux := http.NewServeMux()
-	Mount(mux, MountConfig{
+	cfg := MountConfig{
 		RequireSession: func(r *http.Request) error {
 			if r.URL.Query().Get("auth") == "ok" {
 				return nil
@@ -1275,7 +1291,11 @@ func newAuthedAdminMux(store DashboardStore) *http.ServeMux {
 		IsAdmin:        func(_ *http.Request) bool { return true },
 		GetDisplayName: func(_ *http.Request) string { return "OPERATOR" },
 		Store:          store,
-	})
+	}
+	if managed, ok := store.(ManagedUsersStore); ok {
+		cfg.ManagedUsers = managed
+	}
+	Mount(mux, cfg)
 	return mux
 }
 
@@ -1627,14 +1647,17 @@ func TestAdminHealthPageRendersMetrics(t *testing.T) {
 	}
 }
 
-// TestAdminUsersPageRendersContributors asserts admin users page shell has the correct
-// HTMX trigger for the list partial. Satisfies REQ-106.
+// TestAdminUsersPageRendersManagedUsersShell asserts admin users page shell has the
+// correct HTMX trigger for the managed-users list partial. Satisfies REQ-106.
+// cloud-user-token-management PR4: this surface renders managed cloud
+// principals, not contributor analytics (renamed from
+// TestAdminUsersPageRendersContributors).
 // R6-1 update: the shell no longer embeds inline rows — it contains hx-get="/dashboard/admin/users/list".
-// Contributor rows are served by the /list partial endpoint (tested separately).
-func TestAdminUsersPageRendersContributors(t *testing.T) {
+// Managed user rows are served by the /list partial endpoint (tested separately).
+func TestAdminUsersPageRendersManagedUsersShell(t *testing.T) {
 	mux := newAuthedAdminMux(parityStoreStub{
-		contributors: []cloudstore.DashboardContributorRow{
-			{CreatedBy: "agent@example.com", Chunks: 10, Projects: 2},
+		managedUsers: []cloudstore.HumanUser{
+			{PrincipalID: "p-agent", Username: "agent", Role: cloudstore.PrincipalRoleMember, Enabled: true},
 		},
 	})
 	rec := httptest.NewRecorder()
@@ -2299,47 +2322,112 @@ func TestContributorsPaginationUsesRealTotal(t *testing.T) {
 	}
 }
 
-// R3-3b: TestAdminUsersPaginationUsesRealTotal — same but for /dashboard/admin/users/list.
-// R6-1 update: pagination is now rendered by the /list partial endpoint.
-func TestAdminUsersPaginationUsesRealTotal(t *testing.T) {
-	contributors := make([]cloudstore.DashboardContributorRow, 125)
-	for i := range contributors {
-		contributors[i] = cloudstore.DashboardContributorRow{
-			CreatedBy: "admin-user-" + strings.Repeat("x", i%5),
-			Chunks:    i + 1, Projects: 1,
+// TestManagedUsersListRendersAllUsersWithoutPagination (cloud-user-token-management
+// PR4) asserts /dashboard/admin/users/list renders every managed human user
+// from ManagedUsersStore, distinct from contributor analytics, and does not
+// apply the contributor-analytics pagination behavior (managed accounts are
+// expected to stay small in the MVP, unlike synced contributor volume).
+func TestManagedUsersListRendersAllUsersWithoutPagination(t *testing.T) {
+	users := make([]cloudstore.HumanUser, 12)
+	for i := range users {
+		users[i] = cloudstore.HumanUser{
+			PrincipalID: "p-user-" + strings.Repeat("x", i%3),
+			Username:    "managed-user-" + strings.Repeat("z", i%4),
+			Role:        cloudstore.PrincipalRoleMember,
+			Enabled:     true,
 		}
 	}
-	stub := &contributorsPaginationStub{
-		allContributors: contributors,
-		total:           125,
+	// A contributor fixture is also present to prove the managed-users list
+	// does not fall back to (or mix in) contributor analytics.
+	store := parityStoreStub{
+		managedUsers: users,
+		contributors: []cloudstore.DashboardContributorRow{{CreatedBy: "not-a-managed-user", Chunks: 5}},
 	}
-	mux := http.NewServeMux()
-	Mount(mux, MountConfig{
-		RequireSession: func(r *http.Request) error {
-			if r.URL.Query().Get("auth") == "ok" {
-				return nil
-			}
-			return errUnauthorized
-		},
-		IsAdmin: func(_ *http.Request) bool { return true },
-		Store:   stub,
-	})
+	mux := newAuthedAdminMux(store)
 
 	rec := httptest.NewRecorder()
-	// R6-1: hit the list partial endpoint (pagination is there, not the shell).
-	req := httptest.NewRequest(http.MethodGet, "/dashboard/admin/users/list?auth=ok&page=1&pageSize=10", nil)
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/admin/users/list?auth=ok", nil)
 	req.Header.Set("HX-Request", "true")
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("R3-3b: expected 200, got %d body=%q", rec.Code, rec.Body.String())
+		t.Fatalf("expected 200, got %d body=%q", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	// HtmxPaginationBar renders "1–10 of 125".
-	if strings.Contains(body, "of 100") {
-		t.Errorf("R3-3b: pagination shows 'of 100' (capped), expected 'of 125' (real total)")
+	if strings.Contains(body, "not-a-managed-user") {
+		t.Errorf("managed users list must not render contributor analytics rows, body=%q", body)
 	}
-	if !strings.Contains(body, "of 125") {
-		t.Errorf("R3-3b: expected 'of 125' in admin users pagination output, got body=%q", body)
+	for i := range users {
+		if !strings.Contains(body, users[i].Username) {
+			t.Errorf("expected managed user %q in list body, got %q", users[i].Username, body[:min(len(body), 800)])
+		}
+	}
+	if strings.Contains(body, "pagination-bar") {
+		t.Errorf("managed users list is not expected to paginate in the MVP, got pagination markup in body=%q", body[:min(len(body), 800)])
+	}
+}
+
+// TestManagedUsersPageHasCreateUserForm (cloud-user-token-management PR4)
+// asserts the managed-users shell contains a create-user form that posts to
+// the cloudserver-owned mutation route. The dashboard package never decides
+// authorization itself — it only renders the form; internal/cloud/cloudserver
+// enforces managed-admin authorization and audit on the POST handler.
+func TestManagedUsersPageHasCreateUserForm(t *testing.T) {
+	mux := newAuthedAdminMux(parityStoreStub{})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard/admin/users?auth=ok", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, marker := range []string{
+		`action="/dashboard/admin/users"`,
+		`name="username"`,
+		`name="role"`,
+		"deny-by-default",
+	} {
+		if !strings.Contains(body, marker) {
+			t.Errorf("expected %q in managed users create-user form, body=%q", marker, body[:min(len(body), 1200)])
+		}
+	}
+}
+
+// TestManagedUsersListPartialHasEnableDisableFormsAndEmptyState (cloud-user-token-management
+// PR4) asserts the list partial renders per-user enable/disable forms wired to
+// the cloudserver-owned mutation routes, and an empty-state that explains
+// deny-by-default project grants when there are no managed users yet.
+func TestManagedUsersListPartialHasEnableDisableFormsAndEmptyState(t *testing.T) {
+	enabledStore := parityStoreStub{managedUsers: []cloudstore.HumanUser{
+		{PrincipalID: "p-enabled", Username: "enabled-user", Role: cloudstore.PrincipalRoleMember, Enabled: true},
+		{PrincipalID: "p-disabled", Username: "disabled-user", Role: cloudstore.PrincipalRoleMember, Enabled: false},
+	}}
+	mux := newAuthedAdminMux(enabledStore)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/admin/users/list?auth=ok", nil)
+	req.Header.Set("HX-Request", "true")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, marker := range []string{
+		`action="/dashboard/admin/users/p-enabled/disable"`,
+		`action="/dashboard/admin/users/p-disabled/enable"`,
+	} {
+		if !strings.Contains(body, marker) {
+			t.Errorf("expected %q in managed users list, body=%q", marker, body[:min(len(body), 1200)])
+		}
+	}
+
+	emptyMux := newAuthedAdminMux(parityStoreStub{})
+	emptyRec := httptest.NewRecorder()
+	emptyReq := httptest.NewRequest(http.MethodGet, "/dashboard/admin/users/list?auth=ok", nil)
+	emptyReq.Header.Set("HX-Request", "true")
+	emptyMux.ServeHTTP(emptyRec, emptyReq)
+	if emptyRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for empty managed users list, got %d body=%q", emptyRec.Code, emptyRec.Body.String())
+	}
+	if !strings.Contains(emptyRec.Body.String(), "deny-by-default") {
+		t.Errorf("expected empty managed users list to explain deny-by-default project grants, body=%q", emptyRec.Body.String())
 	}
 }
 
@@ -2649,10 +2737,12 @@ func TestContributorsPaginationHTMXSwapsContent(t *testing.T) {
 
 // TestAdminUsersPaginationHTMXSwapsContent (R5-2 RED) asserts that
 // GET /dashboard/admin/users/list returns the partial (no full layout wrapper).
+// cloud-user-token-management PR4: uses a managed-user fixture, not a
+// contributor fixture — this surface renders managed cloud principals.
 func TestAdminUsersPaginationHTMXSwapsContent(t *testing.T) {
 	store := parityStoreStub{
-		contributors: []cloudstore.DashboardContributorRow{
-			{CreatedBy: "alice", Chunks: 5, Projects: 2, LastChunkAt: "2026-04-23T10:00:00Z"},
+		managedUsers: []cloudstore.HumanUser{
+			{PrincipalID: "p-alice", Username: "alice", Role: cloudstore.PrincipalRoleMember, Enabled: true},
 		},
 	}
 	mux := newAuthedMux(store, true) // admin=true required.
@@ -2665,7 +2755,7 @@ func TestAdminUsersPaginationHTMXSwapsContent(t *testing.T) {
 	}
 	body := rec.Body.String()
 	if !strings.Contains(body, "alice") {
-		t.Errorf("R5-2: expected contributor 'alice' in admin users list partial, got body=%q", body[:min(len(body), 500)])
+		t.Errorf("R5-2: expected managed user 'alice' in admin users list partial, got body=%q", body[:min(len(body), 500)])
 	}
 	// Must NOT contain the full layout wrapper.
 	if strings.Contains(body, "status-ribbon") {
@@ -2707,11 +2797,13 @@ func TestContributorsPageLoadsListPartialViaHTMX(t *testing.T) {
 
 // TestAdminUsersPageLoadsListPartialViaHTMX (R6-1 RED) asserts that
 // GET /dashboard/admin/users (non-HTMX) renders a shell with
-// hx-get="/dashboard/admin/users/list" and no inline contributor rows.
+// hx-get="/dashboard/admin/users/list" and no inline managed-user rows.
+// cloud-user-token-management PR4: uses a managed-user fixture, not a
+// contributor fixture.
 func TestAdminUsersPageLoadsListPartialViaHTMX(t *testing.T) {
 	store := parityStoreStub{
-		contributors: []cloudstore.DashboardContributorRow{
-			{CreatedBy: "carol", Chunks: 7, Projects: 3, LastChunkAt: "2026-04-23T12:00:00Z"},
+		managedUsers: []cloudstore.HumanUser{
+			{PrincipalID: "p-carol", Username: "carol", Role: cloudstore.PrincipalRoleMember, Enabled: true},
 		},
 	}
 	mux := newAuthedMux(store, true) // admin required
@@ -2726,7 +2818,7 @@ func TestAdminUsersPageLoadsListPartialViaHTMX(t *testing.T) {
 		t.Errorf("R6-1: /dashboard/admin/users shell missing hx-get trigger for list partial, body=%q", body[:min(len(body), 800)])
 	}
 	if strings.Contains(body, "carol") {
-		t.Errorf("R6-1: /dashboard/admin/users shell should not embed contributor rows directly, body=%q", body[:min(len(body), 800)])
+		t.Errorf("R6-1: /dashboard/admin/users shell should not embed managed user rows directly, body=%q", body[:min(len(body), 800)])
 	}
 }
 
@@ -2755,11 +2847,11 @@ func TestContributorsListPartialHasNoOuterWrapper(t *testing.T) {
 	}
 }
 
-// TestAdminUsersListPartialHasNoOuterWrapper (R6-1 RED) same check for admin users.
+// TestAdminUsersListPartialHasNoOuterWrapper (R6-1 RED) same check for managed users.
 func TestAdminUsersListPartialHasNoOuterWrapper(t *testing.T) {
 	store := parityStoreStub{
-		contributors: []cloudstore.DashboardContributorRow{
-			{CreatedBy: "alice", Chunks: 5, Projects: 2, LastChunkAt: "2026-04-23T10:00:00Z"},
+		managedUsers: []cloudstore.HumanUser{
+			{PrincipalID: "p-alice", Username: "alice", Role: cloudstore.PrincipalRoleMember, Enabled: true},
 		},
 	}
 	mux := newAuthedMux(store, true)
@@ -2771,8 +2863,8 @@ func TestAdminUsersListPartialHasNoOuterWrapper(t *testing.T) {
 		t.Fatalf("R6-1: expected 200, got %d", rec.Code)
 	}
 	body := rec.Body.String()
-	if strings.Contains(body, `id="admin-users-content"`) {
-		t.Errorf("R6-1: AdminUsersListPartial must not emit outer #admin-users-content wrapper (causes duplicate IDs on HTMX swap)")
+	if strings.Contains(body, `id="managed-users-content"`) {
+		t.Errorf("R6-1: ManagedUsersListPartial must not emit outer #managed-users-content wrapper (causes duplicate IDs on HTMX swap)")
 	}
 }
 
@@ -2803,8 +2895,8 @@ func TestPartialOnlyEndpointErrorIsFragmentNotLayout(t *testing.T) {
 // /dashboard/admin/users/list.
 func TestAdminUsersListPartialErrorIsFragmentNotLayout(t *testing.T) {
 	storeErr := errors.New("db unavailable")
-	// Need a store that fails on ListContributorsPaginated but still passes admin check.
-	store := parityStoreStub{errListContributors: storeErr}
+	// Need a store that fails on ListHumanUsers but still passes admin check.
+	store := parityStoreStub{errManagedUsers: storeErr}
 	mux := newAuthedMux(store, true)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/dashboard/admin/users/list?auth=ok", nil)

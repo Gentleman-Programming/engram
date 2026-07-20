@@ -86,6 +86,31 @@ func TestNewInitializesModelDefaults(t *testing.T) {
 	}
 }
 
+func TestScreenCloudSettingsConstant(t *testing.T) {
+	if ScreenCloudSettings != ScreenSetup+1 {
+		t.Fatalf("ScreenCloudSettings = %d, want %d (ScreenSetup+1)", ScreenCloudSettings, ScreenSetup+1)
+	}
+
+	seen := map[Screen]bool{}
+	for _, s := range []Screen{
+		ScreenDashboard,
+		ScreenSearch,
+		ScreenSearchResults,
+		ScreenRecent,
+		ScreenObservationDetail,
+		ScreenTimeline,
+		ScreenSessions,
+		ScreenSessionDetail,
+		ScreenSetup,
+		ScreenCloudSettings,
+	} {
+		if seen[s] {
+			t.Fatalf("screen constant %d is duplicated", s)
+		}
+		seen[s] = true
+	}
+}
+
 func TestInitReturnsCommand(t *testing.T) {
 	m := New(newTestFixture(t).store, "")
 	if cmd := m.Init(); cmd == nil {
