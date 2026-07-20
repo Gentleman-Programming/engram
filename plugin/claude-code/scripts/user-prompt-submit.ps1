@@ -23,14 +23,42 @@ function Write-ToolSearchMessage {
   [PSCustomObject]@{ systemMessage = $message } | ConvertTo-Json -Compress
 }
 
+function Invoke-EngramPromptPersist {
+  param(
+    [string]$EngramUrl,
+    [string]$SessionId,
+    [string]$Prompt
+  )
+  # Fail-silent and bounded: a short timeout keeps a slow/unreachable server
+  # from stalling prompt submission, and any error is swallowed. The server
+  # derives the prompt's project from the session, so the hook sends none.
+  if ([string]::IsNullOrWhiteSpace($Prompt) -or [string]::IsNullOrWhiteSpace($SessionId)) { return }
+  try {
+    $body = [PSCustomObject]@{
+      session_id = $SessionId
+      content    = $Prompt
+    } | ConvertTo-Json -Compress
+    $null = Invoke-RestMethod -Method Post -Uri "$EngramUrl/prompts" `
+      -ContentType 'application/json' -Body $body -TimeoutSec 1
+  } catch { }
+}
+
 try {
+  $engramPort = if ($env:ENGRAM_PORT) { $env:ENGRAM_PORT } else { '7437' }
+  $engramUrl  = "http://127.0.0.1:$engramPort"
+
   $inputJson = [Console]::In.ReadToEnd()
   $payload = $inputJson | ConvertFrom-Json
   $sessionID = [string]($payload.session_id)
+  $prompt    = [string]($payload.prompt)
 
   if ([string]::IsNullOrWhiteSpace($sessionID)) {
     $sessionID = "windows-$PID"
   }
+
+  # Persist the prompt (fire-and-forget, fail-silent). The server derives the
+  # project from the session, so the hook does not detect it here.
+  Invoke-EngramPromptPersist -EngramUrl $engramUrl -SessionId $sessionID -Prompt $prompt
 
   $safeSessionID = $sessionID -replace '[^a-zA-Z0-9_-]', '_'
   $stateFile = Join-Path ([IO.Path]::GetTempPath()) "engram-claude-$safeSessionID-tools-loaded"

@@ -282,6 +282,10 @@ engram cloud enroll <project>
 engram cloud serve        Run cloud backend + dashboard
 engram cloud upgrade <doctor|repair|bootstrap|status|rollback> --project <name>
                           Guided upgrade workflow for existing projects
+engram cloud bootstrap admin --username <name> [--email <email>]
+                          [--grant-project <project>]... [--issue-token [name]]
+                          Create the first managed admin (see DOCS.md for details
+                          and the current server-side auth wiring limitation)
 engram projects list      Show all projects with obs/session/prompt counts
 engram projects consolidate  Interactive merge of similar project names [--all] [--dry-run]
 engram projects prune     Remove projects with 0 observations [--dry-run]

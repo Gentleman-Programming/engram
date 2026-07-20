@@ -331,6 +331,32 @@ func TestViewObservationDetailTimelineSessionsAndSessionDetail(t *testing.T) {
 	}
 }
 
+func TestViewSessionsDeletePrompt(t *testing.T) {
+	m := New(nil, "")
+	m.Screen = ScreenSessions
+	m.Sessions = []store.SessionSummary{{ID: "session-1", Project: "engram", StartedAt: "2026-01-01"}}
+	m.SessionDeleteState = SessionDeleteStatePrompt
+	m.SessionDeleteID = "session-1"
+	m.SessionDeleteProject = "engram"
+
+	out := m.viewSessions()
+	if !strings.Contains(out, "Confirm Session Delete") {
+		t.Fatal("delete prompt should render heading")
+	}
+	if !strings.Contains(out, "session-1") || !strings.Contains(out, "engram") {
+		t.Fatal("delete prompt should render selected session context")
+	}
+	if !strings.Contains(out, "[y] Delete") || !strings.Contains(out, "[n] Cancel") || !strings.Contains(out, "[esc] Cancel") {
+		t.Fatal("delete prompt should render y/n/esc options")
+	}
+
+	m.SessionDeleteState = SessionDeleteStateDeleting
+	out = m.viewSessions()
+	if !strings.Contains(out, "Deleting Session") || !strings.Contains(out, "session-1") {
+		t.Fatal("deleting state should render selected session context")
+	}
+}
+
 func TestViewRouterCoversAllScreens(t *testing.T) {
 	m := New(nil, "")
 	m.Stats = &store.Stats{}

@@ -481,6 +481,7 @@ Response:
 | `ENGRAM_CLOUD_ALLOWED_PROJECTS` | Comma-separated project allowlist enforced by `engram cloud serve`. Required in both token-auth and insecure modes. Use `*` to allow all projects (dev/internal deploys) — bypasses per-project name enforcement while still requiring a non-empty project on each request. | (unset) |
 | `ENGRAM_JWT_SECRET`             | Required in authenticated cloud serve mode. Must be explicitly set to a non-default value.                                                                                                                                                                | (unset)              |
 | `ENGRAM_CLOUD_ADMIN`            | Optional admin-only dashboard token in authenticated cloud serve mode. Ignored/rejected in insecure mode.                                                                                                                                                 | (unset)              |
+| `ENGRAM_CLOUD_TOKEN_PEPPER`     | Dedicated secret used to hash managed cloud tokens. Required both to issue tokens via `engram cloud bootstrap admin --issue-token` (and the admin API/dashboard) and to enable managed-token authentication on `engram cloud serve`. Distinct from `ENGRAM_JWT_SECRET` on purpose — see [Managed users, tokens, and CLI bootstrap](#managed-users-tokens-and-cli-bootstrap). | (unset)              |
 
 ### Conflict Audit CLI (admin)
 
@@ -547,6 +548,7 @@ Inspect or replay the `sync_apply_deferred` queue.
 - `engram cloud upgrade status --project <project>` — show upgrade stage/class/reason
 - `engram cloud upgrade rollback --project <project>` — restore pre-upgrade local snapshot before `bootstrap_verified`; blocked afterwards
 - `engram cloud repair materialize-mutations --project <project> (--dry-run|--apply)` — explicit server-side Postgres repair that backfills existing `cloud_mutations` into compatible `cloud_chunks` without deleting remote data
+- `engram cloud bootstrap admin --username <name> [--email <email>] [--grant-project <project>]... [--issue-token [name]]` — create the first managed admin (see [Managed users, tokens, and CLI bootstrap](#managed-users-tokens-and-cli-bootstrap))
 
 Cloud auth token is provided at runtime via `ENGRAM_CLOUD_TOKEN` (not by a dedicated CLI subcommand).
 Cloud server startup fails closed when the token is missing unless `ENGRAM_CLOUD_INSECURE_NO_AUTH=1` is explicitly set for local insecure development.
@@ -577,6 +579,36 @@ Cloud runtime envs for `engram cloud serve`:
 | `ENGRAM_JWT_SECRET`             | yes (authenticated mode) | Must be explicitly set and non-default when token mode is enabled                     |
 | `ENGRAM_CLOUD_INSECURE_NO_AUTH` | no                       | Set to `1` only for local insecure mode; cannot be combined with `ENGRAM_CLOUD_TOKEN` |
 | `ENGRAM_CLOUD_ADMIN`            | no                       | Optional admin dashboard token in authenticated mode; rejected in insecure mode       |
+| `ENGRAM_CLOUD_TOKEN_PEPPER`     | no (required to enable managed-token auth) | Dedicated managed-token hashing secret. Must differ from `ENGRAM_JWT_SECRET`. Required both by `engram cloud bootstrap admin --issue-token` and by `engram cloud serve` to accept managed tokens at runtime (see below). |
+
+### Managed users, tokens, and CLI bootstrap
+
+`engram cloud bootstrap admin` creates the first **managed admin** — a principal record stored in the cloud Postgres database (`cloud_principals` / `cloud_human_users`), independent from the legacy `ENGRAM_CLOUD_TOKEN` / `ENGRAM_CLOUD_ADMIN` env-token model:
+
+```bash
+# Create the first managed admin (safe: refuses to create a duplicate first admin)
+engram cloud bootstrap admin --username alice
+
+# Also grant project access and issue a sync token in the same command
+engram cloud bootstrap admin --username alice \
+  --grant-project my-project \
+  --issue-token first-token
+```
+
+- `--username` is required; `--email` is optional.
+- `--grant-project <project>` may be repeated to grant one or more projects (managed principals are deny-by-default: no grants means no sync access).
+- `--issue-token [name]` issues a managed bearer token and prints the **raw token exactly once** in the command output. It is never logged, persisted, or re-printed — store it immediately. Issuing a token requires `ENGRAM_CLOUD_TOKEN_PEPPER` to be set to a dedicated secret (distinct from `ENGRAM_JWT_SECRET`); the command fails clearly, before creating anything, if the pepper is missing.
+- Running the command again once a managed admin already exists is rejected (no silent duplicate first-admin creation); the attempt is still recorded as a denied `bootstrap.cli` audit event.
+- Every bootstrap attempt (accepted or denied) writes a `bootstrap.cli` audit event to `cloud_auth_audit_log`, with the same non-secret metadata rules (no raw tokens, hashes, or bearer headers) as every other cloud auth audit event.
+- Grant/role/duplicate-admin validation reuses the exact same `cloudstore` methods and last-admin guard used by the dashboard's own first-admin bootstrap flow — there is no parallel/looser bootstrap path.
+
+**Runtime authentication:** `engram cloud serve` resolves managed tokens first, then falls back to the legacy env-token credentials (`ENGRAM_CLOUD_TOKEN` for sync, `ENGRAM_CLOUD_ADMIN` for dashboard bootstrap/admin), on every `/sync/*`, `/admin/*`, and dashboard-login request:
+
+- Set `ENGRAM_CLOUD_TOKEN_PEPPER` to enable managed-token authentication. A token issued by `engram cloud bootstrap admin --issue-token` (or by the dashboard/`/admin/*` token-create routes) then authenticates directly against `/sync/*` and `/admin/*`, and can log into the dashboard as its resolved principal/role.
+- If `ENGRAM_CLOUD_TOKEN_PEPPER` is not set, managed-token authentication is simply disabled: the server still starts normally, and `ENGRAM_CLOUD_TOKEN` / `ENGRAM_CLOUD_ADMIN` continue to authenticate exactly as before (legacy-only mode).
+- Managed principals are deny-by-default for project sync: a managed token only reaches projects explicitly granted via `--grant-project` (or the dashboard/`/admin/*` grant routes). Legacy `ENGRAM_CLOUD_TOKEN` keeps its existing `ENGRAM_CLOUD_ALLOWED_PROJECTS` allowlist behavior, unaffected by managed grants.
+- Disabled managed users, revoked managed tokens, and revoked project grants stop authenticating/authorizing on the very next request — no server restart required.
+- No rollback action is required to keep using legacy credentials: legacy `ENGRAM_CLOUD_TOKEN` / `ENGRAM_CLOUD_ADMIN` behavior is unchanged and remains fully supported whether or not `ENGRAM_CLOUD_TOKEN_PEPPER` is configured.
 
 Cloud sync is still local-first and explicit:
 

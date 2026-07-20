@@ -79,6 +79,7 @@ type Result struct {
 }
 
 const claudeCodeMarketplace = "Gentleman-Programming/engram"
+const codexMarketplace = "Gentleman-Programming/engram"
 
 const openCodeSubagentStatuslinePlugin = "opencode-subagent-statusline"
 
@@ -237,52 +238,30 @@ After that sentence, summarize:
 Keep it concise and high-signal.`
 
 // SupportedAgents returns the list of agents that have plugins available.
+// The list is derived from the registry (agentAdapters) so adding an agent there
+// surfaces it here and in `engram setup --help` automatically.
 func SupportedAgents() []Agent {
-	return []Agent{
-		{
-			Name:        "opencode",
-			Description: "OpenCode — TypeScript plugin with session tracking, compaction recovery, and Memory Protocol",
-			InstallDir:  openCodePluginDir(),
-		},
-		{
-			Name:        "pi",
-			Description: "Pi — gentle-engram package plus pi-mcp-adapter MCP tools",
-			InstallDir:  piAgentDir(),
-		},
-		{
-			Name:        "claude-code",
-			Description: "Claude Code — Native plugin via marketplace (hooks, skills, MCP, compaction recovery)",
-			InstallDir:  "managed by claude plugin system",
-		},
-		{
-			Name:        "gemini-cli",
-			Description: "Gemini CLI — MCP registration plus system prompt compaction recovery",
-			InstallDir:  geminiConfigPath(),
-		},
-		{
-			Name:        "codex",
-			Description: "Codex — MCP registration plus model/compaction instruction files",
-			InstallDir:  codexConfigPath(),
-		},
+	adapters := agentAdapters()
+	agents := make([]Agent, 0, len(adapters))
+	for _, a := range adapters {
+		agents = append(agents, Agent{
+			Name:        a.slug,
+			Description: a.description,
+			InstallDir:  a.displayDir(),
+		})
 	}
+	return agents
 }
 
-// Install installs the plugin for the given agent.
+// Install installs the plugin for the given agent by looking it up in the
+// registry and running its adapter (a bespoke installer or the generic driver).
 func Install(agentName string) (*Result, error) {
-	switch agentName {
-	case "opencode":
-		return installOpenCode()
-	case "pi":
-		return installPi()
-	case "claude-code":
-		return installClaudeCode()
-	case "gemini-cli":
-		return installGeminiCLI()
-	case "codex":
-		return installCodex()
-	default:
-		return nil, fmt.Errorf("unknown agent: %q (supported: opencode, pi, claude-code, gemini-cli, codex)", agentName)
+	for _, a := range agentAdapters() {
+		if a.slug == agentName {
+			return installFromAdapter(a)
+		}
 	}
+	return nil, fmt.Errorf("unknown agent: %q (supported: %s)", agentName, strings.Join(supportedSlugs(), ", "))
 }
 
 // ─── Pi ──────────────────────────────────────────────────────────────────────
@@ -1190,6 +1169,38 @@ func installCodex() (*Result, error) {
 	compactPromptPath := codexCompactPromptPath()
 	if err := injectCodexMemoryConfigFn(path, instructionsPath, compactPromptPath); err != nil {
 		return nil, err
+	}
+
+	// Best-effort: install the Codex plugin (hooks) via the Codex CLI.
+	// Failures here are non-fatal — the MCP TOML is already written and works
+	// without the plugin. The plugin adds hooks (compaction recovery, etc.).
+	codexBin, err := lookPathFn("codex")
+	if err != nil {
+		// codex CLI not in PATH — warn and return success with files written so far.
+		fmt.Fprintf(os.Stderr, "warning: codex CLI not found in PATH — MCP config and instruction files were written,\n")
+		fmt.Fprintf(os.Stderr, "  but the Engram plugin (hooks) was not installed.\n")
+		fmt.Fprintf(os.Stderr, "  To install manually, run:\n")
+		fmt.Fprintf(os.Stderr, "    codex plugin marketplace add %s --ref main\n", codexMarketplace)
+		fmt.Fprintf(os.Stderr, "    codex plugin add engram@engram\n")
+		return &Result{
+			Agent:       "codex",
+			Destination: filepath.Dir(path),
+			Files:       3,
+		}, nil
+	}
+
+	// Step 1: add the marketplace (idempotent — tolerate "already" in output).
+	addOut, err := runCommand(codexBin, "plugin", "marketplace", "add", codexMarketplace, "--ref", "main")
+	addOutputStr := strings.TrimSpace(string(addOut))
+	if err != nil && !strings.Contains(strings.ToLower(addOutputStr), "already") {
+		fmt.Fprintf(os.Stderr, "warning: codex plugin marketplace add failed (non-fatal): %s\n", addOutputStr)
+	}
+
+	// Step 2: install the plugin (idempotent — tolerate "already" in output).
+	pluginOut, err := runCommand(codexBin, "plugin", "add", "engram@engram")
+	pluginOutputStr := strings.TrimSpace(string(pluginOut))
+	if err != nil && !strings.Contains(strings.ToLower(pluginOutputStr), "already") {
+		fmt.Fprintf(os.Stderr, "warning: codex plugin add failed (non-fatal): %s\n", pluginOutputStr)
 	}
 
 	return &Result{

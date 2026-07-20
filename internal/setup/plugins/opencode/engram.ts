@@ -76,7 +76,7 @@ Topic rules:
 ### WHEN TO SEARCH MEMORY
 
 When the user asks to recall something — any variation of "remember", "recall", "what did we do",
-"how did we solve", "recordar", "acordate", "qué hicimos", or references to past work:
+"how did we solve", or the equivalent in the user's language, or references to past work:
 1. First call \`mem_context\` — checks recent session history (fast, cheap)
 2. If not found, call \`mem_search\` with relevant keywords (FTS5 full-text search)
 3. If you find a match, use \`mem_get_observation\` for full untruncated content
@@ -88,7 +88,7 @@ Also search memory PROACTIVELY when:
 
 ### SESSION CLOSE PROTOCOL (mandatory)
 
-Before ending a session or saying "done" / "listo" / "that's it", you MUST:
+Before ending a session or saying "done" / "that's it", you MUST:
 1. Call \`mem_session_summary\` with this structure:
 
 ## Goal
@@ -203,6 +203,9 @@ export const Engram: Plugin = async (ctx) => {
   // Track tool counts per session (in-memory only, not critical)
   const toolCounts = new Map<string, number>()
 
+  // Track last nudge time per session to debounce save reminders
+  const lastNudgeTime = new Map<string, number>() // sessionID -> epoch seconds
+
   // Track which sessions we've already ensured exist in engram
   const knownSessions = new Set<string>()
 
@@ -316,6 +319,7 @@ export const Engram: Plugin = async (ctx) => {
           toolCounts.delete(sessionId)
           knownSessions.delete(sessionId)
           subAgentSessions.delete(sessionId)
+          lastNudgeTime.delete(sessionId)
         }
       }
 
@@ -404,11 +408,95 @@ export const Engram: Plugin = async (ctx) => {
     // block at the beginning. By concatenating, we avoid adding extra system
     // messages that would break these models. See: GitHub issue #23.
 
-    "experimental.chat.system.transform": async (_input, output) => {
+    "experimental.chat.system.transform": async (input, output) => {
       if (output.system.length > 0) {
         output.system[output.system.length - 1] += "\n\n" + MEMORY_INSTRUCTIONS
       } else {
         output.system.push(MEMORY_INSTRUCTIONS)
+      }
+
+      // ── Save nudge ──────────────────────────────────────────────────────────
+      // If it has been a long time since the last mem_save, append a reminder
+      // to the system prompt so the agent notices. All fetches are fire-and-
+      // forget with short timeouts — any failure silently skips the nudge.
+      try {
+        const sessionID: string = input.sessionID ?? ""
+        if (!sessionID || subAgentSessions.has(sessionID)) return
+
+        // SQLite datetime('now') returns "YYYY-MM-DD HH:MM:SS" in UTC with no
+        // zone suffix; new Date() would parse that as local time. Normalize to
+        // UTC first so the thresholds are correct in every timezone.
+        const toEpochSecs = (ts: string): number => {
+          if (!ts) return 0
+          const normalized = ts.includes("T") ? ts : ts.replace(" ", "T") + "Z"
+          const ms = new Date(normalized).getTime()
+          return Number.isNaN(ms) ? 0 : Math.floor(ms / 1000)
+        }
+
+        const cooldownSecs = parseInt(process.env.ENGRAM_NUDGE_COOLDOWN_SECS ?? "900", 10)
+        const nowSecs = Math.floor(Date.now() / 1000)
+
+        // Debounce: skip if we nudged recently this session
+        const lastNudge = lastNudgeTime.get(sessionID)
+        if (lastNudge !== undefined && nowSecs - lastNudge < cooldownSecs) return
+
+        // Skip if the session is too young (< 5 minutes)
+        let sessionStartEpoch = 0
+        try {
+          const sessionRes = await fetch(`${ENGRAM_URL}/sessions/${encodeURIComponent(sessionID)}`, {
+            signal: AbortSignal.timeout(200),
+          })
+          if (sessionRes.ok) {
+            const sessionData = await sessionRes.json()
+            const startedAt: string = sessionData?.started_at ?? ""
+            if (startedAt) {
+              sessionStartEpoch = toEpochSecs(startedAt)
+            }
+          }
+        } catch {
+          // Server unreachable or timed out — skip nudge
+          return
+        }
+        if (sessionStartEpoch > 0 && nowSecs - sessionStartEpoch < 300) return
+
+        // Check when the last observation was saved for this project
+        let lastObsEpoch = 0
+        try {
+          const obsRes = await fetch(
+            `${ENGRAM_URL}/observations?project=${encodeURIComponent(project)}&limit=1&sort=created_at:desc`,
+            { signal: AbortSignal.timeout(200) }
+          )
+          if (obsRes.ok) {
+            const obsData = await obsRes.json()
+            const createdAt: string = obsData?.[0]?.created_at ?? ""
+            if (createdAt) {
+              lastObsEpoch = toEpochSecs(createdAt)
+            }
+          }
+        } catch {
+          // Server unreachable or timed out — skip nudge
+          return
+        }
+
+        // No observations yet — nothing to nudge about
+        if (lastObsEpoch === 0) return
+
+        // Only nudge if last save was more than 15 minutes ago
+        if (nowSecs - lastObsEpoch < 900) return
+
+        // Append the nudge to the last system message
+        const nudge =
+          "\n\nMEMORY REMINDER: It's been over 15 minutes since your last memory save. " +
+          "If you've made decisions, discoveries, completed significant work, or found non-obvious things, " +
+          "call mem_save now."
+        if (output.system.length > 0) {
+          output.system[output.system.length - 1] += nudge
+        } else {
+          output.system.push(nudge)
+        }
+        lastNudgeTime.set(sessionID, nowSecs)
+      } catch {
+        // Any unexpected error — silently skip the nudge, never crash the hook
       }
     },
 

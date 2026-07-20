@@ -298,6 +298,142 @@ func TestInstallCodexInjectsTOMLAndIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestInstallCodexPluginCLIPresent verifies that when the codex CLI is in PATH,
+// installCodex() runs marketplace add + plugin add with the correct arguments.
+func TestInstallCodexPluginCLIPresent(t *testing.T) {
+	resetSetupSeams(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	var commands [][]string
+	lookPathFn = func(file string) (string, error) {
+		if file == "codex" {
+			return "/usr/local/bin/codex", nil
+		}
+		return "", errors.New("not found")
+	}
+	runCommand = func(name string, args ...string) ([]byte, error) {
+		commands = append(commands, append([]string{name}, args...))
+		return []byte("ok"), nil
+	}
+
+	result, err := Install("codex")
+	if err != nil {
+		t.Fatalf("Install(codex) failed: %v", err)
+	}
+	if result.Agent != "codex" {
+		t.Fatalf("unexpected agent: %q", result.Agent)
+	}
+	if result.Files != 3 {
+		t.Fatalf("expected 3 files written, got %d", result.Files)
+	}
+
+	// Verify marketplace add was called with the right args.
+	var foundMarketplace bool
+	for _, cmd := range commands {
+		if len(cmd) >= 7 &&
+			cmd[0] == "/usr/local/bin/codex" &&
+			cmd[1] == "plugin" && cmd[2] == "marketplace" && cmd[3] == "add" &&
+			cmd[4] == codexMarketplace &&
+			cmd[5] == "--ref" && cmd[6] == "main" {
+			foundMarketplace = true
+		}
+	}
+	if !foundMarketplace {
+		t.Fatalf("expected 'codex plugin marketplace add %s --ref main' to be invoked, got: %v", codexMarketplace, commands)
+	}
+
+	// Verify plugin add was called with the right args.
+	var foundPluginAdd bool
+	for _, cmd := range commands {
+		if len(cmd) >= 4 &&
+			cmd[0] == "/usr/local/bin/codex" &&
+			cmd[1] == "plugin" && cmd[2] == "add" && cmd[3] == "engram@engram" {
+			foundPluginAdd = true
+		}
+	}
+	if !foundPluginAdd {
+		t.Fatalf("expected 'codex plugin add engram@engram' to be invoked, got: %v", commands)
+	}
+}
+
+// TestInstallCodexPluginCLIAbsent verifies that when the codex CLI is not in
+// PATH, installCodex() does not fail — MCP config is still written and Files==3.
+func TestInstallCodexPluginCLIAbsent(t *testing.T) {
+	resetSetupSeams(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	lookPathFn = func(file string) (string, error) {
+		return "", errors.New("not found")
+	}
+	runCommand = func(name string, args ...string) ([]byte, error) {
+		t.Fatalf("runCommand should not be called when codex CLI is absent, got: %s %v", name, args)
+		return nil, nil
+	}
+
+	result, err := Install("codex")
+	if err != nil {
+		t.Fatalf("Install(codex) should succeed even without codex CLI, got: %v", err)
+	}
+	if result.Agent != "codex" {
+		t.Fatalf("unexpected agent: %q", result.Agent)
+	}
+	if result.Files != 3 {
+		t.Fatalf("expected 3 files written, got %d", result.Files)
+	}
+
+	// Verify the TOML config was still written.
+	configPath := filepath.Join(home, ".codex", "config.toml")
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("expected config.toml to be written: %v", err)
+	}
+	if !strings.Contains(string(raw), "[mcp_servers.engram]") {
+		t.Fatalf("expected [mcp_servers.engram] in config, got:\n%s", raw)
+	}
+}
+
+// TestInstallCodexPluginIdempotentAlreadyInOutput verifies that when
+// marketplace add or plugin add returns an error whose output contains "already",
+// the install is still treated as successful (idempotent).
+func TestInstallCodexPluginIdempotentAlreadyInOutput(t *testing.T) {
+	resetSetupSeams(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	lookPathFn = func(file string) (string, error) {
+		if file == "codex" {
+			return "/usr/local/bin/codex", nil
+		}
+		return "", errors.New("not found")
+	}
+	calls := 0
+	runCommand = func(name string, args ...string) ([]byte, error) {
+		calls++
+		if calls == 1 {
+			// marketplace add returns "already exists" with a non-zero exit
+			return []byte("marketplace already added"), errors.New("exit 1")
+		}
+		if calls == 2 {
+			// plugin add returns "already installed" with a non-zero exit
+			return []byte("plugin already installed"), errors.New("exit 1")
+		}
+		return []byte("ok"), nil
+	}
+
+	result, err := Install("codex")
+	if err != nil {
+		t.Fatalf("Install(codex) should succeed on already-installed outputs, got: %v", err)
+	}
+	if result.Files != 3 {
+		t.Fatalf("expected 3 files written, got %d", result.Files)
+	}
+	if calls < 2 {
+		t.Fatalf("expected at least 2 codex CLI calls, got %d", calls)
+	}
+}
+
 func TestInstallPiInstallsPackagesAndWritesConfig(t *testing.T) {
 	resetSetupSeams(t)
 	agentDir := t.TempDir()

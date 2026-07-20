@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -22,13 +23,13 @@ var ErrInvalidDashboardSessionToken = errors.New("invalid dashboard session toke
 var ErrProjectNotAllowed = errors.New("project is not allowed for this token")
 
 type Service struct {
-	store          *cloudstore.CloudStore
-	expectedToken  string
-	dashboardAuth  map[string]struct{}
-	allowed        map[string]struct{}
-	allowedAll     bool
-	jwtSecret      []byte
-	now            func() time.Time
+	store         *cloudstore.CloudStore
+	expectedToken string
+	dashboardAuth map[string]struct{}
+	allowed       map[string]struct{}
+	allowedAll    bool
+	jwtSecret     []byte
+	now           func() time.Time
 }
 
 type ProjectScopeAuthorizer struct {
@@ -291,8 +292,23 @@ func (s *Service) Authorize(r *http.Request) error {
 	if token == "" {
 		return fmt.Errorf("bearer token is required")
 	}
-	if !hmac.Equal([]byte(token), []byte(s.expectedToken)) {
-		return fmt.Errorf("invalid bearer token")
+	_, err := s.ResolveBearerToken(r.Context(), token)
+	return err
+}
+
+func (s *Service) ResolveBearerToken(_ context.Context, token string) (Principal, error) {
+	if strings.TrimSpace(s.expectedToken) == "" {
+		return Principal{}, ErrBearerTokenNotConfigured
 	}
-	return nil
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return Principal{}, fmt.Errorf("missing authorization header")
+	}
+	if strings.ContainsAny(token, " \t\n\r") {
+		return Principal{}, fmt.Errorf("authorization must use Bearer token")
+	}
+	if !legacyTokenEqual(token, s.expectedToken) {
+		return Principal{}, fmt.Errorf("invalid bearer token")
+	}
+	return Principal{ID: "legacy:sync", Kind: PrincipalKindLegacy, DisplayName: "LEGACY_SYNC", Role: RoleMember, Enabled: true, Source: PrincipalSourceLegacyEnvSync}, nil
 }

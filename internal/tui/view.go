@@ -466,6 +466,26 @@ func (m Model) viewSessions() string {
 	b.WriteString(headerStyle.Render(header))
 	b.WriteString("\n")
 
+	switch m.SessionDeleteState {
+	case SessionDeleteStateDeleting:
+		b.WriteString("\n")
+		b.WriteString(sectionHeadingStyle.Render("  Deleting Session"))
+		b.WriteString("\n\n")
+		b.WriteString(detailContentStyle.Render(fmt.Sprintf("  Deleting session %q...", m.SessionDeleteID)))
+		b.WriteString("\n")
+		return b.String()
+	case SessionDeleteStatePrompt:
+		b.WriteString("\n")
+		b.WriteString(sectionHeadingStyle.Render("  Confirm Session Delete"))
+		b.WriteString("\n\n")
+		b.WriteString(detailContentStyle.Render(fmt.Sprintf("  Delete session %q from project %q?", m.SessionDeleteID, m.SessionDeleteProject)))
+		b.WriteString("\n")
+		b.WriteString(timestampStyle.Render("  Sessions with observations cannot be deleted; Engram will refuse unsafe deletes."))
+		b.WriteString("\n\n")
+		b.WriteString(helpStyle.Render("  [y] Delete  [n] Cancel  [esc] Cancel"))
+		return b.String()
+	}
+
 	if count == 0 {
 		b.WriteString(noResultsStyle.Render("No sessions yet."))
 		b.WriteString("\n\n")
@@ -513,7 +533,7 @@ func (m Model) viewSessions() string {
 			timestampStyle.Render(fmt.Sprintf("showing %d-%d of %d", m.Scroll+1, end, count))))
 	}
 
-	b.WriteString(helpStyle.Render("\n  j/k navigate • enter view session • esc back"))
+	b.WriteString(helpStyle.Render("\n  j/k navigate • enter view session • d delete • esc back"))
 
 	return b.String()
 }

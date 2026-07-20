@@ -1,0 +1,17 @@
+{
+  "name": "engram",
+  "displayName": "Engram Persistent Memory",
+  "version": "0.1.1",
+  "description": "Persistent memory for AI coding agents. Survives across sessions and compactions.",
+  "shortDescription": "Persistent memory with session tracking, compaction recovery, and Memory Protocol.",
+  "author": {
+    "name": "Gentleman Programming"
+  },
+  "homepage": "https://github.com/Gentleman-Programming/engram",
+  "repository": "https://github.com/Gentleman-Programming/engram",
+  "license": "MIT",
+  "category": "Productivity",
+  "keywords": ["memory", "persistence", "sessions", "context"],
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": "./.mcp.json"
+}

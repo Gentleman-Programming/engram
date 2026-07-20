@@ -24,14 +24,26 @@ Agent
   │     ├── plugin/claude-code/scripts/*.sh / *.ps1
   │     └── plugin/claude-code/skills/memory/SKILL.md
   │
-  ├── Gemini / Codex setup
-  │     └── internal/setup/setup.go
-  │
-  └── VS Code / Antigravity / Cursor / Windsurf manual MCP
-        └── JSON configuration documented in docs/AGENT-SETUP.md
+  └── Agent registry (declarative setup)
+        ├── internal/setup/registry.go   (generic injectMCP / writeInstruction driver)
+        └── internal/setup/agents.go     (one data entry per agent)
 ```
 
-`internal/setup` does not install every possible integration. VS Code, Antigravity, Cursor, and Windsurf are manual MCP configuration paths documented in `docs/AGENT-SETUP.md`.
+`internal/setup` exposes a data-driven agent registry (`agentAdapters()` in
+`agents.go`). `Install()` and `SupportedAgents()` are derived from it. Each entry
+is either:
+
+- **bespoke** — a `custom` installer for agents with special needs (OpenCode embeds
+  a TS plugin, Pi runs a package manager, Claude Code drives the `claude` CLI, Codex
+  writes TOML, Gemini CLI cleans up legacy env state), or
+- **declarative** — just an MCP path + format (`mcpServers` / `servers` / OpenCode's
+  `mcp` object) and instruction surfaces; the generic `injectMCP` / `writeInstruction`
+  driver in `registry.go` does the writes. Antigravity CLI, Windsurf, Qwen, Kiro,
+  Cursor, VS Code Copilot, and Kilo Code are all declarative.
+
+Adding a declarative agent is normally just a new entry in `agentAdapters()` plus
+its path helpers — no new install code path. Agents not in the registry remain
+manual MCP configs documented in `docs/AGENT-SETUP.md`.
 
 ## Thin plugin principle
 

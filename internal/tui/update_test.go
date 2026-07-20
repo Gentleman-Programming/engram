@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/internal/setup"
@@ -302,6 +303,148 @@ func TestHandleRecentTimelineSessionsAndDetailKeyPaths(t *testing.T) {
 	}
 }
 
+func TestSessionDeletePromptFlow(t *testing.T) {
+	t.Run("opens and cancels prompt", func(t *testing.T) {
+		fx := newTestFixture(t)
+		m := New(fx.store, "")
+		m.Screen = ScreenSessions
+		m.Sessions = []store.SessionSummary{{ID: fx.sessionID, Project: "engram"}, {ID: fx.otherSession, Project: "engram"}}
+		m.Cursor = 1
+
+		updatedModel, cmd := m.handleSessionsKeys("D")
+		updated := updatedModel.(Model)
+		if cmd != nil {
+			t.Fatal("opening delete prompt should not return command")
+		}
+		if updated.SessionDeleteState != SessionDeleteStatePrompt || updated.SessionDeleteID != fx.otherSession || updated.SessionDeleteProject != "engram" {
+			t.Fatalf("delete prompt state = state:%v id:%q project:%q", updated.SessionDeleteState, updated.SessionDeleteID, updated.SessionDeleteProject)
+		}
+
+		updatedModel, cmd = updated.handleSessionsKeys("esc")
+		updated = updatedModel.(Model)
+		if cmd != nil {
+			t.Fatal("esc cancel should not return command")
+		}
+		if updated.SessionDeleteState != SessionDeleteStateNone || updated.SessionDeleteID != "" || updated.SessionDeleteProject != "" {
+			t.Fatal("esc cancel should clear delete prompt state")
+		}
+
+		updatedModel, _ = m.handleSessionsKeys("d")
+		updated = updatedModel.(Model)
+		updatedModel, cmd = updated.handleSessionsKeys("n")
+		updated = updatedModel.(Model)
+		if cmd != nil {
+			t.Fatal("n cancel should not return command")
+		}
+		if updated.SessionDeleteState != SessionDeleteStateNone || updated.SessionDeleteID != "" || updated.SessionDeleteProject != "" {
+			t.Fatal("n cancel should clear delete prompt state")
+		}
+	})
+
+	t.Run("confirm deletes empty session and refreshes", func(t *testing.T) {
+		fx := newTestFixture(t)
+		m := New(fx.store, "")
+		m.Screen = ScreenSessions
+		m.Sessions = []store.SessionSummary{{ID: fx.sessionID, Project: "engram"}, {ID: fx.otherSession, Project: "engram"}}
+		m.Cursor = 1
+
+		updatedModel, _ := m.handleSessionsKeys("d")
+		updated := updatedModel.(Model)
+		updatedModel, cmd := updated.handleSessionsKeys("y")
+		updated = updatedModel.(Model)
+		if cmd == nil {
+			t.Fatal("confirm should return delete command")
+		}
+		if updated.SessionDeleteState != SessionDeleteStateDeleting {
+			t.Fatal("confirm should close prompt and mark delete in progress")
+		}
+		if _, secondCmd := updated.handleSessionsKeys("y"); secondCmd != nil {
+			t.Fatal("second confirm while deleting should be ignored")
+		}
+
+		msg := cmd().(sessionDeletedMsg)
+		if msg.err != nil {
+			t.Fatalf("delete command error: %v", msg.err)
+		}
+		updated.ErrorMsg = "stale delete error"
+		updatedModel, refreshCmd := updated.Update(msg)
+		updated = updatedModel.(Model)
+		if updated.SessionDeleteState != SessionDeleteStateNone || updated.SessionDeleteID != "" {
+			t.Fatal("delete result should clear prompt state")
+		}
+		if updated.ErrorMsg != "" {
+			t.Fatalf("successful delete should clear stale error, got %q", updated.ErrorMsg)
+		}
+		if refreshCmd == nil {
+			t.Fatal("successful delete should refresh sessions")
+		}
+		if err := fx.store.DeleteSession(fx.otherSession); !errors.Is(err, store.ErrSessionNotFound) {
+			t.Fatalf("session should be deleted, got err %v", err)
+		}
+	})
+
+	t.Run("blocked delete shows store error", func(t *testing.T) {
+		fx := newTestFixture(t)
+		m := New(fx.store, "")
+		m.Screen = ScreenSessions
+		m.Sessions = []store.SessionSummary{{ID: fx.sessionID, Project: "engram"}}
+
+		updatedModel, _ := m.handleSessionsKeys("d")
+		updated := updatedModel.(Model)
+		_, cmd := updated.handleSessionsKeys("y")
+		if cmd == nil {
+			t.Fatal("confirm should return delete command")
+		}
+
+		msg := cmd().(sessionDeletedMsg)
+		if !errors.Is(msg.err, store.ErrSessionHasObservations) {
+			t.Fatalf("expected ErrSessionHasObservations, got %v", msg.err)
+		}
+		updatedModel, refreshCmd := updated.Update(msg)
+		updated = updatedModel.(Model)
+		if refreshCmd != nil {
+			t.Fatal("failed delete should not refresh sessions")
+		}
+		if updated.ErrorMsg == "" || !strings.Contains(updated.ErrorMsg, "Cannot delete session") {
+			t.Fatalf("failed delete should surface contextual error message, got %q", updated.ErrorMsg)
+		}
+		if updated.SessionDeleteState != SessionDeleteStateNone {
+			t.Fatal("failed delete should close prompt")
+		}
+	})
+
+	t.Run("nil store returns graceful error", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen = ScreenSessions
+		m.Sessions = []store.SessionSummary{{ID: "session-missing-store", Project: "engram"}}
+
+		updatedModel, _ := m.handleSessionsKeys("d")
+		updated := updatedModel.(Model)
+		_, cmd := updated.handleSessionsKeys("y")
+		if cmd == nil {
+			t.Fatal("confirm should return delete command")
+		}
+
+		msg := cmd().(sessionDeletedMsg)
+		if msg.err == nil {
+			t.Fatal("nil store delete should return an error message")
+		}
+	})
+
+	t.Run("delete key ignored without sessions", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen = ScreenSessions
+		updatedModel, cmd := m.handleSessionsKeys("d")
+		updated := updatedModel.(Model)
+		if cmd != nil {
+			t.Fatal("delete with no sessions should not return command")
+		}
+		if updated.SessionDeleteState != SessionDeleteStateNone {
+			t.Fatal("delete with no sessions should not open prompt")
+		}
+	})
+}
+
 func TestRefreshScreen(t *testing.T) {
 	m := New(newTestFixture(t).store, "")
 
@@ -404,6 +547,23 @@ func TestUpdateDataMessageBranches(t *testing.T) {
 	updated = updatedModel.(Model)
 	if len(updated.Sessions) != 1 {
 		t.Fatal("sessions should be updated")
+	}
+
+	screenModel := New(nil, "")
+	screenModel.Screen = ScreenSearch
+	screenModel.Cursor = 5
+	screenModel.Scroll = 4
+	updatedModel, _ = screenModel.Update(recentSessionsMsg{sessions: sessions})
+	updated = updatedModel.(Model)
+	if updated.Cursor != 5 || updated.Scroll != 4 {
+		t.Fatalf("sessions refresh outside sessions screen should not clamp cursor/scroll, got %d/%d", updated.Cursor, updated.Scroll)
+	}
+
+	screenModel.Screen = ScreenSessions
+	updatedModel, _ = screenModel.Update(recentSessionsMsg{sessions: sessions})
+	updated = updatedModel.(Model)
+	if updated.Cursor != 0 || updated.Scroll != 0 {
+		t.Fatalf("sessions refresh on sessions screen should clamp cursor/scroll, got %d/%d", updated.Cursor, updated.Scroll)
 	}
 
 	updatedModel, _ = m.Update(sessionObservationsMsg{err: errors.New("session detail err")})

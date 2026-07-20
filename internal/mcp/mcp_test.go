@@ -7365,3 +7365,90 @@ func TestHandleSearchLegacyMixedCaseProject(t *testing.T) {
 		t.Fatalf("expected search results for legacy project, got: %s", text)
 	}
 }
+
+// ─── match_mode MCP tests (issue #352) ──────────────────────────────────────
+
+// seedMCPMatchModeFixture creates a session and three observations with partial
+// token overlap — mirrors the store-level fixture.
+func seedMCPMatchModeFixture(t *testing.T, s *store.Store) {
+	t.Helper()
+	if err := s.CreateSession("s-mcp-matchmode", "engram", "/tmp"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	obs := []store.AddObservationParams{
+		{SessionID: "s-mcp-matchmode", Type: "decision", Title: "Auth session middleware", Content: "", Project: "engram", Scope: "project"},
+		{SessionID: "s-mcp-matchmode", Type: "decision", Title: "Compliance audit notes", Content: "session policy", Project: "engram", Scope: "project"},
+		{SessionID: "s-mcp-matchmode", Type: "decision", Title: "OAuth tokens", Content: "auth and compliance", Project: "engram", Scope: "project"},
+	}
+	for _, p := range obs {
+		if _, err := s.AddObservation(p); err != nil {
+			t.Fatalf("seed observation %q: %v", p.Title, err)
+		}
+	}
+}
+
+// TestHandleSearch_MatchModeAny verifies that passing match_mode="any" through
+// the MCP handler returns the broader result set.
+func TestHandleSearch_MatchModeAny(t *testing.T) {
+	s := newMCPTestStore(t)
+	seedMCPMatchModeFixture(t, s)
+
+	h := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"query":      "auth compliance session",
+		"project":    "engram",
+		"match_mode": "any",
+		"limit":      10.0,
+	}}}
+
+	res, err := h(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handleSearch error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %s", callResultText(t, res))
+	}
+	text := callResultText(t, res)
+	if strings.Contains(text, "No memories found") {
+		t.Fatalf("expected results for match_mode=any, got: %s", text)
+	}
+	if !strings.Contains(text, "Found 3") {
+		t.Fatalf("expected 'Found 3' in response (all 3 seeded observations), got: %s", text)
+	}
+	// All three observation titles must appear in the output.
+	for _, title := range []string{"Auth session middleware", "Compliance audit notes", "OAuth tokens"} {
+		if !strings.Contains(text, title) {
+			t.Fatalf("expected title %q in response, got: %s", title, text)
+		}
+	}
+}
+
+// TestHandleSearch_MatchModeInvalidError verifies that an invalid match_mode
+// value surfaces as an error tool result (not a silent empty list).
+func TestHandleSearch_MatchModeInvalidError(t *testing.T) {
+	s := newMCPTestStore(t)
+	seedMCPMatchModeFixture(t, s)
+
+	h := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"query":      "auth compliance session",
+		"project":    "engram",
+		"match_mode": "or",
+		"limit":      10.0,
+	}}}
+
+	res, err := h(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handleSearch error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("expected tool error for invalid match_mode, got success: %s", callResultText(t, res))
+	}
+	text := callResultText(t, res)
+	if !strings.Contains(text, "invalid match_mode") {
+		t.Fatalf("expected error text to contain \"invalid match_mode\", got: %s", text)
+	}
+	if strings.Contains(text, "Try simpler keywords") {
+		t.Fatalf("parameter-validation error must not contain query-advice suffix \"Try simpler keywords\", got: %s", text)
+	}
+}

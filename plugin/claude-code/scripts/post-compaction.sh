@@ -31,7 +31,21 @@ fi
 ENCODED_PROJECT=$(printf '%s' "$PROJECT" | jq -sRr @uri)
 CONTEXT=$(curl -sf "${ENGRAM_URL}/context?project=${ENCODED_PROJECT}" --max-time 3 2>/dev/null | jq -r '.context // empty')
 
-# Inject Memory Protocol + compaction instruction + context
+# Resolve protocol verbosity mode for this slug. All slim/full branching
+# (including the engram-version floor check) lives in Go — see `engram
+# protocol-mode`. A missing/old engram binary or an unrecognized subcommand
+# never yields "slim" here, so this always defaults safely to full. $mode is
+# NEVER echoed/logged to this hook's own stdout.
+mode=$(engram protocol-mode claude-code 2>/dev/null)
+if [ "$mode" != "slim" ]; then
+  mode="full"
+fi
+
+# Inject Memory Protocol + compaction instruction + context. Only the static
+# protocol prose is gated on $mode — the "CRITICAL INSTRUCTION" header below
+# and the numbered recovery steps that follow it stay unconditional (they are
+# the compaction-recovery contract itself, not the duplicated protocol text).
+if [ "$mode" != "slim" ]; then
 cat <<'PROTOCOL'
 ## Engram Persistent Memory — ACTIVE PROTOCOL
 
@@ -65,8 +79,13 @@ Call `mem_session_summary` with: Goal, Discoveries, Accomplished, Next Steps, Re
 
 ---
 
-CRITICAL INSTRUCTION POST-COMPACTION — follow these steps IN ORDER:
 PROTOCOL
+fi
+
+# Unconditional lead-in for the numbered recovery steps below — this is the
+# compaction-recovery contract itself, not duplicated protocol prose, so it
+# stays outside the $mode gate even when the static protocol text is slim.
+echo "CRITICAL INSTRUCTION POST-COMPACTION — follow these steps IN ORDER:"
 
 printf "\n1. FIRST: Call mem_session_summary with the content of the compacted summary above. Use project: '%s'.\n" "$PROJECT"
 printf "   This preserves what was accomplished before compaction.\n\n"

@@ -284,6 +284,9 @@ func registerTools(srv *server.MCPServer, s *store.Store, cfg MCPConfig, allowli
 				mcp.WithString("scope",
 					mcp.Description("Filter by scope: project (default) or personal"),
 				),
+				mcp.WithString("match_mode",
+					mcp.Description("Token matching: \"all\" (default — every token must match, FTS5 AND) or \"any\" (any token matches — broader recall for multi-token queries). Any other value returns an error."),
+				),
 				mcp.WithNumber("limit",
 					mcp.Description("Max results (default: 10, max: 20)"),
 				),
@@ -968,8 +971,14 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		typ, _ := req.GetArguments()["type"].(string)
 		projectOverride, _ := req.GetArguments()["project"].(string)
 		scope, _ := req.GetArguments()["scope"].(string)
+		matchMode, _ := req.GetArguments()["match_mode"].(string)
 		allProjects := boolArg(req, "all_projects", false)
 		limit := intArg(req, "limit", 10)
+
+		// Validate match_mode before any project resolution or DB work.
+		if matchMode != "" && matchMode != "all" && matchMode != "any" {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid match_mode %q: must be \"all\" or \"any\"", matchMode)), nil
+		}
 
 		// all_projects=true short-circuits project resolution: we search globally
 		// regardless of the project override or any auto-detected project. This
@@ -1010,10 +1019,11 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		activity.RecordToolCall(sessionID)
 
 		results, err := s.Search(query, store.SearchOptions{
-			Type:    typ,
-			Project: searchProject,
-			Scope:   scope,
-			Limit:   limit,
+			Type:      typ,
+			Project:   searchProject,
+			Scope:     scope,
+			Limit:     limit,
+			MatchMode: matchMode,
 		})
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Search error: %s. Try simpler keywords.", err)), nil

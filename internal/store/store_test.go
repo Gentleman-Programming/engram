@@ -3445,6 +3445,61 @@ func TestMigrationAndHelperEdgeBranches(t *testing.T) {
 	})
 }
 
+func TestImportSkipsObservationWithExistingSyncID(t *testing.T) {
+	s := newTestStore(t)
+	now := Now()
+	project := "engram"
+	observations := make([]Observation, 3)
+	for i := range observations {
+		observations[i] = Observation{
+			SyncID:    fmt.Sprintf("obs-import-idempotent-%d", i),
+			SessionID: "import-session",
+			Type:      "bugfix",
+			Title:     fmt.Sprintf("idempotent import %d", i),
+			Content:   fmt.Sprintf("import observation %d once", i),
+			Project:   &project,
+			Scope:     "project",
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+	}
+	data := &ExportData{
+		Sessions: []Session{{
+			ID:        "import-session",
+			Project:   "engram",
+			Directory: "/tmp/engram",
+			StartedAt: now,
+		}},
+		Observations: observations,
+	}
+
+	first, err := s.Import(data)
+	if err != nil {
+		t.Fatalf("first import: %v", err)
+	}
+	if first.ObservationsImported != 3 {
+		t.Fatalf("first import observations = %d, want 3", first.ObservationsImported)
+	}
+
+	for attempt := 2; attempt <= 3; attempt++ {
+		result, err := s.Import(data)
+		if err != nil {
+			t.Fatalf("import attempt %d: %v", attempt, err)
+		}
+		if result.ObservationsImported != 0 {
+			t.Fatalf("import attempt %d observations = %d, want 0", attempt, result.ObservationsImported)
+		}
+	}
+
+	var count int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM observations WHERE sync_id LIKE 'obs-import-idempotent-%'").Scan(&count); err != nil {
+		t.Fatalf("count imported observations: %v", err)
+	}
+	if count != 3 {
+		t.Fatalf("stored observations = %d, want 3", count)
+	}
+}
+
 func TestExportImportEdgeBranches(t *testing.T) {
 	t.Run("export fails when observations query fails", func(t *testing.T) {
 		s := newTestStore(t)
@@ -8574,5 +8629,204 @@ func TestMostRecentActiveSessionScopedByProject(t *testing.T) {
 	}
 	if ok {
 		t.Fatalf("expected no active session for engram when only 'other' has one, got ok=%v", ok)
+	}
+}
+
+// ─── match_mode tests (issue #352) ──────────────────────────────────────────
+
+// seedMatchModeFixture creates a session and three observations with partial
+// token overlap — no single observation contains all three query tokens.
+//
+//	obs1: title "Auth session middleware"       content ""
+//	obs2: title "Compliance audit notes"        content "session policy"
+//	obs3: title "OAuth tokens"                  content "auth and compliance"
+func seedMatchModeFixture(t *testing.T, s *Store) {
+	t.Helper()
+	if err := s.CreateSession("s-matchmode", "engram", "/tmp"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	obs := []AddObservationParams{
+		{SessionID: "s-matchmode", Type: "decision", Title: "Auth session middleware", Content: "", Project: "engram", Scope: "project"},
+		{SessionID: "s-matchmode", Type: "decision", Title: "Compliance audit notes", Content: "session policy", Project: "engram", Scope: "project"},
+		{SessionID: "s-matchmode", Type: "decision", Title: "OAuth tokens", Content: "auth and compliance", Project: "engram", Scope: "project"},
+	}
+	for _, p := range obs {
+		if _, err := s.AddObservation(p); err != nil {
+			t.Fatalf("seed observation %q: %v", p.Title, err)
+		}
+	}
+}
+
+// TestSearchMatchMode_DefaultIsAND verifies that the default (AND) behaviour
+// returns 0 results when no single observation contains all query tokens.
+func TestSearchMatchMode_DefaultIsAND(t *testing.T) {
+	s := newTestStore(t)
+	seedMatchModeFixture(t, s)
+
+	results, err := s.Search("auth compliance session", SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("Search error: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("expected 0 results for AND query, got %d", len(results))
+	}
+}
+
+// TestSearchMatchMode_AllExplicit verifies that MatchMode "all" behaves
+// identically to the default AND mode.
+func TestSearchMatchMode_AllExplicit(t *testing.T) {
+	s := newTestStore(t)
+	seedMatchModeFixture(t, s)
+
+	results, err := s.Search("auth compliance session", SearchOptions{Project: "engram", Limit: 10, MatchMode: "all"})
+	if err != nil {
+		t.Fatalf("Search error: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("expected 0 results for explicit match_mode=all, got %d", len(results))
+	}
+}
+
+// TestSearchMatchMode_Any verifies that MatchMode "any" returns all three
+// observations because each contains at least one of the query tokens.
+func TestSearchMatchMode_Any(t *testing.T) {
+	s := newTestStore(t)
+	seedMatchModeFixture(t, s)
+
+	results, err := s.Search("auth compliance session", SearchOptions{Project: "engram", Limit: 10, MatchMode: "any"})
+	if err != nil {
+		t.Fatalf("Search error: %v", err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("expected 3 results for match_mode=any, got %d", len(results))
+	}
+}
+
+// TestSearchMatchMode_InvalidReturnsError verifies that an unrecognised
+// match_mode value returns an explicit error regardless of query shape.
+func TestSearchMatchMode_InvalidReturnsError(t *testing.T) {
+	s := newTestStore(t)
+	seedMatchModeFixture(t, s)
+
+	_, err := s.Search("auth compliance session", SearchOptions{Project: "engram", Limit: 10, MatchMode: "or"})
+	if err == nil {
+		t.Fatalf("expected error for invalid match_mode, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid match_mode") {
+		t.Fatalf("expected error to contain \"invalid match_mode\", got: %v", err)
+	}
+}
+
+// TestSearchMatchMode_SingleToken verifies that a single-token query returns
+// the same result regardless of match_mode (both modes are equivalent for one
+// token because AND and OR over a single term are identical).
+func TestSearchMatchMode_SingleToken(t *testing.T) {
+	s := newTestStore(t)
+	seedMatchModeFixture(t, s)
+
+	defaultRes, err := s.Search("auth", SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("default Search error: %v", err)
+	}
+	anyRes, err := s.Search("auth", SearchOptions{Project: "engram", Limit: 10, MatchMode: "any"})
+	if err != nil {
+		t.Fatalf("any Search error: %v", err)
+	}
+	if len(defaultRes) != len(anyRes) {
+		t.Fatalf("single-token results differ: default=%d any=%d", len(defaultRes), len(anyRes))
+	}
+}
+
+// TestSearchMatchMode_EmptyQueryAnyReturnsError pins that Search("", …{MatchMode:"any"})
+// returns an error — the FTS5 engine rejects an empty match expression, and this
+// behaviour is the same as the default AND mode with an empty query.
+func TestSearchMatchMode_EmptyQueryAnyReturnsError(t *testing.T) {
+	s := newTestStore(t)
+	seedMatchModeFixture(t, s)
+
+	_, err := s.Search("", SearchOptions{Project: "engram", Limit: 10, MatchMode: "any"})
+	if err == nil {
+		t.Fatal("expected error for empty query with match_mode=any, got nil")
+	}
+}
+
+func TestSearch_WeightedBM25Ranking(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s-bm25", "engram", "/tmp"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	// Observation A: query term in title (weight 5.0)
+	idA, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-bm25",
+		Type:      "decision",
+		Title:     "banana apple grape",
+		Content:   "nothing here",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation A: %v", err)
+	}
+
+	// Observation B: query term in content (weight 1.0)
+	idB, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-bm25",
+		Type:      "decision",
+		Title:     "nothing here",
+		Content:   "banana apple grape",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation B: %v", err)
+	}
+
+	results, err := s.Search("banana", SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("Search error: %v", err)
+	}
+
+	if len(results) < 2 {
+		t.Fatalf("expected at least 2 results, got %d", len(results))
+	}
+
+	// Since we order by rank, and rank is BM25, the title match (A) should be first (more relevant).
+	if results[0].ID != idA {
+		t.Errorf("expected observation A (title match) to rank higher than B (content match); got first: %d (title: %q, rank: %v), second: %d (title: %q, rank: %v)",
+			results[0].ID, results[0].Title, results[0].Rank, results[1].ID, results[1].Title, results[1].Rank)
+	}
+	if results[1].ID != idB {
+		t.Errorf("expected observation B (content match) to rank second; got second: %d (title: %q, rank: %v)",
+			results[1].ID, results[1].Title, results[1].Rank)
+	}
+}
+
+// TestSanitizeFTS verifies sanitizeFTS escapes interior double-quotes per FTS5
+// string-literal rules, preventing "unterminated string" crashes on inputs like
+// `hello"world`. See issue #574.
+func TestSanitizeFTS(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"plain word", "foo", `"foo"`},
+		{"multiple words", "fix auth bug", `"fix" "auth" "bug"`},
+		{"interior double-quote (the bug)", `foo"bar`, `"foo""bar"`},
+		{"already quoted", `"hello"`, `"hello"`},
+		{"multiple interior quotes", `a"b"c`, `"a""b""c"`},
+		{"just quotes", `""`, `""`},
+		{"mixed quote and plain", `hello"world test`, `"hello""world" "test"`},
+		{"empty input", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sanitizeFTS(tc.input)
+			if got != tc.want {
+				t.Errorf("sanitizeFTS(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
 	}
 }
