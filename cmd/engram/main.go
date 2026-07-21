@@ -1841,7 +1841,7 @@ func cmdProjects(cfg store.Config) {
 		fmt.Fprintf(os.Stderr, "unknown projects subcommand: %s\n", subCmd)
 		fmt.Fprintln(os.Stderr, "usage: engram projects list")
 		fmt.Fprintln(os.Stderr, "       engram projects consolidate [--all] [--dry-run]")
-		fmt.Fprintln(os.Stderr, "       engram projects prune [--dry-run]")
+		fmt.Fprintln(os.Stderr, "       engram projects prune [--dry-run] [--paths-only]")
 		exitFunc(1)
 	}
 }
@@ -2246,11 +2246,23 @@ func cmdProjectsConsolidate(cfg store.Config) {
 	}
 }
 
+// isPathLikeProjectName reports whether a project name is actually a filesystem
+// path (contains a path separator). Mirrors the write-boundary rejection in
+// normalizeExplicitWriteProject so cleanup targets exactly the names newer
+// versions now refuse to create. See issue #283 bug 2.
+func isPathLikeProjectName(name string) bool {
+	return strings.ContainsAny(name, `/\`)
+}
+
 func cmdProjectsPrune(cfg store.Config) {
 	dryRun := false
+	pathsOnly := false
 	for i := 3; i < len(os.Args); i++ {
-		if os.Args[i] == "--dry-run" {
+		switch os.Args[i] {
+		case "--dry-run":
 			dryRun = true
+		case "--paths-only":
+			pathsOnly = true
 		}
 	}
 
@@ -2268,13 +2280,24 @@ func cmdProjectsPrune(cfg store.Config) {
 	// Find projects with 0 observations
 	var candidates []store.ProjectStats
 	for _, ps := range allStats {
-		if ps.ObservationCount == 0 {
-			candidates = append(candidates, ps)
+		if ps.ObservationCount != 0 {
+			continue
 		}
+		// --paths-only: restrict to garbage projects whose name is a filesystem
+		// path (issue #283 bug 2). These are leftovers from older versions that
+		// fell back to using cwd as the project name when detection failed.
+		if pathsOnly && !isPathLikeProjectName(ps.Name) {
+			continue
+		}
+		candidates = append(candidates, ps)
 	}
 
 	if len(candidates) == 0 {
-		fmt.Println("No empty projects to prune.")
+		if pathsOnly {
+			fmt.Println("No path-named projects to prune.")
+		} else {
+			fmt.Println("No empty projects to prune.")
+		}
 		return
 	}
 
