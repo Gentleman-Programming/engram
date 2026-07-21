@@ -1888,6 +1888,20 @@ type projectGroup struct {
 	Canonical string // suggested canonical (most observations)
 }
 
+// maxSharedProjectsForDirMatch caps how many distinct projects may share a single
+// directory before that directory is treated as noise (e.g. $HOME or a session
+// root) and excluded from shared-directory grouping. See issue #283 bug 4.
+const maxSharedProjectsForDirMatch = 3
+
+// distinctProjectCount returns the number of unique project indices in idxs.
+func distinctProjectCount(idxs []int) int {
+	seen := make(map[int]struct{}, len(idxs))
+	for _, i := range idxs {
+		seen[i] = struct{}{}
+	}
+	return len(seen)
+}
+
 // groupSimilarProjects groups projects by name similarity and shared directories.
 // Uses a simple union-find approach.
 func groupSimilarProjects(projects []store.ProjectStats) []projectGroup {
@@ -1944,6 +1958,13 @@ func groupSimilarProjects(projects []store.ProjectStats) []projectGroup {
 		}
 	}
 	for _, idxs := range dirToProjects {
+		// Skip noisy ancestor directories shared by many unrelated projects
+		// (issue #283 bug 4): unioning everything under $HOME or a session root
+		// collapses the whole store into one component and turns consolidate into
+		// a data-loss footgun.
+		if distinctProjectCount(idxs) > maxSharedProjectsForDirMatch {
+			continue
+		}
 		for k := 1; k < len(idxs); k++ {
 			union(idxs[0], idxs[k])
 		}
