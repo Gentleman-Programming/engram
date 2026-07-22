@@ -2331,15 +2331,29 @@ func TestClaudeCodeMemorySkillDoesNotHardcodePluginScopedToolSearch(t *testing.T
 	}
 }
 
-func TestClaudeCodeUserPromptHookUsesCurrentMCPServerID(t *testing.T) {
+// readUserPromptHook returns the shell hook source for the ToolSearch prefix
+// assertions below.
+func readUserPromptHook(t *testing.T) string {
+	t.Helper()
 	data, err := os.ReadFile(filepath.Join("..", "..", "plugin", "claude-code", "scripts", "user-prompt-submit.sh"))
 	if err != nil {
 		t.Fatalf("read user prompt hook: %v", err)
 	}
-	text := string(data)
-	if strings.Contains(text, "select:mcp__plugin_engram_engram__") {
-		t.Fatalf("user prompt hook must not hardcode plugin-scoped ToolSearch names")
-	}
+	return string(data)
+}
+
+// Claude Code exposes engram's MCP tools under two different name prefixes
+// depending on how engram was installed, and the first-message ToolSearch
+// bootstrap must load them in BOTH cases. #192 ("repair Claude MCP tool
+// discovery", commit 3b99f0a) narrowed the select: list to the direct-MCP
+// prefix only, which silently broke the plugin/marketplace install path. The
+// two tests below lock each install mode independently so a regression names the
+// exact mode it broke. Listing both prefixes is safe: ToolSearch select: loads
+// whichever names exist and ignores the rest.
+
+// Direct MCP-server install (server id "engram") → mcp__engram__*.
+func TestClaudeCodeUserPromptHookCoversDirectMCPServerID(t *testing.T) {
+	text := readUserPromptHook(t)
 	for _, tool := range []string{
 		"mcp__engram__mem_save",
 		"mcp__engram__mem_search",
@@ -2348,7 +2362,23 @@ func TestClaudeCodeUserPromptHookUsesCurrentMCPServerID(t *testing.T) {
 		"mcp__engram__mem_judge",
 	} {
 		if !strings.Contains(text, tool) {
-			t.Fatalf("user prompt hook missing current ToolSearch name %q", tool)
+			t.Fatalf("user prompt hook missing direct-MCP ToolSearch name %q", tool)
+		}
+	}
+}
+
+// Plugin/marketplace install → mcp__plugin_engram_engram__*.
+func TestClaudeCodeUserPromptHookCoversPluginServerID(t *testing.T) {
+	text := readUserPromptHook(t)
+	for _, tool := range []string{
+		"mcp__plugin_engram_engram__mem_save",
+		"mcp__plugin_engram_engram__mem_search",
+		"mcp__plugin_engram_engram__mem_context",
+		"mcp__plugin_engram_engram__mem_current_project",
+		"mcp__plugin_engram_engram__mem_judge",
+	} {
+		if !strings.Contains(text, tool) {
+			t.Fatalf("user prompt hook missing plugin-scoped ToolSearch name %q", tool)
 		}
 	}
 }
