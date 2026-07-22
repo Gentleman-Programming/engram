@@ -2331,15 +2331,30 @@ func TestClaudeCodeMemorySkillDoesNotHardcodePluginScopedToolSearch(t *testing.T
 	}
 }
 
-// readUserPromptHook returns the shell hook source for the ToolSearch prefix
-// assertions below.
-func readUserPromptHook(t *testing.T) string {
+// claudeCodeBootstrapTools is the complete tool set the first-message
+// ToolSearch bootstrap must load. Both hook implementations (bash and the
+// Windows PowerShell fallback) must list every one of these under both
+// install-mode prefixes; a partial list lets a dropped tool regress silently.
+var claudeCodeBootstrapTools = []string{
+	"mem_save", "mem_search", "mem_context", "mem_session_summary",
+	"mem_session_start", "mem_session_end", "mem_get_observation",
+	"mem_suggest_topic_key", "mem_capture_passive", "mem_save_prompt",
+	"mem_update", "mem_current_project", "mem_judge",
+}
+
+// readUserPromptHooks returns both user prompt hook sources (bash and the
+// Windows PowerShell fallback) for the ToolSearch prefix assertions below.
+func readUserPromptHooks(t *testing.T) map[string]string {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join("..", "..", "plugin", "claude-code", "scripts", "user-prompt-submit.sh"))
-	if err != nil {
-		t.Fatalf("read user prompt hook: %v", err)
+	hooks := make(map[string]string, 2)
+	for _, name := range []string{"user-prompt-submit.sh", "user-prompt-submit.ps1"} {
+		data, err := os.ReadFile(filepath.Join("..", "..", "plugin", "claude-code", "scripts", name))
+		if err != nil {
+			t.Fatalf("read user prompt hook %s: %v", name, err)
+		}
+		hooks[name] = string(data)
 	}
-	return string(data)
+	return hooks
 }
 
 // Claude Code exposes engram's MCP tools under two different name prefixes
@@ -2353,32 +2368,22 @@ func readUserPromptHook(t *testing.T) string {
 
 // Direct MCP-server install (server id "engram") → mcp__engram__*.
 func TestClaudeCodeUserPromptHookCoversDirectMCPServerID(t *testing.T) {
-	text := readUserPromptHook(t)
-	for _, tool := range []string{
-		"mcp__engram__mem_save",
-		"mcp__engram__mem_search",
-		"mcp__engram__mem_context",
-		"mcp__engram__mem_current_project",
-		"mcp__engram__mem_judge",
-	} {
-		if !strings.Contains(text, tool) {
-			t.Fatalf("user prompt hook missing direct-MCP ToolSearch name %q", tool)
+	for name, text := range readUserPromptHooks(t) {
+		for _, tool := range claudeCodeBootstrapTools {
+			if !strings.Contains(text, "mcp__engram__"+tool) {
+				t.Errorf("%s missing direct-MCP ToolSearch name %q", name, "mcp__engram__"+tool)
+			}
 		}
 	}
 }
 
 // Plugin/marketplace install → mcp__plugin_engram_engram__*.
 func TestClaudeCodeUserPromptHookCoversPluginServerID(t *testing.T) {
-	text := readUserPromptHook(t)
-	for _, tool := range []string{
-		"mcp__plugin_engram_engram__mem_save",
-		"mcp__plugin_engram_engram__mem_search",
-		"mcp__plugin_engram_engram__mem_context",
-		"mcp__plugin_engram_engram__mem_current_project",
-		"mcp__plugin_engram_engram__mem_judge",
-	} {
-		if !strings.Contains(text, tool) {
-			t.Fatalf("user prompt hook missing plugin-scoped ToolSearch name %q", tool)
+	for name, text := range readUserPromptHooks(t) {
+		for _, tool := range claudeCodeBootstrapTools {
+			if !strings.Contains(text, "mcp__plugin_engram_engram__"+tool) {
+				t.Errorf("%s missing plugin-scoped ToolSearch name %q", name, "mcp__plugin_engram_engram__"+tool)
+			}
 		}
 	}
 }
