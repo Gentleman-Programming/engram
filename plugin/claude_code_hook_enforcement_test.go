@@ -83,8 +83,11 @@ func TestSessionStartMatcherCoversResumeAndFork(t *testing.T) {
 func TestUserPromptSubmitShellUsesAdditionalContext(t *testing.T) {
 	script := claudeScript(t, "user-prompt-submit.sh")
 
-	if !strings.Contains(script, "additionalContext") {
-		t.Error("user-prompt-submit.sh does not emit additionalContext — hook output never reaches the model")
+	// Assert the emitted JSON key form ("additionalContext":), not the bare word:
+	// the explanatory comments also reference additionalContext, so a bare-word
+	// check would pass even if the emitted payload dropped the field.
+	if !strings.Contains(script, `"additionalContext":`) {
+		t.Error("user-prompt-submit.sh does not emit an additionalContext JSON field - hook output never reaches the model")
 	}
 	if !strings.Contains(script, `"hookEventName":"UserPromptSubmit"`) &&
 		!strings.Contains(script, `hookEventName: "UserPromptSubmit"`) {
