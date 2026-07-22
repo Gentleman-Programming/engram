@@ -78,3 +78,87 @@ test("registered Pi-native mem_search reports native provider transport failure"
     await rm(NODE_MODULES, { recursive: true, force: true });
   }
 });
+
+function jsonResponse(status, body) {
+  return { ok: status >= 200 && status < 300, status, json: async () => body };
+}
+
+// Runs mem_search against a stubbed Engram HTTP server. `searchResponder` returns the Response-like
+// object for the /search request; every other endpoint the extension touches during init/project
+// detection gets a permissive 200 so the search path is what the assertions actually exercise.
+async function runMemSearch(searchResponder) {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  globalThis.fetch = async (url) => {
+    const target = String(url);
+    if (target.includes("/search")) return searchResponder();
+    if (target.includes("/project/current")) return jsonResponse(200, { project: "gentle-agent-state" });
+    return jsonResponse(200, {});
+  };
+
+  try {
+    await installRuntimeStubs();
+    const registeredTools = new Map();
+    const pluginUrl = pathToFileURL(join(ROOT, "index.ts"));
+    pluginUrl.search = `?contract=${Date.now()}-${Math.random()}`;
+    const { default: registerEngram } = await import(pluginUrl.href);
+    registerEngram({
+      registerTool(tool) {
+        registeredTools.set(tool.name, tool);
+      },
+      on() {},
+    });
+
+    const memSearch = registeredTools.get("mem_search");
+    assert.ok(memSearch, "mem_search tool should be registered");
+
+    return await memSearch.execute(
+      "tool-call-search",
+      { query: "state markers", project: "gentle-agent-state" },
+      undefined,
+      undefined,
+      {
+        cwd: ROOT,
+        sessionManager: { getSessionId: () => "test-session" },
+        ui: { setStatus() {} },
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+    await rm(NODE_MODULES, { recursive: true, force: true });
+  }
+}
+
+test("mem_search treats a JSON null (no-hit) response as an empty result, not an outage", async () => {
+  const result = await runMemSearch(() => jsonResponse(200, null));
+
+  assert.notEqual(result.isError, true);
+  assert.doesNotMatch(result.content[0].text, /could not reach the Engram HTTP server/);
+  assert.deepEqual(result.details.data, []);
+});
+
+test("mem_search preserves an existing empty array response", async () => {
+  const result = await runMemSearch(() => jsonResponse(200, []));
+
+  assert.notEqual(result.isError, true);
+  assert.doesNotMatch(result.content[0].text, /could not reach the Engram HTTP server/);
+  assert.deepEqual(result.details.data, []);
+});
+
+test("mem_search returns populated results unchanged", async () => {
+  const hits = [{ id: 1, title: "state markers", type: "discovery" }];
+  const result = await runMemSearch(() => jsonResponse(200, hits));
+
+  assert.notEqual(result.isError, true);
+  assert.deepEqual(result.details.data, hits);
+});
+
+test("mem_search surfaces an HTTP non-2xx response as an error", async () => {
+  const result = await runMemSearch(() => jsonResponse(500, { error: "search index offline" }));
+
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /search index offline/);
+});

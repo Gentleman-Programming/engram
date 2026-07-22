@@ -190,6 +190,17 @@ function takeLastFetchTimeoutMethod(): string | undefined {
   return method;
 }
 
+// Whether the most recent engramFetch actually got a 2xx back from the server. engramFetch returns
+// null both for an unreachable server and for a reachable server that answered with a null JSON body
+// (an empty result set); this out-of-band flag lets the tool layer tell those two apart.
+let lastFetchReachedServer = false;
+
+function takeLastFetchReachedServer(): boolean {
+  const reached = lastFetchReachedServer;
+  lastFetchReachedServer = false;
+  return reached;
+}
+
 async function engramFetch<TResponse = unknown>(path: string, opts: FetchOptions = {}): Promise<TResponse | null> {
   const method = opts.method ?? "GET";
   // This call's outcome supersedes any earlier one. A tool call can issue several fetches
@@ -197,6 +208,7 @@ async function engramFetch<TResponse = unknown>(path: string, opts: FetchOptions
   // on the first leg would mislabel an unrelated failure on the second as "may already have
   // been applied", telling the agent not to retry a write that never left the machine.
   lastFetchTimeoutMethod = undefined;
+  lastFetchReachedServer = false;
   let res: Response | undefined;
   let timedOut = false;
   for (let attempt = 0; attempt < ENGRAM_FETCH_MAX_ATTEMPTS; attempt += 1) {
@@ -241,6 +253,10 @@ async function engramFetch<TResponse = unknown>(path: string, opts: FetchOptions
     throw new EngramHttpError(message, res.status, data);
   }
 
+  // The server answered with a 2xx. Record that out-of-band so the tool layer can tell a genuine
+  // empty response (a JSON null body, e.g. a no-hit search) apart from an unreachable server —
+  // engramFetch returns null for both, and only the latter should surface as an outage.
+  lastFetchReachedServer = true;
   return data as TResponse;
 }
 
@@ -821,10 +837,14 @@ async function executeMemoryTool(toolName: string, params: Record<string, unknow
 
   try {
     const data = await callMemoryTool(toolName, params, ctx);
-    if (data === null) {
+    if (data === null && !takeLastFetchReachedServer()) {
+      // A null with no 2xx behind it is a genuine transport failure (unreachable/timeout), not an
+      // empty result. Surface it as an outage; a reachable-but-empty response falls through.
       throw new Error(unreachableMessage(takeLastFetchTimeoutMethod()));
     }
-    const result = { content: [{ type: "text" as const, text: textResult(data) }], details: { data } };
+    // A no-hit search comes back as a null JSON body; render it as an empty list, not "{}".
+    const rendered = data === null && toolName === "mem_search" ? [] : data;
+    const result = { content: [{ type: "text" as const, text: textResult(rendered) }], details: { data: rendered } };
     if (toolName === "mem_doctor" && data && typeof data === "object" && "status" in data && data.status === "error") {
       const errorResult = { ...result, isError: true };
       ctx.ui?.setStatus?.("engram", `🧠 ${project} · ${compactResultStatus(toolName, errorResult)}`);

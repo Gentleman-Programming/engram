@@ -56,10 +56,11 @@ function buildEngramFetchForTest({
       ${extractFunctionBody("isTimeoutError", "{\n  return error instanceof Error")}
     }
     let lastFetchTimeoutMethod;
+    let lastFetchReachedServer = false;
     const engramFetch = async function engramFetch(path, opts = {}) {
       ${body}
     };
-    return { engramFetch, timedOutMethod: () => lastFetchTimeoutMethod };
+    return { engramFetch, timedOutMethod: () => lastFetchTimeoutMethod, reachedServer: () => lastFetchReachedServer };
   `,
   );
   return factory(
