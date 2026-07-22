@@ -83,15 +83,15 @@ func TestSessionStartMatcherCoversResumeAndFork(t *testing.T) {
 func TestUserPromptSubmitShellUsesAdditionalContext(t *testing.T) {
 	script := claudeScript(t, "user-prompt-submit.sh")
 
-	// Assert the emitted JSON key form ("additionalContext":), not the bare word:
-	// the explanatory comments also reference additionalContext, so a bare-word
-	// check would pass even if the emitted payload dropped the field.
-	if !strings.Contains(script, `"additionalContext":`) {
-		t.Error("user-prompt-submit.sh does not emit an additionalContext JSON field - hook output never reaches the model")
+	// Assert the contiguous nested structure, not separate key checks: Claude
+	// Code only delivers additionalContext when it sits inside hookSpecificOutput
+	// with the UserPromptSubmit event, so a top-level additionalContext must fail.
+	if !strings.Contains(script, `"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":`) {
+		t.Error("user-prompt-submit.sh bootstrap must nest additionalContext inside hookSpecificOutput with hookEventName UserPromptSubmit")
 	}
-	if !strings.Contains(script, `"hookEventName":"UserPromptSubmit"`) &&
-		!strings.Contains(script, `hookEventName: "UserPromptSubmit"`) {
-		t.Error("user-prompt-submit.sh additionalContext payload is missing hookEventName: UserPromptSubmit")
+	// The nudge path builds the same structure via jq (unquoted keys).
+	if !strings.Contains(script, `hookSpecificOutput: {hookEventName: "UserPromptSubmit", additionalContext:`) {
+		t.Error("user-prompt-submit.sh nudge must nest additionalContext inside hookSpecificOutput with hookEventName UserPromptSubmit")
 	}
 	// Assert on the emitted JSON key, not the bare word: the explanatory code
 	// comments legitimately reference systemMessage.
