@@ -61,9 +61,15 @@ func TestSessionStartMatcherCoversResumeAndFork(t *testing.T) {
 		t.Fatal("no SessionStart group invokes session-start.sh — hooks.json changed")
 	}
 
+	// Compare exact alternatives split on "|": strings.Contains would accept an
+	// invalid superset like "resumed" as satisfying "resume".
+	tokens := make(map[string]bool)
+	for _, tok := range strings.Split(matcher, "|") {
+		tokens[tok] = true
+	}
 	for _, want := range []string{"startup", "resume", "clear", "fork"} {
-		if !strings.Contains(matcher, want) {
-			t.Errorf("SessionStart session-start.sh matcher %q is missing %q — resumed/forked sessions get no context injection", matcher, want)
+		if !tokens[want] {
+			t.Errorf("SessionStart session-start.sh matcher %q is missing exact token %q - resumed/forked sessions get no context injection", matcher, want)
 		}
 	}
 }
@@ -92,9 +98,10 @@ func TestUserPromptSubmitShellUsesAdditionalContext(t *testing.T) {
 }
 
 // Defect 1 (PowerShell parity): the Windows-native fallback must use the same
-// additionalContext shape. Note: the .ps1 keeps a code comment mentioning
-// systemMessage for historical context, so this test asserts on the emitted
-// object shape, not on the mere absence of the word.
+// additionalContext shape. The assertions target emit-only tokens (property
+// assignments and the quoted event value), not bare words: the .ps1 comments
+// mention "additionalContext" and "systemMessage", so a word search would pass
+// even if the emitted object wrapper or event value were removed.
 func TestUserPromptSubmitPowerShellUsesAdditionalContext(t *testing.T) {
 	root := repoRoot(t)
 	data, err := os.ReadFile(filepath.Join(root, "plugin", "claude-code", "scripts", "user-prompt-submit.ps1"))
@@ -103,12 +110,18 @@ func TestUserPromptSubmitPowerShellUsesAdditionalContext(t *testing.T) {
 	}
 	script := string(data)
 
-	if !strings.Contains(script, "additionalContext") || !strings.Contains(script, "hookEventName") {
-		t.Error("user-prompt-submit.ps1 does not emit hookSpecificOutput.additionalContext")
+	for _, want := range []string{
+		"hookSpecificOutput = [PSCustomObject]", // the wrapper object
+		"'UserPromptSubmit'",                    // the exact event value
+		"additionalContext = $message",          // the context field carrying the payload
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("user-prompt-submit.ps1 emitted payload is missing %q - additionalContext must be wrapped in hookSpecificOutput with the UserPromptSubmit event", want)
+		}
 	}
 	// The emitted object must not set systemMessage as an output field.
 	if strings.Contains(script, "systemMessage =") {
-		t.Error("user-prompt-submit.ps1 still emits a systemMessage output field — it never reaches the model (issue #145)")
+		t.Error("user-prompt-submit.ps1 still emits a systemMessage output field - it never reaches the model (issue #145)")
 	}
 }
 
@@ -123,10 +136,14 @@ func TestUserPromptSubmitPowerShellUsesAdditionalContext(t *testing.T) {
 func TestSubagentStopReadsLastAssistantMessage(t *testing.T) {
 	script := claudeScript(t, "subagent-stop.sh")
 
-	if !strings.Contains(script, "last_assistant_message") {
-		t.Error("subagent-stop.sh does not read last_assistant_message — SubagentStop passive capture no-ops on every run")
+	// Positively require the combined extraction: last_assistant_message for
+	// Claude Code, with .stdout retained as the fallback for other harnesses.
+	// Asserting only the absence of the stdout-only form would let a
+	// last_assistant_message-only extraction pass while breaking those harnesses.
+	if !strings.Contains(script, ".last_assistant_message // .stdout") {
+		t.Error("subagent-stop.sh must extract '.last_assistant_message // .stdout' - last_assistant_message for Claude Code, .stdout fallback for other harnesses")
 	}
 	if strings.Contains(script, `'.stdout // empty'`) {
-		t.Error("subagent-stop.sh reads only .stdout — that field is absent from the SubagentStop payload")
+		t.Error("subagent-stop.sh reads only .stdout - that field is absent from the SubagentStop payload")
 	}
 }
