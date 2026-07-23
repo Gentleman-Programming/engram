@@ -35,7 +35,7 @@ async function createPlugin(
 }
 
 test("uses the Windows basename in compaction recovery outside Git", async () => {
-  const { plugin } = await createPlugin("C:\\Users\\Blackie", () => ({ exitCode: 1 }))
+  const { plugin, requests } = await createPlugin("C:\\Users\\Blackie", () => ({ exitCode: 1 }))
   const output = { context: [] as string[] }
 
   await plugin["experimental.session.compacting"]?.(
@@ -45,10 +45,14 @@ test("uses the Windows basename in compaction recovery outside Git", async () =>
 
   assert.match(output.context.at(-1) ?? "", /Use project: 'Blackie'/)
   assert.doesNotMatch(output.context.at(-1) ?? "", /C:\\Users\\Blackie/)
+  assert.deepEqual(
+    requests.find(({ path }) => path === "/projects/migrate")?.body,
+    { old_project: "C:\\Users\\Blackie", new_project: "Blackie" },
+  )
 })
 
 test("ignores trailing Windows separators in the basename fallback", async () => {
-  const { plugin } = await createPlugin("C:\\Users\\Blackie\\", () => ({ exitCode: 1 }))
+  const { plugin, requests } = await createPlugin("C:\\Users\\Blackie\\", () => ({ exitCode: 1 }))
   const output = { context: [] as string[] }
 
   await plugin["experimental.session.compacting"]?.(
@@ -57,6 +61,10 @@ test("ignores trailing Windows separators in the basename fallback", async () =>
   )
 
   assert.match(output.context.at(-1) ?? "", /Use project: 'Blackie'/)
+  assert.deepEqual(
+    requests.find(({ path }) => path === "/projects/migrate")?.body,
+    { old_project: "C:\\Users\\Blackie\\", new_project: "Blackie" },
+  )
 })
 
 test("uses the Windows basename from the Git-root fallback", async () => {
