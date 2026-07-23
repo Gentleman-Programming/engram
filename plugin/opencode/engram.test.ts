@@ -79,7 +79,7 @@ test("uses the Windows basename from the Git-root fallback", async () => {
   assert.match(output.context.at(-1) ?? "", /Use project: 'engram-652'/)
 })
 
-test("uses the Windows basename as old_project during migration", async () => {
+test("migrates the legacy Windows project key to the remote project", async () => {
   const { requests } = await createPlugin("C:\\Users\\Blackie", (command) => {
     if (command.includes("get-url")) {
       return {
@@ -92,7 +92,7 @@ test("uses the Windows basename as old_project during migration", async () => {
 
   assert.deepEqual(
     requests.find(({ path }) => path === "/projects/migrate")?.body,
-    { old_project: "Blackie", new_project: "engram" },
+    { old_project: "C:\\Users\\Blackie", new_project: "engram" },
   )
 })
 

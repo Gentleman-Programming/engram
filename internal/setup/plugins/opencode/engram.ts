@@ -201,7 +201,8 @@ function stripPrivateTags(str: string): string {
 // ─── Plugin Export ───────────────────────────────────────────────────────────
 
 export const Engram: Plugin = async (ctx) => {
-  const oldProject = basename(ctx.directory)
+  // Preserve the previous plugin's key so Windows path-based records can migrate.
+  const oldProject = ctx.directory.split("/").pop() ?? "unknown"
   const project = extractProjectName(ctx.directory)
 
   // Track tool counts per session (in-memory only, not critical)
