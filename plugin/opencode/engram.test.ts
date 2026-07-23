@@ -138,3 +138,21 @@ test("migrates the legacy empty POSIX key for a trailing separator", async () =>
     { old_project: "", new_project: "blackie" },
   )
 })
+
+for (const [directory, oldProject] of [["C:\\", "C:\\"], ["C:/", ""]]) {
+  test(`uses unknown for the Windows drive root ${directory}`, async () => {
+    const { plugin, requests } = await createPlugin(directory, () => ({ exitCode: 1 }))
+    const output = { context: [] as string[] }
+
+    await plugin["experimental.session.compacting"]?.(
+      { sessionID: `session-drive-root-${directory}` } as never,
+      output,
+    )
+
+    assert.match(output.context.at(-1) ?? "", /Use project: 'unknown'/)
+    assert.deepEqual(
+      requests.find(({ path }) => path === "/projects/migrate")?.body,
+      { old_project: oldProject, new_project: "unknown" },
+    )
+  })
+}

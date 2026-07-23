@@ -154,7 +154,8 @@ async function isEngramRunning(): Promise<boolean> {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function basename(path: string): string {
-  return path.split(/[\\/]/).filter(Boolean).pop() ?? "unknown"
+  const name = path.split(/[\\/]/).filter(Boolean).pop()
+  return name && !/^[A-Za-z]:$/.test(name) ? name : "unknown"
 }
 
 function extractProjectNames(directory: string): { oldProject: string; project: string } {
