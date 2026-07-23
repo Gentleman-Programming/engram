@@ -47,6 +47,38 @@ test("uses the Windows basename in compaction recovery outside Git", async () =>
   assert.doesNotMatch(output.context.at(-1) ?? "", /C:\\Users\\Blackie/)
 })
 
+test("ignores trailing Windows separators in the basename fallback", async () => {
+  const { plugin } = await createPlugin("C:\\Users\\Blackie\\", () => ({ exitCode: 1 }))
+  const output = { context: [] as string[] }
+
+  await plugin["experimental.session.compacting"]?.(
+    { sessionID: "session-652-trailing" } as never,
+    output,
+  )
+
+  assert.match(output.context.at(-1) ?? "", /Use project: 'Blackie'/)
+})
+
+test("uses the Windows basename from the Git-root fallback", async () => {
+  const { plugin } = await createPlugin("C:\\Users\\Blackie\\project", (command) => {
+    if (command.includes("rev-parse")) {
+      return {
+        exitCode: 0,
+        stdout: Buffer.from("C:\\Users\\Blackie\\worktrees\\engram-652\n"),
+      }
+    }
+    return { exitCode: 1 }
+  })
+  const output = { context: [] as string[] }
+
+  await plugin["experimental.session.compacting"]?.(
+    { sessionID: "session-652-git-root" } as never,
+    output,
+  )
+
+  assert.match(output.context.at(-1) ?? "", /Use project: 'engram-652'/)
+})
+
 test("uses the Windows basename as old_project during migration", async () => {
   const { requests } = await createPlugin("C:\\Users\\Blackie", (command) => {
     if (command.includes("get-url")) {
