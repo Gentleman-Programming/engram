@@ -1,0 +1,77 @@
+import assert from "node:assert/strict"
+import { test } from "node:test"
+
+import { Engram } from "./engram.ts"
+
+type SpawnResult = {
+  exitCode: number
+  stdout?: Buffer
+}
+
+async function createPlugin(
+  directory: string,
+  spawnSync: (command: string[]) => SpawnResult,
+) {
+  const requests: Array<{ path: string; body?: unknown }> = []
+
+  globalThis.Bun = {
+    spawnSync,
+    file: () => ({ exists: async () => false }),
+  } as typeof Bun
+
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(input.toString())
+    const body = init?.body ? JSON.parse(init.body.toString()) : undefined
+    requests.push({ path: url.pathname, body })
+
+    return new Response(JSON.stringify({}), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })
+  }) as typeof fetch
+
+  const plugin = await Engram({ directory } as never)
+  return { plugin, requests }
+}
+
+test("uses the Windows basename in compaction recovery outside Git", async () => {
+  const { plugin } = await createPlugin("C:\\Users\\Blackie", () => ({ exitCode: 1 }))
+  const output = { context: [] as string[] }
+
+  await plugin["experimental.session.compacting"]?.(
+    { sessionID: "session-652" } as never,
+    output,
+  )
+
+  assert.match(output.context.at(-1) ?? "", /Use project: 'Blackie'/)
+  assert.doesNotMatch(output.context.at(-1) ?? "", /C:\\Users\\Blackie/)
+})
+
+test("uses the Windows basename as old_project during migration", async () => {
+  const { requests } = await createPlugin("C:\\Users\\Blackie", (command) => {
+    if (command.includes("get-url")) {
+      return {
+        exitCode: 0,
+        stdout: Buffer.from("https://github.com/Gentleman-Programming/engram.git\n"),
+      }
+    }
+    return { exitCode: 1 }
+  })
+
+  assert.deepEqual(
+    requests.find(({ path }) => path === "/projects/migrate")?.body,
+    { old_project: "Blackie", new_project: "engram" },
+  )
+})
+
+test("preserves POSIX basename fallback behavior", async () => {
+  const { plugin } = await createPlugin("/home/blackie", () => ({ exitCode: 1 }))
+  const output = { context: [] as string[] }
+
+  await plugin["experimental.session.compacting"]?.(
+    { sessionID: "session-posix" } as never,
+    output,
+  )
+
+  assert.match(output.context.at(-1) ?? "", /Use project: 'blackie'/)
+})

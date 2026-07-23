@@ -153,6 +153,10 @@ async function isEngramRunning(): Promise<boolean> {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+function basename(path: string): string {
+  return path.split(/[\\/]/).pop() ?? "unknown"
+}
+
 function extractProjectName(directory: string): string {
   // Try git remote origin URL
   try {
@@ -171,12 +175,12 @@ function extractProjectName(directory: string): string {
     const result = Bun.spawnSync(["git", "-C", directory, "rev-parse", "--show-toplevel"])
     if (result.exitCode === 0) {
       const root = result.stdout?.toString().trim()
-      if (root) return root.split("/").pop() ?? "unknown"
+      if (root) return basename(root)
     }
   } catch {}
 
   // Final fallback: cwd basename
-  return directory.split("/").pop() ?? "unknown"
+  return basename(directory)
 }
 
 function truncate(str: string, max: number): string {
@@ -197,7 +201,7 @@ function stripPrivateTags(str: string): string {
 // ─── Plugin Export ───────────────────────────────────────────────────────────
 
 export const Engram: Plugin = async (ctx) => {
-  const oldProject = ctx.directory.split("/").pop() ?? "unknown"
+  const oldProject = basename(ctx.directory)
   const project = extractProjectName(ctx.directory)
 
   // Track tool counts per session (in-memory only, not critical)
