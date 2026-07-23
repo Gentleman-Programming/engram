@@ -129,3 +129,12 @@ test("preserves POSIX basename fallback behavior", async () => {
 
   assert.match(output.context.at(-1) ?? "", /Use project: 'blackie'/)
 })
+
+test("migrates the legacy empty POSIX key for a trailing separator", async () => {
+  const { requests } = await createPlugin("/home/blackie/", () => ({ exitCode: 1 }))
+
+  assert.deepEqual(
+    requests.find(({ path }) => path === "/projects/migrate")?.body,
+    { old_project: "", new_project: "blackie" },
+  )
+})
