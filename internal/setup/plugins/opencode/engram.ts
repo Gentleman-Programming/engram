@@ -157,7 +157,7 @@ function basename(path: string): string {
   return path.split(/[\\/]/).filter(Boolean).pop() ?? "unknown"
 }
 
-function extractProjectName(directory: string): string {
+function extractProjectNames(directory: string): { oldProject: string; project: string } {
   // Try git remote origin URL
   try {
     const result = Bun.spawnSync(["git", "-C", directory, "remote", "get-url", "origin"])
@@ -165,7 +165,7 @@ function extractProjectName(directory: string): string {
       const url = result.stdout?.toString().trim()
       if (url) {
         const name = url.replace(/\.git$/, "").split(/[/:]/).pop()
-        if (name) return name
+        if (name) return { oldProject: name, project: name }
       }
     }
   } catch {}
@@ -175,12 +175,20 @@ function extractProjectName(directory: string): string {
     const result = Bun.spawnSync(["git", "-C", directory, "rev-parse", "--show-toplevel"])
     if (result.exitCode === 0) {
       const root = result.stdout?.toString().trim()
-      if (root) return basename(root)
+      if (root) {
+        return {
+          oldProject: root.split("/").pop() ?? "unknown",
+          project: basename(root),
+        }
+      }
     }
   } catch {}
 
   // Final fallback: cwd basename
-  return basename(directory)
+  return {
+    oldProject: directory.split("/").pop() ?? "unknown",
+    project: basename(directory),
+  }
 }
 
 function truncate(str: string, max: number): string {
@@ -201,9 +209,7 @@ function stripPrivateTags(str: string): string {
 // ─── Plugin Export ───────────────────────────────────────────────────────────
 
 export const Engram: Plugin = async (ctx) => {
-  // Preserve the previous plugin's key so Windows path-based records can migrate.
-  const oldProject = ctx.directory.split("/").pop() ?? "unknown"
-  const project = extractProjectName(ctx.directory)
+  const { oldProject, project } = extractProjectNames(ctx.directory)
 
   // Track tool counts per session (in-memory only, not critical)
   const toolCounts = new Map<string, number>()

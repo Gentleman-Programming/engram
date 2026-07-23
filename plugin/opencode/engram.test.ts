@@ -79,7 +79,7 @@ test("uses the Windows basename from the Git-root fallback", async () => {
   assert.match(output.context.at(-1) ?? "", /Use project: 'engram-652'/)
 })
 
-test("migrates the legacy Windows project key to the remote project", async () => {
+test("does not migrate when the legacy remote project is unchanged", async () => {
   const { requests } = await createPlugin("C:\\Users\\Blackie", (command) => {
     if (command.includes("get-url")) {
       return {
@@ -90,9 +90,23 @@ test("migrates the legacy Windows project key to the remote project", async () =
     return { exitCode: 1 }
   })
 
+  assert.equal(requests.some(({ path }) => path === "/projects/migrate"), false)
+})
+
+test("migrates the legacy Windows Git-root key from a nested directory", async () => {
+  const { requests } = await createPlugin("C:\\repos\\engram\\nested", (command) => {
+    if (command.includes("rev-parse")) {
+      return {
+        exitCode: 0,
+        stdout: Buffer.from("C:\\repos\\engram\n"),
+      }
+    }
+    return { exitCode: 1 }
+  })
+
   assert.deepEqual(
     requests.find(({ path }) => path === "/projects/migrate")?.body,
-    { old_project: "C:\\Users\\Blackie", new_project: "engram" },
+    { old_project: "C:\\repos\\engram", new_project: "engram" },
   )
 })
 
