@@ -76,7 +76,7 @@ worry when you see them on tables with >100k rows.
 
 ## Language strategy for shared memory
 
-FTS5, the SQLite full-text search engine Engram uses, is language-agnostic but not multilingual. A search in English will not match an observation saved in Spanish, and vice versa. For a globally distributed team, this matters: if every developer saves project-scope memories in their native language, the shared knowledge base fragments and search stops working as a team tool.
+FTS5, the SQLite full-text search engine Engram uses, is language-agnostic but not a translation layer. Engram indexes observations and prompts with trigram search, so Japanese, Chinese, and Korean substrings are searchable, but a search in English still will not match an observation saved only in Spanish, Russian, Japanese, or another language. For a globally distributed team, this matters: if every developer saves project-scope memories in their native language, the shared knowledge base fragments and search stops working as a team tool.
 
 ### Convention
 

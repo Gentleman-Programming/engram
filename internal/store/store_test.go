@@ -1431,6 +1431,510 @@ func TestScopeFiltersSearchAndContext(t *testing.T) {
 	}
 }
 
+func TestSearchSupportsCJKWithTrigramFTS(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s-cjk", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-cjk",
+		Type:      "bugfix",
+		Title:     "日本語検索",
+		Content:   "サンドボックス修正テスト",
+		Project:   "engram",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add cjk observation: %v", err)
+	}
+	if _, err := s.AddPrompt(AddPromptParams{
+		SessionID: "s-cjk",
+		Content:   "中国語検索プロンプト",
+		Project:   "engram",
+	}); err != nil {
+		t.Fatalf("add cjk prompt: %v", err)
+	}
+
+	results, err := s.Search("サンドボックス", SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("search cjk observation: %v", err)
+	}
+	if len(results) != 1 || results[0].Content != "サンドボックス修正テスト" {
+		t.Fatalf("expected cjk observation search hit, got %+v", results)
+	}
+
+	prompts, err := s.SearchPrompts("中国語検索", "engram", 10)
+	if err != nil {
+		t.Fatalf("search cjk prompt: %v", err)
+	}
+	if len(prompts) != 1 || prompts[0].Content != "中国語検索プロンプト" {
+		t.Fatalf("expected cjk prompt search hit, got %+v", prompts)
+	}
+}
+
+func TestSearchShortTokensUsesLikeFallbackWithTrigramFTS(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s-short", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	obsID, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-short",
+		Type:      "decision",
+		Title:     "v2",
+		Content:   "go db",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add short-token observation: %v", err)
+	}
+
+	results, err := s.Search("v2", SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("search short token: %v", err)
+	}
+	if len(results) != 1 || results[0].ID != obsID {
+		t.Fatalf("expected short-token search hit, got %+v", results)
+	}
+
+	anyResults, err := s.Search("go xx", SearchOptions{Project: "engram", Limit: 10, MatchMode: "any"})
+	if err != nil {
+		t.Fatalf("search short token any mode: %v", err)
+	}
+	if len(anyResults) != 1 || anyResults[0].ID != obsID {
+		t.Fatalf("expected short-token any-mode search hit, got %+v", anyResults)
+	}
+
+	literalID, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-short",
+		Type:      "decision",
+		Title:     "literal wildcard tokens",
+		Content:   "contains percent % and underscore _ characters",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add literal wildcard observation: %v", err)
+	}
+	percentResults, err := s.Search("%", SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("search literal percent: %v", err)
+	}
+	if len(percentResults) != 1 || percentResults[0].ID != literalID {
+		t.Fatalf("expected literal percent search hit only, got %+v", percentResults)
+	}
+	underscoreResults, err := s.Search("_", SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("search literal underscore: %v", err)
+	}
+	if len(underscoreResults) != 1 || underscoreResults[0].ID != literalID {
+		t.Fatalf("expected literal underscore search hit only, got %+v", underscoreResults)
+	}
+
+	_, err = s.Search("v2", SearchOptions{Project: "engram", Limit: 10, MatchMode: "or"})
+	if err == nil {
+		t.Fatalf("expected invalid match_mode error for short-token fallback query")
+	}
+	if !strings.Contains(err.Error(), "invalid match_mode") {
+		t.Fatalf("expected invalid match_mode error, got %v", err)
+	}
+
+	// Mixed-length queries must stay on FTS (not degrade English ranking via LIKE).
+	mixedID, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-short",
+		Type:      "decision",
+		Title:     "production rollout",
+		Content:   "go to prod checklist",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add mixed-length observation: %v", err)
+	}
+	mixedResults, err := s.Search("go to prod", SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("search mixed-length query: %v", err)
+	}
+	foundMixed := false
+	for _, r := range mixedResults {
+		if r.ID == mixedID {
+			foundMixed = true
+			if r.Rank == 0 {
+				t.Fatalf("expected FTS/bm25 rank for mixed-length query, got rank=%v", r.Rank)
+			}
+			break
+		}
+	}
+	if !foundMixed {
+		t.Fatalf("expected mixed-length FTS hit for go to prod, got %+v", mixedResults)
+	}
+}
+
+func TestTrigramFTSTriggersSupportUpdateAndDelete(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s-trigram", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	obsID, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-trigram",
+		Type:      "bugfix",
+		Title:     "更新前",
+		Content:   "古い検索テキスト",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	newContent := "更新後サンドボックス検索"
+	if _, err := s.UpdateObservation(obsID, UpdateObservationParams{Content: &newContent}); err != nil {
+		t.Fatalf("update observation with trigram fts: %v", err)
+	}
+
+	results, err := s.Search("サンドボックス", SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("search updated cjk observation: %v", err)
+	}
+	if len(results) != 1 || results[0].ID != obsID {
+		t.Fatalf("expected updated cjk observation search hit, got %+v", results)
+	}
+
+	if err := s.DeleteObservation(obsID, false); err != nil {
+		t.Fatalf("soft delete observation with trigram fts: %v", err)
+	}
+	results, err = s.Search("サンドボックス", SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("search after soft delete: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("expected soft-deleted cjk observation excluded, got %+v", results)
+	}
+
+	hardDeleteID, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-trigram",
+		Type:      "bugfix",
+		Title:     "完全削除",
+		Content:   "完全削除サンドボックス検索",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add hard-delete observation: %v", err)
+	}
+	results, err = s.Search("完全削除", SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("search hard-delete candidate: %v", err)
+	}
+	if len(results) != 1 || results[0].ID != hardDeleteID {
+		t.Fatalf("expected hard-delete candidate search hit, got %+v", results)
+	}
+	if err := s.DeleteObservation(hardDeleteID, true); err != nil {
+		t.Fatalf("hard delete observation with trigram fts: %v", err)
+	}
+	results, err = s.Search("完全削除", SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("search after hard delete: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("expected hard-deleted cjk observation excluded, got %+v", results)
+	}
+
+	promptID, err := s.AddPrompt(AddPromptParams{SessionID: "s-trigram", Content: "プロンプト更新前", Project: "engram"})
+	if err != nil {
+		t.Fatalf("add prompt: %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE user_prompts SET content = ? WHERE id = ?`, "プロンプト更新後検索", promptID); err != nil {
+		t.Fatalf("update prompt with trigram fts: %v", err)
+	}
+	prompts, err := s.SearchPrompts("更新後検索", "engram", 10)
+	if err != nil {
+		t.Fatalf("search updated cjk prompt: %v", err)
+	}
+	if len(prompts) != 1 || prompts[0].ID != promptID {
+		t.Fatalf("expected updated cjk prompt search hit, got %+v", prompts)
+	}
+	if err := s.DeletePrompt(promptID); err != nil {
+		t.Fatalf("delete prompt with trigram fts: %v", err)
+	}
+	prompts, err = s.SearchPrompts("更新後検索", "engram", 10)
+	if err != nil {
+		t.Fatalf("search after prompt delete: %v", err)
+	}
+	if len(prompts) != 0 {
+		t.Fatalf("expected deleted cjk prompt excluded, got %+v", prompts)
+	}
+}
+
+func TestMigrateRebuildsLegacyFTSTablesWithTrigram(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s-legacy-fts", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	obsID, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-legacy-fts",
+		Type:      "bugfix",
+		Title:     "旧検索",
+		Content:   "サンドボックス修正テスト",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	promptID, err := s.AddPrompt(AddPromptParams{
+		SessionID: "s-legacy-fts",
+		Content:   "中国語検索プロンプト",
+		Project:   "engram",
+	})
+	if err != nil {
+		t.Fatalf("add prompt: %v", err)
+	}
+
+	if _, err := s.db.Exec(`
+		DROP TRIGGER IF EXISTS obs_fts_insert;
+		DROP TRIGGER IF EXISTS obs_fts_update;
+		DROP TRIGGER IF EXISTS obs_fts_delete;
+		DROP TRIGGER IF EXISTS prompt_fts_insert;
+		DROP TRIGGER IF EXISTS prompt_fts_update;
+		DROP TRIGGER IF EXISTS prompt_fts_delete;
+		DROP TABLE IF EXISTS observations_fts;
+		DROP TABLE IF EXISTS prompts_fts;
+		CREATE VIRTUAL TABLE observations_fts USING fts5(
+			title,
+			content,
+			tool_name,
+			type,
+			project,
+			topic_key,
+			content='observations',
+			content_rowid='id'
+		);
+		CREATE VIRTUAL TABLE prompts_fts USING fts5(
+			content,
+			project,
+			content='user_prompts',
+			content_rowid='id'
+		);
+		INSERT INTO observations_fts(rowid, title, content, tool_name, type, project, topic_key)
+		SELECT id, title, content, tool_name, type, project, topic_key FROM observations WHERE deleted_at IS NULL;
+		INSERT INTO prompts_fts(rowid, content, project)
+		SELECT id, content, project FROM user_prompts;
+	`); err != nil {
+		t.Fatalf("seed legacy fts tables: %v", err)
+	}
+
+	if err := s.migrate(); err != nil {
+		t.Fatalf("migrate legacy fts tables: %v", err)
+	}
+
+	obsSQL, err := s.ftsTableSQL("observations_fts")
+	if err != nil {
+		t.Fatalf("observations fts sql: %v", err)
+	}
+	promptSQL, err := s.ftsTableSQL("prompts_fts")
+	if err != nil {
+		t.Fatalf("prompts fts sql: %v", err)
+	}
+	if !ftsSQLUsesTrigram(obsSQL) || !ftsSQLUsesTrigram(promptSQL) {
+		t.Fatalf("expected trigram fts tables, observations=%q prompts=%q", obsSQL, promptSQL)
+	}
+
+	results, err := s.Search("サンドボックス", SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("search migrated cjk observation: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected migrated cjk observation search hit, got %+v", results)
+	}
+	prompts, err := s.SearchPrompts("中国語検索", "engram", 10)
+	if err != nil {
+		t.Fatalf("search migrated cjk prompt: %v", err)
+	}
+	if len(prompts) != 1 {
+		t.Fatalf("expected migrated cjk prompt search hit, got %+v", prompts)
+	}
+
+	updatedContent := "移行後トリガー更新検索"
+	if _, err := s.UpdateObservation(obsID, UpdateObservationParams{Content: &updatedContent}); err != nil {
+		t.Fatalf("update migrated observation: %v", err)
+	}
+	results, err = s.Search("トリガー更新", SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("search updated migrated observation: %v", err)
+	}
+	if len(results) != 1 || results[0].ID != obsID {
+		t.Fatalf("expected updated migrated observation search hit, got %+v", results)
+	}
+	if err := s.DeleteObservation(obsID, true); err != nil {
+		t.Fatalf("delete migrated observation: %v", err)
+	}
+	results, err = s.Search("トリガー更新", SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("search deleted migrated observation: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("expected deleted migrated observation excluded, got %+v", results)
+	}
+
+	if _, err := s.db.Exec(`UPDATE user_prompts SET content = ? WHERE id = ?`, "移行後プロンプト更新検索", promptID); err != nil {
+		t.Fatalf("update migrated prompt: %v", err)
+	}
+	prompts, err = s.SearchPrompts("プロンプト更新", "engram", 10)
+	if err != nil {
+		t.Fatalf("search updated migrated prompt: %v", err)
+	}
+	if len(prompts) != 1 || prompts[0].ID != promptID {
+		t.Fatalf("expected updated migrated prompt search hit, got %+v", prompts)
+	}
+	if err := s.DeletePrompt(promptID); err != nil {
+		t.Fatalf("delete migrated prompt: %v", err)
+	}
+	prompts, err = s.SearchPrompts("プロンプト更新", "engram", 10)
+	if err != nil {
+		t.Fatalf("search deleted migrated prompt: %v", err)
+	}
+	if len(prompts) != 0 {
+		t.Fatalf("expected deleted migrated prompt excluded, got %+v", prompts)
+	}
+}
+
+func TestMigrateRepairsExistingTrigramDeleteTriggersBeforeCleanupUpdates(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s-manual-trigram", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	obsID, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-manual-trigram",
+		Type:      "bugfix",
+		Title:     "手動trigram",
+		Content:   "サンドボックス修正テスト",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	promptID, err := s.AddPrompt(AddPromptParams{
+		SessionID: "s-manual-trigram",
+		Content:   "中国語検索プロンプト",
+		Project:   "engram",
+	})
+	if err != nil {
+		t.Fatalf("add prompt: %v", err)
+	}
+
+	if _, err := s.db.Exec(`
+		UPDATE observations SET scope = '';
+		UPDATE user_prompts SET sync_id = '';
+
+		DROP TRIGGER IF EXISTS obs_fts_insert;
+		DROP TRIGGER IF EXISTS obs_fts_update;
+		DROP TRIGGER IF EXISTS obs_fts_delete;
+		DROP TRIGGER IF EXISTS prompt_fts_insert;
+		DROP TRIGGER IF EXISTS prompt_fts_update;
+		DROP TRIGGER IF EXISTS prompt_fts_delete;
+
+		CREATE TRIGGER obs_fts_insert AFTER INSERT ON observations BEGIN
+			INSERT INTO observations_fts(rowid, title, content, tool_name, type, project, topic_key)
+			VALUES (new.id, new.title, new.content, new.tool_name, new.type, new.project, new.topic_key);
+		END;
+		CREATE TRIGGER obs_fts_delete AFTER DELETE ON observations BEGIN
+			INSERT INTO observations_fts(observations_fts, rowid, title, content, tool_name, type, project, topic_key)
+			VALUES ('delete', old.id, old.title, old.content, old.tool_name, old.type, old.project, old.topic_key);
+		END;
+		CREATE TRIGGER obs_fts_update AFTER UPDATE ON observations BEGIN
+			INSERT INTO observations_fts(observations_fts, rowid, title, content, tool_name, type, project, topic_key)
+			VALUES ('delete', old.id, old.title, old.content, old.tool_name, old.type, old.project, old.topic_key);
+			INSERT INTO observations_fts(rowid, title, content, tool_name, type, project, topic_key)
+			VALUES (new.id, new.title, new.content, new.tool_name, new.type, new.project, new.topic_key);
+		END;
+
+		CREATE TRIGGER prompt_fts_insert AFTER INSERT ON user_prompts BEGIN
+			INSERT INTO prompts_fts(rowid, content, project)
+			VALUES (new.id, new.content, new.project);
+		END;
+		CREATE TRIGGER prompt_fts_delete AFTER DELETE ON user_prompts BEGIN
+			INSERT INTO prompts_fts(prompts_fts, rowid, content, project)
+			VALUES ('delete', old.id, old.content, old.project);
+		END;
+		CREATE TRIGGER prompt_fts_update AFTER UPDATE ON user_prompts BEGIN
+			INSERT INTO prompts_fts(prompts_fts, rowid, content, project)
+			VALUES ('delete', old.id, old.content, old.project);
+			INSERT INTO prompts_fts(rowid, content, project)
+			VALUES (new.id, new.content, new.project);
+		END;
+	`); err != nil {
+		t.Fatalf("seed manual trigram delete triggers: %v", err)
+	}
+
+	if err := s.migrate(); err != nil {
+		t.Fatalf("migrate should repair trigram delete triggers before cleanup updates: %v", err)
+	}
+
+	results, err := s.Search("サンドボックス", SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("search repaired observation: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected repaired observation search hit, got %+v", results)
+	}
+	prompts, err := s.SearchPrompts("中国語検索", "engram", 10)
+	if err != nil {
+		t.Fatalf("search repaired prompt: %v", err)
+	}
+	if len(prompts) != 1 {
+		t.Fatalf("expected repaired prompt search hit, got %+v", prompts)
+	}
+
+	updatedContent := "修復後トリガー更新検索"
+	if _, err := s.UpdateObservation(obsID, UpdateObservationParams{Content: &updatedContent}); err != nil {
+		t.Fatalf("update repaired observation: %v", err)
+	}
+	results, err = s.Search("修復後トリガー", SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("search updated repaired observation: %v", err)
+	}
+	if len(results) != 1 || results[0].ID != obsID {
+		t.Fatalf("expected updated repaired observation search hit, got %+v", results)
+	}
+	if err := s.DeleteObservation(obsID, true); err != nil {
+		t.Fatalf("delete repaired observation: %v", err)
+	}
+	results, err = s.Search("修復後トリガー", SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("search deleted repaired observation: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("expected deleted repaired observation excluded, got %+v", results)
+	}
+
+	if _, err := s.db.Exec(`UPDATE user_prompts SET content = ? WHERE id = ?`, "修復後プロンプト更新検索", promptID); err != nil {
+		t.Fatalf("update repaired prompt: %v", err)
+	}
+	prompts, err = s.SearchPrompts("プロンプト更新", "engram", 10)
+	if err != nil {
+		t.Fatalf("search updated repaired prompt: %v", err)
+	}
+	if len(prompts) != 1 || prompts[0].ID != promptID {
+		t.Fatalf("expected updated repaired prompt search hit, got %+v", prompts)
+	}
+	if err := s.DeletePrompt(promptID); err != nil {
+		t.Fatalf("delete repaired prompt: %v", err)
+	}
+	prompts, err = s.SearchPrompts("プロンプト更新", "engram", 10)
+	if err != nil {
+		t.Fatalf("search deleted repaired prompt: %v", err)
+	}
+	if len(prompts) != 0 {
+		t.Fatalf("expected deleted repaired prompt excluded, got %+v", prompts)
+	}
+}
+
 func TestUpdateAndSoftDeleteExcludedFromSearchAndTimeline(t *testing.T) {
 	s := newTestStore(t)
 

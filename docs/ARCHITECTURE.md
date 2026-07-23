@@ -126,15 +126,15 @@ Examples:
 - `pattern/error-handling-convention`
 - `config/ci-environment`
 
-**Why this format?** SQLite FTS5 tokenises on word boundaries. Lowercase kebab-case ensures the key fragments are individually searchable and do not create unexpected FTS5 token splits.
+**Why this format?** Lowercase kebab-case keeps topic fragments readable, predictable, and searchable across Engram's SQLite FTS5 index.
 
 **Anti-patterns to avoid:**
 
 | Anti-pattern | Problem | Correct form |
 |---|---|---|
-| `authModel` | camelCase breaks FTS5 tokenisation | `architecture/auth-model` |
+| `authModel` | camelCase is harder to scan and match consistently | `architecture/auth-model` |
 | `auth model` | spaces create accidental multi-token keys | `architecture/auth-model` |
-| `ARCHITECTURE/AUTH` | uppercase is inconsistent with FTS5 normalisation | `architecture/auth-model` |
+| `ARCHITECTURE/AUTH` | uppercase is inconsistent with Engram's topic-key normalisation | `architecture/auth-model` |
 | `auth/model/v2/final` | more than 2 levels — use `v2` in the description | `architecture/auth-model-v2` |
 | `bugfix` | no slash — looks like a family with no description | `bug/auth-nil-panic` |
 

@@ -840,7 +840,8 @@ func (s *Store) migrate() error {
 			project,
 			topic_key,
 			content='observations',
-			content_rowid='id'
+			content_rowid='id',
+			tokenize='trigram'
 		);
 
 			CREATE TABLE IF NOT EXISTS user_prompts (
@@ -868,7 +869,8 @@ func (s *Store) migrate() error {
 			content,
 			project,
 			content='user_prompts',
-			content_rowid='id'
+			content_rowid='id',
+			tokenize='trigram'
 		);
 
 			CREATE TABLE IF NOT EXISTS sync_chunks (
@@ -955,6 +957,9 @@ func (s *Store) migrate() error {
 	}
 
 	if err := s.addColumnIfNotExists("user_prompts", "sync_id", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.ensureFTSTrigramTables(); err != nil {
 		return err
 	}
 
@@ -1131,74 +1136,11 @@ func (s *Store) migrate() error {
 		return err
 	}
 
-	// Create triggers to keep FTS in sync (idempotent check)
-	var name string
-	err := s.db.QueryRow(
-		"SELECT name FROM sqlite_master WHERE type='trigger' AND name='obs_fts_insert'",
-	).Scan(&name)
-
-	if err == sql.ErrNoRows {
-		triggers := `
-			CREATE TRIGGER obs_fts_insert AFTER INSERT ON observations BEGIN
-				INSERT INTO observations_fts(rowid, title, content, tool_name, type, project, topic_key)
-				VALUES (new.id, new.title, new.content, new.tool_name, new.type, new.project, new.topic_key);
-			END;
-
-			CREATE TRIGGER obs_fts_delete AFTER DELETE ON observations BEGIN
-				INSERT INTO observations_fts(observations_fts, rowid, title, content, tool_name, type, project, topic_key)
-				VALUES ('delete', old.id, old.title, old.content, old.tool_name, old.type, old.project, old.topic_key);
-			END;
-
-			CREATE TRIGGER obs_fts_update AFTER UPDATE ON observations BEGIN
-				INSERT INTO observations_fts(observations_fts, rowid, title, content, tool_name, type, project, topic_key)
-				VALUES ('delete', old.id, old.title, old.content, old.tool_name, old.type, old.project, old.topic_key);
-				INSERT INTO observations_fts(rowid, title, content, tool_name, type, project, topic_key)
-				VALUES (new.id, new.title, new.content, new.tool_name, new.type, new.project, new.topic_key);
-			END;
-		`
-		if _, err := s.execHook(s.db, triggers); err != nil {
-			return err
-		}
-	}
-
-	if err := s.migrateFTSTopicKey(); err != nil {
-		return err
-	}
 	if err := s.withTx(func(tx *sql.Tx) error {
 		_, err := s.execHook(tx, `UPDATE observations SET project = CAST(project AS TEXT) WHERE typeof(project) = 'blob'`)
 		return err
 	}); err != nil {
 		return err
-	}
-
-	// Prompts FTS triggers (separate idempotent check)
-	var promptTrigger string
-	err = s.db.QueryRow(
-		"SELECT name FROM sqlite_master WHERE type='trigger' AND name='prompt_fts_insert'",
-	).Scan(&promptTrigger)
-
-	if err == sql.ErrNoRows {
-		promptTriggers := `
-			CREATE TRIGGER prompt_fts_insert AFTER INSERT ON user_prompts BEGIN
-				INSERT INTO prompts_fts(rowid, content, project)
-				VALUES (new.id, new.content, new.project);
-			END;
-
-			CREATE TRIGGER prompt_fts_delete AFTER DELETE ON user_prompts BEGIN
-				INSERT INTO prompts_fts(prompts_fts, rowid, content, project)
-				VALUES ('delete', old.id, old.content, old.project);
-			END;
-
-			CREATE TRIGGER prompt_fts_update AFTER UPDATE ON user_prompts BEGIN
-				INSERT INTO prompts_fts(prompts_fts, rowid, content, project)
-				VALUES ('delete', old.id, old.content, old.project);
-				INSERT INTO prompts_fts(rowid, content, project)
-				VALUES (new.id, new.content, new.project);
-			END;
-		`
-		if _, err := s.execHook(s.db, promptTriggers); err != nil {
-			return err
-		}
 	}
 
 	// Phase 3: add republish CLI, surface dead rows via mem_status.
@@ -2209,13 +2151,36 @@ func normalizeUpgradeRepairClass(class string) string {
 	}
 }
 
-func (s *Store) migrateFTSTopicKey() error {
-	var colCount int
-	err := s.db.QueryRow("SELECT COUNT(*) FROM pragma_table_xinfo('observations_fts') WHERE name = 'topic_key'").Scan(&colCount)
-	if err != nil || colCount > 0 {
+func (s *Store) ensureFTSTrigramTables() error {
+	if err := s.ensureObservationsFTSTrigram(); err != nil {
+		return err
+	}
+	if err := s.ensurePromptsFTSTrigram(); err != nil {
+		return err
+	}
+	if err := s.recreateObservationFTSTriggers(); err != nil {
+		return err
+	}
+	if err := s.recreatePromptFTSTriggers(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) ensureObservationsFTSTrigram() error {
+	sqlText, err := s.ftsTableSQL("observations_fts")
+	if err != nil {
+		return fmt.Errorf("inspect observations fts: %w", err)
+	}
+	hasTopicKey, err := s.ftsTableHasColumn("observations_fts", "topic_key")
+	if err != nil {
+		return fmt.Errorf("inspect observations fts columns: %w", err)
+	}
+	if hasTopicKey && ftsSQLUsesTrigram(sqlText) {
 		return nil
 	}
 
+	log.Printf("[store] rebuilding observations_fts with trigram tokenizer (one-time migration; may take a moment on large databases)")
 	if _, err := s.execHook(s.db, `
 		DROP TRIGGER IF EXISTS obs_fts_insert;
 		DROP TRIGGER IF EXISTS obs_fts_update;
@@ -2229,13 +2194,57 @@ func (s *Store) migrateFTSTopicKey() error {
 			project,
 			topic_key,
 			content='observations',
-			content_rowid='id'
+			content_rowid='id',
+			tokenize='trigram'
 		);
 		INSERT INTO observations_fts(rowid, title, content, tool_name, type, project, topic_key)
 		SELECT id, title, content, tool_name, type, project, topic_key
 		FROM observations
 		WHERE deleted_at IS NULL;
+	`); err != nil {
+		return fmt.Errorf("rebuild observations fts: %w", err)
+	}
+	return nil
+}
 
+func (s *Store) ensurePromptsFTSTrigram() error {
+	sqlText, err := s.ftsTableSQL("prompts_fts")
+	if err != nil {
+		return fmt.Errorf("inspect prompts fts: %w", err)
+	}
+	if ftsSQLUsesTrigram(sqlText) {
+		return nil
+	}
+
+	log.Printf("[store] rebuilding prompts_fts with trigram tokenizer (one-time migration; may take a moment on large databases)")
+	if _, err := s.execHook(s.db, `
+		DROP TRIGGER IF EXISTS prompt_fts_insert;
+		DROP TRIGGER IF EXISTS prompt_fts_update;
+		DROP TRIGGER IF EXISTS prompt_fts_delete;
+		DROP TABLE IF EXISTS prompts_fts;
+		CREATE VIRTUAL TABLE prompts_fts USING fts5(
+			content,
+			project,
+			content='user_prompts',
+			content_rowid='id',
+			tokenize='trigram'
+		);
+		INSERT INTO prompts_fts(rowid, content, project)
+		SELECT id, content, project
+		FROM user_prompts;
+	`); err != nil {
+		return fmt.Errorf("rebuild prompts fts: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) recreateObservationFTSTriggers() error {
+	// Keep trigger shape aligned with main's delete/insert FTS sync. Soft-delete
+	// gating (WHERE new.deleted_at IS NULL) belongs in a separate PR.
+	if _, err := s.execHook(s.db, `
+		DROP TRIGGER IF EXISTS obs_fts_insert;
+		DROP TRIGGER IF EXISTS obs_fts_update;
+		DROP TRIGGER IF EXISTS obs_fts_delete;
 		CREATE TRIGGER obs_fts_insert AFTER INSERT ON observations BEGIN
 			INSERT INTO observations_fts(rowid, title, content, tool_name, type, project, topic_key)
 			VALUES (new.id, new.title, new.content, new.tool_name, new.type, new.project, new.topic_key);
@@ -2253,9 +2262,61 @@ func (s *Store) migrateFTSTopicKey() error {
 			VALUES (new.id, new.title, new.content, new.tool_name, new.type, new.project, new.topic_key);
 		END;
 	`); err != nil {
-		return fmt.Errorf("migrate fts topic_key: %w", err)
+		return fmt.Errorf("recreate observations fts triggers: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) recreatePromptFTSTriggers() error {
+	if _, err := s.execHook(s.db, `
+		DROP TRIGGER IF EXISTS prompt_fts_insert;
+		DROP TRIGGER IF EXISTS prompt_fts_update;
+		DROP TRIGGER IF EXISTS prompt_fts_delete;
+		CREATE TRIGGER prompt_fts_insert AFTER INSERT ON user_prompts BEGIN
+			INSERT INTO prompts_fts(rowid, content, project)
+			VALUES (new.id, new.content, new.project);
+		END;
+
+		CREATE TRIGGER prompt_fts_delete AFTER DELETE ON user_prompts BEGIN
+			INSERT INTO prompts_fts(prompts_fts, rowid, content, project)
+			VALUES ('delete', old.id, old.content, old.project);
+		END;
+
+		CREATE TRIGGER prompt_fts_update AFTER UPDATE ON user_prompts BEGIN
+			INSERT INTO prompts_fts(prompts_fts, rowid, content, project)
+			VALUES ('delete', old.id, old.content, old.project);
+			INSERT INTO prompts_fts(rowid, content, project)
+			VALUES (new.id, new.content, new.project);
+		END;
+	`); err != nil {
+		return fmt.Errorf("recreate prompts fts triggers: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ftsTableSQL(name string) (string, error) {
+	var sqlText string
+	err := s.db.QueryRow("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", name).Scan(&sqlText)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return sqlText, err
+}
+
+func (s *Store) ftsTableHasColumn(table, column string) (bool, error) {
+	var count int
+	err := s.db.QueryRow("SELECT COUNT(*) FROM pragma_table_xinfo(?) WHERE name = ?", table, column).Scan(&count)
+	return count > 0, err
+}
+
+func ftsSQLUsesTrigram(sqlText string) bool {
+	normalized := strings.ToLower(sqlText)
+	normalized = strings.ReplaceAll(normalized, " ", "")
+	normalized = strings.ReplaceAll(normalized, "\n", "")
+	normalized = strings.ReplaceAll(normalized, "\t", "")
+	return strings.Contains(normalized, "tokenize='trigram'") ||
+		strings.Contains(normalized, `tokenize="trigram"`) ||
+		strings.Contains(normalized, "tokenize=trigram")
 }
 
 // ─── Sessions ────────────────────────────────────────────────────────────────
@@ -3154,22 +3215,33 @@ func (s *Store) SearchPrompts(query string, project string, limit int) ([]Prompt
 		limit = 10
 	}
 
-	ftsQuery := sanitizeFTS(query)
-
 	sql := `
 		SELECT p.id, ifnull(p.sync_id, '') as sync_id, p.session_id, p.content, ifnull(p.project, '') as project, p.created_at
-		FROM prompts_fts fts
-		JOIN user_prompts p ON p.id = fts.rowid
-		WHERE prompts_fts MATCH ?
 	`
-	args := []any{ftsQuery}
+	var args []any
+	if shouldUseTrigramLikeFallback(query) {
+		sql += `FROM user_prompts p WHERE `
+		appendLikeSearchCondition(&sql, &args, "ifnull(p.content, '') || ' ' || ifnull(p.project, '')", query, "all")
+	} else {
+		ftsQuery := sanitizeFTS(query)
+		sql += `
+			FROM prompts_fts fts
+			JOIN user_prompts p ON p.id = fts.rowid
+			WHERE prompts_fts MATCH ?
+		`
+		args = append(args, ftsQuery)
+	}
 
 	if project != "" {
 		sql += " AND p.project = ?"
 		args = append(args, project)
 	}
 
-	sql += " ORDER BY fts.rank LIMIT ?"
+	if shouldUseTrigramLikeFallback(query) {
+		sql += " ORDER BY p.created_at DESC LIMIT ?"
+	} else {
+		sql += " ORDER BY fts.rank LIMIT ?"
+	}
 	args = append(args, limit)
 
 	rows, err := s.queryItHook(s.db, sql, args...)
@@ -3675,15 +3747,57 @@ func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOpti
 		}
 	}
 
-	// Build FTS5 query: "all" (default) uses AND semantics; "any" uses OR for broader recall.
-	var ftsQuery string
-	if opts.MatchMode == "any" {
-		ftsQuery = sanitizeFTSCandidates(query)
+	likeFallback := shouldUseTrigramLikeFallback(query)
+	sqlQ := `
+		SELECT o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
+		       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.review_after, o.pinned, o.created_at, o.updated_at, o.deleted_at,
+	`
+	var args []any
+	if likeFallback {
+		sqlQ += `
+		       0.0 as rank
+		FROM observations o
+		WHERE o.deleted_at IS NULL AND `
+		appendLikeSearchCondition(&sqlQ, &args, "ifnull(o.title, '') || ' ' || ifnull(o.content, '') || ' ' || ifnull(o.tool_name, '') || ' ' || ifnull(o.type, '') || ' ' || ifnull(o.project, '') || ' ' || ifnull(o.topic_key, '')", query, opts.MatchMode)
 	} else {
-		ftsQuery = sanitizeFTS(query)
+		// Build FTS5 query: "all" (default) uses AND semantics; "any" uses OR for broader recall.
+		var ftsQuery string
+		if opts.MatchMode == "any" {
+			ftsQuery = sanitizeFTSCandidates(query)
+		} else {
+			ftsQuery = sanitizeFTS(query)
+		}
+		sqlQ += `
+		       bm25(observations_fts, 5.0, 1.0, 0.0, 0.0, 0.0, 3.0) as rank
+		FROM observations_fts fts
+		JOIN observations o ON o.id = fts.rowid
+		WHERE observations_fts MATCH ? AND o.deleted_at IS NULL
+	`
+		args = append(args, ftsQuery)
 	}
 
-	sqlQ, args := buildSearchFTSQuery(ftsQuery, opts, limit)
+	if opts.Type != "" {
+		sqlQ += " AND o.type = ?"
+		args = append(args, opts.Type)
+	}
+
+	if opts.Project != "" {
+		sqlQ += " AND LOWER(o.project) = ?"
+		args = append(args, opts.Project)
+	}
+
+	if opts.Scope != "" {
+		sqlQ += " AND o.scope = ?"
+		args = append(args, normalizeScope(opts.Scope))
+	}
+
+	if likeFallback {
+		sqlQ += " ORDER BY o.updated_at DESC LIMIT ?"
+	} else {
+		sqlQ += " ORDER BY rank LIMIT ?"
+	}
+	args = append(args, limit)
+
 	rows, err := s.queryItContextHook(ctx, sqlQ, args...)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -8264,7 +8378,8 @@ func (s *Store) migrateLegacyObservationsTable() error {
 			project,
 			topic_key,
 			content='observations',
-			content_rowid='id'
+			content_rowid='id',
+			tokenize='trigram'
 		);
 		INSERT INTO observations_fts(rowid, title, content, tool_name, type, project, topic_key)
 		SELECT id, title, content, tool_name, type, project, topic_key
@@ -8528,6 +8643,62 @@ func sanitizeFTS(query string) string {
 		words[i] = `"` + w + `"`
 	}
 	return strings.Join(words, " ")
+}
+
+func shouldUseTrigramLikeFallback(query string) bool {
+	terms := searchTerms(query)
+	if len(terms) == 0 {
+		return false
+	}
+	// Only fall back when *every* term is shorter than three runes. A mixed
+	// query like "go to prod" must stay on the FTS/bm25 path so English ranking
+	// and indexing are not degraded by a single short stopword-like token.
+	for _, term := range terms {
+		if utf8.RuneCountInString(term) >= 3 {
+			return false
+		}
+	}
+	return true
+}
+
+func appendLikeSearchCondition(sqlQ *string, args *[]any, expr, query, matchMode string) {
+	terms := searchTerms(query)
+	if len(terms) == 0 {
+		*sqlQ += "1 = 0"
+		return
+	}
+	joiner := " AND "
+	if matchMode == "any" {
+		joiner = " OR "
+	}
+	*sqlQ += "("
+	for i, term := range terms {
+		if i > 0 {
+			*sqlQ += joiner
+		}
+		*sqlQ += expr + ` LIKE ? ESCAPE '\'`
+		*args = append(*args, "%"+escapeLikeTerm(term)+"%")
+	}
+	*sqlQ += ")"
+}
+
+func searchTerms(query string) []string {
+	raw := strings.Fields(query)
+	terms := make([]string, 0, len(raw))
+	for _, term := range raw {
+		term = strings.Trim(term, `"`)
+		if term != "" {
+			terms = append(terms, term)
+		}
+	}
+	return terms
+}
+
+func escapeLikeTerm(term string) string {
+	term = strings.ReplaceAll(term, `\`, `\\`)
+	term = strings.ReplaceAll(term, `%`, `\%`)
+	term = strings.ReplaceAll(term, `_`, `\_`)
+	return term
 }
 
 // ─── Passive Capture ─────────────────────────────────────────────────────────

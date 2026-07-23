@@ -41,6 +41,11 @@ Breaking changes are always marked with a `type:breaking-change` label and docum
 
 - **fix(cloud):** make chunk and mutation push payload limits configurable with `ENGRAM_CLOUD_MAX_PUSH_BYTES` while preserving the 8 MiB default.
 
+### Memory search
+
+- **fix(store):** use SQLite FTS5 trigram indexes for observations and prompts so Japanese, Chinese, and Korean substring searches work through CLI, MCP, HTTP, and TUI search.
+- **fix(store):** preserve short-token searches such as `v2` with a bounded `LIKE` fallback when every query term is under three characters (trigram indexes only match terms with at least three characters).
+
 ### Cloud user token management (`cloud-user-token-management`)
 
 - **feat(cloud):** add principal/human-user/token/project-grant/audit storage foundation (`cloud_principals`, `cloud_human_users`, `cloud_principal_tokens`, `cloud_project_grants`, `cloud_auth_audit_log`) alongside existing sync tables.
