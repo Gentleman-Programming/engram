@@ -959,9 +959,6 @@ func (s *Store) migrate() error {
 	if err := s.addColumnIfNotExists("user_prompts", "sync_id", "TEXT"); err != nil {
 		return err
 	}
-	if err := s.ensureFTSTrigramTables(); err != nil {
-		return err
-	}
 
 	if _, err := s.execHook(s.db, `
 		CREATE INDEX IF NOT EXISTS idx_obs_scope ON observations(scope);
@@ -1125,6 +1122,17 @@ func (s *Store) migrate() error {
 	if _, err := s.execHook(s.db, `UPDATE user_prompts SET sync_id = 'prompt-' || lower(hex(randomblob(16))) WHERE sync_id IS NULL OR sync_id = ''`); err != nil {
 		return err
 	}
+
+	// Ensure trigram FTS tables/triggers only AFTER the backfill UPDATEs above.
+	// The FTS triggers issue an external-content 'delete' for old.rowid; running
+	// them while an FTS index is still empty/unpopulated (e.g. a legacy DB whose
+	// fts table was just created fresh) deletes a row that was never indexed and
+	// corrupts the index ("database disk image is malformed"). Creating them last
+	// mirrors main's ordering and keeps migration backfills off the trigger path.
+	if err := s.ensureFTSTrigramTables(); err != nil {
+		return err
+	}
+
 	if _, err := s.execHook(s.db, `INSERT OR IGNORE INTO sync_state (target_key, lifecycle, updated_at) VALUES ('cloud', 'idle', datetime('now'))`); err != nil {
 		return err
 	}
@@ -2181,27 +2189,33 @@ func (s *Store) ensureObservationsFTSTrigram() error {
 	}
 
 	log.Printf("[store] rebuilding observations_fts with trigram tokenizer (one-time migration; may take a moment on large databases)")
-	if _, err := s.execHook(s.db, `
-		DROP TRIGGER IF EXISTS obs_fts_insert;
-		DROP TRIGGER IF EXISTS obs_fts_update;
-		DROP TRIGGER IF EXISTS obs_fts_delete;
-		DROP TABLE IF EXISTS observations_fts;
-		CREATE VIRTUAL TABLE observations_fts USING fts5(
-			title,
-			content,
-			tool_name,
-			type,
-			project,
-			topic_key,
-			content='observations',
-			content_rowid='id',
-			tokenize='trigram'
-		);
-		INSERT INTO observations_fts(rowid, title, content, tool_name, type, project, topic_key)
-		SELECT id, title, content, tool_name, type, project, topic_key
-		FROM observations
-		WHERE deleted_at IS NULL;
-	`); err != nil {
+	// Wrap the drop/create/reinsert as one transaction so a failure mid-sequence
+	// cannot leave observations_fts present but empty; a later run would otherwise
+	// see the trigram shape already in place and skip the rebuild.
+	if err := s.withTx(func(tx *sql.Tx) error {
+		_, err := s.execHook(tx, `
+			DROP TRIGGER IF EXISTS obs_fts_insert;
+			DROP TRIGGER IF EXISTS obs_fts_update;
+			DROP TRIGGER IF EXISTS obs_fts_delete;
+			DROP TABLE IF EXISTS observations_fts;
+			CREATE VIRTUAL TABLE observations_fts USING fts5(
+				title,
+				content,
+				tool_name,
+				type,
+				project,
+				topic_key,
+				content='observations',
+				content_rowid='id',
+				tokenize='trigram'
+			);
+			INSERT INTO observations_fts(rowid, title, content, tool_name, type, project, topic_key)
+			SELECT id, title, content, tool_name, type, project, topic_key
+			FROM observations
+			WHERE deleted_at IS NULL;
+		`)
+		return err
+	}); err != nil {
 		return fmt.Errorf("rebuild observations fts: %w", err)
 	}
 	return nil
@@ -2217,22 +2231,28 @@ func (s *Store) ensurePromptsFTSTrigram() error {
 	}
 
 	log.Printf("[store] rebuilding prompts_fts with trigram tokenizer (one-time migration; may take a moment on large databases)")
-	if _, err := s.execHook(s.db, `
-		DROP TRIGGER IF EXISTS prompt_fts_insert;
-		DROP TRIGGER IF EXISTS prompt_fts_update;
-		DROP TRIGGER IF EXISTS prompt_fts_delete;
-		DROP TABLE IF EXISTS prompts_fts;
-		CREATE VIRTUAL TABLE prompts_fts USING fts5(
-			content,
-			project,
-			content='user_prompts',
-			content_rowid='id',
-			tokenize='trigram'
-		);
-		INSERT INTO prompts_fts(rowid, content, project)
-		SELECT id, content, project
-		FROM user_prompts;
-	`); err != nil {
+	// Wrap the drop/create/reinsert as one transaction so a failure mid-sequence
+	// cannot leave prompts_fts present but empty; a later run would otherwise see
+	// the trigram shape already in place and skip the rebuild.
+	if err := s.withTx(func(tx *sql.Tx) error {
+		_, err := s.execHook(tx, `
+			DROP TRIGGER IF EXISTS prompt_fts_insert;
+			DROP TRIGGER IF EXISTS prompt_fts_update;
+			DROP TRIGGER IF EXISTS prompt_fts_delete;
+			DROP TABLE IF EXISTS prompts_fts;
+			CREATE VIRTUAL TABLE prompts_fts USING fts5(
+				content,
+				project,
+				content='user_prompts',
+				content_rowid='id',
+				tokenize='trigram'
+			);
+			INSERT INTO prompts_fts(rowid, content, project)
+			SELECT id, content, project
+			FROM user_prompts;
+		`)
+		return err
+	}); err != nil {
 		return fmt.Errorf("rebuild prompts fts: %w", err)
 	}
 	return nil
