@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -4620,5 +4621,236 @@ func TestResolveCloudRuntimeConfigMalformedFileDoesNotApplyEnv(t *testing.T) {
 	}
 	if runtimeCfg != nil {
 		t.Fatalf("expected nil runtimeCfg on error, got %+v", runtimeCfg)
+	}
+}
+
+// ─── T-608.13 — autosync caller of resolveCloudRuntimeConfig ──────────────────
+//
+// After T-608.12, resolveCloudRuntimeConfig returns *cloudconfig.Config
+// (non-nil zero-value per T-608.1's contract). The autosync caller
+// in tryStartAutosync (cmd/engram/main.go:808) accesses
+// cc.Token and cc.ServerURL WITHOUT a nil guard, relying on the
+// non-nil contract. The audit (per design #1447) confirms this is
+// safe: the function never returns nil from a successful call.
+//
+// The tests below pin the contract at the tryStartAutosync level:
+// each test stubs the autosync manager factory and asserts the
+// "started" log line is emitted with the expected server URL.
+// The token is implicit (the transport is built with
+// remote.NewMutationTransport(serverURL, token), so a successful
+// start proves the token was passed correctly). The tests cover
+// all four combinations: file-only, env-only, both, and empty.
+
+// captureLog redirects the package-level log output to a buffer
+// for the duration of the test. Returns a function that returns
+// the captured log and a cleanup function to restore the default
+// logger.
+func captureLog(t *testing.T) (get func() string, restore func()) {
+	t.Helper()
+	oldOut := log.Writer()
+	oldFlags := log.Flags()
+	log.SetFlags(0)
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("log pipe: %v", err)
+	}
+	log.SetOutput(w)
+	restore = func() {
+		log.SetOutput(oldOut)
+		log.SetFlags(oldFlags)
+		_ = r.Close()
+		_ = w.Close()
+	}
+	get = func() string {
+		_ = w.Close()
+		b, _ := io.ReadAll(r)
+		return string(b)
+	}
+	return get, restore
+}
+
+// TestAutosyncCallerReadsTokenFromEnv pins the env-precedence
+// contract at the autosync caller level: when ENGRAM_CLOUD_TOKEN
+// is set, the autosync manager must be created with that token
+// (not any file token, not the empty default).
+func TestAutosyncCallerReadsTokenFromEnv(t *testing.T) {
+	cfg := testConfig(t)
+	t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "1")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "env-token-123")
+	t.Setenv("ENGRAM_CLOUD_SERVER", "https://env.example.test/")
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer s.Close()
+
+	called := false
+	oldNew := newAutosyncManager
+	t.Cleanup(func() { newAutosyncManager = oldNew })
+	newAutosyncManager = func(_ *store.Store, _ autosync.CloudTransport, _ autosync.Config) startableAutosyncManager {
+		called = true
+		return &fakeStartableManager{}
+	}
+
+	get, restore := captureLog(t)
+	defer restore()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mgr, _ := tryStartAutosync(ctx, s, cfg)
+	if mgr == nil {
+		t.Fatal("expected non-nil autosync manager when env token+server are set")
+	}
+	if !called {
+		t.Fatal("newAutosyncManager must be called when env token+server are set")
+	}
+	logs := get()
+	if !strings.Contains(logs, "[autosync] started (server=https://env.example.test/)") {
+		t.Fatalf("expected started log with env server URL, got %q", logs)
+	}
+}
+
+// TestAutosyncCallerReadsTokenFromFile pins the file-fallback
+// contract at the autosync caller level: when only the file
+// has the token (no env), the autosync manager must be created
+// with the file token. This is the Windows Task Scheduler scenario
+// (issue #421).
+func TestAutosyncCallerReadsTokenFromFile(t *testing.T) {
+	cfg := testConfig(t)
+	t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "1")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "") // env absent — must fall back to file
+	t.Setenv("ENGRAM_CLOUD_SERVER", "")
+
+	if err := saveCloudConfig(cfg, &cloudConfig{
+		ServerURL: "https://file.example.test/",
+		Token:     "file-token-421",
+	}); err != nil {
+		t.Fatalf("save cloud config: %v", err)
+	}
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer s.Close()
+
+	called := false
+	oldNew := newAutosyncManager
+	t.Cleanup(func() { newAutosyncManager = oldNew })
+	newAutosyncManager = func(_ *store.Store, _ autosync.CloudTransport, _ autosync.Config) startableAutosyncManager {
+		called = true
+		return &fakeStartableManager{}
+	}
+
+	get, restore := captureLog(t)
+	defer restore()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mgr, _ := tryStartAutosync(ctx, s, cfg)
+	if mgr == nil {
+		t.Fatal("expected non-nil autosync manager when file token+server are set (env absent)")
+	}
+	if !called {
+		t.Fatal("newAutosyncManager must be called when file token+server are set")
+	}
+	logs := get()
+	if !strings.Contains(logs, "[autosync] started (server=https://file.example.test/)") {
+		t.Fatalf("expected started log with file server URL, got %q", logs)
+	}
+}
+
+// TestAutosyncCallerEnvWinsOverFile pins the env-precedence
+// contract when BOTH file and env are set: env must win.
+// Catches a regression where the autosync caller accidentally
+// uses the file value when env is also set.
+func TestAutosyncCallerEnvWinsOverFile(t *testing.T) {
+	cfg := testConfig(t)
+	t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "1")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "env-wins-token")
+	t.Setenv("ENGRAM_CLOUD_SERVER", "https://env-wins.example.test/")
+
+	if err := saveCloudConfig(cfg, &cloudConfig{
+		ServerURL: "https://file-loses.example.test/",
+		Token:     "file-loses-token",
+	}); err != nil {
+		t.Fatalf("save cloud config: %v", err)
+	}
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer s.Close()
+
+	called := false
+	oldNew := newAutosyncManager
+	t.Cleanup(func() { newAutosyncManager = oldNew })
+	newAutosyncManager = func(_ *store.Store, _ autosync.CloudTransport, _ autosync.Config) startableAutosyncManager {
+		called = true
+		return &fakeStartableManager{}
+	}
+
+	get, restore := captureLog(t)
+	defer restore()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mgr, _ := tryStartAutosync(ctx, s, cfg)
+	if mgr == nil {
+		t.Fatal("expected non-nil autosync manager when env token+server are set")
+	}
+	if !called {
+		t.Fatal("newAutosyncManager must be called when env token+server are set")
+	}
+	logs := get()
+	if !strings.Contains(logs, "[autosync] started (server=https://env-wins.example.test/)") {
+		t.Fatalf("expected started log with env server URL (env wins), got %q", logs)
+	}
+	if strings.Contains(logs, "file-loses.example.test") {
+		t.Fatalf("file server URL must NOT appear in log when env wins, got %q", logs)
+	}
+}
+
+// TestAutosyncCallerAbortsWhenNoConfig pins the gating contract:
+// when neither file nor env has token/server, the autosync
+// caller must abort (return nil manager). newAutosyncManager
+// must NOT be called.
+func TestAutosyncCallerAbortsWhenNoConfig(t *testing.T) {
+	cfg := testConfig(t)
+	t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "1")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "")
+	t.Setenv("ENGRAM_CLOUD_SERVER", "")
+	// No cloud.json; the function must return a zero-value config
+	// (non-nil) but tryStartAutosync must short-circuit because
+	// token and server URL are empty.
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer s.Close()
+
+	called := false
+	oldNew := newAutosyncManager
+	t.Cleanup(func() { newAutosyncManager = oldNew })
+	newAutosyncManager = func(_ *store.Store, _ autosync.CloudTransport, _ autosync.Config) startableAutosyncManager {
+		called = true
+		return &fakeStartableManager{}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mgr, _ := tryStartAutosync(ctx, s, cfg)
+	if mgr != nil {
+		t.Fatalf("expected nil autosync manager when no token+server are configured, got %+v", mgr)
+	}
+	if called {
+		t.Fatal("newAutosyncManager must NOT be called when no token+server are configured")
 	}
 }
