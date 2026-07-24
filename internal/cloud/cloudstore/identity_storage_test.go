@@ -544,6 +544,11 @@ func TestCloudstoreIdentityPureHelpers(t *testing.T) {
 	if err := rejectSensitiveAuthAuditMetadata(map[string]any{"issued_token": true, "username": "admin", "created_admin": true}); err != nil {
 		t.Fatalf("bootstrap completion metadata must be accepted, got %v", err)
 	}
+	// issued_token is false for grant-only bootstraps (no --issue-token); both
+	// boolean values must be accepted.
+	if err := rejectSensitiveAuthAuditMetadata(map[string]any{"issued_token": false}); err != nil {
+		t.Fatalf("false issued_token must be accepted, got %v", err)
+	}
 	// issued_token is exempt ONLY as a boolean flag. A non-boolean value (e.g. a
 	// string that could carry secret material) must NOT bypass the filter, at
 	// the top level or nested.
