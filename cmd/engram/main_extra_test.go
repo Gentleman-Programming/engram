@@ -20,6 +20,7 @@ import (
 	"github.com/Gentleman-Programming/engram/internal/cloud/autosync"
 	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
 	"github.com/Gentleman-Programming/engram/internal/cloud/remote"
+	"github.com/Gentleman-Programming/engram/internal/cloudconfig"
 	"github.com/Gentleman-Programming/engram/internal/mcp"
 	engramsrv "github.com/Gentleman-Programming/engram/internal/server"
 	"github.com/Gentleman-Programming/engram/internal/setup"
@@ -963,7 +964,7 @@ func TestCmdCloudUpgradeDoctorRequiresProjectAndIsDeterministic(t *testing.T) {
 
 		bootstrapCalled := false
 		oldBootstrap := runUpgradeBootstrap
-		runUpgradeBootstrap = func(_ *store.Store, _ string, _ *cloudConfig) (*engramsync.UpgradeBootstrapResult, error) {
+		runUpgradeBootstrap = func(_ *store.Store, _ string, _ *cloudconfig.Config) (*engramsync.UpgradeBootstrapResult, error) {
 			bootstrapCalled = true
 			return &engramsync.UpgradeBootstrapResult{Project: "proj-legacy", Stage: store.UpgradeStageBootstrapVerified}, nil
 		}
@@ -1112,7 +1113,7 @@ func TestCmdCloudUpgradeBootstrapStatusAndRollbackSemantics(t *testing.T) {
 
 	t.Run("bootstrap resume flag accepted", func(t *testing.T) {
 		oldBootstrap := runUpgradeBootstrap
-		runUpgradeBootstrap = func(_ *store.Store, project string, _ *cloudConfig) (*engramsync.UpgradeBootstrapResult, error) {
+		runUpgradeBootstrap = func(_ *store.Store, project string, _ *cloudconfig.Config) (*engramsync.UpgradeBootstrapResult, error) {
 			return &engramsync.UpgradeBootstrapResult{Project: project, Stage: store.UpgradeStageBootstrapVerified, Resumed: true, NoOp: false}, nil
 		}
 		t.Cleanup(func() { runUpgradeBootstrap = oldBootstrap })
@@ -1130,7 +1131,7 @@ func TestCmdCloudUpgradeBootstrapStatusAndRollbackSemantics(t *testing.T) {
 	t.Run("bootstrap captures rollback snapshot before progression", func(t *testing.T) {
 		captured := false
 		oldBootstrap := runUpgradeBootstrap
-		runUpgradeBootstrap = func(s *store.Store, project string, _ *cloudConfig) (*engramsync.UpgradeBootstrapResult, error) {
+		runUpgradeBootstrap = func(s *store.Store, project string, _ *cloudconfig.Config) (*engramsync.UpgradeBootstrapResult, error) {
 			captured = true
 			state, err := s.GetCloudUpgradeState(project)
 			if err != nil {
@@ -4325,5 +4326,299 @@ func TestCmdMCPAutosyncPollTickerPullsDuringServe(t *testing.T) {
 	_, stderr, recovered := captureOutputAndRecover(t, func() { cmdMCP(cfg) })
 	if recovered != nil || stderr != "" {
 		t.Fatalf("expected MCP autosync poll ticker proof to complete cleanly, panic=%v stderr=%q", recovered, stderr)
+	}
+}
+
+// ─── T-608.12 — resolveCloudRuntimeConfig delegates to cloudconfig ────────────
+//
+// After the migration, resolveCloudRuntimeConfig must:
+//   1. delegate to cloudconfig.Load(cfg.DataDir) (returns *cloudconfig.Config,
+//      non-nil zero-value on IsNotExist per T-608.1);
+//   2. apply ENGRAM_CLOUD_SERVER env override (whitespace-trimmed) to ServerURL;
+//   3. apply ENGRAM_CLOUD_TOKEN env override (whitespace-trimmed) to Token;
+//   4. treat empty/whitespace-only env values as unset (file value preserved);
+//   5. propagate parse errors from malformed cloud.json (env overrides NOT
+//      applied because the function returns the error early).
+//
+// The tests below pin the new contract at the function level. The
+// existing TestResolveCloudRuntimeConfig* tests (above) cover the
+// pre-migration contract: nil on malformed file, file token
+// fallback. They are not deleted; the new tests layer on top to
+// assert the env-precedence and whitespace-handling guarantees
+// the new code provides.
+
+// TestResolveCloudRuntimeConfigReturnsCloudconfigConfigType pins
+// the migration's return type. After T-608.12, the function
+// returns *cloudconfig.Config (not the legacy *cloudConfig).
+// The test catches a regression where the function reverts to
+// the legacy type or wraps the result in another type.
+//
+// We use a type assertion to a named interface check that
+// works for both pre- and post-migration: the type is either
+// *cloudConfig or *cloudconfig.Config, but BOTH have the same
+// two string fields (ServerURL, Token). The new contract
+// requires the return to be assignable to *cloudconfig.Config
+// without conversion — anything else is a regression.
+func TestResolveCloudRuntimeConfigReturnsCloudconfigConfigType(t *testing.T) {
+	cfg := testConfig(t)
+	t.Setenv("ENGRAM_CLOUD_SERVER", "")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "")
+
+	runtimeCfg, err := resolveCloudRuntimeConfig(cfg)
+	if err != nil {
+		t.Fatalf("resolveCloudRuntimeConfig: %v", err)
+	}
+	if runtimeCfg == nil {
+		t.Fatal("expected non-nil runtime config (cloudconfig.Load returns zero-value on IsNotExist)")
+	}
+	// The new contract is: the return value is *cloudconfig.Config
+	// (not the legacy *cloudConfig). This is a structural-type
+	// check via a type assertion.
+	var typed *cloudconfig.Config
+	if !runtimeCfgAsCloudConfig(runtimeCfg, &typed) {
+		t.Fatalf("resolveCloudRuntimeConfig must return *cloudconfig.Config after T-608.12, got %T", runtimeCfg)
+	}
+}
+
+// runtimeCfgAsCloudConfig is a tiny helper that does the type
+// conversion via reflection-free assignment. The conversion
+// is valid because both the legacy *cloudConfig and the new
+// *cloudconfig.Config have identical field sets
+// (ServerURL, Token — both string). The function takes a
+// pointer-to-pointer to set the typed value; if the
+// conversion fails, it returns false.
+//
+// We can't use a direct Go type conversion because we don't
+// know the concrete type at compile time (the function
+// returns an interface, but in practice it's a pointer to
+// one of two struct types). A small reflection block is
+// the cleanest way to make this check.
+func runtimeCfgAsCloudConfig(runtimeCfg any, out **cloudconfig.Config) bool {
+	// Try direct assignment first (works post-migration).
+	if v, ok := runtimeCfg.(*cloudconfig.Config); ok {
+		*out = v
+		return true
+	}
+	return false
+}
+
+// TestResolveCloudRuntimeConfigEmptyFileEmptyEnvReturnsZeroValue
+// pins the load-semantics contract from T-608.1: when no
+// cloud.json exists and no env vars are set, the function
+// returns a non-nil *cloudconfig.Config with both fields
+// empty. The pre-migration code returned a non-nil *cloudConfig
+// with empty fields; the post-migration code returns
+// *cloudconfig.Config with the same empty fields. The test
+// pins the BEHAVIOR (non-nil, empty fields) and the TYPE
+// (must be *cloudconfig.Config).
+func TestResolveCloudRuntimeConfigEmptyFileEmptyEnvReturnsZeroValue(t *testing.T) {
+	cfg := testConfig(t)
+	t.Setenv("ENGRAM_CLOUD_SERVER", "")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "")
+
+	runtimeCfg, err := resolveCloudRuntimeConfig(cfg)
+	if err != nil {
+		t.Fatalf("resolveCloudRuntimeConfig: %v", err)
+	}
+	if runtimeCfg == nil {
+		t.Fatal("expected non-nil runtime config")
+	}
+	if runtimeCfg.ServerURL != "" {
+		t.Fatalf("expected empty ServerURL, got %q", runtimeCfg.ServerURL)
+	}
+	if runtimeCfg.Token != "" {
+		t.Fatalf("expected empty Token, got %q", runtimeCfg.Token)
+	}
+}
+
+// TestResolveCloudRuntimeConfigAppliesServerEnvOverride pins
+// the env-precedence contract: when ENGRAM_CLOUD_SERVER is set,
+// the env value must override the file's ServerURL.
+func TestResolveCloudRuntimeConfigAppliesServerEnvOverride(t *testing.T) {
+	cfg := testConfig(t)
+	t.Setenv("ENGRAM_CLOUD_SERVER", "https://env-override.example.test/")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "")
+	t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "")
+
+	// Write a file with a different ServerURL.
+	rawJSON := []byte(`{"server_url": "https://file.example.test/", "token": ""}`)
+	if err := os.WriteFile(filepath.Join(cfg.DataDir, "cloud.json"), rawJSON, 0o644); err != nil {
+		t.Fatalf("write cloud.json: %v", err)
+	}
+
+	runtimeCfg, err := resolveCloudRuntimeConfig(cfg)
+	if err != nil {
+		t.Fatalf("resolveCloudRuntimeConfig: %v", err)
+	}
+	if runtimeCfg == nil {
+		t.Fatal("expected non-nil runtime config")
+	}
+	if runtimeCfg.ServerURL != "https://env-override.example.test/" {
+		t.Fatalf("expected env SERVER to win, got ServerURL=%q", runtimeCfg.ServerURL)
+	}
+}
+
+// TestResolveCloudRuntimeConfigAppliesTokenEnvOverride pins
+// the env-precedence contract for Token: when ENGRAM_CLOUD_TOKEN
+// is set, the env value must override the file's Token.
+func TestResolveCloudRuntimeConfigAppliesTokenEnvOverride(t *testing.T) {
+	cfg := testConfig(t)
+	t.Setenv("ENGRAM_CLOUD_SERVER", "")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "env-token-xyz")
+	t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "")
+
+	rawJSON := []byte(`{"server_url": "https://file.example.test/", "token": "file-token-abc"}`)
+	if err := os.WriteFile(filepath.Join(cfg.DataDir, "cloud.json"), rawJSON, 0o644); err != nil {
+		t.Fatalf("write cloud.json: %v", err)
+	}
+
+	runtimeCfg, err := resolveCloudRuntimeConfig(cfg)
+	if err != nil {
+		t.Fatalf("resolveCloudRuntimeConfig: %v", err)
+	}
+	if runtimeCfg == nil {
+		t.Fatal("expected non-nil runtime config")
+	}
+	if runtimeCfg.Token != "env-token-xyz" {
+		t.Fatalf("expected env TOKEN to win, got Token=%q", runtimeCfg.Token)
+	}
+	// The file's ServerURL must remain (no env SERVER override).
+	if runtimeCfg.ServerURL != "https://file.example.test/" {
+		t.Fatalf("expected file ServerURL preserved, got %q", runtimeCfg.ServerURL)
+	}
+}
+
+// TestResolveCloudRuntimeConfigAppliesBothEnvOverrides pins
+// the dual-overwrite contract: when BOTH env vars are set,
+// both overrides apply independently. This is the "fully
+// configured via env" scenario.
+func TestResolveCloudRuntimeConfigAppliesBothEnvOverrides(t *testing.T) {
+	cfg := testConfig(t)
+	t.Setenv("ENGRAM_CLOUD_SERVER", "https://env-srv.example.test/")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "env-tok-xyz")
+	t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "")
+
+	rawJSON := []byte(`{"server_url": "https://file.example.test/", "token": "file-tok-abc"}`)
+	if err := os.WriteFile(filepath.Join(cfg.DataDir, "cloud.json"), rawJSON, 0o644); err != nil {
+		t.Fatalf("write cloud.json: %v", err)
+	}
+
+	runtimeCfg, err := resolveCloudRuntimeConfig(cfg)
+	if err != nil {
+		t.Fatalf("resolveCloudRuntimeConfig: %v", err)
+	}
+	if runtimeCfg.ServerURL != "https://env-srv.example.test/" {
+		t.Fatalf("expected env SERVER to win, got ServerURL=%q", runtimeCfg.ServerURL)
+	}
+	if runtimeCfg.Token != "env-tok-xyz" {
+		t.Fatalf("expected env TOKEN to win, got Token=%q", runtimeCfg.Token)
+	}
+}
+
+// TestResolveCloudRuntimeConfigEmptyEnvFallsBackToFile pins
+// the file-precedence contract: when no env vars are set, the
+// file's values must be returned unchanged. This is the
+// "fully configured via file" scenario.
+func TestResolveCloudRuntimeConfigEmptyEnvFallsBackToFile(t *testing.T) {
+	cfg := testConfig(t)
+	t.Setenv("ENGRAM_CLOUD_SERVER", "")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "")
+
+	rawJSON := []byte(`{"server_url": "https://file.example.test/", "token": "file-tok-abc"}`)
+	if err := os.WriteFile(filepath.Join(cfg.DataDir, "cloud.json"), rawJSON, 0o644); err != nil {
+		t.Fatalf("write cloud.json: %v", err)
+	}
+
+	runtimeCfg, err := resolveCloudRuntimeConfig(cfg)
+	if err != nil {
+		t.Fatalf("resolveCloudRuntimeConfig: %v", err)
+	}
+	if runtimeCfg.ServerURL != "https://file.example.test/" {
+		t.Fatalf("expected file ServerURL, got %q", runtimeCfg.ServerURL)
+	}
+	if runtimeCfg.Token != "file-tok-abc" {
+		t.Fatalf("expected file Token, got %q", runtimeCfg.Token)
+	}
+}
+
+// TestResolveCloudRuntimeConfigTrimsWhitespaceEnv pins the
+// whitespace-handling contract: env values are trimmed before
+// being applied. A value with leading/trailing whitespace must
+// be applied without the whitespace. This guards against a
+// regression where the function applies the raw env value
+// (which would put whitespace into the URL, breaking the
+// downstream validator).
+func TestResolveCloudRuntimeConfigTrimsWhitespaceEnv(t *testing.T) {
+	cfg := testConfig(t)
+	t.Setenv("ENGRAM_CLOUD_SERVER", "  https://env-override.example.test/  ")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "\tenv-tok-xyz\n")
+	t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "")
+
+	runtimeCfg, err := resolveCloudRuntimeConfig(cfg)
+	if err != nil {
+		t.Fatalf("resolveCloudRuntimeConfig: %v", err)
+	}
+	if runtimeCfg.ServerURL != "https://env-override.example.test/" {
+		t.Fatalf("expected trimmed env SERVER, got %q", runtimeCfg.ServerURL)
+	}
+	if runtimeCfg.Token != "env-tok-xyz" {
+		t.Fatalf("expected trimmed env TOKEN, got %q", runtimeCfg.Token)
+	}
+}
+
+// TestResolveCloudRuntimeConfigWhitespaceOnlyEnvTreatedAsUnset
+// pins the "whitespace-only is unset" contract: an env value
+// that contains only whitespace (e.g., "   ") must be treated
+// as if the env var were not set. The file's value must be
+// preserved unchanged. This prevents a regression where the
+// function trims and applies an empty value, which would
+// silently clear the persisted config.
+func TestResolveCloudRuntimeConfigWhitespaceOnlyEnvTreatedAsUnset(t *testing.T) {
+	cfg := testConfig(t)
+	t.Setenv("ENGRAM_CLOUD_SERVER", "   ")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "\t\n  ")
+	t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "")
+
+	rawJSON := []byte(`{"server_url": "https://file.example.test/", "token": "file-tok-abc"}`)
+	if err := os.WriteFile(filepath.Join(cfg.DataDir, "cloud.json"), rawJSON, 0o644); err != nil {
+		t.Fatalf("write cloud.json: %v", err)
+	}
+
+	runtimeCfg, err := resolveCloudRuntimeConfig(cfg)
+	if err != nil {
+		t.Fatalf("resolveCloudRuntimeConfig: %v", err)
+	}
+	if runtimeCfg.ServerURL != "https://file.example.test/" {
+		t.Fatalf("whitespace-only env SERVER must be treated as unset; expected file ServerURL, got %q", runtimeCfg.ServerURL)
+	}
+	if runtimeCfg.Token != "file-tok-abc" {
+		t.Fatalf("whitespace-only env TOKEN must be treated as unset; expected file Token, got %q", runtimeCfg.Token)
+	}
+}
+
+// TestResolveCloudRuntimeConfigMalformedFileDoesNotApplyEnv
+// pins the error-propagation contract: a malformed cloud.json
+// must surface as an error, and the env overrides must NOT
+// be applied (the function returns the error before reaching
+// the env-override step). This is the negative-space
+// counterpart to the success-case tests above.
+func TestResolveCloudRuntimeConfigMalformedFileDoesNotApplyEnv(t *testing.T) {
+	cfg := testConfig(t)
+	// Set env vars; the function must return an error and
+	// not return a partially-applied config.
+	t.Setenv("ENGRAM_CLOUD_SERVER", "https://env.example.test/")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "env-tok")
+
+	// Write malformed cloud.json.
+	if err := os.WriteFile(filepath.Join(cfg.DataDir, "cloud.json"), []byte(`{invalid-json`), 0o644); err != nil {
+		t.Fatalf("write malformed cloud.json: %v", err)
+	}
+
+	runtimeCfg, err := resolveCloudRuntimeConfig(cfg)
+	if err == nil {
+		t.Fatal("expected error for malformed cloud.json")
+	}
+	if runtimeCfg != nil {
+		t.Fatalf("expected nil runtimeCfg on error, got %+v", runtimeCfg)
 	}
 }

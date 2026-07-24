@@ -232,7 +232,7 @@ func runCloudUpgradeBootstrap(t *testing.T, serverURL string) string {
 	// real cloud server. The var is restored in the cleanup.
 	origRunUpgradeBootstrap := runUpgradeBootstrap
 	t.Cleanup(func() { runUpgradeBootstrap = origRunUpgradeBootstrap })
-	runUpgradeBootstrap = func(_ *store.Store, _ string, _ *cloudConfig) (*engramsync.UpgradeBootstrapResult, error) {
+	runUpgradeBootstrap = func(_ *store.Store, _ string, _ *cloudconfig.Config) (*engramsync.UpgradeBootstrapResult, error) {
 		return &engramsync.UpgradeBootstrapResult{
 			Project: "my-project",
 			Stage:   "test-stage",
@@ -770,7 +770,7 @@ func runCloudUpgradeBootstrapWithCustomCloudJSON(t *testing.T, rawConfigJSON str
 
 	origRunUpgradeBootstrap := runUpgradeBootstrap
 	t.Cleanup(func() { runUpgradeBootstrap = origRunUpgradeBootstrap })
-	runUpgradeBootstrap = func(_ *store.Store, _ string, _ *cloudConfig) (*engramsync.UpgradeBootstrapResult, error) {
+	runUpgradeBootstrap = func(_ *store.Store, _ string, _ *cloudconfig.Config) (*engramsync.UpgradeBootstrapResult, error) {
 		return &engramsync.UpgradeBootstrapResult{
 			Project: "my-project",
 			Stage:   "test-stage",
@@ -946,7 +946,7 @@ func TestCloudUpgradeBootstrapSnapshotWritebackHandlesMissingFile(t *testing.T) 
 
 	origRunUpgradeBootstrap := runUpgradeBootstrap
 	t.Cleanup(func() { runUpgradeBootstrap = origRunUpgradeBootstrap })
-	runUpgradeBootstrap = func(_ *store.Store, _ string, _ *cloudConfig) (*engramsync.UpgradeBootstrapResult, error) {
+	runUpgradeBootstrap = func(_ *store.Store, _ string, _ *cloudconfig.Config) (*engramsync.UpgradeBootstrapResult, error) {
 		return &engramsync.UpgradeBootstrapResult{
 			Project: "my-project",
 			Stage:   "test-stage",

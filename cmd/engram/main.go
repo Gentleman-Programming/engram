@@ -31,6 +31,7 @@ import (
 	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
 	"github.com/Gentleman-Programming/engram/internal/cloud/remote"
 	"github.com/Gentleman-Programming/engram/internal/cloud/syncguidance"
+	"github.com/Gentleman-Programming/engram/internal/cloudconfig"
 	"github.com/Gentleman-Programming/engram/internal/diagnostic"
 	"github.com/Gentleman-Programming/engram/internal/mcp"
 	"github.com/Gentleman-Programming/engram/internal/obsidian"
@@ -444,28 +445,53 @@ func envBool(key string) bool {
 	return v == "1" || v == "true" || v == "yes" || v == "on"
 }
 
-func resolveCloudRuntimeConfig(cfg store.Config) (*cloudConfig, error) {
-	cc, err := loadCloudConfig(cfg)
+func resolveCloudRuntimeConfig(cfg store.Config) (*cloudconfig.Config, error) {
+	// Delegate to the cloudconfig package: it returns a non-nil
+	// zero-value *cloudconfig.Config on IsNotExist (per the
+	// T-608.1 load-semantics contract) and surfaces parse
+	// errors on malformed JSON. The local loadCloudConfig
+	// helper is preserved for the cmdCloudConfig save flow
+	// (which still uses the legacy *cloudConfig struct for
+	// the type-conversion-safe save path) and is deleted in
+	// T-608.15.
+	cfg2, err := cloudconfig.Load(cfg.DataDir)
 	if err != nil {
 		return nil, fmt.Errorf("read cloud config: %w", err)
 	}
-	if cc == nil {
-		cc = &cloudConfig{}
-	}
-	// ENGRAM_CLOUD_TOKEN overrides any token stored in cloud.json.
-	// When the env var is absent, the persisted token from cloud.json is used
-	// as a fallback so that `engram sync --cloud` works without requiring the
-	// env var to be set in every shell session (fix for issue #343).
-	if v := strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_SERVER")); v != "" {
-		cc.ServerURL = v
-	}
-	if v := strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_TOKEN")); v != "" {
-		cc.Token = v
-	}
-	return cc, nil
+	// ENGRAM_CLOUD_SERVER and ENGRAM_CLOUD_TOKEN override
+	// any value persisted in cloud.json. Empty / whitespace-
+	// only env values are treated as unset, so the file's
+	// value (or the zero-value) is preserved. The env
+	// override is applied AFTER Load so that the file is
+	// always read first — a parse error short-circuits the
+	// override and surfaces as the function's return error.
+	applyEnvOverrides(cfg2)
+	return cfg2, nil
 }
 
-func preflightCloudSync(s *store.Store, cfg store.Config, project string, mutateState bool) (*cloudConfig, error) {
+// applyEnvOverrides applies ENGRAM_CLOUD_SERVER and
+// ENGRAM_CLOUD_TOKEN env overrides to a *cloudconfig.Config.
+// Empty / whitespace-only env values are treated as unset
+// (the field is left unchanged). The function mutates the
+// receiver in place and returns nothing.
+//
+// The function is split out of resolveCloudRuntimeConfig to
+// make the precedence contract auditable at a glance: file
+// precedence is established by cloudconfig.Load (the
+// non-nil zero-value contract), and env precedence is
+// established here (after Load, before the caller uses the
+// config). The split also lets future tests target the
+// override behavior in isolation.
+func applyEnvOverrides(cfg *cloudconfig.Config) {
+	if v := strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_SERVER")); v != "" {
+		cfg.ServerURL = v
+	}
+	if v := strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_TOKEN")); v != "" {
+		cfg.Token = v
+	}
+}
+
+func preflightCloudSync(s *store.Store, cfg store.Config, project string, mutateState bool) (*cloudconfig.Config, error) {
 	project = strings.TrimSpace(project)
 	if project != "" {
 		project, _ = store.NormalizeProject(project)
