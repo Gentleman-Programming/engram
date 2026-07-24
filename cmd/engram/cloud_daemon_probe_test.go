@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Gentleman-Programming/engram/internal/cloudconfig"
 )
 
 func TestDefaultCloudDaemonProbeReturnsRunningOn200(t *testing.T) {
@@ -25,9 +27,9 @@ func TestDefaultCloudDaemonProbeReturnsRunningOn200(t *testing.T) {
 	defer srv.Close()
 
 	port := portFromTestServer(t, srv)
-	res := defaultCloudDaemonProbe(context.Background(), port)
-	if res.Status != daemonProbeRunning {
-		t.Fatalf("expected daemonProbeRunning, got %q (err=%v)", res.Status, res.Err)
+	res := cloudconfig.LocalDaemonProbe(context.Background(), port)
+	if res.Status != cloudconfig.ProbeRunning {
+		t.Fatalf("expected cloudconfig.ProbeRunning, got %q (err=%v)", res.Status, res.Err)
 	}
 	if res.Port != port {
 		t.Fatalf("expected port %d, got %d", port, res.Port)
@@ -36,9 +38,9 @@ func TestDefaultCloudDaemonProbeReturnsRunningOn200(t *testing.T) {
 
 func TestDefaultCloudDaemonProbeReturnsNotRunningOnRefused(t *testing.T) {
 	port := allocateClosedPort(t)
-	res := defaultCloudDaemonProbe(context.Background(), port)
-	if res.Status != daemonProbeNotRunning {
-		t.Fatalf("expected daemonProbeNotRunning on refused, got %q (err=%v)", res.Status, res.Err)
+	res := cloudconfig.LocalDaemonProbe(context.Background(), port)
+	if res.Status != cloudconfig.ProbeNotRunning {
+		t.Fatalf("expected cloudconfig.ProbeNotRunning on refused, got %q (err=%v)", res.Status, res.Err)
 	}
 	if res.Err == nil {
 		t.Fatalf("expected non-nil err for refused dial")
@@ -52,16 +54,16 @@ func TestDefaultCloudDaemonProbeReturnsUnreachableOnNon2xx(t *testing.T) {
 	defer srv.Close()
 
 	port := portFromTestServer(t, srv)
-	res := defaultCloudDaemonProbe(context.Background(), port)
-	if res.Status != daemonProbeUnreachable {
-		t.Fatalf("expected daemonProbeUnreachable on 500, got %q", res.Status)
+	res := cloudconfig.LocalDaemonProbe(context.Background(), port)
+	if res.Status != cloudconfig.ProbeUnreachable {
+		t.Fatalf("expected cloudconfig.ProbeUnreachable on 500, got %q", res.Status)
 	}
 }
 
 func TestDefaultCloudDaemonProbeReturnsUnreachableOnTimeout(t *testing.T) {
-	prev := daemonProbeTimeout
-	daemonProbeTimeout = 100 * time.Millisecond
-	t.Cleanup(func() { daemonProbeTimeout = prev })
+	prev := cloudconfig.ProbeTimeout
+	cloudconfig.ProbeTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { cloudconfig.ProbeTimeout = prev })
 
 	// Listener accepts but never reads/writes, forcing the client to time out.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -82,17 +84,17 @@ func TestDefaultCloudDaemonProbeReturnsUnreachableOnTimeout(t *testing.T) {
 	}()
 
 	port := ln.Addr().(*net.TCPAddr).Port
-	res := defaultCloudDaemonProbe(context.Background(), port)
-	if res.Status != daemonProbeUnreachable {
-		t.Fatalf("expected daemonProbeUnreachable on timeout, got %q (err=%v)", res.Status, res.Err)
+	res := cloudconfig.LocalDaemonProbe(context.Background(), port)
+	if res.Status != cloudconfig.ProbeUnreachable {
+		t.Fatalf("expected cloudconfig.ProbeUnreachable on timeout, got %q (err=%v)", res.Status, res.Err)
 	}
 }
 
 func TestResolveDaemonProbePortHonorsEnvAndDefaults(t *testing.T) {
 	t.Run("defaults to 7437 when ENGRAM_PORT unset", func(t *testing.T) {
 		t.Setenv("ENGRAM_PORT", "")
-		if got := resolveDaemonProbePort(); got != defaultDaemonProbePort {
-			t.Fatalf("expected default %d, got %d", defaultDaemonProbePort, got)
+		if got := resolveDaemonProbePort(); got != cloudconfig.DefaultProbePort {
+			t.Fatalf("expected default %d, got %d", cloudconfig.DefaultProbePort, got)
 		}
 	})
 	t.Run("honors valid ENGRAM_PORT", func(t *testing.T) {
@@ -103,18 +105,18 @@ func TestResolveDaemonProbePortHonorsEnvAndDefaults(t *testing.T) {
 	})
 	t.Run("falls back to default on invalid ENGRAM_PORT", func(t *testing.T) {
 		t.Setenv("ENGRAM_PORT", "not-a-number")
-		if got := resolveDaemonProbePort(); got != defaultDaemonProbePort {
-			t.Fatalf("expected default %d, got %d", defaultDaemonProbePort, got)
+		if got := resolveDaemonProbePort(); got != cloudconfig.DefaultProbePort {
+			t.Fatalf("expected default %d, got %d", cloudconfig.DefaultProbePort, got)
 		}
 	})
 	t.Run("falls back to default on out-of-range ENGRAM_PORT", func(t *testing.T) {
 		t.Setenv("ENGRAM_PORT", "0")
-		if got := resolveDaemonProbePort(); got != defaultDaemonProbePort {
-			t.Fatalf("expected default %d, got %d", defaultDaemonProbePort, got)
+		if got := resolveDaemonProbePort(); got != cloudconfig.DefaultProbePort {
+			t.Fatalf("expected default %d, got %d", cloudconfig.DefaultProbePort, got)
 		}
 		t.Setenv("ENGRAM_PORT", "70000")
-		if got := resolveDaemonProbePort(); got != defaultDaemonProbePort {
-			t.Fatalf("expected default %d, got %d", defaultDaemonProbePort, got)
+		if got := resolveDaemonProbePort(); got != cloudconfig.DefaultProbePort {
+			t.Fatalf("expected default %d, got %d", cloudconfig.DefaultProbePort, got)
 		}
 	})
 }
@@ -122,20 +124,20 @@ func TestResolveDaemonProbePortHonorsEnvAndDefaults(t *testing.T) {
 func TestPrintCloudStatusDaemonProbeFormatsEachState(t *testing.T) {
 	cases := []struct {
 		name      string
-		stub      func(context.Context, int) daemonProbeResult
+		stub      func(context.Context, int) cloudconfig.Result
 		wantLines []string
 	}{
 		{
 			name: "running",
-			stub: func(_ context.Context, port int) daemonProbeResult {
-				return daemonProbeResult{Status: daemonProbeRunning, Port: port}
+			stub: func(_ context.Context, port int) cloudconfig.Result {
+				return cloudconfig.Result{Status: cloudconfig.ProbeRunning, Port: port}
 			},
 			wantLines: []string{"Local daemon: running on port"},
 		},
 		{
 			name: "not_running prints recovery hint",
-			stub: func(_ context.Context, port int) daemonProbeResult {
-				return daemonProbeResult{Status: daemonProbeNotRunning, Port: port}
+			stub: func(_ context.Context, port int) cloudconfig.Result {
+				return cloudconfig.Result{Status: cloudconfig.ProbeNotRunning, Port: port}
 			},
 			wantLines: []string{
 				"Local daemon: not running on port",
@@ -145,8 +147,8 @@ func TestPrintCloudStatusDaemonProbeFormatsEachState(t *testing.T) {
 		},
 		{
 			name: "unreachable surfaces probe error",
-			stub: func(_ context.Context, port int) daemonProbeResult {
-				return daemonProbeResult{Status: daemonProbeUnreachable, Port: port, Err: fmt.Errorf("simulated boom")}
+			stub: func(_ context.Context, port int) cloudconfig.Result {
+				return cloudconfig.Result{Status: cloudconfig.ProbeUnreachable, Port: port, Err: fmt.Errorf("simulated boom")}
 			},
 			wantLines: []string{
 				"Local daemon: unreachable on port",

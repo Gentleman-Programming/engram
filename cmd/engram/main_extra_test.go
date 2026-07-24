@@ -201,8 +201,8 @@ func stubRuntimeHooks(t *testing.T) {
 	checkForUpdates = func(string) versioncheck.CheckResult {
 		return versioncheck.CheckResult{Status: versioncheck.StatusUpToDate}
 	}
-	cloudDaemonProbe = func(_ context.Context, port int) daemonProbeResult {
-		return daemonProbeResult{Status: daemonProbeRunning, Port: port}
+	cloudDaemonProbe = func(_ context.Context, port int) cloudconfig.Result {
+		return cloudconfig.Result{Status: cloudconfig.ProbeRunning, Port: port}
 	}
 
 	t.Cleanup(func() {
@@ -756,9 +756,9 @@ func TestCmdCloudStatusEmitsLocalDaemonLine(t *testing.T) {
 		// Override the probe with a sentinel so we can detect any accidental call.
 		probed := false
 		prev := cloudDaemonProbe
-		cloudDaemonProbe = func(_ context.Context, port int) daemonProbeResult {
+		cloudDaemonProbe = func(_ context.Context, port int) cloudconfig.Result {
 			probed = true
-			return daemonProbeResult{Status: daemonProbeRunning, Port: port}
+			return cloudconfig.Result{Status: cloudconfig.ProbeRunning, Port: port}
 		}
 		t.Cleanup(func() { cloudDaemonProbe = prev })
 
@@ -788,8 +788,8 @@ func TestCmdCloudStatusEmitsLocalDaemonLine(t *testing.T) {
 		t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "")
 
 		prev := cloudDaemonProbe
-		cloudDaemonProbe = func(_ context.Context, port int) daemonProbeResult {
-			return daemonProbeResult{Status: daemonProbeRunning, Port: port}
+		cloudDaemonProbe = func(_ context.Context, port int) cloudconfig.Result {
+			return cloudconfig.Result{Status: cloudconfig.ProbeRunning, Port: port}
 		}
 		t.Cleanup(func() { cloudDaemonProbe = prev })
 
@@ -808,8 +808,8 @@ func TestCmdCloudStatusEmitsLocalDaemonLine(t *testing.T) {
 		t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "")
 
 		prev := cloudDaemonProbe
-		cloudDaemonProbe = func(_ context.Context, port int) daemonProbeResult {
-			return daemonProbeResult{Status: daemonProbeNotRunning, Port: port}
+		cloudDaemonProbe = func(_ context.Context, port int) cloudconfig.Result {
+			return cloudconfig.Result{Status: cloudconfig.ProbeNotRunning, Port: port}
 		}
 		t.Cleanup(func() { cloudDaemonProbe = prev })
 
@@ -831,8 +831,8 @@ func TestCmdCloudStatusEmitsLocalDaemonLine(t *testing.T) {
 		t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "1")
 
 		prev := cloudDaemonProbe
-		cloudDaemonProbe = func(_ context.Context, port int) daemonProbeResult {
-			return daemonProbeResult{Status: daemonProbeRunning, Port: port}
+		cloudDaemonProbe = func(_ context.Context, port int) cloudconfig.Result {
+			return cloudconfig.Result{Status: cloudconfig.ProbeRunning, Port: port}
 		}
 		t.Cleanup(func() { cloudDaemonProbe = prev })
 

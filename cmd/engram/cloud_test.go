@@ -1113,8 +1113,8 @@ func TestCloudStatusEmptyServerURLInConfigWithEnvServerReportsConfigured(t *test
 	// local daemon. The var is restored in the cleanup.
 	prev := cloudDaemonProbe
 	t.Cleanup(func() { cloudDaemonProbe = prev })
-	cloudDaemonProbe = func(_ context.Context, port int) daemonProbeResult {
-		return daemonProbeResult{Status: daemonProbeNotRunning, Port: port}
+	cloudDaemonProbe = func(_ context.Context, port int) cloudconfig.Result {
+		return cloudconfig.Result{Status: cloudconfig.ProbeNotRunning, Port: port}
 	}
 
 	withArgs(t, "engram", "cloud", "status")
@@ -1154,9 +1154,9 @@ func TestCloudStatusNotConfiguredDoesNotInvokeDaemonProbe(t *testing.T) {
 	probed := false
 	prev := cloudDaemonProbe
 	t.Cleanup(func() { cloudDaemonProbe = prev })
-	cloudDaemonProbe = func(_ context.Context, port int) daemonProbeResult {
+	cloudDaemonProbe = func(_ context.Context, port int) cloudconfig.Result {
 		probed = true
-		return daemonProbeResult{Status: daemonProbeRunning, Port: port}
+		return cloudconfig.Result{Status: cloudconfig.ProbeRunning, Port: port}
 	}
 
 	withArgs(t, "engram", "cloud", "status")
