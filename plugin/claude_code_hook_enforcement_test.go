@@ -8,13 +8,15 @@ import (
 	"testing"
 )
 
-// These tests lock in the four fixes that restore Claude Code hook enforcement
-// after SessionStart. Each defect no-op'd silently, so the regression risk is
-// that a future edit reverts one without any runtime error. The tests are
-// deterministic file/JSON assertions (no script execution) to match the
-// existing plugin_test convention (see hooks_quoting_test.go, assets_test.go)
-// and the engram testing-coverage rule: prefer deterministic tests over flaky
-// integration paths.
+// Layer 2 of the Claude Code hook test strategy: static assertions over hook
+// sources and hooks.json.
+//
+// These run without bash or jq, so they still guard the contracts when
+// claude_code_hook_behavior_test.go skips. They are deliberately coarse — a
+// source-text assertion can always be satisfied by text that does not satisfy
+// the contract, which is why the behavior tests exist. Assert here only what
+// has no interpreter to run (hooks.json) or no dependable runner (the
+// PowerShell fallback); everything else belongs in Layer 1.
 
 func claudeScript(t *testing.T, name string) string {
 	t.Helper()
@@ -74,29 +76,19 @@ func TestSessionStartMatcherCoversResumeAndFork(t *testing.T) {
 	}
 }
 
-// Defect 1: on a UserPromptSubmit hook, only stdout / additionalContext enters
-// the model's context. A systemMessage payload renders to the terminal as
-// "UserPromptSubmit says: ..." (issue #145) and never reaches the model, so the
-// bootstrap and the save nudge silently no-op. The shell hook must emit
-// hookSpecificOutput.additionalContext and must not emit a systemMessage
-// payload.
-func TestUserPromptSubmitShellUsesAdditionalContext(t *testing.T) {
+// Defect 1 (bash): the emitted payload shape is asserted by executing the hook
+// and parsing its stdout — see TestBootstrapEmitsToolSearchPayload and
+// TestNudgeEmitsMemoryReminder in claude_code_hook_behavior_test.go. A parsed
+// payload cannot be satisfied by a comment, by the wrong nesting level, or by
+// a systemMessage, so the string prohibitions this test used to carry are gone.
+//
+// This assertion remains because it costs nothing and localises the failure to
+// the emitting function when the behavior tests skip for a missing jq.
+func TestUserPromptSubmitShellHasBootstrapEmitter(t *testing.T) {
 	script := claudeScript(t, "user-prompt-submit.sh")
 
-	// Assert the contiguous nested structure, not separate key checks: Claude
-	// Code only delivers additionalContext when it sits inside hookSpecificOutput
-	// with the UserPromptSubmit event, so a top-level additionalContext must fail.
-	if !strings.Contains(script, `"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":`) {
-		t.Error("user-prompt-submit.sh bootstrap must nest additionalContext inside hookSpecificOutput with hookEventName UserPromptSubmit")
-	}
-	// The nudge path builds the same structure via jq (unquoted keys).
-	if !strings.Contains(script, `hookSpecificOutput: {hookEventName: "UserPromptSubmit", additionalContext:`) {
-		t.Error("user-prompt-submit.sh nudge must nest additionalContext inside hookSpecificOutput with hookEventName UserPromptSubmit")
-	}
-	// Assert on the emitted JSON key, not the bare word: the explanatory code
-	// comments legitimately reference systemMessage.
-	if strings.Contains(script, `"systemMessage":`) {
-		t.Error("user-prompt-submit.sh still emits a systemMessage payload — that renders to the terminal and never reaches the model (issue #145)")
+	if !strings.Contains(script, "print_toolsearch_message()") {
+		t.Error("user-prompt-submit.sh no longer defines print_toolsearch_message - the first-message bootstrap emitter is gone")
 	}
 }
 
@@ -132,21 +124,16 @@ func TestUserPromptSubmitPowerShellUsesAdditionalContext(t *testing.T) {
 // TestClaudeCodeUserPromptHookCovers{Direct,Plugin}ServerID in
 // internal/setup/setup_test.go, alongside the other Claude Code setup tests.
 
-// Defect 3: Claude Code's SubagentStop payload carries the subagent's final
-// text in last_assistant_message; there is no .stdout field, so reading .stdout
-// captured nothing and every subagent run no-op'd. The hook must read
-// last_assistant_message (keeping .stdout as a fallback for other harnesses).
-func TestSubagentStopReadsLastAssistantMessage(t *testing.T) {
+// Defect 3: extraction precedence and the .stdout fallback are asserted by
+// executing the hook against fixture payloads and inspecting the captured POST
+// — see TestSubagentStopPrefersLastAssistantMessage,
+// TestSubagentStopFallsBackToStdout, and TestSubagentStopSkipsEmptyPayload in
+// claude_code_hook_behavior_test.go. Those also cover the pipeline's quoting,
+// which this file cannot reach.
+func TestSubagentStopPostsToPassiveEndpoint(t *testing.T) {
 	script := claudeScript(t, "subagent-stop.sh")
 
-	// Positively require the combined extraction: last_assistant_message for
-	// Claude Code, with .stdout retained as the fallback for other harnesses.
-	// Asserting only the absence of the stdout-only form would let a
-	// last_assistant_message-only extraction pass while breaking those harnesses.
-	if !strings.Contains(script, ".last_assistant_message // .stdout") {
-		t.Error("subagent-stop.sh must extract '.last_assistant_message // .stdout' - last_assistant_message for Claude Code, .stdout fallback for other harnesses")
-	}
-	if strings.Contains(script, `'.stdout // empty'`) {
-		t.Error("subagent-stop.sh reads only .stdout - that field is absent from the SubagentStop payload")
+	if !strings.Contains(script, "/observations/passive") {
+		t.Error("subagent-stop.sh no longer posts to /observations/passive - passive capture is dead")
 	}
 }
