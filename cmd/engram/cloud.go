@@ -493,7 +493,7 @@ func cmdCloudUpgradeBootstrap(cfg store.Config) {
 		fatal(fmt.Errorf("cloud upgrade bootstrap requires configured cloud server"))
 		return
 	}
-	validatedURL, err := validateCloudServerURL(cc.ServerURL)
+	validatedURL, err := cloudconfig.ValidateServerURL(cc.ServerURL)
 	if err != nil {
 		fatal(fmt.Errorf("invalid cloud runtime server URL: %w", err))
 		return
