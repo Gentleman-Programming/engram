@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -972,5 +973,241 @@ func TestCloudUpgradeBootstrapSnapshotWritebackHandlesMissingFile(t *testing.T) 
 	}
 	if strings.TrimSpace(snapshot.CloudConfigJSON) != "" {
 		t.Fatalf("expected empty snapshot.CloudConfigJSON, got %q", snapshot.CloudConfigJSON)
+	}
+}
+
+// ─── T-608.10 — cmdCloudStatus nil-vs-zero-value contract ─────────────────────
+//
+// The `if cc == nil || cc.ServerURL == ""` branch in cmdCloudStatus
+// (cloud.go:676) implements the SPEC REQ-2 contract: a missing file,
+// a malformed file that decodes to a zero-value, or a file with no
+// ServerURL all reduce to "Cloud status: not configured". The
+// `cc == nil` half is defensive — resolveCloudRuntimeConfig currently
+// converts a nil load result into a zero-value *cloudConfig — but the
+// rewrite keeps the nil check so future callers that pass nil
+// explicitly (e.g., T-608.12's migration to cloudconfig.Load returns
+// a non-nil zero-value, but tests that stub the function may return
+// nil) cannot crash on a nil deref. The tests below pin the contract
+// at the cmdCloudStatus level (not at the lower-level helpers), so
+// any future refactor that breaks the "not configured" path triggers
+// a failure here.
+
+// runCloudStatus is the shared body for the TestCloudStatus* family.
+// It pins the runtime env vars to empty (so the on-disk cloud.json
+// — if any — is the source of truth), sets os.Args to invoke
+// cmdCloudStatus, captures stdout/stderr/recovered from a panic on
+// exit, and returns all three to the caller.
+func runCloudStatus(t *testing.T) (stdout, stderr string, recovered any) {
+	t.Helper()
+
+	stubExitWithPanic(t)
+	stubRuntimeHooks(t)
+
+	withArgs(t, "engram", "cloud", "status")
+	return captureOutputAndRecover(t, func() { cmdCloudStatus(testConfig(t)) })
+}
+
+// assertCloudStatusNotConfigured pins the "not configured" output:
+// stdout must contain the sentinel "Cloud status: not configured"
+// and must NOT contain "Cloud status: configured".
+func assertCloudStatusNotConfigured(t *testing.T, stdout, stderr string, recovered any, context string) {
+	t.Helper()
+	if recovered != nil {
+		t.Fatalf("%s: cloud status should succeed (not panic), panic=%v stderr=%q", context, recovered, stderr)
+	}
+	if stderr != "" {
+		t.Fatalf("%s: expected no stderr, got %q", context, stderr)
+	}
+	if !strings.Contains(stdout, "Cloud status: not configured") {
+		t.Fatalf("%s: expected 'Cloud status: not configured' in stdout, got %q", context, stdout)
+	}
+	if strings.Contains(stdout, "Cloud status: configured") {
+		t.Fatalf("%s: stdout must NOT contain 'Cloud status: configured', got %q", context, stdout)
+	}
+}
+
+// TestCloudStatusNoFileNoEnvReportsNotConfigured pins the
+// zero-value case: no cloud.json on disk AND no ENGRAM_CLOUD_*
+// env vars. resolveCloudRuntimeConfig returns a *cloudConfig with
+// empty ServerURL (via the nil-to-zero-value branch on line 452-454
+// of main.go). The cmdCloudStatus check `cc.ServerURL == ""` must
+// catch this and print "Cloud status: not configured".
+func TestCloudStatusNoFileNoEnvReportsNotConfigured(t *testing.T) {
+	stubExitWithPanic(t)
+	stubRuntimeHooks(t)
+
+	cfg := testConfig(t)
+	t.Setenv("ENGRAM_CLOUD_SERVER", "")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "")
+	t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "")
+
+	withArgs(t, "engram", "cloud", "status")
+	stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloudStatus(cfg) })
+	assertCloudStatusNotConfigured(t, stdout, stderr, recovered, "no file, no env")
+}
+
+// TestCloudStatusEmptyServerURLInConfigReportsNotConfigured pins
+// the case where cloud.json exists and decodes successfully, but
+// the persisted ServerURL is empty (and Token may be set or not).
+// The cmdCloudStatus check `cc.ServerURL == ""` must catch this
+// and print "Cloud status: not configured" — the empty URL makes
+// the runtime config unusable regardless of the persisted token.
+//
+// This test writes a raw cloud.json with `{"server_url": ""}`
+// to bypass saveCloudConfig (which would re-validate the URL and
+// reject an empty value). The migration's "return zero-value" Load
+// semantics make this scenario reachable: a user could in principle
+// hand-edit cloud.json to clear the URL, or future code could save
+// a config with only a Token.
+func TestCloudStatusEmptyServerURLInConfigReportsNotConfigured(t *testing.T) {
+	stubExitWithPanic(t)
+	stubRuntimeHooks(t)
+
+	cfg := testConfig(t)
+	t.Setenv("ENGRAM_CLOUD_SERVER", "")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "")
+	t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "")
+
+	// Write a raw cloud.json with empty ServerURL. We bypass
+	// saveCloudConfig because it normalizes/validates the URL.
+	// The migration's Load semantics must accept this file (a
+	// zero-value URL is the same as no file from cmdCloudStatus'
+	// perspective).
+	cloudPath := filepath.Join(cfg.DataDir, "cloud.json")
+	if err := os.WriteFile(cloudPath, []byte(`{"server_url": "", "token": "persisted-token"}`), 0o644); err != nil {
+		t.Fatalf("write raw cloud.json: %v", err)
+	}
+
+	withArgs(t, "engram", "cloud", "status")
+	stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloudStatus(cfg) })
+	assertCloudStatusNotConfigured(t, stdout, stderr, recovered, "file with empty server_url")
+}
+
+// TestCloudStatusEmptyServerURLInConfigWithEnvServerReportsConfigured
+// pins the env-precedence contract: when the on-disk cloud.json
+// has an empty ServerURL but ENGRAM_CLOUD_SERVER is set,
+// resolveCloudRuntimeConfig's env-override branch populates
+// cc.ServerURL from the env. The cmdCloudStatus check `cc.ServerURL
+// == ""` must NOT trip — the function must reach the "configured"
+// branch and print the server URL from the env.
+//
+// This guards against a regression where a future refactor
+// accidentally orders the env-override AFTER the not-configured
+// check (or skips the env override when the file's URL is empty).
+func TestCloudStatusEmptyServerURLInConfigWithEnvServerReportsConfigured(t *testing.T) {
+	stubExitWithPanic(t)
+	stubRuntimeHooks(t)
+
+	cfg := testConfig(t)
+	t.Setenv("ENGRAM_CLOUD_SERVER", "https://env-override.example.test/")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "env-token")
+	t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "")
+
+	// Write a raw cloud.json with empty ServerURL.
+	cloudPath := filepath.Join(cfg.DataDir, "cloud.json")
+	if err := os.WriteFile(cloudPath, []byte(`{"server_url": "", "token": ""}`), 0o644); err != nil {
+		t.Fatalf("write raw cloud.json: %v", err)
+	}
+
+	// Stub the daemon probe so the test does not hit a real
+	// local daemon. The var is restored in the cleanup.
+	prev := cloudDaemonProbe
+	t.Cleanup(func() { cloudDaemonProbe = prev })
+	cloudDaemonProbe = func(_ context.Context, port int) daemonProbeResult {
+		return daemonProbeResult{Status: daemonProbeNotRunning, Port: port}
+	}
+
+	withArgs(t, "engram", "cloud", "status")
+	stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloudStatus(cfg) })
+	if recovered != nil || stderr != "" {
+		t.Fatalf("cloud status should succeed with env override, panic=%v stderr=%q", recovered, stderr)
+	}
+	if !strings.Contains(stdout, "Cloud status: configured") {
+		t.Fatalf("expected 'Cloud status: configured' with env SERVER override, got %q", stdout)
+	}
+	if !strings.Contains(stdout, "Server: https://env-override.example.test/") {
+		t.Fatalf("expected env-override server URL in output, got %q", stdout)
+	}
+	if strings.Contains(stdout, "Cloud status: not configured") {
+		t.Fatalf("stdout must NOT contain 'Cloud status: not configured' with env override, got %q", stdout)
+	}
+}
+
+// TestCloudStatusNotConfiguredDoesNotInvokeDaemonProbe pins the
+// audit's "early-return is short-circuit" promise: when
+// cmdCloudStatus enters the "not configured" branch, it must
+// print the sentinel line and return immediately — it must NOT
+// invoke the daemon probe, the sync diagnostic, or any
+// downstream function that would query the local daemon or the
+// store. The audit guarantees this behavior, and the test
+// catches any future refactor that accidentally re-orders the
+// checks.
+func TestCloudStatusNotConfiguredDoesNotInvokeDaemonProbe(t *testing.T) {
+	stubExitWithPanic(t)
+	stubRuntimeHooks(t)
+
+	cfg := testConfig(t)
+	t.Setenv("ENGRAM_CLOUD_SERVER", "")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "")
+	t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "")
+
+	probed := false
+	prev := cloudDaemonProbe
+	t.Cleanup(func() { cloudDaemonProbe = prev })
+	cloudDaemonProbe = func(_ context.Context, port int) daemonProbeResult {
+		probed = true
+		return daemonProbeResult{Status: daemonProbeRunning, Port: port}
+	}
+
+	withArgs(t, "engram", "cloud", "status")
+	stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloudStatus(cfg) })
+	assertCloudStatusNotConfigured(t, stdout, stderr, recovered, "no file, no env, no probe expected")
+	if probed {
+		t.Fatalf("daemon probe must NOT run when cloud is not configured")
+	}
+	if strings.Contains(stdout, "Local daemon:") {
+		t.Fatalf("stdout must NOT contain 'Local daemon:' line when not configured, got %q", stdout)
+	}
+	if strings.Contains(stdout, "Sync diagnostic:") {
+		t.Fatalf("stdout must NOT contain 'Sync diagnostic:' line when not configured, got %q", stdout)
+	}
+}
+
+// TestCloudStatusMalformedConfigSurfacesErrorPinsNotConfigured
+// pins the contract that a malformed cloud.json does NOT silently
+// degrade to "not configured" — the function must surface the
+// parse error via the fatal-exit path. This is the negative-space
+// counterpart to the other TestCloudStatus* tests: any
+// "not configured" behavior on a malformed file is a bug, not
+// graceful degradation. The malformed JSON must propagate as an
+// error so the user knows their config is broken.
+//
+// The test deliberately uses a file content that the legacy
+// loadCloudConfig rejects (unterminated object), ensuring the
+// error path is reached. It does NOT use saveCloudConfig because
+// saveCloudConfig would JSON-encode a valid struct.
+func TestCloudStatusMalformedConfigSurfacesErrorNotNotConfigured(t *testing.T) {
+	stubExitWithPanic(t)
+	stubRuntimeHooks(t)
+
+	cfg := testConfig(t)
+	t.Setenv("ENGRAM_CLOUD_SERVER", "")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "")
+
+	cloudPath := filepath.Join(cfg.DataDir, "cloud.json")
+	if err := os.WriteFile(cloudPath, []byte(`{invalid-json`), 0o644); err != nil {
+		t.Fatalf("write malformed cloud.json: %v", err)
+	}
+
+	withArgs(t, "engram", "cloud", "status")
+	stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloudStatus(cfg) })
+	if _, ok := recovered.(exitCode); !ok {
+		t.Fatalf("expected fatal exit for malformed cloud.json, got %v", recovered)
+	}
+	if strings.Contains(stdout, "Cloud status: not configured") {
+		t.Fatalf("malformed cloud.json must NOT report 'not configured' — the parse error is the truth, got %q", stdout)
+	}
+	if !strings.Contains(stderr, "unable to read cloud runtime config") {
+		t.Fatalf("expected parse error surfaced in stderr, got %q", stderr)
 	}
 }
