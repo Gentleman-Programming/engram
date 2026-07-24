@@ -281,7 +281,7 @@ if [ "$ELAPSED" -gt 900 ]; then
   esac
 
   if [ -z "$LAST_NUDGE_EPOCH" ] || [ "$(( NOW_EPOCH - LAST_NUDGE_EPOCH ))" -ge "$NUDGE_COOLDOWN" ]; then
-    printf '%s' "$NOW_EPOCH" > "$NUDGE_STATE_FILE" 2>/dev/null || true
+    printf '%s\n' "$NOW_EPOCH" > "$NUDGE_STATE_FILE" 2>/dev/null || true
     # additionalContext (not systemMessage) so the nudge reaches the model — see
     # print_toolsearch_message above.
     OUTPUT=$(jq -n \

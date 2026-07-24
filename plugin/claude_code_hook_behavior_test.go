@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Layer 1 of the Claude Code hook test strategy: run the hooks and assert on
@@ -223,5 +224,95 @@ func TestSecondMessageEmitsNoContext(t *testing.T) {
 
 	if payload.HookSpecificOutput.AdditionalContext != "" {
 		t.Errorf("bootstrap fired twice for one session: %q", payload.HookSpecificOutput.AdditionalContext)
+	}
+}
+
+// observationsServer impersonates the engram server for the nudge path. It
+// answers /observations with a single observation saved lastSaveAge ago, and
+// 404s /sessions/<id> so the hook skips its session-age gate (user-prompt-
+// submit.sh:223 only applies that gate when a start time was returned).
+func observationsServer(t *testing.T, lastSaveAge time.Duration) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/observations") {
+			http.NotFound(w, r)
+			return
+		}
+		createdAt := time.Now().Add(-lastSaveAge).UTC().Format("2006-01-02T15:04:05Z")
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `[{"created_at":%q}]`, createdAt)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// markSessionBootstrapped creates the marker so the hook takes the subsequent-
+// message path instead of the first-message bootstrap.
+func markSessionBootstrapped(t *testing.T, sessionID string) {
+	t.Helper()
+	if err := os.WriteFile(stateFilePath(sessionID), nil, 0o600); err != nil {
+		t.Fatalf("create session marker: %v", err)
+	}
+}
+
+// A save older than 15 minutes must produce a nudge the model actually sees,
+// which again means additionalContext nested in hookSpecificOutput.
+func TestNudgeEmitsMemoryReminder(t *testing.T) {
+	requireHookBinaries(t)
+	sessionID := newSessionID(t)
+	markSessionBootstrapped(t, sessionID)
+	srv := observationsServer(t, 20*time.Minute)
+
+	stdin := fmt.Sprintf(`{"session_id":%q,"cwd":%q}`, sessionID, t.TempDir())
+	payload := decodeHookPayload(t, runHook(t, "user-prompt-submit.sh", stdin,
+		map[string]string{"ENGRAM_PORT": serverPort(t, srv)}))
+
+	if payload.SystemMessage != "" {
+		t.Errorf("nudge emitted systemMessage %q - it never reaches the model (issue #145)", payload.SystemMessage)
+	}
+	if got := payload.HookSpecificOutput.HookEventName; got != "UserPromptSubmit" {
+		t.Errorf("nudge hookSpecificOutput.hookEventName = %q, want %q", got, "UserPromptSubmit")
+	}
+	if !strings.Contains(payload.HookSpecificOutput.AdditionalContext, "MEMORY REMINDER") {
+		t.Errorf("nudge additionalContext = %q, want it to carry MEMORY REMINDER", payload.HookSpecificOutput.AdditionalContext)
+	}
+}
+
+// A recent save must stay silent, or the reminder fires on every message.
+func TestNoNudgeWhenSaveIsRecent(t *testing.T) {
+	requireHookBinaries(t)
+	sessionID := newSessionID(t)
+	markSessionBootstrapped(t, sessionID)
+	srv := observationsServer(t, 1*time.Minute)
+
+	stdin := fmt.Sprintf(`{"session_id":%q,"cwd":%q}`, sessionID, t.TempDir())
+	payload := decodeHookPayload(t, runHook(t, "user-prompt-submit.sh", stdin,
+		map[string]string{"ENGRAM_PORT": serverPort(t, srv)}))
+
+	if payload.HookSpecificOutput.AdditionalContext != "" {
+		t.Errorf("nudged after a 1-minute-old save: %q", payload.HookSpecificOutput.AdditionalContext)
+	}
+}
+
+// The nudge is debounced per session: without persisting the last-nudge
+// timestamp, an agent with nothing to save never resets the clock and the
+// reminder repeats on every message. This test is the regression proof for the
+// user-prompt-submit.sh:284 trailing-newline fix.
+func TestNudgeIsDebouncedWithinCooldown(t *testing.T) {
+	requireHookBinaries(t)
+	sessionID := newSessionID(t)
+	markSessionBootstrapped(t, sessionID)
+	srv := observationsServer(t, 20*time.Minute)
+	env := map[string]string{"ENGRAM_PORT": serverPort(t, srv)}
+	stdin := fmt.Sprintf(`{"session_id":%q,"cwd":%q}`, sessionID, t.TempDir())
+
+	first := decodeHookPayload(t, runHook(t, "user-prompt-submit.sh", stdin, env))
+	if !strings.Contains(first.HookSpecificOutput.AdditionalContext, "MEMORY REMINDER") {
+		t.Fatalf("first nudge did not fire: %q", first.HookSpecificOutput.AdditionalContext)
+	}
+
+	second := decodeHookPayload(t, runHook(t, "user-prompt-submit.sh", stdin, env))
+	if second.HookSpecificOutput.AdditionalContext != "" {
+		t.Errorf("nudge repeated inside the cooldown window: %q", second.HookSpecificOutput.AdditionalContext)
 	}
 }
