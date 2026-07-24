@@ -769,13 +769,19 @@ func cmdCloudConfig(cfg store.Config) {
 		fmt.Fprintln(os.Stderr, "error: server URL is required")
 		exitFunc(1)
 	}
-	validatedURL, err := validateCloudServerURL(cc.ServerURL)
+	validatedURL, err := cloudconfig.ValidateServerURL(cc.ServerURL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: invalid server URL: %v\n", err)
 		exitFunc(1)
 	}
 	cc.ServerURL = validatedURL
-	if err := saveCloudConfig(cfg, cc); err != nil {
+	// The local cloudConfig and cloudconfig.Config have
+	// identical underlying types (same field names, types, and
+	// JSON tags), so a Go type conversion preserves the JSON
+	// schema on disk. The migration replaces saveCloudConfig
+	// with the package's Save, which adds an os.Chmod
+	// normalization (per T-608.1's spec: 0o644 on every write).
+	if err := cloudconfig.Save(cfg.DataDir, (*cloudconfig.Config)(cc)); err != nil {
 		fatal(err)
 		return
 	}

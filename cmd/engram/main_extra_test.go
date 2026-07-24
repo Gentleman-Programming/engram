@@ -1636,13 +1636,15 @@ func TestCmdCloudConfigRejectsInvalidServerURL(t *testing.T) {
 	stubRuntimeHooks(t)
 
 	cfg := testConfig(t)
+	// URLs that must be REJECTED by the validator. Queries and
+	// fragments are now ACCEPTED and cleared per spec REQ-1
+	// (T-608.8 migration); their acceptance is covered by
+	// TestCloudConfigURLAcceptanceMatrix in cloud_test.go.
 	tests := []string{
 		"cloud.example.test",
 		"ftp://cloud.example.test",
 		"http://",
 		"://bad-url",
-		"https://cloud.example.test?debug=1",
-		"https://cloud.example.test#dev",
 	}
 
 	for _, input := range tests {
