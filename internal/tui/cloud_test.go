@@ -2,6 +2,7 @@ package tui
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -153,37 +154,6 @@ func TestPingCloudServerMalformedURL(t *testing.T) {
 	}
 }
 
-// validateCloudServerURL is a thin shim around cloudconfig.ValidateServerURL
-// (T-608.17 will delete the shim). These tests pin the shim's behavior so
-// the migration is auditable.
-
-func TestValidateCloudServerURLShim(t *testing.T) {
-	tests := []struct {
-		name    string
-		input   string
-		want    string
-		wantErr bool
-	}{
-		{"https ok", "https://cloud.example.com", "https://cloud.example.com", false},
-		{"missing scheme", "cloud.example.com", "", true},
-		{"bad scheme", "ftp://cloud.example.com", "", true},
-		{"missing host", "https://", "", true},
-		{"http ok", "http://cloud.example.com", "http://cloud.example.com", false},
-		{"empty", "", "", true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := validateCloudServerURL(tt.input)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("validateCloudServerURL(%q) err = %v", tt.input, err)
-			}
-			if got != tt.want {
-				t.Fatalf("validateCloudServerURL(%q) = %q, want %q", tt.input, got, tt.want)
-			}
-		})
-	}
-}
-
 // tuiCloudConfigForUI tests — the helper that reads cloudconfig + applies
 // the ENGRAM_CLOUD_SERVER override (T-608.16).
 //
@@ -260,10 +230,6 @@ func TestTuiCloudConfigForUIEnvOnlyReturnsConfigWithURL(t *testing.T) {
 	}
 }
 
-// loadCloudConfigCmd tests — the message contract after T-608.16.
-// The message must carry the effective server URL (env override applied)
-// and the canonical token source label (from cloudconfig.SourceLabel).
-
 func TestLoadCloudConfigCmdAppliesEnvServerOverride(t *testing.T) {
 	dir := t.TempDir()
 	writeCloudJSON(t, dir, `{"server_url":"https://file.example.com","token":"file-token"}`)
@@ -321,6 +287,148 @@ func TestLoadCloudConfigCmdReportsNoneSourceWhenNoToken(t *testing.T) {
 	}
 	if loaded.tokenSource != cloudconfig.LabelSourceNone {
 		t.Fatalf("tokenSource = %q, want %q (cloudconfig label)", loaded.tokenSource, cloudconfig.LabelSourceNone)
+	}
+}
+
+// ─── T-608.17 tests ────────────────────────────────────────────────────────
+//
+// The TUI gains its own local-daemon probe command (probeLocalDaemonCmd)
+// and message type (cloudDaemonProbeMsg) per ADR-2. The probe lives
+// in the cloudconfig package; the TUI command is a thin tea.Cmd wrapper
+// that delivers the result as a typed message. The probe is not yet
+// wired into a screen (T-608.19 will dispatch it from the Cloud Status
+// arm); the tests below exercise the command in isolation.
+
+func TestProbeLocalDaemonCmdReturnsTeaCmd(t *testing.T) {
+	if probeLocalDaemonCmd() == nil {
+		t.Fatal("probeLocalDaemonCmd must return a non-nil tea.Cmd")
+	}
+}
+
+func TestProbeLocalDaemonCmdDeliversProbeMessage(t *testing.T) {
+	orig := cloudconfig.LocalDaemonProbe
+	defer func() { cloudconfig.LocalDaemonProbe = orig }()
+	cloudconfig.LocalDaemonProbe = func(ctx context.Context, port int) cloudconfig.Result {
+		return cloudconfig.Result{Status: cloudconfig.ProbeRunning, Port: port}
+	}
+
+	msg := probeLocalDaemonCmd()()
+	probe, ok := msg.(cloudDaemonProbeMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want cloudDaemonProbeMsg", msg)
+	}
+	if probe.result.Status != cloudconfig.ProbeRunning {
+		t.Fatalf("status = %v, want ProbeRunning", probe.result.Status)
+	}
+	if probe.result.Port != cloudconfig.ResolvePort() {
+		t.Fatalf("port = %d, want %d", probe.result.Port, cloudconfig.ResolvePort())
+	}
+	if probe.result.Err != nil {
+		t.Fatalf("unexpected err: %v", probe.result.Err)
+	}
+}
+
+func TestProbeLocalDaemonCmdPropagatesNotRunning(t *testing.T) {
+	orig := cloudconfig.LocalDaemonProbe
+	defer func() { cloudconfig.LocalDaemonProbe = orig }()
+	cloudconfig.LocalDaemonProbe = func(ctx context.Context, port int) cloudconfig.Result {
+		return cloudconfig.Result{
+			Status: cloudconfig.ProbeNotRunning,
+			Port:   port,
+			Err:    errors.New("dial tcp 127.0.0.1:7437: connect: connection refused"),
+		}
+	}
+
+	msg := probeLocalDaemonCmd()()
+	probe, ok := msg.(cloudDaemonProbeMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want cloudDaemonProbeMsg", msg)
+	}
+	if probe.result.Status != cloudconfig.ProbeNotRunning {
+		t.Fatalf("status = %v, want ProbeNotRunning", probe.result.Status)
+	}
+	if probe.result.Err == nil {
+		t.Fatal("expected Err to be set on NotRunning")
+	}
+}
+
+func TestProbeLocalDaemonCmdPropagatesUnreachable(t *testing.T) {
+	orig := cloudconfig.LocalDaemonProbe
+	defer func() { cloudconfig.LocalDaemonProbe = orig }()
+	cloudconfig.LocalDaemonProbe = func(ctx context.Context, port int) cloudconfig.Result {
+		return cloudconfig.Result{
+			Status: cloudconfig.ProbeUnreachable,
+			Port:   port,
+			Err:    errors.New("context deadline exceeded"),
+		}
+	}
+
+	msg := probeLocalDaemonCmd()()
+	probe, ok := msg.(cloudDaemonProbeMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want cloudDaemonProbeMsg", msg)
+	}
+	if probe.result.Status != cloudconfig.ProbeUnreachable {
+		t.Fatalf("status = %v, want ProbeUnreachable", probe.result.Status)
+	}
+	if probe.result.Err == nil {
+		t.Fatal("expected Err to be set on Unreachable")
+	}
+}
+
+// pingCloudServer (cloud /health) now uses cloudconfig.ValidateServerURL
+// directly (T-608.17). The behavior change per REQ-1: URLs with ?q=1
+// or #frag are accepted and the query/fragment is cleared. The
+// legacy TUI validateCloudServerURL REJECTED them; the new tests
+// below pin the accept-and-clear contract.
+
+func TestPingCloudServerAcceptsAndClearsQueryInURL(t *testing.T) {
+	orig := pingCloudTransport
+	pingCloudTransport = &fakePingTransport{statusCode: http.StatusOK}
+	defer func() { pingCloudTransport = orig }()
+
+	msg := pingCloudServer("https://cloud.example.com?debug=1", "token")().(cloudPingMsg)
+	if msg.status != "reachable" {
+		t.Fatalf("status = %q, want reachable; err = %v", msg.status, msg.err)
+	}
+	if msg.err != nil {
+		t.Fatalf("unexpected err: %v", msg.err)
+	}
+}
+
+func TestPingCloudServerAcceptsAndClearsFragmentInURL(t *testing.T) {
+	orig := pingCloudTransport
+	pingCloudTransport = &fakePingTransport{statusCode: http.StatusOK}
+	defer func() { pingCloudTransport = orig }()
+
+	msg := pingCloudServer("https://cloud.example.com#section", "token")().(cloudPingMsg)
+	if msg.status != "reachable" {
+		t.Fatalf("status = %q, want reachable; err = %v", msg.status, msg.err)
+	}
+	if msg.err != nil {
+		t.Fatalf("unexpected err: %v", msg.err)
+	}
+}
+
+func TestPingCloudServerStillRejectsBadScheme(t *testing.T) {
+	orig := pingCloudTransport
+	pingCloudTransport = &fakePingTransport{}
+	defer func() { pingCloudTransport = orig }()
+
+	msg := pingCloudServer("ftp://cloud.example.com", "token")().(cloudPingMsg)
+	if msg.status != "unreachable" {
+		t.Fatalf("status = %q, want unreachable; err = %v", msg.status, msg.err)
+	}
+}
+
+func TestPingCloudServerStillRejectsEmptyHost(t *testing.T) {
+	orig := pingCloudTransport
+	pingCloudTransport = &fakePingTransport{}
+	defer func() { pingCloudTransport = orig }()
+
+	msg := pingCloudServer("https://", "token")().(cloudPingMsg)
+	if msg.status != "unreachable" {
+		t.Fatalf("status = %q, want unreachable; err = %v", msg.status, msg.err)
 	}
 }
 

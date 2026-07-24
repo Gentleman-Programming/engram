@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
@@ -71,6 +72,36 @@ func saveTUIServerURL(dataDir, serverURL string) error {
 	return cloudconfig.Save(dataDir, cfg)
 }
 
+// cloudDaemonProbeMsg is delivered when probeLocalDaemonCmd completes.
+// It carries the cloudconfig.Result from a single LocalDaemonProbe call
+// (T-608.17) so the TUI can render the daemon status independently of
+// the cloud-config form's load message.
+//
+// T-608.19 wires the message into the update loop: the Cloud Status
+// arm dispatches probeLocalDaemonCmd alongside the status load, and a
+// new case arm in Update writes probe.result to m.CloudDaemonProbe.
+type cloudDaemonProbeMsg struct {
+	result cloudconfig.Result
+	err    error
+}
+
+// probeLocalDaemonCmd returns a tea.Cmd that runs cloudconfig.LocalDaemonProbe
+// once (with the default 1s ProbeTimeout, per ADR-1) and delivers the
+// outcome as a cloudDaemonProbeMsg. The probe targets the port returned
+// by cloudconfig.ResolvePort, which honors ENGRAM_PORT.
+//
+// This is the TUI's local-daemon probe entry point. It is decoupled
+// from the cloud /health probe (pingCloudServer, kept inline per ADR-2):
+// the two have different timeouts (1s vs 3s) and different status
+// mappings (ProbeRunning/ProbeNotRunning/ProbeUnreachable vs
+// reachable/unauthorized/unreachable).
+func probeLocalDaemonCmd() tea.Cmd {
+	return func() tea.Msg {
+		result := cloudconfig.LocalDaemonProbe(context.Background(), cloudconfig.ResolvePort())
+		return cloudDaemonProbeMsg{result: result}
+	}
+}
+
 // pingCloudTransport can be overridden in tests to avoid real network calls.
 var pingCloudTransport http.RoundTripper = http.DefaultTransport
 
@@ -125,13 +156,4 @@ func pingCloudServerStatus(serverURL, token string) (string, error) {
 	default:
 		return "unreachable", fmt.Errorf("unexpected status %d", resp.StatusCode)
 	}
-}
-
-// validateCloudServerURL is a thin shim kept for callers that have not
-// yet migrated; T-608.17 removes it after swapping the last call site
-// (pingCloudServerStatus above already delegates internally) and
-// updating the corresponding TUI tests to assert the
-// cloudconfig.ValidateServerURL contract directly.
-func validateCloudServerURL(raw string) (string, error) {
-	return cloudconfig.ValidateServerURL(raw)
 }
