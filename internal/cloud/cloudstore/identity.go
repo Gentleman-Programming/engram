@@ -955,7 +955,12 @@ func rejectSensitiveAuthAuditValue(value any) error {
 
 func sensitiveAuthAuditKey(key string) bool {
 	key = strings.ToLower(strings.TrimSpace(key))
-	if key == "token_prefix" {
+	// Known-safe keys whose names match the sensitive-fragment heuristic below
+	// but never carry a secret value: token_prefix is the short non-secret
+	// prefix, and issued_token is a boolean flag recorded by the bootstrap
+	// completion audit (see cloudBootstrapCompletionMetadata).
+	switch key {
+	case "token_prefix", "issued_token":
 		return false
 	}
 	for _, fragment := range []string{"token", "authorization", "cookie", "secret", "hash", "password", "bearer"} {

@@ -522,6 +522,9 @@ func TestCloudstoreIdentityPureHelpers(t *testing.T) {
 	if sensitiveAuthAuditKey("token_prefix") {
 		t.Fatal("token_prefix is safe metadata and should not be rejected")
 	}
+	if sensitiveAuthAuditKey("issued_token") {
+		t.Fatal("issued_token is a safe boolean flag and should not be rejected")
+	}
 	for _, key := range []string{"raw_token", "authorization_header", "session_cookie", "token_hash", "password"} {
 		if !sensitiveAuthAuditKey(key) {
 			t.Fatalf("%s should be classified as sensitive audit metadata", key)
@@ -535,6 +538,14 @@ func TestCloudstoreIdentityPureHelpers(t *testing.T) {
 	}
 	if err := rejectSensitiveAuthAuditMetadata(map[string]any{"events": []map[string]any{{"raw_token": "secret"}}}); !errors.Is(err, ErrSensitiveAuditMetadata) {
 		t.Fatalf("typed nested slice sensitive audit metadata must be rejected, got %v", err)
+	}
+	// Regression: the bootstrap completion audit metadata (created by
+	// cloudBootstrapCompletionMetadata) carries the boolean flag "issued_token".
+	// It is not a secret and must be accepted, otherwise
+	// `engram cloud bootstrap admin --issue-token` fails atomically and no admin
+	// token is ever minted.
+	if err := rejectSensitiveAuthAuditMetadata(map[string]any{"issued_token": true, "username": "admin", "created_admin": true}); err != nil {
+		t.Fatalf("bootstrap completion metadata must be accepted, got %v", err)
 	}
 }
 
