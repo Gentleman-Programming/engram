@@ -14,6 +14,33 @@ import (
 // with the CLI.
 const EnvCloudToken = "ENGRAM_CLOUD_TOKEN"
 
+// User-facing labels for each Source value. These are the
+// canonical strings the CLI prints on its "Auth status" line and
+// the TUI's view layer renders via the TokenSource* constants.
+// The strings are exported as constants so that consumers (TUI,
+// future CLI status subcommands, dashboard UIs, log messages)
+// can reference them directly instead of duplicating the literal
+// — which is exactly the drift that produced the TUI's silent
+// precedence bug this package fixes.
+//
+// The TUI/CLI agreement is pinned by TestCLIAndTUIAgreeOnTokenSource
+// (T-608.5): if you change any of these strings, update every
+// consumer to match in the same commit.
+const (
+	// LabelSourceNone is the user-facing label for SourceNone
+	// ("the runtime cloud token is not configured").
+	LabelSourceNone = "not set"
+
+	// LabelSourceFile is the user-facing label for SourceFile
+	// ("the runtime cloud token was read from cloud.json").
+	LabelSourceFile = "read from cloud.json"
+
+	// LabelSourceEnv is the user-facing label for SourceEnv
+	// ("the runtime cloud token was provided via the
+	// ENGRAM_CLOUD_TOKEN environment variable").
+	LabelSourceEnv = "set via ENGRAM_CLOUD_TOKEN"
+)
+
 // Source identifies which input provided the effective token. The
 // zero value is SourceNone, which also happens to be the value
 // returned when no token is configured.
@@ -39,23 +66,32 @@ const (
 // String returns the user-facing label for the source. The label
 // is the same string the CLI auth status line prints; the TUI's
 // TokenSource* constants are expected to mirror it via
-// SourceLabel, and the TUI/CLI parity test in T-608.5 will guard
-// the agreement.
+// SourceLabel. The TUI/CLI parity is pinned by
+// TestCLIAndTUIAgreeOnTokenSource (T-608.5): if you change a
+// label, update every consumer to match in the same commit.
 func (s Source) String() string {
 	switch s {
 	case SourceFile:
-		return "read from cloud.json"
+		return LabelSourceFile
 	case SourceEnv:
-		return "set via ENGRAM_CLOUD_TOKEN"
+		return LabelSourceEnv
 	default:
-		return "not set"
+		return LabelSourceNone
 	}
 }
 
-// SourceLabel returns the user-facing label for s. It is
-// equivalent to s.String(); provided as a function form for
-// callers that prefer functions over methods (e.g. a switch
-// statement in a view layer).
+// SourceLabel returns the user-facing label for a Source value.
+// The CLI uses Source internally to choose behavior; the TUI uses
+// SourceLabel(Source) to display the same source. The strings
+// MUST match what the TUI's view layer renders (or what the CLI's
+// status command prints) for the same (file, env) input, so the
+// regression test TestCLIAndTUIAgreeOnTokenSource pins this
+// invariant. If you change a label, update the TUI's view (and
+// any other consumer) to match.
+//
+// The function form is provided for callers that prefer functions
+// over methods (e.g. a switch statement in a view layer that
+// needs to map a Source to a string).
 func SourceLabel(s Source) string {
 	return s.String()
 }

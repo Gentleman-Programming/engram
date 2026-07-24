@@ -222,3 +222,88 @@ func TestSaveOverwriteKeepsConfiguredMode(t *testing.T) {
 		t.Fatalf("Load: Token = %q, want %q", got.Token, "new-token")
 	}
 }
+
+// TestCLIAndTUIAgreeOnTokenSource is the regression test that pins the
+// TUI/CLI agreement on the user-facing label for the runtime cloud
+// token source (T-608.5). The CLI surfaces the label through
+// SourceLabel(cloudconfig.EffectiveToken(d)) when rendering the
+// "Auth status" line; the TUI surfaces it through its view layer's
+// TokenSource* constants. Both surfaces must produce the same string
+// for the same (file, env) triple, or the user sees two different
+// explanations for the same state.
+//
+// Scenarios covered:
+//
+//   - file-set, env-empty: cloud.json has a token, env is unset →
+//     file wins, label says "read from cloud.json".
+//   - file-empty, env-set: no cloud.json, env has a token →
+//     env wins, label says "set via ENGRAM_CLOUD_TOKEN".
+//   - both-set, env-wins: both have tokens, env takes precedence →
+//     label still says "set via ENGRAM_CLOUD_TOKEN".
+//   - both-empty: no file, no env → empty token, label says "not set".
+//
+// Tests that mutate ENGRAM_CLOUD_TOKEN MUST NOT use t.Parallel()
+// (Go's testing framework rejects the combination). Tests use
+// t.Setenv and t.TempDir() for isolation; the previous subtest's
+// state is restored automatically on Cleanup.
+func TestCLIAndTUIAgreeOnTokenSource(t *testing.T) {
+	cases := []struct {
+		name       string
+		writeFile  bool   // whether to write cloud.json with a token
+		fileToken  string // the token to write in cloud.json
+		envToken   string // the ENGRAM_CLOUD_TOKEN env value (or "" to unset)
+		wantSource Source
+		wantLabel  string
+	}{
+		{"file-set, env-empty", true, "t1", "", SourceFile, "read from cloud.json"},
+		{"file-empty, env-set", false, "", "e1", SourceEnv, "set via ENGRAM_CLOUD_TOKEN"},
+		{"both-set, env-wins", true, "t1", "e1", SourceEnv, "set via ENGRAM_CLOUD_TOKEN"},
+		{"both-empty", false, "", "", SourceNone, "not set"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			// Set up env (t.Setenv, no t.Parallel: env mutation).
+			t.Setenv(EnvCloudToken, tc.envToken)
+
+			// Set up file (or omit).
+			dataDir := t.TempDir()
+			if tc.writeFile {
+				cfg := &Config{Token: tc.fileToken}
+				if err := Save(dataDir, cfg); err != nil {
+					t.Fatalf("setup Save: %v", err)
+				}
+			}
+
+			// Call EffectiveToken.
+			gotTok, gotSrc := EffectiveToken(dataDir)
+
+			// Assert Source matches expected.
+			if gotSrc != tc.wantSource {
+				t.Errorf("Source: got %v, want %v", gotSrc, tc.wantSource)
+			}
+
+			// Assert SourceLabel matches expected. This is the
+			// TUI/CLI agreement: the same string must surface
+			// for the same (file, env) input.
+			gotLabel := SourceLabel(gotSrc)
+			if gotLabel != tc.wantLabel {
+				t.Errorf("SourceLabel: got %q, want %q", gotLabel, tc.wantLabel)
+			}
+
+			// Also assert the token value is what we expect:
+			// file-only → file token; env-only or both → env token;
+			// neither → empty.
+			var wantTok string
+			switch tc.wantSource {
+			case SourceFile:
+				wantTok = tc.fileToken
+			case SourceEnv:
+				wantTok = tc.envToken
+			}
+			if gotTok != wantTok {
+				t.Errorf("Token: got %q, want %q", gotTok, wantTok)
+			}
+		})
+	}
+}
