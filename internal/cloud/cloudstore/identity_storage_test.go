@@ -522,9 +522,6 @@ func TestCloudstoreIdentityPureHelpers(t *testing.T) {
 	if sensitiveAuthAuditKey("token_prefix") {
 		t.Fatal("token_prefix is safe metadata and should not be rejected")
 	}
-	if sensitiveAuthAuditKey("issued_token") {
-		t.Fatal("issued_token is a safe boolean flag and should not be rejected")
-	}
 	for _, key := range []string{"raw_token", "authorization_header", "session_cookie", "token_hash", "password"} {
 		if !sensitiveAuthAuditKey(key) {
 			t.Fatalf("%s should be classified as sensitive audit metadata", key)
@@ -546,6 +543,18 @@ func TestCloudstoreIdentityPureHelpers(t *testing.T) {
 	// token is ever minted.
 	if err := rejectSensitiveAuthAuditMetadata(map[string]any{"issued_token": true, "username": "admin", "created_admin": true}); err != nil {
 		t.Fatalf("bootstrap completion metadata must be accepted, got %v", err)
+	}
+	// issued_token is exempt ONLY as a boolean flag. A non-boolean value (e.g. a
+	// string that could carry secret material) must NOT bypass the filter, at
+	// the top level or nested.
+	if err := rejectSensitiveAuthAuditMetadata(map[string]any{"issued_token": "egc_live_would_be_leaked"}); !errors.Is(err, ErrSensitiveAuditMetadata) {
+		t.Fatalf("non-boolean issued_token must be rejected, got %v", err)
+	}
+	if err := rejectSensitiveAuthAuditMetadata(map[string]any{"outer": map[string]any{"issued_token": "egc_live_would_be_leaked"}}); !errors.Is(err, ErrSensitiveAuditMetadata) {
+		t.Fatalf("nested non-boolean issued_token must be rejected, got %v", err)
+	}
+	if err := rejectSensitiveAuthAuditMetadata(map[string]any{"outer": map[string]any{"issued_token": true}}); err != nil {
+		t.Fatalf("nested boolean issued_token must be accepted, got %v", err)
 	}
 }
 
