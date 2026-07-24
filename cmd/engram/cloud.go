@@ -547,7 +547,16 @@ func captureUpgradeSnapshotBeforeBootstrap(s *store.Store, cfg store.Config, pro
 	}
 
 	var snapshot store.CloudUpgradeSnapshot
-	configBytes, err := os.ReadFile(cloudConfigPath(cfg))
+	// Snapshot the raw bytes of cloud.json verbatim. The
+	// snapshot is later used to ROLLBACK the upgrade (writing
+	// snapshot.CloudConfigJSON back to disk). Decoding via
+	// cloudconfig.Load would lose any field the package's
+	// Config struct does not declare; raw bytes preserve the
+	// exact on-disk state. The path is read from
+	// cloudconfig.Path to align with the rest of the migration,
+	// but the read call stays os.ReadFile so the bytes are
+	// preserved unchanged.
+	configBytes, err := os.ReadFile(cloudconfig.Path(cfg.DataDir))
 	if err == nil {
 		snapshot.CloudConfigPresent = true
 		snapshot.CloudConfigJSON = string(configBytes)
