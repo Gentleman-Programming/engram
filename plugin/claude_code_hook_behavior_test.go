@@ -3,6 +3,7 @@ package plugin_test
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -10,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -314,5 +316,128 @@ func TestNudgeIsDebouncedWithinCooldown(t *testing.T) {
 	second := decodeHookPayload(t, runHook(t, "user-prompt-submit.sh", stdin, env))
 	if second.HookSpecificOutput.AdditionalContext != "" {
 		t.Errorf("nudge repeated inside the cooldown window: %q", second.HookSpecificOutput.AdditionalContext)
+	}
+}
+
+// passiveCapture is the body subagent-stop.sh POSTs to /observations/passive.
+type passiveCapture struct {
+	SessionID string `json:"session_id"`
+	Content   string `json:"content"`
+	Project   string `json:"project"`
+	Source    string `json:"source"`
+}
+
+// captureServer records every passive-capture POST. subagent-stop.sh issues its
+// curl synchronously, so by the time the process exits the request has landed
+// and the returned slice is complete.
+func captureServer(t *testing.T) (*httptest.Server, func() []passiveCapture) {
+	t.Helper()
+	var mu sync.Mutex
+	var got []passiveCapture
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read passive capture body: %v", err)
+			return
+		}
+		var capture passiveCapture
+		if err := json.Unmarshal(body, &capture); err != nil {
+			t.Errorf("passive capture body is not valid JSON: %v (body: %q)", err, body)
+			return
+		}
+		mu.Lock()
+		got = append(got, capture)
+		mu.Unlock()
+	}))
+	t.Cleanup(srv.Close)
+
+	return srv, func() []passiveCapture {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]passiveCapture(nil), got...)
+	}
+}
+
+// Defect 3: Claude Code's SubagentStop payload carries the subagent's final text
+// in last_assistant_message. Reading .stdout captured nothing and every subagent
+// run no-op'd.
+func TestSubagentStopPrefersLastAssistantMessage(t *testing.T) {
+	requireHookBinaries(t)
+	srv, captured := captureServer(t)
+
+	stdin := fmt.Sprintf(`{"session_id":"sess-primary","cwd":%q,"last_assistant_message":"from last_assistant_message","stdout":"from stdout"}`, t.TempDir())
+	runHook(t, "subagent-stop.sh", stdin, map[string]string{"ENGRAM_PORT": serverPort(t, srv)})
+
+	got := captured()
+	if len(got) != 1 {
+		t.Fatalf("got %d passive captures, want 1: %+v", len(got), got)
+	}
+	if got[0].Content != "from last_assistant_message" {
+		t.Errorf("content = %q, want the last_assistant_message value", got[0].Content)
+	}
+	if got[0].SessionID != "sess-primary" {
+		t.Errorf("session_id = %q, want %q", got[0].SessionID, "sess-primary")
+	}
+	if got[0].Source != "subagent-stop" {
+		t.Errorf("source = %q, want %q", got[0].Source, "subagent-stop")
+	}
+}
+
+// The .stdout fallback keeps other harnesses working; a
+// last_assistant_message-only extraction would silently break them.
+func TestSubagentStopFallsBackToStdout(t *testing.T) {
+	requireHookBinaries(t)
+	srv, captured := captureServer(t)
+
+	stdin := fmt.Sprintf(`{"session_id":"sess-fallback","cwd":%q,"stdout":"from stdout"}`, t.TempDir())
+	runHook(t, "subagent-stop.sh", stdin, map[string]string{"ENGRAM_PORT": serverPort(t, srv)})
+
+	got := captured()
+	if len(got) != 1 {
+		t.Fatalf("got %d passive captures, want 1: %+v", len(got), got)
+	}
+	if got[0].Content != "from stdout" {
+		t.Errorf("content = %q, want the stdout value", got[0].Content)
+	}
+}
+
+// Neither field present: the hook must exit without POSTing an empty capture.
+func TestSubagentStopSkipsEmptyPayload(t *testing.T) {
+	requireHookBinaries(t)
+	srv, captured := captureServer(t)
+
+	stdin := fmt.Sprintf(`{"session_id":"sess-empty","cwd":%q}`, t.TempDir())
+	runHook(t, "subagent-stop.sh", stdin, map[string]string{"ENGRAM_PORT": serverPort(t, srv)})
+
+	if got := captured(); len(got) != 0 {
+		t.Errorf("posted %d captures for an empty payload, want 0: %+v", len(got), got)
+	}
+}
+
+// Content that would break naive shell quoting must survive verbatim. Source-
+// text assertions cannot reach this: they see the jq expression, not the
+// quoting of the pipeline that feeds it.
+func TestSubagentStopPreservesShellMetacharacters(t *testing.T) {
+	requireHookBinaries(t)
+	srv, captured := captureServer(t)
+
+	const tricky = "line one\nline \"two\" $HOME `id` 'quoted' \\backslash"
+	payload, err := json.Marshal(map[string]string{
+		"session_id":            "sess-quoting",
+		"cwd":                   t.TempDir(),
+		"last_assistant_message": tricky,
+	})
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	runHook(t, "subagent-stop.sh", string(payload), map[string]string{"ENGRAM_PORT": serverPort(t, srv)})
+
+	got := captured()
+	if len(got) != 1 {
+		t.Fatalf("got %d passive captures, want 1: %+v", len(got), got)
+	}
+	if got[0].Content != tricky {
+		t.Errorf("content = %q, want %q", got[0].Content, tricky)
 	}
 }
