@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Gentleman-Programming/engram/internal/cloudconfig"
 	"github.com/Gentleman-Programming/engram/internal/setup"
 	"github.com/Gentleman-Programming/engram/internal/store"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -169,12 +170,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.status == "reachable" || msg.status == "unauthorized" {
-			validatedURL, err := validateCloudServerURL(m.CloudConfigInput.Value())
+			validatedURL, err := cloudconfig.ValidateServerURL(m.CloudConfigInput.Value())
 			if err != nil {
 				m.CloudConfigError = err.Error()
 				return m, nil
 			}
-			if err := saveCloudConfig(m.store.DataDir(), validatedURL); err != nil {
+			if err := saveTUIServerURL(m.store.DataDir(), validatedURL); err != nil {
 				m.CloudConfigError = err.Error()
 				return m, nil
 			}
@@ -848,14 +849,15 @@ func (m Model) activateCloudConfigFocus() (tea.Model, tea.Cmd) {
 func (m Model) runCloudConfigPing(testOnly bool) (tea.Model, tea.Cmd) {
 	m.CloudConfigError = ""
 	m.CloudConfigPingStatus = ""
-	validatedURL, err := validateCloudServerURL(m.CloudConfigInput.Value())
+	validatedURL, err := cloudconfig.ValidateServerURL(m.CloudConfigInput.Value())
 	if err != nil {
 		m.CloudConfigError = err.Error()
 		return m, nil
 	}
 	m.CloudConfigTest = testOnly
 	m.CloudConfigSaving = !testOnly
-	return m, pingCloudServer(validatedURL, effectiveCloudToken(m.store.DataDir()))
+	token, _ := cloudconfig.EffectiveToken(m.store.DataDir())
+	return m, pingCloudServer(validatedURL, token)
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

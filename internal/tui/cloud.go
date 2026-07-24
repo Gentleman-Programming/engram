@@ -1,114 +1,74 @@
 package tui
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/Gentleman-Programming/engram/internal/cloudconfig"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-const (
-	cloudConfigFileName = "cloud.json"
-	cloudHealthPath     = "/health"
-)
+const cloudHealthPath = "/health"
 
 // TokenSourceEnv is the display label used when ENGRAM_CLOUD_TOKEN
-// environment variable is set.
+// environment variable is set. Mirrors cloudconfig.LabelSourceEnv so the
+// view layer can render the same string the CLI's status line prints;
+// the parity is pinned by cloudconfig.TestCLIAndTUIAgreeOnTokenSource.
 const TokenSourceEnv = "set via ENGRAM_CLOUD_TOKEN"
 
 // TokenSourceFile is the display label used when a token is read
-// from the cloud.json config file.
+// from the cloud.json config file. Mirrors cloudconfig.LabelSourceFile.
 const TokenSourceFile = "read from cloud.json"
 
 // TokenSourceNone is the display label used when no cloud token is
-// available from any source.
+// available from any source. Mirrors cloudconfig.LabelSourceNone.
 const TokenSourceNone = "not set"
 
-type tuiCloudConfig struct {
-	ServerURL string `json:"server_url"`
-	Token     string `json:"token,omitempty"`
-}
+// envCloudServer is the environment variable the TUI's Cloud Config form
+// honors as an override of the file-stored server URL. It matches the
+// CLI's cmd/engram/main.go:resolveCloudRuntimeConfig behavior; the TUI's
+// old effectiveCloudToken / loadCloudConfigCmd did not, which is the
+// silent precedence drift this package fixes.
+const envCloudServer = "ENGRAM_CLOUD_SERVER"
 
-// cloudConfigPath returns the full path to the cloud config JSON file
-// within the given data directory.
-func cloudConfigPath(dataDir string) string {
-	return filepath.Join(dataDir, cloudConfigFileName)
-}
-
-// loadCloudConfig reads the cloud config JSON file from the data directory.
+// tuiCloudConfigForUI returns the effective Config the TUI's Cloud
+// Config form should display and persist: the cloudconfig.Load result
+// with the ENGRAM_CLOUD_SERVER env var applied as an override when it
+// is set and non-empty (after whitespace trimming).
 //
-// Returns an empty config if the file does not exist. Returns an error
-// if the file exists but cannot be read or parsed.
-func loadCloudConfig(dataDir string) (*tuiCloudConfig, error) {
-	path := cloudConfigPath(dataDir)
-	b, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return &tuiCloudConfig{}, nil
-		}
-		return nil, err
+// A missing or malformed cloud.json yields a zero-value Config (no
+// error surfaced to the view — the user can still type a URL and save).
+// A whitespace-only env value is treated as unset, matching the CLI.
+func tuiCloudConfigForUI(dataDir string) cloudconfig.Config {
+	cfg, _ := cloudconfig.Load(dataDir)
+	if cfg == nil {
+		cfg = &cloudconfig.Config{}
 	}
-	var cc tuiCloudConfig
-	if err := json.Unmarshal(b, &cc); err != nil {
-		return nil, err
+	if v := strings.TrimSpace(os.Getenv(envCloudServer)); v != "" {
+		cfg.ServerURL = v
 	}
-	return &cc, nil
+	return *cfg
 }
 
-// saveCloudConfig writes the given serverURL into the cloud config JSON file
-// within the data directory, preserving any existing fields.
-//
-// Creates the data directory if it does not exist.
-func saveCloudConfig(dataDir, serverURL string) error {
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		return err
-	}
-	cc, err := loadCloudConfig(dataDir)
+// saveTUIServerURL persists serverURL into the cloud.json inside dataDir
+// while preserving any pre-existing Token field. It replaces the old
+// forked saveCloudConfig (T-608.16): load the existing config, update
+// only the URL, save through the package so perms + atomicity are owned
+// in one place.
+func saveTUIServerURL(dataDir, serverURL string) error {
+	cfg, err := cloudconfig.Load(dataDir)
 	if err != nil {
 		return err
 	}
-	cc.ServerURL = serverURL
-	b, err := json.MarshalIndent(cc, "", "  ")
-	if err != nil {
-		return err
+	if cfg == nil {
+		cfg = &cloudconfig.Config{}
 	}
-	return os.WriteFile(cloudConfigPath(dataDir), b, 0o644)
-}
-
-// tokenSourceMessage returns a user-facing label describing how the cloud
-// token is currently configured: via environment variable, config file, or
-// not set at all.
-func tokenSourceMessage(dataDir string) string {
-	if strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_TOKEN")) != "" {
-		return TokenSourceEnv
-	}
-	cc, err := loadCloudConfig(dataDir)
-	if err == nil && strings.TrimSpace(cc.Token) != "" {
-		return TokenSourceFile
-	}
-	return TokenSourceNone
-}
-
-// effectiveCloudToken returns the first available cloud token, checking the
-// ENGRAM_CLOUD_TOKEN environment variable before falling back to the token
-// stored in the cloud config file.
-//
-// Returns an empty string if no token is available from any source.
-func effectiveCloudToken(dataDir string) string {
-	if token := strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_TOKEN")); token != "" {
-		return token
-	}
-	cc, err := loadCloudConfig(dataDir)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(cc.Token)
+	cfg.ServerURL = serverURL
+	return cloudconfig.Save(dataDir, cfg)
 }
 
 // pingCloudTransport can be overridden in tests to avoid real network calls.
@@ -118,7 +78,10 @@ var pingCloudTransport http.RoundTripper = http.DefaultTransport
 // endpoint. The result is delivered as a cloudPingMsg.
 //
 // Use this when the user triggers a "Test Connection" action on the Cloud
-// Config screen.
+// Config screen. Kept inline in the TUI per ADR-2: it is a TUI-only
+// tea.Cmd wrapper around a synchronous HTTP GET with its own 3s timeout
+// and a different status mapping than the local-daemon probe; the
+// cloudconfig package does not need to own it.
 func pingCloudServer(serverURL, token string) tea.Cmd {
 	return func() tea.Msg {
 		status, err := pingCloudServerStatus(serverURL, token)
@@ -130,9 +93,11 @@ func pingCloudServer(serverURL, token string) tea.Cmd {
 // server's /health endpoint.
 //
 // Returns "reachable" on a 2xx response, "unauthorized" on 401,
-// or "unreachable" on any other error.
+// or "unreachable" on any other error. URL validation delegates to
+// cloudconfig.ValidateServerURL (T-608.17), which accepts http/https
+// with a host, clears query/fragment on success.
 func pingCloudServerStatus(serverURL, token string) (string, error) {
-	validatedURL, err := validateCloudServerURL(serverURL)
+	validatedURL, err := cloudconfig.ValidateServerURL(serverURL)
 	if err != nil {
 		return "unreachable", err
 	}
@@ -162,33 +127,11 @@ func pingCloudServerStatus(serverURL, token string) (string, error) {
 	}
 }
 
-// validateCloudServerURL parses and validates a cloud server URL.
-//
-// The URL must have an http or https scheme, a non-empty host, and no
-// query parameters or fragments. Returns the normalized URL string on
-// success.
+// validateCloudServerURL is a thin shim kept for callers that have not
+// yet migrated; T-608.17 removes it after swapping the last call site
+// (pingCloudServerStatus above already delegates internally) and
+// updating the corresponding TUI tests to assert the
+// cloudconfig.ValidateServerURL contract directly.
 func validateCloudServerURL(raw string) (string, error) {
-	trimmed := strings.TrimSpace(raw)
-	parsed, err := url.ParseRequestURI(trimmed)
-	if err != nil {
-		return "", err
-	}
-	scheme := strings.ToLower(strings.TrimSpace(parsed.Scheme))
-	if scheme != "http" && scheme != "https" {
-		return "", fmt.Errorf("scheme must be http or https")
-	}
-	if strings.TrimSpace(parsed.Host) == "" || strings.TrimSpace(parsed.Hostname()) == "" {
-		return "", fmt.Errorf("host is required")
-	}
-	if strings.TrimSpace(parsed.RawQuery) != "" {
-		return "", fmt.Errorf("query is not allowed")
-	}
-	if strings.TrimSpace(parsed.Fragment) != "" {
-		return "", fmt.Errorf("fragment is not allowed")
-	}
-	parsed.RawQuery = ""
-	parsed.Fragment = ""
-	return parsed.String(), nil
+	return cloudconfig.ValidateServerURL(raw)
 }
-
-

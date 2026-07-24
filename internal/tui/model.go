@@ -12,6 +12,7 @@ package tui
 import (
 	"errors"
 
+	"github.com/Gentleman-Programming/engram/internal/cloudconfig"
 	"github.com/Gentleman-Programming/engram/internal/setup"
 	"github.com/Gentleman-Programming/engram/internal/store"
 	"github.com/Gentleman-Programming/engram/internal/version"
@@ -306,15 +307,18 @@ var addClaudeCodeAllowlistFn = setup.AddClaudeCodeAllowlist
 // loadCloudConfigCmd returns a tea.Cmd that reads the cloud configuration
 // from disk and delivers a cloudConfigLoadedMsg containing the server URL
 // and token source label.
+//
+// The server URL is the effective URL after applying the
+// ENGRAM_CLOUD_SERVER env override (T-608.16); the token source label
+// is the canonical string from cloudconfig.SourceLabel, identical to
+// what the CLI's status line prints.
 func loadCloudConfigCmd(dataDir string) tea.Cmd {
 	return func() tea.Msg {
-		cc, err := loadCloudConfig(dataDir)
-		if err != nil {
-			return cloudConfigLoadedMsg{err: err}
-		}
+		cfg := tuiCloudConfigForUI(dataDir)
+		_, source := cloudconfig.EffectiveToken(dataDir)
 		return cloudConfigLoadedMsg{
-			serverURL:   cc.ServerURL,
-			tokenSource: tokenSourceMessage(dataDir),
+			serverURL:   cfg.ServerURL,
+			tokenSource: cloudconfig.SourceLabel(source),
 			err:         nil,
 		}
 	}

@@ -534,7 +534,7 @@ func TestCloudConfigSavePreservesToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read cloud.json: %v", err)
 	}
-	if !bytes.Contains(b, []byte(`"token": "existing-token"`)) {
+	if !bytes.Contains(b, []byte(`"token":"existing-token"`)) {
 		t.Fatalf("existing token must be preserved, got %s", string(b))
 	}
 }

@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/Gentleman-Programming/engram/internal/cloudconfig"
 )
 
 func writeCloudJSON(t *testing.T, dir, content string) {
@@ -17,80 +19,53 @@ func writeCloudJSON(t *testing.T, dir, content string) {
 	}
 }
 
-func TestLoadCloudConfigReadsServerURLAndToken(t *testing.T) {
-	dir := t.TempDir()
-	writeCloudJSON(t, dir, `{"server_url":"https://cloud.example.com","token":"file-token"}`)
+// saveTUIServerURL tests — the helper that writes the server URL into
+// cloud.json while preserving any pre-existing Token field. Replaces
+// the forked saveCloudConfig deleted in T-608.16.
 
-	cc, err := loadCloudConfig(dir)
-	if err != nil {
-		t.Fatalf("loadCloudConfig: %v", err)
-	}
-	if cc.ServerURL != "https://cloud.example.com" {
-		t.Fatalf("server_url = %q", cc.ServerURL)
-	}
-	if cc.Token != "file-token" {
-		t.Fatalf("token = %q", cc.Token)
-	}
-}
-
-func TestLoadCloudConfigMissingReturnsEmpty(t *testing.T) {
-	dir := t.TempDir()
-
-	cc, err := loadCloudConfig(dir)
-	if err != nil {
-		t.Fatalf("loadCloudConfig: %v", err)
-	}
-	if cc.ServerURL != "" || cc.Token != "" {
-		t.Fatalf("expected empty config, got %+v", cc)
-	}
-}
-
-func TestTokenSourceEnvOverridesFile(t *testing.T) {
-	dir := t.TempDir()
-	writeCloudJSON(t, dir, `{"token":"file-token"}`)
-
-	t.Setenv("ENGRAM_CLOUD_TOKEN", "env-token")
-	if got := tokenSourceMessage(dir); got != TokenSourceEnv {
-		t.Fatalf("source = %q, want %q", got, TokenSourceEnv)
-	}
-}
-
-func TestTokenSourceFileFallback(t *testing.T) {
-	dir := t.TempDir()
-	writeCloudJSON(t, dir, `{"token":"file-token"}`)
-
-	t.Setenv("ENGRAM_CLOUD_TOKEN", "")
-	if got := tokenSourceMessage(dir); got != TokenSourceFile {
-		t.Fatalf("source = %q, want %q", got, TokenSourceFile)
-	}
-}
-
-func TestTokenSourceNone(t *testing.T) {
-	dir := t.TempDir()
-
-	t.Setenv("ENGRAM_CLOUD_TOKEN", "")
-	if got := tokenSourceMessage(dir); got != TokenSourceNone {
-		t.Fatalf("source = %q, want %q", got, TokenSourceNone)
-	}
-}
-
-func TestSaveCloudConfigWritesOnlyServerURLAndPreservesToken(t *testing.T) {
+func TestSaveTUIServerURLPreservesToken(t *testing.T) {
 	dir := t.TempDir()
 	writeCloudJSON(t, dir, `{"server_url":"https://old.example.com","token":"file-token"}`)
 
-	if err := saveCloudConfig(dir, "https://new.example.com"); err != nil {
-		t.Fatalf("saveCloudConfig: %v", err)
+	if err := saveTUIServerURL(dir, "https://new.example.com"); err != nil {
+		t.Fatalf("saveTUIServerURL: %v", err)
 	}
 
 	b, err := os.ReadFile(filepath.Join(dir, "cloud.json"))
 	if err != nil {
 		t.Fatalf("read cloud.json: %v", err)
 	}
-	if !bytes.Contains(b, []byte(`"server_url": "https://new.example.com"`)) {
+	if !bytes.Contains(b, []byte(`"server_url":"https://new.example.com"`)) {
 		t.Fatalf("server_url not updated in %s", string(b))
 	}
-	if !bytes.Contains(b, []byte(`"token": "file-token"`)) {
+	if !bytes.Contains(b, []byte(`"token":"file-token"`)) {
 		t.Fatalf("token was not preserved in %s", string(b))
+	}
+}
+
+func TestSaveTUIServerURLOnEmptyDirWritesOnlyURL(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := saveTUIServerURL(dir, "https://new.example.com"); err != nil {
+		t.Fatalf("saveTUIServerURL: %v", err)
+	}
+
+	b, err := os.ReadFile(filepath.Join(dir, "cloud.json"))
+	if err != nil {
+		t.Fatalf("read cloud.json: %v", err)
+	}
+	if !bytes.Contains(b, []byte(`"server_url":"https://new.example.com"`)) {
+		t.Fatalf("server_url not written in %s", string(b))
+	}
+}
+
+func TestSaveTUIServerURLPropagatesMalformedError(t *testing.T) {
+	dir := t.TempDir()
+	writeCloudJSON(t, dir, `{not valid json`)
+
+	err := saveTUIServerURL(dir, "https://new.example.com")
+	if err == nil {
+		t.Fatal("expected error from malformed file")
 	}
 }
 
@@ -178,23 +153,11 @@ func TestPingCloudServerMalformedURL(t *testing.T) {
 	}
 }
 
-func TestSaveCloudConfigDoesNotWriteToken(t *testing.T) {
-	dir := t.TempDir()
+// validateCloudServerURL is a thin shim around cloudconfig.ValidateServerURL
+// (T-608.17 will delete the shim). These tests pin the shim's behavior so
+// the migration is auditable.
 
-	if err := saveCloudConfig(dir, "https://new.example.com"); err != nil {
-		t.Fatalf("saveCloudConfig: %v", err)
-	}
-
-	b, err := os.ReadFile(filepath.Join(dir, "cloud.json"))
-	if err != nil {
-		t.Fatalf("read cloud.json: %v", err)
-	}
-	if bytes.Contains(b, []byte(`"token"`)) {
-		t.Fatalf("token must never be written by TUI, got %s", string(b))
-	}
-}
-
-func TestValidateCloudServerURL(t *testing.T) {
+func TestValidateCloudServerURLShim(t *testing.T) {
 	tests := []struct {
 		name    string
 		input   string
@@ -202,12 +165,11 @@ func TestValidateCloudServerURL(t *testing.T) {
 		wantErr bool
 	}{
 		{"https ok", "https://cloud.example.com", "https://cloud.example.com", false},
-		{"trims space", "  https://cloud.example.com  ", "https://cloud.example.com", false},
 		{"missing scheme", "cloud.example.com", "", true},
 		{"bad scheme", "ftp://cloud.example.com", "", true},
 		{"missing host", "https://", "", true},
-		{"query not allowed", "https://cloud.example.com?x=1", "", true},
-		{"fragment not allowed", "https://cloud.example.com#x", "", true},
+		{"http ok", "http://cloud.example.com", "http://cloud.example.com", false},
+		{"empty", "", "", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -219,6 +181,146 @@ func TestValidateCloudServerURL(t *testing.T) {
 				t.Fatalf("validateCloudServerURL(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
+	}
+}
+
+// tuiCloudConfigForUI tests — the helper that reads cloudconfig + applies
+// the ENGRAM_CLOUD_SERVER override (T-608.16).
+//
+// The bug being fixed: the old effectiveCloudToken / loadCloudConfigCmd in
+// the TUI did not honor ENGRAM_CLOUD_SERVER, so the TUI's Cloud Config
+// form could display a stale server URL after the user set the env var.
+// These tests pin the precedence: env > file > zero-value, with
+// whitespace-only env treated as unset.
+
+func TestTuiCloudConfigForUIAppliesEnvServerOverride(t *testing.T) {
+	dir := t.TempDir()
+	writeCloudJSON(t, dir, `{"server_url":"https://file.example.com","token":"file-token"}`)
+	t.Setenv("ENGRAM_CLOUD_SERVER", "https://env.example.com")
+
+	cfg := tuiCloudConfigForUI(dir)
+	if cfg.ServerURL != "https://env.example.com" {
+		t.Fatalf("env should override file, got ServerURL=%q", cfg.ServerURL)
+	}
+	if cfg.Token != "file-token" {
+		t.Fatalf("token field from file should be preserved, got Token=%q", cfg.Token)
+	}
+}
+
+func TestTuiCloudConfigForUIFallsBackToFileWhenEnvUnset(t *testing.T) {
+	dir := t.TempDir()
+	writeCloudJSON(t, dir, `{"server_url":"https://file.example.com","token":"file-token"}`)
+	t.Setenv("ENGRAM_CLOUD_SERVER", "")
+
+	cfg := tuiCloudConfigForUI(dir)
+	if cfg.ServerURL != "https://file.example.com" {
+		t.Fatalf("file should win when env empty, got ServerURL=%q", cfg.ServerURL)
+	}
+}
+
+func TestTuiCloudConfigForUIWhitespaceEnvTreatedAsUnset(t *testing.T) {
+	dir := t.TempDir()
+	writeCloudJSON(t, dir, `{"server_url":"https://file.example.com","token":"file-token"}`)
+	t.Setenv("ENGRAM_CLOUD_SERVER", "   \t  ")
+
+	cfg := tuiCloudConfigForUI(dir)
+	if cfg.ServerURL != "https://file.example.com" {
+		t.Fatalf("whitespace-only env should be unset; file should win, got ServerURL=%q", cfg.ServerURL)
+	}
+}
+
+func TestTuiCloudConfigForUINoFileNoEnvReturnsZeroValue(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("ENGRAM_CLOUD_SERVER", "")
+
+	cfg := tuiCloudConfigForUI(dir)
+	if cfg.ServerURL != "" || cfg.Token != "" {
+		t.Fatalf("expected zero-value, got %+v", cfg)
+	}
+}
+
+func TestTuiCloudConfigForUIMalformedFileReturnsZeroValue(t *testing.T) {
+	dir := t.TempDir()
+	writeCloudJSON(t, dir, `{not valid json`)
+	t.Setenv("ENGRAM_CLOUD_SERVER", "")
+
+	cfg := tuiCloudConfigForUI(dir)
+	if cfg.ServerURL != "" || cfg.Token != "" {
+		t.Fatalf("malformed file should yield zero-value, got %+v", cfg)
+	}
+}
+
+func TestTuiCloudConfigForUIEnvOnlyReturnsConfigWithURL(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("ENGRAM_CLOUD_SERVER", "https://env.example.com")
+
+	cfg := tuiCloudConfigForUI(dir)
+	if cfg.ServerURL != "https://env.example.com" {
+		t.Fatalf("env should populate URL when no file present, got ServerURL=%q", cfg.ServerURL)
+	}
+}
+
+// loadCloudConfigCmd tests — the message contract after T-608.16.
+// The message must carry the effective server URL (env override applied)
+// and the canonical token source label (from cloudconfig.SourceLabel).
+
+func TestLoadCloudConfigCmdAppliesEnvServerOverride(t *testing.T) {
+	dir := t.TempDir()
+	writeCloudJSON(t, dir, `{"server_url":"https://file.example.com","token":"file-token"}`)
+	t.Setenv("ENGRAM_CLOUD_SERVER", "https://env.example.com")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "")
+
+	msg := loadCloudConfigCmd(dir)()
+	loaded, ok := msg.(cloudConfigLoadedMsg)
+	if !ok {
+		t.Fatalf("message type = %T", msg)
+	}
+	if loaded.err != nil {
+		t.Fatalf("unexpected error: %v", loaded.err)
+	}
+	if loaded.serverURL != "https://env.example.com" {
+		t.Fatalf("serverURL = %q, want env override", loaded.serverURL)
+	}
+	if loaded.tokenSource != cloudconfig.LabelSourceFile {
+		t.Fatalf("tokenSource = %q, want %q (cloudconfig label)", loaded.tokenSource, cloudconfig.LabelSourceFile)
+	}
+}
+
+func TestLoadCloudConfigCmdReportsEnvTokenSource(t *testing.T) {
+	dir := t.TempDir()
+	writeCloudJSON(t, dir, `{"server_url":"https://file.example.com","token":"file-token"}`)
+	t.Setenv("ENGRAM_CLOUD_SERVER", "")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "env-token")
+
+	msg := loadCloudConfigCmd(dir)()
+	loaded, ok := msg.(cloudConfigLoadedMsg)
+	if !ok {
+		t.Fatalf("message type = %T", msg)
+	}
+	if loaded.err != nil {
+		t.Fatalf("unexpected error: %v", loaded.err)
+	}
+	if loaded.tokenSource != cloudconfig.LabelSourceEnv {
+		t.Fatalf("tokenSource = %q, want %q (cloudconfig label)", loaded.tokenSource, cloudconfig.LabelSourceEnv)
+	}
+}
+
+func TestLoadCloudConfigCmdReportsNoneSourceWhenNoToken(t *testing.T) {
+	dir := t.TempDir()
+	writeCloudJSON(t, dir, `{"server_url":"https://file.example.com"}`)
+	t.Setenv("ENGRAM_CLOUD_SERVER", "")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "")
+
+	msg := loadCloudConfigCmd(dir)()
+	loaded, ok := msg.(cloudConfigLoadedMsg)
+	if !ok {
+		t.Fatalf("message type = %T", msg)
+	}
+	if loaded.err != nil {
+		t.Fatalf("unexpected error: %v", loaded.err)
+	}
+	if loaded.tokenSource != cloudconfig.LabelSourceNone {
+		t.Fatalf("tokenSource = %q, want %q (cloudconfig label)", loaded.tokenSource, cloudconfig.LabelSourceNone)
 	}
 }
 
