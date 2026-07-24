@@ -122,6 +122,13 @@ func serverPort(t *testing.T, srv *httptest.Server) string {
 // selectNames returns the exact tool names in a runtime additionalContext. The
 // scan stops at the newline terminating the list, so no name can be satisfied
 // by a longer name that merely contains it.
+//
+// This is a counterpart to toolSearchSelectSet (internal/setup/setup_test.go).
+// The key difference: selectNames parses RUNTIME-emitted additionalContext
+// (no comments → a single select: anchor is sufficient), while toolSearchSelectSet
+// parses SCRIPT SOURCE (has comments → needs scan-largest robustness to avoid
+// accidental coupling to comment content). Keep them in sync if the select:
+// format changes.
 func selectNames(t *testing.T, additionalContext string) map[string]bool {
 	t.Helper()
 	idx := strings.Index(additionalContext, "select:")
@@ -301,6 +308,9 @@ func TestNoNudgeWhenSaveIsRecent(t *testing.T) {
 // reminder repeats on every message. This test is the regression proof for the
 // user-prompt-submit.sh:284 trailing-newline fix.
 func TestNudgeIsDebouncedWithinCooldown(t *testing.T) {
+	// Both hook runs occur within the default ENGRAM_NUDGE_COOLDOWN_SECS (900s)
+	// window — trivially true for two back-to-back invocations — so this test
+	// proves the debounce logic, not timing behavior.
 	requireHookBinaries(t)
 	sessionID := newSessionID(t)
 	markSessionBootstrapped(t, sessionID)

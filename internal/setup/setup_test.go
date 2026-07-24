@@ -2392,36 +2392,55 @@ func TestClaudeCodeUserPromptHookCoversPluginServerID(t *testing.T) {
 	}
 }
 
-// The select: list is scanned forward from the "select:" marker while
-// characters remain valid in a tool name or the comma separator. That stops at
-// the escape sequence terminating the list in both sources: a literal `\n` in
-// user-prompt-submit.sh and a backtick-n in user-prompt-submit.ps1.
+// toolSearchSelectSet parses every select: occurrence in script source and
+// returns the token set with the most entries. Script source may contain
+// comments — a prose comment containing "select:" might yield zero or one
+// token, whereas the real ToolSearch list yields 26+ tokens. Taking the
+// largest set avoids accidental coupling to comment content: a future comment
+// containing "select:mcp__" before the real list would not fool this parser.
+//
+// For each candidate, the list is scanned forward from the "select:" marker
+// while characters remain valid in a tool name or the comma separator. That
+// stops at the escape sequence terminating the list in both sources: a literal
+// `\n` in user-prompt-submit.sh and a backtick-n in user-prompt-submit.ps1.
 func toolSearchSelectSet(t *testing.T, script string) map[string]bool {
 	t.Helper()
-	idx := strings.Index(script, "select:mcp__")
-	if idx < 0 {
+	var largest map[string]bool
+	offset := 0
+	for {
+		idx := strings.Index(script[offset:], "select:")
+		if idx < 0 {
+			break
+		}
+		idx += offset
+		rest := script[idx+len("select:"):]
+		end := strings.IndexFunc(rest, func(r rune) bool {
+			switch {
+			case r == ',' || r == '_':
+				return false
+			case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+				return false
+			}
+			return true
+		})
+		if end < 0 {
+			end = len(rest)
+		}
+		set := make(map[string]bool)
+		for _, name := range strings.Split(rest[:end], ",") {
+			if name != "" {
+				set[name] = true
+			}
+		}
+		if len(set) > len(largest) {
+			largest = set
+		}
+		offset = idx + len("select:")
+	}
+	if len(largest) == 0 {
 		t.Fatal("hook script has no ToolSearch select: list")
 	}
-	rest := script[idx+len("select:"):]
-	end := strings.IndexFunc(rest, func(r rune) bool {
-		switch {
-		case r == ',' || r == '_':
-			return false
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-			return false
-		}
-		return true
-	})
-	if end < 0 {
-		end = len(rest)
-	}
-	set := make(map[string]bool)
-	for _, name := range strings.Split(rest[:end], ",") {
-		if name != "" {
-			set[name] = true
-		}
-	}
-	return set
+	return largest
 }
 
 // mem_save is a prefix of mem_save_prompt, so a Contains-based assertion reports
@@ -2441,6 +2460,25 @@ func TestToolSearchSelectSetRequiresExactNames(t *testing.T) {
 	}
 	if len(set) != 2 {
 		t.Errorf("parser returned %d names, want 2: %v", len(set), set)
+	}
+}
+
+// A comment containing the marker before the real list must not fool the
+// parser: it scans every select: and takes the largest token set, so a prose
+// occurrence (zero or one token) never wins over the real 26-name list.
+func TestToolSearchSelectSetIgnoresMarkerInComment(t *testing.T) {
+	script := `# see the select:mcp__ list below for details` + "\n" +
+		`printf '{"...":"select:mcp__engram__mem_save,mcp__engram__mem_search,mcp__engram__mem_context"}'`
+	set := toolSearchSelectSet(t, script)
+
+	if !set["mcp__engram__mem_save"] || !set["mcp__engram__mem_search"] || !set["mcp__engram__mem_context"] {
+		t.Errorf("parser did not extract the real list; got %v", set)
+	}
+	if set["mcp__engram__mem_save_prompt"] {
+		t.Error("parser invented a token not in the list")
+	}
+	if len(set) != 3 {
+		t.Errorf("parser returned %d names, want 3: %v", len(set), set)
 	}
 }
 
