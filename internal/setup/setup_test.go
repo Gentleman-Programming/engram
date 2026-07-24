@@ -2369,9 +2369,11 @@ func readUserPromptHooks(t *testing.T) map[string]string {
 // Direct MCP-server install (server id "engram") → mcp__engram__*.
 func TestClaudeCodeUserPromptHookCoversDirectMCPServerID(t *testing.T) {
 	for name, text := range readUserPromptHooks(t) {
+		listed := toolSearchSelectSet(t, text)
 		for _, tool := range claudeCodeBootstrapTools {
-			if !strings.Contains(text, "mcp__engram__"+tool) {
-				t.Errorf("%s missing direct-MCP ToolSearch name %q", name, "mcp__engram__"+tool)
+			want := "mcp__engram__" + tool
+			if !listed[want] {
+				t.Errorf("%s: ToolSearch select: list is missing direct-MCP name %q", name, want)
 			}
 		}
 	}
@@ -2380,11 +2382,65 @@ func TestClaudeCodeUserPromptHookCoversDirectMCPServerID(t *testing.T) {
 // Plugin/marketplace install → mcp__plugin_engram_engram__*.
 func TestClaudeCodeUserPromptHookCoversPluginServerID(t *testing.T) {
 	for name, text := range readUserPromptHooks(t) {
+		listed := toolSearchSelectSet(t, text)
 		for _, tool := range claudeCodeBootstrapTools {
-			if !strings.Contains(text, "mcp__plugin_engram_engram__"+tool) {
-				t.Errorf("%s missing plugin-scoped ToolSearch name %q", name, "mcp__plugin_engram_engram__"+tool)
+			want := "mcp__plugin_engram_engram__" + tool
+			if !listed[want] {
+				t.Errorf("%s: ToolSearch select: list is missing plugin-scoped name %q", name, want)
 			}
 		}
+	}
+}
+
+// The select: list is scanned forward from the "select:" marker while
+// characters remain valid in a tool name or the comma separator. That stops at
+// the escape sequence terminating the list in both sources: a literal `\n` in
+// user-prompt-submit.sh and a backtick-n in user-prompt-submit.ps1.
+func toolSearchSelectSet(t *testing.T, script string) map[string]bool {
+	t.Helper()
+	idx := strings.Index(script, "select:mcp__")
+	if idx < 0 {
+		t.Fatal("hook script has no ToolSearch select: list")
+	}
+	rest := script[idx+len("select:"):]
+	end := strings.IndexFunc(rest, func(r rune) bool {
+		switch {
+		case r == ',' || r == '_':
+			return false
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			return false
+		}
+		return true
+	})
+	if end < 0 {
+		end = len(rest)
+	}
+	set := make(map[string]bool)
+	for _, name := range strings.Split(rest[:end], ",") {
+		if name != "" {
+			set[name] = true
+		}
+	}
+	return set
+}
+
+// mem_save is a prefix of mem_save_prompt, so a Contains-based assertion reports
+// mem_save as present when only mem_save_prompt is listed. That is the hole this
+// parser exists to close.
+func TestToolSearchSelectSetRequiresExactNames(t *testing.T) {
+	set := toolSearchSelectSet(t, `select:mcp__engram__mem_save_prompt,mcp__engram__mem_search\n\nAfter loading`)
+
+	if set["mcp__engram__mem_save"] {
+		t.Error("mem_save_prompt must not satisfy a required mem_save entry")
+	}
+	if !set["mcp__engram__mem_save_prompt"] {
+		t.Error("parser dropped mcp__engram__mem_save_prompt")
+	}
+	if !set["mcp__engram__mem_search"] {
+		t.Error("parser dropped mcp__engram__mem_search")
+	}
+	if len(set) != 2 {
+		t.Errorf("parser returned %d names, want 2: %v", len(set), set)
 	}
 }
 
