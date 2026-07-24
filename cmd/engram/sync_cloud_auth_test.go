@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/internal/cloud/autosync"
+	"github.com/Gentleman-Programming/engram/internal/cloudconfig"
 	"github.com/Gentleman-Programming/engram/internal/store"
 )
 
@@ -20,7 +21,7 @@ func TestResolveCloudRuntimeConfigFallsBackToFileToken(t *testing.T) {
 	t.Setenv("ENGRAM_CLOUD_SERVER", "")
 
 	const fileToken = "file-token-from-cloud-json"
-	if err := saveCloudConfig(cfg, &cloudConfig{
+	if err := cloudconfig.Save(cfg.DataDir, &cloudconfig.Config{
 		ServerURL: "https://cloud.example.test",
 		Token:     fileToken,
 	}); err != nil {
@@ -45,7 +46,7 @@ func TestResolveCloudRuntimeConfigEnvTokenTakesPrecedence(t *testing.T) {
 	t.Setenv("ENGRAM_CLOUD_TOKEN", envToken)
 	t.Setenv("ENGRAM_CLOUD_SERVER", "")
 
-	if err := saveCloudConfig(cfg, &cloudConfig{
+	if err := cloudconfig.Save(cfg.DataDir, &cloudconfig.Config{
 		ServerURL: "https://cloud.example.test",
 		Token:     fileToken,
 	}); err != nil {
@@ -92,7 +93,7 @@ func TestSyncCloudSendsAuthorizationHeaderFromFileToken(t *testing.T) {
 	t.Setenv("ENGRAM_CLOUD_TOKEN", "")
 	t.Setenv("ENGRAM_CLOUD_SERVER", "")
 
-	if err := saveCloudConfig(cfg, &cloudConfig{
+	if err := cloudconfig.Save(cfg.DataDir, &cloudconfig.Config{
 		ServerURL: srv.URL,
 		Token:     fileToken,
 	}); err != nil {
@@ -134,7 +135,7 @@ func TestTryStartAutosyncUsesFileToken(t *testing.T) {
 	t.Setenv("ENGRAM_CLOUD_SERVER", "") // env var absent — server from file too
 
 	const fileToken = "file-only-token-421"
-	if err := saveCloudConfig(cfg, &cloudConfig{
+	if err := cloudconfig.Save(cfg.DataDir, &cloudconfig.Config{
 		ServerURL: "http://127.0.0.1:19998",
 		Token:     fileToken,
 	}); err != nil {

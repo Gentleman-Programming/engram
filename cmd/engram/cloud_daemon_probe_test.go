@@ -3,93 +3,20 @@ package main
 import (
 	"context"
 	"fmt"
-	"net"
-	"net/http"
-	"net/http/httptest"
-	"net/url"
-	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/cloudconfig"
 )
 
-func TestDefaultCloudDaemonProbeReturnsRunningOn200(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/health" {
-			http.NotFound(w, r)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	}))
-	defer srv.Close()
-
-	port := portFromTestServer(t, srv)
-	res := cloudconfig.LocalDaemonProbe(context.Background(), port)
-	if res.Status != cloudconfig.ProbeRunning {
-		t.Fatalf("expected cloudconfig.ProbeRunning, got %q (err=%v)", res.Status, res.Err)
-	}
-	if res.Port != port {
-		t.Fatalf("expected port %d, got %d", port, res.Port)
-	}
-}
-
-func TestDefaultCloudDaemonProbeReturnsNotRunningOnRefused(t *testing.T) {
-	port := allocateClosedPort(t)
-	res := cloudconfig.LocalDaemonProbe(context.Background(), port)
-	if res.Status != cloudconfig.ProbeNotRunning {
-		t.Fatalf("expected cloudconfig.ProbeNotRunning on refused, got %q (err=%v)", res.Status, res.Err)
-	}
-	if res.Err == nil {
-		t.Fatalf("expected non-nil err for refused dial")
-	}
-}
-
-func TestDefaultCloudDaemonProbeReturnsUnreachableOnNon2xx(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-
-	port := portFromTestServer(t, srv)
-	res := cloudconfig.LocalDaemonProbe(context.Background(), port)
-	if res.Status != cloudconfig.ProbeUnreachable {
-		t.Fatalf("expected cloudconfig.ProbeUnreachable on 500, got %q", res.Status)
-	}
-}
-
-func TestDefaultCloudDaemonProbeReturnsUnreachableOnTimeout(t *testing.T) {
-	prev := cloudconfig.ProbeTimeout
-	cloudconfig.ProbeTimeout = 100 * time.Millisecond
-	t.Cleanup(func() { cloudconfig.ProbeTimeout = prev })
-
-	// Listener accepts but never reads/writes, forcing the client to time out.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	defer ln.Close()
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		conn, aerr := ln.Accept()
-		if aerr != nil {
-			return
-		}
-		// Hold the connection until the listener closes; never write a response.
-		<-done
-		_ = conn.Close()
-	}()
-
-	port := ln.Addr().(*net.TCPAddr).Port
-	res := cloudconfig.LocalDaemonProbe(context.Background(), port)
-	if res.Status != cloudconfig.ProbeUnreachable {
-		t.Fatalf("expected cloudconfig.ProbeUnreachable on timeout, got %q (err=%v)", res.Status, res.Err)
-	}
-}
-
+// TestResolveDaemonProbePortHonorsEnvAndDefaults pins the
+// contract of the local resolveDaemonProbePort wrapper
+// (cmd/engram/cloud_daemon_probe.go). The wrapper is a thin
+// shim over cloudconfig.ResolvePort but the env-var name
+// (cloudconfig.EnvProbePort = "ENGRAM_PORT") and the default
+// (cloudconfig.DefaultProbePort = 7437) are part of the
+// public surface and must remain stable for cmdCloudStatus
+// and any future TUI parity work.
 func TestResolveDaemonProbePortHonorsEnvAndDefaults(t *testing.T) {
 	t.Run("defaults to 7437 when ENGRAM_PORT unset", func(t *testing.T) {
 		t.Setenv("ENGRAM_PORT", "")
@@ -121,6 +48,16 @@ func TestResolveDaemonProbePortHonorsEnvAndDefaults(t *testing.T) {
 	})
 }
 
+// TestPrintCloudStatusDaemonProbeFormatsEachState pins the
+// per-state stdout output of printCloudStatusDaemonProbe.
+// The test stubs cloudconfig.LocalDaemonProbe directly via
+// the new var seam (T-608.15's porting step) — the local
+// cloudDaemonProbe wrapper in cmd/engram/cloud_daemon_probe.go
+// is still the caller's seam, but since the wrapper is a
+// thin pass-through to cloudconfig.LocalDaemonProbe, stubbing
+// the upstream var is equivalent to stubbing the wrapper and
+// matches the design's ADR-1 pattern (vars in cloudconfig, not
+// const funcs).
 func TestPrintCloudStatusDaemonProbeFormatsEachState(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -160,9 +97,15 @@ func TestPrintCloudStatusDaemonProbeFormatsEachState(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			prev := cloudDaemonProbe
-			cloudDaemonProbe = tc.stub
-			t.Cleanup(func() { cloudDaemonProbe = prev })
+			// Stub the cloudconfig package's LocalDaemonProbe var
+			// (the new seam introduced in T-608.15). The local
+			// cloudDaemonProbe wrapper in cmd/engram defaults to
+			// cloudconfig.LocalDaemonProbe, so stubbing the
+			// upstream var reaches printCloudStatusDaemonProbe
+			// without needing a separate local seam.
+			prev := cloudconfig.LocalDaemonProbe
+			t.Cleanup(func() { cloudconfig.LocalDaemonProbe = prev })
+			cloudconfig.LocalDaemonProbe = tc.stub
 
 			stdout, _, recovered := captureOutputAndRecover(t, func() { printCloudStatusDaemonProbe() })
 			if recovered != nil {
@@ -175,34 +118,4 @@ func TestPrintCloudStatusDaemonProbeFormatsEachState(t *testing.T) {
 			}
 		})
 	}
-}
-
-// portFromTestServer extracts the TCP port a httptest.Server is bound to.
-func portFromTestServer(t *testing.T, srv *httptest.Server) int {
-	t.Helper()
-	parsed, err := url.Parse(srv.URL)
-	if err != nil {
-		t.Fatalf("parse server URL: %v", err)
-	}
-	port, err := strconv.Atoi(parsed.Port())
-	if err != nil {
-		t.Fatalf("parse server port: %v", err)
-	}
-	return port
-}
-
-// allocateClosedPort returns a TCP port number that is guaranteed to be
-// closed: it binds, reads the assigned port, then closes the listener.
-// On loopback this reliably surfaces "connection refused" on dial.
-func allocateClosedPort(t *testing.T) int {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	if err := ln.Close(); err != nil {
-		t.Fatalf("close listener: %v", err)
-	}
-	return port
 }

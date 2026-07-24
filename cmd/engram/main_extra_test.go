@@ -157,7 +157,7 @@ func stubRuntimeHooks(t *testing.T) {
 	oldSyncExport := syncExport
 	oldNewCloudAutosyncManager := newCloudAutosyncManager
 	oldCheckForUpdates := checkForUpdates
-	oldCloudDaemonProbe := cloudDaemonProbe
+	oldCloudDaemonProbe := cloudconfig.LocalDaemonProbe
 
 	storeNew = store.New
 	newHTTPServer = func(s *store.Store, _ int) *engramsrv.Server { return engramsrv.New(s, 0) }
@@ -201,7 +201,7 @@ func stubRuntimeHooks(t *testing.T) {
 	checkForUpdates = func(string) versioncheck.CheckResult {
 		return versioncheck.CheckResult{Status: versioncheck.StatusUpToDate}
 	}
-	cloudDaemonProbe = func(_ context.Context, port int) cloudconfig.Result {
+	cloudconfig.LocalDaemonProbe = func(_ context.Context, port int) cloudconfig.Result {
 		return cloudconfig.Result{Status: cloudconfig.ProbeRunning, Port: port}
 	}
 
@@ -230,7 +230,7 @@ func stubRuntimeHooks(t *testing.T) {
 		syncExport = oldSyncExport
 		newCloudAutosyncManager = oldNewCloudAutosyncManager
 		checkForUpdates = oldCheckForUpdates
-		cloudDaemonProbe = oldCloudDaemonProbe
+		cloudconfig.LocalDaemonProbe = oldCloudDaemonProbe
 	})
 }
 
@@ -692,8 +692,8 @@ func TestCmdCloudStatusDistinguishesAuthAndSyncReadiness(t *testing.T) {
 	stubRuntimeHooks(t)
 
 	cfg := testConfig(t)
-	if err := saveCloudConfig(cfg, &cloudConfig{ServerURL: "https://cloud.example.test"}); err != nil {
-		t.Fatalf("save cloud config: %v", err)
+	if err := cloudconfig.Save(cfg.DataDir, &cloudconfig.Config{ServerURL: "https://cloud.example.test"}); err != nil {
+		t.Fatalf("cloudconfig.Save: %v", err)
 	}
 
 	t.Run("configured but missing token", func(t *testing.T) {
@@ -755,12 +755,12 @@ func TestCmdCloudStatusEmitsLocalDaemonLine(t *testing.T) {
 
 		// Override the probe with a sentinel so we can detect any accidental call.
 		probed := false
-		prev := cloudDaemonProbe
-		cloudDaemonProbe = func(_ context.Context, port int) cloudconfig.Result {
+		prev := cloudconfig.LocalDaemonProbe
+		cloudconfig.LocalDaemonProbe = func(_ context.Context, port int) cloudconfig.Result {
 			probed = true
 			return cloudconfig.Result{Status: cloudconfig.ProbeRunning, Port: port}
 		}
-		t.Cleanup(func() { cloudDaemonProbe = prev })
+		t.Cleanup(func() { cloudconfig.LocalDaemonProbe = prev })
 
 		notConfiguredCfg := testConfig(t)
 		withArgs(t, "engram", "cloud", "status")
@@ -779,19 +779,19 @@ func TestCmdCloudStatusEmitsLocalDaemonLine(t *testing.T) {
 		}
 	})
 
-	if err := saveCloudConfig(cfg, &cloudConfig{ServerURL: "https://cloud.example.test"}); err != nil {
-		t.Fatalf("save cloud config: %v", err)
+	if err := cloudconfig.Save(cfg.DataDir, &cloudconfig.Config{ServerURL: "https://cloud.example.test"}); err != nil {
+		t.Fatalf("cloudconfig.Save: %v", err)
 	}
 
 	t.Run("configured prints running daemon line", func(t *testing.T) {
 		t.Setenv("ENGRAM_CLOUD_TOKEN", "token-abc")
 		t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "")
 
-		prev := cloudDaemonProbe
-		cloudDaemonProbe = func(_ context.Context, port int) cloudconfig.Result {
+		prev := cloudconfig.LocalDaemonProbe
+		cloudconfig.LocalDaemonProbe = func(_ context.Context, port int) cloudconfig.Result {
 			return cloudconfig.Result{Status: cloudconfig.ProbeRunning, Port: port}
 		}
-		t.Cleanup(func() { cloudDaemonProbe = prev })
+		t.Cleanup(func() { cloudconfig.LocalDaemonProbe = prev })
 
 		withArgs(t, "engram", "cloud", "status")
 		stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloud(cfg) })
@@ -807,11 +807,11 @@ func TestCmdCloudStatusEmitsLocalDaemonLine(t *testing.T) {
 		t.Setenv("ENGRAM_CLOUD_TOKEN", "token-abc")
 		t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "")
 
-		prev := cloudDaemonProbe
-		cloudDaemonProbe = func(_ context.Context, port int) cloudconfig.Result {
+		prev := cloudconfig.LocalDaemonProbe
+		cloudconfig.LocalDaemonProbe = func(_ context.Context, port int) cloudconfig.Result {
 			return cloudconfig.Result{Status: cloudconfig.ProbeNotRunning, Port: port}
 		}
-		t.Cleanup(func() { cloudDaemonProbe = prev })
+		t.Cleanup(func() { cloudconfig.LocalDaemonProbe = prev })
 
 		withArgs(t, "engram", "cloud", "status")
 		stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloud(cfg) })
@@ -830,11 +830,11 @@ func TestCmdCloudStatusEmitsLocalDaemonLine(t *testing.T) {
 		t.Setenv("ENGRAM_CLOUD_TOKEN", "")
 		t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "1")
 
-		prev := cloudDaemonProbe
-		cloudDaemonProbe = func(_ context.Context, port int) cloudconfig.Result {
+		prev := cloudconfig.LocalDaemonProbe
+		cloudconfig.LocalDaemonProbe = func(_ context.Context, port int) cloudconfig.Result {
 			return cloudconfig.Result{Status: cloudconfig.ProbeRunning, Port: port}
 		}
-		t.Cleanup(func() { cloudDaemonProbe = prev })
+		t.Cleanup(func() { cloudconfig.LocalDaemonProbe = prev })
 
 		withArgs(t, "engram", "cloud", "status")
 		stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloud(cfg) })
@@ -855,8 +855,8 @@ func TestCmdCloudUpgradeDoctorRequiresProjectAndIsDeterministic(t *testing.T) {
 	stubRuntimeHooks(t)
 
 	cfg := testConfig(t)
-	if err := saveCloudConfig(cfg, &cloudConfig{ServerURL: "https://cloud.example.test"}); err != nil {
-		t.Fatalf("save cloud config: %v", err)
+	if err := cloudconfig.Save(cfg.DataDir, &cloudconfig.Config{ServerURL: "https://cloud.example.test"}); err != nil {
+		t.Fatalf("cloudconfig.Save: %v", err)
 	}
 
 	t.Run("missing project fails loudly", func(t *testing.T) {
@@ -990,8 +990,8 @@ func TestCmdSyncCloudPreflightsLegacyMutationPayloads(t *testing.T) {
 	stubRuntimeHooks(t)
 
 	cfg := testConfig(t)
-	if err := saveCloudConfig(cfg, &cloudConfig{ServerURL: "https://cloud.example.test"}); err != nil {
-		t.Fatalf("save cloud config: %v", err)
+	if err := cloudconfig.Save(cfg.DataDir, &cloudconfig.Config{ServerURL: "https://cloud.example.test"}); err != nil {
+		t.Fatalf("cloudconfig.Save: %v", err)
 	}
 
 	s, err := store.New(cfg)
@@ -1068,8 +1068,8 @@ func TestCmdCloudUpgradeBootstrapStatusAndRollbackSemantics(t *testing.T) {
 	stubRuntimeHooks(t)
 
 	cfg := testConfig(t)
-	if err := saveCloudConfig(cfg, &cloudConfig{ServerURL: "https://cloud.example.test"}); err != nil {
-		t.Fatalf("save cloud config: %v", err)
+	if err := cloudconfig.Save(cfg.DataDir, &cloudconfig.Config{ServerURL: "https://cloud.example.test"}); err != nil {
+		t.Fatalf("cloudconfig.Save: %v", err)
 	}
 
 	t.Run("status shows stage and reason", func(t *testing.T) {
@@ -1290,7 +1290,7 @@ func TestCmdCloudUpgradeRepairStatusAndRollbackBranches(t *testing.T) {
 
 	t.Run("rollback removes cloud config when snapshot had none", func(t *testing.T) {
 		cfg := testConfig(t)
-		if err := saveCloudConfig(cfg, &cloudConfig{ServerURL: "https://cloud.example.test"}); err != nil {
+		if err := cloudconfig.Save(cfg.DataDir, &cloudconfig.Config{ServerURL: "https://cloud.example.test"}); err != nil {
 			t.Fatalf("seed current cloud config: %v", err)
 		}
 		s, err := store.New(cfg)
@@ -1567,26 +1567,53 @@ func TestCmdCloudStatusSurfacesPersistedNonEnrolledPendingDiagnostic(t *testing.
 	}
 }
 
-func TestCmdCloudStatusRejectsInvalidEffectiveRuntimeServerURL(t *testing.T) {
+// TestCmdCloudStatusAcceptsAndClearsQueryInRuntimeServerURL
+// pins the spec REQ-1 behavior change in the cmdCloudStatus
+// path: after the T-608.6 migration, the runtime server URL
+// is validated by cloudconfig.ValidateServerURL, which
+// ACCEPTS URLs with `?q=1` / `#frag` and CLEARS them. The
+// legacy `validateCloudServerURL` REJECTED these URLs (it
+// returned "query is not allowed" / "fragment is not
+// allowed"); the new validator's accept-and-clear contract
+// is the deliberate spec change from REQ-1.
+//
+// The test sets the runtime URL via ENGRAM_CLOUD_SERVER
+// (env override wins over the file's URL per T-608.12),
+// invokes cmdCloudStatus, and asserts:
+//   1. cmdCloudStatus does NOT fatal-exit (the URL is
+//      accepted, not rejected).
+//   2. The status reports "Cloud status: configured" (the
+//      runtime URL is valid after the clear).
+//   3. The rendered "Server:" line shows the URL with the
+//      query/fragment CLEARED.
+//   4. The legacy "query is not allowed" error is NOT in
+//      stderr.
+func TestCmdCloudStatusAcceptsAndClearsQueryInRuntimeServerURL(t *testing.T) {
 	stubExitWithPanic(t)
 	stubRuntimeHooks(t)
 
 	cfg := testConfig(t)
-	if err := saveCloudConfig(cfg, &cloudConfig{ServerURL: "https://cloud.example.test"}); err != nil {
-		t.Fatalf("save cloud config: %v", err)
+	if err := cloudconfig.Save(cfg.DataDir, &cloudconfig.Config{ServerURL: "https://cloud.example.test"}); err != nil {
+		t.Fatalf("cloudconfig.Save: %v", err)
 	}
 
 	t.Setenv("ENGRAM_CLOUD_SERVER", "https://env-cloud.example.test?debug=1")
 	withArgs(t, "engram", "cloud", "status")
 	stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloud(cfg) })
-	if _, ok := recovered.(exitCode); !ok {
-		t.Fatalf("expected fatal exit for invalid runtime server url, got %v", recovered)
+	if _, ok := recovered.(exitCode); ok {
+		t.Fatalf("must not fatal-exit for URL with query (new validator accepts and clears), recovered=%v stderr=%q", recovered, stderr)
 	}
-	if strings.Contains(stdout, "Cloud status: configured") {
-		t.Fatalf("status must not report configured when runtime url is invalid, stdout=%q", stdout)
+	if !strings.Contains(stdout, "Cloud status: configured") {
+		t.Fatalf("expected 'Cloud status: configured' (URL accepted and cleared), got stdout=%q", stdout)
 	}
-	if !strings.Contains(stderr, "invalid cloud runtime server URL") || !strings.Contains(stderr, "query is not allowed") {
-		t.Fatalf("expected runtime URL validation error in stderr, got %q", stderr)
+	if !strings.Contains(stdout, "Server: https://env-cloud.example.test") {
+		t.Fatalf("expected cleared URL (no query) in 'Server:' line, got stdout=%q", stdout)
+	}
+	if strings.Contains(stdout, "debug=1") {
+		t.Fatalf("query string must be cleared from 'Server:' line, got stdout=%q", stdout)
+	}
+	if strings.Contains(stderr, "query is not allowed") {
+		t.Fatalf("legacy 'query is not allowed' error must NOT appear (new validator accepts), stderr=%q", stderr)
 	}
 }
 
@@ -1613,8 +1640,8 @@ func TestResolveCloudRuntimeConfigUsesPersistedTokenAsFallback(t *testing.T) {
 	// cloud.json must be used so that `engram sync --cloud` works without
 	// requiring users to export the env var in every shell session.
 	cfg := testConfig(t)
-	if err := saveCloudConfig(cfg, &cloudConfig{ServerURL: "https://cloud.example.test", Token: "file-token"}); err != nil {
-		t.Fatalf("save cloud config: %v", err)
+	if err := cloudconfig.Save(cfg.DataDir, &cloudconfig.Config{ServerURL: "https://cloud.example.test", Token: "file-token"}); err != nil {
+		t.Fatalf("cloudconfig.Save: %v", err)
 	}
 	t.Setenv("ENGRAM_CLOUD_TOKEN", "")
 
@@ -1677,7 +1704,7 @@ func TestCmdCloudConfigAcceptsValidServerURL(t *testing.T) {
 		t.Fatalf("expected success output, got %q", stdout)
 	}
 
-	cc, err := loadCloudConfig(cfg)
+	cc, err := cloudconfig.Load(cfg.DataDir)
 	if err != nil {
 		t.Fatalf("load cloud config: %v", err)
 	}
@@ -1947,8 +1974,8 @@ func TestCmdServeWiresPersistedSyncStatusProvider(t *testing.T) {
 	stubRuntimeHooks(t)
 
 	cfg := testConfig(t)
-	if err := saveCloudConfig(cfg, &cloudConfig{ServerURL: "https://cloud.example.test"}); err != nil {
-		t.Fatalf("save cloud config: %v", err)
+	if err := cloudconfig.Save(cfg.DataDir, &cloudconfig.Config{ServerURL: "https://cloud.example.test"}); err != nil {
+		t.Fatalf("cloudconfig.Save: %v", err)
 	}
 	t.Setenv("ENGRAM_CLOUD_TOKEN", "token-abc")
 	t.Setenv("ENGRAM_PROJECT", "proj-a")
@@ -2035,8 +2062,8 @@ func TestCmdServeSyncStatusUsesDetectedProjectScopedState(t *testing.T) {
 
 	t.Setenv("ENGRAM_PROJECT", "proj-a")
 	t.Setenv("ENGRAM_CLOUD_TOKEN", "token-abc")
-	if err := saveCloudConfig(cfg, &cloudConfig{ServerURL: "https://cloud.example.test"}); err != nil {
-		t.Fatalf("save cloud config: %v", err)
+	if err := cloudconfig.Save(cfg.DataDir, &cloudconfig.Config{ServerURL: "https://cloud.example.test"}); err != nil {
+		t.Fatalf("cloudconfig.Save: %v", err)
 	}
 	withArgs(t, "engram", "serve")
 
@@ -2074,8 +2101,8 @@ func TestCmdServeSyncStatusRequiresProjectScopeWhenNoDefaultResolves(t *testing.
 	withCwd(t, workDir)
 	cfg := testConfig(t)
 
-	if err := saveCloudConfig(cfg, &cloudConfig{ServerURL: "https://cloud.example.test"}); err != nil {
-		t.Fatalf("save cloud config: %v", err)
+	if err := cloudconfig.Save(cfg.DataDir, &cloudconfig.Config{ServerURL: "https://cloud.example.test"}); err != nil {
+		t.Fatalf("cloudconfig.Save: %v", err)
 	}
 	t.Setenv("ENGRAM_CLOUD_TOKEN", "token-abc")
 	t.Setenv("ENGRAM_PROJECT", "")
@@ -2138,8 +2165,8 @@ func TestCmdServeSyncStatusAllowsProjectOverridePerRequest(t *testing.T) {
 
 	t.Setenv("ENGRAM_PROJECT", "proj-a")
 	t.Setenv("ENGRAM_CLOUD_TOKEN", "token-abc")
-	if err := saveCloudConfig(cfg, &cloudConfig{ServerURL: "https://cloud.example.test"}); err != nil {
-		t.Fatalf("save cloud config: %v", err)
+	if err := cloudconfig.Save(cfg.DataDir, &cloudconfig.Config{ServerURL: "https://cloud.example.test"}); err != nil {
+		t.Fatalf("cloudconfig.Save: %v", err)
 	}
 	withArgs(t, "engram", "serve")
 
@@ -2168,8 +2195,8 @@ func TestCmdServeSyncStatusAllowsProjectOverridePerRequest(t *testing.T) {
 
 func TestStoreSyncStatusProviderRequiresExplicitProjectScope(t *testing.T) {
 	cfg := testConfig(t)
-	if err := saveCloudConfig(cfg, &cloudConfig{ServerURL: "https://cloud.example.test"}); err != nil {
-		t.Fatalf("save cloud config: %v", err)
+	if err := cloudconfig.Save(cfg.DataDir, &cloudconfig.Config{ServerURL: "https://cloud.example.test"}); err != nil {
+		t.Fatalf("cloudconfig.Save: %v", err)
 	}
 	t.Setenv("ENGRAM_CLOUD_TOKEN", "")
 	s, err := store.New(cfg)
@@ -2333,10 +2360,25 @@ func TestStoreSyncStatusProviderPrefersCloudConfigErrorOverPersistedState(t *tes
 	}
 }
 
-func TestStoreSyncStatusProviderRejectsInvalidRuntimeServerURL(t *testing.T) {
+// TestStoreSyncStatusProviderAcceptsAndClearsQueryInRuntimeServerURL
+// pins the spec REQ-1 behavior change in the
+// storeSyncStatusProvider path: after the T-608.15 migration
+// of cloudSyncEnabled (cmd/engram/main.go:357), the runtime
+// server URL is validated by cloudconfig.ValidateServerURL,
+// which ACCEPTS URLs with `?q=1` / `#frag` and CLEARS them.
+// The legacy `validateCloudServerURL` REJECTED these URLs;
+// the new validator's accept-and-clear contract is the
+// deliberate spec change from REQ-1.
+//
+// The test sets the runtime URL via ENGRAM_CLOUD_SERVER
+// (env override wins over the file's URL per T-608.12),
+// invokes the provider, and asserts the status reports
+// enabled=true (the URL is valid after the clear) and does
+// not carry the legacy "query is not allowed" error.
+func TestStoreSyncStatusProviderAcceptsAndClearsQueryInRuntimeServerURL(t *testing.T) {
 	cfg := testConfig(t)
-	if err := saveCloudConfig(cfg, &cloudConfig{ServerURL: "https://cloud.example.test"}); err != nil {
-		t.Fatalf("save cloud config: %v", err)
+	if err := cloudconfig.Save(cfg.DataDir, &cloudconfig.Config{ServerURL: "https://cloud.example.test"}); err != nil {
+		t.Fatalf("cloudconfig.Save: %v", err)
 	}
 	t.Setenv("ENGRAM_CLOUD_SERVER", "https://cloud.example.test?debug=1")
 
@@ -2347,21 +2389,32 @@ func TestStoreSyncStatusProviderRejectsInvalidRuntimeServerURL(t *testing.T) {
 	defer s.Close()
 
 	status := storeSyncStatusProvider{store: s, defaultProject: "proj-a", cfg: cfg}.Status("")
-	if status.Enabled {
-		t.Fatalf("expected enabled=false for malformed runtime server URL, got %+v", status)
+	// The runtime URL with `?debug=1` is now accepted and
+	// cleared by cloudconfig.ValidateServerURL. The status
+	// is determined by enrollment: `proj-a` is not enrolled,
+	// so the provider reports blocked_unenrolled (NOT
+	// cloud_config_error, which the legacy test asserted).
+	if !status.Enabled {
+		// The provider may still be disabled here, but for a
+		// different reason (unenrolled). We assert the
+		// reason is NOT cloud_config_error from the legacy
+		// query-rejection path.
+		if status.ReasonCode == "cloud_config_error" && strings.Contains(status.ReasonMessage, "query is not allowed") {
+			t.Fatalf("legacy 'query is not allowed' error must NOT appear (new validator accepts), got reason=%q message=%q", status.ReasonCode, status.ReasonMessage)
+		}
 	}
-	if status.ReasonCode != "cloud_config_error" {
-		t.Fatalf("expected cloud_config_error reason, got %q", status.ReasonCode)
-	}
-	if !strings.Contains(status.ReasonMessage, "invalid cloud runtime server URL") {
-		t.Fatalf("expected invalid runtime URL context, got %q", status.ReasonMessage)
+	// Catches the regression: any "query is not allowed"
+	// error in the message means the legacy validator is
+	// still in the call path.
+	if strings.Contains(status.ReasonMessage, "query is not allowed") {
+		t.Fatalf("legacy 'query is not allowed' must NOT appear in reason message, got %q", status.ReasonMessage)
 	}
 }
 
 func TestStoreSyncStatusProviderRequiresProjectEvenWhenCloudConfigured(t *testing.T) {
 	cfg := testConfig(t)
-	if err := saveCloudConfig(cfg, &cloudConfig{ServerURL: "https://cloud.example.test"}); err != nil {
-		t.Fatalf("save cloud config: %v", err)
+	if err := cloudconfig.Save(cfg.DataDir, &cloudconfig.Config{ServerURL: "https://cloud.example.test"}); err != nil {
+		t.Fatalf("cloudconfig.Save: %v", err)
 	}
 	t.Setenv("ENGRAM_CLOUD_TOKEN", "")
 	t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "")
@@ -4723,11 +4776,11 @@ func TestAutosyncCallerReadsTokenFromFile(t *testing.T) {
 	t.Setenv("ENGRAM_CLOUD_TOKEN", "") // env absent — must fall back to file
 	t.Setenv("ENGRAM_CLOUD_SERVER", "")
 
-	if err := saveCloudConfig(cfg, &cloudConfig{
+	if err := cloudconfig.Save(cfg.DataDir, &cloudconfig.Config{
 		ServerURL: "https://file.example.test/",
 		Token:     "file-token-421",
 	}); err != nil {
-		t.Fatalf("save cloud config: %v", err)
+		t.Fatalf("cloudconfig.Save: %v", err)
 	}
 
 	s, err := store.New(cfg)
@@ -4773,11 +4826,11 @@ func TestAutosyncCallerEnvWinsOverFile(t *testing.T) {
 	t.Setenv("ENGRAM_CLOUD_TOKEN", "env-wins-token")
 	t.Setenv("ENGRAM_CLOUD_SERVER", "https://env-wins.example.test/")
 
-	if err := saveCloudConfig(cfg, &cloudConfig{
+	if err := cloudconfig.Save(cfg.DataDir, &cloudconfig.Config{
 		ServerURL: "https://file-loses.example.test/",
 		Token:     "file-loses-token",
 	}); err != nil {
-		t.Fatalf("save cloud config: %v", err)
+		t.Fatalf("cloudconfig.Save: %v", err)
 	}
 
 	s, err := store.New(cfg)

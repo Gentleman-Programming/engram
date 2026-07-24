@@ -354,7 +354,7 @@ func (p storeSyncStatusProvider) cloudSyncEnabled(project string) (bool, string,
 	if cc == nil || strings.TrimSpace(cc.ServerURL) == "" {
 		return false, "cloud_not_configured", "cloud sync is not configured"
 	}
-	if _, err := validateCloudServerURL(cc.ServerURL); err != nil {
+	if _, err := cloudconfig.ValidateServerURL(cc.ServerURL); err != nil {
 		return false, "cloud_config_error", fmt.Sprintf("cloud config error: invalid cloud runtime server URL: %v", err)
 	}
 	if strings.TrimSpace(project) == "" {
@@ -510,7 +510,7 @@ func preflightCloudSync(s *store.Store, cfg store.Config, project string, mutate
 		}
 		return nil, fmt.Errorf("cloud sync %s: %s", constants.ReasonCloudConfigError, message)
 	}
-	if _, err := validateCloudServerURL(cc.ServerURL); err != nil {
+	if _, err := cloudconfig.ValidateServerURL(cc.ServerURL); err != nil {
 		message := fmt.Sprintf("invalid cloud runtime server URL: %v", err)
 		if mutateState {
 			_ = s.MarkSyncBlocked(targetKey, constants.ReasonCloudConfigError, message)

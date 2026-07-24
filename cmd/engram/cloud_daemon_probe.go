@@ -10,17 +10,17 @@ import (
 	"github.com/Gentleman-Programming/engram/internal/cloudconfig"
 )
 
-// cloudDaemonProbe issues a short timeout GET to /health on the
-// local engram HTTP server. It is a thin wrapper around
-// cloudconfig.LocalDaemonProbe so cmdCloudStatus can stub the
-// probe in tests without importing the cloudconfig package's
-// var seam directly. The wrapper preserves the existing
-// `func(context.Context, int) cloudconfig.Result` signature
-// used by callers; future tests should stub the cloudconfig
-// package's LocalDaemonProbe var instead of this local
-// variable (T-608.15 will rewrite the print-test to use the
-// new seam).
-var cloudDaemonProbe = cloudconfig.LocalDaemonProbe
+// cloudDaemonProbe is a thin wrapper that calls
+// cloudconfig.LocalDaemonProbe at invocation time so test
+// stubs of the cloudconfig package's var seam (per ADR-1)
+// reach printCloudStatusDaemonProbe without needing a
+// separate local var seam. The wrapper is a function (not
+// a var assigned at package init) so a later assignment to
+// cloudconfig.LocalDaemonProbe is observed by the next call
+// to printCloudStatusDaemonProbe.
+func cloudDaemonProbe(ctx context.Context, port int) cloudconfig.Result {
+	return cloudconfig.LocalDaemonProbe(ctx, port)
+}
 
 // resolveDaemonProbePort mirrors the port resolution used by
 // cmdServe so the probe targets the same address the user's

@@ -61,11 +61,11 @@ func runCloudUpgradeDoctor(t *testing.T, serverURL string) string {
 	}
 	_ = s.Close()
 
-	if err := saveCloudConfig(cfg, &cloudConfig{
+	if err := cloudconfig.Save(cfg.DataDir, &cloudconfig.Config{
 		ServerURL: serverURL,
 		Token:     "t",
 	}); err != nil {
-		t.Fatalf("saveCloudConfig: %v", err)
+		t.Fatalf("cloudconfig.Save: %v", err)
 	}
 
 	withArgs(t, "engram", "cloud", "upgrade", "doctor", "--project", "my-project")
@@ -221,11 +221,11 @@ func runCloudUpgradeBootstrap(t *testing.T, serverURL string) string {
 	}
 	_ = s.Close()
 
-	if err := saveCloudConfig(cfg, &cloudConfig{
+	if err := cloudconfig.Save(cfg.DataDir, &cloudconfig.Config{
 		ServerURL: serverURL,
 		Token:     "t",
 	}); err != nil {
-		t.Fatalf("saveCloudConfig: %v", err)
+		t.Fatalf("cloudconfig.Save: %v", err)
 	}
 
 	// Stub the HTTP bootstrap call so the test does not hit a
@@ -1111,9 +1111,9 @@ func TestCloudStatusEmptyServerURLInConfigWithEnvServerReportsConfigured(t *test
 
 	// Stub the daemon probe so the test does not hit a real
 	// local daemon. The var is restored in the cleanup.
-	prev := cloudDaemonProbe
-	t.Cleanup(func() { cloudDaemonProbe = prev })
-	cloudDaemonProbe = func(_ context.Context, port int) cloudconfig.Result {
+	prev := cloudconfig.LocalDaemonProbe
+	t.Cleanup(func() { cloudconfig.LocalDaemonProbe = prev })
+	cloudconfig.LocalDaemonProbe = func(_ context.Context, port int) cloudconfig.Result {
 		return cloudconfig.Result{Status: cloudconfig.ProbeNotRunning, Port: port}
 	}
 
@@ -1152,9 +1152,9 @@ func TestCloudStatusNotConfiguredDoesNotInvokeDaemonProbe(t *testing.T) {
 	t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "")
 
 	probed := false
-	prev := cloudDaemonProbe
-	t.Cleanup(func() { cloudDaemonProbe = prev })
-	cloudDaemonProbe = func(_ context.Context, port int) cloudconfig.Result {
+	prev := cloudconfig.LocalDaemonProbe
+	t.Cleanup(func() { cloudconfig.LocalDaemonProbe = prev })
+	cloudconfig.LocalDaemonProbe = func(_ context.Context, port int) cloudconfig.Result {
 		probed = true
 		return cloudconfig.Result{Status: cloudconfig.ProbeRunning, Port: port}
 	}

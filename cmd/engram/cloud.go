@@ -2,11 +2,9 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -641,12 +639,12 @@ func cmdCloudUpgradeRollback(cfg store.Config) {
 		return
 	}
 	if state.Snapshot.CloudConfigPresent {
-		if err := os.WriteFile(cloudConfigPath(cfg), []byte(state.Snapshot.CloudConfigJSON), 0o644); err != nil {
+		if err := os.WriteFile(cloudconfig.Path(cfg.DataDir), []byte(state.Snapshot.CloudConfigJSON), 0o644); err != nil {
 			fatal(err)
 			return
 		}
 	} else {
-		_ = os.Remove(cloudConfigPath(cfg))
+		_ = os.Remove(cloudconfig.Path(cfg.DataDir))
 	}
 	rolledBack, err := engramsync.RollbackProject(s, engramsync.UpgradeRollbackOptions{Project: project})
 	if err != nil {
@@ -677,7 +675,7 @@ func cmdCloudStatus(cfg store.Config) {
 		fmt.Println("Cloud status: not configured")
 		return
 	}
-	validatedURL, err := validateCloudServerURL(cc.ServerURL)
+	validatedURL, err := cloudconfig.ValidateServerURL(cc.ServerURL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: invalid cloud runtime server URL: %v\n", err)
 		exitFunc(1)
@@ -797,30 +795,6 @@ func cmdCloudConfig(cfg store.Config) {
 	fmt.Printf("✓ Cloud server set to %s\n", cc.ServerURL)
 }
 
-func validateCloudServerURL(raw string) (string, error) {
-	trimmed := strings.TrimSpace(raw)
-	parsed, err := url.ParseRequestURI(trimmed)
-	if err != nil {
-		return "", err
-	}
-	scheme := strings.ToLower(strings.TrimSpace(parsed.Scheme))
-	if scheme != "http" && scheme != "https" {
-		return "", fmt.Errorf("scheme must be http or https")
-	}
-	if strings.TrimSpace(parsed.Host) == "" || strings.TrimSpace(parsed.Hostname()) == "" {
-		return "", fmt.Errorf("host is required")
-	}
-	if strings.TrimSpace(parsed.RawQuery) != "" {
-		return "", fmt.Errorf("query is not allowed")
-	}
-	if strings.TrimSpace(parsed.Fragment) != "" {
-		return "", fmt.Errorf("fragment is not allowed")
-	}
-	parsed.RawQuery = ""
-	parsed.Fragment = ""
-	return parsed.String(), nil
-}
-
 func cmdCloudServe() {
 	runtimeCfg := cloud.ConfigFromEnv()
 	if err := validateCloudServeAuthConfig(); err != nil {
@@ -888,35 +862,4 @@ func normalizeAllowedProjects(projects []string) []string {
 		normalized = append(normalized, name)
 	}
 	return normalized
-}
-
-func cloudConfigPath(cfg store.Config) string {
-	return filepath.Join(cfg.DataDir, "cloud.json")
-}
-
-func loadCloudConfig(cfg store.Config) (*cloudConfig, error) {
-	path := cloudConfigPath(cfg)
-	b, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	var cc cloudConfig
-	if err := json.Unmarshal(b, &cc); err != nil {
-		return nil, err
-	}
-	return &cc, nil
-}
-
-func saveCloudConfig(cfg store.Config, cc *cloudConfig) error {
-	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
-		return err
-	}
-	b, err := json.MarshalIndent(cc, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(cloudConfigPath(cfg), b, 0o644)
 }

@@ -101,7 +101,17 @@ var ProbeTransport http.RoundTripper = http.DefaultTransport
 // The function uses ProbeTimeout for the request timeout and
 // ProbeTransport for the underlying transport; both are package
 // vars so tests can override them.
-func LocalDaemonProbe(ctx context.Context, port int) Result {
+//
+// LocalDaemonProbe is exposed as a var (not a const func) so
+// callers and tests can substitute a fake implementation. The
+// default is the real network probe below; tests in this
+// package and cmd/engram/cloud_daemon_probe_test.go stub the
+// var to return canned results. This pattern mirrors the
+// existing CLI/TUI `var ProbeTimeout` and `var ProbeTransport`
+// seams (per design ADR-1).
+var LocalDaemonProbe = localDaemonProbe
+
+func localDaemonProbe(ctx context.Context, port int) Result {
 	url := fmt.Sprintf("http://127.0.0.1:%d/health", port)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
