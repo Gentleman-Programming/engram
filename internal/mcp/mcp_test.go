@@ -1611,7 +1611,7 @@ func TestResolveToolsAgentProfile(t *testing.T) {
 	}
 
 	expectedTools := []string{
-		"mem_save", "mem_search", "mem_context", "mem_session_summary",
+		"mem_save", "mem_search", "mem_find_project", "mem_context", "mem_session_summary",
 		"mem_session_start", "mem_session_end", "mem_get_observation",
 		"mem_suggest_topic_key", "mem_capture_passive", "mem_save_prompt",
 		"mem_update",          // skills explicitly say "use mem_update when you have an exact ID to correct"
@@ -2254,7 +2254,7 @@ func TestNewServerWithToolsNilRegistersAll(t *testing.T) {
 	tools := srv.ListTools()
 
 	allTools := []string{
-		"mem_save", "mem_search", "mem_context", "mem_session_summary",
+		"mem_save", "mem_search", "mem_find_project", "mem_context", "mem_session_summary",
 		"mem_session_start", "mem_session_end", "mem_get_observation",
 		"mem_suggest_topic_key", "mem_capture_passive", "mem_save_prompt",
 		"mem_update", "mem_delete", "mem_stats", "mem_timeline", "mem_merge_projects",
@@ -2364,14 +2364,14 @@ func TestNewServerBackwardsCompatible(t *testing.T) {
 	srv := NewServer(s)
 	tools := srv.ListTools()
 
-	// 18 agent + 4 admin = 22 total.
-	if len(tools) != 22 {
-		t.Errorf("NewServer should register all 22 tools, got %d", len(tools))
+	// 19 agent + 4 admin = 23 total.
+	if len(tools) != 23 {
+		t.Errorf("NewServer should register all 23 tools, got %d", len(tools))
 	}
 }
 
 func TestProfileConsistency(t *testing.T) {
-	// Verify that agent + admin = all 22 tools
+	// Verify that agent + admin = all 23 tools
 	combined := make(map[string]bool)
 	for tool := range ProfileAgent {
 		combined[tool] = true
@@ -2380,9 +2380,9 @@ func TestProfileConsistency(t *testing.T) {
 		combined[tool] = true
 	}
 
-	// 18 agent + 4 admin = 22 total.
-	if len(combined) != 22 {
-		t.Errorf("agent + admin should cover all 22 tools, got %d", len(combined))
+	// 19 agent + 4 admin = 23 total.
+	if len(combined) != 23 {
+		t.Errorf("agent + admin should cover all 23 tools, got %d", len(combined))
 	}
 
 	// Verify no overlap between profiles
@@ -2710,9 +2710,9 @@ func TestNewServerWithConfig(t *testing.T) {
 		t.Fatal("expected MCP server instance")
 	}
 	tools := srv.ListTools()
-	// Should have all 22 tools (18 agent + 4 admin).
-	if len(tools) != 22 {
-		t.Errorf("NewServerWithConfig should register all 22 tools, got %d", len(tools))
+	// Should have all 23 tools (19 agent + 4 admin).
+	if len(tools) != 23 {
+		t.Errorf("NewServerWithConfig should register all 23 tools, got %d", len(tools))
 	}
 }
 

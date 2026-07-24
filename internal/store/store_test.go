@@ -8830,3 +8830,77 @@ func TestSanitizeFTS(t *testing.T) {
 		})
 	}
 }
+
+func TestSearchProjects(t *testing.T) {
+	st := newTestStore(t)
+
+	st.CreateSession("s1", "project-a", "/tmp/a")
+	st.CreateSession("s2", "project-b", "/tmp/b")
+	st.CreateSession("s3", "project-c", "/tmp/c")
+
+	// Seed 3 observations for project A
+	_, err := st.AddObservation(AddObservationParams{
+		SessionID: "s1", Type: "bugfix", Title: "Fix auth token expiration",
+		Content: "The auth middleware was dropping tokens", Project: "project-a",
+	})
+	if err != nil { t.Fatal(err) }
+	_, err = st.AddObservation(AddObservationParams{
+		SessionID: "s1", Type: "bugfix", Title: "Auth token validation",
+		Content: "Middleware should validate auth tokens", Project: "project-a",
+	})
+	if err != nil { t.Fatal(err) }
+	_, err = st.AddObservation(AddObservationParams{
+		SessionID: "s1", Type: "bugfix", Title: "Minor fix",
+		Content: "Just a minor auth fix in the middleware", Project: "project-a",
+	})
+	if err != nil { t.Fatal(err) }
+
+	// Seed 1 highly relevant observation for project B
+	_, err = st.AddObservation(AddObservationParams{
+		SessionID: "s2", Type: "bugfix", Title: "Auth middleware completely rewritten",
+		Content: "Auth middleware auth middleware auth middleware tokens", Project: "project-b",
+	})
+	if err != nil { t.Fatal(err) }
+
+	// Seed an irrelevant observation for project C
+	_, err = st.AddObservation(AddObservationParams{
+		SessionID: "s3", Type: "feature", Title: "Database migration",
+		Content: "Added new tables", Project: "project-c",
+	})
+	if err != nil { t.Fatal(err) }
+
+	// Force FTS sync if async (test setup normally does this, but just in case)
+	// We'll just search directly.
+
+	matches, err := st.SearchProjects("auth middleware", "all", 10)
+	if err != nil {
+		t.Fatalf("SearchProjects failed: %v", err)
+	}
+
+	if len(matches) != 2 {
+		t.Fatalf("Expected 2 projects, got %d: %+v", len(matches), matches)
+	}
+
+	// project-a should have 3 matches. project-b should have 1 match.
+	// project-b has more occurrences of the terms, so its top_rank might be better (more negative).
+	// Let's assert on the project names and counts.
+	hasA := false
+	hasB := false
+	for _, m := range matches {
+		if m.Project == "project-a" {
+			hasA = true
+			if m.MatchCount != 3 {
+				t.Errorf("project-a: expected 3 matches, got %d", m.MatchCount)
+			}
+		}
+		if m.Project == "project-b" {
+			hasB = true
+			if m.MatchCount != 1 {
+				t.Errorf("project-b: expected 1 match, got %d", m.MatchCount)
+			}
+		}
+	}
+	if !hasA || !hasB {
+		t.Errorf("Missing expected projects in results: %+v", matches)
+	}
+}
