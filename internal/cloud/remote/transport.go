@@ -34,29 +34,41 @@ func parseExtraHeaders(raw string) map[string]string {
 		return nil
 	}
 
-	pairs := strings.Split(raw, ",")
-	result := make(map[string]string, len(pairs))
+	parts := strings.Split(raw, ",")
+	result := make(map[string]string)
+	var currentKey string
 
-	for _, pair := range pairs {
-		pair = strings.TrimSpace(pair)
-		idx := strings.IndexByte(pair, ':')
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+
+		idx := strings.IndexByte(part, ':')
 		if idx < 0 {
-			log.Printf("[cloud] WARN ENGRAM_CLOUD_EXTRA_HEADERS: skipping malformed pair %q (missing colon)", pair)
+			if currentKey != "" {
+				result[currentKey] += ", " + part
+			} else {
+				log.Printf("[cloud] WARN ENGRAM_CLOUD_EXTRA_HEADERS: skipping malformed segment %q (missing colon)", part)
+			}
 			continue
 		}
-		key := strings.TrimSpace(pair[:idx])
-		value := strings.TrimSpace(pair[idx+1:])
+
+		key := strings.TrimSpace(part[:idx])
 		if key == "" {
+			currentKey = ""
 			continue
 		}
-		// Canonicalize the key (e.g. x-trace-id → X-Trace-Id).
+
 		canonical := http.CanonicalHeaderKey(key)
-		// Reject Authorization regardless of original casing.
 		if canonical == "Authorization" {
 			log.Printf("[cloud] WARN ENGRAM_CLOUD_EXTRA_HEADERS: refusing to override Authorization header")
+			currentKey = "" // Prevent appending trailing segments to a rejected header
 			continue
 		}
-		result[canonical] = value
+
+		currentKey = canonical
+		result[currentKey] = strings.TrimSpace(part[idx+1:])
 	}
 
 	if len(result) == 0 {
