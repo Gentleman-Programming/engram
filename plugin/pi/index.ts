@@ -887,8 +887,9 @@ export default function registerEngram(pi: ExtensionAPI) {
     if (sessionId) await ensureSessionBestEffort(sessionId);
 
     const summary = extractCompactedSummary(event);
+    let persistedSummary = false;
     if (sessionId && summary) {
-      await bestEffortEngramFetch("/observations", {
+      const saved = await bestEffortEngramFetch("/observations", {
         method: "POST",
         body: {
           session_id: sessionId,
@@ -900,10 +901,14 @@ export default function registerEngram(pi: ExtensionAPI) {
           topic_key: "session/compaction-recovery",
         },
       });
+      // bestEffortEngramFetch returns null on a failed/unreachable write. Treat
+      // only a confirmed response as persisted so a failed archive still falls
+      // back to the manual FIRST ACTION REQUIRED save instruction.
+      persistedSummary = saved !== null;
     }
 
     const data = await bestEffortEngramFetch<ContextResponse>(`/context?project=${encodeURIComponent(project)}`);
-    pendingRecoveryNotice = buildRecoveryNotice(project, data?.context);
+    pendingRecoveryNotice = buildRecoveryNotice(project, data?.context, persistedSummary);
   });
 
   pi.on("before_agent_start", async (event: AgentStartEvent, ctx: SessionContext) => {
