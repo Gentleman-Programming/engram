@@ -8830,3 +8830,43 @@ func TestSanitizeFTS(t *testing.T) {
 		})
 	}
 }
+
+func TestUpdateObservationReassignsProject(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s1", "alpha", "/tmp/alpha"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "config",
+		Title:     "movable",
+		Content:   "belongs elsewhere",
+		Project:   "alpha",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	newProject := "beta"
+	updated, err := s.UpdateObservation(id, UpdateObservationParams{
+		Project: &newProject,
+	})
+	if err != nil {
+		t.Fatalf("update observation: %v", err)
+	}
+	if derefString(updated.Project) != "beta" {
+		t.Fatalf("project reassignment did not apply; got project=%q, want %q", derefString(updated.Project), "beta")
+	}
+
+	// Confirm it persisted on re-read.
+	got, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("get observation: %v", err)
+	}
+	if derefString(got.Project) != "beta" {
+		t.Fatalf("reassignment not persisted; got project=%q, want %q", derefString(got.Project), "beta")
+	}
+}
