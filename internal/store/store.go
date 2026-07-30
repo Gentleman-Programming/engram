@@ -3943,12 +3943,7 @@ func (s *Store) FormatContextWithOptions(project, scope string, opts ContextOpti
 	if len(pinned) > 0 {
 		b.WriteString("### Pinned\n")
 		for _, obs := range pinned {
-			if opts.Compact {
-				fmt.Fprintf(&b, "- [%s] **%s**\n", obs.Type, obs.Title)
-			} else {
-				fmt.Fprintf(&b, "- [%s] **%s**: %s\n",
-					obs.Type, obs.Title, truncate(obs.Content, 300))
-			}
+			writeObservationBullet(&b, obs, opts.Compact)
 		}
 		b.WriteString("\n")
 	}
@@ -3956,12 +3951,7 @@ func (s *Store) FormatContextWithOptions(project, scope string, opts ContextOpti
 	if len(observations) > 0 {
 		b.WriteString("### Recent Observations\n")
 		for _, obs := range observations {
-			if opts.Compact {
-				fmt.Fprintf(&b, "- [%s] **%s**\n", obs.Type, obs.Title)
-			} else {
-				fmt.Fprintf(&b, "- [%s] **%s**: %s\n",
-					obs.Type, obs.Title, truncate(obs.Content, 300))
-			}
+			writeObservationBullet(&b, obs, opts.Compact)
 		}
 		b.WriteString("\n")
 	}
@@ -4028,6 +4018,21 @@ func (s *Store) FormatCompactionContext(sessionID string) (string, error) {
 	}
 
 	return b.String(), nil
+}
+
+// writeObservationBullet renders one observation-shaped bullet shared by the
+// "### Pinned" and "### Recent Observations" loops in FormatContextWithOptions,
+// so both sections stay byte-for-byte in sync — a future formatting change
+// (truncate length, redaction) now only has one place to land instead of two
+// copies that can drift apart. When compact is true it drops the inline
+// content preview; otherwise it appends up to 300 chars of obs.Content.
+func writeObservationBullet(b *strings.Builder, obs Observation, compact bool) {
+	if compact {
+		fmt.Fprintf(b, "- [%s] **%s**\n", obs.Type, obs.Title)
+	} else {
+		fmt.Fprintf(b, "- [%s] **%s**: %s\n",
+			obs.Type, obs.Title, truncate(obs.Content, 300))
+	}
 }
 
 // ─── Export / Import ─────────────────────────────────────────────────────────

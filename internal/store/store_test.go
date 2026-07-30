@@ -12421,6 +12421,57 @@ func TestUpdateObservationAcceptsPrivateTagOnlyTitle(t *testing.T) {
 // now a thin wrapper delegating to FormatContextWithOptions with a
 // zero-value ContextOptions{}.
 
+// TestFormatContextWithOptionsErrorBranches exercises the four early
+// `return "", err` branches in FormatContextWithOptions (Sessions, Pinned,
+// Observations, Prompts) that TestFormatContextWithOptions (below) never
+// reaches because every fetch there succeeds. Each subtest closes the
+// store's DB first, so whichever fetch runs first fails — per the fetch
+// order in FormatContextWithOptions (Sessions, then Pinned, then
+// Observations, then Prompts), each subtest omits (opts < 0) every section
+// ahead of the one under test so that section's fetch is the one that
+// actually runs and fails.
+func TestFormatContextWithOptionsErrorBranches(t *testing.T) {
+	t.Run("sessions fetch error", func(t *testing.T) {
+		s := newTestStore(t)
+		if err := s.Close(); err != nil {
+			t.Fatalf("close store: %v", err)
+		}
+		if _, err := s.FormatContextWithOptions("engram", "project", ContextOptions{}); err == nil {
+			t.Fatal("expected error when the Sessions fetch fails on a closed db")
+		}
+	})
+
+	t.Run("pinned fetch error", func(t *testing.T) {
+		s := newTestStore(t)
+		if err := s.Close(); err != nil {
+			t.Fatalf("close store: %v", err)
+		}
+		if _, err := s.FormatContextWithOptions("engram", "project", ContextOptions{Sessions: -1}); err == nil {
+			t.Fatal("expected error when the Pinned fetch fails on a closed db")
+		}
+	})
+
+	t.Run("observations fetch error", func(t *testing.T) {
+		s := newTestStore(t)
+		if err := s.Close(); err != nil {
+			t.Fatalf("close store: %v", err)
+		}
+		if _, err := s.FormatContextWithOptions("engram", "project", ContextOptions{Sessions: -1, Pinned: -1}); err == nil {
+			t.Fatal("expected error when the Observations fetch fails on a closed db")
+		}
+	})
+
+	t.Run("prompts fetch error", func(t *testing.T) {
+		s := newTestStore(t)
+		if err := s.Close(); err != nil {
+			t.Fatalf("close store: %v", err)
+		}
+		if _, err := s.FormatContextWithOptions("engram", "project", ContextOptions{Sessions: -1, Pinned: -1, Observations: -1}); err == nil {
+			t.Fatal("expected error when the Prompts fetch fails on a closed db")
+		}
+	})
+}
+
 // TestFormatContextWithOptions seeds enough rows per section (more than
 // every legacy default) so defaults, explicit caps, and omission are all
 // distinguishable from "everything". cfg.MaxContextResults is pinned to 3
