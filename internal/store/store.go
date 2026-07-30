@@ -2711,7 +2711,21 @@ func (s *Store) RecentObservations(project, scope string, limit int) ([]Observat
 	return s.queryObservations(query, args...)
 }
 
+// PinnedObservations returns every pinned observation for project/scope,
+// most-recent-first, with no row limit — pinning is an explicit, hand-bounded
+// action, so returning all pinned rows has always been the legacy default.
+// Callers that need a cap (e.g. FormatContextWithOptions via
+// ContextOptions.Pinned) use the unexported pinnedObservationsLimit helper,
+// which this delegates to with limit=0 ("no LIMIT clause", i.e. unbounded).
 func (s *Store) PinnedObservations(project, scope string) ([]Observation, error) {
+	return s.pinnedObservationsLimit(project, scope, 0)
+}
+
+// pinnedObservationsLimit is the shared query behind PinnedObservations. A
+// limit <= 0 means "no LIMIT clause" (every pinned row, matching
+// PinnedObservations' historical unbounded behavior); a positive limit caps
+// the result via SQL LIMIT.
+func (s *Store) pinnedObservationsLimit(project, scope string, limit int) ([]Observation, error) {
 	project, _ = NormalizeProject(project)
 
 	query := `
@@ -2731,6 +2745,10 @@ func (s *Store) PinnedObservations(project, scope string) ([]Observation, error)
 	}
 
 	query += " ORDER BY datetime(o.created_at) DESC, o.id DESC"
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
 	return s.queryObservations(query, args...)
 }
 
@@ -3802,25 +3820,96 @@ SELECT 1 FROM (
 
 // ─── Context Formatting ─────────────────────────────────────────────────────
 
+// ContextOptions tunes FormatContextWithOptions, capping how many rows each
+// section of the "## Memory from Previous Sessions" block renders.
+//
+// Every field follows the same convention:
+//   - 0  uses that section's legacy default.
+//   - >0 caps the section at that many rows.
+//   - <0 omits the section entirely, including its "### ..." header.
+//
+// The legacy defaults are Sessions 5, Prompts 10, Observations
+// s.cfg.MaxContextResults, and Pinned unlimited (no SQL LIMIT) — exactly
+// what FormatContext has always produced, so a zero-value ContextOptions{}
+// reproduces FormatContext's output byte-for-byte. See issue #163
+// (bounded-size injection).
+type ContextOptions struct {
+	// Observations caps the "### Recent Observations" section (unpinned).
+	Observations int
+
+	// Prompts caps the "### Recent User Prompts" section.
+	Prompts int
+
+	// Sessions caps the "### Recent Sessions" section.
+	Sessions int
+
+	// Pinned caps the "### Pinned" section.
+	Pinned int
+
+	// Compact drops the inline content preview from observation-shaped
+	// bullets — both "### Pinned" and "### Recent Observations" render
+	// `- [type] **title**` instead of `- [type] **title**: <300 chars of
+	// body>`. Sessions and prompts bullets are unaffected.
+	Compact bool
+}
+
+// FormatContext is a thin wrapper around FormatContextWithOptions using a
+// zero-value ContextOptions, preserving the pre-ContextOptions call
+// signature so existing callers and tests keep working unchanged.
 func (s *Store) FormatContext(project, scope string) (string, error) {
-	sessions, err := s.RecentSessions(project, 5)
-	if err != nil {
-		return "", err
+	return s.FormatContextWithOptions(project, scope, ContextOptions{})
+}
+
+// FormatContextWithOptions renders the "## Memory from Previous Sessions"
+// markdown block for the given project/scope, honoring the per-section caps
+// and Compact rendering in opts. See ContextOptions for the cap convention.
+func (s *Store) FormatContextWithOptions(project, scope string, opts ContextOptions) (string, error) {
+	var (
+		sessions     []SessionSummary
+		pinned       []Observation
+		observations []Observation
+		prompts      []Prompt
+		err          error
+	)
+
+	if opts.Sessions >= 0 {
+		limit := opts.Sessions
+		if limit == 0 {
+			limit = 5
+		}
+		if sessions, err = s.RecentSessions(project, limit); err != nil {
+			return "", err
+		}
 	}
 
-	pinned, err := s.PinnedObservations(project, scope)
-	if err != nil {
-		return "", err
+	if opts.Pinned == 0 {
+		if pinned, err = s.PinnedObservations(project, scope); err != nil {
+			return "", err
+		}
+	} else if opts.Pinned > 0 {
+		if pinned, err = s.pinnedObservationsLimit(project, scope, opts.Pinned); err != nil {
+			return "", err
+		}
 	}
 
-	observations, err := s.recentUnpinnedObservations(project, scope, s.cfg.MaxContextResults)
-	if err != nil {
-		return "", err
+	if opts.Observations >= 0 {
+		limit := opts.Observations
+		if limit == 0 {
+			limit = s.cfg.MaxContextResults
+		}
+		if observations, err = s.recentUnpinnedObservations(project, scope, limit); err != nil {
+			return "", err
+		}
 	}
 
-	prompts, err := s.RecentPrompts(project, 10)
-	if err != nil {
-		return "", err
+	if opts.Prompts >= 0 {
+		limit := opts.Prompts
+		if limit == 0 {
+			limit = 10
+		}
+		if prompts, err = s.RecentPrompts(project, limit); err != nil {
+			return "", err
+		}
 	}
 
 	if len(sessions) == 0 && len(pinned) == 0 && len(observations) == 0 && len(prompts) == 0 {
@@ -3854,8 +3943,12 @@ func (s *Store) FormatContext(project, scope string) (string, error) {
 	if len(pinned) > 0 {
 		b.WriteString("### Pinned\n")
 		for _, obs := range pinned {
-			fmt.Fprintf(&b, "- [%s] **%s**: %s\n",
-				obs.Type, obs.Title, truncate(obs.Content, 300))
+			if opts.Compact {
+				fmt.Fprintf(&b, "- [%s] **%s**\n", obs.Type, obs.Title)
+			} else {
+				fmt.Fprintf(&b, "- [%s] **%s**: %s\n",
+					obs.Type, obs.Title, truncate(obs.Content, 300))
+			}
 		}
 		b.WriteString("\n")
 	}
@@ -3863,8 +3956,12 @@ func (s *Store) FormatContext(project, scope string) (string, error) {
 	if len(observations) > 0 {
 		b.WriteString("### Recent Observations\n")
 		for _, obs := range observations {
-			fmt.Fprintf(&b, "- [%s] **%s**: %s\n",
-				obs.Type, obs.Title, truncate(obs.Content, 300))
+			if opts.Compact {
+				fmt.Fprintf(&b, "- [%s] **%s**\n", obs.Type, obs.Title)
+			} else {
+				fmt.Fprintf(&b, "- [%s] **%s**: %s\n",
+					obs.Type, obs.Title, truncate(obs.Content, 300))
+			}
 		}
 		b.WriteString("\n")
 	}

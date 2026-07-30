@@ -12412,3 +12412,260 @@ func TestUpdateObservationAcceptsPrivateTagOnlyTitle(t *testing.T) {
 		t.Fatalf("expected redacted title in update payload, got %#v", payload["title"])
 	}
 }
+
+// ─── ContextOptions tests (issue #163) ──────────────────────────────────────
+//
+// FormatContextWithOptions caps each of the 4 sections independently via
+// ContextOptions (0 = legacy default, >0 = cap, <0 = omit the section and
+// its header) and can compact observation-shaped bullets. FormatContext is
+// now a thin wrapper delegating to FormatContextWithOptions with a
+// zero-value ContextOptions{}.
+
+// TestFormatContextWithOptions seeds enough rows per section (more than
+// every legacy default) so defaults, explicit caps, and omission are all
+// distinguishable from "everything". cfg.MaxContextResults is pinned to 3
+// so the Observations legacy default is a known, assertable number.
+func TestFormatContextWithOptions(t *testing.T) {
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = t.TempDir()
+	cfg.DedupeWindow = time.Hour
+	cfg.MaxContextResults = 3
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	// 7 sessions: more than the legacy Sessions=5 default.
+	for i := 0; i < 7; i++ {
+		if err := s.CreateSession(fmt.Sprintf("ctx-sess-%d", i), "engram", "/tmp/engram"); err != nil {
+			t.Fatalf("create session %d: %v", i, err)
+		}
+	}
+
+	// 12 prompts: more than the legacy Prompts=10 default.
+	for i := 0; i < 12; i++ {
+		if _, err := s.AddPrompt(AddPromptParams{
+			SessionID: "ctx-sess-0",
+			Content:   fmt.Sprintf("prompt body %d", i),
+			Project:   "engram",
+		}); err != nil {
+			t.Fatalf("add prompt %d: %v", i, err)
+		}
+	}
+
+	// 5 unpinned observations with long multi-line bodies: more than
+	// cfg.MaxContextResults=3, and enough content for Compact to visibly drop.
+	for i := 0; i < 5; i++ {
+		if _, err := s.AddObservation(AddObservationParams{
+			SessionID: "ctx-sess-0",
+			Type:      "decision",
+			Title:     fmt.Sprintf("obs-%d", i),
+			Content:   fmt.Sprintf("## Goal\nLine one for obs %d\n\n## Details\nLorem ipsum dolor sit amet, a long body Compact mode should drop entirely.", i),
+			Project:   "engram",
+			Scope:     "project",
+		}); err != nil {
+			t.Fatalf("add obs %d: %v", i, err)
+		}
+	}
+
+	// 4 pinned observations: PinnedObservations has no legacy cap, so all 4
+	// must survive the zero-value default and only a positive Pinned should
+	// trim them.
+	for i := 0; i < 4; i++ {
+		id, err := s.AddObservation(AddObservationParams{
+			SessionID: "ctx-sess-0",
+			Type:      "architecture",
+			Title:     fmt.Sprintf("pin-%d", i),
+			Content:   fmt.Sprintf("Pinned body %d with a Lorem ipsum preview Compact should drop.", i),
+			Project:   "engram",
+			Scope:     "project",
+		})
+		if err != nil {
+			t.Fatalf("add pinned obs %d: %v", i, err)
+		}
+		if err := s.PinObservation(id); err != nil {
+			t.Fatalf("pin obs %d: %v", i, err)
+		}
+	}
+
+	legacyCtx, err := s.FormatContext("engram", "project")
+	if err != nil {
+		t.Fatalf("format context legacy: %v", err)
+	}
+
+	// ── Zero-value: the mandating test. FormatContextWithOptions with a
+	// zero-value ContextOptions must reproduce FormatContext byte-for-byte,
+	// since FormatContext is now defined purely as that delegation.
+	t.Run("zero value matches legacy FormatContext byte-for-byte", func(t *testing.T) {
+		got, err := s.FormatContextWithOptions("engram", "project", ContextOptions{})
+		if err != nil {
+			t.Fatalf("format context zero-value: %v", err)
+		}
+		if got != legacyCtx {
+			t.Fatalf("zero-value ContextOptions must match legacy FormatContext output.\nzero-value:\n%s\nlegacy:\n%s", got, legacyCtx)
+		}
+	})
+
+	// ── The zero-value output must actually carry the documented legacy
+	// numbers (5/10/cfg.MaxContextResults/unlimited), not just agree with
+	// itself — guards against both defaults drifting together silently.
+	t.Run("zero value applies the documented legacy defaults", func(t *testing.T) {
+		if got := strings.Count(legacyCtx, "- **engram** ("); got != 5 {
+			t.Fatalf("expected legacy default of 5 sessions, got %d\n%s", got, legacyCtx)
+		}
+		if got := strings.Count(legacyCtx, "prompt body "); got != 10 {
+			t.Fatalf("expected legacy default of 10 prompts, got %d\n%s", got, legacyCtx)
+		}
+		if got := strings.Count(legacyCtx, "- [decision] **obs-"); got != 3 {
+			t.Fatalf("expected legacy default of cfg.MaxContextResults=3 observations, got %d\n%s", got, legacyCtx)
+		}
+		if got := strings.Count(legacyCtx, "- [architecture] **pin-"); got != 4 {
+			t.Fatalf("expected legacy default of unlimited (4) pinned, got %d\n%s", got, legacyCtx)
+		}
+	})
+
+	t.Run("positive Sessions caps only sessions", func(t *testing.T) {
+		got, err := s.FormatContextWithOptions("engram", "project", ContextOptions{Sessions: 2})
+		if err != nil {
+			t.Fatalf("format context Sessions=2: %v", err)
+		}
+		if n := strings.Count(got, "- **engram** ("); n != 2 {
+			t.Fatalf("expected 2 sessions under Sessions=2, got %d\n%s", n, got)
+		}
+		if n := strings.Count(got, "prompt body "); n != 10 {
+			t.Fatalf("Sessions cap must not affect prompts, got %d\n%s", n, got)
+		}
+		if n := strings.Count(got, "- [decision] **obs-"); n != 3 {
+			t.Fatalf("Sessions cap must not affect observations, got %d\n%s", n, got)
+		}
+		if n := strings.Count(got, "- [architecture] **pin-"); n != 4 {
+			t.Fatalf("Sessions cap must not affect pinned, got %d\n%s", n, got)
+		}
+	})
+
+	t.Run("negative Sessions omits the section and its header", func(t *testing.T) {
+		got, err := s.FormatContextWithOptions("engram", "project", ContextOptions{Sessions: -1})
+		if err != nil {
+			t.Fatalf("format context Sessions=-1: %v", err)
+		}
+		if strings.Contains(got, "### Recent Sessions") {
+			t.Fatalf("expected Recent Sessions header omitted, got:\n%s", got)
+		}
+		if strings.Contains(got, "- **engram** (") {
+			t.Fatalf("expected no session bullets, got:\n%s", got)
+		}
+		if !strings.Contains(got, "### Recent Observations") {
+			t.Fatalf("Sessions omission must not touch other sections, got:\n%s", got)
+		}
+	})
+
+	t.Run("positive Prompts caps only prompts", func(t *testing.T) {
+		got, err := s.FormatContextWithOptions("engram", "project", ContextOptions{Prompts: 3})
+		if err != nil {
+			t.Fatalf("format context Prompts=3: %v", err)
+		}
+		if n := strings.Count(got, "prompt body "); n != 3 {
+			t.Fatalf("expected 3 prompts under Prompts=3, got %d\n%s", n, got)
+		}
+		if n := strings.Count(got, "- **engram** ("); n != 5 {
+			t.Fatalf("Prompts cap must not affect sessions, got %d\n%s", n, got)
+		}
+	})
+
+	t.Run("negative Prompts omits the section and its header", func(t *testing.T) {
+		got, err := s.FormatContextWithOptions("engram", "project", ContextOptions{Prompts: -1})
+		if err != nil {
+			t.Fatalf("format context Prompts=-1: %v", err)
+		}
+		if strings.Contains(got, "### Recent User Prompts") {
+			t.Fatalf("expected Recent User Prompts header omitted, got:\n%s", got)
+		}
+		if strings.Contains(got, "prompt body ") {
+			t.Fatalf("expected no prompt bullets, got:\n%s", got)
+		}
+		if !strings.Contains(got, "### Pinned") {
+			t.Fatalf("Prompts omission must not touch other sections, got:\n%s", got)
+		}
+	})
+
+	t.Run("positive Observations caps only observations", func(t *testing.T) {
+		got, err := s.FormatContextWithOptions("engram", "project", ContextOptions{Observations: 1})
+		if err != nil {
+			t.Fatalf("format context Observations=1: %v", err)
+		}
+		if n := strings.Count(got, "- [decision] **obs-"); n != 1 {
+			t.Fatalf("expected 1 observation under Observations=1, got %d\n%s", n, got)
+		}
+		if n := strings.Count(got, "- [architecture] **pin-"); n != 4 {
+			t.Fatalf("Observations cap must not affect pinned, got %d\n%s", n, got)
+		}
+	})
+
+	t.Run("negative Observations omits the section and its header", func(t *testing.T) {
+		got, err := s.FormatContextWithOptions("engram", "project", ContextOptions{Observations: -1})
+		if err != nil {
+			t.Fatalf("format context Observations=-1: %v", err)
+		}
+		if strings.Contains(got, "### Recent Observations") {
+			t.Fatalf("expected Recent Observations header omitted, got:\n%s", got)
+		}
+		if strings.Contains(got, "- [decision] **obs-") {
+			t.Fatalf("expected no observation bullets, got:\n%s", got)
+		}
+		if !strings.Contains(got, "### Pinned") {
+			t.Fatalf("Observations omission must not touch other sections, got:\n%s", got)
+		}
+	})
+
+	t.Run("positive Pinned caps only pinned", func(t *testing.T) {
+		got, err := s.FormatContextWithOptions("engram", "project", ContextOptions{Pinned: 2})
+		if err != nil {
+			t.Fatalf("format context Pinned=2: %v", err)
+		}
+		if n := strings.Count(got, "- [architecture] **pin-"); n != 2 {
+			t.Fatalf("expected 2 pinned under Pinned=2, got %d\n%s", n, got)
+		}
+		if n := strings.Count(got, "- [decision] **obs-"); n != 3 {
+			t.Fatalf("Pinned cap must not affect observations, got %d\n%s", n, got)
+		}
+	})
+
+	t.Run("negative Pinned omits the section and its header", func(t *testing.T) {
+		got, err := s.FormatContextWithOptions("engram", "project", ContextOptions{Pinned: -1})
+		if err != nil {
+			t.Fatalf("format context Pinned=-1: %v", err)
+		}
+		if strings.Contains(got, "### Pinned") {
+			t.Fatalf("expected Pinned header omitted, got:\n%s", got)
+		}
+		if strings.Contains(got, "- [architecture] **pin-") {
+			t.Fatalf("expected no pinned bullets, got:\n%s", got)
+		}
+		if !strings.Contains(got, "### Recent Observations") {
+			t.Fatalf("Pinned omission must not touch other sections, got:\n%s", got)
+		}
+	})
+
+	t.Run("Compact drops body previews from observation and pinned bullets only", func(t *testing.T) {
+		got, err := s.FormatContextWithOptions("engram", "project", ContextOptions{Compact: true})
+		if err != nil {
+			t.Fatalf("format context Compact: %v", err)
+		}
+		if strings.Contains(got, "Lorem ipsum") {
+			t.Fatalf("Compact should drop body previews, got:\n%s", got)
+		}
+		if !strings.Contains(got, "- [decision] **obs-4**\n") {
+			t.Fatalf("Compact should keep observation titles bullet-only, got:\n%s", got)
+		}
+		if !strings.Contains(got, "- [architecture] **pin-3**\n") {
+			t.Fatalf("Compact should keep pinned titles bullet-only, got:\n%s", got)
+		}
+		if !strings.Contains(got, "prompt body ") {
+			t.Fatalf("Compact must not affect prompt bullets, got:\n%s", got)
+		}
+		if len(got) >= len(legacyCtx) {
+			t.Fatalf("Compact output (%d) should be smaller than legacy output (%d)", len(got), len(legacyCtx))
+		}
+	})
+}
