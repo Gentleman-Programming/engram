@@ -901,7 +901,22 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 	}
 	scope := r.URL.Query().Get("scope")
 
-	context, err := s.store.FormatContext(resolved.Project, scope)
+	// Per-section caps via store.ContextOptions: 0 (param absent/empty/
+	// unparseable) keeps FormatContext's legacy default, >0 caps the
+	// section, and <0 is a DELIBERATE way to omit the section (and its
+	// "### ..." header) entirely — not a bug to be filtered out like the
+	// `err == nil && n > 0` guard in the upstream reference this was
+	// adapted from (PR #162). queryInt/queryBool already fall back to the
+	// zero value on any bad input, so garbage query params never 4xx here.
+	opts := store.ContextOptions{
+		Observations: queryInt(r, "observations", 0),
+		Prompts:      queryInt(r, "prompts", 0),
+		Sessions:     queryInt(r, "sessions", 0),
+		Pinned:       queryInt(r, "pinned", 0),
+		Compact:      queryBool(r, "compact", false),
+	}
+
+	context, err := s.store.FormatContextWithOptions(resolved.Project, scope, opts)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return

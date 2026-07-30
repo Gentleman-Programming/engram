@@ -493,6 +493,123 @@ func TestCoreReadHandlersAndHelpersE2E(t *testing.T) {
 	endResp.Body.Close()
 }
 
+// TestContextQueryParamsE2E covers the store.ContextOptions query params on
+// GET /context (feat/context-size-cap): observations/prompts/sessions/pinned
+// (signed int caps) and compact (bool). Convention: 0 = legacy default,
+// >0 = cap, <0 = omit the section (and its header) entirely.
+func TestContextQueryParamsE2E(t *testing.T) {
+	s, ts := newE2EServer(t)
+	client := ts.Client()
+
+	create := postJSON(t, client, ts.URL+"/sessions", map[string]any{
+		"id":      "s-ctx-params",
+		"project": "engram",
+	})
+	if create.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 creating session, got %d", create.StatusCode)
+	}
+	create.Body.Close()
+
+	const bodyMarker = "UNIQUE_CONTEXT_PARAMS_BODY_MARKER_9f3a"
+	obsResp := postJSON(t, client, ts.URL+"/observations", map[string]any{
+		"session_id": "s-ctx-params",
+		"type":       "decision",
+		"title":      "Context params observation",
+		"content":    "Long body so compact mode has something to drop. " + bodyMarker,
+		"project":    "engram",
+		"scope":      "project",
+	})
+	if obsResp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 creating observation, got %d", obsResp.StatusCode)
+	}
+	obsResp.Body.Close()
+
+	promptResp := postJSON(t, client, ts.URL+"/prompts", map[string]any{
+		"session_id": "s-ctx-params",
+		"content":    "prompt for context params test",
+		"project":    "engram",
+	})
+	if promptResp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 creating prompt, got %d", promptResp.StatusCode)
+	}
+	promptResp.Body.Close()
+
+	// ── No params: byte-identical to the legacy FormatContext call — the
+	// contract must not change for existing callers.
+	defaultResp, err := client.Get(ts.URL + "/context?project=engram&scope=project")
+	if err != nil {
+		t.Fatalf("context default: %v", err)
+	}
+	if defaultResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 context default, got %d", defaultResp.StatusCode)
+	}
+	defaultData := decodeJSON[map[string]string](t, defaultResp)
+
+	legacy, err := s.FormatContext("engram", "project")
+	if err != nil {
+		t.Fatalf("legacy FormatContext: %v", err)
+	}
+	if defaultData["context"] != legacy {
+		t.Fatalf("no-params /context should match legacy FormatContext exactly.\ngot:\n%s\nwant:\n%s", defaultData["context"], legacy)
+	}
+	if !strings.Contains(defaultData["context"], bodyMarker) {
+		t.Fatalf("default context should include the observation body preview, got:\n%s", defaultData["context"])
+	}
+	if !strings.Contains(defaultData["context"], "### Recent User Prompts") {
+		t.Fatalf("default context should include the prompts section, got:\n%s", defaultData["context"])
+	}
+
+	// ── compact=1&observations=1: strictly smaller than default, no body preview.
+	compactResp, err := client.Get(ts.URL + "/context?project=engram&scope=project&compact=1&observations=1")
+	if err != nil {
+		t.Fatalf("context compact: %v", err)
+	}
+	if compactResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 context compact, got %d", compactResp.StatusCode)
+	}
+	compactData := decodeJSON[map[string]string](t, compactResp)
+	if len(compactData["context"]) >= len(defaultData["context"]) {
+		t.Fatalf("compact context (%d) should be smaller than default (%d)",
+			len(compactData["context"]), len(defaultData["context"]))
+	}
+	if strings.Contains(compactData["context"], bodyMarker) {
+		t.Fatalf("compact context should not include the observation body preview, got:\n%s", compactData["context"])
+	}
+
+	// ── prompts=-1: negative cap omits the prompts section AND its header
+	// (this is the behavior PR #162's `err == nil && n > 0` parsing would
+	// have silently discarded — negatives must reach the store as-is).
+	noPromptsResp, err := client.Get(ts.URL + "/context?project=engram&scope=project&prompts=-1")
+	if err != nil {
+		t.Fatalf("context prompts=-1: %v", err)
+	}
+	if noPromptsResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 context prompts=-1, got %d", noPromptsResp.StatusCode)
+	}
+	noPromptsData := decodeJSON[map[string]string](t, noPromptsResp)
+	if strings.Contains(noPromptsData["context"], "### Recent User Prompts") {
+		t.Fatalf("prompts=-1 should drop the '### Recent User Prompts' header, got:\n%s", noPromptsData["context"])
+	}
+	if strings.Contains(noPromptsData["context"], "prompt for context params test") {
+		t.Fatalf("prompts=-1 should drop prompt content, got:\n%s", noPromptsData["context"])
+	}
+
+	// ── observations=abc: unparseable value is ignored (never a 4xx), falls
+	// back to the same zero-value default as the no-params request.
+	garbageResp, err := client.Get(ts.URL + "/context?project=engram&scope=project&observations=abc")
+	if err != nil {
+		t.Fatalf("context garbage observations: %v", err)
+	}
+	if garbageResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 context garbage observations, got %d", garbageResp.StatusCode)
+	}
+	garbageData := decodeJSON[map[string]string](t, garbageResp)
+	if garbageData["context"] != defaultData["context"] {
+		t.Fatalf("observations=abc should be ignored and match the default output.\ngot:\n%s\nwant:\n%s",
+			garbageData["context"], defaultData["context"])
+	}
+}
+
 func TestValidationAndImportExportErrorsE2E(t *testing.T) {
 	_, ts := newE2EServer(t)
 	client := ts.Client()
