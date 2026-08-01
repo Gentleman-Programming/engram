@@ -186,7 +186,20 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 
 ### Stats / Diagnostics
 
-- `GET /stats` — Memory statistics
+- `GET /stats` — Memory statistics. Returns:
+  ```json
+  {
+    "total_sessions": 120,
+    "total_observations": 100,
+    "total_created": 107,
+    "max_observation_id": 112,
+    "total_prompts": 234,
+    "projects": ["project-a", "project-b"]
+  }
+  ```
+  - `total_observations` — active (non-deleted) observations
+  - `total_created` — all observations ever created, including soft-deleted
+  - `max_observation_id` — highest ID ever assigned (IDs are autoincrement, never reused)
 - `GET /doctor` — Read-only operational diagnostics. Query: `?project=X&check=CHECK_CODE`
   - Returns the same diagnostic report envelope as `engram doctor --json` and MCP `mem_doctor`
   - `project` and `check` are optional; omitted `project` uses current project detection
