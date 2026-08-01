@@ -143,6 +143,8 @@ type SessionSummary struct {
 type Stats struct {
 	TotalSessions     int      `json:"total_sessions"`
 	TotalObservations int      `json:"total_observations"`
+	TotalCreated      int      `json:"total_created"`
+	MaxObservationID  int64    `json:"max_observation_id"`
 	TotalPrompts      int      `json:"total_prompts"`
 	Projects          []string `json:"projects"`
 }
@@ -3242,6 +3244,8 @@ func (s *Store) Stats() (*Stats, error) {
 
 	s.db.QueryRow("SELECT COUNT(*) FROM sessions").Scan(&stats.TotalSessions)
 	s.db.QueryRow("SELECT COUNT(*) FROM observations WHERE deleted_at IS NULL").Scan(&stats.TotalObservations)
+	s.db.QueryRow("SELECT COUNT(*) FROM observations").Scan(&stats.TotalCreated)
+	s.db.QueryRow("SELECT COALESCE(MAX(id), 0) FROM observations").Scan(&stats.MaxObservationID)
 	s.db.QueryRow("SELECT COUNT(*) FROM user_prompts").Scan(&stats.TotalPrompts)
 
 	rows, err := s.queryItHook(s.db, "SELECT project FROM observations WHERE project IS NOT NULL AND deleted_at IS NULL GROUP BY project ORDER BY MAX(created_at) DESC")
