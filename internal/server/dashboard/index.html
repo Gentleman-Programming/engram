@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Engram Dashboard</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --bg2: #161b22;
+  --bg3: #21262d;
+  --border: #30363d;
+  --fg: #c9d1d9;
+  --fg2: #8b949e;
+  --accent: #58a6ff;
+  --danger: #f85149;
+  --green: #3fb950;
+  --yellow: #d2991d;
+  --purple: #bc8cff;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--fg); min-height: 100vh; display: flex; }
+#sidebar { width: 260px; min-width: 260px; background: var(--bg2); border-right: 1px solid var(--border); display: flex; flex-direction: column; padding: 16px; gap: 12px; }
+#sidebar h2 { font-size: 16px; color: var(--accent); display: flex; align-items: center; gap: 8px; }
+#sidebar h2 svg { width: 20px; height: 20px; }
+.stats { font-size: 12px; color: var(--fg2); display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.stats .val { color: var(--fg); font-weight: 600; }
+.project-list { list-style: none; flex: 1; overflow-y: auto; }
+.project-list li { padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 13px; color: var(--fg2); display: flex; justify-content: space-between; transition: background .1s; }
+.project-list li:hover { background: var(--bg3); }
+.project-list li.active { background: var(--bg3); color: var(--accent); font-weight: 600; }
+.project-list li .count { font-size: 11px; opacity: 0.7; }
+#search-bar { width: 100%; padding: 8px 12px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg3); color: var(--fg); font-size: 13px; outline: none; }
+#search-bar:focus { border-color: var(--accent); }
+#main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+#header { padding: 12px 24px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+#header h1 { font-size: 18px; font-weight: 600; }
+#header .actions { display: flex; gap: 8px; }
+#header .actions button { padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg3); color: var(--fg); cursor: pointer; font-size: 12px; }
+#header .actions button:hover { background: var(--border); }
+#obs-list { flex: 1; overflow-y: auto; padding: 16px 24px; }
+.obs-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin-bottom: 10px; cursor: pointer; transition: border-color .1s; }
+.obs-card:hover { border-color: var(--accent); }
+.obs-card .meta { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; font-size: 11px; color: var(--fg2); }
+.obs-card .meta .type-badge { padding: 1px 8px; border-radius: 10px; font-size: 10px; font-weight: 600; text-transform: uppercase; }
+.type-badge { background: var(--bg3); }
+.obs-card .title { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+.obs-card .preview { font-size: 13px; color: var(--fg2); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+.obs-card .project-tag { color: var(--purple); font-size: 11px; }
+#detail-panel { border-top: 1px solid var(--border); background: var(--bg2); max-height: 50vh; overflow-y: auto; display: none; }
+#detail-panel.open { display: block; }
+#detail-panel .detail-header { padding: 14px 24px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: flex-start; }
+#detail-panel .detail-body { padding: 16px 24px; white-space: pre-wrap; font-size: 13px; line-height: 1.6; }
+.detail-actions { display: flex; gap: 8px; }
+.detail-actions button { padding: 5px 12px; border-radius: 6px; border: 1px solid var(--border); font-size: 12px; cursor: pointer; }
+.btn-edit { background: var(--accent); color: #000; border-color: var(--accent); }
+.btn-delete { background: transparent; color: var(--danger); border-color: var(--danger); }
+.btn-close { background: var(--bg3); color: var(--fg); }
+#edit-modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 100; justify-content: center; align-items: flex-start; padding-top: 60px; }
+#edit-modal.open { display: flex; }
+#edit-modal .modal-box { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; width: 700px; max-width: 90vw; max-height: 80vh; display: flex; flex-direction: column; }
+#edit-modal .modal-header { padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+#edit-modal .modal-body { padding: 16px 20px; flex: 1; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
+#edit-modal .modal-body input, #edit-modal .modal-body textarea { width: 100%; padding: 8px 12px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg3); color: var(--fg); font-family: monospace; font-size: 13px; }
+#edit-modal .modal-body textarea { flex: 1; min-height: 200px; resize: vertical; }
+#edit-modal .modal-body select { padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg3); color: var(--fg); font-size: 12px; }
+#edit-modal .modal-footer { padding: 12px 20px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 8px; }
+#edit-modal .modal-footer button { padding: 6px 16px; border-radius: 6px; border: 1px solid var(--border); font-size: 12px; cursor: pointer; }
+#empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; color: var(--fg2); gap: 8px; }
+#empty-state svg { width: 48px; height: 48px; opacity: 0.4; }
+.loading { opacity: 0.5; pointer-events: none; }
+@media (max-width: 768px) { body { flex-direction: column; } #sidebar { width: 100%; min-width: 100%; max-height: 40vh; } }
+</style>
+</head>
+<body>
+<aside id="sidebar">
+  <h2><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg> Engram</h2>
+  <div class="stats" id="stats-box">Loading...</div>
+  <input id="search-bar" type="text" placeholder="Search memories...">
+  <ul class="project-list" id="project-list"></ul>
+</aside>
+<section id="main">
+  <div id="header">
+    <h1 id="page-title">All Memories</h1>
+    <div class="actions">
+      <button onclick="refresh()">↻ Refresh</button>
+    </div>
+  </div>
+  <div id="obs-list">
+    <div id="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>Select a project or search to begin</div>
+  </div>
+  <div id="detail-panel">
+    <div class="detail-header">
+      <div><h2 id="detail-title"></h2><div class="meta" id="detail-meta"></div></div>
+      <div class="detail-actions">
+        <button class="btn-edit" onclick="editObservation(currentObs)">✎ Edit</button>
+        <button class="btn-delete" onclick="deleteObservation(currentObs)">✕ Delete</button>
+        <button class="btn-close" onclick="closeDetail()">✕</button>
+      </div>
+    </div>
+    <div class="detail-body" id="detail-content"></div>
+  </div>
+</section>
+<div id="edit-modal">
+  <div class="modal-box">
+    <div class="modal-header"><h3>Edit Observation</h3><button class="btn-close" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <input id="edit-title" placeholder="Title">
+      <select id="edit-type">
+        <option value="architecture">architecture</option><option value="bugfix">bugfix</option>
+        <option value="config">config</option><option value="decision">decision</option>
+        <option value="development">development</option><option value="discovery">discovery</option>
+        <option value="learning">learning</option><option value="manual">manual</option>
+        <option value="pattern">pattern</option><option value="project_context">project_context</option>
+        <option value="reference">reference</option><option value="session_summary">session_summary</option>
+      </select>
+      <select id="edit-scope">
+        <option value="project">project</option><option value="personal">personal</option>
+      </select>
+      <textarea id="edit-content" placeholder="Content (markdown)"></textarea>
+    </div>
+    <div class="modal-footer">
+      <button onclick="closeModal()">Cancel</button>
+      <button class="btn-edit" onclick="saveEdit()">Save</button>
+    </div>
+  </div>
+</div>
+<script>
+const API = "http://127.0.0.1:7437";
+let currentProject = "";
+let currentObs = null;
+let allObs = [];
+
+function api(path, opts) { return fetch(API + path, opts).then(r => r.json()); }
+
+function fmtTime(s) { if (!s) return ""; const d = new Date(s.replace(" ","T") + "Z"); return d.toLocaleDateString() + " " + d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}); }
+
+function typeColor(t) {
+  const m = {bugfix:"var(--danger)",architecture:"var(--accent)",config:"var(--yellow)",discovery:"var(--green)",learning:"var(--purple)",development:"var(--accent)",decision:"var(--yellow)",pattern:"var(--green)"};
+  return m[t] || "var(--fg2)";
+}
+
+function badge(type) { return `<span class="type-badge" style="background:${typeColor(type)}20;color:${typeColor(type)}">${type||'none'}</span>`; }
+
+async function loadStats() {
+  try {
+    const s = await api("/stats");
+    document.getElementById("stats-box").innerHTML =
+      `<div>Active: <span class="val">${s.total_observations}</span></div>
+       <div>Created: <span class="val">${s.total_created}</span></div>
+       <div>Max ID: <span class="val">${s.max_observation_id}</span></div>
+       <div>Sessions: <span class="val">${s.total_sessions}</span></div>
+       <div>Prompts: <span class="val">${s.total_prompts}</span></div>
+       <div>Projects: <span class="val">${s.projects.length}</span></div>`;
+    const list = document.getElementById("project-list");
+    list.innerHTML = `<li class="${currentProject===''?'active':''}" onclick="setProject('')">All Projects <span class="count">${s.total_observations}</span></li>`;
+    s.projects.forEach(p => {
+      const c = ""; // counts come from group query below
+      list.innerHTML += `<li class="${currentProject===p?'active':''}" onclick="setProject('${p}')">${p}</li>`;
+    });
+    loadProjectCounts(s.projects);
+  } catch(e) { document.getElementById("stats-box").textContent = "Engram offline"; }
+}
+
+async function loadProjectCounts(projects) {
+  for (const p of projects) {
+    try {
+      const data = await api(`/observations?project=${encodeURIComponent(p)}&limit=1`);
+      const count = Array.isArray(data) ? data.length : 0;
+      const li = document.querySelector(`#project-list li[onclick="setProject('${p}')"]`);
+      if (li && count > 0) li.querySelector(".count") || (li.innerHTML += `<span class="count">${count}</span>`);
+    } catch(e) {}
+  }
+}
+
+async function loadObservations(project) {
+  const obsEl = document.getElementById("obs-list");
+  obsEl.innerHTML = '<div style="text-align:center;padding:40px;color:var(--fg2)">Loading...</div>';
+  try {
+    const query = project ? `/observations?project=${encodeURIComponent(project)}&limit=200` : "/observations?limit=200";
+    allObs = await api(query);
+    if (!Array.isArray(allObs)) { allObs = []; }
+    renderObs(allObs);
+    document.getElementById("page-title").textContent = project || "All Memories";
+  } catch(e) { obsEl.innerHTML = `<div id="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>Error connecting to Engram</div>`; }
+}
+
+function renderObs(obs) {
+  const obsEl = document.getElementById("obs-list");
+  if (obs.length === 0) {
+    obsEl.innerHTML = `<div id="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>No memories found</div>`;
+    return;
+  }
+  obsEl.innerHTML = obs.map(o => `
+    <div class="obs-card" onclick="showDetail(${o.id})">
+      <div class="meta">${badge(o.type)} <span>#${o.id}</span> <span>${fmtTime(o.created_at)}</span>${o.project ? `<span class="project-tag">@ ${o.project}</span>` : ""}</div>
+      <div class="title">${escapeHtml(o.title)}</div>
+      <div class="preview">${escapeHtml((o.content||'').slice(0,200))}</div>
+    </div>
+  `).join("");
+}
+
+function escapeHtml(s) { const d = document.createElement("div"); d.textContent = s; return d.innerHTML; }
+
+async function showDetail(id) {
+  try {
+    const o = await api(`/observations/${id}`);
+    currentObs = o;
+    const panel = document.getElementById("detail-panel");
+    document.getElementById("detail-title").textContent = o.title;
+    document.getElementById("detail-meta").innerHTML = `${badge(o.type)} <span>#${o.id}</span> <span>${fmtTime(o.created_at)}</span> <span>updated ${fmtTime(o.updated_at)}</span> ${o.project ? `<span class="project-tag">@ ${o.project}</span>` : ""} · scope: ${o.scope} · session: ${o.session_id}`;
+    document.getElementById("detail-content").textContent = o.content;
+    panel.classList.add("open");
+  } catch(e) { alert("Failed to load observation"); }
+}
+
+function closeDetail() { document.getElementById("detail-panel").classList.remove("open"); }
+
+function editObservation(o) {
+  if (!o) return;
+  document.getElementById("edit-title").value = o.title || "";
+  document.getElementById("edit-type").value = o.type || "manual";
+  document.getElementById("edit-scope").value = o.scope || "project";
+  document.getElementById("edit-content").value = o.content || "";
+  document.getElementById("edit-modal").classList.add("open");
+}
+
+function closeModal() { document.getElementById("edit-modal").classList.remove("open"); }
+
+async function saveEdit() {
+  if (!currentObs) return;
+  const body = {
+    title: document.getElementById("edit-title").value,
+    type: document.getElementById("edit-type").value,
+    scope: document.getElementById("edit-scope").value,
+    content: document.getElementById("edit-content").value
+  };
+  try {
+    await fetch(`${API}/observations/${currentObs.id}`, { method: "PATCH", headers: {"Content-Type":"application/json"}, body: JSON.stringify(body) });
+    closeModal();
+    showDetail(currentObs.id);
+    loadObservations(currentProject);
+  } catch(e) { alert("Failed to update"); }
+}
+
+async function deleteObservation(o) {
+  if (!o || !confirm(`Delete #${o.id} "${o.title}"?`)) return;
+  try {
+    await fetch(`${API}/observations/${o.id}`, { method: "DELETE" });
+    closeDetail();
+    loadObservations(currentProject);
+    loadStats();
+  } catch(e) { alert("Failed to delete"); }
+}
+
+function setProject(p) {
+  currentProject = p;
+  document.querySelectorAll("#project-list li").forEach(el => el.classList.remove("active"));
+  const li = document.querySelector(`#project-list li[onclick="setProject('${p}')"]`);
+  if (li) li.classList.add("active");
+  loadObservations(p);
+  closeDetail();
+}
+
+document.getElementById("search-bar").addEventListener("input", async (e) => {
+  const q = e.target.value.trim();
+  if (!q) { loadObservations(currentProject); return; }
+  try {
+    const data = await api(`/search?q=${encodeURIComponent(q)}`);
+    if (Array.isArray(data)) { allObs = data; renderObs(allObs); }
+  } catch {}
+});
+
+loadStats();
+loadObservations("");
+</script>
+</body>
+</html>

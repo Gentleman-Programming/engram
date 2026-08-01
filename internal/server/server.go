@@ -8,6 +8,7 @@ import (
 	"crypto/hmac"
 	"crypto/subtle"
 	"database/sql"
+	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +25,9 @@ import (
 	projectpkg "github.com/Gentleman-Programming/engram/internal/project"
 	"github.com/Gentleman-Programming/engram/internal/store"
 )
+
+//go:embed dashboard/*
+var dashboardFS embed.FS
 
 var loadServerStats = func(s *store.Store) (*store.Stats, error) {
 	return s.Stats()
@@ -167,12 +171,27 @@ func (s *Server) Start() error {
 		serveFn = http.Serve
 	}
 
+	handler := corsMiddleware(s.mux)
+
 	ln, err := listenFn("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("engram server: listen %s: %w", addr, err)
 	}
 	log.Printf("[engram] HTTP server listening on %s", addr)
-	return serveFn(ln, s.mux)
+	return serveFn(ln, handler)
+}
+
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) Handler() http.Handler {
@@ -181,6 +200,9 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /health", s.handleHealth)
+
+	// Dashboard
+	s.mux.HandleFunc("GET /dashboard", s.handleDashboard)
 
 	// Sessions
 	s.mux.HandleFunc("POST /sessions", s.handleCreateSession)
@@ -251,6 +273,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"service": "engram",
 		"version": "0.1.0",
 	})
+}
+
+func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	html, _ := dashboardFS.ReadFile("dashboard/index.html")
+	w.Write(html)
 }
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
