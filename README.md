@@ -72,9 +72,11 @@ Full per-agent config, Memory Protocol, and compaction survival → [docs/AGENT-
 > For most agents (Claude Code, Gemini CLI, Codex, VS Code, Cursor, Windsurf) — **no**. Your agent launches `engram mcp` automatically as a short-lived stdio subprocess whenever it starts a session. You never run it manually.
 >
 > `engram serve` is only needed when a plugin uses the HTTP API for session tracking: the **OpenCode plugin** and the **Pi extension** both talk to `engram serve` in the background. `engram setup opencode` and `engram setup pi` note this; the plugins auto-start the server when possible. If your environment blocks background processes, start it manually in a separate terminal:
+>
 > ```bash
 > engram serve   # runs on port 7437 by default; keep it running
 > ```
+>
 > You do not need `engram serve` at all for stdio-only agents (Claude Code, Gemini CLI, Codex, VS Code, Cursor, Windsurf).
 
 No Node.js, no Python, no Docker. **One binary, one SQLite file.**
@@ -116,6 +118,19 @@ Full environment variable reference → [DOCS.md#environment-variables](DOCS.md#
 ```
 
 Full details on session lifecycle, topic keys, and memory hygiene → [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+
+### Broader memory search
+
+`mem_search` uses `match_mode: "all"` by default, so every query token must match. Use `match_mode: "any"` when you want broader recall across a collection of keywords:
+
+```json
+{
+  "query": "authentication compliance session",
+  "match_mode": "any"
+}
+```
+
+With `any`, a memory can match one or more query tokens instead of requiring all of them. This is useful when you remember related keywords but not the exact wording stored in Engram.
 
 ## MCP Tools (20)
 
