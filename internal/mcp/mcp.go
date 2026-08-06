@@ -1196,7 +1196,7 @@ func handleFindProject(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 		var b strings.Builder
 		fmt.Fprintf(&b, "Found %d project(s) matching %q:\n", len(matches), query)
 		for _, m := range matches {
-			fmt.Fprintf(&b, "- %s (%d matches, rank: %.2f)\n", m.Project, m.MatchCount, m.TopRank)
+			fmt.Fprintf(&b, "- %s (%d matches, rank: %g)\n", m.Project, m.MatchCount, m.TopRank)
 		}
 		b.WriteString("\nUse mem_search with project: \"<name>\" to explore these memories.")
 

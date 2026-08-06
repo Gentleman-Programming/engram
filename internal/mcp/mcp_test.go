@@ -7452,3 +7452,113 @@ func TestHandleSearch_MatchModeInvalidError(t *testing.T) {
 		t.Fatalf("parameter-validation error must not contain query-advice suffix \"Try simpler keywords\", got: %s", text)
 	}
 }
+
+func TestHandleFindProject(t *testing.T) {
+	s := newMCPTestStore(t)
+
+	s.CreateSession("s1", "project-one", "/tmp/one")
+	s.CreateSession("s2", "project-two", "/tmp/two")
+
+	// Insert some observations in different projects to test SearchProjects
+	_, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "s1", Type: "bugfix", Title: "search test one",
+		Content: "project one search test", Project: "project-one",
+	})
+	if err != nil { t.Fatal(err) }
+	_, err = s.AddObservation(store.AddObservationParams{
+		SessionID: "s2", Type: "bugfix", Title: "search test two",
+		Content: "project two search test", Project: "project-two",
+	})
+	if err != nil { t.Fatal(err) }
+
+	h := handleFindProject(s, MCPConfig{})
+
+	tests := []struct {
+		name          string
+		query         string
+		matchMode     string
+		expectError   bool
+		errorContains string
+		expectText    string
+	}{
+		{
+			name:       "success exact match",
+			query:      "project one",
+			matchMode:  "",
+			expectText: "Found 1 project(s)",
+		},
+		{
+			name:       "success match any",
+			query:      "project one test",
+			matchMode:  "any",
+			expectText: "project-two", // Both contain test
+		},
+		{
+			name:          "missing query",
+			query:         "",
+			matchMode:     "",
+			expectError:   true,
+			errorContains: "query is required",
+		},
+		{
+			name:          "invalid match_mode",
+			query:         "test",
+			matchMode:     "invalid-mode",
+			expectError:   true,
+			errorContains: "invalid match_mode",
+		},
+		{
+			name:       "no results",
+			query:      "nonexistentstringthatwillnevermatch",
+			matchMode:  "",
+			expectText: "No projects found matching",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			args := map[string]any{"query": tc.query}
+			if tc.matchMode != "" {
+				args["match_mode"] = tc.matchMode
+			}
+			req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: args}}
+			res, err := h(context.Background(), req)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			
+			if tc.expectError {
+				if !res.IsError {
+					t.Fatalf("expected error, got success")
+				}
+				text := callResultText(t, res)
+				if !strings.Contains(text, tc.errorContains) {
+					t.Fatalf("expected error containing %q, got %q", tc.errorContains, text)
+				}
+			} else {
+				if res.IsError {
+					t.Fatalf("expected success, got error: %s", callResultText(t, res))
+				}
+				text := callResultText(t, res)
+				if tc.expectText != "" && !strings.Contains(text, tc.expectText) {
+					t.Fatalf("expected text containing %q, got %q", tc.expectText, text)
+				}
+			}
+		})
+	}
+	
+	// Test error from store (e.g., closed db)
+	s.Close()
+	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"query": "test"}}}
+	res, err := h(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("expected tool error due to closed store")
+	}
+	text := callResultText(t, res)
+	if !strings.Contains(text, "Project search failed") {
+		t.Fatalf("expected error text for store failure, got: %s", text)
+	}
+}

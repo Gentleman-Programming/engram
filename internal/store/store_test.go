@@ -8837,6 +8837,7 @@ func TestSearchProjects(t *testing.T) {
 	st.CreateSession("s1", "project-a", "/tmp/a")
 	st.CreateSession("s2", "project-b", "/tmp/b")
 	st.CreateSession("s3", "project-c", "/tmp/c")
+	st.CreateSession("s4", "", "/tmp/d")
 
 	// Seed 3 observations for project A
 	_, err := st.AddObservation(AddObservationParams{
@@ -8869,38 +8870,127 @@ func TestSearchProjects(t *testing.T) {
 	})
 	if err != nil { t.Fatal(err) }
 
-	// Force FTS sync if async (test setup normally does this, but just in case)
-	// We'll just search directly.
+	// Seed observation with blank project
+	_, err = st.AddObservation(AddObservationParams{
+		SessionID: "s4", Type: "bugfix", Title: "Auth issue in blank project",
+		Content: "The auth middleware failed here too", Project: "",
+	})
+	if err != nil { t.Fatal(err) }
 
-	matches, err := st.SearchProjects("auth middleware", "all", 10)
-	if err != nil {
-		t.Fatalf("SearchProjects failed: %v", err)
+	// Seed observation in project-d and then delete it
+	st.CreateSession("s5", "project-d", "/tmp/e")
+	obsID, err := st.AddObservation(AddObservationParams{
+		SessionID: "s5", Type: "bugfix", Title: "Auth issue to be deleted",
+		Content: "The auth middleware will be deleted", Project: "project-d",
+	})
+	if err != nil { t.Fatal(err) }
+	err = st.DeleteObservation(obsID, false)
+	if err != nil { t.Fatal(err) }
+
+	tests := []struct {
+		name         string
+		query        string
+		matchMode    string
+		limit        int
+		expectCounts map[string]int // project -> expected match count
+		expectErr    bool
+		expectLen    int
+	}{
+		{
+			name:      "match all default limit",
+			query:     "auth middleware",
+			matchMode: "all",
+			limit:     10,
+			expectCounts: map[string]int{
+				"project-a": 3,
+				"project-b": 1,
+			},
+			expectLen: 2,
+		},
+		{
+			name:      "match any",
+			query:     "auth tables", // auth matches a, b. tables matches c.
+			matchMode: "any",
+			limit:     10,
+			expectCounts: map[string]int{
+				"project-a": 3,
+				"project-b": 1,
+				"project-c": 1,
+			},
+			expectLen: 3,
+		},
+		{
+			name:      "empty query",
+			query:     "",
+			matchMode: "all",
+			limit:     10,
+			expectLen: 0,
+		},
+		{
+			name:      "zero or negative limit gets default 10",
+			query:     "auth",
+			matchMode: "all",
+			limit:     -5,
+			expectLen: 2,
+		},
+		{
+			name:      "limit upper bound 50",
+			query:     "auth",
+			matchMode: "all",
+			limit:     100, // Should be clamped to 50
+			expectLen: 2,
+		},
+		{
+			name:      "limit restricts results",
+			query:     "auth",
+			matchMode: "all",
+			limit:     1, // Should return only top 1 project
+			expectLen: 1,
+		},
+		{
+			name:      "no match",
+			query:     "nonexistentstring",
+			matchMode: "all",
+			limit:     10,
+			expectLen: 0,
+		},
 	}
 
-	if len(matches) != 2 {
-		t.Fatalf("Expected 2 projects, got %d: %+v", len(matches), matches)
-	}
-
-	// project-a should have 3 matches. project-b should have 1 match.
-	// project-b has more occurrences of the terms, so its top_rank might be better (more negative).
-	// Let's assert on the project names and counts.
-	hasA := false
-	hasB := false
-	for _, m := range matches {
-		if m.Project == "project-a" {
-			hasA = true
-			if m.MatchCount != 3 {
-				t.Errorf("project-a: expected 3 matches, got %d", m.MatchCount)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			matches, err := st.SearchProjects(tc.query, tc.matchMode, tc.limit)
+			if tc.expectErr {
+				if err == nil {
+					t.Fatalf("expected error but got nil")
+				}
+				return
 			}
-		}
-		if m.Project == "project-b" {
-			hasB = true
-			if m.MatchCount != 1 {
-				t.Errorf("project-b: expected 1 match, got %d", m.MatchCount)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
 			}
-		}
+			if len(matches) != tc.expectLen {
+				t.Fatalf("expected %d projects, got %d: %+v", tc.expectLen, len(matches), matches)
+			}
+			for _, m := range matches {
+				if m.Project == "" {
+					t.Errorf("expected no blank projects, got one")
+				}
+				if m.Project == "project-d" {
+					t.Errorf("expected deleted project-d to be excluded")
+				}
+				if expected, ok := tc.expectCounts[m.Project]; ok {
+					if m.MatchCount != expected {
+						t.Errorf("project %s: expected %d matches, got %d", m.Project, expected, m.MatchCount)
+					}
+				}
+			}
+		})
 	}
-	if !hasA || !hasB {
-		t.Errorf("Missing expected projects in results: %+v", matches)
+	
+	// Test error propagation
+	st.Close()
+	_, err = st.SearchProjects("auth", "all", 10)
+	if err == nil {
+		t.Fatalf("expected error from closed store, got nil")
 	}
 }
