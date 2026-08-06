@@ -79,6 +79,49 @@ func TestSessionActivity_RecordSave_ResetsNudge(t *testing.T) {
 	}
 }
 
+func TestSessionActivity_ProjectSaveSuppressesNudgeWithoutMutatingDefaultScore(t *testing.T) {
+	now := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	a := NewSessionActivity(10 * time.Minute)
+	a.now = func() time.Time { return now }
+
+	project := "myproject"
+	defaultSID := defaultSessionID(project)
+	for i := 0; i < 6; i++ {
+		a.RecordToolCall(defaultSID)
+	}
+	now = now.Add(15 * time.Minute)
+	if nudge := a.NudgeForProject(defaultSID, project); nudge == "" {
+		t.Fatal("expected project nudge before save")
+	}
+
+	a.RecordProjectSave("explicit-session", project)
+	if nudge := a.NudgeForProject(defaultSID, project); nudge != "" {
+		t.Fatalf("expected project save to suppress nudge, got %q", nudge)
+	}
+	if score := a.ActivityScore(defaultSID); !strings.Contains(score, "0 saves") {
+		t.Fatalf("expected default session score to remain unchanged, got %q", score)
+	}
+}
+
+func TestSessionActivity_NudgeForProjectExpiresOldProjectSave(t *testing.T) {
+	now := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	a := NewSessionActivity(10 * time.Minute)
+	a.now = func() time.Time { return now }
+	project := "myproject"
+	defaultSID := defaultSessionID(project)
+	for i := 0; i < 6; i++ {
+		a.RecordToolCall(defaultSID)
+	}
+	a.RecordProjectSave("explicit-session", project)
+	now = now.Add(15 * time.Minute)
+	if nudge := a.NudgeForProject(defaultSID, project); nudge == "" {
+		t.Fatal("expected nudge after project save freshness expires")
+	}
+	if _, ok := a.projectSaves[project]; ok {
+		t.Fatal("expected expired project save entry to be removed")
+	}
+}
+
 func TestSessionActivity_ActivityScore(t *testing.T) {
 	a := NewSessionActivity(10 * time.Minute)
 	sid := "test-session"

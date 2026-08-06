@@ -3128,6 +3128,106 @@ func TestSearchResponseIncludesNudgeAfterInactivity(t *testing.T) {
 	}
 }
 
+func TestImmediateExplicitSessionSaveSuppressesProjectSearchNudge(t *testing.T) {
+	s := newMCPTestStore(t)
+	now := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	activity := NewSessionActivity(10 * time.Minute)
+	activity.now = func() time.Time { return now }
+
+	project := "myproject"
+	s.CreateSession("explicit-session", project, "")
+	searchSessionID := defaultSessionID(project)
+	for i := 0; i < 6; i++ {
+		activity.RecordToolCall(searchSessionID)
+	}
+	now = now.Add(15 * time.Minute)
+
+	save := handleSave(s, MCPConfig{}, activity)
+	_, err := save(context.Background(), mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"session_id": "explicit-session",
+			"project":    project,
+			"type":       "discovery",
+			"title":      "fresh memory",
+			"content":    "fresh searchable content",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("save handler error: %v", err)
+	}
+
+	search := handleSearch(s, MCPConfig{}, activity)
+	res, err := search(context.Background(), mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"query":   "fresh memory",
+			"project": project,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("search handler error: %v", err)
+	}
+	text := callResultText(t, res)
+	if !strings.Contains(text, "fresh memory") {
+		t.Fatalf("expected fresh memory in search response, got: %q", text)
+	}
+	if strings.Contains(text, "No mem_save calls for this project") {
+		t.Fatalf("unexpected stale inactivity warning after immediate save: %q", text)
+	}
+}
+
+func TestImmediateExplicitSessionSaveSuppressesProjectContextNudge(t *testing.T) {
+	s := newMCPTestStore(t)
+	now := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	activity := NewSessionActivity(10 * time.Minute)
+	activity.now = func() time.Time { return now }
+	project := "myproject"
+	s.CreateSession("explicit-session", project, "")
+	defaultSID := defaultSessionID(project)
+	for i := 0; i < 6; i++ {
+		activity.RecordToolCall(defaultSID)
+	}
+	now = now.Add(15 * time.Minute)
+	activity.RecordProjectSave("explicit-session", project)
+
+	res, err := handleContext(s, MCPConfig{}, activity)(context.Background(), mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{"project": project}},
+	})
+	if err != nil {
+		t.Fatalf("context handler error: %v", err)
+	}
+	if text := callResultText(t, res); strings.Contains(text, "No mem_save calls for this project") {
+		t.Fatalf("unexpected stale context warning after save: %q", text)
+	}
+}
+
+func TestSessionSummarySuppressesProjectSearchNudge(t *testing.T) {
+	s := newMCPTestStore(t)
+	now := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	activity := NewSessionActivity(10 * time.Minute)
+	activity.now = func() time.Time { return now }
+	project := "myproject"
+	s.CreateSession("summary-session", project, "")
+	defaultSID := defaultSessionID(project)
+	for i := 0; i < 6; i++ {
+		activity.RecordToolCall(defaultSID)
+	}
+	now = now.Add(15 * time.Minute)
+
+	_, err := handleSessionSummary(s, MCPConfig{}, activity)(context.Background(), mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"session_id": "summary-session",
+			"project":    project,
+			"content":    "## Goal\nVerify project freshness",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("summary handler error: %v", err)
+	}
+	if nudge := activity.NudgeForProject(defaultSID, project); nudge != "" {
+		t.Fatalf("unexpected stale nudge after session summary: %q", nudge)
+	}
+}
+
 func TestSessionSummaryResponseIncludesActivityScore(t *testing.T) {
 	// Set up a git repo so auto-detect returns a known project (REQ-308).
 	dir := t.TempDir()

@@ -1139,7 +1139,7 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			fmt.Fprintf(&b, "---\nResults above are previews (300 chars). To read the full content of a specific memory, call mem_get_observation(id: <ID>).\n")
 		}
 
-		if nudge := activity.NudgeIfNeeded(sessionID); nudge != "" {
+		if nudge := activity.NudgeForProject(sessionID, project); nudge != "" {
 			b.WriteString(nudge)
 		}
 
@@ -1287,7 +1287,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		}
 
 		if activity != nil {
-			activity.RecordSave(sessionID)
+			activity.RecordProjectSave(sessionID, project)
 		}
 
 		msg := fmt.Sprintf("Memory saved: %q (%s)", title, typ)
@@ -1662,7 +1662,7 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 		result := fmt.Sprintf("%s\n---\nMemory stats: %d sessions, %d observations across projects: %s",
 			contextResult, stats.TotalSessions, stats.TotalObservations, projects)
 
-		if nudge := activity.NudgeIfNeeded(sessionID); nudge != "" {
+		if nudge := activity.NudgeForProject(sessionID, project); nudge != "" {
 			result += nudge
 		}
 
@@ -1921,6 +1921,7 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		if err != nil {
 			return mcp.NewToolResultError("Failed to save session summary: " + err.Error()), nil
 		}
+		activity.RecordProjectFreshness(project)
 
 		msg := fmt.Sprintf("Session summary saved for project %q", project)
 		if score := activity.ActivityScore(defaultSessionID(project)); score != "" {

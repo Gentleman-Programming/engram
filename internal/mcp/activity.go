@@ -14,10 +14,11 @@ const ambiguousProjectRecoveryTTL = 5 * time.Minute
 
 // SessionActivity tracks tool call activity for save reminders and activity scores.
 type SessionActivity struct {
-	mu         sync.Mutex
-	sessions   map[string]*sessionState
-	nudgeAfter time.Duration
-	now        func() time.Time // injectable for testing
+	mu           sync.Mutex
+	sessions     map[string]*sessionState
+	projectSaves map[string]time.Time
+	nudgeAfter   time.Duration
+	now          func() time.Time // injectable for testing
 }
 
 type sessionState struct {
@@ -44,9 +45,10 @@ type ambiguousProjectRecovery struct {
 // NewSessionActivity creates a new activity tracker with the given nudge threshold.
 func NewSessionActivity(nudgeAfter time.Duration) *SessionActivity {
 	return &SessionActivity{
-		sessions:   make(map[string]*sessionState),
-		nudgeAfter: nudgeAfter,
-		now:        time.Now,
+		sessions:     make(map[string]*sessionState),
+		projectSaves: make(map[string]time.Time),
+		nudgeAfter:   nudgeAfter,
+		now:          time.Now,
 	}
 }
 
@@ -137,10 +139,36 @@ func (a *SessionActivity) ValidateAmbiguousProjectRecoveryToken(sessionID, token
 	return recovery.selectedProject == selectedProject
 }
 
-// RecordSave increments the save counter and updates lastSaveAt.
+// RecordSave increments per-session save activity only. When the project is
+// known, callers should use RecordProjectSave so project read nudges also reset.
 func (a *SessionActivity) RecordSave(sessionID string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.recordSaveLocked(sessionID)
+}
+
+// RecordProjectSave records a successful save for both the concrete MCP
+// session and the project's synthetic activity session used by read tools.
+func (a *SessionActivity) RecordProjectSave(sessionID, project string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.recordSaveLocked(sessionID)
+	if project != "" {
+		a.projectSaves[project] = a.now()
+	}
+}
+
+// RecordProjectFreshness updates project read nudges without changing any
+// session's activity score.
+func (a *SessionActivity) RecordProjectFreshness(project string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if project != "" {
+		a.projectSaves[project] = a.now()
+	}
+}
+
+func (a *SessionActivity) recordSaveLocked(sessionID string) {
 	s := a.getOrCreate(sessionID)
 	s.saveCount++
 	s.lastSaveAt = a.now()
@@ -171,42 +199,50 @@ func (a *SessionActivity) CurrentPrompt(sessionID, project string) (string, bool
 	return s.currentPrompt.content, true
 }
 
-// NudgeIfNeeded returns a reminder string if too much time has passed since
-// the last save in this session. Returns empty string if no nudge needed.
+// NudgeIfNeeded returns a per-session reminder and does not consult saves made
+// through other sessions in the same project. Project read tools should use
+// NudgeForProject. Returns empty string if no nudge is needed.
 func (a *SessionActivity) NudgeIfNeeded(sessionID string) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	return a.nudgeIfNeededLocked(sessionID)
+}
 
+// NudgeForProject suppresses a session nudge when the project has received a
+// more recent successful save through another explicit MCP session.
+func (a *SessionActivity) NudgeForProject(sessionID, project string) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if savedAt, ok := a.projectSaves[project]; ok {
+		if a.now().Sub(savedAt) < a.nudgeAfter {
+			return ""
+		}
+		delete(a.projectSaves, project)
+	}
+	return a.nudgeIfNeededLocked(sessionID)
+}
+
+func (a *SessionActivity) nudgeIfNeededLocked(sessionID string) string {
 	s, ok := a.sessions[sessionID]
 	if !ok {
 		return ""
 	}
-
 	now := a.now()
-
-	// Don't nudge if session is too young
 	if now.Sub(s.startedAt) < a.nudgeAfter {
 		return ""
 	}
-
-	// Don't nudge idle/new sessions (no saves and few tool calls)
 	if s.saveCount == 0 && s.toolCallCount <= 5 {
 		return ""
 	}
-
-	// Check time since last save (or session start if no saves yet)
 	ref := s.lastSaveAt
 	if ref.IsZero() {
 		ref = s.startedAt
 	}
-
 	elapsed := now.Sub(ref)
 	if elapsed < a.nudgeAfter {
 		return ""
 	}
-
-	minutes := int(elapsed.Minutes())
-	return fmt.Sprintf("\n\n⚠️ No mem_save calls for this project in %d minutes. Did you make any decisions, fix bugs, or discover something worth persisting?", minutes)
+	return fmt.Sprintf("\n\n⚠️ No mem_save calls for this project in %d minutes. Did you make any decisions, fix bugs, or discover something worth persisting?", int(elapsed.Minutes()))
 }
 
 // ActivityScore returns a formatted activity score string for the session.
