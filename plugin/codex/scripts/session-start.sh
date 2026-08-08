@@ -137,8 +137,21 @@ fi
 ENCODED_PROJECT=$(printf '%s' "$PROJECT" | jq -sRr @uri)
 CONTEXT=$(curl -sf "${ENGRAM_URL}/context?project=${ENCODED_PROJECT}" --max-time 3 2>/dev/null | jq -r '.context // empty')
 
-# Inject Memory Protocol + context — stdout is returned to Codex as additionalContext
-cat <<'PROTOCOL'
+# Build Memory Protocol + context, then emit it as Codex's hookSpecificOutput
+# JSON envelope. Codex's SessionStart parser rejects raw stdout text as a hook
+# failure (non-fatal, but reports "hook: SessionStart Failed" every run — see
+# codex-review SKILL.md "Failure modes", 2026-08-08 silent-death-after-hooks).
+# Claude Code's SessionStart contract stays tolerant of raw text, so this is a
+# codex/-only change; plugin/claude-code/scripts/session-start.sh is untouched.
+#
+# The protocol text is written to a FILE, never captured via `$(cat <<'EOF' ...)`
+# — macOS ships bash 3.2 as /bin/bash, which mis-parses a heredoc nested inside
+# a command substitution once the heredoc body contains an apostrophe (e.g.
+# "user's"), throwing "unexpected EOF while looking for matching `)'" at
+# script-load time. Writing to a file sidesteps the parser bug entirely.
+PROTOCOL_FILE=$(mktemp)
+trap 'rm -f "$PROTOCOL_FILE"' EXIT
+cat <<'PROTOCOL' > "$PROTOCOL_FILE"
 ## Engram Persistent Memory — ACTIVE PROTOCOL
 
 You have engram memory tools. This protocol is MANDATORY and ALWAYS ACTIVE.
@@ -174,9 +187,8 @@ Call `mem_save` IMMEDIATELY after ANY of these:
 Call `mem_session_summary` with: Goal, Discoveries, Accomplished, Next Steps, Relevant Files.
 PROTOCOL
 
-# Inject memory context if available
-if [ -n "$CONTEXT" ]; then
-  printf "\n%s\n" "$CONTEXT"
-fi
+jq -n --rawfile protocol "$PROTOCOL_FILE" --arg ctx "$CONTEXT" \
+  '{hookSpecificOutput: {hookEventName: "SessionStart",
+    additionalContext: ($protocol + (if $ctx != "" then "\n\n" + $ctx else "" end))}}'
 
 exit 0

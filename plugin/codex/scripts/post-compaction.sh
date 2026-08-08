@@ -31,8 +31,24 @@ fi
 ENCODED_PROJECT=$(printf '%s' "$PROJECT" | jq -sRr @uri)
 CONTEXT=$(curl -sf "${ENGRAM_URL}/context?project=${ENCODED_PROJECT}" --max-time 3 2>/dev/null | jq -r '.context // empty')
 
-# Inject Memory Protocol + compaction instruction + context
-cat <<'PROTOCOL'
+# Build Memory Protocol + compaction instruction + context, then emit it as
+# Codex's hookSpecificOutput JSON envelope. Codex's SessionStart parser (this
+# hook registers under the SessionStart "compact" matcher — see hooks.json)
+# rejects raw stdout text as a hook failure (non-fatal, but reports
+# "hook: SessionStart Failed" every run — see codex-review SKILL.md "Failure
+# modes", 2026-08-08 silent-death-after-hooks). Claude Code's SessionStart
+# contract stays tolerant of raw text, so this is a codex/-only change;
+# plugin/claude-code/scripts/post-compaction.sh is untouched.
+#
+# Each piece is written to a FILE, never captured via `$(cat <<'EOF' ...)` —
+# macOS ships bash 3.2 as /bin/bash, which mis-parses a heredoc nested inside
+# a command substitution once the heredoc body contains an apostrophe (e.g.
+# "user's"), throwing "unexpected EOF while looking for matching `)'" at
+# script-load time. Writing to files sidesteps the parser bug entirely.
+TMPD=$(mktemp -d)
+trap 'rm -rf "$TMPD"' EXIT
+
+cat <<'PROTOCOL' > "$TMPD/head.txt"
 ## Engram Persistent Memory — ACTIVE PROTOCOL
 
 You have engram memory tools. This protocol is MANDATORY and ALWAYS ACTIVE.
@@ -68,11 +84,10 @@ Call `mem_session_summary` with: Goal, Discoveries, Accomplished, Next Steps, Re
 CRITICAL INSTRUCTION POST-COMPACTION — follow these steps IN ORDER:
 PROTOCOL
 
-printf "\n1. FIRST: Call mem_session_summary with the content of the compacted summary above. Use project: '%s'.\n" "$PROJECT"
-printf "   This preserves what was accomplished before compaction.\n\n"
-printf "2. THEN: Call mem_context with project: '%s' to recover recent session history and observations.\n" "$PROJECT"
-printf "   Read the returned context carefully — it tells you what was being worked on.\n\n"
-cat <<'PROTOCOL'
+printf "1. FIRST: Call mem_session_summary with the content of the compacted summary above. Use project: '%s'.\n   This preserves what was accomplished before compaction.\n\n2. THEN: Call mem_context with project: '%s' to recover recent session history and observations.\n   Read the returned context carefully — it tells you what was being worked on." \
+  "$PROJECT" "$PROJECT" > "$TMPD/steps.txt"
+
+cat <<'PROTOCOL' > "$TMPD/tail.txt"
 3. If you need more detail on a specific topic, call mem_search with relevant keywords.
 
 4. Only THEN continue working on what the user asked.
@@ -80,9 +95,8 @@ cat <<'PROTOCOL'
 All 4 steps are MANDATORY. Without them, you lose context and start blind.
 PROTOCOL
 
-# Inject memory context if available
-if [ -n "$CONTEXT" ]; then
-  printf "\n%s\n" "$CONTEXT"
-fi
+jq -n --rawfile head "$TMPD/head.txt" --rawfile steps "$TMPD/steps.txt" --rawfile tail "$TMPD/tail.txt" --arg ctx "$CONTEXT" \
+  '{hookSpecificOutput: {hookEventName: "SessionStart",
+    additionalContext: ($head + "\n\n" + $steps + "\n\n" + $tail + (if $ctx != "" then "\n\n" + $ctx else "" end))}}'
 
 exit 0
