@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# Scheduled explicit cloud sync wrapper — ALTERNATIVE to native autosync.
-# Runs `engram sync --cloud --project <project>` once per explicitly named
-# project. Choose ONE mode: native autosync (recommended) OR this wrapper.
+set -uo pipefail
 
 PROG_NAME="cloud-sync-projects.sh"
 DEFAULT_LOG_NAME="cloud-sync-projects.log"
@@ -9,22 +7,20 @@ DEFAULT_LOG_NAME="cloud-sync-projects.log"
 usage() {
   cat <<'USAGE'
 Usage: cloud-sync-projects.sh [--log <path>] <project> [<project> ...]
-Run `engram sync --cloud --project <project>` once per explicitly named project,
-in order, continuing through all. Exit 0 if all succeed, 1 if any project sync
-or logging op fails, 2 on usage error.
-  --log <path>  Append-only log. Overrides default and ENGRAM_CLOUD_SYNC_LOG.
+Run `engram sync --cloud --project <project>` once per explicitly named project.
+Exit 0 if all succeed, 1 if any project/log op fails, 2 on usage error.
+  --log <path>  Overrides default and ENGRAM_CLOUD_SYNC_LOG.
   -h, --help    Show this help.
 Env: ENGRAM_DATA_DIR (defaults to ~/.engram); ENGRAM_CLOUD_SYNC_LOG (log override).
 USAGE
 }
 
-die_usage() { printf '%s: error: %s\n' "$PROG_NAME" "$*" >&2; printf 'Run with --help for usage.\n' >&2; exit 2; }
-
+die_usage() { printf '%s: error: %s\n' "$PROG_NAME" "$*" >&2; exit 2; }
 log_path=""
 projects=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    -h|--help) usage; exit 2 ;;
+    -h|--help) usage; exit 0 ;;
     --log) [ $# -ge 2 ] || die_usage "--log requires a path argument"; log_path="$2"; shift 2 ;;
     --log=*) log_path="${1#--log=}"; [ -n "$log_path" ] || die_usage "--log requires a non-empty path"; shift ;;
     --) shift; while [ $# -gt 0 ]; do projects+=("$1"); shift; done ;;
@@ -35,7 +31,6 @@ done
 
 [ "${#projects[@]}" -gt 0 ] || die_usage "at least one project is required"
 
-# Log path precedence: --log > ENGRAM_CLOUD_SYNC_LOG > ENGRAM_DATA_DIR default.
 [ -z "$log_path" ] && log_path="${ENGRAM_CLOUD_SYNC_LOG:-}"
 if [ -z "$log_path" ]; then
   log_path="${ENGRAM_DATA_DIR:-$HOME/.engram}/$DEFAULT_LOG_NAME"
@@ -45,14 +40,12 @@ case "$log_path" in /*) ;; *) log_path="$PWD/$log_path" ;; esac  # absolute
 log_dir="$(dirname "$log_path")"
 [ -d "$log_dir" ] || { printf '%s: error: log directory does not exist: %s\n' "$PROG_NAME" "$log_dir" >&2; exit 2; }
 
-# Timestamped [ts] message to BOTH console and the append-only log.
 logline() {
   local ts; ts="$(date '+%Y-%m-%dT%H:%M:%S%z')" || return 1
   printf '[%s] %s\n' "$ts" "$*" >>"$log_path" || return 1
   printf '[%s] %s\n' "$ts" "$*"
 }
 
-# Run the verified command for one project, tee output live to log and console.
 run_project() {
   local proj="$1" rc tee_rc
   local -a statuses

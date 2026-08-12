@@ -10,8 +10,7 @@ import (
 	"testing"
 )
 
-// Deterministic wrapper tests with a fake `engram` (no network, no real data
-// dir). Bash runs non-Windows; pwsh runs Windows; otherwise skipped.
+// Wrapper tests with a fake `engram`. Bash non-Windows; pwsh Windows.
 func wrapperAbs(t *testing.T, name string) string {
 	t.Helper()
 	abs, err := filepath.Abs(name)
@@ -32,8 +31,6 @@ func assertContains(t *testing.T, label, out string, wants ...string) {
 	}
 }
 
-// fakeEngram writes a fake `engram` to dir; echoes stdout+stderr, exits 0
-// (failProj exits 1). Windows: .cmd; else: bash script.
 func fakeEngram(t *testing.T, dir, failProj string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -81,21 +78,20 @@ func run(t *testing.T, interp, wrapper, fakeDir, dataDir string, args ...string)
 		env = append(env, "USERPROFILE="+t.TempDir())
 	}
 	for i, e := range env {
-		key, value, ok := strings.Cut(e, "=")
-		if ok && strings.EqualFold(key, "PATH") {
-			env[i] = "PATH=" + fakeDir + string(os.PathListSeparator) + value
+		if k, v, ok := strings.Cut(e, "="); ok && strings.EqualFold(k, "PATH") {
+			env[i] = "PATH=" + fakeDir + string(os.PathListSeparator) + v
 			break
 		}
 	}
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()
-	exit := 0
 	if exitErr, ok := err.(*exec.ExitError); ok {
-		exit = exitErr.ExitCode()
-	} else if err != nil {
+		return exitErr.ExitCode(), string(out), filepath.Join(dataDir, "cloud-sync-projects.log")
+	}
+	if err != nil {
 		t.Fatalf("run %s: %v; output:\n%s", interp, err, string(out))
 	}
-	return exit, string(out), filepath.Join(dataDir, "cloud-sync-projects.log")
+	return 0, string(out), filepath.Join(dataDir, "cloud-sync-projects.log")
 }
 func TestCloudSyncWrappers(t *testing.T) {
 	type interp struct{ name, file, flag string }
@@ -163,6 +159,23 @@ func TestCloudSyncWrappers(t *testing.T) {
 					t.Fatalf("engram invoked despite invalid log:\n%s", out)
 				}
 			})
+			var helpFlags []string
+			if it.file == "cloud-sync-projects.sh" {
+				helpFlags = []string{"-h", "--help"}
+			} else {
+				helpFlags = []string{"-Help", "--help", "-h"}
+			}
+			for _, hf := range helpFlags {
+				t.Run("HelpExits0_"+hf, func(t *testing.T) {
+					exit, out, _ := run(t, it.name, wrapper, fakeDir, dataDir, hf)
+					if exit != 0 {
+						t.Fatalf("exit=%d want 0; output:\n%s", exit, out)
+					}
+					if !strings.Contains(out, "Usage:") {
+						t.Fatalf("missing Usage text:\n%s", out)
+					}
+				})
+			}
 		})
 	}
 }

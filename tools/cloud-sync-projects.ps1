@@ -1,7 +1,3 @@
-# Scheduled explicit cloud sync wrapper (PowerShell 7) — ALTERNATIVE to native
-# autosync. Runs `engram sync --cloud --project <project>` once per explicitly
-# named project. Choose ONE mode: native autosync (recommended) OR this wrapper.
-
 [CmdletBinding()]
 param(
   [string]$LogPath,
@@ -20,26 +16,23 @@ if ($PSVersionTable.PSVersion.Major -lt 7) {
 function Write-Usage {
   @'
 Usage: cloud-sync-projects.ps1 [-LogPath <path>] <project> [<project> ...]
-Run `engram sync --cloud --project <project>` once per explicitly named project,
-in order, continuing through all. Exit 0 if all succeed, 1 if any project sync
-or logging op fails, 2 on usage error.
-  -LogPath <path>  Append-only log. Overrides default and ENGRAM_CLOUD_SYNC_LOG.
+Run `engram sync --cloud --project <project>` once per explicitly named project.
+Exit 0 if all succeed, 1 if any project/log op fails, 2 on usage error.
+  -LogPath <path>  Overrides default and ENGRAM_CLOUD_SYNC_LOG.
   -Help            Show this help.
 Requires PowerShell 7 (pwsh); 5.1 is not supported.
 '@ | Out-Host
 }
 
-# Strip -Help from remaining args.
 $helpRequested = $false
 $cleanProjects = @()
 foreach ($a in $Projects) { if ($a -in @('-Help', '--help', '-h')) { $helpRequested = $true } else { $cleanProjects += $a } }
 $Projects = $cleanProjects
-if ($helpRequested) { Write-Usage; exit 2 }
+if ($helpRequested) { Write-Usage; exit 0 }
 if ($Projects.Count -eq 0) {
   [Console]::Error.WriteLine('cloud-sync-projects.ps1: error: at least one project is required'); exit 2
 }
 
-# Log path: -LogPath > ENGRAM_CLOUD_SYNC_LOG > ENGRAM_DATA_DIR default.
 $resolvedLog = $LogPath
 if ([string]::IsNullOrEmpty($resolvedLog)) { $resolvedLog = $env:ENGRAM_CLOUD_SYNC_LOG }
 if ([string]::IsNullOrEmpty($resolvedLog)) {
@@ -60,9 +53,6 @@ function Write-LogLine {
   return $true
 }
 
-# Run the verified command for one project via native call operator (safe
-# argument tokens), Tee-Object -Append. Scoped Continue lets native stderr
-# stream without aborting. $LASTEXITCODE captured before any later native cmd.
 function Invoke-Project {
   param([string]$Project)
   if (-not (Write-LogLine "project START project=$Project")) { return -1 }
