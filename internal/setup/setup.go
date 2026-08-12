@@ -846,23 +846,26 @@ func claudeCodeUserMCPPath() string {
 	return filepath.Join(claudeCodeMCPDir(), "engram.json")
 }
 
-// writeClaudeCodeUserMCP writes ~/.claude/mcp/engram.json with the absolute
-// path to the engram binary. This is idempotent — it always writes (overwrites)
-// so that if the binary moves (e.g. brew upgrade), running setup again fixes it.
-// Using os.Executable() instead of PATH lookup ensures the correct binary is
-// referenced even when PATH is not propagated to MCP subprocesses (Windows).
+// writeClaudeCodeUserMCP writes ~/.claude/mcp/engram.json with the canonical
+// absolute path to the engram binary. This is idempotent — it always writes
+// (overwrites) so that if the binary moves (e.g. brew upgrade), running setup
+// again fixes it. The command is resolved via canonicalEngramCommand() so a
+// versioned Homebrew/Linuxbrew Cellar path maps to the stable
+// <brew-prefix>/bin/engram symlink that survives `brew upgrade`.
+//
+// os.Executable() is called exactly once and its result is passed to the
+// canonicalization helper, so the written path is always derived from the same
+// executable result that was checked for an error. The error contract preserves
+// the original "resolve binary path" failure — the Claude Code user MCP config
+// must not be written with a PATH-dependent command when the binary cannot be
+// resolved absolutely.
 func writeClaudeCodeUserMCP() error {
 	exe, err := osExecutable()
 	if err != nil {
 		return fmt.Errorf("resolve binary path: %w", err)
 	}
-	// Resolve any symlinks so the path is stable across package manager updates.
-	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
-		exe = resolved
-	}
-
 	entry := map[string]any{
-		"command": exe,
+		"command": canonicalEngramCommand(exe),
 		"args":    []string{"mcp", "--tools=agent"},
 	}
 	data, err := jsonMarshalIndentFn(entry, "", "  ")
@@ -1073,6 +1076,17 @@ func resolveEngramCommand() string {
 	if err != nil {
 		return "engram" // fallback to PATH-based name
 	}
+	return canonicalEngramCommand(exe)
+}
+
+// canonicalEngramCommand resolves an already-obtained executable path to the
+// canonical engram command: it resolves symlinks via filepath.EvalSymlinks and
+// maps a versioned Homebrew/Linuxbrew Cellar path to the stable
+// <brew-prefix>/bin/engram symlink that brew keeps pointing at the current
+// version (see stableHomebrewEngramCommand). Non-Homebrew installs keep their
+// resolved absolute path. It does not call osExecutable() — the caller is
+// responsible for obtaining exe and for any PATH-based fallback on failure.
+func canonicalEngramCommand(exe string) string {
 	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
 		exe = resolved
 	}

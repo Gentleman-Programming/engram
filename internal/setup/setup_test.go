@@ -1363,6 +1363,49 @@ func TestWriteClaudeCodeUserMCP(t *testing.T) {
 		}
 	})
 
+	t.Run("homebrew cellar path maps to stable bin symlink", func(t *testing.T) {
+		// Regression for issue #461: a versioned Cellar executable (the real
+		// target of <brew-prefix>/bin/engram) must be rewritten to the stable
+		// symlink so the written command survives `brew upgrade`. Previously
+		// writeClaudeCodeUserMCP called EvalSymlinks directly and baked in the
+		// versioned Cellar path, which broke once brew removed the old version.
+		resetSetupSeams(t)
+		home := useTestHome(t)
+		cellarExe := "/opt/homebrew/Cellar/engram/1.20.0/bin/engram"
+		stableSymlink := "/opt/homebrew/bin/engram"
+		osExecutable = func() (string, error) { return cellarExe, nil }
+		statFn = func(name string) (os.FileInfo, error) {
+			if filepath.ToSlash(name) == stableSymlink {
+				return nil, nil // stable symlink exists on disk
+			}
+			return nil, os.ErrNotExist
+		}
+
+		if err := writeClaudeCodeUserMCP(); err != nil {
+			t.Fatalf("writeClaudeCodeUserMCP failed: %v", err)
+		}
+
+		mcpPath := filepath.Join(home, ".claude", "mcp", "engram.json")
+		raw, err := os.ReadFile(mcpPath)
+		if err != nil {
+			t.Fatalf("read mcp config: %v", err)
+		}
+		var cfg map[string]any
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			t.Fatalf("parse mcp config: %v", err)
+		}
+		got, ok := cfg["command"].(string)
+		if !ok {
+			t.Fatalf("expected string command, got %#v", cfg["command"])
+		}
+		if filepath.ToSlash(got) != stableSymlink {
+			t.Fatalf("expected stable symlink %q, got %q", stableSymlink, got)
+		}
+		if strings.Contains(got, "Cellar") {
+			t.Fatalf("command must not contain a versioned Cellar path, got %q", got)
+		}
+	})
+
 	t.Run("os.Executable failure returns error", func(t *testing.T) {
 		resetSetupSeams(t)
 		useTestHome(t)
@@ -1547,6 +1590,70 @@ func TestResolveEngramCommandHomebrewCellar(t *testing.T) {
 			// filepath.FromSlash while tc.want is written with forward slashes.
 			if got := filepath.ToSlash(resolveEngramCommand()); got != tc.want {
 				t.Fatalf("resolveEngramCommand() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCanonicalEngramCommand proves the canonicalization helper derives the
+// command from an already-resolved executable path (no second osExecutable()
+// call) and keeps Homebrew mapping behavior identical to resolveEngramCommand.
+// This guards the atomic single-executable-result contract shared by
+// writeClaudeCodeUserMCP after the issue #461 refactor.
+func TestCanonicalEngramCommand(t *testing.T) {
+	cases := []struct {
+		name         string
+		exe          string
+		stableOnDisk string // stable symlink present on disk; "" means none
+		want         string
+	}{
+		{
+			name:         "linuxbrew cellar maps to stable bin symlink",
+			exe:          "/home/linuxbrew/.linuxbrew/Cellar/engram/1.20.0/bin/engram",
+			stableOnDisk: "/home/linuxbrew/.linuxbrew/bin/engram",
+			want:         "/home/linuxbrew/.linuxbrew/bin/engram",
+		},
+		{
+			name:         "macos arm cellar maps to stable bin symlink",
+			exe:          "/opt/homebrew/Cellar/engram/1.20.0/bin/engram",
+			stableOnDisk: "/opt/homebrew/bin/engram",
+			want:         "/opt/homebrew/bin/engram",
+		},
+		{
+			name:         "cellar with missing stable symlink falls back to bare name",
+			exe:          "/opt/homebrew/Cellar/engram/1.20.0/bin/engram",
+			stableOnDisk: "",
+			want:         "engram",
+		},
+		{
+			name:         "non-cellar absolute path is preserved",
+			exe:          "/opt/engram/bin/engram",
+			stableOnDisk: "",
+			want:         "/opt/engram/bin/engram",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resetSetupSeams(t)
+			statFn = func(name string) (os.FileInfo, error) {
+				if tc.stableOnDisk != "" && filepath.ToSlash(name) == tc.stableOnDisk {
+					return nil, nil // exists
+				}
+				return nil, os.ErrNotExist
+			}
+
+			// canonicalEngramCommand must NOT call osExecutable: if it did,
+			// the seam override below would make it return a sentinel path and
+			// the assertion would fail. This proves the single-result contract.
+			osExecutable = func() (string, error) {
+				t.Fatal("canonicalEngramCommand must not call osExecutable")
+				return "", nil
+			}
+
+			got := canonicalEngramCommand(tc.exe)
+			if filepath.ToSlash(got) != tc.want {
+				t.Fatalf("canonicalEngramCommand(%q) = %q, want %q", tc.exe, got, tc.want)
 			}
 		})
 	}
