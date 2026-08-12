@@ -39,3 +39,18 @@ jobs:
 
       - name: Run e2e tests
         run: go test -tags e2e ./internal/server/...
+
+  windows-setup-test:
+    name: Windows Setup Test
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.10"
+
+      - name: Run Windows-specific setup test
+        run: go test ./internal/setup/ -run TestClaudeCodeEngramCommandPreservesWindowsAbsolutePath -count=1
