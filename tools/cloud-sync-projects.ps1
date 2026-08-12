@@ -78,7 +78,7 @@ function Invoke-Project {
   $prevPref = $ErrorActionPreference
   try {
     $ErrorActionPreference = 'Continue'
-    & engram sync --cloud --project $Project 2>&1 | Tee-Object -FilePath $resolvedLog -Append -ErrorAction Stop
+    & engram sync --cloud --project $Project 2>&1 | Tee-Object -FilePath $resolvedLog -Append -ErrorAction Stop | ForEach-Object { Write-Host $_ }
     $exitCode = $LASTEXITCODE
     if ($null -eq $exitCode) { $exitCode = 0 }
   } catch {
