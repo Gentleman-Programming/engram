@@ -4208,41 +4208,9 @@ func (s *Store) ApplyPulledMutation(targetKey string, mutation SyncMutation) err
 
 		applyErr := s.applyPulledMutationTx(tx, mutation)
 		if applyErr != nil {
-			// Phase E: per-entity skip+log policy (design §9).
-			// For relation FK misses, write to sync_apply_deferred and ACK the seq
-			// so the cursor can advance. All other errors propagate and halt the pull.
-			if mutation.Entity == SyncEntityRelation && errors.Is(applyErr, ErrRelationFKMissing) {
-				log.Printf("[store] ApplyPulledMutation: relation FK miss seq=%d entity_key=%s — deferring",
-					mutation.Seq, mutation.EntityKey)
-				if _, deferErr := s.execHook(tx, `
-					INSERT INTO sync_apply_deferred
-						(sync_id, entity, payload, apply_status, retry_count, first_seen_at)
-					VALUES (?, ?, ?, 'deferred', 0, datetime('now'))
-					ON CONFLICT(sync_id) DO UPDATE SET
-						payload            = excluded.payload,
-						last_attempted_at  = datetime('now')
-				`, mutation.EntityKey, mutation.Entity, mutation.Payload); deferErr != nil {
-					return fmt.Errorf("ApplyPulledMutation: write deferred row: %w", deferErr)
-				}
-				// Fall through to advance the cursor (ACK the seq).
-			} else if mutation.Entity == SyncEntityRelation && errors.Is(applyErr, ErrApplyDead) {
-				// Payload is permanently undecodable — write directly as dead and ACK.
-				// There is no point retrying; a malformed payload will never become valid.
-				log.Printf("[store] ApplyPulledMutation: relation payload dead seq=%d entity_key=%s err=%v — marking dead",
-					mutation.Seq, mutation.EntityKey, applyErr)
-				if _, deferErr := s.execHook(tx, `
-					INSERT INTO sync_apply_deferred
-						(sync_id, entity, payload, apply_status, retry_count, first_seen_at)
-					VALUES (?, ?, ?, 'dead', 0, datetime('now'))
-					ON CONFLICT(sync_id) DO UPDATE SET
-						payload           = excluded.payload,
-						apply_status      = 'dead',
-						last_attempted_at = datetime('now')
-				`, mutation.EntityKey, mutation.Entity, mutation.Payload); deferErr != nil {
-					return fmt.Errorf("ApplyPulledMutation: write dead row: %w", deferErr)
-				}
-				// Fall through to advance the cursor (ACK the seq).
-			} else {
+			if handled, err := s.recordRelationApplyFailureTx(tx, mutation, applyErr); err != nil {
+				return err
+			} else if !handled {
 				return applyErr
 			}
 		}
@@ -4255,6 +4223,43 @@ func (s *Store) ApplyPulledMutation(targetKey string, mutation SyncMutation) err
 		)
 		return err
 	})
+}
+
+// recordRelationApplyFailureTx records relation failures that are safe to
+// acknowledge while preserving the existing fail-fast behavior for other
+// entities and errors.
+func (s *Store) recordRelationApplyFailureTx(tx *sql.Tx, mutation SyncMutation, applyErr error) (bool, error) {
+	if mutation.Entity != SyncEntityRelation {
+		return false, nil
+	}
+
+	status := ""
+	switch {
+	case errors.Is(applyErr, ErrRelationFKMissing):
+		status = "deferred"
+	case errors.Is(applyErr, ErrApplyDead):
+		status = "dead"
+	default:
+		return false, nil
+	}
+
+	if _, err := s.execHook(tx, `
+		INSERT INTO sync_apply_deferred
+			(sync_id, entity, payload, apply_status, retry_count, first_seen_at)
+		VALUES (?, ?, ?, ?, 0, datetime('now'))
+		ON CONFLICT(sync_id) DO UPDATE SET
+			payload           = excluded.payload,
+			apply_status      = CASE
+				WHEN excluded.apply_status = 'dead' THEN 'dead'
+				ELSE sync_apply_deferred.apply_status
+			END,
+			last_attempted_at = datetime('now')
+	`, mutation.EntityKey, mutation.Entity, mutation.Payload, status); err != nil {
+		return false, fmt.Errorf("write relation apply failure: %w", err)
+	}
+
+	log.Printf("[store] relation apply seq=%d entity_key=%s err=%v - marking %s", mutation.Seq, mutation.EntityKey, applyErr, status)
+	return true, nil
 }
 
 // ApplyPulledChunk atomically applies all mutations contained in a pulled chunk
@@ -4292,8 +4297,12 @@ func (s *Store) ApplyPulledChunk(targetKey, chunkID string, mutations []SyncMuta
 			mutation.Seq = seq
 			mutation.TargetKey = targetKey
 			mutation.Source = SyncSourceRemote
-			if err := s.applyPulledMutationTx(tx, mutation); err != nil {
-				return fmt.Errorf("apply chunk mutation %d: %w", i, err)
+			if applyErr := s.applyPulledMutationTx(tx, mutation); applyErr != nil {
+				if handled, err := s.recordRelationApplyFailureTx(tx, mutation, applyErr); err != nil {
+					return fmt.Errorf("apply chunk mutation %d: %w", i, err)
+				} else if !handled {
+					return fmt.Errorf("apply chunk mutation %d: %w", i, applyErr)
+				}
 			}
 		}
 
@@ -5668,7 +5677,11 @@ func (s *Store) applyRelationUpsertTx(tx *sql.Tx, mutation SyncMutation) error {
 	).Scan(&obsCount); err != nil {
 		return fmt.Errorf("applyRelationUpsertTx: check observations: %w", err)
 	}
-	if obsCount < 2 {
+	requiredObservations := 2
+	if p.SourceID == p.TargetID {
+		requiredObservations = 1
+	}
+	if obsCount < requiredObservations {
 		return ErrRelationFKMissing
 	}
 

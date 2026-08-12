@@ -109,6 +109,108 @@ func TestApplyPulledRelation_InsertsWhenObsExist(t *testing.T) {
 	}
 }
 
+func TestApplyPulledRelation_AllowsSelfReference(t *testing.T) {
+	s, syncA, _ := setupSyncApplyStore(t)
+
+	relSyncID := newSyncID("rel-self")
+	m := buildRelationMutation(t, syncRelationPayload{
+		SyncID:         relSyncID,
+		SourceID:       syncA,
+		TargetID:       syncA,
+		Relation:       RelationCompatible,
+		JudgmentStatus: JudgmentStatusJudged,
+		Project:        "proj-apply",
+		CreatedAt:      "2026-04-26T10:00:00Z",
+		UpdatedAt:      "2026-04-26T10:00:00Z",
+	})
+
+	if err := applyRelationMutation(t, s, m); err != nil {
+		t.Fatalf("applyPulledMutationTx: %v", err)
+	}
+	if got := countRelationRows(t, s, relSyncID); got != 1 {
+		t.Fatalf("expected 1 self-referential relation, got %d", got)
+	}
+}
+
+func TestApplyPulledChunk_DefersMissingRelationAndContinues(t *testing.T) {
+	s, syncA, syncB := setupSyncApplyStore(t)
+	missingTarget := "obs-ghost-" + newSyncID("x")
+
+	validID := newSyncID("rel-valid")
+	missingID := newSyncID("rel-missing")
+	mutations := []SyncMutation{
+		buildRelationMutation(t, syncRelationPayload{
+			SyncID: validID, SourceID: syncA, TargetID: syncB,
+			Relation: RelationCompatible, JudgmentStatus: JudgmentStatusJudged,
+			Project: "proj-apply", CreatedAt: "2026-04-26T10:00:00Z", UpdatedAt: "2026-04-26T10:00:00Z",
+		}),
+		buildRelationMutation(t, syncRelationPayload{
+			SyncID: missingID, SourceID: syncA, TargetID: missingTarget,
+			Relation: RelationRelated, JudgmentStatus: JudgmentStatusJudged,
+			Project: "proj-apply", CreatedAt: "2026-04-26T10:00:00Z", UpdatedAt: "2026-04-26T10:00:00Z",
+		}),
+	}
+
+	if err := s.ApplyPulledChunk(DefaultSyncTargetKey, "chunk-local-relations", mutations); err != nil {
+		t.Fatalf("ApplyPulledChunk: %v", err)
+	}
+	if got := countRelationRows(t, s, validID); got != 1 {
+		t.Fatalf("expected valid relation to apply, got %d rows", got)
+	}
+	if got := countDeferredRows(t, s, missingID); got != 1 {
+		t.Fatalf("expected missing relation to defer, got %d rows", got)
+	}
+	var lastPulled int64
+	if err := s.db.QueryRow(`SELECT last_pulled_seq FROM sync_state WHERE target_key = ?`, DefaultSyncTargetKey).Scan(&lastPulled); err != nil {
+		t.Fatalf("read last_pulled_seq: %v", err)
+	}
+	if lastPulled != int64(len(mutations)) {
+		t.Fatalf("last_pulled_seq: want %d, got %d", len(mutations), lastPulled)
+	}
+	chunks, err := s.GetSyncedChunksForTarget(DefaultSyncTargetKey)
+	if err != nil {
+		t.Fatalf("read synced chunks: %v", err)
+	}
+	if !chunks["chunk-local-relations"] {
+		t.Fatal("expected chunk with deferred relation to be marked as synced")
+	}
+}
+
+func TestApplyPulledChunk_MarksMalformedRelationDeadAndContinues(t *testing.T) {
+	s, syncA, syncB := setupSyncApplyStore(t)
+	validID := newSyncID("rel-valid")
+	deadID := newSyncID("rel-dead")
+	mutations := []SyncMutation{
+		{Entity: SyncEntityRelation, EntityKey: deadID, Op: SyncOpUpsert, Payload: "not json"},
+		buildRelationMutation(t, syncRelationPayload{
+			SyncID: validID, SourceID: syncA, TargetID: syncB,
+			Relation: RelationCompatible, JudgmentStatus: JudgmentStatusJudged,
+			Project: "proj-apply", CreatedAt: "2026-04-26T10:00:00Z", UpdatedAt: "2026-04-26T10:00:00Z",
+		}),
+	}
+
+	if err := s.ApplyPulledChunk(DefaultSyncTargetKey, "chunk-dead-relation", mutations); err != nil {
+		t.Fatalf("ApplyPulledChunk: %v", err)
+	}
+	if got := countRelationRows(t, s, validID); got != 1 {
+		t.Fatalf("expected valid relation to apply, got %d rows", got)
+	}
+	var status string
+	if err := s.db.QueryRow(`SELECT apply_status FROM sync_apply_deferred WHERE sync_id = ?`, deadID).Scan(&status); err != nil {
+		t.Fatalf("read dead relation status: %v", err)
+	}
+	if status != "dead" {
+		t.Fatalf("apply_status: want dead, got %q", status)
+	}
+	var lastPulled int64
+	if err := s.db.QueryRow(`SELECT last_pulled_seq FROM sync_state WHERE target_key = ?`, DefaultSyncTargetKey).Scan(&lastPulled); err != nil {
+		t.Fatalf("read last_pulled_seq: %v", err)
+	}
+	if lastPulled != int64(len(mutations)) {
+		t.Fatalf("last_pulled_seq: want %d, got %d", len(mutations), lastPulled)
+	}
+}
+
 // C.3b — ApplyPulledRelation_DefersOnFKMiss: target observation absent →
 // row written to sync_apply_deferred; no halt; seq is ACK-able.
 func TestApplyPulledRelation_DefersOnFKMiss(t *testing.T) {
