@@ -140,13 +140,13 @@ func TestApplyPulledChunk_DefersMissingRelationAndContinues(t *testing.T) {
 	missingID := newSyncID("rel-missing")
 	mutations := []SyncMutation{
 		buildRelationMutation(t, syncRelationPayload{
-			SyncID: validID, SourceID: syncA, TargetID: syncB,
-			Relation: RelationCompatible, JudgmentStatus: JudgmentStatusJudged,
+			SyncID: missingID, SourceID: syncA, TargetID: missingTarget,
+			Relation: RelationRelated, JudgmentStatus: JudgmentStatusJudged,
 			Project: "proj-apply", CreatedAt: "2026-04-26T10:00:00Z", UpdatedAt: "2026-04-26T10:00:00Z",
 		}),
 		buildRelationMutation(t, syncRelationPayload{
-			SyncID: missingID, SourceID: syncA, TargetID: missingTarget,
-			Relation: RelationRelated, JudgmentStatus: JudgmentStatusJudged,
+			SyncID: validID, SourceID: syncA, TargetID: syncB,
+			Relation: RelationCompatible, JudgmentStatus: JudgmentStatusJudged,
 			Project: "proj-apply", CreatedAt: "2026-04-26T10:00:00Z", UpdatedAt: "2026-04-26T10:00:00Z",
 		}),
 	}
