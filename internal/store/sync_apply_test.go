@@ -164,6 +164,9 @@ func TestApplyPulledChunk_DefersMissingRelationAndContinues(t *testing.T) {
 	if status != "deferred" {
 		t.Fatalf("apply_status: want deferred, got %q", status)
 	}
+	if got := countRelationRows(t, s, missingID); got != 0 {
+		t.Fatalf("expected missing relation to remain unapplied, got %d rows", got)
+	}
 	var lastPulled int64
 	if err := s.db.QueryRow(`SELECT last_pulled_seq FROM sync_state WHERE target_key = ?`, DefaultSyncTargetKey).Scan(&lastPulled); err != nil {
 		t.Fatalf("read last_pulled_seq: %v", err)
