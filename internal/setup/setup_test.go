@@ -1406,6 +1406,60 @@ func TestWriteClaudeCodeUserMCP(t *testing.T) {
 		}
 	})
 
+	t.Run("homebrew cellar with missing stable symlink preserves absolute exe (issue #461 pr713)", func(t *testing.T) {
+		// Regression for PR #713 CodeRabbit Major: a Cellar exe with the stable
+		// symlink absent must not persist bare "engram"; writeClaudeCodeUserMCP
+		// must preserve the already-obtained absolute exe, or error.
+		resetSetupSeams(t)
+		home := useTestHome(t)
+		cellarExe := "/opt/homebrew/Cellar/engram/1.20.0/bin/engram"
+		osExecutable = func() (string, error) { return cellarExe, nil }
+		statFn = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
+
+		if err := writeClaudeCodeUserMCP(); err != nil {
+			t.Fatalf("writeClaudeCodeUserMCP failed: %v", err)
+		}
+
+		mcpPath := filepath.Join(home, ".claude", "mcp", "engram.json")
+		raw, err := os.ReadFile(mcpPath)
+		if err != nil {
+			t.Fatalf("read mcp config: %v", err)
+		}
+		var cfg map[string]any
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			t.Fatalf("parse mcp config: %v", err)
+		}
+		got, ok := cfg["command"].(string)
+		if !ok {
+			t.Fatalf("expected string command, got %#v", cfg["command"])
+		}
+		if got == "engram" {
+			t.Fatalf("must not persist bare 'engram' when absolute exe is available, got %q", got)
+		}
+		if !filepath.IsAbs(got) {
+			t.Fatalf("expected absolute command, got %q", got)
+		}
+		if filepath.ToSlash(got) != cellarExe {
+			t.Fatalf("expected absolute exe %q preserved, got %q", cellarExe, got)
+		}
+	})
+
+	t.Run("non-absolute executable returns error instead of writing bare command", func(t *testing.T) {
+		// Defensive guard: non-absolute exe + non-absolute canonical fallback
+		// must refuse to write rather than persist a PATH-dependent command.
+		resetSetupSeams(t)
+		useTestHome(t)
+		osExecutable = func() (string, error) { return "engram", nil }
+
+		err := writeClaudeCodeUserMCP()
+		if err == nil {
+			t.Fatalf("expected error for non-absolute executable, got nil")
+		}
+		if !strings.Contains(err.Error(), "absolute") {
+			t.Fatalf("expected absolute-path error, got %v", err)
+		}
+	})
+
 	t.Run("os.Executable failure returns error", func(t *testing.T) {
 		resetSetupSeams(t)
 		useTestHome(t)

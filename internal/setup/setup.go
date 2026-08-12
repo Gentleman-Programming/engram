@@ -864,8 +864,12 @@ func writeClaudeCodeUserMCP() error {
 	if err != nil {
 		return fmt.Errorf("resolve binary path: %w", err)
 	}
+	cmd, err := claudeCodeEngramCommand(exe)
+	if err != nil {
+		return err
+	}
 	entry := map[string]any{
-		"command": canonicalEngramCommand(exe),
+		"command": cmd,
 		"args":    []string{"mcp", "--tools=agent"},
 	}
 	data, err := jsonMarshalIndentFn(entry, "", "  ")
@@ -1094,6 +1098,24 @@ func canonicalEngramCommand(exe string) string {
 		return stable
 	}
 	return exe
+}
+
+// claudeCodeEngramCommand is the caller-specific absolute-path policy for
+// writeClaudeCodeUserMCP. canonicalEngramCommand may return the bare "engram"
+// fallback when a Homebrew Cellar exe has no stable <brew-prefix>/bin/engram
+// symlink on disk — correct for resolveEngramCommand (PATH discovery), but
+// the durable Claude Code user MCP config must never persist a PATH-dependent
+// command. This helper preserves the already-obtained absolute exe on a
+// non-absolute fallback and errors when the obtained exe is non-absolute.
+func claudeCodeEngramCommand(exe string) (string, error) {
+	canonical := canonicalEngramCommand(exe)
+	if filepath.IsAbs(canonical) {
+		return canonical, nil
+	}
+	if filepath.IsAbs(exe) {
+		return exe, nil
+	}
+	return "", fmt.Errorf("resolve absolute engram command: executable path %q is not absolute", exe)
 }
 
 // stableHomebrewEngramCommand maps a versioned Homebrew Cellar path to the
