@@ -1,8 +1,6 @@
-# Scheduled explicit cloud sync wrapper (PowerShell) — ALTERNATIVE to native
+# Scheduled explicit cloud sync wrapper (PowerShell 7) — ALTERNATIVE to native
 # autosync. Runs `engram sync --cloud --project <project>` once per explicitly
-# named project, continuing through all; nonzero if any project or logging op
-# fails. Choose ONE mode: native autosync (recommended) OR this wrapper —
-# running both creates redundant overlapping sync. Exit: 0 ok, 1 fail, 2 usage.
+# named project. Choose ONE mode: native autosync (recommended) OR this wrapper.
 
 [CmdletBinding()]
 param(
@@ -14,34 +12,34 @@ param(
 $ErrorActionPreference = 'Stop'
 $defaultLogName = 'cloud-sync-projects.log'
 
+if ($PSVersionTable.PSVersion.Major -lt 7) {
+  [Console]::Error.WriteLine('cloud-sync-projects.ps1: error: PowerShell 7 (pwsh) is required. 5.1 is not supported.')
+  exit 2
+}
+
 function Write-Usage {
   @'
 Usage: cloud-sync-projects.ps1 [-LogPath <path>] <project> [<project> ...]
 Run `engram sync --cloud --project <project>` once per explicitly named project,
 in order, continuing through all. Exit 0 if all succeed, 1 if any project sync
 or logging op fails, 2 on usage error.
-  -LogPath <path>  Append-only log. Overrides default ($ENGRAM_DATA_DIR\
-                  cloud-sync-projects.log) and ENGRAM_CLOUD_SYNC_LOG.
-  -Help           Show this help.
-Env: ENGRAM_DATA_DIR (defaults to ~/.engram); ENGRAM_CLOUD_SYNC_LOG (log override).
+  -LogPath <path>  Append-only log. Overrides default and ENGRAM_CLOUD_SYNC_LOG.
+  -Help            Show this help.
+Requires PowerShell 7 (pwsh); 5.1 is not supported.
 '@ | Out-Host
 }
 
 # Strip -Help from remaining args.
 $helpRequested = $false
 $cleanProjects = @()
-foreach ($a in $Projects) {
-  if ($a -in @('-Help', '--help', '-h')) { $helpRequested = $true } else { $cleanProjects += $a }
-}
+foreach ($a in $Projects) { if ($a -in @('-Help', '--help', '-h')) { $helpRequested = $true } else { $cleanProjects += $a } }
 $Projects = $cleanProjects
 if ($helpRequested) { Write-Usage; exit 2 }
 if ($Projects.Count -eq 0) {
-  [Console]::Error.WriteLine('cloud-sync-projects.ps1: error: at least one project is required')
-  [Console]::Error.WriteLine('Run with -Help for usage.')
-  exit 2
+  [Console]::Error.WriteLine('cloud-sync-projects.ps1: error: at least one project is required'); exit 2
 }
 
-# Log path precedence: -LogPath > ENGRAM_CLOUD_SYNC_LOG > ENGRAM_DATA_DIR default.
+# Log path: -LogPath > ENGRAM_CLOUD_SYNC_LOG > ENGRAM_DATA_DIR default.
 $resolvedLog = $LogPath
 if ([string]::IsNullOrEmpty($resolvedLog)) { $resolvedLog = $env:ENGRAM_CLOUD_SYNC_LOG }
 if ([string]::IsNullOrEmpty($resolvedLog)) {
@@ -49,13 +47,10 @@ if ([string]::IsNullOrEmpty($resolvedLog)) {
   $resolvedLog = Join-Path $dataDir $defaultLogName
 }
 $resolvedLog = [System.IO.Path]::GetFullPath($resolvedLog)
-$logDir = [System.IO.Path]::GetDirectoryName($resolvedLog)
-if (-not (Test-Path -LiteralPath $logDir -PathType Container)) {
-  [Console]::Error.WriteLine("cloud-sync-projects.ps1: error: log directory does not exist: $logDir"); exit 2
+if (-not (Test-Path -LiteralPath ([System.IO.Path]::GetDirectoryName($resolvedLog)) -PathType Container)) {
+  [Console]::Error.WriteLine("cloud-sync-projects.ps1: error: log directory does not exist: $resolvedLog"); exit 2
 }
 
-# Timestamped [ts] message to BOTH console and the append-only log; returns
-# $false on log write failure so callers aggregate failures.
 function Write-LogLine {
   param([string]$Message)
   $line = "[$(Get-Date -Format 'yyyy-MM-ddTHH:mm:sszzz')] $Message"
@@ -66,11 +61,8 @@ function Write-LogLine {
 }
 
 # Run the verified command for one project via native call operator (safe
-# argument tokens), piping combined stdout/stderr through Tee-Object -Append.
-# A scoped Continue preference lets ordinary native stderr stream without
-# aborting a successful command; Tee-Object -ErrorAction Stop makes log write
-# failures terminating. $LASTEXITCODE captured before any later native command.
-# Returns the engram exit, or -1 if invoke/tee/logging failed.
+# argument tokens), Tee-Object -Append. Scoped Continue lets native stderr
+# stream without aborting. $LASTEXITCODE captured before any later native cmd.
 function Invoke-Project {
   param([string]$Project)
   if (-not (Write-LogLine "project START project=$Project")) { return -1 }

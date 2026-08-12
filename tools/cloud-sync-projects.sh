@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
 # Scheduled explicit cloud sync wrapper — ALTERNATIVE to native autosync.
 # Runs `engram sync --cloud --project <project>` once per explicitly named
-# project, continuing through all; nonzero if any project or logging op fails.
-# Choose ONE mode: native autosync (ENGRAM_CLOUD_AUTOSYNC=1, recommended) OR
-# this wrapper — running both creates redundant overlapping sync attempts.
-# Projects are never inferred from cwd or an env var. Exit: 0 ok, 1 fail, 2 usage.
+# project. Choose ONE mode: native autosync (recommended) OR this wrapper.
 
 PROG_NAME="cloud-sync-projects.sh"
 DEFAULT_LOG_NAME="cloud-sync-projects.log"
@@ -12,17 +9,12 @@ DEFAULT_LOG_NAME="cloud-sync-projects.log"
 usage() {
   cat <<'USAGE'
 Usage: cloud-sync-projects.sh [--log <path>] <project> [<project> ...]
-
 Run `engram sync --cloud --project <project>` once per explicitly named project,
 in order, continuing through all. Exit 0 if all succeed, 1 if any project sync
 or logging op fails, 2 on usage error.
-
-  --log <path>  Append-only log. Overrides default ($ENGRAM_DATA_DIR/
-               cloud-sync-projects.log) and ENGRAM_CLOUD_SYNC_LOG.
+  --log <path>  Append-only log. Overrides default and ENGRAM_CLOUD_SYNC_LOG.
   -h, --help    Show this help.
-
 Env: ENGRAM_DATA_DIR (defaults to ~/.engram); ENGRAM_CLOUD_SYNC_LOG (log override).
-Projects are never inferred from cwd or an env var.
 USAGE
 }
 
@@ -53,8 +45,7 @@ case "$log_path" in /*) ;; *) log_path="$PWD/$log_path" ;; esac  # absolute
 log_dir="$(dirname "$log_path")"
 [ -d "$log_dir" ] || { printf '%s: error: log directory does not exist: %s\n' "$PROG_NAME" "$log_dir" >&2; exit 2; }
 
-# Timestamped [ts] message to BOTH console and the append-only log; returns
-# nonzero on log write failure.
+# Timestamped [ts] message to BOTH console and the append-only log.
 logline() {
   local ts; ts="$(date '+%Y-%m-%dT%H:%M:%S%z')" || return 1
   printf '[%s] %s\n' "$ts" "$*" >>"$log_path" || return 1
@@ -62,7 +53,6 @@ logline() {
 }
 
 # Run the verified command for one project, tee output live to log and console.
-# Returns the engram exit status, or 1 if tee/logging failed. Never hides failures.
 run_project() {
   local proj="$1" rc tee_rc
   local -a statuses

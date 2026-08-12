@@ -11,9 +11,7 @@ import (
 )
 
 // Deterministic wrapper tests with a fake `engram` (no network, no real data
-// dir). Bash runs non-Windows; PowerShell runs Windows when available;
-// otherwise skipped. Covers: success+durable capture, partial failure
-// aggregate 1, missing args usage 2, space-containing project args.
+// dir). Bash runs non-Windows; pwsh runs Windows; otherwise skipped.
 func wrapperAbs(t *testing.T, name string) string {
 	t.Helper()
 	abs, err := filepath.Abs(name)
@@ -34,8 +32,8 @@ func assertContains(t *testing.T, label, out string, wants ...string) {
 	}
 }
 
-// fakeEngram writes a fake `engram` to dir that echoes stdout+stderr, exits 0
-// (failProj exits 1). Windows: .cmd; otherwise: bash script.
+// fakeEngram writes a fake `engram` to dir; echoes stdout+stderr, exits 0
+// (failProj exits 1). Windows: .cmd; else: bash script.
 func fakeEngram(t *testing.T, dir, failProj string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -73,7 +71,6 @@ type wcase struct {
 func run(t *testing.T, interp, wrapper, fakeDir, dataDir string, args ...string) (int, string, string) {
 	t.Helper()
 	var cmd *exec.Cmd
-	// Preserve Windows command resolution while putting fake engram first.
 	env := os.Environ()
 	env = append(env, "ENGRAM_DATA_DIR="+dataDir)
 	if interp == "bash" {
@@ -108,11 +105,8 @@ func TestCloudSyncWrappers(t *testing.T) {
 			interps = append(interps, interp{"bash", "cloud-sync-projects.sh", "--log"})
 		}
 	} else {
-		for _, name := range []string{"pwsh", "powershell"} {
-			if p, err := exec.LookPath(name); err == nil {
-				interps = append(interps, interp{p, "cloud-sync-projects.ps1", "-LogPath"})
-				break
-			}
+		if p, err := exec.LookPath("pwsh"); err == nil {
+			interps = append(interps, interp{p, "cloud-sync-projects.ps1", "-LogPath"})
 		}
 	}
 	if len(interps) == 0 {
@@ -128,11 +122,10 @@ func TestCloudSyncWrappers(t *testing.T) {
 			wrapper := wrapperAbs(t, it.file)
 			tmp := t.TempDir()
 			fakeDir, dataDir := filepath.Join(tmp, "bin"), filepath.Join(tmp, "data")
-			if err := os.MkdirAll(fakeDir, 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.MkdirAll(dataDir, 0o755); err != nil {
-				t.Fatal(err)
+			for _, d := range []string{fakeDir, dataDir} {
+				if err := os.MkdirAll(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
 			}
 			for _, tc := range cases {
 				t.Run(tc.name, func(t *testing.T) {
@@ -157,7 +150,17 @@ func TestCloudSyncWrappers(t *testing.T) {
 					t.Fatalf("exit=%d want 2; output:\n%s", exit, out)
 				}
 				if !strings.Contains(out, "at least one project is required") {
-					t.Fatalf("missing usage message:\n%s", out)
+					t.Fatalf("missing usage:\n%s", out)
+				}
+			})
+			t.Run("InvalidLogExits1", func(t *testing.T) {
+				fakeEngram(t, fakeDir, "")
+				exit, out, _ := run(t, it.name, wrapper, fakeDir, dataDir, it.flag, dataDir, "alpha")
+				if exit != 1 {
+					t.Fatalf("exit=%d want 1; output:\n%s", exit, out)
+				}
+				if strings.Contains(out, "stdout: syncing project=alpha") {
+					t.Fatalf("engram invoked despite invalid log:\n%s", out)
 				}
 			})
 		})

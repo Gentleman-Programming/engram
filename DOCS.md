@@ -1478,37 +1478,37 @@ For a step-by-step recovery guide covering `chunk_id does not match payload cont
 
 ## Scheduled Explicit Cloud Sync Wrappers
 
-The wrappers under `tools/` are an **alternative** to native autosync for hosts where you cannot keep `engram serve` running (CI runners, ephemeral agents, cron-only boxes). They run `engram sync --cloud --project <project>` once per explicitly named project and stop. **Choose ONE mode** — native autosync (above) is recommended when a daemon is feasible; the wrappers are for the no-daemon case. Do **not** run both at once: it produces redundant overlapping sync attempts. Cloud `--all` is intentionally unsupported; these wrappers never infer projects from cwd or an env var — every project is passed explicitly.
-
+The wrappers under `tools/` are an **alternative** to native autosync for hosts where you cannot keep `engram serve` running (CI runners, ephemeral agents, cron-only boxes). They run `engram sync --cloud --project <project>` once per explicitly named project and stop. **Choose ONE mode** — native autosync (above) is recommended when a daemon is feasible; the wrappers are for the no-daemon case. Do **not** run both at once: it produces redundant overlapping sync attempts. Cloud `--all` is intentionally unsupported; projects are never inferred from cwd or an env var.
 ### Bash: `tools/cloud-sync-projects.sh`
 
 ```sh
 ./tools/cloud-sync-projects.sh my-project my-other-project
-./tools/cloud-sync-projects.sh --log /var/log/engram-cloud-sync.log my-project  # override default log
+./tools/cloud-sync-projects.sh --log /var/log/engram-cloud-sync.log my-project
 ```
-
-Exit `0` if all project syncs and the log succeeded; `1` if any project sync or logging op failed; `2` on usage error (no projects, bad flag). Default durable append-only log: `$ENGRAM_DATA_DIR/cloud-sync-projects.log` (`ENGRAM_DATA_DIR` defaults to `~/.engram`); override precedence `--log` > `ENGRAM_CLOUD_SYNC_LOG` > default. Wrapper start/end and per-project start/success/failure lines go to **both** the timestamped console and the log; the command's stdout+stderr are preserved on console and appended to the log. Nothing is retried or silenced.
+Exit `0` if all syncs and log succeeded; `1` if any project or logging op failed; `2` on usage error. Default durable log `$ENGRAM_DATA_DIR/cloud-sync-projects.log` (`~/.engram` fallback); override `--log` > `ENGRAM_CLOUD_SYNC_LOG` > default. Status lines go to both timestamped console and log; command stdout+stderr preserved on console and appended to log. Nothing retried or silenced.
 
 ### PowerShell: `tools/cloud-sync-projects.ps1`
-
 ```powershell
 pwsh ./tools/cloud-sync-projects.ps1 my-project my-other-project
 pwsh ./tools/cloud-sync-projects.ps1 -LogPath C:\logs\engram-cloud-sync.log my-project
 ```
-
-Same behavior and exit codes. Log default `$ENGRAM_DATA_DIR\cloud-sync-projects.log`; override `-LogPath` > `ENGRAM_CLOUD_SYNC_LOG` > default.
+Requires PowerShell 7 (`pwsh`); 5.1 is not supported. Same behavior, exit codes, and log defaults as Bash; override `-LogPath` > `ENGRAM_CLOUD_SYNC_LOG` > default.
 
 ### Inspecting the last failure
 
-The log is append-only. `project FAILURE project=<name> exit=<n>` records the exact exit code from `engram sync --cloud --project <name>`:
+`project FAILURE project=<name> exit=<n>` records the exact exit code from `engram sync --cloud --project <name>`:
 
 ```sh
-grep 'project FAILURE' "$ENGRAM_DATA_DIR/cloud-sync-projects.log" | tail -n 5
+grep 'project FAILURE' "${ENGRAM_DATA_DIR:-$HOME/.engram}/cloud-sync-projects.log" | tail -n 5
+```
+PowerShell 7 (`$env:ENGRAM_DATA_DIR` or `$HOME/.engram` fallback):
+
+```powershell
+$d = if ($env:ENGRAM_DATA_DIR) { $env:ENGRAM_DATA_DIR } else { Join-Path $HOME '.engram' }
+Select-String 'project FAILURE' (Join-Path $d 'cloud-sync-projects.log') | Select-Object -Last 5
 ```
 
-Pass the failing project to the normal [Engram Cloud Troubleshooting](docs/engram-cloud/troubleshooting.md) flow — the wrappers record and propagate the failure, they do not interpret or retry it.
-
----
+Pass the failing project to [Engram Cloud Troubleshooting](docs/engram-cloud/troubleshooting.md) — the wrappers record and propagate, not interpret or retry.
 
 ## Cloud Sync Audit Log
 
