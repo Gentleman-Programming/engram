@@ -1,7 +1,7 @@
 {
   "name": "engram",
   "displayName": "Engram Persistent Memory",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Persistent memory for AI coding agents. Survives across sessions and compactions.",
   "shortDescription": "Persistent memory with session tracking, compaction recovery, and Memory Protocol.",
   "author": {
