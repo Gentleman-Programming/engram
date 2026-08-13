@@ -10,8 +10,6 @@ import (
 	"testing"
 )
 
-// Wrapper tests with a fake `engram`: bash on non-Windows, pwsh on Windows;
-// PowerShell 5.1 is rejected in a separate Windows-only subtest.
 func wrapperAbs(t *testing.T, name string) string {
 	t.Helper()
 	abs, err := filepath.Abs(name)
@@ -20,6 +18,7 @@ func wrapperAbs(t *testing.T, name string) string {
 	}
 	return abs
 }
+
 func assertContains(t *testing.T, label, out string, wants ...string) {
 	t.Helper()
 	for _, w := range wants {
@@ -28,7 +27,6 @@ func assertContains(t *testing.T, label, out string, wants ...string) {
 		}
 	}
 }
-
 func fakeEngram(t *testing.T, dir, failProj string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -49,8 +47,6 @@ func fakeEngram(t *testing.T, dir, failProj string) {
 		t.Fatal(err)
 	}
 }
-
-// run: controlled env (ENGRAM_CLOUD_SYNC_LOG removed case-insensitively for Windows, add appended, fakeDir on PATH); never returns a hard-coded log path.
 func run(t *testing.T, interp, wrapper, fakeDir string, add, args []string) (int, string) {
 	t.Helper()
 	env := []string{}
@@ -81,25 +77,25 @@ func run(t *testing.T, interp, wrapper, fakeDir string, add, args []string) (int
 	return 0, string(out)
 }
 
-// wcase covers log-path precedence, failure aggregation, usage errors, and help in one table; envLog/explicitLog "" = unset/omitted.
 type wcase struct {
-	name                       string
-	projects                   []string
-	failProj                   string
-	envLog, explicitLog        string
-	wantExit                   int
-	wantLogPath                string
-	wantIn, wantLog, wantNotIn []string
+	name                                       string
+	projects                                   []string
+	failProj, envLog, explicitLog, wantLogPath string
+	wantExit                                   int
+	wantIn, wantLog, wantNotIn                 []string
 }
 
 func TestCloudSyncWrappers(t *testing.T) {
 	type interp struct{ name, file, flag string }
 	var interps []interp
 	if runtime.GOOS != "windows" {
-		if _, err := exec.LookPath("bash"); err == nil {
-			interps = append(interps, interp{"bash", "cloud-sync-projects.sh", "--log"})
+		if _, err := exec.LookPath("bash"); err != nil {
+			t.Fatal("bash is required to test cloud-sync-projects.sh")
 		}
-	} else if p, err := exec.LookPath("pwsh"); err == nil {
+		interps = append(interps, interp{"bash", "cloud-sync-projects.sh", "--log"})
+	} else if p, err := exec.LookPath("pwsh"); err != nil {
+		t.Fatal("pwsh is required to test cloud-sync-projects.ps1")
+	} else {
 		interps = append(interps, interp{p, "cloud-sync-projects.ps1", "-LogPath"})
 	}
 	for _, it := range interps {
@@ -107,8 +103,11 @@ func TestCloudSyncWrappers(t *testing.T) {
 			wrapper := wrapperAbs(t, it.file)
 			tmp := t.TempDir()
 			fakeDir, dataDir := filepath.Join(tmp, "bin"), filepath.Join(tmp, "data")
-			os.MkdirAll(fakeDir, 0o755)
-			os.MkdirAll(dataDir, 0o755)
+			for _, d := range []string{fakeDir, dataDir} {
+				if err := os.MkdirAll(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
 			defLog := filepath.Join(dataDir, "cloud-sync-projects.log")
 			envLog, envLogUnused, explicitLog, pfLog := filepath.Join(tmp, "env.log"), filepath.Join(tmp, "env-unused.log"), filepath.Join(tmp, "explicit.log"), filepath.Join(tmp, "pf.log")
 			cases := []wcase{
