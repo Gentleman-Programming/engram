@@ -13,6 +13,8 @@ import (
 	"time"
 )
 
+const codexStopResponse = `{"continue":true,"suppressOutput":false}`
+
 type codexHooksManifest struct {
 	Hooks map[string][]struct {
 		Hooks []struct {
@@ -70,6 +72,7 @@ func TestCodexWindowsStopHook(t *testing.T) {
 			"-TimeoutSec 3",
 			"-MaximumRedirection 0",
 			"*> $null",
+			codexStopResponse,
 			"exit 0",
 		} {
 			if !strings.Contains(content, required) {
@@ -127,8 +130,8 @@ func TestCodexWindowsSessionStopAdapter(t *testing.T) {
 
 	t.Run("posts an escaped session ID through a path containing spaces", func(t *testing.T) {
 		stdout, stderr, code := runCodexWindowsStop(t, adapterPath, `{"session_id":"session id/with?characters"}`, &port)
-		if code != 0 || stdout != "" || stderr != "" {
-			t.Fatalf("exit=%d stdout=%q stderr=%q, want silent exit 0", code, stdout, stderr)
+		if code != 0 || stdout != codexStopResponse || stderr != "" {
+			t.Fatalf("exit=%d stdout=%q stderr=%q, want exit 0 with Stop response %q", code, stdout, stderr, codexStopResponse)
 		}
 		select {
 		case got := <-requests:
@@ -143,8 +146,8 @@ func TestCodexWindowsSessionStopAdapter(t *testing.T) {
 	t.Run("executes the manifest command through cmd.exe", func(t *testing.T) {
 		command := strings.ReplaceAll(codexWindowsStopCommand(t, root), "${PLUGIN_ROOT}", pluginRoot)
 		stdout, stderr, code := runCodexWindowsManifestCommand(t, command, `{"session_id":"session id/with?characters"}`, port)
-		if code != 0 || stdout != "" || stderr != "" {
-			t.Fatalf("exit=%d stdout=%q stderr=%q, want silent exit 0", code, stdout, stderr)
+		if code != 0 || stdout != codexStopResponse || stderr != "" {
+			t.Fatalf("exit=%d stdout=%q stderr=%q, want exit 0 with Stop response %q", code, stdout, stderr, codexStopResponse)
 		}
 		select {
 		case got := <-requests:
@@ -169,8 +172,8 @@ func TestCodexWindowsSessionStopAdapter(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stdout, stderr, code := runCodexWindowsStop(t, adapterPath, tc.input, tc.port)
-			if code != 0 || stdout != "" || stderr != "" {
-				t.Fatalf("exit=%d stdout=%q stderr=%q, want silent exit 0", code, stdout, stderr)
+			if code != 0 || stdout != codexStopResponse || stderr != "" {
+				t.Fatalf("exit=%d stdout=%q stderr=%q, want exit 0 with Stop response %q", code, stdout, stderr, codexStopResponse)
 			}
 			select {
 			case got := <-requests:
@@ -190,15 +193,15 @@ func TestCodexWindowsSessionStopAdapter(t *testing.T) {
 			t.Fatalf("close reserved port: %v", err)
 		}
 		stdout, stderr, code := runCodexWindowsStop(t, adapterPath, `{"session_id":"id"}`, &closedPort)
-		if code != 0 || stdout != "" || stderr != "" {
-			t.Fatalf("exit=%d stdout=%q stderr=%q, want silent exit 0", code, stdout, stderr)
+		if code != 0 || stdout != codexStopResponse || stderr != "" {
+			t.Fatalf("exit=%d stdout=%q stderr=%q, want exit 0 with Stop response %q", code, stdout, stderr, codexStopResponse)
 		}
 	})
 }
 
 func runCodexWindowsStop(t *testing.T, adapterPath, input string, port *string) (string, string, int) {
 	t.Helper()
-	command := "& \"" + strings.ReplaceAll(adapterPath, "'", "''") + "\""
+	command := "& '" + strings.ReplaceAll(adapterPath, "'", "''") + "'"
 	if port != nil {
 		command = "$env:ENGRAM_PORT='" + strings.ReplaceAll(*port, "'", "''") + "'; " + command
 	} else {
