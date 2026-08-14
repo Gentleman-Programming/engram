@@ -58,8 +58,9 @@ function toolOutput(...sessionIDs) {
 }
 
 async function assertNoForward(pending, output, error = RESOLUTION_ERROR) {
-  await assert.rejects(pending, error)
+  assert.notEqual(output.args.session_id, undefined)
   assert.equal(output.args.session_id, MODEL_SESSION_ID)
+  await assert.rejects(pending, error)
 }
 
 function assertNoRegistration(runtime, message) {
@@ -255,6 +256,12 @@ test("invalid, cyclic, and mismatched SDK ownership aborts without registration"
       start: "foreign",
       sessions: new Map([["foreign", session("foreign", undefined, "project-2")]]),
       expectedLookups: ["foreign"],
+    },
+    {
+      name: "missing project ID",
+      start: "unscoped",
+      sessions: new Map([["unscoped", { id: "unscoped" }]]),
+      expectedLookups: ["unscoped"],
     },
   ]) {
     await t.test(scenario.name, async (t) => {

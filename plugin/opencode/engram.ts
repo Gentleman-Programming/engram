@@ -270,7 +270,7 @@ export const Engram: Plugin = async (ctx) => {
         ? rawParentID
         : undefined
     const rawProjectID = info?.projectID
-    const invalidProjectID = rawProjectID !== undefined && (
+    const invalidProjectID = (
       typeof rawProjectID !== "string" ||
       !rawProjectID ||
       (ctx.project?.id && rawProjectID !== ctx.project.id)
@@ -340,6 +340,7 @@ export const Engram: Plugin = async (ctx) => {
             typeof info.id !== "string" ||
             info.id !== current ||
             typeof info.projectID !== "string" ||
+            !info.projectID ||
             (ctx.project?.id && info.projectID !== ctx.project.id) ||
             (info.parentID !== undefined && (typeof info.parentID !== "string" || !info.parentID))
           ) {
