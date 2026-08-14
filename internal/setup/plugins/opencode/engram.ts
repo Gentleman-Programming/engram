@@ -233,16 +233,43 @@ export const Engram: Plugin = async (ctx) => {
   // OpenCode session events; subagents never register or own lifecycle.
   const parentSessions = new Map<string, string>()
 
+  // Deleted sessions and descendants remain invalid for this plugin lifetime.
+  // This prevents late hooks or events from reviving an expired runtime chain.
+  const invalidSessions = new Set<string>()
+
+  function invalidateSessionTree(sessionId: string): void {
+    const invalidated = new Set([sessionId])
+    let foundDescendant = true
+    while (foundDescendant) {
+      foundDescendant = false
+      for (const [childID, parentID] of parentSessions) {
+        if (invalidated.has(parentID) && !invalidated.has(childID)) {
+          invalidated.add(childID)
+          foundDescendant = true
+        }
+      }
+    }
+
+    for (const invalidID of invalidated) {
+      invalidSessions.add(invalidID)
+      knownSessions.delete(invalidID)
+      subAgentSessions.delete(invalidID)
+      parentSessions.delete(invalidID)
+      toolCounts.delete(invalidID)
+      lastNudgeTime.delete(invalidID)
+    }
+  }
+
   function resolveAuthoritativeSessionID(sessionId: string): string {
-    if (!sessionId) return ""
+    if (!sessionId || invalidSessions.has(sessionId)) return ""
     if (subAgentSessions.has(sessionId) && !parentSessions.has(sessionId)) return ""
     const visited = new Set<string>()
     let current = sessionId
     while (parentSessions.has(current)) {
-      if (visited.has(current)) return ""
+      if (visited.has(current) || invalidSessions.has(current)) return ""
       visited.add(current)
       current = parentSessions.get(current) ?? ""
-      if (!current) return ""
+      if (!current || invalidSessions.has(current)) return ""
     }
     return current
   }
@@ -254,7 +281,7 @@ export const Engram: Plugin = async (ctx) => {
    * Silently skips sub-agent sessions (tracked in `subAgentSessions`).
    */
   async function ensureSession(sessionId: string): Promise<boolean> {
-    if (!sessionId) return false
+    if (!sessionId || invalidSessions.has(sessionId)) return false
     if (knownSessions.has(sessionId)) return true
     // Do not register sub-agent sessions in Engram (issue #116).
     if (subAgentSessions.has(sessionId)) return false
@@ -266,7 +293,7 @@ export const Engram: Plugin = async (ctx) => {
         directory: ctx.directory,
       },
     })
-    if (acknowledgement === null) return false
+    if (acknowledgement === null || invalidSessions.has(sessionId)) return false
     knownSessions.add(sessionId)
     return true
   }
@@ -327,6 +354,11 @@ export const Engram: Plugin = async (ctx) => {
         const parentID = info?.parentID
         const title: string = info?.title ?? ""
 
+        if (sessionId && (invalidSessions.has(sessionId) || (parentID && invalidSessions.has(parentID)))) {
+          invalidateSessionTree(sessionId)
+          return
+        }
+
         // Sub-agent sessions (created via Task()) must NOT be registered as
         // top-level Engram sessions. They cause massive session inflation
         // (e.g. 170 sessions for 1 real conversation).
@@ -352,11 +384,7 @@ export const Engram: Plugin = async (ctx) => {
         const info = (event.properties as any)?.info
         const sessionId = info?.id
         if (sessionId) {
-          toolCounts.delete(sessionId)
-          knownSessions.delete(sessionId)
-          subAgentSessions.delete(sessionId)
-          parentSessions.delete(sessionId)
-          lastNudgeTime.delete(sessionId)
+          invalidateSessionTree(sessionId)
         }
       }
 
@@ -411,10 +439,10 @@ export const Engram: Plugin = async (ctx) => {
     "tool.execute.before": async (input, output) => {
       if (!SESSION_ATTRIBUTED_WRITE_TOOLS.has(input.tool.toLowerCase())) return
       const authoritativeSessionID = resolveAuthoritativeSessionID(input.sessionID)
-      if (authoritativeSessionID && await ensureSession(authoritativeSessionID)) {
+      if (authoritativeSessionID && await ensureSession(authoritativeSessionID) && !invalidSessions.has(authoritativeSessionID)) {
         output.args.session_id = authoritativeSessionID
       } else {
-        delete output.args.session_id
+        throw new Error(`gentle-engram could not bind ${input.tool} to a confirmed OpenCode runtime session`)
       }
     },
 
@@ -468,7 +496,7 @@ export const Engram: Plugin = async (ctx) => {
       // forget with short timeouts — any failure silently skips the nudge.
       try {
         const sessionID: string = input.sessionID ?? ""
-        if (!sessionID || subAgentSessions.has(sessionID)) return
+        if (!sessionID || invalidSessions.has(sessionID) || subAgentSessions.has(sessionID)) return
 
         // SQLite datetime('now') returns "YYYY-MM-DD HH:MM:SS" in UTC with no
         // zone suffix; new Date() would parse that as local time. Normalize to

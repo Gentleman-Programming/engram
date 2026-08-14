@@ -680,7 +680,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
       return engramFetch(`/timeline${queryString({ observation_id: params.observation_id, before: params.before, after: params.after, project: params.project })}`);
     case "mem_get_observation":
       return engramFetch(`/observations/${encodeURIComponent(String(params.id))}`);
-    case "mem_save":
+    case "mem_save": {
       if (!requestedProject) requireResolvedProject();
       const activeSessionId = runtimeSessionForWrite();
       await ensureSession(activeSessionId, activeProject);
@@ -696,6 +696,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
           topic_key: params.topic_key,
         },
       });
+    }
     case "mem_update":
       return engramFetch(`/observations/${encodeURIComponent(String(params.id))}`, {
         method: "PATCH",
@@ -711,7 +712,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
       return engramFetch(`/observations/${encodeURIComponent(String(params.id))}${queryString({ hard: params.hard_delete })}`, { method: "DELETE" });
     case "mem_suggest_topic_key":
       return { topic_key: slugifyTopicKey(params) };
-    case "mem_save_prompt":
+    case "mem_save_prompt": {
       if (!requestedProject) requireResolvedProject();
       const promptSessionId = runtimeSessionForWrite();
       await ensureSession(promptSessionId, activeProject);
@@ -719,7 +720,8 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
         method: "POST",
         body: { session_id: promptSessionId, content: params.content, project: activeProject },
       });
-    case "mem_session_summary":
+    }
+    case "mem_session_summary": {
       if (!requestedProject) requireResolvedProject();
       const summarySessionId = runtimeSessionForWrite();
       await ensureSession(summarySessionId, activeProject);
@@ -734,6 +736,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
           scope: "project",
         },
       });
+    }
     case "mem_session_start":
       requireResolvedProject();
       return engramFetch("/sessions", {
@@ -758,7 +761,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
     }
     case "mem_doctor":
       return engramFetch(`/doctor${queryString({ project: params.project, check: params.check, cwd: params.project ? undefined : ctx.cwd })}`);
-    case "mem_capture_passive":
+    case "mem_capture_passive": {
       requireResolvedProject();
       const passiveSessionId = runtimeSessionForWrite();
       await ensureSession(passiveSessionId);
@@ -771,6 +774,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
           source: params.source || "pi-tool",
         },
       });
+    }
     case "mem_review": {
       const action = String(params.action || "").trim();
       if (action === "list") {
