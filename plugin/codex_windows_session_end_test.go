@@ -13,22 +13,21 @@ import (
 	"time"
 )
 
-const codexStopResponse = `{"continue":true,"suppressOutput":false}`
-
 type codexHooksManifest struct {
 	Hooks map[string][]struct {
 		Hooks []struct {
 			Type           string `json:"type"`
 			Command        string `json:"command"`
 			CommandWindows string `json:"commandWindows"`
+			Timeout        int    `json:"timeout"`
 		} `json:"hooks"`
 	} `json:"hooks"`
 }
 
-func TestCodexWindowsStopHook(t *testing.T) {
+func TestCodexSessionEndHook(t *testing.T) {
 	root := repoRoot(t)
 
-	t.Run("declares the Windows adapter", func(t *testing.T) {
+	t.Run("declares SessionEnd adapters within the timeout cap", func(t *testing.T) {
 		data, err := os.ReadFile(filepath.Join(root, "plugin", "codex", "hooks", "hooks.json"))
 		if err != nil {
 			t.Fatalf("read hooks manifest: %v", err)
@@ -39,22 +38,50 @@ func TestCodexWindowsStopHook(t *testing.T) {
 			t.Fatalf("parse hooks manifest: %v", err)
 		}
 
-		const want = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${PLUGIN_ROOT}\scripts\session-stop.ps1"`
-		for _, group := range manifest.Hooks["Stop"] {
+		const wantUnix = `"${PLUGIN_ROOT}/scripts/session-end.sh"`
+		const wantWindows = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${PLUGIN_ROOT}\scripts\session-end.ps1"`
+		for _, group := range manifest.Hooks["SessionEnd"] {
 			for _, hook := range group.Hooks {
-				if hook.Type == "command" && hook.CommandWindows == want {
+				if hook.Type == "command" && hook.Command == wantUnix && hook.CommandWindows == wantWindows && hook.Timeout == 3 {
 					return
 				}
 			}
 		}
-		t.Fatalf("Stop hook must declare commandWindows %q", want)
+		t.Fatalf("SessionEnd hook must declare command %q, commandWindows %q, and timeout 3", wantUnix, wantWindows)
 	})
 
-	t.Run("provides a fail-open PowerShell adapter", func(t *testing.T) {
-		path := filepath.Join(root, "plugin", "codex", "scripts", "session-stop.ps1")
+	t.Run("does not close sessions from Stop", func(t *testing.T) {
+		data, err := os.ReadFile(filepath.Join(root, "plugin", "codex", "hooks", "hooks.json"))
+		if err != nil {
+			t.Fatalf("read hooks manifest: %v", err)
+		}
+
+		var manifest codexHooksManifest
+		if err := json.Unmarshal(data, &manifest); err != nil {
+			t.Fatalf("parse hooks manifest: %v", err)
+		}
+		for _, group := range manifest.Hooks["Stop"] {
+			for _, hook := range group.Hooks {
+				if strings.Contains(hook.Command, "session-stop") || strings.Contains(hook.Command, "session-end") ||
+					strings.Contains(hook.CommandWindows, "session-stop") || strings.Contains(hook.CommandWindows, "session-end") {
+					t.Fatalf("Stop must not contain an Engram session-closure handler: command=%q commandWindows=%q", hook.Command, hook.CommandWindows)
+				}
+			}
+		}
+	})
+
+	t.Run("provides bounded SessionEnd adapters", func(t *testing.T) {
+		for _, oldName := range []string{"session-stop.ps1", "session-stop.sh"} {
+			oldPath := filepath.Join(root, "plugin", "codex", "scripts", oldName)
+			if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+				t.Errorf("obsolete adapter %s must not remain", oldPath)
+			}
+		}
+
+		path := filepath.Join(root, "plugin", "codex", "scripts", "session-end.ps1")
 		data, err := os.ReadFile(path)
 		if err != nil {
-			t.Fatalf("read Windows session-stop adapter: %v", err)
+			t.Fatalf("read Windows session-end adapter: %v", err)
 		}
 		content := string(data)
 		for _, required := range []string{
@@ -69,15 +96,23 @@ func TestCodexWindowsStopHook(t *testing.T) {
 			"/end",
 			"Invoke-WebRequest",
 			"-UseBasicParsing",
-			"-TimeoutSec 3",
+			"-TimeoutSec 2",
 			"-MaximumRedirection 0",
 			"*> $null",
-			codexStopResponse,
 			"exit 0",
 		} {
 			if !strings.Contains(content, required) {
-				t.Errorf("Windows session-stop adapter must contain %q", required)
+				t.Errorf("Windows session-end adapter must contain %q", required)
 			}
+		}
+
+		shellPath := filepath.Join(root, "plugin", "codex", "scripts", "session-end.sh")
+		shellData, err := os.ReadFile(shellPath)
+		if err != nil {
+			t.Fatalf("read Unix session-end adapter: %v", err)
+		}
+		if !strings.Contains(string(shellData), "--max-time 2") {
+			t.Errorf("Unix session-end adapter must bound curl with --max-time 2")
 		}
 	})
 
@@ -90,24 +125,24 @@ func TestCodexWindowsStopHook(t *testing.T) {
 		if err := json.Unmarshal(data, &manifest); err != nil {
 			t.Fatalf("parse Codex plugin manifest: %v", err)
 		}
-		if manifest.Version != "0.1.2" {
-			t.Errorf("Codex plugin version = %q, want 0.1.2", manifest.Version)
+		if manifest.Version != "0.1.3" {
+			t.Errorf("Codex plugin version = %q, want 0.1.3", manifest.Version)
 		}
 	})
 }
 
-func TestCodexWindowsSessionStopAdapter(t *testing.T) {
+func TestCodexWindowsSessionEndAdapter(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("requires Windows PowerShell")
 	}
 
 	root := repoRoot(t)
-	source, err := os.ReadFile(filepath.Join(root, "plugin", "codex", "scripts", "session-stop.ps1"))
+	source, err := os.ReadFile(filepath.Join(root, "plugin", "codex", "scripts", "session-end.ps1"))
 	if err != nil {
 		t.Fatalf("read adapter: %v", err)
 	}
 	pluginRoot := filepath.Join(t.TempDir(), "plugin root with spaces")
-	adapterPath := filepath.Join(pluginRoot, "scripts", "session-stop.ps1")
+	adapterPath := filepath.Join(pluginRoot, "scripts", "session-end.ps1")
 	if err := os.MkdirAll(filepath.Dir(adapterPath), 0o755); err != nil {
 		t.Fatalf("create adapter directory: %v", err)
 	}
@@ -129,9 +164,9 @@ func TestCodexWindowsSessionStopAdapter(t *testing.T) {
 	port := strings.TrimPrefix(listener.Addr().String(), "127.0.0.1:")
 
 	t.Run("posts an escaped session ID through a path containing spaces", func(t *testing.T) {
-		stdout, stderr, code := runCodexWindowsStop(t, adapterPath, `{"session_id":"session id/with?characters"}`, &port)
-		if code != 0 || stdout != codexStopResponse || stderr != "" {
-			t.Fatalf("exit=%d stdout=%q stderr=%q, want exit 0 with Stop response %q", code, stdout, stderr, codexStopResponse)
+		stdout, stderr, code := runCodexWindowsSessionEnd(t, adapterPath, `{"session_id":"session id/with?characters"}`, &port)
+		if code != 0 || stdout != "" || stderr != "" {
+			t.Fatalf("exit=%d stdout=%q stderr=%q, want silent exit 0", code, stdout, stderr)
 		}
 		select {
 		case got := <-requests:
@@ -144,10 +179,10 @@ func TestCodexWindowsSessionStopAdapter(t *testing.T) {
 	})
 
 	t.Run("executes the manifest command through cmd.exe", func(t *testing.T) {
-		command := strings.ReplaceAll(codexWindowsStopCommand(t, root), "${PLUGIN_ROOT}", pluginRoot)
-		stdout, stderr, code := runCodexWindowsManifestCommand(t, command, `{"session_id":"session id/with?characters"}`, port)
-		if code != 0 || stdout != codexStopResponse || stderr != "" {
-			t.Fatalf("exit=%d stdout=%q stderr=%q, want exit 0 with Stop response %q", code, stdout, stderr, codexStopResponse)
+		command := strings.ReplaceAll(codexWindowsSessionEndCommand(t, root), "${PLUGIN_ROOT}", pluginRoot)
+		stdout, stderr, code := runCodexWindowsSessionEndManifestCommand(t, command, `{"session_id":"session id/with?characters"}`, port)
+		if code != 0 || stdout != "" || stderr != "" {
+			t.Fatalf("exit=%d stdout=%q stderr=%q, want silent exit 0", code, stdout, stderr)
 		}
 		select {
 		case got := <-requests:
@@ -171,9 +206,9 @@ func TestCodexWindowsSessionStopAdapter(t *testing.T) {
 		{name: "invalid out of range port", input: `{"session_id":"id"}`, port: stringPointer("65536")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			stdout, stderr, code := runCodexWindowsStop(t, adapterPath, tc.input, tc.port)
-			if code != 0 || stdout != codexStopResponse || stderr != "" {
-				t.Fatalf("exit=%d stdout=%q stderr=%q, want exit 0 with Stop response %q", code, stdout, stderr, codexStopResponse)
+			stdout, stderr, code := runCodexWindowsSessionEnd(t, adapterPath, tc.input, tc.port)
+			if code != 0 || stdout != "" || stderr != "" {
+				t.Fatalf("exit=%d stdout=%q stderr=%q, want silent exit 0", code, stdout, stderr)
 			}
 			select {
 			case got := <-requests:
@@ -192,22 +227,25 @@ func TestCodexWindowsSessionStopAdapter(t *testing.T) {
 		if err := closedListener.Close(); err != nil {
 			t.Fatalf("close reserved port: %v", err)
 		}
-		stdout, stderr, code := runCodexWindowsStop(t, adapterPath, `{"session_id":"id"}`, &closedPort)
-		if code != 0 || stdout != codexStopResponse || stderr != "" {
-			t.Fatalf("exit=%d stdout=%q stderr=%q, want exit 0 with Stop response %q", code, stdout, stderr, codexStopResponse)
+		stdout, stderr, code := runCodexWindowsSessionEnd(t, adapterPath, `{"session_id":"id"}`, &closedPort)
+		if code != 0 || stdout != "" || stderr != "" {
+			t.Fatalf("exit=%d stdout=%q stderr=%q, want silent exit 0", code, stdout, stderr)
 		}
 	})
 }
 
-func runCodexWindowsStop(t *testing.T, adapterPath, input string, port *string) (string, string, int) {
+func runCodexWindowsSessionEnd(t *testing.T, adapterPath, input string, port *string) (string, string, int) {
 	t.Helper()
-	command := "& '" + strings.ReplaceAll(adapterPath, "'", "''") + "'"
-	if port != nil {
-		command = "$env:ENGRAM_PORT='" + strings.ReplaceAll(*port, "'", "''") + "'; " + command
-	} else {
-		command = "Remove-Item Env:ENGRAM_PORT -ErrorAction SilentlyContinue; " + command
+	run := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", adapterPath)
+	run.Env = make([]string, 0, len(os.Environ())+1)
+	for _, env := range os.Environ() {
+		if !strings.HasPrefix(strings.ToUpper(env), "ENGRAM_PORT=") {
+			run.Env = append(run.Env, env)
+		}
 	}
-	run := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command)
+	if port != nil {
+		run.Env = append(run.Env, "ENGRAM_PORT="+*port)
+	}
 	run.Stdin = strings.NewReader(input)
 	var stdout, stderr strings.Builder
 	run.Stdout = &stdout
@@ -223,7 +261,7 @@ func runCodexWindowsStop(t *testing.T, adapterPath, input string, port *string) 
 	return "", "", -1
 }
 
-func codexWindowsStopCommand(t *testing.T, root string) string {
+func codexWindowsSessionEndCommand(t *testing.T, root string) string {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join(root, "plugin", "codex", "hooks", "hooks.json"))
 	if err != nil {
@@ -233,14 +271,14 @@ func codexWindowsStopCommand(t *testing.T, root string) string {
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		t.Fatalf("parse hooks manifest: %v", err)
 	}
-	for _, group := range manifest.Hooks["Stop"] {
+	for _, group := range manifest.Hooks["SessionEnd"] {
 		for _, hook := range group.Hooks {
 			if hook.Type == "command" && hook.CommandWindows != "" {
 				return hook.CommandWindows
 			}
 		}
 	}
-	t.Fatal("Stop hook does not declare commandWindows")
+	t.Fatal("SessionEnd hook does not declare commandWindows")
 	return ""
 }
 

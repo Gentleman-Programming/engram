@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-func runCodexWindowsManifestCommand(t *testing.T, command, input, port string) (string, string, int) {
+func runCodexWindowsSessionEndManifestCommand(t *testing.T, command, input, port string) (string, string, int) {
 	t.Helper()
 	run := exec.Command("cmd.exe")
 	run.SysProcAttr = &syscall.SysProcAttr{CmdLine: "/D /S /C " + command}
