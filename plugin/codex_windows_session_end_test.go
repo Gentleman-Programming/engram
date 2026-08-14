@@ -116,7 +116,7 @@ func TestCodexSessionEndHook(t *testing.T) {
 		}
 	})
 
-	t.Run("keeps the Codex plugin version", func(t *testing.T) {
+	t.Run("bumps the Codex plugin version", func(t *testing.T) {
 		data, err := os.ReadFile(filepath.Join(root, "plugin", "codex", ".codex-plugin", "plugin.json"))
 		if err != nil {
 			t.Fatalf("read Codex plugin manifest: %v", err)
@@ -125,8 +125,8 @@ func TestCodexSessionEndHook(t *testing.T) {
 		if err := json.Unmarshal(data, &manifest); err != nil {
 			t.Fatalf("parse Codex plugin manifest: %v", err)
 		}
-		if manifest.Version != "0.1.2" {
-			t.Errorf("Codex plugin version = %q, want 0.1.2", manifest.Version)
+		if manifest.Version != "0.1.3" {
+			t.Errorf("Codex plugin version = %q, want 0.1.3", manifest.Version)
 		}
 	})
 }
