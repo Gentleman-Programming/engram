@@ -86,7 +86,7 @@ If the binary is missing, the MCP launcher exits cleanly instead of crashing Pi 
 
 Other write tools still primarily use cwd/repo detection unless their schema says otherwise. Start the MCP server from the repo or add `.engram/config.json` when you want deterministic default writes.
 
-OpenCode binds these four MCP calls to its confirmed top-level runtime session and maps subagents to their authoritative parent. Pi's native HTTP wrappers use only `ctx.sessionManager.getSessionId()` for these writes; model-supplied session IDs are ignored, and a missing or unconfirmed runtime ID fails safely.
+OpenCode binds these four MCP calls to its confirmed top-level runtime session and maps subagents to their authoritative parent.
 
 To lock write tools to the canonical project for a repo, add `.engram/config.json` at the repo root:
 
