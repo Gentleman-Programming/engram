@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -10,6 +11,20 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestEmbeddedOpenCodePluginMatchesSourceByteForByte(t *testing.T) {
+	source, err := os.ReadFile(filepath.Join("..", "..", "plugin", "opencode", "engram.ts"))
+	if err != nil {
+		t.Fatalf("read OpenCode source plugin: %v", err)
+	}
+	embedded, err := os.ReadFile(filepath.Join("plugins", "opencode", "engram.ts"))
+	if err != nil {
+		t.Fatalf("read embedded OpenCode plugin: %v", err)
+	}
+	if !bytes.Equal(source, embedded) {
+		t.Fatal("embedded OpenCode plugin drifted from plugin/opencode/engram.ts; regenerate the embedded copy")
+	}
+}
 
 func resetSetupSeams(t *testing.T) {
 	t.Helper()

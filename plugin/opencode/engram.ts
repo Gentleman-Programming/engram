@@ -37,6 +37,14 @@ const ENGRAM_TOOLS = new Set([
   "mem_get_observation",
   "mem_session_start",
   "mem_session_end",
+  "mem_capture_passive",
+])
+
+const SESSION_ATTRIBUTED_WRITE_TOOLS = new Set([
+  "mem_save",
+  "mem_save_prompt",
+  "mem_session_summary",
+  "mem_capture_passive",
 ])
 
 // ─── Memory Instructions ─────────────────────────────────────────────────────
@@ -132,8 +140,14 @@ async function engramFetch(
       method: opts.method ?? "GET",
       headers: opts.body ? { "Content-Type": "application/json" } : undefined,
       body: opts.body ? JSON.stringify(opts.body) : undefined,
+      signal: AbortSignal.timeout(3000),
     })
-    return await res.json()
+    if (!res.ok) return null
+    try {
+      return await res.json()
+    } catch {
+      return {}
+    }
   } catch {
     // Engram server not running — silently fail
     return null
@@ -215,18 +229,36 @@ export const Engram: Plugin = async (ctx) => {
   // inflation (e.g. 170 sessions for 1 real conversation, issue #116).
   const subAgentSessions = new Set<string>()
 
+  // Authoritative runtime ownership for subagents. Values come only from
+  // OpenCode session events; subagents never register or own lifecycle.
+  const parentSessions = new Map<string, string>()
+
+  function resolveAuthoritativeSessionID(sessionId: string): string {
+    if (!sessionId) return ""
+    if (subAgentSessions.has(sessionId) && !parentSessions.has(sessionId)) return ""
+    const visited = new Set<string>()
+    let current = sessionId
+    while (parentSessions.has(current)) {
+      if (visited.has(current)) return ""
+      visited.add(current)
+      current = parentSessions.get(current) ?? ""
+      if (!current) return ""
+    }
+    return current
+  }
+
   /**
    * Ensure a session exists in engram. Idempotent — calls POST /sessions
    * which uses INSERT OR IGNORE. Safe to call multiple times.
    *
    * Silently skips sub-agent sessions (tracked in `subAgentSessions`).
    */
-  async function ensureSession(sessionId: string): Promise<void> {
-    if (!sessionId || knownSessions.has(sessionId)) return
+  async function ensureSession(sessionId: string): Promise<boolean> {
+    if (!sessionId) return false
+    if (knownSessions.has(sessionId)) return true
     // Do not register sub-agent sessions in Engram (issue #116).
-    if (subAgentSessions.has(sessionId)) return
-    knownSessions.add(sessionId)
-    await engramFetch("/sessions", {
+    if (subAgentSessions.has(sessionId)) return false
+    const acknowledgement = await engramFetch("/sessions", {
       method: "POST",
       body: {
         id: sessionId,
@@ -234,6 +266,9 @@ export const Engram: Plugin = async (ctx) => {
         directory: ctx.directory,
       },
     })
+    if (acknowledgement === null) return false
+    knownSessions.add(sessionId)
+    return true
   }
 
   // Try to start engram server if not running
@@ -307,6 +342,7 @@ export const Engram: Plugin = async (ctx) => {
           // Remember this as a sub-agent session so tool-hook calls
           // to ensureSession() are also suppressed for it.
           subAgentSessions.add(sessionId)
+          if (parentID) parentSessions.set(sessionId, parentID)
         }
       }
 
@@ -319,6 +355,7 @@ export const Engram: Plugin = async (ctx) => {
           toolCounts.delete(sessionId)
           knownSessions.delete(sessionId)
           subAgentSessions.delete(sessionId)
+          parentSessions.delete(sessionId)
           lastNudgeTime.delete(sessionId)
         }
       }
@@ -353,7 +390,7 @@ export const Engram: Plugin = async (ctx) => {
 
       // Only capture non-trivial prompts (>10 chars)
       if (finalContent.length > 10) {
-        await ensureSession(sessionId)
+        if (!await ensureSession(sessionId)) return
         await engramFetch("/prompts", {
           method: "POST",
           body: {
@@ -371,13 +408,23 @@ export const Engram: Plugin = async (ctx) => {
     // Passive capture: when a Task tool completes, POST its output to
     // the passive capture endpoint so the server extracts learnings.
 
+    "tool.execute.before": async (input, output) => {
+      if (!SESSION_ATTRIBUTED_WRITE_TOOLS.has(input.tool.toLowerCase())) return
+      const authoritativeSessionID = resolveAuthoritativeSessionID(input.sessionID)
+      if (authoritativeSessionID && await ensureSession(authoritativeSessionID)) {
+        output.args.session_id = authoritativeSessionID
+      } else {
+        delete output.args.session_id
+      }
+    },
+
     "tool.execute.after": async (input, output) => {
       if (ENGRAM_TOOLS.has(input.tool.toLowerCase())) return
 
       // input.sessionID comes from OpenCode — always available
-      const sessionId = input.sessionID
+      const sessionId = resolveAuthoritativeSessionID(input.sessionID)
       if (sessionId) {
-        await ensureSession(sessionId)
+        if (!await ensureSession(sessionId)) return
         toolCounts.set(sessionId, (toolCounts.get(sessionId) ?? 0) + 1)
       }
 
@@ -510,7 +557,7 @@ export const Engram: Plugin = async (ctx) => {
 
     "experimental.session.compacting": async (input, output) => {
       if (input.sessionID) {
-        await ensureSession(input.sessionID)
+        await ensureSession(resolveAuthoritativeSessionID(input.sessionID))
       }
 
       // Inject context from previous sessions

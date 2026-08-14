@@ -178,10 +178,9 @@ function isTimeoutError(error: unknown): boolean {
   return error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
 }
 
-// engramFetch resolves to null on failure and ~20 call sites depend on that fallthrough —
-// ensureSession in particular must not abort a mem_save just because session creation blipped.
-// So the timeout detail travels out-of-band instead of changing what any caller receives,
-// letting executeMemoryTool tell the truth about an ambiguous write without blast radius.
+// engramFetch resolves to null on transport failure. Session-attributed writes
+// treat a null registration response as unacknowledged and stop before writing;
+// other callers retain the existing null fallthrough contract.
 let lastFetchTimeoutMethod: string | undefined;
 
 function takeLastFetchTimeoutMethod(): string | undefined {
@@ -420,9 +419,12 @@ const toolCounts = new Map<string, number>();
 async function ensureSession(sessionId: string, sessionProject = project): Promise<void> {
   const key = `${sessionProject}:${sessionId}`;
   if (!sessionId || knownSessions.has(key)) return;
-  knownSessions.add(key);
   const body: SessionBody = { id: sessionId, project: sessionProject, directory };
-  await engramFetch("/sessions", { method: "POST", body });
+  const acknowledgement = await engramFetch("/sessions", { method: "POST", body });
+  if (acknowledgement === null) {
+    throw new Error("gentle-engram could not confirm session registration for Pi runtime session " + sessionId);
+  }
+  knownSessions.add(key);
 }
 
 async function detectServerProject(cwd: string): Promise<CurrentProjectResponse | undefined> {
@@ -507,6 +509,14 @@ function getSessionId(ctx: SessionContext): string | undefined {
   return ctx.sessionManager.getSessionId();
 }
 
+function requireRuntimeSessionID(ctx: SessionContext): string {
+  const sessionId = ctx.sessionManager.getSessionId()?.trim();
+  if (!sessionId) {
+    throw new Error("Pi runtime session ID is unavailable; session-attributed writes require a native SessionContext ID");
+  }
+  return sessionId;
+}
+
 const optionalString = (description: string) => Type.Optional(Type.String({ description }));
 const optionalNumber = (description: string) => Type.Optional(Type.Number({ description }));
 const optionalBoolean = (description: string) => Type.Optional(Type.Boolean({ description }));
@@ -525,7 +535,6 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
     title: Type.String({ description: "Short, searchable title" }),
     content: Type.String({ description: "Structured memory content" }),
     type: optionalString("Observation type/category"),
-    session_id: optionalString("Session ID to associate with"),
     scope: optionalString("Scope: project or personal"),
     topic_key: optionalString("Stable topic key for upserts"),
     project: optionalString("Optional explicit project"),
@@ -550,12 +559,10 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
   }),
   mem_save_prompt: Type.Object({
     content: Type.String({ description: "The user's prompt text" }),
-    session_id: optionalString("Session ID to associate with"),
     project: optionalString("Optional project"),
   }),
   mem_session_summary: Type.Object({
     content: Type.String({ description: "Full session summary" }),
-    session_id: optionalString("Session ID"),
     project: optionalString("Optional project to use when automatic detection is unavailable"),
   }),
   mem_context: Type.Object({
@@ -591,7 +598,6 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
   }),
   mem_capture_passive: Type.Object({
     content: Type.String({ description: "Text output containing a ## Key Learnings section" }),
-    session_id: optionalString("Session ID to associate with"),
     source: optionalString("Source identifier, e.g. subagent-stop or session-end"),
   }),
   mem_review: Type.Object({
@@ -652,7 +658,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
   const sessionId = getSessionId(ctx);
   const requestedProject = typeof params.project === "string" && params.project ? params.project : undefined;
   const activeProject = requestedProject || project;
-  const activeSessionId = String(params.session_id || (requestedProject ? `manual-save-${requestedProject}` : sessionId) || `manual-save-${project}`);
+  const runtimeSessionForWrite = () => requireRuntimeSessionID(ctx);
 
   switch (toolName) {
     case "mem_search":
@@ -676,6 +682,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
       return engramFetch(`/observations/${encodeURIComponent(String(params.id))}`);
     case "mem_save":
       if (!requestedProject) requireResolvedProject();
+      const activeSessionId = runtimeSessionForWrite();
       await ensureSession(activeSessionId, activeProject);
       return engramFetch("/observations", {
         method: "POST",
@@ -706,18 +713,20 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
       return { topic_key: slugifyTopicKey(params) };
     case "mem_save_prompt":
       if (!requestedProject) requireResolvedProject();
-      await ensureSession(activeSessionId, activeProject);
+      const promptSessionId = runtimeSessionForWrite();
+      await ensureSession(promptSessionId, activeProject);
       return engramFetch("/prompts", {
         method: "POST",
-        body: { session_id: activeSessionId, content: params.content, project: activeProject },
+        body: { session_id: promptSessionId, content: params.content, project: activeProject },
       });
     case "mem_session_summary":
       if (!requestedProject) requireResolvedProject();
-      await ensureSession(activeSessionId, activeProject);
+      const summarySessionId = runtimeSessionForWrite();
+      await ensureSession(summarySessionId, activeProject);
       return engramFetch("/observations", {
         method: "POST",
         body: {
-          session_id: activeSessionId,
+          session_id: summarySessionId,
           type: "session_summary",
           title: "Session summary",
           content: params.content,
@@ -751,11 +760,12 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
       return engramFetch(`/doctor${queryString({ project: params.project, check: params.check, cwd: params.project ? undefined : ctx.cwd })}`);
     case "mem_capture_passive":
       requireResolvedProject();
-      await ensureSession(activeSessionId);
+      const passiveSessionId = runtimeSessionForWrite();
+      await ensureSession(passiveSessionId);
       return engramFetch("/observations/passive", {
         method: "POST",
         body: {
-          session_id: activeSessionId,
+          session_id: passiveSessionId,
           content: params.content,
           project,
           source: params.source || "pi-tool",

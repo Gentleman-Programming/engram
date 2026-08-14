@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-const source = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
+const source = readFileSync(new URL("../index.ts", import.meta.url), "utf8").replaceAll("\r\n", "\n");
 
 function extractFunctionBody(name, marker) {
   const signatureIndex = source.indexOf(`function ${name}`);
@@ -103,6 +103,18 @@ function buildScheduleEngramSelfHealForTest({ waitUnref, isEngramRunning, maxAtt
   return factory(waitUnref, isEngramRunning, 1, maxAttempts);
 }
 
+function buildEnsureSessionForTest(engramFetch) {
+  const body = extractFunctionBody("ensureSession", "{\n  const key")
+    .replace("const body: SessionBody", "const body")
+  const factory = new Function("knownSessions", "engramFetch", "project", "directory", `
+    return async function ensureSession(sessionId, sessionProject = project) {
+      ${body}
+    };
+  `);
+  const knownSessions = new Set();
+  return { ensureSession: factory(knownSessions, engramFetch, "engram", "/work/engram"), knownSessions };
+}
+
 function sessionCtx(id, sink) {
   return {
     sessionManager: { getSessionId: () => id },
@@ -112,7 +124,7 @@ function sessionCtx(id, sink) {
 
 test("mem_session_summary accepts explicit project fallback", () => {
   assert.match(source, /mem_session_summary: Type\.Object\(\{[\s\S]*project: optionalString\("Optional project to use when automatic detection is unavailable"\)/);
-  assert.match(source, /case "mem_session_summary":[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*ensureSession\(activeSessionId, activeProject\)[\s\S]*project: activeProject/);
+  assert.match(source, /case "mem_session_summary":[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*ensureSession\(summarySessionId, activeProject\)[\s\S]*project: activeProject/);
 });
 
 test("mem_search exposes and forwards match_mode and all_projects", () => {
@@ -286,35 +298,32 @@ test("the tool layer reports unknown write outcome instead of inviting a blind r
   assert.doesNotMatch(unreachable, /timed out/);
 });
 
-test("a session-creation timeout still lets the observation write through", async () => {
-  // Regression: when engramFetch threw on timeout, the unguarded ensureSession call in
-  // mem_save aborted the whole tool call before /observations was ever attempted, silently
-  // dropping the user's memory while telling the agent not to retry.
-  assert.match(source, /await ensureSession\(activeSessionId, activeProject\);/);
-  assert.doesNotMatch(source, /throw new EngramTimeoutError/);
+test("session registration requires acknowledgement and failed acknowledgement remains retryable", async () => {
+  let calls = 0;
+  const { ensureSession, knownSessions } = buildEnsureSessionForTest(async () => {
+    calls += 1;
+    return calls === 1 ? null : { status: "created" };
+  });
 
-  const originalFetch = globalThis.fetch;
-  const paths = [];
-  globalThis.fetch = async (url, init) => {
-    const path = new URL(url).pathname;
-    paths.push(path);
-    if (path === "/sessions") {
-      const timeout = new Error("The operation was aborted due to timeout");
-      timeout.name = "TimeoutError";
-      throw timeout;
-    }
-    return { ok: true, async json() { return { id: 1 }; } };
-  };
-  try {
-    const { engramFetch } = buildEngramFetchForTest();
-    // ensureSession's own call fails soft...
-    assert.equal(await engramFetch("/sessions", { method: "POST", body: { id: "s" } }), null);
-    // ...and the observation write that follows it still lands.
-    assert.deepEqual(await engramFetch("/observations", { method: "POST", body: { title: "t" } }), { id: 1 });
-    assert.deepEqual(paths, ["/sessions", "/observations"]);
-  } finally {
-    globalThis.fetch = originalFetch;
+  await assert.rejects(ensureSession("runtime"), /could not confirm session registration/);
+  assert.equal(knownSessions.has("engram:runtime"), false);
+  await ensureSession("runtime");
+  assert.equal(knownSessions.has("engram:runtime"), true);
+  await ensureSession("runtime");
+  assert.equal(calls, 2);
+});
+
+test("four session-attributed writes ignore model session_id and require the Pi runtime ID", () => {
+  for (const tool of ["mem_save", "mem_save_prompt", "mem_session_summary", "mem_capture_passive"]) {
+    const schema = source.match(new RegExp(`${tool}: Type\\.Object\\(\\{([\\s\\S]*?)\\n  \\}\\),`));
+    assert.ok(schema, `${tool} schema not found`);
+    assert.doesNotMatch(schema[1], /session_id:/, `${tool} must not invite model-supplied session identity`);
   }
+  assert.match(source, /function requireRuntimeSessionID/);
+  assert.match(source, /ctx\.sessionManager\.getSessionId\(\)/);
+  assert.match(source, /Pi runtime session ID is unavailable/);
+  assert.doesNotMatch(source, /const activeSessionId = String\(params\.session_id/);
+  assert.doesNotMatch(source, /manual-save-\$\{requestedProject\}/);
 });
 
 test("a timeout on the session leg does not mislabel an unrelated failure on the write leg", async () => {

@@ -82,9 +82,11 @@ If the binary is missing, the MCP launcher exits cleanly instead of crashing Pi 
 
 ### Project auto-detection (important)
 
-`mem_save` resolves its write project in this order: validated explicit `project`, existing `session_id` association, repo `.engram/config.json`/cwd detection, then directory-basename fallback. Use an explicit `project` when you intentionally want to target a known project; invalid or unbacked names fail loudly instead of silently falling back.
+The session-attributed write tools (`mem_save`, `mem_save_prompt`, `mem_session_summary`, and `mem_capture_passive`) resolve their write project from a validated explicit `project`, an existing `session_id` association, or repo/cwd detection as supported by each schema. Use an explicit `project` only when intentionally targeting known project context; invalid or unbacked names fail loudly instead of silently falling back.
 
-Other write tools still primarily use cwd/repo detection unless their schema says otherwise. Start the MCP server from the repo or add `.engram/config.json` when you want deterministic default writes.
+All four tools share one session rule. An explicit `session_id` must already exist and belong to the resolved project. When `session_id` is omitted, Engram uses the only active runtime session, creates/uses `manual-save-{project}` only when no runtime session is active, and returns `ambiguous_session` when more than one runtime session is active. Store query failures never fall back to a manual session.
+
+OpenCode binds these four MCP calls to its confirmed top-level runtime session and maps subagents to their authoritative parent. Pi's native HTTP wrappers use only `ctx.sessionManager.getSessionId()` for these writes; model-supplied session IDs are ignored, and a missing or unconfirmed runtime ID fails safely.
 
 To lock write tools to the canonical project for a repo, add `.engram/config.json` at the repo root:
 
@@ -160,14 +162,14 @@ Additional rules:
 - Invalid explicit `project` names fail loudly.
 - Valid-looking explicit `project` names are accepted only when backed by known context: an existing local project in the store, a matching existing session project, the nearest resolvable repo/subproject `.engram/config.json`, or exact ambiguous-project recovery.
 - Unbacked explicit `project` values are rejected; `mem_save(project=...)` is a validated selection, not an arbitrary project-creation path.
-- If `session_id` is provided and no session exists, `mem_save` fails loudly instead of falling back to cwd/config detection.
+- If `session_id` is provided and no session exists, every session-attributed write fails loudly instead of creating it or falling back to cwd/config detection.
 - If both explicit `project` and `session_id` are supplied, they must match after normalization or the write is rejected.
 - `project_choice_reason=user_selected_after_ambiguous_project` is only valid when cwd detection is actually ambiguous; stale flags on a non-ambiguous cwd do not override explicit `project` precedence or session mismatch checks.
 - When ambiguous-project recovery is active, `project` must exactly match one of `available_projects`; invented or normalized guesses are rejected.
 - Exact choices may still fail with `project_name_collision` when two available names collapse to the same normalized storage bucket, such as `foo--bar` and `foo-bar`.
 - Ordinary explicit `mem_save(project=...)` calls may also fail with `project_name_collision` when the raw explicit name collapses into an existing config-backed, session-backed, or store-backed project bucket, such as `foo--bar` versus `foo-bar`.
 
-`mem_save_prompt` keeps the older cwd/default behavior. Its `project` field is only for ambiguous-project recovery together with `project_choice_reason=user_selected_after_ambiguous_project`.
+`mem_save_prompt` preserves ambiguous-project recovery through `project_choice_reason=user_selected_after_ambiguous_project`, while using the same session identity contract as the other attributed writes.
 
 Mental model:
 
