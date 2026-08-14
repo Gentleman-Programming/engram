@@ -3415,7 +3415,7 @@ func TestInstallOpenCodeBakesENGRAMBIN(t *testing.T) {
 // contains the necessary logic to:
 //
 //	a) read session data from event.properties.info (not event.properties)
-//	b) suppress Task() sub-agent sessions via parentID or title suffix check
+//	b) suppress child sessions only when authoritative parentID is present
 //	c) track sub-agent IDs in subAgentSessions for cross-hook suppression
 func TestPluginSubAgentFiltering(t *testing.T) {
 	resetSetupSeams(t)
@@ -3445,9 +3445,9 @@ func TestPluginSubAgentFiltering(t *testing.T) {
 		t.Fatalf("plugin must check parentID to detect sub-agent sessions")
 	}
 
-	// b) title suffix check: secondary signal for sub-agent detection
-	if !strings.Contains(content, `subagent)`) {
-		t.Fatalf("plugin must check title suffix ' subagent)' as secondary sub-agent signal")
+	// b) Titles are descriptive only and must not determine session ownership.
+	if strings.Contains(content, `title.endsWith(" subagent)")`) {
+		t.Fatal("plugin must not use title suffixes to detect child sessions")
 	}
 
 	// b) isSubAgent gate: must guard ensureSession() call
