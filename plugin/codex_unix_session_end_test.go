@@ -94,6 +94,9 @@ func TestCodexUnixSessionEndAdapter(t *testing.T) {
 			if !strings.Contains(string(args), "http://127.0.0.1:7437/sessions/id/end") {
 				t.Fatalf("curl arguments do not use default port 7437: %q", args)
 			}
+			if !strings.Contains(string(args), "--max-time\n2\n") {
+				t.Fatalf("curl arguments do not set a two-second timeout: %q", args)
+			}
 		})
 	}
 
