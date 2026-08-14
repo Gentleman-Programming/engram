@@ -439,11 +439,16 @@ export const Engram: Plugin = async (ctx) => {
     "tool.execute.before": async (input, output) => {
       if (!SESSION_ATTRIBUTED_WRITE_TOOLS.has(input.tool.toLowerCase())) return
       const authoritativeSessionID = resolveAuthoritativeSessionID(input.sessionID)
-      if (authoritativeSessionID && await ensureSession(authoritativeSessionID) && !invalidSessions.has(authoritativeSessionID)) {
-        output.args.session_id = authoritativeSessionID
-      } else {
-        throw new Error(`gentle-engram could not bind ${input.tool} to a confirmed OpenCode runtime session`)
+      if (!authoritativeSessionID) {
+        throw new Error(`gentle-engram could not resolve an authoritative OpenCode runtime session for ${input.tool}`)
       }
+      if (!await ensureSession(authoritativeSessionID)) {
+        throw new Error(`gentle-engram could not confirm Engram session registration for ${input.tool}; verify that the Engram server is available and retry`)
+      }
+      if (invalidSessions.has(authoritativeSessionID)) {
+        throw new Error(`gentle-engram could not resolve an authoritative OpenCode runtime session for ${input.tool}`)
+      }
+      output.args.session_id = authoritativeSessionID
     },
 
     "tool.execute.after": async (input, output) => {

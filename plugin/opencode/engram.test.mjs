@@ -90,10 +90,16 @@ test("runtime hook rejects failed bindings, retries registration, and binds suba
 
     const first = { args: { session_id: "model-invented" } }
     let forwardedCalls = 0
+    let registrationErrorMessage = ""
     await assert.rejects(async () => {
       await before({ tool: "mem_save", sessionID: "runtime" }, first)
       forwardedCalls += 1
-    }, /confirmed OpenCode runtime session/)
+    }, (error) => {
+      registrationErrorMessage = error.message
+      assert.match(error.message, /could not confirm Engram session registration/)
+      assert.match(error.message, /verify that the Engram server is available and retry/)
+      return true
+    })
     assert.equal(first.args.session_id, "model-invented")
     assert.equal(forwardedCalls, 0, "failed registration must abort before MCP argument forwarding")
 
@@ -110,10 +116,16 @@ test("runtime hook rejects failed bindings, retries registration, and binds suba
 
     await plugin.event({ event: { type: "session.created", properties: { info: { id: "orphan-sub", title: "Task (orphan subagent)" } } } })
     const orphan = { args: { session_id: "model-invented" } }
+    let resolutionErrorMessage = ""
     await assert.rejects(async () => {
       await before({ tool: "mem_capture_passive", sessionID: "orphan-sub" }, orphan)
       forwardedCalls += 1
-    }, /confirmed OpenCode runtime session/)
+    }, (error) => {
+      resolutionErrorMessage = error.message
+      assert.match(error.message, /could not resolve an authoritative OpenCode runtime session/)
+      return true
+    })
+    assert.notEqual(resolutionErrorMessage, registrationErrorMessage)
     assert.equal(orphan.args.session_id, "model-invented")
     assert.equal(forwardedCalls, 0, "failed resolution must abort before MCP argument forwarding")
     assert.equal(registrations, 2)
@@ -171,11 +183,11 @@ test("deleting a parent invalidates descendants and prevents later writes or re-
       await assert.rejects(async () => {
         await before({ tool: "mem_save_prompt", sessionID }, output)
         forwardedCalls += 1
-      }, /confirmed OpenCode runtime session/)
+      }, /could not resolve an authoritative OpenCode runtime session/)
       assert.equal(output.args.session_id, "model-invented")
 
       await plugin.event({ event: { type: "session.created", properties: { info: { id: sessionID } } } })
-      await assert.rejects(before({ tool: "mem_session_summary", sessionID }, { args: {} }), /confirmed OpenCode runtime session/)
+      await assert.rejects(before({ tool: "mem_session_summary", sessionID }, { args: {} }), /could not resolve an authoritative OpenCode runtime session/)
     }
 
     assert.deepEqual(registeredIDs, ["parent"], "invalid descendants must never re-register as top-level sessions")
