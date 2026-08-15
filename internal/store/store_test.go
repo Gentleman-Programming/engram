@@ -8887,11 +8887,19 @@ func TestSearchProjects(t *testing.T) {
 	err = st.DeleteObservation(obsID, false)
 	if err != nil { t.Fatal(err) }
 
+	// Seed a personal observation for project-a to test scope filtering
+	_, err = st.AddObservation(AddObservationParams{
+		SessionID: "s1", Type: "bugfix", Title: "Personal observation",
+		Content: "My personal auth thoughts", Project: "project-a", Scope: "personal",
+	})
+	if err != nil { t.Fatal(err) }
+
 	tests := []struct {
 		name         string
 		query        string
 		matchMode    string
 		limit        int
+		scope        string
 		expectCounts map[string]int // project -> expected match count
 		expectErr    bool
 		expectLen    int
@@ -8913,7 +8921,7 @@ func TestSearchProjects(t *testing.T) {
 			matchMode: "any",
 			limit:     10,
 			expectCounts: map[string]int{
-				"project-a": 3,
+				"project-a": 4, // 3 project + 1 personal
 				"project-b": 1,
 				"project-c": 1,
 			},
@@ -8954,11 +8962,34 @@ func TestSearchProjects(t *testing.T) {
 			limit:     10,
 			expectLen: 0,
 		},
+		{
+			name:      "scope project filters out personal ones",
+			query:     "auth",
+			matchMode: "all",
+			scope:     "project",
+			limit:     10,
+			expectCounts: map[string]int{
+				"project-a": 3, // personal one excluded
+				"project-b": 1,
+			},
+			expectLen: 2,
+		},
+		{
+			name:      "scope personal filters only personal ones",
+			query:     "auth",
+			matchMode: "all",
+			scope:     "personal",
+			limit:     10,
+			expectCounts: map[string]int{
+				"project-a": 1, // only personal one included
+			},
+			expectLen: 1,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			matches, err := st.SearchProjects(tc.query, tc.matchMode, tc.limit)
+			matches, err := st.SearchProjects(tc.query, tc.matchMode, tc.scope, tc.limit)
 			if tc.expectErr {
 				if err == nil {
 					t.Fatalf("expected error but got nil")
@@ -8989,7 +9020,7 @@ func TestSearchProjects(t *testing.T) {
 	
 	// Test error propagation
 	st.Close()
-	_, err = st.SearchProjects("auth", "all", 10)
+	_, err = st.SearchProjects("auth", "all", "", 10)
 	if err == nil {
 		t.Fatalf("expected error from closed store, got nil")
 	}

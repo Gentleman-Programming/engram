@@ -3244,7 +3244,7 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 // ─── Search Projects ────────────────────────────────────────────────────────
 
 // SearchProjects groups FTS5 search results by project to help route ambiguous searches.
-func (s *Store) SearchProjects(query string, matchMode string, limit int) ([]ProjectMatch, error) {
+func (s *Store) SearchProjects(query string, matchMode string, scope string, limit int) ([]ProjectMatch, error) {
 	if limit <= 0 {
 		limit = 10
 	}
@@ -3262,19 +3262,31 @@ func (s *Store) SearchProjects(query string, matchMode string, limit int) ([]Pro
 		return []ProjectMatch{}, nil
 	}
 
-	sqlQ := `
+	var args []any
+	args = append(args, ftsQuery)
+
+	scopeFilter := ""
+	if scope != "" && scope != "all" {
+		scopeFilter = " AND o.scope = ?"
+		args = append(args, normalizeScope(scope))
+	}
+
+	args = append(args, limit)
+
+	sqlQ := fmt.Sprintf(`
 		SELECT project, COUNT(id) as match_count, MIN(rank) as top_rank
 		FROM (
 			SELECT o.project, o.id, observations_fts.rank as rank
 			FROM observations_fts
 			JOIN observations o ON o.id = observations_fts.rowid
-			WHERE observations_fts MATCH ? AND o.deleted_at IS NULL AND o.project != ''
+			WHERE observations_fts MATCH ? AND o.deleted_at IS NULL AND o.project != ''%s
 		)
 		GROUP BY project
 		ORDER BY top_rank ASC, match_count DESC, project ASC
 		LIMIT ?
-	`
-	rows, err := s.queryItHook(s.db, sqlQ, ftsQuery, limit)
+	`, scopeFilter)
+
+	rows, err := s.queryItHook(s.db, sqlQ, args...)
 	if err != nil {
 		return nil, fmt.Errorf("search projects: %w", err)
 	}

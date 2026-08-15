@@ -7471,12 +7471,20 @@ func TestHandleFindProject(t *testing.T) {
 	})
 	if err != nil { t.Fatal(err) }
 
+	// Insert a personal observation in project-one to test scope filtering
+	_, err = s.AddObservation(store.AddObservationParams{
+		SessionID: "s1", Type: "bugfix", Title: "personal search test",
+		Content: "project one personal thoughts", Project: "project-one", Scope: "personal",
+	})
+	if err != nil { t.Fatal(err) }
+
 	h := handleFindProject(s, MCPConfig{})
 
 	tests := []struct {
 		name          string
 		query         string
 		matchMode     string
+		scope         string
 		expectError   bool
 		errorContains string
 		expectText    string
@@ -7508,10 +7516,32 @@ func TestHandleFindProject(t *testing.T) {
 			errorContains: "invalid match_mode",
 		},
 		{
+			name:          "invalid scope",
+			query:         "test",
+			matchMode:     "",
+			scope:         "invalid-scope",
+			expectError:   true,
+			errorContains: "invalid scope",
+		},
+		{
 			name:       "no results",
 			query:      "nonexistentstringthatwillnevermatch",
 			matchMode:  "",
 			expectText: "No projects found matching",
+		},
+		{
+			name:       "scope project filters out personal ones",
+			query:      "thoughts",
+			matchMode:  "",
+			scope:      "project",
+			expectText: "No projects found matching",
+		},
+		{
+			name:       "scope personal finds only personal ones",
+			query:      "thoughts",
+			matchMode:  "",
+			scope:      "personal",
+			expectText: "project-one",
 		},
 	}
 
@@ -7520,6 +7550,9 @@ func TestHandleFindProject(t *testing.T) {
 			args := map[string]any{"query": tc.query}
 			if tc.matchMode != "" {
 				args["match_mode"] = tc.matchMode
+			}
+			if tc.scope != "" {
+				args["scope"] = tc.scope
 			}
 			req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: args}}
 			res, err := h(context.Background(), req)

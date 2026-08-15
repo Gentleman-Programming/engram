@@ -313,6 +313,9 @@ func registerTools(srv *server.MCPServer, s *store.Store, cfg MCPConfig, allowli
 				mcp.WithString("match_mode",
 					mcp.Description("Token matching: \"all\" (default — every token must match, FTS5 AND) or \"any\" (any token matches)."),
 				),
+				mcp.WithString("scope",
+					mcp.Description("Filter search results by scope: \"project\" (only team/project workspace memories), \"personal\" (personal logs/diary), or \"all\" (default — search across both)."),
+				),
 			),
 			handleFindProject(s, cfg),
 		)
@@ -1175,6 +1178,7 @@ func handleFindProject(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		query, _ := req.GetArguments()["query"].(string)
 		matchMode, _ := req.GetArguments()["match_mode"].(string)
+		scope, _ := req.GetArguments()["scope"].(string)
 
 		if query == "" {
 			return mcp.NewToolResultError("query is required"), nil
@@ -1182,9 +1186,12 @@ func handleFindProject(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 		if matchMode != "" && matchMode != "all" && matchMode != "any" {
 			return mcp.NewToolResultError(fmt.Sprintf("invalid match_mode %q: must be \"all\" or \"any\"", matchMode)), nil
 		}
+		if scope != "" && scope != "all" && scope != "project" && scope != "personal" {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid scope %q: must be \"all\", \"project\", or \"personal\"", scope)), nil
+		}
 
 		limit := 10 // Fix limit as requested by minimalist approach
-		matches, err := s.SearchProjects(query, matchMode, limit)
+		matches, err := s.SearchProjects(query, matchMode, scope, limit)
 		if err != nil {
 			return mcp.NewToolResultError("Project search failed: " + err.Error()), nil
 		}
