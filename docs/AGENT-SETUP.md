@@ -17,6 +17,7 @@ Engram works with **any MCP-compatible agent**. Pick your agent below.
 | Agent         | One-liner                                                                                    | Manual Config                                      |
 | ------------- | -------------------------------------------------------------------------------------------- | -------------------------------------------------- |
 | Claude Code   | `claude plugin marketplace add Gentleman-Programming/engram && claude plugin install engram` | [Details](#claude-code)                            |
+| Droid         | `engram setup droid`                                                                         | [Details](#droid)                                  |
 | Pi            | `engram setup pi`                                                                            | [Details](#pi)                                     |
 | OpenCode      | `engram setup opencode`                                                                      | [Details](#opencode)                               |
 | Gemini CLI    | `engram setup gemini-cli`                                                                    | [Details](#gemini-cli)                             |
@@ -350,6 +351,34 @@ mkdir -p "$TMPDIR"
 Then reload your shell (`source ~/.bashrc`) and re-run the install.
 
 > This is an upstream Claude Code CLI limitation that affects any plugin installed via `claude plugin install`, not just Engram. Docker-based environments are typically not affected because the container's `/tmp` and `/home` usually share the same overlay filesystem.
+
+---
+
+## Droid
+
+> **Prerequisite**: Install the `engram` binary first (via [Homebrew](INSTALLATION.md#homebrew-macos--linux), [Windows binary](INSTALLATION.md#windows), [binary download](INSTALLATION.md#download-binary-all-platforms), or [source](INSTALLATION.md#install-from-source-macos--linux)).
+
+```bash
+engram setup droid
+```
+
+`engram setup droid` does four things:
+
+1. Registers `mcpServers.engram` in `~/.factory/mcp.json` with the absolute path to the `engram` binary.
+2. Extracts Engram's `UserPromptSubmit` hook scripts to `~/.factory/hooks/engram/`.
+3. Writes a `UserPromptSubmit` entry to `~/.factory/hooks.json` that calls the extracted script.
+4. Installs the Engram plugin from the GitHub marketplace so Droid gets the `SessionStart`, `Stop`, `PreCompact`, `SubagentStop` hooks and the Memory Protocol skill.
+
+The `UserPromptSubmit` hook is written at user scope because Droid (like Claude Code) does not execute `UserPromptSubmit` hooks that are declared inside a plugin, even though it registers and matches them. The user-level hook works around this limitation and ensures first-message tool loading and prompt capture function correctly.
+
+If the plugin install step fails (for example, due to network issues), setup continues and prints a warning with the manual install commands:
+
+```bash
+droid plugin marketplace add https://github.com/Gentleman-Programming/engram
+droid plugin install engram@engram --scope user
+```
+
+After setup, restart Droid so the new MCP config and hooks are loaded.
 
 ---
 

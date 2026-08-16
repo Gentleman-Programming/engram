@@ -37,6 +37,18 @@ func agentAdapters() []agentAdapter {
 			installDir:  func() string { return "managed by claude plugin system" },
 		},
 		{
+			slug:        "droid",
+			description: "Droid — MCP registration, user-level UserPromptSubmit hook, and plugin via marketplace",
+			custom:      installDroid,
+			installDir:  func() string { return "managed by droid plugin system" },
+			postInstall: []string{
+				"Restart Droid so MCP config and hooks are reloaded",
+				"Verify ~/.factory/mcp.json includes mcpServers.engram",
+				"Verify ~/.factory/hooks.json has a UserPromptSubmit entry for engram",
+				"Verify the plugin is installed with: droid plugin list --scope user",
+			},
+		},
+		{
 			slug:        "gemini-cli",
 			description: "Gemini CLI — MCP registration plus system prompt compaction recovery",
 			custom:      installGeminiCLI,

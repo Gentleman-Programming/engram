@@ -34,6 +34,10 @@ func resetSetupSeams(t *testing.T) {
 	oldAddClaudeCodeAllowlistFn := addClaudeCodeAllowlistFn
 	oldOsExecutable := osExecutable
 	oldWriteClaudeCodeUserMCPFn := writeClaudeCodeUserMCPFn
+	oldInjectDroidMCPFn := injectDroidMCPFn
+	oldExtractDroidHookScriptsFn := extractDroidHookScriptsFn
+	oldWriteDroidUserPromptSubmitHookFn := writeDroidUserPromptSubmitHookFn
+	oldInstallDroidPluginFn := installDroidPluginFn
 	oldResolveMiseNodeVersionFn := resolveMiseNodeVersionFn
 
 	t.Cleanup(func() {
@@ -58,6 +62,10 @@ func resetSetupSeams(t *testing.T) {
 		addClaudeCodeAllowlistFn = oldAddClaudeCodeAllowlistFn
 		osExecutable = oldOsExecutable
 		writeClaudeCodeUserMCPFn = oldWriteClaudeCodeUserMCPFn
+		injectDroidMCPFn = oldInjectDroidMCPFn
+		extractDroidHookScriptsFn = oldExtractDroidHookScriptsFn
+		writeDroidUserPromptSubmitHookFn = oldWriteDroidUserPromptSubmitHookFn
+		installDroidPluginFn = oldInstallDroidPluginFn
 		resolveMiseNodeVersionFn = oldResolveMiseNodeVersionFn
 	})
 }

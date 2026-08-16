@@ -53,6 +53,10 @@ var (
 	injectCodexMemoryConfigFn          = injectCodexMemoryConfig
 	addClaudeCodeAllowlistFn           = AddClaudeCodeAllowlist
 	writeClaudeCodeUserMCPFn           = writeClaudeCodeUserMCP
+	injectDroidMCPFn                   = injectDroidMCP
+	extractDroidHookScriptsFn          = extractDroidHookScripts
+	writeDroidUserPromptSubmitHookFn   = writeDroidUserPromptSubmitHook
+	installDroidPluginFn               = installDroidPlugin
 
 	// resolveMiseNodeVersionFn resolves the active Node version managed by mise.
 	// It runs "mise current node" and returns the result as a "node@X.Y.Z" specifier.
