@@ -4043,6 +4043,85 @@ func TestMemSave_AmbiguousEnvelope(t *testing.T) {
 	}
 }
 
+// TestReadTools_AmbiguousEnvelope asserts that read tools return a structured
+// ambiguous_project error with available_projects and a read-specific hint, and
+// no recovery_token, when cwd is a parent of multiple git repos (REQ-314).
+func TestReadTools_AmbiguousEnvelope(t *testing.T) {
+	parent := t.TempDir()
+	names := []string{"repo-a", "repo-b"}
+	for _, name := range names {
+		child := filepath.Join(parent, name)
+		if err := os.MkdirAll(child, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		initTestGitRepo(t, child)
+	}
+	t.Chdir(parent)
+
+	s := newMCPTestStore(t)
+	activity := NewSessionActivity(10 * time.Minute)
+
+	cases := []struct {
+		name string
+		h    func(context.Context, mcppkg.CallToolRequest) (*mcppkg.CallToolResult, error)
+		req  mcppkg.CallToolRequest
+	}{
+		{
+			name: "mem_search",
+			h:    handleSearch(s, MCPConfig{}, activity),
+			req:  mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"query": "test"}}},
+		},
+		{
+			name: "mem_context",
+			h:    handleContext(s, MCPConfig{}, activity),
+			req:  mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{}}},
+		},
+		{
+			name: "mem_stats",
+			h:    handleStats(s, MCPConfig{}),
+			req:  mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{}}},
+		},
+		{
+			name: "mem_doctor",
+			h:    handleDoctor(s, MCPConfig{}),
+			req:  mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{}}},
+		},
+		{
+			name: "mem_timeline",
+			h:    handleTimeline(s, MCPConfig{}),
+			req:  mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"observation_id": float64(1)}}},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := tc.h(context.Background(), tc.req)
+			if err != nil {
+				t.Fatalf("handler error: %v", err)
+			}
+			if !res.IsError {
+				t.Fatal("expected error for ambiguous cwd")
+			}
+			text := callResultText(t, res)
+			if !strings.Contains(text, "\"error_code\":\"ambiguous_project\"") {
+				t.Errorf("expected error_code ambiguous_project, got: %q", text)
+			}
+			body := callResultJSON(t, res)
+			projects, ok := body["available_projects"].([]any)
+			if !ok || len(projects) != 2 {
+				t.Errorf("expected available_projects with 2 entries, got: %v", body["available_projects"])
+			}
+			hint, ok := body["hint"].(string)
+			if !ok || !strings.Contains(hint, "read tool") {
+				t.Errorf("expected read-specific hint, got: %q", hint)
+			}
+			if _, has := body["recovery_token"]; has {
+				t.Errorf("read tools must not include recovery_token; got: %v", body)
+			}
+		})
+	}
+}
+
 func TestMemSave_AmbiguousWithValidUserChoiceSucceeds(t *testing.T) {
 	parent := t.TempDir()
 	for _, name := range []string{"repo-choice-a", "repo-choice-b"} {
