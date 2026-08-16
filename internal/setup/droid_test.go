@@ -94,7 +94,7 @@ func TestInstallDroidWritesMCPAndHooks(t *testing.T) {
 		t.Fatalf("_helpers.sh not extracted: %v", err)
 	}
 
-	// Verify hooks.json.
+	// Verify hooks.json uses standalone format (events at top level).
 	hooksPath := filepath.Join(home, ".factory", "hooks.json")
 	hooksRaw, err := os.ReadFile(hooksPath)
 	if err != nil {
@@ -104,11 +104,10 @@ func TestInstallDroidWritesMCPAndHooks(t *testing.T) {
 	if err := json.Unmarshal(hooksRaw, &hooksCfg); err != nil {
 		t.Fatalf("parse hooks config: %v", err)
 	}
-	hooks, ok := hooksCfg["hooks"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected hooks object")
+	if _, exists := hooksCfg["hooks"]; exists {
+		t.Fatalf("expected standalone hooks.json format, found top-level 'hooks' wrapper")
 	}
-	ups, ok := hooks["UserPromptSubmit"].([]any)
+	ups, ok := hooksCfg["UserPromptSubmit"].([]any)
 	if !ok || len(ups) != 1 {
 		t.Fatalf("expected one UserPromptSubmit matcher group")
 	}
@@ -129,6 +128,68 @@ func TestInstallDroidWritesMCPAndHooks(t *testing.T) {
 	}
 	if !strings.HasSuffix(hookCmd["command"].(string), "user-prompt-submit.sh") {
 		t.Fatalf("expected command to end with user-prompt-submit.sh, got %v", hookCmd["command"])
+	}
+}
+
+func TestWriteDroidUserPromptSubmitHookPreservesWrappedHooks(t *testing.T) {
+	resetSetupSeams(t)
+	home := useTestHome(t)
+
+	// Pre-populate hooks.json with the legacy "hooks" wrapper format.
+	hooksPath := filepath.Join(home, ".factory", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(hooksPath), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	original := `{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"/existing.sh"}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"/old.sh"}]}]}}`
+	if err := os.WriteFile(hooksPath, []byte(original), 0644); err != nil {
+		t.Fatalf("write initial hooks: %v", err)
+	}
+
+	lookPathFn = func(name string) (string, error) {
+		if name == "droid" {
+			return "/usr/local/bin/droid", nil
+		}
+		return "", errors.New("not found")
+	}
+	installDroidPluginFn = func() error { return nil }
+
+	if _, err := Install("droid"); err != nil {
+		t.Fatalf("install droid: %v", err)
+	}
+
+	raw, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatalf("read hooks: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("parse hooks: %v", err)
+	}
+	if _, exists := cfg["hooks"]; exists {
+		t.Fatalf("expected standalone format after install, found 'hooks' wrapper")
+	}
+
+	// Existing SessionStart hook should be preserved.
+	ss, ok := cfg["SessionStart"].([]any)
+	if !ok || len(ss) != 1 {
+		t.Fatalf("expected preserved SessionStart hook")
+	}
+	ssGroup := ss[0].(map[string]any)
+	ssCmds := ssGroup["hooks"].([]any)
+	if ssCmds[0].(map[string]any)["command"] != "/existing.sh" {
+		t.Fatalf("expected existing SessionStart command to be preserved")
+	}
+
+	// UserPromptSubmit should be updated to the engram script.
+	ups, ok := cfg["UserPromptSubmit"].([]any)
+	if !ok || len(ups) != 1 {
+		t.Fatalf("expected one UserPromptSubmit group")
+	}
+	upsGroup := ups[0].(map[string]any)
+	upsCmds := upsGroup["hooks"].([]any)
+	cmd := upsCmds[0].(map[string]any)["command"].(string)
+	if !strings.HasSuffix(cmd, "user-prompt-submit.sh") {
+		t.Fatalf("expected engram user-prompt-submit.sh, got %s", cmd)
 	}
 }
 

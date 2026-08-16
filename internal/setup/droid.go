@@ -162,33 +162,52 @@ func extractDroidHookScripts() error {
 
 // writeDroidUserPromptSubmitHook writes (or updates) the UserPromptSubmit hook
 // in ~/.factory/hooks.json to call the extracted engram script.
+//
+// Droid's user-level hooks file uses the standalone format: event names are
+// top-level keys. Some existing installs may wrap events under a legacy
+// "hooks" key (the format used inside settings.json). This function normalizes
+// the file to the standalone format while preserving any existing hooks.
 func writeDroidUserPromptSubmitHook() error {
 	path := droidHooksPath()
 
-	var config map[string]json.RawMessage
+	events := make(map[string]json.RawMessage)
+
 	data, err := readFileFn(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			config = make(map[string]json.RawMessage)
-		} else {
+		if !os.IsNotExist(err) {
 			return fmt.Errorf("read hooks config: %w", err)
 		}
 	} else {
-		if err := json.Unmarshal(data, &config); err != nil {
+		var rawConfig map[string]json.RawMessage
+		if err := json.Unmarshal(data, &rawConfig); err != nil {
 			return fmt.Errorf("parse hooks config: %w", err)
 		}
-	}
 
-	var hooks map[string]json.RawMessage
-	if raw, exists := config["hooks"]; exists {
-		if err := json.Unmarshal(raw, &hooks); err != nil {
-			return fmt.Errorf("parse hooks block: %w", err)
+		// If the file uses the legacy "hooks" wrapper (settings.json format),
+		// unwrap the known event keys into the standalone map.
+		if rawHooks, exists := rawConfig["hooks"]; exists {
+			var wrapped map[string]json.RawMessage
+			if err := json.Unmarshal(rawHooks, &wrapped); err != nil {
+				return fmt.Errorf("parse wrapped hooks block: %w", err)
+			}
+			for event, hookList := range wrapped {
+				events[event] = hookList
+			}
+			// Preserve any non-event top-level keys (unlikely, but safe).
+			for key, value := range rawConfig {
+				if key == "hooks" {
+					continue
+				}
+				// Non-event keys are not part of the hooks schema; drop them
+				// since the standalone file only contains event keys.
+				_ = value
+			}
+		} else {
+			// Already standalone: copy all top-level keys as events.
+			for event, hookList := range rawConfig {
+				events[event] = hookList
+			}
 		}
-		if hooks == nil {
-			hooks = make(map[string]json.RawMessage)
-		}
-	} else {
-		hooks = make(map[string]json.RawMessage)
 	}
 
 	scriptPath := filepath.Join(droidHooksDir(), "user-prompt-submit.sh")
@@ -203,20 +222,13 @@ func writeDroidUserPromptSubmitHook() error {
 			},
 		},
 	}
-
 	hookJSON, err := jsonMarshalFn(engramHook)
 	if err != nil {
 		return fmt.Errorf("marshal UserPromptSubmit hook: %w", err)
 	}
-	hooks["UserPromptSubmit"] = json.RawMessage(hookJSON)
+	events["UserPromptSubmit"] = json.RawMessage(hookJSON)
 
-	hooksJSON, err := jsonMarshalFn(hooks)
-	if err != nil {
-		return fmt.Errorf("marshal hooks block: %w", err)
-	}
-	config["hooks"] = json.RawMessage(hooksJSON)
-
-	return writeJSONConfig(path, config)
+	return writeJSONConfig(path, events)
 }
 
 // installDroidPlugin adds the Engram marketplace and installs the plugin.
