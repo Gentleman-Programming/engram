@@ -170,6 +170,10 @@ Call `mem_save` IMMEDIATELY after ANY of these:
 - User mentions a topic you have no context on
 - User's FIRST message references the project, a feature, or a problem — call `mem_search` with keywords from their message to check for prior work before responding
 
+### AMBIGUOUS PROJECT (cwd spans multiple repos)
+
+If a memory tool returns an `ambiguous_project` error, read `available_projects` from the JSON error and retry with `project=<project_name>` using one of the listed values, or call `mem_current_project` to see the resolved project and available projects. For cross-project recall, `mem_search` accepts `all_projects=true`.
+
 ### SESSION CLOSE — before saying "done":
 Call `mem_session_summary` with: Goal, Discoveries, Accomplished, Next Steps, Relevant Files.
 PROTOCOL

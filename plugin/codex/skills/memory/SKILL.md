@@ -87,6 +87,10 @@ Also search memory PROACTIVELY when:
 - The user mentions a topic you have no context on — check if past sessions covered it
 - The user's FIRST message references the project, a feature, or a problem — call `mem_search` with keywords from their message to check for prior work before responding
 
+## AMBIGUOUS PROJECT (cwd spans multiple repos)
+
+If a memory tool returns an `ambiguous_project` error, read `available_projects` from the JSON error and retry with `project=<project_name>` using one of the listed values, or call `mem_current_project` to see the resolved project and available projects. For cross-project recall, `mem_search` accepts `all_projects=true`.
+
 ## SESSION CLOSE PROTOCOL (mandatory)
 
 Before ending a session or saying "done" / "that's it", you MUST:

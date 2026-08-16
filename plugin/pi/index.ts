@@ -82,6 +82,10 @@ Format for \`mem_save\`:
 When the user asks to recall past work, first call \`mem_context\`. If not found,
 call \`mem_search\`, then \`mem_get_observation\` for full content.
 
+### AMBIGUOUS PROJECT (cwd spans multiple repos)
+
+If a memory tool returns an \`ambiguous_project\` error, read \`available_projects\` from the JSON error and retry with \`project=<project_name>\` using one of the listed values, or call \`mem_current_project\` to see the resolved project and available projects. For cross-project recall, \`mem_search\` accepts \`all_projects=true\`.
+
 ### SESSION CLOSE PROTOCOL
 
 Before ending a session or saying "done", call \`mem_session_summary\`

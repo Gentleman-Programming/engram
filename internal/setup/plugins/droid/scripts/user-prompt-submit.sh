@@ -56,7 +56,7 @@ sanitize_session_key_part() {
 }
 
 print_toolsearch_message() {
-  printf '%s\n' '{"systemMessage":"CRITICAL FIRST ACTION — Execute this ToolSearch NOW before responding to the user:\nselect:engram___mem_save,engram___mem_search,engram___mem_context,engram___mem_session_summary,engram___mem_session_start,engram___mem_session_end,engram___mem_get_observation,engram___mem_suggest_topic_key,engram___mem_capture_passive,engram___mem_save_prompt,engram___mem_update,engram___mem_current_project,engram___mem_judge\n\nAfter loading tools, call mem_context to check for prior session history before responding."}'
+  printf '%s\n' '{"systemMessage":"CRITICAL FIRST ACTION — Execute this ToolSearch NOW before responding to the user:\nselect:engram___mem_save,engram___mem_search,engram___mem_context,engram___mem_session_summary,engram___mem_session_start,engram___mem_session_end,engram___mem_get_observation,engram___mem_suggest_topic_key,engram___mem_capture_passive,engram___mem_save_prompt,engram___mem_update,engram___mem_current_project,engram___mem_judge\n\nAfter loading tools, call mem_context to check for prior session history before responding.\n\nIf a memory tool returns an ambiguous_project error (cwd spans multiple git repos), retry with project=<one of the available_projects> or call mem_current_project."}'
 }
 
 if is_windows_bash && [ "${ENGRAM_DROID_WINDOWS_BASH_SAFE_MODE:-auto}" != "0" ]; then

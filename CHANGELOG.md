@@ -97,3 +97,7 @@ Returns detection result including `project`, `project_source`, `project_path`, 
 - **feat(mcp):** auto-detect project at MCP startup via `--project` flag, `ENGRAM_PROJECT` env, or git remote
 - **feat(mcp):** similar-project warnings when saving to a new project that resembles an existing one
 - **fix(sync):** use git remote detection instead of `filepath.Base(cwd)` for project name
+
+### MCP read-tool errors
+
+- **fix(mcp):** read tools (`mem_search`, `mem_context`, `mem_stats`, `mem_doctor`, `mem_timeline`, `mem_review`) now return structured `ambiguous_project` and `unknown_project` errors with `available_projects` and a read-specific hint, matching the existing write-tool behavior. Previously these errors were returned as plain text, preventing agents from recovering programmatically.

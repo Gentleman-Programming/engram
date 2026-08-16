@@ -177,6 +177,10 @@ Also search memory PROACTIVELY when:
 - Starting work on something that might have been done before
 - The user mentions a topic you have no context on — check if past sessions covered it
 
+### AMBIGUOUS PROJECT (cwd spans multiple repos)
+
+If a memory tool returns an ambiguous_project error, read available_projects from the JSON error and retry with project=<project_name> using one of the listed values, or call mem_current_project to see the resolved project and available projects. For cross-project recall, mem_search accepts all_projects=true.
+
 ### SESSION CLOSE PROTOCOL (mandatory)
 
 Before ending a session or saying "done" / "listo" / "that's it", you MUST:
