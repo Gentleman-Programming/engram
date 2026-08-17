@@ -175,6 +175,11 @@ Call `mem_save` IMMEDIATELY after ANY of these:
 
 **Self-check after EVERY task**: "Did I or the user just make a decision, confirm a recommendation, express a preference, fix a bug, learn something, or establish a convention? If yes → mem_save NOW."
 
+### FORMAT for mem_save (content is required)
+- **title**: short, searchable
+- **type**: decision | bugfix | architecture | discovery | pattern | config
+- **content** (required): **What** / **Why** / **Where** / **Learned**
+
 ### SEARCH MEMORY when:
 - User asks to recall anything ("remember", "what did we do", or the equivalent in the user's language)
 - Starting work on something that might have been done before
