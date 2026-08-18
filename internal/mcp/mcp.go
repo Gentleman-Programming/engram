@@ -98,6 +98,7 @@ func ensureImplicitSessionWithCWD(s *store.Store, sessionID, project string) err
 var ProfileAgent = map[string]bool{
 	"mem_save":              true, // proactive save — referenced 17 times across protocols
 	"mem_search":            true, // search past memories — referenced 6 times
+	"mem_find_project":      true, // find projects by memory content
 	"mem_context":           true, // recent context from previous sessions — referenced 10 times
 	"mem_session_summary":   true, // end-of-session summary — referenced 16 times
 	"mem_session_start":     true, // register session start
@@ -292,6 +293,31 @@ func registerTools(srv *server.MCPServer, s *store.Store, cfg MCPConfig, allowli
 				),
 			),
 			handleSearch(s, cfg, activity),
+		)
+	}
+
+	// ─── mem_find_project ─────────────────────────────────────────────
+	if shouldRegister("mem_find_project", allowlist) {
+		srv.AddTool(
+			mcp.NewTool("mem_find_project",
+				mcp.WithDescription("Search for projects containing relevant memories. Use this when you don't know which project holds a past decision. It returns the top matching projects, their match counts, and rank. You can then use mem_search with a specific project name to read those memories."),
+				mcp.WithTitleAnnotation("Find Projects"),
+				mcp.WithReadOnlyHintAnnotation(true),
+				mcp.WithDestructiveHintAnnotation(false),
+				mcp.WithIdempotentHintAnnotation(true),
+				mcp.WithOpenWorldHintAnnotation(false),
+				mcp.WithString("query",
+					mcp.Required(),
+					mcp.Description("Search query — natural language or keywords to find across all projects"),
+				),
+				mcp.WithString("match_mode",
+					mcp.Description("Token matching: \"all\" (default — every token must match, FTS5 AND) or \"any\" (any token matches)."),
+				),
+				mcp.WithString("scope",
+					mcp.Description("Filter search results by scope: \"project\" (only team/project workspace memories), \"personal\" (personal logs/diary), or \"all\" (default — search across both)."),
+				),
+			),
+			handleFindProject(s, cfg),
 		)
 	}
 
@@ -1145,6 +1171,43 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 
 		// JW4: use respondWithProject for the success path (REQ-314).
 		return respondWithProject(detRes, b.String(), map[string]any{"results": structuredResults}), nil
+	}
+}
+
+func handleFindProject(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		query, _ := req.GetArguments()["query"].(string)
+		matchMode, _ := req.GetArguments()["match_mode"].(string)
+		scope, _ := req.GetArguments()["scope"].(string)
+
+		if query == "" {
+			return mcp.NewToolResultError("query is required"), nil
+		}
+		if matchMode != "" && matchMode != "all" && matchMode != "any" {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid match_mode %q: must be \"all\" or \"any\"", matchMode)), nil
+		}
+		if scope != "" && scope != "all" && scope != "project" && scope != "personal" {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid scope %q: must be \"all\", \"project\", or \"personal\"", scope)), nil
+		}
+
+		limit := 10 // Fix limit as requested by minimalist approach
+		matches, err := s.SearchProjects(query, matchMode, scope, limit)
+		if err != nil {
+			return mcp.NewToolResultError("Project search failed: " + err.Error()), nil
+		}
+
+		if len(matches) == 0 {
+			return mcp.NewToolResultText(fmt.Sprintf("No projects found matching %q.", query)), nil
+		}
+
+		var b strings.Builder
+		fmt.Fprintf(&b, "Found %d project(s) matching %q:\n", len(matches), query)
+		for _, m := range matches {
+			fmt.Fprintf(&b, "- %s (%d matches, rank: %g)\n", m.Project, m.MatchCount, m.TopRank)
+		}
+		b.WriteString("\nUse mem_search with project: \"<name>\" to explore these memories.")
+
+		return mcp.NewToolResultText(b.String()), nil
 	}
 }
 

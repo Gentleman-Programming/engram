@@ -8830,3 +8830,198 @@ func TestSanitizeFTS(t *testing.T) {
 		})
 	}
 }
+
+func TestSearchProjects(t *testing.T) {
+	st := newTestStore(t)
+
+	st.CreateSession("s1", "project-a", "/tmp/a")
+	st.CreateSession("s2", "project-b", "/tmp/b")
+	st.CreateSession("s3", "project-c", "/tmp/c")
+	st.CreateSession("s4", "", "/tmp/d")
+
+	// Seed 3 observations for project A
+	_, err := st.AddObservation(AddObservationParams{
+		SessionID: "s1", Type: "bugfix", Title: "Fix auth token expiration",
+		Content: "The auth middleware was dropping tokens", Project: "project-a",
+	})
+	if err != nil { t.Fatal(err) }
+	_, err = st.AddObservation(AddObservationParams{
+		SessionID: "s1", Type: "bugfix", Title: "Auth token validation",
+		Content: "Middleware should validate auth tokens", Project: "project-a",
+	})
+	if err != nil { t.Fatal(err) }
+	_, err = st.AddObservation(AddObservationParams{
+		SessionID: "s1", Type: "bugfix", Title: "Minor fix",
+		Content: "Just a minor auth fix in the middleware", Project: "project-a",
+	})
+	if err != nil { t.Fatal(err) }
+
+	// Seed 1 highly relevant observation for project B
+	_, err = st.AddObservation(AddObservationParams{
+		SessionID: "s2", Type: "bugfix", Title: "Auth middleware completely rewritten",
+		Content: "Auth middleware auth middleware auth middleware tokens", Project: "project-b",
+	})
+	if err != nil { t.Fatal(err) }
+
+	// Seed an irrelevant observation for project C
+	_, err = st.AddObservation(AddObservationParams{
+		SessionID: "s3", Type: "feature", Title: "Database migration",
+		Content: "Added new tables", Project: "project-c",
+	})
+	if err != nil { t.Fatal(err) }
+
+	// Seed observation with blank project
+	_, err = st.AddObservation(AddObservationParams{
+		SessionID: "s4", Type: "bugfix", Title: "Auth issue in blank project",
+		Content: "The auth middleware failed here too", Project: "",
+	})
+	if err != nil { t.Fatal(err) }
+
+	// Seed observation in project-d and then delete it
+	st.CreateSession("s5", "project-d", "/tmp/e")
+	obsID, err := st.AddObservation(AddObservationParams{
+		SessionID: "s5", Type: "bugfix", Title: "Auth issue to be deleted",
+		Content: "The auth middleware will be deleted", Project: "project-d",
+	})
+	if err != nil { t.Fatal(err) }
+	err = st.DeleteObservation(obsID, false)
+	if err != nil { t.Fatal(err) }
+
+	// Seed a personal observation for project-a to test scope filtering
+	_, err = st.AddObservation(AddObservationParams{
+		SessionID: "s1", Type: "bugfix", Title: "Personal observation",
+		Content: "My personal auth thoughts", Project: "project-a", Scope: "personal",
+	})
+	if err != nil { t.Fatal(err) }
+
+	tests := []struct {
+		name         string
+		query        string
+		matchMode    string
+		limit        int
+		scope        string
+		expectCounts map[string]int // project -> expected match count
+		expectErr    bool
+		expectLen    int
+	}{
+		{
+			name:      "match all default limit",
+			query:     "auth middleware",
+			matchMode: "all",
+			limit:     10,
+			expectCounts: map[string]int{
+				"project-a": 3,
+				"project-b": 1,
+			},
+			expectLen: 2,
+		},
+		{
+			name:      "match any",
+			query:     "auth tables", // auth matches a, b. tables matches c.
+			matchMode: "any",
+			limit:     10,
+			expectCounts: map[string]int{
+				"project-a": 4, // 3 project + 1 personal
+				"project-b": 1,
+				"project-c": 1,
+			},
+			expectLen: 3,
+		},
+		{
+			name:      "empty query",
+			query:     "",
+			matchMode: "all",
+			limit:     10,
+			expectLen: 0,
+		},
+		{
+			name:      "zero or negative limit gets default 10",
+			query:     "auth",
+			matchMode: "all",
+			limit:     -5,
+			expectLen: 2,
+		},
+		{
+			name:      "limit upper bound 50",
+			query:     "auth",
+			matchMode: "all",
+			limit:     100, // Should be clamped to 50
+			expectLen: 2,
+		},
+		{
+			name:      "limit restricts results",
+			query:     "auth",
+			matchMode: "all",
+			limit:     1, // Should return only top 1 project
+			expectLen: 1,
+		},
+		{
+			name:      "no match",
+			query:     "nonexistentstring",
+			matchMode: "all",
+			limit:     10,
+			expectLen: 0,
+		},
+		{
+			name:      "scope project filters out personal ones",
+			query:     "auth",
+			matchMode: "all",
+			scope:     "project",
+			limit:     10,
+			expectCounts: map[string]int{
+				"project-a": 3, // personal one excluded
+				"project-b": 1,
+			},
+			expectLen: 2,
+		},
+		{
+			name:      "scope personal filters only personal ones",
+			query:     "auth",
+			matchMode: "all",
+			scope:     "personal",
+			limit:     10,
+			expectCounts: map[string]int{
+				"project-a": 1, // only personal one included
+			},
+			expectLen: 1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			matches, err := st.SearchProjects(tc.query, tc.matchMode, tc.scope, tc.limit)
+			if tc.expectErr {
+				if err == nil {
+					t.Fatalf("expected error but got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(matches) != tc.expectLen {
+				t.Fatalf("expected %d projects, got %d: %+v", tc.expectLen, len(matches), matches)
+			}
+			for _, m := range matches {
+				if m.Project == "" {
+					t.Errorf("expected no blank projects, got one")
+				}
+				if m.Project == "project-d" {
+					t.Errorf("expected deleted project-d to be excluded")
+				}
+				if expected, ok := tc.expectCounts[m.Project]; ok {
+					if m.MatchCount != expected {
+						t.Errorf("project %s: expected %d matches, got %d", m.Project, expected, m.MatchCount)
+					}
+				}
+			}
+		})
+	}
+	
+	// Test error propagation
+	st.Close()
+	_, err = st.SearchProjects("auth", "all", "", 10)
+	if err == nil {
+		t.Fatalf("expected error from closed store, got nil")
+	}
+}

@@ -1611,7 +1611,7 @@ func TestResolveToolsAgentProfile(t *testing.T) {
 	}
 
 	expectedTools := []string{
-		"mem_save", "mem_search", "mem_context", "mem_session_summary",
+		"mem_save", "mem_search", "mem_find_project", "mem_context", "mem_session_summary",
 		"mem_session_start", "mem_session_end", "mem_get_observation",
 		"mem_suggest_topic_key", "mem_capture_passive", "mem_save_prompt",
 		"mem_update",          // skills explicitly say "use mem_update when you have an exact ID to correct"
@@ -2254,7 +2254,7 @@ func TestNewServerWithToolsNilRegistersAll(t *testing.T) {
 	tools := srv.ListTools()
 
 	allTools := []string{
-		"mem_save", "mem_search", "mem_context", "mem_session_summary",
+		"mem_save", "mem_search", "mem_find_project", "mem_context", "mem_session_summary",
 		"mem_session_start", "mem_session_end", "mem_get_observation",
 		"mem_suggest_topic_key", "mem_capture_passive", "mem_save_prompt",
 		"mem_update", "mem_delete", "mem_stats", "mem_timeline", "mem_merge_projects",
@@ -2364,14 +2364,14 @@ func TestNewServerBackwardsCompatible(t *testing.T) {
 	srv := NewServer(s)
 	tools := srv.ListTools()
 
-	// 18 agent + 4 admin = 22 total.
-	if len(tools) != 22 {
-		t.Errorf("NewServer should register all 22 tools, got %d", len(tools))
+	// 19 agent + 4 admin = 23 total.
+	if len(tools) != 23 {
+		t.Errorf("NewServer should register all 23 tools, got %d", len(tools))
 	}
 }
 
 func TestProfileConsistency(t *testing.T) {
-	// Verify that agent + admin = all 22 tools
+	// Verify that agent + admin = all 23 tools
 	combined := make(map[string]bool)
 	for tool := range ProfileAgent {
 		combined[tool] = true
@@ -2380,9 +2380,9 @@ func TestProfileConsistency(t *testing.T) {
 		combined[tool] = true
 	}
 
-	// 18 agent + 4 admin = 22 total.
-	if len(combined) != 22 {
-		t.Errorf("agent + admin should cover all 22 tools, got %d", len(combined))
+	// 19 agent + 4 admin = 23 total.
+	if len(combined) != 23 {
+		t.Errorf("agent + admin should cover all 23 tools, got %d", len(combined))
 	}
 
 	// Verify no overlap between profiles
@@ -2710,9 +2710,9 @@ func TestNewServerWithConfig(t *testing.T) {
 		t.Fatal("expected MCP server instance")
 	}
 	tools := srv.ListTools()
-	// Should have all 22 tools (18 agent + 4 admin).
-	if len(tools) != 22 {
-		t.Errorf("NewServerWithConfig should register all 22 tools, got %d", len(tools))
+	// Should have all 23 tools (19 agent + 4 admin).
+	if len(tools) != 23 {
+		t.Errorf("NewServerWithConfig should register all 23 tools, got %d", len(tools))
 	}
 }
 
@@ -7450,5 +7450,148 @@ func TestHandleSearch_MatchModeInvalidError(t *testing.T) {
 	}
 	if strings.Contains(text, "Try simpler keywords") {
 		t.Fatalf("parameter-validation error must not contain query-advice suffix \"Try simpler keywords\", got: %s", text)
+	}
+}
+
+func TestHandleFindProject(t *testing.T) {
+	s := newMCPTestStore(t)
+
+	s.CreateSession("s1", "project-one", "/tmp/one")
+	s.CreateSession("s2", "project-two", "/tmp/two")
+
+	// Insert some observations in different projects to test SearchProjects
+	_, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "s1", Type: "bugfix", Title: "search test one",
+		Content: "project one search test", Project: "project-one",
+	})
+	if err != nil { t.Fatal(err) }
+	_, err = s.AddObservation(store.AddObservationParams{
+		SessionID: "s2", Type: "bugfix", Title: "search test two",
+		Content: "project two search test", Project: "project-two",
+	})
+	if err != nil { t.Fatal(err) }
+
+	// Insert a personal observation in project-one to test scope filtering
+	_, err = s.AddObservation(store.AddObservationParams{
+		SessionID: "s1", Type: "bugfix", Title: "personal search test",
+		Content: "project one personal thoughts", Project: "project-one", Scope: "personal",
+	})
+	if err != nil { t.Fatal(err) }
+
+	h := handleFindProject(s, MCPConfig{})
+
+	tests := []struct {
+		name          string
+		query         string
+		matchMode     string
+		scope         string
+		expectError   bool
+		errorContains string
+		expectText    string
+	}{
+		{
+			name:       "success exact match",
+			query:      "project one",
+			matchMode:  "",
+			expectText: "Found 1 project(s)",
+		},
+		{
+			name:       "success match any",
+			query:      "project one test",
+			matchMode:  "any",
+			expectText: "project-two", // Both contain test
+		},
+		{
+			name:          "missing query",
+			query:         "",
+			matchMode:     "",
+			expectError:   true,
+			errorContains: "query is required",
+		},
+		{
+			name:          "invalid match_mode",
+			query:         "test",
+			matchMode:     "invalid-mode",
+			expectError:   true,
+			errorContains: "invalid match_mode",
+		},
+		{
+			name:          "invalid scope",
+			query:         "test",
+			matchMode:     "",
+			scope:         "invalid-scope",
+			expectError:   true,
+			errorContains: "invalid scope",
+		},
+		{
+			name:       "no results",
+			query:      "nonexistentstringthatwillnevermatch",
+			matchMode:  "",
+			expectText: "No projects found matching",
+		},
+		{
+			name:       "scope project filters out personal ones",
+			query:      "thoughts",
+			matchMode:  "",
+			scope:      "project",
+			expectText: "No projects found matching",
+		},
+		{
+			name:       "scope personal finds only personal ones",
+			query:      "thoughts",
+			matchMode:  "",
+			scope:      "personal",
+			expectText: "project-one",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			args := map[string]any{"query": tc.query}
+			if tc.matchMode != "" {
+				args["match_mode"] = tc.matchMode
+			}
+			if tc.scope != "" {
+				args["scope"] = tc.scope
+			}
+			req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: args}}
+			res, err := h(context.Background(), req)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			
+			if tc.expectError {
+				if !res.IsError {
+					t.Fatalf("expected error, got success")
+				}
+				text := callResultText(t, res)
+				if !strings.Contains(text, tc.errorContains) {
+					t.Fatalf("expected error containing %q, got %q", tc.errorContains, text)
+				}
+			} else {
+				if res.IsError {
+					t.Fatalf("expected success, got error: %s", callResultText(t, res))
+				}
+				text := callResultText(t, res)
+				if tc.expectText != "" && !strings.Contains(text, tc.expectText) {
+					t.Fatalf("expected text containing %q, got %q", tc.expectText, text)
+				}
+			}
+		})
+	}
+	
+	// Test error from store (e.g., closed db)
+	s.Close()
+	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"query": "test"}}}
+	res, err := h(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("expected tool error due to closed store")
+	}
+	text := callResultText(t, res)
+	if !strings.Contains(text, "Project search failed") {
+		t.Fatalf("expected error text for store failure, got: %s", text)
 	}
 }
