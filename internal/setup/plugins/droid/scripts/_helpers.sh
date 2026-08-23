@@ -31,3 +31,24 @@ detect_project() {
   # Final fallback: cwd basename (current behavior)
   basename "$dir" | tr '[:upper:]' '[:lower:]'
 }
+
+# List lowercase names of immediate child git repositories under $dir,
+# skipping hidden and noise directories. Mirrors the Go scanChildren logic in
+# internal/project/detect.go so the injected candidate list matches the
+# available_projects returned by ambiguous_project errors.
+#
+# Prints a single line with space-separated names; empty if none.
+list_child_projects() {
+  local dir="$1"
+  [ -d "$dir" ] || return
+
+  local child name
+  for child in "$dir"/*/; do
+    [ -d "${child%/}/.git" ] || continue
+    name=$(basename "${child%/}")
+    case "$name" in
+      node_modules|vendor|.venv|__pycache__|target|dist|build|.idea|.vscode) continue ;;
+    esac
+    printf '%s ' "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
+  done
+}

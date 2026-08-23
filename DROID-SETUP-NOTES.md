@@ -46,6 +46,30 @@ pattern:
 select:engram___mem_save,engram___mem_search,engram___mem_context,...
 ```
 
+### Multi-repo cwd handling
+
+When Droid starts in a directory that contains multiple git repositories (e.g.
+`/Users/aj/scratch`, which holds both `engram-droid` and `iqair-airvisual-pro`),
+cwd-based project detection returns `ambiguous_project` and read tools fail
+until the caller retries with an explicit `project=`.
+
+The `UserPromptSubmit` hook scans immediate child git repos on the first
+message of each session. If it finds more than one, it injects the candidate
+list and a hard rule into the first-message system prompt:
+
+```text
+IMPORTANT — multi-repo cwd detected: [engram-droid, iqair-airvisual-pro].
+When calling ANY engram read tool (mem_search, mem_context, ...), ALWAYS pass
+project=<the repo matching the current user task> explicitly. Never omit the
+project parameter from read tools — cwd auto-detection will fail with
+ambiguous_project. Only use a project name from the list above.
+```
+
+This is a prompt-side fix: it eliminates the `ambiguous_project` round-trip by
+telling the agent to always pass `project=` on read tools, while still allowing
+the agent to pick the correct project for the user's task. If cwd is a single
+repo or not a git parent, the first-message prompt is unchanged.
+
 ### `droid exec` vs interactive `droid`
 
 `UserPromptSubmit` hooks fire in interactive Droid sessions. They do **not**
@@ -57,9 +81,10 @@ list, but it must choose to load them itself.
 
 - `internal/setup/droid.go` — installer implementation
 - `internal/setup/droid_test.go` — installer tests
-- `internal/setup/plugins/droid/scripts/_helpers.sh` — shared hook helpers
+- `internal/setup/plugins/droid/scripts/_helpers.sh` — shared hook helpers,
+  including `list_child_projects()` for multi-repo cwd detection
 - `internal/setup/plugins/droid/scripts/user-prompt-submit.sh` — first-message
-  tool loader and save nudge
+  tool loader, save nudge, and multi-repo `project=` instruction injection
 - `internal/setup/agents.go` — registry entry for `droid`
 - `internal/setup/setup.go` — seam variables for testing
 - `internal/setup/setup_test.go` — reset seams for Droid

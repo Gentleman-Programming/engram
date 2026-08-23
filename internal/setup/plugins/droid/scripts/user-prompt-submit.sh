@@ -56,7 +56,28 @@ sanitize_session_key_part() {
 }
 
 print_toolsearch_message() {
-  printf '%s\n' '{"systemMessage":"CRITICAL FIRST ACTION — Execute this ToolSearch NOW before responding to the user:\nselect:engram___mem_save,engram___mem_search,engram___mem_context,engram___mem_session_summary,engram___mem_session_start,engram___mem_session_end,engram___mem_get_observation,engram___mem_suggest_topic_key,engram___mem_capture_passive,engram___mem_save_prompt,engram___mem_update,engram___mem_current_project,engram___mem_judge\n\nAfter loading tools, call mem_context to check for prior session history before responding.\n\nIf a memory tool returns an ambiguous_project error (cwd spans multiple git repos), retry with project=<one of the available_projects> or call mem_current_project.\n\nWhen calling mem_save, content is REQUIRED — structure it as **What** / **Why** / **Where** / **Learned**. A save with only title+type is rejected."}'
+  local projects_list="$1"
+  local project_count=0
+  local p
+  for p in $projects_list; do
+    project_count=$((project_count + 1))
+  done
+
+  if [ "$project_count" -gt 1 ]; then
+    local formatted_list=""
+    local first=1
+    for p in $projects_list; do
+      if [ "$first" -eq 1 ]; then
+        formatted_list="$p"
+        first=0
+      else
+        formatted_list="${formatted_list}, ${p}"
+      fi
+    done
+    printf '%s\n' '{"systemMessage":"CRITICAL FIRST ACTION — Execute this ToolSearch NOW before responding to the user:\nselect:engram___mem_save,engram___mem_search,engram___mem_context,engram___mem_session_summary,engram___mem_session_start,engram___mem_session_end,engram___mem_get_observation,engram___mem_suggest_topic_key,engram___mem_capture_passive,engram___mem_save_prompt,engram___mem_update,engram___mem_current_project,engram___mem_judge\n\nAfter loading tools, call mem_context to check for prior session history before responding.\n\nIMPORTANT — multi-repo cwd detected: ['"${formatted_list}"']. When calling ANY engram read tool (mem_search, mem_context, mem_get_observation, mem_timeline, mem_doctor, mem_review, mem_judge, mem_compare), ALWAYS pass project=<the repo matching the current user task> explicitly. Never omit the project parameter from read tools — cwd auto-detection will fail with ambiguous_project. Only use a project name from the list above.\n\nWhen calling mem_save, content is REQUIRED — structure it as **What** / **Why** / **Where** / **Learned**. A save with only title+type is rejected."}'
+  else
+    printf '%s\n' '{"systemMessage":"CRITICAL FIRST ACTION — Execute this ToolSearch NOW before responding to the user:\nselect:engram___mem_save,engram___mem_search,engram___mem_context,engram___mem_session_summary,engram___mem_session_start,engram___mem_session_end,engram___mem_get_observation,engram___mem_suggest_topic_key,engram___mem_capture_passive,engram___mem_save_prompt,engram___mem_update,engram___mem_current_project,engram___mem_judge\n\nAfter loading tools, call mem_context to check for prior session history before responding.\n\nIf a memory tool returns an ambiguous_project error (cwd spans multiple git repos), retry with project=<one of the available_projects> or call mem_current_project.\n\nWhen calling mem_save, content is REQUIRED — structure it as **What** / **Why** / **Where** / **Learned**. A save with only title+type is rejected."}'
+  fi
 }
 
 if is_windows_bash && [ "${ENGRAM_DROID_WINDOWS_BASH_SAFE_MODE:-auto}" != "0" ]; then
@@ -180,8 +201,14 @@ if [ ! -f "$STATE_FILE" ]; then
   # Create the state file immediately to prevent repeat injections
   touch "$STATE_FILE" 2>/dev/null || true
 
+  # Detect available child projects so the ToolSearch instruction can force the
+  # agent to pass project= explicitly when cwd is a multi-repo parent. If cwd
+  # is not a multi-repo parent (empty or single-repo), this is a no-op and the
+  # existing message is emitted unchanged.
+  CHILD_PROJECTS=$(list_child_projects "$CWD")
+
   # Inject ToolSearch + mem_context instruction.
-  print_toolsearch_message
+  print_toolsearch_message "$CHILD_PROJECTS"
   exit 0
 fi
 
