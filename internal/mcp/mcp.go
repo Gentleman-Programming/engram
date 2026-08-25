@@ -334,7 +334,7 @@ Examples:
 	if shouldRegister("mem_update", allowlist) {
 		srv.AddTool(
 			mcp.NewTool("mem_update",
-				mcp.WithDescription("Update an existing observation by ID. Only provided fields are changed."),
+				mcp.WithDescription("Update an existing observation by ID. Only provided fields are changed. find and replace must be supplied together and cannot be combined with content."),
 				mcp.WithDeferLoading(true),
 				mcp.WithTitleAnnotation("Update Memory"),
 				mcp.WithReadOnlyHintAnnotation(false),
@@ -350,6 +350,12 @@ Examples:
 				),
 				mcp.WithString("content",
 					mcp.Description("New content"),
+				),
+				mcp.WithString("find",
+					mcp.Description("Literal text to replace everywhere in the current content; requires replace"),
+				),
+				mcp.WithString("replace",
+					mcp.Description("Replacement text for every literal find occurrence; requires find"),
 				),
 				mcp.WithString("type",
 					mcp.Description("New type/category"),
@@ -1066,6 +1072,12 @@ func handleUpdate(s *store.Store) server.ToolHandlerFunc {
 		if v, ok := req.GetArguments()["content"].(string); ok {
 			update.Content = &v
 		}
+		if v, ok := req.GetArguments()["find"].(string); ok {
+			update.Find = &v
+		}
+		if v, ok := req.GetArguments()["replace"].(string); ok {
+			update.Replace = &v
+		}
 		if v, ok := req.GetArguments()["type"].(string); ok {
 			update.Type = &v
 		}
@@ -1080,7 +1092,7 @@ func handleUpdate(s *store.Store) server.ToolHandlerFunc {
 			update.TopicKey = &v
 		}
 
-		if update.Title == nil && update.Content == nil && update.Type == nil && update.Project == nil && update.Scope == nil && update.TopicKey == nil {
+		if update.Title == nil && update.Content == nil && update.Find == nil && update.Replace == nil && update.Type == nil && update.Project == nil && update.Scope == nil && update.TopicKey == nil {
 			return mcp.NewToolResultError("provide at least one field to update"), nil
 		}
 
@@ -1091,6 +1103,9 @@ func handleUpdate(s *store.Store) server.ToolHandlerFunc {
 
 		obs, err := s.UpdateObservation(id, update)
 		if err != nil {
+			if errors.Is(err, store.ErrFindReplacePairRequired) || errors.Is(err, store.ErrFindReplaceWithContent) {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
 			return mcp.NewToolResultError("Failed to update memory: " + err.Error()), nil
 		}
 

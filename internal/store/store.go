@@ -43,11 +43,13 @@ var sqliteWriteRetryBackoffs = []time.Duration{
 
 // Sentinel errors returned by delete operations so callers can use errors.Is.
 var (
-	ErrSessionNotFound        = errors.New("session not found")
-	ErrSessionHasObservations = errors.New("session still has observations")
-	ErrSessionDeleteBlocked   = errors.New("session deletion is blocked while cloud sync enrollment is active")
-	ErrObservationNotFound    = errors.New("observation not found")
-	ErrPromptNotFound         = errors.New("prompt not found")
+	ErrSessionNotFound         = errors.New("session not found")
+	ErrSessionHasObservations  = errors.New("session still has observations")
+	ErrSessionDeleteBlocked    = errors.New("session deletion is blocked while cloud sync enrollment is active")
+	ErrObservationNotFound     = errors.New("observation not found")
+	ErrPromptNotFound          = errors.New("prompt not found")
+	ErrFindReplacePairRequired = errors.New("find and replace must be used together")
+	ErrFindReplaceWithContent  = errors.New("find/replace is mutually exclusive with content")
 )
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -150,6 +152,8 @@ type UpdateObservationParams struct {
 	Type     *string `json:"type,omitempty"`
 	Title    *string `json:"title,omitempty"`
 	Content  *string `json:"content,omitempty"`
+	Find     *string `json:"find,omitempty"`
+	Replace  *string `json:"replace,omitempty"`
 	Project  *string `json:"project,omitempty"`
 	Scope    *string `json:"scope,omitempty"`
 	TopicKey *string `json:"topic_key,omitempty"`
@@ -2347,6 +2351,13 @@ func (s *Store) GetObservation(id int64) (*Observation, error) {
 }
 
 func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observation, error) {
+	if (p.Find == nil) != (p.Replace == nil) {
+		return nil, ErrFindReplacePairRequired
+	}
+	if p.Find != nil && p.Content != nil {
+		return nil, ErrFindReplaceWithContent
+	}
+
 	var updated *Observation
 	err := s.withTx(func(tx *sql.Tx) error {
 		obs, err := s.getObservationTx(tx, id)
@@ -2368,7 +2379,15 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 			title = stripPrivateTags(*p.Title)
 		}
 		if p.Content != nil {
-			content = stripPrivateTags(*p.Content)
+			content = *p.Content
+		}
+		if p.Find != nil {
+			if *p.Find != "" {
+				content = strings.ReplaceAll(content, *p.Find, *p.Replace)
+			}
+		}
+		if p.Content != nil || p.Find != nil {
+			content = stripPrivateTags(content)
 			if len(content) > s.cfg.MaxObservationLength {
 				content = content[:s.cfg.MaxObservationLength] + "... [truncated]"
 			}

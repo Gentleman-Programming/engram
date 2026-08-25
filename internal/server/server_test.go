@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -230,6 +231,92 @@ func TestExportRejectsExplicitBlankProjectQuery(t *testing.T) {
 
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("expected 400 for explicit blank project query (%s), got %d", url, rec.Code)
+		}
+	}
+}
+
+func TestHandleUpdateObservationFindReplaceContract(t *testing.T) {
+	st := newServerTestStore(t)
+	if err := st.CreateSession("http-find-replace", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := st.AddObservation(store.AddObservationParams{
+		SessionID: "http-find-replace",
+		Type:      "note",
+		Title:     "replacement",
+		Content:   "alpha alpha",
+		Project:   "engram",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	replaceReq := httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/observations/%d", id), strings.NewReader(`{"find":"alpha","replace":"beta"}`))
+	replaceRec := httptest.NewRecorder()
+	h.ServeHTTP(replaceRec, replaceReq)
+	if replaceRec.Code != http.StatusOK {
+		t.Fatalf("expected replacement status 200, got %d: %s", replaceRec.Code, replaceRec.Body.String())
+	}
+	var updated store.Observation
+	if err := json.NewDecoder(replaceRec.Body).Decode(&updated); err != nil {
+		t.Fatalf("decode replacement response: %v", err)
+	}
+	if updated.Content != "beta beta" {
+		t.Fatalf("expected all occurrences replaced, got %q", updated.Content)
+	}
+
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "find only", body: `{"find":""}`, want: "find and replace must be used together"},
+		{name: "replace only", body: `{"replace":"gamma"}`, want: "find and replace must be used together"},
+		{name: "pair with content", body: `{"find":"beta","replace":"gamma","content":"replacement"}`, want: "find/replace is mutually exclusive with content"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/observations/%d", id), strings.NewReader(tt.body))
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
+			}
+			var response map[string]string
+			if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+				t.Fatalf("decode error response: %v", err)
+			}
+			if response["error"] != tt.want {
+				t.Fatalf("expected exact error %q, got %q", tt.want, response["error"])
+			}
+		})
+	}
+
+	missingReq := httptest.NewRequest(http.MethodPatch, "/observations/999999", strings.NewReader(`{"find":"beta","replace":"gamma"}`))
+	missingRec := httptest.NewRecorder()
+	h.ServeHTTP(missingRec, missingReq)
+	if missingRec.Code != http.StatusNotFound {
+		t.Fatalf("expected missing observation status 404, got %d: %s", missingRec.Code, missingRec.Body.String())
+	}
+}
+
+func TestDocsDescribeFindReplaceUpdateContract(t *testing.T) {
+	docs, err := os.ReadFile("../../DOCS.md")
+	if err != nil {
+		t.Fatalf("read DOCS.md: %v", err)
+	}
+	for _, want := range []string{
+		"find and replace must be used together",
+		"find/replace is mutually exclusive with content",
+		"every literal occurrence",
+		"revision and sync",
+		`{"find":"alpha","replace":"beta"}`,
+	} {
+		if !strings.Contains(string(docs), want) {
+			t.Fatalf("DOCS.md must describe %q", want)
 		}
 	}
 }
