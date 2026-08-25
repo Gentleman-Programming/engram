@@ -60,6 +60,9 @@ func (a *autosyncStatusAdapter) mapPhase(st autosync.Status) server.SyncStatus {
 		ConsecutiveFailures: st.ConsecutiveFailures,
 		BackoffUntil:        st.BackoffUntil,
 		LastSyncAt:          st.LastSyncAt,
+		// Phase E: propagate deferred/dead counts from autosync.Status.
+		DeferredCount: st.DeferredCount,
+		DeadCount:     st.DeadCount,
 	}
 
 	switch st.Phase {

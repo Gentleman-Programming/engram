@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/internal/setup"
@@ -210,6 +211,116 @@ func TestHandleDashboardAndSearchKeyPaths(t *testing.T) {
 	}
 }
 
+func TestDashboardHasCloudSettingsMenuItem(t *testing.T) {
+	cloudIdx, quitIdx := -1, -1
+	for i, item := range dashboardMenuItems {
+		if item == "Cloud sync settings" {
+			cloudIdx = i
+		}
+		if item == "Quit" {
+			quitIdx = i
+		}
+	}
+	if cloudIdx < 0 {
+		t.Fatal("dashboard menu is missing Cloud sync settings item")
+	}
+	if quitIdx < 0 {
+		t.Fatal("dashboard menu is missing Quit item")
+	}
+	if cloudIdx >= quitIdx {
+		t.Fatalf("Cloud sync settings (%d) must appear before Quit (%d)", cloudIdx, quitIdx)
+	}
+}
+
+func TestCloudSettingsNavigation(t *testing.T) {
+	m := New(nil, "")
+	m.Cursor = 4 // Cloud sync settings
+
+	updatedModel, _ := m.handleDashboardSelection()
+	updated := updatedModel.(Model)
+	if updated.Screen != ScreenCloudSettings {
+		t.Fatalf("enter on Cloud sync settings should open ScreenCloudSettings, got %v", updated.Screen)
+	}
+	if updated.Cursor != 0 {
+		t.Fatalf("cursor should reset to 0 on entering cloud settings, got %d", updated.Cursor)
+	}
+
+	updatedModel, _ = updated.handleCloudSettingsKeys("esc")
+	updated = updatedModel.(Model)
+	if updated.Screen != ScreenDashboard {
+		t.Fatalf("esc from cloud settings should return to dashboard, got %v", updated.Screen)
+	}
+
+	m = New(nil, "")
+	m.Screen = ScreenCloudSettings
+	updatedModel, _ = m.handleCloudSettingsKeys("q")
+	updated = updatedModel.(Model)
+	if updated.Screen != ScreenDashboard {
+		t.Fatalf("q from cloud settings should return to dashboard, got %v", updated.Screen)
+	}
+}
+
+func TestCloudSettingsMenuNavigation(t *testing.T) {
+	m := New(nil, "")
+	m.Screen = ScreenCloudSettings
+
+	updatedModel, _ := m.handleCloudSettingsKeys("down")
+	updated := updatedModel.(Model)
+	if updated.Cursor != 1 {
+		t.Fatalf("down should move cursor to 1, got %d", updated.Cursor)
+	}
+
+	updatedModel, _ = updated.handleCloudSettingsKeys("j")
+	updated = updatedModel.(Model)
+	if updated.Cursor != 2 {
+		t.Fatalf("j should move cursor to 2, got %d", updated.Cursor)
+	}
+
+	updatedModel, _ = updated.handleCloudSettingsKeys("down")
+	updated = updatedModel.(Model)
+	if updated.Cursor != 3 {
+		t.Fatalf("down should move cursor to 3, got %d", updated.Cursor)
+	}
+
+	updatedModel, _ = updated.handleCloudSettingsKeys("down")
+	updated = updatedModel.(Model)
+	if updated.Cursor != 3 {
+		t.Fatalf("down at bottom should stay at 3, got %d", updated.Cursor)
+	}
+
+	updatedModel, _ = updated.handleCloudSettingsKeys("up")
+	updated = updatedModel.(Model)
+	if updated.Cursor != 2 {
+		t.Fatalf("up should move cursor to 2, got %d", updated.Cursor)
+	}
+
+	updatedModel, _ = updated.handleCloudSettingsKeys("k")
+	updated = updatedModel.(Model)
+	if updated.Cursor != 1 {
+		t.Fatalf("k should move cursor to 1, got %d", updated.Cursor)
+	}
+
+	m = New(nil, "")
+	m.Screen = ScreenCloudSettings
+	updatedModel, _ = m.handleCloudSettingsKeys("up")
+	updated = updatedModel.(Model)
+	if updated.Cursor != 0 {
+		t.Fatalf("up at top should stay at 0, got %d", updated.Cursor)
+	}
+
+	m = New(nil, "")
+	m.Screen = ScreenCloudSettings
+	m.Cursor = 3 // Back
+	updatedModel, cmd := m.handleCloudSettingsKeys("enter")
+	updated = updatedModel.(Model)
+	if updated.Screen != ScreenDashboard {
+		t.Fatalf("enter on Back should return to dashboard, got %v", updated.Screen)
+	}
+	if cmd == nil {
+		t.Fatal("enter on Back should refresh stats")
+	}
+}
+
 func TestHandleRecentTimelineSessionsAndDetailKeyPaths(t *testing.T) {
 	fx := newTestFixture(t)
 	m := New(fx.store, "")
@@ -300,6 +411,148 @@ func TestHandleRecentTimelineSessionsAndDetailKeyPaths(t *testing.T) {
 	if updated.Screen != ScreenSessions || cmd == nil {
 		t.Fatal("session detail esc should return to sessions and refresh list")
 	}
+}
+
+func TestSessionDeletePromptFlow(t *testing.T) {
+	t.Run("opens and cancels prompt", func(t *testing.T) {
+		fx := newTestFixture(t)
+		m := New(fx.store, "")
+		m.Screen = ScreenSessions
+		m.Sessions = []store.SessionSummary{{ID: fx.sessionID, Project: "engram"}, {ID: fx.otherSession, Project: "engram"}}
+		m.Cursor = 1
+
+		updatedModel, cmd := m.handleSessionsKeys("D")
+		updated := updatedModel.(Model)
+		if cmd != nil {
+			t.Fatal("opening delete prompt should not return command")
+		}
+		if updated.SessionDeleteState != SessionDeleteStatePrompt || updated.SessionDeleteID != fx.otherSession || updated.SessionDeleteProject != "engram" {
+			t.Fatalf("delete prompt state = state:%v id:%q project:%q", updated.SessionDeleteState, updated.SessionDeleteID, updated.SessionDeleteProject)
+		}
+
+		updatedModel, cmd = updated.handleSessionsKeys("esc")
+		updated = updatedModel.(Model)
+		if cmd != nil {
+			t.Fatal("esc cancel should not return command")
+		}
+		if updated.SessionDeleteState != SessionDeleteStateNone || updated.SessionDeleteID != "" || updated.SessionDeleteProject != "" {
+			t.Fatal("esc cancel should clear delete prompt state")
+		}
+
+		updatedModel, _ = m.handleSessionsKeys("d")
+		updated = updatedModel.(Model)
+		updatedModel, cmd = updated.handleSessionsKeys("n")
+		updated = updatedModel.(Model)
+		if cmd != nil {
+			t.Fatal("n cancel should not return command")
+		}
+		if updated.SessionDeleteState != SessionDeleteStateNone || updated.SessionDeleteID != "" || updated.SessionDeleteProject != "" {
+			t.Fatal("n cancel should clear delete prompt state")
+		}
+	})
+
+	t.Run("confirm deletes empty session and refreshes", func(t *testing.T) {
+		fx := newTestFixture(t)
+		m := New(fx.store, "")
+		m.Screen = ScreenSessions
+		m.Sessions = []store.SessionSummary{{ID: fx.sessionID, Project: "engram"}, {ID: fx.otherSession, Project: "engram"}}
+		m.Cursor = 1
+
+		updatedModel, _ := m.handleSessionsKeys("d")
+		updated := updatedModel.(Model)
+		updatedModel, cmd := updated.handleSessionsKeys("y")
+		updated = updatedModel.(Model)
+		if cmd == nil {
+			t.Fatal("confirm should return delete command")
+		}
+		if updated.SessionDeleteState != SessionDeleteStateDeleting {
+			t.Fatal("confirm should close prompt and mark delete in progress")
+		}
+		if _, secondCmd := updated.handleSessionsKeys("y"); secondCmd != nil {
+			t.Fatal("second confirm while deleting should be ignored")
+		}
+
+		msg := cmd().(sessionDeletedMsg)
+		if msg.err != nil {
+			t.Fatalf("delete command error: %v", msg.err)
+		}
+		updated.ErrorMsg = "stale delete error"
+		updatedModel, refreshCmd := updated.Update(msg)
+		updated = updatedModel.(Model)
+		if updated.SessionDeleteState != SessionDeleteStateNone || updated.SessionDeleteID != "" {
+			t.Fatal("delete result should clear prompt state")
+		}
+		if updated.ErrorMsg != "" {
+			t.Fatalf("successful delete should clear stale error, got %q", updated.ErrorMsg)
+		}
+		if refreshCmd == nil {
+			t.Fatal("successful delete should refresh sessions")
+		}
+		if err := fx.store.DeleteSession(fx.otherSession); !errors.Is(err, store.ErrSessionNotFound) {
+			t.Fatalf("session should be deleted, got err %v", err)
+		}
+	})
+
+	t.Run("blocked delete shows store error", func(t *testing.T) {
+		fx := newTestFixture(t)
+		m := New(fx.store, "")
+		m.Screen = ScreenSessions
+		m.Sessions = []store.SessionSummary{{ID: fx.sessionID, Project: "engram"}}
+
+		updatedModel, _ := m.handleSessionsKeys("d")
+		updated := updatedModel.(Model)
+		_, cmd := updated.handleSessionsKeys("y")
+		if cmd == nil {
+			t.Fatal("confirm should return delete command")
+		}
+
+		msg := cmd().(sessionDeletedMsg)
+		if !errors.Is(msg.err, store.ErrSessionHasObservations) {
+			t.Fatalf("expected ErrSessionHasObservations, got %v", msg.err)
+		}
+		updatedModel, refreshCmd := updated.Update(msg)
+		updated = updatedModel.(Model)
+		if refreshCmd != nil {
+			t.Fatal("failed delete should not refresh sessions")
+		}
+		if updated.ErrorMsg == "" || !strings.Contains(updated.ErrorMsg, "Cannot delete session") {
+			t.Fatalf("failed delete should surface contextual error message, got %q", updated.ErrorMsg)
+		}
+		if updated.SessionDeleteState != SessionDeleteStateNone {
+			t.Fatal("failed delete should close prompt")
+		}
+	})
+
+	t.Run("nil store returns graceful error", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen = ScreenSessions
+		m.Sessions = []store.SessionSummary{{ID: "session-missing-store", Project: "engram"}}
+
+		updatedModel, _ := m.handleSessionsKeys("d")
+		updated := updatedModel.(Model)
+		_, cmd := updated.handleSessionsKeys("y")
+		if cmd == nil {
+			t.Fatal("confirm should return delete command")
+		}
+
+		msg := cmd().(sessionDeletedMsg)
+		if msg.err == nil {
+			t.Fatal("nil store delete should return an error message")
+		}
+	})
+
+	t.Run("delete key ignored without sessions", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen = ScreenSessions
+		updatedModel, cmd := m.handleSessionsKeys("d")
+		updated := updatedModel.(Model)
+		if cmd != nil {
+			t.Fatal("delete with no sessions should not return command")
+		}
+		if updated.SessionDeleteState != SessionDeleteStateNone {
+			t.Fatal("delete with no sessions should not open prompt")
+		}
+	})
 }
 
 func TestRefreshScreen(t *testing.T) {
@@ -406,6 +659,23 @@ func TestUpdateDataMessageBranches(t *testing.T) {
 		t.Fatal("sessions should be updated")
 	}
 
+	screenModel := New(nil, "")
+	screenModel.Screen = ScreenSearch
+	screenModel.Cursor = 5
+	screenModel.Scroll = 4
+	updatedModel, _ = screenModel.Update(recentSessionsMsg{sessions: sessions})
+	updated = updatedModel.(Model)
+	if updated.Cursor != 5 || updated.Scroll != 4 {
+		t.Fatalf("sessions refresh outside sessions screen should not clamp cursor/scroll, got %d/%d", updated.Cursor, updated.Scroll)
+	}
+
+	screenModel.Screen = ScreenSessions
+	updatedModel, _ = screenModel.Update(recentSessionsMsg{sessions: sessions})
+	updated = updatedModel.(Model)
+	if updated.Cursor != 0 || updated.Scroll != 0 {
+		t.Fatalf("sessions refresh on sessions screen should clamp cursor/scroll, got %d/%d", updated.Cursor, updated.Scroll)
+	}
+
 	updatedModel, _ = m.Update(sessionObservationsMsg{err: errors.New("session detail err")})
 	updated = updatedModel.(Model)
 	if updated.ErrorMsg != "session detail err" {
@@ -457,6 +727,7 @@ func TestHandleKeyPressRouterAndClearsError(t *testing.T) {
 		ScreenSessions,
 		ScreenSessionDetail,
 		ScreenSetup,
+		ScreenCloudSettings,
 	} {
 		m.Screen = screen
 		m.ErrorMsg = "old error"
@@ -483,7 +754,7 @@ func TestHandleDashboardKeysAndSelectionRemainingBranches(t *testing.T) {
 		t.Fatal("cursor should stay at bottom boundary")
 	}
 
-	m.Cursor = 4
+	m.Cursor = 5
 	_, cmd := m.handleDashboardKeys(" ")
 	if cmd == nil {
 		t.Fatal("space on quit item should return quit command")
@@ -501,10 +772,10 @@ func TestHandleDashboardKeysAndSelectionRemainingBranches(t *testing.T) {
 		t.Fatal("cursor 0 selection should open search")
 	}
 
-	m.Cursor = 4
+	m.Cursor = 5
 	_, cmd = m.handleDashboardSelection()
 	if cmd == nil {
-		t.Fatal("cursor 4 selection should quit")
+		t.Fatal("cursor 5 selection should quit")
 	}
 
 	m.Cursor = 99

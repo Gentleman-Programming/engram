@@ -46,6 +46,7 @@ type MountConfig struct {
 	IsAdmin             func(r *http.Request) bool
 	GetDisplayName      func(r *http.Request) string
 	Store               DashboardStore
+	ManagedUsers        ManagedUsersStore
 	MaxLoginBodyBytes   int64
 	StatusProvider      SyncStatusProvider
 }
@@ -87,6 +88,18 @@ type DashboardStore interface {
 
 	// Audit log (REQ-409).
 	ListAuditEntriesPaginated(ctx context.Context, filter cloudstore.AuditFilter, limit, offset int) ([]cloudstore.DashboardAuditRow, int, error)
+}
+
+// ManagedUsersStore is the read-only boundary the dashboard package uses to
+// render the Managed Users surface. It is intentionally separate from
+// DashboardStore (contributor/project/session analytics) so managed human
+// users stay distinct from contributor analytics (cloud-user-token-management
+// PR4). Mutations (create/enable/disable/tokens/grants) are owned and
+// policy-gated by internal/cloud/cloudserver, which already enforces managed
+// admin authorization and audit for these operations; the dashboard package
+// only renders outcomes and links to those cloudserver-owned routes.
+type ManagedUsersStore interface {
+	ListHumanUsers(ctx context.Context) ([]cloudstore.HumanUser, error)
 }
 
 type handlers struct {
@@ -776,58 +789,45 @@ func (h *handlers) handleProjectPromptsPartial(w http.ResponseWriter, r *http.Re
 
 // handleAdminUsers handles GET /dashboard/admin/users.
 // R6-1: serves only the shell; the list is loaded via HTMX from /dashboard/admin/users/list.
+// cloud-user-token-management PR4: this surface renders MANAGED USERS (cloud
+// principals/human accounts), not contributor analytics. Contributor
+// analytics keep their own separate surface at /dashboard/contributors.
 func (h *handlers) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 	p := h.principalFromRequest(r)
 	if !p.IsAdmin() {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	component := AdminUsersPage()
+	component := ManagedUsersPage()
 	if isHTMXRequest(r) {
 		renderComponent(w, r, component)
 		return
 	}
-	renderComponent(w, r, Layout("Admin Users", p.DisplayName(), "admin", p.IsAdmin(), component))
+	renderComponent(w, r, Layout("Managed Users", p.DisplayName(), "admin", p.IsAdmin(), component))
 }
 
 // handleAdminUsersList handles GET /dashboard/admin/users/list.
-// R5-2: always returns AdminUsersListPartial (partial only, no full shell wrapper).
+// R5-2: always returns ManagedUsersListPartial (partial only, no full shell wrapper).
 // R6-2: on store error, always renders a fragment (no Layout wrapper) — partial-only contract.
-// Admin-gated.
+// Admin-gated. cloud-user-token-management PR4: renders managed human users,
+// not contributor analytics (see handleAdminUsers).
 func (h *handlers) handleAdminUsersList(w http.ResponseWriter, r *http.Request) {
 	p := h.principalFromRequest(r)
 	if !p.IsAdmin() {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	reqPage, pageSize := parsePaginationRaw(r)
-	rows := make([]cloudstore.DashboardContributorRow, 0)
-	total := 0
-	if h.cfg.Store != nil {
+	rows := make([]cloudstore.HumanUser, 0)
+	if h.cfg.ManagedUsers != nil {
 		var err error
-		rows, total, err = h.cfg.Store.ListContributorsPaginated("", pageSize, (reqPage-1)*pageSize)
+		rows, err = h.cfg.ManagedUsers.ListHumanUsers(r.Context())
 		if err != nil {
-			log.Printf("dashboard: admin users list store error: %v", err)
-			renderComponentStatus(w, r, http.StatusBadGateway, EmptyState("Service Unavailable", "Dashboard data is temporarily unavailable."))
+			log.Printf("dashboard: managed users list store error: %v", err)
+			renderComponentStatus(w, r, http.StatusBadGateway, EmptyState("Service Unavailable", "Managed user data is temporarily unavailable."))
 			return
 		}
 	}
-	pg, needsRefetch := reclampPagination(reqPage, pageSize, total)
-	if needsRefetch && h.cfg.Store != nil {
-		if refetched, _, err := h.cfg.Store.ListContributorsPaginated("", pageSize, pg.Offset()); err == nil {
-			rows = refetched
-		} else {
-			log.Printf("dashboard: re-fetch admin users list page %d: %v", pg.Page, err)
-			if len(rows) == 0 {
-				if fallback, _, fallbackErr := h.cfg.Store.ListContributorsPaginated("", pageSize, 0); fallbackErr == nil {
-					rows = fallback
-				} else {
-					log.Printf("dashboard: fallback admin users list page 1: %v", fallbackErr)
-				}
-			}
-		}
-	}
-	renderComponent(w, r, AdminUsersListPartial(rows, pg))
+	renderComponent(w, r, ManagedUsersListPartial(rows))
 }
 
 // handleAdminHealth handles GET /dashboard/admin/health.

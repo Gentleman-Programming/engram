@@ -29,6 +29,8 @@ brew update && brew upgrade engram
 > brew uninstall --cask engram 2>/dev/null; brew install gentleman-programming/tap/engram
 > ```
 
+> **Keep `engram serve` running across `brew upgrade`?** On macOS, `brew upgrade engram` replaces the binary and kills any running `engram serve` process — autosync stops silently until you relaunch it. To make autosync survive upgrades and reboots, use the launchd template in [Running as a Service → Using launchd (macOS)](../DOCS.md#using-launchd-macos). Run `engram cloud status` afterwards: the `Local daemon:` line should report `running`.
+
 ---
 
 ## Windows
@@ -51,11 +53,28 @@ git clone https://github.com/Gentleman-Programming/engram.git
 cd engram
 go install ./cmd/engram
 # Binary goes to %GOPATH%\bin\engram.exe (typically %USERPROFILE%\go\bin\)
-
-# Optional: build with version stamp (otherwise `engram version` shows "dev")
-$v = git describe --tags --always
-go build -ldflags="-X main.version=local-$v" -o engram.exe ./cmd/engram
 ```
+
+> **Want a real version string instead of `dev`?**
+>
+> `go install` always stamps the binary as `dev`. To get a meaningful version, pick one of these — not both. Running them both leaves two binaries on disk and `engram version` keeps reporting `dev` because PATH still resolves to the `go install` build.
+>
+> **Option B1 — version-stamped `go install` (binary stays on PATH):**
+>
+> ```powershell
+> $v = git describe --tags --always
+> go install -ldflags="-X main.version=local-$v" ./cmd/engram
+> ```
+>
+> **Option B2 — `go build` and move the result onto PATH:**
+>
+> ```powershell
+> $v = git describe --tags --always
+> go build -ldflags="-X main.version=local-$v" -o engram.exe ./cmd/engram
+> Move-Item -Force engram.exe "$env:USERPROFILE\go\bin\engram.exe"
+> ```
+>
+> After either option, `engram version` should print `local-<git-describe>` instead of `dev`.
 
 **Option C: Download the prebuilt binary**
 
@@ -104,10 +123,27 @@ Expand-Archive engram_*_windows_amd64.zip -DestinationPath "$env:USERPROFILE\bin
 git clone https://github.com/Gentleman-Programming/engram.git
 cd engram
 go install ./cmd/engram
-
-# Optional: build with version stamp (otherwise `engram version` shows "dev")
-go build -ldflags="-X main.version=local-$(git describe --tags --always)" -o engram ./cmd/engram
+# Binary goes to $GOPATH/bin (typically ~/go/bin/)
 ```
+
+> **Want a real version string instead of `dev`?**
+>
+> `go install` always stamps the binary as `dev`. To get a meaningful version, pick one of these — not both. Running them both leaves two binaries on disk and `engram version` keeps reporting `dev` because PATH still resolves to the `go install` build.
+>
+> **Option 1 — version-stamped `go install` (binary stays on PATH):**
+>
+> ```bash
+> go install -ldflags="-X main.version=local-$(git describe --tags --always)" ./cmd/engram
+> ```
+>
+> **Option 2 — `go build` and move the result onto PATH:**
+>
+> ```bash
+> go build -ldflags="-X main.version=local-$(git describe --tags --always)" -o engram ./cmd/engram
+> mv engram "$(go env GOPATH)/bin/engram"
+> ```
+>
+> After either option, `engram version` should print `local-<git-describe>` instead of `dev`.
 
 ---
 
@@ -154,6 +190,11 @@ When using `engram setup`, config files are written to platform-appropriate loca
 | Gemini CLI | `~/.gemini/` | `%APPDATA%\gemini\` |
 | Codex | `~/.codex/` | `%APPDATA%\codex\` |
 | Claude Code | Managed by `claude` CLI | Managed by `claude` CLI |
-| VS Code | `.vscode/mcp.json` (workspace) or `~/Library/Application Support/Code/User/mcp.json` (user) | `.vscode\mcp.json` (workspace) or `%APPDATA%\Code\User\mcp.json` (user) |
-| Antigravity | `~/.gemini/antigravity/mcp_config.json` | `%USERPROFILE%\.gemini\antigravity\mcp_config.json` |
+| Antigravity CLI | `~/.gemini/config/mcp_config.json` + `~/.gemini/GEMINI.md` | `%APPDATA%\gemini\config\mcp_config.json` + `%APPDATA%\gemini\GEMINI.md` |
+| Windsurf | `~/.codeium/windsurf/mcp_config.json` + `.../memories/global_rules.md` | `%USERPROFILE%\.codeium\windsurf\...` |
+| Qwen Code | `~/.qwen/settings.json` + `~/.qwen/QWEN.md` | `%USERPROFILE%\.qwen\...` |
+| Kiro | `~/.kiro/settings/mcp.json` + `~/.kiro/steering/engram.md` | `%USERPROFILE%\.kiro\...` |
+| Cursor | `~/.cursor/mcp.json` + `~/.cursor/rules/engram.mdc` | `%USERPROFILE%\.cursor\...` |
+| VS Code Copilot | `~/.config/Code/User/mcp.json` + `.../prompts/engram.instructions.md` (macOS: `~/Library/Application Support/Code/User/`) | `%APPDATA%\Code\User\...` |
+| Kilo Code | `~/.config/kilo/opencode.json` + `~/.config/kilo/AGENTS.md` | `%USERPROFILE%\.config\kilo\...` |
 | Data directory | `~/.engram/` | `%USERPROFILE%\.engram\` |

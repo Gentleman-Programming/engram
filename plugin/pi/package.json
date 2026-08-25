@@ -1,0 +1,71 @@
+{
+  "name": "gentle-engram",
+  "version": "0.1.10",
+  "description": "Persistent memory for Pi agents — one local-or-cloud brain shared across sessions, compactions, and MCP agents",
+  "type": "module",
+  "license": "MIT",
+  "author": "Gentleman Programming",
+  "homepage": "https://github.com/Gentleman-Programming/engram",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Gentleman-Programming/engram.git",
+    "directory": "plugin/pi"
+  },
+  "bin": {
+    "pi-engram": "cli.js"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "engram",
+    "memory",
+    "persistent-memory",
+    "project-memory",
+    "compaction-recovery",
+    "agent-memory",
+    "ai-memory",
+    "engram-cloud",
+    "token-saving",
+    "mcp",
+    "coding-agent",
+    "extension"
+  ],
+  "pi": {
+    "image": "https://raw.githubusercontent.com/Gentleman-Programming/engram/main/plugin/pi/assets/engram-logo-only.png",
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "assets/",
+    "cli.js",
+    "compaction-recovery.js",
+    "index.ts",
+    "memory-tool-chrome.js",
+    "mcp-template.json",
+    "private-redaction.js",
+    "test/",
+    "README.md",
+    "package.json"
+  ],
+  "publishConfig": {
+    "provenance": true,
+    "access": "public"
+  },
+  "dependencies": {
+    "@earendil-works/pi-tui": "^0.74.0",
+    "typebox": "^1.1.38"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "pi-mcp-adapter": ">=2.5.0"
+  },
+  "peerDependenciesMeta": {
+    "pi-mcp-adapter": {
+      "optional": true
+    }
+  }
+}

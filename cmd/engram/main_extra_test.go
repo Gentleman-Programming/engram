@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -154,6 +155,7 @@ func stubRuntimeHooks(t *testing.T) {
 	oldSyncExport := syncExport
 	oldNewCloudAutosyncManager := newCloudAutosyncManager
 	oldCheckForUpdates := checkForUpdates
+	oldCloudDaemonProbe := cloudDaemonProbe
 
 	storeNew = store.New
 	newHTTPServer = func(s *store.Store, _ int) *engramsrv.Server { return engramsrv.New(s, 0) }
@@ -197,6 +199,9 @@ func stubRuntimeHooks(t *testing.T) {
 	checkForUpdates = func(string) versioncheck.CheckResult {
 		return versioncheck.CheckResult{Status: versioncheck.StatusUpToDate}
 	}
+	cloudDaemonProbe = func(_ context.Context, port int) daemonProbeResult {
+		return daemonProbeResult{Status: daemonProbeRunning, Port: port}
+	}
 
 	t.Cleanup(func() {
 		storeNew = oldStoreNew
@@ -223,6 +228,7 @@ func stubRuntimeHooks(t *testing.T) {
 		syncExport = oldSyncExport
 		newCloudAutosyncManager = oldNewCloudAutosyncManager
 		checkForUpdates = oldCheckForUpdates
+		cloudDaemonProbe = oldCloudDaemonProbe
 	})
 }
 
@@ -495,10 +501,15 @@ func TestTryStartAutosyncReturnsStopFn(t *testing.T) {
 // Run exits immediately (no goroutines); Stop is synchronous and calls stopFn.
 // BR2-3: Used to stub newAutosyncManager in tests.
 type fakeStartableManager struct {
+	runFn  func(context.Context)
 	stopFn func()
 }
 
-func (f *fakeStartableManager) Run(_ context.Context) {} // exits immediately — no goroutine spawned
+func (f *fakeStartableManager) Run(ctx context.Context) {
+	if f.runFn != nil {
+		f.runFn(ctx)
+	}
+} // exits immediately — no goroutine spawned unless runFn blocks
 func (f *fakeStartableManager) Stop() {
 	if f.stopFn != nil {
 		f.stopFn()
@@ -648,6 +659,9 @@ func TestUpdateChecksSkipCriticalStartupCommands(t *testing.T) {
 	if shouldCheckForUpdates([]string{"cloud", "serve"}) {
 		t.Fatal("cloud serve startup must not run update check")
 	}
+	if shouldCheckForUpdates([]string{"protocol-mode", "claude-code"}) {
+		t.Fatal("protocol-mode startup must not run update check")
+	}
 	if !shouldCheckForUpdates([]string{"version"}) {
 		t.Fatal("normal commands should keep update output")
 	}
@@ -722,6 +736,114 @@ func TestCmdCloudStatusDistinguishesAuthAndSyncReadiness(t *testing.T) {
 		}
 		if !strings.Contains(stdout, "Auth status: ready") || !strings.Contains(stdout, "Sync readiness: ready") {
 			t.Fatalf("expected ready readiness output, got %q", stdout)
+		}
+	})
+}
+
+func TestCmdCloudStatusEmitsLocalDaemonLine(t *testing.T) {
+	stubExitWithPanic(t)
+	stubRuntimeHooks(t)
+
+	cfg := testConfig(t)
+
+	t.Run("not configured suppresses daemon probe", func(t *testing.T) {
+		t.Setenv("ENGRAM_CLOUD_TOKEN", "")
+		t.Setenv("ENGRAM_CLOUD_SERVER", "")
+		t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "")
+
+		// Override the probe with a sentinel so we can detect any accidental call.
+		probed := false
+		prev := cloudDaemonProbe
+		cloudDaemonProbe = func(_ context.Context, port int) daemonProbeResult {
+			probed = true
+			return daemonProbeResult{Status: daemonProbeRunning, Port: port}
+		}
+		t.Cleanup(func() { cloudDaemonProbe = prev })
+
+		notConfiguredCfg := testConfig(t)
+		withArgs(t, "engram", "cloud", "status")
+		stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloud(notConfiguredCfg) })
+		if recovered != nil || stderr != "" {
+			t.Fatalf("cloud status should succeed, panic=%v stderr=%q", recovered, stderr)
+		}
+		if !strings.Contains(stdout, "not configured") {
+			t.Fatalf("expected not-configured output, got %q", stdout)
+		}
+		if probed {
+			t.Fatalf("daemon probe must not run when cloud is not configured")
+		}
+		if strings.Contains(stdout, "Local daemon:") {
+			t.Fatalf("expected no daemon line in not-configured output, got %q", stdout)
+		}
+	})
+
+	if err := saveCloudConfig(cfg, &cloudConfig{ServerURL: "https://cloud.example.test"}); err != nil {
+		t.Fatalf("save cloud config: %v", err)
+	}
+
+	t.Run("configured prints running daemon line", func(t *testing.T) {
+		t.Setenv("ENGRAM_CLOUD_TOKEN", "token-abc")
+		t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "")
+
+		prev := cloudDaemonProbe
+		cloudDaemonProbe = func(_ context.Context, port int) daemonProbeResult {
+			return daemonProbeResult{Status: daemonProbeRunning, Port: port}
+		}
+		t.Cleanup(func() { cloudDaemonProbe = prev })
+
+		withArgs(t, "engram", "cloud", "status")
+		stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloud(cfg) })
+		if recovered != nil || stderr != "" {
+			t.Fatalf("cloud status should succeed, panic=%v stderr=%q", recovered, stderr)
+		}
+		if !strings.Contains(stdout, "Local daemon: running on port") {
+			t.Fatalf("expected running daemon line, got %q", stdout)
+		}
+	})
+
+	t.Run("configured prints recovery hint when daemon is down", func(t *testing.T) {
+		t.Setenv("ENGRAM_CLOUD_TOKEN", "token-abc")
+		t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "")
+
+		prev := cloudDaemonProbe
+		cloudDaemonProbe = func(_ context.Context, port int) daemonProbeResult {
+			return daemonProbeResult{Status: daemonProbeNotRunning, Port: port}
+		}
+		t.Cleanup(func() { cloudDaemonProbe = prev })
+
+		withArgs(t, "engram", "cloud", "status")
+		stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloud(cfg) })
+		if recovered != nil || stderr != "" {
+			t.Fatalf("cloud status should succeed when daemon is down, panic=%v stderr=%q", recovered, stderr)
+		}
+		if !strings.Contains(stdout, "Local daemon: not running on port") {
+			t.Fatalf("expected not-running daemon line, got %q", stdout)
+		}
+		if !strings.Contains(stdout, "engram serve") {
+			t.Fatalf("expected recovery hint mentioning `engram serve`, got %q", stdout)
+		}
+	})
+
+	t.Run("insecure mode also prints daemon line", func(t *testing.T) {
+		t.Setenv("ENGRAM_CLOUD_TOKEN", "")
+		t.Setenv("ENGRAM_CLOUD_INSECURE_NO_AUTH", "1")
+
+		prev := cloudDaemonProbe
+		cloudDaemonProbe = func(_ context.Context, port int) daemonProbeResult {
+			return daemonProbeResult{Status: daemonProbeRunning, Port: port}
+		}
+		t.Cleanup(func() { cloudDaemonProbe = prev })
+
+		withArgs(t, "engram", "cloud", "status")
+		stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloud(cfg) })
+		if recovered != nil || stderr != "" {
+			t.Fatalf("cloud status should succeed, panic=%v stderr=%q", recovered, stderr)
+		}
+		if !strings.Contains(stdout, "insecure local-dev mode") {
+			t.Fatalf("expected insecure-mode banner, got %q", stdout)
+		}
+		if !strings.Contains(stdout, "Local daemon: running on port") {
+			t.Fatalf("expected running daemon line in insecure mode, got %q", stdout)
 		}
 	})
 }
@@ -1484,9 +1606,12 @@ func TestResolveCloudRuntimeConfigReturnsErrorWhenPersistedConfigUnreadable(t *t
 	}
 }
 
-func TestResolveCloudRuntimeConfigIgnoresPersistedTokenWithoutEnvOverride(t *testing.T) {
+func TestResolveCloudRuntimeConfigUsesPersistedTokenAsFallback(t *testing.T) {
+	// Issue #343: when ENGRAM_CLOUD_TOKEN is not set, the token stored in
+	// cloud.json must be used so that `engram sync --cloud` works without
+	// requiring users to export the env var in every shell session.
 	cfg := testConfig(t)
-	if err := saveCloudConfig(cfg, &cloudConfig{ServerURL: "https://cloud.example.test", Token: "legacy-token"}); err != nil {
+	if err := saveCloudConfig(cfg, &cloudConfig{ServerURL: "https://cloud.example.test", Token: "file-token"}); err != nil {
 		t.Fatalf("save cloud config: %v", err)
 	}
 	t.Setenv("ENGRAM_CLOUD_TOKEN", "")
@@ -1498,8 +1623,8 @@ func TestResolveCloudRuntimeConfigIgnoresPersistedTokenWithoutEnvOverride(t *tes
 	if runtimeCfg == nil {
 		t.Fatal("expected non-nil cloud runtime config")
 	}
-	if runtimeCfg.Token != "" {
-		t.Fatalf("expected persisted legacy token to be ignored, got %q", runtimeCfg.Token)
+	if runtimeCfg.Token != "file-token" {
+		t.Fatalf("expected persisted token %q as fallback, got %q", "file-token", runtimeCfg.Token)
 	}
 	if runtimeCfg.ServerURL != "https://cloud.example.test" {
 		t.Fatalf("expected server URL to remain available, got %q", runtimeCfg.ServerURL)
@@ -1588,6 +1713,7 @@ func TestCmdCloudServeStartsCloudRuntime(t *testing.T) {
 	t.Setenv("ENGRAM_CLOUD_HOST", "0.0.0.0")
 	t.Setenv("ENGRAM_CLOUD_TOKEN", "token-abc")
 	t.Setenv("ENGRAM_CLOUD_ALLOWED_PROJECTS", "proj-a")
+	t.Setenv("ENGRAM_CLOUD_MAX_PUSH_BYTES", "10485760")
 
 	var seen cloud.Config
 	runtimeStub := &stubCloudRuntimeServer{}
@@ -1611,6 +1737,9 @@ func TestCmdCloudServeStartsCloudRuntime(t *testing.T) {
 	}
 	if seen.BindHost != "0.0.0.0" {
 		t.Fatalf("expected cloud runtime config bind host from env, got %q", seen.BindHost)
+	}
+	if seen.MaxPushBodyBytes != 10485760 {
+		t.Fatalf("expected cloud runtime max push bytes from env, got %d", seen.MaxPushBodyBytes)
 	}
 }
 
@@ -2251,6 +2380,7 @@ func TestStoreSyncStatusProviderRequiresProjectEvenWhenCloudConfigured(t *testin
 func TestCmdSetupDirectAndInteractive(t *testing.T) {
 	stubRuntimeHooks(t)
 	stubExitWithPanic(t)
+	cfg := testConfig(t)
 
 	setupInstallAgent = func(agent string) (*setup.Result, error) {
 		if agent == "broken" {
@@ -2260,7 +2390,7 @@ func TestCmdSetupDirectAndInteractive(t *testing.T) {
 	}
 
 	withArgs(t, "engram", "setup", "codex")
-	out, errOut, recovered := captureOutputAndRecover(t, func() { cmdSetup() })
+	out, errOut, recovered := captureOutputAndRecover(t, func() { cmdSetup(cfg) })
 	if recovered != nil || errOut != "" {
 		t.Fatalf("direct setup should succeed, panic=%v stderr=%q", recovered, errOut)
 	}
@@ -2269,7 +2399,7 @@ func TestCmdSetupDirectAndInteractive(t *testing.T) {
 	}
 
 	withArgs(t, "engram", "setup", "broken")
-	_, errOut, recovered = captureOutputAndRecover(t, func() { cmdSetup() })
+	_, errOut, recovered = captureOutputAndRecover(t, func() { cmdSetup(cfg) })
 	if _, ok := recovered.(exitCode); !ok || !strings.Contains(errOut, "install failed") {
 		t.Fatalf("expected direct setup fatal, panic=%v stderr=%q", recovered, errOut)
 	}
@@ -2284,7 +2414,7 @@ func TestCmdSetupDirectAndInteractive(t *testing.T) {
 	}
 
 	withArgs(t, "engram", "setup")
-	out, errOut, recovered = captureOutputAndRecover(t, func() { cmdSetup() })
+	out, errOut, recovered = captureOutputAndRecover(t, func() { cmdSetup(cfg) })
 	if recovered != nil || errOut != "" {
 		t.Fatalf("interactive setup should succeed, panic=%v stderr=%q", recovered, errOut)
 	}
@@ -2298,7 +2428,7 @@ func TestCmdSetupDirectAndInteractive(t *testing.T) {
 		return 1, nil
 	}
 	withArgs(t, "engram", "setup")
-	_, errOut, recovered = captureOutputAndRecover(t, func() { cmdSetup() })
+	_, errOut, recovered = captureOutputAndRecover(t, func() { cmdSetup(cfg) })
 	if _, ok := recovered.(exitCode); !ok || !strings.Contains(errOut, "Invalid choice") {
 		t.Fatalf("expected invalid choice exit, panic=%v stderr=%q", recovered, errOut)
 	}
@@ -3623,6 +3753,7 @@ func TestCmdSearchAndSaveDanglingFlags(t *testing.T) {
 func TestCmdSetupHyphenArgFallsBackToInteractive(t *testing.T) {
 	stubRuntimeHooks(t)
 	stubExitWithPanic(t)
+	cfg := testConfig(t)
 
 	setupSupportedAgents = func() []setup.Agent {
 		return []setup.Agent{{Name: "codex", Description: "Codex", InstallDir: "/tmp/codex"}}
@@ -3637,7 +3768,7 @@ func TestCmdSetupHyphenArgFallsBackToInteractive(t *testing.T) {
 	}
 
 	withArgs(t, "engram", "setup", "--not-an-agent")
-	stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdSetup() })
+	stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdSetup(cfg) })
 	if recovered != nil || stderr != "" {
 		t.Fatalf("setup interactive fallback failed: panic=%v stderr=%q", recovered, stderr)
 	}
@@ -3861,7 +3992,7 @@ func TestCommandErrorSeamsAndUncoveredBranches(t *testing.T) {
 		}
 
 		withArgs(t, "engram", "setup")
-		_, stderr, recovered := captureOutputAndRecover(t, func() { cmdSetup() })
+		_, stderr, recovered := captureOutputAndRecover(t, func() { cmdSetup(cfg) })
 		assertFatal(t, stderr, recovered, "forced setup error")
 	})
 }
@@ -3933,6 +4064,45 @@ func TestCmdMCP(t *testing.T) {
 		}
 	})
 
+	t.Run("cloud autosync env with token and server starts and stops manager", func(t *testing.T) {
+		t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "1")
+		t.Setenv("ENGRAM_CLOUD_TOKEN", "tok")
+		t.Setenv("ENGRAM_CLOUD_SERVER", "http://localhost:9999")
+
+		runStarted := make(chan struct{}, 1)
+		stopCalled := make(chan struct{}, 1)
+		oldNewAutosyncManager := newAutosyncManager
+		newAutosyncManager = func(_ *store.Store, _ autosync.CloudTransport, _ autosync.Config) startableAutosyncManager {
+			return &fakeStartableManager{
+				runFn:  func(context.Context) { runStarted <- struct{}{} },
+				stopFn: func() { stopCalled <- struct{}{} },
+			}
+		}
+		t.Cleanup(func() { newAutosyncManager = oldNewAutosyncManager })
+
+		serveMCP = func(_ *mcpserver.MCPServer, _ ...mcpserver.StdioOption) error {
+			select {
+			case <-runStarted:
+				return nil
+			case <-time.After(time.Second):
+				t.Fatal("expected MCP autosync manager to start before serving returned")
+				return nil
+			}
+		}
+
+		withArgs(t, "engram", "mcp")
+		_, _, recovered := captureOutputAndRecover(t, func() { cmdMCP(cfg) })
+		if recovered != nil {
+			t.Fatalf("expected clean run, got panic=%v", recovered)
+		}
+		select {
+		case <-stopCalled:
+			// expected
+		default:
+			t.Fatal("expected MCP autosync manager to stop after stdio server exits")
+		}
+	})
+
 	t.Run("storeNew failure calls fatal", func(t *testing.T) {
 		storeNew = func(cfg store.Config) (*store.Store, error) {
 			return nil, errors.New("db open failed")
@@ -3951,4 +4121,207 @@ func TestCmdMCP(t *testing.T) {
 		_, stderr, recovered := captureOutputAndRecover(t, func() { cmdMCP(cfg) })
 		assertFatal(t, stderr, recovered, "stdio failed")
 	})
+}
+
+func TestCmdMCPAutosyncPushesWriteDuringServe(t *testing.T) {
+	cfg := testConfig(t)
+	stubExitWithPanic(t)
+
+	var mu sync.Mutex
+	var pushed []autosync.MutationEntry
+	observationPushed := make(chan struct{})
+	var closeObservationPushed sync.Once
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		switch r.URL.Path {
+		case "/sync/mutations/push":
+			var req struct {
+				Entries []autosync.MutationEntry `json:"entries"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+
+			mu.Lock()
+			pushed = append(pushed, req.Entries...)
+			for _, entry := range req.Entries {
+				if entry.Project == "engram" && entry.Entity == store.SyncEntityObservation && strings.Contains(string(entry.Payload), "mcp autosync proof") {
+					closeObservationPushed.Do(func() { close(observationPushed) })
+				}
+			}
+			mu.Unlock()
+
+			seqs := make([]int64, len(req.Entries))
+			for i := range seqs {
+				seqs[i] = int64(i + 1)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"accepted_seqs": seqs})
+
+		case "/sync/mutations/pull":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"mutations":  []any{},
+				"has_more":   false,
+				"latest_seq": 0,
+			})
+
+		default:
+			http.Error(w, "not found", http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "1")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "test-token")
+	t.Setenv("ENGRAM_CLOUD_SERVER", srv.URL)
+
+	oldStoreNew := storeNew
+	oldNewMCPServerWithConfig := newMCPServerWithConfig
+	oldServeMCP := serveMCP
+	oldNewAutosyncManager := newAutosyncManager
+	storeNew = store.New
+	t.Cleanup(func() {
+		storeNew = oldStoreNew
+		newMCPServerWithConfig = oldNewMCPServerWithConfig
+		serveMCP = oldServeMCP
+		newAutosyncManager = oldNewAutosyncManager
+	})
+
+	var mcpStore *store.Store
+	newMCPServerWithConfig = func(s *store.Store, _ mcp.MCPConfig, _ map[string]bool) *mcpserver.MCPServer {
+		mcpStore = s
+		return mcpserver.NewMCPServer("test", "0")
+	}
+	newAutosyncManager = func(s *store.Store, transport autosync.CloudTransport, cfg autosync.Config) startableAutosyncManager {
+		cfg.DebounceDuration = 5 * time.Millisecond
+		cfg.PollInterval = 10 * time.Millisecond
+		cfg.BaseBackoff = 20 * time.Millisecond
+		cfg.MaxBackoff = 50 * time.Millisecond
+		return autosync.New(s, transport, cfg)
+	}
+	serveMCP = func(_ *mcpserver.MCPServer, _ ...mcpserver.StdioOption) error {
+		if mcpStore == nil {
+			return errors.New("MCP store was not wired into server construction")
+		}
+		if err := mcpStore.EnrollProject("engram"); err != nil {
+			return fmt.Errorf("enroll project: %w", err)
+		}
+		if err := mcpStore.CreateSession("mcp-autosync-session", "engram", t.TempDir()); err != nil {
+			return fmt.Errorf("create session: %w", err)
+		}
+		if _, err := mcpStore.AddObservation(store.AddObservationParams{
+			SessionID: "mcp-autosync-session",
+			Type:      "bugfix",
+			Title:     "mcp autosync proof",
+			Content:   "mcp autosync proof mutation created during stdio serving",
+			Project:   "engram",
+			Scope:     "project",
+		}); err != nil {
+			return fmt.Errorf("add observation: %w", err)
+		}
+
+		select {
+		case <-observationPushed:
+			return nil
+		case <-time.After(2 * time.Second):
+			return errors.New("timed out waiting for autosync to push MCP write")
+		}
+	}
+
+	withArgs(t, "engram", "mcp")
+	_, stderr, recovered := captureOutputAndRecover(t, func() { cmdMCP(cfg) })
+	if recovered != nil || stderr != "" {
+		t.Fatalf("expected MCP autosync proof to complete cleanly, panic=%v stderr=%q", recovered, stderr)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(pushed) == 0 {
+		t.Fatal("expected remote mutation endpoint to receive at least one pushed mutation")
+	}
+}
+
+func TestCmdMCPAutosyncPollTickerPullsDuringServe(t *testing.T) {
+	cfg := testConfig(t)
+	stubExitWithPanic(t)
+
+	pullCalled := make(chan struct{})
+	var closePullCalled sync.Once
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		switch r.URL.Path {
+		case "/sync/mutations/pull":
+			if r.Method != http.MethodGet {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			closePullCalled.Do(func() { close(pullCalled) })
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"mutations":  []any{},
+				"has_more":   false,
+				"latest_seq": 0,
+			})
+
+		case "/sync/mutations/push":
+			http.Error(w, "unexpected push without MCP write", http.StatusInternalServerError)
+
+		default:
+			http.Error(w, "not found", http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "1")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "test-token")
+	t.Setenv("ENGRAM_CLOUD_SERVER", srv.URL)
+
+	oldStoreNew := storeNew
+	oldNewMCPServerWithConfig := newMCPServerWithConfig
+	oldServeMCP := serveMCP
+	oldNewAutosyncManager := newAutosyncManager
+	storeNew = store.New
+	t.Cleanup(func() {
+		storeNew = oldStoreNew
+		newMCPServerWithConfig = oldNewMCPServerWithConfig
+		serveMCP = oldServeMCP
+		newAutosyncManager = oldNewAutosyncManager
+	})
+
+	newMCPServerWithConfig = func(s *store.Store, _ mcp.MCPConfig, _ map[string]bool) *mcpserver.MCPServer {
+		return mcpserver.NewMCPServer("test", "0")
+	}
+	newAutosyncManager = func(s *store.Store, transport autosync.CloudTransport, cfg autosync.Config) startableAutosyncManager {
+		cfg.DebounceDuration = time.Hour
+		cfg.PollInterval = 10 * time.Millisecond
+		cfg.BaseBackoff = 20 * time.Millisecond
+		cfg.MaxBackoff = 50 * time.Millisecond
+		return autosync.New(s, transport, cfg)
+	}
+	serveMCP = func(_ *mcpserver.MCPServer, _ ...mcpserver.StdioOption) error {
+		select {
+		case <-pullCalled:
+			return nil
+		case <-time.After(2 * time.Second):
+			return errors.New("timed out waiting for autosync poll ticker pull during MCP serve")
+		}
+	}
+
+	withArgs(t, "engram", "mcp")
+	_, stderr, recovered := captureOutputAndRecover(t, func() { cmdMCP(cfg) })
+	if recovered != nil || stderr != "" {
+		t.Fatalf("expected MCP autosync poll ticker proof to complete cleanly, panic=%v stderr=%q", recovered, stderr)
+	}
 }

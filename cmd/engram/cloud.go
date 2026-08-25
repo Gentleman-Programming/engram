@@ -84,21 +84,18 @@ var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
 		return nil, err
 	}
 	allowedProjects := normalizeAllowedProjects(cfg.AllowedProjects)
+	if err := backfillAllowedProjectMutationChunks(context.Background(), cs, allowedProjects); err != nil {
+		_ = cs.Close()
+		return nil, err
+	}
 	projectAuth := auth.NewProjectScopeAuthorizer(allowedProjects)
 	token := strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_TOKEN"))
 	cs.SetDashboardAllowedProjects(allowedProjects)
 	insecureNoAuth := token == "" && envBool("ENGRAM_CLOUD_INSECURE_NO_AUTH")
-	var authenticator cloudserver.Authenticator
-	if !insecureNoAuth {
-		authSvc, err := auth.NewService(cs, cfg.JWTSecret)
-		if err != nil {
-			_ = cs.Close()
-			return nil, err
-		}
-		authSvc.SetBearerToken(token)
-		authSvc.SetAllowedProjects(allowedProjects)
-		authSvc.SetDashboardSessionTokens([]string{cfg.AdminToken})
-		authenticator = authSvc
+	authenticator, managedHasher, err := buildRuntimeAuthenticator(cfg, cs, allowedProjects, token, insecureNoAuth)
+	if err != nil {
+		_ = cs.Close()
+		return nil, err
 	}
 	return &defaultCloudRuntime{
 		server: cloudserver.New(
@@ -107,11 +104,93 @@ var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
 			cfg.Port,
 			cloudserver.WithHost(cfg.BindHost),
 			cloudserver.WithProjectAuthorizer(projectAuth),
+			cloudserver.WithPrincipalProjectAuthorizer(cloudPrincipalProjectAuthorizer{store: cs}),
+			cloudserver.WithAdminIdentityStore(cs),
+			cloudserver.WithManagedTokenHasher(managedHasher),
+			cloudserver.WithPrincipalStateStore(cs),
 			cloudserver.WithDashboardAdminToken(cfg.AdminToken),
+			cloudserver.WithMaxPushBodyBytes(cfg.MaxPushBodyBytes),
 			cloudserver.WithSyncStatusProvider(cloudDashboardStatusProvider{store: cs, projects: allowedProjects}),
 		),
 		store: cs,
 	}, nil
+}
+
+// buildRuntimeAuthenticator constructs the cloudserver.Authenticator and
+// managed-token hasher newCloudRuntime wires into cloudserver.New. It is
+// extracted as its own function (rather than inlined in newCloudRuntime) so
+// its three startup-decision branches — insecureNoAuth, an invalid/too-short
+// dedicated token pepper, and no pepper configured at all (graceful
+// degradation) — can be unit-tested without a live Postgres connection: cs
+// may be nil here (auth.NewService accepts a nil *cloudstore.CloudStore, and
+// cloudstoreManagedTokenLookup{store: cs} is only ever invoked later, at
+// request time, not during construction), so tests can exercise this
+// function directly instead of only through the Postgres-gated
+// newCloudRuntime end-to-end test.
+//
+// Order note (deliberate deviation from design.md migration step 3's
+// "managed-first" wording): this function wires
+// auth.PrincipalResolver.ResolveBearerToken to check managed token storage
+// in addition to the legacy ENGRAM_CLOUD_TOKEN/ENGRAM_CLOUD_ADMIN env
+// credentials, but PrincipalResolver.ResolveBearerToken (foundation.go)
+// actually checks the legacy credentials FIRST, then falls back to managed
+// token storage — not "managed-first" as design.md's migration step 3
+// describes. This is safe today: legacy secrets are single, operator-chosen
+// strings and managed secrets are 32 bytes of crypto/rand, so a collision
+// between the two credential spaces is not practically possible. Checking
+// legacy first is also intentional, not an oversight: it avoids a
+// hash-and-DB-lookup round trip for every legacy sync request (the
+// hot path for existing deployments that have not opted into managed
+// tokens), deferring that cost only to bearer tokens that are not the
+// legacy secret. Do not reorder resolveLegacy after the managed-token check
+// in foundation.go without re-evaluating this hot-path tradeoff.
+func buildRuntimeAuthenticator(cfg cloud.Config, cs *cloudstore.CloudStore, allowedProjects []string, token string, insecureNoAuth bool) (cloudserver.Authenticator, *auth.ManagedTokenHasher, error) {
+	if insecureNoAuth {
+		return nil, nil, nil
+	}
+	authSvc, err := auth.NewService(cs, cfg.JWTSecret)
+	if err != nil {
+		return nil, nil, err
+	}
+	authSvc.SetBearerToken(token)
+	authSvc.SetAllowedProjects(allowedProjects)
+	authSvc.SetDashboardSessionTokens([]string{cfg.AdminToken})
+
+	resolverConfig := auth.ResolverConfig{
+		Legacy: auth.LegacyCredentials{SyncToken: token, AdminToken: cfg.AdminToken},
+	}
+	var managedHasher *auth.ManagedTokenHasher
+	pepper := strings.TrimSpace(cfg.TokenPepper)
+	if pepper != "" {
+		hasher, err := auth.NewManagedTokenHasher([]byte(pepper))
+		if err != nil {
+			return nil, nil, fmt.Errorf("cloud serve: invalid ENGRAM_CLOUD_TOKEN_PEPPER: %w", err)
+		}
+		managedHasher = hasher
+		resolverConfig.Hasher = hasher
+		resolverConfig.ManagedTokens = cloudstoreManagedTokenLookup{store: cs}
+	}
+	authenticator := &cloudRuntimeAuthenticator{
+		Service:  authSvc,
+		resolver: auth.NewPrincipalResolver(resolverConfig),
+	}
+	return authenticator, managedHasher, nil
+}
+
+func backfillAllowedProjectMutationChunks(ctx context.Context, cs *cloudstore.CloudStore, projects []string) error {
+	for _, project := range projects {
+		report, err := cs.BackfillMutationChunks(ctx, project, true)
+		if err != nil {
+			return fmt.Errorf("cloud repair materialize-mutations for project %q: %w", project, err)
+		}
+		if report.CandidateMutations > 0 || report.ChunksInserted > 0 {
+			fmt.Fprintf(os.Stderr,
+				"engram cloud repair materialize-mutations: project=%s candidates=%d already_materialized=%d chunks_planned=%d chunks_inserted=%d\n",
+				report.Project, report.CandidateMutations, report.AlreadyMaterialized, report.ChunksPlanned, report.ChunksInserted,
+			)
+		}
+	}
+	return nil
 }
 
 var runUpgradeBootstrap = func(s *store.Store, project string, cc *cloudConfig) (*engramsync.UpgradeBootstrapResult, error) {
@@ -130,12 +209,12 @@ type cloudConfig struct {
 func cmdCloud(cfg store.Config) {
 	if len(os.Args) < 3 {
 		fmt.Fprintln(os.Stderr, "usage: engram cloud <subcommand> [options]")
-		fmt.Fprintln(os.Stderr, "supported subcommands: status, enroll, config, serve, upgrade")
+		fmt.Fprintln(os.Stderr, "supported subcommands: status, enroll, config, serve, upgrade, repair, bootstrap")
 		exitFunc(1)
 	}
 	if os.Args[2] == "--help" || os.Args[2] == "-h" || os.Args[2] == "help" {
 		fmt.Println("usage: engram cloud <subcommand> [options]")
-		fmt.Println("supported subcommands: status, enroll, config, serve, upgrade")
+		fmt.Println("supported subcommands: status, enroll, config, serve, upgrade, repair, bootstrap")
 		return
 	}
 
@@ -150,11 +229,63 @@ func cmdCloud(cfg store.Config) {
 		cmdCloudServe()
 	case "upgrade":
 		cmdCloudUpgrade(cfg)
+	case "repair":
+		cmdCloudRepair()
+	case "bootstrap":
+		cmdCloudBootstrap()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown cloud command: %s\n", os.Args[2])
-		fmt.Fprintln(os.Stderr, "supported subcommands: status, enroll, config, serve, upgrade")
+		fmt.Fprintln(os.Stderr, "supported subcommands: status, enroll, config, serve, upgrade, repair, bootstrap")
 		exitFunc(1)
 	}
+}
+
+func cmdCloudRepair() {
+	if len(os.Args) < 4 || os.Args[3] == "--help" || os.Args[3] == "-h" || os.Args[3] == "help" {
+		fmt.Println("usage: engram cloud repair materialize-mutations --project <name> (--dry-run|--apply)")
+		fmt.Println("repairs existing cloud_mutations into compatible cloud_chunks without deleting remote data")
+		return
+	}
+	command := strings.TrimSpace(strings.ToLower(os.Args[3]))
+	if command != "materialize-mutations" {
+		fmt.Fprintf(os.Stderr, "unknown cloud repair command: %s\n", command)
+		fmt.Fprintln(os.Stderr, "supported cloud repair commands: materialize-mutations")
+		exitFunc(1)
+		return
+	}
+	project := parseCloudUpgradeProjectArg(os.Args[4:])
+	if project == "" {
+		fmt.Fprintln(os.Stderr, "usage: engram cloud repair materialize-mutations --project <name> (--dry-run|--apply)")
+		fmt.Fprintln(os.Stderr, "error: --project is required")
+		exitFunc(1)
+		return
+	}
+	dryRun := hasCloudUpgradeFlag(os.Args[4:], "--dry-run")
+	apply := hasCloudUpgradeFlag(os.Args[4:], "--apply")
+	if dryRun == apply {
+		fmt.Fprintln(os.Stderr, "usage: engram cloud repair materialize-mutations --project <name> (--dry-run|--apply)")
+		fmt.Fprintln(os.Stderr, "error: exactly one of --dry-run or --apply is required")
+		exitFunc(1)
+		return
+	}
+
+	cs, err := cloudstore.New(cloud.ConfigFromEnv())
+	if err != nil {
+		fatal(err)
+		return
+	}
+	defer cs.Close()
+	report, err := cs.BackfillMutationChunks(context.Background(), project, apply)
+	if err != nil {
+		fatal(err)
+		return
+	}
+	encoded, err := jsonMarshalIndent(report, "", "  ")
+	if err != nil {
+		fatal(err)
+		return
+	}
+	fmt.Println(string(encoded))
 }
 
 func cmdCloudUpgrade(cfg store.Config) {
@@ -552,17 +683,20 @@ func cmdCloudStatus(cfg store.Config) {
 			fmt.Println("Auth status: ready (insecure local-dev mode: ENGRAM_CLOUD_INSECURE_NO_AUTH=1)")
 			fmt.Println("Sync readiness: ready for explicit --project sync (project must be enrolled)")
 			fmt.Println("Warning: bearer auth is disabled in insecure mode; do not use in production")
+			printCloudStatusDaemonProbe()
 			printCloudStatusSyncDiagnostic(cfg)
 			return
 		}
 		fmt.Println("Auth status: token not configured (client token is optional at preflight)")
 		fmt.Println("Sync readiness: ready to attempt explicit --project sync (project must be enrolled)")
 		fmt.Println("Hint: if the remote server enforces bearer auth, set ENGRAM_CLOUD_TOKEN")
+		printCloudStatusDaemonProbe()
 		printCloudStatusSyncDiagnostic(cfg)
 		return
 	}
 	fmt.Println("Auth status: ready (token provided via runtime cloud config)")
 	fmt.Println("Sync readiness: ready for explicit --project sync (project must be enrolled)")
+	printCloudStatusDaemonProbe()
 	printCloudStatusSyncDiagnostic(cfg)
 }
 

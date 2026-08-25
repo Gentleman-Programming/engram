@@ -47,6 +47,9 @@ func TestRenderObservationListItem(t *testing.T) {
 		"content line 1\ncontent line 2",
 		"2026-01-01",
 		&project,
+		"active",
+		nil,
+		true,
 	)
 
 	if !strings.Contains(line, "▸") {
@@ -60,6 +63,15 @@ func TestRenderObservationListItem(t *testing.T) {
 	}
 	if !strings.Contains(line, "engram") {
 		t.Fatal("project label should be rendered when project is set")
+	}
+	if !strings.Contains(line, "pinned") {
+		t.Fatal("pinned item should include pin indicator")
+	}
+
+	reviewAfter := "2026-01-01 00:00:00"
+	staleLine := m.renderObservationListItem(0, 43, "decision", "Needs review", "content", "2026-01-01", &project, "needs_review", &reviewAfter, false)
+	if !strings.Contains(staleLine, "needs_review") {
+		t.Fatal("stale item should include needs_review badge")
 	}
 }
 
@@ -228,11 +240,20 @@ func TestViewObservationDetailTimelineSessionsAndSessionDetail(t *testing.T) {
 		ToolName:  &tool,
 		Project:   &project,
 		Content:   strings.Repeat("line\n", 20),
+		Pinned:    true,
 	}
+	reviewAfter := "2027-02-03 04:05:06"
+	m.SelectedObservation.ReviewAfter = &reviewAfter
 	m.DetailScroll = 99
 	out = m.viewObservationDetail()
 	if !strings.Contains(out, "Observation #42") || !strings.Contains(out, "Content") {
 		t.Fatal("detail view should render metadata and content section")
+	}
+	if !strings.Contains(out, "State:") || !strings.Contains(out, "active") || !strings.Contains(out, "Review:") || !strings.Contains(out, "2027-02-03") {
+		t.Fatal("detail view should render lifecycle state and review date")
+	}
+	if !strings.Contains(out, "Pinned:") || !strings.Contains(out, "true") {
+		t.Fatal("detail view should render pinned state")
 	}
 	if !strings.Contains(out, "line") {
 		t.Fatal("detail view should render content lines")
@@ -310,6 +331,32 @@ func TestViewObservationDetailTimelineSessionsAndSessionDetail(t *testing.T) {
 	}
 }
 
+func TestViewSessionsDeletePrompt(t *testing.T) {
+	m := New(nil, "")
+	m.Screen = ScreenSessions
+	m.Sessions = []store.SessionSummary{{ID: "session-1", Project: "engram", StartedAt: "2026-01-01"}}
+	m.SessionDeleteState = SessionDeleteStatePrompt
+	m.SessionDeleteID = "session-1"
+	m.SessionDeleteProject = "engram"
+
+	out := m.viewSessions()
+	if !strings.Contains(out, "Confirm Session Delete") {
+		t.Fatal("delete prompt should render heading")
+	}
+	if !strings.Contains(out, "session-1") || !strings.Contains(out, "engram") {
+		t.Fatal("delete prompt should render selected session context")
+	}
+	if !strings.Contains(out, "[y] Delete") || !strings.Contains(out, "[n] Cancel") || !strings.Contains(out, "[esc] Cancel") {
+		t.Fatal("delete prompt should render y/n/esc options")
+	}
+
+	m.SessionDeleteState = SessionDeleteStateDeleting
+	out = m.viewSessions()
+	if !strings.Contains(out, "Deleting Session") || !strings.Contains(out, "session-1") {
+		t.Fatal("deleting state should render selected session context")
+	}
+}
+
 func TestViewRouterCoversAllScreens(t *testing.T) {
 	m := New(nil, "")
 	m.Stats = &store.Stats{}
@@ -337,6 +384,7 @@ func TestViewRouterCoversAllScreens(t *testing.T) {
 		{screen: ScreenSessions, want: "Sessions"},
 		{screen: ScreenSessionDetail, want: "Session:"},
 		{screen: ScreenSetup, want: "Setup"},
+		{screen: ScreenCloudSettings, want: "Cloud sync settings"},
 	}
 
 	for _, tt := range tests {

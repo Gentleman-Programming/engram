@@ -31,6 +31,61 @@ func TestConfigFromEnvAllowedProjects(t *testing.T) {
 	}
 }
 
+func TestConfigFromEnvMaxPushBodyBytes(t *testing.T) {
+	t.Run("default is 8 MiB", func(t *testing.T) {
+		t.Setenv("ENGRAM_CLOUD_MAX_PUSH_BYTES", "")
+		cfg := ConfigFromEnv()
+		if cfg.MaxPushBodyBytes != DefaultMaxPushBodyBytes {
+			t.Fatalf("expected default max push bytes %d, got %d", DefaultMaxPushBodyBytes, cfg.MaxPushBodyBytes)
+		}
+	})
+
+	t.Run("env overrides with positive integer", func(t *testing.T) {
+		t.Setenv("ENGRAM_CLOUD_MAX_PUSH_BYTES", "10485760")
+		cfg := ConfigFromEnv()
+		if cfg.MaxPushBodyBytes != 10485760 {
+			t.Fatalf("expected max push bytes override 10485760, got %d", cfg.MaxPushBodyBytes)
+		}
+	})
+
+	for _, value := range []string{"0", "-1", "not-a-number"} {
+		t.Run("invalid value keeps default "+value, func(t *testing.T) {
+			t.Setenv("ENGRAM_CLOUD_MAX_PUSH_BYTES", value)
+			cfg := ConfigFromEnv()
+			if cfg.MaxPushBodyBytes != DefaultMaxPushBodyBytes {
+				t.Fatalf("expected default max push bytes for %q, got %d", value, cfg.MaxPushBodyBytes)
+			}
+		})
+	}
+}
+
+func TestConfigFromEnvTokenPepper(t *testing.T) {
+	t.Run("default is empty", func(t *testing.T) {
+		t.Setenv("ENGRAM_CLOUD_TOKEN_PEPPER", "")
+		cfg := ConfigFromEnv()
+		if cfg.TokenPepper != "" {
+			t.Fatalf("expected empty token pepper by default, got %q", cfg.TokenPepper)
+		}
+	})
+
+	t.Run("env overrides token pepper", func(t *testing.T) {
+		t.Setenv("ENGRAM_CLOUD_TOKEN_PEPPER", "dedicated-cloud-token-pepper")
+		cfg := ConfigFromEnv()
+		if cfg.TokenPepper != "dedicated-cloud-token-pepper" {
+			t.Fatalf("expected token pepper override, got %q", cfg.TokenPepper)
+		}
+	})
+
+	t.Run("token pepper is independent from JWT secret", func(t *testing.T) {
+		t.Setenv("ENGRAM_JWT_SECRET", "session-signing-secret")
+		t.Setenv("ENGRAM_CLOUD_TOKEN_PEPPER", "dedicated-cloud-token-pepper")
+		cfg := ConfigFromEnv()
+		if cfg.TokenPepper == cfg.JWTSecret {
+			t.Fatalf("expected token pepper %q to differ from JWT secret %q", cfg.TokenPepper, cfg.JWTSecret)
+		}
+	})
+}
+
 func TestIsDefaultJWTSecret(t *testing.T) {
 	t.Run("default secret returns true", func(t *testing.T) {
 		if !IsDefaultJWTSecret(DefaultJWTSecret) {

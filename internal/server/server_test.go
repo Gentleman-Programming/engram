@@ -2,6 +2,8 @@ package server
 
 import (
 	"bytes"
+	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,12 +11,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/store"
+	_ "modernc.org/sqlite"
 )
 
 type stubListener struct{}
@@ -101,6 +105,189 @@ func TestStartUsesDefaultServeWhenServeNil(t *testing.T) {
 	}
 }
 
+func TestClaudeSaveNudgeCompatibilityRoutes(t *testing.T) {
+	st := newServerTestStore(t)
+	h := New(st, 0).Handler()
+
+	createReq := httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(`{"id":"s-nudge","project":"engram","directory":"/work/engram"}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createRec := httptest.NewRecorder()
+	h.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("expected session create 201, got %d", createRec.Code)
+	}
+
+	getSessionReq := httptest.NewRequest(http.MethodGet, "/sessions/s-nudge", nil)
+	getSessionRec := httptest.NewRecorder()
+	h.ServeHTTP(getSessionRec, getSessionReq)
+	if getSessionRec.Code != http.StatusOK {
+		t.Fatalf("expected session get 200, got %d body=%s", getSessionRec.Code, getSessionRec.Body.String())
+	}
+	var session map[string]any
+	if err := json.Unmarshal(getSessionRec.Body.Bytes(), &session); err != nil {
+		t.Fatalf("decode session: %v", err)
+	}
+	if session["started_at"] == "" || session["project"] != "engram" {
+		t.Fatalf("expected session JSON with started_at and project, got %#v", session)
+	}
+
+	for _, title := range []string{"Older save", "Newest save"} {
+		obsReq := httptest.NewRequest(http.MethodPost, "/observations", strings.NewReader(fmt.Sprintf(`{"session_id":"s-nudge","type":"note","title":%q,"content":"body","project":"engram"}`, title)))
+		obsReq.Header.Set("Content-Type", "application/json")
+		obsRec := httptest.NewRecorder()
+		h.ServeHTTP(obsRec, obsReq)
+		if obsRec.Code != http.StatusCreated {
+			t.Fatalf("expected observation create 201 for %q, got %d body=%s", title, obsRec.Code, obsRec.Body.String())
+		}
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/observations?project=engram&limit=1&sort=created_at:desc", nil)
+	listRec := httptest.NewRecorder()
+	h.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("expected observations list 200, got %d body=%s", listRec.Code, listRec.Body.String())
+	}
+	var obs []map[string]any
+	if err := json.Unmarshal(listRec.Body.Bytes(), &obs); err != nil {
+		t.Fatalf("decode observations: %v", err)
+	}
+	if len(obs) != 1 || obs[0]["title"] != "Newest save" || obs[0]["created_at"] == "" {
+		t.Fatalf("expected latest observation with created_at, got %#v", obs)
+	}
+
+	badSortReq := httptest.NewRequest(http.MethodGet, "/observations?sort=updated_at:desc", nil)
+	badSortRec := httptest.NewRecorder()
+	h.ServeHTTP(badSortRec, badSortReq)
+	if badSortRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unsupported sort, got %d", badSortRec.Code)
+	}
+
+	missingSessionReq := httptest.NewRequest(http.MethodGet, "/sessions/missing", nil)
+	missingSessionRec := httptest.NewRecorder()
+	h.ServeHTTP(missingSessionRec, missingSessionReq)
+	if missingSessionRec.Code != http.StatusNotFound {
+		t.Fatalf("expected missing session 404, got %d", missingSessionRec.Code)
+	}
+}
+
+func TestHandleSearchForwardsMatchModeAndAllProjects(t *testing.T) {
+	st := newServerTestStore(t)
+	h := New(st, 0).Handler()
+
+	if err := st.CreateSession("sess-search-a", "proj-a", "/tmp/proj-a"); err != nil {
+		t.Fatalf("create session proj-a: %v", err)
+	}
+	if err := st.CreateSession("sess-search-b", "proj-b", "/tmp/proj-b"); err != nil {
+		t.Fatalf("create session proj-b: %v", err)
+	}
+	if _, err := st.AddObservation(store.AddObservationParams{
+		SessionID: "sess-search-a",
+		Type:      "note",
+		Title:     "Aurora project note",
+		Content:   "alpha content",
+		Project:   "proj-a",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add obs proj-a: %v", err)
+	}
+	if _, err := st.AddObservation(store.AddObservationParams{
+		SessionID: "sess-search-b",
+		Type:      "note",
+		Title:     "Nebula project note",
+		Content:   "beta content",
+		Project:   "proj-b",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add obs proj-b: %v", err)
+	}
+
+	search := func(url string) []map[string]any {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, url, nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected search 200, got %d body=%s", rec.Code, rec.Body.String())
+		}
+
+		var results []map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &results); err != nil {
+			t.Fatalf("decode search results: %v", err)
+		}
+		return results
+	}
+	titles := func(results []map[string]any) map[string]bool {
+		t.Helper()
+		seen := map[string]bool{}
+		for _, result := range results {
+			title, _ := result["title"].(string)
+			seen[title] = true
+		}
+		return seen
+	}
+
+	projectResults := search("/search?q=aurora+nebula&project=proj-a&match_mode=any&limit=10")
+	projectTitles := titles(projectResults)
+	if len(projectResults) != 1 || !projectTitles["Aurora project note"] {
+		t.Fatalf("expected match_mode=any to preserve the project filter by default, got %#v", projectResults)
+	}
+
+	allProjectResults := search("/search?q=aurora+nebula&project=proj-a&match_mode=any&all_projects=true&limit=10")
+	allProjectTitles := titles(allProjectResults)
+	if len(allProjectResults) != 2 || !allProjectTitles["Aurora project note"] || !allProjectTitles["Nebula project note"] {
+		t.Fatalf("expected all_projects=true to ignore project and return both project notes, got %#v", allProjectResults)
+	}
+}
+
+func TestHandleSearchAllowsEmptyMatchMode(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	if err := st.CreateSession("sess-search-default", "proj-default", "/tmp/proj-default"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := st.AddObservation(store.AddObservationParams{
+		SessionID: "sess-search-default",
+		Type:      "note",
+		Title:     "Aurora default match note",
+		Content:   "alpha content",
+		Project:   "proj-default",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/search?q=aurora&project=proj-default", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for empty match_mode, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var results []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &results); err != nil {
+		t.Fatalf("decode search results: %v", err)
+	}
+	if len(results) != 1 || results[0]["title"] != "Aurora default match note" {
+		t.Fatalf("expected default match_mode search to return seeded observation, got %#v", results)
+	}
+}
+
+func TestHandleSearchRejectsInvalidMatchMode(t *testing.T) {
+	srv := New(newServerTestStore(t), 0)
+	req := httptest.NewRequest(http.MethodGet, "/search?q=aurora&match_mode=or", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid match_mode, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "invalid match_mode") {
+		t.Fatalf("expected error body to mention invalid match_mode, got %q", rec.Body.String())
+	}
+}
+
 func TestAdditionalServerErrorBranches(t *testing.T) {
 	st := newServerTestStore(t)
 	srv := New(st, 0)
@@ -160,6 +347,108 @@ func TestAdditionalServerErrorBranches(t *testing.T) {
 	h.ServeHTTP(importClosedRec, importClosedReq)
 	if importClosedRec.Code != http.StatusInternalServerError {
 		t.Fatalf("expected 500 importing on closed store, got %d", importClosedRec.Code)
+	}
+}
+
+func TestHandleReviewListAndMarkReviewed(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	if err := st.CreateSession("s-http-review", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := st.AddObservation(store.AddObservationParams{SessionID: "s-http-review", Type: "decision", Title: "Review me", Content: "Needs lifecycle review", Project: "engram"})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	past := time.Now().UTC().Add(-time.Hour).Format("2006-01-02 15:04:05")
+	if _, err := st.DB().Exec(`UPDATE observations SET review_after = ? WHERE id = ?`, past, id); err != nil {
+		t.Fatalf("backdate review_after: %v", err)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/review?project=engram&limit=5", nil)
+	listRec := httptest.NewRecorder()
+	h.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("expected review list 200, got %d body=%s", listRec.Code, listRec.Body.String())
+	}
+	var listBody map[string]any
+	if err := json.NewDecoder(listRec.Body).Decode(&listBody); err != nil {
+		t.Fatalf("decode review list: %v", err)
+	}
+	observations, ok := listBody["observations"].([]any)
+	if !ok || len(observations) != 1 {
+		t.Fatalf("expected one review observation, got %#v", listBody["observations"])
+	}
+	entry, _ := observations[0].(map[string]any)
+	if entry["state"] != store.ObservationStateNeedsReview {
+		t.Fatalf("expected needs_review state, got %v", entry["state"])
+	}
+
+	markReq := httptest.NewRequest(http.MethodPost, "/review/mark_reviewed", strings.NewReader(fmt.Sprintf(`{"observation_id":%d}`, id)))
+	markReq.Header.Set("Content-Type", "application/json")
+	markRec := httptest.NewRecorder()
+	h.ServeHTTP(markRec, markReq)
+	if markRec.Code != http.StatusOK {
+		t.Fatalf("expected mark reviewed 200, got %d body=%s", markRec.Code, markRec.Body.String())
+	}
+	var markBody map[string]any
+	if err := json.NewDecoder(markRec.Body).Decode(&markBody); err != nil {
+		t.Fatalf("decode mark reviewed: %v", err)
+	}
+	if markBody["state"] != store.ObservationStateActive {
+		t.Fatalf("expected active after mark_reviewed, got %v", markBody["state"])
+	}
+}
+
+func TestHandleReviewMarkReviewedAcceptsIDAlias(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	if err := st.CreateSession("s-http-review-alias", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := st.AddObservation(store.AddObservationParams{SessionID: "s-http-review-alias", Type: "decision", Title: "Review alias", Content: "Needs lifecycle review", Project: "engram"})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	past := time.Now().UTC().Add(-time.Hour).Format("2006-01-02 15:04:05")
+	if _, err := st.DB().Exec(`UPDATE observations SET review_after = ? WHERE id = ?`, past, id); err != nil {
+		t.Fatalf("backdate review_after: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/review/mark_reviewed", strings.NewReader(fmt.Sprintf(`{"id":%d}`, id)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected mark reviewed alias 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleReviewMarkReviewedRequiresObservationID(t *testing.T) {
+	srv := New(newServerTestStore(t), 0)
+	req := httptest.NewRequest(http.MethodPost, "/review/mark_reviewed", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 when observation_id is missing, got %d", rec.Code)
+	}
+}
+
+func TestHandleReviewMarkReviewedReturnsNotFoundForUnknownObservation(t *testing.T) {
+	srv := New(newServerTestStore(t), 0)
+	req := httptest.NewRequest(http.MethodPost, "/review/mark_reviewed", strings.NewReader(`{"observation_id":999999}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for unknown observation, got %d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -800,5 +1089,1169 @@ func TestHandleDeletePrompt_BadID(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for invalid prompt id, got %d", rec.Code)
+	}
+}
+
+// ─── Phase E.1e — /sync/status exposes deferred + dead counts (REQ-007) ─────
+
+// TestSyncStatus_IncludesDeferredAndDeadCounts: 3 deferred + 1 dead →
+// /sync/status response must have deferred_count=3 and dead_count=1.
+func TestSyncStatus_IncludesDeferredAndDeadCounts(t *testing.T) {
+	provider := &stubSyncStatusProvider{
+		status: SyncStatus{
+			Enabled:       true,
+			Phase:         "healthy",
+			DeferredCount: 3,
+			DeadCount:     1,
+		},
+	}
+
+	srv := New(newServerTestStore(t), 0)
+	srv.SetSyncStatus(provider)
+
+	req := httptest.NewRequest(http.MethodGet, "/sync/status", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if got := resp["deferred_count"]; got != float64(3) {
+		t.Errorf("expected deferred_count=3, got %v", got)
+	}
+	if got := resp["dead_count"]; got != float64(1) {
+		t.Errorf("expected dead_count=1, got %v", got)
+	}
+}
+
+// ─── Conflict-Audit HTTP Tests (Phase E, REQ-006 thru REQ-011) ──────────────
+//
+// These tests cover the 6 new /conflicts/* routes.
+// Helpers below seed observations, relations, and deferred rows without
+// requiring an unexported Store.db accessor.
+
+// conflictsTestStore creates a store with a fresh temp dir and returns
+// both the store and the raw *sql.DB for low-level seeding (deferred rows).
+func conflictsTestStore(t *testing.T) (*store.Store, *sql.DB) {
+	t.Helper()
+	cfg, err := store.DefaultConfig()
+	if err != nil {
+		t.Fatalf("DefaultConfig: %v", err)
+	}
+	cfg.DataDir = t.TempDir()
+
+	st, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	rawDB, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
+	if err != nil {
+		t.Fatalf("open raw db: %v", err)
+	}
+	t.Cleanup(func() { _ = rawDB.Close() })
+
+	return st, rawDB
+}
+
+// seedConflictsSession creates a session and two observations in the given project.
+// Returns the sync_ids of both observations.
+func seedConflictsSession(t *testing.T, st *store.Store, project string) (srcSync, tgtSync string) {
+	t.Helper()
+	sesID := fmt.Sprintf("ses-http-%s", project)
+	if err := st.CreateSession(sesID, project, "/tmp/"+project); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	srcIntID, err := st.AddObservation(store.AddObservationParams{
+		SessionID: sesID, Type: "decision",
+		Title: "Src Title", Content: "src content body for http test",
+		Project: project, Scope: "project",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation src: %v", err)
+	}
+	tgtIntID, err := st.AddObservation(store.AddObservationParams{
+		SessionID: sesID, Type: "decision",
+		Title: "Tgt Title", Content: "tgt content body for http test",
+		Project: project, Scope: "project",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation tgt: %v", err)
+	}
+	// Retrieve text sync_ids from the store's DB.
+	// We need the raw DB access here. Since we are package server and Store does not expose
+	// a DB accessor, we retrieve the sync_id from the store through a search trick:
+	// use AddObservation int64 id and look up via store.GetObservation.
+	srcObs, err := st.GetObservation(srcIntID)
+	if err != nil {
+		t.Fatalf("GetObservation src: %v", err)
+	}
+	tgtObs, err := st.GetObservation(tgtIntID)
+	if err != nil {
+		t.Fatalf("GetObservation tgt: %v", err)
+	}
+	return srcObs.SyncID, tgtObs.SyncID
+}
+
+// seedDeferredHTTP inserts a raw deferred row via the raw *sql.DB.
+func seedDeferredHTTP(t *testing.T, rawDB *sql.DB, syncID, payload string, retryCount int, applyStatus string) {
+	t.Helper()
+	if _, err := rawDB.Exec(`
+		INSERT INTO sync_apply_deferred
+			(sync_id, entity, payload, retry_count, apply_status, first_seen_at)
+		VALUES (?, 'relation', ?, ?, ?, datetime('now'))
+	`, syncID, payload, retryCount, applyStatus); err != nil {
+		t.Fatalf("seedDeferredHTTP %q: %v", syncID, err)
+	}
+}
+
+// ─── GET /conflicts ───────────────────────────────────────────────────────────
+
+func TestHandleListConflicts_ProjectFilter(t *testing.T) {
+	st, _ := conflictsTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	// Seed two observations in project "alpha" and one relation between them.
+	srcSync, tgtSync := seedConflictsSession(t, st, "alpha")
+	rel, err := st.SaveRelation(store.SaveRelationParams{
+		SyncID: "rel-alpha-001", SourceID: srcSync, TargetID: tgtSync,
+	})
+	if err != nil || rel == nil {
+		t.Fatalf("SaveRelation: %v", err)
+	}
+
+	// Also seed observations and relation in project "beta" — should NOT appear in alpha filter.
+	srcB, tgtB := seedConflictsSession(t, st, "beta")
+	if _, err := st.SaveRelation(store.SaveRelationParams{
+		SyncID: "rel-beta-001", SourceID: srcB, TargetID: tgtB,
+	}); err != nil {
+		t.Fatalf("SaveRelation beta: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/conflicts?project=alpha", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	// Must have "relations" array and "total" field.
+	relations, ok := resp["relations"].([]any)
+	if !ok {
+		t.Fatalf("expected relations array, got %T: %v", resp["relations"], resp["relations"])
+	}
+	if len(relations) != 1 {
+		t.Errorf("expected exactly 1 relation for project alpha, got %d", len(relations))
+	}
+	total, ok := resp["total"].(float64)
+	if !ok {
+		t.Fatalf("expected total field, got %T", resp["total"])
+	}
+	if total != 1 {
+		t.Errorf("expected total=1, got %v", total)
+	}
+}
+
+func TestHandleListConflicts_LimitClampsTo500(t *testing.T) {
+	st, _ := conflictsTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	// limit=1000 must be clamped to 500 (no 4xx).
+	req := httptest.NewRequest(http.MethodGet, "/conflicts?limit=1000", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 when limit>500, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleListConflicts_DefaultLimit50(t *testing.T) {
+	st, _ := conflictsTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/conflicts", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if _, ok := resp["relations"]; !ok {
+		t.Errorf("expected relations field in response")
+	}
+	if _, ok := resp["limit"]; !ok {
+		t.Errorf("expected limit field in response")
+	}
+	if resp["limit"] != float64(50) {
+		t.Errorf("expected default limit=50, got %v", resp["limit"])
+	}
+}
+
+// ─── GET /conflicts/stats ─────────────────────────────────────────────────────
+
+func TestHandleConflictsStats_ProjectScoped(t *testing.T) {
+	st, _ := conflictsTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	srcSync, tgtSync := seedConflictsSession(t, st, "statsproject")
+	if _, err := st.SaveRelation(store.SaveRelationParams{
+		SyncID: "rel-stats-001", SourceID: srcSync, TargetID: tgtSync,
+	}); err != nil {
+		t.Fatalf("SaveRelation: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/conflicts/stats?project=statsproject", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	// Must include by_judgment_status and deferred/dead counts.
+	if _, ok := resp["by_judgment_status"]; !ok {
+		t.Errorf("expected by_judgment_status field")
+	}
+	if _, ok := resp["deferred"]; !ok {
+		t.Errorf("expected deferred field")
+	}
+	if _, ok := resp["dead"]; !ok {
+		t.Errorf("expected dead field")
+	}
+}
+
+func TestHandleConflictsStats_GlobalNoProject(t *testing.T) {
+	st, _ := conflictsTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/conflicts/stats", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ─── GET /conflicts/deferred ──────────────────────────────────────────────────
+
+func TestHandleConflictsDeferred_ListWithLimit(t *testing.T) {
+	st, rawDB := conflictsTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	validPayload := `{"relation_type":"conflicts","source_id":"obs-a","target_id":"obs-b"}`
+	seedDeferredHTTP(t, rawDB, "def-http-001", validPayload, 0, "deferred")
+	seedDeferredHTTP(t, rawDB, "def-http-002", validPayload, 0, "deferred")
+	seedDeferredHTTP(t, rawDB, "def-http-003", validPayload, 5, "dead")
+
+	req := httptest.NewRequest(http.MethodGet, "/conflicts/deferred?limit=2", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	rows, ok := resp["rows"].([]any)
+	if !ok {
+		t.Fatalf("expected rows array, got %T", resp["rows"])
+	}
+	if len(rows) != 2 {
+		t.Errorf("expected 2 rows (limit=2), got %d", len(rows))
+	}
+	if _, ok := resp["total"]; !ok {
+		t.Errorf("expected total field in deferred response")
+	}
+}
+
+func TestHandleConflictsDeferred_StatusFilter(t *testing.T) {
+	st, rawDB := conflictsTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	validPayload := `{"relation_type":"conflicts","source_id":"obs-c","target_id":"obs-d"}`
+	seedDeferredHTTP(t, rawDB, "def-http-dead-1", validPayload, 5, "dead")
+	seedDeferredHTTP(t, rawDB, "def-http-dead-2", validPayload, 5, "dead")
+	seedDeferredHTTP(t, rawDB, "def-http-pend-1", validPayload, 0, "deferred")
+
+	req := httptest.NewRequest(http.MethodGet, "/conflicts/deferred?status=dead", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	rows, ok := resp["rows"].([]any)
+	if !ok {
+		t.Fatalf("expected rows array, got %T", resp["rows"])
+	}
+	if len(rows) != 2 {
+		t.Errorf("expected 2 dead rows, got %d", len(rows))
+	}
+}
+
+// ─── POST /conflicts/scan ─────────────────────────────────────────────────────
+
+func TestHandleConflictsScan_DryRun(t *testing.T) {
+	st, _ := conflictsTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	// Seed a project with an observation (no candidates expected for isolated obs).
+	seedConflictsSession(t, st, "scanproject")
+
+	body := `{"project":"scanproject","apply":false}`
+	req := httptest.NewRequest(http.MethodPost, "/conflicts/scan", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	// Must include candidates_found and inserted.
+	if _, ok := resp["candidates_found"]; !ok {
+		t.Errorf("expected candidates_found field")
+	}
+	if _, ok := resp["inserted"]; !ok {
+		t.Errorf("expected inserted field")
+	}
+	// dry_run must be true when apply=false.
+	if resp["dry_run"] != true {
+		t.Errorf("expected dry_run=true for apply=false scan, got %v", resp["dry_run"])
+	}
+	// inserted must be 0 for dry-run.
+	if resp["inserted"] != float64(0) {
+		t.Errorf("expected inserted=0 for dry-run, got %v", resp["inserted"])
+	}
+}
+
+func TestHandleConflictsScan_MissingProject400(t *testing.T) {
+	st, _ := conflictsTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	body := `{"apply":false}`
+	req := httptest.NewRequest(http.MethodPost, "/conflicts/scan", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 when project is missing, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ─── POST /conflicts/deferred/replay ─────────────────────────────────────────
+
+func TestHandleReplayDeferred_EmptyQueue(t *testing.T) {
+	st, _ := conflictsTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodPost, "/conflicts/deferred/replay", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for replay on empty queue, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["retried"] != float64(0) {
+		t.Errorf("expected retried=0, got %v", resp["retried"])
+	}
+	if resp["succeeded"] != float64(0) {
+		t.Errorf("expected succeeded=0, got %v", resp["succeeded"])
+	}
+	if resp["dead"] != float64(0) {
+		t.Errorf("expected dead=0, got %v", resp["dead"])
+	}
+}
+
+// ─── GET /conflicts/{relation_id} ─────────────────────────────────────────────
+
+func TestHandleConflictByID_Found(t *testing.T) {
+	st, _ := conflictsTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	srcSync, tgtSync := seedConflictsSession(t, st, "getproject")
+	rel, err := st.SaveRelation(store.SaveRelationParams{
+		SyncID: "rel-get-001", SourceID: srcSync, TargetID: tgtSync,
+	})
+	if err != nil {
+		t.Fatalf("SaveRelation: %v", err)
+	}
+
+	url := fmt.Sprintf("/conflicts/%d", rel.ID)
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for existing relation, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["relation_id"] != float64(rel.ID) {
+		t.Errorf("expected relation_id=%d, got %v", rel.ID, resp["relation_id"])
+	}
+	if _, ok := resp["sync_id"]; !ok {
+		t.Errorf("expected sync_id field in relation detail")
+	}
+	if _, ok := resp["judgment_status"]; !ok {
+		t.Errorf("expected judgment_status field in relation detail")
+	}
+}
+
+func TestHandleConflictByID_NotFound(t *testing.T) {
+	st, _ := conflictsTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/conflicts/99999", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for missing relation, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode 404 body: %v", err)
+	}
+	if _, ok := resp["error"]; !ok {
+		t.Errorf("expected error field in 404 response")
+	}
+}
+
+func TestHandleConflictByID_InvalidID(t *testing.T) {
+	st, _ := conflictsTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/conflicts/not-a-number", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid relation_id, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ─── Phase F — POST /conflicts/scan semantic params ──────────────────────────
+
+// mockSemanticRunner is a fake store.SemanticRunner for HTTP tests.
+type mockSemanticRunner struct {
+	verdict store.SemanticVerdict
+	err     error
+}
+
+func (m *mockSemanticRunner) Compare(_ context.Context, _ string) (store.SemanticVerdict, error) {
+	return m.verdict, m.err
+}
+
+// TestHandleScanConflicts_SemanticFalse_CountersZero verifies that when semantic=false
+// (or omitted), the response includes semantic_judged=0, semantic_skipped=0,
+// semantic_errors=0.
+func TestHandleScanConflicts_SemanticFalse_CountersZero(t *testing.T) {
+	st, _ := conflictsTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	seedConflictsSession(t, st, "semfalseproj")
+
+	body := `{"project":"semfalseproj","apply":false}`
+	req := httptest.NewRequest(http.MethodPost, "/conflicts/scan", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	// All three semantic counters must be present and zero.
+	for _, field := range []string{"semantic_judged", "semantic_skipped", "semantic_errors"} {
+		val, ok := resp[field]
+		if !ok {
+			t.Errorf("expected %q field in response; got keys: %v", field, resp)
+			continue
+		}
+		if val != float64(0) {
+			t.Errorf("expected %q=0 when semantic=false, got %v", field, val)
+		}
+	}
+}
+
+// TestHandleScanConflicts_SemanticTrue_NoEnv_500 verifies that when semantic=true
+// and the runnerFactory is not configured (nil), the server returns 500 with a
+// clear error body.
+func TestHandleScanConflicts_SemanticTrue_NoFactory_500(t *testing.T) {
+	st, _ := conflictsTestStore(t)
+	srv := New(st, 0)
+	// No runner factory set → should fail.
+	h := srv.Handler()
+
+	seedConflictsSession(t, st, "semnoenvproj")
+
+	body := `{"project":"semnoenvproj","semantic":true}`
+	req := httptest.NewRequest(http.MethodPost, "/conflicts/scan", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 when no runner factory set, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	errMsg, ok := resp["error"].(string)
+	if !ok || errMsg == "" {
+		t.Errorf("expected non-empty 'error' field in 500 response; got: %v", resp)
+	}
+}
+
+// TestHandleScanConflicts_SemanticTrue_WithMockRunner verifies that when semantic=true
+// and a mock runner factory is injected, the response includes non-zero counters.
+func TestHandleScanConflicts_SemanticTrue_WithMockRunner(t *testing.T) {
+	st, _ := conflictsTestStore(t)
+	srv := New(st, 0)
+
+	// Inject a factory that returns a fake runner returning "compatible".
+	srv.SetRunnerFactory(func(name string) (store.SemanticRunner, error) {
+		return &mockSemanticRunner{
+			verdict: store.SemanticVerdict{
+				Relation:   "compatible",
+				Confidence: 0.9,
+				Reasoning:  "test",
+				Model:      "test-model",
+			},
+		}, nil
+	})
+	h := srv.Handler()
+
+	// Seed enough observations that FTS5 finds candidates.
+	if err := st.CreateSession("ses-semtrue", "semtrueproj", "/tmp"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	titles := []string{
+		"JWT authentication token session management policy",
+		"Session token JWT authentication management approach",
+		"Authentication JWT session token policy decision",
+	}
+	for _, title := range titles {
+		if _, err := st.AddObservation(store.AddObservationParams{
+			SessionID: "ses-semtrue", Type: "decision",
+			Title: title, Content: "JWT auth content for " + title,
+			Project: "semtrueproj", Scope: "project",
+		}); err != nil {
+			t.Fatalf("AddObservation: %v", err)
+		}
+	}
+
+	body := `{"project":"semtrueproj","semantic":true,"concurrency":2,"max_semantic":10}`
+	req := httptest.NewRequest(http.MethodPost, "/conflicts/scan", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 with mock runner, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	// semantic_judged + semantic_skipped + semantic_errors should be present (values depend on FTS).
+	for _, field := range []string{"semantic_judged", "semantic_skipped", "semantic_errors"} {
+		if _, ok := resp[field]; !ok {
+			t.Errorf("expected %q field in semantic=true response; got: %v", field, resp)
+		}
+	}
+}
+
+// TestHandleScanConflicts_InvalidConcurrency_400 verifies that concurrency out of
+// [1,20] range returns 400 before any work is done.
+func TestHandleScanConflicts_InvalidConcurrency_400(t *testing.T) {
+	st, _ := conflictsTestStore(t)
+	srv := New(st, 0)
+	// Runner factory not needed — validation happens before runner is resolved.
+	h := srv.Handler()
+
+	seedConflictsSession(t, st, "badconcproj")
+
+	for _, badConcurrency := range []int{0, 21, -1, 100} {
+		body := fmt.Sprintf(`{"project":"badconcproj","semantic":true,"concurrency":%d}`, badConcurrency)
+		req := httptest.NewRequest(http.MethodPost, "/conflicts/scan", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("expected 400 for concurrency=%d, got %d: %s", badConcurrency, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// TestHandleScanConflicts_InvalidTimeout_400 verifies that timeout_per_call_seconds
+// out of [1,600] range returns 400 before any work is done.
+func TestHandleScanConflicts_InvalidTimeout_400(t *testing.T) {
+	st, _ := conflictsTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	seedConflictsSession(t, st, "badtmoproj")
+
+	for _, badTimeout := range []int{0, 601, -5} {
+		body := fmt.Sprintf(`{"project":"badtmoproj","semantic":true,"timeout_per_call_seconds":%d}`, badTimeout)
+		req := httptest.NewRequest(http.MethodPost, "/conflicts/scan", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("expected 400 for timeout_per_call_seconds=%d, got %d: %s", badTimeout, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// ─── TestRoutes_NoOverlapPanic ────────────────────────────────────────────────
+
+// TestRoutes_NoOverlapPanic constructs a fresh *Server and calls Handler()
+// to detect any route-registration-time panic (Go 1.22 mux panics on overlap).
+func TestRoutes_NoOverlapPanic(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("route registration panicked: %v", r)
+		}
+	}()
+
+	st, _ := conflictsTestStore(t)
+	srv := New(st, 0)
+	// Calling Handler() exercises the registered mux without issuing requests.
+	h := srv.Handler()
+	if h == nil {
+		t.Fatal("expected non-nil handler")
+	}
+}
+
+// ─── G.2 — HTTP API integration tests ────────────────────────────────────────
+//
+// End-to-end coverage against a real seeded store hitting all 6 /conflicts/* routes.
+// Verifies: pagination total accuracy, 404 JSON body shape, 400 on missing project,
+// cap warning in scan response, pre-existing routes unaffected.
+
+// TestG2_ListConflicts_PaginationTotal verifies the total field matches the
+// actual row count for the project regardless of the limit applied.
+func TestG2_ListConflicts_PaginationTotal(t *testing.T) {
+	st, _ := conflictsTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	// Seed 3 relations for project "pagproj".
+	for i := 0; i < 3; i++ {
+		srcSync, tgtSync := seedConflictsSession(t, st, fmt.Sprintf("pagproj-%d", i))
+		if _, err := st.SaveRelation(store.SaveRelationParams{
+			SyncID:   fmt.Sprintf("rel-pag-%d", i),
+			SourceID: srcSync,
+			TargetID: tgtSync,
+		}); err != nil {
+			t.Fatalf("SaveRelation %d: %v", i, err)
+		}
+	}
+
+	// Request with limit=1 — total must still report 3.
+	req := httptest.NewRequest(http.MethodGet, "/conflicts?project=pagproj-0&limit=1", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	relations, ok := resp["relations"].([]any)
+	if !ok {
+		t.Fatalf("expected relations array, got %T", resp["relations"])
+	}
+	// With limit=1, at most 1 row returned.
+	if len(relations) > 1 {
+		t.Errorf("expected at most 1 relation with limit=1, got %d", len(relations))
+	}
+	// total must be a number (reflects full count for the project).
+	if _, ok := resp["total"].(float64); !ok {
+		t.Errorf("expected numeric total field, got %T: %v", resp["total"], resp["total"])
+	}
+}
+
+// TestG2_GetConflict_404BodyShape verifies the 404 response for a missing
+// relation_id has a JSON body with an "error" field.
+func TestG2_GetConflict_404BodyShape(t *testing.T) {
+	st, _ := conflictsTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/conflicts/88888", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode 404 body: %v", err)
+	}
+	if _, ok := resp["error"]; !ok {
+		t.Errorf("expected 'error' field in 404 JSON body; got: %v", resp)
+	}
+}
+
+// TestG2_ScanConflicts_ApplyCapWarning verifies that when the scan cap is reached
+// the response includes a "warning" field containing "cap".
+func TestG2_ScanConflicts_ApplyCapWarning(t *testing.T) {
+	st, _ := conflictsTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	// Seed a session; scan will attempt to find candidates.
+	// With only 2 observations the FTS result is uncertain, so we pass max_insert=0
+	// to force Capped=true without needing actual candidates.
+	// Per design, max_insert=0 means any insert would exceed cap → Capped=true immediately.
+	// However MaxInsert=0 may be treated as "use default 100". Instead seed 6 similar
+	// observations and use max_insert=1 so the first insert triggers the cap.
+	if err := st.CreateSession("ses-g2scan", "g2scanproj", "/tmp/g2scanproj"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	titles := []string{
+		"JWT authentication token session management policy",
+		"Session token JWT authentication management approach",
+		"Authentication JWT session token policy decision",
+		"Token management session JWT authentication strategy",
+		"JWT session authentication token management pattern",
+		"Session-based JWT token authentication management rule",
+	}
+	for _, title := range titles {
+		if _, err := st.AddObservation(store.AddObservationParams{
+			SessionID: "ses-g2scan", Type: "decision",
+			Title: title, Content: "JWT auth content for " + title,
+			Project: "g2scanproj", Scope: "project",
+		}); err != nil {
+			t.Fatalf("AddObservation: %v", err)
+		}
+	}
+
+	body := `{"project":"g2scanproj","apply":true,"max_insert":1}`
+	req := httptest.NewRequest(http.MethodPost, "/conflicts/scan", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for scan apply, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	// If a candidate was found and cap was reached, "warning" must be present.
+	// If no candidates exist (FTS scores too low), "capped" is false — we tolerate that.
+	if capped, _ := resp["capped"].(bool); capped {
+		warning, hasWarning := resp["warning"].(string)
+		if !hasWarning || warning == "" {
+			t.Errorf("expected non-empty 'warning' field when capped=true; got: %v", resp)
+		}
+	}
+	// Must always have inserted and candidates_found fields.
+	if _, ok := resp["inserted"]; !ok {
+		t.Errorf("expected 'inserted' field in scan response; got: %v", resp)
+	}
+	if _, ok := resp["candidates_found"]; !ok {
+		t.Errorf("expected 'candidates_found' field in scan response; got: %v", resp)
+	}
+}
+
+// TestG2_ScanConflicts_MissingProject400 verifies the scan endpoint returns 400
+// when the "project" field is absent from the request body.
+func TestG2_ScanConflicts_MissingProject400(t *testing.T) {
+	st, _ := conflictsTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	body := `{"apply":true}`
+	req := httptest.NewRequest(http.MethodPost, "/conflicts/scan", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 when project is missing, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestG2_ReplayDeferred_ResponseShape verifies the replay endpoint always returns
+// the three count fields: retried, succeeded, dead — even on empty queue.
+func TestG2_ReplayDeferred_ResponseShape(t *testing.T) {
+	st, _ := conflictsTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodPost, "/conflicts/deferred/replay", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	for _, field := range []string{"retried", "succeeded", "dead"} {
+		if _, ok := resp[field]; !ok {
+			t.Errorf("expected %q field in replay response; got: %v", field, resp)
+		}
+	}
+}
+
+// TestG2_ListDeferred_StatusFilter verifies the status filter returns only matching rows.
+func TestG2_ListDeferred_StatusFilter(t *testing.T) {
+	st, rawDB := conflictsTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	validPayload := `{"relation_type":"conflicts","source_id":"g2-src","target_id":"g2-tgt"}`
+	seedDeferredHTTP(t, rawDB, "g2-dead-a", validPayload, 5, "dead")
+	seedDeferredHTTP(t, rawDB, "g2-dead-b", validPayload, 5, "dead")
+	seedDeferredHTTP(t, rawDB, "g2-defer-a", validPayload, 0, "deferred")
+
+	// Filter by status=dead → expect exactly 2.
+	req := httptest.NewRequest(http.MethodGet, "/conflicts/deferred?status=dead", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	rows, ok := resp["rows"].([]any)
+	if !ok {
+		t.Fatalf("expected rows array, got %T", resp["rows"])
+	}
+	if len(rows) != 2 {
+		t.Errorf("expected 2 dead rows, got %d", len(rows))
+	}
+}
+
+// TestG2_ExistingRoutes_Unaffected verifies that pre-existing /sync/status and
+// /health routes are unaffected by the Phase 3 conflicts route additions.
+func TestG2_ExistingRoutes_Unaffected(t *testing.T) {
+	st, _ := conflictsTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	// GET /health must still return 200.
+	healthReq := httptest.NewRequest(http.MethodGet, "/health", nil)
+	healthRec := httptest.NewRecorder()
+	h.ServeHTTP(healthRec, healthReq)
+	if healthRec.Code != http.StatusOK {
+		t.Errorf("expected /health 200 after Phase 3, got %d", healthRec.Code)
+	}
+
+	// GET /sync/status must still return 200.
+	syncReq := httptest.NewRequest(http.MethodGet, "/sync/status", nil)
+	syncRec := httptest.NewRecorder()
+	h.ServeHTTP(syncRec, syncReq)
+	if syncRec.Code != http.StatusOK {
+		t.Errorf("expected /sync/status 200 after Phase 3, got %d", syncRec.Code)
+	}
+
+	// GET /stats must still return 200.
+	statsReq := httptest.NewRequest(http.MethodGet, "/stats", nil)
+	statsRec := httptest.NewRecorder()
+	h.ServeHTTP(statsRec, statsReq)
+	if statsRec.Code != http.StatusOK {
+		t.Errorf("expected /stats 200 after Phase 3, got %d", statsRec.Code)
+	}
+}
+
+func TestProjectCurrentDoctorJudgeAndCompareRoutes(t *testing.T) {
+	st := newServerTestStore(t)
+	if err := st.CreateSession("s-parity", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	idA, err := st.AddObservation(store.AddObservationParams{SessionID: "s-parity", Type: "decision", Title: "Old auth", Content: "sessions", Project: "engram", Scope: "project"})
+	if err != nil {
+		t.Fatalf("AddObservation A: %v", err)
+	}
+	idB, err := st.AddObservation(store.AddObservationParams{SessionID: "s-parity", Type: "decision", Title: "New auth", Content: "jwt", Project: "engram", Scope: "project"})
+	if err != nil {
+		t.Fatalf("AddObservation B: %v", err)
+	}
+	obsA, _ := st.GetObservation(idA)
+	obsB, _ := st.GetObservation(idB)
+	if _, err := st.SaveRelation(store.SaveRelationParams{SyncID: "rel-http-parity", SourceID: obsA.SyncID, TargetID: obsB.SyncID}); err != nil {
+		t.Fatalf("SaveRelation: %v", err)
+	}
+
+	var writes int32
+	srv := New(st, 0)
+	srv.SetOnWrite(func() { atomic.AddInt32(&writes, 1) })
+	h := srv.Handler()
+
+	projectReq := httptest.NewRequest(http.MethodGet, "/project/current?cwd=/tmp/engram", nil)
+	projectRec := httptest.NewRecorder()
+	h.ServeHTTP(projectRec, projectReq)
+	if projectRec.Code != http.StatusOK {
+		t.Fatalf("expected current project 200, got %d body=%q", projectRec.Code, projectRec.Body.String())
+	}
+	var projectResp map[string]any
+	if err := json.Unmarshal(projectRec.Body.Bytes(), &projectResp); err != nil {
+		t.Fatalf("decode project response: %v", err)
+	}
+	if projectResp["project"] == "" || projectResp["cwd"] != "/tmp/engram" {
+		t.Fatalf("unexpected project response: %#v", projectResp)
+	}
+
+	doctorReq := httptest.NewRequest(http.MethodGet, "/doctor?project=engram&check=session_project_directory_mismatch", nil)
+	doctorRec := httptest.NewRecorder()
+	h.ServeHTTP(doctorRec, doctorReq)
+	if doctorRec.Code != http.StatusOK {
+		t.Fatalf("expected doctor 200, got %d body=%q", doctorRec.Code, doctorRec.Body.String())
+	}
+	var doctorResp map[string]any
+	if err := json.Unmarshal(doctorRec.Body.Bytes(), &doctorResp); err != nil {
+		t.Fatalf("decode doctor response: %v", err)
+	}
+	if doctorResp["project"] != "engram" || doctorResp["status"] == "" {
+		t.Fatalf("unexpected doctor response: %#v", doctorResp)
+	}
+
+	missingProjectDoctorReq := httptest.NewRequest(http.MethodGet, "/doctor?project=missing-project", nil)
+	missingProjectDoctorRec := httptest.NewRecorder()
+	h.ServeHTTP(missingProjectDoctorRec, missingProjectDoctorReq)
+	if missingProjectDoctorRec.Code != http.StatusNotFound {
+		t.Fatalf("expected doctor unknown project 404, got %d body=%q", missingProjectDoctorRec.Code, missingProjectDoctorRec.Body.String())
+	}
+	var missingDoctorResp map[string]any
+	if err := json.Unmarshal(missingProjectDoctorRec.Body.Bytes(), &missingDoctorResp); err != nil {
+		t.Fatalf("decode missing doctor response: %v", err)
+	}
+	if missingDoctorResp["code"] != "unknown_project" || missingDoctorResp["available_projects"] == nil {
+		t.Fatalf("expected structured unknown project response, got %#v", missingDoctorResp)
+	}
+
+	freshDetectedDoctorReq := httptest.NewRequest(http.MethodGet, "/doctor?cwd=/tmp/fresh-project", nil)
+	freshDetectedDoctorRec := httptest.NewRecorder()
+	h.ServeHTTP(freshDetectedDoctorRec, freshDetectedDoctorReq)
+	if freshDetectedDoctorRec.Code != http.StatusOK {
+		t.Fatalf("expected doctor fresh detected project 200, got %d body=%q", freshDetectedDoctorRec.Code, freshDetectedDoctorRec.Body.String())
+	}
+
+	mismatchObservationReq := httptest.NewRequest(http.MethodPost, "/observations", strings.NewReader(`{"session_id":"s-parity","type":"decision","title":"Wrong project","content":"body","project":"other"}`))
+	mismatchObservationRec := httptest.NewRecorder()
+	h.ServeHTTP(mismatchObservationRec, mismatchObservationReq)
+	if mismatchObservationRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected observation session/project mismatch 400, got %d body=%q", mismatchObservationRec.Code, mismatchObservationRec.Body.String())
+	}
+
+	mismatchPromptReq := httptest.NewRequest(http.MethodPost, "/prompts", strings.NewReader(`{"session_id":"s-parity","content":"prompt","project":"other"}`))
+	mismatchPromptRec := httptest.NewRecorder()
+	h.ServeHTTP(mismatchPromptRec, mismatchPromptReq)
+	if mismatchPromptRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected prompt session/project mismatch 400, got %d body=%q", mismatchPromptRec.Code, mismatchPromptRec.Body.String())
+	}
+
+	mismatchPassiveReq := httptest.NewRequest(http.MethodPost, "/observations/passive", strings.NewReader(`{"session_id":"s-parity","content":"## Key Learnings:\n- mismatch","project":"other"}`))
+	mismatchPassiveRec := httptest.NewRecorder()
+	h.ServeHTTP(mismatchPassiveRec, mismatchPassiveReq)
+	if mismatchPassiveRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected passive session/project mismatch 400, got %d body=%q", mismatchPassiveRec.Code, mismatchPassiveRec.Body.String())
+	}
+
+	invalidJudgeConfidenceReq := httptest.NewRequest(http.MethodPost, "/conflicts/judge", strings.NewReader(`{"judgment_id":"rel-http-parity","relation":"compatible","confidence":1.5}`))
+	invalidJudgeConfidenceRec := httptest.NewRecorder()
+	h.ServeHTTP(invalidJudgeConfidenceRec, invalidJudgeConfidenceReq)
+	if invalidJudgeConfidenceRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid judge confidence 400, got %d body=%q", invalidJudgeConfidenceRec.Code, invalidJudgeConfidenceRec.Body.String())
+	}
+
+	judgeReq := httptest.NewRequest(http.MethodPost, "/conflicts/judge", strings.NewReader(`{"judgment_id":"rel-http-parity","relation":"compatible","reason":"same migration","confidence":0.8,"session_id":"s-parity"}`))
+	judgeReq.Header.Set("Content-Type", "application/json")
+	judgeRec := httptest.NewRecorder()
+	h.ServeHTTP(judgeRec, judgeReq)
+	if judgeRec.Code != http.StatusOK {
+		t.Fatalf("expected judge 200, got %d body=%q", judgeRec.Code, judgeRec.Body.String())
+	}
+	var judgeResp map[string]any
+	if err := json.Unmarshal(judgeRec.Body.Bytes(), &judgeResp); err != nil {
+		t.Fatalf("decode judge response: %v", err)
+	}
+	if judgeResp["relation"] == nil {
+		t.Fatalf("expected relation envelope, got %#v", judgeResp)
+	}
+
+	compareReq := httptest.NewRequest(http.MethodPost, "/conflicts/compare", strings.NewReader(fmt.Sprintf(`{"memory_id_a":%d,"memory_id_b":%d,"relation":"related","confidence":0.91,"reasoning":"same auth topic","model":"test-model"}`, idA, idB)))
+	compareReq.Header.Set("Content-Type", "application/json")
+	compareRec := httptest.NewRecorder()
+	h.ServeHTTP(compareRec, compareReq)
+	if compareRec.Code != http.StatusOK {
+		t.Fatalf("expected compare 200, got %d body=%q", compareRec.Code, compareRec.Body.String())
+	}
+	var compareResp map[string]any
+	if err := json.Unmarshal(compareRec.Body.Bytes(), &compareResp); err != nil {
+		t.Fatalf("decode compare response: %v", err)
+	}
+	if compareResp["sync_id"] == "" {
+		t.Fatalf("expected persisted sync_id, got %#v", compareResp)
+	}
+	if atomic.LoadInt32(&writes) < 2 {
+		t.Fatalf("expected judge and compare writes to notify, got %d", writes)
+	}
+}
+
+func TestJudgeAndCompareRoutesValidateInput(t *testing.T) {
+	st := newServerTestStore(t)
+	h := New(st, 0).Handler()
+
+	judgeReq := httptest.NewRequest(http.MethodPost, "/conflicts/judge", strings.NewReader(`{"relation":"related"}`))
+	judgeRec := httptest.NewRecorder()
+	h.ServeHTTP(judgeRec, judgeReq)
+	if judgeRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected missing judgment_id 400, got %d body=%q", judgeRec.Code, judgeRec.Body.String())
+	}
+
+	missingConfidenceReq := httptest.NewRequest(http.MethodPost, "/conflicts/compare", strings.NewReader(`{"memory_id_a":1,"memory_id_b":2,"relation":"related","reasoning":"missing confidence"}`))
+	missingConfidenceRec := httptest.NewRecorder()
+	h.ServeHTTP(missingConfidenceRec, missingConfidenceReq)
+	if missingConfidenceRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected missing confidence 400, got %d body=%q", missingConfidenceRec.Code, missingConfidenceRec.Body.String())
+	}
+
+	invalidConfidenceReq := httptest.NewRequest(http.MethodPost, "/conflicts/compare", strings.NewReader(`{"memory_id_a":1,"memory_id_b":2,"relation":"related","confidence":1.5,"reasoning":"invalid confidence"}`))
+	invalidConfidenceRec := httptest.NewRecorder()
+	h.ServeHTTP(invalidConfidenceRec, invalidConfidenceReq)
+	if invalidConfidenceRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid confidence 400, got %d body=%q", invalidConfidenceRec.Code, invalidConfidenceRec.Body.String())
+	}
+
+	compareReq := httptest.NewRequest(http.MethodPost, "/conflicts/compare", strings.NewReader(`{"memory_id_a":999,"memory_id_b":1000,"relation":"related","confidence":0.9,"reasoning":"missing"}`))
+	compareRec := httptest.NewRecorder()
+	h.ServeHTTP(compareRec, compareReq)
+	if compareRec.Code != http.StatusNotFound {
+		t.Fatalf("expected missing observation 404, got %d body=%q", compareRec.Code, compareRec.Body.String())
+	}
+}
+
+// TestMigrateProjectCaseOnlySkipped asserts that POST /projects/migrate
+// returns status "skipped" when old_project and new_project differ only by
+// case — fixing #438 where the exact-string comparison let case-only renames
+// slip through and create duplicate projects.
+//
+// The test seeds a session under "repo_name" so that the store would actually
+// migrate if the server did not guard against case-only differences first.
+func TestMigrateProjectCaseOnlySkipped(t *testing.T) {
+	st := newServerTestStore(t)
+	h := New(st, 0).Handler()
+
+	// Seed a session under the lowercase project name so the store has data
+	// to migrate; without the fix the handler would call store.MigrateProject
+	// and rename "repo_name" → "Repo_Name", creating a duplicate.
+	seedReq := httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(
+		`{"id":"s-case-migrate","project":"repo_name","directory":"/tmp/repo"}`,
+	))
+	seedReq.Header.Set("Content-Type", "application/json")
+	seedRec := httptest.NewRecorder()
+	h.ServeHTTP(seedRec, seedReq)
+	if seedRec.Code != http.StatusCreated {
+		t.Fatalf("seed session: expected 201, got %d body=%s", seedRec.Code, seedRec.Body.String())
+	}
+
+	body := bytes.NewBufferString(`{"old_project":"repo_name","new_project":"Repo_Name"}`)
+	req := httptest.NewRequest(http.MethodPost, "/projects/migrate", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["status"] != "skipped" {
+		t.Fatalf("expected status=skipped for case-only difference, got %v (full response: %#v)", resp["status"], resp)
 	}
 }

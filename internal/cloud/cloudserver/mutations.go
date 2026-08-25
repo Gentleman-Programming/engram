@@ -3,6 +3,7 @@ package cloudserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -57,14 +58,20 @@ const defaultPullLimit = 100
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
 // handleMutationPush handles POST /sync/mutations/push.
-// REQ-200: bearer auth, body limit 8 MiB, batch size cap 100, pause gate (409 on sync_enabled=false).
+// REQ-200: bearer auth, configurable body limit defaulting to 8 MiB, batch size cap 100, pause gate (409 on sync_enabled=false).
 // BC2: project authorization is enforced for every distinct project in the batch.
 // BW9: 409 pause response uses writeActionableError for structured error envelope.
 func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request) {
+	maxPushBodyBytes := s.pushBodyLimit()
 	r.Body = http.MaxBytesReader(w, r.Body, maxPushBodyBytes)
 
 	var req mutationPushEnvelope
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			writeActionableError(w, http.StatusRequestEntityTooLarge, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodePayloadTooLarge, fmt.Sprintf("push payload too large (max %d bytes)", maxPushBodyBytes))
+			return
+		}
 		http.Error(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
 		return
 	}
@@ -113,7 +120,7 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 			continue
 		}
 		seen[project] = struct{}{}
-		if !s.authorizeProjectScope(w, project) {
+		if !s.authorizeProjectScope(r.Context(), w, project) {
 			// authorizeProjectScope already wrote the 403 response.
 			return
 		}
@@ -169,6 +176,29 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
+	// REQ-006 / REQ-008: Validate each entry's payload before storage.
+	// Relation entries are strictly validated (all required fields).
+	// Legacy entities (session, observation, prompt) use the lenient floor only.
+	// Any failure rejects the ENTIRE batch (atomic — no partial inserts).
+	var invalid []map[string]any
+	for i, entry := range req.Entries {
+		if field, ok := validateMutationEntry(entry); !ok {
+			invalid = append(invalid, map[string]any{
+				"index":  i,
+				"field":  field,
+				"entity": entry.Entity,
+			})
+		}
+	}
+	if len(invalid) > 0 {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{
+			"error":       "invalid relation payload",
+			"reason_code": "validation_error",
+			"invalid":     invalid,
+		})
+		return
+	}
+
 	acceptedSeqs, err := ms.InsertMutationBatch(r.Context(), req.Entries)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("insert mutations: %v", err), http.StatusInternalServerError)
@@ -212,7 +242,27 @@ func (s *CloudServer) handleMutationPull(w http.ResponseWriter, r *http.Request)
 	// EnrolledProjectsProvider, default to an empty allowedProjects slice
 	// (returns nothing) rather than nil (which returns everything).
 	var allowedProjects []string
-	if s.projectAuth != nil {
+	legacyProjectAuth := s.projectAuth != nil
+	if s.principalProject != nil {
+		principal, ok := PrincipalFromContext(r.Context())
+		if !ok {
+			writeActionableError(w, http.StatusForbidden, constants.UpgradeErrorClassPolicy, constants.ReasonPolicyForbidden, "forbidden: principal is required")
+			return
+		}
+		if usesManagedProjectGrants(principal) {
+			projects, err := s.principalProject.EnrolledProjectsForPrincipal(r.Context(), principal)
+			if err != nil {
+				writeActionableError(w, http.StatusForbidden, constants.UpgradeErrorClassPolicy, constants.ReasonPolicyForbidden, "forbidden: project is not allowed")
+				return
+			}
+			if projects == nil {
+				projects = []string{}
+			}
+			allowedProjects = projects
+			legacyProjectAuth = false
+		}
+	}
+	if legacyProjectAuth {
 		if ep, ok := s.projectAuth.(EnrolledProjectsProvider); ok {
 			allowedProjects = ep.EnrolledProjects()
 		} else {
@@ -262,6 +312,64 @@ func (s *CloudServer) handleMutationPull(w http.ResponseWriter, r *http.Request)
 		"project_source": project.SourceRequestBody,
 		"project_path":   "",
 	})
+}
+
+// ─── REQ-006 / REQ-008: Per-entity payload validation ────────────────────────
+
+// relationRequiredFields lists the fields that MUST be present and non-empty
+// in every relation mutation payload (REQ-006). This list is the stable
+// validation contract — Phase 3 MUST NOT remove or rename these fields without
+// a wire-format version bump.
+var relationRequiredFields = []string{
+	"sync_id",
+	"source_id",
+	"target_id",
+	"relation",
+	"judgment_status",
+	"marked_by_actor",
+	"marked_by_kind",
+}
+
+// validateRelationPayload checks that all required relation fields are present
+// and non-empty in the decoded payload map.
+// Returns (missingField, false) when any required field is absent or empty,
+// or ("", true) when all required fields are present.
+func validateRelationPayload(payload json.RawMessage) (string, bool) {
+	var fields map[string]any
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		// Malformed JSON: treat sync_id as missing (first required field).
+		return "sync_id", false
+	}
+	for _, field := range relationRequiredFields {
+		v, ok := fields[field]
+		if !ok {
+			return field, false
+		}
+		s, isStr := v.(string)
+		if !isStr || strings.TrimSpace(s) == "" {
+			return field, false
+		}
+	}
+	return "", true
+}
+
+// validateLegacyPayload is a no-op for legacy entities (session, observation,
+// prompt). REQ-008: these entities have no new required payload fields — their
+// push/pull behavior is UNCHANGED from before Phase 2. Any tightening of legacy
+// payload validation is a breaking change and must not be done here.
+func validateLegacyPayload(_ string, _ json.RawMessage) (string, bool) {
+	return "", true
+}
+
+// validateMutationEntry dispatches to the correct validator for the entry's
+// entity type. Returns (missingField, false) on validation failure.
+func validateMutationEntry(entry MutationEntry) (string, bool) {
+	switch entry.Entity {
+	case "relation":
+		return validateRelationPayload(entry.Payload)
+	default:
+		return validateLegacyPayload(entry.Entity, entry.Payload)
+	}
 }
 
 // ─── Cloudstore mutation queries ──────────────────────────────────────────────

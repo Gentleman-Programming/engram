@@ -7,9 +7,10 @@ package project
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -19,6 +20,10 @@ import (
 // multiple git repositories and we cannot auto-select one.
 var ErrAmbiguousProject = errors.New("ambiguous project: multiple git repos found in cwd")
 
+// ErrInvalidConfig is returned when .engram/config.json exists but cannot be
+// used as a project write lock.
+var ErrInvalidConfig = errors.New("invalid .engram/config.json")
+
 // Source constants describe how the project name was resolved.
 const (
 	SourceGitRemote        = "git_remote"        // derived from git remote origin URL
@@ -27,7 +32,14 @@ const (
 	SourceDirBasename      = "dir_basename"      // fallback: directory basename
 	SourceAmbiguous        = "ambiguous"         // cwd contains multiple git repos (Case 4)
 	SourceExplicitOverride = "explicit_override" // JR2-2: caller explicitly supplied a project name
-	SourceRequestBody      = "request_body"      // REQ-414: project came from the request body (server-side, no filesystem path)
+	SourceSessionProject   = "session"           // caller supplied a session_id with an existing project
+	// SourceUserSelectedAfterAmbiguousProject means an MCP write initially hit
+	// ErrAmbiguousProject and the caller provided an explicit user-selected
+	// project from the ambiguity result's available_projects list.
+	SourceUserSelectedAfterAmbiguousProject = "user_selected_after_ambiguous_project"
+	SourceRequestBody                       = "request_body" // REQ-414: project came from the request body (server-side, no filesystem path)
+	SourceConfig                            = "config"       // derived from .engram/config.json project_name
+	SourceAllProjects                       = "all_projects" // caller asked for cross-project search (no single project resolved)
 )
 
 // noiseSet lists directory names that are skipped during child-repo scanning.
@@ -62,6 +74,7 @@ type DetectionResult struct {
 
 // DetectProjectFull resolves the project for dir using a 5-case algorithm:
 //
+//  0. config     — nearest .engram/config.json inside the enclosing repo/root
 //  1. git_remote — cwd is a git root with a remote → derive name from remote URL
 //  2. git_root   — cwd is inside a git repo → use repo root basename
 //  3. git_child  — cwd has exactly one git-repo child → auto-promote it
@@ -74,6 +87,10 @@ func DetectProjectFull(dir string) DetectionResult {
 	// Guard against arg injection.
 	if strings.HasPrefix(dir, "-") {
 		dir = "./" + dir
+	}
+
+	if res, ok := detectFromConfig(dir); ok {
+		return res
 	}
 
 	// ── Case 1: git_remote ──────────────────────────────────────────────
@@ -154,12 +171,114 @@ basename:
 	}
 }
 
+type configFile struct {
+	ProjectName string `json:"project_name"`
+}
+
+func detectFromConfig(dir string) (DetectionResult, bool) {
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		absDir = dir
+	}
+	absDir = canonicalizePath(absDir)
+
+	// Project config is a project/repo lock, not a global ancestor setting. When
+	// cwd is inside git, walk upward only within the enclosing repository so a
+	// nearest subproject .engram/config.json can override the repo root without
+	// letting ~/.engram/config.json leak into nested workspaces under $HOME.
+	if gitRoot := canonicalizePath(detectGitRootDir(absDir)); gitRoot != "" {
+		return readNearestConfigAtOrBelow(absDir, gitRoot)
+	}
+
+	// Outside git, accept only the current directory's config. Do not walk to
+	// arbitrary parents such as $HOME.
+	return readConfigAt(absDir)
+}
+
+func readNearestConfigAtOrBelow(startDir, stopDir string) (DetectionResult, bool) {
+	current := filepath.Clean(startDir)
+	stop := filepath.Clean(stopDir)
+
+	for {
+		if res, ok := readConfigAt(current); ok {
+			return res, true
+		}
+		if current == stop {
+			break
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+
+	return DetectionResult{}, false
+}
+
+func readConfigAt(projectDir string) (DetectionResult, bool) {
+	configPath := filepath.Join(projectDir, ".engram", "config.json")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return DetectionResult{}, false
+		}
+		return invalidConfigResult(projectDir, fmt.Errorf("read %s: %w", configPath, err)), true
+	}
+
+	var cfg configFile
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return invalidConfigResult(projectDir, fmt.Errorf("parse %s: %w", configPath, err)), true
+	}
+	projectName, err := normalizeConfigProjectName(cfg.ProjectName)
+	if err != nil {
+		return invalidConfigResult(projectDir, err), true
+	}
+	return DetectionResult{Project: projectName, Source: SourceConfig, Path: projectDir}, true
+}
+
+func invalidConfigResult(path string, err error) DetectionResult {
+	return DetectionResult{
+		Project: "",
+		Source:  SourceConfig,
+		Path:    path,
+		Error:   fmt.Errorf("%w: %v", ErrInvalidConfig, err),
+	}
+}
+
+func canonicalizePath(path string) string {
+	if path == "" {
+		return ""
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	return filepath.Clean(resolved)
+}
+
+func normalizeConfigProjectName(projectName string) (string, error) {
+	trimmed := strings.TrimSpace(projectName)
+	if trimmed == "" {
+		return "", fmt.Errorf("%w: project_name is required", ErrInvalidConfig)
+	}
+	if strings.ContainsAny(trimmed, `/\\`) {
+		return "", fmt.Errorf("%w: project_name must be a name, not a path", ErrInvalidConfig)
+	}
+	for _, r := range trimmed {
+		if r < 0x20 || r == 0x7f {
+			return "", fmt.Errorf("%w: project_name contains control characters", ErrInvalidConfig)
+		}
+	}
+	return normalize(trimmed), nil
+}
+
 // detectGitRootDir returns the git repository root for dir, or "" if not in a repo.
 func detectGitRootDir(dir string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--show-toplevel")
+	cmd := newProjectCommandContext(ctx, "git", "-C", dir, "rev-parse", "--show-toplevel")
 	out, err := cmd.Output()
 	if err != nil {
 		return ""
@@ -258,7 +377,7 @@ func detectFromGitRemote(dir string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "git", "-C", dir, "remote", "get-url", "origin")
+	cmd := newProjectCommandContext(ctx, "git", "-C", dir, "remote", "get-url", "origin")
 	out, err := cmd.Output()
 	if err != nil {
 		return ""

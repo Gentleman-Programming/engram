@@ -1,0 +1,19 @@
+{
+  "name": "engram",
+  "interface": {
+    "displayName": "Engram Persistent Memory"
+  },
+  "plugins": [
+    {
+      "name": "engram",
+      "source": {
+        "source": "local",
+        "path": "./plugin/codex"
+      },
+      "policy": {
+        "installation": "INSTALLED_BY_DEFAULT"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

@@ -49,6 +49,12 @@ var (
 			Bold(true).
 			Padding(0, 1)
 
+	// Clipboard copy feedback ("✓ Copied!")
+	copyFeedbackStyle = lipgloss.NewStyle().
+				Foreground(colorGreen).
+				Bold(true).
+				Padding(0, 1)
+
 	// Update available banner
 	updateBannerStyle = lipgloss.NewStyle().
 				Foreground(colorYellow).
@@ -114,6 +120,11 @@ var (
 	typeBadgeStyle = lipgloss.NewStyle().
 			Foreground(colorPeach).
 			Bold(true)
+
+	// Observation lifecycle warning badge
+	stateWarningBadgeStyle = lipgloss.NewStyle().
+				Foreground(colorYellow).
+				Bold(true)
 
 	// Observation ID
 	idStyle = lipgloss.NewStyle().

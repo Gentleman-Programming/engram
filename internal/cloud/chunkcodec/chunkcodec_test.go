@@ -2,6 +2,7 @@ package chunkcodec
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/internal/store"
@@ -70,6 +71,82 @@ func TestCanonicalizeForProjectPreservesMutationMetadataPayloadFields(t *testing
 	assertPayloadField(1, "revision_count", float64(9))
 	assertPayloadField(1, "duplicate_count", float64(4))
 	assertPayloadField(2, "created_at", "2026-04-08T09:00:00Z")
+}
+
+func TestCanonicalizeForProjectAcceptsRelationUpsertMutation(t *testing.T) {
+	raw := []byte(`{
+		"mutations": [
+			{
+				"entity": "relation",
+				"entity_key": "rel-1",
+				"op": "upsert",
+				"project": "wrong",
+				"payload": "{\"sync_id\":\"rel-1\",\"source_id\":\"obs-a\",\"target_id\":\"obs-b\",\"relation\":\"conflicts_with\",\"reason\":\"different decisions\",\"judgment_status\":\"judged\",\"marked_by_actor\":\"agent-a\",\"marked_by_kind\":\"agent\",\"marked_by_model\":\"model-a\",\"project\":\"wrong\",\"created_at\":\"2026-05-04T01:00:00Z\",\"updated_at\":\"2026-05-04T01:01:00Z\"}"
+			}
+		]
+	}`)
+
+	normalized, err := CanonicalizeForProject(raw, "proj-a")
+	if err != nil {
+		t.Fatalf("canonicalize relation mutation: %v", err)
+	}
+
+	var chunk struct {
+		Mutations []store.SyncMutation `json:"mutations"`
+	}
+	if err := json.Unmarshal(normalized, &chunk); err != nil {
+		t.Fatalf("decode canonicalized chunk: %v", err)
+	}
+	if len(chunk.Mutations) != 1 {
+		t.Fatalf("expected 1 mutation, got %d", len(chunk.Mutations))
+	}
+	mutation := chunk.Mutations[0]
+	if mutation.Entity != store.SyncEntityRelation || mutation.Op != store.SyncOpUpsert || mutation.EntityKey != "rel-1" || mutation.Project != "proj-a" {
+		t.Fatalf("expected canonical relation/upsert mutation, got %+v", mutation)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(mutation.Payload), &payload); err != nil {
+		t.Fatalf("decode canonical relation payload: %v", err)
+	}
+	if payload["project"] != "proj-a" {
+		t.Fatalf("expected relation payload project rewritten to proj-a, got %#v", payload["project"])
+	}
+	for _, field := range []string{"sync_id", "source_id", "target_id", "relation", "judgment_status", "marked_by_actor", "marked_by_kind"} {
+		if payload[field] == "" || payload[field] == nil {
+			t.Fatalf("expected relation payload field %q to be preserved, got %#v", field, payload)
+		}
+	}
+}
+
+func TestCanonicalizeForProjectRejectsInvalidRelationMutation(t *testing.T) {
+	raw := []byte(`{
+		"mutations": [
+			{
+				"entity": "relation",
+				"entity_key": "rel-1",
+				"op": "upsert",
+				"payload": "{\"sync_id\":\"rel-1\",\"source_id\":\"obs-a\",\"target_id\":\"\",\"judgment_status\":\"judged\",\"marked_by_actor\":\"agent-a\",\"marked_by_kind\":\"agent\"}"
+			}
+		]
+	}`)
+
+	_, err := CanonicalizeForProject(raw, "proj-a")
+	if err == nil {
+		t.Fatal("expected invalid relation mutation to fail")
+	}
+	if got := err.Error(); got == "" || !containsAll(got, []string{"relation", "target_id"}) {
+		t.Fatalf("expected relation target_id validation error, got %q", got)
+	}
+}
+
+func containsAll(s string, parts []string) bool {
+	for _, part := range parts {
+		if !strings.Contains(s, part) {
+			return false
+		}
+	}
+	return true
 }
 
 func TestCanonicalizeForProjectPreservesClosureOnlyDirectSessionOwnership(t *testing.T) {

@@ -42,7 +42,7 @@ Engram trusts the **agent** to decide what's worth remembering — not a firehos
 ```
 Session starts → Agent works → Agent saves memories proactively
                                     ↓
-Session ends → Agent writes session summary (Goal/Discoveries/Accomplished/Files)
+Session ends → Agent writes session summary (Goal/Discoveries/Accomplished/Next Steps/Files)
                                     ↓
 Next session starts → Previous session context is injected automatically
 ```
@@ -53,7 +53,7 @@ Next session starts → Previous session context is injected automatically
 
 | Tool | Purpose |
 |------|---------|
-| `mem_save` | Save a structured observation (decision, bugfix, pattern, etc.) |
+| `mem_save` | Save a structured observation (decision, bugfix, pattern, etc.); best-effort captures process-local current prompt context when available unless `capture_prompt=false` |
 | `mem_update` | Update an existing observation by ID |
 | `mem_delete` | Delete an observation (soft-delete by default, hard-delete optional) |
 | `mem_suggest_topic_key` | Suggest a stable `topic_key` for evolving topics before saving |
@@ -69,6 +69,10 @@ Next session starts → Previous session context is injected automatically
 | `mem_capture_passive` | Extract learnings from text output |
 | `mem_merge_projects` | Merge project name variants into canonical name (admin) |
 | `mem_current_project` | Detect project from cwd — never errors, recommended first call |
+| `mem_doctor` | Run read-only operational diagnostics for project detection and store health |
+| `mem_review` | List observations whose `review_after` lifecycle is stale; `mark_reviewed` resets the local review cycle |
+| `mem_judge` | Record a verdict for a pending memory conflict surfaced by `mem_save` |
+| `mem_compare` | Persist a semantic relation verdict between two existing observations |
 
 ---
 
@@ -86,8 +90,11 @@ Token-efficient memory retrieval — don't dump everything, drill in:
 
 ## Memory Hygiene
 
-- `mem_save` now supports `scope` (`project` default, `personal` optional)
+- `mem_save` now supports `scope` (`project` default, `personal` and `global` also accepted)
 - `mem_save` also supports `topic_key`; with a topic key, saves become upserts (same project+scope+topic updates the existing memory)
+- `mem_save` supports `capture_prompt` (`true` by default). When the same MCP process lifecycle has current prompt context for the same project and session, it best-effort records that prompt alongside the observation. The prompt context must be fed before the later `mem_save` (typically via `mem_save_prompt`); `mem_save` still succeeds if context is unavailable or prompt capture fails. Automated saves such as SDD artifacts should pass `capture_prompt=false`.
+- `mem_save` and `mem_search` expose lifecycle metadata: computed `state` (`active` or `needs_review`) and `review_after` when a review cycle applies.
+- `mem_review` supports `action="list"` (`project`, `limit`) and `action="mark_reviewed"` (`observation_id`). Marking reviewed is local-only for now because `review_after` is intentionally not part of sync payloads in this phase.
 - Exact dedupe prevents repeated inserts in a rolling window (hash + project + scope + type + title)
 - Duplicates update metadata (`duplicate_count`, `last_seen_at`, `updated_at`) instead of creating new rows
 - Topic upserts increment `revision_count` so evolving decisions stay in one memory
@@ -98,22 +105,101 @@ Token-efficient memory retrieval — don't dump everything, drill in:
 
 ## Topic Key Workflow (Recommended)
 
-Use this when a topic evolves over time (architecture, long-running feature decisions, etc.):
+### What topic_key is
 
-```text
-1. mem_suggest_topic_key(type="architecture", title="Auth architecture")
-2. mem_save(..., topic_key="architecture-auth-architecture")
-3. Later change on same topic -> mem_save(..., same topic_key)
-   => existing observation is updated (revision_count++)
+`topic_key` turns `mem_save` into an **upsert**: if a memory with the same `project + scope + topic_key` already exists, the existing observation is updated in place (`revision_count++`) instead of creating a new row. Without a `topic_key`, every `mem_save` creates a new observation even when the content describes the same evolving topic.
+
+Use topic keys for knowledge that changes over time: architecture decisions, long-running feature notes, recurring patterns, configuration choices. Skip them for one-off bugs, single facts, or anything that does not evolve.
+
+### Format convention
+
+Topic keys follow **slash-separated lowercase kebab-case**:
+
+```
+family/specific-description
 ```
 
-Different topics should use different keys (e.g. `architecture/auth-model` vs `bug/auth-nil-panic`) so they never overwrite each other.
+Examples:
+- `architecture/auth-model`
+- `bug/nil-panic-in-user-list`
+- `decision/database-choice`
+- `pattern/error-handling-convention`
+- `config/ci-environment`
 
-`mem_suggest_topic_key` now applies a family heuristic for consistency across sessions:
+**Why this format?** SQLite FTS5 tokenises on word boundaries. Lowercase kebab-case ensures the key fragments are individually searchable and do not create unexpected FTS5 token splits.
 
-- `architecture/*` for architecture/design/ADR-like changes
-- `bug/*` for fixes, regressions, errors, panics
-- `decision/*`, `pattern/*`, `config/*`, `discovery/*`, `learning/*` when detected
+**Anti-patterns to avoid:**
+
+| Anti-pattern | Problem | Correct form |
+|---|---|---|
+| `authModel` | camelCase breaks FTS5 tokenisation | `architecture/auth-model` |
+| `auth model` | spaces create accidental multi-token keys | `architecture/auth-model` |
+| `ARCHITECTURE/AUTH` | uppercase is inconsistent with FTS5 normalisation | `architecture/auth-model` |
+| `auth/model/v2/final` | more than 2 levels — use `v2` in the description | `architecture/auth-model-v2` |
+| `bugfix` | no slash — looks like a family with no description | `bug/auth-nil-panic` |
+
+### Decision table — when to use topic_key
+
+| Situation | Use topic_key? | Reasoning |
+|---|---|---|
+| Architecture or design decision that may evolve | Yes | Keeps history in one observation, incrementing `revision_count` |
+| Long-running feature work (spans multiple sessions) | Yes | Single source of truth across sessions |
+| A pattern or convention established for the project | Yes | One canonical entry, updated as the pattern matures |
+| Bug fix that was self-contained and is now closed | No | A single observation is fine; no future updates expected |
+| One-off discovery or fact | No | Creating a key you will never reuse adds noise |
+| Multiple independent decisions on the same broad topic | No — use distinct keys | Different decisions must have different keys or they will overwrite each other |
+
+### The mem_suggest_topic_key-first workflow
+
+When you are not sure which key to use, call `mem_suggest_topic_key` before `mem_save`. It applies a family heuristic based on the observation type and title, returning a suggested key you can use directly or adjust:
+
+```text
+1. mem_suggest_topic_key(type="architecture", title="Auth model")
+   → returns: "architecture/auth-model"
+
+2. mem_save(..., topic_key="architecture/auth-model")
+   → creates new observation (revision_count=1)
+
+3. (later session) mem_save(..., topic_key="architecture/auth-model")
+   → updates existing observation (revision_count=2)
+```
+
+`mem_suggest_topic_key` families:
+
+- `architecture/*` — architecture, design, ADR-like observations
+- `bug/*` — bug fixes, regressions, panics, error root causes
+- `decision/*` — explicit decisions with tradeoffs
+- `pattern/*` — naming conventions, structural patterns, coding standards
+- `config/*` — configuration and environment setup
+- `discovery/*` — non-obvious findings about the codebase
+- `learning/*` — team knowledge and onboarding notes
+
+If none of these families fit, it is usually fine to skip the key and let `mem_save` create a plain observation.
+
+### Hierarchical keys — max 2 levels
+
+Keys are organisational only; there is no parent–child relationship in the store. Two levels (`family/description`) cover almost every case. Use the description segment to add specificity rather than adding more slashes:
+
+```
+architecture/auth-model          ✓ two levels, specific
+architecture/auth-model-v2       ✓ version in description
+architecture/auth/model/detail   ✗ three levels — flatten to two
+```
+
+### Lifecycle and pruning
+
+Topic keys are not pruned automatically. An observation updated via upsert keeps a single row with the latest content and an incremented `revision_count`. Use `mem_delete` to remove an observation (soft-delete by default) when a topic is no longer relevant. Soft-deleted observations are excluded from search and context but their IDs remain in the store for audit purposes. Use `--hard` to remove them permanently.
+
+### Scope interaction
+
+`topic_key` upsert is scoped to `project + scope + topic_key`. The same key used with different scopes creates independent observations:
+
+```
+project=engram, scope=project, topic_key=architecture/auth-model  → observation A
+project=engram, scope=personal, topic_key=architecture/auth-model → observation B (independent)
+```
+
+This means a `personal` note on the same topic does not overwrite the shared `project` observation.
 
 ---
 
@@ -125,7 +211,7 @@ engram/
 ├── internal/
 │   ├── store/store.go              # Core: SQLite + FTS5 + all data ops
 │   ├── server/server.go            # HTTP REST API (port 7437)
-│   ├── mcp/mcp.go                  # MCP stdio server (17 tools)
+│   ├── mcp/mcp.go                  # MCP stdio server (20 tools)
 │   ├── setup/setup.go              # Agent plugin installer (go:embed)
 │   ├── cloud/                       # Optional cloud runtime (Postgres + dashboard)
 │   │   ├── cloudserver/             # /sync API + dashboard mount + auth/session bridge
@@ -168,6 +254,14 @@ engram mcp                Start MCP server (stdio transport)
 engram tui                Launch interactive terminal UI
 engram search <query>     Search memories
 engram save <title> <msg> Save a memory
+engram delete <obs_id>    Delete an observation [--hard] (soft-delete by default; --hard removes permanently)
+engram delete session <id>
+                          Delete a session by ID (session must have no observations)
+engram delete prompt <id>
+                          Delete a prompt by ID (permanent)
+engram delete project <name> [--hard]
+                          Cascade-delete a project: soft-deletes observations (or hard-deletes
+                          with --hard, which also removes sessions); always removes prompts
 engram timeline <obs_id>  Chronological context around an observation
 engram context [project]  Recent context from previous sessions
 engram stats              Memory statistics
@@ -177,6 +271,9 @@ engram sync               Export new memories as compressed chunk to .engram/
 engram sync --all         Export ALL projects (ignore directory-based filter)
 engram sync --cloud --project <name>
                           Sync against configured cloud endpoint (project-scoped)
+engram conflicts <sub>    Inspect and manage memory conflict relations
+                            list, show, stats, scan, deferred
+engram doctor             Run read-only operational diagnostics [--json] [--project P] [--check CODE]
 engram cloud status       Show cloud runtime/config status
 engram cloud config --server <url>
                           Configure cloud server URL
@@ -185,6 +282,10 @@ engram cloud enroll <project>
 engram cloud serve        Run cloud backend + dashboard
 engram cloud upgrade <doctor|repair|bootstrap|status|rollback> --project <name>
                           Guided upgrade workflow for existing projects
+engram cloud bootstrap admin --username <name> [--email <email>]
+                          [--grant-project <project>]... [--issue-token [name]]
+                          Create the first managed admin (see DOCS.md for details
+                          and the current server-side auth wiring limitation)
 engram projects list      Show all projects with obs/session/prompt counts
 engram projects consolidate  Interactive merge of similar project names [--all] [--dry-run]
 engram projects prune     Remove projects with 0 observations [--dry-run]
@@ -192,10 +293,15 @@ engram obsidian-export    Export memories to Obsidian vault (beta)
 engram version            Show version
 ```
 
+Local server auth:
+
+- `ENGRAM_HTTP_TOKEN`: optional Bearer auth for `engram serve`. When set, the following routes require `Authorization: Bearer <token>`: `DELETE /sessions/{id}`, `DELETE /observations/{id}`, `DELETE /prompts/{id}`, `GET /export`, `POST /import`, `POST /projects/migrate`. Comparison is constant-time; token is read per-request. When unset, all routes are open (zero-config default).
+- `ENGRAM_TIMEZONE`: IANA zone name for timestamp display in TUI and cloud dashboard (e.g. `America/New_York`). Falls back to system local when unset or invalid.
+
 Cloud constraints (current behavior):
 
 - Cloud is opt-in replication/shared access; local SQLite remains source of truth.
-- `engram cloud serve` requires `ENGRAM_CLOUD_ALLOWED_PROJECTS` in both token-auth and insecure no-auth mode.
+- `engram cloud serve` requires `ENGRAM_CLOUD_ALLOWED_PROJECTS` in both token-auth and insecure no-auth mode. Use `*` to allow all projects (dev/internal deploys) — bypasses per-project name enforcement while still requiring a non-empty project on each request.
 - Authenticated cloud serve requires `ENGRAM_CLOUD_TOKEN` + explicit non-default `ENGRAM_JWT_SECRET`.
 - Insecure local-dev mode (`ENGRAM_CLOUD_INSECURE_NO_AUTH=1`) still requires the project allowlist and must not be used in production.
 
@@ -294,7 +400,7 @@ The cloud server exposes two routes registered in `cloudserver.go` and handled b
 | `POST` | `/sync/mutations/push` | Accept a batch of up to 100 mutations from the client |
 | `GET` | `/sync/mutations/pull` | Return mutations since a cursor, filtered by caller's enrolled projects |
 
-Both require `Authorization: Bearer <token>`. Push enforces the project-level sync pause (HTTP 409 on `sync_enabled=false`). Pull filters server-side.
+Both require `Authorization: Bearer <token>`. Push enforces the project-level sync pause (HTTP 409 on `sync_enabled=false`) and the configured cloud push body limit (`ENGRAM_CLOUD_MAX_PUSH_BYTES`, default 8 MiB). Pull filters server-side.
 
 ---
 

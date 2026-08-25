@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -413,6 +414,124 @@ func TestUpdateObservationFindReplaceTruncatesReplacementOutput(t *testing.T) {
 	}
 	if persisted.Content != want {
 		t.Fatalf("expected persisted replacement output to be truncated, got length=%d want length=%d", len(persisted.Content), len(want))
+	}
+}
+
+func TestPinnedObservationsAndFormatContextPriority(t *testing.T) {
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = t.TempDir()
+	cfg.DedupeWindow = time.Hour
+	cfg.MaxContextResults = 2
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	titles := []string{"pinned architecture", "recent one", "recent two", "recent three"}
+	ids := make([]int64, 0, len(titles))
+	for i, title := range titles {
+		id, err := s.AddObservation(AddObservationParams{
+			SessionID: "s1",
+			Type:      "decision",
+			Title:     title,
+			Content:   fmt.Sprintf("content %d", i),
+			Project:   "engram",
+			Scope:     "project",
+		})
+		if err != nil {
+			t.Fatalf("add observation %q: %v", title, err)
+		}
+		ids = append(ids, id)
+		createdAt := fmt.Sprintf("2026-01-0%d 00:00:00", i+1)
+		if _, err := s.db.Exec(`UPDATE observations SET created_at = ?, updated_at = ? WHERE id = ?`, createdAt, createdAt, id); err != nil {
+			t.Fatalf("set created_at for %q: %v", title, err)
+		}
+	}
+	exportedBeforePin, err := s.ExportProject("engram")
+	if err != nil {
+		t.Fatalf("export project before pin: %v", err)
+	}
+	exportedBeforePinJSON, err := json.Marshal(exportedBeforePin)
+	if err != nil {
+		t.Fatalf("marshal export before pin: %v", err)
+	}
+	var updatedAtBeforePin string
+	if err := s.db.QueryRow(`SELECT updated_at FROM observations WHERE id = ?`, ids[0]).Scan(&updatedAtBeforePin); err != nil {
+		t.Fatalf("get updated_at before pin: %v", err)
+	}
+
+	if err := s.PinObservation(ids[0]); err != nil {
+		t.Fatalf("pin observation: %v", err)
+	}
+	var updatedAtAfterPin string
+	if err := s.db.QueryRow(`SELECT updated_at FROM observations WHERE id = ?`, ids[0]).Scan(&updatedAtAfterPin); err != nil {
+		t.Fatalf("get updated_at after pin: %v", err)
+	}
+	if updatedAtAfterPin != updatedAtBeforePin {
+		t.Fatalf("pin should not change updated_at: before=%q after=%q", updatedAtBeforePin, updatedAtAfterPin)
+	}
+	pinned, err := s.PinnedObservations("engram", "project")
+	if err != nil {
+		t.Fatalf("pinned observations: %v", err)
+	}
+	if len(pinned) != 1 || pinned[0].ID != ids[0] || !pinned[0].Pinned {
+		t.Fatalf("expected pinned observation %d, got %#v", ids[0], pinned)
+	}
+
+	ctx, err := s.FormatContext("engram", "project")
+	if err != nil {
+		t.Fatalf("format context: %v", err)
+	}
+	pinnedIdx := strings.Index(ctx, "### Pinned")
+	recentIdx := strings.Index(ctx, "### Recent Observations")
+	if pinnedIdx < 0 || recentIdx < 0 || pinnedIdx > recentIdx {
+		t.Fatalf("expected pinned section before recent observations, got:\n%s", ctx)
+	}
+	if !strings.Contains(ctx, "pinned architecture") {
+		t.Fatalf("expected pinned observation in context, got:\n%s", ctx)
+	}
+	if !strings.Contains(ctx, "recent three") || !strings.Contains(ctx, "recent two") {
+		t.Fatalf("expected max recent unpinned observations in context, got:\n%s", ctx)
+	}
+	if strings.Contains(ctx, "recent one") {
+		t.Fatalf("expected recent window to stay at MaxContextResults, got:\n%s", ctx)
+	}
+	exported, err := s.ExportProject("engram")
+	if err != nil {
+		t.Fatalf("export project: %v", err)
+	}
+	exportedJSON, err := json.Marshal(exported)
+	if err != nil {
+		t.Fatalf("marshal export: %v", err)
+	}
+	if strings.Contains(string(exportedJSON), `"pinned"`) {
+		t.Fatalf("pinned state must stay out of sync/export JSON, got %s", exportedJSON)
+	}
+	if string(exportedJSON) != string(exportedBeforePinJSON) {
+		t.Fatalf("pinning must not change export payload:\nbefore: %s\nafter:  %s", exportedBeforePinJSON, exportedJSON)
+	}
+
+	if err := s.UnpinObservation(ids[0]); err != nil {
+		t.Fatalf("unpin observation: %v", err)
+	}
+	var updatedAtAfterUnpin string
+	if err := s.db.QueryRow(`SELECT updated_at FROM observations WHERE id = ?`, ids[0]).Scan(&updatedAtAfterUnpin); err != nil {
+		t.Fatalf("get updated_at after unpin: %v", err)
+	}
+	if updatedAtAfterUnpin != updatedAtBeforePin {
+		t.Fatalf("unpin should not change updated_at: before=%q after=%q", updatedAtBeforePin, updatedAtAfterUnpin)
+	}
+	pinned, err = s.PinnedObservations("engram", "project")
+	if err != nil {
+		t.Fatalf("pinned observations after unpin: %v", err)
+	}
+	if len(pinned) != 0 {
+		t.Fatalf("expected no pinned observations after unpin, got %#v", pinned)
 	}
 }
 
@@ -2139,6 +2258,280 @@ func TestUpgradeRepairDryRunAndApply(t *testing.T) {
 			t.Fatalf("expected no remaining legacy findings after repair, got %+v", after)
 		}
 	})
+
+	t.Run("legacy relation mutation payload is repaired from authoritative local relation", func(t *testing.T) {
+		s := newTestStore(t)
+		if err := s.CreateSession("legacy-rel-s1", "legacy-rel-proj", "/tmp/legacy-rel"); err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		sourceID, err := s.AddObservation(AddObservationParams{SessionID: "legacy-rel-s1", Type: "decision", Title: "Source", Content: "Source content", Project: "legacy-rel-proj", Scope: "project"})
+		if err != nil {
+			t.Fatalf("add source observation: %v", err)
+		}
+		targetID, err := s.AddObservation(AddObservationParams{SessionID: "legacy-rel-s1", Type: "decision", Title: "Target", Content: "Target content", Project: "legacy-rel-proj", Scope: "project"})
+		if err != nil {
+			t.Fatalf("add target observation: %v", err)
+		}
+		if err := s.EnrollProject("legacy-rel-proj"); err != nil {
+			t.Fatalf("enroll project: %v", err)
+		}
+
+		var sourceSyncID, targetSyncID string
+		if err := s.db.QueryRow(`SELECT sync_id FROM observations WHERE id = ?`, sourceID).Scan(&sourceSyncID); err != nil {
+			t.Fatalf("lookup source sync id: %v", err)
+		}
+		if err := s.db.QueryRow(`SELECT sync_id FROM observations WHERE id = ?`, targetID).Scan(&targetSyncID); err != nil {
+			t.Fatalf("lookup target sync id: %v", err)
+		}
+		rel, err := s.SaveRelation(SaveRelationParams{SyncID: "rel-legacy-repair", SourceID: sourceSyncID, TargetID: targetSyncID})
+		if err != nil {
+			t.Fatalf("save relation: %v", err)
+		}
+		reason := "same decision"
+		if _, err := s.JudgeRelation(JudgeRelationParams{
+			JudgmentID:    rel.SyncID,
+			Relation:      RelationCompatible,
+			Reason:        &reason,
+			MarkedByActor: "engram-test",
+			MarkedByKind:  "system",
+			SessionID:     "legacy-rel-s1",
+		}); err != nil {
+			t.Fatalf("judge relation: %v", err)
+		}
+
+		legacyPayload := `{"sync_id":"rel-legacy-repair","source_id":"` + sourceSyncID + `","target_id":"` + targetSyncID + `","relation":"compatible"}`
+		if _, err := s.execHook(s.db, `
+			UPDATE sync_mutations
+			SET payload = ?
+			WHERE target_key = ? AND project = ? AND entity = ? AND entity_key = ? AND op = ? AND acked_at IS NULL
+		`, legacyPayload, DefaultSyncTargetKey, "legacy-rel-proj", SyncEntityRelation, rel.SyncID, SyncOpUpsert); err != nil {
+			t.Fatalf("seed legacy relation payload: %v", err)
+		}
+
+		diagnosis, err := s.DiagnoseCloudUpgradeLegacyMutations("legacy-rel-proj")
+		if err != nil {
+			t.Fatalf("diagnose relation legacy mutation: %v", err)
+		}
+		if diagnosis.RepairableCount == 0 || diagnosis.BlockedCount != 0 {
+			t.Fatalf("expected relation payload to be repairable-only, got %+v", diagnosis)
+		}
+
+		report, err := s.RepairCloudUpgrade("legacy-rel-proj", true)
+		if err != nil {
+			t.Fatalf("repair relation legacy payload: %v", err)
+		}
+		if report.Class != UpgradeRepairClassRepairable || !report.Applied {
+			t.Fatalf("expected applied repairable relation result, got %+v", report)
+		}
+
+		var repairedPayload string
+		if err := s.db.QueryRow(`
+			SELECT payload FROM sync_mutations
+			WHERE target_key = ? AND project = ? AND entity = ? AND entity_key = ? AND op = ?
+			ORDER BY seq DESC LIMIT 1
+		`, DefaultSyncTargetKey, "legacy-rel-proj", SyncEntityRelation, rel.SyncID, SyncOpUpsert).Scan(&repairedPayload); err != nil {
+			t.Fatalf("load repaired relation payload: %v", err)
+		}
+		var repaired syncRelationPayload
+		if err := decodeSyncPayload([]byte(repairedPayload), &repaired); err != nil {
+			t.Fatalf("decode repaired relation payload: %v", err)
+		}
+		if strings.TrimSpace(repaired.JudgmentStatus) == "" || repaired.MarkedByActor == nil || strings.TrimSpace(*repaired.MarkedByActor) == "" || repaired.MarkedByKind == nil || strings.TrimSpace(*repaired.MarkedByKind) == "" || strings.TrimSpace(repaired.Project) == "" {
+			t.Fatalf("expected repaired payload to include required relation fields, got %+v", repaired)
+		}
+	})
+
+	t.Run("legacy relation mutation stays blocked when provenance cannot be inferred", func(t *testing.T) {
+		s := newTestStore(t)
+		if err := s.CreateSession("legacy-rel-blocked-s1", "legacy-rel-blocked", "/tmp/legacy-rel-blocked"); err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		sourceID, err := s.AddObservation(AddObservationParams{SessionID: "legacy-rel-blocked-s1", Type: "decision", Title: "Source", Content: "Source content", Project: "legacy-rel-blocked", Scope: "project"})
+		if err != nil {
+			t.Fatalf("add source observation: %v", err)
+		}
+		targetID, err := s.AddObservation(AddObservationParams{SessionID: "legacy-rel-blocked-s1", Type: "decision", Title: "Target", Content: "Target content", Project: "legacy-rel-blocked", Scope: "project"})
+		if err != nil {
+			t.Fatalf("add target observation: %v", err)
+		}
+		if err := s.EnrollProject("legacy-rel-blocked"); err != nil {
+			t.Fatalf("enroll project: %v", err)
+		}
+
+		var sourceSyncID, targetSyncID string
+		if err := s.db.QueryRow(`SELECT sync_id FROM observations WHERE id = ?`, sourceID).Scan(&sourceSyncID); err != nil {
+			t.Fatalf("lookup source sync id: %v", err)
+		}
+		if err := s.db.QueryRow(`SELECT sync_id FROM observations WHERE id = ?`, targetID).Scan(&targetSyncID); err != nil {
+			t.Fatalf("lookup target sync id: %v", err)
+		}
+		if _, err := s.SaveRelation(SaveRelationParams{SyncID: "rel-legacy-blocked", SourceID: sourceSyncID, TargetID: targetSyncID}); err != nil {
+			t.Fatalf("save relation: %v", err)
+		}
+		payload := `{"sync_id":"rel-legacy-blocked","source_id":"` + sourceSyncID + `","target_id":"` + targetSyncID + `","relation":"compatible","project":"legacy-rel-blocked"}`
+		if _, err := s.execHook(s.db,
+			`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			DefaultSyncTargetKey,
+			SyncEntityRelation,
+			"rel-legacy-blocked",
+			SyncOpUpsert,
+			payload,
+			SyncSourceLocal,
+			"legacy-rel-blocked",
+		); err != nil {
+			t.Fatalf("insert relation mutation: %v", err)
+		}
+
+		diagnosis, err := s.DiagnoseCloudUpgradeLegacyMutations("legacy-rel-blocked")
+		if err != nil {
+			t.Fatalf("diagnose blocked relation legacy mutation: %v", err)
+		}
+		if diagnosis.BlockedCount != 1 || diagnosis.RepairableCount != 0 || !strings.Contains(diagnosis.Findings[0].Message, "marked_by_actor") || !strings.Contains(diagnosis.Findings[0].Message, "marked_by_kind") {
+			t.Fatalf("expected missing provenance to remain blocked, got %+v", diagnosis)
+		}
+	})
+
+	// Regression test for GitHub issue #446: when both repairable and blocked
+	// mutations coexist, RepairCloudUpgrade(apply=true) must apply the
+	// repairable subset and return Applied:true with Class=Blocked (and the
+	// message must reference the actual blocker, not the low-seq repairable
+	// entry that happens to be first in Findings order).
+	t.Run("partial apply: repairable mutations applied even when a blocker is queued", func(t *testing.T) {
+		s := newTestStore(t)
+		if err := s.CreateSession("partial-repair-s1", "partial-repair-proj", "/tmp/partial-repair"); err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+
+		// Create an observation so we have authoritative local state for the
+		// repairable mutation.
+		obsID, err := s.AddObservation(AddObservationParams{
+			SessionID: "partial-repair-s1",
+			Type:      "decision",
+			Title:     "Authoritative title",
+			Content:   "Authoritative content",
+			Project:   "partial-repair-proj",
+			Scope:     "project",
+		})
+		if err != nil {
+			t.Fatalf("add observation: %v", err)
+		}
+		if err := s.EnrollProject("partial-repair-proj"); err != nil {
+			t.Fatalf("enroll project: %v", err)
+		}
+
+		// Look up the observation's sync_id for payload construction.
+		var obsSyncID string
+		if err := s.db.QueryRow(`SELECT sync_id FROM observations WHERE id = ?`, obsID).Scan(&obsSyncID); err != nil {
+			t.Fatalf("lookup observation sync_id: %v", err)
+		}
+
+		// Insert a REPAIRABLE observation mutation (missing title — low seq,
+		// will naturally come before the blocker we insert next).
+		repairablePayload := `{"sync_id":"` + obsSyncID + `","session_id":"partial-repair-s1","type":"decision","content":"legacy payload missing title","scope":"project"}`
+		if _, err := s.execHook(s.db,
+			`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			DefaultSyncTargetKey,
+			SyncEntityObservation,
+			obsSyncID,
+			SyncOpUpsert,
+			repairablePayload,
+			SyncSourceLocal,
+			"partial-repair-proj",
+		); err != nil {
+			t.Fatalf("insert repairable observation mutation: %v", err)
+		}
+
+		// Create two observations for source/target of the relation we use as
+		// the blocker mutation.
+		srcID, err := s.AddObservation(AddObservationParams{SessionID: "partial-repair-s1", Type: "decision", Title: "Src", Content: "src", Project: "partial-repair-proj", Scope: "project"})
+		if err != nil {
+			t.Fatalf("add source observation: %v", err)
+		}
+		dstID, err := s.AddObservation(AddObservationParams{SessionID: "partial-repair-s1", Type: "decision", Title: "Dst", Content: "dst", Project: "partial-repair-proj", Scope: "project"})
+		if err != nil {
+			t.Fatalf("add dest observation: %v", err)
+		}
+		var srcSyncID, dstSyncID string
+		if err := s.db.QueryRow(`SELECT sync_id FROM observations WHERE id = ?`, srcID).Scan(&srcSyncID); err != nil {
+			t.Fatalf("lookup src sync_id: %v", err)
+		}
+		if err := s.db.QueryRow(`SELECT sync_id FROM observations WHERE id = ?`, dstID).Scan(&dstSyncID); err != nil {
+			t.Fatalf("lookup dst sync_id: %v", err)
+		}
+
+		// Insert a BLOCKED relation mutation (missing provenance — high seq,
+		// comes after the repairable entry so Findings[0] would point to the
+		// repairable entry without the fix).
+		const blockerEntityKey = "rel-partial-blocked-446"
+		blockerPayload := `{"sync_id":"` + blockerEntityKey + `","source_id":"` + srcSyncID + `","target_id":"` + dstSyncID + `","relation":"compatible","project":"partial-repair-proj"}`
+		if _, err := s.execHook(s.db,
+			`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			DefaultSyncTargetKey,
+			SyncEntityRelation,
+			blockerEntityKey,
+			SyncOpUpsert,
+			blockerPayload,
+			SyncSourceLocal,
+			"partial-repair-proj",
+		); err != nil {
+			t.Fatalf("insert blocked relation mutation: %v", err)
+		}
+
+		// Confirm pre-conditions: diagnosis must see exactly one repairable
+		// and one blocked entry.
+		diag, err := s.DiagnoseCloudUpgradeLegacyMutations("partial-repair-proj")
+		if err != nil {
+			t.Fatalf("pre-condition diagnose: %v", err)
+		}
+		if diag.RepairableCount != 1 || diag.BlockedCount != 1 {
+			t.Fatalf("expected 1 repairable + 1 blocked pre-condition, got %+v", diag)
+		}
+
+		// Find the seq of the blocked finding so we can assert the message
+		// references the right entry.
+		var blockerSeq int64
+		for _, f := range diag.Findings {
+			if !f.Repairable {
+				blockerSeq = f.Seq
+				break
+			}
+		}
+		if blockerSeq == 0 {
+			t.Fatal("pre-condition: could not locate blocked finding seq")
+		}
+		// Also verify that Findings[0] is NOT the blocker (i.e. lowest-seq is
+		// the repairable one); this is the exact condition that triggered the
+		// wrong-message bug.
+		if diag.Findings[0].Seq == blockerSeq {
+			t.Fatalf("pre-condition: expected Findings[0] to be repairable (lowest seq), but got blocker seq=%d", blockerSeq)
+		}
+
+		// === THE ACTUAL ASSERTION ===
+		// With apply=true, repairable mutations must be applied and the
+		// report must still surface the blocker clearly.
+		report, err := s.RepairCloudUpgrade("partial-repair-proj", true)
+		if err != nil {
+			t.Fatalf("repair with mixed repairable+blocker: %v", err)
+		}
+
+		// Applied MUST be true: at least the repairable mutation was applied.
+		if !report.Applied {
+			t.Fatalf("expected Applied=true (repairable subset was processed), got %+v", report)
+		}
+		// Class MUST be Blocked because the non-repairable mutation is still present.
+		if report.Class != UpgradeRepairClassBlocked {
+			t.Fatalf("expected Class=%q, got %q (full report: %+v)", UpgradeRepairClassBlocked, report.Class, report)
+		}
+		// The message must name the BLOCKER seq, not the repairable entry.
+		blockerSeqStr := fmt.Sprintf("seq=%d", blockerSeq)
+		if !strings.Contains(report.Message, blockerSeqStr) {
+			t.Fatalf("expected message to reference blocker seq (%s), got %q", blockerSeqStr, report.Message)
+		}
+		// The message must also include entity_key for debuggability.
+		if !strings.Contains(report.Message, blockerEntityKey) {
+			t.Fatalf("expected message to include entity_key=%q, got %q", blockerEntityKey, report.Message)
+		}
+	})
 }
 
 func TestRollbackCloudUpgradeSafetyBoundary(t *testing.T) {
@@ -3204,6 +3597,61 @@ func TestMigrationAndHelperEdgeBranches(t *testing.T) {
 			t.Fatalf("expected empty context when no data, got %q", ctx)
 		}
 	})
+}
+
+func TestImportSkipsObservationWithExistingSyncID(t *testing.T) {
+	s := newTestStore(t)
+	now := Now()
+	project := "engram"
+	observations := make([]Observation, 3)
+	for i := range observations {
+		observations[i] = Observation{
+			SyncID:    fmt.Sprintf("obs-import-idempotent-%d", i),
+			SessionID: "import-session",
+			Type:      "bugfix",
+			Title:     fmt.Sprintf("idempotent import %d", i),
+			Content:   fmt.Sprintf("import observation %d once", i),
+			Project:   &project,
+			Scope:     "project",
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+	}
+	data := &ExportData{
+		Sessions: []Session{{
+			ID:        "import-session",
+			Project:   "engram",
+			Directory: "/tmp/engram",
+			StartedAt: now,
+		}},
+		Observations: observations,
+	}
+
+	first, err := s.Import(data)
+	if err != nil {
+		t.Fatalf("first import: %v", err)
+	}
+	if first.ObservationsImported != 3 {
+		t.Fatalf("first import observations = %d, want 3", first.ObservationsImported)
+	}
+
+	for attempt := 2; attempt <= 3; attempt++ {
+		result, err := s.Import(data)
+		if err != nil {
+			t.Fatalf("import attempt %d: %v", attempt, err)
+		}
+		if result.ObservationsImported != 0 {
+			t.Fatalf("import attempt %d observations = %d, want 0", attempt, result.ObservationsImported)
+		}
+	}
+
+	var count int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM observations WHERE sync_id LIKE 'obs-import-idempotent-%'").Scan(&count); err != nil {
+		t.Fatalf("count imported observations: %v", err)
+	}
+	if count != 3 {
+		t.Fatalf("stored observations = %d, want 3", count)
+	}
 }
 
 func TestExportImportEdgeBranches(t *testing.T) {
@@ -6512,6 +6960,97 @@ func TestCountObservationsForProject(t *testing.T) {
 
 // ─── DeleteSession tests ─────────────────────────────────────────────────────
 
+func TestRecentObservationsOrderByCreatedAtBeforeID(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s-recent-created", "proj", "/tmp"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	rows := []struct {
+		id        int64
+		title     string
+		createdAt string
+	}{
+		{id: 100, title: "older-high-id", createdAt: "2025-01-01 00:00:00"},
+		{id: 50, title: "newer-low-id", createdAt: "2025-01-02 00:00:00"},
+	}
+	for _, row := range rows {
+		if _, err := s.db.Exec(`INSERT INTO observations (id, sync_id, session_id, type, title, content, project, scope, normalized_hash, revision_count, duplicate_count, created_at, updated_at)
+			VALUES (?, ?, 's-recent-created', 'note', ?, ?, 'proj', 'project', ?, 1, 1, ?, ?)`, row.id, fmt.Sprintf("obs-%d", row.id), row.title, row.title, row.title, row.createdAt, row.createdAt); err != nil {
+			t.Fatalf("insert observation %d: %v", row.id, err)
+		}
+	}
+
+	obs, err := s.RecentObservations("proj", "project", 10)
+	if err != nil {
+		t.Fatalf("RecentObservations: %v", err)
+	}
+	if len(obs) < 2 || obs[0].Title != "newer-low-id" || obs[1].Title != "older-high-id" {
+		t.Fatalf("expected created_at desc before id desc, got %+v", obs)
+	}
+}
+
+func TestRecentObservationsSameTimestampTiesByIDDesc(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s-recent-tie", "proj", "/tmp"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	for _, id := range []int64{10, 20} {
+		if _, err := s.db.Exec(`INSERT INTO observations (id, sync_id, session_id, type, title, content, project, scope, normalized_hash, revision_count, duplicate_count, created_at, updated_at)
+			VALUES (?, ?, 's-recent-tie', 'note', ?, ?, 'proj', 'project', ?, 1, 1, '2025-01-01 00:00:00', '2025-01-01 00:00:00')`, id, fmt.Sprintf("obs-tie-%d", id), fmt.Sprintf("tie-%d", id), fmt.Sprintf("tie-%d", id), fmt.Sprintf("hash-%d", id)); err != nil {
+			t.Fatalf("insert observation %d: %v", id, err)
+		}
+	}
+
+	obs, err := s.RecentObservations("proj", "project", 10)
+	if err != nil {
+		t.Fatalf("RecentObservations: %v", err)
+	}
+	if len(obs) < 2 || obs[0].ID != 20 || obs[1].ID != 10 {
+		t.Fatalf("expected id desc tie-breaker, got %+v", obs)
+	}
+}
+
+func TestRecentSessionsOrderByLatestCreatedAtDeterministically(t *testing.T) {
+	s := newTestStore(t)
+	for _, sess := range []struct {
+		id        string
+		startedAt string
+	}{
+		{id: "sess-a", startedAt: "2025-01-01 00:00:00"},
+		{id: "sess-b", startedAt: "2025-01-01 00:00:00"},
+		{id: "sess-c", startedAt: "2025-01-01 00:00:00"},
+	} {
+		if err := s.CreateSession(sess.id, "proj", "/tmp"); err != nil {
+			t.Fatalf("create session %s: %v", sess.id, err)
+		}
+		if _, err := s.db.Exec(`UPDATE sessions SET started_at = ? WHERE id = ?`, sess.startedAt, sess.id); err != nil {
+			t.Fatalf("update session %s: %v", sess.id, err)
+		}
+	}
+	for _, row := range []struct {
+		id        int64
+		sessionID string
+		createdAt string
+	}{
+		{id: 1, sessionID: "sess-a", createdAt: "2025-01-03 00:00:00"},
+		{id: 2, sessionID: "sess-b", createdAt: "2025-01-02 00:00:00"},
+		{id: 3, sessionID: "sess-c", createdAt: "2025-01-03 00:00:00"},
+	} {
+		if _, err := s.db.Exec(`INSERT INTO observations (id, sync_id, session_id, type, title, content, project, scope, normalized_hash, revision_count, duplicate_count, created_at, updated_at)
+			VALUES (?, ?, ?, 'note', ?, ?, 'proj', 'project', ?, 1, 1, ?, ?)`, row.id, fmt.Sprintf("obs-session-%d", row.id), row.sessionID, row.sessionID, row.sessionID, fmt.Sprintf("hash-session-%d", row.id), row.createdAt, row.createdAt); err != nil {
+			t.Fatalf("insert observation %d: %v", row.id, err)
+		}
+	}
+
+	sessions, err := s.RecentSessions("proj", 10)
+	if err != nil {
+		t.Fatalf("RecentSessions: %v", err)
+	}
+	if len(sessions) < 3 || sessions[0].ID != "sess-c" || sessions[1].ID != "sess-a" || sessions[2].ID != "sess-b" {
+		t.Fatalf("expected latest created_at desc with session id desc tie-breaker, got %+v", sessions)
+	}
+}
+
 func TestDeleteSession_EmptySession(t *testing.T) {
 	s := newTestStore(t)
 
@@ -6930,6 +7469,82 @@ func TestProjectExists_KnownViaEnrollmentOnly(t *testing.T) {
 	}
 	if !exists {
 		t.Error("enrolled-only-project must be found via sync_enrolled_projects UNION ALL branch")
+	}
+}
+
+// ─── Doctor diagnostic helpers ───────────────────────────────────────────────
+
+func TestListDiagnosticSessionsScopesByProject(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("manual-save-engram", "engram", "/work/engram"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := s.CreateSession("manual-save-other", "other", "/work/other"); err != nil {
+		t.Fatalf("CreateSession other: %v", err)
+	}
+	sessions, err := s.ListDiagnosticSessions("engram")
+	if err != nil {
+		t.Fatalf("ListDiagnosticSessions: %v", err)
+	}
+	if len(sessions) != 1 || sessions[0].ID != "manual-save-engram" || sessions[0].Name != "manual-save-engram" {
+		t.Fatalf("sessions=%+v", sessions)
+	}
+}
+
+func TestListPendingProjectMutationsAndPayloadValidation(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.db.Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`, DefaultSyncTargetKey, SyncEntityObservation, "obs-1", SyncOpUpsert, `{"sync_id":"obs-1"}`, SyncSourceLocal, "engram"); err != nil {
+		t.Fatalf("insert pending mutation: %v", err)
+	}
+	mutations, err := s.ListPendingProjectMutations("engram")
+	if err != nil {
+		t.Fatalf("ListPendingProjectMutations: %v", err)
+	}
+	if len(mutations) != 1 {
+		t.Fatalf("mutations=%+v", mutations)
+	}
+	validation := ValidateSyncMutationPayload(mutations[0].Entity, mutations[0].Op, mutations[0].Payload, mutations[0].EntityKey)
+	if validation.ReasonCode != "sync_mutation_payload_missing_required_fields" {
+		t.Fatalf("validation=%+v", validation)
+	}
+	if strings.Join(validation.MissingFields, ",") != "session_id,type,title,content,scope" {
+		t.Fatalf("missing fields=%v", validation.MissingFields)
+	}
+}
+
+func TestValidateSyncMutationPayloadRelationRequiresServerFields(t *testing.T) {
+	payload := `{"sync_id":"rel-1","source_id":"obs-a","target_id":"obs-b","relation":"conflicts_with","judgment_status":"judged","project":"engram"}`
+	validation := ValidateSyncMutationPayload(SyncEntityRelation, SyncOpUpsert, payload, "rel-1")
+	if validation.ReasonCode != "sync_mutation_payload_missing_required_fields" {
+		t.Fatalf("validation=%+v", validation)
+	}
+	if strings.Join(validation.MissingFields, ",") != "marked_by_actor,marked_by_kind" {
+		t.Fatalf("missing fields=%v", validation.MissingFields)
+	}
+}
+
+func TestReadSQLiteLockSnapshotDoesNotMutateApplicationRows(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s1", "engram", "/work/engram"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	var before int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sessions`).Scan(&before); err != nil {
+		t.Fatalf("count before: %v", err)
+	}
+	snapshot, err := s.ReadSQLiteLockSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("ReadSQLiteLockSnapshot: %v", err)
+	}
+	var after int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sessions`).Scan(&after); err != nil {
+		t.Fatalf("count after: %v", err)
+	}
+	if before != after {
+		t.Fatalf("session count changed: before=%d after=%d", before, after)
+	}
+	if snapshot.JournalMode == "" || snapshot.BusyTimeoutMS <= 0 {
+		t.Fatalf("snapshot=%+v", snapshot)
 	}
 }
 
@@ -7423,5 +8038,949 @@ func TestAddObservation_DecayNotAppliedToExistingRows(t *testing.T) {
 	// review_after MUST NOT have been updated by the revision (original value preserved).
 	if ra1 != ra2 {
 		t.Errorf("revision must not overwrite review_after: was %q, now %q", ra1, ra2)
+	}
+}
+
+func TestObservationState(t *testing.T) {
+	future := time.Now().UTC().Add(time.Hour).Format("2006-01-02 15:04:05")
+	past := time.Now().UTC().Add(-time.Hour).Format("2006-01-02 15:04:05")
+
+	if got := (Observation{}).State(); got != ObservationStateActive {
+		t.Fatalf("nil review_after state = %q, want active", got)
+	}
+	if got := (Observation{ReviewAfter: &future}).State(); got != ObservationStateActive {
+		t.Fatalf("future review_after state = %q, want active", got)
+	}
+	if got := (Observation{ReviewAfter: &past}).State(); got != ObservationStateNeedsReview {
+		t.Fatalf("past review_after state = %q, want needs_review", got)
+	}
+}
+
+func TestObservationsNeedingReview(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("review-sess", "review-proj", "/tmp/review"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	staleID, err := s.AddObservation(AddObservationParams{SessionID: "review-sess", Type: "decision", Title: "stale", Content: "stale content", Project: "review-proj"})
+	if err != nil {
+		t.Fatalf("add stale: %v", err)
+	}
+	futureID, err := s.AddObservation(AddObservationParams{SessionID: "review-sess", Type: "decision", Title: "future", Content: "future content", Project: "review-proj"})
+	if err != nil {
+		t.Fatalf("add future: %v", err)
+	}
+	otherID, err := s.AddObservation(AddObservationParams{SessionID: "review-sess", Type: "decision", Title: "other", Content: "other content", Project: "other-proj"})
+	if err != nil {
+		t.Fatalf("add other: %v", err)
+	}
+
+	past := time.Now().UTC().Add(-24 * time.Hour).Format("2006-01-02 15:04:05")
+	future := time.Now().UTC().Add(24 * time.Hour).Format("2006-01-02 15:04:05")
+	if _, err := s.db.Exec(`UPDATE observations SET review_after = ? WHERE id IN (?, ?)`, past, staleID, otherID); err != nil {
+		t.Fatalf("backdate review_after: %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE observations SET review_after = ? WHERE id = ?`, future, futureID); err != nil {
+		t.Fatalf("future review_after: %v", err)
+	}
+
+	got, err := s.ObservationsNeedingReview("review-proj", 10)
+	if err != nil {
+		t.Fatalf("ObservationsNeedingReview(project): %v", err)
+	}
+	if len(got) != 1 || got[0].ID != staleID || got[0].State() != ObservationStateNeedsReview {
+		t.Fatalf("project review list = %#v, want only staleID", got)
+	}
+
+	all, err := s.ObservationsNeedingReview("", 10)
+	if err != nil {
+		t.Fatalf("ObservationsNeedingReview(all): %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("all review list len = %d, want 2: %#v", len(all), all)
+	}
+}
+
+func TestObservationsNeedingReviewExcludesDeletedObservations(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("review-deleted-sess", "review-deleted-proj", "/tmp/review"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	activeID, err := s.AddObservation(AddObservationParams{SessionID: "review-deleted-sess", Type: "decision", Title: "active", Content: "active content", Project: "review-deleted-proj"})
+	if err != nil {
+		t.Fatalf("add active: %v", err)
+	}
+	deletedID, err := s.AddObservation(AddObservationParams{SessionID: "review-deleted-sess", Type: "decision", Title: "deleted", Content: "deleted content", Project: "review-deleted-proj"})
+	if err != nil {
+		t.Fatalf("add deleted: %v", err)
+	}
+	past := time.Now().UTC().Add(-24 * time.Hour).Format("2006-01-02 15:04:05")
+	if _, err := s.db.Exec(`UPDATE observations SET review_after = ? WHERE id IN (?, ?)`, past, activeID, deletedID); err != nil {
+		t.Fatalf("backdate review_after: %v", err)
+	}
+	if err := s.DeleteObservation(deletedID, false); err != nil {
+		t.Fatalf("delete observation: %v", err)
+	}
+
+	got, err := s.ObservationsNeedingReview("review-deleted-proj", 10)
+	if err != nil {
+		t.Fatalf("ObservationsNeedingReview(project): %v", err)
+	}
+	if len(got) != 1 || got[0].ID != activeID {
+		t.Fatalf("review list = %#v, want only activeID", got)
+	}
+}
+
+func TestMarkReviewedResetsReviewAfter(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("mark-reviewed-sess", "mark-reviewed-proj", "/tmp/review"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	decisionID, err := s.AddObservation(AddObservationParams{SessionID: "mark-reviewed-sess", Type: "decision", Title: "decision", Content: "decision content", Project: "mark-reviewed-proj"})
+	if err != nil {
+		t.Fatalf("add decision: %v", err)
+	}
+	manualID, err := s.AddObservation(AddObservationParams{SessionID: "mark-reviewed-sess", Type: "manual", Title: "manual", Content: "manual content", Project: "mark-reviewed-proj"})
+	if err != nil {
+		t.Fatalf("add manual: %v", err)
+	}
+	past := time.Now().UTC().Add(-24 * time.Hour).Format("2006-01-02 15:04:05")
+	if _, err := s.db.Exec(`UPDATE observations SET review_after = ? WHERE id IN (?, ?)`, past, decisionID, manualID); err != nil {
+		t.Fatalf("backdate review_after: %v", err)
+	}
+
+	start := time.Now().UTC()
+	if err := s.MarkReviewed(decisionID); err != nil {
+		t.Fatalf("MarkReviewed decision: %v", err)
+	}
+	reviewAfter, reviewNull, _, _ := queryDecayFields(t, s, decisionID)
+	if reviewNull {
+		t.Fatal("decision review_after should be reset, got NULL")
+	}
+	withinDays(t, "mark reviewed decision", reviewAfter, start.AddDate(0, decayDecisionMonths, 0), 2)
+	obs, err := s.GetObservation(decisionID)
+	if err != nil {
+		t.Fatalf("GetObservation decision: %v", err)
+	}
+	if obs.State() != ObservationStateActive {
+		t.Fatalf("reviewed decision state = %q, want active", obs.State())
+	}
+
+	if err := s.MarkReviewed(manualID); err != nil {
+		t.Fatalf("MarkReviewed manual: %v", err)
+	}
+	_, manualReviewNull, _, _ := queryDecayFields(t, s, manualID)
+	if !manualReviewNull {
+		t.Fatal("manual review_after should be NULL after mark reviewed")
+	}
+}
+
+func TestMarkReviewedDoesNotEnqueueSyncMutation(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnrollProject("mark-reviewed-sync-proj"); err != nil {
+		t.Fatalf("EnrollProject: %v", err)
+	}
+	if err := s.CreateSession("mark-reviewed-sync-sess", "mark-reviewed-sync-proj", "/tmp/review-sync"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	obsID, err := s.AddObservation(AddObservationParams{SessionID: "mark-reviewed-sync-sess", Type: "decision", Title: "decision", Content: "decision content", Project: "mark-reviewed-sync-proj"})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+	past := time.Now().UTC().Add(-24 * time.Hour).Format("2006-01-02 15:04:05")
+	if _, err := s.db.Exec(`UPDATE observations SET review_after = ? WHERE id = ?`, past, obsID); err != nil {
+		t.Fatalf("backdate review_after: %v", err)
+	}
+
+	before, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 10)
+	if err != nil {
+		t.Fatalf("ListPendingSyncMutations before: %v", err)
+	}
+	if err := s.MarkReviewed(obsID); err != nil {
+		t.Fatalf("MarkReviewed: %v", err)
+	}
+	after, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 10)
+	if err != nil {
+		t.Fatalf("ListPendingSyncMutations after: %v", err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("MarkReviewed enqueued sync mutation: before=%d after=%d", len(before), len(after))
+	}
+}
+
+// ─── C.2 [RED] — ListDeferred / GetDeferred ──────────────────────────────────
+
+// seedDeferredRow is a test helper that inserts a row into sync_apply_deferred.
+// Uses a different name from the existing insertDeferredRow in sync_apply_test.go
+// which has parameter order (syncID, entity, payload, retryCount, applyStatus).
+func seedDeferredRow(t *testing.T, s *Store, syncID, entity, payload string, retryCount int, applyStatus string) {
+	t.Helper()
+	if _, err := s.db.Exec(`
+		INSERT INTO sync_apply_deferred
+			(sync_id, entity, payload, apply_status, retry_count, first_seen_at)
+		VALUES (?, ?, ?, ?, ?, datetime('now'))
+	`, syncID, entity, payload, applyStatus, retryCount); err != nil {
+		t.Fatalf("seedDeferredRow %q: %v", syncID, err)
+	}
+}
+
+// TestListDeferred_HappyPath verifies pagination and status filter.
+func TestListDeferred_HappyPath(t *testing.T) {
+	s := newTestStore(t)
+
+	validPayload := `{"relation_type":"conflicts_with","source_id":"obs-aaa","target_id":"obs-bbb"}`
+	seedDeferredRow(t, s, "def-001", "relation", validPayload, 0, "deferred")
+	seedDeferredRow(t, s, "def-002", "relation", validPayload, 1, "deferred")
+	seedDeferredRow(t, s, "def-003", "relation", validPayload, 5, "dead")
+
+	// List all.
+	all, err := s.ListDeferred(ListDeferredOptions{Limit: 50})
+	if err != nil {
+		t.Fatalf("ListDeferred all: %v", err)
+	}
+	if len(all) != 3 {
+		t.Errorf("expected 3 rows; got %d", len(all))
+	}
+
+	// List only deferred status.
+	deferred, err := s.ListDeferred(ListDeferredOptions{Status: "deferred", Limit: 50})
+	if err != nil {
+		t.Fatalf("ListDeferred deferred: %v", err)
+	}
+	if len(deferred) != 2 {
+		t.Errorf("expected 2 deferred rows; got %d", len(deferred))
+	}
+
+	// Pagination: limit=1.
+	page, err := s.ListDeferred(ListDeferredOptions{Limit: 1})
+	if err != nil {
+		t.Fatalf("ListDeferred limit=1: %v", err)
+	}
+	if len(page) != 1 {
+		t.Errorf("expected 1 row with limit=1; got %d", len(page))
+	}
+}
+
+// TestListDeferred_DecodedPayload verifies that DeferredRow.Payload is decoded
+// and PayloadValid=true for well-formed JSON.
+func TestListDeferred_DecodedPayload(t *testing.T) {
+	s := newTestStore(t)
+
+	validPayload := `{"relation_type":"conflicts_with","source_id":"obs-src","target_id":"obs-tgt","extra":42}`
+	seedDeferredRow(t, s, "def-valid", "relation", validPayload, 0, "deferred")
+
+	rows, err := s.ListDeferred(ListDeferredOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListDeferred: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row; got %d", len(rows))
+	}
+	row := rows[0]
+	if !row.PayloadValid {
+		t.Errorf("expected PayloadValid=true for well-formed JSON; got false. PayloadRaw=%q", row.PayloadRaw)
+	}
+	if row.Payload == nil {
+		t.Fatal("expected decoded Payload map; got nil")
+	}
+	if row.Payload["relation_type"] != "conflicts_with" {
+		t.Errorf("decoded Payload[relation_type]: want conflicts_with; got %v", row.Payload["relation_type"])
+	}
+}
+
+// TestListDeferred_MalformedPayload verifies that a malformed JSON payload sets
+// PayloadValid=false and preserves PayloadRaw.
+func TestListDeferred_MalformedPayload(t *testing.T) {
+	s := newTestStore(t)
+
+	seedDeferredRow(t, s, "def-bad", "relation", "not valid json", 5, "dead")
+
+	rows, err := s.ListDeferred(ListDeferredOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListDeferred malformed: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row; got %d", len(rows))
+	}
+	row := rows[0]
+	if row.PayloadValid {
+		t.Errorf("expected PayloadValid=false for malformed JSON; got true")
+	}
+	if row.PayloadRaw != "not valid json" {
+		t.Errorf("expected PayloadRaw preserved; got %q", row.PayloadRaw)
+	}
+}
+
+// TestGetDeferred_HappyPath verifies GetDeferred returns the correct row.
+func TestGetDeferred_HappyPath(t *testing.T) {
+	s := newTestStore(t)
+
+	validPayload := `{"relation_type":"related","source_id":"obs-xyz","target_id":"obs-abc"}`
+	seedDeferredRow(t, s, "def-xyz", "relation", validPayload, 2, "deferred")
+
+	row, err := s.GetDeferred("def-xyz")
+	if err != nil {
+		t.Fatalf("GetDeferred: %v", err)
+	}
+	if row.SyncID != "def-xyz" {
+		t.Errorf("expected SyncID=def-xyz; got %q", row.SyncID)
+	}
+	if row.ApplyStatus != "deferred" {
+		t.Errorf("expected ApplyStatus=deferred; got %q", row.ApplyStatus)
+	}
+	if row.RetryCount != 2 {
+		t.Errorf("expected RetryCount=2; got %d", row.RetryCount)
+	}
+	if !row.PayloadValid {
+		t.Errorf("expected PayloadValid=true for valid JSON; got false")
+	}
+	if row.Payload["relation_type"] != "related" {
+		t.Errorf("decoded Payload[relation_type]: want related; got %v", row.Payload["relation_type"])
+	}
+}
+
+// TestGetDeferred_NotFound verifies GetDeferred returns an error wrapping "not found".
+func TestGetDeferred_NotFound(t *testing.T) {
+	s := newTestStore(t)
+
+	_, err := s.GetDeferred("def-missing")
+	if err == nil {
+		t.Fatal("expected error for missing sync_id; got nil")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected error to contain 'not found'; got %q", err.Error())
+	}
+}
+
+func TestNormalizeScopeHandlesGlobal(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"global", "global"},
+		{"Global", "global"},
+		{"GLOBAL", "global"},
+		{"  global  ", "global"},
+		{"personal", "personal"},
+		{"Personal", "personal"},
+		{"project", "project"},
+		{"Project", "project"},
+		{"", "project"},
+		{"unknown", "project"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			got := normalizeScope(tc.input)
+			if got != tc.want {
+				t.Errorf("normalizeScope(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSearchLegacyMixedCaseProject reproduces issue #146:
+// observations stored with a mixed-case project name (legacy data pre-normalization)
+// must be found when searched with a normalized (lowercase) project name.
+//
+// Previously, Search and ProjectExists used case-sensitive "project = ?" which
+// caused all MCP tool calls to return empty results for such projects.
+func TestSearchLegacyMixedCaseProject(t *testing.T) {
+	s := newTestStore(t)
+
+	// Insert a session and observation directly with mixed-case project name,
+	// bypassing AddObservation normalization to simulate legacy data.
+	legacyProject := "Ebook2Audio"
+	_, err := s.db.Exec(
+		`INSERT INTO sessions (id, project, directory) VALUES (?, ?, ?)`,
+		"legacy-mixed-sess", legacyProject, "/tmp/ebook",
+	)
+	if err != nil {
+		t.Fatalf("insert legacy session: %v", err)
+	}
+
+	_, err = s.db.Exec(`
+		INSERT INTO observations (session_id, type, title, content, project, scope)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		"legacy-mixed-sess", "bugfix",
+		"Fixed log routing in DisplayManager",
+		"Corrected log routing so debug output goes to stderr not stdout",
+		legacyProject, "project",
+	)
+	if err != nil {
+		t.Fatalf("insert legacy observation: %v", err)
+	}
+
+	// Re-build FTS index so the new row is searchable.
+	if _, err := s.db.Exec(`INSERT INTO observations_fts(observations_fts) VALUES('rebuild')`); err != nil {
+		t.Fatalf("rebuild FTS: %v", err)
+	}
+
+	normalizedProject := "ebook2audio"
+
+	// ProjectExists must find the legacy project via case-insensitive match.
+	exists, err := s.ProjectExists(normalizedProject)
+	if err != nil {
+		t.Fatalf("ProjectExists error: %v", err)
+	}
+	if !exists {
+		t.Error("ProjectExists returned false for mixed-case legacy project; want true")
+	}
+
+	// Search must return the observation when filtering by normalized project name.
+	results, err := s.Search("log routing", SearchOptions{
+		Project: normalizedProject,
+		Limit:   10,
+	})
+	if err != nil {
+		t.Fatalf("Search error: %v", err)
+	}
+	if len(results) == 0 {
+		t.Error("Search returned 0 results for legacy mixed-case project; want >=1")
+	}
+
+	// RecentObservations (used by mem_context) must also find the data.
+	obs, err := s.RecentObservations(normalizedProject, "", 10)
+	if err != nil {
+		t.Fatalf("RecentObservations error: %v", err)
+	}
+	if len(obs) == 0 {
+		t.Error("RecentObservations returned 0 results for legacy mixed-case project; want >=1")
+	}
+
+	// RecentSessions (used by mem_context) must also find the session.
+	sessions, err := s.RecentSessions(normalizedProject, 5)
+	if err != nil {
+		t.Fatalf("RecentSessions error: %v", err)
+	}
+	if len(sessions) == 0 {
+		t.Error("RecentSessions returned 0 results for legacy mixed-case project; want >=1")
+	}
+}
+
+// ─── DeleteProject tests ──────────────────────────────────────────────────────
+
+func TestDeleteProjectCascadesAllEntities(t *testing.T) {
+	s := newTestStore(t)
+
+	// Seed: one session with two observations and one prompt.
+	if err := s.CreateSession("s-del-proj-1", "alpha", "/tmp/alpha"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	obsID1, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-del-proj-1",
+		Type:      "decision",
+		Title:     "obs-one",
+		Content:   "content one",
+		Project:   "alpha",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add obs 1: %v", err)
+	}
+	_, err = s.AddObservation(AddObservationParams{
+		SessionID: "s-del-proj-1",
+		Type:      "bugfix",
+		Title:     "obs-two",
+		Content:   "content two",
+		Project:   "alpha",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add obs 2: %v", err)
+	}
+	_, err = s.AddPrompt(AddPromptParams{SessionID: "s-del-proj-1", Content: "prompt one", Project: "alpha"})
+	if err != nil {
+		t.Fatalf("add prompt: %v", err)
+	}
+
+	result, err := s.DeleteProject("alpha", true)
+	if err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
+
+	if result.Project != "alpha" {
+		t.Errorf("result.Project = %q, want %q", result.Project, "alpha")
+	}
+	if result.ObservationsDeleted != 2 {
+		t.Errorf("ObservationsDeleted = %d, want 2", result.ObservationsDeleted)
+	}
+	if result.PromptsDeleted != 1 {
+		t.Errorf("PromptsDeleted = %d, want 1", result.PromptsDeleted)
+	}
+	if result.SessionsDeleted != 1 {
+		t.Errorf("SessionsDeleted = %d, want 1", result.SessionsDeleted)
+	}
+
+	// Verify rows are gone.
+	var obsCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE session_id = ?`, "s-del-proj-1").Scan(&obsCount); err != nil {
+		t.Fatalf("count observations: %v", err)
+	}
+	if obsCount != 0 {
+		t.Errorf("expected 0 observations after hard delete, got %d", obsCount)
+	}
+
+	var sessionCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE project = ?`, "alpha").Scan(&sessionCount); err != nil {
+		t.Fatalf("count sessions: %v", err)
+	}
+	if sessionCount != 0 {
+		t.Errorf("expected 0 sessions after DeleteProject, got %d", sessionCount)
+	}
+
+	var promptCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM user_prompts WHERE project = ?`, "alpha").Scan(&promptCount); err != nil {
+		t.Fatalf("count prompts: %v", err)
+	}
+	if promptCount != 0 {
+		t.Errorf("expected 0 prompts after DeleteProject, got %d", promptCount)
+	}
+
+	// Hard-deleted obs must also be gone from the table itself.
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE id = ?`, obsID1).Scan(&obsCount); err != nil {
+		t.Fatalf("count obs by id: %v", err)
+	}
+	if obsCount != 0 {
+		t.Errorf("expected obs #%d to be hard-deleted, got count %d", obsID1, obsCount)
+	}
+}
+
+func TestDeleteProjectSoftDeleteObservations(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s-del-proj-soft", "beta", "/tmp/beta"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	_, err := s.AddPrompt(AddPromptParams{SessionID: "s-del-proj-soft", Content: "p", Project: "beta"})
+	if err != nil {
+		t.Fatalf("add prompt: %v", err)
+	}
+	obsID, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-del-proj-soft",
+		Type:      "decision",
+		Title:     "soft-obs",
+		Content:   "content",
+		Project:   "beta",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add obs: %v", err)
+	}
+
+	result, err := s.DeleteProject("beta", false)
+	if err != nil {
+		t.Fatalf("DeleteProject soft: %v", err)
+	}
+	if result.ObservationsDeleted != 1 {
+		t.Errorf("ObservationsDeleted = %d, want 1", result.ObservationsDeleted)
+	}
+	if result.PromptsDeleted != 1 {
+		t.Errorf("PromptsDeleted = %d, want 1", result.PromptsDeleted)
+	}
+
+	// Observation row must still exist but have deleted_at set.
+	var deletedAt *string
+	if err := s.db.QueryRow(`SELECT deleted_at FROM observations WHERE id = ?`, obsID).Scan(&deletedAt); err != nil {
+		t.Fatalf("scan deleted_at: %v", err)
+	}
+	if deletedAt == nil {
+		t.Errorf("expected deleted_at to be set after soft-delete, got nil")
+	}
+
+	// Prompts must be removed.
+	var promptCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM user_prompts WHERE project = ?`, "beta").Scan(&promptCount); err != nil {
+		t.Fatalf("count prompts: %v", err)
+	}
+	if promptCount != 0 {
+		t.Errorf("expected 0 prompts after soft DeleteProject, got %d", promptCount)
+	}
+
+	// Sessions must NOT be removed in soft-delete mode (FK constraint from soft-deleted obs).
+	var sessionCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE project = ?`, "beta").Scan(&sessionCount); err != nil {
+		t.Fatalf("count sessions: %v", err)
+	}
+	if sessionCount != 1 {
+		t.Errorf("expected sessions to remain intact after soft DeleteProject, got count %d", sessionCount)
+	}
+	// SessionsDeleted must be 0 in soft mode.
+	if result.SessionsDeleted != 0 {
+		t.Errorf("expected SessionsDeleted = 0 in soft mode, got %d", result.SessionsDeleted)
+	}
+}
+
+func TestDeleteProjectUnknownProjectReturnsError(t *testing.T) {
+	s := newTestStore(t)
+	_, err := s.DeleteProject("nonexistent-project-xyz", true)
+	if err == nil {
+		t.Fatal("expected error for unknown project, got nil")
+	}
+	if !errors.Is(err, ErrProjectNotFound) {
+		t.Errorf("expected ErrProjectNotFound, got %v", err)
+	}
+}
+
+func TestDeleteProjectEmptyNameReturnsError(t *testing.T) {
+	s := newTestStore(t)
+	_, err := s.DeleteProject("", true)
+	if err == nil {
+		t.Fatal("expected error for empty project name, got nil")
+	}
+}
+
+func TestDeleteProjectOrphansMemoryRelations(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s-del-proj-rel", "gamma", "/tmp/gamma"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	obsID, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-del-proj-rel",
+		Type:      "decision",
+		Title:     "rel-obs",
+		Content:   "content",
+		Project:   "gamma",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add obs: %v", err)
+	}
+
+	// Get sync_id of the observation for the relation.
+	var syncID string
+	if err := s.db.QueryRow(`SELECT sync_id FROM observations WHERE id = ?`, obsID).Scan(&syncID); err != nil {
+		t.Fatalf("get sync_id: %v", err)
+	}
+
+	// Insert a fake relation that references this observation.
+	relSyncID := "rel-" + syncID
+	if _, err := s.db.Exec(`
+		INSERT INTO memory_relations (sync_id, source_id, target_id, relation, judgment_status, created_at, updated_at)
+		VALUES (?, ?, 'other-obs', 'related', 'pending', datetime('now'), datetime('now'))
+	`, relSyncID, syncID); err != nil {
+		t.Fatalf("insert relation: %v", err)
+	}
+
+	if _, err := s.DeleteProject("gamma", true); err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
+
+	// The relation must be orphaned, not deleted.
+	var judgmentStatus string
+	if err := s.db.QueryRow(`SELECT judgment_status FROM memory_relations WHERE sync_id = ?`, relSyncID).Scan(&judgmentStatus); err != nil {
+		t.Fatalf("scan relation judgment_status: %v", err)
+	}
+	if judgmentStatus != "orphaned" {
+		t.Errorf("expected relation judgment_status = orphaned after hard delete, got %q", judgmentStatus)
+	}
+}
+
+func TestMostRecentActiveSessionReturnsUnEndedSession(t *testing.T) {
+	s := newTestStore(t)
+
+	// A hook-registered UUID session, never ended.
+	if err := s.CreateSession("uuid-active-1", "engram", "/work/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	id, ok, err := s.MostRecentActiveSession("engram")
+	if err != nil {
+		t.Fatalf("MostRecentActiveSession: %v", err)
+	}
+	if !ok || id != "uuid-active-1" {
+		t.Fatalf("expected active session uuid-active-1, got id=%q ok=%v", id, ok)
+	}
+}
+
+func TestMostRecentActiveSessionSkipsEndedSessions(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("uuid-ended-1", "engram", "/work/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if err := s.EndSession("uuid-ended-1", "done"); err != nil {
+		t.Fatalf("end session: %v", err)
+	}
+
+	_, ok, err := s.MostRecentActiveSession("engram")
+	if err != nil {
+		t.Fatalf("MostRecentActiveSession: %v", err)
+	}
+	if ok {
+		t.Fatalf("expected no active session when the only session is ended, got ok=%v", ok)
+	}
+}
+
+func TestMostRecentActiveSessionNoSessionsReturnsFalse(t *testing.T) {
+	s := newTestStore(t)
+
+	_, ok, err := s.MostRecentActiveSession("engram")
+	if err != nil {
+		t.Fatalf("MostRecentActiveSession: %v", err)
+	}
+	if ok {
+		t.Fatalf("expected ok=false for a project with no sessions, got ok=%v", ok)
+	}
+}
+
+func TestMostRecentActiveSessionPicksMostRecentWhenMultipleActive(t *testing.T) {
+	s := newTestStore(t)
+
+	// Two un-ended UUID sessions for the same project; the newer started_at wins.
+	if err := s.CreateSession("uuid-old", "engram", "/work/engram"); err != nil {
+		t.Fatalf("create old session: %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE sessions SET started_at = ? WHERE id = ?`, "2025-01-01 00:00:00", "uuid-old"); err != nil {
+		t.Fatalf("backdate old session: %v", err)
+	}
+	if err := s.CreateSession("uuid-new", "engram", "/work/engram"); err != nil {
+		t.Fatalf("create new session: %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE sessions SET started_at = ? WHERE id = ?`, "2025-06-01 00:00:00", "uuid-new"); err != nil {
+		t.Fatalf("set new session started_at: %v", err)
+	}
+
+	id, ok, err := s.MostRecentActiveSession("engram")
+	if err != nil {
+		t.Fatalf("MostRecentActiveSession: %v", err)
+	}
+	if !ok || id != "uuid-new" {
+		t.Fatalf("expected most recent active session uuid-new, got id=%q ok=%v", id, ok)
+	}
+}
+
+func TestMostRecentActiveSessionIgnoresManualSaveSessions(t *testing.T) {
+	s := newTestStore(t)
+
+	// The manual-save fallback session is also un-ended, but it must NOT be
+	// resolved as "the active session" — otherwise resolution becomes circular.
+	if err := s.CreateSession("manual-save-engram", "engram", "/work/engram"); err != nil {
+		t.Fatalf("create manual-save session: %v", err)
+	}
+
+	_, ok, err := s.MostRecentActiveSession("engram")
+	if err != nil {
+		t.Fatalf("MostRecentActiveSession: %v", err)
+	}
+	if ok {
+		t.Fatalf("expected manual-save session to be ignored, got ok=%v", ok)
+	}
+}
+
+func TestMostRecentActiveSessionScopedByProject(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("uuid-other-proj", "other", "/work/other"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	_, ok, err := s.MostRecentActiveSession("engram")
+	if err != nil {
+		t.Fatalf("MostRecentActiveSession: %v", err)
+	}
+	if ok {
+		t.Fatalf("expected no active session for engram when only 'other' has one, got ok=%v", ok)
+	}
+}
+
+// ─── match_mode tests (issue #352) ──────────────────────────────────────────
+
+// seedMatchModeFixture creates a session and three observations with partial
+// token overlap — no single observation contains all three query tokens.
+//
+//	obs1: title "Auth session middleware"       content ""
+//	obs2: title "Compliance audit notes"        content "session policy"
+//	obs3: title "OAuth tokens"                  content "auth and compliance"
+func seedMatchModeFixture(t *testing.T, s *Store) {
+	t.Helper()
+	if err := s.CreateSession("s-matchmode", "engram", "/tmp"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	obs := []AddObservationParams{
+		{SessionID: "s-matchmode", Type: "decision", Title: "Auth session middleware", Content: "", Project: "engram", Scope: "project"},
+		{SessionID: "s-matchmode", Type: "decision", Title: "Compliance audit notes", Content: "session policy", Project: "engram", Scope: "project"},
+		{SessionID: "s-matchmode", Type: "decision", Title: "OAuth tokens", Content: "auth and compliance", Project: "engram", Scope: "project"},
+	}
+	for _, p := range obs {
+		if _, err := s.AddObservation(p); err != nil {
+			t.Fatalf("seed observation %q: %v", p.Title, err)
+		}
+	}
+}
+
+// TestSearchMatchMode_DefaultIsAND verifies that the default (AND) behaviour
+// returns 0 results when no single observation contains all query tokens.
+func TestSearchMatchMode_DefaultIsAND(t *testing.T) {
+	s := newTestStore(t)
+	seedMatchModeFixture(t, s)
+
+	results, err := s.Search("auth compliance session", SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("Search error: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("expected 0 results for AND query, got %d", len(results))
+	}
+}
+
+// TestSearchMatchMode_AllExplicit verifies that MatchMode "all" behaves
+// identically to the default AND mode.
+func TestSearchMatchMode_AllExplicit(t *testing.T) {
+	s := newTestStore(t)
+	seedMatchModeFixture(t, s)
+
+	results, err := s.Search("auth compliance session", SearchOptions{Project: "engram", Limit: 10, MatchMode: "all"})
+	if err != nil {
+		t.Fatalf("Search error: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("expected 0 results for explicit match_mode=all, got %d", len(results))
+	}
+}
+
+// TestSearchMatchMode_Any verifies that MatchMode "any" returns all three
+// observations because each contains at least one of the query tokens.
+func TestSearchMatchMode_Any(t *testing.T) {
+	s := newTestStore(t)
+	seedMatchModeFixture(t, s)
+
+	results, err := s.Search("auth compliance session", SearchOptions{Project: "engram", Limit: 10, MatchMode: "any"})
+	if err != nil {
+		t.Fatalf("Search error: %v", err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("expected 3 results for match_mode=any, got %d", len(results))
+	}
+}
+
+// TestSearchMatchMode_InvalidReturnsError verifies that an unrecognised
+// match_mode value returns an explicit error regardless of query shape.
+func TestSearchMatchMode_InvalidReturnsError(t *testing.T) {
+	s := newTestStore(t)
+	seedMatchModeFixture(t, s)
+
+	_, err := s.Search("auth compliance session", SearchOptions{Project: "engram", Limit: 10, MatchMode: "or"})
+	if err == nil {
+		t.Fatalf("expected error for invalid match_mode, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid match_mode") {
+		t.Fatalf("expected error to contain \"invalid match_mode\", got: %v", err)
+	}
+}
+
+// TestSearchMatchMode_SingleToken verifies that a single-token query returns
+// the same result regardless of match_mode (both modes are equivalent for one
+// token because AND and OR over a single term are identical).
+func TestSearchMatchMode_SingleToken(t *testing.T) {
+	s := newTestStore(t)
+	seedMatchModeFixture(t, s)
+
+	defaultRes, err := s.Search("auth", SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("default Search error: %v", err)
+	}
+	anyRes, err := s.Search("auth", SearchOptions{Project: "engram", Limit: 10, MatchMode: "any"})
+	if err != nil {
+		t.Fatalf("any Search error: %v", err)
+	}
+	if len(defaultRes) != len(anyRes) {
+		t.Fatalf("single-token results differ: default=%d any=%d", len(defaultRes), len(anyRes))
+	}
+}
+
+// TestSearchMatchMode_EmptyQueryAnyReturnsError pins that Search("", …{MatchMode:"any"})
+// returns an error — the FTS5 engine rejects an empty match expression, and this
+// behaviour is the same as the default AND mode with an empty query.
+func TestSearchMatchMode_EmptyQueryAnyReturnsError(t *testing.T) {
+	s := newTestStore(t)
+	seedMatchModeFixture(t, s)
+
+	_, err := s.Search("", SearchOptions{Project: "engram", Limit: 10, MatchMode: "any"})
+	if err == nil {
+		t.Fatal("expected error for empty query with match_mode=any, got nil")
+	}
+}
+
+func TestSearch_WeightedBM25Ranking(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s-bm25", "engram", "/tmp"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	// Observation A: query term in title (weight 5.0)
+	idA, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-bm25",
+		Type:      "decision",
+		Title:     "banana apple grape",
+		Content:   "nothing here",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation A: %v", err)
+	}
+
+	// Observation B: query term in content (weight 1.0)
+	idB, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-bm25",
+		Type:      "decision",
+		Title:     "nothing here",
+		Content:   "banana apple grape",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation B: %v", err)
+	}
+
+	results, err := s.Search("banana", SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("Search error: %v", err)
+	}
+
+	if len(results) < 2 {
+		t.Fatalf("expected at least 2 results, got %d", len(results))
+	}
+
+	// Since we order by rank, and rank is BM25, the title match (A) should be first (more relevant).
+	if results[0].ID != idA {
+		t.Errorf("expected observation A (title match) to rank higher than B (content match); got first: %d (title: %q, rank: %v), second: %d (title: %q, rank: %v)",
+			results[0].ID, results[0].Title, results[0].Rank, results[1].ID, results[1].Title, results[1].Rank)
+	}
+	if results[1].ID != idB {
+		t.Errorf("expected observation B (content match) to rank second; got second: %d (title: %q, rank: %v)",
+			results[1].ID, results[1].Title, results[1].Rank)
+	}
+}
+
+// TestSanitizeFTS verifies sanitizeFTS escapes interior double-quotes per FTS5
+// string-literal rules, preventing "unterminated string" crashes on inputs like
+// `hello"world`. See issue #574.
+func TestSanitizeFTS(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"plain word", "foo", `"foo"`},
+		{"multiple words", "fix auth bug", `"fix" "auth" "bug"`},
+		{"interior double-quote (the bug)", `foo"bar`, `"foo""bar"`},
+		{"already quoted", `"hello"`, `"hello"`},
+		{"multiple interior quotes", `a"b"c`, `"a""b""c"`},
+		{"just quotes", `""`, `""`},
+		{"mixed quote and plain", `hello"world test`, `"hello""world" "test"`},
+		{"empty input", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sanitizeFTS(tc.input)
+			if got != tc.want {
+				t.Errorf("sanitizeFTS(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
 	}
 }

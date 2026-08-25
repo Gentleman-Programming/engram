@@ -8,10 +8,9 @@
  *   OpenCode events → this plugin → HTTP calls → engram serve → SQLite
  *
  * Session resilience:
- *   Uses `ensureSession()` before any DB write. This means sessions are
- *   created on-demand — even if the plugin was loaded after the session
- *   started (restart, reconnect, etc.). The session ID comes from OpenCode's
- *   hooks (input.sessionID) rather than relying on a session.created event.
+ *   Resolves OpenCode's persisted session hierarchy before attributed writes,
+ *   then uses `ensureSession()` so plugin reloads and reconnects remain safe
+ *   even when no session.created event is replayed.
  */
 
 import type { Plugin } from "@opencode-ai/plugin"
@@ -37,6 +36,14 @@ const ENGRAM_TOOLS = new Set([
   "mem_get_observation",
   "mem_session_start",
   "mem_session_end",
+  "mem_capture_passive",
+])
+
+const SESSION_ATTRIBUTED_WRITE_TOOLS = new Set([
+  "mem_save",
+  "mem_save_prompt",
+  "mem_session_summary",
+  "mem_capture_passive",
 ])
 
 // ─── Memory Instructions ─────────────────────────────────────────────────────
@@ -76,7 +83,7 @@ Topic rules:
 ### WHEN TO SEARCH MEMORY
 
 When the user asks to recall something — any variation of "remember", "recall", "what did we do",
-"how did we solve", "recordar", "acordate", "qué hicimos", or references to past work:
+"how did we solve", or the equivalent in the user's language, or references to past work:
 1. First call \`mem_context\` — checks recent session history (fast, cheap)
 2. If not found, call \`mem_search\` with relevant keywords (FTS5 full-text search)
 3. If you find a match, use \`mem_get_observation\` for full untruncated content
@@ -88,7 +95,7 @@ Also search memory PROACTIVELY when:
 
 ### SESSION CLOSE PROTOCOL (mandatory)
 
-Before ending a session or saying "done" / "listo" / "that's it", you MUST:
+Before ending a session or saying "done" / "that's it", you MUST:
 1. Call \`mem_session_summary\` with this structure:
 
 ## Goal
@@ -132,8 +139,14 @@ async function engramFetch(
       method: opts.method ?? "GET",
       headers: opts.body ? { "Content-Type": "application/json" } : undefined,
       body: opts.body ? JSON.stringify(opts.body) : undefined,
+      signal: AbortSignal.timeout(3000),
     })
-    return await res.json()
+    if (!res.ok) return null
+    try {
+      return await res.json()
+    } catch {
+      return {}
+    }
   } catch {
     // Engram server not running — silently fail
     return null
@@ -203,14 +216,160 @@ export const Engram: Plugin = async (ctx) => {
   // Track tool counts per session (in-memory only, not critical)
   const toolCounts = new Map<string, number>()
 
+  // Track last nudge time per session to debounce save reminders
+  const lastNudgeTime = new Map<string, number>() // sessionID -> epoch seconds
+
   // Track which sessions we've already ensured exist in engram
   const knownSessions = new Set<string>()
 
-  // Track sub-agent session IDs so we can suppress their tool-hook registrations.
-  // Sub-agents (Task() calls) have a parentID or a title ending in " subagent)".
-  // We must not register them as top-level Engram sessions — they cause session
-  // inflation (e.g. 170 sessions for 1 real conversation, issue #116).
+  // Track child session IDs so we can suppress their tool-hook registrations.
+  // OpenCode's parentID is the authoritative ownership signal; titles are not.
+  // Children must not register as top-level Engram sessions because that causes
+  // session inflation (e.g. 170 sessions for 1 real conversation, issue #116).
   const subAgentSessions = new Set<string>()
+
+  // Authoritative runtime ownership from OpenCode events or SDK lookups.
+  // A null parent marks a confirmed root; child sessions never own lifecycle.
+  const parentSessions = new Map<string, string | null>()
+
+  // Deleted sessions and descendants remain invalid for this plugin lifetime.
+  // This prevents late hooks or events from reviving an expired runtime chain.
+  const invalidSessions = new Set<string>()
+
+  function invalidateSessionTree(sessionId: string): void {
+    const invalidated = new Set([sessionId])
+    let foundDescendant = true
+    while (foundDescendant) {
+      foundDescendant = false
+      for (const [childID, parentID] of parentSessions) {
+        if (parentID && invalidated.has(parentID) && !invalidated.has(childID)) {
+          invalidated.add(childID)
+          foundDescendant = true
+        }
+      }
+    }
+
+    for (const invalidID of invalidated) {
+      invalidSessions.add(invalidID)
+      knownSessions.delete(invalidID)
+      subAgentSessions.delete(invalidID)
+      parentSessions.delete(invalidID)
+      toolCounts.delete(invalidID)
+      lastNudgeTime.delete(invalidID)
+    }
+  }
+
+  function cacheSessionInfo(info: { id?: unknown; parentID?: unknown; projectID?: unknown } | undefined): boolean {
+    const rawSessionID = info?.id
+    const sessionId = typeof rawSessionID === "string" && rawSessionID ? rawSessionID : ""
+    if (!sessionId) return false
+    const rawParentID = info?.parentID
+    const parentID = rawParentID === undefined
+      ? null
+      : typeof rawParentID === "string" && rawParentID
+        ? rawParentID
+        : undefined
+    const rawProjectID = info?.projectID
+    const invalidProjectID = (
+      typeof rawProjectID !== "string" ||
+      !rawProjectID ||
+      (ctx.project?.id && rawProjectID !== ctx.project.id)
+    )
+    if (parentID === undefined || invalidProjectID) {
+      parentSessions.delete(sessionId)
+      subAgentSessions.delete(sessionId)
+      return false
+    }
+    if (invalidSessions.has(sessionId) || (parentID && invalidSessions.has(parentID))) {
+      invalidateSessionTree(sessionId)
+      return false
+    }
+    parentSessions.set(sessionId, parentID)
+    return true
+  }
+
+  async function resolveAuthoritativeSessionID(sessionId: string): Promise<string> {
+    if (!sessionId || invalidSessions.has(sessionId)) return ""
+    if (subAgentSessions.has(sessionId) && !parentSessions.has(sessionId)) return ""
+    const visited = new Set<string>()
+    const resolvedParents = new Map<string, string | null>()
+    const publishResolvedParents = (): void => {
+      for (const [resolvedID, resolvedParentID] of resolvedParents) {
+        if (!parentSessions.has(resolvedID)) {
+          parentSessions.set(resolvedID, resolvedParentID)
+          if (resolvedParentID) subAgentSessions.add(resolvedID)
+        }
+      }
+    }
+    const invalidateResolvedTree = (invalidID: string): void => {
+      publishResolvedParents()
+      invalidateSessionTree(invalidID)
+    }
+    let current = sessionId
+    while (true) {
+      if (visited.has(current)) return ""
+      if (invalidSessions.has(current)) {
+        invalidateResolvedTree(current)
+        return ""
+      }
+      visited.add(current)
+
+      let parentID: string | null
+      if (parentSessions.has(current)) {
+        parentID = parentSessions.get(current) ?? null
+      } else {
+        let result: Awaited<ReturnType<typeof ctx.client.session.get>> | undefined
+        try {
+          result = await ctx.client.session.get({ path: { id: current } })
+        } catch {
+          return ""
+        }
+        if (invalidSessions.has(current)) {
+          invalidateResolvedTree(current)
+          return ""
+        }
+        if (parentSessions.has(current)) {
+          parentID = parentSessions.get(current) ?? null
+        } else {
+          const info = result?.data
+          const status = result?.response?.status
+          if (
+            result?.error ||
+            (typeof status === "number" && status >= 400) ||
+            !info ||
+            typeof info.id !== "string" ||
+            info.id !== current ||
+            typeof info.projectID !== "string" ||
+            !info.projectID ||
+            (ctx.project?.id && info.projectID !== ctx.project.id) ||
+            (info.parentID !== undefined && (typeof info.parentID !== "string" || !info.parentID))
+          ) {
+            return ""
+          }
+          parentID = info.parentID ?? null
+          resolvedParents.set(current, parentID)
+        }
+      }
+
+      if (parentID === null) {
+        if (subAgentSessions.has(current)) return ""
+        for (const [resolvedID, resolvedParentID] of resolvedParents) {
+          const invalidID = invalidSessions.has(resolvedID)
+            ? resolvedID
+            : resolvedParentID && invalidSessions.has(resolvedParentID)
+              ? resolvedParentID
+              : ""
+          if (invalidID) {
+            invalidateResolvedTree(invalidID)
+            return ""
+          }
+        }
+        publishResolvedParents()
+        return current
+      }
+      current = parentID
+    }
+  }
 
   /**
    * Ensure a session exists in engram. Idempotent — calls POST /sessions
@@ -218,12 +377,12 @@ export const Engram: Plugin = async (ctx) => {
    *
    * Silently skips sub-agent sessions (tracked in `subAgentSessions`).
    */
-  async function ensureSession(sessionId: string): Promise<void> {
-    if (!sessionId || knownSessions.has(sessionId)) return
+  async function ensureSession(sessionId: string): Promise<boolean> {
+    if (!sessionId || invalidSessions.has(sessionId)) return false
+    if (knownSessions.has(sessionId)) return true
     // Do not register sub-agent sessions in Engram (issue #116).
-    if (subAgentSessions.has(sessionId)) return
-    knownSessions.add(sessionId)
-    await engramFetch("/sessions", {
+    if (subAgentSessions.has(sessionId)) return false
+    const acknowledgement = await engramFetch("/sessions", {
       method: "POST",
       body: {
         id: sessionId,
@@ -231,6 +390,9 @@ export const Engram: Plugin = async (ctx) => {
         directory: ctx.directory,
       },
     })
+    if (acknowledgement === null || invalidSessions.has(sessionId)) return false
+    knownSessions.add(sessionId)
+    return true
   }
 
   // Try to start engram server if not running
@@ -280,30 +442,24 @@ export const Engram: Plugin = async (ctx) => {
     // ─── Event Listeners ───────────────────────────────────────────
 
     event: async ({ event }) => {
-      // --- Session Created ---
-      if (event.type === "session.created") {
+      // --- Session Created / Updated ---
+      if (event.type === "session.created" || event.type === "session.updated") {
         // Bug fix (#116): session data is nested under event.properties.info,
         // not event.properties directly.
         const info = (event.properties as any)?.info
         const sessionId = info?.id
         const parentID = info?.parentID
-        const title: string = info?.title ?? ""
 
-        // Sub-agent sessions (created via Task()) must NOT be registered as
-        // top-level Engram sessions. They cause massive session inflation
-        // (e.g. 170 sessions for 1 real conversation).
-        //
-        // Detection heuristics:
-        //   - parentID is set on all Task() sub-agent sessions
-        //   - title ends with " subagent)" as a secondary signal
-        const isSubAgent = !!parentID || title.endsWith(" subagent)")
+        // Only an authoritative parentID makes this session a child. Titles are
+        // descriptive and may legitimately resemble generated sub-agent titles.
+        const isSubAgent = !!parentID
 
-        if (sessionId && !isSubAgent) {
+        if (!cacheSessionInfo(info)) return
+        if (isSubAgent) subAgentSessions.add(sessionId)
+        else subAgentSessions.delete(sessionId)
+
+        if (event.type === "session.created" && sessionId && !isSubAgent) {
           await ensureSession(sessionId)
-        } else if (sessionId && isSubAgent) {
-          // Remember this as a sub-agent session so tool-hook calls
-          // to ensureSession() are also suppressed for it.
-          subAgentSessions.add(sessionId)
         }
       }
 
@@ -313,9 +469,7 @@ export const Engram: Plugin = async (ctx) => {
         const info = (event.properties as any)?.info
         const sessionId = info?.id
         if (sessionId) {
-          toolCounts.delete(sessionId)
-          knownSessions.delete(sessionId)
-          subAgentSessions.delete(sessionId)
+          invalidateSessionTree(sessionId)
         }
       }
 
@@ -328,10 +482,9 @@ export const Engram: Plugin = async (ctx) => {
     // output.parts contains TextPart[] with the actual message text.
 
     "chat.message": async (input, output) => {
-      // Skip sub-agent sessions — they inflate session counts (issue #116)
-      if (subAgentSessions.has(input.sessionID)) return
-
-      const sessionId = input.sessionID
+      const sessionId = await resolveAuthoritativeSessionID(input.sessionID)
+      // Skip child prompts even when ownership was discovered through the SDK.
+      if (!sessionId || subAgentSessions.has(input.sessionID)) return
 
       // Extract text from parts (type:"text")
       const content = output.parts
@@ -349,7 +502,9 @@ export const Engram: Plugin = async (ctx) => {
 
       // Only capture non-trivial prompts (>10 chars)
       if (finalContent.length > 10) {
-        await ensureSession(sessionId)
+        const registered = await ensureSession(sessionId)
+        const confirmedSessionID = await resolveAuthoritativeSessionID(input.sessionID)
+        if (!registered || confirmedSessionID !== sessionId) return
         await engramFetch("/prompts", {
           method: "POST",
           body: {
@@ -367,18 +522,36 @@ export const Engram: Plugin = async (ctx) => {
     // Passive capture: when a Task tool completes, POST its output to
     // the passive capture endpoint so the server extracts learnings.
 
+    "tool.execute.before": async (input, output) => {
+      if (!SESSION_ATTRIBUTED_WRITE_TOOLS.has(input.tool.toLowerCase())) return
+      const authoritativeSessionID = await resolveAuthoritativeSessionID(input.sessionID)
+      if (!authoritativeSessionID) {
+        throw new Error(`gentle-engram could not resolve an authoritative OpenCode runtime session for ${input.tool}`)
+      }
+      const registered = await ensureSession(authoritativeSessionID)
+      const confirmedSessionID = await resolveAuthoritativeSessionID(input.sessionID)
+      if (confirmedSessionID !== authoritativeSessionID) {
+        throw new Error(`gentle-engram could not resolve an authoritative OpenCode runtime session for ${input.tool}`)
+      }
+      if (!registered) {
+        throw new Error(`gentle-engram could not confirm Engram session registration for ${input.tool}; verify that the Engram server is available and retry`)
+      }
+      output.args.session_id = authoritativeSessionID
+    },
+
     "tool.execute.after": async (input, output) => {
       if (ENGRAM_TOOLS.has(input.tool.toLowerCase())) return
 
       // input.sessionID comes from OpenCode — always available
-      const sessionId = input.sessionID
-      if (sessionId) {
-        await ensureSession(sessionId)
-        toolCounts.set(sessionId, (toolCounts.get(sessionId) ?? 0) + 1)
-      }
+      const sessionId = await resolveAuthoritativeSessionID(input.sessionID)
+      if (!sessionId) return
+      const registered = await ensureSession(sessionId)
+      const confirmedSessionID = await resolveAuthoritativeSessionID(input.sessionID)
+      if (!registered || confirmedSessionID !== sessionId) return
+      toolCounts.set(sessionId, (toolCounts.get(sessionId) ?? 0) + 1)
 
       // Passive capture: extract learnings from Task tool output
-      if (input.tool === "Task" && output && sessionId) {
+      if (input.tool === "Task" && output) {
         const text = typeof output === "string" ? output : JSON.stringify(output)
         if (text.length > 50) {
           await engramFetch("/observations/passive", {
@@ -404,11 +577,95 @@ export const Engram: Plugin = async (ctx) => {
     // block at the beginning. By concatenating, we avoid adding extra system
     // messages that would break these models. See: GitHub issue #23.
 
-    "experimental.chat.system.transform": async (_input, output) => {
+    "experimental.chat.system.transform": async (input, output) => {
       if (output.system.length > 0) {
         output.system[output.system.length - 1] += "\n\n" + MEMORY_INSTRUCTIONS
       } else {
         output.system.push(MEMORY_INSTRUCTIONS)
+      }
+
+      // ── Save nudge ──────────────────────────────────────────────────────────
+      // If it has been a long time since the last mem_save, append a reminder
+      // to the system prompt so the agent notices. All fetches are fire-and-
+      // forget with short timeouts — any failure silently skips the nudge.
+      try {
+        const sessionID: string = input.sessionID ?? ""
+        if (!sessionID || invalidSessions.has(sessionID) || subAgentSessions.has(sessionID)) return
+
+        // SQLite datetime('now') returns "YYYY-MM-DD HH:MM:SS" in UTC with no
+        // zone suffix; new Date() would parse that as local time. Normalize to
+        // UTC first so the thresholds are correct in every timezone.
+        const toEpochSecs = (ts: string): number => {
+          if (!ts) return 0
+          const normalized = ts.includes("T") ? ts : ts.replace(" ", "T") + "Z"
+          const ms = new Date(normalized).getTime()
+          return Number.isNaN(ms) ? 0 : Math.floor(ms / 1000)
+        }
+
+        const cooldownSecs = parseInt(process.env.ENGRAM_NUDGE_COOLDOWN_SECS ?? "900", 10)
+        const nowSecs = Math.floor(Date.now() / 1000)
+
+        // Debounce: skip if we nudged recently this session
+        const lastNudge = lastNudgeTime.get(sessionID)
+        if (lastNudge !== undefined && nowSecs - lastNudge < cooldownSecs) return
+
+        // Skip if the session is too young (< 5 minutes)
+        let sessionStartEpoch = 0
+        try {
+          const sessionRes = await fetch(`${ENGRAM_URL}/sessions/${encodeURIComponent(sessionID)}`, {
+            signal: AbortSignal.timeout(200),
+          })
+          if (sessionRes.ok) {
+            const sessionData = await sessionRes.json()
+            const startedAt: string = sessionData?.started_at ?? ""
+            if (startedAt) {
+              sessionStartEpoch = toEpochSecs(startedAt)
+            }
+          }
+        } catch {
+          // Server unreachable or timed out — skip nudge
+          return
+        }
+        if (sessionStartEpoch > 0 && nowSecs - sessionStartEpoch < 300) return
+
+        // Check when the last observation was saved for this project
+        let lastObsEpoch = 0
+        try {
+          const obsRes = await fetch(
+            `${ENGRAM_URL}/observations?project=${encodeURIComponent(project)}&limit=1&sort=created_at:desc`,
+            { signal: AbortSignal.timeout(200) }
+          )
+          if (obsRes.ok) {
+            const obsData = await obsRes.json()
+            const createdAt: string = obsData?.[0]?.created_at ?? ""
+            if (createdAt) {
+              lastObsEpoch = toEpochSecs(createdAt)
+            }
+          }
+        } catch {
+          // Server unreachable or timed out — skip nudge
+          return
+        }
+
+        // No observations yet — nothing to nudge about
+        if (lastObsEpoch === 0) return
+
+        // Only nudge if last save was more than 15 minutes ago
+        if (nowSecs - lastObsEpoch < 900) return
+
+        // Append the nudge to the last system message
+        const nudge =
+          "\n\nMEMORY REMINDER: It's been over 15 minutes since your last memory save. " +
+          "If you've made decisions, discoveries, completed significant work, or found non-obvious things, " +
+          "call mem_save now."
+        if (output.system.length > 0) {
+          output.system[output.system.length - 1] += nudge
+        } else {
+          output.system.push(nudge)
+        }
+        lastNudgeTime.set(sessionID, nowSecs)
+      } catch {
+        // Any unexpected error — silently skip the nudge, never crash the hook
       }
     },
 
@@ -422,7 +679,8 @@ export const Engram: Plugin = async (ctx) => {
 
     "experimental.session.compacting": async (input, output) => {
       if (input.sessionID) {
-        await ensureSession(input.sessionID)
+        const sessionId = await resolveAuthoritativeSessionID(input.sessionID)
+        if (sessionId) await ensureSession(sessionId)
       }
 
       // Inject context from previous sessions

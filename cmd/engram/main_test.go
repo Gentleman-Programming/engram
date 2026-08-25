@@ -166,6 +166,11 @@ func TestPrintUsage(t *testing.T) {
 	if !strings.Contains(stdout, "search <query>") || !strings.Contains(stdout, "setup [agent]") {
 		t.Fatalf("usage missing expected commands: %q", stdout)
 	}
+	for _, agent := range []string{"opencode", "pi", "claude-code", "gemini-cli", "codex", "antigravity-cli", "windsurf", "qwen", "kiro", "cursor", "vscode-copilot", "kilocode"} {
+		if !strings.Contains(stdout, agent) {
+			t.Fatalf("usage missing setup agent %q: %q", agent, stdout)
+		}
+	}
 	if !strings.Contains(stdout, "cloud <subcommand>") {
 		t.Fatalf("usage missing cloud command tree: %q", stdout)
 	}
@@ -178,6 +183,7 @@ func TestPrintUsage(t *testing.T) {
 	for _, token := range []string{
 		"ENGRAM_DATABASE_URL",
 		"ENGRAM_CLOUD_HOST",
+		"ENGRAM_CLOUD_MAX_PUSH_BYTES",
 		"ENGRAM_CLOUD_TOKEN",
 		"ENGRAM_CLOUD_INSECURE_NO_AUTH",
 		"Cannot be combined with ENGRAM_CLOUD_TOKEN",
@@ -198,15 +204,22 @@ func TestPrintPostInstall(t *testing.T) {
 		notExpects []string
 	}{
 		{
-			name:    "opencode with subagent monitor enabled",
-			result:  &setup.Result{Agent: "opencode", TUIPluginEnabled: true},
-			expects: []string{"Restart OpenCode", "opencode-subagent-statusline", "engram serve &"},
+			name:       "opencode with subagent monitor enabled",
+			result:     &setup.Result{Agent: "opencode", TUIPluginEnabled: true},
+			expects:    []string{"Restart OpenCode", "opencode-subagent-statusline", "auto-starts"},
+			notExpects: []string{"engram serve &"},
 		},
 		{
 			name:       "opencode with subagent monitor not enabled",
 			result:     &setup.Result{Agent: "opencode", TUIPluginEnabled: false},
-			expects:    []string{"Restart OpenCode", "engram serve &"},
-			notExpects: []string{"opencode-subagent-statusline"},
+			expects:    []string{"Restart OpenCode", "auto-starts"},
+			notExpects: []string{"opencode-subagent-statusline", "engram serve &"},
+		},
+		{
+			name:       "pi",
+			result:     &setup.Result{Agent: "pi"},
+			expects:    []string{"Restart Pi", "pi list"},
+			notExpects: []string{"ENGRAM_BIN"},
 		},
 		{
 			name:    "gemini-cli",
@@ -217,6 +230,41 @@ func TestPrintPostInstall(t *testing.T) {
 			name:    "codex",
 			result:  &setup.Result{Agent: "codex"},
 			expects: []string{"Restart Codex", "~/.codex/config.toml"},
+		},
+		{
+			name:    "antigravity-cli",
+			result:  &setup.Result{Agent: "antigravity-cli"},
+			expects: []string{"Restart Antigravity", "~/.gemini/config/mcp_config.json", "~/.gemini/GEMINI.md"},
+		},
+		{
+			name:    "windsurf",
+			result:  &setup.Result{Agent: "windsurf"},
+			expects: []string{"Restart Windsurf", "~/.codeium/windsurf/mcp_config.json"},
+		},
+		{
+			name:    "qwen",
+			result:  &setup.Result{Agent: "qwen"},
+			expects: []string{"Restart Qwen Code", "~/.qwen/settings.json"},
+		},
+		{
+			name:    "kiro",
+			result:  &setup.Result{Agent: "kiro"},
+			expects: []string{"Restart Kiro", "~/.kiro/settings/mcp.json"},
+		},
+		{
+			name:    "cursor",
+			result:  &setup.Result{Agent: "cursor"},
+			expects: []string{"Restart Cursor", "~/.cursor/mcp.json", "engram-memory-protocol.md", "User Rules"},
+		},
+		{
+			name:    "vscode-copilot",
+			result:  &setup.Result{Agent: "vscode-copilot"},
+			expects: []string{"Restart VS Code", "servers.engram", "engram.instructions.md"},
+		},
+		{
+			name:    "kilocode",
+			result:  &setup.Result{Agent: "kilocode"},
+			expects: []string{"Restart Kilo Code", "~/.config/kilo/opencode.json"},
 		},
 		{
 			name:   "unknown",
@@ -974,9 +1022,6 @@ func TestCmdProjectsAllNoGroups(t *testing.T) {
 }
 
 func TestCmdMCPDetectsProjectFromFlag(t *testing.T) {
-	// JR2-4: --project flag is no longer used (dead code removed). The --project flag
-	// is now silently ignored; project is auto-detected from cwd at each MCP call.
-	// This test verifies cmdMCP still starts correctly when an unknown flag is passed.
 	cfg := testConfig(t)
 
 	var capturedCfg mcp.MCPConfig
@@ -998,9 +1043,9 @@ func TestCmdMCPDetectsProjectFromFlag(t *testing.T) {
 	withArgs(t, "engram", "mcp", "--project=myproject")
 	_, _ = captureOutput(t, func() { cmdMCP(cfg) })
 
-	// JW6: MCPConfig.DefaultProject removed — verify cmdMCP still calls newMCPServerWithConfig.
-	// The project flag is parsed but project is now auto-detected per call, not stored in config.
-	_ = capturedCfg // MCPConfig{} — no fields to assert
+	if capturedCfg.DefaultProject != "myproject" {
+		t.Fatalf("DefaultProject = %q; want myproject", capturedCfg.DefaultProject)
+	}
 }
 
 func TestCmdMCPDetectsProjectFromEnv(t *testing.T) {
@@ -1025,8 +1070,9 @@ func TestCmdMCPDetectsProjectFromEnv(t *testing.T) {
 	withArgs(t, "engram", "mcp")
 	_, _ = captureOutput(t, func() { cmdMCP(cfg) })
 
-	// JW6: MCPConfig.DefaultProject removed — just verify cmdMCP completes without panic.
-	_ = capturedCfg
+	if capturedCfg.DefaultProject != "env-project" {
+		t.Fatalf("DefaultProject = %q; want env-project", capturedCfg.DefaultProject)
+	}
 }
 
 func TestCmdMCPDetectsProjectFromGit(t *testing.T) {
@@ -1054,8 +1100,9 @@ func TestCmdMCPDetectsProjectFromGit(t *testing.T) {
 	withArgs(t, "engram", "mcp")
 	_, _ = captureOutput(t, func() { cmdMCP(cfg) })
 
-	// JW6: MCPConfig.DefaultProject removed — just verify cmdMCP completes without panic.
-	_ = capturedCfg
+	if capturedCfg.DefaultProject != "" {
+		t.Fatalf("DefaultProject = %q; want empty without flag/env", capturedCfg.DefaultProject)
+	}
 }
 
 func TestCmdSyncUsesDetectProject(t *testing.T) {
@@ -1444,5 +1491,350 @@ func TestObsidianExportWatchModeCallsInjectedWatcher(t *testing.T) {
 	}
 	if watcherCfg.Logf == nil {
 		t.Fatalf("expected non-nil Logf in WatcherConfig")
+	}
+}
+
+// ─── Delete command tests ─────────────────────────────────────────────────────
+
+func TestCmdDeleteSoftDeleteSuccess(t *testing.T) {
+	cfg := testConfig(t)
+	id := mustSeedObservation(t, cfg, "s-del", "proj-del", "decision", "to-delete", "delete me", "project")
+
+	withArgs(t, "engram", "delete", strconv.FormatInt(id, 10))
+	stdout, stderr := captureOutput(t, func() { cmdDelete(cfg) })
+	if stderr != "" {
+		t.Fatalf("expected no stderr, got: %q", stderr)
+	}
+	if !strings.Contains(stdout, "deleted") {
+		t.Fatalf("expected deletion confirmation, got: %q", stdout)
+	}
+	if !strings.Contains(stdout, strconv.FormatInt(id, 10)) {
+		t.Fatalf("expected id in output, got: %q", stdout)
+	}
+}
+
+func TestCmdDeleteHardDeleteSuccess(t *testing.T) {
+	cfg := testConfig(t)
+	id := mustSeedObservation(t, cfg, "s-del2", "proj-del2", "decision", "hard-delete", "hard delete me", "project")
+
+	withArgs(t, "engram", "delete", strconv.FormatInt(id, 10), "--hard")
+	stdout, stderr := captureOutput(t, func() { cmdDelete(cfg) })
+	if stderr != "" {
+		t.Fatalf("expected no stderr, got: %q", stderr)
+	}
+	if !strings.Contains(stdout, "deleted") {
+		t.Fatalf("expected deletion confirmation, got: %q", stdout)
+	}
+	if !strings.Contains(stdout, strconv.FormatInt(id, 10)) {
+		t.Fatalf("expected id in output, got: %q", stdout)
+	}
+}
+
+func TestCmdDeleteNonExistentID(t *testing.T) {
+	cfg := testConfig(t)
+
+	exited := false
+	oldExit := exitFunc
+	exitFunc = func(code int) { exited = true }
+	t.Cleanup(func() { exitFunc = oldExit })
+
+	withArgs(t, "engram", "delete", "999999")
+	_, stderr := captureOutput(t, func() { cmdDelete(cfg) })
+
+	if !exited {
+		t.Fatalf("expected exitFunc to be called for non-existent observation")
+	}
+	if !strings.Contains(stderr, "not found") && !strings.Contains(stderr, "observation") {
+		t.Fatalf("expected not-found error in stderr, got: %q", stderr)
+	}
+}
+
+func TestCmdDeleteMissingIDArg(t *testing.T) {
+	cfg := testConfig(t)
+
+	exited := false
+	oldExit := exitFunc
+	exitFunc = func(code int) { exited = true }
+	t.Cleanup(func() { exitFunc = oldExit })
+
+	withArgs(t, "engram", "delete")
+	_, stderr := captureOutput(t, func() { cmdDelete(cfg) })
+
+	if !exited {
+		t.Fatalf("expected exitFunc to be called when no ID arg provided")
+	}
+	if !strings.Contains(stderr, "usage") {
+		t.Fatalf("expected usage message in stderr, got: %q", stderr)
+	}
+}
+
+func TestCmdDeleteInvalidIDArg(t *testing.T) {
+	cfg := testConfig(t)
+
+	exited := false
+	oldExit := exitFunc
+	exitFunc = func(code int) { exited = true }
+	t.Cleanup(func() { exitFunc = oldExit })
+
+	withArgs(t, "engram", "delete", "not-a-number")
+	_, stderr := captureOutput(t, func() { cmdDelete(cfg) })
+
+	if !exited {
+		t.Fatalf("expected exitFunc to be called for invalid id")
+	}
+	if !strings.Contains(stderr, "invalid") {
+		t.Fatalf("expected invalid id error in stderr, got: %q", stderr)
+	}
+}
+
+func TestCmdDeleteInUsage(t *testing.T) {
+	stdout, _ := captureOutput(t, func() { printUsage() })
+	if !strings.Contains(stdout, "delete") {
+		t.Fatalf("expected 'delete' in usage output, got: %q", stdout)
+	}
+}
+
+// ─── delete session sub-command tests ─────────────────────────────────────────
+
+func mustSeedSession(t *testing.T, cfg store.Config, sessionID, project string) {
+	t.Helper()
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer s.Close()
+	if err := s.CreateSession(sessionID, project, "/tmp"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+}
+
+func mustSeedPrompt(t *testing.T, cfg store.Config, sessionID, project string) int64 {
+	t.Helper()
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer s.Close()
+	if err := s.CreateSession(sessionID, project, "/tmp"); err != nil {
+		// ignore if already exists
+		_ = err
+	}
+	id, err := s.AddPrompt(store.AddPromptParams{SessionID: sessionID, Content: "test prompt", Project: project})
+	if err != nil {
+		t.Fatalf("AddPrompt: %v", err)
+	}
+	return id
+}
+
+func TestCmdDeleteSessionSuccess(t *testing.T) {
+	cfg := testConfig(t)
+	mustSeedSession(t, cfg, "sess-to-delete", "proj-del-sess")
+
+	withArgs(t, "engram", "delete", "session", "sess-to-delete")
+	stdout, stderr := captureOutput(t, func() { cmdDelete(cfg) })
+	if stderr != "" {
+		t.Fatalf("expected no stderr, got: %q", stderr)
+	}
+	if !strings.Contains(stdout, "deleted") {
+		t.Fatalf("expected deletion confirmation in stdout, got: %q", stdout)
+	}
+}
+
+func TestCmdDeleteSessionNotFound(t *testing.T) {
+	cfg := testConfig(t)
+
+	exited := false
+	oldExit := exitFunc
+	exitFunc = func(code int) { exited = true }
+	t.Cleanup(func() { exitFunc = oldExit })
+
+	withArgs(t, "engram", "delete", "session", "no-such-session")
+	_, stderr := captureOutput(t, func() { cmdDelete(cfg) })
+	if !exited {
+		t.Fatal("expected exitFunc to be called for not-found session")
+	}
+	if !strings.Contains(stderr, "not found") && !strings.Contains(stderr, "session") {
+		t.Fatalf("expected not-found error in stderr, got: %q", stderr)
+	}
+}
+
+func TestCmdDeleteSessionMissingID(t *testing.T) {
+	cfg := testConfig(t)
+
+	exited := false
+	oldExit := exitFunc
+	exitFunc = func(code int) { exited = true }
+	t.Cleanup(func() { exitFunc = oldExit })
+
+	withArgs(t, "engram", "delete", "session")
+	_, stderr := captureOutput(t, func() { cmdDelete(cfg) })
+	if !exited {
+		t.Fatal("expected exitFunc to be called when session id is missing")
+	}
+	if !strings.Contains(stderr, "usage") {
+		t.Fatalf("expected usage message in stderr, got: %q", stderr)
+	}
+}
+
+// ─── delete prompt sub-command tests ──────────────────────────────────────────
+
+func TestCmdDeletePromptSuccess(t *testing.T) {
+	cfg := testConfig(t)
+	promptID := mustSeedPrompt(t, cfg, "sess-prompt-del", "proj-del-prompt")
+
+	withArgs(t, "engram", "delete", "prompt", strconv.FormatInt(promptID, 10))
+	stdout, stderr := captureOutput(t, func() { cmdDelete(cfg) })
+	if stderr != "" {
+		t.Fatalf("expected no stderr, got: %q", stderr)
+	}
+	if !strings.Contains(stdout, "deleted") {
+		t.Fatalf("expected deletion confirmation in stdout, got: %q", stdout)
+	}
+}
+
+func TestCmdDeletePromptNotFound(t *testing.T) {
+	cfg := testConfig(t)
+
+	exited := false
+	oldExit := exitFunc
+	exitFunc = func(code int) { exited = true }
+	t.Cleanup(func() { exitFunc = oldExit })
+
+	withArgs(t, "engram", "delete", "prompt", "999999")
+	_, stderr := captureOutput(t, func() { cmdDelete(cfg) })
+	if !exited {
+		t.Fatal("expected exitFunc to be called for not-found prompt")
+	}
+	if !strings.Contains(stderr, "not found") && !strings.Contains(stderr, "prompt") {
+		t.Fatalf("expected not-found error in stderr, got: %q", stderr)
+	}
+}
+
+func TestCmdDeletePromptMissingID(t *testing.T) {
+	cfg := testConfig(t)
+
+	exited := false
+	oldExit := exitFunc
+	exitFunc = func(code int) { exited = true }
+	t.Cleanup(func() { exitFunc = oldExit })
+
+	withArgs(t, "engram", "delete", "prompt")
+	_, stderr := captureOutput(t, func() { cmdDelete(cfg) })
+	if !exited {
+		t.Fatal("expected exitFunc to be called when prompt id is missing")
+	}
+	if !strings.Contains(stderr, "usage") {
+		t.Fatalf("expected usage message in stderr, got: %q", stderr)
+	}
+}
+
+func TestCmdDeletePromptInvalidID(t *testing.T) {
+	cfg := testConfig(t)
+
+	exited := false
+	oldExit := exitFunc
+	exitFunc = func(code int) { exited = true }
+	t.Cleanup(func() { exitFunc = oldExit })
+
+	withArgs(t, "engram", "delete", "prompt", "not-a-number")
+	_, stderr := captureOutput(t, func() { cmdDelete(cfg) })
+	if !exited {
+		t.Fatal("expected exitFunc to be called for invalid prompt id")
+	}
+	if !strings.Contains(stderr, "invalid") {
+		t.Fatalf("expected invalid id error in stderr, got: %q", stderr)
+	}
+}
+
+// ─── delete project sub-command tests ─────────────────────────────────────────
+
+func TestCmdDeleteProjectSuccess(t *testing.T) {
+	cfg := testConfig(t)
+	mustSeedObservation(t, cfg, "sess-proj-del", "proj-cascade", "decision", "title", "content", "project")
+
+	withArgs(t, "engram", "delete", "project", "proj-cascade", "--hard")
+	stdout, stderr := captureOutput(t, func() { cmdDelete(cfg) })
+	if stderr != "" {
+		t.Fatalf("expected no stderr, got: %q", stderr)
+	}
+	if !strings.Contains(stdout, "deleted") {
+		t.Fatalf("expected deletion confirmation in stdout, got: %q", stdout)
+	}
+}
+
+func TestCmdDeleteProjectSoftDefault(t *testing.T) {
+	cfg := testConfig(t)
+	mustSeedObservation(t, cfg, "sess-proj-soft", "proj-soft", "decision", "title", "content", "project")
+
+	withArgs(t, "engram", "delete", "project", "proj-soft")
+	stdout, stderr := captureOutput(t, func() { cmdDelete(cfg) })
+	if stderr != "" {
+		t.Fatalf("expected no stderr (soft), got: %q", stderr)
+	}
+	if !strings.Contains(stdout, "deleted") {
+		t.Fatalf("expected deletion confirmation in stdout, got: %q", stdout)
+	}
+}
+
+func TestCmdDeleteProjectNotFound(t *testing.T) {
+	cfg := testConfig(t)
+
+	exited := false
+	oldExit := exitFunc
+	exitFunc = func(code int) { exited = true }
+	t.Cleanup(func() { exitFunc = oldExit })
+
+	withArgs(t, "engram", "delete", "project", "no-such-project-xyz")
+	_, stderr := captureOutput(t, func() { cmdDelete(cfg) })
+	if !exited {
+		t.Fatal("expected exitFunc to be called for not-found project")
+	}
+	if !strings.Contains(stderr, "not found") && !strings.Contains(stderr, "project") {
+		t.Fatalf("expected not-found error in stderr, got: %q", stderr)
+	}
+}
+
+func TestCmdDeleteProjectMissingName(t *testing.T) {
+	cfg := testConfig(t)
+
+	exited := false
+	oldExit := exitFunc
+	exitFunc = func(code int) { exited = true }
+	t.Cleanup(func() { exitFunc = oldExit })
+
+	withArgs(t, "engram", "delete", "project")
+	_, stderr := captureOutput(t, func() { cmdDelete(cfg) })
+	if !exited {
+		t.Fatal("expected exitFunc to be called when project name is missing")
+	}
+	if !strings.Contains(stderr, "usage") {
+		t.Fatalf("expected usage message in stderr, got: %q", stderr)
+	}
+}
+
+// ─── backward-compat: delete <obs_id> still works ─────────────────────────────
+
+func TestCmdDeleteObservationBackwardCompat(t *testing.T) {
+	cfg := testConfig(t)
+	id := mustSeedObservation(t, cfg, "s-compat", "proj-compat", "decision", "compat-title", "compat-content", "project")
+
+	withArgs(t, "engram", "delete", strconv.FormatInt(id, 10))
+	stdout, stderr := captureOutput(t, func() { cmdDelete(cfg) })
+	if stderr != "" {
+		t.Fatalf("expected no stderr, got: %q", stderr)
+	}
+	if !strings.Contains(stdout, "deleted") {
+		t.Fatalf("expected deletion confirmation, got: %q", stdout)
+	}
+}
+
+// ─── usage shows new sub-commands ─────────────────────────────────────────────
+
+func TestCmdDeleteSubCommandsInUsage(t *testing.T) {
+	stdout, _ := captureOutput(t, func() { printUsage() })
+	for _, want := range []string{"delete session", "delete prompt", "delete project"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("expected %q in usage output, got:\n%s", want, stdout)
+		}
 	}
 }

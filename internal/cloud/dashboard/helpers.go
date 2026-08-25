@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Gentleman-Programming/engram/internal/cloud/cloudstore"
+	"github.com/Gentleman-Programming/engram/internal/timeutil"
 )
 
 // ─── Pagination ─────────────────────────────────────────────────────────────
@@ -238,19 +239,27 @@ func typePillClass(activeType, candidate string) string {
 	return "type-pill"
 }
 
+// dashboardTimestampLayout is the human-friendly layout shown on dashboard cards
+// (e.g. "22 May 2026 11:31"). Storage stays UTC; only the rendered string changes.
+const dashboardTimestampLayout = "02 Jan 2006 15:04"
+
+// formatTimestamp renders a stored UTC timestamp for dashboard display. It accepts
+// both RFC3339 and SQLite-style values ("YYYY-MM-DD HH:MM:SS") and honors
+// ENGRAM_TIMEZONE for the display zone, falling back to system local time.
+//
+// Returns "-" for an empty string. If the value cannot be parsed in any supported
+// layout, the original string is returned unchanged so we never lose data on
+// malformed timestamps.
 func formatTimestamp(ts string) string {
 	ts = strings.TrimSpace(ts)
 	if ts == "" {
 		return "-"
 	}
-	parsed, err := time.Parse(time.RFC3339Nano, ts)
-	if err != nil {
-		return ts
-	}
-	return parsed.Local().Format("02 Jan 2006 15:04")
+	return timeutil.FormatLocalWithLayout(ts, dashboardTimestampLayout)
 }
 
 // ADAPTED: legacy had formatTimestampPtr(*string); integrated uses string fields.
+// Cards that show "last seen" or similar nullable values render "Never" instead of "-".
 func formatTimestampStr(ts string) string {
 	if ts == "" {
 		return "Never"
@@ -498,6 +507,45 @@ func buildAuditListURL(filter cloudstore.AuditFilter) string {
 		return base
 	}
 	return base + "?" + q.Encode()
+}
+
+// formatTimeValue renders a time.Time value for dashboard display (managed
+// user / token / grant timestamps come back as time.Time from cloudstore,
+// unlike the string timestamps used by the sync-replicated dashboard rows).
+// Returns "-" for a zero value.
+func formatTimeValue(t time.Time) string {
+	if t.IsZero() {
+		return "-"
+	}
+	return t.UTC().Format(dashboardTimestampLayout)
+}
+
+// formatTimePtr renders an optional time.Time pointer, returning "Never" when
+// nil or zero (e.g. a token that has never been used).
+func formatTimePtr(t *time.Time) string {
+	if t == nil || t.IsZero() {
+		return "Never"
+	}
+	return formatTimeValue(*t)
+}
+
+// emptyDash returns "-" for an empty/whitespace-only string, otherwise the
+// trimmed original value. Used for optional managed-user/token fields.
+func emptyDash(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+// managedUserToggleAction returns the enable/disable form action suffix for a
+// managed user row, based on its current enabled state.
+func managedUserToggleAction(enabled bool) string {
+	if enabled {
+		return "/disable"
+	}
+	return "/enable"
 }
 
 // typeBadgeVariant returns a badge color variant for an observation type.
