@@ -780,6 +780,121 @@ func TestLocalChunkExportFailsLoudlyOnCorruptPriorChunk(t *testing.T) {
 	}
 }
 
+func TestLocalChunkExportUsesHistoricalIdentityPresence(t *testing.T) {
+	tests := []struct {
+		name      string
+		createdBy string
+		updatedAt string
+		history   func(*store.Observation) ChunkData
+		missing   bool
+		wantObs   bool
+	}{
+		{
+			name:      "newer chunk from another project does not suppress an older new identity",
+			createdBy: "other-project-machine",
+			updatedAt: "2025-01-01 00:00:00",
+			history: func(_ *store.Observation) ChunkData {
+				return ChunkData{Sessions: []store.Session{{ID: "foreign-session", Project: "proj-b"}}}
+			},
+			wantObs: true,
+		},
+		{
+			name:      "missing chunk leaves a historical identity unknown",
+			createdBy: "other-machine",
+			updatedAt: "2025-01-01 00:00:00",
+			missing:   true,
+			wantObs:   true,
+		},
+		{
+			name:      "newer same-project chunk from another machine does not suppress an older new identity",
+			createdBy: "other-machine",
+			updatedAt: "2025-01-01 00:00:00",
+			history: func(_ *store.Observation) ChunkData {
+				return ChunkData{Sessions: []store.Session{{ID: "other-session", Project: "proj-a"}}}
+			},
+			wantObs: true,
+		},
+		{
+			name:      "historically present older identity follows the original cutoff",
+			createdBy: "other-machine",
+			updatedAt: "2025-01-01 00:00:00",
+			history: func(observation *store.Observation) ChunkData {
+				return ChunkData{Observations: []store.Observation{{SyncID: observation.SyncID}}}
+			},
+			wantObs: false,
+		},
+		{
+			name:      "historically present newer observation still exports",
+			createdBy: "other-machine",
+			updatedAt: "2025-07-01 00:00:00",
+			history: func(observation *store.Observation) ChunkData {
+				return ChunkData{Observations: []store.Observation{{SyncID: observation.SyncID}}}
+			},
+			wantObs: true,
+		},
+		{
+			name:      "historical explicit deletion counts as identity presence",
+			createdBy: "other-machine",
+			updatedAt: "2025-01-01 00:00:00",
+			history: func(observation *store.Observation) ChunkData {
+				return ChunkData{Mutations: []store.SyncMutation{{Entity: store.SyncEntityObservation, EntityKey: observation.SyncID, Op: store.SyncOpDelete}}}
+			},
+			wantObs: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if err := s.CreateSession("session-identity", "proj-a", "/tmp/proj-a"); err != nil {
+				t.Fatalf("create session: %v", err)
+			}
+			observationID, err := s.AddObservation(store.AddObservationParams{SessionID: "session-identity", Type: "decision", Title: "identity", Content: "identity", Project: "proj-a", Scope: "project"})
+			if err != nil {
+				t.Fatalf("add observation: %v", err)
+			}
+			if _, err := s.DB().Exec(`UPDATE observations SET created_at = ?, updated_at = ? WHERE id = ?`, "2025-01-01 00:00:00", tc.updatedAt, observationID); err != nil {
+				t.Fatalf("backdate observation: %v", err)
+			}
+			observation, err := s.GetObservation(observationID)
+			if err != nil {
+				t.Fatalf("get observation: %v", err)
+			}
+
+			syncDir := filepath.Join(t.TempDir(), ".engram")
+			if !tc.missing {
+				writeLocalChunkFile(t, syncDir, "history", tc.history(observation))
+			}
+			writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "history", CreatedBy: tc.createdBy, CreatedAt: "2025-06-01T00:00:00Z"}}})
+
+			result, err := New(s, syncDir).Export("alice", "proj-a")
+			if err != nil {
+				t.Fatalf("export: %v", err)
+			}
+			if result.IsEmpty {
+				t.Fatal("expected the local session to produce an export chunk")
+			}
+			payload, err := readGzip(filepath.Join(syncDir, "chunks", result.ChunkID+".jsonl.gz"))
+			if err != nil {
+				t.Fatalf("read export chunk: %v", err)
+			}
+			var exported ChunkData
+			if err := json.Unmarshal(payload, &exported); err != nil {
+				t.Fatalf("unmarshal export chunk: %v", err)
+			}
+			found := false
+			for _, candidate := range exported.Observations {
+				if candidate.SyncID == observation.SyncID {
+					found = true
+				}
+			}
+			if found != tc.wantObs {
+				t.Fatalf("observation export presence = %t, want %t; chunk=%+v", found, tc.wantObs, exported)
+			}
+		})
+	}
+}
+
 // TestLocalChunkExportReexportsRelationUpdatedAfterLastChunk covers the second
 // branch of the export filter: a relation already present in a prior chunk but
 // re-judged after the latest chunk must be exported again so the update

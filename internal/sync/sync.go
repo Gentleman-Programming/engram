@@ -402,15 +402,19 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 		// Get the timestamp of the last chunk to filter "new" data
 		lastChunkTime := sy.lastChunkTime(manifest)
 
-		// Filter to only new data (created after last chunk)
-		chunk = sy.filterNewData(data, lastChunkTime)
-
-		// Relations are filtered by chunk presence, not timestamp; see the
-		// rationale on filterRelationMutationsForExport and issue #353.
-		exportedRelations, err := sy.exportedRelationKeys(manifest)
+		// Scan historical chunks once for identities relevant to this export and
+		// for the relation keys that retain their existing filtering behavior.
+		historicalIdentities, exportedRelations, err := sy.exportedIdentityAndRelationKeys(manifest, localDataIdentityKeys(data))
 		if err != nil {
 			return nil, fmt.Errorf("scan exported relations: %w", err)
 		}
+		// An identity absent from available history has never been exported, so it
+		// must bypass the global timestamp cutoff. Known identities retain the
+		// original cutoff behavior.
+		chunk = sy.filterNewDataWithHistoricalIdentities(data, lastChunkTime, historicalIdentities)
+
+		// Relations are filtered by chunk presence, not timestamp; see the
+		// rationale on filterRelationMutationsForExport and issue #353.
 		chunk.Mutations = filterRelationMutationsForExport(relationMutations, exportedRelations, lastChunkTime)
 	}
 
@@ -1141,19 +1145,49 @@ func (sy *Syncer) filterNewData(data *store.ExportData, lastChunkTime string) *C
 	return chunk
 }
 
-// exportedRelationKeys returns the set of relation EntityKeys already present
-// in the chunks recorded by the manifest. The manifest itself does not track
-// relations, so the chunk contents are the source of truth for "has this
-// relation ever been exported".
-//
-// Cost: this reads every chunk listed in the manifest on each export. A
-// relation may live in any chunk, so the scan cannot stop early. For very long
-// sync histories this is O(total chunks); tracking relation keys in the
-// manifest would remove the rescan if it ever becomes a bottleneck.
-func (sy *Syncer) exportedRelationKeys(m *Manifest) (map[string]struct{}, error) {
-	keys := make(map[string]struct{})
+func (sy *Syncer) filterNewDataWithHistoricalIdentities(data *store.ExportData, lastChunkTime string, historical map[string]struct{}) *ChunkData {
+	if lastChunkTime == "" {
+		return sy.filterNewData(data, lastChunkTime)
+	}
+
+	cutoff := normalizeTime(lastChunkTime)
+	chunk := &ChunkData{}
+	for _, session := range data.Sessions {
+		if historicalIdentityIsAbsent(historical, store.SyncEntitySession, session.ID) || normalizeTime(session.StartedAt) > cutoff {
+			chunk.Sessions = append(chunk.Sessions, session)
+		}
+	}
+	for _, observation := range data.Observations {
+		if historicalIdentityIsAbsent(historical, store.SyncEntityObservation, observation.SyncID) || normalizeTime(observation.CreatedAt) > cutoff || normalizeTime(observation.UpdatedAt) > cutoff {
+			chunk.Observations = append(chunk.Observations, observation)
+		}
+	}
+	for _, prompt := range data.Prompts {
+		if historicalIdentityIsAbsent(historical, store.SyncEntityPrompt, prompt.SyncID) || normalizeTime(prompt.CreatedAt) > cutoff {
+			chunk.Prompts = append(chunk.Prompts, prompt)
+		}
+	}
+	return chunk
+}
+
+func historicalIdentityIsAbsent(historical map[string]struct{}, entity, key string) bool {
+	identity := historicalIdentityKey(entity, key)
+	if identity == "" {
+		return false
+	}
+	_, found := historical[identity]
+	return !found
+}
+
+// exportedIdentityAndRelationKeys scans the chunks recorded by the manifest.
+// It retains only historical non-relation identities that are relevant to the
+// current local export candidates, while preserving the existing complete set
+// of relation keys used by relation filtering.
+func (sy *Syncer) exportedIdentityAndRelationKeys(m *Manifest, relevant map[string]struct{}) (map[string]struct{}, map[string]struct{}, error) {
+	identities := make(map[string]struct{}, len(relevant))
+	relations := make(map[string]struct{})
 	if m == nil {
-		return keys, nil
+		return identities, relations, nil
 	}
 	for _, entry := range m.Chunks {
 		// Read through the transport (not the local filesystem directly) so the
@@ -1169,19 +1203,73 @@ func (sy *Syncer) exportedRelationKeys(m *Manifest) (map[string]struct{}, error)
 				// but cannot be read is a real fault and fails loudly below.
 				continue
 			}
-			return nil, fmt.Errorf("read chunk %s: %w", entry.ID, err)
+			return nil, nil, fmt.Errorf("read chunk %s: %w", entry.ID, err)
 		}
 		var chunk ChunkData
 		if err := json.Unmarshal(raw, &chunk); err != nil {
-			return nil, fmt.Errorf("unmarshal chunk %s: %w", entry.ID, err)
+			return nil, nil, fmt.Errorf("unmarshal chunk %s: %w", entry.ID, err)
+		}
+		for _, session := range chunk.Sessions {
+			markHistoricalIdentity(identities, relevant, store.SyncEntitySession, session.ID)
+		}
+		for _, observation := range chunk.Observations {
+			markHistoricalIdentity(identities, relevant, store.SyncEntityObservation, observation.SyncID)
+		}
+		for _, prompt := range chunk.Prompts {
+			markHistoricalIdentity(identities, relevant, store.SyncEntityPrompt, prompt.SyncID)
 		}
 		for _, mutation := range chunk.Mutations {
 			if mutation.Entity == store.SyncEntityRelation {
-				keys[mutation.EntityKey] = struct{}{}
+				relations[mutation.EntityKey] = struct{}{}
+				continue
 			}
+			markHistoricalIdentity(identities, relevant, mutation.Entity, mutation.EntityKey)
 		}
 	}
-	return keys, nil
+	return identities, relations, nil
+}
+
+func localDataIdentityKeys(data *store.ExportData) map[string]struct{} {
+	keys := make(map[string]struct{}, len(data.Sessions)+len(data.Observations)+len(data.Prompts))
+	for _, session := range data.Sessions {
+		addHistoricalIdentity(keys, store.SyncEntitySession, session.ID)
+	}
+	for _, observation := range data.Observations {
+		addHistoricalIdentity(keys, store.SyncEntityObservation, observation.SyncID)
+	}
+	for _, prompt := range data.Prompts {
+		addHistoricalIdentity(keys, store.SyncEntityPrompt, prompt.SyncID)
+	}
+	return keys
+}
+
+func addHistoricalIdentity(keys map[string]struct{}, entity, key string) {
+	if identity := historicalIdentityKey(entity, key); identity != "" {
+		keys[identity] = struct{}{}
+	}
+}
+
+func markHistoricalIdentity(found, relevant map[string]struct{}, entity, key string) {
+	identity := historicalIdentityKey(entity, key)
+	if identity == "" {
+		return
+	}
+	if _, ok := relevant[identity]; ok {
+		found[identity] = struct{}{}
+	}
+}
+
+func historicalIdentityKey(entity, key string) string {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return ""
+	}
+	switch entity {
+	case store.SyncEntitySession, store.SyncEntityObservation, store.SyncEntityPrompt:
+		return fmt.Sprintf("%s:%s", entity, key)
+	default:
+		return ""
+	}
 }
 
 // filterRelationMutationsForExport returns the relation mutations that still
