@@ -137,7 +137,12 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 - `GET /observations` — Recent observations compatibility endpoint. Query: `?project=X&scope=project|personal|global&limit=N&sort=created_at:desc`
 - `GET /observations/recent` — Recent observations. Query: `?project=X&scope=project|personal|global&limit=N`
 - `GET /observations/{id}` — Get single observation by ID
-- `PATCH /observations/{id}` — Update fields. Body: `{title?, content?, type?, project?, scope?, topic_key?}`
+- `PATCH /observations/{id}` — Update fields. Body: `{title?, content?, find?, replace?, type?, project?, scope?, topic_key?}`
+  - `find` and `replace` provide an atomic literal find/replace against the observation's current content. A complete pair replaces every literal occurrence; regular expressions, case-insensitive matching, and replacement limits are not supported.
+  - `find` and `replace` must be supplied together. Supplying only one (including an empty string) returns `400 {"error":"find and replace must be used together"}`.
+  - `find/replace` is mutually exclusive with `content`. Supplying all three returns `400 {"error":"find/replace is mutually exclusive with content"}`.
+  - An empty or non-matching `find` leaves content unchanged, but still performs the normal update: revision and sync semantics remain intact, so the revision advances and an observation-upsert sync mutation is recorded.
+  - Example: `PATCH /observations/7` with `{"find":"alpha","replace":"beta"}` changes `alpha alpha` to `beta beta` in one transaction.
 - `DELETE /observations/{id}` — Delete observation (`?hard=true` for hard delete, soft delete by default)
   - `200` when deleted
   - `404` when observation does not exist
@@ -852,7 +857,19 @@ Save responses include lifecycle metadata for the saved observation: computed `s
 
 ### mem_update
 
-Update an observation by ID. Public schema supports partial updates for `title`, `content`, `type`, `scope`, and `topic_key`. For legacy/raw MCP clients, a non-empty `project` argument is still tolerated by the handler even though it is not exposed in the schema.
+Update an observation by ID. Supports partial updates for `title`, `content`, `find`, `replace`, `type`, `project`, `scope`, and `topic_key`.
+
+`find` and `replace` atomically replace every literal occurrence in the stored content. Both fields are required together; a lone field returns exactly `find and replace must be used together`. A complete pair cannot be sent with `content`; that combination returns exactly `find/replace is mutually exclusive with content`. An empty or non-matching `find` is a content no-op, while preserving the normal revision and sync side effects.
+
+Example:
+
+```json
+{
+  "id": 7,
+  "find": "alpha",
+  "replace": "beta"
+}
+```
 
 ### mem_review
 

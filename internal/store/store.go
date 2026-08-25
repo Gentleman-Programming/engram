@@ -20,6 +20,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/Gentleman-Programming/engram/internal/timeutil"
 	sqlite "modernc.org/sqlite"
@@ -45,12 +47,14 @@ var sqliteWriteRetryBackoffs = []time.Duration{
 
 // Sentinel errors returned by delete operations so callers can use errors.Is.
 var (
-	ErrSessionNotFound        = errors.New("session not found")
-	ErrSessionHasObservations = errors.New("session still has observations")
-	ErrSessionDeleteBlocked   = errors.New("session deletion is blocked while cloud sync enrollment is active")
-	ErrObservationNotFound    = errors.New("observation not found")
-	ErrPromptNotFound         = errors.New("prompt not found")
-	ErrProjectNotFound        = errors.New("project not found")
+	ErrSessionNotFound         = errors.New("session not found")
+	ErrSessionHasObservations  = errors.New("session still has observations")
+	ErrSessionDeleteBlocked    = errors.New("session deletion is blocked while cloud sync enrollment is active")
+	ErrObservationNotFound     = errors.New("observation not found")
+	ErrPromptNotFound          = errors.New("prompt not found")
+	ErrFindReplacePairRequired = errors.New("find and replace must be used together")
+	ErrFindReplaceWithContent  = errors.New("find/replace is mutually exclusive with content")
+	ErrProjectNotFound         = errors.New("project not found")
 )
 
 // Sentinel errors for relation sync apply path (Phase 2).
@@ -197,6 +201,8 @@ type UpdateObservationParams struct {
 	Type     *string `json:"type,omitempty"`
 	Title    *string `json:"title,omitempty"`
 	Content  *string `json:"content,omitempty"`
+	Find     *string `json:"find,omitempty"`
+	Replace  *string `json:"replace,omitempty"`
 	Project  *string `json:"project,omitempty"`
 	Scope    *string `json:"scope,omitempty"`
 	TopicKey *string `json:"topic_key,omitempty"`
@@ -2862,6 +2868,13 @@ func (s *Store) GetObservation(id int64) (*Observation, error) {
 }
 
 func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observation, error) {
+	if (p.Find == nil) != (p.Replace == nil) {
+		return nil, ErrFindReplacePairRequired
+	}
+	if p.Find != nil && p.Content != nil {
+		return nil, ErrFindReplaceWithContent
+	}
+
 	var updated *Observation
 	err := s.withTx(func(tx *sql.Tx) error {
 		obs, err := s.getObservationTx(tx, id)
@@ -2883,7 +2896,12 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 			title = stripPrivateTags(*p.Title)
 		}
 		if p.Content != nil {
-			content = stripPrivateTags(*p.Content)
+			content = *p.Content
+		}
+		if p.Find != nil && *p.Find != "" {
+			content = replaceAndNormalizeObservationContent(content, *p.Find, *p.Replace, s.cfg.MaxObservationLength)
+		} else if p.Content != nil || p.Find != nil {
+			content = stripPrivateTags(content)
 			if len(content) > s.cfg.MaxObservationLength {
 				content = content[:s.cfg.MaxObservationLength] + "... [truncated]"
 			}
@@ -6570,6 +6588,11 @@ func normalizeExistingSyncID(existing, prefix string) string {
 // Supports multiline and nested content. Case-insensitive.
 var privateTagRegex = regexp.MustCompile(`(?is)<private>.*?</private>`)
 
+const (
+	privateOpenTag  = "<private>"
+	privateCloseTag = "</private>"
+)
+
 // stripPrivateTags removes all <private>...</private> content from a string.
 // This ensures sensitive information (API keys, passwords, personal data)
 // is never persisted to the memory database.
@@ -6577,6 +6600,251 @@ func stripPrivateTags(s string) string {
 	result := privateTagRegex.ReplaceAllString(s, "[REDACTED]")
 	// Clean up multiple consecutive [REDACTED] and excessive whitespace
 	result = strings.TrimSpace(result)
+	return result
+}
+
+// replaceAndNormalizeObservationContent streams the logical ReplaceAll output
+// through private-tag sanitization, retaining only the bytes needed for the
+// existing truncation behavior. This avoids materializing a large expanded
+// string when a replacement occurs many times.
+func replaceAndNormalizeObservationContent(content, find, replace string, max int) string {
+	sanitizer := privateTagSanitizer{
+		output:   boundedTrimmedContent{max: max},
+		fallback: boundedTrimmedContent{max: max},
+	}
+
+	for sourcePos := 0; sourcePos < len(content); {
+		matchOffset := strings.Index(content[sourcePos:], find)
+		if matchOffset < 0 {
+			sanitizer.writeString(content[sourcePos:])
+			break
+		}
+		sanitizer.writeString(content[sourcePos : sourcePos+matchOffset])
+		sanitizer.writeString(replace)
+		sourcePos += matchOffset + len(find)
+	}
+
+	return sanitizer.finish()
+}
+
+type privateTagSanitizer struct {
+	output         boundedTrimmedContent
+	fallback       boundedTrimmedContent
+	openCandidate  []byte
+	closeCandidate []byte
+	inPrivate      bool
+}
+
+func (s *privateTagSanitizer) writeByte(b byte) {
+	if s.inPrivate {
+		s.writePrivateByte(b)
+		return
+	}
+	s.writeNormalByte(b)
+}
+
+func (s *privateTagSanitizer) writeString(value string) {
+	for i := 0; i < len(value); i++ {
+		s.writeByte(value[i])
+	}
+}
+
+func (s *privateTagSanitizer) writeNormalByte(b byte) {
+	if len(s.openCandidate) == 0 {
+		if b == privateOpenTag[0] {
+			s.openCandidate = append(s.openCandidate[:0], b)
+			return
+		}
+		s.output.writeByte(b)
+		return
+	}
+
+	if len(s.openCandidate) < len(privateOpenTag) && asciiEqualFold(b, privateOpenTag[len(s.openCandidate)]) {
+		s.openCandidate = append(s.openCandidate, b)
+		if len(s.openCandidate) == len(privateOpenTag) {
+			s.inPrivate = true
+			s.fallback.reset()
+			s.fallback.writeBytes(s.openCandidate)
+			s.openCandidate = s.openCandidate[:0]
+		}
+		return
+	}
+
+	s.output.writeBytes(s.openCandidate)
+	s.openCandidate = s.openCandidate[:0]
+	if b == privateOpenTag[0] {
+		s.openCandidate = append(s.openCandidate, b)
+	} else {
+		s.output.writeByte(b)
+	}
+}
+
+func (s *privateTagSanitizer) writePrivateByte(b byte) {
+	s.fallback.writeByte(b)
+
+	if len(s.closeCandidate) == 0 {
+		if b == privateCloseTag[0] {
+			s.closeCandidate = append(s.closeCandidate[:0], b)
+		}
+		return
+	}
+
+	if len(s.closeCandidate) < len(privateCloseTag) && asciiEqualFold(b, privateCloseTag[len(s.closeCandidate)]) {
+		s.closeCandidate = append(s.closeCandidate, b)
+		if len(s.closeCandidate) == len(privateCloseTag) {
+			s.inPrivate = false
+			s.closeCandidate = s.closeCandidate[:0]
+			s.fallback.reset()
+			s.output.writeString("[REDACTED]")
+		}
+		return
+	}
+
+	if b == privateCloseTag[0] {
+		s.closeCandidate = append(s.closeCandidate[:0], b)
+	} else {
+		s.closeCandidate = s.closeCandidate[:0]
+	}
+}
+
+func (s *privateTagSanitizer) finish() string {
+	if s.inPrivate {
+		s.fallback.appendTo(&s.output)
+	} else {
+		for _, b := range s.openCandidate {
+			s.output.writeByte(b)
+		}
+	}
+	return s.output.finish()
+}
+
+func asciiEqualFold(a, b byte) bool {
+	if a >= 'A' && a <= 'Z' {
+		a += 'a' - 'A'
+	}
+	if b >= 'A' && b <= 'Z' {
+		b += 'a' - 'A'
+	}
+	return a == b
+}
+
+type boundedTrimmedContent struct {
+	max          int
+	content      strings.Builder
+	pendingSpace []byte
+	pendingLong  bool
+	hasContent   bool
+	truncated    bool
+	runeBuffer   []byte
+}
+
+func (s *boundedTrimmedContent) reset() {
+	s.content.Reset()
+	s.pendingSpace = s.pendingSpace[:0]
+	s.pendingLong = false
+	s.hasContent = false
+	s.truncated = false
+	s.runeBuffer = s.runeBuffer[:0]
+}
+
+func (s *boundedTrimmedContent) writeByte(b byte) {
+	s.runeBuffer = append(s.runeBuffer, b)
+	s.flushRunes(false)
+}
+
+func (s *boundedTrimmedContent) writeString(value string) {
+	for i := 0; i < len(value); i++ {
+		s.writeByte(value[i])
+	}
+}
+
+func (s *boundedTrimmedContent) writeBytes(value []byte) {
+	for _, b := range value {
+		s.writeByte(b)
+	}
+}
+
+func (s *boundedTrimmedContent) flushRunes(force bool) {
+	for len(s.runeBuffer) > 0 {
+		if !force && !utf8.FullRune(s.runeBuffer) {
+			return
+		}
+		r, size := utf8.DecodeRune(s.runeBuffer)
+		if size == 0 {
+			return
+		}
+		s.writeRune(s.runeBuffer[:size], unicode.IsSpace(r))
+		s.runeBuffer = s.runeBuffer[size:]
+	}
+}
+
+func (s *boundedTrimmedContent) writeRune(value []byte, space bool) {
+	if space {
+		if !s.hasContent {
+			return
+		}
+		s.appendPending(value)
+		return
+	}
+
+	if !s.hasContent {
+		s.hasContent = true
+	}
+	s.commit(s.pendingSpace)
+	if s.pendingLong {
+		s.truncated = true
+	}
+	s.pendingSpace = s.pendingSpace[:0]
+	s.pendingLong = false
+	s.commit(value)
+}
+
+func (s *boundedTrimmedContent) appendPending(value []byte) {
+	if s.pendingLong {
+		return
+	}
+	remaining := s.max - len(s.pendingSpace)
+	if len(value) > remaining {
+		s.pendingLong = true
+	}
+	if remaining > len(value) {
+		remaining = len(value)
+	}
+	s.pendingSpace = append(s.pendingSpace, value[:remaining]...)
+}
+
+func (s *boundedTrimmedContent) commit(value []byte) {
+	if len(value) == 0 {
+		return
+	}
+	remaining := s.max - s.content.Len()
+	if len(value) > remaining {
+		s.truncated = true
+		value = value[:remaining]
+	}
+	_, _ = s.content.Write(value)
+}
+
+func (s *boundedTrimmedContent) appendTo(destination *boundedTrimmedContent) {
+	s.flushRunes(true)
+	if !s.hasContent {
+		return
+	}
+	destination.writeString(s.content.String())
+	if s.truncated {
+		destination.truncated = true
+	}
+}
+
+func (s *boundedTrimmedContent) finish() string {
+	s.flushRunes(true)
+	if !s.hasContent {
+		return ""
+	}
+	result := s.content.String()
+	if s.truncated {
+		return result + "... [truncated]"
+	}
 	return result
 }
 

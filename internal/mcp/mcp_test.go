@@ -1478,6 +1478,79 @@ func TestHandleUpdateAcceptsAllOptionalFields(t *testing.T) {
 	}
 }
 
+func TestHandleUpdateFindReplaceContract(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("mcp-find-replace", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "mcp-find-replace",
+		Type:      "note",
+		Title:     "replacement",
+		Content:   "alpha alpha",
+		Project:   "engram",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	h := handleUpdate(s)
+	updated, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"id":      float64(id),
+		"find":    "alpha",
+		"replace": "beta",
+	}}})
+	if err != nil {
+		t.Fatalf("replace handler error: %v", err)
+	}
+	if updated.IsError {
+		t.Fatalf("expected replacement success, got %q", callResultText(t, updated))
+	}
+	observation, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("get replaced observation: %v", err)
+	}
+	if observation.Content != "beta beta" {
+		t.Fatalf("expected all occurrences replaced, got %q", observation.Content)
+	}
+
+	for _, args := range []map[string]any{
+		{"id": float64(id), "find": ""},
+		{"id": float64(id), "replace": "beta"},
+		{"id": float64(id), "find": "beta", "replace": "gamma", "content": "replacement"},
+	} {
+		res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: args}})
+		if err != nil {
+			t.Fatalf("invalid handler error: %v", err)
+		}
+		if !res.IsError {
+			t.Fatalf("expected tool error for %#v", args)
+		}
+		got := callResultText(t, res)
+		want := "find and replace must be used together"
+		if args["content"] != nil {
+			want = "find/replace is mutually exclusive with content"
+		}
+		if got != want {
+			t.Fatalf("expected exact error %q, got %q", want, got)
+		}
+	}
+}
+
+func TestMemUpdateSchemaIncludesFindAndReplace(t *testing.T) {
+	srv := NewServer(newMCPTestStore(t))
+	tool := srv.GetTool("mem_update")
+	if tool == nil {
+		t.Fatal("mem_update tool not registered")
+	}
+
+	for _, property := range []string{"find", "replace"} {
+		if _, ok := tool.Tool.InputSchema.Properties[property]; !ok {
+			t.Errorf("mem_update schema missing %q property", property)
+		}
+	}
+}
+
 func TestHandleContextWithSessionOnlyUsesNoneProjects(t *testing.T) {
 	s := newMCPTestStore(t)
 	if err := s.CreateSession("s-context-none", "engram", "/tmp/engram"); err != nil {

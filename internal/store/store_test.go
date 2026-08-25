@@ -263,6 +263,295 @@ func TestUpdateAndSoftDeleteExcludedFromSearchAndTimeline(t *testing.T) {
 	}
 }
 
+func TestUpdateObservationFindReplacePreservesPersistenceSemantics(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnrollProject("engram"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+	if err := s.CreateSession("find-replace", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "find-replace",
+		Type:      "note",
+		Title:     "replacement",
+		Content:   "alpha alpha",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	before, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("get observation before update: %v", err)
+	}
+	beforeMutations, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 20)
+	if err != nil {
+		t.Fatalf("list mutations before update: %v", err)
+	}
+
+	find, replace := "alpha", "<private>secret</private>beta"
+	updated, err := s.UpdateObservation(id, UpdateObservationParams{Find: &find, Replace: &replace})
+	if err != nil {
+		t.Fatalf("replace observation content: %v", err)
+	}
+	if updated.Content != "[REDACTED]beta [REDACTED]beta" {
+		t.Fatalf("expected replacement before sanitization, got %q", updated.Content)
+	}
+	if updated.RevisionCount != before.RevisionCount+1 {
+		t.Fatalf("expected revision increment from %d, got %d", before.RevisionCount, updated.RevisionCount)
+	}
+
+	var persistedHash string
+	if err := s.db.QueryRow(`SELECT normalized_hash FROM observations WHERE id = ?`, id).Scan(&persistedHash); err != nil {
+		t.Fatalf("read normalized hash: %v", err)
+	}
+	if persistedHash != hashNormalized(updated.Content) {
+		t.Fatalf("expected normalized hash for replacement content, got %q", persistedHash)
+	}
+
+	afterMutations, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 20)
+	if err != nil {
+		t.Fatalf("list mutations after update: %v", err)
+	}
+	if len(afterMutations) != len(beforeMutations)+1 {
+		t.Fatalf("expected one additional sync mutation, before=%d after=%d", len(beforeMutations), len(afterMutations))
+	}
+	lastMutation := afterMutations[len(afterMutations)-1]
+	if lastMutation.Entity != SyncEntityObservation || lastMutation.EntityKey != updated.SyncID || lastMutation.Op != SyncOpUpsert {
+		t.Fatalf("expected observation upsert for update, got %+v", lastMutation)
+	}
+
+	emptyFind, ignoredReplacement := "", "ignored"
+	emptyUpdated, err := s.UpdateObservation(id, UpdateObservationParams{Find: &emptyFind, Replace: &ignoredReplacement})
+	if err != nil {
+		t.Fatalf("empty find update: %v", err)
+	}
+	if emptyUpdated.Content != updated.Content {
+		t.Fatalf("expected empty find to preserve content %q, got %q", updated.Content, emptyUpdated.Content)
+	}
+	if emptyUpdated.RevisionCount != updated.RevisionCount+1 {
+		t.Fatalf("expected empty find to increment revision, got %d", emptyUpdated.RevisionCount)
+	}
+
+	nonMatchingFind, replacement := "missing", "changed"
+	nonMatchingUpdated, err := s.UpdateObservation(id, UpdateObservationParams{Find: &nonMatchingFind, Replace: &replacement})
+	if err != nil {
+		t.Fatalf("non-matching find update: %v", err)
+	}
+	if nonMatchingUpdated.Content != updated.Content {
+		t.Fatalf("expected non-matching find to preserve content %q, got %q", updated.Content, nonMatchingUpdated.Content)
+	}
+	if nonMatchingUpdated.RevisionCount != emptyUpdated.RevisionCount+1 {
+		t.Fatalf("expected non-matching find to increment revision, got %d", nonMatchingUpdated.RevisionCount)
+	}
+}
+
+func TestUpdateObservationFindReplaceValidatesFieldCombinations(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("find-replace-validation", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := s.AddObservation(AddObservationParams{SessionID: "find-replace-validation", Type: "note", Title: "validation", Content: "alpha", Project: "engram"})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	find, replace, content := "", "beta", "replacement content"
+	tests := []struct {
+		name   string
+		params UpdateObservationParams
+		want   error
+	}{
+		{name: "find only", params: UpdateObservationParams{Find: &find}, want: ErrFindReplacePairRequired},
+		{name: "replace only", params: UpdateObservationParams{Replace: &replace}, want: ErrFindReplacePairRequired},
+		{name: "pair with content", params: UpdateObservationParams{Find: &find, Replace: &replace, Content: &content}, want: ErrFindReplaceWithContent},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := s.UpdateObservation(id, tt.params)
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("expected %q, got %v", tt.want, err)
+			}
+		})
+	}
+}
+
+func TestUpdateObservationFindReplaceTruncatesReplacementOutput(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("find-replace-truncation", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "find-replace-truncation",
+		Type:      "note",
+		Title:     "truncation",
+		Content:   "replace-me",
+		Project:   "engram",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	find := "replace-me"
+	replace := strings.Repeat("x", s.MaxObservationLength()+1)
+	updated, err := s.UpdateObservation(id, UpdateObservationParams{Find: &find, Replace: &replace})
+	if err != nil {
+		t.Fatalf("replace observation content: %v", err)
+	}
+
+	want := strings.Repeat("x", s.MaxObservationLength()) + "... [truncated]"
+	if updated.Content != want {
+		t.Fatalf("expected replacement output to follow truncation behavior, got length=%d want length=%d", len(updated.Content), len(want))
+	}
+
+	persisted, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("get truncated observation: %v", err)
+	}
+	if persisted.Content != want {
+		t.Fatalf("expected persisted replacement output to be truncated, got length=%d want length=%d", len(persisted.Content), len(want))
+	}
+}
+
+func TestUpdateObservationFindReplaceBoundsExpandedOutput(t *testing.T) {
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = t.TempDir()
+	cfg.MaxObservationLength = 32
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	if err := s.CreateSession("find-replace-bounded", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "find-replace-bounded",
+		Type:      "note",
+		Title:     "bounded replacement",
+		Content:   strings.Repeat("a", cfg.MaxObservationLength),
+		Project:   "engram",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	find := "a"
+	replace := strings.Repeat("b", 256*1024)
+	updated, err := s.UpdateObservation(id, UpdateObservationParams{Find: &find, Replace: &replace})
+	if err != nil {
+		t.Fatalf("replace observation content: %v", err)
+	}
+
+	want := strings.Repeat("b", cfg.MaxObservationLength) + "... [truncated]"
+	if updated.Content != want {
+		t.Fatalf("expected bounded replacement output to be truncated, got length=%d want length=%d", len(updated.Content), len(want))
+	}
+}
+
+func TestReplaceAndNormalizeObservationContentPreservesMixedCaseUnmatchedTag(t *testing.T) {
+	const max = 100
+	got := replaceAndNormalizeObservationContent("\t<PRIVATE>secret\n", "missing", "replacement", max)
+	if want := "<PRIVATE>secret"; got != want {
+		t.Fatalf("unmatched private tag changed: got %q, want %q", got, want)
+	}
+}
+
+func TestReplaceAndNormalizeObservationContentMatchesLegacyPipeline(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		find    string
+		replace string
+		max     int
+	}{
+		{
+			name:    "repeated replacements",
+			content: "alpha alpha alpha",
+			find:    "alpha",
+			replace: "beta",
+			max:     100,
+		},
+		{
+			name:    "opening tag spans source and replacement",
+			content: "start<priXsecret</private>end",
+			find:    "X",
+			replace: "vate>",
+			max:     100,
+		},
+		{
+			name:    "closing tag spans source and replacement",
+			content: "start<private>secretXend",
+			find:    "X",
+			replace: "</private>",
+			max:     100,
+		},
+		{
+			name:    "multiple mixed-case tags",
+			content: "<private>one</private> middle <PRIVATE>two</PRIVATE>",
+			find:    "middle",
+			replace: "between",
+			max:     100,
+		},
+		{
+			name:    "unmatched mixed-case tag",
+			content: " \u2003<PRIVATE>secret\n",
+			find:    "missing",
+			replace: "replacement",
+			max:     100,
+		},
+		{
+			name:    "malformed private tag",
+			content: "prefix<PrIvAtE attr>secret</PRIVATE",
+			find:    "secret",
+			replace: "changed",
+			max:     100,
+		},
+		{
+			name:    "unicode whitespace",
+			content: "\u2003x\u00a0",
+			find:    "x",
+			replace: "y",
+			max:     100,
+		},
+		{
+			name:    "truncation follows redaction",
+			content: "a",
+			find:    "a",
+			replace: "<PRIVATE>secret</PRIVATE>0123456789",
+			max:     12,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := replaceAndNormalizeObservationContent(tt.content, tt.find, tt.replace, tt.max)
+			want := legacyReplaceAndNormalizeObservationContent(tt.content, tt.find, tt.replace, tt.max)
+			if got != want {
+				t.Fatalf("streaming pipeline differs: got %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// legacyReplaceAndNormalizeObservationContent is the pre-remediation logical
+// pipeline used as a differential-test oracle. It intentionally materializes
+// output because the production path must not.
+func legacyReplaceAndNormalizeObservationContent(content, find, replace string, max int) string {
+	content = strings.ReplaceAll(content, find, replace)
+	content = privateTagRegex.ReplaceAllString(content, "[REDACTED]")
+	content = strings.TrimSpace(content)
+	if len(content) > max {
+		content = content[:max] + "... [truncated]"
+	}
+	return content
+}
+
 func TestPinnedObservationsAndFormatContextPriority(t *testing.T) {
 	cfg := mustDefaultConfig(t)
 	cfg.DataDir = t.TempDir()
