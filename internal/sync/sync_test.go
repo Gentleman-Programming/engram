@@ -782,64 +782,111 @@ func TestLocalChunkExportFailsLoudlyOnCorruptPriorChunk(t *testing.T) {
 
 func TestLocalChunkExportUsesHistoricalIdentityPresence(t *testing.T) {
 	tests := []struct {
-		name      string
-		createdBy string
-		updatedAt string
-		history   func(*store.Observation) ChunkData
-		missing   bool
-		wantObs   bool
+		name       string
+		createdBy  string
+		updatedAt  string
+		history    func(store.Session, *store.Observation, store.Prompt) ChunkData
+		missing    bool
+		entity     string
+		wantExport bool
 	}{
 		{
 			name:      "newer chunk from another project does not suppress an older new identity",
 			createdBy: "other-project-machine",
 			updatedAt: "2025-01-01 00:00:00",
-			history: func(_ *store.Observation) ChunkData {
+			entity:    "observation",
+			history: func(_ store.Session, _ *store.Observation, _ store.Prompt) ChunkData {
 				return ChunkData{Sessions: []store.Session{{ID: "foreign-session", Project: "proj-b"}}}
 			},
-			wantObs: true,
+			wantExport: true,
 		},
 		{
-			name:      "missing chunk leaves a historical identity unknown",
-			createdBy: "other-machine",
-			updatedAt: "2025-01-01 00:00:00",
-			missing:   true,
-			wantObs:   true,
+			name:       "missing chunk leaves a historical identity unknown",
+			createdBy:  "other-machine",
+			updatedAt:  "2025-01-01 00:00:00",
+			missing:    true,
+			entity:     "observation",
+			wantExport: true,
 		},
 		{
 			name:      "newer same-project chunk from another machine does not suppress an older new identity",
 			createdBy: "other-machine",
 			updatedAt: "2025-01-01 00:00:00",
-			history: func(_ *store.Observation) ChunkData {
+			entity:    "observation",
+			history: func(_ store.Session, _ *store.Observation, _ store.Prompt) ChunkData {
 				return ChunkData{Sessions: []store.Session{{ID: "other-session", Project: "proj-a"}}}
 			},
-			wantObs: true,
+			wantExport: true,
 		},
 		{
 			name:      "historically present older identity follows the original cutoff",
 			createdBy: "other-machine",
 			updatedAt: "2025-01-01 00:00:00",
-			history: func(observation *store.Observation) ChunkData {
+			entity:    "observation",
+			history: func(_ store.Session, observation *store.Observation, _ store.Prompt) ChunkData {
 				return ChunkData{Observations: []store.Observation{{SyncID: observation.SyncID}}}
 			},
-			wantObs: false,
+			wantExport: false,
 		},
 		{
 			name:      "historically present newer observation still exports",
 			createdBy: "other-machine",
 			updatedAt: "2025-07-01 00:00:00",
-			history: func(observation *store.Observation) ChunkData {
+			entity:    "observation",
+			history: func(_ store.Session, observation *store.Observation, _ store.Prompt) ChunkData {
 				return ChunkData{Observations: []store.Observation{{SyncID: observation.SyncID}}}
 			},
-			wantObs: true,
+			wantExport: true,
 		},
 		{
 			name:      "historical explicit deletion counts as identity presence",
 			createdBy: "other-machine",
 			updatedAt: "2025-01-01 00:00:00",
-			history: func(observation *store.Observation) ChunkData {
+			entity:    "observation",
+			history: func(_ store.Session, observation *store.Observation, _ store.Prompt) ChunkData {
 				return ChunkData{Mutations: []store.SyncMutation{{Entity: store.SyncEntityObservation, EntityKey: observation.SyncID, Op: store.SyncOpDelete}}}
 			},
-			wantObs: false,
+			wantExport: false,
+		},
+		{
+			name:      "historically absent older session bypasses the cutoff",
+			createdBy: "other-machine",
+			updatedAt: "2025-01-01 00:00:00",
+			entity:    "session",
+			history: func(_ store.Session, _ *store.Observation, _ store.Prompt) ChunkData {
+				return ChunkData{}
+			},
+			wantExport: true,
+		},
+		{
+			name:      "historically present older session follows the cutoff",
+			createdBy: "other-machine",
+			updatedAt: "2025-01-01 00:00:00",
+			entity:    "session",
+			history: func(session store.Session, _ *store.Observation, _ store.Prompt) ChunkData {
+				return ChunkData{Sessions: []store.Session{{ID: session.ID}}}
+			},
+			wantExport: false,
+		},
+		{
+			name:      "historically absent older prompt bypasses the cutoff",
+			createdBy: "other-machine",
+			updatedAt: "2025-01-01 00:00:00",
+			entity:    "prompt",
+			history: func(_ store.Session, _ *store.Observation, _ store.Prompt) ChunkData {
+				return ChunkData{}
+			},
+			wantExport: true,
+		},
+		{
+			name:      "historically present older prompt follows the cutoff",
+			createdBy: "other-machine",
+			updatedAt: "2025-01-01 00:00:00",
+			entity:    "prompt",
+			history: func(_ store.Session, _ *store.Observation, prompt store.Prompt) ChunkData {
+				return ChunkData{Prompts: []store.Prompt{{SyncID: prompt.SyncID}}}
+			},
+			wantExport: false,
 		},
 	}
 
@@ -853,17 +900,35 @@ func TestLocalChunkExportUsesHistoricalIdentityPresence(t *testing.T) {
 			if err != nil {
 				t.Fatalf("add observation: %v", err)
 			}
+			promptID, err := s.AddPrompt(store.AddPromptParams{SessionID: "session-identity", Content: "identity", Project: "proj-a"})
+			if err != nil {
+				t.Fatalf("add prompt: %v", err)
+			}
+			if _, err := s.DB().Exec(`UPDATE sessions SET started_at = ? WHERE id = ?`, "2025-01-01 00:00:00", "session-identity"); err != nil {
+				t.Fatalf("backdate session: %v", err)
+			}
 			if _, err := s.DB().Exec(`UPDATE observations SET created_at = ?, updated_at = ? WHERE id = ?`, "2025-01-01 00:00:00", tc.updatedAt, observationID); err != nil {
 				t.Fatalf("backdate observation: %v", err)
+			}
+			if _, err := s.DB().Exec(`UPDATE user_prompts SET created_at = ? WHERE id = ?`, "2025-01-01 00:00:00", promptID); err != nil {
+				t.Fatalf("backdate prompt: %v", err)
 			}
 			observation, err := s.GetObservation(observationID)
 			if err != nil {
 				t.Fatalf("get observation: %v", err)
 			}
+			var prompt store.Prompt
+			if err := s.DB().QueryRow(`SELECT sync_id FROM user_prompts WHERE id = ?`, promptID).Scan(&prompt.SyncID); err != nil {
+				t.Fatalf("get prompt sync ID: %v", err)
+			}
+			session, err := s.GetSession("session-identity")
+			if err != nil {
+				t.Fatalf("get session: %v", err)
+			}
 
 			syncDir := filepath.Join(t.TempDir(), ".engram")
 			if !tc.missing {
-				writeLocalChunkFile(t, syncDir, "history", tc.history(observation))
+				writeLocalChunkFile(t, syncDir, "history", tc.history(*session, observation, prompt))
 			}
 			writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "history", CreatedBy: tc.createdBy, CreatedAt: "2025-06-01T00:00:00Z"}}})
 
@@ -883,15 +948,51 @@ func TestLocalChunkExportUsesHistoricalIdentityPresence(t *testing.T) {
 				t.Fatalf("unmarshal export chunk: %v", err)
 			}
 			found := false
-			for _, candidate := range exported.Observations {
-				if candidate.SyncID == observation.SyncID {
-					found = true
+			switch tc.entity {
+			case "session":
+				for _, candidate := range exported.Sessions {
+					if candidate.ID == session.ID {
+						found = true
+					}
+				}
+			case "observation":
+				for _, candidate := range exported.Observations {
+					if candidate.SyncID == observation.SyncID {
+						found = true
+					}
+				}
+			case "prompt":
+				for _, candidate := range exported.Prompts {
+					if candidate.SyncID == prompt.SyncID {
+						found = true
+					}
 				}
 			}
-			if found != tc.wantObs {
-				t.Fatalf("observation export presence = %t, want %t; chunk=%+v", found, tc.wantObs, exported)
+			if found != tc.wantExport {
+				t.Fatalf("%s export presence = %t, want %t; chunk=%+v", tc.entity, found, tc.wantExport, exported)
 			}
 		})
+	}
+}
+
+func TestLocalChunkExportFailsLoudlyOnInvalidJSONPriorChunk(t *testing.T) {
+	s := newTestStore(t)
+	syncDir := filepath.Join(t.TempDir(), ".engram")
+	invalidID := "invalidjson"
+	chunksDir := filepath.Join(syncDir, "chunks")
+	if err := os.MkdirAll(chunksDir, 0o755); err != nil {
+		t.Fatalf("mkdir chunks: %v", err)
+	}
+	if err := writeGzip(filepath.Join(chunksDir, invalidID+".jsonl.gz"), []byte(`{invalid json`)); err != nil {
+		t.Fatalf("write invalid JSON chunk: %v", err)
+	}
+	writeManifestFile(t, syncDir, &Manifest{
+		Version: 1,
+		Chunks:  []ChunkEntry{{ID: invalidID, CreatedBy: "alice", CreatedAt: "2025-06-01T00:00:00Z"}},
+	})
+
+	if _, err := New(s, syncDir).Export("alice", "proj-a"); err == nil || !strings.Contains(err.Error(), "unmarshal chunk "+invalidID) {
+		t.Fatalf("expected Export to fail on invalid JSON prior chunk, got %v", err)
 	}
 }
 
