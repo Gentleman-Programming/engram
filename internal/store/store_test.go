@@ -417,6 +417,141 @@ func TestUpdateObservationFindReplaceTruncatesReplacementOutput(t *testing.T) {
 	}
 }
 
+func TestUpdateObservationFindReplaceBoundsExpandedOutput(t *testing.T) {
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = t.TempDir()
+	cfg.MaxObservationLength = 32
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	if err := s.CreateSession("find-replace-bounded", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "find-replace-bounded",
+		Type:      "note",
+		Title:     "bounded replacement",
+		Content:   strings.Repeat("a", cfg.MaxObservationLength),
+		Project:   "engram",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	find := "a"
+	replace := strings.Repeat("b", 256*1024)
+	updated, err := s.UpdateObservation(id, UpdateObservationParams{Find: &find, Replace: &replace})
+	if err != nil {
+		t.Fatalf("replace observation content: %v", err)
+	}
+
+	want := strings.Repeat("b", cfg.MaxObservationLength) + "... [truncated]"
+	if updated.Content != want {
+		t.Fatalf("expected bounded replacement output to be truncated, got length=%d want length=%d", len(updated.Content), len(want))
+	}
+}
+
+func TestReplaceAndNormalizeObservationContentPreservesMixedCaseUnmatchedTag(t *testing.T) {
+	const max = 100
+	got := replaceAndNormalizeObservationContent("\t<PRIVATE>secret\n", "missing", "replacement", max)
+	if want := "<PRIVATE>secret"; got != want {
+		t.Fatalf("unmatched private tag changed: got %q, want %q", got, want)
+	}
+}
+
+func TestReplaceAndNormalizeObservationContentMatchesLegacyPipeline(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		find    string
+		replace string
+		max     int
+	}{
+		{
+			name:    "repeated replacements",
+			content: "alpha alpha alpha",
+			find:    "alpha",
+			replace: "beta",
+			max:     100,
+		},
+		{
+			name:    "opening tag spans source and replacement",
+			content: "start<priXsecret</private>end",
+			find:    "X",
+			replace: "vate>",
+			max:     100,
+		},
+		{
+			name:    "closing tag spans source and replacement",
+			content: "start<private>secretXend",
+			find:    "X",
+			replace: "</private>",
+			max:     100,
+		},
+		{
+			name:    "multiple mixed-case tags",
+			content: "<private>one</private> middle <PRIVATE>two</PRIVATE>",
+			find:    "middle",
+			replace: "between",
+			max:     100,
+		},
+		{
+			name:    "unmatched mixed-case tag",
+			content: " \u2003<PRIVATE>secret\n",
+			find:    "missing",
+			replace: "replacement",
+			max:     100,
+		},
+		{
+			name:    "malformed private tag",
+			content: "prefix<PrIvAtE attr>secret</PRIVATE",
+			find:    "secret",
+			replace: "changed",
+			max:     100,
+		},
+		{
+			name:    "unicode whitespace",
+			content: "\u2003x\u00a0",
+			find:    "x",
+			replace: "y",
+			max:     100,
+		},
+		{
+			name:    "truncation follows redaction",
+			content: "a",
+			find:    "a",
+			replace: "<PRIVATE>secret</PRIVATE>0123456789",
+			max:     12,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := replaceAndNormalizeObservationContent(tt.content, tt.find, tt.replace, tt.max)
+			want := legacyReplaceAndNormalizeObservationContent(tt.content, tt.find, tt.replace, tt.max)
+			if got != want {
+				t.Fatalf("streaming pipeline differs: got %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// legacyReplaceAndNormalizeObservationContent is the pre-remediation logical
+// pipeline used as a differential-test oracle. It intentionally materializes
+// output because the production path must not.
+func legacyReplaceAndNormalizeObservationContent(content, find, replace string, max int) string {
+	content = strings.ReplaceAll(content, find, replace)
+	content = privateTagRegex.ReplaceAllString(content, "[REDACTED]")
+	content = strings.TrimSpace(content)
+	if len(content) > max {
+		content = content[:max] + "... [truncated]"
+	}
+	return content
+}
+
 func TestPinnedObservationsAndFormatContextPriority(t *testing.T) {
 	cfg := mustDefaultConfig(t)
 	cfg.DataDir = t.TempDir()
