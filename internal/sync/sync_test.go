@@ -2630,6 +2630,125 @@ func TestCloudImportReordersMutationsWithinChunkToAvoidFKFailures(t *testing.T) 
 	}
 }
 
+func TestCloudImportAppliesObservationsBeforeEarlierRelationInSameChunk(t *testing.T) {
+	dst := newTestStore(t)
+	if err := dst.EnrollProject("proj-a"); err != nil {
+		t.Fatalf("enroll destination project: %v", err)
+	}
+
+	transport := newFakeCloudTransport()
+	chunkID := "chunk-relation-before-observations"
+	transport.manifest = &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: chunkID, CreatedAt: "2026-08-24T12:00:00Z"}}}
+	chunk := ChunkData{Mutations: []store.SyncMutation{
+		{
+			Entity:    store.SyncEntityRelation,
+			EntityKey: "rel-before-observations",
+			Op:        store.SyncOpUpsert,
+			Payload:   `{"sync_id":"rel-before-observations","source_id":"obs-relation-source","target_id":"obs-relation-target","relation":"compatible","judgment_status":"judged","project":"proj-a","created_at":"2026-08-24T12:00:00Z","updated_at":"2026-08-24T12:00:00Z"}`,
+		},
+		{
+			Entity:    store.SyncEntityObservation,
+			EntityKey: "obs-relation-source",
+			Op:        store.SyncOpUpsert,
+			Payload:   `{"sync_id":"obs-relation-source","session_id":"sess-relation-order","type":"decision","title":"source","content":"source observation","project":"proj-a","scope":"project"}`,
+		},
+		{
+			Entity:    store.SyncEntityObservation,
+			EntityKey: "obs-relation-target",
+			Op:        store.SyncOpUpsert,
+			Payload:   `{"sync_id":"obs-relation-target","session_id":"sess-relation-order","type":"decision","title":"target","content":"target observation","project":"proj-a","scope":"project"}`,
+		},
+		{
+			Entity:    store.SyncEntitySession,
+			EntityKey: "sess-relation-order",
+			Op:        store.SyncOpUpsert,
+			Payload:   `{"id":"sess-relation-order","project":"proj-a","directory":"/tmp/proj-a"}`,
+		},
+	}}
+	chunkPayload, err := json.Marshal(chunk)
+	if err != nil {
+		t.Fatalf("marshal relation-first chunk: %v", err)
+	}
+	transport.chunks[chunkID] = chunkPayload
+
+	result, err := NewCloudWithTransport(dst, transport, "proj-a").Import()
+	if err != nil {
+		t.Fatalf("cloud import should apply observations before an earlier relation: %v", err)
+	}
+	if result.ChunksImported != 1 || result.ObservationsImported != 2 {
+		t.Fatalf("unexpected import result: %+v", result)
+	}
+	for _, syncID := range []string{"obs-relation-source", "obs-relation-target"} {
+		if _, err := dst.GetObservationBySyncID(syncID); err != nil {
+			t.Fatalf("expected referenced observation %q to be imported: %v", syncID, err)
+		}
+	}
+	relation, err := dst.GetRelation("rel-before-observations")
+	if err != nil {
+		t.Fatalf("expected relation to be imported: %v", err)
+	}
+	if relation.SourceID != "obs-relation-source" || relation.TargetID != "obs-relation-target" {
+		t.Fatalf("unexpected imported relation: %+v", relation)
+	}
+}
+
+func TestCloudImportRollsBackRelationFirstChunkWhenEndpointIsMissing(t *testing.T) {
+	dst := newTestStore(t)
+	if err := dst.EnrollProject("proj-a"); err != nil {
+		t.Fatalf("enroll destination project: %v", err)
+	}
+
+	transport := newFakeCloudTransport()
+	chunkID := "chunk-relation-missing-endpoint"
+	transport.manifest = &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: chunkID, CreatedAt: "2026-08-24T12:00:00Z"}}}
+	chunk := ChunkData{Mutations: []store.SyncMutation{
+		{
+			Entity:    store.SyncEntityRelation,
+			EntityKey: "rel-missing-endpoint",
+			Op:        store.SyncOpUpsert,
+			Payload:   `{"sync_id":"rel-missing-endpoint","source_id":"obs-rollback-source","target_id":"obs-missing-target","relation":"compatible","judgment_status":"judged","project":"proj-a","created_at":"2026-08-24T12:00:00Z","updated_at":"2026-08-24T12:00:00Z"}`,
+		},
+		{
+			Entity:    store.SyncEntityObservation,
+			EntityKey: "obs-rollback-source",
+			Op:        store.SyncOpUpsert,
+			Payload:   `{"sync_id":"obs-rollback-source","session_id":"sess-relation-rollback","type":"decision","title":"source","content":"source observation","project":"proj-a","scope":"project"}`,
+		},
+		{
+			Entity:    store.SyncEntitySession,
+			EntityKey: "sess-relation-rollback",
+			Op:        store.SyncOpUpsert,
+			Payload:   `{"id":"sess-relation-rollback","project":"proj-a","directory":"/tmp/proj-a"}`,
+		},
+	}}
+	chunkPayload, err := json.Marshal(chunk)
+	if err != nil {
+		t.Fatalf("marshal relation-first chunk with missing endpoint: %v", err)
+	}
+	transport.chunks[chunkID] = chunkPayload
+
+	if _, err := dst.GetObservationBySyncID("obs-missing-target"); err == nil {
+		t.Fatal("missing relation target must be absent from the destination before import")
+	}
+	if _, err := NewCloudWithTransport(dst, transport, "proj-a").Import(); !errors.Is(err, store.ErrRelationFKMissing) {
+		t.Fatalf("expected import to fail for the missing relation endpoint, got %v", err)
+	}
+
+	if _, err := dst.GetObservationBySyncID("obs-rollback-source"); err == nil {
+		t.Fatal("expected source observation upsert to roll back after failed relation import")
+	}
+	if _, err := dst.GetSession("sess-relation-rollback"); err == nil {
+		t.Fatal("expected session upsert to roll back after failed relation import")
+	}
+	synced, err := dst.GetSyncedChunks()
+	if err != nil {
+		t.Fatalf("get synced chunks: %v", err)
+	}
+	if synced[chunkID] {
+		t.Fatalf("failed chunk %q must not be marked synced", chunkID)
+	}
+}
+
 func TestCloudImportMixedChunkAppliesDirectArrayDependenciesBeforeMutations(t *testing.T) {
 	dst := newTestStore(t)
 	if err := dst.EnrollProject("proj-a"); err != nil {

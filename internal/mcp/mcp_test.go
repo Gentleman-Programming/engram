@@ -15,6 +15,7 @@ import (
 	"github.com/Gentleman-Programming/engram/internal/project"
 	"github.com/Gentleman-Programming/engram/internal/store"
 	mcppkg "github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
 )
 
 func newMCPTestStore(t *testing.T) *store.Store {
@@ -292,6 +293,71 @@ func TestHandleSaveRejectsMissingContent(t *testing.T) {
 	}
 	if len(obs) != 0 {
 		t.Fatalf("expected no observation to be written, got %#v", obs)
+	}
+}
+
+func TestSaveHandlersExposeStoreAdmissionErrors(t *testing.T) {
+	tests := []struct {
+		name      string
+		handler   server.ToolHandlerFunc
+		arguments map[string]any
+		wantError string
+		countRows func(*store.Store) (int, error)
+	}{
+		{
+			name:      "observation title",
+			arguments: map[string]any{"title": " \t\n ", "content": "valid content", "project": "engram"},
+			wantError: "Failed to save: observation title is required",
+			countRows: func(s *store.Store) (int, error) {
+				var count int
+				err := s.DB().QueryRow(`SELECT count(*) FROM observations`).Scan(&count)
+				return count, err
+			},
+		},
+		{
+			name:      "prompt content",
+			arguments: map[string]any{"content": " \t\n ", "project": "engram"},
+			wantError: "Failed to save prompt: prompt content is required",
+			countRows: func(s *store.Store) (int, error) {
+				var count int
+				err := s.DB().QueryRow(`SELECT count(*) FROM user_prompts`).Scan(&count)
+				return count, err
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newMCPTestStore(t)
+			if tc.name == "observation title" {
+				tc.handler = handleSave(s, MCPConfig{}, nil)
+			} else {
+				tc.handler = handleSavePrompt(s, MCPConfig{}, nil)
+			}
+
+			before, err := tc.countRows(s)
+			if err != nil {
+				t.Fatalf("count rows before invalid write: %v", err)
+			}
+			res, err := tc.handler(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: tc.arguments}})
+			if err != nil {
+				t.Fatalf("handler error: %v", err)
+			}
+			if !res.IsError {
+				t.Fatalf("expected tool error, got %q", callResultText(t, res))
+			}
+			if got := callResultText(t, res); got != tc.wantError {
+				t.Fatalf("expected error %q, got %q", tc.wantError, got)
+			}
+
+			after, err := tc.countRows(s)
+			if err != nil {
+				t.Fatalf("count rows after invalid write: %v", err)
+			}
+			if after != before {
+				t.Fatalf("invalid write persisted a primary row: %d->%d", before, after)
+			}
+		})
 	}
 }
 
@@ -7376,7 +7442,7 @@ func seedMCPMatchModeFixture(t *testing.T, s *store.Store) {
 		t.Fatalf("create session: %v", err)
 	}
 	obs := []store.AddObservationParams{
-		{SessionID: "s-mcp-matchmode", Type: "decision", Title: "Auth session middleware", Content: "", Project: "engram", Scope: "project"},
+		{SessionID: "s-mcp-matchmode", Type: "decision", Title: "Auth session middleware", Content: "request routing layer", Project: "engram", Scope: "project"},
 		{SessionID: "s-mcp-matchmode", Type: "decision", Title: "Compliance audit notes", Content: "session policy", Project: "engram", Scope: "project"},
 		{SessionID: "s-mcp-matchmode", Type: "decision", Title: "OAuth tokens", Content: "auth and compliance", Project: "engram", Scope: "project"},
 	}

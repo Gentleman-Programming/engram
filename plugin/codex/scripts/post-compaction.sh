@@ -15,7 +15,7 @@ source "${SCRIPT_DIR}/_helpers.sh"
 INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
-PROJECT=$(detect_project "$CWD")
+PROJECT=$(resolve_project "$CWD") || PROJECT=""
 
 # Ensure session exists
 if [ -n "$SESSION_ID" ] && [ -n "$PROJECT" ]; then
@@ -28,8 +28,11 @@ if [ -n "$SESSION_ID" ] && [ -n "$PROJECT" ]; then
 fi
 
 # Fetch context from previous sessions
-ENCODED_PROJECT=$(printf '%s' "$PROJECT" | jq -sRr @uri)
-CONTEXT=$(curl -sf "${ENGRAM_URL}/context?project=${ENCODED_PROJECT}" --max-time 3 2>/dev/null | jq -r '.context // empty')
+CONTEXT=""
+if [ -n "$PROJECT" ]; then
+  ENCODED_PROJECT=$(printf '%s' "$PROJECT" | jq -sRr @uri)
+  CONTEXT=$(curl -sf "${ENGRAM_URL}/context?project=${ENCODED_PROJECT}" --max-time 3 2>/dev/null | jq -r '.context // empty')
+fi
 
 # Inject Memory Protocol + compaction instruction + context
 cat <<'PROTOCOL'

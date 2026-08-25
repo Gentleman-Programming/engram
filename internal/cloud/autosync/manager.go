@@ -463,13 +463,21 @@ func autosyncFailureMessage(targetKey, message string, err error) string {
 
 // unwrapTransportStatusError walks the error chain looking for transportStatusError.
 func unwrapTransportStatusError(err error) (transportStatusError, bool) {
-	for err != nil {
-		if te, ok := err.(transportStatusError); ok {
-			return te, true
-		}
-		err = errors.Unwrap(err)
+	if err == nil {
+		return nil, false
 	}
-	return nil, false
+	if te, ok := err.(transportStatusError); ok {
+		return te, true
+	}
+	if multi, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, wrapped := range multi.Unwrap() {
+			if te, ok := unwrapTransportStatusError(wrapped); ok {
+				return te, true
+			}
+		}
+		return nil, false
+	}
+	return unwrapTransportStatusError(errors.Unwrap(err))
 }
 
 // ─── Push ────────────────────────────────────────────────────────────────────
@@ -507,7 +515,12 @@ func (m *Manager) push(ctx context.Context) error {
 		groups[project] = append(groups[project], mut)
 	}
 
+	var failures []error
 	for _, project := range order {
+		if err := ctx.Err(); err != nil {
+			failures = append(failures, err)
+			return errors.Join(failures...)
+		}
 		batch := groups[project]
 		entries := make([]MutationEntry, len(batch))
 		seqs := make([]int64, len(batch))
@@ -524,20 +537,24 @@ func (m *Manager) push(ctx context.Context) error {
 
 		result, err := m.transport.PushMutations(entries)
 		if err != nil {
-			return fmt.Errorf("transport push project %q: %w", project, err)
+			failures = append(failures, fmt.Errorf("transport push project %q: %w", project, err))
+			continue
 		}
 		if result == nil {
-			return fmt.Errorf("transport push project %q: missing accepted seqs for %d mutations", project, len(entries))
+			failures = append(failures, fmt.Errorf("transport push project %q: missing accepted seqs for %d mutations", project, len(entries)))
+			continue
 		}
 		if len(result.AcceptedSeqs) != len(entries) {
-			return fmt.Errorf("transport push project %q: cloud accepted %d of %d mutations; refusing to ack local seqs", project, len(result.AcceptedSeqs), len(entries))
+			failures = append(failures, fmt.Errorf("transport push project %q: cloud accepted %d of %d mutations; refusing to ack local seqs", project, len(result.AcceptedSeqs), len(entries)))
+			continue
 		}
 		if err := m.store.AckSyncMutationSeqs(m.cfg.TargetKey, seqs); err != nil {
-			return fmt.Errorf("ack project %q: %w", project, err)
+			failures = append(failures, fmt.Errorf("ack project %q: %w", project, err))
+			return errors.Join(failures...)
 		}
 	}
 
-	return nil
+	return errors.Join(failures...)
 }
 
 // ─── Pull ────────────────────────────────────────────────────────────────────

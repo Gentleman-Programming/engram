@@ -28,21 +28,23 @@ source "${SCRIPT_DIR}/_helpers.sh"
 INPUT=$(cat)
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
+PROJECT=""
 
 # ──────────────────────────────────────────────────────────────────────────────
 # PROMPT PERSIST
 #
 # Every user message is captured to POST /prompts so mem_save can attach the
-# originating prompt via SessionActivity. Detached subshell: never blocks and
+# originating prompt via SessionActivity. The canonical project is resolved by
+# the server before this script writes. Detached subshell: never blocks and
 # never fails the hook.
 # ──────────────────────────────────────────────────────────────────────────────
 PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty')
 if [ -n "$PROMPT" ] && [ -n "$SESSION_ID" ]; then
   (
-    _PROMPT_PROJECT=$(detect_project "$CWD")
+    PROJECT=$(resolve_project "$CWD") || exit 0
     curl -sf -X POST "${ENGRAM_URL}/prompts" --max-time 2 \
       -H 'Content-Type: application/json' \
-      -d "$(jq -n --arg s "$SESSION_ID" --arg p "${_PROMPT_PROJECT:-}" --arg c "$PROMPT" \
+      -d "$(jq -n --arg s "$SESSION_ID" --arg p "$PROJECT" --arg c "$PROMPT" \
             '{session_id:$s, project:$p, content:$c}')" >/dev/null 2>&1 || true
   ) &
 fi
@@ -94,14 +96,11 @@ OUTPUT="{}"
 # State file lives in /tmp and is keyed by session_id (falls back to project+pid).
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Build a stable session key — prefer SESSION_ID, fall back to project name
+# Build a stable session key — prefer SESSION_ID, then a process-local fallback.
 if [ -n "$SESSION_ID" ]; then
   SESSION_KEY="engram-codex-${SESSION_ID}-tools-loaded"
 else
-  # No session ID available — only then detect project for the fallback state key.
-  PROJECT=$(detect_project "$CWD")
-  SAFE_PROJECT=$(printf '%s' "${PROJECT:-unknown}" | tr -cs 'a-zA-Z0-9_-' '_')
-  SESSION_KEY="engram-codex-${SAFE_PROJECT}-$$-tools-loaded"
+  SESSION_KEY="engram-codex-unknown-$$-tools-loaded"
 fi
 
 STATE_FILE="/tmp/${SESSION_KEY}"
@@ -120,9 +119,9 @@ fi
 # SUBSEQUENT MESSAGES — save-nudge logic
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Detect project only after the first-message path has had a chance to return.
+# Resolve the project only after the first-message path has had a chance to return.
 if [ -z "${PROJECT:-}" ]; then
-  PROJECT=$(detect_project "$CWD")
+  PROJECT=$(resolve_project "$CWD") || PROJECT=""
 fi
 
 # Bail early if we can't determine the project

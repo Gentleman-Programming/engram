@@ -337,7 +337,13 @@ func (s *Server) handleAddObservation(w http.ResponseWriter, r *http.Request) {
 
 	id, err := s.store.AddObservation(body)
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		switch {
+		case errors.Is(err, store.ErrObservationTitleRequired),
+			errors.Is(err, store.ErrObservationContentRequired):
+			jsonError(w, http.StatusBadRequest, err.Error())
+		default:
+			jsonError(w, http.StatusInternalServerError, err.Error())
+		}
 		return
 	}
 
@@ -465,7 +471,13 @@ func (s *Server) handleUpdateObservation(w http.ResponseWriter, r *http.Request)
 
 	obs, err := s.store.UpdateObservation(id, body)
 	if err != nil {
-		jsonError(w, http.StatusNotFound, err.Error())
+		switch {
+		case errors.Is(err, store.ErrObservationTitleRequired),
+			errors.Is(err, store.ErrObservationContentRequired):
+			jsonError(w, http.StatusBadRequest, err.Error())
+		default:
+			jsonError(w, http.StatusNotFound, err.Error())
+		}
 		return
 	}
 
@@ -626,7 +638,12 @@ func (s *Server) handleAddPrompt(w http.ResponseWriter, r *http.Request) {
 
 	id, err := s.store.AddPrompt(body)
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		switch {
+		case errors.Is(err, store.ErrPromptContentRequired):
+			jsonError(w, http.StatusBadRequest, err.Error())
+		default:
+			jsonError(w, http.StatusInternalServerError, err.Error())
+		}
 		return
 	}
 

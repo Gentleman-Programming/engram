@@ -43,14 +43,17 @@ var sqliteWriteRetryBackoffs = []time.Duration{
 	50 * time.Millisecond,
 }
 
-// Sentinel errors returned by delete operations so callers can use errors.Is.
+// Sentinel errors returned by Store operations so callers can use errors.Is.
 var (
-	ErrSessionNotFound        = errors.New("session not found")
-	ErrSessionHasObservations = errors.New("session still has observations")
-	ErrSessionDeleteBlocked   = errors.New("session deletion is blocked while cloud sync enrollment is active")
-	ErrObservationNotFound    = errors.New("observation not found")
-	ErrPromptNotFound         = errors.New("prompt not found")
-	ErrProjectNotFound        = errors.New("project not found")
+	ErrSessionNotFound            = errors.New("session not found")
+	ErrSessionHasObservations     = errors.New("session still has observations")
+	ErrSessionDeleteBlocked       = errors.New("session deletion is blocked while cloud sync enrollment is active")
+	ErrObservationNotFound        = errors.New("observation not found")
+	ErrPromptNotFound             = errors.New("prompt not found")
+	ErrProjectNotFound            = errors.New("project not found")
+	ErrObservationTitleRequired   = errors.New("observation title is required")
+	ErrObservationContentRequired = errors.New("observation content is required")
+	ErrPromptContentRequired      = errors.New("prompt content is required")
 )
 
 // Sentinel errors for relation sync apply path (Phase 2).
@@ -2255,6 +2258,12 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 	// Strip <private>...</private> tags before persisting ANYTHING
 	title := stripPrivateTags(p.Title)
 	content := stripPrivateTags(p.Content)
+	if title == "" {
+		return 0, ErrObservationTitleRequired
+	}
+	if content == "" {
+		return 0, ErrObservationContentRequired
+	}
 
 	if len(content) > s.cfg.MaxObservationLength {
 		content = content[:s.cfg.MaxObservationLength] + "... [truncated]"
@@ -2551,6 +2560,9 @@ func (s *Store) AddPrompt(p AddPromptParams) (int64, error) {
 	p.Project, _ = NormalizeProject(p.Project)
 
 	content := s.preparePromptContent(p.Content)
+	if content == "" {
+		return 0, ErrPromptContentRequired
+	}
 
 	var promptID int64
 	err := s.withTx(func(tx *sql.Tx) error {
@@ -2590,6 +2602,9 @@ func (s *Store) AddPrompt(p AddPromptParams) (int64, error) {
 func (s *Store) AddPromptIfMissing(p AddPromptParams) (int64, bool, error) {
 	p.Project, _ = NormalizeProject(p.Project)
 	content := s.preparePromptContent(p.Content)
+	if content == "" {
+		return 0, false, ErrPromptContentRequired
+	}
 
 	var promptID int64
 	inserted := false
@@ -2862,6 +2877,13 @@ func (s *Store) GetObservation(id int64) (*Observation, error) {
 }
 
 func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observation, error) {
+	if p.Title != nil && stripPrivateTags(*p.Title) == "" {
+		return nil, ErrObservationTitleRequired
+	}
+	if p.Content != nil && stripPrivateTags(*p.Content) == "" {
+		return nil, ErrObservationContentRequired
+	}
+
 	var updated *Observation
 	err := s.withTx(func(tx *sql.Tx) error {
 		obs, err := s.getObservationTx(tx, id)

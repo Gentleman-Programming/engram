@@ -875,6 +875,7 @@ func orderMutationsForApply(mutations []store.SyncMutation) []store.SyncMutation
 	}
 	sessionUpserts := make([]store.SyncMutation, 0, len(mutations))
 	otherUpserts := make([]store.SyncMutation, 0, len(mutations))
+	relationUpserts := make([]store.SyncMutation, 0, len(mutations))
 	otherDeletes := make([]store.SyncMutation, 0, len(mutations))
 	sessionDeletes := make([]store.SyncMutation, 0, len(mutations))
 
@@ -886,6 +887,8 @@ func orderMutationsForApply(mutations []store.SyncMutation) []store.SyncMutation
 			sessionDeletes = append(sessionDeletes, mutation)
 		case mutation.Op == store.SyncOpDelete:
 			otherDeletes = append(otherDeletes, mutation)
+		case mutation.Entity == store.SyncEntityRelation:
+			relationUpserts = append(relationUpserts, mutation)
 		default:
 			otherUpserts = append(otherUpserts, mutation)
 		}
@@ -894,6 +897,7 @@ func orderMutationsForApply(mutations []store.SyncMutation) []store.SyncMutation
 	ordered := make([]store.SyncMutation, 0, len(mutations))
 	ordered = append(ordered, sessionUpserts...)
 	ordered = append(ordered, otherUpserts...)
+	ordered = append(ordered, relationUpserts...)
 	ordered = append(ordered, otherDeletes...)
 	ordered = append(ordered, sessionDeletes...)
 	return ordered
