@@ -595,7 +595,7 @@ func TestWriteChunkMaterializesRelationMutationIntoCloudMutations(t *testing.T) 
 
 func TestWriteChunkRejectsIncompleteRelationBeforePersistence(t *testing.T) {
 	cs := openTestCloudStore(t)
-	project := "test-invalid-chunk-relation-" + strings.ReplaceAll(time.Now().UTC().Format("20060102150405.000000000"), ".", "-")
+	project := "test-invalid-chunk-relation-" + strings.ReplaceAll(t.Name(), "/", "-")
 	payload := []byte(`{
 		"mutations":[
 			{"entity":"relation","entity_key":"rel-1","op":"upsert","payload":"{\"source_id\":\"obs-a\",\"target_id\":\"obs-b\",\"relation\":\"related\",\"judgment_status\":\"judged\",\"marked_by_actor\":\"agent-a\",\"marked_by_kind\":\"agent\"}"}
