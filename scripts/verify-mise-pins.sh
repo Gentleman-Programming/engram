@@ -77,8 +77,9 @@ extract_agreed() {
   printf '%s\n' "${agreed}"
 }
 
-go_mod_line="$(extract_one "go directive" "${go_mod}" '^go [0-9]')"
-go_mod_pin="$(awk '{print $2}' <<<"${go_mod_line}")"
+go_mod_line="$(extract_one "go directive" "${go_mod}" '^go[[:space:]]')"
+go_mod_pin="$(sed -nE 's/^go[[:space:]]+([0-9][^[:space:]]*).*$/\1/p' <<<"${go_mod_line}")"
+[[ -n "${go_mod_pin}" ]] || die "unsupported go directive format in ${go_mod}: ${go_mod_line}"
 
 workflow_go_pin="$(extract_agreed "go-version pin" \
   '^[[:space:]]*go-version:' \
@@ -89,11 +90,13 @@ pi_node_line="$(extract_one "node-version key" "${publish_pi_yml}" '^[[:space:]]
 pi_node_pin="$(sed -nE 's/^[[:space:]]*node-version: "([0-9][^"]*)".*$/\1/p' <<<"${pi_node_line}")"
 [[ -n "${pi_node_pin}" ]] || die "unsupported node-version format in ${publish_pi_yml}: ${pi_node_line}"
 
-mise_go_line="$(extract_one "go pin" "${mise_toml}" '^go = "')"
-mise_go_pin="$(sed -E 's/^go = "([^"]*)".*$/\1/' <<<"${mise_go_line}")"
+mise_go_line="$(extract_one "go pin" "${mise_toml}" '^go[[:space:]]*=')"
+mise_go_pin="$(sed -nE 's/^go[[:space:]]*=[[:space:]]*"([^"]*)".*$/\1/p' <<<"${mise_go_line}")"
+[[ -n "${mise_go_pin}" ]] || die "unsupported go pin format in ${mise_toml}: ${mise_go_line}"
 
-mise_node_line="$(extract_one "node pin" "${mise_toml}" '^node = "')"
-mise_node_pin="$(sed -E 's/^node = "([^"]*)".*$/\1/' <<<"${mise_node_line}")"
+mise_node_line="$(extract_one "node pin" "${mise_toml}" '^node[[:space:]]*=')"
+mise_node_pin="$(sed -nE 's/^node[[:space:]]*=[[:space:]]*"([^"]*)".*$/\1/p' <<<"${mise_node_line}")"
+[[ -n "${mise_node_pin}" ]] || die "unsupported node pin format in ${mise_toml}: ${mise_node_line}"
 
 status=0
 
