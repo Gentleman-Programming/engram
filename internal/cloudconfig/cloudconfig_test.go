@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestSaveNormalizesExistingFileMode(t *testing.T) {
+func TestSaveKeepsCloudConfigPrivate(t *testing.T) {
 	dataDir := t.TempDir()
 	if err := os.WriteFile(Path(dataDir), []byte(`{"server_url":"https://old.example.test"}`), 0o600); err != nil {
 		t.Fatalf("seed cloud config: %v", err)
@@ -25,8 +25,8 @@ func TestSaveNormalizesExistingFileMode(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		return // Windows does not expose POSIX permission bits through os.FileMode.
 	}
-	if got := info.Mode().Perm(); got != 0o644 {
-		t.Fatalf("cloud config mode = %o, want 644", got)
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("cloud config mode = %o, want 600", got)
 	}
 }
 
