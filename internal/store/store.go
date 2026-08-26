@@ -2890,6 +2890,9 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 		}
 		if p.Title != nil {
 			title = stripPrivateTags(*p.Title)
+			if err := ValidateObservationTitle(title); err != nil {
+				return err
+			}
 		}
 		if p.Content != nil {
 			content = stripPrivateTags(*p.Content)

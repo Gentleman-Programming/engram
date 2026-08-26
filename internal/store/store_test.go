@@ -9000,3 +9000,105 @@ func TestValidateObservationTitleMatchesSyncPayloadRule(t *testing.T) {
 		})
 	}
 }
+
+func TestUpdateObservationRejectsBlankTitleWithoutSideEffects(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s-update-title-guard", "engram", t.TempDir()); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-update-title-guard",
+		Type:      "note",
+		Title:     "Original title",
+		Content:   "Original content",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	before, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("get original observation: %v", err)
+	}
+	countMutations := func() int {
+		t.Helper()
+		var count int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntityObservation, before.SyncID).Scan(&count); err != nil {
+			t.Fatalf("count observation mutations: %v", err)
+		}
+		return count
+	}
+	mutationsBefore := countMutations()
+
+	for _, title := range []string{"", " \t\n "} {
+		title := title
+		t.Run(fmt.Sprintf("title %q", title), func(t *testing.T) {
+			_, err := s.UpdateObservation(id, UpdateObservationParams{Title: &title})
+			if !errors.Is(err, ErrObservationTitleRequired) {
+				t.Fatalf("expected ErrObservationTitleRequired, got %v", err)
+			}
+			after, err := s.GetObservation(id)
+			if err != nil {
+				t.Fatalf("get observation after rejected update: %v", err)
+			}
+			if after.Title != before.Title || after.Content != before.Content || after.RevisionCount != before.RevisionCount {
+				t.Fatalf("rejected update changed observation: before=%#v after=%#v", before, after)
+			}
+			if got := countMutations(); got != mutationsBefore {
+				t.Fatalf("rejected update enqueued a mutation: got %d, want %d", got, mutationsBefore)
+			}
+		})
+	}
+}
+
+func TestUpdateObservationAcceptsPrivateTagOnlyTitle(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s-update-redaction", "engram", t.TempDir()); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-update-redaction",
+		Type:      "note",
+		Title:     "Original title",
+		Content:   "Original content",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	title := "<private>secret</private>"
+	updated, err := s.UpdateObservation(id, UpdateObservationParams{Title: &title})
+	if err != nil {
+		t.Fatalf("update observation: %v", err)
+	}
+	if updated.Title != "[REDACTED]" {
+		t.Fatalf("expected redacted title, got %q", updated.Title)
+	}
+
+	var mutationCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntityObservation, updated.SyncID).Scan(&mutationCount); err != nil {
+		t.Fatalf("count observation mutations: %v", err)
+	}
+	if mutationCount != 2 {
+		t.Fatalf("expected exactly two observation mutations (create and update), got %d", mutationCount)
+	}
+	var mutation SyncMutation
+	if err := s.db.QueryRow(`SELECT op, payload FROM sync_mutations WHERE entity = ? AND entity_key = ? ORDER BY seq DESC LIMIT 1`, SyncEntityObservation, updated.SyncID).Scan(&mutation.Op, &mutation.Payload); err != nil {
+		t.Fatalf("load update mutation: %v", err)
+	}
+	if mutation.Op != SyncOpUpsert {
+		t.Fatalf("expected update mutation op %q, got %q", SyncOpUpsert, mutation.Op)
+	}
+	if validation := ValidateSyncMutationPayload(SyncEntityObservation, mutation.Op, mutation.Payload, updated.SyncID); len(validation.MissingFields) != 0 || validation.ReasonCode != "" {
+		t.Fatalf("expected valid update mutation, got %#v", validation)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(mutation.Payload), &payload); err != nil {
+		t.Fatalf("decode update mutation payload: %v", err)
+	}
+	if payload["title"] != "[REDACTED]" {
+		t.Fatalf("expected redacted title in update payload, got %#v", payload["title"])
+	}
+}

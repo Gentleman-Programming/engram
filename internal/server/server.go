@@ -477,7 +477,11 @@ func (s *Server) handleUpdateObservation(w http.ResponseWriter, r *http.Request)
 
 	obs, err := s.store.UpdateObservation(id, body)
 	if err != nil {
-		jsonError(w, http.StatusNotFound, err.Error())
+		if errors.Is(err, store.ErrObservationTitleRequired) {
+			jsonError(w, http.StatusBadRequest, err.Error())
+		} else {
+			jsonError(w, http.StatusNotFound, err.Error())
+		}
 		return
 	}
 
