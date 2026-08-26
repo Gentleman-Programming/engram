@@ -181,6 +181,11 @@ function isTimeoutError(error: unknown): boolean {
 // treat a null registration response as unacknowledged and stop before writing;
 // other callers retain the existing null fallthrough contract.
 let lastFetchTimeoutMethod: string | undefined;
+// Whether the most recent engramFetch actually got an HTTP response. Distinguishes a
+// genuine unreachable server (no response) from a successful HTTP 200 whose body is the
+// JSON literal `null` -- which /search returns for zero results and must NOT be reported
+// as "could not reach".
+let lastFetchSawResponse = false;
 
 function takeLastFetchTimeoutMethod(): string | undefined {
   const method = lastFetchTimeoutMethod;
@@ -195,6 +200,7 @@ async function engramFetch<TResponse = unknown>(path: string, opts: FetchOptions
   // on the first leg would mislabel an unrelated failure on the second as "may already have
   // been applied", telling the agent not to retry a write that never left the machine.
   lastFetchTimeoutMethod = undefined;
+  lastFetchSawResponse = false;
   let res: Response | undefined;
   let timedOut = false;
   for (let attempt = 0; attempt < ENGRAM_FETCH_MAX_ATTEMPTS; attempt += 1) {
@@ -223,6 +229,7 @@ async function engramFetch<TResponse = unknown>(path: string, opts: FetchOptions
   // not reach" invites the caller to retry a write whose outcome is genuinely unknown. Record
   // which it was so the tool layer can say what we do and do not know.
   if (timedOut) lastFetchTimeoutMethod = method;
+  if (res) lastFetchSawResponse = true;
   if (!res) return null;
 
   let data: unknown = null;
@@ -1091,8 +1098,16 @@ async function executeMemoryTool(toolName: string, params: Record<string, unknow
     await refreshProjectDetection(ctx.cwd);
     ctx.ui?.setStatus?.("engram", `🧠 ${project} · ${action}…`);
     const data = await callMemoryTool(toolName, params, ctx);
-    if (data === null) {
+    if (data === null && !lastFetchSawResponse) {
       throw new Error(unreachableMessage(takeLastFetchTimeoutMethod()));
+    }
+    if (data === null) {
+      // HTTP succeeded with an empty body (e.g. /search with zero hits returns the JSON
+      // literal `null`): an honest empty result, not a connection failure.
+      const brain = String.fromCodePoint(0x1f9e0);
+      const emptyResult = { content: [{ type: "text" as const, text: "No memories found." }], details: { data: [] as never[] } };
+      ctx.ui?.setStatus?.("engram", `${brain} ${project} · ${humanToolName(toolName)} · no results`);
+      return emptyResult;
     }
     const result = { content: [{ type: "text" as const, text: textResult(data) }], details: { data } };
     if (toolName === "mem_doctor" && data && typeof data === "object" && "status" in data && data.status === "error") {
