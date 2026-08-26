@@ -127,27 +127,47 @@ func TestCodexUnixUserPromptSubmitDetachesPromptPersistenceStdin(t *testing.T) {
 	binDir := t.TempDir()
 	markerPath := filepath.Join(binDir, "stdin-result")
 	writeCodexPromptProbeCommand(t, filepath.Join(binDir, "cat"), "#!/bin/bash\nprintf '%s' '{\"cwd\":\"/tmp/test\",\"session_id\":\"stdin-pipe-test\",\"prompt\":\"capture this\"}'\n")
-	writeCodexPromptProbeCommand(t, filepath.Join(binDir, "curl"), "#!/bin/bash\ncase \"$*\" in\n  *'/project/current'*) printf '%s' '{\"project\":\"test-project\",\"project_source\":\"config\"}' ;;\n  *) if IFS= read -r -t 0.2 _; then printf data > \"$PROMPT_STDIN_MARKER\"; else printf eof > \"$PROMPT_STDIN_MARKER\"; fi ;;\nesac\n")
+	writeCodexPromptProbeCommand(t, filepath.Join(binDir, "curl"), "#!/bin/bash\ncase \"$*\" in\n  *'/project/current'*) printf '%s' '{\"project\":\"test-project\",\"project_source\":\"config\"}' ;;\n  *'/prompts'*) if IFS= read -r _; then printf data > \"$PROMPT_STDIN_MARKER\"; else printf eof > \"$PROMPT_STDIN_MARKER\"; fi ;;\n  *) exit 0 ;;\nesac\n")
 
 	stdinReader, stdinWriter, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("create stdin pipe: %v", err)
 	}
-	defer stdinWriter.Close()
 	run := exec.Command(bashPath, "-c", `PATH="$1:$PATH"; export PATH; "$2"`, "codex-test", binDir, adapterPath)
 	run.Env = append(codexPromptTestEnv("7437"), "PROMPT_STDIN_MARKER="+markerPath)
 	run.Stdin = stdinReader
-	if output, err := run.CombinedOutput(); err != nil {
-		t.Fatalf("run adapter: %v: %s", err, output)
+	if err := run.Start(); err != nil {
+		_ = stdinWriter.Close()
+		t.Fatalf("start adapter: %v", err)
 	}
 	_ = stdinReader.Close()
 
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- run.Wait() }()
+	waited := false
+	defer func() {
+		_ = stdinWriter.Close()
+		if !waited {
+			_ = run.Process.Kill()
+			<-waitDone
+		}
+	}()
+
 	deadline := time.Now().Add(time.Second)
 	for {
-		result, err := os.ReadFile(markerPath)
+		marker, err := os.ReadFile(markerPath)
 		if err == nil {
-			if string(result) != "eof" {
-				t.Fatalf("detached curl stdin = %q, want EOF from /dev/null", result)
+			if string(marker) != "eof" {
+				t.Fatalf("detached curl stdin = %q, want EOF from /dev/null", marker)
+			}
+			select {
+			case err := <-waitDone:
+				waited = true
+				if err != nil {
+					t.Fatalf("run adapter: %v", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("adapter did not exit after the stdin probe")
 			}
 			return
 		}
