@@ -57,11 +57,31 @@ func storeLeasePath(dataDir string) (string, error) {
 }
 
 func canonicalStoreLeaseDir(dataDir string) (string, error) {
-	canonicalDir, err := filepath.EvalSymlinks(dataDir)
-	if err != nil {
-		return "", fmt.Errorf("resolve store lease directory %s: %w", dataDir, err)
+	dir := filepath.Clean(dataDir)
+	missing := make([]string, 0)
+	for {
+		canonicalDir, err := filepath.EvalSymlinks(dir)
+		if err == nil {
+			for i := len(missing) - 1; i >= 0; i-- {
+				canonicalDir = filepath.Join(canonicalDir, missing[i])
+			}
+			return filepath.Clean(canonicalDir), nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("resolve store lease directory %s: %w", dataDir, err)
+		}
+		if _, statErr := os.Lstat(dir); statErr == nil {
+			return "", fmt.Errorf("resolve store lease directory %s: %w", dataDir, err)
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return "", fmt.Errorf("inspect store lease directory %s: %w", dir, statErr)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", fmt.Errorf("resolve store lease directory %s: %w", dataDir, err)
+		}
+		missing = append(missing, filepath.Base(dir))
+		dir = parent
 	}
-	return filepath.Clean(canonicalDir), nil
 }
 
 func (l *storeLease) Close() error {

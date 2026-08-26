@@ -27,6 +27,28 @@ func TestMoveDatabaseGenerationRefusesLiveStoreThroughSymlink(t *testing.T) {
 		t.Fatalf("open real store: %v", err)
 	}
 	defer s.Close()
+	realLeasePath, err := storeLeasePath(realDir)
+	if err != nil {
+		t.Fatalf("derive real lease path: %v", err)
+	}
+	aliasLeasePath, err := storeLeasePath(aliasDir)
+	if err != nil {
+		t.Fatalf("derive alias lease path: %v", err)
+	}
+	if aliasLeasePath != realLeasePath {
+		t.Fatalf("alias lease path = %q, want %q", aliasLeasePath, realLeasePath)
+	}
+	realMissingLeasePath, err := storeLeasePath(filepath.Join(realDir, "missing"))
+	if err != nil {
+		t.Fatalf("derive missing real lease path: %v", err)
+	}
+	aliasMissingLeasePath, err := storeLeasePath(filepath.Join(aliasDir, "missing"))
+	if err != nil {
+		t.Fatalf("derive missing alias lease path: %v", err)
+	}
+	if aliasMissingLeasePath != realMissingLeasePath {
+		t.Fatalf("missing alias lease path = %q, want %q", aliasMissingLeasePath, realMissingLeasePath)
+	}
 
 	err = MoveDatabaseGeneration(filepath.Join(aliasDir, "engram.db"), filepath.Join(destinationDir, "engram.db"))
 	if !errors.Is(err, ErrDatabaseStoreInUse) {

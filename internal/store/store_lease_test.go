@@ -167,6 +167,32 @@ func TestMoveDatabaseGenerationPreservesExistingDestination(t *testing.T) {
 	}
 }
 
+func TestStoreLeasePathAllowsMissingDataDirectory(t *testing.T) {
+	parent := t.TempDir()
+	dataDir := filepath.Join(parent, "missing")
+
+	lockPath, err := storeLeasePath(dataDir)
+	if err != nil {
+		t.Fatalf("derive lease path: %v", err)
+	}
+	if want := filepath.Join(parent, ".missing.engram.store.lock"); lockPath != want {
+		t.Fatalf("lease path = %q, want %q", lockPath, want)
+	}
+	if _, err := os.Stat(dataDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing data directory after lease derivation: %v", err)
+	}
+}
+
+func TestStoreLeasePathPreservesResolutionErrors(t *testing.T) {
+	_, err := storeLeasePath(filepath.Join(t.TempDir(), "\x00"))
+	if err == nil {
+		t.Fatal("derive lease path with invalid path succeeded")
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid path error = %v, must not be treated as missing", err)
+	}
+}
+
 func TestAcquireStoreLeaseTimesOutWithGuidance(t *testing.T) {
 	useShortStoreLeaseTimeout(t)
 
