@@ -1262,8 +1262,9 @@ func (s *Store) GetRelationStats(project string) (RelationStats, error) {
 // pending relation (after a pre-check to skip already-related pairs).
 //
 // Phase 4 extension: when ScanOptions.Semantic is true, after the FTS5 candidate
-// collection a bounded worker pool calls Runner.Compare on each pair and persists
-// non-"not_conflict" verdicts via JudgeBySemantic. Semantic=false (zero value)
+// collection a bounded worker pool calls Runner.Compare on each pair. Applied
+// scans persist non-"not_conflict" verdicts via JudgeBySemantic, while dry-runs
+// report their semantic results without persistence. Semantic=false (zero value)
 // preserves Phase 3 behaviour exactly.
 //
 // Returns a ScanResult with counts of inspected observations, candidates found,
@@ -1506,6 +1507,20 @@ func (s *Store) ScanProject(opts ScanOptions) (ScanResult, error) {
 					if verdict.Relation == RelationNotConflict {
 						mu.Lock()
 						result.SemanticSkipped++
+						mu.Unlock()
+						return
+					}
+
+					// Dry-runs evaluate and count valid verdicts without persistence.
+					// Invalid verdicts still flow through JudgeBySemantic so existing
+					// semantic error behavior remains unchanged.
+					if !opts.Apply &&
+						pair.sourceSnippet.SyncID != "" &&
+						pair.candidateSnippet.SyncID != "" &&
+						isValidRelationVerb(verdict.Relation) &&
+						verdict.Confidence >= 0 && verdict.Confidence <= 1 {
+						mu.Lock()
+						result.SemanticJudged++
 						mu.Unlock()
 						return
 					}

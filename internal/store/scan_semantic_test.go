@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 )
@@ -13,9 +14,14 @@ import (
 // verdictRunner returns a fixed SemanticVerdict for every Compare call.
 type verdictRunner struct {
 	verdict SemanticVerdict
+	mu      sync.Mutex
+	calls   int
 }
 
 func (r *verdictRunner) Compare(_ context.Context, _ string) (SemanticVerdict, error) {
+	r.mu.Lock()
+	r.calls++
+	r.mu.Unlock()
 	return r.verdict, nil
 }
 
@@ -30,8 +36,8 @@ func (r *errorRunner) Compare(_ context.Context, _ string) (SemanticVerdict, err
 
 // routingRunner routes calls to different runners based on the call index.
 type routingRunner struct {
-	runners  []SemanticRunner
-	callIdx  int
+	runners []SemanticRunner
+	callIdx int
 }
 
 func (r *routingRunner) Compare(ctx context.Context, prompt string) (SemanticVerdict, error) {
@@ -141,6 +147,98 @@ func TestScanProject_Semantic_HappyPath(t *testing.T) {
 	}
 	if count == 0 {
 		t.Error("expected at least 1 relation row with marked_by_actor='engram'; got 0")
+	}
+}
+
+// TestScanProject_Semantic_DryRunDoesNotPersist verifies that semantic dry-runs
+// evaluate valid verdicts without changing relation or sync state.
+func TestScanProject_Semantic_DryRunDoesNotPersist(t *testing.T) {
+	s := newTestStore(t)
+	_, syncA, _, syncB := seedSimilarPair(t, s, "semantic-dry-run-project")
+
+	if _, err := s.db.Exec(`
+		INSERT INTO memory_relations
+			(sync_id, source_id, target_id, relation, judgment_status, confidence, reason, created_at, updated_at)
+		VALUES (?, ?, ?, 'related', 'pending', 0.2, 'awaiting judgment', datetime('now'), datetime('now'))
+	`, "rel-semantic-dry-run", syncA, syncB); err != nil {
+		t.Fatalf("seed pending relation: %v", err)
+	}
+	if err := s.EnrollProject("semantic-dry-run-project"); err != nil {
+		t.Fatalf("EnrollProject: %v", err)
+	}
+
+	var relationsBefore, mutationsBefore int
+	if err := s.db.QueryRow(`SELECT count(*) FROM memory_relations`).Scan(&relationsBefore); err != nil {
+		t.Fatalf("count relations before scan: %v", err)
+	}
+	if err := s.db.QueryRow(`SELECT count(*) FROM sync_mutations`).Scan(&mutationsBefore); err != nil {
+		t.Fatalf("count sync mutations before scan: %v", err)
+	}
+	syncStateBefore, err := s.GetSyncState(DefaultSyncTargetKey)
+	if err != nil {
+		t.Fatalf("GetSyncState before scan: %v", err)
+	}
+
+	runner := &verdictRunner{
+		verdict: SemanticVerdict{
+			Relation:   "compatible",
+			Confidence: 0.9,
+			Reasoning:  "both discuss JWT auth",
+			Model:      "haiku",
+		},
+	}
+	result, err := s.ScanProject(ScanOptions{
+		Project:        "semantic-dry-run-project",
+		Apply:          false,
+		Semantic:       true,
+		Concurrency:    1,
+		TimeoutPerCall: 5 * time.Second,
+		MaxSemantic:    10,
+		Runner:         runner,
+		BuildPrompt:    identityPromptBuilder,
+	})
+	if err != nil {
+		t.Fatalf("ScanProject: %v", err)
+	}
+	if result.SemanticJudged == 0 || result.SemanticErrors != 0 {
+		t.Errorf("semantic counters = judged:%d errors:%d, want judged > 0 and errors = 0", result.SemanticJudged, result.SemanticErrors)
+	}
+	if runner.calls == 0 {
+		t.Error("semantic runner was not called during dry-run")
+	}
+
+	var relationsAfter, mutationsAfter int
+	if err := s.db.QueryRow(`SELECT count(*) FROM memory_relations`).Scan(&relationsAfter); err != nil {
+		t.Fatalf("count relations after scan: %v", err)
+	}
+	if relationsAfter != relationsBefore {
+		t.Errorf("relation count = %d, want unchanged %d", relationsAfter, relationsBefore)
+	}
+
+	var relation, status, reason string
+	var confidence float64
+	if err := s.db.QueryRow(`
+		SELECT relation, judgment_status, confidence, reason
+		FROM memory_relations WHERE sync_id = ?
+	`, "rel-semantic-dry-run").Scan(&relation, &status, &confidence, &reason); err != nil {
+		t.Fatalf("load pending relation after scan: %v", err)
+	}
+	if relation != "related" || status != "pending" || confidence != 0.2 || reason != "awaiting judgment" {
+		t.Errorf("pending relation mutated: relation=%q status=%q confidence=%v reason=%q", relation, status, confidence, reason)
+	}
+
+	if err := s.db.QueryRow(`SELECT count(*) FROM sync_mutations`).Scan(&mutationsAfter); err != nil {
+		t.Fatalf("count sync mutations after scan: %v", err)
+	}
+	if mutationsAfter != mutationsBefore {
+		t.Errorf("sync mutation count = %d, want unchanged %d", mutationsAfter, mutationsBefore)
+	}
+	syncStateAfter, err := s.GetSyncState(DefaultSyncTargetKey)
+	if err != nil {
+		t.Fatalf("GetSyncState after scan: %v", err)
+	}
+	if syncStateAfter.LastEnqueuedSeq != syncStateBefore.LastEnqueuedSeq || syncStateAfter.Lifecycle != syncStateBefore.Lifecycle {
+		t.Errorf("sync state changed: before last_enqueued_seq=%d lifecycle=%q; after last_enqueued_seq=%d lifecycle=%q", syncStateBefore.LastEnqueuedSeq, syncStateBefore.Lifecycle, syncStateAfter.LastEnqueuedSeq, syncStateAfter.Lifecycle)
 	}
 }
 
