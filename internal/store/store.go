@@ -486,6 +486,11 @@ func (s *Store) MaxObservationLength() int {
 	return s.cfg.MaxObservationLength
 }
 
+// DataDir returns the directory containing the store database and cloud.json.
+func (s *Store) DataDir() string {
+	return s.cfg.DataDir
+}
+
 // ─── Store ───────────────────────────────────────────────────────────────────
 
 type Store struct {
@@ -3727,6 +3732,21 @@ func (s *Store) ListPendingSyncMutations(targetKey string, limit int) ([]SyncMut
 		mutations = append(mutations, mutation)
 	}
 	return mutations, rows.Err()
+}
+
+// CountPendingSyncMutations returns the number of unacknowledged mutations
+// eligible to sync for targetKey. Mutations for unenrolled projects are not
+// included, matching ListPendingSyncMutations.
+func (s *Store) CountPendingSyncMutations(targetKey string) (int64, error) {
+	targetKey = normalizeSyncTargetKey(targetKey)
+	var count int64
+	err := s.db.QueryRow(`
+		SELECT COUNT(*)
+		FROM sync_mutations sm
+		LEFT JOIN sync_enrolled_projects sep ON sm.project = sep.project
+		WHERE sm.target_key = ? AND sm.acked_at IS NULL
+		  AND (sm.project = '' OR sep.project IS NOT NULL)`, targetKey).Scan(&count)
+	return count, err
 }
 
 func (s *Store) ListPendingSyncMutationsAfterSeq(targetKey string, afterSeq int64, limit int) ([]SyncMutation, error) {

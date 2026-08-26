@@ -40,6 +40,51 @@ func newTestStore(t *testing.T) *Store {
 	return s
 }
 
+func TestStoreDataDir(t *testing.T) {
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = t.TempDir()
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	if got := s.DataDir(); got != cfg.DataDir {
+		t.Fatalf("data directory = %q, want %q", got, cfg.DataDir)
+	}
+}
+
+func TestCountPendingSyncMutationsMatchesEnrollmentFilter(t *testing.T) {
+	s := newTestStore(t)
+	for _, project := range []string{"", "enrolled", "unenrolled"} {
+		if err := s.CreateSession("session-"+project, project, "/tmp"); err != nil {
+			t.Fatalf("create %q session: %v", project, err)
+		}
+	}
+	if err := s.EnrollProject("enrolled"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+
+	count, err := s.CountPendingSyncMutations(DefaultSyncTargetKey)
+	if err != nil {
+		t.Fatalf("count pending mutations: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("pending mutation count = %d, want 2 for global and enrolled projects", count)
+	}
+
+	if err := s.UnenrollProject("enrolled"); err != nil {
+		t.Fatalf("unenroll project: %v", err)
+	}
+	count, err = s.CountPendingSyncMutations(DefaultSyncTargetKey)
+	if err != nil {
+		t.Fatalf("count pending mutations after unenroll: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("pending mutation count after unenroll = %d, want 1 for global project only", count)
+	}
+}
+
 type fakeRows struct {
 	next     []bool
 	scanErr  error

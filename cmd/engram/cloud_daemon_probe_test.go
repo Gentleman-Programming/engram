@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Gentleman-Programming/engram/internal/cloudconfig"
 )
 
 func TestDefaultCloudDaemonProbeReturnsRunningOn200(t *testing.T) {
@@ -59,9 +61,9 @@ func TestDefaultCloudDaemonProbeReturnsUnreachableOnNon2xx(t *testing.T) {
 }
 
 func TestDefaultCloudDaemonProbeReturnsUnreachableOnTimeout(t *testing.T) {
-	prev := daemonProbeTimeout
-	daemonProbeTimeout = 100 * time.Millisecond
-	t.Cleanup(func() { daemonProbeTimeout = prev })
+	prev := cloudconfig.ProbeTimeout
+	cloudconfig.ProbeTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { cloudconfig.ProbeTimeout = prev })
 
 	// Listener accepts but never reads/writes, forcing the client to time out.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

@@ -82,6 +82,12 @@ func (m Model) View() string {
 		content = m.viewSetup()
 	case ScreenCloudSettings:
 		content = m.viewCloudSettings()
+	case ScreenCloudConfig:
+		content = m.viewCloudConfig()
+	case ScreenCloudStatus:
+		content = m.viewCloudStatus()
+	case ScreenCloudEnrollment:
+		content = m.viewCloudEnrollment()
 	default:
 		content = "Unknown screen"
 	}
@@ -178,6 +184,135 @@ func (m Model) viewCloudSettings() string {
 	b.WriteString(helpStyle.Render("\n  j/k navigate • enter select • esc/q back"))
 
 	return b.String()
+}
+
+func (m Model) viewCloudConfig() string {
+	var b strings.Builder
+	configLabelStyle := detailLabelStyle.Width(18)
+	b.WriteString(headerStyle.Render("  Configure cloud server"))
+	b.WriteString("\n\n")
+	b.WriteString(configLabelStyle.Render("  Server URL: "))
+	b.WriteString(searchInputStyle.Render(m.CloudConfigInput.View()))
+	b.WriteString("\n")
+	b.WriteString(configLabelStyle.Render("  Token source: ") + detailValueStyle.Render(emptyCloudValue(m.CloudConfigTokenSource, TokenSourceNone)))
+	b.WriteString("\n")
+	if m.CloudConfigTokenSource != TokenSourceEnv {
+		b.WriteString(timestampStyle.Render("  Set ENGRAM_CLOUD_TOKEN to override cloud.json.token"))
+		b.WriteString("\n")
+	}
+	b.WriteString("\n\n")
+	items := []string{"Test connection", "Save server", "Cancel"}
+	for i, item := range items {
+		focus := i + 1
+		if m.CloudConfigFocus == focus {
+			b.WriteString(menuSelectedStyle.Render("▸ " + item))
+		} else {
+			b.WriteString(menuItemStyle.Render("  " + item))
+		}
+		b.WriteString("\n")
+	}
+	if m.CloudConfigSaving {
+		b.WriteString(timestampStyle.Render("  Checking server..."))
+		b.WriteString("\n")
+	}
+	if m.CloudConfigPingStatus != "" {
+		b.WriteString(detailLabelStyle.Render("  Connection: ") + detailValueStyle.Render(m.CloudConfigPingStatus) + "\n")
+	}
+	if m.CloudConfigError != "" {
+		b.WriteString(errorStyle.Render("  Error: "+m.CloudConfigError) + "\n")
+	}
+	b.WriteString(helpStyle.Render("\n  j/k navigate • i edit URL • enter select • esc/q back"))
+	return b.String()
+}
+
+func (m Model) viewCloudStatus() string {
+	var b strings.Builder
+	statusLabelStyle := detailLabelStyle.Width(20)
+	b.WriteString(headerStyle.Render("  Cloud status"))
+	b.WriteString("\n\n")
+	if m.CloudStatusLoading {
+		b.WriteString(timestampStyle.Render("  Loading cloud status...\n"))
+	}
+	lines := [][2]string{
+		{"Cloud status", emptyCloudValue(cloudStatusConfiguredValue(m.CloudStatusTarget), "not configured")},
+		{"Server URL", emptyCloudValue(m.CloudStatusServerURL, "not configured")},
+		{"Health", emptyCloudValue(m.CloudStatusHealth, "not checked")},
+		{"Token source", emptyCloudValue(m.CloudStatusTokenSource, "none")},
+		{"Last sync", emptyCloudValue(m.CloudStatusLastSync, "never")},
+		{"Pending mutations", fmt.Sprintf("%d", m.CloudStatusPendingCount)},
+		{"Sync lifecycle", emptyCloudValue(m.CloudStatusSyncLifecycle, "unknown")},
+		{"Local daemon", emptyCloudValue(m.CloudStatusLocalDaemon, "not checked")},
+	}
+	for _, line := range lines {
+		b.WriteString(statusLabelStyle.Render("  "+line[0]+": ") + detailValueStyle.Render(line[1]) + "\n")
+	}
+	if m.CloudStatusSyncLifecycle != "" || m.CloudStatusSyncReasonCode != "" || m.CloudStatusSyncReasonMessage != "" {
+		b.WriteString("\n")
+		b.WriteString(statusLabelStyle.Render("  Sync diagnostic: ") + detailValueStyle.Render(emptyCloudValue(m.CloudStatusSyncLifecycle, "unknown")) + "\n")
+		if m.CloudStatusSyncReasonCode != "" {
+			b.WriteString(statusLabelStyle.Render("    reason_code: ") + detailValueStyle.Render(m.CloudStatusSyncReasonCode) + "\n")
+		}
+		if m.CloudStatusSyncReasonMessage != "" {
+			b.WriteString(statusLabelStyle.Render("    reason_message: ") + detailValueStyle.Render(m.CloudStatusSyncReasonMessage) + "\n")
+		}
+	}
+	if m.CloudStatusAuthStatus != "" {
+		b.WriteString(statusLabelStyle.Render("  Auth status: ") + detailValueStyle.Render(m.CloudStatusAuthStatus) + "\n")
+	}
+	if m.CloudStatusSyncReadiness != "" {
+		b.WriteString(statusLabelStyle.Render("  Sync readiness: ") + detailValueStyle.Render(m.CloudStatusSyncReadiness) + "\n")
+	}
+	for _, message := range []string{m.CloudStatusAuthWarning, m.CloudStatusAuthHint, m.CloudStatusDaemonHint, m.CloudStatusLastError} {
+		if message != "" {
+			b.WriteString(timestampStyle.Render("  "+message) + "\n")
+		}
+	}
+	b.WriteString(helpStyle.Render("\n  r refresh • esc/q back"))
+	return b.String()
+}
+
+func (m Model) viewCloudEnrollment() string {
+	var b strings.Builder
+	b.WriteString(headerStyle.Render("  Enroll projects for cloud sync"))
+	b.WriteString("\n\n")
+	if m.CloudEnrollmentLoading {
+		b.WriteString(timestampStyle.Render("  Loading projects...\n"))
+	}
+	if len(m.CloudEnrollmentItems) == 0 && !m.CloudEnrollmentLoading {
+		b.WriteString(timestampStyle.Render("  No local projects found.\n"))
+	}
+	for i, item := range m.CloudEnrollmentItems {
+		check := "[ ]"
+		if item.enrolled {
+			check = "[x]"
+		}
+		line := fmt.Sprintf("%s %s", check, item.project)
+		if i == m.Cursor {
+			b.WriteString(menuSelectedStyle.Render("▸ " + line))
+		} else {
+			b.WriteString(menuItemStyle.Render("  " + line))
+		}
+		b.WriteString("\n")
+	}
+	if m.CloudEnrollmentError != "" {
+		b.WriteString(errorStyle.Render("  Error: "+m.CloudEnrollmentError) + "\n")
+	}
+	b.WriteString(helpStyle.Render("\n  j/k navigate • enter toggle • r refresh • esc/q back"))
+	return b.String()
+}
+
+func emptyCloudValue(value, fallback string) string {
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func cloudStatusConfiguredValue(target string) string {
+	if target == "" {
+		return ""
+	}
+	return fmt.Sprintf("configured (target=%s)", target)
 }
 
 // renderMenu renders a vertical list of selectable menu items with a cursor.

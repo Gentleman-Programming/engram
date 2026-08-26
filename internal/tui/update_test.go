@@ -321,6 +321,36 @@ func TestCloudSettingsMenuNavigation(t *testing.T) {
 	}
 }
 
+func TestCloudSettingsActionsOpenTheirScreens(t *testing.T) {
+	fx := newTestFixture(t)
+	tests := []struct {
+		name   string
+		cursor int
+		want   Screen
+	}{
+		{name: "configure server", cursor: 0, want: ScreenCloudConfig},
+		{name: "view status", cursor: 1, want: ScreenCloudStatus},
+		{name: "enroll projects", cursor: 2, want: ScreenCloudEnrollment},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := New(fx.store, "")
+			m.Screen = ScreenCloudSettings
+			m.Cursor = tt.cursor
+
+			updatedModel, cmd := m.handleCloudSettingsKeys("enter")
+			updated := updatedModel.(Model)
+			if updated.Screen != tt.want {
+				t.Fatalf("screen = %v, want %v", updated.Screen, tt.want)
+			}
+			if cmd == nil {
+				t.Fatal("selected cloud settings action should start its load command")
+			}
+		})
+	}
+}
+
 func TestHandleRecentTimelineSessionsAndDetailKeyPaths(t *testing.T) {
 	fx := newTestFixture(t)
 	m := New(fx.store, "")

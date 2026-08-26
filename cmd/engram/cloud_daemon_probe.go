@@ -2,38 +2,24 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io"
-	"net"
-	"net/http"
-	"os"
-	"strconv"
-	"strings"
-	"time"
+
+	"github.com/Gentleman-Programming/engram/internal/cloudconfig"
 )
 
 // daemonProbeStatus describes the outcome of probing the local engram daemon.
-type daemonProbeStatus string
+type daemonProbeStatus = cloudconfig.ProbeStatus
 
 const (
-	daemonProbeRunning     daemonProbeStatus = "running"
-	daemonProbeNotRunning  daemonProbeStatus = "not_running"
-	daemonProbeUnreachable daemonProbeStatus = "unreachable"
+	daemonProbeRunning     = cloudconfig.ProbeRunning
+	daemonProbeNotRunning  = cloudconfig.ProbeNotRunning
+	daemonProbeUnreachable = cloudconfig.ProbeUnreachable
 )
 
 // daemonProbeResult captures the outcome of a single probe.
-type daemonProbeResult struct {
-	Status daemonProbeStatus
-	Port   int
-	Err    error
-}
+type daemonProbeResult = cloudconfig.Result
 
-const defaultDaemonProbePort = 7437
-
-// daemonProbeTimeout is a var (not const) so tests can shorten it when
-// exercising the "server accepts but never replies" path.
-var daemonProbeTimeout = time.Second
+const defaultDaemonProbePort = cloudconfig.DefaultProbePort
 
 // cloudDaemonProbe issues a short timeout GET to /health on the local engram
 // HTTP server. Exposed as a variable so tests can stub it.
@@ -44,37 +30,13 @@ var cloudDaemonProbe = defaultCloudDaemonProbe
 // (timeout, non-2xx response, malformed reply) maps to "unreachable" so the
 // user can distinguish "the daemon is gone" from "the daemon is misbehaving".
 func defaultCloudDaemonProbe(ctx context.Context, port int) daemonProbeResult {
-	url := fmt.Sprintf("http://127.0.0.1:%d/health", port)
-	client := &http.Client{Timeout: daemonProbeTimeout}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return daemonProbeResult{Status: daemonProbeUnreachable, Port: port, Err: err}
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		var opErr *net.OpError
-		if errors.As(err, &opErr) && opErr.Op == "dial" {
-			return daemonProbeResult{Status: daemonProbeNotRunning, Port: port, Err: err}
-		}
-		return daemonProbeResult{Status: daemonProbeUnreachable, Port: port, Err: err}
-	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return daemonProbeResult{Status: daemonProbeRunning, Port: port}
-	}
-	return daemonProbeResult{Status: daemonProbeUnreachable, Port: port}
+	return cloudconfig.LocalDaemonProbe(ctx, port)
 }
 
 // resolveDaemonProbePort mirrors the port resolution used by cmdServe so the
 // probe targets the same address the user's serve process is bound to.
 func resolveDaemonProbePort() int {
-	if p := strings.TrimSpace(os.Getenv("ENGRAM_PORT")); p != "" {
-		if n, err := strconv.Atoi(p); err == nil && n > 0 && n < 65536 {
-			return n
-		}
-	}
-	return defaultDaemonProbePort
+	return cloudconfig.ResolvePort()
 }
 
 // printCloudStatusDaemonProbe prints a single line describing whether the
@@ -83,7 +45,7 @@ func resolveDaemonProbePort() int {
 // non-failing diagnostic surface.
 func printCloudStatusDaemonProbe() {
 	port := resolveDaemonProbePort()
-	ctx, cancel := context.WithTimeout(context.Background(), daemonProbeTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), cloudconfig.ProbeTimeout)
 	defer cancel()
 	res := cloudDaemonProbe(ctx, port)
 	switch res.Status {
