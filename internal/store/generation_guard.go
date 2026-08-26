@@ -84,11 +84,11 @@ func (g *databaseGeneration) check() error {
 		file := &g.files[i]
 		identity, err := readDatabaseFileID(file.path)
 		if err != nil {
-			if !file.required && errors.Is(err, os.ErrNotExist) {
-				if !file.present {
-					continue
+			if errors.Is(err, os.ErrNotExist) {
+				if file.required || file.present {
+					return g.changedError(file.name, "disappeared")
 				}
-				return g.changedError(file.name, "disappeared")
+				continue
 			}
 			return fmt.Errorf("inspect %s identity: %w", file.name, err)
 		}

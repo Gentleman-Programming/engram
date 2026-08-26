@@ -22,7 +22,10 @@ type storeLease struct {
 }
 
 func acquireStoreLease(dataDir string, exclusive bool) (*storeLease, error) {
-	lockPath := storeLeasePath(dataDir)
+	lockPath, err := storeLeasePath(dataDir)
+	if err != nil {
+		return nil, err
+	}
 	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open store lease %s: %w", lockPath, err)
@@ -45,9 +48,20 @@ func acquireStoreLease(dataDir string, exclusive bool) (*storeLease, error) {
 	}
 }
 
-func storeLeasePath(dataDir string) string {
-	cleanDir := filepath.Clean(dataDir)
-	return filepath.Join(filepath.Dir(cleanDir), "."+filepath.Base(cleanDir)+".engram.store.lock")
+func storeLeasePath(dataDir string) (string, error) {
+	canonicalDir, err := canonicalStoreLeaseDir(dataDir)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(filepath.Dir(canonicalDir), "."+filepath.Base(canonicalDir)+".engram.store.lock"), nil
+}
+
+func canonicalStoreLeaseDir(dataDir string) (string, error) {
+	canonicalDir, err := filepath.EvalSymlinks(dataDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve store lease directory %s: %w", dataDir, err)
+	}
+	return filepath.Clean(canonicalDir), nil
 }
 
 func (l *storeLease) Close() error {
@@ -67,7 +81,15 @@ func releaseStoreLeases(leases []*storeLease) {
 }
 
 func acquireMoveLeases(sourceDir, destinationDir string) ([]*storeLease, error) {
-	dirs := []string{filepath.Clean(sourceDir), filepath.Clean(destinationDir)}
+	sourceDir, err := canonicalStoreLeaseDir(sourceDir)
+	if err != nil {
+		return nil, err
+	}
+	destinationDir, err = canonicalStoreLeaseDir(destinationDir)
+	if err != nil {
+		return nil, err
+	}
+	dirs := []string{sourceDir, destinationDir}
 	sort.Strings(dirs)
 	if len(dirs) == 2 && dirs[0] == dirs[1] {
 		dirs = dirs[:1]
@@ -124,9 +146,17 @@ func MoveDatabaseGeneration(sourceDB, destinationDB string) error {
 
 	moved := make([]databaseMove, 0, 3)
 	for _, suffix := range []string{"", "-wal", "-shm"} {
+		destination := destinationDB + suffix
+		if _, err := os.Stat(destination); err == nil {
+			return fmt.Errorf("destination %s already exists: %w", filepath.Base(destination), os.ErrExist)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("inspect destination %s: %w", filepath.Base(destination), err)
+		}
+	}
+	for _, suffix := range []string{"", "-wal", "-shm"} {
 		source := sourceDB + suffix
 		if _, err := os.Stat(source); err != nil {
-			if errors.Is(err, os.ErrNotExist) {
+			if suffix != "" && errors.Is(err, os.ErrNotExist) {
 				continue
 			}
 			return moveDatabaseFailure(fmt.Errorf("inspect %s: %w", filepath.Base(source), err), moved)

@@ -97,6 +97,76 @@ func TestMoveDatabaseGenerationRollsBackPartialMove(t *testing.T) {
 	}
 }
 
+func TestMoveDatabaseGenerationRequiresSourceDatabase(t *testing.T) {
+	base := t.TempDir()
+	sourceDir := filepath.Join(base, "source")
+	destinationDir := filepath.Join(base, "destination")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatalf("create source directory: %v", err)
+	}
+	sourceDB := filepath.Join(sourceDir, "engram.db")
+	destinationDB := filepath.Join(destinationDir, "engram.db")
+	if err := os.WriteFile(sourceDB+"-wal", []byte("orphaned WAL"), 0o600); err != nil {
+		t.Fatalf("write source WAL: %v", err)
+	}
+
+	err := MoveDatabaseGeneration(sourceDB, destinationDB)
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("move error = %v, want missing source database", err)
+	}
+	if _, err := os.Stat(sourceDB + "-wal"); err != nil {
+		t.Fatalf("source WAL after failed move: %v", err)
+	}
+	if _, err := os.Stat(destinationDB + "-wal"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("destination WAL after failed move: %v", err)
+	}
+}
+
+func TestMoveDatabaseGenerationPreservesExistingDestination(t *testing.T) {
+	base := t.TempDir()
+	sourceDir := filepath.Join(base, "source")
+	destinationDir := filepath.Join(base, "destination")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatalf("create source directory: %v", err)
+	}
+	sourceDB := filepath.Join(sourceDir, "engram.db")
+	destinationDB := filepath.Join(destinationDir, "engram.db")
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if err := os.WriteFile(sourceDB+suffix, []byte("source"+suffix), 0o600); err != nil {
+			t.Fatalf("write source %q: %v", suffix, err)
+		}
+	}
+	if err := os.MkdirAll(destinationDir, 0o755); err != nil {
+		t.Fatalf("create destination directory: %v", err)
+	}
+	if err := os.WriteFile(destinationDB+"-wal", []byte("destination WAL"), 0o600); err != nil {
+		t.Fatalf("write destination WAL: %v", err)
+	}
+
+	originalRename := renameDatabaseFile
+	t.Cleanup(func() { renameDatabaseFile = originalRename })
+	renameCalls := 0
+	renameDatabaseFile = func(source, destination string) error {
+		renameCalls++
+		return errors.New("rename must not be called")
+	}
+
+	err := MoveDatabaseGeneration(sourceDB, destinationDB)
+	if !errors.Is(err, os.ErrExist) {
+		t.Fatalf("move error = %v, want existing destination", err)
+	}
+	if renameCalls != 0 {
+		t.Fatalf("rename calls = %d, want 0", renameCalls)
+	}
+	content, err := os.ReadFile(destinationDB + "-wal")
+	if err != nil {
+		t.Fatalf("read destination WAL: %v", err)
+	}
+	if string(content) != "destination WAL" {
+		t.Fatalf("destination WAL content = %q, want preserved content", content)
+	}
+}
+
 func TestAcquireStoreLeaseTimesOutWithGuidance(t *testing.T) {
 	useShortStoreLeaseTimeout(t)
 

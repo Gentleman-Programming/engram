@@ -90,6 +90,27 @@ func TestDatabaseGenerationRejectsSidecarDisappearance(t *testing.T) {
 	}
 }
 
+func TestDatabaseGenerationRejectsDatabaseDisappearance(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "engram.db")
+	if err := os.WriteFile(dbPath, []byte("database"), 0o600); err != nil {
+		t.Fatalf("write database: %v", err)
+	}
+	generation := newDatabaseGeneration(dbPath)
+	if err := generation.capture(); err != nil {
+		t.Fatalf("capture generation: %v", err)
+	}
+	if err := os.Remove(dbPath); err != nil {
+		t.Fatalf("remove database: %v", err)
+	}
+
+	if err := generation.check(); !errors.Is(err, ErrDatabaseGenerationChanged) {
+		t.Fatalf("disappearance error = %v, want ErrDatabaseGenerationChanged", err)
+	}
+	if err := generation.check(); !errors.Is(err, ErrDatabaseGenerationChanged) {
+		t.Fatalf("sticky disappearance error = %v, want ErrDatabaseGenerationChanged", err)
+	}
+}
+
 func TestDatabaseGenerationPreservesIdentityReadErrors(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "engram.db")
 	if err := os.WriteFile(dbPath, []byte("database"), 0o600); err != nil {
