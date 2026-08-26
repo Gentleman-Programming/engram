@@ -884,6 +884,28 @@ func TestLocalChunkExportFailsClosedOnInvalidHistoricalIdentityData(t *testing.T
 			},
 		},
 		{
+			name: "legacy pending relation still requires source identity",
+			chunk: func() ChunkData {
+				return ChunkData{Mutations: []store.SyncMutation{{
+					Entity:    store.SyncEntityRelation,
+					EntityKey: "legacy-pending-relation",
+					Op:        store.SyncOpUpsert,
+					Payload:   `{"sync_id":"legacy-pending-relation","source_id":"","target_id":"target-observation","relation":"pending","judgment_status":"pending"}`,
+				}}}
+			},
+		},
+		{
+			name: "non-pending relation still requires provenance",
+			chunk: func() ChunkData {
+				return ChunkData{Mutations: []store.SyncMutation{{
+					Entity:    store.SyncEntityRelation,
+					EntityKey: "judged-relation",
+					Op:        store.SyncOpUpsert,
+					Payload:   `{"sync_id":"judged-relation","source_id":"source-observation","target_id":"target-observation","relation":"compatible","judgment_status":"compatible"}`,
+				}}}
+			},
+		},
+		{
 			name:             "valid explicit observation must not hide invalid closure-only direct session",
 			assertNoNewChunk: true,
 			chunk: func() ChunkData {
@@ -931,6 +953,65 @@ func TestLocalChunkExportFailsClosedOnInvalidHistoricalIdentityData(t *testing.T
 				}
 			}
 		})
+	}
+}
+
+func TestLocalChunkExportAccountsForLegacyPendingRelationWithoutProvenance(t *testing.T) {
+	s := newTestStore(t)
+	syncDir := filepath.Join(t.TempDir(), ".engram")
+	seedRelationForProject(t, s, "proj-a", "legacy-session", "legacy-pending-relation")
+	if _, err := s.DB().Exec(`
+		UPDATE memory_relations
+		SET relation = 'pending', judgment_status = 'pending', marked_by_actor = NULL, marked_by_kind = NULL,
+			marked_by_model = NULL, updated_at = '2025-01-01 00:00:00'
+		WHERE sync_id = 'legacy-pending-relation'
+	`); err != nil {
+		t.Fatalf("make relation legacy pending: %v", err)
+	}
+
+	historicalRelations, err := s.ExportRelationMutations("proj-a")
+	if err != nil {
+		t.Fatalf("export legacy relation: %v", err)
+	}
+	if len(historicalRelations) != 1 {
+		t.Fatalf("expected one legacy relation mutation, got %+v", historicalRelations)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(historicalRelations[0].Payload), &payload); err != nil {
+		t.Fatalf("decode legacy relation payload: %v", err)
+	}
+	if _, ok := payload["marked_by_actor"]; ok {
+		t.Fatalf("legacy pending payload must omit marked_by_actor, got %s", historicalRelations[0].Payload)
+	}
+	if _, ok := payload["marked_by_kind"]; ok {
+		t.Fatalf("legacy pending payload must omit marked_by_kind, got %s", historicalRelations[0].Payload)
+	}
+
+	// The endpoints intentionally are not in this historical chunk. Historical
+	// export accounting must not require same-chunk relation closure.
+	writeLocalChunkFile(t, syncDir, "history", ChunkData{Mutations: historicalRelations})
+	writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "history", CreatedAt: "2025-06-01T00:00:00Z"}}})
+
+	result, err := New(s, syncDir).Export("alice", "proj-a")
+	if err != nil {
+		t.Fatalf("export after legacy pending relation: %v", err)
+	}
+	if result.IsEmpty || result.SessionsExported == 0 || result.ObservationsExported == 0 || result.MutationsExported != 0 {
+		t.Fatalf("subsequent export must succeed without duplicating the historical relation, got %+v", result)
+	}
+
+	chunkData, err := readGzip(filepath.Join(syncDir, "chunks", result.ChunkID+".jsonl.gz"))
+	if err != nil {
+		t.Fatalf("read exported chunk: %v", err)
+	}
+	var exported ChunkData
+	if err := json.Unmarshal(chunkData, &exported); err != nil {
+		t.Fatalf("decode exported chunk: %v", err)
+	}
+	for _, mutation := range exported.Mutations {
+		if mutation.Entity == store.SyncEntityRelation && mutation.EntityKey == "legacy-pending-relation" {
+			t.Fatalf("legacy relation must be counted as historical, got duplicated mutation %+v", mutation)
+		}
 	}
 }
 

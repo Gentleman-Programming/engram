@@ -1239,9 +1239,13 @@ func validateHistoricalChunk(raw []byte, chunk ChunkData) error {
 			return fmt.Errorf("mutations[%d].entity_key is required", i)
 		}
 	}
+	validationPayload, err := historicalValidationPayload(raw, document, chunk.Mutations)
+	if err != nil {
+		return err
+	}
 	// The canonical chunk codec enforces supported operations, payload shape,
 	// and payload identity agreement before an identity can count as historical.
-	if _, err := chunkcodec.CanonicalizeForProject(raw, ""); err != nil {
+	if _, err := chunkcodec.CanonicalizeForProject(validationPayload, ""); err != nil {
 		return err
 	}
 
@@ -1257,6 +1261,80 @@ func validateHistoricalChunk(raw []byte, chunk ChunkData) error {
 		return fmt.Errorf("validate direct rows: %w", err)
 	}
 	return nil
+}
+
+// historicalValidationPayload makes the one legacy allowance needed for local
+// export accounting. SaveRelation created pending rows before provenance was
+// required by the codec, so historical pending relation payloads can omit both
+// provenance fields. The synthesized values exist only in this validation copy;
+// all identity, operation, payload, and endpoint checks remain in the codec.
+func historicalValidationPayload(raw []byte, document map[string]json.RawMessage, mutations []store.SyncMutation) ([]byte, error) {
+	rawMutations, ok := document["mutations"]
+	if !ok {
+		return raw, nil
+	}
+	var rows []map[string]json.RawMessage
+	if err := json.Unmarshal(rawMutations, &rows); err != nil || len(rows) != len(mutations) {
+		return raw, nil
+	}
+
+	changed := false
+	for i, mutation := range mutations {
+		payload, ok := legacyPendingRelationPayload(mutation)
+		if !ok || rows[i] == nil {
+			continue
+		}
+		encodedPayload, err := json.Marshal(payload)
+		if err != nil {
+			return nil, fmt.Errorf("encode legacy relation payload: %w", err)
+		}
+		rows[i]["payload"] = encodedPayload
+		changed = true
+	}
+	if !changed {
+		return raw, nil
+	}
+	encodedRows, err := json.Marshal(rows)
+	if err != nil {
+		return nil, fmt.Errorf("encode historical mutations: %w", err)
+	}
+	document["mutations"] = encodedRows
+	validationPayload, err := json.Marshal(document)
+	if err != nil {
+		return nil, fmt.Errorf("encode historical chunk: %w", err)
+	}
+	return validationPayload, nil
+}
+
+func legacyPendingRelationPayload(mutation store.SyncMutation) (string, bool) {
+	if strings.TrimSpace(mutation.Entity) != store.SyncEntityRelation || strings.TrimSpace(mutation.Op) != store.SyncOpUpsert {
+		return "", false
+	}
+	var payload map[string]json.RawMessage
+	if err := chunkcodec.DecodeSyncMutationPayload(mutation.Payload, &payload); err != nil || payload == nil {
+		return "", false
+	}
+	status, ok := payload["judgment_status"]
+	if !ok {
+		return "", false
+	}
+	var judgmentStatus string
+	if err := json.Unmarshal(status, &judgmentStatus); err != nil || strings.TrimSpace(judgmentStatus) != store.JudgmentStatusPending {
+		return "", false
+	}
+	if _, exists := payload["marked_by_actor"]; exists {
+		return "", false
+	}
+	if _, exists := payload["marked_by_kind"]; exists {
+		return "", false
+	}
+	payload["marked_by_actor"] = json.RawMessage(`"legacy"`)
+	payload["marked_by_kind"] = json.RawMessage(`"legacy"`)
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", false
+	}
+	return string(encoded), true
 }
 
 func localDataIdentityKeys(data *store.ExportData) map[string]struct{} {
