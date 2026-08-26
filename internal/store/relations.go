@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -57,6 +58,11 @@ var validRelationVerbs = map[string]bool{
 // isValidRelationVerb returns true if v is an accepted mem_judge relation verb.
 func isValidRelationVerb(v string) bool {
 	return validRelationVerbs[v]
+}
+
+// isValidConfidence returns true when confidence is finite and in [0.0, 1.0].
+func isValidConfidence(confidence float64) bool {
+	return !math.IsNaN(confidence) && !math.IsInf(confidence, 0) && confidence >= 0.0 && confidence <= 1.0
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -746,7 +752,7 @@ func (s *Store) JudgeBySemantic(p JudgeBySemanticParams) (string, error) {
 	if !isValidRelationVerb(p.Relation) {
 		return "", fmt.Errorf("JudgeBySemantic: invalid relation verb %q — must be one of: related, compatible, scoped, conflicts_with, supersedes, not_conflict", p.Relation)
 	}
-	if p.Confidence < 0.0 || p.Confidence > 1.0 {
+	if !isValidConfidence(p.Confidence) {
 		return "", fmt.Errorf("JudgeBySemantic: confidence %v is out of range [0.0, 1.0]", p.Confidence)
 	}
 
@@ -1518,7 +1524,7 @@ func (s *Store) ScanProject(opts ScanOptions) (ScanResult, error) {
 						pair.sourceSnippet.SyncID != "" &&
 						pair.candidateSnippet.SyncID != "" &&
 						isValidRelationVerb(verdict.Relation) &&
-						verdict.Confidence >= 0 && verdict.Confidence <= 1 {
+						isValidConfidence(verdict.Confidence) {
 						mu.Lock()
 						result.SemanticJudged++
 						mu.Unlock()
