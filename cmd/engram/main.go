@@ -2835,17 +2835,9 @@ func migrateOrphanedDB(correctDir string) {
 			return
 		}
 
-		// Move DB and WAL/SHM files if they exist.
-		for _, suffix := range []string{"", "-wal", "-shm"} {
-			src := candidate + suffix
-			dst := correctDB + suffix
-			if _, statErr := os.Stat(src); statErr != nil {
-				continue
-			}
-			if renameErr := os.Rename(src, dst); renameErr != nil {
-				log.Printf("[engram] migration failed (move %s): %v", filepath.Base(src), renameErr)
-				return
-			}
+		if err := store.MoveDatabaseGeneration(candidate, correctDB); err != nil {
+			log.Printf("[engram] migration failed: %v", err)
+			return
 		}
 
 		// Clean up empty orphaned directory.

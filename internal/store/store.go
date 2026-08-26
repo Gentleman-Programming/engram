@@ -25,7 +25,7 @@ import (
 	sqlite "modernc.org/sqlite"
 )
 
-var openDB = sql.Open
+var openGuardedDB = openGenerationGuardedDB
 
 // sqliteConstraintForeignKey is the extended SQLite result code for a foreign-key
 // constraint violation (SQLITE_CONSTRAINT_FOREIGNKEY = 787).
@@ -489,9 +489,11 @@ func (s *Store) MaxObservationLength() int {
 // ─── Store ───────────────────────────────────────────────────────────────────
 
 type Store struct {
-	db    *sql.DB
-	cfg   Config
-	hooks storeHooks
+	db         *sql.DB
+	cfg        Config
+	hooks      storeHooks
+	lease      *storeLease
+	generation *databaseGeneration
 }
 
 type execer interface {
@@ -613,17 +615,37 @@ func (s *Store) commitHook(tx *sql.Tx) error {
 }
 
 func New(cfg Config) (*Store, error) {
+	return newStore(cfg, true)
+}
+
+// newWithoutRepair is the same as New but skips repairEnrolledProjectSyncMutations.
+// It exists solely to support tests that need to seed data and call repair manually.
+func newWithoutRepair(cfg Config) (*Store, error) {
+	return newStore(cfg, false)
+}
+
+func newStore(cfg Config, repair bool) (*Store, error) {
 	if !filepath.IsAbs(cfg.DataDir) {
 		return nil, fmt.Errorf("engram: data directory must be an absolute path, got %q — set ENGRAM_DATA_DIR or ensure your home directory is resolvable", cfg.DataDir)
 	}
 	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
 		return nil, fmt.Errorf("engram: create data dir: %w", err)
 	}
+	lease, err := acquireStoreLease(cfg.DataDir, false)
+	if err != nil {
+		return nil, fmt.Errorf("engram: acquire store lease: %w", err)
+	}
 
 	dbPath := filepath.Join(cfg.DataDir, "engram.db")
-	db, err := openDB("sqlite", dbPath)
+	generation := newDatabaseGeneration(dbPath)
+	db, err := openGuardedDB(dbPath, generation)
 	if err != nil {
+		_ = lease.Close()
 		return nil, fmt.Errorf("engram: open database: %w", err)
+	}
+	closeWithLease := func() {
+		_ = db.Close()
+		_ = lease.Close()
 	}
 	db.SetMaxOpenConns(1)
 
@@ -636,59 +658,32 @@ func New(cfg Config) (*Store, error) {
 	}
 	for _, p := range pragmas {
 		if _, err := db.Exec(p); err != nil {
+			closeWithLease()
 			return nil, fmt.Errorf("engram: pragma %q: %w", p, err)
 		}
 	}
 
-	s := &Store{db: db, cfg: cfg, hooks: defaultStoreHooks()}
+	s := &Store{db: db, cfg: cfg, hooks: defaultStoreHooks(), lease: lease, generation: generation}
 	if err := s.migrate(); err != nil {
+		closeWithLease()
 		return nil, fmt.Errorf("engram: migration: %w", err)
 	}
-	if err := s.repairEnrolledProjectSyncMutations(); err != nil {
-		return nil, fmt.Errorf("engram: repair enrolled sync journal: %w", err)
-	}
-
-	return s, nil
-}
-
-// newWithoutRepair is the same as New but skips repairEnrolledProjectSyncMutations.
-// It exists solely to support tests that need to seed data and call repair manually.
-func newWithoutRepair(cfg Config) (*Store, error) {
-	if !filepath.IsAbs(cfg.DataDir) {
-		return nil, fmt.Errorf("engram: data directory must be an absolute path, got %q — set ENGRAM_DATA_DIR or ensure your home directory is resolvable", cfg.DataDir)
-	}
-	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
-		return nil, fmt.Errorf("engram: create data dir: %w", err)
-	}
-
-	dbPath := filepath.Join(cfg.DataDir, "engram.db")
-	db, err := openDB("sqlite", dbPath)
-	if err != nil {
-		return nil, fmt.Errorf("engram: open database: %w", err)
-	}
-	db.SetMaxOpenConns(1)
-
-	pragmas := []string{
-		"PRAGMA journal_mode = WAL",
-		"PRAGMA busy_timeout = 5000",
-		"PRAGMA synchronous = NORMAL",
-		"PRAGMA foreign_keys = ON",
-	}
-	for _, p := range pragmas {
-		if _, err := db.Exec(p); err != nil {
-			return nil, fmt.Errorf("engram: pragma %q: %w", p, err)
+	if repair {
+		if err := s.repairEnrolledProjectSyncMutations(); err != nil {
+			closeWithLease()
+			return nil, fmt.Errorf("engram: repair enrolled sync journal: %w", err)
 		}
 	}
-
-	s := &Store{db: db, cfg: cfg, hooks: defaultStoreHooks()}
-	if err := s.migrate(); err != nil {
-		return nil, fmt.Errorf("engram: migration: %w", err)
+	if err := generation.capture(); err != nil {
+		closeWithLease()
+		return nil, fmt.Errorf("engram: capture database generation: %w", err)
 	}
+
 	return s, nil
 }
 
 func (s *Store) Close() error {
-	return s.db.Close()
+	return errors.Join(s.db.Close(), s.lease.Close())
 }
 
 // ─── Migrations ──────────────────────────────────────────────────────────────

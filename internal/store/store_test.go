@@ -4399,9 +4399,9 @@ func TestSQLiteWriteRetryRetriesTransientLockErrors(t *testing.T) {
 
 func TestStoreUncoveredBranchesPushToHundred(t *testing.T) {
 	t.Run("new open database hook error", func(t *testing.T) {
-		orig := openDB
-		t.Cleanup(func() { openDB = orig })
-		openDB = func(driverName, dataSourceName string) (*sql.DB, error) {
+		orig := openGuardedDB
+		t.Cleanup(func() { openGuardedDB = orig })
+		openGuardedDB = func(string, *databaseGeneration) (*sql.DB, error) {
 			return nil, errors.New("forced open error")
 		}
 
