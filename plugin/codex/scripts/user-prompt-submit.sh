@@ -46,7 +46,7 @@ if [ -n "$PROMPT" ] && [ -n "$SESSION_ID" ]; then
       -H 'Content-Type: application/json' \
       -d "$(jq -n --arg s "$SESSION_ID" --arg p "$PROJECT" --arg c "$PROMPT" \
             '{session_id:$s, project:$p, content:$c}')" >/dev/null 2>&1 || true
-  ) &
+  ) </dev/null >/dev/null 2>&1 &
 fi
 
 parse_epoch() {
