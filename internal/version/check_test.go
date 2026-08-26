@@ -1,9 +1,12 @@
 package version
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -218,10 +221,34 @@ func TestCheckLatestUsesGitHubToken(t *testing.T) {
 }
 
 func TestUpdateInstructions(t *testing.T) {
-	msg := updateInstructions()
-	if msg == "" {
-		t.Fatal("expected non-empty update instructions")
-	}
+	t.Run("mise-managed install gets a mise upgrade hint", func(t *testing.T) {
+		clearMiseEnv(t)
+		root := t.TempDir()
+		t.Setenv("MISE_INSTALLS_DIR", root)
+		withCurrentExecutable(t, filepath.Join(root, "go", "1.25.10", "bin", "engram"), nil)
+
+		if got := updateInstructions(); !strings.Contains(got, "mise upgrade engram") {
+			t.Errorf("updateInstructions() = %q, want it to contain %q", got, "mise upgrade engram")
+		}
+	})
+
+	t.Run("non-mise install keeps today's per-OS instructions unchanged", func(t *testing.T) {
+		clearMiseEnv(t)
+		withUserHomeDir(t, "", errors.New("no home directory"))
+		withCurrentExecutable(t, "/usr/local/bin/engram", nil)
+
+		want := map[string]string{
+			"darwin": "  brew update && brew upgrade engram",
+			"linux":  "  brew update && brew upgrade engram\n  or: go install github.com/Gentleman-Programming/engram/cmd/engram@latest",
+		}[runtime.GOOS]
+		if want == "" {
+			want = "  go install github.com/Gentleman-Programming/engram/cmd/engram@latest\n  or: https://github.com/Gentleman-Programming/engram/releases/latest"
+		}
+
+		if got := updateInstructions(); got != want {
+			t.Errorf("updateInstructions() = %q, want %q", got, want)
+		}
+	})
 }
 
 func withCheckServer(t *testing.T, handler http.Handler) {
