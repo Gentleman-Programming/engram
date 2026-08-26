@@ -193,10 +193,10 @@ PROACTIVE SAVE RULE: Call mem_save immediately after ANY decision, bug fix, disc
 ## CONFLICT SURFACING
 
 After mem_save: if judgment_required, iterate candidates[] and call mem_judge
-once per judgment_id. Ask conversationally when confidence < 0.7 OR (relation
-in {supersedes, conflicts_with} AND type in {architecture, policy, decision});
-else resolve with related | compatible | scoped | not_conflict. Pass evidence
-from user reply.`
+once per entry using that entry's judgment_id; never reuse the top-level judgment_id.
+Ask conversationally when confidence < 0.7 OR (relation in
+{supersedes, conflicts_with} AND type in {architecture, policy, decision}); else
+resolve with related | compatible | scoped | not_conflict. Pass evidence from user reply.`
 
 // NewServerWithTools creates an MCP server registering only the tools in
 // the allowlist. If allowlist is nil, all tools are registered.

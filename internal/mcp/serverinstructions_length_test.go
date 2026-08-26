@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"strings"
 	"testing"
 	"unicode/utf8"
 )
@@ -30,5 +31,16 @@ func TestServerInstructionsStaysUnderClientTruncationLimit(t *testing.T) {
 	if runes >= clientTruncationCeiling {
 		t.Errorf("serverInstructions is %d runes (>=%d) — exceeds the documented 2048-rune MCP client truncation ceiling. Trim prose.",
 			runes, clientTruncationCeiling)
+	}
+}
+
+func TestServerInstructionsUsesCandidateJudgmentIDs(t *testing.T) {
+	const candidateInstruction = "once per entry using that entry's judgment_id"
+	const topLevelWarning = "never reuse the top-level judgment_id"
+
+	candidateIndex := strings.Index(serverInstructions, candidateInstruction)
+	warningIndex := strings.Index(serverInstructions, topLevelWarning)
+	if candidateIndex < 0 || warningIndex < candidateIndex {
+		t.Errorf("serverInstructions must require each candidate's judgment_id and prohibit reusing the top-level judgment_id")
 	}
 }
