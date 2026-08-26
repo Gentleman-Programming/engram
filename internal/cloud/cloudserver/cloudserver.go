@@ -80,6 +80,7 @@ type CloudServer struct {
 	port                int
 	host                string
 	maxPushBodyBytes    int64
+	dashboardEnableDelete bool
 	mux                 *http.ServeMux
 	syncStatus          dashboard.SyncStatusProvider
 	listenAndServe      func(addr string, handler http.Handler) error
@@ -143,6 +144,10 @@ func WithMaxPushBodyBytes(limit int64) Option {
 			s.maxPushBodyBytes = limit
 		}
 	}
+}
+
+func WithDashboardEnableDelete(enabled bool) Option {
+	return func(s *CloudServer) { s.dashboardEnableDelete = enabled }
 }
 
 func New(store ChunkStore, authSvc Authenticator, port int, opts ...Option) *CloudServer {
@@ -256,6 +261,7 @@ func (s *CloudServer) routes() {
 		ManagedUsers:      managedUsersStore,
 		MaxLoginBodyBytes: maxDashboardLoginBodyBytes,
 		StatusProvider:    s.syncStatus,
+		EnableDelete:      s.dashboardEnableDelete,
 	})
 	s.mux.HandleFunc("GET /dashboard/bootstrap", s.handleDashboardBootstrapPage)
 	s.mux.HandleFunc("POST /dashboard/bootstrap", s.handleDashboardBootstrapSubmit)
@@ -413,6 +419,9 @@ func (s *CloudServer) handleHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *CloudServer) isDashboardAdmin(r *http.Request) bool {
+	if s.auth == nil && s.dashboardEnableDelete {
+		return true
+	}
 	if principal, ok := s.dashboardPrincipalFromRequest(r); ok {
 		return principal.Role == cloudauth.RoleAdmin && (principal.Source == cloudauth.PrincipalSourceManagedToken || principal.Source == cloudauth.PrincipalSourceLegacyEnvAdmin)
 	}

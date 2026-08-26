@@ -420,7 +420,7 @@ templ PromptsPartial(prompts []cloudstore.DashboardPromptRow, pg Pagination) {
 
 // PromptDetailPage renders a prompt detail page.
 // ADAPTED: CloudPrompt -> DashboardPromptRow; CloudSession -> DashboardSessionRow.
-templ PromptDetailPage(prompt *cloudstore.DashboardPromptRow, session *cloudstore.DashboardSessionRow, related []cloudstore.DashboardPromptRow) {
+templ PromptDetailPage(prompt *cloudstore.DashboardPromptRow, session *cloudstore.DashboardSessionRow, related []cloudstore.DashboardPromptRow, showDelete bool) {
 	<section class="frame-section">
 		<div class="section-header">
 			<div>
@@ -445,6 +445,9 @@ templ PromptDetailPage(prompt *cloudstore.DashboardPromptRow, session *cloudstor
 					@templ.Raw(renderStructuredContent(prompt.Content))
 				</div>
 			</div>
+			if showDelete {
+				@DashboardDeleteForm("prompt", prompt.Project, prompt.SyncID, prompt.SessionID)
+			}
 			if session != nil {
 				<div class="data-frame linked-session-panel">
 					<p class="section-kicker">LINKED SESSION</p>
@@ -1208,7 +1211,7 @@ templ AdminSyncToggleFormPartial(control cloudstore.ProjectSyncControl) {
 
 // SessionDetailPage renders a connected session detail surface.
 // ADAPTED: CloudSession -> DashboardSessionRow; CloudObservation -> DashboardObservationRow; CloudPrompt -> DashboardPromptRow.
-templ SessionDetailPage(session *cloudstore.DashboardSessionRow, observations []cloudstore.DashboardObservationRow, prompts []cloudstore.DashboardPromptRow) {
+templ SessionDetailPage(session *cloudstore.DashboardSessionRow, observations []cloudstore.DashboardObservationRow, prompts []cloudstore.DashboardPromptRow, showDelete bool) {
 	<section class="frame-section">
 		<div class="section-header">
 			<div>
@@ -1267,6 +1270,9 @@ templ SessionDetailPage(session *cloudstore.DashboardSessionRow, observations []
 					</tbody>
 				</table>
 			</div>
+			if showDelete {
+				@DashboardDeleteForm("session", session.Project, session.SessionID, session.SessionID)
+			}
 			<h3 class="section-block-title">Observations in this Session</h3>
 			@ObservationsPartial(observations, Pagination{})
 			<h3 class="section-block-title">Prompts in this Session</h3>
@@ -1277,7 +1283,7 @@ templ SessionDetailPage(session *cloudstore.DashboardSessionRow, observations []
 
 // ObservationDetailPage renders the full observation payload with session context.
 // ADAPTED: CloudObservation -> DashboardObservationRow; CloudSession -> DashboardSessionRow.
-templ ObservationDetailPage(observation *cloudstore.DashboardObservationRow, session *cloudstore.DashboardSessionRow, related []cloudstore.DashboardObservationRow) {
+templ ObservationDetailPage(observation *cloudstore.DashboardObservationRow, session *cloudstore.DashboardSessionRow, related []cloudstore.DashboardObservationRow, showDelete bool) {
 	<section class="frame-section">
 		<div class="section-header">
 			<div>
@@ -1329,6 +1335,9 @@ templ ObservationDetailPage(observation *cloudstore.DashboardObservationRow, ses
 					@templ.Raw(renderStructuredContent(observation.Content))
 				</div>
 			</div>
+			if session != nil && showDelete {
+				@DashboardDeleteForm("observation", observation.Project, observation.SyncID, observation.SessionID)
+			}
 			if session != nil {
 				<div class="data-frame linked-session-panel">
 					<p class="section-kicker">LINKED SESSION</p>
@@ -1345,6 +1354,16 @@ templ ObservationDetailPage(observation *cloudstore.DashboardObservationRow, ses
 			}
 		}
 	</section>
+}
+
+templ DashboardDeleteForm(entity, project, entityKey, sessionID string) {
+	<form method="post" action="/dashboard/delete" onsubmit="return confirm('Delete this item?')">
+		<input type="hidden" name="entity" value={ entity }/>
+		<input type="hidden" name="project" value={ project }/>
+		<input type="hidden" name="entity_key" value={ entityKey }/>
+		<input type="hidden" name="session_id" value={ sessionID }/>
+		<button type="submit" class="delete-button">Delete</button>
+	</form>
 }
 
 // ─── Phase 9: Audit Log Admin Views ─────────────────────────────────────────

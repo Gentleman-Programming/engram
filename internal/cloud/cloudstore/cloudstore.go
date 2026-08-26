@@ -872,6 +872,33 @@ func (cs *CloudStore) InsertMutationBatch(ctx context.Context, batch []MutationE
 	return seqs, nil
 }
 
+func (cs *CloudStore) DeleteDashboardEntity(ctx context.Context, project, entity, entityKey, sessionID, actor string) error {
+	project = strings.TrimSpace(project)
+	entity = strings.TrimSpace(entity)
+	entityKey = strings.TrimSpace(entityKey)
+	sessionID = strings.TrimSpace(sessionID)
+	if project == "" || entityKey == "" || sessionID == "" {
+		return fmt.Errorf("cloudstore: delete target is incomplete")
+	}
+	if entity != store.SyncEntitySession && entity != store.SyncEntityObservation && entity != store.SyncEntityPrompt {
+		return fmt.Errorf("cloudstore: unsupported dashboard delete entity %q", entity)
+	}
+	payload := map[string]any{"deleted": true, "hard_delete": true, "session_id": sessionID}
+	if entity == store.SyncEntitySession {
+		payload["id"] = entityKey
+	} else {
+		payload["sync_id"] = entityKey
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("cloudstore: encode dashboard delete: %w", err)
+	}
+	if _, err := cs.InsertMutationBatch(ctx, []MutationEntry{{Project: project, Entity: entity, EntityKey: entityKey, Op: store.SyncOpDelete, Payload: encoded}}); err != nil {
+		return err
+	}
+	return cs.InsertAuditEntry(ctx, AuditEntry{Contributor: actor, Project: project, Action: AuditActionDashboardDelete, Outcome: "deleted", EntryCount: 1, ReasonCode: entity})
+}
+
 const mutationBackfillChunkSize = 100
 
 func (cs *CloudStore) BackfillMutationChunks(ctx context.Context, project string, apply bool) (MutationChunkBackfillReport, error) {

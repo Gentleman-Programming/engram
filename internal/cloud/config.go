@@ -16,6 +16,7 @@ type Config struct {
 	AdminToken       string
 	AllowedProjects  []string
 	MaxPushBodyBytes int64
+	DashboardEnableDelete bool
 	// TokenPepper is the dedicated secret used to hash managed cloud tokens
 	// (see internal/cloud/auth.ManagedTokenHasher). It MUST be distinct from
 	// JWTSecret so rotating the dashboard/session signing secret does not
@@ -85,6 +86,9 @@ func ConfigFromEnv() Config {
 			projects = append(projects, project)
 		}
 		cfg.AllowedProjects = projects
+	}
+	if v := strings.TrimSpace(os.Getenv("ENGRAM_DASHBOARD_ENABLE_DELETE")); v != "" {
+		cfg.DashboardEnableDelete = v == "1" || strings.EqualFold(v, "true")
 	}
 	return cfg
 }

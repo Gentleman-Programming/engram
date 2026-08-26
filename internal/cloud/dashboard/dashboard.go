@@ -49,6 +49,11 @@ type MountConfig struct {
 	ManagedUsers        ManagedUsersStore
 	MaxLoginBodyBytes   int64
 	StatusProvider      SyncStatusProvider
+	EnableDelete        bool
+}
+
+type DashboardDeleteStore interface {
+	DeleteDashboardEntity(ctx context.Context, project, entity, entityKey, sessionID, actor string) error
 }
 
 type DashboardStore interface {
@@ -152,10 +157,47 @@ func Mount(mux *http.ServeMux, cfg MountConfig) {
 	mux.HandleFunc("GET /dashboard/sessions/{project}/{sessionID}", h.requireSession(h.handleSessionDetail))
 	mux.HandleFunc("GET /dashboard/observations/{project}/{sessionID}/{syncID}", h.requireSession(h.handleObservationDetail))
 	mux.HandleFunc("GET /dashboard/prompts/{project}/{sessionID}/{syncID}", h.requireSession(h.handlePromptDetail))
+	mux.HandleFunc("POST /dashboard/delete", h.requireSession(h.handleDelete))
 
 	// Audit log routes — admin-gated (REQ-408, REQ-409).
 	mux.HandleFunc("GET /dashboard/admin/audit-log", h.requireSession(h.handleAdminAuditLog))
 	mux.HandleFunc("GET /dashboard/admin/audit-log/list", h.requireSession(h.handleAdminAuditLogList))
+}
+
+func (h *handlers) handleDelete(w http.ResponseWriter, r *http.Request) {
+	p := h.principalFromRequest(r)
+	if !h.cfg.EnableDelete || !p.IsAdmin() {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	project := strings.TrimSpace(r.FormValue("project"))
+	entity := strings.TrimSpace(r.FormValue("entity"))
+	entityKey := strings.TrimSpace(r.FormValue("entity_key"))
+	sessionID := strings.TrimSpace(r.FormValue("session_id"))
+	if project == "" || entityKey == "" || sessionID == "" || (entity != "session" && entity != "observation" && entity != "prompt") {
+		http.Error(w, "invalid delete target", http.StatusBadRequest)
+		return
+	}
+	store, ok := h.cfg.Store.(DashboardDeleteStore)
+	if !ok {
+		http.Error(w, "delete is unavailable", http.StatusNotImplemented)
+		return
+	}
+	if err := store.DeleteDashboardEntity(r.Context(), project, entity, entityKey, sessionID, p.DisplayName()); err != nil {
+		h.renderStoreError(w, r, "browser", "Delete", err)
+		return
+	}
+	redirectURL := "/dashboard/browser"
+	if isHTMXRequest(r) {
+		w.Header().Set("HX-Redirect", redirectURL)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	http.Redirect(w, r, redirectURL, http.StatusSeeOther)
 }
 
 func Handler() http.Handler {
@@ -929,7 +971,7 @@ func (h *handlers) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 		obs = o
 		prompts = pr
 	}
-	component := SessionDetailPage(sess, obs, prompts)
+	component := SessionDetailPage(sess, obs, prompts, h.cfg.EnableDelete && p.IsAdmin())
 	renderComponent(w, r, Layout("Session Detail", p.DisplayName(), "browser", p.IsAdmin(), component))
 }
 
@@ -956,7 +998,7 @@ func (h *handlers) handleObservationDetail(w http.ResponseWriter, r *http.Reques
 		sess = &s
 		related = rel
 	}
-	component := ObservationDetailPage(obs, sess, related)
+	component := ObservationDetailPage(obs, sess, related, h.cfg.EnableDelete && p.IsAdmin())
 	renderComponent(w, r, Layout("Observation Detail", p.DisplayName(), "browser", p.IsAdmin(), component))
 }
 
@@ -983,7 +1025,7 @@ func (h *handlers) handlePromptDetail(w http.ResponseWriter, r *http.Request) {
 		sess = &s
 		related = rel
 	}
-	component := PromptDetailPage(prompt, sess, related)
+	component := PromptDetailPage(prompt, sess, related, h.cfg.EnableDelete && p.IsAdmin())
 	renderComponent(w, r, Layout("Prompt Detail", p.DisplayName(), "browser", p.IsAdmin(), component))
 }
 

@@ -20,6 +20,8 @@ const AuditActionMutationPush = "mutation_push"
 // AuditActionChunkPush discriminates chunk push rejections.
 const AuditActionChunkPush = "chunk_push"
 
+const AuditActionDashboardDelete = "dashboard_delete"
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 // AuditEntry is the write-side struct for inserting an audit log row.
