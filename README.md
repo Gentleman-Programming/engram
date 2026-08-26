@@ -43,7 +43,7 @@ SQLite + FTS5 (~/.engram/engram.db)
 brew install gentleman-programming/tap/engram
 ```
 
-Windows, Linux, and other install methods → [docs/INSTALLATION.md](docs/INSTALLATION.md)
+Windows, Linux, and other install methods (including [mise](https://mise.jdx.dev)) → [docs/INSTALLATION.md](docs/INSTALLATION.md)
 
 ### Setup Your Agent
 
