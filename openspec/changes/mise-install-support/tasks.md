@@ -28,11 +28,11 @@ All 3 units are independent — each PR targets `main` directly; order is a sugg
 
 ## Phase 1: Toolchain Pins + CI Drift Guard (PR 1)
 
-- [ ] 1.1 Create `mise.toml` at repo root: `go = "1.25.10"`, `node = "24"` (REQ-MISE-001)
-- [ ] 1.2 Write `scripts/verify-mise-pins.sh` (`extract_one` for single-occurrence sites + new `extract_agreed` for Go's cross-file agreement rule); `chmod +x` (REQ-MISE-002)
-- [ ] 1.3 On scratch copies, verify the guard fails closed: go drift; deleted `go-version:` line; duplicate disagreeing `node-version:` (both well-formed, different values); a duplicated `node-version:`/`go-version:` line with unsupported syntax (unquoted, `${{ }}`) — previously invisible to the count, must now die explicitly; missing `mise.toml` (REQ-MISE-002 scenarios)
-- [ ] 1.4 Run the guard on the real repo tree; confirm exit 0 with no drift output (REQ-MISE-002 clean-tree scenario)
-- [ ] 1.5 Add a "Verify mise pins" step to `.github/workflows/ci.yml`'s `unit-tests` job, between "Set up Go" and "Run unit tests" (REQ-MISE-003)
+- [x] 1.1 Create `mise.toml` at repo root: `go = "1.25.10"`, `node = "24"` (REQ-MISE-001)
+- [x] 1.2 Write `scripts/verify-mise-pins.sh` (`extract_one` for single-occurrence sites + new `extract_agreed` for Go's cross-file agreement rule); `chmod +x` (REQ-MISE-002)
+- [x] 1.3 On scratch copies, verify the guard fails closed: go drift; deleted `go-version:` line; duplicate disagreeing `node-version:` (both well-formed, different values); a duplicated `node-version:`/`go-version:` line with unsupported syntax (unquoted, `${{ }}`) — previously invisible to the count, must now die explicitly; missing `mise.toml` (REQ-MISE-002 scenarios)
+- [x] 1.4 Run the guard on the real repo tree; confirm exit 0 with no drift output (REQ-MISE-002 clean-tree scenario)
+- [x] 1.5 Add a "Verify mise pins" step to `.github/workflows/ci.yml`'s `unit-tests` job, between "Set up Go" and "Run unit tests" (REQ-MISE-003)
 
 ## Phase 2: Mise-Managed Detection + Update-Hint Wiring (PR 2)
 
