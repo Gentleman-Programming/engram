@@ -46,8 +46,12 @@ func Save(dataDir string, cfg *Config) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(Path(dataDir), data, 0o600); err != nil {
+	path := Path(dataDir)
+	if err := os.Chmod(path, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return os.Chmod(Path(dataDir), 0o600)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
 }

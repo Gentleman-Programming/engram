@@ -8,14 +8,14 @@ import (
 
 func TestSaveKeepsCloudConfigPrivate(t *testing.T) {
 	dataDir := t.TempDir()
-	if err := os.WriteFile(Path(dataDir), []byte(`{"server_url":"https://old.example.test"}`), 0o600); err != nil {
+	if err := os.WriteFile(Path(dataDir), []byte(`{"server_url":"https://old.example.test"}`), 0o644); err != nil {
 		t.Fatalf("seed cloud config: %v", err)
 	}
-	if err := os.Chmod(Path(dataDir), 0o600); err != nil {
-		t.Fatalf("restrict cloud config mode: %v", err)
+	if err := os.Chmod(Path(dataDir), 0o644); err != nil {
+		t.Fatalf("make cloud config permissive: %v", err)
 	}
 
-	if err := Save(dataDir, &Config{ServerURL: "https://cloud.example.test"}); err != nil {
+	if err := Save(dataDir, &Config{ServerURL: "https://cloud.example.test", Token: "secret-token"}); err != nil {
 		t.Fatalf("save cloud config: %v", err)
 	}
 	info, err := os.Stat(Path(dataDir))
