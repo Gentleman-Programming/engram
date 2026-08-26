@@ -22,6 +22,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Gentleman-Programming/engram/internal/timeutil"
 	sqlite "modernc.org/sqlite"
@@ -2354,9 +2355,7 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 		return 0, ErrObservationContentRequired
 	}
 
-	if len(content) > s.cfg.MaxObservationLength {
-		content = content[:s.cfg.MaxObservationLength] + "... [truncated]"
-	}
+	content = truncateContent(content, s.cfg.MaxObservationLength)
 	scope := normalizeScope(p.Scope)
 	normHash := hashNormalized(content)
 	topicKey := normalizeTopicKey(p.TopicKey)
@@ -2765,10 +2764,19 @@ func (s *Store) AddPromptIfMissing(p AddPromptParams) (int64, bool, error) {
 
 func (s *Store) preparePromptContent(content string) string {
 	content = stripPrivateTags(content)
-	if len(content) > s.cfg.MaxObservationLength {
-		content = content[:s.cfg.MaxObservationLength] + "... [truncated]"
+	return truncateContent(content, s.cfg.MaxObservationLength)
+}
+
+func truncateContent(content string, max int) string {
+	if len(content) <= max {
+		return content
 	}
-	return content
+
+	end := max
+	for end > 0 && !utf8.RuneStart(content[end]) {
+		end--
+	}
+	return content[:end] + "... [truncated]"
 }
 
 func (s *Store) RecentPrompts(project string, limit int) ([]Prompt, error) {
@@ -3042,9 +3050,7 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 		}
 		if p.Content != nil {
 			content = stripPrivateTags(*p.Content)
-			if len(content) > s.cfg.MaxObservationLength {
-				content = content[:s.cfg.MaxObservationLength] + "... [truncated]"
-			}
+			content = truncateContent(content, s.cfg.MaxObservationLength)
 		}
 		if p.Project != nil {
 			project, _ = NormalizeProject(*p.Project)
