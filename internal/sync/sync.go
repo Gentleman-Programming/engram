@@ -402,16 +402,13 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 		// Get the timestamp of the last chunk to filter "new" data
 		lastChunkTime := sy.lastChunkTime(manifest)
 
-		// Scan historical chunks once for identities relevant to this export and
-		// for the relation keys that retain their existing filtering behavior.
-		historicalIdentities, exportedRelations, err := sy.exportedIdentityAndRelationKeys(manifest, localDataIdentityKeys(data))
+		// Historical identity absence can bypass the global timestamp watermark,
+		// but only after every manifest-listed chunk has been validated.
+		historicalIdentities, exportedRelations, historyComplete, err := sy.exportedIdentityAndRelationKeys(manifest, localDataIdentityKeys(data))
 		if err != nil {
-			return nil, fmt.Errorf("scan exported relations: %w", err)
+			return nil, fmt.Errorf("scan historical chunks: %w", err)
 		}
-		// An identity absent from available history has never been exported, so it
-		// must bypass the global timestamp cutoff. Known identities retain the
-		// original cutoff behavior.
-		chunk = sy.filterNewDataWithHistoricalIdentities(data, lastChunkTime, historicalIdentities)
+		chunk = sy.filterNewDataWithHistoricalIdentities(data, lastChunkTime, historicalIdentities, historyComplete)
 
 		// Relations are filtered by chunk presence, not timestamp; see the
 		// rationale on filterRelationMutationsForExport and issue #353.
@@ -1149,7 +1146,7 @@ func (sy *Syncer) filterNewData(data *store.ExportData, lastChunkTime string) *C
 	return chunk
 }
 
-func (sy *Syncer) filterNewDataWithHistoricalIdentities(data *store.ExportData, lastChunkTime string, historical map[string]struct{}) *ChunkData {
+func (sy *Syncer) filterNewDataWithHistoricalIdentities(data *store.ExportData, lastChunkTime string, historical map[string]struct{}, historyComplete bool) *ChunkData {
 	if lastChunkTime == "" {
 		return sy.filterNewData(data, lastChunkTime)
 	}
@@ -1157,17 +1154,17 @@ func (sy *Syncer) filterNewDataWithHistoricalIdentities(data *store.ExportData, 
 	cutoff := normalizeTime(lastChunkTime)
 	chunk := &ChunkData{}
 	for _, session := range data.Sessions {
-		if historicalIdentityIsAbsent(historical, store.SyncEntitySession, session.ID) || normalizeTime(session.StartedAt) > cutoff {
+		if (historyComplete && historicalIdentityIsAbsent(historical, store.SyncEntitySession, session.ID)) || normalizeTime(session.StartedAt) > cutoff {
 			chunk.Sessions = append(chunk.Sessions, session)
 		}
 	}
 	for _, observation := range data.Observations {
-		if historicalIdentityIsAbsent(historical, store.SyncEntityObservation, observation.SyncID) || normalizeTime(observation.CreatedAt) > cutoff || normalizeTime(observation.UpdatedAt) > cutoff {
+		if (historyComplete && historicalIdentityIsAbsent(historical, store.SyncEntityObservation, observation.SyncID)) || normalizeTime(observation.CreatedAt) > cutoff || normalizeTime(observation.UpdatedAt) > cutoff {
 			chunk.Observations = append(chunk.Observations, observation)
 		}
 	}
 	for _, prompt := range data.Prompts {
-		if historicalIdentityIsAbsent(historical, store.SyncEntityPrompt, prompt.SyncID) || normalizeTime(prompt.CreatedAt) > cutoff {
+		if (historyComplete && historicalIdentityIsAbsent(historical, store.SyncEntityPrompt, prompt.SyncID)) || normalizeTime(prompt.CreatedAt) > cutoff {
 			chunk.Prompts = append(chunk.Prompts, prompt)
 		}
 	}
@@ -1183,35 +1180,31 @@ func historicalIdentityIsAbsent(historical map[string]struct{}, entity, key stri
 	return !found
 }
 
-// exportedIdentityAndRelationKeys scans the chunks recorded by the manifest.
-// It retains only historical non-relation identities that are relevant to the
-// current local export candidates, while preserving the existing complete set
-// of relation keys used by relation filtering.
-func (sy *Syncer) exportedIdentityAndRelationKeys(m *Manifest, relevant map[string]struct{}) (map[string]struct{}, map[string]struct{}, error) {
+// exportedIdentityAndRelationKeys scans complete, replayable chunk history.
+// It retains historical non-relation identities relevant to the current local
+// export and the complete relation key set used by relation reconciliation.
+func (sy *Syncer) exportedIdentityAndRelationKeys(m *Manifest, relevant map[string]struct{}) (map[string]struct{}, map[string]struct{}, bool, error) {
 	identities := make(map[string]struct{}, len(relevant))
 	relations := make(map[string]struct{})
 	if m == nil {
-		return identities, relations, nil
+		return identities, relations, true, nil
 	}
+	complete := true
 	for _, entry := range m.Chunks {
-		// Read through the transport (not the local filesystem directly) so the
-		// scan honors the active backend — the import path uses the same
-		// contract. A missing chunk surfaces as ErrChunkNotFound.
 		raw, err := sy.transport.ReadChunk(entry.ID)
 		if err != nil {
 			if errors.Is(err, ErrChunkNotFound) {
-				// The manifest can list chunks that live on another machine and
-				// were never pulled locally. A missing chunk contributes no known
-				// relations; at worst a relation is re-exported, which is an
-				// idempotent upsert — never a silent drop. A chunk that exists
-				// but cannot be read is a real fault and fails loudly below.
+				complete = false
 				continue
 			}
-			return nil, nil, fmt.Errorf("read chunk %s: %w", entry.ID, err)
+			return nil, nil, false, fmt.Errorf("read chunk %s: %w", entry.ID, err)
 		}
 		var chunk ChunkData
 		if err := json.Unmarshal(raw, &chunk); err != nil {
-			return nil, nil, fmt.Errorf("unmarshal chunk %s: %w", entry.ID, err)
+			return nil, nil, false, fmt.Errorf("unmarshal chunk %s: %w", entry.ID, err)
+		}
+		if err := validateHistoricalChunk(raw, chunk); err != nil {
+			return nil, nil, false, fmt.Errorf("validate chunk %s: %w", entry.ID, err)
 		}
 		for _, session := range chunk.Sessions {
 			markHistoricalIdentity(identities, relevant, store.SyncEntitySession, session.ID)
@@ -1230,7 +1223,40 @@ func (sy *Syncer) exportedIdentityAndRelationKeys(m *Manifest, relevant map[stri
 			markHistoricalIdentity(identities, relevant, mutation.Entity, mutation.EntityKey)
 		}
 	}
-	return identities, relations, nil
+	return identities, relations, complete, nil
+}
+
+func validateHistoricalChunk(raw []byte, chunk ChunkData) error {
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &document); err != nil {
+		return err
+	}
+	if document == nil {
+		return fmt.Errorf("chunk must be a JSON object")
+	}
+	for i, mutation := range chunk.Mutations {
+		if strings.TrimSpace(mutation.EntityKey) == "" {
+			return fmt.Errorf("mutations[%d].entity_key is required", i)
+		}
+	}
+	// The canonical chunk codec enforces supported operations, payload shape,
+	// and payload identity agreement before an identity can count as historical.
+	if _, err := chunkcodec.CanonicalizeForProject(raw, ""); err != nil {
+		return err
+	}
+
+	direct := synthesizeMutationsFromChunk(chunk)
+	if len(direct) == 0 {
+		return nil
+	}
+	directJSON, err := json.Marshal(ChunkData{Mutations: direct})
+	if err != nil {
+		return fmt.Errorf("encode direct rows: %w", err)
+	}
+	if _, err := chunkcodec.CanonicalizeForProject(directJSON, ""); err != nil {
+		return fmt.Errorf("validate direct rows: %w", err)
+	}
+	return nil
 }
 
 func localDataIdentityKeys(data *store.ExportData) map[string]struct{} {
