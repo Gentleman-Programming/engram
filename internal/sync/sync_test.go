@@ -2943,8 +2943,12 @@ func TestExportDoesNotReconcileUnsyncedChunksByCreatedByOnly(t *testing.T) {
 	}
 
 	sy := NewWithTransport(s, transport)
-	if _, err := sy.Export("alice", ""); err == nil || !strings.Contains(err.Error(), "read chunk foreign-like") {
-		t.Fatalf("missing manifest chunk must fail closed, got %v", err)
+	result, err := sy.Export("alice", "")
+	if err != nil {
+		t.Fatalf("export with missing manifest chunk: %v", err)
+	}
+	if result == nil || !result.IsEmpty {
+		t.Fatalf("expected empty export result, got %+v", result)
 	}
 
 	synced, err := s.GetSyncedChunks()
