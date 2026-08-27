@@ -1080,7 +1080,20 @@ func sanitizeFTSCandidates(title string) string {
 	for _, w := range words {
 		w = strings.Trim(w, `"`)
 		if w != "" {
-			quoted = append(quoted, `"`+w+`"`)
+			var escaped strings.Builder
+			for i := 0; i < len(w); i++ {
+				if w[i] == '"' {
+					// FTS5 escapes a literal quote by doubling it. Preserve an
+					// already escaped pair so callers do not get double escaped.
+					escaped.WriteString(`""`)
+					if i+1 < len(w) && w[i+1] == '"' {
+						i++
+					}
+					continue
+				}
+				escaped.WriteByte(w[i])
+			}
+			quoted = append(quoted, `"`+escaped.String()+`"`)
 		}
 	}
 	return strings.Join(quoted, " OR ")

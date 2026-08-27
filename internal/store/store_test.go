@@ -9396,6 +9396,35 @@ func TestSearchMatchMode_Any(t *testing.T) {
 	}
 }
 
+func TestSearchMatchMode_AnyEscapesInteriorQuotes(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s-matchmode-quotes", "engram", "/tmp"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-matchmode-quotes",
+		Type:      "decision",
+		Title:     `hello"world`,
+		Content:   "quoted search target",
+		Project:   "engram",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	for _, query := range []string{`hello"world`, `"hello""world"`} {
+		t.Run(query, func(t *testing.T) {
+			results, err := s.SearchContext(context.Background(), query, SearchOptions{Project: "engram", Limit: 10, MatchMode: "any"})
+			if err != nil {
+				t.Fatalf("SearchContext(%q): %v", query, err)
+			}
+			if len(results) != 1 {
+				t.Fatalf("expected 1 result for %q, got %d", query, len(results))
+			}
+		})
+	}
+}
+
 // TestSearchMatchMode_InvalidReturnsError verifies that an unrecognised
 // match_mode value returns an explicit error regardless of query shape.
 func TestSearchMatchMode_InvalidReturnsError(t *testing.T) {
