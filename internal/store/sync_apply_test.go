@@ -73,12 +73,15 @@ func TestApplyPulledObservationStoresProjectAsText(t *testing.T) {
 		t.Fatalf("apply updated pulled observation: %v", err)
 	}
 
-	var title, content, storageClass string
-	if err := s.db.QueryRow(`SELECT title, content, typeof(project) FROM observations WHERE sync_id = ?`, "obs-pulled-project-storage").Scan(&title, &content, &storageClass); err != nil {
+	var title, content, storedProject, storageClass string
+	if err := s.db.QueryRow(`SELECT title, content, project, typeof(project) FROM observations WHERE sync_id = ?`, "obs-pulled-project-storage").Scan(&title, &content, &storedProject, &storageClass); err != nil {
 		t.Fatalf("read updated observation: %v", err)
 	}
 	if title != "Updated pulled project as text" || content != "Sync apply update stores text" {
 		t.Fatalf("updated observation = title %q, content %q", title, content)
+	}
+	if storedProject != project {
+		t.Fatalf("project = %q, want %q", storedProject, project)
 	}
 	if storageClass != "text" {
 		t.Fatalf("project storage class = %q, want text", storageClass)
