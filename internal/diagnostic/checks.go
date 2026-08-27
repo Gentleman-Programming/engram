@@ -2,9 +2,11 @@ package diagnostic
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 
+	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
 	projectpkg "github.com/Gentleman-Programming/engram/internal/project"
 	"github.com/Gentleman-Programming/engram/internal/store"
 )
@@ -13,12 +15,19 @@ const (
 	CheckSessionProjectDirectoryMismatch  = "session_project_directory_mismatch"
 	CheckManualSessionNameProjectMismatch = "manual_session_name_project_mismatch"
 	CheckSyncMutationRequiredFields       = "sync_mutation_required_fields"
+	CheckInvalidSessionIdentity           = "invalid_session_identity"
 	CheckSQLiteLockContention             = "sqlite_lock_contention"
 )
+
+// ReasonQuarantinedPulledSessionIdentity marks a finding of
+// CheckInvalidSessionIdentity that describes a pulled session mutation the
+// apply path skipped rather than a corrupt local source row.
+const ReasonQuarantinedPulledSessionIdentity = "quarantined_pulled_session_identity"
 
 type SessionProjectDirectoryMismatchCheck struct{}
 type ManualSessionNameProjectMismatchCheck struct{}
 type SyncMutationRequiredFieldsCheck struct{}
+type InvalidSessionIdentityCheck struct{}
 type SQLiteLockContentionCheck struct{}
 
 func (SessionProjectDirectoryMismatchCheck) Code() string {
@@ -28,6 +37,7 @@ func (ManualSessionNameProjectMismatchCheck) Code() string {
 	return CheckManualSessionNameProjectMismatch
 }
 func (SyncMutationRequiredFieldsCheck) Code() string { return CheckSyncMutationRequiredFields }
+func (InvalidSessionIdentityCheck) Code() string     { return CheckInvalidSessionIdentity }
 func (SQLiteLockContentionCheck) Code() string       { return CheckSQLiteLockContention }
 
 func (c SessionProjectDirectoryMismatchCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {
@@ -132,14 +142,34 @@ func knownSessionProjects(scope Scope) (map[string]bool, error) {
 	return known, nil
 }
 
+// cloudSyncInUse reports whether this device opted into cloud sync. Enrollment
+// is the store level signal the cloud paths already use to decide whether a
+// project may be delivered, so at least one enrolled project is the evidence
+// that the operator asked for cloud sync at all.
+func cloudSyncInUse(scope Scope) (bool, error) {
+	enrolled, err := scope.Store.ListEnrolledProjects()
+	if err != nil {
+		return false, err
+	}
+	return len(enrolled) > 0, nil
+}
+
 func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {
 	_ = ctx
 	mutations, err := scope.Store.ListPendingProjectMutations(scope.Project)
 	if err != nil {
 		return CheckResult{}, err
 	}
-	findings := make([]Finding, 0)
+	blocking := make([]Finding, 0)
+	quarantined := make([]Finding, 0)
 	for _, mutation := range mutations {
+		// A quarantined row is an explicit, already-taken disposition: it no
+		// longer reaches transport, so it must not keep doctor blocked. It stays
+		// reported as non-blocking evidence of what was dropped from sync.
+		if strings.TrimSpace(mutation.Disposition) == store.SyncMutationDispositionQuarantined {
+			quarantined = append(quarantined, c.quarantinedFinding(mutation))
+			continue
+		}
 		validation := store.ValidateSyncMutationPayload(mutation.Entity, mutation.Op, mutation.Payload, mutation.EntityKey)
 		if validation.ReasonCode == "" {
 			continue
@@ -148,7 +178,7 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 		if strings.TrimSpace(scope.Project) != "" {
 			nextStep = "Run `engram cloud upgrade doctor --project " + scope.Project + "` and inspect the mutation payload before any manual repair."
 		}
-		findings = append(findings, Finding{
+		blocking = append(blocking, Finding{
 			CheckID:              c.Code(),
 			Severity:             SeverityBlocking,
 			ReasonCode:           validation.ReasonCode,
@@ -159,7 +189,128 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 			RequiresConfirmation: true,
 		})
 	}
-	return resultFromFindings(c.Code(), map[string]any{"pending_mutations_evaluated": len(mutations)}, findings), nil
+	// Quarantined rows are already-taken dispositions, so they never count as
+	// work still pending delivery.
+	evidence := map[string]any{"pending_mutations_evaluated": len(mutations) - len(quarantined)}
+	if len(quarantined) > 0 {
+		evidence["quarantined_mutations"] = len(quarantined)
+	}
+	// Blocking findings lead the roll-up so the check summary always describes the
+	// work that still needs a decision rather than already-dispositioned evidence.
+	rollUp := func() []Finding { return append(append([]Finding{}, blocking...), quarantined...) }
+
+	// A non-enrolled backlog is only a fault on a device that actually uses
+	// cloud sync. The store journals sync mutations unconditionally, so on a
+	// local-only install every pending mutation belongs to a non-enrolled
+	// project by definition — the normal steady state, not something doctor
+	// should block on and answer with `engram cloud enroll`. This mirrors the
+	// autosync manager, which owns the same reason code and only evaluates it
+	// while cloud sync is configured and running. The gate is deliberately
+	// placed after the payload/quarantine pass so a local-only install still
+	// gets its quarantined evidence reported instead of silently dropped.
+	usesCloudSync, err := cloudSyncInUse(scope)
+	if err != nil {
+		return CheckResult{}, err
+	}
+	if !usesCloudSync {
+		return resultFromFindings(c.Code(), evidence, rollUp()), nil
+	}
+	// CountPendingNonEnrolledSyncMutations only counts rows whose disposition is
+	// still `pending`, so a quarantined row can never resurrect this blocking
+	// finding: the backlog it reports is genuinely undeliverable work.
+	nonEnrolledCounts, err := scope.Store.CountPendingNonEnrolledSyncMutations(store.DefaultSyncTargetKey)
+	if err != nil {
+		return CheckResult{}, err
+	}
+	scopedProject := normalizeProjectName(scope.Project)
+	for _, projectCount := range nonEnrolledCounts {
+		project := normalizeProjectName(projectCount.Project)
+		if scopedProject != "" && project != scopedProject {
+			continue
+		}
+		blocking = append(blocking, Finding{
+			CheckID:              c.Code(),
+			Severity:             SeverityBlocking,
+			ReasonCode:           constants.ReasonNonEnrolledPendingMutations,
+			Message:              fmt.Sprintf("Pending cloud sync mutations for project %q are blocked because it is not enrolled.", project),
+			Why:                  "Cloud delivery cannot continue while pending mutations belong to a project that is not enrolled.",
+			Evidence:             mustJSON(map[string]any{"project": project, "pending_mutations": projectCount.Count}),
+			SafeNextStep:         "Run `engram cloud enroll <project>` for each intended project or review enrollment, then rerun `engram doctor`.",
+			RequiresConfirmation: true,
+		})
+	}
+	return resultFromFindings(c.Code(), evidence, rollUp()), nil
+}
+
+func (c SyncMutationRequiredFieldsCheck) quarantinedFinding(mutation store.SyncMutation) Finding {
+	return Finding{
+		CheckID:    c.Code(),
+		Severity:   SeverityInfo,
+		ReasonCode: "sync_mutation_quarantined",
+		Message:    "Sync mutation is quarantined and no longer blocks cloud replication.",
+		Why:        "Quarantine keeps the irreparable journal row as durable local evidence while removing it from transport, so doctor reports it instead of staying blocked forever.",
+		Evidence: mustJSON(map[string]any{
+			"seq":                  mutation.Seq,
+			"target_key":           mutation.TargetKey,
+			"project":              mutation.Project,
+			"entity":               mutation.Entity,
+			"op":                   mutation.Op,
+			"entity_key":           mutation.EntityKey,
+			"disposition":          mutation.Disposition,
+			"disposition_reason":   mutation.DispositionReason,
+			"disposition_evidence": mutation.DispositionEvidence,
+			"disposition_at":       mutation.DispositionAt,
+		}),
+		SafeNextStep:         "No action required. Inspect the recorded disposition evidence if you need to know what was dropped from cloud sync.",
+		RequiresConfirmation: false,
+	}
+}
+
+func (c InvalidSessionIdentityCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {
+	_ = ctx
+	evidence, err := scope.Store.ListInvalidSessionIdentityEvidence(scope.Project)
+	if err != nil {
+		return CheckResult{}, err
+	}
+	quarantined, err := scope.Store.ListQuarantinedPulledSessionEvidence(scope.Project)
+	if err != nil {
+		return CheckResult{}, err
+	}
+	findings := make([]Finding, 0, len(evidence)+len(quarantined))
+	// Blocking source-row findings stay first: resultFromFindings derives the
+	// check-level reason code from findings[0].
+	for _, item := range evidence {
+		findings = append(findings, Finding{
+			CheckID:              c.Code(),
+			Severity:             SeverityBlocking,
+			ReasonCode:           CheckInvalidSessionIdentity,
+			Message:              "Session source ID is blank; affected references and journal entries cannot be repaired without an explicit canonical session ID.",
+			Why:                  "A blank session ID is not accepted by cloud replication and re-emitting it would preserve corrupt identity data.",
+			Evidence:             mustJSON(item),
+			SafeNextStep:         "Provide an explicit canonical session ID through a supported repair workflow; automatic ID generation is intentionally unavailable.",
+			RequiresConfirmation: true,
+		})
+	}
+	// Quarantined pulled mutations are reported but not blocking: the pull
+	// already skipped them and advanced its cursor, so replication itself is
+	// healthy and only the dropped remote rows need an operator decision.
+	for _, item := range quarantined {
+		findings = append(findings, Finding{
+			CheckID:              c.Code(),
+			Severity:             SeverityWarning,
+			ReasonCode:           ReasonQuarantinedPulledSessionIdentity,
+			Message:              "A pulled session mutation was skipped because its identity is blank or does not match its payload; the pull cursor advanced past it.",
+			Why:                  "Halting the pull on a historical blank identity would pin the cursor forever, so the mutation is quarantined as evidence instead.",
+			Evidence:             mustJSON(item),
+			SafeNextStep:         "Inspect the quarantined mutation with `engram conflicts deferred`; it can only be applied once the remote side publishes a canonical session ID.",
+			RequiresConfirmation: true,
+		})
+	}
+	details := map[string]any{
+		"invalid_source_sessions":     len(evidence),
+		"quarantined_pulled_sessions": len(quarantined),
+	}
+	return resultFromFindings(c.Code(), details, findings), nil
 }
 
 func (c SQLiteLockContentionCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {

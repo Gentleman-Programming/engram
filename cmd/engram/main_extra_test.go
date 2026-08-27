@@ -4478,3 +4478,36 @@ func TestCmdMCPAutosyncPollTickerPullsDuringServe(t *testing.T) {
 		t.Fatalf("expected MCP autosync poll ticker proof to complete cleanly, panic=%v stderr=%q", recovered, stderr)
 	}
 }
+
+// TestCmdSaveRejectsEmptyTitle pins that `engram save` exits non-zero with the
+// store's title-admission message instead of persisting a titleless
+// observation (#459). The guard runs before the store is opened, so a rejected
+// save must not even create the database or the `manual-save` session.
+func TestCmdSaveRejectsEmptyTitle(t *testing.T) {
+	cfg := testConfig(t)
+	stubExitWithPanic(t)
+
+	for _, title := range []string{"", "   ", " \t\n "} {
+		withArgs(t, "engram", "save", title, "content body")
+		_, stderr, recovered := captureOutputAndRecover(t, func() { cmdSave(cfg) })
+		if _, ok := recovered.(exitCode); !ok {
+			t.Fatalf("title %q: expected exit panic, got %v", title, recovered)
+		}
+		if !strings.Contains(stderr, store.ErrObservationTitleRequired.Error()) {
+			t.Fatalf("title %q: stderr missing title guard message: %q", title, stderr)
+		}
+		if _, err := os.Stat(filepath.Join(cfg.DataDir, "engram.db")); !os.IsNotExist(err) {
+			t.Fatalf("title %q: rejected save opened the store (stat error %v)", title, err)
+		}
+	}
+
+	// A valid title still saves, so the guard is not rejecting everything.
+	withArgs(t, "engram", "save", "Real title", "content body")
+	stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdSave(cfg) })
+	if recovered != nil {
+		t.Fatalf("valid save exited: %v (stderr %q)", recovered, stderr)
+	}
+	if !strings.Contains(stdout, "Memory saved") {
+		t.Fatalf("expected a saved memory, got stdout %q stderr %q", stdout, stderr)
+	}
+}

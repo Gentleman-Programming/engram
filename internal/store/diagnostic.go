@@ -31,6 +31,31 @@ type SyncMutationPayloadValidation struct {
 	Message       string   `json:"message,omitempty"`
 }
 
+// InvalidSessionIdentityEvidence describes a corrupt source session and the
+// dependent local data that cannot be repaired without a canonical ID.
+type InvalidSessionIdentityEvidence struct {
+	Project             string `json:"project"`
+	SessionID           string `json:"session_id"`
+	ObservationCount    int64  `json:"observation_count"`
+	PromptCount         int64  `json:"prompt_count"`
+	InvalidJournalCount int64  `json:"invalid_journal_count"`
+}
+
+// QuarantinedPulledSessionEvidence describes a pulled session mutation that was
+// skipped because its identity is blank or inconsistent. The pull cursor
+// advances past such a mutation instead of halting, so this row is the only
+// record that remote data was dropped.
+type QuarantinedPulledSessionEvidence struct {
+	SyncID      string `json:"sync_id"`
+	TargetKey   string `json:"target_key"`
+	Project     string `json:"project"`
+	EntityKey   string `json:"entity_key"`
+	Op          string `json:"op"`
+	RemoteSeq   int64  `json:"remote_seq"`
+	ReasonCode  string `json:"reason_code"`
+	FirstSeenAt string `json:"first_seen_at"`
+}
+
 // SQLiteLockSnapshot captures conservative SQLite lock/contention indicators.
 // wal_checkpoint(PASSIVE) is an observational probe for this diagnostic surface;
 // callers must not interpret it as a repair action.
@@ -98,13 +123,160 @@ func (s *Store) ListPendingProjectMutations(project string) ([]SyncMutation, err
 	return s.listPendingProjectMutationsTxLike(s.db, project)
 }
 
+// ListInvalidSessionIdentityEvidence reports blank source session IDs together
+// with affected references and invalid session journal entries. It is read-only.
+//
+// The source-row predicate uses the shared whitespace trim set rather than
+// SQLite's bare trim(), so a legacy identity made of tabs, newlines or carriage
+// returns cannot bypass the scan while still being rejected by the Go guards.
+func (s *Store) ListInvalidSessionIdentityEvidence(project string) ([]InvalidSessionIdentityEvidence, error) {
+	project, _ = NormalizeProject(project)
+	project = strings.TrimSpace(project)
+	query := `SELECT id, project FROM sessions WHERE ` + sqlSessionIDBlank("id")
+	args := []any{sqlWhitespaceTrimSet}
+	if project != "" {
+		query += ` AND project = ?`
+		args = append(args, project)
+	}
+	rows, err := s.queryItHook(s.db, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	evidence := make([]InvalidSessionIdentityEvidence, 0)
+	for rows.Next() {
+		var item InvalidSessionIdentityEvidence
+		if err := rows.Scan(&item.SessionID, &item.Project); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		evidence = append(evidence, item)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	type sessionMutationIdentity struct {
+		entityKey      string
+		payloadID      string
+		payloadDecoded bool
+		invalid        bool
+	}
+	mutationQuery := `SELECT entity_key, payload FROM sync_mutations WHERE entity = ?`
+	mutationArgs := []any{SyncEntitySession}
+	if project != "" {
+		mutationQuery += ` AND project = ?`
+		mutationArgs = append(mutationArgs, project)
+	}
+	mutationRows, err := s.queryItHook(s.db, mutationQuery, mutationArgs...)
+	if err != nil {
+		return nil, err
+	}
+	mutations := make([]sessionMutationIdentity, 0)
+	for mutationRows.Next() {
+		var mutation sessionMutationIdentity
+		var payloadRaw string
+		if err := mutationRows.Scan(&mutation.entityKey, &payloadRaw); err != nil {
+			return nil, closeRowsWithError(mutationRows, err)
+		}
+		var payload syncSessionPayload
+		if err := decodeSyncPayload([]byte(payloadRaw), &payload); err != nil {
+			mutation.invalid = true
+		} else {
+			mutation.payloadID = payload.ID
+			mutation.payloadDecoded = true
+			mutation.invalid = validateSessionMutationIdentity(payload.ID, mutation.entityKey) != nil
+		}
+		mutations = append(mutations, mutation)
+	}
+	if err := mutationRows.Close(); err != nil {
+		return nil, err
+	}
+	if err := mutationRows.Err(); err != nil {
+		return nil, err
+	}
+
+	evidenceBySessionID := make(map[string]int, len(evidence))
+	for i := range evidence {
+		evidenceBySessionID[evidence[i].SessionID] = i
+	}
+	for _, mutation := range mutations {
+		if !mutation.invalid {
+			continue
+		}
+		matched := make(map[int]struct{}, 2)
+		if i, ok := evidenceBySessionID[mutation.entityKey]; ok {
+			matched[i] = struct{}{}
+		}
+		if mutation.payloadDecoded {
+			if i, ok := evidenceBySessionID[mutation.payloadID]; ok {
+				matched[i] = struct{}{}
+			}
+		}
+		for i := range matched {
+			evidence[i].InvalidJournalCount++
+		}
+	}
+
+	for i := range evidence {
+		item := &evidence[i]
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE session_id = ?`, item.SessionID).Scan(&item.ObservationCount); err != nil {
+			return nil, err
+		}
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM user_prompts WHERE session_id = ?`, item.SessionID).Scan(&item.PromptCount); err != nil {
+			return nil, err
+		}
+	}
+	return evidence, nil
+}
+
+// ListQuarantinedPulledSessionEvidence returns the pulled session mutations the
+// apply path skipped because their identity is blank or inconsistent.
+//
+// The pull deliberately does not fail closed on these mutations: halting would
+// pin the cursor forever on a historical chunk written before the identity rule
+// existed. Instead each one is quarantined here so doctor can report exactly
+// what remote data was dropped. It is read-only.
+func (s *Store) ListQuarantinedPulledSessionEvidence(project string) ([]QuarantinedPulledSessionEvidence, error) {
+	project, _ = NormalizeProject(project)
+	project = strings.TrimSpace(project)
+	query := `SELECT sync_id, target_key, ifnull(project, ''), entity_key, op, remote_seq, reason_code, ifnull(first_seen_at, '')
+		FROM sync_apply_deferred
+		WHERE entity = ? AND reason_code = ?`
+	args := []any{SyncEntitySession, SyncSessionIdentityInvalidReasonCode}
+	if project != "" {
+		query += ` AND project = ?`
+		args = append(args, project)
+	}
+	query += ` ORDER BY target_key ASC, remote_seq ASC, sync_id ASC`
+
+	rows, err := s.queryItHook(s.db, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	quarantined := make([]QuarantinedPulledSessionEvidence, 0)
+	for rows.Next() {
+		var item QuarantinedPulledSessionEvidence
+		if err := rows.Scan(&item.SyncID, &item.TargetKey, &item.Project, &item.EntityKey, &item.Op, &item.RemoteSeq, &item.ReasonCode, &item.FirstSeenAt); err != nil {
+			return nil, closeRowsWithError(rows, err)
+		}
+		quarantined = append(quarantined, item)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	return quarantined, rows.Err()
+}
+
 type rowQuerier interface {
 	Query(query string, args ...any) (*sql.Rows, error)
 }
 
 func (s *Store) listPendingProjectMutationsTxLike(q rowQuerier, project string) ([]SyncMutation, error) {
 	query := `
-		SELECT seq, target_key, entity, entity_key, op, payload, source, project, occurred_at, acked_at
+		SELECT seq, target_key, entity, entity_key, op, payload, source, project, occurred_at, acked_at, disposition, ifnull(disposition_reason, ''), ifnull(disposition_evidence, ''), disposition_at
 		FROM sync_mutations
 		WHERE target_key = ? AND acked_at IS NULL`
 	args := []any{DefaultSyncTargetKey}
@@ -121,7 +293,7 @@ func (s *Store) listPendingProjectMutationsTxLike(q rowQuerier, project string) 
 	mutations := make([]SyncMutation, 0)
 	for rows.Next() {
 		var m SyncMutation
-		if err := rows.Scan(&m.Seq, &m.TargetKey, &m.Entity, &m.EntityKey, &m.Op, &m.Payload, &m.Source, &m.Project, &m.OccurredAt, &m.AckedAt); err != nil {
+		if err := rows.Scan(&m.Seq, &m.TargetKey, &m.Entity, &m.EntityKey, &m.Op, &m.Payload, &m.Source, &m.Project, &m.OccurredAt, &m.AckedAt, &m.Disposition, &m.DispositionReason, &m.DispositionEvidence, &m.DispositionAt); err != nil {
 			return nil, err
 		}
 		mutations = append(mutations, m)
@@ -136,7 +308,6 @@ func (s *Store) listPendingProjectMutationsTxLike(q rowQuerier, project string) 
 func ValidateSyncMutationPayload(entity, op, payload, entityKey string) SyncMutationPayloadValidation {
 	entity = strings.TrimSpace(entity)
 	op = strings.TrimSpace(op)
-	entityKey = strings.TrimSpace(entityKey)
 	result := SyncMutationPayloadValidation{Entity: entity, Op: op, EntityKey: entityKey}
 	trimmed := strings.TrimSpace(payload)
 	if trimmed == "" {
@@ -162,6 +333,14 @@ func ValidateSyncMutationPayload(entity, op, payload, entityKey string) SyncMuta
 		encoded, _ := json.Marshal(v)
 		return strings.TrimSpace(string(encoded))
 	}
+	rawStringField := func(name string) string {
+		v, ok := body[name]
+		if !ok || v == nil {
+			return ""
+		}
+		s, _ := v.(string)
+		return s
+	}
 	missing := make([]string, 0)
 	require := func(name string) {
 		if field(name) == "" {
@@ -171,14 +350,23 @@ func ValidateSyncMutationPayload(entity, op, payload, entityKey string) SyncMuta
 
 	switch entity {
 	case SyncEntitySession:
-		if field("id") == "" && entityKey == "" {
+		payloadID := rawStringField("id")
+		if strings.TrimSpace(payloadID) == "" {
 			missing = append(missing, "id")
+		}
+		if strings.TrimSpace(entityKey) == "" {
+			missing = append(missing, "entity_key")
+		}
+		if len(missing) == 0 && payloadID != entityKey {
+			result.ReasonCode = "sync_session_mutation_identity_mismatch"
+			result.Message = fmt.Sprintf("session entity_key %q does not match payload id %q", entityKey, payloadID)
+			return result
 		}
 		if op == SyncOpUpsert {
 			require("directory")
 		}
 	case SyncEntityObservation:
-		if field("sync_id") == "" && entityKey == "" {
+		if field("sync_id") == "" && strings.TrimSpace(entityKey) == "" {
 			missing = append(missing, "sync_id")
 		}
 		if op == SyncOpUpsert {
@@ -189,7 +377,7 @@ func ValidateSyncMutationPayload(entity, op, payload, entityKey string) SyncMuta
 			require("scope")
 		}
 	case SyncEntityPrompt:
-		if field("sync_id") == "" && entityKey == "" {
+		if field("sync_id") == "" && strings.TrimSpace(entityKey) == "" {
 			missing = append(missing, "sync_id")
 		}
 		if op == SyncOpUpsert {

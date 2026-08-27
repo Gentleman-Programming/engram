@@ -61,7 +61,7 @@ The CLI `--json` and MCP tool return:
 
 - `session_project_directory_mismatch` — warns when `sessions.project` disagrees with the project inferred from trusted repository evidence for the session directory. The MVP trusts `git_remote` and `git_root` only; it ignores basename fallback, ambiguous workspaces, missing directories, and child-repo auto-promotion to avoid noisy false positives.
 - `manual_session_name_project_mismatch` — warns when a `manual-save-{suffix}` session name disagrees with `sessions.project`.
-- `sync_mutation_required_fields` — blocks when a pending `sync_mutations.payload` is missing required fields.
+- `sync_mutation_required_fields` — blocks when a pending `sync_mutations.payload` is missing required fields. On a device that uses cloud sync (at least one project enrolled), it also blocks when pending cloud mutations belong to a project that is not enrolled; the finding identifies the project and backlog count, so enroll intended projects with `engram cloud enroll <project>` or review enrollment before retrying. A local-only install with no enrolled project never reports that finding: the store journals mutations unconditionally, so a non-enrolled backlog is its normal steady state.
 - `sqlite_lock_contention` — warns on conservative SQLite contention signals; returns an error if lock state cannot be evaluated.
 
 ## Safety

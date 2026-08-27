@@ -37,10 +37,38 @@ const (
 	// ErrAmbiguousProject and the caller provided an explicit user-selected
 	// project from the ambiguity result's available_projects list.
 	SourceUserSelectedAfterAmbiguousProject = "user_selected_after_ambiguous_project"
-	SourceRequestBody                       = "request_body" // REQ-414: project came from the request body (server-side, no filesystem path)
-	SourceConfig                            = "config"       // derived from .engram/config.json project_name
-	SourceAllProjects                       = "all_projects" // caller asked for cross-project search (no single project resolved)
+	SourceRequestBody                       = "request_body"     // REQ-414: project came from the request body (server-side, no filesystem path)
+	SourceConfig                            = "config"           // derived from .engram/config.json project_name
+	SourceAllProjects                       = "all_projects"     // caller asked for cross-project search (no single project resolved)
+	SourceProcessOverride                   = "process_override" // resolved from the process-level project override
 )
+
+// EnvProjectOverride names the environment variable that carries the
+// process-level project override.
+const EnvProjectOverride = "ENGRAM_PROJECT"
+
+// ProcessOverride returns the single process-level project override that every
+// entry point (CLI, MCP, HTTP server) applies before working-directory
+// detection. It is the one precedence rule for process-level identity:
+//
+//  1. explicit process argument — `engram mcp --project <name>`, which the MCP
+//     server carries as MCPConfig.DefaultProject;
+//  2. the ENGRAM_PROJECT environment variable;
+//  3. no override, so the caller falls back to cwd detection.
+//
+// A request-scoped project (the CLI `engram save --project` flag or an MCP tool
+// argument) is resolved by the caller before this rule and always wins over it.
+// The returned name is trimmed but not normalized; callers normalize with
+// store.NormalizeProject so the operator still sees the normalization warning.
+func ProcessOverride(explicit string) (string, bool) {
+	if trimmed := strings.TrimSpace(explicit); trimmed != "" {
+		return trimmed, true
+	}
+	if trimmed := strings.TrimSpace(os.Getenv(EnvProjectOverride)); trimmed != "" {
+		return trimmed, true
+	}
+	return "", false
+}
 
 // noiseSet lists directory names that are skipped during child-repo scanning.
 var noiseSet = map[string]bool{

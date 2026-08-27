@@ -1594,3 +1594,131 @@ func TestPromptDetailNotFoundReturnsPromptNotFoundError(t *testing.T) {
 		t.Errorf("must NOT be ErrDashboardProjectNotFound for missing prompt in valid project")
 	}
 }
+
+// TestDashboardCountsPiSavedPromptUnderItsProject closes the last gap #706 named: the reporter's
+// prompt "saved" locally while the cloud dashboard kept showing 0 prompts for the project.
+//
+// It seeds the read model with a prompt delivered the way a locally saved prompt actually reaches
+// the cloud — an upsert mutation keyed by sync_id — and asserts the dashboard surfaces that
+// prompt under its own project: the project prompt count, the recent-prompts list, and the detail
+// page the sync_id addresses. A neighbouring project must not see it.
+func TestDashboardCountsPiSavedPromptUnderItsProject(t *testing.T) {
+	const (
+		targetProject = "paidosdep"
+		otherProject  = "skill-registry"
+		promptSyncID  = "prompt-paidosdep-1"
+		promptSession = "manual-save-paidosdep"
+		promptContent = "preserve this exact user prompt about auth token rotation"
+	)
+
+	// Mirrors the payload the local store enqueues for a prompt upsert.
+	mutationPayload, err := json.Marshal(map[string]any{
+		"sync_id":    promptSyncID,
+		"session_id": promptSession,
+		"content":    promptContent,
+		"project":    targetProject,
+		"created_at": "2026-04-23T08:20:00Z",
+	})
+	if err != nil {
+		t.Fatalf("marshal mutation payload: %v", err)
+	}
+
+	targetChunk, err := json.Marshal(map[string]any{
+		"sessions": []map[string]any{
+			{"id": promptSession, "project": targetProject, "started_at": "2026-04-23T08:00:00Z"},
+		},
+		"mutations": []map[string]any{
+			{"entity": "prompt", "entity_key": promptSyncID, "op": "upsert", "payload": string(mutationPayload)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal target chunk: %v", err)
+	}
+
+	chunks := []dashboardChunkRow{
+		{
+			chunkID: "chunk-paidosdep-1", project: targetProject, createdBy: "alice",
+			createdAt: time.Date(2026, 4, 23, 10, 0, 0, 0, time.UTC),
+			parsed:    parseMustChunk(t, targetChunk),
+		},
+		{
+			chunkID: "chunk-skill-registry-1", project: otherProject, createdBy: "alice",
+			createdAt: time.Date(2026, 4, 23, 11, 0, 0, 0, time.UTC),
+			parsed: parseMustChunk(t, []byte(`{
+				"sessions":[{"id":"manual-save-skill-registry","project":"skill-registry","started_at":"2026-04-23T09:00:00Z"}],
+				"prompts":[{"sync_id":"prompt-skill-registry-1","session_id":"manual-save-skill-registry","project":"skill-registry","content":"an unrelated prompt","created_at":"2026-04-23T09:20:00Z"}]
+			}`)),
+		},
+	}
+
+	model, err := buildDashboardReadModel(chunks)
+	if err != nil {
+		t.Fatalf("buildDashboardReadModel: %v", err)
+	}
+	cs := &CloudStore{
+		dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil },
+	}
+
+	// The symptom in #706: the project row kept reporting 0 prompts.
+	projects, err := cs.ListProjects("")
+	if err != nil {
+		t.Fatalf("ListProjects: %v", err)
+	}
+	var targetRow *DashboardProjectRow
+	for i := range projects {
+		if projects[i].Project == targetProject {
+			targetRow = &projects[i]
+			break
+		}
+	}
+	if targetRow == nil {
+		t.Fatalf("project %q missing from the dashboard project list", targetProject)
+	}
+	if targetRow.Prompts != 1 {
+		t.Fatalf("expected 1 prompt on the %q dashboard row, got %d", targetProject, targetRow.Prompts)
+	}
+
+	prompts, err := cs.ListRecentPrompts(targetProject, "", 10)
+	if err != nil {
+		t.Fatalf("ListRecentPrompts: %v", err)
+	}
+	var listed *DashboardPromptRow
+	for i := range prompts {
+		if prompts[i].SyncID == promptSyncID {
+			listed = &prompts[i]
+			break
+		}
+	}
+	if listed == nil {
+		t.Fatalf("prompt %q not listed on the %q dashboard (got %d prompts)", promptSyncID, targetProject, len(prompts))
+	}
+	if listed.Content != promptContent {
+		t.Fatalf("dashboard prompt content changed: %q", listed.Content)
+	}
+	if listed.SessionID != promptSession {
+		t.Fatalf("expected dashboard prompt session %q, got %q", promptSession, listed.SessionID)
+	}
+	if listed.Project != targetProject {
+		t.Fatalf("expected dashboard prompt project %q, got %q", targetProject, listed.Project)
+	}
+
+	// The detail page is addressed by sync_id, so that identity must resolve.
+	detail, _, _, err := cs.GetPromptDetail(targetProject, promptSession, promptSyncID)
+	if err != nil {
+		t.Fatalf("GetPromptDetail: %v", err)
+	}
+	if detail.SyncID != promptSyncID || detail.Content != promptContent {
+		t.Fatalf("prompt detail does not describe the saved prompt: %+v", detail)
+	}
+
+	// Scope: the neighbouring project must not show this prompt.
+	otherPrompts, err := cs.ListRecentPrompts(otherProject, "", 10)
+	if err != nil {
+		t.Fatalf("ListRecentPrompts other project: %v", err)
+	}
+	for _, p := range otherPrompts {
+		if p.SyncID == promptSyncID {
+			t.Fatalf("prompt %q leaked onto the %q dashboard", promptSyncID, otherProject)
+		}
+	}
+}

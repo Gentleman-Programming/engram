@@ -1046,3 +1046,158 @@ func TestStoreClosedExtraServerBranchesE2E(t *testing.T) {
 	}
 	exportResp.Body.Close()
 }
+
+// TestPiPromptPersistenceE2E replays the exact wire sequence the Pi plugin's mem_save_prompt
+// issues (POST /sessions, then POST /prompts) and proves the prompt is durably persisted,
+// retrievable, and scoped to its project.
+//
+// Regression for #706: the reported symptom was a "saved" response carrying an id that resolved
+// to an unrelated entry from another project. The id was never stale — prompts are numbered from
+// user_prompts, a sequence independent of observations — so the response id must read back as the
+// prompt that was just saved, and must not resolve as an observation.
+func TestPiPromptPersistenceE2E(t *testing.T) {
+	_, ts := newE2EServer(t)
+	client := ts.Client()
+
+	const (
+		targetProject = "paidosdep"
+		otherProject  = "skill-registry"
+		promptContent = "preserve this exact user prompt about auth token rotation"
+	)
+
+	// The plugin derives a stable per-project session id when the caller passes an explicit
+	// project, and creates that session before writing the prompt.
+	targetSession := "manual-save-" + targetProject
+	otherSession := "manual-save-" + otherProject
+
+	for _, s := range []struct{ id, project string }{
+		{targetSession, targetProject},
+		{otherSession, otherProject},
+	} {
+		sessionResp := postJSON(t, client, ts.URL+"/sessions", map[string]any{
+			"id":        s.id,
+			"project":   s.project,
+			"directory": "/tmp/" + s.project,
+		})
+		if sessionResp.StatusCode != http.StatusCreated {
+			t.Fatalf("expected 201 creating session %q, got %d", s.id, sessionResp.StatusCode)
+		}
+		sessionResp.Body.Close()
+	}
+
+	// An observation in the other project gives both id sequences live rows, so the namespace
+	// assertions below exercise the collision #706 actually hit rather than an empty table.
+	obsResp := postJSON(t, client, ts.URL+"/observations", map[string]any{
+		"session_id": otherSession,
+		"title":      "unrelated entry",
+		"content":    "an observation that must never answer for a prompt id",
+		"type":       "manual",
+		"project":    otherProject,
+		"scope":      "project",
+	})
+	if obsResp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 creating observation, got %d", obsResp.StatusCode)
+	}
+	obsResp.Body.Close()
+
+	promptResp := postJSON(t, client, ts.URL+"/prompts", map[string]any{
+		"session_id": targetSession,
+		"content":    promptContent,
+		"project":    targetProject,
+	})
+	if promptResp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 creating prompt, got %d", promptResp.StatusCode)
+	}
+	created := decodeJSON[map[string]any](t, promptResp)
+	if created["status"] != "saved" {
+		t.Fatalf("expected saved status, got %v", created["status"])
+	}
+	promptID, ok := created["id"].(float64)
+	if !ok || promptID <= 0 {
+		t.Fatalf("expected a positive prompt id, got %v", created["id"])
+	}
+
+	// The prompt is retrievable under its own project, and the returned id resolves to the
+	// content that was just written — not to some pre-existing row.
+	recentResp, err := client.Get(ts.URL + "/prompts/recent?project=" + targetProject)
+	if err != nil {
+		t.Fatalf("recent prompts: %v", err)
+	}
+	if recentResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 recent prompts, got %d", recentResp.StatusCode)
+	}
+	recent := decodeJSON[[]store.Prompt](t, recentResp)
+	var saved *store.Prompt
+	for i := range recent {
+		if recent[i].ID == int64(promptID) {
+			saved = &recent[i]
+			break
+		}
+	}
+	if saved == nil {
+		t.Fatalf("prompt id %d not retrievable from /prompts/recent for project %q (got %d prompts)", int64(promptID), targetProject, len(recent))
+	}
+	if saved.Content != promptContent {
+		t.Fatalf("prompt id %d resolved to unexpected content %q", int64(promptID), saved.Content)
+	}
+	if saved.Project != targetProject {
+		t.Fatalf("expected prompt project %q, got %q", targetProject, saved.Project)
+	}
+	if saved.SessionID != targetSession {
+		t.Fatalf("expected prompt session %q, got %q", targetSession, saved.SessionID)
+	}
+	// A sync_id is what carries this prompt to the cloud dashboard; without it the row is local-only.
+	if strings.TrimSpace(saved.SyncID) == "" {
+		t.Fatalf("expected prompt %d to carry a sync_id for cloud replication", int64(promptID))
+	}
+
+	// Project scoping: another project must not see this prompt.
+	otherResp, err := client.Get(ts.URL + "/prompts/recent?project=" + otherProject)
+	if err != nil {
+		t.Fatalf("recent prompts other project: %v", err)
+	}
+	if otherResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 recent prompts for other project, got %d", otherResp.StatusCode)
+	}
+	for _, p := range decodeJSON[[]store.Prompt](t, otherResp) {
+		if p.ID == int64(promptID) {
+			t.Fatalf("prompt %d leaked into project %q", int64(promptID), otherProject)
+		}
+	}
+
+	// Search is the other retrieval surface the dashboard and agents use.
+	searchResp, err := client.Get(ts.URL + "/prompts/search?q=rotation&project=" + targetProject + "&limit=5")
+	if err != nil {
+		t.Fatalf("search prompts: %v", err)
+	}
+	if searchResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 searching prompts, got %d", searchResp.StatusCode)
+	}
+	found := false
+	for _, p := range decodeJSON[[]store.Prompt](t, searchResp) {
+		if p.ID == int64(promptID) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("prompt %d not found via /prompts/search", int64(promptID))
+	}
+
+	// The disambiguation #706 asked for: the prompt id is not an observation id. Reading it as one
+	// must never answer with this prompt's content.
+	obsLookup, err := client.Get(ts.URL + "/observations/" + strconv.FormatInt(int64(promptID), 10))
+	if err != nil {
+		t.Fatalf("observation lookup: %v", err)
+	}
+	defer obsLookup.Body.Close()
+	if obsLookup.StatusCode == http.StatusOK {
+		raw, err := io.ReadAll(obsLookup.Body)
+		if err != nil {
+			t.Fatalf("read observation lookup: %v", err)
+		}
+		if strings.Contains(string(raw), promptContent) {
+			t.Fatalf("prompt id %d resolved to an observation carrying the prompt content", int64(promptID))
+		}
+	}
+}

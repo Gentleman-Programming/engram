@@ -134,10 +134,12 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 ### Observations
 
 - `POST /observations` — Add observation. Body: `{session_id, type, title, content, tool_name?, project?, scope?, topic_key?}`
+  - `400` when `title` or `content` is missing, empty, or whitespace-only. The observation-create paths (`engram save`, `mem_save`, `POST /observations`) enforce the same title rule because cloud sync rejects observation upserts without a title, and one rejected mutation blocks every later mutation for the project
 - `GET /observations` — Recent observations compatibility endpoint. Query: `?project=X&scope=project|personal|global&limit=N&sort=created_at:desc`
 - `GET /observations/recent` — Recent observations. Query: `?project=X&scope=project|personal|global&limit=N`
 - `GET /observations/{id}` — Get single observation by ID
 - `PATCH /observations/{id}` — Update fields. Body: `{title?, content?, type?, project?, scope?, topic_key?}`
+  - `400` when `title` or `content` is provided but empty or whitespace-only. Omitting a field leaves its current value unchanged
 - `DELETE /observations/{id}` — Delete observation (`?hard=true` for hard delete, soft delete by default)
   - `200` when deleted
   - `404` when observation does not exist
@@ -197,7 +199,13 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 
 - `GET /project/current` — Detect the current project. Query: `?cwd=/path/to/repo`
   - Always returns a success envelope with `{project, project_source, project_path, cwd, available_projects}` plus optional `warning`/`error_hint`
-- `POST /projects/migrate` — Migrate observations between project names. Body: `{old_project, new_project}`
+- `POST /projects/rescue-ownership` — Bulk-assign ownership to explicitly selected historical records that carry none. `POST /projects/migrate` is a deprecated compatibility alias routed to the same handler. The JSON body is limited to 8 KiB: `{target_project, confirmed:true, observation_ids?:[], session_ids?:[], prompt_ids?:[]}`.
+  - A configured `ENGRAM_HTTP_TOKEN`, matching `Authorization: Bearer <token>`, `target_project`, `confirmed:true`, and at least one positive observation/prompt ID or non-blank session ID are required. Missing server token returns `503`; missing or wrong credentials return `401`; malformed or invalid requests return `400`.
+  - This route is a convenience, not the only repair. `engram projects rescue-ownership --project <name> [--session <id>] [--observation <id>] [--prompt <id>]` performs the same operation against the local store and needs no server token, so ownership stays repairable in a zero-config install.
+  - `200` returns `{status, complete, blocked, target_project, rescued_observations, rescued_sessions, rescued_prompts, conflicting_records, skipped_records, journaled_local, reconciliation_status}`. Owned records are never reassigned.
+  - `status` is `rescued` when `complete` is `true` and everything selected now belongs to `target_project`, or `partially_rescued` when something was left behind. `blocked` then names each item exactly — `{kind, id, reason, owned_by}` with `kind` one of `session`/`observation`/`prompt` and `reason` one of `owned_by_other_project`, `session_owned_by_other_project`, `dependent_record_owned_by_other_project`, `missing` — so a partial outcome is never inferred from counters.
+  - The whole plan is resolved before anything is written: which sessions and which records will move is decided first, then applied. An unowned session that already parents a record owned by a different project is therefore left in place rather than moved out from under it, in either direction. A blank project is treated exactly like `NULL` — neither identifies an owner — and no sync mutation is ever journaled for a blank-owned record.
+  - `journaled_local` means a canonical pending local mutation exists after the call, whether inserted by the call or already pending. A local journal is not a cloud acknowledgement; autosync reports subsequent reconciliation state.
 
 ### Conflict Audit (admin — local runtime only)
 
@@ -331,6 +339,7 @@ Request body:
 ```json
 {
   "project": "my-project",
+  "limit": 100,
   "apply": false,
   "max_insert": 100,
   "semantic": false,
@@ -340,6 +349,8 @@ Request body:
 }
 ```
 
+- `limit` — observations per page (default and maximum 100); rows are ordered by observation ID
+- `cursor` — optional `next_cursor` from a completed previous page; omit to start the first page
 - `apply: false` (default) — dry-run for the non-semantic lexical scan; reports candidates without inserting pending rows
 - `apply: true` — non-semantic lexical scan inserts new pending relation rows up to `max_insert` cap (default 100)
 - `semantic: true` — after FTS5 lexical scan, run LLM-judge semantic detection on the candidate pairs returned by `FindCandidates`. It does not discover totally lexically unrelated pairs on its own. Requires `ENGRAM_AGENT_CLI` to be set on the server to `claude` or `opencode`.
@@ -355,8 +366,10 @@ Response:
 ```json
 {
   "project": "my-project",
-  "inspected": 25,
+  "inspected": 100,
+  "ranked_queries": 100,
   "candidates_found": 5,
+  "next_cursor": 520,
   "already_related": 2,
   "inserted": 0,
   "capped": false,
@@ -367,14 +380,14 @@ Response:
 }
 ```
 
-`semantic_judged`, `semantic_skipped`, and `semantic_errors` are always present (zero when `semantic: false`).
+`semantic_judged`, `semantic_skipped`, and `semantic_errors` are always present (zero when `semantic: false`). `next_cursor` is present only after every candidate for the completed page has been handled. Scans never auto-loop through pages.
 
-When any scan cap is reached, including `max_insert` for lexical apply scans or `max_semantic` for semantic scans, a `warning` field is included:
+When any scan cap is reached, including `max_insert` for lexical apply scans or `max_semantic` for semantic scans, no `next_cursor` is returned. Re-run from the same incoming cursor with a higher cap; the response includes this warning:
 
 ```json
 {
   "project": "my-project",
-  "inspected": 250,
+  "inspected": 100,
   "candidates_found": 150,
   "already_related": 0,
   "inserted": 50,
@@ -383,7 +396,7 @@ When any scan cap is reached, including `max_insert` for lexical apply scans or 
   "semantic_judged": 0,
   "semantic_skipped": 0,
   "semantic_errors": 0,
-  "warning": "cap reached: not all candidates were inserted"
+  "warning": "cap reached: this page has no continuation; rerun from the same cursor with a higher applicable cap"
 }
 ```
 
@@ -468,8 +481,8 @@ Response:
 | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
 | `ENGRAM_DATA_DIR`               | Override data directory                                                                                                                                                                                                                                   | `~/.engram`          |
 | `ENGRAM_PORT`                   | Override HTTP server port                                                                                                                                                                                                                                 | `7437`               |
-| `ENGRAM_PROJECT`                | Process-level default project override. For `engram serve`: used as the fallback when `GET /sync/status` receives no `project` query param. For `engram mcp`: sets `MCPConfig.DefaultProject`, which takes precedence over cwd detection for all read and write tools for the lifetime of that MCP process. When unset, cwd detection is used as the fallback. | cwd-detected project |
-| `ENGRAM_HTTP_TOKEN`             | Optional Bearer auth for the local HTTP server. When set, the following routes require `Authorization: Bearer <token>`: `DELETE /sessions/{id}`, `DELETE /observations/{id}`, `DELETE /prompts/{id}`, `GET /export`, `POST /import`, `POST /projects/migrate`. Comparison is constant-time. Token is read at request time (no restart needed). When unset, all routes are open (zero-config default). | (unset — open) |
+| `ENGRAM_PROJECT`                | Process-level default project override, applied by every entry point through one precedence rule: **explicit request project** (`engram save --project`, an MCP tool `project` argument) → **process override** (`engram mcp --project`, then `ENGRAM_PROJECT`) → **cwd detection**. For `engram save`: owns the observation and its `manual-save-<project>` session when `--project` is omitted. For `engram serve`: used as the fallback when `GET /sync/status` receives no `project` query param. For `engram mcp`: sets `MCPConfig.DefaultProject`, which takes precedence over cwd detection for all read and write tools (including `mem_update`) for the lifetime of that MCP process. When unset, cwd detection is used as the fallback. | cwd-detected project |
+| `ENGRAM_HTTP_TOKEN`             | Optional Bearer auth for the local HTTP server. When set, `DELETE /sessions/{id}`, `DELETE /observations/{id}`, `DELETE /prompts/{id}`, `GET /export`, and `POST /import` require `Authorization: Bearer <token>`. `POST /projects/rescue-ownership` (and deprecated alias `POST /projects/migrate`) always requires a configured token and matching Bearer credential. Comparison is constant-time. Token is read at request time (no restart needed). Other routes remain open when unset (zero-config default). Ownership repair never depends on this token: `engram projects rescue-ownership` performs the same repair against the local store. | (unset — HTTP rescue route not served; CLI repair still available) |
 | `ENGRAM_TIMEZONE`               | Timezone for timestamp display in the TUI and cloud dashboard. Accepts any IANA zone name (e.g. `America/New_York`, `Europe/Berlin`). Falls back to system local time when unset or invalid.                                                               | system local         |
 | `ENGRAM_AGENT_CLI`              | LLM runner name used by `engram conflicts scan --semantic` and the HTTP `/conflicts/scan` endpoint. Accepted values: `claude`, `opencode`.                                                                                                                | (unset)              |
 | `ENGRAM_CLOUD_AUTOSYNC`         | Set to `1` to enable background autosync. Requires `ENGRAM_CLOUD_TOKEN` and `ENGRAM_CLOUD_SERVER` to also be set.                                                                                                                                         | (unset — disabled)   |
@@ -510,7 +523,7 @@ Print aggregate grouped `judgment_status` counts (`pending` | `judged` | `orphan
 
 ```
 engram conflicts scan [--project <name>] [--dry-run] [--apply] [--max-insert <N>]
-                      [--since <RFC3339>]
+                      [--since <RFC3339>] [--limit <N>] [--cursor <ID>]
                       [--semantic] [--concurrency <N>] [--timeout-per-call <N>]
                       [--max-semantic <N>] [--yes]
 ```
@@ -520,6 +533,8 @@ Walk observations for the project, run FindCandidates, and report or insert new 
 - `--dry-run` (default): for non-semantic lexical scans, reports candidates found with 0 pending rows inserted.
 - `--apply`: inserts up to `--max-insert` (default 100) new rows; prints WARNING when cap is reached.
 - `--since RFC3339`: scan only observations created at or after the timestamp.
+- `--limit N`: inspect 1–100 observations per page (default 100), ordered by observation ID.
+- `--cursor ID`: resume after a printed `next_cursor`; no automatic follow-up page is run.
 - `--semantic`: enable LLM-judge semantic detection on FTS5 candidate pairs returned by `FindCandidates`. It can improve verdict quality for candidates that share lexical terms, but it does not discover totally lexically unrelated pairs on its own. Requires `ENGRAM_AGENT_CLI=claude` or `ENGRAM_AGENT_CLI=opencode`.
 - With `--semantic`, non-`not_conflict` verdicts are persisted by `JudgeBySemantic` even in the default `--dry-run` mode; `not_conflict` verdicts remain no-op.
 - `--concurrency N`: worker pool size for parallel LLM calls (default 5, max 20).
@@ -858,7 +873,7 @@ Save structured observations. The tool description teaches agents the format:
 
 Exact duplicate saves are deduplicated in a rolling time window using a normalized content hash + project + scope + type + title.
 When `topic_key` is provided, `mem_save` upserts the latest observation in the same `project + scope + topic_key`, incrementing `revision_count` and attributing it to the latest writer session.
-Save responses include lifecycle metadata for the saved observation: computed `state` (`active` or `needs_review`) and `review_after` when the observation type has a review cycle.
+Save responses include lifecycle metadata for the saved observation: computed `state` (`active` or `needs_review`) and `review_after` when the observation type has a review cycle. Content is redacted before the configured storage limit is applied; that limit and truncation metadata (`original_bytes`, `limit_bytes`) are UTF-8 bytes. MCP save/update responses include `truncated`, and warn when truncation occurs.
 
 ### mem_update
 
@@ -885,7 +900,7 @@ Delete an observation by ID. Uses soft-delete by default (`deleted_at`); optiona
 
 ### mem_save_prompt
 
-Save user prompts — records what the user asked so future sessions have context about user goals.
+Save user prompts — records what the user asked so future sessions have context about user goals. It applies the same post-redaction byte limit and truncation metadata as `mem_save`; `mem_save_prompt` warns when it truncates.
 When called in the same MCP process, this also feeds process-local current prompt context used by later `mem_save` calls with `capture_prompt=true`. The same MCP process lifecycle must receive the prompt context before the later save; prompt capture is best-effort and `mem_save` still succeeds when no context is available.
 
 ### mem_context
@@ -1087,11 +1102,11 @@ Do not skip step 1. Without it, everything done before compaction is lost from m
 
 ## Project Name Normalization
 
-Engram automatically prevents project name drift — the same project saved under different names (`"engram"` vs `"Engram"` vs `"engram-memory"`) by different clients or users.
+Engram automatically prevents project name drift — the same project saved under different names (`"engram"` vs `"Engram"` vs `"  ENGRAM  "`) by different clients or users.
 
 ### Automatic normalization
 
-All project names are normalized on write and read: **lowercase**, **trimmed**, **collapsed hyphens/underscores**. If a name is changed during normalization, a warning is included in the response.
+All project names are normalized on write and read: **lowercase**, **trimmed**, **collapsed hyphens/underscores**. Hyphens and underscores are not interchangeable, so `"engram-memory"` and `"engram_memory"` are not equivalent. If a name is changed during normalization, a warning is included in the response.
 
 ### Auto-detection
 
@@ -1104,7 +1119,19 @@ MCP tools resolve project names at call time using the shared detection chain:
 5. Multiple git-repo children of cwd returns `ambiguous_project` with `available_projects`
 6. Current working directory basename
 
-`engram mcp` accepts a process-level default project via `--project <name>` / `--project=<name>` or `ENGRAM_PROJECT=<name>`. This override takes precedence over cwd detection for all read and write tools throughout the lifetime of that MCP process. It is a trusted startup-time value — use it when the host cannot supply a reliable cwd (VS Code, WSL, CI, Docker).
+`engram mcp` accepts a process-level default project via `--project <name>` / `--project=<name>` or `ENGRAM_PROJECT=<name>`. This override takes precedence over cwd detection for all read and write tools — `mem_update` included — throughout the lifetime of that MCP process. It is a trusted startup-time value — use it when the host cannot supply a reliable cwd (VS Code, WSL, CI, Docker).
+
+The same precedence rule is applied by every entry point, so identity never depends on which binary wrote the record: an **explicit request project** (`engram save --project`, an MCP tool `project` argument) wins first, then the **process override** (`engram mcp --project`, then `ENGRAM_PROJECT`), then **cwd detection**.
+
+### Ownership on legacy sessions
+
+A database upgraded from the schema where `sessions.project` was nullable still holds sessions that identify no project. Those sessions keep accepting writes: ownership is established forward rather than demanded retroactively.
+
+- When the write resolves a project through the chain above, its unowned parent session **adopts** that project in the same transaction, and the move is journaled like any other ownership change. The record and its session end up in agreement, so no record is left split from its parent.
+- Adoption is refused in one case: an unowned session that already parents a record owned by a *different* project. Claiming it there would split that record from its session, so the write fails with `project_ownership_ambiguous` (HTTP `409`) and the operator resolves it explicitly.
+- A write that resolves no project at all against an unowned session fails with `project_ownership_required` (HTTP `409`).
+
+Both errors carry a `remedy` field naming the exact command to run: `engram projects rescue-ownership --project <name> --session <id>`. That command reaches the local store directly and needs no server token, so recovery stays available in a zero-config install. Bulk repair remains available over HTTP through `POST /projects/rescue-ownership` when `ENGRAM_HTTP_TOKEN` is configured.
 
 ### Similar-project warnings
 
@@ -1112,7 +1139,9 @@ When saving to a project that doesn't exist yet, Engram checks for similar exist
 
 ### Retroactive cleanup
 
-Use `engram projects consolidate` to interactively merge variant project names, or `mem_merge_projects` for agent-driven consolidation.
+Use `engram projects consolidate` to interactively merge legacy project names that are equivalent after normalization, or `mem_merge_projects` for agent-driven consolidation.
+
+Use `engram projects rescue-ownership --project <name> [--session <id>] [--observation <id>] [--prompt <id>]` to assign ownership to legacy rows that carry none. It prints how many sessions, observations, and prompts moved, and — when anything was left behind — exactly which items and why. It works against the local store, so it needs no running server and no `ENGRAM_HTTP_TOKEN`.
 
 ---
 

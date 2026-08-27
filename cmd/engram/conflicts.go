@@ -44,7 +44,7 @@ func printConflictsUsage() {
 	fmt.Fprintln(os.Stderr, "  list       [--project P]  [--status S]  [--since RFC3339]  [--limit N]")
 	fmt.Fprintln(os.Stderr, "  show       <relation_id>")
 	fmt.Fprintln(os.Stderr, "  stats      [--project P]")
-	fmt.Fprintln(os.Stderr, "  scan       [--project P]  [--since RFC3339]  [--dry-run]  [--apply]  [--max-insert N]")
+	fmt.Fprintln(os.Stderr, "  scan       [--project P]  [--since RFC3339]  [--limit N]  [--cursor ID]  [--dry-run]  [--apply]  [--max-insert N]")
 	fmt.Fprintln(os.Stderr, "             [--semantic]  [--concurrency N]  [--timeout-per-call SECONDS]")
 	fmt.Fprintln(os.Stderr, "             [--max-semantic N]  [--yes]")
 	fmt.Fprintln(os.Stderr, "  deferred   [--status S]  [--limit N]  [--inspect SYNC_ID]  [--replay]")
@@ -306,6 +306,8 @@ func cmdConflictsScan(cfg store.Config) {
 	dryRun := true // default
 	apply := false
 	maxInsert := 100
+	limit := 0
+	var cursor int64
 
 	// Phase 4 semantic flags (parsed here; wired into ScanOptions below).
 	semantic := false
@@ -339,6 +341,34 @@ func cmdConflictsScan(cfg store.Config) {
 				}
 				i++
 			}
+		case "--limit":
+			if i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "error: --limit requires a value")
+				exitFunc(1)
+				return
+			}
+			value, err := strconv.Atoi(args[i+1])
+			if err != nil || value < 1 || value > store.DefaultScanLimit {
+				fmt.Fprintf(os.Stderr, "error: --limit must be between 1 and %d\n", store.DefaultScanLimit)
+				exitFunc(1)
+				return
+			}
+			limit = value
+			i++
+		case "--cursor":
+			if i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "error: --cursor requires a value")
+				exitFunc(1)
+				return
+			}
+			value, err := strconv.ParseInt(args[i+1], 10, 64)
+			if err != nil || value < 0 {
+				fmt.Fprintln(os.Stderr, "error: --cursor must be a non-negative observation ID")
+				exitFunc(1)
+				return
+			}
+			cursor = value
+			i++
 		case "--semantic":
 			semantic = true
 		case "--concurrency":
@@ -397,6 +427,8 @@ func cmdConflictsScan(cfg store.Config) {
 	opts := store.ScanOptions{
 		Project:   proj,
 		Since:     sinceTime,
+		Limit:     limit,
+		Cursor:    cursor,
 		Apply:     apply,
 		MaxInsert: maxInsert,
 	}
@@ -455,11 +487,14 @@ func cmdConflictsScan(cfg store.Config) {
 
 	fmt.Printf("Conflicts Scan (project: %s)\n", proj)
 	fmt.Printf("  inspected:        %d\n", result.Inspected)
+	fmt.Printf("  ranked_queries:   %d\n", result.RankedQueries)
 	fmt.Printf("  candidates_found: %d\n", result.CandidatesFound)
 	fmt.Printf("  already_related:  %d\n", result.AlreadyRelated)
 	fmt.Printf("  inserted:         %d\n", result.RelationsInserted)
 	fmt.Printf("  dry_run:          %v\n", result.DryRun)
-
+	if result.NextCursor != nil {
+		fmt.Printf("  next_cursor:      %d\n", *result.NextCursor)
+	}
 	if semantic {
 		fmt.Printf("  semantic_judged:  %d\n", result.SemanticJudged)
 		fmt.Printf("  semantic_skipped: %d\n", result.SemanticSkipped)
@@ -468,9 +503,9 @@ func cmdConflictsScan(cfg store.Config) {
 
 	if result.Capped {
 		if semantic {
-			fmt.Printf("WARNING: max-semantic cap of %d reached — stopped early. Re-run to continue.\n", maxSemantic)
+			fmt.Printf("WARNING: max-semantic cap of %d reached — this page has no continuation; re-run with --cursor %d and a higher cap.\n", maxSemantic, cursor)
 		} else {
-			fmt.Printf("WARNING: max-insert cap of %d reached — stopped early. Re-run to continue.\n", maxInsert)
+			fmt.Printf("WARNING: max-insert cap of %d reached — this page has no continuation; re-run with --cursor %d and a higher cap.\n", maxInsert, cursor)
 		}
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Gentleman-Programming/engram/internal/cloud/chunkcodec"
 	"github.com/Gentleman-Programming/engram/internal/cloud/cloudstore"
 	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
 	"github.com/Gentleman-Programming/engram/internal/project"
@@ -316,41 +317,12 @@ func (s *CloudServer) handleMutationPull(w http.ResponseWriter, r *http.Request)
 
 // ─── REQ-006 / REQ-008: Per-entity payload validation ────────────────────────
 
-// relationRequiredFields lists the fields that MUST be present and non-empty
-// in every relation mutation payload (REQ-006). This list is the stable
-// validation contract — Phase 3 MUST NOT remove or rename these fields without
-// a wire-format version bump.
-var relationRequiredFields = []string{
-	"sync_id",
-	"source_id",
-	"target_id",
-	"relation",
-	"judgment_status",
-	"marked_by_actor",
-	"marked_by_kind",
-}
-
 // validateRelationPayload checks that all required relation fields are present
-// and non-empty in the decoded payload map.
+// and non-empty in the decoded payload map using the canonical chunk validator.
 // Returns (missingField, false) when any required field is absent or empty,
 // or ("", true) when all required fields are present.
 func validateRelationPayload(payload json.RawMessage) (string, bool) {
-	var fields map[string]any
-	if err := json.Unmarshal(payload, &fields); err != nil {
-		// Malformed JSON: treat sync_id as missing (first required field).
-		return "sync_id", false
-	}
-	for _, field := range relationRequiredFields {
-		v, ok := fields[field]
-		if !ok {
-			return field, false
-		}
-		s, isStr := v.(string)
-		if !isStr || strings.TrimSpace(s) == "" {
-			return field, false
-		}
-	}
-	return "", true
+	return chunkcodec.ValidateRelationPayload(payload)
 }
 
 // validateLegacyPayload is a no-op for legacy entities (session, observation,

@@ -415,6 +415,9 @@ func materializedChunkMutations(project string, chunk engramsync.ChunkData) ([]M
 		if len(payload) == 0 {
 			payload = json.RawMessage("{}")
 		}
+		if field, ok := chunkcodec.ValidateRelationPayload(payload); !ok {
+			return nil, fmt.Errorf("cloudstore: materialize chunk: mutations[%d].payload.%s is required for relation", i, field)
+		}
 		entries = append(entries, MutationEntry{Project: project, Entity: store.SyncEntityRelation, EntityKey: entityKey, Op: op, Payload: payload})
 	}
 

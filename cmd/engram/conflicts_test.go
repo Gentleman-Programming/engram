@@ -230,6 +230,35 @@ func TestCmdConflictsScan_DryRun(t *testing.T) {
 	}
 }
 
+func TestCmdConflictsScan_PageContract(t *testing.T) {
+	cfg := testConfig(t)
+	for i := 0; i < 2; i++ {
+		mustSeedObservation(t, cfg, "scan-page", "scan-page", "decision", fmt.Sprintf("scan page %d", i), "scan page", "project")
+	}
+
+	withArgs(t, "engram", "conflicts", "scan", "--project", "scan-page", "--limit", "1")
+	stdout, stderr := captureOutput(t, func() { cmdConflicts(cfg) })
+	if stderr != "" {
+		t.Fatalf("stderr = %q", stderr)
+	}
+	if !strings.Contains(stdout, "inspected:        1") || !strings.Contains(stdout, "ranked_queries:   1") || !strings.Contains(stdout, "next_cursor:") {
+		t.Fatalf("page output = %q", stdout)
+	}
+
+	stubExitWithPanic(t)
+	withArgs(t, "engram", "conflicts", "scan", "--project", "scan-page", "--limit", "0")
+	_, stderr, recovered := captureOutputAndRecover(t, func() { cmdConflicts(cfg) })
+	if recovered == nil || !strings.Contains(stderr, "--limit must be between") {
+		t.Fatalf("invalid limit stderr = %q, panic = %v", stderr, recovered)
+	}
+
+	withArgs(t, "engram", "conflicts", "scan", "--project", "scan-page", "--limit", "1", "--apply", "--max-insert", "1")
+	stdout, stderr = captureOutput(t, func() { cmdConflictsScan(cfg) })
+	if stderr != "" || !strings.Contains(stdout, "next_cursor:") || strings.Contains(stdout, "no continuation") {
+		t.Fatalf("completed page output = %q stderr = %q", stdout, stderr)
+	}
+}
+
 // TestCmdConflictsScan_Apply verifies `engram conflicts scan --apply` inserts rows
 // and reports an inserted count.
 func TestCmdConflictsScan_Apply(t *testing.T) {

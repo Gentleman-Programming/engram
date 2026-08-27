@@ -21,6 +21,16 @@ Breaking changes are always marked with a `type:breaking-change` label and docum
 
 <!-- Changes that are merged but not yet released are tracked here until the next tag. -->
 
+### Memory core
+
+- **fix(store):** establish project ownership forward on legacy sessions instead of rejecting their writes. A database upgraded from the schema where `sessions.project` was nullable still holds sessions that identify no project; those sessions now adopt the project of the write landing on them, in the same transaction and journaled like any other ownership move, so the record and its session agree rather than the write failing permanently. Adoption is refused only when the unowned session already parents a record owned by a different project, which would split that record from its session. Both ownership errors answer `409` with a `code` and a `remedy` naming the exact repair.
+- **feat(cli):** add `engram projects rescue-ownership --project <name> [--session <id>] [--observation <id>] [--prompt <id>]`. It performs the same ownership repair as `POST /projects/rescue-ownership` against the local store, so recovery no longer requires `ENGRAM_HTTP_TOKEN` to be configured.
+- **fix(store):** resolve the whole rescue plan before mutating anything. The session pass previously claimed dependent parent sessions before any record's ownership was examined, so an unowned session parenting a record owned by another project was moved while the record was left behind — a split in the mirror direction of the case the rescue guards. Sessions and records are now decided together and applied afterwards.
+- **fix(server):** report rescue outcomes unambiguously. The response carries `complete` and a `blocked` list naming every item left behind with its reason, and `status` is `partially_rescued` rather than `rescued` when anything was; a partial outcome is no longer indistinguishable from a clean one.
+- **fix(store):** read `sessions.project` as nullable in `GetSession`, so a legacy NULL row no longer fails every caller that inspects the session with an opaque scan error.
+- **fix(pi):** surface background capture failures on stderr instead of discarding them, so a user whose passive memories stopped being saved gets a signal.
+- **fix(store):** reject empty or whitespace-only observation titles consistently on create and update, before any side effect. `engram save` and `mem_save` now refuse a titleless write before opening the store or creating a session, `POST /observations` validates the title before the session lookup so a bad session or project can no longer mask the documented `400`, and `PATCH /observations/{id}` answers `400` rather than `404`. Persisting a titleless observation also enqueues a cloud upsert that the sync validators reject, which blocks every later mutation for the project.
+
 ### Cloud sync
 
 - **fix(cloud):** make chunk and mutation push payload limits configurable with `ENGRAM_CLOUD_MAX_PUSH_BYTES` while preserving the 8 MiB default.

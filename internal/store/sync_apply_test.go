@@ -85,25 +85,24 @@ func setupSyncApplyStore(t *testing.T) (s *Store, syncObsA, syncObsB string) {
 
 // ─── Phase C.3 — Pull-side RED tests (REQ-002, REQ-009) ──────────────────────
 
-// C.3a — ApplyPulledRelation_InsertsWhenObsExist: both source and target
-// observations exist locally → relation is upserted into memory_relations.
-func TestApplyPulledRelation_InsertsWhenObsExist(t *testing.T) {
+// C.3a — historical relation payloads without newer metadata still apply when
+// their relation identity and endpoints are valid.
+func TestApplyPulledRelation_AcceptsLegacyPayloadWithoutProvenance(t *testing.T) {
 	s, syncA, syncB := setupSyncApplyStore(t)
 
 	relSyncID := newSyncID("rel")
-	m := buildRelationMutation(t, syncRelationPayload{
-		SyncID:         relSyncID,
-		SourceID:       syncA,
-		TargetID:       syncB,
-		Relation:       RelationConflictsWith,
-		JudgmentStatus: JudgmentStatusJudged,
-		Project:        "proj-apply",
-		CreatedAt:      "2026-04-26T10:00:00Z",
-		UpdatedAt:      "2026-04-26T10:00:00Z",
-	})
+	m := SyncMutation{
+		Seq:       1,
+		Entity:    SyncEntityRelation,
+		EntityKey: relSyncID,
+		Op:        SyncOpUpsert,
+		Payload: fmt.Sprintf(`{"sync_id":%q,"source_id":%q,"target_id":%q,"relation":"conflicts_with","judgment_status":"judged","created_at":"2026-04-26T10:00:00Z","updated_at":"2026-04-26T10:00:00Z"}`,
+			relSyncID, syncA, syncB),
+		Source: SyncSourceRemote,
+	}
 
-	if err := applyRelationMutation(t, s, m); err != nil {
-		t.Fatalf("applyPulledMutationTx: %v", err)
+	if err := s.ApplyPulledMutation(DefaultSyncTargetKey, m); err != nil {
+		t.Fatalf("ApplyPulledMutation: %v", err)
 	}
 
 	n := countRelationRows(t, s, relSyncID)
@@ -293,12 +292,21 @@ func TestApplyPulledChunk_MarksInvalidRelationContractsDead(t *testing.T) {
 			},
 		},
 		{
-			name: "missing required provenance fields",
+			name: "missing endpoint",
 			mutation: SyncMutation{
 				Entity:    SyncEntityRelation,
-				EntityKey: "rel-missing-provenance",
+				EntityKey: "rel-missing-endpoint",
 				Op:        SyncOpUpsert,
-				Payload:   fmt.Sprintf(`{"sync_id":"rel-missing-provenance","source_id":%q,"target_id":%q,"relation":"related","judgment_status":"judged","project":"proj-apply"}`, syncA, syncB),
+				Payload:   fmt.Sprintf(`{"sync_id":"rel-missing-endpoint","source_id":%q,"relation":"related","judgment_status":"judged"}`, syncA),
+			},
+		},
+		{
+			name: "entity key does not match payload identity",
+			mutation: SyncMutation{
+				Entity:    SyncEntityRelation,
+				EntityKey: "rel-mismatched-identity",
+				Op:        SyncOpUpsert,
+				Payload:   string(validPayload),
 			},
 		},
 	}
