@@ -3,6 +3,7 @@
 # Installation
 
 - [Homebrew (macOS / Linux)](#homebrew-macos--linux)
+- [mise (macOS / Linux / Windows)](#mise-macos--linux--windows)
 - [Windows](#windows)
 - [Install from source (macOS / Linux)](#install-from-source-macos--linux)
 - [Download binary (all platforms)](#download-binary-all-platforms)
@@ -30,6 +31,24 @@ brew update && brew upgrade engram
 > ```
 
 > **Keep `engram serve` running across `brew upgrade`?** On macOS, `brew upgrade engram` replaces the binary and kills any running `engram serve` process — autosync stops silently until you relaunch it. To make autosync survive upgrades and reboots, use the launchd template in [Running as a Service → Using launchd (macOS)](../DOCS.md#using-launchd-macos). Run `engram cloud status` afterwards: the `Local daemon:` line should report `running`.
+
+---
+
+## mise (macOS / Linux / Windows)
+
+[mise](https://mise.jdx.dev) is a polyglot toolchain and version manager. engram isn't yet published under its short registry name, so pin it directly from the GitHub repo:
+
+```bash
+mise use -g github:Gentleman-Programming/engram@latest
+```
+
+> **Note:** `mise use -g` only registers the pin — it does not by itself put `engram` on your `PATH`. You also need either `mise activate` (shell integration, see the [mise docs](https://mise.jdx.dev/getting-started.html)) or shims configured. If you haven't set either up, run engram through mise instead:
+>
+> ```bash
+> mise exec -- engram version
+> ```
+
+This works the same way on macOS, Linux, and Windows.
 
 ---
 
@@ -164,7 +183,7 @@ Grab the latest release for your platform from [GitHub Releases](https://github.
 
 ## Requirements
 
-- **Go 1.24+** to build from source (not needed if installing via Homebrew or downloading a binary)
+- **Go 1.25.10** to build from source (not needed if installing via Homebrew, mise, or downloading a binary)
 - That's it. No runtime dependencies.
 
 The binary includes SQLite (via [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite) — pure Go, no CGO). Works natively on **macOS**, **Linux**, and **Windows** (x86_64 and ARM64).
