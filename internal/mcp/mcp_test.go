@@ -1110,6 +1110,12 @@ func TestHandleSearchPreviewUsesRuneCount(t *testing.T) {
 			wantPreview: false,
 		},
 		{
+			name:        "multibyte content at rune limit remains complete",
+			content:     strings.Repeat("é", 300),
+			wantContent: strings.Repeat("é", 300),
+			wantPreview: false,
+		},
+		{
 			name:        "multibyte content above rune limit is truncated",
 			content:     strings.Repeat("é", 301),
 			wantContent: strings.Repeat("é", 300) + "...",
