@@ -1313,6 +1313,22 @@ func postSaveConflictCandidateResponse(s *store.Store, cfg MCPConfig, savedID in
 	if extra == nil {
 		extra = map[string]any{}
 	}
+	obs, obsErr := s.GetObservation(savedID)
+	if obsErr == nil {
+		extra["id"] = savedID
+		extra["sync_id"] = obs.SyncID
+		extra["state"] = obs.State()
+		if obs.ReviewAfter != nil {
+			extra["review_after"] = *obs.ReviewAfter
+		}
+	}
+	if query != "" {
+		if obsErr != nil {
+			extra["judgment_required"] = false
+			return extra
+		}
+		query = obs.Content
+	}
 	candOpts := store.CandidateOptions{Project: project, Scope: scope, BM25Floor: cfg.BM25Floor, Query: query}
 	if cfg.Limit != nil {
 		candOpts.Limit = *cfg.Limit
@@ -1323,14 +1339,6 @@ func postSaveConflictCandidateResponse(s *store.Store, cfg MCPConfig, savedID in
 		fmt.Fprintf(os.Stderr, "engram: FindCandidates error (non-fatal): %v\n", candErr)
 	}
 
-	if obs, obsErr := s.GetObservation(savedID); obsErr == nil {
-		extra["id"] = savedID
-		extra["sync_id"] = obs.SyncID
-		extra["state"] = obs.State()
-		if obs.ReviewAfter != nil {
-			extra["review_after"] = *obs.ReviewAfter
-		}
-	}
 	if len(candidates) == 0 {
 		extra["judgment_required"] = false
 		return extra
