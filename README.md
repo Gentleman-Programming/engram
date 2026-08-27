@@ -413,6 +413,8 @@ Full environment variable reference → [DOCS.md#environment-variables](DOCS.md#
 
 > **Dashboard contributors**: if you modify `.templ` files in `internal/cloud/dashboard/`, run `make templ` to regenerate before committing. See [DOCS.md — Dashboard templ regeneration](DOCS.md#dashboard-templ-regeneration).
 
+> **Trademark notice:** The Engram names and logos are trademarks of Alan Buscaglia. The MIT License applies to the code; it does not permit implying endorsement or official affiliation. See [TRADEMARKS.md](TRADEMARKS.md).
+
 ## License
 
 MIT
