@@ -536,6 +536,144 @@ func TestMaterializedChunkMutationsCarriesRelationFromChunkMutations(t *testing.
 	}
 }
 
+// #837: a prompt is hard-deleted locally, so it cannot ride in chunk.Prompts.
+// Its delete travels only as a chunk.Mutations entry and must still materialize.
+func TestMaterializedChunkMutationsCarriesPromptDeleteFromChunkMutations(t *testing.T) {
+	project := "proj-materialize-prompt-delete"
+	deletePayload := `{"sync_id":"prompt-1","session_id":"s-1","project":"proj-materialize-prompt-delete","deleted":true,"hard_delete":true,"deleted_at":"2026-04-29T10:05:00Z"}`
+	chunk := engramsync.ChunkData{
+		Sessions: []store.Session{{ID: "s-1", Project: project}},
+		Mutations: []store.SyncMutation{
+			{Project: project, Entity: store.SyncEntityPrompt, EntityKey: "prompt-1", Op: store.SyncOpDelete, Payload: deletePayload},
+		},
+	}
+
+	entries, err := materializedChunkMutations(project, chunk)
+	if err != nil {
+		t.Fatalf("materializedChunkMutations: %v", err)
+	}
+
+	if len(entries) != 2 {
+		t.Fatalf("expected session upsert + prompt delete, got %d: %+v", len(entries), entries)
+	}
+
+	var promptDelete *MutationEntry
+	for i := range entries {
+		if entries[i].Entity == store.SyncEntityPrompt {
+			promptDelete = &entries[i]
+		}
+	}
+	if promptDelete == nil {
+		t.Fatalf("expected prompt delete materialized from chunk.Mutations, got %+v", entries)
+	}
+	if promptDelete.EntityKey != "prompt-1" || promptDelete.Op != store.SyncOpDelete || promptDelete.Project != project {
+		t.Fatalf("unexpected prompt delete entry: %+v", *promptDelete)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(promptDelete.Payload, &payload); err != nil {
+		t.Fatalf("prompt delete payload is not object JSON: %v", err)
+	}
+	if payload["sync_id"] != "prompt-1" {
+		t.Fatalf("prompt delete payload not preserved: %+v", payload)
+	}
+}
+
+// #837: DeleteObservation(id, hardDelete=true) removes the row exactly like
+// DeletePrompt, so its delete can only travel as a chunk.Mutations entry too.
+func TestMaterializedChunkMutationsCarriesObservationHardDeleteFromChunkMutations(t *testing.T) {
+	project := "proj-materialize-obs-hard-delete"
+	deletePayload := `{"sync_id":"obs-1","session_id":"s-1","project":"proj-materialize-obs-hard-delete","deleted":true,"hard_delete":true,"deleted_at":"2026-04-29T10:05:00Z"}`
+	chunk := engramsync.ChunkData{
+		Sessions: []store.Session{{ID: "s-1", Project: project}},
+		Mutations: []store.SyncMutation{
+			{Project: project, Entity: store.SyncEntityObservation, EntityKey: "obs-1", Op: store.SyncOpDelete, Payload: deletePayload},
+		},
+	}
+
+	entries, err := materializedChunkMutations(project, chunk)
+	if err != nil {
+		t.Fatalf("materializedChunkMutations: %v", err)
+	}
+
+	if len(entries) != 2 {
+		t.Fatalf("expected session upsert + observation delete, got %d: %+v", len(entries), entries)
+	}
+	var observationDelete *MutationEntry
+	for i := range entries {
+		if entries[i].Entity == store.SyncEntityObservation {
+			observationDelete = &entries[i]
+		}
+	}
+	if observationDelete == nil {
+		t.Fatalf("expected observation delete materialized from chunk.Mutations, got %+v", entries)
+	}
+	if observationDelete.EntityKey != "obs-1" || observationDelete.Op != store.SyncOpDelete || observationDelete.Project != project {
+		t.Fatalf("unexpected observation delete entry: %+v", *observationDelete)
+	}
+}
+
+// A soft-deleted observation still rides in chunk.Observations (its row survives
+// with deleted_at set), so it materializes an upsert. The paired delete mutation
+// must materialize after it, otherwise replaying cloud_mutations resurrects it.
+func TestMaterializedChunkMutationsOrdersObservationSoftDeleteAfterTypedUpsert(t *testing.T) {
+	project := "proj-materialize-obs-soft-delete"
+	deletedAt := "2026-04-29T10:05:00Z"
+	chunk := engramsync.ChunkData{
+		Observations: []store.Observation{{SyncID: "obs-1", SessionID: "s-1", DeletedAt: &deletedAt}},
+		Mutations: []store.SyncMutation{
+			{Project: project, Entity: store.SyncEntityObservation, EntityKey: "obs-1", Op: store.SyncOpDelete, Payload: `{"sync_id":"obs-1","session_id":"s-1","deleted":true,"deleted_at":"2026-04-29T10:05:00Z"}`},
+		},
+	}
+
+	entries, err := materializedChunkMutations(project, chunk)
+	if err != nil {
+		t.Fatalf("materializedChunkMutations: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected typed upsert + delete, got %d: %+v", len(entries), entries)
+	}
+	if entries[0].Op != store.SyncOpUpsert || entries[1].Op != store.SyncOpDelete {
+		t.Fatalf("expected the delete to be materialized last, got %+v", entries)
+	}
+}
+
+// The skip that dropped prompt deletes exists to keep upserts from being
+// materialized twice — once from the typed collection and once from the
+// mirrored chunk.Mutations entry. That invariant must survive the fix.
+func TestMaterializedChunkMutationsMaterializesUpsertsExactlyOnce(t *testing.T) {
+	project := "proj-materialize-no-duplicates"
+	chunk := engramsync.ChunkData{
+		Sessions:     []store.Session{{ID: "s-1", Project: project}},
+		Observations: []store.Observation{{SyncID: "obs-1", SessionID: "s-1"}},
+		Prompts:      []store.Prompt{{SyncID: "prompt-1", SessionID: "s-1", Project: project}},
+		Mutations: []store.SyncMutation{
+			{Project: project, Entity: store.SyncEntitySession, EntityKey: "s-1", Op: store.SyncOpUpsert, Payload: `{"id":"s-1"}`},
+			{Project: project, Entity: store.SyncEntityObservation, EntityKey: "obs-1", Op: store.SyncOpUpsert, Payload: `{"sync_id":"obs-1"}`},
+			{Project: project, Entity: store.SyncEntityPrompt, EntityKey: "prompt-1", Op: store.SyncOpUpsert, Payload: `{"sync_id":"prompt-1"}`},
+		},
+	}
+
+	entries, err := materializedChunkMutations(project, chunk)
+	if err != nil {
+		t.Fatalf("materializedChunkMutations: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("expected exactly one entry per typed row, got %d: %+v", len(entries), entries)
+	}
+	seen := make(map[string]int, len(entries))
+	for _, entry := range entries {
+		if entry.Op != store.SyncOpUpsert {
+			t.Fatalf("expected only upserts, got %+v", entry)
+		}
+		seen[entry.Entity+"/"+entry.EntityKey]++
+	}
+	for key, count := range seen {
+		if count != 1 {
+			t.Fatalf("entry %s materialized %d times, want exactly 1", key, count)
+		}
+	}
+}
+
 func TestWriteChunkMaterializesRelationMutationIntoCloudMutations(t *testing.T) {
 	cs := openTestCloudStore(t)
 	project := "test-chunk-relation-" + strings.ReplaceAll(time.Now().UTC().Format("20060102150405.000000000"), ".", "-")

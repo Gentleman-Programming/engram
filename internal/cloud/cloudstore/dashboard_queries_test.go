@@ -1722,3 +1722,193 @@ func TestDashboardCountsPiSavedPromptUnderItsProject(t *testing.T) {
 		}
 	}
 }
+
+// ─── #837: local deletes must reach the dashboard ────────────────────────────
+
+// materializeChunkRowsForDashboard mirrors what WriteChunk persists: every chunk
+// row is materialized into cloud_mutations rows with monotonically increasing
+// seqs, so dashboard assertions run against the same data the cloud would store.
+func materializeChunkRowsForDashboard(t *testing.T, chunks []dashboardChunkRow) []dashboardMutationRow {
+	t.Helper()
+	rows := make([]dashboardMutationRow, 0)
+	seq := int64(0)
+	for _, chunk := range chunks {
+		entries, err := materializedChunkMutations(chunk.project, chunk.parsed)
+		if err != nil {
+			t.Fatalf("materializedChunkMutations for chunk %q: %v", chunk.chunkID, err)
+		}
+		for _, entry := range entries {
+			seq++
+			rows = append(rows, dashboardMutationRow{
+				seq:        seq,
+				project:    entry.Project,
+				entity:     entry.Entity,
+				entityKey:  entry.EntityKey,
+				op:         entry.Op,
+				payload:    []byte(entry.Payload),
+				occurredAt: chunk.createdAt,
+			})
+		}
+	}
+	return rows
+}
+
+// TestDeletedPromptDisappearsFromDashboard drives the full cloud-side path for
+// #837: a first sync uploads the prompt, a second sync uploads only the delete
+// mutation (the local row is hard-deleted, so it cannot ride in chunk.Prompts).
+// The dashboard must stop listing the prompt.
+func TestDeletedPromptDisappearsFromDashboard(t *testing.T) {
+	const project = "proj-prompt-delete"
+	chunks := []dashboardChunkRow{
+		{
+			chunkID: "chunk-prompt-save", project: project, createdBy: "dev",
+			createdAt: time.Date(2026, 4, 29, 10, 0, 0, 0, time.UTC),
+			parsed: parseMustChunk(t, []byte(`{
+				"sessions":[{"id":"sess-1","project":"proj-prompt-delete","started_at":"2026-04-29T09:00:00Z"}],
+				"prompts":[{"sync_id":"prompt-1","session_id":"sess-1","project":"proj-prompt-delete","content":"Keep me?","created_at":"2026-04-29T09:10:00Z"}],
+				"mutations":[
+					{"project":"proj-prompt-delete","entity":"session","entity_key":"sess-1","op":"upsert","payload":"{\"id\":\"sess-1\",\"project\":\"proj-prompt-delete\",\"started_at\":\"2026-04-29T09:00:00Z\"}"},
+					{"project":"proj-prompt-delete","entity":"prompt","entity_key":"prompt-1","op":"upsert","payload":"{\"sync_id\":\"prompt-1\",\"session_id\":\"sess-1\",\"project\":\"proj-prompt-delete\",\"content\":\"Keep me?\",\"created_at\":\"2026-04-29T09:10:00Z\"}"}
+				]
+			}`)),
+		},
+		{
+			chunkID: "chunk-prompt-delete", project: project, createdBy: "dev",
+			createdAt: time.Date(2026, 4, 29, 11, 0, 0, 0, time.UTC),
+			parsed: parseMustChunk(t, []byte(`{
+				"sessions":[{"id":"sess-1","project":"proj-prompt-delete","started_at":"2026-04-29T09:00:00Z"}],
+				"mutations":[
+					{"project":"proj-prompt-delete","entity":"prompt","entity_key":"prompt-1","op":"delete","payload":"{\"sync_id\":\"prompt-1\",\"session_id\":\"sess-1\",\"project\":\"proj-prompt-delete\",\"deleted\":true,\"hard_delete\":true,\"deleted_at\":\"2026-04-29T10:30:00Z\"}"}
+				]
+			}`)),
+		},
+	}
+
+	model, err := buildDashboardReadModelFromRows(chunks, materializeChunkRowsForDashboard(t, chunks))
+	if err != nil {
+		t.Fatalf("buildDashboardReadModelFromRows: %v", err)
+	}
+	cs := &CloudStore{
+		dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil },
+	}
+
+	prompts, err := cs.ListRecentPrompts(project, "", 10)
+	if err != nil {
+		t.Fatalf("ListRecentPrompts: %v", err)
+	}
+	for _, prompt := range prompts {
+		if prompt.SyncID == "prompt-1" {
+			t.Fatalf("deleted prompt still listed on the dashboard: %+v", prompt)
+		}
+	}
+
+	if _, _, _, err := cs.GetPromptDetail(project, "sess-1", "prompt-1"); !errors.Is(err, ErrDashboardPromptNotFound) {
+		t.Fatalf("expected ErrDashboardPromptNotFound for the deleted prompt, got %v", err)
+	}
+
+	detail, err := cs.ProjectDetail(project)
+	if err != nil {
+		t.Fatalf("ProjectDetail: %v", err)
+	}
+	if detail.Stats.Prompts != 0 {
+		t.Fatalf("expected 0 prompts in project stats, got %d", detail.Stats.Prompts)
+	}
+}
+
+// TestHardDeletedObservationDisappearsFromDashboard covers the sibling path:
+// DeleteObservation(id, hardDelete=true) removes the row, so the delete also
+// travels only as a chunk.Mutations entry.
+func TestHardDeletedObservationDisappearsFromDashboard(t *testing.T) {
+	const project = "proj-obs-hard-delete"
+	chunks := []dashboardChunkRow{
+		{
+			chunkID: "chunk-obs-save", project: project, createdBy: "dev",
+			createdAt: time.Date(2026, 4, 29, 10, 0, 0, 0, time.UTC),
+			parsed: parseMustChunk(t, []byte(`{
+				"sessions":[{"id":"sess-1","project":"proj-obs-hard-delete","started_at":"2026-04-29T09:00:00Z"}],
+				"observations":[{"sync_id":"obs-1","session_id":"sess-1","project":"proj-obs-hard-delete","type":"decision","title":"Keep me?","content":"Body","created_at":"2026-04-29T09:10:00Z"}],
+				"mutations":[
+					{"project":"proj-obs-hard-delete","entity":"observation","entity_key":"obs-1","op":"upsert","payload":"{\"sync_id\":\"obs-1\",\"session_id\":\"sess-1\",\"project\":\"proj-obs-hard-delete\",\"type\":\"decision\",\"title\":\"Keep me?\",\"content\":\"Body\",\"created_at\":\"2026-04-29T09:10:00Z\"}"}
+				]
+			}`)),
+		},
+		{
+			chunkID: "chunk-obs-delete", project: project, createdBy: "dev",
+			createdAt: time.Date(2026, 4, 29, 11, 0, 0, 0, time.UTC),
+			parsed: parseMustChunk(t, []byte(`{
+				"sessions":[{"id":"sess-1","project":"proj-obs-hard-delete","started_at":"2026-04-29T09:00:00Z"}],
+				"mutations":[
+					{"project":"proj-obs-hard-delete","entity":"observation","entity_key":"obs-1","op":"delete","payload":"{\"sync_id\":\"obs-1\",\"session_id\":\"sess-1\",\"project\":\"proj-obs-hard-delete\",\"deleted\":true,\"hard_delete\":true}"}
+				]
+			}`)),
+		},
+	}
+
+	model, err := buildDashboardReadModelFromRows(chunks, materializeChunkRowsForDashboard(t, chunks))
+	if err != nil {
+		t.Fatalf("buildDashboardReadModelFromRows: %v", err)
+	}
+	cs := &CloudStore{
+		dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil },
+	}
+
+	observations, err := cs.ListRecentObservations(project, "", 10)
+	if err != nil {
+		t.Fatalf("ListRecentObservations: %v", err)
+	}
+	for _, observation := range observations {
+		if observation.SyncID == "obs-1" {
+			t.Fatalf("hard-deleted observation still listed on the dashboard: %+v", observation)
+		}
+	}
+}
+
+// TestSoftDeletedObservationDisappearsFromDashboard covers the default
+// DeleteObservation path: the row survives with deleted_at set, so it still
+// rides in chunk.Observations and materializes an upsert. The paired delete
+// mutation must be materialized after it so the replay does not resurrect it.
+func TestSoftDeletedObservationDisappearsFromDashboard(t *testing.T) {
+	const project = "proj-obs-soft-delete"
+	chunks := []dashboardChunkRow{
+		{
+			chunkID: "chunk-obs-save", project: project, createdBy: "dev",
+			createdAt: time.Date(2026, 4, 29, 10, 0, 0, 0, time.UTC),
+			parsed: parseMustChunk(t, []byte(`{
+				"sessions":[{"id":"sess-1","project":"proj-obs-soft-delete","started_at":"2026-04-29T09:00:00Z"}],
+				"observations":[{"sync_id":"obs-1","session_id":"sess-1","project":"proj-obs-soft-delete","type":"decision","title":"Keep me?","content":"Body","created_at":"2026-04-29T09:10:00Z"}],
+				"mutations":[
+					{"project":"proj-obs-soft-delete","entity":"observation","entity_key":"obs-1","op":"upsert","payload":"{\"sync_id\":\"obs-1\",\"session_id\":\"sess-1\",\"project\":\"proj-obs-soft-delete\",\"type\":\"decision\",\"title\":\"Keep me?\",\"content\":\"Body\",\"created_at\":\"2026-04-29T09:10:00Z\"}"}
+				]
+			}`)),
+		},
+		{
+			chunkID: "chunk-obs-delete", project: project, createdBy: "dev",
+			createdAt: time.Date(2026, 4, 29, 11, 0, 0, 0, time.UTC),
+			parsed: parseMustChunk(t, []byte(`{
+				"sessions":[{"id":"sess-1","project":"proj-obs-soft-delete","started_at":"2026-04-29T09:00:00Z"}],
+				"observations":[{"sync_id":"obs-1","session_id":"sess-1","project":"proj-obs-soft-delete","type":"decision","title":"Keep me?","content":"Body","created_at":"2026-04-29T09:10:00Z","deleted_at":"2026-04-29T10:30:00Z"}],
+				"mutations":[
+					{"project":"proj-obs-soft-delete","entity":"observation","entity_key":"obs-1","op":"delete","payload":"{\"sync_id\":\"obs-1\",\"session_id\":\"sess-1\",\"project\":\"proj-obs-soft-delete\",\"deleted\":true}"}
+				]
+			}`)),
+		},
+	}
+
+	model, err := buildDashboardReadModelFromRows(chunks, materializeChunkRowsForDashboard(t, chunks))
+	if err != nil {
+		t.Fatalf("buildDashboardReadModelFromRows: %v", err)
+	}
+	cs := &CloudStore{
+		dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil },
+	}
+
+	observations, err := cs.ListRecentObservations(project, "", 10)
+	if err != nil {
+		t.Fatalf("ListRecentObservations: %v", err)
+	}
+	for _, observation := range observations {
+		if observation.SyncID == "obs-1" {
+			t.Fatalf("soft-deleted observation still listed on the dashboard: %+v", observation)
+		}
+	}
+}
