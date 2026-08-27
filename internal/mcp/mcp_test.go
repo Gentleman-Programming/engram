@@ -3235,6 +3235,84 @@ func TestHandleSessionSummarySurfacesConflictCandidates(t *testing.T) {
 	}
 }
 
+func TestHandleSessionSummaryCandidateQueryUsesPersistedContent(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		maxContent int
+		content    string
+		absentTerm string
+	}{
+		{
+			name:       "private tag redaction",
+			content:    "<private>codenameaerolith</private> public summary text",
+			absentTerm: "codenameaerolith",
+		},
+		{
+			name:       "storage truncation",
+			maxContent: 32,
+			content:    "visible summary text candidategammafourteen",
+			absentTerm: "candidategammafourteen",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newMCPTestStoreWithMaxContentLength(t, tc.maxContent)
+			const project = "persisted-summary-candidates"
+			for _, sessionID := range []string{"candidate-source", "summary-source"} {
+				if err := s.CreateSession(sessionID, project, t.TempDir()); err != nil {
+					t.Fatalf("CreateSession(%q): %v", sessionID, err)
+				}
+			}
+			if _, err := s.AddObservation(store.AddObservationParams{
+				SessionID: "candidate-source",
+				Type:      "decision",
+				Title:     tc.absentTerm,
+				Content:   tc.absentTerm,
+				Project:   project,
+				Scope:     "project",
+			}); err != nil {
+				t.Fatalf("AddObservation(candidate): %v", err)
+			}
+
+			originalFindCandidates := findCandidates
+			var candidateQuery string
+			findCandidates = func(s *store.Store, savedID int64, opts store.CandidateOptions) ([]store.Candidate, error) {
+				candidateQuery = opts.Query
+				if strings.Contains(opts.Query, tc.absentTerm) {
+					return originalFindCandidates(s, savedID, opts)
+				}
+				return nil, nil
+			}
+			t.Cleanup(func() { findCandidates = originalFindCandidates })
+
+			h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+			result, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+				"project":    project,
+				"session_id": "summary-source",
+				"content":    tc.content,
+			}}})
+			if err != nil || result.IsError {
+				t.Fatalf("session summary: err=%v isError=%v text=%s", err, result.IsError, callResultText(t, result))
+			}
+
+			envelope := parseEnvelope(t, "persisted summary candidate query", result)
+			syncID, _ := envelope["sync_id"].(string)
+			summary, err := s.GetObservationBySyncID(syncID)
+			if err != nil {
+				t.Fatalf("GetObservationBySyncID(%q): %v", syncID, err)
+			}
+			if strings.Contains(summary.Content, tc.absentTerm) {
+				t.Fatalf("persisted content %q unexpectedly contains candidate term %q", summary.Content, tc.absentTerm)
+			}
+			if candidateQuery != summary.Content {
+				t.Fatalf("candidate query = %q, want persisted content %q", candidateQuery, summary.Content)
+			}
+			if required, _ := envelope["judgment_required"].(bool); required {
+				t.Fatalf("unexpected candidate from content absent after persistence %q: %v", summary.Content, envelope["candidates"])
+			}
+		})
+	}
+}
+
 func TestHandleSessionSummaryPersistsWhenCandidateDetectionFails(t *testing.T) {
 	s := newMCPTestStore(t)
 	const sessionID = "summary-candidate-failure"

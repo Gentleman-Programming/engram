@@ -1299,8 +1299,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 			msg += "\n" + similarWarning
 		}
 
-		extra := postSaveConflictCandidateResponse(s, cfg, savedID, project, scope, "", &msg)
-		extra["truncation"] = truncation
+		extra := postSaveConflictCandidateResponse(s, cfg, savedID, project, scope, "", &msg, map[string]any{"truncation": truncation})
 
 		// Update detRes to reflect normalized project for envelope accuracy
 		detRes.Project = project
@@ -1310,8 +1309,26 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 
 // postSaveConflictCandidateResponse runs best-effort candidate detection and
 // builds the existing mem_save response metadata for a persisted observation.
-func postSaveConflictCandidateResponse(s *store.Store, cfg MCPConfig, savedID int64, project, scope, query string, msg *string) map[string]any {
-	extra := map[string]any{}
+func postSaveConflictCandidateResponse(s *store.Store, cfg MCPConfig, savedID int64, project, scope, query string, msg *string, extra map[string]any) map[string]any {
+	if extra == nil {
+		extra = map[string]any{}
+	}
+	obs, obsErr := s.GetObservation(savedID)
+	if obsErr == nil {
+		extra["id"] = savedID
+		extra["sync_id"] = obs.SyncID
+		extra["state"] = obs.State()
+		if obs.ReviewAfter != nil {
+			extra["review_after"] = *obs.ReviewAfter
+		}
+	}
+	if query != "" {
+		if obsErr != nil {
+			extra["judgment_required"] = false
+			return extra
+		}
+		query = obs.Content
+	}
 	candOpts := store.CandidateOptions{Project: project, Scope: scope, BM25Floor: cfg.BM25Floor, Query: query}
 	if cfg.Limit != nil {
 		candOpts.Limit = *cfg.Limit
@@ -1322,14 +1339,6 @@ func postSaveConflictCandidateResponse(s *store.Store, cfg MCPConfig, savedID in
 		fmt.Fprintf(os.Stderr, "engram: FindCandidates error (non-fatal): %v\n", candErr)
 	}
 
-	if obs, obsErr := s.GetObservation(savedID); obsErr == nil {
-		extra["id"] = savedID
-		extra["sync_id"] = obs.SyncID
-		extra["state"] = obs.State()
-		if obs.ReviewAfter != nil {
-			extra["review_after"] = *obs.ReviewAfter
-		}
-	}
 	if len(candidates) == 0 {
 		extra["judgment_required"] = false
 		return extra
@@ -1929,7 +1938,7 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 			msg += "\n" + score
 		}
 		detRes.Project = project
-		extra := postSaveConflictCandidateResponse(s, cfg, savedID, project, "", content, &msg)
+		extra := postSaveConflictCandidateResponse(s, cfg, savedID, project, "", content, &msg, nil)
 		return respondWithProject(detRes, msg, extra), nil
 	}
 }
