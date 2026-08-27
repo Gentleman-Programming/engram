@@ -307,6 +307,88 @@ func TestScanProject_Semantic_NotConflictSkipped(t *testing.T) {
 	}
 }
 
+// TestScanProject_Semantic_InvalidNotConflictConfidence verifies that invalid
+// not_conflict verdicts are rejected without changing relation or sync state.
+func TestScanProject_Semantic_InvalidNotConflictConfidence(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		apply      bool
+		confidence float64
+	}{
+		{name: "apply/NaN", apply: true, confidence: math.NaN()},
+		{name: "apply/positive infinity", apply: true, confidence: math.Inf(1)},
+		{name: "apply/negative infinity", apply: true, confidence: math.Inf(-1)},
+		{name: "dry-run/NaN", confidence: math.NaN()},
+		{name: "dry-run/positive infinity", confidence: math.Inf(1)},
+		{name: "dry-run/negative infinity", confidence: math.Inf(-1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			_, _, _, _ = seedSimilarPair(t, s, "invalid-not-conflict-project")
+			if err := s.EnrollProject("invalid-not-conflict-project"); err != nil {
+				t.Fatalf("EnrollProject: %v", err)
+			}
+
+			var relationsBefore, mutationsBefore int
+			if err := s.db.QueryRow(`SELECT count(*) FROM memory_relations`).Scan(&relationsBefore); err != nil {
+				t.Fatalf("count relations before scan: %v", err)
+			}
+			if err := s.db.QueryRow(`SELECT count(*) FROM sync_mutations`).Scan(&mutationsBefore); err != nil {
+				t.Fatalf("count sync mutations before scan: %v", err)
+			}
+			syncStateBefore, err := s.GetSyncState(DefaultSyncTargetKey)
+			if err != nil {
+				t.Fatalf("GetSyncState before scan: %v", err)
+			}
+
+			runner := &verdictRunner{verdict: SemanticVerdict{
+				Relation:   RelationNotConflict,
+				Confidence: tc.confidence,
+			}}
+			result, err := s.ScanProject(ScanOptions{
+				Project:        "invalid-not-conflict-project",
+				Apply:          tc.apply,
+				Semantic:       true,
+				Concurrency:    1,
+				TimeoutPerCall: 5 * time.Second,
+				MaxSemantic:    10,
+				Runner:         runner,
+				BuildPrompt:    identityPromptBuilder,
+			})
+			if err != nil {
+				t.Fatalf("ScanProject: %v", err)
+			}
+			if result.SemanticErrors == 0 || result.SemanticSkipped != 0 || result.SemanticJudged != 0 {
+				t.Errorf("semantic counters = judged:%d skipped:%d errors:%d, want judged:0 skipped:0 errors:>0", result.SemanticJudged, result.SemanticSkipped, result.SemanticErrors)
+			}
+			if runner.calls == 0 {
+				t.Fatal("semantic runner was not called")
+			}
+
+			var relationsAfter, mutationsAfter int
+			if err := s.db.QueryRow(`SELECT count(*) FROM memory_relations`).Scan(&relationsAfter); err != nil {
+				t.Fatalf("count relations after scan: %v", err)
+			}
+			if relationsAfter != relationsBefore {
+				t.Errorf("relation count = %d, want unchanged %d", relationsAfter, relationsBefore)
+			}
+			if err := s.db.QueryRow(`SELECT count(*) FROM sync_mutations`).Scan(&mutationsAfter); err != nil {
+				t.Fatalf("count sync mutations after scan: %v", err)
+			}
+			if mutationsAfter != mutationsBefore {
+				t.Errorf("sync mutation count = %d, want unchanged %d", mutationsAfter, mutationsBefore)
+			}
+			syncStateAfter, err := s.GetSyncState(DefaultSyncTargetKey)
+			if err != nil {
+				t.Fatalf("GetSyncState after scan: %v", err)
+			}
+			if syncStateAfter.LastEnqueuedSeq != syncStateBefore.LastEnqueuedSeq || syncStateAfter.Lifecycle != syncStateBefore.Lifecycle {
+				t.Errorf("sync state changed: before last_enqueued_seq=%d lifecycle=%q; after last_enqueued_seq=%d lifecycle=%q", syncStateBefore.LastEnqueuedSeq, syncStateBefore.Lifecycle, syncStateAfter.LastEnqueuedSeq, syncStateAfter.Lifecycle)
+			}
+		})
+	}
+}
+
 // ─── C.5c — TestScanProject_Semantic_ErrorIsolation ──────────────────────────
 
 // TestScanProject_Semantic_ErrorIsolation verifies that a runner error on one

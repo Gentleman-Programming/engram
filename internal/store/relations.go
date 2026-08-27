@@ -1523,7 +1523,7 @@ func (s *Store) ScanProject(opts ScanOptions) (ScanResult, error) {
 						return
 					}
 
-					if verdict.Relation == RelationNotConflict {
+					if verdict.Relation == RelationNotConflict && isValidConfidence(verdict.Confidence) {
 						mu.Lock()
 						result.SemanticSkipped++
 						mu.Unlock()
@@ -1544,7 +1544,7 @@ func (s *Store) ScanProject(opts ScanOptions) (ScanResult, error) {
 						return
 					}
 
-					// Persist non-not_conflict verdict.
+					// Validate and persist non-skipped verdict.
 					_, judgeErr := s.JudgeBySemantic(JudgeBySemanticParams{
 						SourceID:   pair.sourceSnippet.SyncID,
 						TargetID:   pair.candidateSnippet.SyncID,
