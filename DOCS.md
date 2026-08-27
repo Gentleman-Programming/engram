@@ -858,7 +858,7 @@ Save structured observations. The tool description teaches agents the format:
 
 Exact duplicate saves are deduplicated in a rolling time window using a normalized content hash + project + scope + type + title.
 When `topic_key` is provided, `mem_save` upserts the latest observation in the same `project + scope + topic_key`, incrementing `revision_count` and attributing it to the latest writer session.
-Save responses include lifecycle metadata for the saved observation: computed `state` (`active` or `needs_review`) and `review_after` when the observation type has a review cycle.
+Save responses include lifecycle metadata for the saved observation: computed `state` (`active` or `needs_review`) and `review_after` when the observation type has a review cycle. Content is redacted before the configured storage limit is applied; that limit and truncation metadata (`original_bytes`, `limit_bytes`) are UTF-8 bytes. MCP save/update responses include `truncated`, and warn when truncation occurs.
 
 ### mem_update
 
@@ -885,7 +885,7 @@ Delete an observation by ID. Uses soft-delete by default (`deleted_at`); optiona
 
 ### mem_save_prompt
 
-Save user prompts — records what the user asked so future sessions have context about user goals.
+Save user prompts — records what the user asked so future sessions have context about user goals. It applies the same post-redaction byte limit and truncation metadata as `mem_save`; `mem_save_prompt` warns when it truncates.
 When called in the same MCP process, this also feeds process-local current prompt context used by later `mem_save` calls with `capture_prompt=true`. The same MCP process lifecycle must receive the prompt context before the later save; prompt capture is best-effort and `mem_save` still succeeds when no context is available.
 
 ### mem_context

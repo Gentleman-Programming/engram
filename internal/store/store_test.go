@@ -42,6 +42,22 @@ func newTestStore(t *testing.T) *Store {
 	return s
 }
 
+func TestContentTruncationMeasuresRedactedBytes(t *testing.T) {
+	s := newTestStore(t)
+	s.cfg.MaxObservationLength = len("ok[REDACTED]")
+
+	metadata := s.ContentTruncation("ok<private>" + strings.Repeat("secret", 10) + "</private>")
+	if metadata.OriginalBytes != len("ok[REDACTED]") {
+		t.Fatalf("original bytes = %d, want %d", metadata.OriginalBytes, len("ok[REDACTED]"))
+	}
+	if metadata.LimitBytes != s.cfg.MaxObservationLength {
+		t.Fatalf("limit bytes = %d, want %d", metadata.LimitBytes, s.cfg.MaxObservationLength)
+	}
+	if metadata.Truncated {
+		t.Fatal("redacted content at the byte limit must not report truncation")
+	}
+}
+
 func TestTruncateContentPreservesUTF8BytePrefix(t *testing.T) {
 	const marker = "... [truncated]"
 

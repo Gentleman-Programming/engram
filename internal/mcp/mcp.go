@@ -68,6 +68,13 @@ var loadMCPStats = func(s *store.Store) (*store.Stats, error) {
 	return s.Stats()
 }
 
+func truncationWarning(metadata store.TruncationMetadata) string {
+	if !metadata.Truncated {
+		return ""
+	}
+	return fmt.Sprintf("\n⚠ WARNING: Content was truncated from %d to %d bytes. Consider splitting into smaller observations.", metadata.OriginalBytes, metadata.LimitBytes)
+}
+
 func currentWorkingDirectory() string {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -1261,7 +1268,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		// Ensure the implicit MCP session exists with the current working directory.
 		_ = ensureImplicitSessionWithCWD(s, sessionID, project)
 
-		truncated := len(content) > s.MaxObservationLength()
+		truncation := s.ContentTruncation(content)
 
 		savedID, err := s.AddObservation(store.AddObservationParams{
 			SessionID: sessionID,
@@ -1296,9 +1303,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		if topicKey == "" && suggestedTopicKey != "" {
 			msg += fmt.Sprintf("\nSuggested topic_key: %s", suggestedTopicKey)
 		}
-		if truncated {
-			msg += fmt.Sprintf("\n⚠ WARNING: Content was truncated from %d to %d chars. Consider splitting into smaller observations.", len(content), s.MaxObservationLength())
-		}
+		msg += truncationWarning(truncation)
 		if normWarning != "" {
 			msg += "\n" + normWarning
 		}
@@ -1308,7 +1313,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 
 		// Post-transaction conflict candidate detection (REQ-001).
 		// Errors are logged and swallowed — detection failure never fails the save.
-		extra := map[string]any{}
+		extra := map[string]any{"truncation": truncation}
 		// Build CandidateOptions, forwarding any MCPConfig overrides.
 		// nil fields mean "use store defaults"; explicit pointer values override.
 		candOpts := store.CandidateOptions{
@@ -1417,9 +1422,10 @@ func handleUpdate(s *store.Store) server.ToolHandlerFunc {
 			return mcp.NewToolResultError("provide at least one field to update"), nil
 		}
 
-		var contentLen int
+		var truncation *store.TruncationMetadata
 		if update.Content != nil {
-			contentLen = len(*update.Content)
+			metadata := s.ContentTruncation(*update.Content)
+			truncation = &metadata
 		}
 
 		obs, err := s.UpdateObservation(id, update)
@@ -1428,8 +1434,10 @@ func handleUpdate(s *store.Store) server.ToolHandlerFunc {
 		}
 
 		msg := fmt.Sprintf("Memory updated: #%d %q (%s, scope=%s)", obs.ID, obs.Title, obs.Type, obs.Scope)
-		if contentLen > s.MaxObservationLength() {
-			msg += fmt.Sprintf("\n⚠ WARNING: Content was truncated from %d to %d chars. Consider splitting into smaller observations.", contentLen, s.MaxObservationLength())
+		extra := map[string]any{}
+		if truncation != nil {
+			msg += truncationWarning(*truncation)
+			extra["truncation"] = *truncation
 		}
 
 		// Auto-detect for envelope; tolerant — don't fail update on resolution error
@@ -1438,7 +1446,7 @@ func handleUpdate(s *store.Store) server.ToolHandlerFunc {
 			// Still return success for the update itself.
 			return mcp.NewToolResultText(msg), nil
 		}
-		return respondWithProject(detRes, msg, nil), nil
+		return respondWithProject(detRes, msg, extra), nil
 	}
 }
 
@@ -1594,6 +1602,7 @@ func handleSavePrompt(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 		// Ensure the implicit MCP session exists with the current working directory.
 		_ = ensureImplicitSessionWithCWD(s, sessionID, project)
 
+		truncation := s.ContentTruncation(content)
 		_, err = s.AddPrompt(store.AddPromptParams{
 			SessionID: sessionID,
 			Content:   content,
@@ -1608,7 +1617,8 @@ func handleSavePrompt(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 		}
 
 		detRes.Project = project
-		return respondWithProject(detRes, fmt.Sprintf("Prompt saved: %q", truncate(content, 80)), nil), nil
+		msg := fmt.Sprintf("Prompt saved: %q", truncate(content, 80)) + truncationWarning(truncation)
+		return respondWithProject(detRes, msg, map[string]any{"truncation": truncation}), nil
 	}
 }
 
