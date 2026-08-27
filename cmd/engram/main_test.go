@@ -121,6 +121,48 @@ func captureOutput(t *testing.T, fn func()) (stdout string, stderr string) {
 	return stdout, stderr
 }
 
+func TestCaptureOutputRestoresStreams(t *testing.T) {
+	t.Run("after normal return", func(t *testing.T) {
+		originalStdout := os.Stdout
+		originalStderr := os.Stderr
+
+		captureOutput(t, func() {})
+
+		if os.Stdout != originalStdout {
+			t.Fatal("stdout was not restored")
+		}
+		if os.Stderr != originalStderr {
+			t.Fatal("stderr was not restored")
+		}
+	})
+
+	t.Run("after panic", func(t *testing.T) {
+		originalStdout := os.Stdout
+		originalStderr := os.Stderr
+		const wantPanic = "capture output panic"
+
+		var recovered any
+		func() {
+			defer func() {
+				recovered = recover()
+			}()
+			captureOutput(t, func() {
+				panic(wantPanic)
+			})
+		}()
+
+		if recovered != wantPanic {
+			t.Fatalf("recovered panic = %v, want %q", recovered, wantPanic)
+		}
+		if os.Stdout != originalStdout {
+			t.Fatal("stdout was not restored")
+		}
+		if os.Stderr != originalStderr {
+			t.Fatal("stderr was not restored")
+		}
+	})
+}
+
 func TestLargeStdoutAndStderrAreCapturedCompletely(t *testing.T) {
 	const helperEnv = "ENGRAM_TEST_CAPTURE_OUTPUT_LARGE_STREAMS_HELPER"
 	const payloadSize = 256 * 1024
