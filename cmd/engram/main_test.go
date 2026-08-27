@@ -73,29 +73,51 @@ func captureOutput(t *testing.T, fn func()) (stdout string, stderr string) {
 	}
 	errR, errW, err := os.Pipe()
 	if err != nil {
+		_ = outR.Close()
+		_ = outW.Close()
 		t.Fatalf("stderr pipe: %v", err)
 	}
+
+	type captureResult struct {
+		output []byte
+		err    error
+	}
+	drain := func(r *os.File) <-chan captureResult {
+		done := make(chan captureResult, 1)
+		go func() {
+			output, err := io.ReadAll(r)
+			done <- captureResult{output: output, err: err}
+		}()
+		return done
+	}
+	outDone := drain(outR)
+	errDone := drain(errR)
 
 	os.Stdout = outW
 	os.Stderr = errW
 
+	defer func() {
+		os.Stdout = oldOut
+		os.Stderr = oldErr
+		_ = outW.Close()
+		_ = errW.Close()
+
+		outResult := <-outDone
+		errResult := <-errDone
+		_ = outR.Close()
+		_ = errR.Close()
+		if outResult.err != nil {
+			t.Fatalf("read stdout: %v", outResult.err)
+		}
+		if errResult.err != nil {
+			t.Fatalf("read stderr: %v", errResult.err)
+		}
+		stdout = string(outResult.output)
+		stderr = string(errResult.output)
+	}()
+
 	fn()
-
-	_ = outW.Close()
-	_ = errW.Close()
-	os.Stdout = oldOut
-	os.Stderr = oldErr
-
-	outBytes, err := io.ReadAll(outR)
-	if err != nil {
-		t.Fatalf("read stdout: %v", err)
-	}
-	errBytes, err := io.ReadAll(errR)
-	if err != nil {
-		t.Fatalf("read stderr: %v", err)
-	}
-
-	return string(outBytes), string(errBytes)
+	return stdout, stderr
 }
 
 func mustSeedObservation(t *testing.T, cfg store.Config, sessionID, project, typ, title, content, scope string) int64 {
