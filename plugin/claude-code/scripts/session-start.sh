@@ -23,7 +23,8 @@ CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 
 # Ensure engram server is running
 if ! curl -sf "${ENGRAM_URL}/health" --max-time 1 > /dev/null 2>&1; then
-  engram serve &>/dev/null &
+  mkdir -p "${ENGRAM_DATA_DIR:-$HOME/.engram}" 2>/dev/null
+  ENGRAM_CLOUD_AUTOSYNC=1 engram serve >> "${ENGRAM_DATA_DIR:-$HOME/.engram}/serve.err.log" 2>&1 &
   sleep 0.5
 fi
 
