@@ -1096,6 +1096,71 @@ func TestHelperArgsAndTruncate(t *testing.T) {
 	}
 }
 
+func TestHandleSearchPreviewUsesRuneCount(t *testing.T) {
+	tests := []struct {
+		name        string
+		content     string
+		wantContent string
+		wantPreview bool
+	}{
+		{
+			name:        "multibyte content below rune limit remains complete",
+			content:     strings.Repeat("é", 250),
+			wantContent: strings.Repeat("é", 250),
+			wantPreview: false,
+		},
+		{
+			name:        "multibyte content above rune limit is truncated",
+			content:     strings.Repeat("é", 301),
+			wantContent: strings.Repeat("é", 300) + "...",
+			wantPreview: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newMCPTestStore(t)
+			if err := s.CreateSession("search-preview", "engram", "/tmp/engram"); err != nil {
+				t.Fatalf("create session: %v", err)
+			}
+			if _, err := s.AddObservation(store.AddObservationParams{
+				SessionID: "search-preview",
+				Type:      "bugfix",
+				Title:     tt.name,
+				Content:   tt.content,
+				Project:   "engram",
+				Scope:     "project",
+			}); err != nil {
+				t.Fatalf("add observation: %v", err)
+			}
+
+			result, err := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{
+				Params: mcppkg.CallToolParams{Arguments: map[string]any{
+					"query":   "multibyte",
+					"project": "engram",
+				}},
+			})
+			if err != nil {
+				t.Fatalf("handle search: %v", err)
+			}
+			if result.IsError {
+				t.Fatalf("unexpected search error: %s", callResultText(t, result))
+			}
+
+			text := callResultText(t, result)
+			if !strings.Contains(text, tt.wantContent) {
+				t.Errorf("search result did not contain expected preview content")
+			}
+			if got := strings.Contains(text, "[preview]"); got != tt.wantPreview {
+				t.Errorf("preview marker present = %t, want %t", got, tt.wantPreview)
+			}
+			if got := strings.Contains(text, "Results above are previews (300 chars)"); got != tt.wantPreview {
+				t.Errorf("preview footer present = %t, want %t", got, tt.wantPreview)
+			}
+		})
+	}
+}
+
 func TestHandleSearchAndCRUDHandlers(t *testing.T) {
 	s := newMCPTestStore(t)
 	if err := s.CreateSession("s-mcp", "engram", "/tmp/engram"); err != nil {

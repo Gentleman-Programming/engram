@@ -1045,7 +1045,7 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 				projectDisplay = fmt.Sprintf(" | project: %s", *r.Project)
 			}
 			preview := truncate(r.Content, 300)
-			if len(r.Content) > 300 {
+			if len([]rune(r.Content)) > 300 {
 				anyTruncated = true
 				preview += " [preview]"
 			}
