@@ -652,7 +652,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
   const sessionId = getSessionId(ctx);
   const requestedProject = typeof params.project === "string" && params.project ? params.project : undefined;
   const activeProject = requestedProject || project;
-  const activeSessionId = String(params.session_id || (requestedProject ? `manual-save-${requestedProject}` : sessionId) || `manual-save-${project}`);
+  const activeSessionId = String(params.session_id || sessionId || `manual-save-${requestedProject || project}`);
 
   switch (toolName) {
     case "mem_search":
