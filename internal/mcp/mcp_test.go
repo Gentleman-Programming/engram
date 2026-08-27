@@ -2761,6 +2761,130 @@ func TestHandleSessionSummaryCreatesProjectScopedSession(t *testing.T) {
 	assertSessionSyncMutationDirectory(t, s, "manual-save-summary-session-project", dir)
 }
 
+func TestHandleSessionSummarySurfacesConflictCandidates(t *testing.T) {
+	s := newMCPTestStore(t)
+	for _, sessionID := range []string{"summary-candidates-1", "summary-candidates-2", "summary-candidates-3"} {
+		if err := s.CreateSession(sessionID, "summary-candidates", t.TempDir()); err != nil {
+			t.Fatalf("CreateSession(%q): %v", sessionID, err)
+		}
+	}
+	zero := 0.0
+	h := handleSessionSummary(s, MCPConfig{BM25Floor: &zero}, NewSessionActivity(10*time.Minute))
+
+	first, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"project":    "summary-candidates",
+		"session_id": "summary-candidates-1",
+		"content":    "Database indexing migration replaces B-tree pages with an LSM design.",
+	}}})
+	if err != nil || first.IsError {
+		t.Fatalf("first session summary: err=%v isError=%v text=%s", err, first.IsError, callResultText(t, first))
+	}
+	firstEnvelope := parseEnvelope(t, "first session summary", first)
+	firstSyncID, _ := firstEnvelope["sync_id"].(string)
+	firstSummary, err := s.GetObservationBySyncID(firstSyncID)
+	if err != nil {
+		t.Fatalf("GetObservationBySyncID(%q): %v", firstSyncID, err)
+	}
+
+	second, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"project":    "summary-candidates",
+		"session_id": "summary-candidates-2",
+		"content":    "Database indexing migration changes the B-tree storage design to LSM tables.",
+	}}})
+	if err != nil || second.IsError {
+		t.Fatalf("second session summary: err=%v isError=%v text=%s", err, second.IsError, callResultText(t, second))
+	}
+
+	envelope := parseEnvelope(t, "session summary candidates", second)
+	if required, _ := envelope["judgment_required"].(bool); !required {
+		t.Fatalf("expected judgment_required=true, got %v", envelope["judgment_required"])
+	}
+	candidates, _ := envelope["candidates"].([]any)
+	if len(candidates) == 0 {
+		t.Fatal("expected a summary conflict candidate")
+	}
+	candidate, ok := candidates[0].(map[string]any)
+	if !ok {
+		t.Fatalf("candidate has type %T, want object", candidates[0])
+	}
+	for _, field := range []string{"id", "sync_id", "title", "type", "score", "judgment_id"} {
+		if _, ok := candidate[field]; !ok {
+			t.Errorf("candidate is missing %q", field)
+		}
+	}
+	if candidate["title"] != "Session summary: summary-candidates" {
+		t.Fatalf("summary title changed to %q", candidate["title"])
+	}
+	judgmentID, _ := candidate["judgment_id"].(string)
+	relation, err := s.GetRelation(judgmentID)
+	if err != nil {
+		t.Fatalf("GetRelation(%q): %v", judgmentID, err)
+	}
+	if relation.JudgmentStatus != store.JudgmentStatusPending {
+		t.Fatalf("judgment status = %q, want pending", relation.JudgmentStatus)
+	}
+	third, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"project":    "summary-candidates",
+		"session_id": "summary-candidates-3",
+		"content":    "Tessellated hexagons orbit a cobalt nebula.",
+	}}})
+	if err != nil || third.IsError {
+		t.Fatalf("third session summary: err=%v isError=%v text=%s", err, third.IsError, callResultText(t, third))
+	}
+	thirdEnvelope := parseEnvelope(t, "unrelated session summary", third)
+	if required, _ := thirdEnvelope["judgment_required"].(bool); required {
+		t.Fatalf("unrelated summary should not match only because session summary titles are constant: %v", thirdEnvelope["candidates"])
+	}
+
+	summaries, err := s.RecentObservations("summary-candidates", firstSummary.Scope, 10)
+	if err != nil {
+		t.Fatalf("RecentObservations: %v", err)
+	}
+	if len(summaries) != 3 {
+		t.Fatalf("expected three separate summaries, got %d", len(summaries))
+	}
+	for _, summary := range summaries {
+		if summary.TopicKey != nil {
+			t.Fatalf("summary %d unexpectedly has topic_key %q", summary.ID, *summary.TopicKey)
+		}
+	}
+}
+
+func TestHandleSessionSummaryPersistsWhenCandidateDetectionFails(t *testing.T) {
+	s := newMCPTestStore(t)
+	const sessionID = "summary-candidate-failure"
+	if err := s.CreateSession(sessionID, "summary-candidate-failure", t.TempDir()); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	originalFindCandidates := findCandidates
+	findCandidates = func(*store.Store, int64, store.CandidateOptions) ([]store.Candidate, error) {
+		return nil, errors.New("forced candidate detection failure")
+	}
+	t.Cleanup(func() { findCandidates = originalFindCandidates })
+
+	content := "The session summary must survive a candidate detection failure."
+	h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	result, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"project":    "summary-candidate-failure",
+		"session_id": sessionID,
+		"content":    content,
+	}}})
+	if err != nil || result.IsError {
+		t.Fatalf("session summary should succeed when candidate detection fails: err=%v isError=%v text=%s", err, result.IsError, callResultText(t, result))
+	}
+
+	envelope := parseEnvelope(t, "candidate detection failure", result)
+	syncID, _ := envelope["sync_id"].(string)
+	summary, err := s.GetObservationBySyncID(syncID)
+	if err != nil {
+		t.Fatalf("GetObservationBySyncID(%q): %v", syncID, err)
+	}
+	if summary.Type != "session_summary" || summary.Content != content {
+		t.Fatalf("persisted summary = type %q content %q, want session_summary and %q", summary.Type, summary.Content, content)
+	}
+}
+
 func TestHandleCapturePassiveCreatesProjectScopedSession(t *testing.T) {
 	s := newMCPTestStore(t)
 	h := handleCapturePassive(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
@@ -6396,9 +6520,9 @@ func TestServerInstructions_ConflictSurfacingBlock(t *testing.T) {
 // and MCPConfig.Limit are forwarded to FindCandidates. REQ-001 requires
 // configurability via Config; the existing MCPConfig struct was empty.
 //
-// Strategy: set BM25Floor to a very strict value (0.0) via MCPConfig. Even with
-// two similar observations in the store, no candidate should score >= 0 (BM25
-// scores are always negative), so candidates[] must be empty. Without the fix,
+// Strategy: set BM25Floor to a very strict value (-100.0) via MCPConfig. Even
+// with two similar observations in the store, no candidate should score <= -100,
+// so candidates[] must be empty. Without the fix,
 // MCPConfig.BM25Floor would be ignored and the default -2.0 would be used,
 // returning at least one candidate — causing the assertion to fail.
 func TestHandleSave_MCPConfig_OverridesDefaults(t *testing.T) {
@@ -6407,9 +6531,9 @@ func TestHandleSave_MCPConfig_OverridesDefaults(t *testing.T) {
 	// Helper to create float64 pointer.
 	ptrF := func(v float64) *float64 { return &v }
 
-	// Create MCP server with strict BM25Floor override — nothing should score >= 0.
+	// Create MCP server with strict BM25Floor override — nothing should score <= -100.
 	cfg := MCPConfig{
-		BM25Floor: ptrF(0.0),
+		BM25Floor: ptrF(-100.0),
 	}
 	h := handleSave(s, cfg, NewSessionActivity(10*time.Minute))
 
@@ -6443,14 +6567,14 @@ func TestHandleSave_MCPConfig_OverridesDefaults(t *testing.T) {
 		t.Fatalf("response is not valid JSON: %v — got %q", err, text)
 	}
 
-	// With BM25Floor=0.0 configured, no candidate can pass (BM25 scores are always negative).
+	// With BM25Floor=-100.0 configured, no candidate can pass.
 	// judgment_required must be false or absent.
 	if jr, ok := envelope["judgment_required"].(bool); ok && jr {
-		t.Fatalf("expected judgment_required=false with strict BM25Floor=0.0 override, got true — MCPConfig.BM25Floor may not be wired")
+		t.Fatalf("expected judgment_required=false with strict BM25Floor=-100.0 override, got true — MCPConfig.BM25Floor may not be wired")
 	}
 	if cands, ok := envelope["candidates"]; ok {
 		if arr, ok := cands.([]any); ok && len(arr) > 0 {
-			t.Fatalf("expected no candidates with BM25Floor=0.0 override, got %d — MCPConfig.BM25Floor may not be wired", len(arr))
+			t.Fatalf("expected no candidates with BM25Floor=-100.0 override, got %d — MCPConfig.BM25Floor may not be wired", len(arr))
 		}
 	}
 }

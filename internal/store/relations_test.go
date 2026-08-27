@@ -76,7 +76,7 @@ func TestFindCandidates_HappyPath(t *testing.T) {
 		Project:   "testproject",
 		Scope:     "project",
 		Limit:     3,
-		BM25Floor: ptrFloat64(-2.0),
+		BM25Floor: ptrFloat64(0.0),
 	}
 	candidates, err := s.FindCandidates(savedID, opts)
 	if err != nil {
@@ -132,7 +132,7 @@ func TestFindCandidates_EarlyBreakDoesNotSelfBlockWithSingleConnection(t *testin
 			Project:   "testproject",
 			Scope:     "project",
 			Limit:     1,
-			BM25Floor: ptrFloat64(-10.0),
+			BM25Floor: ptrFloat64(0.0),
 		})
 		done <- findResult{candidates: candidates, err: err}
 	}()
@@ -199,55 +199,55 @@ func TestFindCandidates_ExcludesSelf(t *testing.T) {
 
 // ─── C.3 — TestFindCandidates_BM25Floor ──────────────────────────────────────
 
-// TestFindCandidates_BM25Floor verifies that raising the BM25 floor filters out
-// borderline (low-score) candidates while keeping high-score ones.
+// TestFindCandidates_BM25Floor verifies that a stricter rank threshold keeps the
+// stronger (more-negative) FTS5 match and excludes a weaker one.
 func TestFindCandidates_BM25Floor(t *testing.T) {
 	s := setupRelationsStore(t)
 
-	// Observation A: high similarity — many overlapping words.
-	_, _ = addTestObs(t, s, "JWT auth token session management implementation", "decision", "testproject", "project")
+	strongID, _ := addTestObs(t, s, "JWT authentication token session management rollout", "decision", "testproject", "project")
+	weakID, _ := addTestObs(t, s, "JWT database migration notes", "decision", "testproject", "project")
+	savedID, _ := addTestObs(t, s, "JWT authentication token session management strategy", "decision", "testproject", "project")
 
-	// Observation B: unrelated — almost nothing in common.
-	_, _ = addTestObs(t, s, "Database connection pool sizing strategy", "decision", "testproject", "project")
-
-	// Target observation — similar to A, dissimilar to B.
-	savedID, _ := addTestObs(t, s, "JWT auth token handling pattern", "decision", "testproject", "project")
-
-	// With a very permissive floor, both may appear.
+	// FTS5 ranks stronger matches with more-negative values and the query orders
+	// them first. A zero threshold is therefore permissive for matching rows.
 	optsPermissive := CandidateOptions{
-		Project:   "testproject",
-		Scope:     "project",
-		Limit:     5,
-		BM25Floor: ptrFloat64(-100.0),
+		Project:    "testproject",
+		Scope:      "project",
+		Limit:      5,
+		BM25Floor:  ptrFloat64(0.0),
+		SkipInsert: true,
 	}
 	allCandidates, err := s.FindCandidates(savedID, optsPermissive)
 	if err != nil {
 		t.Fatalf("FindCandidates (permissive): %v", err)
 	}
+	if len(allCandidates) < 2 {
+		t.Fatalf("expected strong and weak candidates, got %d", len(allCandidates))
+	}
+	if allCandidates[0].ID != strongID || allCandidates[len(allCandidates)-1].ID != weakID {
+		t.Fatalf("unexpected candidate order: got first=%d last=%d, want strong=%d weak=%d", allCandidates[0].ID, allCandidates[len(allCandidates)-1].ID, strongID, weakID)
+	}
+	if allCandidates[0].Score >= allCandidates[len(allCandidates)-1].Score {
+		t.Fatalf("expected stronger candidate score %f to be more negative than weaker score %f", allCandidates[0].Score, allCandidates[len(allCandidates)-1].Score)
+	}
 
-	// With a strict floor, only the high-similarity one should remain.
-	// BM25 scores are negative; higher (closer to 0) = better match.
+	threshold := (allCandidates[0].Score + allCandidates[len(allCandidates)-1].Score) / 2
 	optsStrict := CandidateOptions{
-		Project:   "testproject",
-		Scope:     "project",
-		Limit:     5,
-		BM25Floor: ptrFloat64(-0.5), // very strict — only strongly matching rows pass
+		Project:    "testproject",
+		Scope:      "project",
+		Limit:      5,
+		BM25Floor:  &threshold,
+		SkipInsert: true,
 	}
 	strictCandidates, err := s.FindCandidates(savedID, optsStrict)
 	if err != nil {
 		t.Fatalf("FindCandidates (strict): %v", err)
 	}
-
-	// Triangulation: strict floor must yield fewer or equal candidates.
-	if len(strictCandidates) > len(allCandidates) {
-		t.Errorf("strict floor (%d) returned MORE candidates than permissive floor (%d)",
-			len(strictCandidates), len(allCandidates))
+	if len(strictCandidates) != 1 || strictCandidates[0].ID != strongID {
+		t.Fatalf("strict threshold %f returned %+v, want only strong candidate %d", threshold, strictCandidates, strongID)
 	}
-	// All strict candidates must have score >= floor (score is negative; >= -0.5).
-	for _, c := range strictCandidates {
-		if c.Score < -0.5 {
-			t.Errorf("candidate score %f is below strict floor -0.5", c.Score)
-		}
+	if strictCandidates[0].Score > threshold {
+		t.Fatalf("strong candidate score %f must meet maximum rank threshold %f", strictCandidates[0].Score, threshold)
 	}
 }
 
@@ -816,7 +816,7 @@ func TestOrphaning_OrphanedDoesNotBlockCandidate(t *testing.T) {
 		Project:   "testproject",
 		Scope:     "project",
 		Limit:     5,
-		BM25Floor: ptrFloat64(-10.0),
+		BM25Floor: ptrFloat64(0.0),
 	}
 	candidates, err := s.FindCandidates(idC, opts)
 	if err != nil {
@@ -841,19 +841,8 @@ func TestOrphaning_OrphanedDoesNotBlockCandidate(t *testing.T) {
 
 // ─── Fix 2 RED — TestFindCandidates_ExplicitZeroFloor ────────────────────────
 
-// TestFindCandidates_ExplicitZeroFloor verifies that passing BM25Floor=0 via a
-// *float64 pointer is treated as the literal value 0.0, not as "use default"
-// (-2.0). With the old float64 API, zero was indistinguishable from omitted,
-// causing the default (-2.0) to be used instead of the requested 0.0.
-//
-// We prove the fix works by comparing candidate counts:
-//   - BM25Floor=nil (default -2.0) is permissive → may return candidates
-//   - BM25Floor=ptr(0.0) is very strict (only near-perfect matches pass) → returns fewer or equal candidates
-//
-// If the zero-value collision still exists, both calls would use -2.0 and return
-// the same count, causing the test to be inconclusive (not a hard failure). The
-// critical assertion is that BM25Floor=ptr(0.0) does NOT return MORE candidates
-// than BM25Floor=nil, demonstrating the floor is being applied correctly.
+// TestFindCandidates_ExplicitZeroFloor verifies that an explicit zero rank
+// threshold includes every matching candidate.
 func TestFindCandidates_ExplicitZeroFloor(t *testing.T) {
 	s := setupRelationsStore(t)
 
@@ -863,7 +852,7 @@ func TestFindCandidates_ExplicitZeroFloor(t *testing.T) {
 	// Save a moderately similar observation.
 	savedID, _ := addTestObs(t, s, "Auth token handling pattern", "decision", "testproject", "project")
 
-	// With default (nil) floor, use -2.0 — relatively permissive.
+	// With the default (nil) floor, use 0.0.
 	optsDefault := CandidateOptions{
 		Project: "testproject",
 		Scope:   "project",
@@ -875,7 +864,7 @@ func TestFindCandidates_ExplicitZeroFloor(t *testing.T) {
 		t.Fatalf("FindCandidates (nil floor): %v", err)
 	}
 
-	// With explicit 0.0 floor — very strict (BM25 scores are negative; >= 0 is essentially impossible).
+	// With an explicit 0.0 threshold, every negative FTS5 rank may pass.
 	optsZero := CandidateOptions{
 		Project:   "testproject",
 		Scope:     "project",
@@ -887,16 +876,8 @@ func TestFindCandidates_ExplicitZeroFloor(t *testing.T) {
 		t.Fatalf("FindCandidates (zero floor): %v", err)
 	}
 
-	// An explicit floor of 0.0 must be strictly applied (BM25 scores are always negative).
-	// Therefore zero-floor must return 0 candidates.
-	if len(candidatesZero) > 0 {
-		t.Errorf("expected 0 candidates with BM25Floor=0.0 (nothing scores >= 0); got %d (default may still be used)", len(candidatesZero))
-	}
-
-	// Sanity: default floor should return at least as many as zero floor.
-	if len(candidatesDefault) < len(candidatesZero) {
-		t.Errorf("default floor (%d candidates) returned fewer than zero floor (%d) — unexpected",
-			len(candidatesDefault), len(candidatesZero))
+	if len(candidatesZero) != len(candidatesDefault) {
+		t.Errorf("explicit zero threshold (%d candidates) differs from default (%d)", len(candidatesZero), len(candidatesDefault))
 	}
 }
 
@@ -1117,7 +1098,7 @@ func TestJudgeRelation_RejectsCrossProject(t *testing.T) {
 }
 
 // C.1e — When the source observation is missing, JudgeRelation must enqueue a
-// mutation with project='' (empty string, not an error).
+// mutation with project=” (empty string, not an error).
 func TestJudgeRelation_MissingSource_EnqueuesEmptyProject(t *testing.T) {
 	s := setupEnrolledStore(t)
 

@@ -71,13 +71,16 @@ type CandidateOptions struct {
 	Type string
 	// Limit caps the number of candidates returned. Default 3 when nil or <=0.
 	Limit int
-	// BM25Floor is the minimum BM25 score (negative; closer to 0 = better match).
-	// Candidates below the floor are excluded. Default -2.0 when nil.
+	// BM25Floor is the maximum accepted FTS5 BM25 rank. FTS5 returns negative
+	// ranks, where more-negative values are more relevant. Candidates above this
+	// threshold are excluded. Default 0.0 when nil.
 	//
-	// Use a pointer so that an explicit 0.0 (very strict — nothing passes) is
-	// distinguishable from the zero value (which previously collided with the
-	// default sentinel). nil means "use the default (-2.0)".
+	// Use a pointer so explicit values remain distinguishable from an omitted
+	// threshold. nil means "use the default (0.0)".
 	BM25Floor *float64
+	// Query optionally overrides the saved observation title as the candidate
+	// query source. Empty uses the saved title.
+	Query string
 	// SkipInsert controls whether FindCandidates inserts pending relation rows.
 	// When true, candidates are returned but NO rows are written to memory_relations.
 	// Default false preserves the existing behavior (rows are inserted).
@@ -317,7 +320,7 @@ type JudgeRelationParams struct {
 // ─── FindCandidates ───────────────────────────────────────────────────────────
 
 // FindCandidates runs a post-transaction FTS5 candidate query for the given
-// savedID and returns at most opts.Limit candidates above the BM25 floor.
+// savedID and returns at most opts.Limit candidates at or below the BM25 floor.
 //
 // For each candidate, a pending memory_relations row is inserted and the row's
 // sync_id is exposed as Candidate.JudgmentID.
@@ -330,9 +333,9 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 	if limit <= 0 {
 		limit = 3
 	}
-	// BM25Floor uses pointer semantics: nil means "use the default (-2.0)".
+	// BM25Floor uses pointer semantics: nil means "use the default (0.0)".
 	// An explicit pointer value (including 0.0) is used as-is.
-	floor := -2.0
+	floor := 0.0
 	if opts.BM25Floor != nil {
 		floor = *opts.BM25Floor
 	}
@@ -357,7 +360,11 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 		scope = opts.Scope
 	}
 
-	ftsQuery := sanitizeFTSCandidates(title)
+	queryText := opts.Query
+	if strings.TrimSpace(queryText) == "" {
+		queryText = title
+	}
+	ftsQuery := sanitizeFTSCandidates(queryText)
 	if ftsQuery == "" {
 		return nil, nil
 	}
@@ -386,9 +393,9 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 			}
 			return nil, fmt.Errorf("FindCandidates: scan: %w", err)
 		}
-		// Apply BM25 floor filter. BM25 scores are negative; closer to 0 = better.
-		// We only include rows whose score >= floor (e.g., -1.5 >= -2.0).
-		if rc.score < floor {
+		// FTS5 ranks more relevant rows with more-negative values. Keep rows at
+		// or below the configured maximum rank (e.g., -1.5 <= -1.0).
+		if rc.score > floor {
 			continue
 		}
 		raw = append(raw, rc)
