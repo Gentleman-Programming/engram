@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"math"
 	"testing"
 )
 
@@ -252,6 +253,74 @@ func TestJudgeBySemantic_ValidationErrors(t *testing.T) {
 			}
 			if syncID != "" {
 				t.Errorf("expected empty sync_id on validation error; got %q", syncID)
+			}
+		})
+	}
+}
+
+// TestJudgeBySemantic_RejectsNonFiniteConfidence verifies that non-finite
+// confidence values are rejected before relation or sync state can change.
+func TestJudgeBySemantic_RejectsNonFiniteConfidence(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, syncA := addTestObs(t, s, "Some decision", "decision", "testproject", "project")
+	_, syncB := addTestObs(t, s, "Another decision", "decision", "testproject", "project")
+	if err := s.EnrollProject("testproject"); err != nil {
+		t.Fatalf("EnrollProject: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name       string
+		confidence float64
+	}{
+		{name: "NaN", confidence: math.NaN()},
+		{name: "positive infinity", confidence: math.Inf(1)},
+		{name: "negative infinity", confidence: math.Inf(-1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var relationsBefore, mutationsBefore int
+			if err := s.db.QueryRow(`SELECT count(*) FROM memory_relations`).Scan(&relationsBefore); err != nil {
+				t.Fatalf("count relations before judgment: %v", err)
+			}
+			if err := s.db.QueryRow(`SELECT count(*) FROM sync_mutations`).Scan(&mutationsBefore); err != nil {
+				t.Fatalf("count sync mutations before judgment: %v", err)
+			}
+			syncStateBefore, err := s.GetSyncState(DefaultSyncTargetKey)
+			if err != nil {
+				t.Fatalf("GetSyncState before judgment: %v", err)
+			}
+
+			syncID, err := s.JudgeBySemantic(JudgeBySemanticParams{
+				SourceID:   syncA,
+				TargetID:   syncB,
+				Relation:   RelationCompatible,
+				Confidence: tc.confidence,
+			})
+			if err == nil {
+				t.Fatalf("expected confidence validation error; got sync_id=%q", syncID)
+			}
+			if syncID != "" {
+				t.Errorf("expected empty sync_id; got %q", syncID)
+			}
+
+			var relationsAfter, mutationsAfter int
+			if err := s.db.QueryRow(`SELECT count(*) FROM memory_relations`).Scan(&relationsAfter); err != nil {
+				t.Fatalf("count relations after judgment: %v", err)
+			}
+			if relationsAfter != relationsBefore {
+				t.Errorf("relation count = %d, want unchanged %d", relationsAfter, relationsBefore)
+			}
+			if err := s.db.QueryRow(`SELECT count(*) FROM sync_mutations`).Scan(&mutationsAfter); err != nil {
+				t.Fatalf("count sync mutations after judgment: %v", err)
+			}
+			if mutationsAfter != mutationsBefore {
+				t.Errorf("sync mutation count = %d, want unchanged %d", mutationsAfter, mutationsBefore)
+			}
+			syncStateAfter, err := s.GetSyncState(DefaultSyncTargetKey)
+			if err != nil {
+				t.Fatalf("GetSyncState after judgment: %v", err)
+			}
+			if syncStateAfter.LastEnqueuedSeq != syncStateBefore.LastEnqueuedSeq || syncStateAfter.Lifecycle != syncStateBefore.Lifecycle {
+				t.Errorf("sync state changed: before last_enqueued_seq=%d lifecycle=%q; after last_enqueued_seq=%d lifecycle=%q", syncStateBefore.LastEnqueuedSeq, syncStateBefore.Lifecycle, syncStateAfter.LastEnqueuedSeq, syncStateAfter.Lifecycle)
 			}
 		})
 	}
