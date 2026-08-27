@@ -271,6 +271,413 @@ func TestCreatePrincipalTokenWithAuditRollsBackTokenWhenAuditValidationFails(t *
 	}
 }
 
+func TestRecoverStrandedAdminTokenWithAuditPreservesGrants(t *testing.T) {
+	ctx := context.Background()
+	cs := openIsolatedCloudStore(t)
+
+	admin, err := cs.CreateFirstAdminHumanUser(ctx, CreateHumanUserParams{Username: "stranded-admin", DisplayName: "Stranded Admin"})
+	if err != nil {
+		t.Fatalf("CreateFirstAdminHumanUser: %v", err)
+	}
+	if _, err := cs.CreateProjectGrant(ctx, CreateProjectGrantParams{PrincipalID: admin.PrincipalID, Project: "recovery-project", GrantedByPrincipalID: admin.PrincipalID}); err != nil {
+		t.Fatalf("CreateProjectGrant: %v", err)
+	}
+
+	token, err := cs.RecoverStrandedAdminTokenWithAudit(ctx, RecoverStrandedAdminTokenParams{TokenPrefix: "egc_live_recovery", TokenHash: "hmac-sha256:v1:recovery", Name: "recovered"}, AuthAuditEvent{
+		ActorSource: "bootstrap_cli",
+		Action:      "bootstrap.cli",
+		Outcome:     "success",
+		ReasonCode:  "stranded_admin_token_recovered",
+		Metadata:    map[string]any{"recovered": true, "token_prefix": "egc_live_recovery"},
+	})
+	if err != nil {
+		t.Fatalf("RecoverStrandedAdminTokenWithAudit: %v", err)
+	}
+	if token.PrincipalID != admin.PrincipalID || token.CreatedByPrincipalID != admin.PrincipalID {
+		t.Fatalf("recovery token must belong to and be attributed to the stranded admin, got %+v", token)
+	}
+	grants, err := cs.ListProjectGrants(ctx, admin.PrincipalID)
+	if err != nil {
+		t.Fatalf("ListProjectGrants: %v", err)
+	}
+	assertProjects(t, grants, []string{"recovery-project"})
+	events, err := cs.ListAuthAuditEvents(ctx, AuthAuditQuery{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListAuthAuditEvents: %v", err)
+	}
+	if len(events) != 1 || events[0].TargetPrincipalID != admin.PrincipalID || events[0].ReasonCode != "stranded_admin_token_recovered" || events[0].Metadata["recovered"] != true {
+		t.Fatalf("expected one recovery audit attributed to the recovered admin, got %+v", events)
+	}
+}
+
+func TestRecoverStrandedAdminTokenWithAuditRejectsUnsafeOrRepeatedState(t *testing.T) {
+	cases := []struct {
+		name           string
+		setup          func(t *testing.T, cs *CloudStore, admin HumanUser)
+		params         RecoverStrandedAdminTokenParams
+		wantErr        string
+		wantTokenCount int
+	}{
+		{
+			name: "multiple enabled human admins",
+			setup: func(t *testing.T, cs *CloudStore, _ HumanUser) {
+				t.Helper()
+				if _, err := cs.CreateHumanUser(context.Background(), CreateHumanUserParams{Username: "second-admin", DisplayName: "Second Admin", Role: PrincipalRoleAdmin}); err != nil {
+					t.Fatalf("CreateHumanUser second admin: %v", err)
+				}
+			},
+			wantErr: ErrStrandedAdminRecoveryIneligible.Error(),
+		},
+		{
+			name: "zero enabled human admins",
+			setup: func(t *testing.T, cs *CloudStore, admin HumanUser) {
+				t.Helper()
+				if _, err := cs.CreatePrincipal(context.Background(), CreatePrincipalParams{Kind: PrincipalKindServiceAccount, DisplayName: "Recovery Backup", Role: PrincipalRoleAdmin}); err != nil {
+					t.Fatalf("CreatePrincipal backup admin: %v", err)
+				}
+				if err := cs.SetHumanUserEnabled(context.Background(), admin.PrincipalID, false); err != nil {
+					t.Fatalf("SetHumanUserEnabled stranded admin false: %v", err)
+				}
+			},
+			wantErr: ErrStrandedAdminRecoveryIneligible.Error(),
+		},
+		{
+			name: "existing token anywhere",
+			setup: func(t *testing.T, cs *CloudStore, admin HumanUser) {
+				t.Helper()
+				if _, err := cs.CreatePrincipalToken(context.Background(), CreatePrincipalTokenParams{PrincipalID: admin.PrincipalID, TokenPrefix: "egc_live_existing", TokenHash: "hmac-sha256:v1:existing", Name: "existing", CreatedByPrincipalID: admin.PrincipalID}); err != nil {
+					t.Fatalf("CreatePrincipalToken setup: %v", err)
+				}
+			},
+			wantErr:        ErrStrandedAdminRecoveryIneligible.Error(),
+			wantTokenCount: 1,
+		},
+		{
+			name: "revoked token row",
+			setup: func(t *testing.T, cs *CloudStore, admin HumanUser) {
+				t.Helper()
+				token, err := cs.CreatePrincipalToken(context.Background(), CreatePrincipalTokenParams{PrincipalID: admin.PrincipalID, TokenPrefix: "egc_live_revoked", TokenHash: "hmac-sha256:v1:revoked", Name: "revoked", CreatedByPrincipalID: admin.PrincipalID})
+				if err != nil {
+					t.Fatalf("CreatePrincipalToken setup: %v", err)
+				}
+				if err := cs.RevokePrincipalToken(context.Background(), token.ID, admin.PrincipalID, "setup"); err != nil {
+					t.Fatalf("RevokePrincipalToken setup: %v", err)
+				}
+			},
+			wantErr:        ErrStrandedAdminRecoveryIneligible.Error(),
+			wantTokenCount: 1,
+		},
+		{
+			name:    "empty token prefix",
+			params:  RecoverStrandedAdminTokenParams{TokenHash: "hmac-sha256:v1:rejected"},
+			wantErr: "cloudstore: token prefix is required",
+		},
+		{
+			name:    "empty token hash",
+			params:  RecoverStrandedAdminTokenParams{TokenPrefix: "egc_live_rejected"},
+			wantErr: "cloudstore: token hash is required",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			cs := openIsolatedCloudStore(t)
+			admin, err := cs.CreateFirstAdminHumanUser(ctx, CreateHumanUserParams{Username: "recovery-target", DisplayName: "Recovery Target"})
+			if err != nil {
+				t.Fatalf("CreateFirstAdminHumanUser: %v", err)
+			}
+			if tt.setup != nil {
+				tt.setup(t, cs, admin)
+			}
+
+			params := tt.params
+			if params.TokenPrefix == "" && params.TokenHash == "" {
+				params = RecoverStrandedAdminTokenParams{TokenPrefix: "egc_live_rejected", TokenHash: "hmac-sha256:v1:rejected"}
+			}
+			_, err = cs.RecoverStrandedAdminTokenWithAudit(ctx, params, AuthAuditEvent{ActorSource: "bootstrap_cli", Action: "bootstrap.cli", Outcome: "success", Metadata: map[string]any{"recovered": true}})
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("expected recovery rejection containing %q, got %v", tt.wantErr, err)
+			}
+			tokens, err := cs.ListPrincipalTokens(ctx, admin.PrincipalID)
+			if err != nil {
+				t.Fatalf("ListPrincipalTokens after rejected recovery: %v", err)
+			}
+			if len(tokens) != tt.wantTokenCount {
+				t.Fatalf("rejected recovery must not change token rows, got %+v want %d tokens", tokens, tt.wantTokenCount)
+			}
+			events, err := cs.ListAuthAuditEvents(ctx, AuthAuditQuery{Limit: 10})
+			if err != nil {
+				t.Fatalf("ListAuthAuditEvents: %v", err)
+			}
+			if len(events) != 0 {
+				t.Fatalf("ineligible recovery must not write an audit event, got %+v", events)
+			}
+		})
+	}
+}
+
+func TestRecoverStrandedAdminTokenWithAuditRejectsTokenOwnedByNonAdmin(t *testing.T) {
+	ctx := context.Background()
+	cs := openIsolatedCloudStore(t)
+	admin, err := cs.CreateFirstAdminHumanUser(ctx, CreateHumanUserParams{Username: "recovery-target", DisplayName: "Recovery Target"})
+	if err != nil {
+		t.Fatalf("CreateFirstAdminHumanUser: %v", err)
+	}
+	other, err := cs.CreatePrincipal(ctx, CreatePrincipalParams{Kind: PrincipalKindServiceAccount, DisplayName: "Recovery Member", Role: PrincipalRoleMember})
+	if err != nil {
+		t.Fatalf("CreatePrincipal non-admin token owner: %v", err)
+	}
+	existing, err := cs.CreatePrincipalToken(ctx, CreatePrincipalTokenParams{PrincipalID: other.ID, TokenPrefix: "egc_live_other", TokenHash: "hmac-sha256:v1:other", Name: "other", CreatedByPrincipalID: admin.PrincipalID})
+	if err != nil {
+		t.Fatalf("CreatePrincipalToken non-admin token owner: %v", err)
+	}
+
+	_, err = cs.RecoverStrandedAdminTokenWithAudit(ctx, RecoverStrandedAdminTokenParams{TokenPrefix: "egc_live_rejected", TokenHash: "hmac-sha256:v1:rejected"}, AuthAuditEvent{ActorSource: "bootstrap_cli", Action: "bootstrap.cli", Outcome: "success", Metadata: map[string]any{"recovered": true}})
+	if !errors.Is(err, ErrStrandedAdminRecoveryIneligible) {
+		t.Fatalf("expected ErrStrandedAdminRecoveryIneligible, got %v", err)
+	}
+	targetTokens, err := cs.ListPrincipalTokens(ctx, admin.PrincipalID)
+	if err != nil {
+		t.Fatalf("ListPrincipalTokens recovery target: %v", err)
+	}
+	if len(targetTokens) != 0 {
+		t.Fatalf("ineligible recovery must not create a target token, got %+v", targetTokens)
+	}
+	otherTokens, err := cs.ListPrincipalTokens(ctx, other.ID)
+	if err != nil {
+		t.Fatalf("ListPrincipalTokens non-admin token owner: %v", err)
+	}
+	if len(otherTokens) != 1 || otherTokens[0].ID != existing.ID || otherTokens[0].PrincipalID != other.ID || otherTokens[0].TokenPrefix != existing.TokenPrefix || otherTokens[0].Name != existing.Name || otherTokens[0].CreatedByPrincipalID != admin.PrincipalID || otherTokens[0].RevokedAt != nil {
+		t.Fatalf("ineligible recovery must preserve the non-admin token, got %+v want %+v", otherTokens, existing)
+	}
+	events, err := cs.ListAuthAuditEvents(ctx, AuthAuditQuery{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListAuthAuditEvents: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("ineligible recovery must not write an audit event, got %+v", events)
+	}
+}
+
+func TestRecoverStrandedAdminTokenWithAuditRollsBackTokenWhenAuditFails(t *testing.T) {
+	ctx := context.Background()
+	cs := openIsolatedCloudStore(t)
+	admin, err := cs.CreateFirstAdminHumanUser(ctx, CreateHumanUserParams{Username: "audit-recovery", DisplayName: "Audit Recovery"})
+	if err != nil {
+		t.Fatalf("CreateFirstAdminHumanUser: %v", err)
+	}
+	if _, err := cs.CreateProjectGrant(ctx, CreateProjectGrantParams{PrincipalID: admin.PrincipalID, Project: "preserved-project", GrantedByPrincipalID: admin.PrincipalID}); err != nil {
+		t.Fatalf("CreateProjectGrant: %v", err)
+	}
+
+	_, err = cs.RecoverStrandedAdminTokenWithAudit(ctx, RecoverStrandedAdminTokenParams{TokenPrefix: "egc_live_audit", TokenHash: "hmac-sha256:v1:audit"}, AuthAuditEvent{ActorSource: "bootstrap_cli", Action: "bootstrap.cli", Outcome: "success", Metadata: map[string]any{"raw_token": "must-not-persist"}})
+	if !errors.Is(err, ErrSensitiveAuditMetadata) {
+		t.Fatalf("expected sensitive audit metadata error, got %v", err)
+	}
+	tokens, err := cs.ListPrincipalTokens(ctx, admin.PrincipalID)
+	if err != nil {
+		t.Fatalf("ListPrincipalTokens: %v", err)
+	}
+	if len(tokens) != 0 {
+		t.Fatalf("failed recovery audit must roll back token creation, got %+v", tokens)
+	}
+	grants, err := cs.ListProjectGrants(ctx, admin.PrincipalID)
+	if err != nil {
+		t.Fatalf("ListProjectGrants: %v", err)
+	}
+	assertProjects(t, grants, []string{"preserved-project"})
+}
+
+func TestPrincipalTokenIssuanceSerializesWithStrandedRecoveryEligibility(t *testing.T) {
+	cases := []struct {
+		name  string
+		issue func(context.Context, *CloudStore, HumanUser) error
+	}{
+		{
+			name: "without audit",
+			issue: func(ctx context.Context, cs *CloudStore, admin HumanUser) error {
+				_, err := cs.CreatePrincipalToken(ctx, CreatePrincipalTokenParams{PrincipalID: admin.PrincipalID, TokenPrefix: "egc_live_normal", TokenHash: "hmac-sha256:v1:normal", Name: "normal", CreatedByPrincipalID: admin.PrincipalID})
+				return err
+			},
+		},
+		{
+			name: "with audit",
+			issue: func(ctx context.Context, cs *CloudStore, admin HumanUser) error {
+				_, err := cs.CreatePrincipalTokenWithAudit(ctx, CreatePrincipalTokenParams{PrincipalID: admin.PrincipalID, TokenPrefix: "egc_live_audited", TokenHash: "hmac-sha256:v1:audited", Name: "audited", CreatedByPrincipalID: admin.PrincipalID}, AuthAuditEvent{ActorPrincipalID: admin.PrincipalID, ActorSource: "managed", TargetPrincipalID: admin.PrincipalID, Action: "token.create", Outcome: "success", Metadata: map[string]any{"token_prefix": "egc_live_audited"}})
+				return err
+			},
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			cs := openIsolatedCloudStore(t)
+			admin, err := cs.CreateFirstAdminHumanUser(ctx, CreateHumanUserParams{Username: "serialized-recovery", DisplayName: "Serialized Recovery"})
+			if err != nil {
+				t.Fatalf("CreateFirstAdminHumanUser: %v", err)
+			}
+
+			blocker, err := cs.db.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatalf("begin advisory-lock blocker: %v", err)
+			}
+			defer func() { _ = blocker.Rollback() }()
+			if _, err := blocker.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext('engram_cloud_active_admin_guard'))`); err != nil {
+				t.Fatalf("acquire advisory-lock blocker: %v", err)
+			}
+
+			issueErrs := make(chan error, 1)
+			go func() { issueErrs <- tt.issue(ctx, cs, admin) }()
+			waitForActiveAdminGuardWaiter(t, cs.db)
+
+			if err := blocker.Commit(); err != nil {
+				t.Fatalf("release advisory-lock blocker: %v", err)
+			}
+			if err := <-issueErrs; err != nil {
+				t.Fatalf("normal token issuance after lock release: %v", err)
+			}
+
+			_, err = cs.RecoverStrandedAdminTokenWithAudit(ctx, RecoverStrandedAdminTokenParams{TokenPrefix: "egc_live_recovery-race", TokenHash: "hmac-sha256:v1:recovery-race"}, AuthAuditEvent{ActorSource: "bootstrap_cli", Action: "bootstrap.cli", Outcome: "success", Metadata: map[string]any{"recovered": true}})
+			if !errors.Is(err, ErrStrandedAdminRecoveryIneligible) {
+				t.Fatalf("recovery must see the serialized normal issuance and refuse, got %v", err)
+			}
+		})
+	}
+}
+
+func TestTokenIssuanceAndLastAdminGuardLockTargetBeforeAdvisoryGuard(t *testing.T) {
+	cases := []struct {
+		name  string
+		issue func(context.Context, *CloudStore, HumanUser) error
+	}{
+		{
+			name: "without audit",
+			issue: func(ctx context.Context, cs *CloudStore, admin HumanUser) error {
+				_, err := cs.CreatePrincipalToken(ctx, CreatePrincipalTokenParams{PrincipalID: admin.PrincipalID, TokenPrefix: "egc_live_lock-order", TokenHash: "hmac-sha256:v1:lock-order", Name: "lock-order", CreatedByPrincipalID: admin.PrincipalID})
+				return err
+			},
+		},
+		{
+			name: "with audit",
+			issue: func(ctx context.Context, cs *CloudStore, admin HumanUser) error {
+				_, err := cs.CreatePrincipalTokenWithAudit(ctx, CreatePrincipalTokenParams{PrincipalID: admin.PrincipalID, TokenPrefix: "egc_live_lock-order-audit", TokenHash: "hmac-sha256:v1:lock-order-audit", Name: "lock-order-audit", CreatedByPrincipalID: admin.PrincipalID}, AuthAuditEvent{ActorPrincipalID: admin.PrincipalID, ActorSource: "managed", TargetPrincipalID: admin.PrincipalID, Action: "token.create", Outcome: "success", Metadata: map[string]any{"token_prefix": "egc_live_lock-order-audit"}})
+				return err
+			},
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			cs := openIsolatedCloudStore(t)
+			admin, err := cs.CreateFirstAdminHumanUser(ctx, CreateHumanUserParams{Username: "lock-order-admin", DisplayName: "Lock Order Admin"})
+			if err != nil {
+				t.Fatalf("CreateFirstAdminHumanUser: %v", err)
+			}
+
+			blocker, err := cs.db.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatalf("begin principal-row blocker: %v", err)
+			}
+			defer func() { _ = blocker.Rollback() }()
+			var lockedPrincipalID string
+			if err := blocker.QueryRowContext(ctx, `SELECT id::text FROM cloud_principals WHERE id = $1 FOR UPDATE`, admin.PrincipalID).Scan(&lockedPrincipalID); err != nil {
+				t.Fatalf("acquire principal-row blocker: %v", err)
+			}
+
+			operationCtx, cancel := context.WithTimeout(ctx, lockOrderOperationTimeout)
+			defer cancel()
+			errs := make(chan error, 2)
+			go func() { errs <- tt.issue(operationCtx, cs, admin) }()
+			go func() {
+				errs <- cs.UpdatePrincipal(operationCtx, admin.PrincipalID, UpdatePrincipalParams{Role: PrincipalRoleAdmin, Enabled: true})
+			}()
+			waitForDatabaseLockWaiters(t, cs.db, 2)
+			assertNoActiveAdminGuardHeld(t, cs.db)
+
+			if err := blocker.Commit(); err != nil {
+				t.Fatalf("release principal-row blocker: %v", err)
+			}
+			for range 2 {
+				select {
+				case err := <-errs:
+					if err != nil {
+						t.Fatalf("concurrent operation must complete without a lock-order error: %v", err)
+					}
+				case <-time.After(lockOrderOperationTimeout):
+					t.Fatal("concurrent token issuance and admin update did not complete after the principal-row blocker released")
+				}
+			}
+		})
+	}
+}
+
+const (
+	lockOrderOperationTimeout = 5 * time.Second
+	activeAdminGuardLockWhere = `
+		locktype = 'advisory'
+		AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+		AND classid::bigint = ((hashtext('engram_cloud_active_admin_guard')::bigint >> 32) & 4294967295)
+		AND objid::bigint = (hashtext('engram_cloud_active_admin_guard')::bigint & 4294967295)
+		AND objsubid = 1`
+)
+
+func waitForActiveAdminGuardWaiter(t *testing.T, db *sql.DB) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		var waiters int
+		if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM pg_locks WHERE `+activeAdminGuardLockWhere+` AND granted = FALSE`).Scan(&waiters); err != nil {
+			t.Fatalf("count active-admin guard waiters: %v", err)
+		}
+		if waiters > 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("normal token issuance did not wait for engram_cloud_active_admin_guard")
+}
+
+func waitForDatabaseLockWaiters(t *testing.T, db *sql.DB, wantAtLeast int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		var waiters int
+		if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&waiters); err != nil {
+			t.Fatalf("count database lock waiters: %v", err)
+		}
+		if waiters >= wantAtLeast {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("expected at least %d database lock waiters", wantAtLeast)
+}
+
+func assertNoActiveAdminGuardHeld(t *testing.T, db *sql.DB) {
+	t.Helper()
+	var held int
+	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM pg_locks WHERE `+activeAdminGuardLockWhere+` AND granted = TRUE`).Scan(&held); err != nil {
+		t.Fatalf("count held advisory locks: %v", err)
+	}
+	if held != 0 {
+		t.Fatalf("token issuance and last-admin guard must wait on the principal row before acquiring the advisory guard, found %d held advisory locks", held)
+	}
+}
+
+func TestActiveAdminGuardLockQueriesIgnoreUnrelatedAdvisoryLocks(t *testing.T) {
+	ctx := context.Background()
+	cs := openIsolatedCloudStore(t)
+	tx, err := cs.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin unrelated advisory-lock tx: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(42::bigint)`); err != nil {
+		t.Fatalf("acquire unrelated advisory lock: %v", err)
+	}
+	assertNoActiveAdminGuardHeld(t, cs.db)
+}
+
 // TestFindPrincipalTokenByHashResolvesActiveTokenAndRejectsUnknownOrRevoked
 // is the RED-first proof for the runtime managed-token wiring slice: before
 // FindPrincipalTokenByHash existed, this test failed to compile (undefined

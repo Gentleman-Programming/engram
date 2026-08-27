@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -13,6 +14,14 @@ import (
 // syncRelationPayload.
 func buildRelationMutation(t *testing.T, p syncRelationPayload) SyncMutation {
 	t.Helper()
+	if p.MarkedByActor == nil {
+		actor := "test-actor"
+		p.MarkedByActor = &actor
+	}
+	if p.MarkedByKind == nil {
+		kind := "test"
+		p.MarkedByKind = &kind
+	}
 	raw, err := json.Marshal(p)
 	if err != nil {
 		t.Fatalf("buildRelationMutation: marshal: %v", err)
@@ -106,6 +115,206 @@ func TestApplyPulledRelation_InsertsWhenObsExist(t *testing.T) {
 	d := countDeferredRows(t, s, relSyncID)
 	if d != 0 {
 		t.Errorf("expected 0 deferred rows after successful apply; got %d", d)
+	}
+}
+
+func TestApplyPulledRelation_AllowsSelfReference(t *testing.T) {
+	s, syncA, _ := setupSyncApplyStore(t)
+
+	relSyncID := newSyncID("rel-self")
+	m := buildRelationMutation(t, syncRelationPayload{
+		SyncID:         relSyncID,
+		SourceID:       syncA,
+		TargetID:       syncA,
+		Relation:       RelationCompatible,
+		JudgmentStatus: JudgmentStatusJudged,
+		Project:        "proj-apply",
+		CreatedAt:      "2026-04-26T10:00:00Z",
+		UpdatedAt:      "2026-04-26T10:00:00Z",
+	})
+
+	if err := applyRelationMutation(t, s, m); err != nil {
+		t.Fatalf("applyPulledMutationTx: %v", err)
+	}
+	if got := countRelationRows(t, s, relSyncID); got != 1 {
+		t.Fatalf("expected 1 self-referential relation, got %d", got)
+	}
+}
+
+func TestApplyPulledChunk_DefersMissingRelationAndContinues(t *testing.T) {
+	s, syncA, syncB := setupSyncApplyStore(t)
+	missingTarget := "obs-ghost-" + newSyncID("x")
+
+	validID := newSyncID("rel-valid")
+	missingID := newSyncID("rel-missing")
+	mutations := []SyncMutation{
+		buildRelationMutation(t, syncRelationPayload{
+			SyncID: missingID, SourceID: syncA, TargetID: missingTarget,
+			Relation: RelationRelated, JudgmentStatus: JudgmentStatusJudged,
+			Project: "proj-apply", CreatedAt: "2026-04-26T10:00:00Z", UpdatedAt: "2026-04-26T10:00:00Z",
+		}),
+		buildRelationMutation(t, syncRelationPayload{
+			SyncID: validID, SourceID: syncA, TargetID: syncB,
+			Relation: RelationCompatible, JudgmentStatus: JudgmentStatusJudged,
+			Project: "proj-apply", CreatedAt: "2026-04-26T10:00:00Z", UpdatedAt: "2026-04-26T10:00:00Z",
+		}),
+	}
+
+	if err := s.ApplyPulledChunk(DefaultSyncTargetKey, "chunk-local-relations", mutations); err != nil {
+		t.Fatalf("ApplyPulledChunk: %v", err)
+	}
+	if got := countRelationRows(t, s, validID); got != 1 {
+		t.Fatalf("expected valid relation to apply, got %d rows", got)
+	}
+	if got := countDeferredRows(t, s, missingID); got != 1 {
+		t.Fatalf("expected missing relation to defer, got %d rows", got)
+	}
+	status, _ := getDeferredRow(t, s, missingID)
+	if status != "deferred" {
+		t.Fatalf("apply_status: want deferred, got %q", status)
+	}
+	assertDeferredScope(t, s, missingID, DefaultSyncTargetKey, "proj-apply", "scoped")
+	if got := countRelationRows(t, s, missingID); got != 0 {
+		t.Fatalf("expected missing relation to remain unapplied, got %d rows", got)
+	}
+	var lastPulled int64
+	if err := s.db.QueryRow(`SELECT last_pulled_seq FROM sync_state WHERE target_key = ?`, DefaultSyncTargetKey).Scan(&lastPulled); err != nil {
+		t.Fatalf("read last_pulled_seq: %v", err)
+	}
+	if lastPulled != int64(len(mutations)) {
+		t.Fatalf("last_pulled_seq: want %d, got %d", len(mutations), lastPulled)
+	}
+	chunks, err := s.GetSyncedChunksForTarget(DefaultSyncTargetKey)
+	if err != nil {
+		t.Fatalf("read synced chunks: %v", err)
+	}
+	if !chunks["chunk-local-relations"] {
+		t.Fatal("expected chunk with deferred relation to be marked as synced")
+	}
+}
+
+func TestApplyPulledMutation_DefersMissingRelationAndAdvancesCursor(t *testing.T) {
+	s, syncA, _ := setupSyncApplyStore(t)
+	relSyncID := newSyncID("rel-missing")
+	m := buildRelationMutation(t, syncRelationPayload{
+		SyncID:         relSyncID,
+		SourceID:       syncA,
+		TargetID:       "obs-ghost-" + newSyncID("x"),
+		Relation:       RelationRelated,
+		JudgmentStatus: JudgmentStatusJudged,
+		Project:        "proj-apply",
+		CreatedAt:      "2026-04-26T10:00:00Z",
+		UpdatedAt:      "2026-04-26T10:00:00Z",
+	})
+	m.Seq = 1
+
+	if err := s.ApplyPulledMutation(DefaultSyncTargetKey, m); err != nil {
+		t.Fatalf("ApplyPulledMutation: %v", err)
+	}
+	if got := countDeferredRows(t, s, relSyncID); got != 1 {
+		t.Fatalf("expected missing relation to defer, got %d rows", got)
+	}
+	status, _ := getDeferredRow(t, s, relSyncID)
+	if status != "deferred" {
+		t.Fatalf("apply_status: want deferred, got %q", status)
+	}
+	assertDeferredScope(t, s, relSyncID, DefaultSyncTargetKey, "proj-apply", "scoped")
+	if got := countRelationRows(t, s, relSyncID); got != 0 {
+		t.Fatalf("expected missing relation to remain unapplied, got %d rows", got)
+	}
+	var lastPulled int64
+	if err := s.db.QueryRow(`SELECT last_pulled_seq FROM sync_state WHERE target_key = ?`, DefaultSyncTargetKey).Scan(&lastPulled); err != nil {
+		t.Fatalf("read last_pulled_seq: %v", err)
+	}
+	if lastPulled != m.Seq {
+		t.Fatalf("last_pulled_seq: want %d, got %d", m.Seq, lastPulled)
+	}
+}
+
+func TestApplyPulledChunk_MarksMalformedRelationDeadAndContinues(t *testing.T) {
+	s, syncA, syncB := setupSyncApplyStore(t)
+	validID := newSyncID("rel-valid")
+	deadID := newSyncID("rel-dead")
+	mutations := []SyncMutation{
+		{Entity: SyncEntityRelation, EntityKey: deadID, Op: SyncOpUpsert, Payload: "not json"},
+		buildRelationMutation(t, syncRelationPayload{
+			SyncID: validID, SourceID: syncA, TargetID: syncB,
+			Relation: RelationCompatible, JudgmentStatus: JudgmentStatusJudged,
+			Project: "proj-apply", CreatedAt: "2026-04-26T10:00:00Z", UpdatedAt: "2026-04-26T10:00:00Z",
+		}),
+	}
+
+	if err := s.ApplyPulledChunk(DefaultSyncTargetKey, "chunk-dead-relation", mutations); err != nil {
+		t.Fatalf("ApplyPulledChunk: %v", err)
+	}
+	if got := countRelationRows(t, s, validID); got != 1 {
+		t.Fatalf("expected valid relation to apply, got %d rows", got)
+	}
+	var status string
+	if err := s.db.QueryRow(`SELECT apply_status FROM sync_apply_deferred WHERE sync_id = ?`, deadID).Scan(&status); err != nil {
+		t.Fatalf("read dead relation status: %v", err)
+	}
+	if status != "dead" {
+		t.Fatalf("apply_status: want dead, got %q", status)
+	}
+	var lastPulled int64
+	if err := s.db.QueryRow(`SELECT last_pulled_seq FROM sync_state WHERE target_key = ?`, DefaultSyncTargetKey).Scan(&lastPulled); err != nil {
+		t.Fatalf("read last_pulled_seq: %v", err)
+	}
+	if lastPulled != int64(len(mutations)) {
+		t.Fatalf("last_pulled_seq: want %d, got %d", len(mutations), lastPulled)
+	}
+}
+
+func TestApplyPulledChunk_MarksInvalidRelationContractsDead(t *testing.T) {
+	s, syncA, syncB := setupSyncApplyStore(t)
+	validPayload, err := json.Marshal(syncRelationPayload{
+		SyncID:         "rel-invalid-contract",
+		SourceID:       syncA,
+		TargetID:       syncB,
+		Relation:       RelationRelated,
+		JudgmentStatus: JudgmentStatusJudged,
+		Project:        "proj-apply",
+		CreatedAt:      "2026-08-25T00:00:00Z",
+		UpdatedAt:      "2026-08-25T00:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("marshal relation payload: %v", err)
+	}
+
+	tests := []struct {
+		name     string
+		mutation SyncMutation
+	}{
+		{
+			name: "unsupported operation",
+			mutation: SyncMutation{
+				Entity: SyncEntityRelation, EntityKey: "rel-invalid-contract", Op: SyncOpDelete, Payload: string(validPayload),
+			},
+		},
+		{
+			name: "missing required provenance fields",
+			mutation: SyncMutation{
+				Entity:    SyncEntityRelation,
+				EntityKey: "rel-missing-provenance",
+				Op:        SyncOpUpsert,
+				Payload:   fmt.Sprintf(`{"sync_id":"rel-missing-provenance","source_id":%q,"target_id":%q,"relation":"related","judgment_status":"judged","project":"proj-apply"}`, syncA, syncB),
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := s.ApplyPulledChunk(DefaultSyncTargetKey, "chunk-"+tt.mutation.EntityKey, []SyncMutation{tt.mutation}); err != nil {
+				t.Fatalf("ApplyPulledChunk: %v", err)
+			}
+			status, _ := getDeferredRow(t, s, tt.mutation.EntityKey)
+			if status != "dead" {
+				t.Fatalf("apply_status: want dead, got %q", status)
+			}
+			if got := countRelationRows(t, s, tt.mutation.EntityKey); got != 0 {
+				t.Fatalf("expected invalid relation to remain unapplied, got %d rows", got)
+			}
+		})
 	}
 }
 
@@ -233,10 +442,38 @@ func getDeferredRow(t *testing.T, s *Store, syncID string) (applyStatus string, 
 	return applyStatus, retryCount
 }
 
+func assertDeferredScope(t *testing.T, s *Store, syncID, targetKey, project, scopeClass string) {
+	t.Helper()
+	var gotTargetKey, gotProject, gotScopeClass string
+	if err := s.db.QueryRow(`
+		SELECT target_key, project, scope_class
+		FROM sync_apply_deferred
+		WHERE sync_id = ?
+	`, syncID).Scan(&gotTargetKey, &gotProject, &gotScopeClass); err != nil {
+		t.Fatalf("read deferred scope for %q: %v", syncID, err)
+	}
+	if gotTargetKey != targetKey || gotProject != project || gotScopeClass != scopeClass {
+		t.Fatalf("deferred scope: got target=%q project=%q class=%q, want target=%q project=%q class=%q", gotTargetKey, gotProject, gotScopeClass, targetKey, project, scopeClass)
+	}
+}
+
+func insertScopedDeferredRow(t *testing.T, s *Store, syncID, payload, targetKey, project string, retryCount int) {
+	t.Helper()
+	if _, err := s.db.Exec(`
+		INSERT INTO sync_apply_deferred
+			(sync_id, entity, payload, target_key, project, scope_class, retry_count, apply_status, first_seen_at)
+		VALUES (?, 'relation', ?, ?, ?, 'scoped', ?, 'deferred', datetime('now'))
+	`, syncID, payload, targetKey, project, retryCount); err != nil {
+		t.Fatalf("insertScopedDeferredRow %q: %v", syncID, err)
+	}
+}
+
 // TestReplayDeferred_RetrySucceeds: A deferred row; after the missing obs arrives
 // and ReplayDeferred runs, the row is applied and removed.
 func TestReplayDeferred_RetrySucceeds(t *testing.T) {
 	s, syncA, _ := setupSyncApplyStore(t)
+	actor := "test-actor"
+	kind := "test"
 
 	// Missing target obs.
 	missingTarget := "obs-missing-" + newSyncID("x")
@@ -248,6 +485,8 @@ func TestReplayDeferred_RetrySucceeds(t *testing.T) {
 		TargetID:       missingTarget,
 		Relation:       RelationRelated,
 		JudgmentStatus: JudgmentStatusJudged,
+		MarkedByActor:  &actor,
+		MarkedByKind:   &kind,
 		Project:        "proj-apply",
 		CreatedAt:      "2026-04-26T10:00:00Z",
 		UpdatedAt:      "2026-04-26T10:00:00Z",
@@ -280,6 +519,8 @@ func TestReplayDeferred_RetrySucceeds(t *testing.T) {
 		TargetID:       missingTargetSync,
 		Relation:       RelationRelated,
 		JudgmentStatus: JudgmentStatusJudged,
+		MarkedByActor:  &actor,
+		MarkedByKind:   &kind,
 		Project:        "proj-apply",
 		CreatedAt:      "2026-04-26T10:00:00Z",
 		UpdatedAt:      "2026-04-26T10:00:00Z",
@@ -316,6 +557,8 @@ func TestReplayDeferred_RetrySucceeds(t *testing.T) {
 // TestReplayDeferred_DeadAtFiveRetries: retry_count=4; FK still missing → row becomes dead.
 func TestReplayDeferred_DeadAtFiveRetries(t *testing.T) {
 	s, syncA, _ := setupSyncApplyStore(t)
+	actor := "test-actor"
+	kind := "test"
 
 	missingTarget := "obs-ghost-" + newSyncID("x")
 	relSyncID := newSyncID("rel-dead")
@@ -325,6 +568,8 @@ func TestReplayDeferred_DeadAtFiveRetries(t *testing.T) {
 		TargetID:       missingTarget,
 		Relation:       RelationRelated,
 		JudgmentStatus: JudgmentStatusJudged,
+		MarkedByActor:  &actor,
+		MarkedByKind:   &kind,
 		Project:        "proj-apply",
 		CreatedAt:      "2026-04-26T10:00:00Z",
 		UpdatedAt:      "2026-04-26T10:00:00Z",
@@ -417,6 +662,96 @@ func TestCountDeferredAndDead(t *testing.T) {
 	}
 	if dead != 1 {
 		t.Errorf("dead: want 1, got %d", dead)
+	}
+}
+
+func TestReplayDeferredForScope_IsolatesTargetAndProject(t *testing.T) {
+	s, syncA, _ := setupSyncApplyStore(t)
+	actor := "test-actor"
+	kind := "test"
+	missingPayload := func(syncID, project string) string {
+		payload, err := json.Marshal(syncRelationPayload{
+			SyncID: syncID, SourceID: syncA, TargetID: "obs-missing-" + syncID,
+			Relation: RelationRelated, JudgmentStatus: JudgmentStatusJudged,
+			MarkedByActor: &actor, MarkedByKind: &kind, Project: project,
+		})
+		if err != nil {
+			t.Fatalf("marshal deferred payload: %v", err)
+		}
+		return string(payload)
+	}
+
+	cloudA := "rel-cloud-a"
+	cloudB := "rel-cloud-b"
+	localA := "rel-local-a"
+	insertScopedDeferredRow(t, s, cloudA, missingPayload(cloudA, "project-a"), "cloud", "project-a", 4)
+	insertScopedDeferredRow(t, s, cloudB, missingPayload(cloudB, "project-b"), "cloud", "project-b", 4)
+	insertScopedDeferredRow(t, s, localA, missingPayload(localA, "project-a"), LocalChunkTargetKey, "project-a", 4)
+
+	result, err := s.ReplayDeferredForScope("cloud", "project-b")
+	if err != nil {
+		t.Fatalf("ReplayDeferredForScope cloud project-b: %v", err)
+	}
+	if result.Retried != 1 || result.Dead != 1 {
+		t.Fatalf("cloud project-b replay = %+v, want one dead retry", result)
+	}
+	statusA, retriesA := getDeferredRow(t, s, cloudA)
+	if statusA != "deferred" || retriesA != 4 {
+		t.Fatalf("cloud project-a row changed by project-b replay: status=%q retries=%d", statusA, retriesA)
+	}
+	statusLocal, retriesLocal := getDeferredRow(t, s, localA)
+	if statusLocal != "deferred" || retriesLocal != 4 {
+		t.Fatalf("local row changed by cloud replay: status=%q retries=%d", statusLocal, retriesLocal)
+	}
+	deferred, dead, err := s.CountDeferredAndDeadForScope("cloud", "project-b")
+	if err != nil || deferred != 0 || dead != 1 {
+		t.Fatalf("cloud project-b counts = deferred=%d dead=%d err=%v", deferred, dead, err)
+	}
+
+	result, err = s.ReplayDeferredForScope(LocalChunkTargetKey, "project-a")
+	if err != nil {
+		t.Fatalf("ReplayDeferredForScope local project-a: %v", err)
+	}
+	if result.Retried != 1 || result.Dead != 1 {
+		t.Fatalf("local project-a replay = %+v, want one dead retry", result)
+	}
+	statusA, retriesA = getDeferredRow(t, s, cloudA)
+	if statusA != "deferred" || retriesA != 4 {
+		t.Fatalf("cloud row changed by local replay: status=%q retries=%d", statusA, retriesA)
+	}
+}
+
+func TestListDeferredProjectsForTargetScopesAndOrders(t *testing.T) {
+	s, syncA, _ := setupSyncApplyStore(t)
+	payload := func(syncID, project string) string {
+		encoded, err := json.Marshal(syncRelationPayload{
+			SyncID: syncID, SourceID: syncA, TargetID: "obs-missing-" + syncID,
+			Relation: RelationRelated, JudgmentStatus: JudgmentStatusJudged, Project: project,
+		})
+		if err != nil {
+			t.Fatalf("marshal payload: %v", err)
+		}
+		return string(encoded)
+	}
+	insertScopedDeferredRow(t, s, "rel-project-b-1", payload("rel-project-b-1", "project-b"), "cloud", "project-b", 0)
+	insertScopedDeferredRow(t, s, "rel-project-a", payload("rel-project-a", "project-a"), "cloud", "project-a", 0)
+	insertScopedDeferredRow(t, s, "rel-project-b-2", payload("rel-project-b-2", "project-b"), "cloud", "project-b", 1)
+	insertScopedDeferredRow(t, s, "rel-other-target", payload("rel-other-target", "project-c"), "cloud:project-c", "project-c", 0)
+	if _, err := s.db.Exec(`
+		INSERT INTO sync_apply_deferred
+			(sync_id, entity, payload, target_key, project, scope_class, apply_status, first_seen_at)
+		VALUES ('rel-dead', 'relation', '{}', 'cloud', 'project-dead', 'scoped', 'dead', datetime('now'))
+	`); err != nil {
+		t.Fatalf("insert dead scoped deferred: %v", err)
+	}
+	insertDeferredRow(t, s, "rel-legacy", SyncEntityRelation, "{}", 0, "deferred")
+
+	projects, err := s.ListDeferredProjectsForTarget("CLOUD")
+	if err != nil {
+		t.Fatalf("ListDeferredProjectsForTarget: %v", err)
+	}
+	if got, want := fmt.Sprint(projects), "[project-a project-b]"; got != want {
+		t.Fatalf("projects = %s, want %s", got, want)
 	}
 }
 

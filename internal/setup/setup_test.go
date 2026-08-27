@@ -1,8 +1,10 @@
 package setup
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -10,6 +12,20 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestEmbeddedOpenCodePluginMatchesSourceByteForByte(t *testing.T) {
+	source, err := os.ReadFile(filepath.Join("..", "..", "plugin", "opencode", "engram.ts"))
+	if err != nil {
+		t.Fatalf("read OpenCode source plugin: %v", err)
+	}
+	embedded, err := os.ReadFile(filepath.Join("plugins", "opencode", "engram.ts"))
+	if err != nil {
+		t.Fatalf("read embedded OpenCode plugin: %v", err)
+	}
+	if !bytes.Equal(source, embedded) {
+		t.Fatal("embedded OpenCode plugin drifted from plugin/opencode/engram.ts; regenerate the embedded copy")
+	}
+}
 
 func resetSetupSeams(t *testing.T) {
 	t.Helper()
@@ -69,6 +85,45 @@ func useTestHome(t *testing.T) string {
 	return home
 }
 
+// useIsolatedProfile keeps platform-resolved setup paths inside one disposable
+// profile, including the Windows APPDATA paths used by Gemini and Codex.
+func useIsolatedProfile(t *testing.T) string {
+	t.Helper()
+	profile := t.TempDir()
+	userHomeDir = func() (string, error) { return profile, nil }
+
+	volume := filepath.VolumeName(profile)
+	t.Setenv("APPDATA", filepath.Join(profile, "AppData", "Roaming"))
+	t.Setenv("LOCALAPPDATA", filepath.Join(profile, "AppData", "Local"))
+	t.Setenv("USERPROFILE", profile)
+	t.Setenv("HOMEDRIVE", volume)
+	t.Setenv("HOMEPATH", strings.TrimPrefix(profile, volume))
+	t.Setenv("HOME", profile)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(profile, ".config"))
+
+	return profile
+}
+
+func TestWindowsCodexAndGeminiPathsStayWithinDisposableProfile(t *testing.T) {
+	resetSetupSeams(t)
+	profile := useIsolatedProfile(t)
+	runtimeGOOS = "windows"
+
+	for name, path := range map[string]string{
+		"Gemini config":        geminiConfigPath(),
+		"Gemini system prompt": geminiSystemPromptPath(),
+		"Gemini environment":   geminiEnvPath(),
+		"Codex config":         codexConfigPath(),
+		"Codex instructions":   codexInstructionsPath(),
+		"Codex compact prompt": codexCompactPromptPath(),
+	} {
+		rel, err := filepath.Rel(profile, path)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+			t.Fatalf("%s path %q escapes disposable profile %q", name, path, profile)
+		}
+	}
+}
+
 func TestSupportedAgentsIncludesGeminiAndCodex(t *testing.T) {
 	agents := SupportedAgents()
 
@@ -92,10 +147,10 @@ func TestSupportedAgentsIncludesGeminiAndCodex(t *testing.T) {
 }
 
 func TestInstallGeminiCLIInjectsMCPConfig(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	resetSetupSeams(t)
+	useIsolatedProfile(t)
 
-	configPath := filepath.Join(home, ".gemini", "settings.json")
+	configPath := geminiConfigPath()
 	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
 		t.Fatalf("mkdir config dir: %v", err)
 	}
@@ -158,7 +213,7 @@ func TestInstallGeminiCLIInjectsMCPConfig(t *testing.T) {
 		t.Fatalf("expected existing mcp server to be preserved")
 	}
 
-	systemPath := filepath.Join(home, ".gemini", "system.md")
+	systemPath := geminiSystemPromptPath()
 	systemRaw, err := os.ReadFile(systemPath)
 	if err != nil {
 		t.Fatalf("read system prompt: %v", err)
@@ -172,7 +227,7 @@ func TestInstallGeminiCLIInjectsMCPConfig(t *testing.T) {
 	}
 
 	// GEMINI_SYSTEM_MD should NOT be set (it breaks Gemini outside $HOME)
-	envPath := filepath.Join(home, ".gemini", ".env")
+	envPath := geminiEnvPath()
 	if _, err := os.Stat(envPath); err == nil {
 		envRaw, _ := os.ReadFile(envPath)
 		if strings.Contains(string(envRaw), "GEMINI_SYSTEM_MD") {
@@ -187,10 +242,9 @@ func TestInstallGeminiCLIInjectsMCPConfig(t *testing.T) {
 
 func TestInstallCodexInjectsTOMLAndIsIdempotent(t *testing.T) {
 	resetSetupSeams(t)
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	useIsolatedProfile(t)
 
-	configPath := filepath.Join(home, ".codex", "config.toml")
+	configPath := codexConfigPath()
 	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
 		t.Fatalf("mkdir config dir: %v", err)
 	}
@@ -249,12 +303,12 @@ func TestInstallCodexInjectsTOMLAndIsIdempotent(t *testing.T) {
 		if !strings.Contains(text, `args = ["mcp", "--tools=agent"]`) {
 			t.Fatalf("expected engram args in config, got:\n%s", text)
 		}
-		instructionsPath := filepath.Join(home, ".codex", "engram-instructions.md")
-		if !strings.Contains(text, "model_instructions_file = \""+instructionsPath+"\"") {
+		instructionsPath := codexInstructionsPath()
+		if !strings.Contains(text, fmt.Sprintf("model_instructions_file = %q", instructionsPath)) {
 			t.Fatalf("expected model_instructions_file in config, got:\n%s", text)
 		}
-		compactPromptPath := filepath.Join(home, ".codex", "engram-compact-prompt.md")
-		if !strings.Contains(text, "experimental_compact_prompt_file = \""+compactPromptPath+"\"") {
+		compactPromptPath := codexCompactPromptPath()
+		if !strings.Contains(text, fmt.Sprintf("experimental_compact_prompt_file = %q", compactPromptPath)) {
 			t.Fatalf("expected compact prompt file key in config, got:\n%s", text)
 		}
 		firstSection := strings.Index(text, "[profile]")
@@ -281,7 +335,7 @@ func TestInstallCodexInjectsTOMLAndIsIdempotent(t *testing.T) {
 		t.Fatalf("expected no changes on second install")
 	}
 
-	instructionsRaw, err := os.ReadFile(filepath.Join(home, ".codex", "engram-instructions.md"))
+	instructionsRaw, err := os.ReadFile(codexInstructionsPath())
 	if err != nil {
 		t.Fatalf("read codex instructions: %v", err)
 	}
@@ -289,7 +343,7 @@ func TestInstallCodexInjectsTOMLAndIsIdempotent(t *testing.T) {
 		t.Fatalf("expected AFTER COMPACTION section in codex instructions")
 	}
 
-	compactRaw, err := os.ReadFile(filepath.Join(home, ".codex", "engram-compact-prompt.md"))
+	compactRaw, err := os.ReadFile(codexCompactPromptPath())
 	if err != nil {
 		t.Fatalf("read codex compact prompt: %v", err)
 	}
@@ -302,8 +356,7 @@ func TestInstallCodexInjectsTOMLAndIsIdempotent(t *testing.T) {
 // installCodex() runs marketplace add + plugin add with the correct arguments.
 func TestInstallCodexPluginCLIPresent(t *testing.T) {
 	resetSetupSeams(t)
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	useIsolatedProfile(t)
 
 	var commands [][]string
 	lookPathFn = func(file string) (string, error) {
@@ -361,8 +414,7 @@ func TestInstallCodexPluginCLIPresent(t *testing.T) {
 // PATH, installCodex() does not fail — MCP config is still written and Files==3.
 func TestInstallCodexPluginCLIAbsent(t *testing.T) {
 	resetSetupSeams(t)
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	useIsolatedProfile(t)
 
 	lookPathFn = func(file string) (string, error) {
 		return "", errors.New("not found")
@@ -384,7 +436,7 @@ func TestInstallCodexPluginCLIAbsent(t *testing.T) {
 	}
 
 	// Verify the TOML config was still written.
-	configPath := filepath.Join(home, ".codex", "config.toml")
+	configPath := codexConfigPath()
 	raw, err := os.ReadFile(configPath)
 	if err != nil {
 		t.Fatalf("expected config.toml to be written: %v", err)
@@ -399,8 +451,7 @@ func TestInstallCodexPluginCLIAbsent(t *testing.T) {
 // the install is still treated as successful (idempotent).
 func TestInstallCodexPluginIdempotentAlreadyInOutput(t *testing.T) {
 	resetSetupSeams(t)
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	useIsolatedProfile(t)
 
 	lookPathFn = func(file string) (string, error) {
 		if file == "codex" {
@@ -2353,40 +2404,27 @@ func TestClaudeCodeUserPromptHookUsesCurrentMCPServerID(t *testing.T) {
 	}
 }
 
-func TestClaudeCodeUserPromptHookDefersProjectDetectionUntilNeeded(t *testing.T) {
+func TestClaudeCodeUserPromptHookUsesProcessLocalFallbackKeyAndCanonicalResolution(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "plugin", "claude-code", "scripts", "user-prompt-submit.sh"))
 	if err != nil {
 		t.Fatalf("read user prompt hook: %v", err)
 	}
 	text := string(data)
 
-	sessionParse := strings.Index(text, "SESSION_ID=$(echo \"$INPUT\" | jq -r '.session_id // empty')")
-	if sessionParse < 0 {
-		t.Fatalf("user prompt hook missing expected session parsing structure")
-	}
-	sessionKeyBranchRel := strings.Index(text[sessionParse:], "if [ -n \"$SESSION_ID\" ]; then")
-	sessionKeyBranch := -1
-	if sessionKeyBranchRel >= 0 {
-		sessionKeyBranch = sessionParse + sessionKeyBranchRel
-	}
-	if sessionParse < 0 || sessionKeyBranch < 0 {
-		t.Fatalf("user prompt hook missing expected session parsing/keying structure")
-	}
-	if preKey := text[sessionParse:sessionKeyBranch]; strings.Contains(preKey, "detect_project") {
-		t.Fatalf("user prompt hook must not detect project before session_id-first keying")
+	if strings.Contains(text, "detect_project") {
+		t.Fatal("user prompt hook must not use Git/basename project detection")
 	}
 
-	fallbackDetect := "PROJECT=$(detect_project \"$CWD\")\n  SAFE_PROJECT="
-	if !strings.Contains(text, fallbackDetect) {
-		t.Fatalf("user prompt hook should detect project only for the no-session_id fallback key")
+	if !strings.Contains(text, "SESSION_KEY=\"engram-claude-unknown-$$-tools-loaded\"") {
+		t.Fatal("user prompt hook must use a process-local fallback key when session_id is absent")
 	}
 
 	subsequentMarker := strings.Index(text, "# SUBSEQUENT MESSAGES")
 	if subsequentMarker < 0 {
 		t.Fatalf("user prompt hook missing subsequent-message section")
 	}
-	if !strings.Contains(text[subsequentMarker:], "PROJECT=$(detect_project \"$CWD\")") {
-		t.Fatalf("user prompt hook should detect project for subsequent nudge logic after first-message handling")
+	if !strings.Contains(text[subsequentMarker:], "PROJECT=$(resolve_project \"$CWD\") || PROJECT=\"\"") {
+		t.Fatal("user prompt hook must resolve the nudge project canonically after first-message handling")
 	}
 }
 
@@ -3400,7 +3438,7 @@ func TestInstallOpenCodeBakesENGRAMBIN(t *testing.T) {
 // contains the necessary logic to:
 //
 //	a) read session data from event.properties.info (not event.properties)
-//	b) suppress Task() sub-agent sessions via parentID or title suffix check
+//	b) suppress child sessions only when authoritative parentID is present
 //	c) track sub-agent IDs in subAgentSessions for cross-hook suppression
 func TestPluginSubAgentFiltering(t *testing.T) {
 	resetSetupSeams(t)
@@ -3430,9 +3468,9 @@ func TestPluginSubAgentFiltering(t *testing.T) {
 		t.Fatalf("plugin must check parentID to detect sub-agent sessions")
 	}
 
-	// b) title suffix check: secondary signal for sub-agent detection
-	if !strings.Contains(content, `subagent)`) {
-		t.Fatalf("plugin must check title suffix ' subagent)' as secondary sub-agent signal")
+	// b) Titles are descriptive only and must not determine session ownership.
+	if strings.Contains(content, `title.endsWith(" subagent)")`) {
+		t.Fatal("plugin must not use title suffixes to detect child sessions")
 	}
 
 	// b) isSubAgent gate: must guard ensureSession() call
@@ -3450,8 +3488,19 @@ func TestPluginSubAgentFiltering(t *testing.T) {
 		t.Fatalf("ensureSession must check subAgentSessions before registering")
 	}
 
-	// session.deleted must clean up subAgentSessions too
-	if !strings.Contains(content, `subAgentSessions.delete(sessionId)`) {
-		t.Fatalf("session.deleted handler must clean up subAgentSessions set")
+	// session.deleted must invalidate the full hierarchy, retaining tombstones
+	// while clearing every invalidated session from runtime caches.
+	for _, snippet := range []string{
+		`invalidateSessionTree(sessionId)`,
+		`invalidSessions.add(invalidID)`,
+		`knownSessions.delete(invalidID)`,
+		`subAgentSessions.delete(invalidID)`,
+		`parentSessions.delete(invalidID)`,
+		`toolCounts.delete(invalidID)`,
+		`lastNudgeTime.delete(invalidID)`,
+	} {
+		if !strings.Contains(content, snippet) {
+			t.Fatalf("session.deleted hierarchy invalidation must contain %q", snippet)
+		}
 	}
 }

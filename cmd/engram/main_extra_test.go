@@ -980,6 +980,15 @@ func TestCmdCloudUpgradeDoctorRequiresProjectAndIsDeterministic(t *testing.T) {
 		if !strings.Contains(bootstrapStderr, "legacy mutation payloads require repair") {
 			t.Fatalf("expected actionable legacy-repair guidance, got %q", bootstrapStderr)
 		}
+		capturedState, err := store.New(cfg)
+		if err != nil {
+			t.Fatalf("reopen store after bootstrap preflight: %v", err)
+		}
+		defer capturedState.Close()
+		state, err := capturedState.GetCloudUpgradeState("proj-legacy")
+		if err != nil || state == nil || !state.Snapshot.Captured || !state.Snapshot.ProjectEnrolled {
+			t.Fatalf("bootstrap must capture enrollment before legacy diagnosis: state=%+v err=%v", state, err)
+		}
 	})
 }
 
@@ -1096,7 +1105,14 @@ func TestCmdCloudUpgradeBootstrapStatusAndRollbackSemantics(t *testing.T) {
 			t.Fatalf("open store: %v", err)
 		}
 		t.Cleanup(func() { _ = s.Close() })
-		if err := s.SaveCloudUpgradeState(store.CloudUpgradeState{Project: "proj-a", Stage: store.UpgradeStageBootstrapVerified, RepairClass: store.UpgradeRepairClassReady}); err != nil {
+		if err := s.SaveCloudUpgradeState(store.CloudUpgradeState{
+			Project:     "proj-a",
+			Stage:       store.UpgradeStageBootstrapVerified,
+			RepairClass: store.UpgradeRepairClassReady,
+			Snapshot: store.CloudUpgradeSnapshot{
+				Captured: true,
+			},
+		}); err != nil {
 			t.Fatalf("seed verified state: %v", err)
 		}
 
@@ -1139,11 +1155,8 @@ func TestCmdCloudUpgradeBootstrapStatusAndRollbackSemantics(t *testing.T) {
 			if state == nil {
 				return nil, fmt.Errorf("expected pre-bootstrap state snapshot")
 			}
-			if !state.Snapshot.CloudConfigPresent {
-				return nil, fmt.Errorf("expected snapshot cloud config presence to be true")
-			}
-			if !strings.Contains(state.Snapshot.CloudConfigJSON, "cloud.example.test") {
-				return nil, fmt.Errorf("expected snapshot cloud config json to include configured server")
+			if !state.Snapshot.Captured {
+				return nil, fmt.Errorf("expected pre-bootstrap snapshot to be captured")
 			}
 			if state.Snapshot.ProjectEnrolled {
 				return nil, fmt.Errorf("expected snapshot to preserve pre-bootstrap unenrolled state")
@@ -1164,6 +1177,155 @@ func TestCmdCloudUpgradeBootstrapStatusAndRollbackSemantics(t *testing.T) {
 			t.Fatalf("expected verified bootstrap stage output, got %q", stdout)
 		}
 	})
+}
+
+func TestCmdCloudUpgradeBootstrapSnapshotExcludesCloudCredentials(t *testing.T) {
+	stubExitWithPanic(t)
+	stubRuntimeHooks(t)
+
+	const token = "test-bootstrap-token-must-not-reach-sqlite"
+	cfg := testConfig(t)
+	if err := saveCloudConfig(cfg, &cloudConfig{ServerURL: "https://cloud.example.test", Token: token}); err != nil {
+		t.Fatalf("save cloud config: %v", err)
+	}
+
+	oldBootstrap := runUpgradeBootstrap
+	runUpgradeBootstrap = func(s *store.Store, project string, _ *cloudConfig) (*engramsync.UpgradeBootstrapResult, error) {
+		var snapshotJSON string
+		if err := s.DB().QueryRow(`SELECT snapshot_json FROM cloud_upgrade_state WHERE project = ?`, project).Scan(&snapshotJSON); err != nil {
+			return nil, fmt.Errorf("read persisted bootstrap snapshot: %w", err)
+		}
+		if strings.Contains(snapshotJSON, token) || strings.Contains(snapshotJSON, `"token"`) || strings.Contains(snapshotJSON, "cloud_config") {
+			return nil, fmt.Errorf("bootstrap snapshot persisted credential material: %s", snapshotJSON)
+		}
+		return &engramsync.UpgradeBootstrapResult{Project: project, Stage: store.UpgradeStageBootstrapVerified}, nil
+	}
+	t.Cleanup(func() { runUpgradeBootstrap = oldBootstrap })
+
+	withArgs(t, "engram", "cloud", "upgrade", "bootstrap", "--project", "proj-a")
+	_, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloud(cfg) })
+	if recovered != nil || stderr != "" {
+		t.Fatalf("bootstrap should not persist cloud credentials, panic=%v stderr=%q", recovered, stderr)
+	}
+}
+
+func TestCmdCloudUpgradeBootstrapCapturesEnrollmentFromPreBootstrapState(t *testing.T) {
+	stubExitWithPanic(t)
+	stubRuntimeHooks(t)
+
+	for _, stage := range []string{store.UpgradeStageDoctorReady, store.UpgradeStageRepairApplied} {
+		t.Run(stage, func(t *testing.T) {
+			cfg := testConfig(t)
+			if err := saveCloudConfig(cfg, &cloudConfig{ServerURL: "https://cloud.example.test"}); err != nil {
+				t.Fatalf("save cloud config: %v", err)
+			}
+			s, err := store.New(cfg)
+			if err != nil {
+				t.Fatalf("open store: %v", err)
+			}
+			if err := s.EnrollProject("proj-a"); err != nil {
+				_ = s.Close()
+				t.Fatalf("seed enrollment: %v", err)
+			}
+			if err := s.SaveCloudUpgradeState(store.CloudUpgradeState{
+				Project:     "proj-a",
+				Stage:       stage,
+				RepairClass: store.UpgradeRepairClassReady,
+			}); err != nil {
+				_ = s.Close()
+				t.Fatalf("seed pre-bootstrap state: %v", err)
+			}
+			if err := s.Close(); err != nil {
+				t.Fatalf("close seeded store: %v", err)
+			}
+
+			oldBootstrap := runUpgradeBootstrap
+			runUpgradeBootstrap = func(s *store.Store, project string, _ *cloudConfig) (*engramsync.UpgradeBootstrapResult, error) {
+				state, err := s.GetCloudUpgradeState(project)
+				if err != nil {
+					return nil, fmt.Errorf("load captured state: %w", err)
+				}
+				if state == nil || !state.Snapshot.Captured || !state.Snapshot.ProjectEnrolled {
+					return nil, fmt.Errorf("expected enrolled pre-bootstrap snapshot, got %+v", state)
+				}
+				return &engramsync.UpgradeBootstrapResult{Project: project, Stage: store.UpgradeStageBootstrapVerified}, nil
+			}
+			t.Cleanup(func() { runUpgradeBootstrap = oldBootstrap })
+
+			withArgs(t, "engram", "cloud", "upgrade", "bootstrap", "--project", "proj-a")
+			_, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloud(cfg) })
+			if recovered != nil || stderr != "" {
+				t.Fatalf("bootstrap should capture existing enrollment, panic=%v stderr=%q", recovered, stderr)
+			}
+		})
+	}
+}
+
+func TestCmdCloudUpgradeBootstrapRejectsUncapturedPostSideEffectCheckpoints(t *testing.T) {
+	stubExitWithPanic(t)
+	stubRuntimeHooks(t)
+
+	for _, stage := range []string{
+		store.UpgradeStageBootstrapEnrolled,
+		store.UpgradeStageBootstrapPushed,
+		store.UpgradeStageBootstrapVerified,
+	} {
+		t.Run(stage, func(t *testing.T) {
+			cfg := testConfig(t)
+			if err := saveCloudConfig(cfg, &cloudConfig{ServerURL: "https://cloud.example.test"}); err != nil {
+				t.Fatalf("save cloud config: %v", err)
+			}
+			s, err := store.New(cfg)
+			if err != nil {
+				t.Fatalf("open store: %v", err)
+			}
+			if err := s.EnrollProject("proj-a"); err != nil {
+				_ = s.Close()
+				t.Fatalf("seed enrollment: %v", err)
+			}
+			if err := s.SaveCloudUpgradeState(store.CloudUpgradeState{
+				Project:     "proj-a",
+				Stage:       stage,
+				RepairClass: store.UpgradeRepairClassRepairable,
+			}); err != nil {
+				_ = s.Close()
+				t.Fatalf("seed uncaptured checkpoint: %v", err)
+			}
+			if err := s.Close(); err != nil {
+				t.Fatalf("close seeded store: %v", err)
+			}
+
+			called := false
+			oldBootstrap := runUpgradeBootstrap
+			runUpgradeBootstrap = func(*store.Store, string, *cloudConfig) (*engramsync.UpgradeBootstrapResult, error) {
+				called = true
+				return nil, nil
+			}
+			t.Cleanup(func() { runUpgradeBootstrap = oldBootstrap })
+
+			withArgs(t, "engram", "cloud", "upgrade", "bootstrap", "--project", "proj-a")
+			_, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloud(cfg) })
+			if _, ok := recovered.(exitCode); !ok {
+				t.Fatalf("expected bootstrap checkpoint rejection, got %v", recovered)
+			}
+			if !strings.Contains(stderr, "requires a captured pre-bootstrap snapshot") {
+				t.Fatalf("expected captured-snapshot guidance, got %q", stderr)
+			}
+			if called {
+				t.Fatal("bootstrap must not proceed from an uncaptured checkpoint")
+			}
+
+			s, err = store.New(cfg)
+			if err != nil {
+				t.Fatalf("reopen store: %v", err)
+			}
+			defer s.Close()
+			enrolled, err := s.IsProjectEnrolled("proj-a")
+			if err != nil || !enrolled {
+				t.Fatalf("rejected bootstrap must preserve enrollment: enrolled=%t err=%v", enrolled, err)
+			}
+		})
+	}
 }
 
 func TestCmdCloudUpgradeRepairStatusAndRollbackBranches(t *testing.T) {
@@ -1248,8 +1410,12 @@ func TestCmdCloudUpgradeRepairStatusAndRollbackBranches(t *testing.T) {
 		}
 	})
 
-	t.Run("rollback restores cloud config when snapshot captured it", func(t *testing.T) {
+	t.Run("rollback leaves existing cloud config in place", func(t *testing.T) {
+		const token = "test-rollback-token-must-not-reach-sqlite"
 		cfg := testConfig(t)
+		if err := saveCloudConfig(cfg, &cloudConfig{ServerURL: "https://rollback.example.test", Token: token}); err != nil {
+			t.Fatalf("seed current cloud config: %v", err)
+		}
 		s, err := store.New(cfg)
 		if err != nil {
 			t.Fatalf("open store: %v", err)
@@ -1259,9 +1425,8 @@ func TestCmdCloudUpgradeRepairStatusAndRollbackBranches(t *testing.T) {
 			Stage:       store.UpgradeStageBootstrapPushed,
 			RepairClass: store.UpgradeRepairClassRepairable,
 			Snapshot: store.CloudUpgradeSnapshot{
-				CloudConfigPresent: true,
-				CloudConfigJSON:    `{"server_url":"https://rollback.example.test"}`,
-				ProjectEnrolled:    false,
+				Captured:        true,
+				ProjectEnrolled: false,
 			},
 		}); err != nil {
 			_ = s.Close()
@@ -1279,46 +1444,10 @@ func TestCmdCloudUpgradeRepairStatusAndRollbackBranches(t *testing.T) {
 		}
 		data, err := os.ReadFile(filepath.Join(cfg.DataDir, "cloud.json"))
 		if err != nil {
-			t.Fatalf("expected restored cloud config file: %v", err)
+			t.Fatalf("read existing cloud config after rollback: %v", err)
 		}
-		if !strings.Contains(string(data), "rollback.example.test") {
-			t.Fatalf("expected restored cloud config content, got %q", string(data))
-		}
-	})
-
-	t.Run("rollback removes cloud config when snapshot had none", func(t *testing.T) {
-		cfg := testConfig(t)
-		if err := saveCloudConfig(cfg, &cloudConfig{ServerURL: "https://cloud.example.test"}); err != nil {
-			t.Fatalf("seed current cloud config: %v", err)
-		}
-		s, err := store.New(cfg)
-		if err != nil {
-			t.Fatalf("open store: %v", err)
-		}
-		if err := s.SaveCloudUpgradeState(store.CloudUpgradeState{
-			Project:     "proj-a",
-			Stage:       store.UpgradeStageBootstrapPushed,
-			RepairClass: store.UpgradeRepairClassRepairable,
-			Snapshot: store.CloudUpgradeSnapshot{
-				CloudConfigPresent: false,
-				ProjectEnrolled:    false,
-			},
-		}); err != nil {
-			_ = s.Close()
-			t.Fatalf("seed rollback state: %v", err)
-		}
-		_ = s.Close()
-
-		withArgs(t, "engram", "cloud", "upgrade", "rollback", "--project", "proj-a")
-		stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloud(cfg) })
-		if recovered != nil || stderr != "" {
-			t.Fatalf("rollback should succeed, panic=%v stderr=%q", recovered, stderr)
-		}
-		if !strings.Contains(stdout, "stage: rolled_back") {
-			t.Fatalf("expected rolled_back stage output, got %q", stdout)
-		}
-		if _, err := os.Stat(filepath.Join(cfg.DataDir, "cloud.json")); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("expected cloud config to be removed, err=%v", err)
+		if !strings.Contains(string(data), "rollback.example.test") || !strings.Contains(string(data), token) {
+			t.Fatalf("expected rollback to leave existing cloud config intact, got %q", string(data))
 		}
 	})
 }
@@ -3856,6 +3985,30 @@ func TestCmdSyncImportEmptyAndMixedChunks(t *testing.T) {
 			t.Fatalf("unexpected mixed import output: %q", stdout)
 		}
 	})
+}
+
+func TestCmdSyncImportPrintsRelationCounts(t *testing.T) {
+	stubExitWithPanic(t)
+	workDir := t.TempDir()
+	withCwd(t, workDir)
+	cfg := testConfig(t)
+
+	originalSyncImport := syncImport
+	t.Cleanup(func() { syncImport = originalSyncImport })
+	syncImport = func(*engramsync.Syncer) (*engramsync.ImportResult, error) {
+		return &engramsync.ImportResult{RelationsReplayed: 2, RelationsDeferred: 3, RelationsDead: 4}, nil
+	}
+
+	withArgs(t, "engram", "sync", "--import")
+	stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdSync(cfg) })
+	if recovered != nil || stderr != "" {
+		t.Fatalf("sync import failed: panic=%v stderr=%q", recovered, stderr)
+	}
+	for _, want := range []string{"No new chunks to import", "Relations replayed: 2", "Relations deferred: 3", "Relations dead:     4"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("expected output to contain %q, got %q", want, stdout)
+		}
+	}
 }
 
 func TestCommandErrorSeamsAndUncoveredBranches(t *testing.T) {

@@ -216,6 +216,7 @@ func (s *Server) routes() {
 
 	// Context
 	s.mux.HandleFunc("GET /context", s.handleContext)
+	s.mux.HandleFunc("GET /context/compaction", s.handleCompactionContext)
 
 	// Export / Import — sensitive: full data read and bulk mutation.
 	s.mux.HandleFunc("GET /export", requireAuth(s.handleExport))
@@ -337,7 +338,13 @@ func (s *Server) handleAddObservation(w http.ResponseWriter, r *http.Request) {
 
 	id, err := s.store.AddObservation(body)
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		switch {
+		case errors.Is(err, store.ErrObservationTitleRequired),
+			errors.Is(err, store.ErrObservationContentRequired):
+			jsonError(w, http.StatusBadRequest, err.Error())
+		default:
+			jsonError(w, http.StatusInternalServerError, err.Error())
+		}
 		return
 	}
 
@@ -465,7 +472,13 @@ func (s *Server) handleUpdateObservation(w http.ResponseWriter, r *http.Request)
 
 	obs, err := s.store.UpdateObservation(id, body)
 	if err != nil {
-		jsonError(w, http.StatusNotFound, err.Error())
+		switch {
+		case errors.Is(err, store.ErrObservationTitleRequired),
+			errors.Is(err, store.ErrObservationContentRequired):
+			jsonError(w, http.StatusBadRequest, err.Error())
+		default:
+			jsonError(w, http.StatusNotFound, err.Error())
+		}
 		return
 	}
 
@@ -626,7 +639,12 @@ func (s *Server) handleAddPrompt(w http.ResponseWriter, r *http.Request) {
 
 	id, err := s.store.AddPrompt(body)
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		switch {
+		case errors.Is(err, store.ErrPromptContentRequired):
+			jsonError(w, http.StatusBadRequest, err.Error())
+		default:
+			jsonError(w, http.StatusInternalServerError, err.Error())
+		}
 		return
 	}
 
@@ -776,6 +794,26 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 
 	context, err := s.store.FormatContext(project, scope)
 	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]string{"context": context})
+}
+
+func (s *Server) handleCompactionContext(w http.ResponseWriter, r *http.Request) {
+	sessionID := strings.TrimSpace(r.URL.Query().Get("session_id"))
+	if sessionID == "" {
+		jsonError(w, http.StatusBadRequest, "session_id is required")
+		return
+	}
+
+	context, err := s.store.FormatCompactionContext(sessionID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			jsonError(w, http.StatusNotFound, "session not found")
+			return
+		}
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

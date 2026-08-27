@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -1102,6 +1104,64 @@ func TestCmdMCPDetectsProjectFromGit(t *testing.T) {
 
 	if capturedCfg.DefaultProject != "" {
 		t.Fatalf("DefaultProject = %q; want empty without flag/env", capturedCfg.DefaultProject)
+	}
+}
+
+func TestCmdMCPServesBeforeDeferredEnrolledProjectRepair(t *testing.T) {
+	cfg := testConfig(t)
+	seed, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("seed store: %v", err)
+	}
+	if err := seed.CreateSession("legacy-session", "legacy-project", t.TempDir()); err != nil {
+		_ = seed.Close()
+		t.Fatalf("seed session: %v", err)
+	}
+	if err := seed.EnrollProject("legacy-project"); err != nil {
+		_ = seed.Close()
+		t.Fatalf("enroll project: %v", err)
+	}
+	if _, err := seed.DB().Exec(`DELETE FROM sync_mutations WHERE project = ?`, "legacy-project"); err != nil {
+		_ = seed.Close()
+		t.Fatalf("remove journal entries: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("close seed store: %v", err)
+	}
+
+	oldStoreNew := storeNew
+	oldNewMCPServerWithConfig := newMCPServerWithConfig
+	oldServeMCP := serveMCP
+	t.Cleanup(func() {
+		storeNew = oldStoreNew
+		newMCPServerWithConfig = oldNewMCPServerWithConfig
+		serveMCP = oldServeMCP
+	})
+	storeNew = store.New
+
+	var mcpStore *store.Store
+	newMCPServerWithConfig = func(s *store.Store, mcpCfg mcp.MCPConfig, allowlist map[string]bool) *mcpserver.MCPServer {
+		mcpStore = s
+		return oldNewMCPServerWithConfig(s, mcpCfg, allowlist)
+	}
+	serveMCP = func(_ *mcpserver.MCPServer, _ ...mcpserver.StdioOption) error {
+		if mcpStore == nil {
+			return errors.New("MCP server did not receive a store")
+		}
+		var mutations int
+		if err := mcpStore.DB().QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE project = ?`, "legacy-project").Scan(&mutations); err != nil {
+			return fmt.Errorf("count journal entries at MCP readiness: %w", err)
+		}
+		if mutations != 0 {
+			return fmt.Errorf("MCP readiness ran deferred repair: got %d mutations", mutations)
+		}
+		return nil
+	}
+
+	withArgs(t, "engram", "mcp")
+	_, stderr := captureOutput(t, func() { cmdMCP(cfg) })
+	if stderr != "" {
+		t.Fatalf("MCP startup stderr = %q", stderr)
 	}
 }
 

@@ -22,15 +22,16 @@ const (
 )
 
 var (
-	ErrInvalidPrincipalKind   = errors.New("cloudstore: invalid principal kind")
-	ErrInvalidPrincipalRole   = errors.New("cloudstore: invalid principal role")
-	ErrLastActiveAdmin        = errors.New("cloudstore: cannot remove last active admin")
-	ErrSensitiveAuditMetadata = errors.New("cloudstore: sensitive auth audit metadata is not allowed")
-	ErrAuthAuditInsertFailed  = errors.New("cloudstore: auth audit insert failed")
-	ErrAdminAlreadyExists     = errors.New("cloudstore: a managed admin already exists")
-	ErrPrincipalNotFound      = errors.New("cloudstore: principal not found")
-	ErrPrincipalDisabled      = errors.New("cloudstore: principal is disabled")
-	ErrPrincipalTokenNotFound = errors.New("cloudstore: principal token not found")
+	ErrInvalidPrincipalKind            = errors.New("cloudstore: invalid principal kind")
+	ErrInvalidPrincipalRole            = errors.New("cloudstore: invalid principal role")
+	ErrLastActiveAdmin                 = errors.New("cloudstore: cannot remove last active admin")
+	ErrSensitiveAuditMetadata          = errors.New("cloudstore: sensitive auth audit metadata is not allowed")
+	ErrAuthAuditInsertFailed           = errors.New("cloudstore: auth audit insert failed")
+	ErrAdminAlreadyExists              = errors.New("cloudstore: a managed admin already exists")
+	ErrStrandedAdminRecoveryIneligible = errors.New("cloudstore: stranded admin token recovery is not eligible")
+	ErrPrincipalNotFound               = errors.New("cloudstore: principal not found")
+	ErrPrincipalDisabled               = errors.New("cloudstore: principal is disabled")
+	ErrPrincipalTokenNotFound          = errors.New("cloudstore: principal token not found")
 )
 
 type Principal struct {
@@ -92,6 +93,14 @@ type CreatePrincipalTokenParams struct {
 	TokenHash            string
 	Name                 string
 	CreatedByPrincipalID string
+}
+
+// RecoverStrandedAdminTokenParams contains the non-secret token data needed to
+// recover the single admin left without a token by a failed bootstrap.
+type RecoverStrandedAdminTokenParams struct {
+	TokenPrefix string
+	TokenHash   string
+	Name        string
 }
 
 type ProjectGrant struct {
@@ -300,7 +309,9 @@ func (cs *CloudStore) CreateFirstAdminHumanUser(ctx context.Context, params Crea
 
 	// Same advisory lock key as guardLastActiveAdminTx: first-admin creation
 	// serializes with concurrent admin-removal/demotion guard transactions
-	// as well as with concurrent first-admin bootstrap attempts.
+	// as well as with concurrent first-admin bootstrap attempts. There is no
+	// existing target principal to lock before this creation check, so it never
+	// waits on a principal row while holding the advisory lock.
 	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext('engram_cloud_active_admin_guard'))`); err != nil {
 		return HumanUser{}, fmt.Errorf("cloudstore: lock active admin guard: %w", err)
 	}
@@ -405,22 +416,32 @@ func (cs *CloudStore) CreatePrincipalToken(ctx context.Context, params CreatePri
 	if err != nil {
 		return PrincipalToken{}, err
 	}
-	const q = `
-		WITH target_principal AS (
-			SELECT id
-			FROM cloud_principals
-			WHERE id = $1 AND enabled = TRUE
-			FOR UPDATE
-		)
-		INSERT INTO cloud_principal_tokens (principal_id, token_prefix, token_hash, name, created_by_principal_id)
-		SELECT p.id, $2, $3, $4, $5
-		FROM target_principal p
-		RETURNING id::text, principal_id::text, token_prefix, '' AS token_hash, name, COALESCE(created_by_principal_id::text, ''), created_at, last_used_at, revoked_at, COALESCE(revoked_by_principal_id::text, ''), COALESCE(revocation_reason, '')`
-	token, err := scanPrincipalToken(cs.db.QueryRowContext(ctx, q, values.principalID, values.tokenPrefix, values.tokenHash, values.name, values.createdByPrincipalID))
-	if errors.Is(err, sql.ErrNoRows) {
-		return PrincipalToken{}, principalTokenTargetError(ctx, cs.db, values.principalID)
+	tx, err := cs.db.BeginTx(ctx, nil)
+	if err != nil {
+		return PrincipalToken{}, fmt.Errorf("cloudstore: begin principal token tx: %w", err)
 	}
-	return token, err
+	defer func() { _ = tx.Rollback() }()
+	if err := lockPrincipalTokenTargetTx(ctx, tx, values.principalID); err != nil {
+		return PrincipalToken{}, err
+	}
+	// Lock the token target before the shared advisory guard. This matches the
+	// existing last-active-admin transitions, which also lock their target row
+	// before acquiring the guard, and prevents inverse-order deadlocks.
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext('engram_cloud_active_admin_guard'))`); err != nil {
+		return PrincipalToken{}, fmt.Errorf("cloudstore: lock active admin guard: %w", err)
+	}
+	const q = `
+		INSERT INTO cloud_principal_tokens (principal_id, token_prefix, token_hash, name, created_by_principal_id)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id::text, principal_id::text, token_prefix, '' AS token_hash, name, COALESCE(created_by_principal_id::text, ''), created_at, last_used_at, revoked_at, COALESCE(revoked_by_principal_id::text, ''), COALESCE(revocation_reason, '')`
+	token, err := scanPrincipalToken(tx.QueryRowContext(ctx, q, values.principalID, values.tokenPrefix, values.tokenHash, values.name, values.createdByPrincipalID))
+	if err != nil {
+		return PrincipalToken{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return PrincipalToken{}, fmt.Errorf("cloudstore: commit principal token tx: %w", err)
+	}
+	return token, nil
 }
 
 func (cs *CloudStore) CreatePrincipalTokenWithAudit(ctx context.Context, params CreatePrincipalTokenParams, audit AuthAuditEvent) (PrincipalToken, error) {
@@ -436,22 +457,21 @@ func (cs *CloudStore) CreatePrincipalTokenWithAudit(ctx context.Context, params 
 		return PrincipalToken{}, fmt.Errorf("cloudstore: begin principal token audit tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := lockPrincipalTokenTargetTx(ctx, tx, values.principalID); err != nil {
+		return PrincipalToken{}, err
+	}
+	// Keep normal token issuance in the same eligibility serialization as the
+	// stranded-admin recovery, after taking the target-row lock to preserve the
+	// lock order used by last-active-admin transitions.
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext('engram_cloud_active_admin_guard'))`); err != nil {
+		return PrincipalToken{}, fmt.Errorf("cloudstore: lock active admin guard: %w", err)
+	}
 
 	const q = `
-		WITH target_principal AS (
-			SELECT id
-			FROM cloud_principals
-			WHERE id = $1 AND enabled = TRUE
-			FOR UPDATE
-		)
 		INSERT INTO cloud_principal_tokens (principal_id, token_prefix, token_hash, name, created_by_principal_id)
-		SELECT p.id, $2, $3, $4, $5
-		FROM target_principal p
+		VALUES ($1, $2, $3, $4, $5)
 		RETURNING id::text, principal_id::text, token_prefix, '' AS token_hash, name, COALESCE(created_by_principal_id::text, ''), created_at, last_used_at, revoked_at, COALESCE(revoked_by_principal_id::text, ''), COALESCE(revocation_reason, '')`
 	token, err := scanPrincipalToken(tx.QueryRowContext(ctx, q, values.principalID, values.tokenPrefix, values.tokenHash, values.name, values.createdByPrincipalID))
-	if errors.Is(err, sql.ErrNoRows) {
-		return PrincipalToken{}, principalTokenTargetError(ctx, tx, values.principalID)
-	}
 	if err != nil {
 		return PrincipalToken{}, err
 	}
@@ -462,6 +482,119 @@ func (cs *CloudStore) CreatePrincipalTokenWithAudit(ctx context.Context, params 
 		return PrincipalToken{}, fmt.Errorf("cloudstore: commit principal token audit tx: %w", err)
 	}
 	return token, nil
+}
+
+// RecoverStrandedAdminTokenWithAudit atomically issues a token to the sole
+// enabled managed human admin only when no principal token exists anywhere in
+// the deployment. It is intentionally narrower than normal token issuance:
+// it repairs only the partial state left by the historical bootstrap audit
+// failure, preserves all grants, and cannot be repeated after a token exists.
+func (cs *CloudStore) RecoverStrandedAdminTokenWithAudit(ctx context.Context, params RecoverStrandedAdminTokenParams, audit AuthAuditEvent) (PrincipalToken, error) {
+	if cs == nil || cs.db == nil {
+		return PrincipalToken{}, fmt.Errorf("cloudstore: not initialized")
+	}
+	tokenPrefix := strings.TrimSpace(params.TokenPrefix)
+	if tokenPrefix == "" {
+		return PrincipalToken{}, fmt.Errorf("cloudstore: token prefix is required")
+	}
+	tokenHash := strings.TrimSpace(params.TokenHash)
+	if tokenHash == "" {
+		return PrincipalToken{}, fmt.Errorf("cloudstore: token hash is required")
+	}
+
+	tx, err := cs.db.BeginTx(ctx, nil)
+	if err != nil {
+		return PrincipalToken{}, fmt.Errorf("cloudstore: begin stranded admin token recovery tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Lock active human-admin rows first, matching normal issuance's row-then-
+	// advisory-lock order. Re-read them after the guard is held so a concurrent
+	// transition cannot make the recovery eligibility stale while waiting.
+	if _, err := lockedEnabledHumanAdminIDsTx(ctx, tx); err != nil {
+		return PrincipalToken{}, err
+	}
+	// Use the same transaction-scoped lock as first-admin creation and the
+	// last-active-admin guard so recovery eligibility and token issuance cannot
+	// race with those safety-critical admin transitions.
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext('engram_cloud_active_admin_guard'))`); err != nil {
+		return PrincipalToken{}, fmt.Errorf("cloudstore: lock active admin guard: %w", err)
+	}
+
+	adminIDs, err := lockedEnabledHumanAdminIDsTx(ctx, tx)
+	if err != nil {
+		return PrincipalToken{}, err
+	}
+	if len(adminIDs) != 1 {
+		return PrincipalToken{}, fmt.Errorf("%w: requires exactly one enabled managed human admin, found %d", ErrStrandedAdminRecoveryIneligible, len(adminIDs))
+	}
+
+	var tokenCount int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM cloud_principal_tokens`).Scan(&tokenCount); err != nil {
+		return PrincipalToken{}, fmt.Errorf("cloudstore: count stranded admin recovery tokens: %w", err)
+	}
+	if tokenCount != 0 {
+		return PrincipalToken{}, fmt.Errorf("%w: requires zero principal tokens, found %d", ErrStrandedAdminRecoveryIneligible, tokenCount)
+	}
+
+	principalID := adminIDs[0]
+	const q = `
+		INSERT INTO cloud_principal_tokens (principal_id, token_prefix, token_hash, name, created_by_principal_id)
+		VALUES ($1, $2, $3, $4, $1)
+		RETURNING id::text, principal_id::text, token_prefix, '' AS token_hash, name, COALESCE(created_by_principal_id::text, ''), created_at, last_used_at, revoked_at, COALESCE(revoked_by_principal_id::text, ''), COALESCE(revocation_reason, '')`
+	token, err := scanPrincipalToken(tx.QueryRowContext(ctx, q, principalID, tokenPrefix, tokenHash, strings.TrimSpace(params.Name)))
+	if err != nil {
+		return PrincipalToken{}, fmt.Errorf("cloudstore: create stranded admin recovery token: %w", err)
+	}
+
+	// The store owns the target identity so a caller cannot create an audit
+	// event that claims recovery for a different principal.
+	audit.TargetPrincipalID = principalID
+	if err := insertAuthAuditEvent(ctx, tx, audit); err != nil {
+		return PrincipalToken{}, fmt.Errorf("%w: %w", ErrAuthAuditInsertFailed, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return PrincipalToken{}, fmt.Errorf("cloudstore: commit stranded admin token recovery tx: %w", err)
+	}
+	return token, nil
+}
+
+func lockPrincipalTokenTargetTx(ctx context.Context, tx *sql.Tx, principalID string) error {
+	var lockedPrincipalID string
+	err := tx.QueryRowContext(ctx, `SELECT id::text FROM cloud_principals WHERE id = $1 AND enabled = TRUE FOR UPDATE`, principalID).Scan(&lockedPrincipalID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return principalTokenTargetError(ctx, tx, principalID)
+	}
+	if err != nil {
+		return fmt.Errorf("cloudstore: lock token principal: %w", err)
+	}
+	return nil
+}
+
+func lockedEnabledHumanAdminIDsTx(ctx context.Context, tx *sql.Tx) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT p.id::text
+		FROM cloud_principals p
+		JOIN cloud_human_users h ON h.principal_id = p.id
+		WHERE p.kind = $1 AND p.role = $2 AND p.enabled = TRUE
+		ORDER BY p.id
+		FOR UPDATE OF p`, PrincipalKindHuman, PrincipalRoleAdmin)
+	if err != nil {
+		return nil, fmt.Errorf("cloudstore: find stranded admin recovery target: %w", err)
+	}
+	defer rows.Close()
+	adminIDs := make([]string, 0, 2)
+	for rows.Next() {
+		var principalID string
+		if err := rows.Scan(&principalID); err != nil {
+			return nil, fmt.Errorf("cloudstore: scan stranded admin recovery target: %w", err)
+		}
+		adminIDs = append(adminIDs, principalID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("cloudstore: iterate stranded admin recovery targets: %w", err)
+	}
+	return adminIDs, nil
 }
 
 type createPrincipalTokenValues struct {
@@ -878,9 +1011,6 @@ func normalizeCloudProjectGrant(project string) string {
 }
 
 func guardLastActiveAdminTx(ctx context.Context, tx *sql.Tx, principalID string, nextRole string, nextEnabled bool) error {
-	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext('engram_cloud_active_admin_guard'))`); err != nil {
-		return fmt.Errorf("cloudstore: lock active admin guard: %w", err)
-	}
 	var currentRole string
 	var currentEnabled bool
 	err := tx.QueryRowContext(ctx, `SELECT role, enabled FROM cloud_principals WHERE id = $1 FOR UPDATE`, principalID).Scan(&currentRole, &currentEnabled)
@@ -889,6 +1019,12 @@ func guardLastActiveAdminTx(ctx context.Context, tx *sql.Tx, principalID string,
 	}
 	if err != nil {
 		return fmt.Errorf("cloudstore: read admin guard candidate: %w", err)
+	}
+	// All principal-targeted users of engram_cloud_active_admin_guard lock their
+	// principal rows first, then acquire the advisory lock. This avoids an
+	// advisory-to-row inversion with token issuance and recovery.
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext('engram_cloud_active_admin_guard'))`); err != nil {
+		return fmt.Errorf("cloudstore: lock active admin guard: %w", err)
 	}
 	if currentRole != PrincipalRoleAdmin || !currentEnabled {
 		return nil

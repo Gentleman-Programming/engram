@@ -570,6 +570,99 @@ func TestValidationAndImportExportErrorsE2E(t *testing.T) {
 	recentPromptsResp.Body.Close()
 }
 
+func TestCompactionContextE2EIsSessionScoped(t *testing.T) {
+	s, ts := newE2EServer(t)
+	client := ts.Client()
+
+	for _, sessionID := range []string{"runtime-a", "runtime-b"} {
+		resp := postJSON(t, client, ts.URL+"/sessions", map[string]any{"id": sessionID, "project": "engram"})
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("create %s: got %d", sessionID, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+	for _, item := range []struct {
+		sessionID string
+		title     string
+		content   string
+		pinned    bool
+	}{
+		{"runtime-a", "pinned-a", "pinned-content-a", true},
+		{"runtime-a", "recent-a", "recent-content-a", false},
+		{"runtime-b", "pinned-b", "pinned-content-b", true},
+		{"runtime-b", "recent-b", "recent-content-b", false},
+	} {
+		resp := postJSON(t, client, ts.URL+"/observations", map[string]any{"session_id": item.sessionID, "type": "decision", "title": item.title, "content": item.content, "project": "engram"})
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("create %s: got %d", item.title, resp.StatusCode)
+		}
+		id := int64(decodeJSON[map[string]any](t, resp)["id"].(float64))
+		if item.pinned {
+			if err := s.PinObservation(id); err != nil {
+				t.Fatalf("pin %s: %v", item.title, err)
+			}
+		}
+	}
+
+	for _, item := range []struct{ sessionID, content string }{{"runtime-a", "prompt-a"}, {"runtime-b", "prompt-b"}} {
+		resp := postJSON(t, client, ts.URL+"/prompts", map[string]any{"session_id": item.sessionID, "content": item.content, "project": "engram"})
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("create %s: got %d", item.content, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+
+	response, err := client.Get(ts.URL + "/context/compaction?session_id=runtime-a&project=foreign")
+	if err != nil {
+		t.Fatalf("get compaction context: %v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("compaction context status = %d, want 200", response.StatusCode)
+	}
+	context := decodeJSON[map[string]string](t, response)["context"]
+	for _, value := range []string{"runtime-a", "prompt-a", "recent-a"} {
+		if !strings.Contains(context, value) {
+			t.Errorf("context missing %q:\n%s", value, context)
+		}
+	}
+	for _, value := range []string{"runtime-b", "prompt-b", "recent-b"} {
+		if strings.Contains(context, value) {
+			t.Errorf("context leaked %q:\n%s", value, context)
+		}
+	}
+
+	missing, err := client.Get(ts.URL + "/context/compaction")
+	if err != nil {
+		t.Fatalf("get missing compaction session: %v", err)
+	}
+	if missing.StatusCode != http.StatusBadRequest {
+		t.Fatalf("missing session status = %d, want 400", missing.StatusCode)
+	}
+	missing.Body.Close()
+
+	unknown, err := client.Get(ts.URL + "/context/compaction?session_id=unknown")
+	if err != nil {
+		t.Fatalf("get unknown compaction session: %v", err)
+	}
+	if unknown.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown session status = %d, want 404", unknown.StatusCode)
+	}
+	unknown.Body.Close()
+
+	manual, err := client.Get(ts.URL + "/context?project=engram")
+	if err != nil {
+		t.Fatalf("get manual context: %v", err)
+	}
+	if manual.StatusCode != http.StatusOK {
+		t.Fatalf("manual context status = %d, want 200", manual.StatusCode)
+	}
+	manualContext := decodeJSON[map[string]string](t, manual)["context"]
+	if !strings.Contains(manualContext, "prompt-a") || !strings.Contains(manualContext, "prompt-b") ||
+		!strings.Contains(manualContext, "recent-a") || !strings.Contains(manualContext, "recent-b") {
+		t.Fatalf("manual project context must remain project-scoped:\n%s", manualContext)
+	}
+}
+
 func TestPromptAndObservationMutationHandlersE2E(t *testing.T) {
 	_, ts := newE2EServer(t)
 	client := ts.Client()

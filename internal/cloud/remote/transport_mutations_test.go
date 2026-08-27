@@ -93,7 +93,7 @@ func TestMutationTransportPullSinceSeq(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"mutations":[{"seq":6,"entity":"obs","entity_key":"k6","op":"upsert","payload":{}}],"has_more":false,"latest_seq":10}`))
+		_, _ = w.Write([]byte(`{"mutations":[{"seq":6,"project":"project-a","entity":"obs","entity_key":"k6","op":"upsert","payload":{}}],"has_more":false,"latest_seq":10}`))
 	}))
 	defer srv.Close()
 
@@ -110,6 +110,9 @@ func TestMutationTransportPullSinceSeq(t *testing.T) {
 	}
 	if resp.LatestSeq != 10 {
 		t.Fatalf("expected latest_seq=10, got %d", resp.LatestSeq)
+	}
+	if resp.Mutations[0].Project != "project-a" {
+		t.Fatalf("expected mutation project project-a, got %q", resp.Mutations[0].Project)
 	}
 }
 

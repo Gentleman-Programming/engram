@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"log"
 	"strings"
@@ -19,6 +20,21 @@ func setupRelationsStore(t *testing.T) *Store {
 		t.Fatalf("CreateSession: %v", err)
 	}
 	return s
+}
+
+func TestGetRelationsForObservationsContext_AlreadyCanceled(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, syncID := addTestObs(t, s, "Contextual relation", "decision", "testproject", "project")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	relations, err := s.GetRelationsForObservationsContext(ctx, []string{syncID})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context cancellation, got relations=%v err=%v", relations, err)
+	}
+	if relations != nil {
+		t.Fatalf("expected no relations from canceled enrichment, got %v", relations)
+	}
 }
 
 // addTestObs inserts a single observation and returns its (id, syncID).
@@ -91,6 +107,25 @@ func TestFindCandidates_HappyPath(t *testing.T) {
 	}
 	if !hasPrefix(c.JudgmentID, "rel-") {
 		t.Errorf("candidate.JudgmentID must start with 'rel-'; got %q", c.JudgmentID)
+	}
+}
+
+func TestFindCandidates_EscapesInteriorQuotes(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, _ = addTestObs(t, s, `hello"world candidate`, "decision", "testproject", "project")
+	savedID, _ := addTestObs(t, s, `hello"world source`, "decision", "testproject", "project")
+
+	candidates, err := s.FindCandidates(savedID, CandidateOptions{
+		Project:   "testproject",
+		Scope:     "project",
+		Limit:     3,
+		BM25Floor: ptrFloat64(-10.0),
+	})
+	if err != nil {
+		t.Fatalf("FindCandidates: %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("expected 1 candidate, got %d", len(candidates))
 	}
 }
 
@@ -383,12 +418,12 @@ func TestJudgeRelation_HappyPath(t *testing.T) {
 
 	confidence := 0.9
 	judged, err := s.JudgeRelation(JudgeRelationParams{
-		JudgmentID:     relSyncID,
-		Relation:       "not_conflict",
-		Confidence:     &confidence,
-		MarkedByActor:  "agent:claude-sonnet-4-6",
-		MarkedByKind:   "agent",
-		MarkedByModel:  "claude-sonnet-4-6",
+		JudgmentID:    relSyncID,
+		Relation:      "not_conflict",
+		Confidence:    &confidence,
+		MarkedByActor: "agent:claude-sonnet-4-6",
+		MarkedByKind:  "agent",
+		MarkedByModel: "claude-sonnet-4-6",
 	})
 	if err != nil {
 		t.Fatalf("JudgeRelation: %v", err)
@@ -595,14 +630,14 @@ func TestProvenance_FullRowPersisted(t *testing.T) {
 	evidence := `{"basis":"title overlap"}`
 	reason := "titles are nearly identical"
 	judged, err := s.JudgeRelation(JudgeRelationParams{
-		JudgmentID:     relSyncID,
-		Relation:       "compatible",
-		Confidence:     &confidence,
-		Evidence:       &evidence,
-		Reason:         &reason,
-		MarkedByActor:  "agent:claude-sonnet-4-6",
-		MarkedByKind:   "agent",
-		MarkedByModel:  "claude-sonnet-4-6",
+		JudgmentID:    relSyncID,
+		Relation:      "compatible",
+		Confidence:    &confidence,
+		Evidence:      &evidence,
+		Reason:        &reason,
+		MarkedByActor: "agent:claude-sonnet-4-6",
+		MarkedByKind:  "agent",
+		MarkedByModel: "claude-sonnet-4-6",
 	})
 	if err != nil {
 		t.Fatalf("JudgeRelation: %v", err)
@@ -1380,6 +1415,34 @@ func TestGetRelationStats_EmptyProject(t *testing.T) {
 	}
 	if stats.DeferredCount != 0 || stats.DeadCount != 0 {
 		t.Errorf("expected DeferredCount=0 DeadCount=0; got %d %d", stats.DeferredCount, stats.DeadCount)
+	}
+}
+
+func TestGetRelationStats_ScopesDeferredCountsByProject(t *testing.T) {
+	s := newTestStore(t)
+	for _, row := range []struct {
+		syncID  string
+		project string
+		status  string
+	}{
+		{syncID: "deferred-alpha", project: "alpha", status: "deferred"},
+		{syncID: "dead-beta", project: "beta", status: "dead"},
+	} {
+		if _, err := s.db.Exec(`
+			INSERT INTO sync_apply_deferred
+				(sync_id, entity, payload, target_key, project, scope_class, apply_status, first_seen_at)
+			VALUES (?, 'relation', '{}', 'cloud', ?, 'scoped', ?, datetime('now'))
+		`, row.syncID, row.project, row.status); err != nil {
+			t.Fatalf("seed %s deferred row: %v", row.project, err)
+		}
+	}
+
+	stats, err := s.GetRelationStats("alpha")
+	if err != nil {
+		t.Fatalf("GetRelationStats alpha: %v", err)
+	}
+	if stats.DeferredCount != 1 || stats.DeadCount != 0 {
+		t.Fatalf("alpha deferred stats = deferred=%d dead=%d, want 1/0", stats.DeferredCount, stats.DeadCount)
 	}
 }
 

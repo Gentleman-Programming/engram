@@ -161,7 +161,7 @@ When you are not sure which key to use, call `mem_suggest_topic_key` before `mem
    → creates new observation (revision_count=1)
 
 3. (later session) mem_save(..., topic_key="architecture/auth-model")
-   → updates existing observation (revision_count=2)
+   → updates the existing observation (revision_count=2) and attributes it to the latest writer session
 ```
 
 `mem_suggest_topic_key` families:

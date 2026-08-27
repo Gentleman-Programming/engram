@@ -349,6 +349,69 @@ func TestAdditionalServerErrorBranches(t *testing.T) {
 	}
 }
 
+func TestWriteHandlersRejectWhitespaceOnlyRequiredFields(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	if err := st.CreateSession("s-whitespace", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	observationID, err := st.AddObservation(store.AddObservationParams{
+		SessionID: "s-whitespace",
+		Type:      "decision",
+		Title:     "Original title",
+		Content:   "Original content",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("seed observation: %v", err)
+	}
+
+	assertBadRequest := func(method, path, body string) {
+		t.Helper()
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for %s %s, got %d body=%s", method, path, rec.Code, rec.Body.String())
+		}
+	}
+
+	assertBadRequest(http.MethodPost, "/observations", `{"session_id":"s-whitespace","type":"decision","title":" \t\n ","content":"Invalid observation","project":"engram"}`)
+	assertBadRequest(http.MethodPost, "/observations", `{"session_id":"s-whitespace","type":"decision","title":"Valid title","content":" \t\n ","project":"engram"}`)
+	assertBadRequest(http.MethodPatch, fmt.Sprintf("/observations/%d", observationID), `{"title":" \t\n "}`)
+	assertBadRequest(http.MethodPatch, fmt.Sprintf("/observations/%d", observationID), `{"content":" \t\n "}`)
+	assertBadRequest(http.MethodPost, "/prompts", `{"session_id":"s-whitespace","content":" \t\n ","project":"engram"}`)
+
+	var observationCount, promptCount int
+	if err := st.DB().QueryRow(`SELECT count(*) FROM observations`).Scan(&observationCount); err != nil {
+		t.Fatalf("count observations: %v", err)
+	}
+	if observationCount != 1 {
+		t.Fatalf("expected invalid observation create not to persist, got %d observations", observationCount)
+	}
+	if err := st.DB().QueryRow(`SELECT count(*) FROM user_prompts`).Scan(&promptCount); err != nil {
+		t.Fatalf("count prompts: %v", err)
+	}
+	if promptCount != 0 {
+		t.Fatalf("expected invalid prompt create not to persist, got %d prompts", promptCount)
+	}
+
+	observation, err := st.GetObservation(observationID)
+	if err != nil {
+		t.Fatalf("get seeded observation: %v", err)
+	}
+	if observation.Title != "Original title" {
+		t.Fatalf("expected invalid observation update not to persist, got title %q", observation.Title)
+	}
+	if observation.Content != "Original content" {
+		t.Fatalf("expected invalid observation update not to persist, got content %q", observation.Content)
+	}
+}
+
 func TestHandleReviewListAndMarkReviewed(t *testing.T) {
 	st := newServerTestStore(t)
 	srv := New(st, 0)

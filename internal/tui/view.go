@@ -80,6 +80,8 @@ func (m Model) View() string {
 		content = m.viewSessionDetail()
 	case ScreenSetup:
 		content = m.viewSetup()
+	case ScreenCloudSettings:
+		content = m.viewCloudSettings()
 	default:
 		content = "Unknown screen"
 	}
@@ -159,19 +161,36 @@ func (m Model) viewDashboard() string {
 	// Menu
 	b.WriteString(titleStyle.Render("  Actions"))
 	b.WriteString("\n")
+	b.WriteString(renderMenu(dashboardMenuItems, m.Cursor))
 
-	for i, item := range dashboardMenuItems {
-		if i == m.Cursor {
+	// Help
+	b.WriteString(helpStyle.Render("\n  j/k navigate • enter select • s search • q quit"))
+
+	return b.String()
+}
+
+func (m Model) viewCloudSettings() string {
+	var b strings.Builder
+
+	b.WriteString(headerStyle.Render("  Cloud sync settings"))
+	b.WriteString("\n\n")
+	b.WriteString(renderMenu(cloudSettingsMenuItems, m.Cursor))
+	b.WriteString(helpStyle.Render("\n  j/k navigate • enter select • esc/q back"))
+
+	return b.String()
+}
+
+// renderMenu renders a vertical list of selectable menu items with a cursor.
+func renderMenu(items []string, cursor int) string {
+	var b strings.Builder
+	for i, item := range items {
+		if i == cursor {
 			b.WriteString(menuSelectedStyle.Render("▸ " + item))
 		} else {
 			b.WriteString(menuItemStyle.Render("  " + item))
 		}
 		b.WriteString("\n")
 	}
-
-	// Help
-	b.WriteString(helpStyle.Render("\n  j/k navigate • enter select • s search • q quit"))
-
 	return b.String()
 }
 
@@ -466,6 +485,26 @@ func (m Model) viewSessions() string {
 	b.WriteString(headerStyle.Render(header))
 	b.WriteString("\n")
 
+	switch m.SessionDeleteState {
+	case SessionDeleteStateDeleting:
+		b.WriteString("\n")
+		b.WriteString(sectionHeadingStyle.Render("  Deleting Session"))
+		b.WriteString("\n\n")
+		b.WriteString(detailContentStyle.Render(fmt.Sprintf("  Deleting session %q...", m.SessionDeleteID)))
+		b.WriteString("\n")
+		return b.String()
+	case SessionDeleteStatePrompt:
+		b.WriteString("\n")
+		b.WriteString(sectionHeadingStyle.Render("  Confirm Session Delete"))
+		b.WriteString("\n\n")
+		b.WriteString(detailContentStyle.Render(fmt.Sprintf("  Delete session %q from project %q?", m.SessionDeleteID, m.SessionDeleteProject)))
+		b.WriteString("\n")
+		b.WriteString(timestampStyle.Render("  Sessions with observations cannot be deleted; Engram will refuse unsafe deletes."))
+		b.WriteString("\n\n")
+		b.WriteString(helpStyle.Render("  [y] Delete  [n] Cancel  [esc] Cancel"))
+		return b.String()
+	}
+
 	if count == 0 {
 		b.WriteString(noResultsStyle.Render("No sessions yet."))
 		b.WriteString("\n\n")
@@ -513,7 +552,7 @@ func (m Model) viewSessions() string {
 			timestampStyle.Render(fmt.Sprintf("showing %d-%d of %d", m.Scroll+1, end, count))))
 	}
 
-	b.WriteString(helpStyle.Render("\n  j/k navigate • enter view session • esc back"))
+	b.WriteString(helpStyle.Render("\n  j/k navigate • enter view session • d delete • esc back"))
 
 	return b.String()
 }

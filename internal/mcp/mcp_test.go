@@ -15,6 +15,7 @@ import (
 	"github.com/Gentleman-Programming/engram/internal/project"
 	"github.com/Gentleman-Programming/engram/internal/store"
 	mcppkg "github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
 )
 
 func newMCPTestStore(t *testing.T) *store.Store {
@@ -292,6 +293,71 @@ func TestHandleSaveRejectsMissingContent(t *testing.T) {
 	}
 	if len(obs) != 0 {
 		t.Fatalf("expected no observation to be written, got %#v", obs)
+	}
+}
+
+func TestSaveHandlersExposeStoreAdmissionErrors(t *testing.T) {
+	tests := []struct {
+		name      string
+		handler   server.ToolHandlerFunc
+		arguments map[string]any
+		wantError string
+		countRows func(*store.Store) (int, error)
+	}{
+		{
+			name:      "observation title",
+			arguments: map[string]any{"title": " \t\n ", "content": "valid content", "project": "engram"},
+			wantError: "Failed to save: observation title is required",
+			countRows: func(s *store.Store) (int, error) {
+				var count int
+				err := s.DB().QueryRow(`SELECT count(*) FROM observations`).Scan(&count)
+				return count, err
+			},
+		},
+		{
+			name:      "prompt content",
+			arguments: map[string]any{"content": " \t\n ", "project": "engram"},
+			wantError: "Failed to save prompt: prompt content is required",
+			countRows: func(s *store.Store) (int, error) {
+				var count int
+				err := s.DB().QueryRow(`SELECT count(*) FROM user_prompts`).Scan(&count)
+				return count, err
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newMCPTestStore(t)
+			if tc.name == "observation title" {
+				tc.handler = handleSave(s, MCPConfig{}, nil)
+			} else {
+				tc.handler = handleSavePrompt(s, MCPConfig{}, nil)
+			}
+
+			before, err := tc.countRows(s)
+			if err != nil {
+				t.Fatalf("count rows before invalid write: %v", err)
+			}
+			res, err := tc.handler(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: tc.arguments}})
+			if err != nil {
+				t.Fatalf("handler error: %v", err)
+			}
+			if !res.IsError {
+				t.Fatalf("expected tool error, got %q", callResultText(t, res))
+			}
+			if got := callResultText(t, res); got != tc.wantError {
+				t.Fatalf("expected error %q, got %q", tc.wantError, got)
+			}
+
+			after, err := tc.countRows(s)
+			if err != nil {
+				t.Fatalf("count rows after invalid write: %v", err)
+			}
+			if after != before {
+				t.Fatalf("invalid write persisted a primary row: %d->%d", before, after)
+			}
+		})
 	}
 }
 
@@ -918,6 +984,41 @@ func TestHandleSearchAndCRUDHandlers(t *testing.T) {
 	}
 }
 
+func TestHandleSearch_PropagatesCanceledContext(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("s-canceled-search", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "s-canceled-search",
+		Type:      "decision",
+		Title:     "Canceled search must stop",
+		Content:   "Search cancellation is observable at the handler boundary.",
+		Project:   "engram",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	result, err := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(ctx, mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"query":   "canceled search",
+			"project": "engram",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("handle search: %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("expected canceled search to be a tool error, got %s", callResultText(t, result))
+	}
+	if !strings.Contains(callResultText(t, result), context.Canceled.Error()) {
+		t.Fatalf("expected cancellation error, got %s", callResultText(t, result))
+	}
+}
+
 func TestHandleSaveReturnsLifecycleState(t *testing.T) {
 	s := newMCPTestStore(t)
 	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
@@ -1161,6 +1262,43 @@ func TestHandlePromptContextStatsTimelineAndSessionHandlers(t *testing.T) {
 	}
 	if endRes.IsError {
 		t.Fatalf("unexpected session end error: %s", callResultText(t, endRes))
+	}
+}
+
+func TestMemContextRemainsProjectScopedAcrossSessions(t *testing.T) {
+	s := newMCPTestStore(t)
+	for _, sessionID := range []string{"manual-a", "manual-b"} {
+		if err := s.CreateSession(sessionID, "engram", "/tmp/engram"); err != nil {
+			t.Fatalf("create %s: %v", sessionID, err)
+		}
+		if _, err := s.AddObservation(store.AddObservationParams{
+			SessionID: sessionID,
+			Type:      "decision",
+			Title:     sessionID,
+			Content:   "content-" + sessionID,
+			Project:   "engram",
+			Scope:     "project",
+		}); err != nil {
+			t.Fatalf("add %s observation: %v", sessionID, err)
+		}
+	}
+
+	h := handleContext(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"project": "engram",
+		"scope":   "project",
+	}}})
+	if err != nil {
+		t.Fatalf("mem_context handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected mem_context error: %s", callResultText(t, res))
+	}
+	context := callResultText(t, res)
+	for _, value := range []string{"manual-a", "manual-b"} {
+		if !strings.Contains(context, value) {
+			t.Fatalf("manual mem_context must remain project-scoped and include %q:\n%s", value, context)
+		}
 	}
 }
 
@@ -5623,9 +5761,9 @@ func TestHandleTimeline_ExplicitUnknownProjectError(t *testing.T) {
 
 // ─── F2: mem_session_summary schema + auto-detect tests ──────────────────────
 
-// TestMemSessionSummary_SchemaNoProjectField: mem_session_summary must NOT have
-// 'project' in its input schema (mirrors REQ-308 write-tool contract).
-func TestMemSessionSummary_SchemaNoProjectField(t *testing.T) {
+// TestMemSessionSummary_SchemaIncludesProjectField: mem_session_summary must have
+// 'project', 'project_choice_reason', and 'recovery_token' in its input schema.
+func TestMemSessionSummary_SchemaIncludesProjectField(t *testing.T) {
 	s := newMCPTestStore(t)
 	srv := NewServer(s)
 
@@ -5634,8 +5772,80 @@ func TestMemSessionSummary_SchemaNoProjectField(t *testing.T) {
 		t.Fatal("mem_session_summary not registered")
 	}
 	props := st.Tool.InputSchema.Properties
-	if _, hasProject := props["project"]; hasProject {
-		t.Error("mem_session_summary must not have 'project' in schema (write tool — auto-detect only)")
+	if _, hasProject := props["project"]; !hasProject {
+		t.Error("mem_session_summary must have 'project' in schema")
+	}
+	if _, hasReason := props["project_choice_reason"]; !hasReason {
+		t.Error("mem_session_summary must have 'project_choice_reason' in schema")
+	}
+	if _, hasToken := props["recovery_token"]; !hasToken {
+		t.Error("mem_session_summary must have 'recovery_token' in schema")
+	}
+}
+
+// TestMemSessionSummary_ExplicitProjectOverride: summary is stored under the explicit project provided.
+func TestMemSessionSummary_ExplicitProjectOverride(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	if err := s.EnrollProject("explicit-summary-project"); err != nil {
+		t.Fatal(err)
+	}
+	h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"content": "## Goal\nTest explicit project override",
+			"project": "explicit-summary-project",
+		}},
+	})
+	if err != nil || res.IsError {
+		t.Fatalf("session summary: err=%v isError=%v text=%q", err, res.IsError, callResultText(t, res))
+	}
+
+	obs, err := s.RecentObservations("explicit-summary-project", "project", 5)
+	if err != nil || len(obs) == 0 {
+		t.Fatal("expected session_summary observation under explicit project 'explicit-summary-project'")
+	}
+
+	m := callResultJSON(t, res)
+	if got := m["project"]; got != "explicit-summary-project" {
+		t.Errorf("response envelope project = %v; want 'explicit-summary-project'", got)
+	}
+}
+
+// TestMemSessionSummary_ResolveViaSessionID: summary is stored under the project associated with the session.
+func TestMemSessionSummary_ResolveViaSessionID(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("active-sess", "session-linked-project", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+
+	h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"content":    "## Goal\nTest project via session_id",
+			"session_id": "active-sess",
+		}},
+	})
+	if err != nil || res.IsError {
+		t.Fatalf("session summary: err=%v isError=%v text=%q", err, res.IsError, callResultText(t, res))
+	}
+
+	obs, err := s.RecentObservations("session-linked-project", "project", 5)
+	if err != nil || len(obs) == 0 {
+		t.Fatal("expected session_summary observation under session project 'session-linked-project'")
+	}
+
+	m := callResultJSON(t, res)
+	if got := m["project"]; got != "session-linked-project" {
+		t.Errorf("response envelope project = %v; want 'session-linked-project'", got)
 	}
 }
 
@@ -7304,7 +7514,7 @@ func seedMCPMatchModeFixture(t *testing.T, s *store.Store) {
 		t.Fatalf("create session: %v", err)
 	}
 	obs := []store.AddObservationParams{
-		{SessionID: "s-mcp-matchmode", Type: "decision", Title: "Auth session middleware", Content: "", Project: "engram", Scope: "project"},
+		{SessionID: "s-mcp-matchmode", Type: "decision", Title: "Auth session middleware", Content: "request routing layer", Project: "engram", Scope: "project"},
 		{SessionID: "s-mcp-matchmode", Type: "decision", Title: "Compliance audit notes", Content: "session policy", Project: "engram", Scope: "project"},
 		{SessionID: "s-mcp-matchmode", Type: "decision", Title: "OAuth tokens", Content: "auth and compliance", Project: "engram", Scope: "project"},
 	}
