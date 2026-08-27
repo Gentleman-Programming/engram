@@ -649,6 +649,37 @@ func TestCloudEnrollAndSyncHelpDoNotMutateLocalState(t *testing.T) {
 	}
 }
 
+func TestCloudEnrollReportsNormalizedProjectName(t *testing.T) {
+	stubExitWithPanic(t)
+	stubRuntimeHooks(t)
+
+	cfg := testConfig(t)
+	withArgs(t, "engram", "cloud", "enroll", "MiXeD-Project")
+	stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloud(cfg) })
+	if recovered != nil {
+		t.Fatalf("cloud enroll should succeed, panic=%v", recovered)
+	}
+	if !strings.Contains(stderr, `⚠️ Project name normalized: "MiXeD-Project" → "mixed-project"`) {
+		t.Fatalf("expected normalization warning, got %q", stderr)
+	}
+	if !strings.Contains(stdout, `✓ Project "mixed-project" enrolled for cloud sync`) {
+		t.Fatalf("expected canonical enrollment confirmation, got %q", stdout)
+	}
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	projects, err := s.ListEnrolledProjects()
+	if err != nil {
+		t.Fatalf("list enrolled projects: %v", err)
+	}
+	if len(projects) != 1 || projects[0].Project != "mixed-project" {
+		t.Fatalf("enrolled projects = %+v, want canonical mixed-project", projects)
+	}
+}
+
 func TestUpdateChecksSkipCriticalStartupCommands(t *testing.T) {
 	if shouldCheckForUpdates([]string{"mcp"}) {
 		t.Fatal("mcp startup must not run update check")
