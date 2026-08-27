@@ -974,18 +974,9 @@ func (s *Server) handleMigrateProject(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, "old_project and new_project are required")
 		return
 	}
-	// Normalize both names using the same rules the store applies so that
-	// case-only differences (e.g. "repo_name" vs "Repo_Name") are treated as
-	// identical and do not trigger a migration that would create duplicates.
-	// See: https://github.com/Gentleman-Programming/engram/issues/438
-	normalizedOld, _ := store.NormalizeProject(body.OldProject)
 	normalizedNew, _ := store.NormalizeProject(body.NewProject)
-	if normalizedOld == normalizedNew {
-		jsonResponse(w, http.StatusOK, map[string]any{"status": "skipped", "reason": "names are identical"})
-		return
-	}
 
-	result, err := s.store.MigrateProject(body.OldProject, body.NewProject)
+	result, err := s.store.MigrateProject(body.OldProject, normalizedNew)
 	if err != nil {
 		log.Printf("[engram] project migration failed: %v", err)
 		jsonError(w, http.StatusInternalServerError, "migration failed")
@@ -1004,7 +995,7 @@ func (s *Server) handleMigrateProject(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]any{
 		"status":       "migrated",
 		"old_project":  body.OldProject,
-		"new_project":  body.NewProject,
+		"new_project":  normalizedNew,
 		"observations": result.ObservationsUpdated,
 		"sessions":     result.SessionsUpdated,
 		"prompts":      result.PromptsUpdated,

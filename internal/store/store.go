@@ -4943,8 +4943,8 @@ type MergeResult struct {
 }
 
 // MergeProjects migrates all records from each source project name into the
-// canonical name. Sources that equal the canonical (after normalization) or
-// have no records are silently skipped — the operation is idempotent.
+// canonical name. Exact canonical sources or sources with no records are
+// silently skipped — the operation is idempotent.
 // All updates are performed inside a single transaction for atomicity.
 func (s *Store) MergeProjects(sources []string, canonical string) (*MergeResult, error) {
 	canonical, _ = NormalizeProject(canonical)
@@ -4958,13 +4958,13 @@ func (s *Store) MergeProjects(sources []string, canonical string) (*MergeResult,
 		seenSources := make(map[string]struct{})
 		for _, srcInput := range sources {
 			srcNormalized, _ := NormalizeProject(srcInput)
-			if srcNormalized == "" || srcNormalized == canonical {
+			if srcNormalized == "" || srcInput == canonical {
 				continue
 			}
-			if _, seen := seenSources[srcNormalized]; seen {
+			if _, seen := seenSources[srcInput]; seen {
 				continue
 			}
-			seenSources[srcNormalized] = struct{}{}
+			seenSources[srcInput] = struct{}{}
 
 			sourceVariants := projectMergeSourceVariants(srcInput, srcNormalized, canonical)
 			if len(sourceVariants) == 0 {
@@ -5023,8 +5023,8 @@ func projectMergeSourceVariants(rawSource, normalizedSource, canonical string) [
 	seen := make(map[string]struct{})
 	variants := make([]string, 0, 5)
 	// Match both the historical raw project name and its normalized form so
-	// legacy rows are migrated without reintroducing canonical-source churn.
-	candidates := []string{strings.TrimSpace(rawSource), normalizedSource}
+	// legacy rows are migrated while exact canonical rows remain untouched.
+	candidates := []string{rawSource, normalizedSource}
 	parts := strings.FieldsFunc(normalizedSource, func(r rune) bool {
 		return r == ' ' || r == '-' || r == '_'
 	})
@@ -5034,12 +5034,7 @@ func projectMergeSourceVariants(rawSource, normalizedSource, canonical string) [
 		}
 	}
 	for _, candidate := range candidates {
-		candidate = strings.TrimSpace(candidate)
-		if candidate == "" || candidate == canonical {
-			continue
-		}
-		candidateNormalized, _ := NormalizeProject(candidate)
-		if candidateNormalized == canonical {
+		if strings.TrimSpace(candidate) == "" || candidate == canonical {
 			continue
 		}
 		if _, ok := seen[candidate]; ok {

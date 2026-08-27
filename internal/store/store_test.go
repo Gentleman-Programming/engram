@@ -7116,8 +7116,8 @@ func TestListProjectsWithStats(t *testing.T) {
 func TestMergeProjects(t *testing.T) {
 	s := newTestStore(t)
 
-	// Set up three source projects
-	sources := []string{"engram", "Engram", "engram-memory"}
+	// Set up canonical and alias source projects.
+	sources := []string{"engram", "engram-memory"}
 	canonical := "engram"
 
 	if err := s.CreateSession("s1", "engram", "/work"); err != nil {
@@ -7150,10 +7150,9 @@ func TestMergeProjects(t *testing.T) {
 		t.Errorf("canonical = %q, want \"engram\"", result.Canonical)
 	}
 
-	// "Engram" normalizes to "engram" (same as canonical) → skipped
 	// "engram-memory" is different → merged
-	// Only "engram-memory" should appear in SourcesMerged (and possibly "engram" if it had records,
-	// but it equals canonical after normalization → skipped)
+	// Only "engram-memory" should appear in SourcesMerged because "engram"
+	// is the exact canonical source.
 	for _, merged := range result.SourcesMerged {
 		if merged == "engram" {
 			t.Error("canonical 'engram' should not appear in SourcesMerged")
@@ -7212,18 +7211,53 @@ func TestMergeProjectsCanonicalInSources(t *testing.T) {
 		t.Fatalf("AddObservation: %v", err)
 	}
 
-	// Sources include the canonical itself — should be silently skipped
-	result, err := s.MergeProjects([]string{"engram", "Engram"}, "engram")
+	// The exact canonical source is silently skipped.
+	result, err := s.MergeProjects([]string{"engram"}, "engram")
 	if err != nil {
 		t.Fatalf("MergeProjects: %v", err)
 	}
 
-	// Nothing should have been changed (engram and Engram both normalize to "engram" = canonical)
+	// Nothing should have been changed.
 	if result.ObservationsUpdated != 0 {
 		t.Errorf("expected 0 observations updated when sources equal canonical, got %d", result.ObservationsUpdated)
 	}
 	if len(result.SourcesMerged) != 0 {
 		t.Errorf("expected empty SourcesMerged when all sources equal canonical, got %v", result.SourcesMerged)
+	}
+}
+
+func TestMergeProjectsMigratesCaseOnlyLegacySource(t *testing.T) {
+	s := newTestStore(t)
+
+	if _, err := s.db.Exec(`INSERT INTO sessions (id, project, directory) VALUES (?, ?, ?)`, "legacy-case-session", "Engram", "/work/engram"); err != nil {
+		t.Fatalf("seed legacy session: %v", err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO observations (sync_id, session_id, type, title, content, project, scope, normalized_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, "legacy-case-obs", "legacy-case-session", "decision", "legacy", "legacy content", "Engram", "project", "legacy-case-hash"); err != nil {
+		t.Fatalf("seed legacy observation: %v", err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO user_prompts (sync_id, session_id, content, project) VALUES (?, ?, ?, ?)`, "legacy-case-prompt", "legacy-case-session", "legacy prompt", "Engram"); err != nil {
+		t.Fatalf("seed legacy prompt: %v", err)
+	}
+
+	result, err := s.MergeProjects([]string{"Engram"}, "engram")
+	if err != nil {
+		t.Fatalf("MergeProjects: %v", err)
+	}
+	if result.Canonical != "engram" || result.ObservationsUpdated != 1 || result.SessionsUpdated != 1 || result.PromptsUpdated != 1 {
+		t.Fatalf("unexpected merge result: %+v", result)
+	}
+
+	for _, table := range []string{"sessions", "observations", "user_prompts"} {
+		var legacyRows, canonicalRows int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM `+table+` WHERE project = ?`, "Engram").Scan(&legacyRows); err != nil {
+			t.Fatalf("count legacy rows in %s: %v", table, err)
+		}
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM `+table+` WHERE project = ?`, "engram").Scan(&canonicalRows); err != nil {
+			t.Fatalf("count canonical rows in %s: %v", table, err)
+		}
+		if legacyRows != 0 || canonicalRows != 1 {
+			t.Fatalf("%s rows: legacy=%d canonical=%d, want 0 and 1", table, legacyRows, canonicalRows)
+		}
 	}
 }
 

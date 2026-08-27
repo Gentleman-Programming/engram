@@ -2188,31 +2188,35 @@ func TestJudgeAndCompareRoutesValidateInput(t *testing.T) {
 	}
 }
 
-// TestMigrateProjectCaseOnlySkipped asserts that POST /projects/migrate
-// returns status "skipped" when old_project and new_project differ only by
-// case — fixing #438 where the exact-string comparison let case-only renames
-// slip through and create duplicate projects.
-//
-// The test seeds a session under "repo_name" so that the store would actually
-// migrate if the server did not guard against case-only differences first.
-func TestMigrateProjectCaseOnlySkipped(t *testing.T) {
-	st := newServerTestStore(t)
-	h := New(st, 0).Handler()
+func TestMigrateProjectCaseOnlyLegacySource(t *testing.T) {
+	cfg, err := store.DefaultConfig()
+	if err != nil {
+		t.Fatalf("DefaultConfig: %v", err)
+	}
+	cfg.DataDir = t.TempDir()
+	st, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
 
-	// Seed a session under the lowercase project name so the store has data
-	// to migrate; without the fix the handler would call store.MigrateProject
-	// and rename "repo_name" → "Repo_Name", creating a duplicate.
-	seedReq := httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(
-		`{"id":"s-case-migrate","project":"repo_name","directory":"/tmp/repo"}`,
-	))
-	seedReq.Header.Set("Content-Type", "application/json")
-	seedRec := httptest.NewRecorder()
-	h.ServeHTTP(seedRec, seedReq)
-	if seedRec.Code != http.StatusCreated {
-		t.Fatalf("seed session: expected 201, got %d body=%s", seedRec.Code, seedRec.Body.String())
+	db, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	for _, query := range []string{
+		`INSERT INTO sessions (id, project, directory) VALUES ('s-case-migrate', 'Engram', '/tmp/repo')`,
+		`INSERT INTO observations (sync_id, session_id, type, title, content, project, scope, normalized_hash) VALUES ('case-obs', 's-case-migrate', 'decision', 'legacy', 'content', 'Engram', 'project', 'case-hash')`,
+		`INSERT INTO user_prompts (sync_id, session_id, content, project) VALUES ('case-prompt', 's-case-migrate', 'prompt', 'Engram')`,
+	} {
+		if _, err := db.Exec(query); err != nil {
+			t.Fatalf("seed legacy project: %v", err)
+		}
 	}
 
-	body := bytes.NewBufferString(`{"old_project":"repo_name","new_project":"Repo_Name"}`)
+	h := New(st, 0).Handler()
+	body := bytes.NewBufferString(`{"old_project":"Engram","new_project":"engram"}`)
 	req := httptest.NewRequest(http.MethodPost, "/projects/migrate", body)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -2227,7 +2231,35 @@ func TestMigrateProjectCaseOnlySkipped(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if resp["status"] != "skipped" {
-		t.Fatalf("expected status=skipped for case-only difference, got %v (full response: %#v)", resp["status"], resp)
+	if resp["status"] != "migrated" || resp["new_project"] != "engram" {
+		t.Fatalf("unexpected migration response: %#v", resp)
+	}
+
+	for _, table := range []string{"sessions", "observations", "user_prompts"} {
+		var legacyRows, canonicalRows int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM `+table+` WHERE project = ?`, "Engram").Scan(&legacyRows); err != nil {
+			t.Fatalf("count legacy rows in %s: %v", table, err)
+		}
+		if err := db.QueryRow(`SELECT COUNT(*) FROM `+table+` WHERE project = ?`, "engram").Scan(&canonicalRows); err != nil {
+			t.Fatalf("count canonical rows in %s: %v", table, err)
+		}
+		if legacyRows != 0 || canonicalRows != 1 {
+			t.Fatalf("%s rows: legacy=%d canonical=%d, want 0 and 1", table, legacyRows, canonicalRows)
+		}
+	}
+
+	identicalReq := httptest.NewRequest(http.MethodPost, "/projects/migrate", strings.NewReader(`{"old_project":"engram","new_project":"engram"}`))
+	identicalReq.Header.Set("Content-Type", "application/json")
+	identicalRec := httptest.NewRecorder()
+	h.ServeHTTP(identicalRec, identicalReq)
+	if identicalRec.Code != http.StatusOK {
+		t.Fatalf("identical migration: expected 200, got %d body=%s", identicalRec.Code, identicalRec.Body.String())
+	}
+	var identicalResp map[string]any
+	if err := json.NewDecoder(identicalRec.Body).Decode(&identicalResp); err != nil {
+		t.Fatalf("decode identical response: %v", err)
+	}
+	if identicalResp["status"] != "skipped" {
+		t.Fatalf("expected identical migration to be skipped, got %#v", identicalResp)
 	}
 }
