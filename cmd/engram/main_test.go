@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -118,6 +119,48 @@ func captureOutput(t *testing.T, fn func()) (stdout string, stderr string) {
 
 	fn()
 	return stdout, stderr
+}
+
+func TestLargeStdoutAndStderrAreCapturedCompletely(t *testing.T) {
+	const helperEnv = "ENGRAM_TEST_CAPTURE_OUTPUT_LARGE_STREAMS_HELPER"
+	const payloadSize = 256 * 1024
+
+	if os.Getenv(helperEnv) == "1" {
+		stdoutPayload := strings.Repeat("o", payloadSize)
+		stderrPayload := strings.Repeat("e", payloadSize)
+		stdout, stderr := captureOutput(t, func() {
+			if _, err := io.WriteString(os.Stdout, stdoutPayload); err != nil {
+				t.Fatalf("write stdout: %v", err)
+			}
+			if _, err := io.WriteString(os.Stderr, stderrPayload); err != nil {
+				t.Fatalf("write stderr: %v", err)
+			}
+		})
+		if stdout != stdoutPayload {
+			t.Fatalf("stdout capture length = %d, want %d", len(stdout), len(stdoutPayload))
+		}
+		if stderr != stderrPayload {
+			t.Fatalf("stderr capture length = %d, want %d", len(stderr), len(stderrPayload))
+		}
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestLargeStdoutAndStderrAreCapturedCompletely$", "-test.count=1")
+	cmd.Env = append(os.Environ(), helperEnv+"=1")
+	output, err := cmd.CombinedOutput()
+	const maxDiagnosticOutput = 4096
+	diagnostic := string(output)
+	if len(diagnostic) > maxDiagnosticOutput {
+		diagnostic = diagnostic[:maxDiagnosticOutput] + "\n... subprocess output truncated"
+	}
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatalf("captureOutput helper timed out after 10s; subprocess output:\n%s", diagnostic)
+	}
+	if err != nil {
+		t.Fatalf("captureOutput helper failed: %v\nsubprocess output:\n%s", err, diagnostic)
+	}
 }
 
 func mustSeedObservation(t *testing.T, cfg store.Config, sessionID, project, typ, title, content, scope string) int64 {
