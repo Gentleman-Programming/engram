@@ -61,9 +61,24 @@ func TestApplyPulledObservationStoresProjectAsText(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("apply pulled observation: %v", err)
 	}
-	var storageClass string
-	if err := s.db.QueryRow(`SELECT typeof(project) FROM observations WHERE sync_id = ?`, "obs-pulled-project-storage").Scan(&storageClass); err != nil {
-		t.Fatalf("read project storage class: %v", err)
+	updatedPayload, err := json.Marshal(syncObservationPayload{
+		SyncID: "obs-pulled-project-storage", SessionID: "s-pulled-project-storage", Type: "bugfix", Title: "Updated pulled project as text", Content: "Sync apply update stores text", Project: &project, Scope: "project",
+	})
+	if err != nil {
+		t.Fatalf("marshal updated observation payload: %v", err)
+	}
+	if err := s.withTx(func(tx *sql.Tx) error {
+		return s.applyPulledMutationTx(tx, SyncMutation{Entity: SyncEntityObservation, EntityKey: "obs-pulled-project-storage", Op: SyncOpUpsert, Payload: string(updatedPayload), Source: SyncSourceRemote, Project: project})
+	}); err != nil {
+		t.Fatalf("apply updated pulled observation: %v", err)
+	}
+
+	var title, content, storageClass string
+	if err := s.db.QueryRow(`SELECT title, content, typeof(project) FROM observations WHERE sync_id = ?`, "obs-pulled-project-storage").Scan(&title, &content, &storageClass); err != nil {
+		t.Fatalf("read updated observation: %v", err)
+	}
+	if title != "Updated pulled project as text" || content != "Sync apply update stores text" {
+		t.Fatalf("updated observation = title %q, content %q", title, content)
 	}
 	if storageClass != "text" {
 		t.Fatalf("project storage class = %q, want text", storageClass)
