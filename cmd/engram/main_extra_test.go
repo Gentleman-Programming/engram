@@ -2587,7 +2587,7 @@ func TestCmdExportDefaultAndCmdImportErrors(t *testing.T) {
 	badPath := filepath.Join(workDir, "missing", "out.json")
 	withArgs(t, "engram", "export", badPath)
 	_, stderr, recovered = captureOutputAndRecover(t, func() { cmdExport(cfg) })
-	if _, ok := recovered.(exitCode); !ok || !strings.Contains(stderr, "no such file or directory") {
+	if code, ok := recovered.(exitCode); !ok || code != 1 || !strings.Contains(stderr, badPath) {
 		t.Fatalf("expected export write fatal, panic=%v stderr=%q", recovered, stderr)
 	}
 
