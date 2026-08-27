@@ -490,7 +490,7 @@ func TestMaterializedChunkMutationsRejectsMissingSyncIDs(t *testing.T) {
 
 func TestMaterializedChunkMutationsCarriesRelationFromChunkMutations(t *testing.T) {
 	project := "proj-materialize-rel"
-	relationPayload := `{"sync_id":"rel-1","source_id":"obs-a","target_id":"obs-b","relation":"related","project":"proj-materialize-rel"}`
+	relationPayload := `{"sync_id":"rel-1","source_id":"obs-a","target_id":"obs-b","relation":"related","judgment_status":"judged","marked_by_actor":"agent-a","marked_by_kind":"agent","project":"proj-materialize-rel"}`
 	chunk := engramsync.ChunkData{
 		Observations: []store.Observation{{SyncID: "obs-a"}, {SyncID: "obs-b"}},
 		Mutations: []store.SyncMutation{
@@ -545,7 +545,7 @@ func TestWriteChunkMaterializesRelationMutationIntoCloudMutations(t *testing.T) 
 			{"sync_id":"obs-b","session_id":"s-1","type":"decision","title":"B","content":"B","scope":"project","created_at":"2026-04-29T10:01:00Z","updated_at":"2026-04-29T10:01:00Z"}
 		],
 		"mutations":[
-			{"entity":"relation","entity_key":"rel-1","op":"upsert","payload":"{\"sync_id\":\"rel-1\",\"source_id\":\"obs-a\",\"target_id\":\"obs-b\",\"relation\":\"related\"}"}
+			{"entity":"relation","entity_key":"rel-1","op":"upsert","payload":"{\"sync_id\":\"rel-1\",\"source_id\":\"obs-a\",\"target_id\":\"obs-b\",\"relation\":\"related\",\"judgment_status\":\"judged\",\"marked_by_actor\":\"agent-a\",\"marked_by_kind\":\"agent\"}"}
 		]
 	}`), project)
 	if err != nil {
@@ -590,6 +590,32 @@ func TestWriteChunkMaterializesRelationMutationIntoCloudMutations(t *testing.T) 
 	}
 	if relCount != 1 {
 		t.Fatalf("expected exactly one relation row after replay, got %d", relCount)
+	}
+}
+
+func TestWriteChunkRejectsIncompleteRelationBeforePersistence(t *testing.T) {
+	cs := openTestCloudStore(t)
+	project := "test-invalid-chunk-relation-" + strings.ReplaceAll(t.Name(), "/", "-")
+	payload := []byte(`{
+		"mutations":[
+			{"entity":"relation","entity_key":"rel-1","op":"upsert","payload":"{\"source_id\":\"obs-a\",\"target_id\":\"obs-b\",\"relation\":\"related\",\"judgment_status\":\"judged\",\"marked_by_actor\":\"agent-a\",\"marked_by_kind\":\"agent\"}"}
+		]
+	}`)
+
+	err := cs.WriteChunk(context.Background(), project, chunkIDFromPayload(payload), "tester", "2026-04-29T10:03:00Z", payload)
+	if err == nil || !strings.Contains(err.Error(), "mutations[0].payload.sync_id is required") {
+		t.Fatalf("expected missing relation sync_id error, got %v", err)
+	}
+
+	var chunks, mutations int
+	if err := cs.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM cloud_chunks WHERE project_name = $1`, project).Scan(&chunks); err != nil {
+		t.Fatalf("count chunks: %v", err)
+	}
+	if err := cs.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM cloud_mutations WHERE project = $1`, project).Scan(&mutations); err != nil {
+		t.Fatalf("count mutations: %v", err)
+	}
+	if chunks != 0 || mutations != 0 {
+		t.Fatalf("expected no persisted chunk or mutation after validation failure, got chunks=%d mutations=%d", chunks, mutations)
 	}
 }
 
