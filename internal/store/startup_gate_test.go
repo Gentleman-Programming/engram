@@ -460,6 +460,82 @@ func TestLiveStoreDetectsReplacedDatabaseGeneration(t *testing.T) {
 	}
 }
 
+func TestStoreOpensQuestionMarkDataDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not permit '?' in file names")
+	}
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = filepath.Join(t.TempDir(), "data?dir")
+
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := s.CreateSession("question-mark-session", "question-mark-project", cfg.DataDir); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	dbPath := filepath.Join(cfg.DataDir, "engram.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		t.Fatalf("database was not created at intended path %q: %v", dbPath, err)
+	}
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open intended database: %v", err)
+	}
+	defer raw.Close()
+	var sessions int
+	if err := raw.QueryRow("SELECT COUNT(*) FROM sessions WHERE id = ?", "question-mark-session").Scan(&sessions); err != nil {
+		t.Fatalf("query intended database: %v", err)
+	}
+	if sessions != 1 {
+		t.Fatalf("sessions in intended database = %d, want 1", sessions)
+	}
+}
+
+func TestCommittedTransactionKeepsTrustedDatabaseGeneration(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not permit replacing an open SQLite database file")
+	}
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = t.TempDir()
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+
+	dbPath := filepath.Join(cfg.DataDir, "engram.db")
+	replacement := filepath.Join(cfg.DataDir, "replacement.db")
+	if err := os.WriteFile(replacement, []byte("replacement"), 0o600); err != nil {
+		t.Fatalf("write replacement: %v", err)
+	}
+	replaced := false
+	s.hooks.commit = func(tx *sql.Tx) error {
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		if !replaced {
+			replaced = true
+			return os.Rename(replacement, dbPath)
+		}
+		return nil
+	}
+
+	if err := s.CreateSession("committed-session", "generation-project", cfg.DataDir); err != nil {
+		t.Fatalf("CreateSession must preserve committed-write success: %v", err)
+	}
+	if !replaced {
+		t.Fatal("commit hook did not replace the database generation")
+	}
+	if err := s.CreateSession("rejected-session", "generation-project", cfg.DataDir); !errors.Is(err, ErrDatabaseGenerationReplaced) {
+		t.Fatalf("CreateSession after replacement error = %v, want ErrDatabaseGenerationReplaced", err)
+	}
+}
+
 // TestConnectionReplacementKeepsConfiguration guards the pool-replacement
 // regression: database/sql silently discards a modernc connection after a
 // context-cancelled query interrupts it (IsValid/ResetSession fail once

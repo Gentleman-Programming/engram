@@ -771,10 +771,8 @@ func newStore(cfg Config, withRepair bool) (*Store, error) {
 // (see modernc.org/sqlite applyQueryParams), so every fresh connection gets
 // the 5s busy handler before running journal_mode(WAL).
 //
-// The plain-path DSN form is used deliberately: modernc strips everything
-// after '?' from a non-"file:" DSN and passes the path through verbatim, so
-// no URL escaping of the path is needed (a literal '?' inside DataDir is the
-// only unsupported case, as in the driver generally).
+// A file URI keeps query parameters separate from valid path characters such
+// as '?', while url.URL escapes the path for SQLite to decode.
 func storeDSN(dbPath string) string {
 	q := url.Values{}
 	for _, p := range []string{
@@ -785,7 +783,8 @@ func storeDSN(dbPath string) string {
 	} {
 		q.Add("_pragma", p)
 	}
-	return dbPath + "?" + q.Encode()
+	escapedPath := strings.ReplaceAll(url.PathEscape(filepath.ToSlash(dbPath)), "%2F", "/")
+	return (&url.URL{Scheme: "file", Opaque: escapedPath, RawQuery: q.Encode()}).String()
 }
 
 // persistWALHookOnce guards the process-global driver hook registration.
@@ -6440,8 +6439,8 @@ func (s *Store) withTx(fn func(tx *sql.Tx) error) error {
 	}); err != nil {
 		return err
 	}
-	if err := s.captureDatabaseGeneration(); err != nil {
-		log.Printf("[store] database generation refresh failed after committed transaction: %v; future mutations will revalidate the database generation", err)
+	if err := s.CheckDatabaseGeneration(); err != nil {
+		log.Printf("[store] database generation check failed after committed transaction: %v; future mutations will revalidate the database generation", err)
 	}
 	return nil
 }
