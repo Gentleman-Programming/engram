@@ -2966,6 +2966,11 @@ func resolveHomeFallback() string {
 	return ""
 }
 
+var (
+	renameDatabaseGenerationFile = os.Rename
+	orphanedDBMoveAfterLock      func()
+)
+
 // migrateOrphanedDB checks for engram databases that ended up in wrong
 // locations (e.g. drive root on Windows when UserHomeDir failed silently)
 // and moves them to the correct location if the correct location has no DB.
@@ -3015,11 +3020,14 @@ func migrateOrphanedDBCandidates(correctDir string, candidates []string) {
 			log.Printf("[engram] migration refused: %v; stop the running Engram process and retry", err)
 			return
 		}
+		defer unlock()
+		if orphanedDBMoveAfterLock != nil {
+			orphanedDBMoveAfterLock()
+		}
 
 		// A Store may have won the generation lease while this process was
 		// locating the orphan. Never replace the generation it just created.
 		if _, err := os.Stat(correctDB); err == nil {
-			unlock()
 			return
 		}
 
@@ -3027,20 +3035,10 @@ func migrateOrphanedDBCandidates(correctDir string, candidates []string) {
 		// matching shared generation lease.
 		log.Printf("[engram] found orphaned database at %s, migrating to %s", candidate, correctDB)
 
-		// Move DB and WAL/SHM files if they exist.
-		for _, suffix := range []string{"", "-wal", "-shm"} {
-			src := candidate + suffix
-			dst := correctDB + suffix
-			if _, statErr := os.Stat(src); statErr != nil {
-				continue
-			}
-			if renameErr := os.Rename(src, dst); renameErr != nil {
-				unlock()
-				log.Printf("[engram] migration failed (move %s): %v", filepath.Base(src), renameErr)
-				return
-			}
+		if err := moveDatabaseGeneration(candidate, correctDB); err != nil {
+			log.Printf("[engram] migration failed: %v", err)
+			return
 		}
-		unlock()
 
 		// Clean up empty orphaned directory.
 		orphanDir := filepath.Dir(candidate)
@@ -3052,6 +3050,36 @@ func migrateOrphanedDBCandidates(correctDir string, candidates []string) {
 		log.Printf("[engram] migration complete — memories recovered")
 		return
 	}
+}
+
+// moveDatabaseGeneration moves a SQLite database with its WAL and SHM files.
+// If one move fails, it restores every file already moved so the source remains
+// a complete, retryable generation instead of splitting it across directories.
+func moveDatabaseGeneration(sourceDB, destinationDB string) error {
+	moved := make([]string, 0, 3)
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		source := sourceDB + suffix
+		destination := destinationDB + suffix
+		if _, err := os.Stat(source); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return fmt.Errorf("inspect %s: %w", filepath.Base(source), err)
+		}
+		if err := renameDatabaseGenerationFile(source, destination); err != nil {
+			rollbackErrs := make([]error, 0, len(moved))
+			for i := len(moved) - 1; i >= 0; i-- {
+				restored := sourceDB + moved[i]
+				movedFile := destinationDB + moved[i]
+				if rollbackErr := renameDatabaseGenerationFile(movedFile, restored); rollbackErr != nil {
+					rollbackErrs = append(rollbackErrs, fmt.Errorf("restore %s: %w", filepath.Base(restored), rollbackErr))
+				}
+			}
+			return fmt.Errorf("move %s: %w", filepath.Base(source), errors.Join(append([]error{err}, rollbackErrs...)...))
+		}
+		moved = append(moved, suffix)
+	}
+	return nil
 }
 
 func truncate(s string, max int) string {

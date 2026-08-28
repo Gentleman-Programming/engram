@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -381,7 +382,7 @@ func TestMigrationRepairsBlobObservationProjectsAfterFTSTriggers(t *testing.T) {
 		s.Close()
 		t.Fatalf("insert historical blob project: %v", err)
 	}
-	if _, err := s.db.Exec(`PRAGMA user_version = 1`); err != nil {
+	if _, err := s.db.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion-1)); err != nil {
 		s.Close()
 		t.Fatalf("set previous schema version: %v", err)
 	}

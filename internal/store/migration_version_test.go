@@ -20,7 +20,15 @@ import (
 // source of its migration functions. When a migration step changes, bump
 // schemaVersion and record the new fingerprint so existing databases run it.
 var migrationVersionFingerprints = map[int]string{
-	2: "8a8e7471b6f3ae6be31463efae14ff8484be6e847f517bd4dd4d0b65e21166b9",
+	2: "db0bd6c4dcb6520a2165ba63c6ce228c8dd5baeaf66a8be0d53b658e81222138",
+	3: "20de316386769239e96f3b977f33195d05aecebe795834296086f1713f92ee11",
+}
+
+// migrationFingerprintHelperFunctions names migration-relevant helpers whose
+// names do not begin with "migrate". Keep this list explicit so unrelated
+// helpers do not make schema-version bumps noisy.
+var migrationFingerprintHelperFunctions = map[string]bool{
+	"addColumnIfNotExists": true,
 }
 
 func TestSchemaVersionMatchesMigrationFingerprint(t *testing.T) {
@@ -47,7 +55,7 @@ func TestSchemaVersionMatchesMigrationFingerprint(t *testing.T) {
 		}
 		for _, decl := range file.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || !strings.HasPrefix(fn.Name.Name, "migrate") {
+			if !ok || (!strings.HasPrefix(fn.Name.Name, "migrate") && !migrationFingerprintHelperFunctions[fn.Name.Name]) {
 				continue
 			}
 			var formatted bytes.Buffer

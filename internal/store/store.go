@@ -919,10 +919,12 @@ func (s *Store) CheckDatabaseGeneration() error {
 // ─── Migrations ──────────────────────────────────────────────────────────────
 
 // schemaVersion is the store schema generation recorded in SQLite's
-// PRAGMA user_version. Version 1 corresponds to the fully-migrated v1.19.0
-// schema (the current migrate() suite). Bump this constant whenever migrate()
-// gains a new step so that databases stamped with an older version run the
-// suite again on next startup.
+// PRAGMA user_version. Version 1 predates the gate; version 2 introduced it;
+// version 3 is the current generation and runs the current migrate() suite
+// once before it is stamped.
+// Bump this constant whenever migrate() or one of its fingerprinted helpers
+// gains a new step so databases stamped with an older version run the suite on
+// their next startup.
 //
 // Gate semantics (runStartupMigrations):
 //   - user_version == schemaVersion → schema is current; skip migrate().
@@ -931,10 +933,9 @@ func (s *Store) CheckDatabaseGeneration() error {
 //   - user_version >  schemaVersion → database was migrated by a newer engram;
 //     warn and skip (never run old migrations against a newer schema).
 //
-// The enrolled-project sync repair is independent of the gate. When requested,
-// it runs inside the same inter-process lock so concurrent startups cannot
-// storm identical backfill writes.
-const schemaVersion = 2
+// Enrolled-project sync repair is independent of this gate and runs before the
+// first sync operation through EnsureEnrolledProjectSyncMutations.
+const schemaVersion = 3
 
 // migrateRunCount counts executions of the gated migration block across the
 // process. It exists for test observability only — asserting that the
@@ -951,9 +952,9 @@ var startupMigrationBeforeLockHook func()
 var startupRepairRunCount atomic.Int64
 
 // runStartupMigrations runs migrate() at most once per schema generation
-// (gated on PRAGMA user_version) and, when withRepair is set, the
-// enrolled-project sync repair on every open — both inside one exclusive
-// inter-process lock.
+// (gated on PRAGMA user_version), convergent repairs required on every current
+// schema open, and, when withRepair is set for focused tests, the enrolled-
+// project sync repair — all inside one exclusive inter-process lock.
 //
 // Exclusivity is provided by an advisory file lock (acquireMigrationLock)
 // on <DataDir>/.migrate.lock rather than by one giant BEGIN IMMEDIATE
@@ -965,21 +966,16 @@ var startupRepairRunCount atomic.Int64
 // processes around the suite, and the destructive rebuild steps keep their
 // own per-step transactions for atomicity against crashes.
 //
-// The repair deliberately runs on every open — its self-healing behavior
-// predates the gate and must not regress — but it lives inside the same
-// exclusive lock so N concurrent startups cannot storm identical backfill
-// writes; the exclusive (not shared) lock is correct because the repair
-// writes when a backfill is needed. The per-open cost is small: the repair's
-// own fast path (projectNeedsBackfill) is read-only, so a healthy database
-// pays one brief lock acquisition plus a few reads.
+// The optional repair path shares this lock because it can write a backfill;
+// the production path defers that repair until synchronization.
 func (s *Store) runStartupMigrations(withRepair bool) error {
 	current, err := s.readUserVersion()
 	if err != nil {
 		return fmt.Errorf("engram: read user_version: %w", err)
 	}
-	skipMigrate := shouldSkipMigrations(current)
-	if skipMigrate && !withRepair {
-		return nil // schema current and no repair requested: nothing to do
+	if current > schemaVersion {
+		shouldSkipMigrations(current)
+		return nil
 	}
 	if startupMigrationBeforeLockHook != nil {
 		startupMigrationBeforeLockHook()
@@ -1025,6 +1021,9 @@ func (s *Store) runStartupMigrations(withRepair bool) error {
 		if err := s.setUserVersion(schemaVersion); err != nil {
 			return fmt.Errorf("engram: set user_version: %w", err)
 		}
+	}
+	if err := s.runConvergentStartupRepairs(); err != nil {
+		return fmt.Errorf("engram: run convergent startup repairs: %w", err)
 	}
 	return nil
 }
@@ -1493,7 +1492,35 @@ func (s *Store) migrate() error {
 	`); err != nil {
 		return err
 	}
-	deferredColumns := []struct {
+	if err := s.repairDeferredRelationPayloadIdentities(); err != nil {
+		return err
+	}
+
+	// Phase 3b: composite index for conflict-audit list/count queries.
+	if _, err := s.execHook(s.db, `
+		CREATE INDEX IF NOT EXISTS idx_memrel_status_created
+			ON memory_relations(judgment_status, created_at DESC);
+	`); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// runConvergentStartupRepairs preserves repairs that must run on every open,
+// even after the version-gated migration suite has completed.
+func (s *Store) runConvergentStartupRepairs() error {
+	if err := s.redactCloudUpgradeSnapshots(); err != nil {
+		return err
+	}
+	return s.repairDeferredRelationPayloadIdentities()
+}
+
+// repairDeferredRelationPayloadIdentities derives the relation identity carried
+// by deferred payloads. It converges interrupted migrations and rows written by
+// older binaries, so it must remain outside the version-gated migration suite.
+func (s *Store) repairDeferredRelationPayloadIdentities() error {
+	for _, c := range []struct {
 		name       string
 		definition string
 	}{
@@ -1504,16 +1531,8 @@ func (s *Store) migrate() error {
 		{name: "reason_code", definition: "TEXT NOT NULL DEFAULT ''"},
 		{name: "project", definition: "TEXT NOT NULL DEFAULT ''"},
 		{name: "scope_class", definition: "TEXT NOT NULL DEFAULT 'legacy_unscoped'"},
-		// payload_sync_id records the entity identity the row's own payload
-		// claims, which is not always the key the row is stored under. The
-		// success-path cleanup needs that identity, and reading it from a stored
-		// column keeps a JSON extract out of the apply write transaction. It stays
-		// blank for payloads that carry no sync_id of their own — pulled session
-		// payloads are keyed on `id`, and an undecodable payload has no identity
-		// at all, which is itself one of the reasons its row is dead.
 		{name: "payload_sync_id", definition: "TEXT NOT NULL DEFAULT ''"},
-	}
-	for _, c := range deferredColumns {
+	} {
 		if err := s.addColumnIfNotExists("sync_apply_deferred", c.name, c.definition); err != nil {
 			return err
 		}
@@ -1526,31 +1545,6 @@ func (s *Store) migrate() error {
 	`); err != nil {
 		return err
 	}
-	// Rows written before payload_sync_id existed carry their relation identity
-	// only inside the payload, so derive it here rather than parsing JSON on every
-	// apply.
-	//
-	// This runs on every open rather than only in the open that added the column.
-	// The ALTER above and this UPDATE are separate auto-committed statements, so a
-	// transient SQLITE_BUSY, an I/O error, or the process dying between them leaves
-	// a database whose column exists while every legacy row is still blank. An open
-	// that derived only what it had just added would skip such a database forever,
-	// and a schema-version marker advanced past this point would skip it too. It is
-	// also what repairs rows an older binary writes into the same database once the
-	// column exists. That matters beyond migration hygiene: a blank identity is
-	// what lets relationApplyCleanupSQL delete a row by the key it is stored under,
-	// so a blank that means "not yet derived" is a route to deleting evidence about
-	// a different relation.
-	//
-	// Running it unconditionally is cheap because it converges. The two equality
-	// terms are the exact leading prefix of idx_sad_payload_sync(payload_sync_id,
-	// entity), so this is a point lookup rather than a scan of the backlog, and the
-	// CASE excludes every row whose identity cannot be derived — after one
-	// successful run no row matches at all. CASE is used instead of a
-	// `json_valid(...) AND json_extract(...)` conjunction because only CASE
-	// guarantees the extract is never evaluated for a payload that is not valid
-	// JSON. The value is trimmed so a derived identity is byte-identical to the one
-	// recordRelationApplyFailureTx stores for the same payload.
 	if _, err := s.execHook(s.db, `
 		UPDATE sync_apply_deferred
 		SET payload_sync_id = trim(json_extract(payload, '$.sync_id'))
@@ -1563,15 +1557,6 @@ func (s *Store) migrate() error {
 	`); err != nil {
 		return err
 	}
-
-	// Phase 3b: composite index for conflict-audit list/count queries.
-	if _, err := s.execHook(s.db, `
-		CREATE INDEX IF NOT EXISTS idx_memrel_status_created
-			ON memory_relations(judgment_status, created_at DESC);
-	`); err != nil {
-		return err
-	}
-
 	return nil
 }
 
@@ -4346,6 +4331,9 @@ func (s *Store) exportWithProjectScope(project string) (*ExportData, error) {
 }
 
 func (s *Store) Import(data *ExportData) (*ImportResult, error) {
+	if err := s.CheckDatabaseGeneration(); err != nil {
+		return nil, err
+	}
 	for _, sess := range data.Sessions {
 		if err := validateSessionID(sess.ID); err != nil {
 			return nil, fmt.Errorf("import session: %w", err)
@@ -4419,6 +4407,9 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 		result.PromptsImported++
 	}
 
+	if err := s.CheckDatabaseGeneration(); err != nil {
+		return nil, err
+	}
 	if err := s.commitHook(tx); err != nil {
 		return nil, fmt.Errorf("import: commit: %w", err)
 	}

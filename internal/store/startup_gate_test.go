@@ -353,7 +353,11 @@ func TestConcurrentColdStartProcesses(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %d child readiness markers; got %d; outputs:\n%s\n%s\n%s", procs, ready, outputs[0].String(), outputs[1].String(), outputs[2].String())
+			var diagnostics strings.Builder
+			for i, output := range outputs {
+				fmt.Fprintf(&diagnostics, "child %d output:\n%s\n", i, output.String())
+			}
+			t.Fatalf("timed out waiting for %d child readiness markers; got %d; outputs:\n%s", procs, ready, diagnostics.String())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -608,21 +612,24 @@ func TestAcquireMigrationLockExcludes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first acquire: %v", err)
 	}
+	defer unlock1()
 
-	acquired := make(chan struct{})
+	acquired := make(chan error, 1)
 	go func() {
 		unlock2, err := acquireMigrationLock(path)
 		if err != nil {
-			t.Errorf("second acquire: %v", err)
-			close(acquired)
+			acquired <- err
 			return
 		}
-		close(acquired)
 		unlock2()
+		acquired <- nil
 	}()
 
 	select {
-	case <-acquired:
+	case err := <-acquired:
+		if err != nil {
+			t.Fatalf("second acquire: %v", err)
+		}
 		t.Fatal("second acquire succeeded while the first lock was still held")
 	case <-time.After(150 * time.Millisecond):
 		// Still blocked — expected.
@@ -631,10 +638,46 @@ func TestAcquireMigrationLockExcludes(t *testing.T) {
 	unlock1()
 
 	select {
-	case <-acquired:
+	case err := <-acquired:
+		if err != nil {
+			t.Fatalf("second acquire after release: %v", err)
+		}
 		// Granted after release — expected.
 	case <-time.After(5 * time.Second):
 		t.Fatal("second acquire did not proceed after the first lock was released")
+	}
+}
+
+func TestImportRefusesReplacedDatabaseGeneration(t *testing.T) {
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = t.TempDir()
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+
+	original, err := os.Stat(filepath.Join(cfg.DataDir, "engram.db"))
+	if err != nil {
+		t.Fatalf("stat original generation: %v", err)
+	}
+	replacement := filepath.Join(t.TempDir(), "replacement.db")
+	if err := os.WriteFile(replacement, []byte("replacement"), 0o600); err != nil {
+		t.Fatalf("write replacement generation: %v", err)
+	}
+	s.databasePath = replacement
+	s.databaseGenerationInfos = map[string]os.FileInfo{replacement: original}
+
+	_, err = s.Import(&ExportData{Sessions: []Session{{ID: "blocked-import", Project: "engram", Directory: cfg.DataDir}}})
+	if !errors.Is(err, ErrDatabaseGenerationReplaced) {
+		t.Fatalf("Import error = %v, want ErrDatabaseGenerationReplaced", err)
+	}
+	var sessions int
+	if err := s.db.QueryRow(`SELECT count(*) FROM sessions WHERE id = 'blocked-import'`).Scan(&sessions); err != nil {
+		t.Fatalf("count imports: %v", err)
+	}
+	if sessions != 0 {
+		t.Fatalf("Import wrote %d sessions after detecting replacement", sessions)
 	}
 }
 

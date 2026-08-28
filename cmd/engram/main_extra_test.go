@@ -704,6 +704,67 @@ func TestMigrateOrphanedDBCandidatesMovesDatabaseGeneration(t *testing.T) {
 		if want := suffix + " generation"; string(got) != want {
 			t.Errorf("migrated %q = %q, want %q", suffix, got, want)
 		}
+		if _, err := os.Stat(orphanDB + suffix); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("orphaned %q remains after migration: %v", suffix, err)
+		}
+	}
+	if _, err := os.Stat(orphanDir); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("orphaned database directory remains after migration: %v", err)
+	}
+}
+
+func TestMigrateOrphanedDBCandidatesDoesNotOverwriteDatabaseCreatedAfterLock(t *testing.T) {
+	orphanDir := t.TempDir()
+	correctDir := filepath.Join(t.TempDir(), "engram")
+	orphanDB := filepath.Join(orphanDir, "engram.db")
+	if err := os.WriteFile(orphanDB, []byte("orphan generation"), 0o600); err != nil {
+		t.Fatalf("write orphan: %v", err)
+	}
+
+	originalAfterLock := orphanedDBMoveAfterLock
+	orphanedDBMoveAfterLock = func() {
+		if err := os.WriteFile(filepath.Join(correctDir, "engram.db"), []byte("new generation"), 0o600); err != nil {
+			t.Fatalf("write destination after lock: %v", err)
+		}
+	}
+	t.Cleanup(func() { orphanedDBMoveAfterLock = originalAfterLock })
+
+	migrateOrphanedDBCandidates(correctDir, []string{orphanDB})
+	if got, err := os.ReadFile(filepath.Join(correctDir, "engram.db")); err != nil || string(got) != "new generation" {
+		t.Fatalf("destination after lock = %q, %v; want newer generation untouched", got, err)
+	}
+	if got, err := os.ReadFile(orphanDB); err != nil || string(got) != "orphan generation" {
+		t.Fatalf("orphan after destination appeared = %q, %v; want original generation intact", got, err)
+	}
+}
+
+func TestMigrateOrphanedDBCandidatesRestoresGenerationAfterMoveFailure(t *testing.T) {
+	orphanDir := t.TempDir()
+	correctDir := filepath.Join(t.TempDir(), "engram")
+	orphanDB := filepath.Join(orphanDir, "engram.db")
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if err := os.WriteFile(orphanDB+suffix, []byte(suffix+" generation"), 0o600); err != nil {
+			t.Fatalf("write orphan %q: %v", suffix, err)
+		}
+	}
+
+	originalRename := renameDatabaseGenerationFile
+	renameDatabaseGenerationFile = func(source, destination string) error {
+		if strings.HasSuffix(source, "engram.db-wal") {
+			return errors.New("forced WAL move failure")
+		}
+		return originalRename(source, destination)
+	}
+	t.Cleanup(func() { renameDatabaseGenerationFile = originalRename })
+
+	migrateOrphanedDBCandidates(correctDir, []string{orphanDB})
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if got, err := os.ReadFile(orphanDB + suffix); err != nil || string(got) != suffix+" generation" {
+			t.Errorf("recovered orphan %q = %q, %v; want complete source generation", suffix, got, err)
+		}
+		if _, err := os.Stat(filepath.Join(correctDir, "engram.db") + suffix); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("destination %q remains after failed move: %v", suffix, err)
+		}
 	}
 }
 
