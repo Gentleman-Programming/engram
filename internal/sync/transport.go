@@ -53,6 +53,9 @@ func (ft *FileTransport) ReadManifest() (*Manifest, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			if info, statErr := os.Stat(ft.syncDir); statErr == nil && !info.IsDir() {
+				return nil, fmt.Errorf("read manifest: sync path %q is not a directory", ft.syncDir)
+			}
 			return &Manifest{Version: 1}, nil
 		}
 		return nil, fmt.Errorf("read manifest: %w", err)

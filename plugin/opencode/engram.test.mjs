@@ -70,6 +70,7 @@ function assertNoRegistration(runtime, message) {
 async function createRuntime(t, {
   sessionGet = async ({ path }) => sdkResult(session(path.id)),
   registrationResponse,
+  contextResponse,
 } = {}) {
   const originalFetch = globalThis.fetch
   const originalBun = globalThis.Bun
@@ -88,12 +89,13 @@ async function createRuntime(t, {
     const path = new URL(url).pathname
     if (path === "/health") return { ok: true, async json() { return { status: "ok" } } }
     const body = init?.body ? JSON.parse(init.body) : undefined
-    requests.push({ path, body })
+    requests.push({ path, url: String(url), body })
     if (path === "/sessions") {
       registeredIDs.push(body.id)
       if (registrationResponse) return registrationResponse(registeredIDs.length)
       return httpResponse()
     }
+    if (path === "/context/compaction" && contextResponse) return contextResponse()
     return httpResponse({})
   }
 
@@ -488,13 +490,28 @@ test("Task passive capture resolves an unobserved child and attributes the root"
 })
 
 test("compaction resolves an unobserved child and registers only its root", async (t) => {
-  const runtime = await createRuntime(t, { sessionGet: sdkLookup(CHILD_SESSIONS) })
+  const runtime = await createRuntime(t, {
+    sessionGet: sdkLookup(CHILD_SESSIONS),
+    contextResponse: () => httpResponse({ context: "root-only context" }),
+  })
   const output = { context: [] }
   await runtime.compact({ sessionID: "leaf" }, output)
 
   assert.deepEqual(runtime.sessionGetIDs, ["leaf", "root"])
   assert.deepEqual(runtime.registeredIDs, ["root"], "compaction must never register the child")
+  const compactionContext = runtime.requests.find(({ path }) => path === "/context/compaction")
+  assert.equal(new URL(compactionContext?.url).searchParams.get("session_id"), "root")
+  assert.equal(runtime.requests.some(({ path }) => path === "/context"), false)
+  assert.ok(output.context.includes("root-only context"))
   assert.match(output.context.at(-1), /FIRST ACTION REQUIRED/)
+})
+
+test("post-compaction protocol relies on injected session-only context", () => {
+	const afterCompaction = source.match(/### AFTER COMPACTION[\s\S]*?Do not skip step 1\.[\s\S]*?memory\./)?.[0]
+  assert.ok(afterCompaction, "AFTER COMPACTION protocol must exist")
+  assert.match(afterCompaction, /session-only compaction context has already been injected/)
+  assert.match(afterCompaction, /use it only when explicitly requested/)
+  assert.doesNotMatch(afterCompaction, /\d\.\s+(?:Then )?call `mem_context`/)
 })
 
 test("compaction skips invalid or missing sessions and still injects recovery context", async (t) => {
@@ -517,9 +534,22 @@ test("compaction skips invalid or missing sessions and still injects recovery co
       await runtime.compact({ sessionID: "runtime" }, output)
 
       assertNoRegistration(runtime)
+      assert.equal(runtime.requests.some(({ path }) => path === "/context/compaction" || path === "/context"), false)
       assert.match(output.context.at(-1), /FIRST ACTION REQUIRED/)
     })
   }
+})
+
+test("compaction fails closed when the session context endpoint is unavailable", async (t) => {
+  const runtime = await createRuntime(t, {
+    contextResponse: () => httpResponse({ context: "must not inject" }, false),
+  })
+  const output = { context: [] }
+  await runtime.compact({ sessionID: "runtime" }, output)
+
+  assert.equal(runtime.requests.filter(({ path }) => path === "/context/compaction").length, 1)
+  assert.equal(runtime.requests.some(({ path }) => path === "/context"), false)
+  assert.equal(output.context.includes("must not inject"), false)
 })
 
 test("automatic hooks omit writes when ownership changes during registration", async (t) => {

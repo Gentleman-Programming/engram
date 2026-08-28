@@ -161,7 +161,7 @@ When you are not sure which key to use, call `mem_suggest_topic_key` before `mem
    → creates new observation (revision_count=1)
 
 3. (later session) mem_save(..., topic_key="architecture/auth-model")
-   → updates existing observation (revision_count=2)
+   → updates the existing observation (revision_count=2) and attributes it to the latest writer session
 ```
 
 `mem_suggest_topic_key` families:
@@ -287,15 +287,18 @@ engram cloud bootstrap admin --username <name> [--email <email>]
                           Create the first managed admin (see DOCS.md for details
                           and the current server-side auth wiring limitation)
 engram projects list      Show all projects with obs/session/prompt counts
-engram projects consolidate  Interactive merge of similar project names [--all] [--dry-run]
+engram projects consolidate  Interactive merge of normalization-equivalent project names [--all] [--dry-run]
 engram projects prune     Remove projects with 0 observations [--dry-run]
+engram projects rescue-ownership --project <name> [--session <id>] [--observation <id>] [--prompt <id>]
+                          Assign explicit ownership to legacy rows that carry none. Reaches the local
+                          store directly, so it needs no server token and works in a zero-config install.
 engram obsidian-export    Export memories to Obsidian vault (beta)
 engram version            Show version
 ```
 
 Local server auth:
 
-- `ENGRAM_HTTP_TOKEN`: optional Bearer auth for `engram serve`. When set, the following routes require `Authorization: Bearer <token>`: `DELETE /sessions/{id}`, `DELETE /observations/{id}`, `DELETE /prompts/{id}`, `GET /export`, `POST /import`, `POST /projects/migrate`. Comparison is constant-time; token is read per-request. When unset, all routes are open (zero-config default).
+- `ENGRAM_HTTP_TOKEN`: optional Bearer auth for `engram serve`. When set, `DELETE /sessions/{id}`, `DELETE /observations/{id}`, `DELETE /prompts/{id}`, `GET /export`, and `POST /import` require `Authorization: Bearer <token>`. `POST /projects/rescue-ownership` always requires a configured token and matching Bearer credential; deprecated alias `POST /projects/migrate` uses the same handler and requirement. Comparison is constant-time; token is read per-request. Other routes remain open when unset (zero-config default). Ownership repair does not depend on this token: `engram projects rescue-ownership` does the same work against the local store.
 - `ENGRAM_TIMEZONE`: IANA zone name for timestamp display in TUI and cloud dashboard (e.g. `America/New_York`). Falls back to system local when unset or invalid.
 
 Cloud constraints (current behavior):

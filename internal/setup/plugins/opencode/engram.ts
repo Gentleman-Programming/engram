@@ -122,7 +122,7 @@ This is NOT optional. If you skip this, the next session starts blind.
 
 If you see a message about compaction or context reset, or if you see "FIRST ACTION REQUIRED" in your context:
 1. IMMEDIATELY call \`mem_session_summary\` with the compacted summary content — this persists what was done before compaction
-2. Then call \`mem_context\` to recover any additional context from previous sessions
+2. The session-only compaction context has already been injected. Do not automatically call \`mem_context\`, which is project-scoped; use it only when explicitly requested.
 3. Only THEN continue working
 
 Do not skip step 1. Without it, everything done before compaction is lost from memory.
@@ -678,17 +678,21 @@ export const Engram: Plugin = async (ctx) => {
     // 3. Tell the compressor to remind the new agent to save memories
 
     "experimental.session.compacting": async (input, output) => {
+      let sessionId = ""
       if (input.sessionID) {
-        const sessionId = await resolveAuthoritativeSessionID(input.sessionID)
-        if (sessionId) await ensureSession(sessionId)
+        sessionId = await resolveAuthoritativeSessionID(input.sessionID)
       }
 
-      // Inject context from previous sessions
-      const data = await engramFetch(
-        `/context?project=${encodeURIComponent(project)}`
-      )
-      if (data?.context) {
-        output.context.push(data.context)
+      // Runtime compaction context must never cross session boundaries. If the
+      // authoritative session cannot be resolved or registered, skip this
+      // injection rather than falling back to project-wide manual context.
+      if (sessionId && await ensureSession(sessionId)) {
+        const data = await engramFetch(
+          `/context/compaction?session_id=${encodeURIComponent(sessionId)}`
+        )
+        if (data?.context) {
+          output.context.push(data.context)
+        }
       }
 
       // Tell the compressor to instruct the new agent to persist the

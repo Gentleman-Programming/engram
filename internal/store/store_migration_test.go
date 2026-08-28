@@ -485,7 +485,7 @@ func TestMigrate_DoesNotTouchFTS5OrSyncMutations(t *testing.T) {
 		t.Fatalf("smRows.Err: %v", err)
 	}
 
-	requiredSMCols := []string{"seq", "target_key", "entity", "entity_key", "op", "payload", "source", "project", "occurred_at", "acked_at"}
+	requiredSMCols := []string{"seq", "target_key", "entity", "entity_key", "op", "payload", "source", "project", "occurred_at", "acked_at", "disposition", "disposition_reason", "disposition_evidence", "disposition_at"}
 	colSet := make(map[string]bool, len(smCols))
 	for _, c := range smCols {
 		colSet[c] = true
@@ -656,6 +656,27 @@ func TestMigrate_PostPhase1_AddsSyncApplyDeferred(t *testing.T) {
 	// The design specifies idx_sad_status_seen on (apply_status, first_seen_at).
 	if !gotIndexes["idx_sad_status_seen"] {
 		t.Errorf("index idx_sad_status_seen not found on sync_apply_deferred (expected RED until Phase B); got: %v", gotIndexes)
+	}
+}
+
+func TestMigrate_ExtendsExistingDeferredRows(t *testing.T) {
+	s := newTestStoreWithLegacySchemaPostP1(t, nil, nil)
+	if _, err := s.DB().Exec(`DROP TABLE sync_apply_deferred;
+		CREATE TABLE sync_apply_deferred (
+			sync_id TEXT PRIMARY KEY, entity TEXT NOT NULL, payload TEXT NOT NULL,
+			apply_status TEXT NOT NULL DEFAULT 'deferred', retry_count INTEGER NOT NULL DEFAULT 0,
+			last_error TEXT, last_attempted_at TEXT, first_seen_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+		INSERT INTO sync_apply_deferred (sync_id, entity, payload) VALUES ('legacy-deferred', 'relation', '{}')`); err != nil {
+		t.Fatalf("seed legacy deferred table: %v", err)
+	}
+	// Re-running migration is idempotent and must preserve pre-extension rows.
+	if err := s.migrate(); err != nil {
+		t.Fatalf("migrate existing deferred table: %v", err)
+	}
+	row, err := s.GetDeferred("legacy-deferred")
+	if err != nil || row.TargetKey != "" || row.RemoteSeq != 0 || row.ReasonCode != "" {
+		t.Fatalf("legacy deferred row=%+v, err=%v", row, err)
 	}
 }
 
@@ -876,5 +897,56 @@ func TestMigrate_AddsIdxMemrelStatusCreated(t *testing.T) {
 	}
 	if pendingCount != 2 {
 		t.Errorf("pending relations count = %d, want 2 (seeded rows with judgment_status='pending')", pendingCount)
+	}
+}
+
+func TestMigrate_LegacyDeferredRowsRemainAdministrativeOnly(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "engram.db")
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open legacy database: %v", err)
+	}
+	if _, err := raw.Exec(legacyDDLPostMemoryConflictAudit); err != nil {
+		raw.Close()
+		t.Fatalf("apply legacy DDL: %v", err)
+	}
+	if _, err := raw.Exec(`
+		INSERT INTO sync_apply_deferred (sync_id, entity, payload, retry_count, apply_status)
+		VALUES ('legacy-deferred', 'relation', '{}', 4, 'deferred')
+	`); err != nil {
+		raw.Close()
+		t.Fatalf("seed legacy deferred row: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close legacy database: %v", err)
+	}
+
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = dir
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("migrate legacy database: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	assertDeferredScope(t, s, "legacy-deferred", "", "", "legacy_unscoped")
+	result, err := s.ReplayDeferredForScope("cloud:project-b", "project-b")
+	if err != nil {
+		t.Fatalf("scoped replay: %v", err)
+	}
+	if result.Retried != 0 {
+		t.Fatalf("scoped replay retried legacy row: %+v", result)
+	}
+	status, retries := getDeferredRow(t, s, "legacy-deferred")
+	if status != "deferred" || retries != 4 {
+		t.Fatalf("legacy row changed by scoped replay: status=%q retries=%d", status, retries)
+	}
+	deferred, dead, err := s.CountDeferredAndDead()
+	if err != nil || deferred != 1 || dead != 0 {
+		t.Fatalf("global administrative visibility = deferred=%d dead=%d err=%v", deferred, dead, err)
+	}
+	if err := s.migrate(); err != nil {
+		t.Fatalf("second migration must be idempotent: %v", err)
 	}
 }
