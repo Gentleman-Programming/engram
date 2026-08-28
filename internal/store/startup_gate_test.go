@@ -460,6 +460,66 @@ func TestLiveStoreDetectsReplacedDatabaseGeneration(t *testing.T) {
 	}
 }
 
+func TestReadOperationsRefuseReplacedDatabaseGeneration(t *testing.T) {
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = t.TempDir()
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+
+	dbPath := filepath.Join(cfg.DataDir, "engram.db")
+	replacementIdentity := filepath.Join(t.TempDir(), "replacement.db")
+	if err := os.WriteFile(replacementIdentity, []byte("replacement"), 0o600); err != nil {
+		t.Fatalf("write replacement identity: %v", err)
+	}
+	replacementInfo, err := os.Stat(replacementIdentity)
+	if err != nil {
+		t.Fatalf("stat replacement identity: %v", err)
+	}
+	s.generationMu.Lock()
+	s.databaseGenerationInfos = map[string]os.FileInfo{dbPath: replacementInfo}
+	s.generationMu.Unlock()
+
+	cases := []struct {
+		name string
+		read func() error
+	}{
+		{"recent observations", func() error {
+			_, err := s.RecentObservations("", "", 1)
+			return err
+		}},
+		{"get observation", func() error {
+			_, err := s.GetObservation(1)
+			return err
+		}},
+		{"get observation by sync ID", func() error {
+			_, err := s.GetObservationBySyncID("missing")
+			return err
+		}},
+		{"search topic-key branch", func() error {
+			_, err := s.SearchContext(context.Background(), "project/topic", SearchOptions{})
+			return err
+		}},
+		{"search FTS branch", func() error {
+			_, err := s.SearchContext(context.Background(), "query", SearchOptions{})
+			return err
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.read()
+			if !errors.Is(err, ErrDatabaseGenerationReplaced) {
+				t.Fatalf("read error = %v, want ErrDatabaseGenerationReplaced", err)
+			}
+			if !strings.Contains(err.Error(), "restart") {
+				t.Errorf("replacement diagnostic = %q, want restart guidance", err)
+			}
+		})
+	}
+}
+
 func TestStoreOpensQuestionMarkDataDirectory(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows does not permit '?' in file names")

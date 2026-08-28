@@ -915,6 +915,10 @@ func (s *Store) CheckDatabaseGeneration() error {
 	return nil
 }
 
+func (s *Store) preflightRead() error {
+	return s.CheckDatabaseGeneration()
+}
+
 // ─── Migrations ──────────────────────────────────────────────────────────────
 
 // schemaVersion is the store schema generation recorded in SQLite's
@@ -3063,6 +3067,9 @@ func (s *Store) RecentObservations(project, scope string, limit int) ([]Observat
 	query += " ORDER BY datetime(o.created_at) DESC, o.id DESC LIMIT ?"
 	args = append(args, limit)
 
+	if err := s.preflightRead(); err != nil {
+		return nil, err
+	}
 	return s.queryObservations(query, args...)
 }
 
@@ -3602,6 +3609,9 @@ func (s *Store) DeletePrompt(id int64) error {
 // ─── Get Single Observation ──────────────────────────────────────────────────
 
 func (s *Store) GetObservation(id int64) (*Observation, error) {
+	if err := s.preflightRead(); err != nil {
+		return nil, err
+	}
 	row := s.db.QueryRow(
 		`SELECT `+observationSelectColumns+`
 		 FROM observations WHERE id = ? AND deleted_at IS NULL`, id,
@@ -3896,6 +3906,10 @@ func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOpti
 	}
 	if limit > s.cfg.MaxSearchResults {
 		limit = s.cfg.MaxSearchResults
+	}
+
+	if err := s.preflightRead(); err != nil {
+		return nil, err
 	}
 
 	var directResults []SearchResult
@@ -5516,6 +5530,9 @@ func (s *Store) ApplyPulledChunk(targetKey, chunkID string, mutations []SyncMuta
 }
 
 func (s *Store) GetObservationBySyncID(syncID string) (*Observation, error) {
+	if err := s.preflightRead(); err != nil {
+		return nil, err
+	}
 	row := s.db.QueryRow(
 		`SELECT `+observationSelectColumns+`
 		 FROM observations WHERE sync_id = ? AND deleted_at IS NULL ORDER BY id DESC LIMIT 1`,
