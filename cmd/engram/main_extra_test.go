@@ -768,6 +768,38 @@ func TestMigrateOrphanedDBCandidatesRestoresGenerationAfterMoveFailure(t *testin
 	}
 }
 
+func TestMoveDatabaseGenerationDoesNotSplitGenerationOnInspectionFailure(t *testing.T) {
+	sourceDB := filepath.Join(t.TempDir(), "engram.db")
+	destinationDB := filepath.Join(t.TempDir(), "engram.db")
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if err := os.WriteFile(sourceDB+suffix, []byte(suffix+" generation"), 0o600); err != nil {
+			t.Fatalf("write source %q: %v", suffix, err)
+		}
+	}
+
+	originalStat := statDatabaseGenerationFile
+	statDatabaseGenerationFile = func(path string) (os.FileInfo, error) {
+		if path == sourceDB+"-wal" {
+			return nil, errors.New("forced WAL inspection failure")
+		}
+		return originalStat(path)
+	}
+	t.Cleanup(func() { statDatabaseGenerationFile = originalStat })
+
+	err := moveDatabaseGeneration(sourceDB, destinationDB)
+	if err == nil || !strings.Contains(err.Error(), "inspect engram.db-wal") {
+		t.Fatalf("moveDatabaseGeneration error = %v, want WAL inspection failure", err)
+	}
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if got, err := os.ReadFile(sourceDB + suffix); err != nil || string(got) != suffix+" generation" {
+			t.Errorf("source %q = %q, %v; want complete source generation", suffix, got, err)
+		}
+		if _, err := os.Stat(destinationDB + suffix); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("destination %q remains after inspection failure: %v", suffix, err)
+		}
+	}
+}
+
 func TestCmdCloudStatusDistinguishesAuthAndSyncReadiness(t *testing.T) {
 	stubExitWithPanic(t)
 	stubRuntimeHooks(t)

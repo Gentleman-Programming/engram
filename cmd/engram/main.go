@@ -2968,6 +2968,7 @@ func resolveHomeFallback() string {
 
 var (
 	renameDatabaseGenerationFile = os.Rename
+	statDatabaseGenerationFile   = os.Stat
 	orphanedDBMoveAfterLock      func()
 )
 
@@ -3056,16 +3057,22 @@ func migrateOrphanedDBCandidates(correctDir string, candidates []string) {
 // If one move fails, it restores every file already moved so the source remains
 // a complete, retryable generation instead of splitting it across directories.
 func moveDatabaseGeneration(sourceDB, destinationDB string) error {
-	moved := make([]string, 0, 3)
+	suffixes := make([]string, 0, 3)
 	for _, suffix := range []string{"", "-wal", "-shm"} {
 		source := sourceDB + suffix
-		destination := destinationDB + suffix
-		if _, err := os.Stat(source); err != nil {
+		if _, err := statDatabaseGenerationFile(source); err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
 			return fmt.Errorf("inspect %s: %w", filepath.Base(source), err)
 		}
+		suffixes = append(suffixes, suffix)
+	}
+
+	moved := make([]string, 0, len(suffixes))
+	for _, suffix := range suffixes {
+		source := sourceDB + suffix
+		destination := destinationDB + suffix
 		if err := renameDatabaseGenerationFile(source, destination); err != nil {
 			rollbackErrs := make([]error, 0, len(moved))
 			for i := len(moved) - 1; i >= 0; i-- {
