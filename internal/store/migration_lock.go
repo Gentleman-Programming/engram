@@ -3,6 +3,8 @@ package store
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -27,30 +29,51 @@ var migrationLockTimeout = 60 * time.Second
 // would open a race where a third process re-creates the path and locks a
 // different inode/file object, defeating the exclusion.
 func acquireMigrationLock(path string) (func(), error) {
+	return acquireDatabaseFileLock(path, "migration", tryLockMigrationFile, unlockMigrationFile)
+}
+
+// acquireStoreGenerationLease holds a shared advisory lock for the complete
+// Store lifetime. The orphaned-database mover takes the matching exclusive
+// lock, so an Engram process never replaces a database generation that this
+// process still has open.
+func acquireStoreGenerationLease(path string) (func(), error) {
+	return acquireDatabaseFileLock(path, "database generation", tryLockSharedDatabaseFile, unlockDatabaseFile)
+}
+
+// AcquireDatabaseGenerationMoveLock serializes an Engram-owned database move
+// with live Store instances. Callers must defer the returned release function.
+func AcquireDatabaseGenerationMoveLock(dataDir string) (func(), error) {
+	return acquireDatabaseFileLock(filepath.Join(dataDir, ".generation.lock"), "database generation", tryLockMigrationFile, unlockDatabaseFile)
+}
+
+func acquireDatabaseFileLock(path, purpose string, tryLock func(*os.File) (bool, error), unlockFile func(*os.File) error) (func(), error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
-		return nil, fmt.Errorf("open migration lock file %q: %w", path, err)
+		return nil, fmt.Errorf("open %s lock file %q: %w", purpose, path, err)
 	}
 
 	deadline := time.Now().Add(migrationLockTimeout)
 	backoff := 10 * time.Millisecond
 	for {
-		acquired, err := tryLockMigrationFile(f)
+		acquired, err := tryLock(f)
 		if err != nil {
 			_ = f.Close()
-			return nil, fmt.Errorf("lock migration lock file %q: %w", path, err)
+			return nil, fmt.Errorf("lock %s lock file %q: %w", purpose, path, err)
 		}
 		if acquired {
+			var once sync.Once
 			return func() {
-				_ = unlockMigrationFile(f)
-				_ = f.Close()
+				once.Do(func() {
+					_ = unlockFile(f)
+					_ = f.Close()
+				})
 			}, nil
 		}
 		if time.Now().After(deadline) {
 			_ = f.Close()
 			return nil, fmt.Errorf(
-				"timed out after %s waiting for migration lock %q — another engram process appears to be holding it; check for a stuck engram process (and terminate it) before retrying",
-				migrationLockTimeout, path,
+				"timed out after %s waiting for %s lock %q — another engram process appears to be holding it; check for a stuck engram process (and terminate it) before retrying",
+				migrationLockTimeout, purpose, path,
 			)
 		}
 		time.Sleep(backoff)

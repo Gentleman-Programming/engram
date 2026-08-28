@@ -13,10 +13,12 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -137,6 +139,54 @@ func TestNewerSchemaVersionIsLeftUntouched(t *testing.T) {
 	}
 }
 
+func TestLockedVersionRereadSkipsRepairForNewerSchema(t *testing.T) {
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = t.TempDir()
+
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("seed New: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("seed Close: %v", err)
+	}
+
+	beforeMigrate := migrateRunCount.Load()
+	beforeRepair := startupRepairRunCount.Load()
+	future := schemaVersion + 7
+	startupMigrationBeforeLockHook = func() {
+		raw, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
+		if err != nil {
+			t.Fatalf("raw open: %v", err)
+		}
+		defer raw.Close()
+		if _, err := raw.Exec(fmt.Sprintf("PRAGMA user_version = %d", future)); err != nil {
+			t.Fatalf("stamp future user_version: %v", err)
+		}
+	}
+	t.Cleanup(func() { startupMigrationBeforeLockHook = nil })
+
+	s, err = New(cfg)
+	if err != nil {
+		t.Fatalf("New after locked schema change: %v", err)
+	}
+	defer s.Close()
+
+	if got := migrateRunCount.Load() - beforeMigrate; got != 0 {
+		t.Errorf("migration suite ran %d times after locked re-read found newer schema, want 0", got)
+	}
+	if got := startupRepairRunCount.Load() - beforeRepair; got != 0 {
+		t.Errorf("startup repair ran %d times after locked re-read found newer schema, want 0", got)
+	}
+	var got int
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&got); err != nil {
+		t.Fatalf("read user_version: %v", err)
+	}
+	if got != future {
+		t.Errorf("user_version after locked re-read = %d, want %d", got, future)
+	}
+}
+
 func TestConcurrentColdStartGoroutines(t *testing.T) {
 	cfg := mustDefaultConfig(t)
 	cfg.DataDir = t.TempDir()
@@ -229,6 +279,24 @@ func TestColdStartChildProcess(t *testing.T) {
 	}
 	cfg.DataDir = dir
 	cfg.DedupeWindow = time.Hour
+	childID := fmt.Sprintf("%d", os.Getpid())
+	readyPath := filepath.Join(dir, ".coldstart-ready-"+childID)
+	if err := os.WriteFile(readyPath, []byte("ready"), 0o600); err != nil {
+		t.Fatalf("write ready marker: %v", err)
+	}
+	releasePath := filepath.Join(dir, ".coldstart-release")
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if _, err := os.Stat(releasePath); err == nil {
+			break
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("read release marker: %v", err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for parent cold-start release")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 
 	s, err := New(cfg)
 	if err != nil {
@@ -246,26 +314,51 @@ func TestConcurrentColdStartProcesses(t *testing.T) {
 		t.Skip("child process mode")
 	}
 
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatalf("os.Executable: %v", err)
+	exe := os.Args[0]
+	if exe == "" {
+		t.Fatal("test binary path is empty")
 	}
 
 	dir := t.TempDir()
 	const procs = 3
+	t.Setenv(coldStartChildEnv, dir)
+	releasePath := filepath.Join(dir, ".coldstart-release")
+	t.Cleanup(func() { _ = os.WriteFile(releasePath, []byte("release"), 0o600) })
 
 	cmds := make([]*exec.Cmd, procs)
 	outputs := make([]*strings.Builder, procs)
 	for i := range cmds {
 		outputs[i] = &strings.Builder{}
-		cmd := exec.Command(exe, "-test.run", "^TestColdStartChildProcess$", "-test.v", "-test.timeout", "60s")
-		cmd.Env = append(os.Environ(), coldStartChildEnv+"="+dir)
+		cmd := exec.Command(exe, "-test.run=^TestColdStartChildProcess$", "-test.v", "-test.timeout=60s")
 		cmd.Stdout = outputs[i]
 		cmd.Stderr = outputs[i]
 		if err := cmd.Start(); err != nil {
-			t.Fatalf("start child %d: %v", i, err)
+			t.Fatalf("start child %d (%s): %v", i, cmd.String(), err)
 		}
 		cmds[i] = cmd
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatalf("read child readiness directory: %v", err)
+		}
+		ready := 0
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), ".coldstart-ready-") {
+				ready++
+			}
+		}
+		if ready == procs {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %d child readiness markers; got %d; outputs:\n%s\n%s\n%s", procs, ready, outputs[0].String(), outputs[1].String(), outputs[2].String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := os.WriteFile(releasePath, []byte("release"), 0o600); err != nil {
+		t.Fatalf("release child cold starts: %v", err)
 	}
 	for i, cmd := range cmds {
 		if err := cmd.Wait(); err != nil {
@@ -311,6 +404,55 @@ func TestConcurrentColdStartProcesses(t *testing.T) {
 	}
 	if integrity != "ok" {
 		t.Errorf("integrity_check = %q, want ok", integrity)
+	}
+}
+
+func TestCheckDatabaseGenerationReportsReplacement(t *testing.T) {
+	dir := t.TempDir()
+	original := filepath.Join(dir, "original.db")
+	replacement := filepath.Join(dir, "replacement.db")
+	if err := os.WriteFile(original, []byte("original"), 0o600); err != nil {
+		t.Fatalf("write original: %v", err)
+	}
+	if err := os.WriteFile(replacement, []byte("replacement"), 0o600); err != nil {
+		t.Fatalf("write replacement: %v", err)
+	}
+	info, err := os.Stat(original)
+	if err != nil {
+		t.Fatalf("stat original: %v", err)
+	}
+	s := &Store{databasePath: replacement, databaseGenerationInfos: map[string]os.FileInfo{replacement: info}}
+	err = s.CheckDatabaseGeneration()
+	if !errors.Is(err, ErrDatabaseGenerationReplaced) {
+		t.Fatalf("CheckDatabaseGeneration error = %v, want ErrDatabaseGenerationReplaced", err)
+	}
+	if !strings.Contains(err.Error(), "restart") {
+		t.Errorf("replacement diagnostic = %q, want restart guidance", err)
+	}
+}
+
+func TestLiveStoreDetectsReplacedDatabaseGeneration(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not permit replacing an open SQLite database file")
+	}
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = t.TempDir()
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+
+	dbPath := filepath.Join(cfg.DataDir, "engram.db")
+	replacement := filepath.Join(cfg.DataDir, "replacement.db")
+	if err := os.WriteFile(replacement, []byte("not a SQLite database"), 0o600); err != nil {
+		t.Fatalf("write replacement: %v", err)
+	}
+	if err := os.Rename(replacement, dbPath); err != nil {
+		t.Fatalf("replace live database generation: %v", err)
+	}
+	if err := s.CreateSession("replacement-session", "replacement-project", cfg.DataDir); !errors.Is(err, ErrDatabaseGenerationReplaced) {
+		t.Fatalf("CreateSession error = %v, want ErrDatabaseGenerationReplaced", err)
 	}
 }
 
@@ -451,7 +593,7 @@ func TestAcquireMigrationLockTimesOutWithDiagnostic(t *testing.T) {
 	if elapsed := time.Since(start); elapsed < 300*time.Millisecond {
 		t.Errorf("timed out after %s, want at least the %s budget", elapsed, 300*time.Millisecond)
 	}
-	if !strings.Contains(err.Error(), path) {
+	if !strings.Contains(err.Error(), filepath.Base(path)) {
 		t.Errorf("timeout error does not name the lock file: %v", err)
 	}
 	if !strings.Contains(err.Error(), "stuck engram process") {
@@ -493,5 +635,26 @@ func TestAcquireMigrationLockExcludes(t *testing.T) {
 		// Granted after release — expected.
 	case <-time.After(5 * time.Second):
 		t.Fatal("second acquire did not proceed after the first lock was released")
+	}
+}
+
+func TestStoreGenerationLeaseBlocksDatabaseMove(t *testing.T) {
+	origTimeout := migrationLockTimeout
+	migrationLockTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { migrationLockTimeout = origTimeout })
+
+	dir := t.TempDir()
+	release, err := acquireStoreGenerationLease(filepath.Join(dir, ".generation.lock"))
+	if err != nil {
+		t.Fatalf("acquire store generation lease: %v", err)
+	}
+	defer release()
+
+	_, err = AcquireDatabaseGenerationMoveLock(dir)
+	if err == nil {
+		t.Fatal("database mover acquired an exclusive lock while a Store lease was held")
+	}
+	if !strings.Contains(err.Error(), "database generation") {
+		t.Errorf("generation move lock diagnostic = %q, want database generation context", err)
 	}
 }

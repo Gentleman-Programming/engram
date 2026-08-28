@@ -58,6 +58,7 @@ var (
 	ErrObservationTitleRequired   = errors.New("observation title is required")
 	ErrObservationContentRequired = errors.New("observation content is required")
 	ErrPromptContentRequired      = errors.New("prompt content is required")
+	ErrDatabaseGenerationReplaced = errors.New("database generation was replaced while Engram was running")
 )
 
 // Sentinel errors for relation sync apply path (Phase 2).
@@ -493,9 +494,13 @@ func (s *Store) MaxObservationLength() int {
 // ─── Store ───────────────────────────────────────────────────────────────────
 
 type Store struct {
-	db    *sql.DB
-	cfg   Config
-	hooks storeHooks
+	db                      *sql.DB
+	cfg                     Config
+	hooks                   storeHooks
+	databasePath            string
+	generationMu            sync.RWMutex
+	databaseGenerationInfos map[string]os.FileInfo
+	releaseGenerationLease  func()
 }
 
 type execer interface {
@@ -635,23 +640,42 @@ func newStore(cfg Config, withRepair bool) (*Store, error) {
 	}
 
 	dbPath := filepath.Join(cfg.DataDir, "engram.db")
+	releaseGenerationLease, err := acquireStoreGenerationLease(filepath.Join(cfg.DataDir, ".generation.lock"))
+	if err != nil {
+		return nil, fmt.Errorf("engram: acquire database generation lease: %w", err)
+	}
+	defer func() {
+		if releaseGenerationLease != nil {
+			releaseGenerationLease()
+		}
+	}()
+
 	registerPersistWALHook()
 	db, err := openDB("sqlite", storeDSN(dbPath))
 	if err != nil {
 		return nil, fmt.Errorf("engram: open database: %w", err)
 	}
+	storeReady := false
+	defer func() {
+		if !storeReady {
+			_ = db.Close()
+		}
+	}()
 	db.SetMaxOpenConns(1)
 
 	if err := primeConnection(db); err != nil {
-		_ = db.Close()
 		return nil, err
 	}
 
-	s := &Store{db: db, cfg: cfg, hooks: defaultStoreHooks()}
-	if err := s.runStartupMigrations(withRepair); err != nil {
-		_ = db.Close()
+	s := &Store{db: db, cfg: cfg, hooks: defaultStoreHooks(), databasePath: dbPath, releaseGenerationLease: releaseGenerationLease}
+	if err := s.captureDatabaseGeneration(); err != nil {
 		return nil, err
 	}
+	if err := s.runStartupMigrations(withRepair); err != nil {
+		return nil, err
+	}
+	storeReady = true
+	releaseGenerationLease = nil
 	return s, nil
 }
 
@@ -767,7 +791,51 @@ func primeConnection(db *sql.DB) error {
 }
 
 func (s *Store) Close() error {
-	return s.db.Close()
+	err := s.db.Close()
+	if s.releaseGenerationLease != nil {
+		s.releaseGenerationLease()
+	}
+	return err
+}
+
+func (s *Store) captureDatabaseGeneration() error {
+	infos := make(map[string]os.FileInfo, 3)
+	for _, path := range []string{s.databasePath, s.databasePath + "-wal", s.databasePath + "-shm"} {
+		info, err := os.Stat(path)
+		if err != nil {
+			if path != s.databasePath && errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return fmt.Errorf("engram: record database generation %q: %w", path, err)
+		}
+		infos[path] = info
+	}
+	s.generationMu.Lock()
+	s.databaseGenerationInfos = infos
+	s.generationMu.Unlock()
+	return nil
+}
+
+// CheckDatabaseGeneration detects an unsupported external replacement of the
+// main database file while this Store remains live. It deliberately does not
+// reopen the database: reopening across WAL/SHM generations is not proven
+// safe. Callers must stop all Engram processes and restart after this error.
+func (s *Store) CheckDatabaseGeneration() error {
+	s.generationMu.RLock()
+	defer s.generationMu.RUnlock()
+	if len(s.databaseGenerationInfos) == 0 {
+		return fmt.Errorf("%w: no initial identity was recorded; stop all Engram processes and restart them", ErrDatabaseGenerationReplaced)
+	}
+	for path, expected := range s.databaseGenerationInfos {
+		info, err := os.Stat(path)
+		if err != nil {
+			return fmt.Errorf("%w: database generation file %q is unavailable (%v); external database/WAL/SHM replacement is unsupported — stop all Engram processes and restart them", ErrDatabaseGenerationReplaced, path, err)
+		}
+		if !os.SameFile(expected, info) {
+			return fmt.Errorf("%w: database generation file %q changed externally; external database/WAL/SHM replacement is unsupported — stop all Engram processes and restart them", ErrDatabaseGenerationReplaced, path)
+		}
+	}
+	return nil
 }
 
 // ─── Migrations ──────────────────────────────────────────────────────────────
@@ -789,12 +857,21 @@ func (s *Store) Close() error {
 // every open (self-healing, as before the gate existed) but inside the same
 // inter-process lock so concurrent startups cannot storm identical backfill
 // writes.
-const schemaVersion = 1
+const schemaVersion = 2
 
 // migrateRunCount counts executions of the gated migration block across the
 // process. It exists for test observability only — asserting that the
 // user_version gate skips migrations on already-current databases.
 var migrateRunCount atomic.Int64
+
+// startupMigrationBeforeLockHook is a test seam for the narrow interval
+// between the optimistic version read and the locked re-read. Production
+// leaves it nil.
+var startupMigrationBeforeLockHook func()
+
+// startupRepairRunCount is test observability for the repair path. It proves a
+// newer schema returns before any repair writes.
+var startupRepairRunCount atomic.Int64
 
 // runStartupMigrations runs migrate() at most once per schema generation
 // (gated on PRAGMA user_version) and, when withRepair is set, the
@@ -827,6 +904,9 @@ func (s *Store) runStartupMigrations(withRepair bool) error {
 	if skipMigrate && !withRepair {
 		return nil // schema current and no repair requested: nothing to do
 	}
+	if startupMigrationBeforeLockHook != nil {
+		startupMigrationBeforeLockHook()
+	}
 
 	unlock, err := acquireMigrationLock(filepath.Join(s.cfg.DataDir, ".migrate.lock"))
 	if err != nil {
@@ -834,24 +914,29 @@ func (s *Store) runStartupMigrations(withRepair bool) error {
 	}
 	defer unlock()
 
+	// Re-read even when the optimistic read was current: a process that was
+	// waiting for the lock may now see a different database generation or a
+	// newer binary's schema stamp.
+	current, err = s.readUserVersion()
+	if err != nil {
+		return fmt.Errorf("engram: re-read user_version: %w", err)
+	}
+	if current > schemaVersion {
+		shouldSkipMigrations(current) // logs the actionable newer-binary warning
+		return nil
+	}
+
 	ranMigrate := false
-	if !skipMigrate {
-		// Double-check under the lock: another process may have completed
-		// the migration while this one was waiting on the lock.
-		current, err = s.readUserVersion()
-		if err != nil {
-			return fmt.Errorf("engram: re-read user_version: %w", err)
+	if current < schemaVersion {
+		migrateRunCount.Add(1)
+		if err := s.migrate(); err != nil {
+			return fmt.Errorf("engram: migration: %w", err)
 		}
-		if !shouldSkipMigrations(current) {
-			migrateRunCount.Add(1)
-			if err := s.migrate(); err != nil {
-				return fmt.Errorf("engram: migration: %w", err)
-			}
-			ranMigrate = true
-		}
+		ranMigrate = true
 	}
 
 	if withRepair {
+		startupRepairRunCount.Add(1)
 		if err := s.repairEnrolledProjectSyncMutations(); err != nil {
 			return fmt.Errorf("engram: repair enrolled sync journal: %w", err)
 		}
@@ -1239,6 +1324,19 @@ func (s *Store) migrate() error {
 	}
 
 	if err := s.migrateFTSTopicKey(); err != nil {
+		return err
+	}
+
+	// FTS triggers above must exist before this backfill so SQLite maintains the
+	// external-content index while normalizing historical BLOB project values.
+	if err := s.withTx(func(tx *sql.Tx) error {
+		_, err := s.execHook(tx, `
+			UPDATE observations
+			SET project = CAST(project AS TEXT)
+			WHERE typeof(project) = 'blob'
+		`)
+		return err
+	}); err != nil {
 		return err
 	}
 
@@ -2565,7 +2663,7 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 		syncID := newSyncID("obs")
 		res, err := s.execHook(tx,
 			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, datetime('now'), datetime('now'))`,
+			 VALUES (?, ?, ?, ?, ?, ?, CAST(? AS TEXT), ?, ?, ?, 1, 1, datetime('now'), datetime('now'))`,
 			syncID, p.SessionID, p.Type, title, content,
 			nullableString(p.ToolName), nullableString(p.Project), scope, nullableString(topicKey), normHash,
 		)
@@ -3795,7 +3893,7 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 		syncID := normalizeExistingSyncID(obs.SyncID, "obs")
 		res, err := s.execHook(tx,
 			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, review_after, created_at, updated_at, deleted_at)
-			 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+			 SELECT ?, ?, ?, ?, ?, ?, CAST(? AS TEXT), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 			 WHERE NOT EXISTS (SELECT 1 FROM observations WHERE sync_id = ?)`,
 			syncID,
 			obs.SessionID,
@@ -5145,7 +5243,10 @@ func (s *Store) DeleteProject(project string, hardDelete bool) (*DeleteProjectRe
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 func (s *Store) withTx(fn func(tx *sql.Tx) error) error {
-	return withSQLiteWriteRetry(func() error {
+	if err := s.CheckDatabaseGeneration(); err != nil {
+		return err
+	}
+	if err := withSQLiteWriteRetry(func() error {
 		tx, err := s.beginTxHook()
 		if err != nil {
 			return err
@@ -5155,7 +5256,13 @@ func (s *Store) withTx(fn func(tx *sql.Tx) error) error {
 			return err
 		}
 		return s.commitHook(tx)
-	})
+	}); err != nil {
+		return err
+	}
+	if err := s.captureDatabaseGeneration(); err != nil {
+		log.Printf("[store] database generation refresh failed after committed transaction: %v; future mutations will revalidate the database generation", err)
+	}
+	return nil
 }
 
 func withSQLiteWriteRetry(fn func() error) error {
@@ -6088,7 +6195,7 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 	if err == sql.ErrNoRows {
 		_, err = s.execHook(tx,
 			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+			 VALUES (?, ?, ?, ?, ?, ?, CAST(? AS TEXT), ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
 			payload.SyncID,
 			payload.SessionID,
 			payload.Type,
@@ -6129,7 +6236,7 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 
 	_, err = s.execHook(tx,
 		`UPDATE observations
-		 SET session_id = ?, type = ?, title = ?, content = ?, tool_name = ?, project = ?, scope = ?, topic_key = ?, normalized_hash = ?, revision_count = ?, duplicate_count = ?, last_seen_at = ?, created_at = ?, updated_at = ?, deleted_at = NULL
+		 SET session_id = ?, type = ?, title = ?, content = ?, tool_name = ?, project = CAST(? AS TEXT), scope = ?, topic_key = ?, normalized_hash = ?, revision_count = ?, duplicate_count = ?, last_seen_at = ?, created_at = ?, updated_at = ?, deleted_at = NULL
 		 WHERE id = ?`,
 		payload.SessionID,
 		payload.Type,

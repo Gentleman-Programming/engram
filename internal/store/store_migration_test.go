@@ -350,11 +350,68 @@ func TestMigrate_Idempotent(t *testing.T) {
 	}
 
 	// Assert new columns still present and queryable.
-	_, err = s2.db.Query(
+	rows, err := s2.db.Query(
 		`SELECT review_after, expires_at FROM observations LIMIT 1`,
 	)
 	if err != nil {
 		t.Fatalf("new columns missing after second migrate: %v (expected red)", err)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatalf("close new columns query rows: %v", err)
+	}
+}
+
+func TestMigrationRepairsBlobObservationProjectsAfterFTSTriggers(t *testing.T) {
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = t.TempDir()
+
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := s.CreateSession("blob-project-session", "blob-project", "/tmp/blob-project"); err != nil {
+		s.Close()
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.db.Exec(`
+		INSERT INTO observations (sync_id, session_id, type, title, content, project, scope, normalized_hash, revision_count, duplicate_count, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, CAST(? AS BLOB), ?, ?, 1, 1, datetime('now'), datetime('now'))`,
+		"obs-blob-project", "blob-project-session", "decision", "blob project title", "blobrepairtoken", "blob-project", "project", hashNormalized("blobrepairtoken"),
+	); err != nil {
+		s.Close()
+		t.Fatalf("insert historical blob project: %v", err)
+	}
+	if _, err := s.db.Exec(`PRAGMA user_version = 1`); err != nil {
+		s.Close()
+		t.Fatalf("set previous schema version: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close pre-repair store: %v", err)
+	}
+
+	s, err = New(cfg)
+	if err != nil {
+		t.Fatalf("New after historical blob project: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	var project, storageClass string
+	if err := s.db.QueryRow(`SELECT project, typeof(project) FROM observations WHERE sync_id = ?`, "obs-blob-project").Scan(&project, &storageClass); err != nil {
+		t.Fatalf("read repaired project: %v", err)
+	}
+	if project != "blob-project" {
+		t.Fatalf("repaired project = %q, want blob-project", project)
+	}
+	if storageClass != "text" {
+		t.Fatalf("repaired project storage = %q, want text", storageClass)
+	}
+
+	results, err := s.Search("blobrepairtoken", SearchOptions{Project: "blob-project", Scope: "project"})
+	if err != nil {
+		t.Fatalf("search repaired observation: %v", err)
+	}
+	if len(results) != 1 || results[0].SyncID != "obs-blob-project" {
+		t.Fatalf("search repaired observation = %#v, want obs-blob-project", results)
 	}
 }
 

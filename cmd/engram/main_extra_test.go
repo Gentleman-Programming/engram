@@ -685,6 +685,28 @@ func TestMainCloudHelpDoesNotCreateLocalDatabase(t *testing.T) {
 	}
 }
 
+func TestMigrateOrphanedDBCandidatesMovesDatabaseGeneration(t *testing.T) {
+	orphanDir := t.TempDir()
+	correctDir := filepath.Join(t.TempDir(), "engram")
+	orphanDB := filepath.Join(orphanDir, "engram.db")
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if err := os.WriteFile(orphanDB+suffix, []byte(suffix+" generation"), 0o600); err != nil {
+			t.Fatalf("write orphan %q: %v", suffix, err)
+		}
+	}
+
+	migrateOrphanedDBCandidates(correctDir, []string{orphanDB})
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		got, err := os.ReadFile(filepath.Join(correctDir, "engram.db") + suffix)
+		if err != nil {
+			t.Fatalf("read migrated %q: %v", suffix, err)
+		}
+		if want := suffix + " generation"; string(got) != want {
+			t.Errorf("migrated %q = %q, want %q", suffix, got, want)
+		}
+	}
+}
+
 func TestCmdCloudStatusDistinguishesAuthAndSyncReadiness(t *testing.T) {
 	stubExitWithPanic(t)
 	stubRuntimeHooks(t)

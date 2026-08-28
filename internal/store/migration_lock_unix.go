@@ -28,3 +28,21 @@ func tryLockMigrationFile(f *os.File) (bool, error) {
 func unlockMigrationFile(f *os.File) error {
 	return syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 }
+
+// tryLockSharedDatabaseFile attempts a non-blocking shared flock(2). A Store
+// holds this lease for its lifetime while the orphan mover takes an exclusive
+// lock on the same file.
+func tryLockSharedDatabaseFile(f *os.File) (bool, error) {
+	err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EINTR) {
+		return false, nil
+	}
+	return false, err
+}
+
+func unlockDatabaseFile(f *os.File) error {
+	return syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+}

@@ -3067,6 +3067,107 @@ func TestApplyPulledObservationPreservesChronologyAndRevisionMetadata(t *testing
 	}
 }
 
+func TestObservationProjectWritesUseSQLiteText(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("text-project-session", "text-project", "/tmp/text-project"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "text-project-session",
+		Type:      "decision",
+		Title:     "ordinary text project",
+		Content:   "ordinarytexttoken",
+		Project:   "text-project",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	var ordinaryProject, ordinaryStorageClass string
+	if err := s.db.QueryRow(`SELECT project, typeof(project) FROM observations WHERE title = ?`, "ordinary text project").Scan(&ordinaryProject, &ordinaryStorageClass); err != nil {
+		t.Fatalf("read ordinary project storage: %v", err)
+	}
+	if ordinaryProject != "text-project" || ordinaryStorageClass != "text" {
+		t.Fatalf("ordinary project = (%q, %q), want (text-project, text)", ordinaryProject, ordinaryStorageClass)
+	}
+
+	importProject := "import-text-project"
+	if _, err := s.Import(&ExportData{
+		Sessions: []Session{{
+			ID:        "import-text-session",
+			Project:   importProject,
+			Directory: "/tmp/import-text-project",
+			StartedAt: Now(),
+		}},
+		Observations: []Observation{{
+			SyncID:    "obs-import-text-project",
+			SessionID: "import-text-session",
+			Type:      "decision",
+			Title:     "import text project",
+			Content:   "importtexttoken",
+			Project:   &importProject,
+			Scope:     "project",
+			CreatedAt: Now(),
+			UpdatedAt: Now(),
+		}},
+	}); err != nil {
+		t.Fatalf("import observation: %v", err)
+	}
+
+	if err := s.CreateSession("sync-text-session", "sync-text-project", "/tmp/sync-text-project"); err != nil {
+		t.Fatalf("create sync session: %v", err)
+	}
+	for _, mutation := range []SyncMutation{
+		{
+			Seq:       1,
+			TargetKey: DefaultSyncTargetKey,
+			Entity:    SyncEntityObservation,
+			EntityKey: "obs-sync-text-project",
+			Op:        SyncOpUpsert,
+			Payload:   `{"sync_id":"obs-sync-text-project","session_id":"sync-text-session","type":"decision","title":"sync text project","content":"syncinserttexttoken","project":"sync-text-project","scope":"project"}`,
+		},
+		{
+			Seq:       2,
+			TargetKey: DefaultSyncTargetKey,
+			Entity:    SyncEntityObservation,
+			EntityKey: "obs-sync-text-project",
+			Op:        SyncOpUpsert,
+			Payload:   `{"sync_id":"obs-sync-text-project","session_id":"sync-text-session","type":"decision","title":"sync text project updated","content":"syncupdatetexttoken","project":"sync-text-project","scope":"project"}`,
+		},
+	} {
+		if err := s.ApplyPulledMutation(DefaultSyncTargetKey, mutation); err != nil {
+			t.Fatalf("apply pulled observation seq %d: %v", mutation.Seq, err)
+		}
+	}
+
+	for _, syncID := range []string{
+		"obs-import-text-project",
+		"obs-sync-text-project",
+	} {
+		var project, storageClass string
+		if err := s.db.QueryRow(`SELECT project, typeof(project) FROM observations WHERE sync_id = ?`, syncID).Scan(&project, &storageClass); err != nil {
+			t.Fatalf("read project storage for %s: %v", syncID, err)
+		}
+		if storageClass != "text" {
+			t.Errorf("project storage for %s = %q, want text", syncID, storageClass)
+		}
+		if syncID == "obs-import-text-project" && project != importProject {
+			t.Errorf("imported project = %q, want %q", project, importProject)
+		}
+		if syncID == "obs-sync-text-project" && project != "sync-text-project" {
+			t.Errorf("updated sync project = %q, want sync-text-project", project)
+		}
+	}
+
+	results, err := s.Search("syncupdatetexttoken", SearchOptions{Project: "sync-text-project", Scope: "project"})
+	if err != nil {
+		t.Fatalf("search updated sync observation: %v", err)
+	}
+	if len(results) != 1 || results[0].SyncID != "obs-sync-text-project" {
+		t.Fatalf("search updated sync observation = %#v, want obs-sync-text-project", results)
+	}
+}
+
 func TestApplyPulledChunkIsAtomicAndRetrySafe(t *testing.T) {
 	s := newTestStore(t)
 
@@ -4397,6 +4498,21 @@ func TestSQLiteWriteRetryRetriesTransientLockErrors(t *testing.T) {
 	})
 }
 
+func TestWithTxDoesNotReportCommittedWriteAsFailedWhenGenerationRefreshFails(t *testing.T) {
+	s := newTestStore(t)
+	originalDatabasePath := s.databasePath
+	s.databasePath = filepath.Join(t.TempDir(), "missing.db")
+	t.Cleanup(func() { s.databasePath = originalDatabasePath })
+
+	if err := s.CreateSession("committed-generation-refresh", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("CreateSession returned an error after commit: %v", err)
+	}
+
+	if _, err := s.GetSession("committed-generation-refresh"); err != nil {
+		t.Fatalf("committed session was not persisted: %v", err)
+	}
+}
+
 func TestStoreUncoveredBranchesPushToHundred(t *testing.T) {
 	t.Run("new open database hook error", func(t *testing.T) {
 		orig := openDB
@@ -4410,6 +4526,48 @@ func TestStoreUncoveredBranchesPushToHundred(t *testing.T) {
 		if _, err := New(cfg); err == nil || !strings.Contains(err.Error(), "open database") {
 			t.Fatalf("expected open database error, got %v", err)
 		}
+	})
+
+	t.Run("new closes opened database and releases generation lease on migration error", func(t *testing.T) {
+		cfg := mustDefaultConfig(t)
+		cfg.DataDir = t.TempDir()
+
+		raw, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
+		if err != nil {
+			t.Fatalf("open setup database: %v", err)
+		}
+		if _, err := raw.Exec(`CREATE VIEW observations AS SELECT 1 AS id`); err != nil {
+			raw.Close()
+			t.Fatalf("create incompatible observations view: %v", err)
+		}
+		if err := raw.Close(); err != nil {
+			t.Fatalf("close setup database: %v", err)
+		}
+
+		originalOpenDB := openDB
+		var opened *sql.DB
+		openDB = func(driverName, dataSourceName string) (*sql.DB, error) {
+			var err error
+			opened, err = originalOpenDB(driverName, dataSourceName)
+			return opened, err
+		}
+		t.Cleanup(func() { openDB = originalOpenDB })
+
+		if _, err := New(cfg); err == nil {
+			t.Fatal("New succeeded with an incompatible observations view")
+		}
+		if opened == nil {
+			t.Fatal("New did not call openDB")
+		}
+		if err := opened.Ping(); err == nil || !strings.Contains(err.Error(), "database is closed") {
+			t.Fatalf("opened database Ping error = %v, want closed database error", err)
+		}
+
+		release, err := AcquireDatabaseGenerationMoveLock(cfg.DataDir)
+		if err != nil {
+			t.Fatalf("acquire generation move lock after failed New: %v", err)
+		}
+		release()
 	})
 
 	t.Run("migrate forced failures for remaining exec branches", func(t *testing.T) {

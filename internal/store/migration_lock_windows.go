@@ -32,3 +32,25 @@ func tryLockMigrationFile(f *os.File) (bool, error) {
 func unlockMigrationFile(f *os.File) error {
 	return windows.UnlockFileEx(windows.Handle(f.Fd()), 0, 1, 0, new(windows.Overlapped))
 }
+
+// tryLockSharedDatabaseFile acquires a non-blocking shared byte-range lock.
+// LockFileEx treats a lock without LOCKFILE_EXCLUSIVE_LOCK as shared.
+func tryLockSharedDatabaseFile(f *os.File) (bool, error) {
+	ol := new(windows.Overlapped)
+	err := windows.LockFileEx(
+		windows.Handle(f.Fd()),
+		windows.LOCKFILE_FAIL_IMMEDIATELY,
+		0, 1, 0, ol,
+	)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+		return false, nil
+	}
+	return false, err
+}
+
+func unlockDatabaseFile(f *os.File) error {
+	return windows.UnlockFileEx(windows.Handle(f.Fd()), 0, 1, 0, new(windows.Overlapped))
+}

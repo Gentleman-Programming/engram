@@ -2818,6 +2818,11 @@ func migrateOrphanedDB(correctDir string) {
 		}
 	}
 
+	migrateOrphanedDBCandidates(correctDir, candidates)
+}
+
+func migrateOrphanedDBCandidates(correctDir string, candidates []string) {
+	correctDB := filepath.Join(correctDir, "engram.db")
 	for _, candidate := range candidates {
 		if candidate == correctDB {
 			continue
@@ -2827,13 +2832,26 @@ func migrateOrphanedDB(correctDir string) {
 			continue
 		}
 
-		// Found an orphaned DB — migrate it.
-		log.Printf("[engram] found orphaned database at %s, migrating to %s", candidate, correctDB)
-
 		if err := os.MkdirAll(correctDir, 0755); err != nil {
 			log.Printf("[engram] migration failed (create dir): %v", err)
 			return
 		}
+		unlock, err := store.AcquireDatabaseGenerationMoveLock(correctDir)
+		if err != nil {
+			log.Printf("[engram] migration refused: %v; stop the running Engram process and retry", err)
+			return
+		}
+
+		// A Store may have won the generation lease while this process was
+		// locating the orphan. Never replace the generation it just created.
+		if _, err := os.Stat(correctDB); err == nil {
+			unlock()
+			return
+		}
+
+		// Found an orphaned DB — migrate it only while no Store has the
+		// matching shared generation lease.
+		log.Printf("[engram] found orphaned database at %s, migrating to %s", candidate, correctDB)
 
 		// Move DB and WAL/SHM files if they exist.
 		for _, suffix := range []string{"", "-wal", "-shm"} {
@@ -2843,10 +2861,12 @@ func migrateOrphanedDB(correctDir string) {
 				continue
 			}
 			if renameErr := os.Rename(src, dst); renameErr != nil {
+				unlock()
 				log.Printf("[engram] migration failed (move %s): %v", filepath.Base(src), renameErr)
 				return
 			}
 		}
+		unlock()
 
 		// Clean up empty orphaned directory.
 		orphanDir := filepath.Dir(candidate)
