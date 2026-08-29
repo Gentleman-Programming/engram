@@ -210,12 +210,45 @@ func TestProjectScopedHTTPReadFamiliesUseCurrentAndExplicitAll(t *testing.T) {
 		t.Fatalf("failed project resolution must not mutate review state: before=%v after=%v err=%v", before.ReviewAfter, after.ReviewAfter, err)
 	}
 
-	for _, path := range []string{"/stats?project=missing", "/stats?all_projects=not-a-bool", "/stats?project=alpha&all_projects=true"} {
+	for _, selector := range []struct {
+		path       string
+		wantStatus int
+		wantCode   string
+	}{
+		{"/stats?project=missing", http.StatusNotFound, "unknown_project"},
+		{"/stats?all_projects=not-a-bool", http.StatusBadRequest, "invalid_project"},
+		{"/stats?project=alpha&all_projects=true", http.StatusBadRequest, "invalid_project"},
+		{"/stats?project=alpha&project=beta", http.StatusBadRequest, "invalid_project"},
+	} {
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
-		if rec.Code != http.StatusBadRequest && rec.Code != http.StatusNotFound {
-			t.Fatalf("invalid selector %s = %d: %s", path, rec.Code, rec.Body.String())
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, selector.path, nil))
+		if rec.Code != selector.wantStatus {
+			t.Fatalf("selector %s = %d, want %d: %s", selector.path, rec.Code, selector.wantStatus, rec.Body.String())
 		}
+		var body map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode selector %s response: %v", selector.path, err)
+		}
+		if body["code"] != selector.wantCode {
+			t.Fatalf("selector %s error code = %#v, want %q: %s", selector.path, body["code"], selector.wantCode, rec.Body.String())
+		}
+	}
+}
+
+func TestRepeatedProjectSelectorReturnsInvalidProject(t *testing.T) {
+	srv := New(newServerTestStore(t), 0)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/stats?project=alpha&project=beta", nil))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("repeated project selector = %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode repeated selector response: %v", err)
+	}
+	if body["code"] != "invalid_project" {
+		t.Fatalf("repeated project selector code = %#v, want invalid_project: %s", body["code"], rec.Body.String())
 	}
 }
 
@@ -1514,6 +1547,47 @@ func TestHandleStatsReturnsInternalServerErrorOnLoaderError(t *testing.T) {
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("expected 500 stats response, got %d", rec.Code)
+	}
+}
+
+func TestHandleStatsProjectScopeSkipsGlobalLoader(t *testing.T) {
+	st := newServerTestStore(t)
+	if err := st.CreateSession("scoped-stats", "alpha", "/tmp/alpha"); err != nil {
+		t.Fatalf("create alpha session: %v", err)
+	}
+	previous := loadServerStats
+	loadServerStats = func(*store.Store) (*store.Stats, error) {
+		return nil, errors.New("global stats should not run")
+	}
+	t.Cleanup(func() { loadServerStats = previous })
+
+	srv := New(st, 0)
+	rec := httptest.NewRecorder()
+	srv.handleStats(rec, httptest.NewRequest(http.MethodGet, "/stats?project=alpha", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("project stats = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestProjectResolutionStoreFailureReturnsInternalErrorCode(t *testing.T) {
+	st := newServerTestStore(t)
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+	srv := New(st, 0)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/stats?project=alpha", nil))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("store resolution failure = %d, want 500: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode resolution failure: %v", err)
+	}
+	if body["code"] != "project_resolution_failed" {
+		t.Fatalf("resolution failure code = %#v, want project_resolution_failed: %s", body["code"], rec.Body.String())
 	}
 }
 

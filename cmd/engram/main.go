@@ -1528,9 +1528,11 @@ func cmdStats(cfg store.Config) {
 		fatal(resolveErr)
 		return
 	}
-	stats, err := storeStats(s)
+	var stats *store.Stats
 	if resolved != "" {
 		stats, err = storeStatsProject(s, resolved)
+	} else {
+		stats, err = storeStats(s)
 	}
 	if err != nil {
 		fatal(err)
@@ -1580,9 +1582,11 @@ func cmdExport(cfg store.Config) {
 		fatal(resolveErr)
 		return
 	}
-	data, err := storeExport(s)
+	var data *store.ExportData
 	if resolved != "" {
 		data, err = storeExportProject(s, resolved)
+	} else {
+		data, err = storeExport(s)
 	}
 	if err != nil {
 		fatal(err)
@@ -3007,7 +3011,7 @@ Commands:
   test [suite] [--quick] [--json]
                      Run isolated local reliability and performance self-tests
                        suites: reliability, performance (default: both)
-  search <query>     Search memories [--type TYPE] [--project PROJECT] [--scope SCOPE] [--limit N]
+  search <query>     Search memories [--type TYPE] [--project PROJECT|--all] [--scope SCOPE] [--limit N]
   save <title> <msg> Save a memory  [--type TYPE] [--project PROJECT] [--scope SCOPE]
   delete <obs_id>    Delete an observation [--hard] (soft-delete by default; --hard removes permanently)
   delete session <id>
@@ -3017,7 +3021,7 @@ Commands:
   delete project <name> [--hard]
                      Cascade-delete a project: soft-deletes observations (or hard if --hard),
                      removes prompts; with --hard also removes sessions
-  timeline <obs_id>  Show chronological context around an observation [--before N] [--after N]
+  timeline <obs_id>  Show chronological context around an observation [--before N] [--after N] [--project PROJECT|--all]
   conflicts <sub>   Inspect and manage memory conflict relations
                        list     [--project P]  [--status S]  [--since RFC3339]  [--limit N]
                        show     <relation_id>
@@ -3029,8 +3033,10 @@ Commands:
   doctor             Run read-only operational diagnostics [--json] [--project P] [--check CODE]
   context [project] [--project PROJECT|--all] [--scope SCOPE]
                      Show recent context from previous sessions
-  stats              Show memory system statistics
-  export [file]      Export all memories to JSON (default: engram-export.json)
+  stats [--project PROJECT|--all]
+                     Show memory system statistics
+  export [file] [--project PROJECT|--all]
+                     Export memories to JSON (default: engram-export.json)
   import <file>      Import memories from a JSON export file
   projects list      List all projects with observation, session, and prompt counts
   projects consolidate [--all] [--dry-run]
@@ -3055,9 +3061,11 @@ Commands:
 	                        enroll     Enroll a project for cloud sync
 	                        config     Set cloud server URL
 	                        serve      Run cloud backend + dashboard
-  obsidian-export    Export memories to an Obsidian-compatible markdown vault
+  obsidian-export [--project PROJECT|--all]
+                     Export memories to an Obsidian-compatible markdown vault
                        --vault         Path to Obsidian vault root (required)
-                       --project       Filter export to a single project (optional)
+                        --project       Filter export to a single project (optional; cannot combine with --all)
+                        --all           Export every project
                        --limit         Cap exported observations at N (optional)
                        --since         Export only observations after this date, e.g. 2026-01-01 (optional)
                        --force         Ignore incremental state, full re-export (optional)

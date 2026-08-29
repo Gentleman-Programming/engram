@@ -1047,6 +1047,54 @@ func TestCmdSearchLocalMode(t *testing.T) {
 	}
 }
 
+func TestUsageAdvertisesAllProjectReadSelectors(t *testing.T) {
+	stdout, _ := captureOutput(t, func() { printUsage() })
+	for _, want := range []string{
+		"search <query>     Search memories [--type TYPE] [--project PROJECT|--all]",
+		"timeline <obs_id>  Show chronological context around an observation [--before N] [--after N] [--project PROJECT|--all]",
+		"stats [--project PROJECT|--all]",
+		"export [file] [--project PROJECT|--all]",
+		"obsidian-export [--project PROJECT|--all]",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("usage missing %q:\n%s", want, stdout)
+		}
+	}
+}
+
+func TestCmdStatsAndExportProjectScopeSkipGlobalLoads(t *testing.T) {
+	workDir := t.TempDir()
+	withCwd(t, workDir)
+	cfg := testConfig(t)
+	mustSeedObservation(t, cfg, "scoped-load", "alpha", "note", "scoped", "scoped content", "project")
+
+	oldStats := storeStats
+	oldExport := storeExport
+	storeStats = func(*store.Store) (*store.Stats, error) {
+		return nil, errors.New("global stats should not run")
+	}
+	storeExport = func(*store.Store) (*store.ExportData, error) {
+		return nil, errors.New("global export should not run")
+	}
+	t.Cleanup(func() {
+		storeStats = oldStats
+		storeExport = oldExport
+	})
+
+	withArgs(t, "engram", "stats", "--project", "alpha")
+	stdout, stderr := captureOutput(t, func() { cmdStats(cfg) })
+	if stderr != "" || !strings.Contains(stdout, "Observations: 1") {
+		t.Fatalf("project stats must avoid the global loader: stdout=%q stderr=%q", stdout, stderr)
+	}
+
+	path := filepath.Join(workDir, "alpha.json")
+	withArgs(t, "engram", "export", path, "--project", "alpha")
+	_, stderr = captureOutput(t, func() { cmdExport(cfg) })
+	if stderr != "" {
+		t.Fatalf("project export must avoid the global loader: stderr=%q", stderr)
+	}
+}
+
 func TestProjectScopedCLIReadFamiliesUseCurrentAndExplicitAll(t *testing.T) {
 	workDir := t.TempDir()
 	withCwd(t, workDir)

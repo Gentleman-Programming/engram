@@ -277,6 +277,38 @@ function buildEnsureSessionForTest(engramFetch) {
   };
 }
 
+function buildProjectDetectionBoundaryForTest() {
+  const safeProjectBody = extractFunctionBody("isSafeDetectedProject", "{\n  const candidate");
+  const applyBody = extractFunctionBody("applyDetectedProject", "{\n  if (!detected)");
+  const requireBody = extractFunctionBody("requireResolvedProject", "{\n  if (projectResolutionError)");
+  const factory = new Function(`
+    let project = "fallback-project";
+    let projectResolutionError;
+    let projectDetectionPending = false;
+    function isSafeDetectedProject(detected) {
+      ${safeProjectBody}
+    }
+    function applyDetectedProject(detected) {
+      ${applyBody}
+    }
+    function requireResolvedProject() {
+      ${requireBody}
+    }
+    const requests = [];
+    function writeMemory() {
+      requireResolvedProject();
+      requests.push("/sessions", "/observations");
+    }
+    return {
+      applyDetectedProject,
+      writeMemory,
+      requests,
+      state: () => ({ project, projectResolutionError, projectDetectionPending }),
+    };
+  `);
+  return factory();
+}
+
 function sessionCtx(id, sink) {
   return {
     sessionManager: { getSessionId: () => id },
@@ -305,6 +337,35 @@ test("project detection 404 falls back to local config or diagnostic", () => {
   assert.match(source, /project_name/);
   assert.match(source, /error\.status === 404[\s\S]*detectLocalConfigProject\(cwd\) \|\| projectCurrentUnsupportedError\(cwd\)/);
   assert.match(source, /does not support \/project\/current/);
+});
+
+test("unsafe detected projects do not reach session or memory writes", () => {
+  assert.match(source, /case "mem_save":[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*ensureSession/);
+  assert.match(source, /case "mem_save_prompt":[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*ensureSession/);
+  assert.match(source, /case "mem_session_summary":[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*ensureSession/);
+
+  for (const detected of [
+    undefined,
+    { project: "unknown" },
+    { project: "alpha", error_hint: "" },
+    { project: "nested/project" },
+    { project: "C:workspace" },
+    { project: "safe\u0000name" },
+  ]) {
+    const boundary = buildProjectDetectionBoundaryForTest();
+    assert.equal(boundary.applyDetectedProject(detected), false);
+    assert.equal(boundary.state().project, "unknown");
+    assert.throws(() => boundary.writeMemory());
+    assert.deepEqual(boundary.requests, []);
+  }
+});
+
+test("safe detected projects continue through session and memory writes", () => {
+  const boundary = buildProjectDetectionBoundaryForTest();
+  assert.equal(boundary.applyDetectedProject({ project: "engram" }), true);
+  assert.equal(boundary.state().project, "engram");
+  boundary.writeMemory();
+  assert.deepEqual(boundary.requests, ["/sessions", "/observations"]);
 });
 
 test("ambiguous_project error maps to actionable status label, not generic 'error'", () => {

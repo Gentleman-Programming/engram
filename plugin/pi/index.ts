@@ -660,17 +660,34 @@ async function detectServerProject(cwd: string): Promise<CurrentProjectResponse 
   return undefined;
 }
 
+function isSafeDetectedProject(detected: CurrentProjectResponse): string | undefined {
+  const candidate = typeof detected.project === "string" ? detected.project.trim() : "";
+  if (
+    !candidate ||
+    candidate.toLowerCase() === "unknown" ||
+    detected.error_hint !== undefined ||
+    /[\\/\x00-\x1F\x7F]/.test(candidate) ||
+    /^[A-Za-z]:/.test(candidate)
+  ) {
+    return undefined;
+  }
+  return candidate;
+}
+
 function applyDetectedProject(detected: CurrentProjectResponse | undefined): boolean {
   if (!detected) {
+    project = "unknown";
     projectDetectionPending = true;
     return false;
   }
   projectDetectionPending = false;
-  if (detected.project) {
-    project = detected.project;
+  const detectedProject = isSafeDetectedProject(detected);
+  if (detectedProject) {
+    project = detectedProject;
     projectResolutionError = undefined;
     return true;
   }
+  project = "unknown";
   const choices = detected.available_projects?.length ? ` Available projects: ${detected.available_projects.join(", ")}.` : "";
   projectResolutionError = detected.error_hint || detected.warning || `Engram project detection did not resolve a project.${choices}`;
   return false;

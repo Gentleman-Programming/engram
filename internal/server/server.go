@@ -934,9 +934,11 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		s.writeProjectResolutionError(w, resolved, err)
 		return
 	}
-	stats, err := loadServerStats(s.store)
+	var stats *store.Stats
 	if resolved.Project != "" {
 		stats, err = s.store.StatsProject(resolved.Project)
+	} else {
+		stats, err = loadServerStats(s.store)
 	}
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
@@ -1012,9 +1014,11 @@ func (s *Server) handleCurrentProject(w http.ResponseWriter, r *http.Request) {
 // detection remains usable before a project has any stored memories.
 func (s *Server) resolveRequestProject(r *http.Request, mode projectpkg.ResolutionMode, requireKnownOverrides bool) (projectpkg.DetectionResult, error) {
 	query := r.URL.Query()
-	_, projectProvided := query["project"]
-	if projectProvided && strings.TrimSpace(query.Get("project")) == "" {
-		return projectpkg.DetectionResult{}, fmt.Errorf("%w: project parameter must not be blank", projectpkg.ErrInvalidProjectName)
+	projectValues, projectProvided := query["project"]
+	if projectProvided {
+		if len(projectValues) != 1 || strings.TrimSpace(projectValues[0]) == "" {
+			return projectpkg.DetectionResult{}, fmt.Errorf("%w: project parameter must be specified exactly once and must not be blank", projectpkg.ErrInvalidProjectName)
+		}
 	}
 	if raw, allProvided := query["all_projects"]; allProvided {
 		if len(raw) != 1 {
@@ -1046,7 +1050,9 @@ func (s *Server) writeProjectResolutionError(w http.ResponseWriter, res projectp
 	if errors.As(err, &unknown) {
 		available, listErr := s.store.ListProjectNames()
 		if listErr != nil {
-			jsonError(w, http.StatusInternalServerError, listErr.Error())
+			jsonErrorWithFields(w, http.StatusInternalServerError, "project resolution failed: "+listErr.Error(), map[string]any{
+				"code": "project_resolution_failed",
+			})
 			return
 		}
 		jsonErrorWithFields(w, http.StatusNotFound, fmt.Sprintf("project %q not found", unknown.Name), map[string]any{
@@ -1056,9 +1062,10 @@ func (s *Server) writeProjectResolutionError(w http.ResponseWriter, res projectp
 		return
 	}
 	code := "project_resolution_failed"
-	status := http.StatusBadRequest
+	status := http.StatusInternalServerError
 	if errors.Is(err, projectpkg.ErrInvalidProjectName) {
 		code = "invalid_project"
+		status = http.StatusBadRequest
 	}
 	if errors.Is(err, projectpkg.ErrAmbiguousProject) {
 		code = "ambiguous_project"

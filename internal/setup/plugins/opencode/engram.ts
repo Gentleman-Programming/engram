@@ -204,10 +204,13 @@ function stripPrivateTags(str: string): string {
 export const Engram: Plugin = async (ctx) => {
 	let project = "unknown"
 	let projectResolutionError = ""
+	let projectResolutionGeneration = 0
 
 	async function ensureResolvedProject(): Promise<boolean> {
 		if (project !== "unknown" && !projectResolutionError) return true
+		const generation = ++projectResolutionGeneration
 		const resolved = await resolveProjectName(ctx.directory)
+		if (generation !== projectResolutionGeneration) return project !== "unknown" && !projectResolutionError
 		project = resolved.project
 		projectResolutionError = resolved.error ?? ""
 		return projectResolutionError === ""

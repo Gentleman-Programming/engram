@@ -621,6 +621,9 @@ func TestDetectProjectFull_ChildScanFindsLaterSecondRepository(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	previousNow := childScanNow
+	childScanNow = func() time.Time { return time.Unix(0, 0) }
+	t.Cleanup(func() { childScanNow = previousNow })
 
 	res := DetectProjectFull(parent)
 

@@ -52,6 +52,33 @@ function deferredResponse() {
   }
 }
 
+function extractFunctionBody(name) {
+  const signature = source.indexOf(`function ${name}`)
+  assert.notEqual(signature, -1, `${name} function not found`)
+  const bodyStart = source.indexOf("{", signature)
+  let depth = 0
+  for (let index = bodyStart; index < source.length; index += 1) {
+    if (source[index] === "{") depth += 1
+    if (source[index] === "}" && --depth === 0) return source.slice(bodyStart + 1, index)
+  }
+  throw new Error(`${name} function body not found`)
+}
+
+function buildEnsureResolvedProjectForTest(resolveProjectName) {
+  const body = extractFunctionBody("ensureResolvedProject")
+  return new Function("resolveProjectName", `
+    let project = "unknown"
+    let projectResolutionError = ""
+    let projectResolutionGeneration = 0
+    const ctx = { directory: "/work/engram" }
+    async function ensureResolvedProject() {${body}}
+    return {
+      ensureResolvedProject,
+      state: () => ({ project, projectResolutionError }),
+    }
+  `)(resolveProjectName)
+}
+
 function toolOutput(...sessionIDs) {
   const sessionID = sessionIDs.length === 0 ? MODEL_SESSION_ID : sessionIDs[0]
   return { args: sessionID === undefined ? {} : { session_id: sessionID } }
@@ -238,6 +265,27 @@ test("project identity retries a failed resolution on later events", async (t) =
 	assert.deepEqual(runtime.registeredIDs, ["runtime"])
 	const registration = runtime.requests.find(({ path }) => path === "/sessions")
 	assert.equal(registration?.body.project, "engram")
+})
+
+test("a stale project resolution failure cannot overwrite a newer success", async () => {
+  const stale = deferredEvent()
+  let calls = 0
+  const resolution = buildEnsureResolvedProjectForTest(() => {
+    calls += 1
+    return calls === 1 ? stale.event : Promise.resolve({ project: "engram" })
+  })
+
+  const first = resolution.ensureResolvedProject()
+  const second = resolution.ensureResolvedProject()
+  assert.equal(await second, true)
+  stale.emit({ project: "unknown", error: "temporary resolver failure" })
+  assert.equal(await first, true)
+  assert.deepEqual(resolution.state(), { project: "engram", projectResolutionError: "" })
+})
+
+test("embedded and distributable OpenCode plugins remain identical", () => {
+  const embedded = readFileSync(new URL("../../internal/setup/plugins/opencode/engram.ts", import.meta.url), "utf8")
+  assert.equal(embedded, source)
 })
 
 test("registration enters the cache only after a successful acknowledgement", async (t) => {

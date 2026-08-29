@@ -224,9 +224,19 @@ func TestCmdConflictsSelectorsUseCurrentAndExplicitAll(t *testing.T) {
 
 	withArgs(t, "engram", "conflicts", "stats", "--all")
 	stats, stderr := captureOutput(t, func() { cmdConflicts(cfg) })
-	if stderr != "" || !strings.Contains(stats, "pending") {
+	if stderr != "" {
 		t.Fatalf("all conflicts stats must be global: stdout=%q stderr=%q", stats, stderr)
 	}
+	for _, line := range strings.Split(stats, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == "pending:" {
+			if fields[1] != "2" {
+				t.Fatalf("global pending conflicts = %s, want 2: stdout=%q", fields[1], stats)
+			}
+			return
+		}
+	}
+	t.Fatalf("global conflicts stats did not report a pending count: stdout=%q", stats)
 }
 
 // TestCmdConflictsScan_DryRun verifies `engram conflicts scan --project X` (dry-run

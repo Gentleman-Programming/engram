@@ -71,7 +71,7 @@ The OpenCode plugin uses a defense-in-depth strategy to ensure memories survive 
 |-------|-----------|---------------------|
 | **System Prompt** | `MEMORY_INSTRUCTIONS` concatenated into existing system prompt via `chat.system.transform` | Always present |
 | **Compaction Hook** | Auto-saves checkpoint + injects context + reminds compressor | Fires during compaction |
-| **Agent Config** | "After compaction, call `mem_context`" in agent prompt | Always present |
+| **Agent Config** | "First persist the injected summary with `mem_session_summary`; request `mem_context` only if additional context is needed" | Always present |
 
 ---
 
