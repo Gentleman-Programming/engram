@@ -75,7 +75,7 @@ func TestSQLiteLockContentionBranches(t *testing.T) {
 
 func TestRegistryLookupAndOrdering(t *testing.T) {
 	codes := RegisteredCodes()
-	want := []string{CheckManualSessionNameProjectMismatch, CheckSessionProjectDirectoryMismatch, CheckSQLiteLockContention, CheckSyncMutationRequiredFields}
+	want := []string{CheckManualSessionNameProjectMismatch, CheckProjectsSchema, CheckSessionProjectDirectoryMismatch, CheckSQLiteLockContention, CheckSyncMutationRequiredFields}
 	if strings.Join(codes, ",") != strings.Join(want, ",") {
 		t.Fatalf("RegisteredCodes = %v, want %v", codes, want)
 	}
@@ -96,6 +96,35 @@ func TestRunnerRollsUpBlockedFindings(t *testing.T) {
 	}
 	if got := report.Checks[0].Findings[0].ReasonCode; got != "fake_blocked_reason" {
 		t.Fatalf("reason_code=%q", got)
+	}
+}
+
+func TestProjectsSchemaCheck(t *testing.T) {
+	s := newDiagnosticTestStore(t)
+
+	report, err := NewRunner().RunOne(context.Background(), Scope{Store: s, Project: "engram"}, CheckProjectsSchema)
+	if err != nil {
+		t.Fatalf("RunOne (schema present): %v", err)
+	}
+	if report.Status != StatusOK {
+		t.Fatalf("status = %s, want %s (evidence=%s)", report.Status, StatusOK, report.Checks[0].Evidence)
+	}
+	if got := report.Checks[0].ReasonCode; got != CheckProjectsSchema+"_ok" {
+		t.Fatalf("reason_code = %q", got)
+	}
+
+	if err := s.DropProjectsSchema(); err != nil {
+		t.Fatalf("DropProjectsSchema: %v", err)
+	}
+	report, err = NewRunner().RunOne(context.Background(), Scope{Store: s, Project: "engram"}, CheckProjectsSchema)
+	if err != nil {
+		t.Fatalf("RunOne (schema absent): %v", err)
+	}
+	if report.Status != StatusWarning {
+		t.Fatalf("status after drop = %s, want %s", report.Status, StatusWarning)
+	}
+	if got := report.Checks[0].ReasonCode; got != "projects_schema_absent" {
+		t.Fatalf("reason_code after drop = %q", got)
 	}
 }
 
@@ -144,7 +173,7 @@ func TestRunnerRunAllHealthyEvaluatesEveryMVPCheck(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunAll: %v", err)
 	}
-	if report.Status != StatusOK || report.Summary.OK != 4 || len(report.Checks) != 4 {
+	if report.Status != StatusOK || report.Summary.OK != 5 || len(report.Checks) != 5 {
 		t.Fatalf("report=%+v", report)
 	}
 	for _, check := range report.Checks {

@@ -2,6 +2,7 @@ package diagnostic
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 
@@ -14,12 +15,14 @@ const (
 	CheckManualSessionNameProjectMismatch = "manual_session_name_project_mismatch"
 	CheckSyncMutationRequiredFields       = "sync_mutation_required_fields"
 	CheckSQLiteLockContention             = "sqlite_lock_contention"
+	CheckProjectsSchema                   = "projects_schema"
 )
 
 type SessionProjectDirectoryMismatchCheck struct{}
 type ManualSessionNameProjectMismatchCheck struct{}
 type SyncMutationRequiredFieldsCheck struct{}
 type SQLiteLockContentionCheck struct{}
+type ProjectsSchemaCheck struct{}
 
 func (SessionProjectDirectoryMismatchCheck) Code() string {
 	return CheckSessionProjectDirectoryMismatch
@@ -29,6 +32,7 @@ func (ManualSessionNameProjectMismatchCheck) Code() string {
 }
 func (SyncMutationRequiredFieldsCheck) Code() string { return CheckSyncMutationRequiredFields }
 func (SQLiteLockContentionCheck) Code() string       { return CheckSQLiteLockContention }
+func (ProjectsSchemaCheck) Code() string             { return CheckProjectsSchema }
 
 func (c SessionProjectDirectoryMismatchCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {
 	_ = ctx
@@ -186,6 +190,56 @@ func (c SQLiteLockContentionCheck) Run(ctx context.Context, scope Scope) (CheckR
 		})
 	}
 	return resultFromFindings(c.Code(), snapshot, findings), nil
+}
+
+// Run reports whether the engram-projects schema (project_cards, tasks,
+// evidence, runbook_index, task_observations) is present and stamped with
+// the expected PRAGMA user_version. Store.migrate() creates the schema on
+// every engram startup, so an absent or stale schema here means no engram
+// process has started against this data directory since the extension
+// shipped — not a corruption.
+func (c ProjectsSchemaCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {
+	_ = ctx
+	status, err := scope.Store.ProjectsSchemaStatus()
+	if err != nil {
+		return CheckResult{}, err
+	}
+	evidence := mustJSON(status)
+
+	if !status.Present {
+		return CheckResult{
+			CheckID:      c.Code(),
+			Result:       StatusWarning,
+			Severity:     SeverityWarning,
+			ReasonCode:   "projects_schema_absent",
+			Message:      "The engram-projects schema is not present in this database yet.",
+			Why:          "Project-scoped tools, HTTP routes, and the TUI dashboard read project_cards/tasks/evidence/runbook_index/task_observations and will report an empty project until this schema exists.",
+			Evidence:     evidence,
+			SafeNextStep: "Run any engram command against this data directory (e.g. `engram doctor`) so Store.migrate() creates the schema, then rerun this check.",
+		}, nil
+	}
+	if status.UserVersion < store.ProjectsSchemaVersion {
+		return CheckResult{
+			CheckID:      c.Code(),
+			Result:       StatusWarning,
+			Severity:     SeverityWarning,
+			ReasonCode:   "projects_schema_stale",
+			Message:      fmt.Sprintf("engram-projects schema is at user_version %d, expected %d.", status.UserVersion, store.ProjectsSchemaVersion),
+			Why:          "A stale schema version means a newer engram-projects migration has not run yet against this database.",
+			Evidence:     evidence,
+			SafeNextStep: "Run any engram command against this data directory so Store.migrate() applies the pending engram-projects migration.",
+		}, nil
+	}
+	return CheckResult{
+		CheckID:      c.Code(),
+		Result:       StatusOK,
+		Severity:     SeverityInfo,
+		ReasonCode:   c.Code() + "_ok",
+		Message:      fmt.Sprintf("engram-projects schema is up to date (user_version=%d).", status.UserVersion),
+		Why:          "The five contract tables exist and the schema stamp matches the version this build expects.",
+		Evidence:     evidence,
+		SafeNextStep: "No action required.",
+	}, nil
 }
 
 func normalizeProjectName(value string) string {

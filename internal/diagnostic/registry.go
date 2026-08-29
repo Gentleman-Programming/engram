@@ -39,6 +39,7 @@ func DefaultRegistry() Registry {
 		ManualSessionNameProjectMismatchCheck{},
 		SyncMutationRequiredFieldsCheck{},
 		SQLiteLockContentionCheck{},
+		ProjectsSchemaCheck{},
 	)
 }
 
