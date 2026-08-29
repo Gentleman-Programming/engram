@@ -156,6 +156,8 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 ### Search
 
 - `GET /search` — FTS5 search. Query: `?q=QUERY&type=TYPE&project=PROJECT&scope=SCOPE&limit=N`
+  - `200` with a JSON array of search results
+  - No-result example: `GET /search?q=definitely-no-hit` returns `200` with `[]` (never `null`)
 
 ### Timeline
 
