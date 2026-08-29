@@ -1,0 +1,21 @@
+{
+  "To Do": "open",
+  "Open": "open",
+  "Backlog": "open",
+  "Reopened": "open",
+  "in Analysis": "analysis",
+  "In Analysis": "analysis",
+  "In Develop": "in_progress",
+  "In Progress": "in_progress",
+  "In Code Review": "review",
+  "To Verified": "review",
+  "Ready for Deployment": "review",
+  "To internal release": "review",
+  "Verified": "verified",
+  "Done": "done",
+  "Closed": "done",
+  "Pending External Data": "blocked",
+  "Blocked": "blocked",
+  "Cancelled": "cancelled",
+  "Won't Do": "cancelled"
+}
