@@ -485,6 +485,9 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if results == nil {
+		results = []store.SearchResult{}
+	}
 
 	jsonResponse(w, http.StatusOK, results)
 }

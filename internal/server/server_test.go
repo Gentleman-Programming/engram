@@ -669,6 +669,21 @@ func TestHandleSearchAllowsEmptyMatchMode(t *testing.T) {
 	}
 }
 
+func TestHandleSearchNoHitsReturnsEmptyArray(t *testing.T) {
+	srv := New(newServerTestStore(t), 0)
+	req := httptest.NewRequest(http.MethodGet, "/search?q=no-hits", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for no-hit search, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if body := strings.TrimSpace(rec.Body.String()); body != "[]" {
+		t.Fatalf("expected no-hit search body [], got %q", body)
+	}
+}
+
 func TestHandleSearchRejectsInvalidMatchMode(t *testing.T) {
 	srv := New(newServerTestStore(t), 0)
 	req := httptest.NewRequest(http.MethodGet, "/search?q=aurora&match_mode=or", nil)
