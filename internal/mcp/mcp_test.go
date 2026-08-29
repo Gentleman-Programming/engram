@@ -3155,11 +3155,31 @@ func TestHandleSessionSummarySurfacesConflictCandidates(t *testing.T) {
 	}
 	zero := 0.0
 	h := handleSessionSummary(s, MCPConfig{BM25Floor: &zero}, NewSessionActivity(10*time.Minute))
+	if _, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "summary-candidates-1",
+		Type:      "decision",
+		Title:     "Session summary: summary-candidates",
+		Content:   "session summary generic words must not become a summary candidate",
+		Project:   "summary-candidates",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("AddObservation(unrelated): %v", err)
+	}
+	if _, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "summary-candidates-1",
+		Type:      "session_summary",
+		Title:     "Session summary: summary-candidates",
+		Content:   "a global summary must not cross the project summary scope boundary",
+		Project:   "summary-candidates",
+		Scope:     "global",
+	}); err != nil {
+		t.Fatalf("AddObservation(other scope): %v", err)
+	}
 
 	first, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"project":    "summary-candidates",
 		"session_id": "summary-candidates-1",
-		"content":    "Database indexing migration replaces B-tree pages with an LSM design.",
+		"content":    "Helixfjord lanterns completed their northern passage.",
 	}}})
 	if err != nil || first.IsError {
 		t.Fatalf("first session summary: err=%v isError=%v text=%s", err, first.IsError, callResultText(t, first))
@@ -3170,11 +3190,14 @@ func TestHandleSessionSummarySurfacesConflictCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetObservationBySyncID(%q): %v", firstSyncID, err)
 	}
+	if required, _ := firstEnvelope["judgment_required"].(bool); required {
+		t.Fatalf("unrelated observation or other-scope summary became a candidate: %v", firstEnvelope["candidates"])
+	}
 
 	second, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"project":    "summary-candidates",
 		"session_id": "summary-candidates-2",
-		"content":    "Database indexing migration changes the B-tree storage design to LSM tables.",
+		"content":    "Quartzorchid receipts reconciled beneath violet rain.",
 	}}})
 	if err != nil || second.IsError {
 		t.Fatalf("second session summary: err=%v isError=%v text=%s", err, second.IsError, callResultText(t, second))
@@ -3200,6 +3223,9 @@ func TestHandleSessionSummarySurfacesConflictCandidates(t *testing.T) {
 	if candidate["title"] != "Session summary: summary-candidates" {
 		t.Fatalf("summary title changed to %q", candidate["title"])
 	}
+	if candidate["sync_id"] != firstSyncID {
+		t.Fatalf("summary candidate sync_id = %q, want prior summary %q", candidate["sync_id"], firstSyncID)
+	}
 	judgmentID, _ := candidate["judgment_id"].(string)
 	relation, err := s.GetRelation(judgmentID)
 	if err != nil {
@@ -3208,6 +3234,22 @@ func TestHandleSessionSummarySurfacesConflictCandidates(t *testing.T) {
 	if relation.JudgmentStatus != store.JudgmentStatusPending {
 		t.Fatalf("judgment status = %q, want pending", relation.JudgmentStatus)
 	}
+	if relation.Relation != store.RelationPending {
+		t.Fatalf("detected relation = %q, want pending without an inferred verdict", relation.Relation)
+	}
+	judged, err := s.JudgeRelation(store.JudgeRelationParams{
+		JudgmentID:    judgmentID,
+		Relation:      store.RelationRelated,
+		MarkedByActor: "agent:test",
+		MarkedByKind:  "agent",
+	})
+	if err != nil {
+		t.Fatalf("JudgeRelation: %v", err)
+	}
+	if judged.JudgmentStatus != store.JudgmentStatusJudged || judged.Relation != store.RelationRelated {
+		t.Fatalf("explicit judgment = (%q, %q), want (judged, related)", judged.JudgmentStatus, judged.Relation)
+	}
+	secondSyncID, _ := envelope["sync_id"].(string)
 	third, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"project":    "summary-candidates",
 		"session_id": "summary-candidates-3",
@@ -3216,26 +3258,39 @@ func TestHandleSessionSummarySurfacesConflictCandidates(t *testing.T) {
 	if err != nil || third.IsError {
 		t.Fatalf("third session summary: err=%v isError=%v text=%s", err, third.IsError, callResultText(t, third))
 	}
-	thirdEnvelope := parseEnvelope(t, "unrelated session summary", third)
-	if required, _ := thirdEnvelope["judgment_required"].(bool); required {
-		t.Fatalf("unrelated summary should not match only because session summary titles are constant: %v", thirdEnvelope["candidates"])
+	thirdEnvelope := parseEnvelope(t, "third session summary", third)
+	if required, _ := thirdEnvelope["judgment_required"].(bool); !required {
+		t.Fatalf("expected a candidate for the latest prior summary, got %v", thirdEnvelope["candidates"])
+	}
+	thirdCandidates, _ := thirdEnvelope["candidates"].([]any)
+	if len(thirdCandidates) != 1 {
+		t.Fatalf("third summary candidates = %v, want exactly one", thirdCandidates)
+	}
+	thirdCandidate, _ := thirdCandidates[0].(map[string]any)
+	if thirdCandidate["sync_id"] != secondSyncID {
+		t.Fatalf("third summary candidate sync_id = %q, want latest prior summary %q", thirdCandidate["sync_id"], secondSyncID)
 	}
 
 	summaries, err := s.RecentObservations("summary-candidates", firstSummary.Scope, 10)
 	if err != nil {
 		t.Fatalf("RecentObservations: %v", err)
 	}
-	if len(summaries) != 3 {
-		t.Fatalf("expected three separate summaries, got %d", len(summaries))
-	}
+	summaryCount := 0
 	for _, summary := range summaries {
+		if summary.Type != "session_summary" {
+			continue
+		}
+		summaryCount++
 		if summary.TopicKey != nil {
 			t.Fatalf("summary %d unexpectedly has topic_key %q", summary.ID, *summary.TopicKey)
 		}
 	}
+	if summaryCount != 3 {
+		t.Fatalf("expected three separate summaries after detection and judgment, got %d", summaryCount)
+	}
 }
 
-func TestHandleSessionSummaryCandidateQueryUsesPersistedContent(t *testing.T) {
+func TestHandleSessionSummaryCandidateSelectionDoesNotUsePersistedContent(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		maxContent int
@@ -3273,16 +3328,13 @@ func TestHandleSessionSummaryCandidateQueryUsesPersistedContent(t *testing.T) {
 				t.Fatalf("AddObservation(candidate): %v", err)
 			}
 
-			originalFindCandidates := findCandidates
+			originalFindSessionSummaryCandidates := findSessionSummaryCandidates
 			var candidateQuery string
-			findCandidates = func(s *store.Store, savedID int64, opts store.CandidateOptions) ([]store.Candidate, error) {
+			findSessionSummaryCandidates = func(s *store.Store, savedID int64, opts store.CandidateOptions) ([]store.Candidate, error) {
 				candidateQuery = opts.Query
-				if strings.Contains(opts.Query, tc.absentTerm) {
-					return originalFindCandidates(s, savedID, opts)
-				}
 				return nil, nil
 			}
-			t.Cleanup(func() { findCandidates = originalFindCandidates })
+			t.Cleanup(func() { findSessionSummaryCandidates = originalFindSessionSummaryCandidates })
 
 			h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 			result, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -3303,13 +3355,48 @@ func TestHandleSessionSummaryCandidateQueryUsesPersistedContent(t *testing.T) {
 			if strings.Contains(summary.Content, tc.absentTerm) {
 				t.Fatalf("persisted content %q unexpectedly contains candidate term %q", summary.Content, tc.absentTerm)
 			}
-			if candidateQuery != summary.Content {
-				t.Fatalf("candidate query = %q, want persisted content %q", candidateQuery, summary.Content)
+			if candidateQuery != "" {
+				t.Fatalf("summary candidate query = %q, want metadata-only selection", candidateQuery)
 			}
 			if required, _ := envelope["judgment_required"].(bool); required {
 				t.Fatalf("unexpected candidate from content absent after persistence %q: %v", summary.Content, envelope["candidates"])
 			}
 		})
+	}
+}
+
+func TestHandleSessionSummaryCandidatesStayProjectScoped(t *testing.T) {
+	s := newMCPTestStore(t)
+	for _, setup := range []struct {
+		sessionID string
+		project   string
+	}{
+		{sessionID: "summary-project-a", project: "summary-project-a"},
+		{sessionID: "summary-project-b", project: "summary-project-b"},
+	} {
+		if err := s.CreateSession(setup.sessionID, setup.project, t.TempDir()); err != nil {
+			t.Fatalf("CreateSession(%q): %v", setup.sessionID, err)
+		}
+	}
+	h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	for _, request := range []struct {
+		project   string
+		sessionID string
+		content   string
+	}{
+		{project: "summary-project-a", sessionID: "summary-project-a", content: "A project contains the first unrelated summary."},
+		{project: "summary-project-b", sessionID: "summary-project-b", content: "B project contains a separate unrelated summary."},
+	} {
+		result, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"project": request.project, "session_id": request.sessionID, "content": request.content,
+		}}})
+		if err != nil || result.IsError {
+			t.Fatalf("session summary for %q: err=%v isError=%v text=%s", request.project, err, result.IsError, callResultText(t, result))
+		}
+		envelope := parseEnvelope(t, "project-scoped summary", result)
+		if required, _ := envelope["judgment_required"].(bool); required {
+			t.Fatalf("project %q matched a summary from another project: %v", request.project, envelope["candidates"])
+		}
 	}
 }
 
@@ -3320,11 +3407,11 @@ func TestHandleSessionSummaryPersistsWhenCandidateDetectionFails(t *testing.T) {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
-	originalFindCandidates := findCandidates
-	findCandidates = func(*store.Store, int64, store.CandidateOptions) ([]store.Candidate, error) {
+	originalFindSessionSummaryCandidates := findSessionSummaryCandidates
+	findSessionSummaryCandidates = func(*store.Store, int64, store.CandidateOptions) ([]store.Candidate, error) {
 		return nil, errors.New("forced candidate detection failure")
 	}
-	t.Cleanup(func() { findCandidates = originalFindCandidates })
+	t.Cleanup(func() { findSessionSummaryCandidates = originalFindSessionSummaryCandidates })
 
 	content := "The session summary must survive a candidate detection failure."
 	h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
@@ -3345,6 +3432,9 @@ func TestHandleSessionSummaryPersistsWhenCandidateDetectionFails(t *testing.T) {
 	}
 	if summary.Type != "session_summary" || summary.Content != content {
 		t.Fatalf("persisted summary = type %q content %q, want session_summary and %q", summary.Type, summary.Content, content)
+	}
+	if required, _ := envelope["judgment_required"].(bool); required {
+		t.Fatalf("candidate failure must not require judgment: %v", envelope["candidates"])
 	}
 }
 

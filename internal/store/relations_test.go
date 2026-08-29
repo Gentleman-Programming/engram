@@ -61,6 +61,57 @@ func addTestObs(t *testing.T, s *Store, title, obsType, project, scope string) (
 	return id, obs.SyncID
 }
 
+func TestFindSessionSummaryCandidatesRejectsReplacedGenerationBeforeRead(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, _ = addTestObs(t, s, "Earlier summary", "session_summary", "testproject", "project")
+	savedID, _ := addTestObs(t, s, "Later summary", "session_summary", "testproject", "project")
+
+	s.generationMu.Lock()
+	s.databaseGenerationInfos = nil
+	s.generationMu.Unlock()
+
+	candidates, err := s.FindSessionSummaryCandidates(savedID, CandidateOptions{SkipInsert: true})
+	if !errors.Is(err, ErrDatabaseGenerationReplaced) {
+		t.Fatalf("FindSessionSummaryCandidates error = %v, want ErrDatabaseGenerationReplaced", err)
+	}
+	if candidates != nil {
+		t.Fatalf("FindSessionSummaryCandidates returned candidates after generation replacement: %+v", candidates)
+	}
+}
+
+func TestFindSessionSummaryCandidatesCannotOverridePersistedIdentity(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, wantSyncID := addTestObs(t, s, "Earlier project summary", "session_summary", "testproject", "project")
+	savedID, _ := addTestObs(t, s, "Later project summary", "session_summary", "testproject", "project")
+	_, _ = addTestObs(t, s, "Other project summary", "session_summary", "other-project", "project")
+	_, _ = addTestObs(t, s, "Other scope summary", "session_summary", "testproject", "global")
+
+	candidates, err := s.FindSessionSummaryCandidates(savedID, CandidateOptions{
+		Project:    "testproject",
+		Scope:      "project",
+		SkipInsert: true,
+	})
+	if err != nil {
+		t.Fatalf("FindSessionSummaryCandidates matching identity: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].SyncID != wantSyncID {
+		t.Fatalf("matching identity candidates = %+v, want only %q", candidates, wantSyncID)
+	}
+
+	for _, opts := range []CandidateOptions{
+		{Project: "other-project", SkipInsert: true},
+		{Scope: "global", SkipInsert: true},
+	} {
+		candidates, err := s.FindSessionSummaryCandidates(savedID, opts)
+		if err != nil {
+			t.Fatalf("FindSessionSummaryCandidates mismatched identity: %v", err)
+		}
+		if len(candidates) != 0 {
+			t.Fatalf("mismatched identity opts %+v returned candidates %+v", opts, candidates)
+		}
+	}
+}
+
 // ─── C.1 — TestFindCandidates_HappyPath ──────────────────────────────────────
 
 // TestFindCandidates_HappyPath inserts two observations with similar titles,

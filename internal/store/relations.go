@@ -505,6 +505,132 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 	return candidates, nil
 }
 
+// FindSessionSummaryCandidates returns the most recent prior session summary in
+// the saved observation's project and scope. Summary identity is metadata-based,
+// not content-based, so lexically unrelated summaries still receive an explicit
+// pending judgment rather than an inferred replacement verdict.
+func (s *Store) FindSessionSummaryCandidates(savedID int64, opts CandidateOptions) ([]Candidate, error) {
+	if err := s.preflightRead(); err != nil {
+		return nil, err
+	}
+
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 3
+	}
+	if limit > 1 {
+		limit = 1
+	}
+
+	var project, scope string
+	err := s.db.QueryRow(
+		`SELECT ifnull(project,''), scope FROM observations WHERE id = ?`, savedID,
+	).Scan(&project, &scope)
+	if err == sql.ErrNoRows {
+		if generationErr := s.CheckDatabaseGeneration(); generationErr != nil {
+			return nil, generationErr
+		}
+		return nil, fmt.Errorf("FindSessionSummaryCandidates: observation %d not found", savedID)
+	}
+	if err != nil {
+		if generationErr := s.CheckDatabaseGeneration(); generationErr != nil {
+			return nil, generationErr
+		}
+		return nil, fmt.Errorf("FindSessionSummaryCandidates: get saved observation: %w", err)
+	}
+	if (opts.Project != "" && opts.Project != project) || (opts.Scope != "" && opts.Scope != scope) {
+		if err := s.CheckDatabaseGeneration(); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+
+	rows, err := s.db.Query(`
+		SELECT o.id, ifnull(o.sync_id,''), o.title, o.type, o.topic_key
+		FROM observations o
+		WHERE o.id != ?
+		  AND o.deleted_at IS NULL
+		  AND ifnull(o.project,'') = ifnull(?,'')
+		  AND o.scope = ?
+		  AND o.type = 'session_summary'
+		ORDER BY datetime(o.created_at) DESC, o.id DESC
+		LIMIT ?
+	`, savedID, project, scope, limit)
+	if err != nil {
+		if generationErr := s.CheckDatabaseGeneration(); generationErr != nil {
+			return nil, generationErr
+		}
+		return nil, fmt.Errorf("FindSessionSummaryCandidates: query: %w", err)
+	}
+
+	var candidates []Candidate
+	for rows.Next() {
+		var candidate Candidate
+		if err := rows.Scan(&candidate.ID, &candidate.SyncID, &candidate.Title, &candidate.Type, &candidate.TopicKey); err != nil {
+			_ = rows.Close()
+			if generationErr := s.CheckDatabaseGeneration(); generationErr != nil {
+				return nil, generationErr
+			}
+			return nil, fmt.Errorf("FindSessionSummaryCandidates: scan: %w", err)
+		}
+		candidates = append(candidates, candidate)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		if generationErr := s.CheckDatabaseGeneration(); generationErr != nil {
+			return nil, generationErr
+		}
+		return nil, fmt.Errorf("FindSessionSummaryCandidates: rows: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		if generationErr := s.CheckDatabaseGeneration(); generationErr != nil {
+			return nil, generationErr
+		}
+		return nil, fmt.Errorf("FindSessionSummaryCandidates: close rows: %w", err)
+	}
+	if err := s.CheckDatabaseGeneration(); err != nil {
+		return nil, err
+	}
+	if opts.SkipInsert || len(candidates) == 0 {
+		return candidates, nil
+	}
+
+	var sourceSyncID string
+	if err := s.db.QueryRow(`SELECT ifnull(sync_id,'') FROM observations WHERE id = ?`, savedID).Scan(&sourceSyncID); err != nil {
+		if generationErr := s.CheckDatabaseGeneration(); generationErr != nil {
+			return nil, generationErr
+		}
+		return nil, fmt.Errorf("FindSessionSummaryCandidates: get source sync_id: %w", err)
+	}
+	if err := s.CheckDatabaseGeneration(); err != nil {
+		return nil, err
+	}
+	if exists, err := s.relationExists(sourceSyncID, candidates[0].SyncID); err != nil {
+		if generationErr := s.CheckDatabaseGeneration(); generationErr != nil {
+			return nil, generationErr
+		}
+		return nil, fmt.Errorf("FindSessionSummaryCandidates: relation lookup: %w", err)
+	} else if exists {
+		if err := s.CheckDatabaseGeneration(); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+
+	judgmentID := newSyncID("rel")
+	_, admitted, err := s.insertPendingRelation(SaveRelationParams{
+		SyncID: judgmentID, SourceID: sourceSyncID, TargetID: candidates[0].SyncID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("FindSessionSummaryCandidates: insert relation: %w", err)
+	}
+	if !admitted {
+		return nil, nil
+	}
+	candidates[0].JudgmentID = judgmentID
+	return candidates, nil
+}
+
 // ─── SaveRelation ─────────────────────────────────────────────────────────────
 
 // SaveRelation inserts a new pending relation row or returns the existing

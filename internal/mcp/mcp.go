@@ -68,6 +68,10 @@ var findCandidates = func(s *store.Store, savedID int64, opts store.CandidateOpt
 	return s.FindCandidates(savedID, opts)
 }
 
+var findSessionSummaryCandidates = func(s *store.Store, savedID int64, opts store.CandidateOptions) ([]store.Candidate, error) {
+	return s.FindSessionSummaryCandidates(savedID, opts)
+}
+
 var loadMCPStats = func(s *store.Store) (*store.Stats, error) {
 	return s.Stats()
 }
@@ -1299,7 +1303,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 			msg += "\n" + similarWarning
 		}
 
-		extra := postSaveConflictCandidateResponse(s, cfg, savedID, project, scope, "", &msg, map[string]any{"truncation": truncation})
+		extra := postSaveConflictCandidateResponse(s, cfg, savedID, project, scope, "", findCandidates, &msg, map[string]any{"truncation": truncation})
 
 		// Update detRes to reflect normalized project for envelope accuracy
 		detRes.Project = project
@@ -1309,7 +1313,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 
 // postSaveConflictCandidateResponse runs best-effort candidate detection and
 // builds the existing mem_save response metadata for a persisted observation.
-func postSaveConflictCandidateResponse(s *store.Store, cfg MCPConfig, savedID int64, project, scope, query string, msg *string, extra map[string]any) map[string]any {
+func postSaveConflictCandidateResponse(s *store.Store, cfg MCPConfig, savedID int64, project, scope, query string, candidateFinder func(*store.Store, int64, store.CandidateOptions) ([]store.Candidate, error), msg *string, extra map[string]any) map[string]any {
 	if extra == nil {
 		extra = map[string]any{}
 	}
@@ -1333,7 +1337,7 @@ func postSaveConflictCandidateResponse(s *store.Store, cfg MCPConfig, savedID in
 	if cfg.Limit != nil {
 		candOpts.Limit = *cfg.Limit
 	}
-	candidates, candErr := findCandidates(s, savedID, candOpts)
+	candidates, candErr := candidateFinder(s, savedID, candOpts)
 	if candErr != nil {
 		// Candidate discovery is non-fatal after the source observation is saved.
 		fmt.Fprintf(os.Stderr, "engram: FindCandidates error (non-fatal): %v\n", candErr)
@@ -1938,7 +1942,7 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 			msg += "\n" + score
 		}
 		detRes.Project = project
-		extra := postSaveConflictCandidateResponse(s, cfg, savedID, project, "", content, &msg, nil)
+		extra := postSaveConflictCandidateResponse(s, cfg, savedID, project, "", "", findSessionSummaryCandidates, &msg, nil)
 		return respondWithProject(detRes, msg, extra), nil
 	}
 }
