@@ -405,9 +405,6 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 				return fmt.Errorf("FindCandidates: %w", err)
 			}
 			ftsQuery := sanitizeFTSCandidates(queryText)
-			if mixedAny {
-				ftsQuery = sanitizeFTSCandidates(strings.Join(longTerms, " "))
-			}
 			if ftsQuery == "" {
 				return nil
 			}
@@ -429,7 +426,9 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 		if err := rows.Close(); err != nil {
 			return fmt.Errorf("FindCandidates: close rows: %w", err)
 		}
-		if !mixedAny {
+		// An explicit BM25 threshold is a ranking contract; the zero-rank LIKE
+		// branch must not bypass it.
+		if !mixedAny || opts.BM25MaxRank != nil || opts.BM25Floor != nil {
 			return nil
 		}
 		shortQuery, shortArgs := candidateLikeQuery(strings.Join(shortTerms, " "), savedID, project, scope, limit)
@@ -632,7 +631,7 @@ func (s *Store) FindSessionSummaryCandidates(savedID int64, opts CandidateOption
 // pending row for the unordered pair. This makes pending relation replay
 // idempotent while preserving multiple judged actor opinions.
 func (s *Store) SaveRelation(p SaveRelationParams) (*Relation, error) {
-	relation, _, err := s.insertPendingRelation(p)
+	relation, _, err := s.insertPendingRelationForJudgment(p)
 	if err != nil {
 		return nil, fmt.Errorf("SaveRelation: insert: %w", err)
 	}
@@ -693,11 +692,39 @@ func (s *Store) admitPendingRelationTx(tx *sql.Tx, p SaveRelationParams) (*Relat
 // pair. Its boolean return is retained for existing callers; the transaction-local
 // outcome distinguishes an existing pending pair from a completed evaluation.
 func (s *Store) insertPendingRelation(p SaveRelationParams) (*Relation, bool, error) {
+	return s.insertPendingRelationWithAlias(p, false)
+}
+
+// insertPendingRelationForJudgment preserves an explicitly supplied judgment
+// identity after a pair is evaluated as an orphaned alias. JudgeRelation may
+// then promote that identity to a separate terminal actor opinion without ever
+// reopening the pair as pending.
+func (s *Store) insertPendingRelationForJudgment(p SaveRelationParams) (*Relation, bool, error) {
+	return s.insertPendingRelationWithAlias(p, true)
+}
+
+func (s *Store) insertPendingRelationWithAlias(p SaveRelationParams, retainEvaluatedAlias bool) (*Relation, bool, error) {
 	var relation *Relation
 	var outcome pendingAdmissionOutcome
 	err := s.withTx(func(tx *sql.Tx) error {
 		var err error
 		relation, outcome, err = s.admitPendingRelationTx(tx, p)
+		if err != nil || outcome != pairAlreadyEvaluated || !retainEvaluatedAlias {
+			return err
+		}
+		canonical, err := s.evaluatedRelationTx(tx, p.SourceID, p.TargetID)
+		if err != nil {
+			return err
+		}
+		if _, err := s.execHook(tx, `
+			INSERT INTO memory_relations
+				(sync_id, source_id, target_id, relation, judgment_status, created_at, updated_at, superseded_at, superseded_by_relation_id)
+			VALUES (?, ?, ?, 'pending', 'orphaned', datetime('now'), datetime('now'), datetime('now'), ?)
+			ON CONFLICT(sync_id) DO NOTHING
+		`, p.SyncID, p.SourceID, p.TargetID, canonical.ID); err != nil {
+			return err
+		}
+		relation, err = s.getRelationTx(tx, p.SyncID)
 		return err
 	})
 	if err != nil {

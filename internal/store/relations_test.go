@@ -524,7 +524,7 @@ func TestSaveRelation(t *testing.T) {
 	}
 }
 
-func TestSaveRelationDeduplicatesReversedPendingPairAndDoesNotReopenJudgedPair(t *testing.T) {
+func TestSaveRelationDeduplicatesReversedPendingPairWithoutReopeningIt(t *testing.T) {
 	s := setupRelationsStore(t)
 	_, syncA := addTestObs(t, s, "Auth sessions design", "decision", "testproject", "project")
 	_, syncB := addTestObs(t, s, "Auth JWT migration decision", "decision", "testproject", "project")
@@ -550,16 +550,19 @@ func TestSaveRelationDeduplicatesReversedPendingPairAndDoesNotReopenJudgedPair(t
 	if err != nil {
 		t.Fatalf("SaveRelation second pending: %v", err)
 	}
-	if second != nil {
-		t.Fatalf("SaveRelation reopened judged pair with %+v", second)
+	if second == nil || second.JudgmentStatus != JudgmentStatusOrphaned {
+		t.Fatalf("SaveRelation must retain an evaluated alias, got %+v", second)
+	}
+	if _, err := s.JudgeRelation(JudgeRelationParams{JudgmentID: second.SyncID, Relation: RelationCompatible, MarkedByActor: "agent:second", MarkedByKind: "agent"}); err != nil {
+		t.Fatalf("JudgeRelation second opinion: %v", err)
 	}
 
 	var judged int
 	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM memory_relations WHERE judgment_status = ? AND ((source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?))`, JudgmentStatusJudged, syncA, syncB, syncB, syncA).Scan(&judged); err != nil {
 		t.Fatalf("count judged opinions: %v", err)
 	}
-	if judged != 1 {
-		t.Fatalf("judged opinions = %d, want 1", judged)
+	if judged != 2 {
+		t.Fatalf("judged opinions = %d, want 2", judged)
 	}
 }
 
