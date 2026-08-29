@@ -12522,6 +12522,39 @@ func TestSearchMatchMode_Any(t *testing.T) {
 	}
 }
 
+func TestSearchMatchMode_AnyCombinesShortAndLongTerms(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s-mixed-any", "engram", "/tmp"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	for _, observation := range []AddObservationParams{
+		{SessionID: "s-mixed-any", Type: "decision", Title: "v2 only", Content: "short", Project: "engram", Scope: "project"},
+		{SessionID: "s-mixed-any", Type: "decision", Title: "migration only", Content: "long", Project: "engram", Scope: "project"},
+		{SessionID: "s-mixed-any", Type: "decision", Title: "v2 migration both", Content: "both", Project: "engram", Scope: "project"},
+		{SessionID: "s-mixed-any", Type: "learning", Title: "v2 hidden", Content: "filtered", Project: "other", Scope: "global"},
+	} {
+		if _, err := s.AddObservation(observation); err != nil {
+			t.Fatalf("add observation %q: %v", observation.Title, err)
+		}
+	}
+	results, err := s.SearchContext(context.Background(), "v2 migration", SearchOptions{Project: "engram", Scope: "project", Type: "decision", Limit: 10, MatchMode: "any"})
+	if err != nil {
+		t.Fatalf("mixed ANY search: %v", err)
+	}
+	got := make(map[string]bool, len(results))
+	for _, result := range results {
+		if got[result.Title] {
+			t.Fatalf("mixed ANY returned duplicate observation %q", result.Title)
+		}
+		got[result.Title] = true
+	}
+	for _, title := range []string{"v2 only", "migration only", "v2 migration both"} {
+		if !got[title] {
+			t.Fatalf("mixed ANY results missing %q: %+v", title, results)
+		}
+	}
+}
+
 func TestSearchMatchMode_AnyEscapesInteriorQuotes(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.CreateSession("s-matchmode-quotes", "engram", "/tmp"); err != nil {

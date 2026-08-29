@@ -201,6 +201,39 @@ func TestApplyPulledRelationCanonicalizesDuplicatePendingPairsAcrossPeers(t *tes
 	}
 }
 
+func TestApplyPulledRelationRetainsLatePendingAsEvaluatedAlias(t *testing.T) {
+	s, syncA, syncB := setupSyncApplyStore(t)
+	canonicalID := "rel-judged-canonical"
+	if err := applyRelationMutation(t, s, buildRelationMutation(t, syncRelationPayload{
+		SyncID: canonicalID, SourceID: syncA, TargetID: syncB,
+		Relation: RelationRelated, JudgmentStatus: JudgmentStatusJudged,
+		Project: "proj-apply", CreatedAt: "2026-04-26T10:00:00Z", UpdatedAt: "2026-04-26T10:00:00Z",
+	})); err != nil {
+		t.Fatalf("apply terminal relation: %v", err)
+	}
+	aliasID := "rel-late-pending-alias"
+	reason := "late remote evidence"
+	if err := applyRelationMutation(t, s, buildRelationMutation(t, syncRelationPayload{
+		SyncID: aliasID, SourceID: syncB, TargetID: syncA,
+		Relation: RelationPending, JudgmentStatus: JudgmentStatusPending, Reason: &reason,
+		Project: "proj-apply", CreatedAt: "2026-04-27T10:00:00Z", UpdatedAt: "2026-04-27T10:00:00Z",
+	})); err != nil {
+		t.Fatalf("apply late pending relation: %v", err)
+	}
+	var status, gotReason, canonical string
+	if err := s.DB().QueryRow(`
+		SELECT alias.judgment_status, ifnull(alias.reason, ''), target.sync_id
+		FROM memory_relations AS alias
+		JOIN memory_relations AS target ON target.id = alias.superseded_by_relation_id
+		WHERE alias.sync_id = ?
+	`, aliasID).Scan(&status, &gotReason, &canonical); err != nil {
+		t.Fatalf("read retained alias: %v", err)
+	}
+	if status != JudgmentStatusOrphaned || gotReason != reason || canonical != canonicalID {
+		t.Fatalf("late pending alias = status=%q reason=%q canonical=%q", status, gotReason, canonical)
+	}
+}
+
 func TestApplyPulledChunk_DefersMissingRelationAndContinues(t *testing.T) {
 	s, syncA, syncB := setupSyncApplyStore(t)
 	missingTarget := "obs-ghost-" + newSyncID("x")

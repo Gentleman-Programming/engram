@@ -535,6 +535,62 @@ func markDatabaseGenerationReplaced(t *testing.T, s *Store) {
 	s.generationMu.Unlock()
 }
 
+func TestRuntimeBoundaryRejectsReplacementWithoutWriteSideEffects(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("generation-boundary", "engram", "/tmp"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if err := s.EnrollProject("engram"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+	first, err := s.AddObservation(AddObservationParams{SessionID: "generation-boundary", Type: "decision", Title: "v2 migration", Content: "first", Project: "engram", Scope: "project"})
+	if err != nil {
+		t.Fatalf("add first observation: %v", err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{SessionID: "generation-boundary", Type: "decision", Title: "v2 upgrade", Content: "second", Project: "engram", Scope: "project"}); err != nil {
+		t.Fatalf("add second observation: %v", err)
+	}
+	markDatabaseGenerationReplaced(t, s)
+
+	operations := []struct {
+		name string
+		run  func() error
+	}{
+		{"get session", func() error { _, err := s.GetSession("generation-boundary"); return err }},
+		{"find candidates", func() error { _, err := s.FindCandidates(first, CandidateOptions{SkipInsert: true}); return err }},
+		{"pin observation", func() error { return s.PinObservation(first) }},
+		{"unenroll project", func() error { return s.UnenrollProject("engram") }},
+	}
+	for _, operation := range operations {
+		t.Run(operation.name, func(t *testing.T) {
+			if err := operation.run(); !errors.Is(err, ErrDatabaseGenerationReplaced) {
+				t.Fatalf("operation error = %v, want ErrDatabaseGenerationReplaced", err)
+			}
+		})
+	}
+	var pinned, enrolled int
+	if err := s.DB().QueryRow(`SELECT pinned FROM observations WHERE id = ?`, first).Scan(&pinned); err != nil {
+		t.Fatalf("read pinned state: %v", err)
+	}
+	if err := s.DB().QueryRow(`SELECT count(*) FROM sync_enrolled_projects WHERE project = 'engram'`).Scan(&enrolled); err != nil {
+		t.Fatalf("read enrollment state: %v", err)
+	}
+	if pinned != 0 || enrolled != 1 {
+		t.Fatalf("replacement mutated runtime state: pinned=%d enrolled=%d", pinned, enrolled)
+	}
+}
+
+func TestWithReadPrefersPostReadGenerationReplacement(t *testing.T) {
+	s := newTestStore(t)
+	err := s.withRead(func() error {
+		markDatabaseGenerationReplaced(t, s)
+		return errors.New("synthetic read error")
+	})
+	if !errors.Is(err, ErrDatabaseGenerationReplaced) {
+		t.Fatalf("withRead error = %v, want generation replacement", err)
+	}
+}
+
 func TestAdditionalReadOperationsRefuseReplacedDatabaseGeneration(t *testing.T) {
 	cases := []struct {
 		name string

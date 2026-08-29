@@ -935,6 +935,21 @@ func (s *Store) preflightRead() error {
 	return s.CheckDatabaseGeneration()
 }
 
+// withRead is the runtime read boundary. Callers must fully consume and close
+// rows in fn so the post-read generation check covers the complete operation.
+// A replacement error takes precedence over a concurrent SQLite error: callers
+// must restart rather than act on a database generation that is no longer ours.
+func (s *Store) withRead(fn func() error) error {
+	if err := s.CheckDatabaseGeneration(); err != nil {
+		return err
+	}
+	err := fn()
+	if generationErr := s.CheckDatabaseGeneration(); generationErr != nil {
+		return generationErr
+	}
+	return err
+}
+
 // ─── Migrations ──────────────────────────────────────────────────────────────
 
 // schemaVersion is the store schema generation recorded in SQLite's
@@ -2722,15 +2737,16 @@ func (s *Store) EndSession(id string, summary string) error {
 }
 
 func (s *Store) GetSession(id string) (*Session, error) {
-	row := s.db.QueryRow(
-		`SELECT id, project, directory, started_at, ended_at, summary FROM sessions WHERE id = ?`, id,
-	)
 	var sess Session
 	// A database upgraded from the schema where sessions.project was nullable
 	// still carries NULL ownership, so the column must be read as nullable or
 	// every caller that inspects a legacy session dies on an opaque scan error.
 	var project sql.NullString
-	if err := row.Scan(&sess.ID, &project, &sess.Directory, &sess.StartedAt, &sess.EndedAt, &sess.Summary); err != nil {
+	if err := s.withRead(func() error {
+		return s.db.QueryRow(
+			`SELECT id, project, directory, started_at, ended_at, summary FROM sessions WHERE id = ?`, id,
+		).Scan(&sess.ID, &project, &sess.Directory, &sess.StartedAt, &sess.EndedAt, &sess.Summary)
+	}); err != nil {
 		return nil, err
 	}
 	sess.Project = project.String
@@ -3168,18 +3184,20 @@ func (s *Store) setObservationPinned(id int64, pinned bool) error {
 	if pinned {
 		value = 1
 	}
-	res, err := s.execHook(s.db, `UPDATE observations SET pinned = ? WHERE id = ? AND deleted_at IS NULL`, value, id)
-	if err != nil {
-		return err
-	}
-	rows, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows == 0 {
-		return ErrObservationNotFound
-	}
-	return nil
+	return s.withTx(func(tx *sql.Tx) error {
+		res, err := s.execHook(tx, `UPDATE observations SET pinned = ? WHERE id = ? AND deleted_at IS NULL`, value, id)
+		if err != nil {
+			return err
+		}
+		rows, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if rows == 0 {
+			return ErrObservationNotFound
+		}
+		return nil
+	})
 }
 
 func (s *Store) recentUnpinnedObservations(project, scope string, limit int) ([]Observation, error) {
@@ -4040,6 +4058,8 @@ func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOpti
 		}
 	}
 
+	longTerms, shortTerms := splitSearchTerms(query)
+	mixedAny := opts.MatchMode == "any" && len(longTerms) > 0 && len(shortTerms) > 0
 	likeFallback := shouldUseTrigramLikeFallback(query)
 	sqlQ := `
 		SELECT o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
@@ -4056,7 +4076,11 @@ func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOpti
 		// Build FTS5 query: "all" (default) uses AND semantics; "any" uses OR for broader recall.
 		var ftsQuery string
 		if opts.MatchMode == "any" {
-			ftsQuery = sanitizeFTSCandidates(query)
+			if mixedAny {
+				ftsQuery = sanitizeFTSCandidates(strings.Join(longTerms, " "))
+			} else {
+				ftsQuery = sanitizeFTSCandidates(query)
+			}
 		} else {
 			ftsQuery = sanitizeFTS(query)
 		}
@@ -4127,6 +4151,7 @@ func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOpti
 			return nil, err
 		}
 		if !seen[sr.ID] {
+			seen[sr.ID] = true
 			results = append(results, sr)
 		}
 	}
@@ -4135,6 +4160,21 @@ func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOpti
 			return nil, ctxErr
 		}
 		return nil, err
+	}
+	if mixedAny {
+		shortResults, err := s.searchShortAnyContext(ctx, shortTerms, opts, limit)
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+			return nil, err
+		}
+		for _, shortResult := range shortResults {
+			if !seen[shortResult.ID] {
+				seen[shortResult.ID] = true
+				results = append(results, shortResult)
+			}
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -4147,6 +4187,45 @@ func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOpti
 		return nil, err
 	}
 	return results, nil
+}
+
+// searchShortAnyContext materializes the LIKE branch of a mixed ANY search. The
+// caller merges it after the FTS branch, so an FTS hit wins duplicate identity
+// and BM25 ordering remains authoritative before the single outer limit.
+func (s *Store) searchShortAnyContext(ctx context.Context, terms []string, opts SearchOptions, limit int) ([]SearchResult, error) {
+	query := `SELECT ` + observationSelectColumns + `, 0.0 AS rank FROM observations o WHERE o.deleted_at IS NULL AND `
+	args := make([]any, 0, len(terms)+4)
+	appendLikeSearchCondition(&query, &args, "ifnull(o.title, '') || ' ' || ifnull(o.content, '') || ' ' || ifnull(o.tool_name, '') || ' ' || ifnull(o.type, '') || ' ' || ifnull(o.project, '') || ' ' || ifnull(o.topic_key, '')", strings.Join(terms, " "), "any")
+	if opts.Type != "" {
+		query += " AND o.type = ?"
+		args = append(args, opts.Type)
+	}
+	if opts.Project != "" {
+		query += " AND LOWER(o.project) = ?"
+		args = append(args, opts.Project)
+	}
+	if opts.Scope != "" {
+		query += " AND o.scope = ?"
+		args = append(args, normalizeScope(opts.Scope))
+	}
+	query += " ORDER BY datetime(o.updated_at) DESC, o.id DESC LIMIT ?"
+	args = append(args, limit)
+	rows, err := s.queryItContextHook(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("search short terms: %w", err)
+	}
+	defer rows.Close()
+	results := make([]SearchResult, 0)
+	for rows.Next() {
+		var sr SearchResult
+		if err := rows.Scan(&sr.ID, &sr.SyncID, &sr.SessionID, &sr.Type, &sr.Title, &sr.Content,
+			&sr.ToolName, &sr.Project, &sr.Scope, &sr.TopicKey, &sr.RevisionCount, &sr.DuplicateCount,
+			&sr.LastSeenAt, &sr.ReviewAfter, &sr.Pinned, &sr.CreatedAt, &sr.UpdatedAt, &sr.DeletedAt, &sr.Rank); err != nil {
+			return nil, err
+		}
+		results = append(results, sr)
+	}
+	return results, rows.Err()
 }
 
 func buildSearchFTSQuery(ftsQuery string, opts SearchOptions, limit int) (string, []any) {
@@ -5711,11 +5790,13 @@ func (s *Store) UnenrollProject(project string) error {
 	if project == "" {
 		return fmt.Errorf("project name must not be empty")
 	}
-	_, err := s.execHook(s.db,
-		`DELETE FROM sync_enrolled_projects WHERE project = ?`,
-		project,
-	)
-	return err
+	return s.withTx(func(tx *sql.Tx) error {
+		_, err := s.execHook(tx,
+			`DELETE FROM sync_enrolled_projects WHERE project = ?`,
+			project,
+		)
+		return err
+	})
 }
 
 // ListEnrolledProjects returns all projects currently enrolled for cloud sync,
@@ -7989,6 +8070,35 @@ func (s *Store) applyRelationUpsertTx(tx *sql.Tx, mutation SyncMutation) error {
 			}
 			supersededSyncID = canonical.SyncID
 		}
+		if err == sql.ErrNoRows {
+			evaluated, evaluatedErr := s.evaluatedRelationTx(tx, p.SourceID, p.TargetID)
+			if evaluatedErr != nil && !errors.Is(evaluatedErr, sql.ErrNoRows) {
+				return fmt.Errorf("applyRelationUpsertTx: find evaluated relation: %w", evaluatedErr)
+			}
+			if evaluatedErr == nil {
+				// Preserve a late remote pending identity as an audit alias instead
+				// of reopening a pair that has a terminal local decision.
+				if _, err := s.execHook(tx, `
+					INSERT INTO memory_relations
+						(sync_id, source_id, target_id, relation, reason, evidence, confidence,
+						 judgment_status, marked_by_actor, marked_by_kind, marked_by_model,
+						 session_id, created_at, updated_at, superseded_at, superseded_by_relation_id)
+					VALUES (?, ?, ?, ?, ?, ?, ?, 'orphaned', ?, ?, ?, ?, ?, ?, datetime('now'), ?)
+					ON CONFLICT(sync_id) DO UPDATE SET
+						source_id = excluded.source_id, target_id = excluded.target_id,
+						relation = excluded.relation, reason = excluded.reason, evidence = excluded.evidence,
+						confidence = excluded.confidence, marked_by_actor = excluded.marked_by_actor,
+						marked_by_kind = excluded.marked_by_kind, marked_by_model = excluded.marked_by_model,
+						session_id = excluded.session_id, updated_at = excluded.updated_at,
+						superseded_at = excluded.superseded_at, superseded_by_relation_id = excluded.superseded_by_relation_id
+					WHERE memory_relations.judgment_status = 'orphaned'
+				`, p.SyncID, p.SourceID, p.TargetID, p.Relation, p.Reason, p.Evidence, p.Confidence,
+					p.MarkedByActor, p.MarkedByKind, p.MarkedByModel, p.SessionID, p.CreatedAt, p.UpdatedAt, evaluated.ID); err != nil {
+					return fmt.Errorf("applyRelationUpsertTx: retain evaluated pending alias: %w", err)
+				}
+				goto cleanup
+			}
+		}
 	}
 
 	// Upsert into memory_relations keyed on sync_id (idempotent re-apply).
@@ -9050,6 +9160,17 @@ func searchTerms(query string) []string {
 		}
 	}
 	return terms
+}
+
+func splitSearchTerms(query string) (long, short []string) {
+	for _, term := range searchTerms(query) {
+		if utf8.RuneCountInString(term) >= 3 {
+			long = append(long, term)
+		} else {
+			short = append(short, term)
+		}
+	}
+	return long, short
 }
 
 func escapeLikeTerm(term string) string {

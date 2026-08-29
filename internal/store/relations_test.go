@@ -207,6 +207,31 @@ func TestFindCandidatesShortTitleFallback(t *testing.T) {
 	}
 }
 
+func TestFindCandidatesCombinesShortAndLongTerms(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, shortSyncID := addTestObs(t, s, "v2 only", "decision", "testproject", "project")
+	_, longSyncID := addTestObs(t, s, "migration only", "decision", "testproject", "project")
+	_, bothSyncID := addTestObs(t, s, "v2 migration both", "decision", "testproject", "project")
+	savedID, _ := addTestObs(t, s, "source", "decision", "testproject", "project")
+
+	candidates, err := s.FindCandidates(savedID, CandidateOptions{Project: "testproject", Scope: "project", Query: "v2 migration", Limit: 10, SkipInsert: true})
+	if err != nil {
+		t.Fatalf("FindCandidates mixed query: %v", err)
+	}
+	got := make(map[string]bool, len(candidates))
+	for _, candidate := range candidates {
+		if got[candidate.SyncID] {
+			t.Fatalf("duplicate candidate %q", candidate.SyncID)
+		}
+		got[candidate.SyncID] = true
+	}
+	for _, syncID := range []string{shortSyncID, longSyncID, bothSyncID} {
+		if !got[syncID] {
+			t.Fatalf("mixed candidate results missing %q: %+v", syncID, candidates)
+		}
+	}
+}
+
 func TestFindCandidatesShortTitleFallbackPreservesIsolationAndRelationExclusion(t *testing.T) {
 	s := setupRelationsStore(t)
 	_, wantSyncID := addTestObs(t, s, "UI", "decision", "testproject", "project")
@@ -499,7 +524,7 @@ func TestSaveRelation(t *testing.T) {
 	}
 }
 
-func TestSaveRelationDeduplicatesReversedPendingPairAndPreservesJudgedOpinions(t *testing.T) {
+func TestSaveRelationDeduplicatesReversedPendingPairAndDoesNotReopenJudgedPair(t *testing.T) {
 	s := setupRelationsStore(t)
 	_, syncA := addTestObs(t, s, "Auth sessions design", "decision", "testproject", "project")
 	_, syncB := addTestObs(t, s, "Auth JWT migration decision", "decision", "testproject", "project")
@@ -525,16 +550,16 @@ func TestSaveRelationDeduplicatesReversedPendingPairAndPreservesJudgedOpinions(t
 	if err != nil {
 		t.Fatalf("SaveRelation second pending: %v", err)
 	}
-	if _, err := s.JudgeRelation(JudgeRelationParams{JudgmentID: second.SyncID, Relation: RelationCompatible, MarkedByActor: "agent:second", MarkedByKind: "agent"}); err != nil {
-		t.Fatalf("JudgeRelation second opinion: %v", err)
+	if second != nil {
+		t.Fatalf("SaveRelation reopened judged pair with %+v", second)
 	}
 
 	var judged int
 	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM memory_relations WHERE judgment_status = ? AND ((source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?))`, JudgmentStatusJudged, syncA, syncB, syncB, syncA).Scan(&judged); err != nil {
 		t.Fatalf("count judged opinions: %v", err)
 	}
-	if judged != 2 {
-		t.Fatalf("judged opinions = %d, want 2", judged)
+	if judged != 1 {
+		t.Fatalf("judged opinions = %d, want 1", judged)
 	}
 }
 
@@ -920,19 +945,19 @@ func TestMultiActor_TwoRowsForSamePair(t *testing.T) {
 		t.Fatalf("JudgeRelation agent-1: %v", err)
 	}
 
-	// Agent-2 can save a new pending relation after the first agent's verdict.
+	// A second terminal identity from sync is retained as a separate actor
+	// opinion; pending admission itself must not reopen the evaluated pair.
 	relSync2 := newSyncID("rel")
-	rel2, err := s.SaveRelation(SaveRelationParams{
-		SyncID:   relSync2,
-		SourceID: syncA,
-		TargetID: syncB,
-	})
-	if err != nil {
-		t.Fatalf("SaveRelation agent-2: %v", err)
+	if _, err := s.DB().Exec(`
+		INSERT INTO memory_relations
+			(sync_id, source_id, target_id, relation, judgment_status, marked_by_actor, marked_by_kind, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+	`, relSync2, syncA, syncB, RelationCompatible, JudgmentStatusJudged, "agent:two", "agent"); err != nil {
+		t.Fatalf("insert agent-2 terminal opinion: %v", err)
 	}
 
-	if rel1.SyncID == rel2.SyncID {
-		t.Error("two SaveRelation calls must produce rows with different sync_ids")
+	if rel1.SyncID == relSync2 {
+		t.Error("terminal actor identities must be distinct")
 	}
 
 	// Both rows must be visible.
