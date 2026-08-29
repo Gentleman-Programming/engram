@@ -12555,6 +12555,36 @@ func TestSearchMatchMode_AnyCombinesShortAndLongTerms(t *testing.T) {
 	}
 }
 
+func TestSearchMatchMode_AnyCombinesPunctuatedShortAndLongTerms(t *testing.T) {
+	for _, query := range []string{"v2, migration", "v2: migration", "v2、 migration"} {
+		t.Run(query, func(t *testing.T) {
+			s := newTestStore(t)
+			if err := s.CreateSession("s-punctuated-mixed-any", "engram", "/tmp"); err != nil {
+				t.Fatalf("create session: %v", err)
+			}
+			for _, observation := range []AddObservationParams{
+				{SessionID: "s-punctuated-mixed-any", Type: "decision", Title: "v2 only", Content: "short", Project: "engram", Scope: "project"},
+				{SessionID: "s-punctuated-mixed-any", Type: "decision", Title: "migration only", Content: "long", Project: "engram", Scope: "project"},
+			} {
+				if _, err := s.AddObservation(observation); err != nil {
+					t.Fatalf("add observation %q: %v", observation.Title, err)
+				}
+			}
+
+			results, err := s.SearchContext(context.Background(), query, SearchOptions{Project: "engram", Scope: "project", Type: "decision", Limit: 10, MatchMode: "any"})
+			if err != nil {
+				t.Fatalf("SearchContext(%q): %v", query, err)
+			}
+			for _, result := range results {
+				if result.Title == "v2 only" {
+					return
+				}
+			}
+			t.Fatalf("punctuated mixed ANY results omitted v2 match: %+v", results)
+		})
+	}
+}
+
 func TestSearchContextMixedAnyLimitPrefersFTSAfterDeduplication(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.CreateSession("s-mixed-any-limit", "engram", "/tmp"); err != nil {

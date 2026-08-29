@@ -232,6 +232,28 @@ func TestFindCandidatesCombinesShortAndLongTerms(t *testing.T) {
 	}
 }
 
+func TestFindCandidatesCombinesPunctuatedShortAndLongTerms(t *testing.T) {
+	for _, query := range []string{"v2, migration", "v2: migration", "v2、 migration"} {
+		t.Run(query, func(t *testing.T) {
+			s := setupRelationsStore(t)
+			_, shortSyncID := addTestObs(t, s, "v2 only", "decision", "testproject", "project")
+			_, _ = addTestObs(t, s, "migration only", "decision", "testproject", "project")
+			savedID, _ := addTestObs(t, s, "source", "decision", "testproject", "project")
+
+			candidates, err := s.FindCandidates(savedID, CandidateOptions{Project: "testproject", Scope: "project", Query: query, Limit: 10, SkipInsert: true})
+			if err != nil {
+				t.Fatalf("FindCandidates(%q): %v", query, err)
+			}
+			for _, candidate := range candidates {
+				if candidate.SyncID == shortSyncID {
+					return
+				}
+			}
+			t.Fatalf("punctuated mixed candidates omitted %q: %+v", shortSyncID, candidates)
+		})
+	}
+}
+
 func TestFindCandidatesMixedAnyLimitPrefersFTSAfterDeduplication(t *testing.T) {
 	s := setupRelationsStore(t)
 	_, _ = addTestObs(t, s, "migration long-only", "decision", "testproject", "project")
@@ -592,6 +614,62 @@ func TestSaveRelationDeduplicatesReversedPendingPairWithoutReopeningIt(t *testin
 	}
 }
 
+func TestJudgeRelationRetiresPendingTwinWhenPromotingOrphanedAlias(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, sourceID := addTestObs(t, s, "Auth sessions design", "decision", "testproject", "project")
+	_, targetID := addTestObs(t, s, "Auth JWT migration decision", "decision", "testproject", "project")
+
+	pending, err := s.SaveRelation(SaveRelationParams{SyncID: "rel-pending-a", SourceID: sourceID, TargetID: targetID})
+	if err != nil {
+		t.Fatalf("SaveRelation pending: %v", err)
+	}
+	if _, err := s.DB().Exec(`
+		INSERT INTO memory_relations
+			(sync_id, source_id, target_id, relation, judgment_status, superseded_at, superseded_by_relation_id)
+		VALUES ('rel-orphaned-z', ?, ?, 'pending', 'orphaned', datetime('now'), ?)
+	`, targetID, sourceID, pending.ID); err != nil {
+		t.Fatalf("seed orphaned alias: %v", err)
+	}
+
+	judged, err := s.JudgeRelation(JudgeRelationParams{
+		JudgmentID:    "rel-orphaned-z",
+		Relation:      RelationRelated,
+		MarkedByActor: "agent:reviewer",
+		MarkedByKind:  "agent",
+	})
+	if err != nil {
+		t.Fatalf("JudgeRelation orphaned alias: %v", err)
+	}
+	if judged.JudgmentStatus != JudgmentStatusJudged {
+		t.Fatalf("judged alias status = %q, want %q", judged.JudgmentStatus, JudgmentStatusJudged)
+	}
+
+	var pendingCount int
+	if err := s.DB().QueryRow(`
+		SELECT count(*) FROM memory_relations
+		WHERE judgment_status = ?
+		  AND ((source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?))
+	`, JudgmentStatusPending, sourceID, targetID, targetID, sourceID).Scan(&pendingCount); err != nil {
+		t.Fatalf("count pending twins: %v", err)
+	}
+	if pendingCount != 0 {
+		t.Fatalf("pending twins after alias judgment = %d, want 0", pendingCount)
+	}
+
+	var pendingStatus, supersedingSyncID string
+	if err := s.DB().QueryRow(`
+		SELECT pending.judgment_status, terminal.sync_id
+		FROM memory_relations AS pending
+		JOIN memory_relations AS terminal ON terminal.id = pending.superseded_by_relation_id
+		WHERE pending.sync_id = ?
+	`, pending.SyncID).Scan(&pendingStatus, &supersedingSyncID); err != nil {
+		t.Fatalf("read retired pending twin: %v", err)
+	}
+	if pendingStatus != JudgmentStatusOrphaned || supersedingSyncID != judged.SyncID {
+		t.Fatalf("retired pending twin = status %q superseded by %q, want status %q superseded by %q", pendingStatus, supersedingSyncID, JudgmentStatusOrphaned, judged.SyncID)
+	}
+}
+
 func TestFindCandidatesAtomicallyAdmitsOnePendingPairAcrossStores(t *testing.T) {
 	cfg := mustDefaultConfig(t)
 	cfg.DataDir = t.TempDir()
@@ -663,7 +741,7 @@ func TestFindCandidatesAtomicallyAdmitsOnePendingPairAcrossStores(t *testing.T) 
 	}
 }
 
-func TestPendingPairMigrationCanonicalizesAliasesAndKeepsJudgedOpinions(t *testing.T) {
+func TestPendingPairMigrationRetiresAliasesBesideJudgedOpinions(t *testing.T) {
 	cfg := mustDefaultConfig(t)
 	cfg.DataDir = t.TempDir()
 	s, err := New(cfg)
@@ -694,10 +772,15 @@ func TestPendingPairMigrationCanonicalizesAliasesAndKeepsJudgedOpinions(t *testi
 		{"rel-pending-z", JudgmentStatusPending, "obs-b", "obs-a", "retained alias metadata"},
 		{"rel-judged-a", JudgmentStatusJudged, "obs-a", "obs-b", ""},
 		{"rel-judged-b", JudgmentStatusJudged, "obs-b", "obs-a", ""},
+		{"rel-pending-canonical", JudgmentStatusPending, "obs-c", "obs-d", "canonical pending metadata"},
+		{"rel-orphaned-alias", JudgmentStatusOrphaned, "obs-d", "obs-c", "retained alias metadata"},
 	} {
 		if _, err := raw.Exec(`INSERT INTO memory_relations (sync_id, source_id, target_id, relation, reason, judgment_status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`, row.syncID, row.source, row.target, RelationRelated, row.reason, row.status); err != nil {
 			t.Fatalf("seed %s: %v", row.syncID, err)
 		}
+	}
+	if _, err := raw.Exec(`UPDATE memory_relations SET superseded_by_relation_id = (SELECT id FROM memory_relations WHERE sync_id = 'rel-pending-canonical') WHERE sync_id = 'rel-orphaned-alias'`); err != nil {
+		t.Fatalf("link orphaned alias: %v", err)
 	}
 	if _, err := raw.Exec("PRAGMA user_version = 5"); err != nil {
 		t.Fatalf("set legacy user version: %v", err)
@@ -712,19 +795,25 @@ func TestPendingPairMigrationCanonicalizesAliasesAndKeepsJudgedOpinions(t *testi
 	}
 	defer migrated.Close()
 
-	var pendingSyncID string
-	if err := migrated.DB().QueryRow(`SELECT sync_id FROM memory_relations WHERE judgment_status = ? AND ((source_id = 'obs-a' AND target_id = 'obs-b') OR (source_id = 'obs-b' AND target_id = 'obs-a'))`, JudgmentStatusPending).Scan(&pendingSyncID); err != nil {
-		t.Fatalf("read retained pending pair: %v", err)
+	var pending int
+	if err := migrated.DB().QueryRow(`SELECT COUNT(*) FROM memory_relations WHERE judgment_status = ? AND ((source_id = 'obs-a' AND target_id = 'obs-b') OR (source_id = 'obs-b' AND target_id = 'obs-a'))`, JudgmentStatusPending).Scan(&pending); err != nil {
+		t.Fatalf("count active pending pairs: %v", err)
 	}
-	if pendingSyncID != "rel-pending-a" {
-		t.Fatalf("retained pending sync_id = %q, want rel-pending-a", pendingSyncID)
+	if pending != 0 {
+		t.Fatalf("active pending pairs after terminal reconciliation = %d, want 0", pending)
 	}
 	var aliasStatus, aliasReason, canonicalSyncID string
 	if err := migrated.DB().QueryRow(`SELECT alias.judgment_status, alias.reason, canonical.sync_id FROM memory_relations AS alias JOIN memory_relations AS canonical ON canonical.id = alias.superseded_by_relation_id WHERE alias.sync_id = 'rel-pending-z'`).Scan(&aliasStatus, &aliasReason, &canonicalSyncID); err != nil {
 		t.Fatalf("read retained pending alias: %v", err)
 	}
-	if aliasStatus != JudgmentStatusOrphaned || aliasReason != "retained alias metadata" || canonicalSyncID != "rel-pending-a" {
-		t.Fatalf("retained pending alias = status %q reason %q canonical %q", aliasStatus, aliasReason, canonicalSyncID)
+	if aliasStatus != JudgmentStatusOrphaned || aliasReason != "retained alias metadata" || canonicalSyncID != "rel-judged-a" {
+		t.Fatalf("retired pending alias = status %q reason %q terminal %q", aliasStatus, aliasReason, canonicalSyncID)
+	}
+	if err := migrated.DB().QueryRow(`SELECT canonical.judgment_status, terminal.sync_id FROM memory_relations AS canonical JOIN memory_relations AS terminal ON terminal.id = canonical.superseded_by_relation_id WHERE canonical.sync_id = 'rel-pending-a'`).Scan(&aliasStatus, &canonicalSyncID); err != nil {
+		t.Fatalf("read reconciled pending canonical: %v", err)
+	}
+	if aliasStatus != JudgmentStatusOrphaned || canonicalSyncID != "rel-judged-a" {
+		t.Fatalf("reconciled pending canonical = status %q superseded by %q", aliasStatus, canonicalSyncID)
 	}
 	var judged int
 	if err := migrated.DB().QueryRow(`SELECT COUNT(*) FROM memory_relations WHERE judgment_status = ? AND ((source_id = 'obs-a' AND target_id = 'obs-b') OR (source_id = 'obs-b' AND target_id = 'obs-a'))`, JudgmentStatusJudged).Scan(&judged); err != nil {
@@ -733,8 +822,20 @@ func TestPendingPairMigrationCanonicalizesAliasesAndKeepsJudgedOpinions(t *testi
 	if judged != 2 {
 		t.Fatalf("judged opinions after migration = %d, want 2", judged)
 	}
-	if _, err := migrated.DB().Exec(`INSERT INTO memory_relations (sync_id, source_id, target_id, relation, judgment_status) VALUES ('rel-pending-duplicate', 'obs-b', 'obs-a', 'pending', 'pending')`); err == nil {
-		t.Fatal("pending unordered duplicate insert succeeded after migration")
+	var orphanedStatus, pendingStatus, pendingSyncID string
+	var pendingIsUnsuperseded bool
+	if err := migrated.DB().QueryRow(`SELECT orphaned.judgment_status, pending.judgment_status, pending.sync_id, pending.superseded_by_relation_id IS NULL FROM memory_relations AS orphaned JOIN memory_relations AS pending ON pending.id = orphaned.superseded_by_relation_id WHERE orphaned.sync_id = 'rel-orphaned-alias'`).Scan(&orphanedStatus, &pendingStatus, &pendingSyncID, &pendingIsUnsuperseded); err != nil {
+		t.Fatalf("read orphaned alias canonical: %v", err)
+	}
+	if orphanedStatus != JudgmentStatusOrphaned || pendingStatus != JudgmentStatusPending || pendingSyncID != "rel-pending-canonical" || !pendingIsUnsuperseded {
+		t.Fatalf("orphaned alias canonical = statuses %q/%q sync ID %q unsuperseded %v", orphanedStatus, pendingStatus, pendingSyncID, pendingIsUnsuperseded)
+	}
+	late, err := migrated.SaveRelation(SaveRelationParams{SyncID: "rel-pending-duplicate", SourceID: "obs-b", TargetID: "obs-a"})
+	if err != nil {
+		t.Fatalf("SaveRelation after terminal reconciliation: %v", err)
+	}
+	if late.JudgmentStatus != JudgmentStatusOrphaned {
+		t.Fatalf("late pending identity status = %q, want %q", late.JudgmentStatus, JudgmentStatusOrphaned)
 	}
 }
 

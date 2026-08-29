@@ -909,6 +909,16 @@ func (s *Store) JudgeRelation(p JudgeRelationParams) (*Relation, error) {
 		); err != nil {
 			return fmt.Errorf("JudgeRelation: update: %w", err)
 		}
+		if _, err := s.execHook(tx, `
+			UPDATE memory_relations
+			SET judgment_status = 'orphaned',
+			    superseded_at = datetime('now'),
+			    superseded_by_relation_id = (SELECT id FROM memory_relations WHERE sync_id = ?)
+			WHERE judgment_status = 'pending'
+			  AND ((source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?))
+		`, p.JudgmentID, sourceID, targetID, targetID, sourceID); err != nil {
+			return fmt.Errorf("JudgeRelation: retire pending twins: %w", err)
+		}
 
 		// ── Enqueue sync mutation when project is enrolled (REQ-001) ───────
 		// Derive project from source observation; empty string if source missing.

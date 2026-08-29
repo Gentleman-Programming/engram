@@ -635,6 +635,47 @@ func TestAdditionalReadOperationsRefuseReplacedDatabaseGeneration(t *testing.T) 
 	}
 }
 
+func TestRuntimeSQLHelpersRefuseReplacedGenerationBeforeUsingStaleHandle(t *testing.T) {
+	cases := []struct {
+		name string
+		run  func(*Store) (any, error)
+	}{
+		{"SQLite lock snapshot", func(s *Store) (any, error) { return s.ReadSQLiteLockSnapshot(context.Background()) }},
+		{"relation sync mutation count", func(s *Store) (any, error) { return s.CountRelationSyncMutations() }},
+		{"observation sync payloads", func(s *Store) (any, error) { return s.ListObservationSyncPayloads() }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			markDatabaseGenerationReplaced(t, s)
+			if err := s.DB().Close(); err != nil {
+				t.Fatalf("close stale database handle: %v", err)
+			}
+
+			value, err := tc.run(s)
+			if !errors.Is(err, ErrDatabaseGenerationReplaced) {
+				t.Fatalf("runtime SQL helper error = %v, want ErrDatabaseGenerationReplaced", err)
+			}
+			switch value := value.(type) {
+			case SQLiteLockSnapshot:
+				if value != (SQLiteLockSnapshot{}) {
+					t.Fatalf("runtime SQL helper returned stale data after replacement: %#v", value)
+				}
+			case int:
+				if value != 0 {
+					t.Fatalf("runtime SQL helper returned stale data after replacement: %#v", value)
+				}
+			case []any:
+				if value != nil {
+					t.Fatalf("runtime SQL helper returned stale data after replacement: %#v", value)
+				}
+			default:
+				t.Fatalf("runtime SQL helper returned unexpected value type %T", value)
+			}
+		})
+	}
+}
+
 func TestStatsRefusesReplacedDatabaseGenerationWithoutPartialData(t *testing.T) {
 	s := newTestStore(t)
 	markDatabaseGenerationReplaced(t, s)

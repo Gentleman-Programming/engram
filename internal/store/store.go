@@ -975,7 +975,7 @@ func (s *Store) withRead(fn func() error) error {
 //
 // Enrolled-project sync repair is independent of this gate and runs before the
 // first sync operation through EnsureEnrolledProjectSyncMutations.
-const schemaVersion = 7
+const schemaVersion = 8
 
 // migrateRunCount counts executions of the gated migration block across the
 // process. It exists for test observability only — asserting that the
@@ -1358,6 +1358,32 @@ func (s *Store) migrate() error {
 		CREATE INDEX IF NOT EXISTS idx_memrel_source    ON memory_relations(source_id, judgment_status);
 		CREATE INDEX IF NOT EXISTS idx_memrel_target    ON memory_relations(target_id, judgment_status);
 		CREATE INDEX IF NOT EXISTS idx_memrel_supersede ON memory_relations(superseded_by_relation_id);
+	`); err != nil {
+		return err
+	}
+
+	// A judged decision closes its unordered pair. Retire historical pending
+	// twins before canonicalizing pending-only duplicates so audit identities
+	// remain linked to the terminal decision that closed the pair.
+	if _, err := s.execHook(s.db, `
+		UPDATE memory_relations AS pending
+		SET judgment_status = 'orphaned',
+			superseded_at = datetime('now'),
+			superseded_by_relation_id = (
+				SELECT terminal.id FROM memory_relations AS terminal
+				WHERE terminal.judgment_status = 'judged'
+				  AND ((terminal.source_id = pending.source_id AND terminal.target_id = pending.target_id)
+				    OR (terminal.source_id = pending.target_id AND terminal.target_id = pending.source_id))
+				ORDER BY terminal.id ASC
+				LIMIT 1
+			)
+		WHERE pending.judgment_status = 'pending'
+		  AND EXISTS (
+			SELECT 1 FROM memory_relations AS terminal
+			WHERE terminal.judgment_status = 'judged'
+			  AND ((terminal.source_id = pending.source_id AND terminal.target_id = pending.target_id)
+			    OR (terminal.source_id = pending.target_id AND terminal.target_id = pending.source_id))
+		)
 	`); err != nil {
 		return err
 	}
@@ -9425,7 +9451,9 @@ func searchTerms(query string) []string {
 	raw := strings.Fields(query)
 	terms := make([]string, 0, len(raw))
 	for _, term := range raw {
-		term = strings.Trim(term, `"`)
+		if normalized := strings.TrimFunc(term, unicode.IsPunct); normalized != "" {
+			term = normalized
+		}
 		if term != "" {
 			terms = append(terms, term)
 		}
@@ -9634,11 +9662,13 @@ func Now() string {
 // regression guard scoped to the unenrolled test context that uses it.
 func (s *Store) CountRelationSyncMutations() (int, error) {
 	var count int
-	err := s.db.QueryRow(`
-		SELECT count(*)
-		FROM sync_mutations
-		WHERE entity NOT IN ('session', 'observation', 'prompt')
-	`).Scan(&count)
+	err := s.withRead(func() error {
+		return s.db.QueryRow(`
+			SELECT count(*)
+			FROM sync_mutations
+			WHERE entity NOT IN ('session', 'observation', 'prompt')
+		`).Scan(&count)
+	})
 	if err != nil {
 		return 0, fmt.Errorf("CountRelationSyncMutations: %w", err)
 	}
@@ -10018,31 +10048,37 @@ func scanDeferredRow(row scannable) (DeferredRow, error) {
 // new observation columns (review_after, expires_at, embedding*) are NOT present
 // in the sync wire format in Phase 1 (REQ-009).
 func (s *Store) ListObservationSyncPayloads() ([]any, error) {
-	rows, err := s.db.Query(`
-		SELECT payload
-		FROM sync_mutations
-		WHERE entity = 'observation'
-		ORDER BY seq ASC
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("ListObservationSyncPayloads: query: %w", err)
-	}
-	defer rows.Close()
-
 	var payloads []any
-	for rows.Next() {
-		var raw string
-		if err := rows.Scan(&raw); err != nil {
-			return nil, fmt.Errorf("ListObservationSyncPayloads: scan: %w", err)
+	err := s.withRead(func() error {
+		rows, err := s.db.Query(`
+			SELECT payload
+			FROM sync_mutations
+			WHERE entity = 'observation'
+			ORDER BY seq ASC
+		`)
+		if err != nil {
+			return fmt.Errorf("ListObservationSyncPayloads: query: %w", err)
 		}
-		var p syncObservationPayload
-		if err := json.Unmarshal([]byte(raw), &p); err != nil {
-			return nil, fmt.Errorf("ListObservationSyncPayloads: unmarshal: %w", err)
+		defer rows.Close()
+
+		for rows.Next() {
+			var raw string
+			if err := rows.Scan(&raw); err != nil {
+				return fmt.Errorf("ListObservationSyncPayloads: scan: %w", err)
+			}
+			var p syncObservationPayload
+			if err := json.Unmarshal([]byte(raw), &p); err != nil {
+				return fmt.Errorf("ListObservationSyncPayloads: unmarshal: %w", err)
+			}
+			payloads = append(payloads, p)
 		}
-		payloads = append(payloads, p)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("ListObservationSyncPayloads: rows error: %w", err)
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("ListObservationSyncPayloads: rows error: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return payloads, nil
 }
