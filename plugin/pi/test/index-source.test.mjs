@@ -1217,6 +1217,8 @@ test("native tool unavailable error names the Pi-native HTTP path", () => {
 test("mem_review is registered as a Pi-native executable memory tool", () => {
   assert.match(source, /const ENGRAM_TOOLS = \[[\s\S]*"mem_review"/);
   assert.match(source, /mem_review: Type\.Object\(\{[\s\S]*action: Type\.String\(\{ description: "Action: list \| mark_reviewed" \}\)/);
+  assert.match(source, /mem_review: Type\.Object\(\{[\s\S]*project: optionalString\("Optional project selector: filters list and scopes mark_reviewed; list remains global when omitted"\)/);
+  assert.doesNotMatch(source, /project: optionalString\("Optional project filter for action=list"\)/);
   assert.match(source, /mem_review: Type\.Object\(\{[\s\S]*observation_id: optionalNumber\("Observation id for action=mark_reviewed"\)/);
   assert.match(source, /mem_review: Type\.Object\(\{[\s\S]*id: optionalNumber\("Alias for observation_id"\)/);
   assert.match(source, /case "mem_review":[\s\S]*action === "list"[\s\S]*engramFetch\(`\/review\$\{queryString\(\{ project: params\.project, limit: params\.limit \}\)\}`\)/);

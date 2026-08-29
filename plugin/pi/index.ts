@@ -852,7 +852,7 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
   }),
   mem_review: Type.Object({
     action: Type.String({ description: "Action: list | mark_reviewed" }),
-    project: optionalString("Optional project filter for action=list"),
+    project: optionalString("Optional project selector: filters list and scopes mark_reviewed; list remains global when omitted"),
     limit: optionalNumber("Max results for action=list"),
     observation_id: optionalNumber("Observation id for action=mark_reviewed"),
     id: optionalNumber("Alias for observation_id"),
