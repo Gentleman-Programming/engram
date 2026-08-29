@@ -954,7 +954,7 @@ func (s *Store) preflightRead() error {
 //
 // Enrolled-project sync repair is independent of this gate and runs before the
 // first sync operation through EnsureEnrolledProjectSyncMutations.
-const schemaVersion = 3
+const schemaVersion = 4
 
 // migrateRunCount counts executions of the gated migration block across the
 // process. It exists for test observability only — asserting that the
