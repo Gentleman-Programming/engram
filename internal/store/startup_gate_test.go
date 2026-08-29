@@ -520,6 +520,127 @@ func TestReadOperationsRefuseReplacedDatabaseGeneration(t *testing.T) {
 	}
 }
 
+func markDatabaseGenerationReplaced(t *testing.T, s *Store) {
+	t.Helper()
+	replacementIdentity := filepath.Join(t.TempDir(), "replacement.db")
+	if err := os.WriteFile(replacementIdentity, []byte("replacement"), 0o600); err != nil {
+		t.Fatalf("write replacement identity: %v", err)
+	}
+	replacementInfo, err := os.Stat(replacementIdentity)
+	if err != nil {
+		t.Fatalf("stat replacement identity: %v", err)
+	}
+	s.generationMu.Lock()
+	s.databaseGenerationInfos = map[string]os.FileInfo{s.databasePath: replacementInfo}
+	s.generationMu.Unlock()
+}
+
+func TestAdditionalReadOperationsRefuseReplacedDatabaseGeneration(t *testing.T) {
+	cases := []struct {
+		name string
+		read func(*Store) error
+	}{
+		{"format context", func(s *Store) error {
+			_, err := s.FormatContext("", "")
+			return err
+		}},
+		{"recent sessions", func(s *Store) error {
+			_, err := s.RecentSessions("", 1)
+			return err
+		}},
+		{"recent prompts", func(s *Store) error {
+			_, err := s.RecentPrompts("", 1)
+			return err
+		}},
+		{"stats", func(s *Store) error {
+			_, err := s.Stats()
+			return err
+		}},
+		{"export", func(s *Store) error {
+			_, err := s.Export()
+			return err
+		}},
+		{"list project names", func(s *Store) error {
+			_, err := s.ListProjectNames()
+			return err
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			markDatabaseGenerationReplaced(t, s)
+
+			err := tc.read(s)
+			if !errors.Is(err, ErrDatabaseGenerationReplaced) {
+				t.Fatalf("read error = %v, want ErrDatabaseGenerationReplaced", err)
+			}
+		})
+	}
+}
+
+func TestStatsRefusesReplacedDatabaseGenerationWithoutPartialData(t *testing.T) {
+	s := newTestStore(t)
+	markDatabaseGenerationReplaced(t, s)
+
+	stats, err := s.Stats()
+	if !errors.Is(err, ErrDatabaseGenerationReplaced) {
+		t.Fatalf("Stats error = %v, want ErrDatabaseGenerationReplaced", err)
+	}
+	if stats != nil {
+		t.Fatalf("Stats returned stale partial data: %#v", stats)
+	}
+}
+
+func TestSaveRelationRefusesReplacedDatabaseGenerationWithoutWriting(t *testing.T) {
+	s := newTestStore(t)
+	originalExec := s.hooks.exec
+	s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+		result, err := originalExec(db, query, args...)
+		if strings.Contains(query, "INSERT INTO memory_relations") {
+			markDatabaseGenerationReplaced(t, s)
+		}
+		return result, err
+	}
+
+	_, err := s.SaveRelation(SaveRelationParams{
+		SyncID:   "replaced-generation-relation",
+		SourceID: "source",
+		TargetID: "target",
+	})
+	if !errors.Is(err, ErrDatabaseGenerationReplaced) {
+		t.Fatalf("SaveRelation error = %v, want ErrDatabaseGenerationReplaced", err)
+	}
+
+	var count int
+	if err := s.DB().QueryRow("SELECT COUNT(*) FROM memory_relations WHERE sync_id = ?", "replaced-generation-relation").Scan(&count); err != nil {
+		t.Fatalf("count replacement-generation relation: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("relation persisted in replacement generation: count = %d, want 0", count)
+	}
+}
+
+func TestReadGenerationGuardRejectsMidOperationReplacement(t *testing.T) {
+	s := newTestStore(t)
+	s.hooks.queryIt = func(db queryer, query string, args ...any) (rowScanner, error) {
+		rows, err := db.Query(query, args...)
+		if err != nil {
+			return nil, err
+		}
+		markDatabaseGenerationReplaced(t, s)
+		return sqlRowScanner{rows: rows}, nil
+	}
+
+	projects, err := s.ListProjectNames()
+	if !errors.Is(err, ErrDatabaseGenerationReplaced) {
+		t.Fatalf("ListProjectNames error = %v, want ErrDatabaseGenerationReplaced", err)
+	}
+	if projects != nil {
+		t.Fatalf("ListProjectNames returned data from replaced generation: %v", projects)
+	}
+}
+
 func TestStoreOpensQuestionMarkDataDirectory(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows does not permit '?' in file names")
@@ -592,6 +713,33 @@ func TestCommittedTransactionKeepsTrustedDatabaseGeneration(t *testing.T) {
 		t.Fatal("commit hook did not replace the database generation")
 	}
 	if err := s.CreateSession("rejected-session", "generation-project", cfg.DataDir); !errors.Is(err, ErrDatabaseGenerationReplaced) {
+		t.Fatalf("CreateSession after replacement error = %v, want ErrDatabaseGenerationReplaced", err)
+	}
+}
+
+func TestCommittedTransactionSucceedsWhenReplacementFollowsCommit(t *testing.T) {
+	s := newTestStore(t)
+	originalCommit := s.hooks.commit
+	s.hooks.commit = func(tx *sql.Tx) error {
+		if err := originalCommit(tx); err != nil {
+			return err
+		}
+		markDatabaseGenerationReplaced(t, s)
+		return nil
+	}
+
+	if err := s.CreateSession("trusted-commit", "generation-project", "/tmp/generation-project"); err != nil {
+		t.Fatalf("CreateSession returned an error after a trusted commit: %v", err)
+	}
+
+	var count int
+	if err := s.DB().QueryRow("SELECT COUNT(*) FROM sessions WHERE id = ?", "trusted-commit").Scan(&count); err != nil {
+		t.Fatalf("count committed session: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("committed session count = %d, want 1", count)
+	}
+	if err := s.CreateSession("rejected-after-commit", "generation-project", "/tmp/generation-project"); !errors.Is(err, ErrDatabaseGenerationReplaced) {
 		t.Fatalf("CreateSession after replacement error = %v, want ErrDatabaseGenerationReplaced", err)
 	}
 }

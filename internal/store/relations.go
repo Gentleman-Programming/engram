@@ -501,11 +501,14 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 // SaveRelation inserts a new pending relation row. The SyncID field must be
 // unique (enforced by the UNIQUE constraint on memory_relations.sync_id).
 func (s *Store) SaveRelation(p SaveRelationParams) (*Relation, error) {
-	_, err := s.db.Exec(`
-		INSERT INTO memory_relations
-			(sync_id, source_id, target_id, relation, judgment_status, created_at, updated_at)
-		VALUES (?, ?, ?, 'pending', 'pending', datetime('now'), datetime('now'))
-	`, p.SyncID, p.SourceID, p.TargetID)
+	err := s.withTx(func(tx *sql.Tx) error {
+		_, err := s.execHook(tx, `
+			INSERT INTO memory_relations
+				(sync_id, source_id, target_id, relation, judgment_status, created_at, updated_at)
+			VALUES (?, ?, ?, 'pending', 'pending', datetime('now'), datetime('now'))
+		`, p.SyncID, p.SourceID, p.TargetID)
+		return err
+	})
 	if err != nil {
 		return nil, fmt.Errorf("SaveRelation: insert: %w", err)
 	}
@@ -516,6 +519,9 @@ func (s *Store) SaveRelation(p SaveRelationParams) (*Relation, error) {
 
 // GetRelation retrieves a single relation row by its sync_id.
 func (s *Store) GetRelation(syncID string) (*Relation, error) {
+	if err := s.preflightRead(); err != nil {
+		return nil, err
+	}
 	row := s.db.QueryRow(`
 		SELECT id, sync_id,
 		       ifnull(source_id,''), ifnull(target_id,''),
@@ -541,6 +547,9 @@ func (s *Store) GetRelation(syncID string) (*Relation, error) {
 	}
 	r.SourceID = sourceID
 	r.TargetID = targetID
+	if err := s.CheckDatabaseGeneration(); err != nil {
+		return nil, err
+	}
 	return &r, nil
 }
 

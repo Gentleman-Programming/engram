@@ -954,7 +954,7 @@ func (s *Store) preflightRead() error {
 //
 // Enrolled-project sync repair is independent of this gate and runs before the
 // first sync operation through EnsureEnrolledProjectSyncMutations.
-const schemaVersion = 4
+const schemaVersion = 5
 
 // migrateRunCount counts executions of the gated migration block across the
 // process. It exists for test observability only — asserting that the
@@ -1423,7 +1423,7 @@ func (s *Store) migrate() error {
 	}
 
 	// Normalize historical BLOB project values before rebuilding the FTS index.
-	if err := s.withTx(func(tx *sql.Tx) error {
+	if err := s.withTxUnchecked(func(tx *sql.Tx) error {
 		_, err := s.execHook(tx, `
 			UPDATE observations
 			SET project = CAST(project AS TEXT)
@@ -2757,6 +2757,9 @@ func (s *Store) RecentSessions(project string, limit int) ([]SessionSummary, err
 	if limit <= 0 {
 		limit = 5
 	}
+	if err := s.preflightRead(); err != nil {
+		return nil, err
+	}
 
 	query := `
 		SELECT s.id, ifnull(s.project, ''), s.started_at, s.ended_at, s.summary,
@@ -2789,7 +2792,13 @@ func (s *Store) RecentSessions(project string, limit int) ([]SessionSummary, err
 		}
 		results = append(results, ss)
 	}
-	return results, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := s.CheckDatabaseGeneration(); err != nil {
+		return nil, err
+	}
+	return results, nil
 }
 
 // AllSessions returns recent sessions ordered by most recent first (for TUI browsing).
@@ -3385,6 +3394,9 @@ func (s *Store) RecentPrompts(project string, limit int) ([]Prompt, error) {
 	if limit <= 0 {
 		limit = 20
 	}
+	if err := s.preflightRead(); err != nil {
+		return nil, err
+	}
 
 	query := `SELECT id, ifnull(sync_id, '') as sync_id, session_id, content, ifnull(project, '') as project, created_at FROM user_prompts`
 	args := []any{}
@@ -3411,7 +3423,13 @@ func (s *Store) RecentPrompts(project string, limit int) ([]Prompt, error) {
 		}
 		results = append(results, p)
 	}
-	return results, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := s.CheckDatabaseGeneration(); err != nil {
+		return nil, err
+	}
+	return results, nil
 }
 
 func (s *Store) compactionPrompts(sessionID, project string, limit int) ([]Prompt, error) {
@@ -3634,6 +3652,9 @@ func (s *Store) GetObservation(id int64) (*Observation, error) {
 	)
 	var o Observation
 	if err := scanObservationRow(row, &o); err != nil {
+		return nil, err
+	}
+	if err := s.CheckDatabaseGeneration(); err != nil {
 		return nil, err
 	}
 	return &o, nil
@@ -4088,6 +4109,9 @@ func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOpti
 	if len(results) > limit {
 		results = results[:limit]
 	}
+	if err := s.CheckDatabaseGeneration(); err != nil {
+		return nil, err
+	}
 	return results, nil
 }
 
@@ -4123,6 +4147,9 @@ func buildSearchFTSQuery(ftsQuery string, opts SearchOptions, limit int) (string
 
 func (s *Store) Stats() (*Stats, error) {
 	stats := &Stats{}
+	if err := s.preflightRead(); err != nil {
+		return nil, err
+	}
 
 	s.db.QueryRow("SELECT COUNT(*) FROM sessions").Scan(&stats.TotalSessions)
 	s.db.QueryRow("SELECT COUNT(*) FROM observations WHERE deleted_at IS NULL").Scan(&stats.TotalObservations)
@@ -4130,6 +4157,9 @@ func (s *Store) Stats() (*Stats, error) {
 
 	rows, err := s.queryItHook(s.db, "SELECT project FROM observations WHERE project IS NOT NULL AND deleted_at IS NULL GROUP BY project ORDER BY MAX(created_at) DESC")
 	if err != nil {
+		if generationErr := s.CheckDatabaseGeneration(); generationErr != nil {
+			return nil, generationErr
+		}
 		return stats, nil
 	}
 	defer rows.Close()
@@ -4141,6 +4171,9 @@ func (s *Store) Stats() (*Stats, error) {
 		}
 	}
 
+	if err := s.CheckDatabaseGeneration(); err != nil {
+		return nil, err
+	}
 	return stats, nil
 }
 
@@ -4180,6 +4213,9 @@ SELECT 1 FROM (
 // ─── Context Formatting ─────────────────────────────────────────────────────
 
 func (s *Store) FormatContext(project, scope string) (string, error) {
+	if err := s.preflightRead(); err != nil {
+		return "", err
+	}
 	sessions, err := s.RecentSessions(project, 5)
 	if err != nil {
 		return "", err
@@ -4201,6 +4237,9 @@ func (s *Store) FormatContext(project, scope string) (string, error) {
 	}
 
 	if len(sessions) == 0 && len(pinned) == 0 && len(observations) == 0 && len(prompts) == 0 {
+		if err := s.CheckDatabaseGeneration(); err != nil {
+			return "", err
+		}
 		return "", nil
 	}
 
@@ -4246,6 +4285,9 @@ func (s *Store) FormatContext(project, scope string) (string, error) {
 		b.WriteString("\n")
 	}
 
+	if err := s.CheckDatabaseGeneration(); err != nil {
+		return "", err
+	}
 	return b.String(), nil
 }
 
@@ -4391,6 +4433,9 @@ func (s *Store) ExportRelationMutations(project string) ([]SyncMutation, error) 
 // data leaves the store before a repair, so it must not be the one path that
 // refuses to read the legacy unowned rows the operator is trying to rescue.
 func (s *Store) exportWithProjectScope(project string) (*ExportData, error) {
+	if err := s.preflightRead(); err != nil {
+		return nil, err
+	}
 	data := &ExportData{
 		Version:    "0.1.0",
 		ExportedAt: Now(),
@@ -4487,6 +4532,9 @@ func (s *Store) exportWithProjectScope(project string) (*ExportData, error) {
 		return nil, err
 	}
 
+	if err := s.CheckDatabaseGeneration(); err != nil {
+		return nil, err
+	}
 	return data, nil
 }
 
@@ -5558,6 +5606,9 @@ func (s *Store) GetObservationBySyncID(syncID string) (*Observation, error) {
 	if err := scanObservationRow(row, &o); err != nil {
 		return nil, err
 	}
+	if err := s.CheckDatabaseGeneration(); err != nil {
+		return nil, err
+	}
 	return &o, nil
 }
 
@@ -6073,6 +6124,9 @@ type ProjectNameCount struct {
 // ListProjectNames returns all distinct project names from observations,
 // ordered alphabetically. Used for fuzzy matching and consolidation.
 func (s *Store) ListProjectNames() ([]string, error) {
+	if err := s.preflightRead(); err != nil {
+		return nil, err
+	}
 	rows, err := s.queryItHook(s.db,
 		`SELECT DISTINCT project FROM observations
 		 WHERE project IS NOT NULL AND project != '' AND deleted_at IS NULL
@@ -6091,7 +6145,13 @@ func (s *Store) ListProjectNames() ([]string, error) {
 		}
 		results = append(results, name)
 	}
-	return results, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := s.CheckDatabaseGeneration(); err != nil {
+		return nil, err
+	}
+	return results, nil
 }
 
 // ProjectStats holds aggregate statistics for a single project.
@@ -6590,6 +6650,26 @@ func (s *Store) withTx(fn func(tx *sql.Tx) error) error {
 	if err := s.CheckDatabaseGeneration(); err != nil {
 		return err
 	}
+	if err := s.withTxUnchecked(func(tx *sql.Tx) error {
+		if err := fn(tx); err != nil {
+			return err
+		}
+		// A Store holds the shared generation lease for its complete lifetime.
+		// Engram-owned movers must acquire the matching exclusive lease, so this
+		// successful check and commit are indivisible relative to a supported
+		// generation replacement. Do not check after commit: a replacement that
+		// begins after this trusted commit must not turn a successful write into
+		// an error.
+		return s.CheckDatabaseGeneration()
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+// withTxUnchecked is reserved for startup migration work, which runs before a
+// Store is exposed to runtime callers and already holds the migration lock.
+func (s *Store) withTxUnchecked(fn func(tx *sql.Tx) error) error {
 	if err := withSQLiteWriteRetry(func() error {
 		tx, err := s.beginTxHook()
 		if err != nil {
@@ -6602,9 +6682,6 @@ func (s *Store) withTx(fn func(tx *sql.Tx) error) error {
 		return s.commitHook(tx)
 	}); err != nil {
 		return err
-	}
-	if err := s.CheckDatabaseGeneration(); err != nil {
-		log.Printf("[store] database generation check failed after committed transaction: %v; future mutations will revalidate the database generation", err)
 	}
 	return nil
 }
@@ -8270,6 +8347,9 @@ func scanObservationRow(scanner observationScanner, o *Observation) error {
 }
 
 func (s *Store) queryObservations(query string, args ...any) ([]Observation, error) {
+	if err := s.preflightRead(); err != nil {
+		return nil, err
+	}
 	rows, err := s.queryItHook(s.db, query, args...)
 	if err != nil {
 		return nil, err
@@ -8284,7 +8364,13 @@ func (s *Store) queryObservations(query string, args ...any) ([]Observation, err
 		}
 		results = append(results, o)
 	}
-	return results, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := s.CheckDatabaseGeneration(); err != nil {
+		return nil, err
+	}
+	return results, nil
 }
 
 func (s *Store) addColumnIfNotExists(tableName, columnName, definition string) error {
