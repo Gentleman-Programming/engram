@@ -542,7 +542,7 @@ func TestStoreOpensQuestionMarkDataDirectory(t *testing.T) {
 	if _, err := os.Stat(dbPath); err != nil {
 		t.Fatalf("database was not created at intended path %q: %v", dbPath, err)
 	}
-	raw, err := sql.Open("sqlite", dbPath)
+	raw, err := sql.Open("sqlite", storeDSN(dbPath))
 	if err != nil {
 		t.Fatalf("open intended database: %v", err)
 	}
