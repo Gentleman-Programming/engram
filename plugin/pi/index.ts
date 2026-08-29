@@ -1035,7 +1035,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
         return engramFetch(`/review${queryString({ project: params.project, limit: params.limit })}`);
       }
       if (action === "mark_reviewed") {
-        requireResolvedProject();
+        if (!requestedProject) requireResolvedProject();
         return engramFetch(`/review/mark_reviewed${queryString({ project: activeProject })}`, {
           method: "POST",
           body: { observation_id: params.observation_id || params.id },
