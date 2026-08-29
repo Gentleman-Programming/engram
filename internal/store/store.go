@@ -4076,11 +4076,7 @@ func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOpti
 		// Build FTS5 query: "all" (default) uses AND semantics; "any" uses OR for broader recall.
 		var ftsQuery string
 		if opts.MatchMode == "any" {
-			if mixedAny {
-				ftsQuery = sanitizeFTSCandidates(strings.Join(longTerms, " "))
-			} else {
-				ftsQuery = sanitizeFTSCandidates(query)
-			}
+			ftsQuery = sanitizeFTSCandidates(query)
 		} else {
 			ftsQuery = sanitizeFTS(query)
 		}
