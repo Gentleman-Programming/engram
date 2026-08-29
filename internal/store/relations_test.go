@@ -73,10 +73,10 @@ func TestFindCandidates_HappyPath(t *testing.T) {
 	savedID, _ := addTestObs(t, s, "Switched from sessions to JWT for auth", "decision", "testproject", "project")
 
 	opts := CandidateOptions{
-		Project:   "testproject",
-		Scope:     "project",
-		Limit:     3,
-		BM25Floor: ptrFloat64(0.0),
+		Project:     "testproject",
+		Scope:       "project",
+		Limit:       3,
+		BM25MaxRank: ptrFloat64(0.0),
 	}
 	candidates, err := s.FindCandidates(savedID, opts)
 	if err != nil {
@@ -116,10 +116,10 @@ func TestFindCandidates_EscapesInteriorQuotes(t *testing.T) {
 	savedID, _ := addTestObs(t, s, `hello"world source`, "decision", "testproject", "project")
 
 	candidates, err := s.FindCandidates(savedID, CandidateOptions{
-		Project:   "testproject",
-		Scope:     "project",
-		Limit:     3,
-		BM25Floor: ptrFloat64(-10.0),
+		Project:     "testproject",
+		Scope:       "project",
+		Limit:       3,
+		BM25MaxRank: ptrFloat64(0.0),
 	})
 	if err != nil {
 		t.Fatalf("FindCandidates: %v", err)
@@ -143,10 +143,10 @@ func TestFindCandidates_SkipsExistingRelation(t *testing.T) {
 	savedID, _ := addTestObs(t, s, "Switched from sessions to JWT for auth", "decision", "testproject", "project")
 
 	opts := CandidateOptions{
-		Project:   "testproject",
-		Scope:     "project",
-		Limit:     3,
-		BM25Floor: ptrFloat64(-2.0),
+		Project:     "testproject",
+		Scope:       "project",
+		Limit:       3,
+		BM25MaxRank: ptrFloat64(0.0),
 	}
 
 	// First call: should surface the pair and insert a pending relation row.
@@ -187,10 +187,10 @@ func TestFindCandidates_EarlyBreakDoesNotSelfBlockWithSingleConnection(t *testin
 	done := make(chan findResult, 1)
 	go func() {
 		candidates, err := s.FindCandidates(savedID, CandidateOptions{
-			Project:   "testproject",
-			Scope:     "project",
-			Limit:     1,
-			BM25Floor: ptrFloat64(0.0),
+			Project:     "testproject",
+			Scope:       "project",
+			Limit:       1,
+			BM25MaxRank: ptrFloat64(0.0),
 		})
 		done <- findResult{candidates: candidates, err: err}
 	}()
@@ -239,10 +239,10 @@ func TestFindCandidates_ExcludesSelf(t *testing.T) {
 	savedID, _ := addTestObs(t, s, "Switched to JWT from sessions", "decision", "testproject", "project")
 
 	opts := CandidateOptions{
-		Project:   "testproject",
-		Scope:     "project",
-		Limit:     5,
-		BM25Floor: ptrFloat64(-10.0), // very permissive floor to get all hits
+		Project:     "testproject",
+		Scope:       "project",
+		Limit:       5,
+		BM25MaxRank: ptrFloat64(0.0), // permissive maximum rank to get all hits
 	}
 	candidates, err := s.FindCandidates(savedID, opts)
 	if err != nil {
@@ -255,11 +255,11 @@ func TestFindCandidates_ExcludesSelf(t *testing.T) {
 	}
 }
 
-// ─── C.3 — TestFindCandidates_BM25Floor ──────────────────────────────────────
+// ─── C.3 — TestFindCandidates_BM25MaxRank ────────────────────────────────────
 
-// TestFindCandidates_BM25Floor verifies that a stricter rank threshold keeps the
+// TestFindCandidates_BM25MaxRank verifies that a stricter rank threshold keeps the
 // stronger (more-negative) FTS5 match and excludes a weaker one.
-func TestFindCandidates_BM25Floor(t *testing.T) {
+func TestFindCandidates_BM25MaxRank(t *testing.T) {
 	s := setupRelationsStore(t)
 
 	strongID, _ := addTestObs(t, s, "JWT authentication token session management rollout", "decision", "testproject", "project")
@@ -269,11 +269,11 @@ func TestFindCandidates_BM25Floor(t *testing.T) {
 	// FTS5 ranks stronger matches with more-negative values and the query orders
 	// them first. A zero threshold is therefore permissive for matching rows.
 	optsPermissive := CandidateOptions{
-		Project:    "testproject",
-		Scope:      "project",
-		Limit:      5,
-		BM25Floor:  ptrFloat64(0.0),
-		SkipInsert: true,
+		Project:     "testproject",
+		Scope:       "project",
+		Limit:       5,
+		BM25MaxRank: ptrFloat64(0.0),
+		SkipInsert:  true,
 	}
 	allCandidates, err := s.FindCandidates(savedID, optsPermissive)
 	if err != nil {
@@ -291,11 +291,11 @@ func TestFindCandidates_BM25Floor(t *testing.T) {
 
 	threshold := (allCandidates[0].Score + allCandidates[len(allCandidates)-1].Score) / 2
 	optsStrict := CandidateOptions{
-		Project:    "testproject",
-		Scope:      "project",
-		Limit:      5,
-		BM25Floor:  &threshold,
-		SkipInsert: true,
+		Project:     "testproject",
+		Scope:       "project",
+		Limit:       5,
+		BM25MaxRank: &threshold,
+		SkipInsert:  true,
 	}
 	strictCandidates, err := s.FindCandidates(savedID, optsStrict)
 	if err != nil {
@@ -323,10 +323,10 @@ func TestFindCandidates_UnrelatedTitle(t *testing.T) {
 	savedID, _ := addTestObs(t, s, "CSS grid layout responsive breakpoints", "decision", "testproject", "project")
 
 	opts := CandidateOptions{
-		Project:   "testproject",
-		Scope:     "project",
-		Limit:     3,
-		BM25Floor: ptrFloat64(-2.0),
+		Project:     "testproject",
+		Scope:       "project",
+		Limit:       3,
+		BM25MaxRank: ptrFloat64(0.0),
 	}
 	candidates, err := s.FindCandidates(savedID, opts)
 	if err != nil {
@@ -871,10 +871,10 @@ func TestOrphaning_OrphanedDoesNotBlockCandidate(t *testing.T) {
 	idC, _ := addTestObs(t, s, "JWT auth token handling modern approach", "decision", "testproject", "project")
 
 	opts := CandidateOptions{
-		Project:   "testproject",
-		Scope:     "project",
-		Limit:     5,
-		BM25Floor: ptrFloat64(0.0),
+		Project:     "testproject",
+		Scope:       "project",
+		Limit:       5,
+		BM25MaxRank: ptrFloat64(0.0),
 	}
 	candidates, err := s.FindCandidates(idC, opts)
 	if err != nil {
@@ -897,11 +897,11 @@ func TestOrphaning_OrphanedDoesNotBlockCandidate(t *testing.T) {
 	// Orphaned relations must not prevent the query from running.
 }
 
-// ─── Fix 2 RED — TestFindCandidates_ExplicitZeroFloor ────────────────────────
+// ─── Fix 2 RED — TestFindCandidates_ExplicitZeroMaxRank ──────────────────────
 
-// TestFindCandidates_ExplicitZeroFloor verifies that an explicit zero rank
+// TestFindCandidates_ExplicitZeroMaxRank verifies that an explicit zero rank
 // threshold includes every matching candidate.
-func TestFindCandidates_ExplicitZeroFloor(t *testing.T) {
+func TestFindCandidates_ExplicitZeroMaxRank(t *testing.T) {
 	s := setupRelationsStore(t)
 
 	// Seed a highly similar observation.
@@ -910,12 +910,13 @@ func TestFindCandidates_ExplicitZeroFloor(t *testing.T) {
 	// Save a moderately similar observation.
 	savedID, _ := addTestObs(t, s, "Auth token handling pattern", "decision", "testproject", "project")
 
-	// With the default (nil) floor, use 0.0.
+	// The default maximum rank is 0.0.
 	optsDefault := CandidateOptions{
-		Project: "testproject",
-		Scope:   "project",
-		Limit:   5,
-		// BM25Floor nil → default -2.0
+		Project:    "testproject",
+		Scope:      "project",
+		Limit:      5,
+		SkipInsert: true,
+		// BM25MaxRank nil → default 0.0
 	}
 	candidatesDefault, err := s.FindCandidates(savedID, optsDefault)
 	if err != nil {
@@ -924,10 +925,11 @@ func TestFindCandidates_ExplicitZeroFloor(t *testing.T) {
 
 	// With an explicit 0.0 threshold, every negative FTS5 rank may pass.
 	optsZero := CandidateOptions{
-		Project:   "testproject",
-		Scope:     "project",
-		Limit:     5,
-		BM25Floor: ptrFloat64(0.0), // explicit zero — should NOT collide with default
+		Project:     "testproject",
+		Scope:       "project",
+		Limit:       5,
+		BM25MaxRank: ptrFloat64(0.0), // explicit zero — should match the default
+		SkipInsert:  true,
 	}
 	candidatesZero, err := s.FindCandidates(savedID, optsZero)
 	if err != nil {
@@ -1096,10 +1098,10 @@ func TestFindCandidates_DoesNotEnqueue(t *testing.T) {
 	before := countRelationMutations(t, s, SyncEntityRelation, "proj-a")
 
 	_, _ = s.FindCandidates(savedID, CandidateOptions{
-		Project:   "proj-a",
-		Scope:     "project",
-		Limit:     3,
-		BM25Floor: ptrFloat64(-10.0),
+		Project:     "proj-a",
+		Scope:       "project",
+		Limit:       3,
+		BM25MaxRank: ptrFloat64(0.0),
 	})
 
 	after := countRelationMutations(t, s, SyncEntityRelation, "proj-a")
@@ -1603,11 +1605,11 @@ func TestFindCandidates_SkipInsert_True(t *testing.T) {
 	}
 
 	candidates, err := s.FindCandidates(savedID, CandidateOptions{
-		Project:    "testproject",
-		Scope:      "project",
-		Limit:      3,
-		BM25Floor:  ptrFloat64(-10.0),
-		SkipInsert: true,
+		Project:     "testproject",
+		Scope:       "project",
+		Limit:       3,
+		BM25MaxRank: ptrFloat64(0.0),
+		SkipInsert:  true,
 	})
 	if err != nil {
 		t.Fatalf("FindCandidates SkipInsert=true: %v", err)
@@ -1719,11 +1721,11 @@ func TestFindCandidates_SkipInsert_False_Regression(t *testing.T) {
 	}
 
 	candidates, err := s.FindCandidates(savedID, CandidateOptions{
-		Project:    "testproject",
-		Scope:      "project",
-		Limit:      3,
-		BM25Floor:  ptrFloat64(-10.0),
-		SkipInsert: false, // explicit false — must behave exactly as before (default)
+		Project:     "testproject",
+		Scope:       "project",
+		Limit:       3,
+		BM25MaxRank: ptrFloat64(0.0),
+		SkipInsert:  false, // explicit false — must behave exactly as before (default)
 	})
 	if err != nil {
 		t.Fatalf("FindCandidates SkipInsert=false: %v", err)

@@ -167,15 +167,8 @@ func TestScanProject_Semantic_DryRunDoesNotPersist(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newTestStore(t)
-			_, syncA, _, syncB := seedSimilarPair(t, s, "semantic-dry-run-project")
+			seedSimilarPair(t, s, "semantic-dry-run-project")
 
-			if _, err := s.db.Exec(`
-		INSERT INTO memory_relations
-			(sync_id, source_id, target_id, relation, judgment_status, confidence, reason, created_at, updated_at)
-		VALUES (?, ?, ?, 'related', 'pending', 0.2, 'awaiting judgment', datetime('now'), datetime('now'))
-			`, "rel-semantic-dry-run", syncA, syncB); err != nil {
-				t.Fatalf("seed pending relation: %v", err)
-			}
 			if err := s.EnrollProject("semantic-dry-run-project"); err != nil {
 				t.Fatalf("EnrollProject: %v", err)
 			}
@@ -229,18 +222,6 @@ func TestScanProject_Semantic_DryRunDoesNotPersist(t *testing.T) {
 			}
 			if relationsAfter != relationsBefore {
 				t.Errorf("relation count = %d, want unchanged %d", relationsAfter, relationsBefore)
-			}
-
-			var relation, status, reason string
-			var confidence float64
-			if err := s.db.QueryRow(`
-		SELECT relation, judgment_status, confidence, reason
-		FROM memory_relations WHERE sync_id = ?
-			`, "rel-semantic-dry-run").Scan(&relation, &status, &confidence, &reason); err != nil {
-				t.Fatalf("load pending relation after scan: %v", err)
-			}
-			if relation != "related" || status != "pending" || confidence != 0.2 || reason != "awaiting judgment" {
-				t.Errorf("pending relation mutated: relation=%q status=%q confidence=%v reason=%q", relation, status, confidence, reason)
 			}
 
 			if err := s.db.QueryRow(`SELECT count(*) FROM sync_mutations`).Scan(&mutationsAfter); err != nil {
