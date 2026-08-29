@@ -1223,11 +1223,11 @@ func TestInjectOpenCodeMCPConfigErrors(t *testing.T) {
 
 func TestDefaultRunCommandExecutes(t *testing.T) {
 	resetSetupSeams(t)
-	out, err := runCommand("sh", "-c", "printf ok")
+	out, err := runCommand(os.Args[0], "-test.run=^$")
 	if err != nil {
 		t.Fatalf("expected default runCommand to execute, got %v", err)
 	}
-	if string(out) != "ok" {
+	if !strings.Contains(string(out), "PASS") {
 		t.Fatalf("unexpected output: %q", string(out))
 	}
 }
