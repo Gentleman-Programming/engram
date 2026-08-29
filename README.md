@@ -46,8 +46,8 @@ Treat Engram as a curated project memory, not a transcript sink. Use this operat
 3. **Retrieve progressively.** Use `mem_search` for candidates, `mem_timeline` when surrounding session context matters, and `mem_get_observation` before relying on a full observation.
 4. **Save significant knowledge deliberately.** Save completed bug fixes, decisions, discoveries, configuration changes, patterns, and durable user constraints with `mem_save`. Do not capture raw tool output or every conversational turn.
 5. **Keep evolving knowledge stable.** Give an evolving topic a stable `topic_key` such as `architecture/auth-model`; reuse it to update that topic rather than creating competing memories. Use `mem_suggest_topic_key` when the key is unclear.
-6. **Leave a handoff.** Before ending meaningful work, save a `mem_session_summary` with the goal, discoveries, accomplished work, next steps, and relevant files.
-7. **Recover after compaction.** Persist the compacted handoff with `mem_session_summary` first. Then continue from any injected session context; call `mem_context` only when your integration or task requires broader project history.
+6. **Leave a handoff.** Before ending a session, save a `mem_session_summary` with the goal, instructions, discoveries, accomplished work, next steps, and relevant files.
+7. **Recover after compaction.** Persist the compacted handoff with `mem_session_summary` first. Then call `mem_context` to recover recent session history before continuing.
 
 ### A useful memory is structured
 
@@ -111,7 +111,7 @@ See [Agent Setup](docs/AGENT-SETUP.md) for per-agent configuration, plugin behav
 
 ## Local first, portable when needed
 
-Engram keeps memory local by default. The local SQLite database is authoritative; Git Sync exports portable compressed chunks for sharing across machines, and Engram Cloud is optional, project-scoped replication and browser visibility.
+Engram keeps memory local by default. The local SQLite database is authoritative; Git Sync exports portable compressed chunks for sharing across machines, and Engram Cloud is optional, project-scoped replication/shared access with browser visibility.
 
 | Need | Start here |
 | --- | --- |
@@ -119,6 +119,17 @@ Engram keeps memory local by default. The local SQLite database is authoritative
 | Share memory with Git | [Git Sync reference](DOCS.md#git-sync-chunked) |
 | Use optional Cloud replication | [Engram Cloud](docs/engram-cloud/README.md) |
 | Diagnose or recover Cloud operations | [Cloud troubleshooting](docs/engram-cloud/troubleshooting.md) |
+
+For an existing Cloud database, use the guided upgrade sequence:
+
+```bash
+engram cloud upgrade doctor --project <project>
+engram cloud upgrade repair --project <project> --dry-run
+engram cloud upgrade bootstrap --project <project>
+engram cloud upgrade status --project <project>
+```
+
+See the [Cloud upgrade reference](DOCS.md#cloud-upgrade-flow) for apply, rollback, and recovery details.
 
 ## Terminal UI
 
@@ -147,6 +158,8 @@ Navigate with `j`/`k`, use `Enter` to drill in, `c` to copy content to the clipb
 | [Plugins](docs/PLUGINS.md) | OpenCode and Claude Code plugin details |
 | [Team Usage](docs/TEAM-USAGE.md) | Shared-memory conventions |
 | [Engram Cloud](docs/engram-cloud/README.md) | Cloud quickstart, deployment, and technical links |
+| [Doctor](docs/DOCTOR.md) | Operational diagnosis and repair workflows |
+| [Beta Testing](docs/BETA_TESTING.md) | Isolated beta testing flows and cleanup guidance |
 | [Comparison](docs/COMPARISON.md) | Engram compared with claude-mem |
 | [Obsidian Brain](docs/beta/obsidian-brain.md) | Export memories as an Obsidian knowledge graph (beta) |
 | [Full Docs](DOCS.md) | Complete CLI, environment, API, and operational reference |
