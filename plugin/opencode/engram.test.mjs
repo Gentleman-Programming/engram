@@ -29,8 +29,8 @@ function sdkLookup(sessions) {
   return ({ path }) => sdkResult(sessions.get(path.id))
 }
 
-function httpResponse(data = { status: "created" }, ok = true) {
-  return { ok, async json() { return data } }
+function httpResponse(data = { status: "created" }, ok = true, onJSON) {
+  return { ok, async json() { onJSON?.(); return data } }
 }
 
 function deferredEvent() {
@@ -109,12 +109,16 @@ async function createRuntime(t, {
   const sessionGetIDs = []
   const requests = []
 	const spawns = []
+	const startupEvents = []
   globalThis.Bun = {
     spawnSync(args) {
       if (args.includes("remote")) return { exitCode: 1, stdout: Buffer.from("") }
       return { exitCode: 0, stdout: Buffer.from("/work/engram\n") }
     },
-		spawn(args, options) { spawns.push({ args, options }) },
+		spawn(args, options) {
+			spawns.push({ args, options })
+			if (args[1] === "sync" && args[2] === "--import") startupEvents.push("import:spawn")
+		},
 		file() { return { async exists() { return manifestExists } } },
   }
   globalThis.fetch = async (url, init) => {
@@ -124,7 +128,7 @@ async function createRuntime(t, {
     requests.push({ path, url: String(url), body })
 		if (path === "/project/current") {
 			const response = typeof projectCurrentResponse === "function" ? projectCurrentResponse() : projectCurrentResponse
-			return httpResponse(response, projectCurrentOK)
+			return httpResponse(response, projectCurrentOK, () => startupEvents.push("project-current:response"))
 		}
     if (path === "/sessions") {
       registeredIDs.push(body.id)
@@ -165,6 +169,7 @@ async function createRuntime(t, {
     sessionGetIDs,
     requests,
 		spawns,
+		startupEvents,
   }
 }
 
@@ -252,9 +257,9 @@ test("project identity resolution failures fail closed for automatic writes", as
 
 test("startup import requires a resolved project identity", async (t) => {
 	for (const scenario of [
-		{ name: "failed", response: { error: "unavailable" }, ok: false, imports: 0 },
-		{ name: "ambiguous", response: { project: "", error_hint: "ambiguous project", available_projects: ["repo-a", "repo-b"] }, imports: 0 },
-		{ name: "resolved", response: { project: "engram", project_source: "git_remote" }, imports: 1 },
+		{ name: "failed", response: { error: "unavailable" }, ok: false, imports: 0, startupEvents: [] },
+		{ name: "ambiguous", response: { project: "", error_hint: "ambiguous project", available_projects: ["repo-a", "repo-b"] }, imports: 0, startupEvents: ["project-current:response"] },
+		{ name: "resolved", response: { project: "engram", project_source: "git_remote" }, imports: 1, startupEvents: ["project-current:response", "import:spawn"] },
 	]) {
 		await t.test(scenario.name, async (t) => {
 			const runtime = await createRuntime(t, {
@@ -264,6 +269,7 @@ test("startup import requires a resolved project identity", async (t) => {
 			})
 			const imports = runtime.spawns.filter(({ args }) => args[1] === "sync" && args[2] === "--import")
 			assert.equal(imports.length, scenario.imports)
+			assert.deepEqual(runtime.startupEvents, scenario.startupEvents)
 		})
 	}
 })
