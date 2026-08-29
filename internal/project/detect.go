@@ -184,7 +184,7 @@ func DetectProjectFull(dir string) DetectionResult {
 			// Case 4: multiple children → ambiguous.
 			names := make([]string, len(children))
 			for i, c := range children {
-				names[i] = normalize(filepath.Base(c))
+				names[i] = normalizeAvailableProject(filepath.Base(c))
 			}
 			absDir, _ := filepath.Abs(dir)
 			// REQ-304: Project is empty on ambiguous (spec is authoritative).
@@ -459,6 +459,16 @@ func DetectProject(dir string) string {
 // path-like values to unknown so DetectProject always returns a valid name.
 func normalize(name string) string {
 	n := CanonicalizeProjectName(name)
+	if n == "" || strings.ContainsAny(n, `/\\`) {
+		return "unknown"
+	}
+	return n
+}
+
+// normalizeAvailableProject preserves the exact separator form of an ambiguous
+// child choice so downstream resolution can distinguish collisions.
+func normalizeAvailableProject(name string) string {
+	n := strings.TrimSpace(strings.ToLower(name))
 	if n == "" || strings.ContainsAny(n, `/\\`) {
 		return "unknown"
 	}

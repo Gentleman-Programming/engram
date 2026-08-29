@@ -637,6 +637,46 @@ func TestDetectProjectFull_Case4_MultiChild(t *testing.T) {
 	}
 }
 
+func TestDetectProjectFull_AmbiguousChildrenPreserveSeparatorForms(t *testing.T) {
+	tests := []struct {
+		name     string
+		children []string
+		want     []string
+	}{
+		{
+			name:     "repeated hyphens remain distinct",
+			children: []string{"Foo--Bar", "Foo-Bar"},
+			want:     []string{"foo--bar", "foo-bar"},
+		},
+		{
+			name:     "repeated underscores remain distinct",
+			children: []string{"Repo_Exact_B", "Repo__Exact__B"},
+			want:     []string{"repo_exact_b", "repo__exact__b"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parent := t.TempDir()
+			for _, name := range tt.children {
+				child := filepath.Join(parent, name)
+				if err := os.MkdirAll(child, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				initGit(t, child)
+			}
+
+			res := DetectProjectFull(parent)
+			if !errors.Is(res.Error, ErrAmbiguousProject) {
+				t.Fatalf("error = %v, want ErrAmbiguousProject", res.Error)
+			}
+			if !reflect.DeepEqual(res.AvailableProjects, tt.want) {
+				t.Fatalf("available projects = %q, want %q", res.AvailableProjects, tt.want)
+			}
+		})
+	}
+}
+
 func TestDetectProjectFull_ChildScanFindsLaterSecondRepository(t *testing.T) {
 	parent := t.TempDir()
 	for _, name := range []string{"a-repo", "z-repo"} {
