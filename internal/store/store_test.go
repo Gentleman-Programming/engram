@@ -3058,6 +3058,55 @@ func TestStatsProjectsOrderedByMostRecentObservation(t *testing.T) {
 	}
 }
 
+func TestStatsReturnsErrorWhenCountCannotBeRead(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.db.Close(); err != nil {
+		t.Fatalf("close database: %v", err)
+	}
+
+	stats, err := s.Stats()
+	if err == nil || !strings.Contains(err.Error(), "stats: count sessions") {
+		t.Fatalf("Stats error = %v, want contextual count error", err)
+	}
+	if stats != nil {
+		t.Fatalf("Stats result = %#v, want nil after count failure", stats)
+	}
+}
+
+func TestStatsReturnsErrorWhenProjectsCannotBeRead(t *testing.T) {
+	queryErr := errors.New("project query failed")
+	scanErr := errors.New("project scan failed")
+	rowsErr := errors.New("project rows failed")
+	closeErr := errors.New("project close failed")
+
+	for _, tc := range []struct {
+		name string
+		rows rowScanner
+		err  error
+		want error
+	}{
+		{name: "query", err: queryErr, want: queryErr},
+		{name: "scan", rows: &fakeRows{next: []bool{true}, scanErr: scanErr}, want: scanErr},
+		{name: "iterate", rows: &fakeRows{err: rowsErr}, want: rowsErr},
+		{name: "close", rows: &fakeRows{closeErr: closeErr}, want: closeErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			s.hooks.queryIt = func(queryer, string, ...any) (rowScanner, error) {
+				return tc.rows, tc.err
+			}
+
+			stats, err := s.Stats()
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("Stats error = %v, want %v", err, tc.want)
+			}
+			if stats != nil {
+				t.Fatalf("Stats result = %#v, want nil after project read failure", stats)
+			}
+		})
+	}
+}
+
 func TestSessionsOrderedByMostRecentActivity(t *testing.T) {
 	s := newTestStore(t)
 
@@ -6663,8 +6712,8 @@ func TestStoreUncoveredBranchesPushToHundred(t *testing.T) {
 			}
 			return origQueryIt(db, query, args...)
 		}
-		if _, err := s.Stats(); err != nil {
-			t.Fatalf("stats should swallow project query errors: %v", err)
+		if _, err := s.Stats(); err == nil {
+			t.Fatal("expected stats project query error")
 		}
 
 		if err := s.EndSession("s-c", "has summary"); err != nil {

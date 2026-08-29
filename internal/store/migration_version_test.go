@@ -73,6 +73,6 @@ func TestSchemaVersionMatchesMigrationFingerprint(t *testing.T) {
 	actual := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(functions, "\n"))))
 	expected, ok := migrationVersionFingerprints[schemaVersion]
 	if !ok || expected != actual {
-		t.Fatalf("migration source fingerprint = %s for schemaVersion %d; bump schemaVersion and update migrationVersionFingerprints", actual, schemaVersion)
+		t.Fatalf("migration source fingerprint = %s for schemaVersion %d; go/format output can vary by Go toolchain, so first rerun with the repository toolchain before changing schemaVersion. If the migration source changed under that toolchain, bump schemaVersion and update migrationVersionFingerprints", actual, schemaVersion)
 	}
 }

@@ -938,12 +938,8 @@ func (s *Store) preflightRead() error {
 // ─── Migrations ──────────────────────────────────────────────────────────────
 
 // schemaVersion is the store schema generation recorded in SQLite's
-// PRAGMA user_version. Version 1 predates the gate; version 2 introduced it;
-// version 3 is the current generation and runs the current migrate() suite
-// once before it is stamped.
-// Bump this constant whenever migrate() or one of its fingerprinted helpers
-// gains a new step so databases stamped with an older version run the suite on
-// their next startup.
+// PRAGMA user_version. Bump it when migrate() or one of its fingerprinted
+// helpers changes in a way that must run for existing databases.
 //
 // Gate semantics (runStartupMigrations):
 //   - user_version == schemaVersion → schema is current; skip migrate().
@@ -4189,24 +4185,54 @@ func (s *Store) Stats() (*Stats, error) {
 		return nil, err
 	}
 
-	s.db.QueryRow("SELECT COUNT(*) FROM sessions").Scan(&stats.TotalSessions)
-	s.db.QueryRow("SELECT COUNT(*) FROM observations WHERE deleted_at IS NULL").Scan(&stats.TotalObservations)
-	s.db.QueryRow("SELECT COUNT(*) FROM user_prompts").Scan(&stats.TotalPrompts)
+	for _, count := range []struct {
+		name  string
+		query string
+		dest  *int
+	}{
+		{"sessions", "SELECT COUNT(*) FROM sessions", &stats.TotalSessions},
+		{"observations", "SELECT COUNT(*) FROM observations WHERE deleted_at IS NULL", &stats.TotalObservations},
+		{"prompts", "SELECT COUNT(*) FROM user_prompts", &stats.TotalPrompts},
+	} {
+		if err := s.db.QueryRow(count.query).Scan(count.dest); err != nil {
+			if generationErr := s.CheckDatabaseGeneration(); generationErr != nil {
+				return nil, generationErr
+			}
+			return nil, fmt.Errorf("stats: count %s: %w", count.name, err)
+		}
+	}
 
 	rows, err := s.queryItHook(s.db, "SELECT project FROM observations WHERE project IS NOT NULL AND deleted_at IS NULL GROUP BY project ORDER BY MAX(created_at) DESC")
 	if err != nil {
 		if generationErr := s.CheckDatabaseGeneration(); generationErr != nil {
 			return nil, generationErr
 		}
-		return stats, nil
+		return nil, fmt.Errorf("stats: list projects: %w", err)
 	}
-	defer rows.Close()
 
 	for rows.Next() {
 		var p string
-		if err := rows.Scan(&p); err == nil {
-			stats.Projects = append(stats.Projects, p)
+		if err := rows.Scan(&p); err != nil {
+			err = closeRowsWithError(rows, err)
+			if generationErr := s.CheckDatabaseGeneration(); generationErr != nil {
+				return nil, generationErr
+			}
+			return nil, fmt.Errorf("stats: scan project: %w", err)
 		}
+		stats.Projects = append(stats.Projects, p)
+	}
+	if err := rows.Err(); err != nil {
+		err = closeRowsWithError(rows, err)
+		if generationErr := s.CheckDatabaseGeneration(); generationErr != nil {
+			return nil, generationErr
+		}
+		return nil, fmt.Errorf("stats: iterate projects: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		if generationErr := s.CheckDatabaseGeneration(); generationErr != nil {
+			return nil, generationErr
+		}
+		return nil, fmt.Errorf("stats: close projects: %w", err)
 	}
 
 	if err := s.CheckDatabaseGeneration(); err != nil {
