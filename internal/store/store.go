@@ -1092,6 +1092,14 @@ func (s *Store) migrate() error {
 		return err
 	}
 
+	// engram-projects extension (EP-001): additive schema for project_cards,
+	// tasks, evidence, runbook_index and task_observations. Single contact
+	// point with the upstream migrate() so a future rebase only has to
+	// preserve this one line.
+	if err := s.migrateProjects(); err != nil {
+		return err
+	}
+
 	return nil
 }
 
