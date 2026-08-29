@@ -199,6 +199,8 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 
 - `GET /project/current` — Detect the current project. Query: `?cwd=/path/to/repo`
   - Always returns a success envelope with `{project, project_source, project_path, cwd, available_projects}` plus optional `warning`/`error_hint`
+  - Ambiguous cwd is a successful discovery response: `project` is empty, `project_source` is `ambiguous`, `available_projects` lists the candidates, and `error_hint` explains why no project was selected.
+  - Other current-project-scoped HTTP routes return `404` for an unknown explicit project, `409` with `{error, code:"ambiguous_project", available_projects, project_source, project_path}` for an ambiguous cwd, and `400` for an invalid selector or configuration.
 - `POST /projects/rescue-ownership` — Bulk-assign ownership to explicitly selected historical records that carry none. `POST /projects/migrate` is a deprecated compatibility alias routed to the same handler. The JSON body is limited to 8 KiB: `{target_project, confirmed:true, observation_ids?:[], session_ids?:[], prompt_ids?:[]}`.
   - A configured `ENGRAM_HTTP_TOKEN`, matching `Authorization: Bearer <token>`, `target_project`, `confirmed:true`, and at least one positive observation/prompt ID or non-blank session ID are required. Missing server token returns `503`; missing or wrong credentials return `401`; malformed or invalid requests return `400`.
   - This route is a convenience, not the only repair. `engram projects rescue-ownership --project <name> [--session <id>] [--observation <id>] [--prompt <id>]` performs the same operation against the local store and needs no server token, so ownership stays repairable in a zero-config install.

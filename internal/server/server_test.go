@@ -10,6 +10,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -2678,6 +2680,72 @@ func TestProjectScopedEndpointsResolveAndValidateProcessOverrides(t *testing.T) 
 			t.Fatalf("current status = %d body=%q", rec.Code, rec.Body.String())
 		}
 	})
+}
+
+func ambiguousProjectHTTPDirectory(t *testing.T) string {
+	t.Helper()
+	parent := t.TempDir()
+	for _, name := range []string{"repo-http-a", "repo-http-b"} {
+		if err := os.MkdirAll(filepath.Join(parent, name, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return parent
+}
+
+func TestProjectCurrentAmbiguousUsesDiscoveryEnvelope(t *testing.T) {
+	parent := ambiguousProjectHTTPDirectory(t)
+	rec := httptest.NewRecorder()
+	New(newServerTestStore(t), 0).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/project/current?cwd="+url.QueryEscape(parent), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%q", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["project"] != "" || body["project_source"] != "ambiguous" || body["project_path"] != parent {
+		t.Fatalf("unexpected discovery envelope: %#v", body)
+	}
+	if available, ok := body["available_projects"].([]any); !ok || len(available) != 2 {
+		t.Fatalf("available_projects = %#v, want two candidates", body["available_projects"])
+	}
+	if hint, ok := body["error_hint"].(string); !ok || hint == "" {
+		t.Fatalf("error_hint = %#v, want ambiguity diagnostic", body["error_hint"])
+	}
+}
+
+func TestProjectScopedRoutesReportStructuredAmbiguity(t *testing.T) {
+	parent := ambiguousProjectHTTPDirectory(t)
+	h := New(newServerTestStore(t), 0).Handler()
+	for _, route := range []string{
+		"/search?q=identity",
+		"/timeline?observation_id=1",
+		"/context",
+		"/doctor",
+	} {
+		t.Run(route, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			separator := "?"
+			if strings.Contains(route, "?") {
+				separator = "&"
+			}
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, route+separator+"cwd="+url.QueryEscape(parent), nil))
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("status = %d body=%q", rec.Code, rec.Body.String())
+			}
+			var body map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if body["code"] != "ambiguous_project" || body["project_source"] != "ambiguous" || body["project_path"] != parent {
+				t.Fatalf("unexpected ambiguity envelope: %#v", body)
+			}
+			if available, ok := body["available_projects"].([]any); !ok || len(available) != 2 {
+				t.Fatalf("available_projects = %#v, want two candidates", body["available_projects"])
+			}
+		})
+	}
 }
 
 func TestJudgeAndCompareRoutesValidateInput(t *testing.T) {

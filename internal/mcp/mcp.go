@@ -557,7 +557,7 @@ Examples:
 					mcp.Description("Project to echo in envelope context (omit for auto-detect; stats themselves are global aggregates)"),
 				),
 			),
-			handleStats(s, cfg),
+			handleStats(s, cfg, activity),
 		)
 	}
 
@@ -586,7 +586,7 @@ Examples:
 					mcp.Description("Filter by project name (omit for auto-detect)"),
 				),
 			),
-			handleTimeline(s, cfg),
+			handleTimeline(s, cfg, activity),
 		)
 	}
 
@@ -801,7 +801,7 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 				mcp.WithString("project", mcp.Description("Project to diagnose (omit for auto-detect)")),
 				mcp.WithString("check", mcp.Description("Optional diagnostic check code to run")),
 			),
-			handleDoctor(s, cfg),
+			handleDoctor(s, cfg, activity),
 		)
 	}
 
@@ -980,14 +980,7 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			// Resolve project: validate override or auto-detect (REQ-310, REQ-311)
 			res, err := resolveReadProjectWithProcessOverride(s, projectOverride, cfg.DefaultProject)
 			if err != nil {
-				var upe *unknownProjectError
-				if errors.As(err, &upe) {
-					return errorWithMeta("unknown_project",
-						fmt.Sprintf("Project %q not found in store", upe.Name),
-						upe.AvailableProjects,
-					), nil
-				}
-				return mcp.NewToolResultError(fmt.Sprintf("Project resolution failed: %s", err)), nil
+				return readProjectErrorResult(activity, res, err), nil
 			}
 			detRes = res
 			project = detRes.Project
@@ -1629,14 +1622,7 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 		// Resolve project: validate override or auto-detect (REQ-310, REQ-311)
 		detRes, err := resolveReadProjectWithProcessOverride(s, projectOverride, cfg.DefaultProject)
 		if err != nil {
-			var upe *unknownProjectError
-			if errors.As(err, &upe) {
-				return errorWithMeta("unknown_project",
-					fmt.Sprintf("Project %q not found in store", upe.Name),
-					upe.AvailableProjects,
-				), nil
-			}
-			return mcp.NewToolResultError(fmt.Sprintf("Project resolution failed: %s", err)), nil
+			return readProjectErrorResult(activity, detRes, err), nil
 		}
 		project := detRes.Project
 		project, _ = store.NormalizeProject(project)
@@ -1682,21 +1668,18 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 }
 
 // handleStats returns a tool handler function for mem_stats.
-func handleStats(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
+func handleStats(s *store.Store, cfg MCPConfig, activities ...*SessionActivity) server.ToolHandlerFunc {
+	var activity *SessionActivity
+	if len(activities) > 0 {
+		activity = activities[0]
+	}
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		projectOverride, _ := req.GetArguments()["project"].(string)
 
 		// Resolve project: validate override or auto-detect (REQ-310, REQ-311, REQ-314)
 		detRes, err := resolveReadProjectWithProcessOverride(s, projectOverride, cfg.DefaultProject)
 		if err != nil {
-			var upe *unknownProjectError
-			if errors.As(err, &upe) {
-				return errorWithMeta("unknown_project",
-					fmt.Sprintf("Project %q not found in store", upe.Name),
-					upe.AvailableProjects,
-				), nil
-			}
-			return mcp.NewToolResultError(fmt.Sprintf("Project resolution failed: %s", err)), nil
+			return readProjectErrorResult(activity, detRes, err), nil
 		}
 
 		stats, err := loadMCPStats(s)
@@ -1723,17 +1706,17 @@ func DoctorToolHandler(s *store.Store) server.ToolHandlerFunc {
 	return handleDoctor(s, MCPConfig{})
 }
 
-func handleDoctor(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
+func handleDoctor(s *store.Store, cfg MCPConfig, activities ...*SessionActivity) server.ToolHandlerFunc {
+	var activity *SessionActivity
+	if len(activities) > 0 {
+		activity = activities[0]
+	}
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		projectOverride, _ := req.GetArguments()["project"].(string)
 		check, _ := req.GetArguments()["check"].(string)
 		detRes, err := resolveReadProjectWithProcessOverride(s, projectOverride, cfg.DefaultProject)
 		if err != nil {
-			var upe *unknownProjectError
-			if errors.As(err, &upe) {
-				return errorWithMeta("unknown_project", fmt.Sprintf("Project %q not found in store", upe.Name), upe.AvailableProjects), nil
-			}
-			return mcp.NewToolResultError(fmt.Sprintf("Project resolution failed: %s", err)), nil
+			return readProjectErrorResult(activity, detRes, err), nil
 		}
 		project := detRes.Project
 		project, _ = store.NormalizeProject(project)
@@ -1760,7 +1743,11 @@ func handleDoctor(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 	}
 }
 
-func handleTimeline(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
+func handleTimeline(s *store.Store, cfg MCPConfig, activities ...*SessionActivity) server.ToolHandlerFunc {
+	var activity *SessionActivity
+	if len(activities) > 0 {
+		activity = activities[0]
+	}
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		observationID := int64(intArg(req, "observation_id", 0))
 		if observationID == 0 {
@@ -1773,14 +1760,7 @@ func handleTimeline(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 		// Resolve project: validate override or auto-detect (REQ-310, REQ-311, REQ-314)
 		detRes, err := resolveReadProjectWithProcessOverride(s, projectOverride, cfg.DefaultProject)
 		if err != nil {
-			var upe *unknownProjectError
-			if errors.As(err, &upe) {
-				return errorWithMeta("unknown_project",
-					fmt.Sprintf("Project %q not found in store", upe.Name),
-					upe.AvailableProjects,
-				), nil
-			}
-			return mcp.NewToolResultError(fmt.Sprintf("Project resolution failed: %s", err)), nil
+			return readProjectErrorResult(activity, detRes, err), nil
 		}
 		focus, err := s.GetObservation(observationID)
 		if err != nil {
@@ -2917,6 +2897,20 @@ func writeProjectErrorResult(activity *SessionActivity, sessionID string, res pr
 		})
 	}
 	return result
+}
+
+// readProjectErrorResult keeps read-tool ambiguity actionable just like writes.
+// In particular, callers need the detected candidates and short-lived recovery
+// context rather than an opaque tool error that discards the resolver result.
+func readProjectErrorResult(activity *SessionActivity, res projectpkg.DetectionResult, err error) *mcp.CallToolResult {
+	var unknownProjectErr *unknownProjectError
+	if errors.As(err, &unknownProjectErr) {
+		return errorWithMeta("unknown_project",
+			fmt.Sprintf("Project %q not found in store", unknownProjectErr.Name),
+			unknownProjectErr.AvailableProjects,
+		)
+	}
+	return writeProjectErrorResult(activity, defaultSessionID(""), res, err)
 }
 
 func addErrorMetadata(result *mcp.CallToolResult, metadata map[string]any) {

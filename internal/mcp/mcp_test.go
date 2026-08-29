@@ -7459,6 +7459,76 @@ func TestProcessOverrideSaveWriteResolutionBeforeCWD(t *testing.T) {
 	}
 }
 
+func TestProjectResolvingReadHandlersPreserveAmbiguityRecoveryMetadata(t *testing.T) {
+	parent := t.TempDir()
+	for _, name := range []string{"repo-read-a", "repo-read-b"} {
+		child := filepath.Join(parent, name)
+		if err := os.MkdirAll(child, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		initTestGitRepo(t, child)
+	}
+	t.Chdir(parent)
+
+	s := newMCPTestStore(t)
+	activity := NewSessionActivity(10 * time.Minute)
+	tests := []struct {
+		name string
+		call func() (*mcppkg.CallToolResult, error)
+	}{
+		{
+			name: "search",
+			call: func() (*mcppkg.CallToolResult, error) {
+				return handleSearch(s, MCPConfig{}, activity)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"query": "identity"}}})
+			},
+		},
+		{
+			name: "context",
+			call: func() (*mcppkg.CallToolResult, error) {
+				return handleContext(s, MCPConfig{}, activity)(context.Background(), mcppkg.CallToolRequest{})
+			},
+		},
+		{
+			name: "stats",
+			call: func() (*mcppkg.CallToolResult, error) {
+				return handleStats(s, MCPConfig{}, activity)(context.Background(), mcppkg.CallToolRequest{})
+			},
+		},
+		{
+			name: "doctor",
+			call: func() (*mcppkg.CallToolResult, error) {
+				return handleDoctor(s, MCPConfig{}, activity)(context.Background(), mcppkg.CallToolRequest{})
+			},
+		},
+		{
+			name: "timeline",
+			call: func() (*mcppkg.CallToolResult, error) {
+				return handleTimeline(s, MCPConfig{}, activity)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"observation_id": 1.0}}})
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := tc.call()
+			if err != nil || !result.IsError {
+				t.Fatalf("result err=%v isError=%v text=%q", err, result.IsError, callResultText(t, result))
+			}
+			body := callResultJSON(t, result)
+			if got := body["error_code"]; got != "ambiguous_project" {
+				t.Fatalf("error_code = %v, want ambiguous_project; body=%v", got, body)
+			}
+			available, ok := body["available_projects"].([]any)
+			if !ok || len(available) != 2 {
+				t.Fatalf("available_projects = %#v, want both cwd repos", body["available_projects"])
+			}
+			if token, ok := body["recovery_token"].(string); !ok || token == "" {
+				t.Fatalf("missing recovery_token in %v", body)
+			}
+		})
+	}
+}
+
 func TestProcessOverrideSaveHandlerWritesToDefaultProject(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)

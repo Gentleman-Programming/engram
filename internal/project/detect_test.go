@@ -3,12 +3,14 @@ package project
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ─── extractRepoName unit tests ──────────────────────────────────────────────
@@ -605,7 +607,7 @@ func TestDetectProjectFull_Case4_MultiChild(t *testing.T) {
 	}
 }
 
-func TestDetectProjectFull_ChildScanFindsReposAfterPlainDirectories(t *testing.T) {
+func TestDetectProjectFull_ChildScanStopsAtEntryBudget(t *testing.T) {
 	parent := t.TempDir()
 	for _, name := range []string{"a-repo", "z-repo"} {
 		child := filepath.Join(parent, name)
@@ -622,11 +624,8 @@ func TestDetectProjectFull_ChildScanFindsReposAfterPlainDirectories(t *testing.T
 
 	res := DetectProjectFull(parent)
 
-	if !errors.Is(res.Error, ErrAmbiguousProject) {
-		t.Fatalf("Error = %v, want ErrAmbiguousProject; result = %+v", res.Error, res)
-	}
-	if got, want := res.AvailableProjects, []string{"a-repo", "z-repo"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("AvailableProjects = %q, want %q", got, want)
+	if res.Error != nil || res.Source != SourceGitChild || res.Project != "a-repo" {
+		t.Fatalf("result = %+v, want in-budget git_child a-repo", res)
 	}
 }
 
@@ -882,5 +881,82 @@ func TestDetectProject_AmbiguousEmpty(t *testing.T) {
 	got := DetectProject(parent)
 	if got == "" {
 		t.Error("DetectProject must not return empty string on ambiguous cwd")
+	}
+}
+
+func TestChildScan_EntryLimitDoesNotReadPastBudget(t *testing.T) {
+	parent := t.TempDir()
+	firstRepo := filepath.Join(parent, "01-repo")
+	if err := os.MkdirAll(filepath.Join(firstRepo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < childScanEntryLimit-1; i++ {
+		if err := os.Mkdir(filepath.Join(parent, fmt.Sprintf("%02d-plain", i+2)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	beyondBudgetRepo := filepath.Join(parent, "zz-repo")
+	if err := os.MkdirAll(filepath.Join(beyondBudgetRepo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(entries), childScanEntryLimit+1; got != want {
+		t.Fatalf("fixture entries = %d, want %d", got, want)
+	}
+	oldReadDir := childScanReadDir
+	t.Cleanup(func() { childScanReadDir = oldReadDir })
+	reads := 0
+	childScanReadDir = func(_ *os.File, count int) ([]os.DirEntry, error) {
+		if count != 1 {
+			t.Fatalf("ReadDir count = %d, want 1", count)
+		}
+		if reads == len(entries) {
+			return nil, io.EOF
+		}
+		entry := entries[reads]
+		reads++
+		return []os.DirEntry{entry}, nil
+	}
+
+	repos, timedOut := scanChildren(parent)
+	if timedOut {
+		t.Fatal("bounded scan unexpectedly timed out")
+	}
+	if got, want := reads, childScanEntryLimit; got != want {
+		t.Fatalf("ReadDir calls = %d, want entry budget %d", got, want)
+	}
+	if got, want := repos, []string{firstRepo}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("repos = %q, want only in-budget repo %q", got, want)
+	}
+}
+
+func TestChildScan_TimeoutFallsBackWithoutStartingReads(t *testing.T) {
+	parent := t.TempDir()
+	oldNow, oldReadDir := childScanNow, childScanReadDir
+	t.Cleanup(func() {
+		childScanNow = oldNow
+		childScanReadDir = oldReadDir
+	})
+	base := time.Date(2026, time.August, 28, 0, 0, 0, 0, time.UTC)
+	clockCalls := 0
+	childScanNow = func() time.Time {
+		clockCalls++
+		if clockCalls == 1 {
+			return base
+		}
+		return base.Add(childScanTimeout + time.Nanosecond)
+	}
+	childScanReadDir = func(_ *os.File, _ int) ([]os.DirEntry, error) {
+		t.Fatal("child scan read after its deadline")
+		return nil, io.EOF
+	}
+
+	res := DetectProjectFull(parent)
+	if res.Source != SourceDirBasename || res.Error != nil {
+		t.Fatalf("timeout result = %+v, want dir_basename fallback", res)
 	}
 }

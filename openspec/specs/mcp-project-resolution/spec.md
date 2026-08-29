@@ -374,6 +374,24 @@ Project-aware MCP responses SHOULD include `project`, `project_source`, and `pro
 
 ---
 
+### Requirement: REQ-316 HTTP Project Discovery and Scoped Failures
+
+`GET /project/current` MUST preserve the discovery envelope even when cwd resolution is ambiguous: it returns HTTP 200 with empty `project`, `project_source: "ambiguous"`, `project_path`, `cwd`, `available_projects`, and `error_hint`. Project-scoped HTTP operations MUST return structured errors: unknown explicit projects use HTTP 404, ambiguous cwd uses HTTP 409 with `code: "ambiguous_project"`, `available_projects`, `project_source`, and `project_path`, and invalid selectors/configuration use HTTP 400.
+
+#### Scenario: HTTP discovery remains successful when cwd is ambiguous
+
+- GIVEN a cwd containing two git repository children
+- WHEN `GET /project/current` is called for that cwd
+- THEN it returns HTTP 200 with an empty `project`, `project_source: "ambiguous"`, populated `available_projects`, and `error_hint`
+
+#### Scenario: Scoped HTTP read reports ambiguity truthfully
+
+- GIVEN a cwd containing two git repository children
+- WHEN a current-project-scoped HTTP read is called
+- THEN it returns HTTP 409 with `code: "ambiguous_project"`, populated `available_projects`, `project_source`, and `project_path`
+
+---
+
 ## Test Seam Summary
 
 | REQ | Test Functions | File |
@@ -394,3 +412,4 @@ Project-aware MCP responses SHOULD include `project`, `project_source`, and `pro
 | REQ-313 | `TestMemCurrentProject_NormalResult`, `TestMemCurrentProject_AmbiguousNoError`, `TestMemCurrentProject_WarningCase3` | `internal/mcp/mcp_test.go` |
 | REQ-314 | `TestAllTools_ReadResponseEnvelope_WithAssertions`, `TestErrorEnvelope_IncludesAvailableProjects` | `internal/mcp/mcp_test.go` |
 | REQ-315 | `TestProjectExists_Known`, `TestProjectExists_Unknown`, `TestProjectExists_EmptyStore` | `internal/store/store_test.go` |
+| REQ-316 | `TestProjectCurrentAmbiguousUsesDiscoveryEnvelope`, `TestProjectScopedRoutesReportStructuredAmbiguity` | `internal/server/server_test.go` |

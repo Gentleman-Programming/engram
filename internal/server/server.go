@@ -467,14 +467,14 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	if queryBool(r, "all_projects", false) {
 		// Search is one of the explicit global contracts. Do not let a process
 		// override silently turn all_projects into a current-project query.
-		if _, err := s.resolveRequestProject(r, projectpkg.ResolutionAll, false); err != nil {
-			s.writeProjectResolutionError(w, err)
+		if resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionAll, false); err != nil {
+			s.writeProjectResolutionError(w, resolved, err)
 			return
 		}
 	} else {
 		resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
 		if err != nil {
-			s.writeProjectResolutionError(w, err)
+			s.writeProjectResolutionError(w, resolved, err)
 			return
 		}
 		project = resolved.Project
@@ -597,7 +597,7 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 	after := queryInt(r, "after", 5)
 	resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
 	if err != nil {
-		s.writeProjectResolutionError(w, err)
+		s.writeProjectResolutionError(w, resolved, err)
 		return
 	}
 	focus, err := s.store.GetObservation(id)
@@ -873,7 +873,7 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 	resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
 	if err != nil {
-		s.writeProjectResolutionError(w, err)
+		s.writeProjectResolutionError(w, resolved, err)
 		return
 	}
 	scope := r.URL.Query().Get("scope")
@@ -920,7 +920,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
 	resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
 	if err != nil {
-		s.writeProjectResolutionError(w, err)
+		s.writeProjectResolutionError(w, resolved, err)
 		return
 	}
 	projectName := resolved.Project
@@ -957,8 +957,8 @@ func (s *Server) handleCurrentProject(w http.ResponseWriter, r *http.Request) {
 		Mode:      projectpkg.ResolutionCurrent,
 		Directory: cwd,
 	})
-	if err != nil {
-		jsonError(w, http.StatusBadRequest, "project resolution failed: "+err.Error())
+	if err != nil && !errors.Is(err, projectpkg.ErrAmbiguousProject) {
+		s.writeProjectResolutionError(w, res, err)
 		return
 	}
 	payload := map[string]any{
@@ -992,7 +992,7 @@ func (s *Server) resolveRequestProject(r *http.Request, mode projectpkg.Resoluti
 	})
 }
 
-func (s *Server) writeProjectResolutionError(w http.ResponseWriter, err error) {
+func (s *Server) writeProjectResolutionError(w http.ResponseWriter, res projectpkg.DetectionResult, err error) {
 	var unknown *projectpkg.UnknownProjectError
 	if errors.As(err, &unknown) {
 		available, listErr := s.store.ListProjectNames()
@@ -1007,13 +1007,21 @@ func (s *Server) writeProjectResolutionError(w http.ResponseWriter, err error) {
 		return
 	}
 	code := "project_resolution_failed"
+	status := http.StatusBadRequest
 	if errors.Is(err, projectpkg.ErrInvalidProjectName) {
 		code = "invalid_project"
 	}
 	if errors.Is(err, projectpkg.ErrAmbiguousProject) {
 		code = "ambiguous_project"
+		status = http.StatusConflict
 	}
-	jsonErrorWithFields(w, http.StatusBadRequest, "project resolution failed: "+err.Error(), map[string]any{"code": code})
+	fields := map[string]any{"code": code}
+	if errors.Is(err, projectpkg.ErrAmbiguousProject) {
+		fields["available_projects"] = res.AvailableProjects
+		fields["project_source"] = res.Source
+		fields["project_path"] = res.Path
+	}
+	jsonErrorWithFields(w, status, "project resolution failed: "+err.Error(), fields)
 }
 
 // ─── Sync Status ─────────────────────────────────────────────────────────────

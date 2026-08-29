@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -82,6 +83,21 @@ var noiseSet = map[string]bool{
 	".idea":        true,
 	".vscode":      true,
 }
+
+const (
+	childScanEntryLimit = 20
+	childScanTimeout    = 200 * time.Millisecond
+)
+
+// childScanNow and childScanReadDir are test seams for bounded child scans.
+// Production uses the wall clock and synchronous directory reads, so it never
+// starts a goroutine that could outlive a blocked filesystem operation.
+var (
+	childScanNow     = time.Now
+	childScanReadDir = func(directory *os.File, count int) ([]os.DirEntry, error) {
+		return directory.ReadDir(count)
+	}
+)
 
 // DetectionResult carries the full output of DetectProjectFull.
 type DetectionResult struct {
@@ -333,21 +349,40 @@ func detectGitWorktreeDir(dir string) string {
 }
 
 // scanChildren scans dir at depth=1 for git repositories, skipping noise dirs,
-// hidden dirs, enforcing a 200ms timeout, and short-circuiting as soon as more
-// than one repository is found.
+// hidden dirs, inspecting at most 20 entries, enforcing a 200ms timeout, and
+// short-circuiting as soon as more than one repository is found.
 // Returns the list of found git-repo paths and a boolean indicating timeout.
 func scanChildren(dir string) (repos []string, timedOut bool) {
-	deadline := time.Now().Add(200 * time.Millisecond)
-
-	entries, err := os.ReadDir(dir)
+	deadline := childScanNow().Add(childScanTimeout)
+	directory, err := os.Open(dir)
 	if err != nil {
 		return nil, false
 	}
+	defer directory.Close()
+	if childScanNow().After(deadline) {
+		return nil, true
+	}
 
-	for _, entry := range entries {
-		if time.Now().After(deadline) {
+	for inspected := 0; inspected < childScanEntryLimit; inspected++ {
+		// Check before each bounded read. os.ReadDir materializes the whole
+		// directory before this loop can enforce either contract limit.
+		if childScanNow().After(deadline) {
 			return repos, true
 		}
+		entries, readErr := childScanReadDir(directory, 1)
+		if errors.Is(readErr, io.EOF) {
+			return repos, false
+		}
+		if readErr != nil {
+			return repos, false
+		}
+		if childScanNow().After(deadline) {
+			return repos, true
+		}
+		if len(entries) == 0 {
+			return repos, false
+		}
+		entry := entries[0]
 		if !entry.IsDir() {
 			continue
 		}
@@ -364,6 +399,9 @@ func scanChildren(dir string) (repos []string, timedOut bool) {
 		// Check if this child is a git repo (has a .git entry).
 		gitPath := filepath.Join(childPath, ".git")
 		if _, err := os.Stat(gitPath); err == nil {
+			if childScanNow().After(deadline) {
+				return repos, true
+			}
 			repos = append(repos, childPath)
 			// Short-circuit: as soon as we have > 1, no need to keep scanning.
 			if len(repos) > 1 {
