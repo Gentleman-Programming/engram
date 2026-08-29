@@ -12555,6 +12555,39 @@ func TestSearchMatchMode_AnyCombinesShortAndLongTerms(t *testing.T) {
 	}
 }
 
+func TestSearchContextMixedAnyLimitPrefersFTSAfterDeduplication(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s-mixed-any-limit", "engram", "/tmp"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	for _, observation := range []AddObservationParams{
+		{SessionID: "s-mixed-any-limit", Type: "decision", Title: "migration long-only", Content: "long branch alternative", Project: "engram", Scope: "project"},
+		{SessionID: "s-mixed-any-limit", Type: "decision", Title: "v2 migration migration preferred", Content: "both branches", Project: "engram", Scope: "project"},
+		{SessionID: "s-mixed-any-limit", Type: "decision", Title: "v2 short-only", Content: "short branch alternative", Project: "engram", Scope: "project"},
+		{SessionID: "s-mixed-any-limit", Type: "learning", Title: "v2 migration excluded", Content: "wrong type", Project: "other", Scope: "global"},
+	} {
+		if _, err := s.AddObservation(observation); err != nil {
+			t.Fatalf("add observation %q: %v", observation.Title, err)
+		}
+	}
+
+	results, err := s.SearchContext(context.Background(), "v2 migration", SearchOptions{
+		Project: "engram", Scope: "project", Type: "decision", Limit: 1, MatchMode: "any",
+	})
+	if err != nil {
+		t.Fatalf("mixed ANY search: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("mixed ANY limit must apply after deduplication, got %+v", results)
+	}
+	if results[0].Title != "v2 migration migration preferred" {
+		t.Fatalf("mixed ANY limit returned %q, want preferred FTS result", results[0].Title)
+	}
+	if results[0].Rank == 0 {
+		t.Fatal("mixed ANY limit must retain the FTS rank for the preferred result")
+	}
+}
+
 func TestSearchMatchMode_AnyEscapesInteriorQuotes(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.CreateSession("s-matchmode-quotes", "engram", "/tmp"); err != nil {

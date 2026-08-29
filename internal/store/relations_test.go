@@ -232,6 +232,32 @@ func TestFindCandidatesCombinesShortAndLongTerms(t *testing.T) {
 	}
 }
 
+func TestFindCandidatesMixedAnyLimitPrefersFTSAfterDeduplication(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, _ = addTestObs(t, s, "migration long-only", "decision", "testproject", "project")
+	_, wantSyncID := addTestObs(t, s, "v2 migration migration preferred", "decision", "testproject", "project")
+	_, _ = addTestObs(t, s, "v2 short-only", "decision", "testproject", "project")
+	_, _ = addTestObs(t, s, "v2 migration excluded project", "decision", "other-project", "project")
+	_, _ = addTestObs(t, s, "v2 migration excluded scope", "decision", "testproject", "global")
+	savedID, _ := addTestObs(t, s, "v2 migration source", "decision", "testproject", "project")
+
+	candidates, err := s.FindCandidates(savedID, CandidateOptions{
+		Project: "testproject", Scope: "project", Query: "v2 migration", Limit: 1, SkipInsert: true,
+	})
+	if err != nil {
+		t.Fatalf("FindCandidates mixed ANY limit: %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("mixed candidate limit must apply after deduplication, got %+v", candidates)
+	}
+	if candidates[0].SyncID != wantSyncID {
+		t.Fatalf("mixed candidate limit returned %q, want preferred FTS result %q", candidates[0].SyncID, wantSyncID)
+	}
+	if candidates[0].Score == 0 {
+		t.Fatal("mixed candidate limit must retain the FTS score for the preferred result")
+	}
+}
+
 func TestFindCandidatesShortTitleFallbackPreservesIsolationAndRelationExclusion(t *testing.T) {
 	s := setupRelationsStore(t)
 	_, wantSyncID := addTestObs(t, s, "UI", "decision", "testproject", "project")
