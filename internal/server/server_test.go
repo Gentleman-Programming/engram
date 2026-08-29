@@ -1259,6 +1259,44 @@ func TestOnWriteNotCalledOnReadOperations(t *testing.T) {
 	}
 }
 
+func TestHealthReportsDatabaseReachability(t *testing.T) {
+	st := newServerTestStore(t)
+	srv := New(st, 0)
+	h := srv.Handler()
+
+	healthRec := httptest.NewRecorder()
+	h.ServeHTTP(healthRec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if healthRec.Code != http.StatusOK {
+		t.Fatalf("healthy /health status = %d, want %d", healthRec.Code, http.StatusOK)
+	}
+	var healthy map[string]any
+	if err := json.NewDecoder(healthRec.Body).Decode(&healthy); err != nil {
+		t.Fatalf("decode healthy response: %v", err)
+	}
+	if healthy["database"] != "reachable" {
+		t.Fatalf("healthy database state = %#v, want reachable", healthy["database"])
+	}
+
+	if err := st.Close(); err != nil {
+		t.Fatalf("close test store: %v", err)
+	}
+	failedRec := httptest.NewRecorder()
+	h.ServeHTTP(failedRec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if failedRec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unhealthy /health status = %d, want %d", failedRec.Code, http.StatusServiceUnavailable)
+	}
+	var failed map[string]any
+	if err := json.NewDecoder(failedRec.Body).Decode(&failed); err != nil {
+		t.Fatalf("decode unhealthy response: %v", err)
+	}
+	if failed["database"] != "unreachable" || failed["status"] != "unavailable" {
+		t.Fatalf("unhealthy health response = %#v", failed)
+	}
+	if message, _ := failed["error"].(string); !strings.Contains(message, "restart") {
+		t.Fatalf("unhealthy health response lacks restart guidance: %#v", failed)
+	}
+}
+
 func TestOnWriteNotCalledOnFailedWrites(t *testing.T) {
 	st := newServerTestStore(t)
 	srv := New(st, 0)

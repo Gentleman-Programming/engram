@@ -915,6 +915,22 @@ func (s *Store) CheckDatabaseGeneration() error {
 	return nil
 }
 
+// Health verifies that this Store still refers to the generation it opened and
+// that SQLite remains reachable. It intentionally does not reopen the Store:
+// recovering across a replaced WAL/SHM generation is unsafe, so callers must
+// stop all Engram processes and restart them after a failed health check.
+func (s *Store) Health() error {
+	if err := s.CheckDatabaseGeneration(); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := s.db.PingContext(ctx); err != nil {
+		return fmt.Errorf("engram: database health check failed: %w; stop all Engram processes and restart them", err)
+	}
+	return nil
+}
+
 func (s *Store) preflightRead() error {
 	return s.CheckDatabaseGeneration()
 }

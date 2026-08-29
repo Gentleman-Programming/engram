@@ -289,10 +289,21 @@ func (s *Server) routes() {
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.Health(); err != nil {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{
+			"status":   "unavailable",
+			"service":  "engram",
+			"version":  "0.1.0",
+			"database": "unreachable",
+			"error":    err.Error(),
+		})
+		return
+	}
 	jsonResponse(w, http.StatusOK, map[string]any{
-		"status":  "ok",
-		"service": "engram",
-		"version": "0.1.0",
+		"status":   "ok",
+		"service":  "engram",
+		"version":  "0.1.0",
+		"database": "reachable",
 	})
 }
 
