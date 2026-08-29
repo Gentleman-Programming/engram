@@ -117,7 +117,20 @@ func normalizeProjectName(name string) (string, error) {
 			return "", invalidProjectName(name, "project contains control characters")
 		}
 	}
-	return strings.ToLower(trimmed), nil
+	return CanonicalizeProjectName(trimmed), nil
+}
+
+// CanonicalizeProjectName returns the canonical storage form of a project name.
+// Callers that accept external input must validate it before canonicalizing.
+func CanonicalizeProjectName(name string) string {
+	canonical := strings.TrimSpace(strings.ToLower(name))
+	for strings.Contains(canonical, "--") {
+		canonical = strings.ReplaceAll(canonical, "--", "-")
+	}
+	for strings.Contains(canonical, "__") {
+		canonical = strings.ReplaceAll(canonical, "__", "_")
+	}
+	return canonical
 }
 
 func invalidProjectName(name, reason string) error {

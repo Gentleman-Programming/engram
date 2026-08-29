@@ -349,7 +349,7 @@ test("unsafe detected projects do not reach session or memory writes", () => {
     { project: "unknown" },
     { project: "alpha", error_hint: "" },
     { project: "nested/project" },
-    { project: "C:workspace" },
+    { project: "C:\\workspace" },
     { project: "safe\u0000name" },
   ]) {
     const boundary = buildProjectDetectionBoundaryForTest();
@@ -361,11 +361,13 @@ test("unsafe detected projects do not reach session or memory writes", () => {
 });
 
 test("safe detected projects continue through session and memory writes", () => {
-  const boundary = buildProjectDetectionBoundaryForTest();
-  assert.equal(boundary.applyDetectedProject({ project: "engram" }), true);
-  assert.equal(boundary.state().project, "engram");
-  boundary.writeMemory();
-  assert.deepEqual(boundary.requests, ["/sessions", "/observations"]);
+  for (const project of ["engram", "c:compiler"]) {
+    const boundary = buildProjectDetectionBoundaryForTest();
+    assert.equal(boundary.applyDetectedProject({ project }), true);
+    assert.equal(boundary.state().project, project);
+    boundary.writeMemory();
+    assert.deepEqual(boundary.requests, ["/sessions", "/observations"]);
+  }
 });
 
 test("ambiguous_project error maps to actionable status label, not generic 'error'", () => {
@@ -1221,7 +1223,7 @@ test("mem_review is registered as a Pi-native executable memory tool", () => {
   assert.doesNotMatch(source, /project: optionalString\("Optional project filter for action=list"\)/);
   assert.match(source, /mem_review: Type\.Object\(\{[\s\S]*observation_id: optionalNumber\("Observation id for action=mark_reviewed"\)/);
   assert.match(source, /mem_review: Type\.Object\(\{[\s\S]*id: optionalNumber\("Alias for observation_id"\)/);
-  assert.match(source, /case "mem_review":[\s\S]*action === "list"[\s\S]*engramFetch\(`\/review\$\{queryString\(\{ project: params\.project, limit: params\.limit \}\)\}`\)/);
+  assert.match(source, /case "mem_review":[\s\S]*action === "list"[\s\S]*engramFetch\(`\/review\$\{queryString\(\{ project: requestedProject, limit: params\.limit, all_projects: requestedProject \? undefined : true \}\)\}`\)/);
   assert.match(source, /case "mem_review":[\s\S]*action === "mark_reviewed"[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*engramFetch\(`\/review\/mark_reviewed\$\{queryString\(\{ project: activeProject \}\)\}`/);
   assert.match(source, /case "mem_review":[\s\S]*body: \{ observation_id: params\.observation_id \|\| params\.id \}/);
   assert.match(source, /for \(const toolName of ENGRAM_TOOLS\)[\s\S]*executeMemoryTool\(toolName/);

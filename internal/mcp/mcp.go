@@ -1523,13 +1523,16 @@ func handleReview(s *store.Store, cfg MCPConfig, activities ...*SessionActivity)
 			if detErr != nil {
 				return readProjectErrorResult(activity, detRes, detErr), nil
 			}
+			markReviewed := s.MarkReviewed
 			if detRes.Project != "" {
-				obs, getErr := s.GetObservation(id)
-				if getErr != nil || obs.Project == nil || !strings.EqualFold(strings.TrimSpace(*obs.Project), detRes.Project) {
-					return mcp.NewToolResultError("Failed to mark reviewed: observation not found in resolved project"), nil
+				markReviewed = func(observationID int64) error {
+					return s.MarkReviewedForProject(observationID, detRes.Project)
 				}
 			}
-			if err := s.MarkReviewed(id); err != nil {
+			if err := markReviewed(id); err != nil {
+				if detRes.Project != "" && errors.Is(err, store.ErrObservationNotFound) {
+					return mcp.NewToolResultError("Failed to mark reviewed: observation not found in resolved project"), nil
+				}
 				return mcp.NewToolResultError("Failed to mark reviewed: " + err.Error()), nil
 			}
 			obs, err := s.GetObservation(id)

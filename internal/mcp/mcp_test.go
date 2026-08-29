@@ -1332,6 +1332,41 @@ func TestHandleReviewMarkReviewedAcceptsIDAlias(t *testing.T) {
 	}
 }
 
+func TestHandleReviewMarkReviewedEnforcesResolvedProjectAtMutation(t *testing.T) {
+	s := newMCPTestStore(t)
+	for _, project := range []string{"alpha", "beta"} {
+		if err := s.CreateSession("review-scope-"+project, project, "/tmp/"+project); err != nil {
+			t.Fatalf("create %s session: %v", project, err)
+		}
+	}
+	id, err := s.AddObservation(store.AddObservationParams{SessionID: "review-scope-alpha", Type: "decision", Title: "Alpha review", Content: "must remain scoped", Project: "alpha"})
+	if err != nil {
+		t.Fatalf("add alpha observation: %v", err)
+	}
+	past := time.Now().UTC().Add(-time.Hour).Format("2006-01-02 15:04:05")
+	if _, err := s.DB().Exec(`UPDATE observations SET review_after = ? WHERE id = ?`, past, id); err != nil {
+		t.Fatalf("backdate review_after: %v", err)
+	}
+
+	res, err := handleReview(s, MCPConfig{DefaultProject: "beta"})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"action":         "mark_reviewed",
+		"observation_id": float64(id),
+	}}})
+	if err != nil {
+		t.Fatalf("mark reviewed handler error: %v", err)
+	}
+	if !res.IsError || !strings.Contains(callResultText(t, res), "observation not found in resolved project") {
+		t.Fatalf("mismatched project mark reviewed result = %s", callResultText(t, res))
+	}
+	obs, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("GetObservation: %v", err)
+	}
+	if obs.State() != store.ObservationStateNeedsReview {
+		t.Fatalf("mismatched project mutation changed review state to %q", obs.State())
+	}
+}
+
 func TestHandleReviewListUnknownProjectReturnsStructuredError(t *testing.T) {
 	s := newMCPTestStore(t)
 	if err := s.CreateSession("s-review-project", "engram", "/tmp/engram"); err != nil {

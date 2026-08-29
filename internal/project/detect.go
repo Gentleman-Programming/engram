@@ -318,15 +318,38 @@ func detectGitRootDir(dir string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	cmd := newProjectCommandContext(ctx, "git", "-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	commonDir := gitRevParsePath(ctx, dir, "--git-common-dir")
+	if commonDir == "" {
+		return ""
+	}
+
+	worktreeDir := gitRevParsePath(ctx, dir, "--show-toplevel")
+	if worktreeDir != "" {
+		// Ordinary repositories and submodules have the same git and common
+		// directories, so their checkout root is authoritative. A linked
+		// worktree has a per-worktree git directory and must retain the shared
+		// primary root derived from git-common-dir.
+		if gitDir := gitRevParsePath(ctx, dir, "--git-dir"); gitDir == commonDir {
+			return worktreeDir
+		}
+	}
+	return repositoryRootFromCommonDir(commonDir)
+}
+
+func gitRevParsePath(ctx context.Context, dir, argument string) string {
+	cmd := newProjectCommandContext(ctx, "git", "-C", dir, "rev-parse", "--path-format=absolute", argument)
 	out, err := cmd.Output()
 	if err != nil {
 		return ""
 	}
-	commonDir := filepath.Clean(strings.TrimSpace(string(out)))
-	if commonDir == "." || commonDir == "" {
+	path := filepath.Clean(strings.TrimSpace(string(out)))
+	if path == "." || path == "" {
 		return ""
 	}
+	return path
+}
+
+func repositoryRootFromCommonDir(commonDir string) string {
 	if filepath.Base(commonDir) == ".git" {
 		return filepath.Dir(commonDir)
 	}

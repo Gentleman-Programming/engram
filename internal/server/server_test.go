@@ -1040,6 +1040,38 @@ func TestHandleReviewListAndMarkReviewed(t *testing.T) {
 	}
 }
 
+func TestHandleReviewMarkReviewedEnforcesResolvedProjectAtMutation(t *testing.T) {
+	st := newServerTestStore(t)
+	for _, project := range []string{"alpha", "beta"} {
+		if err := st.CreateSession("review-scope-"+project, project, "/tmp/"+project); err != nil {
+			t.Fatalf("create %s session: %v", project, err)
+		}
+	}
+	id, err := st.AddObservation(store.AddObservationParams{SessionID: "review-scope-alpha", Type: "decision", Title: "Alpha review", Content: "must remain scoped", Project: "alpha"})
+	if err != nil {
+		t.Fatalf("add alpha observation: %v", err)
+	}
+	past := time.Now().UTC().Add(-time.Hour).Format("2006-01-02 15:04:05")
+	if _, err := st.DB().Exec(`UPDATE observations SET review_after = ? WHERE id = ?`, past, id); err != nil {
+		t.Fatalf("backdate review_after: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/review/mark_reviewed?project=beta", strings.NewReader(fmt.Sprintf(`{"observation_id":%d}`, id)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	New(st, 0).Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "observation not found in resolved project") {
+		t.Fatalf("mismatched project mark reviewed = %d: %s", rec.Code, rec.Body.String())
+	}
+	obs, err := st.GetObservation(id)
+	if err != nil {
+		t.Fatalf("GetObservation: %v", err)
+	}
+	if obs.State() != store.ObservationStateNeedsReview {
+		t.Fatalf("mismatched project mutation changed review state to %q", obs.State())
+	}
+}
+
 func TestHandleReviewMarkReviewedAcceptsIDAlias(t *testing.T) {
 	st := newServerTestStore(t)
 	srv := New(st, 0)

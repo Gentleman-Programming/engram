@@ -725,6 +725,32 @@ func TestDetectProjectFull_WorktreeRemoteUsesPrimaryRepositoryPath(t *testing.T)
 	}
 }
 
+func TestDetectProjectFull_SubmoduleUsesCheckoutRoot(t *testing.T) {
+	parent := t.TempDir()
+	dependency := filepath.Join(parent, "dependency")
+	repo := filepath.Join(parent, "parent-repo")
+	for _, dir := range []string{dependency, repo} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		initGit(t, dir)
+		commitEmptyGit(t, dir)
+	}
+	submodule := filepath.Join(repo, "deps", "submodule")
+	cmd := exec.Command("git", "-C", repo, "-c", "protocol.file.allow=always", "submodule", "add", dependency, "deps/submodule")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git submodule add: %v\n%s", err, out)
+	}
+
+	res := DetectProjectFull(submodule)
+	if res.Error != nil {
+		t.Fatalf("submodule result error = %v", res.Error)
+	}
+	if got, want := canonicalizePath(res.Path), canonicalizePath(submodule); got != want {
+		t.Fatalf("submodule path = %q, want checkout root %q", got, want)
+	}
+}
+
 func TestDetectProjectFull_BareRepositoryUsesRepositoryName(t *testing.T) {
 	bare := filepath.Join(t.TempDir(), "canonical-repo.git")
 	cmd := exec.Command("git", "init", "--bare", bare)

@@ -11165,6 +11165,43 @@ func TestMarkReviewedResetsReviewAfter(t *testing.T) {
 	}
 }
 
+func TestMarkReviewedForProjectEnforcesCanonicalOwnership(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("review-scope-alpha", "alpha", "/tmp/alpha"); err != nil {
+		t.Fatalf("CreateSession alpha: %v", err)
+	}
+	id, err := s.AddObservation(AddObservationParams{SessionID: "review-scope-alpha", Type: "decision", Title: "scoped", Content: "scoped content", Project: "alpha"})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+	past := time.Now().UTC().Add(-24 * time.Hour).Format("2006-01-02 15:04:05")
+	if _, err := s.DB().Exec(`UPDATE observations SET review_after = ? WHERE id = ?`, past, id); err != nil {
+		t.Fatalf("backdate review_after: %v", err)
+	}
+
+	if err := s.MarkReviewedForProject(id, "beta"); !errors.Is(err, ErrObservationNotFound) {
+		t.Fatalf("MarkReviewedForProject mismatched project error = %v, want ErrObservationNotFound", err)
+	}
+	unchanged, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("GetObservation after mismatch: %v", err)
+	}
+	if unchanged.State() != ObservationStateNeedsReview {
+		t.Fatalf("mismatched mutation changed review state to %q", unchanged.State())
+	}
+
+	if err := s.MarkReviewedForProject(id, " ALPHA "); err != nil {
+		t.Fatalf("MarkReviewedForProject matching canonical project: %v", err)
+	}
+	updated, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("GetObservation after matching mutation: %v", err)
+	}
+	if updated.State() != ObservationStateActive {
+		t.Fatalf("matching mutation review state = %q, want active", updated.State())
+	}
+}
+
 func TestMarkReviewedDoesNotEnqueueSyncMutation(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.EnrollProject("mark-reviewed-sync-proj"); err != nil {

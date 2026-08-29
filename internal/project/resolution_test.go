@@ -20,6 +20,36 @@ func TestResolveModes(t *testing.T) {
 		}
 	})
 
+	t.Run("explicit canonicalizes repeated separators before checking the store", func(t *testing.T) {
+		result, err := Resolve(ResolutionOptions{
+			Mode:                 ResolutionCurrent,
+			Explicit:             "Foo--Bar",
+			RequireKnownExplicit: true,
+			ProjectExists:        func(name string) (bool, error) { return name == "foo-bar", nil },
+		})
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if result.Project != "foo-bar" || result.Source != SourceExplicitOverride {
+			t.Fatalf("result = %+v", result)
+		}
+	})
+
+	t.Run("process override canonicalizes repeated separators before checking the store", func(t *testing.T) {
+		result, err := Resolve(ResolutionOptions{
+			Mode:                ResolutionCurrent,
+			ProcessOverride:     "Foo__Bar",
+			RequireKnownProcess: true,
+			ProjectExists:       func(name string) (bool, error) { return name == "foo_bar", nil },
+		})
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if result.Project != "foo_bar" || result.Source != SourceProcessOverride {
+			t.Fatalf("result = %+v", result)
+		}
+	})
+
 	t.Run("process override rejects paths", func(t *testing.T) {
 		_, err := Resolve(ResolutionOptions{Mode: ResolutionCurrent, ProcessOverride: `C:\\repo`})
 		if !errors.Is(err, ErrInvalidProjectName) {

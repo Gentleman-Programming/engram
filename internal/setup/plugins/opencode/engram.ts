@@ -169,7 +169,7 @@ async function isEngramRunning(): Promise<boolean> {
 async function resolveProjectName(directory: string): Promise<{ project: string; error?: string }> {
   const data = await engramFetch(`/project/current?cwd=${encodeURIComponent(directory)}`)
   const project = typeof data?.project === "string" ? data.project.trim() : ""
-  if (project && project !== "unknown" && !data?.error_hint && !/[\\/]/.test(project) && !/^[A-Za-z]:$/.test(project)) {
+  if (project && project !== "unknown" && !data?.error_hint && !/[\\/]/.test(project)) {
     return { project }
   }
   const choices = Array.isArray(data?.available_projects) && data.available_projects.length > 0

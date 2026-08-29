@@ -667,16 +667,18 @@ func (s *Server) handleReviewMarkReviewed(w http.ResponseWriter, r *http.Request
 		s.writeProjectResolutionError(w, resolved, err)
 		return
 	}
+	markReviewed := s.store.MarkReviewed
 	if resolved.Project != "" {
-		obs, getErr := s.store.GetObservation(id)
-		if getErr != nil || obs.Project == nil || !strings.EqualFold(strings.TrimSpace(*obs.Project), resolved.Project) {
-			jsonError(w, http.StatusNotFound, "observation not found in resolved project")
-			return
+		markReviewed = func(observationID int64) error {
+			return s.store.MarkReviewedForProject(observationID, resolved.Project)
 		}
 	}
-
-	if err := s.store.MarkReviewed(id); err != nil {
+	if err := markReviewed(id); err != nil {
 		if errors.Is(err, store.ErrObservationNotFound) {
+			if resolved.Project != "" {
+				jsonError(w, http.StatusNotFound, "observation not found in resolved project")
+				return
+			}
 			jsonError(w, http.StatusNotFound, err.Error())
 			return
 		}

@@ -666,8 +666,7 @@ function isSafeDetectedProject(detected: CurrentProjectResponse): string | undef
     !candidate ||
     candidate.toLowerCase() === "unknown" ||
     detected.error_hint !== undefined ||
-    /[\\/\x00-\x1F\x7F]/.test(candidate) ||
-    /^[A-Za-z]:/.test(candidate)
+    /[\\/\x00-\x1F\x7F]/.test(candidate)
   ) {
     return undefined;
   }
@@ -1032,7 +1031,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
     case "mem_review": {
       const action = String(params.action || "").trim();
       if (action === "list") {
-        return engramFetch(`/review${queryString({ project: params.project, limit: params.limit })}`);
+        return engramFetch(`/review${queryString({ project: requestedProject, limit: params.limit, all_projects: requestedProject ? undefined : true })}`);
       }
       if (action === "mark_reviewed") {
         if (!requestedProject) requireResolvedProject();

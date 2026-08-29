@@ -25,6 +25,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	projectpkg "github.com/Gentleman-Programming/engram/internal/project"
 	"github.com/Gentleman-Programming/engram/internal/timeutil"
 	sqlite "modernc.org/sqlite"
 )
@@ -2832,8 +2833,26 @@ func (s *Store) ObservationsNeedingReview(project string, limit int) ([]Observat
 // Types without a decay offset return to a NULL review_after value.
 // This lifecycle reset is intentionally local-only until the sync wire format includes review_after.
 func (s *Store) MarkReviewed(id int64) error {
+	return s.markReviewed(id, "")
+}
+
+// MarkReviewedForProject resets an observation's review lifecycle only when it
+// remains owned by project at the mutation boundary.
+func (s *Store) MarkReviewedForProject(id int64, project string) error {
+	project, _ = NormalizeProject(project)
+	return s.markReviewed(id, project)
+}
+
+func (s *Store) markReviewed(id int64, project string) error {
 	return s.withTx(func(tx *sql.Tx) error {
-		obs, err := s.getObservationTx(tx, id)
+		query := `SELECT type FROM observations WHERE id = ? AND deleted_at IS NULL`
+		args := []any{id}
+		if project != "" {
+			query += ` AND project = ?`
+			args = append(args, project)
+		}
+		var observationType string
+		err := tx.QueryRow(query, args...).Scan(&observationType)
 		if err == sql.ErrNoRows {
 			return ErrObservationNotFound
 		}
@@ -2842,11 +2861,25 @@ func (s *Store) MarkReviewed(id int64) error {
 		}
 
 		var reviewAfter any
-		if months, ok := decayReviewAfterMonths[obs.Type]; ok {
+		if months, ok := decayReviewAfterMonths[observationType]; ok {
 			reviewAfter = time.Now().UTC().AddDate(0, months, 0).Format("2006-01-02 15:04:05")
 		}
-		if _, err := s.execHook(tx, `UPDATE observations SET review_after = ?, updated_at = datetime('now') WHERE id = ? AND deleted_at IS NULL`, reviewAfter, id); err != nil {
+		update := `UPDATE observations SET review_after = ?, updated_at = datetime('now') WHERE id = ? AND deleted_at IS NULL`
+		updateArgs := []any{reviewAfter, id}
+		if project != "" {
+			update += ` AND project = ?`
+			updateArgs = append(updateArgs, project)
+		}
+		result, err := s.execHook(tx, update, updateArgs...)
+		if err != nil {
 			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected == 0 {
+			return ErrObservationNotFound
 		}
 		return nil
 	})
@@ -8154,15 +8187,7 @@ func NormalizeProject(project string) (normalized string, warning string) {
 	if project == "" {
 		return "", ""
 	}
-	n := strings.TrimSpace(strings.ToLower(project))
-	// Collapse multiple consecutive hyphens
-	for strings.Contains(n, "--") {
-		n = strings.ReplaceAll(n, "--", "-")
-	}
-	// Collapse multiple consecutive underscores
-	for strings.Contains(n, "__") {
-		n = strings.ReplaceAll(n, "__", "_")
-	}
+	n := projectpkg.CanonicalizeProjectName(project)
 	if n == project {
 		return n, ""
 	}

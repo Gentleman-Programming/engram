@@ -189,6 +189,13 @@ test("project identity delegates Windows paths and worktrees to the canonical se
 		canWrite: false,
     },
     {
+      name: "colon-prefixed project name",
+      directory: "C:\\worktrees\\compiler",
+      response: { project: "c:compiler", project_source: "config" },
+      expectedProject: "c:compiler",
+      canWrite: true,
+    },
+    {
       name: "worktree repository identity",
       directory: "C:\\worktrees\\engram-652",
       response: { project: "engram", project_source: "git_remote" },
