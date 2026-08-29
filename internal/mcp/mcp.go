@@ -125,10 +125,29 @@ var ProfileAdmin = map[string]bool{
 	"mem_merge_projects": true, // destructive curation tool — not for agent use
 }
 
+// ProfileProjects contains the 10 engram-projects tools (RFC
+// rfc-engram-projects.md §5.11): project cards, tasks, evidence, the
+// runbook index, and the context pack. Intended for agents working in
+// project repos, not for the generic agent skill protocols ProfileAgent
+// is sourced from.
+var ProfileProjects = map[string]bool{
+	"mem_project_card":       true,
+	"mem_project_upsert":     true,
+	"mem_task_upsert":        true,
+	"mem_task_list":          true,
+	"mem_task_link":          true,
+	"mem_evidence_add":       true,
+	"mem_evidence_list":      true,
+	"mem_runbook_index_sync": true,
+	"mem_runbook_find":       true,
+	"mem_context_pack":       true,
+}
+
 // Profiles maps profile names to their tool sets.
 var Profiles = map[string]map[string]bool{
-	"agent": ProfileAgent,
-	"admin": ProfileAdmin,
+	"agent":    ProfileAgent,
+	"admin":    ProfileAdmin,
+	"projects": ProfileProjects,
 }
 
 // ResolveTools takes a comma-separated string of profile names and/or
@@ -931,6 +950,9 @@ ERROR: Returns IsError=true if IDs are unknown, relation is invalid, or cross-pr
 			handleCompare(s, activity),
 		)
 	}
+
+	// ─── engram-projects tools (profile: projects) ─────────────────────
+	registerProjectTools(srv, s, cfg, allowlist, writeQueue)
 }
 
 // ─── Tool Handlers ───────────────────────────────────────────────────────────

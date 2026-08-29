@@ -2260,6 +2260,9 @@ func TestNewServerWithToolsNilRegistersAll(t *testing.T) {
 		"mem_update", "mem_delete", "mem_stats", "mem_timeline", "mem_merge_projects",
 		"mem_current_project", "mem_judge", "mem_compare", "mem_doctor", "mem_review",
 		"mem_pin", "mem_unpin",
+		"mem_project_card", "mem_project_upsert", "mem_task_upsert", "mem_task_list",
+		"mem_task_link", "mem_evidence_add", "mem_evidence_list", "mem_runbook_index_sync",
+		"mem_runbook_find", "mem_context_pack",
 	}
 
 	for _, name := range allTools {
@@ -2364,9 +2367,9 @@ func TestNewServerBackwardsCompatible(t *testing.T) {
 	srv := NewServer(s)
 	tools := srv.ListTools()
 
-	// 18 agent + 4 admin = 22 total.
-	if len(tools) != 22 {
-		t.Errorf("NewServer should register all 22 tools, got %d", len(tools))
+	// 18 agent + 4 admin + 10 projects = 32 total.
+	if len(tools) != 32 {
+		t.Errorf("NewServer should register all 32 tools, got %d", len(tools))
 	}
 }
 
@@ -2710,9 +2713,9 @@ func TestNewServerWithConfig(t *testing.T) {
 		t.Fatal("expected MCP server instance")
 	}
 	tools := srv.ListTools()
-	// Should have all 22 tools (18 agent + 4 admin).
-	if len(tools) != 22 {
-		t.Errorf("NewServerWithConfig should register all 22 tools, got %d", len(tools))
+	// Should have all 32 tools (18 agent + 4 admin + 10 projects).
+	if len(tools) != 32 {
+		t.Errorf("NewServerWithConfig should register all 32 tools, got %d", len(tools))
 	}
 }
 
