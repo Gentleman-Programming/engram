@@ -70,6 +70,7 @@ function assertNoRegistration(runtime, message) {
 async function createRuntime(t, {
   directory = "/work/engram",
   projectCurrentResponse = { project: "engram", project_source: "git_remote" },
+	projectCurrentOK = true,
   sessionGet = async ({ path }) => sdkResult(session(path.id)),
   registrationResponse,
   contextResponse,
@@ -92,7 +93,10 @@ async function createRuntime(t, {
     if (path === "/health") return { ok: true, async json() { return { status: "ok" } } }
     const body = init?.body ? JSON.parse(init.body) : undefined
     requests.push({ path, url: String(url), body })
-    if (path === "/project/current") return httpResponse(projectCurrentResponse)
+		if (path === "/project/current") {
+			const response = typeof projectCurrentResponse === "function" ? projectCurrentResponse() : projectCurrentResponse
+			return httpResponse(response, projectCurrentOK)
+		}
     if (path === "/sessions") {
       registeredIDs.push(body.id)
       if (registrationResponse) return registrationResponse(registeredIDs.length)
@@ -141,18 +145,20 @@ test("project identity delegates Windows paths and worktrees to the canonical se
       directory: "C:\\Users\\Blackie",
       response: { project: "blackie", project_source: "dir_basename" },
       expectedProject: "blackie",
+		canWrite: true,
     },
     {
       name: "Windows drive root",
       directory: "C:\\",
       response: { project: "C:\\", project_source: "dir_basename" },
-      expectedProject: "unknown",
+		canWrite: false,
     },
     {
       name: "worktree repository identity",
       directory: "C:\\worktrees\\engram-652",
       response: { project: "engram", project_source: "git_remote" },
       expectedProject: "engram",
+		canWrite: true,
     },
   ]) {
     await t.test(scenario.name, async (t) => {
@@ -166,13 +172,72 @@ test("project identity delegates Windows paths and worktrees to the canonical se
 
       await runtime.event("session.created", session("runtime"))
       const registration = runtime.requests.find(({ path }) => path === "/sessions")
-      assert.equal(registration?.body.project, scenario.expectedProject)
-
       const output = { context: [] }
       await runtime.compact({ sessionID: "runtime" }, output)
-      assert.match(output.context.at(-1), new RegExp(`Use project: '${scenario.expectedProject}'`))
+		if (scenario.canWrite) {
+			assert.equal(registration?.body.project, scenario.expectedProject)
+			assert.match(output.context.at(-1), new RegExp(`Use project: '${scenario.expectedProject}'`))
+		} else {
+			assert.equal(registration, undefined)
+			assert.match(output.context.at(-1), /Automatic session, prompt, and passive-capture writes remain disabled/)
+			assert.doesNotMatch(output.context.at(-1), /Use project: 'unknown'/)
+		}
     })
   }
+})
+
+test("project identity resolution failures fail closed for automatic writes", async (t) => {
+	for (const scenario of [
+		{ name: "failed response", response: { error: "unavailable" }, ok: false },
+		{ name: "ambiguous response", response: { project: "", error_hint: "ambiguous project", available_projects: ["repo-a", "repo-b"] } },
+		{ name: "malformed response", response: {} },
+		{ name: "unknown project", response: { project: "unknown", project_source: "dir_basename" } },
+	]) {
+		await t.test(scenario.name, async (t) => {
+			const runtime = await createRuntime(t, {
+				projectCurrentResponse: scenario.response,
+				projectCurrentOK: scenario.ok ?? true,
+			})
+			await runtime.event("session.created", session("runtime"))
+			await assert.rejects(
+				runtime.before({ tool: "mem_save", sessionID: "runtime" }, toolOutput(undefined)),
+				/could not resolve a safe project identity/,
+			)
+			await runtime.chat(
+				{ sessionID: "runtime" },
+				{ message: {}, parts: [{ type: "text", text: "A sufficiently long root prompt" }] },
+			)
+			await runtime.after({ tool: "Task", sessionID: "runtime" }, "A".repeat(60))
+			const output = { context: [] }
+			await runtime.compact({ sessionID: "runtime" }, output)
+
+			assertNoRegistration(runtime)
+			assert.equal(runtime.requests.some(({ path }) => path === "/prompts"), false)
+			assert.equal(runtime.requests.some(({ path }) => path === "/observations/passive"), false)
+			assert.equal(runtime.requests.some(({ path }) => path === "/context/compaction"), false)
+			assert.match(output.context.at(-1), /Automatic session, prompt, and passive-capture writes remain disabled/)
+		})
+	}
+})
+
+test("project identity retries a failed resolution on later events", async (t) => {
+	let recovered = false
+	const runtime = await createRuntime(t, {
+		projectCurrentResponse: () => recovered
+			? { project: "engram", project_source: "git_remote" }
+			: { project: "unknown", project_source: "dir_basename" },
+	})
+	await runtime.event("session.created", session("runtime"))
+	assertNoRegistration(runtime)
+
+	recovered = true
+	await runtime.event("session.updated", session("runtime"))
+	const output = toolOutput(undefined)
+	await runtime.before({ tool: "mem_save", sessionID: "runtime" }, output)
+	assert.equal(output.args.session_id, "runtime")
+	assert.deepEqual(runtime.registeredIDs, ["runtime"])
+	const registration = runtime.requests.find(({ path }) => path === "/sessions")
+	assert.equal(registration?.body.project, "engram")
 })
 
 test("registration enters the cache only after a successful acknowledgement", async (t) => {

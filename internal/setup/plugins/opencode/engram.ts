@@ -166,13 +166,22 @@ async function isEngramRunning(): Promise<boolean> {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-async function resolveProjectName(directory: string): Promise<string> {
+async function resolveProjectName(directory: string): Promise<{ project: string; error?: string }> {
   const data = await engramFetch(`/project/current?cwd=${encodeURIComponent(directory)}`)
   const project = typeof data?.project === "string" ? data.project.trim() : ""
-  if (!project || data?.error_hint || /[\\/]/.test(project) || /^[A-Za-z]:$/.test(project)) {
-    return "unknown"
+  if (project && project !== "unknown" && !data?.error_hint && !/[\\/]/.test(project) && !/^[A-Za-z]:$/.test(project)) {
+    return { project }
   }
-  return project
+  const choices = Array.isArray(data?.available_projects) && data.available_projects.length > 0
+    ? ` Available projects: ${data.available_projects.join(", ")}.`
+    : ""
+  const reason = typeof data?.error_hint === "string" && data.error_hint.trim()
+    ? ` ${data.error_hint.trim()}`
+    : ""
+  return {
+    project: "unknown",
+    error: `gentle-engram could not resolve a safe project identity.${reason}${choices} Retry when project resolution is available.`,
+  }
 }
 
 function truncate(str: string, max: number): string {
@@ -193,6 +202,17 @@ function stripPrivateTags(str: string): string {
 // ─── Plugin Export ───────────────────────────────────────────────────────────
 
 export const Engram: Plugin = async (ctx) => {
+	let project = "unknown"
+	let projectResolutionError = ""
+
+	async function ensureResolvedProject(): Promise<boolean> {
+		if (project !== "unknown" && !projectResolutionError) return true
+		const resolved = await resolveProjectName(ctx.directory)
+		project = resolved.project
+		projectResolutionError = resolved.error ?? ""
+		return projectResolutionError === ""
+	}
+
   // Track tool counts per session (in-memory only, not critical)
   const toolCounts = new Map<string, number>()
 
@@ -358,6 +378,7 @@ export const Engram: Plugin = async (ctx) => {
    * Silently skips sub-agent sessions (tracked in `subAgentSessions`).
    */
   async function ensureSession(sessionId: string): Promise<boolean> {
+		if (!await ensureResolvedProject()) return false
     if (!sessionId || invalidSessions.has(sessionId)) return false
     if (knownSessions.has(sessionId)) return true
     // Do not register sub-agent sessions in Engram (issue #116).
@@ -390,7 +411,7 @@ export const Engram: Plugin = async (ctx) => {
     }
   }
 
-  const project = await resolveProjectName(ctx.directory)
+	await ensureResolvedProject()
 
   // Auto-import: if .engram/manifest.json exists in the project repo,
   // run `engram sync --import` to load any new chunks into the local DB.
@@ -507,6 +528,7 @@ export const Engram: Plugin = async (ctx) => {
         throw new Error(`gentle-engram could not resolve an authoritative OpenCode runtime session for ${input.tool}`)
       }
       if (!registered) {
+			if (projectResolutionError) throw new Error(projectResolutionError)
         throw new Error(`gentle-engram could not confirm Engram session registration for ${input.tool}; verify that the Engram server is available and retry`)
       }
       output.args.session_id = authoritativeSessionID
@@ -562,6 +584,7 @@ export const Engram: Plugin = async (ctx) => {
       // to the system prompt so the agent notices. All fetches are fire-and-
       // forget with short timeouts — any failure silently skips the nudge.
       try {
+			if (!await ensureResolvedProject()) return
         const sessionID: string = input.sessionID ?? ""
         if (!sessionID || invalidSessions.has(sessionID) || subAgentSessions.has(sessionID)) return
 
@@ -651,6 +674,10 @@ export const Engram: Plugin = async (ctx) => {
     // 3. Tell the compressor to remind the new agent to save memories
 
     "experimental.session.compacting": async (input, output) => {
+		if (!await ensureResolvedProject()) {
+			output.context.push(`${projectResolutionError} Automatic session, prompt, and passive-capture writes remain disabled.`)
+			return
+		}
       let sessionId = ""
       if (input.sessionID) {
         sessionId = await resolveAuthoritativeSessionID(input.sessionID)
