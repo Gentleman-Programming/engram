@@ -2,9 +2,11 @@ package project
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -85,6 +87,22 @@ func initGit(t *testing.T, dir string) {
 	run("init")
 	run("config", "user.email", "test@example.com")
 	run("config", "user.name", "Test User")
+}
+
+func commitEmptyGit(t *testing.T, dir string) {
+	t.Helper()
+	cmd := exec.Command("git", "-C", dir, "commit", "--allow-empty", "-m", "initial commit")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v\n%s", err, out)
+	}
+}
+
+func addGitWorktree(t *testing.T, repo, worktree, branch string) {
+	t.Helper()
+	cmd := exec.Command("git", "-C", repo, "worktree", "add", "-b", branch, worktree)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v\n%s", err, out)
+	}
 }
 
 func TestDetectProject_GitRemote(t *testing.T) {
@@ -587,6 +605,31 @@ func TestDetectProjectFull_Case4_MultiChild(t *testing.T) {
 	}
 }
 
+func TestDetectProjectFull_ChildScanFindsReposAfterPlainDirectories(t *testing.T) {
+	parent := t.TempDir()
+	for _, name := range []string{"a-repo", "z-repo"} {
+		child := filepath.Join(parent, name)
+		if err := os.MkdirAll(child, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		initGit(t, child)
+	}
+	for i := 1; i <= 19; i++ {
+		if err := os.Mkdir(filepath.Join(parent, fmt.Sprintf("noise-%02d", i)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	res := DetectProjectFull(parent)
+
+	if !errors.Is(res.Error, ErrAmbiguousProject) {
+		t.Fatalf("Error = %v, want ErrAmbiguousProject; result = %+v", res.Error, res)
+	}
+	if got, want := res.AvailableProjects, []string{"a-repo", "z-repo"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("AvailableProjects = %q, want %q", got, want)
+	}
+}
+
 // TestDetectProjectFull_Case5_Basename asserts Source=="dir_basename",
 // Project==filepath.Base(dir), Error==nil for a plain non-git dir (REQ-305).
 func TestDetectProjectFull_Case5_Basename(t *testing.T) {
@@ -609,6 +652,115 @@ func TestDetectProjectFull_Case5_Basename(t *testing.T) {
 	}
 	if res.Warning != "" {
 		t.Errorf("Warning must be empty for dir_basename, got %q", res.Warning)
+	}
+}
+
+func TestFallbackProjectName_RootIsUnknown(t *testing.T) {
+	for _, dir := range []string{string(filepath.Separator), `C:\`} {
+		if got := fallbackProjectName(dir); got != "unknown" {
+			t.Fatalf("fallbackProjectName(%q) = %q, want unknown", dir, got)
+		}
+	}
+}
+
+func TestNormalize_PathValueIsUnknown(t *testing.T) {
+	for _, name := range []string{"invalid/path", `invalid\path`} {
+		if got := normalize(name); got != "unknown" {
+			t.Fatalf("normalize(%q) = %q, want unknown", name, got)
+		}
+	}
+}
+
+func TestDetectProjectFull_WorktreeUsesPrimaryRepositoryIdentity(t *testing.T) {
+	parent := t.TempDir()
+	repo := filepath.Join(parent, "canonical-repo")
+	worktree := filepath.Join(parent, "feature-worktree")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initGit(t, repo)
+	commitEmptyGit(t, repo)
+	addGitWorktree(t, repo, worktree, "feature")
+
+	for _, dir := range []string{repo, worktree} {
+		res := DetectProjectFull(dir)
+		if res.Source != SourceGitRoot {
+			t.Errorf("DetectProjectFull(%q) source = %q, want %q", dir, res.Source, SourceGitRoot)
+		}
+		if res.Project != "canonical-repo" {
+			t.Errorf("DetectProjectFull(%q) project = %q, want canonical-repo", dir, res.Project)
+		}
+		if got, want := canonicalizePath(res.Path), canonicalizePath(repo); got != want {
+			t.Errorf("DetectProjectFull(%q) path = %q, want primary repository %q", dir, got, want)
+		}
+	}
+}
+
+func TestDetectProjectFull_WorktreeRemoteUsesPrimaryRepositoryPath(t *testing.T) {
+	parent := t.TempDir()
+	repo := filepath.Join(parent, "canonical-repo")
+	worktree := filepath.Join(parent, "feature-worktree")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initGit(t, repo)
+	commitEmptyGit(t, repo)
+	cmd := exec.Command("git", "-C", repo, "remote", "add", "origin", "git@github.com:test/canonical-remote.git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+	addGitWorktree(t, repo, worktree, "feature")
+
+	res := DetectProjectFull(worktree)
+	if res.Source != SourceGitRemote || res.Project != "canonical-remote" {
+		t.Fatalf("worktree result = %+v, want git_remote canonical-remote", res)
+	}
+	if got, want := canonicalizePath(res.Path), canonicalizePath(repo); got != want {
+		t.Fatalf("worktree path = %q, want primary repository %q", got, want)
+	}
+}
+
+func TestDetectProjectFull_BareRepositoryUsesRepositoryName(t *testing.T) {
+	bare := filepath.Join(t.TempDir(), "canonical-repo.git")
+	cmd := exec.Command("git", "init", "--bare", bare)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare: %v\n%s", err, out)
+	}
+
+	res := DetectProjectFull(bare)
+	if res.Source != SourceGitRoot || res.Project != "canonical-repo" {
+		t.Fatalf("bare repository result = %+v, want git-root canonical-repo", res)
+	}
+	if got, want := canonicalizePath(res.Path), canonicalizePath(filepath.Join(filepath.Dir(bare), "canonical-repo")); got != want {
+		t.Fatalf("bare repository path = %q, want %q", got, want)
+	}
+}
+
+func TestDetectProjectFull_WorktreeDoesNotInheritCommonAncestorConfig(t *testing.T) {
+	parent := t.TempDir()
+	configDir := filepath.Join(parent, ".engram")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(`{"project_name":"ancestor-leak"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repo := filepath.Join(parent, "canonical-repo")
+	worktree := filepath.Join(parent, "feature-worktree")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initGit(t, repo)
+	commitEmptyGit(t, repo)
+	addGitWorktree(t, repo, worktree, "feature")
+	nested := filepath.Join(worktree, "nested")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	res := DetectProjectFull(nested)
+	if res.Source != SourceGitRoot || res.Project != "canonical-repo" {
+		t.Fatalf("worktree result = %+v, want primary git-root identity", res)
 	}
 }
 

@@ -24,6 +24,7 @@ func TestProjectDetectionGitCommandsUsePlatformHelper(t *testing.T) {
 		name string
 	}{
 		{name: "detectGitRootDir"},
+		{name: "detectGitWorktreeDir"},
 		{name: "detectFromGitRemote"},
 	}
 

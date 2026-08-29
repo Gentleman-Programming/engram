@@ -188,12 +188,8 @@ func DetectProjectFull(dir string) DetectionResult {
 basename:
 	// ── Case 5: dir_basename ─────────────────────────────────────────────
 	absDir, _ := filepath.Abs(dir)
-	base := filepath.Base(dir)
-	if base == "" || base == "." {
-		base = "unknown"
-	}
 	return DetectionResult{
-		Project: normalize(base),
+		Project: fallbackProjectName(dir),
 		Source:  SourceDirBasename,
 		Path:    absDir,
 	}
@@ -214,8 +210,8 @@ func detectFromConfig(dir string) (DetectionResult, bool) {
 	// cwd is inside git, walk upward only within the enclosing repository so a
 	// nearest subproject .engram/config.json can override the repo root without
 	// letting ~/.engram/config.json leak into nested workspaces under $HOME.
-	if gitRoot := canonicalizePath(detectGitRootDir(absDir)); gitRoot != "" {
-		return readNearestConfigAtOrBelow(absDir, gitRoot)
+	if worktreeRoot := canonicalizePath(detectGitWorktreeDir(absDir)); worktreeRoot != "" {
+		return readNearestConfigAtOrBelow(absDir, worktreeRoot)
 	}
 
 	// Outside git, accept only the current directory's config. Do not walk to
@@ -301,8 +297,30 @@ func normalizeConfigProjectName(projectName string) (string, error) {
 	return normalize(trimmed), nil
 }
 
-// detectGitRootDir returns the git repository root for dir, or "" if not in a repo.
+// detectGitRootDir returns the canonical repository root for dir, or "" if it is
+// not in a repository. Linked worktrees share this root with their primary checkout.
 func detectGitRootDir(dir string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	cmd := newProjectCommandContext(ctx, "git", "-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	commonDir := filepath.Clean(strings.TrimSpace(string(out)))
+	if commonDir == "." || commonDir == "" {
+		return ""
+	}
+	if filepath.Base(commonDir) == ".git" {
+		return filepath.Dir(commonDir)
+	}
+	return strings.TrimSuffix(commonDir, ".git")
+}
+
+// detectGitWorktreeDir returns the current checkout root for dir. Config files
+// are scoped to that checkout rather than the shared repository identity root.
+func detectGitWorktreeDir(dir string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -311,13 +329,12 @@ func detectGitRootDir(dir string) string {
 	if err != nil {
 		return ""
 	}
-	root := strings.TrimSpace(string(out))
-	return root
+	return strings.TrimSpace(string(out))
 }
 
 // scanChildren scans dir at depth=1 for git repositories, skipping noise dirs,
-// hidden dirs, enforcing a 200ms timeout, a 20-entry cap, and short-circuiting
-// as soon as more than 1 repo is found.
+// hidden dirs, enforcing a 200ms timeout, and short-circuiting as soon as more
+// than one repository is found.
 // Returns the list of found git-repo paths and a boolean indicating timeout.
 func scanChildren(dir string) (repos []string, timedOut bool) {
 	deadline := time.Now().Add(200 * time.Millisecond)
@@ -327,13 +344,9 @@ func scanChildren(dir string) (repos []string, timedOut bool) {
 		return nil, false
 	}
 
-	scanned := 0
 	for _, entry := range entries {
 		if time.Now().After(deadline) {
 			return repos, true
-		}
-		if scanned >= 20 {
-			break
 		}
 		if !entry.IsDir() {
 			continue
@@ -347,7 +360,6 @@ func scanChildren(dir string) (repos []string, timedOut bool) {
 		if noiseSet[name] {
 			continue
 		}
-		scanned++
 		childPath := filepath.Join(dir, name)
 		// Check if this child is a git repo (has a .git entry).
 		gitPath := filepath.Join(childPath, ".git")
@@ -375,11 +387,7 @@ func DetectProject(dir string) string {
 		if dir == "" {
 			return "unknown"
 		}
-		base := filepath.Base(dir)
-		if base == "" || base == "." {
-			return "unknown"
-		}
-		return normalize(base)
+		return fallbackProjectName(dir)
 	}
 	if res.Project == "" {
 		return "unknown"
@@ -387,15 +395,23 @@ func DetectProject(dir string) string {
 	return res.Project
 }
 
-// normalize applies canonical project name rules: lowercase + trim whitespace.
-// It mirrors the normalization applied by the store layer so that DetectProject
-// always returns a value that is consistent with stored project names.
+// normalize applies canonical project name rules: lowercase + trim whitespace,
+// and maps path-like values to unknown. It mirrors the normalization applied by
+// the store layer so DetectProject always returns a valid project name.
 func normalize(name string) string {
 	n := strings.TrimSpace(strings.ToLower(name))
-	if n == "" {
+	if n == "" || strings.ContainsAny(n, `/\\`) {
 		return "unknown"
 	}
 	return n
+}
+
+func fallbackProjectName(dir string) string {
+	base := filepath.Base(dir)
+	if base == "" || base == "." {
+		return "unknown"
+	}
+	return normalize(base)
 }
 
 // detectFromGitRemote attempts to determine the project name from the git
