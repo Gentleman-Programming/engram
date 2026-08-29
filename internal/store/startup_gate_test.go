@@ -817,6 +817,53 @@ func TestImportRefusesReplacedDatabaseGeneration(t *testing.T) {
 	}
 }
 
+func TestImportRollsBackWhenGenerationChangesBeforeCommit(t *testing.T) {
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = t.TempDir()
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+
+	dbPath := filepath.Join(cfg.DataDir, "engram.db")
+	replacement := filepath.Join(t.TempDir(), "replacement.db")
+	if err := os.WriteFile(replacement, []byte("replacement"), 0o600); err != nil {
+		t.Fatalf("write replacement identity: %v", err)
+	}
+	replacementInfo, err := os.Stat(replacement)
+	if err != nil {
+		t.Fatalf("stat replacement identity: %v", err)
+	}
+	originalExec := s.hooks.exec
+	changed := false
+	s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+		result, execErr := originalExec(db, query, args...)
+		if !changed && strings.Contains(query, "INSERT OR IGNORE INTO sessions") {
+			changed = true
+			s.generationMu.Lock()
+			s.databaseGenerationInfos = map[string]os.FileInfo{dbPath: replacementInfo}
+			s.generationMu.Unlock()
+		}
+		return result, execErr
+	}
+
+	_, err = s.Import(&ExportData{Sessions: []Session{{ID: "atomic-import", Project: "engram", Directory: cfg.DataDir}}})
+	if !errors.Is(err, ErrDatabaseGenerationReplaced) {
+		t.Fatalf("Import error = %v, want ErrDatabaseGenerationReplaced", err)
+	}
+	if !changed {
+		t.Fatal("import did not reach the staged session write")
+	}
+	var sessions int
+	if err := s.db.QueryRow(`SELECT count(*) FROM sessions WHERE id = 'atomic-import'`).Scan(&sessions); err != nil {
+		t.Fatalf("count imported sessions: %v", err)
+	}
+	if sessions != 0 {
+		t.Fatalf("Import committed %d session(s) after generation changed", sessions)
+	}
+}
+
 func TestStoreGenerationLeaseBlocksDatabaseMove(t *testing.T) {
 	origTimeout := migrationLockTimeout
 	migrationLockTimeout = 300 * time.Millisecond

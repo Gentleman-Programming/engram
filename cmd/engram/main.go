@@ -3068,6 +3068,17 @@ func moveDatabaseGeneration(sourceDB, destinationDB string) error {
 		}
 		suffixes = append(suffixes, suffix)
 	}
+	// os.Rename replaces an existing destination on Unix. Inspect every database
+	// generation path before moving anything so a rollback can never overwrite a
+	// pre-existing database, WAL, or SHM sidecar.
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		destination := destinationDB + suffix
+		if _, err := statDatabaseGenerationFile(destination); err == nil {
+			return fmt.Errorf("refuse move: destination %s already exists", filepath.Base(destination))
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("inspect destination %s: %w", filepath.Base(destination), err)
+		}
+	}
 
 	moved := make([]string, 0, len(suffixes))
 	for _, suffix := range suffixes {

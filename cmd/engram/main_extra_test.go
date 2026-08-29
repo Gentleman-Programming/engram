@@ -800,6 +800,36 @@ func TestMoveDatabaseGenerationDoesNotSplitGenerationOnInspectionFailure(t *test
 	}
 }
 
+func TestMoveDatabaseGenerationRefusesDestinationGenerationCollisions(t *testing.T) {
+	for _, collisionSuffix := range []string{"", "-wal", "-shm"} {
+		t.Run(collisionSuffix, func(t *testing.T) {
+			sourceDB := filepath.Join(t.TempDir(), "engram.db")
+			destinationDB := filepath.Join(t.TempDir(), "engram.db")
+			for _, suffix := range []string{"", "-wal", "-shm"} {
+				if err := os.WriteFile(sourceDB+suffix, []byte(suffix+" source"), 0o600); err != nil {
+					t.Fatalf("write source %q: %v", suffix, err)
+				}
+			}
+			if err := os.WriteFile(destinationDB+collisionSuffix, []byte(collisionSuffix+" destination"), 0o600); err != nil {
+				t.Fatalf("write destination %q: %v", collisionSuffix, err)
+			}
+
+			err := moveDatabaseGeneration(sourceDB, destinationDB)
+			if err == nil || !strings.Contains(err.Error(), "destination "+filepath.Base(destinationDB+collisionSuffix)+" already exists") {
+				t.Fatalf("moveDatabaseGeneration error = %v, want destination collision", err)
+			}
+			for _, suffix := range []string{"", "-wal", "-shm"} {
+				if got, readErr := os.ReadFile(sourceDB + suffix); readErr != nil || string(got) != suffix+" source" {
+					t.Errorf("source %q = %q, %v; want intact generation", suffix, got, readErr)
+				}
+			}
+			if got, readErr := os.ReadFile(destinationDB + collisionSuffix); readErr != nil || string(got) != collisionSuffix+" destination" {
+				t.Errorf("destination collision %q = %q, %v; want untouched sidecar", collisionSuffix, got, readErr)
+			}
+		})
+	}
+}
+
 func TestCmdCloudStatusDistinguishesAuthAndSyncReadiness(t *testing.T) {
 	stubExitWithPanic(t)
 	stubRuntimeHooks(t)
