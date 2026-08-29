@@ -3,9 +3,12 @@ package store
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"log"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -126,6 +129,86 @@ func TestFindCandidates_EscapesInteriorQuotes(t *testing.T) {
 	}
 	if len(candidates) != 1 {
 		t.Fatalf("expected 1 candidate, got %d", len(candidates))
+	}
+}
+
+func TestFindCandidatesShortTitleFallback(t *testing.T) {
+	for _, title := range []string{"v2", "db", "go", "UI", "你好"} {
+		t.Run(title, func(t *testing.T) {
+			s := setupRelationsStore(t)
+			_, wantSyncID := addTestObs(t, s, title, "decision", "testproject", "project")
+			savedID, _ := addTestObs(t, s, title+" source", "decision", "testproject", "project")
+
+			candidates, err := s.FindCandidates(savedID, CandidateOptions{
+				Project:    "testproject",
+				Scope:      "project",
+				Query:      title,
+				Limit:      3,
+				SkipInsert: true,
+			})
+			if err != nil {
+				t.Fatalf("FindCandidates: %v", err)
+			}
+			if len(candidates) != 1 || candidates[0].SyncID != wantSyncID {
+				t.Fatalf("short title candidates = %+v, want only %q", candidates, wantSyncID)
+			}
+		})
+	}
+}
+
+func TestFindCandidatesShortTitleFallbackPreservesIsolationAndRelationExclusion(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, wantSyncID := addTestObs(t, s, "UI", "decision", "testproject", "project")
+	savedID, savedSyncID := addTestObs(t, s, "UI source", "decision", "testproject", "project")
+	_, _ = addTestObs(t, s, "UI", "decision", "other-project", "project")
+	_, _ = addTestObs(t, s, "UI", "decision", "testproject", "global")
+
+	candidates, err := s.FindCandidates(savedID, CandidateOptions{
+		Project:    "testproject",
+		Scope:      "project",
+		Query:      "UI",
+		Limit:      3,
+		SkipInsert: true,
+	})
+	if err != nil {
+		t.Fatalf("FindCandidates: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].SyncID != wantSyncID {
+		t.Fatalf("isolated short title candidates = %+v, want only %q", candidates, wantSyncID)
+	}
+
+	if _, err := s.SaveRelation(SaveRelationParams{SyncID: newSyncID("rel"), SourceID: wantSyncID, TargetID: savedSyncID}); err != nil {
+		t.Fatalf("SaveRelation reverse pair: %v", err)
+	}
+	candidates, err = s.FindCandidates(savedID, CandidateOptions{Project: "testproject", Scope: "project", Query: "UI", Limit: 3})
+	if err != nil {
+		t.Fatalf("FindCandidates after reverse relation: %v", err)
+	}
+	if len(candidates) != 0 {
+		t.Fatalf("reverse pending relation must exclude candidate, got %+v", candidates)
+	}
+}
+
+func TestFindCandidatesMixedQueryRetainsFTSRank(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, wantSyncID := addTestObs(t, s, "go JWT candidate", "decision", "testproject", "project")
+	savedID, _ := addTestObs(t, s, "go JWT source", "decision", "testproject", "project")
+
+	candidates, err := s.FindCandidates(savedID, CandidateOptions{
+		Project:    "testproject",
+		Scope:      "project",
+		Query:      "go JWT",
+		Limit:      3,
+		SkipInsert: true,
+	})
+	if err != nil {
+		t.Fatalf("FindCandidates: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].SyncID != wantSyncID {
+		t.Fatalf("mixed query candidates = %+v, want only %q", candidates, wantSyncID)
+	}
+	if candidates[0].Score == 0 {
+		t.Fatal("mixed query must retain the FTS/BM25 rank path")
 	}
 }
 
@@ -365,6 +448,183 @@ func TestSaveRelation(t *testing.T) {
 	}
 }
 
+func TestSaveRelationDeduplicatesReversedPendingPairAndPreservesJudgedOpinions(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, syncA := addTestObs(t, s, "Auth sessions design", "decision", "testproject", "project")
+	_, syncB := addTestObs(t, s, "Auth JWT migration decision", "decision", "testproject", "project")
+
+	first, err := s.SaveRelation(SaveRelationParams{SyncID: newSyncID("rel"), SourceID: syncA, TargetID: syncB})
+	if err != nil {
+		t.Fatalf("SaveRelation first pending: %v", err)
+	}
+	reversed, err := s.SaveRelation(SaveRelationParams{SyncID: newSyncID("rel"), SourceID: syncB, TargetID: syncA})
+	if err != nil {
+		t.Fatalf("SaveRelation reversed pending: %v", err)
+	}
+	if reversed.SyncID != first.SyncID {
+		t.Fatalf("reversed pending relation = %q, want existing %q", reversed.SyncID, first.SyncID)
+	}
+
+	for _, judgmentID := range []string{first.SyncID} {
+		if _, err := s.JudgeRelation(JudgeRelationParams{JudgmentID: judgmentID, Relation: RelationRelated, MarkedByActor: "agent:first", MarkedByKind: "agent"}); err != nil {
+			t.Fatalf("JudgeRelation(%q): %v", judgmentID, err)
+		}
+	}
+	second, err := s.SaveRelation(SaveRelationParams{SyncID: newSyncID("rel"), SourceID: syncB, TargetID: syncA})
+	if err != nil {
+		t.Fatalf("SaveRelation second pending: %v", err)
+	}
+	if _, err := s.JudgeRelation(JudgeRelationParams{JudgmentID: second.SyncID, Relation: RelationCompatible, MarkedByActor: "agent:second", MarkedByKind: "agent"}); err != nil {
+		t.Fatalf("JudgeRelation second opinion: %v", err)
+	}
+
+	var judged int
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM memory_relations WHERE judgment_status = ? AND ((source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?))`, JudgmentStatusJudged, syncA, syncB, syncB, syncA).Scan(&judged); err != nil {
+		t.Fatalf("count judged opinions: %v", err)
+	}
+	if judged != 2 {
+		t.Fatalf("judged opinions = %d, want 2", judged)
+	}
+}
+
+func TestFindCandidatesAtomicallyAdmitsOnePendingPairAcrossStores(t *testing.T) {
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = t.TempDir()
+	cfg.DedupeWindow = time.Hour
+
+	primary, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New primary store: %v", err)
+	}
+	t.Cleanup(func() { _ = primary.Close() })
+	if err := primary.CreateSession("ses-race", "testproject", "/tmp/race"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	_, candidateSyncID := addTestObsSession(t, primary, "ses-race", "shared authentication candidate", "decision", "testproject", "project")
+	savedID, sourceSyncID := addTestObsSession(t, primary, "ses-race", "shared authentication source", "decision", "testproject", "project")
+
+	stores := []*Store{primary}
+	for i := 0; i < 3; i++ {
+		s, err := New(cfg)
+		if err != nil {
+			t.Fatalf("New peer store %d: %v", i, err)
+		}
+		stores = append(stores, s)
+		t.Cleanup(func() { _ = s.Close() })
+	}
+
+	const calls = 48
+	start := make(chan struct{})
+	results := make(chan []Candidate, calls)
+	errs := make(chan error, calls)
+	var wg sync.WaitGroup
+	for i := 0; i < calls; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			candidates, err := stores[i%len(stores)].FindCandidates(savedID, CandidateOptions{
+				Project: "testproject", Scope: "project", Limit: 1,
+			})
+			if err != nil {
+				errs <- err
+				return
+			}
+			results <- candidates
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	close(errs)
+	for err := range errs {
+		t.Fatalf("FindCandidates concurrent call: %v", err)
+	}
+
+	admitted := 0
+	for candidates := range results {
+		admitted += len(candidates)
+	}
+	if admitted != 1 {
+		t.Fatalf("admitted candidate rows = %d, want 1", admitted)
+	}
+
+	var pending int
+	if err := primary.DB().QueryRow(`SELECT COUNT(*) FROM memory_relations WHERE judgment_status = ? AND ((source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?))`, JudgmentStatusPending, sourceSyncID, candidateSyncID, candidateSyncID, sourceSyncID).Scan(&pending); err != nil {
+		t.Fatalf("count pending pairs: %v", err)
+	}
+	if pending != 1 {
+		t.Fatalf("pending unordered pair rows = %d, want 1", pending)
+	}
+}
+
+func TestPendingPairMigrationKeepsEarliestAndJudgedOpinions(t *testing.T) {
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = t.TempDir()
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close initial store: %v", err)
+	}
+
+	dbPath := filepath.Join(cfg.DataDir, "engram.db")
+	raw, err := sql.Open("sqlite", storeDSN(dbPath))
+	if err != nil {
+		t.Fatalf("open raw database: %v", err)
+	}
+	defer raw.Close()
+	if _, err := raw.Exec(`DROP INDEX IF EXISTS idx_memrel_pending_unordered_pair`); err != nil {
+		t.Fatalf("drop pending pair index: %v", err)
+	}
+	for _, row := range []struct {
+		syncID string
+		status string
+		source string
+		target string
+	}{
+		{"rel-pending-old", JudgmentStatusPending, "obs-a", "obs-b"},
+		{"rel-pending-new", JudgmentStatusPending, "obs-b", "obs-a"},
+		{"rel-judged-a", JudgmentStatusJudged, "obs-a", "obs-b"},
+		{"rel-judged-b", JudgmentStatusJudged, "obs-b", "obs-a"},
+	} {
+		if _, err := raw.Exec(`INSERT INTO memory_relations (sync_id, source_id, target_id, relation, judgment_status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))`, row.syncID, row.source, row.target, RelationRelated, row.status); err != nil {
+			t.Fatalf("seed %s: %v", row.syncID, err)
+		}
+	}
+	if _, err := raw.Exec("PRAGMA user_version = 5"); err != nil {
+		t.Fatalf("set legacy user version: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw database: %v", err)
+	}
+
+	migrated, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New after pending pair migration: %v", err)
+	}
+	defer migrated.Close()
+
+	var pendingSyncID string
+	if err := migrated.DB().QueryRow(`SELECT sync_id FROM memory_relations WHERE judgment_status = ? AND ((source_id = 'obs-a' AND target_id = 'obs-b') OR (source_id = 'obs-b' AND target_id = 'obs-a'))`, JudgmentStatusPending).Scan(&pendingSyncID); err != nil {
+		t.Fatalf("read retained pending pair: %v", err)
+	}
+	if pendingSyncID != "rel-pending-old" {
+		t.Fatalf("retained pending sync_id = %q, want rel-pending-old", pendingSyncID)
+	}
+	var judged int
+	if err := migrated.DB().QueryRow(`SELECT COUNT(*) FROM memory_relations WHERE judgment_status = ? AND ((source_id = 'obs-a' AND target_id = 'obs-b') OR (source_id = 'obs-b' AND target_id = 'obs-a'))`, JudgmentStatusJudged).Scan(&judged); err != nil {
+		t.Fatalf("count judged opinions: %v", err)
+	}
+	if judged != 2 {
+		t.Fatalf("judged opinions after migration = %d, want 2", judged)
+	}
+	if _, err := migrated.DB().Exec(`INSERT INTO memory_relations (sync_id, source_id, target_id, relation, judgment_status) VALUES ('rel-pending-duplicate', 'obs-b', 'obs-a', 'pending', 'pending')`); err == nil {
+		t.Fatal("pending unordered duplicate insert succeeded after migration")
+	}
+}
+
 // TestGetRelationsForObservations_HappyPath verifies batch retrieval by source IDs.
 func TestGetRelationsForObservations_HappyPath(t *testing.T) {
 	s := setupRelationsStore(t)
@@ -592,8 +852,16 @@ func TestMultiActor_TwoRowsForSamePair(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SaveRelation agent-1: %v", err)
 	}
+	if _, err := s.JudgeRelation(JudgeRelationParams{
+		JudgmentID:    rel1.SyncID,
+		Relation:      RelationRelated,
+		MarkedByActor: "agent:one",
+		MarkedByKind:  "agent",
+	}); err != nil {
+		t.Fatalf("JudgeRelation agent-1: %v", err)
+	}
 
-	// Agent-2 saves a different relation for the same pair.
+	// Agent-2 can save a new pending relation after the first agent's verdict.
 	relSync2 := newSyncID("rel")
 	rel2, err := s.SaveRelation(SaveRelationParams{
 		SyncID:   relSync2,
@@ -625,12 +893,13 @@ func TestSyncIDUnique(t *testing.T) {
 
 	_, syncA := addTestObs(t, s, "Auth sessions design", "decision", "testproject", "project")
 	_, syncB := addTestObs(t, s, "Auth JWT migration", "decision", "testproject", "project")
+	_, syncC := addTestObs(t, s, "Auth cookie migration", "decision", "testproject", "project")
 
 	sharedSyncID := newSyncID("rel")
 	_, err := s.SaveRelation(SaveRelationParams{
 		SyncID:   sharedSyncID,
 		SourceID: syncA,
-		TargetID: syncB,
+		TargetID: syncC,
 	})
 	if err != nil {
 		t.Fatalf("first SaveRelation: %v", err)
@@ -1362,10 +1631,10 @@ func TestListRelations_Empty(t *testing.T) {
 
 // TestCountRelations_AccurateTotal verifies CountRelations returns the exact count.
 func TestCountRelations_AccurateTotal(t *testing.T) {
-	s, alphaSync1, alphaSync2, _ := setupTwoProjectStore(t)
+	s, alphaSync1, alphaSync2, betaSync1 := setupTwoProjectStore(t)
 
 	insertRelationWithStatus(t, s, alphaSync1, alphaSync2, "pending")
-	insertRelationWithStatus(t, s, alphaSync1, alphaSync2, "pending")
+	insertRelationWithStatus(t, s, alphaSync1, betaSync1, "pending")
 	insertRelationWithStatus(t, s, alphaSync1, alphaSync2, "judged")
 
 	total, err := s.CountRelations(ListRelationsOptions{Project: "alpha", Status: "pending"})
@@ -1396,12 +1665,12 @@ func TestCountRelations_NoPredicate(t *testing.T) {
 
 // TestGetRelationStats_MixedStatuses verifies GetRelationStats aggregates correctly.
 func TestGetRelationStats_MixedStatuses(t *testing.T) {
-	s, alphaSync1, alphaSync2, _ := setupTwoProjectStore(t)
+	s, alphaSync1, alphaSync2, betaSync1 := setupTwoProjectStore(t)
 
 	// Insert 3 pending and 1 judged.
 	insertRelationWithStatus(t, s, alphaSync1, alphaSync2, "pending")
-	insertRelationWithStatus(t, s, alphaSync1, alphaSync2, "pending")
-	insertRelationWithStatus(t, s, alphaSync1, alphaSync2, "pending")
+	insertRelationWithStatus(t, s, alphaSync1, betaSync1, "pending")
+	insertRelationWithStatus(t, s, alphaSync2, betaSync1, "pending")
 	insertRelationWithStatus(t, s, alphaSync1, alphaSync2, "judged")
 
 	stats, err := s.GetRelationStats("alpha")

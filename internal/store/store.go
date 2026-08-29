@@ -954,7 +954,7 @@ func (s *Store) preflightRead() error {
 //
 // Enrolled-project sync repair is independent of this gate and runs before the
 // first sync operation through EnsureEnrolledProjectSyncMutations.
-const schemaVersion = 5
+const schemaVersion = 6
 
 // migrateRunCount counts executions of the gated migration block across the
 // process. It exists for test observability only — asserting that the
@@ -1337,6 +1337,33 @@ func (s *Store) migrate() error {
 		CREATE INDEX IF NOT EXISTS idx_memrel_source    ON memory_relations(source_id, judgment_status);
 		CREATE INDEX IF NOT EXISTS idx_memrel_target    ON memory_relations(target_id, judgment_status);
 		CREATE INDEX IF NOT EXISTS idx_memrel_supersede ON memory_relations(superseded_by_relation_id);
+	`); err != nil {
+		return err
+	}
+
+	// Keep the earliest pending row for every unordered pair before enforcing the
+	// pending-only uniqueness invariant. Judged rows are deliberately untouched:
+	// they preserve independent actor opinions about the same pair.
+	if _, err := s.execHook(s.db, `
+		DELETE FROM memory_relations
+		WHERE judgment_status = 'pending'
+		  AND id NOT IN (
+			SELECT MIN(id) FROM memory_relations
+			WHERE judgment_status = 'pending'
+			GROUP BY
+				CASE WHEN ifnull(source_id,'') <= ifnull(target_id,'') THEN ifnull(source_id,'') ELSE ifnull(target_id,'') END,
+				CASE WHEN ifnull(source_id,'') <= ifnull(target_id,'') THEN ifnull(target_id,'') ELSE ifnull(source_id,'') END
+		  )
+	`); err != nil {
+		return err
+	}
+	if _, err := s.execHook(s.db, `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_memrel_pending_unordered_pair
+		ON memory_relations(
+			CASE WHEN ifnull(source_id,'') <= ifnull(target_id,'') THEN ifnull(source_id,'') ELSE ifnull(target_id,'') END,
+			CASE WHEN ifnull(source_id,'') <= ifnull(target_id,'') THEN ifnull(target_id,'') ELSE ifnull(source_id,'') END
+		)
+		WHERE judgment_status = 'pending'
 	`); err != nil {
 		return err
 	}
@@ -7908,6 +7935,7 @@ func (s *Store) applyRelationUpsertTx(tx *sql.Tx, mutation SyncMutation) error {
 			marked_by_model = excluded.marked_by_model,
 			session_id      = excluded.session_id,
 			updated_at      = excluded.updated_at
+		ON CONFLICT DO NOTHING
 	`,
 		p.SyncID, p.SourceID, p.TargetID, p.Relation,
 		p.Reason, p.Evidence, p.Confidence,

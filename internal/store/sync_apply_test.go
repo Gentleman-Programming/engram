@@ -140,6 +140,42 @@ func TestApplyPulledRelation_AllowsSelfReference(t *testing.T) {
 	}
 }
 
+func TestApplyPulledRelationTreatsDuplicatePendingPairAsIdempotent(t *testing.T) {
+	s, syncA, syncB := setupSyncApplyStore(t)
+	firstID := newSyncID("rel")
+	secondID := newSyncID("rel")
+
+	first := buildRelationMutation(t, syncRelationPayload{
+		SyncID: firstID, SourceID: syncA, TargetID: syncB,
+		Relation: RelationPending, JudgmentStatus: JudgmentStatusPending,
+		Project: "proj-apply", CreatedAt: "2026-04-26T10:00:00Z", UpdatedAt: "2026-04-26T10:00:00Z",
+	})
+	second := buildRelationMutation(t, syncRelationPayload{
+		SyncID: secondID, SourceID: syncB, TargetID: syncA,
+		Relation: RelationPending, JudgmentStatus: JudgmentStatusPending,
+		Project: "proj-apply", CreatedAt: "2026-04-26T10:00:00Z", UpdatedAt: "2026-04-26T10:00:00Z",
+	})
+	first.Seq = 1
+	second.Seq = 2
+	if err := s.ApplyPulledMutation(DefaultSyncTargetKey, first); err != nil {
+		t.Fatalf("apply first pending relation: %v", err)
+	}
+	if err := s.ApplyPulledMutation(DefaultSyncTargetKey, second); err != nil {
+		t.Fatalf("apply duplicate pending relation: %v", err)
+	}
+
+	var pending int
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM memory_relations WHERE judgment_status = ? AND ((source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?))`, JudgmentStatusPending, syncA, syncB, syncB, syncA).Scan(&pending); err != nil {
+		t.Fatalf("count pending pairs: %v", err)
+	}
+	if pending != 1 {
+		t.Fatalf("pending unordered pair rows = %d, want 1", pending)
+	}
+	if got := countDeferredRows(t, s, secondID); got != 0 {
+		t.Fatalf("duplicate pending relation deferred rows = %d, want 0", got)
+	}
+}
+
 func TestApplyPulledChunk_DefersMissingRelationAndContinues(t *testing.T) {
 	s, syncA, syncB := setupSyncApplyStore(t)
 	missingTarget := "obs-ghost-" + newSyncID("x")

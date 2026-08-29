@@ -265,7 +265,8 @@ type Candidate struct {
 	Type string
 	// TopicKey is the candidate's topic_key (may be nil).
 	TopicKey *string
-	// Score is the FTS5 BM25 rank; lower values are better matches.
+	// Score is the FTS5 BM25 rank for FTS candidates; short-query LIKE fallback
+	// candidates use zero. Lower non-zero values are better FTS matches.
 	Score float64
 	// JudgmentID is the sync_id of the pending memory_relations row created
 	// for this (source, candidate) pair.
@@ -343,8 +344,9 @@ type JudgeRelationParams struct {
 
 // ─── FindCandidates ───────────────────────────────────────────────────────────
 
-// FindCandidates runs a post-transaction FTS5 candidate query for the given
-// savedID and returns at most opts.Limit candidates at or below the BM25 floor.
+// FindCandidates runs a post-transaction candidate query for the given savedID.
+// It uses FTS5/BM25 unless every query term is shorter than three runes, when a
+// bounded LIKE fallback supplies candidates the trigram tokenizer cannot index.
 //
 // For each candidate, a pending memory_relations row is inserted and the row's
 // sync_id is exposed as Candidate.JudgmentID.
@@ -357,14 +359,9 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 	if limit <= 0 {
 		limit = 3
 	}
-	query, threshold, err := candidateRankQuery(opts)
-	if err != nil {
-		return nil, fmt.Errorf("FindCandidates: %w", err)
-	}
-
 	// Get the saved observation to build the FTS query and for project/scope filtering.
 	var title, project, scope string
-	err = s.db.QueryRow(
+	err := s.db.QueryRow(
 		`SELECT title, ifnull(project,''), scope FROM observations WHERE id = ?`, savedID,
 	).Scan(&title, &project, &scope)
 	if err == sql.ErrNoRows {
@@ -386,15 +383,27 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 	if strings.TrimSpace(queryText) == "" {
 		queryText = title
 	}
-	ftsQuery := sanitizeFTSCandidates(queryText)
-	if ftsQuery == "" {
+	if len(searchTerms(queryText)) == 0 {
 		return nil, nil
 	}
 
-	// Apply the rank predicate in SQL before ordering and limiting.
-	rows, err := s.db.Query(query, ftsQuery, savedID, project, scope, threshold, limit)
+	var rows *sql.Rows
+	if shouldUseTrigramLikeFallback(queryText) {
+		query, args := candidateLikeQuery(queryText, savedID, project, scope, limit)
+		rows, err = s.db.Query(query, args...)
+	} else {
+		query, threshold, err := candidateRankQuery(opts)
+		if err != nil {
+			return nil, fmt.Errorf("FindCandidates: %w", err)
+		}
+		ftsQuery := sanitizeFTSCandidates(queryText)
+		if ftsQuery == "" {
+			return nil, nil
+		}
+		rows, err = s.db.Query(query, ftsQuery, savedID, project, scope, threshold, limit)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("FindCandidates: FTS5 query: %w", err)
+		return nil, fmt.Errorf("FindCandidates: candidate query: %w", err)
 	}
 	type rawCandidate struct {
 		id       int64
@@ -455,11 +464,9 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 		return nil, fmt.Errorf("FindCandidates: get source sync_id: %w", err)
 	}
 
-	// Insert a pending relation row for each candidate.
-	// Skip pairs that already have a relation row in either direction — this
-	// prevents FindCandidates from re-surfacing already-evaluated pairs on every
-	// save (issue #490). memory_relations has no UNIQUE on (source_id, target_id),
-	// so the existence check is the only dedup guard.
+	// Insert a pending relation row for each candidate. Already judged pairs are
+	// skipped, while pending-pair admission is delegated to the database's
+	// pending-only unordered-pair uniqueness invariant.
 	candidates := make([]Candidate, 0, len(raw))
 	for _, rc := range raw {
 		exists, err := s.relationExists(sourceSyncID, rc.syncID)
@@ -468,18 +475,20 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 			continue
 		}
 		if exists {
-			// Pair already has a relation row — skip to avoid duplicates.
+			// Pair already has a judged relation — do not re-surface it.
 			continue
 		}
 
 		judgmentID := newSyncID("rel")
-		_, err = s.db.Exec(`
-			INSERT INTO memory_relations
-				(sync_id, source_id, target_id, relation, judgment_status, created_at, updated_at)
-			VALUES (?, ?, ?, 'pending', 'pending', datetime('now'), datetime('now'))
-		`, judgmentID, sourceSyncID, rc.syncID)
+		_, admitted, err := s.insertPendingRelation(SaveRelationParams{
+			SyncID: judgmentID, SourceID: sourceSyncID, TargetID: rc.syncID,
+		})
 		if err != nil {
 			// Log and skip — don't fail the whole detection.
+			continue
+		}
+		if !admitted {
+			// Another caller admitted this pending pair first.
 			continue
 		}
 		candidates = append(candidates, Candidate{
@@ -498,21 +507,57 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 
 // ─── SaveRelation ─────────────────────────────────────────────────────────────
 
-// SaveRelation inserts a new pending relation row. The SyncID field must be
-// unique (enforced by the UNIQUE constraint on memory_relations.sync_id).
+// SaveRelation inserts a new pending relation row or returns the existing
+// pending row for the unordered pair. This makes pending relation replay
+// idempotent while preserving multiple judged actor opinions.
 func (s *Store) SaveRelation(p SaveRelationParams) (*Relation, error) {
-	err := s.withTx(func(tx *sql.Tx) error {
-		_, err := s.execHook(tx, `
-			INSERT INTO memory_relations
-				(sync_id, source_id, target_id, relation, judgment_status, created_at, updated_at)
-			VALUES (?, ?, ?, 'pending', 'pending', datetime('now'), datetime('now'))
-		`, p.SyncID, p.SourceID, p.TargetID)
-		return err
-	})
+	relation, _, err := s.insertPendingRelation(p)
 	if err != nil {
 		return nil, fmt.Errorf("SaveRelation: insert: %w", err)
 	}
-	return s.GetRelation(p.SyncID)
+	return relation, nil
+}
+
+// insertPendingRelation atomically admits one pending relation for an unordered
+// pair. On an existing pending pair, it returns that canonical row with
+// admitted=false so callers can avoid reporting duplicate candidate work.
+func (s *Store) insertPendingRelation(p SaveRelationParams) (*Relation, bool, error) {
+	var relation *Relation
+	admitted := false
+	err := s.withTx(func(tx *sql.Tx) error {
+		res, err := s.execHook(tx, `
+			INSERT INTO memory_relations
+				(sync_id, source_id, target_id, relation, judgment_status, created_at, updated_at)
+			VALUES (?, ?, ?, 'pending', 'pending', datetime('now'), datetime('now'))
+			ON CONFLICT DO NOTHING
+		`, p.SyncID, p.SourceID, p.TargetID)
+		if err != nil {
+			return err
+		}
+		rows, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if rows == 1 {
+			admitted = true
+			relation, err = s.getRelationTx(tx, p.SyncID)
+			return err
+		}
+
+		relation, err = s.pendingRelationTx(tx, p.SourceID, p.TargetID)
+		if err != sql.ErrNoRows {
+			return err
+		}
+		existing, err := s.getRelationTx(tx, p.SyncID)
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("relation sync_id %q already belongs to pair (%s, %s)", p.SyncID, existing.SourceID, existing.TargetID)
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	return relation, admitted, nil
 }
 
 // ─── GetRelation ──────────────────────────────────────────────────────────────
@@ -737,20 +782,18 @@ func (s *Store) JudgeRelation(p JudgeRelationParams) (*Relation, error) {
 
 // ─── Shared relation helpers ──────────────────────────────────────────────────
 
-// relationExists reports whether a relation row exists for the unordered pair
-// (sourceSyncID, targetSyncID) in either direction. Shared by FindCandidates
-// and the non-semantic ScanProject pre-check to dedup pending-row creation
-// without re-surfacing already-evaluated pairs (issue #490).
-// memory_relations has no UNIQUE on (source_id, target_id), so this existence
-// check is the only dedup guard.
+// relationExists reports whether a judged relation exists for the unordered pair
+// in either direction. Pending-pair uniqueness is enforced atomically by the
+// partial unique index, not by this preflight.
 func (s *Store) relationExists(sourceSyncID, targetSyncID string) (bool, error) {
 	var exists int
 	err := s.db.QueryRow(
 		`SELECT 1 FROM memory_relations
-		 WHERE (source_id = ? AND target_id = ?)
-		    OR (source_id = ? AND target_id = ?)
+		 WHERE ((source_id = ? AND target_id = ?)
+		    OR (source_id = ? AND target_id = ?))
+		   AND judgment_status != ?
 		 LIMIT 1`,
-		sourceSyncID, targetSyncID, targetSyncID, sourceSyncID,
+		sourceSyncID, targetSyncID, targetSyncID, sourceSyncID, JudgmentStatusPending,
 	).Scan(&exists)
 	if err == nil {
 		return true, nil
@@ -1018,6 +1061,22 @@ func (s *Store) getRelationTx(tx *sql.Tx, syncID string) (*Relation, error) {
 	return &r, nil
 }
 
+func (s *Store) pendingRelationTx(tx *sql.Tx, sourceID, targetID string) (*Relation, error) {
+	var syncID string
+	err := tx.QueryRow(`
+		SELECT sync_id FROM memory_relations
+		WHERE judgment_status = ?
+		  AND ((source_id = ? AND target_id = ?)
+		    OR (source_id = ? AND target_id = ?))
+		ORDER BY id ASC
+		LIMIT 1
+	`, JudgmentStatusPending, sourceID, targetID, targetID, sourceID).Scan(&syncID)
+	if err != nil {
+		return nil, err
+	}
+	return s.getRelationTx(tx, syncID)
+}
+
 // ─── GetRelationsForObservations ──────────────────────────────────────────────
 
 // GetRelationsForObservations returns a map of observation sync_id →
@@ -1160,6 +1219,30 @@ const findCandidatesFTSQuery = `
 	ORDER BY fts.rank
 	LIMIT ?
 `
+
+const findCandidatesLikeQueryPrefix = `
+	SELECT o.id, ifnull(o.sync_id,'') as sync_id, o.title, o.type, o.topic_key,
+	       0.0 AS rank
+	FROM observations o
+	WHERE o.id != ?
+	  AND o.deleted_at IS NULL
+	  AND ifnull(o.project,'') = ifnull(?,'')
+	  AND o.scope = ?
+	  AND `
+
+// candidateLikeQuery supplies bounded OR-style matching only when every query
+// term is too short for the trigram tokenizer. The regular FTS/BM25 query
+// remains authoritative for every query containing a three-rune term.
+func candidateLikeQuery(queryText string, savedID int64, project, scope string, limit int) (string, []any) {
+	query := findCandidatesLikeQueryPrefix
+	args := []any{savedID, project, scope}
+	appendLikeSearchCondition(&query, &args,
+		"(ifnull(o.title,'') || ' ' || ifnull(o.content,'') || ' ' || ifnull(o.tool_name,'') || ' ' || ifnull(o.type,'') || ' ' || ifnull(o.project,'') || ' ' || ifnull(o.topic_key,''))",
+		queryText, "any")
+	query += " ORDER BY datetime(o.updated_at) DESC, o.id DESC LIMIT ?"
+	args = append(args, limit)
+	return query, args
+}
 
 func candidateRankQuery(opts CandidateOptions) (string, float64, error) {
 	if opts.BM25MaxRank != nil && opts.BM25Floor != nil {
@@ -1623,7 +1706,7 @@ scan:
 		}
 
 		for candidateIndex, c := range candidates {
-			// Pre-check: skip pairs that already have any relation row in either direction.
+			// Pre-check only already judged pairs. Pending-pair admission is atomic.
 			exists, err := s.relationExists(obs.syncID, c.SyncID)
 			if err != nil {
 				log.Printf("[store] ScanProject: pre-check obs=%s cand=%s: %v", obs.syncID, c.SyncID, err)
@@ -1635,12 +1718,15 @@ scan:
 			}
 
 			judgmentID := newSyncID("rel")
-			if _, err := s.db.Exec(`
-				INSERT INTO memory_relations
-					(sync_id, source_id, target_id, relation, judgment_status, created_at, updated_at)
-				VALUES (?, ?, ?, 'pending', 'pending', datetime('now'), datetime('now'))
-			`, judgmentID, obs.syncID, c.SyncID); err != nil {
+			_, admitted, err := s.insertPendingRelation(SaveRelationParams{
+				SyncID: judgmentID, SourceID: obs.syncID, TargetID: c.SyncID,
+			})
+			if err != nil {
 				log.Printf("[store] ScanProject: insert relation obs=%s cand=%s: %v", obs.syncID, c.SyncID, err)
+				continue
+			}
+			if !admitted {
+				result.AlreadyRelated++
 				continue
 			}
 			result.RelationsInserted++
