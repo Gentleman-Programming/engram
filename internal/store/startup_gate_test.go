@@ -93,13 +93,16 @@ func TestUserVersionGateSkipsSecondOpen(t *testing.T) {
 	}
 }
 
-func TestNewerSchemaVersionIsLeftUntouched(t *testing.T) {
+func TestNewerSchemaVersionIsRejectedWithoutWrites(t *testing.T) {
 	cfg := mustDefaultConfig(t)
 	cfg.DataDir = t.TempDir()
 
 	s1, err := New(cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
+	}
+	if err := s1.CreateSession("future-schema-seed", "future-schema-project", cfg.DataDir); err != nil {
+		t.Fatalf("seed session: %v", err)
 	}
 	if err := s1.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -121,21 +124,35 @@ func TestNewerSchemaVersionIsLeftUntouched(t *testing.T) {
 	before := migrateRunCount.Load()
 
 	s2, err := New(cfg)
-	if err != nil {
-		t.Fatalf("New on newer-schema database: %v", err)
+	if !errors.Is(err, ErrFutureSchemaVersion) {
+		t.Fatalf("New on newer-schema database error = %v, want ErrFutureSchemaVersion", err)
 	}
-	defer s2.Close()
+	if s2 != nil {
+		t.Fatalf("New on newer-schema database returned store %v, want nil", s2)
+	}
 
 	if got := migrateRunCount.Load() - before; got != 0 {
 		t.Fatalf("migration suite ran %d times against a newer schema, want 0", got)
 	}
 
+	raw, err = sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
+	if err != nil {
+		t.Fatalf("reopen raw database: %v", err)
+	}
+	defer raw.Close()
 	var v int
-	if err := s2.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
+	if err := raw.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
 		t.Fatalf("read user_version: %v", err)
 	}
 	if v != future {
 		t.Fatalf("user_version was rewritten to %d, want it left at %d", v, future)
+	}
+	var sessions int
+	if err := raw.QueryRow(`SELECT count(*) FROM sessions`).Scan(&sessions); err != nil {
+		t.Fatalf("count sessions after rejected open: %v", err)
+	}
+	if sessions != 1 {
+		t.Fatalf("sessions after rejected open = %d, want unchanged seed count 1", sessions)
 	}
 }
 
@@ -167,10 +184,12 @@ func TestLockedVersionRereadSkipsRepairForNewerSchema(t *testing.T) {
 	t.Cleanup(func() { startupMigrationBeforeLockHook = nil })
 
 	s, err = New(cfg)
-	if err != nil {
-		t.Fatalf("New after locked schema change: %v", err)
+	if !errors.Is(err, ErrFutureSchemaVersion) {
+		t.Fatalf("New after locked schema change error = %v, want ErrFutureSchemaVersion", err)
 	}
-	defer s.Close()
+	if s != nil {
+		t.Fatalf("New after locked schema change returned store %v, want nil", s)
+	}
 
 	if got := migrateRunCount.Load() - beforeMigrate; got != 0 {
 		t.Errorf("migration suite ran %d times after locked re-read found newer schema, want 0", got)
@@ -178,8 +197,13 @@ func TestLockedVersionRereadSkipsRepairForNewerSchema(t *testing.T) {
 	if got := startupRepairRunCount.Load() - beforeRepair; got != 0 {
 		t.Errorf("startup repair ran %d times after locked re-read found newer schema, want 0", got)
 	}
+	raw, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
+	if err != nil {
+		t.Fatalf("reopen raw database: %v", err)
+	}
+	defer raw.Close()
 	var got int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&got); err != nil {
+	if err := raw.QueryRow("PRAGMA user_version").Scan(&got); err != nil {
 		t.Fatalf("read user_version: %v", err)
 	}
 	if got != future {

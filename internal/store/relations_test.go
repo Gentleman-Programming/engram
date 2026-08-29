@@ -254,6 +254,34 @@ func TestFindCandidatesCombinesPunctuatedShortAndLongTerms(t *testing.T) {
 	}
 }
 
+func TestFindCandidatesPreservesMeaningfulPunctuation(t *testing.T) {
+	for _, tc := range []string{"C#", "F#", ".NET"} {
+		t.Run(tc, func(t *testing.T) {
+			s := setupRelationsStore(t)
+			_, wantSyncID := addTestObs(t, s, tc+" language", "decision", "testproject", "project")
+			_, cacheSyncID := addTestObs(t, s, "cache implementation", "decision", "testproject", "project")
+			savedID, _ := addTestObs(t, s, "source", "decision", "testproject", "project")
+
+			candidates, err := s.FindCandidates(savedID, CandidateOptions{
+				Project: "testproject", Scope: "project", Query: tc, Limit: 10, SkipInsert: true,
+			})
+			if err != nil {
+				t.Fatalf("FindCandidates(%q): %v", tc, err)
+			}
+			found := false
+			for _, candidate := range candidates {
+				if candidate.SyncID == cacheSyncID {
+					t.Fatalf("FindCandidates(%q) matched broad cache fragment: %+v", tc, candidates)
+				}
+				found = found || candidate.SyncID == wantSyncID
+			}
+			if !found {
+				t.Fatalf("FindCandidates(%q) omitted %q: %+v", tc, wantSyncID, candidates)
+			}
+		})
+	}
+}
+
 func TestFindCandidatesMixedAnyLimitPrefersFTSAfterDeduplication(t *testing.T) {
 	s := setupRelationsStore(t)
 	_, _ = addTestObs(t, s, "migration long-only", "decision", "testproject", "project")

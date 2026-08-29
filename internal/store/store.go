@@ -69,6 +69,10 @@ var (
 	ErrObservationContentRequired  = errors.New("observation content is required")
 	ErrPromptContentRequired       = errors.New("prompt content is required")
 	ErrDatabaseGenerationReplaced  = errors.New("database generation was replaced while Engram was running")
+	// ErrFutureSchemaVersion is returned when a database was created by a newer
+	// Engram binary. Opening it is rejected because this binary cannot safely
+	// interpret or write an unknown schema.
+	ErrFutureSchemaVersion = errors.New("database schema version is newer than this Engram binary")
 )
 
 // Sentinel errors for relation sync apply path (Phase 2).
@@ -1014,8 +1018,7 @@ func (s *Store) runStartupMigrations(withRepair bool) error {
 		return fmt.Errorf("engram: read user_version: %w", err)
 	}
 	if current > schemaVersion {
-		shouldSkipMigrations(current)
-		return nil
+		return fmt.Errorf("%w: database version %d exceeds supported version %d", ErrFutureSchemaVersion, current, schemaVersion)
 	}
 	if startupMigrationBeforeLockHook != nil {
 		startupMigrationBeforeLockHook()
@@ -1035,8 +1038,7 @@ func (s *Store) runStartupMigrations(withRepair bool) error {
 		return fmt.Errorf("engram: re-read user_version: %w", err)
 	}
 	if current > schemaVersion {
-		shouldSkipMigrations(current) // logs the actionable newer-binary warning
-		return nil
+		return fmt.Errorf("%w: database version %d exceeds supported version %d", ErrFutureSchemaVersion, current, schemaVersion)
 	}
 
 	ranMigrate := false
@@ -1066,21 +1068,6 @@ func (s *Store) runStartupMigrations(withRepair bool) error {
 		return fmt.Errorf("engram: run convergent startup repairs: %w", err)
 	}
 	return nil
-}
-
-// shouldSkipMigrations reports whether the migration suite must be skipped
-// for the given user_version. A database stamped by a NEWER engram is left
-// untouched: running this binary's older migrations against a newer schema
-// is exactly the kind of blind rebuild that corrupts databases.
-func shouldSkipMigrations(current int) bool {
-	if current == schemaVersion {
-		return true
-	}
-	if current > schemaVersion {
-		log.Printf("[store] database schema version %d is newer than this binary's %d — skipping migrations (upgrade engram to manage this database)", current, schemaVersion)
-		return true
-	}
-	return false
 }
 
 func (s *Store) readUserVersion() (int, error) {
@@ -8428,6 +8415,11 @@ func (s *Store) applyRelationUpsertTx(tx *sql.Tx, mutation SyncMutation) error {
 			return fmt.Errorf("applyRelationUpsertTx: link retired pending relation: %w", err)
 		}
 	}
+	if p.JudgmentStatus == JudgmentStatusJudged {
+		if err := s.finalizeJudgedRelationTx(tx, p.SyncID, p.SourceID, p.TargetID); err != nil {
+			return fmt.Errorf("applyRelationUpsertTx: finalize judgment: %w", err)
+		}
+	}
 
 	// Step 4: clean up the rows this relation left behind (its pending retry
 	// state and any evidence about this same relation).
@@ -9451,7 +9443,7 @@ func searchTerms(query string) []string {
 	raw := strings.Fields(query)
 	terms := make([]string, 0, len(raw))
 	for _, term := range raw {
-		if normalized := strings.TrimFunc(term, unicode.IsPunct); normalized != "" {
+		if normalized := strings.TrimFunc(term, isSearchSyntaxDelimiter); normalized != "" {
 			term = normalized
 		}
 		if term != "" {
@@ -9459,6 +9451,19 @@ func searchTerms(query string) []string {
 		}
 	}
 	return terms
+}
+
+// isSearchSyntaxDelimiter identifies punctuation that separates search terms
+// without being part of their meaning. Symbols such as # and . are retained so
+// language and framework identifiers including C#, F#, and .NET stay exact.
+func isSearchSyntaxDelimiter(r rune) bool {
+	switch r {
+	case ',', ':', ';', '!', '?', '(', ')', '[', ']', '{', '}', '<', '>', '"', '\'',
+		'“', '”', '‘', '’', '«', '»', '…', '、':
+		return true
+	default:
+		return false
+	}
 }
 
 func splitSearchTerms(query string) (long, short []string) {

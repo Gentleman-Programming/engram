@@ -234,6 +234,58 @@ func TestApplyPulledRelationRetainsLatePendingAsEvaluatedAlias(t *testing.T) {
 	}
 }
 
+func TestApplyPulledJudgedRelationRetiresCanonicalPendingTwin(t *testing.T) {
+	s, syncA, syncB := setupSyncApplyStore(t)
+	pending, err := s.SaveRelation(SaveRelationParams{
+		SyncID: "rel-pending-canonical", SourceID: syncA, TargetID: syncB,
+	})
+	if err != nil {
+		t.Fatalf("SaveRelation pending: %v", err)
+	}
+	if _, err := s.DB().Exec(`
+		INSERT INTO memory_relations
+			(sync_id, source_id, target_id, relation, judgment_status, superseded_at, superseded_by_relation_id)
+		VALUES ('rel-orphaned-alias', ?, ?, 'pending', 'orphaned', datetime('now'), ?)
+	`, syncB, syncA, pending.ID); err != nil {
+		t.Fatalf("seed orphaned alias: %v", err)
+	}
+
+	actor := "remote-reviewer"
+	if err := applyRelationMutation(t, s, buildRelationMutation(t, syncRelationPayload{
+		SyncID: "rel-orphaned-alias", SourceID: syncB, TargetID: syncA,
+		Relation: RelationRelated, JudgmentStatus: JudgmentStatusJudged,
+		MarkedByActor: &actor, Project: "proj-apply",
+		CreatedAt: "2026-04-26T10:00:00Z", UpdatedAt: "2026-04-26T10:00:00Z",
+	})); err != nil {
+		t.Fatalf("apply judged alias: %v", err)
+	}
+
+	var pendingStatus, linkedTo string
+	if err := s.DB().QueryRow(`
+		SELECT pending.judgment_status, judged.sync_id
+		FROM memory_relations AS pending
+		JOIN memory_relations AS judged ON judged.id = pending.superseded_by_relation_id
+		WHERE pending.sync_id = ?
+	`, pending.SyncID).Scan(&pendingStatus, &linkedTo); err != nil {
+		t.Fatalf("read retired canonical pending: %v", err)
+	}
+	if pendingStatus != JudgmentStatusOrphaned || linkedTo != "rel-orphaned-alias" {
+		t.Fatalf("retired canonical = status %q linked to %q, want orphaned linked to judged alias", pendingStatus, linkedTo)
+	}
+
+	var judgedStatus string
+	var judgedLinkCount int
+	if err := s.DB().QueryRow(`
+		SELECT judgment_status, count(superseded_by_relation_id)
+		FROM memory_relations WHERE sync_id = 'rel-orphaned-alias'
+	`).Scan(&judgedStatus, &judgedLinkCount); err != nil {
+		t.Fatalf("read judged alias: %v", err)
+	}
+	if judgedStatus != JudgmentStatusJudged || judgedLinkCount != 0 {
+		t.Fatalf("judged alias = status %q link count %d, want judged without supersession link", judgedStatus, judgedLinkCount)
+	}
+}
+
 func TestApplyPulledChunk_DefersMissingRelationAndContinues(t *testing.T) {
 	s, syncA, syncB := setupSyncApplyStore(t)
 	missingTarget := "obs-ghost-" + newSyncID("x")

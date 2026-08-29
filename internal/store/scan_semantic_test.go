@@ -222,6 +222,31 @@ func TestScanProject_Semantic_ResolvesPendingRelation(t *testing.T) {
 	}
 }
 
+func TestScanProjectSemanticEvaluatesPairWithOnlyOrphanedAlias(t *testing.T) {
+	s := newTestStore(t)
+	_, syncA, _, syncB := seedSimilarPair(t, s, "semantic-orphaned-project")
+	if _, err := s.DB().Exec(`
+		INSERT INTO memory_relations (sync_id, source_id, target_id, relation, judgment_status)
+		VALUES ('rel-orphaned-only', ?, ?, 'pending', 'orphaned')
+	`, syncA, syncB); err != nil {
+		t.Fatalf("seed orphaned relation: %v", err)
+	}
+
+	runner := &verdictRunner{verdict: SemanticVerdict{
+		Relation: RelationCompatible, Confidence: 0.9, Reasoning: "both discuss JWT auth", Model: "haiku",
+	}}
+	result, err := s.ScanProject(ScanOptions{
+		Project: "semantic-orphaned-project", Apply: true, Semantic: true, Concurrency: 1,
+		TimeoutPerCall: 5 * time.Second, MaxSemantic: 10, Runner: runner, BuildPrompt: identityPromptBuilder,
+	})
+	if err != nil {
+		t.Fatalf("ScanProject: %v", err)
+	}
+	if runner.calls != 1 || result.SemanticJudged != 1 {
+		t.Fatalf("orphaned-only scan = runner calls %d, semantic judgments %d; want 1 and 1", runner.calls, result.SemanticJudged)
+	}
+}
+
 // TestScanProject_Semantic_DryRunDoesNotPersist verifies that semantic dry-runs
 // evaluate valid verdicts without changing relation or sync state.
 func TestScanProject_Semantic_DryRunDoesNotPersist(t *testing.T) {

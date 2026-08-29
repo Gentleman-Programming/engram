@@ -12585,6 +12585,46 @@ func TestSearchMatchMode_AnyCombinesPunctuatedShortAndLongTerms(t *testing.T) {
 	}
 }
 
+func TestSearchContextPreservesMeaningfulPunctuation(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s-punctuation", "engram", "/tmp"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	for _, observation := range []AddObservationParams{
+		{SessionID: "s-punctuation", Type: "decision", Title: "C# language", Content: "c sharp", Project: "engram", Scope: "project"},
+		{SessionID: "s-punctuation", Type: "decision", Title: "F# language", Content: "f sharp", Project: "engram", Scope: "project"},
+		{SessionID: "s-punctuation", Type: "decision", Title: ".NET runtime", Content: "dot net", Project: "engram", Scope: "project"},
+		{SessionID: "s-punctuation", Type: "decision", Title: "cache implementation", Content: "unrelated", Project: "engram", Scope: "project"},
+	} {
+		if _, err := s.AddObservation(observation); err != nil {
+			t.Fatalf("add observation %q: %v", observation.Title, err)
+		}
+	}
+
+	for _, tc := range []struct{ query, want string }{
+		{query: "C#", want: "C# language"},
+		{query: "F#", want: "F# language"},
+		{query: ".NET", want: ".NET runtime"},
+	} {
+		t.Run(tc.query, func(t *testing.T) {
+			results, err := s.SearchContext(context.Background(), tc.query, SearchOptions{Project: "engram", Scope: "project", Limit: 10})
+			if err != nil {
+				t.Fatalf("SearchContext(%q): %v", tc.query, err)
+			}
+			found := false
+			for _, result := range results {
+				if result.Title == "cache implementation" {
+					t.Fatalf("SearchContext(%q) matched broad cache fragment: %+v", tc.query, results)
+				}
+				found = found || result.Title == tc.want
+			}
+			if !found {
+				t.Fatalf("SearchContext(%q) omitted %q: %+v", tc.query, tc.want, results)
+			}
+		})
+	}
+}
+
 func TestSearchContextMixedAnyLimitPrefersFTSAfterDeduplication(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.CreateSession("s-mixed-any-limit", "engram", "/tmp"); err != nil {

@@ -211,6 +211,57 @@ func TestJudgeBySemantic_UpsertRewritesDirection(t *testing.T) {
 	}
 }
 
+func TestJudgeBySemanticPrefersPendingTwinOverOrphanedAlias(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, sourceID := addTestObs(t, s, "Auth sessions design", "decision", "testproject", "project")
+	_, targetID := addTestObs(t, s, "JWT auth migration", "decision", "testproject", "project")
+
+	if _, err := s.DB().Exec(`
+		INSERT INTO memory_relations
+			(sync_id, source_id, target_id, relation, judgment_status, superseded_at, superseded_by_relation_id)
+		VALUES ('rel-orphaned-alias', ?, ?, 'pending', 'orphaned', datetime('now'), NULL)
+	`, targetID, sourceID); err != nil {
+		t.Fatalf("seed orphaned alias: %v", err)
+	}
+	if _, err := s.DB().Exec(`
+		INSERT INTO memory_relations (sync_id, source_id, target_id, relation, judgment_status)
+		VALUES ('rel-pending-canonical', ?, ?, 'pending', 'pending')
+	`, sourceID, targetID); err != nil {
+		t.Fatalf("seed canonical pending: %v", err)
+	}
+
+	syncID, err := s.JudgeBySemantic(JudgeBySemanticParams{
+		SourceID: targetID, TargetID: sourceID, Relation: RelationCompatible,
+		Confidence: 0.9, Reasoning: "same authentication design", Model: "test-model",
+	})
+	if err != nil {
+		t.Fatalf("JudgeBySemantic: %v", err)
+	}
+	if syncID != "rel-pending-canonical" {
+		t.Fatalf("JudgeBySemantic sync ID = %q, want canonical pending", syncID)
+	}
+
+	var pendingCount int
+	if err := s.DB().QueryRow(`
+		SELECT count(*) FROM memory_relations
+		WHERE judgment_status = ?
+		  AND ((source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?))
+	`, JudgmentStatusPending, sourceID, targetID, targetID, sourceID).Scan(&pendingCount); err != nil {
+		t.Fatalf("count pending twins: %v", err)
+	}
+	if pendingCount != 0 {
+		t.Fatalf("pending twins after semantic judgment = %d, want 0", pendingCount)
+	}
+
+	judged, err := s.GetRelation("rel-pending-canonical")
+	if err != nil {
+		t.Fatalf("GetRelation canonical: %v", err)
+	}
+	if judged.JudgmentStatus != JudgmentStatusJudged || judged.MarkedByActor == nil || *judged.MarkedByActor != "engram" {
+		t.Fatalf("canonical judgment = %+v, want judged system provenance", judged)
+	}
+}
+
 // ─── C.2c — TestJudgeBySemantic_NotConflictPersists ─────────────────────────
 
 // TestJudgeBySemantic_NotConflictPersists verifies that passing Relation="not_conflict"

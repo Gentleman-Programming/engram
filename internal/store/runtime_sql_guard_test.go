@@ -167,6 +167,7 @@ var callbackOnlySQLHelpers = map[string]bool{
 	"enqueueSyncMutationTx":                     true,
 	"evaluateCloudUpgradeLegacyMutationTx":      true,
 	"evaluatedRelationTx":                       true,
+	"finalizeJudgedRelationTx":                  true,
 	"findSessionSummaryCandidatesSQL":           true,
 	"foreignRecordOwnerTx":                      true,
 	"getObservationBySyncIDTx":                  true,

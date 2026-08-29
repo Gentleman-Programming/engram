@@ -657,8 +657,9 @@ const (
 )
 
 // admitPendingRelationTx is the single authority for unordered-pair pending
-// admission. A terminal relation of any status permanently prevents reopening
-// that pair, while the partial pending index still serializes pending duplicates.
+// admission. A judged relation prevents reopening that pair, while the partial
+// pending index still serializes pending duplicates. Orphaned aliases are audit
+// state, not a completed evaluation.
 func (s *Store) admitPendingRelationTx(tx *sql.Tx, p SaveRelationParams) (*Relation, pendingAdmissionOutcome, error) {
 	res, err := s.execHook(tx, `
 		INSERT INTO memory_relations
@@ -666,7 +667,7 @@ func (s *Store) admitPendingRelationTx(tx *sql.Tx, p SaveRelationParams) (*Relat
 		SELECT ?, ?, ?, 'pending', 'pending', datetime('now'), datetime('now')
 		WHERE NOT EXISTS (
 			SELECT 1 FROM memory_relations
-			WHERE judgment_status != 'pending'
+			WHERE judgment_status = 'judged'
 			  AND ((source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?))
 		)
 		ON CONFLICT DO NOTHING
@@ -909,15 +910,8 @@ func (s *Store) JudgeRelation(p JudgeRelationParams) (*Relation, error) {
 		); err != nil {
 			return fmt.Errorf("JudgeRelation: update: %w", err)
 		}
-		if _, err := s.execHook(tx, `
-			UPDATE memory_relations
-			SET judgment_status = 'orphaned',
-			    superseded_at = datetime('now'),
-			    superseded_by_relation_id = (SELECT id FROM memory_relations WHERE sync_id = ?)
-			WHERE judgment_status = 'pending'
-			  AND ((source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?))
-		`, p.JudgmentID, sourceID, targetID, targetID, sourceID); err != nil {
-			return fmt.Errorf("JudgeRelation: retire pending twins: %w", err)
+		if err := s.finalizeJudgedRelationTx(tx, p.JudgmentID, sourceID, targetID); err != nil {
+			return fmt.Errorf("JudgeRelation: finalize judgment: %w", err)
 		}
 
 		// ── Enqueue sync mutation when project is enrolled (REQ-001) ───────
@@ -1000,9 +994,9 @@ func (s *Store) relationExistsSQL(sourceSyncID, targetSyncID string) (bool, erro
 		`SELECT 1 FROM memory_relations
 		 WHERE ((source_id = ? AND target_id = ?)
 		    OR (source_id = ? AND target_id = ?))
-		   AND judgment_status != ?
+		   AND judgment_status = ?
 		 LIMIT 1`,
-		sourceSyncID, targetSyncID, targetSyncID, sourceSyncID, JudgmentStatusPending,
+		sourceSyncID, targetSyncID, targetSyncID, sourceSyncID, JudgmentStatusJudged,
 	).Scan(&exists)
 	if err == nil {
 		return true, nil
@@ -1013,8 +1007,8 @@ func (s *Store) relationExistsSQL(sourceSyncID, targetSyncID string) (bool, erro
 	return false, err
 }
 
-// relationEvaluated reports whether an unordered pair has a non-pending
-// relation row. Semantic scans must still evaluate pending rows so their
+// relationEvaluated reports whether an unordered pair has a judged relation.
+// Semantic scans must still evaluate pending and orphaned rows so their
 // provisional candidate relation can be resolved by JudgeBySemantic.
 func (s *Store) relationEvaluated(sourceSyncID, targetSyncID string) (bool, error) {
 	var exists bool
@@ -1032,9 +1026,9 @@ func (s *Store) relationEvaluatedSQL(sourceSyncID, targetSyncID string) (bool, e
 		`SELECT 1 FROM memory_relations
 		 WHERE ((source_id = ? AND target_id = ?)
 		     OR (source_id = ? AND target_id = ?))
-		   AND judgment_status != ?
+		   AND judgment_status = ?
 		 LIMIT 1`,
-		sourceSyncID, targetSyncID, targetSyncID, sourceSyncID, JudgmentStatusPending,
+		sourceSyncID, targetSyncID, targetSyncID, sourceSyncID, JudgmentStatusJudged,
 	).Scan(&exists)
 	if err == nil {
 		return true, nil
@@ -1068,6 +1062,32 @@ func validateCrossProjectGuard(tx *sql.Tx, sourceID, targetID string) error {
 
 	if srcProject != "" && tgtProject != "" && srcProject != tgtProject {
 		return ErrCrossProjectRelation
+	}
+	return nil
+}
+
+// finalizeJudgedRelationTx completes a relation's transition to judged. The
+// judged identity cannot retain a stale supersession link, and every active
+// pending twin for its unordered pair is retired and linked to that identity.
+func (s *Store) finalizeJudgedRelationTx(tx *sql.Tx, judgedSyncID, sourceID, targetID string) error {
+	if _, err := s.execHook(tx, `
+		UPDATE memory_relations
+		SET superseded_at = NULL,
+		    superseded_by_relation_id = NULL
+		WHERE sync_id = ?
+	`, judgedSyncID); err != nil {
+		return fmt.Errorf("clear judged relation supersession: %w", err)
+	}
+	if _, err := s.execHook(tx, `
+		UPDATE memory_relations
+		SET judgment_status = 'orphaned',
+		    superseded_at = datetime('now'),
+		    superseded_by_relation_id = (SELECT id FROM memory_relations WHERE sync_id = ?)
+		WHERE judgment_status = 'pending'
+		  AND sync_id != ?
+		  AND ((source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?))
+	`, judgedSyncID, judgedSyncID, sourceID, targetID, targetID, sourceID); err != nil {
+		return fmt.Errorf("retire pending twins: %w", err)
 	}
 	return nil
 }
@@ -1120,6 +1140,7 @@ func (s *Store) JudgeBySemantic(p JudgeBySemanticParams) (string, error) {
 			SELECT sync_id FROM memory_relations
 			WHERE (source_id = ? AND target_id = ?)
 			   OR (source_id = ? AND target_id = ?)
+			ORDER BY CASE judgment_status WHEN 'pending' THEN 0 ELSE 1 END, id ASC
 			LIMIT 1
 		`, p.SourceID, p.TargetID, p.TargetID, p.SourceID).Scan(&existingSyncID)
 
@@ -1174,6 +1195,9 @@ func (s *Store) JudgeBySemantic(p JudgeBySemanticParams) (string, error) {
 			); execErr != nil {
 				return fmt.Errorf("JudgeBySemantic: update: %w", execErr)
 			}
+		}
+		if err := s.finalizeJudgedRelationTx(tx, existingSyncID, p.SourceID, p.TargetID); err != nil {
+			return fmt.Errorf("JudgeBySemantic: finalize judgment: %w", err)
 		}
 
 		resultSyncID = existingSyncID
@@ -1296,18 +1320,18 @@ func (s *Store) pendingRelationTx(tx *sql.Tx, sourceID, targetID string) (*Relat
 	return s.getRelationTx(tx, syncID)
 }
 
-// evaluatedRelationTx returns the deterministic canonical terminal row for an
-// unordered pair. It is used only by admission/replay code; terminal identities
+// evaluatedRelationTx returns the deterministic canonical judged row for an
+// unordered pair. It is used only by admission/replay code; judged identities
 // remain independent actor opinions and are never collapsed.
 func (s *Store) evaluatedRelationTx(tx *sql.Tx, sourceID, targetID string) (*Relation, error) {
 	var syncID string
 	err := tx.QueryRow(`
 		SELECT sync_id FROM memory_relations
-		WHERE judgment_status != ?
+		WHERE judgment_status = ?
 		  AND ((source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?))
 		ORDER BY id ASC
 		LIMIT 1
-	`, JudgmentStatusPending, sourceID, targetID, targetID, sourceID).Scan(&syncID)
+	`, JudgmentStatusJudged, sourceID, targetID, targetID, sourceID).Scan(&syncID)
 	if err != nil {
 		return nil, err
 	}
