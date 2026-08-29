@@ -455,11 +455,10 @@ func DetectProject(dir string) string {
 	return res.Project
 }
 
-// normalize applies canonical project name rules: lowercase + trim whitespace,
-// and maps path-like values to unknown. It mirrors the normalization applied by
-// the store layer so DetectProject always returns a valid project name.
+// normalize applies the shared canonical project name rules and maps empty or
+// path-like values to unknown so DetectProject always returns a valid name.
 func normalize(name string) string {
-	n := strings.TrimSpace(strings.ToLower(name))
+	n := CanonicalizeProjectName(name)
 	if n == "" || strings.ContainsAny(n, `/\\`) {
 		return "unknown"
 	}

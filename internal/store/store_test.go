@@ -11202,6 +11202,40 @@ func TestMarkReviewedForProjectEnforcesCanonicalOwnership(t *testing.T) {
 	}
 }
 
+func TestMarkReviewedForProjectMatchesLegacyMixedCaseProject(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("legacy-review-sess", "legacy-project", "/tmp/legacy-review"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	id, err := s.AddObservation(AddObservationParams{SessionID: "legacy-review-sess", Type: "decision", Title: "legacy", Content: "legacy content", Project: "legacy-project"})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+	past := time.Now().UTC().Add(-24 * time.Hour).Format("2006-01-02 15:04:05")
+	if _, err := s.DB().Exec(`UPDATE observations SET project = ?, review_after = ? WHERE id = ?`, "Legacy-Project", past, id); err != nil {
+		t.Fatalf("store legacy project: %v", err)
+	}
+
+	observations, err := s.ObservationsNeedingReview("legacy-project", 10)
+	if err != nil {
+		t.Fatalf("ObservationsNeedingReview: %v", err)
+	}
+	if len(observations) != 1 || observations[0].ID != id {
+		t.Fatalf("review list = %#v, want legacy observation %d", observations, id)
+	}
+
+	if err := s.MarkReviewedForProject(id, "legacy-project"); err != nil {
+		t.Fatalf("MarkReviewedForProject: %v", err)
+	}
+	updated, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("GetObservation: %v", err)
+	}
+	if updated.State() != ObservationStateActive {
+		t.Fatalf("reviewed legacy observation state = %q, want active", updated.State())
+	}
+}
+
 func TestMarkReviewedDoesNotEnqueueSyncMutation(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.EnrollProject("mark-reviewed-sync-proj"); err != nil {

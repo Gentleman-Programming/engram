@@ -2848,7 +2848,7 @@ func (s *Store) markReviewed(id int64, project string) error {
 		query := `SELECT type FROM observations WHERE id = ? AND deleted_at IS NULL`
 		args := []any{id}
 		if project != "" {
-			query += ` AND project = ?`
+			query += ` AND LOWER(project) = ?`
 			args = append(args, project)
 		}
 		var observationType string
@@ -2867,7 +2867,7 @@ func (s *Store) markReviewed(id int64, project string) error {
 		update := `UPDATE observations SET review_after = ?, updated_at = datetime('now') WHERE id = ? AND deleted_at IS NULL`
 		updateArgs := []any{reviewAfter, id}
 		if project != "" {
-			update += ` AND project = ?`
+			update += ` AND LOWER(project) = ?`
 			updateArgs = append(updateArgs, project)
 		}
 		result, err := s.execHook(tx, update, updateArgs...)

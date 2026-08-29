@@ -240,6 +240,20 @@ func TestDetectProjectFull_Case1_Remote(t *testing.T) {
 	}
 }
 
+func TestDetectProjectFull_GitRemoteCanonicalizesRepeatedSeparators(t *testing.T) {
+	dir := t.TempDir()
+	initGit(t, dir)
+	cmd := exec.Command("git", "-C", dir, "remote", "add", "origin", "git@github.com:testuser/Foo--Bar__Baz.git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+
+	res := DetectProjectFull(dir)
+	if res.Source != SourceGitRemote || res.Project != "foo-bar_baz" {
+		t.Fatalf("git remote detection = %+v, want source=%q project=%q", res, SourceGitRemote, "foo-bar_baz")
+	}
+}
+
 func TestDetectProjectFull_ConfigFromRepoRootOverridesRemoteFromSubdir(t *testing.T) {
 	root := t.TempDir()
 	initGit(t, root)
@@ -271,6 +285,22 @@ func TestDetectProjectFull_ConfigFromRepoRootOverridesRemoteFromSubdir(t *testin
 	wantPath, _ := filepath.EvalSymlinks(root)
 	if got, want := gotPath, wantPath; got != want {
 		t.Fatalf("expected config path %q, got %q", want, got)
+	}
+}
+
+func TestDetectProjectFull_ConfigCanonicalizesRepeatedSeparators(t *testing.T) {
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, ".engram")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(`{"project_name":"Foo--Bar__Baz"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res := DetectProjectFull(dir)
+	if res.Source != SourceConfig || res.Project != "foo-bar_baz" {
+		t.Fatalf("config detection = %+v, want source=%q project=%q", res, SourceConfig, "foo-bar_baz")
 	}
 }
 
@@ -657,6 +687,18 @@ func TestDetectProjectFull_Case5_Basename(t *testing.T) {
 	}
 	if res.Warning != "" {
 		t.Errorf("Warning must be empty for dir_basename, got %q", res.Warning)
+	}
+}
+
+func TestDetectProjectFull_BasenameCanonicalizesRepeatedSeparators(t *testing.T) {
+	plain := filepath.Join(t.TempDir(), "Foo--Bar__Baz")
+	if err := os.MkdirAll(plain, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	res := DetectProjectFull(plain)
+	if res.Source != SourceDirBasename || res.Project != "foo-bar_baz" {
+		t.Fatalf("basename detection = %+v, want source=%q project=%q", res, SourceDirBasename, "foo-bar_baz")
 	}
 }
 
