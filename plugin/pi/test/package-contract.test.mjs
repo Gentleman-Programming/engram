@@ -19,13 +19,26 @@ const PI_TUI = "@earendil-works/pi-tui";
 
 /**
  * Minimal range check for the peer declaration contract. Supports the range forms the
- * repo actually uses for peer dependencies (`>=x.y.z` and `*`). Anything else fails
- * the test loudly so a range change here is a conscious decision, not an accident.
+ * repo actually uses for peer dependencies (`>=x.y.z` and `*`). Anything else throws so
+ * a range change here is a conscious decision, not an accident.
+ *
+ * The reviewed contract (#853) is an OPEN-ENDED >= floor: the plugin only imports
+ * `Text` while running inside pi, so it must accept every future pi-tui release
+ * (0.85.x, 1.x, 2.x, ...) with no fix required here. The acceptance list below is a
+ * floor verification against the two known lines, not a version pin.
  */
 function peerRangeAllows(range, version) {
 	if (range === "*") return true;
 	const match = /^>=(\d+)\.(\d+)\.(\d+)$/.exec(range);
-	if (!match) return false;
+	if (!match) {
+		throw new Error(
+			`peer range ${JSON.stringify(range)} uses a form this contract test cannot evaluate. ` +
+				"The reviewed contract (#853) is an open-ended >= floor, so new pi-tui releases " +
+				"keep being accepted without any fix here. If the range change is deliberate " +
+				"(e.g. adding an upper bound for a breaking pi-tui major), update peerRangeAllows() " +
+				"and the acceptance list in this test consciously.",
+		);
+	}
 	const [major, minor, patch] = version.split(".").map(Number);
 	const [floorMajor, floorMinor, floorPatch] = match.slice(1).map(Number);
 	if (major !== floorMajor) return major > floorMajor;
@@ -68,7 +81,9 @@ test("pi-tui peer range accepts every pi-tui line the plugin renders against", (
 		);
 	}
 	// Pin the lower bound, not just acceptance: a wider range (`*`, `>=0.0.0`) would
-	// silently bless pi-tui lines the plugin has never rendered against.
+	// silently bless pi-tui lines the plugin has never rendered against. Note `*` is
+	// accepted by the helper but rejected here on purpose: `*` keeps accepting future
+	// releases, yet it would also bless a 0.x line below the verified 0.74 floor.
 	assert.equal(
 		peerRangeAllows(range, "0.73.9"),
 		false,
