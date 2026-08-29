@@ -160,6 +160,7 @@ Navigate with `j`/`k`, use `Enter` to drill in, `c` to copy content to the clipb
 | [Team Usage](docs/TEAM-USAGE.md) | Shared-memory conventions |
 | [Engram Cloud](docs/engram-cloud/README.md) | Cloud quickstart, deployment, and technical links |
 | [Doctor](docs/DOCTOR.md) | Operational diagnosis and repair workflows |
+| [Binary self-testing](docs/SELF-TESTING.md) | Isolated reliability and performance checks for released binaries |
 | [Beta Testing](docs/BETA_TESTING.md) | Isolated beta testing flows and cleanup guidance |
 | [Comparison](docs/COMPARISON.md) | Engram compared with claude-mem |
 | [Obsidian Brain](docs/beta/obsidian-brain.md) | Export memories as an Obsidian knowledge graph (beta) |

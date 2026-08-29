@@ -25,6 +25,9 @@ jobs:
       - name: Run unit tests
         run: go test ./...
 
+      - name: Run binary quick self-test
+        run: go build -o engram-selftest ./cmd/engram && ./engram-selftest test --quick
+
   e2e-tests:
     name: E2E Tests
     runs-on: ubuntu-latest

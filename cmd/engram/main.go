@@ -597,6 +597,14 @@ func main() {
 		printUsage()
 		exitFunc(1)
 	}
+	// Self-tests must run before update checks, configuration resolution, orphan
+	// migration, and autosync setup so released binaries cannot touch user data.
+	if strings.EqualFold(strings.TrimSpace(os.Args[1]), "test") {
+		if code := cmdTest(os.Args[2:]); code != testExitSuccess {
+			exitFunc(code)
+		}
+		return
+	}
 
 	if shouldCheckForUpdates(os.Args[1:]) {
 		printUpdateCheckResult(checkForUpdates(version))
@@ -2814,6 +2822,9 @@ Commands:
                        --project NAME  Set process-level default project (overrides cwd detection).
                                        Also accepted as ENGRAM_PROJECT=NAME env var.
   tui                Launch interactive terminal UI
+  test [suite] [--quick] [--json]
+                     Run isolated local reliability and performance self-tests
+                       suites: reliability, performance (default: both)
   search <query>     Search memories [--type TYPE] [--project PROJECT] [--scope SCOPE] [--limit N]
   save <title> <msg> Save a memory  [--type TYPE] [--project PROJECT] [--scope SCOPE]
   delete <obs_id>    Delete an observation [--hard] (soft-delete by default; --hard removes permanently)
