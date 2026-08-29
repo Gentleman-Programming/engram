@@ -94,6 +94,16 @@ type SessionProjectReclassificationResult struct {
 // report on. NULL and blank both mean "identifies no project" to every caller
 // here, so collapsing them to the empty string loses nothing.
 func (s *Store) ListDiagnosticSessions(project string) ([]DiagnosticSessionEvidence, error) {
+	var sessions []DiagnosticSessionEvidence
+	err := s.withRead(func() error {
+		var err error
+		sessions, err = s.listDiagnosticSessionsSQL(project)
+		return err
+	})
+	return sessions, err
+}
+
+func (s *Store) listDiagnosticSessionsSQL(project string) ([]DiagnosticSessionEvidence, error) {
 	project, _ = NormalizeProject(project)
 	project = strings.TrimSpace(project)
 	query := `SELECT id, ifnull(project, ''), ifnull(directory, ''), id FROM sessions`
@@ -127,7 +137,13 @@ func (s *Store) ListDiagnosticSessions(project string) ([]DiagnosticSessionEvide
 func (s *Store) ListPendingProjectMutations(project string) ([]SyncMutation, error) {
 	project, _ = NormalizeProject(project)
 	project = strings.TrimSpace(project)
-	return s.listPendingProjectMutationsTxLike(s.db, project)
+	var mutations []SyncMutation
+	err := s.withRead(func() error {
+		var err error
+		mutations, err = s.listPendingProjectMutationsTxLike(s.db, project)
+		return err
+	})
+	return mutations, err
 }
 
 // ListInvalidSessionIdentityEvidence reports blank source session IDs together
@@ -141,6 +157,16 @@ func (s *Store) ListPendingProjectMutations(project string) ([]SyncMutation, err
 // database can also carry the legacy NULL ownership; reporting the corrupt
 // identity must not depend on whether that row's project survived the upgrade.
 func (s *Store) ListInvalidSessionIdentityEvidence(project string) ([]InvalidSessionIdentityEvidence, error) {
+	var evidence []InvalidSessionIdentityEvidence
+	err := s.withRead(func() error {
+		var err error
+		evidence, err = s.listInvalidSessionIdentityEvidenceSQL(project)
+		return err
+	})
+	return evidence, err
+}
+
+func (s *Store) listInvalidSessionIdentityEvidenceSQL(project string) ([]InvalidSessionIdentityEvidence, error) {
 	project, _ = NormalizeProject(project)
 	project = strings.TrimSpace(project)
 	query := `SELECT id, ifnull(project, '') FROM sessions WHERE ` + sqlSessionIDBlank("id")
@@ -251,6 +277,16 @@ func (s *Store) ListInvalidSessionIdentityEvidence(project string) ([]InvalidSes
 // existed. Instead each one is quarantined here so doctor can report exactly
 // what remote data was dropped. It is read-only.
 func (s *Store) ListQuarantinedPulledSessionEvidence(project string) ([]QuarantinedPulledSessionEvidence, error) {
+	var evidence []QuarantinedPulledSessionEvidence
+	err := s.withRead(func() error {
+		var err error
+		evidence, err = s.listQuarantinedPulledSessionEvidenceSQL(project)
+		return err
+	})
+	return evidence, err
+}
+
+func (s *Store) listQuarantinedPulledSessionEvidenceSQL(project string) ([]QuarantinedPulledSessionEvidence, error) {
 	project, _ = NormalizeProject(project)
 	project = strings.TrimSpace(project)
 	query := `SELECT sync_id, target_key, ifnull(project, ''), entity_key, op, remote_seq, reason_code, ifnull(first_seen_at, '')
@@ -438,6 +474,16 @@ func (s *Store) ReadSQLiteLockSnapshot(ctx context.Context) (SQLiteLockSnapshot,
 
 func (s *Store) EstimateSessionProjectReclassification(actions []SessionProjectReclassification) (SessionProjectReclassificationCounts, error) {
 	var counts SessionProjectReclassificationCounts
+	err := s.withRead(func() error {
+		var err error
+		counts, err = s.estimateSessionProjectReclassificationSQL(actions)
+		return err
+	})
+	return counts, err
+}
+
+func (s *Store) estimateSessionProjectReclassificationSQL(actions []SessionProjectReclassification) (SessionProjectReclassificationCounts, error) {
+	var counts SessionProjectReclassificationCounts
 	for _, action := range normalizeSessionProjectReclassificationActions(actions) {
 		var n int64
 		if err := s.db.QueryRow(`SELECT count(*) FROM sessions WHERE id = ? AND project = ?`, action.SessionID, action.FromProject).Scan(&n); err != nil {
@@ -496,6 +542,16 @@ func (s *Store) ApplySessionProjectReclassification(actions []SessionProjectRecl
 }
 
 func (s *Store) BackupSQLite() (string, error) {
+	var path string
+	err := s.withRead(func() error {
+		var err error
+		path, err = s.backupSQLiteSQL()
+		return err
+	})
+	return path, err
+}
+
+func (s *Store) backupSQLiteSQL() (string, error) {
 	backupDir := filepath.Join(s.cfg.DataDir, "backups")
 	if err := os.MkdirAll(backupDir, 0755); err != nil {
 		return "", fmt.Errorf("create sqlite backup dir: %w", err)

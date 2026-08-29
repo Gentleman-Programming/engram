@@ -516,6 +516,16 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 // not content-based, so lexically unrelated summaries still receive an explicit
 // pending judgment rather than an inferred replacement verdict.
 func (s *Store) FindSessionSummaryCandidates(savedID int64, opts CandidateOptions) ([]Candidate, error) {
+	var candidates []Candidate
+	err := s.withRead(func() error {
+		var err error
+		candidates, err = s.findSessionSummaryCandidatesSQL(savedID, opts)
+		return err
+	})
+	return candidates, err
+}
+
+func (s *Store) findSessionSummaryCandidatesSQL(savedID int64, opts CandidateOptions) ([]Candidate, error) {
 	if err := s.preflightRead(); err != nil {
 		return nil, err
 	}
@@ -737,9 +747,16 @@ func (s *Store) insertPendingRelationWithAlias(p SaveRelationParams, retainEvalu
 
 // GetRelation retrieves a single relation row by its sync_id.
 func (s *Store) GetRelation(syncID string) (*Relation, error) {
-	if err := s.preflightRead(); err != nil {
-		return nil, err
-	}
+	var relation *Relation
+	err := s.withRead(func() error {
+		var err error
+		relation, err = s.getRelationSQL(syncID)
+		return err
+	})
+	return relation, err
+}
+
+func (s *Store) getRelationSQL(syncID string) (*Relation, error) {
 	row := s.db.QueryRow(`
 		SELECT id, sync_id,
 		       ifnull(source_id,''), ifnull(target_id,''),
@@ -765,9 +782,6 @@ func (s *Store) GetRelation(syncID string) (*Relation, error) {
 	}
 	r.SourceID = sourceID
 	r.TargetID = targetID
-	if err := s.CheckDatabaseGeneration(); err != nil {
-		return nil, err
-	}
 	return &r, nil
 }
 
@@ -820,10 +834,12 @@ func (s *Store) JudgeRelation(p JudgeRelationParams) (*Relation, error) {
 
 	// Verify the relation exists and fetch source/target IDs for project check.
 	var sourceID, targetID string
-	if err := s.db.QueryRow(
-		`SELECT ifnull(source_id,''), ifnull(target_id,'') FROM memory_relations WHERE sync_id = ?`,
-		p.JudgmentID,
-	).Scan(&sourceID, &targetID); err != nil {
+	if err := s.withRead(func() error {
+		return s.db.QueryRow(
+			`SELECT ifnull(source_id,''), ifnull(target_id,'') FROM memory_relations WHERE sync_id = ?`,
+			p.JudgmentID,
+		).Scan(&sourceID, &targetID)
+	}); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("JudgeRelation: relation %q not found", p.JudgmentID)
 		}
@@ -959,6 +975,16 @@ func (s *Store) JudgeRelation(p JudgeRelationParams) (*Relation, error) {
 // in either direction. Pending-pair uniqueness is enforced atomically by the
 // partial unique index, not by this preflight.
 func (s *Store) relationExists(sourceSyncID, targetSyncID string) (bool, error) {
+	var exists bool
+	err := s.withRead(func() error {
+		var err error
+		exists, err = s.relationExistsSQL(sourceSyncID, targetSyncID)
+		return err
+	})
+	return exists, err
+}
+
+func (s *Store) relationExistsSQL(sourceSyncID, targetSyncID string) (bool, error) {
 	var exists int
 	err := s.db.QueryRow(
 		`SELECT 1 FROM memory_relations
@@ -981,6 +1007,16 @@ func (s *Store) relationExists(sourceSyncID, targetSyncID string) (bool, error) 
 // relation row. Semantic scans must still evaluate pending rows so their
 // provisional candidate relation can be resolved by JudgeBySemantic.
 func (s *Store) relationEvaluated(sourceSyncID, targetSyncID string) (bool, error) {
+	var exists bool
+	err := s.withRead(func() error {
+		var err error
+		exists, err = s.relationEvaluatedSQL(sourceSyncID, targetSyncID)
+		return err
+	})
+	return exists, err
+}
+
+func (s *Store) relationEvaluatedSQL(sourceSyncID, targetSyncID string) (bool, error) {
 	var exists int
 	err := s.db.QueryRow(
 		`SELECT 1 FROM memory_relations
@@ -1285,6 +1321,16 @@ func (s *Store) GetRelationsForObservations(syncIDs []string) (map[string]Observ
 // GetRelationsForObservationsContext enriches observations with relations while
 // honoring cancellation from the caller, including while materializing rows.
 func (s *Store) GetRelationsForObservationsContext(ctx context.Context, syncIDs []string) (map[string]ObservationRelations, error) {
+	var relations map[string]ObservationRelations
+	err := s.withRead(func() error {
+		var err error
+		relations, err = s.getRelationsForObservationsContextSQL(ctx, syncIDs)
+		return err
+	})
+	return relations, err
+}
+
+func (s *Store) getRelationsForObservationsContextSQL(ctx context.Context, syncIDs []string) (map[string]ObservationRelations, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -1510,6 +1556,16 @@ func joinStrings(items []string, sep string) string {
 // options. Project filtering is done via LEFT JOIN to observations (no schema
 // change). Uses idx_memrel_status_created for efficient status+date ordering.
 func (s *Store) ListRelations(opts ListRelationsOptions) ([]RelationListItem, error) {
+	var items []RelationListItem
+	err := s.withRead(func() error {
+		var err error
+		items, err = s.listRelationsSQL(opts)
+		return err
+	})
+	return items, err
+}
+
+func (s *Store) listRelationsSQL(opts ListRelationsOptions) ([]RelationListItem, error) {
 	query, args := buildRelationsQuery(opts, false)
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
@@ -1541,6 +1597,16 @@ func (s *Store) ListRelations(opts ListRelationsOptions) ([]RelationListItem, er
 // CountRelations returns the total number of relation rows matching opts.
 // Uses the same WHERE conditions as ListRelations.
 func (s *Store) CountRelations(opts ListRelationsOptions) (int, error) {
+	var total int
+	err := s.withRead(func() error {
+		var err error
+		total, err = s.countRelationsSQL(opts)
+		return err
+	})
+	return total, err
+}
+
+func (s *Store) countRelationsSQL(opts ListRelationsOptions) (int, error) {
 	query, args := buildRelationsQuery(opts, true)
 	var total int
 	if err := s.db.QueryRow(query, args...).Scan(&total); err != nil {
@@ -1610,6 +1676,16 @@ func buildRelationsQuery(opts ListRelationsOptions, countOnly bool) (string, []a
 // ListRelations directly for inclusive relation enumeration. Two queries are
 // executed: one GROUP BY and one delegated to CountDeferredAndDead.
 func (s *Store) GetRelationStats(project string) (RelationStats, error) {
+	var stats RelationStats
+	err := s.withRead(func() error {
+		var err error
+		stats, err = s.getRelationStatsSQL(project)
+		return err
+	})
+	return stats, err
+}
+
+func (s *Store) getRelationStatsSQL(project string) (RelationStats, error) {
 	stats := RelationStats{
 		Project:          project,
 		ByRelation:       map[string]int{},
@@ -1686,6 +1762,16 @@ func (s *Store) GetRelationStats(project string) (RelationStats, error) {
 // Returns a ScanResult with counts, a continuation cursor when another page
 // remains, and whether an insert or semantic cap was hit.
 func (s *Store) ScanProject(opts ScanOptions) (ScanResult, error) {
+	var result ScanResult
+	err := s.withRead(func() error {
+		var err error
+		result, err = s.scanProjectSQL(opts)
+		return err
+	})
+	return result, err
+}
+
+func (s *Store) scanProjectSQL(opts ScanOptions) (ScanResult, error) {
 	limit := opts.Limit
 	if limit == 0 {
 		limit = DefaultScanLimit

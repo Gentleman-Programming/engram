@@ -562,6 +562,16 @@ type enrolledProjectRepair struct {
 	err  error
 }
 
+type transactionBeginError struct{ err error }
+
+func (e *transactionBeginError) Error() string { return e.err.Error() }
+func (e *transactionBeginError) Unwrap() error { return e.err }
+
+type transactionCommitError struct{ err error }
+
+func (e *transactionCommitError) Error() string { return e.err.Error() }
+func (e *transactionCommitError) Unwrap() error { return e.err }
+
 type execer interface {
 	Exec(query string, args ...any) (sql.Result, error)
 }
@@ -1619,7 +1629,8 @@ func (s *Store) SaveCloudUpgradeState(state CloudUpgradeState) error {
 		return fmt.Errorf("marshal cloud upgrade snapshot: %w", err)
 	}
 
-	_, err = s.execHook(s.db, `
+	return s.withTx(func(tx *sql.Tx) error {
+		_, err = s.execHook(tx, `
 		INSERT INTO cloud_upgrade_state (
 			project, stage, repair_class, snapshot_json, last_error_code, last_error_message, findings_json, applied_actions, updated_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
@@ -1637,11 +1648,22 @@ func (s *Store) SaveCloudUpgradeState(state CloudUpgradeState) error {
 			findings_json = excluded.findings_json,
 			applied_actions = excluded.applied_actions,
 			updated_at = datetime('now')
-	`, state.Project, state.Stage, state.RepairClass, string(snapshotJSON), nullableString(state.LastErrorCode), nullableString(state.LastErrorMessage), nullableString(state.FindingsJSON), nullableString(state.AppliedActions))
-	return err
+		`, state.Project, state.Stage, state.RepairClass, string(snapshotJSON), nullableString(state.LastErrorCode), nullableString(state.LastErrorMessage), nullableString(state.FindingsJSON), nullableString(state.AppliedActions))
+		return err
+	})
 }
 
 func (s *Store) GetCloudUpgradeState(project string) (*CloudUpgradeState, error) {
+	var state *CloudUpgradeState
+	err := s.withRead(func() error {
+		var err error
+		state, err = s.getCloudUpgradeStateSQL(project)
+		return err
+	})
+	return state, err
+}
+
+func (s *Store) getCloudUpgradeStateSQL(project string) (*CloudUpgradeState, error) {
 	project, _ = NormalizeProject(project)
 	project = strings.TrimSpace(project)
 	if project == "" {
@@ -1678,8 +1700,10 @@ func (s *Store) ClearCloudUpgradeState(project string) error {
 	if project == "" {
 		return nil
 	}
-	_, err := s.execHook(s.db, `DELETE FROM cloud_upgrade_state WHERE project = ?`, project)
-	return err
+	return s.withTx(func(tx *sql.Tx) error {
+		_, err := s.execHook(tx, `DELETE FROM cloud_upgrade_state WHERE project = ?`, project)
+		return err
+	})
 }
 
 func (s *Store) CanRollbackCloudUpgrade(project string) (bool, error) {
@@ -1946,30 +1970,41 @@ func (s *Store) applyCloudUpgradeLegacyMutationRepairs(project string) error {
 }
 
 func (s *Store) evaluateCloudUpgradeLegacyMutations(project string) ([]cloudUpgradeLegacyMutationEvaluation, error) {
-	return s.withReadTx(func(tx *sql.Tx) ([]cloudUpgradeLegacyMutationEvaluation, error) {
-		mutations, err := s.listPendingProjectMutationsTx(tx, project)
-		if err != nil {
-			return nil, err
-		}
-		evaluations := make([]cloudUpgradeLegacyMutationEvaluation, 0, len(mutations))
-		for _, mutation := range mutations {
-			eval, err := s.evaluateCloudUpgradeLegacyMutationTx(tx, mutation)
+	var evaluations []cloudUpgradeLegacyMutationEvaluation
+	err := s.withRead(func() error {
+		var err error
+		evaluations, err = s.withReadTx(func(tx *sql.Tx) ([]cloudUpgradeLegacyMutationEvaluation, error) {
+			mutations, err := s.listPendingProjectMutationsTx(tx, project)
 			if err != nil {
 				return nil, err
 			}
-			evaluations = append(evaluations, eval)
-		}
-		return evaluations, nil
+			evaluations := make([]cloudUpgradeLegacyMutationEvaluation, 0, len(mutations))
+			for _, mutation := range mutations {
+				eval, err := s.evaluateCloudUpgradeLegacyMutationTx(tx, mutation)
+				if err != nil {
+					return nil, err
+				}
+				evaluations = append(evaluations, eval)
+			}
+			return evaluations, nil
+		})
+		return err
 	})
+	return evaluations, err
 }
 
 func (s *Store) withReadTx(fn func(tx *sql.Tx) ([]cloudUpgradeLegacyMutationEvaluation, error)) ([]cloudUpgradeLegacyMutationEvaluation, error) {
-	tx, err := s.beginTxHook()
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-	return fn(tx)
+	var results []cloudUpgradeLegacyMutationEvaluation
+	err := s.withRead(func() error {
+		tx, err := s.beginTxHook()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		results, err = fn(tx)
+		return err
+	})
+	return results, err
 }
 
 // listPendingProjectMutationsTx returns the transportable pending journal rows a
@@ -2409,7 +2444,8 @@ func (s *Store) cloudUpgradeManualActionReport(project string) (bool, CloudUpgra
 
 func (s *Store) projectSyncBackfillRequired(project string) (bool, error) {
 	var missing int
-	err := s.db.QueryRow(`
+	err := s.withRead(func() error {
+		return s.db.QueryRow(`
 		SELECT EXISTS(
 			SELECT 1
 			FROM sessions sess
@@ -2438,7 +2474,8 @@ func (s *Store) projectSyncBackfillRequired(project string) (bool, error) {
 				  AND sm.source = ?
 			  )
 		)
-	`, project, DefaultSyncTargetKey, SyncEntitySession, SyncSourceLocal, project, project, DefaultSyncTargetKey, SyncEntityObservation, SyncSourceLocal).Scan(&missing)
+		`, project, DefaultSyncTargetKey, SyncEntitySession, SyncSourceLocal, project, project, DefaultSyncTargetKey, SyncEntityObservation, SyncSourceLocal).Scan(&missing)
+	})
 	if err != nil {
 		return false, fmt.Errorf("detect project sync metadata gaps: %w", err)
 	}
@@ -2773,6 +2810,17 @@ func (s *Store) GetSession(id string) (*Session, error) {
 //   - When multiple un-ended sessions exist, pick the MOST RECENT by
 //     started_at DESC, with id DESC as a deterministic tie-breaker.
 func (s *Store) MostRecentActiveSession(project string) (string, bool, error) {
+	var id string
+	var ok bool
+	err := s.withRead(func() error {
+		var err error
+		id, ok, err = s.mostRecentActiveSessionSQL(project)
+		return err
+	})
+	return id, ok, err
+}
+
+func (s *Store) mostRecentActiveSessionSQL(project string) (string, bool, error) {
 	project, _ = NormalizeProject(project)
 	if project == "" {
 		return "", false, nil
@@ -2801,14 +2849,21 @@ func (s *Store) MostRecentActiveSession(project string) (string, bool, error) {
 // carries rows that identify no project, so the column is read through ifnull():
 // an unscoped listing reads every session row and must not die on one of them.
 func (s *Store) RecentSessions(project string, limit int) ([]SessionSummary, error) {
+	var sessions []SessionSummary
+	err := s.withRead(func() error {
+		var err error
+		sessions, err = s.recentSessionsSQL(project, limit)
+		return err
+	})
+	return sessions, err
+}
+
+func (s *Store) recentSessionsSQL(project string, limit int) ([]SessionSummary, error) {
 	// Normalize project filter for case-insensitive matching
 	project, _ = NormalizeProject(project)
 
 	if limit <= 0 {
 		limit = 5
-	}
-	if err := s.preflightRead(); err != nil {
-		return nil, err
 	}
 
 	query := `
@@ -2845,9 +2900,6 @@ func (s *Store) RecentSessions(project string, limit int) ([]SessionSummary, err
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if err := s.CheckDatabaseGeneration(); err != nil {
-		return nil, err
-	}
 	return results, nil
 }
 
@@ -2856,6 +2908,16 @@ func (s *Store) RecentSessions(project string, limit int) ([]SessionSummary, err
 // carries rows that identify no project, so the column is read through ifnull():
 // an unscoped listing reads every session row and must not die on one of them.
 func (s *Store) AllSessions(project string, limit int) ([]SessionSummary, error) {
+	var sessions []SessionSummary
+	err := s.withRead(func() error {
+		var err error
+		sessions, err = s.allSessionsSQL(project, limit)
+		return err
+	})
+	return sessions, err
+}
+
+func (s *Store) allSessionsSQL(project string, limit int) ([]SessionSummary, error) {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -3440,14 +3502,21 @@ func truncateContent(content string, max int) string {
 }
 
 func (s *Store) RecentPrompts(project string, limit int) ([]Prompt, error) {
+	var prompts []Prompt
+	err := s.withRead(func() error {
+		var err error
+		prompts, err = s.recentPromptsSQL(project, limit)
+		return err
+	})
+	return prompts, err
+}
+
+func (s *Store) recentPromptsSQL(project string, limit int) ([]Prompt, error) {
 	// Normalize project filter for case-insensitive matching
 	project, _ = NormalizeProject(project)
 
 	if limit <= 0 {
 		limit = 20
-	}
-	if err := s.preflightRead(); err != nil {
-		return nil, err
 	}
 
 	query := `SELECT id, ifnull(sync_id, '') as sync_id, session_id, content, ifnull(project, '') as project, created_at FROM user_prompts`
@@ -3478,13 +3547,20 @@ func (s *Store) RecentPrompts(project string, limit int) ([]Prompt, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if err := s.CheckDatabaseGeneration(); err != nil {
-		return nil, err
-	}
 	return results, nil
 }
 
 func (s *Store) compactionPrompts(sessionID, project string, limit int) ([]Prompt, error) {
+	var prompts []Prompt
+	err := s.withRead(func() error {
+		var err error
+		prompts, err = s.compactionPromptsSQL(sessionID, project, limit)
+		return err
+	})
+	return prompts, err
+}
+
+func (s *Store) compactionPromptsSQL(sessionID, project string, limit int) ([]Prompt, error) {
 	if limit <= 0 {
 		limit = 10
 	}
@@ -3512,6 +3588,16 @@ func (s *Store) compactionPrompts(sessionID, project string, limit int) ([]Promp
 }
 
 func (s *Store) SearchPrompts(query string, project string, limit int) ([]Prompt, error) {
+	var prompts []Prompt
+	err := s.withRead(func() error {
+		var err error
+		prompts, err = s.searchPromptsSQL(query, project, limit)
+		return err
+	})
+	return prompts, err
+}
+
+func (s *Store) searchPromptsSQL(query string, project string, limit int) ([]Prompt, error) {
 	if limit <= 0 {
 		limit = 10
 	}
@@ -3695,18 +3781,22 @@ func (s *Store) DeletePrompt(id int64) error {
 // ─── Get Single Observation ──────────────────────────────────────────────────
 
 func (s *Store) GetObservation(id int64) (*Observation, error) {
-	if err := s.preflightRead(); err != nil {
-		return nil, err
-	}
+	var observation *Observation
+	err := s.withRead(func() error {
+		var err error
+		observation, err = s.getObservationSQL(id)
+		return err
+	})
+	return observation, err
+}
+
+func (s *Store) getObservationSQL(id int64) (*Observation, error) {
 	row := s.db.QueryRow(
 		`SELECT `+observationSelectColumns+`
 		 FROM observations WHERE id = ? AND deleted_at IS NULL`, id,
 	)
 	var o Observation
 	if err := scanObservationRow(row, &o); err != nil {
-		return nil, err
-	}
-	if err := s.CheckDatabaseGeneration(); err != nil {
 		return nil, err
 	}
 	return &o, nil
@@ -3795,6 +3885,14 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 		return s.enqueueSyncMutationTx(tx, SyncEntityObservation, updated.SyncID, SyncOpUpsert, observationPayloadFromObservation(updated))
 	})
 	if err != nil {
+		var beginErr *transactionBeginError
+		if errors.As(err, &beginErr) {
+			return nil, fmt.Errorf("import: begin tx: %w", err)
+		}
+		var commitErr *transactionCommitError
+		if errors.As(err, &commitErr) {
+			return nil, fmt.Errorf("import: commit: %w", err)
+		}
 		return nil, err
 	}
 	return updated, nil
@@ -3864,6 +3962,16 @@ func (s *Store) DeleteObservation(id int64, hardDelete bool) error {
 // the chronological neighborhood of a result.
 
 func (s *Store) Timeline(observationID int64, before, after int) (*TimelineResult, error) {
+	var timeline *TimelineResult
+	err := s.withRead(func() error {
+		var err error
+		timeline, err = s.timelineSQL(observationID, before, after)
+		return err
+	})
+	return timeline, err
+}
+
+func (s *Store) timelineSQL(observationID int64, before, after int) (*TimelineResult, error) {
 	if before <= 0 {
 		before = 5
 	}
@@ -3974,6 +4082,16 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 // SearchContext searches observations while honoring cancellation from the
 // caller, including while materializing rows.
 func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOptions) ([]SearchResult, error) {
+	var results []SearchResult
+	err := s.withRead(func() error {
+		var err error
+		results, err = s.searchContextSQL(ctx, query, opts)
+		return err
+	})
+	return results, err
+}
+
+func (s *Store) searchContextSQL(ctx context.Context, query string, opts SearchOptions) ([]SearchResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -3995,10 +4113,6 @@ func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOpti
 	}
 	if limit > s.cfg.MaxSearchResults {
 		limit = s.cfg.MaxSearchResults
-	}
-
-	if err := s.preflightRead(); err != nil {
-		return nil, err
 	}
 
 	var directResults []SearchResult
@@ -4184,9 +4298,6 @@ func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOpti
 	if len(results) > limit {
 		results = results[:limit]
 	}
-	if err := s.CheckDatabaseGeneration(); err != nil {
-		return nil, err
-	}
 	return results, nil
 }
 
@@ -4194,6 +4305,16 @@ func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOpti
 // caller merges it after the FTS branch, so an FTS hit wins duplicate identity
 // and BM25 ordering remains authoritative before the single outer limit.
 func (s *Store) searchShortAnyContext(ctx context.Context, terms []string, opts SearchOptions, limit int) ([]SearchResult, error) {
+	var results []SearchResult
+	err := s.withRead(func() error {
+		var err error
+		results, err = s.searchShortAnyContextSQL(ctx, terms, opts, limit)
+		return err
+	})
+	return results, err
+}
+
+func (s *Store) searchShortAnyContextSQL(ctx context.Context, terms []string, opts SearchOptions, limit int) ([]SearchResult, error) {
 	query := `SELECT ` + observationSelectColumns + `, 0.0 AS rank FROM observations o WHERE o.deleted_at IS NULL AND `
 	args := make([]any, 0, len(terms)+4)
 	appendLikeSearchCondition(&query, &args, "ifnull(o.title, '') || ' ' || ifnull(o.content, '') || ' ' || ifnull(o.tool_name, '') || ' ' || ifnull(o.type, '') || ' ' || ifnull(o.project, '') || ' ' || ifnull(o.topic_key, '')", strings.Join(terms, " "), "any")
@@ -4260,10 +4381,17 @@ func buildSearchFTSQuery(ftsQuery string, opts SearchOptions, limit int) (string
 // ─── Stats ───────────────────────────────────────────────────────────────────
 
 func (s *Store) Stats() (*Stats, error) {
+	var stats *Stats
+	err := s.withRead(func() error {
+		var err error
+		stats, err = s.statsSQL()
+		return err
+	})
+	return stats, err
+}
+
+func (s *Store) statsSQL() (*Stats, error) {
 	stats := &Stats{}
-	if err := s.preflightRead(); err != nil {
-		return nil, err
-	}
 
 	for _, count := range []struct {
 		name  string
@@ -4315,9 +4443,6 @@ func (s *Store) Stats() (*Stats, error) {
 		return nil, fmt.Errorf("stats: close projects: %w", err)
 	}
 
-	if err := s.CheckDatabaseGeneration(); err != nil {
-		return nil, err
-	}
 	return stats, nil
 }
 
@@ -4441,6 +4566,16 @@ func (s *Store) FormatContext(project, scope string) (string, error) {
 // one persisted session. The session's project is derived from the store and
 // is never supplied by the caller.
 func (s *Store) FormatCompactionContext(sessionID string) (string, error) {
+	var context string
+	err := s.withRead(func() error {
+		var err error
+		context, err = s.formatCompactionContextSQL(sessionID)
+		return err
+	})
+	return context, err
+}
+
+func (s *Store) formatCompactionContextSQL(sessionID string) (string, error) {
 	session, err := s.GetSession(sessionID)
 	if err != nil {
 		return "", err
@@ -4519,6 +4654,16 @@ func (s *Store) ExportProject(project string) (*ExportData, error) {
 // ExportRelationMutations returns relation upsert mutations for non-orphaned
 // relation rows whose source and target observations are available locally.
 func (s *Store) ExportRelationMutations(project string) ([]SyncMutation, error) {
+	var mutations []SyncMutation
+	err := s.withRead(func() error {
+		var err error
+		mutations, err = s.exportRelationMutationsSQL(project)
+		return err
+	})
+	return mutations, err
+}
+
+func (s *Store) exportRelationMutationsSQL(project string) ([]SyncMutation, error) {
 	normalizedProject, _ := NormalizeProject(project)
 	normalizedProject = strings.TrimSpace(normalizedProject)
 
@@ -4579,9 +4724,16 @@ func (s *Store) ExportRelationMutations(project string) ([]SyncMutation, error) 
 // data leaves the store before a repair, so it must not be the one path that
 // refuses to read the legacy unowned rows the operator is trying to rescue.
 func (s *Store) exportWithProjectScope(project string) (*ExportData, error) {
-	if err := s.preflightRead(); err != nil {
-		return nil, err
-	}
+	var data *ExportData
+	err := s.withRead(func() error {
+		var err error
+		data, err = s.exportWithProjectScopeSQL(project)
+		return err
+	})
+	return data, err
+}
+
+func (s *Store) exportWithProjectScopeSQL(project string) (*ExportData, error) {
 	data := &ExportData{
 		Version:    "0.1.0",
 		ExportedAt: Now(),
@@ -4678,94 +4830,88 @@ func (s *Store) exportWithProjectScope(project string) (*ExportData, error) {
 		return nil, err
 	}
 
-	if err := s.CheckDatabaseGeneration(); err != nil {
-		return nil, err
-	}
 	return data, nil
 }
 
 func (s *Store) Import(data *ExportData) (*ImportResult, error) {
-	if err := s.CheckDatabaseGeneration(); err != nil {
-		return nil, err
-	}
 	for _, sess := range data.Sessions {
 		if err := validateSessionID(sess.ID); err != nil {
 			return nil, fmt.Errorf("import session: %w", err)
 		}
 	}
-	tx, err := s.beginTxHook()
-	if err != nil {
-		return nil, fmt.Errorf("import: begin tx: %w", err)
-	}
-	defer tx.Rollback()
-
 	result := &ImportResult{}
-
-	// Import sessions (skip duplicates)
-	for _, sess := range data.Sessions {
-		res, err := s.execHook(tx,
-			`INSERT OR IGNORE INTO sessions (id, project, directory, started_at, ended_at, summary)
+	err := s.withTx(func(tx *sql.Tx) error {
+		// Import sessions (skip duplicates)
+		for _, sess := range data.Sessions {
+			res, err := s.execHook(tx,
+				`INSERT OR IGNORE INTO sessions (id, project, directory, started_at, ended_at, summary)
 			 VALUES (?, ?, ?, ?, ?, ?)`,
-			sess.ID, sess.Project, sess.Directory, sess.StartedAt, sess.EndedAt, sess.Summary,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("import session %s: %w", sess.ID, err)
+				sess.ID, sess.Project, sess.Directory, sess.StartedAt, sess.EndedAt, sess.Summary,
+			)
+			if err != nil {
+				return fmt.Errorf("import session %s: %w", sess.ID, err)
+			}
+			n, _ := res.RowsAffected()
+			result.SessionsImported += int(n)
 		}
-		n, _ := res.RowsAffected()
-		result.SessionsImported += int(n)
-	}
 
-	// Import observations (use new IDs — AUTOINCREMENT, skip duplicate sync IDs)
-	for _, obs := range data.Observations {
-		syncID := normalizeExistingSyncID(obs.SyncID, "obs")
-		res, err := s.execHook(tx,
-			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, review_after, created_at, updated_at, deleted_at)
+		// Import observations (use new IDs — AUTOINCREMENT, skip duplicate sync IDs)
+		for _, obs := range data.Observations {
+			syncID := normalizeExistingSyncID(obs.SyncID, "obs")
+			res, err := s.execHook(tx,
+				`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, review_after, created_at, updated_at, deleted_at)
 			 SELECT ?, ?, ?, ?, ?, ?, CAST(? AS TEXT), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 			 WHERE NOT EXISTS (SELECT 1 FROM observations WHERE sync_id = ?)`,
-			syncID,
-			obs.SessionID,
-			obs.Type,
-			obs.Title,
-			obs.Content,
-			obs.ToolName,
-			obs.Project,
-			normalizeScope(obs.Scope),
-			nullableString(normalizeTopicKey(derefString(obs.TopicKey))),
-			hashNormalized(obs.Content),
-			maxInt(obs.RevisionCount, 1),
-			maxInt(obs.DuplicateCount, 1),
-			obs.LastSeenAt,
-			obs.ReviewAfter,
-			obs.CreatedAt,
-			obs.UpdatedAt,
-			obs.DeletedAt,
-			syncID,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("import observation %d: %w", obs.ID, err)
+				syncID,
+				obs.SessionID,
+				obs.Type,
+				obs.Title,
+				obs.Content,
+				obs.ToolName,
+				obs.Project,
+				normalizeScope(obs.Scope),
+				nullableString(normalizeTopicKey(derefString(obs.TopicKey))),
+				hashNormalized(obs.Content),
+				maxInt(obs.RevisionCount, 1),
+				maxInt(obs.DuplicateCount, 1),
+				obs.LastSeenAt,
+				obs.ReviewAfter,
+				obs.CreatedAt,
+				obs.UpdatedAt,
+				obs.DeletedAt,
+				syncID,
+			)
+			if err != nil {
+				return fmt.Errorf("import observation %d: %w", obs.ID, err)
+			}
+			n, _ := res.RowsAffected()
+			result.ObservationsImported += int(n)
 		}
-		n, _ := res.RowsAffected()
-		result.ObservationsImported += int(n)
-	}
 
-	// Import prompts
-	for _, p := range data.Prompts {
-		_, err := s.execHook(tx,
-			`INSERT INTO user_prompts (sync_id, session_id, content, project, created_at)
+		// Import prompts
+		for _, p := range data.Prompts {
+			_, err := s.execHook(tx,
+				`INSERT INTO user_prompts (sync_id, session_id, content, project, created_at)
 			 VALUES (?, ?, ?, ?, ?)`,
-			normalizeExistingSyncID(p.SyncID, "prompt"), p.SessionID, p.Content, p.Project, p.CreatedAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("import prompt %d: %w", p.ID, err)
+				normalizeExistingSyncID(p.SyncID, "prompt"), p.SessionID, p.Content, p.Project, p.CreatedAt,
+			)
+			if err != nil {
+				return fmt.Errorf("import prompt %d: %w", p.ID, err)
+			}
+			result.PromptsImported++
 		}
-		result.PromptsImported++
-	}
-
-	if err := s.CheckDatabaseGeneration(); err != nil {
+		return nil
+	})
+	if err != nil {
+		var beginErr *transactionBeginError
+		if errors.As(err, &beginErr) {
+			return nil, fmt.Errorf("import: begin tx: %w", err)
+		}
+		var commitErr *transactionCommitError
+		if errors.As(err, &commitErr) {
+			return nil, fmt.Errorf("import: commit: %w", err)
+		}
 		return nil, err
-	}
-	if err := s.commitHook(tx); err != nil {
-		return nil, fmt.Errorf("import: commit: %w", err)
 	}
 
 	return result, nil
@@ -4786,6 +4932,16 @@ func (s *Store) GetSyncedChunks() (map[string]bool, error) {
 
 // GetSyncedChunksForTarget returns chunk IDs tracked for a specific sync target.
 func (s *Store) GetSyncedChunksForTarget(targetKey string) (map[string]bool, error) {
+	var chunks map[string]bool
+	err := s.withRead(func() error {
+		var err error
+		chunks, err = s.getSyncedChunksForTargetSQL(targetKey)
+		return err
+	})
+	return chunks, err
+}
+
+func (s *Store) getSyncedChunksForTargetSQL(targetKey string) (map[string]bool, error) {
 	targetKey = normalizeChunkTargetKey(targetKey)
 	rows, err := s.queryItHook(s.db, "SELECT chunk_id FROM sync_chunks WHERE target_key = ?", targetKey)
 	if err != nil {
@@ -4812,11 +4968,13 @@ func (s *Store) RecordSyncedChunk(chunkID string) error {
 // RecordSyncedChunkForTarget marks a chunk as imported/exported for a target.
 func (s *Store) RecordSyncedChunkForTarget(targetKey, chunkID string) error {
 	targetKey = normalizeChunkTargetKey(targetKey)
-	_, err := s.execHook(s.db,
-		"INSERT OR IGNORE INTO sync_chunks (target_key, chunk_id) VALUES (?, ?)",
-		targetKey, chunkID,
-	)
-	return err
+	return s.withTx(func(tx *sql.Tx) error {
+		_, err := s.execHook(tx,
+			"INSERT OR IGNORE INTO sync_chunks (target_key, chunk_id) VALUES (?, ?)",
+			targetKey, chunkID,
+		)
+		return err
+	})
 }
 
 // ─── Local Sync State & Mutation Journal ─────────────────────────────────────
@@ -4830,6 +4988,16 @@ func (s *Store) GetSyncState(targetKey string) (*SyncState, error) {
 }
 
 func (s *Store) ListPendingSyncMutations(targetKey string, limit int) ([]SyncMutation, error) {
+	var mutations []SyncMutation
+	err := s.withRead(func() error {
+		var err error
+		mutations, err = s.listPendingSyncMutationsSQL(targetKey, limit)
+		return err
+	})
+	return mutations, err
+}
+
+func (s *Store) listPendingSyncMutationsSQL(targetKey string, limit int) ([]SyncMutation, error) {
 	targetKey = normalizeSyncTargetKey(targetKey)
 	if limit <= 0 {
 		limit = 100
@@ -4861,6 +5029,16 @@ func (s *Store) ListPendingSyncMutations(targetKey string, limit int) ([]SyncMut
 }
 
 func (s *Store) ListPendingSyncMutationsAfterSeq(targetKey string, afterSeq int64, limit int) ([]SyncMutation, error) {
+	var mutations []SyncMutation
+	err := s.withRead(func() error {
+		var err error
+		mutations, err = s.listPendingSyncMutationsAfterSeqSQL(targetKey, afterSeq, limit)
+		return err
+	})
+	return mutations, err
+}
+
+func (s *Store) listPendingSyncMutationsAfterSeqSQL(targetKey string, afterSeq int64, limit int) ([]SyncMutation, error) {
 	targetKey = normalizeSyncTargetKey(targetKey)
 	if limit <= 0 {
 		limit = 100
@@ -4977,6 +5155,16 @@ func (s *Store) QuarantineIrreparableSyncMutations(project string, apply bool) (
 }
 
 func (s *Store) CountPendingNonEnrolledSyncMutations(targetKey string) ([]PendingSyncMutationProjectCount, error) {
+	var counts []PendingSyncMutationProjectCount
+	err := s.withRead(func() error {
+		var err error
+		counts, err = s.countPendingNonEnrolledSyncMutationsSQL(targetKey)
+		return err
+	})
+	return counts, err
+}
+
+func (s *Store) countPendingNonEnrolledSyncMutationsSQL(targetKey string) ([]PendingSyncMutationProjectCount, error) {
 	targetKey = normalizeSyncTargetKey(targetKey)
 	rows, err := s.queryItHook(s.db, `
 		SELECT sm.project, COUNT(*)
@@ -5010,7 +5198,9 @@ func (s *Store) CountPendingNonEnrolledSyncMutations(targetKey string) ([]Pendin
 // mutations are never skipped — they always sync regardless of enrollment.
 func (s *Store) SkipAckNonEnrolledMutations(targetKey string) (int64, error) {
 	targetKey = normalizeSyncTargetKey(targetKey)
-	res, err := s.execHook(s.db, `
+	var rowsAffected int64
+	err := s.withTx(func(tx *sql.Tx) error {
+		res, err := s.execHook(tx, `
 		UPDATE sync_mutations
 		SET acked_at = datetime('now')
 		WHERE target_key = ?
@@ -5018,12 +5208,18 @@ func (s *Store) SkipAckNonEnrolledMutations(targetKey string) (int64, error) {
 		  AND disposition = 'pending'
 		  AND project != ''
 		  AND project NOT IN (SELECT project FROM sync_enrolled_projects)`,
-		targetKey,
-	)
+			targetKey,
+		)
+		if err != nil {
+			return err
+		}
+		rowsAffected, err = res.RowsAffected()
+		return err
+	})
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	return rowsAffected, nil
 }
 
 func (s *Store) AckSyncMutations(targetKey string, lastAckedSeq int64) error {
@@ -5209,11 +5405,13 @@ func (s *Store) HasPendingSyncMutationsForProject(project string) (bool, error) 
 	}
 
 	var count int
-	err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM sync_mutations WHERE target_key = ? AND project = ? AND acked_at IS NULL AND disposition = 'pending'`,
-		DefaultSyncTargetKey,
-		project,
-	).Scan(&count)
+	err := s.withRead(func() error {
+		return s.db.QueryRow(
+			`SELECT COUNT(*) FROM sync_mutations WHERE target_key = ? AND project = ? AND acked_at IS NULL AND disposition = 'pending'`,
+			DefaultSyncTargetKey,
+			project,
+		).Scan(&count)
+	})
 	if err != nil {
 		return false, err
 	}
@@ -5406,13 +5604,15 @@ func (s *Store) AcquireSyncLease(targetKey, owner string, ttl time.Duration, now
 
 func (s *Store) ReleaseSyncLease(targetKey, owner string) error {
 	targetKey = normalizeSyncTargetKey(targetKey)
-	_, err := s.execHook(s.db,
-		`UPDATE sync_state
+	return s.withTx(func(tx *sql.Tx) error {
+		_, err := s.execHook(tx,
+			`UPDATE sync_state
 		 SET lease_owner = NULL, lease_until = NULL, updated_at = datetime('now')
 		 WHERE target_key = ? AND (lease_owner = ? OR lease_owner IS NULL OR lease_owner = '')`,
-		targetKey, owner,
-	)
-	return err
+			targetKey, owner,
+		)
+		return err
+	})
 }
 
 func (s *Store) MarkSyncBlocked(targetKey, reasonCode, message string) error {
@@ -5740,9 +5940,16 @@ func (s *Store) ApplyPulledChunk(targetKey, chunkID string, mutations []SyncMuta
 }
 
 func (s *Store) GetObservationBySyncID(syncID string) (*Observation, error) {
-	if err := s.preflightRead(); err != nil {
-		return nil, err
-	}
+	var observation *Observation
+	err := s.withRead(func() error {
+		var err error
+		observation, err = s.getObservationBySyncIDSQL(syncID)
+		return err
+	})
+	return observation, err
+}
+
+func (s *Store) getObservationBySyncIDSQL(syncID string) (*Observation, error) {
 	row := s.db.QueryRow(
 		`SELECT `+observationSelectColumns+`
 		 FROM observations WHERE sync_id = ? AND deleted_at IS NULL ORDER BY id DESC LIMIT 1`,
@@ -5750,9 +5957,6 @@ func (s *Store) GetObservationBySyncID(syncID string) (*Observation, error) {
 	)
 	var o Observation
 	if err := scanObservationRow(row, &o); err != nil {
-		return nil, err
-	}
-	if err := s.CheckDatabaseGeneration(); err != nil {
 		return nil, err
 	}
 	return &o, nil
@@ -5805,6 +6009,16 @@ func (s *Store) UnenrollProject(project string) error {
 // ListEnrolledProjects returns all projects currently enrolled for cloud sync,
 // ordered alphabetically by project name.
 func (s *Store) ListEnrolledProjects() ([]EnrolledProject, error) {
+	var projects []EnrolledProject
+	err := s.withRead(func() error {
+		var err error
+		projects, err = s.listEnrolledProjectsSQL()
+		return err
+	})
+	return projects, err
+}
+
+func (s *Store) listEnrolledProjectsSQL() ([]EnrolledProject, error) {
 	rows, err := s.queryItHook(s.db,
 		`SELECT project, enrolled_at FROM sync_enrolled_projects ORDER BY project ASC`)
 	if err != nil {
@@ -5825,15 +6039,27 @@ func (s *Store) ListEnrolledProjects() ([]EnrolledProject, error) {
 
 // IsProjectEnrolled returns true if the given project is enrolled for cloud sync.
 func (s *Store) IsProjectEnrolled(project string) (bool, error) {
+	var enrolled bool
+	err := s.withRead(func() error {
+		var err error
+		enrolled, err = s.isProjectEnrolledSQL(project)
+		return err
+	})
+	return enrolled, err
+}
+
+func (s *Store) isProjectEnrolledSQL(project string) (bool, error) {
 	project, _ = NormalizeProject(project)
 	if project == "" {
 		return false, nil
 	}
 	var exists int
-	err := s.db.QueryRow(
-		`SELECT 1 FROM sync_enrolled_projects WHERE project = ? LIMIT 1`,
-		project,
-	).Scan(&exists)
+	err := s.withRead(func() error {
+		return s.db.QueryRow(
+			`SELECT 1 FROM sync_enrolled_projects WHERE project = ? LIMIT 1`,
+			project,
+		).Scan(&exists)
+	})
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -6202,15 +6428,17 @@ func (s *Store) MigrateProject(oldName, newName string) (*MigrateResult, error) 
 
 	// Check if old project has any records (short-circuit on first match)
 	var exists bool
-	err := s.db.QueryRow(
-		`SELECT EXISTS(
+	err := s.withRead(func() error {
+		return s.db.QueryRow(
+			`SELECT EXISTS(
 			SELECT 1 FROM observations WHERE project = ?
 			UNION ALL
 			SELECT 1 FROM sessions WHERE project = ?
 			UNION ALL
 			SELECT 1 FROM user_prompts WHERE project = ?
-		)`, oldName, oldName, oldName,
-	).Scan(&exists)
+			)`, oldName, oldName, oldName,
+		).Scan(&exists)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("check old project: %w", err)
 	}
@@ -6272,9 +6500,16 @@ type ProjectNameCount struct {
 // ListProjectNames returns all distinct project names from observations,
 // ordered alphabetically. Used for fuzzy matching and consolidation.
 func (s *Store) ListProjectNames() ([]string, error) {
-	if err := s.preflightRead(); err != nil {
-		return nil, err
-	}
+	var names []string
+	err := s.withRead(func() error {
+		var err error
+		names, err = s.listProjectNamesSQL()
+		return err
+	})
+	return names, err
+}
+
+func (s *Store) listProjectNamesSQL() ([]string, error) {
 	rows, err := s.queryItHook(s.db,
 		`SELECT DISTINCT project FROM observations
 		 WHERE project IS NOT NULL AND project != '' AND deleted_at IS NULL
@@ -6296,9 +6531,6 @@ func (s *Store) ListProjectNames() ([]string, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if err := s.CheckDatabaseGeneration(); err != nil {
-		return nil, err
-	}
 	return results, nil
 }
 
@@ -6314,6 +6546,16 @@ type ProjectStats struct {
 // ListProjectsWithStats returns all projects with aggregated counts.
 // Ordered by observation count descending.
 func (s *Store) ListProjectsWithStats() ([]ProjectStats, error) {
+	var projects []ProjectStats
+	err := s.withRead(func() error {
+		var err error
+		projects, err = s.listProjectsWithStatsSQL()
+		return err
+	})
+	return projects, err
+}
+
+func (s *Store) listProjectsWithStatsSQL() ([]ProjectStats, error) {
 	// Observation counts per project
 	obsRows, err := s.queryItHook(s.db,
 		`SELECT project, COUNT(*) as cnt
@@ -6430,6 +6672,16 @@ func (s *Store) ListProjectsWithStats() ([]ProjectStats, error) {
 // for the given project name. Used by handleSave for the similar-project
 // warning instead of the heavier ListProjectsWithStats.
 func (s *Store) CountObservationsForProject(name string) (int, error) {
+	var count int
+	err := s.withRead(func() error {
+		var err error
+		count, err = s.countObservationsForProjectSQL(name)
+		return err
+	})
+	return count, err
+}
+
+func (s *Store) countObservationsForProjectSQL(name string) (int, error) {
 	var count int
 	err := s.db.QueryRow(
 		`SELECT COUNT(*) FROM observations WHERE project = ? AND deleted_at IS NULL`,
@@ -6821,13 +7073,16 @@ func (s *Store) withTxUnchecked(fn func(tx *sql.Tx) error) error {
 	if err := withSQLiteWriteRetry(func() error {
 		tx, err := s.beginTxHook()
 		if err != nil {
-			return err
+			return &transactionBeginError{err: err}
 		}
 		defer tx.Rollback()
 		if err := fn(tx); err != nil {
 			return err
 		}
-		return s.commitHook(tx)
+		if err := s.commitHook(tx); err != nil {
+			return &transactionCommitError{err: err}
+		}
+		return nil
 	}); err != nil {
 		return err
 	}
@@ -6878,20 +7133,25 @@ func (s *Store) createSessionTx(tx *sql.Tx, id, project, directory string) error
 }
 
 func (s *Store) ensureSyncState(targetKey string) error {
-	_, err := s.execHook(s.db,
-		`INSERT OR IGNORE INTO sync_state (target_key, lifecycle, updated_at) VALUES (?, ?, datetime('now'))`,
-		targetKey, SyncLifecycleIdle,
-	)
-	return err
+	return s.withTx(func(tx *sql.Tx) error {
+		_, err := s.execHook(tx,
+			`INSERT OR IGNORE INTO sync_state (target_key, lifecycle, updated_at) VALUES (?, ?, datetime('now'))`,
+			targetKey, SyncLifecycleIdle,
+		)
+		return err
+	})
 }
 
 func (s *Store) getSyncState(targetKey string) (*SyncState, error) {
-	row := s.db.QueryRow(`
+	var state SyncState
+	err := s.withRead(func() error {
+		row := s.db.QueryRow(`
 		SELECT target_key, lifecycle, last_enqueued_seq, last_acked_seq, last_pulled_seq,
 		       consecutive_failures, backoff_until, lease_owner, lease_until, reason_code, reason_message, last_error, updated_at
 		FROM sync_state WHERE target_key = ?`, targetKey)
-	var state SyncState
-	if err := row.Scan(&state.TargetKey, &state.Lifecycle, &state.LastEnqueuedSeq, &state.LastAckedSeq, &state.LastPulledSeq, &state.ConsecutiveFailures, &state.BackoffUntil, &state.LeaseOwner, &state.LeaseUntil, &state.ReasonCode, &state.ReasonMessage, &state.LastError, &state.UpdatedAt); err != nil {
+		return row.Scan(&state.TargetKey, &state.Lifecycle, &state.LastEnqueuedSeq, &state.LastAckedSeq, &state.LastPulledSeq, &state.ConsecutiveFailures, &state.BackoffUntil, &state.LeaseOwner, &state.LeaseUntil, &state.ReasonCode, &state.ReasonMessage, &state.LastError, &state.UpdatedAt)
+	})
+	if err != nil {
 		return nil, err
 	}
 	return &state, nil
@@ -7086,7 +7346,9 @@ func (s *Store) projectNeedsBackfill(project string) (bool, error) {
 	}
 	for _, cq := range queries {
 		var n int
-		if err := s.db.QueryRow(cq.q, cq.args...).Scan(&n); err != nil {
+		if err := s.withRead(func() error {
+			return s.db.QueryRow(cq.q, cq.args...).Scan(&n)
+		}); err != nil {
 			return false, err
 		}
 		if n > 0 {
@@ -7148,22 +7410,24 @@ func (s *Store) EnsureEnrolledProjectSyncMutations(ctx context.Context) error {
 func (s *Store) repairEnrolledProjectSyncMutations() error {
 	// Collect enrolled projects outside a transaction so we avoid holding a read
 	// cursor open while we later write inside backfillProjectSyncMutationsTx.
-	rows, err := s.db.Query(`SELECT project FROM sync_enrolled_projects ORDER BY project ASC`)
-	if err != nil {
-		return err
-	}
 	var projects []string
-	for rows.Next() {
-		var project string
-		if err := rows.Scan(&project); err != nil {
-			return closeRowsWithError(rows, err)
+	if err := s.withRead(func() error {
+		rows, err := s.db.Query(`SELECT project FROM sync_enrolled_projects ORDER BY project ASC`)
+		if err != nil {
+			return err
 		}
-		projects = append(projects, project)
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	if err := rows.Err(); err != nil {
+		for rows.Next() {
+			var project string
+			if err := rows.Scan(&project); err != nil {
+				return closeRowsWithError(rows, err)
+			}
+			projects = append(projects, project)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		return rows.Err()
+	}); err != nil {
 		return err
 	}
 
@@ -8571,9 +8835,16 @@ func scanObservationRow(scanner observationScanner, o *Observation) error {
 }
 
 func (s *Store) queryObservations(query string, args ...any) ([]Observation, error) {
-	if err := s.preflightRead(); err != nil {
-		return nil, err
-	}
+	var observations []Observation
+	err := s.withRead(func() error {
+		var err error
+		observations, err = s.queryObservationsSQL(query, args...)
+		return err
+	})
+	return observations, err
+}
+
+func (s *Store) queryObservationsSQL(query string, args ...any) ([]Observation, error) {
 	rows, err := s.queryItHook(s.db, query, args...)
 	if err != nil {
 		return nil, err
@@ -8589,9 +8860,6 @@ func (s *Store) queryObservations(query string, args ...any) ([]Observation, err
 		results = append(results, o)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if err := s.CheckDatabaseGeneration(); err != nil {
 		return nil, err
 	}
 	return results, nil
@@ -9289,14 +9557,16 @@ func (s *Store) PassiveCapture(p PassiveCaptureParams) (*PassiveCaptureResult, e
 		// Check if this learning already exists (by content hash) within this project
 		normHash := hashNormalized(learning)
 		var existingID int64
-		err := s.db.QueryRow(
-			`SELECT id FROM observations
+		err := s.withRead(func() error {
+			return s.db.QueryRow(
+				`SELECT id FROM observations
 			 WHERE normalized_hash = ?
 			   AND ifnull(project, '') = ifnull(?, '')
 			   AND deleted_at IS NULL
 			 LIMIT 1`,
-			normHash, nullableString(p.Project),
-		).Scan(&existingID)
+				normHash, nullableString(p.Project),
+			).Scan(&existingID)
+		})
 
 		if err == nil {
 			// Already exists — skip
@@ -9392,6 +9662,16 @@ func (s *Store) ReplayDeferred() (ReplayDeferredResult, error) {
 }
 
 func (s *Store) ListDeferredProjectsForTarget(targetKey string) ([]string, error) {
+	var projects []string
+	err := s.withRead(func() error {
+		var err error
+		projects, err = s.listDeferredProjectsForTargetSQL(targetKey)
+		return err
+	})
+	return projects, err
+}
+
+func (s *Store) listDeferredProjectsForTargetSQL(targetKey string) ([]string, error) {
 	rows, err := s.db.Query(`
 		SELECT DISTINCT project
 		FROM sync_apply_deferred
@@ -9445,48 +9725,9 @@ func (s *Store) ReplayDeferredForScope(targetKey, project string) (result Replay
 	targetKey = strings.TrimSpace(targetKey)
 	project, _ = NormalizeProject(strings.TrimSpace(project))
 
-	query := `
-		SELECT sync_id, entity, payload, entity_key, op, retry_count
-		FROM sync_apply_deferred
-		WHERE apply_status = 'deferred'`
-	args := []any{}
-	if targetKey != "" {
-		query += ` AND target_key = ? AND scope_class != 'legacy_unscoped'`
-		args = append(args, normalizeSyncTargetKey(targetKey))
-	}
-	if project != "" {
-		query += ` AND project = ? AND scope_class = 'scoped'`
-		args = append(args, project)
-	}
-	query += ` ORDER BY first_seen_at LIMIT ?`
-	args = append(args, limit)
-
-	rows, err := s.db.Query(query, args...)
+	pending, err := s.listDeferredForReplay(targetKey, project, limit)
 	if err != nil {
-		return result, fmt.Errorf("ReplayDeferred: list deferred: %w", err)
-	}
-
-	type deferredRow struct {
-		syncID     string
-		entity     string
-		payload    string
-		entityKey  string
-		op         string
-		retryCount int
-	}
-
-	var pending []deferredRow
-	for rows.Next() {
-		var r deferredRow
-		if err := rows.Scan(&r.syncID, &r.entity, &r.payload, &r.entityKey, &r.op, &r.retryCount); err != nil {
-			rows.Close()
-			return result, fmt.Errorf("ReplayDeferred: scan: %w", err)
-		}
-		pending = append(pending, r)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return result, fmt.Errorf("ReplayDeferred: rows error: %w", err)
+		return result, err
 	}
 
 	for _, row := range pending {
@@ -9537,16 +9778,63 @@ func (s *Store) ReplayDeferredForScope(targetKey, project string) (result Replay
 				row.syncID, newRetry, applyErr)
 		}
 
-		if _, uErr := s.db.Exec(`
-			UPDATE sync_apply_deferred
-			SET retry_count = ?, apply_status = ?, last_error = ?, last_attempted_at = datetime('now')
-			WHERE sync_id = ?
-		`, newRetry, newStatus, applyErr.Error(), row.syncID); uErr != nil {
+		if uErr := s.withTx(func(tx *sql.Tx) error {
+			_, err := s.execHook(tx, `
+				UPDATE sync_apply_deferred
+				SET retry_count = ?, apply_status = ?, last_error = ?, last_attempted_at = datetime('now')
+				WHERE sync_id = ?
+			`, newRetry, newStatus, applyErr.Error(), row.syncID)
+			return err
+		}); uErr != nil {
 			log.Printf("[store] replayDeferred: update row sync_id=%s: %v", row.syncID, uErr)
 		}
 	}
 
 	return result, nil
+}
+
+type replayDeferredRow struct {
+	syncID     string
+	entity     string
+	payload    string
+	entityKey  string
+	op         string
+	retryCount int
+}
+
+func (s *Store) listDeferredForReplay(targetKey, project string, limit int) ([]replayDeferredRow, error) {
+	query := `SELECT sync_id, entity, payload, entity_key, op, retry_count
+		FROM sync_apply_deferred WHERE apply_status = 'deferred'`
+	args := []any{}
+	if targetKey != "" {
+		query += ` AND target_key = ? AND scope_class != 'legacy_unscoped'`
+		args = append(args, normalizeSyncTargetKey(targetKey))
+	}
+	if project != "" {
+		query += ` AND project = ? AND scope_class = 'scoped'`
+		args = append(args, project)
+	}
+	query += ` ORDER BY first_seen_at LIMIT ?`
+	args = append(args, limit)
+	var pending []replayDeferredRow
+	err := s.withRead(func() error {
+		rows, err := s.db.Query(query, args...)
+		if err != nil {
+			return fmt.Errorf("ReplayDeferred: list deferred: %w", err)
+		}
+		for rows.Next() {
+			var row replayDeferredRow
+			if err := rows.Scan(&row.syncID, &row.entity, &row.payload, &row.entityKey, &row.op, &row.retryCount); err != nil {
+				return closeRowsWithError(rows, fmt.Errorf("ReplayDeferred: scan: %w", err))
+			}
+			pending = append(pending, row)
+		}
+		if err := rows.Err(); err != nil {
+			return closeRowsWithError(rows, fmt.Errorf("ReplayDeferred: rows error: %w", err))
+		}
+		return rows.Close()
+	})
+	return pending, err
 }
 
 // CountDeferredAndDead returns global administrative totals, including legacy
@@ -9559,6 +9847,15 @@ func (s *Store) CountDeferredAndDead() (deferred, dead int, err error) {
 // project. Scoped totals exclude legacy-unscoped rows; empty filters return the
 // global administrative totals.
 func (s *Store) CountDeferredAndDeadForScope(targetKey, project string) (deferred, dead int, err error) {
+	err = s.withRead(func() error {
+		var readErr error
+		deferred, dead, readErr = s.countDeferredAndDeadForScopeSQL(targetKey, project)
+		return readErr
+	})
+	return deferred, dead, err
+}
+
+func (s *Store) countDeferredAndDeadForScopeSQL(targetKey, project string) (deferred, dead int, err error) {
 	targetKey = strings.TrimSpace(targetKey)
 	project, _ = NormalizeProject(strings.TrimSpace(project))
 	query := `
@@ -9606,6 +9903,16 @@ func (s *Store) CountDeferredAndDeadForScope(targetKey, project string) (deferre
 // and pagination. The payload field is decoded to map[string]any; on malformed
 // JSON, PayloadValid is false and PayloadRaw is preserved.
 func (s *Store) ListDeferred(opts ListDeferredOptions) ([]DeferredRow, error) {
+	var rows []DeferredRow
+	err := s.withRead(func() error {
+		var err error
+		rows, err = s.listDeferredSQL(opts)
+		return err
+	})
+	return rows, err
+}
+
+func (s *Store) listDeferredSQL(opts ListDeferredOptions) ([]DeferredRow, error) {
 	query := `
 		SELECT sync_id, entity, payload, target_key, project, scope_class, remote_seq, entity_key, op, reason_code, apply_status, retry_count,
 		       last_error, last_attempted_at, first_seen_at
@@ -9653,6 +9960,16 @@ func (s *Store) ListDeferred(opts ListDeferredOptions) ([]DeferredRow, error) {
 // GetDeferred returns a single row from sync_apply_deferred by sync_id.
 // Returns an error wrapping "not found" when no row exists (matches FindCandidates style).
 func (s *Store) GetDeferred(syncID string) (DeferredRow, error) {
+	var deferred DeferredRow
+	err := s.withRead(func() error {
+		var err error
+		deferred, err = s.getDeferredSQL(syncID)
+		return err
+	})
+	return deferred, err
+}
+
+func (s *Store) getDeferredSQL(syncID string) (DeferredRow, error) {
 	row := s.db.QueryRow(`
 		SELECT sync_id, entity, payload, target_key, project, scope_class, remote_seq, entity_key, op, reason_code, apply_status, retry_count,
 		       last_error, last_attempted_at, first_seen_at
