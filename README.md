@@ -120,11 +120,12 @@ Engram keeps memory local by default. The local SQLite database is authoritative
 | Use optional Cloud replication | [Engram Cloud](docs/engram-cloud/README.md) |
 | Diagnose or recover Cloud operations | [Cloud troubleshooting](docs/engram-cloud/troubleshooting.md) |
 
-For an existing Cloud database, use the guided upgrade sequence:
+For an existing local database, use the guided upgrade sequence. If the dry run reports changes, apply them before bootstrap; otherwise continue directly to bootstrap.
 
 ```bash
 engram cloud upgrade doctor --project <project>
 engram cloud upgrade repair --project <project> --dry-run
+engram cloud upgrade repair --project <project> --apply # only when the dry run reports changes
 engram cloud upgrade bootstrap --project <project>
 engram cloud upgrade status --project <project>
 ```
