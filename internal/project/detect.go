@@ -85,8 +85,7 @@ var noiseSet = map[string]bool{
 }
 
 const (
-	childScanEntryLimit = 20
-	childScanTimeout    = 200 * time.Millisecond
+	childScanTimeout = 200 * time.Millisecond
 )
 
 // childScanNow and childScanReadDir are test seams for bounded child scans.
@@ -349,7 +348,7 @@ func detectGitWorktreeDir(dir string) string {
 }
 
 // scanChildren scans dir at depth=1 for git repositories, skipping noise dirs,
-// hidden dirs, inspecting at most 20 entries, enforcing a 200ms timeout, and
+// hidden dirs, enforcing a 200ms timeout, and
 // short-circuiting as soon as more than one repository is found.
 // Returns the list of found git-repo paths and a boolean indicating timeout.
 func scanChildren(dir string) (repos []string, timedOut bool) {
@@ -363,9 +362,9 @@ func scanChildren(dir string) (repos []string, timedOut bool) {
 		return nil, true
 	}
 
-	for inspected := 0; inspected < childScanEntryLimit; inspected++ {
+	for {
 		// Check before each bounded read. os.ReadDir materializes the whole
-		// directory before this loop can enforce either contract limit.
+		// directory before this loop can enforce the deadline.
 		if childScanNow().After(deadline) {
 			return repos, true
 		}

@@ -14,7 +14,7 @@ All project-aware entry points MUST use the shared resolver with an explicit ope
 
 - `current`: an omitted project resolves the process override before cwd/repository detection;
 - `explicit`: a supplied project must be structurally a project name, not a path; and
-- `all`: omission intentionally leaves the filter unset.
+- `all`: an explicit all-project selector intentionally leaves the filter unset.
 
 `ENGRAM_PROJECT` and `engram mcp --project` are process overrides. They MUST reject path-like or control-character values. Operations that cannot establish a new project bucket MUST validate an explicit or process override against known store context; write flows that legitimately establish a session/project retain their documented creation and ambiguous-recovery behavior.
 
@@ -146,7 +146,7 @@ When the working directory is not in or adjacent to any git repository, the syst
 
 ### Requirement: REQ-306 Child Scan Constraints
 
-The child-directory scan MUST operate at depth=1 only, inspect at most 20 directory entries, skip hidden directories and the noise set (`node_modules`, `vendor`, `.venv`, `__pycache__`, `target`, `dist`, `build`), enforce a 200ms wall-clock timeout, and short-circuit as soon as more than 1 git repository is found.
+The child-directory scan MUST operate at depth=1 only, scan until EOF, deadline, or the second repository, skip hidden directories and the noise set (`node_modules`, `vendor`, `.venv`, `__pycache__`, `target`, `dist`, `build`), enforce a 200ms wall-clock timeout, and short-circuit as soon as more than 1 git repository is found.
 
 #### Scenario: Scan stops after finding two repos
 
@@ -171,6 +171,12 @@ The child-directory scan MUST operate at depth=1 only, inspect at most 20 direct
 - GIVEN a directory scan that would exceed 200ms (simulated via test seam)
 - WHEN `DetectProjectFull` runs the child scan
 - THEN the function returns before or at the timeout AND falls through to Case 5 (dir_basename)
+
+#### Scenario: Noise precedes a later second repository
+
+- GIVEN more than 20 non-repository or skipped child entries, one repository, and a later second repository
+- WHEN `DetectProjectFull` runs the child scan before its deadline
+- THEN it returns `ErrAmbiguousProject` with both repository names rather than auto-promoting the first repository
 
 ---
 
@@ -250,7 +256,7 @@ When `resolveWriteProject` returns `ErrAmbiguousProject`, write tool handlers MU
 
 ### Requirement: REQ-310 Read Tools Accept Supported Optional project Field
 
-The MCP read tools that expose project-scoped list/search behavior (`mem_search`, `mem_context`, `mem_timeline`, `mem_stats`, `mem_doctor`) MUST include `project` as an OPTIONAL field in their JSON schema. When `project` is omitted or empty, `current` mode applies the process override before auto-detection via `DetectProjectFull`. `mem_context` omission is therefore current-project scoped, except its existing cross-project personal-scope rule. `mem_get_observation` is ID-based and does not accept a project override; it resolves project only for response metadata and may use a plain-text degraded response when cwd is ambiguous.
+The MCP read tools that expose project-scoped list/search behavior (`mem_search`, `mem_context`, `mem_timeline`, `mem_stats`, `mem_doctor`) MUST include `project` as an OPTIONAL field in their JSON schema. When `project` is omitted or empty, `current` mode applies the process override before auto-detection via `DetectProjectFull`. `mem_context` omission is therefore current-project scoped, except its existing cross-project personal-scope rule. `mem_get_observation` is ID-based and does not accept a project override; it resolves project for response metadata and returns the same structured ambiguity-recovery envelope as other project-aware reads when cwd resolution is ambiguous.
 
 #### Scenario: Omitted project falls back to auto-detect
 
@@ -334,7 +340,7 @@ The system MUST register a new `mem_current_project` tool that returns `{project
 
 ### Requirement: REQ-314 Standardized Response Envelope
 
-Project-aware MCP responses SHOULD include `project`, `project_source`, and `project_path` fields reflecting the resolved project used. Plain-text admin tools that do not participate in project resolution (`mem_delete`, `mem_merge_projects`), raw diagnostic reports (`mem_doctor`), and documented degraded/plain-text paths such as ambiguous-cwd `mem_get_observation` are exempt. Error responses MUST include `available_projects` whenever the error relates to project resolution.
+Project-aware MCP responses SHOULD include `project`, `project_source`, and `project_path` fields reflecting the resolved project used. Plain-text admin tools that do not participate in project resolution (`mem_delete`, `mem_merge_projects`) and raw diagnostic reports (`mem_doctor`) are exempt. Error responses MUST include `available_projects` whenever the error relates to project resolution.
 
 #### Scenario: Successful project-aware tool response includes project metadata
 
@@ -392,6 +398,31 @@ Project-aware MCP responses SHOULD include `project`, `project_source`, and `pro
 
 ---
 
+### Requirement: CLI and HTTP Scoped Read Parity
+
+Project-aware CLI and HTTP read families MUST use `current` when project selection is omitted. A caller MUST select global data explicitly with `--all` (CLI) or `all_projects=true` (HTTP; conflict scan accepts the equivalent structured body field). `--project` / `project` selects one known project and MUST be rejected when combined with the all-project selector. `engram context` MUST continue to accept one positional project as a compatibility alias for `--project` and reject multiple or conflicting project selectors. Invalid selectors, unknown explicit projects, and ambiguous current detection MUST use the shared resolver's existing error contract before a read or mutation occurs.
+
+The scoped families include search, timeline, context, stats, export, Obsidian export, conflict list/stats/scan, recent sessions, recent observations, review, recent/search prompts, and sync status. Timeline and review mutation MUST reject a focus observation outside the resolved project. `sync --all` remains an explicit global sync operation. Sync status MUST reject `all_projects=true` with a structured 4xx `unsupported_project_scope` response because its provider accepts only one project and cannot aggregate status.
+
+#### Scenario: Omitted HTTP read uses current project
+
+- GIVEN records belonging to two projects and a resolvable current project
+- WHEN a scoped HTTP read omits both `project` and `all_projects`
+- THEN the response contains only records from the current project
+
+#### Scenario: Explicit all remains global for aggregate-capable reads
+
+- GIVEN records belonging to two projects
+- WHEN an aggregate-capable scoped CLI read uses `--all` or an HTTP read uses `all_projects=true`
+- THEN the response is global and no cwd or process override narrows it
+
+#### Scenario: Sync status rejects explicit all
+
+- WHEN `GET /sync/status?all_projects=true` is called
+- THEN it returns HTTP 400 with `code: "unsupported_project_scope"` and does not consult its single-project provider
+
+---
+
 ## Test Seam Summary
 
 | REQ | Test Functions | File |
@@ -412,4 +443,5 @@ Project-aware MCP responses SHOULD include `project`, `project_source`, and `pro
 | REQ-313 | `TestMemCurrentProject_NormalResult`, `TestMemCurrentProject_AmbiguousNoError`, `TestMemCurrentProject_WarningCase3` | `internal/mcp/mcp_test.go` |
 | REQ-314 | `TestAllTools_ReadResponseEnvelope_WithAssertions`, `TestErrorEnvelope_IncludesAvailableProjects` | `internal/mcp/mcp_test.go` |
 | REQ-315 | `TestProjectExists_Known`, `TestProjectExists_Unknown`, `TestProjectExists_EmptyStore` | `internal/store/store_test.go` |
-| REQ-316 | `TestProjectCurrentAmbiguousUsesDiscoveryEnvelope`, `TestProjectScopedRoutesReportStructuredAmbiguity` | `internal/server/server_test.go` |
+| REQ-316 | `TestProjectCurrentAmbiguousUsesDiscoveryEnvelope`, `TestProjectScopedRoutesReportStructuredAmbiguity`, `TestSyncStatusResolvesProjectSelectors` | `internal/server/server_test.go` |
+| REQ-317 | `TestProjectScopedCLIReadFamiliesUseCurrentAndExplicitAll`, `TestCmdContextRejectsConflictingProjectSelectors` | `cmd/engram/main_test.go` |

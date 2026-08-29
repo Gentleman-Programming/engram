@@ -178,17 +178,14 @@ func TestCmdConflictsList_HappyPath(t *testing.T) {
 	}
 }
 
-// TestCmdConflictsList_EmptyProject verifies that when there are no relations for
-// a project, the command exits 0 and indicates zero results.
-func TestCmdConflictsList_EmptyProject(t *testing.T) {
+// TestCmdConflictsList_UnknownProject verifies explicit selectors are validated.
+func TestCmdConflictsList_UnknownProject(t *testing.T) {
 	cfg := testConfig(t)
 	withArgs(t, "engram", "conflicts", "list", "--project", "no-such-project")
-	stdout, stderr := captureOutput(t, func() { cmdConflicts(cfg) })
-	if stderr != "" {
-		t.Fatalf("unexpected stderr: %q", stderr)
-	}
-	if !strings.Contains(stdout, "0") && !strings.Contains(strings.ToLower(stdout), "no relations") {
-		t.Errorf("expected zero-results indication; got: %q", stdout)
+	stubExitWithPanic(t)
+	_, stderr, recovered := captureOutputAndRecover(t, func() { cmdConflicts(cfg) })
+	if recovered == nil || !strings.Contains(stderr, "unknown project") {
+		t.Fatalf("unknown explicit project must fail before listing: stderr=%q panic=%v", stderr, recovered)
 	}
 }
 
@@ -205,6 +202,30 @@ func TestCmdConflictsStats_HappyPath(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(stdout), "pending") {
 		t.Errorf("expected stats output to mention 'pending'; got: %q", stdout)
+	}
+}
+
+func TestCmdConflictsSelectorsUseCurrentAndExplicitAll(t *testing.T) {
+	cfg := testConfig(t)
+	seedRelation(t, cfg, "alpha")
+	seedRelation(t, cfg, "beta")
+	t.Setenv("ENGRAM_PROJECT", "alpha")
+
+	withArgs(t, "engram", "conflicts", "list")
+	current, stderr := captureOutput(t, func() { cmdConflicts(cfg) })
+	if stderr != "" || !strings.Contains(current, "project: alpha") || strings.Contains(current, "project: beta") {
+		t.Fatalf("current conflicts list must be alpha-only: stdout=%q stderr=%q", current, stderr)
+	}
+	withArgs(t, "engram", "conflicts", "list", "--all")
+	all, stderr := captureOutput(t, func() { cmdConflicts(cfg) })
+	if stderr != "" || !strings.Contains(all, "Total:  2") {
+		t.Fatalf("all conflicts list must include both relations: stdout=%q stderr=%q", all, stderr)
+	}
+
+	withArgs(t, "engram", "conflicts", "stats", "--all")
+	stats, stderr := captureOutput(t, func() { cmdConflicts(cfg) })
+	if stderr != "" || !strings.Contains(stats, "pending") {
+		t.Fatalf("all conflicts stats must be global: stdout=%q stderr=%q", stats, stderr)
 	}
 }
 
@@ -487,6 +508,7 @@ func TestCmdMain_ConflictsWired(t *testing.T) {
 // FTS scores are all below floor) but asserts the command never errors.
 func TestG1_ConflictsLifecycle_EmptyThenScanThenList(t *testing.T) {
 	cfg := testConfig(t)
+	mustSeedObservation(t, cfg, "ses-g1-initial", "g1proj", "note", "Initial observation", "Establishes the project without creating a relation.", "project")
 
 	// Step 1 — list with no relations should report zero.
 	withArgs(t, "engram", "conflicts", "list", "--project", "g1proj")
@@ -696,6 +718,7 @@ func TestResolveAgentRunner_InvalidName(t *testing.T) {
 func TestCmdConflictsScan_SemanticFlagNoEnv(t *testing.T) {
 	cfg := testConfig(t)
 	t.Setenv("ENGRAM_AGENT_CLI", "")
+	mustSeedObservation(t, cfg, "semantic-no-env", "noproj", "note", "Known project", "content", "project")
 
 	// factory must NOT be called when env is empty.
 	factoryCalled := false

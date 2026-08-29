@@ -607,7 +607,7 @@ func TestDetectProjectFull_Case4_MultiChild(t *testing.T) {
 	}
 }
 
-func TestDetectProjectFull_ChildScanStopsAtEntryBudget(t *testing.T) {
+func TestDetectProjectFull_ChildScanFindsLaterSecondRepository(t *testing.T) {
 	parent := t.TempDir()
 	for _, name := range []string{"a-repo", "z-repo"} {
 		child := filepath.Join(parent, name)
@@ -616,7 +616,7 @@ func TestDetectProjectFull_ChildScanStopsAtEntryBudget(t *testing.T) {
 		}
 		initGit(t, child)
 	}
-	for i := 1; i <= 19; i++ {
+	for i := 1; i <= 25; i++ {
 		if err := os.Mkdir(filepath.Join(parent, fmt.Sprintf("noise-%02d", i)), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -624,8 +624,11 @@ func TestDetectProjectFull_ChildScanStopsAtEntryBudget(t *testing.T) {
 
 	res := DetectProjectFull(parent)
 
-	if res.Error != nil || res.Source != SourceGitChild || res.Project != "a-repo" {
-		t.Fatalf("result = %+v, want in-budget git_child a-repo", res)
+	if !errors.Is(res.Error, ErrAmbiguousProject) {
+		t.Fatalf("result error = %v, want ErrAmbiguousProject", res.Error)
+	}
+	if !reflect.DeepEqual(res.AvailableProjects, []string{"a-repo", "z-repo"}) {
+		t.Fatalf("available projects = %q, want both repositories", res.AvailableProjects)
 	}
 }
 
@@ -884,19 +887,19 @@ func TestDetectProject_AmbiguousEmpty(t *testing.T) {
 	}
 }
 
-func TestChildScan_EntryLimitDoesNotReadPastBudget(t *testing.T) {
+func TestChildScan_ContinuesPastNoiseUntilSecondRepository(t *testing.T) {
 	parent := t.TempDir()
 	firstRepo := filepath.Join(parent, "01-repo")
 	if err := os.MkdirAll(filepath.Join(firstRepo, ".git"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < childScanEntryLimit-1; i++ {
+	for i := 0; i < 25; i++ {
 		if err := os.Mkdir(filepath.Join(parent, fmt.Sprintf("%02d-plain", i+2)), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	beyondBudgetRepo := filepath.Join(parent, "zz-repo")
-	if err := os.MkdirAll(filepath.Join(beyondBudgetRepo, ".git"), 0o755); err != nil {
+	secondRepo := filepath.Join(parent, "zz-repo")
+	if err := os.MkdirAll(filepath.Join(secondRepo, ".git"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -904,7 +907,7 @@ func TestChildScan_EntryLimitDoesNotReadPastBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := len(entries), childScanEntryLimit+1; got != want {
+	if got, want := len(entries), 27; got != want {
 		t.Fatalf("fixture entries = %d, want %d", got, want)
 	}
 	oldReadDir := childScanReadDir
@@ -926,11 +929,11 @@ func TestChildScan_EntryLimitDoesNotReadPastBudget(t *testing.T) {
 	if timedOut {
 		t.Fatal("bounded scan unexpectedly timed out")
 	}
-	if got, want := reads, childScanEntryLimit; got != want {
-		t.Fatalf("ReadDir calls = %d, want entry budget %d", got, want)
+	if got, want := reads, len(entries); got != want {
+		t.Fatalf("ReadDir calls = %d, want all %d entries through the second repository", got, want)
 	}
-	if got, want := repos, []string{firstRepo}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("repos = %q, want only in-budget repo %q", got, want)
+	if got, want := repos, []string{firstRepo, secondRepo}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("repos = %q, want both repositories %q", got, want)
 	}
 }
 

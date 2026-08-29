@@ -62,6 +62,10 @@ For other docs:
 
 ## HTTP API Endpoints
 
+### Project-scoped read migration
+
+Project-aware reads resolve an omitted project to the canonical current project: explicit `project`, then `ENGRAM_PROJECT`, then cwd detection. To read across every project, pass `all_projects=true`; do not combine it with `project`. CLI counterparts use `--all`. This intentionally replaces formerly implicit-global behavior for recent lists, review, prompts, export, stats, and conflict inspection. `GET /sync/status` resolves and validates one current or explicit project but rejects `all_projects=true` because its provider cannot aggregate project status.
+
 Engram exposes two different runtimes. Keep routes split by runtime:
 
 - **Local runtime (`engram serve`, JSON on `127.0.0.1:7437`)**
@@ -123,7 +127,7 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 
 - `POST /sessions` — Create session. Body: `{id, project, directory}`
 - `POST /sessions/{id}/end` — End session. Body: `{summary}`
-- `GET /sessions/recent` — Recent sessions. Query: `?project=X&limit=N`
+- `GET /sessions/recent` — Recent sessions. Query: `?project=X&all_projects=true&limit=N`
 - `GET /sessions/{id}` — Get single session by ID
 - `DELETE /sessions/{id}` — Delete session
   - `200` when deleted
@@ -135,8 +139,8 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 
 - `POST /observations` — Add observation. Body: `{session_id, type, title, content, tool_name?, project?, scope?, topic_key?}`
   - `400` when `title` or `content` is missing, empty, or whitespace-only. The observation-create paths (`engram save`, `mem_save`, `POST /observations`) enforce the same title rule because cloud sync rejects observation upserts without a title, and one rejected mutation blocks every later mutation for the project
-- `GET /observations` — Recent observations compatibility endpoint. Query: `?project=X&scope=project|personal|global&limit=N&sort=created_at:desc`
-- `GET /observations/recent` — Recent observations. Query: `?project=X&scope=project|personal|global&limit=N`
+- `GET /observations` — Recent observations compatibility endpoint. Query: `?project=X&all_projects=true&scope=project|personal|global&limit=N&sort=created_at:desc`
+- `GET /observations/recent` — Recent observations. Query: `?project=X&all_projects=true&scope=project|personal|global&limit=N`
 - `GET /observations/{id}` — Get single observation by ID
 - `PATCH /observations/{id}` — Update fields. Body: `{title?, content?, type?, project?, scope?, topic_key?}`
   - `400` when `title` or `content` is provided but empty or whitespace-only. Omitting a field leaves its current value unchanged
@@ -146,7 +150,7 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 
 ### Review
 
-- `GET /review` — List observations due for local review. Query: `?project=X&limit=N`
+- `GET /review` — List observations due for local review. Query: `?project=X&all_projects=true&limit=N`
 - `POST /review/mark_reviewed` — Reset one observation's local review cycle. Body: `{observation_id}`; legacy `{id}` is accepted.
   - `200` with the refreshed observation payload when marked reviewed
   - `400` when `observation_id`/`id` is missing or the JSON body is invalid
@@ -164,8 +168,8 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 ### Prompts
 
 - `POST /prompts` — Save user prompt. Body: `{session_id, content, project?}`
-- `GET /prompts/recent` — Recent prompts. Query: `?project=X&limit=N`
-- `GET /prompts/search` — Search prompts. Query: `?q=QUERY&project=X&limit=N`
+- `GET /prompts/recent` — Recent prompts. Query: `?project=X&all_projects=true&limit=N`
+- `GET /prompts/search` — Search prompts. Query: `?q=QUERY&project=X&all_projects=true&limit=N`
 - `DELETE /prompts/{id}` — Delete prompt
   - `200` when deleted
   - `400` for invalid prompt id
@@ -182,14 +186,14 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 
 ### Export / Import
 
-- `GET /export` — Export all data as JSON
-  - Optional `?project=<name>` for project-scoped export
-  - `400` when `project` is provided but blank/whitespace
+- `GET /export` — Export current-project data as JSON
+  - Optional `?project=<name>` selects a known project; `?all_projects=true` exports every project
+  - `400` for blank, malformed, or conflicting selectors
 - `POST /import` — Import data from JSON. Body: ExportData JSON
 
 ### Stats / Diagnostics
 
-- `GET /stats` — Memory statistics
+- `GET /stats` — Current-project memory statistics. Use `?project=<name>` or `?all_projects=true` to select scope.
 - `GET /doctor` — Read-only operational diagnostics. Query: `?project=X&check=CHECK_CODE`
   - Returns the same diagnostic report envelope as `engram doctor --json` and MCP `mem_doctor`
   - `project` and `check` are optional; omitted `project` uses current project detection
@@ -217,7 +221,7 @@ These endpoints are served by `engram serve` on the local runtime only. They are
 
 List `memory_relations` rows with optional filters.
 
-Query params: `project` (string), `status` (string — raw `judgment_status`, currently `pending` | `judged` | `orphaned` | `ignored`), `since` (RFC3339), `limit` (int, default 50, max 500 — silently clamped), `offset` (int, default 0).
+Query params: `project` (string), `all_projects=true` (explicit global scope), `status` (string — raw `judgment_status`, currently `pending` | `judged` | `orphaned` | `ignored`), `since` (RFC3339), `limit` (int, default 50, max 500 — silently clamped), `offset` (int, default 0).
 
 Response:
 
@@ -312,7 +316,7 @@ Get full detail for one relation row, including source and target observation sn
 
 #### GET /conflicts/stats
 
-Aggregate counts for the project (or global when `project` query param is omitted).
+Aggregate counts for the current project, an explicit project, or every project when `all_projects=true`.
 
 Response:
 
@@ -360,7 +364,7 @@ Request body:
 - `concurrency` — worker pool size for parallel LLM calls when `semantic: true` (default 5, range 1–20)
 - `timeout_per_call_seconds` — per-LLM-call timeout in seconds when `semantic: true` (default 60, range 1–600)
 - `max_semantic` — hard cap on LLM calls per scan (default 100); scan stops collecting new pairs once reached
-- Missing `project` field returns `400`
+- Omitted `project` resolves the current project; `all_projects:true` explicitly scans every project
 - With `semantic: true`, `concurrency` outside [1, 20] or `timeout_per_call_seconds` outside [1, 600] returns `400`
 
 Response:
@@ -457,6 +461,7 @@ Response:
 
 - `GET /sync/status` — Runtime sync-state status for the local node (`engram serve` only).
 - In `engram serve`, sync status is wired to persisted SQLite sync state (project-scoped for detected/current project).
+- `?project=<name>` selects one known project; `?all_projects=true` returns HTTP 400 with `code: "unsupported_project_scope"`.
 - Response fields when provider is injected:
   - `enabled`
   - `phase`

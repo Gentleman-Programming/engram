@@ -405,7 +405,7 @@ Examples:
 				mcp.WithNumber("observation_id", mcp.Description("Observation id for action=mark_reviewed.")),
 				mcp.WithNumber("id", mcp.Description("Backward-compatible alias for observation_id.")),
 			),
-			queuedWriteHandler(writeQueue, handleReview(s, cfg)),
+			queuedWriteHandler(writeQueue, handleReview(s, cfg, activity)),
 		)
 	}
 
@@ -605,7 +605,7 @@ Examples:
 					mcp.Description("The observation ID to retrieve"),
 				),
 			),
-			handleGetObservation(s, cfg),
+			handleGetObservation(s, cfg, activity),
 		)
 	}
 
@@ -1445,7 +1445,8 @@ func handleUpdate(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 	}
 }
 
-func handleReview(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
+func handleReview(s *store.Store, cfg MCPConfig, activities ...*SessionActivity) server.ToolHandlerFunc {
+	activity := recoveryActivity(activities)
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		action, _ := req.GetArguments()["action"].(string)
 		switch strings.TrimSpace(action) {
@@ -1518,6 +1519,10 @@ func handleReview(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 			if id == 0 {
 				return mcp.NewToolResultError("observation_id is required for mark_reviewed"), nil
 			}
+			detRes, detErr := resolveReadProjectWithProcessOverride(s, "", cfg.DefaultProject)
+			if detErr != nil {
+				return readProjectErrorResult(activity, detRes, detErr), nil
+			}
 			if err := s.MarkReviewed(id); err != nil {
 				return mcp.NewToolResultError("Failed to mark reviewed: " + err.Error()), nil
 			}
@@ -1529,12 +1534,7 @@ func handleReview(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 			if obs.ReviewAfter != nil {
 				extra["review_after"] = *obs.ReviewAfter
 			}
-			detRes, detErr := resolveReadProjectWithProcessOverride(s, "", cfg.DefaultProject)
 			msg := fmt.Sprintf("Memory marked reviewed: #%d %q (%s)", obs.ID, obs.Title, obs.Type)
-			if detErr != nil {
-				out, _ := jsonMarshal(map[string]any{"result": msg, "id": obs.ID, "sync_id": obs.SyncID, "state": obs.State()})
-				return mcp.NewToolResultText(string(out)), nil
-			}
 			return respondWithProject(detRes, msg, extra), nil
 
 		default:
@@ -1814,7 +1814,8 @@ func handleTimeline(s *store.Store, cfg MCPConfig, activities ...*SessionActivit
 }
 
 // handleGetObservation returns a tool handler function for mem_get_observation.
-func handleGetObservation(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
+func handleGetObservation(s *store.Store, cfg MCPConfig, activities ...*SessionActivity) server.ToolHandlerFunc {
+	activity := recoveryActivity(activities)
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		id := int64(intArg(req, "id", 0))
 		if id == 0 {
@@ -1827,8 +1828,7 @@ func handleGetObservation(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc 
 		}
 
 		// Resolve project from process override/cwd (REQ-310, REQ-314). No per-call
-		// override possible for get-by-ID. Tolerant: don't fail the fetch on
-		// resolution error; degrade to plain text.
+		// override is possible for get-by-ID.
 		detRes, detErr := resolveReadProjectWithProcessOverride(s, "", cfg.DefaultProject)
 
 		obsProject := ""
@@ -1855,9 +1855,7 @@ func handleGetObservation(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc 
 		)
 
 		if detErr != nil {
-			// Degraded path: resolution failed (e.g. ambiguous cwd). Return
-			// the observation content without envelope rather than erroring.
-			return mcp.NewToolResultText(result), nil
+			return readProjectErrorResult(activity, detRes, detErr), nil
 		}
 		return respondWithProject(detRes, result, nil), nil
 	}
@@ -2903,14 +2901,29 @@ func writeProjectErrorResult(activity *SessionActivity, sessionID string, res pr
 // In particular, callers need the detected candidates and short-lived recovery
 // context rather than an opaque tool error that discards the resolver result.
 func readProjectErrorResult(activity *SessionActivity, res projectpkg.DetectionResult, err error) *mcp.CallToolResult {
+	var result *mcp.CallToolResult
 	var unknownProjectErr *unknownProjectError
 	if errors.As(err, &unknownProjectErr) {
-		return errorWithMeta("unknown_project",
+		result = errorWithMeta("unknown_project",
 			fmt.Sprintf("Project %q not found in store", unknownProjectErr.Name),
 			unknownProjectErr.AvailableProjects,
 		)
+	} else {
+		result = writeProjectErrorResult(activity, defaultSessionID(""), res, err)
 	}
-	return writeProjectErrorResult(activity, defaultSessionID(""), res, err)
+	addErrorMetadata(result, map[string]any{
+		"project":        res.Project,
+		"project_source": res.Source,
+		"project_path":   res.Path,
+	})
+	return result
+}
+
+func recoveryActivity(activities []*SessionActivity) *SessionActivity {
+	if len(activities) > 0 && activities[0] != nil {
+		return activities[0]
+	}
+	return NewSessionActivity(10 * time.Minute)
 }
 
 func addErrorMetadata(result *mcp.CallToolResult, metadata map[string]any) {

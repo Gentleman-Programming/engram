@@ -103,7 +103,9 @@ var (
 	}
 	storeFormatContext = func(s *store.Store, project, scope string) (string, error) { return s.FormatContext(project, scope) }
 	storeStats         = func(s *store.Store) (*store.Stats, error) { return s.Stats() }
+	storeStatsProject  = func(s *store.Store, project string) (*store.Stats, error) { return s.StatsProject(project) }
 	storeExport        = func(s *store.Store) (*store.ExportData, error) { return s.Export() }
+	storeExportProject = func(s *store.Store, project string) (*store.ExportData, error) { return s.ExportProject(project) }
 	jsonMarshalIndent  = json.MarshalIndent
 	runDiagnostics     = func(ctx context.Context, s *store.Store, project, check string) (diagnostic.Report, error) {
 		runner := diagnostic.NewRunner()
@@ -154,6 +156,17 @@ var (
 // valid before a repository has written its first memory.
 func resolveCLIProject(s *store.Store, explicit string, requireKnownOverrides bool) (string, error) {
 	return resolveCLIProjectWithDetector(s, explicit, requireKnownOverrides, detectProjectFull)
+}
+
+func resolveCLIProjectScope(s *store.Store, explicit string, all, requireKnownOverrides bool) (string, error) {
+	if all {
+		if strings.TrimSpace(explicit) != "" {
+			return "", fmt.Errorf("--all and --project cannot be used together")
+		}
+		resolved, err := project.Resolve(project.ResolutionOptions{Mode: project.ResolutionAll})
+		return resolved.Project, err
+	}
+	return resolveCLIProject(s, explicit, requireKnownOverrides)
 }
 
 func resolveCLIProjectWithDetector(s *store.Store, explicit string, requireKnownOverrides bool, detect func(string) project.DetectionResult) (string, error) {
@@ -957,13 +970,14 @@ func cmdTUI(cfg store.Config) {
 
 func cmdSearch(cfg store.Config) {
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "usage: engram search <query> [--type TYPE] [--project PROJECT] [--scope SCOPE] [--limit N]")
+		fmt.Fprintln(os.Stderr, "usage: engram search <query> [--type TYPE] [--project PROJECT|--all] [--scope SCOPE] [--limit N]")
 		exitFunc(1)
 	}
 
 	// Collect the query (everything that's not a flag)
 	var queryParts []string
 	opts := store.SearchOptions{Limit: 10}
+	allProjects := false
 
 	for i := 2; i < len(os.Args); i++ {
 		switch os.Args[i] {
@@ -977,6 +991,8 @@ func cmdSearch(cfg store.Config) {
 				opts.Project = os.Args[i+1]
 				i++
 			}
+		case "--all":
+			allProjects = true
 		case "--limit":
 			if i+1 < len(os.Args) {
 				if n, err := strconv.Atoi(os.Args[i+1]); err == nil {
@@ -1006,21 +1022,12 @@ func cmdSearch(cfg store.Config) {
 		return
 	}
 	defer s.Close()
-	if strings.TrimSpace(opts.Project) == "" {
-		resolved, resolveErr := resolveCLIProject(s, "", true)
-		if resolveErr != nil {
-			fatal(resolveErr)
-			return
-		}
-		opts.Project = resolved
-	} else {
-		resolved, resolveErr := resolveCLIProject(s, opts.Project, true)
-		if resolveErr != nil {
-			fatal(resolveErr)
-			return
-		}
-		opts.Project = resolved
+	resolved, resolveErr := resolveCLIProjectScope(s, opts.Project, allProjects, true)
+	if resolveErr != nil {
+		fatal(resolveErr)
+		return
 	}
+	opts.Project = resolved
 
 	results, err := storeSearch(s, query, opts)
 	if err != nil {
@@ -1309,7 +1316,7 @@ func cmdDeleteProject(cfg store.Config) {
 
 func cmdTimeline(cfg store.Config) {
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "usage: engram timeline <observation_id> [--before N] [--after N]")
+		fmt.Fprintln(os.Stderr, "usage: engram timeline <observation_id> [--before N] [--after N] [--project PROJECT|--all]")
 		exitFunc(1)
 	}
 
@@ -1320,6 +1327,8 @@ func cmdTimeline(cfg store.Config) {
 	}
 
 	before, after := 5, 5
+	projectName := ""
+	allProjects := false
 	for i := 3; i < len(os.Args); i++ {
 		switch os.Args[i] {
 		case "--before":
@@ -1336,6 +1345,13 @@ func cmdTimeline(cfg store.Config) {
 				}
 				i++
 			}
+		case "--project":
+			if i+1 < len(os.Args) {
+				projectName = os.Args[i+1]
+				i++
+			}
+		case "--all":
+			allProjects = true
 		}
 	}
 
@@ -1344,6 +1360,22 @@ func cmdTimeline(cfg store.Config) {
 		fatal(err)
 	}
 	defer s.Close()
+	resolved, resolveErr := resolveCLIProjectScope(s, projectName, allProjects, true)
+	if resolveErr != nil {
+		fatal(resolveErr)
+		return
+	}
+	if resolved != "" {
+		focus, err := s.GetObservation(obsID)
+		if err != nil {
+			fatal(err)
+			return
+		}
+		if focus.Project == nil || !strings.EqualFold(strings.TrimSpace(*focus.Project), resolved) {
+			fatal(errors.New("observation not found in resolved project"))
+			return
+		}
+	}
 
 	result, err := storeTimeline(s, obsID, before, after)
 	if err != nil {
@@ -1384,21 +1416,59 @@ func cmdTimeline(cfg store.Config) {
 }
 
 func cmdContext(cfg store.Config) {
-	project := ""
+	projectName := ""
+	legacyProject := ""
 	scope := ""
+	projectFlagSeen := false
+	allProjects := false
 
 	for i := 2; i < len(os.Args); i++ {
 		switch os.Args[i] {
+		case "--project":
+			if i+1 >= len(os.Args) || strings.TrimSpace(os.Args[i+1]) == "" {
+				fatal(errors.New("context project selector requires a value"))
+				return
+			}
+			if projectFlagSeen {
+				fatal(errors.New("context project selector may only be specified once"))
+				return
+			}
+			projectName = os.Args[i+1]
+			projectFlagSeen = true
+			i++
+		case "--all":
+			if allProjects {
+				fatal(errors.New("context all-project selector may only be specified once"))
+				return
+			}
+			allProjects = true
 		case "--scope":
 			if i+1 < len(os.Args) {
 				scope = os.Args[i+1]
 				i++
 			}
 		default:
-			if project == "" {
-				project = os.Args[i]
+			if strings.HasPrefix(os.Args[i], "-") {
+				fatal(fmt.Errorf("unknown context flag: %s", os.Args[i]))
+				return
 			}
+			if legacyProject != "" {
+				fatal(errors.New("context project selector may only be specified once"))
+				return
+			}
+			legacyProject = os.Args[i]
 		}
+	}
+	if projectFlagSeen && legacyProject != "" {
+		fatal(errors.New("context project selector cannot combine legacy positional project with --project"))
+		return
+	}
+	if allProjects && (projectFlagSeen || legacyProject != "") {
+		fatal(errors.New("context all-project selector cannot be combined with a project selector"))
+		return
+	}
+	if legacyProject != "" {
+		projectName = legacyProject
 	}
 
 	s, err := storeNew(cfg)
@@ -1406,7 +1476,7 @@ func cmdContext(cfg store.Config) {
 		fatal(err)
 	}
 	defer s.Close()
-	resolved, resolveErr := resolveCLIProject(s, project, true)
+	resolved, resolveErr := resolveCLIProjectScope(s, projectName, allProjects, true)
 	if resolveErr != nil {
 		fatal(resolveErr)
 		return
@@ -1426,13 +1496,34 @@ func cmdContext(cfg store.Config) {
 }
 
 func cmdStats(cfg store.Config) {
+	projectName := ""
+	allProjects := false
+	for i := 2; i < len(os.Args); i++ {
+		switch os.Args[i] {
+		case "--project":
+			if i+1 < len(os.Args) {
+				projectName = os.Args[i+1]
+				i++
+			}
+		case "--all":
+			allProjects = true
+		}
+	}
 	s, err := storeNew(cfg)
 	if err != nil {
 		fatal(err)
 	}
 	defer s.Close()
 
+	resolved, resolveErr := resolveCLIProjectScope(s, projectName, allProjects, true)
+	if resolveErr != nil {
+		fatal(resolveErr)
+		return
+	}
 	stats, err := storeStats(s)
+	if resolved != "" {
+		stats, err = storeStatsProject(s, resolved)
+	}
 	if err != nil {
 		fatal(err)
 	}
@@ -1452,8 +1543,22 @@ func cmdStats(cfg store.Config) {
 
 func cmdExport(cfg store.Config) {
 	outFile := "engram-export.json"
-	if len(os.Args) > 2 {
-		outFile = os.Args[2]
+	projectName := ""
+	allProjects := false
+	for i := 2; i < len(os.Args); i++ {
+		switch os.Args[i] {
+		case "--project":
+			if i+1 < len(os.Args) {
+				projectName = os.Args[i+1]
+				i++
+			}
+		case "--all":
+			allProjects = true
+		default:
+			if !strings.HasPrefix(os.Args[i], "-") {
+				outFile = os.Args[i]
+			}
+		}
 	}
 
 	s, err := storeNew(cfg)
@@ -1462,7 +1567,15 @@ func cmdExport(cfg store.Config) {
 	}
 	defer s.Close()
 
+	resolved, resolveErr := resolveCLIProjectScope(s, projectName, allProjects, true)
+	if resolveErr != nil {
+		fatal(resolveErr)
+		return
+	}
 	data, err := storeExport(s)
+	if resolved != "" {
+		data, err = storeExportProject(s, resolved)
+	}
 	if err != nil {
 		fatal(err)
 	}
@@ -1747,9 +1860,17 @@ func printSyncUsage() {
 
 // storeAdapter wraps *store.Store to satisfy obsidian.StoreReader.
 // The real store.Stats() returns (*store.Stats, error); the interface expects *store.Stats.
-type storeAdapter struct{ s *store.Store }
+type storeAdapter struct {
+	s       *store.Store
+	project string
+}
 
-func (a *storeAdapter) Export() (*store.ExportData, error) { return a.s.Export() }
+func (a *storeAdapter) Export() (*store.ExportData, error) {
+	if a.project != "" {
+		return a.s.ExportProject(a.project)
+	}
+	return a.s.Export()
+}
 func (a *storeAdapter) Stats() *store.Stats {
 	st, _ := a.s.Stats()
 	return st
@@ -1766,6 +1887,7 @@ func cmdObsidianExport(cfg store.Config) {
 		graphConfig string
 		watch       bool
 		interval    string
+		allProjects bool
 	)
 
 	for i := 2; i < len(os.Args); i++ {
@@ -1780,6 +1902,8 @@ func cmdObsidianExport(cfg store.Config) {
 				project = os.Args[i+1]
 				i++
 			}
+		case "--all":
+			allProjects = true
 		case "--limit":
 			if i+1 < len(os.Args) {
 				if n, err := strconv.Atoi(os.Args[i+1]); err == nil {
@@ -1883,8 +2007,16 @@ func cmdObsidianExport(cfg store.Config) {
 		fatal(err)
 	}
 	defer s.Close()
+	resolved, resolveErr := resolveCLIProjectScope(s, project, allProjects, true)
+	if resolveErr != nil {
+		fatal(resolveErr)
+		return
+	}
+	if resolved != "" {
+		exportCfg.Project = resolved
+	}
 
-	exp := newObsidianExporter(&storeAdapter{s: s}, exportCfg)
+	exp := newObsidianExporter(&storeAdapter{s: s, project: resolved}, exportCfg)
 
 	if watch {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -2884,7 +3016,8 @@ Commands:
                                 [--max-semantic N]  [--yes]
                        deferred [--status S]  [--limit N]  [--inspect SYNC_ID]  [--replay]
   doctor             Run read-only operational diagnostics [--json] [--project P] [--check CODE]
-  context [project]  Show recent context from previous sessions
+  context [project] [--project PROJECT|--all] [--scope SCOPE]
+                     Show recent context from previous sessions
   stats              Show memory system statistics
   export [file]      Export all memories to JSON (default: engram-export.json)
   import <file>      Import memories from a JSON export file

@@ -3683,13 +3683,42 @@ func buildSearchFTSQuery(ftsQuery string, opts SearchOptions, limit int) (string
 // ─── Stats ───────────────────────────────────────────────────────────────────
 
 func (s *Store) Stats() (*Stats, error) {
+	return s.statsForProject("")
+}
+
+// StatsProject returns aggregate counts restricted to one project. Selection
+// policy belongs to callers; this method only applies the supplied scope.
+func (s *Store) StatsProject(project string) (*Stats, error) {
+	project, _ = NormalizeProject(project)
+	if strings.TrimSpace(project) == "" {
+		return nil, fmt.Errorf("project is required")
+	}
+	return s.statsForProject(project)
+}
+
+func (s *Store) statsForProject(project string) (*Stats, error) {
 	stats := &Stats{}
+	args := []any{}
+	where := ""
+	if project != "" {
+		where = " WHERE LOWER(project) = ?"
+		args = append(args, project)
+	}
+	s.db.QueryRow("SELECT COUNT(*) FROM sessions"+where, args...).Scan(&stats.TotalSessions)
+	s.db.QueryRow("SELECT COUNT(*) FROM observations WHERE deleted_at IS NULL"+func() string {
+		if project == "" {
+			return ""
+		}
+		return " AND LOWER(project) = ?"
+	}(), args...).Scan(&stats.TotalObservations)
+	s.db.QueryRow("SELECT COUNT(*) FROM user_prompts"+where, args...).Scan(&stats.TotalPrompts)
 
-	s.db.QueryRow("SELECT COUNT(*) FROM sessions").Scan(&stats.TotalSessions)
-	s.db.QueryRow("SELECT COUNT(*) FROM observations WHERE deleted_at IS NULL").Scan(&stats.TotalObservations)
-	s.db.QueryRow("SELECT COUNT(*) FROM user_prompts").Scan(&stats.TotalPrompts)
-
-	rows, err := s.queryItHook(s.db, "SELECT project FROM observations WHERE project IS NOT NULL AND deleted_at IS NULL GROUP BY project ORDER BY MAX(created_at) DESC")
+	projectsQuery := "SELECT project FROM observations WHERE project IS NOT NULL AND deleted_at IS NULL"
+	if project != "" {
+		projectsQuery += " AND LOWER(project) = ?"
+	}
+	projectsQuery += " GROUP BY project ORDER BY MAX(created_at) DESC"
+	rows, err := s.queryItHook(s.db, projectsQuery, args...)
 	if err != nil {
 		return stats, nil
 	}

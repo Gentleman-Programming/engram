@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -2551,6 +2552,38 @@ func TestStatsProjectsOrderedByMostRecentObservation(t *testing.T) {
 
 	if stats.Projects[0] != "beta" || stats.Projects[1] != "alpha" {
 		t.Fatalf("expected recency order [beta alpha], got %v", stats.Projects[:2])
+	}
+}
+
+func TestStatsProjectScopesAllCounts(t *testing.T) {
+	s := newTestStore(t)
+	for _, project := range []string{"alpha", "beta"} {
+		if err := s.CreateSession("session-"+project, project, "/tmp/"+project); err != nil {
+			t.Fatalf("create %s session: %v", project, err)
+		}
+		if _, err := s.AddObservation(AddObservationParams{
+			SessionID: "session-" + project,
+			Type:      "note",
+			Title:     "title " + project,
+			Content:   "content " + project,
+			Project:   project,
+		}); err != nil {
+			t.Fatalf("add %s observation: %v", project, err)
+		}
+		if _, err := s.AddPrompt(AddPromptParams{SessionID: "session-" + project, Content: "prompt " + project, Project: project}); err != nil {
+			t.Fatalf("add %s prompt: %v", project, err)
+		}
+	}
+
+	stats, err := s.StatsProject("ALPHA")
+	if err != nil {
+		t.Fatalf("stats project: %v", err)
+	}
+	if stats.TotalSessions != 1 || stats.TotalObservations != 1 || stats.TotalPrompts != 1 || !reflect.DeepEqual(stats.Projects, []string{"alpha"}) {
+		t.Fatalf("scoped stats = %#v, want only alpha records", stats)
+	}
+	if _, err := s.StatsProject(" "); err == nil {
+		t.Fatal("blank project stats must fail")
 	}
 }
 
