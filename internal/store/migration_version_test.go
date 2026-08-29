@@ -25,6 +25,7 @@ var migrationVersionFingerprints = map[int]string{
 	4: "e4ed27435b9e8d4fda41add3f1c797901fb46ead095409dd97574b3cc6fd8b00",
 	5: "5c7ceb07936a1efa43df120119cb44c4d653514fd0090db591d1a9588b65c6ee",
 	6: "eec183e125f76d214d420d15c55ac52e60b21007c31da90155868aecbea9983d",
+	7: "1425d98f1bbd80d7d4518558abf6e3c1db964505735b402a5134f9e1d71ae6e7",
 }
 
 // migrationFingerprintHelperFunctions names migration-relevant helpers whose

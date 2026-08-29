@@ -140,10 +140,17 @@ func TestApplyPulledRelation_AllowsSelfReference(t *testing.T) {
 	}
 }
 
-func TestApplyPulledRelationTreatsDuplicatePendingPairAsIdempotent(t *testing.T) {
+func TestApplyPulledRelationCanonicalizesDuplicatePendingPairsAcrossPeers(t *testing.T) {
 	s, syncA, syncB := setupSyncApplyStore(t)
-	firstID := newSyncID("rel")
-	secondID := newSyncID("rel")
+	peer, peerA, peerB := setupSyncApplyStore(t)
+	if _, err := peer.DB().Exec(`UPDATE observations SET sync_id = ? WHERE sync_id = ?`, syncA, peerA); err != nil {
+		t.Fatalf("align peer source observation: %v", err)
+	}
+	if _, err := peer.DB().Exec(`UPDATE observations SET sync_id = ? WHERE sync_id = ?`, syncB, peerB); err != nil {
+		t.Fatalf("align peer target observation: %v", err)
+	}
+	firstID := "rel-z"
+	secondID := "rel-a"
 
 	first := buildRelationMutation(t, syncRelationPayload{
 		SyncID: firstID, SourceID: syncA, TargetID: syncB,
@@ -157,22 +164,40 @@ func TestApplyPulledRelationTreatsDuplicatePendingPairAsIdempotent(t *testing.T)
 	})
 	first.Seq = 1
 	second.Seq = 2
-	if err := s.ApplyPulledMutation(DefaultSyncTargetKey, first); err != nil {
-		t.Fatalf("apply first pending relation: %v", err)
-	}
-	if err := s.ApplyPulledMutation(DefaultSyncTargetKey, second); err != nil {
-		t.Fatalf("apply duplicate pending relation: %v", err)
-	}
-
-	var pending int
-	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM memory_relations WHERE judgment_status = ? AND ((source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?))`, JudgmentStatusPending, syncA, syncB, syncB, syncA).Scan(&pending); err != nil {
-		t.Fatalf("count pending pairs: %v", err)
-	}
-	if pending != 1 {
-		t.Fatalf("pending unordered pair rows = %d, want 1", pending)
-	}
-	if got := countDeferredRows(t, s, secondID); got != 0 {
-		t.Fatalf("duplicate pending relation deferred rows = %d, want 0", got)
+	peerFirst, peerSecond := second, first
+	peerFirst.Seq = 1
+	peerSecond.Seq = 2
+	for _, tc := range []struct {
+		name          string
+		store         *Store
+		first, second SyncMutation
+	}{
+		{"first-peer", s, first, second},
+		{"second-peer", peer, peerFirst, peerSecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.store.ApplyPulledMutation(DefaultSyncTargetKey, tc.first); err != nil {
+				t.Fatalf("apply first pending relation: %v", err)
+			}
+			if err := tc.store.ApplyPulledMutation(DefaultSyncTargetKey, tc.second); err != nil {
+				t.Fatalf("apply duplicate pending relation: %v", err)
+			}
+			canonical, err := tc.store.GetRelation(secondID)
+			if err != nil || canonical.JudgmentStatus != JudgmentStatusPending {
+				t.Fatalf("canonical relation = %+v, %v", canonical, err)
+			}
+			alias, err := tc.store.GetRelation(firstID)
+			if err != nil || alias.JudgmentStatus != JudgmentStatusOrphaned {
+				t.Fatalf("retained alias = %+v, %v", alias, err)
+			}
+			if err := applyRelationMutation(t, tc.store, first); err != nil {
+				t.Fatalf("replay pending alias: %v", err)
+			}
+			replayedAlias, err := tc.store.GetRelation(firstID)
+			if err != nil || replayedAlias.JudgmentStatus != JudgmentStatusOrphaned {
+				t.Fatalf("replayed alias = %+v, %v", replayedAlias, err)
+			}
+		})
 	}
 }
 

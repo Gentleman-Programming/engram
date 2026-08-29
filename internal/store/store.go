@@ -954,7 +954,7 @@ func (s *Store) preflightRead() error {
 //
 // Enrolled-project sync repair is independent of this gate and runs before the
 // first sync operation through EnsureEnrolledProjectSyncMutations.
-const schemaVersion = 6
+const schemaVersion = 7
 
 // migrateRunCount counts executions of the gated migration block across the
 // process. It exists for test observability only — asserting that the
@@ -1341,18 +1341,29 @@ func (s *Store) migrate() error {
 		return err
 	}
 
-	// Keep the earliest pending row for every unordered pair before enforcing the
-	// pending-only uniqueness invariant. Judged rows are deliberately untouched:
-	// they preserve independent actor opinions about the same pair.
+	// Canonicalize duplicate pending rows before enforcing the pending-only
+	// uniqueness invariant. Retired identities remain as orphaned audit rows so
+	// later replays can update their original relation identity safely.
 	if _, err := s.execHook(s.db, `
-		DELETE FROM memory_relations
-		WHERE judgment_status = 'pending'
-		  AND id NOT IN (
-			SELECT MIN(id) FROM memory_relations
-			WHERE judgment_status = 'pending'
-			GROUP BY
-				CASE WHEN ifnull(source_id,'') <= ifnull(target_id,'') THEN ifnull(source_id,'') ELSE ifnull(target_id,'') END,
-				CASE WHEN ifnull(source_id,'') <= ifnull(target_id,'') THEN ifnull(target_id,'') ELSE ifnull(source_id,'') END
+		UPDATE memory_relations AS duplicate
+		SET judgment_status = 'orphaned',
+			superseded_at = datetime('now'),
+			superseded_by_relation_id = (
+				SELECT canonical.id FROM memory_relations AS canonical
+				WHERE canonical.judgment_status = 'pending'
+				  AND CASE WHEN ifnull(canonical.source_id,'') <= ifnull(canonical.target_id,'') THEN ifnull(canonical.source_id,'') ELSE ifnull(canonical.target_id,'') END = CASE WHEN ifnull(duplicate.source_id,'') <= ifnull(duplicate.target_id,'') THEN ifnull(duplicate.source_id,'') ELSE ifnull(duplicate.target_id,'') END
+				  AND CASE WHEN ifnull(canonical.source_id,'') <= ifnull(canonical.target_id,'') THEN ifnull(canonical.target_id,'') ELSE ifnull(canonical.source_id,'') END = CASE WHEN ifnull(duplicate.source_id,'') <= ifnull(duplicate.target_id,'') THEN ifnull(duplicate.target_id,'') ELSE ifnull(duplicate.source_id,'') END
+				ORDER BY canonical.sync_id ASC
+				LIMIT 1
+			)
+		WHERE duplicate.judgment_status = 'pending'
+		  AND duplicate.sync_id != (
+			SELECT canonical.sync_id FROM memory_relations AS canonical
+			WHERE canonical.judgment_status = 'pending'
+			  AND CASE WHEN ifnull(canonical.source_id,'') <= ifnull(canonical.target_id,'') THEN ifnull(canonical.source_id,'') ELSE ifnull(canonical.target_id,'') END = CASE WHEN ifnull(duplicate.source_id,'') <= ifnull(duplicate.target_id,'') THEN ifnull(duplicate.source_id,'') ELSE ifnull(duplicate.target_id,'') END
+			  AND CASE WHEN ifnull(canonical.source_id,'') <= ifnull(canonical.target_id,'') THEN ifnull(canonical.target_id,'') ELSE ifnull(canonical.source_id,'') END = CASE WHEN ifnull(duplicate.source_id,'') <= ifnull(duplicate.target_id,'') THEN ifnull(duplicate.target_id,'') ELSE ifnull(duplicate.source_id,'') END
+			ORDER BY canonical.sync_id ASC
+			LIMIT 1
 		  )
 	`); err != nil {
 		return err
@@ -7915,7 +7926,46 @@ func (s *Store) applyRelationUpsertTx(tx *sql.Tx, mutation SyncMutation) error {
 		return ErrRelationFKMissing
 	}
 
-	// Step 3: upsert into memory_relations keyed on sync_id (idempotent re-apply).
+	// Step 3: canonicalize pending pairs by sync identity before upserting. A
+	// retired pending identity is retained as an orphaned audit row, allowing a
+	// later judgment for that identity to become an independent actor opinion.
+	supersededSyncID := ""
+	if p.JudgmentStatus == JudgmentStatusPending {
+		canonical, err := s.pendingRelationTx(tx, p.SourceID, p.TargetID)
+		if err != nil && err != sql.ErrNoRows {
+			return fmt.Errorf("applyRelationUpsertTx: find canonical pending relation: %w", err)
+		}
+		if err == nil && canonical.SyncID != p.SyncID {
+			if canonical.SyncID < p.SyncID {
+				if _, err := s.execHook(tx, `
+					INSERT INTO memory_relations
+						(sync_id, source_id, target_id, relation, reason, evidence, confidence,
+						 judgment_status, marked_by_actor, marked_by_kind, marked_by_model,
+						 session_id, created_at, updated_at, superseded_at, superseded_by_relation_id)
+					VALUES (?, ?, ?, ?, ?, ?, ?, 'orphaned', ?, ?, ?, ?, ?, ?, datetime('now'),
+						(SELECT id FROM memory_relations WHERE sync_id = ?))
+					ON CONFLICT(sync_id) DO UPDATE SET
+						source_id = excluded.source_id, target_id = excluded.target_id,
+						relation = excluded.relation, reason = excluded.reason, evidence = excluded.evidence,
+						confidence = excluded.confidence, marked_by_actor = excluded.marked_by_actor,
+						marked_by_kind = excluded.marked_by_kind, marked_by_model = excluded.marked_by_model,
+						session_id = excluded.session_id, updated_at = excluded.updated_at,
+						superseded_at = excluded.superseded_at, superseded_by_relation_id = excluded.superseded_by_relation_id
+					WHERE memory_relations.judgment_status = 'orphaned'
+				`, p.SyncID, p.SourceID, p.TargetID, p.Relation, p.Reason, p.Evidence, p.Confidence,
+					p.MarkedByActor, p.MarkedByKind, p.MarkedByModel, p.SessionID, p.CreatedAt, p.UpdatedAt, canonical.SyncID); err != nil {
+					return fmt.Errorf("applyRelationUpsertTx: retain pending alias: %w", err)
+				}
+				goto cleanup
+			}
+			if _, err := s.execHook(tx, `UPDATE memory_relations SET judgment_status = 'orphaned', superseded_at = datetime('now') WHERE sync_id = ?`, canonical.SyncID); err != nil {
+				return fmt.Errorf("applyRelationUpsertTx: retire pending canonical: %w", err)
+			}
+			supersededSyncID = canonical.SyncID
+		}
+	}
+
+	// Upsert into memory_relations keyed on sync_id (idempotent re-apply).
 	if _, err := s.execHook(tx, `
 		INSERT INTO memory_relations
 			(sync_id, source_id, target_id, relation, reason, evidence, confidence,
@@ -7944,9 +7994,16 @@ func (s *Store) applyRelationUpsertTx(tx *sql.Tx, mutation SyncMutation) error {
 	); err != nil {
 		return fmt.Errorf("applyRelationUpsertTx: upsert: %w", err)
 	}
+	if supersededSyncID != "" {
+		if _, err := s.execHook(tx, `UPDATE memory_relations SET superseded_by_relation_id = (SELECT id FROM memory_relations WHERE sync_id = ?) WHERE sync_id = ?`, p.SyncID, supersededSyncID); err != nil {
+			return fmt.Errorf("applyRelationUpsertTx: link retired pending relation: %w", err)
+		}
+	}
 
 	// Step 4: clean up the rows this relation left behind (its pending retry
 	// state and any evidence about this same relation).
+
+cleanup:
 	if _, err := s.execHook(tx, relationApplyCleanupSQL,
 		SyncEntityRelation, p.SyncID, p.SyncID, p.SyncID); err != nil {
 		return fmt.Errorf("applyRelationUpsertTx: clear deferred: %w", err)
