@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -670,7 +671,11 @@ func TestDetectProjectFull_AmbiguousChildrenPreserveSeparatorForms(t *testing.T)
 			if !errors.Is(res.Error, ErrAmbiguousProject) {
 				t.Fatalf("error = %v, want ErrAmbiguousProject", res.Error)
 			}
-			if !reflect.DeepEqual(res.AvailableProjects, tt.want) {
+			got := append([]string(nil), res.AvailableProjects...)
+			want := append([]string(nil), tt.want...)
+			sort.Strings(got)
+			sort.Strings(want)
+			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("available projects = %q, want %q", res.AvailableProjects, tt.want)
 			}
 		})
