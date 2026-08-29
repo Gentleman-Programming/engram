@@ -1329,7 +1329,7 @@ func postSaveConflictCandidateResponse(s *store.Store, cfg MCPConfig, savedID in
 		}
 		query = obs.Content
 	}
-	candOpts := store.CandidateOptions{Project: project, Scope: scope, BM25Floor: cfg.BM25Floor, Query: query}
+	candOpts := store.CandidateOptions{Project: project, Scope: scope, BM25MaxRank: cfg.BM25Floor, Query: query}
 	if cfg.Limit != nil {
 		candOpts.Limit = *cfg.Limit
 	}
