@@ -4028,7 +4028,6 @@ func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOpti
 
 		tkRows, err := s.db.QueryContext(ctx, tkSQL, tkArgs...)
 		if err == nil {
-			defer tkRows.Close()
 			for tkRows.Next() {
 				if err := ctx.Err(); err != nil {
 					return nil, err
@@ -4051,6 +4050,10 @@ func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOpti
 				directResults = append(directResults, sr)
 			}
 			if err := ctx.Err(); err != nil {
+				_ = tkRows.Close()
+				return nil, err
+			}
+			if err := tkRows.Close(); err != nil {
 				return nil, err
 			}
 		} else if ctxErr := ctx.Err(); ctxErr != nil {
@@ -4118,7 +4121,6 @@ func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOpti
 		}
 		return nil, fmt.Errorf("search: %w", err)
 	}
-	defer rows.Close()
 
 	seen := make(map[int64]bool)
 	for _, dr := range directResults {
@@ -4155,6 +4157,9 @@ func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOpti
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
 		}
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
 		return nil, err
 	}
 	if mixedAny {
@@ -4339,7 +4344,9 @@ SELECT 1 FROM (
   SELECT project FROM sync_enrolled_projects WHERE LOWER(project) = ?
 ) LIMIT 1`
 	var dummy int
-	err := s.db.QueryRow(query, name, name, name, name).Scan(&dummy)
+	err := s.withRead(func() error {
+		return s.db.QueryRow(query, name, name, name, name).Scan(&dummy)
+	})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil

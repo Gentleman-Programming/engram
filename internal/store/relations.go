@@ -776,24 +776,24 @@ func (s *Store) GetRelation(syncID string) (*Relation, error) {
 // ListRelations rows) so HTTP handlers share one response type.
 // Returns an error wrapping "not found" when the id does not exist.
 func (s *Store) GetRelationByIntID(id int64) (*RelationListItem, error) {
-	row := s.db.QueryRow(`
-		SELECT r.id, r.sync_id, r.relation, r.judgment_status,
-		       ifnull(r.source_id,''), ifnull(src.title,''),
-		       ifnull(r.target_id,''), ifnull(tgt.title,''),
-		       r.created_at, r.updated_at
-		FROM memory_relations r
-		LEFT JOIN observations src ON src.sync_id = r.source_id AND src.deleted_at IS NULL
-		LEFT JOIN observations tgt ON tgt.sync_id = r.target_id AND tgt.deleted_at IS NULL
-		WHERE r.id = ?
-	`, id)
-
 	var item RelationListItem
-	if err := row.Scan(
-		&item.ID, &item.SyncID, &item.Relation, &item.JudgmentStatus,
-		&item.SourceID, &item.SourceTitle,
-		&item.TargetID, &item.TargetTitle,
-		&item.CreatedAt, &item.UpdatedAt,
-	); err == sql.ErrNoRows {
+	if err := s.withRead(func() error {
+		return s.db.QueryRow(`
+			SELECT r.id, r.sync_id, r.relation, r.judgment_status,
+			       ifnull(r.source_id,''), ifnull(src.title,''),
+			       ifnull(r.target_id,''), ifnull(tgt.title,''),
+			       r.created_at, r.updated_at
+			FROM memory_relations r
+			LEFT JOIN observations src ON src.sync_id = r.source_id AND src.deleted_at IS NULL
+			LEFT JOIN observations tgt ON tgt.sync_id = r.target_id AND tgt.deleted_at IS NULL
+			WHERE r.id = ?
+		`, id).Scan(
+			&item.ID, &item.SyncID, &item.Relation, &item.JudgmentStatus,
+			&item.SourceID, &item.SourceTitle,
+			&item.TargetID, &item.TargetTitle,
+			&item.CreatedAt, &item.UpdatedAt,
+		)
+	}); err == sql.ErrNoRows {
 		return nil, fmt.Errorf("GetRelationByIntID: relation id %d not found", id)
 	} else if err != nil {
 		return nil, fmt.Errorf("GetRelationByIntID: %w", err)
