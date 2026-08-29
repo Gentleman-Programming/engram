@@ -7697,6 +7697,53 @@ func TestTimelineRejectsObservationOutsideResolvedProject(t *testing.T) {
 	}
 }
 
+func TestReviewMarkReviewedRejectsObservationOutsideResolvedProjectWithoutMutation(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("review-project-a", "project-a", t.TempDir()); err != nil {
+		t.Fatalf("seed project a: %v", err)
+	}
+	if err := s.CreateSession("review-project-b", "project-b", t.TempDir()); err != nil {
+		t.Fatalf("seed project b: %v", err)
+	}
+	id, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "review-project-b",
+		Project:   "project-b",
+		Type:      "decision",
+		Title:     "private review",
+		Content:   "must not cross projects",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("seed observation: %v", err)
+	}
+	past := "2000-01-01 00:00:00"
+	if _, err := s.DB().Exec(`UPDATE observations SET review_after = ? WHERE id = ?`, past, id); err != nil {
+		t.Fatalf("backdate review_after: %v", err)
+	}
+
+	result, err := handleReview(s, MCPConfig{DefaultProject: "project-a"})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"action":         "mark_reviewed",
+		"observation_id": float64(id),
+	}}})
+	if err != nil {
+		t.Fatalf("mark reviewed: %v", err)
+	}
+	if !result.IsError || !strings.Contains(callResultText(t, result), "observation not found in resolved project") {
+		t.Fatalf("mark reviewed result = %#v", result)
+	}
+	if strings.Contains(callResultText(t, result), "Memory marked reviewed") {
+		t.Fatalf("cross-project review falsely claimed success: %q", callResultText(t, result))
+	}
+
+	obs, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("reload observation: %v", err)
+	}
+	if obs.ReviewAfter == nil || *obs.ReviewAfter != past {
+		t.Fatalf("cross-project review mutated review_after: %v, want %q", obs.ReviewAfter, past)
+	}
+}
+
 // TestHandleSearchPersonalScopeIgnoresCWDProject verifies that when scope=personal
 // and no explicit project is given, handleSearch returns personal memories from
 // ALL projects rather than filtering to the cwd-detected project (issue #391).

@@ -926,7 +926,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
       if (!params.project) requireResolvedProject();
       return engramFetch(`/context${queryString({ project: params.project || project, scope: params.scope })}`);
     case "mem_stats":
-      return engramFetch("/stats");
+      return engramFetch(`/stats${queryString({ all_projects: true })}`);
     case "mem_timeline":
       if (!requestedProject) requireResolvedProject();
       return engramFetch(`/timeline${queryString({ observation_id: params.observation_id, before: params.before, after: params.after, project: activeProject })}`);
@@ -1035,7 +1035,8 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
         return engramFetch(`/review${queryString({ project: params.project, limit: params.limit })}`);
       }
       if (action === "mark_reviewed") {
-        return engramFetch("/review/mark_reviewed", {
+        requireResolvedProject();
+        return engramFetch(`/review/mark_reviewed${queryString({ project: activeProject })}`, {
           method: "POST",
           body: { observation_id: params.observation_id || params.id },
         });

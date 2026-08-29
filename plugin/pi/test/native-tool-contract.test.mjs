@@ -168,7 +168,7 @@ test("registered Pi-native mem_search reports native provider transport failure"
   }
 });
 
-test("Pi forwards its resolved current project while preserving global review omission", async () => {
+test("Pi forwards its resolved project for review mutations while preserving global review and stats contracts", async () => {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.ENGRAM_URL;
   process.env.ENGRAM_URL = "http://127.0.0.1:17437";
@@ -178,6 +178,8 @@ test("Pi forwards its resolved current project while preserving global review om
     { method: "GET", path: "/search", body: [] },
     { method: "GET", path: "/doctor", body: { status: "ok" } },
     { method: "GET", path: "/review", body: { observations: [] } },
+    { method: "POST", path: "/review/mark_reviewed", body: { state: "active" } },
+    { method: "GET", path: "/stats", body: { total_observations: 2 } },
   ]);
   globalThis.fetch = fetchStub;
 
@@ -189,13 +191,19 @@ test("Pi forwards its resolved current project while preserving global review om
       await registeredTools.get("mem_search").execute("search", { query: "override" }, undefined, undefined, ctx);
       await registeredTools.get("mem_doctor").execute("doctor", {}, undefined, undefined, ctx);
       await registeredTools.get("mem_review").execute("review", { action: "list" }, undefined, undefined, ctx);
+      await registeredTools.get("mem_review").execute("mark-reviewed", { action: "mark_reviewed", observation_id: 42 }, undefined, undefined, ctx);
+      await registeredTools.get("mem_stats").execute("stats", {}, undefined, undefined, ctx);
 
       const search = calls.find((call) => call.path.startsWith("/search"));
       const doctor = calls.find((call) => call.path.startsWith("/doctor"));
-      const review = calls.find((call) => call.path.startsWith("/review"));
+      const review = calls.find((call) => call.method === "GET" && call.path.startsWith("/review"));
+      const markReviewed = calls.find((call) => call.method === "POST" && call.path.startsWith("/review/mark_reviewed"));
+      const stats = calls.find((call) => call.path.startsWith("/stats"));
       assert.match(search.path, /project=override-project/);
       assert.match(doctor.path, /project=override-project/);
       assert.equal(new URL(`http://test${review.path}`).searchParams.has("project"), false);
+      assert.equal(new URL(`http://test${markReviewed.path}`).searchParams.get("project"), "override-project");
+      assert.equal(new URL(`http://test${stats.path}`).searchParams.get("all_projects"), "true");
     });
   } finally {
     globalThis.fetch = originalFetch;
