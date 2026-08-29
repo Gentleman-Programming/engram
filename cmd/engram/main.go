@@ -2969,6 +2969,7 @@ func resolveHomeFallback() string {
 var (
 	renameDatabaseGenerationFile = os.Rename
 	statDatabaseGenerationFile   = os.Stat
+	orphanedDBMoveBeforeLock     func()
 	orphanedDBMoveAfterLock      func()
 )
 
@@ -3015,6 +3016,9 @@ func migrateOrphanedDBCandidates(correctDir string, candidates []string) {
 		if err := os.MkdirAll(correctDir, 0755); err != nil {
 			log.Printf("[engram] migration failed (create dir): %v", err)
 			return
+		}
+		if orphanedDBMoveBeforeLock != nil {
+			orphanedDBMoveBeforeLock()
 		}
 		unlock, err := store.AcquireDatabaseGenerationMoveLock(correctDir)
 		if err != nil {

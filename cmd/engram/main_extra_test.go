@@ -713,6 +713,98 @@ func TestMigrateOrphanedDBCandidatesMovesDatabaseGeneration(t *testing.T) {
 	}
 }
 
+func TestMigrateOrphanedDBCandidatesWaitsForLiveStoreGenerationLease(t *testing.T) {
+	orphanDir := t.TempDir()
+	correctDir := filepath.Join(t.TempDir(), "engram")
+	orphanDB := filepath.Join(orphanDir, "engram.db")
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if err := os.WriteFile(orphanDB+suffix, []byte(suffix+" orphan generation"), 0o600); err != nil {
+			t.Fatalf("write orphan %q: %v", suffix, err)
+		}
+	}
+
+	cfg := testConfig(t)
+	cfg.DataDir = correctDir
+	liveStore, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("open live store: %v", err)
+	}
+	storeClosed := false
+	t.Cleanup(func() {
+		if !storeClosed {
+			_ = liveStore.Close()
+		}
+	})
+
+	originalBeforeLock := orphanedDBMoveBeforeLock
+	originalAfterLock := orphanedDBMoveAfterLock
+	lockAttempted := make(chan struct{})
+	lockAcquired := make(chan struct{})
+	allowPostLockCheck := make(chan struct{})
+	orphanedDBMoveBeforeLock = func() { close(lockAttempted) }
+	orphanedDBMoveAfterLock = func() {
+		close(lockAcquired)
+		<-allowPostLockCheck
+	}
+	t.Cleanup(func() {
+		orphanedDBMoveBeforeLock = originalBeforeLock
+		orphanedDBMoveAfterLock = originalAfterLock
+	})
+
+	moved := make(chan struct{})
+	go func() {
+		migrateOrphanedDBCandidates(correctDir, []string{orphanDB})
+		close(moved)
+	}()
+
+	select {
+	case <-lockAttempted:
+	case <-time.After(time.Second):
+		t.Fatal("orphan mover did not attempt the generation lock")
+	}
+	select {
+	case <-lockAcquired:
+		t.Fatal("orphan mover acquired the generation lock while the Store was live")
+	default:
+	}
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if got, err := os.ReadFile(orphanDB + suffix); err != nil || string(got) != suffix+" orphan generation" {
+			t.Fatalf("orphan %q while Store is live = %q, %v; want intact generation", suffix, got, err)
+		}
+	}
+
+	if err := liveStore.Close(); err != nil {
+		t.Fatalf("close live store: %v", err)
+	}
+	storeClosed = true
+	select {
+	case <-lockAcquired:
+	case <-time.After(time.Second):
+		t.Fatal("orphan mover did not acquire the generation lock after Store closed")
+	}
+
+	correctDB := filepath.Join(correctDir, "engram.db")
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if err := os.Remove(correctDB + suffix); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("remove released generation %q: %v", suffix, err)
+		}
+	}
+	close(allowPostLockCheck)
+	select {
+	case <-moved:
+	case <-time.After(time.Second):
+		t.Fatal("orphan mover did not finish after the generation lease was released")
+	}
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if got, err := os.ReadFile(correctDB + suffix); err != nil || string(got) != suffix+" orphan generation" {
+			t.Errorf("migrated %q = %q, %v; want orphan generation", suffix, got, err)
+		}
+		if _, err := os.Stat(orphanDB + suffix); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("orphaned %q remains after migration: %v", suffix, err)
+		}
+	}
+}
+
 func TestMigrateOrphanedDBCandidatesDoesNotOverwriteDatabaseCreatedAfterLock(t *testing.T) {
 	orphanDir := t.TempDir()
 	correctDir := filepath.Join(t.TempDir(), "engram")
