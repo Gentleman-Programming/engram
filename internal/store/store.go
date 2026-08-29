@@ -39,8 +39,10 @@ var openDB = sql.Open
 const sqliteConstraintForeignKey = 787
 
 const (
-	sqlitePrimaryBusy   = 5
-	sqlitePrimaryLocked = 6
+	sqlitePrimaryBusy      = 5
+	sqlitePrimaryLocked    = 6
+	sqliteReadOnlyRecovery = 264
+	sqliteReadOnlyRollback = 776
 )
 
 var sqliteWriteRetryBackoffs = []time.Duration{
@@ -742,6 +744,16 @@ func newStore(cfg Config, withRepair bool) (*Store, error) {
 		}
 	}()
 
+	unlockMigrations, err := acquireMigrationLock(filepath.Join(cfg.DataDir, ".migrate.lock"))
+	if err != nil {
+		return nil, fmt.Errorf("engram: acquire migration lock: %w", err)
+	}
+	defer unlockMigrations()
+
+	if err := rejectFutureSchemaVersion(dbPath); err != nil {
+		return nil, err
+	}
+
 	registerPersistWALHook()
 	db, err := openDB("sqlite", storeDSN(dbPath))
 	if err != nil {
@@ -801,13 +813,103 @@ func storeDSN(dbPath string) string {
 	return (&url.URL{Scheme: "file", Opaque: escapedPath, RawQuery: q.Encode()}).String()
 }
 
+// storeReadOnlyDSN opens an existing database for the ordinary compatibility
+// probe. It cannot recover a hot journal or change persistent database state.
+func storeReadOnlyDSN(dbPath string) string {
+	return storeCompatibilityDSN(dbPath, "ro")
+}
+
+// storeRecoveryDSN is used only after the read-only pager read reports an
+// exact recovery error with its matching artifact present. It has no WAL
+// pragmas or persistent-WAL hook, so SQLite recovery is its only allowed write.
+func storeRecoveryDSN(dbPath string) string {
+	return storeCompatibilityDSN(dbPath, "rw")
+}
+
+func storeCompatibilityDSN(dbPath, mode string) string {
+	q := url.Values{}
+	q.Set("mode", mode)
+	q.Add("_pragma", "busy_timeout(5000)")
+	escapedPath := strings.ReplaceAll(url.PathEscape(filepath.ToSlash(dbPath)), "%2F", "/")
+	return (&url.URL{Scheme: "file", Opaque: escapedPath, RawQuery: q.Encode()}).String()
+}
+
+// rejectFutureSchemaVersion holds the migration lock around a read-only probe
+// and, only for SQLite's exact recovery errors, one neutral recovery retry.
+func rejectFutureSchemaVersion(dbPath string) error {
+	if _, err := os.Stat(dbPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("engram: inspect database for schema compatibility: %w", err)
+	}
+
+	db, err := openDB("sqlite", storeReadOnlyDSN(dbPath))
+	if err != nil {
+		return fmt.Errorf("engram: open database for schema compatibility: %w", err)
+	}
+	current, readErr := readCompatibilityUserVersion(db)
+	if closeErr := db.Close(); closeErr != nil {
+		return fmt.Errorf("engram: close read-only schema compatibility probe: %w", closeErr)
+	}
+	if readErr != nil {
+		if !shouldRetryCompatibilityRecovery(readErr, dbPath) {
+			return fmt.Errorf("engram: read user_version for schema compatibility: %w", readErr)
+		}
+		db, err = openDB("sqlite", storeRecoveryDSN(dbPath))
+		if err != nil {
+			return fmt.Errorf("engram: open database for schema recovery: %w", err)
+		}
+		defer db.Close()
+		current, readErr = readCompatibilityUserVersion(db)
+		if readErr != nil {
+			return fmt.Errorf("engram: read user_version after schema recovery: %w", readErr)
+		}
+	}
+	if current > schemaVersion {
+		return fmt.Errorf("%w: database version %d exceeds supported version %d", ErrFutureSchemaVersion, current, schemaVersion)
+	}
+	return nil
+}
+
+func readCompatibilityUserVersion(db *sql.DB) (int, error) {
+	var current int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&current); err != nil {
+		return 0, err
+	}
+	return current, nil
+}
+
+func shouldRetryCompatibilityRecovery(err error, dbPath string) bool {
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) {
+		return false
+	}
+	return canRetryCompatibilityRecovery(sqliteErr.Code(), dbPath)
+}
+
+func canRetryCompatibilityRecovery(code int, dbPath string) bool {
+	var artifact string
+	switch code {
+	case sqliteReadOnlyRecovery:
+		artifact = dbPath + "-wal"
+	case sqliteReadOnlyRollback:
+		artifact = dbPath + "-journal"
+	default:
+		return false
+	}
+	_, err := os.Stat(artifact)
+	return err == nil
+}
+
 // persistWALHookOnce guards the process-global driver hook registration.
 var persistWALHookOnce sync.Once
 
 // registerPersistWALHook registers a modernc.org/sqlite connection hook that
-// enables SQLITE_FCNTL_PERSIST_WAL on every new physical connection, so a
+// enables SQLITE_FCNTL_PERSIST_WAL on every writable physical connection, so a
 // pool-created replacement connection can never reintroduce the last-closer
-// WAL unlink (#477, #571).
+// WAL unlink (#477, #571). Read-only and recovery-preflight connections are
+// excluded so compatibility probing never enables persistent WAL.
 //
 // The hook is driver-global (it fires for every sqlite connection this
 // process opens, not just the store's), so it is registered exactly once and
@@ -817,13 +919,32 @@ var persistWALHookOnce sync.Once
 // opens. The store's own database is strictly verified in primeConnection.
 func registerPersistWALHook() {
 	persistWALHookOnce.Do(func() {
-		sqlite.RegisterConnectionHook(func(conn sqlite.ExecQuerierContext, _ string) error {
-			if fc, ok := conn.(sqlite.FileControl); ok {
-				_, _ = fc.FileControlPersistWAL("main", 1)
+		sqlite.RegisterConnectionHook(func(conn sqlite.ExecQuerierContext, dataSourceName string) error {
+			if shouldEnablePersistentWAL(dataSourceName) {
+				if fc, ok := conn.(sqlite.FileControl); ok {
+					_, _ = fc.FileControlPersistWAL("main", 1)
+				}
 			}
 			return nil
 		})
 	})
+}
+
+// shouldEnablePersistentWAL excludes only exact, unambiguous read-only and
+// recovery SQLite DSNs. url.Parse avoids treating values such as mode=rwfile
+// as recovery, while rejecting repeated mode parameters avoids a bypass for an
+// ambiguous DSN.
+func shouldEnablePersistentWAL(dataSourceName string) bool {
+	dsn, err := url.Parse(dataSourceName)
+	if err != nil {
+		return true
+	}
+	params, err := url.ParseQuery(dsn.RawQuery)
+	if err != nil {
+		return true
+	}
+	modes := params["mode"]
+	return len(modes) != 1 || (modes[0] != "ro" && modes[0] != "rw")
 }
 
 // walSwitchRetryBackoffs paces retries of the first connection open during a
@@ -975,7 +1096,8 @@ func (s *Store) withRead(fn func() error) error {
 //   - user_version <  schemaVersion → run migrate() under an exclusive
 //     inter-process lock, then stamp user_version.
 //   - user_version >  schemaVersion → database was migrated by a newer engram;
-//     warn and skip (never run old migrations against a newer schema).
+//     reject the open with ErrFutureSchemaVersion (never run old migrations
+//     against a newer schema).
 //
 // Enrolled-project sync repair is independent of this gate and runs before the
 // first sync operation through EnsureEnrolledProjectSyncMutations.
@@ -987,8 +1109,8 @@ const schemaVersion = 8
 var migrateRunCount atomic.Int64
 
 // startupMigrationBeforeLockHook is a test seam for the narrow interval
-// between the optimistic version read and the locked re-read. Production
-// leaves it nil.
+// between the optimistic version read and the second read while the migration
+// lock is held. Production leaves it nil.
 var startupMigrationBeforeLockHook func()
 
 // startupRepairRunCount is test observability for the repair path. It proves a
@@ -998,7 +1120,8 @@ var startupRepairRunCount atomic.Int64
 // runStartupMigrations runs migrate() at most once per schema generation
 // (gated on PRAGMA user_version), convergent repairs required on every current
 // schema open, and, when withRepair is set for focused tests, the enrolled-
-// project sync repair — all inside one exclusive inter-process lock.
+// project sync repair — all while newStore holds one exclusive inter-process
+// lock.
 //
 // Exclusivity is provided by an advisory file lock (acquireMigrationLock)
 // on <DataDir>/.migrate.lock rather than by one giant BEGIN IMMEDIATE
@@ -1011,7 +1134,10 @@ var startupRepairRunCount atomic.Int64
 // own per-step transactions for atomicity against crashes.
 //
 // The optional repair path shares this lock because it can write a backfill;
-// the production path defers that repair until synchronization.
+// the production path defers that repair until synchronization. newStore
+// acquires the lock before its read-only future-schema preflight and retains it
+// through this method, so supported schemas cannot be advanced by another
+// Engram process before the writable connection opens.
 func (s *Store) runStartupMigrations(withRepair bool) error {
 	current, err := s.readUserVersion()
 	if err != nil {
@@ -1024,15 +1150,8 @@ func (s *Store) runStartupMigrations(withRepair bool) error {
 		startupMigrationBeforeLockHook()
 	}
 
-	unlock, err := acquireMigrationLock(filepath.Join(s.cfg.DataDir, ".migrate.lock"))
-	if err != nil {
-		return fmt.Errorf("engram: acquire migration lock: %w", err)
-	}
-	defer unlock()
-
 	// Re-read even when the optimistic read was current: a process that was
-	// waiting for the lock may now see a different database generation or a
-	// newer binary's schema stamp.
+	// modifying the database outside Engram may have changed the schema stamp.
 	current, err = s.readUserVersion()
 	if err != nil {
 		return fmt.Errorf("engram: re-read user_version: %w", err)
@@ -4189,6 +4308,7 @@ func (s *Store) searchContextSQL(ctx context.Context, query string, opts SearchO
 	}
 
 	longTerms, shortTerms := splitSearchTerms(query)
+	normalizedQuery := strings.Join(searchTerms(query), " ")
 	mixedAny := opts.MatchMode == "any" && len(longTerms) > 0 && len(shortTerms) > 0
 	likeFallback := shouldUseTrigramLikeFallback(query)
 	sqlQ := `
@@ -4206,9 +4326,9 @@ func (s *Store) searchContextSQL(ctx context.Context, query string, opts SearchO
 		// Build FTS5 query: "all" (default) uses AND semantics; "any" uses OR for broader recall.
 		var ftsQuery string
 		if opts.MatchMode == "any" {
-			ftsQuery = sanitizeFTSCandidates(query)
+			ftsQuery = sanitizeFTSCandidates(normalizedQuery)
 		} else {
-			ftsQuery = sanitizeFTS(query)
+			ftsQuery = sanitizeFTS(normalizedQuery)
 		}
 		sqlQ += `
 		       bm25(observations_fts, 5.0, 1.0, 0.0, 0.0, 0.0, 3.0) as rank
@@ -9446,6 +9566,7 @@ func searchTerms(query string) []string {
 		if normalized := strings.TrimFunc(term, isSearchSyntaxDelimiter); normalized != "" {
 			term = normalized
 		}
+		term = strings.TrimRightFunc(term, isSearchTrailingSyntaxDelimiter)
 		if term != "" {
 			terms = append(terms, term)
 		}
@@ -9454,8 +9575,9 @@ func searchTerms(query string) []string {
 }
 
 // isSearchSyntaxDelimiter identifies punctuation that separates search terms
-// without being part of their meaning. Symbols such as # and . are retained so
-// language and framework identifiers including C#, F#, and .NET stay exact.
+// without being part of their meaning. Symbols such as # and a leading . are
+// retained so language and framework identifiers including C#, F#, and .NET
+// stay exact.
 func isSearchSyntaxDelimiter(r rune) bool {
 	switch r {
 	case ',', ':', ';', '!', '?', '(', ')', '[', ']', '{', '}', '<', '>', '"', '\'',
@@ -9464,6 +9586,13 @@ func isSearchSyntaxDelimiter(r rune) bool {
 	default:
 		return false
 	}
+}
+
+// isSearchTrailingSyntaxDelimiter additionally removes a terminal period.
+// A period is meaningful at the start of .NET but not at the end of v2. or
+// .NET., so it cannot be handled by the position-independent delimiter test.
+func isSearchTrailingSyntaxDelimiter(r rune) bool {
+	return r == '.' || isSearchSyntaxDelimiter(r)
 }
 
 func splitSearchTerms(query string) (long, short []string) {

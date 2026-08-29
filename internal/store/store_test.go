@@ -12594,6 +12594,7 @@ func TestSearchContextPreservesMeaningfulPunctuation(t *testing.T) {
 		{SessionID: "s-punctuation", Type: "decision", Title: "C# language", Content: "c sharp", Project: "engram", Scope: "project"},
 		{SessionID: "s-punctuation", Type: "decision", Title: "F# language", Content: "f sharp", Project: "engram", Scope: "project"},
 		{SessionID: "s-punctuation", Type: "decision", Title: ".NET runtime", Content: "dot net", Project: "engram", Scope: "project"},
+		{SessionID: "s-punctuation", Type: "decision", Title: "v2 release", Content: "version two", Project: "engram", Scope: "project"},
 		{SessionID: "s-punctuation", Type: "decision", Title: "cache implementation", Content: "unrelated", Project: "engram", Scope: "project"},
 	} {
 		if _, err := s.AddObservation(observation); err != nil {
@@ -12605,6 +12606,8 @@ func TestSearchContextPreservesMeaningfulPunctuation(t *testing.T) {
 		{query: "C#", want: "C# language"},
 		{query: "F#", want: "F# language"},
 		{query: ".NET", want: ".NET runtime"},
+		{query: ".NET.", want: ".NET runtime"},
+		{query: "v2.", want: "v2 release"},
 	} {
 		t.Run(tc.query, func(t *testing.T) {
 			results, err := s.SearchContext(context.Background(), tc.query, SearchOptions{Project: "engram", Scope: "project", Limit: 10})
@@ -12620,6 +12623,28 @@ func TestSearchContextPreservesMeaningfulPunctuation(t *testing.T) {
 			}
 			if !found {
 				t.Fatalf("SearchContext(%q) omitted %q: %+v", tc.query, tc.want, results)
+			}
+		})
+	}
+}
+
+func TestSearchTermsPreserveLeadingDotAndTrimTrailingPeriods(t *testing.T) {
+	for _, tc := range []struct {
+		query string
+		want  string
+	}{
+		{query: "C#", want: "C#"},
+		{query: "F#", want: "F#"},
+		{query: "v2", want: "v2"},
+		{query: "v2,", want: "v2"},
+		{query: "v2:", want: "v2"},
+		{query: "v2.", want: "v2"},
+		{query: ".NET", want: ".NET"},
+		{query: ".NET.", want: ".NET"},
+	} {
+		t.Run(tc.query, func(t *testing.T) {
+			if got := strings.Join(searchTerms(tc.query), " "); got != tc.want {
+				t.Fatalf("searchTerms(%q) = %q, want %q", tc.query, got, tc.want)
 			}
 		})
 	}

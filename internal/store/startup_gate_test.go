@@ -51,6 +51,108 @@ func TestPersistentWALSurvivesClose(t *testing.T) {
 	}
 }
 
+func TestPersistentWALHookSkipsReadOnlyAndRecoveryDSNs(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "engram.db")
+	for _, tc := range []struct {
+		name string
+		dsn  string
+		want bool
+	}{
+		{name: "read-only preflight", dsn: storeReadOnlyDSN(dbPath), want: false},
+		{name: "recovery preflight", dsn: storeRecoveryDSN(dbPath), want: false},
+		{name: "normal store", dsn: storeDSN(dbPath), want: true},
+		{name: "mode prefix is not recovery", dsn: "file:engram.db?mode=rwfile", want: true},
+		{name: "conflicting modes are not recovery", dsn: "file:engram.db?mode=rw&mode=ro", want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldEnablePersistentWAL(tc.dsn); got != tc.want {
+				t.Fatalf("shouldEnablePersistentWAL(%q) = %v, want %v", tc.dsn, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCompatibilityRecoveryFallbackRequiresExactCodeAndArtifact(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "engram.db")
+	for _, tc := range []struct {
+		name      string
+		code      int
+		artifacts []string
+		want      bool
+	}{
+		{name: "recovery WAL", code: sqliteReadOnlyRecovery, artifacts: []string{"-wal"}, want: true},
+		{name: "rollback journal", code: sqliteReadOnlyRollback, artifacts: []string{"-journal"}, want: true},
+		{name: "recovery without WAL", code: sqliteReadOnlyRecovery, artifacts: []string{"-journal"}},
+		{name: "rollback without journal", code: sqliteReadOnlyRollback, artifacts: []string{"-wal"}},
+		{name: "generic readonly", code: 8, artifacts: []string{"-journal"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, suffix := range []string{"-wal", "-journal"} {
+				_ = os.Remove(dbPath + suffix)
+			}
+			for _, suffix := range tc.artifacts {
+				if err := os.WriteFile(dbPath+suffix, []byte("artifact"), 0o600); err != nil {
+					t.Fatalf("write %s: %v", suffix, err)
+				}
+			}
+			if got := canRetryCompatibilityRecovery(tc.code, dbPath); got != tc.want {
+				t.Fatalf("canRetryCompatibilityRecovery(%d) = %v, want %v", tc.code, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCompatibilityPreflightRecoversHotRollbackJournal(t *testing.T) {
+	if dbPath := os.Getenv("ENGRAM_TEST_HOT_JOURNAL_DB"); dbPath != "" {
+		db, err := sql.Open("sqlite", dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`PRAGMA journal_mode = DELETE; PRAGMA synchronous = FULL; PRAGMA cache_size = 1; BEGIN IMMEDIATE; UPDATE hot_journal SET value = randomblob(100000)`); err != nil {
+			t.Fatal(err)
+		}
+		os.Exit(0)
+	}
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = t.TempDir()
+	dbPath := filepath.Join(cfg.DataDir, "engram.db")
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("seed database: %v", err)
+	}
+	if _, err := raw.Exec(`PRAGMA journal_mode = DELETE; CREATE TABLE hot_journal (value TEXT); INSERT INTO hot_journal VALUES ('original')`); err != nil {
+		t.Fatalf("seed table: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("seed close: %v", err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestCompatibilityPreflightRecoversHotRollbackJournal$")
+	cmd.Env = append(os.Environ(), "ENGRAM_TEST_HOT_JOURNAL_DB="+dbPath)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("create hot journal: %v\n%s", err, output)
+	}
+	probe, err := openDB("sqlite", storeReadOnlyDSN(dbPath))
+	if err != nil {
+		t.Fatalf("open read-only probe: %v", err)
+	}
+	_, readErr := readCompatibilityUserVersion(probe)
+	if err := probe.Close(); err != nil {
+		t.Fatalf("close read-only probe: %v", err)
+	}
+	if !shouldRetryCompatibilityRecovery(readErr, dbPath) {
+		t.Fatalf("read-only hot-journal error %v was not eligible for recovery", readErr)
+	}
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New after hot journal: %v", err)
+	}
+	defer s.Close()
+	var value string
+	if err := s.db.QueryRow(`SELECT value FROM hot_journal`).Scan(&value); err != nil || value != "original" {
+		t.Fatalf("hot-journal recovery = %q, %v; want original", value, err)
+	}
+}
+
 func TestUserVersionGateSkipsSecondOpen(t *testing.T) {
 	cfg := mustDefaultConfig(t)
 	cfg.DataDir = t.TempDir()
@@ -97,22 +199,14 @@ func TestNewerSchemaVersionIsRejectedWithoutWrites(t *testing.T) {
 	cfg := mustDefaultConfig(t)
 	cfg.DataDir = t.TempDir()
 
-	s1, err := New(cfg)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	if err := s1.CreateSession("future-schema-seed", "future-schema-project", cfg.DataDir); err != nil {
-		t.Fatalf("seed session: %v", err)
-	}
-	if err := s1.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-
-	// Simulate a database already migrated by a NEWER engram.
 	future := schemaVersion + 7
-	raw, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
+	dbPath := filepath.Join(cfg.DataDir, "engram.db")
+	raw, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatalf("raw open: %v", err)
+	}
+	if _, err := raw.Exec("PRAGMA journal_mode = DELETE"); err != nil {
+		t.Fatalf("set DELETE journal mode: %v", err)
 	}
 	if _, err := raw.Exec(fmt.Sprintf("PRAGMA user_version = %d", future)); err != nil {
 		t.Fatalf("stamp future user_version: %v", err)
@@ -135,7 +229,7 @@ func TestNewerSchemaVersionIsRejectedWithoutWrites(t *testing.T) {
 		t.Fatalf("migration suite ran %d times against a newer schema, want 0", got)
 	}
 
-	raw, err = sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
+	raw, err = sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatalf("reopen raw database: %v", err)
 	}
@@ -147,12 +241,17 @@ func TestNewerSchemaVersionIsRejectedWithoutWrites(t *testing.T) {
 	if v != future {
 		t.Fatalf("user_version was rewritten to %d, want it left at %d", v, future)
 	}
-	var sessions int
-	if err := raw.QueryRow(`SELECT count(*) FROM sessions`).Scan(&sessions); err != nil {
-		t.Fatalf("count sessions after rejected open: %v", err)
+	var journalMode string
+	if err := raw.QueryRow("PRAGMA journal_mode").Scan(&journalMode); err != nil {
+		t.Fatalf("read journal mode after rejected open: %v", err)
 	}
-	if sessions != 1 {
-		t.Fatalf("sessions after rejected open = %d, want unchanged seed count 1", sessions)
+	if journalMode != "delete" {
+		t.Fatalf("journal mode after rejected open = %q, want delete", journalMode)
+	}
+	for _, sidecar := range []string{dbPath + "-wal", dbPath + "-shm"} {
+		if _, err := os.Stat(sidecar); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("rejected open created SQLite sidecar %q: %v", sidecar, err)
+		}
 	}
 }
 

@@ -79,6 +79,7 @@ var runtimeSQLEscapes = map[string]bool{
 	"withTxUnchecked":                         true,
 	"primeConnection":                         true,
 	"registerPersistWALHook":                  true,
+	"readCompatibilityUserVersion":            true,
 	"readUserVersion":                         true,
 	"setUserVersion":                          true,
 	"migrate":                                 true,
