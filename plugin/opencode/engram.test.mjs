@@ -98,6 +98,7 @@ async function createRuntime(t, {
   directory = "/work/engram",
   projectCurrentResponse = { project: "engram", project_source: "git_remote" },
 	projectCurrentOK = true,
+	manifestExists = false,
   sessionGet = async ({ path }) => sdkResult(session(path.id)),
   registrationResponse,
   contextResponse,
@@ -107,13 +108,14 @@ async function createRuntime(t, {
   const registeredIDs = []
   const sessionGetIDs = []
   const requests = []
+	const spawns = []
   globalThis.Bun = {
     spawnSync(args) {
       if (args.includes("remote")) return { exitCode: 1, stdout: Buffer.from("") }
       return { exitCode: 0, stdout: Buffer.from("/work/engram\n") }
     },
-    spawn() {},
-    file() { return { async exists() { return false } } },
+		spawn(args, options) { spawns.push({ args, options }) },
+		file() { return { async exists() { return manifestExists } } },
   }
   globalThis.fetch = async (url, init) => {
     const path = new URL(url).pathname
@@ -162,6 +164,7 @@ async function createRuntime(t, {
     registeredIDs,
     sessionGetIDs,
     requests,
+		spawns,
   }
 }
 
@@ -243,6 +246,24 @@ test("project identity resolution failures fail closed for automatic writes", as
 			assert.equal(runtime.requests.some(({ path }) => path === "/observations/passive"), false)
 			assert.equal(runtime.requests.some(({ path }) => path === "/context/compaction"), false)
 			assert.match(output.context.at(-1), /Automatic session, prompt, and passive-capture writes remain disabled/)
+		})
+	}
+})
+
+test("startup import requires a resolved project identity", async (t) => {
+	for (const scenario of [
+		{ name: "failed", response: { error: "unavailable" }, ok: false, imports: 0 },
+		{ name: "ambiguous", response: { project: "", error_hint: "ambiguous project", available_projects: ["repo-a", "repo-b"] }, imports: 0 },
+		{ name: "resolved", response: { project: "engram", project_source: "git_remote" }, imports: 1 },
+	]) {
+		await t.test(scenario.name, async (t) => {
+			const runtime = await createRuntime(t, {
+				projectCurrentResponse: scenario.response,
+				projectCurrentOK: scenario.ok ?? true,
+				manifestExists: true,
+			})
+			const imports = runtime.spawns.filter(({ args }) => args[1] === "sync" && args[2] === "--import")
+			assert.equal(imports.length, scenario.imports)
 		})
 	}
 })

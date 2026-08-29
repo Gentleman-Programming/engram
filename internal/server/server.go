@@ -1455,7 +1455,12 @@ func (s *Server) handleScanConflicts(w http.ResponseWriter, r *http.Request) {
 		opts.BuildPrompt = promptBuilder
 	}
 
-	result, err := s.store.ScanProject(opts)
+	var result store.ScanResult
+	if body.AllProjects {
+		result, err = s.store.ScanAllProjects(opts)
+	} else {
+		result, err = s.store.ScanProject(opts)
+	}
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return

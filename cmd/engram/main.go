@@ -169,6 +169,17 @@ func resolveCLIProjectScope(s *store.Store, explicit string, all, requireKnownOv
 	return resolveCLIProject(s, explicit, requireKnownOverrides)
 }
 
+func requiredProjectValue(args []string, index int) (string, error) {
+	if index+1 >= len(args) {
+		return "", fmt.Errorf("--project requires a non-empty value")
+	}
+	value := strings.TrimSpace(args[index+1])
+	if value == "" || strings.HasPrefix(value, "-") {
+		return "", fmt.Errorf("--project requires a non-empty value")
+	}
+	return value, nil
+}
+
 func resolveCLIProjectWithDetector(s *store.Store, explicit string, requireKnownOverrides bool, detect func(string) project.DetectionResult) (string, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -1354,10 +1365,13 @@ func cmdTimeline(cfg store.Config) {
 				i++
 			}
 		case "--project":
-			if i+1 < len(os.Args) {
-				projectName = os.Args[i+1]
-				i++
+			value, err := requiredProjectValue(os.Args, i)
+			if err != nil {
+				fatal(err)
+				return
 			}
+			projectName = value
+			i++
 		case "--all":
 			allProjects = true
 		}
@@ -1509,10 +1523,13 @@ func cmdStats(cfg store.Config) {
 	for i := 2; i < len(os.Args); i++ {
 		switch os.Args[i] {
 		case "--project":
-			if i+1 < len(os.Args) {
-				projectName = os.Args[i+1]
-				i++
+			value, err := requiredProjectValue(os.Args, i)
+			if err != nil {
+				fatal(err)
+				return
 			}
+			projectName = value
+			i++
 		case "--all":
 			allProjects = true
 		}
@@ -1558,10 +1575,13 @@ func cmdExport(cfg store.Config) {
 	for i := 2; i < len(os.Args); i++ {
 		switch os.Args[i] {
 		case "--project":
-			if i+1 < len(os.Args) {
-				projectName = os.Args[i+1]
-				i++
+			value, err := requiredProjectValue(os.Args, i)
+			if err != nil {
+				fatal(err)
+				return
 			}
+			projectName = value
+			i++
 		case "--all":
 			allProjects = true
 		default:
@@ -1669,6 +1689,10 @@ func cmdSync(cfg store.Config) {
 				i++
 			}
 		}
+	}
+	if doAll && projectProvided {
+		fatal(fmt.Errorf("--all and --project cannot be used together"))
+		return
 	}
 
 	syncDir := ".engram"

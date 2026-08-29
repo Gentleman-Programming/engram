@@ -261,6 +261,35 @@ func TestCmdConflictsScan_DryRun(t *testing.T) {
 	}
 }
 
+func TestCmdConflictsScanAllProjectsUsesGlobalScan(t *testing.T) {
+	cfg := testConfig(t)
+	for _, project := range []string{"alpha", "beta", "legacy"} {
+		sessionID := "scan-cli-" + project
+		for _, title := range []string{"shared CLI conflict scan primary", "shared CLI conflict scan secondary"} {
+			mustSeedObservation(t, cfg, sessionID, project, "decision", title, "shared CLI conflict scan", "project")
+		}
+	}
+	db := openTestDB(t, cfg)
+	if _, err := db.Exec(`UPDATE observations SET project = '' WHERE session_id = 'scan-cli-legacy'`); err != nil {
+		t.Fatalf("clear blank observation project: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE sessions SET project = '' WHERE id = 'scan-cli-legacy'`); err != nil {
+		t.Fatalf("clear blank session project: %v", err)
+	}
+
+	withArgs(t, "engram", "conflicts", "scan", "--project", "alpha")
+	alpha, stderr := captureOutput(t, func() { cmdConflicts(cfg) })
+	if stderr != "" || !strings.Contains(alpha, "inspected:        2") {
+		t.Fatalf("explicit project scan must inspect alpha only: stdout=%q stderr=%q", alpha, stderr)
+	}
+
+	withArgs(t, "engram", "conflicts", "scan", "--all", "--apply", "--max-insert", "10")
+	all, stderr := captureOutput(t, func() { cmdConflicts(cfg) })
+	if stderr != "" || !strings.Contains(all, "inspected:        6") || !strings.Contains(all, "inserted:         3") {
+		t.Fatalf("all-project scan must inspect every project scope: stdout=%q stderr=%q", all, stderr)
+	}
+}
+
 func TestCmdConflictsScan_PageContract(t *testing.T) {
 	cfg := testConfig(t)
 	for i := 0; i < 2; i++ {

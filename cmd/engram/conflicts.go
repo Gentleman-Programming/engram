@@ -471,7 +471,12 @@ func cmdConflictsScan(cfg store.Config) {
 		opts.BuildPrompt = buildPrompt
 	}
 
-	result, err := s.ScanProject(opts)
+	var result store.ScanResult
+	if allProjects {
+		result, err = s.ScanAllProjects(opts)
+	} else {
+		result, err = s.ScanProject(opts)
+	}
 	if err != nil {
 		fatal(err)
 		return

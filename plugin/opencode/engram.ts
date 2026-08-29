@@ -414,26 +414,26 @@ export const Engram: Plugin = async (ctx) => {
     }
   }
 
-	await ensureResolvedProject()
-
-  // Auto-import: if .engram/manifest.json exists in the project repo,
-  // run `engram sync --import` to load any new chunks into the local DB.
-  // This is how git-synced memories get loaded when cloning a repo or
-  // pulling changes. Each chunk is imported only once (tracked by ID).
-  try {
-    const manifestFile = `${ctx.directory}/.engram/manifest.json`
-    const file = Bun.file(manifestFile)
-    if (await file.exists()) {
-      Bun.spawn([ENGRAM_BIN, "sync", "--import"], {
-        cwd: ctx.directory,
-        stdout: "ignore",
-        stderr: "ignore",
-        stdin: "ignore",
-      })
-    }
-  } catch {
-    // Manifest doesn't exist or binary not found — silently skip
-  }
+	if (await ensureResolvedProject()) {
+		// Auto-import: if .engram/manifest.json exists in the project repo,
+		// run `engram sync --import` to load any new chunks into the local DB.
+		// This is how git-synced memories get loaded when cloning a repo or
+		// pulling changes. Each chunk is imported only once (tracked by ID).
+		try {
+			const manifestFile = `${ctx.directory}/.engram/manifest.json`
+			const file = Bun.file(manifestFile)
+			if (await file.exists()) {
+				Bun.spawn([ENGRAM_BIN, "sync", "--import"], {
+					cwd: ctx.directory,
+					stdout: "ignore",
+					stderr: "ignore",
+					stdin: "ignore",
+				})
+			}
+		} catch {
+			// Manifest doesn't exist or binary not found — silently skip
+		}
+	}
 
   return {
     // ─── Event Listeners ───────────────────────────────────────────

@@ -2179,6 +2179,74 @@ func TestHandleConflictsScan_PageContract(t *testing.T) {
 	}
 }
 
+func TestHandleConflictsScanProjectIsolationAndAllProjects(t *testing.T) {
+	st, rawDB := conflictsTestStore(t)
+	seed := func(sessionID, project string) {
+		t.Helper()
+		if err := st.CreateSession(sessionID, project, "/tmp/"+sessionID); err != nil {
+			t.Fatalf("CreateSession %q: %v", sessionID, err)
+		}
+		for _, title := range []string{"shared HTTP conflict scan primary", "shared HTTP conflict scan secondary"} {
+			if _, err := st.AddObservation(store.AddObservationParams{
+				SessionID: sessionID,
+				Type:      "decision",
+				Title:     title,
+				Content:   "shared HTTP conflict scan",
+				Project:   project,
+				Scope:     "project",
+			}); err != nil {
+				t.Fatalf("AddObservation %q: %v", sessionID, err)
+			}
+		}
+	}
+	seed("scan-alpha", "alpha")
+	seed("scan-beta", "beta")
+	seed("scan-blank", "legacy")
+	if _, err := rawDB.Exec(`UPDATE observations SET project = '' WHERE session_id = 'scan-blank'`); err != nil {
+		t.Fatalf("clear blank observation project: %v", err)
+	}
+	if _, err := rawDB.Exec(`UPDATE sessions SET project = '' WHERE id = 'scan-blank'`); err != nil {
+		t.Fatalf("clear blank session project: %v", err)
+	}
+
+	scan := func(body string) map[string]any {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		New(st, 0).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/conflicts/scan", strings.NewReader(body)))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("scan %s status = %d: %s", body, rec.Code, rec.Body.String())
+		}
+		var response map[string]any
+		if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+			t.Fatalf("decode scan response: %v", err)
+		}
+		return response
+	}
+
+	alpha := scan(`{"project":"alpha"}`)
+	if alpha["inspected"] != float64(2) || alpha["inserted"] != float64(0) {
+		t.Fatalf("explicit alpha scan = %#v, want only alpha observations", alpha)
+	}
+	all := scan(`{"all_projects":true,"apply":true}`)
+	if all["inspected"] != float64(6) || all["inserted"] != float64(3) {
+		t.Fatalf("all-project scan = %#v, want all three project scopes", all)
+	}
+
+	var crossProjectRelations int
+	if err := rawDB.QueryRow(`
+		SELECT COUNT(*)
+		FROM memory_relations r
+		JOIN observations src ON src.sync_id = r.source_id
+		JOIN observations tgt ON tgt.sync_id = r.target_id
+		WHERE ifnull(src.project, '') != ifnull(tgt.project, '')
+	`).Scan(&crossProjectRelations); err != nil {
+		t.Fatalf("count cross-project relations: %v", err)
+	}
+	if crossProjectRelations != 0 {
+		t.Fatalf("all-project scan created %d cross-project relations", crossProjectRelations)
+	}
+}
+
 func TestHandleConflictsScan_OmittedProjectUsesCurrent(t *testing.T) {
 	st, _ := conflictsTestStore(t)
 	srv := New(st, 0)

@@ -3832,6 +3832,51 @@ func TestCmdSyncCloudRequiresExplicitProjectAndRejectsAll(t *testing.T) {
 	}
 }
 
+func TestCmdSyncRejectsCombinedProjectSelectorsBeforeStoreConstruction(t *testing.T) {
+	for _, args := range [][]string{
+		{"engram", "sync", "--all", "--project", "alpha"},
+		{"engram", "sync", "--project", "alpha", "--all"},
+	} {
+		t.Run(strings.Join(args[2:], " "), func(t *testing.T) {
+			stubExitWithPanic(t)
+			calledStoreNew := false
+			originalStoreNew := storeNew
+			storeNew = func(store.Config) (*store.Store, error) {
+				calledStoreNew = true
+				return nil, errors.New("store must not be constructed")
+			}
+			t.Cleanup(func() { storeNew = originalStoreNew })
+
+			withArgs(t, args...)
+			_, stderr, recovered := captureOutputAndRecover(t, func() { cmdSync(testConfig(t)) })
+			if _, ok := recovered.(exitCode); !ok {
+				t.Fatalf("expected combined selectors to exit, got %v", recovered)
+			}
+			if !strings.Contains(stderr, "--all and --project cannot be used together") {
+				t.Fatalf("combined selector error = %q", stderr)
+			}
+			if calledStoreNew {
+				t.Fatal("combined selectors constructed a store")
+			}
+		})
+	}
+
+	for _, args := range [][]string{
+		{"engram", "sync", "--all", "--status"},
+		{"engram", "sync", "--project", "alpha", "--status"},
+	} {
+		t.Run(strings.Join(args[2:], " "), func(t *testing.T) {
+			stubExitWithPanic(t)
+			withCwd(t, t.TempDir())
+			withArgs(t, args...)
+			stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdSync(testConfig(t)) })
+			if recovered != nil || stderr != "" || !strings.Contains(stdout, "Sync status:") {
+				t.Fatalf("valid selector failed: stdout=%q stderr=%q panic=%v", stdout, stderr, recovered)
+			}
+		})
+	}
+}
+
 func TestCmdImportStoreImportFailure(t *testing.T) {
 	stubExitWithPanic(t)
 	cfg := testConfig(t)

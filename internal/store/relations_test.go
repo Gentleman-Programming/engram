@@ -1497,6 +1497,79 @@ func TestScanProject_DryRunNoInsert(t *testing.T) {
 	}
 }
 
+func TestScanAllProjectsIncludesEveryProjectWithoutCrossProjectCandidates(t *testing.T) {
+	s := newTestStore(t)
+	for _, project := range []string{"alpha", "beta", ""} {
+		sessionID := "scan-global-" + project
+		seedProject := project
+		if seedProject == "" {
+			sessionID = "scan-global-blank"
+			seedProject = "legacy"
+		}
+		if err := s.CreateSession(sessionID, seedProject, "/tmp/"+sessionID); err != nil {
+			t.Fatalf("CreateSession %q: %v", sessionID, err)
+		}
+		for _, title := range []string{"shared global conflict scan primary", "shared global conflict scan secondary"} {
+			addTestObsSession(t, s, sessionID, title, "decision", seedProject, "project")
+		}
+		if project == "" {
+			if _, err := s.db.Exec(`UPDATE observations SET project = '' WHERE session_id = ?`, sessionID); err != nil {
+				t.Fatalf("clear observation project: %v", err)
+			}
+			if _, err := s.db.Exec(`UPDATE sessions SET project = '' WHERE id = ?`, sessionID); err != nil {
+				t.Fatalf("clear session project: %v", err)
+			}
+		}
+	}
+
+	for _, project := range []string{"alpha", "beta", ""} {
+		result, err := s.ScanProject(ScanOptions{Project: project})
+		if err != nil {
+			t.Fatalf("ScanProject %q: %v", project, err)
+		}
+		if result.Inspected != 2 {
+			t.Fatalf("ScanProject %q inspected %d observations, want 2", project, result.Inspected)
+		}
+	}
+
+	result, err := s.ScanAllProjects(ScanOptions{Apply: true})
+	if err != nil {
+		t.Fatalf("ScanAllProjects: %v", err)
+	}
+	if result.Inspected != 6 || result.RelationsInserted != 3 {
+		t.Fatalf("ScanAllProjects result = %#v, want 6 inspected and 3 relations", result)
+	}
+
+	var crossProjectRelations int
+	if err := s.db.QueryRow(`
+		SELECT COUNT(*)
+		FROM memory_relations r
+		JOIN observations src ON src.sync_id = r.source_id
+		JOIN observations tgt ON tgt.sync_id = r.target_id
+		WHERE ifnull(src.project, '') != ifnull(tgt.project, '')
+	`).Scan(&crossProjectRelations); err != nil {
+		t.Fatalf("count cross-project relations: %v", err)
+	}
+	if crossProjectRelations != 0 {
+		t.Fatalf("ScanAllProjects created %d cross-project relations", crossProjectRelations)
+	}
+	for _, project := range []string{"alpha", "beta", ""} {
+		var relations int
+		if err := s.db.QueryRow(`
+			SELECT COUNT(*)
+			FROM memory_relations r
+			JOIN observations src ON src.sync_id = r.source_id
+			JOIN observations tgt ON tgt.sync_id = r.target_id
+			WHERE ifnull(src.project, '') = ? AND ifnull(tgt.project, '') = ?
+		`, project, project).Scan(&relations); err != nil {
+			t.Fatalf("count relations for project %q: %v", project, err)
+		}
+		if relations != 1 {
+			t.Fatalf("relations for project %q = %d, want 1", project, relations)
+		}
+	}
+}
+
 // TestScanProject_ApplyInsertsUpToCap verifies that ScanProject with Apply=true
 // inserts new pending relation rows up to MaxInsert, sets Capped=true when hit.
 func TestScanProject_ApplyInsertsUpToCap(t *testing.T) {

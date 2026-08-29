@@ -1095,6 +1095,43 @@ func TestCmdStatsAndExportProjectScopeSkipGlobalLoads(t *testing.T) {
 	}
 }
 
+func TestCmdTimelineStatsAndExportRejectInvalidProjectValues(t *testing.T) {
+	commands := []struct {
+		name string
+		args []string
+		run  func(store.Config)
+	}{
+		{name: "timeline", args: []string{"timeline", "1"}, run: cmdTimeline},
+		{name: "stats", args: []string{"stats"}, run: cmdStats},
+		{name: "export", args: []string{"export", "out.json"}, run: cmdExport},
+	}
+	values := []struct {
+		name string
+		args []string
+	}{
+		{name: "missing", args: []string{"--project"}},
+		{name: "blank", args: []string{"--project", " "}},
+		{name: "flag", args: []string{"--project", "--all"}},
+	}
+	for _, command := range commands {
+		for _, value := range values {
+			t.Run(command.name+"/"+value.name, func(t *testing.T) {
+				stubExitWithPanic(t)
+				args := append([]string{"engram"}, command.args...)
+				args = append(args, value.args...)
+				withArgs(t, args...)
+				_, stderr, recovered := captureOutputAndRecover(t, func() { command.run(testConfig(t)) })
+				if _, ok := recovered.(exitCode); !ok {
+					t.Fatalf("expected invalid --project to exit, got %v", recovered)
+				}
+				if !strings.Contains(stderr, "--project requires a non-empty value") {
+					t.Fatalf("invalid --project error = %q", stderr)
+				}
+			})
+		}
+	}
+}
+
 func TestProjectScopedCLIReadFamiliesUseCurrentAndExplicitAll(t *testing.T) {
 	workDir := t.TempDir()
 	withCwd(t, workDir)
