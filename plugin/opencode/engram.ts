@@ -166,30 +166,13 @@ async function isEngramRunning(): Promise<boolean> {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function extractProjectName(directory: string): string {
-  // Try git remote origin URL
-  try {
-    const result = Bun.spawnSync(["git", "-C", directory, "remote", "get-url", "origin"])
-    if (result.exitCode === 0) {
-      const url = result.stdout?.toString().trim()
-      if (url) {
-        const name = url.replace(/\.git$/, "").split(/[/:]/).pop()
-        if (name) return name
-      }
-    }
-  } catch {}
-
-  // Fallback: git root directory name (works in worktrees)
-  try {
-    const result = Bun.spawnSync(["git", "-C", directory, "rev-parse", "--show-toplevel"])
-    if (result.exitCode === 0) {
-      const root = result.stdout?.toString().trim()
-      if (root) return root.split("/").pop() ?? "unknown"
-    }
-  } catch {}
-
-  // Final fallback: cwd basename
-  return directory.split("/").pop() ?? "unknown"
+async function resolveProjectName(directory: string): Promise<string> {
+  const data = await engramFetch(`/project/current?cwd=${encodeURIComponent(directory)}`)
+  const project = typeof data?.project === "string" ? data.project.trim() : ""
+  if (!project || data?.error_hint || /[\\/]/.test(project) || /^[A-Za-z]:$/.test(project)) {
+    return "unknown"
+  }
+  return project
 }
 
 function truncate(str: string, max: number): string {
@@ -210,9 +193,6 @@ function stripPrivateTags(str: string): string {
 // ─── Plugin Export ───────────────────────────────────────────────────────────
 
 export const Engram: Plugin = async (ctx) => {
-  const oldProject = ctx.directory.split("/").pop() ?? "unknown"
-  const project = extractProjectName(ctx.directory)
-
   // Track tool counts per session (in-memory only, not critical)
   const toolCounts = new Map<string, number>()
 
@@ -410,14 +390,7 @@ export const Engram: Plugin = async (ctx) => {
     }
   }
 
-  // Migrate project name if it changed (one-time, idempotent)
-  // Must run AFTER server startup to ensure the endpoint is available
-  if (oldProject !== project) {
-    await engramFetch("/projects/migrate", {
-      method: "POST",
-      body: { old_project: oldProject, new_project: project },
-    })
-  }
+  const project = await resolveProjectName(ctx.directory)
 
   // Auto-import: if .engram/manifest.json exists in the project repo,
   // run `engram sync --import` to load any new chunks into the local DB.

@@ -68,6 +68,8 @@ function assertNoRegistration(runtime, message) {
 }
 
 async function createRuntime(t, {
+  directory = "/work/engram",
+  projectCurrentResponse = { project: "engram", project_source: "git_remote" },
   sessionGet = async ({ path }) => sdkResult(session(path.id)),
   registrationResponse,
   contextResponse,
@@ -90,6 +92,7 @@ async function createRuntime(t, {
     if (path === "/health") return { ok: true, async json() { return { status: "ok" } } }
     const body = init?.body ? JSON.parse(init.body) : undefined
     requests.push({ path, url: String(url), body })
+    if (path === "/project/current") return httpResponse(projectCurrentResponse)
     if (path === "/sessions") {
       registeredIDs.push(body.id)
       if (registrationResponse) return registrationResponse(registeredIDs.length)
@@ -107,7 +110,7 @@ async function createRuntime(t, {
   const moduleURL = new URL(`./engram.ts?sdk-runtime=${runtimeImport}`, import.meta.url)
   const { Engram } = await import(moduleURL.href)
   const plugin = await Engram({
-    directory: "/work/engram",
+    directory,
     project: { id: PROJECT_ID },
     client: {
       session: {
@@ -130,6 +133,47 @@ async function createRuntime(t, {
     requests,
   }
 }
+
+test("project identity delegates Windows paths and worktrees to the canonical server", async (t) => {
+  for (const scenario of [
+    {
+      name: "Windows directory basename",
+      directory: "C:\\Users\\Blackie",
+      response: { project: "blackie", project_source: "dir_basename" },
+      expectedProject: "blackie",
+    },
+    {
+      name: "Windows drive root",
+      directory: "C:\\",
+      response: { project: "C:\\", project_source: "dir_basename" },
+      expectedProject: "unknown",
+    },
+    {
+      name: "worktree repository identity",
+      directory: "C:\\worktrees\\engram-652",
+      response: { project: "engram", project_source: "git_remote" },
+      expectedProject: "engram",
+    },
+  ]) {
+    await t.test(scenario.name, async (t) => {
+      const runtime = await createRuntime(t, {
+        directory: scenario.directory,
+        projectCurrentResponse: scenario.response,
+      })
+      const resolution = runtime.requests.find(({ path }) => path === "/project/current")
+      assert.ok(resolution, "the plugin must ask the canonical resolver")
+      assert.equal(new URL(resolution.url).searchParams.get("cwd"), scenario.directory)
+
+      await runtime.event("session.created", session("runtime"))
+      const registration = runtime.requests.find(({ path }) => path === "/sessions")
+      assert.equal(registration?.body.project, scenario.expectedProject)
+
+      const output = { context: [] }
+      await runtime.compact({ sessionID: "runtime" }, output)
+      assert.match(output.context.at(-1), new RegExp(`Use project: '${scenario.expectedProject}'`))
+    })
+  }
+})
 
 test("registration enters the cache only after a successful acknowledgement", async (t) => {
   assert.match(source, /signal: AbortSignal\.timeout\(3000\)/)
