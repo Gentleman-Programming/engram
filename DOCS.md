@@ -481,7 +481,7 @@ Response:
 | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
 | `ENGRAM_DATA_DIR`               | Override data directory                                                                                                                                                                                                                                   | `~/.engram`          |
 | `ENGRAM_PORT`                   | Override HTTP server port                                                                                                                                                                                                                                 | `7437`               |
-| `ENGRAM_PROJECT`                | Process-level default project override, applied by every entry point through one precedence rule: **explicit request project** (`engram save --project`, an MCP tool `project` argument) → **process override** (`engram mcp --project`, then `ENGRAM_PROJECT`) → **cwd detection**. For `engram save`: owns the observation and its `manual-save-<project>` session when `--project` is omitted. For `engram serve`: used as the fallback when `GET /sync/status` receives no `project` query param. For `engram mcp`: sets `MCPConfig.DefaultProject`, which takes precedence over cwd detection for all read and write tools (including `mem_update`) for the lifetime of that MCP process. When unset, cwd detection is used as the fallback. | cwd-detected project |
+| `ENGRAM_PROJECT`                | Process-level default project override for `current` project-scoped operations. Precedence: **explicit request project** (`engram save --project`, an MCP tool `project` argument) → **process override** (`engram mcp --project`, then `ENGRAM_PROJECT`) → **cwd detection**. The value must be a project name, not a path. Explicit/process values are checked against known context when an operation must not establish a bucket; documented creation and recovery writes retain that behavior. Deliberately global operations such as `mem_review` list with no project and `mem_search(all_projects=true)` remain global. | cwd-detected project |
 | `ENGRAM_HTTP_TOKEN`             | Optional Bearer auth for the local HTTP server. When set, `DELETE /sessions/{id}`, `DELETE /observations/{id}`, `DELETE /prompts/{id}`, `GET /export`, and `POST /import` require `Authorization: Bearer <token>`. `POST /projects/rescue-ownership` (and deprecated alias `POST /projects/migrate`) always requires a configured token and matching Bearer credential. Comparison is constant-time. Token is read at request time (no restart needed). Other routes remain open when unset (zero-config default). Ownership repair never depends on this token: `engram projects rescue-ownership` performs the same repair against the local store. | (unset — HTTP rescue route not served; CLI repair still available) |
 | `ENGRAM_TIMEZONE`               | Timezone for timestamp display in the TUI and cloud dashboard. Accepts any IANA zone name (e.g. `America/New_York`, `Europe/Berlin`). Falls back to system local time when unset or invalid.                                                               | system local         |
 | `ENGRAM_AGENT_CLI`              | LLM runner name used by `engram conflicts scan --semantic` and the HTTP `/conflicts/scan` endpoint. Accepted values: `claude`, `opencode`.                                                                                                                | (unset)              |
@@ -907,6 +907,8 @@ When called in the same MCP process, this also feeds process-local current promp
 
 Get recent memory context from previous sessions — shows sessions, prompts, and observations, with optional scope filtering for observations.
 
+When `project` is omitted, context is scoped to the resolved current project (process override before cwd detection). This is not an all-project query. `scope: personal` without an explicit project retains its cross-project personal-memory behavior.
+
 Scope values accepted by the `scope` parameter: `project` (default), `personal`, `global`. When `scope: personal` is passed without an explicit `project` override, the project filter is cleared and personal observations are returned across all projects (cross-project personal scope).
 
 ### mem_stats
@@ -916,6 +918,7 @@ Show memory system statistics — sessions, observations, prompts, projects.
 ### mem_timeline
 
 Progressive disclosure: after searching, drill into chronological context around a specific observation. Shows N observations before and after within the same session.
+The optional project filter is enforced: an observation owned by another project is not returned.
 
 ### mem_get_observation
 
@@ -1119,7 +1122,7 @@ MCP tools resolve project names at call time using the shared detection chain:
 5. Multiple git-repo children of cwd returns `ambiguous_project` with `available_projects`
 6. Current working directory basename
 
-`engram mcp` accepts a process-level default project via `--project <name>` / `--project=<name>` or `ENGRAM_PROJECT=<name>`. This override takes precedence over cwd detection for all read and write tools — `mem_update` included — throughout the lifetime of that MCP process. It is a trusted startup-time value — use it when the host cannot supply a reliable cwd (VS Code, WSL, CI, Docker).
+`engram mcp` accepts a process-level default project via `--project <name>` / `--project=<name>` or `ENGRAM_PROJECT=<name>`. For current-project tools, this override takes precedence over cwd detection throughout the MCP process. It must be a project name, not a path; operations that cannot establish project context reject unknown overrides. Deliberately global tools retain their own omission contract, including `mem_review` list without a project filter.
 
 The same precedence rule is applied by every entry point, so identity never depends on which binary wrote the record: an **explicit request project** (`engram save --project`, an MCP tool `project` argument) wins first, then the **process override** (`engram mcp --project`, then `ENGRAM_PROJECT`), then **cwd detection**.
 

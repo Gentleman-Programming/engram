@@ -552,9 +552,9 @@ The reliable fix is to pin the project explicitly at startup time. Both forms be
 }
 ```
 
-Both `--project=my-project` and `ENGRAM_PROJECT=my-project` set `MCPConfig.DefaultProject`, which takes precedence over cwd detection for every read and write tool for the lifetime of that MCP process.
+Both `--project=my-project` and `ENGRAM_PROJECT=my-project` set `MCPConfig.DefaultProject`, which takes precedence over cwd detection for current-project tools for the lifetime of that MCP process. Deliberately global operations keep their own omission contract.
 
-> The `--project` flag and `ENGRAM_PROJECT` env var are the same mechanism. If both are supplied, the flag wins. The value must match an existing project name in your Engram store; unknown names are rejected so typos fail loudly instead of silently creating a new project bucket.
+> The `--project` flag and `ENGRAM_PROJECT` env var are the same mechanism. If both are supplied, the flag wins. The value must be a project name, not a path. Operations that cannot establish project context reject unknown values; documented creation and recovery writes retain their creation semantics.
 
 Same pattern applies to:
 - WSL terminals where VS Code opens a remote window (`\\wsl$\...` paths) — the MCP server process runs inside WSL but VS Code does not forward the workspace directory as cwd.

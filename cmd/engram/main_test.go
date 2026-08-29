@@ -862,6 +862,23 @@ func TestCmdSyncDefaultProjectNoData(t *testing.T) {
 	}
 }
 
+func TestCmdSyncHonorsProcessProjectOverride(t *testing.T) {
+	workDir := t.TempDir()
+	withCwd(t, workDir)
+	t.Setenv(project.EnvProjectOverride, "override-project")
+
+	cfg := testConfig(t)
+	mustSeedObservation(t, cfg, "override-session", "override-project", "note", "override note", "override content", "project")
+	withArgs(t, "engram", "sync")
+	stdout, stderr := captureOutput(t, func() { cmdSync(cfg) })
+	if stderr != "" {
+		t.Fatalf("stderr = %q", stderr)
+	}
+	if !strings.Contains(stdout, `Exporting memories for project "override-project"`) {
+		t.Fatalf("sync did not use process override: %q", stdout)
+	}
+}
+
 func TestMainVersionAndHelpAliases(t *testing.T) {
 	oldVersion := version
 	version = "9.9.9-test"

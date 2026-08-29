@@ -895,10 +895,11 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
 
   switch (toolName) {
     case "mem_search":
+      if (!params.all_projects && !requestedProject) requireResolvedProject();
       return engramFetch(`/search${queryString({
         q: params.query,
         type: params.type,
-        project: params.all_projects ? undefined : params.project,
+        project: params.all_projects ? undefined : activeProject,
         scope: params.scope,
         limit: params.limit,
         match_mode: params.match_mode,
@@ -910,7 +911,8 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
     case "mem_stats":
       return engramFetch("/stats");
     case "mem_timeline":
-      return engramFetch(`/timeline${queryString({ observation_id: params.observation_id, before: params.before, after: params.after, project: params.project })}`);
+      if (!requestedProject) requireResolvedProject();
+      return engramFetch(`/timeline${queryString({ observation_id: params.observation_id, before: params.before, after: params.after, project: activeProject })}`);
     case "mem_get_observation":
       return engramFetch(`/observations/${encodeURIComponent(String(params.id))}`);
     case "mem_save": {
@@ -994,7 +996,8 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
       }
     }
     case "mem_doctor":
-      return engramFetch(`/doctor${queryString({ project: params.project, check: params.check, cwd: params.project ? undefined : ctx.cwd })}`);
+      if (!requestedProject) requireResolvedProject();
+      return engramFetch(`/doctor${queryString({ project: activeProject, check: params.check })}`);
     case "mem_capture_passive": {
       requireResolvedProject();
       const passiveSessionId = runtimeSessionForWrite();

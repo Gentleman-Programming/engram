@@ -149,6 +149,37 @@ var (
 	agentRunnerFactory = defaultAgentRunnerFactory
 )
 
+// resolveCLIProject adapts the shared resolver for project-scoped CLI reads.
+// Explicit and process-level values must already exist; cwd detection remains
+// valid before a repository has written its first memory.
+func resolveCLIProject(s *store.Store, explicit string, requireKnownOverrides bool) (string, error) {
+	return resolveCLIProjectWithDetector(s, explicit, requireKnownOverrides, detectProjectFull)
+}
+
+func resolveCLIProjectWithDetector(s *store.Store, explicit string, requireKnownOverrides bool, detect func(string) project.DetectionResult) (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	result, err := project.Resolve(project.ResolutionOptions{
+		Mode:                 project.ResolutionCurrent,
+		Explicit:             explicit,
+		Directory:            cwd,
+		Detect:               detect,
+		ProjectExists:        s.ProjectExists,
+		RequireKnownExplicit: requireKnownOverrides && strings.TrimSpace(explicit) != "",
+		RequireKnownProcess:  requireKnownOverrides,
+	})
+	if err != nil {
+		return "", err
+	}
+	return result.Project, nil
+}
+
+func detectProjectForSync(dir string) project.DetectionResult {
+	return project.DetectionResult{Project: detectProject(dir), Source: project.SourceDirBasename, Path: dir}
+}
+
 type cloudSyncStatus struct {
 	Phase               string
 	LastError           string
@@ -975,6 +1006,21 @@ func cmdSearch(cfg store.Config) {
 		return
 	}
 	defer s.Close()
+	if strings.TrimSpace(opts.Project) == "" {
+		resolved, resolveErr := resolveCLIProject(s, "", true)
+		if resolveErr != nil {
+			fatal(resolveErr)
+			return
+		}
+		opts.Project = resolved
+	} else {
+		resolved, resolveErr := resolveCLIProject(s, opts.Project, true)
+		if resolveErr != nil {
+			fatal(resolveErr)
+			return
+		}
+		opts.Project = resolved
+	}
 
 	results, err := storeSearch(s, query, opts)
 	if err != nil {
@@ -1050,25 +1096,31 @@ func cmdSave(cfg store.Config) {
 		fatal(err)
 		return
 	}
-	// Identity precedence is the one process-level rule shared with the MCP and
-	// HTTP entry points: the explicit --project flag, then the process override
-	// (project.ProcessOverride reads ENGRAM_PROJECT), then cwd detection.
-	if strings.TrimSpace(projectName) == "" {
-		if override, ok := project.ProcessOverride(""); ok {
-			projectName = override
+	// The shared resolver preserves save's legitimate creation contract for an
+	// explicit name or a newly detected cwd, while rejecting malformed overrides.
+	rawProjectName := projectName
+	resolved, resolveErr := project.Resolve(project.ResolutionOptions{
+		Mode:      project.ResolutionCurrent,
+		Explicit:  projectName,
+		Directory: cwd,
+		Detect:    detectProjectFull,
+	})
+	if resolveErr != nil || strings.TrimSpace(resolved.Project) == "" {
+		if resolveErr != nil {
+			fatal(fmt.Errorf("cannot save without an unambiguous project identity: %w; use --project <name>", resolveErr))
 		} else {
-			resolved := detectProjectFull(cwd)
-			if resolved.Error != nil || strings.TrimSpace(resolved.Project) == "" {
-				if resolved.Error != nil {
-					fatal(fmt.Errorf("cannot save without an unambiguous project identity: %w; use --project <name>", resolved.Error))
-				} else {
-					fatal(errors.New("cannot save without an unambiguous project identity; use --project <name>"))
-				}
-				return
-			}
-			projectName = resolved.Project
+			fatal(errors.New("cannot save without an unambiguous project identity; use --project <name>"))
+		}
+		return
+	}
+	if rawProjectName == "" {
+		if override, ok := project.ProcessOverride(""); ok {
+			rawProjectName = override
+		} else {
+			rawProjectName = resolved.Project
 		}
 	}
+	projectName = rawProjectName
 	var warning string
 	projectName, warning = store.NormalizeProject(projectName)
 	if warning != "" {
@@ -1084,7 +1136,6 @@ func cmdSave(cfg store.Config) {
 		fatal(err)
 	}
 	defer s.Close()
-
 	sessionID := "manual-save-" + projectName
 	if err := s.CreateSession(sessionID, projectName, cwd); err != nil {
 		fatal(err)
@@ -1355,8 +1406,13 @@ func cmdContext(cfg store.Config) {
 		fatal(err)
 	}
 	defer s.Close()
+	resolved, resolveErr := resolveCLIProject(s, project, true)
+	if resolveErr != nil {
+		fatal(resolveErr)
+		return
+	}
 
-	ctx, err := storeFormatContext(s, project, scope)
+	ctx, err := storeFormatContext(s, resolved, scope)
 	if err != nil {
 		fatal(err)
 	}
@@ -1490,22 +1546,6 @@ func cmdSync(cfg store.Config) {
 		}
 	}
 
-	// Default project using git detection (so sync only exports
-	// memories for THIS project, not everything in the global DB).
-	// --all skips project filtering entirely — exports everything.
-	if !doAll && project == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			project = detectProject(cwd)
-		}
-	}
-	if project != "" {
-		normalizedProject, warning := store.NormalizeProject(project)
-		project = normalizedProject
-		if warning != "" {
-			fmt.Fprintln(os.Stderr, warning)
-		}
-	}
-
 	syncDir := ".engram"
 
 	s, err := storeNew(cfg)
@@ -1513,6 +1553,16 @@ func cmdSync(cfg store.Config) {
 		fatal(err)
 	}
 	defer s.Close()
+	// Sync is project-scoped unless --all is explicit. Route its omitted project
+	// through the same process-override-before-cwd resolver as other CLI paths.
+	if !doAll {
+		resolved, resolveErr := resolveCLIProjectWithDetector(s, project, false, detectProjectForSync)
+		if resolveErr != nil {
+			fatal(resolveErr)
+			return
+		}
+		project = resolved
+	}
 
 	cloudEnabled := doCloud || envBool("ENGRAM_CLOUD_SYNC")
 	if cloudEnabled {

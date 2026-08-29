@@ -168,6 +168,42 @@ test("registered Pi-native mem_search reports native provider transport failure"
   }
 });
 
+test("Pi forwards its resolved current project while preserving global review omission", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const { calls, fetchStub } = recordingFetch([
+    { method: "GET", path: "/health", body: { status: "ok" } },
+    { method: "GET", path: "/project/current", body: { project: "override-project", project_source: "process_override" } },
+    { method: "GET", path: "/search", body: [] },
+    { method: "GET", path: "/doctor", body: { status: "ok" } },
+    { method: "GET", path: "/review", body: { observations: [] } },
+  ]);
+  globalThis.fetch = fetchStub;
+
+  try {
+    await withPluginSandbox("engram-pi-contract-", async ({ sandbox }) => {
+      const { registeredTools } = await loadPluginHarness(sandbox);
+      const ctx = runtimeContext("resolved-project-session");
+
+      await registeredTools.get("mem_search").execute("search", { query: "override" }, undefined, undefined, ctx);
+      await registeredTools.get("mem_doctor").execute("doctor", {}, undefined, undefined, ctx);
+      await registeredTools.get("mem_review").execute("review", { action: "list" }, undefined, undefined, ctx);
+
+      const search = calls.find((call) => call.path.startsWith("/search"));
+      const doctor = calls.find((call) => call.path.startsWith("/doctor"));
+      const review = calls.find((call) => call.path.startsWith("/review"));
+      assert.match(search.path, /project=override-project/);
+      assert.match(doctor.path, /project=override-project/);
+      assert.equal(new URL(`http://test${review.path}`).searchParams.has("project"), false);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
 test("session-attributed Pi writes bind to acknowledged runtime identity and retry failed registration", async () => {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.ENGRAM_URL;

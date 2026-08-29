@@ -7402,6 +7402,9 @@ func TestProcessOverrideReadResolutionBeforeCWD(t *testing.T) {
 	t.Chdir(parent)
 
 	s := newMCPTestStore(t)
+	if err := s.CreateSession("trusted-project-session", "trusted project", t.TempDir()); err != nil {
+		t.Fatalf("seed trusted project: %v", err)
+	}
 	res, err := resolveReadProjectWithProcessOverride(s, "", "Trusted Project")
 	if err != nil {
 		t.Fatalf("resolve read with process override: %v", err)
@@ -7476,6 +7479,78 @@ func TestProcessOverrideSaveHandlerWritesToDefaultProject(t *testing.T) {
 	}
 	if len(results) != 1 {
 		t.Fatalf("results in trusted project = %d; want 1", len(results))
+	}
+}
+
+func TestLifecycleHandlersHonorDefaultProject(t *testing.T) {
+	s := newMCPTestStore(t)
+	activity := NewSessionActivity(10 * time.Minute)
+	cfg := MCPConfig{DefaultProject: "Lifecycle Project"}
+
+	start := handleSessionStart(s, cfg, activity)
+	startRes, err := start(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": "lifecycle-default"}}})
+	if err != nil || startRes.IsError {
+		t.Fatalf("session start: err=%v result=%q", err, callResultText(t, startRes))
+	}
+	if got := callResultJSON(t, startRes)["project_source"]; got != sourceProcessOverride {
+		t.Fatalf("session start source = %v; want %s", got, sourceProcessOverride)
+	}
+	session, err := s.GetSession("lifecycle-default")
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if session.Project != "lifecycle project" {
+		t.Fatalf("session project = %q", session.Project)
+	}
+
+	capture := handleCapturePassive(s, cfg, activity)
+	captureRes, err := capture(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"session_id": "lifecycle-default",
+		"content":    "## Key Learnings:\n- Lifecycle uses the configured project.",
+	}}})
+	if err != nil || captureRes.IsError {
+		t.Fatalf("passive capture: err=%v result=%q", err, callResultText(t, captureRes))
+	}
+	if got := callResultJSON(t, captureRes)["project_source"]; got != sourceProcessOverride {
+		t.Fatalf("capture source = %v; want %s", got, sourceProcessOverride)
+	}
+
+	end := handleSessionEnd(s, cfg, activity)
+	endRes, err := end(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": "lifecycle-default"}}})
+	if err != nil || endRes.IsError {
+		t.Fatalf("session end: err=%v result=%q", err, callResultText(t, endRes))
+	}
+	if got := callResultJSON(t, endRes)["project_source"]; got != sourceProcessOverride {
+		t.Fatalf("session end source = %v; want %s", got, sourceProcessOverride)
+	}
+}
+
+func TestTimelineRejectsObservationOutsideResolvedProject(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("timeline-project-a", "project-a", t.TempDir()); err != nil {
+		t.Fatalf("seed project a: %v", err)
+	}
+	if err := s.CreateSession("timeline-project-b", "project-b", t.TempDir()); err != nil {
+		t.Fatalf("seed project b: %v", err)
+	}
+	observation, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "timeline-project-b",
+		Project:   "project-b",
+		Type:      "discovery",
+		Title:     "private timeline",
+		Content:   "must not cross projects",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("seed observation: %v", err)
+	}
+
+	result, err := handleTimeline(s, MCPConfig{DefaultProject: "project-a"})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"observation_id": float64(observation)}}})
+	if err != nil {
+		t.Fatalf("timeline: %v", err)
+	}
+	if !result.IsError || !strings.Contains(callResultText(t, result), "not found in resolved project") {
+		t.Fatalf("timeline result = %#v", result)
 	}
 }
 

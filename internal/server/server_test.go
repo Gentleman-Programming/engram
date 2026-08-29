@@ -2644,6 +2644,42 @@ func TestProjectCurrentUsesProcessOverrideBeforeCWD(t *testing.T) {
 	}
 }
 
+func TestProjectScopedEndpointsResolveAndValidateProcessOverrides(t *testing.T) {
+	t.Run("known override scopes context", func(t *testing.T) {
+		t.Setenv("ENGRAM_PROJECT", "override-project")
+		st := newServerTestStore(t)
+		if err := st.CreateSession("override-session", "override-project", t.TempDir()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.AddObservation(store.AddObservationParams{SessionID: "override-session", Project: "override-project", Type: "note", Title: "override title", Content: "override content", Scope: "project"}); err != nil {
+			t.Fatal(err)
+		}
+		rec := httptest.NewRecorder()
+		New(st, 0).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/context", nil))
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "override title") {
+			t.Fatalf("context = %d %q", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("unknown override is rejected for current scoped reads", func(t *testing.T) {
+		t.Setenv("ENGRAM_PROJECT", "missing-project")
+		rec := httptest.NewRecorder()
+		New(newServerTestStore(t), 0).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/context", nil))
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("context status = %d body=%q", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("path-like override is rejected by discovery", func(t *testing.T) {
+		t.Setenv("ENGRAM_PROJECT", `C:\\workspace`)
+		rec := httptest.NewRecorder()
+		New(newServerTestStore(t), 0).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/project/current", nil))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("current status = %d body=%q", rec.Code, rec.Body.String())
+		}
+	})
+}
+
 func TestJudgeAndCompareRoutesValidateInput(t *testing.T) {
 	st := newServerTestStore(t)
 	h := New(st, 0).Handler()

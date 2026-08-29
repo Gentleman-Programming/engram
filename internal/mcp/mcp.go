@@ -926,8 +926,12 @@ func handleCurrentProject(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc 
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		cwd, _ := os.Getwd()
 		res := projectpkg.DetectProjectFull(cwd)
-		if processRes, ok := processProjectResult(cfg.DefaultProject); ok {
-			res = processRes
+		if processRes, ok, err := processProjectResult(cfg.DefaultProject); ok {
+			if err != nil {
+				res = projectpkg.DetectionResult{Source: projectpkg.SourceProcessOverride, Error: err}
+			} else {
+				res = processRes
+			}
 		}
 
 		envelope := map[string]any{
@@ -1406,7 +1410,7 @@ func handleUpdate(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 			return mcp.NewToolResultError("provide at least one field to update"), nil
 		}
 
-		detRes, err := resolveWriteProjectWithProcessOverride(cfg.DefaultProject)
+		detRes, err := resolveWriteProjectWithProcessOverride(s, cfg.DefaultProject, true)
 		if err != nil {
 			return writeProjectErrorResult(nil, "", detRes, err), nil
 		}
@@ -1455,7 +1459,7 @@ func handleReview(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 		case "list":
 			projectFilter, _ := req.GetArguments()["project"].(string)
 			limit := intArg(req, "limit", 10)
-			detRes := projectpkg.DetectionResult{Project: projectFilter, Source: projectpkg.SourceAllProjects}
+			detRes, _ := projectpkg.Resolve(projectpkg.ResolutionOptions{Mode: projectpkg.ResolutionAll})
 			if strings.TrimSpace(projectFilter) != "" {
 				var err error
 				detRes, err = resolveReadProject(s, projectFilter)
@@ -1470,9 +1474,6 @@ func handleReview(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 					return mcp.NewToolResultError(fmt.Sprintf("Project resolution failed: %s", err)), nil
 				}
 				projectFilter = detRes.Project
-			} else if res, err := resolveReadProjectWithProcessOverride(s, "", cfg.DefaultProject); err == nil {
-				detRes = res
-				detRes.Source = projectpkg.SourceAllProjects
 			}
 
 			observations, err := s.ObservationsNeedingReview(projectFilter, limit)
@@ -1587,7 +1588,7 @@ func handleSavePrompt(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 			return true, activity.ValidateAmbiguousProjectRecoveryToken(recoverySessionID, recoveryToken, strings.TrimSpace(choice), res.AvailableProjects, res.Path)
 		}
 
-		detRes, err := resolveWriteProjectWithChoiceAndProcessOverride(projectChoice, projectChoiceReason, validateRecoveryToken, cfg.DefaultProject)
+		detRes, err := resolveWriteProjectWithChoiceAndProcessOverride(s, projectChoice, projectChoiceReason, validateRecoveryToken, cfg.DefaultProject)
 		if err != nil {
 			return writeProjectErrorResult(activity, recoverySessionID, detRes, err), nil
 		}
@@ -1781,6 +1782,13 @@ func handleTimeline(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 			}
 			return mcp.NewToolResultError(fmt.Sprintf("Project resolution failed: %s", err)), nil
 		}
+		focus, err := s.GetObservation(observationID)
+		if err != nil {
+			return mcp.NewToolResultError("Timeline error: observation not found"), nil
+		}
+		if focus.Project == nil || !strings.EqualFold(strings.TrimSpace(*focus.Project), detRes.Project) {
+			return mcp.NewToolResultError("Timeline error: observation not found in resolved project"), nil
+		}
 
 		result, err := s.Timeline(observationID, before, after)
 		if err != nil {
@@ -1948,7 +1956,7 @@ func handleSessionStart(s *store.Store, cfg MCPConfig, activity *SessionActivity
 		resolvedDirectory := strings.TrimSpace(directory)
 		// project field intentionally not read — auto-detect only (REQ-308)
 
-		detRes, err := resolveSessionStartProject(resolvedDirectory)
+		detRes, err := resolveSessionStartProject(s, resolvedDirectory, cfg.DefaultProject)
 		if err != nil {
 			return writeProjectErrorResult(nil, "", detRes, err), nil
 		}
@@ -1971,9 +1979,9 @@ func handleSessionStart(s *store.Store, cfg MCPConfig, activity *SessionActivity
 	}
 }
 
-func resolveSessionStartProject(explicitDirectory string) (projectpkg.DetectionResult, error) {
+func resolveSessionStartProject(s *store.Store, explicitDirectory, defaultProject string) (projectpkg.DetectionResult, error) {
 	if explicitDirectory == "" {
-		return resolveWriteProject()
+		return resolveWriteProjectWithProcessOverride(s, defaultProject, false)
 	}
 	res := projectpkg.DetectProjectFull(explicitDirectory)
 	if res.Error != nil {
@@ -1988,7 +1996,7 @@ func handleSessionEnd(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 		summary, _ := req.GetArguments()["summary"].(string)
 		// project field intentionally not read — auto-detect only (REQ-308)
 
-		detRes, err := resolveWriteProject()
+		detRes, err := resolveWriteProjectWithProcessOverride(s, cfg.DefaultProject, false)
 		if err != nil {
 			if errors.Is(err, projectpkg.ErrInvalidConfig) {
 				return writeProjectErrorResult(nil, "", detRes, err), nil
@@ -2022,7 +2030,7 @@ func handleCapturePassive(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		source, _ := req.GetArguments()["source"].(string)
 		// project field intentionally not read — auto-detect only (REQ-308)
 
-		detRes, err := resolveWriteProject()
+		detRes, err := resolveWriteProjectWithProcessOverride(s, cfg.DefaultProject, false)
 		if err != nil {
 			return writeProjectErrorResult(nil, "", detRes, err), nil
 		}
@@ -2335,32 +2343,27 @@ func resolveWriteProject() (projectpkg.DetectionResult, error) {
 // processProjectResult applies the single process-level override rule
 // (projectpkg.ProcessOverride): the trusted MCPConfig.DefaultProject first, then
 // ENGRAM_PROJECT, and only then cwd detection by the caller.
-func processProjectResult(defaultProject string) (projectpkg.DetectionResult, bool) {
-	project, ok := projectpkg.ProcessOverride(defaultProject)
+func processProjectResult(defaultProject string) (projectpkg.DetectionResult, bool, error) {
+	_, ok := projectpkg.ProcessOverride(defaultProject)
 	if !ok {
-		return projectpkg.DetectionResult{}, false
+		return projectpkg.DetectionResult{}, false, nil
 	}
-	normalized, warning := store.NormalizeProject(project)
-	return projectpkg.DetectionResult{
-		Project: normalized,
-		Source:  sourceProcessOverride,
-		Path:    "",
-		Warning: warning,
-	}, true
+	result, err := projectpkg.Resolve(projectpkg.ResolutionOptions{
+		Mode:            projectpkg.ResolutionCurrent,
+		ProcessOverride: defaultProject,
+	})
+	return result, true, err
 }
 
-func resolveWriteProjectWithProcessOverride(defaultProject string) (projectpkg.DetectionResult, error) {
-	if res, ok := processProjectResult(defaultProject); ok {
-		return res, nil
-	}
-	return resolveWriteProject()
+func resolveWriteProjectWithProcessOverride(s *store.Store, defaultProject string, requireKnownProcess bool) (projectpkg.DetectionResult, error) {
+	return resolveMCPProjectWithPolicy(s, "", defaultProject, requireKnownProcess)
 }
 
 type ambiguousRecoveryTokenValidator func(projectpkg.DetectionResult, string) (provided bool, valid bool)
 
-func resolveWriteProjectWithChoiceAndProcessOverride(projectChoice, reason string, validateToken ambiguousRecoveryTokenValidator, defaultProject string) (projectpkg.DetectionResult, error) {
+func resolveWriteProjectWithChoiceAndProcessOverride(s *store.Store, projectChoice, reason string, validateToken ambiguousRecoveryTokenValidator, defaultProject string) (projectpkg.DetectionResult, error) {
 	if strings.TrimSpace(projectChoice) == "" {
-		return resolveWriteProjectWithProcessOverride(defaultProject)
+		return resolveWriteProjectWithProcessOverride(s, defaultProject, false)
 	}
 	return resolveWriteProjectWithChoice(projectChoice, reason, validateToken)
 }
@@ -2424,8 +2427,11 @@ func resolveWriteProjectWithChoice(projectChoice, reason string, validateToken a
 // by applying the process-level project override before falling back to full precedence resolution.
 func resolveSaveWriteProjectWithProcessOverride(s *store.Store, projectChoice string, explicitProjectProvided bool, reason, sessionID string, validateToken ambiguousRecoveryTokenValidator, defaultProject string) (projectpkg.DetectionResult, error) {
 	if !explicitProjectProvided && strings.TrimSpace(projectChoice) == "" && strings.TrimSpace(sessionID) == "" && strings.TrimSpace(reason) == "" {
-		if processRes, ok := processProjectResult(defaultProject); ok {
-			return processRes, nil
+		if _, ok, err := processProjectResult(defaultProject); ok {
+			if err != nil {
+				return projectpkg.DetectionResult{}, err
+			}
+			return resolveMCPProjectWithPolicy(s, "", defaultProject, false)
 		}
 	}
 	return resolveSaveWriteProject(s, projectChoice, explicitProjectProvided, reason, sessionID, validateToken)
@@ -2761,37 +2767,51 @@ func resolveAmbiguousChoicePath(ambiguousParent, choice string) string {
 // JW2: normalizes the override (lowercase+trim) before ProjectExists lookup so
 // that e.g. "MyApp" and "  myapp  " both resolve to the stored "myapp".
 func resolveReadProjectWithProcessOverride(s *store.Store, override, defaultProject string) (projectpkg.DetectionResult, error) {
-	if strings.TrimSpace(override) == "" {
-		if res, ok := processProjectResult(defaultProject); ok {
-			return res, nil
-		}
-	}
-	return resolveReadProject(s, override)
+	return resolveMCPProject(s, override, defaultProject)
 }
 
 func resolveReadProject(s *store.Store, override string) (projectpkg.DetectionResult, error) {
-	override = strings.TrimSpace(override)
-	if override == "" {
-		return resolveWriteProject()
+	return resolveMCPProject(s, override, "")
+}
+
+// resolveMCPProject is the MCP adapter around the shared mode-aware resolver.
+// Cwd detection remains allowed to identify an empty/new repository, while an
+// explicit request or process override must name an existing bucket.
+func resolveMCPProject(s *store.Store, explicit, defaultProject string) (projectpkg.DetectionResult, error) {
+	return resolveMCPProjectWithPolicy(s, explicit, defaultProject, true)
+}
+
+func resolveMCPProjectWithPolicy(s *store.Store, explicit, defaultProject string, requireKnownProcess bool) (projectpkg.DetectionResult, error) {
+	result, err := projectpkg.Resolve(projectpkg.ResolutionOptions{
+		Mode:                 projectpkg.ResolutionCurrent,
+		Explicit:             explicit,
+		ProcessOverride:      defaultProject,
+		ProjectExists:        s.ProjectExists,
+		RequireKnownExplicit: strings.TrimSpace(explicit) != "",
+		RequireKnownProcess:  requireKnownProcess,
+	})
+	if err == nil {
+		return result, nil
 	}
-	normalized, _ := store.NormalizeProject(override)
-	exists, err := s.ProjectExists(normalized)
-	if err != nil {
-		return projectpkg.DetectionResult{}, err
-	}
-	if !exists {
-		// Collect available projects for the error.
+	var unknown *projectpkg.UnknownProjectError
+	if errors.As(err, &unknown) {
 		stats, _ := s.Stats()
-		return projectpkg.DetectionResult{}, &unknownProjectError{
-			Name:              normalized,
-			AvailableProjects: stats.Projects,
-		}
+		return result, &unknownProjectError{Name: unknown.Name, AvailableProjects: stats.Projects}
 	}
-	return projectpkg.DetectionResult{
-		Project: normalized,
-		Source:  projectpkg.SourceExplicitOverride, // JR2-2: use named constant
-		Path:    "",
-	}, nil
+	if errors.Is(err, projectpkg.ErrInvalidProjectName) {
+		return result, &invalidExplicitProjectError{Name: firstProjectValue(explicit, defaultProject), Reason: err.Error()}
+	}
+	return result, err
+}
+
+func firstProjectValue(explicit, defaultProject string) string {
+	if strings.TrimSpace(explicit) != "" {
+		return explicit
+	}
+	if value, ok := projectpkg.ProcessOverride(defaultProject); ok {
+		return value
+	}
+	return ""
 }
 
 // respondWithProject wraps a tool result by prepending the project envelope

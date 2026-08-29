@@ -8,6 +8,28 @@ Authoritative project resolution for MCP tool calls. `mem_save` accepts a valida
 
 ## Requirements
 
+### Requirement: Shared Operation Modes and Process Override
+
+All project-aware entry points MUST use the shared resolver with an explicit operation mode:
+
+- `current`: an omitted project resolves the process override before cwd/repository detection;
+- `explicit`: a supplied project must be structurally a project name, not a path; and
+- `all`: omission intentionally leaves the filter unset.
+
+`ENGRAM_PROJECT` and `engram mcp --project` are process overrides. They MUST reject path-like or control-character values. Operations that cannot establish a new project bucket MUST validate an explicit or process override against known store context; write flows that legitimately establish a session/project retain their documented creation and ambiguous-recovery behavior.
+
+#### Scenario: Process override wins for a current-project operation
+
+- GIVEN a valid configured process override and an unrelated cwd
+- WHEN a `current` operation omits `project`
+- THEN the operation uses the process override with `project_source: "process_override"`
+
+#### Scenario: All-project review remains global
+
+- GIVEN `mem_review` action `list` omits `project`
+- WHEN the handler resolves its operation
+- THEN it uses `all` mode and returns review candidates from every project
+
 ### Requirement: REQ-300 DetectProjectFull Contract
 
 The system MUST expose `DetectProjectFull(dir string) DetectionResult` where `DetectionResult` carries `Project string`, `Source string`, `Path string`, `Warning string` (optional), `Error error` (optional), and `AvailableProjects []string` (populated only when `Error` is `ErrAmbiguousProject`).
@@ -228,7 +250,7 @@ When `resolveWriteProject` returns `ErrAmbiguousProject`, write tool handlers MU
 
 ### Requirement: REQ-310 Read Tools Accept Supported Optional project Field
 
-The MCP read tools that expose project-scoped list/search behavior (`mem_search`, `mem_context`, `mem_timeline`, `mem_stats`, `mem_doctor`) MUST include `project` as an OPTIONAL field in their JSON schema. When `project` is omitted or empty, the handler MUST fall back to auto-detection via `DetectProjectFull`. `mem_get_observation` is ID-based and does not accept a project override; it resolves project only for response metadata and may use a plain-text degraded response when cwd is ambiguous.
+The MCP read tools that expose project-scoped list/search behavior (`mem_search`, `mem_context`, `mem_timeline`, `mem_stats`, `mem_doctor`) MUST include `project` as an OPTIONAL field in their JSON schema. When `project` is omitted or empty, `current` mode applies the process override before auto-detection via `DetectProjectFull`. `mem_context` omission is therefore current-project scoped, except its existing cross-project personal-scope rule. `mem_get_observation` is ID-based and does not accept a project override; it resolves project only for response metadata and may use a plain-text degraded response when cwd is ambiguous.
 
 #### Scenario: Omitted project falls back to auto-detect
 
@@ -241,6 +263,12 @@ The MCP read tools that expose project-scoped list/search behavior (`mem_search`
 - GIVEN a call to a supported read tool such as `mem_search` with `project: "known-project"`
 - WHEN the handler processes the request
 - THEN `store.ProjectExists("known-project")` is called before executing the query
+
+#### Scenario: Timeline enforces its resolved project filter
+
+- GIVEN a timeline observation belongs to a different project than the resolved project
+- WHEN `mem_timeline` is called
+- THEN it returns no timeline for that observation instead of exposing a cross-project session
 
 ---
 
