@@ -39,6 +39,11 @@ test("pi-tui is not a hard dependency", () => {
 		undefined,
 		"pi-tui must not be declared in dependencies: a hard dep gives npm a reason to hoist a 0.74.x over the host's ^0.84.x and crash pi startup",
 	);
+	assert.equal(
+		pkg.optionalDependencies?.[PI_TUI],
+		undefined,
+		"pi-tui must not be declared in optionalDependencies either: npm installs optional dependencies by default, so this door would reintroduce the same downgrade",
+	);
 });
 
 test("pi-tui is declared as an optional peer dependency", () => {
@@ -56,12 +61,19 @@ test("pi-tui peer range accepts every pi-tui line the plugin renders against", (
 	assert.ok(range, "peerDependencies must declare a pi-tui range");
 	// `Text` is the only export used and exists across the 0.74 -> 0.84 lines; a caret
 	// range on 0.x would pin the minor and conflict with the host's 0.84.x.
-	for (const version of ["0.74.2", "0.84.3"]) {
+	for (const version of ["0.74.0", "0.74.2", "0.84.3"]) {
 		assert.ok(
 			peerRangeAllows(range, version),
 			`peer range ${JSON.stringify(range)} must accept pi-tui ${version} (host ships 0.84.x, plugin is verified against 0.74.x)`,
 		);
 	}
+	// Pin the lower bound, not just acceptance: a wider range (`*`, `>=0.0.0`) would
+	// silently bless pi-tui lines the plugin has never rendered against.
+	assert.equal(
+		peerRangeAllows(range, "0.73.9"),
+		false,
+		`peer range ${JSON.stringify(range)} must reject pi-tui 0.73.9: the >=0.74.0 floor is the reviewed contract`,
+	);
 });
 
 test("the peer declaration stays justified by actual pi-tui usage", () => {
