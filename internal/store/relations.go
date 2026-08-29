@@ -730,8 +730,8 @@ func (s *Store) JudgeRelation(p JudgeRelationParams) (*Relation, error) {
 
 // relationExists reports whether a relation row exists for the unordered pair
 // (sourceSyncID, targetSyncID) in either direction. Shared by FindCandidates
-// and both ScanProject pre-checks (Phase 3 and semantic) to dedup pending-row
-// creation without re-surfacing already-evaluated pairs (issue #490).
+// and the non-semantic ScanProject pre-check to dedup pending-row creation
+// without re-surfacing already-evaluated pairs (issue #490).
 // memory_relations has no UNIQUE on (source_id, target_id), so this existence
 // check is the only dedup guard.
 func (s *Store) relationExists(sourceSyncID, targetSyncID string) (bool, error) {
@@ -742,6 +742,28 @@ func (s *Store) relationExists(sourceSyncID, targetSyncID string) (bool, error) 
 		    OR (source_id = ? AND target_id = ?)
 		 LIMIT 1`,
 		sourceSyncID, targetSyncID, targetSyncID, sourceSyncID,
+	).Scan(&exists)
+	if err == nil {
+		return true, nil
+	}
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return false, err
+}
+
+// relationEvaluated reports whether an unordered pair has a non-pending
+// relation row. Semantic scans must still evaluate pending rows so their
+// provisional candidate relation can be resolved by JudgeBySemantic.
+func (s *Store) relationEvaluated(sourceSyncID, targetSyncID string) (bool, error) {
+	var exists int
+	err := s.db.QueryRow(
+		`SELECT 1 FROM memory_relations
+		 WHERE ((source_id = ? AND target_id = ?)
+		     OR (source_id = ? AND target_id = ?))
+		   AND judgment_status != ?
+		 LIMIT 1`,
+		sourceSyncID, targetSyncID, targetSyncID, sourceSyncID, JudgmentStatusPending,
 	).Scan(&exists)
 	if err == nil {
 		return true, nil
@@ -1540,16 +1562,17 @@ scan:
 				}
 				seenPairs[pairKey] = true
 
-				// Pre-check: skip pairs that already have any relation row in either
-				// direction. SkipInsert=true above bypasses FindCandidates' built-in
-				// existence check, so we mirror the Phase 3 pre-check here to avoid
-				// wasting LLM calls on already-judged pairs from PREVIOUS scans.
-				exists, err := s.relationExists(obs.syncID, c.SyncID)
+				// Pre-check: skip only pairs already evaluated in either direction.
+				// Pending rows are candidate annotations that the semantic runner must
+				// resolve. SkipInsert=true above bypasses FindCandidates' built-in
+				// existence check, so this avoids wasting LLM calls on evaluated pairs
+				// from previous scans without suppressing pending work.
+				evaluated, err := s.relationEvaluated(obs.syncID, c.SyncID)
 				if err != nil {
 					log.Printf("[store] ScanProject: semantic pre-check obs=%s cand=%s: %v", obs.syncID, c.SyncID, err)
 					continue
 				}
-				if exists {
+				if evaluated {
 					result.AlreadyRelated++
 					continue
 				}

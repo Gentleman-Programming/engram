@@ -151,6 +151,77 @@ func TestScanProject_Semantic_HappyPath(t *testing.T) {
 	}
 }
 
+// TestScanProject_Semantic_ResolvesPendingRelation verifies that semantic scans
+// evaluate existing candidate rows, then skip the row after it is judged.
+func TestScanProject_Semantic_ResolvesPendingRelation(t *testing.T) {
+	s := newTestStore(t)
+	_, syncA, _, syncB := seedSimilarPair(t, s, "semantic-pending-project")
+
+	pending, err := s.SaveRelation(SaveRelationParams{
+		SyncID:   "rel-semantic-pending",
+		SourceID: syncA,
+		TargetID: syncB,
+	})
+	if err != nil {
+		t.Fatalf("SaveRelation: %v", err)
+	}
+
+	runner := &verdictRunner{verdict: SemanticVerdict{
+		Relation:   RelationCompatible,
+		Confidence: 0.9,
+		Reasoning:  "both discuss JWT auth",
+		Model:      "haiku",
+	}}
+	result, err := s.ScanProject(ScanOptions{
+		Project:        "semantic-pending-project",
+		Apply:          true,
+		Semantic:       true,
+		Concurrency:    1,
+		TimeoutPerCall: 5 * time.Second,
+		MaxSemantic:    10,
+		Runner:         runner,
+		BuildPrompt:    identityPromptBuilder,
+	})
+	if err != nil {
+		t.Fatalf("ScanProject with pending relation: %v", err)
+	}
+	if runner.calls != 1 {
+		t.Fatalf("runner calls with pending relation = %d, want 1", runner.calls)
+	}
+	if result.SemanticJudged != 1 {
+		t.Fatalf("SemanticJudged with pending relation = %d, want 1", result.SemanticJudged)
+	}
+
+	resolved, err := s.GetRelation(pending.SyncID)
+	if err != nil {
+		t.Fatalf("GetRelation: %v", err)
+	}
+	if resolved.JudgmentStatus != JudgmentStatusJudged || resolved.Relation != RelationCompatible {
+		t.Fatalf("resolved relation = status %q, relation %q; want status %q, relation %q", resolved.JudgmentStatus, resolved.Relation, JudgmentStatusJudged, RelationCompatible)
+	}
+
+	skippedRunner := &verdictRunner{verdict: runner.verdict}
+	result, err = s.ScanProject(ScanOptions{
+		Project:        "semantic-pending-project",
+		Apply:          true,
+		Semantic:       true,
+		Concurrency:    1,
+		TimeoutPerCall: 5 * time.Second,
+		MaxSemantic:    10,
+		Runner:         skippedRunner,
+		BuildPrompt:    identityPromptBuilder,
+	})
+	if err != nil {
+		t.Fatalf("ScanProject with judged relation: %v", err)
+	}
+	if skippedRunner.calls != 0 {
+		t.Fatalf("runner calls with judged relation = %d, want 0", skippedRunner.calls)
+	}
+	if result.SemanticJudged != 0 || result.AlreadyRelated != 1 {
+		t.Fatalf("result with judged relation = judged:%d already-related:%d, want judged:0 already-related:1", result.SemanticJudged, result.AlreadyRelated)
+	}
+}
+
 // TestScanProject_Semantic_DryRunDoesNotPersist verifies that semantic dry-runs
 // evaluate valid verdicts without changing relation or sync state.
 func TestScanProject_Semantic_DryRunDoesNotPersist(t *testing.T) {
