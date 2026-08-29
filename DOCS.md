@@ -116,7 +116,9 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 
 ### Health
 
-- Local runtime (`engram serve`): `GET /health` — Returns `{"status": "ok", "service": "engram", "version": "0.1.0"}`
+- Local runtime (`engram serve`): `GET /health`
+  - `200 OK` when the local database is reachable: `{"status":"ok","service":"engram","version":"0.1.0","database":"reachable"}`
+  - `503 Service Unavailable` when the local database cannot be reached: `{"status":"unavailable","service":"engram","version":"0.1.0","database":"unreachable","error":"<details>"}`
 - Cloud runtime (`engram cloud serve`): `GET /health` — Returns `{"status": "ok", "service": "engram-cloud"}`
 
 ### Sessions
