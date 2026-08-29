@@ -966,6 +966,14 @@ func (s *Server) handleCurrentProject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	res := projectpkg.DetectProjectFull(cwd)
+	if override, ok := projectpkg.ProcessOverride(""); ok {
+		normalized, warning := store.NormalizeProject(override)
+		res = projectpkg.DetectionResult{
+			Project: normalized,
+			Source:  projectpkg.SourceProcessOverride,
+			Warning: warning,
+		}
+	}
 	payload := map[string]any{
 		"project":            res.Project,
 		"project_source":     res.Source,

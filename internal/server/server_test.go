@@ -2615,6 +2615,35 @@ func TestProjectCurrentDoctorJudgeAndCompareRoutes(t *testing.T) {
 	}
 }
 
+func TestProjectCurrentUsesProcessOverrideBeforeCWD(t *testing.T) {
+	t.Setenv("ENGRAM_PROJECT", "  Trusted Project  ")
+
+	srv := New(newServerTestStore(t), 0)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/project/current?cwd=/path/that/does/not/exist", nil)
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected current project 200, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode project response: %v", err)
+	}
+	if got := response["project"]; got != "trusted project" {
+		t.Errorf("project = %v, want trusted project", got)
+	}
+	if got := response["project_source"]; got != "process_override" {
+		t.Errorf("project_source = %v, want process_override", got)
+	}
+	if got := response["project_path"]; got != "" {
+		t.Errorf("project_path = %v, want empty for process override", got)
+	}
+	if got := response["cwd"]; got != "/path/that/does/not/exist" {
+		t.Errorf("cwd = %v, want request cwd", got)
+	}
+}
+
 func TestJudgeAndCompareRoutesValidateInput(t *testing.T) {
 	st := newServerTestStore(t)
 	h := New(st, 0).Handler()
