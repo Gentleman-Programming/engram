@@ -1643,8 +1643,11 @@ func TestMCPHandlersReturnErrorsWhenStoreClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("closed store stats call: %v", err)
 	}
-	if statsRes.IsError {
-		t.Fatalf("expected stats fallback result even when store is closed")
+	if !statsRes.IsError {
+		t.Fatal("expected stats to return tool error when store is closed")
+	}
+	if !strings.Contains(callResultText(t, statsRes), "Failed to get stats: stats: count sessions") {
+		t.Fatalf("stats error = %q, want contextual count failure", callResultText(t, statsRes))
 	}
 
 	timelineRes, err := handleTimeline(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"observation_id": 1.0}}})
