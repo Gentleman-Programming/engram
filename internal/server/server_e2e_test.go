@@ -855,10 +855,13 @@ func TestServerHandlersReturn500WhenStoreClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stats closed store: %v", err)
 	}
-	if statsResp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200 stats with closed store fallback, got %d", statsResp.StatusCode)
+	if statsResp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("expected 500 stats with closed store, got %d", statsResp.StatusCode)
 	}
-	statsResp.Body.Close()
+	statsErr := decodeJSON[map[string]string](t, statsResp)
+	if !strings.Contains(statsErr["error"], "stats: count sessions") {
+		t.Fatalf("stats error = %q, want contextual count failure", statsErr["error"])
+	}
 }
 
 func TestObservationAndSessionErrorBranchesE2E(t *testing.T) {
