@@ -114,19 +114,22 @@ type setupInstallMsg struct {
 }
 
 type cloudConfigLoadedMsg struct {
+	generation  uint64
 	serverURL   string
 	tokenSource string
 	err         error
 }
 
 type cloudPingMsg struct {
-	origin    cloudPingOrigin
-	serverURL string
-	status    string
-	err       error
+	origin     cloudPingOrigin
+	generation uint64
+	serverURL  string
+	status     string
+	err        error
 }
 
 type cloudStatusLoadedMsg struct {
+	generation        uint64
 	serverURL         string
 	tokenSource       string
 	target            string
@@ -144,7 +147,8 @@ type cloudStatusLoadedMsg struct {
 }
 
 type cloudDaemonProbeMsg struct {
-	result cloudconfig.Result
+	generation uint64
+	result     cloudconfig.Result
 }
 
 type cloudEnrollmentItem struct {
@@ -230,6 +234,7 @@ type Model struct {
 	CloudConfigPingStatus  string
 	CloudConfigSaving      bool
 	CloudConfigTest        bool
+	CloudRequestGeneration uint64
 
 	// Cloud status
 	CloudStatusServerURL         string
@@ -239,6 +244,7 @@ type Model struct {
 	CloudStatusLastSync          string
 	CloudStatusPendingCount      int64
 	CloudStatusLastError         string
+	CloudStatusHealthError       string
 	CloudStatusLoading           bool
 	CloudStatusAuthStatus        string
 	CloudStatusAuthWarning       string
@@ -367,34 +373,34 @@ func installAgent(agentName string) tea.Cmd {
 var installAgentFn = setup.Install
 var addClaudeCodeAllowlistFn = setup.AddClaudeCodeAllowlist
 
-func loadCloudConfigCmd(dataDir string) tea.Cmd {
+func loadCloudConfigCmd(dataDir string, generation uint64) tea.Cmd {
 	return func() tea.Msg {
 		cfg, err := loadCloudConfigForUI(dataDir)
 		if err != nil {
-			return cloudConfigLoadedMsg{err: err}
+			return cloudConfigLoadedMsg{generation: generation, err: err}
 		}
 		_, source := cloudconfig.EffectiveToken(dataDir)
-		return cloudConfigLoadedMsg{serverURL: cfg.ServerURL, tokenSource: cloudconfig.SourceLabel(source)}
+		return cloudConfigLoadedMsg{generation: generation, serverURL: cfg.ServerURL, tokenSource: cloudconfig.SourceLabel(source)}
 	}
 }
 
-func loadCloudStatusCmd(s *store.Store) tea.Cmd {
+func loadCloudStatusCmd(s *store.Store, generation uint64) tea.Cmd {
 	return func() tea.Msg {
 		if s == nil {
-			return cloudStatusLoadedMsg{err: errors.New("store is unavailable")}
+			return cloudStatusLoadedMsg{generation: generation, err: errors.New("store is unavailable")}
 		}
 		dataDir := s.DataDir()
 		cfg, err := loadCloudConfigForUI(dataDir)
 		if err != nil {
-			return cloudStatusLoadedMsg{err: err}
+			return cloudStatusLoadedMsg{generation: generation, err: err}
 		}
 		state, err := s.GetSyncState(constants.TargetKeyCloud)
 		if err != nil {
-			return cloudStatusLoadedMsg{err: err}
+			return cloudStatusLoadedMsg{generation: generation, err: err}
 		}
 		pendingCount, err := s.CountPendingSyncMutations(constants.TargetKeyCloud)
 		if err != nil {
-			return cloudStatusLoadedMsg{err: err}
+			return cloudStatusLoadedMsg{generation: generation, err: err}
 		}
 		token, source := cloudconfig.EffectiveToken(dataDir)
 		authStatus, authWarning, authHint, readiness := cloudStatusAuth(token, cloudInsecureNoAuth())
@@ -413,11 +419,16 @@ func loadCloudStatusCmd(s *store.Store) tea.Cmd {
 		if state.ReasonMessage != nil {
 			reasonMessage = *state.ReasonMessage
 		}
+		lastSync := ""
+		if state.LastSuccessAt != nil {
+			lastSync = *state.LastSuccessAt
+		}
 		return cloudStatusLoadedMsg{
+			generation:        generation,
 			serverURL:         cfg.ServerURL,
 			tokenSource:       cloudconfig.SourceLabel(source),
 			target:            cloudStatusTarget(cfg.ServerURL),
-			lastSync:          state.UpdatedAt,
+			lastSync:          lastSync,
 			pendingCount:      pendingCount,
 			lastError:         lastError,
 			authStatus:        authStatus,
@@ -438,9 +449,9 @@ func cloudStatusTarget(serverURL string) string {
 	return constants.TargetKeyCloud
 }
 
-func probeLocalDaemonCmd() tea.Cmd {
+func probeLocalDaemonCmd(generation uint64) tea.Cmd {
 	return func() tea.Msg {
-		return cloudDaemonProbeMsg{result: cloudconfig.LocalDaemonProbe(context.Background(), cloudconfig.ResolvePort())}
+		return cloudDaemonProbeMsg{generation: generation, result: cloudconfig.LocalDaemonProbe(context.Background(), cloudconfig.ResolvePort())}
 	}
 }
 

@@ -431,8 +431,8 @@ func (p storeSyncStatusProvider) cloudSyncEnabled(project string) (bool, string,
 
 func syncStatusFromState(state *store.SyncState) server.SyncStatus {
 	var lastSyncAt *time.Time
-	if state != nil && state.Lifecycle == store.SyncLifecycleHealthy {
-		lastSyncAt = parseSyncStateTimestamp(state.UpdatedAt)
+	if state != nil {
+		lastSyncAt = parseSyncStateTimestamp(derefString(state.LastSuccessAt))
 	}
 	return server.SyncStatus{
 		Phase:               state.Lifecycle,

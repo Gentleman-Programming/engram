@@ -2342,6 +2342,18 @@ func TestStoreSyncStatusProviderRequiresExplicitProjectScope(t *testing.T) {
 	}
 }
 
+func TestSyncStatusUsesLastSuccessfulSyncAfterLifecycleDegrades(t *testing.T) {
+	lastSuccess := "2026-08-30T10:00:00Z"
+	status := syncStatusFromState(&store.SyncState{
+		Lifecycle:           store.SyncLifecycleDegraded,
+		LastSuccessAt:       &lastSuccess,
+		ConsecutiveFailures: 1,
+	})
+	if status.LastSyncAt == nil || !status.LastSyncAt.Equal(time.Date(2026, 8, 30, 10, 0, 0, 0, time.UTC)) {
+		t.Fatalf("last_sync_at = %v, want last successful sync", status.LastSyncAt)
+	}
+}
+
 func TestStoreSyncStatusProviderDisabledWhenCloudNotConfigured(t *testing.T) {
 	cfg := testConfig(t)
 	s, err := store.New(cfg)

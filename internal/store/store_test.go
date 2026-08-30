@@ -76,6 +76,21 @@ func TestCountPendingSyncMutationsMatchesEnrollmentFilter(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("pending mutation count = %d, want 1 for the enrolled project", count)
 	}
+	if _, err := s.db.Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project, disposition)
+		VALUES (?, 'observation', 'quarantined', 'upsert', '{}', 'local', 'enrolled', 'quarantined')`, DefaultSyncTargetKey); err != nil {
+		t.Fatalf("insert quarantined mutation: %v", err)
+	}
+	count, err = s.CountPendingSyncMutations(DefaultSyncTargetKey)
+	if err != nil {
+		t.Fatalf("count pending mutations with quarantined row: %v", err)
+	}
+	mutations, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 10)
+	if err != nil {
+		t.Fatalf("list pending mutations: %v", err)
+	}
+	if count != 1 || int(count) != len(mutations) {
+		t.Fatalf("pending count/list mismatch with quarantined row: count=%d list=%d", count, len(mutations))
+	}
 
 	if err := s.UnenrollProject("enrolled"); err != nil {
 		t.Fatalf("unenroll project: %v", err)
@@ -3959,6 +3974,47 @@ func TestMarkSyncHealthyCreatesSyncStateWhenMissing(t *testing.T) {
 	}
 	if state.ReasonCode != nil || state.ReasonMessage != nil || state.LastError != nil {
 		t.Fatalf("expected healthy state without degraded reasons/errors, got %+v", state)
+	}
+}
+
+func TestLastSuccessAtChangesOnlyWhenSyncBecomesHealthy(t *testing.T) {
+	s := newTestStore(t)
+	targetKey := "cloud:proj-a"
+
+	state, err := s.GetSyncState(targetKey)
+	if err != nil {
+		t.Fatalf("get initial sync state: %v", err)
+	}
+	if state.LastSuccessAt != nil {
+		t.Fatalf("initial last success = %q, want NULL", *state.LastSuccessAt)
+	}
+	if err := s.MarkSyncHealthy(targetKey); err != nil {
+		t.Fatalf("mark healthy: %v", err)
+	}
+	state, err = s.GetSyncState(targetKey)
+	if err != nil || state.LastSuccessAt == nil {
+		t.Fatalf("healthy state last success = %v, err=%v", state.LastSuccessAt, err)
+	}
+	want := *state.LastSuccessAt
+
+	if err := s.MarkSyncFailure(targetKey, "timeout", time.Now().Add(time.Minute)); err != nil {
+		t.Fatalf("mark failure: %v", err)
+	}
+	if err := s.MarkSyncPending(targetKey); err != nil {
+		t.Fatalf("mark pending: %v", err)
+	}
+	if _, err := s.AcquireSyncLease(targetKey, "test", time.Minute, time.Now()); err != nil {
+		t.Fatalf("acquire lease: %v", err)
+	}
+	if err := s.ReleaseSyncLease(targetKey, "test"); err != nil {
+		t.Fatalf("release lease: %v", err)
+	}
+	if err := s.AckSyncMutations(targetKey, 0); err != nil {
+		t.Fatalf("ack mutations: %v", err)
+	}
+	state, err = s.GetSyncState(targetKey)
+	if err != nil || state.LastSuccessAt == nil || *state.LastSuccessAt != want {
+		t.Fatalf("non-success lifecycle changed last success: state=%+v err=%v", state, err)
 	}
 }
 
@@ -8582,26 +8638,19 @@ func TestCreateSessionNormalizesProject(t *testing.T) {
 
 func TestListProjectNames(t *testing.T) {
 	s := newTestStore(t)
-
-	if err := s.CreateSession("s1", "alpha", "/tmp"); err != nil {
-		t.Fatalf("create session: %v", err)
-	}
-	if err := s.CreateSession("s2", "beta", "/tmp"); err != nil {
-		t.Fatalf("create session: %v", err)
-	}
-
-	for _, proj := range []string{"alpha", "alpha", "beta", "gamma"} {
-		_, err := s.AddObservation(AddObservationParams{
-			SessionID: "s1",
-			Type:      "decision",
-			Title:     "test " + proj,
-			Content:   "content for " + proj,
-			Project:   proj,
-			Scope:     "project",
-		})
-		if err != nil {
-			t.Fatalf("AddObservation: %v", err)
-		}
+	if _, err := s.db.Exec(`
+		INSERT INTO sessions (id, project, directory) VALUES
+			('obs-session', '', '/tmp'), ('session-only', 'beta', '/tmp'),
+			('prompt-session', '', '/tmp'), ('duplicate', 'epsilon', '/tmp'), ('deleted-session', '', '/tmp');
+		INSERT INTO observations (session_id, type, title, content, project, scope) VALUES
+			('obs-session', 'note', 'observation', 'content', 'alpha', 'project'),
+			('duplicate', 'note', 'duplicate', 'content', 'epsilon', 'project');
+		INSERT INTO observations (session_id, type, title, content, project, scope, deleted_at) VALUES
+			('deleted-session', 'note', 'deleted', 'content', 'zeta', 'project', datetime('now'));
+		INSERT INTO user_prompts (session_id, content, project) VALUES ('prompt-session', 'prompt', 'gamma');
+		INSERT INTO sync_enrolled_projects (project) VALUES ('delta'), ('epsilon');
+	`); err != nil {
+		t.Fatalf("seed project identities: %v", err)
 	}
 
 	names, err := s.ListProjectNames()
@@ -8609,16 +8658,9 @@ func TestListProjectNames(t *testing.T) {
 		t.Fatalf("ListProjectNames: %v", err)
 	}
 
-	// Should return distinct names: alpha, beta, gamma
-	want := map[string]bool{"alpha": true, "beta": true, "gamma": true}
-	for _, n := range names {
-		if !want[n] {
-			t.Errorf("unexpected project name %q in results", n)
-		}
-		delete(want, n)
-	}
-	if len(want) > 0 {
-		t.Errorf("missing project names: %v", want)
+	want := []string{"alpha", "beta", "delta", "epsilon", "gamma"}
+	if !reflect.DeepEqual(names, want) {
+		t.Fatalf("project names = %v, want %v", names, want)
 	}
 }
 

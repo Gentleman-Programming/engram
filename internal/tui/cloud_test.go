@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/internal/cloudconfig"
+	"github.com/Gentleman-Programming/engram/internal/store"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -222,4 +223,106 @@ func TestCloudEnrollmentToggleErrorClearsLoading(t *testing.T) {
 	if updated.CloudEnrollmentError != "database locked" {
 		t.Fatalf("enrollment error = %q", updated.CloudEnrollmentError)
 	}
+}
+
+func TestCloudSavePersistsReachableStatusOnConfigurationScreen(t *testing.T) {
+	cfg, err := store.DefaultConfig()
+	if err != nil {
+		t.Fatalf("default config: %v", err)
+	}
+	cfg.DataDir = t.TempDir()
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	m := New(s, "")
+	m.Screen = ScreenCloudConfig
+	m.CloudConfigFocus = cloudConfigFocusSave
+	m.CloudConfigSaving = true
+	m.CloudConfigInput.SetValue("https://cloud.example.test")
+	m.CloudRequestGeneration = 1
+
+	updatedModel, _ := m.Update(cloudPingMsg{origin: cloudPingFromConfig, generation: 1, serverURL: "https://cloud.example.test", status: "reachable"})
+	updated := updatedModel.(Model)
+	if updated.Screen != ScreenCloudConfig || updated.CloudConfigFocus != cloudConfigFocusSave || updated.CloudConfigPingStatus != "reachable" {
+		t.Fatalf("save outcome was not retained on config screen: %+v", updated)
+	}
+	if !strings.Contains(updated.View(), "Connection: reachable") {
+		t.Fatalf("config view does not render save outcome: %q", updated.View())
+	}
+	saved, err := cloudconfig.Load(s.DataDir())
+	if err != nil || saved.ServerURL != "https://cloud.example.test" {
+		t.Fatalf("saved server URL = %q, err=%v", saved.ServerURL, err)
+	}
+}
+
+func TestCloudResponsesRejectStaleGenerationsAndPreserveSeparateErrors(t *testing.T) {
+	t.Run("stale config load", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen, m.CloudRequestGeneration = ScreenCloudConfig, 2
+		m.CloudConfigInput.SetValue("https://current.example.test")
+		updated, _ := m.Update(cloudConfigLoadedMsg{generation: 1, serverURL: "https://stale.example.test"})
+		if updated.(Model).CloudConfigInput.Value() != "https://current.example.test" {
+			t.Fatal("stale config load overwrote current input")
+		}
+	})
+	t.Run("stale status load and daemon probe", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen, m.CloudRequestGeneration, m.CloudStatusServerURL, m.CloudStatusLocalDaemon = ScreenCloudStatus, 2, "https://current.example.test", "running"
+		updated, _ := m.Update(cloudStatusLoadedMsg{generation: 1, serverURL: "https://stale.example.test"})
+		m = updated.(Model)
+		updated, _ = m.Update(cloudDaemonProbeMsg{generation: 1, result: cloudconfig.Result{Status: cloudconfig.ProbeNotRunning, Port: 8123}})
+		m = updated.(Model)
+		if m.CloudStatusServerURL != "https://current.example.test" || m.CloudStatusLocalDaemon != "running" {
+			t.Fatal("stale status response overwrote current state")
+		}
+	})
+	t.Run("pings require current URLs", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen, m.CloudRequestGeneration, m.CloudConfigSaving = ScreenCloudConfig, 2, true
+		m.CloudConfigInput.SetValue("https://current.example.test")
+		updated, _ := m.Update(cloudPingMsg{origin: cloudPingFromConfig, generation: 2, serverURL: "https://stale.example.test", status: "reachable"})
+		m = updated.(Model)
+		if !m.CloudConfigSaving {
+			t.Fatal("config ping for an old URL changed current save state")
+		}
+		m.Screen, m.CloudStatusServerURL, m.CloudStatusHealth = ScreenCloudStatus, "https://current.example.test", "reachable"
+		updated, _ = m.Update(cloudPingMsg{origin: cloudPingFromStatus, generation: 1, serverURL: "https://old.example.test", status: "unreachable"})
+		if updated.(Model).CloudStatusHealth != "reachable" {
+			t.Fatal("stale status ping after refresh overwrote health")
+		}
+	})
+	t.Run("current chained ping preserves sync error and clears health error", func(t *testing.T) {
+		cfg, err := store.DefaultConfig()
+		if err != nil {
+			t.Fatalf("default config: %v", err)
+		}
+		cfg.DataDir = t.TempDir()
+		s, err := store.New(cfg)
+		if err != nil {
+			t.Fatalf("new store: %v", err)
+		}
+		t.Cleanup(func() { _ = s.Close() })
+		m := New(s, "")
+		m.Screen, m.CloudRequestGeneration = ScreenCloudStatus, 2
+		updated, cmd := m.Update(cloudStatusLoadedMsg{generation: 2, serverURL: "https://current.example.test", lastError: "sync failed"})
+		m = updated.(Model)
+		if cmd == nil || m.CloudStatusLastError != "sync failed" || m.CloudStatusHealthError != "" {
+			t.Fatalf("status load did not retain sync error and clear health error: %+v", m)
+		}
+		updated, _ = m.Update(cloudPingMsg{origin: cloudPingFromStatus, generation: 2, serverURL: "https://current.example.test", status: "unreachable", err: errors.New("health failed")})
+		m = updated.(Model)
+		if m.CloudStatusLastError != "sync failed" || m.CloudStatusHealthError != "health failed" {
+			t.Fatalf("health failure overwrote sync error: %+v", m)
+		}
+		if !strings.Contains(m.View(), "Sync error: sync failed") || !strings.Contains(m.View(), "Health error: health failed") {
+			t.Fatalf("status view does not render separate errors: %q", m.View())
+		}
+		updated, _ = m.Update(cloudPingMsg{origin: cloudPingFromStatus, generation: 2, serverURL: "https://current.example.test", status: "reachable"})
+		m = updated.(Model)
+		if m.CloudStatusHealthError != "" || !strings.Contains(m.View(), "Sync error: sync failed") || strings.Contains(m.View(), "Health error:") {
+			t.Fatalf("successful health ping did not clear health error independently: %q", m.View())
+		}
+	})
 }

@@ -262,10 +262,16 @@ func (m Model) viewCloudStatus() string {
 	if m.CloudStatusSyncReadiness != "" {
 		b.WriteString(statusLabelStyle.Render("  Sync readiness: ") + detailValueStyle.Render(m.CloudStatusSyncReadiness) + "\n")
 	}
-	for _, message := range []string{m.CloudStatusAuthWarning, m.CloudStatusAuthHint, m.CloudStatusDaemonHint, m.CloudStatusLastError} {
+	for _, message := range []string{m.CloudStatusAuthWarning, m.CloudStatusAuthHint, m.CloudStatusDaemonHint} {
 		if message != "" {
 			b.WriteString(timestampStyle.Render("  "+message) + "\n")
 		}
+	}
+	if m.CloudStatusLastError != "" {
+		b.WriteString(timestampStyle.Render("  Sync error: "+m.CloudStatusLastError) + "\n")
+	}
+	if m.CloudStatusHealthError != "" {
+		b.WriteString(timestampStyle.Render("  Health error: "+m.CloudStatusHealthError) + "\n")
 	}
 	b.WriteString(helpStyle.Render("\n  r refresh • esc/q back"))
 	return b.String()

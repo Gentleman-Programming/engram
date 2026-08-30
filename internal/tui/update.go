@@ -147,6 +147,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case cloudConfigLoadedMsg:
+		if msg.generation != m.CloudRequestGeneration || m.Screen != ScreenCloudConfig {
+			return m, nil
+		}
 		if msg.err != nil {
 			m.CloudConfigError = msg.err.Error()
 			return m, nil
@@ -157,9 +160,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case cloudStatusLoadedMsg:
+		if msg.generation != m.CloudRequestGeneration || m.Screen != ScreenCloudStatus {
+			return m, nil
+		}
 		m.CloudStatusLoading = false
 		if msg.err != nil {
 			m.CloudStatusLastError = msg.err.Error()
+			m.CloudStatusHealthError = ""
 			return m, nil
 		}
 		m.CloudStatusServerURL = msg.serverURL
@@ -168,6 +175,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.CloudStatusLastSync = msg.lastSync
 		m.CloudStatusPendingCount = msg.pendingCount
 		m.CloudStatusLastError = msg.lastError
+		m.CloudStatusHealthError = ""
 		m.CloudStatusAuthStatus = msg.authStatus
 		m.CloudStatusAuthWarning = msg.authWarning
 		m.CloudStatusAuthHint = msg.authHint
@@ -177,12 +185,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.CloudStatusSyncReasonMessage = msg.syncReasonMessage
 		if msg.serverURL != "" && m.store != nil {
 			token, _ := cloudconfig.EffectiveToken(m.store.DataDir())
-			return m, pingCloudServer(cloudPingFromStatus, msg.serverURL, token)
+			return m, pingCloudServer(cloudPingFromStatus, msg.generation, msg.serverURL, token)
 		}
 		return m, nil
 
 	case cloudDaemonProbeMsg:
-		if m.Screen != ScreenCloudStatus {
+		if msg.generation != m.CloudRequestGeneration || m.Screen != ScreenCloudStatus {
 			return m, nil
 		}
 		m.CloudStatusLocalDaemon, m.CloudStatusDaemonHint = cloudDaemonStatus(msg.result)
@@ -213,16 +221,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, loadCloudEnrollmentCmd(m.store)
 
 	case cloudPingMsg:
+		if msg.generation != m.CloudRequestGeneration {
+			return m, nil
+		}
 		if msg.origin == cloudPingFromStatus {
-			if m.Screen == ScreenCloudStatus {
+			if m.Screen == ScreenCloudStatus && msg.serverURL == m.CloudStatusServerURL {
 				m.CloudStatusHealth = msg.status
 				if msg.err != nil {
-					m.CloudStatusLastError = msg.err.Error()
+					m.CloudStatusHealthError = msg.err.Error()
+				} else {
+					m.CloudStatusHealthError = ""
 				}
 			}
 			return m, nil
 		}
-		if m.Screen != ScreenCloudConfig {
+		if m.Screen != ScreenCloudConfig || msg.serverURL != m.CloudConfigInput.Value() {
 			return m, nil
 		}
 		m.CloudConfigSaving = false
@@ -246,9 +259,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.CloudConfigError = err.Error()
 			return m, nil
 		}
-		m.Screen = ScreenCloudSettings
-		m.Cursor = 0
-		m.CloudConfigFocus = cloudConfigFocusInput
+		m.CloudConfigFocus = cloudConfigFocusSave
+		m.CloudConfigInput.Blur()
 		return m, nil
 
 	case clipboardCopiedMsg:
@@ -796,14 +808,17 @@ func (m Model) handleCloudSettingsKeys(key string) (tea.Model, tea.Cmd) {
 				m.CloudConfigError = "store is unavailable"
 				return m, nil
 			}
-			return m, loadCloudConfigCmd(m.store.DataDir())
+			m.CloudRequestGeneration++
+			return m, loadCloudConfigCmd(m.store.DataDir(), m.CloudRequestGeneration)
 		case 1:
 			m.Screen = ScreenCloudStatus
+			m.CloudRequestGeneration++
 			m.CloudStatusLoading = true
 			m.CloudStatusLastError = ""
+			m.CloudStatusHealthError = ""
 			m.CloudStatusLocalDaemon = ""
 			m.CloudStatusDaemonHint = ""
-			return m, tea.Batch(loadCloudStatusCmd(m.store), probeLocalDaemonCmd())
+			return m, tea.Batch(loadCloudStatusCmd(m.store, m.CloudRequestGeneration), probeLocalDaemonCmd(m.CloudRequestGeneration))
 		case 2:
 			m.Screen = ScreenCloudEnrollment
 			m.Cursor = 0
@@ -897,7 +912,8 @@ func (m Model) handleCloudConfigKeys(key string) (tea.Model, tea.Cmd) {
 			m.CloudConfigPingStatus = "checking"
 			m.CloudConfigTest = m.CloudConfigFocus == cloudConfigFocusTest
 			m.CloudConfigSaving = true
-			return m, tea.Batch(m.SetupSpinner.Tick, pingCloudServer(cloudPingFromConfig, serverURL, token))
+			m.CloudRequestGeneration++
+			return m, tea.Batch(m.SetupSpinner.Tick, pingCloudServer(cloudPingFromConfig, m.CloudRequestGeneration, serverURL, token))
 		}
 	}
 	m.CloudConfigInput.Blur()
@@ -924,10 +940,12 @@ func previousCloudConfigFocus(focus int) int {
 func (m Model) handleCloudStatusKeys(key string) (tea.Model, tea.Cmd) {
 	switch key {
 	case "r":
+		m.CloudRequestGeneration++
 		m.CloudStatusLoading = true
+		m.CloudStatusHealthError = ""
 		m.CloudStatusLocalDaemon = ""
 		m.CloudStatusDaemonHint = ""
-		return m, tea.Batch(loadCloudStatusCmd(m.store), probeLocalDaemonCmd())
+		return m, tea.Batch(loadCloudStatusCmd(m.store, m.CloudRequestGeneration), probeLocalDaemonCmd(m.CloudRequestGeneration))
 	case "esc", "q":
 		m.Screen = ScreenCloudSettings
 		m.Cursor = 1

@@ -48,10 +48,10 @@ func saveCloudServerURL(dataDir, serverURL string) error {
 	return cloudconfig.Save(dataDir, cfg)
 }
 
-func pingCloudServer(origin cloudPingOrigin, serverURL, token string) tea.Cmd {
+func pingCloudServer(origin cloudPingOrigin, generation uint64, serverURL, token string) tea.Cmd {
 	return func() tea.Msg {
 		status, err := pingCloudServerStatus(serverURL, token)
-		return cloudPingMsg{origin: origin, serverURL: serverURL, status: status, err: err}
+		return cloudPingMsg{origin: origin, generation: generation, serverURL: serverURL, status: status, err: err}
 	}
 }
 
