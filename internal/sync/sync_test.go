@@ -814,6 +814,30 @@ func TestLocalChunkExportReconcilesCompleteValidatedHistory(t *testing.T) {
 			t.Fatalf("historically present old identities must retain timestamp filtering, got %+v", result)
 		}
 	})
+
+	t.Run("historical tombstones count as known identities", func(t *testing.T) {
+		s, data := seedOldLocalExportData(t)
+		syncDir := filepath.Join(t.TempDir(), ".engram")
+		writeLocalChunkFile(t, syncDir, "history", ChunkData{
+			Sessions: data.Sessions,
+			Prompts:  data.Prompts,
+			Mutations: []store.SyncMutation{{
+				Entity:    store.SyncEntityObservation,
+				EntityKey: data.Observations[0].SyncID,
+				Op:        store.SyncOpDelete,
+				Payload:   fmt.Sprintf(`{"sync_id":%q,"deleted":true}`, data.Observations[0].SyncID),
+			}},
+		})
+		writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "history", CreatedAt: "2025-06-01T00:00:00Z"}}})
+
+		result, err := New(s, syncDir).Export("alice", "proj-a")
+		if err != nil {
+			t.Fatalf("export: %v", err)
+		}
+		if !result.IsEmpty {
+			t.Fatalf("historical tombstones must prevent identity resurrection, got %+v", result)
+		}
+	})
 }
 
 func TestLocalChunkExportFallsBackToWatermarkForIncompleteHistory(t *testing.T) {
@@ -854,15 +878,18 @@ func TestLocalChunkExportFailsClosedOnInvalidHistoricalIdentityData(t *testing.T
 		name             string
 		chunk            func() ChunkData
 		assertNoNewChunk bool
+		expectedError    string
 	}{
 		{
-			name: "direct session row is semantically invalid",
+			name:          "direct session row is semantically invalid",
+			expectedError: "session payload directory is required for upsert",
 			chunk: func() ChunkData {
 				return ChunkData{Sessions: []store.Session{{ID: "missing-directory"}}}
 			},
 		},
 		{
-			name: "mutation payload is malformed",
+			name:          "mutation payload is malformed",
+			expectedError: "decode mutation payload",
 			chunk: func() ChunkData {
 				return ChunkData{Mutations: []store.SyncMutation{{
 					Entity:    store.SyncEntityObservation,
@@ -873,7 +900,8 @@ func TestLocalChunkExportFailsClosedOnInvalidHistoricalIdentityData(t *testing.T
 			},
 		},
 		{
-			name: "mutation entity key must match payload identity",
+			name:          "mutation entity key must match payload identity",
+			expectedError: "does not match payload key",
 			chunk: func() ChunkData {
 				return ChunkData{Mutations: []store.SyncMutation{{
 					Entity:    store.SyncEntityPrompt,
@@ -884,7 +912,8 @@ func TestLocalChunkExportFailsClosedOnInvalidHistoricalIdentityData(t *testing.T
 			},
 		},
 		{
-			name: "legacy pending relation still requires source identity",
+			name:          "legacy pending relation still requires source identity",
+			expectedError: "relation payload source_id is required for upsert",
 			chunk: func() ChunkData {
 				return ChunkData{Mutations: []store.SyncMutation{{
 					Entity:    store.SyncEntityRelation,
@@ -895,7 +924,8 @@ func TestLocalChunkExportFailsClosedOnInvalidHistoricalIdentityData(t *testing.T
 			},
 		},
 		{
-			name: "non-pending relation still requires provenance",
+			name:          "non-pending relation still requires provenance",
+			expectedError: "relation payload marked_by_actor is required for upsert",
 			chunk: func() ChunkData {
 				return ChunkData{Mutations: []store.SyncMutation{{
 					Entity:    store.SyncEntityRelation,
@@ -908,6 +938,7 @@ func TestLocalChunkExportFailsClosedOnInvalidHistoricalIdentityData(t *testing.T
 		{
 			name:             "valid explicit observation must not hide invalid closure-only direct session",
 			assertNoNewChunk: true,
+			expectedError:    "validate direct rows",
 			chunk: func() ChunkData {
 				return ChunkData{
 					Sessions: []store.Session{{ID: "closure-only-session", Project: "proj-a"}},
@@ -931,6 +962,8 @@ func TestLocalChunkExportFailsClosedOnInvalidHistoricalIdentityData(t *testing.T
 
 			if _, err := New(s, syncDir).Export("alice", "proj-a"); err == nil {
 				t.Fatal("expected export to fail closed on invalid historical chunk")
+			} else if !strings.Contains(err.Error(), tc.expectedError) {
+				t.Fatalf("expected error to contain %q, got %v", tc.expectedError, err)
 			}
 			if tc.assertNoNewChunk {
 				manifestData, err := os.ReadFile(filepath.Join(syncDir, "manifest.json"))
@@ -953,6 +986,48 @@ func TestLocalChunkExportFailsClosedOnInvalidHistoricalIdentityData(t *testing.T
 				}
 			}
 		})
+	}
+}
+
+func TestLocalChunkExportFailsClosedOnInvalidJSONHistoricalChunk(t *testing.T) {
+	s, _ := seedOldLocalExportData(t)
+	syncDir := filepath.Join(t.TempDir(), ".engram")
+	chunksDir := filepath.Join(syncDir, "chunks")
+	if err := os.MkdirAll(chunksDir, 0o755); err != nil {
+		t.Fatalf("mkdir chunks: %v", err)
+	}
+	if err := writeGzip(filepath.Join(chunksDir, "invalid-json.jsonl.gz"), []byte(`{not json}`)); err != nil {
+		t.Fatalf("write invalid JSON chunk: %v", err)
+	}
+	writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "invalid-json", CreatedAt: "2025-06-01T00:00:00Z"}}})
+
+	if _, err := New(s, syncDir).Export("alice", "proj-a"); err == nil {
+		t.Fatal("expected export to fail closed on invalid JSON historical chunk")
+	} else {
+		for _, want := range []string{"scan historical chunks", "unmarshal chunk invalid-json"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("expected error to contain %q, got %v", want, err)
+			}
+		}
+	}
+
+	manifestData, err := os.ReadFile(filepath.Join(syncDir, "manifest.json"))
+	if err != nil {
+		t.Fatalf("read manifest after failed export: %v", err)
+	}
+	var manifest Manifest
+	if err := json.Unmarshal(manifestData, &manifest); err != nil {
+		t.Fatalf("unmarshal manifest after failed export: %v", err)
+	}
+	if len(manifest.Chunks) != 1 || manifest.Chunks[0].ID != "invalid-json" {
+		t.Fatalf("failed export must not publish a new chunk, got manifest %+v", manifest.Chunks)
+	}
+	entries, err := os.ReadDir(chunksDir)
+	if err != nil {
+		t.Fatalf("read chunks after failed export: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "invalid-json.jsonl.gz" {
+		t.Fatalf("failed export must not write a new chunk, got entries %+v", entries)
 	}
 }
 
@@ -3012,14 +3087,14 @@ func TestFilterByPendingMutationsPaginatesBeforeProjectFiltering(t *testing.T) {
 }
 
 func TestExportDoesNotReconcileUnsyncedChunksByCreatedByOnly(t *testing.T) {
-	s := newTestStore(t)
+	s, _ := seedOldLocalExportData(t)
 	transport := newFakeCloudTransport()
 	transport.manifest = &Manifest{
 		Version: 1,
 		Chunks: []ChunkEntry{{
 			ID:        "foreign-like",
 			CreatedBy: "alice",
-			CreatedAt: time.Now().UTC().Format(time.RFC3339),
+			CreatedAt: "2025-06-01T00:00:00Z",
 		}},
 	}
 
@@ -3029,7 +3104,10 @@ func TestExportDoesNotReconcileUnsyncedChunksByCreatedByOnly(t *testing.T) {
 		t.Fatalf("export with missing manifest chunk: %v", err)
 	}
 	if result == nil || !result.IsEmpty {
-		t.Fatalf("expected empty export result, got %+v", result)
+		t.Fatalf("incomplete history must retain the watermark, got %+v", result)
+	}
+	if transport.manifest.Chunks[0].CreatedBy != "alice" {
+		t.Fatalf("missing chunk ownership must remain manifest metadata, got %+v", transport.manifest.Chunks[0])
 	}
 
 	synced, err := s.GetSyncedChunks()
@@ -3037,7 +3115,7 @@ func TestExportDoesNotReconcileUnsyncedChunksByCreatedByOnly(t *testing.T) {
 		t.Fatalf("get synced chunks: %v", err)
 	}
 	if synced["foreign-like"] {
-		t.Fatal("chunk ownership must not be inferred from CreatedBy alone")
+		t.Fatal("missing chunk ownership must not count as complete synced-history identity evidence")
 	}
 }
 
