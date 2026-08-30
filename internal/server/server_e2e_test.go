@@ -534,6 +534,62 @@ func TestContextQueryParamsE2E(t *testing.T) {
 	}
 	promptResp.Body.Close()
 
+	// Two pinned observations, because pinned=N is only observable when the
+	// "### Pinned" section actually has rows — against an empty section every
+	// pinned assertion below would pass vacuously. Pinned bullets sort
+	// newest-first (created_at DESC, id DESC), so pinned=1 deterministically
+	// keeps NEW and drops OLD.
+	const (
+		pinnedOldMarker = "UNIQUE_CONTEXT_PARAMS_PINNED_OLD_4b21"
+		pinnedNewMarker = "UNIQUE_CONTEXT_PARAMS_PINNED_NEW_7e08"
+	)
+	for _, title := range []string{pinnedOldMarker, pinnedNewMarker} {
+		pinResp := postJSON(t, client, ts.URL+"/observations", map[string]any{
+			"session_id": "s-ctx-params",
+			"type":       "decision",
+			"title":      title,
+			"content":    "Pinned body so compact mode has something to drop here too.",
+			"project":    "engram",
+			"scope":      "project",
+		})
+		if pinResp.StatusCode != http.StatusCreated {
+			t.Fatalf("expected 201 creating pinned observation %s, got %d", title, pinResp.StatusCode)
+		}
+		id := int64(decodeJSON[map[string]any](t, pinResp)["id"].(float64))
+		if err := s.PinObservation(id); err != nil {
+			t.Fatalf("pin %s: %v", title, err)
+		}
+	}
+
+	// Same reasoning for sessions=N: a second session so the cap has
+	// something to drop, and a summary on each so the rendered bullets are
+	// distinguishable. RecentSessions orders by newest activity with an
+	// id DESC tie-break, so "s-ctx-params-newer" always outranks
+	// "s-ctx-params" — with or without a clock tick between them.
+	const (
+		oldSessionSummary = "UNIQUE_CONTEXT_PARAMS_SESSION_OLD_2c9f"
+		newSessionSummary = "UNIQUE_CONTEXT_PARAMS_SESSION_NEW_6a3d"
+	)
+	newerSession := postJSON(t, client, ts.URL+"/sessions", map[string]any{
+		"id":      "s-ctx-params-newer",
+		"project": "engram",
+	})
+	if newerSession.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 creating second session, got %d", newerSession.StatusCode)
+	}
+	newerSession.Body.Close()
+
+	for _, item := range []struct{ id, summary string }{
+		{"s-ctx-params", oldSessionSummary},
+		{"s-ctx-params-newer", newSessionSummary},
+	} {
+		endResp := postJSON(t, client, ts.URL+"/sessions/"+item.id+"/end", map[string]any{"summary": item.summary})
+		if endResp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 ending session %s, got %d", item.id, endResp.StatusCode)
+		}
+		endResp.Body.Close()
+	}
+
 	// ── No params: byte-identical to the legacy FormatContext call — the
 	// contract must not change for existing callers.
 	defaultResp, err := client.Get(ts.URL + "/context?project=engram&scope=project")
@@ -557,6 +613,16 @@ func TestContextQueryParamsE2E(t *testing.T) {
 	}
 	if !strings.Contains(defaultData["context"], "### Recent User Prompts") {
 		t.Fatalf("default context should include the prompts section, got:\n%s", defaultData["context"])
+	}
+	// Every section the cases below drop or cap must be present here first,
+	// otherwise those assertions prove nothing.
+	for _, want := range []string{
+		"### Recent Sessions", oldSessionSummary, newSessionSummary,
+		"### Pinned", pinnedOldMarker, pinnedNewMarker,
+	} {
+		if !strings.Contains(defaultData["context"], want) {
+			t.Fatalf("default context should include %q, got:\n%s", want, defaultData["context"])
+		}
 	}
 
 	// ── compact=1&observations=1: strictly smaller than default, no body preview.
@@ -607,6 +673,96 @@ func TestContextQueryParamsE2E(t *testing.T) {
 	if garbageData["context"] != defaultData["context"] {
 		t.Fatalf("observations=abc should be ignored and match the default output.\ngot:\n%s\nwant:\n%s",
 			garbageData["context"], defaultData["context"])
+	}
+
+	// The remaining cases each fetch one context blob and assert on which
+	// sections survived, so they share the fetch rather than repeat the
+	// err/status/decode boilerplate five more times.
+	contextFor := func(params string) string {
+		t.Helper()
+		resp, err := client.Get(ts.URL + "/context?project=engram&scope=project&" + params)
+		if err != nil {
+			t.Fatalf("context %s: %v", params, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 context %s, got %d", params, resp.StatusCode)
+		}
+		return decodeJSON[map[string]string](t, resp)["context"]
+	}
+
+	// ── sessions=-1 / pinned=-1: the omit-the-section state for the two
+	// params nothing exercised from the URL until now. The sections
+	// themselves are already covered by store.TestFormatContextWithOptions —
+	// what is unproven there is the wiring, so a typo in a query-param name
+	// would keep every store test green and still ship a dead knob.
+	noSessions := contextFor("sessions=-1")
+	if strings.Contains(noSessions, "### Recent Sessions") {
+		t.Fatalf("sessions=-1 should drop the '### Recent Sessions' header, got:\n%s", noSessions)
+	}
+	for _, dropped := range []string{oldSessionSummary, newSessionSummary} {
+		if strings.Contains(noSessions, dropped) {
+			t.Fatalf("sessions=-1 should drop session summary %q, got:\n%s", dropped, noSessions)
+		}
+	}
+	for _, kept := range []string{"### Pinned", "### Recent User Prompts", "### Recent Observations"} {
+		if !strings.Contains(noSessions, kept) {
+			t.Fatalf("sessions=-1 should leave %q alone, got:\n%s", kept, noSessions)
+		}
+	}
+
+	noPinned := contextFor("pinned=-1")
+	if strings.Contains(noPinned, "### Pinned") {
+		t.Fatalf("pinned=-1 should drop the '### Pinned' header, got:\n%s", noPinned)
+	}
+	for _, dropped := range []string{pinnedOldMarker, pinnedNewMarker} {
+		if strings.Contains(noPinned, dropped) {
+			t.Fatalf("pinned=-1 should drop pinned observation %q, got:\n%s", dropped, noPinned)
+		}
+	}
+	for _, kept := range []string{"### Recent Sessions", "### Recent User Prompts", "### Recent Observations"} {
+		if !strings.Contains(noPinned, kept) {
+			t.Fatalf("pinned=-1 should leave %q alone, got:\n%s", kept, noPinned)
+		}
+	}
+
+	// ── pinned=1 / sessions=1: a positive cap trims its own section to the
+	// newest row and leaves every other section untouched.
+	cappedPinned := contextFor("pinned=1")
+	if !strings.Contains(cappedPinned, pinnedNewMarker) {
+		t.Fatalf("pinned=1 should keep the newest pinned observation, got:\n%s", cappedPinned)
+	}
+	if strings.Contains(cappedPinned, pinnedOldMarker) {
+		t.Fatalf("pinned=1 should drop the older pinned observation, got:\n%s", cappedPinned)
+	}
+	for _, untouched := range []string{oldSessionSummary, newSessionSummary, bodyMarker, "### Recent User Prompts"} {
+		if !strings.Contains(cappedPinned, untouched) {
+			t.Fatalf("pinned=1 should not touch the other sections, %q missing:\n%s", untouched, cappedPinned)
+		}
+	}
+
+	cappedSessions := contextFor("sessions=1")
+	if !strings.Contains(cappedSessions, newSessionSummary) {
+		t.Fatalf("sessions=1 should keep the most recent session, got:\n%s", cappedSessions)
+	}
+	if strings.Contains(cappedSessions, oldSessionSummary) {
+		t.Fatalf("sessions=1 should drop the older session, got:\n%s", cappedSessions)
+	}
+	for _, untouched := range []string{pinnedOldMarker, pinnedNewMarker, bodyMarker, "### Recent User Prompts"} {
+		if !strings.Contains(cappedSessions, untouched) {
+			t.Fatalf("sessions=1 should not touch the other sections, %q missing:\n%s", untouched, cappedSessions)
+		}
+	}
+
+	// ── observations=999999: an absurd positive cap is clamped to
+	// contextMaxSectionLimit instead of reaching SQL as the LIMIT. The
+	// ceiling itself is invisible from here while the store holds fewer rows
+	// than the cap, so what this pins down is that clamping neither 4xx's nor
+	// changes the rendered output — a clamp that collapsed the value to 0 or
+	// to a negative would alter or drop the section and fail this equality.
+	huge := contextFor("observations=999999")
+	if huge != defaultData["context"] {
+		t.Fatalf("observations=999999 should be clamped and still match the default output.\ngot:\n%s\nwant:\n%s",
+			huge, defaultData["context"])
 	}
 }
 
