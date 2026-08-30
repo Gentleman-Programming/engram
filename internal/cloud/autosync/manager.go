@@ -749,18 +749,20 @@ func (m *Manager) computeBackoff(failures int) time.Duration {
 	// ±25% jitter: uniform in [-base/4, +base/4].
 	// rand.Int63n(int64(base/2)+1) gives [0, base/2]; subtracting base/4 shifts to [-base/4, +base/4].
 	jitter := time.Duration(rand.Int63n(int64(base/2)+1)) - time.Duration(base/4)
-	result := base
-	const maxDuration = time.Duration(1<<63 - 1)
-	if jitter > 0 && (base > m.cfg.MaxBackoff-jitter || base > maxDuration-jitter) {
-		result = m.cfg.MaxBackoff
-	} else {
-		result += jitter
-	}
+	result := saturatingAddBackoffJitter(base, jitter, m.cfg.MaxBackoff)
 	// Floor at BaseBackoff/2 to avoid extremely short intervals on large negative jitter.
 	if result < m.cfg.BaseBackoff/2 {
 		result = m.cfg.BaseBackoff / 2
 	}
 	return result
+}
+
+func saturatingAddBackoffJitter(base, jitter, maxBackoff time.Duration) time.Duration {
+	const maxDuration = time.Duration(1<<63 - 1)
+	if jitter > 0 && (base > maxBackoff-jitter || base > maxDuration-jitter) {
+		return maxBackoff
+	}
+	return base + jitter
 }
 
 func (m *Manager) releaseLease() {

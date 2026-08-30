@@ -990,17 +990,32 @@ func TestManagerBackoffSaturatesBeforeDurationConversion(t *testing.T) {
 }
 
 func TestManagerBackoffSaturatesPositiveJitterBeforeDurationOverflow(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.BaseBackoff = time.Duration(1<<63 - 1)
-	cfg.MaxBackoff = time.Duration(1<<63 - 1)
-	mgr := &Manager{cfg: cfg}
-	minExpected := cfg.MaxBackoff - cfg.MaxBackoff/4
+	const maxDuration = time.Duration(1<<63 - 1)
 
-	for i := 0; i < 1024; i++ {
-		d := mgr.computeBackoff(1)
-		if d < minExpected || d > cfg.MaxBackoff {
-			t.Fatalf("backoff %v outside expected range [%v, %v] at iteration %d", d, minExpected, cfg.MaxBackoff, i)
-		}
+	for _, tc := range []struct {
+		name   string
+		base   time.Duration
+		jitter time.Duration
+		want   time.Duration
+	}{
+		{
+			name:   "saturates overflowing positive jitter",
+			base:   maxDuration - 1,
+			jitter: 2,
+			want:   maxDuration,
+		},
+		{
+			name:   "adds positive jitter below ceiling",
+			base:   maxDuration - 2,
+			jitter: 1,
+			want:   maxDuration - 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := saturatingAddBackoffJitter(tc.base, tc.jitter, maxDuration); got != tc.want {
+				t.Fatalf("saturatingAddBackoffJitter(%v, %v, %v) = %v, want %v", tc.base, tc.jitter, maxDuration, got, tc.want)
+			}
+		})
 	}
 }
 
