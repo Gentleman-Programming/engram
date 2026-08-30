@@ -190,6 +190,7 @@ var callbackOnlySQLHelpers = map[string]bool{
 	"searchContextSQL":                          true,
 	"searchShortAnyContextSQL":                  true,
 	"statsSQL":                                  true,
+	"statsForProjectSQL":                        true,
 	"formatCompactionContextSQL":                true,
 	"exportRelationMutationsSQL":                true,
 	"exportWithProjectScopeSQL":                 true,

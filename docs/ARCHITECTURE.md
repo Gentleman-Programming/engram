@@ -252,7 +252,7 @@ engram setup [agent]      Install/setup agent integration (opencode, claude-code
 engram serve [port]       Start HTTP API server (default: 7437)
 engram mcp                Start MCP server (stdio transport)
 engram tui                Launch interactive terminal UI
-engram search <query>     Search memories
+engram search <query>     Search memories [--project P|--all]
 engram save <title> <msg> Save a memory
 engram delete <obs_id>    Delete an observation [--hard] (soft-delete by default; --hard removes permanently)
 engram delete session <id>
@@ -262,10 +262,10 @@ engram delete prompt <id>
 engram delete project <name> [--hard]
                           Cascade-delete a project: soft-deletes observations (or hard-deletes
                           with --hard, which also removes sessions); always removes prompts
-engram timeline <obs_id>  Chronological context around an observation
-engram context [project]  Recent context from previous sessions
-engram stats              Memory statistics
-engram export [file]      Export all memories to JSON
+engram timeline <obs_id>  Chronological context around an observation [--project P|--all]
+engram context [project]  Recent context from previous sessions [--project P|--all]
+engram stats              Memory statistics [--project P|--all]
+engram export [file]      Export current-project memories to JSON [--project P|--all]
 engram import <file>      Import memories from JSON
 engram sync               Export new memories as compressed chunk to .engram/
 engram sync --all         Export ALL projects (ignore directory-based filter)
@@ -292,7 +292,7 @@ engram projects prune     Remove projects with 0 observations [--dry-run]
 engram projects rescue-ownership --project <name> [--session <id>] [--observation <id>] [--prompt <id>]
                           Assign explicit ownership to legacy rows that carry none. Reaches the local
                           store directly, so it needs no server token and works in a zero-config install.
-engram obsidian-export    Export memories to Obsidian vault (beta)
+engram obsidian-export    Export current-project memories to Obsidian vault (beta; --all for every project)
 engram version            Show version
 ```
 
@@ -300,6 +300,8 @@ Local server auth:
 
 - `ENGRAM_HTTP_TOKEN`: optional Bearer auth for `engram serve`. When set, `DELETE /sessions/{id}`, `DELETE /observations/{id}`, `DELETE /prompts/{id}`, `GET /export`, and `POST /import` require `Authorization: Bearer <token>`. `POST /projects/rescue-ownership` always requires a configured token and matching Bearer credential; deprecated alias `POST /projects/migrate` uses the same handler and requirement. Comparison is constant-time; token is read per-request. Other routes remain open when unset (zero-config default). Ownership repair does not depend on this token: `engram projects rescue-ownership` does the same work against the local store.
 - `ENGRAM_TIMEZONE`: IANA zone name for timestamp display in TUI and cloud dashboard (e.g. `America/New_York`). Falls back to system local when unset or invalid.
+
+Project selection for reads is explicit: omitted project selectors resolve the current project (explicit project, then `ENGRAM_PROJECT`, then cwd detection). Use `--all` in the CLI or `all_projects=true` in HTTP to intentionally read every project. Do not combine an explicit project with an all-project selector. `engram context` accepts its legacy positional project as an alias for `--project`; the two forms cannot be combined. `GET /sync/status` supports only one resolved project and rejects `all_projects=true`.
 
 Cloud constraints (current behavior):
 

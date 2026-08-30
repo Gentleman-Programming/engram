@@ -358,7 +358,7 @@ func TestMigrate_Idempotent(t *testing.T) {
 		t.Fatalf("new columns missing after second migrate: %v (expected red)", err)
 	}
 	if err := rows.Close(); err != nil {
-		t.Fatalf("close new columns query rows: %v", err)
+		t.Fatalf("close column query: %v", err)
 	}
 }
 

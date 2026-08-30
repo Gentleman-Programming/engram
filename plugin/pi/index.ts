@@ -660,17 +660,33 @@ async function detectServerProject(cwd: string): Promise<CurrentProjectResponse 
   return undefined;
 }
 
+function isSafeDetectedProject(detected: CurrentProjectResponse): string | undefined {
+  const candidate = typeof detected.project === "string" ? detected.project.trim() : "";
+  if (
+    !candidate ||
+    candidate.toLowerCase() === "unknown" ||
+    detected.error_hint !== undefined ||
+    /[\\/\x00-\x1F\x7F]/.test(candidate)
+  ) {
+    return undefined;
+  }
+  return candidate;
+}
+
 function applyDetectedProject(detected: CurrentProjectResponse | undefined): boolean {
   if (!detected) {
+    project = "unknown";
     projectDetectionPending = true;
     return false;
   }
   projectDetectionPending = false;
-  if (detected.project) {
-    project = detected.project;
+  const detectedProject = isSafeDetectedProject(detected);
+  if (detectedProject) {
+    project = detectedProject;
     projectResolutionError = undefined;
     return true;
   }
+  project = "unknown";
   const choices = detected.available_projects?.length ? ` Available projects: ${detected.available_projects.join(", ")}.` : "";
   projectResolutionError = detected.error_hint || detected.warning || `Engram project detection did not resolve a project.${choices}`;
   return false;
@@ -835,7 +851,7 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
   }),
   mem_review: Type.Object({
     action: Type.String({ description: "Action: list | mark_reviewed" }),
-    project: optionalString("Optional project filter for action=list"),
+    project: optionalString("Optional project selector: filters list and scopes mark_reviewed; list remains global when omitted"),
     limit: optionalNumber("Max results for action=list"),
     observation_id: optionalNumber("Observation id for action=mark_reviewed"),
     id: optionalNumber("Alias for observation_id"),
@@ -895,10 +911,11 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
 
   switch (toolName) {
     case "mem_search":
+      if (!params.all_projects && !requestedProject) requireResolvedProject();
       return engramFetch(`/search${queryString({
         q: params.query,
         type: params.type,
-        project: params.all_projects ? undefined : params.project,
+        project: params.all_projects ? undefined : activeProject,
         scope: params.scope,
         limit: params.limit,
         match_mode: params.match_mode,
@@ -908,9 +925,10 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
       if (!params.project) requireResolvedProject();
       return engramFetch(`/context${queryString({ project: params.project || project, scope: params.scope })}`);
     case "mem_stats":
-      return engramFetch("/stats");
+      return engramFetch(`/stats${queryString({ all_projects: true })}`);
     case "mem_timeline":
-      return engramFetch(`/timeline${queryString({ observation_id: params.observation_id, before: params.before, after: params.after, project: params.project })}`);
+      if (!requestedProject) requireResolvedProject();
+      return engramFetch(`/timeline${queryString({ observation_id: params.observation_id, before: params.before, after: params.after, project: activeProject })}`);
     case "mem_get_observation":
       return engramFetch(`/observations/${encodeURIComponent(String(params.id))}`);
     case "mem_save": {
@@ -994,7 +1012,8 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
       }
     }
     case "mem_doctor":
-      return engramFetch(`/doctor${queryString({ project: params.project, check: params.check, cwd: params.project ? undefined : ctx.cwd })}`);
+      if (!requestedProject) requireResolvedProject();
+      return engramFetch(`/doctor${queryString({ project: activeProject, check: params.check })}`);
     case "mem_capture_passive": {
       requireResolvedProject();
       const passiveSessionId = runtimeSessionForWrite();
@@ -1012,10 +1031,11 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
     case "mem_review": {
       const action = String(params.action || "").trim();
       if (action === "list") {
-        return engramFetch(`/review${queryString({ project: params.project, limit: params.limit })}`);
+        return engramFetch(`/review${queryString({ project: requestedProject, limit: params.limit, all_projects: requestedProject ? undefined : true })}`);
       }
       if (action === "mark_reviewed") {
-        return engramFetch("/review/mark_reviewed", {
+        if (!requestedProject) requireResolvedProject();
+        return engramFetch(`/review/mark_reviewed${queryString({ project: activeProject })}`, {
           method: "POST",
           body: { observation_id: params.observation_id || params.id },
         });

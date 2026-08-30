@@ -27,6 +27,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	projectpkg "github.com/Gentleman-Programming/engram/internal/project"
 	"github.com/Gentleman-Programming/engram/internal/timeutil"
 	sqlite "modernc.org/sqlite"
 )
@@ -3466,8 +3467,26 @@ func (s *Store) ObservationsNeedingReview(project string, limit int) ([]Observat
 // Types without a decay offset return to a NULL review_after value.
 // This lifecycle reset is intentionally local-only until the sync wire format includes review_after.
 func (s *Store) MarkReviewed(id int64) error {
+	return s.markReviewed(id, "")
+}
+
+// MarkReviewedForProject resets an observation's review lifecycle only when it
+// remains owned by project at the mutation boundary.
+func (s *Store) MarkReviewedForProject(id int64, project string) error {
+	project, _ = NormalizeProject(project)
+	return s.markReviewed(id, project)
+}
+
+func (s *Store) markReviewed(id int64, project string) error {
 	return s.withTx(func(tx *sql.Tx) error {
-		obs, err := s.getObservationTx(tx, id)
+		query := `SELECT type FROM observations WHERE id = ? AND deleted_at IS NULL`
+		args := []any{id}
+		if project != "" {
+			query += ` AND LOWER(project) = ?`
+			args = append(args, project)
+		}
+		var observationType string
+		err := tx.QueryRow(query, args...).Scan(&observationType)
 		if err == sql.ErrNoRows {
 			return ErrObservationNotFound
 		}
@@ -3476,11 +3495,25 @@ func (s *Store) MarkReviewed(id int64) error {
 		}
 
 		var reviewAfter any
-		if months, ok := decayReviewAfterMonths[obs.Type]; ok {
+		if months, ok := decayReviewAfterMonths[observationType]; ok {
 			reviewAfter = time.Now().UTC().AddDate(0, months, 0).Format("2006-01-02 15:04:05")
 		}
-		if _, err := s.execHook(tx, `UPDATE observations SET review_after = ?, updated_at = datetime('now') WHERE id = ? AND deleted_at IS NULL`, reviewAfter, id); err != nil {
+		update := `UPDATE observations SET review_after = ?, updated_at = datetime('now') WHERE id = ? AND deleted_at IS NULL`
+		updateArgs := []any{reviewAfter, id}
+		if project != "" {
+			update += ` AND LOWER(project) = ?`
+			updateArgs = append(updateArgs, project)
+		}
+		result, err := s.execHook(tx, update, updateArgs...)
+		if err != nil {
 			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected == 0 {
+			return ErrObservationNotFound
 		}
 		return nil
 	})
@@ -4514,65 +4547,77 @@ func buildSearchFTSQuery(ftsQuery string, opts SearchOptions, limit int) (string
 // ─── Stats ───────────────────────────────────────────────────────────────────
 
 func (s *Store) Stats() (*Stats, error) {
+	return s.statsForProject("")
+}
+
+// StatsProject returns aggregate counts restricted to one project. Selection
+// policy belongs to callers; this method only applies the supplied scope.
+func (s *Store) StatsProject(project string) (*Stats, error) {
+	project, _ = NormalizeProject(project)
+	if strings.TrimSpace(project) == "" {
+		return nil, fmt.Errorf("project is required")
+	}
+	return s.statsForProject(project)
+}
+
+func (s *Store) statsForProject(project string) (*Stats, error) {
 	var stats *Stats
 	err := s.withRead(func() error {
 		var err error
-		stats, err = s.statsSQL()
+		stats, err = s.statsForProjectSQL(project)
 		return err
 	})
 	return stats, err
 }
 
-func (s *Store) statsSQL() (*Stats, error) {
+func (s *Store) statsForProjectSQL(project string) (*Stats, error) {
 	stats := &Stats{}
+	projectFilter := ""
+	observationProjectFilter := ""
+	var projectArgs []any
+	if project != "" {
+		projectFilter = " WHERE LOWER(project) = ?"
+		observationProjectFilter = " AND LOWER(project) = ?"
+		projectArgs = []any{project}
+	}
 
 	for _, count := range []struct {
 		name  string
 		query string
 		dest  *int
 	}{
-		{"sessions", "SELECT COUNT(*) FROM sessions", &stats.TotalSessions},
-		{"observations", "SELECT COUNT(*) FROM observations WHERE deleted_at IS NULL", &stats.TotalObservations},
-		{"prompts", "SELECT COUNT(*) FROM user_prompts", &stats.TotalPrompts},
+		{"sessions", "SELECT COUNT(*) FROM sessions" + projectFilter, &stats.TotalSessions},
+		{"observations", "SELECT COUNT(*) FROM observations WHERE deleted_at IS NULL" + observationProjectFilter, &stats.TotalObservations},
+		{"prompts", "SELECT COUNT(*) FROM user_prompts" + projectFilter, &stats.TotalPrompts},
 	} {
-		if err := s.db.QueryRow(count.query).Scan(count.dest); err != nil {
-			if generationErr := s.CheckDatabaseGeneration(); generationErr != nil {
-				return nil, generationErr
-			}
+		if err := s.db.QueryRow(count.query, projectArgs...).Scan(count.dest); err != nil {
 			return nil, fmt.Errorf("stats: count %s: %w", count.name, err)
 		}
 	}
 
-	rows, err := s.queryItHook(s.db, "SELECT project FROM observations WHERE project IS NOT NULL AND deleted_at IS NULL GROUP BY project ORDER BY MAX(created_at) DESC")
+	projectsQuery := "SELECT project FROM observations WHERE project IS NOT NULL AND deleted_at IS NULL"
+	if project != "" {
+		projectsQuery += " AND LOWER(project) = ?"
+	}
+	projectsQuery += " GROUP BY project ORDER BY MAX(created_at) DESC"
+	rows, err := s.queryItHook(s.db, projectsQuery, projectArgs...)
 	if err != nil {
-		if generationErr := s.CheckDatabaseGeneration(); generationErr != nil {
-			return nil, generationErr
-		}
 		return nil, fmt.Errorf("stats: list projects: %w", err)
 	}
 
 	for rows.Next() {
 		var p string
 		if err := rows.Scan(&p); err != nil {
-			err = closeRowsWithError(rows, err)
-			if generationErr := s.CheckDatabaseGeneration(); generationErr != nil {
-				return nil, generationErr
-			}
+			_ = closeRowsWithError(rows, err)
 			return nil, fmt.Errorf("stats: scan project: %w", err)
 		}
 		stats.Projects = append(stats.Projects, p)
 	}
 	if err := rows.Err(); err != nil {
-		err = closeRowsWithError(rows, err)
-		if generationErr := s.CheckDatabaseGeneration(); generationErr != nil {
-			return nil, generationErr
-		}
+		_ = closeRowsWithError(rows, err)
 		return nil, fmt.Errorf("stats: iterate projects: %w", err)
 	}
 	if err := rows.Close(); err != nil {
-		if generationErr := s.CheckDatabaseGeneration(); generationErr != nil {
-			return nil, generationErr
-		}
 		return nil, fmt.Errorf("stats: close projects: %w", err)
 	}
 
@@ -9299,15 +9344,7 @@ func NormalizeProject(project string) (normalized string, warning string) {
 	if project == "" {
 		return "", ""
 	}
-	n := strings.TrimSpace(strings.ToLower(project))
-	// Collapse multiple consecutive hyphens
-	for strings.Contains(n, "--") {
-		n = strings.ReplaceAll(n, "--", "-")
-	}
-	// Collapse multiple consecutive underscores
-	for strings.Contains(n, "__") {
-		n = strings.ReplaceAll(n, "__", "_")
-	}
+	n := projectpkg.CanonicalizeProjectName(project)
 	if n == project {
 		return n, ""
 	}
