@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -12410,5 +12411,42 @@ func TestUpdateObservationAcceptsPrivateTagOnlyTitle(t *testing.T) {
 	}
 	if payload["title"] != "[REDACTED]" {
 		t.Fatalf("expected redacted title in update payload, got %#v", payload["title"])
+	}
+}
+
+// TestNewWithoutRepairReleasesHandleOnOpenFailure proves that newWithoutRepair
+// closes the SQLite handle when it fails AFTER sql.Open (the post-open failure
+// path). Without the deferred db.Close(), the *sql.DB — and its open OS file
+// handle — leaks, so removing the db file on Windows fails. This reproduces the
+// #825 leak scenario and must fail if the deferred close is reverted.
+func TestNewWithoutRepairReleasesHandleOnOpenFailure(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("handle-release assertion is only meaningful on Windows")
+	}
+
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "engram.db")
+
+	// Seed a non-SQLite file so the first PRAGMA after sql.Open fails, but the
+	// driver has already opened an OS handle against the path.
+	if err := os.WriteFile(dbPath, []byte("this file is deliberately not a sqlite database"), 0o644); err != nil {
+		t.Fatalf("seed corrupt db file: %v", err)
+	}
+
+	cfg, err := DefaultConfig()
+	if err != nil {
+		t.Fatalf("DefaultConfig: %v", err)
+	}
+	cfg.DataDir = dir
+
+	_, openErr := newWithoutRepair(cfg)
+	if openErr == nil {
+		t.Fatalf("newWithoutRepair with corrupt db returned nil error; want non-nil (post-open failure)")
+	}
+
+	// On Windows, removing the file only succeeds if the leaked handle was
+	// closed by newWithoutRepair's deferred db.Close().
+	if err := os.Remove(dbPath); err != nil {
+		t.Fatalf("os.Remove(%q) after failed newWithoutRepair: %v — leaked OS handle (deferred close missing)", dbPath, err)
 	}
 }

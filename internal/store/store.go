@@ -752,6 +752,12 @@ func newWithoutRepair(cfg Config) (*Store, error) {
 		return nil, fmt.Errorf("engram: open database: %w", err)
 	}
 	db.SetMaxOpenConns(1)
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			_ = db.Close()
+		}
+	}()
 
 	pragmas := []string{
 		"PRAGMA journal_mode = WAL",
@@ -769,6 +775,8 @@ func newWithoutRepair(cfg Config) (*Store, error) {
 	if err := s.migrate(); err != nil {
 		return nil, fmt.Errorf("engram: migration: %w", err)
 	}
+
+	succeeded = true
 	return s, nil
 }
 
