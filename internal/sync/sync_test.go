@@ -1555,6 +1555,112 @@ func TestLocalChunkExportFallsBackToWatermarkForIncompleteHistory(t *testing.T) 
 	})
 }
 
+func TestLocalChunkExportReconcilesCanonicalHistoricalState(t *testing.T) {
+	backdateRelationFixture := func(t *testing.T, s *store.Store, sessionID, relationID string) {
+		t.Helper()
+		if _, err := s.DB().Exec(`UPDATE sessions SET started_at='2025-01-01 00:00:00' WHERE id=?`, sessionID); err != nil {
+			t.Fatalf("backdate session: %v", err)
+		}
+		if _, err := s.DB().Exec(`UPDATE observations SET created_at='2025-01-01 00:00:00', updated_at='2025-01-01 00:00:00' WHERE session_id=?`, sessionID); err != nil {
+			t.Fatalf("backdate observations: %v", err)
+		}
+		if _, err := s.DB().Exec(`UPDATE memory_relations SET updated_at='2025-01-01 00:00:00' WHERE sync_id=?`, relationID); err != nil {
+			t.Fatalf("backdate relation: %v", err)
+		}
+	}
+
+	t.Run("missing chunk resets lifecycle availability", func(t *testing.T) {
+		s, data := seedOldLocalExportData(t)
+		syncDir := filepath.Join(t.TempDir(), ".engram")
+		sessionID := data.Sessions[0].ID
+		writeLocalChunkFile(t, syncDir, "session-upsert", ChunkData{Sessions: data.Sessions})
+		writeLocalChunkFile(t, syncDir, "session-delete", ChunkData{Mutations: []store.SyncMutation{{
+			Entity:    store.SyncEntitySession,
+			EntityKey: sessionID,
+			Op:        store.SyncOpDelete,
+			Payload:   fmt.Sprintf(`{"id":%q,"project":"proj-a","deleted_at":"2025-06-01T00:00:00Z"}`, sessionID),
+		}}})
+		writeLocalChunkFile(t, syncDir, "later-observation", ChunkData{Observations: data.Observations})
+		writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{
+			{ID: "session-upsert", CreatedAt: "2025-06-01T00:00:00Z"},
+			{ID: "session-delete", CreatedAt: "2025-06-01T00:01:00Z"},
+			{ID: "missing", CreatedAt: "2025-06-01T00:02:00Z"},
+			{ID: "later-observation", CreatedAt: "2025-06-01T00:03:00Z"},
+		}})
+
+		result, err := New(s, syncDir).Export("alice", "proj-a")
+		if err != nil {
+			t.Fatalf("incomplete history must reset lifecycle availability before later chunks: %v", err)
+		}
+		if !result.IsEmpty {
+			t.Fatalf("incomplete history must retain timestamp fallback, got %+v", result)
+		}
+	})
+
+	t.Run("deleted historical observation is not a relation endpoint", func(t *testing.T) {
+		s := newTestStore(t)
+		syncDir := filepath.Join(t.TempDir(), ".engram")
+		sourceID, _ := seedRelationForProject(t, s, "proj-a", "deleted-endpoint-session", "deleted-endpoint-relation")
+		backdateRelationFixture(t, s, "deleted-endpoint-session", "deleted-endpoint-relation")
+		data, err := s.ExportProject("proj-a")
+		if err != nil {
+			t.Fatalf("export project data: %v", err)
+		}
+		writeLocalChunkFile(t, syncDir, "history", ChunkData{
+			Sessions:     data.Sessions,
+			Observations: data.Observations,
+			Mutations: []store.SyncMutation{{
+				Entity:    store.SyncEntityObservation,
+				EntityKey: sourceID,
+				Op:        store.SyncOpDelete,
+				Payload:   fmt.Sprintf(`{"sync_id":%q,"deleted":true}`, sourceID),
+			}},
+		})
+		writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "history", CreatedAt: "2025-06-01T00:00:00Z"}}})
+
+		result, err := New(s, syncDir).Export("alice", "proj-a")
+		if err != nil {
+			t.Fatalf("export: %v", err)
+		}
+		if !result.IsEmpty {
+			t.Fatalf("relation with a deleted historical endpoint must not be exported, got %+v", result)
+		}
+	})
+
+	t.Run("historical relation keys use mutation identity normalization", func(t *testing.T) {
+		s := newTestStore(t)
+		syncDir := filepath.Join(t.TempDir(), ".engram")
+		seedRelationForProject(t, s, "proj-a", "normalized-relation-session", "normalized-relation")
+		backdateRelationFixture(t, s, "normalized-relation-session", "normalized-relation")
+		data, err := s.ExportProject("proj-a")
+		if err != nil {
+			t.Fatalf("export project data: %v", err)
+		}
+		relations, err := s.ExportRelationMutations("proj-a")
+		if err != nil {
+			t.Fatalf("export relation mutations: %v", err)
+		}
+		if len(relations) != 1 {
+			t.Fatalf("expected one relation mutation, got %+v", relations)
+		}
+		relations[0].EntityKey = "  normalized-relation  "
+		writeLocalChunkFile(t, syncDir, "history", ChunkData{
+			Sessions:     data.Sessions,
+			Observations: data.Observations,
+			Mutations:    relations,
+		})
+		writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "history", CreatedAt: "2025-06-01T00:00:00Z"}}})
+
+		result, err := New(s, syncDir).Export("alice", "proj-a")
+		if err != nil {
+			t.Fatalf("export: %v", err)
+		}
+		if !result.IsEmpty {
+			t.Fatalf("normalized historical relation key must suppress duplicate export, got %+v", result)
+		}
+	})
+}
+
 func TestLocalChunkExportFailsClosedOnInvalidHistoricalIdentityData(t *testing.T) {
 	tests := []struct {
 		name             string

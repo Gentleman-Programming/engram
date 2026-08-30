@@ -98,6 +98,48 @@ type ChunkData struct {
 	Mutations    []store.SyncMutation `json:"mutations,omitempty"`
 }
 
+// historicalExportState is the validated state reconstructed from manifest
+// chunks for a local export. Identities preserve tombstones for reconciliation;
+// availability tracks only endpoints that remain live for relation closure.
+type historicalExportState struct {
+	identities              map[string]struct{}
+	relationKeys            map[string]struct{}
+	complete                bool
+	sessionAvailability     map[string]bool
+	observationAvailability map[string]bool
+	activeObservations      map[string]string
+}
+
+func newHistoricalExportState(relevant map[string]struct{}) *historicalExportState {
+	return &historicalExportState{
+		identities:              make(map[string]struct{}, len(relevant)),
+		relationKeys:            make(map[string]struct{}),
+		complete:                true,
+		sessionAvailability:     make(map[string]bool),
+		observationAvailability: make(map[string]bool),
+		activeObservations:      make(map[string]string),
+	}
+}
+
+func (state *historicalExportState) resetAvailability() {
+	state.sessionAvailability = make(map[string]bool)
+	state.observationAvailability = make(map[string]bool)
+	state.activeObservations = make(map[string]string)
+}
+
+func (state *historicalExportState) availableObservationKeys() map[string]struct{} {
+	if !state.complete {
+		return nil
+	}
+	available := make(map[string]struct{}, len(state.observationAvailability))
+	for syncID, live := range state.observationAvailability {
+		if live {
+			available[syncID] = struct{}{}
+		}
+	}
+	return available
+}
+
 // SyncResult is returned after a sync operation.
 type SyncResult struct {
 	ChunkID              string `json:"chunk_id,omitempty"`
@@ -463,16 +505,16 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 	lastChunkTime := sy.lastChunkTime(manifest)
 	// Historical identity absence can bypass the global timestamp watermark,
 	// but only after every manifest-listed chunk has been validated.
-	historicalIdentities, exportedRelations, historyComplete, err := sy.exportedIdentityAndRelationKeys(manifest, localDataIdentityKeys(data))
+	history, err := sy.exportedHistoricalState(manifest, localDataIdentityKeys(data))
 	if err != nil {
 		return nil, fmt.Errorf("scan historical chunks: %w", err)
 	}
-	chunk := sy.filterNewDataWithHistoricalIdentities(data, lastChunkTime, historicalIdentities, historyComplete)
+	chunk := sy.filterNewDataWithHistoricalIdentities(data, lastChunkTime, history.identities, history.complete)
 
 	// Relations are filtered by chunk presence, not timestamp; see the
 	// rationale on filterRelationMutationsForExport and issue #353.
-	chunk.Mutations = filterRelationMutationsForExport(relationMutations, exportedRelations, lastChunkTime)
-	if err := filterRelationMutationsForEndpointAvailability(chunk, data, historicalKeysForEntity(historicalIdentities, store.SyncEntityObservation), strings.TrimSpace(project) != ""); err != nil {
+	chunk.Mutations = filterRelationMutationsForExport(relationMutations, history.relationKeys, lastChunkTime)
+	if err := filterRelationMutationsForEndpointAvailability(chunk, data, history.availableObservationKeys(), strings.TrimSpace(project) != ""); err != nil {
 		return nil, fmt.Errorf("filter relation endpoints: %w", err)
 	}
 
@@ -1570,56 +1612,51 @@ func historicalIdentityIsAbsent(historical map[string]struct{}, entity, key stri
 	return !found
 }
 
-// exportedIdentityAndRelationKeys scans complete, replayable chunk history.
-// It retains historical non-relation identities relevant to the current local
-// export and the complete relation key set used by relation reconciliation.
-func (sy *Syncer) exportedIdentityAndRelationKeys(m *Manifest, relevant map[string]struct{}) (map[string]struct{}, map[string]struct{}, bool, error) {
-	identities := make(map[string]struct{}, len(relevant))
-	relations := make(map[string]struct{})
+// exportedHistoricalState scans replayable chunk history into one canonical
+// state for identity reconciliation, lifecycle validation, and relation closure.
+func (sy *Syncer) exportedHistoricalState(m *Manifest, relevant map[string]struct{}) (*historicalExportState, error) {
+	state := newHistoricalExportState(relevant)
 	if m == nil {
-		return identities, relations, true, nil
+		return state, nil
 	}
-	complete := true
-	sessionAvailability := make(map[string]bool)
-	activeObservations := make(map[string]string)
 	for _, entry := range m.Chunks {
 		raw, err := sy.transport.ReadChunk(entry.ID)
 		if err != nil {
 			if errors.Is(err, ErrChunkNotFound) {
-				complete = false
-				activeObservations = make(map[string]string)
+				state.complete = false
+				state.resetAvailability()
 				continue
 			}
-			return nil, nil, false, fmt.Errorf("read chunk %s: %w", entry.ID, err)
+			return nil, fmt.Errorf("read chunk %s: %w", entry.ID, err)
 		}
 		var chunk ChunkData
 		if err := json.Unmarshal(raw, &chunk); err != nil {
-			return nil, nil, false, fmt.Errorf("unmarshal chunk %s: %w", entry.ID, err)
+			return nil, fmt.Errorf("unmarshal chunk %s: %w", entry.ID, err)
 		}
-		if err := validateHistoricalChunk(raw, chunk, sessionAvailability, activeObservations); err != nil {
-			return nil, nil, false, fmt.Errorf("validate chunk %s: %w", entry.ID, err)
+		if err := validateHistoricalChunk(raw, chunk, state.sessionAvailability, state.observationAvailability, state.activeObservations); err != nil {
+			return nil, fmt.Errorf("validate chunk %s: %w", entry.ID, err)
 		}
 		for _, session := range chunk.Sessions {
-			markHistoricalIdentity(identities, relevant, store.SyncEntitySession, session.ID)
+			markHistoricalIdentity(state.identities, relevant, store.SyncEntitySession, session.ID)
 		}
 		for _, observation := range chunk.Observations {
-			markHistoricalIdentity(identities, relevant, store.SyncEntityObservation, observation.SyncID)
+			markHistoricalIdentity(state.identities, relevant, store.SyncEntityObservation, observation.SyncID)
 		}
 		for _, prompt := range chunk.Prompts {
-			markHistoricalIdentity(identities, relevant, store.SyncEntityPrompt, prompt.SyncID)
+			markHistoricalIdentity(state.identities, relevant, store.SyncEntityPrompt, prompt.SyncID)
 		}
 		for _, mutation := range chunk.Mutations {
 			if mutation.Entity == store.SyncEntityRelation {
-				relations[mutation.EntityKey] = struct{}{}
+				state.relationKeys[mutationIdentityKey(mutation)] = struct{}{}
 				continue
 			}
-			markHistoricalIdentity(identities, relevant, mutation.Entity, mutation.EntityKey)
+			markHistoricalIdentity(state.identities, relevant, mutation.Entity, mutation.EntityKey)
 		}
 	}
-	return identities, relations, complete, nil
+	return state, nil
 }
 
-func validateHistoricalChunk(raw []byte, chunk ChunkData, sessionAvailability map[string]bool, activeObservations map[string]string) error {
+func validateHistoricalChunk(raw []byte, chunk ChunkData, sessionAvailability, observationAvailability map[string]bool, activeObservations map[string]string) error {
 	var document map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &document); err != nil {
 		return err
@@ -1645,7 +1682,7 @@ func validateHistoricalChunk(raw []byte, chunk ChunkData, sessionAvailability ma
 	if err := validateHistoricalDirectRows(chunk); err != nil {
 		return err
 	}
-	return validateHistoricalSessionLifecycle(chunk, sessionAvailability, activeObservations)
+	return validateHistoricalSessionLifecycle(chunk, sessionAvailability, observationAvailability, activeObservations)
 }
 
 // validateHistoricalDirectRows checks only the identities used to account for
@@ -1673,7 +1710,7 @@ func validateHistoricalDirectRows(chunk ChunkData) error {
 // validateHistoricalSessionLifecycle verifies that stable direct and explicit
 // dependents do not follow a historical session tombstone. Unknown sessions
 // remain recoverable for legacy local chunks.
-func validateHistoricalSessionLifecycle(chunk ChunkData, sessionAvailability map[string]bool, activeObservations map[string]string) error {
+func validateHistoricalSessionLifecycle(chunk ChunkData, sessionAvailability, observationAvailability map[string]bool, activeObservations map[string]string) error {
 	for _, mutation := range orderMutationsForApply(buildImportMutations(chunk)) {
 		sessionID := strings.TrimSpace(mutation.EntityKey)
 		switch {
@@ -1703,8 +1740,10 @@ func validateHistoricalSessionLifecycle(chunk ChunkData, sessionAvailability map
 			}
 			if mutation.Entity == store.SyncEntityObservation {
 				activeObservations[mutationIdentityKey(mutation)] = dependencyID
+				observationAvailability[strings.TrimSpace(mutation.EntityKey)] = true
 			}
 		case mutation.Entity == store.SyncEntityObservation && mutation.Op == store.SyncOpDelete:
+			observationAvailability[strings.TrimSpace(mutation.EntityKey)] = false
 			var payload struct {
 				HardDelete bool `json:"hard_delete"`
 			}
@@ -1807,17 +1846,6 @@ func localDataIdentityKeys(data *store.ExportData) map[string]struct{} {
 	return keys
 }
 
-func historicalKeysForEntity(identities map[string]struct{}, entity string) map[string]struct{} {
-	keys := make(map[string]struct{})
-	prefix := entity + ":"
-	for identity := range identities {
-		if key, ok := strings.CutPrefix(identity, prefix); ok {
-			keys[key] = struct{}{}
-		}
-	}
-	return keys
-}
-
 func addHistoricalIdentity(keys map[string]struct{}, entity, key string) {
 	if identity := historicalIdentityKey(entity, key); identity != "" {
 		keys[identity] = struct{}{}
@@ -1864,7 +1892,7 @@ func filterRelationMutationsForExport(mutations []store.SyncMutation, exported m
 	cutoff := normalizeTime(lastChunkTime)
 	filtered := make([]store.SyncMutation, 0, len(mutations))
 	for _, mutation := range mutations {
-		_, alreadyExported := exported[mutation.EntityKey]
+		_, alreadyExported := exported[mutationIdentityKey(mutation)]
 		updatedSinceLastChunk := normalizeTime(mutation.OccurredAt) > cutoff
 		if !alreadyExported || updatedSinceLastChunk {
 			filtered = append(filtered, mutation)
