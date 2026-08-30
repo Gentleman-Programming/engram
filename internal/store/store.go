@@ -3342,7 +3342,7 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 			 SET type = ?,
 			     title = ?,
 			     content = ?,
-			     project = ?,
+			     project = CAST(? AS TEXT),
 			     scope = ?,
 			     topic_key = ?,
 			     normalized_hash = ?,
