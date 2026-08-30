@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,9 @@ var ErrSemanticRunnerRequired = errors.New("semantic scan requires a non-nil Run
 // ErrSemanticPromptBuilderRequired is returned by ScanProject when
 // ScanOptions.Semantic is true but ScanOptions.BuildPrompt is nil.
 var ErrSemanticPromptBuilderRequired = errors.New("semantic scan requires a non-nil BuildPrompt function")
+
+// DefaultScanLimit bounds each conflict scan page and its FTS candidate queries.
+const DefaultScanLimit = 100
 
 // ─── Relation vocabulary (locked) ─────────────────────────────────────────────
 
@@ -59,6 +63,11 @@ func isValidRelationVerb(v string) bool {
 	return validRelationVerbs[v]
 }
 
+// isValidConfidence returns true when confidence is finite and in [0.0, 1.0].
+func isValidConfidence(confidence float64) bool {
+	return !math.IsNaN(confidence) && !math.IsInf(confidence, 0) && confidence >= 0.0 && confidence <= 1.0
+}
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 // CandidateOptions controls the FindCandidates query.
@@ -71,12 +80,12 @@ type CandidateOptions struct {
 	Type string
 	// Limit caps the number of candidates returned. Default 3 when nil or <=0.
 	Limit int
-	// BM25Floor is the minimum BM25 score (negative; closer to 0 = better match).
-	// Candidates below the floor are excluded. Default -2.0 when nil.
-	//
-	// Use a pointer so that an explicit 0.0 (very strict — nothing passes) is
-	// distinguishable from the zero value (which previously collided with the
-	// default sentinel). nil means "use the default (-2.0)".
+	// BM25MaxRank is the largest acceptable raw FTS5 BM25 rank. Smaller ranks
+	// are better matches, so candidates whose rank is greater are excluded. nil
+	// uses 0.0, which retains ordinary negative FTS5 ranks.
+	BM25MaxRank *float64
+	// BM25Floor preserves the deprecated legacy minimum-rank behavior. Candidates
+	// below this value are excluded. It cannot be combined with BM25MaxRank.
 	BM25Floor *float64
 	// SkipInsert controls whether FindCandidates inserts pending relation rows.
 	// When true, candidates are returned but NO rows are written to memory_relations.
@@ -132,6 +141,10 @@ type DeferredRow struct {
 	TargetKey       string         `json:"target_key"`
 	Project         string         `json:"project"`
 	ScopeClass      string         `json:"scope_class"`
+	RemoteSeq       int64          `json:"remote_seq,omitempty"`
+	EntityKey       string         `json:"entity_key,omitempty"`
+	Op              string         `json:"op,omitempty"`
+	ReasonCode      string         `json:"reason_code,omitempty"`
 	Payload         map[string]any `json:"payload,omitempty"`
 	PayloadRaw      string         `json:"payload_raw"`
 	PayloadValid    bool           `json:"payload_valid"`
@@ -146,11 +159,15 @@ type DeferredRow struct {
 type ScanResult struct {
 	Project           string `json:"project"`
 	Inspected         int    `json:"inspected"`
+	RankedQueries     int    `json:"ranked_queries"`
 	CandidatesFound   int    `json:"candidates_found"`
+	NextCursor        *int64 `json:"next_cursor,omitempty"`
 	AlreadyRelated    int    `json:"already_related"`
 	RelationsInserted int    `json:"inserted"`
-	Capped            bool   `json:"capped"`
-	DryRun            bool   `json:"dry_run"`
+	// Capped means work remains but this result has no continuation cursor. Re-run
+	// the same incoming observation cursor with a higher applicable cap.
+	Capped bool `json:"capped"`
+	DryRun bool `json:"dry_run"`
 
 	// Semantic counters — populated only when ScanOptions.Semantic is true.
 	// Zero-value is safe for existing JSON consumers.
@@ -175,6 +192,10 @@ type ScanOptions struct {
 	Project string
 	// Since filters observations to created_at >= Since. Zero value means no filter.
 	Since time.Time
+	// Limit caps this scan page. Zero uses DefaultScanLimit.
+	Limit int
+	// Cursor resumes after this observation ID. Zero starts from the first row.
+	Cursor int64
 	// Apply controls whether new relation rows are inserted.
 	// When false (dry-run, default), candidates are reported but not written.
 	Apply bool
@@ -238,7 +259,7 @@ type Candidate struct {
 	Type string
 	// TopicKey is the candidate's topic_key (may be nil).
 	TopicKey *string
-	// Score is the FTS5 BM25 rank (negative; closer to 0 = better match).
+	// Score is the FTS5 BM25 rank; lower values are better matches.
 	Score float64
 	// JudgmentID is the sync_id of the pending memory_relations row created
 	// for this (source, candidate) pair.
@@ -330,16 +351,14 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 	if limit <= 0 {
 		limit = 3
 	}
-	// BM25Floor uses pointer semantics: nil means "use the default (-2.0)".
-	// An explicit pointer value (including 0.0) is used as-is.
-	floor := -2.0
-	if opts.BM25Floor != nil {
-		floor = *opts.BM25Floor
+	query, threshold, err := candidateRankQuery(opts)
+	if err != nil {
+		return nil, fmt.Errorf("FindCandidates: %w", err)
 	}
 
 	// Get the saved observation to build the FTS query and for project/scope filtering.
 	var title, project, scope string
-	err := s.db.QueryRow(
+	err = s.db.QueryRow(
 		`SELECT title, ifnull(project,''), scope FROM observations WHERE id = ?`, savedID,
 	).Scan(&title, &project, &scope)
 	if err == sql.ErrNoRows {
@@ -362,9 +381,8 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 		return nil, nil
 	}
 
-	// FTS5 query: same project, same scope, exclude just-saved row, exclude soft-deleted.
-	// BM25 floor filtering is done in Go after scanning.
-	rows, err := s.db.Query(findCandidatesFTSQuery, ftsQuery, savedID, project, scope, limit*3) // fetch extra rows to allow floor filtering
+	// Apply the rank predicate in SQL before ordering and limiting.
+	rows, err := s.db.Query(query, ftsQuery, savedID, project, scope, threshold, limit)
 	if err != nil {
 		return nil, fmt.Errorf("FindCandidates: FTS5 query: %w", err)
 	}
@@ -386,15 +404,7 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 			}
 			return nil, fmt.Errorf("FindCandidates: scan: %w", err)
 		}
-		// Apply BM25 floor filter. BM25 scores are negative; closer to 0 = better.
-		// We only include rows whose score >= floor (e.g., -1.5 >= -2.0).
-		if rc.score < floor {
-			continue
-		}
 		raw = append(raw, rc)
-		if len(raw) >= limit {
-			break
-		}
 	}
 	if err := rows.Err(); err != nil {
 		if closeErr := rows.Close(); closeErr != nil {
@@ -746,7 +756,7 @@ func (s *Store) JudgeBySemantic(p JudgeBySemanticParams) (string, error) {
 	if !isValidRelationVerb(p.Relation) {
 		return "", fmt.Errorf("JudgeBySemantic: invalid relation verb %q — must be one of: related, compatible, scoped, conflicts_with, supersedes, not_conflict", p.Relation)
 	}
-	if p.Confidence < 0.0 || p.Confidence > 1.0 {
+	if !isValidConfidence(p.Confidence) {
 		return "", fmt.Errorf("JudgeBySemantic: confidence %v is out of range [0.0, 1.0]", p.Confidence)
 	}
 
@@ -1062,9 +1072,34 @@ const findCandidatesFTSQuery = `
 	  AND o.deleted_at IS NULL
 	  AND ifnull(o.project,'') = ifnull(?,'')
 	  AND o.scope = ?
+	  AND fts.rank %s ?
 	ORDER BY fts.rank
 	LIMIT ?
 `
+
+func candidateRankQuery(opts CandidateOptions) (string, float64, error) {
+	if opts.BM25MaxRank != nil && opts.BM25Floor != nil {
+		return "", 0, fmt.Errorf("BM25MaxRank and deprecated BM25Floor cannot both be set")
+	}
+	if opts.BM25Floor != nil {
+		if !validBM25Rank(*opts.BM25Floor) {
+			return "", 0, fmt.Errorf("BM25Floor must be finite")
+		}
+		return fmt.Sprintf(findCandidatesFTSQuery, ">="), *opts.BM25Floor, nil
+	}
+	maxRank := 0.0
+	if opts.BM25MaxRank != nil {
+		maxRank = *opts.BM25MaxRank
+	}
+	if !validBM25Rank(maxRank) {
+		return "", 0, fmt.Errorf("BM25MaxRank must be finite")
+	}
+	return fmt.Sprintf(findCandidatesFTSQuery, "<="), maxRank, nil
+}
+
+func validBM25Rank(rank float64) bool {
+	return !math.IsNaN(rank) && !math.IsInf(rank, 0)
+}
 
 // sanitizeFTSCandidates builds an OR-based FTS5 query from a title so that
 // FindCandidates returns documents with ANY term overlap (not all terms).
@@ -1080,7 +1115,20 @@ func sanitizeFTSCandidates(title string) string {
 	for _, w := range words {
 		w = strings.Trim(w, `"`)
 		if w != "" {
-			quoted = append(quoted, `"`+w+`"`)
+			var escaped strings.Builder
+			for i := 0; i < len(w); i++ {
+				if w[i] == '"' {
+					// FTS5 escapes a literal quote by doubling it. Preserve an
+					// already escaped pair so callers do not get double escaped.
+					escaped.WriteString(`""`)
+					if i+1 < len(w) && w[i+1] == '"' {
+						i++
+					}
+					continue
+				}
+				escaped.WriteByte(w[i])
+			}
+			quoted = append(quoted, `"`+escaped.String()+`"`)
 		}
 	}
 	return strings.Join(quoted, " OR ")
@@ -1256,19 +1304,39 @@ func (s *Store) GetRelationStats(project string) (RelationStats, error) {
 
 // ─── Phase 3: ScanProject ─────────────────────────────────────────────────────
 
-// ScanProject walks all observations in the given project (filtered by Since)
-// and for each observation calls FindCandidates with SkipInsert=true. If Apply
-// is true and below MaxInsert cap, each new candidate pair is inserted as a
+// ScanProject walks one ID-ordered observation page in the given project
+// (filtered by Since) and calls FindCandidates with SkipInsert=true for each row.
+// If Apply is true and below MaxInsert cap, each new candidate pair is inserted as a
 // pending relation (after a pre-check to skip already-related pairs).
 //
 // Phase 4 extension: when ScanOptions.Semantic is true, after the FTS5 candidate
-// collection a bounded worker pool calls Runner.Compare on each pair and persists
-// non-"not_conflict" verdicts via JudgeBySemantic. Semantic=false (zero value)
+// collection a bounded worker pool calls Runner.Compare on each pair. Applied
+// scans persist non-"not_conflict" verdicts via JudgeBySemantic, while dry-runs
+// report their semantic results without persistence. Semantic=false (zero value)
 // preserves Phase 3 behaviour exactly.
 //
-// Returns a ScanResult with counts of inspected observations, candidates found,
-// already-related pairs skipped, relations inserted, and whether the cap was hit.
+// Returns a ScanResult with counts, a continuation cursor when another page
+// remains, and whether an insert or semantic cap was hit.
 func (s *Store) ScanProject(opts ScanOptions) (ScanResult, error) {
+	return s.scanProject(opts, false)
+}
+
+func (s *Store) ScanAllProjects(opts ScanOptions) (ScanResult, error) {
+	return s.scanProject(opts, true)
+}
+
+func (s *Store) scanProject(opts ScanOptions, allProjects bool) (ScanResult, error) {
+	limit := opts.Limit
+	if limit == 0 {
+		limit = DefaultScanLimit
+	}
+	if limit < 0 || limit > DefaultScanLimit {
+		return ScanResult{}, fmt.Errorf("ScanProject: limit must be between 1 and %d", DefaultScanLimit)
+	}
+	if opts.Cursor < 0 {
+		return ScanResult{}, fmt.Errorf("ScanProject: cursor must be non-negative")
+	}
+
 	// ── Semantic flag validation (Phase 4) ────────────────────────────────────
 	if opts.Semantic {
 		if opts.Runner == nil {
@@ -1301,19 +1369,23 @@ func (s *Store) ScanProject(opts ScanOptions) (ScanResult, error) {
 		DryRun:  !opts.Apply,
 	}
 
-	// Walk observations in the project.
+	// Load one ID-ordered page and one sentinel row before running candidate queries.
 	obsQuery := `
 		SELECT id, ifnull(sync_id,''), scope
 		FROM observations
-		WHERE ifnull(project,'') = ?
-		  AND deleted_at IS NULL
+		WHERE deleted_at IS NULL
 	`
-	var obsArgs []any
-	obsArgs = append(obsArgs, opts.Project)
+	obsArgs := []any{}
+	if !allProjects {
+		obsQuery += ` AND ifnull(project,'') = ?`
+		obsArgs = append(obsArgs, opts.Project)
+	}
 	if !opts.Since.IsZero() {
 		obsQuery += ` AND created_at >= ?`
 		obsArgs = append(obsArgs, opts.Since.UTC().Format("2006-01-02T15:04:05Z"))
 	}
+	obsQuery += ` AND id > ? ORDER BY id LIMIT ?`
+	obsArgs = append(obsArgs, opts.Cursor, limit+1)
 
 	obsRows, err := s.db.Query(obsQuery, obsArgs...)
 	if err != nil {
@@ -1325,7 +1397,7 @@ func (s *Store) ScanProject(opts ScanOptions) (ScanResult, error) {
 		syncID string
 		scope  string
 	}
-	var observations []obsRow
+	observations := make([]obsRow, 0, limit+1)
 	for obsRows.Next() {
 		var o obsRow
 		if err := obsRows.Scan(&o.id, &o.syncID, &o.scope); err != nil {
@@ -1334,9 +1406,15 @@ func (s *Store) ScanProject(opts ScanOptions) (ScanResult, error) {
 		}
 		observations = append(observations, o)
 	}
-	obsRows.Close()
+	if err := obsRows.Close(); err != nil {
+		return result, fmt.Errorf("ScanProject: close obs rows: %w", err)
+	}
 	if err := obsRows.Err(); err != nil {
 		return result, fmt.Errorf("ScanProject: obs rows error: %w", err)
+	}
+	hasMoreObservations := len(observations) > limit
+	if hasMoreObservations {
+		observations = observations[:limit]
 	}
 
 	// ── Phase 4: collect all (source, candidate) pairs for semantic scan ──────
@@ -1346,13 +1424,22 @@ func (s *Store) ScanProject(opts ScanOptions) (ScanResult, error) {
 		candidateSnippet ObservationSnippet
 	}
 	var semanticPairs []candidatePair
+	hasUnprocessedWork := func(candidateIndex, candidateCount int) bool {
+		return candidateIndex+1 < candidateCount
+	}
 
+scan:
 	for _, obs := range observations {
 		result.Inspected++
+		result.RankedQueries++
 
 		// Find candidates without inserting (SkipInsert=true per design §5).
+		candidateProject := opts.Project
+		if allProjects {
+			candidateProject = ""
+		}
 		candidates, err := s.FindCandidates(obs.id, CandidateOptions{
-			Project:    opts.Project,
+			Project:    candidateProject,
 			Scope:      obs.scope,
 			Limit:      10,
 			SkipInsert: true,
@@ -1364,6 +1451,11 @@ func (s *Store) ScanProject(opts ScanOptions) (ScanResult, error) {
 		result.CandidatesFound += len(candidates)
 
 		if opts.Semantic {
+			if len(semanticPairs) >= maxSemantic && len(candidates) > 0 {
+				result.Capped = true
+				break scan
+			}
+
 			// In semantic mode, accumulate pairs for the worker pool.
 			// We need the full content for prompt building — fetch from DB.
 			var srcTitle, srcType, srcContent string
@@ -1378,12 +1470,7 @@ func (s *Store) ScanProject(opts ScanOptions) (ScanResult, error) {
 				Content: srcContent,
 			}
 
-			for _, c := range candidates {
-				if len(semanticPairs) >= maxSemantic {
-					// Cap reached — stop adding pairs.
-					result.Capped = true
-					break
-				}
+			for candidateIndex, c := range candidates {
 				var candTitle, candType, candContent string
 				_ = s.db.QueryRow(
 					`SELECT title, type, ifnull(content,'') FROM observations WHERE sync_id = ?`, c.SyncID,
@@ -1398,10 +1485,10 @@ func (s *Store) ScanProject(opts ScanOptions) (ScanResult, error) {
 						Content: candContent,
 					},
 				})
-			}
-			if result.Capped {
-				log.Printf("[store] ScanProject: MaxSemantic cap (%d) reached; some pairs skipped", maxSemantic)
-				break
+				if len(semanticPairs) == maxSemantic && hasUnprocessedWork(candidateIndex, len(candidates)) {
+					result.Capped = true
+					break scan
+				}
 			}
 			continue
 		}
@@ -1410,13 +1497,12 @@ func (s *Store) ScanProject(opts ScanOptions) (ScanResult, error) {
 		if !opts.Apply {
 			continue
 		}
+		if result.RelationsInserted >= maxInsert && len(candidates) > 0 {
+			result.Capped = true
+			break scan
+		}
 
-		for _, c := range candidates {
-			if result.RelationsInserted >= maxInsert {
-				result.Capped = true
-				return result, nil
-			}
-
+		for candidateIndex, c := range candidates {
 			// Pre-check: skip pairs that already have any relation row in either direction.
 			var exists int
 			if err := s.db.QueryRow(
@@ -1443,12 +1529,16 @@ func (s *Store) ScanProject(opts ScanOptions) (ScanResult, error) {
 				continue
 			}
 			result.RelationsInserted++
+			if result.RelationsInserted == maxInsert && hasUnprocessedWork(candidateIndex, len(candidates)) {
+				result.Capped = true
+				break scan
+			}
 		}
+	}
 
-		if result.RelationsInserted >= maxInsert {
-			result.Capped = true
-			return result, nil
-		}
+	if !result.Capped && hasMoreObservations && len(observations) > 0 {
+		next := observations[len(observations)-1].id
+		result.NextCursor = &next
 	}
 
 	// ── Phase 4: semantic worker pool ─────────────────────────────────────────
@@ -1503,14 +1593,28 @@ func (s *Store) ScanProject(opts ScanOptions) (ScanResult, error) {
 						return
 					}
 
-					if verdict.Relation == RelationNotConflict {
+					if verdict.Relation == RelationNotConflict && isValidConfidence(verdict.Confidence) {
 						mu.Lock()
 						result.SemanticSkipped++
 						mu.Unlock()
 						return
 					}
 
-					// Persist non-not_conflict verdict.
+					// Dry-runs evaluate and count valid verdicts without persistence.
+					// Invalid verdicts still flow through JudgeBySemantic so existing
+					// semantic error behavior remains unchanged.
+					if !opts.Apply &&
+						pair.sourceSnippet.SyncID != "" &&
+						pair.candidateSnippet.SyncID != "" &&
+						isValidRelationVerb(verdict.Relation) &&
+						isValidConfidence(verdict.Confidence) {
+						mu.Lock()
+						result.SemanticJudged++
+						mu.Unlock()
+						return
+					}
+
+					// Validate and persist non-skipped verdict.
 					_, judgeErr := s.JudgeBySemantic(JudgeBySemanticParams{
 						SourceID:   pair.sourceSnippet.SyncID,
 						TargetID:   pair.candidateSnippet.SyncID,

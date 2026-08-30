@@ -21,6 +21,7 @@ type fakeLocalStore struct {
 	mutations         []store.SyncMutation
 	syncState         *store.SyncState
 	leaseOwner        string
+	leaseCalls        int
 	pushErr           error
 	pullErr           error
 	failureMessage    string
@@ -95,6 +96,7 @@ func (s *fakeLocalStore) AckSyncMutationSeqs(_ string, seqs []int64) error {
 func (s *fakeLocalStore) AcquireSyncLease(_, owner string, ttl time.Duration, now time.Time) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.leaseCalls++
 	if !s.acquireGranted {
 		return false, nil
 	}
@@ -856,6 +858,164 @@ func TestManagerBackoffCeiling(t *testing.T) {
 	d := mgr.computeBackoff(cfg.MaxConsecutiveFailures)
 	if d > cfg.MaxBackoff {
 		t.Fatalf("backoff exceeds ceiling: %v > %v", d, cfg.MaxBackoff)
+	}
+}
+
+func TestManagerCycleAtFailureCeilingWithActiveBackoffSkipsWork(t *testing.T) {
+	ls := newFakeLocalStore()
+	tr := newFakeTransport()
+	cfg := DefaultConfig()
+	cfg.MaxConsecutiveFailures = 3
+	mgr := New(ls, tr, cfg)
+	backoffUntil := time.Now().Add(time.Minute)
+
+	mgr.mu.Lock()
+	mgr.status.Phase = PhasePushFailed
+	mgr.status.ConsecutiveFailures = cfg.MaxConsecutiveFailures
+	mgr.status.BackoffUntil = &backoffUntil
+	mgr.mu.Unlock()
+
+	mgr.cycle(context.Background())
+
+	ls.mu.Lock()
+	leaseCalls := ls.leaseCalls
+	ls.mu.Unlock()
+	if leaseCalls != 0 {
+		t.Fatalf("expected no lease work during active ceiling backoff, got %d attempts", leaseCalls)
+	}
+	if got := atomic.LoadInt32(&tr.pushCalls); got != 0 {
+		t.Fatalf("expected no push work during active ceiling backoff, got %d calls", got)
+	}
+	if got := atomic.LoadInt32(&tr.pullCalls); got != 0 {
+		t.Fatalf("expected no pull work during active ceiling backoff, got %d calls", got)
+	}
+	if got := mgr.Status().Phase; got != PhaseBackoff {
+		t.Fatalf("expected PhaseBackoff during active ceiling backoff, got %q", got)
+	}
+}
+
+func TestManagerCycleAtFailureCeilingAfterBackoffExpiryRecovers(t *testing.T) {
+	ls := newFakeLocalStore()
+	ls.mutations = []store.SyncMutation{{Seq: 1, Entity: "obs", EntityKey: "k1", Project: "proj-a"}}
+	tr := newFakeTransport()
+	tr.pushResult = &PushMutationsResult{AcceptedSeqs: []int64{1}}
+	cfg := DefaultConfig()
+	cfg.MaxConsecutiveFailures = 3
+	mgr := New(ls, tr, cfg)
+	backoffUntil := time.Now().Add(-time.Second)
+
+	mgr.mu.Lock()
+	mgr.status.Phase = PhasePushFailed
+	mgr.status.ConsecutiveFailures = cfg.MaxConsecutiveFailures
+	mgr.status.BackoffUntil = &backoffUntil
+	mgr.mu.Unlock()
+
+	mgr.cycle(context.Background())
+
+	ls.mu.Lock()
+	leaseCalls := ls.leaseCalls
+	healthyCalls := ls.healthyCalls
+	ls.mu.Unlock()
+	if leaseCalls != 1 {
+		t.Fatalf("expected one lease attempt after backoff expiry, got %d", leaseCalls)
+	}
+	if got := atomic.LoadInt32(&tr.pushCalls); got != 1 {
+		t.Fatalf("expected one push after backoff expiry, got %d calls", got)
+	}
+	if got := atomic.LoadInt32(&tr.pullCalls); got != 1 {
+		t.Fatalf("expected one pull after backoff expiry, got %d calls", got)
+	}
+	if healthyCalls != 1 {
+		t.Fatalf("expected healthy state to be persisted once, got %d calls", healthyCalls)
+	}
+	st := mgr.Status()
+	if st.Phase != PhaseHealthy || st.ConsecutiveFailures != 0 || st.BackoffUntil != nil {
+		t.Fatalf("expected healthy reset after backoff expiry, got %+v", st)
+	}
+}
+
+func TestManagerCycleAfterBackoffExpirySchedulesAnotherBackoff(t *testing.T) {
+	ls := newFakeLocalStore()
+	ls.mutations = []store.SyncMutation{{Seq: 1, Entity: "obs", EntityKey: "k1", Project: "proj-a"}}
+	tr := newFakeTransport()
+	tr.pushErr = errors.New("transport down")
+	cfg := DefaultConfig()
+	cfg.MaxConsecutiveFailures = 3
+	cfg.BaseBackoff = time.Second
+	cfg.MaxBackoff = 5 * time.Second
+	mgr := New(ls, tr, cfg)
+	backoffUntil := time.Now().Add(-time.Second)
+
+	mgr.mu.Lock()
+	mgr.status.Phase = PhasePushFailed
+	mgr.status.ConsecutiveFailures = cfg.MaxConsecutiveFailures
+	mgr.status.BackoffUntil = &backoffUntil
+	mgr.mu.Unlock()
+
+	mgr.cycle(context.Background())
+
+	if got := atomic.LoadInt32(&tr.pushCalls); got != 1 {
+		t.Fatalf("expected one push after backoff expiry, got %d calls", got)
+	}
+	st := mgr.Status()
+	if st.Phase != PhasePushFailed || st.ConsecutiveFailures != cfg.MaxConsecutiveFailures+1 || st.BackoffUntil == nil {
+		t.Fatalf("expected another failed backoff after expiry, got %+v", st)
+	}
+	remaining := time.Until(*st.BackoffUntil)
+	if remaining <= 0 || remaining > cfg.MaxBackoff {
+		t.Fatalf("expected bounded future backoff, got remaining duration %v", remaining)
+	}
+}
+
+func TestManagerBackoffSaturatesBeforeDurationConversion(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.BaseBackoff = time.Second
+	cfg.MaxBackoff = 5 * time.Minute
+	mgr := &Manager{cfg: cfg}
+
+	for _, failures := range []int{34, 35, 1000} {
+		t.Run(fmt.Sprintf("failures=%d", failures), func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("computeBackoff panicked: %v", r)
+				}
+			}()
+
+			d := mgr.computeBackoff(failures)
+			if d < cfg.BaseBackoff/2 || d > cfg.MaxBackoff {
+				t.Fatalf("backoff %v outside configured bounds [%v, %v]", d, cfg.BaseBackoff/2, cfg.MaxBackoff)
+			}
+		})
+	}
+}
+
+func TestManagerBackoffSaturatesPositiveJitterBeforeDurationOverflow(t *testing.T) {
+	const maxDuration = time.Duration(1<<63 - 1)
+
+	for _, tc := range []struct {
+		name   string
+		base   time.Duration
+		jitter time.Duration
+		want   time.Duration
+	}{
+		{
+			name:   "saturates overflowing positive jitter",
+			base:   maxDuration - 1,
+			jitter: 2,
+			want:   maxDuration,
+		},
+		{
+			name:   "adds positive jitter below ceiling",
+			base:   maxDuration - 2,
+			jitter: 1,
+			want:   maxDuration - 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := saturatingAddBackoffJitter(tc.base, tc.jitter, maxDuration); got != tc.want {
+				t.Fatalf("saturatingAddBackoffJitter(%v, %v, %v) = %v, want %v", tc.base, tc.jitter, maxDuration, got, tc.want)
+			}
+		})
 	}
 }
 

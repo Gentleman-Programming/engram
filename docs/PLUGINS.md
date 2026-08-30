@@ -43,6 +43,7 @@ The plugin auto-starts the HTTP server if it's not already running — no manual
 
 The plugin:
 - **Auto-starts** the engram server if not running
+- **Resolves project identity** through the server's canonical resolver, so configured projects and repository worktrees keep their shared project identity
 - **Auto-imports** git-synced memories from `.engram/manifest.json` if present in the project
 - **Creates sessions** on-demand via `ensureSession()` (resilient to restarts/reconnects)
 - **Injects the Memory Protocol** into the agent's system prompt via `chat.system.transform` — strict rules for when to save, when to search, and a mandatory session close protocol. The protocol is concatenated into the existing system message (not pushed as a separate one), ensuring compatibility with models that only accept a single system block (Qwen, Mistral/Ministral via llama.cpp, etc.)
@@ -60,7 +61,7 @@ The plugin injects a strict protocol into every agent message:
 - **WHEN TO SAVE**: Mandatory after bugfixes, decisions, discoveries, config changes, patterns, preferences
 - **WHEN TO SEARCH**: Reactive (user says "remember"/"recordar") + proactive (starting work that might overlap past sessions)
 - **SESSION CLOSE**: Mandatory `mem_session_summary` before ending — "This is NOT optional. If you skip this, the next session starts blind."
-- **AFTER COMPACTION**: Immediately call `mem_context` to recover state
+- **AFTER COMPACTION**: Persist the injected session-only compaction context before requesting any additional project context
 
 ### Three Layers of Memory Resilience
 
@@ -70,7 +71,7 @@ The OpenCode plugin uses a defense-in-depth strategy to ensure memories survive 
 |-------|-----------|---------------------|
 | **System Prompt** | `MEMORY_INSTRUCTIONS` concatenated into existing system prompt via `chat.system.transform` | Always present |
 | **Compaction Hook** | Auto-saves checkpoint + injects context + reminds compressor | Fires during compaction |
-| **Agent Config** | "After compaction, call `mem_context`" in agent prompt | Always present |
+| **Agent Config** | "First persist the injected summary with `mem_session_summary`; request `mem_context` only if additional context is needed" | Always present |
 
 ---
 

@@ -213,7 +213,8 @@ engram-beta obsidian-export --vault <path> [flags]
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
 | `--vault <path>` | ✅ | — | Path to your Obsidian vault root. The exporter writes inside `{vault}/engram/` only. |
-| `--project <name>` | No | (all) | Export only observations from this project. |
+| `--project <name>` | No | current project | Export only observations from this known project. |
+| `--all` | No | false | Explicitly export observations from every project. |
 | `--limit <n>` | No | 0 (no limit) | Maximum observations per source query. |
 | `--since <date>` | No | (state file) | Export only observations updated after this date. Format: RFC3339 (`2026-04-06T14:30:00Z`) or `YYYY-MM-DD`. |
 | `--force` | No | false | Re-export everything, ignoring the incremental state file. |
@@ -224,8 +225,11 @@ engram-beta obsidian-export --vault <path> [flags]
 ### Examples
 
 ```bash
-# Single export of everything
+# Single export of the current project
 engram-beta obsidian-export --vault ~/Obsidian/engram
+
+# Explicitly export every project
+engram-beta obsidian-export --vault ~/Obsidian/engram --all
 
 # Export only the engram project
 engram-beta obsidian-export --vault ~/Obsidian/engram --project engram

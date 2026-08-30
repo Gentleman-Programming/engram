@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
@@ -761,7 +762,11 @@ func (cs *CloudStore) ListProjectGrants(ctx context.Context, principalID string)
 	if cs == nil || cs.db == nil {
 		return nil, fmt.Errorf("cloudstore: not initialized")
 	}
-	rows, err := cs.db.QueryContext(ctx, `SELECT principal_id::text, project, COALESCE(granted_by_principal_id::text, ''), created_at FROM cloud_project_grants WHERE principal_id = $1 ORDER BY project ASC`, strings.TrimSpace(principalID))
+	numericPrincipalID, err := parseCloudPrincipalID(principalID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := cs.db.QueryContext(ctx, `SELECT principal_id::text, project, COALESCE(granted_by_principal_id::text, ''), created_at FROM cloud_project_grants WHERE principal_id = $1 ORDER BY project ASC`, numericPrincipalID)
 	if err != nil {
 		return nil, fmt.Errorf("cloudstore: list project grants: %w", err)
 	}
@@ -784,8 +789,12 @@ func (cs *CloudStore) RevokeProjectGrant(ctx context.Context, principalID, proje
 	if cs == nil || cs.db == nil {
 		return fmt.Errorf("cloudstore: not initialized")
 	}
+	numericPrincipalID, err := parseCloudPrincipalID(principalID)
+	if err != nil {
+		return err
+	}
 	normalized := normalizeCloudProjectGrant(project)
-	res, err := cs.db.ExecContext(ctx, `DELETE FROM cloud_project_grants WHERE principal_id = $1 AND project = $2`, strings.TrimSpace(principalID), normalized)
+	res, err := cs.db.ExecContext(ctx, `DELETE FROM cloud_project_grants WHERE principal_id = $1 AND project = $2`, numericPrincipalID, normalized)
 	if err != nil {
 		return fmt.Errorf("cloudstore: revoke project grant: %w", err)
 	}
@@ -915,6 +924,14 @@ func scanPrincipalToken(scanner interface{ Scan(dest ...any) error }) (Principal
 		return PrincipalToken{}, err
 	}
 	return token, nil
+}
+
+func parseCloudPrincipalID(principalID string) (int64, error) {
+	numericPrincipalID, err := strconv.ParseInt(strings.TrimSpace(principalID), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("cloudstore: parse principal id: %w", err)
+	}
+	return numericPrincipalID, nil
 }
 
 func scanProjectGrant(scanner interface{ Scan(dest ...any) error }) (ProjectGrant, error) {

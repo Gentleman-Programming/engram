@@ -110,6 +110,25 @@ func TestFindCandidates_HappyPath(t *testing.T) {
 	}
 }
 
+func TestFindCandidates_EscapesInteriorQuotes(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, _ = addTestObs(t, s, `hello"world candidate`, "decision", "testproject", "project")
+	savedID, _ := addTestObs(t, s, `hello"world source`, "decision", "testproject", "project")
+
+	candidates, err := s.FindCandidates(savedID, CandidateOptions{
+		Project:   "testproject",
+		Scope:     "project",
+		Limit:     3,
+		BM25Floor: ptrFloat64(-10.0),
+	})
+	if err != nil {
+		t.Fatalf("FindCandidates: %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("expected 1 candidate, got %d", len(candidates))
+	}
+}
+
 // TestFindCandidates_EarlyBreakDoesNotSelfBlockWithSingleConnection verifies
 // that FindCandidates closes its FTS rows before follow-up QueryRow/Exec calls.
 // With SetMaxOpenConns(1), leaving rows open after the early-break path can
@@ -1117,7 +1136,7 @@ func TestJudgeRelation_RejectsCrossProject(t *testing.T) {
 }
 
 // C.1e — When the source observation is missing, JudgeRelation must enqueue a
-// mutation with project='' (empty string, not an error).
+// mutation with project=” (empty string, not an error).
 func TestJudgeRelation_MissingSource_EnqueuesEmptyProject(t *testing.T) {
 	s := setupEnrolledStore(t)
 
@@ -1475,6 +1494,79 @@ func TestScanProject_DryRunNoInsert(t *testing.T) {
 	}
 	if result.Inspected < 1 {
 		t.Errorf("expected Inspected>=1; got %d", result.Inspected)
+	}
+}
+
+func TestScanAllProjectsIncludesEveryProjectWithoutCrossProjectCandidates(t *testing.T) {
+	s := newTestStore(t)
+	for _, project := range []string{"alpha", "beta", ""} {
+		sessionID := "scan-global-" + project
+		seedProject := project
+		if seedProject == "" {
+			sessionID = "scan-global-blank"
+			seedProject = "legacy"
+		}
+		if err := s.CreateSession(sessionID, seedProject, "/tmp/"+sessionID); err != nil {
+			t.Fatalf("CreateSession %q: %v", sessionID, err)
+		}
+		for _, title := range []string{"shared global conflict scan primary", "shared global conflict scan secondary"} {
+			addTestObsSession(t, s, sessionID, title, "decision", seedProject, "project")
+		}
+		if project == "" {
+			if _, err := s.db.Exec(`UPDATE observations SET project = '' WHERE session_id = ?`, sessionID); err != nil {
+				t.Fatalf("clear observation project: %v", err)
+			}
+			if _, err := s.db.Exec(`UPDATE sessions SET project = '' WHERE id = ?`, sessionID); err != nil {
+				t.Fatalf("clear session project: %v", err)
+			}
+		}
+	}
+
+	for _, project := range []string{"alpha", "beta", ""} {
+		result, err := s.ScanProject(ScanOptions{Project: project})
+		if err != nil {
+			t.Fatalf("ScanProject %q: %v", project, err)
+		}
+		if result.Inspected != 2 {
+			t.Fatalf("ScanProject %q inspected %d observations, want 2", project, result.Inspected)
+		}
+	}
+
+	result, err := s.ScanAllProjects(ScanOptions{Apply: true})
+	if err != nil {
+		t.Fatalf("ScanAllProjects: %v", err)
+	}
+	if result.Inspected != 6 || result.RelationsInserted != 3 {
+		t.Fatalf("ScanAllProjects result = %#v, want 6 inspected and 3 relations", result)
+	}
+
+	var crossProjectRelations int
+	if err := s.db.QueryRow(`
+		SELECT COUNT(*)
+		FROM memory_relations r
+		JOIN observations src ON src.sync_id = r.source_id
+		JOIN observations tgt ON tgt.sync_id = r.target_id
+		WHERE ifnull(src.project, '') != ifnull(tgt.project, '')
+	`).Scan(&crossProjectRelations); err != nil {
+		t.Fatalf("count cross-project relations: %v", err)
+	}
+	if crossProjectRelations != 0 {
+		t.Fatalf("ScanAllProjects created %d cross-project relations", crossProjectRelations)
+	}
+	for _, project := range []string{"alpha", "beta", ""} {
+		var relations int
+		if err := s.db.QueryRow(`
+			SELECT COUNT(*)
+			FROM memory_relations r
+			JOIN observations src ON src.sync_id = r.source_id
+			JOIN observations tgt ON tgt.sync_id = r.target_id
+			WHERE ifnull(src.project, '') = ? AND ifnull(tgt.project, '') = ?
+		`, project, project).Scan(&relations); err != nil {
+			t.Fatalf("count relations for project %q: %v", project, err)
+		}
+		if relations != 1 {
+			t.Fatalf("relations for project %q = %d, want 1", project, relations)
+		}
 	}
 }
 
