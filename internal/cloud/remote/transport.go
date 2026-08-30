@@ -268,6 +268,7 @@ type PushMutationsResult struct {
 
 type PulledMutation struct {
 	Seq        int64           `json:"seq"`
+	Project    string          `json:"project"`
 	Entity     string          `json:"entity"`
 	EntityKey  string          `json:"entity_key"`
 	Op         string          `json:"op"`

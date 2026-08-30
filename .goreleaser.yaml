@@ -2,6 +2,9 @@ version: 2
 
 project_name: engram
 
+release:
+  prerelease: auto
+
 before:
   hooks:
     - go mod tidy
@@ -49,6 +52,7 @@ brews:
       owner: Gentleman-Programming
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    skip_upload: auto
     directory: Formula
     name: engram
     homepage: "https://github.com/Gentleman-Programming/engram"

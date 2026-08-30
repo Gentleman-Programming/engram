@@ -39,7 +39,7 @@ function Resolve-EngramProject {
     }
     $project = $projectProperty[0].Value
     $source = $sourceProperty[0].Value
-    $validSources = @('config', 'git_remote', 'git_root', 'git_child', 'dir_basename')
+    $validSources = @('config', 'git_remote', 'git_root', 'git_child', 'dir_basename', 'process_override')
     if ([string]::IsNullOrWhiteSpace($project) -or $validSources -cnotcontains $source -or $null -ne $resolution.PSObject.Properties['error_hint']) {
       return $null
     }

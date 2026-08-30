@@ -149,6 +149,8 @@ func TestRelationSync_PushPull_CrossMachine(t *testing.T) {
 // deferred. Then observations arrive. replayDeferred() succeeds.
 func TestRelationSync_FKMissDeferRetrySuccess(t *testing.T) {
 	s := newTestStore(t)
+	actor := "test-actor"
+	kind := "test"
 	if err := s.CreateSession("ses-g2-a", "proj-g2", "/tmp/g2-a"); err != nil {
 		t.Fatalf("G.2: CreateSession: %v", err)
 	}
@@ -166,6 +168,8 @@ func TestRelationSync_FKMissDeferRetrySuccess(t *testing.T) {
 		TargetID:       missingTargetSyncID,
 		Relation:       RelationSupersedes,
 		JudgmentStatus: JudgmentStatusJudged,
+		MarkedByActor:  &actor,
+		MarkedByKind:   &kind,
 		Project:        "proj-g2",
 		CreatedAt:      "2026-04-26T12:00:00Z",
 		UpdatedAt:      "2026-04-26T12:00:00Z",
@@ -212,6 +216,8 @@ func TestRelationSync_FKMissDeferRetrySuccess(t *testing.T) {
 		TargetID:       arrivedTargetSyncID,
 		Relation:       RelationSupersedes,
 		JudgmentStatus: JudgmentStatusJudged,
+		MarkedByActor:  &actor,
+		MarkedByKind:   &kind,
 		Project:        "proj-g2",
 		CreatedAt:      "2026-04-26T12:00:00Z",
 		UpdatedAt:      "2026-04-26T12:00:00Z",
@@ -249,6 +255,8 @@ func TestRelationSync_FKMissDeferRetrySuccess(t *testing.T) {
 // After 5 retries, apply_status='dead' and the row is no longer attempted.
 func TestRelationSync_RetryCapDead(t *testing.T) {
 	s := newTestStore(t)
+	actor := "test-actor"
+	kind := "test"
 	if err := s.CreateSession("ses-g3", "proj-g3", "/tmp/g3"); err != nil {
 		t.Fatalf("G.3: CreateSession: %v", err)
 	}
@@ -262,6 +270,8 @@ func TestRelationSync_RetryCapDead(t *testing.T) {
 		TargetID:       missingTarget,
 		Relation:       RelationCompatible,
 		JudgmentStatus: JudgmentStatusJudged,
+		MarkedByActor:  &actor,
+		MarkedByKind:   &kind,
 		Project:        "proj-g3",
 		CreatedAt:      "2026-04-26T12:00:00Z",
 		UpdatedAt:      "2026-04-26T12:00:00Z",
