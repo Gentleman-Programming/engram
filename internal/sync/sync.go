@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -108,6 +109,11 @@ type historicalExportState struct {
 	sessionAvailability     map[string]bool
 	observationAvailability map[string]bool
 	activeObservations      map[string]string
+}
+
+type historicalLifecycleChunk struct {
+	id    string
+	chunk ChunkData
 }
 
 func newHistoricalExportState(relevant map[string]struct{}) *historicalExportState {
@@ -1619,10 +1625,21 @@ func (sy *Syncer) exportedHistoricalState(m *Manifest, relevant map[string]struc
 	if m == nil {
 		return state, nil
 	}
+	lifecycleChunks := make([]historicalLifecycleChunk, 0, len(m.Chunks))
+	validateLifecycleChunks := func() error {
+		if err := validateHistoricalSessionLifecycles(lifecycleChunks, state); err != nil {
+			return err
+		}
+		lifecycleChunks = lifecycleChunks[:0]
+		return nil
+	}
 	for _, entry := range m.Chunks {
 		raw, err := sy.transport.ReadChunk(entry.ID)
 		if err != nil {
 			if errors.Is(err, ErrChunkNotFound) {
+				if err := validateLifecycleChunks(); err != nil {
+					return nil, fmt.Errorf("validate historical lifecycle: %w", err)
+				}
 				state.complete = false
 				state.resetAvailability()
 				continue
@@ -1633,9 +1650,10 @@ func (sy *Syncer) exportedHistoricalState(m *Manifest, relevant map[string]struc
 		if err := json.Unmarshal(raw, &chunk); err != nil {
 			return nil, fmt.Errorf("unmarshal chunk %s: %w", entry.ID, err)
 		}
-		if err := validateHistoricalChunk(raw, chunk, state.sessionAvailability, state.observationAvailability, state.activeObservations); err != nil {
+		if err := validateHistoricalChunk(raw, chunk); err != nil {
 			return nil, fmt.Errorf("validate chunk %s: %w", entry.ID, err)
 		}
+		lifecycleChunks = append(lifecycleChunks, historicalLifecycleChunk{id: entry.ID, chunk: chunk})
 		for _, session := range chunk.Sessions {
 			markHistoricalIdentity(state.identities, relevant, store.SyncEntitySession, session.ID)
 		}
@@ -1653,10 +1671,13 @@ func (sy *Syncer) exportedHistoricalState(m *Manifest, relevant map[string]struc
 			markHistoricalIdentity(state.identities, relevant, mutation.Entity, mutation.EntityKey)
 		}
 	}
+	if err := validateLifecycleChunks(); err != nil {
+		return nil, fmt.Errorf("validate historical lifecycle: %w", err)
+	}
 	return state, nil
 }
 
-func validateHistoricalChunk(raw []byte, chunk ChunkData, sessionAvailability, observationAvailability map[string]bool, activeObservations map[string]string) error {
+func validateHistoricalChunk(raw []byte, chunk ChunkData) error {
 	var document map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &document); err != nil {
 		return err
@@ -1682,7 +1703,7 @@ func validateHistoricalChunk(raw []byte, chunk ChunkData, sessionAvailability, o
 	if err := validateHistoricalDirectRows(chunk); err != nil {
 		return err
 	}
-	return validateHistoricalSessionLifecycle(chunk, sessionAvailability, observationAvailability, activeObservations)
+	return nil
 }
 
 // validateHistoricalDirectRows checks only the identities used to account for
@@ -1703,6 +1724,35 @@ func validateHistoricalDirectRows(chunk ChunkData) error {
 		if strings.TrimSpace(prompt.SyncID) != "" && strings.TrimSpace(prompt.SessionID) == "" {
 			return fmt.Errorf("prompts[%d].session_id is required", i)
 		}
+	}
+	return nil
+}
+
+// validateHistoricalSessionLifecycles retries chunks temporarily blocked by lifecycle dependencies, matching the importer's replay passes.
+func validateHistoricalSessionLifecycles(chunks []historicalLifecycleChunk, state *historicalExportState) error {
+	pending := chunks
+	var lastErr error
+	for len(pending) > 0 {
+		progress := false
+		nextPending := make([]historicalLifecycleChunk, 0, len(pending))
+		for _, historical := range pending {
+			sessions := maps.Clone(state.sessionAvailability)
+			observations := maps.Clone(state.observationAvailability)
+			active := maps.Clone(state.activeObservations)
+			if err := validateHistoricalSessionLifecycle(historical.chunk, sessions, observations, active); err != nil {
+				lastErr = fmt.Errorf("chunk %s: %w", historical.id, err)
+				nextPending = append(nextPending, historical)
+				continue
+			}
+			state.sessionAvailability = sessions
+			state.observationAvailability = observations
+			state.activeObservations = active
+			progress = true
+		}
+		if !progress {
+			return lastErr
+		}
+		pending = nextPending
 	}
 	return nil
 }

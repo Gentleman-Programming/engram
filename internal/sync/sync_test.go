@@ -1597,6 +1597,58 @@ func TestLocalChunkExportReconcilesCanonicalHistoricalState(t *testing.T) {
 		}
 	})
 
+	t.Run("replays lifecycle chunks deferred by dependencies", func(t *testing.T) {
+		tests := []struct {
+			name   string
+			chunks func(*store.ExportData) []ChunkData
+		}{
+			{
+				name: "session delete followed by observation hard delete",
+				chunks: func(data *store.ExportData) []ChunkData {
+					return []ChunkData{
+						{Sessions: data.Sessions},
+						{Observations: data.Observations},
+						{Mutations: []store.SyncMutation{{Entity: store.SyncEntitySession, EntityKey: data.Sessions[0].ID, Op: store.SyncOpDelete, Payload: fmt.Sprintf(`{"id":%q,"project":"proj-a","deleted_at":"2025-06-01T00:00:00Z"}`, data.Sessions[0].ID)}}},
+						{Mutations: []store.SyncMutation{{Entity: store.SyncEntityObservation, EntityKey: data.Observations[0].SyncID, Op: store.SyncOpDelete, Payload: fmt.Sprintf(`{"sync_id":%q,"deleted":true,"hard_delete":true}`, data.Observations[0].SyncID)}}},
+					}
+				},
+			},
+			{
+				name: "dependent after session delete followed by session re-upsert",
+				chunks: func(data *store.ExportData) []ChunkData {
+					return []ChunkData{
+						{Sessions: data.Sessions},
+						{Mutations: []store.SyncMutation{{Entity: store.SyncEntitySession, EntityKey: data.Sessions[0].ID, Op: store.SyncOpDelete, Payload: fmt.Sprintf(`{"id":%q,"project":"proj-a","deleted_at":"2025-06-01T00:00:00Z"}`, data.Sessions[0].ID)}}},
+						{Observations: data.Observations},
+						{Sessions: data.Sessions},
+					}
+				},
+			},
+		}
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				s, data := seedOldLocalExportData(t)
+				syncDir := filepath.Join(t.TempDir(), ".engram")
+				chunks := tc.chunks(data)
+				chunks[0].Prompts = data.Prompts
+				entries := make([]ChunkEntry, len(chunks))
+				for i, chunk := range chunks {
+					id := fmt.Sprintf("history-%d", i)
+					writeLocalChunkFile(t, syncDir, id, chunk)
+					entries[i] = ChunkEntry{ID: id, CreatedAt: fmt.Sprintf("2025-06-01T00:0%d:00Z", i)}
+				}
+				writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: entries})
+				result, err := New(s, syncDir).Export("alice", "proj-a")
+				if err != nil {
+					t.Fatalf("replayable historical lifecycle must export: %v", err)
+				}
+				if !result.IsEmpty {
+					t.Fatalf("replayable historical lifecycle must remain accounted for, got %+v", result)
+				}
+			})
+		}
+	})
+
 	t.Run("deleted historical observation is not a relation endpoint", func(t *testing.T) {
 		s := newTestStore(t)
 		syncDir := filepath.Join(t.TempDir(), ".engram")
