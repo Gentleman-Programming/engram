@@ -250,7 +250,10 @@ func TestApplyPulledChunk_MarksMalformedRelationDeadAndContinues(t *testing.T) {
 		t.Fatalf("expected valid relation to apply, got %d rows", got)
 	}
 	var status string
-	if err := s.db.QueryRow(`SELECT apply_status FROM sync_apply_deferred WHERE sync_id = ?`, deadID).Scan(&status); err != nil {
+	if err := s.db.QueryRow(
+		`SELECT apply_status FROM sync_apply_deferred WHERE sync_id = ?`,
+		deadRelationRowKey(DefaultSyncTargetKey, mutations[0]),
+	).Scan(&status); err != nil {
 		t.Fatalf("read dead relation status: %v", err)
 	}
 	if status != "dead" {
@@ -315,7 +318,7 @@ func TestApplyPulledChunk_MarksInvalidRelationContractsDead(t *testing.T) {
 			if err := s.ApplyPulledChunk(DefaultSyncTargetKey, "chunk-"+tt.mutation.EntityKey, []SyncMutation{tt.mutation}); err != nil {
 				t.Fatalf("ApplyPulledChunk: %v", err)
 			}
-			status, _ := getDeferredRow(t, s, tt.mutation.EntityKey)
+			status, _ := getDeferredRow(t, s, deadRelationRowKey(DefaultSyncTargetKey, tt.mutation))
 			if status != "dead" {
 				t.Fatalf("apply_status: want dead, got %q", status)
 			}
@@ -437,6 +440,14 @@ func insertDeferredRow(t *testing.T, s *Store, syncID, entity, payload string, r
 	`, syncID, entity, payload, retryCount, applyStatus); err != nil {
 		t.Fatalf("insertDeferredRow: %v", err)
 	}
+}
+
+// deadRelationRowKey returns the sync_apply_deferred key a discarded relation
+// mutation is recorded under. Dead rows are keyed on the mutation's own material
+// rather than on its entity_key, so tests resolve the key the same way the store
+// does instead of restating the derivation.
+func deadRelationRowKey(targetKey string, mutation SyncMutation) string {
+	return relationApplyFailureSyncID("dead", normalizeSyncTargetKey(targetKey), mutation)
 }
 
 // getDeferredRow fetches a single deferred row's status fields.
@@ -856,7 +867,8 @@ func TestApplyPulledRelation_MalformedPayload_StraightToDead(t *testing.T) {
 			var applyStatus string
 			var retryCount int
 			if err := s.db.QueryRow(
-				`SELECT apply_status, retry_count FROM sync_apply_deferred WHERE sync_id = ?`, relSyncID,
+				`SELECT apply_status, retry_count FROM sync_apply_deferred WHERE sync_id = ?`,
+				deadRelationRowKey(DefaultSyncTargetKey, m),
 			).Scan(&applyStatus, &retryCount); err != nil {
 				t.Fatalf("scan deferred row: %v", err)
 			}

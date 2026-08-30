@@ -21,10 +21,13 @@ func TestProjectDetectionGitCommandsUsePlatformHelper(t *testing.T) {
 	}
 
 	tests := []struct {
-		name string
+		name            string
+		wantHelperCalls int
 	}{
-		{name: "detectGitRootDir"},
-		{name: "detectFromGitRemote"},
+		{name: "detectGitRootDir", wantHelperCalls: 0},
+		{name: "gitRevParsePath", wantHelperCalls: 1},
+		{name: "detectGitWorktreeDir", wantHelperCalls: 1},
+		{name: "detectFromGitRemote", wantHelperCalls: 1},
 	}
 
 	for _, tt := range tests {
@@ -53,8 +56,8 @@ func TestProjectDetectionGitCommandsUsePlatformHelper(t *testing.T) {
 				}
 				return true
 			})
-			if helperCalls != 1 {
-				t.Fatalf("%s uses newProjectCommandContext %d times; want 1", tt.name, helperCalls)
+			if helperCalls != tt.wantHelperCalls {
+				t.Fatalf("%s uses newProjectCommandContext %d times; want %d", tt.name, helperCalls, tt.wantHelperCalls)
 			}
 		})
 	}

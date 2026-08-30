@@ -62,6 +62,10 @@ For other docs:
 
 ## HTTP API Endpoints
 
+### Project-scoped read migration
+
+Project-aware reads resolve an omitted project to the canonical current project: explicit `project`, then `ENGRAM_PROJECT`, then cwd detection. To read across every project, pass `all_projects=true`; do not combine it with `project`. CLI counterparts use `--all`. This intentionally replaces formerly implicit-global behavior for recent lists, review, prompts, export, stats, and conflict inspection. `GET /sync/status` resolves and validates one current or explicit project but rejects `all_projects=true` because its provider cannot aggregate project status.
+
 Engram exposes two different runtimes. Keep routes split by runtime:
 
 - **Local runtime (`engram serve`, JSON on `127.0.0.1:7437`)**
@@ -123,7 +127,7 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 
 - `POST /sessions` — Create session. Body: `{id, project, directory}`
 - `POST /sessions/{id}/end` — End session. Body: `{summary}`
-- `GET /sessions/recent` — Recent sessions. Query: `?project=X&limit=N`
+- `GET /sessions/recent` — Recent sessions. Query: `?project=X&all_projects=true&limit=N`
 - `GET /sessions/{id}` — Get single session by ID
 - `DELETE /sessions/{id}` — Delete session
   - `200` when deleted
@@ -135,8 +139,8 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 
 - `POST /observations` — Add observation. Body: `{session_id, type, title, content, tool_name?, project?, scope?, topic_key?}`
   - `400` when `title` or `content` is missing, empty, or whitespace-only. The observation-create paths (`engram save`, `mem_save`, `POST /observations`) enforce the same title rule because cloud sync rejects observation upserts without a title, and one rejected mutation blocks every later mutation for the project
-- `GET /observations` — Recent observations compatibility endpoint. Query: `?project=X&scope=project|personal|global&limit=N&sort=created_at:desc`
-- `GET /observations/recent` — Recent observations. Query: `?project=X&scope=project|personal|global&limit=N`
+- `GET /observations` — Recent observations compatibility endpoint. Query: `?project=X&all_projects=true&scope=project|personal|global&limit=N&sort=created_at:desc`
+- `GET /observations/recent` — Recent observations. Query: `?project=X&all_projects=true&scope=project|personal|global&limit=N`
 - `GET /observations/{id}` — Get single observation by ID
 - `PATCH /observations/{id}` — Update fields. Body: `{title?, content?, type?, project?, scope?, topic_key?}`
   - `400` when `title` or `content` is provided but empty or whitespace-only. Omitting a field leaves its current value unchanged
@@ -146,7 +150,7 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 
 ### Review
 
-- `GET /review` — List observations due for local review. Query: `?project=X&limit=N`
+- `GET /review` — List observations due for local review. Query: `?project=X&all_projects=true&limit=N`
 - `POST /review/mark_reviewed` — Reset one observation's local review cycle. Body: `{observation_id}`; legacy `{id}` is accepted.
   - `200` with the refreshed observation payload when marked reviewed
   - `400` when `observation_id`/`id` is missing or the JSON body is invalid
@@ -156,6 +160,8 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 ### Search
 
 - `GET /search` — FTS5 search. Query: `?q=QUERY&type=TYPE&project=PROJECT&scope=SCOPE&limit=N`
+  - `200` with a JSON array of search results
+  - No-result example: `GET /search?q=definitely-no-hit` returns `200` with `[]` (never `null`)
 
 ### Timeline
 
@@ -164,8 +170,8 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 ### Prompts
 
 - `POST /prompts` — Save user prompt. Body: `{session_id, content, project?}`
-- `GET /prompts/recent` — Recent prompts. Query: `?project=X&limit=N`
-- `GET /prompts/search` — Search prompts. Query: `?q=QUERY&project=X&limit=N`
+- `GET /prompts/recent` — Recent prompts. Query: `?project=X&all_projects=true&limit=N`
+- `GET /prompts/search` — Search prompts. Query: `?q=QUERY&project=X&all_projects=true&limit=N`
 - `DELETE /prompts/{id}` — Delete prompt
   - `200` when deleted
   - `400` for invalid prompt id
@@ -182,14 +188,14 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 
 ### Export / Import
 
-- `GET /export` — Export all data as JSON
-  - Optional `?project=<name>` for project-scoped export
-  - `400` when `project` is provided but blank/whitespace
+- `GET /export` — Export current-project data as JSON
+  - Optional `?project=<name>` selects a known project; `?all_projects=true` exports every project
+  - `400` for blank, malformed, or conflicting selectors
 - `POST /import` — Import data from JSON. Body: ExportData JSON
 
 ### Stats / Diagnostics
 
-- `GET /stats` — Memory statistics
+- `GET /stats` — Current-project memory statistics. Use `?project=<name>` or `?all_projects=true` to select scope.
 - `GET /doctor` — Read-only operational diagnostics. Query: `?project=X&check=CHECK_CODE`
   - Returns the same diagnostic report envelope as `engram doctor --json` and MCP `mem_doctor`
   - `project` and `check` are optional; omitted `project` uses current project detection
@@ -199,6 +205,8 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 
 - `GET /project/current` — Detect the current project. Query: `?cwd=/path/to/repo`
   - Always returns a success envelope with `{project, project_source, project_path, cwd, available_projects}` plus optional `warning`/`error_hint`
+  - Ambiguous cwd is a successful discovery response: `project` is empty, `project_source` is `ambiguous`, `available_projects` lists the candidates, and `error_hint` explains why no project was selected.
+  - Other current-project-scoped HTTP routes return `404` for an unknown explicit project, `409` with `{error, code:"ambiguous_project", available_projects, project_source, project_path}` for an ambiguous cwd, and `400` for an invalid selector or configuration.
 - `POST /projects/rescue-ownership` — Bulk-assign ownership to explicitly selected historical records that carry none. `POST /projects/migrate` is a deprecated compatibility alias routed to the same handler. The JSON body is limited to 8 KiB: `{target_project, confirmed:true, observation_ids?:[], session_ids?:[], prompt_ids?:[]}`.
   - A configured `ENGRAM_HTTP_TOKEN`, matching `Authorization: Bearer <token>`, `target_project`, `confirmed:true`, and at least one positive observation/prompt ID or non-blank session ID are required. Missing server token returns `503`; missing or wrong credentials return `401`; malformed or invalid requests return `400`.
   - This route is a convenience, not the only repair. `engram projects rescue-ownership --project <name> [--session <id>] [--observation <id>] [--prompt <id>]` performs the same operation against the local store and needs no server token, so ownership stays repairable in a zero-config install.
@@ -215,7 +223,7 @@ These endpoints are served by `engram serve` on the local runtime only. They are
 
 List `memory_relations` rows with optional filters.
 
-Query params: `project` (string), `status` (string — raw `judgment_status`, currently `pending` | `judged` | `orphaned` | `ignored`), `since` (RFC3339), `limit` (int, default 50, max 500 — silently clamped), `offset` (int, default 0).
+Query params: `project` (string), `all_projects=true` (explicit global scope), `status` (string — raw `judgment_status`, currently `pending` | `judged` | `orphaned` | `ignored`), `since` (RFC3339), `limit` (int, default 50, max 500 — silently clamped), `offset` (int, default 0).
 
 Response:
 
@@ -310,7 +318,7 @@ Get full detail for one relation row, including source and target observation sn
 
 #### GET /conflicts/stats
 
-Aggregate counts for the project (or global when `project` query param is omitted).
+Aggregate counts for the current project, an explicit project, or every project when `all_projects=true`.
 
 Response:
 
@@ -358,7 +366,7 @@ Request body:
 - `concurrency` — worker pool size for parallel LLM calls when `semantic: true` (default 5, range 1–20)
 - `timeout_per_call_seconds` — per-LLM-call timeout in seconds when `semantic: true` (default 60, range 1–600)
 - `max_semantic` — hard cap on LLM calls per scan (default 100); scan stops collecting new pairs once reached
-- Missing `project` field returns `400`
+- Omitted `project` resolves the current project; `all_projects:true` explicitly scans every project
 - With `semantic: true`, `concurrency` outside [1, 20] or `timeout_per_call_seconds` outside [1, 600] returns `400`
 
 Response:
@@ -455,6 +463,7 @@ Response:
 
 - `GET /sync/status` — Runtime sync-state status for the local node (`engram serve` only).
 - In `engram serve`, sync status is wired to persisted SQLite sync state (project-scoped for detected/current project).
+- `?project=<name>` selects one known project; `?all_projects=true` returns HTTP 400 with `code: "unsupported_project_scope"`.
 - Response fields when provider is injected:
   - `enabled`
   - `phase`
@@ -481,7 +490,7 @@ Response:
 | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
 | `ENGRAM_DATA_DIR`               | Override data directory                                                                                                                                                                                                                                   | `~/.engram`          |
 | `ENGRAM_PORT`                   | Override HTTP server port                                                                                                                                                                                                                                 | `7437`               |
-| `ENGRAM_PROJECT`                | Process-level default project override, applied by every entry point through one precedence rule: **explicit request project** (`engram save --project`, an MCP tool `project` argument) → **process override** (`engram mcp --project`, then `ENGRAM_PROJECT`) → **cwd detection**. For `engram save`: owns the observation and its `manual-save-<project>` session when `--project` is omitted. For `engram serve`: used as the fallback when `GET /sync/status` receives no `project` query param. For `engram mcp`: sets `MCPConfig.DefaultProject`, which takes precedence over cwd detection for all read and write tools (including `mem_update`) for the lifetime of that MCP process. When unset, cwd detection is used as the fallback. | cwd-detected project |
+| `ENGRAM_PROJECT`                | Process-level default project override for `current` project-scoped operations. Precedence: **explicit request project** (`engram save --project`, an MCP tool `project` argument) → **process override** (`engram mcp --project`, then `ENGRAM_PROJECT`) → **cwd detection**. The value must be a project name, not a path. Explicit/process values are checked against known context when an operation must not establish a bucket; documented creation and recovery writes retain that behavior. Deliberately global operations such as `mem_review` list with no project and `mem_search(all_projects=true)` remain global. | cwd-detected project |
 | `ENGRAM_HTTP_TOKEN`             | Optional Bearer auth for the local HTTP server. When set, `DELETE /sessions/{id}`, `DELETE /observations/{id}`, `DELETE /prompts/{id}`, `GET /export`, and `POST /import` require `Authorization: Bearer <token>`. `POST /projects/rescue-ownership` (and deprecated alias `POST /projects/migrate`) always requires a configured token and matching Bearer credential. Comparison is constant-time. Token is read at request time (no restart needed). Other routes remain open when unset (zero-config default). Ownership repair never depends on this token: `engram projects rescue-ownership` performs the same repair against the local store. | (unset — HTTP rescue route not served; CLI repair still available) |
 | `ENGRAM_TIMEZONE`               | Timezone for timestamp display in the TUI and cloud dashboard. Accepts any IANA zone name (e.g. `America/New_York`, `Europe/Berlin`). Falls back to system local time when unset or invalid.                                                               | system local         |
 | `ENGRAM_AGENT_CLI`              | LLM runner name used by `engram conflicts scan --semantic` and the HTTP `/conflicts/scan` endpoint. Accepted values: `claude`, `opencode`.                                                                                                                | (unset)              |
@@ -907,6 +916,8 @@ When called in the same MCP process, this also feeds process-local current promp
 
 Get recent memory context from previous sessions — shows sessions, prompts, and observations, with optional scope filtering for observations.
 
+When `project` is omitted, context is scoped to the resolved current project (process override before cwd detection). This is not an all-project query. `scope: personal` without an explicit project retains its cross-project personal-memory behavior.
+
 Scope values accepted by the `scope` parameter: `project` (default), `personal`, `global`. When `scope: personal` is passed without an explicit `project` override, the project filter is cleared and personal observations are returned across all projects (cross-project personal scope).
 
 ### mem_stats
@@ -916,6 +927,7 @@ Show memory system statistics — sessions, observations, prompts, projects.
 ### mem_timeline
 
 Progressive disclosure: after searching, drill into chronological context around a specific observation. Shows N observations before and after within the same session.
+The optional project filter is enforced: an observation owned by another project is not returned.
 
 ### mem_get_observation
 
@@ -1119,7 +1131,7 @@ MCP tools resolve project names at call time using the shared detection chain:
 5. Multiple git-repo children of cwd returns `ambiguous_project` with `available_projects`
 6. Current working directory basename
 
-`engram mcp` accepts a process-level default project via `--project <name>` / `--project=<name>` or `ENGRAM_PROJECT=<name>`. This override takes precedence over cwd detection for all read and write tools — `mem_update` included — throughout the lifetime of that MCP process. It is a trusted startup-time value — use it when the host cannot supply a reliable cwd (VS Code, WSL, CI, Docker).
+`engram mcp` accepts a process-level default project via `--project <name>` / `--project=<name>` or `ENGRAM_PROJECT=<name>`. For current-project tools, this override takes precedence over cwd detection throughout the MCP process. It must be a project name, not a path; operations that cannot establish project context reject unknown overrides. Deliberately global tools retain their own omission contract, including `mem_review` list without a project filter.
 
 The same precedence rule is applied by every entry point, so identity never depends on which binary wrote the record: an **explicit request project** (`engram save --project`, an MCP tool `project` argument) wins first, then the **process override** (`engram mcp --project`, then `ENGRAM_PROJECT`), then **cwd detection**.
 

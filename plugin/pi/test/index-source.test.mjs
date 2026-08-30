@@ -277,6 +277,38 @@ function buildEnsureSessionForTest(engramFetch) {
   };
 }
 
+function buildProjectDetectionBoundaryForTest() {
+  const safeProjectBody = extractFunctionBody("isSafeDetectedProject", "{\n  const candidate");
+  const applyBody = extractFunctionBody("applyDetectedProject", "{\n  if (!detected)");
+  const requireBody = extractFunctionBody("requireResolvedProject", "{\n  if (projectResolutionError)");
+  const factory = new Function(`
+    let project = "fallback-project";
+    let projectResolutionError;
+    let projectDetectionPending = false;
+    function isSafeDetectedProject(detected) {
+      ${safeProjectBody}
+    }
+    function applyDetectedProject(detected) {
+      ${applyBody}
+    }
+    function requireResolvedProject() {
+      ${requireBody}
+    }
+    const requests = [];
+    function writeMemory() {
+      requireResolvedProject();
+      requests.push("/sessions", "/observations");
+    }
+    return {
+      applyDetectedProject,
+      writeMemory,
+      requests,
+      state: () => ({ project, projectResolutionError, projectDetectionPending }),
+    };
+  `);
+  return factory();
+}
+
 function sessionCtx(id, sink) {
   return {
     sessionManager: { getSessionId: () => id },
@@ -297,7 +329,7 @@ test("mem_save_prompt returns a prompt-scoped identity", () => {
 test("mem_search exposes and forwards match_mode and all_projects", () => {
   assert.match(source, /mem_search: Type\.Object\(\{[\s\S]*all_projects: optionalBoolean\("Search across every project; when true project is ignored"\)/);
   assert.match(source, /mem_search: Type\.Object\(\{[\s\S]*match_mode: optionalString\("Match mode: all \(default\) or any for broader recall"\)/);
-  assert.match(source, /case "mem_search":[\s\S]*project: params\.all_projects \? undefined : params\.project[\s\S]*match_mode: params\.match_mode[\s\S]*all_projects: params\.all_projects/);
+  assert.match(source, /case "mem_search":[\s\S]*if \(!params\.all_projects && !requestedProject\) requireResolvedProject\(\);[\s\S]*project: params\.all_projects \? undefined : activeProject[\s\S]*match_mode: params\.match_mode[\s\S]*all_projects: params\.all_projects/);
 });
 
 test("project detection 404 falls back to local config or diagnostic", () => {
@@ -305,6 +337,37 @@ test("project detection 404 falls back to local config or diagnostic", () => {
   assert.match(source, /project_name/);
   assert.match(source, /error\.status === 404[\s\S]*detectLocalConfigProject\(cwd\) \|\| projectCurrentUnsupportedError\(cwd\)/);
   assert.match(source, /does not support \/project\/current/);
+});
+
+test("unsafe detected projects do not reach session or memory writes", () => {
+  assert.match(source, /case "mem_save":[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*ensureSession/);
+  assert.match(source, /case "mem_save_prompt":[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*ensureSession/);
+  assert.match(source, /case "mem_session_summary":[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*ensureSession/);
+
+  for (const detected of [
+    undefined,
+    { project: "unknown" },
+    { project: "alpha", error_hint: "" },
+    { project: "nested/project" },
+    { project: "C:\\workspace" },
+    { project: "safe\u0000name" },
+  ]) {
+    const boundary = buildProjectDetectionBoundaryForTest();
+    assert.equal(boundary.applyDetectedProject(detected), false);
+    assert.equal(boundary.state().project, "unknown");
+    assert.throws(() => boundary.writeMemory());
+    assert.deepEqual(boundary.requests, []);
+  }
+});
+
+test("safe detected projects continue through session and memory writes", () => {
+  for (const project of ["engram", "c:compiler"]) {
+    const boundary = buildProjectDetectionBoundaryForTest();
+    assert.equal(boundary.applyDetectedProject({ project }), true);
+    assert.equal(boundary.state().project, project);
+    boundary.writeMemory();
+    assert.deepEqual(boundary.requests, ["/sessions", "/observations"]);
+  }
 });
 
 test("ambiguous_project error maps to actionable status label, not generic 'error'", () => {
@@ -1156,12 +1219,18 @@ test("native tool unavailable error names the Pi-native HTTP path", () => {
 test("mem_review is registered as a Pi-native executable memory tool", () => {
   assert.match(source, /const ENGRAM_TOOLS = \[[\s\S]*"mem_review"/);
   assert.match(source, /mem_review: Type\.Object\(\{[\s\S]*action: Type\.String\(\{ description: "Action: list \| mark_reviewed" \}\)/);
+  assert.match(source, /mem_review: Type\.Object\(\{[\s\S]*project: optionalString\("Optional project selector: filters list and scopes mark_reviewed; list remains global when omitted"\)/);
+  assert.doesNotMatch(source, /project: optionalString\("Optional project filter for action=list"\)/);
   assert.match(source, /mem_review: Type\.Object\(\{[\s\S]*observation_id: optionalNumber\("Observation id for action=mark_reviewed"\)/);
   assert.match(source, /mem_review: Type\.Object\(\{[\s\S]*id: optionalNumber\("Alias for observation_id"\)/);
-  assert.match(source, /case "mem_review":[\s\S]*action === "list"[\s\S]*engramFetch\(`\/review\$\{queryString\(\{ project: params\.project, limit: params\.limit \}\)\}`\)/);
-  assert.match(source, /case "mem_review":[\s\S]*action === "mark_reviewed"[\s\S]*engramFetch\("\/review\/mark_reviewed"/);
+  assert.match(source, /case "mem_review":[\s\S]*action === "list"[\s\S]*engramFetch\(`\/review\$\{queryString\(\{ project: requestedProject, limit: params\.limit, all_projects: requestedProject \? undefined : true \}\)\}`\)/);
+  assert.match(source, /case "mem_review":[\s\S]*action === "mark_reviewed"[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*engramFetch\(`\/review\/mark_reviewed\$\{queryString\(\{ project: activeProject \}\)\}`/);
   assert.match(source, /case "mem_review":[\s\S]*body: \{ observation_id: params\.observation_id \|\| params\.id \}/);
   assert.match(source, /for \(const toolName of ENGRAM_TOOLS\)[\s\S]*executeMemoryTool\(toolName/);
+});
+
+test("mem_stats explicitly requests its global aggregate contract", () => {
+  assert.match(source, /case "mem_stats":[\s\S]*engramFetch\(`\/stats\$\{queryString\(\{ all_projects: true \}\)\}`\)/);
 });
 
 test("best-effort capture failures are surfaced instead of silently discarded", () => {

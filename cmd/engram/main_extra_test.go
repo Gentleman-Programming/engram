@@ -2222,7 +2222,7 @@ func TestCmdServeSyncStatusUsesDetectedProjectScopedState(t *testing.T) {
 	}
 }
 
-func TestCmdServeSyncStatusRequiresProjectScopeWhenNoDefaultResolves(t *testing.T) {
+func TestCmdServeSyncStatusUsesCurrentProjectWhenNoOverrideResolves(t *testing.T) {
 	stubExitWithPanic(t)
 	stubRuntimeHooks(t)
 
@@ -2253,10 +2253,10 @@ func TestCmdServeSyncStatusRequiresProjectScopeWhenNoDefaultResolves(t *testing.
 		}
 		body := rec.Body.String()
 		if !strings.Contains(body, `"enabled":false`) {
-			t.Fatalf("expected enabled=false when no project scope resolves, got body=%q", body)
+			t.Fatalf("expected enabled=false for the unresolved current project, got body=%q", body)
 		}
-		if !strings.Contains(body, `"reason_code":"project_required"`) {
-			t.Fatalf("expected project_required reason code, got body=%q", body)
+		if !strings.Contains(body, `"reason_code":"blocked_unenrolled"`) {
+			t.Fatalf("expected blocked_unenrolled reason code for the current project, got body=%q", body)
 		}
 		return nil
 	}
@@ -2618,7 +2618,7 @@ func TestCmdExportDefaultAndCmdImportErrors(t *testing.T) {
 	badPath := filepath.Join(workDir, "missing", "out.json")
 	withArgs(t, "engram", "export", badPath)
 	_, stderr, recovered = captureOutputAndRecover(t, func() { cmdExport(cfg) })
-	if _, ok := recovered.(exitCode); !ok || !strings.Contains(stderr, "no such file or directory") {
+	if _, ok := recovered.(exitCode); !ok || !strings.Contains(stderr, "out.json") {
 		t.Fatalf("expected export write fatal, panic=%v stderr=%q", recovered, stderr)
 	}
 
@@ -2767,6 +2767,7 @@ func TestMainDispatchRemainingCommands(t *testing.T) {
 	}
 	seedCfg.DataDir = dataDir
 	focusID := mustSeedObservation(t, seedCfg, "s-main", "main-proj", "note", "focus", "focus content", "project")
+	t.Setenv("ENGRAM_PROJECT", "main-proj")
 
 	importFile := filepath.Join(t.TempDir(), "import.json")
 	if err := os.WriteFile(importFile, []byte(`{"version":"0.1.0","exported_at":"2026-01-01T00:00:00Z","sessions":[],"observations":[],"prompts":[]}`), 0644); err != nil {
@@ -3862,6 +3863,51 @@ func TestCmdSyncCloudRequiresExplicitProjectAndRejectsAll(t *testing.T) {
 	}
 }
 
+func TestCmdSyncRejectsCombinedProjectSelectorsBeforeStoreConstruction(t *testing.T) {
+	for _, args := range [][]string{
+		{"engram", "sync", "--all", "--project", "alpha"},
+		{"engram", "sync", "--project", "alpha", "--all"},
+	} {
+		t.Run(strings.Join(args[2:], " "), func(t *testing.T) {
+			stubExitWithPanic(t)
+			calledStoreNew := false
+			originalStoreNew := storeNew
+			storeNew = func(store.Config) (*store.Store, error) {
+				calledStoreNew = true
+				return nil, errors.New("store must not be constructed")
+			}
+			t.Cleanup(func() { storeNew = originalStoreNew })
+
+			withArgs(t, args...)
+			_, stderr, recovered := captureOutputAndRecover(t, func() { cmdSync(testConfig(t)) })
+			if _, ok := recovered.(exitCode); !ok {
+				t.Fatalf("expected combined selectors to exit, got %v", recovered)
+			}
+			if !strings.Contains(stderr, "--all and --project cannot be used together") {
+				t.Fatalf("combined selector error = %q", stderr)
+			}
+			if calledStoreNew {
+				t.Fatal("combined selectors constructed a store")
+			}
+		})
+	}
+
+	for _, args := range [][]string{
+		{"engram", "sync", "--all", "--status"},
+		{"engram", "sync", "--project", "alpha", "--status"},
+	} {
+		t.Run(strings.Join(args[2:], " "), func(t *testing.T) {
+			stubExitWithPanic(t)
+			withCwd(t, t.TempDir())
+			withArgs(t, args...)
+			stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdSync(testConfig(t)) })
+			if recovered != nil || stderr != "" || !strings.Contains(stdout, "Sync status:") {
+				t.Fatalf("valid selector failed: stdout=%q stderr=%q panic=%v", stdout, stderr, recovered)
+			}
+		})
+	}
+}
+
 func TestCmdImportStoreImportFailure(t *testing.T) {
 	stubExitWithPanic(t)
 	cfg := testConfig(t)
@@ -3940,6 +3986,7 @@ func TestCmdSetupHyphenArgFallsBackToInteractive(t *testing.T) {
 func TestCmdTimelineNoBeforeAfterSections(t *testing.T) {
 	cfg := testConfig(t)
 	focusID := mustSeedObservation(t, cfg, "solo-session", "solo", "note", "focus", "only content", "project")
+	t.Setenv("ENGRAM_PROJECT", "solo")
 
 	withArgs(t, "engram", "timeline", fmt.Sprintf("%d", focusID), "--before", "0", "--after", "0")
 	stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdTimeline(cfg) })
@@ -4076,7 +4123,7 @@ func TestCommandErrorSeamsAndUncoveredBranches(t *testing.T) {
 	})
 
 	t.Run("timeline seam error", func(t *testing.T) {
-		withArgs(t, "engram", "timeline", "1")
+		withArgs(t, "engram", "timeline", "1", "--all")
 		storeTimeline = func(*store.Store, int64, int, int) (*store.TimelineResult, error) {
 			return nil, errors.New("forced timeline error")
 		}
@@ -4086,7 +4133,7 @@ func TestCommandErrorSeamsAndUncoveredBranches(t *testing.T) {
 
 	t.Run("timeline prints session summary", func(t *testing.T) {
 		summary := "this session has a non-empty summary"
-		withArgs(t, "engram", "timeline", "1")
+		withArgs(t, "engram", "timeline", "1", "--all")
 		storeTimeline = func(*store.Store, int64, int, int) (*store.TimelineResult, error) {
 			return &store.TimelineResult{
 				Focus:        store.Observation{ID: 1, Type: "note", Title: "focus", Content: "content", CreatedAt: "2026-01-01"},
@@ -4113,7 +4160,7 @@ func TestCommandErrorSeamsAndUncoveredBranches(t *testing.T) {
 	})
 
 	t.Run("stats seam error", func(t *testing.T) {
-		withArgs(t, "engram", "stats")
+		withArgs(t, "engram", "stats", "--all")
 		storeStats = func(*store.Store) (*store.Stats, error) {
 			return nil, errors.New("forced stats error")
 		}
@@ -4122,7 +4169,7 @@ func TestCommandErrorSeamsAndUncoveredBranches(t *testing.T) {
 	})
 
 	t.Run("export seam error", func(t *testing.T) {
-		withArgs(t, "engram", "export")
+		withArgs(t, "engram", "export", "--all")
 		storeExport = func(*store.Store) (*store.ExportData, error) {
 			return nil, errors.New("forced export error")
 		}
