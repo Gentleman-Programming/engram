@@ -780,6 +780,30 @@ func TestLocalChunkExportFailsLoudlyOnCorruptPriorChunk(t *testing.T) {
 	}
 }
 
+func TestLocalChunkExportDoesNotWedgeOnEmptySessionDirectory(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("empty-directory-session", "proj-a", ""); err != nil {
+		t.Fatalf("CreateSession accepts an empty directory: %v", err)
+	}
+
+	sy := New(s, filepath.Join(t.TempDir(), ".engram"))
+	first, err := sy.Export("alice", "proj-a")
+	if err != nil {
+		t.Fatalf("first export: %v", err)
+	}
+	if first.IsEmpty || first.SessionsExported != 1 || first.ObservationsExported != 0 || first.PromptsExported != 0 {
+		t.Fatalf("first export must write the session with its accepted empty directory, got %+v", first)
+	}
+
+	second, err := sy.Export("alice", "proj-a")
+	if err != nil {
+		t.Fatalf("second export must account for the written session: %v", err)
+	}
+	if !second.IsEmpty || second.SessionsExported != 0 || second.ObservationsExported != 0 || second.PromptsExported != 0 || second.MutationsExported != 0 {
+		t.Fatalf("second export must be empty after accounting for the prior session, got %+v", second)
+	}
+}
+
 func TestLocalChunkExportReconcilesCompleteValidatedHistory(t *testing.T) {
 	t.Run("old identities absent from history bypass the watermark", func(t *testing.T) {
 		s, data := seedOldLocalExportData(t)
@@ -838,6 +862,48 @@ func TestLocalChunkExportReconcilesCompleteValidatedHistory(t *testing.T) {
 			t.Fatalf("historical tombstones must prevent identity resurrection, got %+v", result)
 		}
 	})
+
+	t.Run("legacy direct observations and prompts without sync IDs export current identities once", func(t *testing.T) {
+		s, data := seedOldLocalExportData(t)
+		legacyObservations := append([]store.Observation(nil), data.Observations...)
+		legacyPrompts := append([]store.Prompt(nil), data.Prompts...)
+		for i := range legacyObservations {
+			legacyObservations[i].SyncID = ""
+		}
+		for i := range legacyPrompts {
+			legacyPrompts[i].SyncID = ""
+		}
+		syncDir := filepath.Join(t.TempDir(), ".engram")
+		writeLocalChunkFile(t, syncDir, "history", ChunkData{
+			Sessions:     data.Sessions,
+			Observations: legacyObservations,
+			Prompts:      legacyPrompts,
+		})
+		writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "history", CreatedAt: "2025-06-01T00:00:00Z"}}})
+
+		result, err := New(s, syncDir).Export("alice", "proj-a")
+		if err != nil {
+			t.Fatalf("export after legacy direct rows: %v", err)
+		}
+		if result.IsEmpty || result.SessionsExported != 0 || result.ObservationsExported != len(data.Observations) || result.PromptsExported != len(data.Prompts) {
+			t.Fatalf("current stable observation and prompt identities must export once, got %+v", result)
+		}
+
+		raw, err := readGzip(filepath.Join(syncDir, "chunks", result.ChunkID+".jsonl.gz"))
+		if err != nil {
+			t.Fatalf("read exported chunk: %v", err)
+		}
+		var exported ChunkData
+		if err := json.Unmarshal(raw, &exported); err != nil {
+			t.Fatalf("unmarshal exported chunk: %v", err)
+		}
+		if len(exported.Observations) != len(data.Observations) || exported.Observations[0].SyncID != data.Observations[0].SyncID {
+			t.Fatalf("exported observation must retain its current stable identity, got %+v", exported.Observations)
+		}
+		if len(exported.Prompts) != len(data.Prompts) || exported.Prompts[0].SyncID != data.Prompts[0].SyncID {
+			t.Fatalf("exported prompt must retain its current stable identity, got %+v", exported.Prompts)
+		}
+	})
 }
 
 func TestLocalChunkExportFallsBackToWatermarkForIncompleteHistory(t *testing.T) {
@@ -881,10 +947,10 @@ func TestLocalChunkExportFailsClosedOnInvalidHistoricalIdentityData(t *testing.T
 		expectedError    string
 	}{
 		{
-			name:          "direct session row is semantically invalid",
-			expectedError: "session payload directory is required for upsert",
+			name:          "direct session row is missing its identity",
+			expectedError: "sessions[0].id is required",
 			chunk: func() ChunkData {
-				return ChunkData{Sessions: []store.Session{{ID: "missing-directory"}}}
+				return ChunkData{Sessions: []store.Session{{Project: "proj-a"}}}
 			},
 		},
 		{
@@ -936,12 +1002,12 @@ func TestLocalChunkExportFailsClosedOnInvalidHistoricalIdentityData(t *testing.T
 			},
 		},
 		{
-			name:             "valid explicit observation must not hide invalid closure-only direct session",
+			name:             "valid explicit observation must not hide direct session without an identity",
 			assertNoNewChunk: true,
-			expectedError:    "validate direct rows",
+			expectedError:    "sessions[0].id is required",
 			chunk: func() ChunkData {
 				return ChunkData{
-					Sessions: []store.Session{{ID: "closure-only-session", Project: "proj-a"}},
+					Sessions: []store.Session{{Project: "proj-a"}},
 					Mutations: []store.SyncMutation{{
 						Entity:    store.SyncEntityObservation,
 						EntityKey: "valid-explicit-observation",

@@ -1249,16 +1249,17 @@ func validateHistoricalChunk(raw []byte, chunk ChunkData) error {
 		return err
 	}
 
-	direct := synthesizeMutationsFromChunk(chunk)
-	if len(direct) == 0 {
-		return nil
-	}
-	directJSON, err := json.Marshal(ChunkData{Mutations: direct})
-	if err != nil {
-		return fmt.Errorf("encode direct rows: %w", err)
-	}
-	if _, err := chunkcodec.CanonicalizeForProject(directJSON, ""); err != nil {
-		return fmt.Errorf("validate direct rows: %w", err)
+	return validateHistoricalDirectRows(chunk)
+}
+
+// validateHistoricalDirectRows checks only the identities used to account for
+// historical local-export rows. Direct rows predate cloud mutation payloads,
+// so they must not be held to current cloud-upsert field requirements.
+func validateHistoricalDirectRows(chunk ChunkData) error {
+	for i, session := range chunk.Sessions {
+		if strings.TrimSpace(session.ID) == "" {
+			return fmt.Errorf("sessions[%d].id is required", i)
+		}
 	}
 	return nil
 }
