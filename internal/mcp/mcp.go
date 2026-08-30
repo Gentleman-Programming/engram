@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -594,7 +595,7 @@ Examples:
 	if shouldRegister("mem_get_observation", allowlist) {
 		srv.AddTool(
 			mcp.NewTool("mem_get_observation",
-				mcp.WithDescription("Get the full content of a specific observation by ID. Use when you need the complete, untruncated content of an observation found via mem_search or mem_timeline."),
+				mcp.WithDescription("Get the content of a specific observation by ID. Omit partial-read params for the full untruncated body. Use offset/limit for a rune-ranged slice, or find/context to return windows around matches. The two groups are mutually exclusive."),
 				mcp.WithTitleAnnotation("Get Observation"),
 				mcp.WithReadOnlyHintAnnotation(true),
 				mcp.WithDestructiveHintAnnotation(false),
@@ -603,6 +604,18 @@ Examples:
 				mcp.WithNumber("id",
 					mcp.Required(),
 					mcp.Description("The observation ID to retrieve"),
+				),
+				mcp.WithNumber("offset",
+					mcp.Description("Rune offset for a ranged read. Mutually exclusive with find/context. Omit with no other partial-read params to return the full body."),
+				),
+				mcp.WithNumber("limit",
+					mcp.Description("Rune length for a ranged read (default 2000). Limit without offset starts at offset 0. Mutually exclusive with find/context."),
+				),
+				mcp.WithString("find",
+					mcp.Description("Literal substring to locate inside the observation. Returns windows around each match. Mutually exclusive with offset/limit."),
+				),
+				mcp.WithNumber("context",
+					mcp.Description("Rune padding on each side of every find match (default 600). Requires find."),
 				),
 			),
 			handleGetObservation(s, cfg, activity),
@@ -1836,6 +1849,11 @@ func handleGetObservation(s *store.Store, cfg MCPConfig, activities ...*SessionA
 			return mcp.NewToolResultError(fmt.Sprintf("Observation #%d not found", id)), nil
 		}
 
+		read, readErr := store.ResolveObservationRead(obs.Content, observationReadRequest(req))
+		if readErr != nil {
+			return mcp.NewToolResultError(readErr.Error()), nil
+		}
+
 		// Resolve project from process override/cwd (REQ-310, REQ-314). No per-call
 		// override is possible for get-by-ID.
 		detRes, detErr := resolveReadProjectWithProcessOverride(s, "", cfg.DefaultProject)
@@ -1855,19 +1873,86 @@ func handleGetObservation(s *store.Store, cfg MCPConfig, activities ...*SessionA
 		}
 		duplicateMeta := fmt.Sprintf("\nDuplicates: %d", obs.DuplicateCount)
 		revisionMeta := fmt.Sprintf("\nRevisions: %d", obs.RevisionCount)
-
-		result := fmt.Sprintf("#%d [%s] %s\n%s\nSession: %s%s%s\nCreated: %s",
-			obs.ID, obs.Type, obs.Title,
-			obs.Content,
+		meta := fmt.Sprintf("Session: %s%s%s\nCreated: %s",
 			obs.SessionID, obsProject+scope+topic, toolName+duplicateMeta+revisionMeta,
 			timeutil.FormatLocal(obs.CreatedAt),
 		)
+
+		result := formatGetObservationResult(obs, read, meta)
 
 		if detErr != nil {
 			return readProjectErrorResult(activity, detRes, detErr), nil
 		}
 		return respondWithProject(detRes, result, nil), nil
 	}
+}
+
+func observationReadRequest(req mcp.CallToolRequest) store.ObservationReadRequest {
+	args := req.GetArguments()
+	out := store.ObservationReadRequest{}
+	if v, ok := args["offset"].(float64); ok {
+		n := int(v)
+		out.Offset = &n
+	}
+	if v, ok := args["limit"].(float64); ok {
+		n := int(v)
+		out.Limit = &n
+	}
+	if v, ok := args["find"].(string); ok {
+		out.Find = &v
+	}
+	if v, ok := args["context"].(float64); ok {
+		n := int(v)
+		out.Context = &n
+	}
+	return out
+}
+
+func formatGetObservationResult(obs *store.Observation, read store.ObservationReadResult, meta string) string {
+	if read.Mode == store.ObservationReadFull {
+		return fmt.Sprintf("#%d [%s] %s\n%s\n%s",
+			obs.ID, obs.Type, obs.Title, read.Content, meta)
+	}
+
+	header := fmt.Sprintf("#%d %q — %s", obs.ID, obs.Title, formatRuneCount(read.TotalRunes))
+	var b strings.Builder
+	if read.Mode == store.ObservationReadFind {
+		fmt.Fprintf(&b, "%s, %d matches for %q\n", header, len(read.Windows), read.Find)
+		for _, w := range read.Windows {
+			fmt.Fprintf(&b, "\n[offset %s]\n%s\n", formatIntWithComma(w.Offset), w.Content)
+		}
+	} else {
+		fmt.Fprintf(&b, "%s\n\n[offset %s, limit %s]\n%s\n",
+			header, formatIntWithComma(read.Offset), formatIntWithComma(read.Limit), read.Content)
+	}
+	b.WriteString("\n")
+	b.WriteString(meta)
+	return b.String()
+}
+
+func formatRuneCount(n int) string {
+	return formatIntWithComma(n) + " runes total"
+}
+
+func formatIntWithComma(n int) string {
+	if n < 0 {
+		return "-" + formatIntWithComma(-n)
+	}
+	s := strconv.Itoa(n)
+	if len(s) <= 3 {
+		return s
+	}
+	pre := len(s) % 3
+	if pre == 0 {
+		pre = 3
+	}
+	var b strings.Builder
+	b.WriteString(s[:pre])
+	for i := pre; i < len(s); i += 3 {
+		b.WriteByte(',')
+		b.WriteString(s[i : i+3])
+	}
+	return b.String()
 }
 
 // handleSessionSummary returns a tool handler function that saves a comprehensive

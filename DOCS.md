@@ -931,7 +931,19 @@ The optional project filter is enforced: an observation owned by another project
 
 ### mem_get_observation
 
-Get full untruncated content of a specific observation by ID.
+Get the content of a specific observation by ID.
+
+With no extra parameters this returns the full untruncated body (unchanged). Optional partial-read parameters reduce token cost on large observations. Offsets and lengths are counted in **runes**, not bytes.
+
+**Mechanical paging — `offset` + `limit`**
+
+`mem_get_observation(id: 475, offset: 12000, limit: 2000)` returns runes `[offset, offset+limit)`. `limit` without `offset` starts at `0`. `offset` past the end returns an empty window (no error). Default `limit` is 2000.
+
+**Match-scoped read — `find` + `context`**
+
+`mem_get_observation(id: 475, find: "test 7", context: 600)` returns a window of `context` runes on each side of every literal match, prefixed with the window's rune offset. `find` with no matches returns zero windows (no error). `context` without `find` is an error. Default `context` is 600.
+
+`offset`/`limit` and `find`/`context` are mutually exclusive.
 
 ### mem_session_summary
 
