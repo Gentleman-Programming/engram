@@ -839,6 +839,51 @@ func TestLocalChunkExportReconcilesCompleteValidatedHistory(t *testing.T) {
 		}
 	})
 
+	t.Run("direct stable identities require only session references", func(t *testing.T) {
+		s, data := seedOldLocalExportData(t)
+		syncDir := filepath.Join(t.TempDir(), ".engram")
+		historicalChunk := ChunkData{
+			Sessions: []store.Session{{ID: data.Sessions[0].ID}},
+			Observations: []store.Observation{{
+				SyncID:    data.Observations[0].SyncID,
+				SessionID: "missing-but-recoverable-session",
+			}},
+			Prompts: []store.Prompt{{
+				SyncID:    data.Prompts[0].SyncID,
+				SessionID: "missing-but-recoverable-session",
+			}},
+		}
+		writeLocalChunkFile(t, syncDir, "history", historicalChunk)
+		writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "history", CreatedAt: "2025-06-01T00:00:00Z"}}})
+
+		result, err := New(s, syncDir).Export("alice", "proj-a")
+		if err != nil {
+			t.Fatalf("export: %v", err)
+		}
+		if !result.IsEmpty {
+			t.Fatalf("minimal direct stable identities must remain historical without cloud-only fields, got %+v", result)
+		}
+
+		importStore := newTestStore(t)
+		importResult, err := New(importStore, syncDir).Import()
+		if err != nil {
+			t.Fatalf("local import must replay the minimal historical chunk: %v", err)
+		}
+		if importResult.ChunksImported != 1 || importResult.SessionsImported != 2 || importResult.ObservationsImported != 1 || importResult.PromptsImported != 1 {
+			t.Fatalf("minimal direct history must import both stable entities and recover its missing session, got %+v", importResult)
+		}
+		if _, err := importStore.GetSession("missing-but-recoverable-session"); err != nil {
+			t.Fatalf("expected missing referenced session to be recovered: %v", err)
+		}
+		if _, err := importStore.GetObservationBySyncID(data.Observations[0].SyncID); err != nil {
+			t.Fatalf("expected stable observation to be imported: %v", err)
+		}
+		prompts, err := importStore.RecentPrompts("", 5)
+		if err != nil || len(prompts) != 1 || prompts[0].SyncID != data.Prompts[0].SyncID {
+			t.Fatalf("expected stable prompt to be imported, prompts=%+v err=%v", prompts, err)
+		}
+	})
+
 	t.Run("historical tombstones count as known identities", func(t *testing.T) {
 		s, data := seedOldLocalExportData(t)
 		syncDir := filepath.Join(t.TempDir(), ".engram")
@@ -942,21 +987,21 @@ func TestLocalChunkExportFallsBackToWatermarkForIncompleteHistory(t *testing.T) 
 func TestLocalChunkExportFailsClosedOnInvalidHistoricalIdentityData(t *testing.T) {
 	tests := []struct {
 		name             string
-		chunk            func() ChunkData
+		chunk            func(*store.ExportData) ChunkData
 		assertNoNewChunk bool
 		expectedError    string
 	}{
 		{
 			name:          "direct session row is missing its identity",
 			expectedError: "sessions[0].id is required",
-			chunk: func() ChunkData {
+			chunk: func(_ *store.ExportData) ChunkData {
 				return ChunkData{Sessions: []store.Session{{Project: "proj-a"}}}
 			},
 		},
 		{
 			name:          "mutation payload is malformed",
 			expectedError: "decode mutation payload",
-			chunk: func() ChunkData {
+			chunk: func(_ *store.ExportData) ChunkData {
 				return ChunkData{Mutations: []store.SyncMutation{{
 					Entity:    store.SyncEntityObservation,
 					EntityKey: "obs-history",
@@ -968,7 +1013,7 @@ func TestLocalChunkExportFailsClosedOnInvalidHistoricalIdentityData(t *testing.T
 		{
 			name:          "mutation entity key must match payload identity",
 			expectedError: "does not match payload key",
-			chunk: func() ChunkData {
+			chunk: func(_ *store.ExportData) ChunkData {
 				return ChunkData{Mutations: []store.SyncMutation{{
 					Entity:    store.SyncEntityPrompt,
 					EntityKey: "different-prompt",
@@ -980,7 +1025,7 @@ func TestLocalChunkExportFailsClosedOnInvalidHistoricalIdentityData(t *testing.T
 		{
 			name:          "legacy pending relation still requires source identity",
 			expectedError: "relation payload source_id is required for upsert",
-			chunk: func() ChunkData {
+			chunk: func(_ *store.ExportData) ChunkData {
 				return ChunkData{Mutations: []store.SyncMutation{{
 					Entity:    store.SyncEntityRelation,
 					EntityKey: "legacy-pending-relation",
@@ -992,7 +1037,7 @@ func TestLocalChunkExportFailsClosedOnInvalidHistoricalIdentityData(t *testing.T
 		{
 			name:          "non-pending relation still requires provenance",
 			expectedError: "relation payload marked_by_actor is required for upsert",
-			chunk: func() ChunkData {
+			chunk: func(_ *store.ExportData) ChunkData {
 				return ChunkData{Mutations: []store.SyncMutation{{
 					Entity:    store.SyncEntityRelation,
 					EntityKey: "judged-relation",
@@ -1005,7 +1050,7 @@ func TestLocalChunkExportFailsClosedOnInvalidHistoricalIdentityData(t *testing.T
 			name:             "valid explicit observation must not hide direct session without an identity",
 			assertNoNewChunk: true,
 			expectedError:    "sessions[0].id is required",
-			chunk: func() ChunkData {
+			chunk: func(_ *store.ExportData) ChunkData {
 				return ChunkData{
 					Sessions: []store.Session{{Project: "proj-a"}},
 					Mutations: []store.SyncMutation{{
@@ -1017,13 +1062,29 @@ func TestLocalChunkExportFailsClosedOnInvalidHistoricalIdentityData(t *testing.T
 				}
 			},
 		},
+		{
+			name:             "direct stable observation without session reference cannot suppress local observation",
+			assertNoNewChunk: true,
+			expectedError:    "observations[0].session_id is required",
+			chunk: func(data *store.ExportData) ChunkData {
+				return ChunkData{Observations: []store.Observation{{SyncID: data.Observations[0].SyncID}}}
+			},
+		},
+		{
+			name:             "direct stable prompt without session reference cannot suppress local prompt",
+			assertNoNewChunk: true,
+			expectedError:    "prompts[0].session_id is required",
+			chunk: func(data *store.ExportData) ChunkData {
+				return ChunkData{Prompts: []store.Prompt{{SyncID: data.Prompts[0].SyncID}}}
+			},
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			s, _ := seedOldLocalExportData(t)
+			s, data := seedOldLocalExportData(t)
 			syncDir := filepath.Join(t.TempDir(), ".engram")
-			writeLocalChunkFile(t, syncDir, "history", tc.chunk())
+			writeLocalChunkFile(t, syncDir, "history", tc.chunk(data))
 			writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "history", CreatedAt: "2025-06-01T00:00:00Z"}}})
 
 			if _, err := New(s, syncDir).Export("alice", "proj-a"); err == nil {

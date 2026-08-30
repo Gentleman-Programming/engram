@@ -1261,6 +1261,16 @@ func validateHistoricalDirectRows(chunk ChunkData) error {
 			return fmt.Errorf("sessions[%d].id is required", i)
 		}
 	}
+	for i, observation := range chunk.Observations {
+		if strings.TrimSpace(observation.SyncID) != "" && strings.TrimSpace(observation.SessionID) == "" {
+			return fmt.Errorf("observations[%d].session_id is required", i)
+		}
+	}
+	for i, prompt := range chunk.Prompts {
+		if strings.TrimSpace(prompt.SyncID) != "" && strings.TrimSpace(prompt.SessionID) == "" {
+			return fmt.Errorf("prompts[%d].session_id is required", i)
+		}
+	}
 	return nil
 }
 
