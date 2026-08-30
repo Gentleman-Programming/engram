@@ -139,7 +139,9 @@ async function engramFetch(
     // Treat non-2xx as failure so callers can avoid false-positive side effects
     // (e.g. marking a session known when POST /sessions did not succeed).
     if (!res.ok) return null
-    return await res.json()
+    const text = await res.text()
+    if (!text.trim()) return {}
+    return JSON.parse(text)
   } catch {
     // Engram server not running — silently fail
     return null
@@ -326,22 +328,12 @@ export const Engram: Plugin = async (ctx) => {
         const sessionId = info?.id
         if (sessionId) {
           if (knownSessions.has(sessionId)) {
-            // session.deleted fires once — retry once inline, and only clear
-            // knownSessions after a confirmed /end (do not pretend it closed).
-            let ended = await engramFetch(
+            await engramFetch(
               `/sessions/${encodeURIComponent(sessionId)}/end`,
               { method: "POST" }
             )
-            if (ended == null) {
-              ended = await engramFetch(
-                `/sessions/${encodeURIComponent(sessionId)}/end`,
-                { method: "POST" }
-              )
-            }
-            if (ended != null) {
-              knownSessions.delete(sessionId)
-            }
           }
+          knownSessions.delete(sessionId)
           toolCounts.delete(sessionId)
           subAgentSessions.delete(sessionId)
           lastNudgeTime.delete(sessionId)
