@@ -989,6 +989,21 @@ func TestManagerBackoffSaturatesBeforeDurationConversion(t *testing.T) {
 	}
 }
 
+func TestManagerBackoffSaturatesPositiveJitterBeforeDurationOverflow(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.BaseBackoff = time.Duration(1<<63 - 1)
+	cfg.MaxBackoff = time.Duration(1<<63 - 1)
+	mgr := &Manager{cfg: cfg}
+	minExpected := cfg.MaxBackoff - cfg.MaxBackoff/4
+
+	for i := 0; i < 1024; i++ {
+		d := mgr.computeBackoff(1)
+		if d < minExpected || d > cfg.MaxBackoff {
+			t.Fatalf("backoff %v outside expected range [%v, %v] at iteration %d", d, minExpected, cfg.MaxBackoff, i)
+		}
+	}
+}
+
 func TestManagerBackoffResetOnSuccess(t *testing.T) {
 	ls := newFakeLocalStore()
 	tr := newFakeTransport()
