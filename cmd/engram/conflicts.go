@@ -494,6 +494,7 @@ func cmdConflictsScan(cfg store.Config) {
 		fmt.Printf("  next_cursor:      %d\n", *result.NextCursor)
 	}
 	if semantic {
+		fmt.Printf("  semantic_skipped: %d\n", result.SemanticSkipped)
 		fmt.Printf("  semantic_judged:  %d\n", result.SemanticJudged)
 		fmt.Printf("  semantic_errors:  %d\n", result.SemanticErrors)
 	}

@@ -18,10 +18,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Gentleman-Programming/engram/internal/diagnostic"
 	projectpkg "github.com/Gentleman-Programming/engram/internal/project"
@@ -880,7 +882,7 @@ PARAMS:
   memory_id_b  (required) — integer id of the second observation
   relation     (required) — one of: related, compatible, scoped, conflicts_with, supersedes, not_conflict
   confidence   (required) — float 0..1; your self-reported confidence in the verdict
-  reasoning    (required) — explanation of the verdict, max 200 chars
+  reasoning    (required) — explanation of the verdict, at most 200 Unicode runes
   model        (optional) — your model identifier, stored for provenance (e.g. "claude-haiku-4-5")
 
 BEHAVIOR:
@@ -914,7 +916,7 @@ ERROR: Returns IsError=true if IDs are unknown, relation is invalid, or cross-pr
 				),
 				mcp.WithString("reasoning",
 					mcp.Required(),
-					mcp.Description("Brief explanation of the verdict (max 200 chars)"),
+					mcp.Description("Brief explanation of the verdict (at most 200 Unicode runes)"),
 				),
 				mcp.WithString("model",
 					mcp.Description("Your model identifier for provenance (e.g. \"claude-haiku-4-5\")"),
@@ -2148,6 +2150,12 @@ func handleCompare(s *store.Store, _ *SessionActivity) server.ToolHandlerFunc {
 		if !okB {
 			return mcp.NewToolResultError("memory_id_b is required (integer observation id)"), nil
 		}
+		if math.Trunc(rawA) != rawA {
+			return mcp.NewToolResultError("memory_id_a must be an integer observation id"), nil
+		}
+		if math.Trunc(rawB) != rawB {
+			return mcp.NewToolResultError("memory_id_b must be an integer observation id"), nil
+		}
 		idA := int64(rawA)
 		idB := int64(rawB)
 
@@ -2159,6 +2167,9 @@ func handleCompare(s *store.Store, _ *SessionActivity) server.ToolHandlerFunc {
 		reasoning, _ := req.GetArguments()["reasoning"].(string)
 		if reasoning == "" {
 			return mcp.NewToolResultError("reasoning is required"), nil
+		}
+		if utf8.RuneCountInString(reasoning) > 200 {
+			return mcp.NewToolResultError("reasoning must be at most 200 characters"), nil
 		}
 
 		// --- required confidence ---

@@ -29,9 +29,9 @@ All 30 tasks complete, 16 spec REQs fully implemented, full `go test ./...` GREE
 | REQ-006 --concurrency N flag (1-20, default 5) | ✅ COMPLIANT | `cmd/engram/conflicts.go:310,342-348,376-380` | `cmd/engram/conflicts_test.go` (D.2 tests cover validation paths) | Range validated up-front before any work |
 | REQ-007 --timeout-per-call N flag (default 60s) | ✅ COMPLIANT | `cmd/engram/conflicts.go:311,349-355,435` | `internal/store/scan_semantic_test.go` (TestScanProject_Semantic_TimeoutCounted) | `context.WithTimeout` per pair; timeouts → SemanticErrors++; scan continues |
 | REQ-008 --max-semantic N cap (default 100) | ✅ COMPLIANT | `cmd/engram/conflicts.go:313,358-364,436`; `internal/store/relations.go:1261-1284` | `internal/store/scan_semantic_test.go` (TestScanProject_Semantic_MaxSemanticCap) | Cap at pair collection; sets `result.Capped=true` |
-| REQ-009 JudgeBySemantic store method | ✅ COMPLIANT | `internal/store/relations.go:725-810` | `internal/store/judge_by_semantic_test.go` (6 tests: SystemProvenance, UpsertIdempotency, NotConflictNoOp, ValidationErrors×5, CrossProjectRejected, AllValidRelations×5) | UPSERT semantics; `marked_by_kind="system"`, `marked_by_actor="engram"`; not_conflict no-op |
+| REQ-009 JudgeBySemantic store method | ✅ COMPLIANT | `internal/store/relations.go` | `internal/store/judge_by_semantic_test.go` | UPSERT semantics; `marked_by_kind="system"`, `marked_by_actor="engram"`; durable `not_conflict` |
 | REQ-010 ScanResult extended with semantic counters | ✅ COMPLIANT | `internal/store/relations.go:154-156` | `internal/store/scan_semantic_test.go` (all 8 scan_semantic tests check counters); `internal/server/server_test.go` (TestHandleScanConflicts_*) | JSON tags `semantic_judged`/`semantic_skipped`/`semantic_errors`; zero-value safe |
-| REQ-011 mem_compare MCP tool | ✅ COMPLIANT | `internal/mcp/mcp.go:99,747-802,1684-1753` | `internal/mcp/mcp_compare_test.go` (8 tests: HappyPath, NotConflict_NoRow, MissingMemoryIDB, InvalidRelation, NonExistentObservation, Idempotency, ProfileAgent, ModelOptional) | Schema: memory_id_a/b int, relation enum, confidence float, reasoning string, model optional; resolves int IDs to sync_ids; calls JudgeBySemantic |
+| REQ-011 mem_compare MCP tool | ✅ COMPLIANT | `internal/mcp/mcp.go` | `internal/mcp/mcp_compare_test.go` | Schema: integer memory IDs, relation enum, confidence float, reasoning of at most 200 Unicode runes, model optional; rejects fractional IDs; resolves IDs to sync_ids and calls JudgeBySemantic |
 | REQ-012 per-pair failure isolation | ✅ COMPLIANT | `internal/store/relations.go:1361-1407` | `internal/store/scan_semantic_test.go` (TestScanProject_Semantic_ErrorIsolation) | panic recover; structured warn log; SemanticErrors++ on err/timeout; scan continues |
 | REQ-013 conflict-scan modified | ✅ COMPLIANT | `cmd/engram/conflicts.go:300-470` | All Phase 3 test suite still GREEN + new D.2 semantic-off cases | Phase 3 dry-run/apply/max-insert/already-related logic preserved |
 | REQ-014 POST /conflicts/scan accepts semantic params | ✅ COMPLIANT | `internal/server/server.go:817-933` (semantic body fields, defaults via `*int`, runner resolution, response counters) | `internal/server/server_test.go` (5 tests: SemanticFalse_CountersZero, SemanticTrue_NoFactory_500, SemanticTrue_WithMockRunner, InvalidConcurrency_400, InvalidTimeout_400) | `*int` distinguishes absent from explicit zero; concurrency [1,20] + timeout [1,600] validated; counters always present in response |
@@ -60,7 +60,7 @@ All 30 tasks complete, 16 spec REQs fully implemented, full `go test ./...` GREE
 | B.6 GREEN factory.go | ✅ | `internal/llm/factory.go:28-49` | `internal/llm/factory_test.go` (5 tests) |
 | C.1 store/runner.go (duck-type) | ✅ | `internal/store/runner.go:5-25` | structural; covered by C.2/C.5 |
 | C.2 RED judge_by_semantic_test.go | ✅ | n/a | `internal/store/judge_by_semantic_test.go` |
-| C.3 GREEN JudgeBySemantic | ✅ | `internal/store/relations.go:725-810`; `validateCrossProjectGuard:694-708` | `internal/store/judge_by_semantic_test.go` (6 tests) |
+| C.3 GREEN JudgeBySemantic | ✅ | `internal/store/relations.go` | `internal/store/judge_by_semantic_test.go` |
 | C.4 ScanOptions+ScanResult fields | ✅ | `internal/store/relations.go:142-197` (ScanResult, ObservationSnippet, ScanOptions) | covered by C.5 + scan_semantic tests |
 | C.5 RED scan_semantic_test.go | ✅ | n/a | `internal/store/scan_semantic_test.go` (8 tests) |
 | C.6 GREEN ScanProject worker pool | ✅ | `internal/store/relations.go:1150-1421` | `internal/store/scan_semantic_test.go` |
@@ -71,7 +71,7 @@ All 30 tasks complete, 16 spec REQs fully implemented, full `go test ./...` GREE
 | E.2 full `go test ./...` GREEN | ✅ | n/a (gate) | full suite |
 | F.1 RED server_test.go (5 tests) | ✅ | n/a | `internal/server/server_test.go` |
 | F.2 GREEN server.go semantic params | ✅ | `internal/server/server.go:69-104, 817-933`; `cmd/engram/main.go` (SetRunnerFactory/SetPromptBuilder wiring) | `internal/server/server_test.go` (5 tests) |
-| G.1 RED mcp_compare_test.go (8 tests) | ✅ | n/a | `internal/mcp/mcp_compare_test.go` (8 tests) |
+| G.1 RED mcp_compare_test.go | ✅ | n/a | `internal/mcp/mcp_compare_test.go` |
 | G.2 GREEN mem_compare in mcp.go | ✅ | `internal/mcp/mcp.go:99,747-802,1684-1753` | `internal/mcp/mcp_compare_test.go` |
 | H.1 docs/PLUGINS.md updated | ✅ | `docs/PLUGINS.md:85,267-310` (tool count 18/14, semantic flags + mem_compare reference) | n/a (docs) |
 | H.2 DOCS.md + README + ARCHITECTURE + AGENT-SETUP | ⚠️ | `DOCS.md:570,681`; `README.md:79`; `docs/ARCHITECTURE.md:128`; `docs/AGENT-SETUP.md:61,102,454` | `docs/AGENT-SETUP.md:50` still has stale "12 agent-facing tools" — see WARNING-1 |

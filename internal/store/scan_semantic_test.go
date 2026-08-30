@@ -247,16 +247,53 @@ func TestScanProjectSemanticEvaluatesPairWithOnlyOrphanedAlias(t *testing.T) {
 	}
 }
 
+func TestScanProjectSemanticEvaluatesPairWithOnlyExternalJudgment(t *testing.T) {
+	s := newTestStore(t)
+	_, syncA, _, syncB := seedSimilarPair(t, s, "semantic-external-project")
+	if _, err := s.DB().Exec(`
+		INSERT INTO memory_relations (sync_id, source_id, target_id, relation, judgment_status, marked_by_actor, marked_by_kind)
+		VALUES ('rel-external-only', ?, ?, 'conflicts_with', 'judged', 'agent:external', 'agent')
+	`, syncA, syncB); err != nil {
+		t.Fatalf("seed external relation: %v", err)
+	}
+	runner := &verdictRunner{verdict: SemanticVerdict{
+		Relation: RelationNotConflict, Confidence: 0.9, Reasoning: "independent system opinion", Model: "haiku",
+	}}
+	result, err := s.ScanProject(ScanOptions{
+		Project: "semantic-external-project", Apply: true, Semantic: true, Concurrency: 1,
+		TimeoutPerCall: 5 * time.Second, MaxSemantic: 10, Runner: runner, BuildPrompt: identityPromptBuilder,
+	})
+	if err != nil {
+		t.Fatalf("ScanProject: %v", err)
+	}
+	if runner.calls != 1 || result.SemanticJudged != 1 {
+		t.Fatalf("external-only scan = runner calls %d, semantic judgments %d; want 1 and 1", runner.calls, result.SemanticJudged)
+	}
+	var external, system int
+	if err := s.DB().QueryRow(`
+		SELECT
+			sum(CASE WHEN sync_id = 'rel-external-only' AND judgment_status = 'judged' THEN 1 ELSE 0 END),
+			sum(CASE WHEN marked_by_actor = 'engram' AND marked_by_kind = 'system' AND relation = 'not_conflict' THEN 1 ELSE 0 END)
+		FROM memory_relations
+	`).Scan(&external, &system); err != nil {
+		t.Fatalf("count external and system relations: %v", err)
+	}
+	if external != 1 || system != 1 {
+		t.Fatalf("external/system relation counts = %d/%d, want 1/1", external, system)
+	}
+}
+
 // TestScanProject_Semantic_DryRunDoesNotPersist verifies that semantic dry-runs
 // evaluate valid verdicts without changing relation or sync state.
 func TestScanProject_Semantic_DryRunDoesNotPersist(t *testing.T) {
 	for _, tc := range []struct {
 		name              string
 		confidence        float64
-		wantJudged        bool
+		wantSkipped       bool
 		wantSemanticError bool
 	}{
-		{name: "valid confidence", confidence: 0.9, wantJudged: true},
+		{name: "valid compatible verdict", confidence: 0.9, wantSkipped: true},
+		{name: "valid not_conflict verdict", confidence: 0.9, wantSkipped: true},
 		{name: "NaN confidence", confidence: math.NaN(), wantSemanticError: true},
 		{name: "positive infinite confidence", confidence: math.Inf(1), wantSemanticError: true},
 		{name: "negative infinite confidence", confidence: math.Inf(-1), wantSemanticError: true},
@@ -281,9 +318,13 @@ func TestScanProject_Semantic_DryRunDoesNotPersist(t *testing.T) {
 				t.Fatalf("GetSyncState before scan: %v", err)
 			}
 
+			relation := "compatible"
+			if tc.name == "valid not_conflict verdict" {
+				relation = RelationNotConflict
+			}
 			runner := &verdictRunner{
 				verdict: SemanticVerdict{
-					Relation:   "compatible",
+					Relation:   relation,
 					Confidence: tc.confidence,
 					Reasoning:  "both discuss JWT auth",
 					Model:      "haiku",
@@ -302,11 +343,11 @@ func TestScanProject_Semantic_DryRunDoesNotPersist(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ScanProject: %v", err)
 			}
-			if tc.wantJudged && (result.SemanticJudged == 0 || result.SemanticErrors != 0) {
-				t.Errorf("semantic counters = judged:%d errors:%d, want judged > 0 and errors = 0", result.SemanticJudged, result.SemanticErrors)
+			if tc.wantSkipped && (result.SemanticSkipped == 0 || result.SemanticJudged != 0 || result.SemanticErrors != 0) {
+				t.Errorf("semantic counters = skipped:%d judged:%d errors:%d, want skipped > 0, judged = 0, and errors = 0", result.SemanticSkipped, result.SemanticJudged, result.SemanticErrors)
 			}
-			if tc.wantSemanticError && (result.SemanticJudged != 0 || result.SemanticErrors == 0) {
-				t.Errorf("semantic counters = judged:%d errors:%d, want judged = 0 and errors > 0", result.SemanticJudged, result.SemanticErrors)
+			if tc.wantSemanticError && (result.SemanticSkipped != 0 || result.SemanticJudged != 0 || result.SemanticErrors == 0) {
+				t.Errorf("semantic counters = skipped:%d judged:%d errors:%d, want skipped = 0, judged = 0, and errors > 0", result.SemanticSkipped, result.SemanticJudged, result.SemanticErrors)
 			}
 			if runner.calls == 0 {
 				t.Error("semantic runner was not called during dry-run")

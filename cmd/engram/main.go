@@ -3246,12 +3246,17 @@ func migrateOrphanedDBCandidates(correctDir string, candidates []string) {
 		if orphanedDBMoveBeforeLock != nil {
 			orphanedDBMoveBeforeLock()
 		}
-		unlock, err := store.AcquireDatabaseGenerationMoveLock(correctDir)
+		unlock, err := store.AcquireDatabaseGenerationMoveLocks(filepath.Dir(candidate), correctDir)
 		if err != nil {
 			log.Printf("[engram] migration refused: %v; stop the running Engram process and retry", err)
 			return
 		}
-		defer unlock()
+		locked := true
+		defer func() {
+			if locked {
+				unlock()
+			}
+		}()
 		if orphanedDBMoveAfterLock != nil {
 			orphanedDBMoveAfterLock()
 		}
@@ -3270,10 +3275,16 @@ func migrateOrphanedDBCandidates(correctDir string, candidates []string) {
 			log.Printf("[engram] migration failed: %v", err)
 			return
 		}
+		unlock()
+		locked = false
 
 		// Clean up empty orphaned directory.
 		orphanDir := filepath.Dir(candidate)
 		entries, _ := os.ReadDir(orphanDir)
+		if len(entries) == 1 && entries[0].Name() == ".generation.lock" {
+			_ = os.Remove(filepath.Join(orphanDir, ".generation.lock"))
+			entries, _ = os.ReadDir(orphanDir)
+		}
 		if len(entries) == 0 {
 			os.Remove(orphanDir)
 		}

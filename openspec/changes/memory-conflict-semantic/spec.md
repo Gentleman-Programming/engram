@@ -95,7 +95,7 @@ The system MUST define `AgentRunner` and `Verdict` in `internal/llm/runner.go`. 
 
 ### Requirement: --semantic flag on engram conflicts scan
 
-`engram conflicts scan` MUST accept `--semantic` (bool, default false). When absent, behavior MUST be identical to Phase 3. When present, after FTS5 candidate collection the system MUST: print the cost-warning estimate, require confirmation (or `--yes`), then invoke `AgentRunner.Compare` per candidate via a worker pool, and persist non-`not_conflict` verdicts via `JudgeBySemantic`.
+`engram conflicts scan` MUST accept `--semantic` (bool, default false). When absent, behavior MUST be identical to Phase 3. When present, after FTS5 candidate collection the system MUST: print the cost-warning estimate, require confirmation (or `--yes`), then invoke `AgentRunner.Compare` per candidate via a worker pool. With `--apply`, every valid verdict is persisted via `JudgeBySemantic`; without it, valid verdicts are counted as skipped without persistence.
 
 #### Scenario: --semantic off — Phase 3 behavior unchanged
 
@@ -169,7 +169,7 @@ MUST accept `--max-semantic N` (int, default 100). When the FTS5 candidate count
 
 ### Requirement: JudgeBySemantic store method
 
-`*store.Store` MUST expose `JudgeBySemantic(opts JudgeBySemanticOptions) (syncID string, error)`. MUST insert a `memory_relations` row with `marked_by_kind="system"`, `marked_by_actor="engram"`, `marked_by_model=<opts.Model>`. MUST skip rows where `Relation == "not_conflict"`. MUST be idempotent on same pair+provenance (UPDATE if exists).
+`*store.Store` MUST expose `JudgeBySemantic(opts JudgeBySemanticOptions) (syncID string, error)`. It MUST persist a durable system-owned row with `marked_by_kind="system"`, `marked_by_actor="engram"`, and `marked_by_model=<opts.Model>`, including `Relation == "not_conflict"`. It may update only an existing system-owned row for the pair; human and external-agent rows remain independent opinions. It MUST be idempotent on the system-owned pair+provenance.
 
 #### Scenario: inserts judged row with system provenance
 
@@ -177,11 +177,11 @@ MUST accept `--max-semantic N` (int, default 100). When the FTS5 candidate count
 - WHEN `JudgeBySemantic({ObsA:A, ObsB:B, Relation:"compatible", Confidence:0.9, Model:"haiku"})` is called
 - THEN a row is inserted with `marked_by_actor="engram"` and `marked_by_model="haiku"` and a non-empty sync_id is returned
 
-#### Scenario: not_conflict verdict is not persisted
+#### Scenario: not_conflict verdict is persisted
 
 - GIVEN two observations with no existing relation
 - WHEN `JudgeBySemantic({Relation:"not_conflict"})` is called
-- THEN no row is inserted and no error is returned
+- THEN a judged system row with `relation="not_conflict"` is persisted and its sync_id is returned
 
 #### Scenario: validates required fields
 
@@ -197,9 +197,9 @@ MUST accept `--max-semantic N` (int, default 100). When the FTS5 candidate count
 
 #### Scenario: counters reflect scan outcomes
 
-- GIVEN a semantic scan where 8 pairs succeed, 1 is skipped (not_conflict), 1 errors
+- GIVEN a semantic dry-run where 8 pairs receive valid verdicts and 1 errors
 - WHEN the scan completes
-- THEN `SemanticJudged=8`, `SemanticSkipped=1`, `SemanticErrors=1` are returned
+- THEN `SemanticJudged=0`, `SemanticSkipped=8`, `SemanticErrors=1` are returned
 
 #### Scenario: HTTP response includes semantic counters
 
@@ -225,7 +225,7 @@ Any error from `AgentRunner.Compare` (including timeouts) MUST: emit a structure
 
 ### Requirement: mem_compare MCP tool
 
-The system MUST register `mem_compare` in `internal/mcp/mcp.go`. Input schema: `memory_id_a` (int, required), `memory_id_b` (int, required), `relation` (string enum, required), `confidence` (float 0..1, required), `reasoning` (string ≤200 chars, required), `model` (string, optional). Behavior: persists a relation row via `JudgeBySemantic`. Returns the inserted row's `sync_id`. MUST be idempotent on existing same-pair relation.
+The system MUST register `mem_compare` in `internal/mcp/mcp.go`. Input schema: `memory_id_a` (integer, required), `memory_id_b` (integer, required), `relation` (string enum, required), `confidence` (float 0..1, required), `reasoning` (string of at most 200 Unicode runes, required), `model` (string, optional). Fractional numeric IDs MUST be rejected. Behavior: persists a relation row via `JudgeBySemantic`. Returns the inserted row's `sync_id`. MUST be idempotent on existing same-pair relation.
 
 #### Scenario: agent persists verdict via mem_compare
 
@@ -233,11 +233,11 @@ The system MUST register `mem_compare` in `internal/mcp/mcp.go`. Input schema: `
 - WHEN `mem_compare(memory_id_a:10, memory_id_b:20, relation:"supersedes", confidence:0.98, reasoning:"newer post supersedes", model:"haiku")` is called
 - THEN a relation row is inserted with system provenance and the sync_id is returned
 
-#### Scenario: mem_compare with not_conflict does not insert
+#### Scenario: mem_compare persists not_conflict
 
 - GIVEN observations id=5 and id=6 exist
 - WHEN `mem_compare(memory_id_a:5, memory_id_b:6, relation:"not_conflict", confidence:0.99, reasoning:"unrelated")` is called
-- THEN no row is inserted and the tool returns a success response with no sync_id
+- THEN a durable system `not_conflict` row is inserted and the tool returns its sync_id
 
 #### Scenario: mem_compare rejects missing required field
 
@@ -306,7 +306,7 @@ Phase 4 additionally accepts `--semantic`, `--concurrency N` (default 5, max 20)
 
 - GIVEN a seeded project with FTS5 candidates and a fake runner
 - WHEN `POST /conflicts/scan` with `{"project":"alpha","semantic":true,"concurrency":2,"max_semantic":10}`
-- THEN response includes non-zero `semantic_judged` and the verdict rows are in the DB
+- THEN response includes non-zero `semantic_skipped` and no verdict rows are added to the DB
 
 ---
 

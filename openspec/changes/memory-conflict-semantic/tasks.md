@@ -31,11 +31,11 @@
 ## Phase C: Store layer extension (parallel with D)
 
 - [x] C.1 Create `internal/store/runner.go`: local duck-typed `AgentRunner` mirror interface (`Compare(ctx, prompt) (Verdict, error)`) — avoids `store→llm` import cycle. [Design: cross-package boundary]
-- [x] C.2 RED — Write `internal/store/judge_by_semantic_test.go`: real SQLite in-memory tests — insert happy path with system provenance; UPSERT idempotency on same `(source_id, target_id)` pair; `not_conflict` is no-op (zero rows); validation error on zero-value SourceID. [REQ: JudgeBySemantic]
+- [x] C.2 RED — Write `internal/store/judge_by_semantic_test.go`: real SQLite in-memory tests — insert happy path with system provenance; UPSERT idempotency on same `(source_id, target_id)` pair; durable `not_conflict`; validation error on zero-value SourceID. [REQ: JudgeBySemantic]
 - [x] C.3 GREEN — Extend `internal/store/relations.go`: add `JudgeBySemanticParams` struct and `(s *Store) JudgeBySemantic(p JudgeBySemanticParams) (string, error)` — UPSERT into `memory_relations` with `marked_by_kind="system"`, `marked_by_actor="engram"`, `marked_by_model`. Extract shared cross-project guard helper reused from `JudgeRelation`. [REQ: JudgeBySemantic]
 - [x] C.4 Extend `internal/store/relations.go`: add semantic fields to `ScanOptions` (`Semantic bool`, `Concurrency int`, `TimeoutPerCall time.Duration`, `MaxSemantic int`, `Runner AgentRunnerLike`) and to `ScanResult` (`SemanticJudged int`, `SemanticSkipped int`, `SemanticErrors int`). [REQ: ScanResult counters]
 - [x] C.5 RED — Write `internal/store/scan_semantic_test.go`: fake-runner driven `ScanProject` with `Semantic=true` — counter accuracy (judged/skipped/errors); per-pair error isolation (one error does not abort scan); `--max-semantic` cap limits LLM calls; timeout-exceeded pair → `SemanticErrors++`. [REQ: per-pair failure isolation, max-semantic cap, timeout]
-- [x] C.6 GREEN — Extend `ScanProject` in `internal/store/relations.go`: when `ScanOptions.Semantic=true`, after FTS5 collection spawn `errgroup.SetLimit(Concurrency)` worker pool; per-pair `context.WithTimeout(TimeoutPerCall)`; classify verdict into judged/skipped/errors; call `JudgeBySemantic` for non-`not_conflict` verdicts. [REQ: worker pool, per-pair isolation]
+- [x] C.6 GREEN — Extend `ScanProject` in `internal/store/relations.go`: when `ScanOptions.Semantic=true`, after FTS5 collection spawn a bounded worker pool; per-pair `context.WithTimeout(TimeoutPerCall)`; dry-runs count valid verdicts as skipped without persistence; apply scans call `JudgeBySemantic` for every valid verdict. [REQ: worker pool, per-pair isolation]
 
 ---
 
@@ -56,14 +56,14 @@
 
 ## Phase F: HTTP API extension (parallel with G)
 
-- [x] F.1 RED — Extend `internal/server/server_test.go`: `POST /conflicts/scan` with `semantic=false` → `semantic_judged=0`, `semantic_skipped=0`, `semantic_errors=0` in response; `semantic=true` with injected fake runner → non-zero judged counter and verdict rows in DB; omitted fields → defaults applied. [REQ: POST /conflicts/scan semantic params]
+- [x] F.1 RED — Extend `internal/server/server_test.go`: `POST /conflicts/scan` with `semantic=false` → `semantic_judged=0`, `semantic_skipped=0`, `semantic_errors=0` in response; semantic dry-run with an injected fake runner → non-zero skipped counter and unchanged relation/sync-write counts; omitted fields → defaults applied. [REQ: POST /conflicts/scan semantic params]
 - [x] F.2 GREEN — Extend `internal/server/server.go`: extend `POST /conflicts/scan` body parser to accept `semantic`, `concurrency`, `timeout_per_call_seconds`, `max_semantic`; apply defaults matching CLI; forward to `ScanOptions`; add `semantic_judged`, `semantic_skipped`, `semantic_errors` to JSON response. [REQ: POST /conflicts/scan]
 
 ---
 
 ## Phase G: mem_compare MCP tool (parallel with F)
 
-- [x] G.1 RED — Extend `internal/mcp/mcp_test.go`: `mem_compare` happy path inserts row with `marked_by_actor="engram"`; `not_conflict` returns success with no row; missing `memory_id_b` → MCP error; `memory_id_a=9999` not found → descriptive error. [REQ: mem_compare MCP tool]
+- [x] G.1 RED — Extend `internal/mcp/mcp_test.go`: `mem_compare` happy path inserts row with `marked_by_actor="engram"`; `not_conflict` persists; fractional IDs and overlong reasoning return MCP errors; missing `memory_id_b` → MCP error; `memory_id_a=9999` not found → descriptive error. [REQ: mem_compare MCP tool]
 - [x] G.2 GREEN — Extend `internal/mcp/mcp.go`: register `mem_compare` tool with input schema (memory_id_a int, memory_id_b int, relation enum, confidence float, reasoning ≤200, model optional); resolve observation IDs → sync_ids; call `Store.JudgeBySemantic`; return `{sync_id}`. [REQ: mem_compare MCP tool]
 
 ---

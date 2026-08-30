@@ -177,8 +177,9 @@ type ScanResult struct {
 
 	// Semantic counters — populated only when ScanOptions.Semantic is true.
 	// Zero-value is safe for existing JSON consumers.
-	SemanticJudged int `json:"semantic_judged"`
-	SemanticErrors int `json:"semantic_errors"`
+	SemanticSkipped int `json:"semantic_skipped"`
+	SemanticJudged  int `json:"semantic_judged"`
+	SemanticErrors  int `json:"semantic_errors"`
 }
 
 // ObservationSnippet carries the fields needed by BuildPrompt to construct an
@@ -389,22 +390,23 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 		if strings.TrimSpace(queryText) == "" {
 			queryText = title
 		}
-		if len(searchTerms(queryText)) == 0 {
+		normalizedQuery := normalizedSearchQuery(queryText)
+		if normalizedQuery == "" {
 			return nil
 		}
-		longTerms, shortTerms := splitSearchTerms(queryText)
+		longTerms, shortTerms := splitSearchTerms(normalizedQuery)
 		mixedAny := len(longTerms) > 0 && len(shortTerms) > 0
 		var rows *sql.Rows
 		var err error
-		if shouldUseTrigramLikeFallback(queryText) {
-			query, args := candidateLikeQuery(queryText, savedID, project, scope, limit)
+		if shouldUseTrigramLikeFallback(normalizedQuery) {
+			query, args := candidateLikeQuery(normalizedQuery, savedID, project, scope, limit)
 			rows, err = s.db.Query(query, args...)
 		} else {
 			query, threshold, err := candidateRankQuery(opts)
 			if err != nil {
 				return fmt.Errorf("FindCandidates: %w", err)
 			}
-			ftsQuery := sanitizeFTSCandidates(queryText)
+			ftsQuery := sanitizeFTSCandidates(normalizedQuery)
 			if ftsQuery == "" {
 				return nil
 			}
@@ -1007,9 +1009,9 @@ func (s *Store) relationExistsSQL(sourceSyncID, targetSyncID string) (bool, erro
 	return false, err
 }
 
-// relationEvaluated reports whether an unordered pair has a judged relation.
-// Semantic scans must still evaluate pending and orphaned rows so their
-// provisional candidate relation can be resolved by JudgeBySemantic.
+// relationEvaluated reports whether the system has already judged an unordered
+// pair. Semantic scans must still evaluate pending, orphaned, and independently
+// owned human/external rows so JudgeBySemantic can persist Engram's opinion.
 func (s *Store) relationEvaluated(sourceSyncID, targetSyncID string) (bool, error) {
 	var exists bool
 	err := s.withRead(func() error {
@@ -1027,6 +1029,8 @@ func (s *Store) relationEvaluatedSQL(sourceSyncID, targetSyncID string) (bool, e
 		 WHERE ((source_id = ? AND target_id = ?)
 		     OR (source_id = ? AND target_id = ?))
 		   AND judgment_status = ?
+		   AND marked_by_actor = 'engram'
+		   AND marked_by_kind = 'system'
 		 LIMIT 1`,
 		sourceSyncID, targetSyncID, targetSyncID, sourceSyncID, JudgmentStatusJudged,
 	).Scan(&exists)
@@ -1103,9 +1107,9 @@ func (s *Store) finalizeJudgedRelationTx(tx *sql.Tx, judgedSyncID, sourceID, tar
 // This resolves any pending relation annotation and prevents ScanProject
 // from re-inserting the pair on subsequent scans.
 //
-// Idempotency: if a row already exists for (source_id, target_id) in either
-// direction, the existing row is updated (UPSERT). The returned sync_id is
-// always the canonical row's sync_id.
+// Idempotency is scoped to the system's own opinion: a system-generated pending
+// row is reused first, then a prior Engram system judgment. Human and external
+// agent rows are preserved as independent opinions for the same unordered pair.
 //
 // Returns ErrCrossProjectRelation when source and target belong to different
 // projects. Returns a validation error when required fields are missing or
@@ -1133,14 +1137,21 @@ func (s *Store) JudgeBySemantic(p JudgeBySemanticParams) (string, error) {
 			return err
 		}
 
-		// Check whether a row already exists for this (source_id, target_id) pair
-		// in either direction.
+		// Select only a row owned by the system. Legacy pending rows without
+		// provenance predate actor ownership and are treated as provisional system
+		// pending rows; explicitly non-system pending rows are never finalized here.
 		var existingSyncID string
 		err := tx.QueryRow(`
 			SELECT sync_id FROM memory_relations
-			WHERE (source_id = ? AND target_id = ?)
-			   OR (source_id = ? AND target_id = ?)
-			ORDER BY CASE judgment_status WHEN 'pending' THEN 0 ELSE 1 END, id ASC
+			WHERE ((source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?))
+			  AND (
+				(judgment_status = 'pending' AND (
+					(marked_by_actor = 'engram' AND marked_by_kind = 'system')
+					OR (marked_by_actor IS NULL AND marked_by_kind IS NULL)
+				))
+				OR (judgment_status = 'judged' AND marked_by_actor = 'engram' AND marked_by_kind = 'system')
+			  )
+			ORDER BY CASE WHEN judgment_status = 'pending' THEN 0 ELSE 1 END, id ASC
 			LIMIT 1
 		`, p.SourceID, p.TargetID, p.TargetID, p.SourceID).Scan(&existingSyncID)
 
@@ -1184,9 +1195,13 @@ func (s *Store) JudgeBySemantic(p JudgeBySemanticParams) (string, error) {
 				    judgment_status = 'judged',
 				    confidence      = ?,
 				    reason          = ?,
+				    evidence        = NULL,
 				    marked_by_actor = ?,
 				    marked_by_kind  = ?,
 				    marked_by_model = ?,
+				    session_id      = NULL,
+				    superseded_at   = NULL,
+				    superseded_by_relation_id = NULL,
 				    updated_at      = datetime('now')
 				WHERE sync_id = ?
 			`, p.Relation, p.SourceID, p.TargetID, confidence, p.Reasoning,
@@ -1196,7 +1211,7 @@ func (s *Store) JudgeBySemantic(p JudgeBySemanticParams) (string, error) {
 				return fmt.Errorf("JudgeBySemantic: update: %w", execErr)
 			}
 		}
-		if err := s.finalizeJudgedRelationTx(tx, existingSyncID, p.SourceID, p.TargetID); err != nil {
+		if err := s.finalizeSemanticJudgedRelationTx(tx, existingSyncID, p.SourceID, p.TargetID); err != nil {
 			return fmt.Errorf("JudgeBySemantic: finalize judgment: %w", err)
 		}
 
@@ -1271,6 +1286,36 @@ func (s *Store) JudgeBySemantic(p JudgeBySemanticParams) (string, error) {
 	}
 
 	return resultSyncID, nil
+}
+
+// finalizeSemanticJudgedRelationTx closes only provisional/system pending rows.
+// A semantic verdict is the system's opinion, not authority to orphan a pending
+// human or external-agent judgment for the same pair.
+func (s *Store) finalizeSemanticJudgedRelationTx(tx *sql.Tx, judgedSyncID, sourceID, targetID string) error {
+	if _, err := s.execHook(tx, `
+		UPDATE memory_relations
+		SET superseded_at = NULL,
+		    superseded_by_relation_id = NULL
+		WHERE sync_id = ?
+	`, judgedSyncID); err != nil {
+		return fmt.Errorf("clear semantic judged relation supersession: %w", err)
+	}
+	if _, err := s.execHook(tx, `
+		UPDATE memory_relations
+		SET judgment_status = 'orphaned',
+		    superseded_at = datetime('now'),
+		    superseded_by_relation_id = (SELECT id FROM memory_relations WHERE sync_id = ?)
+		WHERE judgment_status = 'pending'
+		  AND sync_id != ?
+		  AND ((source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?))
+		  AND (
+			(marked_by_actor = 'engram' AND marked_by_kind = 'system')
+			OR (marked_by_actor IS NULL AND marked_by_kind IS NULL)
+		  )
+	`, judgedSyncID, judgedSyncID, sourceID, targetID, targetID, sourceID); err != nil {
+		return fmt.Errorf("retire system pending twins: %w", err)
+	}
+	return nil
 }
 
 // getRelationTx is the transactional variant of GetRelation used within
@@ -2112,7 +2157,7 @@ scan:
 						isValidRelationVerb(verdict.Relation) &&
 						isValidConfidence(verdict.Confidence) {
 						mu.Lock()
-						result.SemanticJudged++
+						result.SemanticSkipped++
 						mu.Unlock()
 						return
 					}

@@ -10,7 +10,7 @@ Phase 3 (memory-conflict-audit) shipped `engram conflicts scan` using FTS5+BM25 
 - "Use Postgres" vs "We migrated to MongoDB" (supersedes — newer replaces older)
 - "Use Clean Architecture" vs "Use Hexagonal Architecture" (compatible — conceptually equivalent)
 
-FTS5 cannot see these because the tokens do not overlap. Phase 4 adds an LLM-judge layer on top of the FTS5 candidate stream.
+FTS5 cannot see these because the tokens do not overlap. Phase 4 adds an LLM-judge layer for FTS5 candidate pairs; it does not independently discover pairs with no lexical candidate.
 
 ## Verified facts
 
@@ -27,14 +27,15 @@ FTS5 cannot see these because the tokens do not overlap. Phase 4 adds an LLM-jud
 - **No embeddings, no bundled models, no API key management in engram** — engram shells out to an external agent CLI.
 - **Two transports both ship in Phase 4**:
   - **4a — CLI shell-out**: `engram conflicts scan --semantic` invokes `ENGRAM_AGENT_CLI` (claude | opencode).
-  - **4b — MCP `mem_compare` tool**: agent reads both memories, returns verdict via MCP.
+  - **4b — MCP `mem_compare` tool**: agent reads both memories, supplies its verdict, and persists it through `JudgeBySemantic`.
 - **`AgentRunner` interface** in `internal/llm/` (new package) with `Compare(ctx, prompt) (Verdict, error)`. Two implementations: `ClaudeRunner`, `OpenCodeRunner`.
 - **Selected via env var**: `ENGRAM_AGENT_CLI=claude` or `ENGRAM_AGENT_CLI=opencode`.
-- Plug point: after `FindCandidates` returns a candidate, before `InsertPending` — call `AgentRunner.Compare` and persist the verdict directly via new store method `JudgeBySemantic`.
+- Plug point: after `FindCandidates` returns a candidate, before `InsertPending` — call `AgentRunner.Compare`; apply scans persist valid verdicts via `JudgeBySemantic`, while dry-runs count them as skipped without writes.
 - Concurrency: pool of 5 by default, configurable via `--concurrency N`.
 - Cost warning: pre-scan prints request count + token estimate, NEVER $$ as primary metric. Subscription users see "consumes quota, no extra charge"; per-token API users see estimated range.
 - Failure handling: per-pair skip+log, scan continues, `SemanticErrors` counter in `ScanResult`.
-- Persistence: ALL non-`not_conflict` verdicts persist (scoped, related, conflicts_with, supersedes, compatible). Provenance: `marked_by_kind="system"`, `marked_by_actor="engram"`, `marked_by_model=<runner output model>`.
+- Persistence: applied scans persist every valid verdict, including `not_conflict`, as a durable system-owned row. Dry-runs are non-mutating and increment `SemanticSkipped`. System replay updates only Engram-owned system rows and preserves every other actor and status.
+- Schema migration v9 performs atomic writer-exclusive FTS repair when upgrading from v8.
 
 ## Affected modules
 

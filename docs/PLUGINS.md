@@ -295,7 +295,7 @@ The `engram conflicts <sub-command>` command provides read and scan access to th
 
 When `--project` is omitted, the command falls back to the cwd-detected project (same resolution as all other `engram` commands).
 
-`engram conflicts scan` also supports `--semantic` for LLM-judge semantic detection beyond FTS5 lexical candidates. This catches vocabulary-different concepts that share no keywords (e.g., "Hexagonal Architecture" vs "Ports and Adapters"). Set `ENGRAM_AGENT_CLI=claude` or `ENGRAM_AGENT_CLI=opencode` before running. Additional flags: `--concurrency N` (default 5), `--timeout-per-call N` seconds (default 60), `--max-semantic N` (default 100), `--yes` (skip confirmation).
+`engram conflicts scan` also supports `--semantic` to LLM-judge FTS5 lexical candidates. Set `ENGRAM_AGENT_CLI=claude` or `ENGRAM_AGENT_CLI=opencode` before running. A semantic dry-run evaluates valid verdicts without persisting them; add `--apply` to persist them. Additional flags: `--concurrency N` (default 5), `--timeout-per-call N` seconds (default 60), `--max-semantic N` (default 100), `--yes` (skip confirmation).
 
 > **Subscription note**: `--semantic` uses your existing agent CLI quota (Claude Pro/Max, OpenCode subscription). Engram itself adds no extra cost — you pay only what your LLM provider charges for the prompts.
 
@@ -332,7 +332,7 @@ Records a verdict on a semantic comparison between two memories. The agent reads
 | `memory_id_b` | yes | int | Observation ID of the second memory |
 | `relation` | yes | string | One of: `conflicts_with` | `supersedes` | `scoped` | `related` | `compatible` | `not_conflict` |
 | `confidence` | yes | float | 0.0..1.0 |
-| `reasoning` | yes | string | Explanation of the verdict (max 200 chars) |
+| `reasoning` | yes | string | Explanation of the verdict (at most 200 Unicode runes) |
 | `model` | no | string | Model name for provenance (e.g. `"claude-haiku-4-5"`) |
 
 ### Behavior
@@ -342,7 +342,7 @@ On success, `mem_compare`:
 - Is idempotent: the same `(source_id, target_id)` pair updates the existing row rather than inserting a duplicate
 - Returns `{"sync_id": "<rel-hex>"}` on a persisted verdict
 
-`not_conflict` verdicts are no-ops — the call succeeds and returns `{"sync_id": ""}` but no row is written, matching the scan flow contract.
+`not_conflict` verdicts are persisted as durable system judgments and return their non-empty `sync_id`; conflict-focused views can exclude them without losing the audit record.
 
 Cross-project relations (where `memory_id_a` and `memory_id_b` belong to different projects) are rejected with an error.
 

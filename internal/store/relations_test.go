@@ -282,6 +282,22 @@ func TestFindCandidatesPreservesMeaningfulPunctuation(t *testing.T) {
 	}
 }
 
+func TestFindCandidatesUsesNormalizedQuery(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, wantSyncID := addTestObs(t, s, ".NET runtime", "decision", "testproject", "project")
+	savedID, _ := addTestObs(t, s, "source", "decision", "testproject", "project")
+
+	candidates, err := s.FindCandidates(savedID, CandidateOptions{
+		Project: "testproject", Scope: "project", Query: ".NET.", Limit: 10, SkipInsert: true,
+	})
+	if err != nil {
+		t.Fatalf("FindCandidates(.NET.): %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].SyncID != wantSyncID {
+		t.Fatalf("FindCandidates(.NET.) = %+v, want only %q", candidates, wantSyncID)
+	}
+}
+
 func TestFindCandidatesMixedAnyLimitPrefersFTSAfterDeduplication(t *testing.T) {
 	s := setupRelationsStore(t)
 	_, _ = addTestObs(t, s, "migration long-only", "decision", "testproject", "project")

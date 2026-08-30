@@ -1102,7 +1102,7 @@ func (s *Store) withRead(fn func() error) error {
 //
 // Enrolled-project sync repair is independent of this gate and runs before the
 // first sync operation through EnsureEnrolledProjectSyncMutations.
-const schemaVersion = 8
+const schemaVersion = 9
 
 // migrateRunCount counts executions of the gated migration block across the
 // process. It exists for test observability only — asserting that the
@@ -2646,112 +2646,74 @@ func normalizeUpgradeRepairClass(class string) string {
 	}
 }
 
+// ftsRepairAfterTriggerDropHook is a deterministic test seam. It runs inside
+// the repair transaction while SQLite excludes external writers.
+var ftsRepairAfterTriggerDropHook func()
+
+// ensureFTSTrigramTables owns the complete FTS repair in one write transaction.
+// Do not use s.db inside the transaction: Store databases have MaxOpenConns(1).
 func (s *Store) ensureFTSTrigramTables() error {
-	if err := s.ensureObservationsFTSTrigram(); err != nil {
-		return err
-	}
-	if err := s.ensurePromptsFTSTrigram(); err != nil {
-		return err
-	}
-	if err := s.recreateObservationFTSTriggers(); err != nil {
-		return err
-	}
-	if err := s.recreatePromptFTSTriggers(); err != nil {
-		return err
-	}
-	return nil
-}
+	return s.withTxUnchecked(func(tx *sql.Tx) error {
+		observationsSQL, err := ftsTableSQLTx(tx, "observations_fts")
+		if err != nil {
+			return fmt.Errorf("inspect observations fts: %w", err)
+		}
+		hasTopicKey, err := ftsTableHasColumnTx(tx, "observations_fts", "topic_key")
+		if err != nil {
+			return fmt.Errorf("inspect observations fts columns: %w", err)
+		}
+		promptsSQL, err := ftsTableSQLTx(tx, "prompts_fts")
+		if err != nil {
+			return fmt.Errorf("inspect prompts fts: %w", err)
+		}
+		rebuildObservations := !hasTopicKey || !ftsSQLUsesTrigram(observationsSQL)
+		rebuildPrompts := !ftsSQLUsesTrigram(promptsSQL)
 
-func (s *Store) ensureObservationsFTSTrigram() error {
-	sqlText, err := s.ftsTableSQL("observations_fts")
-	if err != nil {
-		return fmt.Errorf("inspect observations fts: %w", err)
-	}
-	hasTopicKey, err := s.ftsTableHasColumn("observations_fts", "topic_key")
-	if err != nil {
-		return fmt.Errorf("inspect observations fts columns: %w", err)
-	}
-	if hasTopicKey && ftsSQLUsesTrigram(sqlText) {
-		return nil
-	}
-
-	log.Printf("[store] rebuilding observations_fts with trigram tokenizer (one-time migration; may take a moment on large databases)")
-	// Wrap the drop/create/reinsert as one transaction so a failure mid-sequence
-	// cannot leave observations_fts present but empty; a later run would otherwise
-	// see the trigram shape already in place and skip the rebuild.
-	if err := s.withTx(func(tx *sql.Tx) error {
-		_, err := s.execHook(tx, `
+		if _, err := s.execHook(tx, `
 			DROP TRIGGER IF EXISTS obs_fts_insert;
 			DROP TRIGGER IF EXISTS obs_fts_update;
 			DROP TRIGGER IF EXISTS obs_fts_delete;
-			DROP TABLE IF EXISTS observations_fts;
-			CREATE VIRTUAL TABLE observations_fts USING fts5(
-				title,
-				content,
-				tool_name,
-				type,
-				project,
-				topic_key,
-				content='observations',
-				content_rowid='id',
-				tokenize='trigram'
-			);
-			INSERT INTO observations_fts(rowid, title, content, tool_name, type, project, topic_key)
-			SELECT id, title, content, tool_name, type, project, topic_key
-			FROM observations
-			WHERE deleted_at IS NULL;
-		`)
-		return err
-	}); err != nil {
-		return fmt.Errorf("rebuild observations fts: %w", err)
-	}
-	return nil
-}
-
-func (s *Store) ensurePromptsFTSTrigram() error {
-	sqlText, err := s.ftsTableSQL("prompts_fts")
-	if err != nil {
-		return fmt.Errorf("inspect prompts fts: %w", err)
-	}
-	if ftsSQLUsesTrigram(sqlText) {
-		return nil
-	}
-
-	log.Printf("[store] rebuilding prompts_fts with trigram tokenizer (one-time migration; may take a moment on large databases)")
-	// Wrap the drop/create/reinsert as one transaction so a failure mid-sequence
-	// cannot leave prompts_fts present but empty; a later run would otherwise see
-	// the trigram shape already in place and skip the rebuild.
-	if err := s.withTx(func(tx *sql.Tx) error {
-		_, err := s.execHook(tx, `
 			DROP TRIGGER IF EXISTS prompt_fts_insert;
 			DROP TRIGGER IF EXISTS prompt_fts_update;
 			DROP TRIGGER IF EXISTS prompt_fts_delete;
-			DROP TABLE IF EXISTS prompts_fts;
-			CREATE VIRTUAL TABLE prompts_fts USING fts5(
-				content,
-				project,
-				content='user_prompts',
-				content_rowid='id',
-				tokenize='trigram'
-			);
-			INSERT INTO prompts_fts(rowid, content, project)
-			SELECT id, content, project
-			FROM user_prompts;
-		`)
-		return err
-	}); err != nil {
-		return fmt.Errorf("rebuild prompts fts: %w", err)
-	}
-	return nil
+		`); err != nil {
+			return fmt.Errorf("drop fts triggers: %w", err)
+		}
+		if ftsRepairAfterTriggerDropHook != nil {
+			ftsRepairAfterTriggerDropHook()
+		}
+		if rebuildObservations {
+			log.Printf("[store] rebuilding observations_fts with trigram tokenizer (one-time migration; may take a moment on large databases)")
+			if _, err := s.execHook(tx, `
+				DROP TABLE IF EXISTS observations_fts;
+				CREATE VIRTUAL TABLE observations_fts USING fts5(title, content, tool_name, type, project, topic_key, content='observations', content_rowid='id', tokenize='trigram');
+				INSERT INTO observations_fts(rowid, title, content, tool_name, type, project, topic_key)
+				SELECT id, title, content, tool_name, type, project, topic_key FROM observations WHERE deleted_at IS NULL;
+			`); err != nil {
+				return fmt.Errorf("rebuild observations fts: %w", err)
+			}
+		}
+		if rebuildPrompts {
+			log.Printf("[store] rebuilding prompts_fts with trigram tokenizer (one-time migration; may take a moment on large databases)")
+			if _, err := s.execHook(tx, `
+				DROP TABLE IF EXISTS prompts_fts;
+				CREATE VIRTUAL TABLE prompts_fts USING fts5(content, project, content='user_prompts', content_rowid='id', tokenize='trigram');
+				INSERT INTO prompts_fts(rowid, content, project) SELECT id, content, project FROM user_prompts;
+			`); err != nil {
+				return fmt.Errorf("rebuild prompts fts: %w", err)
+			}
+		}
+		if err := s.recreateObservationFTSTriggersTx(tx); err != nil {
+			return err
+		}
+		return s.recreatePromptFTSTriggersTx(tx)
+	})
 }
 
-func (s *Store) recreateObservationFTSTriggers() error {
+func (s *Store) recreateObservationFTSTriggersTx(tx *sql.Tx) error {
 	// Keep trigger shape aligned with main's delete/insert FTS sync. Soft-delete
 	// gating (WHERE new.deleted_at IS NULL) belongs in a separate PR.
-	if _, err := s.execHook(s.db, `
-		DROP TRIGGER IF EXISTS obs_fts_insert;
-		DROP TRIGGER IF EXISTS obs_fts_update;
-		DROP TRIGGER IF EXISTS obs_fts_delete;
+	if _, err := s.execHook(tx, `
 		CREATE TRIGGER obs_fts_insert AFTER INSERT ON observations BEGIN
 			INSERT INTO observations_fts(rowid, title, content, tool_name, type, project, topic_key)
 			VALUES (new.id, new.title, new.content, new.tool_name, new.type, new.project, new.topic_key);
@@ -2774,11 +2736,8 @@ func (s *Store) recreateObservationFTSTriggers() error {
 	return nil
 }
 
-func (s *Store) recreatePromptFTSTriggers() error {
-	if _, err := s.execHook(s.db, `
-		DROP TRIGGER IF EXISTS prompt_fts_insert;
-		DROP TRIGGER IF EXISTS prompt_fts_update;
-		DROP TRIGGER IF EXISTS prompt_fts_delete;
+func (s *Store) recreatePromptFTSTriggersTx(tx *sql.Tx) error {
+	if _, err := s.execHook(tx, `
 		CREATE TRIGGER prompt_fts_insert AFTER INSERT ON user_prompts BEGIN
 			INSERT INTO prompts_fts(rowid, content, project)
 			VALUES (new.id, new.content, new.project);
@@ -2810,9 +2769,24 @@ func (s *Store) ftsTableSQL(name string) (string, error) {
 	return sqlText, err
 }
 
+func ftsTableSQLTx(tx *sql.Tx, name string) (string, error) {
+	var sqlText string
+	err := tx.QueryRow("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", name).Scan(&sqlText)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return sqlText, err
+}
+
 func (s *Store) ftsTableHasColumn(table, column string) (bool, error) {
 	var count int
 	err := s.db.QueryRow("SELECT COUNT(*) FROM pragma_table_xinfo(?) WHERE name = ?", table, column).Scan(&count)
+	return count > 0, err
+}
+
+func ftsTableHasColumnTx(tx *sql.Tx, table, column string) (bool, error) {
+	var count int
+	err := tx.QueryRow("SELECT COUNT(*) FROM pragma_table_xinfo(?) WHERE name = ?", table, column).Scan(&count)
 	return count > 0, err
 }
 
@@ -3766,6 +3740,10 @@ func (s *Store) searchPromptsSQL(query string, project string, limit int) ([]Pro
 	if limit <= 0 {
 		limit = 10
 	}
+	query = strings.Join(searchTerms(query), " ")
+	if query == "" {
+		return nil, nil
+	}
 
 	sql := `
 		SELECT p.id, ifnull(p.sync_id, '') as sync_id, p.session_id, p.content, ifnull(p.project, '') as project, p.created_at
@@ -4280,14 +4258,22 @@ func (s *Store) searchContextSQL(ctx context.Context, query string, opts SearchO
 		limit = s.cfg.MaxSearchResults
 	}
 
+	normalizedQuery := normalizedSearchQuery(query)
+	if normalizedQuery == "" {
+		if strings.TrimSpace(query) == "" {
+			return nil, fmt.Errorf("search: query must not be empty")
+		}
+		return []SearchResult{}, nil
+	}
+
 	var directResults []SearchResult
-	if strings.Contains(query, "/") {
+	if strings.Contains(normalizedQuery, "/") {
 		tkSQL := `
 			SELECT ` + observationSelectColumns + `
 			FROM observations
 			WHERE topic_key = ? AND deleted_at IS NULL
 		`
-		tkArgs := []any{query}
+		tkArgs := []any{normalizedQuery}
 
 		if opts.Type != "" {
 			tkSQL += " AND type = ?"
@@ -4340,10 +4326,9 @@ func (s *Store) searchContextSQL(ctx context.Context, query string, opts SearchO
 		}
 	}
 
-	longTerms, shortTerms := splitSearchTerms(query)
-	normalizedQuery := strings.Join(searchTerms(query), " ")
+	longTerms, shortTerms := splitSearchTerms(normalizedQuery)
 	mixedAny := opts.MatchMode == "any" && len(longTerms) > 0 && len(shortTerms) > 0
-	likeFallback := shouldUseTrigramLikeFallback(query)
+	likeFallback := shouldUseTrigramLikeFallback(normalizedQuery)
 	sqlQ := `
 		SELECT o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
 		       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.review_after, o.pinned, o.created_at, o.updated_at, o.deleted_at,
@@ -4354,7 +4339,7 @@ func (s *Store) searchContextSQL(ctx context.Context, query string, opts SearchO
 		       0.0 as rank
 		FROM observations o
 		WHERE o.deleted_at IS NULL AND `
-		appendLikeSearchCondition(&sqlQ, &args, "ifnull(o.title, '') || ' ' || ifnull(o.content, '') || ' ' || ifnull(o.tool_name, '') || ' ' || ifnull(o.type, '') || ' ' || ifnull(o.project, '') || ' ' || ifnull(o.topic_key, '')", query, opts.MatchMode)
+		appendLikeSearchCondition(&sqlQ, &args, "ifnull(o.title, '') || ' ' || ifnull(o.content, '') || ' ' || ifnull(o.tool_name, '') || ' ' || ifnull(o.type, '') || ' ' || ifnull(o.project, '') || ' ' || ifnull(o.topic_key, '')", normalizedQuery, opts.MatchMode)
 	} else {
 		// Build FTS5 query: "all" (default) uses AND semantics; "any" uses OR for broader recall.
 		var ftsQuery string
@@ -9568,6 +9553,12 @@ func shouldUseTrigramLikeFallback(query string) bool {
 	// query like "go to prod" must stay on the FTS/bm25 path so English ranking
 	// and indexing are not degraded by a single short stopword-like token.
 	for _, term := range terms {
+		// The trigram tokenizer can miss framework identifiers that begin with a
+		// meaningful period (for example .NET) in external-content prompt tables.
+		// LIKE preserves the normalized identifier exactly across every search path.
+		if strings.HasPrefix(term, ".") {
+			return true
+		}
 		if utf8.RuneCountInString(term) >= 3 {
 			return false
 		}
@@ -9609,6 +9600,10 @@ func searchTerms(query string) []string {
 		}
 	}
 	return terms
+}
+
+func normalizedSearchQuery(query string) string {
+	return strings.Join(searchTerms(query), " ")
 }
 
 // isSearchSyntaxDelimiter identifies punctuation that separates search terms

@@ -2,13 +2,31 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
+
+func assertAllFTSTriggers(t *testing.T, s *Store) {
+	t.Helper()
+	for _, name := range []string{
+		"obs_fts_insert", "obs_fts_update", "obs_fts_delete",
+		"prompt_fts_insert", "prompt_fts_update", "prompt_fts_delete",
+	} {
+		var count int
+		if err := s.DB().QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND name = ?`, name).Scan(&count); err != nil {
+			t.Fatalf("count trigger %q: %v", name, err)
+		}
+		if count != 1 {
+			t.Fatalf("trigger %q count = %d, want 1", name, count)
+		}
+	}
+}
 
 // legacyObsRow holds the columns that exist in the pre-conflict-surfacing schema.
 // Only the columns that existed in the legacy DDL are captured here.
@@ -413,6 +431,178 @@ func TestMigrationRepairsBlobObservationProjectsAfterFTSTriggers(t *testing.T) {
 	}
 	if len(results) != 1 || results[0].SyncID != "obs-blob-project" {
 		t.Fatalf("search repaired observation = %#v, want obs-blob-project", results)
+	}
+}
+
+func TestFTSTrigramRepairRollsBackAsOneTransaction(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("fts-rollback-session", "engram", "/tmp"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{SessionID: "fts-rollback-session", Type: "decision", Title: "atomic repair observation", Content: "atomic repair content", Project: "engram", Scope: "project"}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	if _, err := s.AddPrompt(AddPromptParams{SessionID: "fts-rollback-session", Content: "atomic repair prompt", Project: "engram"}); err != nil {
+		t.Fatalf("add prompt: %v", err)
+	}
+	if _, err := s.DB().Exec(`
+		DROP TRIGGER IF EXISTS obs_fts_insert;
+		DROP TRIGGER IF EXISTS obs_fts_update;
+		DROP TRIGGER IF EXISTS obs_fts_delete;
+		DROP TRIGGER IF EXISTS prompt_fts_insert;
+		DROP TRIGGER IF EXISTS prompt_fts_update;
+		DROP TRIGGER IF EXISTS prompt_fts_delete;
+		DROP TABLE prompts_fts;
+		CREATE VIRTUAL TABLE prompts_fts USING fts5(content, project, content='user_prompts', content_rowid='id', tokenize='unicode61');
+	`); err != nil {
+		t.Fatalf("seed legacy FTS tables: %v", err)
+	}
+	if err := s.withTxUnchecked(func(tx *sql.Tx) error {
+		if err := s.recreateObservationFTSTriggersTx(tx); err != nil {
+			return err
+		}
+		return s.recreatePromptFTSTriggersTx(tx)
+	}); err != nil {
+		t.Fatalf("seed FTS triggers: %v", err)
+	}
+	assertAllFTSTriggers(t, s)
+
+	originalExec := s.hooks.exec
+	s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+		if strings.Contains(query, "CREATE TRIGGER prompt_fts_insert") {
+			return nil, errors.New("forced FTS trigger failure")
+		}
+		return originalExec(db, query, args...)
+	}
+	err := s.ensureFTSTrigramTables()
+	s.hooks.exec = originalExec
+	if err == nil {
+		t.Fatal("ensureFTSTrigramTables unexpectedly succeeded")
+	}
+	observationsSQL, err := s.ftsTableSQL("observations_fts")
+	if err != nil {
+		t.Fatalf("inspect restored observations FTS: %v", err)
+	}
+	if !ftsSQLUsesTrigram(observationsSQL) {
+		t.Fatal("observations FTS was unexpectedly changed during failed prompt repair")
+	}
+	promptsSQL, err := s.ftsTableSQL("prompts_fts")
+	if err != nil {
+		t.Fatalf("inspect restored prompts FTS: %v", err)
+	}
+	if ftsSQLUsesTrigram(promptsSQL) {
+		t.Fatal("prompts FTS committed a half-rebuilt trigram table after failure")
+	}
+	assertAllFTSTriggers(t, s)
+
+	if err := s.ensureFTSTrigramTables(); err != nil {
+		t.Fatalf("retry FTS repair: %v", err)
+	}
+	assertAllFTSTriggers(t, s)
+	for _, table := range []string{"observations_fts", "prompts_fts"} {
+		if _, err := s.DB().Exec(`INSERT INTO ` + table + `(` + table + `) VALUES('integrity-check')`); err != nil {
+			t.Fatalf("%s integrity check: %v", table, err)
+		}
+	}
+}
+
+func TestV8ToV9FTSRepairExcludesPreviouslyOpenWriter(t *testing.T) {
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = t.TempDir()
+	writer, err := New(cfg)
+	if err != nil {
+		t.Fatalf("open writer store: %v", err)
+	}
+	t.Cleanup(func() { _ = writer.Close() })
+	if _, err := writer.DB().Exec("PRAGMA user_version = 8"); err != nil {
+		t.Fatalf("stamp v8: %v", err)
+	}
+
+	repairStarted := make(chan struct{})
+	releaseRepair := make(chan struct{})
+	ftsRepairAfterTriggerDropHook = func() {
+		close(repairStarted)
+		<-releaseRepair
+	}
+	t.Cleanup(func() { ftsRepairAfterTriggerDropHook = nil })
+	migrated := make(chan *Store, 1)
+	migrateErr := make(chan error, 1)
+	go func() {
+		db, err := openDB("sqlite", storeDSN(filepath.Join(cfg.DataDir, "engram.db")))
+		if err != nil {
+			migrateErr <- err
+			return
+		}
+		db.SetMaxOpenConns(1)
+		if err := primeConnection(db); err != nil {
+			_ = db.Close()
+			migrateErr <- err
+			return
+		}
+		s := &Store{db: db, cfg: cfg, hooks: defaultStoreHooks()}
+		if err := s.runStartupMigrations(false); err != nil {
+			_ = db.Close()
+			migrateErr <- err
+			return
+		}
+		migrated <- s
+	}()
+	select {
+	case <-repairStarted:
+	case err := <-migrateErr:
+		t.Fatalf("start v8 migration: %v", err)
+	}
+
+	writerDone := make(chan error, 1)
+	go func() {
+		if err := writer.CreateSession("concurrent-v8-writer", "engram", "/tmp"); err != nil {
+			writerDone <- err
+			return
+		}
+		if _, err := writer.AddObservation(AddObservationParams{SessionID: "concurrent-v8-writer", Type: "decision", Title: "writer migration observation", Content: "writer migration observation", Project: "engram", Scope: "project"}); err != nil {
+			writerDone <- err
+			return
+		}
+		_, err := writer.AddPrompt(AddPromptParams{SessionID: "concurrent-v8-writer", Content: "writer migration prompt", Project: "engram"})
+		writerDone <- err
+	}()
+	select {
+	case err := <-writerDone:
+		t.Fatalf("previously open writer committed while FTS triggers were absent: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseRepair)
+
+	var migratedStore *Store
+	select {
+	case migratedStore = <-migrated:
+		t.Cleanup(func() { _ = migratedStore.Close() })
+	case err := <-migrateErr:
+		t.Fatalf("complete v8 migration: %v", err)
+	}
+	if err := <-writerDone; err != nil {
+		t.Fatalf("previously open writer after migration: %v", err)
+	}
+	results, err := writer.Search("writer migration observation", SearchOptions{Project: "engram"})
+	if err != nil || len(results) != 1 {
+		t.Fatalf("search concurrently written observation = %+v, %v", results, err)
+	}
+	prompts, err := writer.SearchPrompts("writer migration prompt", "engram", 10)
+	if err != nil || len(prompts) != 1 {
+		t.Fatalf("search concurrently written prompt = %+v, %v", prompts, err)
+	}
+	assertAllFTSTriggers(t, migratedStore)
+	for _, table := range []string{"observations_fts", "prompts_fts"} {
+		if _, err := migratedStore.DB().Exec(`INSERT INTO ` + table + `(` + table + `) VALUES('integrity-check')`); err != nil {
+			t.Fatalf("%s integrity check: %v", table, err)
+		}
+	}
+	var version int
+	if err := migratedStore.DB().QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatalf("read migrated user_version: %v", err)
+	}
+	if version != 9 {
+		t.Fatalf("migrated user_version = %d, want 9", version)
 	}
 }
 

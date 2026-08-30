@@ -282,3 +282,55 @@ func TestHandleCompare_ModelOptional(t *testing.T) {
 		t.Fatalf("expected success when model omitted, got error: %s", callResultText(t, res))
 	}
 }
+
+func TestHandleCompare_RejectsFractionalObservationID(t *testing.T) {
+	s := newMCPTestStore(t)
+	idA, idB := seedCompareFixture(t, s)
+	h := handleCompare(s, NewSessionActivity(10*time.Minute))
+
+	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"memory_id_a": float64(idA) + 0.5,
+		"memory_id_b": float64(idB),
+		"relation":    "compatible",
+		"confidence":  float64(0.9),
+		"reasoning":   "a valid explanation",
+	}}}
+	res, err := h(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handleCompare error: %v", err)
+	}
+	if !res.IsError || !strings.Contains(callResultText(t, res), "integer") {
+		t.Fatalf("fractional ID result = error:%t text:%q, want integer validation error", res.IsError, callResultText(t, res))
+	}
+}
+
+func TestHandleCompare_ReasoningRuneLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		reasoning string
+		wantError bool
+	}{
+		{name: "200 Unicode runes", reasoning: strings.Repeat("🙂", 200)},
+		{name: "201 Unicode runes", reasoning: strings.Repeat("🙂", 201), wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newMCPTestStore(t)
+			idA, idB := seedCompareFixture(t, s)
+			h := handleCompare(s, NewSessionActivity(10*time.Minute))
+			req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+				"memory_id_a": float64(idA),
+				"memory_id_b": float64(idB),
+				"relation":    "compatible",
+				"confidence":  float64(0.9),
+				"reasoning":   tc.reasoning,
+			}}}
+			res, err := h(context.Background(), req)
+			if err != nil {
+				t.Fatalf("handleCompare error: %v", err)
+			}
+			if res.IsError != tc.wantError {
+				t.Fatalf("reasoning result = error:%t text:%q, want error:%t", res.IsError, callResultText(t, res), tc.wantError)
+			}
+		})
+	}
+}

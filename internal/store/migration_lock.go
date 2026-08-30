@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -44,6 +47,75 @@ func acquireStoreGenerationLease(path string) (func(), error) {
 // with live Store instances. Callers must defer the returned release function.
 func AcquireDatabaseGenerationMoveLock(dataDir string) (func(), error) {
 	return acquireDatabaseFileLock(filepath.Join(dataDir, ".generation.lock"), "database generation", tryLockMigrationFile, unlockDatabaseFile)
+}
+
+// AcquireDatabaseGenerationMoveLocks serializes a database-generation move with
+// Store instances that own either the source or destination generation. Locks are
+// acquired in canonical lexical order so independently ordered callers cannot
+// deadlock. The returned release function unlocks in reverse acquisition order.
+func AcquireDatabaseGenerationMoveLocks(sourceDir, destinationDir string) (func(), error) {
+	paths := make([]string, 0, 2)
+	for _, dir := range []string{sourceDir, destinationDir} {
+		canonical, err := canonicalDatabaseGenerationLockPath(dir)
+		if err != nil {
+			return nil, err
+		}
+		duplicate := false
+		for _, existing := range paths {
+			if sameDatabaseGenerationLockPath(existing, canonical) {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			paths = append(paths, canonical)
+		}
+	}
+	sort.Slice(paths, func(i, j int) bool {
+		return databaseGenerationLockPathSortKey(paths[i]) < databaseGenerationLockPathSortKey(paths[j])
+	})
+
+	releases := make([]func(), 0, len(paths))
+	for _, path := range paths {
+		release, err := AcquireDatabaseGenerationMoveLock(path)
+		if err != nil {
+			for i := len(releases) - 1; i >= 0; i-- {
+				releases[i]()
+			}
+			return nil, err
+		}
+		releases = append(releases, release)
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			for i := len(releases) - 1; i >= 0; i-- {
+				releases[i]()
+			}
+		})
+	}, nil
+}
+
+func canonicalDatabaseGenerationLockPath(dataDir string) (string, error) {
+	abs, err := filepath.Abs(filepath.Clean(dataDir))
+	if err != nil {
+		return "", fmt.Errorf("canonicalize database generation lock path %q: %w", dataDir, err)
+	}
+	return abs, nil
+}
+
+func sameDatabaseGenerationLockPath(a, b string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
+
+func databaseGenerationLockPathSortKey(path string) string {
+	if runtime.GOOS == "windows" {
+		return strings.ToLower(path)
+	}
+	return path
 }
 
 func acquireDatabaseFileLock(path, purpose string, tryLock func(*os.File) (bool, error), unlockFile func(*os.File) error) (func(), error) {

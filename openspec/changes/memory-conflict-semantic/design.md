@@ -7,7 +7,7 @@
 
 ## Technical Approach
 
-Phase 4 layers a semantic LLM-judge step on top of the Phase 3 FTS5 candidate stream WITHOUT touching schema or existing code paths. A new `internal/llm/` package defines the `AgentRunner` abstraction and ships two shell-out implementations (Claude Code, OpenCode). When `engram conflicts scan --semantic` runs, the existing `ScanProject` loop collects candidates as today, then a worker pool pipes each pair through `runner.Compare(ctx, prompt)`, parses the verdict, and persists non-`not_conflict` outcomes via a new `Store.JudgeBySemantic` method that writes system-attributed rows into the existing `memory_relations` table. A parallel transport — the `mem_compare` MCP tool — lets an active agent perform the same judgment interactively. The `internal/llm/` package is a strict boundary: only `cmd/engram/conflicts.go` and `internal/store/relations.go` consume it; no other package imports it.
+Phase 4 layers a semantic LLM-judge step on top of the Phase 3 FTS5 candidate stream WITHOUT touching schema or existing code paths. A new `internal/llm/` package defines the `AgentRunner` abstraction and ships two shell-out implementations (Claude Code, OpenCode). When `engram conflicts scan --semantic` runs, the existing `ScanProject` loop collects candidates as today, then a worker pool pipes each pair through `runner.Compare(ctx, prompt)` and parses the verdict. `--apply` persists every valid verdict, including durable `not_conflict`, via a `Store.JudgeBySemantic` system-owned row; dry-runs count valid verdicts as skipped without persistence. A parallel transport — the `mem_compare` MCP tool — lets an active agent perform the same judgment interactively. The `internal/llm/` package is a strict boundary: only `cmd/engram/conflicts.go` and `internal/store/relations.go` consume it; no other package imports it.
 
 ---
 
@@ -41,7 +41,7 @@ Phase 4 layers a semantic LLM-judge step on top of the Phase 3 FTS5 candidate st
 | Reuse `JudgeRelation` after `FindCandidates` inserts pending row | Forces double-write (insert pending → update); cross-project guard already gated by relation existence | Rejected |
 | Direct INSERT in CLI handler | Scatters provenance logic outside store | Rejected (violates engram-architecture-guardrails: store owns SQL) |
 
-**Rationale**: semantic scan calls `FindCandidates` with `SkipInsert=true` (already supported), so no pending row exists. `JudgeBySemantic` is one write per verdict. Dedup key `(source_id, target_id)` (canonicalised pair) UPSERTs an existing same-pair row; provenance always overwrites with `marked_by_kind="system"`, `marked_by_actor="engram"`, `marked_by_model=<verdict.Model>`. Cross-project guard reused from `JudgeRelation` (extracted helper).
+**Rationale**: semantic scan calls `FindCandidates` with `SkipInsert=true` (already supported), so no pending row exists. `JudgeBySemantic` is one write per verdict. It reuses a provisional/system pending row first, then a prior Engram system judgment, or inserts a new system identity; it never overwrites independent human or external-agent provenance. Cross-project guard reused from `JudgeRelation` (extracted helper).
 
 ### Decision: worker pool with bounded `chan pair` + per-pair `context.WithTimeout`
 
@@ -92,11 +92,11 @@ ScanProject ──→ for each obs ──→ FindCandidates ──→ chan pair
                                                        ▼
                                               classify verdict
                                               ┌────────┼───────────┐
-                                          error   not_conflict   judged
-                                            │       │              │
-                                       SemErrors  SemSkipped       ▼
-                                            │       │     JudgeBySemantic
-                                            └───────┴───────┐  (UPSERT system row)
+                                           error  dry-run valid  apply valid
+                                             │       │              │
+                                        SemErrors  SemSkipped       ▼
+                                             │       │     JudgeBySemantic
+                                             └───────┴───────┐  (UPSERT system row)
                                                             ▼
                                                        ScanResult
 ```
@@ -133,13 +133,13 @@ agent ──→ mem_compare(id_a, id_b, relation, confidence, reasoning, model)
 | `cmd/engram/conflicts.go` | Modify | Add `--semantic`, `--concurrency`, `--timeout-per-call`, `--yes`, `--max-semantic` flags to `cmdConflictsScan`; pre-LLM cost prompt (skipped on `--yes`); resolve runner via `agentRunnerFactory(os.Getenv("ENGRAM_AGENT_CLI"))`; pass to `ScanOptions.Runner` |
 | `cmd/engram/conflicts_test.go` | Modify | New cases: --semantic off = Phase 3 unchanged; --semantic + --yes uses fake runner; ENGRAM_AGENT_CLI unset fails fast; concurrency/timeout/max-semantic flag parsing |
 | `cmd/engram/main.go` | Modify | Add injectable `agentRunnerFactory = llm.NewRunner` package-level var (alongside `storeNew`, `newHTTPServer`); enables test injection of fake runners |
-| `internal/mcp/mcp.go` | Modify | Register `mem_compare` tool — input schema (memory_id_a, memory_id_b, relation enum, confidence float, reasoning ≤200 chars, model optional); resolves observation IDs (int → sync_id), calls `Store.JudgeBySemantic`, returns `{sync_id}` JSON |
-| `internal/mcp/mcp_test.go` | Modify | New cases: persist verdict via mem_compare; `not_conflict` returns success no-row; missing required field error; non-existent observation error |
+| `internal/mcp/mcp.go` | Modify | Register `mem_compare` tool — input schema (integer memory IDs, relation enum, confidence float, reasoning ≤200 Unicode runes, model optional); resolves observation IDs to sync_ids, calls `Store.JudgeBySemantic`, returns `{sync_id}` JSON |
+| `internal/mcp/mcp_test.go` | Modify | New cases: persist verdict via mem_compare; durable `not_conflict`; fractional IDs and overlong reasoning rejected; missing required field error; non-existent observation error |
 | `internal/server/server.go` | Modify | Extend `POST /conflicts/scan` body parser to accept `semantic`, `concurrency`, `timeout_per_call_seconds`, `max_semantic`; forward to `ScanOptions`; response includes `semantic_judged`, `semantic_skipped`, `semantic_errors` |
 | `internal/server/server_test.go` | Modify | New cases: `semantic=false` returns zero counters; `semantic=true` with fake runner returns populated counters |
 | `docs/PLUGINS.md` (or `docs/SEMANTIC_SCAN.md` new) | Modify/Create | `ENGRAM_AGENT_CLI` env var contract; `--semantic` UX; cost warning; `mem_compare` tool reference |
 
-No file deletions. No schema migrations.
+No file deletions. Schema v9 adds atomic writer-exclusive FTS repair for v8 databases.
 
 ---
 
@@ -156,7 +156,7 @@ type AgentRunner interface {
 type Verdict struct {
     Relation   string  // one of: conflicts_with|supersedes|scoped|related|compatible|not_conflict
     Confidence float64 // [0.0, 1.0]
-    Reasoning  string  // ≤200 chars
+    Reasoning  string  // ≤200 Unicode runes
     Model      string  // captured from CLI output (e.g. "claude-haiku-4-5")
     DurationMS int64   // wall-clock for the CLI call
 }
@@ -200,7 +200,7 @@ type ScanResult struct {
 
 type JudgeBySemanticParams struct {
     SourceID, TargetID string  // sync_ids
-    Relation           string  // verb (must be in validRelationVerbs and != "not_conflict")
+    Relation           string  // verb in validRelationVerbs, including not_conflict
     Confidence         float64
     Reasoning          string
     Model              string  // -> marked_by_model
@@ -219,7 +219,7 @@ func (s *Store) JudgeBySemantic(p JudgeBySemanticParams) (syncID string, err err
   reasoning:   string (required, ≤200),
   model:       string (optional)
 }
-// Returns: { "sync_id": "rel-...." } on persist, { "sync_id": "" } on not_conflict
+// Returns: { "sync_id": "rel-...." } on every persisted valid verdict
 ```
 
 CLI shell-out abstraction: every runner ctor accepts a default `runCLI = exec.CommandContext` based impl. Tests construct runners with a fake `runCLI` that returns canned bytes.
@@ -234,11 +234,11 @@ CLI shell-out abstraction: every runner ctor accepts a default `runCLI = exec.Co
 | Unit (factory) | `claude` / `opencode` dispatch; empty/unknown returns descriptive error naming env var | Direct `NewRunner` calls |
 | Unit (prompt) | Snapshot of rendered prompt for fixed observation pair | String compare against golden |
 | Unit (cost) | Token estimate math; per-pair constants stable | Pure function tests |
-| Unit (store) | `JudgeBySemantic` insert; UPSERT idempotency on same pair; `not_conflict` no-op; validation errors; system provenance fields | Real SQLite `:memory:`, fixture observations |
-| Integration (store) | `ScanProject` with `Semantic=true` and fake runner: counter accuracy across success/skip/error; `--max-semantic` cap; per-pair timeout isolation; concurrency bound observed | Real SQLite + canned-verdict fake runner channel-tap |
+| Unit (store) | `JudgeBySemantic` insert; UPSERT idempotency on same pair; durable `not_conflict`; validation errors; system provenance fields | Real SQLite `:memory:`, fixture observations |
+| Integration (store) | `ScanProject` with `Semantic=true` and fake runner: apply and dry-run counter accuracy, dry-run non-mutation, `--max-semantic` cap; per-pair timeout isolation; concurrency bound observed | Real SQLite + canned-verdict fake runner channel-tap |
 | Integration (CLI) | `--semantic` off = Phase 3 unchanged (snapshot output); `--semantic --yes` runs with injected fake; `ENGRAM_AGENT_CLI` unset fails fast with named error | `agentRunnerFactory` test override + existing `testConfig→seed→withArgs→captureOutput→assert` pattern |
 | Integration (HTTP) | `POST /conflicts/scan` with `semantic=true/false`; counters in response; defaults applied when fields omitted | In-process server harness with injected fake runner |
-| Integration (MCP) | `mem_compare` happy path persists row with system provenance; `not_conflict` no-row success; missing field rejected; non-existent obs id error | Existing in-process MCP test harness |
+| Integration (MCP) | `mem_compare` happy path persists row with system provenance; durable `not_conflict`; fractional IDs and overlong reasoning rejected; missing field rejected; non-existent obs id error | Existing in-process MCP test harness |
 | Regression | All Phase 3 tests stay green; full `go test ./...` GREEN | CI |
 | Out of scope | Real CLI invocation (no live `claude`/`opencode` calls in tests) | — |
 
@@ -246,7 +246,7 @@ CLI shell-out abstraction: every runner ctor accepts a default `runCLI = exec.Co
 
 ## Migration / Rollout
 
-No schema migration. No data backfill. No feature flag — the surface is opt-in via `--semantic` and `mem_compare`. Rollout order: ship `internal/llm/` package first (independent of consumers), then `JudgeBySemantic`, then CLI/HTTP/MCP wiring. Each step lands GREEN.
+Schema v9 performs an atomic writer-exclusive FTS repair when upgrading from v8. No semantic-data backfill is required. The surface remains opt-in via `--semantic` and `mem_compare`; applied semantic verdicts persist durable system-owned rows, while dry-runs are non-mutating and increment `SemanticSkipped`.
 
 ---
 

@@ -805,6 +805,43 @@ func TestMigrateOrphanedDBCandidatesWaitsForLiveStoreGenerationLease(t *testing.
 	}
 }
 
+func TestMigrateOrphanedDBCandidatesWaitsForLiveSourceGenerationLease(t *testing.T) {
+	orphanDir := t.TempDir()
+	correctDir := filepath.Join(t.TempDir(), "engram")
+	cfg := testConfig(t)
+	cfg.DataDir = orphanDir
+	liveStore, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("open source store: %v", err)
+	}
+	storeClosed := false
+	t.Cleanup(func() {
+		if !storeClosed {
+			_ = liveStore.Close()
+		}
+	})
+
+	moved := make(chan struct{})
+	go func() {
+		migrateOrphanedDBCandidates(correctDir, []string{filepath.Join(orphanDir, "engram.db")})
+		close(moved)
+	}()
+	select {
+	case <-moved:
+		t.Fatal("orphan mover completed while the source Store held its generation lease")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := liveStore.Close(); err != nil {
+		t.Fatalf("close source store: %v", err)
+	}
+	storeClosed = true
+	select {
+	case <-moved:
+	case <-time.After(time.Second):
+		t.Fatal("orphan mover did not finish after source generation lease released")
+	}
+}
+
 func TestMigrateOrphanedDBCandidatesDoesNotOverwriteDatabaseCreatedAfterLock(t *testing.T) {
 	orphanDir := t.TempDir()
 	correctDir := filepath.Join(t.TempDir(), "engram")

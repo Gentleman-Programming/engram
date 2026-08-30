@@ -1491,6 +1491,7 @@ func (s *Server) handleScanConflicts(w http.ResponseWriter, r *http.Request) {
 		"capped":           result.Capped,
 		"dry_run":          result.DryRun,
 		// Semantic counters — always present; zero when semantic=false.
+		"semantic_skipped": result.SemanticSkipped,
 		"semantic_judged":  result.SemanticJudged,
 		"semantic_errors":  result.SemanticErrors,
 	}

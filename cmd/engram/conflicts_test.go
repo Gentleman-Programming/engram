@@ -792,17 +792,55 @@ func TestCmdConflictsScan_SemanticFlagWithEnv(t *testing.T) {
 	}
 	stubAgentRunnerFactory(t, mock, nil)
 
-	mustSeedObservation(t, cfg, "ses-sem1", "semproj", "decision", "A", "content alpha", "project")
-	mustSeedObservation(t, cfg, "ses-sem1", "semproj", "decision", "B", "content alpha duplicate", "project")
+	mustSeedObservation(t, cfg, "ses-sem1", "semproj", "decision", "JWT authentication session token lifecycle policy", "JWT authentication session token lifecycle policy", "project")
+	mustSeedObservation(t, cfg, "ses-sem1", "semproj", "decision", "JWT authentication session token rotation policy", "JWT authentication session token rotation policy", "project")
+	db := openTestDB(t, cfg)
+	var relationsBefore, mutationsBefore int
+	if err := db.QueryRow(`SELECT count(*) FROM memory_relations`).Scan(&relationsBefore); err != nil {
+		t.Fatalf("count relations before scan: %v", err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM sync_mutations`).Scan(&mutationsBefore); err != nil {
+		t.Fatalf("count sync mutations before scan: %v", err)
+	}
 
 	withArgs(t, "engram", "conflicts", "scan", "--project", "semproj", "--semantic", "--yes")
 	stdout, stderr := captureOutput(t, func() { cmdConflicts(cfg) })
 	if stderr != "" {
 		t.Fatalf("unexpected stderr: %q", stderr)
 	}
-	// The output should contain the semantic counter fields.
-	if !strings.Contains(stdout, "semantic") {
-		t.Errorf("expected semantic fields in output; got: %q", stdout)
+	semanticCounter := func(name string) int {
+		t.Helper()
+		for _, line := range strings.Split(stdout, "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, name+":") {
+				value, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, name+":")))
+				if err != nil {
+					t.Fatalf("parse %s counter from %q: %v", name, line, err)
+				}
+				return value
+			}
+		}
+		t.Fatalf("missing %s counter in output: %q", name, stdout)
+		return 0
+	}
+	if !mock.called {
+		t.Fatal("semantic runner was not invoked")
+	}
+	if got := semanticCounter("semantic_skipped"); got <= 0 {
+		t.Errorf("semantic_skipped = %d, want > 0", got)
+	}
+	if got := semanticCounter("semantic_judged"); got != 0 {
+		t.Errorf("semantic_judged = %d, want 0 for dry-run", got)
+	}
+	var relationsAfter, mutationsAfter int
+	if err := db.QueryRow(`SELECT count(*) FROM memory_relations`).Scan(&relationsAfter); err != nil {
+		t.Fatalf("count relations after scan: %v", err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM sync_mutations`).Scan(&mutationsAfter); err != nil {
+		t.Fatalf("count sync mutations after scan: %v", err)
+	}
+	if relationsAfter != relationsBefore || mutationsAfter != mutationsBefore {
+		t.Errorf("dry-run writes changed relations/mutations from %d/%d to %d/%d", relationsBefore, mutationsBefore, relationsAfter, mutationsAfter)
 	}
 }
 

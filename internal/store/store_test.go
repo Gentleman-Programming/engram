@@ -12754,6 +12754,49 @@ func TestSearchTermsPreserveLeadingDotAndTrimTrailingPeriods(t *testing.T) {
 	}
 }
 
+func TestSearchNormalizationIsSharedAcrossSearchSurfaces(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s-shared-search-normalization", "engram", "/tmp"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-shared-search-normalization", Type: "decision", Title: ".NET runtime", Content: "dot net", Project: "engram", Scope: "project",
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	if _, err := s.AddPrompt(AddPromptParams{
+		SessionID: "s-shared-search-normalization", Content: ".NET prompt", Project: "engram",
+	}); err != nil {
+		t.Fatalf("add prompt: %v", err)
+	}
+
+	for _, query := range []string{"!!!", "..."} {
+		results, err := s.SearchContext(context.Background(), query, SearchOptions{Project: "engram", MatchMode: "any"})
+		if err != nil {
+			t.Fatalf("SearchContext(%q): %v", query, err)
+		}
+		if len(results) != 0 {
+			t.Fatalf("SearchContext(%q) = %+v, want no results", query, results)
+		}
+		prompts, err := s.SearchPrompts(query, "engram", 10)
+		if err != nil {
+			t.Fatalf("SearchPrompts(%q): %v", query, err)
+		}
+		if len(prompts) != 0 {
+			t.Fatalf("SearchPrompts(%q) = %+v, want no results", query, prompts)
+		}
+	}
+
+	results, err := s.SearchContext(context.Background(), ".NET.", SearchOptions{Project: "engram"})
+	if err != nil || len(results) != 1 || results[0].Title != ".NET runtime" {
+		t.Fatalf("SearchContext(.NET.) = %+v, %v; want .NET runtime", results, err)
+	}
+	prompts, err := s.SearchPrompts(".NET.", "engram", 10)
+	if err != nil || len(prompts) != 1 || prompts[0].Content != ".NET prompt" {
+		t.Fatalf("SearchPrompts(.NET.) = %+v, %v; want .NET prompt", prompts, err)
+	}
+}
+
 func TestSearchContextMixedAnyLimitPrefersFTSAfterDeduplication(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.CreateSession("s-mixed-any-limit", "engram", "/tmp"); err != nil {

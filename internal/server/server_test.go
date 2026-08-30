@@ -2561,7 +2561,7 @@ func (m *mockSemanticRunner) Compare(_ context.Context, _ string) (store.Semanti
 }
 
 // TestHandleScanConflicts_SemanticFalse_CountersZero verifies that when semantic=false
-// (or omitted), the response includes semantic_judged=0 and semantic_errors=0.
+// (or omitted), the response includes zero semantic counters.
 func TestHandleScanConflicts_SemanticFalse_CountersZero(t *testing.T) {
 	st, _ := conflictsTestStore(t)
 	srv := New(st, 0)
@@ -2584,8 +2584,8 @@ func TestHandleScanConflicts_SemanticFalse_CountersZero(t *testing.T) {
 		t.Fatalf("decode response: %v", err)
 	}
 
-	// Both semantic counters must be present and zero.
-	for _, field := range []string{"semantic_judged", "semantic_errors"} {
+	// All semantic counters must be present and zero.
+	for _, field := range []string{"semantic_skipped", "semantic_judged", "semantic_errors"} {
 		val, ok := resp[field]
 		if !ok {
 			t.Errorf("expected %q field in response; got keys: %v", field, resp)
@@ -2665,6 +2665,13 @@ func TestHandleScanConflicts_SemanticTrue_WithMockRunner(t *testing.T) {
 			t.Fatalf("AddObservation: %v", err)
 		}
 	}
+	var relationsBefore, mutationsBefore int
+	if err := st.DB().QueryRow(`SELECT count(*) FROM memory_relations`).Scan(&relationsBefore); err != nil {
+		t.Fatalf("count relations before scan: %v", err)
+	}
+	if err := st.DB().QueryRow(`SELECT count(*) FROM sync_mutations`).Scan(&mutationsBefore); err != nil {
+		t.Fatalf("count sync mutations before scan: %v", err)
+	}
 
 	body := `{"project":"semtrueproj","semantic":true,"concurrency":2,"max_semantic":10}`
 	req := httptest.NewRequest(http.MethodPost, "/conflicts/scan", strings.NewReader(body))
@@ -2681,11 +2688,22 @@ func TestHandleScanConflicts_SemanticTrue_WithMockRunner(t *testing.T) {
 		t.Fatalf("decode response: %v", err)
 	}
 
-	// semantic_judged + semantic_errors should be present (values depend on FTS).
-	for _, field := range []string{"semantic_judged", "semantic_errors"} {
-		if _, ok := resp[field]; !ok {
-			t.Errorf("expected %q field in semantic=true response; got: %v", field, resp)
-		}
+	skipped, ok := resp["semantic_skipped"].(float64)
+	if !ok || skipped <= 0 {
+		t.Errorf("semantic_skipped = %v, want > 0 to prove the runner was invoked", resp["semantic_skipped"])
+	}
+	if judged, ok := resp["semantic_judged"].(float64); !ok || judged != 0 {
+		t.Errorf("semantic_judged = %v, want 0 for dry-run", resp["semantic_judged"])
+	}
+	var relationsAfter, mutationsAfter int
+	if err := st.DB().QueryRow(`SELECT count(*) FROM memory_relations`).Scan(&relationsAfter); err != nil {
+		t.Fatalf("count relations after scan: %v", err)
+	}
+	if err := st.DB().QueryRow(`SELECT count(*) FROM sync_mutations`).Scan(&mutationsAfter); err != nil {
+		t.Fatalf("count sync mutations after scan: %v", err)
+	}
+	if relationsAfter != relationsBefore || mutationsAfter != mutationsBefore {
+		t.Errorf("dry-run writes changed relations/mutations from %d/%d to %d/%d", relationsBefore, mutationsBefore, relationsAfter, mutationsAfter)
 	}
 }
 

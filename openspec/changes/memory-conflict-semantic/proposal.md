@@ -12,8 +12,8 @@ Lexical detection misses the ~20% of conflicts that are **vocabulary-different b
 
 Phase 4 closes that gap by adding an **LLM-judge layer** on top of the existing FTS5 candidate stream. Engram does not bundle a model, does not call any LLM API directly, and does not manage any API keys. Instead, engram shells out to an external agent CLI (Claude Code or OpenCode) that the user has already installed and authenticated. Two complementary transports ship together in this phase:
 
-- **4a — CLI shell-out**: `engram conflicts scan --semantic` invokes `ENGRAM_AGENT_CLI` (claude | opencode) per FTS5 candidate, parses the verdict, and persists it as a judged relation.
-- **4b — MCP `mem_compare` tool**: agents (running an active session) can compare two memories interactively via a new MCP tool that returns a verdict the agent can then judge.
+- **4a — CLI shell-out**: `engram conflicts scan --semantic` invokes `ENGRAM_AGENT_CLI` (claude | opencode) per FTS5 candidate and parses the verdict. `--apply` persists valid verdicts as judged relations; the default dry-run is non-mutating and counts valid verdicts as skipped.
+- **4b — MCP `mem_compare` tool**: agents can compare two memories interactively and persist their supplied verdict directly through `JudgeBySemantic`.
 
 Local-first stays intact. Engram remains the agent's memory; semantic detection is opt-in (`--semantic` flag, `mem_compare` invocation), shells out only when invoked, and never alters baseline scan behavior.
 
@@ -31,7 +31,7 @@ Local-first stays intact. Engram remains the agent's memory; semantic detection 
 2. **CLI shell-out path (Phase 4a)** — `cmd/engram/conflicts.go`:
    - Extend `scan` sub-command with `--semantic`, `--concurrency N` (default 5), `--yes` (skip confirmation).
    - When `--semantic` is set: collect FTS5 candidates, print pre-scan estimate (request count + token estimate, subscription/API cost note), confirm via stdin (or `--yes`), then run `AgentRunner.Compare` per candidate using a worker pool.
-   - Persist non-`not_conflict` verdicts via the new store method `JudgeBySemantic` (provenance: `marked_by_kind="system"`, `marked_by_actor="engram"`, `marked_by_model=<verdict.Model>`).
+    - With `--apply`, persist every valid verdict, including `not_conflict`, via `JudgeBySemantic` (provenance: `marked_by_kind="system"`, `marked_by_actor="engram"`, `marked_by_model=<verdict.Model>`). Without `--apply`, make no relation or sync write and increment `SemanticSkipped` for every valid verdict.
    - Per-pair failures skip + log + increment `SemanticErrors`; scan continues.
 
 3. **Store layer extension** — `internal/store/relations.go`:
@@ -41,12 +41,9 @@ Local-first stays intact. Engram remains the agent's memory; semantic detection 
    - `ScanProject` keeps its existing FTS5 path and gains an internal branch when `opts.Semantic == true` that drives the runner pool through the injected `AgentRunner`.
 
 4. **MCP `mem_compare` tool (Phase 4b)** — `internal/mcp/mcp.go`:
-   - New tool `mem_compare(observation_a_id, observation_b_id)` that:
-     1. Reads both observations from the local store.
-     2. Returns a structured comparison payload (titles, types, contents, optional context) for the calling agent to judge.
-     3. Returns the response in the same JSON shape as `Verdict` so the agent can directly call `mem_judge` with the verdict.
-   - Unlike Phase 4a, this transport does NOT shell out — the agent IS the LLM and judges in-context.
-   - The agent then uses the existing `mem_judge` to persist the verdict.
+    - New tool `mem_compare(memory_id_a, memory_id_b, relation, confidence, reasoning, model)` that resolves integer observation IDs and persists the supplied verdict through `JudgeBySemantic`.
+    - Unlike Phase 4a, this transport does NOT shell out — the agent IS the LLM and supplies the verdict in-context.
+    - Fractional IDs and reasoning longer than 200 Unicode runes are rejected.
 
 5. **Documentation** — extend or add doc(s) describing:
    - `ENGRAM_AGENT_CLI` env var contract (supported values, required CLI install + auth).
@@ -63,7 +60,7 @@ Local-first stays intact. Engram remains the agent's memory; semantic detection 
 - **Resumable scan checkpoint table** — same single-shot model as Phase 3.
 - **Cross-model verdict normalization** — the `Verdict` struct accepts whatever the runner returns; calibrating verdict semantics across models is not in scope.
 - **Batched prompts** (N pairs in one LLM call) — Phase 4 is one-pair-per-call. Batching is a Phase 5 cost optimization.
-- **HTTP `/conflicts/scan` semantic flag** — Phase 4 lands semantic only on the CLI path. Adding `?semantic=true` to the HTTP endpoint requires solving long-running request semantics and is deferred.
+- **Long-running scan jobs / polling** — semantic HTTP scan parameters are implemented on `POST /conflicts/scan`; asynchronous job orchestration remains deferred.
 
 ## Capabilities
 
@@ -83,9 +80,9 @@ Local-first stays intact. Engram remains the agent's memory; semantic detection 
 
 1. **`AgentRunner` first** (`internal/llm/runner.go`) — TDD the `Verdict` parser for both Claude and OpenCode using fixture strings. Real CLI invocation is gated behind `ENGRAM_AGENT_CLI`; tests use a fake `AgentRunner`.
 2. **Store extension** — TDD `JudgeBySemantic` against real SQLite. Reuses `judgeRelationTx` provenance machinery from Phase 1. Add semantic counters to `ScanResult`.
-3. **`ScanProject` semantic branch** — when `opts.Semantic == true`, replace the simple `InsertPending` step with: `runner.Compare(prompt)` → `JudgeBySemantic(verdict)`. Worker pool sized by `opts.Concurrency`. Per-pair errors increment `SemanticErrors` and continue.
+3. **`ScanProject` semantic branch** — when `opts.Semantic == true`, replace the simple `InsertPending` step with `runner.Compare(prompt)`. Applied scans then call `JudgeBySemantic`; dry-runs increment `SemanticSkipped` without writing. Worker pool size follows `opts.Concurrency`. Per-pair errors increment `SemanticErrors` and continue.
 4. **CLI** — `cmd/engram/conflicts.go` adds `--semantic`/`--concurrency`/`--yes` flag parsing to existing `cmdConflictsScan`. Pre-scan estimate uses `len(candidates)` × per-call token estimate constants. Confirmation reads stdin unless `--yes` or non-TTY.
-5. **MCP tool** — register `mem_compare` matching the existing `mem_judge` pattern (declared via `mcp.NewTool`, handler closure). Returns structured comparison payload — does NOT call any model itself; the calling agent judges.
+5. **MCP tool** — register `mem_compare` matching the existing `mem_judge` pattern (declared via `mcp.NewTool`, handler closure). It does not call a model itself; it validates and persists the calling agent's verdict.
 6. **Docs** — extend Phase 3 conflict docs (or `docs/PLUGINS.md`) with the agent-CLI contract and the two transport paths.
 
 ### Cost-warning UX (locked in propose context)
@@ -131,9 +128,9 @@ Strict TDD is enabled (`go test ./...`). Every behavior arrives via RED → GREE
 
 ## Migration Safety
 
-- **Schema**: NO new tables, NO new columns, NO new indexes. Phase 4 reuses Phase 1's `memory_relations` schema entirely. Provenance fields (`marked_by_*`, `marked_by_model`) already exist from Phase 1.
-- **Data**: no backfill, no rewrites. New verdict rows simply append.
-- **Migration order**: not applicable — there is no migration in this phase.
+- **Schema**: v9 performs an atomic writer-exclusive FTS repair when upgrading from v8. The semantic feature adds no relation tables or columns and reuses Phase 1 provenance fields.
+- **Data**: the v8→v9 repair rebuilds FTS atomically; applied semantic verdicts append or update only Engram-owned system relation rows.
+- **Migration order**: migration v9 completes before normal writes resume.
 
 ## Backwards Compatibility
 
@@ -153,8 +150,8 @@ Strict TDD is enabled (`go test ./...`). Every behavior arrives via RED → GREE
 | OpenCode NDJSON schema drift (event names change) | Med | Same defensive parsing; per-pair errors do not abort scan; documented as a known maintenance surface. |
 | Agent CLI not installed or not authenticated | High | Pre-flight check on first runner invocation; clear error message naming the env var and suggested install command. |
 | Per-pair LLM hang | Med | Per-call context timeout (default 30s, configurable later); cancelled call counts as `SemanticErrors`. |
-| `not_conflict` verdicts inflating `memory_relations` | Low | Decision: do NOT persist `not_conflict` verdicts (locked in propose context). Only positive verdicts (compatible/scoped/related/conflicts_with/supersedes) persist. |
-| Mixing `--semantic` with `--apply` semantics from Phase 3 | Low | `--semantic` implies its own persistence path (via `JudgeBySemantic`); the existing `--apply` flag behavior is unchanged when `--semantic` is absent. Documented clearly. |
+| `not_conflict` verdicts inflating `memory_relations` | Low | Durable `not_conflict` system rows record evaluated pairs and prevent repeated scans; conflict-focused views can filter them. |
+| Mixing `--semantic` with `--apply` semantics from Phase 3 | Low | Semantic dry-runs are non-mutating and count skipped verdicts; semantic apply persists every valid verdict. The existing `--apply` behavior is unchanged when `--semantic` is absent. |
 | Verdict model attribution stale across model upgrades | Low | `Verdict.Model` is captured per call; provenance reflects what was actually used at scan time. Model normalization is explicitly Phase 5+. |
 
 ## Rollback Plan
@@ -165,9 +162,9 @@ All changes are additive and feature-flagged behind the `--semantic` flag and a 
 2. **Store rollback** — delete `JudgeBySemantic` and the semantic branch in `ScanProject`. Remove additive fields from `ScanOptions`/`ScanResult` (or leave them as unused fields; no DB impact).
 3. **MCP rollback** — remove `mem_compare` registration in `internal/mcp/mcp.go` and delete the handler. Existing tools unaffected.
 4. **`internal/llm/` rollback** — delete the package. No external callers outside the Phase 4 surface.
-5. **Docs** — revert the documentation section.
+5. **Docs** — revert the documentation section without rewriting retained audit rows.
 
-No data migration. No schema changes. No persisted data depends on Phase 4 specifically (rows are valid Phase 1 relation rows with system provenance).
+Schema v9 upgrades v8 databases through atomic FTS repair. Persisted semantic rows are valid system-provenance relation rows and remain auditable if the feature is later disabled.
 
 ## Dependencies
 
@@ -180,11 +177,7 @@ No data migration. No schema changes. No persisted data depends on Phase 4 speci
 
 Most architectural forks were resolved in propose-phase context. The remaining minor questions for spec/design:
 
-1. **`mem_compare` payload shape** — should the tool return only the two observations + minimal metadata, or pre-format a full prompt the agent can pass directly to its own model? (Lean: minimal payload — let the agent compose its own prompt; matches the "agent IS the LLM" model.)
-2. **Pre-scan token estimate constants** — what fixed numbers should drive the estimate (e.g., ~60 input tokens + ~10 output tokens per pair)? (Lean: encode as named consts in `cmd/engram/conflicts.go`; revisit empirically in Phase 5.)
-3. **Where does the runner factory live** — `internal/llm/factory.go`, or directly in `cmd/engram/main.go` as an injectable var (matching `storeNew`)? (Lean: `internal/llm/factory.go` for purity, plus an injectable `agentRunnerFactory` var in `cmd/engram/main.go` for testability.)
-4. **Per-call timeout default** — 30s is the leaning default; should it be configurable in Phase 4 (`--timeout-per-call`) or hardcoded for now? (Lean: hardcoded for Phase 4; flag added only if real users complain.)
-5. **MCP `mem_compare` model attribution** — the agent calling `mem_compare` does not know its own model name reliably. Should the tool ask, or should `mem_judge` capture model attribution as it already does? (Lean: rely on `mem_judge`'s existing `model` parameter; `mem_compare` itself does not need to record provenance.)
+All original proposal questions are resolved by the implemented contract: `mem_compare` persists an agent-supplied verdict with optional model attribution, the runner factory is injectable, timeout defaults to 60 seconds, and semantic persistence is controlled by `Apply`.
 
 ## Success Criteria
 
@@ -192,7 +185,7 @@ Most architectural forks were resolved in propose-phase context. The remaining m
 - [ ] `engram conflicts scan --semantic --yes` against a seeded project produces correct verdicts and persists them via `JudgeBySemantic` with `marked_by_actor="engram"` provenance.
 - [ ] `engram conflicts scan --semantic` (no `--yes`) prints the cost-warning estimate and respects stdin confirmation.
 - [ ] `engram conflicts scan` (no `--semantic`) behaves identically to Phase 3 — all existing scan tests pass unchanged.
-- [ ] `mem_compare` MCP tool is registered, returns structured comparison payload, and is callable end-to-end via the in-process MCP test harness.
+- [ ] `mem_compare` MCP tool validates integer IDs and a 200-Unicode-rune reasoning limit, persists its supplied verdict, and is callable end-to-end via the in-process MCP test harness.
 - [ ] `ScanResult.SemanticJudged`, `SemanticSkipped`, `SemanticErrors` counters reflect actual scan outcomes; per-pair errors do not abort the scan.
 - [ ] `ENGRAM_AGENT_CLI` unset + `--semantic` produces a clear pre-flight error.
 - [ ] All existing 19+ packages remain GREEN (zero regressions).
@@ -209,6 +202,6 @@ Decisions in Phase 4 enable later work:
 | Async / job-based scan | `ScanProject` semantic branch is a single function — wrap it in a job runner without API change. |
 | Batched prompts (N pairs per LLM call) | `AgentRunner.Compare` signature is `(ctx, prompt) Verdict` — add a `CompareBatch(ctx, prompts) []Verdict` method or a new interface. |
 | Resumable scan checkpoint | Same hook as Phase 3 — wrap the scan loop with checkpoint state. |
-| HTTP `/conflicts/scan?semantic=true` | Behind long-running-request handling (SSE or polling), the same `JudgeBySemantic` store method works. |
+| Async HTTP scan jobs | `POST /conflicts/scan` already supports semantic parameters; job orchestration can later add polling or SSE. |
 | Cross-model verdict normalization | `Verdict.Model` is captured per call — Phase 5 can add a normalizer layer without changing the runner contract. |
 | Direct API calls (when/if user wants engram-managed key) | New `AgentRunner` implementation backed by an SDK; existing shell-out runners stay as the default. |

@@ -300,6 +300,52 @@ func TestJudgeBySemantic_NotConflictPersists(t *testing.T) {
 	}
 }
 
+func TestJudgeBySemanticPreservesExternalJudgmentAndClearsSystemMetadata(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, sourceID := addTestObs(t, s, "Authentication replacement", "decision", "testproject", "project")
+	_, targetID := addTestObs(t, s, "Authentication predecessor", "decision", "testproject", "project")
+	if _, err := s.DB().Exec(`
+		INSERT INTO memory_relations
+			(sync_id, source_id, target_id, relation, reason, evidence, confidence, judgment_status, marked_by_actor, marked_by_kind, session_id)
+		VALUES ('rel-human', ?, ?, 'conflicts_with', 'human reason', 'human evidence', 0.4, 'judged', 'human:alice', 'human', 'human-session')
+	`, targetID, sourceID); err != nil {
+		t.Fatalf("seed external relation: %v", err)
+	}
+	if _, err := s.DB().Exec(`
+		INSERT INTO memory_relations
+			(sync_id, source_id, target_id, relation, reason, evidence, confidence, judgment_status, marked_by_actor, marked_by_kind, session_id, superseded_at)
+		VALUES ('rel-system-pending', ?, ?, 'pending', 'stale reason', 'stale evidence', 0.1, 'pending', 'engram', 'system', 'stale-session', datetime('now'))
+	`, targetID, sourceID); err != nil {
+		t.Fatalf("seed system pending relation: %v", err)
+	}
+
+	syncID, err := s.JudgeBySemantic(JudgeBySemanticParams{
+		SourceID: sourceID, TargetID: targetID, Relation: RelationNotConflict, Confidence: 0.95, Reasoning: "separate system opinion", Model: "test-model",
+	})
+	if err != nil {
+		t.Fatalf("JudgeBySemantic: %v", err)
+	}
+	if syncID != "rel-system-pending" {
+		t.Fatalf("JudgeBySemantic sync ID = %q, want reusable system pending row", syncID)
+	}
+
+	var relation, status, actor, kind, evidence, sessionID string
+	if err := s.DB().QueryRow(`SELECT relation, judgment_status, marked_by_actor, marked_by_kind, ifnull(evidence,''), ifnull(session_id,'') FROM memory_relations WHERE sync_id = 'rel-human'`).Scan(&relation, &status, &actor, &kind, &evidence, &sessionID); err != nil {
+		t.Fatalf("read external relation: %v", err)
+	}
+	if relation != RelationConflictsWith || status != JudgmentStatusJudged || actor != "human:alice" || kind != "human" || evidence != "human evidence" || sessionID != "human-session" {
+		t.Fatalf("external relation was modified: relation=%q status=%q actor=%q kind=%q evidence=%q session=%q", relation, status, actor, kind, evidence, sessionID)
+	}
+	var staleEvidence, staleSession string
+	var supersededAt any
+	if err := s.DB().QueryRow(`SELECT ifnull(evidence,''), ifnull(session_id,''), superseded_at FROM memory_relations WHERE sync_id = ?`, syncID).Scan(&staleEvidence, &staleSession, &supersededAt); err != nil {
+		t.Fatalf("read system relation: %v", err)
+	}
+	if staleEvidence != "" || staleSession != "" || supersededAt != nil {
+		t.Fatalf("system metadata survived semantic overwrite: evidence=%q session=%q superseded_at=%v", staleEvidence, staleSession, supersededAt)
+	}
+}
+
 // ─── C.2d — TestJudgeBySemantic_ValidationErrors ─────────────────────────────
 
 // TestJudgeBySemantic_ValidationErrors verifies that invalid inputs return
