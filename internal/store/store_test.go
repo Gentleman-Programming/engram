@@ -12443,6 +12443,13 @@ func TestNewWithoutRepairReleasesHandleOnOpenFailure(t *testing.T) {
 	if openErr == nil {
 		t.Fatalf("newWithoutRepair with corrupt db returned nil error; want non-nil (post-open failure)")
 	}
+	// Guard the regression: the failure must come from the post-open PRAGMA step
+	// (store.go wraps it as `engram: pragma "PRAGMA journal_mode = WAL": ...`), not
+	// from openDB. If openDB failed directly there is no handle to leak and the
+	// cleanup assertion below would be vacuous.
+	if !strings.Contains(openErr.Error(), "pragma") {
+		t.Fatalf("newWithoutRepair with corrupt db returned %v; want the post-open PRAGMA failure so the test exercises the cleanup path", openErr)
+	}
 
 	// On Windows, removing the file only succeeds if the leaked handle was
 	// closed by newWithoutRepair's deferred db.Close().

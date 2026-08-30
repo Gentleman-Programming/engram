@@ -736,8 +736,10 @@ func New(cfg Config) (*Store, error) {
 	return s, nil
 }
 
-// newWithoutRepair is retained as a test helper alias for New. Enrolled-project
-// repair is deferred until the first synchronization operation in both cases.
+// newWithoutRepair is a test helper alias for New that defers enrolled-project
+// repair to the first synchronization operation. Like New, it closes the
+// database on every post-open failure path (pragma or migration error) via a
+// deferred db.Close() guarded by the succeeded flag, so no SQLite handle leaks.
 func newWithoutRepair(cfg Config) (*Store, error) {
 	if !filepath.IsAbs(cfg.DataDir) {
 		return nil, fmt.Errorf("engram: data directory must be an absolute path, got %q — set ENGRAM_DATA_DIR or ensure your home directory is resolvable", cfg.DataDir)
