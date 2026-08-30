@@ -513,7 +513,7 @@ The Memory Protocol tells the agent:
 - **When to save** — after bugfixes, decisions, discoveries, config changes, patterns
 - **When to search** — reactive ("remember", "recall") + proactive (overlapping past work)
 - **Session close** — mandatory `mem_session_summary` before ending
-- **After compaction** — recover state with `mem_context`
+- **After compaction** — first persist the injected summary with `mem_session_summary`; request `mem_context` only if additional context is needed
 
 See [Surviving Compaction](#surviving-compaction-recommended) for the minimal version, or [DOCS.md](../DOCS.md#memory-protocol-full-text) for the full Memory Protocol text you can copy-paste.
 
@@ -552,9 +552,9 @@ The reliable fix is to pin the project explicitly at startup time. Both forms be
 }
 ```
 
-Both `--project=my-project` and `ENGRAM_PROJECT=my-project` set `MCPConfig.DefaultProject`, which takes precedence over cwd detection for every read and write tool for the lifetime of that MCP process.
+Both `--project=my-project` and `ENGRAM_PROJECT=my-project` set `MCPConfig.DefaultProject`, which takes precedence over cwd detection for current-project tools for the lifetime of that MCP process. Deliberately global operations keep their own omission contract.
 
-> The `--project` flag and `ENGRAM_PROJECT` env var are the same mechanism. If both are supplied, the flag wins. The value must match an existing project name in your Engram store; unknown names are rejected so typos fail loudly instead of silently creating a new project bucket.
+> The `--project` flag and `ENGRAM_PROJECT` env var are the same mechanism. If both are supplied, the flag wins. The value must be a project name, not a path. Operations that cannot establish project context reject unknown values; documented creation and recovery writes retain their creation semantics.
 
 Same pattern applies to:
 - WSL terminals where VS Code opens a remote window (`\\wsl$\...` paths) — the MCP server process runs inside WSL but VS Code does not forward the workspace directory as cwd.
@@ -713,13 +713,13 @@ When your agent compacts (summarizes long conversations to free context), it sta
 You have access to Engram persistent memory via MCP tools (mem_save, mem_search, mem_session_summary, etc.).
 
 - Save proactively after significant work — don't wait to be asked.
-- After any compaction or context reset, call `mem_context` to recover session state before continuing.
+- After any compaction or context reset, first persist the injected summary with `mem_session_summary`. Request `mem_context` only if additional context is needed.
 ```
 
 **For OpenCode** (agent prompt in `opencode.json`):
 
 ```
-After any compaction or context reset, call mem_context to recover session state before continuing.
+After any compaction or context reset, first persist the injected summary with mem_session_summary. Request mem_context only if additional context is needed.
 Save memories proactively with mem_save after significant work.
 ```
 
@@ -731,7 +731,7 @@ Save memories proactively with mem_save after significant work.
 You have access to Engram persistent memory via MCP tools (mem_save, mem_search, mem_session_summary, etc.).
 
 - Save proactively after significant work — don't wait to be asked.
-- After any compaction or context reset, call `mem_context` to recover session state before continuing.
+- After any compaction or context reset, first persist the injected summary with `mem_session_summary`. Request `mem_context` only if additional context is needed.
 ```
 
 **For VS Code** (`Code/User/prompts/*.instructions.md` or custom instructions):
@@ -742,7 +742,7 @@ You have access to Engram persistent memory via MCP tools (mem_save, mem_search,
 You have access to Engram persistent memory via MCP tools (mem_save, mem_search, mem_session_summary, etc.).
 
 - Save proactively after significant work — don't wait to be asked.
-- After any compaction or context reset, call `mem_context` to recover session state before continuing.
+- After any compaction or context reset, first persist the injected summary with `mem_session_summary`. Request `mem_context` only if additional context is needed.
 ```
 
 **For Antigravity** (`~/.gemini/GEMINI.md` or `.agent/rules/`):
@@ -753,7 +753,7 @@ You have access to Engram persistent memory via MCP tools (mem_save, mem_search,
 You have access to Engram persistent memory via MCP tools (mem_save, mem_search, mem_session_summary, etc.).
 
 - Save proactively after significant work — don't wait to be asked.
-- After any compaction or context reset, call `mem_context` to recover session state before continuing.
+- After any compaction or context reset, first persist the injected summary with `mem_session_summary`. Request `mem_context` only if additional context is needed.
 ```
 
 **For Cursor** (`.cursor/rules/engram.mdc` or `~/.cursor/rules/engram.mdc`):
@@ -765,15 +765,15 @@ The `alwaysApply: true` frontmatter tells Cursor to load this rule in every conv
 alwaysApply: true
 ---
 
-You have access to Engram persistent memory (mem_save, mem_search, mem_context).
-Save proactively after significant work. After context resets, call mem_context to recover state.
+You have access to Engram persistent memory (mem_save, mem_search, mem_context, mem_session_summary).
+Save proactively after significant work. After context resets, first persist the injected summary with mem_session_summary. Request mem_context only if additional context is needed.
 ```
 
 **For Windsurf** (`.windsurfrules`):
 
 ```
-You have access to Engram persistent memory (mem_save, mem_search, mem_context).
-Save proactively after significant work. After context resets, call mem_context to recover state.
+You have access to Engram persistent memory (mem_save, mem_search, mem_context, mem_session_summary).
+Save proactively after significant work. After context resets, first persist the injected summary with mem_session_summary. Request mem_context only if additional context is needed.
 ```
 
 This is the **nuclear option** — system prompts survive everything, including compaction. Use it when you want guaranteed agent behavior without relying on plugin hooks. It is optional for agents that have a full plugin (Claude Code, OpenCode, Gemini CLI, Codex) and required for agents that do not (VS Code, Cursor, Windsurf, Antigravity).

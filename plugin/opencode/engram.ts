@@ -166,30 +166,22 @@ async function isEngramRunning(): Promise<boolean> {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function extractProjectName(directory: string): string {
-  // Try git remote origin URL
-  try {
-    const result = Bun.spawnSync(["git", "-C", directory, "remote", "get-url", "origin"])
-    if (result.exitCode === 0) {
-      const url = result.stdout?.toString().trim()
-      if (url) {
-        const name = url.replace(/\.git$/, "").split(/[/:]/).pop()
-        if (name) return name
-      }
-    }
-  } catch {}
-
-  // Fallback: git root directory name (works in worktrees)
-  try {
-    const result = Bun.spawnSync(["git", "-C", directory, "rev-parse", "--show-toplevel"])
-    if (result.exitCode === 0) {
-      const root = result.stdout?.toString().trim()
-      if (root) return root.split("/").pop() ?? "unknown"
-    }
-  } catch {}
-
-  // Final fallback: cwd basename
-  return directory.split("/").pop() ?? "unknown"
+async function resolveProjectName(directory: string): Promise<{ project: string; error?: string }> {
+  const data = await engramFetch(`/project/current?cwd=${encodeURIComponent(directory)}`)
+  const project = typeof data?.project === "string" ? data.project.trim() : ""
+  if (project && project !== "unknown" && !data?.error_hint && !/[\\/]/.test(project)) {
+    return { project }
+  }
+  const choices = Array.isArray(data?.available_projects) && data.available_projects.length > 0
+    ? ` Available projects: ${data.available_projects.join(", ")}.`
+    : ""
+  const reason = typeof data?.error_hint === "string" && data.error_hint.trim()
+    ? ` ${data.error_hint.trim()}`
+    : ""
+  return {
+    project: "unknown",
+    error: `gentle-engram could not resolve a safe project identity.${reason}${choices} Retry when project resolution is available.`,
+  }
 }
 
 function truncate(str: string, max: number): string {
@@ -210,8 +202,19 @@ function stripPrivateTags(str: string): string {
 // ─── Plugin Export ───────────────────────────────────────────────────────────
 
 export const Engram: Plugin = async (ctx) => {
-  const oldProject = ctx.directory.split("/").pop() ?? "unknown"
-  const project = extractProjectName(ctx.directory)
+	let project = "unknown"
+	let projectResolutionError = ""
+	let projectResolutionGeneration = 0
+
+	async function ensureResolvedProject(): Promise<boolean> {
+		if (project !== "unknown" && !projectResolutionError) return true
+		const generation = ++projectResolutionGeneration
+		const resolved = await resolveProjectName(ctx.directory)
+		if (generation !== projectResolutionGeneration) return project !== "unknown" && !projectResolutionError
+		project = resolved.project
+		projectResolutionError = resolved.error ?? ""
+		return projectResolutionError === ""
+	}
 
   // Track tool counts per session (in-memory only, not critical)
   const toolCounts = new Map<string, number>()
@@ -378,6 +381,7 @@ export const Engram: Plugin = async (ctx) => {
    * Silently skips sub-agent sessions (tracked in `subAgentSessions`).
    */
   async function ensureSession(sessionId: string): Promise<boolean> {
+		if (!await ensureResolvedProject()) return false
     if (!sessionId || invalidSessions.has(sessionId)) return false
     if (knownSessions.has(sessionId)) return true
     // Do not register sub-agent sessions in Engram (issue #116).
@@ -410,33 +414,26 @@ export const Engram: Plugin = async (ctx) => {
     }
   }
 
-  // Migrate project name if it changed (one-time, idempotent)
-  // Must run AFTER server startup to ensure the endpoint is available
-  if (oldProject !== project) {
-    await engramFetch("/projects/migrate", {
-      method: "POST",
-      body: { old_project: oldProject, new_project: project },
-    })
-  }
-
-  // Auto-import: if .engram/manifest.json exists in the project repo,
-  // run `engram sync --import` to load any new chunks into the local DB.
-  // This is how git-synced memories get loaded when cloning a repo or
-  // pulling changes. Each chunk is imported only once (tracked by ID).
-  try {
-    const manifestFile = `${ctx.directory}/.engram/manifest.json`
-    const file = Bun.file(manifestFile)
-    if (await file.exists()) {
-      Bun.spawn([ENGRAM_BIN, "sync", "--import"], {
-        cwd: ctx.directory,
-        stdout: "ignore",
-        stderr: "ignore",
-        stdin: "ignore",
-      })
-    }
-  } catch {
-    // Manifest doesn't exist or binary not found — silently skip
-  }
+	if (await ensureResolvedProject()) {
+		// Auto-import: if .engram/manifest.json exists in the project repo,
+		// run `engram sync --import` to load any new chunks into the local DB.
+		// This is how git-synced memories get loaded when cloning a repo or
+		// pulling changes. Each chunk is imported only once (tracked by ID).
+		try {
+			const manifestFile = `${ctx.directory}/.engram/manifest.json`
+			const file = Bun.file(manifestFile)
+			if (await file.exists()) {
+				Bun.spawn([ENGRAM_BIN, "sync", "--import"], {
+					cwd: ctx.directory,
+					stdout: "ignore",
+					stderr: "ignore",
+					stdin: "ignore",
+				})
+			}
+		} catch {
+			// Manifest doesn't exist or binary not found — silently skip
+		}
+	}
 
   return {
     // ─── Event Listeners ───────────────────────────────────────────
@@ -534,6 +531,7 @@ export const Engram: Plugin = async (ctx) => {
         throw new Error(`gentle-engram could not resolve an authoritative OpenCode runtime session for ${input.tool}`)
       }
       if (!registered) {
+			if (projectResolutionError) throw new Error(projectResolutionError)
         throw new Error(`gentle-engram could not confirm Engram session registration for ${input.tool}; verify that the Engram server is available and retry`)
       }
       output.args.session_id = authoritativeSessionID
@@ -589,6 +587,7 @@ export const Engram: Plugin = async (ctx) => {
       // to the system prompt so the agent notices. All fetches are fire-and-
       // forget with short timeouts — any failure silently skips the nudge.
       try {
+			if (!await ensureResolvedProject()) return
         const sessionID: string = input.sessionID ?? ""
         if (!sessionID || invalidSessions.has(sessionID) || subAgentSessions.has(sessionID)) return
 
@@ -678,6 +677,10 @@ export const Engram: Plugin = async (ctx) => {
     // 3. Tell the compressor to remind the new agent to save memories
 
     "experimental.session.compacting": async (input, output) => {
+		if (!await ensureResolvedProject()) {
+			output.context.push(`${projectResolutionError} Automatic session, prompt, and passive-capture writes remain disabled.`)
+			return
+		}
       let sessionId = ""
       if (input.sessionID) {
         sessionId = await resolveAuthoritativeSessionID(input.sessionID)

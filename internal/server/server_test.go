@@ -10,6 +10,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -101,6 +103,152 @@ func TestStartUsesDefaultServeWhenServeNil(t *testing.T) {
 	err := s.Start()
 	if err == nil {
 		t.Fatalf("expected start to fail when default http.Serve receives failing listener")
+	}
+}
+
+func TestProjectScopedHTTPReadFamiliesUseCurrentAndExplicitAll(t *testing.T) {
+	st := newServerTestStore(t)
+	t.Setenv("ENGRAM_PROJECT", "alpha")
+	ids := map[string]int64{}
+	for _, project := range []string{"alpha", "beta"} {
+		if err := st.CreateSession("scope-"+project, project, "/tmp/"+project); err != nil {
+			t.Fatalf("create %s session: %v", project, err)
+		}
+		id, err := st.AddObservation(store.AddObservationParams{
+			SessionID: "scope-" + project,
+			Type:      "note",
+			Title:     "scoped " + project,
+			Content:   "scoped search " + project,
+			Project:   project,
+		})
+		if err != nil {
+			t.Fatalf("add %s observation: %v", project, err)
+		}
+		ids[project] = id
+		if _, err := st.AddPrompt(store.AddPromptParams{SessionID: "scope-" + project, Content: "scoped prompt " + project, Project: project}); err != nil {
+			t.Fatalf("add %s prompt: %v", project, err)
+		}
+	}
+	past := time.Now().UTC().Add(-time.Hour).Format("2006-01-02 15:04:05")
+	if _, err := st.DB().Exec(`UPDATE observations SET review_after = ?`, past); err != nil {
+		t.Fatalf("backdate reviews: %v", err)
+	}
+
+	provider := &stubSyncStatusProvider{status: SyncStatus{Enabled: true, Phase: "healthy"}}
+	srv := New(st, 0)
+	srv.SetSyncStatus(provider)
+	h := srv.Handler()
+	get := func(path string) string {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s = %d: %s", path, rec.Code, rec.Body.String())
+		}
+		return rec.Body.String()
+	}
+
+	for _, path := range []string{
+		"/sessions/recent",
+		"/observations",
+		"/observations/recent",
+		"/review",
+		"/prompts/recent",
+		"/prompts/search?q=scoped",
+		"/export",
+		"/stats",
+		"/conflicts",
+		"/conflicts/stats",
+	} {
+		body := get(path)
+		if strings.Contains(body, "beta") {
+			t.Fatalf("omitted selector leaked beta data for %s: %s", path, body)
+		}
+	}
+	_ = get("/sync/status?project=beta")
+	if provider.lastProject != "beta" {
+		t.Fatalf("sync status must preserve its explicit project contract: got %q", provider.lastProject)
+	}
+
+	for _, path := range []string{
+		"/sessions/recent?all_projects=true",
+		"/observations?all_projects=true",
+		"/observations/recent?all_projects=true",
+		"/review?all_projects=true",
+		"/prompts/recent?all_projects=true",
+		"/prompts/search?q=scoped&all_projects=true",
+		"/export?all_projects=true",
+		"/stats?all_projects=true",
+	} {
+		body := get(path)
+		if !strings.Contains(body, "beta") {
+			t.Fatalf("explicit all selector omitted beta data for %s: %s", path, body)
+		}
+	}
+	_ = get("/conflicts?all_projects=true")
+	_ = get("/conflicts/stats?all_projects=true")
+
+	for _, body := range []string{`{"apply":false}`, `{"all_projects":true,"apply":false}`} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/conflicts/scan", strings.NewReader(body)))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("scan body %s = %d: %s", body, rec.Code, rec.Body.String())
+		}
+	}
+
+	before, err := st.GetObservation(ids["alpha"])
+	if err != nil {
+		t.Fatalf("load review observation: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/review/mark_reviewed?project=missing", strings.NewReader(fmt.Sprintf(`{"observation_id":%d}`, ids["alpha"]))))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown review selector = %d: %s", rec.Code, rec.Body.String())
+	}
+	after, err := st.GetObservation(ids["alpha"])
+	if err != nil || before.ReviewAfter == nil || after.ReviewAfter == nil || *after.ReviewAfter != *before.ReviewAfter {
+		t.Fatalf("failed project resolution must not mutate review state: before=%v after=%v err=%v", before.ReviewAfter, after.ReviewAfter, err)
+	}
+
+	for _, selector := range []struct {
+		path       string
+		wantStatus int
+		wantCode   string
+	}{
+		{"/stats?project=missing", http.StatusNotFound, "unknown_project"},
+		{"/stats?all_projects=not-a-bool", http.StatusBadRequest, "invalid_project"},
+		{"/stats?project=alpha&all_projects=true", http.StatusBadRequest, "invalid_project"},
+		{"/stats?project=alpha&project=beta", http.StatusBadRequest, "invalid_project"},
+	} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, selector.path, nil))
+		if rec.Code != selector.wantStatus {
+			t.Fatalf("selector %s = %d, want %d: %s", selector.path, rec.Code, selector.wantStatus, rec.Body.String())
+		}
+		var body map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode selector %s response: %v", selector.path, err)
+		}
+		if body["code"] != selector.wantCode {
+			t.Fatalf("selector %s error code = %#v, want %q: %s", selector.path, body["code"], selector.wantCode, rec.Body.String())
+		}
+	}
+}
+
+func TestRepeatedProjectSelectorReturnsInvalidProject(t *testing.T) {
+	srv := New(newServerTestStore(t), 0)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/stats?project=alpha&project=beta", nil))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("repeated project selector = %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode repeated selector response: %v", err)
+	}
+	if body["code"] != "invalid_project" {
+		t.Fatalf("repeated project selector code = %#v, want invalid_project: %s", body["code"], rec.Body.String())
 	}
 }
 
@@ -628,10 +776,17 @@ func TestHandleSearchForwardsMatchModeAndAllProjects(t *testing.T) {
 		t.Fatalf("expected match_mode=any to preserve the project filter by default, got %#v", projectResults)
 	}
 
-	allProjectResults := search("/search?q=aurora+nebula&project=proj-a&match_mode=any&all_projects=true&limit=10")
+	conflicting := httptest.NewRequest(http.MethodGet, "/search?q=aurora+nebula&project=proj-a&match_mode=any&all_projects=true&limit=10", nil)
+	conflictingRec := httptest.NewRecorder()
+	h.ServeHTTP(conflictingRec, conflicting)
+	if conflictingRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected conflicting project selectors to return 400, got %d body=%s", conflictingRec.Code, conflictingRec.Body.String())
+	}
+
+	allProjectResults := search("/search?q=aurora+nebula&match_mode=any&all_projects=true&limit=10")
 	allProjectTitles := titles(allProjectResults)
 	if len(allProjectResults) != 2 || !allProjectTitles["Aurora project note"] || !allProjectTitles["Nebula project note"] {
-		t.Fatalf("expected all_projects=true to ignore project and return both project notes, got %#v", allProjectResults)
+		t.Fatalf("expected explicit all_projects=true to return both project notes, got %#v", allProjectResults)
 	}
 }
 
@@ -666,6 +821,21 @@ func TestHandleSearchAllowsEmptyMatchMode(t *testing.T) {
 	}
 	if len(results) != 1 || results[0]["title"] != "Aurora default match note" {
 		t.Fatalf("expected default match_mode search to return seeded observation, got %#v", results)
+	}
+}
+
+func TestHandleSearchNoHitsReturnsEmptyArray(t *testing.T) {
+	srv := New(newServerTestStore(t), 0)
+	req := httptest.NewRequest(http.MethodGet, "/search?q=no-hits", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for no-hit search, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if body := strings.TrimSpace(rec.Body.String()); body != "[]" {
+		t.Fatalf("expected no-hit search body [], got %q", body)
 	}
 }
 
@@ -870,6 +1040,38 @@ func TestHandleReviewListAndMarkReviewed(t *testing.T) {
 	}
 }
 
+func TestHandleReviewMarkReviewedEnforcesResolvedProjectAtMutation(t *testing.T) {
+	st := newServerTestStore(t)
+	for _, project := range []string{"alpha", "beta"} {
+		if err := st.CreateSession("review-scope-"+project, project, "/tmp/"+project); err != nil {
+			t.Fatalf("create %s session: %v", project, err)
+		}
+	}
+	id, err := st.AddObservation(store.AddObservationParams{SessionID: "review-scope-alpha", Type: "decision", Title: "Alpha review", Content: "must remain scoped", Project: "alpha"})
+	if err != nil {
+		t.Fatalf("add alpha observation: %v", err)
+	}
+	past := time.Now().UTC().Add(-time.Hour).Format("2006-01-02 15:04:05")
+	if _, err := st.DB().Exec(`UPDATE observations SET review_after = ? WHERE id = ?`, past, id); err != nil {
+		t.Fatalf("backdate review_after: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/review/mark_reviewed?project=beta", strings.NewReader(fmt.Sprintf(`{"observation_id":%d}`, id)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	New(st, 0).Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "observation not found in resolved project") {
+		t.Fatalf("mismatched project mark reviewed = %d: %s", rec.Code, rec.Body.String())
+	}
+	obs, err := st.GetObservation(id)
+	if err != nil {
+		t.Fatalf("GetObservation: %v", err)
+	}
+	if obs.State() != store.ObservationStateNeedsReview {
+		t.Fatalf("mismatched project mutation changed review state to %q", obs.State())
+	}
+}
+
 func TestHandleReviewMarkReviewedAcceptsIDAlias(t *testing.T) {
 	st := newServerTestStore(t)
 	srv := New(st, 0)
@@ -998,10 +1200,12 @@ func TestExportRejectsExplicitBlankProjectQuery(t *testing.T) {
 type stubSyncStatusProvider struct {
 	status      SyncStatus
 	lastProject string
+	calls       int
 }
 
 func (s *stubSyncStatusProvider) Status(project string) SyncStatus {
 	s.lastProject = project
+	s.calls++
 	return s.status
 }
 
@@ -1144,7 +1348,11 @@ func TestSyncStatusIncludesReasonParityFields(t *testing.T) {
 
 func TestSyncStatusForwardsProjectQueryToProvider(t *testing.T) {
 	provider := &stubSyncStatusProvider{status: SyncStatus{Enabled: true, Phase: "healthy"}}
-	srv := New(newServerTestStore(t), 0)
+	st := newServerTestStore(t)
+	if err := st.CreateSession("sync-proj-a", "proj-a", "/tmp/proj-a"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	srv := New(st, 0)
 	srv.SetSyncStatus(provider)
 
 	req := httptest.NewRequest(http.MethodGet, "/sync/status?project=proj-a", nil)
@@ -1156,6 +1364,66 @@ func TestSyncStatusForwardsProjectQueryToProvider(t *testing.T) {
 	}
 	if provider.lastProject != "proj-a" {
 		t.Fatalf("expected provider to receive project query, got %q", provider.lastProject)
+	}
+}
+
+func TestSyncStatusResolvesProjectSelectors(t *testing.T) {
+	provider := &stubSyncStatusProvider{status: SyncStatus{Enabled: true, Phase: "healthy"}}
+	st := newServerTestStore(t)
+	for _, project := range []string{"alpha", "beta"} {
+		if err := st.CreateSession("sync-scope-"+project, project, "/tmp/"+project); err != nil {
+			t.Fatalf("create %s session: %v", project, err)
+		}
+	}
+	srv := New(st, 0)
+	srv.SetSyncStatus(provider)
+	h := srv.Handler()
+	request := func(path string) *httptest.ResponseRecorder {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		return rec
+	}
+	assertCode := func(rec *httptest.ResponseRecorder, want int, wantCode string) {
+		t.Helper()
+		if rec.Code != want {
+			t.Fatalf("status = %d, want %d: %s", rec.Code, want, rec.Body.String())
+		}
+		if wantCode == "" {
+			return
+		}
+		var body map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if body["code"] != wantCode {
+			t.Fatalf("error code = %#v, want %q: %s", body["code"], wantCode, rec.Body.String())
+		}
+	}
+
+	t.Setenv("ENGRAM_PROJECT", "alpha")
+	assertCode(request("/sync/status"), http.StatusOK, "")
+	if provider.lastProject != "alpha" {
+		t.Fatalf("omitted selector reached provider as %q, want alpha", provider.lastProject)
+	}
+	assertCode(request("/sync/status?project=beta"), http.StatusOK, "")
+	if provider.lastProject != "beta" {
+		t.Fatalf("explicit selector reached provider as %q, want beta", provider.lastProject)
+	}
+
+	calls := provider.calls
+	assertCode(request("/sync/status?project="), http.StatusBadRequest, "invalid_project")
+	assertCode(request("/sync/status?project=missing"), http.StatusNotFound, "unknown_project")
+	if provider.calls != calls {
+		t.Fatalf("invalid or unknown selectors must not consult provider: calls=%d want %d", provider.calls, calls)
+	}
+
+	t.Setenv("ENGRAM_PROJECT", "")
+	parent := ambiguousProjectHTTPDirectory(t)
+	assertCode(request("/sync/status?cwd="+url.QueryEscape(parent)), http.StatusConflict, "ambiguous_project")
+	assertCode(request("/sync/status?all_projects=true"), http.StatusBadRequest, "unsupported_project_scope")
+	if provider.calls != calls {
+		t.Fatalf("ambiguous or unsupported selectors must not consult provider: calls=%d want %d", provider.calls, calls)
 	}
 }
 
@@ -1304,13 +1572,54 @@ func TestHandleStatsReturnsInternalServerErrorOnLoaderError(t *testing.T) {
 	})
 
 	s := New(newServerTestStore(t), 0)
-	req := httptest.NewRequest(http.MethodGet, "/stats", nil)
+	req := httptest.NewRequest(http.MethodGet, "/stats?all_projects=true", nil)
 	rec := httptest.NewRecorder()
 
 	s.handleStats(rec, req)
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("expected 500 stats response, got %d", rec.Code)
+	}
+}
+
+func TestHandleStatsProjectScopeSkipsGlobalLoader(t *testing.T) {
+	st := newServerTestStore(t)
+	if err := st.CreateSession("scoped-stats", "alpha", "/tmp/alpha"); err != nil {
+		t.Fatalf("create alpha session: %v", err)
+	}
+	previous := loadServerStats
+	loadServerStats = func(*store.Store) (*store.Stats, error) {
+		return nil, errors.New("global stats should not run")
+	}
+	t.Cleanup(func() { loadServerStats = previous })
+
+	srv := New(st, 0)
+	rec := httptest.NewRecorder()
+	srv.handleStats(rec, httptest.NewRequest(http.MethodGet, "/stats?project=alpha", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("project stats = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestProjectResolutionStoreFailureReturnsInternalErrorCode(t *testing.T) {
+	st := newServerTestStore(t)
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+	srv := New(st, 0)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/stats?project=alpha", nil))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("store resolution failure = %d, want 500: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode resolution failure: %v", err)
+	}
+	if body["code"] != "project_resolution_failed" {
+		t.Fatalf("resolution failure code = %#v, want project_resolution_failed: %s", body["code"], rec.Body.String())
 	}
 }
 
@@ -1902,7 +2211,75 @@ func TestHandleConflictsScan_PageContract(t *testing.T) {
 	}
 }
 
-func TestHandleConflictsScan_MissingProject400(t *testing.T) {
+func TestHandleConflictsScanProjectIsolationAndAllProjects(t *testing.T) {
+	st, rawDB := conflictsTestStore(t)
+	seed := func(sessionID, project string) {
+		t.Helper()
+		if err := st.CreateSession(sessionID, project, "/tmp/"+sessionID); err != nil {
+			t.Fatalf("CreateSession %q: %v", sessionID, err)
+		}
+		for _, title := range []string{"shared HTTP conflict scan primary", "shared HTTP conflict scan secondary"} {
+			if _, err := st.AddObservation(store.AddObservationParams{
+				SessionID: sessionID,
+				Type:      "decision",
+				Title:     title,
+				Content:   "shared HTTP conflict scan",
+				Project:   project,
+				Scope:     "project",
+			}); err != nil {
+				t.Fatalf("AddObservation %q: %v", sessionID, err)
+			}
+		}
+	}
+	seed("scan-alpha", "alpha")
+	seed("scan-beta", "beta")
+	seed("scan-blank", "legacy")
+	if _, err := rawDB.Exec(`UPDATE observations SET project = '' WHERE session_id = 'scan-blank'`); err != nil {
+		t.Fatalf("clear blank observation project: %v", err)
+	}
+	if _, err := rawDB.Exec(`UPDATE sessions SET project = '' WHERE id = 'scan-blank'`); err != nil {
+		t.Fatalf("clear blank session project: %v", err)
+	}
+
+	scan := func(body string) map[string]any {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		New(st, 0).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/conflicts/scan", strings.NewReader(body)))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("scan %s status = %d: %s", body, rec.Code, rec.Body.String())
+		}
+		var response map[string]any
+		if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+			t.Fatalf("decode scan response: %v", err)
+		}
+		return response
+	}
+
+	alpha := scan(`{"project":"alpha"}`)
+	if alpha["inspected"] != float64(2) || alpha["inserted"] != float64(0) {
+		t.Fatalf("explicit alpha scan = %#v, want only alpha observations", alpha)
+	}
+	all := scan(`{"all_projects":true,"apply":true}`)
+	if all["inspected"] != float64(6) || all["inserted"] != float64(3) {
+		t.Fatalf("all-project scan = %#v, want all three project scopes", all)
+	}
+
+	var crossProjectRelations int
+	if err := rawDB.QueryRow(`
+		SELECT COUNT(*)
+		FROM memory_relations r
+		JOIN observations src ON src.sync_id = r.source_id
+		JOIN observations tgt ON tgt.sync_id = r.target_id
+		WHERE ifnull(src.project, '') != ifnull(tgt.project, '')
+	`).Scan(&crossProjectRelations); err != nil {
+		t.Fatalf("count cross-project relations: %v", err)
+	}
+	if crossProjectRelations != 0 {
+		t.Fatalf("all-project scan created %d cross-project relations", crossProjectRelations)
+	}
+}
+
+func TestHandleConflictsScan_OmittedProjectUsesCurrent(t *testing.T) {
 	st, _ := conflictsTestStore(t)
 	srv := New(st, 0)
 	h := srv.Handler()
@@ -1913,8 +2290,8 @@ func TestHandleConflictsScan_MissingProject400(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 when project is missing, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for current-project scan, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -2373,7 +2750,7 @@ func TestG2_ScanConflicts_ApplyCapWarning(t *testing.T) {
 
 // TestG2_ScanConflicts_MissingProject400 verifies the scan endpoint returns 400
 // when the "project" field is absent from the request body.
-func TestG2_ScanConflicts_MissingProject400(t *testing.T) {
+func TestG2_ScanConflicts_OmittedProjectUsesCurrent(t *testing.T) {
 	st, _ := conflictsTestStore(t)
 	srv := New(st, 0)
 	h := srv.Handler()
@@ -2384,8 +2761,8 @@ func TestG2_ScanConflicts_MissingProject400(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 when project is missing, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for current-project scan, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -2612,6 +2989,137 @@ func TestProjectCurrentDoctorJudgeAndCompareRoutes(t *testing.T) {
 	}
 	if atomic.LoadInt32(&writes) < 2 {
 		t.Fatalf("expected judge and compare writes to notify, got %d", writes)
+	}
+}
+
+func TestProjectCurrentUsesProcessOverrideBeforeCWD(t *testing.T) {
+	t.Setenv("ENGRAM_PROJECT", "  Trusted Project  ")
+
+	srv := New(newServerTestStore(t), 0)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/project/current?cwd=/path/that/does/not/exist", nil)
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected current project 200, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode project response: %v", err)
+	}
+	if got := response["project"]; got != "trusted project" {
+		t.Errorf("project = %v, want trusted project", got)
+	}
+	if got := response["project_source"]; got != "process_override" {
+		t.Errorf("project_source = %v, want process_override", got)
+	}
+	if got := response["project_path"]; got != "" {
+		t.Errorf("project_path = %v, want empty for process override", got)
+	}
+	if got := response["cwd"]; got != "/path/that/does/not/exist" {
+		t.Errorf("cwd = %v, want request cwd", got)
+	}
+}
+
+func TestProjectScopedEndpointsResolveAndValidateProcessOverrides(t *testing.T) {
+	t.Run("known override scopes context", func(t *testing.T) {
+		t.Setenv("ENGRAM_PROJECT", "override-project")
+		st := newServerTestStore(t)
+		if err := st.CreateSession("override-session", "override-project", t.TempDir()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.AddObservation(store.AddObservationParams{SessionID: "override-session", Project: "override-project", Type: "note", Title: "override title", Content: "override content", Scope: "project"}); err != nil {
+			t.Fatal(err)
+		}
+		rec := httptest.NewRecorder()
+		New(st, 0).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/context", nil))
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "override title") {
+			t.Fatalf("context = %d %q", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("unknown override is rejected for current scoped reads", func(t *testing.T) {
+		t.Setenv("ENGRAM_PROJECT", "missing-project")
+		rec := httptest.NewRecorder()
+		New(newServerTestStore(t), 0).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/context", nil))
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("context status = %d body=%q", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("path-like override is rejected by discovery", func(t *testing.T) {
+		t.Setenv("ENGRAM_PROJECT", `C:\\workspace`)
+		rec := httptest.NewRecorder()
+		New(newServerTestStore(t), 0).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/project/current", nil))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("current status = %d body=%q", rec.Code, rec.Body.String())
+		}
+	})
+}
+
+func ambiguousProjectHTTPDirectory(t *testing.T) string {
+	t.Helper()
+	parent := t.TempDir()
+	for _, name := range []string{"repo-http-a", "repo-http-b"} {
+		if err := os.MkdirAll(filepath.Join(parent, name, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return parent
+}
+
+func TestProjectCurrentAmbiguousUsesDiscoveryEnvelope(t *testing.T) {
+	parent := ambiguousProjectHTTPDirectory(t)
+	rec := httptest.NewRecorder()
+	New(newServerTestStore(t), 0).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/project/current?cwd="+url.QueryEscape(parent), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%q", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["project"] != "" || body["project_source"] != "ambiguous" || body["project_path"] != parent {
+		t.Fatalf("unexpected discovery envelope: %#v", body)
+	}
+	if available, ok := body["available_projects"].([]any); !ok || len(available) != 2 {
+		t.Fatalf("available_projects = %#v, want two candidates", body["available_projects"])
+	}
+	if hint, ok := body["error_hint"].(string); !ok || hint == "" {
+		t.Fatalf("error_hint = %#v, want ambiguity diagnostic", body["error_hint"])
+	}
+}
+
+func TestProjectScopedRoutesReportStructuredAmbiguity(t *testing.T) {
+	parent := ambiguousProjectHTTPDirectory(t)
+	h := New(newServerTestStore(t), 0).Handler()
+	for _, route := range []string{
+		"/search?q=identity",
+		"/timeline?observation_id=1",
+		"/context",
+		"/doctor",
+	} {
+		t.Run(route, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			separator := "?"
+			if strings.Contains(route, "?") {
+				separator = "&"
+			}
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, route+separator+"cwd="+url.QueryEscape(parent), nil))
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("status = %d body=%q", rec.Code, rec.Body.String())
+			}
+			var body map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if body["code"] != "ambiguous_project" || body["project_source"] != "ambiguous" || body["project_path"] != parent {
+				t.Fatalf("unexpected ambiguity envelope: %#v", body)
+			}
+			if available, ok := body["available_projects"].([]any); !ok || len(available) != 2 {
+				t.Fatalf("available_projects = %#v, want two candidates", body["available_projects"])
+			}
+		})
 	}
 }
 
