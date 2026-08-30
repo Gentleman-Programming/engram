@@ -969,6 +969,169 @@ func TestLocalChunkExportReconcilesCompleteValidatedHistory(t *testing.T) {
 		}
 	})
 
+	t.Run("same-chunk session tombstone cannot suppress observations", func(t *testing.T) {
+		s, data := seedOldLocalExportData(t)
+		syncDir := filepath.Join(t.TempDir(), ".engram")
+		sessionID := data.Sessions[0].ID
+		sessionUpsert := synthesizeMutationsFromChunk(ChunkData{Sessions: data.Sessions})[0]
+		writeLocalChunkFile(t, syncDir, "history", ChunkData{
+			Observations: data.Observations,
+			Mutations: []store.SyncMutation{
+				sessionUpsert,
+				{
+					Entity:    store.SyncEntitySession,
+					EntityKey: sessionID,
+					Op:        store.SyncOpDelete,
+					Payload:   fmt.Sprintf(`{"id":%q,"project":"proj-a","deleted_at":"2025-06-01T00:00:00Z"}`, sessionID),
+				},
+			},
+		})
+		writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "history", CreatedAt: "2025-06-01T00:00:00Z"}}})
+
+		if _, err := New(s, syncDir).Export("alice", "proj-a"); err == nil {
+			t.Fatal("expected export to reject same-chunk history that cannot replay after a session tombstone")
+		} else if !strings.Contains(err.Error(), "deleted with live observations") {
+			t.Fatalf("expected replayability validation error, got %v", err)
+		}
+
+		if _, err := New(newTestStore(t), syncDir).Import(); err == nil {
+			t.Fatal("expected same-chunk observation lifecycle to fail import")
+		}
+	})
+
+	t.Run("cross-chunk session tombstone cannot suppress observations", func(t *testing.T) {
+		s, data := seedOldLocalExportData(t)
+		syncDir := filepath.Join(t.TempDir(), ".engram")
+		sessionID := data.Sessions[0].ID
+		sessionUpsert := synthesizeMutationsFromChunk(ChunkData{Sessions: data.Sessions})[0]
+		writeLocalChunkFile(t, syncDir, "session-upsert", ChunkData{Mutations: []store.SyncMutation{sessionUpsert}})
+		writeLocalChunkFile(t, syncDir, "observation-upsert", ChunkData{Observations: data.Observations})
+		writeLocalChunkFile(t, syncDir, "session-delete", ChunkData{Mutations: []store.SyncMutation{{
+			Entity:    store.SyncEntitySession,
+			EntityKey: sessionID,
+			Op:        store.SyncOpDelete,
+			Payload:   fmt.Sprintf(`{"id":%q,"project":"proj-a","deleted_at":"2025-06-01T00:00:00Z"}`, sessionID),
+		}}})
+		writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{
+			{ID: "session-upsert", CreatedAt: "2025-06-01T00:00:00Z"},
+			{ID: "observation-upsert", CreatedAt: "2025-06-01T00:01:00Z"},
+			{ID: "session-delete", CreatedAt: "2025-06-01T00:02:00Z"},
+		}})
+
+		if _, err := New(s, syncDir).Export("alice", "proj-a"); err == nil {
+			t.Fatal("expected export to reject cross-chunk history that cannot replay after a session tombstone")
+		} else if !strings.Contains(err.Error(), "deleted with live observations") {
+			t.Fatalf("expected replayability validation error, got %v", err)
+		}
+
+		if _, err := New(newTestStore(t), syncDir).Import(); err == nil {
+			t.Fatal("expected cross-chunk observation lifecycle to fail import")
+		}
+	})
+
+	for _, tc := range []struct {
+		name          string
+		hardDelete    bool
+		wantExportErr bool
+		wantImportErr bool
+	}{
+		{name: "soft observation delete retains FK liveness", wantExportErr: true, wantImportErr: true},
+		{name: "hard observation delete releases FK liveness", hardDelete: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _ := seedOldLocalExportData(t)
+			if _, err := s.DB().Exec(`DELETE FROM user_prompts`); err != nil {
+				t.Fatalf("remove unrelated prompt: %v", err)
+			}
+			data, err := s.ExportProject("proj-a")
+			if err != nil {
+				t.Fatalf("export observation-only local data: %v", err)
+			}
+			syncDir := filepath.Join(t.TempDir(), ".engram")
+			sessionID := data.Sessions[0].ID
+			observationID := data.Observations[0].SyncID
+			sessionUpsert := synthesizeMutationsFromChunk(ChunkData{Sessions: data.Sessions})[0]
+			observationUpsert := synthesizeMutationsFromChunk(ChunkData{Observations: data.Observations})[0]
+			writeLocalChunkFile(t, syncDir, "history", ChunkData{Mutations: []store.SyncMutation{
+				sessionUpsert,
+				observationUpsert,
+				{
+					Entity:    store.SyncEntityObservation,
+					EntityKey: observationID,
+					Op:        store.SyncOpDelete,
+					Payload:   fmt.Sprintf(`{"sync_id":%q,"deleted":true,"hard_delete":%t}`, observationID, tc.hardDelete),
+				},
+				{
+					Entity:    store.SyncEntitySession,
+					EntityKey: sessionID,
+					Op:        store.SyncOpDelete,
+					Payload:   fmt.Sprintf(`{"id":%q,"project":"proj-a","deleted_at":"2025-06-01T00:00:00Z"}`, sessionID),
+				},
+			}})
+			writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "history", CreatedAt: "2025-06-01T00:00:00Z"}}})
+
+			_, err = New(s, syncDir).Export("alice", "proj-a")
+			if tc.wantExportErr {
+				if err == nil {
+					t.Fatal("expected export to reject a soft-deleted observation that still blocks session deletion")
+				}
+				if !strings.Contains(err.Error(), "deleted with live observations") {
+					t.Fatalf("expected replayability validation error, got %v", err)
+				}
+			} else if err != nil {
+				t.Fatalf("hard-deleted observation history must not be rejected: %v", err)
+			}
+
+			_, err = New(newTestStore(t), syncDir).Import()
+			if tc.wantImportErr {
+				if err == nil {
+					t.Fatal("expected soft-deleted observation lifecycle to fail import")
+				}
+			} else if err != nil {
+				t.Fatalf("hard-deleted observation lifecycle must import: %v", err)
+			}
+		})
+	}
+
+	t.Run("same-chunk session tombstone permits prompts", func(t *testing.T) {
+		s, _ := seedOldLocalExportData(t)
+		if _, err := s.DB().Exec(`DELETE FROM observations`); err != nil {
+			t.Fatalf("remove unrelated observation: %v", err)
+		}
+		data, err := s.ExportProject("proj-a")
+		if err != nil {
+			t.Fatalf("export prompt-only local data: %v", err)
+		}
+		syncDir := filepath.Join(t.TempDir(), ".engram")
+		sessionID := data.Sessions[0].ID
+		sessionUpsert := synthesizeMutationsFromChunk(ChunkData{Sessions: data.Sessions})[0]
+		writeLocalChunkFile(t, syncDir, "history", ChunkData{
+			Prompts: data.Prompts,
+			Mutations: []store.SyncMutation{
+				sessionUpsert,
+				{
+					Entity:    store.SyncEntitySession,
+					EntityKey: sessionID,
+					Op:        store.SyncOpDelete,
+					Payload:   fmt.Sprintf(`{"id":%q,"project":"proj-a","deleted_at":"2025-06-01T00:00:00Z"}`, sessionID),
+				},
+			},
+		})
+		writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "history", CreatedAt: "2025-06-01T00:00:00Z"}}})
+
+		result, err := New(s, syncDir).Export("alice", "proj-a")
+		if err != nil {
+			t.Fatalf("prompt-only history must not be rejected: %v", err)
+		}
+		if !result.IsEmpty {
+			t.Fatalf("prompt-only history must remain accounted for, got %+v", result)
+		}
+
+		if _, err := New(newTestStore(t), syncDir).Import(); err != nil {
+			t.Fatalf("prompt-only same-chunk lifecycle must import: %v", err)
+		}
+	})
+
 	t.Run("legacy direct observations and prompts without sync IDs export current identities once", func(t *testing.T) {
 		s, data := seedOldLocalExportData(t)
 		legacyObservations := append([]store.Observation(nil), data.Observations...)

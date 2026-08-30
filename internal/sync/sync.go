@@ -1197,11 +1197,13 @@ func (sy *Syncer) exportedIdentityAndRelationKeys(m *Manifest, relevant map[stri
 	}
 	complete := true
 	sessionAvailability := make(map[string]bool)
+	activeObservations := make(map[string]string)
 	for _, entry := range m.Chunks {
 		raw, err := sy.transport.ReadChunk(entry.ID)
 		if err != nil {
 			if errors.Is(err, ErrChunkNotFound) {
 				complete = false
+				activeObservations = make(map[string]string)
 				continue
 			}
 			return nil, nil, false, fmt.Errorf("read chunk %s: %w", entry.ID, err)
@@ -1210,7 +1212,7 @@ func (sy *Syncer) exportedIdentityAndRelationKeys(m *Manifest, relevant map[stri
 		if err := json.Unmarshal(raw, &chunk); err != nil {
 			return nil, nil, false, fmt.Errorf("unmarshal chunk %s: %w", entry.ID, err)
 		}
-		if err := validateHistoricalChunk(raw, chunk, sessionAvailability); err != nil {
+		if err := validateHistoricalChunk(raw, chunk, sessionAvailability, activeObservations); err != nil {
 			return nil, nil, false, fmt.Errorf("validate chunk %s: %w", entry.ID, err)
 		}
 		for _, session := range chunk.Sessions {
@@ -1233,7 +1235,7 @@ func (sy *Syncer) exportedIdentityAndRelationKeys(m *Manifest, relevant map[stri
 	return identities, relations, complete, nil
 }
 
-func validateHistoricalChunk(raw []byte, chunk ChunkData, sessionAvailability map[string]bool) error {
+func validateHistoricalChunk(raw []byte, chunk ChunkData, sessionAvailability map[string]bool, activeObservations map[string]string) error {
 	var document map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &document); err != nil {
 		return err
@@ -1259,7 +1261,7 @@ func validateHistoricalChunk(raw []byte, chunk ChunkData, sessionAvailability ma
 	if err := validateHistoricalDirectRows(chunk); err != nil {
 		return err
 	}
-	return validateHistoricalSessionLifecycle(chunk, sessionAvailability)
+	return validateHistoricalSessionLifecycle(chunk, sessionAvailability, activeObservations)
 }
 
 // validateHistoricalDirectRows checks only the identities used to account for
@@ -1287,7 +1289,7 @@ func validateHistoricalDirectRows(chunk ChunkData) error {
 // validateHistoricalSessionLifecycle verifies that stable direct and explicit
 // dependents do not follow a historical session tombstone. Unknown sessions
 // remain recoverable for legacy local chunks.
-func validateHistoricalSessionLifecycle(chunk ChunkData, sessionAvailability map[string]bool) error {
+func validateHistoricalSessionLifecycle(chunk ChunkData, sessionAvailability map[string]bool, activeObservations map[string]string) error {
 	for _, mutation := range orderMutationsForApply(buildImportMutations(chunk)) {
 		sessionID := strings.TrimSpace(mutation.EntityKey)
 		switch {
@@ -1297,6 +1299,11 @@ func validateHistoricalSessionLifecycle(chunk ChunkData, sessionAvailability map
 			}
 		case mutation.Entity == store.SyncEntitySession && mutation.Op == store.SyncOpDelete:
 			if sessionID != "" {
+				for _, dependencyID := range activeObservations {
+					if dependencyID == sessionID {
+						return fmt.Errorf("session %q is deleted with live observations", sessionID)
+					}
+				}
 				sessionAvailability[sessionID] = false
 			}
 		case (mutation.Entity == store.SyncEntityObservation || mutation.Entity == store.SyncEntityPrompt) && mutation.Op == store.SyncOpUpsert && sessionID != "":
@@ -1309,6 +1316,19 @@ func validateHistoricalSessionLifecycle(chunk ChunkData, sessionAvailability map
 			dependencyID := strings.TrimSpace(payload.SessionID)
 			if available, known := sessionAvailability[dependencyID]; known && !available {
 				return fmt.Errorf("%s %q references deleted session %q", mutation.Entity, sessionID, dependencyID)
+			}
+			if mutation.Entity == store.SyncEntityObservation {
+				activeObservations[mutationIdentityKey(mutation)] = dependencyID
+			}
+		case mutation.Entity == store.SyncEntityObservation && mutation.Op == store.SyncOpDelete:
+			var payload struct {
+				HardDelete bool `json:"hard_delete"`
+			}
+			if err := decodeSyncPayloadForProject([]byte(mutation.Payload), &payload); err != nil {
+				return fmt.Errorf("decode observation payload: %w", err)
+			}
+			if payload.HardDelete {
+				delete(activeObservations, mutationIdentityKey(mutation))
 			}
 		}
 	}
