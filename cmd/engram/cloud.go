@@ -712,6 +712,10 @@ func cmdCloudEnroll(cfg store.Config) {
 	defer s.Close()
 
 	projectName := strings.TrimSpace(os.Args[3])
+	projectName, warning := store.NormalizeProject(projectName)
+	if warning != "" {
+		fmt.Fprintln(os.Stderr, warning)
+	}
 	if err := s.EnrollProject(projectName); err != nil {
 		fatal(err)
 		return
