@@ -58,6 +58,9 @@ func TestDefaultCloudDaemonProbeReturnsUnreachableOnNon2xx(t *testing.T) {
 	if res.Status != daemonProbeUnreachable {
 		t.Fatalf("expected daemonProbeUnreachable on 500, got %q", res.Status)
 	}
+	if res.Err == nil {
+		t.Fatal("expected non-nil diagnostic error for non-2xx response")
+	}
 }
 
 func TestDefaultCloudDaemonProbeReturnsUnreachableOnTimeout(t *testing.T) {
@@ -146,7 +149,17 @@ func TestPrintCloudStatusDaemonProbeFormatsEachState(t *testing.T) {
 			},
 		},
 		{
-			name: "unreachable surfaces probe error",
+			name: "non-2xx surfaces probe error",
+			stub: func(_ context.Context, port int) daemonProbeResult {
+				return daemonProbeResult{Status: daemonProbeUnreachable, Port: port, Err: fmt.Errorf("unexpected status 503")}
+			},
+			wantLines: []string{
+				"Local daemon: unreachable on port",
+				"probe error: unexpected status 503",
+			},
+		},
+		{
+			name: "other unreachable result surfaces probe error",
 			stub: func(_ context.Context, port int) daemonProbeResult {
 				return daemonProbeResult{Status: daemonProbeUnreachable, Port: port, Err: fmt.Errorf("simulated boom")}
 			},

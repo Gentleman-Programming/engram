@@ -625,7 +625,16 @@ func cmdCloudUpgradeRollback(cfg store.Config) {
 		return
 	}
 	if state.Snapshot.CloudConfigPresent {
-		if err := os.WriteFile(cloudconfig.Path(cfg.DataDir), []byte(state.Snapshot.CloudConfigJSON), 0o644); err != nil {
+		cloudConfigPath := cloudconfig.Path(cfg.DataDir)
+		if err := os.Chmod(cloudConfigPath, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
+			fatal(err)
+			return
+		}
+		if err := os.WriteFile(cloudConfigPath, []byte(state.Snapshot.CloudConfigJSON), 0o600); err != nil {
+			fatal(err)
+			return
+		}
+		if err := os.Chmod(cloudConfigPath, 0o600); err != nil {
 			fatal(err)
 			return
 		}
@@ -757,7 +766,11 @@ func cmdCloudConfig(cfg store.Config) {
 		fmt.Fprintln(os.Stderr, "usage: engram cloud config --server <url>")
 		exitFunc(1)
 	}
-	cc := &cloudconfig.Config{ServerURL: strings.TrimSpace(os.Args[4])}
+	cc, err := cloudconfig.Load(cfg.DataDir)
+	if err != nil {
+		cc = &cloudconfig.Config{}
+	}
+	cc.ServerURL = strings.TrimSpace(os.Args[4])
 	if cc.ServerURL == "" {
 		fmt.Fprintln(os.Stderr, "error: server URL is required")
 		exitFunc(1)

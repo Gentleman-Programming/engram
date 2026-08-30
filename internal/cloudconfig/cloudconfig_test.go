@@ -51,3 +51,40 @@ func TestValidateServerURLPreservesTrailingSlash(t *testing.T) {
 		})
 	}
 }
+
+func TestEffectiveTokenTrimsSurroundingWhitespaceWithoutRewritingFile(t *testing.T) {
+	t.Run("environment token", func(t *testing.T) {
+		t.Setenv(EnvCloudToken, " \n environment-token \t")
+
+		token, source := EffectiveToken(t.TempDir())
+		if token != "environment-token" {
+			t.Fatal("expected effective environment token to be trimmed")
+		}
+		if source != SourceEnv {
+			t.Fatalf("token source = %v, want environment", source)
+		}
+	})
+
+	t.Run("file token", func(t *testing.T) {
+		dataDir := t.TempDir()
+		raw := []byte(`{"token":" \n file-token \t"}`)
+		if err := os.WriteFile(Path(dataDir), raw, 0o600); err != nil {
+			t.Fatalf("write cloud config: %v", err)
+		}
+
+		token, source := EffectiveToken(dataDir)
+		if token != "file-token" {
+			t.Fatal("expected effective file token to be trimmed")
+		}
+		if source != SourceFile {
+			t.Fatalf("token source = %v, want file", source)
+		}
+		after, err := os.ReadFile(Path(dataDir))
+		if err != nil {
+			t.Fatalf("read cloud config after token resolution: %v", err)
+		}
+		if string(after) != string(raw) {
+			t.Fatal("effective token resolution must not rewrite cloud config")
+		}
+	})
+}

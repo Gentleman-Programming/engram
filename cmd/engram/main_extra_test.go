@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -1268,6 +1269,13 @@ func TestCmdCloudUpgradeRepairStatusAndRollbackBranches(t *testing.T) {
 			t.Fatalf("seed rollback state: %v", err)
 		}
 		_ = s.Close()
+		cloudConfigPath := filepath.Join(cfg.DataDir, "cloud.json")
+		if err := os.WriteFile(cloudConfigPath, []byte(`{"server_url":"https://current.example.test"}`), 0o644); err != nil {
+			t.Fatalf("seed permissive cloud config: %v", err)
+		}
+		if err := os.Chmod(cloudConfigPath, 0o644); err != nil {
+			t.Fatalf("make cloud config permissive: %v", err)
+		}
 
 		withArgs(t, "engram", "cloud", "upgrade", "rollback", "--project", "proj-a")
 		stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloud(cfg) })
@@ -1277,12 +1285,21 @@ func TestCmdCloudUpgradeRepairStatusAndRollbackBranches(t *testing.T) {
 		if !strings.Contains(stdout, "stage: rolled_back") {
 			t.Fatalf("expected rolled_back stage output, got %q", stdout)
 		}
-		data, err := os.ReadFile(filepath.Join(cfg.DataDir, "cloud.json"))
+		data, err := os.ReadFile(cloudConfigPath)
 		if err != nil {
 			t.Fatalf("expected restored cloud config file: %v", err)
 		}
 		if !strings.Contains(string(data), "rollback.example.test") {
 			t.Fatalf("expected restored cloud config content, got %q", string(data))
+		}
+		if runtime.GOOS != "windows" {
+			info, err := os.Stat(cloudConfigPath)
+			if err != nil {
+				t.Fatalf("stat restored cloud config: %v", err)
+			}
+			if got := info.Mode().Perm(); got != 0o600 {
+				t.Fatalf("restored cloud config mode = %o, want 600", got)
+			}
 		}
 	})
 
@@ -1664,6 +1681,10 @@ func TestCmdCloudConfigAcceptsValidServerURL(t *testing.T) {
 	stubRuntimeHooks(t)
 
 	cfg := testConfig(t)
+	const savedToken = "stored-token"
+	if err := saveCloudConfig(cfg, &cloudConfig{ServerURL: "https://previous.example.test", Token: savedToken}); err != nil {
+		t.Fatalf("seed cloud config: %v", err)
+	}
 	withArgs(t, "engram", "cloud", "config", "--server", "https://cloud.example.test")
 	stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloud(cfg) })
 	if recovered != nil || stderr != "" {
@@ -1677,8 +1698,14 @@ func TestCmdCloudConfigAcceptsValidServerURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load cloud config: %v", err)
 	}
-	if cc == nil || cc.ServerURL != "https://cloud.example.test" {
-		t.Fatalf("expected persisted server URL, got %+v", cc)
+	if cc == nil {
+		t.Fatal("expected persisted cloud config")
+	}
+	if cc.ServerURL != "https://cloud.example.test" {
+		t.Fatalf("expected persisted server URL, got %q", cc.ServerURL)
+	}
+	if cc.Token != savedToken {
+		t.Fatal("expected existing cloud token to be preserved")
 	}
 }
 
