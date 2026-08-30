@@ -17,7 +17,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"math"
 	"math/rand"
 	"runtime/debug"
 	"sort"
@@ -394,8 +393,8 @@ func (m *Manager) cycle(ctx context.Context) {
 		return
 	}
 
-	// Check if we've exceeded the failure ceiling — enters PhaseBackoff.
-	if failures >= m.cfg.MaxConsecutiveFailures {
+	// At the failure ceiling, remain in backoff only until the current deadline expires.
+	if failures >= m.cfg.MaxConsecutiveFailures && backoffUntil != nil && time.Now().Before(*backoffUntil) {
 		m.setPhase(PhaseBackoff)
 		return
 	}
@@ -736,10 +735,16 @@ func (m *Manager) computeBackoff(failures int) time.Duration {
 	if failures <= 0 {
 		return m.cfg.BaseBackoff
 	}
-	exp := math.Pow(2, float64(failures-1))
-	base := time.Duration(float64(m.cfg.BaseBackoff) * exp)
+	base := m.cfg.BaseBackoff
 	if base > m.cfg.MaxBackoff {
 		base = m.cfg.MaxBackoff
+	}
+	for i := 1; i < failures && base < m.cfg.MaxBackoff; i++ {
+		if base > m.cfg.MaxBackoff/2 {
+			base = m.cfg.MaxBackoff
+		} else {
+			base *= 2
+		}
 	}
 	// ±25% jitter: uniform in [-base/4, +base/4].
 	// rand.Int63n(int64(base/2)+1) gives [0, base/2]; subtracting base/4 shifts to [-base/4, +base/4].
