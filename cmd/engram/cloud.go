@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -87,7 +86,6 @@ var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
 		_ = cs.Close()
 		return nil, err
 	}
-	projectAuth := auth.NewProjectScopeAuthorizer(allowedProjects)
 	token := strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_TOKEN"))
 	cs.SetDashboardAllowedProjects(allowedProjects)
 	insecureNoAuth := token == "" && envBool("ENGRAM_CLOUD_INSECURE_NO_AUTH")
@@ -101,18 +99,27 @@ var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
 			cs,
 			authenticator,
 			cfg.Port,
-			cloudserver.WithHost(cfg.BindHost),
-			cloudserver.WithProjectAuthorizer(projectAuth),
-			cloudserver.WithPrincipalProjectAuthorizer(cloudPrincipalProjectAuthorizer{store: cs}),
-			cloudserver.WithAdminIdentityStore(cs),
-			cloudserver.WithManagedTokenHasher(managedHasher),
-			cloudserver.WithPrincipalStateStore(cs),
-			cloudserver.WithDashboardAdminToken(cfg.AdminToken),
-			cloudserver.WithMaxPushBodyBytes(cfg.MaxPushBodyBytes),
-			cloudserver.WithSyncStatusProvider(cloudDashboardStatusProvider{store: cs, projects: allowedProjects}),
+			cloudRuntimeServerOptions(cfg, cs, allowedProjects, authenticator, managedHasher, cs)...,
 		),
 		store: cs,
 	}, nil
+}
+
+func cloudRuntimeServerOptions(cfg cloud.Config, cs *cloudstore.CloudStore, allowedProjects []string, authenticator cloudserver.Authenticator, managedHasher *auth.ManagedTokenHasher, grantStore cloudProjectGrantStore) []cloudserver.Option {
+	options := []cloudserver.Option{
+		cloudserver.WithHost(cfg.BindHost),
+		cloudserver.WithProjectAuthorizer(auth.NewProjectScopeAuthorizer(allowedProjects)),
+		cloudserver.WithAdminIdentityStore(cs),
+		cloudserver.WithManagedTokenHasher(managedHasher),
+		cloudserver.WithPrincipalStateStore(cs),
+		cloudserver.WithDashboardAdminToken(cfg.AdminToken),
+		cloudserver.WithMaxPushBodyBytes(cfg.MaxPushBodyBytes),
+		cloudserver.WithSyncStatusProvider(cloudDashboardStatusProvider{store: cs, projects: allowedProjects}),
+	}
+	if authenticator != nil {
+		options = append(options, cloudserver.WithPrincipalProjectAuthorizer(cloudPrincipalProjectAuthorizer{store: grantStore}))
+	}
+	return options
 }
 
 // buildRuntimeAuthenticator constructs the cloudserver.Authenticator and
@@ -492,7 +499,8 @@ func cmdCloudUpgradeBootstrap(cfg store.Config) {
 		return
 	}
 	cc.ServerURL = validatedURL
-	if err := captureUpgradeSnapshotBeforeBootstrap(s, cfg, project); err != nil {
+	project, _, err = engramsync.CaptureUpgradeSnapshotBeforeBootstrap(s, project)
+	if err != nil {
 		fatal(err)
 		return
 	}
@@ -520,44 +528,6 @@ func cmdCloudUpgradeBootstrap(cfg store.Config) {
 	fmt.Printf("stage: %s\n", result.Stage)
 	fmt.Printf("resumed: %t\n", result.Resumed)
 	fmt.Printf("noop: %t\n", result.NoOp)
-}
-
-func captureUpgradeSnapshotBeforeBootstrap(s *store.Store, cfg store.Config, project string) error {
-	state, err := s.GetCloudUpgradeState(project)
-	if err != nil {
-		return fmt.Errorf("load cloud upgrade state before bootstrap snapshot: %w", err)
-	}
-	if state != nil {
-		snapshot := state.Snapshot
-		if snapshot.CloudConfigPresent || strings.TrimSpace(snapshot.CloudConfigJSON) != "" || snapshot.ProjectEnrolled {
-			return nil
-		}
-	}
-
-	enrolled, err := s.IsProjectEnrolled(project)
-	if err != nil {
-		return fmt.Errorf("load project enrollment before bootstrap snapshot: %w", err)
-	}
-
-	var snapshot store.CloudUpgradeSnapshot
-	configBytes, err := os.ReadFile(cloudconfig.Path(cfg.DataDir))
-	if err == nil {
-		snapshot.CloudConfigPresent = true
-		snapshot.CloudConfigJSON = string(configBytes)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("read cloud config for bootstrap snapshot: %w", err)
-	}
-	snapshot.ProjectEnrolled = enrolled
-
-	next := store.CloudUpgradeState{Project: project, Stage: store.UpgradeStagePlanned, RepairClass: store.UpgradeRepairClassNone, Snapshot: snapshot}
-	if state != nil {
-		next = *state
-		next.Snapshot = snapshot
-	}
-	if err := s.SaveCloudUpgradeState(next); err != nil {
-		return fmt.Errorf("persist pre-bootstrap rollback snapshot: %w", err)
-	}
-	return nil
 }
 
 func cmdCloudUpgradeStatus(cfg store.Config) {
@@ -624,25 +594,20 @@ func cmdCloudUpgradeRollback(cfg store.Config) {
 		exitFunc(1)
 		return
 	}
-	if state.Snapshot.CloudConfigPresent {
-		cloudConfigPath := cloudconfig.Path(cfg.DataDir)
-		if err := os.Chmod(cloudConfigPath, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
-			fatal(err)
-			return
-		}
-		if err := os.WriteFile(cloudConfigPath, []byte(state.Snapshot.CloudConfigJSON), 0o600); err != nil {
-			fatal(err)
-			return
-		}
-		if err := os.Chmod(cloudConfigPath, 0o600); err != nil {
-			fatal(err)
-			return
-		}
-	} else {
-		_ = os.Remove(cloudconfig.Path(cfg.DataDir))
+	// Rollback no longer restores cloud.json: upgrade snapshots are deliberately
+	// redacted so local credentials cannot enter SQLite. Keep an existing config
+	// intact while ensuring it remains private across the rollback boundary.
+	cloudConfigPath := cloudconfig.Path(cfg.DataDir)
+	if err := os.Chmod(cloudConfigPath, 0o600); err != nil && !os.IsNotExist(err) {
+		fatal(err)
+		return
 	}
 	rolledBack, err := engramsync.RollbackProject(s, engramsync.UpgradeRollbackOptions{Project: project})
 	if err != nil {
+		fatal(err)
+		return
+	}
+	if err := os.Chmod(cloudConfigPath, 0o600); err != nil && !os.IsNotExist(err) {
 		fatal(err)
 		return
 	}

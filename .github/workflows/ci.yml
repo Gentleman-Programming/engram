@@ -25,6 +25,9 @@ jobs:
       - name: Run unit tests
         run: go test ./...
 
+      - name: Run binary quick self-test
+        run: go build -o engram-selftest ./cmd/engram && ./engram-selftest test --quick
+
   e2e-tests:
     name: E2E Tests
     runs-on: ubuntu-latest
@@ -39,3 +42,28 @@ jobs:
 
       - name: Run e2e tests
         run: go test -tags e2e ./internal/server/...
+
+  plugin-tests:
+    name: Plugin Tests
+    runs-on: ubuntu-latest
+    # The suite is ~11s of wall time, dominated by one fixture that deliberately
+    # exercises the full 10s startup deadline. Ten minutes leaves ample headroom
+    # for a cold runner while still catching a genuine hang.
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # Must match publish-pi.yml: the suite imports index.ts directly and relies
+      # on native TypeScript type stripping.
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+
+      # No install step: test/plugin-sandbox.mjs copies the plugin into a temp
+      # directory with its own stubbed node_modules, so the suite runs from a
+      # clean checkout and never writes into plugin/pi/node_modules.
+      - name: Run Pi plugin tests
+        working-directory: plugin/pi
+        run: npm test
