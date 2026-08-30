@@ -672,13 +672,19 @@ func (sy *Syncer) sessionIDsAvailableInChunks(entries []ChunkEntry, knownChunks 
 			}
 			return nil, fmt.Errorf("parse chunk %s: %w", entry.ID, err)
 		}
-		for _, mutation := range buildImportMutations(chunk) {
-			if mutation.Entity != store.SyncEntitySession || mutation.Op != store.SyncOpUpsert {
+		for _, mutation := range orderMutationsForApply(buildImportMutations(chunk)) {
+			if mutation.Entity != store.SyncEntitySession {
 				continue
 			}
 			sessionID := strings.TrimSpace(mutation.EntityKey)
-			if sessionID != "" {
+			if sessionID == "" {
+				continue
+			}
+			switch mutation.Op {
+			case store.SyncOpUpsert:
 				available[sessionID] = struct{}{}
+			case store.SyncOpDelete:
+				delete(available, sessionID)
 			}
 		}
 	}
@@ -1190,6 +1196,7 @@ func (sy *Syncer) exportedIdentityAndRelationKeys(m *Manifest, relevant map[stri
 		return identities, relations, true, nil
 	}
 	complete := true
+	sessionAvailability := make(map[string]bool)
 	for _, entry := range m.Chunks {
 		raw, err := sy.transport.ReadChunk(entry.ID)
 		if err != nil {
@@ -1203,7 +1210,7 @@ func (sy *Syncer) exportedIdentityAndRelationKeys(m *Manifest, relevant map[stri
 		if err := json.Unmarshal(raw, &chunk); err != nil {
 			return nil, nil, false, fmt.Errorf("unmarshal chunk %s: %w", entry.ID, err)
 		}
-		if err := validateHistoricalChunk(raw, chunk); err != nil {
+		if err := validateHistoricalChunk(raw, chunk, sessionAvailability); err != nil {
 			return nil, nil, false, fmt.Errorf("validate chunk %s: %w", entry.ID, err)
 		}
 		for _, session := range chunk.Sessions {
@@ -1226,7 +1233,7 @@ func (sy *Syncer) exportedIdentityAndRelationKeys(m *Manifest, relevant map[stri
 	return identities, relations, complete, nil
 }
 
-func validateHistoricalChunk(raw []byte, chunk ChunkData) error {
+func validateHistoricalChunk(raw []byte, chunk ChunkData, sessionAvailability map[string]bool) error {
 	var document map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &document); err != nil {
 		return err
@@ -1249,7 +1256,10 @@ func validateHistoricalChunk(raw []byte, chunk ChunkData) error {
 		return err
 	}
 
-	return validateHistoricalDirectRows(chunk)
+	if err := validateHistoricalDirectRows(chunk); err != nil {
+		return err
+	}
+	return validateHistoricalSessionLifecycle(chunk, sessionAvailability)
 }
 
 // validateHistoricalDirectRows checks only the identities used to account for
@@ -1269,6 +1279,37 @@ func validateHistoricalDirectRows(chunk ChunkData) error {
 	for i, prompt := range chunk.Prompts {
 		if strings.TrimSpace(prompt.SyncID) != "" && strings.TrimSpace(prompt.SessionID) == "" {
 			return fmt.Errorf("prompts[%d].session_id is required", i)
+		}
+	}
+	return nil
+}
+
+// validateHistoricalSessionLifecycle verifies that stable direct and explicit
+// dependents do not follow a historical session tombstone. Unknown sessions
+// remain recoverable for legacy local chunks.
+func validateHistoricalSessionLifecycle(chunk ChunkData, sessionAvailability map[string]bool) error {
+	for _, mutation := range orderMutationsForApply(buildImportMutations(chunk)) {
+		sessionID := strings.TrimSpace(mutation.EntityKey)
+		switch {
+		case mutation.Entity == store.SyncEntitySession && mutation.Op == store.SyncOpUpsert:
+			if sessionID != "" {
+				sessionAvailability[sessionID] = true
+			}
+		case mutation.Entity == store.SyncEntitySession && mutation.Op == store.SyncOpDelete:
+			if sessionID != "" {
+				sessionAvailability[sessionID] = false
+			}
+		case (mutation.Entity == store.SyncEntityObservation || mutation.Entity == store.SyncEntityPrompt) && mutation.Op == store.SyncOpUpsert && sessionID != "":
+			var payload struct {
+				SessionID string `json:"session_id"`
+			}
+			if err := decodeSyncPayloadForProject([]byte(mutation.Payload), &payload); err != nil {
+				return fmt.Errorf("decode %s payload: %w", mutation.Entity, err)
+			}
+			dependencyID := strings.TrimSpace(payload.SessionID)
+			if available, known := sessionAvailability[dependencyID]; known && !available {
+				return fmt.Errorf("%s %q references deleted session %q", mutation.Entity, sessionID, dependencyID)
+			}
 		}
 	}
 	return nil

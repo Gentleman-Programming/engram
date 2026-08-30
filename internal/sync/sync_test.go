@@ -908,6 +908,67 @@ func TestLocalChunkExportReconcilesCompleteValidatedHistory(t *testing.T) {
 		}
 	})
 
+	t.Run("tombstoned session cannot suppress later direct dependents", func(t *testing.T) {
+		s, data := seedOldLocalExportData(t)
+		syncDir := filepath.Join(t.TempDir(), ".engram")
+		sessionID := data.Sessions[0].ID
+		writeLocalChunkFile(t, syncDir, "session-upsert", ChunkData{Sessions: data.Sessions})
+		writeLocalChunkFile(t, syncDir, "session-delete", ChunkData{Mutations: []store.SyncMutation{{
+			Entity:    store.SyncEntitySession,
+			EntityKey: sessionID,
+			Op:        store.SyncOpDelete,
+			Payload:   fmt.Sprintf(`{"id":%q,"project":"proj-a","deleted_at":"2025-06-01T00:00:00Z"}`, sessionID),
+		}}})
+		writeLocalChunkFile(t, syncDir, "later-dependents", ChunkData{
+			Observations: data.Observations,
+			Prompts:      data.Prompts,
+		})
+		writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{
+			{ID: "session-upsert", CreatedAt: "2025-06-01T00:00:00Z"},
+			{ID: "session-delete", CreatedAt: "2025-06-01T00:01:00Z"},
+			{ID: "later-dependents", CreatedAt: "2025-06-01T00:02:00Z"},
+		}})
+
+		if _, err := New(s, syncDir).Export("alice", "proj-a"); err == nil {
+			t.Fatal("expected export to reject history that cannot replay after a session tombstone")
+		}
+
+		manifestData, err := os.ReadFile(filepath.Join(syncDir, "manifest.json"))
+		if err != nil {
+			t.Fatalf("read manifest after rejected history: %v", err)
+		}
+		var manifest Manifest
+		if err := json.Unmarshal(manifestData, &manifest); err != nil {
+			t.Fatalf("unmarshal manifest after rejected history: %v", err)
+		}
+		if len(manifest.Chunks) != 3 {
+			t.Fatalf("rejected history must not publish a new chunk, got %+v", manifest.Chunks)
+		}
+
+		importStore := newTestStore(t)
+		importResult, err := New(importStore, syncDir).Import()
+		if err != nil {
+			t.Fatalf("local import must recover direct dependents after the tombstone: %v", err)
+		}
+		if importResult.ChunksImported != 3 || importResult.SessionsImported != 2 || importResult.ObservationsImported != 1 || importResult.PromptsImported != 1 {
+			t.Fatalf("unexpected recovered import result: %+v", importResult)
+		}
+		recoveredSession, err := importStore.GetSession(sessionID)
+		if err != nil {
+			t.Fatalf("expected recovered session after tombstone: %v", err)
+		}
+		if recoveredSession.ID != sessionID {
+			t.Fatalf("expected recovered session %q, got %+v", sessionID, recoveredSession)
+		}
+		if _, err := importStore.GetObservationBySyncID(data.Observations[0].SyncID); err != nil {
+			t.Fatalf("expected direct observation to be imported after recovery: %v", err)
+		}
+		prompts, err := importStore.RecentPrompts("proj-a", 5)
+		if err != nil || len(prompts) != 1 || prompts[0].SyncID != data.Prompts[0].SyncID {
+			t.Fatalf("expected direct prompt to be imported after recovery, prompts=%+v err=%v", prompts, err)
+		}
+	})
+
 	t.Run("legacy direct observations and prompts without sync IDs export current identities once", func(t *testing.T) {
 		s, data := seedOldLocalExportData(t)
 		legacyObservations := append([]store.Observation(nil), data.Observations...)
