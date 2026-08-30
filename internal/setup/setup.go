@@ -14,6 +14,7 @@
 package setup
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Gentleman-Programming/engram/internal/command"
 	"github.com/Gentleman-Programming/engram/internal/mcp"
 )
 
@@ -33,7 +35,7 @@ var (
 	lookPathFn   = exec.LookPath
 	osExecutable = os.Executable
 	runCommand   = func(name string, args ...string) ([]byte, error) {
-		return exec.Command(name, args...).CombinedOutput()
+		return command.NewContext(context.Background(), name, args...).CombinedOutput()
 	}
 	openCodeReadFile = func(path string) ([]byte, error) {
 		return openCodeFS.ReadFile(path)

@@ -1223,12 +1223,25 @@ func TestInjectOpenCodeMCPConfigErrors(t *testing.T) {
 
 func TestDefaultRunCommandExecutes(t *testing.T) {
 	resetSetupSeams(t)
-	out, err := runCommand("sh", "-c", "printf ok")
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("resolve test executable: %v", err)
+	}
+	out, err := runCommand(executable, "-test.run=^TestRunCommandHelperProcess$", "--", "setup-command-helper", "ok")
 	if err != nil {
 		t.Fatalf("expected default runCommand to execute, got %v", err)
 	}
 	if string(out) != "ok" {
 		t.Fatalf("unexpected output: %q", string(out))
+	}
+}
+
+func TestRunCommandHelperProcess(t *testing.T) {
+	for i, arg := range os.Args {
+		if arg == "setup-command-helper" && i+1 < len(os.Args) {
+			fmt.Print(os.Args[i+1])
+			os.Exit(0)
+		}
 	}
 }
 

@@ -1,6 +1,6 @@
 //go:build !windows
 
-package project
+package command
 
 import (
 	"context"
@@ -8,8 +8,8 @@ import (
 	"testing"
 )
 
-func TestNewProjectCommandContextPreservesDefaultProcessAttributes(t *testing.T) {
-	cmd := newProjectCommandContext(context.Background(), "git", "status")
+func TestNewContextPreservesDefaultProcessAttributes(t *testing.T) {
+	cmd := NewContext(context.Background(), "git", "status")
 
 	if want := []string{"git", "status"}; !reflect.DeepEqual(cmd.Args, want) {
 		t.Fatalf("command arguments = %q; want %q", cmd.Args, want)
