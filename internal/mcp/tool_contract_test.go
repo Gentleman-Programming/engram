@@ -1,10 +1,10 @@
 package mcp
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"slices"
 	"sort"
 	"strings"
@@ -108,7 +108,7 @@ func mustNormalize(t *testing.T, raw string) mcpToolSchema {
 }
 
 func decodeMCPToolSchema(raw []byte, path string) (any, error) {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
 	decoder.UseNumber()
 	value, err := uniqueJSONValue(decoder, path)
 	if err != nil {
@@ -267,7 +267,7 @@ func observeMCPToolContract(tools map[string]*mcpserver.ServerTool) (map[string]
 				return nil, fmt.Errorf("/tools/%s: marshal schema: %w", escapePointer(name), err)
 			}
 		}
-		if len(bytes.TrimSpace(raw)) == 0 {
+		if strings.TrimSpace(string(raw)) == "" {
 			return nil, schemaError(jsonPointer("/tools", name), "schema is empty")
 		}
 		schema, err := normalizeMCPToolContract(raw, jsonPointer("/tools", name))
@@ -326,4 +326,193 @@ func jsonPointer(path, value string) string {
 		return "/" + escapePointer(value)
 	}
 	return path + "/" + escapePointer(value)
+}
+
+func TestFormatMCPToolContract(t *testing.T) {
+	contract := map[string]mcpToolSchema{"z": {Types: []string{"string"}, Enum: []string{"900719925474099312345", "1.25"}}, "a": {Types: []string{"object"}, Properties: map[string]mcpToolSchema{"z": {Types: []string{"string"}}, "a": {Types: []string{"array"}, Items: &mcpToolSchema{Types: []string{"integer"}}}}, Required: []string{"z", "a"}, Additional: false}}
+	got := formatMCPToolContract(contract)
+	for _, want := range []string{"{\n  \"version\": \"engram.mcp-tool-contract/v1\",", "\n    \"a\": {", "[\"a\",\"z\"]", "900719925474099312345", "\"items\": {", "\"z\": {\"type\":[\"string\"],\"additionalProperties\":false}", "\"additionalProperties\": false}"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("format missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Index(got, "\"a\":") > strings.Index(got, "\"z\":") || strings.Contains(got, "\"z\": {\n") {
+		t.Fatalf("format order or compact leaf is not canonical:\n%s", got)
+	}
+}
+
+func TestReadMCPToolContractFixture(t *testing.T) {
+	for _, tc := range []struct{ raw, want string }{
+		{`{}`, "version"}, {`{"version":"v2","tools":{"x":{"type":"string"}}}`, "unsupported-version"}, {`{"version":"engram.mcp-tool-contract/v1","tools":{},"extra":true}`, "unknown envelope"}, {`{"version":"engram.mcp-tool-contract/v1","tools":{}}`, "tools"}, {`{"version":"engram.mcp-tool-contract/v1","tools":{"x":{"type":"string","pattern":"x"}}}`, "/tools/x/pattern"}, {`{"version":"engram.mcp-tool-contract/v1","tools":{"x":{"type":"string"}}}{}`, "trailing"}, {`{"version":"engram.mcp-tool-contract/v1","tools":{"x":{"type":"string","type":"number"}}}`, "/tools/x/type"},
+	} {
+		if _, err := readMCPToolContractFixture([]byte(tc.raw)); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: %v", tc.want, err)
+		}
+	}
+}
+
+func TestExactMCPToolContract(t *testing.T) {
+	base := map[string]mcpToolSchema{"x": {Types: []string{"object"}, Properties: map[string]mcpToolSchema{"p": {Types: []string{"array"}, Items: &mcpToolSchema{Types: []string{"string"}, Enum: []string{`"a"`}}}, "q": {Types: []string{"number"}}}, Required: []string{"p"}, Additional: false}}
+	for index, changed := range []map[string]mcpToolSchema{
+		base, {}, {"x": {Types: []string{"object"}, Properties: map[string]mcpToolSchema{"p": {Types: []string{"array"}, Items: &mcpToolSchema{Types: []string{"string"}, Enum: []string{`"b"`}}}, "q": {Types: []string{"integer"}}}, Required: []string{"p", "q"}, Additional: false}}, {"x": {Types: []string{"object"}, Properties: map[string]mcpToolSchema{"p": {Types: []string{"array"}}, "q": {Types: []string{"number"}}, "new": {Types: []string{"string"}}}, Required: []string{"p"}, Additional: false}},
+	} {
+		if err := exactMCPToolContract(base, changed); index == 0 && err != nil || index > 0 && err == nil {
+			t.Fatal("exact equality expectation failed")
+		}
+	}
+}
+
+func TestMCPToolContractV1(t *testing.T) {
+	before, err := os.ReadFile("testdata/tool-contract-v1.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture, err := readMCPToolContractFixture(before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := observeMCPToolContract(NewServer(newMCPTestStore(t)).ListTools())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := exactMCPToolContract(fixture, live); err != nil {
+		t.Fatal(err)
+	}
+	if formatted := formatMCPToolContract(live); string(before) != formatted {
+		t.Fatal("fixture is not byte-canonical live formatter output")
+	}
+	if after, err := os.ReadFile("testdata/tool-contract-v1.json"); err != nil || string(before) != string(after) {
+		t.Fatalf("fixture changed: %v", err)
+	}
+}
+
+func formatMCPToolContract(tools map[string]mcpToolSchema) string {
+	var b strings.Builder
+	b.WriteString("{\n  \"version\": \"engram.mcp-tool-contract/v1\",\n  \"tools\": ")
+	formatMCPToolSchemas(&b, tools, 2)
+	b.WriteString("\n}\n")
+	return b.String()
+}
+
+func formatMCPToolSchemas(b *strings.Builder, schemas map[string]mcpToolSchema, indent int) {
+	b.WriteString("{\n")
+	keys := sortedKeys(schemas)
+	for i, name := range keys {
+		writeIndent(b, indent+2)
+		writeJSONString(b, name)
+		b.WriteString(": ")
+		formatMCPToolSchema(b, schemas[name], indent+2)
+		if i+1 < len(keys) {
+			b.WriteByte(',')
+		}
+		b.WriteByte('\n')
+	}
+	writeIndent(b, indent)
+	b.WriteByte('}')
+}
+
+func formatMCPToolSchema(b *strings.Builder, schema mcpToolSchema, indent int) {
+	if len(schema.Properties) == 0 && schema.Items == nil {
+		b.WriteString(`{"type":`)
+		writeJSONStringSlice(b, schema.Types)
+		if len(schema.Enum) > 0 {
+			b.WriteString(`,"enum":[`)
+			for i, value := range uniqueStrings(append([]string(nil), schema.Enum...)) {
+				if i > 0 {
+					b.WriteByte(',')
+				}
+				b.WriteString(value)
+			}
+			b.WriteByte(']')
+		}
+		b.WriteString(`,"additionalProperties":`)
+		b.WriteString(fmt.Sprint(schema.Additional))
+		b.WriteByte('}')
+		return
+	}
+	b.WriteString("{\n")
+	field := func(comma bool, name string, value func()) {
+		if comma {
+			b.WriteString(",\n")
+		}
+		writeIndent(b, indent+2)
+		writeJSONString(b, name)
+		b.WriteString(": ")
+		value()
+	}
+	field(false, "type", func() { writeJSONStringSlice(b, schema.Types) })
+	if len(schema.Properties) > 0 {
+		field(true, "properties", func() { formatMCPToolSchemas(b, schema.Properties, indent+2) })
+	}
+	if len(schema.Required) > 0 {
+		field(true, "required", func() { writeJSONStringSlice(b, schema.Required) })
+	}
+	if schema.Items != nil {
+		field(true, "items", func() { formatMCPToolSchema(b, *schema.Items, indent+2) })
+	}
+	if len(schema.Enum) > 0 {
+		field(true, "enum", func() {
+			b.WriteByte('[')
+			for i, value := range uniqueStrings(append([]string(nil), schema.Enum...)) {
+				if i > 0 {
+					b.WriteByte(',')
+				}
+				b.WriteString(value)
+			}
+			b.WriteByte(']')
+		})
+	}
+	field(true, "additionalProperties", func() { b.WriteString(fmt.Sprint(schema.Additional)) })
+	b.WriteByte('}')
+}
+
+func writeIndent(b *strings.Builder, indent int) { b.WriteString(strings.Repeat(" ", indent)) }
+func writeJSONString(b *strings.Builder, value string) {
+	encoded, _ := json.Marshal(value)
+	b.Write(encoded)
+}
+func writeJSONStringSlice(b *strings.Builder, values []string) {
+	encoded, _ := json.Marshal(uniqueStrings(append([]string(nil), values...)))
+	b.Write(encoded)
+}
+
+func readMCPToolContractFixture(raw []byte) (map[string]mcpToolSchema, error) {
+	value, err := decodeMCPToolSchema(raw, "/")
+	if err != nil {
+		return nil, fmt.Errorf("malformed-fixture: %w", err)
+	}
+	envelope, ok := value.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("/: malformed-fixture: envelope must be an object")
+	}
+	for key := range envelope {
+		if key != "version" && key != "tools" {
+			return nil, fmt.Errorf("/%s: malformed-fixture: unknown envelope field", key)
+		}
+	}
+	version, _ := envelope["version"].(string)
+	if version != "engram.mcp-tool-contract/v1" {
+		return nil, fmt.Errorf("/version: unsupported-version: %q", version)
+	}
+	tools, ok := envelope["tools"].(map[string]any)
+	if !ok || len(tools) == 0 {
+		return nil, fmt.Errorf("/tools: malformed-fixture: tools must be non-empty")
+	}
+	out := make(map[string]mcpToolSchema, len(tools))
+	for _, name := range sortedKeys(tools) {
+		schema, err := normalizeMCPToolSchema(tools[name], jsonPointer("/tools", name))
+		if err != nil {
+			return nil, fmt.Errorf("malformed-fixture: %w", err)
+		}
+		out[name] = schema
+	}
+	return out, nil
+}
+
+func exactMCPToolContract(expected, live map[string]mcpToolSchema) error {
+	want, got := formatMCPToolContract(expected), formatMCPToolContract(live)
+	if want == got {
+		return nil
+	}
+	return fmt.Errorf("exact MCP tool contract drift\nexpected:\n%s\nlive:\n%s", want, got)
 }
