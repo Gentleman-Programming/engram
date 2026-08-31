@@ -1656,16 +1656,7 @@ func (sy *Syncer) exportedHistoricalState(m *Manifest, relevant map[string]struc
 			return nil, fmt.Errorf("validate chunk %s: %w", entry.ID, err)
 		}
 		lifecycleChunks = append(lifecycleChunks, historicalLifecycleChunk{id: entry.ID, chunk: chunk})
-		for _, session := range chunk.Sessions {
-			markHistoricalIdentity(state.identities, relevant, store.SyncEntitySession, session.ID)
-		}
-		for _, observation := range chunk.Observations {
-			markHistoricalIdentity(state.identities, relevant, store.SyncEntityObservation, observation.SyncID)
-		}
-		for _, prompt := range chunk.Prompts {
-			markHistoricalIdentity(state.identities, relevant, store.SyncEntityPrompt, prompt.SyncID)
-		}
-		for _, mutation := range chunk.Mutations {
+		for _, mutation := range buildImportMutations(chunk) {
 			if mutation.Entity == store.SyncEntityRelation {
 				state.relationKeys[mutationIdentityKey(mutation)] = struct{}{}
 				continue

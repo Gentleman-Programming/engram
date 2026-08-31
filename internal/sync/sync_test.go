@@ -951,8 +951,8 @@ func TestLocalChunkExportExcludesOtherProjectRelations(t *testing.T) {
 }
 
 // TestIncrementalRelationExport verifies that successive exports only carry new
-// relation mutations in each chunk and that a third export with no new data
-// produces an empty (IsEmpty) result.
+// relation mutations in each chunk and that closure-only sessions omitted by a
+// mixed chunk are exported before a later export becomes empty.
 //
 // Timing is controlled explicitly: rel-inc-1 is backdated to 2025-01-01, the
 // manifest records the first chunk at 2025-06-01 (after rel-inc-1), and
@@ -1015,7 +1015,6 @@ func TestIncrementalRelationExport(t *testing.T) {
 	if err := json.Unmarshal(chunkJSON1, &chunk1); err != nil {
 		t.Fatalf("unmarshal chunk: %v", err)
 	}
-
 	// Only the new relation must appear.
 	if len(chunk1.Mutations) != 1 || chunk1.Mutations[0].EntityKey != "rel-inc-2" {
 		t.Fatalf("expected only rel-inc-2 in chunk, got %+v", chunk1.Mutations)
@@ -1026,13 +1025,35 @@ func TestIncrementalRelationExport(t *testing.T) {
 		}
 	}
 
-	// Second export — no new data — must be empty (IsEmpty guard against double-export).
+	// The first mixed chunk's explicit relation needs only sess-inc-1, so
+	// buildImportMutations omits closure-only sess-inc-2. It must remain eligible
+	// for export rather than becoming historical by array presence alone.
 	result2, err := New(s, syncDir).Export("alice", "proj-a")
 	if err != nil {
 		t.Fatalf("second export: %v", err)
 	}
-	if !result2.IsEmpty {
-		t.Fatal("expected second export (no new data) to be empty")
+	if result2.IsEmpty || result2.SessionsExported != 1 {
+		t.Fatalf("expected closure-only session export, got %+v", result2)
+	}
+
+	chunkJSON2, err := readGzip(filepath.Join(syncDir, "chunks", result2.ChunkID+".jsonl.gz"))
+	if err != nil {
+		t.Fatalf("read closure-only session chunk: %v", err)
+	}
+	var chunk2 ChunkData
+	if err := json.Unmarshal(chunkJSON2, &chunk2); err != nil {
+		t.Fatalf("unmarshal closure-only session chunk: %v", err)
+	}
+	if len(chunk2.Sessions) != 1 || chunk2.Sessions[0].ID != "sess-inc-2" {
+		t.Fatalf("expected sess-inc-2 closure-only session, got %+v", chunk2.Sessions)
+	}
+
+	result3, err := New(s, syncDir).Export("alice", "proj-a")
+	if err != nil {
+		t.Fatalf("third export: %v", err)
+	}
+	if !result3.IsEmpty {
+		t.Fatalf("expected third export to be empty, got %+v", result3)
 	}
 }
 
@@ -1215,6 +1236,37 @@ func TestLocalChunkExportReconcilesCompleteValidatedHistory(t *testing.T) {
 					t.Fatalf("expected %d exported sessions, got %+v", tt.wantSessions, result)
 				}
 			})
+		}
+	})
+
+	t.Run("direct sessions omitted from mixed imports are not historical", func(t *testing.T) {
+		s := newTestStore(t)
+		const closureOnlySessionID = "closure-only-session"
+		if err := s.CreateSession(closureOnlySessionID, "proj-a", "/tmp/proj-a"); err != nil {
+			t.Fatalf("create closure-only session: %v", err)
+		}
+		if _, err := s.DB().Exec(`UPDATE sessions SET started_at = '2025-01-01 00:00:00' WHERE id = ?`, closureOnlySessionID); err != nil {
+			t.Fatalf("backdate closure-only session: %v", err)
+		}
+
+		syncDir := filepath.Join(t.TempDir(), ".engram")
+		writeLocalChunkFile(t, syncDir, "history", ChunkData{
+			Sessions: []store.Session{{ID: closureOnlySessionID, Project: "proj-a", Directory: "/tmp/proj-a"}},
+			Mutations: []store.SyncMutation{{
+				Entity:    store.SyncEntitySession,
+				EntityKey: "explicit-session",
+				Op:        store.SyncOpUpsert,
+				Payload:   `{"id":"explicit-session","project":"proj-a","directory":"/tmp/explicit"}`,
+			}},
+		})
+		writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "history", CreatedAt: "2025-06-01T00:00:00Z"}}})
+
+		result, err := New(s, syncDir).Export("alice", "proj-a")
+		if err != nil {
+			t.Fatalf("export: %v", err)
+		}
+		if result.IsEmpty || result.SessionsExported != 1 {
+			t.Fatalf("direct session omitted by mixed import must export, got %+v", result)
 		}
 	})
 
@@ -1848,6 +1900,30 @@ func TestLocalChunkExportFailsClosedOnInvalidHistoricalIdentityData(t *testing.T
 					Entity:    store.SyncEntitySession,
 					EntityKey: " history-session ",
 					Op:        store.SyncOpUpsert,
+					Payload:   `{"id":"history-session","project":"proj-a","directory":"/tmp/proj-a"}`,
+				}}}
+			},
+		},
+		{
+			name:          "mutation entity whitespace must fail before replay",
+			expectedError: "unsupported mutation \" session \"/\"upsert\"",
+			chunk: func(_ *store.ExportData) ChunkData {
+				return ChunkData{Mutations: []store.SyncMutation{{
+					Entity:    " session ",
+					EntityKey: "history-session",
+					Op:        store.SyncOpUpsert,
+					Payload:   `{"id":"history-session","project":"proj-a","directory":"/tmp/proj-a"}`,
+				}}}
+			},
+		},
+		{
+			name:          "mutation operation whitespace must fail before replay",
+			expectedError: "unsupported mutation \"session\"/\" upsert \"",
+			chunk: func(_ *store.ExportData) ChunkData {
+				return ChunkData{Mutations: []store.SyncMutation{{
+					Entity:    store.SyncEntitySession,
+					EntityKey: "history-session",
+					Op:        " upsert ",
 					Payload:   `{"id":"history-session","project":"proj-a","directory":"/tmp/proj-a"}`,
 				}}}
 			},

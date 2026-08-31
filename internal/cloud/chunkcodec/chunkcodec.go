@@ -58,8 +58,7 @@ func CanonicalizeForProject(payload []byte, project string) ([]byte, error) {
 			}
 			if key == "sessions" {
 				sessionID, _ := row["id"].(string)
-				sessionID = strings.TrimSpace(sessionID)
-				if !hasMutationList || sessionID == "" {
+				if !hasMutationList || strings.TrimSpace(sessionID) == "" {
 					row["project"] = project
 				} else if _, owned := sessionMutationKeys[sessionID]; owned {
 					row["project"] = project
@@ -121,14 +120,11 @@ func collectSessionMutationKeys(entries any) (map[string]struct{}, error) {
 		}
 		entity, _ := row["entity"].(string)
 		op, _ := row["op"].(string)
-		trimmedEntity := strings.TrimSpace(entity)
-		trimmedOp := strings.TrimSpace(op)
-		if trimmedEntity != store.SyncEntitySession || (trimmedOp != store.SyncOpUpsert && trimmedOp != store.SyncOpDelete) {
+		if entity != store.SyncEntitySession || (op != store.SyncOpUpsert && op != store.SyncOpDelete) {
 			continue
 		}
 		entityKey, _ := row["entity_key"].(string)
-		entityKey = strings.TrimSpace(entityKey)
-		if entityKey != "" {
+		if strings.TrimSpace(entityKey) != "" {
 			keys[entityKey] = struct{}{}
 		}
 		payload, _ := row["payload"].(string)
@@ -136,8 +132,7 @@ func collectSessionMutationKeys(entries any) (map[string]struct{}, error) {
 		if payload != "" {
 			var body mutationSessionPayload
 			if err := DecodeSyncMutationPayload(payload, &body); err == nil {
-				body.ID = strings.TrimSpace(body.ID)
-				if body.ID != "" {
+				if strings.TrimSpace(body.ID) != "" {
 					keys[body.ID] = struct{}{}
 				}
 			}
@@ -163,8 +158,7 @@ func collectRequiredSessionKeys(doc map[string]any, mutationEntries any) (map[st
 				return nil, fmt.Errorf("%s[%d] must be an object", entityKey, i)
 			}
 			sessionID, _ := row["session_id"].(string)
-			sessionID = strings.TrimSpace(sessionID)
-			if sessionID != "" {
+			if strings.TrimSpace(sessionID) != "" {
 				keys[sessionID] = struct{}{}
 			}
 		}
@@ -184,8 +178,6 @@ func collectRequiredSessionKeys(doc map[string]any, mutationEntries any) (map[st
 		}
 		entity, _ := row["entity"].(string)
 		op, _ := row["op"].(string)
-		entity = strings.TrimSpace(entity)
-		op = strings.TrimSpace(op)
 		if op != store.SyncOpUpsert {
 			continue
 		}
@@ -198,16 +190,14 @@ func collectRequiredSessionKeys(doc map[string]any, mutationEntries any) (map[st
 		case store.SyncEntityObservation:
 			var body mutationObservationPayload
 			if err := DecodeSyncMutationPayload(payload, &body); err == nil {
-				body.SessionID = strings.TrimSpace(body.SessionID)
-				if body.SessionID != "" {
+				if strings.TrimSpace(body.SessionID) != "" {
 					keys[body.SessionID] = struct{}{}
 				}
 			}
 		case store.SyncEntityPrompt:
 			var body mutationPromptPayload
 			if err := DecodeSyncMutationPayload(payload, &body); err == nil {
-				body.SessionID = strings.TrimSpace(body.SessionID)
-				if body.SessionID != "" {
+				if strings.TrimSpace(body.SessionID) != "" {
 					keys[body.SessionID] = struct{}{}
 				}
 			}
@@ -317,11 +307,18 @@ func normalizeChunkMutation(raw map[string]any, project string) (map[string]any,
 		return nil, fmt.Errorf("decode mutation: %w", err)
 	}
 
+	rawEntity := mutation.Entity
 	rawEntityKey := mutation.EntityKey
+	rawOp := mutation.Op
 	mutation.Entity = strings.TrimSpace(mutation.Entity)
-	mutation.EntityKey = strings.TrimSpace(mutation.EntityKey)
 	mutation.Op = strings.TrimSpace(mutation.Op)
 	mutation.Payload = strings.TrimSpace(mutation.Payload)
+	if rawEntity != mutation.Entity || rawOp != mutation.Op {
+		return nil, fmt.Errorf("unsupported mutation %q/%q", rawEntity, rawOp)
+	}
+	if mutation.Entity != store.SyncEntitySession {
+		mutation.EntityKey = strings.TrimSpace(mutation.EntityKey)
+	}
 
 	if err := validateSupportedMutation(mutation.Entity, mutation.Op); err != nil {
 		return nil, err
@@ -394,9 +391,8 @@ func normalizeMutationPayload(entity, op, payload, project string) (normalizedPa
 		if err := DecodeSyncMutationPayload(payload, &body); err != nil {
 			return "", "", fmt.Errorf("decode mutation payload: %w", err)
 		}
-		body.ID = strings.TrimSpace(body.ID)
 		body.Directory = strings.TrimSpace(body.Directory)
-		if body.ID == "" {
+		if strings.TrimSpace(body.ID) == "" {
 			return "", "", fmt.Errorf("session payload id is required")
 		}
 		if op == store.SyncOpUpsert && body.Directory == "" {
@@ -428,11 +424,10 @@ func normalizeMutationPayload(entity, op, payload, project string) (normalizedPa
 			return "", "", fmt.Errorf("decode mutation payload: %w", err)
 		}
 		body.SyncID = strings.TrimSpace(body.SyncID)
-		body.SessionID = strings.TrimSpace(body.SessionID)
 		if body.SyncID == "" {
 			return "", "", fmt.Errorf("observation payload sync_id is required")
 		}
-		if op == store.SyncOpUpsert && body.SessionID == "" {
+		if op == store.SyncOpUpsert && strings.TrimSpace(body.SessionID) == "" {
 			return "", "", fmt.Errorf("observation payload session_id is required for upsert")
 		}
 		if op == store.SyncOpUpsert {
@@ -466,11 +461,10 @@ func normalizeMutationPayload(entity, op, payload, project string) (normalizedPa
 			return "", "", fmt.Errorf("decode mutation payload: %w", err)
 		}
 		body.SyncID = strings.TrimSpace(body.SyncID)
-		body.SessionID = strings.TrimSpace(body.SessionID)
 		if body.SyncID == "" {
 			return "", "", fmt.Errorf("prompt payload sync_id is required")
 		}
-		if op == store.SyncOpUpsert && body.SessionID == "" {
+		if op == store.SyncOpUpsert && strings.TrimSpace(body.SessionID) == "" {
 			return "", "", fmt.Errorf("prompt payload session_id is required for upsert")
 		}
 		if op == store.SyncOpUpsert {

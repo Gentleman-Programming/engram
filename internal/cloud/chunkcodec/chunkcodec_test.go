@@ -161,6 +161,64 @@ func TestCanonicalizeForProjectRejectsSessionMutationWithWhitespaceEntityKeyMism
 	}
 }
 
+func TestCanonicalizeForProjectPreservesWhitespaceSessionIdentityAndReferences(t *testing.T) {
+	raw := []byte(`{
+		"mutations": [
+			{
+				"entity": "session",
+				"entity_key": " session ",
+				"op": "upsert",
+				"payload": "{\"id\":\" session \",\"directory\":\"/tmp/session\"}"
+			},
+			{
+				"entity": "observation",
+				"entity_key": "obs-whitespace-session",
+				"op": "upsert",
+				"payload": "{\"sync_id\":\"obs-whitespace-session\",\"session_id\":\" session \",\"type\":\"note\",\"title\":\"title\",\"content\":\"content\",\"scope\":\"project\"}"
+			},
+			{
+				"entity": "prompt",
+				"entity_key": "prompt-whitespace-session",
+				"op": "upsert",
+				"payload": "{\"sync_id\":\"prompt-whitespace-session\",\"session_id\":\" session \",\"content\":\"prompt\"}"
+			}
+		]
+	}`)
+
+	canonical, err := CanonicalizeForProject(raw, "proj-a")
+	if err != nil {
+		t.Fatalf("canonicalize: %v", err)
+	}
+
+	var chunk struct {
+		Mutations []store.SyncMutation `json:"mutations"`
+	}
+	if err := json.Unmarshal(canonical, &chunk); err != nil {
+		t.Fatalf("decode canonical chunk: %v", err)
+	}
+	if len(chunk.Mutations) != 3 {
+		t.Fatalf("expected 3 mutations, got %d", len(chunk.Mutations))
+	}
+	if chunk.Mutations[0].EntityKey != " session " {
+		t.Fatalf("session entity key = %q, want byte-exact identity", chunk.Mutations[0].EntityKey)
+	}
+	for _, mutation := range chunk.Mutations {
+		var payload struct {
+			ID        string `json:"id"`
+			SessionID string `json:"session_id"`
+		}
+		if err := json.Unmarshal([]byte(mutation.Payload), &payload); err != nil {
+			t.Fatalf("decode %s payload: %v", mutation.Entity, err)
+		}
+		if mutation.Entity == store.SyncEntitySession && payload.ID != " session " {
+			t.Fatalf("session payload id = %q, want byte-exact identity", payload.ID)
+		}
+		if mutation.Entity != store.SyncEntitySession && payload.SessionID != " session " {
+			t.Fatalf("%s session reference = %q, want byte-exact identity", mutation.Entity, payload.SessionID)
+		}
+	}
+}
+
 func containsAll(s string, parts []string) bool {
 	for _, part := range parts {
 		if !strings.Contains(s, part) {
