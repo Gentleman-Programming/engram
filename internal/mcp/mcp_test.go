@@ -3181,6 +3181,298 @@ func TestHandleSessionSummaryCreatesProjectScopedSession(t *testing.T) {
 	assertSessionSyncMutationDirectory(t, s, "manual-save-summary-session-project", dir)
 }
 
+func TestHandleSessionSummarySurfacesConflictCandidates(t *testing.T) {
+	s := newMCPTestStore(t)
+	for _, sessionID := range []string{"summary-candidates-1", "summary-candidates-2", "summary-candidates-3"} {
+		if err := s.CreateSession(sessionID, "summary-candidates", t.TempDir()); err != nil {
+			t.Fatalf("CreateSession(%q): %v", sessionID, err)
+		}
+	}
+	h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	first, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"project":    "summary-candidates",
+		"session_id": "summary-candidates-1",
+		"content": `## Goal
+PostgreSQL partition pruning migration
+
+## Instructions
+Benchmark invoice ledger backfill
+
+## Discoveries
+Btree vacuum checkpoint behavior
+
+## Accomplished
+Created partition indexes
+
+## Next Steps
+Rehearse failover
+
+## Relevant Files
+internal/billing/ledger.go`,
+	}}})
+	if err != nil || first.IsError {
+		t.Fatalf("first session summary: err=%v isError=%v text=%s", err, first.IsError, callResultText(t, first))
+	}
+	firstEnvelope := parseEnvelope(t, "first session summary", first)
+	firstSyncID, _ := firstEnvelope["sync_id"].(string)
+	firstSummary, err := s.GetObservationBySyncID(firstSyncID)
+	if err != nil {
+		t.Fatalf("GetObservationBySyncID(%q): %v", firstSyncID, err)
+	}
+
+	second, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"project":    "summary-candidates",
+		"session_id": "summary-candidates-2",
+		"content": `## Goal
+PostgreSQL partition strategy revision
+
+## Instructions
+Benchmark archive ledger ingestion
+
+## Discoveries
+Btree statistics refresh behavior
+
+## Accomplished
+Created partition constraints
+
+## Next Steps
+Rehearse rollback
+
+## Relevant Files
+internal/billing/archive.go`,
+	}}})
+	if err != nil || second.IsError {
+		t.Fatalf("second session summary: err=%v isError=%v text=%s", err, second.IsError, callResultText(t, second))
+	}
+
+	envelope := parseEnvelope(t, "session summary candidates", second)
+	if required, _ := envelope["judgment_required"].(bool); !required {
+		t.Fatalf("expected judgment_required=true, got %v", envelope["judgment_required"])
+	}
+	candidates, _ := envelope["candidates"].([]any)
+	if len(candidates) == 0 {
+		t.Fatal("expected a summary conflict candidate")
+	}
+	candidate, ok := candidates[0].(map[string]any)
+	if !ok {
+		t.Fatalf("candidate has type %T, want object", candidates[0])
+	}
+	for _, field := range []string{"id", "sync_id", "title", "type", "score", "judgment_id"} {
+		if _, ok := candidate[field]; !ok {
+			t.Errorf("candidate is missing %q", field)
+		}
+	}
+	if candidate["title"] != "Session summary: summary-candidates" {
+		t.Fatalf("summary title changed to %q", candidate["title"])
+	}
+	judgmentID, _ := candidate["judgment_id"].(string)
+	relation, err := s.GetRelation(judgmentID)
+	if err != nil {
+		t.Fatalf("GetRelation(%q): %v", judgmentID, err)
+	}
+	if relation.JudgmentStatus != store.JudgmentStatusPending {
+		t.Fatalf("judgment status = %q, want pending", relation.JudgmentStatus)
+	}
+	third, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"project":    "summary-candidates",
+		"session_id": "summary-candidates-3",
+		"content": `## Goal
+Mobile screenreader navigation release
+
+## Instructions
+Audit focus order contrast
+
+## Discoveries
+VoiceOver rotor semantics
+
+## Accomplished
+Updated accessible labels
+
+## Next Steps
+Validate TalkBack gestures
+
+## Relevant Files
+web/mobile/navigation.ts`,
+	}}})
+	if err != nil || third.IsError {
+		t.Fatalf("third session summary: err=%v isError=%v text=%s", err, third.IsError, callResultText(t, third))
+	}
+	thirdEnvelope := parseEnvelope(t, "unrelated session summary", third)
+	if required, _ := thirdEnvelope["judgment_required"].(bool); required {
+		t.Fatalf("unrelated summary should not match only because session summary titles are constant: %v", thirdEnvelope["candidates"])
+	}
+
+	summaries, err := s.RecentObservations("summary-candidates", firstSummary.Scope, 10)
+	if err != nil {
+		t.Fatalf("RecentObservations: %v", err)
+	}
+	if len(summaries) != 3 {
+		t.Fatalf("expected three separate summaries, got %d", len(summaries))
+	}
+	for _, summary := range summaries {
+		if summary.TopicKey != nil {
+			t.Fatalf("summary %d unexpectedly has topic_key %q", summary.ID, *summary.TopicKey)
+		}
+	}
+}
+
+func TestHandleSessionSummarySkipsCandidatesForHeadingsOnlyContent(t *testing.T) {
+	s := newMCPTestStore(t)
+	const project = "headings-only-summary"
+	const sessionID = "headings-only-summary-session"
+	if err := s.CreateSession(sessionID, project, t.TempDir()); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	originalFindCandidates := findSessionSummaryCandidates
+	candidateSearchCalled := false
+	findSessionSummaryCandidates = func(*store.Store, int64, store.CandidateOptions) ([]store.Candidate, error) {
+		candidateSearchCalled = true
+		return nil, nil
+	}
+	t.Cleanup(func() { findSessionSummaryCandidates = originalFindCandidates })
+
+	h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	result, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"project":    project,
+		"session_id": sessionID,
+		"content": `## Goal
+## Instructions
+## Discoveries
+## Accomplished
+## Next Steps
+## Relevant Files`,
+	}}})
+	if err != nil || result.IsError {
+		t.Fatalf("session summary: err=%v isError=%v text=%s", err, result.IsError, callResultText(t, result))
+	}
+	if candidateSearchCalled {
+		t.Fatal("headings-only session summary should skip candidate search")
+	}
+
+	envelope := parseEnvelope(t, "headings-only session summary", result)
+	if required, _ := envelope["judgment_required"].(bool); required {
+		t.Fatalf("judgment_required = %v, want false", envelope["judgment_required"])
+	}
+	if _, ok := envelope["candidates"]; ok {
+		t.Fatalf("headings-only session summary should not include candidates: %v", envelope["candidates"])
+	}
+}
+
+func TestHandleSessionSummaryCandidateQueryUsesPersistedContent(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		maxContent int
+		content    string
+		absentTerm string
+	}{
+		{
+			name:       "private tag redaction",
+			content:    "<private>codenameaerolith</private> public summary text",
+			absentTerm: "codenameaerolith",
+		},
+		{
+			name:       "storage truncation",
+			maxContent: 32,
+			content:    "visible summary text candidategammafourteen",
+			absentTerm: "candidategammafourteen",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newMCPTestStoreWithMaxContentLength(t, tc.maxContent)
+			const project = "persisted-summary-candidates"
+			for _, sessionID := range []string{"candidate-source", "summary-source"} {
+				if err := s.CreateSession(sessionID, project, t.TempDir()); err != nil {
+					t.Fatalf("CreateSession(%q): %v", sessionID, err)
+				}
+			}
+			if _, err := s.AddObservation(store.AddObservationParams{
+				SessionID: "candidate-source",
+				Type:      "decision",
+				Title:     tc.absentTerm,
+				Content:   tc.absentTerm,
+				Project:   project,
+				Scope:     "project",
+			}); err != nil {
+				t.Fatalf("AddObservation(candidate): %v", err)
+			}
+
+			originalFindCandidates := findSessionSummaryCandidates
+			var candidateQuery string
+			findSessionSummaryCandidates = func(s *store.Store, savedID int64, opts store.CandidateOptions) ([]store.Candidate, error) {
+				candidateQuery = opts.Query
+				if strings.Contains(opts.Query, tc.absentTerm) {
+					return originalFindCandidates(s, savedID, opts)
+				}
+				return nil, nil
+			}
+			t.Cleanup(func() { findSessionSummaryCandidates = originalFindCandidates })
+
+			h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+			result, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+				"project":    project,
+				"session_id": "summary-source",
+				"content":    tc.content,
+			}}})
+			if err != nil || result.IsError {
+				t.Fatalf("session summary: err=%v isError=%v text=%s", err, result.IsError, callResultText(t, result))
+			}
+
+			envelope := parseEnvelope(t, "persisted summary candidate query", result)
+			syncID, _ := envelope["sync_id"].(string)
+			summary, err := s.GetObservationBySyncID(syncID)
+			if err != nil {
+				t.Fatalf("GetObservationBySyncID(%q): %v", syncID, err)
+			}
+			if strings.Contains(summary.Content, tc.absentTerm) {
+				t.Fatalf("persisted content %q unexpectedly contains candidate term %q", summary.Content, tc.absentTerm)
+			}
+			if candidateQuery != summary.Content {
+				t.Fatalf("candidate query = %q, want persisted content %q", candidateQuery, summary.Content)
+			}
+			if required, _ := envelope["judgment_required"].(bool); required {
+				t.Fatalf("unexpected candidate from content absent after persistence %q: %v", summary.Content, envelope["candidates"])
+			}
+		})
+	}
+}
+
+func TestHandleSessionSummaryPersistsWhenCandidateDetectionFails(t *testing.T) {
+	s := newMCPTestStore(t)
+	const sessionID = "summary-candidate-failure"
+	if err := s.CreateSession(sessionID, "summary-candidate-failure", t.TempDir()); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	originalFindCandidates := findSessionSummaryCandidates
+	findSessionSummaryCandidates = func(*store.Store, int64, store.CandidateOptions) ([]store.Candidate, error) {
+		return nil, errors.New("forced candidate detection failure")
+	}
+	t.Cleanup(func() { findSessionSummaryCandidates = originalFindCandidates })
+
+	content := "The session summary must survive a candidate detection failure."
+	h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	result, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"project":    "summary-candidate-failure",
+		"session_id": sessionID,
+		"content":    content,
+	}}})
+	if err != nil || result.IsError {
+		t.Fatalf("session summary should succeed when candidate detection fails: err=%v isError=%v text=%s", err, result.IsError, callResultText(t, result))
+	}
+
+	envelope := parseEnvelope(t, "candidate detection failure", result)
+	syncID, _ := envelope["sync_id"].(string)
+	summary, err := s.GetObservationBySyncID(syncID)
+	if err != nil {
+		t.Fatalf("GetObservationBySyncID(%q): %v", syncID, err)
+	}
+	if summary.Type != "session_summary" || summary.Content != content {
+		t.Fatalf("persisted summary = type %q content %q, want session_summary and %q", summary.Type, summary.Content, content)
+	}
+}
+
 func TestHandleCapturePassiveCreatesProjectScopedSession(t *testing.T) {
 	s := newMCPTestStore(t)
 	h := handleCapturePassive(s, MCPConfig{}, NewSessionActivity(10*time.Minute))

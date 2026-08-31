@@ -64,6 +64,10 @@ var addPromptIfMissing = func(s *store.Store, params store.AddPromptParams) (int
 	return s.AddPromptIfMissing(params)
 }
 
+var findSessionSummaryCandidates = func(s *store.Store, savedID int64, opts store.CandidateOptions) ([]store.Candidate, error) {
+	return s.FindCandidates(savedID, opts)
+}
+
 var loadMCPStats = func(s *store.Store) (*store.Stats, error) {
 	return s.Stats()
 }
@@ -1322,12 +1326,10 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 				extra["review_after"] = *obs.ReviewAfter
 			}
 		}
-
 		if len(candidates) > 0 {
 			extra["judgment_required"] = true
 			extra["judgment_status"] = "pending"
 			extra["judgment_id"] = candidates[0].JudgmentID // first candidate's rel sync_id (design convenience)
-
 			candList := make([]map[string]any, 0, len(candidates))
 			for _, c := range candidates {
 				entry := map[string]any{
@@ -1354,6 +1356,81 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		detRes.Project = project
 		return respondWithProject(detRes, msg, extra), nil
 	}
+}
+
+// sessionSummaryCandidateResponse runs candidate detection only for a persisted
+// session summary and builds its conflict-review response metadata.
+func sessionSummaryCandidateResponse(s *store.Store, cfg MCPConfig, savedID int64, project string, msg *string) map[string]any {
+	extra := map[string]any{}
+	obs, obsErr := s.GetObservation(savedID)
+	if obsErr == nil {
+		extra["id"] = savedID
+		extra["sync_id"] = obs.SyncID
+		extra["state"] = obs.State()
+		if obs.ReviewAfter != nil {
+			extra["review_after"] = *obs.ReviewAfter
+		}
+	}
+	if obsErr != nil {
+		extra["judgment_required"] = false
+		return extra
+	}
+	query := sessionSummaryCandidateQuery(obs.Content)
+	if strings.TrimSpace(query) == "" {
+		extra["judgment_required"] = false
+		return extra
+	}
+	candOpts := store.CandidateOptions{Project: project, BM25Floor: cfg.BM25Floor, Query: query}
+	if cfg.Limit != nil {
+		candOpts.Limit = *cfg.Limit
+	}
+	candidates, candErr := findSessionSummaryCandidates(s, savedID, candOpts)
+	if candErr != nil {
+		// Candidate discovery is non-fatal after the source observation is saved.
+		fmt.Fprintf(os.Stderr, "engram: FindCandidates error (non-fatal): %v\n", candErr)
+	}
+
+	if len(candidates) == 0 {
+		extra["judgment_required"] = false
+		return extra
+	}
+
+	extra["judgment_required"] = true
+	extra["judgment_status"] = "pending"
+	extra["judgment_id"] = candidates[0].JudgmentID
+	candList := make([]map[string]any, 0, len(candidates))
+	for _, c := range candidates {
+		entry := map[string]any{"id": c.ID, "sync_id": c.SyncID, "title": c.Title, "type": c.Type, "score": c.Score, "judgment_id": c.JudgmentID}
+		if c.TopicKey != nil {
+			entry["topic_key"] = *c.TopicKey
+		}
+		candList = append(candList, entry)
+	}
+	extra["candidates"] = candList
+	*msg += fmt.Sprintf("\nCONFLICT REVIEW PENDING — %d candidate(s); use mem_judge to record verdicts.", len(candidates))
+	return extra
+}
+
+// sessionSummaryCandidateQuery removes the required protocol headings before
+// OR-based FTS matching so they cannot create candidates by themselves.
+func sessionSummaryCandidateQuery(content string) string {
+	mandatoryHeadings := map[string]struct{}{
+		"goal": {}, "instructions": {}, "discoveries": {}, "accomplished": {},
+		"next steps": {}, "relevant files": {},
+	}
+	lines := strings.Split(content, "\n")
+	retained := make([]string, 0, len(lines))
+	for _, line := range lines {
+		heading := strings.TrimSpace(line)
+		if strings.HasPrefix(heading, "#") {
+			heading = strings.TrimSpace(strings.TrimLeft(heading, "#"))
+			if _, mandatory := mandatoryHeadings[strings.ToLower(heading)]; mandatory {
+				continue
+			}
+		}
+		retained = append(retained, line)
+	}
+	return strings.Join(retained, "\n")
 }
 
 func handleSuggestTopicKey() server.ToolHandlerFunc {
@@ -1916,7 +1993,7 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		// Ensure the implicit MCP session exists with the current working directory.
 		_ = ensureImplicitSessionWithCWD(s, sessionID, project)
 
-		_, err = s.AddObservation(store.AddObservationParams{
+		savedID, err := s.AddObservation(store.AddObservationParams{
 			SessionID: sessionID,
 			Type:      "session_summary",
 			Title:     fmt.Sprintf("Session summary: %s", project),
@@ -1932,7 +2009,8 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 			msg += "\n" + score
 		}
 		detRes.Project = project
-		return respondWithProject(detRes, msg, nil), nil
+		extra := sessionSummaryCandidateResponse(s, cfg, savedID, project, &msg)
+		return respondWithProject(detRes, msg, extra), nil
 	}
 }
 
