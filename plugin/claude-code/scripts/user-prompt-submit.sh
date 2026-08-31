@@ -59,6 +59,175 @@ print_toolsearch_message() {
   printf '%s\n' '{"systemMessage":"CRITICAL FIRST ACTION — Execute this ToolSearch NOW before responding to the user:\nselect:mcp__engram__mem_save,mcp__engram__mem_search,mcp__engram__mem_context,mcp__engram__mem_session_summary,mcp__engram__mem_session_start,mcp__engram__mem_session_end,mcp__engram__mem_get_observation,mcp__engram__mem_suggest_topic_key,mcp__engram__mem_capture_passive,mcp__engram__mem_save_prompt,mcp__engram__mem_update,mcp__engram__mem_current_project,mcp__engram__mem_judge\n\nAfter loading tools, call mem_context to check for prior session history before responding."}'
 }
 
+json_string_value_without_jq() {
+  local key="$1"
+  local json="$2"
+  local pattern='"'"$key"'"[[:space:]]*:[[:space:]]*"(([^"\\]|\\.)*)"'
+  local raw i char escaped value=""
+  JSON_VALUE=""
+  [[ "$json" =~ $pattern ]] || return 1
+  raw="${BASH_REMATCH[1]}"
+  for (( i=0; i<${#raw}; i++ )); do
+    char="${raw:i:1}"
+    if [ "$char" != $'\\' ]; then
+      value+="$char"
+      continue
+    fi
+    (( i++ ))
+    [ "$i" -lt "${#raw}" ] || return 1
+    escaped="${raw:i:1}"
+    case "$escaped" in
+      '"'|$'\\'|/) value+="$escaped" ;;
+      b) value+=$'\b' ;;
+      f) value+=$'\f' ;;
+      n) value+=$'\n' ;;
+      r) value+=$'\r' ;;
+      t) value+=$'\t' ;;
+      *) return 1 ;;
+    esac
+  done
+  JSON_VALUE="$value"
+}
+
+json_escape_without_jq() {
+  local raw="$1"
+  local i char value=""
+  for (( i=0; i<${#raw}; i++ )); do
+    char="${raw:i:1}"
+    case "$char" in
+      '"') value+='\"' ;;
+      $'\\') value+=$'\\\\' ;;
+      $'\b') value+='\b' ;;
+      $'\f') value+='\f' ;;
+      $'\n') value+='\n' ;;
+      $'\r') value+='\r' ;;
+      $'\t') value+='\t' ;;
+      *) value+="$char" ;;
+    esac
+  done
+  JSON_VALUE="$value"
+}
+
+url_encode_without_jq() {
+  local raw="$1"
+  local i char byte value=""
+  local LC_ALL=C
+  for (( i=0; i<${#raw}; i++ )); do
+    char="${raw:i:1}"
+    case "$char" in
+      [a-zA-Z0-9.~_-]) value+="$char" ;;
+      *)
+        printf -v byte '%02X' "'$char"
+        value+="%${byte}"
+        ;;
+    esac
+  done
+  JSON_VALUE="$value"
+}
+
+resolve_project_without_jq() {
+  local dir="$1"
+  local encoded response project source
+  [ -n "$dir" ] || return 1
+  url_encode_without_jq "$dir"
+  encoded="$JSON_VALUE"
+  response=$(curl -sf "${ENGRAM_URL}/project/current?cwd=${encoded}" --max-time 2 2>/dev/null) || return 1
+  json_string_value_without_jq "project" "$response" || return 1
+  project="$JSON_VALUE"
+  json_string_value_without_jq "project_source" "$response" || return 1
+  source="$JSON_VALUE"
+  json_string_value_without_jq "error_hint" "$response" && return 1
+  case "$source" in
+    config|git_remote|git_root|git_child|dir_basename|process_override) ;;
+    *) return 1 ;;
+  esac
+  [ -n "$project" ] || return 1
+  printf '%s\n' "$project"
+}
+
+user_prompt_submit_without_jq() {
+  local cwd="" session_id="" prompt="" project="" session_key state_dir state_file
+  local session_start="" session_start_epoch now_epoch session_age_secs encoded_project
+  local last_save_json="" last_save_at="" last_epoch elapsed nudge_cooldown nudge_state_file last_nudge_epoch=""
+
+  json_string_value_without_jq "cwd" "$INPUT" && cwd="$JSON_VALUE"
+  json_string_value_without_jq "session_id" "$INPUT" && session_id="$JSON_VALUE"
+  json_string_value_without_jq "prompt" "$INPUT" && prompt="$JSON_VALUE"
+
+  if [ -n "$prompt" ] && [ -n "$session_id" ]; then
+    (
+      project=$(resolve_project_without_jq "$cwd") || exit 0
+      json_escape_without_jq "$session_id"
+      local escaped_session="$JSON_VALUE"
+      json_escape_without_jq "$project"
+      local escaped_project="$JSON_VALUE"
+      json_escape_without_jq "$prompt"
+      curl -sf -X POST "${ENGRAM_URL}/prompts" --max-time 2 \
+        -H 'Content-Type: application/json' \
+        -d "{\"session_id\":\"${escaped_session}\",\"project\":\"${escaped_project}\",\"content\":\"${JSON_VALUE}\"}" >/dev/null 2>&1 || true
+    ) &
+  fi
+
+  if [ -n "$session_id" ]; then
+    sanitize_session_key_part "$session_id"
+    session_key="engram-claude-${JSON_VALUE}-tools-loaded"
+  else
+    session_key="engram-claude-unknown-$$-tools-loaded"
+  fi
+  state_dir="${TMPDIR:-/tmp}"
+  state_file="${state_dir}/${session_key}"
+
+  if [ ! -f "$state_file" ]; then
+    : > "$state_file" 2>/dev/null || true
+    print_toolsearch_message
+    return 0
+  fi
+
+  project=$(resolve_project_without_jq "$cwd") || {
+    printf '%s\n' '{}'
+    return 0
+  }
+
+  if [ -n "$session_id" ]; then
+    session_start=$(curl -sf "${ENGRAM_URL}/sessions/${session_id}" --max-time 0.2 2>/dev/null)
+    json_string_value_without_jq "started_at" "$session_start" && session_start="$JSON_VALUE" || session_start=""
+  fi
+  if [ -n "$session_start" ]; then
+    session_start_epoch=$(parse_epoch "$session_start")
+    [ -n "$session_start_epoch" ] || { printf '%s\n' '{}'; return 0; }
+    now_epoch=$(date "+%s")
+    session_age_secs=$(( now_epoch - session_start_epoch ))
+    [ "$session_age_secs" -ge 300 ] || { printf '%s\n' '{}'; return 0; }
+  fi
+
+  url_encode_without_jq "$project"
+  encoded_project="$JSON_VALUE"
+  last_save_json=$(curl -sf "${ENGRAM_URL}/observations?project=${encoded_project}&limit=1&sort=created_at:desc" --max-time 0.2 2>/dev/null)
+  json_string_value_without_jq "created_at" "$last_save_json" && last_save_at="$JSON_VALUE" || last_save_at=""
+  [ -n "$last_save_at" ] || { printf '%s\n' '{}'; return 0; }
+  last_epoch=$(parse_epoch "$last_save_at")
+  [ -n "$last_epoch" ] || { printf '%s\n' '{}'; return 0; }
+  now_epoch=$(date "+%s")
+  elapsed=$(( now_epoch - last_epoch ))
+
+  if [ "$elapsed" -gt 900 ]; then
+    nudge_cooldown="${ENGRAM_NUDGE_COOLDOWN_SECS:-900}"
+    nudge_state_file="${state_file%-tools-loaded}-last-nudge"
+    if [ -f "$nudge_state_file" ]; then
+      read -r last_nudge_epoch < "$nudge_state_file" 2>/dev/null || last_nudge_epoch=""
+    fi
+    case "$last_nudge_epoch" in
+      ''|*[!0-9]*) last_nudge_epoch="" ;;
+    esac
+    if [ -z "$last_nudge_epoch" ] || [ "$(( now_epoch - last_nudge_epoch ))" -ge "$nudge_cooldown" ]; then
+      printf '%s\n' "$now_epoch" > "$nudge_state_file" 2>/dev/null || true
+      printf '%s\n' '{"systemMessage":"MEMORY REMINDER: It'\''s been over 15 minutes since your last save. If you'\''ve made decisions, discoveries, or completed significant work, call mem_save now."}'
+      return 0
+    fi
+  fi
+  printf '%s\n' '{}'
+}
+
 if is_windows_bash && [ "${ENGRAM_CLAUDE_WINDOWS_BASH_SAFE_MODE:-auto}" != "0" ]; then
   INPUT=""
   while IFS= read -r LINE || [ -n "$LINE" ]; do
@@ -90,33 +259,6 @@ fi
 # for dirname/pwd before deciding whether the safe path applies.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/_helpers.sh"
-
-# Read hook input from stdin
-INPUT=$(cat)
-CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
-PROJECT=""
-
-# ──────────────────────────────────────────────────────────────────────────────
-# PROMPT PERSIST
-#
-# Every user message is captured to POST /prompts so mem_save can attach the
-# originating prompt via SessionActivity. The canonical project is resolved by
-# the server before this script writes. Fire-and-forget: never blocks and never
-# fails the hook.
-# ──────────────────────────────────────────────────────────────────────────────
-PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty')
-if [ -n "$PROMPT" ] && [ -n "$SESSION_ID" ]; then
-  # Detached subshell so the POST never stalls the hook. The server derives the
-  # prompt's project from the session and rejects any mismatch.
-  (
-    PROJECT=$(resolve_project "$CWD") || exit 0
-    curl -sf -X POST "${ENGRAM_URL}/prompts" --max-time 2 \
-      -H 'Content-Type: application/json' \
-      -d "$(jq -n --arg s "$SESSION_ID" --arg p "$PROJECT" --arg c "$PROMPT" \
-            '{session_id:$s, project:$p, content:$c}')" >/dev/null 2>&1 || true
-  ) &
-fi
 
 parse_epoch() {
   TS="$1"
@@ -154,6 +296,37 @@ parse_epoch() {
     || date -j -f "%Y-%m-%d %H:%M:%S" "$TS" "+%s" 2>/dev/null \
     || date -d "$TS" "+%s" 2>/dev/null
 }
+
+# Read hook input from stdin
+INPUT=$(cat)
+if ! command -v jq >/dev/null 2>&1; then
+  user_prompt_submit_without_jq
+  exit 0
+fi
+CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
+PROJECT=""
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PROMPT PERSIST
+#
+# Every user message is captured to POST /prompts so mem_save can attach the
+# originating prompt via SessionActivity. The canonical project is resolved by
+# the server before this script writes. Fire-and-forget: never blocks and never
+# fails the hook.
+# ──────────────────────────────────────────────────────────────────────────────
+PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty')
+if [ -n "$PROMPT" ] && [ -n "$SESSION_ID" ]; then
+  # Detached subshell so the POST never stalls the hook. The server derives the
+  # prompt's project from the session and rejects any mismatch.
+  (
+    PROJECT=$(resolve_project "$CWD") || exit 0
+    curl -sf -X POST "${ENGRAM_URL}/prompts" --max-time 2 \
+      -H 'Content-Type: application/json' \
+      -d "$(jq -n --arg s "$SESSION_ID" --arg p "$PROJECT" --arg c "$PROMPT" \
+            '{session_id:$s, project:$p, content:$c}')" >/dev/null 2>&1 || true
+  ) &
+fi
 
 # Default: no injection
 OUTPUT="{}"

@@ -2,15 +2,21 @@ package setup
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestEmbeddedOpenCodePluginMatchesSourceByteForByte(t *testing.T) {
@@ -2474,6 +2480,153 @@ func TestClaudeCodeUserPromptHookSanitizesWindowsSafeSessionKey(t *testing.T) {
 			t.Fatalf("user prompt hook missing Windows session key sanitization fragment %q", want)
 		}
 	}
+}
+
+func TestClaudeCodeUserPromptHookWithoutJQPreservesSessionStateAndNudge(t *testing.T) {
+	if testing.Short() {
+		t.Skip("runs the Claude Code shell hook as a child process")
+	}
+
+	bashPath, pathDirs := isolatedHookPath(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/project/current":
+			_, _ = w.Write([]byte(`{"project":"hook-test","project_source":"config"}`))
+		case "/sessions/session-677":
+			_, _ = w.Write([]byte(`{"started_at":"2000-01-01T00:00:00Z"}`))
+		case "/observations":
+			_, _ = w.Write([]byte(`[{"created_at":"2000-01-01T00:00:00Z"}]`))
+		case "/prompts":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse test server URL: %v", err)
+	}
+
+	scriptPath, err := filepath.Abs(filepath.Join("..", "..", "plugin", "claude-code", "scripts", "user-prompt-submit.sh"))
+	if err != nil {
+		t.Fatalf("resolve user prompt hook path: %v", err)
+	}
+	stateDir := t.TempDir()
+	input := `{"cwd":"/workspace","session_id":"session-677","prompt":"remember this"}`
+	env := withoutEnv(os.Environ(), "PATH", "TMPDIR", "ENGRAM_PORT", "ENGRAM_CLAUDE_WINDOWS_BASH_SAFE_MODE")
+	env = append(env,
+		"PATH="+strings.Join(pathDirs, string(os.PathListSeparator)),
+		"TMPDIR="+stateDir,
+		"ENGRAM_PORT="+serverURL.Port(),
+		"ENGRAM_CLAUDE_WINDOWS_BASH_SAFE_MODE=0",
+	)
+
+	runHook := func() (string, string) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, bashPath, scriptPath)
+		cmd.Env = env
+		cmd.Stdin = strings.NewReader(input)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("run user prompt hook without jq: %v\nstderr: %s", err, stderr.String())
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("user prompt hook timed out: %v", ctx.Err())
+		}
+		if strings.Contains(stderr.String(), "jq:") {
+			t.Fatalf("user prompt hook invoked jq without jq on PATH: %s", stderr.String())
+		}
+		var response map[string]any
+		if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &response); err != nil {
+			t.Fatalf("user prompt hook emitted invalid JSON %q: %v", stdout.String(), err)
+		}
+		return stdout.String(), stderr.String()
+	}
+
+	firstOutput, _ := runHook()
+	if !strings.Contains(firstOutput, "CRITICAL FIRST ACTION") {
+		t.Fatalf("first hook invocation = %q, want bootstrap response", firstOutput)
+	}
+
+	secondOutput, secondStderr := runHook()
+	if !strings.Contains(secondOutput, "MEMORY REMINDER") {
+		t.Fatalf("second hook invocation = %q, want save nudge; stderr: %s", secondOutput, secondStderr)
+	}
+
+	thirdOutput, _ := runHook()
+	if strings.Contains(thirdOutput, "MEMORY REMINDER") || strings.Contains(thirdOutput, "CRITICAL FIRST ACTION") {
+		t.Fatalf("third hook invocation = %q, want cooldown response", thirdOutput)
+	}
+
+	stateFiles, err := filepath.Glob(filepath.Join(stateDir, "engram-claude-*"))
+	if err != nil {
+		t.Fatalf("list hook state files: %v", err)
+	}
+	if len(stateFiles) != 2 {
+		t.Fatalf("hook state files = %v, want one session and one cooldown file", stateFiles)
+	}
+}
+
+func isolatedHookPath(t *testing.T) (string, []string) {
+	t.Helper()
+	if gitPath, err := exec.LookPath("git"); err == nil {
+		gitRoot := filepath.Dir(filepath.Dir(gitPath))
+		gitBash := filepath.Join(gitRoot, "bin", "bash.exe")
+		if _, err := os.Stat(gitBash); err == nil {
+			pathDirs := []string{filepath.Join(gitRoot, "usr", "bin"), filepath.Join(gitRoot, "bin"), os.Getenv("SystemRoot") + `\System32`}
+			assertJQAbsent(t, pathDirs)
+			return gitBash, pathDirs
+		}
+	}
+
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skipf("bash is required for Claude Code hook regression: %v", err)
+	}
+
+	binDir := t.TempDir()
+	for _, tool := range []string{"cat", "curl", "date", "dirname", "touch"} {
+		toolPath, err := exec.LookPath(tool)
+		if err != nil {
+			t.Fatalf("find required hook tool %q: %v", tool, err)
+		}
+		linkPath := filepath.Join(binDir, filepath.Base(toolPath))
+		if err := os.Link(toolPath, linkPath); err != nil {
+			if err := os.Symlink(toolPath, linkPath); err != nil {
+				t.Fatalf("expose required hook tool %q without jq: %v", tool, err)
+			}
+		}
+	}
+	assertJQAbsent(t, []string{binDir})
+	return bashPath, []string{binDir}
+}
+
+func assertJQAbsent(t *testing.T, pathDirs []string) {
+	t.Helper()
+	for _, dir := range pathDirs {
+		for _, name := range []string{"jq", "jq.exe"} {
+			if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+				t.Fatalf("controlled hook PATH includes jq at %q", filepath.Join(dir, name))
+			}
+		}
+	}
+}
+
+func withoutEnv(env []string, names ...string) []string {
+	filtered := make([]string, 0, len(env))
+	for _, item := range env {
+		name, _, _ := strings.Cut(item, "=")
+		if !slices.Contains(names, name) {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
 }
 
 func TestClaudeCodeUserPromptHookIncludesPowerShellFallback(t *testing.T) {
