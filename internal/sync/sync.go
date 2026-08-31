@@ -1913,16 +1913,20 @@ func markHistoricalIdentity(found, relevant map[string]struct{}, entity, key str
 }
 
 func historicalIdentityKey(entity, key string) string {
-	key = strings.TrimSpace(key)
-	if key == "" {
-		return ""
-	}
 	switch entity {
-	case store.SyncEntitySession, store.SyncEntityObservation, store.SyncEntityPrompt:
-		return fmt.Sprintf("%s:%s", entity, key)
+	case store.SyncEntitySession:
+		if key == "" {
+			return ""
+		}
+	case store.SyncEntityObservation, store.SyncEntityPrompt:
+		key = strings.TrimSpace(key)
+		if key == "" {
+			return ""
+		}
 	default:
 		return ""
 	}
+	return fmt.Sprintf("%s:%s", entity, key)
 }
 
 // filterRelationMutationsForExport returns the relation mutations that still

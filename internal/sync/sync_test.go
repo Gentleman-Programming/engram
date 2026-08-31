@@ -1186,6 +1186,38 @@ func TestLocalChunkExportReconcilesCompleteValidatedHistory(t *testing.T) {
 		}
 	})
 
+	t.Run("session identities preserve non-empty bytes", func(t *testing.T) {
+		tests := []struct {
+			name, historical, local string
+			wantSessions            int
+		}{
+			{"whitespace is distinct", "session", " session ", 1},
+			{"exact match is accounted for", "session", "session", 0},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				s := newTestStore(t)
+				if err := s.CreateSession(tt.local, "proj-a", "/tmp/proj-a"); err != nil {
+					t.Fatalf("create session: %v", err)
+				}
+				if _, err := s.DB().Exec(`UPDATE sessions SET started_at = '2025-01-01 00:00:00' WHERE id = ?`, tt.local); err != nil {
+					t.Fatalf("backdate session: %v", err)
+				}
+				syncDir := filepath.Join(t.TempDir(), ".engram")
+				writeLocalChunkFile(t, syncDir, "history", ChunkData{Sessions: []store.Session{{ID: tt.historical}}})
+				writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "history", CreatedAt: "2025-06-01T00:00:00Z"}}})
+
+				result, err := New(s, syncDir).Export("alice", "proj-a")
+				if err != nil {
+					t.Fatalf("export: %v", err)
+				}
+				if result.SessionsExported != tt.wantSessions || result.IsEmpty != (tt.wantSessions == 0) {
+					t.Fatalf("expected %d exported sessions, got %+v", tt.wantSessions, result)
+				}
+			})
+		}
+	})
+
 	t.Run("direct stable identities require only session references", func(t *testing.T) {
 		s, data := seedOldLocalExportData(t)
 		syncDir := filepath.Join(t.TempDir(), ".engram")
