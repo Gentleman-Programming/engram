@@ -761,12 +761,14 @@ func newWithoutRepair(cfg Config) (*Store, error) {
 	}
 	for _, p := range pragmas {
 		if _, err := db.Exec(p); err != nil {
+			_ = db.Close()
 			return nil, fmt.Errorf("engram: pragma %q: %w", p, err)
 		}
 	}
 
 	s := &Store{db: db, cfg: cfg, hooks: defaultStoreHooks()}
 	if err := s.migrate(); err != nil {
+		_ = db.Close()
 		return nil, fmt.Errorf("engram: migration: %w", err)
 	}
 	return s, nil
