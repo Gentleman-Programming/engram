@@ -263,8 +263,7 @@ func TestScanProject_Semantic_DryRunDoesNotPersist(t *testing.T) {
 // ─── C.5b — TestScanProject_Semantic_NotConflictSkipped ──────────────────────
 
 // TestScanProject_Semantic_NotConflictSkipped verifies that verdicts of
-// "not_conflict" remain counted in SemanticSkipped while producing a durable
-// negative verdict that suppresses later semantic scans for the unordered pair.
+// "not_conflict" are counted in SemanticSkipped and do NOT produce relation rows.
 func TestScanProject_Semantic_NotConflictSkipped(t *testing.T) {
 	s := newTestStore(t)
 	seedSimilarPair(t, s, "sem-skip-project")
@@ -301,111 +300,10 @@ func TestScanProject_Semantic_NotConflictSkipped(t *testing.T) {
 
 	var count int
 	_ = s.db.QueryRow(
-		`SELECT count(*) FROM memory_relations WHERE marked_by_actor = 'engram' AND relation = ? AND judgment_status = 'judged'`, RelationNotConflict,
+		`SELECT count(*) FROM memory_relations WHERE marked_by_actor = 'engram'`,
 	).Scan(&count)
-	if count != 1 {
-		t.Errorf("expected one durable negative verdict; got %d", count)
-	}
-}
-
-func TestScanProject_Semantic_DryRunNotConflictIsSkippedWithoutPersistence(t *testing.T) {
-	s := newTestStore(t)
-	seedSimilarPair(t, s, "sem-dry-run-not-conflict-project")
-	runner := &verdictRunner{verdict: SemanticVerdict{
-		Relation: RelationNotConflict, Confidence: 0.99, Reasoning: "unrelated", Model: "haiku",
-	}}
-
-	result, err := s.ScanProject(ScanOptions{
-		Project: "sem-dry-run-not-conflict-project", Semantic: true, Concurrency: 1,
-		TimeoutPerCall: 5 * time.Second, MaxSemantic: 10, Runner: runner, BuildPrompt: identityPromptBuilder,
-	})
-	if err != nil {
-		t.Fatalf("ScanProject: %v", err)
-	}
-	if result.SemanticSkipped != 1 || result.SemanticJudged != 0 || result.SemanticErrors != 0 {
-		t.Errorf("dry-run semantic counters = judged:%d skipped:%d errors:%d, want judged:0 skipped:1 errors:0", result.SemanticJudged, result.SemanticSkipped, result.SemanticErrors)
-	}
-	var relationMutations, relations int
-	if err := s.db.QueryRow(`SELECT count(*) FROM memory_relations`).Scan(&relations); err != nil {
-		t.Fatalf("count relations: %v", err)
-	}
-	if err := s.db.QueryRow(`SELECT count(*) FROM sync_mutations WHERE entity = ?`, SyncEntityRelation).Scan(&relationMutations); err != nil {
-		t.Fatalf("count relation mutations: %v", err)
-	}
-	if relations != 0 || relationMutations != 0 {
-		t.Errorf("dry-run persistence = relations:%d mutations:%d, want 0/0", relations, relationMutations)
-	}
-}
-
-func TestScanProject_Semantic_DeduplicatesReciprocalPairBeforeBudget(t *testing.T) {
-	s := newTestStore(t)
-	seedSimilarPair(t, s, "sem-reciprocal-project")
-	if err := s.EnrollProject("sem-reciprocal-project"); err != nil {
-		t.Fatalf("EnrollProject: %v", err)
-	}
-	runner := &verdictRunner{verdict: SemanticVerdict{
-		Relation: RelationCompatible, Confidence: 0.9, Reasoning: "same topic", Model: "haiku",
-	}}
-
-	result, err := s.ScanProject(ScanOptions{
-		Project: "sem-reciprocal-project", Apply: true, Semantic: true, Concurrency: 1,
-		TimeoutPerCall: 5 * time.Second, MaxSemantic: 1, Runner: runner, BuildPrompt: identityPromptBuilder,
-	})
-	if err != nil {
-		t.Fatalf("ScanProject: %v", err)
-	}
-	if result.Capped || runner.calls != 1 || result.SemanticJudged != 1 || result.SemanticSkipped != 0 || result.SemanticErrors != 0 {
-		t.Errorf("reciprocal semantic result = capped:%t calls:%d judged:%d skipped:%d errors:%d, want false/1/1/0/0", result.Capped, runner.calls, result.SemanticJudged, result.SemanticSkipped, result.SemanticErrors)
-	}
-	var relationIDs []string
-	rows, err := s.db.Query(`SELECT sync_id FROM memory_relations WHERE marked_by_actor = 'engram' AND marked_by_kind = 'system'`)
-	if err != nil {
-		t.Fatalf("list system relations: %v", err)
-	}
-	for rows.Next() {
-		var syncID string
-		if err := rows.Scan(&syncID); err != nil {
-			rows.Close()
-			t.Fatalf("scan system relation: %v", err)
-		}
-		relationIDs = append(relationIDs, syncID)
-	}
-	if err := rows.Close(); err != nil {
-		t.Fatalf("close system relations: %v", err)
-	}
-	if len(relationIDs) != 1 {
-		t.Fatalf("system relation count = %d, want 1", len(relationIDs))
-	}
-	if got := countRelationSyncMutationsByKey(t, s, relationIDs[0]); got != 1 {
-		t.Errorf("relation sync mutations = %d, want 1", got)
-	}
-}
-
-func TestScanProject_Semantic_NotConflictSuppressesSecondScan(t *testing.T) {
-	s := newTestStore(t)
-	seedSimilarPair(t, s, "sem-suppress-project")
-	runner := &verdictRunner{verdict: SemanticVerdict{Relation: RelationNotConflict, Confidence: 0.9, Reasoning: "unrelated", Model: "haiku"}}
-	opts := ScanOptions{
-		Project: "sem-suppress-project", Apply: true, Semantic: true, Concurrency: 1,
-		TimeoutPerCall: 5 * time.Second, MaxSemantic: 10, Runner: runner, BuildPrompt: identityPromptBuilder,
-	}
-	first, err := s.ScanProject(opts)
-	if err != nil {
-		t.Fatalf("first ScanProject: %v", err)
-	}
-	if first.SemanticSkipped == 0 || runner.calls == 0 {
-		t.Fatalf("first scan did not evaluate a negative verdict: skipped=%d calls=%d", first.SemanticSkipped, runner.calls)
-	}
-	callsAfterFirst := runner.calls
-	second, err := s.ScanProject(opts)
-	if err != nil {
-		t.Fatalf("second ScanProject: %v", err)
-	}
-	if runner.calls != callsAfterFirst {
-		t.Errorf("second scan reran evaluated unordered pair: calls=%d, want %d", runner.calls, callsAfterFirst)
-	}
-	if second.SemanticJudged != 0 || second.SemanticSkipped != 0 || second.SemanticErrors != 0 {
-		t.Errorf("second scan semantic counters = judged:%d skipped:%d errors:%d, want all zero", second.SemanticJudged, second.SemanticSkipped, second.SemanticErrors)
+	if count != 0 {
+		t.Errorf("expected no 'engram' relation rows for not_conflict; got %d", count)
 	}
 }
 

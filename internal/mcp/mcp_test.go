@@ -3317,6 +3317,49 @@ web/mobile/navigation.ts`,
 	}
 }
 
+func TestHandleSessionSummarySkipsCandidatesForHeadingsOnlyContent(t *testing.T) {
+	s := newMCPTestStore(t)
+	const project = "headings-only-summary"
+	const sessionID = "headings-only-summary-session"
+	if err := s.CreateSession(sessionID, project, t.TempDir()); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	originalFindCandidates := findSessionSummaryCandidates
+	candidateSearchCalled := false
+	findSessionSummaryCandidates = func(*store.Store, int64, store.CandidateOptions) ([]store.Candidate, error) {
+		candidateSearchCalled = true
+		return nil, nil
+	}
+	t.Cleanup(func() { findSessionSummaryCandidates = originalFindCandidates })
+
+	h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	result, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"project":    project,
+		"session_id": sessionID,
+		"content": `## Goal
+## Instructions
+## Discoveries
+## Accomplished
+## Next Steps
+## Relevant Files`,
+	}}})
+	if err != nil || result.IsError {
+		t.Fatalf("session summary: err=%v isError=%v text=%s", err, result.IsError, callResultText(t, result))
+	}
+	if candidateSearchCalled {
+		t.Fatal("headings-only session summary should skip candidate search")
+	}
+
+	envelope := parseEnvelope(t, "headings-only session summary", result)
+	if required, _ := envelope["judgment_required"].(bool); required {
+		t.Fatalf("judgment_required = %v, want false", envelope["judgment_required"])
+	}
+	if _, ok := envelope["candidates"]; ok {
+		t.Fatalf("headings-only session summary should not include candidates: %v", envelope["candidates"])
+	}
+}
+
 func TestHandleSessionSummaryCandidateQueryUsesPersistedContent(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -3355,16 +3398,16 @@ func TestHandleSessionSummaryCandidateQueryUsesPersistedContent(t *testing.T) {
 				t.Fatalf("AddObservation(candidate): %v", err)
 			}
 
-			originalFindCandidates := findCandidates
+			originalFindCandidates := findSessionSummaryCandidates
 			var candidateQuery string
-			findCandidates = func(s *store.Store, savedID int64, opts store.CandidateOptions) ([]store.Candidate, error) {
+			findSessionSummaryCandidates = func(s *store.Store, savedID int64, opts store.CandidateOptions) ([]store.Candidate, error) {
 				candidateQuery = opts.Query
 				if strings.Contains(opts.Query, tc.absentTerm) {
 					return originalFindCandidates(s, savedID, opts)
 				}
 				return nil, nil
 			}
-			t.Cleanup(func() { findCandidates = originalFindCandidates })
+			t.Cleanup(func() { findSessionSummaryCandidates = originalFindCandidates })
 
 			h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 			result, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -3402,11 +3445,11 @@ func TestHandleSessionSummaryPersistsWhenCandidateDetectionFails(t *testing.T) {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
-	originalFindCandidates := findCandidates
-	findCandidates = func(*store.Store, int64, store.CandidateOptions) ([]store.Candidate, error) {
+	originalFindCandidates := findSessionSummaryCandidates
+	findSessionSummaryCandidates = func(*store.Store, int64, store.CandidateOptions) ([]store.Candidate, error) {
 		return nil, errors.New("forced candidate detection failure")
 	}
-	t.Cleanup(func() { findCandidates = originalFindCandidates })
+	t.Cleanup(func() { findSessionSummaryCandidates = originalFindCandidates })
 
 	content := "The session summary must survive a candidate detection failure."
 	h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))

@@ -339,10 +339,10 @@ Records a verdict on a semantic comparison between two memories. The agent reads
 
 On success, `mem_compare`:
 - Persists a relation row with system provenance (`marked_by_kind="system"`, `marked_by_actor="engram"`)
-- Is idempotent for the unordered pair: it updates the existing Engram/system row or inserts one when no such row exists
-- Returns `{"sync_id": "<rel-hex>"}` for every persisted verdict
+- Is idempotent: the same `(source_id, target_id)` pair updates the existing row rather than inserting a duplicate
+- Returns `{"sync_id": "<rel-hex>"}` on a persisted verdict
 
-`not_conflict` persists a durable negative Engram/system verdict and returns its non-empty relation `sync_id`.
+`not_conflict` verdicts are no-ops — the call succeeds and returns `{"sync_id": ""}` but no row is written, matching the scan flow contract.
 
 Cross-project relations (where `memory_id_a` and `memory_id_b` belong to different projects) are rejected with an error.
 

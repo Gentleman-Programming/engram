@@ -1613,7 +1613,9 @@ func (s *Server) handleCompareMemories(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.notifyWrite()
+	if syncID != "" {
+		s.notifyWrite()
+	}
 	jsonResponse(w, http.StatusOK, map[string]any{"sync_id": syncID})
 }
 

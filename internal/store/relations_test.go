@@ -110,6 +110,25 @@ func TestFindCandidates_HappyPath(t *testing.T) {
 	}
 }
 
+func TestFindCandidates_EscapesInteriorQuotes(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, _ = addTestObs(t, s, `hello"world candidate`, "decision", "testproject", "project")
+	savedID, _ := addTestObs(t, s, `hello"world source`, "decision", "testproject", "project")
+
+	candidates, err := s.FindCandidates(savedID, CandidateOptions{
+		Project:   "testproject",
+		Scope:     "project",
+		Limit:     3,
+		BM25Floor: ptrFloat64(-10.0),
+	})
+	if err != nil {
+		t.Fatalf("FindCandidates: %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("expected 1 candidate, got %d", len(candidates))
+	}
+}
+
 // TestFindCandidates_EarlyBreakDoesNotSelfBlockWithSingleConnection verifies
 // that FindCandidates closes its FTS rows before follow-up QueryRow/Exec calls.
 // With SetMaxOpenConns(1), leaving rows open after the early-break path can
@@ -374,23 +393,6 @@ func TestGetRelationsForObservations_SkipsOrphaned(t *testing.T) {
 				t.Error("orphaned relation must not be returned by GetRelationsForObservations")
 			}
 		}
-	}
-}
-
-func TestGetRelationsForObservations_SkipsNotConflict(t *testing.T) {
-	s := setupRelationsStore(t)
-	_, syncA := addTestObs(t, s, "Auth sessions design", "decision", "testproject", "project")
-	_, syncB := addTestObs(t, s, "CSS grid layout", "decision", "testproject", "project")
-	if _, err := s.JudgeBySemantic(JudgeBySemanticParams{SourceID: syncA, TargetID: syncB, Relation: RelationNotConflict, Confidence: 0.9, Reasoning: "unrelated"}); err != nil {
-		t.Fatalf("JudgeBySemantic: %v", err)
-	}
-
-	result, err := s.GetRelationsForObservations([]string{syncA})
-	if err != nil {
-		t.Fatalf("GetRelationsForObservations: %v", err)
-	}
-	if relations := result[syncA]; len(relations.AsSource) != 0 || len(relations.AsTarget) != 0 {
-		t.Errorf("not_conflict must not appear in annotations; got %+v", relations)
 	}
 }
 
@@ -1394,43 +1396,6 @@ func TestGetRelationStats_MixedStatuses(t *testing.T) {
 	judgedCount := stats.ByJudgmentStatus["judged"]
 	if judgedCount != 1 {
 		t.Errorf("expected ByJudgmentStatus[judged]=1; got %d", judgedCount)
-	}
-}
-
-func TestConflictFacingQueriesExcludeNotConflict(t *testing.T) {
-	s, alphaSync1, alphaSync2, betaSync1 := setupTwoProjectStore(t)
-	insertRelationWithStatus(t, s, alphaSync1, betaSync1, "judged")
-	negativeID, err := s.JudgeBySemantic(JudgeBySemanticParams{
-		SourceID: alphaSync1, TargetID: alphaSync2, Relation: RelationNotConflict, Confidence: 0.9, Reasoning: "unrelated",
-	})
-	if err != nil {
-		t.Fatalf("JudgeBySemantic: %v", err)
-	}
-	items, err := s.ListRelations(ListRelationsOptions{Project: "alpha"})
-	if err != nil {
-		t.Fatalf("ListRelations: %v", err)
-	}
-	for _, item := range items {
-		if item.SyncID == negativeID || item.Relation == RelationNotConflict {
-			t.Errorf("ListRelations exposed not_conflict relation %+v", item)
-		}
-	}
-	total, err := s.CountRelations(ListRelationsOptions{Project: "alpha"})
-	if err != nil {
-		t.Fatalf("CountRelations: %v", err)
-	}
-	if total != len(items) {
-		t.Errorf("CountRelations = %d, want visible list length %d", total, len(items))
-	}
-	if total != 1 {
-		t.Errorf("CountRelations = %d, want one non-negative relation", total)
-	}
-	stats, err := s.GetRelationStats("alpha")
-	if err != nil {
-		t.Fatalf("GetRelationStats: %v", err)
-	}
-	if stats.ByRelation[RelationNotConflict] != 0 {
-		t.Errorf("GetRelationStats exposed not_conflict count %d", stats.ByRelation[RelationNotConflict])
 	}
 }
 

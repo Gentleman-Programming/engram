@@ -64,7 +64,7 @@ var addPromptIfMissing = func(s *store.Store, params store.AddPromptParams) (int
 	return s.AddPromptIfMissing(params)
 }
 
-var findCandidates = func(s *store.Store, savedID int64, opts store.CandidateOptions) ([]store.Candidate, error) {
+var findSessionSummaryCandidates = func(s *store.Store, savedID int64, opts store.CandidateOptions) ([]store.Candidate, error) {
 	return s.FindCandidates(savedID, opts)
 }
 
@@ -881,11 +881,11 @@ PARAMS:
 
 BEHAVIOR:
   - Persists the verdict via JudgeBySemantic with system provenance (marked_by_actor="engram").
-  - not_conflict is persisted as a negative verdict so the pair is not evaluated again.
+  - not_conflict: no row is inserted; tool returns success with empty sync_id (the verdict is recorded but not stored — it means "we evaluated these and they do not conflict").
   - Idempotent: calling again for the same pair updates the existing row.
   - Cross-project pairs are rejected.
 
-SUCCESS: Returns { "sync_id": "rel-..." } for every persisted verdict.
+SUCCESS: Returns { "sync_id": "rel-..." } on persist, { "sync_id": "" } on not_conflict.
 ERROR: Returns IsError=true if IDs are unknown, relation is invalid, or cross-project pair.`),
 				mcp.WithTitleAnnotation("Compare Memory Pair (Persist Semantic Verdict)"),
 				mcp.WithReadOnlyHintAnnotation(false),
@@ -1296,7 +1296,61 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 			msg += "\n" + similarWarning
 		}
 
-		extra := postSaveConflictCandidateResponse(s, cfg, savedID, project, scope, "", &msg, map[string]any{"truncation": truncation})
+		// Post-transaction conflict candidate detection (REQ-001).
+		// Errors are logged and swallowed — detection failure never fails the save.
+		extra := map[string]any{"truncation": truncation}
+		// Build CandidateOptions, forwarding any MCPConfig overrides.
+		// nil fields mean "use store defaults"; explicit pointer values override.
+		candOpts := store.CandidateOptions{
+			Project:   project,
+			Scope:     scope,
+			BM25Floor: cfg.BM25Floor, // nil → store default (-2.0); explicit value overrides
+		}
+		if cfg.Limit != nil {
+			candOpts.Limit = *cfg.Limit
+		}
+		candidates, candErr := s.FindCandidates(savedID, candOpts)
+		if candErr != nil {
+			// Log only — do not fail the save.
+			fmt.Fprintf(os.Stderr, "engram: FindCandidates error (non-fatal): %v\n", candErr)
+		}
+
+		// Fetch the saved observation's sync_id for the envelope (REQ-001).
+		var savedSyncID string
+		if obs, obsErr := s.GetObservation(savedID); obsErr == nil {
+			savedSyncID = obs.SyncID
+			extra["id"] = savedID
+			extra["sync_id"] = savedSyncID
+			extra["state"] = obs.State()
+			if obs.ReviewAfter != nil {
+				extra["review_after"] = *obs.ReviewAfter
+			}
+		}
+		if len(candidates) > 0 {
+			extra["judgment_required"] = true
+			extra["judgment_status"] = "pending"
+			extra["judgment_id"] = candidates[0].JudgmentID // first candidate's rel sync_id (design convenience)
+			candList := make([]map[string]any, 0, len(candidates))
+			for _, c := range candidates {
+				entry := map[string]any{
+					"id":          c.ID,
+					"sync_id":     c.SyncID,
+					"title":       c.Title,
+					"type":        c.Type,
+					"score":       c.Score,
+					"judgment_id": c.JudgmentID,
+				}
+				if c.TopicKey != nil {
+					entry["topic_key"] = *c.TopicKey
+				}
+				candList = append(candList, entry)
+			}
+			extra["candidates"] = candList
+
+			msg += fmt.Sprintf("\nCONFLICT REVIEW PENDING — %d candidate(s); use mem_judge to record verdicts.", len(candidates))
+		} else {
+			extra["judgment_required"] = false
+		}
 
 		// Update detRes to reflect normalized project for envelope accuracy
 		detRes.Project = project
@@ -1304,12 +1358,10 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 	}
 }
 
-// postSaveConflictCandidateResponse runs best-effort candidate detection and
-// builds the existing mem_save response metadata for a persisted observation.
-func postSaveConflictCandidateResponse(s *store.Store, cfg MCPConfig, savedID int64, project, scope, query string, msg *string, extra map[string]any) map[string]any {
-	if extra == nil {
-		extra = map[string]any{}
-	}
+// sessionSummaryCandidateResponse runs candidate detection only for a persisted
+// session summary and builds its conflict-review response metadata.
+func sessionSummaryCandidateResponse(s *store.Store, cfg MCPConfig, savedID int64, project string, msg *string) map[string]any {
+	extra := map[string]any{}
 	obs, obsErr := s.GetObservation(savedID)
 	if obsErr == nil {
 		extra["id"] = savedID
@@ -1319,21 +1371,20 @@ func postSaveConflictCandidateResponse(s *store.Store, cfg MCPConfig, savedID in
 			extra["review_after"] = *obs.ReviewAfter
 		}
 	}
-	if query != "" {
-		if obsErr != nil {
-			extra["judgment_required"] = false
-			return extra
-		}
-		query = obs.Content
-		if obs.Type == "session_summary" {
-			query = sessionSummaryCandidateQuery(query)
-		}
+	if obsErr != nil {
+		extra["judgment_required"] = false
+		return extra
 	}
-	candOpts := store.CandidateOptions{Project: project, Scope: scope, BM25Floor: cfg.BM25Floor, Query: query}
+	query := sessionSummaryCandidateQuery(obs.Content)
+	if strings.TrimSpace(query) == "" {
+		extra["judgment_required"] = false
+		return extra
+	}
+	candOpts := store.CandidateOptions{Project: project, BM25Floor: cfg.BM25Floor, Query: query}
 	if cfg.Limit != nil {
 		candOpts.Limit = *cfg.Limit
 	}
-	candidates, candErr := findCandidates(s, savedID, candOpts)
+	candidates, candErr := findSessionSummaryCandidates(s, savedID, candOpts)
 	if candErr != nil {
 		// Candidate discovery is non-fatal after the source observation is saved.
 		fmt.Fprintf(os.Stderr, "engram: FindCandidates error (non-fatal): %v\n", candErr)
@@ -1958,7 +2009,7 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 			msg += "\n" + score
 		}
 		detRes.Project = project
-		extra := postSaveConflictCandidateResponse(s, cfg, savedID, project, "", content, &msg, nil)
+		extra := sessionSummaryCandidateResponse(s, cfg, savedID, project, &msg)
 		return respondWithProject(detRes, msg, extra), nil
 	}
 }
@@ -2216,6 +2267,7 @@ func handleCompare(s *store.Store, _ *SessionActivity) server.ToolHandlerFunc {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
+		// syncID is "" when relation == "not_conflict" (JudgeBySemantic no-op).
 		envelope := map[string]any{
 			"sync_id": syncID,
 		}
