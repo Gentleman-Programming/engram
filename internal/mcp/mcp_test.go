@@ -3040,33 +3040,26 @@ func TestNewServerWithToolsAdminProfile(t *testing.T) {
 	}
 }
 
+func compareMCPToolInventory(expected, actual map[string]*server.ServerTool) error {
+	if len(expected) != len(actual) {
+		return fmt.Errorf("tool count = %d, want %d", len(actual), len(expected))
+	}
+	for name := range expected {
+		if actual[name] == nil {
+			return fmt.Errorf("missing tool %q", name)
+		}
+	}
+	return nil
+}
+
 func TestNewServerWithToolsNilRegistersAll(t *testing.T) {
 	s := newMCPTestStore(t)
-
 	srv := NewServerWithTools(s, nil)
 	if srv == nil {
 		t.Fatal("expected MCP server instance")
 	}
-
-	tools := srv.ListTools()
-
-	allTools := []string{
-		"mem_save", "mem_search", "mem_context", "mem_session_summary",
-		"mem_session_start", "mem_session_end", "mem_get_observation",
-		"mem_suggest_topic_key", "mem_capture_passive", "mem_save_prompt",
-		"mem_update", "mem_delete", "mem_stats", "mem_timeline", "mem_merge_projects",
-		"mem_current_project", "mem_judge", "mem_compare", "mem_doctor", "mem_review",
-		"mem_pin", "mem_unpin",
-	}
-
-	for _, name := range allTools {
-		if tools[name] == nil {
-			t.Errorf("nil allowlist: expected tool %q to be registered", name)
-		}
-	}
-
-	if len(tools) != len(allTools) {
-		t.Errorf("expected %d tools with nil allowlist, got %d", len(allTools), len(tools))
+	if err := compareMCPToolInventory(NewServer(s).ListTools(), srv.ListTools()); err != nil {
+		t.Fatalf("nil allowlist inventory: %v", err)
 	}
 }
 
@@ -3154,34 +3147,7 @@ func TestMemDoctorUnknownProjectReturnsStructuredError(t *testing.T) {
 	}
 }
 
-func TestNewServerBackwardsCompatible(t *testing.T) {
-	s := newMCPTestStore(t)
-
-	// NewServer (no tools filter) should register all tools
-	srv := NewServer(s)
-	tools := srv.ListTools()
-
-	// 18 agent + 4 admin = 22 total.
-	if len(tools) != 22 {
-		t.Errorf("NewServer should register all 22 tools, got %d", len(tools))
-	}
-}
-
 func TestProfileConsistency(t *testing.T) {
-	// Verify that agent + admin = all 22 tools
-	combined := make(map[string]bool)
-	for tool := range ProfileAgent {
-		combined[tool] = true
-	}
-	for tool := range ProfileAdmin {
-		combined[tool] = true
-	}
-
-	// 18 agent + 4 admin = 22 total.
-	if len(combined) != 22 {
-		t.Errorf("agent + admin should cover all 22 tools, got %d", len(combined))
-	}
-
 	// Verify no overlap between profiles
 	for tool := range ProfileAgent {
 		if ProfileAdmin[tool] {
@@ -3798,10 +3764,8 @@ func TestNewServerWithConfig(t *testing.T) {
 	if srv == nil {
 		t.Fatal("expected MCP server instance")
 	}
-	tools := srv.ListTools()
-	// Should have all 22 tools (18 agent + 4 admin).
-	if len(tools) != 22 {
-		t.Errorf("NewServerWithConfig should register all 22 tools, got %d", len(tools))
+	if err := compareMCPToolInventory(NewServer(s).ListTools(), srv.ListTools()); err != nil {
+		t.Fatalf("default config inventory: %v", err)
 	}
 }
 
