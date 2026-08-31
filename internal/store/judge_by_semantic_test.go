@@ -177,6 +177,96 @@ func TestJudgeBySemantic_NotConflictIsPersisted(t *testing.T) {
 	}
 }
 
+func TestJudgeBySemantic_NotConflictResolvesDuplicatePairRows(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, syncA := addTestObs(t, s, "Unrelated auth decision", "decision", "testproject", "project")
+	_, syncB := addTestObs(t, s, "CSS grid layout decision", "decision", "testproject", "project")
+
+	if err := s.EnrollProject("testproject"); err != nil {
+		t.Fatalf("EnrollProject: %v", err)
+	}
+	canonicalID := newSyncID("rel")
+	duplicateID := newSyncID("rel")
+	remoteID := newSyncID("rel")
+	for _, row := range []struct {
+		syncID, sourceID, targetID, relation, status, actor, kind, model, reason, evidence string
+		confidence                                                                         float64
+	}{
+		{canonicalID, syncA, syncB, RelationPending, "pending", "engram", "system", "old-model", "pending one", "system evidence one", 0.2},
+		{duplicateID, syncB, syncA, RelationRelated, "judged", "engram", "system", "old-model", "pending two", "system evidence two", 0.3},
+		{remoteID, syncB, syncA, RelationConflictsWith, "judged", "remote:human", "human", "human-model", "human judgment", "human evidence", 0.8},
+	} {
+		if _, err := s.db.Exec(`
+			INSERT INTO memory_relations
+				(sync_id, source_id, target_id, relation, judgment_status, confidence, reason, evidence,
+				 marked_by_actor, marked_by_kind, marked_by_model, session_id, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ses-rel-test',
+				'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+			row.syncID, row.sourceID, row.targetID, row.relation, row.status, row.confidence, row.reason, row.evidence,
+			row.actor, row.kind, row.model,
+		); err != nil {
+			t.Fatalf("seed relation %q: %v", row.syncID, err)
+		}
+	}
+
+	var remoteBefore string
+	if err := s.db.QueryRow(`
+		SELECT source_id || '|' || target_id || '|' || relation || '|' || judgment_status || '|' ||
+		       confidence || '|' || reason || '|' || evidence || '|' || marked_by_actor || '|' ||
+		       marked_by_kind || '|' || marked_by_model || '|' || session_id || '|' || created_at || '|' || updated_at
+		FROM memory_relations WHERE sync_id = ?`, remoteID).Scan(&remoteBefore); err != nil {
+		t.Fatalf("snapshot remote relation: %v", err)
+	}
+
+	syncID, err := s.JudgeBySemantic(JudgeBySemanticParams{
+		SourceID: syncA, TargetID: syncB, Relation: RelationNotConflict, Confidence: 0.99, Reasoning: "clearly unrelated", Model: "haiku",
+	})
+	if err != nil {
+		t.Fatalf("JudgeBySemantic(not_conflict): %v", err)
+	}
+	if syncID != canonicalID {
+		t.Fatalf("canonical sync_id = %q, want oldest relation %q", syncID, canonicalID)
+	}
+
+	for _, relationID := range []string{canonicalID, duplicateID} {
+		rel, err := s.GetRelation(relationID)
+		if err != nil {
+			t.Fatalf("GetRelation(%q): %v", relationID, err)
+		}
+		if rel.Relation != RelationNotConflict || rel.JudgmentStatus != "judged" {
+			t.Errorf("relation %q = relation:%q status:%q, want not_conflict/judged", relationID, rel.Relation, rel.JudgmentStatus)
+		}
+		if rel.SourceID != syncA || rel.TargetID != syncB || rel.MarkedByActor == nil || *rel.MarkedByActor != "engram" || rel.MarkedByKind == nil || *rel.MarkedByKind != "system" {
+			t.Errorf("owned relation %q was not resolved with caller direction and system provenance: %+v", relationID, rel)
+		}
+		if got := countRelationSyncMutationsByKey(t, s, relationID); got != 1 {
+			t.Errorf("relation %q sync mutations = %d, want 1", relationID, got)
+		}
+	}
+	if got := countRelationSyncMutationsByKey(t, s, remoteID); got != 0 {
+		t.Errorf("remote relation sync mutations = %d, want 0", got)
+	}
+	var remoteAfter string
+	if err := s.db.QueryRow(`
+		SELECT source_id || '|' || target_id || '|' || relation || '|' || judgment_status || '|' ||
+		       confidence || '|' || reason || '|' || evidence || '|' || marked_by_actor || '|' ||
+		       marked_by_kind || '|' || marked_by_model || '|' || session_id || '|' || created_at || '|' || updated_at
+		FROM memory_relations WHERE sync_id = ?`, remoteID).Scan(&remoteAfter); err != nil {
+		t.Fatalf("reload remote relation: %v", err)
+	}
+	if remoteAfter != remoteBefore {
+		t.Errorf("remote relation changed: before=%q after=%q", remoteBefore, remoteAfter)
+	}
+
+	items, err := s.ListRelations(ListRelationsOptions{Project: "testproject"})
+	if err != nil {
+		t.Fatalf("ListRelations: %v", err)
+	}
+	if len(items) != 1 || items[0].SyncID != remoteID {
+		t.Errorf("ListRelations = %+v, want unchanged remote relation %q", items, remoteID)
+	}
+}
+
 func TestJudgeBySemantic_ReciprocalPairReusesRelationAndUpdatesDirection(t *testing.T) {
 	s := setupRelationsStore(t)
 	_, syncA := addTestObs(t, s, "Older architecture decision", "architecture", "testproject", "project")

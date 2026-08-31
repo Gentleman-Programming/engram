@@ -735,10 +735,11 @@ func validateCrossProjectGuard(tx *sql.Tx, sourceID, targetID string) error {
 // the memory_relations table with system provenance (marked_by_kind="system",
 // marked_by_actor="engram", marked_by_model=params.Model).
 //
-// Idempotency: if a row already exists for (source_id, target_id) in either
-// direction, the existing row is updated. The returned sync_id is always the
-// reused row's sync_id. The latest caller's source and target order is retained
-// for directional verdicts.
+// Idempotency: if an Engram/system-owned row already exists for (source_id,
+// target_id) in either direction, the oldest such row is updated. Other actors'
+// rows are never changed. The returned sync_id is always the reused or inserted
+// Engram/system row's sync_id. The latest caller's source and target order is
+// retained only for rows this method owns.
 //
 // Returns ErrCrossProjectRelation when source and target belong to different
 // projects. Returns a validation error when required fields are missing or
@@ -766,17 +767,6 @@ func (s *Store) JudgeBySemantic(p JudgeBySemanticParams) (string, error) {
 			return err
 		}
 
-		// Check whether a row already exists for this (source_id, target_id) pair
-		// in either direction.
-		var existingSyncID string
-		err := tx.QueryRow(`
-			SELECT sync_id FROM memory_relations
-			WHERE (source_id = ? AND target_id = ?)
-			   OR (source_id = ? AND target_id = ?)
-			ORDER BY id
-			LIMIT 1
-		`, p.SourceID, p.TargetID, p.TargetID, p.SourceID).Scan(&existingSyncID)
-
 		confidence := p.Confidence
 		var modelPtr *string
 		if p.Model != "" {
@@ -785,7 +775,40 @@ func (s *Store) JudgeBySemantic(p JudgeBySemanticParams) (string, error) {
 		actor := "engram"
 		kind := "system"
 
-		if err == sql.ErrNoRows {
+		// JudgeBySemantic owns only Engram/system rows. A remote or human
+		// judgment for the same unordered pair must retain its verdict and
+		// provenance, so it cannot be reused as this method's canonical row.
+		rows, err := tx.Query(`
+			SELECT sync_id FROM memory_relations
+			WHERE ((source_id = ? AND target_id = ?)
+			    OR (source_id = ? AND target_id = ?))
+			  AND marked_by_actor = ?
+			  AND marked_by_kind = ?
+			ORDER BY id
+		`, p.SourceID, p.TargetID, p.TargetID, p.SourceID, actor, kind)
+		if err != nil {
+			return fmt.Errorf("JudgeBySemantic: find owned rows: %w", err)
+		}
+		var ownedSyncIDs []string
+		for rows.Next() {
+			var syncID string
+			if err := rows.Scan(&syncID); err != nil {
+				rows.Close()
+				return fmt.Errorf("JudgeBySemantic: scan owned row: %w", err)
+			}
+			ownedSyncIDs = append(ownedSyncIDs, syncID)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return fmt.Errorf("JudgeBySemantic: read owned rows: %w", err)
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("JudgeBySemantic: close owned rows: %w", err)
+		}
+
+		var existingSyncID string
+		var modifiedSyncIDs []string
+		if len(ownedSyncIDs) == 0 {
 			// Insert new row.
 			existingSyncID = newSyncID("rel")
 			if _, execErr := tx.Exec(`
@@ -801,28 +824,34 @@ func (s *Store) JudgeBySemantic(p JudgeBySemanticParams) (string, error) {
 			); execErr != nil {
 				return fmt.Errorf("JudgeBySemantic: insert: %w", execErr)
 			}
-		} else if err != nil {
-			return fmt.Errorf("JudgeBySemantic: check existing: %w", err)
+			modifiedSyncIDs = append(modifiedSyncIDs, existingSyncID)
 		} else {
-			// Update existing row.
-			if _, execErr := tx.Exec(`
-				UPDATE memory_relations
-				SET source_id       = ?,
-				    target_id       = ?,
-				    relation        = ?,
-				    judgment_status = 'judged',
-				    confidence      = ?,
-				    reason          = ?,
-				    marked_by_actor = ?,
-				    marked_by_kind  = ?,
-				    marked_by_model = ?,
-				    updated_at      = datetime('now')
-				WHERE sync_id = ?
-			`, p.SourceID, p.TargetID, p.Relation, confidence, p.Reasoning,
-				actor, kind, modelPtr,
-				existingSyncID,
-			); execErr != nil {
-				return fmt.Errorf("JudgeBySemantic: update: %w", execErr)
+			existingSyncID = ownedSyncIDs[0]
+			modifiedSyncIDs = append(modifiedSyncIDs, existingSyncID)
+			if p.Relation == RelationNotConflict {
+				// A negative verdict resolves every Engram/system duplicate for the
+				// unordered pair so none remain in conflict-facing views.
+				modifiedSyncIDs = ownedSyncIDs
+			}
+			for _, syncID := range modifiedSyncIDs {
+				if _, execErr := tx.Exec(`
+					UPDATE memory_relations
+					SET source_id       = ?,
+					    target_id       = ?,
+					    relation        = ?,
+					    judgment_status = 'judged',
+					    confidence      = ?,
+					    reason          = ?,
+					    marked_by_actor = ?,
+					    marked_by_kind  = ?,
+					    marked_by_model = ?,
+					    updated_at      = datetime('now')
+					WHERE sync_id = ?`,
+					p.SourceID, p.TargetID, p.Relation, confidence, p.Reasoning,
+					actor, kind, modelPtr, syncID,
+				); execErr != nil {
+					return fmt.Errorf("JudgeBySemantic: update: %w", execErr)
+				}
 			}
 		}
 
@@ -865,33 +894,39 @@ func (s *Store) JudgeBySemantic(p JudgeBySemanticParams) (string, error) {
 		// REQ-011: log at WARNING level when source observation is missing locally
 		// (project='' race condition). The server will reject with 400; this log
 		// is the local breadcrumb so the gap is not silently swallowed.
-		if srcProject == "" {
-			log.Printf("[store] WARNING: JudgeBySemantic enqueueing relation %s with project='' (source observation missing locally); server will reject", existingSyncID)
-		}
+		for _, syncID := range modifiedSyncIDs {
+			if srcProject == "" {
+				log.Printf("[store] WARNING: JudgeBySemantic enqueueing relation %s with project='' (source observation missing locally); server will reject", syncID)
+			}
 
-		// Build payload from the freshly-written row.
-		rel, err := s.getRelationTx(tx, existingSyncID)
-		if err != nil {
-			return fmt.Errorf("JudgeBySemantic: read relation for enqueue: %w", err)
+			// Build a payload from every freshly-written row so each local relation
+			// mutation has a matching mutation-ledger entry.
+			rel, err := s.getRelationTx(tx, syncID)
+			if err != nil {
+				return fmt.Errorf("JudgeBySemantic: read relation for enqueue: %w", err)
+			}
+			payload := syncRelationPayload{
+				SyncID:         rel.SyncID,
+				SourceID:       rel.SourceID,
+				TargetID:       rel.TargetID,
+				Relation:       rel.Relation,
+				Reason:         rel.Reason,
+				Evidence:       rel.Evidence,
+				Confidence:     rel.Confidence,
+				JudgmentStatus: rel.JudgmentStatus,
+				MarkedByActor:  rel.MarkedByActor,
+				MarkedByKind:   rel.MarkedByKind,
+				MarkedByModel:  rel.MarkedByModel,
+				SessionID:      rel.SessionID,
+				Project:        srcProject,
+				CreatedAt:      rel.CreatedAt,
+				UpdatedAt:      rel.UpdatedAt,
+			}
+			if err := s.enqueueSyncMutationTx(tx, SyncEntityRelation, rel.SyncID, SyncOpUpsert, payload); err != nil {
+				return err
+			}
 		}
-		payload := syncRelationPayload{
-			SyncID:         rel.SyncID,
-			SourceID:       rel.SourceID,
-			TargetID:       rel.TargetID,
-			Relation:       rel.Relation,
-			Reason:         rel.Reason,
-			Evidence:       rel.Evidence,
-			Confidence:     rel.Confidence,
-			JudgmentStatus: rel.JudgmentStatus,
-			MarkedByActor:  rel.MarkedByActor,
-			MarkedByKind:   rel.MarkedByKind,
-			MarkedByModel:  rel.MarkedByModel,
-			SessionID:      rel.SessionID,
-			Project:        srcProject,
-			CreatedAt:      rel.CreatedAt,
-			UpdatedAt:      rel.UpdatedAt,
-		}
-		return s.enqueueSyncMutationTx(tx, SyncEntityRelation, rel.SyncID, SyncOpUpsert, payload)
+		return nil
 	}); err != nil {
 		return "", err
 	}
@@ -1429,6 +1464,7 @@ func (s *Store) scanProject(opts ScanOptions, allProjects bool) (ScanResult, err
 		candidateSnippet ObservationSnippet
 	}
 	var semanticPairs []candidatePair
+	seenSemanticPairs := make(map[string]struct{})
 	hasUnprocessedWork := func(candidateIndex, candidateCount int) bool {
 		return candidateIndex+1 < candidateCount
 	}
@@ -1456,11 +1492,6 @@ scan:
 		result.CandidatesFound += len(candidates)
 
 		if opts.Semantic {
-			if len(semanticPairs) >= maxSemantic && len(candidates) > 0 {
-				result.Capped = true
-				break scan
-			}
-
 			// In semantic mode, accumulate pairs for the worker pool.
 			// We need the full content for prompt building — fetch from DB.
 			var srcTitle, srcType, srcContent string
@@ -1475,25 +1506,40 @@ scan:
 				Content: srcContent,
 			}
 
-			for candidateIndex, c := range candidates {
+			for _, c := range candidates {
+				firstID, secondID := srcSnippet.SyncID, c.SyncID
+				if secondID < firstID {
+					firstID, secondID = secondID, firstID
+				}
+				pairKey := firstID + "\x00" + secondID
+				if _, seen := seenSemanticPairs[pairKey]; seen {
+					continue
+				}
+				if len(semanticPairs) >= maxSemantic {
+					result.Capped = true
+					break scan
+				}
+				seenSemanticPairs[pairKey] = struct{}{}
+
 				var candTitle, candType, candContent string
 				_ = s.db.QueryRow(
 					`SELECT title, type, ifnull(content,'') FROM observations WHERE sync_id = ?`, c.SyncID,
 				).Scan(&candTitle, &candType, &candContent)
-				semanticPairs = append(semanticPairs, candidatePair{
-					sourceSnippet: srcSnippet,
-					candidateSnippet: ObservationSnippet{
-						ID:      c.ID,
-						SyncID:  c.SyncID,
-						Title:   candTitle,
-						Type:    candType,
-						Content: candContent,
-					},
-				})
-				if len(semanticPairs) == maxSemantic && hasUnprocessedWork(candidateIndex, len(candidates)) {
-					result.Capped = true
-					break scan
+				pairSource := srcSnippet
+				pairCandidate := ObservationSnippet{
+					ID:      c.ID,
+					SyncID:  c.SyncID,
+					Title:   candTitle,
+					Type:    candType,
+					Content: candContent,
 				}
+				if pairCandidate.SyncID < pairSource.SyncID {
+					pairSource, pairCandidate = pairCandidate, pairSource
+				}
+				semanticPairs = append(semanticPairs, candidatePair{
+					sourceSnippet:    pairSource,
+					candidateSnippet: pairCandidate,
+				})
 			}
 			continue
 		}
@@ -1607,7 +1653,11 @@ scan:
 						isValidRelationVerb(verdict.Relation) &&
 						isValidConfidence(verdict.Confidence) {
 						mu.Lock()
-						result.SemanticJudged++
+						if verdict.Relation == RelationNotConflict {
+							result.SemanticSkipped++
+						} else {
+							result.SemanticJudged++
+						}
 						mu.Unlock()
 						return
 					}
