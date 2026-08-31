@@ -101,6 +101,7 @@ type ChunkData struct {
 // SyncResult is returned after a sync operation.
 type SyncResult struct {
 	ChunkID              string `json:"chunk_id,omitempty"`
+	ChunksExported       int    `json:"chunks_exported,omitempty"`
 	SessionsExported     int    `json:"sessions_exported"`
 	ObservationsExported int    `json:"observations_exported"`
 	PromptsExported      int    `json:"prompts_exported"`
@@ -445,44 +446,38 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 	if !sy.cloudMode && strings.TrimSpace(project) != "" {
 		data = filterExportDataToProjectScope(data)
 	}
-	chunk := &ChunkData{}
-	mutationSeqs := []int64{}
 	if sy.cloudMode {
-		chunk, mutationSeqs, err = sy.filterByPendingMutations(data, project)
+		chunk, mutationSeqs, err := sy.filterByPendingMutations(data, project)
 		if err != nil {
 			return nil, fmt.Errorf("build mutation-backed export: %w", err)
 		}
-	} else {
-		relationMutations, err := storeExportRelations(sy.store, project)
-		if err != nil {
-			return nil, fmt.Errorf("export relations: %w", err)
-		}
+		return sy.exportCloudMutationChunks(manifest, knownChunks, locallySyncedChunks, chunkTargetKey, createdBy, project, chunk, mutationSeqs)
+	}
 
-		// Get the timestamp of the last chunk to filter "new" data
-		lastChunkTime := sy.lastChunkTime(manifest)
+	relationMutations, err := storeExportRelations(sy.store, project)
+	if err != nil {
+		return nil, fmt.Errorf("export relations: %w", err)
+	}
 
-		// Filter to only new data (created after last chunk)
-		chunk = sy.filterNewData(data, lastChunkTime)
+	// Get the timestamp of the last chunk to filter "new" data
+	lastChunkTime := sy.lastChunkTime(manifest)
 
-		// Relations are filtered by chunk presence, not timestamp; see the
-		// rationale on filterRelationMutationsForExport and issue #353.
-		exportedRelations, exportedObservations, err := sy.exportedChunkKeys(manifest)
-		if err != nil {
-			return nil, fmt.Errorf("scan exported relations: %w", err)
-		}
-		chunk.Mutations = filterRelationMutationsForExport(relationMutations, exportedRelations, lastChunkTime)
-		if err := filterRelationMutationsForEndpointAvailability(chunk, data, exportedObservations, strings.TrimSpace(project) != ""); err != nil {
-			return nil, fmt.Errorf("filter relation endpoints: %w", err)
-		}
+	// Filter to only new data (created after last chunk)
+	chunk := sy.filterNewData(data, lastChunkTime)
+
+	// Relations are filtered by chunk presence, not timestamp; see the
+	// rationale on filterRelationMutationsForExport and issue #353.
+	exportedRelations, exportedObservations, err := sy.exportedChunkKeys(manifest)
+	if err != nil {
+		return nil, fmt.Errorf("scan exported relations: %w", err)
+	}
+	chunk.Mutations = filterRelationMutationsForExport(relationMutations, exportedRelations, lastChunkTime)
+	if err := filterRelationMutationsForEndpointAvailability(chunk, data, exportedObservations, strings.TrimSpace(project) != ""); err != nil {
+		return nil, fmt.Errorf("filter relation endpoints: %w", err)
 	}
 
 	// Nothing new to export
 	if len(chunk.Sessions) == 0 && len(chunk.Observations) == 0 && len(chunk.Prompts) == 0 && len(chunk.Mutations) == 0 {
-		if sy.cloudMode && len(mutationSeqs) > 0 {
-			if err := storeAckMutationSeq(sy.store, store.DefaultSyncTargetKey, mutationSeqs); err != nil {
-				return nil, fmt.Errorf("ack synced mutations: %w", err)
-			}
-		}
 		return &SyncResult{IsEmpty: true}, nil
 	}
 
@@ -490,17 +485,6 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 	chunkJSON, err := jsonMarshalChunk(chunk)
 	if err != nil {
 		return nil, fmt.Errorf("marshal chunk: %w", err)
-	}
-	if sy.cloudMode {
-		projectName := strings.TrimSpace(project)
-		if projectName == "" {
-			projectName = sy.project
-		}
-		projectName, _ = store.NormalizeProject(projectName)
-		chunkJSON, err = chunkcodec.CanonicalizeForProject(chunkJSON, projectName)
-		if err != nil {
-			return nil, fmt.Errorf("canonicalize cloud chunk: %w", err)
-		}
 	}
 
 	// Generate chunk ID from content hash
@@ -511,11 +495,6 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 		if !locallySyncedChunks[chunkID] {
 			if err := storeRecordSynced(sy.store, chunkTargetKey, chunkID); err != nil {
 				return nil, fmt.Errorf("reconcile synced chunk %s: %w", chunkID, err)
-			}
-		}
-		if sy.cloudMode && len(mutationSeqs) > 0 {
-			if err := storeAckMutationSeq(sy.store, store.DefaultSyncTargetKey, mutationSeqs); err != nil {
-				return nil, fmt.Errorf("ack synced mutations: %w", err)
 			}
 		}
 		return &SyncResult{IsEmpty: true}, nil
@@ -547,11 +526,6 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 	if err := storeRecordSynced(sy.store, chunkTargetKey, chunkID); err != nil {
 		return nil, fmt.Errorf("record synced chunk: %w", err)
 	}
-	if sy.cloudMode && len(mutationSeqs) > 0 {
-		if err := storeAckMutationSeq(sy.store, store.DefaultSyncTargetKey, mutationSeqs); err != nil {
-			return nil, fmt.Errorf("ack synced mutations: %w", err)
-		}
-	}
 
 	return &SyncResult{
 		ChunkID:              chunkID,
@@ -560,6 +534,254 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 		PromptsExported:      len(chunk.Prompts),
 		MutationsExported:    len(chunk.Mutations),
 	}, nil
+}
+
+// cloudExportMaxChunkBytes bounds the serialized size of a single cloud export
+// chunk so initial replays stay within the cloud server's push-body limit
+// (issue #833). Declared as a var so tests can exercise small budgets.
+var cloudExportMaxChunkBytes = 4 << 20
+
+// cloudExportPart is one size-bounded slice of a mutation-backed export.
+// seqs stays 1:1 aligned with chunk.Mutations.
+type cloudExportPart struct {
+	chunk *ChunkData
+	seqs  []int64
+}
+
+// exportCloudMutationChunks uploads the mutation-backed export as a series of
+// size-bounded chunks, acknowledging each part's mutation seqs only after that
+// part is durably written. An interrupted export therefore resumes from the
+// first unacknowledged mutation instead of replaying the whole ledger (#833).
+func (sy *Syncer) exportCloudMutationChunks(manifest *Manifest, knownChunks map[string]bool, locallySyncedChunks map[string]bool, chunkTargetKey, createdBy, project string, chunk *ChunkData, mutationSeqs []int64) (*SyncResult, error) {
+	if len(chunk.Sessions) == 0 && len(chunk.Observations) == 0 && len(chunk.Prompts) == 0 && len(chunk.Mutations) == 0 {
+		if len(mutationSeqs) > 0 {
+			if err := storeAckMutationSeq(sy.store, store.DefaultSyncTargetKey, mutationSeqs); err != nil {
+				return nil, fmt.Errorf("ack synced mutations: %w", err)
+			}
+		}
+		return &SyncResult{IsEmpty: true}, nil
+	}
+
+	projectName := strings.TrimSpace(project)
+	if projectName == "" {
+		projectName = sy.project
+	}
+	projectName, _ = store.NormalizeProject(projectName)
+
+	result := &SyncResult{}
+	exportedSessions := map[string]struct{}{}
+	for _, part := range splitCloudExportChunk(chunk, mutationSeqs, cloudExportMaxChunkBytes) {
+		chunkJSON, err := jsonMarshalChunk(part.chunk)
+		if err != nil {
+			return nil, fmt.Errorf("marshal chunk: %w", err)
+		}
+		chunkJSON, err = chunkcodec.CanonicalizeForProject(chunkJSON, projectName)
+		if err != nil {
+			return nil, fmt.Errorf("canonicalize cloud chunk: %w", err)
+		}
+		chunkID := chunkcodec.ChunkID(chunkJSON)
+
+		if knownChunks[chunkID] {
+			if !locallySyncedChunks[chunkID] {
+				if err := storeRecordSynced(sy.store, chunkTargetKey, chunkID); err != nil {
+					return nil, fmt.Errorf("reconcile synced chunk %s: %w", chunkID, err)
+				}
+			}
+			if len(part.seqs) > 0 {
+				if err := storeAckMutationSeq(sy.store, store.DefaultSyncTargetKey, part.seqs); err != nil {
+					return nil, fmt.Errorf("ack synced mutations: %w", err)
+				}
+			}
+			continue
+		}
+
+		entry := ChunkEntry{
+			ID:        chunkID,
+			CreatedBy: createdBy,
+			CreatedAt: time.Now().UTC().Format(time.RFC3339),
+			Sessions:  len(part.chunk.Sessions),
+			Memories:  len(part.chunk.Observations),
+			Prompts:   len(part.chunk.Prompts),
+		}
+
+		if err := sy.transport.WriteChunk(chunkID, chunkJSON, entry); err != nil {
+			return nil, fmt.Errorf("write chunk: %w", err)
+		}
+		manifest.Chunks = append(manifest.Chunks, entry)
+		if err := sy.writeManifest(manifest); err != nil {
+			return nil, fmt.Errorf("write manifest: %w", err)
+		}
+		if err := storeRecordSynced(sy.store, chunkTargetKey, chunkID); err != nil {
+			return nil, fmt.Errorf("record synced chunk: %w", err)
+		}
+		if len(part.seqs) > 0 {
+			if err := storeAckMutationSeq(sy.store, store.DefaultSyncTargetKey, part.seqs); err != nil {
+				return nil, fmt.Errorf("ack synced mutations: %w", err)
+			}
+		}
+		knownChunks[chunkID] = true
+
+		result.ChunkID = chunkID
+		result.ChunksExported++
+		for _, session := range part.chunk.Sessions {
+			exportedSessions[session.ID] = struct{}{}
+		}
+		result.ObservationsExported += len(part.chunk.Observations)
+		result.PromptsExported += len(part.chunk.Prompts)
+		result.MutationsExported += len(part.chunk.Mutations)
+	}
+	result.SessionsExported = len(exportedSessions)
+
+	if result.ChunksExported == 0 {
+		return &SyncResult{IsEmpty: true}, nil
+	}
+	return result, nil
+}
+
+// splitCloudExportChunk partitions a mutation-backed export chunk into
+// deterministic, size-bounded, dependency-complete parts. Mutations keep their
+// seq order and 1:1 alignment with seqs, and each part carries the sessions its
+// observations and prompts reference so every part can be imported on its own.
+// A single mutation whose cost exceeds maxBytes still ships alone in its own
+// part rather than being dropped.
+func splitCloudExportChunk(chunk *ChunkData, seqs []int64, maxBytes int) []cloudExportPart {
+	if chunk == nil || len(chunk.Mutations) == 0 {
+		return nil
+	}
+	if maxBytes <= 0 || len(seqs) != len(chunk.Mutations) {
+		return []cloudExportPart{{chunk: chunk, seqs: seqs}}
+	}
+
+	sessionByID := make(map[string]store.Session, len(chunk.Sessions))
+	sessionSize := make(map[string]int, len(chunk.Sessions))
+	for _, session := range chunk.Sessions {
+		sessionByID[session.ID] = session
+		sessionSize[session.ID] = marshaledSizeForSplit(session)
+	}
+	observationBySyncID := make(map[string]store.Observation, len(chunk.Observations))
+	observationSize := make(map[string]int, len(chunk.Observations))
+	for _, observation := range chunk.Observations {
+		observationBySyncID[observation.SyncID] = observation
+		observationSize[observation.SyncID] = marshaledSizeForSplit(observation)
+	}
+	promptBySyncID := make(map[string]store.Prompt, len(chunk.Prompts))
+	promptSize := make(map[string]int, len(chunk.Prompts))
+	for _, prompt := range chunk.Prompts {
+		promptBySyncID[prompt.SyncID] = prompt
+		promptSize[prompt.SyncID] = marshaledSizeForSplit(prompt)
+	}
+
+	// Margin for the mutation's own JSON envelope (field names, quoting) on top
+	// of its payload bytes.
+	const perMutationOverhead = 128
+
+	type splitAddition struct {
+		cost     int
+		sessions []string
+		obsID    string
+		promptID string
+	}
+
+	var parts []cloudExportPart
+	var current *cloudExportPart
+	currentBytes := 0
+	currentSessions := map[string]struct{}{}
+	currentObservations := map[string]struct{}{}
+	currentPrompts := map[string]struct{}{}
+
+	reset := func() {
+		current = &cloudExportPart{chunk: &ChunkData{}}
+		currentBytes = 0
+		currentSessions = map[string]struct{}{}
+		currentObservations = map[string]struct{}{}
+		currentPrompts = map[string]struct{}{}
+	}
+	closeCurrent := func() {
+		if current != nil && len(current.chunk.Mutations) > 0 {
+			parts = append(parts, *current)
+		}
+		current = nil
+	}
+
+	// plan computes what appending the mutation to the current part would add,
+	// deduplicating entities already included in the part.
+	plan := func(mutation store.SyncMutation) splitAddition {
+		add := splitAddition{cost: len(mutation.Payload) + perMutationOverhead}
+		needSession := func(id string) {
+			if id == "" {
+				return
+			}
+			if _, ok := currentSessions[id]; ok {
+				return
+			}
+			for _, queued := range add.sessions {
+				if queued == id {
+					return
+				}
+			}
+			if size, ok := sessionSize[id]; ok {
+				add.cost += size
+				add.sessions = append(add.sessions, id)
+			}
+		}
+		switch mutation.Entity {
+		case store.SyncEntitySession:
+			needSession(mutation.EntityKey)
+		case store.SyncEntityObservation:
+			if observation, ok := observationBySyncID[mutation.EntityKey]; ok {
+				if _, dup := currentObservations[mutation.EntityKey]; !dup {
+					add.cost += observationSize[mutation.EntityKey]
+					add.obsID = mutation.EntityKey
+				}
+				needSession(observation.SessionID)
+			}
+		case store.SyncEntityPrompt:
+			if prompt, ok := promptBySyncID[mutation.EntityKey]; ok {
+				if _, dup := currentPrompts[mutation.EntityKey]; !dup {
+					add.cost += promptSize[mutation.EntityKey]
+					add.promptID = mutation.EntityKey
+				}
+				needSession(prompt.SessionID)
+			}
+		}
+		return add
+	}
+
+	reset()
+	for i, mutation := range chunk.Mutations {
+		add := plan(mutation)
+		if len(current.chunk.Mutations) > 0 && currentBytes+add.cost > maxBytes {
+			closeCurrent()
+			reset()
+			add = plan(mutation)
+		}
+		current.chunk.Mutations = append(current.chunk.Mutations, mutation)
+		current.seqs = append(current.seqs, seqs[i])
+		for _, id := range add.sessions {
+			current.chunk.Sessions = append(current.chunk.Sessions, sessionByID[id])
+			currentSessions[id] = struct{}{}
+		}
+		if add.obsID != "" {
+			current.chunk.Observations = append(current.chunk.Observations, observationBySyncID[add.obsID])
+			currentObservations[add.obsID] = struct{}{}
+		}
+		if add.promptID != "" {
+			current.chunk.Prompts = append(current.chunk.Prompts, promptBySyncID[add.promptID])
+			currentPrompts[add.promptID] = struct{}{}
+		}
+		currentBytes += add.cost
+	}
+	closeCurrent()
+
+	return parts
+}
+
+func marshaledSizeForSplit(v any) int {
+	encoded, err := json.Marshal(v)
+	if err != nil {
+		return 0
+	}
+	return len(encoded)
 }
 
 // ─── Import (chunks → DB) ────────────────────────────────────────────────────

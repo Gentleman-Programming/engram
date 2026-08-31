@@ -44,6 +44,50 @@ func applyRelationMutation(t *testing.T, s *Store, m SyncMutation) error {
 	})
 }
 
+func TestApplyPulledObservationStoresProjectAsText(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s-pulled-project-storage", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	project := "engram"
+	payload, err := json.Marshal(syncObservationPayload{
+		SyncID: "obs-pulled-project-storage", SessionID: "s-pulled-project-storage", Type: "bugfix", Title: "Pulled project as text", Content: "Sync apply boundary stores text", Project: &project, Scope: "project",
+	})
+	if err != nil {
+		t.Fatalf("marshal observation payload: %v", err)
+	}
+	if err := s.withTx(func(tx *sql.Tx) error {
+		return s.applyPulledMutationTx(tx, SyncMutation{Entity: SyncEntityObservation, EntityKey: "obs-pulled-project-storage", Op: SyncOpUpsert, Payload: string(payload), Source: SyncSourceRemote, Project: project})
+	}); err != nil {
+		t.Fatalf("apply pulled observation: %v", err)
+	}
+	updatedPayload, err := json.Marshal(syncObservationPayload{
+		SyncID: "obs-pulled-project-storage", SessionID: "s-pulled-project-storage", Type: "bugfix", Title: "Updated pulled project as text", Content: "Sync apply update stores text", Project: &project, Scope: "project",
+	})
+	if err != nil {
+		t.Fatalf("marshal updated observation payload: %v", err)
+	}
+	if err := s.withTx(func(tx *sql.Tx) error {
+		return s.applyPulledMutationTx(tx, SyncMutation{Entity: SyncEntityObservation, EntityKey: "obs-pulled-project-storage", Op: SyncOpUpsert, Payload: string(updatedPayload), Source: SyncSourceRemote, Project: project})
+	}); err != nil {
+		t.Fatalf("apply updated pulled observation: %v", err)
+	}
+
+	var title, content, storedProject, storageClass string
+	if err := s.db.QueryRow(`SELECT title, content, project, typeof(project) FROM observations WHERE sync_id = ?`, "obs-pulled-project-storage").Scan(&title, &content, &storedProject, &storageClass); err != nil {
+		t.Fatalf("read updated observation: %v", err)
+	}
+	if title != "Updated pulled project as text" || content != "Sync apply update stores text" {
+		t.Fatalf("updated observation = title %q, content %q", title, content)
+	}
+	if storedProject != project {
+		t.Fatalf("project = %q, want %q", storedProject, project)
+	}
+	if storageClass != "text" {
+		t.Fatalf("project storage class = %q, want text", storageClass)
+	}
+}
+
 // countRelationRows returns the count of rows in memory_relations with the
 // given sync_id.
 func countRelationRows(t *testing.T, s *Store, syncID string) int {
@@ -85,25 +129,24 @@ func setupSyncApplyStore(t *testing.T) (s *Store, syncObsA, syncObsB string) {
 
 // ─── Phase C.3 — Pull-side RED tests (REQ-002, REQ-009) ──────────────────────
 
-// C.3a — ApplyPulledRelation_InsertsWhenObsExist: both source and target
-// observations exist locally → relation is upserted into memory_relations.
-func TestApplyPulledRelation_InsertsWhenObsExist(t *testing.T) {
+// C.3a — historical relation payloads without newer metadata still apply when
+// their relation identity and endpoints are valid.
+func TestApplyPulledRelation_AcceptsLegacyPayloadWithoutProvenance(t *testing.T) {
 	s, syncA, syncB := setupSyncApplyStore(t)
 
 	relSyncID := newSyncID("rel")
-	m := buildRelationMutation(t, syncRelationPayload{
-		SyncID:         relSyncID,
-		SourceID:       syncA,
-		TargetID:       syncB,
-		Relation:       RelationConflictsWith,
-		JudgmentStatus: JudgmentStatusJudged,
-		Project:        "proj-apply",
-		CreatedAt:      "2026-04-26T10:00:00Z",
-		UpdatedAt:      "2026-04-26T10:00:00Z",
-	})
+	m := SyncMutation{
+		Seq:       1,
+		Entity:    SyncEntityRelation,
+		EntityKey: relSyncID,
+		Op:        SyncOpUpsert,
+		Payload: fmt.Sprintf(`{"sync_id":%q,"source_id":%q,"target_id":%q,"relation":"conflicts_with","judgment_status":"judged","created_at":"2026-04-26T10:00:00Z","updated_at":"2026-04-26T10:00:00Z"}`,
+			relSyncID, syncA, syncB),
+		Source: SyncSourceRemote,
+	}
 
-	if err := applyRelationMutation(t, s, m); err != nil {
-		t.Fatalf("applyPulledMutationTx: %v", err)
+	if err := s.ApplyPulledMutation(DefaultSyncTargetKey, m); err != nil {
+		t.Fatalf("ApplyPulledMutation: %v", err)
 	}
 
 	n := countRelationRows(t, s, relSyncID)
@@ -251,7 +294,10 @@ func TestApplyPulledChunk_MarksMalformedRelationDeadAndContinues(t *testing.T) {
 		t.Fatalf("expected valid relation to apply, got %d rows", got)
 	}
 	var status string
-	if err := s.db.QueryRow(`SELECT apply_status FROM sync_apply_deferred WHERE sync_id = ?`, deadID).Scan(&status); err != nil {
+	if err := s.db.QueryRow(
+		`SELECT apply_status FROM sync_apply_deferred WHERE sync_id = ?`,
+		deadRelationRowKey(DefaultSyncTargetKey, mutations[0]),
+	).Scan(&status); err != nil {
 		t.Fatalf("read dead relation status: %v", err)
 	}
 	if status != "dead" {
@@ -293,12 +339,21 @@ func TestApplyPulledChunk_MarksInvalidRelationContractsDead(t *testing.T) {
 			},
 		},
 		{
-			name: "missing required provenance fields",
+			name: "missing endpoint",
 			mutation: SyncMutation{
 				Entity:    SyncEntityRelation,
-				EntityKey: "rel-missing-provenance",
+				EntityKey: "rel-missing-endpoint",
 				Op:        SyncOpUpsert,
-				Payload:   fmt.Sprintf(`{"sync_id":"rel-missing-provenance","source_id":%q,"target_id":%q,"relation":"related","judgment_status":"judged","project":"proj-apply"}`, syncA, syncB),
+				Payload:   fmt.Sprintf(`{"sync_id":"rel-missing-endpoint","source_id":%q,"relation":"related","judgment_status":"judged"}`, syncA),
+			},
+		},
+		{
+			name: "entity key does not match payload identity",
+			mutation: SyncMutation{
+				Entity:    SyncEntityRelation,
+				EntityKey: "rel-mismatched-identity",
+				Op:        SyncOpUpsert,
+				Payload:   string(validPayload),
 			},
 		},
 	}
@@ -307,7 +362,7 @@ func TestApplyPulledChunk_MarksInvalidRelationContractsDead(t *testing.T) {
 			if err := s.ApplyPulledChunk(DefaultSyncTargetKey, "chunk-"+tt.mutation.EntityKey, []SyncMutation{tt.mutation}); err != nil {
 				t.Fatalf("ApplyPulledChunk: %v", err)
 			}
-			status, _ := getDeferredRow(t, s, tt.mutation.EntityKey)
+			status, _ := getDeferredRow(t, s, deadRelationRowKey(DefaultSyncTargetKey, tt.mutation))
 			if status != "dead" {
 				t.Fatalf("apply_status: want dead, got %q", status)
 			}
@@ -429,6 +484,14 @@ func insertDeferredRow(t *testing.T, s *Store, syncID, entity, payload string, r
 	`, syncID, entity, payload, retryCount, applyStatus); err != nil {
 		t.Fatalf("insertDeferredRow: %v", err)
 	}
+}
+
+// deadRelationRowKey returns the sync_apply_deferred key a discarded relation
+// mutation is recorded under. Dead rows are keyed on the mutation's own material
+// rather than on its entity_key, so tests resolve the key the same way the store
+// does instead of restating the derivation.
+func deadRelationRowKey(targetKey string, mutation SyncMutation) string {
+	return relationApplyFailureSyncID("dead", normalizeSyncTargetKey(targetKey), mutation)
 }
 
 // getDeferredRow fetches a single deferred row's status fields.
@@ -848,7 +911,8 @@ func TestApplyPulledRelation_MalformedPayload_StraightToDead(t *testing.T) {
 			var applyStatus string
 			var retryCount int
 			if err := s.db.QueryRow(
-				`SELECT apply_status, retry_count FROM sync_apply_deferred WHERE sync_id = ?`, relSyncID,
+				`SELECT apply_status, retry_count FROM sync_apply_deferred WHERE sync_id = ?`,
+				deadRelationRowKey(DefaultSyncTargetKey, m),
 			).Scan(&applyStatus, &retryCount); err != nil {
 				t.Fatalf("scan deferred row: %v", err)
 			}
