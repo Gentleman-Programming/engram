@@ -1325,6 +1325,9 @@ func postSaveConflictCandidateResponse(s *store.Store, cfg MCPConfig, savedID in
 			return extra
 		}
 		query = obs.Content
+		if obs.Type == "session_summary" {
+			query = sessionSummaryCandidateQuery(query)
+		}
 	}
 	candOpts := store.CandidateOptions{Project: project, Scope: scope, BM25Floor: cfg.BM25Floor, Query: query}
 	if cfg.Limit != nil {
@@ -1355,6 +1358,28 @@ func postSaveConflictCandidateResponse(s *store.Store, cfg MCPConfig, savedID in
 	extra["candidates"] = candList
 	*msg += fmt.Sprintf("\nCONFLICT REVIEW PENDING — %d candidate(s); use mem_judge to record verdicts.", len(candidates))
 	return extra
+}
+
+// sessionSummaryCandidateQuery removes the required protocol headings before
+// OR-based FTS matching so they cannot create candidates by themselves.
+func sessionSummaryCandidateQuery(content string) string {
+	mandatoryHeadings := map[string]struct{}{
+		"goal": {}, "instructions": {}, "discoveries": {}, "accomplished": {},
+		"next steps": {}, "relevant files": {},
+	}
+	lines := strings.Split(content, "\n")
+	retained := make([]string, 0, len(lines))
+	for _, line := range lines {
+		heading := strings.TrimSpace(line)
+		if strings.HasPrefix(heading, "#") {
+			heading = strings.TrimSpace(strings.TrimLeft(heading, "#"))
+			if _, mandatory := mandatoryHeadings[strings.ToLower(heading)]; mandatory {
+				continue
+			}
+		}
+		retained = append(retained, line)
+	}
+	return strings.Join(retained, "\n")
 }
 
 func handleSuggestTopicKey() server.ToolHandlerFunc {

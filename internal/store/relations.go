@@ -735,11 +735,12 @@ func validateCrossProjectGuard(tx *sql.Tx, sourceID, targetID string) error {
 // the memory_relations table with system provenance (marked_by_kind="system",
 // marked_by_actor="engram", marked_by_model=params.Model).
 //
-// Idempotency: if an Engram/system-owned row already exists for (source_id,
-// target_id) in either direction, the oldest such row is updated. Other actors'
-// rows are never changed. The returned sync_id is always the reused or inserted
-// Engram/system row's sync_id. The latest caller's source and target order is
-// retained only for rows this method owns.
+// Idempotency: if an Engram/system-owned row, or an automatically generated
+// unjudged pending row, already exists for (source_id, target_id) in either
+// direction, the oldest such row is updated. Other actors' rows are never
+// changed. The returned sync_id is always the reused or inserted Engram/system
+// row's sync_id. The latest caller's source and target order is retained only
+// for rows this method owns.
 //
 // Returns ErrCrossProjectRelation when source and target belong to different
 // projects. Returns a validation error when required fields are missing or
@@ -775,15 +776,19 @@ func (s *Store) JudgeBySemantic(p JudgeBySemanticParams) (string, error) {
 		actor := "engram"
 		kind := "system"
 
-		// JudgeBySemantic owns only Engram/system rows. A remote or human
-		// judgment for the same unordered pair must retain its verdict and
-		// provenance, so it cannot be reused as this method's canonical row.
+		// JudgeBySemantic owns Engram/system rows and the NULL-provenance pending
+		// rows created by candidate detection. A remote or human judgment for the
+		// same unordered pair must retain its verdict and provenance, so it cannot
+		// be reused as this method's canonical row.
 		rows, err := tx.Query(`
 			SELECT sync_id FROM memory_relations
 			WHERE ((source_id = ? AND target_id = ?)
 			    OR (source_id = ? AND target_id = ?))
-			  AND marked_by_actor = ?
-			  AND marked_by_kind = ?
+			  AND (
+				(marked_by_actor = ? AND marked_by_kind = ?)
+				OR (marked_by_actor IS NULL AND marked_by_kind IS NULL
+					AND relation = 'pending' AND judgment_status = 'pending')
+			  )
 			ORDER BY id
 		`, p.SourceID, p.TargetID, p.TargetID, p.SourceID, actor, kind)
 		if err != nil {
@@ -829,8 +834,8 @@ func (s *Store) JudgeBySemantic(p JudgeBySemanticParams) (string, error) {
 			existingSyncID = ownedSyncIDs[0]
 			modifiedSyncIDs = append(modifiedSyncIDs, existingSyncID)
 			if p.Relation == RelationNotConflict {
-				// A negative verdict resolves every Engram/system duplicate for the
-				// unordered pair so none remain in conflict-facing views.
+				// A negative verdict resolves every owned duplicate for the unordered
+				// pair so none remain in conflict-facing views.
 				modifiedSyncIDs = ownedSyncIDs
 			}
 			for _, syncID := range modifiedSyncIDs {

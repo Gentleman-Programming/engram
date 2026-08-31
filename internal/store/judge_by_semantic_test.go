@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"reflect"
 	"testing"
 )
 
@@ -264,6 +265,85 @@ func TestJudgeBySemantic_NotConflictResolvesDuplicatePairRows(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].SyncID != remoteID {
 		t.Errorf("ListRelations = %+v, want unchanged remote relation %q", items, remoteID)
+	}
+}
+
+func TestJudgeBySemantic_NotConflictResolvesProductionPendingCandidate(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, candidateSyncID := addTestObs(t, s, "Invoice ledger backfill migration plan", "decision", "testproject", "project")
+	savedID, sourceSyncID := addTestObs(t, s, "Invoice ledger backfill migration rollout", "decision", "testproject", "project")
+	if err := s.EnrollProject("testproject"); err != nil {
+		t.Fatalf("EnrollProject: %v", err)
+	}
+
+	candidates, err := s.FindCandidates(savedID, CandidateOptions{
+		Project: "testproject", Scope: "project", Limit: 1, BM25Floor: ptrFloat64(-10),
+	})
+	if err != nil {
+		t.Fatalf("FindCandidates: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].SyncID != candidateSyncID {
+		t.Fatalf("production candidates = %+v, want only %q", candidates, candidateSyncID)
+	}
+	pendingID := candidates[0].JudgmentID
+	pending, err := s.GetRelation(pendingID)
+	if err != nil {
+		t.Fatalf("GetRelation(%q): %v", pendingID, err)
+	}
+	if pending.MarkedByActor != nil || pending.MarkedByKind != nil || pending.JudgmentStatus != JudgmentStatusPending {
+		t.Fatalf("production pending relation = %+v, want NULL provenance and pending status", pending)
+	}
+
+	externalID := newSyncID("rel")
+	if _, err := s.db.Exec(`
+		INSERT INTO memory_relations
+			(sync_id, source_id, target_id, relation, judgment_status,
+			 marked_by_actor, marked_by_kind, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 'judged', 'remote:human', 'human', datetime('now'), datetime('now'))`,
+		externalID, candidateSyncID, sourceSyncID, RelationConflictsWith,
+	); err != nil {
+		t.Fatalf("seed external relation: %v", err)
+	}
+	externalBefore, err := s.GetRelation(externalID)
+	if err != nil {
+		t.Fatalf("GetRelation(%q): %v", externalID, err)
+	}
+
+	syncID, err := s.JudgeBySemantic(JudgeBySemanticParams{
+		SourceID: sourceSyncID, TargetID: candidateSyncID, Relation: RelationNotConflict,
+		Confidence: 0.99, Reasoning: "The migration and human report are unrelated.", Model: "test-model",
+	})
+	if err != nil {
+		t.Fatalf("JudgeBySemantic(not_conflict): %v", err)
+	}
+	if syncID != pendingID {
+		t.Fatalf("resolved sync_id = %q, want pending candidate %q", syncID, pendingID)
+	}
+
+	resolved, err := s.GetRelation(pendingID)
+	if err != nil {
+		t.Fatalf("GetRelation(%q): %v", pendingID, err)
+	}
+	if resolved.Relation != RelationNotConflict || resolved.JudgmentStatus != "judged" || resolved.MarkedByActor == nil || *resolved.MarkedByActor != "engram" || resolved.MarkedByKind == nil || *resolved.MarkedByKind != "system" {
+		t.Fatalf("resolved pending relation = %+v, want judged system not_conflict", resolved)
+	}
+	if got := countRelationSyncMutationsByKey(t, s, pendingID); got != 1 {
+		t.Fatalf("resolved pending relation sync mutations = %d, want 1", got)
+	}
+
+	externalAfter, err := s.GetRelation(externalID)
+	if err != nil {
+		t.Fatalf("GetRelation(%q): %v", externalID, err)
+	}
+	if !reflect.DeepEqual(externalAfter, externalBefore) {
+		t.Fatalf("external judged relation changed: before=%+v after=%+v", externalBefore, externalAfter)
+	}
+	items, err := s.ListRelations(ListRelationsOptions{Project: "testproject"})
+	if err != nil {
+		t.Fatalf("ListRelations: %v", err)
+	}
+	if len(items) != 1 || items[0].SyncID != externalID {
+		t.Fatalf("conflict-facing relations = %+v, want unchanged external relation %q", items, externalID)
 	}
 }
 

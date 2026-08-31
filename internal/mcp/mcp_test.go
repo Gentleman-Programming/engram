@@ -3193,7 +3193,23 @@ func TestHandleSessionSummarySurfacesConflictCandidates(t *testing.T) {
 	first, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"project":    "summary-candidates",
 		"session_id": "summary-candidates-1",
-		"content":    "Database indexing migration replaces B-tree pages with an LSM design.",
+		"content": `## Goal
+PostgreSQL partition pruning migration
+
+## Instructions
+Benchmark invoice ledger backfill
+
+## Discoveries
+Btree vacuum checkpoint behavior
+
+## Accomplished
+Created partition indexes
+
+## Next Steps
+Rehearse failover
+
+## Relevant Files
+internal/billing/ledger.go`,
 	}}})
 	if err != nil || first.IsError {
 		t.Fatalf("first session summary: err=%v isError=%v text=%s", err, first.IsError, callResultText(t, first))
@@ -3208,7 +3224,23 @@ func TestHandleSessionSummarySurfacesConflictCandidates(t *testing.T) {
 	second, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"project":    "summary-candidates",
 		"session_id": "summary-candidates-2",
-		"content":    "Database indexing migration changes the B-tree storage design to LSM tables.",
+		"content": `## Goal
+PostgreSQL partition strategy revision
+
+## Instructions
+Benchmark archive ledger ingestion
+
+## Discoveries
+Btree statistics refresh behavior
+
+## Accomplished
+Created partition constraints
+
+## Next Steps
+Rehearse rollback
+
+## Relevant Files
+internal/billing/archive.go`,
 	}}})
 	if err != nil || second.IsError {
 		t.Fatalf("second session summary: err=%v isError=%v text=%s", err, second.IsError, callResultText(t, second))
@@ -3245,7 +3277,23 @@ func TestHandleSessionSummarySurfacesConflictCandidates(t *testing.T) {
 	third, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"project":    "summary-candidates",
 		"session_id": "summary-candidates-3",
-		"content":    "Tessellated hexagons orbit a cobalt nebula.",
+		"content": `## Goal
+Mobile screenreader navigation release
+
+## Instructions
+Audit focus order contrast
+
+## Discoveries
+VoiceOver rotor semantics
+
+## Accomplished
+Updated accessible labels
+
+## Next Steps
+Validate TalkBack gestures
+
+## Relevant Files
+web/mobile/navigation.ts`,
 	}}})
 	if err != nil || third.IsError {
 		t.Fatalf("third session summary: err=%v isError=%v text=%s", err, third.IsError, callResultText(t, third))
