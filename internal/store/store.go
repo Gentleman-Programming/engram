@@ -1154,6 +1154,12 @@ func (s *Store) migrate() error {
 	if err := s.migrateFTSTopicKey(); err != nil {
 		return err
 	}
+	if err := s.withTx(func(tx *sql.Tx) error {
+		_, err := s.execHook(tx, `UPDATE observations SET project = CAST(project AS TEXT) WHERE typeof(project) = 'blob'`)
+		return err
+	}); err != nil {
+		return err
+	}
 
 	// Prompts FTS triggers (separate idempotent check)
 	var promptTrigger string
@@ -2654,7 +2660,7 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 		syncID := newSyncID("obs")
 		res, err := s.execHook(tx,
 			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, datetime('now'), datetime('now'))`,
+			 VALUES (?, ?, ?, ?, ?, ?, CAST(? AS TEXT), ?, ?, ?, 1, 1, datetime('now'), datetime('now'))`,
 			syncID, p.SessionID, p.Type, title, content,
 			nullableString(p.ToolName), nullableString(p.Project), scope, nullableString(topicKey), normHash,
 		)
@@ -3346,7 +3352,7 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 			 SET type = ?,
 			     title = ?,
 			     content = ?,
-			     project = ?,
+			     project = CAST(? AS TEXT),
 			     scope = ?,
 			     topic_key = ?,
 			     normalized_hash = ?,
@@ -4156,7 +4162,7 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 		syncID := normalizeExistingSyncID(obs.SyncID, "obs")
 		res, err := s.execHook(tx,
 			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, review_after, created_at, updated_at, deleted_at)
-			 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+			 SELECT ?, ?, ?, ?, ?, ?, CAST(? AS TEXT), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 			 WHERE NOT EXISTS (SELECT 1 FROM observations WHERE sync_id = ?)`,
 			syncID,
 			obs.SessionID,
@@ -7708,7 +7714,7 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 	if err == sql.ErrNoRows {
 		_, err = s.execHook(tx,
 			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+			 VALUES (?, ?, ?, ?, ?, ?, CAST(? AS TEXT), ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
 			payload.SyncID,
 			payload.SessionID,
 			payload.Type,
@@ -7749,7 +7755,7 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 
 	_, err = s.execHook(tx,
 		`UPDATE observations
-		 SET session_id = ?, type = ?, title = ?, content = ?, tool_name = ?, project = ?, scope = ?, topic_key = ?, normalized_hash = ?, revision_count = ?, duplicate_count = ?, last_seen_at = ?, created_at = ?, updated_at = ?, deleted_at = NULL
+		 SET session_id = ?, type = ?, title = ?, content = ?, tool_name = ?, project = CAST(? AS TEXT), scope = ?, topic_key = ?, normalized_hash = ?, revision_count = ?, duplicate_count = ?, last_seen_at = ?, created_at = ?, updated_at = ?, deleted_at = NULL
 		 WHERE id = ?`,
 		payload.SessionID,
 		payload.Type,

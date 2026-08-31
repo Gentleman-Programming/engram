@@ -1085,6 +1085,73 @@ func TestAddObservationDeduplicatesWithinWindow(t *testing.T) {
 	}
 }
 
+func TestObservationWritesStoreProjectAsText(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s-project-storage", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-project-storage", Type: "bugfix", Title: "Store project as text", Content: "Project storage must be text", Project: "engram", Scope: "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	var storageClass string
+	if err := s.db.QueryRow(`SELECT typeof(project) FROM observations WHERE id = ?`, id).Scan(&storageClass); err != nil {
+		t.Fatalf("read project storage class: %v", err)
+	}
+	if storageClass != "text" {
+		t.Fatalf("project storage class = %q, want text", storageClass)
+	}
+}
+
+func TestUpdateObservationPreservesProjectAsTextAndProjectVisibility(t *testing.T) {
+	s := newTestStore(t)
+	project := "engram"
+	if err := s.CreateSession("s-update-project-storage", project, "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-update-project-storage", Type: "bugfix", Title: "Store project as text", Content: "Project storage must remain text", Project: project, Scope: "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	updatedTitle := "Updated project storage as text"
+	updated, err := s.UpdateObservation(id, UpdateObservationParams{Title: &updatedTitle, Project: &project})
+	if err != nil {
+		t.Fatalf("update observation: %v", err)
+	}
+	if updated.Title != updatedTitle {
+		t.Fatalf("updated title = %q, want %q", updated.Title, updatedTitle)
+	}
+	if updated.Project == nil || *updated.Project != project {
+		t.Fatalf("updated project = %v, want %q", updated.Project, project)
+	}
+
+	var storedProject, storageClass string
+	if err := s.db.QueryRow(`SELECT project, typeof(project) FROM observations WHERE id = ?`, id).Scan(&storedProject, &storageClass); err != nil {
+		t.Fatalf("read updated project storage: %v", err)
+	}
+	if storedProject != project {
+		t.Fatalf("stored project = %q, want %q", storedProject, project)
+	}
+	if storageClass != "text" {
+		t.Fatalf("project storage class = %q, want text", storageClass)
+	}
+
+	observations, err := s.RecentObservations(project, "project", 10)
+	if err != nil {
+		t.Fatalf("list project observations: %v", err)
+	}
+	if len(observations) != 1 || observations[0].ID != id {
+		t.Fatalf("project observations = %+v, want observation %d", observations, id)
+	}
+}
+
 func TestAddObservationRejectsBlankTitleBeforePersistenceAndSync(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.CreateSession("s-admission", "engram", "/tmp/engram"); err != nil {
@@ -5079,6 +5146,26 @@ func TestImportSkipsObservationWithExistingSyncID(t *testing.T) {
 	}
 	if count != 3 {
 		t.Fatalf("stored observations = %d, want 3", count)
+	}
+}
+
+func TestImportStoresObservationProjectAsText(t *testing.T) {
+	s := newTestStore(t)
+	now := Now()
+	project := "engram"
+	_, err := s.Import(&ExportData{
+		Sessions:     []Session{{ID: "import-project-storage", Project: project, Directory: "/tmp/engram", StartedAt: now}},
+		Observations: []Observation{{SyncID: "obs-import-project-storage", SessionID: "import-project-storage", Type: "bugfix", Title: "Import project as text", Content: "Import boundary stores text", Project: &project, Scope: "project", CreatedAt: now, UpdatedAt: now}},
+	})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	var storageClass string
+	if err := s.db.QueryRow(`SELECT typeof(project) FROM observations WHERE sync_id = ?`, "obs-import-project-storage").Scan(&storageClass); err != nil {
+		t.Fatalf("read project storage class: %v", err)
+	}
+	if storageClass != "text" {
+		t.Fatalf("project storage class = %q, want text", storageClass)
 	}
 }
 

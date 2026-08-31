@@ -104,6 +104,44 @@ func migrationFixtureRows() []legacyObsRow {
 	}
 }
 
+func TestMigrateNormalizesBlobProjectsAndPreservesFTS(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s-blob-project", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	project := "engram"
+	content := "Blob project remains searchable"
+	if _, err := s.db.Exec(`INSERT INTO observations (sync_id, session_id, type, title, content, project, scope) VALUES (?, ?, ?, ?, ?, CAST(? AS BLOB), ?)`, "obs-blob-project", "s-blob-project", "bugfix", "Normalize blob project", content, project, "project"); err != nil {
+		t.Fatalf("insert blob observation: %v", err)
+	}
+
+	if err := s.migrate(); err != nil {
+		t.Fatalf("migrate blob project: %v", err)
+	}
+	if err := s.migrate(); err != nil {
+		t.Fatalf("repeat migration: %v", err)
+	}
+
+	var storageClass, repairedProject, repairedContent string
+	if err := s.db.QueryRow(`SELECT typeof(project), project, content FROM observations WHERE sync_id = ?`, "obs-blob-project").Scan(&storageClass, &repairedProject, &repairedContent); err != nil {
+		t.Fatalf("read repaired observation: %v", err)
+	}
+	if storageClass != "text" || repairedProject != project || repairedContent != content {
+		t.Fatalf("repaired row = (%q, %q, %q), want (text, %q, %q)", storageClass, repairedProject, repairedContent, project, content)
+	}
+	observations, err := s.RecentObservations(project, "project", 10)
+	if err != nil || len(observations) != 1 {
+		t.Fatalf("project filter after repair = %d observations, %v; want 1 and nil", len(observations), err)
+	}
+	var ftsCount int
+	if err := s.db.QueryRow(`SELECT count(*) FROM observations_fts WHERE observations_fts MATCH ?`, "searchable").Scan(&ftsCount); err != nil {
+		t.Fatalf("query repaired FTS row: %v", err)
+	}
+	if ftsCount != 1 {
+		t.Fatalf("FTS matches = %d, want 1", ftsCount)
+	}
+}
+
 // legacyRelationRow holds the columns needed to seed memory_relations in the
 // post-Phase-1 schema. Used by Phase 2 migration tests.
 type legacyRelationRow struct {
