@@ -10,11 +10,8 @@
 package tui
 
 import (
-	"context"
 	"errors"
-	"strings"
 
-	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
 	"github.com/Gentleman-Programming/engram/internal/cloudconfig"
 	"github.com/Gentleman-Programming/engram/internal/setup"
 	"github.com/Gentleman-Programming/engram/internal/store"
@@ -129,26 +126,12 @@ type cloudPingMsg struct {
 }
 
 type cloudStatusLoadedMsg struct {
-	generation        uint64
-	serverURL         string
-	tokenSource       string
-	target            string
-	lastSync          string
-	pendingCount      int64
-	lastError         string
-	authStatus        string
-	authWarning       string
-	authHint          string
-	syncReadiness     string
-	syncLifecycle     string
-	syncReasonCode    string
-	syncReasonMessage string
-	err               error
-}
-
-type cloudDaemonProbeMsg struct {
-	generation uint64
-	result     cloudconfig.Result
+	generation   uint64
+	serverURL    string
+	lastSync     string
+	pendingCount int64
+	lastError    string
+	err          error
 }
 
 type cloudEnrollmentItem struct {
@@ -237,24 +220,13 @@ type Model struct {
 	CloudRequestGeneration uint64
 
 	// Cloud status
-	CloudStatusServerURL         string
-	CloudStatusTokenSource       string
-	CloudStatusTarget            string
-	CloudStatusHealth            string
-	CloudStatusLastSync          string
-	CloudStatusPendingCount      int64
-	CloudStatusLastError         string
-	CloudStatusHealthError       string
-	CloudStatusLoading           bool
-	CloudStatusAuthStatus        string
-	CloudStatusAuthWarning       string
-	CloudStatusAuthHint          string
-	CloudStatusSyncReadiness     string
-	CloudStatusLocalDaemon       string
-	CloudStatusDaemonHint        string
-	CloudStatusSyncLifecycle     string
-	CloudStatusSyncReasonCode    string
-	CloudStatusSyncReasonMessage string
+	CloudStatusServerURL    string
+	CloudStatusHealth       string
+	CloudStatusLastSync     string
+	CloudStatusPendingCount int64
+	CloudStatusLastError    string
+	CloudStatusHealthError  string
+	CloudStatusLoading      bool
 
 	// Cloud enrollment
 	CloudEnrollmentItems   []cloudEnrollmentItem
@@ -394,64 +366,17 @@ func loadCloudStatusCmd(s *store.Store, generation uint64) tea.Cmd {
 		if err != nil {
 			return cloudStatusLoadedMsg{generation: generation, err: err}
 		}
-		state, err := s.GetSyncState(constants.TargetKeyCloud)
+		summary, err := s.CloudSyncSummary()
 		if err != nil {
 			return cloudStatusLoadedMsg{generation: generation, err: err}
-		}
-		pendingCount, err := s.CountPendingSyncMutations(constants.TargetKeyCloud)
-		if err != nil {
-			return cloudStatusLoadedMsg{generation: generation, err: err}
-		}
-		token, source := cloudconfig.EffectiveToken(dataDir)
-		authStatus, authWarning, authHint, readiness := cloudStatusAuth(token, cloudInsecureNoAuth())
-		if strings.TrimSpace(cfg.ServerURL) == "" {
-			authStatus, authWarning, authHint, readiness = "", "", "", ""
-		}
-		lastError := ""
-		reasonCode := ""
-		reasonMessage := ""
-		if state.LastError != nil {
-			lastError = *state.LastError
-		}
-		if state.ReasonCode != nil {
-			reasonCode = *state.ReasonCode
-		}
-		if state.ReasonMessage != nil {
-			reasonMessage = *state.ReasonMessage
-		}
-		lastSync := ""
-		if state.LastSuccessAt != nil {
-			lastSync = *state.LastSuccessAt
 		}
 		return cloudStatusLoadedMsg{
-			generation:        generation,
-			serverURL:         cfg.ServerURL,
-			tokenSource:       cloudconfig.SourceLabel(source),
-			target:            cloudStatusTarget(cfg.ServerURL),
-			lastSync:          lastSync,
-			pendingCount:      pendingCount,
-			lastError:         lastError,
-			authStatus:        authStatus,
-			authWarning:       authWarning,
-			authHint:          authHint,
-			syncReadiness:     readiness,
-			syncLifecycle:     state.Lifecycle,
-			syncReasonCode:    reasonCode,
-			syncReasonMessage: reasonMessage,
+			generation:   generation,
+			serverURL:    cfg.ServerURL,
+			lastSync:     summary.LastSuccessAt,
+			pendingCount: summary.PendingMutations,
+			lastError:    summary.LastError,
 		}
-	}
-}
-
-func cloudStatusTarget(serverURL string) string {
-	if strings.TrimSpace(serverURL) == "" {
-		return ""
-	}
-	return constants.TargetKeyCloud
-}
-
-func probeLocalDaemonCmd(generation uint64) tea.Cmd {
-	return func() tea.Msg {
-		return cloudDaemonProbeMsg{generation: generation, result: cloudconfig.LocalDaemonProbe(context.Background(), cloudconfig.ResolvePort())}
 	}
 }
 
@@ -460,7 +385,7 @@ func loadCloudEnrollmentCmd(s *store.Store) tea.Cmd {
 		if s == nil {
 			return cloudEnrollmentLoadedMsg{err: errors.New("store is unavailable")}
 		}
-		names, err := s.ListProjectNames()
+		names, err := s.ListProjectsForCloudEnrollment()
 		if err != nil {
 			return cloudEnrollmentLoadedMsg{err: err}
 		}
@@ -470,7 +395,10 @@ func loadCloudEnrollmentCmd(s *store.Store) tea.Cmd {
 		}
 		enrolled := make(map[string]struct{}, len(enrolledProjects))
 		for _, project := range enrolledProjects {
-			enrolled[project.Project] = struct{}{}
+			name, _ := store.NormalizeProject(project.Project)
+			if name != "" {
+				enrolled[name] = struct{}{}
+			}
 		}
 		items := make([]cloudEnrollmentItem, 0, len(names))
 		for _, name := range names {

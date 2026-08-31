@@ -234,44 +234,14 @@ func (m Model) viewCloudStatus() string {
 		b.WriteString(timestampStyle.Render("  Loading cloud status...\n"))
 	}
 	lines := [][2]string{
-		{"Cloud status", emptyCloudValue(cloudStatusConfiguredValue(m.CloudStatusTarget), "not configured")},
 		{"Server URL", emptyCloudValue(m.CloudStatusServerURL, "not configured")},
-		{"Health", emptyCloudValue(m.CloudStatusHealth, "not checked")},
-		{"Token source", emptyCloudValue(m.CloudStatusTokenSource, "none")},
-		{"Last sync", emptyCloudValue(m.CloudStatusLastSync, "never")},
+		{"Connection health", emptyCloudValue(m.CloudStatusHealth, "not checked")},
+		{"Last successful sync", emptyCloudValue(m.CloudStatusLastSync, "never")},
 		{"Pending mutations", fmt.Sprintf("%d", m.CloudStatusPendingCount)},
-		{"Sync lifecycle", emptyCloudValue(m.CloudStatusSyncLifecycle, "unknown")},
-		{"Local daemon", emptyCloudValue(m.CloudStatusLocalDaemon, "not checked")},
+		{"Last error", emptyCloudValue(cloudStatusLastError(m), "none")},
 	}
 	for _, line := range lines {
 		b.WriteString(statusLabelStyle.Render("  "+line[0]+": ") + detailValueStyle.Render(line[1]) + "\n")
-	}
-	if m.CloudStatusSyncLifecycle != "" || m.CloudStatusSyncReasonCode != "" || m.CloudStatusSyncReasonMessage != "" {
-		b.WriteString("\n")
-		b.WriteString(statusLabelStyle.Render("  Sync diagnostic: ") + detailValueStyle.Render(emptyCloudValue(m.CloudStatusSyncLifecycle, "unknown")) + "\n")
-		if m.CloudStatusSyncReasonCode != "" {
-			b.WriteString(statusLabelStyle.Render("    reason_code: ") + detailValueStyle.Render(m.CloudStatusSyncReasonCode) + "\n")
-		}
-		if m.CloudStatusSyncReasonMessage != "" {
-			b.WriteString(statusLabelStyle.Render("    reason_message: ") + detailValueStyle.Render(m.CloudStatusSyncReasonMessage) + "\n")
-		}
-	}
-	if m.CloudStatusAuthStatus != "" {
-		b.WriteString(statusLabelStyle.Render("  Auth status: ") + detailValueStyle.Render(m.CloudStatusAuthStatus) + "\n")
-	}
-	if m.CloudStatusSyncReadiness != "" {
-		b.WriteString(statusLabelStyle.Render("  Sync readiness: ") + detailValueStyle.Render(m.CloudStatusSyncReadiness) + "\n")
-	}
-	for _, message := range []string{m.CloudStatusAuthWarning, m.CloudStatusAuthHint, m.CloudStatusDaemonHint} {
-		if message != "" {
-			b.WriteString(timestampStyle.Render("  "+message) + "\n")
-		}
-	}
-	if m.CloudStatusLastError != "" {
-		b.WriteString(timestampStyle.Render("  Sync error: "+m.CloudStatusLastError) + "\n")
-	}
-	if m.CloudStatusHealthError != "" {
-		b.WriteString(timestampStyle.Render("  Health error: "+m.CloudStatusHealthError) + "\n")
 	}
 	b.WriteString(helpStyle.Render("\n  r refresh • esc/q back"))
 	return b.String()
@@ -314,11 +284,11 @@ func emptyCloudValue(value, fallback string) string {
 	return value
 }
 
-func cloudStatusConfiguredValue(target string) string {
-	if target == "" {
-		return ""
+func cloudStatusLastError(m Model) string {
+	if m.CloudStatusHealthError != "" {
+		return m.CloudStatusHealthError
 	}
-	return fmt.Sprintf("configured (target=%s)", target)
+	return m.CloudStatusLastError
 }
 
 // renderMenu renders a vertical list of selectable menu items with a cursor.

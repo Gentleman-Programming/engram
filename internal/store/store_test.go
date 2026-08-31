@@ -58,87 +58,34 @@ func TestStoreDataDir(t *testing.T) {
 	}
 }
 
-func TestCountPendingSyncMutationsMatchesEnrollmentFilter(t *testing.T) {
+func TestCloudSyncSummaryUsesProjectScopedCloudState(t *testing.T) {
 	s := newTestStore(t)
-	for _, project := range []string{"enrolled", "unenrolled"} {
-		if err := s.CreateSession("session-"+project, project, "/tmp"); err != nil {
-			t.Fatalf("create %q session: %v", project, err)
-		}
-	}
-	if err := s.EnrollProject("enrolled"); err != nil {
+	if err := s.EnrollProject("project-a"); err != nil {
 		t.Fatalf("enroll project: %v", err)
 	}
-	if _, err := s.db.Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project, disposition, acked_at)
-		VALUES (?, 'observation', 'acknowledged', 'upsert', '{}', 'local', 'enrolled', 'pending', datetime('now'))`, DefaultSyncTargetKey); err != nil {
-		t.Fatalf("insert acknowledged mutation: %v", err)
-	}
-	if _, err := s.db.Exec(`INSERT INTO sync_state (target_key, lifecycle) VALUES ('other-target', 'idle')`); err != nil {
-		t.Fatalf("create other target state: %v", err)
-	}
-	if _, err := s.db.Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project, disposition)
-		VALUES ('other-target', 'observation', 'other-target', 'upsert', '{}', 'local', 'enrolled', 'pending')`); err != nil {
-		t.Fatalf("insert other target mutation: %v", err)
-	}
-
-	count, err := s.CountPendingSyncMutations(DefaultSyncTargetKey)
-	if err != nil {
-		t.Fatalf("count pending mutations: %v", err)
-	}
-	if count != 1 {
-		t.Fatalf("pending mutation count = %d, want 1 for the enrolled project", count)
-	}
-	for _, targetKey := range []string{"", " \t ", " CLOUD "} {
-		count, err = s.CountPendingSyncMutations(targetKey)
-		if err != nil {
-			t.Fatalf("count pending mutations for %q: %v", targetKey, err)
-		}
-		if count != 1 {
-			t.Fatalf("pending mutation count for %q = %d, want 1", targetKey, count)
-		}
-	}
-	count, err = s.CountPendingSyncMutations(" OTHER-TARGET ")
-	if err != nil {
-		t.Fatalf("count pending mutations for other target: %v", err)
-	}
-	if count != 1 {
-		t.Fatalf("pending mutation count for other target = %d, want 1", count)
-	}
-	if _, err := s.db.Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project, disposition)
-		VALUES (?, 'observation', 'quarantined', 'upsert', '{}', 'local', 'enrolled', 'quarantined')`, DefaultSyncTargetKey); err != nil {
-		t.Fatalf("insert quarantined mutation: %v", err)
-	}
-	count, err = s.CountPendingSyncMutations(DefaultSyncTargetKey)
-	if err != nil {
-		t.Fatalf("count pending mutations with quarantined row: %v", err)
-	}
-	mutations, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 10)
-	if err != nil {
-		t.Fatalf("list pending mutations: %v", err)
-	}
-	if count != 1 || int(count) != len(mutations) {
-		t.Fatalf("pending count/list mismatch with quarantined row: count=%d list=%d", count, len(mutations))
+	if _, err := s.db.Exec(`
+		INSERT INTO sync_state (target_key, lifecycle, last_success_at, last_error, updated_at) VALUES
+			('cloud', 'degraded', '2099-01-01T00:00:00Z', 'legacy error', '2099-01-01T00:00:00Z'),
+			('cloud:project-a', 'healthy', '2026-08-30T10:00:00Z', NULL, '2026-08-30T10:00:00Z'),
+			('cloud:project-b', 'degraded', '2026-08-31T10:00:00Z', 'project-b error', '2026-08-31T11:00:00Z')
+		ON CONFLICT(target_key) DO UPDATE SET
+			lifecycle = excluded.lifecycle,
+			last_success_at = excluded.last_success_at,
+			last_error = excluded.last_error,
+			updated_at = excluded.updated_at;
+		INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project, disposition) VALUES
+			('cloud:project-a', 'observation', 'pending-a', 'upsert', '{}', 'local', 'project-a', 'pending'),
+			('cloud:project-b', 'observation', 'pending-b', 'upsert', '{}', 'local', 'project-b', 'pending');
+	`); err != nil {
+		t.Fatalf("seed project-scoped cloud state: %v", err)
 	}
 
-	if err := s.UnenrollProject("enrolled"); err != nil {
-		t.Fatalf("unenroll project: %v", err)
-	}
-	count, err = s.CountPendingSyncMutations(DefaultSyncTargetKey)
+	summary, err := s.CloudSyncSummary()
 	if err != nil {
-		t.Fatalf("count pending mutations after unenroll: %v", err)
+		t.Fatalf("cloud sync summary: %v", err)
 	}
-	if count != 0 {
-		t.Fatalf("pending mutation count after unenroll = %d, want 0", count)
-	}
-}
-
-func TestCountPendingSyncMutationsReturnsErrorAfterClose(t *testing.T) {
-	s := newTestStore(t)
-	if err := s.Close(); err != nil {
-		t.Fatalf("close store: %v", err)
-	}
-
-	if _, err := s.CountPendingSyncMutations(DefaultSyncTargetKey); err == nil {
-		t.Fatal("count pending mutations after close succeeded, want error")
+	if summary.LastSuccessAt != "2026-08-31T10:00:00Z" || summary.LastError != "project-b error" || summary.PendingMutations != 1 {
+		t.Fatalf("cloud summary = %+v", summary)
 	}
 }
 
@@ -8763,19 +8710,25 @@ func TestCreateSessionNormalizesProject(t *testing.T) {
 
 func TestListProjectNames(t *testing.T) {
 	s := newTestStore(t)
-	if _, err := s.db.Exec(`
-		INSERT INTO sessions (id, project, directory) VALUES
-			('obs-session', '', '/tmp'), ('session-only', 'beta', '/tmp'),
-			('prompt-session', '', '/tmp'), ('duplicate', 'epsilon', '/tmp'), ('deleted-session', '', '/tmp');
-		INSERT INTO observations (session_id, type, title, content, project, scope) VALUES
-			('obs-session', 'note', 'observation', 'content', 'alpha', 'project'),
-			('duplicate', 'note', 'duplicate', 'content', 'epsilon', 'project');
-		INSERT INTO observations (session_id, type, title, content, project, scope, deleted_at) VALUES
-			('deleted-session', 'note', 'deleted', 'content', 'zeta', 'project', datetime('now'));
-		INSERT INTO user_prompts (session_id, content, project) VALUES ('prompt-session', 'prompt', 'gamma');
-		INSERT INTO sync_enrolled_projects (project) VALUES ('delta'), ('epsilon');
-	`); err != nil {
-		t.Fatalf("seed project identities: %v", err)
+
+	if err := s.CreateSession("s1", "alpha", "/tmp"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if err := s.CreateSession("s2", "beta", "/tmp"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	for _, project := range []string{"alpha", "alpha", "beta", "gamma"} {
+		if _, err := s.AddObservation(AddObservationParams{
+			SessionID: "s1",
+			Type:      "decision",
+			Title:     "test " + project,
+			Content:   "content for " + project,
+			Project:   project,
+			Scope:     "project",
+		}); err != nil {
+			t.Fatalf("add observation: %v", err)
+		}
 	}
 
 	names, err := s.ListProjectNames()
@@ -8783,9 +8736,41 @@ func TestListProjectNames(t *testing.T) {
 		t.Fatalf("ListProjectNames: %v", err)
 	}
 
-	want := []string{"alpha", "beta", "delta", "epsilon", "gamma"}
-	if !reflect.DeepEqual(names, want) {
-		t.Fatalf("project names = %v, want %v", names, want)
+	want := map[string]bool{"alpha": true, "beta": true, "gamma": true}
+	for _, name := range names {
+		if !want[name] {
+			t.Errorf("unexpected project name %q in results", name)
+		}
+		delete(want, name)
+	}
+	if len(want) > 0 {
+		t.Errorf("missing project names: %v", want)
+	}
+}
+
+func TestListProjectsForCloudEnrollmentIncludesLocalIdentities(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.db.Exec(`
+		INSERT INTO sessions (id, project, directory) VALUES ('session-only', ' Session Project ', '/tmp');
+		INSERT INTO user_prompts (session_id, content, project) VALUES ('session-only', 'prompt', 'Prompt Project');
+		INSERT INTO sync_enrolled_projects (project) VALUES ('enrolled-project');
+	`); err != nil {
+		t.Fatalf("seed cloud enrollment identities: %v", err)
+	}
+	if err := s.CreateSession("observation-session", "observation-project", "/tmp"); err != nil {
+		t.Fatalf("create observation session: %v", err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{SessionID: "observation-session", Type: "note", Title: "title", Content: "content", Project: "observation-project", Scope: "project"}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	projects, err := s.ListProjectsForCloudEnrollment()
+	if err != nil {
+		t.Fatalf("list cloud enrollment projects: %v", err)
+	}
+	want := []string{"enrolled-project", "observation-project", "prompt project", "session project"}
+	if !reflect.DeepEqual(projects, want) {
+		t.Fatalf("cloud enrollment projects = %v, want %v", projects, want)
 	}
 }
 

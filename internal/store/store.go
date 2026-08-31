@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -299,6 +300,13 @@ type SyncState struct {
 	LastError           *string `json:"last_error,omitempty"`
 	LastSuccessAt       *string `json:"last_success_at,omitempty"`
 	UpdatedAt           string  `json:"updated_at"`
+}
+
+// CloudSyncSummary is the aggregate local cloud state shown when no project is selected.
+type CloudSyncSummary struct {
+	LastSuccessAt    string
+	PendingMutations int64
+	LastError        string
 }
 
 type SyncMutation struct {
@@ -4299,19 +4307,38 @@ func (s *Store) ListPendingSyncMutations(targetKey string, limit int) ([]SyncMut
 	return mutations, rows.Err()
 }
 
-// CountPendingSyncMutations returns the number of unacknowledged mutations
-// eligible to sync for targetKey. Mutations for unenrolled projects are not
-// included, matching ListPendingSyncMutations.
-func (s *Store) CountPendingSyncMutations(targetKey string) (int64, error) {
-	targetKey = normalizeSyncTargetKey(targetKey)
-	var count int64
+// CloudSyncSummary returns status across project-scoped cloud targets only.
+// It deliberately excludes the legacy global cloud target because explicit cloud
+// sync records state under cloud:<project>.
+func (s *Store) CloudSyncSummary() (CloudSyncSummary, error) {
+	const cloudProjectTarget = "cloud:%"
+	var summary CloudSyncSummary
+	var lastSuccess, lastError sql.NullString
 	err := s.db.QueryRow(`
+		SELECT MAX(last_success_at), (
+			SELECT last_error FROM sync_state
+			WHERE target_key LIKE ? AND last_error IS NOT NULL
+			ORDER BY updated_at DESC LIMIT 1
+		)
+		FROM sync_state WHERE target_key LIKE ?`, cloudProjectTarget, cloudProjectTarget).Scan(&lastSuccess, &lastError)
+	if err != nil {
+		return CloudSyncSummary{}, err
+	}
+	if lastSuccess.Valid {
+		summary.LastSuccessAt = lastSuccess.String
+	}
+	if lastError.Valid {
+		summary.LastError = lastError.String
+	}
+	err = s.db.QueryRow(`
 		SELECT COUNT(*)
 		FROM sync_mutations sm
-		LEFT JOIN sync_enrolled_projects sep ON sm.project = sep.project
-		WHERE sm.target_key = ? AND sm.acked_at IS NULL AND sm.disposition = 'pending'
-		  AND (sm.project = '' OR sep.project IS NOT NULL)`, targetKey).Scan(&count)
-	return count, err
+		JOIN sync_enrolled_projects sep ON sm.project = sep.project
+		WHERE sm.target_key LIKE ? AND sm.acked_at IS NULL AND sm.disposition = 'pending'`, cloudProjectTarget).Scan(&summary.PendingMutations)
+	if err != nil {
+		return CloudSyncSummary{}, err
+	}
+	return summary, nil
 }
 
 func (s *Store) ListPendingSyncMutationsAfterSeq(targetKey string, afterSeq int64, limit int) ([]SyncMutation, error) {
@@ -5715,20 +5742,13 @@ type ProjectNameCount struct {
 	Count int    `json:"count"`
 }
 
-// ListProjectNames returns all distinct nonblank local project identities,
-// ordered alphabetically. Used for fuzzy matching and cloud enrollment.
+// ListProjectNames returns all distinct project names from observations,
+// ordered alphabetically. Used for fuzzy matching and consolidation.
 func (s *Store) ListProjectNames() ([]string, error) {
 	rows, err := s.queryItHook(s.db,
-		`SELECT project FROM (
-			SELECT project FROM observations WHERE deleted_at IS NULL
-			UNION
-			SELECT project FROM sessions
-			UNION
-			SELECT project FROM user_prompts
-			UNION
-			SELECT project FROM sync_enrolled_projects
-		) WHERE project IS NOT NULL AND TRIM(project) != ''
-		ORDER BY project`,
+		`SELECT DISTINCT project FROM observations
+		 WHERE project IS NOT NULL AND project != '' AND deleted_at IS NULL
+		 ORDER BY project`,
 	)
 	if err != nil {
 		return nil, err
@@ -5744,6 +5764,46 @@ func (s *Store) ListProjectNames() ([]string, error) {
 		results = append(results, name)
 	}
 	return results, rows.Err()
+}
+
+// ListProjectsForCloudEnrollment returns every local identity that can be
+// enrolled, normalized and ordered deterministically for the cloud TUI.
+func (s *Store) ListProjectsForCloudEnrollment() ([]string, error) {
+	rows, err := s.queryItHook(s.db, `SELECT project FROM (
+		SELECT project FROM observations WHERE deleted_at IS NULL
+		UNION
+		SELECT project FROM sessions
+		UNION
+		SELECT project FROM user_prompts
+		UNION
+		SELECT project FROM sync_enrolled_projects
+	) WHERE project IS NOT NULL AND TRIM(project) != ''`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	projects := make(map[string]struct{})
+	for rows.Next() {
+		var project string
+		if err := rows.Scan(&project); err != nil {
+			return nil, err
+		}
+		project, _ = NormalizeProject(project)
+		if strings.TrimSpace(project) != "" {
+			projects[project] = struct{}{}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	results := make([]string, 0, len(projects))
+	for project := range projects {
+		results = append(results, project)
+	}
+	sort.Strings(results)
+	return results, nil
 }
 
 // ProjectStats holds aggregate statistics for a single project.

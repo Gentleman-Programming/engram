@@ -24,10 +24,7 @@ func ValidateServerURL(raw string) (string, error) {
 	if strings.TrimSpace(parsed.Host) == "" || strings.TrimSpace(parsed.Hostname()) == "" {
 		return "", fmt.Errorf("host is required")
 	}
-	if parsed.User != nil {
-		return "", fmt.Errorf("userinfo is not allowed")
-	}
-	if parsed.ForceQuery || strings.TrimSpace(parsed.RawQuery) != "" {
+	if strings.TrimSpace(parsed.RawQuery) != "" {
 		return "", fmt.Errorf("query is not allowed")
 	}
 	if strings.TrimSpace(parsed.Fragment) != "" {

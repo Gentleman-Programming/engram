@@ -594,20 +594,8 @@ func cmdCloudUpgradeRollback(cfg store.Config) {
 		exitFunc(1)
 		return
 	}
-	// Rollback no longer restores cloud.json: upgrade snapshots are deliberately
-	// redacted so local credentials cannot enter SQLite. Keep an existing config
-	// intact while ensuring it remains private across the rollback boundary.
-	cloudConfigPath := cloudconfig.Path(cfg.DataDir)
-	if err := os.Chmod(cloudConfigPath, 0o600); err != nil && !os.IsNotExist(err) {
-		fatal(err)
-		return
-	}
 	rolledBack, err := engramsync.RollbackProject(s, engramsync.UpgradeRollbackOptions{Project: project})
 	if err != nil {
-		fatal(err)
-		return
-	}
-	if err := os.Chmod(cloudConfigPath, 0o600); err != nil && !os.IsNotExist(err) {
 		fatal(err)
 		return
 	}

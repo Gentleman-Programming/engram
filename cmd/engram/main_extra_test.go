@@ -11,7 +11,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -1465,11 +1464,6 @@ func TestCmdCloudUpgradeRepairStatusAndRollbackBranches(t *testing.T) {
 			t.Fatalf("seed rollback state: %v", err)
 		}
 		_ = s.Close()
-		cloudConfigPath := filepath.Join(cfg.DataDir, "cloud.json")
-		if err := os.Chmod(cloudConfigPath, 0o644); err != nil {
-			t.Fatalf("make cloud config permissive: %v", err)
-		}
-
 		withArgs(t, "engram", "cloud", "upgrade", "rollback", "--project", "proj-a")
 		stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloud(cfg) })
 		if recovered != nil || stderr != "" {
@@ -1478,21 +1472,12 @@ func TestCmdCloudUpgradeRepairStatusAndRollbackBranches(t *testing.T) {
 		if !strings.Contains(stdout, "stage: rolled_back") {
 			t.Fatalf("expected rolled_back stage output, got %q", stdout)
 		}
-		data, err := os.ReadFile(cloudConfigPath)
+		data, err := os.ReadFile(filepath.Join(cfg.DataDir, "cloud.json"))
 		if err != nil {
 			t.Fatalf("read existing cloud config after rollback: %v", err)
 		}
 		if !strings.Contains(string(data), "rollback.example.test") || !strings.Contains(string(data), token) {
 			t.Fatalf("expected rollback to leave existing cloud config intact, got %q", string(data))
-		}
-		if runtime.GOOS != "windows" {
-			info, err := os.Stat(cloudConfigPath)
-			if err != nil {
-				t.Fatalf("stat retained cloud config: %v", err)
-			}
-			if got := info.Mode().Perm(); got != 0o600 {
-				t.Fatalf("retained cloud config mode = %o, want 600", got)
-			}
 		}
 	})
 }

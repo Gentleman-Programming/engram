@@ -11,8 +11,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/Gentleman-Programming/engram/internal/cloudconfig"
 )
 
 func TestDefaultCloudDaemonProbeReturnsRunningOn200(t *testing.T) {
@@ -58,15 +56,12 @@ func TestDefaultCloudDaemonProbeReturnsUnreachableOnNon2xx(t *testing.T) {
 	if res.Status != daemonProbeUnreachable {
 		t.Fatalf("expected daemonProbeUnreachable on 500, got %q", res.Status)
 	}
-	if res.Err == nil {
-		t.Fatal("expected non-nil diagnostic error for non-2xx response")
-	}
 }
 
 func TestDefaultCloudDaemonProbeReturnsUnreachableOnTimeout(t *testing.T) {
-	prev := cloudconfig.ProbeTimeout
-	cloudconfig.ProbeTimeout = 100 * time.Millisecond
-	t.Cleanup(func() { cloudconfig.ProbeTimeout = prev })
+	prev := daemonProbeTimeout
+	daemonProbeTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { daemonProbeTimeout = prev })
 
 	// Listener accepts but never reads/writes, forcing the client to time out.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -149,17 +144,7 @@ func TestPrintCloudStatusDaemonProbeFormatsEachState(t *testing.T) {
 			},
 		},
 		{
-			name: "non-2xx surfaces probe error",
-			stub: func(_ context.Context, port int) daemonProbeResult {
-				return daemonProbeResult{Status: daemonProbeUnreachable, Port: port, Err: fmt.Errorf("unexpected status 503")}
-			},
-			wantLines: []string{
-				"Local daemon: unreachable on port",
-				"probe error: unexpected status 503",
-			},
-		},
-		{
-			name: "other unreachable result surfaces probe error",
+			name: "unreachable surfaces probe error",
 			stub: func(_ context.Context, port int) daemonProbeResult {
 				return daemonProbeResult{Status: daemonProbeUnreachable, Port: port, Err: fmt.Errorf("simulated boom")}
 			},

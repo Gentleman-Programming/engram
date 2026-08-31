@@ -470,7 +470,7 @@ Response:
   - `last_error`
   - `consecutive_failures`
   - `backoff_until`
-  - `last_sync_at` — timestamp of the last completed successful sync; it is retained when the current sync lifecycle degrades.
+  - `last_sync_at`
   - `reason_code`
   - `reason_message`
   - `deferred_count` — number of pulled mutations awaiting retry (FK dependency not yet local)

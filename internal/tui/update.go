@@ -170,30 +170,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.CloudStatusServerURL = msg.serverURL
-		m.CloudStatusTokenSource = msg.tokenSource
-		m.CloudStatusTarget = msg.target
 		m.CloudStatusLastSync = msg.lastSync
 		m.CloudStatusPendingCount = msg.pendingCount
 		m.CloudStatusLastError = msg.lastError
 		m.CloudStatusHealthError = ""
-		m.CloudStatusAuthStatus = msg.authStatus
-		m.CloudStatusAuthWarning = msg.authWarning
-		m.CloudStatusAuthHint = msg.authHint
-		m.CloudStatusSyncReadiness = msg.syncReadiness
-		m.CloudStatusSyncLifecycle = msg.syncLifecycle
-		m.CloudStatusSyncReasonCode = msg.syncReasonCode
-		m.CloudStatusSyncReasonMessage = msg.syncReasonMessage
 		if msg.serverURL != "" && m.store != nil {
 			token, _ := cloudconfig.EffectiveToken(m.store.DataDir())
 			return m, pingCloudServer(cloudPingFromStatus, msg.generation, msg.serverURL, token)
 		}
-		return m, nil
-
-	case cloudDaemonProbeMsg:
-		if msg.generation != m.CloudRequestGeneration || m.Screen != ScreenCloudStatus {
-			return m, nil
-		}
-		m.CloudStatusLocalDaemon, m.CloudStatusDaemonHint = cloudDaemonStatus(msg.result)
 		return m, nil
 
 	case cloudEnrollmentLoadedMsg:
@@ -818,9 +802,7 @@ func (m Model) handleCloudSettingsKeys(key string) (tea.Model, tea.Cmd) {
 			m.CloudStatusLoading = true
 			m.CloudStatusLastError = ""
 			m.CloudStatusHealthError = ""
-			m.CloudStatusLocalDaemon = ""
-			m.CloudStatusDaemonHint = ""
-			return m, tea.Batch(loadCloudStatusCmd(m.store, m.CloudRequestGeneration), probeLocalDaemonCmd(m.CloudRequestGeneration))
+			return m, loadCloudStatusCmd(m.store, m.CloudRequestGeneration)
 		case 2:
 			m.Screen = ScreenCloudEnrollment
 			m.Cursor = 0
@@ -945,9 +927,7 @@ func (m Model) handleCloudStatusKeys(key string) (tea.Model, tea.Cmd) {
 		m.CloudRequestGeneration++
 		m.CloudStatusLoading = true
 		m.CloudStatusHealthError = ""
-		m.CloudStatusLocalDaemon = ""
-		m.CloudStatusDaemonHint = ""
-		return m, tea.Batch(loadCloudStatusCmd(m.store, m.CloudRequestGeneration), probeLocalDaemonCmd(m.CloudRequestGeneration))
+		return m, loadCloudStatusCmd(m.store, m.CloudRequestGeneration)
 	case "esc", "q":
 		m.Screen = ScreenCloudSettings
 		m.Cursor = 1
