@@ -1616,6 +1616,9 @@ func (sy *Syncer) exportedChunkKeys(m *Manifest) (map[string]struct{}, map[strin
 			}
 			if mutation.Entity == store.SyncEntityObservation {
 				historicalObservationKeys[mutation.EntityKey] = struct{}{}
+				if mutation.Op == store.SyncOpUpsert && store.ValidateSyncMutationPayload(mutation.Entity, mutation.Op, mutation.Payload, mutation.EntityKey).ReasonCode == "" {
+					observationKeys[mutation.EntityKey] = struct{}{}
+				}
 			}
 		}
 	}

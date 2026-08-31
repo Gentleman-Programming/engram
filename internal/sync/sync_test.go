@@ -508,7 +508,7 @@ func TestLocalChunkExportIncludesRelationsForObservationsInheritingSessionProjec
 	}
 }
 
-func TestLocalChunkExportIncludesRelationWithPriorChunkEndpoints(t *testing.T) {
+func TestLocalChunkExportIncludesRelationWithMutationOnlyPriorEndpoint(t *testing.T) {
 	s := newTestStore(t)
 	const (
 		project   = "proj-a"
@@ -555,17 +555,6 @@ func TestLocalChunkExportIncludesRelationWithPriorChunkEndpoints(t *testing.T) {
 	if _, err := s.DB().Exec(`UPDATE observations SET created_at = ?, updated_at = ? WHERE sync_id IN (?, ?)`, oldTime, oldTime, source.SyncID, target.SyncID); err != nil {
 		t.Fatalf("backdate endpoints: %v", err)
 	}
-	if _, err := s.AddObservation(store.AddObservationParams{
-		SessionID: sessionID,
-		Type:      "decision",
-		Title:     "new project observation",
-		Content:   "new project observation content",
-		Project:   project,
-		Scope:     "project",
-	}); err != nil {
-		t.Fatalf("add new project observation: %v", err)
-	}
-
 	const relationID = "rel-watermark-closure"
 	if _, err := s.SaveRelation(store.SaveRelationParams{SyncID: relationID, SourceID: source.SyncID, TargetID: target.SyncID}); err != nil {
 		t.Fatalf("save relation: %v", err)
@@ -580,12 +569,25 @@ func TestLocalChunkExportIncludesRelationWithPriorChunkEndpoints(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("judge relation: %v", err)
 	}
+	if _, err := s.DB().Exec(`UPDATE memory_relations SET created_at = ?, updated_at = ? WHERE sync_id = ?`, oldTime, oldTime, relationID); err != nil {
+		t.Fatalf("backdate relation: %v", err)
+	}
+	targetPayload, err := json.Marshal(target)
+	if err != nil {
+		t.Fatalf("marshal target endpoint: %v", err)
+	}
 
 	syncDir := filepath.Join(t.TempDir(), ".engram")
-	writeLocalChunkFile(t, syncDir, "previous-chunk", ChunkData{Observations: []store.Observation{
-		{SyncID: source.SyncID},
-		{SyncID: target.SyncID},
-	}})
+	writeLocalChunkFile(t, syncDir, "previous-chunk", ChunkData{
+		Sessions:     []store.Session{{ID: sessionID, Project: project, Directory: "/tmp/proj-a", StartedAt: oldTime}},
+		Observations: []store.Observation{*source},
+		Mutations: []store.SyncMutation{{
+			Entity:    store.SyncEntityObservation,
+			EntityKey: target.SyncID,
+			Op:        store.SyncOpUpsert,
+			Payload:   string(targetPayload),
+		}},
+	})
 	writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{
 		ID: "previous-chunk", CreatedAt: "2025-06-01T00:00:00Z",
 	}}})
@@ -593,6 +595,9 @@ func TestLocalChunkExportIncludesRelationWithPriorChunkEndpoints(t *testing.T) {
 	result, err := New(s, syncDir).Export("alice", project)
 	if err != nil {
 		t.Fatalf("export: %v", err)
+	}
+	if result.IsEmpty {
+		t.Fatal("expected pre-watermark relation with historical mutation endpoint to export")
 	}
 	chunkJSON, err := readGzip(filepath.Join(syncDir, "chunks", result.ChunkID+".jsonl.gz"))
 	if err != nil {
@@ -609,7 +614,7 @@ func TestLocalChunkExportIncludesRelationWithPriorChunkEndpoints(t *testing.T) {
 		}
 	}
 	if !foundRelation {
-		t.Fatalf("relation with prior-chunk endpoints was not exported: %+v", chunk.Mutations)
+		t.Fatalf("relation with prior mutation endpoint was not exported: %+v", chunk.Mutations)
 	}
 	for _, observation := range chunk.Observations {
 		if observation.SyncID == source.SyncID || observation.SyncID == target.SyncID {
