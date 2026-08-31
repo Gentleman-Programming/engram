@@ -37,6 +37,8 @@ func DefaultRegistry() Registry {
 	return NewRegistry(
 		SessionProjectDirectoryMismatchCheck{},
 		ManualSessionNameProjectMismatchCheck{},
+		InvalidSessionIdentityCheck{},
+		UnownedSessionProjectCheck{},
 		SyncMutationRequiredFieldsCheck{},
 		SQLiteLockContentionCheck{},
 	)

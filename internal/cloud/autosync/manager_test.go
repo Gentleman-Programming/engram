@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,6 +21,7 @@ type fakeLocalStore struct {
 	mutations         []store.SyncMutation
 	syncState         *store.SyncState
 	leaseOwner        string
+	leaseCalls        int
 	pushErr           error
 	pullErr           error
 	failureMessage    string
@@ -31,6 +33,10 @@ type fakeLocalStore struct {
 	ackErr            error
 	healthyCalls      int
 	nonEnrolledCounts []store.PendingSyncMutationProjectCount
+	deferredProjects  []string
+	listDeferredErr   error
+	listedTargets     []string
+	replayedScopes    []string
 }
 
 func newFakeLocalStore() *fakeLocalStore {
@@ -90,6 +96,7 @@ func (s *fakeLocalStore) AckSyncMutationSeqs(_ string, seqs []int64) error {
 func (s *fakeLocalStore) AcquireSyncLease(_, owner string, ttl time.Duration, now time.Time) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.leaseCalls++
 	if !s.acquireGranted {
 		return false, nil
 	}
@@ -136,13 +143,37 @@ func (s *fakeLocalStore) MarkSyncHealthy(_ string) error {
 	return nil
 }
 
+func (s *fakeLocalStore) ListDeferredProjectsForTarget(targetKey string) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.listedTargets = append(s.listedTargets, targetKey)
+	if s.listDeferredErr != nil {
+		return nil, s.listDeferredErr
+	}
+	return append([]string(nil), s.deferredProjects...), nil
+}
+
 // Phase E: deferred replay stubs — base fakeLocalStore always returns zero counts
 // and no error. Tests that need real replay behavior use fakeLocalStoreWithDeferred.
-func (s *fakeLocalStore) ReplayDeferred() (store.ReplayDeferredResult, error) {
+func (s *fakeLocalStore) ReplayDeferredForScope(_ string, project string) (store.ReplayDeferredResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.replayedScopes = append(s.replayedScopes, project)
 	return store.ReplayDeferredResult{}, nil
 }
 
-func (s *fakeLocalStore) CountDeferredAndDead() (int, int, error) { return 0, 0, nil }
+func (s *fakeLocalStore) CountDeferredAndDeadForScope(_, _ string) (int, int, error) {
+	return 0, 0, nil
+}
+
+type fakeLocalStoreWithRepairError struct {
+	*fakeLocalStore
+	repairErr error
+}
+
+func (s *fakeLocalStoreWithRepairError) EnsureEnrolledProjectSyncMutations(context.Context) error {
+	return s.repairErr
+}
 
 // ─── Fake Transport ───────────────────────────────────────────────────────────
 
@@ -589,6 +620,55 @@ func TestManagerPushPersistsProjectIsolationAcrossStoreRestart(t *testing.T) {
 	}
 }
 
+func TestManagerPushRepairsEnrolledJournalBeforeListingMutations(t *testing.T) {
+	cfg, err := store.DefaultConfig()
+	if err != nil {
+		t.Fatalf("store default config: %v", err)
+	}
+	cfg.DataDir = t.TempDir()
+	local, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer local.Close() //nolint:errcheck
+
+	if err := local.CreateSession("legacy-session", "legacy-project", "/tmp/legacy-project"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if err := local.EnrollProject("legacy-project"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+	if _, err := local.DB().Exec(`DELETE FROM sync_mutations WHERE project = ?`, "legacy-project"); err != nil {
+		t.Fatalf("remove journal entries to simulate legacy store: %v", err)
+	}
+
+	transport := newFakeTransport()
+	transport.pushResult = &PushMutationsResult{AcceptedSeqs: []int64{1}}
+	if err := New(local, transport, DefaultConfig()).push(context.Background()); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	if len(transport.pushed) != 1 || len(transport.pushed[0]) != 1 || transport.pushed[0][0].Entity != store.SyncEntitySession {
+		t.Fatalf("pushed mutations = %+v, want repaired session mutation", transport.pushed)
+	}
+}
+
+func TestManagerPushReturnsRepairErrorBeforeTransport(t *testing.T) {
+	local := &fakeLocalStoreWithRepairError{
+		fakeLocalStore: newFakeLocalStore(),
+		repairErr:      errors.New("repair failed"),
+	}
+	local.mutations = []store.SyncMutation{{Seq: 1, Project: "project"}}
+	transport := newFakeTransport()
+
+	err := New(local, transport, DefaultConfig()).push(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "repair enrolled sync journal") {
+		t.Fatalf("push error = %v, want repair enrolled sync journal", err)
+	}
+	if calls := atomic.LoadInt32(&transport.pushCalls); calls != 0 {
+		t.Fatalf("transport push calls = %d, want 0", calls)
+	}
+}
+
 // ─── Phase + lifecycle tests (REQ-204) ───────────────────────────────────────
 
 func TestManagerPhaseTransitions(t *testing.T) {
@@ -778,6 +858,164 @@ func TestManagerBackoffCeiling(t *testing.T) {
 	d := mgr.computeBackoff(cfg.MaxConsecutiveFailures)
 	if d > cfg.MaxBackoff {
 		t.Fatalf("backoff exceeds ceiling: %v > %v", d, cfg.MaxBackoff)
+	}
+}
+
+func TestManagerCycleAtFailureCeilingWithActiveBackoffSkipsWork(t *testing.T) {
+	ls := newFakeLocalStore()
+	tr := newFakeTransport()
+	cfg := DefaultConfig()
+	cfg.MaxConsecutiveFailures = 3
+	mgr := New(ls, tr, cfg)
+	backoffUntil := time.Now().Add(time.Minute)
+
+	mgr.mu.Lock()
+	mgr.status.Phase = PhasePushFailed
+	mgr.status.ConsecutiveFailures = cfg.MaxConsecutiveFailures
+	mgr.status.BackoffUntil = &backoffUntil
+	mgr.mu.Unlock()
+
+	mgr.cycle(context.Background())
+
+	ls.mu.Lock()
+	leaseCalls := ls.leaseCalls
+	ls.mu.Unlock()
+	if leaseCalls != 0 {
+		t.Fatalf("expected no lease work during active ceiling backoff, got %d attempts", leaseCalls)
+	}
+	if got := atomic.LoadInt32(&tr.pushCalls); got != 0 {
+		t.Fatalf("expected no push work during active ceiling backoff, got %d calls", got)
+	}
+	if got := atomic.LoadInt32(&tr.pullCalls); got != 0 {
+		t.Fatalf("expected no pull work during active ceiling backoff, got %d calls", got)
+	}
+	if got := mgr.Status().Phase; got != PhaseBackoff {
+		t.Fatalf("expected PhaseBackoff during active ceiling backoff, got %q", got)
+	}
+}
+
+func TestManagerCycleAtFailureCeilingAfterBackoffExpiryRecovers(t *testing.T) {
+	ls := newFakeLocalStore()
+	ls.mutations = []store.SyncMutation{{Seq: 1, Entity: "obs", EntityKey: "k1", Project: "proj-a"}}
+	tr := newFakeTransport()
+	tr.pushResult = &PushMutationsResult{AcceptedSeqs: []int64{1}}
+	cfg := DefaultConfig()
+	cfg.MaxConsecutiveFailures = 3
+	mgr := New(ls, tr, cfg)
+	backoffUntil := time.Now().Add(-time.Second)
+
+	mgr.mu.Lock()
+	mgr.status.Phase = PhasePushFailed
+	mgr.status.ConsecutiveFailures = cfg.MaxConsecutiveFailures
+	mgr.status.BackoffUntil = &backoffUntil
+	mgr.mu.Unlock()
+
+	mgr.cycle(context.Background())
+
+	ls.mu.Lock()
+	leaseCalls := ls.leaseCalls
+	healthyCalls := ls.healthyCalls
+	ls.mu.Unlock()
+	if leaseCalls != 1 {
+		t.Fatalf("expected one lease attempt after backoff expiry, got %d", leaseCalls)
+	}
+	if got := atomic.LoadInt32(&tr.pushCalls); got != 1 {
+		t.Fatalf("expected one push after backoff expiry, got %d calls", got)
+	}
+	if got := atomic.LoadInt32(&tr.pullCalls); got != 1 {
+		t.Fatalf("expected one pull after backoff expiry, got %d calls", got)
+	}
+	if healthyCalls != 1 {
+		t.Fatalf("expected healthy state to be persisted once, got %d calls", healthyCalls)
+	}
+	st := mgr.Status()
+	if st.Phase != PhaseHealthy || st.ConsecutiveFailures != 0 || st.BackoffUntil != nil {
+		t.Fatalf("expected healthy reset after backoff expiry, got %+v", st)
+	}
+}
+
+func TestManagerCycleAfterBackoffExpirySchedulesAnotherBackoff(t *testing.T) {
+	ls := newFakeLocalStore()
+	ls.mutations = []store.SyncMutation{{Seq: 1, Entity: "obs", EntityKey: "k1", Project: "proj-a"}}
+	tr := newFakeTransport()
+	tr.pushErr = errors.New("transport down")
+	cfg := DefaultConfig()
+	cfg.MaxConsecutiveFailures = 3
+	cfg.BaseBackoff = time.Second
+	cfg.MaxBackoff = 5 * time.Second
+	mgr := New(ls, tr, cfg)
+	backoffUntil := time.Now().Add(-time.Second)
+
+	mgr.mu.Lock()
+	mgr.status.Phase = PhasePushFailed
+	mgr.status.ConsecutiveFailures = cfg.MaxConsecutiveFailures
+	mgr.status.BackoffUntil = &backoffUntil
+	mgr.mu.Unlock()
+
+	mgr.cycle(context.Background())
+
+	if got := atomic.LoadInt32(&tr.pushCalls); got != 1 {
+		t.Fatalf("expected one push after backoff expiry, got %d calls", got)
+	}
+	st := mgr.Status()
+	if st.Phase != PhasePushFailed || st.ConsecutiveFailures != cfg.MaxConsecutiveFailures+1 || st.BackoffUntil == nil {
+		t.Fatalf("expected another failed backoff after expiry, got %+v", st)
+	}
+	remaining := time.Until(*st.BackoffUntil)
+	if remaining <= 0 || remaining > cfg.MaxBackoff {
+		t.Fatalf("expected bounded future backoff, got remaining duration %v", remaining)
+	}
+}
+
+func TestManagerBackoffSaturatesBeforeDurationConversion(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.BaseBackoff = time.Second
+	cfg.MaxBackoff = 5 * time.Minute
+	mgr := &Manager{cfg: cfg}
+
+	for _, failures := range []int{34, 35, 1000} {
+		t.Run(fmt.Sprintf("failures=%d", failures), func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("computeBackoff panicked: %v", r)
+				}
+			}()
+
+			d := mgr.computeBackoff(failures)
+			if d < cfg.BaseBackoff/2 || d > cfg.MaxBackoff {
+				t.Fatalf("backoff %v outside configured bounds [%v, %v]", d, cfg.BaseBackoff/2, cfg.MaxBackoff)
+			}
+		})
+	}
+}
+
+func TestManagerBackoffSaturatesPositiveJitterBeforeDurationOverflow(t *testing.T) {
+	const maxDuration = time.Duration(1<<63 - 1)
+
+	for _, tc := range []struct {
+		name   string
+		base   time.Duration
+		jitter time.Duration
+		want   time.Duration
+	}{
+		{
+			name:   "saturates overflowing positive jitter",
+			base:   maxDuration - 1,
+			jitter: 2,
+			want:   maxDuration,
+		},
+		{
+			name:   "adds positive jitter below ceiling",
+			base:   maxDuration - 2,
+			jitter: 1,
+			want:   maxDuration - 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := saturatingAddBackoffJitter(tc.base, tc.jitter, maxDuration); got != tc.want {
+				t.Fatalf("saturatingAddBackoffJitter(%v, %v, %v) = %v, want %v", tc.base, tc.jitter, maxDuration, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -1424,6 +1662,8 @@ func TestReplayDeferred_RetriesAndApplies(t *testing.T) {
 	ls.mu.Lock()
 	ls.deferredRows = []DeferredRow{{
 		SyncID:      "rel-1",
+		TargetKey:   "cloud",
+		Project:     "proj-a",
 		Entity:      "relation",
 		Payload:     `{"sync_id":"rel-1"}`,
 		RetryCount:  0,
@@ -1432,6 +1672,7 @@ func TestReplayDeferred_RetriesAndApplies(t *testing.T) {
 	ls.mu.Unlock()
 
 	// ReplayDeferred must be called by pull; simulate it resolving successfully.
+	tr.pullResult = &PullMutationsResponse{Mutations: []PulledMutation{{Seq: 1, Project: "proj-a", Entity: "observation", Op: "upsert"}}}
 	mgr := New(ls, tr, cfg)
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
@@ -1463,6 +1704,8 @@ func TestReplayDeferred_DeadAfterFiveRetries(t *testing.T) {
 	ls.mu.Lock()
 	ls.deferredRows = []DeferredRow{{
 		SyncID:      "rel-dead",
+		TargetKey:   "cloud",
+		Project:     "proj-a",
 		Entity:      "relation",
 		Payload:     `{"sync_id":"rel-dead"}`,
 		RetryCount:  4,
@@ -1471,6 +1714,7 @@ func TestReplayDeferred_DeadAfterFiveRetries(t *testing.T) {
 	// Always return FK-missing for this deferred row.
 	ls.replayErr = store.ErrRelationFKMissing
 	ls.mu.Unlock()
+	tr.pullResult = &PullMutationsResponse{Mutations: []PulledMutation{{Seq: 1, Project: "proj-a", Entity: "observation", Op: "upsert"}}}
 
 	mgr := New(ls, tr, cfg)
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
@@ -1510,12 +1754,15 @@ func TestReplayDeferred_DeadRowNotRetried(t *testing.T) {
 	ls.mu.Lock()
 	ls.deferredRows = []DeferredRow{{
 		SyncID:      "rel-already-dead",
+		TargetKey:   "cloud",
+		Project:     "proj-a",
 		Entity:      "relation",
 		Payload:     `{"sync_id":"rel-already-dead"}`,
 		RetryCount:  5,
 		ApplyStatus: "dead",
 	}}
 	ls.mu.Unlock()
+	tr.pullResult = &PullMutationsResponse{Mutations: []PulledMutation{{Seq: 1, Project: "proj-a", Entity: "observation", Op: "upsert"}}}
 
 	mgr := New(ls, tr, cfg)
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
@@ -1530,7 +1777,7 @@ func TestReplayDeferred_DeadRowNotRetried(t *testing.T) {
 		if called {
 			// Dead row must never have been applied.
 			ls.mu.Lock()
-			appliedCount := len(ls.appliedMuts)
+			appliedCount := ls.deferredApplied
 			ls.mu.Unlock()
 			if appliedCount != 0 {
 				t.Fatalf("dead row should never be applied; got %d applied mutations", appliedCount)
@@ -1599,6 +1846,8 @@ func TestPull_LegacyEntityNonFKError_StillHalts(t *testing.T) {
 // DeferredRow is a minimal representation of a sync_apply_deferred row used in tests.
 type DeferredRow struct {
 	SyncID      string
+	TargetKey   string
+	Project     string
 	Entity      string
 	Payload     string
 	RetryCount  int
@@ -1610,20 +1859,51 @@ type fakeLocalStoreWithDeferred struct {
 	fakeLocalStore
 	deferredRows         []DeferredRow
 	replayDeferredCalled bool
+	replayProjects       []string
+	deferredApplied      int
 	markDeadCalled       bool
 	replayErr            error
+	replayCallErr        error
 }
 
-func (s *fakeLocalStoreWithDeferred) ReplayDeferred() (store.ReplayDeferredResult, error) {
+func (s *fakeLocalStoreWithDeferred) ListDeferredProjectsForTarget(targetKey string) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.listedTargets = append(s.listedTargets, targetKey)
+	if s.listDeferredErr != nil {
+		return nil, s.listDeferredErr
+	}
+	projects := make(map[string]struct{})
+	for _, row := range s.deferredRows {
+		if row.TargetKey == targetKey && row.Project != "" && row.ApplyStatus == "deferred" {
+			projects[row.Project] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(projects))
+	for project := range projects {
+		result = append(result, project)
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+func (s *fakeLocalStoreWithDeferred) ReplayDeferredForScope(targetKey, project string) (store.ReplayDeferredResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.replayDeferredCalled = true
+	s.replayProjects = append(s.replayProjects, project)
+	if s.replayCallErr != nil {
+		return store.ReplayDeferredResult{}, s.replayCallErr
+	}
 
 	var res store.ReplayDeferredResult
 	for i := range s.deferredRows {
 		row := &s.deferredRows[i]
-		if row.ApplyStatus == "dead" {
-			continue // Dead rows must not be retried.
+		if row.TargetKey != targetKey || row.Project != project {
+			continue
+		}
+		if row.ApplyStatus != "deferred" {
+			continue
 		}
 		res.Retried++
 		if s.replayErr != nil {
@@ -1637,16 +1917,20 @@ func (s *fakeLocalStoreWithDeferred) ReplayDeferred() (store.ReplayDeferredResul
 			}
 		} else {
 			row.ApplyStatus = "applied"
+			s.deferredApplied++
 			res.Succeeded++
 		}
 	}
 	return res, nil
 }
 
-func (s *fakeLocalStoreWithDeferred) CountDeferredAndDead() (deferred, dead int, err error) {
+func (s *fakeLocalStoreWithDeferred) CountDeferredAndDeadForScope(_, project string) (deferred, dead int, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, row := range s.deferredRows {
+		if project != "" && row.Project != project {
+			continue
+		}
 		switch row.ApplyStatus {
 		case "deferred":
 			deferred++
@@ -1655,6 +1939,136 @@ func (s *fakeLocalStoreWithDeferred) CountDeferredAndDead() (deferred, dead int,
 		}
 	}
 	return deferred, dead, nil
+}
+
+func TestPullDoesNotReplayOtherTargetDeferredScopes(t *testing.T) {
+	ls := &fakeLocalStoreWithDeferred{fakeLocalStore: *newFakeLocalStore()}
+	ls.deferredRows = []DeferredRow{
+		{SyncID: "rel-project-a", TargetKey: "cloud:project-a", Project: "project-a", RetryCount: 4, ApplyStatus: "deferred"},
+		{SyncID: "rel-project-b", TargetKey: "cloud", Project: "project-b", RetryCount: 0, ApplyStatus: "deferred"},
+	}
+	tr := newFakeTransport()
+	tr.pullResult = &PullMutationsResponse{Mutations: []PulledMutation{{
+		Seq: 1, Project: "project-b", Entity: "observation", Op: "upsert",
+	}}}
+
+	if err := New(ls, tr, DefaultConfig()).pull(context.Background()); err != nil {
+		t.Fatalf("pull: %v", err)
+	}
+	func() {
+		ls.mu.Lock()
+		defer ls.mu.Unlock()
+		if got := ls.replayProjects; len(got) != 1 || got[0] != "project-b" {
+			t.Fatalf("replay projects = %v, want [project-b]", got)
+		}
+		if row := ls.deferredRows[0]; row.RetryCount != 4 || row.ApplyStatus != "deferred" {
+			t.Fatalf("project-a deferred row changed by project-b pull: %+v", row)
+		}
+		if row := ls.deferredRows[1]; row.ApplyStatus != "applied" {
+			t.Fatalf("project-b deferred row was not applied: %+v", row)
+		}
+		if ls.deferredApplied != 1 {
+			t.Fatalf("applied deferred rows = %d, want 1", ls.deferredApplied)
+		}
+	}()
+
+	if err := New(ls, tr, DefaultConfig()).pull(context.Background()); err != nil {
+		t.Fatalf("second pull: %v", err)
+	}
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+	if ls.deferredApplied != 1 {
+		t.Fatalf("second pull reapplied deferred rows: got %d, want 1", ls.deferredApplied)
+	}
+}
+
+func TestPullReplaysPersistedDeferredScopeWithoutMutations(t *testing.T) {
+	ls := &fakeLocalStoreWithDeferred{fakeLocalStore: *newFakeLocalStore()}
+	ls.deferredRows = []DeferredRow{
+		{SyncID: "rel-project-b", TargetKey: "cloud:project-b", Project: "project-b", ApplyStatus: "deferred"},
+		{SyncID: "rel-project-a", TargetKey: "cloud:project-a", Project: "project-a", RetryCount: 4, ApplyStatus: "deferred"},
+	}
+	tr := newFakeTransport()
+	tr.pullResult = &PullMutationsResponse{}
+	cfg := DefaultConfig()
+	cfg.TargetKey = "cloud:project-b"
+
+	if err := New(ls, tr, cfg).pull(context.Background()); err != nil {
+		t.Fatalf("pull: %v", err)
+	}
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+	if got := ls.replayProjects; len(got) != 1 || got[0] != "project-b" {
+		t.Fatalf("replay projects = %v, want [project-b]", got)
+	}
+	if row := ls.deferredRows[0]; row.ApplyStatus != "applied" {
+		t.Fatalf("pending project-b row was not applied: %+v", row)
+	}
+	if row := ls.deferredRows[1]; row.RetryCount != 4 || row.ApplyStatus != "deferred" {
+		t.Fatalf("other target/project row changed: %+v", row)
+	}
+}
+
+func TestPullMergesTouchedAndPendingDeferredScopes(t *testing.T) {
+	ls := &fakeLocalStoreWithDeferred{fakeLocalStore: *newFakeLocalStore()}
+	ls.deferredRows = []DeferredRow{
+		{SyncID: "rel-project-a", TargetKey: "cloud", Project: "project-a", ApplyStatus: "deferred"},
+		{SyncID: "rel-project-b", TargetKey: "cloud", Project: "project-b", ApplyStatus: "deferred"},
+	}
+	tr := newFakeTransport()
+	tr.pullResult = &PullMutationsResponse{Mutations: []PulledMutation{{
+		Seq: 1, Project: "project-b", Entity: "observation", Op: "upsert",
+	}}}
+
+	if err := New(ls, tr, DefaultConfig()).pull(context.Background()); err != nil {
+		t.Fatalf("pull: %v", err)
+	}
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+	if got, want := fmt.Sprint(ls.replayProjects), "[project-a project-b]"; got != want {
+		t.Fatalf("replay projects = %s, want %s", got, want)
+	}
+	if ls.deferredApplied != 2 {
+		t.Fatalf("applied deferred rows = %d, want 2", ls.deferredApplied)
+	}
+}
+
+func TestPullDeferredScopeEnumerationFailureDoesNotInventScopes(t *testing.T) {
+	ls := newFakeLocalStore()
+	ls.listDeferredErr = errors.New("list deferred projects")
+	tr := newFakeTransport()
+	tr.pullResult = &PullMutationsResponse{}
+
+	if err := New(ls, tr, DefaultConfig()).pull(context.Background()); err != nil {
+		t.Fatalf("pull: %v", err)
+	}
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+	if got := ls.replayedScopes; len(got) != 0 {
+		t.Fatalf("replayed scopes = %v, want none", got)
+	}
+}
+
+func TestPullDeferredScopeReplayErrorIsNonFatal(t *testing.T) {
+	ls := &fakeLocalStoreWithDeferred{fakeLocalStore: *newFakeLocalStore()}
+	ls.deferredRows = []DeferredRow{{
+		SyncID: "rel-project-b", TargetKey: "cloud", Project: "project-b", ApplyStatus: "deferred",
+	}}
+	ls.replayCallErr = errors.New("replay deferred")
+	tr := newFakeTransport()
+	tr.pullResult = &PullMutationsResponse{}
+
+	if err := New(ls, tr, DefaultConfig()).pull(context.Background()); err != nil {
+		t.Fatalf("pull: %v", err)
+	}
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+	if got := ls.replayProjects; len(got) != 1 || got[0] != "project-b" {
+		t.Fatalf("replay projects = %v, want [project-b]", got)
+	}
+	if row := ls.deferredRows[0]; row.ApplyStatus != "deferred" {
+		t.Fatalf("replay error changed deferred row: %+v", row)
+	}
 }
 
 // ─── Helper types ─────────────────────────────────────────────────────────────

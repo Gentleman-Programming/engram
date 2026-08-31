@@ -17,9 +17,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"math"
 	"math/rand"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -60,6 +60,7 @@ type PushMutationsResult struct {
 
 type PulledMutation struct {
 	Seq        int64           `json:"seq"`
+	Project    string          `json:"project"`
 	Entity     string          `json:"entity"`
 	EntityKey  string          `json:"entity_key"`
 	Op         string          `json:"op"`
@@ -88,9 +89,13 @@ type LocalStore interface {
 	MarkSyncFailure(targetKey, message string, backoffUntil time.Time) error
 	MarkSyncBlocked(targetKey, reasonCode, message string) error
 	MarkSyncHealthy(targetKey string) error
-	// Phase E: deferred relation retry.
-	ReplayDeferred() (store.ReplayDeferredResult, error)
-	CountDeferredAndDead() (deferred, dead int, err error)
+	ListDeferredProjectsForTarget(targetKey string) ([]string, error)
+	ReplayDeferredForScope(targetKey, project string) (store.ReplayDeferredResult, error)
+	CountDeferredAndDeadForScope(targetKey, project string) (deferred, dead int, err error)
+}
+
+type enrolledProjectRepairEnsurer interface {
+	EnsureEnrolledProjectSyncMutations(ctx context.Context) error
 }
 
 type nonEnrolledPendingError struct {
@@ -237,7 +242,7 @@ func (m *Manager) Status() Status {
 	m.mu.RUnlock()
 
 	// Phase E: populate deferred/dead counts from store (live query, best-effort).
-	if deferred, dead, err := m.store.CountDeferredAndDead(); err == nil {
+	if deferred, dead, err := m.store.CountDeferredAndDeadForScope(m.cfg.TargetKey, ""); err == nil {
 		st.DeferredCount = deferred
 		st.DeadCount = dead
 	}
@@ -388,8 +393,8 @@ func (m *Manager) cycle(ctx context.Context) {
 		return
 	}
 
-	// Check if we've exceeded the failure ceiling — enters PhaseBackoff.
-	if failures >= m.cfg.MaxConsecutiveFailures {
+	// At the failure ceiling, remain in backoff only until the current deadline expires.
+	if failures >= m.cfg.MaxConsecutiveFailures && backoffUntil != nil && time.Now().Before(*backoffUntil) {
 		m.setPhase(PhaseBackoff)
 		return
 	}
@@ -488,6 +493,11 @@ func (m *Manager) push(ctx context.Context) error {
 	}
 
 	m.setPhase(PhasePushing)
+	if repairer, ok := m.store.(enrolledProjectRepairEnsurer); ok {
+		if err := repairer.EnsureEnrolledProjectSyncMutations(ctx); err != nil {
+			return fmt.Errorf("repair enrolled sync journal: %w", err)
+		}
+	}
 
 	pending, err := m.store.ListPendingSyncMutations(m.cfg.TargetKey, m.cfg.PushBatchSize)
 	if err != nil {
@@ -566,17 +576,6 @@ func (m *Manager) pull(ctx context.Context) error {
 
 	m.setPhase(PhasePulling)
 
-	// Phase E: replay deferred relation rows before fetching new mutations.
-	// This gives previously-deferred rows a chance to apply now that their
-	// referenced observations may have arrived.
-	if res, err := m.store.ReplayDeferred(); err != nil {
-		log.Printf("[autosync] replayDeferred error: %v", err)
-		// Non-fatal: log and continue — deferred replay failures must not halt pulls.
-	} else if res.Retried > 0 {
-		log.Printf("[autosync] replayDeferred: retried=%d succeeded=%d failed=%d dead=%d",
-			res.Retried, res.Succeeded, res.Failed, res.Dead)
-	}
-
 	state, err := m.store.GetSyncState(m.cfg.TargetKey)
 	if err != nil {
 		return fmt.Errorf("get sync state: %w", err)
@@ -584,6 +583,8 @@ func (m *Manager) pull(ctx context.Context) error {
 
 	sinceSeq := state.LastPulledSeq
 
+	touchedProjects := make(map[string]struct{})
+	projectOrder := make([]string, 0)
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -598,6 +599,7 @@ func (m *Manager) pull(ctx context.Context) error {
 			localMut := store.SyncMutation{
 				Seq:        rm.Seq,
 				TargetKey:  m.cfg.TargetKey,
+				Project:    rm.Project,
 				Entity:     rm.Entity,
 				EntityKey:  rm.EntityKey,
 				Op:         rm.Op,
@@ -612,6 +614,13 @@ func (m *Manager) pull(ctx context.Context) error {
 			if err := m.store.ApplyPulledMutation(m.cfg.TargetKey, localMut); err != nil {
 				return fmt.Errorf("apply pulled mutation seq=%d: %w", rm.Seq, err)
 			}
+			project := strings.TrimSpace(rm.Project)
+			if project != "" {
+				if _, seen := touchedProjects[project]; !seen {
+					touchedProjects[project] = struct{}{}
+					projectOrder = append(projectOrder, project)
+				}
+			}
 			if rm.Seq > sinceSeq {
 				sinceSeq = rm.Seq
 			}
@@ -619,6 +628,33 @@ func (m *Manager) pull(ctx context.Context) error {
 
 		if !resp.HasMore {
 			break
+		}
+	}
+
+	pendingProjects, err := m.store.ListDeferredProjectsForTarget(m.cfg.TargetKey)
+	if err != nil {
+		log.Printf("[autosync] list deferred projects target=%q error: %v", m.cfg.TargetKey, err)
+	} else {
+		for _, project := range pendingProjects {
+			project = strings.TrimSpace(project)
+			if project == "" {
+				continue
+			}
+			if _, seen := touchedProjects[project]; seen {
+				continue
+			}
+			touchedProjects[project] = struct{}{}
+			projectOrder = append(projectOrder, project)
+		}
+	}
+	sort.Strings(projectOrder)
+
+	for _, project := range projectOrder {
+		if res, err := m.store.ReplayDeferredForScope(m.cfg.TargetKey, project); err != nil {
+			log.Printf("[autosync] replayDeferred project=%q error: %v", project, err)
+		} else if res.Retried > 0 {
+			log.Printf("[autosync] replayDeferred project=%q retried=%d succeeded=%d failed=%d dead=%d",
+				project, res.Retried, res.Succeeded, res.Failed, res.Dead)
 		}
 	}
 
@@ -699,23 +735,34 @@ func (m *Manager) computeBackoff(failures int) time.Duration {
 	if failures <= 0 {
 		return m.cfg.BaseBackoff
 	}
-	exp := math.Pow(2, float64(failures-1))
-	base := time.Duration(float64(m.cfg.BaseBackoff) * exp)
+	base := m.cfg.BaseBackoff
 	if base > m.cfg.MaxBackoff {
 		base = m.cfg.MaxBackoff
+	}
+	for i := 1; i < failures && base < m.cfg.MaxBackoff; i++ {
+		if base > m.cfg.MaxBackoff/2 {
+			base = m.cfg.MaxBackoff
+		} else {
+			base *= 2
+		}
 	}
 	// ±25% jitter: uniform in [-base/4, +base/4].
 	// rand.Int63n(int64(base/2)+1) gives [0, base/2]; subtracting base/4 shifts to [-base/4, +base/4].
 	jitter := time.Duration(rand.Int63n(int64(base/2)+1)) - time.Duration(base/4)
-	result := base + jitter
-	if result > m.cfg.MaxBackoff {
-		result = m.cfg.MaxBackoff
-	}
+	result := saturatingAddBackoffJitter(base, jitter, m.cfg.MaxBackoff)
 	// Floor at BaseBackoff/2 to avoid extremely short intervals on large negative jitter.
 	if result < m.cfg.BaseBackoff/2 {
 		result = m.cfg.BaseBackoff / 2
 	}
 	return result
+}
+
+func saturatingAddBackoffJitter(base, jitter, maxBackoff time.Duration) time.Duration {
+	const maxDuration = time.Duration(1<<63 - 1)
+	if jitter > 0 && (base > maxBackoff-jitter || base > maxDuration-jitter) {
+		return maxBackoff
+	}
+	return base + jitter
 }
 
 func (m *Manager) releaseLease() {

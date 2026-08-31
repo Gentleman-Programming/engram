@@ -299,12 +299,14 @@ Do not manually edit SQLite without a backup.
 
 ---
 
-## `engram cloud bootstrap admin` errors
+## `engram cloud bootstrap` errors
 
 | Message | Cause | Next step |
 |---|---|---|
 | `a managed admin already exists; refusing to create a duplicate first admin via CLI bootstrap` | A managed admin was already bootstrapped (via CLI or dashboard). | This is expected safety behavior, not a bug. Use the existing managed admin, or a documented recovery path, instead of re-running first-admin bootstrap. |
 | `--issue-token requires ENGRAM_CLOUD_TOKEN_PEPPER to be configured` | `--issue-token` was passed without `ENGRAM_CLOUD_TOKEN_PEPPER` set. | Set `ENGRAM_CLOUD_TOKEN_PEPPER` to a dedicated secret (distinct from `ENGRAM_JWT_SECRET`) and re-run. No admin/user was created by the failed attempt. |
+| `stranded admin token recovery is not eligible` | `recover-token` found anything other than exactly one enabled managed human admin and zero principal tokens. | Use `engram cloud bootstrap recover-token` only for the documented partial-bootstrap state; it intentionally refuses a normal, ambiguous, or already recovered deployment. |
+| `recover-token requires ENGRAM_CLOUD_TOKEN_PEPPER to be configured` | The recovery command cannot hash a managed token safely. | Set the dedicated pepper, then retry. No token was created. |
 | `connect cloud store` | `ENGRAM_DATABASE_URL` is missing/unreachable, same as any other `engram cloud` database command. | Verify `ENGRAM_DATABASE_URL` and that Postgres is reachable, same as `engram cloud serve`. |
 
 Rollback / legacy migration path: `engram cloud bootstrap admin` only adds new `cloud_principals`/`cloud_human_users`/`cloud_principal_tokens`/`cloud_project_grants` rows — it never disables `ENGRAM_CLOUD_TOKEN` or `ENGRAM_CLOUD_ADMIN`. If you want to stop using managed admins/tokens, simply keep using the legacy env credentials (or unset `ENGRAM_CLOUD_TOKEN_PEPPER` to disable managed-token authentication entirely); no migration or rollback command is required to fall back. See [DOCS.md — Managed users, tokens, and CLI bootstrap](../../DOCS.md#managed-users-tokens-and-cli-bootstrap) for how `engram cloud serve` resolves managed tokens first, then legacy env-token credentials.
