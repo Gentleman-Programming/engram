@@ -101,7 +101,7 @@ func TestSQLiteLockContentionBranches(t *testing.T) {
 
 func TestRegistryLookupAndOrdering(t *testing.T) {
 	codes := RegisteredCodes()
-	want := []string{CheckInvalidSessionIdentity, CheckManualSessionNameProjectMismatch, CheckSessionProjectDirectoryMismatch, CheckSQLiteLockContention, CheckSyncMutationRequiredFields}
+	want := []string{CheckInvalidSessionIdentity, CheckManualSessionNameProjectMismatch, CheckSessionProjectDirectoryMismatch, CheckSQLiteLockContention, CheckSyncMutationRequiredFields, CheckUnownedSessionProject}
 	if strings.Join(codes, ",") != strings.Join(want, ",") {
 		t.Fatalf("RegisteredCodes = %v, want %v", codes, want)
 	}
@@ -269,8 +269,9 @@ func TestRunnerRunAllHealthyEvaluatesEveryMVPCheck(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunAll: %v", err)
 	}
-	if report.Status != StatusOK || report.Summary.OK != 5 || len(report.Checks) != 5 {
-		t.Fatalf("report=%+v", report)
+	registered := len(RegisteredCodes())
+	if report.Status != StatusOK || report.Summary.OK != registered || len(report.Checks) != registered {
+		t.Fatalf("report=%+v, want %d ok checks", report, registered)
 	}
 	for _, check := range report.Checks {
 		if check.Result != StatusOK || len(check.Evidence) == 0 {
@@ -623,5 +624,136 @@ func TestSyncMutationRequiredFieldsReportsQuarantinedEvidenceWithoutCloudEnrollm
 	// enrollment guidance: there is nothing to enroll for.
 	if strings.Contains(check.Findings[0].SafeNextStep, "engram cloud enroll") {
 		t.Fatalf("local-only quarantine must not suggest cloud enrollment: %+v", check.Findings[0])
+	}
+}
+
+// newDiagnosticTestStoreWithLegacyNullableSessions builds the shape an upgraded
+// database has: sessions.project is still nullable, because no migration ever
+// rewrote the column, and it carries rows that identify no project.
+func newDiagnosticTestStoreWithLegacyNullableSessions(t *testing.T, sessions ...struct{ id, project string }) *store.Store {
+	t.Helper()
+	cfg, err := store.DefaultConfig()
+	if err != nil {
+		t.Fatalf("DefaultConfig: %v", err)
+	}
+	cfg.DataDir = t.TempDir()
+	raw, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
+	if err != nil {
+		t.Fatalf("open legacy database: %v", err)
+	}
+	if _, err := raw.Exec(`CREATE TABLE sessions (
+		id TEXT PRIMARY KEY,
+		project TEXT,
+		directory TEXT NOT NULL,
+		started_at TEXT NOT NULL DEFAULT (datetime('now')),
+		ended_at TEXT,
+		summary TEXT
+	)`); err != nil {
+		_ = raw.Close()
+		t.Fatalf("create legacy sessions: %v", err)
+	}
+	for _, session := range sessions {
+		var project any = session.project
+		if session.project == "<NULL>" {
+			project = nil
+		}
+		if _, err := raw.Exec(`INSERT INTO sessions (id, project, directory) VALUES (?, ?, ?)`, session.id, project, "/tmp"); err != nil {
+			_ = raw.Close()
+			t.Fatalf("seed legacy session %q: %v", session.id, err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close legacy database: %v", err)
+	}
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("open migrated legacy database: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}
+
+// Doctor must survive the database it exists to diagnose. A legacy NULL project
+// used to abort every check that reads sessions, so the whole report was lost.
+func TestDoctorRunsEveryCheckOnLegacyNullProjectDatabase(t *testing.T) {
+	type legacySession struct{ id, project string }
+	s := newDiagnosticTestStoreWithLegacyNullableSessions(t,
+		legacySession{"null-session", "<NULL>"},
+		legacySession{"owned-session", "engram"},
+	)
+
+	report, err := NewRunner().RunAll(context.Background(), Scope{Store: s})
+	if err != nil {
+		t.Fatalf("RunAll on legacy NULL project database = %v, want a report", err)
+	}
+	if report.Summary.Total != len(RegisteredCodes()) {
+		t.Fatalf("report evaluated %d checks, want all %d", report.Summary.Total, len(RegisteredCodes()))
+	}
+}
+
+// Surfacing legacy ownership state is what doctor is for, so an unowned session
+// must be reported as a finding that names it and carries the repair.
+func TestUnownedSessionProjectCheckReportsLegacyOwnershipGaps(t *testing.T) {
+	type legacySession struct{ id, project string }
+	s := newDiagnosticTestStoreWithLegacyNullableSessions(t,
+		legacySession{"null-session", "<NULL>"},
+		legacySession{"blank-session", "  "},
+		legacySession{"owned-session", "engram"},
+	)
+
+	report, err := NewRunner().RunOne(context.Background(), Scope{Store: s}, CheckUnownedSessionProject)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if report.Status != StatusWarning {
+		t.Fatalf("report status = %s, want %s", report.Status, StatusWarning)
+	}
+	check := report.Checks[0]
+	if len(check.Findings) != 2 {
+		t.Fatalf("findings = %+v, want one per unowned session", check.Findings)
+	}
+	seen := map[string]Finding{}
+	for _, finding := range check.Findings {
+		var evidence struct {
+			SessionID string `json:"session_id"`
+		}
+		if err := json.Unmarshal(finding.Evidence, &evidence); err != nil {
+			t.Fatalf("finding evidence invalid: %v", err)
+		}
+		seen[evidence.SessionID] = finding
+		if finding.ReasonCode != CheckUnownedSessionProject || finding.Severity != SeverityWarning {
+			t.Fatalf("finding = %+v, want a warning that names the check", finding)
+		}
+		if !strings.Contains(finding.SafeNextStep, store.RescueOwnershipCommand) {
+			t.Fatalf("finding must carry the repair, got %q", finding.SafeNextStep)
+		}
+		if !strings.Contains(finding.SafeNextStep, evidence.SessionID) {
+			t.Fatalf("repair must name the session, got %q", finding.SafeNextStep)
+		}
+	}
+	if _, ok := seen["null-session"]; !ok {
+		t.Fatalf("NULL ownership was not reported: %+v", check.Findings)
+	}
+	if _, ok := seen["blank-session"]; !ok {
+		t.Fatalf("blank ownership was not reported: %+v", check.Findings)
+	}
+	if _, ok := seen["owned-session"]; ok {
+		t.Fatalf("an owned session must not be reported: %+v", check.Findings)
+	}
+}
+
+// A healthy database reports nothing, so the check cannot become permanent noise.
+func TestUnownedSessionProjectCheckIsOKWhenEverySessionIsOwned(t *testing.T) {
+	s := newDiagnosticTestStore(t)
+	if err := s.CreateSession("owned-session", "engram", "/tmp"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	report, err := NewRunner().RunOne(context.Background(), Scope{Store: s}, CheckUnownedSessionProject)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if report.Status != StatusOK || len(report.Checks[0].Findings) != 0 {
+		t.Fatalf("report = %+v, want ok with no findings", report)
 	}
 }

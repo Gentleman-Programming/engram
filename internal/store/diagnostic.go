@@ -86,10 +86,17 @@ type SessionProjectReclassificationResult struct {
 
 // ListDiagnosticSessions returns session evidence scoped by project when
 // provided. The query is read-only and ordered for deterministic diagnostics.
+//
+// project is read through ifnull() for the same reason directory already is: a
+// database upgraded from the schema where sessions.project was nullable still
+// carries NULL ownership, and no migration rewrites the column. Scanning that
+// raw would abort every diagnostic on exactly the databases doctor exists to
+// report on. NULL and blank both mean "identifies no project" to every caller
+// here, so collapsing them to the empty string loses nothing.
 func (s *Store) ListDiagnosticSessions(project string) ([]DiagnosticSessionEvidence, error) {
 	project, _ = NormalizeProject(project)
 	project = strings.TrimSpace(project)
-	query := `SELECT id, project, ifnull(directory, ''), id FROM sessions`
+	query := `SELECT id, ifnull(project, ''), ifnull(directory, ''), id FROM sessions`
 	args := []any{}
 	if project != "" {
 		query += ` WHERE project = ?`
@@ -129,10 +136,14 @@ func (s *Store) ListPendingProjectMutations(project string) ([]SyncMutation, err
 // The source-row predicate uses the shared whitespace trim set rather than
 // SQLite's bare trim(), so a legacy identity made of tabs, newlines or carriage
 // returns cannot bypass the scan while still being rejected by the Go guards.
+//
+// project is read through ifnull() because a corrupt session row on an upgraded
+// database can also carry the legacy NULL ownership; reporting the corrupt
+// identity must not depend on whether that row's project survived the upgrade.
 func (s *Store) ListInvalidSessionIdentityEvidence(project string) ([]InvalidSessionIdentityEvidence, error) {
 	project, _ = NormalizeProject(project)
 	project = strings.TrimSpace(project)
-	query := `SELECT id, project FROM sessions WHERE ` + sqlSessionIDBlank("id")
+	query := `SELECT id, ifnull(project, '') FROM sessions WHERE ` + sqlSessionIDBlank("id")
 	args := []any{sqlWhitespaceTrimSet}
 	if project != "" {
 		query += ` AND project = ?`

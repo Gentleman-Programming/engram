@@ -44,6 +44,50 @@ func applyRelationMutation(t *testing.T, s *Store, m SyncMutation) error {
 	})
 }
 
+func TestApplyPulledObservationStoresProjectAsText(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s-pulled-project-storage", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	project := "engram"
+	payload, err := json.Marshal(syncObservationPayload{
+		SyncID: "obs-pulled-project-storage", SessionID: "s-pulled-project-storage", Type: "bugfix", Title: "Pulled project as text", Content: "Sync apply boundary stores text", Project: &project, Scope: "project",
+	})
+	if err != nil {
+		t.Fatalf("marshal observation payload: %v", err)
+	}
+	if err := s.withTx(func(tx *sql.Tx) error {
+		return s.applyPulledMutationTx(tx, SyncMutation{Entity: SyncEntityObservation, EntityKey: "obs-pulled-project-storage", Op: SyncOpUpsert, Payload: string(payload), Source: SyncSourceRemote, Project: project})
+	}); err != nil {
+		t.Fatalf("apply pulled observation: %v", err)
+	}
+	updatedPayload, err := json.Marshal(syncObservationPayload{
+		SyncID: "obs-pulled-project-storage", SessionID: "s-pulled-project-storage", Type: "bugfix", Title: "Updated pulled project as text", Content: "Sync apply update stores text", Project: &project, Scope: "project",
+	})
+	if err != nil {
+		t.Fatalf("marshal updated observation payload: %v", err)
+	}
+	if err := s.withTx(func(tx *sql.Tx) error {
+		return s.applyPulledMutationTx(tx, SyncMutation{Entity: SyncEntityObservation, EntityKey: "obs-pulled-project-storage", Op: SyncOpUpsert, Payload: string(updatedPayload), Source: SyncSourceRemote, Project: project})
+	}); err != nil {
+		t.Fatalf("apply updated pulled observation: %v", err)
+	}
+
+	var title, content, storedProject, storageClass string
+	if err := s.db.QueryRow(`SELECT title, content, project, typeof(project) FROM observations WHERE sync_id = ?`, "obs-pulled-project-storage").Scan(&title, &content, &storedProject, &storageClass); err != nil {
+		t.Fatalf("read updated observation: %v", err)
+	}
+	if title != "Updated pulled project as text" || content != "Sync apply update stores text" {
+		t.Fatalf("updated observation = title %q, content %q", title, content)
+	}
+	if storedProject != project {
+		t.Fatalf("project = %q, want %q", storedProject, project)
+	}
+	if storageClass != "text" {
+		t.Fatalf("project storage class = %q, want text", storageClass)
+	}
+}
+
 // countRelationRows returns the count of rows in memory_relations with the
 // given sync_id.
 func countRelationRows(t *testing.T, s *Store, syncID string) int {
@@ -250,7 +294,10 @@ func TestApplyPulledChunk_MarksMalformedRelationDeadAndContinues(t *testing.T) {
 		t.Fatalf("expected valid relation to apply, got %d rows", got)
 	}
 	var status string
-	if err := s.db.QueryRow(`SELECT apply_status FROM sync_apply_deferred WHERE sync_id = ?`, deadID).Scan(&status); err != nil {
+	if err := s.db.QueryRow(
+		`SELECT apply_status FROM sync_apply_deferred WHERE sync_id = ?`,
+		deadRelationRowKey(DefaultSyncTargetKey, mutations[0]),
+	).Scan(&status); err != nil {
 		t.Fatalf("read dead relation status: %v", err)
 	}
 	if status != "dead" {
@@ -315,7 +362,7 @@ func TestApplyPulledChunk_MarksInvalidRelationContractsDead(t *testing.T) {
 			if err := s.ApplyPulledChunk(DefaultSyncTargetKey, "chunk-"+tt.mutation.EntityKey, []SyncMutation{tt.mutation}); err != nil {
 				t.Fatalf("ApplyPulledChunk: %v", err)
 			}
-			status, _ := getDeferredRow(t, s, tt.mutation.EntityKey)
+			status, _ := getDeferredRow(t, s, deadRelationRowKey(DefaultSyncTargetKey, tt.mutation))
 			if status != "dead" {
 				t.Fatalf("apply_status: want dead, got %q", status)
 			}
@@ -437,6 +484,14 @@ func insertDeferredRow(t *testing.T, s *Store, syncID, entity, payload string, r
 	`, syncID, entity, payload, retryCount, applyStatus); err != nil {
 		t.Fatalf("insertDeferredRow: %v", err)
 	}
+}
+
+// deadRelationRowKey returns the sync_apply_deferred key a discarded relation
+// mutation is recorded under. Dead rows are keyed on the mutation's own material
+// rather than on its entity_key, so tests resolve the key the same way the store
+// does instead of restating the derivation.
+func deadRelationRowKey(targetKey string, mutation SyncMutation) string {
+	return relationApplyFailureSyncID("dead", normalizeSyncTargetKey(targetKey), mutation)
 }
 
 // getDeferredRow fetches a single deferred row's status fields.
@@ -856,7 +911,8 @@ func TestApplyPulledRelation_MalformedPayload_StraightToDead(t *testing.T) {
 			var applyStatus string
 			var retryCount int
 			if err := s.db.QueryRow(
-				`SELECT apply_status, retry_count FROM sync_apply_deferred WHERE sync_id = ?`, relSyncID,
+				`SELECT apply_status, retry_count FROM sync_apply_deferred WHERE sync_id = ?`,
+				deadRelationRowKey(DefaultSyncTargetKey, m),
 			).Scan(&applyStatus, &retryCount); err != nil {
 				t.Fatalf("scan deferred row: %v", err)
 			}

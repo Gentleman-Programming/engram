@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -983,6 +984,73 @@ func TestAddObservationDeduplicatesWithinWindow(t *testing.T) {
 	}
 	if obs.DuplicateCount != 2 {
 		t.Fatalf("expected duplicate_count=2, got %d", obs.DuplicateCount)
+	}
+}
+
+func TestObservationWritesStoreProjectAsText(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s-project-storage", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-project-storage", Type: "bugfix", Title: "Store project as text", Content: "Project storage must be text", Project: "engram", Scope: "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	var storageClass string
+	if err := s.db.QueryRow(`SELECT typeof(project) FROM observations WHERE id = ?`, id).Scan(&storageClass); err != nil {
+		t.Fatalf("read project storage class: %v", err)
+	}
+	if storageClass != "text" {
+		t.Fatalf("project storage class = %q, want text", storageClass)
+	}
+}
+
+func TestUpdateObservationPreservesProjectAsTextAndProjectVisibility(t *testing.T) {
+	s := newTestStore(t)
+	project := "engram"
+	if err := s.CreateSession("s-update-project-storage", project, "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-update-project-storage", Type: "bugfix", Title: "Store project as text", Content: "Project storage must remain text", Project: project, Scope: "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	updatedTitle := "Updated project storage as text"
+	updated, err := s.UpdateObservation(id, UpdateObservationParams{Title: &updatedTitle, Project: &project})
+	if err != nil {
+		t.Fatalf("update observation: %v", err)
+	}
+	if updated.Title != updatedTitle {
+		t.Fatalf("updated title = %q, want %q", updated.Title, updatedTitle)
+	}
+	if updated.Project == nil || *updated.Project != project {
+		t.Fatalf("updated project = %v, want %q", updated.Project, project)
+	}
+
+	var storedProject, storageClass string
+	if err := s.db.QueryRow(`SELECT project, typeof(project) FROM observations WHERE id = ?`, id).Scan(&storedProject, &storageClass); err != nil {
+		t.Fatalf("read updated project storage: %v", err)
+	}
+	if storedProject != project {
+		t.Fatalf("stored project = %q, want %q", storedProject, project)
+	}
+	if storageClass != "text" {
+		t.Fatalf("project storage class = %q, want text", storageClass)
+	}
+
+	observations, err := s.RecentObservations(project, "project", 10)
+	if err != nil {
+		t.Fatalf("list project observations: %v", err)
+	}
+	if len(observations) != 1 || observations[0].ID != id {
+		t.Fatalf("project observations = %+v, want observation %d", observations, id)
 	}
 }
 
@@ -2551,6 +2619,38 @@ func TestStatsProjectsOrderedByMostRecentObservation(t *testing.T) {
 
 	if stats.Projects[0] != "beta" || stats.Projects[1] != "alpha" {
 		t.Fatalf("expected recency order [beta alpha], got %v", stats.Projects[:2])
+	}
+}
+
+func TestStatsProjectScopesAllCounts(t *testing.T) {
+	s := newTestStore(t)
+	for _, project := range []string{"alpha", "beta"} {
+		if err := s.CreateSession("session-"+project, project, "/tmp/"+project); err != nil {
+			t.Fatalf("create %s session: %v", project, err)
+		}
+		if _, err := s.AddObservation(AddObservationParams{
+			SessionID: "session-" + project,
+			Type:      "note",
+			Title:     "title " + project,
+			Content:   "content " + project,
+			Project:   project,
+		}); err != nil {
+			t.Fatalf("add %s observation: %v", project, err)
+		}
+		if _, err := s.AddPrompt(AddPromptParams{SessionID: "session-" + project, Content: "prompt " + project, Project: project}); err != nil {
+			t.Fatalf("add %s prompt: %v", project, err)
+		}
+	}
+
+	stats, err := s.StatsProject("ALPHA")
+	if err != nil {
+		t.Fatalf("stats project: %v", err)
+	}
+	if stats.TotalSessions != 1 || stats.TotalObservations != 1 || stats.TotalPrompts != 1 || !reflect.DeepEqual(stats.Projects, []string{"alpha"}) {
+		t.Fatalf("scoped stats = %#v, want only alpha records", stats)
+	}
+	if _, err := s.StatsProject(" "); err == nil {
+		t.Fatal("blank project stats must fail")
 	}
 }
 
@@ -4910,6 +5010,26 @@ func TestImportSkipsObservationWithExistingSyncID(t *testing.T) {
 	}
 }
 
+func TestImportStoresObservationProjectAsText(t *testing.T) {
+	s := newTestStore(t)
+	now := Now()
+	project := "engram"
+	_, err := s.Import(&ExportData{
+		Sessions:     []Session{{ID: "import-project-storage", Project: project, Directory: "/tmp/engram", StartedAt: now}},
+		Observations: []Observation{{SyncID: "obs-import-project-storage", SessionID: "import-project-storage", Type: "bugfix", Title: "Import project as text", Content: "Import boundary stores text", Project: &project, Scope: "project", CreatedAt: now, UpdatedAt: now}},
+	})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	var storageClass string
+	if err := s.db.QueryRow(`SELECT typeof(project) FROM observations WHERE sync_id = ?`, "obs-import-project-storage").Scan(&storageClass); err != nil {
+		t.Fatalf("read project storage class: %v", err)
+	}
+	if storageClass != "text" {
+		t.Fatalf("project storage class = %q, want text", storageClass)
+	}
+}
+
 func TestExportImportEdgeBranches(t *testing.T) {
 	t.Run("export fails when observations query fails", func(t *testing.T) {
 		s := newTestStore(t)
@@ -5779,12 +5899,12 @@ func TestStoreUncoveredBranchesPushToHundred(t *testing.T) {
 			t.Fatalf("expected search rows err")
 		}
 
-		setScanErr("SELECT id, project, directory")
+		setScanErr("SELECT id, ifnull(project, ''), directory")
 		if _, err := s.Export(); err == nil {
 			t.Fatalf("expected export sessions scan error")
 		}
 
-		setRowsErr("SELECT id, project, directory")
+		setRowsErr("SELECT id, ifnull(project, ''), directory")
 		if _, err := s.Export(); err == nil {
 			t.Fatalf("expected export sessions rows err")
 		}
@@ -11129,6 +11249,77 @@ func TestMarkReviewedResetsReviewAfter(t *testing.T) {
 	_, manualReviewNull, _, _ := queryDecayFields(t, s, manualID)
 	if !manualReviewNull {
 		t.Fatal("manual review_after should be NULL after mark reviewed")
+	}
+}
+
+func TestMarkReviewedForProjectEnforcesCanonicalOwnership(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("review-scope-alpha", "alpha", "/tmp/alpha"); err != nil {
+		t.Fatalf("CreateSession alpha: %v", err)
+	}
+	id, err := s.AddObservation(AddObservationParams{SessionID: "review-scope-alpha", Type: "decision", Title: "scoped", Content: "scoped content", Project: "alpha"})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+	past := time.Now().UTC().Add(-24 * time.Hour).Format("2006-01-02 15:04:05")
+	if _, err := s.DB().Exec(`UPDATE observations SET review_after = ? WHERE id = ?`, past, id); err != nil {
+		t.Fatalf("backdate review_after: %v", err)
+	}
+
+	if err := s.MarkReviewedForProject(id, "beta"); !errors.Is(err, ErrObservationNotFound) {
+		t.Fatalf("MarkReviewedForProject mismatched project error = %v, want ErrObservationNotFound", err)
+	}
+	unchanged, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("GetObservation after mismatch: %v", err)
+	}
+	if unchanged.State() != ObservationStateNeedsReview {
+		t.Fatalf("mismatched mutation changed review state to %q", unchanged.State())
+	}
+
+	if err := s.MarkReviewedForProject(id, " ALPHA "); err != nil {
+		t.Fatalf("MarkReviewedForProject matching canonical project: %v", err)
+	}
+	updated, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("GetObservation after matching mutation: %v", err)
+	}
+	if updated.State() != ObservationStateActive {
+		t.Fatalf("matching mutation review state = %q, want active", updated.State())
+	}
+}
+
+func TestMarkReviewedForProjectMatchesLegacyMixedCaseProject(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("legacy-review-sess", "legacy-project", "/tmp/legacy-review"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	id, err := s.AddObservation(AddObservationParams{SessionID: "legacy-review-sess", Type: "decision", Title: "legacy", Content: "legacy content", Project: "legacy-project"})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+	past := time.Now().UTC().Add(-24 * time.Hour).Format("2006-01-02 15:04:05")
+	if _, err := s.DB().Exec(`UPDATE observations SET project = ?, review_after = ? WHERE id = ?`, "Legacy-Project", past, id); err != nil {
+		t.Fatalf("store legacy project: %v", err)
+	}
+
+	observations, err := s.ObservationsNeedingReview("legacy-project", 10)
+	if err != nil {
+		t.Fatalf("ObservationsNeedingReview: %v", err)
+	}
+	if len(observations) != 1 || observations[0].ID != id {
+		t.Fatalf("review list = %#v, want legacy observation %d", observations, id)
+	}
+
+	if err := s.MarkReviewedForProject(id, "legacy-project"); err != nil {
+		t.Fatalf("MarkReviewedForProject: %v", err)
+	}
+	updated, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("GetObservation: %v", err)
+	}
+	if updated.State() != ObservationStateActive {
+		t.Fatalf("reviewed legacy observation state = %q, want active", updated.State())
 	}
 }
 

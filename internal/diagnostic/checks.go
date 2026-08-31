@@ -16,6 +16,7 @@ const (
 	CheckManualSessionNameProjectMismatch = "manual_session_name_project_mismatch"
 	CheckSyncMutationRequiredFields       = "sync_mutation_required_fields"
 	CheckInvalidSessionIdentity           = "invalid_session_identity"
+	CheckUnownedSessionProject            = "unowned_session_project"
 	CheckSQLiteLockContention             = "sqlite_lock_contention"
 )
 
@@ -28,6 +29,7 @@ type SessionProjectDirectoryMismatchCheck struct{}
 type ManualSessionNameProjectMismatchCheck struct{}
 type SyncMutationRequiredFieldsCheck struct{}
 type InvalidSessionIdentityCheck struct{}
+type UnownedSessionProjectCheck struct{}
 type SQLiteLockContentionCheck struct{}
 
 func (SessionProjectDirectoryMismatchCheck) Code() string {
@@ -38,6 +40,7 @@ func (ManualSessionNameProjectMismatchCheck) Code() string {
 }
 func (SyncMutationRequiredFieldsCheck) Code() string { return CheckSyncMutationRequiredFields }
 func (InvalidSessionIdentityCheck) Code() string     { return CheckInvalidSessionIdentity }
+func (UnownedSessionProjectCheck) Code() string      { return CheckUnownedSessionProject }
 func (SQLiteLockContentionCheck) Code() string       { return CheckSQLiteLockContention }
 
 func (c SessionProjectDirectoryMismatchCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {
@@ -311,6 +314,44 @@ func (c InvalidSessionIdentityCheck) Run(ctx context.Context, scope Scope) (Chec
 		"quarantined_pulled_sessions": len(quarantined),
 	}
 	return resultFromFindings(c.Code(), details, findings), nil
+}
+
+// Run reports the sessions that identify no project. A database upgraded from
+// the schema where sessions.project was nullable keeps those rows intact, and
+// they are the population the ownership errors send to doctor, so leaving them
+// unreported would answer that referral with an empty report.
+//
+// The listing is deliberately unscoped even when scope.Project is set: an
+// unowned session belongs to no project, so a project-scoped query can never
+// return it, and a user who runs `engram doctor --project <name>` after an
+// ownership failure must still be shown the rows that caused it.
+func (c UnownedSessionProjectCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {
+	_ = ctx
+	sessions, err := scope.Store.ListDiagnosticSessions("")
+	if err != nil {
+		return CheckResult{}, err
+	}
+	findings := make([]Finding, 0)
+	for _, session := range sessions {
+		if normalizeProjectName(session.Project) != "" {
+			continue
+		}
+		findings = append(findings, Finding{
+			CheckID:    c.Code(),
+			Severity:   SeverityWarning,
+			ReasonCode: CheckUnownedSessionProject,
+			Message:    fmt.Sprintf("Session %q identifies no project.", session.ID),
+			Why:        "A session left over from the schema where sessions.project was nullable owns no project, so its memories stay outside every project-scoped retrieval and writes to it must resolve ownership before they can land.",
+			Evidence: mustJSON(map[string]any{
+				"session_id":      session.ID,
+				"session_project": session.Project,
+				"directory":       session.Directory,
+			}),
+			SafeNextStep:         fmt.Sprintf("Assign ownership with `%s --project <name> --session %s` after confirming which project the session belongs to.", store.RescueOwnershipCommand, session.ID),
+			RequiresConfirmation: true,
+		})
+	}
+	return resultFromFindings(c.Code(), map[string]any{"sessions_evaluated": len(sessions)}, findings), nil
 }
 
 func (c SQLiteLockContentionCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {

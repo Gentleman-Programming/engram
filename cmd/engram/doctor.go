@@ -50,13 +50,22 @@ func cmdDoctor(cfg store.Config) {
 		}
 	}
 
-	project, _ = store.NormalizeProject(project)
 	s, err := storeNew(cfg)
 	if err != nil {
 		fatal(err)
 		return
 	}
 	defer s.Close()
+	if strings.TrimSpace(project) != "" {
+		// Doctor can inspect a pending-sync project before it has an observation
+		// bucket, so its explicit diagnostic filter is structurally validated but
+		// does not require ProjectExists.
+		project, err = resolveCLIProject(s, project, false)
+		if err != nil {
+			fatal(err)
+			return
+		}
+	}
 
 	report, err := runDiagnostics(context.Background(), s, strings.TrimSpace(project), strings.TrimSpace(check))
 	if err != nil {

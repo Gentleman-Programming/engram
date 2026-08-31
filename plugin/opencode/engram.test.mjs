@@ -29,8 +29,8 @@ function sdkLookup(sessions) {
   return ({ path }) => sdkResult(sessions.get(path.id))
 }
 
-function httpResponse(data = { status: "created" }, ok = true) {
-  return { ok, async json() { return data } }
+function httpResponse(data = { status: "created" }, ok = true, onJSON) {
+  return { ok, async json() { onJSON?.(); return data } }
 }
 
 function deferredEvent() {
@@ -52,6 +52,33 @@ function deferredResponse() {
   }
 }
 
+function extractFunctionBody(name) {
+  const signature = source.indexOf(`function ${name}`)
+  assert.notEqual(signature, -1, `${name} function not found`)
+  const bodyStart = source.indexOf("{", signature)
+  let depth = 0
+  for (let index = bodyStart; index < source.length; index += 1) {
+    if (source[index] === "{") depth += 1
+    if (source[index] === "}" && --depth === 0) return source.slice(bodyStart + 1, index)
+  }
+  throw new Error(`${name} function body not found`)
+}
+
+function buildEnsureResolvedProjectForTest(resolveProjectName) {
+  const body = extractFunctionBody("ensureResolvedProject")
+  return new Function("resolveProjectName", `
+    let project = "unknown"
+    let projectResolutionError = ""
+    let projectResolutionGeneration = 0
+    const ctx = { directory: "/work/engram" }
+    async function ensureResolvedProject() {${body}}
+    return {
+      ensureResolvedProject,
+      state: () => ({ project, projectResolutionError }),
+    }
+  `)(resolveProjectName)
+}
+
 function toolOutput(...sessionIDs) {
   const sessionID = sessionIDs.length === 0 ? MODEL_SESSION_ID : sessionIDs[0]
   return { args: sessionID === undefined ? {} : { session_id: sessionID } }
@@ -68,6 +95,10 @@ function assertNoRegistration(runtime, message) {
 }
 
 async function createRuntime(t, {
+  directory = "/work/engram",
+  projectCurrentResponse = { project: "engram", project_source: "git_remote" },
+	projectCurrentOK = true,
+	manifestExists = false,
   sessionGet = async ({ path }) => sdkResult(session(path.id)),
   registrationResponse,
   contextResponse,
@@ -77,19 +108,28 @@ async function createRuntime(t, {
   const registeredIDs = []
   const sessionGetIDs = []
   const requests = []
+	const spawns = []
+	const startupEvents = []
   globalThis.Bun = {
     spawnSync(args) {
       if (args.includes("remote")) return { exitCode: 1, stdout: Buffer.from("") }
       return { exitCode: 0, stdout: Buffer.from("/work/engram\n") }
     },
-    spawn() {},
-    file() { return { async exists() { return false } } },
+		spawn(args, options) {
+			spawns.push({ args, options })
+			if (args[1] === "sync" && args[2] === "--import") startupEvents.push("import:spawn")
+		},
+		file() { return { async exists() { return manifestExists } } },
   }
   globalThis.fetch = async (url, init) => {
     const path = new URL(url).pathname
     if (path === "/health") return { ok: true, async json() { return { status: "ok" } } }
     const body = init?.body ? JSON.parse(init.body) : undefined
     requests.push({ path, url: String(url), body })
+		if (path === "/project/current") {
+			const response = typeof projectCurrentResponse === "function" ? projectCurrentResponse() : projectCurrentResponse
+			return httpResponse(response, projectCurrentOK, () => startupEvents.push("project-current:response"))
+		}
     if (path === "/sessions") {
       registeredIDs.push(body.id)
       if (registrationResponse) return registrationResponse(registeredIDs.length)
@@ -107,7 +147,7 @@ async function createRuntime(t, {
   const moduleURL = new URL(`./engram.ts?sdk-runtime=${runtimeImport}`, import.meta.url)
   const { Engram } = await import(moduleURL.href)
   const plugin = await Engram({
-    directory: "/work/engram",
+    directory,
     project: { id: PROJECT_ID },
     client: {
       session: {
@@ -128,8 +168,159 @@ async function createRuntime(t, {
     registeredIDs,
     sessionGetIDs,
     requests,
+		spawns,
+		startupEvents,
   }
 }
+
+test("project identity delegates Windows paths and worktrees to the canonical server", async (t) => {
+  for (const scenario of [
+    {
+      name: "Windows directory basename",
+      directory: "C:\\Users\\Blackie",
+      response: { project: "blackie", project_source: "dir_basename" },
+      expectedProject: "blackie",
+		canWrite: true,
+    },
+    {
+      name: "Windows drive root",
+      directory: "C:\\",
+      response: { project: "C:\\", project_source: "dir_basename" },
+		canWrite: false,
+    },
+    {
+      name: "colon-prefixed project name",
+      directory: "C:\\worktrees\\compiler",
+      response: { project: "c:compiler", project_source: "config" },
+      expectedProject: "c:compiler",
+      canWrite: true,
+    },
+    {
+      name: "worktree repository identity",
+      directory: "C:\\worktrees\\engram-652",
+      response: { project: "engram", project_source: "git_remote" },
+      expectedProject: "engram",
+		canWrite: true,
+    },
+  ]) {
+    await t.test(scenario.name, async (t) => {
+      const runtime = await createRuntime(t, {
+        directory: scenario.directory,
+        projectCurrentResponse: scenario.response,
+      })
+      const resolution = runtime.requests.find(({ path }) => path === "/project/current")
+      assert.ok(resolution, "the plugin must ask the canonical resolver")
+      assert.equal(new URL(resolution.url).searchParams.get("cwd"), scenario.directory)
+
+      await runtime.event("session.created", session("runtime"))
+      const registration = runtime.requests.find(({ path }) => path === "/sessions")
+      const output = { context: [] }
+      await runtime.compact({ sessionID: "runtime" }, output)
+		if (scenario.canWrite) {
+			assert.equal(registration?.body.project, scenario.expectedProject)
+			assert.match(output.context.at(-1), new RegExp(`Use project: '${scenario.expectedProject}'`))
+		} else {
+			assert.equal(registration, undefined)
+			assert.match(output.context.at(-1), /Automatic session, prompt, and passive-capture writes remain disabled/)
+			assert.doesNotMatch(output.context.at(-1), /Use project: 'unknown'/)
+		}
+    })
+  }
+})
+
+test("project identity resolution failures fail closed for automatic writes", async (t) => {
+	for (const scenario of [
+		{ name: "failed response", response: { error: "unavailable" }, ok: false },
+		{ name: "ambiguous response", response: { project: "", error_hint: "ambiguous project", available_projects: ["repo-a", "repo-b"] } },
+		{ name: "malformed response", response: {} },
+		{ name: "unknown project", response: { project: "unknown", project_source: "dir_basename" } },
+	]) {
+		await t.test(scenario.name, async (t) => {
+			const runtime = await createRuntime(t, {
+				projectCurrentResponse: scenario.response,
+				projectCurrentOK: scenario.ok ?? true,
+			})
+			await runtime.event("session.created", session("runtime"))
+			await assert.rejects(
+				runtime.before({ tool: "mem_save", sessionID: "runtime" }, toolOutput(undefined)),
+				/could not resolve a safe project identity/,
+			)
+			await runtime.chat(
+				{ sessionID: "runtime" },
+				{ message: {}, parts: [{ type: "text", text: "A sufficiently long root prompt" }] },
+			)
+			await runtime.after({ tool: "Task", sessionID: "runtime" }, "A".repeat(60))
+			const output = { context: [] }
+			await runtime.compact({ sessionID: "runtime" }, output)
+
+			assertNoRegistration(runtime)
+			assert.equal(runtime.requests.some(({ path }) => path === "/prompts"), false)
+			assert.equal(runtime.requests.some(({ path }) => path === "/observations/passive"), false)
+			assert.equal(runtime.requests.some(({ path }) => path === "/context/compaction"), false)
+			assert.match(output.context.at(-1), /Automatic session, prompt, and passive-capture writes remain disabled/)
+		})
+	}
+})
+
+test("startup import requires a resolved project identity", async (t) => {
+	for (const scenario of [
+		{ name: "failed", response: { error: "unavailable" }, ok: false, imports: 0, startupEvents: [] },
+		{ name: "ambiguous", response: { project: "", error_hint: "ambiguous project", available_projects: ["repo-a", "repo-b"] }, imports: 0, startupEvents: ["project-current:response"] },
+		{ name: "resolved", response: { project: "engram", project_source: "git_remote" }, imports: 1, startupEvents: ["project-current:response", "import:spawn"] },
+	]) {
+		await t.test(scenario.name, async (t) => {
+			const runtime = await createRuntime(t, {
+				projectCurrentResponse: scenario.response,
+				projectCurrentOK: scenario.ok ?? true,
+				manifestExists: true,
+			})
+			const imports = runtime.spawns.filter(({ args }) => args[1] === "sync" && args[2] === "--import")
+			assert.equal(imports.length, scenario.imports)
+			assert.deepEqual(runtime.startupEvents, scenario.startupEvents)
+		})
+	}
+})
+
+test("project identity retries a failed resolution on later events", async (t) => {
+	let recovered = false
+	const runtime = await createRuntime(t, {
+		projectCurrentResponse: () => recovered
+			? { project: "engram", project_source: "git_remote" }
+			: { project: "unknown", project_source: "dir_basename" },
+	})
+	await runtime.event("session.created", session("runtime"))
+	assertNoRegistration(runtime)
+
+	recovered = true
+	await runtime.event("session.updated", session("runtime"))
+	const output = toolOutput(undefined)
+	await runtime.before({ tool: "mem_save", sessionID: "runtime" }, output)
+	assert.equal(output.args.session_id, "runtime")
+	assert.deepEqual(runtime.registeredIDs, ["runtime"])
+	const registration = runtime.requests.find(({ path }) => path === "/sessions")
+	assert.equal(registration?.body.project, "engram")
+})
+
+test("a stale project resolution failure cannot overwrite a newer success", async () => {
+  const stale = deferredEvent()
+  let calls = 0
+  const resolution = buildEnsureResolvedProjectForTest(() => {
+    calls += 1
+    return calls === 1 ? stale.event : Promise.resolve({ project: "engram" })
+  })
+
+  const first = resolution.ensureResolvedProject()
+  const second = resolution.ensureResolvedProject()
+  assert.equal(await second, true)
+  stale.emit({ project: "unknown", error: "temporary resolver failure" })
+  assert.equal(await first, true)
+  assert.deepEqual(resolution.state(), { project: "engram", projectResolutionError: "" })
+})
+
+test("embedded and distributable OpenCode plugins remain identical", () => {
+  const embedded = readFileSync(new URL("../../internal/setup/plugins/opencode/engram.ts", import.meta.url), "utf8")
+  assert.equal(embedded, source)
+})
 
 test("registration enters the cache only after a successful acknowledgement", async (t) => {
   assert.match(source, /signal: AbortSignal\.timeout\(3000\)/)

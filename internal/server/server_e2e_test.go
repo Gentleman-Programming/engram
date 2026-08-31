@@ -253,6 +253,27 @@ func TestPassiveCaptureEndpointEmptyContentE2E(t *testing.T) {
 	}
 }
 
+func TestSearchNoHitsReturnsEmptyArrayE2E(t *testing.T) {
+	_, ts := newE2EServer(t)
+
+	resp, err := ts.Client().Get(ts.URL + "/search?q=no-hits")
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for no-hit search, got %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read search response: %v", err)
+	}
+	if trimmed := strings.TrimSpace(string(body)); trimmed != "[]" {
+		t.Fatalf("expected no-hit search body [], got %q", trimmed)
+	}
+}
+
 func TestPassiveCaptureEndpointRequiresSessionID(t *testing.T) {
 	_, ts := newE2EServer(t)
 	client := ts.Client()
