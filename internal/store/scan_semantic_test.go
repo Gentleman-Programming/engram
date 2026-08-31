@@ -263,7 +263,8 @@ func TestScanProject_Semantic_DryRunDoesNotPersist(t *testing.T) {
 // ─── C.5b — TestScanProject_Semantic_NotConflictSkipped ──────────────────────
 
 // TestScanProject_Semantic_NotConflictSkipped verifies that verdicts of
-// "not_conflict" are counted in SemanticSkipped and do NOT produce relation rows.
+// "not_conflict" remain counted in SemanticSkipped while producing a durable
+// negative verdict that suppresses later semantic scans for the unordered pair.
 func TestScanProject_Semantic_NotConflictSkipped(t *testing.T) {
 	s := newTestStore(t)
 	seedSimilarPair(t, s, "sem-skip-project")
@@ -300,10 +301,38 @@ func TestScanProject_Semantic_NotConflictSkipped(t *testing.T) {
 
 	var count int
 	_ = s.db.QueryRow(
-		`SELECT count(*) FROM memory_relations WHERE marked_by_actor = 'engram'`,
+		`SELECT count(*) FROM memory_relations WHERE marked_by_actor = 'engram' AND relation = ? AND judgment_status = 'judged'`, RelationNotConflict,
 	).Scan(&count)
-	if count != 0 {
-		t.Errorf("expected no 'engram' relation rows for not_conflict; got %d", count)
+	if count != 1 {
+		t.Errorf("expected one durable negative verdict; got %d", count)
+	}
+}
+
+func TestScanProject_Semantic_NotConflictSuppressesSecondScan(t *testing.T) {
+	s := newTestStore(t)
+	seedSimilarPair(t, s, "sem-suppress-project")
+	runner := &verdictRunner{verdict: SemanticVerdict{Relation: RelationNotConflict, Confidence: 0.9, Reasoning: "unrelated", Model: "haiku"}}
+	opts := ScanOptions{
+		Project: "sem-suppress-project", Apply: true, Semantic: true, Concurrency: 1,
+		TimeoutPerCall: 5 * time.Second, MaxSemantic: 10, Runner: runner, BuildPrompt: identityPromptBuilder,
+	}
+	first, err := s.ScanProject(opts)
+	if err != nil {
+		t.Fatalf("first ScanProject: %v", err)
+	}
+	if first.SemanticSkipped == 0 || runner.calls == 0 {
+		t.Fatalf("first scan did not evaluate a negative verdict: skipped=%d calls=%d", first.SemanticSkipped, runner.calls)
+	}
+	callsAfterFirst := runner.calls
+	second, err := s.ScanProject(opts)
+	if err != nil {
+		t.Fatalf("second ScanProject: %v", err)
+	}
+	if runner.calls != callsAfterFirst {
+		t.Errorf("second scan reran evaluated unordered pair: calls=%d, want %d", runner.calls, callsAfterFirst)
+	}
+	if second.SemanticJudged != 0 || second.SemanticSkipped != 0 || second.SemanticErrors != 0 {
+		t.Errorf("second scan semantic counters = judged:%d skipped:%d errors:%d, want all zero", second.SemanticJudged, second.SemanticSkipped, second.SemanticErrors)
 	}
 }
 

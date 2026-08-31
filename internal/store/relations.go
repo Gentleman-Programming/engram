@@ -230,7 +230,8 @@ type JudgeBySemanticParams struct {
 	// TargetID is the TEXT sync_id of the target observation (required).
 	TargetID string
 	// Relation is the verdict verb (required); must be in validRelationVerbs.
-	// Passing "not_conflict" is a no-op: no row is inserted and no error is returned.
+	// Passing "not_conflict" records a judged negative verdict so the pair is not
+	// presented for semantic evaluation again.
 	Relation string
 	// Confidence is the LLM's self-reported confidence score [0.0, 1.0].
 	Confidence float64
@@ -360,10 +361,10 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 	}
 
 	// Get the saved observation to build the FTS query and for project/scope filtering.
-	var title, project, scope string
+	var title, project, scope, sourceSyncID string
 	err = s.db.QueryRow(
-		`SELECT title, ifnull(project,''), scope FROM observations WHERE id = ?`, savedID,
-	).Scan(&title, &project, &scope)
+		`SELECT title, ifnull(project,''), scope, ifnull(sync_id,'') FROM observations WHERE id = ?`, savedID,
+	).Scan(&title, &project, &scope, &sourceSyncID)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("FindCandidates: observation %d not found", savedID)
 	}
@@ -389,7 +390,7 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 	}
 
 	// Apply the rank predicate in SQL before ordering and limiting.
-	rows, err := s.db.Query(query, ftsQuery, savedID, project, scope, threshold, limit)
+	rows, err := s.db.Query(query, ftsQuery, savedID, project, scope, sourceSyncID, sourceSyncID, threshold, limit)
 	if err != nil {
 		return nil, fmt.Errorf("FindCandidates: FTS5 query: %w", err)
 	}
@@ -442,14 +443,6 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 			})
 		}
 		return candidates, nil
-	}
-
-	// Get the source observation's sync_id for the relation source_id.
-	var sourceSyncID string
-	if err := s.db.QueryRow(
-		`SELECT ifnull(sync_id,'') FROM observations WHERE id = ?`, savedID,
-	).Scan(&sourceSyncID); err != nil {
-		return nil, fmt.Errorf("FindCandidates: get source sync_id: %w", err)
 	}
 
 	// Insert a pending relation row for each candidate.
@@ -742,12 +735,10 @@ func validateCrossProjectGuard(tx *sql.Tx, sourceID, targetID string) error {
 // the memory_relations table with system provenance (marked_by_kind="system",
 // marked_by_actor="engram", marked_by_model=params.Model).
 //
-// When params.Relation is "not_conflict" the call is a no-op: no row is inserted
-// and an empty sync_id is returned without error.
-//
 // Idempotency: if a row already exists for (source_id, target_id) in either
-// direction, the existing row is updated (UPSERT). The returned sync_id is
-// always the canonical row's sync_id.
+// direction, the existing row is updated. The returned sync_id is always the
+// reused row's sync_id. The latest caller's source and target order is retained
+// for directional verdicts.
 //
 // Returns ErrCrossProjectRelation when source and target belong to different
 // projects. Returns a validation error when required fields are missing or
@@ -767,11 +758,6 @@ func (s *Store) JudgeBySemantic(p JudgeBySemanticParams) (string, error) {
 		return "", fmt.Errorf("JudgeBySemantic: confidence %v is out of range [0.0, 1.0]", p.Confidence)
 	}
 
-	// not_conflict is a no-op.
-	if p.Relation == RelationNotConflict {
-		return "", nil
-	}
-
 	var resultSyncID string
 
 	if err := s.withTx(func(tx *sql.Tx) error {
@@ -787,6 +773,7 @@ func (s *Store) JudgeBySemantic(p JudgeBySemanticParams) (string, error) {
 			SELECT sync_id FROM memory_relations
 			WHERE (source_id = ? AND target_id = ?)
 			   OR (source_id = ? AND target_id = ?)
+			ORDER BY id
 			LIMIT 1
 		`, p.SourceID, p.TargetID, p.TargetID, p.SourceID).Scan(&existingSyncID)
 
@@ -820,7 +807,9 @@ func (s *Store) JudgeBySemantic(p JudgeBySemanticParams) (string, error) {
 			// Update existing row.
 			if _, execErr := tx.Exec(`
 				UPDATE memory_relations
-				SET relation        = ?,
+				SET source_id       = ?,
+				    target_id       = ?,
+				    relation        = ?,
 				    judgment_status = 'judged',
 				    confidence      = ?,
 				    reason          = ?,
@@ -829,7 +818,7 @@ func (s *Store) JudgeBySemantic(p JudgeBySemanticParams) (string, error) {
 				    marked_by_model = ?,
 				    updated_at      = datetime('now')
 				WHERE sync_id = ?
-			`, p.Relation, confidence, p.Reasoning,
+			`, p.SourceID, p.TargetID, p.Relation, confidence, p.Reasoning,
 				actor, kind, modelPtr,
 				existingSyncID,
 			); execErr != nil {
@@ -996,6 +985,7 @@ func (s *Store) GetRelationsForObservationsContext(ctx context.Context, syncIDs 
 		LEFT JOIN observations tgt ON tgt.sync_id = r.target_id
 		WHERE (r.source_id IN (%s) OR r.target_id IN (%s))
 		  AND r.judgment_status != 'orphaned'
+		  AND r.relation != 'not_conflict'
 	`, inClause, inClause)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -1079,6 +1069,12 @@ const findCandidatesFTSQuery = `
 	  AND o.deleted_at IS NULL
 	  AND ifnull(o.project,'') = ifnull(?,'')
 	  AND o.scope = ?
+	  AND NOT EXISTS (
+		SELECT 1 FROM memory_relations r
+		WHERE r.judgment_status = 'judged'
+		  AND ((r.source_id = ? AND r.target_id = o.sync_id)
+			OR (r.source_id = o.sync_id AND r.target_id = ?))
+	  )
 	  AND fts.rank %s ?
 	ORDER BY fts.rank
 	LIMIT ?
@@ -1217,7 +1213,7 @@ func buildRelationsQuery(opts ListRelationsOptions, countOnly bool) (string, []a
 		FROM memory_relations r
 		LEFT JOIN observations src ON src.sync_id = r.source_id AND src.deleted_at IS NULL
 		LEFT JOIN observations tgt ON tgt.sync_id = r.target_id AND tgt.deleted_at IS NULL
-		WHERE 1=1`
+		WHERE r.relation != 'not_conflict'`
 
 	if opts.Project != "" {
 		query += ` AND (ifnull(src.project,'') = ? OR ifnull(tgt.project,'') = ?)`
@@ -1268,7 +1264,8 @@ func (s *Store) GetRelationStats(project string) (RelationStats, error) {
 			FROM memory_relations r
 			LEFT JOIN observations src ON src.sync_id = r.source_id AND src.deleted_at IS NULL
 			LEFT JOIN observations tgt ON tgt.sync_id = r.target_id AND tgt.deleted_at IS NULL
-			WHERE ifnull(src.project,'') = ? OR ifnull(tgt.project,'') = ?
+			WHERE (ifnull(src.project,'') = ? OR ifnull(tgt.project,'') = ?)
+			  AND r.relation != 'not_conflict'
 			GROUP BY r.relation, r.judgment_status
 		`
 		args = []any{project, project}
@@ -1276,6 +1273,7 @@ func (s *Store) GetRelationStats(project string) (RelationStats, error) {
 		q = `
 			SELECT relation, judgment_status, count(*) AS cnt
 			FROM memory_relations
+			WHERE relation != 'not_conflict'
 			GROUP BY relation, judgment_status
 		`
 	}
@@ -1318,8 +1316,8 @@ func (s *Store) GetRelationStats(project string) (RelationStats, error) {
 //
 // Phase 4 extension: when ScanOptions.Semantic is true, after the FTS5 candidate
 // collection a bounded worker pool calls Runner.Compare on each pair. Applied
-// scans persist non-"not_conflict" verdicts via JudgeBySemantic, while dry-runs
-// report their semantic results without persistence. Semantic=false (zero value)
+// scans persist verdicts via JudgeBySemantic, while dry-runs report their
+// semantic results without persistence. Semantic=false (zero value)
 // preserves Phase 3 behaviour exactly.
 //
 // Returns a ScanResult with counts, a continuation cursor when another page
@@ -1600,13 +1598,6 @@ scan:
 						return
 					}
 
-					if verdict.Relation == RelationNotConflict && isValidConfidence(verdict.Confidence) {
-						mu.Lock()
-						result.SemanticSkipped++
-						mu.Unlock()
-						return
-					}
-
 					// Dry-runs evaluate and count valid verdicts without persistence.
 					// Invalid verdicts still flow through JudgeBySemantic so existing
 					// semantic error behavior remains unchanged.
@@ -1621,7 +1612,8 @@ scan:
 						return
 					}
 
-					// Validate and persist non-skipped verdict.
+					// Validate and persist the verdict, including not_conflict so the
+					// unordered pair is suppressed on later scans.
 					_, judgeErr := s.JudgeBySemantic(JudgeBySemanticParams{
 						SourceID:   pair.sourceSnippet.SyncID,
 						TargetID:   pair.candidateSnippet.SyncID,
@@ -1640,7 +1632,11 @@ scan:
 					}
 
 					mu.Lock()
-					result.SemanticJudged++
+					if verdict.Relation == RelationNotConflict {
+						result.SemanticSkipped++
+					} else {
+						result.SemanticJudged++
+					}
 					mu.Unlock()
 				}()
 			}
