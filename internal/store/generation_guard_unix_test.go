@@ -19,6 +19,7 @@ func TestStoreGenerationGuardRejectsLiveSidecarReplacement(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	defer s.Close()
+	disableDatabaseGenerationCheckThrottle(s.generation)
 	if err := s.CreateSession("before-replacement", "engram", "/work/engram"); err != nil {
 		t.Fatalf("create session before replacement: %v", err)
 	}

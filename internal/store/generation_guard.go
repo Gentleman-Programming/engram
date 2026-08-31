@@ -6,15 +6,23 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"reflect"
 	"sync"
+	"time"
 
 	sqlite "modernc.org/sqlite"
 )
 
 // ErrDatabaseGenerationChanged means the database, WAL, or shared-memory file
-// was replaced while this Store was live. Restart Engram to open the new generation.
+// was replaced while this Store was live. The guard is a detector, not an atomic
+// fence: a file may change after a check but before SQLite uses it. A known WAL or
+// shared-memory file disappearing is sticky, including when a driver discards its
+// last connection and unlinks those sidecars; restart Engram to reopen the store.
 var ErrDatabaseGenerationChanged = errors.New("database generation changed on disk; restart Engram to reopen the store")
+
+const databaseGenerationCheckInterval = 10 * time.Millisecond
 
 type generationFile struct {
 	name     string
@@ -25,20 +33,27 @@ type generationFile struct {
 }
 
 type databaseGeneration struct {
-	mu      sync.Mutex
-	files   []generationFile
-	enabled bool
-	changed bool
+	mu            sync.Mutex
+	files         []generationFile
+	enabled       bool
+	changed       bool
+	lastCheck     time.Time
+	checkInterval time.Duration
+	now           func() time.Time
 }
 
 var readDatabaseFileID = databaseFileID
 
 func newDatabaseGeneration(dbPath string) *databaseGeneration {
-	return &databaseGeneration{files: []generationFile{
-		{name: "database", path: dbPath, required: true},
-		{name: "WAL", path: dbPath + "-wal"},
-		{name: "shared-memory", path: dbPath + "-shm"},
-	}}
+	return &databaseGeneration{
+		files: []generationFile{
+			{name: "database", path: dbPath, required: true},
+			{name: "WAL", path: dbPath + "-wal"},
+			{name: "shared-memory", path: dbPath + "-shm"},
+		},
+		checkInterval: databaseGenerationCheckInterval,
+		now:           time.Now,
+	}
 }
 
 func (g *databaseGeneration) capture() error {
@@ -66,6 +81,7 @@ func (g *databaseGeneration) capture() error {
 
 	g.files = files
 	g.enabled = true
+	g.lastCheck = g.now()
 	return nil
 }
 
@@ -78,6 +94,9 @@ func (g *databaseGeneration) check() error {
 	}
 	if g.changed {
 		return ErrDatabaseGenerationChanged
+	}
+	if g.now().Sub(g.lastCheck) < g.checkInterval {
+		return nil
 	}
 
 	for i := range g.files {
@@ -101,6 +120,7 @@ func (g *databaseGeneration) check() error {
 			return g.changedError(file.name, "identity changed")
 		}
 	}
+	g.lastCheck = g.now()
 	return nil
 }
 
@@ -164,7 +184,11 @@ func (c generationConn) Begin() (driver.Tx, error) {
 	if err := c.generation.check(); err != nil {
 		return nil, err
 	}
-	return c.Conn.Begin()
+	tx, err := c.Conn.Begin()
+	if err != nil {
+		return nil, err
+	}
+	return generationTx{Tx: tx, generation: c.generation}, nil
 }
 
 // ResetSession is called by database/sql before every reuse of a pooled connection.
@@ -193,12 +217,16 @@ func (c generationConn) BeginTx(ctx context.Context, opts driver.TxOptions) (dri
 		return nil, err
 	}
 	if beginner, ok := c.Conn.(driver.ConnBeginTx); ok {
-		return beginner.BeginTx(ctx, opts)
+		tx, err := beginner.BeginTx(ctx, opts)
+		if err != nil {
+			return nil, err
+		}
+		return generationTx{Tx: tx, generation: c.generation}, nil
 	}
 	if opts.Isolation != driver.IsolationLevel(0) || opts.ReadOnly {
 		return nil, errors.New("driver does not support transaction options")
 	}
-	return c.Conn.Begin()
+	return c.Begin()
 }
 
 func (c generationConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
@@ -216,7 +244,11 @@ func (c generationConn) QueryContext(ctx context.Context, query string, args []d
 		return nil, err
 	}
 	if queryer, ok := c.Conn.(driver.QueryerContext); ok {
-		return queryer.QueryContext(ctx, query, args)
+		rows, err := queryer.QueryContext(ctx, query, args)
+		if err != nil {
+			return nil, err
+		}
+		return generationRows{Rows: rows, generation: c.generation}, nil
 	}
 	return nil, driver.ErrSkip
 }
@@ -238,6 +270,88 @@ func (c generationConn) IsValid() bool {
 	return true
 }
 
+type generationTx struct {
+	driver.Tx
+	generation *databaseGeneration
+}
+
+func (t generationTx) Commit() error {
+	if err := t.generation.check(); err != nil {
+		return errors.Join(err, t.Tx.Rollback())
+	}
+	return t.Tx.Commit()
+}
+
+func (t generationTx) Rollback() error {
+	return errors.Join(t.generation.check(), t.Tx.Rollback())
+}
+
+// generationRows preserves the optional row interfaces implemented by modernc
+// SQLite. For an unexpected Rows implementation that lacks one, it returns the
+// corresponding database/sql zero-value behavior.
+type generationRows struct {
+	driver.Rows
+	generation *databaseGeneration
+}
+
+func (r generationRows) Next(dest []driver.Value) error {
+	if err := r.generation.check(); err != nil {
+		return err
+	}
+	return r.Rows.Next(dest)
+}
+
+func (r generationRows) HasNextResultSet() bool {
+	rows, ok := r.Rows.(driver.RowsNextResultSet)
+	return ok && rows.HasNextResultSet()
+}
+
+func (r generationRows) NextResultSet() error {
+	if err := r.generation.check(); err != nil {
+		return err
+	}
+	rows, ok := r.Rows.(driver.RowsNextResultSet)
+	if !ok {
+		return io.EOF
+	}
+	return rows.NextResultSet()
+}
+
+func (r generationRows) ColumnTypeScanType(index int) reflect.Type {
+	if rows, ok := r.Rows.(driver.RowsColumnTypeScanType); ok {
+		return rows.ColumnTypeScanType(index)
+	}
+	return reflect.TypeFor[any]()
+}
+
+func (r generationRows) ColumnTypeDatabaseTypeName(index int) string {
+	if rows, ok := r.Rows.(driver.RowsColumnTypeDatabaseTypeName); ok {
+		return rows.ColumnTypeDatabaseTypeName(index)
+	}
+	return ""
+}
+
+func (r generationRows) ColumnTypeLength(index int) (int64, bool) {
+	if rows, ok := r.Rows.(driver.RowsColumnTypeLength); ok {
+		return rows.ColumnTypeLength(index)
+	}
+	return 0, false
+}
+
+func (r generationRows) ColumnTypeNullable(index int) (bool, bool) {
+	if rows, ok := r.Rows.(driver.RowsColumnTypeNullable); ok {
+		return rows.ColumnTypeNullable(index)
+	}
+	return false, false
+}
+
+func (r generationRows) ColumnTypePrecisionScale(index int) (int64, int64, bool) {
+	if rows, ok := r.Rows.(driver.RowsColumnTypePrecisionScale); ok {
+		return rows.ColumnTypePrecisionScale(index)
+	}
+	return 0, 0, false
+}
+
 type generationStmt struct {
 	driver.Stmt
 	generation *databaseGeneration
@@ -254,7 +368,11 @@ func (s generationStmt) Query(args []driver.Value) (driver.Rows, error) {
 	if err := s.generation.check(); err != nil {
 		return nil, err
 	}
-	return s.Stmt.Query(args)
+	rows, err := s.Stmt.Query(args)
+	if err != nil {
+		return nil, err
+	}
+	return generationRows{Rows: rows, generation: s.generation}, nil
 }
 
 func (s generationStmt) ExecContext(ctx context.Context, args []driver.NamedValue) (driver.Result, error) {
@@ -272,7 +390,11 @@ func (s generationStmt) QueryContext(ctx context.Context, args []driver.NamedVal
 		return nil, err
 	}
 	if queryer, ok := s.Stmt.(driver.StmtQueryContext); ok {
-		return queryer.QueryContext(ctx, args)
+		rows, err := queryer.QueryContext(ctx, args)
+		if err != nil {
+			return nil, err
+		}
+		return generationRows{Rows: rows, generation: s.generation}, nil
 	}
 	return nil, driver.ErrSkip
 }

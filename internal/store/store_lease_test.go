@@ -45,12 +45,8 @@ func TestMoveDatabaseGenerationRefusesLiveStore(t *testing.T) {
 	if _, err := os.Stat(sourceDB); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("source database still exists after move: %v", err)
 	}
-	entries, err := os.ReadDir(sourceDir)
-	if err != nil {
-		t.Fatalf("read source directory after move: %v", err)
-	}
-	if len(entries) != 0 {
-		t.Fatalf("source directory retained entries after move: %v", entries)
+	if _, err := os.Stat(filepath.Join(sourceDir, ".engram.store.lock")); err != nil {
+		t.Fatalf("source lease missing after move: %v", err)
 	}
 }
 
@@ -175,11 +171,42 @@ func TestStoreLeasePathAllowsMissingDataDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("derive lease path: %v", err)
 	}
-	if want := filepath.Join(parent, ".missing.engram.store.lock"); lockPath != want {
+	if want := filepath.Join(dataDir, ".engram.store.lock"); lockPath != want {
 		t.Fatalf("lease path = %q, want %q", lockPath, want)
 	}
 	if _, err := os.Stat(dataDir); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("missing data directory after lease derivation: %v", err)
+	}
+}
+
+func TestStoreLeasePathIsInsideCanonicalDataDirectory(t *testing.T) {
+	dataDir := t.TempDir()
+	canonicalDir, err := canonicalStoreLeaseDir(dataDir)
+	if err != nil {
+		t.Fatalf("resolve data directory: %v", err)
+	}
+	lockPath, err := storeLeasePath(dataDir)
+	if err != nil {
+		t.Fatalf("derive lease path: %v", err)
+	}
+	if want := filepath.Join(canonicalDir, ".engram.store.lock"); lockPath != want {
+		t.Fatalf("lease path = %q, want %q", lockPath, want)
+	}
+}
+
+func TestMoveDatabaseGenerationCreatesDirectoriesBeforeLeasing(t *testing.T) {
+	base := t.TempDir()
+	sourceDir := filepath.Join(base, "source")
+	destinationDir := filepath.Join(base, "destination")
+
+	err := MoveDatabaseGeneration(filepath.Join(sourceDir, "engram.db"), filepath.Join(destinationDir, "engram.db"))
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("move error = %v, want missing source database", err)
+	}
+	for _, dir := range []string{sourceDir, destinationDir} {
+		if _, err := os.Stat(filepath.Join(dir, ".engram.store.lock")); err != nil {
+			t.Fatalf("lease in %s after directory creation: %v", dir, err)
+		}
 	}
 }
 

@@ -53,11 +53,15 @@ func storeLeasePath(dataDir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(filepath.Dir(canonicalDir), "."+filepath.Base(canonicalDir)+".engram.store.lock"), nil
+	return filepath.Join(canonicalDir, ".engram.store.lock"), nil
 }
 
 func canonicalStoreLeaseDir(dataDir string) (string, error) {
-	dir := filepath.Clean(dataDir)
+	dir, err := filepath.Abs(dataDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve store lease directory %s: %w", dataDir, err)
+	}
+	dir = filepath.Clean(dir)
 	missing := make([]string, 0)
 	for {
 		canonicalDir, err := filepath.EvalSymlinks(dir)
@@ -154,6 +158,9 @@ func moveDatabaseFailure(moveErr error, moved []databaseMove) error {
 func MoveDatabaseGeneration(sourceDB, destinationDB string) error {
 	sourceDir := filepath.Dir(sourceDB)
 	destinationDir := filepath.Dir(destinationDB)
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		return fmt.Errorf("create source directory: %w", err)
+	}
 	if err := os.MkdirAll(destinationDir, 0o755); err != nil {
 		return fmt.Errorf("create destination directory: %w", err)
 	}

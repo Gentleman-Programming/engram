@@ -58,6 +58,10 @@ For other docs:
 - Synchronous NORMAL
 - Foreign keys ON
 
+### Database generation safety
+
+Engram keeps a lease file in the canonical store data directory and detects a database, WAL, or shared-memory file replacement while a Store is live. This generation guard is a detector, not an atomic fence: a file can change in the check/use TOCTOU window before SQLite uses it. If a known WAL or shared-memory sidecar disappears, including when the driver discards its last connection and unlinks the sidecars, Engram reports a sticky restart requirement rather than continuing with a possibly different generation.
+
 ---
 
 ## HTTP API Endpoints

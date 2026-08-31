@@ -55,3 +55,34 @@ func TestMoveDatabaseGenerationRefusesLiveStoreThroughSymlink(t *testing.T) {
 		t.Fatalf("move through alias error = %v, want ErrDatabaseStoreInUse", err)
 	}
 }
+
+func TestStoreLeaseUsesWritableDataDirectoryWhenParentIsReadOnly(t *testing.T) {
+	parent := t.TempDir()
+	dataDir := filepath.Join(parent, "data")
+	if err := os.Mkdir(dataDir, 0o755); err != nil {
+		t.Fatalf("create data directory: %v", err)
+	}
+	if err := os.Chmod(parent, 0o555); err != nil {
+		t.Fatalf("make parent read-only: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(parent, 0o755); err != nil {
+			t.Errorf("restore parent permissions: %v", err)
+		}
+	})
+	if err := os.WriteFile(filepath.Join(parent, "write-probe"), []byte("probe"), 0o600); err == nil {
+		_ = os.Remove(filepath.Join(parent, "write-probe"))
+		t.Skip("filesystem does not enforce read-only parent permissions")
+	}
+
+	s, err := New(FallbackConfig(dataDir))
+	if err != nil {
+		t.Fatalf("open store with read-only parent: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, ".engram.store.lock")); err != nil {
+		t.Fatalf("lease inside data directory: %v", err)
+	}
+}
