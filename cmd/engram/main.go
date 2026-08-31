@@ -652,8 +652,8 @@ func main() {
 		printUsage()
 		exitFunc(1)
 	}
-	// Self-tests must run before update checks, configuration resolution, orphan
-	// migration, and autosync setup so released binaries cannot touch user data.
+	// Self-tests must run before update checks, configuration resolution, and
+	// autosync setup so released binaries cannot touch user data.
 	if strings.EqualFold(strings.TrimSpace(os.Args[1]), "test") {
 		if code := cmdTest(os.Args[2:]); code != testExitSuccess {
 			exitFunc(code)
@@ -685,10 +685,6 @@ func main() {
 	if dir := os.Getenv("ENGRAM_DATA_DIR"); dir != "" {
 		cfg.DataDir = dir
 	}
-
-	// Migrate orphaned databases that ended up in wrong locations
-	// (e.g. drive root on Windows due to previous bug).
-	migrateOrphanedDB(cfg.DataDir)
 
 	switch os.Args[1] {
 	case "serve":
@@ -3190,66 +3186,6 @@ func resolveHomeFallback() string {
 	}
 
 	return ""
-}
-
-// migrateOrphanedDB checks for engram databases that ended up in wrong
-// locations (e.g. drive root on Windows when UserHomeDir failed silently)
-// and moves them to the correct location if the correct location has no DB.
-func migrateOrphanedDB(correctDir string) {
-	correctDB := filepath.Join(correctDir, "engram.db")
-
-	// If the correct DB already exists, nothing to migrate.
-	if _, err := os.Stat(correctDB); err == nil {
-		return
-	}
-
-	// Known wrong locations: relative ".engram" resolved from common roots.
-	// On Windows this typically ends up at C:\.engram or D:\.engram.
-	candidates := []string{
-		filepath.Join(string(filepath.Separator), ".engram", "engram.db"),
-	}
-
-	// On Windows, check all drive letter roots.
-	if filepath.Separator == '\\' {
-		for _, drive := range "CDEFGHIJ" {
-			candidates = append(candidates,
-				filepath.Join(string(drive)+":\\", ".engram", "engram.db"),
-			)
-		}
-	}
-
-	for _, candidate := range candidates {
-		if candidate == correctDB {
-			continue
-		}
-		info, err := os.Stat(candidate)
-		if err != nil || info.IsDir() {
-			continue
-		}
-
-		// Found an orphaned DB — migrate it.
-		log.Printf("[engram] found orphaned database at %s, migrating to %s", candidate, correctDB)
-
-		if err := os.MkdirAll(correctDir, 0755); err != nil {
-			log.Printf("[engram] migration failed (create dir): %v", err)
-			return
-		}
-
-		if err := store.MoveDatabaseGeneration(candidate, correctDB); err != nil {
-			log.Printf("[engram] migration failed: %v", err)
-			return
-		}
-
-		// Clean up empty orphaned directory.
-		orphanDir := filepath.Dir(candidate)
-		entries, _ := os.ReadDir(orphanDir)
-		if len(entries) == 0 {
-			os.Remove(orphanDir)
-		}
-
-		log.Printf("[engram] migration complete — memories recovered")
-		return
-	}
 }
 
 func truncate(s string, max int) string {

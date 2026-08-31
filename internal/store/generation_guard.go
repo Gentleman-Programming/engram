@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"reflect"
 	"sync"
-	"time"
 
 	sqlite "modernc.org/sqlite"
 )
@@ -22,8 +22,6 @@ import (
 // last connection and unlinks those sidecars; restart Engram to reopen the store.
 var ErrDatabaseGenerationChanged = errors.New("database generation changed on disk; restart Engram to reopen the store")
 
-const databaseGenerationCheckInterval = 10 * time.Millisecond
-
 type generationFile struct {
 	name     string
 	path     string
@@ -33,13 +31,10 @@ type generationFile struct {
 }
 
 type databaseGeneration struct {
-	mu            sync.Mutex
-	files         []generationFile
-	enabled       bool
-	changed       bool
-	lastCheck     time.Time
-	checkInterval time.Duration
-	now           func() time.Time
+	mu      sync.Mutex
+	files   []generationFile
+	enabled bool
+	changed bool
 }
 
 var readDatabaseFileID = databaseFileID
@@ -51,8 +46,6 @@ func newDatabaseGeneration(dbPath string) *databaseGeneration {
 			{name: "WAL", path: dbPath + "-wal"},
 			{name: "shared-memory", path: dbPath + "-shm"},
 		},
-		checkInterval: databaseGenerationCheckInterval,
-		now:           time.Now,
 	}
 }
 
@@ -81,7 +74,6 @@ func (g *databaseGeneration) capture() error {
 
 	g.files = files
 	g.enabled = true
-	g.lastCheck = g.now()
 	return nil
 }
 
@@ -95,10 +87,6 @@ func (g *databaseGeneration) check() error {
 	if g.changed {
 		return ErrDatabaseGenerationChanged
 	}
-	if g.now().Sub(g.lastCheck) < g.checkInterval {
-		return nil
-	}
-
 	for i := range g.files {
 		file := &g.files[i]
 		identity, err := readDatabaseFileID(file.path)
@@ -120,7 +108,6 @@ func (g *databaseGeneration) check() error {
 			return g.changedError(file.name, "identity changed")
 		}
 	}
-	g.lastCheck = g.now()
 	return nil
 }
 
@@ -139,11 +126,19 @@ func (c generationConnector) Connect(context.Context) (driver.Conn, error) {
 	if err := c.generation.check(); err != nil {
 		return nil, err
 	}
+	lease, err := acquireStoreLease(filepath.Dir(c.dsn), false)
+	if err != nil {
+		return nil, fmt.Errorf("acquire connection store lease: %w", err)
+	}
 	conn, err := c.driver.Open(c.dsn)
 	if err != nil {
+		_ = lease.Close()
 		return nil, err
 	}
-	return generationConn{Conn: conn, generation: c.generation}, nil
+	if err := c.generation.check(); err != nil {
+		return nil, errors.Join(err, conn.Close(), lease.Close())
+	}
+	return generationConn{Conn: conn, generation: c.generation, lease: lease}, nil
 }
 
 func (c generationConnector) Driver() driver.Driver {
@@ -153,6 +148,22 @@ func (c generationConnector) Driver() driver.Driver {
 type generationConn struct {
 	driver.Conn
 	generation *databaseGeneration
+	lease      *storeLease
+}
+
+func (c generationConn) Close() error {
+	var generationErr error
+	if c.generation != nil {
+		generationErr = c.generation.check()
+	}
+	closeErr := c.Conn.Close()
+	if c.lease != nil {
+		closeErr = errors.Join(closeErr, c.lease.Close())
+	}
+	if generationErr != nil || closeErr != nil {
+		return errors.Join(generationErr, closeErr)
+	}
+	return nil
 }
 
 func (c generationConn) Prepare(query string) (driver.Stmt, error) {
@@ -162,6 +173,9 @@ func (c generationConn) Prepare(query string) (driver.Stmt, error) {
 	stmt, err := c.Conn.Prepare(query)
 	if err != nil {
 		return nil, err
+	}
+	if err := c.generation.check(); err != nil {
+		return nil, errors.Join(err, stmt.Close())
 	}
 	return generationStmt{Stmt: stmt, generation: c.generation}, nil
 }
@@ -174,6 +188,9 @@ func (c generationConn) PrepareContext(ctx context.Context, query string) (drive
 		stmt, err := preparer.PrepareContext(ctx, query)
 		if err != nil {
 			return nil, err
+		}
+		if err := c.generation.check(); err != nil {
+			return nil, errors.Join(err, stmt.Close())
 		}
 		return generationStmt{Stmt: stmt, generation: c.generation}, nil
 	}
@@ -188,6 +205,9 @@ func (c generationConn) Begin() (driver.Tx, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := c.generation.check(); err != nil {
+		return nil, errors.Join(err, tx.Rollback())
+	}
 	return generationTx{Tx: tx, generation: c.generation}, nil
 }
 
@@ -197,9 +217,11 @@ func (c generationConn) ResetSession(ctx context.Context) error {
 		return err
 	}
 	if resetter, ok := c.Conn.(driver.SessionResetter); ok {
-		return resetter.ResetSession(ctx)
+		if err := resetter.ResetSession(ctx); err != nil {
+			return err
+		}
 	}
-	return nil
+	return c.generation.check()
 }
 
 func (c generationConn) Ping(ctx context.Context) error {
@@ -207,9 +229,11 @@ func (c generationConn) Ping(ctx context.Context) error {
 		return err
 	}
 	if pinger, ok := c.Conn.(driver.Pinger); ok {
-		return pinger.Ping(ctx)
+		if err := pinger.Ping(ctx); err != nil {
+			return err
+		}
 	}
-	return nil
+	return c.generation.check()
 }
 
 func (c generationConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
@@ -220,6 +244,9 @@ func (c generationConn) BeginTx(ctx context.Context, opts driver.TxOptions) (dri
 		tx, err := beginner.BeginTx(ctx, opts)
 		if err != nil {
 			return nil, err
+		}
+		if err := c.generation.check(); err != nil {
+			return nil, errors.Join(err, tx.Rollback())
 		}
 		return generationTx{Tx: tx, generation: c.generation}, nil
 	}
@@ -234,7 +261,14 @@ func (c generationConn) ExecContext(ctx context.Context, query string, args []dr
 		return nil, err
 	}
 	if execer, ok := c.Conn.(driver.ExecerContext); ok {
-		return execer.ExecContext(ctx, query, args)
+		result, err := execer.ExecContext(ctx, query, args)
+		if err != nil {
+			return nil, err
+		}
+		if err := c.generation.check(); err != nil {
+			return nil, err
+		}
+		return result, nil
 	}
 	return nil, driver.ErrSkip
 }
@@ -248,6 +282,9 @@ func (c generationConn) QueryContext(ctx context.Context, query string, args []d
 		if err != nil {
 			return nil, err
 		}
+		if err := c.generation.check(); err != nil {
+			return nil, errors.Join(err, rows.Close())
+		}
 		return generationRows{Rows: rows, generation: c.generation}, nil
 	}
 	return nil, driver.ErrSkip
@@ -255,7 +292,10 @@ func (c generationConn) QueryContext(ctx context.Context, query string, args []d
 
 func (c generationConn) CheckNamedValue(value *driver.NamedValue) error {
 	if checker, ok := c.Conn.(driver.NamedValueChecker); ok {
-		return checker.CheckNamedValue(value)
+		if err := checker.CheckNamedValue(value); err != nil {
+			return err
+		}
+		return c.generation.check()
 	}
 	return driver.ErrSkip
 }
@@ -265,9 +305,11 @@ func (c generationConn) IsValid() bool {
 		return false
 	}
 	if validator, ok := c.Conn.(driver.Validator); ok {
-		return validator.IsValid()
+		if !validator.IsValid() {
+			return false
+		}
 	}
-	return true
+	return c.generation.check() == nil
 }
 
 type generationTx struct {
@@ -279,11 +321,19 @@ func (t generationTx) Commit() error {
 	if err := t.generation.check(); err != nil {
 		return errors.Join(err, t.Tx.Rollback())
 	}
-	return t.Tx.Commit()
+	if err := t.Tx.Commit(); err != nil {
+		return err
+	}
+	return t.generation.check()
 }
 
 func (t generationTx) Rollback() error {
-	return errors.Join(t.generation.check(), t.Tx.Rollback())
+	generationErr := t.generation.check()
+	rollbackErr := t.Tx.Rollback()
+	if generationErr != nil || rollbackErr != nil {
+		return errors.Join(generationErr, rollbackErr)
+	}
+	return t.generation.check()
 }
 
 // generationRows preserves the optional row interfaces implemented by modernc
@@ -294,11 +344,27 @@ type generationRows struct {
 	generation *databaseGeneration
 }
 
+func (r generationRows) Close() error {
+	generationErr := r.generation.check()
+	closeErr := r.Rows.Close()
+	if generationErr != nil || closeErr != nil {
+		return errors.Join(generationErr, closeErr)
+	}
+	return nil
+}
+
 func (r generationRows) Next(dest []driver.Value) error {
 	if err := r.generation.check(); err != nil {
 		return err
 	}
-	return r.Rows.Next(dest)
+	nextErr := r.Rows.Next(dest)
+	if err := r.generation.check(); err != nil {
+		if errors.Is(nextErr, io.EOF) {
+			return errors.Join(err, r.Rows.Close())
+		}
+		return errors.Join(nextErr, err, r.Rows.Close())
+	}
+	return nextErr
 }
 
 func (r generationRows) HasNextResultSet() bool {
@@ -314,7 +380,14 @@ func (r generationRows) NextResultSet() error {
 	if !ok {
 		return io.EOF
 	}
-	return rows.NextResultSet()
+	nextErr := rows.NextResultSet()
+	if err := r.generation.check(); err != nil {
+		if errors.Is(nextErr, io.EOF) {
+			return errors.Join(err, r.Rows.Close())
+		}
+		return errors.Join(nextErr, err, r.Rows.Close())
+	}
+	return nextErr
 }
 
 func (r generationRows) ColumnTypeScanType(index int) reflect.Type {
@@ -357,11 +430,27 @@ type generationStmt struct {
 	generation *databaseGeneration
 }
 
+func (s generationStmt) Close() error {
+	generationErr := s.generation.check()
+	closeErr := s.Stmt.Close()
+	if generationErr != nil || closeErr != nil {
+		return errors.Join(generationErr, closeErr)
+	}
+	return nil
+}
+
 func (s generationStmt) Exec(args []driver.Value) (driver.Result, error) {
 	if err := s.generation.check(); err != nil {
 		return nil, err
 	}
-	return s.Stmt.Exec(args)
+	result, err := s.Stmt.Exec(args)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.generation.check(); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func (s generationStmt) Query(args []driver.Value) (driver.Rows, error) {
@@ -372,6 +461,9 @@ func (s generationStmt) Query(args []driver.Value) (driver.Rows, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := s.generation.check(); err != nil {
+		return nil, errors.Join(err, rows.Close())
+	}
 	return generationRows{Rows: rows, generation: s.generation}, nil
 }
 
@@ -380,7 +472,14 @@ func (s generationStmt) ExecContext(ctx context.Context, args []driver.NamedValu
 		return nil, err
 	}
 	if execer, ok := s.Stmt.(driver.StmtExecContext); ok {
-		return execer.ExecContext(ctx, args)
+		result, err := execer.ExecContext(ctx, args)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.generation.check(); err != nil {
+			return nil, err
+		}
+		return result, nil
 	}
 	return nil, driver.ErrSkip
 }
@@ -393,6 +492,9 @@ func (s generationStmt) QueryContext(ctx context.Context, args []driver.NamedVal
 		rows, err := queryer.QueryContext(ctx, args)
 		if err != nil {
 			return nil, err
+		}
+		if err := s.generation.check(); err != nil {
+			return nil, errors.Join(err, rows.Close())
 		}
 		return generationRows{Rows: rows, generation: s.generation}, nil
 	}

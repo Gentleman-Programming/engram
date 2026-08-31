@@ -718,15 +718,25 @@ func newStore(cfg Config) (*Store, error) {
 	}
 
 	dbPath := filepath.Join(cfg.DataDir, "engram.db")
-	generation := newDatabaseGeneration(dbPath)
+	generation, created, err := establishDatabaseGeneration(dbPath)
+	if err != nil {
+		_ = lease.Close()
+		return nil, fmt.Errorf("engram: capture database generation: %w", err)
+	}
 	db, err := openGuardedDB(dbPath, generation)
 	if err != nil {
+		if created {
+			cleanupCreatedDatabaseGeneration(generation)
+		}
 		_ = lease.Close()
 		return nil, fmt.Errorf("engram: open database: %w", err)
 	}
 	closeWithLease := func() {
 		_ = db.Close()
 		_ = lease.Close()
+		if created {
+			cleanupCreatedDatabaseGeneration(generation)
+		}
 	}
 	db.SetMaxOpenConns(1)
 	succeeded := false
@@ -753,12 +763,44 @@ func newStore(cfg Config) (*Store, error) {
 	if err := s.migrate(); err != nil {
 		return nil, fmt.Errorf("engram: migration: %w", err)
 	}
-	if err := generation.capture(); err != nil {
-		return nil, fmt.Errorf("engram: capture database generation: %w", err)
-	}
-
 	succeeded = true
 	return s, nil
+}
+
+func establishDatabaseGeneration(dbPath string) (*databaseGeneration, bool, error) {
+	file, err := os.OpenFile(dbPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o666)
+	created := err == nil
+	if err != nil && !errors.Is(err, os.ErrExist) {
+		return nil, false, err
+	}
+	if created {
+		if err := file.Close(); err != nil {
+			_ = os.Remove(dbPath)
+			return nil, true, fmt.Errorf("close created database: %w", err)
+		}
+	}
+
+	generation := newDatabaseGeneration(dbPath)
+	if err := generation.capture(); err != nil {
+		if created {
+			_ = os.Remove(dbPath)
+		}
+		return nil, created, err
+	}
+	return generation, created, nil
+}
+
+func cleanupCreatedDatabaseGeneration(generation *databaseGeneration) {
+	generation.mu.Lock()
+	database := generation.files[0]
+	generation.mu.Unlock()
+	identity, err := readDatabaseFileID(database.path)
+	if err != nil || !database.present || identity != database.identity {
+		return
+	}
+	_ = os.Remove(database.path + "-wal")
+	_ = os.Remove(database.path + "-shm")
+	_ = os.Remove(database.path)
 }
 
 func (s *Store) Close() error {
@@ -3732,14 +3774,21 @@ func (s *Store) statsForProject(project string) (*Stats, error) {
 		where = " WHERE LOWER(project) = ?"
 		args = append(args, project)
 	}
-	s.db.QueryRow("SELECT COUNT(*) FROM sessions"+where, args...).Scan(&stats.TotalSessions)
-	s.db.QueryRow("SELECT COUNT(*) FROM observations WHERE deleted_at IS NULL"+func() string {
+	var err error
+	if stats.TotalSessions, err = s.scanStatsCount("sessions", "SELECT COUNT(*) FROM sessions"+where, args...); err != nil {
+		return nil, err
+	}
+	if stats.TotalObservations, err = s.scanStatsCount("observations", "SELECT COUNT(*) FROM observations WHERE deleted_at IS NULL"+func() string {
 		if project == "" {
 			return ""
 		}
 		return " AND LOWER(project) = ?"
-	}(), args...).Scan(&stats.TotalObservations)
-	s.db.QueryRow("SELECT COUNT(*) FROM user_prompts"+where, args...).Scan(&stats.TotalPrompts)
+	}(), args...); err != nil {
+		return nil, err
+	}
+	if stats.TotalPrompts, err = s.scanStatsCount("user prompts", "SELECT COUNT(*) FROM user_prompts"+where, args...); err != nil {
+		return nil, err
+	}
 
 	projectsQuery := "SELECT project FROM observations WHERE project IS NOT NULL AND deleted_at IS NULL"
 	if project != "" {
@@ -3748,18 +3797,48 @@ func (s *Store) statsForProject(project string) (*Stats, error) {
 	projectsQuery += " GROUP BY project ORDER BY MAX(created_at) DESC"
 	rows, err := s.queryItHook(s.db, projectsQuery, args...)
 	if err != nil {
-		return stats, nil
+		return nil, fmt.Errorf("query projects: %w", err)
 	}
-	defer rows.Close()
 
 	for rows.Next() {
 		var p string
-		if err := rows.Scan(&p); err == nil {
-			stats.Projects = append(stats.Projects, p)
+		if err := rows.Scan(&p); err != nil {
+			return nil, closeRowsWithError(rows, fmt.Errorf("scan project: %w", err))
 		}
+		stats.Projects = append(stats.Projects, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, closeRowsWithError(rows, fmt.Errorf("iterate projects: %w", err))
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close projects: %w", err)
 	}
 
 	return stats, nil
+}
+
+func (s *Store) scanStatsCount(name, query string, args ...any) (int, error) {
+	rows, err := s.queryItHook(s.db, query, args...)
+	if err != nil {
+		return 0, fmt.Errorf("query %s count: %w", name, err)
+	}
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return 0, closeRowsWithError(rows, fmt.Errorf("iterate %s count: %w", name, err))
+		}
+		return 0, closeRowsWithError(rows, fmt.Errorf("scan %s count: %w", name, sql.ErrNoRows))
+	}
+	var count int
+	if err := rows.Scan(&count); err != nil {
+		return 0, closeRowsWithError(rows, fmt.Errorf("scan %s count: %w", name, err))
+	}
+	if err := rows.Err(); err != nil {
+		return 0, closeRowsWithError(rows, fmt.Errorf("iterate %s count: %w", name, err))
+	}
+	if err := rows.Close(); err != nil {
+		return 0, fmt.Errorf("close %s count: %w", name, err)
+	}
+	return count, nil
 }
 
 // ─── Project Existence ───────────────────────────────────────────────────────

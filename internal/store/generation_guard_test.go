@@ -9,12 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
-	"time"
 )
-
-func disableDatabaseGenerationCheckThrottle(generation *databaseGeneration) {
-	generation.checkInterval = 0
-}
 
 func TestDatabaseGenerationDetectsReplacedSidecar(t *testing.T) {
 	dir := t.TempDir()
@@ -26,7 +21,6 @@ func TestDatabaseGenerationDetectsReplacedSidecar(t *testing.T) {
 	}
 
 	generation := newDatabaseGeneration(dbPath)
-	disableDatabaseGenerationCheckThrottle(generation)
 	if err := generation.capture(); err != nil {
 		t.Fatalf("capture generation: %v", err)
 	}
@@ -54,7 +48,6 @@ func TestDatabaseGenerationAllowsLateSidecars(t *testing.T) {
 		t.Fatalf("write database: %v", err)
 	}
 	generation := newDatabaseGeneration(dbPath)
-	disableDatabaseGenerationCheckThrottle(generation)
 	if err := generation.capture(); err != nil {
 		t.Fatalf("capture without sidecars: %v", err)
 	}
@@ -84,7 +77,6 @@ func TestDatabaseGenerationRejectsSidecarDisappearance(t *testing.T) {
 		}
 	}
 	generation := newDatabaseGeneration(dbPath)
-	disableDatabaseGenerationCheckThrottle(generation)
 	if err := generation.capture(); err != nil {
 		t.Fatalf("capture generation: %v", err)
 	}
@@ -108,7 +100,6 @@ func TestDatabaseGenerationRejectsDatabaseDisappearance(t *testing.T) {
 		t.Fatalf("write database: %v", err)
 	}
 	generation := newDatabaseGeneration(dbPath)
-	disableDatabaseGenerationCheckThrottle(generation)
 	if err := generation.capture(); err != nil {
 		t.Fatalf("capture generation: %v", err)
 	}
@@ -130,7 +121,6 @@ func TestDatabaseGenerationPreservesIdentityReadErrors(t *testing.T) {
 		t.Fatalf("write database: %v", err)
 	}
 	generation := newDatabaseGeneration(dbPath)
-	disableDatabaseGenerationCheckThrottle(generation)
 	if err := generation.capture(); err != nil {
 		t.Fatalf("capture generation: %v", err)
 	}
@@ -153,125 +143,8 @@ func TestDatabaseGenerationPreservesIdentityReadErrors(t *testing.T) {
 	}
 }
 
-func TestDatabaseGenerationThrottlesIdentityScans(t *testing.T) {
-	now := time.Unix(1, 0)
-	generation := newDatabaseGeneration("engram.db")
-	generation.now = func() time.Time { return now }
-
-	reads := 0
-	original := readDatabaseFileID
-	t.Cleanup(func() { readDatabaseFileID = original })
-	readDatabaseFileID = func(path string) (databaseFileIdentity, error) {
-		reads++
-		return databaseFileIdentity(path), nil
-	}
-	if err := generation.capture(); err != nil {
-		t.Fatalf("capture generation: %v", err)
-	}
-	if reads != 3 {
-		t.Fatalf("capture identity reads = %d, want 3", reads)
-	}
-	if err := generation.check(); err != nil {
-		t.Fatalf("throttled check: %v", err)
-	}
-	if reads != 3 {
-		t.Fatalf("throttled identity reads = %d, want 3", reads)
-	}
-
-	now = now.Add(databaseGenerationCheckInterval)
-	if err := generation.check(); err != nil {
-		t.Fatalf("interval check: %v", err)
-	}
-	if reads != 6 {
-		t.Fatalf("interval identity reads = %d, want 6", reads)
-	}
-}
-
-func TestDatabaseGenerationDetectsReplacementAfterThrottleInterval(t *testing.T) {
-	now := time.Unix(1, 0)
-	generation := newDatabaseGeneration("engram.db")
-	generation.now = func() time.Time { return now }
-
-	replaced := false
-	original := readDatabaseFileID
-	t.Cleanup(func() { readDatabaseFileID = original })
-	readDatabaseFileID = func(path string) (databaseFileIdentity, error) {
-		if path == "engram.db" && replaced {
-			return "replacement", nil
-		}
-		return "original", nil
-	}
-	if err := generation.capture(); err != nil {
-		t.Fatalf("capture generation: %v", err)
-	}
-
-	replaced = true
-	if err := generation.check(); err != nil {
-		t.Fatalf("throttled replacement check: %v", err)
-	}
-	now = now.Add(databaseGenerationCheckInterval)
-	if err := generation.check(); !errors.Is(err, ErrDatabaseGenerationChanged) {
-		t.Fatalf("interval replacement check = %v, want ErrDatabaseGenerationChanged", err)
-	}
-}
-
-func TestDatabaseGenerationDetectsDatabaseDisappearanceAfterThrottleInterval(t *testing.T) {
-	now := time.Unix(1, 0)
-	generation := newDatabaseGeneration("engram.db")
-	generation.now = func() time.Time { return now }
-
-	missing := false
-	original := readDatabaseFileID
-	t.Cleanup(func() { readDatabaseFileID = original })
-	readDatabaseFileID = func(path string) (databaseFileIdentity, error) {
-		if path == "engram.db" && missing {
-			return "", os.ErrNotExist
-		}
-		return "original", nil
-	}
-	if err := generation.capture(); err != nil {
-		t.Fatalf("capture generation: %v", err)
-	}
-
-	missing = true
-	now = now.Add(databaseGenerationCheckInterval)
-	if err := generation.check(); !errors.Is(err, ErrDatabaseGenerationChanged) {
-		t.Fatalf("interval disappearance check = %v, want ErrDatabaseGenerationChanged", err)
-	}
-}
-
-func TestDatabaseGenerationAdoptsLateSidecarAfterThrottleInterval(t *testing.T) {
-	now := time.Unix(1, 0)
-	generation := newDatabaseGeneration("engram.db")
-	generation.now = func() time.Time { return now }
-
-	walPresent := false
-	original := readDatabaseFileID
-	t.Cleanup(func() { readDatabaseFileID = original })
-	readDatabaseFileID = func(path string) (databaseFileIdentity, error) {
-		if path == "engram.db-wal" && !walPresent {
-			return "", os.ErrNotExist
-		}
-		return databaseFileIdentity(path), nil
-	}
-	if err := generation.capture(); err != nil {
-		t.Fatalf("capture generation: %v", err)
-	}
-
-	walPresent = true
-	now = now.Add(databaseGenerationCheckInterval)
-	if err := generation.check(); err != nil {
-		t.Fatalf("adopt late WAL: %v", err)
-	}
-	if !generation.files[1].present {
-		t.Fatal("late WAL was not recorded")
-	}
-}
-
 func TestDatabaseGenerationDoesNotScanAfterStickyFailure(t *testing.T) {
-	now := time.Unix(1, 0)
 	generation := newDatabaseGeneration("engram.db")
-	generation.now = func() time.Time { return now }
 
 	reads := 0
 	replaced := false
@@ -289,7 +162,6 @@ func TestDatabaseGenerationDoesNotScanAfterStickyFailure(t *testing.T) {
 	}
 
 	replaced = true
-	now = now.Add(databaseGenerationCheckInterval)
 	if err := generation.check(); !errors.Is(err, ErrDatabaseGenerationChanged) {
 		t.Fatalf("replacement check = %v, want ErrDatabaseGenerationChanged", err)
 	}
@@ -307,54 +179,110 @@ type generationGuardTestTx struct {
 	rollbackCalls int
 	commitErr     error
 	rollbackErr   error
+	duringCall    func()
 }
 
 type generationGuardTestConn struct {
 	tx           driver.Tx
 	rows         driver.Rows
+	closed       bool
 	beginCalls   int
 	beginTxCalls int
 	queryCalls   int
+	execCalls    int
+	prepareCalls int
 	preparedStmt driver.Stmt
+	duringCall   func()
 }
 
 func (c *generationGuardTestConn) Prepare(string) (driver.Stmt, error) {
+	c.prepareCalls++
+	if c.duringCall != nil {
+		c.duringCall()
+	}
 	return c.preparedStmt, nil
 }
 
-func (*generationGuardTestConn) Close() error { return nil }
+func (c *generationGuardTestConn) Close() error { c.closed = true; return nil }
 
 func (c *generationGuardTestConn) Begin() (driver.Tx, error) {
 	c.beginCalls++
+	if c.duringCall != nil {
+		c.duringCall()
+	}
 	return c.tx, nil
 }
 
 func (c *generationGuardTestConn) QueryContext(context.Context, string, []driver.NamedValue) (driver.Rows, error) {
 	c.queryCalls++
+	if c.duringCall != nil {
+		c.duringCall()
+	}
 	return c.rows, nil
+}
+
+func (c *generationGuardTestConn) ExecContext(context.Context, string, []driver.NamedValue) (driver.Result, error) {
+	c.execCalls++
+	if c.duringCall != nil {
+		c.duringCall()
+	}
+	return driver.ResultNoRows, nil
 }
 
 type generationGuardTestConnBeginTx struct{ *generationGuardTestConn }
 
 func (c *generationGuardTestConnBeginTx) BeginTx(context.Context, driver.TxOptions) (driver.Tx, error) {
 	c.beginTxCalls++
+	if c.duringCall != nil {
+		c.duringCall()
+	}
 	return c.tx, nil
 }
 
-type generationGuardTestStmt struct{ rows driver.Rows }
+type generationGuardTestDriver struct {
+	conn       driver.Conn
+	duringCall func()
+}
 
-func (*generationGuardTestStmt) Close() error  { return nil }
-func (*generationGuardTestStmt) NumInput() int { return -1 }
-func (*generationGuardTestStmt) Exec([]driver.Value) (driver.Result, error) {
+func (d generationGuardTestDriver) Open(string) (driver.Conn, error) {
+	if d.duringCall != nil {
+		d.duringCall()
+	}
+	return d.conn, nil
+}
+
+type generationGuardTestStmt struct {
+	rows       driver.Rows
+	closed     bool
+	duringCall func()
+}
+
+func (s *generationGuardTestStmt) Close() error { s.closed = true; return nil }
+func (*generationGuardTestStmt) NumInput() int  { return -1 }
+func (s *generationGuardTestStmt) Exec([]driver.Value) (driver.Result, error) {
+	if s.duringCall != nil {
+		s.duringCall()
+	}
 	return driver.ResultNoRows, nil
 }
-func (s *generationGuardTestStmt) Query([]driver.Value) (driver.Rows, error) { return s.rows, nil }
+func (s *generationGuardTestStmt) Query([]driver.Value) (driver.Rows, error) {
+	if s.duringCall != nil {
+		s.duringCall()
+	}
+	return s.rows, nil
+}
 func (s *generationGuardTestStmt) QueryContext(context.Context, []driver.NamedValue) (driver.Rows, error) {
+	if s.duringCall != nil {
+		s.duringCall()
+	}
 	return s.rows, nil
 }
 
 func (t *generationGuardTestTx) Commit() error {
 	t.commitCalls++
+	if t.duringCall != nil {
+		t.duringCall()
+	}
 	return t.commitErr
 }
 
@@ -367,6 +295,9 @@ type generationGuardTestRows struct {
 	nextCalls          int
 	nextResultSetCalls int
 	closed             bool
+	duringCall         func()
+	nextErr            error
+	nextResultSetErr   error
 }
 
 func (r *generationGuardTestRows) Columns() []string { return []string{"value"} }
@@ -378,6 +309,12 @@ func (r *generationGuardTestRows) Close() error {
 
 func (r *generationGuardTestRows) Next(dest []driver.Value) error {
 	r.nextCalls++
+	if r.duringCall != nil {
+		r.duringCall()
+	}
+	if r.nextErr != nil {
+		return r.nextErr
+	}
 	dest[0] = int64(42)
 	return nil
 }
@@ -386,7 +323,10 @@ func (r *generationGuardTestRows) HasNextResultSet() bool { return true }
 
 func (r *generationGuardTestRows) NextResultSet() error {
 	r.nextResultSetCalls++
-	return nil
+	if r.duringCall != nil {
+		r.duringCall()
+	}
+	return r.nextResultSetErr
 }
 
 func (r *generationGuardTestRows) ColumnTypeScanType(int) reflect.Type {
@@ -405,6 +345,153 @@ func (r *generationGuardTestRows) ColumnTypePrecisionScale(int) (int64, int64, b
 
 func changedDatabaseGeneration() *databaseGeneration {
 	return &databaseGeneration{enabled: true, changed: true}
+}
+
+func generationChangedDuringCall(t *testing.T) (*databaseGeneration, func()) {
+	t.Helper()
+	replaced := false
+	original := readDatabaseFileID
+	t.Cleanup(func() { readDatabaseFileID = original })
+	readDatabaseFileID = func(string) (databaseFileIdentity, error) {
+		if replaced {
+			return "replacement", nil
+		}
+		return "original", nil
+	}
+	generation := newDatabaseGeneration("engram.db")
+	if err := generation.capture(); err != nil {
+		t.Fatalf("capture generation: %v", err)
+	}
+	return generation, func() { replaced = true }
+}
+
+func TestGenerationGuardRejectsSuccessAfterGenerationChangesDuringDriverCall(t *testing.T) {
+	t.Run("connect closes connection and releases lease", func(t *testing.T) {
+		generation, replace := generationChangedDuringCall(t)
+		raw := &generationGuardTestConn{}
+		dir := t.TempDir()
+		connector := generationConnector{
+			dsn:        filepath.Join(dir, "engram.db"),
+			driver:     generationGuardTestDriver{conn: raw, duringCall: replace},
+			generation: generation,
+		}
+		_, err := connector.Connect(context.Background())
+		if !errors.Is(err, ErrDatabaseGenerationChanged) {
+			t.Fatalf("connect error = %v, want ErrDatabaseGenerationChanged", err)
+		}
+		if !raw.closed {
+			t.Fatal("connection was not closed")
+		}
+		lease, err := acquireStoreLease(dir, false)
+		if err != nil {
+			t.Fatalf("acquire released lease: %v", err)
+		}
+		if err := lease.Close(); err != nil {
+			t.Fatalf("close released lease: %v", err)
+		}
+	})
+
+	t.Run("exec", func(t *testing.T) {
+		generation, replace := generationChangedDuringCall(t)
+		raw := &generationGuardTestConn{duringCall: replace}
+		_, err := (generationConn{Conn: raw, generation: generation}).ExecContext(context.Background(), "UPDATE observations", nil)
+		if !errors.Is(err, ErrDatabaseGenerationChanged) {
+			t.Fatalf("exec error = %v, want ErrDatabaseGenerationChanged", err)
+		}
+	})
+
+	t.Run("query closes rows", func(t *testing.T) {
+		generation, replace := generationChangedDuringCall(t)
+		rawRows := &generationGuardTestRows{}
+		raw := &generationGuardTestConn{rows: rawRows, duringCall: replace}
+		_, err := (generationConn{Conn: raw, generation: generation}).QueryContext(context.Background(), "SELECT 1", nil)
+		if !errors.Is(err, ErrDatabaseGenerationChanged) {
+			t.Fatalf("query error = %v, want ErrDatabaseGenerationChanged", err)
+		}
+		if !rawRows.closed {
+			t.Fatal("query rows were not closed")
+		}
+	})
+
+	t.Run("prepare closes statement", func(t *testing.T) {
+		generation, replace := generationChangedDuringCall(t)
+		rawStmt := &generationGuardTestStmt{}
+		raw := &generationGuardTestConn{preparedStmt: rawStmt, duringCall: replace}
+		_, err := (generationConn{Conn: raw, generation: generation}).Prepare("SELECT 1")
+		if !errors.Is(err, ErrDatabaseGenerationChanged) {
+			t.Fatalf("prepare error = %v, want ErrDatabaseGenerationChanged", err)
+		}
+		if !rawStmt.closed {
+			t.Fatal("prepared statement was not closed")
+		}
+	})
+
+	t.Run("begin rolls back transaction", func(t *testing.T) {
+		generation, replace := generationChangedDuringCall(t)
+		rawTx := &generationGuardTestTx{}
+		raw := &generationGuardTestConn{tx: rawTx, duringCall: replace}
+		_, err := (generationConn{Conn: raw, generation: generation}).Begin()
+		if !errors.Is(err, ErrDatabaseGenerationChanged) {
+			t.Fatalf("begin error = %v, want ErrDatabaseGenerationChanged", err)
+		}
+		if rawTx.rollbackCalls != 1 {
+			t.Fatalf("rollback calls = %d, want 1", rawTx.rollbackCalls)
+		}
+	})
+
+	t.Run("commit", func(t *testing.T) {
+		generation, replace := generationChangedDuringCall(t)
+		rawTx := &generationGuardTestTx{duringCall: replace}
+		err := (generationTx{Tx: rawTx, generation: generation}).Commit()
+		if !errors.Is(err, ErrDatabaseGenerationChanged) {
+			t.Fatalf("commit error = %v, want ErrDatabaseGenerationChanged", err)
+		}
+		if rawTx.commitCalls != 1 {
+			t.Fatalf("commit calls = %d, want 1", rawTx.commitCalls)
+		}
+	})
+
+	t.Run("rows next closes rows", func(t *testing.T) {
+		generation, replace := generationChangedDuringCall(t)
+		rawRows := &generationGuardTestRows{duringCall: replace}
+		err := (generationRows{Rows: rawRows, generation: generation}).Next(make([]driver.Value, 1))
+		if !errors.Is(err, ErrDatabaseGenerationChanged) {
+			t.Fatalf("next error = %v, want ErrDatabaseGenerationChanged", err)
+		}
+		if !rawRows.closed {
+			t.Fatal("rows were not closed")
+		}
+	})
+
+	t.Run("rows next EOF closes rows", func(t *testing.T) {
+		generation, replace := generationChangedDuringCall(t)
+		rawRows := &generationGuardTestRows{duringCall: replace, nextErr: io.EOF}
+		err := (generationRows{Rows: rawRows, generation: generation}).Next(make([]driver.Value, 1))
+		if !errors.Is(err, ErrDatabaseGenerationChanged) {
+			t.Fatalf("next EOF error = %v, want ErrDatabaseGenerationChanged", err)
+		}
+		if errors.Is(err, io.EOF) {
+			t.Fatalf("next EOF error = %v, must not report EOF after generation change", err)
+		}
+		if !rawRows.closed {
+			t.Fatal("rows were not closed")
+		}
+	})
+
+	t.Run("next result set closes rows", func(t *testing.T) {
+		generation, replace := generationChangedDuringCall(t)
+		rawRows := &generationGuardTestRows{duringCall: replace, nextResultSetErr: io.EOF}
+		err := (generationRows{Rows: rawRows, generation: generation}).NextResultSet()
+		if !errors.Is(err, ErrDatabaseGenerationChanged) {
+			t.Fatalf("next result set error = %v, want ErrDatabaseGenerationChanged", err)
+		}
+		if errors.Is(err, io.EOF) {
+			t.Fatalf("next result set error = %v, must not report EOF after generation change", err)
+		}
+		if !rawRows.closed {
+			t.Fatal("rows were not closed")
+		}
+	})
 }
 
 func TestGenerationTxCommitBlocksChangedGenerationAndRollsBack(t *testing.T) {

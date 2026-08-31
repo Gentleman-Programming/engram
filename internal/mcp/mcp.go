@@ -1657,7 +1657,10 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 			return respondWithProject(detRes, "No previous session memories found.", nil), nil
 		}
 
-		stats, _ := s.Stats()
+		stats, err := loadMCPStats(s)
+		if err != nil {
+			return mcp.NewToolResultError("Failed to get stats: " + err.Error()), nil
+		}
 		var projects string
 		if len(stats.Projects) > 0 {
 			projects = strings.Join(stats.Projects, ", ")

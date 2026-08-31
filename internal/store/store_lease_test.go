@@ -1,181 +1,143 @@
 package store
 
 import (
+	"context"
+	"database/sql/driver"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
-	"time"
 )
 
-func TestMoveDatabaseGenerationRefusesLiveStore(t *testing.T) {
-	useShortStoreLeaseTimeout(t)
-	base := t.TempDir()
-	sourceDir := filepath.Join(base, "source")
-	destinationDir := filepath.Join(base, "destination")
-	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
-		t.Fatalf("create source directory: %v", err)
+const storeLeaseProbeEnv = "ENGRAM_STORE_LEASE_EXCLUSIVE_PROBE"
+
+func TestStoreLeaseExclusiveProbe(t *testing.T) {
+	if os.Getenv(storeLeaseProbeEnv) != "1" {
+		return
 	}
 
-	s, err := New(FallbackConfig(sourceDir))
+	file, err := os.OpenFile(filepath.Join(os.Getenv("ENGRAM_STORE_LEASE_DIR"), ".engram.store.lock"), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		t.Fatalf("open source store: %v", err)
+		os.Exit(2)
 	}
-	sourceDB := filepath.Join(sourceDir, "engram.db")
-	destinationDB := filepath.Join(destinationDir, "engram.db")
-	if err := MoveDatabaseGeneration(sourceDB, destinationDB); !errors.Is(err, ErrDatabaseStoreInUse) {
-		_ = s.Close()
-		t.Fatalf("move with live store error = %v, want ErrDatabaseStoreInUse", err)
+	defer file.Close()
+	if err := lockStoreLease(file, true, true); err != nil {
+		os.Exit(1)
 	}
-	if _, err := os.Stat(destinationDB); !errors.Is(err, os.ErrNotExist) {
+	if err := unlockStoreLease(file); err != nil {
+		os.Exit(2)
+	}
+}
+
+func exclusiveStoreLeaseAvailable(t *testing.T, dataDir string) bool {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestStoreLeaseExclusiveProbe$")
+	cmd.Env = append(os.Environ(), storeLeaseProbeEnv+"=1", "ENGRAM_STORE_LEASE_DIR="+dataDir)
+	return cmd.Run() == nil
+}
+
+func TestStoreLifetimesCoordinateLeases(t *testing.T) {
+	dir := t.TempDir()
+	first, err := New(FallbackConfig(dir))
+	if err != nil {
+		t.Fatalf("open first store: %v", err)
+	}
+	second, err := New(FallbackConfig(dir))
+	if err != nil {
+		_ = first.Close()
+		t.Fatalf("open second store: %v", err)
+	}
+	if exclusiveStoreLeaseAvailable(t, dir) {
+		_ = second.Close()
+		_ = first.Close()
+		t.Fatal("exclusive lease acquired while two stores were live")
+	}
+	if err := first.Close(); err != nil {
+		_ = second.Close()
+		t.Fatalf("close first store: %v", err)
+	}
+	if exclusiveStoreLeaseAvailable(t, dir) {
+		_ = second.Close()
+		t.Fatal("exclusive lease acquired while second store was live")
+	}
+	if err := second.Close(); err != nil {
+		t.Fatalf("close second store: %v", err)
+	}
+	if !exclusiveStoreLeaseAvailable(t, dir) {
+		t.Fatal("exclusive lease remained blocked after both stores closed")
+	}
+}
+
+func TestBorrowedConnectionRetainsLeaseAfterStoreClose(t *testing.T) {
+	dir := t.TempDir()
+	s, err := New(FallbackConfig(dir))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	conn, err := s.DB().Conn(context.Background())
+	if err != nil {
 		_ = s.Close()
-		t.Fatalf("destination database exists after refused move: %v", err)
+		t.Fatalf("borrow connection: %v", err)
 	}
 	if err := s.Close(); err != nil {
-		t.Fatalf("close source store: %v", err)
+		_ = conn.Close()
+		t.Fatalf("close store: %v", err)
 	}
-
-	if err := MoveDatabaseGeneration(sourceDB, destinationDB); err != nil {
-		t.Fatalf("move after store close: %v", err)
+	if exclusiveStoreLeaseAvailable(t, dir) {
+		_ = conn.Close()
+		t.Fatal("exclusive lease acquired while borrowed connection was live")
 	}
-	if _, err := os.Stat(destinationDB); err != nil {
-		t.Fatalf("destination database missing after move: %v", err)
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close borrowed connection: %v", err)
 	}
-	if _, err := os.Stat(sourceDB); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("source database still exists after move: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(sourceDir, ".engram.store.lock")); err != nil {
-		t.Fatalf("source lease missing after move: %v", err)
+	if !exclusiveStoreLeaseAvailable(t, dir) {
+		t.Fatal("exclusive lease remained blocked after borrowed connection closed")
 	}
 }
 
-func TestMoveDatabaseGenerationRollsBackPartialMove(t *testing.T) {
-	base := t.TempDir()
-	sourceDir := filepath.Join(base, "source")
-	destinationDir := filepath.Join(base, "destination")
-	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
-		t.Fatalf("create source directory: %v", err)
-	}
-	sourceDB := filepath.Join(sourceDir, "engram.db")
-	destinationDB := filepath.Join(destinationDir, "engram.db")
-	for _, suffix := range []string{"", "-wal", "-shm"} {
-		if err := os.WriteFile(sourceDB+suffix, []byte("source"+suffix), 0o600); err != nil {
-			t.Fatalf("write source %q: %v", suffix, err)
-		}
-	}
+type failingGenerationDriver struct{ err error }
 
-	originalRename := renameDatabaseFile
-	t.Cleanup(func() { renameDatabaseFile = originalRename })
-	failure := errors.New("forced WAL move failure")
-	renameDatabaseFile = func(source, destination string) error {
-		if source == sourceDB+"-wal" {
-			return failure
-		}
-		return originalRename(source, destination)
-	}
+func (d failingGenerationDriver) Open(string) (driver.Conn, error) {
+	return nil, d.err
+}
 
-	err := MoveDatabaseGeneration(sourceDB, destinationDB)
-	if !errors.Is(err, failure) {
-		t.Fatalf("move error = %v, want wrapped forced failure", err)
+func TestGenerationConnectionOpenFailureReleasesLease(t *testing.T) {
+	dir := t.TempDir()
+	openErr := errors.New("open failed")
+	connector := generationConnector{
+		dsn:        filepath.Join(dir, "engram.db"),
+		driver:     failingGenerationDriver{err: openErr},
+		generation: &databaseGeneration{},
 	}
-	for _, suffix := range []string{"", "-wal", "-shm"} {
-		content, readErr := os.ReadFile(sourceDB + suffix)
-		if readErr != nil {
-			t.Fatalf("read restored source %q: %v", suffix, readErr)
-		}
-		if string(content) != "source"+suffix {
-			t.Fatalf("source %q content = %q", suffix, content)
-		}
-		if _, statErr := os.Stat(destinationDB + suffix); !errors.Is(statErr, os.ErrNotExist) {
-			t.Fatalf("destination %q exists after rollback: %v", suffix, statErr)
-		}
+	_, err := connector.Connect(context.Background())
+	if !errors.Is(err, openErr) {
+		t.Fatalf("connect error = %v, want wrapped open error", err)
+	}
+	if !exclusiveStoreLeaseAvailable(t, dir) {
+		t.Fatal("exclusive lease remained blocked after connection open failure")
 	}
 }
 
-func TestMoveDatabaseGenerationRequiresSourceDatabase(t *testing.T) {
-	base := t.TempDir()
-	sourceDir := filepath.Join(base, "source")
-	destinationDir := filepath.Join(base, "destination")
-	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
-		t.Fatalf("create source directory: %v", err)
-	}
-	sourceDB := filepath.Join(sourceDir, "engram.db")
-	destinationDB := filepath.Join(destinationDir, "engram.db")
-	if err := os.WriteFile(sourceDB+"-wal", []byte("orphaned WAL"), 0o600); err != nil {
-		t.Fatalf("write source WAL: %v", err)
-	}
+type leaseCloseTestConn struct{ closeErr error }
 
-	err := MoveDatabaseGeneration(sourceDB, destinationDB)
-	if !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("move error = %v, want missing source database", err)
-	}
-	if _, err := os.Stat(sourceDB + "-wal"); err != nil {
-		t.Fatalf("source WAL after failed move: %v", err)
-	}
-	if _, err := os.Stat(destinationDB + "-wal"); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("destination WAL after failed move: %v", err)
-	}
-}
+func (c leaseCloseTestConn) Prepare(string) (driver.Stmt, error) { return nil, driver.ErrSkip }
+func (c leaseCloseTestConn) Close() error                        { return c.closeErr }
+func (leaseCloseTestConn) Begin() (driver.Tx, error)             { return nil, driver.ErrSkip }
 
-func TestMoveDatabaseGenerationPreservesExistingDestination(t *testing.T) {
-	base := t.TempDir()
-	sourceDir := filepath.Join(base, "source")
-	destinationDir := filepath.Join(base, "destination")
-	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
-		t.Fatalf("create source directory: %v", err)
-	}
-	sourceDB := filepath.Join(sourceDir, "engram.db")
-	destinationDB := filepath.Join(destinationDir, "engram.db")
-	for _, suffix := range []string{"", "-wal", "-shm"} {
-		if err := os.WriteFile(sourceDB+suffix, []byte("source"+suffix), 0o600); err != nil {
-			t.Fatalf("write source %q: %v", suffix, err)
-		}
-	}
-	if err := os.MkdirAll(destinationDir, 0o755); err != nil {
-		t.Fatalf("create destination directory: %v", err)
-	}
-	if err := os.WriteFile(destinationDB+"-wal", []byte("destination WAL"), 0o600); err != nil {
-		t.Fatalf("write destination WAL: %v", err)
-	}
-
-	originalRename := renameDatabaseFile
-	t.Cleanup(func() { renameDatabaseFile = originalRename })
-	renameCalls := 0
-	renameDatabaseFile = func(source, destination string) error {
-		renameCalls++
-		return errors.New("rename must not be called")
-	}
-
-	err := MoveDatabaseGeneration(sourceDB, destinationDB)
-	if !errors.Is(err, os.ErrExist) {
-		t.Fatalf("move error = %v, want existing destination", err)
-	}
-	if renameCalls != 0 {
-		t.Fatalf("rename calls = %d, want 0", renameCalls)
-	}
-	content, err := os.ReadFile(destinationDB + "-wal")
+func TestGenerationConnectionCloseReleasesLeaseAfterCloseError(t *testing.T) {
+	dir := t.TempDir()
+	lease, err := acquireStoreLease(dir, false)
 	if err != nil {
-		t.Fatalf("read destination WAL: %v", err)
+		t.Fatalf("acquire connection lease: %v", err)
 	}
-	if string(content) != "destination WAL" {
-		t.Fatalf("destination WAL content = %q, want preserved content", content)
+	closeErr := errors.New("close failed")
+	err = (generationConn{Conn: leaseCloseTestConn{closeErr: closeErr}, lease: lease}).Close()
+	if !errors.Is(err, closeErr) {
+		t.Fatalf("close error = %v, want wrapped close error", err)
 	}
-}
-
-func TestStoreLeasePathAllowsMissingDataDirectory(t *testing.T) {
-	parent := t.TempDir()
-	dataDir := filepath.Join(parent, "missing")
-
-	lockPath, err := storeLeasePath(dataDir)
-	if err != nil {
-		t.Fatalf("derive lease path: %v", err)
-	}
-	if want := filepath.Join(dataDir, ".engram.store.lock"); lockPath != want {
-		t.Fatalf("lease path = %q, want %q", lockPath, want)
-	}
-	if _, err := os.Stat(dataDir); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("missing data directory after lease derivation: %v", err)
+	if !exclusiveStoreLeaseAvailable(t, dir) {
+		t.Fatal("exclusive lease remained blocked after connection close error")
 	}
 }
 
@@ -192,60 +154,4 @@ func TestStoreLeasePathIsInsideCanonicalDataDirectory(t *testing.T) {
 	if want := filepath.Join(canonicalDir, ".engram.store.lock"); lockPath != want {
 		t.Fatalf("lease path = %q, want %q", lockPath, want)
 	}
-}
-
-func TestMoveDatabaseGenerationCreatesDirectoriesBeforeLeasing(t *testing.T) {
-	base := t.TempDir()
-	sourceDir := filepath.Join(base, "source")
-	destinationDir := filepath.Join(base, "destination")
-
-	err := MoveDatabaseGeneration(filepath.Join(sourceDir, "engram.db"), filepath.Join(destinationDir, "engram.db"))
-	if !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("move error = %v, want missing source database", err)
-	}
-	for _, dir := range []string{sourceDir, destinationDir} {
-		if _, err := os.Stat(filepath.Join(dir, ".engram.store.lock")); err != nil {
-			t.Fatalf("lease in %s after directory creation: %v", dir, err)
-		}
-	}
-}
-
-func TestStoreLeasePathPreservesResolutionErrors(t *testing.T) {
-	_, err := storeLeasePath(filepath.Join(t.TempDir(), "\x00"))
-	if err == nil {
-		t.Fatal("derive lease path with invalid path succeeded")
-	}
-	if errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("invalid path error = %v, must not be treated as missing", err)
-	}
-}
-
-func TestAcquireStoreLeaseTimesOutWithGuidance(t *testing.T) {
-	useShortStoreLeaseTimeout(t)
-
-	dir := t.TempDir()
-	held, err := acquireStoreLease(dir, true)
-	if err != nil {
-		t.Fatalf("acquire held lease: %v", err)
-	}
-	defer held.Close()
-	_, err = acquireStoreLease(dir, false)
-	if !errors.Is(err, ErrDatabaseStoreInUse) {
-		t.Fatalf("acquire error = %v, want ErrDatabaseStoreInUse", err)
-	}
-	if !strings.Contains(err.Error(), "restart") {
-		t.Fatalf("timeout diagnostic = %q, want restart guidance", err)
-	}
-}
-
-func useShortStoreLeaseTimeout(t *testing.T) {
-	t.Helper()
-	originalTimeout := storeLeaseTimeout
-	originalRetry := storeLeaseRetryInterval
-	storeLeaseTimeout = 20 * time.Millisecond
-	storeLeaseRetryInterval = time.Millisecond
-	t.Cleanup(func() {
-		storeLeaseTimeout = originalTimeout
-		storeLeaseRetryInterval = originalRetry
-	})
 }

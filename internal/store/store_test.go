@@ -6121,8 +6121,8 @@ func TestStoreUncoveredBranchesPushToHundred(t *testing.T) {
 			}
 			return origQueryIt(db, query, args...)
 		}
-		if _, err := s.Stats(); err != nil {
-			t.Fatalf("stats should swallow project query errors: %v", err)
+		if _, err := s.Stats(); err == nil {
+			t.Fatal("expected stats project query error")
 		}
 
 		if err := s.EndSession("s-c", "has summary"); err != nil {

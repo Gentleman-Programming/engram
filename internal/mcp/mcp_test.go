@@ -1678,8 +1678,8 @@ func TestMCPHandlersReturnErrorsWhenStoreClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("closed store stats call: %v", err)
 	}
-	if statsRes.IsError {
-		t.Fatalf("expected stats fallback result even when store is closed")
+	if !statsRes.IsError {
+		t.Fatalf("expected stats to return tool error when store is closed")
 	}
 
 	timelineRes, err := handleTimeline(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"observation_id": 1.0}}})
@@ -2072,6 +2072,50 @@ func TestHandleStatsReturnsErrorWhenLoaderFails(t *testing.T) {
 	}
 	if !res.IsError {
 		t.Fatalf("expected tool error when stats loader fails")
+	}
+}
+
+func TestHandleContextReturnsToolErrorWhenStatsLoaderDetectsGenerationChange(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("s-context-generation-change", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "s-context-generation-change",
+		Type:      "decision",
+		Title:     "Context must be complete",
+		Content:   "Return an error instead of partial context.",
+		Project:   "engram",
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	prev := loadMCPStats
+	loadMCPStats = func(s *store.Store) (*store.Stats, error) {
+		return nil, store.ErrDatabaseGenerationChanged
+	}
+	t.Cleanup(func() {
+		loadMCPStats = prev
+	})
+
+	res, err := handleContext(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"project": "engram",
+		"scope":   "project",
+	}}})
+	if err != nil {
+		t.Fatalf("context handler error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("expected tool error when stats loader detects generation change")
+	}
+	text := callResultText(t, res)
+	for _, want := range []string{"Failed to get stats:", "database generation changed", "restart Engram"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected generation-change tool error to contain %q: %s", want, text)
+		}
+	}
+	if strings.Contains(text, "Context must be complete") || strings.Contains(text, "Memory stats:") {
+		t.Fatalf("tool error must not return partial context: %s", text)
 	}
 }
 
