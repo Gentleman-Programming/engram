@@ -833,6 +833,24 @@ func TestRuntimeWorktreeDirectoryNormalizesCaseOnWindows(t *testing.T) {
 	}
 }
 
+func TestRuntimeWorktreeDirectoryFallsBackToNonGitDirectory(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	if got, want := RuntimeWorktreeDirectory("."), runtimeCanonicalizePath(dir); got != want {
+		t.Fatalf("non-Git runtime directory = %q, want %q", got, want)
+	}
+}
+
+func TestRuntimeWorktreeDirectoryUsesCurrentDirectoryForWhitespaceInput(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	if got, want := RuntimeWorktreeDirectory(" \t "), runtimeCanonicalizePath(dir); got != want {
+		t.Fatalf("whitespace runtime directory = %q, want %q", got, want)
+	}
+}
+
 func TestDetectProjectFull_WorktreeRemoteUsesPrimaryRepositoryPath(t *testing.T) {
 	parent := t.TempDir()
 	repo := filepath.Join(parent, "canonical-repo")

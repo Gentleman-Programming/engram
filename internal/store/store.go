@@ -2372,7 +2372,7 @@ func (s *Store) ActiveRuntimeSessions(project string, directories ...string) ([]
 		args = append(args, directory)
 	}
 
-	rows, err := s.db.Query(`
+	rows, err := s.queryHook(s.db, `
 		SELECT DISTINCT id
 		FROM sessions
 		WHERE LOWER(project) = ?

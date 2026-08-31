@@ -11842,6 +11842,46 @@ func TestActiveRuntimeSessionsScopedByProjectAndDirectory(t *testing.T) {
 	}
 }
 
+func TestActiveRuntimeSessionsReturnsNoResultsForEmptyProject(t *testing.T) {
+	s := newTestStore(t)
+
+	ids, err := s.ActiveRuntimeSessions("", "/work/engram")
+	if err != nil {
+		t.Fatalf("ActiveRuntimeSessions: %v", err)
+	}
+	if ids != nil {
+		t.Fatalf("empty project IDs = %#v, want nil", ids)
+	}
+}
+
+func TestActiveRuntimeSessionsReturnsNoResultsForEmptyDirectory(t *testing.T) {
+	s := newTestStore(t)
+
+	ids, err := s.ActiveRuntimeSessions("engram", "")
+	if err != nil {
+		t.Fatalf("ActiveRuntimeSessions: %v", err)
+	}
+	if ids != nil {
+		t.Fatalf("empty directory IDs = %#v, want nil", ids)
+	}
+}
+
+func TestActiveRuntimeSessionsReturnsQueryError(t *testing.T) {
+	s := newTestStore(t)
+	wantErr := errors.New("query failed")
+	s.hooks.query = func(queryer, string, ...any) (*sql.Rows, error) {
+		return nil, wantErr
+	}
+
+	ids, err := s.ActiveRuntimeSessions("engram", "/work/engram")
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("ActiveRuntimeSessions error = %v, want %v", err, wantErr)
+	}
+	if ids != nil {
+		t.Fatalf("query error IDs = %#v, want nil", ids)
+	}
+}
+
 // ─── match_mode tests (issue #352) ──────────────────────────────────────────
 
 // seedMatchModeFixture creates a session and three observations with partial
