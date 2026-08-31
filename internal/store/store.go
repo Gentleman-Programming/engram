@@ -541,9 +541,11 @@ func (s *Store) MaxObservationLength() int {
 // ─── Store ───────────────────────────────────────────────────────────────────
 
 type Store struct {
-	db    *sql.DB
-	cfg   Config
-	hooks storeHooks
+	db      *sql.DB
+	dbPath  string
+	dbIdent os.FileInfo
+	cfg     Config
+	hooks   storeHooks
 
 	repairMu        sync.Mutex
 	repairDone      bool
@@ -727,7 +729,10 @@ func New(cfg Config) (*Store, error) {
 		}
 	}
 
-	s := &Store{db: db, cfg: cfg, hooks: defaultStoreHooks()}
+	s := &Store{db: db, cfg: cfg, hooks: defaultStoreHooks(), dbPath: dbPath}
+	if st, err := os.Stat(dbPath); err == nil {
+		s.dbIdent = st
+	}
 	if err := s.migrate(); err != nil {
 		return nil, fmt.Errorf("engram: migration: %w", err)
 	}
@@ -765,7 +770,10 @@ func newWithoutRepair(cfg Config) (*Store, error) {
 		}
 	}
 
-	s := &Store{db: db, cfg: cfg, hooks: defaultStoreHooks()}
+	s := &Store{db: db, cfg: cfg, hooks: defaultStoreHooks(), dbPath: dbPath}
+	if st, err := os.Stat(dbPath); err == nil {
+		s.dbIdent = st
+	}
 	if err := s.migrate(); err != nil {
 		return nil, fmt.Errorf("engram: migration: %w", err)
 	}
@@ -2244,13 +2252,17 @@ func (s *Store) CreateSession(id, project, directory string) error {
 	if err := validateSessionID(id); err != nil {
 		return err
 	}
+	// Deterministic prevention gate (#571): refuse to write into a dead generation.
+	if err := s.checkGeneration(); err != nil {
+		return err
+	}
 	// Normalize project name before storing
 	project, _ = NormalizeProject(project)
 	if strings.TrimSpace(project) == "" {
 		return ErrProjectRequired
 	}
 
-	return s.withTx(func(tx *sql.Tx) error {
+	err := s.withTx(func(tx *sql.Tx) error {
 		if err := s.createSessionTx(tx, id, project, directory); err != nil {
 			return err
 		}
@@ -2272,6 +2284,12 @@ func (s *Store) CreateSession(id, project, directory string) error {
 			Summary:   persisted.Summary,
 		})
 	})
+	if err != nil {
+		return s.classifyWriteErr(err)
+	}
+	// Post-commit detection gate (#477): never acknowledge a write a fresh
+	// independent connection cannot observe.
+	return s.verifyVisible(`SELECT 1 FROM sessions WHERE id = ?`, id)
 }
 
 func (s *Store) EndSession(id string, summary string) error {
@@ -2527,6 +2545,10 @@ func ValidateObservationTitle(title string) error {
 }
 
 func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
+	// Deterministic prevention gate (#571): refuse to write into a dead generation.
+	if err := s.checkGeneration(); err != nil {
+		return 0, err
+	}
 	// Normalize project name (lowercase + trim) before any persistence
 	p.Project, _ = NormalizeProject(p.Project)
 
@@ -2682,6 +2704,11 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 		return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpUpsert, observationPayloadFromObservation(obs))
 	})
 	if err != nil {
+		return 0, s.classifyWriteErr(err)
+	}
+	// Post-commit detection gate (#477): never acknowledge a write a fresh
+	// independent connection cannot observe.
+	if err := s.verifyVisible(`SELECT 1 FROM observations WHERE id = ?`, observationID); err != nil {
 		return 0, err
 	}
 	return observationID, nil
