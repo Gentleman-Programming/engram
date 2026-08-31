@@ -96,17 +96,6 @@ func runtimeSessionDirectory(directory string) string {
 	return projectpkg.RuntimeWorktreeDirectory(directory)
 }
 
-func absoluteRuntimeDirectory(directory string) string {
-	directory = strings.TrimSpace(directory)
-	if directory == "" {
-		directory = currentWorkingDirectory()
-	}
-	if absoluteDirectory, err := filepath.Abs(directory); err == nil {
-		return absoluteDirectory
-	}
-	return directory
-}
-
 // ─── Tool Profiles ───────────────────────────────────────────────────────────
 //
 // "agent" — tools AI agents use during coding sessions:
@@ -1979,11 +1968,7 @@ func handleSessionStart(s *store.Store, cfg MCPConfig, activity *SessionActivity
 		project, _ := store.NormalizeProject(detRes.Project)
 
 		activity.RecordToolCall(defaultSessionID(project))
-		if resolvedDirectory == "" {
-			resolvedDirectory = runtimeSessionDirectory("")
-		} else if !filepath.IsAbs(resolvedDirectory) {
-			resolvedDirectory = absoluteRuntimeDirectory(resolvedDirectory)
-		}
+		resolvedDirectory = runtimeSessionDirectory(resolvedDirectory)
 
 		if err := s.CreateSession(id, project, resolvedDirectory); err != nil {
 			return mcp.NewToolResultError("Failed to start session: " + err.Error()), nil
@@ -3048,8 +3033,7 @@ func defaultSessionID(project string) string {
 // candidates; a persisted session ID remains the sole identity.
 func resolveFallbackSessionID(s *store.Store, project string) (string, error) {
 	if s != nil {
-		directory := absoluteRuntimeDirectory("")
-		ids, err := s.ActiveRuntimeSessions(project, directory, runtimeSessionDirectory(directory))
+		ids, err := s.ActiveRuntimeSessions(project, runtimeSessionDirectory(""))
 		if err == nil {
 			switch len(ids) {
 			case 0:

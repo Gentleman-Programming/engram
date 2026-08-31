@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -309,9 +310,17 @@ func RuntimeWorktreeDirectory(dir string) string {
 		dir = absolute
 	}
 	if worktreeRoot := detectGitWorktreeDir(dir); worktreeRoot != "" {
-		return canonicalizePath(worktreeRoot)
+		return runtimeCanonicalizePath(worktreeRoot)
 	}
-	return canonicalizePath(dir)
+	return runtimeCanonicalizePath(dir)
+}
+
+func runtimeCanonicalizePath(path string) string {
+	path = canonicalizePath(path)
+	if runtime.GOOS == "windows" {
+		return strings.ToLower(path)
+	}
+	return path
 }
 
 func normalizeConfigProjectName(projectName string) (string, error) {

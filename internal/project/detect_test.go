@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -804,14 +805,31 @@ func TestRuntimeWorktreeDirectoryKeepsLinkedWorktreesDistinct(t *testing.T) {
 
 	primaryDirectory := RuntimeWorktreeDirectory(primary)
 	siblingDirectory := RuntimeWorktreeDirectory(filepath.Join(sibling, "nested"))
-	if primaryDirectory != canonicalizePath(primary) {
-		t.Fatalf("primary runtime directory = %q, want %q", primaryDirectory, canonicalizePath(primary))
+	if primaryDirectory != runtimeCanonicalizePath(primary) {
+		t.Fatalf("primary runtime directory = %q, want %q", primaryDirectory, runtimeCanonicalizePath(primary))
 	}
-	if siblingDirectory != canonicalizePath(sibling) {
-		t.Fatalf("sibling runtime directory = %q, want %q", siblingDirectory, canonicalizePath(sibling))
+	if siblingDirectory != runtimeCanonicalizePath(sibling) {
+		t.Fatalf("sibling runtime directory = %q, want %q", siblingDirectory, runtimeCanonicalizePath(sibling))
 	}
 	if primaryDirectory == siblingDirectory {
 		t.Fatalf("linked worktree runtime directories collapsed to %q", primaryDirectory)
+	}
+}
+
+func TestRuntimeWorktreeDirectoryNormalizesCaseOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-only path case normalization")
+	}
+	dir := filepath.Join(t.TempDir(), "CaseSensitive")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initGit(t, dir)
+
+	actual := RuntimeWorktreeDirectory(dir)
+	equivalent := RuntimeWorktreeDirectory(strings.ToLower(dir))
+	if equivalent != actual {
+		t.Fatalf("case-equivalent worktree directory = %q, want %q", equivalent, actual)
 	}
 }
 

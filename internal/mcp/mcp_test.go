@@ -768,12 +768,13 @@ func TestHandleSaveBindsNestedWriteToExplicitNestedRuntimeSession(t *testing.T) 
 	if err != nil || startResult.IsError {
 		t.Fatalf("start session: err=%v text=%q", err, callResultText(t, startResult))
 	}
-	if session, err := s.GetSession("jd-explicit-nested-runtime-session"); err != nil || session.Directory != nestedDirectory {
-		t.Fatalf("explicit session directory = %#v, err=%v; want %q", session, err, nestedDirectory)
+	wantDirectory := runtimeSessionDirectory(repository)
+	if session, err := s.GetSession("jd-explicit-nested-runtime-session"); err != nil || session.Directory != wantDirectory {
+		t.Fatalf("explicit session directory = %#v, err=%v; want worktree root %q", session, err, wantDirectory)
 	}
 
 	originalWorkingDirectory := currentWorkingDirectory
-	currentWorkingDirectory = func() string { return nestedDirectory }
+	currentWorkingDirectory = func() string { return repository }
 	t.Cleanup(func() { currentWorkingDirectory = originalWorkingDirectory })
 	saveResult, err := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "Explicit nested runtime save",
@@ -809,10 +810,7 @@ func TestHandleSaveBindsRelativeDirectoryRuntimeSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get session: %v", err)
 	}
-	wantDirectory, err := filepath.Abs(".")
-	if err != nil {
-		t.Fatalf("resolve relative directory: %v", err)
-	}
+	wantDirectory := runtimeSessionDirectory(".")
 	if session.Directory != wantDirectory {
 		t.Fatalf("relative session directory = %q, want stable absolute directory %q", session.Directory, wantDirectory)
 	}
@@ -4235,8 +4233,9 @@ func TestSessionStartWithExplicitDirectoryPreservesDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get session: %v", err)
 	}
-	if sess.Directory != explicitDir {
-		t.Fatalf("expected directory=%q, got %q", explicitDir, sess.Directory)
+	wantDirectory := runtimeSessionDirectory(explicitDir)
+	if sess.Directory != wantDirectory {
+		t.Fatalf("expected directory=%q, got %q", wantDirectory, sess.Directory)
 	}
 }
 
@@ -4285,8 +4284,9 @@ func TestSessionStartWithExplicitDirectoryResolvesProjectFromDirectory(t *testin
 	if sess.Project != "explicit-session-project" {
 		t.Fatalf("expected explicit directory project, got %q", sess.Project)
 	}
-	if sess.Directory != explicitDir {
-		t.Fatalf("expected persisted directory=%q, got %q", explicitDir, sess.Directory)
+	wantDirectory := runtimeSessionDirectory(rightRepo)
+	if sess.Directory != wantDirectory {
+		t.Fatalf("expected persisted worktree root=%q, got %q", wantDirectory, sess.Directory)
 	}
 }
 
@@ -4326,8 +4326,9 @@ func TestSessionStartWithExplicitDirectoryTrimsWhitespaceBeforePersisting(t *tes
 	if sess.Project != "trimmed-session-project" {
 		t.Fatalf("expected trimmed explicit directory project, got %q", sess.Project)
 	}
-	if sess.Directory != trimmedDir {
-		t.Fatalf("expected trimmed persisted directory=%q, got %q", trimmedDir, sess.Directory)
+	wantDirectory := runtimeSessionDirectory(repoDir)
+	if sess.Directory != wantDirectory {
+		t.Fatalf("expected trimmed persisted worktree root=%q, got %q", wantDirectory, sess.Directory)
 	}
 }
 
@@ -4371,8 +4372,9 @@ func TestSessionStartWithExplicitPlainDirectoryUsesDirectoryBasenameProject(t *t
 	if sess.Project != "plain-session-target" {
 		t.Fatalf("expected explicit plain directory project, got %q", sess.Project)
 	}
-	if sess.Directory != explicitDir {
-		t.Fatalf("expected persisted directory=%q, got %q", explicitDir, sess.Directory)
+	wantDirectory := runtimeSessionDirectory(explicitDir)
+	if sess.Directory != wantDirectory {
+		t.Fatalf("expected persisted directory=%q, got %q", wantDirectory, sess.Directory)
 	}
 
 	body := callResultJSON(t, res)
