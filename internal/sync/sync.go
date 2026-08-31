@@ -101,13 +101,15 @@ type ChunkData struct {
 
 // historicalExportState is the validated state reconstructed from manifest
 // chunks for a local export. Identities preserve tombstones for reconciliation;
-// availability tracks only endpoints that remain live for relation closure.
+// Lifecycle availability and relation endpoints are reset across missing history,
+// then re-established only by readable chunks that follow the gap.
 type historicalExportState struct {
 	identities              map[string]struct{}
 	relationKeys            map[string]struct{}
 	complete                bool
 	sessionAvailability     map[string]bool
 	observationAvailability map[string]bool
+	availableObservations   map[string]bool
 	activeObservations      map[string]string
 }
 
@@ -123,22 +125,21 @@ func newHistoricalExportState(relevant map[string]struct{}) *historicalExportSta
 		complete:                true,
 		sessionAvailability:     make(map[string]bool),
 		observationAvailability: make(map[string]bool),
+		availableObservations:   make(map[string]bool),
 		activeObservations:      make(map[string]string),
 	}
 }
 
-func (state *historicalExportState) resetAvailability() {
+func (state *historicalExportState) resetLifecycleAvailability() {
 	state.sessionAvailability = make(map[string]bool)
 	state.observationAvailability = make(map[string]bool)
+	state.availableObservations = make(map[string]bool)
 	state.activeObservations = make(map[string]string)
 }
 
 func (state *historicalExportState) availableObservationKeys() map[string]struct{} {
-	if !state.complete {
-		return nil
-	}
-	available := make(map[string]struct{}, len(state.observationAvailability))
-	for syncID, live := range state.observationAvailability {
+	available := make(map[string]struct{}, len(state.availableObservations))
+	for syncID, live := range state.availableObservations {
 		if live {
 			available[syncID] = struct{}{}
 		}
@@ -1029,8 +1030,8 @@ func (sy *Syncer) sessionIDsAvailableInChunks(entries []ChunkEntry, knownChunks 
 			if mutation.Entity != store.SyncEntitySession {
 				continue
 			}
-			sessionID := strings.TrimSpace(mutation.EntityKey)
-			if sessionID == "" {
+			sessionID := mutation.EntityKey
+			if strings.TrimSpace(sessionID) == "" {
 				continue
 			}
 			switch mutation.Op {
@@ -1115,7 +1116,7 @@ func buildImportMutations(chunk ChunkData) []store.SyncMutation {
 	merged := make([]store.SyncMutation, 0, len(synthesized)+len(explicit))
 	for _, mutation := range retainedSynthesized {
 		if mutation.Entity == store.SyncEntitySession && mutation.Op == store.SyncOpUpsert {
-			if _, required := requiredSessionIDs[strings.TrimSpace(mutation.EntityKey)]; !required {
+			if _, required := requiredSessionIDs[mutation.EntityKey]; !required {
 				continue
 			}
 		}
@@ -1133,8 +1134,8 @@ func referencedSessionIDsFromMutations(mutations []store.SyncMutation) map[strin
 		}
 		switch mutation.Entity {
 		case store.SyncEntitySession:
-			sessionID := strings.TrimSpace(mutation.EntityKey)
-			if sessionID != "" {
+			sessionID := mutation.EntityKey
+			if strings.TrimSpace(sessionID) != "" {
 				required[sessionID] = struct{}{}
 			}
 		case store.SyncEntityObservation, store.SyncEntityPrompt:
@@ -1144,8 +1145,8 @@ func referencedSessionIDsFromMutations(mutations []store.SyncMutation) map[strin
 			if err := decodeSyncPayloadForProject([]byte(mutation.Payload), &payload); err != nil {
 				continue
 			}
-			sessionID := strings.TrimSpace(payload.SessionID)
-			if sessionID != "" {
+			sessionID := payload.SessionID
+			if strings.TrimSpace(sessionID) != "" {
 				required[sessionID] = struct{}{}
 			}
 		}
@@ -1167,8 +1168,8 @@ func referencedSessionIDsFromNonSessionUpserts(mutations []store.SyncMutation) m
 			if err := decodeSyncPayloadForProject([]byte(mutation.Payload), &payload); err != nil {
 				continue
 			}
-			sessionID := strings.TrimSpace(payload.SessionID)
-			if sessionID != "" {
+			sessionID := payload.SessionID
+			if strings.TrimSpace(sessionID) != "" {
 				required[sessionID] = struct{}{}
 			}
 		}
@@ -1191,8 +1192,8 @@ func referencedSessionProjectsFromNonSessionUpserts(mutations []store.SyncMutati
 			if err := decodeSyncPayloadForProject([]byte(mutation.Payload), &payload); err != nil {
 				continue
 			}
-			sessionID := strings.TrimSpace(payload.SessionID)
-			if sessionID == "" {
+			sessionID := payload.SessionID
+			if strings.TrimSpace(sessionID) == "" {
 				continue
 			}
 			project, _ := store.NormalizeProject(strings.TrimSpace(mutation.Project))
@@ -1210,7 +1211,11 @@ func referencedSessionProjectsFromNonSessionUpserts(mutations []store.SyncMutati
 }
 
 func mutationIdentityKey(mutation store.SyncMutation) string {
-	return fmt.Sprintf("%s:%s", mutation.Entity, strings.TrimSpace(mutation.EntityKey))
+	entityKey := mutation.EntityKey
+	if mutation.Entity != store.SyncEntitySession {
+		entityKey = strings.TrimSpace(entityKey)
+	}
+	return fmt.Sprintf("%s:%s", mutation.Entity, entityKey)
 }
 
 func (sy *Syncer) chunkTrackingTargetKey(project string) string {
@@ -1275,7 +1280,7 @@ func synthesizeMutationsFromChunk(chunk ChunkData) []store.SyncMutation {
 		}
 		mutations = append(mutations, store.SyncMutation{
 			Entity:    store.SyncEntitySession,
-			EntityKey: strings.TrimSpace(session.ID),
+			EntityKey: session.ID,
 			Op:        store.SyncOpUpsert,
 			Payload:   string(payload),
 		})
@@ -1641,7 +1646,7 @@ func (sy *Syncer) exportedHistoricalState(m *Manifest, relevant map[string]struc
 					return nil, fmt.Errorf("validate historical lifecycle: %w", err)
 				}
 				state.complete = false
-				state.resetAvailability()
+				state.resetLifecycleAvailability()
 				continue
 			}
 			return nil, fmt.Errorf("read chunk %s: %w", entry.ID, err)
@@ -1747,6 +1752,7 @@ func validateHistoricalSessionLifecycles(chunks []historicalLifecycleChunk, stat
 			state.sessionAvailability = sessions
 			state.observationAvailability = observations
 			state.activeObservations = active
+			state.updateAvailableObservations(historical.chunk)
 			progress = true
 		}
 		if !progress {
@@ -1757,12 +1763,33 @@ func validateHistoricalSessionLifecycles(chunks []historicalLifecycleChunk, stat
 	return nil
 }
 
+func (state *historicalExportState) updateAvailableObservations(chunk ChunkData) {
+	for _, mutation := range orderMutationsForApply(buildImportMutations(chunk)) {
+		if mutation.Entity != store.SyncEntityObservation {
+			continue
+		}
+		syncID := strings.TrimSpace(mutation.EntityKey)
+		if syncID == "" {
+			continue
+		}
+		switch mutation.Op {
+		case store.SyncOpUpsert:
+			state.availableObservations[syncID] = true
+		case store.SyncOpDelete:
+			state.availableObservations[syncID] = false
+		}
+	}
+}
+
 // validateHistoricalSessionLifecycle verifies that stable direct and explicit
 // dependents do not follow a historical session tombstone. Unknown sessions
 // remain recoverable for legacy local chunks.
 func validateHistoricalSessionLifecycle(chunk ChunkData, sessionAvailability, observationAvailability map[string]bool, activeObservations map[string]string) error {
 	for _, mutation := range orderMutationsForApply(buildImportMutations(chunk)) {
-		sessionID := strings.TrimSpace(mutation.EntityKey)
+		sessionID := mutation.EntityKey
+		if mutation.Entity != store.SyncEntitySession {
+			sessionID = strings.TrimSpace(sessionID)
+		}
 		switch {
 		case mutation.Entity == store.SyncEntitySession && mutation.Op == store.SyncOpUpsert:
 			if sessionID != "" {
@@ -1784,7 +1811,7 @@ func validateHistoricalSessionLifecycle(chunk ChunkData, sessionAvailability, ob
 			if err := decodeSyncPayloadForProject([]byte(mutation.Payload), &payload); err != nil {
 				return fmt.Errorf("decode %s payload: %w", mutation.Entity, err)
 			}
-			dependencyID := strings.TrimSpace(payload.SessionID)
+			dependencyID := payload.SessionID
 			if available, known := sessionAvailability[dependencyID]; known && !available {
 				return fmt.Errorf("%s %q references deleted session %q", mutation.Entity, sessionID, dependencyID)
 			}
@@ -2167,7 +2194,7 @@ func resolveMutationProject(mutation store.SyncMutation, sessionProjectByID map[
 			return strings.TrimSpace(normalized)
 		}
 	}
-	if normalized, _ := store.NormalizeProject(strings.TrimSpace(sessionProjectByID[strings.TrimSpace(payload.SessionID)])); strings.TrimSpace(normalized) != "" {
+	if normalized, _ := store.NormalizeProject(strings.TrimSpace(sessionProjectByID[payload.SessionID])); strings.TrimSpace(normalized) != "" {
 		return strings.TrimSpace(normalized)
 	}
 	return ""

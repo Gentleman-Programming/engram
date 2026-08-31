@@ -2077,6 +2077,90 @@ func TestLocalChunkExportReexportsRelationUpdatedAfterLastChunk(t *testing.T) {
 	}
 }
 
+func TestLocalChunkExportOnlyTrustsRelationEndpointsAfterMissingChunk(t *testing.T) {
+	s := newTestStore(t)
+	syncDir := filepath.Join(t.TempDir(), ".engram")
+	sourceID, targetID := seedRelationForProject(t, s, "proj-a", "missing-endpoint-session", "missing-endpoint-relation")
+	if _, err := s.DB().Exec(`UPDATE sessions SET started_at='2025-01-01 00:00:00' WHERE id='missing-endpoint-session'`); err != nil {
+		t.Fatalf("backdate session: %v", err)
+	}
+	if _, err := s.DB().Exec(`UPDATE observations SET created_at='2025-01-01 00:00:00', updated_at='2025-01-01 00:00:00' WHERE session_id='missing-endpoint-session'`); err != nil {
+		t.Fatalf("backdate observations: %v", err)
+	}
+	if _, err := s.DB().Exec(`UPDATE memory_relations SET updated_at='2025-01-01 00:00:00' WHERE sync_id='missing-endpoint-relation'`); err != nil {
+		t.Fatalf("backdate relation: %v", err)
+	}
+
+	data, err := s.ExportProject("proj-a")
+	if err != nil {
+		t.Fatalf("export historical data: %v", err)
+	}
+	historicalRelations, err := s.ExportRelationMutations("proj-a")
+	if err != nil {
+		t.Fatalf("export historical relation: %v", err)
+	}
+	writeLocalChunkFile(t, syncDir, "readable", ChunkData{
+		Sessions: data.Sessions, Observations: data.Observations, Mutations: historicalRelations,
+	})
+	writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{
+		{ID: "readable", CreatedAt: "2025-06-01T00:00:00Z"},
+		{ID: "unrelated-missing", CreatedAt: "2025-06-02T00:00:00Z"},
+	}})
+	history, err := New(s, syncDir).exportedHistoricalState(&Manifest{Version: 1, Chunks: []ChunkEntry{
+		{ID: "readable", CreatedAt: "2025-06-01T00:00:00Z"},
+		{ID: "unrelated-missing", CreatedAt: "2025-06-02T00:00:00Z"},
+	}}, localDataIdentityKeys(data))
+	if err != nil {
+		t.Fatalf("reconcile historical state: %v", err)
+	}
+	if history.complete {
+		t.Fatal("missing history must remain incomplete")
+	}
+	available := history.availableObservationKeys()
+	for _, endpointID := range []string{sourceID, targetID} {
+		if _, ok := available[endpointID]; ok {
+			t.Fatalf("endpoint %q before a missing chunk was trusted: %+v", endpointID, available)
+		}
+	}
+	if _, err := s.DB().Exec(`UPDATE memory_relations SET updated_at='2025-07-01 00:00:00' WHERE sync_id='missing-endpoint-relation'`); err != nil {
+		t.Fatalf("update relation: %v", err)
+	}
+
+	result, err := New(s, syncDir).Export("alice", "proj-a")
+	if err != nil {
+		t.Fatalf("export with missing endpoint history: %v", err)
+	}
+	if !result.IsEmpty {
+		t.Fatalf("relation with endpoints before a missing chunk must not export, got %+v", result)
+	}
+	writeLocalChunkFile(t, syncDir, "after-gap", ChunkData{
+		Sessions: data.Sessions, Observations: data.Observations,
+	})
+	writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{
+		{ID: "readable", CreatedAt: "2025-06-01T00:00:00Z"},
+		{ID: "unrelated-missing", CreatedAt: "2025-06-02T00:00:00Z"},
+		{ID: "after-gap", CreatedAt: "2025-06-03T00:00:00Z"},
+	}})
+	result, err = New(s, syncDir).Export("alice", "proj-a")
+	if err != nil {
+		t.Fatalf("export after readable endpoint history: %v", err)
+	}
+	if result.IsEmpty || result.MutationsExported != 1 {
+		t.Fatalf("updated relation with readable endpoints must export, got %+v", result)
+	}
+	raw, err := readGzip(filepath.Join(syncDir, "chunks", result.ChunkID+".jsonl.gz"))
+	if err != nil {
+		t.Fatalf("read exported chunk: %v", err)
+	}
+	var chunk ChunkData
+	if err := json.Unmarshal(raw, &chunk); err != nil {
+		t.Fatalf("unmarshal exported chunk: %v", err)
+	}
+	if len(chunk.Mutations) != 1 || chunk.Mutations[0].EntityKey != "missing-endpoint-relation" {
+		t.Fatalf("expected the eligible relation mutation, got %+v", chunk.Mutations)
+	}
+}
+
 func TestUpgradeDeterministicReasonCodes(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -3161,6 +3245,35 @@ func TestLocalImportOrdersExplicitMutationsAndDirectArraysSafely(t *testing.T) {
 	prompts, err := s.RecentPrompts(project, 5)
 	if err != nil || len(prompts) != 1 || prompts[0].SyncID != "prompt-explicit-mixed" {
 		t.Fatalf("expected explicit prompt imported, prompts=%+v err=%v", prompts, err)
+	}
+}
+
+func TestLocalImportPreservesWhitespaceBearingDirectSessionID(t *testing.T) {
+	s := newTestStore(t)
+	syncDir := t.TempDir()
+	chunkID := "whitespace-session"
+	sessionID := " session "
+	writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: chunkID, CreatedAt: "2025-01-01T00:00:00Z"}}})
+	writeLocalChunkFile(t, syncDir, chunkID, ChunkData{Sessions: []store.Session{{
+		ID: sessionID, Project: "proj-a", Directory: "/tmp/proj-a", StartedAt: "2025-01-01 00:00:00",
+	}}})
+
+	result, err := New(s, syncDir).Import()
+	if err != nil {
+		t.Fatalf("import direct whitespace-bearing session: %v", err)
+	}
+	if result.ChunksImported != 1 || result.SessionsImported != 1 {
+		t.Fatalf("unexpected import result: %+v", result)
+	}
+	session, err := s.GetSession(sessionID)
+	if err != nil {
+		t.Fatalf("get exact session identity: %v", err)
+	}
+	if session.ID != sessionID {
+		t.Fatalf("session ID = %q, want %q", session.ID, sessionID)
+	}
+	if _, err := s.GetSession(strings.TrimSpace(sessionID)); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("trimmed session identity must not be imported, err=%v", err)
 	}
 }
 
