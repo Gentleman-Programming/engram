@@ -338,10 +338,16 @@ func TestHandleCreateSessionStoresRuntimeWorktreeDirectory(t *testing.T) {
 	}{
 		{id: "nested-trailing", directory: nested + string(os.PathSeparator)},
 		{id: "nested-relative", directory: filepath.Join("nested", "child")},
+		{id: "omitted-directory"},
 	} {
 		t.Run(tc.id, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(fmt.Sprintf(`{"id":%q,"project":"engram","directory":%q}`, tc.id, tc.directory)))
+			body := fmt.Sprintf(`{"id":%q,"project":"engram"`, tc.id)
+			if tc.directory != "" {
+				body += fmt.Sprintf(`,"directory":%q`, tc.directory)
+			}
+			body += `}`
+			req := httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(body))
 			h.ServeHTTP(rec, req)
 			if rec.Code != http.StatusCreated {
 				t.Fatalf("create session = %d, want 201: %s", rec.Code, rec.Body.String())
