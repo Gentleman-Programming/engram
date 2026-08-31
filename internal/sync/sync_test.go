@@ -1127,6 +1127,139 @@ func TestLocalChunkExportFailsLoudlyOnCorruptPriorChunk(t *testing.T) {
 	}
 }
 
+func TestLocalChunkExportUsesObservationHistory(t *testing.T) {
+	tests := []struct {
+		name               string
+		history            func(store.Observation) ChunkData
+		observationUpdated string
+		wantObservation    bool
+		wantEmpty          bool
+	}{
+		{
+			name: "older observation absent from history bypasses global watermark",
+			history: func(_ store.Observation) ChunkData {
+				return ChunkData{}
+			},
+			observationUpdated: "2025-01-01 00:00:00",
+			wantObservation:    true,
+		},
+		{
+			name: "older observation in a direct historical row remains filtered",
+			history: func(observation store.Observation) ChunkData {
+				return ChunkData{Observations: []store.Observation{{SyncID: observation.SyncID}}}
+			},
+			observationUpdated: "2025-01-01 00:00:00",
+			wantEmpty:          true,
+		},
+		{
+			name: "observation tombstone mutation counts as historical presence",
+			history: func(observation store.Observation) ChunkData {
+				return ChunkData{Mutations: []store.SyncMutation{{
+					Entity:    store.SyncEntityObservation,
+					EntityKey: observation.SyncID,
+					Op:        store.SyncOpDelete,
+				}}}
+			},
+			observationUpdated: "2025-01-01 00:00:00",
+			wantEmpty:          true,
+		},
+		{
+			name: "newer observation still exports after historical presence",
+			history: func(observation store.Observation) ChunkData {
+				return ChunkData{Observations: []store.Observation{{SyncID: observation.SyncID}}}
+			},
+			observationUpdated: "2025-07-01 00:00:00",
+			wantObservation:    true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			const sessionID = "session-observation-history"
+			if err := s.CreateSession(sessionID, "proj-a", "/tmp/proj-a"); err != nil {
+				t.Fatalf("create session: %v", err)
+			}
+			observationID, err := s.AddObservation(store.AddObservationParams{
+				SessionID: sessionID,
+				Type:      "decision",
+				Title:     "observation history",
+				Content:   "observation history",
+				Project:   "proj-a",
+				Scope:     "project",
+			})
+			if err != nil {
+				t.Fatalf("add observation: %v", err)
+			}
+			promptID, err := s.AddPrompt(store.AddPromptParams{SessionID: sessionID, Content: "prompt history", Project: "proj-a"})
+			if err != nil {
+				t.Fatalf("add prompt: %v", err)
+			}
+			if _, err := s.DB().Exec(`UPDATE sessions SET started_at = ? WHERE id = ?`, "2025-01-01 00:00:00", sessionID); err != nil {
+				t.Fatalf("backdate session: %v", err)
+			}
+			if _, err := s.DB().Exec(`UPDATE observations SET created_at = ?, updated_at = ? WHERE id = ?`, "2025-01-01 00:00:00", tc.observationUpdated, observationID); err != nil {
+				t.Fatalf("backdate observation: %v", err)
+			}
+			if _, err := s.DB().Exec(`UPDATE user_prompts SET created_at = ? WHERE id = ?`, "2025-01-01 00:00:00", promptID); err != nil {
+				t.Fatalf("backdate prompt: %v", err)
+			}
+
+			observation, err := s.GetObservation(observationID)
+			if err != nil {
+				t.Fatalf("get observation: %v", err)
+			}
+			syncDir := filepath.Join(t.TempDir(), ".engram")
+			writeLocalChunkFile(t, syncDir, "history", tc.history(*observation))
+			writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{
+				ID: "history", CreatedAt: "2025-06-01T00:00:00Z",
+			}}})
+
+			result, err := New(s, syncDir).Export("alice", "proj-a")
+			if err != nil {
+				t.Fatalf("export: %v", err)
+			}
+			if result.IsEmpty != tc.wantEmpty {
+				t.Fatalf("empty export = %t, want %t", result.IsEmpty, tc.wantEmpty)
+			}
+			if got := result.SessionsExported; got != boolToInt(tc.wantObservation) {
+				t.Fatalf("exported sessions = %d, want %d", got, boolToInt(tc.wantObservation))
+			}
+			if result.IsEmpty {
+				return
+			}
+
+			payload, err := readGzip(filepath.Join(syncDir, "chunks", result.ChunkID+".jsonl.gz"))
+			if err != nil {
+				t.Fatalf("read export chunk: %v", err)
+			}
+			var exported ChunkData
+			if err := json.Unmarshal(payload, &exported); err != nil {
+				t.Fatalf("unmarshal export chunk: %v", err)
+			}
+			if got := len(exported.Observations); got != boolToInt(tc.wantObservation) {
+				t.Fatalf("exported observations = %d, want %d; chunk=%+v", got, boolToInt(tc.wantObservation), exported)
+			}
+			if got := len(exported.Sessions); got != boolToInt(tc.wantObservation) {
+				t.Fatalf("exported sessions = %d, want %d; chunk=%+v", got, boolToInt(tc.wantObservation), exported)
+			}
+			if exported.Sessions[0].ID != sessionID {
+				t.Fatalf("exported session = %q, want parent %q", exported.Sessions[0].ID, sessionID)
+			}
+			if len(exported.Prompts) != 0 {
+				t.Fatalf("old prompts must retain timestamp filtering: %+v", exported)
+			}
+		})
+	}
+}
+
+func boolToInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
 // TestLocalChunkExportReexportsRelationUpdatedAfterLastChunk covers the second
 // branch of the export filter: a relation already present in a prior chunk but
 // re-judged after the latest chunk must be exported again so the update
