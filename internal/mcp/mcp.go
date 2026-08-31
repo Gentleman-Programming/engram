@@ -75,7 +75,7 @@ func truncationWarning(metadata store.TruncationMetadata) string {
 	return fmt.Sprintf("\n⚠ WARNING: Content was truncated from %d to %d bytes. Consider splitting into smaller observations.", metadata.OriginalBytes, metadata.LimitBytes)
 }
 
-func currentWorkingDirectory() string {
+var currentWorkingDirectory = func() string {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return ""
@@ -1221,7 +1221,10 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 			typ = "manual"
 		}
 		if sessionID == "" {
-			sessionID = resolveFallbackSessionID(s, project)
+			sessionID, err = resolveFallbackSessionID(s, project)
+			if err != nil {
+				return mcp.NewToolResultError("Failed to save: " + err.Error()), nil
+			}
 		}
 		suggestedTopicKey := suggestTopicKey(typ, title, content)
 
@@ -1597,7 +1600,10 @@ func handleSavePrompt(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 		project, _ := store.NormalizeProject(detRes.Project)
 
 		if sessionID == "" {
-			sessionID = resolveFallbackSessionID(s, project)
+			sessionID, err = resolveFallbackSessionID(s, project)
+			if err != nil {
+				return mcp.NewToolResultError("Failed to save prompt: " + err.Error()), nil
+			}
 		}
 
 		// Ensure the implicit MCP session exists with the current working directory.
@@ -1910,7 +1916,10 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		project, _ = store.NormalizeProject(project)
 
 		if sessionID == "" {
-			sessionID = resolveFallbackSessionID(s, project)
+			sessionID, err = resolveFallbackSessionID(s, project)
+			if err != nil {
+				return mcp.NewToolResultError("Failed to save session summary: " + err.Error()), nil
+			}
 		}
 
 		// Ensure the implicit MCP session exists with the current working directory.
@@ -2030,7 +2039,10 @@ func handleCapturePassive(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		}
 
 		if sessionID == "" {
-			sessionID = resolveFallbackSessionID(s, project)
+			sessionID, err = resolveFallbackSessionID(s, project)
+			if err != nil {
+				return mcp.NewToolResultError("Passive capture failed: " + err.Error()), nil
+			}
 			_ = ensureImplicitSessionWithCWD(s, sessionID, project)
 		}
 
@@ -3012,25 +3024,24 @@ func defaultSessionID(project string) string {
 	return "manual-save-" + project
 }
 
-// resolveFallbackSessionID resolves the session a write should attach to when
-// the caller did not provide an explicit session_id.
-//
-// It first consults the persisted sessions table for the most recent active
-// (un-ended) session of the project (issue #386). The SessionStart hook
-// registers a UUID session via the HTTP server, a SEPARATE process from this
-// MCP (stdio) server; the two share only the SQLite store, so the active
-// session must be resolved from disk rather than from any in-process map.
-//
-// When no active session exists for the project (or the store query fails for
-// any reason), it falls back to the manual-save-{project} session, preserving
-// the prior behavior for projects with no live session.
-func resolveFallbackSessionID(s *store.Store, project string) string {
+// resolveFallbackSessionID resolves an omitted session_id without guessing
+// between concurrent runtime sessions. The working directory only narrows
+// candidates; a persisted session ID remains the sole identity.
+func resolveFallbackSessionID(s *store.Store, project string) (string, error) {
 	if s != nil {
-		if id, ok, err := s.MostRecentActiveSession(project); err == nil && ok {
-			return id
+		ids, err := s.ActiveRuntimeSessions(project, currentWorkingDirectory())
+		if err == nil {
+			switch len(ids) {
+			case 0:
+				return defaultSessionID(project), nil
+			case 1:
+				return ids[0], nil
+			default:
+				return "", fmt.Errorf("multiple active runtime sessions match project %q and the current directory; provide session_id", project)
+			}
 		}
 	}
-	return defaultSessionID(project)
+	return defaultSessionID(project), nil
 }
 
 func intArg(req mcp.CallToolRequest, key string, defaultVal int) int {

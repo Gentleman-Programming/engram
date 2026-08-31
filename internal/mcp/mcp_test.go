@@ -659,6 +659,9 @@ func TestHandleSaveRecordsActivityForExplicitSessionID(t *testing.T) {
 // store-based resolution is the only thing that survives the process split.
 func TestHandleSaveResolvesActiveSessionFromStore(t *testing.T) {
 	s := newMCPTestStore(t)
+	originalWorkingDirectory := currentWorkingDirectory
+	currentWorkingDirectory = func() string { return "/work/engram" }
+	t.Cleanup(func() { currentWorkingDirectory = originalWorkingDirectory })
 
 	// Simulate the SessionStart hook registering a UUID session (POST /sessions
 	// ultimately calls store.CreateSession).
@@ -726,47 +729,71 @@ func TestHandleSaveFallsBackToManualSaveWhenNoActiveSession(t *testing.T) {
 	}
 }
 
-// TestHandleSaveResolvesMostRecentActiveSession covers the multi-session edge
-// case: two un-ended sessions exist; mem_save must attach to the most recent.
-func TestHandleSaveResolvesMostRecentActiveSession(t *testing.T) {
+// TestHandleSaveRejectsAmbiguousActiveSessions ensures an omitted session_id
+// never selects one of several active runtime sessions in the same directory.
+func TestHandleSaveRejectsAmbiguousActiveSessions(t *testing.T) {
 	s := newMCPTestStore(t)
+	originalWorkingDirectory := currentWorkingDirectory
+	currentWorkingDirectory = func() string { return "/work/engram" }
+	t.Cleanup(func() { currentWorkingDirectory = originalWorkingDirectory })
 
-	if err := s.CreateSession("uuid-older", "engram", "/work/engram"); err != nil {
-		t.Fatalf("create older session: %v", err)
+	if err := s.CreateSession("uuid-first", "engram", "/work/engram"); err != nil {
+		t.Fatalf("create first session: %v", err)
 	}
-	if _, err := s.DB().Exec(`UPDATE sessions SET started_at = ? WHERE id = ?`, "2025-01-01 00:00:00", "uuid-older"); err != nil {
-		t.Fatalf("backdate older session: %v", err)
-	}
-	if err := s.CreateSession("uuid-newer", "engram", "/work/engram"); err != nil {
-		t.Fatalf("create newer session: %v", err)
-	}
-	if _, err := s.DB().Exec(`UPDATE sessions SET started_at = ? WHERE id = ?`, "2025-06-01 00:00:00", "uuid-newer"); err != nil {
-		t.Fatalf("set newer session started_at: %v", err)
+	if err := s.CreateSession("uuid-second", "engram", "/work/engram"); err != nil {
+		t.Fatalf("create second session: %v", err)
 	}
 
 	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"title":   "Most recent active session",
-		"content": "**What**: saved with two active sessions\n**Why**: multi-session edge case",
+		"title":   "Ambiguous active sessions",
+		"content": "**What**: saved without session_id\n**Why**: ambiguous runtime sessions must fail",
 		"type":    "bugfix",
 		"project": "engram",
 	}}})
 	if err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
-	if res.IsError {
-		t.Fatalf("unexpected save error: %s", callResultText(t, res))
+	if !res.IsError {
+		t.Fatal("expected ambiguous omitted session_id to fail")
+	}
+	if got := callResultText(t, res); !strings.Contains(got, "multiple active runtime sessions") {
+		t.Fatalf("expected ambiguity error, got %q", got)
+	}
+	obs, err := s.RecentObservations("engram", "project", 5)
+	if err != nil {
+		t.Fatalf("recent observations: %v", err)
+	}
+	if len(obs) != 0 {
+		t.Fatalf("expected no write after ambiguous session resolution, got %#v", obs)
+	}
+}
+
+func TestHandleSaveFallsBackWhenActiveSessionIsInAnotherDirectory(t *testing.T) {
+	s := newMCPTestStore(t)
+	originalWorkingDirectory := currentWorkingDirectory
+	currentWorkingDirectory = func() string { return "/work/current" }
+	t.Cleanup(func() { currentWorkingDirectory = originalWorkingDirectory })
+	if err := s.CreateSession("other-worktree-session", "engram", "/work/other"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "Different worktree fallback",
+		"content": "**What**: saved without session_id\n**Why**: worktree regression guard",
+		"project": "engram",
+	}}})
+	if err != nil || res.IsError {
+		t.Fatalf("save failed: err=%v text=%q", err, callResultText(t, res))
 	}
 
 	obs, err := s.RecentObservations("engram", "project", 5)
 	if err != nil {
 		t.Fatalf("recent observations: %v", err)
 	}
-	if len(obs) == 0 {
-		t.Fatalf("expected at least one observation, got none")
-	}
-	if obs[0].SessionID != "uuid-newer" {
-		t.Fatalf("expected most recent active session uuid-newer, got %q", obs[0].SessionID)
+	if len(obs) != 1 || obs[0].SessionID != defaultSessionID("engram") {
+		t.Fatalf("expected manual fallback, got %#v", obs)
 	}
 }
 
