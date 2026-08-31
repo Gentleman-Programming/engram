@@ -42,6 +42,9 @@ func saveCloudServerURL(dataDir, serverURL string) error {
 	if err != nil {
 		// The form is an explicit replacement action, so a malformed legacy
 		// file must not prevent the user from restoring a usable configuration.
+		if !cloudconfig.IsDecodeError(err) {
+			return err
+		}
 		cfg = &cloudconfig.Config{}
 	}
 	cfg.ServerURL = serverURL

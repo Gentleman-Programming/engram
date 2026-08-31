@@ -68,6 +68,17 @@ func TestCountPendingSyncMutationsMatchesEnrollmentFilter(t *testing.T) {
 	if err := s.EnrollProject("enrolled"); err != nil {
 		t.Fatalf("enroll project: %v", err)
 	}
+	if _, err := s.db.Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project, disposition, acked_at)
+		VALUES (?, 'observation', 'acknowledged', 'upsert', '{}', 'local', 'enrolled', 'pending', datetime('now'))`, DefaultSyncTargetKey); err != nil {
+		t.Fatalf("insert acknowledged mutation: %v", err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO sync_state (target_key, lifecycle) VALUES ('other-target', 'idle')`); err != nil {
+		t.Fatalf("create other target state: %v", err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project, disposition)
+		VALUES ('other-target', 'observation', 'other-target', 'upsert', '{}', 'local', 'enrolled', 'pending')`); err != nil {
+		t.Fatalf("insert other target mutation: %v", err)
+	}
 
 	count, err := s.CountPendingSyncMutations(DefaultSyncTargetKey)
 	if err != nil {
@@ -75,6 +86,22 @@ func TestCountPendingSyncMutationsMatchesEnrollmentFilter(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("pending mutation count = %d, want 1 for the enrolled project", count)
+	}
+	for _, targetKey := range []string{"", " \t ", " CLOUD "} {
+		count, err = s.CountPendingSyncMutations(targetKey)
+		if err != nil {
+			t.Fatalf("count pending mutations for %q: %v", targetKey, err)
+		}
+		if count != 1 {
+			t.Fatalf("pending mutation count for %q = %d, want 1", targetKey, count)
+		}
+	}
+	count, err = s.CountPendingSyncMutations(" OTHER-TARGET ")
+	if err != nil {
+		t.Fatalf("count pending mutations for other target: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("pending mutation count for other target = %d, want 1", count)
 	}
 	if _, err := s.db.Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project, disposition)
 		VALUES (?, 'observation', 'quarantined', 'upsert', '{}', 'local', 'enrolled', 'quarantined')`, DefaultSyncTargetKey); err != nil {
@@ -101,6 +128,17 @@ func TestCountPendingSyncMutationsMatchesEnrollmentFilter(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("pending mutation count after unenroll = %d, want 0", count)
+	}
+}
+
+func TestCountPendingSyncMutationsReturnsErrorAfterClose(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	if _, err := s.CountPendingSyncMutations(DefaultSyncTargetKey); err == nil {
+		t.Fatal("count pending mutations after close succeeded, want error")
 	}
 }
 

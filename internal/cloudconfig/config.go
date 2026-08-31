@@ -37,6 +37,13 @@ func Load(dataDir string) (*Config, error) {
 	return &cfg, nil
 }
 
+// IsDecodeError reports whether err was caused by decoding cloud.json content.
+func IsDecodeError(err error) bool {
+	var syntaxErr *json.SyntaxError
+	var typeErr *json.UnmarshalTypeError
+	return errors.As(err, &syntaxErr) || errors.As(err, &typeErr)
+}
+
 // Save persists cfg, creating dataDir when necessary.
 func Save(dataDir string, cfg *Config) error {
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {

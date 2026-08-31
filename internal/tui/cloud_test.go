@@ -37,6 +37,26 @@ func TestSaveCloudServerURLReplacesMalformedConfig(t *testing.T) {
 	}
 }
 
+func TestSaveCloudServerURLPreservesNonDecodeLoadFailures(t *testing.T) {
+	dataDir := t.TempDir()
+	path := cloudconfig.Path(dataDir)
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatalf("create cloud config directory: %v", err)
+	}
+
+	err := saveCloudServerURL(dataDir, "https://cloud.example.test/")
+	if err == nil {
+		t.Fatal("save should propagate a non-decode load error")
+	}
+	info, statErr := os.Stat(path)
+	if statErr != nil {
+		t.Fatalf("stat cloud config path: %v", statErr)
+	}
+	if !info.IsDir() {
+		t.Fatal("non-decode load failure should not overwrite cloud config path")
+	}
+}
+
 func TestPingCloudServerUsesSingleHealthPathForTrailingSlashURL(t *testing.T) {
 	originalTransport := pingCloudTransport
 	t.Cleanup(func() { pingCloudTransport = originalTransport })
@@ -52,6 +72,47 @@ func TestPingCloudServerUsesSingleHealthPathForTrailingSlashURL(t *testing.T) {
 	}
 	if gotPath != cloudHealthPath {
 		t.Fatalf("health request path = %q, want %q", gotPath, cloudHealthPath)
+	}
+}
+
+func TestCloudConfigPersistsUnauthorizedPingResult(t *testing.T) {
+	originalTransport := pingCloudTransport
+	t.Cleanup(func() { pingCloudTransport = originalTransport })
+	pingCloudTransport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusUnauthorized, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header)}, nil
+	})
+
+	status, err := pingCloudServerStatus("https://cloud.example.test", "token")
+	if err != nil || status != "unauthorized" {
+		t.Fatalf("unauthorized ping = status %q error %v", status, err)
+	}
+
+	cfg, err := store.DefaultConfig()
+	if err != nil {
+		t.Fatalf("default config: %v", err)
+	}
+	cfg.DataDir = t.TempDir()
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	m := New(s, "")
+	m.Screen = ScreenCloudConfig
+	m.CloudConfigFocus = cloudConfigFocusSave
+	m.CloudConfigSaving = true
+	m.CloudConfigInput.SetValue("https://cloud.example.test")
+	m.CloudRequestGeneration = 1
+	msg := pingCloudServer(cloudPingFromConfig, 1, "https://cloud.example.test", "token")()
+	updatedModel, _ := m.Update(msg)
+	updated := updatedModel.(Model)
+	if updated.Screen != ScreenCloudConfig || updated.CloudConfigSaving || updated.CloudConfigFocus != cloudConfigFocusSave || updated.CloudConfigPingStatus != "unauthorized" || updated.CloudConfigError != "" {
+		t.Fatalf("unauthorized config ping state = %+v", updated)
+	}
+	saved, err := cloudconfig.Load(s.DataDir())
+	if err != nil || saved.ServerURL != "https://cloud.example.test" {
+		t.Fatalf("saved server URL = %q, err=%v", saved.ServerURL, err)
 	}
 }
 

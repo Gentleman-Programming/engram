@@ -204,10 +204,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.CloudEnrollmentItems = msg.items
 		m.CloudEnrollmentError = ""
-		if len(m.CloudEnrollmentItems) == 0 {
-			m.Cursor = 0
-		} else if m.Cursor >= len(m.CloudEnrollmentItems) {
-			m.Cursor = len(m.CloudEnrollmentItems) - 1
+		if m.Screen == ScreenCloudEnrollment {
+			if len(m.CloudEnrollmentItems) == 0 {
+				m.Cursor = 0
+			} else if m.Cursor >= len(m.CloudEnrollmentItems) {
+				m.Cursor = len(m.CloudEnrollmentItems) - 1
+			}
 		}
 		return m, nil
 

@@ -733,7 +733,8 @@ func cmdCloudConfig(cfg store.Config) {
 	}
 	cc, err := cloudconfig.Load(cfg.DataDir)
 	if err != nil {
-		cc = &cloudconfig.Config{}
+		fatal(err)
+		return
 	}
 	cc.ServerURL = strings.TrimSpace(os.Args[4])
 	if cc.ServerURL == "" {

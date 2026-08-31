@@ -32,16 +32,30 @@ func TestSaveKeepsCloudConfigPrivate(t *testing.T) {
 
 func TestValidateServerURLPreservesTrailingSlash(t *testing.T) {
 	tests := []struct {
-		name  string
-		input string
-		want  string
+		name    string
+		input   string
+		want    string
+		wantErr bool
 	}{
 		{name: "root slash", input: "https://cloud.example.test/", want: "https://cloud.example.test/"},
+		{name: "http", input: "http://cloud.example.test", want: "http://cloud.example.test"},
+		{name: "userinfo", input: "https://token@cloud.example.test", wantErr: true},
+		{name: "query", input: "https://cloud.example.test?debug=1", wantErr: true},
+		{name: "empty query delimiter", input: "https://cloud.example.test?", wantErr: true},
+		{name: "fragment", input: "https://cloud.example.test#section", wantErr: true},
+		{name: "non HTTP scheme", input: "ftp://cloud.example.test", wantErr: true},
+		{name: "missing host", input: "https:///cloud", wantErr: true},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			got, err := ValidateServerURL(test.input)
+			if test.wantErr {
+				if err == nil {
+					t.Fatalf("ValidateServerURL(%q) succeeded, want error", test.input)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("validate server URL: %v", err)
 			}
@@ -52,11 +66,51 @@ func TestValidateServerURLPreservesTrailingSlash(t *testing.T) {
 	}
 }
 
+func TestLoadHandlesMissingAndMalformedCloudConfig(t *testing.T) {
+	t.Run("missing config is empty", func(t *testing.T) {
+		config, err := Load(t.TempDir())
+		if err != nil {
+			t.Fatalf("load missing cloud config: %v", err)
+		}
+		if config.ServerURL != "" || config.Token != "" {
+			t.Fatalf("missing cloud config = %+v, want zero value", config)
+		}
+	})
+
+	t.Run("malformed config is a decode error", func(t *testing.T) {
+		dataDir := t.TempDir()
+		if err := os.WriteFile(Path(dataDir), []byte(`{"token":"stored-token"`), 0o600); err != nil {
+			t.Fatalf("write malformed cloud config: %v", err)
+		}
+
+		config, err := Load(dataDir)
+		if config != nil || err == nil {
+			t.Fatalf("load malformed cloud config = %+v, %v; want nil decode error", config, err)
+		}
+		if !IsDecodeError(err) {
+			t.Fatalf("malformed cloud config error = %v, want decode error", err)
+		}
+	})
+}
+
+func TestApplyServerOverride(t *testing.T) {
+	t.Setenv(EnvCloudServer, " https://env-cloud.example.test/ ")
+
+	config := ApplyServerOverride(&Config{ServerURL: "https://file-cloud.example.test"})
+	if config.ServerURL != "https://env-cloud.example.test/" {
+		t.Fatalf("server URL = %q, want environment override", config.ServerURL)
+	}
+}
+
 func TestEffectiveTokenTrimsSurroundingWhitespaceWithoutRewritingFile(t *testing.T) {
 	t.Run("environment token", func(t *testing.T) {
+		dataDir := t.TempDir()
+		if err := Save(dataDir, &Config{Token: "file-token"}); err != nil {
+			t.Fatalf("save cloud config: %v", err)
+		}
 		t.Setenv(EnvCloudToken, " \n environment-token \t")
 
-		token, source := EffectiveToken(t.TempDir())
+		token, source := EffectiveToken(dataDir)
 		if token != "environment-token" {
 			t.Fatal("expected effective environment token to be trimmed")
 		}

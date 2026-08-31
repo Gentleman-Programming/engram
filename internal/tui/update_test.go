@@ -405,6 +405,24 @@ func TestCloudEnrollmentCursorResetsAndClampsWhenLoading(t *testing.T) {
 			t.Fatal("enter with no enrollment items should not toggle a project")
 		}
 	})
+
+	t.Run("late enrollment load preserves cloud settings Back selection", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen = ScreenCloudSettings
+		m.Cursor = 3 // Back
+		m.CloudEnrollmentLoading = true
+
+		updatedModel, _ := m.Update(cloudEnrollmentLoadedMsg{items: []cloudEnrollmentItem{{project: "one"}}})
+		updated := updatedModel.(Model)
+		if updated.Cursor != 3 || updated.CloudEnrollmentLoading || len(updated.CloudEnrollmentItems) != 1 {
+			t.Fatalf("late enrollment load altered settings state: cursor=%d loading=%t items=%+v", updated.Cursor, updated.CloudEnrollmentLoading, updated.CloudEnrollmentItems)
+		}
+		updatedModel, cmd := updated.handleCloudSettingsKeys("enter")
+		updated = updatedModel.(Model)
+		if updated.Screen != ScreenDashboard || cmd == nil {
+			t.Fatalf("Back selection after late enrollment load = screen %v cmd %v, want dashboard with refresh", updated.Screen, cmd)
+		}
+	})
 }
 
 func TestHandleRecentTimelineSessionsAndDetailKeyPaths(t *testing.T) {
