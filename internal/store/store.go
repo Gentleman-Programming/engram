@@ -2348,23 +2348,39 @@ func (s *Store) GetSession(id string) (*Session, error) {
 //     active session", which would make resolution circular.
 //
 // ActiveRuntimeSessions returns active, non-manual sessions for a project and
-// runtime directory. The directory narrows candidates; callers must not treat
-// it as session identity.
-func (s *Store) ActiveRuntimeSessions(project, directory string) ([]string, error) {
+// runtime directories. The directories narrow candidates; callers must not
+// treat them as session identity.
+func (s *Store) ActiveRuntimeSessions(project string, directories ...string) ([]string, error) {
 	project, _ = NormalizeProject(project)
-	if project == "" || directory == "" {
+	if project == "" {
 		return nil, nil
+	}
+	directorySet := make(map[string]struct{}, len(directories))
+	for _, directory := range directories {
+		if directory != "" {
+			directorySet[directory] = struct{}{}
+		}
+	}
+	if len(directorySet) == 0 {
+		return nil, nil
+	}
+	args := make([]any, 0, len(directorySet)+1)
+	args = append(args, project)
+	placeholders := make([]string, 0, len(directorySet))
+	for directory := range directorySet {
+		placeholders = append(placeholders, "?")
+		args = append(args, directory)
 	}
 
 	rows, err := s.db.Query(`
-		SELECT id
+		SELECT DISTINCT id
 		FROM sessions
 		WHERE LOWER(project) = ?
-		  AND directory = ?
+		  AND directory IN (`+strings.Join(placeholders, ", ")+`)
 		  AND ended_at IS NULL
 		  AND id NOT LIKE 'manual-save%'
 		ORDER BY id
-	`, project, directory)
+	`, args...)
 	if err != nil {
 		return nil, err
 	}

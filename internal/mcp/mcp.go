@@ -87,6 +87,19 @@ func ensureImplicitSessionWithCWD(s *store.Store, sessionID, project string) err
 	return s.CreateSession(sessionID, project, currentWorkingDirectory())
 }
 
+// runtimeSessionDirectory derives the worktree key through the shared project
+// detector for omitted-directory registration and omitted-session lookup.
+func runtimeSessionDirectory(directory string) string {
+	directory = strings.TrimSpace(directory)
+	if directory == "" {
+		directory = currentWorkingDirectory()
+	}
+	if detected := strings.TrimSpace(projectpkg.DetectProjectFull(directory).Path); detected != "" {
+		return detected
+	}
+	return directory
+}
+
 // ─── Tool Profiles ───────────────────────────────────────────────────────────
 //
 // "agent" — tools AI agents use during coding sessions:
@@ -1960,10 +1973,7 @@ func handleSessionStart(s *store.Store, cfg MCPConfig, activity *SessionActivity
 
 		activity.RecordToolCall(defaultSessionID(project))
 		if resolvedDirectory == "" {
-			resolvedDirectory = strings.TrimSpace(detRes.Path)
-			if resolvedDirectory == "" {
-				resolvedDirectory = strings.TrimSpace(currentWorkingDirectory())
-			}
+			resolvedDirectory = runtimeSessionDirectory("")
 		}
 
 		if err := s.CreateSession(id, project, resolvedDirectory); err != nil {
@@ -3029,7 +3039,8 @@ func defaultSessionID(project string) string {
 // candidates; a persisted session ID remains the sole identity.
 func resolveFallbackSessionID(s *store.Store, project string) (string, error) {
 	if s != nil {
-		ids, err := s.ActiveRuntimeSessions(project, currentWorkingDirectory())
+		directory := currentWorkingDirectory()
+		ids, err := s.ActiveRuntimeSessions(project, directory, runtimeSessionDirectory(directory))
 		if err == nil {
 			switch len(ids) {
 			case 0:
