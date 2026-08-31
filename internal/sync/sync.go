@@ -104,13 +104,12 @@ type ChunkData struct {
 // Lifecycle availability and relation endpoints are reset across missing history,
 // then re-established only by readable chunks that follow the gap.
 type historicalExportState struct {
-	identities              map[string]struct{}
-	relationKeys            map[string]struct{}
-	complete                bool
-	sessionAvailability     map[string]bool
-	observationAvailability map[string]bool
-	availableObservations   map[string]bool
-	activeObservations      map[string]string
+	identities            map[string]struct{}
+	relationKeys          map[string]struct{}
+	complete              bool
+	sessionAvailability   map[string]bool
+	availableObservations map[string]bool
+	activeObservations    map[string]string
 }
 
 type historicalLifecycleChunk struct {
@@ -120,19 +119,17 @@ type historicalLifecycleChunk struct {
 
 func newHistoricalExportState(relevant map[string]struct{}) *historicalExportState {
 	return &historicalExportState{
-		identities:              make(map[string]struct{}, len(relevant)),
-		relationKeys:            make(map[string]struct{}),
-		complete:                true,
-		sessionAvailability:     make(map[string]bool),
-		observationAvailability: make(map[string]bool),
-		availableObservations:   make(map[string]bool),
-		activeObservations:      make(map[string]string),
+		identities:            make(map[string]struct{}, len(relevant)),
+		relationKeys:          make(map[string]struct{}),
+		complete:              true,
+		sessionAvailability:   make(map[string]bool),
+		availableObservations: make(map[string]bool),
+		activeObservations:    make(map[string]string),
 	}
 }
 
 func (state *historicalExportState) resetLifecycleAvailability() {
 	state.sessionAvailability = make(map[string]bool)
-	state.observationAvailability = make(map[string]bool)
 	state.availableObservations = make(map[string]bool)
 	state.activeObservations = make(map[string]string)
 }
@@ -1742,15 +1739,13 @@ func validateHistoricalSessionLifecycles(chunks []historicalLifecycleChunk, stat
 		nextPending := make([]historicalLifecycleChunk, 0, len(pending))
 		for _, historical := range pending {
 			sessions := maps.Clone(state.sessionAvailability)
-			observations := maps.Clone(state.observationAvailability)
 			active := maps.Clone(state.activeObservations)
-			if err := validateHistoricalSessionLifecycle(historical.chunk, sessions, observations, active); err != nil {
+			if err := validateHistoricalSessionLifecycle(historical.chunk, sessions, active); err != nil {
 				lastErr = fmt.Errorf("chunk %s: %w", historical.id, err)
 				nextPending = append(nextPending, historical)
 				continue
 			}
 			state.sessionAvailability = sessions
-			state.observationAvailability = observations
 			state.activeObservations = active
 			state.updateAvailableObservations(historical.chunk)
 			progress = true
@@ -1784,7 +1779,7 @@ func (state *historicalExportState) updateAvailableObservations(chunk ChunkData)
 // validateHistoricalSessionLifecycle verifies that stable direct and explicit
 // dependents do not follow a historical session tombstone. Unknown sessions
 // remain recoverable for legacy local chunks.
-func validateHistoricalSessionLifecycle(chunk ChunkData, sessionAvailability, observationAvailability map[string]bool, activeObservations map[string]string) error {
+func validateHistoricalSessionLifecycle(chunk ChunkData, sessionAvailability map[string]bool, activeObservations map[string]string) error {
 	for _, mutation := range orderMutationsForApply(buildImportMutations(chunk)) {
 		sessionID := mutation.EntityKey
 		if mutation.Entity != store.SyncEntitySession {
@@ -1817,10 +1812,8 @@ func validateHistoricalSessionLifecycle(chunk ChunkData, sessionAvailability, ob
 			}
 			if mutation.Entity == store.SyncEntityObservation {
 				activeObservations[mutationIdentityKey(mutation)] = dependencyID
-				observationAvailability[strings.TrimSpace(mutation.EntityKey)] = true
 			}
 		case mutation.Entity == store.SyncEntityObservation && mutation.Op == store.SyncOpDelete:
-			observationAvailability[strings.TrimSpace(mutation.EntityKey)] = false
 			var payload struct {
 				HardDelete bool `json:"hard_delete"`
 			}

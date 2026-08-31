@@ -317,6 +317,7 @@ func normalizeChunkMutation(raw map[string]any, project string) (map[string]any,
 		return nil, fmt.Errorf("decode mutation: %w", err)
 	}
 
+	rawEntityKey := mutation.EntityKey
 	mutation.Entity = strings.TrimSpace(mutation.Entity)
 	mutation.EntityKey = strings.TrimSpace(mutation.EntityKey)
 	mutation.Op = strings.TrimSpace(mutation.Op)
@@ -327,6 +328,15 @@ func normalizeChunkMutation(raw map[string]any, project string) (map[string]any,
 	}
 	if mutation.Payload == "" {
 		return nil, fmt.Errorf("payload is required")
+	}
+	if mutation.Entity == store.SyncEntitySession && strings.TrimSpace(rawEntityKey) != "" {
+		var body mutationSessionPayload
+		if err := DecodeSyncMutationPayload(mutation.Payload, &body); err != nil {
+			return nil, fmt.Errorf("decode mutation payload: %w", err)
+		}
+		if rawEntityKey != body.ID {
+			return nil, fmt.Errorf("entity_key %q does not exactly match session payload id %q", rawEntityKey, body.ID)
+		}
 	}
 
 	normalizedPayload, expectedEntityKey, err := normalizeMutationPayload(mutation.Entity, mutation.Op, mutation.Payload, project)

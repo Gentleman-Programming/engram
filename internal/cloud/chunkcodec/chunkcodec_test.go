@@ -140,6 +140,27 @@ func TestCanonicalizeForProjectRejectsInvalidRelationMutation(t *testing.T) {
 	}
 }
 
+func TestCanonicalizeForProjectRejectsSessionMutationWithWhitespaceEntityKeyMismatch(t *testing.T) {
+	raw := []byte(`{
+		"mutations": [
+			{
+				"entity": "session",
+				"entity_key": " session ",
+				"op": "upsert",
+				"payload": "{\"id\":\"session\",\"directory\":\"/tmp/session\"}"
+			}
+		]
+	}`)
+
+	_, err := CanonicalizeForProject(raw, "proj-a")
+	if err == nil {
+		t.Fatal("expected session entity key mismatch to fail")
+	}
+	if !containsAll(err.Error(), []string{"entity_key", "exactly match", "session payload id"}) {
+		t.Fatalf("expected exact session identity validation error, got %q", err)
+	}
+}
+
 func containsAll(s string, parts []string) bool {
 	for _, part := range parts {
 		if !strings.Contains(s, part) {

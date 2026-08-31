@@ -1839,6 +1839,19 @@ func TestLocalChunkExportFailsClosedOnInvalidHistoricalIdentityData(t *testing.T
 				return ChunkData{Prompts: []store.Prompt{{SyncID: data.Prompts[0].SyncID}}}
 			},
 		},
+		{
+			name:             "session mutation entity key must exactly match payload identity before normalization",
+			assertNoNewChunk: true,
+			expectedError:    "exactly match session payload id",
+			chunk: func(_ *store.ExportData) ChunkData {
+				return ChunkData{Mutations: []store.SyncMutation{{
+					Entity:    store.SyncEntitySession,
+					EntityKey: " history-session ",
+					Op:        store.SyncOpUpsert,
+					Payload:   `{"id":"history-session","project":"proj-a","directory":"/tmp/proj-a"}`,
+				}}}
+			},
+		},
 	}
 
 	for _, tc := range tests {
