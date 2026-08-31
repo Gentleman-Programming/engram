@@ -1258,6 +1258,86 @@ func TestLocalChunkExportUsesObservationHistory(t *testing.T) {
 	}
 }
 
+func TestExportedChunkKeysObservationMutationIdentity(t *testing.T) {
+	validPayload := `{"sync_id":" obs-mutation-only ","session_id":"session","type":"decision","title":"title","content":"content","scope":"project"}`
+	tests := []struct {
+		name           string
+		mutation       store.SyncMutation
+		wantHistorical bool
+		wantAvailable  bool
+		wantKey        string
+	}{
+		{
+			name:           "valid mutation-only upsert preserves its endpoint identity",
+			mutation:       store.SyncMutation{Entity: store.SyncEntityObservation, EntityKey: " obs-mutation-only ", Op: store.SyncOpUpsert, Payload: validPayload},
+			wantHistorical: true,
+			wantAvailable:  true,
+			wantKey:        " obs-mutation-only ",
+		},
+		{
+			name:     "empty payload identity is rejected",
+			mutation: store.SyncMutation{Entity: store.SyncEntityObservation, EntityKey: "obs-empty", Op: store.SyncOpUpsert, Payload: `{"sync_id":"","session_id":"session","type":"decision","title":"title","content":"content","scope":"project"}`},
+		},
+		{
+			name:     "whitespace payload identity is rejected",
+			mutation: store.SyncMutation{Entity: store.SyncEntityObservation, EntityKey: " \t", Op: store.SyncOpUpsert, Payload: `{"sync_id":" \t","session_id":"session","type":"decision","title":"title","content":"content","scope":"project"}`},
+		},
+		{
+			name:     "malformed payload identity is rejected",
+			mutation: store.SyncMutation{Entity: store.SyncEntityObservation, EntityKey: "1", Op: store.SyncOpUpsert, Payload: `{"sync_id":1,"session_id":"session","type":"decision","title":"title","content":"content","scope":"project"}`},
+		},
+		{
+			name:     "malformed payload is rejected",
+			mutation: store.SyncMutation{Entity: store.SyncEntityObservation, EntityKey: "obs-malformed", Op: store.SyncOpUpsert, Payload: `{"sync_id"`},
+		},
+		{
+			name:     "missing payload identity is rejected",
+			mutation: store.SyncMutation{Entity: store.SyncEntityObservation, EntityKey: "obs-missing", Op: store.SyncOpUpsert, Payload: `{"session_id":"session","type":"decision","title":"title","content":"content","scope":"project"}`},
+		},
+		{
+			name:     "mismatched identity is rejected",
+			mutation: store.SyncMutation{Entity: store.SyncEntityObservation, EntityKey: "obs-entity-key", Op: store.SyncOpUpsert, Payload: `{"sync_id":"obs-payload","session_id":"session","type":"decision","title":"title","content":"content","scope":"project"}`},
+		},
+		{
+			name:           "tombstone preserves history but not endpoint availability",
+			mutation:       store.SyncMutation{Entity: store.SyncEntityObservation, EntityKey: "obs-tombstone", Op: store.SyncOpDelete},
+			wantHistorical: true,
+			wantKey:        "obs-tombstone",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := json.Marshal(ChunkData{Mutations: []store.SyncMutation{tc.mutation}})
+			if err != nil {
+				t.Fatalf("marshal chunk: %v", err)
+			}
+			transport := newFakeCloudTransport()
+			transport.chunks["history"] = raw
+			sy := NewWithTransport(nil, transport)
+			_, available, historical, err := sy.exportedChunkKeys(&Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "history"}}})
+			if err != nil {
+				t.Fatalf("exportedChunkKeys: %v", err)
+			}
+			if got := len(historical); got != boolToInt(tc.wantHistorical) {
+				t.Fatalf("historical keys = %v, want historical=%t", historical, tc.wantHistorical)
+			}
+			if got := len(available); got != boolToInt(tc.wantAvailable) {
+				t.Fatalf("available keys = %v, want available=%t", available, tc.wantAvailable)
+			}
+			if tc.wantKey == "" {
+				return
+			}
+			if _, ok := historical[tc.wantKey]; ok != tc.wantHistorical {
+				t.Fatalf("historical key %q present=%t, want %t", tc.wantKey, ok, tc.wantHistorical)
+			}
+			if _, ok := available[tc.wantKey]; ok != tc.wantAvailable {
+				t.Fatalf("available key %q present=%t, want %t", tc.wantKey, ok, tc.wantAvailable)
+			}
+		})
+	}
+}
+
 func boolToInt(value bool) int {
 	if value {
 		return 1

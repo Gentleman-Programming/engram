@@ -1615,14 +1615,48 @@ func (sy *Syncer) exportedChunkKeys(m *Manifest) (map[string]struct{}, map[strin
 				relationKeys[mutation.EntityKey] = struct{}{}
 			}
 			if mutation.Entity == store.SyncEntityObservation {
-				historicalObservationKeys[mutation.EntityKey] = struct{}{}
-				if mutation.Op == store.SyncOpUpsert && store.ValidateSyncMutationPayload(mutation.Entity, mutation.Op, mutation.Payload, mutation.EntityKey).ReasonCode == "" {
-					observationKeys[mutation.EntityKey] = struct{}{}
+				switch mutation.Op {
+				case store.SyncOpDelete:
+					if strings.TrimSpace(mutation.EntityKey) != "" {
+						historicalObservationKeys[mutation.EntityKey] = struct{}{}
+					}
+				case store.SyncOpUpsert:
+					if syncID, ok := observationUpsertIdentity(mutation); ok {
+						historicalObservationKeys[syncID] = struct{}{}
+						observationKeys[syncID] = struct{}{}
+					}
 				}
 			}
 		}
 	}
 	return relationKeys, observationKeys, historicalObservationKeys, nil
+}
+
+// observationUpsertIdentity returns the payload-owned identity of a replayable
+// observation upsert. It keeps the identity byte-exact: whitespace only proves
+// non-emptiness, never changes the key stored in the export indexes.
+func observationUpsertIdentity(mutation store.SyncMutation) (string, bool) {
+	if store.ValidateSyncMutationPayload(mutation.Entity, mutation.Op, mutation.Payload, mutation.EntityKey).ReasonCode != "" {
+		return "", false
+	}
+
+	payload := strings.TrimSpace(mutation.Payload)
+	if payload == "" {
+		return "", false
+	}
+	if payload[0] == '"' {
+		if err := json.Unmarshal([]byte(payload), &payload); err != nil {
+			return "", false
+		}
+		payload = strings.TrimSpace(payload)
+	}
+	var body struct {
+		SyncID string `json:"sync_id"`
+	}
+	if err := json.Unmarshal([]byte(payload), &body); err != nil || strings.TrimSpace(body.SyncID) == "" || body.SyncID != mutation.EntityKey {
+		return "", false
+	}
+	return body.SyncID, true
 }
 
 // filterRelationMutationsForExport returns the relation mutations that still
