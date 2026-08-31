@@ -296,6 +296,24 @@ func canonicalizePath(path string) string {
 	return filepath.Clean(resolved)
 }
 
+// RuntimeWorktreeDirectory returns the stable directory identity for runtime
+// session binding. Unlike DetectProjectFull's Path, linked worktrees retain
+// their individual checkout roots while their project identity may remain
+// shared with the primary checkout.
+func RuntimeWorktreeDirectory(dir string) string {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		dir = "."
+	}
+	if absolute, err := filepath.Abs(dir); err == nil {
+		dir = absolute
+	}
+	if worktreeRoot := detectGitWorktreeDir(dir); worktreeRoot != "" {
+		return canonicalizePath(worktreeRoot)
+	}
+	return canonicalizePath(dir)
+}
+
 func normalizeConfigProjectName(projectName string) (string, error) {
 	trimmed := strings.TrimSpace(projectName)
 	if trimmed == "" {

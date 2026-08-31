@@ -788,6 +788,33 @@ func TestDetectProjectFull_WorktreeUsesPrimaryRepositoryIdentity(t *testing.T) {
 	}
 }
 
+func TestRuntimeWorktreeDirectoryKeepsLinkedWorktreesDistinct(t *testing.T) {
+	parent := t.TempDir()
+	primary := filepath.Join(parent, "primary")
+	sibling := filepath.Join(parent, "sibling")
+	if err := os.MkdirAll(primary, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initGit(t, primary)
+	commitEmptyGit(t, primary)
+	addGitWorktree(t, primary, sibling, "sibling")
+	if err := os.MkdirAll(filepath.Join(sibling, "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	primaryDirectory := RuntimeWorktreeDirectory(primary)
+	siblingDirectory := RuntimeWorktreeDirectory(filepath.Join(sibling, "nested"))
+	if primaryDirectory != canonicalizePath(primary) {
+		t.Fatalf("primary runtime directory = %q, want %q", primaryDirectory, canonicalizePath(primary))
+	}
+	if siblingDirectory != canonicalizePath(sibling) {
+		t.Fatalf("sibling runtime directory = %q, want %q", siblingDirectory, canonicalizePath(sibling))
+	}
+	if primaryDirectory == siblingDirectory {
+		t.Fatalf("linked worktree runtime directories collapsed to %q", primaryDirectory)
+	}
+}
+
 func TestDetectProjectFull_WorktreeRemoteUsesPrimaryRepositoryPath(t *testing.T) {
 	parent := t.TempDir()
 	repo := filepath.Join(parent, "canonical-repo")

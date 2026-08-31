@@ -790,6 +790,51 @@ func TestHandleSaveBindsNestedWriteToExplicitNestedRuntimeSession(t *testing.T) 
 	}
 }
 
+func TestHandleSaveBindsRelativeDirectoryRuntimeSession(t *testing.T) {
+	s := newMCPTestStore(t)
+	repository := t.TempDir()
+	initTestGitRepo(t, repository)
+	t.Chdir(repository)
+
+	start := handleSessionStart(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	startResult, err := start(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"id":        "relative-runtime-session",
+		"directory": ".",
+	}}})
+	if err != nil || startResult.IsError {
+		t.Fatalf("start session: err=%v text=%q", err, callResultText(t, startResult))
+	}
+
+	session, err := s.GetSession("relative-runtime-session")
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	wantDirectory, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatalf("resolve relative directory: %v", err)
+	}
+	if session.Directory != wantDirectory {
+		t.Fatalf("relative session directory = %q, want stable absolute directory %q", session.Directory, wantDirectory)
+	}
+
+	originalWorkingDirectory := currentWorkingDirectory
+	currentWorkingDirectory = func() string { return repository }
+	t.Cleanup(func() { currentWorkingDirectory = originalWorkingDirectory })
+	saveResult, err := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "Relative runtime save",
+		"content": "**What**: saved from a relative runtime directory\n**Why**: runtime session binding regression",
+		"type":    "bugfix",
+		"project": session.Project,
+	}}})
+	if err != nil || saveResult.IsError {
+		t.Fatalf("save: err=%v text=%q", err, callResultText(t, saveResult))
+	}
+	observations, err := s.RecentObservations(session.Project, "project", 1)
+	if err != nil || len(observations) != 1 || observations[0].SessionID != "relative-runtime-session" {
+		t.Fatalf("relative runtime write attached to %#v, err=%v", observations, err)
+	}
+}
+
 // TestHandleSaveFallsBackToManualSaveWhenNoActiveSession is the regression
 // guard for the preserved behavior: when there is no un-ended session for the
 // project, mem_save with no session_id must still use manual-save-{project}.
@@ -888,6 +933,58 @@ func TestHandleSaveFallsBackWhenActiveSessionIsInAnotherDirectory(t *testing.T) 
 	}
 	if len(obs) != 1 || obs[0].SessionID != defaultSessionID("engram") {
 		t.Fatalf("expected manual fallback, got %#v", obs)
+	}
+}
+
+func TestHandleSaveExcludesRuntimeSessionInSiblingLinkedWorktree(t *testing.T) {
+	s := newMCPTestStore(t)
+	parent := t.TempDir()
+	primary := filepath.Join(parent, "primary")
+	sibling := filepath.Join(parent, "sibling")
+	if err := os.MkdirAll(primary, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initTestGitRepo(t, primary)
+	commit := exec.Command("git", "-C", primary, "commit", "--allow-empty", "-m", "initial commit")
+	if out, err := commit.CombinedOutput(); err != nil {
+		t.Fatalf("create initial commit: %v\n%s", err, out)
+	}
+	addWorktree := exec.Command("git", "-C", primary, "worktree", "add", "-b", "sibling", sibling)
+	if out, err := addWorktree.CombinedOutput(); err != nil {
+		t.Fatalf("add sibling worktree: %v\n%s", err, out)
+	}
+	t.Chdir(primary)
+
+	start := handleSessionStart(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	startResult, err := start(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"id": "primary-runtime-session",
+	}}})
+	if err != nil || startResult.IsError {
+		t.Fatalf("start primary session: err=%v text=%q", err, callResultText(t, startResult))
+	}
+	primarySession, err := s.GetSession("primary-runtime-session")
+	if err != nil {
+		t.Fatalf("get primary session: %v", err)
+	}
+	if primarySession.Directory == runtimeSessionDirectory(sibling) {
+		t.Fatalf("primary runtime directory %q collapsed to sibling worktree", primarySession.Directory)
+	}
+
+	originalWorkingDirectory := currentWorkingDirectory
+	currentWorkingDirectory = func() string { return sibling }
+	t.Cleanup(func() { currentWorkingDirectory = originalWorkingDirectory })
+	saveResult, err := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "Sibling worktree runtime save",
+		"content": "**What**: saved from a sibling worktree\n**Why**: runtime sessions must not cross worktree boundaries",
+		"type":    "bugfix",
+		"project": primarySession.Project,
+	}}})
+	if err != nil || saveResult.IsError {
+		t.Fatalf("save: err=%v text=%q", err, callResultText(t, saveResult))
+	}
+	observations, err := s.RecentObservations(primarySession.Project, "project", 1)
+	if err != nil || len(observations) != 1 || observations[0].SessionID != defaultSessionID(primarySession.Project) {
+		t.Fatalf("sibling worktree write attached to %#v, err=%v", observations, err)
 	}
 }
 
