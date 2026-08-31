@@ -345,6 +345,28 @@ func TestCollectSessionIDsIncludesChunkSessionsAndMutationSessions(t *testing.T)
 	}
 }
 
+func TestCollectSessionIDsPreservesDistinctNonblankSessionIdentities(t *testing.T) {
+	sessionIDs := collectSessionIDs(engramsync.ChunkData{
+		Sessions: []store.Session{
+			{ID: "session"},
+			{ID: " session "},
+			{ID: " \t "},
+		},
+	})
+
+	if len(sessionIDs) != 2 {
+		t.Fatalf("expected two distinct nonblank session identities, got %d: %#v", len(sessionIDs), sessionIDs)
+	}
+	for _, sessionID := range []string{"session", " session "} {
+		if _, ok := sessionIDs[sessionID]; !ok {
+			t.Fatalf("expected exact session identity %q", sessionID)
+		}
+	}
+	if _, ok := sessionIDs[" \t "]; ok {
+		t.Fatal("whitespace-only session identity must be ignored")
+	}
+}
+
 func TestParseClientCreatedAt(t *testing.T) {
 	t.Run("empty is allowed", func(t *testing.T) {
 		got, err := parseClientCreatedAt("")
@@ -453,6 +475,29 @@ func TestMaterializedChunkMutationsBuildsOrderedUpserts(t *testing.T) {
 		if payload["project"] != project {
 			t.Fatalf("entry %d payload project mismatch: %v", i, payload["project"])
 		}
+	}
+}
+
+func TestMaterializedChunkMutationsPreservesExactSessionEntityKey(t *testing.T) {
+	const sessionID = " session "
+	entries, err := materializedChunkMutations("proj-materialize", engramsync.ChunkData{
+		Sessions: []store.Session{{ID: sessionID, Directory: "/tmp/session"}},
+	})
+	if err != nil {
+		t.Fatalf("materializedChunkMutations: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected one materialized session mutation, got %d", len(entries))
+	}
+	if entries[0].EntityKey != sessionID {
+		t.Fatalf("expected exact session entity key %q, got %q", sessionID, entries[0].EntityKey)
+	}
+	var session store.Session
+	if err := json.Unmarshal(entries[0].Payload, &session); err != nil {
+		t.Fatalf("decode materialized session payload: %v", err)
+	}
+	if session.ID != entries[0].EntityKey {
+		t.Fatalf("expected payload ID %q to agree with entity key %q", session.ID, entries[0].EntityKey)
 	}
 }
 

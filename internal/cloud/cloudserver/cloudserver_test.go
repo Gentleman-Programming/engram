@@ -54,7 +54,7 @@ func (s *fakeStore) WriteChunk(_ context.Context, project string, chunkID, creat
 		}
 		for _, sess := range chunk.Sessions {
 			if strings.TrimSpace(sess.ID) != "" {
-				s.sessions[project][strings.TrimSpace(sess.ID)] = struct{}{}
+				s.sessions[project][sess.ID] = struct{}{}
 			}
 		}
 	}
@@ -1140,6 +1140,48 @@ func TestValidateChunkSessionReferencesAcceptsDeleteMutationWithoutSession(t *te
 	}}}, map[string]struct{}{})
 	if err != nil {
 		t.Fatalf("expected delete-only mutation to pass session validation, got %v", err)
+	}
+}
+
+func TestValidateChunkSessionReferencesUsesExactNonblankIdentity(t *testing.T) {
+	tests := []struct {
+		name    string
+		chunk   engramsync.ChunkData
+		known   map[string]struct{}
+		wantErr bool
+	}{
+		{
+			name: "accepts exact padded known session",
+			chunk: engramsync.ChunkData{Observations: []store.Observation{{
+				SyncID: "obs-padded", SessionID: " session ", Type: "note", Title: "title", Content: "content", Scope: "project",
+			}}},
+			known: map[string]struct{}{" session ": {}},
+		},
+		{
+			name: "rejects trim distinct known session",
+			chunk: engramsync.ChunkData{Observations: []store.Observation{{
+				SyncID: "obs-distinct", SessionID: " session ", Type: "note", Title: "title", Content: "content", Scope: "project",
+			}}},
+			known:   map[string]struct{}{"session": {}},
+			wantErr: true,
+		},
+		{
+			name: "rejects whitespace only reference",
+			chunk: engramsync.ChunkData{Observations: []store.Observation{{
+				SyncID: "obs-blank", SessionID: " \t ", Type: "note", Title: "title", Content: "content", Scope: "project",
+			}}},
+			known:   map[string]struct{}{"session": {}},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateChunkSessionReferences(tt.chunk, tt.known)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validateChunkSessionReferences() error = %v, want error=%t", err, tt.wantErr)
+			}
+		})
 	}
 }
 
