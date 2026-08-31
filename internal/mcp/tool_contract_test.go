@@ -381,6 +381,11 @@ func TestCompareMCPToolContract(t *testing.T) {
 	if err := compareMCPToolContract(additionalBase, base); err == nil || !strings.Contains(err.Error(), "additional-properties-narrowed") {
 		t.Fatalf("additionalProperties narrowing error = %v", err)
 	}
+	permissiveBase := map[string]mcpToolSchema{"x": {Types: []string{"object"}, Additional: true}}
+	permissiveLive := map[string]mcpToolSchema{"x": {Types: []string{"object"}, Properties: map[string]mcpToolSchema{"new": {Types: []string{"boolean"}}}, Additional: true}}
+	if err := compareMCPToolContract(permissiveBase, permissiveLive); err == nil || !strings.Contains(err.Error(), "/tools/x/properties/new: additional-properties-narrowed") {
+		t.Fatalf("permissive additionalProperties optional addition error = %v", err)
+	}
 }
 
 func TestCompareMCPToolContractDiagnostics(t *testing.T) {
@@ -423,7 +428,7 @@ func TestMCPToolContractV1(t *testing.T) {
 }
 
 func TestVerifyMCPToolContract(t *testing.T) {
-	fixture := map[string]mcpToolSchema{"base": {Types: []string{"object"}, Properties: map[string]mcpToolSchema{"kept": {Types: []string{"string"}}}, Additional: true}}
+	fixture := map[string]mcpToolSchema{"base": {Types: []string{"object"}, Properties: map[string]mcpToolSchema{"kept": {Types: []string{"string"}}}, Additional: false}}
 	canonical := []byte(formatMCPToolContract(fixture))
 	live := map[string]mcpToolSchema{"base": {Types: []string{"object"}, Properties: map[string]mcpToolSchema{"kept": {Types: []string{"string"}}, "added": {Types: []string{"boolean"}}}, Additional: true}, "new": {Types: []string{"string"}}}
 	if err := verifyMCPToolContract(fixture, live, canonical); err != nil {
@@ -646,8 +651,12 @@ func compareMCPToolSchema(drifts *[]mcpToolContractDrift, path string, v1, live 
 		}
 	}
 	for _, name := range sortedKeys(live.Properties) {
-		if _, exists := v1.Properties[name]; !exists && !slices.Contains(live.Required, name) && !simplePrimitive(live.Properties[name]) {
-			driftAt(drifts, jsonPointer(jsonPointer(path, "properties"), name), "unproven-optional-addition", mcpToolSchema{}, live.Properties[name])
+		if _, exists := v1.Properties[name]; !exists && !slices.Contains(live.Required, name) {
+			if v1.Additional {
+				driftAt(drifts, jsonPointer(jsonPointer(path, "properties"), name), "additional-properties-narrowed", mcpToolSchema{}, live.Properties[name])
+			} else if !simplePrimitive(live.Properties[name]) {
+				driftAt(drifts, jsonPointer(jsonPointer(path, "properties"), name), "unproven-optional-addition", mcpToolSchema{}, live.Properties[name])
+			}
 		}
 	}
 }
