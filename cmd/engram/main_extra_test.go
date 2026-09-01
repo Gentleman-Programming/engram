@@ -1464,7 +1464,6 @@ func TestCmdCloudUpgradeRepairStatusAndRollbackBranches(t *testing.T) {
 			t.Fatalf("seed rollback state: %v", err)
 		}
 		_ = s.Close()
-
 		withArgs(t, "engram", "cloud", "upgrade", "rollback", "--project", "proj-a")
 		stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloud(cfg) })
 		if recovered != nil || stderr != "" {
@@ -1824,6 +1823,10 @@ func TestCmdCloudConfigAcceptsValidServerURL(t *testing.T) {
 	stubRuntimeHooks(t)
 
 	cfg := testConfig(t)
+	const savedToken = "stored-token"
+	if err := saveCloudConfig(cfg, &cloudConfig{ServerURL: "https://previous.example.test", Token: savedToken}); err != nil {
+		t.Fatalf("seed cloud config: %v", err)
+	}
 	withArgs(t, "engram", "cloud", "config", "--server", "https://cloud.example.test")
 	stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloud(cfg) })
 	if recovered != nil || stderr != "" {
@@ -1837,9 +1840,63 @@ func TestCmdCloudConfigAcceptsValidServerURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load cloud config: %v", err)
 	}
-	if cc == nil || cc.ServerURL != "https://cloud.example.test" {
-		t.Fatalf("expected persisted server URL, got %+v", cc)
+	if cc == nil {
+		t.Fatal("expected persisted cloud config")
 	}
+	if cc.ServerURL != "https://cloud.example.test" {
+		t.Fatalf("expected persisted server URL, got %q", cc.ServerURL)
+	}
+	if cc.Token != savedToken {
+		t.Fatal("expected existing cloud token to be preserved")
+	}
+}
+
+func TestCmdCloudConfigCreatesMissingConfigAndPreservesLoadFailureFile(t *testing.T) {
+	t.Run("missing config is saved as an empty config", func(t *testing.T) {
+		stubExitWithPanic(t)
+		stubRuntimeHooks(t)
+		cfg := testConfig(t)
+
+		withArgs(t, "engram", "cloud", "config", "--server", "https://cloud.example.test")
+		stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloud(cfg) })
+		if recovered != nil || stderr != "" || !strings.Contains(stdout, "Cloud server set") {
+			t.Fatalf("cloud config result = stdout %q stderr %q panic %v", stdout, stderr, recovered)
+		}
+		config, err := loadCloudConfig(cfg)
+		if err != nil {
+			t.Fatalf("load saved cloud config: %v", err)
+		}
+		if config.ServerURL != "https://cloud.example.test" || config.Token != "" {
+			t.Fatalf("saved cloud config = %+v, want server-only config", config)
+		}
+	})
+
+	t.Run("load failure is fatal and does not overwrite the file", func(t *testing.T) {
+		stubExitWithPanic(t)
+		stubRuntimeHooks(t)
+		cfg := testConfig(t)
+		path := filepath.Join(cfg.DataDir, "cloud.json")
+		raw := []byte(`{"token":"stored-token"`)
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
+			t.Fatalf("write malformed cloud config: %v", err)
+		}
+
+		withArgs(t, "engram", "cloud", "config", "--server", "https://cloud.example.test")
+		stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloud(cfg) })
+		if _, ok := recovered.(exitCode); !ok {
+			t.Fatalf("cloud config load failure panic = %v, want fatal exit", recovered)
+		}
+		if stdout != "" || !strings.Contains(stderr, "engram:") {
+			t.Fatalf("cloud config load failure output = stdout %q stderr %q", stdout, stderr)
+		}
+		after, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read cloud config after failed update: %v", err)
+		}
+		if string(after) != string(raw) {
+			t.Fatalf("cloud config was overwritten after load failure: %q", after)
+		}
+	})
 }
 
 func TestCmdCloudStatusSurfacesCloudConfigParseError(t *testing.T) {
@@ -2346,6 +2403,18 @@ func TestStoreSyncStatusProviderRequiresExplicitProjectScope(t *testing.T) {
 	}
 	if !strings.Contains(status.ReasonMessage, "explicit project") {
 		t.Fatalf("expected explicit project message, got %q", status.ReasonMessage)
+	}
+}
+
+func TestSyncStatusUsesLastSuccessfulSyncAfterLifecycleDegrades(t *testing.T) {
+	lastSuccess := "2026-08-30T10:00:00Z"
+	status := syncStatusFromState(&store.SyncState{
+		Lifecycle:           store.SyncLifecycleDegraded,
+		LastSuccessAt:       &lastSuccess,
+		ConsecutiveFailures: 1,
+	})
+	if status.LastSyncAt == nil || !status.LastSyncAt.Equal(time.Date(2026, 8, 30, 10, 0, 0, 0, time.UTC)) {
+		t.Fatalf("last_sync_at = %v, want last successful sync", status.LastSyncAt)
 	}
 }
 

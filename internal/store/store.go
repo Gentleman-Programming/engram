@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -297,7 +298,15 @@ type SyncState struct {
 	ReasonCode          *string `json:"reason_code,omitempty"`
 	ReasonMessage       *string `json:"reason_message,omitempty"`
 	LastError           *string `json:"last_error,omitempty"`
+	LastSuccessAt       *string `json:"last_success_at,omitempty"`
 	UpdatedAt           string  `json:"updated_at"`
+}
+
+// CloudSyncSummary is the aggregate local cloud state shown when no project is selected.
+type CloudSyncSummary struct {
+	LastSuccessAt    string
+	PendingMutations int64
+	LastError        string
 }
 
 type SyncMutation struct {
@@ -536,6 +545,11 @@ func FallbackConfig(dataDir string) Config {
 // MaxObservationLength returns the configured maximum content length for observations.
 func (s *Store) MaxObservationLength() int {
 	return s.cfg.MaxObservationLength
+}
+
+// DataDir returns the directory containing the store database and cloud.json.
+func (s *Store) DataDir() string {
+	return s.cfg.DataDir
 }
 
 // ─── Store ───────────────────────────────────────────────────────────────────
@@ -875,6 +889,7 @@ func (s *Store) migrate() error {
 				lease_owner          TEXT,
 				lease_until          TEXT,
 				last_error           TEXT,
+				last_success_at      TEXT,
 				updated_at           TEXT NOT NULL DEFAULT (datetime('now'))
 			);
 
@@ -978,6 +993,9 @@ func (s *Store) migrate() error {
 		return err
 	}
 	if err := s.addColumnIfNotExists("sync_state", "reason_message", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.addColumnIfNotExists("sync_state", "last_success_at", "TEXT"); err != nil {
 		return err
 	}
 	if err := s.migrateSyncChunksTable(); err != nil {
@@ -4291,6 +4309,40 @@ func (s *Store) ListPendingSyncMutations(targetKey string, limit int) ([]SyncMut
 	return mutations, rows.Err()
 }
 
+// CloudSyncSummary returns status across project-scoped cloud targets only.
+// It deliberately excludes the legacy global cloud target because explicit cloud
+// sync records state under cloud:<project>.
+func (s *Store) CloudSyncSummary() (CloudSyncSummary, error) {
+	const cloudProjectTarget = "cloud:%"
+	var summary CloudSyncSummary
+	var lastSuccess, lastError sql.NullString
+	err := s.db.QueryRow(`
+		SELECT MAX(last_success_at), (
+			SELECT last_error FROM sync_state
+			WHERE target_key LIKE ? AND last_error IS NOT NULL
+			ORDER BY updated_at DESC LIMIT 1
+		)
+		FROM sync_state WHERE target_key LIKE ?`, cloudProjectTarget, cloudProjectTarget).Scan(&lastSuccess, &lastError)
+	if err != nil {
+		return CloudSyncSummary{}, err
+	}
+	if lastSuccess.Valid {
+		summary.LastSuccessAt = lastSuccess.String
+	}
+	if lastError.Valid {
+		summary.LastError = lastError.String
+	}
+	err = s.db.QueryRow(`
+		SELECT COUNT(*)
+		FROM sync_mutations sm
+		JOIN sync_enrolled_projects sep ON sm.project = sep.project
+		WHERE sm.target_key LIKE ? AND sm.acked_at IS NULL AND sm.disposition = 'pending'`, cloudProjectTarget).Scan(&summary.PendingMutations)
+	if err != nil {
+		return CloudSyncSummary{}, err
+	}
+	return summary, nil
+}
+
 func (s *Store) ListPendingSyncMutationsAfterSeq(targetKey string, afterSeq int64, limit int) ([]SyncMutation, error) {
 	targetKey = normalizeSyncTargetKey(targetKey)
 	if limit <= 0 {
@@ -4896,7 +4948,7 @@ func (s *Store) MarkSyncHealthy(targetKey string) error {
 		}
 		_, err := s.execHook(tx,
 			`UPDATE sync_state
-			 SET lifecycle = ?, consecutive_failures = 0, backoff_until = NULL, reason_code = NULL, reason_message = NULL, last_error = NULL, updated_at = datetime('now')
+			 SET lifecycle = ?, consecutive_failures = 0, backoff_until = NULL, reason_code = NULL, reason_message = NULL, last_error = NULL, last_success_at = datetime('now'), updated_at = datetime('now')
 			 WHERE target_key = ?`,
 			SyncLifecycleHealthy, targetKey,
 		)
@@ -5716,6 +5768,46 @@ func (s *Store) ListProjectNames() ([]string, error) {
 	return results, rows.Err()
 }
 
+// ListProjectsForCloudEnrollment returns every local identity that can be
+// enrolled, normalized and ordered deterministically for the cloud TUI.
+func (s *Store) ListProjectsForCloudEnrollment() ([]string, error) {
+	rows, err := s.queryItHook(s.db, `SELECT project FROM (
+		SELECT project FROM observations WHERE deleted_at IS NULL
+		UNION
+		SELECT project FROM sessions
+		UNION
+		SELECT project FROM user_prompts
+		UNION
+		SELECT project FROM sync_enrolled_projects
+	) WHERE project IS NOT NULL AND TRIM(project) != ''`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	projects := make(map[string]struct{})
+	for rows.Next() {
+		var project string
+		if err := rows.Scan(&project); err != nil {
+			return nil, err
+		}
+		project, _ = NormalizeProject(project)
+		if strings.TrimSpace(project) != "" {
+			projects[project] = struct{}{}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	results := make([]string, 0, len(projects))
+	for project := range projects {
+		results = append(results, project)
+	}
+	sort.Strings(results)
+	return results, nil
+}
+
 // ProjectStats holds aggregate statistics for a single project.
 type ProjectStats struct {
 	Name             string   `json:"name"`
@@ -6276,10 +6368,10 @@ func (s *Store) ensureSyncState(targetKey string) error {
 func (s *Store) getSyncState(targetKey string) (*SyncState, error) {
 	row := s.db.QueryRow(`
 		SELECT target_key, lifecycle, last_enqueued_seq, last_acked_seq, last_pulled_seq,
-		       consecutive_failures, backoff_until, lease_owner, lease_until, reason_code, reason_message, last_error, updated_at
+		       consecutive_failures, backoff_until, lease_owner, lease_until, reason_code, reason_message, last_error, last_success_at, updated_at
 		FROM sync_state WHERE target_key = ?`, targetKey)
 	var state SyncState
-	if err := row.Scan(&state.TargetKey, &state.Lifecycle, &state.LastEnqueuedSeq, &state.LastAckedSeq, &state.LastPulledSeq, &state.ConsecutiveFailures, &state.BackoffUntil, &state.LeaseOwner, &state.LeaseUntil, &state.ReasonCode, &state.ReasonMessage, &state.LastError, &state.UpdatedAt); err != nil {
+	if err := row.Scan(&state.TargetKey, &state.Lifecycle, &state.LastEnqueuedSeq, &state.LastAckedSeq, &state.LastPulledSeq, &state.ConsecutiveFailures, &state.BackoffUntil, &state.LeaseOwner, &state.LeaseUntil, &state.ReasonCode, &state.ReasonMessage, &state.LastError, &state.LastSuccessAt, &state.UpdatedAt); err != nil {
 		return nil, err
 	}
 	return &state, nil
@@ -6294,10 +6386,10 @@ func (s *Store) getSyncStateTx(tx *sql.Tx, targetKey string) (*SyncState, error)
 	}
 	row := tx.QueryRow(`
 		SELECT target_key, lifecycle, last_enqueued_seq, last_acked_seq, last_pulled_seq,
-		       consecutive_failures, backoff_until, lease_owner, lease_until, reason_code, reason_message, last_error, updated_at
+		       consecutive_failures, backoff_until, lease_owner, lease_until, reason_code, reason_message, last_error, last_success_at, updated_at
 		FROM sync_state WHERE target_key = ?`, targetKey)
 	var state SyncState
-	if err := row.Scan(&state.TargetKey, &state.Lifecycle, &state.LastEnqueuedSeq, &state.LastAckedSeq, &state.LastPulledSeq, &state.ConsecutiveFailures, &state.BackoffUntil, &state.LeaseOwner, &state.LeaseUntil, &state.ReasonCode, &state.ReasonMessage, &state.LastError, &state.UpdatedAt); err != nil {
+	if err := row.Scan(&state.TargetKey, &state.Lifecycle, &state.LastEnqueuedSeq, &state.LastAckedSeq, &state.LastPulledSeq, &state.ConsecutiveFailures, &state.BackoffUntil, &state.LeaseOwner, &state.LeaseUntil, &state.ReasonCode, &state.ReasonMessage, &state.LastError, &state.LastSuccessAt, &state.UpdatedAt); err != nil {
 		return nil, err
 	}
 	return &state, nil

@@ -934,3 +934,38 @@ func TestMigrate_LegacyDeferredRowsRemainAdministrativeOnly(t *testing.T) {
 		t.Fatalf("second migration must be idempotent: %v", err)
 	}
 }
+
+func TestMigrate_AddsNullableLastSuccessAtWithoutBackfill(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "engram.db")
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open legacy database: %v", err)
+	}
+	if _, err := raw.Exec(legacyDDLPostMemoryConflictAudit); err != nil {
+		_ = raw.Close()
+		t.Fatalf("apply legacy DDL: %v", err)
+	}
+	if _, err := raw.Exec(`UPDATE sync_state SET updated_at = '2026-08-30T10:00:00Z' WHERE target_key = 'cloud'`); err != nil {
+		_ = raw.Close()
+		t.Fatalf("seed legacy state: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close legacy database: %v", err)
+	}
+
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = dir
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("migrate legacy database: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	state, err := s.GetSyncState(DefaultSyncTargetKey)
+	if err != nil {
+		t.Fatalf("get migrated state: %v", err)
+	}
+	if state.LastSuccessAt != nil {
+		t.Fatalf("legacy last success = %q, want NULL", *state.LastSuccessAt)
+	}
+}

@@ -44,6 +44,51 @@ func newTestStore(t *testing.T) *Store {
 	return s
 }
 
+func TestStoreDataDir(t *testing.T) {
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = t.TempDir()
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	if got := s.DataDir(); got != cfg.DataDir {
+		t.Fatalf("data directory = %q, want %q", got, cfg.DataDir)
+	}
+}
+
+func TestCloudSyncSummaryUsesProjectScopedCloudState(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnrollProject("project-a"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+	if _, err := s.db.Exec(`
+		INSERT INTO sync_state (target_key, lifecycle, last_success_at, last_error, updated_at) VALUES
+			('cloud', 'degraded', '2099-01-01T00:00:00Z', 'legacy error', '2099-01-01T00:00:00Z'),
+			('cloud:project-a', 'healthy', '2026-08-30T10:00:00Z', NULL, '2026-08-30T10:00:00Z'),
+			('cloud:project-b', 'degraded', '2026-08-31T10:00:00Z', 'project-b error', '2026-08-31T11:00:00Z')
+		ON CONFLICT(target_key) DO UPDATE SET
+			lifecycle = excluded.lifecycle,
+			last_success_at = excluded.last_success_at,
+			last_error = excluded.last_error,
+			updated_at = excluded.updated_at;
+		INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project, disposition) VALUES
+			('cloud:project-a', 'observation', 'pending-a', 'upsert', '{}', 'local', 'project-a', 'pending'),
+			('cloud:project-b', 'observation', 'pending-b', 'upsert', '{}', 'local', 'project-b', 'pending');
+	`); err != nil {
+		t.Fatalf("seed project-scoped cloud state: %v", err)
+	}
+
+	summary, err := s.CloudSyncSummary()
+	if err != nil {
+		t.Fatalf("cloud sync summary: %v", err)
+	}
+	if summary.LastSuccessAt != "2026-08-31T10:00:00Z" || summary.LastError != "project-b error" || summary.PendingMutations != 1 {
+		t.Fatalf("cloud summary = %+v", summary)
+	}
+}
+
 func TestProjectIdentityAdmissionRejectsEmptyWritesWithoutJournalState(t *testing.T) {
 	s := newTestStore(t)
 	assertCounts := func(wantSessions, wantObservations, wantPrompts, wantMutations int) {
@@ -3981,6 +4026,47 @@ func TestMarkSyncHealthyCreatesSyncStateWhenMissing(t *testing.T) {
 	}
 	if state.ReasonCode != nil || state.ReasonMessage != nil || state.LastError != nil {
 		t.Fatalf("expected healthy state without degraded reasons/errors, got %+v", state)
+	}
+}
+
+func TestLastSuccessAtChangesOnlyWhenSyncBecomesHealthy(t *testing.T) {
+	s := newTestStore(t)
+	targetKey := "cloud:proj-a"
+
+	state, err := s.GetSyncState(targetKey)
+	if err != nil {
+		t.Fatalf("get initial sync state: %v", err)
+	}
+	if state.LastSuccessAt != nil {
+		t.Fatalf("initial last success = %q, want NULL", *state.LastSuccessAt)
+	}
+	if err := s.MarkSyncHealthy(targetKey); err != nil {
+		t.Fatalf("mark healthy: %v", err)
+	}
+	state, err = s.GetSyncState(targetKey)
+	if err != nil || state.LastSuccessAt == nil {
+		t.Fatalf("healthy state last success = %v, err=%v", state.LastSuccessAt, err)
+	}
+	want := *state.LastSuccessAt
+
+	if err := s.MarkSyncFailure(targetKey, "timeout", time.Now().Add(time.Minute)); err != nil {
+		t.Fatalf("mark failure: %v", err)
+	}
+	if err := s.MarkSyncPending(targetKey); err != nil {
+		t.Fatalf("mark pending: %v", err)
+	}
+	if _, err := s.AcquireSyncLease(targetKey, "test", time.Minute, time.Now()); err != nil {
+		t.Fatalf("acquire lease: %v", err)
+	}
+	if err := s.ReleaseSyncLease(targetKey, "test"); err != nil {
+		t.Fatalf("release lease: %v", err)
+	}
+	if err := s.AckSyncMutations(targetKey, 0); err != nil {
+		t.Fatalf("ack mutations: %v", err)
+	}
+	state, err = s.GetSyncState(targetKey)
+	if err != nil || state.LastSuccessAt == nil || *state.LastSuccessAt != want {
+		t.Fatalf("non-success lifecycle changed last success: state=%+v err=%v", state, err)
 	}
 }
 
@@ -8632,17 +8718,16 @@ func TestListProjectNames(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 
-	for _, proj := range []string{"alpha", "alpha", "beta", "gamma"} {
-		_, err := s.AddObservation(AddObservationParams{
+	for _, project := range []string{"alpha", "alpha", "beta", "gamma"} {
+		if _, err := s.AddObservation(AddObservationParams{
 			SessionID: "s1",
 			Type:      "decision",
-			Title:     "test " + proj,
-			Content:   "content for " + proj,
-			Project:   proj,
+			Title:     "test " + project,
+			Content:   "content for " + project,
+			Project:   project,
 			Scope:     "project",
-		})
-		if err != nil {
-			t.Fatalf("AddObservation: %v", err)
+		}); err != nil {
+			t.Fatalf("add observation: %v", err)
 		}
 	}
 
@@ -8651,16 +8736,41 @@ func TestListProjectNames(t *testing.T) {
 		t.Fatalf("ListProjectNames: %v", err)
 	}
 
-	// Should return distinct names: alpha, beta, gamma
 	want := map[string]bool{"alpha": true, "beta": true, "gamma": true}
-	for _, n := range names {
-		if !want[n] {
-			t.Errorf("unexpected project name %q in results", n)
+	for _, name := range names {
+		if !want[name] {
+			t.Errorf("unexpected project name %q in results", name)
 		}
-		delete(want, n)
+		delete(want, name)
 	}
 	if len(want) > 0 {
 		t.Errorf("missing project names: %v", want)
+	}
+}
+
+func TestListProjectsForCloudEnrollmentIncludesLocalIdentities(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.db.Exec(`
+		INSERT INTO sessions (id, project, directory) VALUES ('session-only', ' Session Project ', '/tmp');
+		INSERT INTO user_prompts (session_id, content, project) VALUES ('session-only', 'prompt', 'Prompt Project');
+		INSERT INTO sync_enrolled_projects (project) VALUES ('enrolled-project');
+	`); err != nil {
+		t.Fatalf("seed cloud enrollment identities: %v", err)
+	}
+	if err := s.CreateSession("observation-session", "observation-project", "/tmp"); err != nil {
+		t.Fatalf("create observation session: %v", err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{SessionID: "observation-session", Type: "note", Title: "title", Content: "content", Project: "observation-project", Scope: "project"}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	projects, err := s.ListProjectsForCloudEnrollment()
+	if err != nil {
+		t.Fatalf("list cloud enrollment projects: %v", err)
+	}
+	want := []string{"enrolled-project", "observation-project", "prompt project", "session project"}
+	if !reflect.DeepEqual(projects, want) {
+		t.Fatalf("cloud enrollment projects = %v, want %v", projects, want)
 	}
 }
 
