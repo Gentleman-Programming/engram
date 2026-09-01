@@ -1136,6 +1136,7 @@ func TestLocalChunkExportUsesObservationHistory(t *testing.T) {
 	tests := []struct {
 		name               string
 		history            func(store.Observation) ChunkData
+		observationCreated string
 		observationUpdated string
 		wantObservation    bool
 		wantEmpty          bool
@@ -1176,6 +1177,15 @@ func TestLocalChunkExportUsesObservationHistory(t *testing.T) {
 			observationUpdated: "2025-07-01 00:00:00",
 			wantObservation:    true,
 		},
+		{
+			name: "observation created after watermark still exports after historical presence",
+			history: func(observation store.Observation) ChunkData {
+				return ChunkData{Observations: []store.Observation{{SyncID: observation.SyncID}}}
+			},
+			observationCreated: "2025-07-01 00:00:00",
+			observationUpdated: "2025-07-01 00:00:00",
+			wantObservation:    true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -1203,7 +1213,11 @@ func TestLocalChunkExportUsesObservationHistory(t *testing.T) {
 			if _, err := s.DB().Exec(`UPDATE sessions SET started_at = ? WHERE id = ?`, "2025-01-01 00:00:00", sessionID); err != nil {
 				t.Fatalf("backdate session: %v", err)
 			}
-			if _, err := s.DB().Exec(`UPDATE observations SET created_at = ?, updated_at = ? WHERE id = ?`, "2025-01-01 00:00:00", tc.observationUpdated, observationID); err != nil {
+			observationCreated := tc.observationCreated
+			if observationCreated == "" {
+				observationCreated = "2025-01-01 00:00:00"
+			}
+			if _, err := s.DB().Exec(`UPDATE observations SET created_at = ?, updated_at = ? WHERE id = ?`, observationCreated, tc.observationUpdated, observationID); err != nil {
 				t.Fatalf("backdate observation: %v", err)
 			}
 			if _, err := s.DB().Exec(`UPDATE user_prompts SET created_at = ? WHERE id = ?`, "2025-01-01 00:00:00", promptID); err != nil {
