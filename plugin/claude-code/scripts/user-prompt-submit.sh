@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Engram — UserPromptSubmit hook for Claude Code
 #
 # On the FIRST message of a session: injects a ToolSearch instruction to force
