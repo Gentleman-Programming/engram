@@ -72,6 +72,10 @@ var loadMCPStats = func(s *store.Store) (*store.Stats, error) {
 	return s.Stats()
 }
 
+var loadContextStats = func(s *store.Store) (*store.Stats, error) {
+	return s.Stats()
+}
+
 func truncationWarning(metadata store.TruncationMetadata) string {
 	if !metadata.Truncated {
 		return ""
@@ -1749,7 +1753,10 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 			return respondWithProject(detRes, "No previous session memories found.", nil), nil
 		}
 
-		stats, _ := s.Stats()
+		stats, err := loadContextStats(s)
+		if err != nil {
+			return mcp.NewToolResultError("Failed to get context stats: " + err.Error()), nil
+		}
 		var projects string
 		if len(stats.Projects) > 0 {
 			projects = strings.Join(stats.Projects, ", ")
