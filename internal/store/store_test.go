@@ -1571,6 +1571,63 @@ func TestSearchShortTokensUsesLikeFallbackWithTrigramFTS(t *testing.T) {
 	}
 }
 
+func TestSearchPromptsShortTokensUsesLikeFallbackWithTrigramFTS(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s-prompt-short", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	shortID, err := s.AddPrompt(AddPromptParams{SessionID: "s-prompt-short", Content: "go db", Project: "engram"})
+	if err != nil {
+		t.Fatalf("add short-token prompt: %v", err)
+	}
+	shortResults, err := s.SearchPrompts("db", "engram", 10)
+	if err != nil {
+		t.Fatalf("search prompt short token: %v", err)
+	}
+	if len(shortResults) != 1 || shortResults[0].ID != shortID {
+		t.Fatalf("expected short-token prompt search hit, got %+v", shortResults)
+	}
+
+	literalID, err := s.AddPrompt(AddPromptParams{SessionID: "s-prompt-short", Content: "contains percent % and underscore _ characters", Project: "engram"})
+	if err != nil {
+		t.Fatalf("add literal wildcard prompt: %v", err)
+	}
+	percentResults, err := s.SearchPrompts("%", "engram", 10)
+	if err != nil {
+		t.Fatalf("search literal percent prompt: %v", err)
+	}
+	if len(percentResults) != 1 || percentResults[0].ID != literalID {
+		t.Fatalf("expected literal percent prompt search hit only, got %+v", percentResults)
+	}
+	underscoreResults, err := s.SearchPrompts("_", "engram", 10)
+	if err != nil {
+		t.Fatalf("search literal underscore prompt: %v", err)
+	}
+	if len(underscoreResults) != 1 || underscoreResults[0].ID != literalID {
+		t.Fatalf("expected literal underscore prompt search hit only, got %+v", underscoreResults)
+	}
+
+	// The LIKE fallback contract orders by created_at DESC (not FTS rank); confirm
+	// both matches surface rather than only the first inserted row.
+	newerID, err := s.AddPrompt(AddPromptParams{SessionID: "s-prompt-short", Content: "db go", Project: "engram"})
+	if err != nil {
+		t.Fatalf("add newer short-token prompt: %v", err)
+	}
+	orderedResults, err := s.SearchPrompts("db", "engram", 10)
+	if err != nil {
+		t.Fatalf("search prompt short token ordering: %v", err)
+	}
+	gotIDs := map[int64]bool{}
+	for _, r := range orderedResults {
+		gotIDs[r.ID] = true
+	}
+	if len(orderedResults) != 2 || !gotIDs[shortID] || !gotIDs[newerID] {
+		t.Fatalf("expected both short-token LIKE fallback prompts, got %+v", orderedResults)
+	}
+}
+
 func TestTrigramFTSTriggersSupportUpdateAndDelete(t *testing.T) {
 	s := newTestStore(t)
 
