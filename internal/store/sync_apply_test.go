@@ -44,6 +44,50 @@ func applyRelationMutation(t *testing.T, s *Store, m SyncMutation) error {
 	})
 }
 
+func TestApplyPulledObservationStoresProjectAsText(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s-pulled-project-storage", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	project := "engram"
+	payload, err := json.Marshal(syncObservationPayload{
+		SyncID: "obs-pulled-project-storage", SessionID: "s-pulled-project-storage", Type: "bugfix", Title: "Pulled project as text", Content: "Sync apply boundary stores text", Project: &project, Scope: "project",
+	})
+	if err != nil {
+		t.Fatalf("marshal observation payload: %v", err)
+	}
+	if err := s.withTx(func(tx *sql.Tx) error {
+		return s.applyPulledMutationTx(tx, SyncMutation{Entity: SyncEntityObservation, EntityKey: "obs-pulled-project-storage", Op: SyncOpUpsert, Payload: string(payload), Source: SyncSourceRemote, Project: project})
+	}); err != nil {
+		t.Fatalf("apply pulled observation: %v", err)
+	}
+	updatedPayload, err := json.Marshal(syncObservationPayload{
+		SyncID: "obs-pulled-project-storage", SessionID: "s-pulled-project-storage", Type: "bugfix", Title: "Updated pulled project as text", Content: "Sync apply update stores text", Project: &project, Scope: "project",
+	})
+	if err != nil {
+		t.Fatalf("marshal updated observation payload: %v", err)
+	}
+	if err := s.withTx(func(tx *sql.Tx) error {
+		return s.applyPulledMutationTx(tx, SyncMutation{Entity: SyncEntityObservation, EntityKey: "obs-pulled-project-storage", Op: SyncOpUpsert, Payload: string(updatedPayload), Source: SyncSourceRemote, Project: project})
+	}); err != nil {
+		t.Fatalf("apply updated pulled observation: %v", err)
+	}
+
+	var title, content, storedProject, storageClass string
+	if err := s.db.QueryRow(`SELECT title, content, project, typeof(project) FROM observations WHERE sync_id = ?`, "obs-pulled-project-storage").Scan(&title, &content, &storedProject, &storageClass); err != nil {
+		t.Fatalf("read updated observation: %v", err)
+	}
+	if title != "Updated pulled project as text" || content != "Sync apply update stores text" {
+		t.Fatalf("updated observation = title %q, content %q", title, content)
+	}
+	if storedProject != project {
+		t.Fatalf("project = %q, want %q", storedProject, project)
+	}
+	if storageClass != "text" {
+		t.Fatalf("project storage class = %q, want text", storageClass)
+	}
+}
+
 // countRelationRows returns the count of rows in memory_relations with the
 // given sync_id.
 func countRelationRows(t *testing.T, s *Store, syncID string) int {

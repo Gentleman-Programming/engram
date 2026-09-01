@@ -87,6 +87,9 @@ type CandidateOptions struct {
 	// BM25Floor preserves the deprecated legacy minimum-rank behavior. Candidates
 	// below this value are excluded. It cannot be combined with BM25MaxRank.
 	BM25Floor *float64
+	// Query optionally overrides the saved observation title as the candidate
+	// query source. Empty uses the saved title.
+	Query string
 	// SkipInsert controls whether FindCandidates inserts pending relation rows.
 	// When true, candidates are returned but NO rows are written to memory_relations.
 	// Default false preserves the existing behavior (rows are inserted).
@@ -376,7 +379,11 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 		scope = opts.Scope
 	}
 
-	ftsQuery := sanitizeFTSCandidates(title)
+	queryText := opts.Query
+	if strings.TrimSpace(queryText) == "" {
+		queryText = title
+	}
+	ftsQuery := sanitizeFTSCandidates(queryText)
 	if ftsQuery == "" {
 		return nil, nil
 	}
@@ -1318,6 +1325,14 @@ func (s *Store) GetRelationStats(project string) (RelationStats, error) {
 // Returns a ScanResult with counts, a continuation cursor when another page
 // remains, and whether an insert or semantic cap was hit.
 func (s *Store) ScanProject(opts ScanOptions) (ScanResult, error) {
+	return s.scanProject(opts, false)
+}
+
+func (s *Store) ScanAllProjects(opts ScanOptions) (ScanResult, error) {
+	return s.scanProject(opts, true)
+}
+
+func (s *Store) scanProject(opts ScanOptions, allProjects bool) (ScanResult, error) {
 	limit := opts.Limit
 	if limit == 0 {
 		limit = DefaultScanLimit
@@ -1365,10 +1380,13 @@ func (s *Store) ScanProject(opts ScanOptions) (ScanResult, error) {
 	obsQuery := `
 		SELECT id, ifnull(sync_id,''), scope
 		FROM observations
-		WHERE ifnull(project,'') = ?
-		  AND deleted_at IS NULL
+		WHERE deleted_at IS NULL
 	`
-	obsArgs := []any{opts.Project}
+	obsArgs := []any{}
+	if !allProjects {
+		obsQuery += ` AND ifnull(project,'') = ?`
+		obsArgs = append(obsArgs, opts.Project)
+	}
 	if !opts.Since.IsZero() {
 		obsQuery += ` AND created_at >= ?`
 		obsArgs = append(obsArgs, opts.Since.UTC().Format("2006-01-02T15:04:05Z"))
@@ -1423,8 +1441,12 @@ scan:
 		result.RankedQueries++
 
 		// Find candidates without inserting (SkipInsert=true per design §5).
+		candidateProject := opts.Project
+		if allProjects {
+			candidateProject = ""
+		}
 		candidates, err := s.FindCandidates(obs.id, CandidateOptions{
-			Project:    opts.Project,
+			Project:    candidateProject,
 			Scope:      obs.scope,
 			Limit:      10,
 			SkipInsert: true,

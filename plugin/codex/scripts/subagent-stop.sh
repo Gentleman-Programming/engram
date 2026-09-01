@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Engram — SubagentStop hook for Codex (synchronous)
 #
 # Reads the subagent output from stdin and POSTs it to the passive capture

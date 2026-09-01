@@ -30,6 +30,8 @@ Local SQLite
 
 Project-scoped chunks carry sessions, observations, prompts, and the non-orphaned `memory_relations` graph for observations in that project. Relation rows travel as existing `relation` sync mutations inside the chunk so imports reuse the same idempotent relation apply path as cloud sync.
 
+During incremental local project exports, an observation absent from available chunk history bypasses the manifest watermark. A direct historical row or an observation mutation, including a tombstone, establishes historical presence; sessions and prompts otherwise retain timestamp-only filtering, while sessions needed by emitted observations are included for dependency closure.
+
 Cloud exports are size-bounded: `engram sync --cloud` splits the pending mutation replay into deterministic, dependency-complete chunks of at most 4 MiB each, so a large initial replay stays within the server's `ENGRAM_CLOUD_MAX_PUSH_BYTES` limit (default 8 MiB). Each chunk acknowledges only its own mutation sequences after a successful push, so an interrupted sync resumes from the first unacknowledged mutation instead of replaying acknowledged work.
 
 Guardrails:
