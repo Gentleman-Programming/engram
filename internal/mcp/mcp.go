@@ -2883,7 +2883,10 @@ func resolveMCPProjectWithPolicy(s *store.Store, explicit, defaultProject string
 	}
 	var unknown *projectpkg.UnknownProjectError
 	if errors.As(err, &unknown) {
-		stats, _ := s.Stats()
+		stats, err := loadMCPStats(s)
+		if err != nil {
+			return result, err
+		}
 		return result, &unknownProjectError{Name: unknown.Name, AvailableProjects: stats.Projects}
 	}
 	if errors.Is(err, projectpkg.ErrInvalidProjectName) {

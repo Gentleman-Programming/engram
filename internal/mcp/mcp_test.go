@@ -6535,6 +6535,22 @@ func TestResolveReadProject_UnknownOverride(t *testing.T) {
 	}
 }
 
+func TestResolveReadProject_UnknownOverrideStatsGenerationChange(t *testing.T) {
+	previous := loadMCPStats
+	loadMCPStats = func(*store.Store) (*store.Stats, error) {
+		return nil, store.ErrDatabaseGenerationChanged
+	}
+	t.Cleanup(func() {
+		loadMCPStats = previous
+	})
+
+	s := newMCPTestStore(t)
+	_, err := resolveReadProject(s, "does-not-exist")
+	if !errors.Is(err, store.ErrDatabaseGenerationChanged) {
+		t.Fatalf("resolveReadProject error = %v; want ErrDatabaseGenerationChanged", err)
+	}
+}
+
 // TestRespondWithProject_MergesEnvelope: assert project, project_source, project_path in result
 func TestRespondWithProject_MergesEnvelope(t *testing.T) {
 	res := project.DetectionResult{
