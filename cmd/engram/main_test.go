@@ -977,7 +977,14 @@ func TestMainVersionAndHelpAliases(t *testing.T) {
 	oldVersion := version
 	version = "9.9.9-test"
 	t.Cleanup(func() { version = oldVersion })
-	stubCheckForUpdates(t, versioncheck.CheckResult{Status: versioncheck.StatusUpToDate})
+
+	checks := 0
+	oldCheckForUpdates := checkForUpdates
+	checkForUpdates = func(string) versioncheck.CheckResult {
+		checks++
+		return versioncheck.CheckResult{Status: versioncheck.StatusUpToDate}
+	}
+	t.Cleanup(func() { checkForUpdates = oldCheckForUpdates })
 
 	tests := []struct {
 		name      string
@@ -995,6 +1002,7 @@ func TestMainVersionAndHelpAliases(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			checks = 0
 			withArgs(t, "engram", tc.arg)
 			stdout, stderr := captureOutput(t, func() { main() })
 			if tc.notStderr && stderr != "" {
@@ -1003,55 +1011,42 @@ func TestMainVersionAndHelpAliases(t *testing.T) {
 			if !strings.Contains(stdout, tc.contains) {
 				t.Fatalf("stdout %q does not include %q", stdout, tc.contains)
 			}
+			if checks != 0 {
+				t.Fatalf("update checks = %d, want 0", checks)
+			}
 		})
 	}
 }
 
 func TestMainPrintsUpdateFailuresAndUpdates(t *testing.T) {
-	oldVersion := version
-	version = "1.10.7"
-	t.Cleanup(func() { version = oldVersion })
-
 	t.Run("prints check failure", func(t *testing.T) {
-		stubCheckForUpdates(t, versioncheck.CheckResult{
-			Status:  versioncheck.StatusCheckFailed,
-			Message: "Could not check for updates: GitHub took too long to respond.",
+		_, stderr := captureOutput(t, func() {
+			printUpdateCheckResult(versioncheck.CheckResult{
+				Status:  versioncheck.StatusCheckFailed,
+				Message: "Could not check for updates: GitHub took too long to respond.",
+			})
 		})
-		withArgs(t, "engram", "version")
-
-		stdout, stderr := captureOutput(t, func() { main() })
-		if !strings.Contains(stdout, "engram 1.10.7") {
-			t.Fatalf("stdout = %q", stdout)
-		}
 		if !strings.Contains(stderr, "Could not check for updates") {
 			t.Fatalf("stderr = %q", stderr)
 		}
 	})
 
 	t.Run("prints available update", func(t *testing.T) {
-		stubCheckForUpdates(t, versioncheck.CheckResult{
-			Status:  versioncheck.StatusUpdateAvailable,
-			Message: "Update available: 1.10.7 -> 1.10.8",
+		_, stderr := captureOutput(t, func() {
+			printUpdateCheckResult(versioncheck.CheckResult{
+				Status:  versioncheck.StatusUpdateAvailable,
+				Message: "Update available: 1.10.7 -> 1.10.8",
+			})
 		})
-		withArgs(t, "engram", "version")
-
-		stdout, stderr := captureOutput(t, func() { main() })
-		if !strings.Contains(stdout, "engram 1.10.7") {
-			t.Fatalf("stdout = %q", stdout)
-		}
 		if !strings.Contains(stderr, "Update available") {
 			t.Fatalf("stderr = %q", stderr)
 		}
 	})
 
 	t.Run("prints nothing when up to date", func(t *testing.T) {
-		stubCheckForUpdates(t, versioncheck.CheckResult{Status: versioncheck.StatusUpToDate})
-		withArgs(t, "engram", "version")
-
-		stdout, stderr := captureOutput(t, func() { main() })
-		if !strings.Contains(stdout, "engram 1.10.7") {
-			t.Fatalf("stdout = %q", stdout)
-		}
+		_, stderr := captureOutput(t, func() {
+			printUpdateCheckResult(versioncheck.CheckResult{Status: versioncheck.StatusUpToDate})
+		})
 		if stderr != "" {
 			t.Fatalf("stderr = %q, want empty", stderr)
 		}
