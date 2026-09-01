@@ -5116,6 +5116,86 @@ func TestImportStoresObservationProjectAsText(t *testing.T) {
 	}
 }
 
+func TestImportObservationUsesLastWriteWinsOrdering(t *testing.T) {
+	s := newTestStore(t)
+	project := "engram"
+	base := &ExportData{
+		Sessions:     []Session{{ID: "import-lww-session", Project: project, Directory: "/tmp", StartedAt: "2026-01-01 00:00:00"}},
+		Observations: []Observation{{SyncID: "import-lww-observation", SessionID: "import-lww-session", Type: "note", Title: "old", Content: "old", Project: &project, Scope: "project", CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-01 00:00:00"}},
+	}
+	if result, err := s.Import(base); err != nil || result.ObservationsImported != 1 {
+		t.Fatalf("base import = %+v, %v", result, err)
+	}
+
+	newer := *base
+	newer.Observations = []Observation{{SyncID: "import-lww-observation", SessionID: "import-lww-session", Type: "note", Title: "new", Content: "new", Project: &project, Scope: "project", CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-02 00:00:00"}}
+	if result, err := s.Import(&newer); err != nil || result.ObservationsImported != 0 {
+		t.Fatalf("newer import = %+v, %v; updates must not be counted as inserts", result, err)
+	}
+	older := newer
+	older.Observations = []Observation{{SyncID: "import-lww-observation", SessionID: "import-lww-session", Type: "note", Title: "older", Content: "older", Project: &project, Scope: "project", CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-01 12:00:00"}}
+	if _, err := s.Import(&older); err != nil {
+		t.Fatalf("older import: %v", err)
+	}
+	if got := scalarString(t, s, `SELECT title FROM observations WHERE sync_id = ?`, "import-lww-observation"); got != "new" {
+		t.Fatalf("title = %q, want newer snapshot", got)
+	}
+}
+
+func TestImportOlderObservationDoesNotResurrectLocalDeletion(t *testing.T) {
+	s := newTestStore(t)
+	project := "engram"
+	if _, err := s.Import(&ExportData{
+		Sessions:     []Session{{ID: "import-delete-session", Project: project, Directory: "/tmp", StartedAt: "2026-01-01 00:00:00"}},
+		Observations: []Observation{{SyncID: "import-delete-observation", SessionID: "import-delete-session", Type: "note", Title: "active", Content: "active", Project: &project, Scope: "project", CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-01 00:00:00"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE observations SET deleted_at = ?, updated_at = ? WHERE sync_id = ?`, "2026-01-02 00:00:00", "2026-01-02 00:00:00", "import-delete-observation"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.Import(&ExportData{Observations: []Observation{{SyncID: "import-delete-observation", SessionID: "import-delete-session", Type: "note", Title: "stale active", Content: "stale active", Project: &project, Scope: "project", CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-01 12:00:00"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ObservationsImported != 0 || scalarInt(t, s, `SELECT count(*) FROM observations WHERE sync_id = ? AND deleted_at IS NOT NULL`, "import-delete-observation") != 1 {
+		t.Fatalf("older active snapshot changed local deletion: result=%+v", result)
+	}
+}
+
+func TestImportPromptIdentityAndTombstoneOrdering(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("import-prompt-session", "engram", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	base := &ExportData{Prompts: []Prompt{{SyncID: "import-prompt", SessionID: "import-prompt-session", Content: "first", Project: "engram", CreatedAt: "2026-01-01 00:00:00"}}}
+	if result, err := s.Import(base); err != nil || result.PromptsImported != 1 {
+		t.Fatalf("base prompt import = %+v, %v", result, err)
+	}
+	duplicate := &ExportData{Prompts: []Prompt{{SyncID: "import-prompt", SessionID: "import-prompt-session", Content: "must remain first", Project: "engram", CreatedAt: "2026-01-02 00:00:00"}}}
+	if result, err := s.Import(duplicate); err != nil || result.PromptsImported != 0 {
+		t.Fatalf("duplicate prompt import = %+v, %v", result, err)
+	}
+	if got := scalarString(t, s, `SELECT content FROM user_prompts WHERE sync_id = ?`, "import-prompt"); got != "first" {
+		t.Fatalf("prompt content = %q, want immutable original", got)
+	}
+
+	if _, err := s.db.Exec(`INSERT INTO prompt_tombstones (sync_id, session_id, project, deleted_at) VALUES (?, ?, ?, ?)`, "import-tombstoned-prompt", "import-prompt-session", "engram", "2026-01-02 00:00:00"); err != nil {
+		t.Fatal(err)
+	}
+	stale := &ExportData{Prompts: []Prompt{{SyncID: "import-tombstoned-prompt", SessionID: "import-prompt-session", Content: "stale", Project: "engram", CreatedAt: "2026-01-01 00:00:00"}}}
+	if result, err := s.Import(stale); err != nil || result.PromptsImported != 0 {
+		t.Fatalf("stale tombstoned prompt import = %+v, %v", result, err)
+	}
+	newer := &ExportData{Prompts: []Prompt{{SyncID: "import-tombstoned-prompt", SessionID: "import-prompt-session", Content: "newer", Project: "engram", CreatedAt: "2026-01-03 00:00:00"}}}
+	if result, err := s.Import(newer); err != nil || result.PromptsImported != 1 {
+		t.Fatalf("newer tombstoned prompt import = %+v, %v", result, err)
+	}
+	if got := scalarInt(t, s, `SELECT count(*) FROM prompt_tombstones WHERE sync_id = ?`, "import-tombstoned-prompt"); got != 0 {
+		t.Fatalf("newer prompt left tombstone: %d", got)
+	}
+}
+
 func TestExportImportEdgeBranches(t *testing.T) {
 	t.Run("export fails when observations query fails", func(t *testing.T) {
 		s := newTestStore(t)

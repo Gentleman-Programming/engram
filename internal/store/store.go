@@ -4235,6 +4235,25 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 	// Import observations (use new IDs — AUTOINCREMENT, skip duplicate sync IDs)
 	for _, obs := range data.Observations {
 		syncID := normalizeExistingSyncID(obs.SyncID, "obs")
+		existing, lookupErr := s.getObservationBySyncIDTx(tx, syncID, true)
+		if lookupErr != nil && lookupErr != sql.ErrNoRows {
+			return nil, fmt.Errorf("import observation %d: %w", obs.ID, lookupErr)
+		}
+		if lookupErr == nil {
+			// Import snapshots use timestamp ordering. A missing timestamp cannot
+			// prove that the incoming snapshot is newer, so leave the local row
+			// untouched in that case as well.
+			incoming := normalizeComparableTimestamp(obs.UpdatedAt)
+			current := normalizeComparableTimestamp(existing.UpdatedAt)
+			if incoming == "" || incoming <= current {
+				continue
+			}
+			if _, err := s.execHook(tx, `UPDATE observations SET session_id = ?, type = ?, title = ?, content = ?, tool_name = CAST(? AS TEXT), project = ?, scope = ?, topic_key = ?, normalized_hash = ?, revision_count = ?, duplicate_count = ?, last_seen_at = ?, review_after = ?, created_at = ?, updated_at = ?, deleted_at = ? WHERE id = ?`,
+				obs.SessionID, obs.Type, obs.Title, obs.Content, obs.ToolName, obs.Project, normalizeScope(obs.Scope), nullableString(normalizeTopicKey(derefString(obs.TopicKey))), hashNormalized(obs.Content), maxInt(obs.RevisionCount, 1), maxInt(obs.DuplicateCount, 1), obs.LastSeenAt, obs.ReviewAfter, obs.CreatedAt, obs.UpdatedAt, obs.DeletedAt, existing.ID); err != nil {
+				return nil, fmt.Errorf("import observation %d: %w", obs.ID, err)
+			}
+			continue
+		}
 		res, err := s.execHook(tx,
 			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, review_after, created_at, updated_at, deleted_at)
 			 SELECT ?, ?, ?, ?, ?, ?, CAST(? AS TEXT), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
@@ -4267,15 +4286,28 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 
 	// Import prompts
 	for _, p := range data.Prompts {
-		_, err := s.execHook(tx,
+		syncID := normalizeExistingSyncID(p.SyncID, "prompt")
+		var tombstoneDeletedAt string
+		if err := tx.QueryRow(`SELECT deleted_at FROM prompt_tombstones WHERE sync_id = ?`, syncID).Scan(&tombstoneDeletedAt); err == nil {
+			if isStalePromptUpsert(syncPromptPayload{CreatedAt: p.CreatedAt}, tombstoneDeletedAt) {
+				continue
+			}
+			if _, err := s.execHook(tx, `DELETE FROM prompt_tombstones WHERE sync_id = ?`, syncID); err != nil {
+				return nil, fmt.Errorf("import prompt %d: remove tombstone: %w", p.ID, err)
+			}
+		} else if err != sql.ErrNoRows {
+			return nil, fmt.Errorf("import prompt %d: %w", p.ID, err)
+		}
+		res, err := s.execHook(tx,
 			`INSERT INTO user_prompts (sync_id, session_id, content, project, created_at)
-			 VALUES (?, ?, ?, ?, ?)`,
-			normalizeExistingSyncID(p.SyncID, "prompt"), p.SessionID, p.Content, p.Project, p.CreatedAt,
+			 SELECT ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM user_prompts WHERE sync_id = ?)`,
+			syncID, p.SessionID, p.Content, p.Project, p.CreatedAt, syncID,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("import prompt %d: %w", p.ID, err)
 		}
-		result.PromptsImported++
+		n, _ := res.RowsAffected()
+		result.PromptsImported += int(n)
 	}
 
 	if err := s.commitHook(tx); err != nil {
