@@ -93,6 +93,36 @@ func TestLifecycleScriptsUseCanonicalProjectResolution(t *testing.T) {
 				}
 			})
 		}
+
+		t.Run(agent+" accepts a process override from canonical resolution", func(t *testing.T) {
+			cwd := lifecycleProjectDirectory(t)
+			var sessionProject string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/health":
+					w.WriteHeader(http.StatusOK)
+				case "/project/current":
+					_, _ = w.Write([]byte(`{"project":"override-project","project_source":"process_override"}`))
+				case "/sessions":
+					var payload struct {
+						Project string `json:"project"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+						t.Errorf("decode session payload: %v", err)
+					}
+					sessionProject = payload.Project
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+
+			runLifecycleSessionStart(t, bashPath, agent, server.URL, `{"session_id":"override-session","cwd":`+jsonQuote(cwd)+`}`)
+			if sessionProject != "override-project" {
+				t.Fatalf("session project = %q; want process override", sessionProject)
+			}
+		})
 	}
 }
 

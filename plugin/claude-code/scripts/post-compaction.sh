@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Engram — Post-compaction hook for Claude Code
 #
 # When compaction happens, inject Memory Protocol + context and instruct

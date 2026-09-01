@@ -31,6 +31,7 @@ import (
 	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
 	"github.com/Gentleman-Programming/engram/internal/cloud/remote"
 	"github.com/Gentleman-Programming/engram/internal/cloud/syncguidance"
+	"github.com/Gentleman-Programming/engram/internal/cloudconfig"
 	"github.com/Gentleman-Programming/engram/internal/diagnostic"
 	"github.com/Gentleman-Programming/engram/internal/mcp"
 	"github.com/Gentleman-Programming/engram/internal/obsidian"
@@ -103,7 +104,9 @@ var (
 	}
 	storeFormatContext = func(s *store.Store, project, scope string) (string, error) { return s.FormatContext(project, scope) }
 	storeStats         = func(s *store.Store) (*store.Stats, error) { return s.Stats() }
+	storeStatsProject  = func(s *store.Store, project string) (*store.Stats, error) { return s.StatsProject(project) }
 	storeExport        = func(s *store.Store) (*store.ExportData, error) { return s.Export() }
+	storeExportProject = func(s *store.Store, project string) (*store.ExportData, error) { return s.ExportProject(project) }
 	jsonMarshalIndent  = json.MarshalIndent
 	runDiagnostics     = func(ctx context.Context, s *store.Store, project, check string) (diagnostic.Report, error) {
 		runner := diagnostic.NewRunner()
@@ -148,6 +151,59 @@ var (
 	// llm.NewRunner; tests substitute a fake to avoid real CLI invocations.
 	agentRunnerFactory = defaultAgentRunnerFactory
 )
+
+// resolveCLIProject adapts the shared resolver for project-scoped CLI reads.
+// Explicit and process-level values must already exist; cwd detection remains
+// valid before a repository has written its first memory.
+func resolveCLIProject(s *store.Store, explicit string, requireKnownOverrides bool) (string, error) {
+	return resolveCLIProjectWithDetector(s, explicit, requireKnownOverrides, detectProjectFull)
+}
+
+func resolveCLIProjectScope(s *store.Store, explicit string, all, requireKnownOverrides bool) (string, error) {
+	if all {
+		if strings.TrimSpace(explicit) != "" {
+			return "", fmt.Errorf("--all and --project cannot be used together")
+		}
+		resolved, err := project.Resolve(project.ResolutionOptions{Mode: project.ResolutionAll})
+		return resolved.Project, err
+	}
+	return resolveCLIProject(s, explicit, requireKnownOverrides)
+}
+
+func requiredProjectValue(args []string, index int) (string, error) {
+	if index+1 >= len(args) {
+		return "", fmt.Errorf("--project requires a non-empty value")
+	}
+	value := strings.TrimSpace(args[index+1])
+	if value == "" || strings.HasPrefix(value, "-") {
+		return "", fmt.Errorf("--project requires a non-empty value")
+	}
+	return value, nil
+}
+
+func resolveCLIProjectWithDetector(s *store.Store, explicit string, requireKnownOverrides bool, detect func(string) project.DetectionResult) (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	result, err := project.Resolve(project.ResolutionOptions{
+		Mode:                 project.ResolutionCurrent,
+		Explicit:             explicit,
+		Directory:            cwd,
+		Detect:               detect,
+		ProjectExists:        s.ProjectExists,
+		RequireKnownExplicit: requireKnownOverrides && strings.TrimSpace(explicit) != "",
+		RequireKnownProcess:  requireKnownOverrides,
+	})
+	if err != nil {
+		return "", err
+	}
+	return result.Project, nil
+}
+
+func detectProjectForSync(dir string) project.DetectionResult {
+	return project.DetectionResult{Project: detectProject(dir), Source: project.SourceDirBasename, Path: dir}
+}
 
 type cloudSyncStatus struct {
 	Phase               string
@@ -357,7 +413,7 @@ func (p storeSyncStatusProvider) cloudSyncEnabled(project string) (bool, string,
 	if cc == nil || strings.TrimSpace(cc.ServerURL) == "" {
 		return false, "cloud_not_configured", "cloud sync is not configured"
 	}
-	if _, err := validateCloudServerURL(cc.ServerURL); err != nil {
+	if _, err := cloudconfig.ValidateServerURL(cc.ServerURL); err != nil {
 		return false, "cloud_config_error", fmt.Sprintf("cloud config error: invalid cloud runtime server URL: %v", err)
 	}
 	if strings.TrimSpace(project) == "" {
@@ -375,8 +431,8 @@ func (p storeSyncStatusProvider) cloudSyncEnabled(project string) (bool, string,
 
 func syncStatusFromState(state *store.SyncState) server.SyncStatus {
 	var lastSyncAt *time.Time
-	if state != nil && state.Lifecycle == store.SyncLifecycleHealthy {
-		lastSyncAt = parseSyncStateTimestamp(state.UpdatedAt)
+	if state != nil {
+		lastSyncAt = parseSyncStateTimestamp(derefString(state.LastSuccessAt))
 	}
 	return server.SyncStatus{
 		Phase:               state.Lifecycle,
@@ -448,28 +504,17 @@ func envBool(key string) bool {
 	return v == "1" || v == "true" || v == "yes" || v == "on"
 }
 
-func resolveCloudRuntimeConfig(cfg store.Config) (*cloudConfig, error) {
-	cc, err := loadCloudConfig(cfg)
+func resolveCloudRuntimeConfig(cfg store.Config) (*cloudconfig.Config, error) {
+	cc, err := cloudconfig.Load(cfg.DataDir)
 	if err != nil {
 		return nil, fmt.Errorf("read cloud config: %w", err)
 	}
-	if cc == nil {
-		cc = &cloudConfig{}
-	}
-	// ENGRAM_CLOUD_TOKEN overrides any token stored in cloud.json.
-	// When the env var is absent, the persisted token from cloud.json is used
-	// as a fallback so that `engram sync --cloud` works without requiring the
-	// env var to be set in every shell session (fix for issue #343).
-	if v := strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_SERVER")); v != "" {
-		cc.ServerURL = v
-	}
-	if v := strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_TOKEN")); v != "" {
-		cc.Token = v
-	}
+	cc = cloudconfig.ApplyServerOverride(cc)
+	cc.Token, _ = cloudconfig.EffectiveToken(cfg.DataDir)
 	return cc, nil
 }
 
-func preflightCloudSync(s *store.Store, cfg store.Config, project string, mutateState bool) (*cloudConfig, error) {
+func preflightCloudSync(s *store.Store, cfg store.Config, project string, mutateState bool) (*cloudconfig.Config, error) {
 	project = strings.TrimSpace(project)
 	if project != "" {
 		project, _ = store.NormalizeProject(project)
@@ -488,7 +533,7 @@ func preflightCloudSync(s *store.Store, cfg store.Config, project string, mutate
 		}
 		return nil, fmt.Errorf("cloud sync %s: %s", constants.ReasonCloudConfigError, message)
 	}
-	if _, err := validateCloudServerURL(cc.ServerURL); err != nil {
+	if _, err := cloudconfig.ValidateServerURL(cc.ServerURL); err != nil {
 		message := fmt.Sprintf("invalid cloud runtime server URL: %v", err)
 		if mutateState {
 			_ = s.MarkSyncBlocked(targetKey, constants.ReasonCloudConfigError, message)
@@ -596,6 +641,14 @@ func main() {
 	if len(os.Args) < 2 {
 		printUsage()
 		exitFunc(1)
+	}
+	// Self-tests must run before update checks, configuration resolution, orphan
+	// migration, and autosync setup so released binaries cannot touch user data.
+	if strings.EqualFold(strings.TrimSpace(os.Args[1]), "test") {
+		if code := cmdTest(os.Args[2:]); code != testExitSuccess {
+			exitFunc(code)
+		}
+		return
 	}
 
 	if shouldCheckForUpdates(os.Args[1:]) {
@@ -926,13 +979,14 @@ func cmdTUI(cfg store.Config) {
 
 func cmdSearch(cfg store.Config) {
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "usage: engram search <query> [--type TYPE] [--project PROJECT] [--scope SCOPE] [--limit N]")
+		fmt.Fprintln(os.Stderr, "usage: engram search <query> [--type TYPE] [--project PROJECT|--all] [--scope SCOPE] [--limit N]")
 		exitFunc(1)
 	}
 
 	// Collect the query (everything that's not a flag)
 	var queryParts []string
 	opts := store.SearchOptions{Limit: 10}
+	allProjects := false
 
 	for i := 2; i < len(os.Args); i++ {
 		switch os.Args[i] {
@@ -946,6 +1000,8 @@ func cmdSearch(cfg store.Config) {
 				opts.Project = os.Args[i+1]
 				i++
 			}
+		case "--all":
+			allProjects = true
 		case "--limit":
 			if i+1 < len(os.Args) {
 				if n, err := strconv.Atoi(os.Args[i+1]); err == nil {
@@ -975,6 +1031,12 @@ func cmdSearch(cfg store.Config) {
 		return
 	}
 	defer s.Close()
+	resolved, resolveErr := resolveCLIProjectScope(s, opts.Project, allProjects, true)
+	if resolveErr != nil {
+		fatal(resolveErr)
+		return
+	}
+	opts.Project = resolved
 
 	results, err := storeSearch(s, query, opts)
 	if err != nil {
@@ -1050,25 +1112,31 @@ func cmdSave(cfg store.Config) {
 		fatal(err)
 		return
 	}
-	// Identity precedence is the one process-level rule shared with the MCP and
-	// HTTP entry points: the explicit --project flag, then the process override
-	// (project.ProcessOverride reads ENGRAM_PROJECT), then cwd detection.
-	if strings.TrimSpace(projectName) == "" {
-		if override, ok := project.ProcessOverride(""); ok {
-			projectName = override
+	// The shared resolver preserves save's legitimate creation contract for an
+	// explicit name or a newly detected cwd, while rejecting malformed overrides.
+	rawProjectName := projectName
+	resolved, resolveErr := project.Resolve(project.ResolutionOptions{
+		Mode:      project.ResolutionCurrent,
+		Explicit:  projectName,
+		Directory: cwd,
+		Detect:    detectProjectFull,
+	})
+	if resolveErr != nil || strings.TrimSpace(resolved.Project) == "" {
+		if resolveErr != nil {
+			fatal(fmt.Errorf("cannot save without an unambiguous project identity: %w; use --project <name>", resolveErr))
 		} else {
-			resolved := detectProjectFull(cwd)
-			if resolved.Error != nil || strings.TrimSpace(resolved.Project) == "" {
-				if resolved.Error != nil {
-					fatal(fmt.Errorf("cannot save without an unambiguous project identity: %w; use --project <name>", resolved.Error))
-				} else {
-					fatal(errors.New("cannot save without an unambiguous project identity; use --project <name>"))
-				}
-				return
-			}
-			projectName = resolved.Project
+			fatal(errors.New("cannot save without an unambiguous project identity; use --project <name>"))
+		}
+		return
+	}
+	if rawProjectName == "" {
+		if override, ok := project.ProcessOverride(""); ok {
+			rawProjectName = override
+		} else {
+			rawProjectName = resolved.Project
 		}
 	}
+	projectName = rawProjectName
 	var warning string
 	projectName, warning = store.NormalizeProject(projectName)
 	if warning != "" {
@@ -1084,7 +1152,6 @@ func cmdSave(cfg store.Config) {
 		fatal(err)
 	}
 	defer s.Close()
-
 	sessionID := "manual-save-" + projectName
 	if err := s.CreateSession(sessionID, projectName, cwd); err != nil {
 		fatal(err)
@@ -1258,7 +1325,7 @@ func cmdDeleteProject(cfg store.Config) {
 
 func cmdTimeline(cfg store.Config) {
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "usage: engram timeline <observation_id> [--before N] [--after N]")
+		fmt.Fprintln(os.Stderr, "usage: engram timeline <observation_id> [--before N] [--after N] [--project PROJECT|--all]")
 		exitFunc(1)
 	}
 
@@ -1269,6 +1336,8 @@ func cmdTimeline(cfg store.Config) {
 	}
 
 	before, after := 5, 5
+	projectName := ""
+	allProjects := false
 	for i := 3; i < len(os.Args); i++ {
 		switch os.Args[i] {
 		case "--before":
@@ -1285,6 +1354,16 @@ func cmdTimeline(cfg store.Config) {
 				}
 				i++
 			}
+		case "--project":
+			value, err := requiredProjectValue(os.Args, i)
+			if err != nil {
+				fatal(err)
+				return
+			}
+			projectName = value
+			i++
+		case "--all":
+			allProjects = true
 		}
 	}
 
@@ -1293,6 +1372,22 @@ func cmdTimeline(cfg store.Config) {
 		fatal(err)
 	}
 	defer s.Close()
+	resolved, resolveErr := resolveCLIProjectScope(s, projectName, allProjects, true)
+	if resolveErr != nil {
+		fatal(resolveErr)
+		return
+	}
+	if resolved != "" {
+		focus, err := s.GetObservation(obsID)
+		if err != nil {
+			fatal(err)
+			return
+		}
+		if focus.Project == nil || !strings.EqualFold(strings.TrimSpace(*focus.Project), resolved) {
+			fatal(errors.New("observation not found in resolved project"))
+			return
+		}
+	}
 
 	result, err := storeTimeline(s, obsID, before, after)
 	if err != nil {
@@ -1333,21 +1428,59 @@ func cmdTimeline(cfg store.Config) {
 }
 
 func cmdContext(cfg store.Config) {
-	project := ""
+	projectName := ""
+	legacyProject := ""
 	scope := ""
+	projectFlagSeen := false
+	allProjects := false
 
 	for i := 2; i < len(os.Args); i++ {
 		switch os.Args[i] {
+		case "--project":
+			if i+1 >= len(os.Args) || strings.TrimSpace(os.Args[i+1]) == "" {
+				fatal(errors.New("context project selector requires a value"))
+				return
+			}
+			if projectFlagSeen {
+				fatal(errors.New("context project selector may only be specified once"))
+				return
+			}
+			projectName = os.Args[i+1]
+			projectFlagSeen = true
+			i++
+		case "--all":
+			if allProjects {
+				fatal(errors.New("context all-project selector may only be specified once"))
+				return
+			}
+			allProjects = true
 		case "--scope":
 			if i+1 < len(os.Args) {
 				scope = os.Args[i+1]
 				i++
 			}
 		default:
-			if project == "" {
-				project = os.Args[i]
+			if strings.HasPrefix(os.Args[i], "-") {
+				fatal(fmt.Errorf("unknown context flag: %s", os.Args[i]))
+				return
 			}
+			if legacyProject != "" {
+				fatal(errors.New("context project selector may only be specified once"))
+				return
+			}
+			legacyProject = os.Args[i]
 		}
+	}
+	if projectFlagSeen && legacyProject != "" {
+		fatal(errors.New("context project selector cannot combine legacy positional project with --project"))
+		return
+	}
+	if allProjects && (projectFlagSeen || legacyProject != "") {
+		fatal(errors.New("context all-project selector cannot be combined with a project selector"))
+		return
+	}
+	if legacyProject != "" {
+		projectName = legacyProject
 	}
 
 	s, err := storeNew(cfg)
@@ -1355,8 +1488,13 @@ func cmdContext(cfg store.Config) {
 		fatal(err)
 	}
 	defer s.Close()
+	resolved, resolveErr := resolveCLIProjectScope(s, projectName, allProjects, true)
+	if resolveErr != nil {
+		fatal(resolveErr)
+		return
+	}
 
-	ctx, err := storeFormatContext(s, project, scope)
+	ctx, err := storeFormatContext(s, resolved, scope)
 	if err != nil {
 		fatal(err)
 	}
@@ -1370,13 +1508,39 @@ func cmdContext(cfg store.Config) {
 }
 
 func cmdStats(cfg store.Config) {
+	projectName := ""
+	allProjects := false
+	for i := 2; i < len(os.Args); i++ {
+		switch os.Args[i] {
+		case "--project":
+			value, err := requiredProjectValue(os.Args, i)
+			if err != nil {
+				fatal(err)
+				return
+			}
+			projectName = value
+			i++
+		case "--all":
+			allProjects = true
+		}
+	}
 	s, err := storeNew(cfg)
 	if err != nil {
 		fatal(err)
 	}
 	defer s.Close()
 
-	stats, err := storeStats(s)
+	resolved, resolveErr := resolveCLIProjectScope(s, projectName, allProjects, true)
+	if resolveErr != nil {
+		fatal(resolveErr)
+		return
+	}
+	var stats *store.Stats
+	if resolved != "" {
+		stats, err = storeStatsProject(s, resolved)
+	} else {
+		stats, err = storeStats(s)
+	}
 	if err != nil {
 		fatal(err)
 	}
@@ -1396,8 +1560,25 @@ func cmdStats(cfg store.Config) {
 
 func cmdExport(cfg store.Config) {
 	outFile := "engram-export.json"
-	if len(os.Args) > 2 {
-		outFile = os.Args[2]
+	projectName := ""
+	allProjects := false
+	for i := 2; i < len(os.Args); i++ {
+		switch os.Args[i] {
+		case "--project":
+			value, err := requiredProjectValue(os.Args, i)
+			if err != nil {
+				fatal(err)
+				return
+			}
+			projectName = value
+			i++
+		case "--all":
+			allProjects = true
+		default:
+			if !strings.HasPrefix(os.Args[i], "-") {
+				outFile = os.Args[i]
+			}
+		}
 	}
 
 	s, err := storeNew(cfg)
@@ -1406,7 +1587,17 @@ func cmdExport(cfg store.Config) {
 	}
 	defer s.Close()
 
-	data, err := storeExport(s)
+	resolved, resolveErr := resolveCLIProjectScope(s, projectName, allProjects, true)
+	if resolveErr != nil {
+		fatal(resolveErr)
+		return
+	}
+	var data *store.ExportData
+	if resolved != "" {
+		data, err = storeExportProject(s, resolved)
+	} else {
+		data, err = storeExport(s)
+	}
 	if err != nil {
 		fatal(err)
 	}
@@ -1489,21 +1680,9 @@ func cmdSync(cfg store.Config) {
 			}
 		}
 	}
-
-	// Default project using git detection (so sync only exports
-	// memories for THIS project, not everything in the global DB).
-	// --all skips project filtering entirely — exports everything.
-	if !doAll && project == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			project = detectProject(cwd)
-		}
-	}
-	if project != "" {
-		normalizedProject, warning := store.NormalizeProject(project)
-		project = normalizedProject
-		if warning != "" {
-			fmt.Fprintln(os.Stderr, warning)
-		}
+	if doAll && projectProvided {
+		fatal(fmt.Errorf("--all and --project cannot be used together"))
+		return
 	}
 
 	syncDir := ".engram"
@@ -1513,6 +1692,16 @@ func cmdSync(cfg store.Config) {
 		fatal(err)
 	}
 	defer s.Close()
+	// Sync is project-scoped unless --all is explicit. Route its omitted project
+	// through the same process-override-before-cwd resolver as other CLI paths.
+	if !doAll {
+		resolved, resolveErr := resolveCLIProjectWithDetector(s, project, false, detectProjectForSync)
+		if resolveErr != nil {
+			fatal(resolveErr)
+			return
+		}
+		project = resolved
+	}
 
 	cloudEnabled := doCloud || envBool("ENGRAM_CLOUD_SYNC")
 	if cloudEnabled {
@@ -1697,9 +1886,17 @@ func printSyncUsage() {
 
 // storeAdapter wraps *store.Store to satisfy obsidian.StoreReader.
 // The real store.Stats() returns (*store.Stats, error); the interface expects *store.Stats.
-type storeAdapter struct{ s *store.Store }
+type storeAdapter struct {
+	s       *store.Store
+	project string
+}
 
-func (a *storeAdapter) Export() (*store.ExportData, error) { return a.s.Export() }
+func (a *storeAdapter) Export() (*store.ExportData, error) {
+	if a.project != "" {
+		return a.s.ExportProject(a.project)
+	}
+	return a.s.Export()
+}
 func (a *storeAdapter) Stats() *store.Stats {
 	st, _ := a.s.Stats()
 	return st
@@ -1716,6 +1913,7 @@ func cmdObsidianExport(cfg store.Config) {
 		graphConfig string
 		watch       bool
 		interval    string
+		allProjects bool
 	)
 
 	for i := 2; i < len(os.Args); i++ {
@@ -1730,6 +1928,8 @@ func cmdObsidianExport(cfg store.Config) {
 				project = os.Args[i+1]
 				i++
 			}
+		case "--all":
+			allProjects = true
 		case "--limit":
 			if i+1 < len(os.Args) {
 				if n, err := strconv.Atoi(os.Args[i+1]); err == nil {
@@ -1833,8 +2033,16 @@ func cmdObsidianExport(cfg store.Config) {
 		fatal(err)
 	}
 	defer s.Close()
+	resolved, resolveErr := resolveCLIProjectScope(s, project, allProjects, true)
+	if resolveErr != nil {
+		fatal(resolveErr)
+		return
+	}
+	if resolved != "" {
+		exportCfg.Project = resolved
+	}
 
-	exp := newObsidianExporter(&storeAdapter{s: s}, exportCfg)
+	exp := newObsidianExporter(&storeAdapter{s: s, project: resolved}, exportCfg)
 
 	if watch {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -2814,7 +3022,10 @@ Commands:
                        --project NAME  Set process-level default project (overrides cwd detection).
                                        Also accepted as ENGRAM_PROJECT=NAME env var.
   tui                Launch interactive terminal UI
-  search <query>     Search memories [--type TYPE] [--project PROJECT] [--scope SCOPE] [--limit N]
+  test [suite] [--quick] [--json]
+                     Run isolated local reliability and performance self-tests
+                       suites: reliability, performance (default: both)
+  search <query>     Search memories [--type TYPE] [--project PROJECT|--all] [--scope SCOPE] [--limit N]
   save <title> <msg> Save a memory  [--type TYPE] [--project PROJECT] [--scope SCOPE]
   delete <obs_id>    Delete an observation [--hard] (soft-delete by default; --hard removes permanently)
   delete session <id>
@@ -2824,7 +3035,7 @@ Commands:
   delete project <name> [--hard]
                      Cascade-delete a project: soft-deletes observations (or hard if --hard),
                      removes prompts; with --hard also removes sessions
-  timeline <obs_id>  Show chronological context around an observation [--before N] [--after N]
+  timeline <obs_id>  Show chronological context around an observation [--before N] [--after N] [--project PROJECT|--all]
   conflicts <sub>   Inspect and manage memory conflict relations
                        list     [--project P]  [--status S]  [--since RFC3339]  [--limit N]
                        show     <relation_id>
@@ -2834,9 +3045,12 @@ Commands:
                                 [--max-semantic N]  [--yes]
                        deferred [--status S]  [--limit N]  [--inspect SYNC_ID]  [--replay]
   doctor             Run read-only operational diagnostics [--json] [--project P] [--check CODE]
-  context [project]  Show recent context from previous sessions
-  stats              Show memory system statistics
-  export [file]      Export all memories to JSON (default: engram-export.json)
+  context [project] [--project PROJECT|--all] [--scope SCOPE]
+                     Show recent context from previous sessions
+  stats [--project PROJECT|--all]
+                     Show memory system statistics
+  export [file] [--project PROJECT|--all]
+                     Export memories to JSON (default: engram-export.json)
   import <file>      Import memories from a JSON export file
   projects list      List all projects with observation, session, and prompt counts
   projects consolidate [--all] [--dry-run]
@@ -2861,9 +3075,11 @@ Commands:
 	                        enroll     Enroll a project for cloud sync
 	                        config     Set cloud server URL
 	                        serve      Run cloud backend + dashboard
-  obsidian-export    Export memories to an Obsidian-compatible markdown vault
+  obsidian-export [--project PROJECT|--all]
+                     Export memories to an Obsidian-compatible markdown vault
                        --vault         Path to Obsidian vault root (required)
-                       --project       Filter export to a single project (optional)
+                        --project       Filter export to a single project (optional; cannot combine with --all)
+                        --all           Export every project
                        --limit         Cap exported observations at N (optional)
                        --since         Export only observations after this date, e.g. 2026-01-01 (optional)
                        --force         Ignore incremental state, full re-export (optional)

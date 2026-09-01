@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Engram — SessionEnd hook for Codex (synchronous)
 #
 # Marks the session as ended via the HTTP API.

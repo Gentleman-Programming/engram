@@ -10,7 +10,7 @@
     {
       "name": "engram",
       "description": "Persistent memory with session tracking, compaction recovery, and Memory Protocol. Gives Claude a brain that survives across sessions.",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "author": {
         "name": "Gentleman Programming"
       },

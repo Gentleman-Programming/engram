@@ -462,15 +462,15 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 	// Get the timestamp of the last chunk to filter "new" data
 	lastChunkTime := sy.lastChunkTime(manifest)
 
-	// Filter to only new data (created after last chunk)
-	chunk := sy.filterNewData(data, lastChunkTime)
-
 	// Relations are filtered by chunk presence, not timestamp; see the
 	// rationale on filterRelationMutationsForExport and issue #353.
-	exportedRelations, exportedObservations, err := sy.exportedChunkKeys(manifest)
+	exportedRelations, exportedObservations, historicalObservations, err := sy.exportedChunkKeys(manifest)
 	if err != nil {
 		return nil, fmt.Errorf("scan exported relations: %w", err)
 	}
+	chunk := sy.filterNewData(data, lastChunkTime)
+	chunk.Observations = filterObservationsForExport(data.Observations, historicalObservations, lastChunkTime)
+	includeObservationParentSessions(chunk, data.Sessions)
 	chunk.Mutations = filterRelationMutationsForExport(relationMutations, exportedRelations, lastChunkTime)
 	if err := filterRelationMutationsForEndpointAvailability(chunk, data, exportedObservations, strings.TrimSpace(project) != ""); err != nil {
 		return nil, fmt.Errorf("filter relation endpoints: %w", err)
@@ -1451,6 +1451,46 @@ func (sy *Syncer) filterNewData(data *store.ExportData, lastChunkTime string) *C
 	return chunk
 }
 
+func filterObservationsForExport(observations []store.Observation, historical map[string]struct{}, lastChunkTime string) []store.Observation {
+	if lastChunkTime == "" {
+		return observations
+	}
+
+	cutoff := normalizeTime(lastChunkTime)
+	filtered := make([]store.Observation, 0, len(observations))
+	for _, observation := range observations {
+		_, present := historical[observation.SyncID]
+		if !present || normalizeTime(observation.CreatedAt) > cutoff || normalizeTime(observation.UpdatedAt) > cutoff {
+			filtered = append(filtered, observation)
+		}
+	}
+	return filtered
+}
+
+func includeObservationParentSessions(chunk *ChunkData, sessions []store.Session) {
+	if len(chunk.Observations) == 0 {
+		return
+	}
+
+	byID := make(map[string]store.Session, len(sessions))
+	for _, session := range sessions {
+		byID[session.ID] = session
+	}
+	included := make(map[string]struct{}, len(chunk.Sessions))
+	for _, session := range chunk.Sessions {
+		included[session.ID] = struct{}{}
+	}
+	for _, observation := range chunk.Observations {
+		if _, ok := included[observation.SessionID]; ok {
+			continue
+		}
+		if session, ok := byID[observation.SessionID]; ok {
+			chunk.Sessions = append(chunk.Sessions, session)
+			included[session.ID] = struct{}{}
+		}
+	}
+}
+
 // filterExportDataToProjectScope excludes personal observations from a local
 // project export. Scope is a privacy boundary even when an observation has the
 // same project as the requested chunk.
@@ -1530,19 +1570,21 @@ func filterRelationMutationsForEndpointAvailability(chunk *ChunkData, data *stor
 	return nil
 }
 
-// exportedChunkKeys returns the relation and observation keys already present
-// in the chunks recorded by the manifest. The manifest itself does not track
-// those keys, so chunk contents are the source of truth for their availability.
+// exportedChunkKeys returns relation keys, direct observation row keys, and all
+// historical observation keys from the chunks recorded by the manifest. The
+// manifest itself does not track those keys, so chunk contents are the source
+// of truth for their availability and historical presence.
 //
 // Cost: this reads every chunk listed in the manifest on each export. A
 // relation may live in any chunk, so the scan cannot stop early. For very long
 // sync histories this is O(total chunks); tracking relation keys in the
 // manifest would remove the rescan if it ever becomes a bottleneck.
-func (sy *Syncer) exportedChunkKeys(m *Manifest) (map[string]struct{}, map[string]struct{}, error) {
+func (sy *Syncer) exportedChunkKeys(m *Manifest) (map[string]struct{}, map[string]struct{}, map[string]struct{}, error) {
 	relationKeys := make(map[string]struct{})
 	observationKeys := make(map[string]struct{})
+	historicalObservationKeys := make(map[string]struct{})
 	if m == nil {
-		return relationKeys, observationKeys, nil
+		return relationKeys, observationKeys, historicalObservationKeys, nil
 	}
 	for _, entry := range m.Chunks {
 		// Read through the transport (not the local filesystem directly) so the
@@ -1558,22 +1600,63 @@ func (sy *Syncer) exportedChunkKeys(m *Manifest) (map[string]struct{}, map[strin
 				// but cannot be read is a real fault and fails loudly below.
 				continue
 			}
-			return nil, nil, fmt.Errorf("read chunk %s: %w", entry.ID, err)
+			return nil, nil, nil, fmt.Errorf("read chunk %s: %w", entry.ID, err)
 		}
 		var chunk ChunkData
 		if err := json.Unmarshal(raw, &chunk); err != nil {
-			return nil, nil, fmt.Errorf("unmarshal chunk %s: %w", entry.ID, err)
+			return nil, nil, nil, fmt.Errorf("unmarshal chunk %s: %w", entry.ID, err)
 		}
 		for _, observation := range chunk.Observations {
 			observationKeys[observation.SyncID] = struct{}{}
+			historicalObservationKeys[observation.SyncID] = struct{}{}
 		}
 		for _, mutation := range chunk.Mutations {
 			if mutation.Entity == store.SyncEntityRelation {
 				relationKeys[mutation.EntityKey] = struct{}{}
 			}
+			if mutation.Entity == store.SyncEntityObservation {
+				switch mutation.Op {
+				case store.SyncOpDelete:
+					if strings.TrimSpace(mutation.EntityKey) != "" {
+						historicalObservationKeys[mutation.EntityKey] = struct{}{}
+					}
+				case store.SyncOpUpsert:
+					if syncID, ok := observationUpsertIdentity(mutation); ok {
+						historicalObservationKeys[syncID] = struct{}{}
+						observationKeys[syncID] = struct{}{}
+					}
+				}
+			}
 		}
 	}
-	return relationKeys, observationKeys, nil
+	return relationKeys, observationKeys, historicalObservationKeys, nil
+}
+
+// observationUpsertIdentity returns the payload-owned identity of a replayable
+// observation upsert. It keeps the identity byte-exact: whitespace only proves
+// non-emptiness, never changes the key stored in the export indexes.
+func observationUpsertIdentity(mutation store.SyncMutation) (string, bool) {
+	if store.ValidateSyncMutationPayload(mutation.Entity, mutation.Op, mutation.Payload, mutation.EntityKey).ReasonCode != "" {
+		return "", false
+	}
+
+	payload := strings.TrimSpace(mutation.Payload)
+	if payload == "" {
+		return "", false
+	}
+	if payload[0] == '"' {
+		if err := json.Unmarshal([]byte(payload), &payload); err != nil {
+			return "", false
+		}
+		payload = strings.TrimSpace(payload)
+	}
+	var body struct {
+		SyncID string `json:"sync_id"`
+	}
+	if err := json.Unmarshal([]byte(payload), &body); err != nil || strings.TrimSpace(body.SyncID) == "" || body.SyncID != mutation.EntityKey {
+		return "", false
+	}
+	return body.SyncID, true
 }
 
 // filterRelationMutationsForExport returns the relation mutations that still

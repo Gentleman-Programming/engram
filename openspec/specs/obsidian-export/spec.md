@@ -12,7 +12,8 @@ CLI command that reads the Engram SQLite store and writes a structured Obsidian-
 
 The `engram obsidian-export` subcommand MUST accept the following flags:
 - `--vault <path>` (required): absolute or relative path to the Obsidian vault root
-- `--project <name>` (optional): filter export to a single project
+- `--project <name>` (optional): select a known project for export
+- `--all` (optional): explicitly export every project
 - `--limit <n>` (optional): cap exported observations at n (default: unlimited)
 - `--since <date>` (optional): export only observations created after this ISO-8601 date
 
@@ -23,6 +24,18 @@ Missing `--vault` MUST produce a descriptive error and exit code 1.
 - GIVEN the user runs `engram obsidian-export --vault ~/vault --project eng --limit 100 --since 2026-01-01`
 - WHEN the command is parsed
 - THEN export runs scoped to project "eng", max 100 observations, created after 2026-01-01
+
+#### Scenario: Omitted project uses current project
+
+- GIVEN the current project resolves to "eng"
+- WHEN the user runs `engram obsidian-export --vault ~/vault`
+- THEN export runs scoped to "eng"
+
+#### Scenario: Explicit all exports every project
+
+- GIVEN the store contains records from multiple projects
+- WHEN the user runs `engram obsidian-export --vault ~/vault --all`
+- THEN export includes every project
 
 #### Scenario: Missing required --vault flag
 
