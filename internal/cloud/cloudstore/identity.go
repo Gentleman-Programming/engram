@@ -58,13 +58,13 @@ type UpdatePrincipalParams struct {
 }
 
 type HumanUser struct {
-	PrincipalID string
-	Username    string
-	Email       string
-	DisplayName string
-	Role        string
-	Enabled     bool
-	CreatedAt   time.Time
+	PrincipalID string    `json:"principal_id"`
+	Username    string    `json:"username"`
+	Email       string    `json:"email"`
+	DisplayName string    `json:"display_name"`
+	Role        string    `json:"role"`
+	Enabled     bool      `json:"enabled"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 type CreateHumanUserParams struct {
@@ -105,10 +105,10 @@ type RecoverStrandedAdminTokenParams struct {
 }
 
 type ProjectGrant struct {
-	PrincipalID          string
-	Project              string
-	GrantedByPrincipalID string
-	CreatedAt            time.Time
+	PrincipalID          string    `json:"principal_id"`
+	Project              string    `json:"project"`
+	GrantedByPrincipalID string    `json:"granted_by_principal_id"`
+	CreatedAt            time.Time `json:"created_at"`
 }
 
 type CreateProjectGrantParams struct {
