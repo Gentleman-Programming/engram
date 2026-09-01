@@ -4245,13 +4245,15 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 			// untouched in that case as well.
 			incoming := normalizeComparableTimestamp(obs.UpdatedAt)
 			current := normalizeComparableTimestamp(existing.UpdatedAt)
-			if incoming == "" || incoming <= current {
+			if incoming == "" || current == "" || incoming <= current {
+				result.ObservationsSkippedStale++
 				continue
 			}
 			if _, err := s.execHook(tx, `UPDATE observations SET session_id = ?, type = ?, title = ?, content = ?, tool_name = CAST(? AS TEXT), project = ?, scope = ?, topic_key = ?, normalized_hash = ?, revision_count = ?, duplicate_count = ?, last_seen_at = ?, review_after = ?, created_at = ?, updated_at = ?, deleted_at = ? WHERE id = ?`,
 				obs.SessionID, obs.Type, obs.Title, obs.Content, obs.ToolName, obs.Project, normalizeScope(obs.Scope), nullableString(normalizeTopicKey(derefString(obs.TopicKey))), hashNormalized(obs.Content), maxInt(obs.RevisionCount, 1), maxInt(obs.DuplicateCount, 1), obs.LastSeenAt, obs.ReviewAfter, obs.CreatedAt, obs.UpdatedAt, obs.DeletedAt, existing.ID); err != nil {
 				return nil, fmt.Errorf("import observation %d: %w", obs.ID, err)
 			}
+			result.ObservationsUpdated++
 			continue
 		}
 		res, err := s.execHook(tx,
@@ -4318,9 +4320,11 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 }
 
 type ImportResult struct {
-	SessionsImported     int `json:"sessions_imported"`
-	ObservationsImported int `json:"observations_imported"`
-	PromptsImported      int `json:"prompts_imported"`
+	SessionsImported         int `json:"sessions_imported"`
+	ObservationsImported     int `json:"observations_imported"`
+	ObservationsUpdated      int `json:"observations_updated"`
+	ObservationsSkippedStale int `json:"observations_skipped_stale"`
+	PromptsImported          int `json:"prompts_imported"`
 }
 
 // ─── Sync Chunk Tracking ─────────────────────────────────────────────────────
@@ -8028,21 +8032,19 @@ func (s *Store) applyPromptDeleteTx(tx *sql.Tx, payload syncPromptPayload) error
 
 func isStalePromptUpsert(payload syncPromptPayload, tombstoneDeletedAt string) bool {
 	upsertTime := normalizeComparableTimestamp(payload.CreatedAt)
-	if strings.TrimSpace(upsertTime) == "" {
+	tombstoneTime := normalizeComparableTimestamp(tombstoneDeletedAt)
+	if upsertTime == "" || tombstoneTime == "" {
 		return true
 	}
-	return upsertTime <= normalizeComparableTimestamp(tombstoneDeletedAt)
+	return upsertTime <= tombstoneTime
 }
 
 func normalizeComparableTimestamp(value string) string {
-	trimmed := strings.TrimSpace(value)
-	if trimmed == "" {
+	parsed, err := parseObservationTime(value)
+	if err != nil {
 		return ""
 	}
-	if parsed, err := time.Parse(time.RFC3339, trimmed); err == nil {
-		return parsed.UTC().Format("2006-01-02 15:04:05")
-	}
-	return trimmed
+	return parsed.Format("2006-01-02 15:04:05.000000000")
 }
 
 func parseObservationTime(value string) (time.Time, error) {
