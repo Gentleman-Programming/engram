@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -77,44 +78,135 @@ func captureOutput(t *testing.T, fn func()) (stdout string, stderr string) {
 	}
 	errR, errW, err := os.Pipe()
 	if err != nil {
+		_ = outR.Close()
+		_ = outW.Close()
 		t.Fatalf("stderr pipe: %v", err)
 	}
+
+	type captureResult struct {
+		output []byte
+		err    error
+	}
+	drain := func(r *os.File) <-chan captureResult {
+		done := make(chan captureResult, 1)
+		go func() {
+			output, err := io.ReadAll(r)
+			done <- captureResult{output: output, err: err}
+		}()
+		return done
+	}
+	outDone := drain(outR)
+	errDone := drain(errR)
 
 	os.Stdout = outW
 	os.Stderr = errW
 
-	type capturedOutput struct {
-		bytes []byte
-		err   error
-	}
-	outDone := make(chan capturedOutput, 1)
-	errDone := make(chan capturedOutput, 1)
-	go func() {
-		bytes, err := io.ReadAll(outR)
-		outDone <- capturedOutput{bytes: bytes, err: err}
-	}()
-	go func() {
-		bytes, err := io.ReadAll(errR)
-		errDone <- capturedOutput{bytes: bytes, err: err}
+	defer func() {
+		os.Stdout = oldOut
+		os.Stderr = oldErr
+		_ = outW.Close()
+		_ = errW.Close()
+
+		outResult := <-outDone
+		errResult := <-errDone
+		_ = outR.Close()
+		_ = errR.Close()
+		if outResult.err != nil {
+			t.Fatalf("read stdout: %v", outResult.err)
+		}
+		if errResult.err != nil {
+			t.Fatalf("read stderr: %v", errResult.err)
+		}
+		stdout = string(outResult.output)
+		stderr = string(errResult.output)
 	}()
 
 	fn()
+	return stdout, stderr
+}
 
-	_ = outW.Close()
-	_ = errW.Close()
-	os.Stdout = oldOut
-	os.Stderr = oldErr
+func TestCaptureOutputRestoresStreams(t *testing.T) {
+	t.Run("after normal return", func(t *testing.T) {
+		originalStdout := os.Stdout
+		originalStderr := os.Stderr
 
-	out := <-outDone
-	if out.err != nil {
-		t.Fatalf("read stdout: %v", out.err)
+		captureOutput(t, func() {})
+
+		if os.Stdout != originalStdout {
+			t.Fatal("stdout was not restored")
+		}
+		if os.Stderr != originalStderr {
+			t.Fatal("stderr was not restored")
+		}
+	})
+
+	t.Run("after panic", func(t *testing.T) {
+		originalStdout := os.Stdout
+		originalStderr := os.Stderr
+		const wantPanic = "capture output panic"
+
+		var recovered any
+		func() {
+			defer func() {
+				recovered = recover()
+			}()
+			captureOutput(t, func() {
+				panic(wantPanic)
+			})
+		}()
+
+		if recovered != wantPanic {
+			t.Fatalf("recovered panic = %v, want %q", recovered, wantPanic)
+		}
+		if os.Stdout != originalStdout {
+			t.Fatal("stdout was not restored")
+		}
+		if os.Stderr != originalStderr {
+			t.Fatal("stderr was not restored")
+		}
+	})
+}
+
+func TestLargeStdoutAndStderrAreCapturedCompletely(t *testing.T) {
+	const helperEnv = "ENGRAM_TEST_CAPTURE_OUTPUT_LARGE_STREAMS_HELPER"
+	const payloadSize = 256 * 1024
+
+	if os.Getenv(helperEnv) == "1" {
+		stdoutPayload := strings.Repeat("o", payloadSize)
+		stderrPayload := strings.Repeat("e", payloadSize)
+		stdout, stderr := captureOutput(t, func() {
+			if _, err := io.WriteString(os.Stdout, stdoutPayload); err != nil {
+				t.Fatalf("write stdout: %v", err)
+			}
+			if _, err := io.WriteString(os.Stderr, stderrPayload); err != nil {
+				t.Fatalf("write stderr: %v", err)
+			}
+		})
+		if stdout != stdoutPayload {
+			t.Fatalf("stdout capture length = %d, want %d", len(stdout), len(stdoutPayload))
+		}
+		if stderr != stderrPayload {
+			t.Fatalf("stderr capture length = %d, want %d", len(stderr), len(stderrPayload))
+		}
+		return
 	}
-	errOut := <-errDone
-	if errOut.err != nil {
-		t.Fatalf("read stderr: %v", errOut.err)
-	}
 
-	return string(out.bytes), string(errOut.bytes)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestLargeStdoutAndStderrAreCapturedCompletely$", "-test.count=1")
+	cmd.Env = append(os.Environ(), helperEnv+"=1")
+	output, err := cmd.CombinedOutput()
+	const maxDiagnosticOutput = 4096
+	diagnostic := string(output)
+	if len(diagnostic) > maxDiagnosticOutput {
+		diagnostic = diagnostic[:maxDiagnosticOutput] + "\n... subprocess output truncated"
+	}
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatalf("captureOutput helper timed out after 10s; subprocess output:\n%s", diagnostic)
+	}
+	if err != nil {
+		t.Fatalf("captureOutput helper failed: %v\nsubprocess output:\n%s", err, diagnostic)
+	}
 }
 
 func TestCaptureOutputDrainsLargeStdoutAndStderrConcurrently(t *testing.T) {
@@ -2214,16 +2306,18 @@ func TestCmdMCPServesBeforeDeferredEnrolledProjectRepair(t *testing.T) {
 	}
 }
 
-func TestCmdSyncUsesDetectProject(t *testing.T) {
+func TestCmdSyncUsesFullProjectDetection(t *testing.T) {
 	workDir := t.TempDir()
 	withCwd(t, workDir)
 
 	cfg := testConfig(t)
 
-	// Stub detectProject to verify it's called instead of filepath.Base
-	old := detectProject
-	t.Cleanup(func() { detectProject = old })
-	detectProject = func(dir string) string { return "git-detected-project" }
+	// Stub full detection so sync preserves fail-closed automatic Git detection.
+	old := detectProjectFull
+	t.Cleanup(func() { detectProjectFull = old })
+	detectProjectFull = func(dir string) project.DetectionResult {
+		return project.DetectionResult{Project: "git-detected-project", Source: project.SourceGitRemote, Path: dir}
+	}
 
 	withArgs(t, "engram", "sync")
 	stdout, stderr := captureOutput(t, func() { cmdSync(cfg) })
@@ -2231,7 +2325,62 @@ func TestCmdSyncUsesDetectProject(t *testing.T) {
 		t.Fatalf("expected no stderr, got: %q", stderr)
 	}
 	if !strings.Contains(stdout, "git-detected-project") {
-		t.Fatalf("expected detectProject result in output, got: %q", stdout)
+		t.Fatalf("expected full detection result in output, got: %q", stdout)
+	}
+}
+
+func TestCmdSyncFailsClosedWhenFullProjectDetectionFails(t *testing.T) {
+	workDir := t.TempDir()
+	withCwd(t, workDir)
+	t.Setenv("ENGRAM_PROJECT", "")
+	stubExitWithPanic(t)
+
+	oldDetectProjectFull := detectProjectFull
+	oldSyncExport := syncExport
+	t.Cleanup(func() {
+		detectProjectFull = oldDetectProjectFull
+		syncExport = oldSyncExport
+	})
+
+	for _, tt := range []struct {
+		name   string
+		detect project.DetectionResult
+		want   error
+	}{
+		{
+			name:   "repository binding unavailable",
+			detect: project.DetectionResult{Source: project.SourceGitRoot, Path: workDir, Error: fmt.Errorf("%w: test binding failure", project.ErrRepositoryBinding)},
+			want:   project.ErrRepositoryBinding,
+		},
+		{
+			name:   "invalid project config",
+			detect: project.DetectionResult{Source: project.SourceConfig, Path: workDir, Error: fmt.Errorf("%w: test config failure", project.ErrInvalidConfig)},
+			want:   project.ErrInvalidConfig,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			detectProjectFull = func(string) project.DetectionResult { return tt.detect }
+			exportCalled := false
+			syncExport = func(*engramsync.Syncer, string, string) (*engramsync.SyncResult, error) {
+				exportCalled = true
+				return nil, errors.New("syncExport must not run after project detection failure")
+			}
+
+			withArgs(t, "engram", "sync")
+			stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdSync(testConfig(t)) })
+			if _, ok := recovered.(exitCode); !ok {
+				t.Fatalf("cmdSync recovery = %v, want exit code", recovered)
+			}
+			if !strings.Contains(stderr, tt.want.Error()) {
+				t.Fatalf("stderr %q does not contain detection error %q", stderr, tt.want)
+			}
+			if exportCalled {
+				t.Fatal("cmdSync invoked syncExport after project detection failed")
+			}
+			if strings.Contains(stdout, "Exporting memories") {
+				t.Fatalf("cmdSync emitted export output after project detection failed: %q", stdout)
+			}
+		})
 	}
 }
 
