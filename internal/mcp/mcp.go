@@ -79,7 +79,7 @@ func truncationWarning(metadata store.TruncationMetadata) string {
 	return fmt.Sprintf("\n⚠ WARNING: Content was truncated from %d to %d bytes. Consider splitting into smaller observations.", metadata.OriginalBytes, metadata.LimitBytes)
 }
 
-func currentWorkingDirectory() string {
+var currentWorkingDirectory = func() string {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return ""
@@ -89,6 +89,15 @@ func currentWorkingDirectory() string {
 
 func ensureImplicitSessionWithCWD(s *store.Store, sessionID, project string) error {
 	return s.CreateSession(sessionID, project, currentWorkingDirectory())
+}
+
+// runtimeSessionDirectory derives the worktree-specific key for omitted
+// registration and omitted-session lookup without changing project identity.
+func runtimeSessionDirectory(directory string) string {
+	if strings.TrimSpace(directory) == "" {
+		directory = currentWorkingDirectory()
+	}
+	return projectpkg.RuntimeWorktreeDirectory(directory)
 }
 
 // ─── Tool Profiles ───────────────────────────────────────────────────────────
@@ -332,7 +341,7 @@ Examples:
 					mcp.Description("Category: decision, architecture, bugfix, pattern, config, discovery, learning (default: manual)"),
 				),
 				mcp.WithString("session_id",
-					mcp.Description("Session ID to associate with (default: manual-save-{project})"),
+					mcp.Description("Session ID to associate with. When omitted, attempts unique active runtime-session selection using current worktree evidence; falls back to manual-save-{project} when no candidate remains, and rejects ambiguity rather than selecting by recency."),
 				),
 				mcp.WithString("scope",
 					mcp.Description("Scope for this observation: project (default) or personal"),
@@ -476,7 +485,7 @@ Examples:
 					mcp.Description("The user's prompt text"),
 				),
 				mcp.WithString("session_id",
-					mcp.Description("Session ID to associate with (default: manual-save-{project})"),
+					mcp.Description("Session ID to associate with. When omitted, attempts unique active runtime-session selection using current worktree evidence; falls back to manual-save-{project} when no candidate remains, and rejects ambiguity rather than selecting by recency."),
 				),
 				mcp.WithString("project",
 					mcp.Description("Optional recovery target only after ambiguous_project. Ignored unless project_choice_reason is user_selected_after_ambiguous_project."),
@@ -660,7 +669,7 @@ GUIDELINES:
 					mcp.Description("Full session summary using the Goal/Instructions/Discoveries/Accomplished/Next Steps/Relevant Files format"),
 				),
 				mcp.WithString("session_id",
-					mcp.Description("Session ID (default: manual-save-{project})"),
+					mcp.Description("Session ID to associate with. When omitted, attempts unique active runtime-session selection using current worktree evidence; falls back to manual-save-{project} when no candidate remains, and rejects ambiguity rather than selecting by recency."),
 				),
 				mcp.WithString("project",
 					mcp.Description("Optional explicit project for this memory. Accepted only when backed by known context (existing project, matching session, repo config, or ambiguous-project recovery); invalid or unbacked names fail loudly."),
@@ -742,7 +751,7 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 					mcp.Description("The text output containing a '## Key Learnings:' section with numbered or bulleted items"),
 				),
 				mcp.WithString("session_id",
-					mcp.Description("Session ID (default: manual-save-{project})"),
+					mcp.Description("Session ID to associate with. When omitted, attempts unique active runtime-session selection using current worktree evidence; falls back to manual-save-{project} when no candidate remains, and rejects ambiguity rather than selecting by recency."),
 				),
 				mcp.WithString("source",
 					mcp.Description("Source identifier (e.g. 'subagent-stop', 'session-end')"),
@@ -1225,7 +1234,10 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 			typ = "manual"
 		}
 		if sessionID == "" {
-			sessionID = resolveFallbackSessionID(s, project)
+			sessionID, err = resolveFallbackSessionID(s, project)
+			if err != nil {
+				return mcp.NewToolResultError("Failed to save: " + err.Error()), nil
+			}
 		}
 		suggestedTopicKey := suggestTopicKey(typ, title, content)
 
@@ -1674,7 +1686,10 @@ func handleSavePrompt(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 		project, _ := store.NormalizeProject(detRes.Project)
 
 		if sessionID == "" {
-			sessionID = resolveFallbackSessionID(s, project)
+			sessionID, err = resolveFallbackSessionID(s, project)
+			if err != nil {
+				return mcp.NewToolResultError("Failed to save prompt: " + err.Error()), nil
+			}
 		}
 
 		// Ensure the implicit MCP session exists with the current working directory.
@@ -1987,7 +2002,10 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		project, _ = store.NormalizeProject(project)
 
 		if sessionID == "" {
-			sessionID = resolveFallbackSessionID(s, project)
+			sessionID, err = resolveFallbackSessionID(s, project)
+			if err != nil {
+				return mcp.NewToolResultError("Failed to save session summary: " + err.Error()), nil
+			}
 		}
 
 		// Ensure the implicit MCP session exists with the current working directory.
@@ -2028,12 +2046,7 @@ func handleSessionStart(s *store.Store, cfg MCPConfig, activity *SessionActivity
 		project, _ := store.NormalizeProject(detRes.Project)
 
 		activity.RecordToolCall(defaultSessionID(project))
-		if resolvedDirectory == "" {
-			resolvedDirectory = strings.TrimSpace(detRes.Path)
-			if resolvedDirectory == "" {
-				resolvedDirectory = strings.TrimSpace(currentWorkingDirectory())
-			}
-		}
+		resolvedDirectory = runtimeSessionDirectory(resolvedDirectory)
 
 		if err := s.CreateSession(id, project, resolvedDirectory); err != nil {
 			return mcp.NewToolResultError("Failed to start session: " + err.Error()), nil
@@ -2108,7 +2121,10 @@ func handleCapturePassive(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		}
 
 		if sessionID == "" {
-			sessionID = resolveFallbackSessionID(s, project)
+			sessionID, err = resolveFallbackSessionID(s, project)
+			if err != nil {
+				return mcp.NewToolResultError("Passive capture failed: " + err.Error()), nil
+			}
 			_ = ensureImplicitSessionWithCWD(s, sessionID, project)
 		}
 
@@ -3090,25 +3106,24 @@ func defaultSessionID(project string) string {
 	return "manual-save-" + project
 }
 
-// resolveFallbackSessionID resolves the session a write should attach to when
-// the caller did not provide an explicit session_id.
-//
-// It first consults the persisted sessions table for the most recent active
-// (un-ended) session of the project (issue #386). The SessionStart hook
-// registers a UUID session via the HTTP server, a SEPARATE process from this
-// MCP (stdio) server; the two share only the SQLite store, so the active
-// session must be resolved from disk rather than from any in-process map.
-//
-// When no active session exists for the project (or the store query fails for
-// any reason), it falls back to the manual-save-{project} session, preserving
-// the prior behavior for projects with no live session.
-func resolveFallbackSessionID(s *store.Store, project string) string {
+// resolveFallbackSessionID resolves an omitted session_id without guessing
+// between concurrent runtime sessions. The working directory only narrows
+// candidates; a persisted session ID remains the sole identity.
+func resolveFallbackSessionID(s *store.Store, project string) (string, error) {
 	if s != nil {
-		if id, ok, err := s.MostRecentActiveSession(project); err == nil && ok {
-			return id
+		ids, err := s.ActiveRuntimeSessions(project, runtimeSessionDirectory(""))
+		if err == nil {
+			switch len(ids) {
+			case 0:
+				return defaultSessionID(project), nil
+			case 1:
+				return ids[0], nil
+			default:
+				return "", fmt.Errorf("multiple active runtime sessions match project %q and the current directory; provide session_id", project)
+			}
 		}
 	}
-	return defaultSessionID(project)
+	return defaultSessionID(project), nil
 }
 
 func intArg(req mcp.CallToolRequest, key string, defaultVal int) int {
