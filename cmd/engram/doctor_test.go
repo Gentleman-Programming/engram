@@ -153,6 +153,7 @@ func TestCmdDoctorRepairValidation(t *testing.T) {
 		{name: "multiple modes", args: []string{"engram", "doctor", "repair", "--project", "sias-app", "--check", "session_project_directory_mismatch", "--plan", "--apply"}, want: "exactly one of --plan, --dry-run, or --apply is required"},
 		{name: "missing project", args: []string{"engram", "doctor", "repair", "--check", "session_project_directory_mismatch", "--plan"}, want: "--project is required"},
 		{name: "unsupported check", args: []string{"engram", "doctor", "repair", "--project", "sias-app", "--check", "not_real", "--plan"}, want: "unsupported repair check"},
+		{name: "orphaned observation session is report only", args: []string{"engram", "doctor", "repair", "--project", "sias-app", "--check", "orphaned_observation_session", "--apply"}, want: "unsupported repair check orphaned_observation_session"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -341,6 +342,70 @@ func TestCmdDoctorTextOutput(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "Engram Doctor: ok") || !strings.Contains(stdout, "manual_session_name_project_mismatch") {
 		t.Fatalf("stdout=%q", stdout)
+	}
+}
+
+func TestCmdDoctorOrphanedObservationSessionRoutesWithoutRepair(t *testing.T) {
+	cfg := testConfig(t)
+	initDoctorStore(t, cfg)
+	db, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	if _, err := db.Exec(`
+		PRAGMA foreign_keys = OFF;
+		INSERT INTO observations
+			(sync_id, session_id, type, title, content, project, scope, normalized_hash, revision_count, duplicate_count, created_at, updated_at)
+		VALUES ('obs-orphan', 'missing-session', 'bugfix', 'orphan', 'content', 'engram', 'project', 'obs-orphan', 1, 1, datetime('now'), datetime('now'));
+	`); err != nil {
+		_ = db.Close()
+		t.Fatalf("seed orphaned observation: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close seeded database: %v", err)
+	}
+
+	withArgs(t, "engram", "doctor", "--json", "--project", "engram", "--check", "orphaned_observation_session")
+	stdout, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+	if stderr != "" {
+		t.Fatalf("json stderr=%q", stderr)
+	}
+	report := decodeDoctorReport(t, stdout)
+	check := report["checks"].([]any)[0].(map[string]any)
+	finding := check["findings"].([]any)[0].(map[string]any)
+	if report["status"] != "warning" || check["check_id"] != "orphaned_observation_session" || finding["requires_confirmation"] != true {
+		t.Fatalf("json report=%v", report)
+	}
+
+	withArgs(t, "engram", "doctor", "--project", "engram", "--check", "orphaned_observation_session")
+	stdout, stderr = captureOutput(t, func() { cmdDoctor(cfg) })
+	if stderr != "" || !strings.Contains(stdout, "orphaned_observation_session") || !strings.Contains(stdout, "missing-session") {
+		t.Fatalf("text stderr=%q stdout=%q", stderr, stdout)
+	}
+
+	oldExit := exitFunc
+	exited := false
+	exitFunc = func(code int) { exited = code != 0 }
+	t.Cleanup(func() { exitFunc = oldExit })
+	withArgs(t, "engram", "doctor", "repair", "--project", "engram", "--check", "orphaned_observation_session", "--apply")
+	stdout, stderr = captureOutput(t, func() { cmdDoctor(cfg) })
+	if !exited || !strings.Contains(stdout, "usage: engram doctor") || !strings.Contains(stderr, "unsupported repair check orphaned_observation_session") {
+		t.Fatalf("repair exited=%v stdout=%q stderr=%q", exited, stdout, stderr)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.DataDir, "backups")); !os.IsNotExist(err) {
+		t.Fatalf("unsupported repair created backup directory: %v", err)
+	}
+	db, err = sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
+	if err != nil {
+		t.Fatalf("reopen database: %v", err)
+	}
+	defer db.Close()
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM observations WHERE sync_id = 'obs-orphan'`).Scan(&count); err != nil {
+		t.Fatalf("count orphaned observations: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("unsupported repair changed observations: count=%d", count)
 	}
 }
 
