@@ -1260,6 +1260,10 @@ func TestLocalChunkExportUsesObservationHistory(t *testing.T) {
 
 func TestExportedChunkKeysObservationMutationIdentity(t *testing.T) {
 	validPayload := `{"sync_id":" obs-mutation-only ","session_id":"session","type":"decision","title":"title","content":"content","scope":"project"}`
+	quotedPayload, err := json.Marshal(validPayload)
+	if err != nil {
+		t.Fatalf("marshal quoted payload: %v", err)
+	}
 	tests := []struct {
 		name           string
 		mutation       store.SyncMutation
@@ -1270,6 +1274,13 @@ func TestExportedChunkKeysObservationMutationIdentity(t *testing.T) {
 		{
 			name:           "valid mutation-only upsert preserves its endpoint identity",
 			mutation:       store.SyncMutation{Entity: store.SyncEntityObservation, EntityKey: " obs-mutation-only ", Op: store.SyncOpUpsert, Payload: validPayload},
+			wantHistorical: true,
+			wantAvailable:  true,
+			wantKey:        " obs-mutation-only ",
+		},
+		{
+			name:           "JSON-string payload preserves its endpoint identity",
+			mutation:       store.SyncMutation{Entity: store.SyncEntityObservation, EntityKey: " obs-mutation-only ", Op: store.SyncOpUpsert, Payload: string(quotedPayload)},
 			wantHistorical: true,
 			wantAvailable:  true,
 			wantKey:        " obs-mutation-only ",
