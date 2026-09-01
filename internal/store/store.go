@@ -6346,9 +6346,13 @@ func (s *Store) DeleteProject(project string, hardDelete bool) (*DeleteProjectRe
 
 		// 3. Delete sessions — only when hard-deleting, because observation rows
 		//    reference sessions via a NOT NULL FK and soft-deleted rows are still
-		//    present in the table.
+		//    present in the table. Keep sessions referenced by either table, even
+		//    when the remaining rows belong to another project.
 		if hardDelete {
-			res, err = s.execHook(tx, `DELETE FROM sessions WHERE project = ?`, project)
+			res, err = s.execHook(tx, `DELETE FROM sessions
+				WHERE project = ?
+				  AND NOT EXISTS (SELECT 1 FROM observations WHERE observations.session_id = sessions.id)
+				  AND NOT EXISTS (SELECT 1 FROM user_prompts WHERE user_prompts.session_id = sessions.id)`, project)
 			if err != nil {
 				return fmt.Errorf("delete project: delete sessions: %w", err)
 			}
