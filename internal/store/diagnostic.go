@@ -20,6 +20,15 @@ type DiagnosticSessionEvidence struct {
 	Name      string `json:"name"`
 }
 
+// OrphanedObservationSessionEvidence identifies observations whose stored
+// session reference has no matching local session. It is grouped so diagnostics
+// can report the affected reference without exposing observation payloads.
+type OrphanedObservationSessionEvidence struct {
+	Project          string `json:"project"`
+	SessionID        string `json:"session_id"`
+	ObservationCount int64  `json:"observation_count"`
+}
+
 // SyncMutationPayloadValidation describes deterministic required-field issues
 // in a pending sync mutation payload.
 type SyncMutationPayloadValidation struct {
@@ -139,6 +148,46 @@ func (s *Store) ListDiagnosticSessions(project string) ([]DiagnosticSessionEvide
 		sessions = append(sessions, ev)
 	}
 	return sessions, rows.Err()
+}
+
+// ListOrphanedObservationSessionEvidence reports grouped observation references
+// whose parent sessions are absent. It includes soft-deleted observations because
+// they remain local data that can block inspection or recovery.
+func (s *Store) ListOrphanedObservationSessionEvidence(project string) ([]OrphanedObservationSessionEvidence, error) {
+	project, _ = NormalizeProject(project)
+	project = strings.TrimSpace(project)
+	query := `SELECT ifnull(o.project, ''), o.session_id, COUNT(*)
+		FROM observations o
+		LEFT JOIN sessions s ON s.id = o.session_id
+		WHERE s.id IS NULL
+			AND length(trim(o.session_id, char(9) || char(10) || char(13) || ' ')) > 0`
+	args := []any{}
+	if project != "" {
+		query += ` AND o.project = ?`
+		args = append(args, project)
+	}
+	query += ` GROUP BY ifnull(o.project, ''), o.session_id ORDER BY ifnull(o.project, ''), o.session_id`
+
+	rows, err := s.queryItHook(s.db, query, args...)
+	if err != nil {
+		return nil, err
+	}
+
+	evidence := make([]OrphanedObservationSessionEvidence, 0)
+	for rows.Next() {
+		var item OrphanedObservationSessionEvidence
+		if err := rows.Scan(&item.Project, &item.SessionID, &item.ObservationCount); err != nil {
+			return nil, closeRowsWithError(rows, err)
+		}
+		evidence = append(evidence, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, closeRowsWithError(rows, err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	return evidence, nil
 }
 
 // ListPendingProjectMutations returns pending cloud mutations for one project,

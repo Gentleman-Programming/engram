@@ -62,6 +62,7 @@ The CLI `--json` and MCP tool return:
 - `session_project_directory_mismatch` — warns when `sessions.project` disagrees with the project inferred from trusted repository evidence for the session directory. The MVP trusts `git_remote` and `git_root` only; it ignores basename fallback, ambiguous workspaces, missing directories, and child-repo auto-promotion to avoid noisy false positives.
 - `manual_session_name_project_mismatch` — warns when a `manual-save-{suffix}` session name disagrees with `sessions.project`.
 - `sync_mutation_required_fields` — blocks when a pending `sync_mutations.payload` is missing required fields. On a device that uses cloud sync (at least one project enrolled), it also blocks when pending cloud mutations belong to a project that is not enrolled; the finding identifies the project and backlog count, so enroll intended projects with `engram cloud enroll <project>` or review enrollment before retrying. A local-only install with no enrolled project never reports that finding: the store journals mutations unconditionally, so a non-enrolled backlog is its normal steady state.
+- `orphaned_observation_session` — warns when active or soft-deleted observations reference a missing session. Findings are grouped by the stored observation project and session ID. The canonical session cannot be reconstructed automatically, so inspect and recover the data deliberately; no supported repair exists.
 - `unowned_session_project` — warns for each session that identifies no project. A database upgraded from the schema where `sessions.project` was nullable keeps those rows intact, and they are exactly what a `project_ownership_required` failure points at, so each finding carries the concrete `engram projects rescue-ownership --project <name> --session <id>` repair. The listing is deliberately unscoped: an unowned session belongs to no project, so `--project` must not filter it out of the report.
 - `sqlite_lock_contention` — warns on conservative SQLite contention signals; returns an error if lock state cannot be evaluated.
 
@@ -83,6 +84,8 @@ Repair never deletes or deduplicates rows, never edits sync cursors, and never w
 - `user_prompts.project`
 
 Title restoration does not create a SQLite backup.
+
+`orphaned_observation_session` is report-only and is not supported by `engram doctor repair`.
 
 ### Repair JSON envelope
 
