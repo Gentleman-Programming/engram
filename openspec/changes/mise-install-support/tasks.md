@@ -36,15 +36,19 @@ All 3 units are independent — each PR targets `main` directly; order is a sugg
 
 ## Phase 2: Mise-Managed Detection + Update-Hint Wiring (PR 2)
 
-- [ ] 2.1 [RED] `internal/version/mise_test.go`: table-driven `miseInstallsRoot(goos)` precedence (`MISE_INSTALLS_DIR` > `MISE_DATA_DIR/installs` > `XDG_DATA_HOME/mise/installs` > platform default), whitespace fallthrough, Windows branch, empty-home case (REQ-MISE-004)
-- [ ] 2.2 [RED] Add `pathContains` cases: under root, root itself, sibling false, symlinked ancestor, nonexistent root
-- [ ] 2.3 [RED] Add `runningBinaryIsMiseManaged()` cases via `currentExecutableFn`/`userHomeDirFn` package-var swap
-- [ ] 2.4 [GREEN] Implement `internal/version/mise.go` (vars, `miseInstallsRoot`, `pathContains`, `runningBinaryIsMiseManaged`) — pass 2.1-2.3
-- [ ] 2.5 [RED] Extend `TestUpdateInstructions` in `check_test.go`: mise-managed output contains `mise upgrade engram`; non-mise output stays byte-identical (REQ-MISE-005)
-- [ ] 2.6 [GREEN] Add guard clause atop `updateInstructions()` (`check.go:150`) returning the two-line mise hint before the unchanged GOOS switch — pass 2.5
+- [x] 2.1 [RED] `internal/version/mise_test.go`: table-driven `miseInstallsRoot(goos)` precedence (`MISE_INSTALLS_DIR` > `MISE_DATA_DIR/installs` > `XDG_DATA_HOME/mise/installs` > platform default), whitespace fallthrough, Windows branch, empty-home case (REQ-MISE-004)
+- [x] 2.2 [RED] Add `pathContains` cases: under root, root itself, sibling false, symlinked ancestor, nonexistent root
+- [x] 2.3 [RED] Add `runningBinaryIsMiseManaged()` cases via `currentExecutableFn`/`userHomeDirFn` package-var swap
+- [x] 2.4 [GREEN] Implement `internal/version/mise.go` (vars, `miseInstallsRoot`, `pathContains`, `runningBinaryIsMiseManaged`) — pass 2.1-2.3
+- [x] 2.5 [RED] Extend `TestUpdateInstructions` in `check_test.go`: mise-managed output contains `mise upgrade engram`; non-mise output stays byte-identical (REQ-MISE-005)
+- [x] 2.6 [GREEN] Add guard clause atop `updateInstructions()` (`check.go:150`) returning the mise hint before the unchanged GOOS switch — pass 2.5. Originally a two-line hint with a `github:` fallback; dropped to a single `mise upgrade engram` line once `aquaproj/aqua-registry#59476`/`jdx/mise#12480` shipped in mise `v2026.9.0`.
+
+Implemented in sibling PR #791 (`feat/mise-managed-detection`), independent of this branch per the stacked-to-main strategy.
 
 ## Phase 3: Documentation (PR 3)
 
-- [ ] 3.1 Add a mise section to `docs/INSTALLATION.md` for macOS, Linux, and Windows using `mise use -g github:Gentleman-Programming/engram@latest`; note that `mise use -g` only registers the pin and does not by itself put the binary on `PATH` without `mise activate` (shell integration) or shims configured, and give `mise exec -- engram version` as the no-activation fallback (REQ-MISE-006)
-- [ ] 3.2 Fix Requirements: `Go 1.24+` → `Go 1.25.10` at line 167 (REQ-MISE-006)
-- [ ] 3.3 Add a one-line mise pointer to `README.md`'s install section (REQ-MISE-006)
+- [x] 3.1 Add a mise section to `docs/INSTALLATION.md` for macOS, Linux, and Windows using `mise use -g engram@latest` (the registry short name, live as of mise `v2026.9.0`); note that `mise use -g` only registers the pin and does not by itself put the binary on `PATH` without `mise activate` (shell integration) or shims configured, and give `mise exec -- engram version` as the no-activation fallback (REQ-MISE-006)
+- [x] 3.2 Fix Requirements: `Go 1.24+` → `Go 1.25.10` (REQ-MISE-006)
+- [x] 3.3 Add a one-line mise pointer to `README.md`'s install section (REQ-MISE-006)
+
+Implemented in sibling PR #792 (`feat/mise-docs`), independent of this branch per the stacked-to-main strategy.

@@ -22,7 +22,7 @@ No package boundary moves: `internal/version` keeps owning update-check logic an
 
 | Decision | Choice | Alternatives considered | Rationale |
 |----------|--------|-------------------------|-----------|
-| Documented install form | `mise use -g github:Gentleman-Programming/engram@latest` | `ubi:` backend; short name `engram@latest` | Verified end to end: `github:` resolves the goreleaser archive, checksums it, verifies **GitHub artifact attestations and SLSA provenance**, extracts a working binary. `ubi:` prints a deprecation warning and is removed in mise 2027.1.0. The short name needs the pending registry PRs, so docs note it as "once the registry entry lands". |
+| Documented install form | `mise use -g engram@latest` (registry short name) | `github:Gentleman-Programming/engram@latest`; `ubi:` backend | The `github:` bridge form was verified end to end first: it resolves the goreleaser archive, checksums it, verifies **GitHub artifact attestations and SLSA provenance**, extracts a working binary. `aquaproj/aqua-registry#59476` and `jdx/mise#12480` have both merged and shipped in mise `v2026.9.0`, so the short name now resolves too (re-verified empirically) and is the documented form. `ubi:` prints a deprecation warning and is removed in mise 2027.1.0. |
 | Containment check | Minimal unexported `os.SameFile` walk, colocated in `internal/version/mise.go` | Port gentle-ai's whole `pathidentity` package; `filepath.Clean` + string prefix | Prefix matching is wrong exactly where engram ships: case-insensitive APFS/NTFS, symlinked `$HOME`, and Unicode-equivalent names — and needs separator-boundary care so `/x/mise-evil` does not match `/x/mise`. The correct version is ~18 lines and needs no new package. Stakes are low (a wrong hint, never a skipped upgrade), but the cheap option is not cheaper. |
 | Detector placement | `internal/version/mise.go`, unexported | New `internal/pathidentity` package | Single consumer in the same package; a package for one predicate earns nothing. Extract later if a second caller appears. |
 | Hint ordering | mise check first, then the existing `runtime.GOOS` switch | Add a case inside the switch | Install method is orthogonal to OS — a mise install on darwin must not print `brew upgrade`. A guard clause keeps the GOOS switch byte-identical. |
@@ -147,17 +147,18 @@ func runningBinaryIsMiseManaged() bool {
 ```go
 func updateInstructions() string {
 	if runningBinaryIsMiseManaged() {
-		return "  mise upgrade engram\n  or: mise upgrade github:Gentleman-Programming/engram"
+		return "  mise upgrade engram"
 	}
 	switch runtime.GOOS { // unchanged below this line
 ```
 
-The second line exists because the documented bridge form registers the tool as
-`github:Gentleman-Programming/engram`, not `engram` — `mise upgrade engram` only
-resolves once the registry entry lands. This satisfies REQ-MISE-005 (the required
-string is emitted) using the same `or:` idiom the linux branch already uses; tests
-assert with `strings.Contains`, matching `check_test.go`. Drop the second line when
-the registry PRs merge.
+Originally this returned a second `or: mise upgrade github:Gentleman-Programming/engram`
+line, because the documented bridge form registered the tool as
+`github:Gentleman-Programming/engram`, not `engram`, and `mise upgrade engram` didn't
+resolve until the registry entry landed. `aquaproj/aqua-registry#59476` and
+`jdx/mise#12480` have now merged and shipped in mise `v2026.9.0`, so the short name
+resolves and the fallback line is dropped. Tests assert with `strings.Contains`,
+matching `check_test.go`, and still pass unchanged.
 
 ### `scripts/verify-mise-pins.sh`
 
@@ -345,10 +346,10 @@ without either depending on the other.
 
 ## Open Questions
 
-- [ ] REQ-MISE-005's scenario says `updateInstructions()` "returns
-      `mise upgrade engram`". This design returns that line **plus** an
-      `or: mise upgrade github:Gentleman-Programming/engram` line, because the
-      short name does not resolve until the external registry PRs land. Tests use
-      `strings.Contains`. If the spec intends strict equality, the second line must
-      be dropped and the pre-registry hint will be wrong for every user who follows
-      today's documented install command.
+- [x] REQ-MISE-005's scenario says `updateInstructions()` "returns
+      `mise upgrade engram`". This design originally returned that line **plus** an
+      `or: mise upgrade github:Gentleman-Programming/engram` fallback, because the
+      short name did not resolve until the external registry PRs landed. Both have
+      now merged and shipped in mise `v2026.9.0`, so the fallback is dropped and
+      `updateInstructions()` returns the single `mise upgrade engram` line, matching
+      REQ-MISE-005 exactly.

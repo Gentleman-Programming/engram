@@ -85,7 +85,6 @@ printed hint. Tests reuse `check_test.go`'s var-swap + `t.Setenv` idiom.
 
 | Risk | Likelihood | Mitigation |
 |------|------------|------------|
-| Docs land before the external registry PRs, documenting a command that does not resolve yet | Med | Document a registry-independent form (e.g. mise's `ubi:` backend) alongside the short name; design confirms it resolves engram's goreleaser archives |
 | A tag-based version source would surface `pi-v*` tags, which have no Release and no asset | Low | Registry entry must use a release-based version source; docs never promise `pi-v*` resolves |
 | Windows detection untested on a real Windows host (CI is ubuntu-only) | Med | Pure env/path logic, table-driven with `t.Setenv`; no filesystem dependence beyond the containment check |
 | Guard step added to a required check can block unrelated PRs on toolchain bumps | Low | Error message names both files and the exact expected value; fixing drift is a one-line edit |
@@ -105,8 +104,9 @@ Per scope item, each independently revertible:
 
 ## Dependencies
 
-- External aqua-registry and jdx/mise registry PRs for the short-name install
-  form (`mise use -g engram`) to resolve. Tracked outside this repo.
+- External aqua-registry and jdx/mise registry PRs (`aquaproj/aqua-registry#59476`,
+  `jdx/mise#12480`) have both merged and shipped in mise `v2026.9.0`, so
+  `mise use -g engram@latest` now resolves and is the documented command.
 - Existing `.goreleaser.yaml` release assets (all six OS/arch archives).
 
 ## Success Criteria

@@ -41,8 +41,7 @@ Strict TDD note: Phase 1 has no Go test runner target (shell script + config onl
 
 ## Remaining work
 
-- Phase 2 (PR 2): `internal/version/mise.go` mise-managed install detector (RED/GREEN per strict TDD) and `updateInstructions()` guard-clause wiring in `check.go`.
-- Phase 3 (PR 3): `docs/INSTALLATION.md` mise section, Go version fix at line 167, `README.md` pointer.
+None from this branch's side. Phase 2 (`internal/version/mise.go` detector + `check.go` hint wiring) and Phase 3 (`docs/INSTALLATION.md` mise section, Go version fix, `README.md` pointer) are implemented in the independent sibling PRs #791 (`feat/mise-managed-detection`) and #792 (`feat/mise-docs`) per the stacked-to-main strategy.
 
 ## Risks
 

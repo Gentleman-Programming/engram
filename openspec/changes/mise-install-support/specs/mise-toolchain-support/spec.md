@@ -84,7 +84,7 @@ The drift guard MUST run as a step in `ci.yml`'s `unit-tests` job, making it par
 
 ### Requirement: REQ-MISE-005 Update Instructions Reflect Mise-Managed Installs
 
-`updateInstructions()` MUST include the line `mise upgrade engram` when the running binary's path is contained within the resolved mise installs root. Because the short `mise upgrade engram` form only resolves once the tool is registered under the `engram` short name (pending external aqua-registry/jdx-mise registry PRs), the output MAY also include a second line naming the registry-independent form (`mise upgrade github:Gentleman-Programming/engram`) as an alternative. When the running binary is not mise-managed, `updateInstructions()` MUST preserve today's unchanged behavior (Homebrew, `go install`, or fallback instructions by OS).
+`updateInstructions()` MUST include the line `mise upgrade engram` when the running binary's path is contained within the resolved mise installs root. When the running binary is not mise-managed, `updateInstructions()` MUST preserve today's unchanged behavior (Homebrew, `go install`, or fallback instructions by OS).
 
 #### Scenario: Mise-managed binary gets a mise hint
 
