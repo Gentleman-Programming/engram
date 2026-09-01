@@ -4444,7 +4444,8 @@ func (s *Store) ListPendingSyncMutationsAfterSeq(targetKey string, afterSeq int6
 // QuarantineIrreparableSyncMutations explicitly disposes of pending mutations
 // the existing legacy validator proves cannot be repaired from local state.
 // It never acknowledges, rewrites, or deletes a mutation.
-func (s *Store) QuarantineIrreparableSyncMutations(project string, apply bool) (SyncMutationQuarantineReport, error) {
+func (s *Store) QuarantineIrreparableSyncMutations(targetKey, project string, apply bool) (SyncMutationQuarantineReport, error) {
+	targetKey = normalizeSyncTargetKey(targetKey)
 	project, _ = NormalizeProject(project)
 	project = strings.TrimSpace(project)
 	report := SyncMutationQuarantineReport{Project: project, Applied: apply, Actions: []SyncMutationQuarantineAction{}}
@@ -4453,7 +4454,7 @@ func (s *Store) QuarantineIrreparableSyncMutations(project string, apply bool) (
 		quarantinedAny := false
 		query := `SELECT seq, target_key, entity, entity_key, op, payload, source, project, occurred_at, acked_at
 			FROM sync_mutations WHERE target_key = ? AND acked_at IS NULL AND disposition = 'pending'`
-		args := []any{DefaultSyncTargetKey}
+		args := []any{targetKey}
 		if project != "" {
 			query += ` AND project = ?`
 			args = append(args, project)
@@ -4485,7 +4486,7 @@ func (s *Store) QuarantineIrreparableSyncMutations(project string, apply bool) (
 			if !apply {
 				continue
 			}
-			result, err := s.execHook(tx, `UPDATE sync_mutations SET disposition = 'quarantined', disposition_reason = ?, disposition_evidence = ?, disposition_at = datetime('now') WHERE target_key = ? AND seq = ? AND acked_at IS NULL AND disposition = 'pending'`, action.ReasonCode, action.Evidence, DefaultSyncTargetKey, action.Seq)
+			result, err := s.execHook(tx, `UPDATE sync_mutations SET disposition = 'quarantined', disposition_reason = ?, disposition_evidence = ?, disposition_at = datetime('now') WHERE target_key = ? AND seq = ? AND acked_at IS NULL AND disposition = 'pending'`, action.ReasonCode, action.Evidence, targetKey, action.Seq)
 			if err != nil {
 				return err
 			}
@@ -4511,12 +4512,14 @@ func (s *Store) QuarantineIrreparableSyncMutations(project string, apply bool) (
 		if !apply || !quarantinedAny {
 			return nil
 		}
-		if err := s.refreshSyncLifecycleTx(tx, DefaultSyncTargetKey); err != nil {
+		if err := s.refreshSyncLifecycleTx(tx, targetKey); err != nil {
 			return err
 		}
-		for affectedProject := range affectedProjects {
-			if err := s.refreshProjectSyncLifecycleTx(tx, affectedProject); err != nil {
-				return err
+		if targetKey == DefaultSyncTargetKey {
+			for affectedProject := range affectedProjects {
+				if err := s.refreshProjectSyncLifecycleTx(tx, affectedProject); err != nil {
+					return err
+				}
 			}
 		}
 		return nil

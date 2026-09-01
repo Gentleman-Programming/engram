@@ -101,7 +101,7 @@ type enrolledProjectRepairEnsurer interface {
 // irreparableSyncMutationQuarantiner prevents malformed legacy rows from
 // repeatedly reaching transport while preserving their local audit evidence.
 type irreparableSyncMutationQuarantiner interface {
-	QuarantineIrreparableSyncMutations(project string, apply bool) (store.SyncMutationQuarantineReport, error)
+	QuarantineIrreparableSyncMutations(targetKey, project string, apply bool) (store.SyncMutationQuarantineReport, error)
 }
 
 type nonEnrolledPendingError struct {
@@ -505,7 +505,7 @@ func (m *Manager) push(ctx context.Context) error {
 		}
 	}
 	if quarantiner, ok := m.store.(irreparableSyncMutationQuarantiner); ok {
-		report, err := quarantiner.QuarantineIrreparableSyncMutations("", true)
+		report, err := quarantiner.QuarantineIrreparableSyncMutations(m.cfg.TargetKey, "", true)
 		if err != nil {
 			return fmt.Errorf("quarantine irreparable pending mutations: %w", err)
 		}
