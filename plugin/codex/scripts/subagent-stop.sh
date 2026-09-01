@@ -29,7 +29,11 @@ OUTPUT=$(echo "$INPUT" | jq -r '.last_assistant_message // .stdout // empty')
 
 # Nothing to capture if no output
 [ -z "$OUTPUT" ] && { emit_hook_result; exit 0; }
-PROJECT=$(resolve_project "$CWD") || { emit_hook_result; exit 0; }
+PROJECT=$(resolve_project "$CWD") || {
+  printf 'engram: unable to resolve project for cwd %q; skipping passive capture\n' "$CWD" >&2
+  emit_hook_result
+  exit 0
+}
 
 # Post to passive capture — server handles extraction, dedup, and storage
 curl -sf "${ENGRAM_URL}/observations/passive" \
