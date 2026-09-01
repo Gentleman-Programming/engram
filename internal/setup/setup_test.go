@@ -982,6 +982,12 @@ func TestInstallOpenCodeTUIInjectionFailureIsNonFatal(t *testing.T) {
 	if result.Files != 2 {
 		t.Fatalf("expected plugin file + MCP config when TUI injection fails, got %d", result.Files)
 	}
+	if !result.MCPConfigured {
+		t.Fatal("expected successful OpenCode MCP injection to report configuration")
+	}
+	if result.TUIPluginEnabled {
+		t.Fatal("expected failed OpenCode TUI injection to remain disabled")
+	}
 }
 
 func TestInjectOpenCodeMCPPreservesExistingAndIsIdempotent(t *testing.T) {
