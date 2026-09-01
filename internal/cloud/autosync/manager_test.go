@@ -428,6 +428,98 @@ func TestManagerPushIsolatesProjectLocalFailures(t *testing.T) {
 	}
 }
 
+func TestManagerPushSkipsEmptyProjectAndSyncsValidGroups(t *testing.T) {
+	ls := newFakeLocalStore()
+	ls.mutations = []store.SyncMutation{
+		{Seq: 1, Entity: "relation", EntityKey: "legacy", Op: "upsert", Project: ""},
+		{Seq: 2, Entity: "obs", EntityKey: "alpha", Op: "upsert", Project: "alpha"},
+	}
+	tr := newFakeTransport()
+	tr.pushResultByProject = map[string]*PushMutationsResult{
+		"alpha": {AcceptedSeqs: []int64{2}},
+	}
+
+	err := New(ls, tr, DefaultConfig()).push(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "has an empty or padded project and was not sent") {
+		t.Fatalf("expected actionable empty-project error, got %v", err)
+	}
+	if got := attemptedProjects(tr); fmt.Sprint(got) != "[alpha]" {
+		t.Fatalf("expected only alpha to reach transport, got %v", got)
+	}
+	if fmt.Sprint(ls.ackedSeqs) != "[2]" {
+		t.Fatalf("expected only the valid mutation to be acked, got %v", ls.ackedSeqs)
+	}
+}
+
+func TestManagerPushSkipsPaddedProjectAndSyncsValidGroups(t *testing.T) {
+	ls := newFakeLocalStore()
+	ls.mutations = []store.SyncMutation{
+		{Seq: 1, Entity: "relation", EntityKey: "legacy", Op: "upsert", Project: " alpha "},
+		{Seq: 2, Entity: "obs", EntityKey: "alpha", Op: "upsert", Project: "alpha"},
+	}
+	tr := newFakeTransport()
+	tr.pushResultByProject = map[string]*PushMutationsResult{
+		"alpha": {AcceptedSeqs: []int64{2}},
+	}
+
+	err := New(ls, tr, DefaultConfig()).push(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "has an empty or padded project and was not sent") {
+		t.Fatalf("expected actionable padded-project error, got %v", err)
+	}
+	if got := attemptedProjects(tr); fmt.Sprint(got) != "[alpha]" {
+		t.Fatalf("expected only alpha to reach transport, got %v", got)
+	}
+	if fmt.Sprint(ls.ackedSeqs) != "[2]" {
+		t.Fatalf("expected only the valid mutation to be acked, got %v", ls.ackedSeqs)
+	}
+}
+
+func TestManagerPushQuarantinesLegacyPaddedProjectBeforeSendingValidGroups(t *testing.T) {
+	cfg, err := store.DefaultConfig()
+	if err != nil {
+		t.Fatalf("store default config: %v", err)
+	}
+	cfg.DataDir = t.TempDir()
+	local, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer local.Close() //nolint:errcheck
+	if err := local.EnrollProject("alpha"); err != nil {
+		t.Fatalf("enroll alpha: %v", err)
+	}
+	if _, err := local.DB().Exec(`
+		INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project)
+		VALUES
+			('cloud', 'session', 'legacy', 'upsert', '{"id":"legacy","directory":"/tmp/legacy"}', 'local', ' alpha '),
+			('cloud', 'session', 'alpha', 'upsert', '{"id":"alpha","directory":"/tmp/alpha","project":"alpha"}', 'local', 'alpha')
+	`); err != nil {
+		t.Fatalf("seed legacy and valid mutations: %v", err)
+	}
+	var alphaSeq int64
+	if err := local.DB().QueryRow(`SELECT seq FROM sync_mutations WHERE entity_key = 'alpha'`).Scan(&alphaSeq); err != nil {
+		t.Fatalf("read alpha sequence: %v", err)
+	}
+	tr := newFakeTransport()
+	tr.pushResultByProject = map[string]*PushMutationsResult{
+		"alpha": {AcceptedSeqs: []int64{alphaSeq}},
+	}
+
+	if err := New(local, tr, DefaultConfig()).push(context.Background()); err != nil {
+		t.Fatalf("push valid group alongside quarantined legacy row: %v", err)
+	}
+	if got := attemptedProjects(tr); fmt.Sprint(got) != "[alpha]" {
+		t.Fatalf("expected only alpha to reach transport, got %v", got)
+	}
+	var disposition string
+	if err := local.DB().QueryRow(`SELECT disposition FROM sync_mutations WHERE entity_key = 'legacy'`).Scan(&disposition); err != nil {
+		t.Fatalf("read legacy mutation disposition: %v", err)
+	}
+	if disposition != store.SyncMutationDispositionQuarantined {
+		t.Fatalf("expected legacy row to be quarantined, got %q", disposition)
+	}
+}
+
 func TestManagerPushReportsAllProjectLocalFailures(t *testing.T) {
 	ls := newFakeLocalStore()
 	ls.mutations = []store.SyncMutation{
