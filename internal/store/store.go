@@ -6672,36 +6672,31 @@ func (s *Store) enrolledProjectsNeedingBackfill() ([]string, error) {
 	rows, err := s.db.Query(`
 		SELECT ep.project
 		FROM sync_enrolled_projects ep
-		WHERE EXISTS (
-			SELECT 1 FROM sessions x
-			WHERE x.project = ep.project
-			  AND `+sqlSessionIDNotBlank("x.id")+`
+		JOIN (
+			SELECT x.project
+			FROM sessions x
+			WHERE trim(x.id, ?) != ''
 			  AND NOT EXISTS (SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = x.id AND sm.source = ?)
-		)
-		OR EXISTS (
-			SELECT 1 FROM observations x LEFT JOIN sessions xs ON xs.id = x.session_id
-			WHERE (ifnull(x.project, '') = ep.project OR (ifnull(x.project, '') = '' AND ifnull(xs.project, '') = ep.project))
-			  AND x.deleted_at IS NULL
+			UNION
+			SELECT coalesce(nullif(x.project, ''), ifnull(xs.project, ''))
+			FROM observations x LEFT JOIN sessions xs ON xs.id = x.session_id
+			WHERE x.deleted_at IS NULL
 			  AND NOT EXISTS (SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = x.sync_id AND sm.source = ?)
-		)
-		OR EXISTS (
-			SELECT 1 FROM observations x LEFT JOIN sessions xs ON xs.id = x.session_id
-			WHERE (ifnull(x.project, '') = ep.project OR (ifnull(x.project, '') = '' AND ifnull(xs.project, '') = ep.project))
-			  AND x.deleted_at IS NOT NULL
+			UNION
+			SELECT coalesce(nullif(x.project, ''), ifnull(xs.project, ''))
+			FROM observations x LEFT JOIN sessions xs ON xs.id = x.session_id
+			WHERE x.deleted_at IS NOT NULL
 			  AND NOT EXISTS (SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = x.sync_id AND sm.op = ? AND sm.source = ?)
-		)
-		OR EXISTS (
-			SELECT 1 FROM user_prompts x LEFT JOIN sessions xs ON xs.id = x.session_id
-			WHERE (ifnull(x.project, '') = ep.project OR (ifnull(x.project, '') = '' AND ifnull(xs.project, '') = ep.project))
-			  AND NOT EXISTS (SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = x.sync_id AND sm.source = ?)
-		)
-		OR EXISTS (
-			SELECT 1 FROM prompt_tombstones x LEFT JOIN sessions xs ON xs.id = x.session_id
-			WHERE (ifnull(x.project, '') = ep.project OR (ifnull(x.project, '') = '' AND ifnull(xs.project, '') = ep.project))
-			  AND NOT EXISTS (SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = x.sync_id AND sm.source = ? AND sm.op = ?)
-		)
-		OR EXISTS (
-			SELECT 1
+			UNION
+			SELECT coalesce(nullif(x.project, ''), ifnull(xs.project, ''))
+			FROM user_prompts x LEFT JOIN sessions xs ON xs.id = x.session_id
+			WHERE NOT EXISTS (SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = x.sync_id AND sm.source = ?)
+			UNION
+			SELECT coalesce(nullif(x.project, ''), ifnull(xs.project, ''))
+			FROM prompt_tombstones x LEFT JOIN sessions xs ON xs.id = x.session_id
+			WHERE NOT EXISTS (SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = x.sync_id AND sm.source = ? AND sm.op = ?)
+			UNION
+			SELECT coalesce(nullif(src.project, ''), src_s.project, '')
 			FROM memory_relations r
 			JOIN observations src ON src.sync_id = r.source_id AND src.deleted_at IS NULL
 			JOIN observations tgt ON tgt.sync_id = r.target_id AND tgt.deleted_at IS NULL
@@ -6709,9 +6704,8 @@ func (s *Store) enrolledProjectsNeedingBackfill() ([]string, error) {
 			WHERE r.judgment_status NOT IN (?, ?)
 			  AND ifnull(r.marked_by_actor, '') != ''
 			  AND ifnull(r.marked_by_kind, '') != ''
-			  AND coalesce(nullif(src.project, ''), src_s.project, '') = ep.project
 			  AND NOT EXISTS (SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = r.sync_id AND sm.source = ?)
-		)
+		) candidates ON candidates.project = ep.project
 		ORDER BY ep.project ASC`,
 		sqlWhitespaceTrimSet, DefaultSyncTargetKey, SyncEntitySession, SyncSourceLocal,
 		DefaultSyncTargetKey, SyncEntityObservation, SyncSourceLocal,

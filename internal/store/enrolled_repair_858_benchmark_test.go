@@ -14,7 +14,7 @@ func BenchmarkEnrolledProjectRepairDetector(b *testing.B) {
 	}{
 		{name: "E8/O128", enrolled: 8, observations: 128},
 	} {
-		b.Run(dimensions.name+"/set-based", func(b *testing.B) {
+		b.Run(dimensions.name+"/missing-mutations", func(b *testing.B) {
 			s := benchmarkRepairDetectorStore(b, dimensions.enrolled, dimensions.observations)
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
@@ -24,6 +24,30 @@ func BenchmarkEnrolledProjectRepairDetector(b *testing.B) {
 				}
 				if len(projects) != dimensions.enrolled {
 					b.Fatalf("set-based detector found %d projects, want %d", len(projects), dimensions.enrolled)
+				}
+			}
+		})
+
+		b.Run(dimensions.name+"/fully-repaired", func(b *testing.B) {
+			s := benchmarkRepairDetectorStore(b, dimensions.enrolled, dimensions.observations)
+			if err := s.repairEnrolledProjectSyncMutations(); err != nil {
+				b.Fatal(err)
+			}
+			projects, err := s.enrolledProjectsNeedingBackfill()
+			if err != nil {
+				b.Fatal(err)
+			}
+			if len(projects) != 0 {
+				b.Fatalf("fully repaired detector found %d projects, want 0", len(projects))
+			}
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				projects, err := s.enrolledProjectsNeedingBackfill()
+				if err != nil {
+					b.Fatal(err)
+				}
+				if len(projects) != 0 {
+					b.Fatalf("fully repaired detector found %d projects, want 0", len(projects))
 				}
 			}
 		})

@@ -74,3 +74,27 @@ func TestRepairEnrolledProjectSyncMutationsBackfillsPromptTombstoneDelete(t *tes
 		t.Fatalf("expected existing upsert and repaired delete, got upserts=%d deletes=%d", upserts, deletes)
 	}
 }
+
+func TestRepairEnrolledProjectSyncMutationsPropagatesDetectorErrorWithoutWriting(t *testing.T) {
+	s := newTestStoreRaw(t)
+	if _, err := s.db.Exec(`INSERT INTO sync_enrolled_projects (project) VALUES (?)`, "repair-858-error"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO sessions (id, project, directory) VALUES (?, ?, ?)`, "repair-858-error-session", "repair-858-error", "/tmp/repair-858"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`DROP TABLE sync_enrolled_projects`); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.repairEnrolledProjectSyncMutations(); err == nil {
+		t.Fatal("expected enrolled-project detector error")
+	}
+	var mutations int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations`).Scan(&mutations); err != nil {
+		t.Fatal(err)
+	}
+	if mutations != 0 {
+		t.Fatalf("expected no mutation writes after detector failure, got %d", mutations)
+	}
+}
