@@ -101,12 +101,75 @@ func TestSQLiteLockContentionBranches(t *testing.T) {
 
 func TestRegistryLookupAndOrdering(t *testing.T) {
 	codes := RegisteredCodes()
-	want := []string{CheckInvalidSessionIdentity, CheckManualSessionNameProjectMismatch, CheckSessionProjectDirectoryMismatch, CheckSQLiteLockContention, CheckSyncMutationRequiredFields, CheckUnownedSessionProject}
+	want := []string{CheckInvalidSessionIdentity, CheckManualSessionNameProjectMismatch, CheckOrphanedObservationSession, CheckSessionProjectDirectoryMismatch, CheckSQLiteLockContention, CheckSyncMutationRequiredFields, CheckUnownedSessionProject}
 	if strings.Join(codes, ",") != strings.Join(want, ",") {
 		t.Fatalf("RegisteredCodes = %v, want %v", codes, want)
 	}
 	if _, err := DefaultRegistry().Lookup("not_real"); err == nil {
 		t.Fatal("expected invalid check error")
+	}
+}
+
+func TestOrphanedObservationSessionCheckIsOKWhenEveryObservationHasASession(t *testing.T) {
+	s := newDiagnosticTestStore(t)
+	if err := s.CreateSession("present", "engram", "/work/engram"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if _, err := s.AddObservation(store.AddObservationParams{SessionID: "present", Type: "bugfix", Title: "valid", Content: "content", Project: "engram", Scope: "project"}); err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+
+	report, err := NewRunner().RunOne(context.Background(), Scope{Store: s, Project: "engram"}, CheckOrphanedObservationSession)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if report.Status != StatusOK || len(report.Checks) != 1 || len(report.Checks[0].Findings) != 0 {
+		t.Fatalf("report=%+v, want healthy check without findings", report)
+	}
+}
+
+func TestOrphanedObservationSessionCheckReportsGroupedEvidence(t *testing.T) {
+	s := newDiagnosticTestStore(t)
+	seedDiagnosticOrphanedObservation(t, s, "obs-orphan", "missing-session", "engram")
+
+	report, err := NewRunner().RunOne(context.Background(), Scope{Store: s, Project: "engram"}, CheckOrphanedObservationSession)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if report.Status != StatusWarning || len(report.Checks) != 1 || len(report.Checks[0].Findings) != 1 {
+		t.Fatalf("report=%+v, want one warning", report)
+	}
+	check := report.Checks[0]
+	if check.ReasonCode != CheckOrphanedObservationSession || check.Severity != SeverityWarning {
+		t.Fatalf("check=%+v", check)
+	}
+	finding := check.Findings[0]
+	if finding.CheckID != CheckOrphanedObservationSession || finding.ReasonCode != CheckOrphanedObservationSession || finding.Severity != SeverityWarning || !finding.RequiresConfirmation {
+		t.Fatalf("finding=%+v", finding)
+	}
+	var evidence store.OrphanedObservationSessionEvidence
+	if err := json.Unmarshal(finding.Evidence, &evidence); err != nil {
+		t.Fatalf("decode evidence: %v", err)
+	}
+	if evidence.Project != "engram" || evidence.SessionID != "missing-session" || evidence.ObservationCount != 1 {
+		t.Fatalf("evidence=%+v", evidence)
+	}
+	if !strings.Contains(finding.Why, "missing session") || !strings.Contains(finding.SafeNextStep, "cannot be reconstructed") || !strings.Contains(finding.SafeNextStep, "no supported repair") {
+		t.Fatalf("finding guidance=%+v", finding)
+	}
+}
+
+func seedDiagnosticOrphanedObservation(t *testing.T, s *store.Store, syncID, sessionID, project string) {
+	t.Helper()
+	if _, err := s.DB().Exec(`PRAGMA foreign_keys = OFF`); err != nil {
+		t.Fatalf("disable foreign keys: %v", err)
+	}
+	if _, err := s.DB().Exec(`
+		INSERT INTO observations
+			(sync_id, session_id, type, title, content, project, scope, normalized_hash, revision_count, duplicate_count, created_at, updated_at)
+		VALUES (?, ?, 'bugfix', 'orphan', 'content', ?, 'project', ?, 1, 1, datetime('now'), datetime('now'))
+	`, syncID, sessionID, project, syncID); err != nil {
+		t.Fatalf("seed orphaned observation: %v", err)
 	}
 }
 
