@@ -1480,8 +1480,14 @@ func TestManagerPanicSetsBackoff(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.DebounceDuration = 10 * time.Millisecond
 	cfg.PollInterval = 10 * time.Millisecond
-	cfg.BaseBackoff = 10 * time.Millisecond
-	cfg.MaxBackoff = 100 * time.Millisecond
+	// A near-real backoff expires before the polling loop can sample it: the
+	// next poll cycle lands past BackoffUntil, recordSuccess() restores
+	// healthy, and the assertion misses PhaseBackoff entirely on loaded
+	// machines. This test only observes the backoff phase; recovery-after-
+	// backoff belongs to TestManagerLoopContinuesAfterPanic below, which keeps
+	// its own short windows for exactly that behavior.
+	cfg.BaseBackoff = time.Minute
+	cfg.MaxBackoff = time.Minute
 
 	mgr := New(ls, tr, cfg)
 	mgr.transport = &panicOnceTransport{delegate: tr, panicOnce: &panicOnce}
