@@ -982,6 +982,9 @@ func TestMutationPushRejectsEmptyProjectEntries(t *testing.T) {
 	if len(ms.mutations) != 0 {
 		t.Fatalf("expected no mutations stored for empty-project entry, got %d", len(ms.mutations))
 	}
+	if ms.insertCalls != 0 {
+		t.Fatalf("expected no mutation insert calls for empty-project entry, got %d", ms.insertCalls)
+	}
 }
 
 // TestMutationPushRejectsMixedEmptyProjectBatch verifies BR2-1 for batches:

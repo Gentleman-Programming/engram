@@ -153,7 +153,7 @@ all exited 0; the combined affected-cloud suite also exited 0
 - **Safety net:** `go test ./internal/cloud/cloudserver -count=1` — exit 0; the existing cloudserver package passed before the corrective assertion was written.
 - **RED:** After writing `TestMutationPushReportsAllInvalidEntriesWithRepairableEnvelope`, the current admission loop was temporarily constrained from `if !ok` to `if !ok && len(invalid) == 0`. `go test ./internal/cloud/cloudserver -count=1 -run '^TestMutationPushReportsAllInvalidEntriesWithRepairableEnvelope$' -v` — exit 1. Actual failure: `mutations_test.go:1453: invalid details: got [{Index:1 Entity:observation Field:content}], want [{Index:1 Entity:observation Field:content} {Index:3 Entity:prompt Field:session_id}]`.
 - **GREEN:** The intended `if !ok` loop was restored as the minimum implementation. `go test ./internal/cloud/cloudserver -count=1 -run '^TestMutationPushReportsAllInvalidEntriesWithRepairableEnvelope$' -v` — exit 0; the new envelope, indexed details, no acknowledgement, and zero storage calls passed.
-- **TRIANGULATE:** The focused cloudserver command above — exit 0; 2 top-level tests passed, covering observation/prompt canonical fields plus relation-operation and non-object payload failures.
+- **TRIANGULATE:** The focused cloudserver command above — exit 0; 1 top-level test passed: `TestMutationPushReportsAllInvalidEntriesWithRepairableEnvelope`.
 - **REFACTOR:** `gofmt -d internal/cloud/cloudserver/mutations.go internal/cloud/cloudserver/mutations_test.go` — no output. The final mutation-focused suite remained green after formatting review.
 
 #### Task 2.2 — mutation wire error-code compatibility
