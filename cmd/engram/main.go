@@ -202,7 +202,7 @@ func resolveCLIProjectWithDetector(s *store.Store, explicit string, requireKnown
 }
 
 func detectProjectForSync(dir string) project.DetectionResult {
-	return project.DetectionResult{Project: detectProject(dir), Source: project.SourceDirBasename, Path: dir}
+	return detectProjectFull(dir)
 }
 
 type cloudSyncStatus struct {
@@ -2363,7 +2363,12 @@ func cmdProjectsConsolidate(cfg store.Config) {
 		if err != nil {
 			fatal(err)
 		}
-		canonical, _ := store.NormalizeProject(detectProject(cwd))
+		res := detectProjectFull(cwd)
+		if res.Error != nil {
+			fatal(res.Error)
+			return
+		}
+		canonical, _ := store.NormalizeProject(res.Project)
 
 		allNames, err := s.ListProjectNames()
 		if err != nil {

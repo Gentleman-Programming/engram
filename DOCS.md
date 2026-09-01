@@ -207,6 +207,7 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
   - Always returns a success envelope with `{project, project_source, project_path, cwd, available_projects}` plus optional `warning`/`error_hint`
   - Ambiguous cwd is a successful discovery response: `project` is empty, `project_source` is `ambiguous`, `available_projects` lists the candidates, and `error_hint` explains why no project was selected.
   - Other current-project-scoped HTTP routes return `404` for an unknown explicit project, `409` with `{error, code:"ambiguous_project", available_projects, project_source, project_path}` for an ambiguous cwd, and `400` for an invalid selector or configuration.
+  - For automatic Git detection, Engram creates a private versioned binding in the repository's shared Git metadata. It retains the first normalized remote/root label through remote renames, linked worktrees, and repository moves; the binding is not tracked and clones or forks create their own opaque ID. A corrupt or unwritable binding fails closed: configure `.engram/config.json` with the intended project name rather than relying on a renamed remote. Global local/cloud `project_id` propagation and alias migration remain deferred.
 - `POST /projects/rescue-ownership` — Bulk-assign ownership to explicitly selected historical records that carry none. `POST /projects/migrate` is a deprecated compatibility alias routed to the same handler. The JSON body is limited to 8 KiB: `{target_project, confirmed:true, observation_ids?:[], session_ids?:[], prompt_ids?:[]}`.
   - A configured `ENGRAM_HTTP_TOKEN`, matching `Authorization: Bearer <token>`, `target_project`, `confirmed:true`, and at least one positive observation/prompt ID or non-blank session ID are required. Missing server token returns `503`; missing or wrong credentials return `401`; malformed or invalid requests return `400`.
   - This route is a convenience, not the only repair. `engram projects rescue-ownership --project <name> [--session <id>] [--observation <id>] [--prompt <id>]` performs the same operation against the local store and needs no server token, so ownership stays repairable in a zero-config install.
@@ -769,13 +770,15 @@ Engram resolves the project at MCP tool call time. The default source is the **s
 | Case | Condition                                                                                 | Source            | Project                            |
 | ---- | ----------------------------------------------------------------------------------------- | ----------------- | ---------------------------------- |
 | 1    | nearest `.engram/config.json` exists within the enclosing git root, or at cwd outside git | `config`          | `project_name` from config         |
-| 2    | cwd is a git root with `origin` remote                                                    | `git_remote`      | repo name from remote URL          |
-| 3    | cwd is inside a git repo (subdirectory)                                                   | `git_root`        | git root's directory basename      |
+| 2    | cwd is inside a git repo that currently has an `origin` remote                              | `git_remote`      | if the binding is absent, initialize it from the remote repo name; otherwise reuse the stored binding label |
+| 3    | cwd is inside a git repo that currently has no `origin` remote                               | `git_root`        | if the binding is absent, initialize it from the git-root basename; otherwise reuse the stored binding label |
 | 4    | cwd has exactly one git-repo child                                                        | `git_child`       | child repo name (warning included) |
 | 5    | cwd has multiple git-repo children                                                        | `ambiguous` error | — write tools fail fast            |
 | 6    | no git repo near cwd                                                                      | `dir_basename`    | basename of cwd                    |
 
 Child scan constraints: depth=1, max 20 entries, 200ms timeout, skips hidden dirs and noise dirs (`node_modules`, `vendor`, `.venv`, `__pycache__`, `target`, `dist`, `build`, `.idea`, `.vscode`).
+
+The Git binding is private to each clone and shared by that clone's linked worktrees. Independent clones and forks establish fresh opaque bindings. Cross-clone identity sharing and alias propagation are not currently supported.
 
 ### Response envelope
 
@@ -791,6 +794,8 @@ Most successful MCP tool responses use this envelope:
 ```
 
 Error responses include `available_projects` when the error is `ambiguous_project` or `unknown_project`.
+
+When a Git repository binding cannot be read or created, MCP returns `repository_binding_unavailable` with guidance to configure the repository's `.engram/config.json` with the intended canonical project. This is not an ambiguity and does not include ambiguity recovery tokens.
 
 Exceptions:
 
@@ -1133,8 +1138,8 @@ All project names are normalized on write and read: **lowercase**, **trimmed**, 
 MCP tools resolve project names at call time using the shared detection chain:
 
 1. Nearest `.engram/config.json` `project_name` within the enclosing git root, or at cwd outside git
-2. Git remote origin URL (extracts repo name)
-3. Git repository root directory name
+2. Git repository with an `origin` remote: initialize an absent private binding from the normalized repo name, otherwise reuse the stored binding label
+3. Git repository without an `origin` remote: initialize an absent private binding from the normalized root directory name, otherwise reuse the stored binding label
 4. Single git-repo child of cwd
 5. Multiple git-repo children of cwd returns `ambiguous_project` with `available_projects`
 6. Current working directory basename
