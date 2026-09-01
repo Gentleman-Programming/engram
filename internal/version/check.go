@@ -148,6 +148,9 @@ func splitVersion(v string) [3]int {
 
 // updateInstructions returns platform-appropriate update commands.
 func updateInstructions() string {
+	if runningBinaryIsMiseManaged() {
+		return "  mise upgrade engram"
+	}
 	switch runtime.GOOS {
 	case "darwin":
 		return "  brew update && brew upgrade engram"
