@@ -56,13 +56,13 @@ The `GET /sync/mutations/pull` handler MUST filter returned mutations to only th
 
 ### REQ-203: Push enforces project pause
 
-`POST /sync/mutations/push` MUST check whether the target project's sync is paused. If the project is paused (via `cloud_project_controls.sync_enabled = false`), the server MUST respond HTTP 409 with body `{"error": "sync-paused", "project": "<name>"}`. Non-paused projects MUST proceed normally.
+`POST /sync/mutations/push` MUST check whether every authorized project's sync is paused before payload validation. If any project in a mixed-project batch is paused (via `cloud_project_controls.sync_enabled = false`), the server MUST reject the COMPLETE batch with HTTP 409 and `error_code=sync-paused`, without validation payload details, acknowledgements, or storage. Active-only authorized mixed-project batches MUST continue through atomic validation and storage normally.
 
 **Scenarios**:
 
 - **Happy path — non-paused project accepted**: GIVEN `cloud_project_controls` has no row or `sync_enabled = true` for the project, WHEN `POST /sync/mutations/push` is called, THEN HTTP 200.
 - **Paused project rejected**: GIVEN `cloud_project_controls.sync_enabled = false` for the project, WHEN `POST /sync/mutations/push` is called, THEN HTTP 409 with `error: "sync-paused"`.
-- **Edge case — pause applies per project**: GIVEN project "alpha" is paused and project "beta" is active, WHEN entries for both are pushed in one batch, THEN only "alpha" entries are rejected; "beta" entries are accepted.
+- **Edge case — paused project rejects mixed batch**: GIVEN project "alpha" is paused and project "beta" is active, WHEN authorized entries for both are pushed in one batch, THEN the COMPLETE batch is rejected with HTTP 409, with no validation details, acknowledgements, or storage.
 - **Error — admin token still paused**: GIVEN a project is paused, WHEN an admin-authenticated push is attempted, THEN HTTP 409 is still returned (pause is a data policy, not an auth level).
 
 ---
@@ -223,16 +223,19 @@ When the autosync transport receives HTTP 404 from `POST /sync/mutations/push` o
 The mutation payload MUST be a JSON object. If `entity_key` is supplied, it MUST match the canonical identity in the payload; an omitted key MAY be derived from that identity.
 
 #### Scenario: Blank observation content is repairably rejected
+
 - GIVEN an authorized, active-project observation upsert whose `content` is `""`, `"   "`, or whitespace-only
 - WHEN the push is submitted
 - THEN the server responds HTTP 400 with `error_class=repairable` and `error_code=payload_invalid`, before mutation storage
 
 #### Scenario: Other canonical fields are enforced
+
 - GIVEN an active-project upsert missing or blank in turn `session.directory`, `observation.scope`, `prompt.session_id`, or `relation.marked_by_kind`
 - WHEN the push is submitted
 - THEN the server responds HTTP 400 identifying the corresponding canonical field
 
 #### Scenario: Complete relation remains compatible
+
 - GIVEN a relation upsert containing all seven required fields
 - WHEN the push is submitted
 - THEN the server responds HTTP 200 and accepts the relation compatibly
@@ -242,11 +245,13 @@ The mutation payload MUST be a JSON object. If `entity_key` is supplied, it MUST
 Session, observation, and prompt `delete` mutations MUST remain supported and require their delete identity (`session.id`, `observation.sync_id`, or `prompt.sync_id`); upsert-only fields MUST NOT be required for deletes. Relation deletes remain unsupported. Any invalid entry MUST reject the complete batch before mutation storage; the server MUST NOT store a subset, return accepted sequences, or partially persist the batch.
 
 #### Scenario: Valid upserts and deletes are preserved
+
 - GIVEN a batch containing valid session, observation, prompt, and supported delete mutations
 - WHEN the push is submitted
 - THEN the server responds HTTP 200 with an acknowledgement for every stored sequence
 
 #### Scenario: Mixed valid and invalid entries are atomic
+
 - GIVEN a batch with valid entries and one observation upsert with blank `content`
 - WHEN the push is submitted
 - THEN the server responds HTTP 400, makes no mutation-storage call, returns no partial acknowledgement, and persists no entry
@@ -256,16 +261,19 @@ Session, observation, and prompt `delete` mutations MUST remain supported and re
 Validation failures MUST use the JSON error envelope: HTTP 400, `error_class=repairable`, `error_code=payload_invalid`, and `error`. The response MUST include `invalid`, with each offending entry represented by zero-based `index`, `entity`, and canonical `field`; all invalid entries SHOULD be reported. Authentication and project authorization MUST occur before payload-validation details, and pause policy MUST be checked after authorization but before payload validation. A paused authorized project MUST retain HTTP 409 without payload details.
 
 #### Scenario: Structured details identify the offender
+
 - GIVEN invalid entries at indexes 1 and 3 for entities `observation` and `prompt`
 - WHEN the push is submitted to an active project
 - THEN the 400 response includes `invalid` details identifying indexes 1 and 3 and their missing fields
 
 #### Scenario: Authorization and pause precede payload validation
+
 - GIVEN a malformed payload for an unauthorized project, or an invalid payload for an authorized paused project
 - WHEN the push is submitted
 - THEN the first case returns the existing authorization error and the second returns HTTP 409 `sync-paused`; neither exposes payload-validation details
 
 #### Scenario: Valid requests retain existing acknowledgement behavior
+
 - GIVEN an authorized active project and a batch in which every upsert and delete satisfies this contract
 - WHEN the push is submitted
 - THEN the server responds HTTP 200 and acknowledges all entries exactly as before

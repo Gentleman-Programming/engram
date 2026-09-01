@@ -37,15 +37,13 @@ The preflight retains raw bytes and extracts only `entries[*].project`; nested f
 
 ## Interfaces / Contracts
 
-```go
-type MutationValidationIssue struct {
-    Field   string
-    Message string
-}
+    type MutationValidationIssue struct {
+        Field   string
+        Message string
+    }
 
-func ValidateMutationEntry(entity, op, entityKey string,
-    payload json.RawMessage) (MutationValidationIssue, bool)
-```
+    func ValidateMutationEntry(entity, op, entityKey string,
+        payload json.RawMessage) (MutationValidationIssue, bool)
 
 The handler serializes zero-based `{index, entity, field}` details. `error` remains human-readable; `invalid` is machine-repair detail. Relation-delete rejection reports `op`; payload failures report the canonical field.
 

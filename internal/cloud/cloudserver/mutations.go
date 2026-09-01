@@ -116,12 +116,22 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 	for i, rawEntry := range rawReq.Entries {
 		var metadata mutationEntryProject
 		if err := json.Unmarshal(rawEntry, &metadata); err != nil {
-			http.Error(w, fmt.Sprintf("invalid request entry %d: %v", i, err), http.StatusBadRequest)
+			jsonResponse(w, http.StatusBadRequest, map[string]any{
+				"error_class": constants.UpgradeErrorClassRepairable,
+				"error_code":  constants.MutationErrorCodePayloadInvalid,
+				"error":       "invalid mutation entry metadata",
+				"reason_code": "validation_error",
+				"invalid": []map[string]any{{
+					"index":  i,
+					"entity": "mutation",
+					"field":  "project",
+				}},
+			})
 			return
 		}
 		project := strings.TrimSpace(metadata.Project)
 		if project == "" {
-			writeActionableError(w, http.StatusBadRequest, "invalid_request", "empty_project",
+			writeActionableError(w, http.StatusBadRequest, constants.UpgradeErrorClassRepairable, "empty_project",
 				"mutation entries must specify a project")
 			return
 		}
@@ -209,7 +219,17 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 	}
 	for i, rawEntry := range rawReq.Entries {
 		if err := json.Unmarshal(rawEntry, &req.Entries[i]); err != nil {
-			http.Error(w, fmt.Sprintf("invalid request entry %d: %v", i, err), http.StatusBadRequest)
+			jsonResponse(w, http.StatusBadRequest, map[string]any{
+				"error_class": constants.UpgradeErrorClassRepairable,
+				"error_code":  constants.MutationErrorCodePayloadInvalid,
+				"error":       "invalid mutation entry payload",
+				"reason_code": "validation_error",
+				"invalid": []map[string]any{{
+					"index":  i,
+					"entity": "mutation",
+					"field":  "payload",
+				}},
+			})
 			return
 		}
 	}
@@ -351,13 +371,6 @@ func (s *CloudServer) handleMutationPull(w http.ResponseWriter, r *http.Request)
 		"project_source": project.SourceRequestBody,
 		"project_path":   "",
 	})
-}
-
-// validateMutationEntry is retained as the cloudserver-local compatibility
-// helper while the canonical validation rules live in chunkcodec.
-func validateMutationEntry(entry MutationEntry) (string, bool) {
-	issue, ok := chunkcodec.ValidateMutationEntry(entry.Entity, entry.Op, entry.EntityKey, entry.Payload)
-	return issue.Field, ok
 }
 
 // ─── Cloudstore mutation queries ──────────────────────────────────────────────

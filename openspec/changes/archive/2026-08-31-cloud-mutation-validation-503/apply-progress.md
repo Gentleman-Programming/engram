@@ -41,7 +41,7 @@
 | Task | Test File | Layer | Safety Net | RED | GREEN | TRIANGULATE | REFACTOR |
 |---|---|---|---|---|---|---|---|
 | 1.1 | `internal/cloud/chunkcodec/chunkcodec_test.go` | Unit | ✅ Existing package: 7/7 passed before edits | ✅ `go test ./internal/cloud/chunkcodec -count=1 -run 'TestValidateMutationEntry'` failed before production code with undefined `ValidateMutationEntry`/`MutationValidationIssue` | ✅ Contract tests passed after the seam was implemented | ✅ 52 table subcases cover all canonical fields, blank and non-string values, object rules, operations, deletes, relation compatibility, and key mismatch | ✅ Test helpers keep the table deterministic; final package tests and formatting checks passed |
-| 2.1 | `internal/cloud/chunkcodec/chunkcodec_test.go` | Unit | ✅ Existing package: 7/7 passed before production edits | ✅ The same RED contract suite referenced the not-yet-existing exported seam | ✅ `go test ./internal/cloud/chunkcodec -count=1 -run 'TestValidateMutationEntry|TestCanonicalizeForProjectRetainsEncodedMutationPayloadCompatibility'` passed | ✅ Derived identity, typed-field reporting, and encoded chunk-payload compatibility exercise distinct paths beyond canonical valid/invalid cases | ✅ Final implementation is formatted and the full focused package remains green |
+| 2.1 | `internal/cloud/chunkcodec/chunkcodec_test.go` | Unit | ✅ Existing package: 7/7 passed before production edits | ✅ The same RED contract suite referenced the not-yet-existing exported seam | ✅ See fenced command below; exit 0 | ✅ Derived identity, typed-field reporting, and encoded chunk-payload compatibility exercise distinct paths beyond canonical valid/invalid cases | ✅ Final implementation is formatted and the full focused package remains green |
 | 1.2 | `internal/cloud/cloudserver/mutations_test.go` | Integration (`httptest` handler) | ✅ `go test ./internal/cloud/cloudserver -count=1` exited 0 before the corrective test was written | ✅ After writing `TestMutationPushReportsAllInvalidEntriesWithRepairableEnvelope`, a controlled temporary `if !ok && len(invalid) == 0` regression produced an actual failure: the focused command exited 1 because only index 1 was reported instead of indexes 1 and 3 | ✅ Restored the intended `if !ok` admission loop and `go test ./internal/cloud/cloudserver -count=1 -run '^TestMutationPushReportsAllInvalidEntriesWithRepairableEnvelope$' -v` exited 0 | ✅ `TestMutationPushReportsAllInvalidEntriesPreservesInputOrderForOperationAndPayload` added and its focused command exited 0; operation and object failures exercise distinct paths | ✅ `gofmt -d` produced no output and the final mutation-focused command exited 0; the temporary production regression was fully restored |
 | 2.2 | `internal/cloud/constants/constants_test.go` | Unit | ✅ `go test ./internal/cloud/constants -count=1 -v` exited 0 before the corrective assertion was written | ✅ After writing `TestMutationWirePayloadInvalidCodeIsStable`, temporarily removing the existing mutation constant made `go test ./internal/cloud/constants -count=1 -run '^TestMutationWirePayloadInvalidCodeIsStable$' -v` fail at compile time with `undefined: MutationErrorCodePayloadInvalid` (exit 1) | ✅ Restored `MutationErrorCodePayloadInvalid = "payload_invalid"`; the two mutation constant tests exited 0 | ➖ Structural constant contract; triangulation skipped under the strict-TDD exception because there is one exact mutation wire value, while the existing test preserves the chunk code and namespace separation | ✅ `gofmt -d` produced no output and `go test ./internal/cloud/constants -count=1 -v` exited 0 with 2 top-level tests |
 | 2.3 | `internal/cloud/cloudserver/mutations.go` + `mutations_test.go` | Integration (`httptest` handler) | ✅ `go test ./internal/cloud/cloudserver -count=1` exited 0 before the corrective multi-project test was written | ✅ After writing `TestMutationPushChecksAllProjectPoliciesBeforeValidation`, a controlled temporary `if !enabled && false` regression produced an actual failure: the focused command exited 1 with expected 409 but received the validation 400 and `payload_invalid` details | ✅ Restored the intended `if !enabled` pause gate; the focused command exited 0 with HTTP 409 and no validation details | ✅ `TestMutationPushValidatesAuthorizedMultiProjectBatchAtomically` added; after correcting its fixture's expected field, the two-test command exited 0 and covered authorized multi-project atomic rejection | ✅ `gofmt -d` produced no output and the final mutation-focused command exited 0; no temporary production regression remains |
@@ -52,7 +52,7 @@
 ## Test Summary
 
 - **Cumulative tests written:** Work Unit 1 contains 3 codec test functions with 52 table subcases plus 2 compatibility/identity scenarios. Work Unit 2 adds 5 targeted cloudserver tests (including 4 indexed cases and 4 ordering cases), preserves the existing relation/legacy regression fixtures, and adds 1 constants contract test; the resumed run adds exact-one-store-call and chunk-code-preservation assertions. Work Unit 3 adds 4 network cloudserver tests, 1 remote repairable-400 test, and 1 table-driven autosync no-ack test. This corrective run adds 5 scoped regression test functions: 2 cloudserver tests for 1.2, 1 constants test for 2.2, and 2 cloudserver tests for 2.3.
-- **Focused cloudserver result:** `go test ./internal/cloud/cloudserver -count=1 -run '^TestMutationPush(InvalidEntriesReturnIndexedRepairable400|ReportsAllInvalidEntries|ReportsAllInvalidEntriesWithRepairableEnvelope|ReportsAllInvalidEntriesPreservesInputOrderForOperationAndPayload|MixedBatchRejectsAtomically|RejectsRelationDelete|AdmissionOrdering|ChecksAllProjectPoliciesBeforeValidation|ValidatesAuthorizedMultiProjectBatchAtomically)$' -v` exited 0; 9 top-level tests and 8 table subtests passed.
+- **Focused cloudserver result:** `go test ./internal/cloud/cloudserver -count=1 -run '^TestMutationPush(InvalidEntriesReturnIndexedRepairable400|ReportsAllInvalidEntriesWithRepairableEnvelope|ReportsAllInvalidEntriesPreservesInputOrderForOperationAndPayload|MixedBatchRejectsAtomically|RejectsRelationDelete|AdmissionOrdering|ChecksAllProjectPoliciesBeforeValidation|ValidatesAuthorizedMultiProjectBatchAtomically)$' -v` exited 0; 8 top-level tests and 8 table subtests passed; all expected `TestMutationPush` cases executed.
 - **Focused codec result:** `go test ./internal/cloud/chunkcodec -count=1 -run 'TestValidateMutationEntry|TestCanonicalizeForProjectRetainsEncodedMutationPayloadCompatibility' -v` exited 0; the canonical table (52 subcases) and 2 compatibility/identity tests passed.
 - **Focused constants result:** `go test ./internal/cloud/constants -count=1 -v` exited 0; 2 top-level wire-constant tests passed.
 - **Additional suite result:** `go test ./...` exited 0; all discovered packages passed, with only `internal/cloud/syncguidance` reporting no test files.
@@ -76,17 +76,35 @@
 
 | Evidence | Result |
 |---|---|
-| Focused test command and exact result | `go test ./internal/cloud/cloudserver -count=1 -run 'Mutation' -v` — exit 0; every matching cloudserver test and table subtest passed. `go test ./internal/cloud/chunkcodec -count=1 -run 'TestValidateMutationEntry|TestCanonicalizeForProjectRetainsEncodedMutationPayloadCompatibility' -v` — exit 0; the canonical table and 2 compatibility/identity tests passed. `go test ./internal/cloud/constants -count=1 -v` — exit 0; the wire-constant contract passed. |
-| Runtime harness command/scenario and exact result | `go test ./internal/cloud/cloudserver -count=1 -run '^TestMutationPush(InvalidEntriesReturnIndexedRepairable400|ReportsAllInvalidEntries|MixedBatchRejectsAtomically|RejectsRelationDelete|AdmissionOrdering)$' -v` — exit 0; 5 top-level handler-route tests and 8 table subtests passed through `CloudServer.Handler().ServeHTTP` with `httptest.NewRecorder`, covering indexed 400s, all-invalid reporting, atomic rejection/no acknowledgement, relation-delete rejection, and authentication/authorization/pause/validation ordering. Network `httptest.Server` coverage remains with pending task 1.3 and was not implemented in this work unit. |
+| Focused test command and exact result | See fenced commands below; all commands exited 0; every matching cloudserver test and table subtest passed; the canonical table and 2 compatibility/identity tests passed; the wire-constant contract passed. |
+| Runtime harness command/scenario and exact result | See fenced command below; exit 0; 6 top-level handler-route tests and 8 table subtests passed through `CloudServer.Handler().ServeHTTP`, covering indexed 400s, all-invalid reporting, atomic rejection/no acknowledgement, relation-delete rejection, and authentication/authorization/pause/validation ordering. Network `httptest.Server` coverage remains with pending task 1.3 and was not implemented in this work unit. |
 | Rollback boundary | Revert only `internal/cloud/cloudserver/mutations.go`, `internal/cloud/cloudserver/mutations_test.go`, `internal/cloud/cloudserver/principal_auth_test.go`'s canonical fixture update, `internal/cloud/constants/constants.go`, and `internal/cloud/constants/constants_test.go`; this removes the mutation preflight/error contract and its related regressions without reverting the Work Unit 1 codec seam or touching remote, autosync, cloudstore transactions, quarantine, cursor, pull, or historical-repair behavior. |
+
+```text
+go test ./internal/cloud/cloudserver -count=1 -run '^TestMutationPush(InvalidEntriesReturnIndexedRepairable400|ReportsAllInvalidEntriesWithRepairableEnvelope|ReportsAllInvalidEntriesPreservesInputOrderForOperationAndPayload|MixedBatchRejectsAtomically|RejectsRelationDelete|AdmissionOrdering)$' -v
+exit 0; 6 top-level handler-route tests and 8 table subtests passed
+
+go test ./internal/cloud/chunkcodec -count=1 -run 'TestValidateMutationEntry|TestCanonicalizeForProjectRetainsEncodedMutationPayloadCompatibility' -v
+exit 0; canonical table and 2 compatibility/identity tests passed
+
+go test ./internal/cloud/constants -count=1 -v
+exit 0; wire-constant contract passed
+```
 
 ## Work Unit 3 Evidence
 
 | Evidence | Result |
 |---|---|
-| Focused test command and exact result | `go test ./internal/cloud/cloudserver -count=1 -run 'TestMutationPushHTTPServer' -v`, `go test ./internal/cloud/remote -count=1 -run 'TestMutationTransportPush(Repairable400|Accepted)' -v`, and `go test ./internal/cloud/autosync -count=1 -run 'TestManagerPushDoesNotAck(RepairableOrShortPush|WhenTransportFails|WhenAcceptedSeqCountMismatchesBatch)' -v` — all exited 0. The combined affected-cloud suite also exited 0. |
+| Focused test command and exact result | See fenced commands below; all commands exited 0. The combined affected-cloud suite also exited 0. |
 | Runtime harness command/scenario and exact result | The network `httptest.Server` cloudserver suite exited 0 with canonical session/observation/prompt/relation upserts, supported deletes, exact repairable 400, hidden 403/409 details, and mixed-batch no-persistence assertions. The remote suite exercised a real `MutationTransport` against an `httptest.Server`; autosync exercised its manager push path with deterministic fakes. |
 | Rollback boundary | Revert `internal/cloud/cloudserver/mutations_e2e_test.go`, the added remote/autosync regression tests, the test-only contiguous-sequence fixture correction, and the aligned `DOCS.md` paragraph. This removes Work Unit 3 proof and documentation without reverting the Work Unit 1 codec seam or Work Unit 2 server contract. |
+
+```text
+go test ./internal/cloud/cloudserver -count=1 -run 'TestMutationPushHTTPServer' -v
+go test ./internal/cloud/remote -count=1 -run 'TestMutationTransportPush(Repairable400|Accepted)' -v
+go test ./internal/cloud/autosync -count=1 -run 'TestManagerPushDoesNotAck(RepairableOrShortPush|WhenTransportFails|WhenAcceptedSeqCountMismatchesBatch)' -v
+all exited 0; the combined affected-cloud suite also exited 0
+```
 
 ## Deviations and Issues
 
@@ -135,7 +153,7 @@
 - **Safety net:** `go test ./internal/cloud/cloudserver -count=1` — exit 0; the existing cloudserver package passed before the corrective assertion was written.
 - **RED:** After writing `TestMutationPushReportsAllInvalidEntriesWithRepairableEnvelope`, the current admission loop was temporarily constrained from `if !ok` to `if !ok && len(invalid) == 0`. `go test ./internal/cloud/cloudserver -count=1 -run '^TestMutationPushReportsAllInvalidEntriesWithRepairableEnvelope$' -v` — exit 1. Actual failure: `mutations_test.go:1453: invalid details: got [{Index:1 Entity:observation Field:content}], want [{Index:1 Entity:observation Field:content} {Index:3 Entity:prompt Field:session_id}]`.
 - **GREEN:** The intended `if !ok` loop was restored as the minimum implementation. `go test ./internal/cloud/cloudserver -count=1 -run '^TestMutationPushReportsAllInvalidEntriesWithRepairableEnvelope$' -v` — exit 0; the new envelope, indexed details, no acknowledgement, and zero storage calls passed.
-- **TRIANGULATE:** `go test ./internal/cloud/cloudserver -count=1 -run '^TestMutationPushReportsAllInvalidEntries(WithRepairableEnvelope|PreservesInputOrderForOperationAndPayload)$' -v` — exit 0; 2 top-level tests passed, covering observation/prompt canonical fields plus relation-operation and non-object payload failures.
+- **TRIANGULATE:** The focused cloudserver command above — exit 0; 2 top-level tests passed, covering observation/prompt canonical fields plus relation-operation and non-object payload failures.
 - **REFACTOR:** `gofmt -d internal/cloud/cloudserver/mutations.go internal/cloud/cloudserver/mutations_test.go` — no output. The final mutation-focused suite remained green after formatting review.
 
 #### Task 2.2 — mutation wire error-code compatibility
@@ -158,9 +176,14 @@
 
 | Evidence | Required result |
 |---|---|
-| Focused test command and exact result | `go test ./internal/cloud/cloudserver -count=1 -run '^TestMutationPush(InvalidEntriesReturnIndexedRepairable400\|ReportsAllInvalidEntries\|ReportsAllInvalidEntriesWithRepairableEnvelope\|ReportsAllInvalidEntriesPreservesInputOrderForOperationAndPayload\|MixedBatchRejectsAtomically\|RejectsRelationDelete\|AdmissionOrdering\|ChecksAllProjectPoliciesBeforeValidation\|ValidatesAuthorizedMultiProjectBatchAtomically)$' -v` — exit 0; 9 top-level tests and 8 table subtests passed. `go test ./internal/cloud/constants -count=1 -v` — exit 0; 2 top-level tests passed. |
+| Focused test command and exact result | See fenced command below; exit 0; 8 top-level tests and 8 table subtests passed. `go test ./internal/cloud/constants -count=1 -v` — exit 0; 2 top-level tests passed. |
 | Runtime harness command/scenario and exact result | The cloudserver command exercised the real `CloudServer.Handler().ServeHTTP` path with `httptest.NewRecorder` for indexed repairable 400s, all-invalid reporting, atomic no-store/no-ack behavior, relation-delete rejection, authentication/authorization/pause/validation ordering, and authorized multi-project preflight; exit 0. The constants task is structural and has no separate runtime boundary; its unit command exited 0. Work Unit 3 network/remote/autosync tests were not rerun. |
 | Rollback boundary | Remove only the five corrective test functions in `internal/cloud/cloudserver/mutations_test.go`, the corrective test in `internal/cloud/constants/constants_test.go`, and the corrective sections/notes in both SDD artifacts. Restore the pre-run versions of those artifact files if the evidence reconciliation is reverted. Do not revert `internal/cloud/cloudserver/mutations.go`, `internal/cloud/constants/constants.go`, or any Work Unit 1/2/3 implementation: their temporary RED conditions were restored and leave no final candidate change. |
+
+```text
+go test ./internal/cloud/cloudserver -count=1 -run '^TestMutationPush(InvalidEntriesReturnIndexedRepairable400|ReportsAllInvalidEntriesWithRepairableEnvelope|ReportsAllInvalidEntriesPreservesInputOrderForOperationAndPayload|MixedBatchRejectsAtomically|RejectsRelationDelete|AdmissionOrdering|ChecksAllProjectPoliciesBeforeValidation|ValidatesAuthorizedMultiProjectBatchAtomically)$' -v
+exit 0; 8 top-level tests and 8 table subtests passed; all expected TestMutationPush cases executed
+```
 
 ### Corrective Final-State Invariant
 

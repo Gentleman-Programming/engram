@@ -971,6 +971,13 @@ func TestMutationPushRejectsEmptyProjectEntries(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for empty-project entry, got %d body=%q", rec.Code, rec.Body.String())
 	}
+	var response mutationPushValidationResponse
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("decode empty-project response: %v", err)
+	}
+	if response.ErrorClass != constants.UpgradeErrorClassRepairable || response.ErrorCode != "empty_project" {
+		t.Fatalf("expected repairable empty_project response, got %+v", response)
+	}
 	// Ensure nothing was stored
 	if len(ms.mutations) != 0 {
 		t.Fatalf("expected no mutations stored for empty-project entry, got %d", len(ms.mutations))
@@ -1356,52 +1363,6 @@ func TestMutationPushInvalidEntriesReturnIndexedRepairable400(t *testing.T) {
 				t.Fatalf("invalid batch crossed storage boundary: insert_calls=%d mutations=%d", ms.insertCalls, len(ms.mutations))
 			}
 		})
-	}
-}
-
-// TestMutationPushReportsAllInvalidEntries verifies that validation scans the
-// complete authorized batch and preserves input order in the repair details.
-func TestMutationPushReportsAllInvalidEntries(t *testing.T) {
-	ms := newFakeMutationStore()
-	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
-	entries := makeMutationEntries(4, "proj-a")
-	entries[1] = MutationEntry{
-		Project:   "proj-a",
-		Entity:    store.SyncEntityObservation,
-		EntityKey: "obs-invalid",
-		Op:        store.SyncOpUpsert,
-		Payload:   json.RawMessage(`{"sync_id":"obs-invalid","session_id":"session-1","type":"decision","title":"Title","content":"","scope":"project"}`),
-	}
-	entries[3] = MutationEntry{
-		Project:   "proj-a",
-		Entity:    store.SyncEntityPrompt,
-		EntityKey: "prompt-invalid",
-		Op:        store.SyncOpUpsert,
-		Payload:   json.RawMessage(`{"sync_id":"prompt-invalid","session_id":" ","content":"Prompt"}`),
-	}
-
-	rec := performMutationPush(t, srv, entries, "secret")
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d body=%q", rec.Code, rec.Body.String())
-	}
-	var response mutationPushValidationResponse
-	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if len(response.Invalid) != 2 {
-		t.Fatalf("invalid: got %d entries, want 2; response=%q", len(response.Invalid), rec.Body.String())
-	}
-	want := []mutationValidationDetail{
-		{Index: 1, Entity: store.SyncEntityObservation, Field: "content"},
-		{Index: 3, Entity: store.SyncEntityPrompt, Field: "session_id"},
-	}
-	for i, got := range response.Invalid {
-		if got != want[i] {
-			t.Errorf("invalid[%d]: got %+v, want %+v", i, got, want[i])
-		}
-	}
-	if ms.insertCalls != 0 || len(ms.mutations) != 0 {
-		t.Fatalf("all-invalid batch crossed storage boundary: insert_calls=%d mutations=%d", ms.insertCalls, len(ms.mutations))
 	}
 }
 

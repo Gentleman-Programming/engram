@@ -21,7 +21,7 @@ Delivery is tracked by umbrella issue #854; issue #503 is the target. Closed iss
 
 ### Behavior and Compatibility
 
-Canonical required fields apply to supported upserts, including non-blank observation content; deletes retain delete-specific rules. Authorization and pause checks remain ahead of payload details. Existing structured error fields remain compatible; detail is additive.
+Canonical required fields apply to supported upserts, including non-blank observation content; session, observation, and prompt upserts and deletes are distinct operations, while relation upserts are supported and relation deletes are explicitly unsupported. Observation, session, and prompt records use their respective observation/session/prompt upserts and deletes; relation records use relation upserts only. Authorization and pause checks remain ahead of payload details. Existing structured error fields remain compatible; detail is additive.
 
 ## Capabilities
 

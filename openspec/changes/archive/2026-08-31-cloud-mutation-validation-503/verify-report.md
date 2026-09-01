@@ -56,15 +56,31 @@ All nine task checkboxes are `[x]` in `tasks.md`; `apply-progress.md` reports no
 
 The focused runtime evidence was rerun with `-count=1`; the configured full runner also completed successfully. No implementation test or build command failed.
 
+```text
+go test ./internal/cloud/cloudserver -count=1 -run '^TestMutationPush(InvalidEntriesReturnIndexedRepairable400|ReportsAllInvalidEntriesWithRepairableEnvelope|ReportsAllInvalidEntriesPreservesInputOrderForOperationAndPayload|MixedBatchRejectsAtomically|RejectsRelationDelete|AdmissionOrdering|ChecksAllProjectPoliciesBeforeValidation|ValidatesAuthorizedMultiProjectBatchAtomically)$' -v
+exit 0; eight top-level tests and eight table subtests passed; all expected TestMutationPush cases executed
+```
+
 ### Targeted Runtime Evidence
 
 | Boundary | Exact command | Exit | Output hash | Runtime result |
 |---|---|---:|---|---|
-| Canonical codec seam | `go test ./internal/cloud/chunkcodec -count=1 -run 'TestValidateMutationEntry|TestCanonicalizeForProjectRetainsEncodedMutationPayloadCompatibility' -v` | 0 | `sha256:9c9f7ba0ae4c946b10f352c7b31df3c59ca9e7e9c6ecefbfe49e694e7516352e` | 52 canonical table subcases plus derived-key and encoded-chunk compatibility tests passed |
-| Handler admission | `go test ./internal/cloud/cloudserver -count=1 -run '^TestMutationPush(InvalidEntriesReturnIndexedRepairable400|ReportsAllInvalidEntries|ReportsAllInvalidEntriesWithRepairableEnvelope|ReportsAllInvalidEntriesPreservesInputOrderForOperationAndPayload|MixedBatchRejectsAtomically|RejectsRelationDelete|AdmissionOrdering|ChecksAllProjectPoliciesBeforeValidation|ValidatesAuthorizedMultiProjectBatchAtomically)$' -v` | 0 | `sha256:49f326b07419f22d0cd54c8fa425ba17125cc772122173af608b987ff807e591` | Nine top-level tests and eight table subtests passed through `CloudServer.Handler().ServeHTTP` |
+| Canonical codec seam | See fenced command below | 0 | `sha256:9c9f7ba0ae4c946b10f352c7b31df3c59ca9e7e9c6ecefbfe49e694e7516352e` | 52 canonical table subcases plus derived-key and encoded-chunk compatibility tests passed |
+| Handler admission | See fenced command below | 0 | `sha256:49f326b07419f22d0cd54c8fa425ba17125cc772122173af608b987ff807e591` | Eight top-level tests and eight table subtests passed through `CloudServer.Handler().ServeHTTP`; all expected `TestMutationPush` cases executed |
 | Network HTTP route | `go test ./internal/cloud/cloudserver -count=1 -run '^TestMutationPushHTTPServer' -v` | 0 | `sha256:fddf8ddf9453ddba05c451ea0d3d8c8a14446fdede40630e33dc377c538bb4af` | Four network tests, including policy subcases, passed against `httptest.Server` |
-| Remote transport | `go test ./internal/cloud/remote -count=1 -run '^TestMutationTransportPush(Accepted|Repairable400PreservesStructuredStatus)$' -v` | 0 | `sha256:4296f90b73aaa2fc97060890e45823bc21b3a69996f5008d72e29fc31394bd02` | Accepted sequences and structured repairable 400 parsing passed |
-| Autosync acknowledgement safety | `go test ./internal/cloud/autosync -count=1 -run '^TestManagerPushDoesNotAck(RepairableOrShortPush|WhenTransportFails|WhenAcceptedSeqCountMismatchesBatch)$' -v` | 0 | `sha256:6851e2a884745df5a491e2ba4c6d32619d5e1ba7b6293ec1e7590897b560a2c23f` | Failed, short, empty, long, and nil acknowledgement cases passed without local ack |
+| Remote transport | See fenced command below | 0 | `sha256:4296f90b73aaa2fc97060890e45823bc21b3a69996f5008d72e29fc31394bd02` | Accepted sequences and structured repairable 400 parsing passed |
+| Autosync acknowledgement safety | See fenced command below | 0 | `sha256:6851e2a884745df5a491e2ba4c6d32619d5e1ba7b6293ec1e7590897b560a2c23f` | Failed, short, empty, long, and nil acknowledgement cases passed without local ack |
+
+```text
+go test ./internal/cloud/chunkcodec -count=1 -run 'TestValidateMutationEntry|TestCanonicalizeForProjectRetainsEncodedMutationPayloadCompatibility' -v
+exit 0; 52 canonical table subcases plus derived-key and encoded-chunk compatibility tests passed
+
+go test ./internal/cloud/remote -count=1 -run '^TestMutationTransportPush(Accepted|Repairable400PreservesStructuredStatus)$' -v
+exit 0; accepted sequences and structured repairable 400 parsing passed
+
+go test ./internal/cloud/autosync -count=1 -run '^TestManagerPushDoesNotAck(RepairableOrShortPush|WhenTransportFails|WhenAcceptedSeqCountMismatchesBatch)$' -v
+exit 0; failed, short, empty, long, and nil acknowledgement cases passed without local ack
+```
 
 ### Coverage
 
@@ -185,8 +201,8 @@ codegraph=unavailable:codegraph executable missing from PATH
 
 - **status**: success
 - **executive_summary**: Strict TDD verification passed all nine tasks and all eight REQ-215/216/217 scenarios against current runtime tests. The final verdict is PASS WITH WARNINGS solely for pre-existing repository vet/format findings, unavailable CodeGraph tooling, and informational coverage context.
-- **artifacts**: `openspec/changes/cloud-mutation-validation-503/verify-report.md`; Engram topic `sdd/cloud-mutation-validation-503/verify-report`
-- **next_recommended**: archive
+- **artifacts**: `openspec/changes/archive/2026-08-31-cloud-mutation-validation-503/verify-report.md`; Engram topic `sdd/cloud-mutation-validation-503/verify-report`
+- **next_recommended**: pending PR issue-link action
 - **risks**: Pre-existing `go vet ./...` and `gofmt -l .` findings; CodeGraph executable unavailable; no implementation blocker.
 - **skill_resolution**: paths-injected — all requested SDD, strict-TDD, architecture, business-rule, API, testing, structure, docs, cultural, Go-testing, and work-unit guidance files were read directly; repository-local skill aliases were unavailable through the dynamic loader, so injected paths were used.
 - **final_verdict**: PASS WITH WARNINGS
