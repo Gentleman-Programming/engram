@@ -17,6 +17,7 @@
 
 ENGRAM_PORT="${ENGRAM_PORT:-7437}"
 ENGRAM_URL="http://127.0.0.1:${ENGRAM_PORT}"
+ENGRAM_HOOK_MAX_TIME="${ENGRAM_HOOK_MAX_TIME:-0.2}"
 
 # Windows Git Bash/MSYS2 can fail while forking helper processes under
 # enterprise Defender/EDR, which makes Claude Code wait on prompt submission.
@@ -40,19 +41,21 @@ set_json_string_value() {
   fi
 }
 
-sanitize_session_key_part() {
+session_state_key_part() {
   local raw="$1"
-  local safe=""
-  local i char
+  local encoded="sid-"
+  local i char byte
+  local LC_ALL=C
+  if [[ "$raw" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]]; then
+    JSON_VALUE="$raw"
+    return 0
+  fi
   for (( i=0; i<${#raw}; i++ )); do
     char="${raw:i:1}"
-    if [[ "$char" =~ [a-zA-Z0-9_-] ]]; then
-      safe+="$char"
-    else
-      safe+="_"
-    fi
+    printf -v byte '%02X' "'$char"
+    encoded+="$byte"
   done
-  JSON_VALUE="$safe"
+  JSON_VALUE="$encoded"
 }
 
 print_toolsearch_message() {
@@ -63,7 +66,8 @@ json_string_value_without_jq() {
   local key="$1"
   local json="$2"
   local pattern='"'"$key"'"[[:space:]]*:[[:space:]]*"(([^"\\]|\\.)*)"'
-  local raw i char escaped value=""
+  local raw i char escaped hex codepoint low_hex low_surrogate value=""
+  local LC_ALL=C
   JSON_VALUE=""
   [[ "$json" =~ $pattern ]] || return 1
   raw="${BASH_REMATCH[1]}"
@@ -83,15 +87,60 @@ json_string_value_without_jq() {
       n) value+=$'\n' ;;
       r) value+=$'\r' ;;
       t) value+=$'\t' ;;
+      u)
+        hex="${raw:i+1:4}"
+        [[ "$hex" =~ ^[0-9A-Fa-f]{4}$ ]] || return 1
+        codepoint=$(( 16#$hex ))
+        i=$(( i + 4 ))
+        if [ "$codepoint" -ge 55296 ] && [ "$codepoint" -le 56319 ]; then
+          [ "${raw:i+1:2}" = $'\\u' ] || return 1
+          low_hex="${raw:i+3:4}"
+          [[ "$low_hex" =~ ^[0-9A-Fa-f]{4}$ ]] || return 1
+          low_surrogate=$(( 16#$low_hex ))
+          [ "$low_surrogate" -ge 56320 ] && [ "$low_surrogate" -le 57343 ] || return 1
+          codepoint=$(( 65536 + (codepoint - 55296) * 1024 + low_surrogate - 56320 ))
+          i=$(( i + 6 ))
+        elif [ "$codepoint" -ge 56320 ] && [ "$codepoint" -le 57343 ]; then
+          return 1
+        fi
+        utf8_from_codepoint_without_jq "$codepoint" || return 1
+        value+="$JSON_VALUE"
+        ;;
       *) return 1 ;;
     esac
   done
   JSON_VALUE="$value"
 }
 
+utf8_from_codepoint_without_jq() {
+  local codepoint="$1"
+  local byte1 byte2 byte3 byte4
+  [ "$codepoint" -gt 0 ] && [ "$codepoint" -le 1114111 ] || return 1
+  if [ "$codepoint" -le 127 ]; then
+    printf -v byte1 '%03o' "$codepoint"
+    printf -v JSON_VALUE '%b' "\\0${byte1}"
+  elif [ "$codepoint" -le 2047 ]; then
+    printf -v byte1 '%03o' "$(( 192 | (codepoint >> 6) ))"
+    printf -v byte2 '%03o' "$(( 128 | (codepoint & 63) ))"
+    printf -v JSON_VALUE '%b' "\\0${byte1}\\0${byte2}"
+  elif [ "$codepoint" -le 65535 ]; then
+    printf -v byte1 '%03o' "$(( 224 | (codepoint >> 12) ))"
+    printf -v byte2 '%03o' "$(( 128 | ((codepoint >> 6) & 63) ))"
+    printf -v byte3 '%03o' "$(( 128 | (codepoint & 63) ))"
+    printf -v JSON_VALUE '%b' "\\0${byte1}\\0${byte2}\\0${byte3}"
+  else
+    printf -v byte1 '%03o' "$(( 240 | (codepoint >> 18) ))"
+    printf -v byte2 '%03o' "$(( 128 | ((codepoint >> 12) & 63) ))"
+    printf -v byte3 '%03o' "$(( 128 | ((codepoint >> 6) & 63) ))"
+    printf -v byte4 '%03o' "$(( 128 | (codepoint & 63) ))"
+    printf -v JSON_VALUE '%b' "\\0${byte1}\\0${byte2}\\0${byte3}\\0${byte4}"
+  fi
+}
+
 json_escape_without_jq() {
   local raw="$1"
-  local i char value=""
+  local i char byte byte2 byte3 byte4 codepoint escaped value=""
+  local LC_ALL=C
   for (( i=0; i<${#raw}; i++ )); do
     char="${raw:i:1}"
     case "$char" in
@@ -102,7 +151,58 @@ json_escape_without_jq() {
       $'\n') value+='\n' ;;
       $'\r') value+='\r' ;;
       $'\t') value+='\t' ;;
-      *) value+="$char" ;;
+      *)
+        printf -v byte '%d' "'$char"
+        if [ "$byte" -ge 1 ] && [ "$byte" -le 31 ]; then
+          printf -v escaped '\\u%04x' "$byte"
+          value+="$escaped"
+        elif [ "$byte" -ge 128 ]; then
+          codepoint=""
+          if [ "$byte" -ge 194 ] && [ "$byte" -le 223 ] && [ "$(( i + 1 ))" -lt "${#raw}" ]; then
+            printf -v byte2 '%d' "'${raw:i+1:1}"
+            if [ "$byte2" -ge 128 ] && [ "$byte2" -le 191 ]; then
+              codepoint=$(( ((byte & 31) << 6) | (byte2 & 63) ))
+              i=$(( i + 1 ))
+            fi
+          elif [ "$byte" -ge 224 ] && [ "$byte" -le 239 ] && [ "$(( i + 2 ))" -lt "${#raw}" ]; then
+            printf -v byte2 '%d' "'${raw:i+1:1}"
+            printf -v byte3 '%d' "'${raw:i+2:1}"
+            if [ "$byte2" -ge 128 ] && [ "$byte2" -le 191 ] && [ "$byte3" -ge 128 ] && [ "$byte3" -le 191 ]; then
+              codepoint=$(( ((byte & 15) << 12) | ((byte2 & 63) << 6) | (byte3 & 63) ))
+              if [ "$codepoint" -ge 2048 ] && { [ "$codepoint" -lt 55296 ] || [ "$codepoint" -gt 57343 ]; }; then
+                i=$(( i + 2 ))
+              else
+                codepoint=""
+              fi
+            fi
+          elif [ "$byte" -ge 240 ] && [ "$byte" -le 244 ] && [ "$(( i + 3 ))" -lt "${#raw}" ]; then
+            printf -v byte2 '%d' "'${raw:i+1:1}"
+            printf -v byte3 '%d' "'${raw:i+2:1}"
+            printf -v byte4 '%d' "'${raw:i+3:1}"
+            if [ "$byte2" -ge 128 ] && [ "$byte2" -le 191 ] && [ "$byte3" -ge 128 ] && [ "$byte3" -le 191 ] && [ "$byte4" -ge 128 ] && [ "$byte4" -le 191 ]; then
+              codepoint=$(( ((byte & 7) << 18) | ((byte2 & 63) << 12) | ((byte3 & 63) << 6) | (byte4 & 63) ))
+              if [ "$codepoint" -ge 65536 ] && [ "$codepoint" -le 1114111 ]; then
+                i=$(( i + 3 ))
+              else
+                codepoint=""
+              fi
+            fi
+          fi
+          if [ -n "$codepoint" ]; then
+            if [ "$codepoint" -le 65535 ]; then
+              printf -v escaped '\\u%04x' "$codepoint"
+            else
+              printf -v escaped '\\u%04x\\u%04x' "$(( 55296 + ((codepoint - 65536) >> 10) ))" "$(( 56320 + ((codepoint - 65536) & 1023) ))"
+            fi
+            value+="$escaped"
+          else
+            printf -v escaped '\\u00%02x' "$byte"
+            value+="$escaped"
+          fi
+        else
+          value+="$char"
+        fi
+        ;;
     esac
   done
   JSON_VALUE="$value"
@@ -169,7 +269,7 @@ user_prompt_submit_without_jq() {
   fi
 
   if [ -n "$session_id" ]; then
-    sanitize_session_key_part "$session_id"
+    session_state_key_part "$session_id"
     session_key="engram-claude-${JSON_VALUE}-tools-loaded"
   else
     session_key="engram-claude-unknown-$$-tools-loaded"
@@ -189,7 +289,7 @@ user_prompt_submit_without_jq() {
   }
 
   if [ -n "$session_id" ]; then
-    session_start=$(curl -sf "${ENGRAM_URL}/sessions/${session_id}" --max-time 0.2 2>/dev/null)
+    session_start=$(curl -sf "${ENGRAM_URL}/sessions/${session_id}" --max-time "$ENGRAM_HOOK_MAX_TIME" 2>/dev/null)
     json_string_value_without_jq "started_at" "$session_start" && session_start="$JSON_VALUE" || session_start=""
   fi
   if [ -n "$session_start" ]; then
@@ -202,7 +302,7 @@ user_prompt_submit_without_jq() {
 
   url_encode_without_jq "$project"
   encoded_project="$JSON_VALUE"
-  last_save_json=$(curl -sf "${ENGRAM_URL}/observations?project=${encoded_project}&limit=1&sort=created_at:desc" --max-time 0.2 2>/dev/null)
+  last_save_json=$(curl -sf "${ENGRAM_URL}/observations?project=${encoded_project}&limit=1&sort=created_at:desc" --max-time "$ENGRAM_HOOK_MAX_TIME" 2>/dev/null)
   json_string_value_without_jq "created_at" "$last_save_json" && last_save_at="$JSON_VALUE" || last_save_at=""
   [ -n "$last_save_at" ] || { printf '%s\n' '{}'; return 0; }
   last_epoch=$(parse_epoch "$last_save_at")
@@ -237,7 +337,7 @@ if is_windows_bash && [ "${ENGRAM_CLAUDE_WINDOWS_BASH_SAFE_MODE:-auto}" != "0" ]
   set_json_string_value "session_id" "$INPUT"
   SESSION_ID="$JSON_VALUE"
   if [ -n "$SESSION_ID" ]; then
-    sanitize_session_key_part "$SESSION_ID"
+    session_state_key_part "$SESSION_ID"
     SESSION_KEY="engram-claude-${JSON_VALUE}-tools-loaded"
   else
     SESSION_KEY="engram-claude-windows-$$-tools-loaded"
@@ -335,17 +435,18 @@ OUTPUT="{}"
 # FIRST-MESSAGE DETECTION
 #
 # Use a state file per session to determine if this is the first user message.
-# State file lives in /tmp and is keyed by session_id (falls back to project+pid).
+# State file lives in TMPDIR (or /tmp) and is keyed by session_id (falls back to project+pid).
 # ──────────────────────────────────────────────────────────────────────────────
 
 # Build a stable session key — prefer SESSION_ID, then a process-local fallback.
 if [ -n "$SESSION_ID" ]; then
-  SESSION_KEY="engram-claude-${SESSION_ID}-tools-loaded"
+  session_state_key_part "$SESSION_ID"
+  SESSION_KEY="engram-claude-${JSON_VALUE}-tools-loaded"
 else
   SESSION_KEY="engram-claude-unknown-$$-tools-loaded"
 fi
 
-STATE_FILE="/tmp/${SESSION_KEY}"
+STATE_FILE="${TMPDIR:-/tmp}/${SESSION_KEY}"
 
 if [ ! -f "$STATE_FILE" ]; then
   # ── FIRST MESSAGE ────────────────────────────────────────────────────────────
@@ -375,7 +476,7 @@ fi
 # Get session start time to check if session is > 5 minutes old
 SESSION_START=""
 if [ -n "$SESSION_ID" ]; then
-  SESSION_START=$(curl -sf "${ENGRAM_URL}/sessions/${SESSION_ID}" --max-time 0.2 2>/dev/null \
+  SESSION_START=$(curl -sf "${ENGRAM_URL}/sessions/${SESSION_ID}" --max-time "$ENGRAM_HOOK_MAX_TIME" 2>/dev/null \
     | jq -r '.started_at // empty' 2>/dev/null)
 fi
 
@@ -400,7 +501,7 @@ fi
 ENCODED_PROJECT=$(printf '%s' "$PROJECT" | jq -sRr @uri)
 LAST_SAVE_JSON=$(curl -sf \
   "${ENGRAM_URL}/observations?project=${ENCODED_PROJECT}&limit=1&sort=created_at:desc" \
-  --max-time 0.2 2>/dev/null)
+  --max-time "$ENGRAM_HOOK_MAX_TIME" 2>/dev/null)
 
 if [ -z "$LAST_SAVE_JSON" ]; then
   # Server not responding or slow — fail silently, no nudge

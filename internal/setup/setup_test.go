@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -2465,19 +2466,49 @@ func TestClaudeCodeUserPromptHookHasWindowsGitBashSafePath(t *testing.T) {
 	}
 }
 
-func TestClaudeCodeUserPromptHookSanitizesWindowsSafeSessionKey(t *testing.T) {
+func TestClaudeCodeUserPromptHookUsesCollisionResistantWindowsSafeSessionKey(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "plugin", "claude-code", "scripts", "user-prompt-submit.sh"))
 	if err != nil {
 		t.Fatalf("read user prompt hook: %v", err)
 	}
 	text := string(data)
+	helperStart := strings.Index(text, "session_state_key_part()")
+	if helperStart < 0 {
+		t.Fatal("user prompt hook missing session state-key helper")
+	}
+	helperEnd := strings.Index(text[helperStart:], "print_toolsearch_message()")
+	if helperEnd < 0 {
+		t.Fatal("user prompt hook missing session state-key helper boundary")
+	}
+	helper := text[helperStart : helperStart+helperEnd]
 	for _, want := range []string{
-		"sanitize_session_key_part()",
-		"[[ \"$char\" =~ [a-zA-Z0-9_-] ]]",
-		"SESSION_KEY=\"engram-claude-${JSON_VALUE}-tools-loaded\"",
+		`local encoded="sid-"`,
+		`^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$`,
+		`printf -v byte '%02X' "'$char"`,
 	} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("user prompt hook missing Windows session key sanitization fragment %q", want)
+		if !strings.Contains(helper, want) {
+			t.Fatalf("session state-key helper missing collision-resistant fragment %q", want)
+		}
+	}
+	if strings.Contains(text, "sanitize_session_key_part") {
+		t.Fatal("user prompt hook still references the removed lossy session-key sanitizer")
+	}
+
+	safePath := strings.Index(text, "if is_windows_bash &&")
+	if safePath < 0 {
+		t.Fatal("user prompt hook missing Windows Git Bash safe path")
+	}
+	blockEnd := strings.Index(text[safePath:], "# Load shared helpers after the Windows-safe fast path")
+	if blockEnd < 0 {
+		t.Fatal("user prompt hook missing Windows Git Bash safe path boundary")
+	}
+	windowsSafePath := text[safePath : safePath+blockEnd]
+	for _, want := range []string{
+		`session_state_key_part "$SESSION_ID"`,
+		`SESSION_KEY="engram-claude-${JSON_VALUE}-tools-loaded"`,
+	} {
+		if !strings.Contains(windowsSafePath, want) {
+			t.Fatalf("Windows-safe path does not build its state key through the collision-resistant helper: %q", want)
 		}
 	}
 }
@@ -2489,15 +2520,40 @@ func TestClaudeCodeUserPromptHookWithoutJQPreservesSessionStateAndNudge(t *testi
 
 	bashPath, pathDirs := isolatedHookPath(t)
 
+	type promptPayload struct {
+		SessionID string `json:"session_id"`
+		Project   string `json:"project"`
+		Content   string `json:"content"`
+	}
+	type capturedPrompt struct {
+		payload promptPayload
+		err     error
+	}
+	projectCWDs := make(chan string, 16)
+	observationProjects := make(chan string, 16)
+	prompts := make(chan capturedPrompt, 8)
+	const cwd = "/workspace with space/mañana"
+	const project = "hook test/mañana"
+	const expectedPrompt = "quote \" slash \\ newline\nbmp Ω pair 😃 esc \x1b"
+	input := `{"cwd":"/workspace with space/mañana","session_id":"session-677","prompt":"quote \" slash \\ newline\nbmp \u03a9 pair \uD83D\uDE03 esc \u001b"}`
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/project/current":
-			_, _ = w.Write([]byte(`{"project":"hook-test","project_source":"config"}`))
+			projectCWDs <- r.URL.Query().Get("cwd")
+			_, _ = w.Write([]byte(`{"project":"hook test/mañana","project_source":"config"}`))
 		case "/sessions/session-677":
 			_, _ = w.Write([]byte(`{"started_at":"2000-01-01T00:00:00Z"}`))
 		case "/observations":
+			observationProjects <- r.URL.Query().Get("project")
 			_, _ = w.Write([]byte(`[{"created_at":"2000-01-01T00:00:00Z"}]`))
 		case "/prompts":
+			body, err := io.ReadAll(r.Body)
+			var payload promptPayload
+			if err == nil {
+				err = json.Unmarshal(body, &payload)
+			}
+			prompts <- capturedPrompt{payload: payload, err: err}
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			http.NotFound(w, r)
@@ -2514,18 +2570,18 @@ func TestClaudeCodeUserPromptHookWithoutJQPreservesSessionStateAndNudge(t *testi
 		t.Fatalf("resolve user prompt hook path: %v", err)
 	}
 	stateDir := t.TempDir()
-	input := `{"cwd":"/workspace","session_id":"session-677","prompt":"remember this"}`
-	env := withoutEnv(os.Environ(), "PATH", "TMPDIR", "ENGRAM_PORT", "ENGRAM_CLAUDE_WINDOWS_BASH_SAFE_MODE")
+	env := withoutEnv(os.Environ(), "PATH", "TMPDIR", "ENGRAM_PORT", "ENGRAM_CLAUDE_WINDOWS_BASH_SAFE_MODE", "ENGRAM_HOOK_MAX_TIME")
 	env = append(env,
 		"PATH="+strings.Join(pathDirs, string(os.PathListSeparator)),
 		"TMPDIR="+stateDir,
 		"ENGRAM_PORT="+serverURL.Port(),
 		"ENGRAM_CLAUDE_WINDOWS_BASH_SAFE_MODE=0",
+		"ENGRAM_HOOK_MAX_TIME=1",
 	)
 
-	runHook := func() (string, string) {
+	runHook := func(input string, env []string) (string, string) {
 		t.Helper()
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, bashPath, scriptPath)
 		cmd.Env = env
@@ -2534,10 +2590,14 @@ func TestClaudeCodeUserPromptHookWithoutJQPreservesSessionStateAndNudge(t *testi
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
-			t.Fatalf("run user prompt hook without jq: %v\nstderr: %s", err, stderr.String())
-		}
-		if ctx.Err() != nil {
-			t.Fatalf("user prompt hook timed out: %v", ctx.Err())
+			stderrText := stderr.String()
+			if len(stderrText) > 4096 {
+				stderrText = stderrText[:4096] + "…"
+			}
+			if ctx.Err() != nil {
+				t.Fatalf("user prompt hook timed out: %v\nstderr: %s", ctx.Err(), stderrText)
+			}
+			t.Fatalf("run user prompt hook without jq: %v\nstderr: %s", err, stderrText)
 		}
 		if strings.Contains(stderr.String(), "jq:") {
 			t.Fatalf("user prompt hook invoked jq without jq on PATH: %s", stderr.String())
@@ -2549,17 +2609,17 @@ func TestClaudeCodeUserPromptHookWithoutJQPreservesSessionStateAndNudge(t *testi
 		return stdout.String(), stderr.String()
 	}
 
-	firstOutput, _ := runHook()
+	firstOutput, _ := runHook(input, env)
 	if !strings.Contains(firstOutput, "CRITICAL FIRST ACTION") {
 		t.Fatalf("first hook invocation = %q, want bootstrap response", firstOutput)
 	}
 
-	secondOutput, secondStderr := runHook()
+	secondOutput, secondStderr := runHook(input, env)
 	if !strings.Contains(secondOutput, "MEMORY REMINDER") {
 		t.Fatalf("second hook invocation = %q, want save nudge; stderr: %s", secondOutput, secondStderr)
 	}
 
-	thirdOutput, _ := runHook()
+	thirdOutput, _ := runHook(input, env)
 	if strings.Contains(thirdOutput, "MEMORY REMINDER") || strings.Contains(thirdOutput, "CRITICAL FIRST ACTION") {
 		t.Fatalf("third hook invocation = %q, want cooldown response", thirdOutput)
 	}
@@ -2570,6 +2630,76 @@ func TestClaudeCodeUserPromptHookWithoutJQPreservesSessionStateAndNudge(t *testi
 	}
 	if len(stateFiles) != 2 {
 		t.Fatalf("hook state files = %v, want one session and one cooldown file", stateFiles)
+	}
+
+	for range 3 {
+		select {
+		case captured := <-prompts:
+			if captured.err != nil {
+				t.Fatalf("decode prompt POST body: %v", captured.err)
+			}
+			if captured.payload != (promptPayload{SessionID: "session-677", Project: project, Content: expectedPrompt}) {
+				t.Fatalf("prompt POST payload = %#v, want %#v", captured.payload, promptPayload{SessionID: "session-677", Project: project, Content: expectedPrompt})
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for prompt POST")
+		}
+	}
+	for range 5 {
+		select {
+		case got := <-projectCWDs:
+			if got != cwd {
+				t.Fatalf("/project/current cwd = %q, want %q", got, cwd)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for /project/current request")
+		}
+	}
+	for range 2 {
+		select {
+		case got := <-observationProjects:
+			if got != project {
+				t.Fatalf("/observations project = %q, want %q", got, project)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for /observations request")
+		}
+	}
+
+	negativeStateDir := t.TempDir()
+	negativeEnv := withoutEnv(env, "TMPDIR")
+	negativeEnv = append(negativeEnv, "TMPDIR="+negativeStateDir)
+	for index, escapedPrompt := range []string{
+		`\u12G4`,
+		`\uD800`,
+		`\uDC00`,
+		`\u0000`,
+	} {
+		negativeInput := fmt.Sprintf(`{"cwd":"%s","session_id":"negative-%d","prompt":"invalid %s"}`, cwd, index, escapedPrompt)
+		runHook(negativeInput, negativeEnv)
+	}
+	select {
+	case captured := <-prompts:
+		t.Fatalf("invalid JSON escape unexpectedly posted prompt payload %#v (decode error: %v)", captured.payload, captured.err)
+	case <-time.After(time.Second):
+	}
+
+	collisionStateDir := t.TempDir()
+	collisionEnv := withoutEnv(env, "TMPDIR")
+	collisionEnv = append(collisionEnv, "TMPDIR="+collisionStateDir)
+	for _, sessionID := range []string{"a/b", "a?b"} {
+		collisionInput := fmt.Sprintf(`{"cwd":"%s","session_id":"%s","prompt":""}`, cwd, sessionID)
+		output, _ := runHook(collisionInput, collisionEnv)
+		if !strings.Contains(output, "CRITICAL FIRST ACTION") {
+			t.Fatalf("first hook invocation for unsafe session %q = %q, want bootstrap response", sessionID, output)
+		}
+	}
+	collisionStateFiles, err := filepath.Glob(filepath.Join(collisionStateDir, "engram-claude-*-tools-loaded"))
+	if err != nil {
+		t.Fatalf("list unsafe session state files: %v", err)
+	}
+	if len(collisionStateFiles) != 2 {
+		t.Fatalf("unsafe session state files = %v, want distinct state files", collisionStateFiles)
 	}
 }
 
@@ -2594,7 +2724,7 @@ func isolatedHookPath(t *testing.T) (string, []string) {
 	for _, tool := range []string{"cat", "curl", "date", "dirname", "touch"} {
 		toolPath, err := exec.LookPath(tool)
 		if err != nil {
-			t.Fatalf("find required hook tool %q: %v", tool, err)
+			t.Skipf("required hook tool %q is unavailable: %v", tool, err)
 		}
 		linkPath := filepath.Join(binDir, filepath.Base(toolPath))
 		if err := os.Link(toolPath, linkPath); err != nil {
