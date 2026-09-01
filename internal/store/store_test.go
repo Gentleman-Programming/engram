@@ -12228,24 +12228,27 @@ func TestDeleteProjectOrphansMemoryRelations(t *testing.T) {
 	}
 }
 
-func TestMostRecentActiveSessionReturnsUnEndedSession(t *testing.T) {
+func TestActiveRuntimeSessionsReturnsUnendedSession(t *testing.T) {
 	s := newTestStore(t)
 
 	// A hook-registered UUID session, never ended.
 	if err := s.CreateSession("uuid-active-1", "engram", "/work/engram"); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-
-	id, ok, err := s.MostRecentActiveSession("engram")
-	if err != nil {
-		t.Fatalf("MostRecentActiveSession: %v", err)
+	if err := s.CreateSession("uuid-other-directory", "engram", "/work/other"); err != nil {
+		t.Fatalf("create session in other directory: %v", err)
 	}
-	if !ok || id != "uuid-active-1" {
-		t.Fatalf("expected active session uuid-active-1, got id=%q ok=%v", id, ok)
+
+	ids, err := s.ActiveRuntimeSessions("engram", "/work/engram")
+	if err != nil {
+		t.Fatalf("ActiveRuntimeSessions: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != "uuid-active-1" {
+		t.Fatalf("expected active session uuid-active-1, got %#v", ids)
 	}
 }
 
-func TestMostRecentActiveSessionSkipsEndedSessions(t *testing.T) {
+func TestActiveRuntimeSessionsSkipsEndedSessions(t *testing.T) {
 	s := newTestStore(t)
 
 	if err := s.CreateSession("uuid-ended-1", "engram", "/work/engram"); err != nil {
@@ -12255,54 +12258,48 @@ func TestMostRecentActiveSessionSkipsEndedSessions(t *testing.T) {
 		t.Fatalf("end session: %v", err)
 	}
 
-	_, ok, err := s.MostRecentActiveSession("engram")
+	ids, err := s.ActiveRuntimeSessions("engram", "/work/engram")
 	if err != nil {
-		t.Fatalf("MostRecentActiveSession: %v", err)
+		t.Fatalf("ActiveRuntimeSessions: %v", err)
 	}
-	if ok {
-		t.Fatalf("expected no active session when the only session is ended, got ok=%v", ok)
+	if len(ids) != 0 {
+		t.Fatalf("expected no active sessions when the only session is ended, got %#v", ids)
 	}
 }
 
-func TestMostRecentActiveSessionNoSessionsReturnsFalse(t *testing.T) {
+func TestActiveRuntimeSessionsNoSessionsReturnsEmpty(t *testing.T) {
 	s := newTestStore(t)
 
-	_, ok, err := s.MostRecentActiveSession("engram")
+	ids, err := s.ActiveRuntimeSessions("engram", "/work/engram")
 	if err != nil {
-		t.Fatalf("MostRecentActiveSession: %v", err)
+		t.Fatalf("ActiveRuntimeSessions: %v", err)
 	}
-	if ok {
-		t.Fatalf("expected ok=false for a project with no sessions, got ok=%v", ok)
+	if len(ids) != 0 {
+		t.Fatalf("expected no sessions, got %#v", ids)
 	}
 }
 
-func TestMostRecentActiveSessionPicksMostRecentWhenMultipleActive(t *testing.T) {
+func TestActiveRuntimeSessionsReturnsAllMatchingActiveSessions(t *testing.T) {
 	s := newTestStore(t)
 
-	// Two un-ended UUID sessions for the same project; the newer started_at wins.
+	// Two un-ended UUID sessions for the same project and directory are ambiguous.
 	if err := s.CreateSession("uuid-old", "engram", "/work/engram"); err != nil {
 		t.Fatalf("create old session: %v", err)
-	}
-	if _, err := s.db.Exec(`UPDATE sessions SET started_at = ? WHERE id = ?`, "2025-01-01 00:00:00", "uuid-old"); err != nil {
-		t.Fatalf("backdate old session: %v", err)
 	}
 	if err := s.CreateSession("uuid-new", "engram", "/work/engram"); err != nil {
 		t.Fatalf("create new session: %v", err)
 	}
-	if _, err := s.db.Exec(`UPDATE sessions SET started_at = ? WHERE id = ?`, "2025-06-01 00:00:00", "uuid-new"); err != nil {
-		t.Fatalf("set new session started_at: %v", err)
-	}
 
-	id, ok, err := s.MostRecentActiveSession("engram")
+	ids, err := s.ActiveRuntimeSessions("engram", "/work/engram")
 	if err != nil {
-		t.Fatalf("MostRecentActiveSession: %v", err)
+		t.Fatalf("ActiveRuntimeSessions: %v", err)
 	}
-	if !ok || id != "uuid-new" {
-		t.Fatalf("expected most recent active session uuid-new, got id=%q ok=%v", id, ok)
+	if !reflect.DeepEqual(ids, []string{"uuid-new", "uuid-old"}) {
+		t.Fatalf("expected both matching active sessions, got %#v", ids)
 	}
 }
 
-func TestMostRecentActiveSessionIgnoresManualSaveSessions(t *testing.T) {
+func TestActiveRuntimeSessionsIgnoresManualSaveSessions(t *testing.T) {
 	s := newTestStore(t)
 
 	// The manual-save fallback session is also un-ended, but it must NOT be
@@ -12311,28 +12308,68 @@ func TestMostRecentActiveSessionIgnoresManualSaveSessions(t *testing.T) {
 		t.Fatalf("create manual-save session: %v", err)
 	}
 
-	_, ok, err := s.MostRecentActiveSession("engram")
+	ids, err := s.ActiveRuntimeSessions("engram", "/work/engram")
 	if err != nil {
-		t.Fatalf("MostRecentActiveSession: %v", err)
+		t.Fatalf("ActiveRuntimeSessions: %v", err)
 	}
-	if ok {
-		t.Fatalf("expected manual-save session to be ignored, got ok=%v", ok)
+	if len(ids) != 0 {
+		t.Fatalf("expected manual-save session to be ignored, got %#v", ids)
 	}
 }
 
-func TestMostRecentActiveSessionScopedByProject(t *testing.T) {
+func TestActiveRuntimeSessionsScopedByProjectAndDirectory(t *testing.T) {
 	s := newTestStore(t)
 
 	if err := s.CreateSession("uuid-other-proj", "other", "/work/other"); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
 
-	_, ok, err := s.MostRecentActiveSession("engram")
+	ids, err := s.ActiveRuntimeSessions("engram", "/work/engram")
 	if err != nil {
-		t.Fatalf("MostRecentActiveSession: %v", err)
+		t.Fatalf("ActiveRuntimeSessions: %v", err)
 	}
-	if ok {
-		t.Fatalf("expected no active session for engram when only 'other' has one, got ok=%v", ok)
+	if len(ids) != 0 {
+		t.Fatalf("expected no active session for engram in the requested directory, got %#v", ids)
+	}
+}
+
+func TestActiveRuntimeSessionsReturnsNoResultsForEmptyProject(t *testing.T) {
+	s := newTestStore(t)
+
+	ids, err := s.ActiveRuntimeSessions("", "/work/engram")
+	if err != nil {
+		t.Fatalf("ActiveRuntimeSessions: %v", err)
+	}
+	if ids != nil {
+		t.Fatalf("empty project IDs = %#v, want nil", ids)
+	}
+}
+
+func TestActiveRuntimeSessionsReturnsNoResultsForEmptyDirectory(t *testing.T) {
+	s := newTestStore(t)
+
+	ids, err := s.ActiveRuntimeSessions("engram", "")
+	if err != nil {
+		t.Fatalf("ActiveRuntimeSessions: %v", err)
+	}
+	if ids != nil {
+		t.Fatalf("empty directory IDs = %#v, want nil", ids)
+	}
+}
+
+func TestActiveRuntimeSessionsReturnsQueryError(t *testing.T) {
+	s := newTestStore(t)
+	wantErr := errors.New("query failed")
+	s.hooks.query = func(queryer, string, ...any) (*sql.Rows, error) {
+		return nil, wantErr
+	}
+
+	ids, err := s.ActiveRuntimeSessions("engram", "/work/engram")
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("ActiveRuntimeSessions error = %v, want %v", err, wantErr)
+	}
+	if ids != nil {
+		t.Fatalf("query error IDs = %#v, want nil", ids)
 	}
 }
 
