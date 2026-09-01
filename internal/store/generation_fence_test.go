@@ -32,13 +32,44 @@ func TestDatabaseGeneration(t *testing.T) {
 			assertGenerationChanged(t, generation.check())
 		})
 
-		t.Run("detects disappearance "+sidecarName(sidecar), func(t *testing.T) {
+		t.Run("handles disappearance "+sidecarName(sidecar), func(t *testing.T) {
 			generation, dbPath := newTestDatabaseGeneration(t, sidecar == "-wal", sidecar == "-shm")
 			if err := os.Remove(dbPath + sidecar); err != nil {
 				t.Fatalf("remove generation file: %v", err)
 			}
-			assertGenerationChanged(t, generation.check())
+			if sidecar == "" {
+				assertGenerationChanged(t, generation.check())
+				return
+			}
+			if err := generation.check(); err != nil {
+				t.Fatalf("check after sidecar disappearance: %v", err)
+			}
+			writeTestFile(t, dbPath+sidecar)
+			if err := generation.check(); err != nil {
+				t.Fatalf("adopt replacement sidecar: %v", err)
+			}
 		})
+	}
+}
+
+func TestDatabaseGenerationRecoversFromStatError(t *testing.T) {
+	generation, dbPath := newTestDatabaseGeneration(t, false, false)
+	original := statFile
+	t.Cleanup(func() { statFile = original })
+	statErr := errors.New("transient stat error")
+	failed := false
+	statFile = func(path string) (os.FileInfo, error) {
+		if path == dbPath && !failed {
+			failed = true
+			return nil, statErr
+		}
+		return original(path)
+	}
+	if err := generation.check(); err != statErr {
+		t.Fatalf("check error = %v, want transient stat error", err)
+	}
+	if err := generation.check(); err != nil {
+		t.Fatalf("check after transient stat error: %v", err)
 	}
 }
 

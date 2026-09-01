@@ -17,6 +17,8 @@ import (
 // this process was running. Restart Engram before accessing the store again.
 var ErrDatabaseGenerationChanged = errors.New("Engram database generation changed; restart Engram")
 
+var statFile = os.Stat
+
 type databaseGeneration struct {
 	paths    []string
 	files    []os.FileInfo
@@ -43,13 +45,17 @@ func (g *databaseGeneration) check() error {
 		return g.err
 	}
 	for i, path := range g.paths {
-		info, err := os.Stat(path)
+		info, err := statFile(path)
 		if err != nil {
-			if os.IsNotExist(err) && i > 0 && !g.observed[i] {
-				continue
+			if os.IsNotExist(err) {
+				if i > 0 {
+					g.files[i], g.observed[i] = nil, false
+					continue
+				}
+				g.err = ErrDatabaseGenerationChanged
+				return g.err
 			}
-			g.err = ErrDatabaseGenerationChanged
-			return g.err
+			return err
 		}
 		if !g.observed[i] {
 			// Resolve Windows' deferred file ID before this path can be replaced.
