@@ -90,10 +90,7 @@ Also search memory PROACTIVELY when:
 ## SESSION CLOSE PROTOCOL (mandatory)
 
 Before ending a session or saying "done" / "that's it", you MUST:
-1. Call `mem_session_summary` with the structure below.
-2. Call `mem_session_end` with the active session id and an optional summary of work completed.
-
-`mem_session_summary` structure:
+1. Call `mem_session_summary` with this structure:
 
 ## Goal
 [What we were working on this session]

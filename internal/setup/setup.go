@@ -225,6 +225,14 @@ If you see a message about compaction or context reset, or if you see "FIRST ACT
 Do not skip step 1. Without it, everything done before compaction is lost from memory.
 `
 
+const geminiSessionCloseInstruction = `
+
+### GEMINI CLI SESSION CLOSE (mandatory)
+
+After mem_session_summary succeeds, call mem_session_end before closing the session.
+Do not call mem_session_end before mem_session_summary.
+`
+
 const codexCompactPromptMarkdown = `You are compacting a coding session that uses Engram persistent memory.
 
 You MUST prepend this exact sentence at the top of the compacted summary:
@@ -1117,7 +1125,7 @@ func writeGeminiSystemPrompt() error {
 		return fmt.Errorf("create gemini system prompt dir: %w", err)
 	}
 
-	if err := os.WriteFile(systemPath, []byte(memoryProtocolMarkdown), 0644); err != nil {
+	if err := os.WriteFile(systemPath, []byte(memoryProtocolMarkdown+geminiSessionCloseInstruction), 0644); err != nil {
 		return fmt.Errorf("write gemini system prompt: %w", err)
 	}
 
