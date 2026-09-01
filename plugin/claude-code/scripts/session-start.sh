@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Engram — SessionStart hook for Claude Code
 #
 # 1. Ensures the engram server is running

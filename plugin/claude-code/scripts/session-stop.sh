@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Engram — Stop hook for Claude Code (async)
 #
 # Marks the session as ended via the HTTP API.

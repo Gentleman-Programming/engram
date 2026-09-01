@@ -16,6 +16,7 @@ const (
 	CheckManualSessionNameProjectMismatch = "manual_session_name_project_mismatch"
 	CheckSyncMutationRequiredFields       = "sync_mutation_required_fields"
 	CheckInvalidSessionIdentity           = "invalid_session_identity"
+	CheckOrphanedObservationSession       = "orphaned_observation_session"
 	CheckUnownedSessionProject            = "unowned_session_project"
 	CheckSQLiteLockContention             = "sqlite_lock_contention"
 )
@@ -29,6 +30,7 @@ type SessionProjectDirectoryMismatchCheck struct{}
 type ManualSessionNameProjectMismatchCheck struct{}
 type SyncMutationRequiredFieldsCheck struct{}
 type InvalidSessionIdentityCheck struct{}
+type OrphanedObservationSessionCheck struct{}
 type UnownedSessionProjectCheck struct{}
 type SQLiteLockContentionCheck struct{}
 
@@ -40,6 +42,7 @@ func (ManualSessionNameProjectMismatchCheck) Code() string {
 }
 func (SyncMutationRequiredFieldsCheck) Code() string { return CheckSyncMutationRequiredFields }
 func (InvalidSessionIdentityCheck) Code() string     { return CheckInvalidSessionIdentity }
+func (OrphanedObservationSessionCheck) Code() string { return CheckOrphanedObservationSession }
 func (UnownedSessionProjectCheck) Code() string      { return CheckUnownedSessionProject }
 func (SQLiteLockContentionCheck) Code() string       { return CheckSQLiteLockContention }
 
@@ -352,6 +355,28 @@ func (c UnownedSessionProjectCheck) Run(ctx context.Context, scope Scope) (Check
 		})
 	}
 	return resultFromFindings(c.Code(), map[string]any{"sessions_evaluated": len(sessions)}, findings), nil
+}
+
+func (c OrphanedObservationSessionCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {
+	_ = ctx
+	evidence, err := scope.Store.ListOrphanedObservationSessionEvidence(scope.Project)
+	if err != nil {
+		return CheckResult{}, err
+	}
+	findings := make([]Finding, 0, len(evidence))
+	for _, item := range evidence {
+		findings = append(findings, Finding{
+			CheckID:              c.Code(),
+			Severity:             SeverityWarning,
+			ReasonCode:           CheckOrphanedObservationSession,
+			Message:              fmt.Sprintf("%d observation(s) reference missing session %q.", item.ObservationCount, item.SessionID),
+			Why:                  "Observations reference a missing session, so their canonical session cannot be reconstructed automatically.",
+			Evidence:             mustJSON(item),
+			SafeNextStep:         "Inspect and recover the affected data deliberately. The canonical session cannot be reconstructed automatically, and no supported repair exists.",
+			RequiresConfirmation: true,
+		})
+	}
+	return resultFromFindings(c.Code(), map[string]any{"orphaned_session_references_evaluated": len(evidence)}, findings), nil
 }
 
 func (c SQLiteLockContentionCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {

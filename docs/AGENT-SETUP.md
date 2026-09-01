@@ -82,7 +82,7 @@ If the binary is missing, the MCP launcher exits cleanly instead of crashing Pi 
 
 ### Project auto-detection (important)
 
-`mem_save` resolves its write project in this order: validated explicit `project`, existing `session_id` association, repo `.engram/config.json`/cwd detection, then directory-basename fallback. Use an explicit `project` when you intentionally want to target a known project; invalid or unbacked names fail loudly instead of silently falling back.
+`mem_save` resolves its write project in this order: validated explicit `project`, existing `session_id` association, repo `.engram/config.json`/cwd detection, then directory-basename fallback. Automatic Git detection stores the first normalized remote/root label in private shared Git metadata, so remote renames, linked worktrees, and repository moves keep using that label. If that binding is corrupt or cannot be written, detection fails closed; set `.engram/config.json` to the intended project rather than relying on the current remote name. Global local/cloud `project_id` propagation and alias migration remain deferred. Use an explicit `project` when you intentionally want to target a known project; invalid or unbacked names fail loudly instead of silently falling back.
 
 Other write tools still primarily use cwd/repo detection unless their schema says otherwise. Start the MCP server from the repo or add `.engram/config.json` when you want deterministic default writes.
 
@@ -368,8 +368,8 @@ engram setup gemini-cli
 `engram setup gemini-cli` now does three things:
 
 - Registers `mcpServers.engram` in `~/.gemini/settings.json` (Windows: `%APPDATA%\gemini\settings.json`)
-- Writes `~/.gemini/system.md` with the Engram Memory Protocol (includes post-compaction recovery)
-- Ensures `~/.gemini/.env` contains `GEMINI_SYSTEM_MD=1` so Gemini actually loads that system prompt
+- Writes `~/.gemini/system.md` with the Engram Memory Protocol, including post-compaction recovery and the required `mem_session_summary` then `mem_session_end` close sequence
+- Removes a legacy `GEMINI_SYSTEM_MD` override from `~/.gemini/.env`; Gemini CLI loads `system.md` directly and the override resolves it relative to the working directory
 
 > `engram setup gemini-cli` automatically writes the full Memory Protocol to `~/.gemini/system.md`, so the agent knows exactly when to save, search, and close sessions. No additional configuration needed.
 

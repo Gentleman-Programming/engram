@@ -162,12 +162,33 @@ func cmdDoctorRepair(cfg store.Config) {
 	}
 	defer s.Close()
 	if check == diagnostic.CheckSyncMutationRequiredFields {
+		repairs, err := s.RepairObservationMutationTitles(project, mode == diagnostic.RepairModeApply)
+		if err != nil {
+			failDoctorRepair(err.Error())
+			return
+		}
 		report, err := s.QuarantineIrreparableSyncMutations(project, mode == diagnostic.RepairModeApply)
 		if err != nil {
 			failDoctorRepair(err.Error())
 			return
 		}
-		writeDoctorRepairJSON(report)
+		if mode != diagnostic.RepairModeApply && len(repairs.Actions) > 0 {
+			repairSeqs := make(map[int64]struct{}, len(repairs.Actions))
+			for _, action := range repairs.Actions {
+				repairSeqs[action.Seq] = struct{}{}
+			}
+			remaining := report.Actions[:0]
+			for _, action := range report.Actions {
+				if _, repaired := repairSeqs[action.Seq]; !repaired {
+					remaining = append(remaining, action)
+				}
+			}
+			report.Actions = remaining
+		}
+		writeDoctorRepairJSON(struct {
+			store.SyncMutationQuarantineReport
+			Repairs []store.SyncMutationTitleRepairAction `json:"repairs"`
+		}{report, repairs.Actions})
 		return
 	}
 
