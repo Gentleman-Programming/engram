@@ -102,7 +102,8 @@ uses its normal process override and cwd-detection precedence.
 
 **Migration:**
 
-- Use `mem_current_project` to inspect which project Engram will use before writing.
+- When no explicit project override is supplied, use `mem_current_project` to inspect which project Engram will use before writing; it reports cwd-based detection.
+- An explicit project override takes precedence over process and cwd detection. Invalid or unbacked explicit names fail without fallback.
 - If the cwd is ambiguous (multiple git repos), Engram returns a structured error with `available_projects`. Navigate to one of the repos before writing.
 - Read tools (`mem_search`, `mem_context`, `mem_timeline`, `mem_get_observation`, `mem_stats`) still accept an optional `project` override — validated against the store.
 
