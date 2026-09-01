@@ -1,6 +1,6 @@
 # Delta for Cloud Autosync
 
-Scope: #503 under #854; excludes #814/#892.
+Scope: #503; excludes #814/#892.
 
 ## ADDED Requirements
 

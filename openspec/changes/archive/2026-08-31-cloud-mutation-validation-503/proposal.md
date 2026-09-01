@@ -4,7 +4,7 @@
 
 Align `POST /sync/mutations/push` with `chunkcodec`'s canonical required-field rules. An incomplete legacy observation upsert currently becomes an opaque HTTP 500 and remains pending locally. The change returns a repairable HTTP 400 before storage while preserving local-first, all-or-nothing sync.
 
-Delivery is tracked by umbrella issue #854; issue #503 is the target. Closed issue #814 and merged PR #892 (blank-title repair) are excluded.
+Delivery is tracked by issue #503. Closed issue #814 and merged PR #892 (blank-title repair) are excluded.
 
 ## Scope and Compatibility Decisions
 

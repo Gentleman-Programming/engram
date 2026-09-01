@@ -61,13 +61,13 @@ No review transaction, ledger, receipt, or gate-context topics were read because
 
 ## Pending Delivery Action
 
-Final PR #891 still needs links to solved issues #769 and #503 and umbrella issue #854. This archive records the action as pending; no branch, PR, push, GitHub, or Gentle AI provider operation was performed.
+Final PR #891 still needs an accurate link to issue #503. This archive records the action as pending; no branch, PR, push, GitHub, or Gentle AI provider operation was performed.
 
 ## Structured Result
 
 - **status**: archived
 - **executive_summary**: Verified hybrid SDD change archived after task gate, delta sync, and mechanical move readback passed.
 - **artifacts**: archive folder above; Engram topic `sdd/cloud-mutation-validation-503/archive-report`
-- **next_recommended**: link #769, #503, and #854 from existing PR #891
+- **next_recommended**: link #503 from existing PR #891
 - **risks**: pre-existing vet/format warnings; pending PR issue-link action
 - **skill_resolution**: requested archive and repository guidance were supplied as paths; dynamic loader exposed `sdd-archive` and `work-unit-commits`, while repository-local aliases were unavailable through the loader

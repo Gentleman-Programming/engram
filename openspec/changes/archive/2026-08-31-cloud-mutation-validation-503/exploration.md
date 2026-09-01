@@ -12,7 +12,7 @@ The smallest safe first slice is to make mutation-push validation agree with can
 - `origin/main` was refreshed and is `9cf93de` (`feat(tui): complete cloud sync settings (#788)`). The cloud target files below have no diff between the working tree and `origin/main`, so this issue remains present upstream.
 - GitHub issue [#503](https://github.com/Gentleman-Programming/engram/issues/503) is still **OPEN**, labeled `type:bug` and `priority:medium`.
 - Issue [#814](https://github.com/Gentleman-Programming/engram/issues/814) is **CLOSED**. PR [#892](https://github.com/Gentleman-Programming/engram/pull/892) merged into `main` on 2026-08-31 and repairs blank observation titles. It does not fix blank observation content during mutation push; it must not be reopened or duplicated.
-- Approved umbrella [#854](https://github.com/Gentleman-Programming/engram/issues/854) remains the delivery tracker requested for this work. It is not evidence that #503 itself is resolved.
+- Issue [#503](https://github.com/Gentleman-Programming/engram/issues/503) remains the delivery tracker for this focused validation fix.
 
 ## Current behavior and causal flow
 
@@ -159,7 +159,7 @@ Run the narrow cloudserver/chunkcodec/remote/autosync/cloudstore suites first, t
 
 Proceed with a focused server contract change: align `POST /sync/mutations/push` validation with the existing `chunkcodec` canonical mutation requirements, perform it before `InsertMutationBatch`, and emit the established actionable repairable 400 for the complete batch. Prefer a shared validation seam over a content-only check so the fix removes the entire known validation/canonicalization inconsistency without changing autosync acknowledgements or persistence semantics. Treat dead-letter/quarantine/cursor recovery as a separately proposed change informed by #503's independent freeze report.
 
-**Ready for proposal:** Yes. The proposal should link #503 under approved umbrella #854, explicitly state that #814/#892 are completed and excluded, and define the compatibility decision for incomplete legacy upserts before implementation begins.
+**Ready for proposal:** Yes. The proposal should link #503, explicitly state that #814/#892 are completed and excluded, and define the compatibility decision for incomplete legacy upserts before implementation begins.
 
 ## CodeGraph status
 

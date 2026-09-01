@@ -2,7 +2,7 @@
 
 ## Technical Approach
 
-Expose one `internal/cloud/chunkcodec` validation seam and call it from `CloudServer.handleMutationPush` after authentication, authorization, and pause checks, but before `InsertMutationBatch`. The seam reuses canonical normalizers; the handler owns indexing and HTTP presentation. `CloudStore` remains defense in depth, and autosync acknowledgements are unchanged. `withAuth` authenticates first. A bounded minimal decode extracts only each entry's project, without nested payload decoding, then authorizes every distinct project and checks pause policy. Full validation runs only afterward, so malformed unauthorized data returns the existing authorization error, not validation details. Scope remains #503 under #854; #814/#892 stay excluded.
+Expose one `internal/cloud/chunkcodec` validation seam and call it from `CloudServer.handleMutationPush` after authentication, authorization, and pause checks, but before `InsertMutationBatch`. The seam reuses canonical normalizers; the handler owns indexing and HTTP presentation. `CloudStore` remains defense in depth, and autosync acknowledgements are unchanged. `withAuth` authenticates first. A bounded minimal decode extracts only each entry's project, without nested payload decoding, then authorizes every distinct project and checks pause policy. Full validation runs only afterward, so malformed unauthorized data returns the existing authorization error, not validation details. Scope remains #503; #814/#892 stay excluded.
 
 ## Architecture Decisions
 
