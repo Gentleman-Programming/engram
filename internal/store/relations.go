@@ -87,6 +87,9 @@ type CandidateOptions struct {
 	// BM25Floor preserves the deprecated legacy minimum-rank behavior. Candidates
 	// below this value are excluded. It cannot be combined with BM25MaxRank.
 	BM25Floor *float64
+	// Query optionally overrides the saved observation title as the candidate
+	// query source. Empty uses the saved title.
+	Query string
 	// SkipInsert controls whether FindCandidates inserts pending relation rows.
 	// When true, candidates are returned but NO rows are written to memory_relations.
 	// Default false preserves the existing behavior (rows are inserted).
@@ -376,7 +379,11 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 		scope = opts.Scope
 	}
 
-	ftsQuery := sanitizeFTSCandidates(title)
+	queryText := opts.Query
+	if strings.TrimSpace(queryText) == "" {
+		queryText = title
+	}
+	ftsQuery := sanitizeFTSCandidates(queryText)
 	if ftsQuery == "" {
 		return nil, nil
 	}

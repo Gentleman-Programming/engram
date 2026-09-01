@@ -311,7 +311,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.store.CreateSession(body.ID, body.Project, body.Directory); err != nil {
+	if err := s.store.CreateSession(body.ID, body.Project, projectpkg.RuntimeWorktreeDirectory(body.Directory)); err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

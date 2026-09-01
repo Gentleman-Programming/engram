@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -297,7 +298,15 @@ type SyncState struct {
 	ReasonCode          *string `json:"reason_code,omitempty"`
 	ReasonMessage       *string `json:"reason_message,omitempty"`
 	LastError           *string `json:"last_error,omitempty"`
+	LastSuccessAt       *string `json:"last_success_at,omitempty"`
 	UpdatedAt           string  `json:"updated_at"`
+}
+
+// CloudSyncSummary is the aggregate local cloud state shown when no project is selected.
+type CloudSyncSummary struct {
+	LastSuccessAt    string
+	PendingMutations int64
+	LastError        string
 }
 
 type SyncMutation struct {
@@ -538,6 +547,11 @@ func (s *Store) MaxObservationLength() int {
 	return s.cfg.MaxObservationLength
 }
 
+// DataDir returns the directory containing the store database and cloud.json.
+func (s *Store) DataDir() string {
+	return s.cfg.DataDir
+}
+
 // ─── Store ───────────────────────────────────────────────────────────────────
 
 type Store struct {
@@ -761,12 +775,14 @@ func newWithoutRepair(cfg Config) (*Store, error) {
 	}
 	for _, p := range pragmas {
 		if _, err := db.Exec(p); err != nil {
+			_ = db.Close()
 			return nil, fmt.Errorf("engram: pragma %q: %w", p, err)
 		}
 	}
 
 	s := &Store{db: db, cfg: cfg, hooks: defaultStoreHooks()}
 	if err := s.migrate(); err != nil {
+		_ = db.Close()
 		return nil, fmt.Errorf("engram: migration: %w", err)
 	}
 	return s, nil
@@ -873,6 +889,7 @@ func (s *Store) migrate() error {
 				lease_owner          TEXT,
 				lease_until          TEXT,
 				last_error           TEXT,
+				last_success_at      TEXT,
 				updated_at           TEXT NOT NULL DEFAULT (datetime('now'))
 			);
 
@@ -976,6 +993,9 @@ func (s *Store) migrate() error {
 		return err
 	}
 	if err := s.addColumnIfNotExists("sync_state", "reason_message", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.addColumnIfNotExists("sync_state", "last_success_at", "TEXT"); err != nil {
 		return err
 	}
 	if err := s.migrateSyncChunksTable(); err != nil {
@@ -1142,6 +1162,12 @@ func (s *Store) migrate() error {
 	}
 
 	if err := s.migrateFTSTopicKey(); err != nil {
+		return err
+	}
+	if err := s.withTx(func(tx *sql.Tx) error {
+		_, err := s.execHook(tx, `UPDATE observations SET project = CAST(project AS TEXT) WHERE typeof(project) = 'blob'`)
+		return err
+	}); err != nil {
 		return err
 	}
 
@@ -2338,38 +2364,66 @@ func (s *Store) GetSession(id string) (*Session, error) {
 // share only the SQLite store, so the active session must be read from disk —
 // never from in-memory state.
 //
-// Selection rules:
+// Candidate rules:
 //   - Scope to the (normalized) project.
+//   - Scope to the current runtime directory.
 //   - Require ended_at IS NULL — ended sessions are never returned, so stale
 //     sessions naturally fall out without any explicit clearing step.
 //   - Exclude the manual-save fallback sessions (id LIKE 'manual-save%'); those
 //     are created by the fallback path itself and must not be resolved as "the
 //     active session", which would make resolution circular.
-//   - When multiple un-ended sessions exist, pick the MOST RECENT by
-//     started_at DESC, with id DESC as a deterministic tie-breaker.
-func (s *Store) MostRecentActiveSession(project string) (string, bool, error) {
+//
+// ActiveRuntimeSessions returns active, non-manual sessions for a project and
+// runtime directories. The directories narrow candidates; callers must not
+// treat them as session identity.
+func (s *Store) ActiveRuntimeSessions(project string, directories ...string) ([]string, error) {
 	project, _ = NormalizeProject(project)
 	if project == "" {
-		return "", false, nil
+		return nil, nil
+	}
+	directorySet := make(map[string]struct{}, len(directories))
+	for _, directory := range directories {
+		if directory != "" {
+			directorySet[directory] = struct{}{}
+		}
+	}
+	if len(directorySet) == 0 {
+		return nil, nil
+	}
+	args := make([]any, 0, len(directorySet)+1)
+	args = append(args, project)
+	placeholders := make([]string, 0, len(directorySet))
+	for directory := range directorySet {
+		placeholders = append(placeholders, "?")
+		args = append(args, directory)
 	}
 
-	var id string
-	err := s.db.QueryRow(`
-		SELECT id
+	rows, err := s.queryHook(s.db, `
+		SELECT DISTINCT id
 		FROM sessions
 		WHERE LOWER(project) = ?
+		  AND directory IN (`+strings.Join(placeholders, ", ")+`)
 		  AND ended_at IS NULL
 		  AND id NOT LIKE 'manual-save%'
-		ORDER BY datetime(started_at) DESC, id DESC
-		LIMIT 1
-	`, project).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
-	}
+		ORDER BY id
+	`, args...)
 	if err != nil {
-		return "", false, err
+		return nil, err
 	}
-	return id, true, nil
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 // A database upgraded from the schema where sessions.project was nullable still
@@ -2644,7 +2698,7 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 		syncID := newSyncID("obs")
 		res, err := s.execHook(tx,
 			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, datetime('now'), datetime('now'))`,
+			 VALUES (?, ?, ?, ?, ?, ?, CAST(? AS TEXT), ?, ?, ?, 1, 1, datetime('now'), datetime('now'))`,
 			syncID, p.SessionID, p.Type, title, content,
 			nullableString(p.ToolName), nullableString(p.Project), scope, nullableString(topicKey), normHash,
 		)
@@ -3336,7 +3390,7 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 			 SET type = ?,
 			     title = ?,
 			     content = ?,
-			     project = ?,
+			     project = CAST(? AS TEXT),
 			     scope = ?,
 			     topic_key = ?,
 			     normalized_hash = ?,
@@ -4146,7 +4200,7 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 		syncID := normalizeExistingSyncID(obs.SyncID, "obs")
 		res, err := s.execHook(tx,
 			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, review_after, created_at, updated_at, deleted_at)
-			 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+			 SELECT ?, ?, ?, ?, ?, ?, CAST(? AS TEXT), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 			 WHERE NOT EXISTS (SELECT 1 FROM observations WHERE sync_id = ?)`,
 			syncID,
 			obs.SessionID,
@@ -4281,6 +4335,40 @@ func (s *Store) ListPendingSyncMutations(targetKey string, limit int) ([]SyncMut
 		mutations = append(mutations, mutation)
 	}
 	return mutations, rows.Err()
+}
+
+// CloudSyncSummary returns status across project-scoped cloud targets only.
+// It deliberately excludes the legacy global cloud target because explicit cloud
+// sync records state under cloud:<project>.
+func (s *Store) CloudSyncSummary() (CloudSyncSummary, error) {
+	const cloudProjectTarget = "cloud:%"
+	var summary CloudSyncSummary
+	var lastSuccess, lastError sql.NullString
+	err := s.db.QueryRow(`
+		SELECT MAX(last_success_at), (
+			SELECT last_error FROM sync_state
+			WHERE target_key LIKE ? AND last_error IS NOT NULL
+			ORDER BY updated_at DESC LIMIT 1
+		)
+		FROM sync_state WHERE target_key LIKE ?`, cloudProjectTarget, cloudProjectTarget).Scan(&lastSuccess, &lastError)
+	if err != nil {
+		return CloudSyncSummary{}, err
+	}
+	if lastSuccess.Valid {
+		summary.LastSuccessAt = lastSuccess.String
+	}
+	if lastError.Valid {
+		summary.LastError = lastError.String
+	}
+	err = s.db.QueryRow(`
+		SELECT COUNT(*)
+		FROM sync_mutations sm
+		JOIN sync_enrolled_projects sep ON sm.project = sep.project
+		WHERE sm.target_key LIKE ? AND sm.acked_at IS NULL AND sm.disposition = 'pending'`, cloudProjectTarget).Scan(&summary.PendingMutations)
+	if err != nil {
+		return CloudSyncSummary{}, err
+	}
+	return summary, nil
 }
 
 func (s *Store) ListPendingSyncMutationsAfterSeq(targetKey string, afterSeq int64, limit int) ([]SyncMutation, error) {
@@ -4888,7 +4976,7 @@ func (s *Store) MarkSyncHealthy(targetKey string) error {
 		}
 		_, err := s.execHook(tx,
 			`UPDATE sync_state
-			 SET lifecycle = ?, consecutive_failures = 0, backoff_until = NULL, reason_code = NULL, reason_message = NULL, last_error = NULL, updated_at = datetime('now')
+			 SET lifecycle = ?, consecutive_failures = 0, backoff_until = NULL, reason_code = NULL, reason_message = NULL, last_error = NULL, last_success_at = datetime('now'), updated_at = datetime('now')
 			 WHERE target_key = ?`,
 			SyncLifecycleHealthy, targetKey,
 		)
@@ -5708,6 +5796,46 @@ func (s *Store) ListProjectNames() ([]string, error) {
 	return results, rows.Err()
 }
 
+// ListProjectsForCloudEnrollment returns every local identity that can be
+// enrolled, normalized and ordered deterministically for the cloud TUI.
+func (s *Store) ListProjectsForCloudEnrollment() ([]string, error) {
+	rows, err := s.queryItHook(s.db, `SELECT project FROM (
+		SELECT project FROM observations WHERE deleted_at IS NULL
+		UNION
+		SELECT project FROM sessions
+		UNION
+		SELECT project FROM user_prompts
+		UNION
+		SELECT project FROM sync_enrolled_projects
+	) WHERE project IS NOT NULL AND TRIM(project) != ''`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	projects := make(map[string]struct{})
+	for rows.Next() {
+		var project string
+		if err := rows.Scan(&project); err != nil {
+			return nil, err
+		}
+		project, _ = NormalizeProject(project)
+		if strings.TrimSpace(project) != "" {
+			projects[project] = struct{}{}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	results := make([]string, 0, len(projects))
+	for project := range projects {
+		results = append(results, project)
+	}
+	sort.Strings(results)
+	return results, nil
+}
+
 // ProjectStats holds aggregate statistics for a single project.
 type ProjectStats struct {
 	Name             string   `json:"name"`
@@ -6268,10 +6396,10 @@ func (s *Store) ensureSyncState(targetKey string) error {
 func (s *Store) getSyncState(targetKey string) (*SyncState, error) {
 	row := s.db.QueryRow(`
 		SELECT target_key, lifecycle, last_enqueued_seq, last_acked_seq, last_pulled_seq,
-		       consecutive_failures, backoff_until, lease_owner, lease_until, reason_code, reason_message, last_error, updated_at
+		       consecutive_failures, backoff_until, lease_owner, lease_until, reason_code, reason_message, last_error, last_success_at, updated_at
 		FROM sync_state WHERE target_key = ?`, targetKey)
 	var state SyncState
-	if err := row.Scan(&state.TargetKey, &state.Lifecycle, &state.LastEnqueuedSeq, &state.LastAckedSeq, &state.LastPulledSeq, &state.ConsecutiveFailures, &state.BackoffUntil, &state.LeaseOwner, &state.LeaseUntil, &state.ReasonCode, &state.ReasonMessage, &state.LastError, &state.UpdatedAt); err != nil {
+	if err := row.Scan(&state.TargetKey, &state.Lifecycle, &state.LastEnqueuedSeq, &state.LastAckedSeq, &state.LastPulledSeq, &state.ConsecutiveFailures, &state.BackoffUntil, &state.LeaseOwner, &state.LeaseUntil, &state.ReasonCode, &state.ReasonMessage, &state.LastError, &state.LastSuccessAt, &state.UpdatedAt); err != nil {
 		return nil, err
 	}
 	return &state, nil
@@ -6286,10 +6414,10 @@ func (s *Store) getSyncStateTx(tx *sql.Tx, targetKey string) (*SyncState, error)
 	}
 	row := tx.QueryRow(`
 		SELECT target_key, lifecycle, last_enqueued_seq, last_acked_seq, last_pulled_seq,
-		       consecutive_failures, backoff_until, lease_owner, lease_until, reason_code, reason_message, last_error, updated_at
+		       consecutive_failures, backoff_until, lease_owner, lease_until, reason_code, reason_message, last_error, last_success_at, updated_at
 		FROM sync_state WHERE target_key = ?`, targetKey)
 	var state SyncState
-	if err := row.Scan(&state.TargetKey, &state.Lifecycle, &state.LastEnqueuedSeq, &state.LastAckedSeq, &state.LastPulledSeq, &state.ConsecutiveFailures, &state.BackoffUntil, &state.LeaseOwner, &state.LeaseUntil, &state.ReasonCode, &state.ReasonMessage, &state.LastError, &state.UpdatedAt); err != nil {
+	if err := row.Scan(&state.TargetKey, &state.Lifecycle, &state.LastEnqueuedSeq, &state.LastAckedSeq, &state.LastPulledSeq, &state.ConsecutiveFailures, &state.BackoffUntil, &state.LeaseOwner, &state.LeaseUntil, &state.ReasonCode, &state.ReasonMessage, &state.LastError, &state.LastSuccessAt, &state.UpdatedAt); err != nil {
 		return nil, err
 	}
 	return &state, nil
@@ -7676,7 +7804,7 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 	if err == sql.ErrNoRows {
 		_, err = s.execHook(tx,
 			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+			 VALUES (?, ?, ?, ?, ?, ?, CAST(? AS TEXT), ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
 			payload.SyncID,
 			payload.SessionID,
 			payload.Type,
@@ -7717,7 +7845,7 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 
 	_, err = s.execHook(tx,
 		`UPDATE observations
-		 SET session_id = ?, type = ?, title = ?, content = ?, tool_name = ?, project = ?, scope = ?, topic_key = ?, normalized_hash = ?, revision_count = ?, duplicate_count = ?, last_seen_at = ?, created_at = ?, updated_at = ?, deleted_at = NULL
+		 SET session_id = ?, type = ?, title = ?, content = ?, tool_name = ?, project = CAST(? AS TEXT), scope = ?, topic_key = ?, normalized_hash = ?, revision_count = ?, duplicate_count = ?, last_seen_at = ?, created_at = ?, updated_at = ?, deleted_at = NULL
 		 WHERE id = ?`,
 		payload.SessionID,
 		payload.Type,

@@ -31,6 +31,26 @@ type SyncMutationPayloadValidation struct {
 	Message       string   `json:"message,omitempty"`
 }
 
+// SyncMutationTitleRepairAction records a title restored from its matching
+// local observation without creating another sync mutation.
+type SyncMutationTitleRepairAction struct {
+	Seq       int64  `json:"seq"`
+	Project   string `json:"project"`
+	Entity    string `json:"entity"`
+	EntityKey string `json:"entity_key"`
+	Op        string `json:"op"`
+	Title     string `json:"title"`
+}
+
+// SyncMutationTitleRepairReport is the local recovery result for title-only
+// observation upserts. Repairs remain pending so the original sequence is
+// delivered normally.
+type SyncMutationTitleRepairReport struct {
+	Project string                          `json:"project,omitempty"`
+	Applied bool                            `json:"applied"`
+	Actions []SyncMutationTitleRepairAction `json:"actions"`
+}
+
 // InvalidSessionIdentityEvidence describes a corrupt source session and the
 // dependent local data that cannot be repaired without a canonical ID.
 type InvalidSessionIdentityEvidence struct {
@@ -418,6 +438,149 @@ func ValidateSyncMutationPayload(entity, op, payload, entityKey string) SyncMuta
 		result.Message = fmt.Sprintf("%s payload missing required fields: %s", entity, strings.Join(missing, ", "))
 	}
 	return result
+}
+
+// RepairObservationMutationTitles restores the single title field that can be
+// proved from a matching titleless local observation. It deliberately does not
+// enqueue a replacement mutation: the existing journal row keeps its sequence
+// and all delivery state while only its frozen payload is corrected.
+func (s *Store) RepairObservationMutationTitles(project string, apply bool) (SyncMutationTitleRepairReport, error) {
+	project, _ = NormalizeProject(project)
+	project = strings.TrimSpace(project)
+	report := SyncMutationTitleRepairReport{Project: project, Applied: apply, Actions: []SyncMutationTitleRepairAction{}}
+	var actions []SyncMutationTitleRepairAction
+	err := s.withTx(func(tx *sql.Tx) error {
+		type titleRepair struct {
+			action        SyncMutationTitleRepairAction
+			payload       string
+			observationID int64
+			sourceTitle   string
+		}
+		attemptActions := make([]SyncMutationTitleRepairAction, 0)
+		repairs := make([]titleRepair, 0)
+		query := `SELECT seq, target_key, entity, entity_key, op, payload, source, project, occurred_at, acked_at
+			FROM sync_mutations WHERE target_key = ? AND acked_at IS NULL AND disposition = 'pending'`
+		args := []any{DefaultSyncTargetKey}
+		if project != "" {
+			query += ` AND project = ?`
+			args = append(args, project)
+		}
+		query += ` ORDER BY seq ASC`
+		rows, err := s.queryItHook(tx, query, args...)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var mutation SyncMutation
+			if err := rows.Scan(&mutation.Seq, &mutation.TargetKey, &mutation.Entity, &mutation.EntityKey, &mutation.Op, &mutation.Payload, &mutation.Source, &mutation.Project, &mutation.OccurredAt, &mutation.AckedAt); err != nil {
+				return closeRowsWithError(rows, err)
+			}
+			action, payload, observationID, sourceTitle, ok, err := s.observationMutationTitleRepairTx(tx, mutation)
+			if err != nil {
+				return closeRowsWithError(rows, err)
+			}
+			if !ok {
+				continue
+			}
+			attemptActions = append(attemptActions, action)
+			repairs = append(repairs, titleRepair{action, payload, observationID, sourceTitle})
+		}
+		if err := closeRowsWithError(rows, rows.Err()); err != nil {
+			return err
+		}
+		if !apply {
+			actions = attemptActions
+			return nil
+		}
+		repairedObservations := make(map[int64]struct{})
+		for _, repair := range repairs {
+			if _, repaired := repairedObservations[repair.observationID]; repaired {
+				continue
+			}
+			result, err := s.execHook(tx, `UPDATE observations SET title = ? WHERE id = ? AND sync_id = ? AND deleted_at IS NULL AND title = ?`, repair.action.Title, repair.observationID, repair.action.EntityKey, repair.sourceTitle)
+			if err != nil {
+				return err
+			}
+			if changed, _ := result.RowsAffected(); changed != 1 {
+				return fmt.Errorf("repair observation title source for mutation %d", repair.action.Seq)
+			}
+			repairedObservations[repair.observationID] = struct{}{}
+		}
+		for _, repair := range repairs {
+			result, err := s.execHook(tx, `UPDATE sync_mutations SET payload = ? WHERE target_key = ? AND seq = ? AND acked_at IS NULL AND disposition = 'pending'`, repair.payload, DefaultSyncTargetKey, repair.action.Seq)
+			if err != nil {
+				return err
+			}
+			if changed, _ := result.RowsAffected(); changed != 1 {
+				return fmt.Errorf("repair observation title mutation %d", repair.action.Seq)
+			}
+		}
+		actions = attemptActions
+		return nil
+	})
+	if err != nil {
+		return SyncMutationTitleRepairReport{}, fmt.Errorf("repair observation mutation titles: %w", err)
+	}
+	report.Actions = actions
+	return report, nil
+}
+
+func (s *Store) observationMutationTitleRepairTx(tx *sql.Tx, mutation SyncMutation) (SyncMutationTitleRepairAction, string, int64, string, bool, error) {
+	validation := ValidateSyncMutationPayload(mutation.Entity, mutation.Op, mutation.Payload, mutation.EntityKey)
+	if mutation.Entity != SyncEntityObservation || mutation.Op != SyncOpUpsert || len(validation.MissingFields) != 1 || validation.MissingFields[0] != "title" {
+		return SyncMutationTitleRepairAction{}, "", 0, "", false, nil
+	}
+	var payload map[string]json.RawMessage
+	if err := decodeSyncPayload([]byte(mutation.Payload), &payload); err != nil {
+		return SyncMutationTitleRepairAction{}, "", 0, "", false, nil
+	}
+	payloadString := func(name string) string {
+		var value string
+		_ = json.Unmarshal(payload[name], &value)
+		return strings.TrimSpace(value)
+	}
+	entityKey := strings.TrimSpace(mutation.EntityKey)
+	if entityKey == "" || payloadString("sync_id") != entityKey || payloadString("content") == "" {
+		return SyncMutationTitleRepairAction{}, "", 0, "", false, nil
+	}
+	observation, err := s.getObservationBySyncIDTx(tx, entityKey, false)
+	if err == sql.ErrNoRows {
+		return SyncMutationTitleRepairAction{}, "", 0, "", false, nil
+	}
+	if err != nil {
+		return SyncMutationTitleRepairAction{}, "", 0, "", false, err
+	}
+	observationProject, _ := NormalizeProject(derefString(observation.Project))
+	mutationProject, _ := NormalizeProject(mutation.Project)
+	payloadProject, _ := NormalizeProject(payloadString("project"))
+	if strings.TrimSpace(observation.Title) != "" || (mutationProject != "" && mutationProject != observationProject) || (payloadProject != "" && payloadProject != observationProject) {
+		return SyncMutationTitleRepairAction{}, "", 0, "", false, nil
+	}
+	title := deriveObservationRepairTitle(observation.Content)
+	if err := ValidateObservationTitle(title); err != nil {
+		return SyncMutationTitleRepairAction{}, "", 0, "", false, nil
+	}
+	payload["title"], _ = json.Marshal(title)
+	rewritten, err := json.Marshal(payload)
+	if err != nil {
+		return SyncMutationTitleRepairAction{}, "", 0, "", false, err
+	}
+	if validation := ValidateSyncMutationPayload(mutation.Entity, mutation.Op, string(rewritten), mutation.EntityKey); validation.ReasonCode != "" {
+		return SyncMutationTitleRepairAction{}, "", 0, "", false, nil
+	}
+	return SyncMutationTitleRepairAction{Seq: mutation.Seq, Project: mutation.Project, Entity: mutation.Entity, EntityKey: mutation.EntityKey, Op: mutation.Op, Title: title}, string(rewritten), observation.ID, observation.Title, true, nil
+}
+
+func deriveObservationRepairTitle(content string) string {
+	content = strings.TrimSpace(stripPrivateTags(content))
+	runes := []rune(content)
+	for i, r := range runes {
+		if strings.ContainsRune(".!?。！？", r) {
+			runes = runes[:i+1]
+			break
+		}
+	}
+	return truncate(string(runes), 300)
 }
 
 // ReadSQLiteLockSnapshot returns SQLite lock-related PRAGMA values without

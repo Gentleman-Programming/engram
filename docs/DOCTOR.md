@@ -69,20 +69,26 @@ The CLI `--json` and MCP tool return:
 
 Plain `engram doctor` remains diagnostic-only. Findings that imply data movement set `requires_confirmation=true` so agents know a human must review evidence before repair.
 
-`engram doctor repair` is intentionally narrow and local-first: local SQLite remains the source of truth, and cloud/sync repair is out of scope. The repair MVP only supports project reclassification for:
+`engram doctor repair` is intentionally narrow and local-first: local SQLite remains the source of truth. Project reclassification supports:
 
 - `session_project_directory_mismatch`, using trusted `git_remote` or `git_root` evidence from doctor findings.
 - `manual_session_name_project_mismatch`, only for exact `manual-save-{known_project}` sessions, and only when trusted directory evidence does not contradict the manual-name target.
 
-Repair never deletes or deduplicates rows, never edits sync cursors, never mutates `sync_state`/`sync_mutations`, and never writes cloud state. `--plan` and `--dry-run` are non-mutating. `--apply` creates a SQLite backup under `<ENGRAM_DATA_DIR>/backups/` before a transaction updates only:
+Title restoration supports `sync_mutation_required_fields` only when a pending observation upsert has a blank title as its sole missing field and the matching local titleless observation has non-empty content. It derives a sanitized, bounded title from that local content and updates `observations.title` and `sync_mutations.payload` in place; all other invalid mutations remain quarantined on `--apply`.
+
+Repair never deletes or deduplicates rows, never edits sync cursors, and never writes cloud state. `--plan` and `--dry-run` are non-mutating. `--apply` creates a SQLite backup under `<ENGRAM_DATA_DIR>/backups/` before a project reclassification transaction updates only:
 
 - `sessions.project`
 - `observations.project`
 - `user_prompts.project`
 
+Title restoration does not create a SQLite backup.
+
 ### Repair JSON envelope
 
 All repair modes print stable JSON to stdout:
+
+For `sync_mutation_required_fields`, `repairs` lists title-only observation upserts that can be restored in place; `actions` continues to list residual rows quarantined on `--apply`.
 
 ```json
 {
@@ -127,4 +133,4 @@ ENGRAM_DATA_DIR=/tmp/engram-repair-clone engram doctor repair --project sias-app
 ENGRAM_DATA_DIR=/tmp/engram-repair-clone engram doctor repair --project sias-app --check session_project_directory_mismatch --apply
 ```
 
-After apply, verify that only the three allowed project columns changed for the planned session IDs and that a backup exists. If the repair is wrong, stop Engram processes and restore the `backup_path` database file manually.
+After a project reclassification apply, verify that only the three allowed project columns changed for the planned session IDs and that a backup exists. If the repair is wrong, stop Engram processes and restore the `backup_path` database file manually.
