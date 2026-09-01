@@ -368,8 +368,8 @@ engram setup gemini-cli
 `engram setup gemini-cli` now does three things:
 
 - Registers `mcpServers.engram` in `~/.gemini/settings.json` (Windows: `%APPDATA%\gemini\settings.json`)
-- Writes `~/.gemini/system.md` with the Engram Memory Protocol (includes post-compaction recovery)
-- Ensures `~/.gemini/.env` contains `GEMINI_SYSTEM_MD=1` so Gemini actually loads that system prompt
+- Writes `~/.gemini/system.md` with the Engram Memory Protocol, including post-compaction recovery and the required `mem_session_summary` then `mem_session_end` close sequence
+- Removes a legacy `GEMINI_SYSTEM_MD` override from `~/.gemini/.env`; Gemini CLI loads `system.md` directly and the override resolves it relative to the working directory
 
 > `engram setup gemini-cli` automatically writes the full Memory Protocol to `~/.gemini/system.md`, so the agent knows exactly when to save, search, and close sessions. No additional configuration needed.
 

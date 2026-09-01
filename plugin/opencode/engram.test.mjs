@@ -98,10 +98,11 @@ async function createRuntime(t, {
   directory = "/work/engram",
   projectCurrentResponse = { project: "engram", project_source: "git_remote" },
 	projectCurrentOK = true,
-	manifestExists = false,
-  sessionGet = async ({ path }) => sdkResult(session(path.id)),
-  registrationResponse,
-  contextResponse,
+  manifestExists = false,
+   sessionGet = async ({ path }) => sdkResult(session(path.id)),
+   registrationResponse,
+   sessionEndResponse,
+   contextResponse,
 } = {}) {
   const originalFetch = globalThis.fetch
   const originalBun = globalThis.Bun
@@ -125,7 +126,7 @@ async function createRuntime(t, {
     const path = new URL(url).pathname
     if (path === "/health") return { ok: true, async json() { return { status: "ok" } } }
     const body = init?.body ? JSON.parse(init.body) : undefined
-    requests.push({ path, url: String(url), body })
+    requests.push({ path, url: String(url), method: init?.method, body })
 		if (path === "/project/current") {
 			const response = typeof projectCurrentResponse === "function" ? projectCurrentResponse() : projectCurrentResponse
 			return httpResponse(response, projectCurrentOK, () => startupEvents.push("project-current:response"))
@@ -134,6 +135,10 @@ async function createRuntime(t, {
       registeredIDs.push(body.id)
       if (registrationResponse) return registrationResponse(registeredIDs.length)
       return httpResponse()
+    }
+    if (path.startsWith("/sessions/") && path.endsWith("/end")) {
+      if (sessionEndResponse) return sessionEndResponse(requests.filter(({ path }) => path.startsWith("/sessions/") && path.endsWith("/end")).length)
+      return httpResponse({})
     }
     if (path === "/context/compaction" && contextResponse) return contextResponse()
     return httpResponse({})
@@ -835,6 +840,54 @@ test("a title-only session.created event registers an authoritative root", async
   assert.equal(output.args.session_id, "legitimate-root")
   assert.deepEqual(runtime.registeredIDs, ["legitimate-root"])
   assert.deepEqual(runtime.sessionGetIDs, [], "event-cached roots must not query the SDK")
+})
+
+test("deleting a registered root ends its encoded Engram session before invalidation", async (t) => {
+  const sessionID = "root/with space"
+  const runtime = await createRuntime(t)
+  await runtime.event("session.created", session(sessionID))
+  await runtime.event("session.deleted", { id: sessionID })
+
+  const endRequests = runtime.requests.filter(({ path }) => path.startsWith("/sessions/") && path.endsWith("/end"))
+  assert.equal(endRequests.length, 1)
+  assert.equal(endRequests[0].method, "POST")
+  assert.equal(endRequests[0].path, `/sessions/${encodeURIComponent(sessionID)}/end`)
+
+  const output = toolOutput()
+  await assertNoForward(runtime.before({ tool: "mem_save", sessionID }, output), output)
+})
+
+test("deleting a child never ends the child or its root Engram session", async (t) => {
+  const runtime = await createRuntime(t)
+  await runtime.event("session.created", session("root"))
+  await runtime.event("session.created", session("child", "root"))
+  await runtime.event("session.deleted", { id: "child" })
+
+  assert.equal(runtime.requests.some(({ path }) => path.startsWith("/sessions/") && path.endsWith("/end")), false)
+})
+
+test("failed root session end retries on a duplicate deletion without confirming closure", async (t) => {
+  const runtime = await createRuntime(t, {
+    sessionEndResponse: (attempt) => attempt === 1
+      ? httpResponse({ error: "unavailable" }, false)
+      : httpResponse({}),
+  })
+  await runtime.event("session.created", session("root"))
+  await runtime.event("session.deleted", { id: "root" })
+  await runtime.event("session.deleted", { id: "root" })
+
+  const endRequests = runtime.requests.filter(({ path }) => path === "/sessions/root/end")
+  assert.equal(endRequests.length, 2)
+})
+
+test("duplicate deletion does not repeat a confirmed root session end", async (t) => {
+  const runtime = await createRuntime(t)
+  await runtime.event("session.created", session("root"))
+  await runtime.event("session.deleted", { id: "root" })
+  await runtime.event("session.deleted", { id: "root" })
+
+  const endRequests = runtime.requests.filter(({ path }) => path === "/sessions/root/end")
+  assert.equal(endRequests.length, 1)
 })
 
 test("deleting a parent invalidates descendants and prevents later writes or re-registration", async (t) => {
