@@ -341,7 +341,7 @@ Examples:
 					mcp.Description("Category: decision, architecture, bugfix, pattern, config, discovery, learning (default: manual)"),
 				),
 				mcp.WithString("session_id",
-					mcp.Description("Session ID to associate with. When omitted, attempts unique active runtime-session selection using current worktree evidence; falls back to manual-save-{project} when no candidate remains, and rejects ambiguity rather than selecting by recency."),
+					mcp.Description("Session ID to associate with. Only pass a value returned by a prior successful mem_session_start call in this session — never invent one from a task name, issue number, or date. An unregistered ID is rejected with error_code=unknown_session; retry the same call with session_id omitted rather than guessing another value. When omitted (the common case), attempts unique active runtime-session selection using current worktree evidence; falls back to manual-save-{project} when no candidate remains, and rejects ambiguity rather than selecting by recency."),
 				),
 				mcp.WithString("scope",
 					mcp.Description("Scope for this observation: project (default) or personal"),
@@ -485,7 +485,7 @@ Examples:
 					mcp.Description("The user's prompt text"),
 				),
 				mcp.WithString("session_id",
-					mcp.Description("Session ID to associate with. When omitted, attempts unique active runtime-session selection using current worktree evidence; falls back to manual-save-{project} when no candidate remains, and rejects ambiguity rather than selecting by recency."),
+					mcp.Description("Session ID to associate with. Only pass a value returned by a prior successful mem_session_start call in this session — never invent one from a task name, issue number, or date. An unregistered ID is rejected with error_code=unknown_session; retry the same call with session_id omitted rather than guessing another value. When omitted (the common case), attempts unique active runtime-session selection using current worktree evidence; falls back to manual-save-{project} when no candidate remains, and rejects ambiguity rather than selecting by recency."),
 				),
 				mcp.WithString("project",
 					mcp.Description("Optional recovery target only after ambiguous_project. Ignored unless project_choice_reason is user_selected_after_ambiguous_project."),
@@ -669,7 +669,7 @@ GUIDELINES:
 					mcp.Description("Full session summary using the Goal/Instructions/Discoveries/Accomplished/Next Steps/Relevant Files format"),
 				),
 				mcp.WithString("session_id",
-					mcp.Description("Session ID to associate with. When omitted, attempts unique active runtime-session selection using current worktree evidence; falls back to manual-save-{project} when no candidate remains, and rejects ambiguity rather than selecting by recency."),
+					mcp.Description("Session ID to associate with. Only pass a value returned by a prior successful mem_session_start call in this session — never invent one from a task name, issue number, or date. An unregistered ID is rejected with error_code=unknown_session; retry the same call with session_id omitted rather than guessing another value. When omitted (the common case), attempts unique active runtime-session selection using current worktree evidence; falls back to manual-save-{project} when no candidate remains, and rejects ambiguity rather than selecting by recency."),
 				),
 				mcp.WithString("project",
 					mcp.Description("Optional explicit project for this memory. Accepted only when backed by known context (existing project, matching session, repo config, or ambiguous-project recovery); invalid or unbacked names fail loudly."),
@@ -751,7 +751,7 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 					mcp.Description("The text output containing a '## Key Learnings:' section with numbered or bulleted items"),
 				),
 				mcp.WithString("session_id",
-					mcp.Description("Session ID to associate with. When omitted, attempts unique active runtime-session selection using current worktree evidence; falls back to manual-save-{project} when no candidate remains, and rejects ambiguity rather than selecting by recency."),
+					mcp.Description("Session ID to associate with. Only pass a value returned by a prior successful mem_session_start call in this session — never invent one from a task name, issue number, or date. An unregistered ID is rejected with error_code=unknown_session; retry the same call with session_id omitted rather than guessing another value. When omitted (the common case), attempts unique active runtime-session selection using current worktree evidence; falls back to manual-save-{project} when no candidate remains, and rejects ambiguity rather than selecting by recency."),
 				),
 				mcp.WithString("source",
 					mcp.Description("Source identifier (e.g. 'subagent-stop', 'session-end')"),
@@ -2968,10 +2968,19 @@ func writeProjectErrorResult(activity *SessionActivity, sessionID string, res pr
 	}
 	var unknownSessionErr *unknownSessionError
 	if errors.As(err, &unknownSessionErr) {
-		return errorWithMeta("unknown_session",
+		result := errorWithMeta("unknown_session",
 			fmt.Sprintf("Session %q was provided but does not exist", unknownSessionErr.SessionID),
 			res.AvailableProjects,
 		)
+		// Structured recovery fields let a caller retry deterministically
+		// instead of re-parsing the hint string: drop session_id and retry
+		// the same call unchanged (#683). Never auto-retry on the caller's
+		// behalf here — that would hide typos and fragment session history.
+		addErrorMetadata(result, map[string]any{
+			"invalid_session_id":       unknownSessionErr.SessionID,
+			"retry_without_session_id": true,
+		})
+		return result
 	}
 	var unknownProjectErr *unknownProjectError
 	if errors.As(err, &unknownProjectErr) {
