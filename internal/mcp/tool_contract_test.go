@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"os"
 	"slices"
 	"sort"
@@ -352,6 +353,43 @@ func TestReadMCPToolContractFixture(t *testing.T) {
 	}
 }
 
+func TestCompareMCPToolContractEnumNumericEquality(t *testing.T) {
+	for _, tc := range []struct {
+		name, base, live, want string
+	}{
+		{"numeric lexemes and nested values are equal", `[1,{"nested":[900719925474099312345.0000000000000000000001,1e0]}]`, `[1.0,{"nested":[900719925474099312345.00000000000000000000010,1.0]}]`, ""},
+		{"different arbitrary-precision number narrows enum", `900719925474099312345.0000000000000000000001`, `900719925474099312345.0000000000000000000002`, "enum-narrowed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := map[string]mcpToolSchema{"x": {Types: []string{"number"}, Enum: []string{tc.base}}}
+			live := map[string]mcpToolSchema{"x": {Types: []string{"number"}, Enum: []string{tc.live}}}
+			err := compareMCPToolContract(base, live)
+			if tc.want == "" && err != nil || tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestCompareMCPToolContractEnumJSONEquality(t *testing.T) {
+	for _, tc := range []struct {
+		name, base, live, want string
+	}{
+		{"primitive types differ", `1`, `"1"`, "enum-narrowed"},
+		{"array order differs", `[1,2]`, `[2,1]`, "enum-narrowed"},
+		{"object members ignore source order", `{"first":1,"second":[2,3]}`, `{"second":[2.0,3.0],"first":1e0}`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := map[string]mcpToolSchema{"x": {Types: []string{"number"}, Enum: []string{tc.base}}}
+			live := map[string]mcpToolSchema{"x": {Types: []string{"number"}, Enum: []string{tc.live}}}
+			err := compareMCPToolContract(base, live)
+			if tc.want == "" && err != nil || tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestCompareMCPToolContract(t *testing.T) {
 	base := map[string]mcpToolSchema{"x": {Types: []string{"object"}, Properties: map[string]mcpToolSchema{"optional": {Types: []string{"integer"}}, "required": {Types: []string{"array"}, Items: &mcpToolSchema{Types: []string{"string"}, Enum: []string{`"a"`}}}}, Required: []string{"required"}, Additional: false}}
 	cases := []struct {
@@ -622,7 +660,7 @@ func compareMCPToolSchema(drifts *[]mcpToolContractDrift, path string, v1, live 
 		drift("enum-added")
 	} else if len(v1.Enum) > 0 && len(live.Enum) > 0 {
 		for _, value := range v1.Enum {
-			if !slices.Contains(live.Enum, value) {
+			if !containsJSONInstance(live.Enum, value) {
 				drift("enum-narrowed")
 				break
 			}
@@ -659,6 +697,83 @@ func compareMCPToolSchema(drifts *[]mcpToolContractDrift, path string, v1, live 
 			}
 		}
 	}
+}
+
+func containsJSONInstance(values []string, target string) bool {
+	targetValue, ok := decodeJSONInstance(target)
+	if !ok {
+		return false
+	}
+	for _, value := range values {
+		candidate, ok := decodeJSONInstance(value)
+		if ok && equalJSONInstances(targetValue, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func decodeJSONInstance(encoded string) (any, bool) {
+	decoder := json.NewDecoder(strings.NewReader(encoded))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, false
+	}
+	var extra any
+	return value, decoder.Decode(&extra) == io.EOF
+}
+
+func equalJSONInstances(left, right any) bool {
+	switch left := left.(type) {
+	case nil:
+		return right == nil
+	case bool:
+		right, ok := right.(bool)
+		return ok && left == right
+	case string:
+		right, ok := right.(string)
+		return ok && left == right
+	case json.Number:
+		right, ok := right.(json.Number)
+		return ok && equalJSONNumbers(left, right)
+	case []any:
+		right, ok := right.([]any)
+		if !ok || len(left) != len(right) {
+			return false
+		}
+		for i := range left {
+			if !equalJSONInstances(left[i], right[i]) {
+				return false
+			}
+		}
+		return true
+	case map[string]any:
+		right, ok := right.(map[string]any)
+		if !ok || len(left) != len(right) {
+			return false
+		}
+		for key, leftValue := range left {
+			rightValue, ok := right[key]
+			if !ok || !equalJSONInstances(leftValue, rightValue) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+func equalJSONNumbers(left, right json.Number) bool {
+	var leftValue, rightValue big.Rat
+	if _, ok := leftValue.SetString(string(left)); !ok {
+		return false
+	}
+	if _, ok := rightValue.SetString(string(right)); !ok {
+		return false
+	}
+	return leftValue.Cmp(&rightValue) == 0
 }
 
 func hasExtraType(v1, live []string) bool {
