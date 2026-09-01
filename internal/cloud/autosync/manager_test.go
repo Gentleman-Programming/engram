@@ -967,6 +967,76 @@ func TestManagerCycleAfterBackoffExpirySchedulesAnotherBackoff(t *testing.T) {
 	}
 }
 
+func TestManagerCycleAfterRepairRetriesFreshPayloadWithoutRestart(t *testing.T) {
+	const (
+		stalePayload    = `{"sync_id":"obs-704","title":""}`
+		repairedPayload = `{"sync_id":"obs-704","title":"Recovered title"}`
+	)
+
+	ls := newFakeLocalStore()
+	ls.mutations = []store.SyncMutation{{
+		Seq:       1,
+		Entity:    "observation",
+		EntityKey: "obs-704",
+		Op:        "upsert",
+		Project:   "proj-a",
+		Payload:   stalePayload,
+	}}
+	tr := newFakeTransport()
+	tr.pushErr = errors.New("canonicalize materialized mutation batch chunk: mutations[0]: observation payload title is required for upsert")
+	cfg := DefaultConfig()
+	cfg.MaxConsecutiveFailures = 1
+	mgr := New(ls, tr, cfg)
+
+	mgr.cycle(context.Background())
+
+	st := mgr.Status()
+	if st.ConsecutiveFailures != cfg.MaxConsecutiveFailures || st.BackoffUntil == nil {
+		t.Fatalf("expected first push to reach the failure ceiling with backoff, got %+v", st)
+	}
+
+	// Simulate `cloud upgrade repair --apply` rewriting the queued mutation in
+	// another process while this Manager remains alive and in backoff.
+	ls.mu.Lock()
+	ls.mutations[0].Payload = repairedPayload
+	ls.mu.Unlock()
+	tr.mu.Lock()
+	tr.pushErr = nil
+	tr.pushResult = &PushMutationsResult{AcceptedSeqs: []int64{1}}
+	tr.mu.Unlock()
+
+	expired := time.Now().Add(-time.Second)
+	mgr.mu.Lock()
+	mgr.status.BackoffUntil = &expired
+	mgr.mu.Unlock()
+
+	mgr.cycle(context.Background())
+
+	tr.mu.Lock()
+	attempted := append([][]MutationEntry(nil), tr.attempted...)
+	tr.mu.Unlock()
+	if len(attempted) != 2 {
+		t.Fatalf("expected one stale attempt and one post-repair retry, got %d attempts", len(attempted))
+	}
+	if len(attempted[0]) != 1 || string(attempted[0][0].Payload) != stalePayload {
+		t.Fatalf("expected first attempt to carry stale payload, got %+v", attempted[0])
+	}
+	if len(attempted[1]) != 1 || string(attempted[1][0].Payload) != repairedPayload {
+		t.Fatalf("expected retry to reload repaired payload, got %+v", attempted[1])
+	}
+
+	st = mgr.Status()
+	if st.Phase != PhaseHealthy || st.ConsecutiveFailures != 0 || st.BackoffUntil != nil {
+		t.Fatalf("expected repaired retry to recover without Manager restart, got %+v", st)
+	}
+	ls.mu.Lock()
+	acked := append([]int64(nil), ls.ackedSeqs...)
+	ls.mu.Unlock()
+	if fmt.Sprint(acked) != "[1]" {
+		t.Fatalf("expected repaired local mutation to be acked, got %v", acked)
+	}
+}
+
 func TestManagerBackoffSaturatesBeforeDurationConversion(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.BaseBackoff = time.Second
