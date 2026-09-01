@@ -12,12 +12,14 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	projectpkg "github.com/Gentleman-Programming/engram/internal/project"
 	"github.com/Gentleman-Programming/engram/internal/store"
 	_ "modernc.org/sqlite"
 )
@@ -314,6 +316,51 @@ func TestClaudeSaveNudgeCompatibilityRoutes(t *testing.T) {
 	h.ServeHTTP(missingSessionRec, missingSessionReq)
 	if missingSessionRec.Code != http.StatusNotFound {
 		t.Fatalf("expected missing session 404, got %d", missingSessionRec.Code)
+	}
+}
+
+func TestHandleCreateSessionStoresRuntimeWorktreeDirectory(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "nested", "child")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("create nested directory: %v", err)
+	}
+	if output, err := exec.Command("git", "init", root).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, output)
+	}
+	t.Chdir(root)
+
+	st := newServerTestStore(t)
+	h := New(st, 0).Handler()
+	for _, tc := range []struct {
+		id        string
+		directory string
+	}{
+		{id: "nested-trailing", directory: nested + string(os.PathSeparator)},
+		{id: "nested-relative", directory: filepath.Join("nested", "child")},
+		{id: "omitted-directory"},
+	} {
+		t.Run(tc.id, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			body := fmt.Sprintf(`{"id":%q,"project":"engram"`, tc.id)
+			if tc.directory != "" {
+				body += fmt.Sprintf(`,"directory":%q`, tc.directory)
+			}
+			body += `}`
+			req := httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(body))
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("create session = %d, want 201: %s", rec.Code, rec.Body.String())
+			}
+
+			session, err := st.GetSession(tc.id)
+			if err != nil {
+				t.Fatalf("get session: %v", err)
+			}
+			if want := projectpkg.RuntimeWorktreeDirectory(root); session.Directory != want {
+				t.Fatalf("stored directory = %q, want worktree root %q", session.Directory, want)
+			}
+		})
 	}
 }
 

@@ -2364,38 +2364,66 @@ func (s *Store) GetSession(id string) (*Session, error) {
 // share only the SQLite store, so the active session must be read from disk —
 // never from in-memory state.
 //
-// Selection rules:
+// Candidate rules:
 //   - Scope to the (normalized) project.
+//   - Scope to the current runtime directory.
 //   - Require ended_at IS NULL — ended sessions are never returned, so stale
 //     sessions naturally fall out without any explicit clearing step.
 //   - Exclude the manual-save fallback sessions (id LIKE 'manual-save%'); those
 //     are created by the fallback path itself and must not be resolved as "the
 //     active session", which would make resolution circular.
-//   - When multiple un-ended sessions exist, pick the MOST RECENT by
-//     started_at DESC, with id DESC as a deterministic tie-breaker.
-func (s *Store) MostRecentActiveSession(project string) (string, bool, error) {
+//
+// ActiveRuntimeSessions returns active, non-manual sessions for a project and
+// runtime directories. The directories narrow candidates; callers must not
+// treat them as session identity.
+func (s *Store) ActiveRuntimeSessions(project string, directories ...string) ([]string, error) {
 	project, _ = NormalizeProject(project)
 	if project == "" {
-		return "", false, nil
+		return nil, nil
+	}
+	directorySet := make(map[string]struct{}, len(directories))
+	for _, directory := range directories {
+		if directory != "" {
+			directorySet[directory] = struct{}{}
+		}
+	}
+	if len(directorySet) == 0 {
+		return nil, nil
+	}
+	args := make([]any, 0, len(directorySet)+1)
+	args = append(args, project)
+	placeholders := make([]string, 0, len(directorySet))
+	for directory := range directorySet {
+		placeholders = append(placeholders, "?")
+		args = append(args, directory)
 	}
 
-	var id string
-	err := s.db.QueryRow(`
-		SELECT id
+	rows, err := s.queryHook(s.db, `
+		SELECT DISTINCT id
 		FROM sessions
 		WHERE LOWER(project) = ?
+		  AND directory IN (`+strings.Join(placeholders, ", ")+`)
 		  AND ended_at IS NULL
 		  AND id NOT LIKE 'manual-save%'
-		ORDER BY datetime(started_at) DESC, id DESC
-		LIMIT 1
-	`, project).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
-	}
+		ORDER BY id
+	`, args...)
 	if err != nil {
-		return "", false, err
+		return nil, err
 	}
-	return id, true, nil
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 // A database upgraded from the schema where sessions.project was nullable still
