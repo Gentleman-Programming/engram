@@ -659,11 +659,15 @@ func TestHandleSaveRecordsActivityForExplicitSessionID(t *testing.T) {
 // store-based resolution is the only thing that survives the process split.
 func TestHandleSaveResolvesActiveSessionFromStore(t *testing.T) {
 	s := newMCPTestStore(t)
+	originalWorkingDirectory := currentWorkingDirectory
+	currentWorkingDirectory = func() string { return "/work/engram" }
+	t.Cleanup(func() { currentWorkingDirectory = originalWorkingDirectory })
+	runtimeDirectory := runtimeSessionDirectory("/work/engram")
 
 	// Simulate the SessionStart hook registering a UUID session (POST /sessions
 	// ultimately calls store.CreateSession).
 	const uuidSession = "0c8e7f2a-1b34-4d9e-9a77-aaaabbbbcccc"
-	if err := s.CreateSession(uuidSession, "engram", "/work/engram"); err != nil {
+	if err := s.CreateSession(uuidSession, "engram", runtimeDirectory); err != nil {
 		t.Fatalf("create UUID session: %v", err)
 	}
 
@@ -691,6 +695,141 @@ func TestHandleSaveResolvesActiveSessionFromStore(t *testing.T) {
 	}
 	if obs[0].SessionID != uuidSession {
 		t.Fatalf("expected observation to attach to active UUID session %q, got %q (regression #386: fell back to manual-save)", uuidSession, obs[0].SessionID)
+	}
+}
+
+func TestHandleSaveBindsNestedWriteToSessionRegisteredAtRepositoryRoot(t *testing.T) {
+	s := newMCPTestStore(t)
+	repository := project.DetectProjectFull(".")
+	if repository.Error != nil {
+		t.Fatalf("detect repository: %v", repository.Error)
+	}
+	if repository.Path == "" {
+		t.Fatal("expected repository detection to provide a canonical root")
+	}
+
+	nestedDirectory := filepath.Join(repository.Path, "internal", "mcp")
+	nested := project.DetectProjectFull(nestedDirectory)
+	if nested.Error != nil {
+		t.Fatalf("detect nested directory: %v", nested.Error)
+	}
+	if nested.Path != repository.Path {
+		t.Fatalf("nested directory resolved to %q, want repository root %q", nested.Path, repository.Path)
+	}
+	t.Chdir(repository.Path)
+
+	start := handleSessionStart(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	startResult, err := start(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"id": "jd-runtime-session",
+	}}})
+	if err != nil || startResult.IsError {
+		t.Fatalf("start session: err=%v text=%q", err, callResultText(t, startResult))
+	}
+
+	originalWorkingDirectory := currentWorkingDirectory
+	currentWorkingDirectory = func() string { return nestedDirectory }
+	t.Cleanup(func() { currentWorkingDirectory = originalWorkingDirectory })
+
+	save := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	saveResult, err := save(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "Nested runtime save",
+		"content": "**What**: saved from a nested directory\n**Why**: runtime session binding regression",
+		"type":    "bugfix",
+		"project": repository.Project,
+	}}})
+	if err != nil || saveResult.IsError {
+		t.Fatalf("save: err=%v text=%q", err, callResultText(t, saveResult))
+	}
+
+	observations, err := s.RecentObservations(repository.Project, "project", 1)
+	if err != nil {
+		t.Fatalf("recent observations: %v", err)
+	}
+	if len(observations) != 1 || observations[0].SessionID != "jd-runtime-session" {
+		t.Fatalf("nested write attached to %#v, want session %q", observations, "jd-runtime-session")
+	}
+}
+
+func TestHandleSaveBindsNestedWriteToExplicitNestedRuntimeSession(t *testing.T) {
+	s := newMCPTestStore(t)
+	repository := t.TempDir()
+	nestedDirectory := filepath.Join(repository, "nested")
+	if err := os.MkdirAll(nestedDirectory, 0o755); err != nil {
+		t.Fatalf("create nested directory: %v", err)
+	}
+	initTestGitRepo(t, repository)
+	projectResult := project.DetectProjectFull(nestedDirectory)
+
+	start := handleSessionStart(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	startResult, err := start(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"id":        "jd-explicit-nested-runtime-session",
+		"directory": nestedDirectory,
+	}}})
+	if err != nil || startResult.IsError {
+		t.Fatalf("start session: err=%v text=%q", err, callResultText(t, startResult))
+	}
+	wantDirectory := runtimeSessionDirectory(repository)
+	if session, err := s.GetSession("jd-explicit-nested-runtime-session"); err != nil || session.Directory != wantDirectory {
+		t.Fatalf("explicit session directory = %#v, err=%v; want worktree root %q", session, err, wantDirectory)
+	}
+
+	originalWorkingDirectory := currentWorkingDirectory
+	currentWorkingDirectory = func() string { return repository }
+	t.Cleanup(func() { currentWorkingDirectory = originalWorkingDirectory })
+	saveResult, err := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "Explicit nested runtime save",
+		"content": "**What**: saved from an explicit nested runtime directory\n**Why**: runtime session binding regression",
+		"type":    "bugfix",
+		"project": projectResult.Project,
+	}}})
+	if err != nil || saveResult.IsError {
+		t.Fatalf("save: err=%v text=%q", err, callResultText(t, saveResult))
+	}
+	observations, err := s.RecentObservations(projectResult.Project, "project", 1)
+	if err != nil || len(observations) != 1 || observations[0].SessionID != "jd-explicit-nested-runtime-session" {
+		t.Fatalf("nested write attached to %#v, err=%v", observations, err)
+	}
+}
+
+func TestHandleSaveBindsRelativeDirectoryRuntimeSession(t *testing.T) {
+	s := newMCPTestStore(t)
+	repository := t.TempDir()
+	initTestGitRepo(t, repository)
+	t.Chdir(repository)
+
+	start := handleSessionStart(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	startResult, err := start(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"id":        "relative-runtime-session",
+		"directory": ".",
+	}}})
+	if err != nil || startResult.IsError {
+		t.Fatalf("start session: err=%v text=%q", err, callResultText(t, startResult))
+	}
+
+	session, err := s.GetSession("relative-runtime-session")
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	wantDirectory := runtimeSessionDirectory(".")
+	if session.Directory != wantDirectory {
+		t.Fatalf("relative session directory = %q, want stable absolute directory %q", session.Directory, wantDirectory)
+	}
+
+	originalWorkingDirectory := currentWorkingDirectory
+	currentWorkingDirectory = func() string { return repository }
+	t.Cleanup(func() { currentWorkingDirectory = originalWorkingDirectory })
+	saveResult, err := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "Relative runtime save",
+		"content": "**What**: saved from a relative runtime directory\n**Why**: runtime session binding regression",
+		"type":    "bugfix",
+		"project": session.Project,
+	}}})
+	if err != nil || saveResult.IsError {
+		t.Fatalf("save: err=%v text=%q", err, callResultText(t, saveResult))
+	}
+	observations, err := s.RecentObservations(session.Project, "project", 1)
+	if err != nil || len(observations) != 1 || observations[0].SessionID != "relative-runtime-session" {
+		t.Fatalf("relative runtime write attached to %#v, err=%v", observations, err)
 	}
 }
 
@@ -726,47 +865,124 @@ func TestHandleSaveFallsBackToManualSaveWhenNoActiveSession(t *testing.T) {
 	}
 }
 
-// TestHandleSaveResolvesMostRecentActiveSession covers the multi-session edge
-// case: two un-ended sessions exist; mem_save must attach to the most recent.
-func TestHandleSaveResolvesMostRecentActiveSession(t *testing.T) {
+// TestHandleSaveRejectsAmbiguousActiveSessions ensures an omitted session_id
+// never selects one of several active runtime sessions in the same directory.
+func TestHandleSaveRejectsAmbiguousActiveSessions(t *testing.T) {
 	s := newMCPTestStore(t)
+	originalWorkingDirectory := currentWorkingDirectory
+	currentWorkingDirectory = func() string { return "/work/engram" }
+	t.Cleanup(func() { currentWorkingDirectory = originalWorkingDirectory })
+	runtimeDirectory := runtimeSessionDirectory("/work/engram")
 
-	if err := s.CreateSession("uuid-older", "engram", "/work/engram"); err != nil {
-		t.Fatalf("create older session: %v", err)
+	if err := s.CreateSession("uuid-first", "engram", runtimeDirectory); err != nil {
+		t.Fatalf("create first session: %v", err)
 	}
-	if _, err := s.DB().Exec(`UPDATE sessions SET started_at = ? WHERE id = ?`, "2025-01-01 00:00:00", "uuid-older"); err != nil {
-		t.Fatalf("backdate older session: %v", err)
-	}
-	if err := s.CreateSession("uuid-newer", "engram", "/work/engram"); err != nil {
-		t.Fatalf("create newer session: %v", err)
-	}
-	if _, err := s.DB().Exec(`UPDATE sessions SET started_at = ? WHERE id = ?`, "2025-06-01 00:00:00", "uuid-newer"); err != nil {
-		t.Fatalf("set newer session started_at: %v", err)
+	if err := s.CreateSession("uuid-second", "engram", runtimeDirectory); err != nil {
+		t.Fatalf("create second session: %v", err)
 	}
 
 	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"title":   "Most recent active session",
-		"content": "**What**: saved with two active sessions\n**Why**: multi-session edge case",
+		"title":   "Ambiguous active sessions",
+		"content": "**What**: saved without session_id\n**Why**: ambiguous runtime sessions must fail",
 		"type":    "bugfix",
 		"project": "engram",
 	}}})
 	if err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
-	if res.IsError {
-		t.Fatalf("unexpected save error: %s", callResultText(t, res))
+	if !res.IsError {
+		t.Fatal("expected ambiguous omitted session_id to fail")
+	}
+	if got := callResultText(t, res); !strings.Contains(got, "multiple active runtime sessions") {
+		t.Fatalf("expected ambiguity error, got %q", got)
+	}
+	obs, err := s.RecentObservations("engram", "project", 5)
+	if err != nil {
+		t.Fatalf("recent observations: %v", err)
+	}
+	if len(obs) != 0 {
+		t.Fatalf("expected no write after ambiguous session resolution, got %#v", obs)
+	}
+}
+
+func TestHandleSaveFallsBackWhenActiveSessionIsInAnotherDirectory(t *testing.T) {
+	s := newMCPTestStore(t)
+	originalWorkingDirectory := currentWorkingDirectory
+	currentWorkingDirectory = func() string { return "/work/current" }
+	t.Cleanup(func() { currentWorkingDirectory = originalWorkingDirectory })
+	if err := s.CreateSession("other-worktree-session", "engram", runtimeSessionDirectory("/work/other")); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "Different worktree fallback",
+		"content": "**What**: saved without session_id\n**Why**: worktree regression guard",
+		"project": "engram",
+	}}})
+	if err != nil || res.IsError {
+		t.Fatalf("save failed: err=%v text=%q", err, callResultText(t, res))
 	}
 
 	obs, err := s.RecentObservations("engram", "project", 5)
 	if err != nil {
 		t.Fatalf("recent observations: %v", err)
 	}
-	if len(obs) == 0 {
-		t.Fatalf("expected at least one observation, got none")
+	if len(obs) != 1 || obs[0].SessionID != defaultSessionID("engram") {
+		t.Fatalf("expected manual fallback, got %#v", obs)
 	}
-	if obs[0].SessionID != "uuid-newer" {
-		t.Fatalf("expected most recent active session uuid-newer, got %q", obs[0].SessionID)
+}
+
+func TestHandleSaveExcludesRuntimeSessionInSiblingLinkedWorktree(t *testing.T) {
+	s := newMCPTestStore(t)
+	parent := t.TempDir()
+	primary := filepath.Join(parent, "primary")
+	sibling := filepath.Join(parent, "sibling")
+	if err := os.MkdirAll(primary, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initTestGitRepo(t, primary)
+	commit := exec.Command("git", "-C", primary, "commit", "--allow-empty", "-m", "initial commit")
+	if out, err := commit.CombinedOutput(); err != nil {
+		t.Fatalf("create initial commit: %v\n%s", err, out)
+	}
+	addWorktree := exec.Command("git", "-C", primary, "worktree", "add", "-b", "sibling", sibling)
+	if out, err := addWorktree.CombinedOutput(); err != nil {
+		t.Fatalf("add sibling worktree: %v\n%s", err, out)
+	}
+	t.Chdir(primary)
+
+	start := handleSessionStart(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	startResult, err := start(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"id": "primary-runtime-session",
+	}}})
+	if err != nil || startResult.IsError {
+		t.Fatalf("start primary session: err=%v text=%q", err, callResultText(t, startResult))
+	}
+	primarySession, err := s.GetSession("primary-runtime-session")
+	if err != nil {
+		t.Fatalf("get primary session: %v", err)
+	}
+	if primarySession.Directory == runtimeSessionDirectory(sibling) {
+		t.Fatalf("primary runtime directory %q collapsed to sibling worktree", primarySession.Directory)
+	}
+
+	originalWorkingDirectory := currentWorkingDirectory
+	currentWorkingDirectory = func() string { return sibling }
+	t.Cleanup(func() { currentWorkingDirectory = originalWorkingDirectory })
+	saveResult, err := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "Sibling worktree runtime save",
+		"content": "**What**: saved from a sibling worktree\n**Why**: runtime sessions must not cross worktree boundaries",
+		"type":    "bugfix",
+		"project": primarySession.Project,
+	}}})
+	if err != nil || saveResult.IsError {
+		t.Fatalf("save: err=%v text=%q", err, callResultText(t, saveResult))
+	}
+	observations, err := s.RecentObservations(primarySession.Project, "project", 1)
+	if err != nil || len(observations) != 1 || observations[0].SessionID != defaultSessionID(primarySession.Project) {
+		t.Fatalf("sibling worktree write attached to %#v, err=%v", observations, err)
 	}
 }
 
@@ -4309,8 +4525,9 @@ func TestSessionStartWithExplicitDirectoryPreservesDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get session: %v", err)
 	}
-	if sess.Directory != explicitDir {
-		t.Fatalf("expected directory=%q, got %q", explicitDir, sess.Directory)
+	wantDirectory := runtimeSessionDirectory(explicitDir)
+	if sess.Directory != wantDirectory {
+		t.Fatalf("expected directory=%q, got %q", wantDirectory, sess.Directory)
 	}
 }
 
@@ -4359,8 +4576,9 @@ func TestSessionStartWithExplicitDirectoryResolvesProjectFromDirectory(t *testin
 	if sess.Project != "explicit-session-project" {
 		t.Fatalf("expected explicit directory project, got %q", sess.Project)
 	}
-	if sess.Directory != explicitDir {
-		t.Fatalf("expected persisted directory=%q, got %q", explicitDir, sess.Directory)
+	wantDirectory := runtimeSessionDirectory(rightRepo)
+	if sess.Directory != wantDirectory {
+		t.Fatalf("expected persisted worktree root=%q, got %q", wantDirectory, sess.Directory)
 	}
 }
 
@@ -4400,8 +4618,9 @@ func TestSessionStartWithExplicitDirectoryTrimsWhitespaceBeforePersisting(t *tes
 	if sess.Project != "trimmed-session-project" {
 		t.Fatalf("expected trimmed explicit directory project, got %q", sess.Project)
 	}
-	if sess.Directory != trimmedDir {
-		t.Fatalf("expected trimmed persisted directory=%q, got %q", trimmedDir, sess.Directory)
+	wantDirectory := runtimeSessionDirectory(repoDir)
+	if sess.Directory != wantDirectory {
+		t.Fatalf("expected trimmed persisted worktree root=%q, got %q", wantDirectory, sess.Directory)
 	}
 }
 
@@ -4445,8 +4664,9 @@ func TestSessionStartWithExplicitPlainDirectoryUsesDirectoryBasenameProject(t *t
 	if sess.Project != "plain-session-target" {
 		t.Fatalf("expected explicit plain directory project, got %q", sess.Project)
 	}
-	if sess.Directory != explicitDir {
-		t.Fatalf("expected persisted directory=%q, got %q", explicitDir, sess.Directory)
+	wantDirectory := runtimeSessionDirectory(explicitDir)
+	if sess.Directory != wantDirectory {
+		t.Fatalf("expected persisted directory=%q, got %q", wantDirectory, sess.Directory)
 	}
 
 	body := callResultJSON(t, res)
