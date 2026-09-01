@@ -426,6 +426,36 @@ func TestCompareMCPToolContract(t *testing.T) {
 	}
 }
 
+func TestCompareMCPToolContractNullableWidening(t *testing.T) {
+	for _, tc := range []struct {
+		name, want string
+		v1, live   map[string]mcpToolSchema
+	}{
+		{
+			name: "accepts primitive widening",
+			v1:   map[string]mcpToolSchema{"x": {Types: []string{"string"}}},
+			live: map[string]mcpToolSchema{"x": {Types: []string{"string", "null"}}},
+		},
+		{
+			name: "rejects complex object widening",
+			v1: map[string]mcpToolSchema{"x": {Types: []string{"object"}, Properties: map[string]mcpToolSchema{
+				"name": {Types: []string{"string"}},
+			}}},
+			live: map[string]mcpToolSchema{"x": {Types: []string{"object", "null"}, Properties: map[string]mcpToolSchema{
+				"name": {Types: []string{"string"}},
+			}}},
+			want: "unproven-type-drift",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := compareMCPToolContract(tc.v1, tc.live)
+			if tc.want == "" && err != nil || tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+				t.Fatalf("nullable widening error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestCompareMCPToolContractDiagnostics(t *testing.T) {
 	base := map[string]mcpToolSchema{"a/b": {Types: []string{"object"}, Properties: map[string]mcpToolSchema{"x~y": {Types: []string{"string"}}}, Additional: true}, "z": {Types: []string{"string"}}}
 	live := map[string]mcpToolSchema{"a/b": {Types: []string{"object"}, Properties: map[string]mcpToolSchema{"x~y": {Types: []string{"number"}}}, Additional: false}}
@@ -789,7 +819,7 @@ func simplePrimitive(schema mcpToolSchema) bool {
 		return false
 	}
 	for _, typ := range schema.Types {
-		if !slices.Contains([]string{"string", "number", "integer", "boolean"}, typ) {
+		if !slices.Contains([]string{"string", "number", "integer", "boolean", "null"}, typ) {
 			return false
 		}
 	}

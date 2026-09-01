@@ -3,6 +3,7 @@
 package mcp
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,12 +12,61 @@ import (
 )
 
 func TestWriteMCPToolContractFixture(t *testing.T) {
+	mode := os.Getenv("ENGRAM_MCP_CONTRACT_WRITE")
+	if mode == "" {
+		t.Skip("set ENGRAM_MCP_CONTRACT_WRITE to update the checked-in fixture")
+	}
 	live, err := observeMCPToolContract(NewServer(newMCPTestStore(t)).ListTools())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := writeMCPToolContractFixture(os.Getenv("ENGRAM_MCP_CONTRACT_WRITE"), filepath.Join("testdata", "tool-contract-v1.json"), live, os.Getenv("CI") != "" || os.Getenv("GITHUB_ACTIONS") != ""); err != nil {
+	if err := writeMCPToolContractFixture(mode, filepath.Join("testdata", "tool-contract-v1.json"), live, os.Getenv("CI") != "" || os.Getenv("GITHUB_ACTIONS") != ""); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestMCPToolContractWriterSuccesses(t *testing.T) {
+	for _, tc := range []struct {
+		name, mode string
+		fixture    []byte
+		live       map[string]mcpToolSchema
+	}{
+		{
+			name: "initial v1 creates missing target",
+			mode: "initial-v1",
+			live: map[string]mcpToolSchema{
+				"x": {Types: []string{"string"}},
+			},
+		},
+		{
+			name:    "promote v1 replaces compatible fixture",
+			mode:    "promote-v1",
+			fixture: []byte(formatMCPToolContract(map[string]mcpToolSchema{"x": {Types: []string{"string"}}})),
+			live: map[string]mcpToolSchema{
+				"x": {Types: []string{"string", "null"}},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			target := filepath.Join(t.TempDir(), "fixture.json")
+			if tc.fixture != nil {
+				if err := os.WriteFile(target, tc.fixture, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if err := writeMCPToolContractFixture(tc.mode, target, tc.live, false); err != nil {
+				t.Fatalf("writeMCPToolContractFixture: %v", err)
+			}
+			got, err := os.ReadFile(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []byte(formatMCPToolContract(tc.live))
+			if !bytes.Equal(got, want) {
+				t.Fatalf("written fixture = %q, want %q", got, want)
+			}
+		})
 	}
 }
 
