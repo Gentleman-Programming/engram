@@ -8,10 +8,9 @@
  *   OpenCode events → this plugin → HTTP calls → engram serve → SQLite
  *
  * Session resilience:
- *   Uses `ensureSession()` before any DB write. This means sessions are
- *   created on-demand — even if the plugin was loaded after the session
- *   started (restart, reconnect, etc.). The session ID comes from OpenCode's
- *   hooks (input.sessionID) rather than relying on a session.created event.
+ *   Resolves OpenCode's persisted session hierarchy before attributed writes,
+ *   then uses `ensureSession()` so plugin reloads and reconnects remain safe
+ *   even when no session.created event is replayed.
  */
 
 import type { Plugin } from "@opencode-ai/plugin"
@@ -37,6 +36,14 @@ const ENGRAM_TOOLS = new Set([
   "mem_get_observation",
   "mem_session_start",
   "mem_session_end",
+  "mem_capture_passive",
+])
+
+const SESSION_ATTRIBUTED_WRITE_TOOLS = new Set([
+  "mem_save",
+  "mem_save_prompt",
+  "mem_session_summary",
+  "mem_capture_passive",
 ])
 
 // ─── Memory Instructions ─────────────────────────────────────────────────────
@@ -89,10 +96,7 @@ Also search memory PROACTIVELY when:
 ### SESSION CLOSE PROTOCOL (mandatory)
 
 Before ending a session or saying "done" / "that's it", you MUST:
-1. Call \`mem_session_summary\` with the structure below.
-2. Call \`mem_session_end\` with the active session id and an optional summary of work completed.
-
-\`mem_session_summary\` structure:
+1. Call \`mem_session_summary\` with this structure:
 
 ## Goal
 [What we were working on this session]
@@ -118,7 +122,7 @@ This is NOT optional. If you skip this, the next session starts blind.
 
 If you see a message about compaction or context reset, or if you see "FIRST ACTION REQUIRED" in your context:
 1. IMMEDIATELY call \`mem_session_summary\` with the compacted summary content — this persists what was done before compaction
-2. Then call \`mem_context\` to recover any additional context from previous sessions
+2. The session-only compaction context has already been injected. Do not automatically call \`mem_context\`, which is project-scoped; use it only when explicitly requested.
 3. Only THEN continue working
 
 Do not skip step 1. Without it, everything done before compaction is lost from memory.
@@ -135,13 +139,14 @@ async function engramFetch(
       method: opts.method ?? "GET",
       headers: opts.body ? { "Content-Type": "application/json" } : undefined,
       body: opts.body ? JSON.stringify(opts.body) : undefined,
+      signal: AbortSignal.timeout(3000),
     })
-    // Treat non-2xx as failure so callers can avoid false-positive side effects
-    // (e.g. marking a session known when POST /sessions did not succeed).
     if (!res.ok) return null
-    const text = await res.text()
-    if (!text.trim()) return {}
-    return JSON.parse(text)
+    try {
+      return await res.json()
+    } catch {
+      return {}
+    }
   } catch {
     // Engram server not running — silently fail
     return null
@@ -161,30 +166,22 @@ async function isEngramRunning(): Promise<boolean> {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function extractProjectName(directory: string): string {
-  // Try git remote origin URL
-  try {
-    const result = Bun.spawnSync(["git", "-C", directory, "remote", "get-url", "origin"])
-    if (result.exitCode === 0) {
-      const url = result.stdout?.toString().trim()
-      if (url) {
-        const name = url.replace(/\.git$/, "").split(/[/:]/).pop()
-        if (name) return name
-      }
-    }
-  } catch {}
-
-  // Fallback: git root directory name (works in worktrees)
-  try {
-    const result = Bun.spawnSync(["git", "-C", directory, "rev-parse", "--show-toplevel"])
-    if (result.exitCode === 0) {
-      const root = result.stdout?.toString().trim()
-      if (root) return root.split("/").pop() ?? "unknown"
-    }
-  } catch {}
-
-  // Final fallback: cwd basename
-  return directory.split("/").pop() ?? "unknown"
+async function resolveProjectName(directory: string): Promise<{ project: string; error?: string }> {
+  const data = await engramFetch(`/project/current?cwd=${encodeURIComponent(directory)}`)
+  const project = typeof data?.project === "string" ? data.project.trim() : ""
+  if (project && project !== "unknown" && !data?.error_hint && !/[\\/]/.test(project)) {
+    return { project }
+  }
+  const choices = Array.isArray(data?.available_projects) && data.available_projects.length > 0
+    ? ` Available projects: ${data.available_projects.join(", ")}.`
+    : ""
+  const reason = typeof data?.error_hint === "string" && data.error_hint.trim()
+    ? ` ${data.error_hint.trim()}`
+    : ""
+  return {
+    project: "unknown",
+    error: `gentle-engram could not resolve a safe project identity.${reason}${choices} Retry when project resolution is available.`,
+  }
 }
 
 function truncate(str: string, max: number): string {
@@ -205,8 +202,19 @@ function stripPrivateTags(str: string): string {
 // ─── Plugin Export ───────────────────────────────────────────────────────────
 
 export const Engram: Plugin = async (ctx) => {
-  const oldProject = ctx.directory.split("/").pop() ?? "unknown"
-  const project = extractProjectName(ctx.directory)
+	let project = "unknown"
+	let projectResolutionError = ""
+	let projectResolutionGeneration = 0
+
+	async function ensureResolvedProject(): Promise<boolean> {
+		if (project !== "unknown" && !projectResolutionError) return true
+		const generation = ++projectResolutionGeneration
+		const resolved = await resolveProjectName(ctx.directory)
+		if (generation !== projectResolutionGeneration) return project !== "unknown" && !projectResolutionError
+		project = resolved.project
+		projectResolutionError = resolved.error ?? ""
+		return projectResolutionError === ""
+	}
 
   // Track tool counts per session (in-memory only, not critical)
   const toolCounts = new Map<string, number>()
@@ -217,11 +225,154 @@ export const Engram: Plugin = async (ctx) => {
   // Track which sessions we've already ensured exist in engram
   const knownSessions = new Set<string>()
 
-  // Track sub-agent session IDs so we can suppress their tool-hook registrations.
-  // Sub-agents (Task() calls) have a parentID or a title ending in " subagent)".
-  // We must not register them as top-level Engram sessions — they cause session
-  // inflation (e.g. 170 sessions for 1 real conversation, issue #116).
+  // Track child session IDs so we can suppress their tool-hook registrations.
+  // OpenCode's parentID is the authoritative ownership signal; titles are not.
+  // Children must not register as top-level Engram sessions because that causes
+  // session inflation (e.g. 170 sessions for 1 real conversation, issue #116).
   const subAgentSessions = new Set<string>()
+
+  // Authoritative runtime ownership from OpenCode events or SDK lookups.
+  // A null parent marks a confirmed root; child sessions never own lifecycle.
+  const parentSessions = new Map<string, string | null>()
+
+  // Deleted sessions and descendants remain invalid for this plugin lifetime.
+  // This prevents late hooks or events from reviving an expired runtime chain.
+  const invalidSessions = new Set<string>()
+
+  function invalidateSessionTree(sessionId: string): void {
+    const invalidated = new Set([sessionId])
+    let foundDescendant = true
+    while (foundDescendant) {
+      foundDescendant = false
+      for (const [childID, parentID] of parentSessions) {
+        if (parentID && invalidated.has(parentID) && !invalidated.has(childID)) {
+          invalidated.add(childID)
+          foundDescendant = true
+        }
+      }
+    }
+
+    for (const invalidID of invalidated) {
+      invalidSessions.add(invalidID)
+      knownSessions.delete(invalidID)
+      subAgentSessions.delete(invalidID)
+      parentSessions.delete(invalidID)
+      toolCounts.delete(invalidID)
+      lastNudgeTime.delete(invalidID)
+    }
+  }
+
+  function cacheSessionInfo(info: { id?: unknown; parentID?: unknown; projectID?: unknown } | undefined): boolean {
+    const rawSessionID = info?.id
+    const sessionId = typeof rawSessionID === "string" && rawSessionID ? rawSessionID : ""
+    if (!sessionId) return false
+    const rawParentID = info?.parentID
+    const parentID = rawParentID === undefined
+      ? null
+      : typeof rawParentID === "string" && rawParentID
+        ? rawParentID
+        : undefined
+    const rawProjectID = info?.projectID
+    const invalidProjectID = (
+      typeof rawProjectID !== "string" ||
+      !rawProjectID ||
+      (ctx.project?.id && rawProjectID !== ctx.project.id)
+    )
+    if (parentID === undefined || invalidProjectID) {
+      parentSessions.delete(sessionId)
+      subAgentSessions.delete(sessionId)
+      return false
+    }
+    if (invalidSessions.has(sessionId) || (parentID && invalidSessions.has(parentID))) {
+      invalidateSessionTree(sessionId)
+      return false
+    }
+    parentSessions.set(sessionId, parentID)
+    return true
+  }
+
+  async function resolveAuthoritativeSessionID(sessionId: string): Promise<string> {
+    if (!sessionId || invalidSessions.has(sessionId)) return ""
+    if (subAgentSessions.has(sessionId) && !parentSessions.has(sessionId)) return ""
+    const visited = new Set<string>()
+    const resolvedParents = new Map<string, string | null>()
+    const publishResolvedParents = (): void => {
+      for (const [resolvedID, resolvedParentID] of resolvedParents) {
+        if (!parentSessions.has(resolvedID)) {
+          parentSessions.set(resolvedID, resolvedParentID)
+          if (resolvedParentID) subAgentSessions.add(resolvedID)
+        }
+      }
+    }
+    const invalidateResolvedTree = (invalidID: string): void => {
+      publishResolvedParents()
+      invalidateSessionTree(invalidID)
+    }
+    let current = sessionId
+    while (true) {
+      if (visited.has(current)) return ""
+      if (invalidSessions.has(current)) {
+        invalidateResolvedTree(current)
+        return ""
+      }
+      visited.add(current)
+
+      let parentID: string | null
+      if (parentSessions.has(current)) {
+        parentID = parentSessions.get(current) ?? null
+      } else {
+        let result: Awaited<ReturnType<typeof ctx.client.session.get>> | undefined
+        try {
+          result = await ctx.client.session.get({ path: { id: current } })
+        } catch {
+          return ""
+        }
+        if (invalidSessions.has(current)) {
+          invalidateResolvedTree(current)
+          return ""
+        }
+        if (parentSessions.has(current)) {
+          parentID = parentSessions.get(current) ?? null
+        } else {
+          const info = result?.data
+          const status = result?.response?.status
+          if (
+            result?.error ||
+            (typeof status === "number" && status >= 400) ||
+            !info ||
+            typeof info.id !== "string" ||
+            info.id !== current ||
+            typeof info.projectID !== "string" ||
+            !info.projectID ||
+            (ctx.project?.id && info.projectID !== ctx.project.id) ||
+            (info.parentID !== undefined && (typeof info.parentID !== "string" || !info.parentID))
+          ) {
+            return ""
+          }
+          parentID = info.parentID ?? null
+          resolvedParents.set(current, parentID)
+        }
+      }
+
+      if (parentID === null) {
+        if (subAgentSessions.has(current)) return ""
+        for (const [resolvedID, resolvedParentID] of resolvedParents) {
+          const invalidID = invalidSessions.has(resolvedID)
+            ? resolvedID
+            : resolvedParentID && invalidSessions.has(resolvedParentID)
+              ? resolvedParentID
+              : ""
+          if (invalidID) {
+            invalidateResolvedTree(invalidID)
+            return ""
+          }
+        }
+        publishResolvedParents()
+        return current
+      }
+      current = parentID
+    }
+  }
 
   /**
    * Ensure a session exists in engram. Idempotent — calls POST /sessions
@@ -229,11 +380,13 @@ export const Engram: Plugin = async (ctx) => {
    *
    * Silently skips sub-agent sessions (tracked in `subAgentSessions`).
    */
-  async function ensureSession(sessionId: string): Promise<void> {
-    if (!sessionId || knownSessions.has(sessionId)) return
+  async function ensureSession(sessionId: string): Promise<boolean> {
+		if (!await ensureResolvedProject()) return false
+    if (!sessionId || invalidSessions.has(sessionId)) return false
+    if (knownSessions.has(sessionId)) return true
     // Do not register sub-agent sessions in Engram (issue #116).
-    if (subAgentSessions.has(sessionId)) return
-    const created = await engramFetch("/sessions", {
+    if (subAgentSessions.has(sessionId)) return false
+    const acknowledgement = await engramFetch("/sessions", {
       method: "POST",
       body: {
         id: sessionId,
@@ -241,10 +394,9 @@ export const Engram: Plugin = async (ctx) => {
         directory: ctx.directory,
       },
     })
-    // Only mark known after confirmed create so failed requests can retry.
-    if (created != null) {
-      knownSessions.add(sessionId)
-    }
+    if (acknowledgement === null || invalidSessions.has(sessionId)) return false
+    knownSessions.add(sessionId)
+    return true
   }
 
   // Try to start engram server if not running
@@ -262,62 +414,49 @@ export const Engram: Plugin = async (ctx) => {
     }
   }
 
-  // Migrate project name if it changed (one-time, idempotent)
-  // Must run AFTER server startup to ensure the endpoint is available
-  if (oldProject !== project) {
-    await engramFetch("/projects/migrate", {
-      method: "POST",
-      body: { old_project: oldProject, new_project: project },
-    })
-  }
-
-  // Auto-import: if .engram/manifest.json exists in the project repo,
-  // run `engram sync --import` to load any new chunks into the local DB.
-  // This is how git-synced memories get loaded when cloning a repo or
-  // pulling changes. Each chunk is imported only once (tracked by ID).
-  try {
-    const manifestFile = `${ctx.directory}/.engram/manifest.json`
-    const file = Bun.file(manifestFile)
-    if (await file.exists()) {
-      Bun.spawn([ENGRAM_BIN, "sync", "--import"], {
-        cwd: ctx.directory,
-        stdout: "ignore",
-        stderr: "ignore",
-        stdin: "ignore",
-      })
-    }
-  } catch {
-    // Manifest doesn't exist or binary not found — silently skip
-  }
+	if (await ensureResolvedProject()) {
+		// Auto-import: if .engram/manifest.json exists in the project repo,
+		// run `engram sync --import` to load any new chunks into the local DB.
+		// This is how git-synced memories get loaded when cloning a repo or
+		// pulling changes. Each chunk is imported only once (tracked by ID).
+		try {
+			const manifestFile = `${ctx.directory}/.engram/manifest.json`
+			const file = Bun.file(manifestFile)
+			if (await file.exists()) {
+				Bun.spawn([ENGRAM_BIN, "sync", "--import"], {
+					cwd: ctx.directory,
+					stdout: "ignore",
+					stderr: "ignore",
+					stdin: "ignore",
+				})
+			}
+		} catch {
+			// Manifest doesn't exist or binary not found — silently skip
+		}
+	}
 
   return {
     // ─── Event Listeners ───────────────────────────────────────────
 
     event: async ({ event }) => {
-      // --- Session Created ---
-      if (event.type === "session.created") {
+      // --- Session Created / Updated ---
+      if (event.type === "session.created" || event.type === "session.updated") {
         // Bug fix (#116): session data is nested under event.properties.info,
         // not event.properties directly.
         const info = (event.properties as any)?.info
         const sessionId = info?.id
         const parentID = info?.parentID
-        const title: string = info?.title ?? ""
 
-        // Sub-agent sessions (created via Task()) must NOT be registered as
-        // top-level Engram sessions. They cause massive session inflation
-        // (e.g. 170 sessions for 1 real conversation).
-        //
-        // Detection heuristics:
-        //   - parentID is set on all Task() sub-agent sessions
-        //   - title ends with " subagent)" as a secondary signal
-        const isSubAgent = !!parentID || title.endsWith(" subagent)")
+        // Only an authoritative parentID makes this session a child. Titles are
+        // descriptive and may legitimately resemble generated sub-agent titles.
+        const isSubAgent = !!parentID
 
-        if (sessionId && !isSubAgent) {
+        if (!cacheSessionInfo(info)) return
+        if (isSubAgent) subAgentSessions.add(sessionId)
+        else subAgentSessions.delete(sessionId)
+
+        if (event.type === "session.created" && sessionId && !isSubAgent) {
           await ensureSession(sessionId)
-        } else if (sessionId && isSubAgent) {
-          // Remember this as a sub-agent session so tool-hook calls
-          // to ensureSession() are also suppressed for it.
-          subAgentSessions.add(sessionId)
         }
       }
 
@@ -327,16 +466,7 @@ export const Engram: Plugin = async (ctx) => {
         const info = (event.properties as any)?.info
         const sessionId = info?.id
         if (sessionId) {
-          if (knownSessions.has(sessionId)) {
-            await engramFetch(
-              `/sessions/${encodeURIComponent(sessionId)}/end`,
-              { method: "POST" }
-            )
-          }
-          knownSessions.delete(sessionId)
-          toolCounts.delete(sessionId)
-          subAgentSessions.delete(sessionId)
-          lastNudgeTime.delete(sessionId)
+          invalidateSessionTree(sessionId)
         }
       }
 
@@ -349,10 +479,9 @@ export const Engram: Plugin = async (ctx) => {
     // output.parts contains TextPart[] with the actual message text.
 
     "chat.message": async (input, output) => {
-      // Skip sub-agent sessions — they inflate session counts (issue #116)
-      if (subAgentSessions.has(input.sessionID)) return
-
-      const sessionId = input.sessionID
+      const sessionId = await resolveAuthoritativeSessionID(input.sessionID)
+      // Skip child prompts even when ownership was discovered through the SDK.
+      if (!sessionId || subAgentSessions.has(input.sessionID)) return
 
       // Extract text from parts (type:"text")
       const content = output.parts
@@ -370,7 +499,9 @@ export const Engram: Plugin = async (ctx) => {
 
       // Only capture non-trivial prompts (>10 chars)
       if (finalContent.length > 10) {
-        await ensureSession(sessionId)
+        const registered = await ensureSession(sessionId)
+        const confirmedSessionID = await resolveAuthoritativeSessionID(input.sessionID)
+        if (!registered || confirmedSessionID !== sessionId) return
         await engramFetch("/prompts", {
           method: "POST",
           body: {
@@ -388,18 +519,37 @@ export const Engram: Plugin = async (ctx) => {
     // Passive capture: when a Task tool completes, POST its output to
     // the passive capture endpoint so the server extracts learnings.
 
+    "tool.execute.before": async (input, output) => {
+      if (!SESSION_ATTRIBUTED_WRITE_TOOLS.has(input.tool.toLowerCase())) return
+      const authoritativeSessionID = await resolveAuthoritativeSessionID(input.sessionID)
+      if (!authoritativeSessionID) {
+        throw new Error(`gentle-engram could not resolve an authoritative OpenCode runtime session for ${input.tool}`)
+      }
+      const registered = await ensureSession(authoritativeSessionID)
+      const confirmedSessionID = await resolveAuthoritativeSessionID(input.sessionID)
+      if (confirmedSessionID !== authoritativeSessionID) {
+        throw new Error(`gentle-engram could not resolve an authoritative OpenCode runtime session for ${input.tool}`)
+      }
+      if (!registered) {
+			if (projectResolutionError) throw new Error(projectResolutionError)
+        throw new Error(`gentle-engram could not confirm Engram session registration for ${input.tool}; verify that the Engram server is available and retry`)
+      }
+      output.args.session_id = authoritativeSessionID
+    },
+
     "tool.execute.after": async (input, output) => {
       if (ENGRAM_TOOLS.has(input.tool.toLowerCase())) return
 
       // input.sessionID comes from OpenCode — always available
-      const sessionId = input.sessionID
-      if (sessionId) {
-        await ensureSession(sessionId)
-        toolCounts.set(sessionId, (toolCounts.get(sessionId) ?? 0) + 1)
-      }
+      const sessionId = await resolveAuthoritativeSessionID(input.sessionID)
+      if (!sessionId) return
+      const registered = await ensureSession(sessionId)
+      const confirmedSessionID = await resolveAuthoritativeSessionID(input.sessionID)
+      if (!registered || confirmedSessionID !== sessionId) return
+      toolCounts.set(sessionId, (toolCounts.get(sessionId) ?? 0) + 1)
 
       // Passive capture: extract learnings from Task tool output
-      if (input.tool === "Task" && output && sessionId) {
+      if (input.tool === "Task" && output) {
         const text = typeof output === "string" ? output : JSON.stringify(output)
         if (text.length > 50) {
           await engramFetch("/observations/passive", {
@@ -437,8 +587,9 @@ export const Engram: Plugin = async (ctx) => {
       // to the system prompt so the agent notices. All fetches are fire-and-
       // forget with short timeouts — any failure silently skips the nudge.
       try {
+			if (!await ensureResolvedProject()) return
         const sessionID: string = input.sessionID ?? ""
-        if (!sessionID || subAgentSessions.has(sessionID)) return
+        if (!sessionID || invalidSessions.has(sessionID) || subAgentSessions.has(sessionID)) return
 
         // SQLite datetime('now') returns "YYYY-MM-DD HH:MM:SS" in UTC with no
         // zone suffix; new Date() would parse that as local time. Normalize to
@@ -526,16 +677,25 @@ export const Engram: Plugin = async (ctx) => {
     // 3. Tell the compressor to remind the new agent to save memories
 
     "experimental.session.compacting": async (input, output) => {
+		if (!await ensureResolvedProject()) {
+			output.context.push(`${projectResolutionError} Automatic session, prompt, and passive-capture writes remain disabled.`)
+			return
+		}
+      let sessionId = ""
       if (input.sessionID) {
-        await ensureSession(input.sessionID)
+        sessionId = await resolveAuthoritativeSessionID(input.sessionID)
       }
 
-      // Inject context from previous sessions
-      const data = await engramFetch(
-        `/context?project=${encodeURIComponent(project)}`
-      )
-      if (data?.context) {
-        output.context.push(data.context)
+      // Runtime compaction context must never cross session boundaries. If the
+      // authoritative session cannot be resolved or registered, skip this
+      // injection rather than falling back to project-wide manual context.
+      if (sessionId && await ensureSession(sessionId)) {
+        const data = await engramFetch(
+          `/context/compaction?session_id=${encodeURIComponent(sessionId)}`
+        )
+        if (data?.context) {
+          output.context.push(data.context)
+        }
       }
 
       // Tell the compressor to instruct the new agent to persist the

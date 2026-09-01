@@ -21,11 +21,12 @@ type fakeCloudBootstrapStore struct {
 	hasAdmin    bool
 	hasAdminErr error
 
-	createUserErr  error
-	createGrantErr error
-	createTokenErr error
-	auditErr       error
-	auditErrOnCall int
+	createUserErr   error
+	createGrantErr  error
+	createTokenErr  error
+	recoverTokenErr error
+	auditErr        error
+	auditErrOnCall  int
 
 	users       []cloudstore.HumanUser
 	grants      []cloudstore.ProjectGrant
@@ -35,6 +36,7 @@ type fakeCloudBootstrapStore struct {
 	createUserCalls       int
 	createGrantCalls      int
 	createTokenCalls      int
+	recoverTokenCalls     int
 	createFirstAdminCalls int
 	auditCalls            int
 	closeCalls            int
@@ -126,6 +128,26 @@ func (s *fakeCloudBootstrapStore) CreatePrincipalTokenWithAudit(_ context.Contex
 	if err := s.insertAuthAuditEvent(audit); err != nil {
 		return cloudstore.PrincipalToken{}, err
 	}
+	s.tokens = append(s.tokens, token)
+	return token, nil
+}
+
+func (s *fakeCloudBootstrapStore) RecoverStrandedAdminTokenWithAudit(_ context.Context, params cloudstore.RecoverStrandedAdminTokenParams, audit cloudstore.AuthAuditEvent) (cloudstore.PrincipalToken, error) {
+	s.recoverTokenCalls++
+	if s.recoverTokenErr != nil {
+		return cloudstore.PrincipalToken{}, s.recoverTokenErr
+	}
+	audit.TargetPrincipalID = "p-stranded-admin"
+	if err := s.insertAuthAuditEvent(audit); err != nil {
+		return cloudstore.PrincipalToken{}, err
+	}
+	token := fakePrincipalToken(cloudstore.CreatePrincipalTokenParams{
+		PrincipalID:          audit.TargetPrincipalID,
+		TokenPrefix:          params.TokenPrefix,
+		TokenHash:            params.TokenHash,
+		Name:                 params.Name,
+		CreatedByPrincipalID: audit.TargetPrincipalID,
+	})
 	s.tokens = append(s.tokens, token)
 	return token, nil
 }
@@ -694,6 +716,131 @@ func TestCloudBootstrapAdminRejectsUnknownFlag(t *testing.T) {
 	}
 	if *calls != 0 {
 		t.Fatalf("expected cloud store to never be constructed for invalid input, got %d calls", *calls)
+	}
+}
+
+func TestCloudBootstrapRecoverTokenIssuesOneTokenAndAuditsRecovery(t *testing.T) {
+	stubExitWithPanic(t)
+	t.Setenv("ENGRAM_CLOUD_TOKEN_PEPPER", "dedicated-cloud-token-pepper-for-tests")
+	store := &fakeCloudBootstrapStore{}
+	stubNewCloudBootstrapStore(t, store)
+
+	withArgs(t, "engram", "cloud", "bootstrap", "recover-token", "--name", "replacement")
+	stdout, _, recovered := captureOutputAndRecover(t, cmdCloudBootstrap)
+	if recovered != nil {
+		t.Fatalf("expected stranded-admin recovery to succeed, got %v; stdout=%q", recovered, stdout)
+	}
+	if store.recoverTokenCalls != 1 || len(store.tokens) != 1 {
+		t.Fatalf("expected one recovery token attempt and one token, calls=%d tokens=%+v", store.recoverTokenCalls, store.tokens)
+	}
+	if store.tokens[0].Name != "replacement" {
+		t.Fatalf("expected requested recovery token name, got %+v", store.tokens[0])
+	}
+	if strings.Count(stdout, "egc_live_") != 1 {
+		t.Fatalf("expected the raw recovery token exactly once, got stdout=%q", stdout)
+	}
+	if len(store.auditEvents) != 1 {
+		t.Fatalf("expected one recovery audit event, got %+v", store.auditEvents)
+	}
+	event := store.auditEvents[0]
+	if event.TargetPrincipalID != "p-stranded-admin" || event.ReasonCode != "stranded_admin_token_recovered" || event.Metadata["recovered"] != true {
+		t.Fatalf("unexpected recovery audit event: %+v", event)
+	}
+	lines := strings.Split(strings.TrimSpace(stdout), "\n")
+	rawToken := strings.TrimSpace(lines[len(lines)-1])
+	for _, value := range event.Metadata {
+		if value == rawToken {
+			t.Fatalf("recovery audit metadata leaked the raw token: %+v", event.Metadata)
+		}
+	}
+}
+
+func TestCloudBootstrapRecoverTokenDoesNotPersistOrDiscloseWhenAuditFails(t *testing.T) {
+	stubExitWithPanic(t)
+	t.Setenv("ENGRAM_CLOUD_TOKEN_PEPPER", "dedicated-cloud-token-pepper-for-tests")
+	store := &fakeCloudBootstrapStore{auditErrOnCall: 1}
+	stubNewCloudBootstrapStore(t, store)
+
+	withArgs(t, "engram", "cloud", "bootstrap", "recover-token")
+	stdout, _, recovered := captureOutputAndRecover(t, cmdCloudBootstrap)
+	code, ok := recovered.(exitCode)
+	if !ok || int(code) != 1 {
+		t.Fatalf("expected exit code 1 when recovery audit fails, got %v", recovered)
+	}
+	if strings.Contains(stdout, "egc_live_") || len(store.tokens) != 0 || len(store.auditEvents) != 0 {
+		t.Fatalf("failed recovery audit must not disclose or persist a token, stdout=%q tokens=%+v audits=%+v", stdout, store.tokens, store.auditEvents)
+	}
+}
+
+func TestCloudBootstrapRecoverTokenRejectsIneligibleStateWithoutDisclosure(t *testing.T) {
+	stubExitWithPanic(t)
+	t.Setenv("ENGRAM_CLOUD_TOKEN_PEPPER", "dedicated-cloud-token-pepper-for-tests")
+	store := &fakeCloudBootstrapStore{recoverTokenErr: fmt.Errorf("%w: requires zero principal tokens, found 1", cloudstore.ErrStrandedAdminRecoveryIneligible)}
+	stubNewCloudBootstrapStore(t, store)
+
+	withArgs(t, "engram", "cloud", "bootstrap", "recover-token")
+	stdout, stderr, recovered := captureOutputAndRecover(t, cmdCloudBootstrap)
+	code, ok := recovered.(exitCode)
+	if !ok || int(code) != 1 {
+		t.Fatalf("expected exit code 1 for ineligible recovery, got %v", recovered)
+	}
+	if !strings.Contains(stderr, "requires zero principal tokens") {
+		t.Fatalf("expected actionable ineligibility error, got stderr=%q", stderr)
+	}
+	if strings.Contains(stdout, "egc_live_") || len(store.tokens) != 0 || len(store.auditEvents) != 0 {
+		t.Fatalf("ineligible recovery must not disclose or mutate, stdout=%q tokens=%+v audits=%+v", stdout, store.tokens, store.auditEvents)
+	}
+}
+
+func TestCloudBootstrapRecoverTokenRequiresTokenPepperBeforeOpeningStore(t *testing.T) {
+	stubExitWithPanic(t)
+	t.Setenv("ENGRAM_CLOUD_TOKEN_PEPPER", "")
+	store := &fakeCloudBootstrapStore{}
+	calls := stubNewCloudBootstrapStore(t, store)
+
+	withArgs(t, "engram", "cloud", "bootstrap", "recover-token")
+	_, stderr, recovered := captureOutputAndRecover(t, cmdCloudBootstrap)
+	code, ok := recovered.(exitCode)
+	if !ok || int(code) != 1 {
+		t.Fatalf("expected exit code 1 without a token pepper, got %v", recovered)
+	}
+	if !strings.Contains(stderr, "ENGRAM_CLOUD_TOKEN_PEPPER") || *calls != 0 || store.recoverTokenCalls != 0 {
+		t.Fatalf("missing pepper must fail before opening the store, stderr=%q calls=%d recoveryCalls=%d", stderr, *calls, store.recoverTokenCalls)
+	}
+}
+
+func TestCloudBootstrapHelpDescribesAdminAndRecoverySeparately(t *testing.T) {
+	withArgs(t, "engram", "cloud", "bootstrap", "--help")
+	stdout, _, recovered := captureOutputAndRecover(t, cmdCloudBootstrap)
+	if recovered != nil {
+		t.Fatalf("expected help to return normally, got %v", recovered)
+	}
+	if !strings.Contains(stdout, "admin creates the first managed admin") || !strings.Contains(stdout, "recover-token issues one token for the eligible stranded managed admin") {
+		t.Fatalf("expected separate accurate bootstrap help descriptions, got %q", stdout)
+	}
+}
+
+func TestParseCloudBootstrapRecoverTokenArgsRejectsMissingNameValue(t *testing.T) {
+	for _, args := range [][]string{{"--name"}, {"--name", "--unknown"}} {
+		if _, err := parseCloudBootstrapRecoverTokenArgs(args); err == nil || err.Error() != "--name requires a value" {
+			t.Fatalf("parseCloudBootstrapRecoverTokenArgs(%v) = %v, want --name requires a value", args, err)
+		}
+	}
+}
+
+func TestCloudBootstrapRecoverTokenRejectsFlagAsNameBeforeOpeningStore(t *testing.T) {
+	stubExitWithPanic(t)
+	store := &fakeCloudBootstrapStore{}
+	calls := stubNewCloudBootstrapStore(t, store)
+
+	withArgs(t, "engram", "cloud", "bootstrap", "recover-token", "--name", "--unknown")
+	_, stderr, recovered := captureOutputAndRecover(t, cmdCloudBootstrap)
+	code, ok := recovered.(exitCode)
+	if !ok || int(code) != 1 {
+		t.Fatalf("expected exit code 1 for a flag-like --name value, got %v", recovered)
+	}
+	if !strings.Contains(stderr, "--name requires a value") || *calls != 0 || store.recoverTokenCalls != 0 {
+		t.Fatalf("flag-like --name value must fail before opening the store, stderr=%q calls=%d recoveryCalls=%d", stderr, *calls, store.recoverTokenCalls)
 	}
 }
 

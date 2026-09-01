@@ -20,10 +20,10 @@ INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 OUTPUT=$(echo "$INPUT" | jq -r '.last_assistant_message // .stdout // empty')
-PROJECT=$(detect_project "$CWD")
 
 # Nothing to capture if no output
 [ -z "$OUTPUT" ] && exit 0
+PROJECT=$(resolve_project "$CWD") || exit 0
 
 # Post to passive capture — server handles extraction, dedup, and storage
 curl -sf "${ENGRAM_URL}/observations/passive" \

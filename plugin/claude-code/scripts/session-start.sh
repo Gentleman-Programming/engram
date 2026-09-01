@@ -20,24 +20,20 @@ source "${SCRIPT_DIR}/_helpers.sh"
 INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
-OLD_PROJECT=$(basename "$CWD" | tr '[:upper:]' '[:lower:]')
-PROJECT=$(detect_project "$CWD")
 
 # Ensure engram server is running
 if ! curl -sf "${ENGRAM_URL}/health" --max-time 1 > /dev/null 2>&1; then
-  engram serve &>/dev/null &
+  ENGRAM_SERVE_DATA_DIR="${ENGRAM_DATA_DIR:-$HOME/.engram}"
+  if mkdir -p "$ENGRAM_SERVE_DATA_DIR" 2>/dev/null && : >> "$ENGRAM_SERVE_DATA_DIR/serve.err.log" 2>/dev/null; then
+    ENGRAM_SERVE_ERR_LOG="$ENGRAM_SERVE_DATA_DIR/serve.err.log"
+  else
+    ENGRAM_SERVE_ERR_LOG="${TMPDIR:-/tmp}/engram-serve.err.log"
+  fi
+  ENGRAM_CLOUD_AUTOSYNC=1 engram serve > /dev/null 2>> "$ENGRAM_SERVE_ERR_LOG" &
   sleep 0.5
 fi
 
-# Migrate project name if it changed (one-time, idempotent)
-if [ "$OLD_PROJECT" != "$PROJECT" ] && [ -n "$OLD_PROJECT" ] && [ -n "$PROJECT" ]; then
-  curl -sf "${ENGRAM_URL}/projects/migrate" \
-    -X POST \
-    -H "Content-Type: application/json" \
-    -d "$(jq -n --arg old "$OLD_PROJECT" --arg new "$PROJECT" \
-      '{old_project: $old, new_project: $new}')" \
-    > /dev/null 2>&1
-fi
+PROJECT=$(resolve_project "$CWD") || PROJECT=""
 
 # Create session
 if [ -n "$SESSION_ID" ] && [ -n "$PROJECT" ]; then
@@ -134,8 +130,11 @@ if [ -f "${CWD}/.engram/manifest.json" ]; then
 fi
 
 # Fetch memory context
-ENCODED_PROJECT=$(printf '%s' "$PROJECT" | jq -sRr @uri)
-CONTEXT=$(curl -sf "${ENGRAM_URL}/context?project=${ENCODED_PROJECT}" --max-time 3 2>/dev/null | jq -r '.context // empty')
+CONTEXT=""
+if [ -n "$PROJECT" ]; then
+  ENCODED_PROJECT=$(printf '%s' "$PROJECT" | jq -sRr @uri)
+  CONTEXT=$(curl -sf "${ENGRAM_URL}/context?project=${ENCODED_PROJECT}" --max-time 3 2>/dev/null | jq -r '.context // empty')
+fi
 
 # Resolve protocol verbosity mode for this slug. All slim/full branching
 # (including the engram-version floor check) lives in Go — see `engram
