@@ -31,8 +31,6 @@ import (
 	sqlite "modernc.org/sqlite"
 )
 
-var openDB = sql.Open
-
 // sqliteConstraintForeignKey is the extended SQLite result code for a foreign-key
 // constraint violation (SQLITE_CONSTRAINT_FOREIGNKEY = 787).
 // See https://www.sqlite.org/rescode.html#constraint_foreignkey
@@ -716,7 +714,14 @@ func New(cfg Config) (*Store, error) {
 	}
 
 	dbPath := filepath.Join(cfg.DataDir, "engram.db")
-	db, err := openDB("sqlite", dbPath)
+	if err := ensureDatabaseFile(dbPath); err != nil {
+		return nil, fmt.Errorf("engram: create database file: %w", err)
+	}
+	generation, err := newDatabaseGeneration(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("engram: capture database generation: %w", err)
+	}
+	db, err := openDB(dbPath, generation)
 	if err != nil {
 		return nil, fmt.Errorf("engram: open database: %w", err)
 	}
@@ -761,7 +766,14 @@ func newWithoutRepair(cfg Config) (*Store, error) {
 	}
 
 	dbPath := filepath.Join(cfg.DataDir, "engram.db")
-	db, err := openDB("sqlite", dbPath)
+	if err := ensureDatabaseFile(dbPath); err != nil {
+		return nil, fmt.Errorf("engram: create database file: %w", err)
+	}
+	generation, err := newDatabaseGeneration(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("engram: capture database generation: %w", err)
+	}
+	db, err := openDB(dbPath, generation)
 	if err != nil {
 		return nil, fmt.Errorf("engram: open database: %w", err)
 	}
@@ -3791,14 +3803,20 @@ func (s *Store) statsForProject(project string) (*Stats, error) {
 		where = " WHERE LOWER(project) = ?"
 		args = append(args, project)
 	}
-	s.db.QueryRow("SELECT COUNT(*) FROM sessions"+where, args...).Scan(&stats.TotalSessions)
-	s.db.QueryRow("SELECT COUNT(*) FROM observations WHERE deleted_at IS NULL"+func() string {
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM sessions"+where, args...).Scan(&stats.TotalSessions); errors.Is(err, ErrDatabaseGenerationChanged) {
+		return nil, err
+	}
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM observations WHERE deleted_at IS NULL"+func() string {
 		if project == "" {
 			return ""
 		}
 		return " AND LOWER(project) = ?"
-	}(), args...).Scan(&stats.TotalObservations)
-	s.db.QueryRow("SELECT COUNT(*) FROM user_prompts"+where, args...).Scan(&stats.TotalPrompts)
+	}(), args...).Scan(&stats.TotalObservations); errors.Is(err, ErrDatabaseGenerationChanged) {
+		return nil, err
+	}
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM user_prompts"+where, args...).Scan(&stats.TotalPrompts); errors.Is(err, ErrDatabaseGenerationChanged) {
+		return nil, err
+	}
 
 	projectsQuery := "SELECT project FROM observations WHERE project IS NOT NULL AND deleted_at IS NULL"
 	if project != "" {
@@ -3807,14 +3825,33 @@ func (s *Store) statsForProject(project string) (*Stats, error) {
 	projectsQuery += " GROUP BY project ORDER BY MAX(created_at) DESC"
 	rows, err := s.queryItHook(s.db, projectsQuery, args...)
 	if err != nil {
+		if errors.Is(err, ErrDatabaseGenerationChanged) {
+			return nil, err
+		}
 		return stats, nil
 	}
-	defer rows.Close()
 
 	for rows.Next() {
-		var p string
-		if err := rows.Scan(&p); err == nil {
-			stats.Projects = append(stats.Projects, p)
+		var projectName string
+		if err := rows.Scan(&projectName); err != nil {
+			_ = rows.Close()
+			if errors.Is(err, ErrDatabaseGenerationChanged) {
+				return nil, err
+			}
+			return stats, nil
+		}
+		stats.Projects = append(stats.Projects, projectName)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		if errors.Is(err, ErrDatabaseGenerationChanged) {
+			return nil, err
+		}
+		return stats, nil
+	}
+	if err := rows.Close(); err != nil {
+		if errors.Is(err, ErrDatabaseGenerationChanged) {
+			return nil, err
 		}
 	}
 

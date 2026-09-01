@@ -232,6 +232,11 @@ func TestInstallGeminiCLIInjectsMCPConfig(t *testing.T) {
 	if !strings.Contains(systemText, "FIRST ACTION REQUIRED") {
 		t.Fatalf("expected FIRST ACTION REQUIRED guidance in system prompt")
 	}
+	summaryIndex := strings.Index(systemText, "After mem_session_summary succeeds")
+	endIndex := strings.Index(systemText, "call mem_session_end before closing the session")
+	if summaryIndex == -1 || endIndex == -1 || summaryIndex > endIndex {
+		t.Fatalf("expected Gemini close instructions to require summary before end, got:\n%s", systemText)
+	}
 
 	// GEMINI_SYSTEM_MD should NOT be set (it breaks Gemini outside $HOME)
 	envPath := geminiEnvPath()

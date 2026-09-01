@@ -5744,7 +5744,7 @@ func TestStoreUncoveredBranchesPushToHundred(t *testing.T) {
 	t.Run("new open database hook error", func(t *testing.T) {
 		orig := openDB
 		t.Cleanup(func() { openDB = orig })
-		openDB = func(driverName, dataSourceName string) (*sql.DB, error) {
+		openDB = func(_ string, _ *databaseGeneration) (*sql.DB, error) {
 			return nil, errors.New("forced open error")
 		}
 

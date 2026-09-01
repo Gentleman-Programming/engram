@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Engram — Shared helpers for Claude Code hooks
 # WARNING: Do not read from stdin here — scripts source this before reading their hook input.
 
