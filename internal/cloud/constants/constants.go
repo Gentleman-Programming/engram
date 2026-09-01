@@ -36,6 +36,10 @@ const (
 	UpgradeErrorCodePayloadTooLarge = "upgrade_repairable_payload_too_large"
 	UpgradeErrorCodeChunkConflict   = "upgrade_repairable_chunk_conflict"
 	UpgradeErrorCodeInternal        = "upgrade_blocked_internal"
+
+	// Mutation push errors use their own wire namespace. Keep this separate from
+	// chunk upgrade codes so clients can distinguish mutation admission failures.
+	MutationErrorCodePayloadInvalid = "payload_invalid"
 )
 
 var DeterministicReasons = []string{

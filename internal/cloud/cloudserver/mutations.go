@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -28,6 +29,18 @@ type MutationEntry = cloudstore.MutationEntry
 type mutationPushEnvelope struct {
 	Entries   []MutationEntry `json:"entries"`
 	CreatedBy string          `json:"created_by,omitempty"`
+}
+
+// rawMutationPushEnvelope retains each entry as raw JSON until project policy
+// gates have completed. This keeps nested payload fields opaque during the
+// authentication, authorization, and pause checks.
+type rawMutationPushEnvelope struct {
+	Entries   []json.RawMessage `json:"entries"`
+	CreatedBy string            `json:"created_by,omitempty"`
+}
+
+type mutationEntryProject struct {
+	Project string `json:"project"`
 }
 
 // StoredMutation is an alias for cloudstore.StoredMutation (canonical read type).
@@ -66,38 +79,55 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 	maxPushBodyBytes := s.pushBodyLimit()
 	r.Body = http.MaxBytesReader(w, r.Body, maxPushBodyBytes)
 
-	var req mutationPushEnvelope
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
 			writeActionableError(w, http.StatusRequestEntityTooLarge, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodePayloadTooLarge, fmt.Sprintf("push payload too large (max %d bytes)", maxPushBodyBytes))
 			return
 		}
+		http.Error(w, fmt.Sprintf("read request body: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	var rawReq rawMutationPushEnvelope
+	if err := json.Unmarshal(body, &rawReq); err != nil {
 		http.Error(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
 		return
 	}
 
-	if len(req.Entries) > maxMutationBatchSize {
+	if len(rawReq.Entries) > maxMutationBatchSize {
 		http.Error(w, fmt.Sprintf("batch too large: max %d entries per request", maxMutationBatchSize), http.StatusBadRequest)
 		return
 	}
 
 	// JC1: Empty batch is rejected early — empty batches carry no project info and
 	// cannot be pause-gated or audited. Clients must send at least one entry.
-	if len(req.Entries) == 0 {
+	if len(rawReq.Entries) == 0 {
 		writeActionableError(w, http.StatusBadRequest, constants.UpgradeErrorClassRepairable, "empty_batch",
 			"mutation batch must contain at least one entry")
 		return
 	}
 
-	// BR2-1: Reject any entry with an empty project before auth/pause checks.
-	// An empty project is always invalid: it bypasses per-project auth and would
-	// be inserted into cloud_mutations with a blank project column.
-	for _, entry := range req.Entries {
-		if strings.TrimSpace(entry.Project) == "" {
+	// BR2-1: Extract only project metadata before auth/pause checks. Nested
+	// payload fields remain raw so policy errors cannot disclose validation data.
+	projects := make([]string, 0, len(rawReq.Entries))
+	seen := make(map[string]struct{}, len(rawReq.Entries))
+	for i, rawEntry := range rawReq.Entries {
+		var metadata mutationEntryProject
+		if err := json.Unmarshal(rawEntry, &metadata); err != nil {
+			http.Error(w, fmt.Sprintf("invalid request entry %d: %v", i, err), http.StatusBadRequest)
+			return
+		}
+		project := strings.TrimSpace(metadata.Project)
+		if project == "" {
 			writeActionableError(w, http.StatusBadRequest, "invalid_request", "empty_project",
 				"mutation entries must specify a project")
 			return
+		}
+		if _, ok := seen[project]; !ok {
+			seen[project] = struct{}{}
+			projects = append(projects, project)
 		}
 	}
 
@@ -114,13 +144,7 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 	// If ANY project is unauthorized, the entire batch is rejected (all-or-nothing).
 	// N2: The empty-project `continue` is removed — BR2-1 (lines above) already
 	// guarantees every entry has a non-empty project before this loop is reached.
-	seen := make(map[string]struct{})
-	for _, entry := range req.Entries {
-		project := strings.TrimSpace(entry.Project)
-		if _, ok := seen[project]; ok {
-			continue
-		}
-		seen[project] = struct{}{}
+	for _, project := range projects {
 		if !s.authorizeProjectScope(r.Context(), w, project) {
 			// authorizeProjectScope already wrote the 403 response.
 			return
@@ -131,11 +155,10 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 	// Server-side has no filesystem cwd semantics; source is always "request_body".
 	// N3: The `if len(req.Entries) > 0` guard is removed — JC1 (above) guarantees
 	// at least one entry exists at this point.
-	primaryProject := strings.TrimSpace(req.Entries[0].Project)
+	primaryProject := projects[0]
 
 	// Check sync pause per project (REQ-203 + BW9: use writeActionableError for 409).
-	for _, entry := range req.Entries {
-		proj := strings.TrimSpace(entry.Project)
+	for _, proj := range projects {
 		enabled, err := ms.IsProjectSyncEnabled(proj)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("check project sync: %v", err), http.StatusInternalServerError)
@@ -144,7 +167,7 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 		if !enabled {
 			// REQ-404: emit audit entry for pause-rejection before writing 409 response.
 			// Uses structural type assertion — MutationStore is NOT extended.
-			contributor := strings.TrimSpace(req.CreatedBy)
+			contributor := strings.TrimSpace(rawReq.CreatedBy)
 			if contributor == "" {
 				contributor = "unknown"
 			}
@@ -156,7 +179,7 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 					Project:     proj,
 					Action:      cloudstore.AuditActionMutationPush,
 					Outcome:     cloudstore.AuditOutcomeRejectedProjectPaused,
-					EntryCount:  len(req.Entries),
+					EntryCount:  len(rawReq.Entries),
 					ReasonCode:  "sync-paused",
 				}); aerr != nil {
 					log.Printf("cloudserver: audit insert failed (mutation push): %v", aerr)
@@ -177,23 +200,38 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
+	// Decode entries only after all project policy gates have succeeded. The
+	// payload remains raw through auth and pause checks, then the shared codec
+	// seam owns the canonical mutation contract.
+	req := mutationPushEnvelope{
+		CreatedBy: rawReq.CreatedBy,
+		Entries:   make([]MutationEntry, len(rawReq.Entries)),
+	}
+	for i, rawEntry := range rawReq.Entries {
+		if err := json.Unmarshal(rawEntry, &req.Entries[i]); err != nil {
+			http.Error(w, fmt.Sprintf("invalid request entry %d: %v", i, err), http.StatusBadRequest)
+			return
+		}
+	}
+
 	// REQ-006 / REQ-008: Validate each entry's payload before storage.
-	// Relation entries are strictly validated (all required fields).
-	// Legacy entities (session, observation, prompt) use the lenient floor only.
 	// Any failure rejects the ENTIRE batch (atomic — no partial inserts).
 	var invalid []map[string]any
 	for i, entry := range req.Entries {
-		if field, ok := validateMutationEntry(entry); !ok {
+		issue, ok := chunkcodec.ValidateMutationEntry(entry.Entity, entry.Op, entry.EntityKey, entry.Payload)
+		if !ok {
 			invalid = append(invalid, map[string]any{
 				"index":  i,
-				"field":  field,
+				"field":  issue.Field,
 				"entity": entry.Entity,
 			})
 		}
 	}
 	if len(invalid) > 0 {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{
-			"error":       "invalid relation payload",
+			"error_class": constants.UpgradeErrorClassRepairable,
+			"error_code":  constants.MutationErrorCodePayloadInvalid,
+			"error":       "invalid mutation payload",
 			"reason_code": "validation_error",
 			"invalid":     invalid,
 		})
@@ -315,33 +353,11 @@ func (s *CloudServer) handleMutationPull(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-// ─── REQ-006 / REQ-008: Per-entity payload validation ────────────────────────
-
-// validateRelationPayload checks that all required relation fields are present
-// and non-empty in the decoded payload map using the canonical chunk validator.
-// Returns (missingField, false) when any required field is absent or empty,
-// or ("", true) when all required fields are present.
-func validateRelationPayload(payload json.RawMessage) (string, bool) {
-	return chunkcodec.ValidateRelationPayload(payload)
-}
-
-// validateLegacyPayload is a no-op for legacy entities (session, observation,
-// prompt). REQ-008: these entities have no new required payload fields — their
-// push/pull behavior is UNCHANGED from before Phase 2. Any tightening of legacy
-// payload validation is a breaking change and must not be done here.
-func validateLegacyPayload(_ string, _ json.RawMessage) (string, bool) {
-	return "", true
-}
-
-// validateMutationEntry dispatches to the correct validator for the entry's
-// entity type. Returns (missingField, false) on validation failure.
+// validateMutationEntry is retained as the cloudserver-local compatibility
+// helper while the canonical validation rules live in chunkcodec.
 func validateMutationEntry(entry MutationEntry) (string, bool) {
-	switch entry.Entity {
-	case "relation":
-		return validateRelationPayload(entry.Payload)
-	default:
-		return validateLegacyPayload(entry.Entity, entry.Payload)
-	}
+	issue, ok := chunkcodec.ValidateMutationEntry(entry.Entity, entry.Op, entry.EntityKey, entry.Payload)
+	return issue.Field, ok
 }
 
 // ─── Cloudstore mutation queries ──────────────────────────────────────────────

@@ -53,6 +53,43 @@ func TestMutationTransportPushAccepted(t *testing.T) {
 	}
 }
 
+// TestMutationTransportPushRepairable400PreservesStructuredStatus verifies that
+// the mutation-specific validation response remains actionable to autosync.
+func TestMutationTransportPushRepairable400PreservesStructuredStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/sync/mutations/push" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error_class":"repairable","error_code":"payload_invalid","error":"invalid mutation payload","reason_code":"validation_error","invalid":[{"index":1,"entity":"observation","field":"content"}]}`))
+	}))
+	defer srv.Close()
+
+	mt := mustNewMutationTransport(t, srv.URL, "token123")
+	_, err := mt.PushMutations([]MutationEntry{{Project: "proj-a", Entity: "observation", EntityKey: "obs-1", Op: "upsert", Payload: json.RawMessage(`{"content":""}`)}})
+	if err == nil {
+		t.Fatal("expected repairable validation error")
+	}
+	var statusErr *HTTPStatusError
+	if !errors.As(err, &statusErr) {
+		t.Fatalf("expected HTTPStatusError, got %T (%v)", err, err)
+	}
+	if statusErr.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want %d", statusErr.StatusCode, http.StatusBadRequest)
+	}
+	if statusErr.ErrorClass != "repairable" || statusErr.ErrorCode != "payload_invalid" {
+		t.Fatalf("structured status: got class=%q code=%q", statusErr.ErrorClass, statusErr.ErrorCode)
+	}
+	if statusErr.Body != "invalid mutation payload" {
+		t.Fatalf("body: got %q, want %q", statusErr.Body, "invalid mutation payload")
+	}
+	if !statusErr.IsRepairable() {
+		t.Fatal("expected mutation validation failure to be repairable")
+	}
+}
+
 // TestMutationTransportPushUnauth verifies REQ-200: 401 → HTTPStatusError.IsAuthFailure.
 func TestMutationTransportPushUnauth(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

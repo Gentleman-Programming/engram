@@ -325,3 +325,313 @@ func TestCanonicalizeForProjectAcceptsSessionDeleteMutation(t *testing.T) {
 		t.Fatalf("expected canonical session delete payload without directory, got %#v", payload)
 	}
 }
+
+func TestValidateMutationEntryCanonicalContract(t *testing.T) {
+	validPayloads := map[string]map[string]any{
+		store.SyncEntitySession: {
+			"id":        "session-1",
+			"directory": "/work/project",
+		},
+		store.SyncEntityObservation: {
+			"sync_id":    "observation-1",
+			"session_id": "session-1",
+			"type":       "decision",
+			"title":      "A decision",
+			"content":    "The decision body",
+			"scope":      "project",
+		},
+		store.SyncEntityPrompt: {
+			"sync_id":    "prompt-1",
+			"session_id": "session-1",
+			"content":    "The prompt body",
+		},
+		store.SyncEntityRelation: {
+			"sync_id":         "relation-1",
+			"source_id":       "observation-1",
+			"target_id":       "observation-2",
+			"relation":        "related",
+			"judgment_status": "judged",
+			"marked_by_actor": "agent-1",
+			"marked_by_kind":  "agent",
+		},
+	}
+	wrongTypeObservation := cloneMutationPayload(validPayloads[store.SyncEntityObservation])
+	wrongTypeObservation["content"] = 42
+
+	tests := []struct {
+		name      string
+		entity    string
+		op        string
+		entityKey string
+		payload   json.RawMessage
+		wantField string
+		wantValid bool
+	}{
+		{
+			name:      "valid session upsert",
+			entity:    store.SyncEntitySession,
+			op:        store.SyncOpUpsert,
+			entityKey: "session-1",
+			payload:   rawMutationPayload(t, validPayloads[store.SyncEntitySession]),
+			wantValid: true,
+		},
+		{
+			name:      "valid observation upsert",
+			entity:    store.SyncEntityObservation,
+			op:        store.SyncOpUpsert,
+			entityKey: "observation-1",
+			payload:   rawMutationPayload(t, validPayloads[store.SyncEntityObservation]),
+			wantValid: true,
+		},
+		{
+			name:      "valid prompt upsert",
+			entity:    store.SyncEntityPrompt,
+			op:        store.SyncOpUpsert,
+			entityKey: "prompt-1",
+			payload:   rawMutationPayload(t, validPayloads[store.SyncEntityPrompt]),
+			wantValid: true,
+		},
+		{
+			name:      "valid relation upsert",
+			entity:    store.SyncEntityRelation,
+			op:        store.SyncOpUpsert,
+			entityKey: "relation-1",
+			payload:   rawMutationPayload(t, validPayloads[store.SyncEntityRelation]),
+			wantValid: true,
+		},
+		{
+			name:      "session delete requires only identity",
+			entity:    store.SyncEntitySession,
+			op:        store.SyncOpDelete,
+			entityKey: "session-delete",
+			payload:   json.RawMessage(`{"id":"session-delete"}`),
+			wantValid: true,
+		},
+		{
+			name:      "observation delete requires only identity",
+			entity:    store.SyncEntityObservation,
+			op:        store.SyncOpDelete,
+			entityKey: "observation-delete",
+			payload:   json.RawMessage(`{"sync_id":"observation-delete"}`),
+			wantValid: true,
+		},
+		{
+			name:      "prompt delete requires only identity",
+			entity:    store.SyncEntityPrompt,
+			op:        store.SyncOpDelete,
+			entityKey: "prompt-delete",
+			payload:   json.RawMessage(`{"sync_id":"prompt-delete"}`),
+			wantValid: true,
+		},
+		{
+			name:      "relation delete is unsupported",
+			entity:    store.SyncEntityRelation,
+			op:        store.SyncOpDelete,
+			entityKey: "relation-1",
+			payload:   rawMutationPayload(t, validPayloads[store.SyncEntityRelation]),
+			wantField: "op",
+		},
+		{
+			name:      "non-object array payload",
+			entity:    store.SyncEntitySession,
+			op:        store.SyncOpUpsert,
+			payload:   json.RawMessage(`[]`),
+			wantField: "payload",
+		},
+		{
+			name:      "non-object scalar payload",
+			entity:    store.SyncEntitySession,
+			op:        store.SyncOpUpsert,
+			payload:   json.RawMessage(`42`),
+			wantField: "payload",
+		},
+		{
+			name:      "null payload",
+			entity:    store.SyncEntitySession,
+			op:        store.SyncOpUpsert,
+			payload:   json.RawMessage(`null`),
+			wantField: "payload",
+		},
+		{
+			name:      "encoded object payload",
+			entity:    store.SyncEntitySession,
+			op:        store.SyncOpUpsert,
+			payload:   encodedMutationPayload(t, validPayloads[store.SyncEntitySession]),
+			wantField: "payload",
+		},
+		{
+			name:      "non-string required field",
+			entity:    store.SyncEntityObservation,
+			op:        store.SyncOpUpsert,
+			entityKey: "observation-1",
+			payload:   rawMutationPayload(t, wrongTypeObservation),
+			wantField: "content",
+		},
+		{
+			name:      "entity key mismatch",
+			entity:    store.SyncEntityObservation,
+			op:        store.SyncOpUpsert,
+			entityKey: "observation-other",
+			payload:   rawMutationPayload(t, validPayloads[store.SyncEntityObservation]),
+			wantField: "entity_key",
+		},
+		{
+			name:      "unsupported entity",
+			entity:    "unknown",
+			op:        store.SyncOpUpsert,
+			payload:   json.RawMessage(`{}`),
+			wantField: "entity",
+		},
+		{
+			name:      "unsupported operation",
+			entity:    store.SyncEntitySession,
+			op:        "replace",
+			payload:   rawMutationPayload(t, validPayloads[store.SyncEntitySession]),
+			wantField: "op",
+		},
+	}
+
+	canonicalRequirements := []struct {
+		entity string
+		fields []string
+	}{
+		{store.SyncEntitySession, []string{"id", "directory"}},
+		{store.SyncEntityObservation, []string{"sync_id", "session_id", "type", "title", "content", "scope"}},
+		{store.SyncEntityPrompt, []string{"sync_id", "session_id", "content"}},
+		{store.SyncEntityRelation, []string{"sync_id", "source_id", "target_id", "relation", "judgment_status", "marked_by_actor", "marked_by_kind"}},
+	}
+	for _, requirement := range canonicalRequirements {
+		for _, field := range requirement.fields {
+			missing := cloneMutationPayload(validPayloads[requirement.entity])
+			delete(missing, field)
+			tests = append(tests, struct {
+				name      string
+				entity    string
+				op        string
+				entityKey string
+				payload   json.RawMessage
+				wantField string
+				wantValid bool
+			}{
+				name:      requirement.entity + " upsert missing " + field,
+				entity:    requirement.entity,
+				op:        store.SyncOpUpsert,
+				entityKey: canonicalMutationEntityKey(requirement.entity),
+				payload:   rawMutationPayload(t, missing),
+				wantField: field,
+			})
+
+			blank := cloneMutationPayload(validPayloads[requirement.entity])
+			blank[field] = " \t"
+			tests = append(tests, struct {
+				name      string
+				entity    string
+				op        string
+				entityKey string
+				payload   json.RawMessage
+				wantField string
+				wantValid bool
+			}{
+				name:      requirement.entity + " upsert blank " + field,
+				entity:    requirement.entity,
+				op:        store.SyncOpUpsert,
+				entityKey: canonicalMutationEntityKey(requirement.entity),
+				payload:   rawMutationPayload(t, blank),
+				wantField: field,
+			})
+		}
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issue, valid := ValidateMutationEntry(tt.entity, tt.op, tt.entityKey, tt.payload)
+			if valid != tt.wantValid {
+				t.Fatalf("valid=%v, want %v; issue=%+v", valid, tt.wantValid, issue)
+			}
+			if issue.Field != tt.wantField {
+				t.Fatalf("issue field=%q, want %q; issue=%+v", issue.Field, tt.wantField, issue)
+			}
+			if !valid && strings.TrimSpace(issue.Message) == "" {
+				t.Fatalf("invalid mutation must include a message: %+v", issue)
+			}
+		})
+	}
+}
+
+func TestValidateMutationEntryAllowsDerivedEntityKey(t *testing.T) {
+	payload := json.RawMessage(`{"sync_id":"observation-1","session_id":"session-1","type":"decision","title":"A decision","content":"The decision body","scope":"project"}`)
+
+	issue, valid := ValidateMutationEntry(store.SyncEntityObservation, store.SyncOpUpsert, "", payload)
+	if !valid || issue != (MutationValidationIssue{}) {
+		t.Fatalf("expected omitted entity key to be derivable, valid=%v issue=%+v", valid, issue)
+	}
+}
+
+func TestCanonicalizeForProjectRetainsEncodedMutationPayloadCompatibility(t *testing.T) {
+	raw := []byte(`{
+		"mutations": [
+			{
+				"entity": "session",
+				"op": "upsert",
+				"payload": "{\"id\":\"session-encoded\",\"directory\":\"/work/project\"}"
+			}
+		]
+	}`)
+
+	canonical, err := CanonicalizeForProject(raw, "proj-a")
+	if err != nil {
+		t.Fatalf("canonicalize encoded mutation payload: %v", err)
+	}
+
+	var chunk struct {
+		Mutations []store.SyncMutation `json:"mutations"`
+	}
+	if err := json.Unmarshal(canonical, &chunk); err != nil {
+		t.Fatalf("decode canonicalized chunk: %v", err)
+	}
+	if len(chunk.Mutations) != 1 || chunk.Mutations[0].EntityKey != "session-encoded" {
+		t.Fatalf("expected encoded payload to retain canonical session identity, got %+v", chunk.Mutations)
+	}
+}
+
+func rawMutationPayload(t *testing.T, fields map[string]any) json.RawMessage {
+	t.Helper()
+	payload, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatalf("marshal mutation payload: %v", err)
+	}
+	return payload
+}
+
+func encodedMutationPayload(t *testing.T, fields map[string]any) json.RawMessage {
+	t.Helper()
+	payload := rawMutationPayload(t, fields)
+	encoded, err := json.Marshal(string(payload))
+	if err != nil {
+		t.Fatalf("marshal encoded mutation payload: %v", err)
+	}
+	return encoded
+}
+
+func cloneMutationPayload(fields map[string]any) map[string]any {
+	clone := make(map[string]any, len(fields))
+	for key, value := range fields {
+		clone[key] = value
+	}
+	return clone
+}
+
+func canonicalMutationEntityKey(entity string) string {
+	switch entity {
+	case store.SyncEntitySession:
+		return "session-1"
+	case store.SyncEntityObservation:
+		return "observation-1"
+	case store.SyncEntityPrompt:
+		return "prompt-1"
+	case store.SyncEntityRelation:
+		return "relation-1"
+	default:
+		return ""
+	}
+}

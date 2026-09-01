@@ -757,7 +757,7 @@ Machine-actionable validation/policy failures from cloud sync routes include:
 - `error_code` (stable deterministic code)
 - `error` (human-readable message)
 
-This envelope is used consistently by `/sync/push` validation/control failures and by `/sync/pull` / `/sync/pull/{chunkID}` project-required or policy failures. `/sync/mutations/push` uses the envelope for empty batches, empty projects, project policy failures, and pause-control failures; relation-payload validation currently returns `error`, `reason_code`, and `invalid` instead. `/sync/mutations/pull` success responses include the project envelope, but internal listing errors currently use plain `http.Error`.
+This envelope is used consistently by `/sync/push` validation/control failures and by `/sync/pull` / `/sync/pull/{chunkID}` project-required or policy failures. `/sync/mutations/push` uses the envelope for empty batches, empty projects, project policy failures, pause-control failures, and mutation payload validation. Mutation validation failures use `error_class=repairable`, `error_code=payload_invalid`, an indexed `invalid` list, and the additive `reason_code=validation_error`. `/sync/mutations/pull` success responses include the project envelope, but internal listing errors currently use plain `http.Error`.
 
 ---
 

@@ -383,6 +383,53 @@ func TestManagerPushDoesNotAckWhenTransportFails(t *testing.T) {
 	}
 }
 
+func TestManagerPushDoesNotAckRepairableOrShortPush(t *testing.T) {
+	tests := []struct {
+		name       string
+		pushErr    error
+		pushResult *PushMutationsResult
+		wantError  string
+	}{
+		{
+			name:      "repairable validation failure",
+			pushErr:   fakeRepairableCloudError{msg: "cloud: mutation push: payload_invalid"},
+			wantError: "payload_invalid",
+		},
+		{
+			name:       "short acknowledgement",
+			pushResult: &PushMutationsResult{AcceptedSeqs: []int64{101}},
+			wantError:  "accepted 1 of 2",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			local := newFakeLocalStore()
+			local.mutations = []store.SyncMutation{
+				{Seq: 1, Entity: store.SyncEntityObservation, EntityKey: "obs-1", Op: store.SyncOpUpsert, Project: "proj-a", Payload: `{"content":"one"}`},
+				{Seq: 2, Entity: store.SyncEntityObservation, EntityKey: "obs-2", Op: store.SyncOpUpsert, Project: "proj-a", Payload: `{"content":"two"}`},
+			}
+			transport := newFakeTransport()
+			transport.pushErr = tt.pushErr
+			transport.pushResult = tt.pushResult
+
+			err := New(local, transport, DefaultConfig()).push(context.Background())
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("push error = %v, want error containing %q", err, tt.wantError)
+			}
+			if calls := atomic.LoadInt32(&transport.pushCalls); calls != 1 {
+				t.Fatalf("transport push calls = %d, want 1", calls)
+			}
+			local.mu.Lock()
+			acked := append([]int64(nil), local.ackedSeqs...)
+			local.mu.Unlock()
+			if len(acked) != 0 {
+				t.Fatalf("failed push acknowledged local sequences %v", acked)
+			}
+		})
+	}
+}
+
 func TestManagerPushIsolatesProjectLocalFailures(t *testing.T) {
 	tests := []struct {
 		name        string

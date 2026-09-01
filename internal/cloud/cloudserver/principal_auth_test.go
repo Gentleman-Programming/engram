@@ -57,7 +57,7 @@ func TestSyncRoutesAuthenticateThroughPrincipalResolver(t *testing.T) {
 		{name: "pull manifest", method: http.MethodGet, path: "/sync/pull?project=proj-a"},
 		{name: "pull chunk", method: http.MethodGet, path: "/sync/pull/chunk-1?project=proj-a"},
 		{name: "push chunk", method: http.MethodPost, path: "/sync/push", body: `{"project":"proj-a","created_by":"tester","data":{"sessions":[{"id":"s-1","directory":"/tmp/s-1"}]}}`},
-		{name: "mutation push", method: http.MethodPost, path: "/sync/mutations/push", body: `{"entries":[{"project":"proj-a","entity":"observation","entity_key":"obs-1","op":"upsert","payload":{}}]}`},
+		{name: "mutation push", method: http.MethodPost, path: "/sync/mutations/push", body: `{"entries":[{"project":"proj-a","entity":"observation","entity_key":"obs-1","op":"upsert","payload":{"sync_id":"obs-1","session_id":"session-1","type":"decision","title":"Title","content":"Content","scope":"project"}}]}`},
 		{name: "mutation pull", method: http.MethodGet, path: "/sync/mutations/pull?since_seq=0&limit=100"},
 	}
 

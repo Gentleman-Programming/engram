@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/cloud/cloudstore"
+	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
 	"github.com/Gentleman-Programming/engram/internal/store"
 	engramsync "github.com/Gentleman-Programming/engram/internal/sync"
 )
@@ -21,6 +23,7 @@ import (
 type fakeMutationStore struct {
 	fakeStore
 	mutations      []MutationEntry
+	insertCalls    int
 	syncEnabledMap map[string]bool // project → sync enabled
 	errInsert      error
 	errList        error
@@ -172,12 +175,14 @@ func TestMalformedChunkRejectsBeforeMaterialization(t *testing.T) {
 }
 
 func (s *fakeMutationStore) InsertMutationBatch(ctx context.Context, batch []MutationEntry) ([]int64, error) {
+	s.insertCalls++
 	if s.errInsert != nil {
 		return nil, s.errInsert
 	}
 	seqs := make([]int64, len(batch))
+	firstSeq := int64(len(s.mutations) + 1)
 	for i := range batch {
-		seq := int64(len(s.mutations) + i + 1)
+		seq := firstSeq + int64(i)
 		seqs[i] = seq
 		s.mutations = append(s.mutations, batch[i])
 	}
@@ -282,6 +287,9 @@ func TestMutationPushEndpointAccepted(t *testing.T) {
 	}
 	if len(resp.AcceptedSeqs) != 5 {
 		t.Fatalf("expected 5 accepted_seqs, got %d", len(resp.AcceptedSeqs))
+	}
+	if ms.insertCalls != 1 {
+		t.Fatalf("expected exactly one mutation-storage call, got %d", ms.insertCalls)
 	}
 }
 
@@ -1243,31 +1251,523 @@ func TestHandleMutationPush_PartialBatch_Atomic(t *testing.T) {
 	}
 }
 
-// TestHandleMutationPush_LegacyObsMissingOptional_Returns200 (D.1d) verifies
-// REQ-008: legacy observation entity with only sync_id in payload → HTTP 200.
-// No new required fields for legacy entities — backwards compatibility preserved.
-func TestHandleMutationPush_LegacyObsMissingOptional_Returns200(t *testing.T) {
+// TestMutationPushInvalidEntriesReturnIndexedRepairable400 verifies REQ-215 and
+// REQ-217: canonical field failures are reported with stable input indexes and
+// the mutation-specific repairable error code.
+func TestMutationPushInvalidEntriesReturnIndexedRepairable400(t *testing.T) {
+	tests := []struct {
+		name      string
+		index     int
+		entry     MutationEntry
+		wantField string
+	}{
+		{
+			name:  "observation content",
+			index: 2,
+			entry: MutationEntry{
+				Project:   "proj-a",
+				Entity:    store.SyncEntityObservation,
+				EntityKey: "obs-invalid",
+				Op:        store.SyncOpUpsert,
+				Payload: json.RawMessage(`{
+					"sync_id":"obs-invalid","session_id":"session-1","type":"decision",
+					"title":"Title","content":"   ","scope":"project"
+				}`),
+			},
+			wantField: "content",
+		},
+		{
+			name:  "session directory",
+			index: 1,
+			entry: MutationEntry{
+				Project:   "proj-a",
+				Entity:    store.SyncEntitySession,
+				EntityKey: "session-invalid",
+				Op:        store.SyncOpUpsert,
+				Payload:   json.RawMessage(`{"id":"session-invalid","directory":"\t"}`),
+			},
+			wantField: "directory",
+		},
+		{
+			name:  "prompt session id",
+			index: 3,
+			entry: MutationEntry{
+				Project:   "proj-a",
+				Entity:    store.SyncEntityPrompt,
+				EntityKey: "prompt-invalid",
+				Op:        store.SyncOpUpsert,
+				Payload:   json.RawMessage(`{"sync_id":"prompt-invalid","session_id":"","content":"Prompt"}`),
+			},
+			wantField: "session_id",
+		},
+		{
+			name:  "relation marked by kind",
+			index: 4,
+			entry: MutationEntry{
+				Project:   "proj-a",
+				Entity:    store.SyncEntityRelation,
+				EntityKey: "relation-invalid",
+				Op:        store.SyncOpUpsert,
+				Payload: json.RawMessage(`{
+					"sync_id":"relation-invalid","source_id":"source-1","target_id":"target-1",
+					"relation":"related","judgment_status":"judged","marked_by_actor":"agent","marked_by_kind":" "
+				}`),
+			},
+			wantField: "marked_by_kind",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ms := newFakeMutationStore()
+			srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
+			entries := makeMutationEntries(tt.index+1, "proj-a")
+			entries[tt.index] = tt.entry
+
+			rec := performMutationPush(t, srv, entries, "secret")
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d body=%q", rec.Code, rec.Body.String())
+			}
+
+			var response mutationPushValidationResponse
+			if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+				t.Fatalf("decode response: %v; body=%q", err, rec.Body.String())
+			}
+			if response.ErrorClass != "repairable" {
+				t.Errorf("error_class: got %q, want %q", response.ErrorClass, "repairable")
+			}
+			if response.ErrorCode != "payload_invalid" {
+				t.Errorf("error_code: got %q, want %q", response.ErrorCode, "payload_invalid")
+			}
+			if response.ReasonCode != "validation_error" {
+				t.Errorf("reason_code: got %q, want %q", response.ReasonCode, "validation_error")
+			}
+			if response.Error == "" {
+				t.Error("error must identify the invalid mutation batch")
+			}
+			if len(response.Invalid) != 1 {
+				t.Fatalf("invalid: got %d entries, want 1; response=%q", len(response.Invalid), rec.Body.String())
+			}
+			invalid := response.Invalid[0]
+			if invalid.Index != tt.index || invalid.Entity != tt.entry.Entity || invalid.Field != tt.wantField {
+				t.Errorf("invalid detail: got %+v, want index=%d entity=%q field=%q", invalid, tt.index, tt.entry.Entity, tt.wantField)
+			}
+			if ms.insertCalls != 0 || len(ms.mutations) != 0 {
+				t.Fatalf("invalid batch crossed storage boundary: insert_calls=%d mutations=%d", ms.insertCalls, len(ms.mutations))
+			}
+		})
+	}
+}
+
+// TestMutationPushReportsAllInvalidEntries verifies that validation scans the
+// complete authorized batch and preserves input order in the repair details.
+func TestMutationPushReportsAllInvalidEntries(t *testing.T) {
+	ms := newFakeMutationStore()
+	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
+	entries := makeMutationEntries(4, "proj-a")
+	entries[1] = MutationEntry{
+		Project:   "proj-a",
+		Entity:    store.SyncEntityObservation,
+		EntityKey: "obs-invalid",
+		Op:        store.SyncOpUpsert,
+		Payload:   json.RawMessage(`{"sync_id":"obs-invalid","session_id":"session-1","type":"decision","title":"Title","content":"","scope":"project"}`),
+	}
+	entries[3] = MutationEntry{
+		Project:   "proj-a",
+		Entity:    store.SyncEntityPrompt,
+		EntityKey: "prompt-invalid",
+		Op:        store.SyncOpUpsert,
+		Payload:   json.RawMessage(`{"sync_id":"prompt-invalid","session_id":" ","content":"Prompt"}`),
+	}
+
+	rec := performMutationPush(t, srv, entries, "secret")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	var response mutationPushValidationResponse
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(response.Invalid) != 2 {
+		t.Fatalf("invalid: got %d entries, want 2; response=%q", len(response.Invalid), rec.Body.String())
+	}
+	want := []mutationValidationDetail{
+		{Index: 1, Entity: store.SyncEntityObservation, Field: "content"},
+		{Index: 3, Entity: store.SyncEntityPrompt, Field: "session_id"},
+	}
+	for i, got := range response.Invalid {
+		if got != want[i] {
+			t.Errorf("invalid[%d]: got %+v, want %+v", i, got, want[i])
+		}
+	}
+	if ms.insertCalls != 0 || len(ms.mutations) != 0 {
+		t.Fatalf("all-invalid batch crossed storage boundary: insert_calls=%d mutations=%d", ms.insertCalls, len(ms.mutations))
+	}
+}
+
+// TestMutationPushReportsAllInvalidEntriesWithRepairableEnvelope verifies the
+// complete mutation validation contract when more than one entry is invalid.
+func TestMutationPushReportsAllInvalidEntriesWithRepairableEnvelope(t *testing.T) {
+	ms := newFakeMutationStore()
+	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
+	entries := makeMutationEntries(4, "proj-a")
+	entries[1] = MutationEntry{
+		Project:   "proj-a",
+		Entity:    store.SyncEntityObservation,
+		EntityKey: "obs-invalid",
+		Op:        store.SyncOpUpsert,
+		Payload:   json.RawMessage(`{"sync_id":"obs-invalid","session_id":"session-1","type":"decision","title":"Title","content":"","scope":"project"}`),
+	}
+	entries[3] = MutationEntry{
+		Project:   "proj-a",
+		Entity:    store.SyncEntityPrompt,
+		EntityKey: "prompt-invalid",
+		Op:        store.SyncOpUpsert,
+		Payload:   json.RawMessage(`{"sync_id":"prompt-invalid","session_id":" ","content":"Prompt"}`),
+	}
+
+	rec := performMutationPush(t, srv, entries, "secret")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%q", rec.Code, rec.Body.String())
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode validation response: %v", err)
+	}
+	if _, ok := raw["accepted_seqs"]; ok {
+		t.Fatalf("invalid batch returned accepted sequences: %s", rec.Body.Bytes())
+	}
+	var response mutationPushValidationResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode validation envelope: %v", err)
+	}
+	if response.ErrorClass != constants.UpgradeErrorClassRepairable || response.ErrorCode != constants.MutationErrorCodePayloadInvalid || response.ReasonCode != "validation_error" {
+		t.Fatalf("unexpected validation envelope: %+v", response)
+	}
+	want := []mutationValidationDetail{
+		{Index: 1, Entity: store.SyncEntityObservation, Field: "content"},
+		{Index: 3, Entity: store.SyncEntityPrompt, Field: "session_id"},
+	}
+	if !reflect.DeepEqual(response.Invalid, want) {
+		t.Fatalf("invalid details: got %+v, want %+v", response.Invalid, want)
+	}
+	if ms.insertCalls != 0 || len(ms.mutations) != 0 {
+		t.Fatalf("invalid batch crossed storage boundary: insert_calls=%d mutations=%d", ms.insertCalls, len(ms.mutations))
+	}
+}
+
+// TestMutationPushReportsAllInvalidEntriesPreservesInputOrderForOperationAndPayload
+// triangulates the complete-batch response with distinct operation and object
+// validation failures.
+func TestMutationPushReportsAllInvalidEntriesPreservesInputOrderForOperationAndPayload(t *testing.T) {
+	ms := newFakeMutationStore()
+	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
+	entries := makeMutationEntries(4, "proj-a")
+	entries[1] = MutationEntry{
+		Project:   "proj-a",
+		Entity:    store.SyncEntityRelation,
+		EntityKey: "relation-delete",
+		Op:        store.SyncOpDelete,
+		Payload:   json.RawMessage(`{"sync_id":"relation-delete"}`),
+	}
+	entries[2] = MutationEntry{
+		Project:   "proj-a",
+		Entity:    store.SyncEntitySession,
+		EntityKey: "session-invalid",
+		Op:        store.SyncOpUpsert,
+		Payload:   json.RawMessage(`[]`),
+	}
+
+	rec := performMutationPush(t, srv, entries, "secret")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	var response mutationPushValidationResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode validation envelope: %v", err)
+	}
+	want := []mutationValidationDetail{
+		{Index: 1, Entity: store.SyncEntityRelation, Field: "op"},
+		{Index: 2, Entity: store.SyncEntitySession, Field: "payload"},
+	}
+	if !reflect.DeepEqual(response.Invalid, want) {
+		t.Fatalf("invalid details: got %+v, want %+v", response.Invalid, want)
+	}
+	if response.ErrorClass != constants.UpgradeErrorClassRepairable || response.ErrorCode != constants.MutationErrorCodePayloadInvalid {
+		t.Fatalf("unexpected validation error classification: %+v", response)
+	}
+	if ms.insertCalls != 0 || len(ms.mutations) != 0 {
+		t.Fatalf("invalid batch crossed storage boundary: insert_calls=%d mutations=%d", ms.insertCalls, len(ms.mutations))
+	}
+}
+
+// TestMutationPushMixedBatchRejectsAtomically verifies REQ-216: a valid entry
+// surrounding an invalid entry cannot produce a partial insert or acknowledgement.
+func TestMutationPushMixedBatchRejectsAtomically(t *testing.T) {
+	ms := newFakeMutationStore()
+	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
+	valid := makeMutationEntries(1, "proj-a")[0]
+	invalid := MutationEntry{
+		Project:   "proj-a",
+		Entity:    store.SyncEntityObservation,
+		EntityKey: "obs-invalid",
+		Op:        store.SyncOpUpsert,
+		Payload:   json.RawMessage(`{"sync_id":"obs-invalid","session_id":"session-1","type":"decision","title":"Title","content":" ","scope":"project"}`),
+	}
+
+	rec := performMutationPush(t, srv, []MutationEntry{valid, invalid}, "secret")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if _, ok := raw["accepted_seqs"]; ok {
+		t.Fatalf("invalid batch returned an accepted_seqs field: %s", rec.Body.Bytes())
+	}
+	if ms.insertCalls != 0 || len(ms.mutations) != 0 {
+		t.Fatalf("mixed batch crossed storage boundary: insert_calls=%d mutations=%d", ms.insertCalls, len(ms.mutations))
+	}
+}
+
+// TestMutationPushRejectsRelationDelete verifies REQ-216: relation deletion
+// remains unsupported while session, observation, and prompt deletes remain
+// operation-specific compatibility cases.
+func TestMutationPushRejectsRelationDelete(t *testing.T) {
+	ms := newFakeMutationStore()
+	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
+	entry := MutationEntry{
+		Project:   "proj-a",
+		Entity:    store.SyncEntityRelation,
+		EntityKey: "relation-1",
+		Op:        store.SyncOpDelete,
+		Payload: json.RawMessage(`{
+			"sync_id":"relation-1","source_id":"source-1","target_id":"target-1",
+			"relation":"related","judgment_status":"judged","marked_by_actor":"agent","marked_by_kind":"agent"
+		}`),
+	}
+
+	rec := performMutationPush(t, srv, []MutationEntry{entry}, "secret")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	var response mutationPushValidationResponse
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.ErrorCode != "payload_invalid" || len(response.Invalid) != 1 {
+		t.Fatalf("expected structured payload_invalid response, got %+v", response)
+	}
+	if got := response.Invalid[0]; got != (mutationValidationDetail{Index: 0, Entity: store.SyncEntityRelation, Field: "op"}) {
+		t.Errorf("invalid detail: got %+v, want relation delete op rejection", got)
+	}
+	if ms.insertCalls != 0 || len(ms.mutations) != 0 {
+		t.Fatalf("relation delete crossed storage boundary: insert_calls=%d mutations=%d", ms.insertCalls, len(ms.mutations))
+	}
+}
+
+// TestMutationPushAdmissionOrdering verifies authentication, authorization,
+// and pause policy hide payload details before active-project validation runs.
+func TestMutationPushAdmissionOrdering(t *testing.T) {
+	tests := []struct {
+		name          string
+		projects      []string
+		pausedProject string
+		token         string
+		authorization string
+		project       string
+		wantStatus    int
+		wantCode      string
+		wantInvalid   bool
+	}{
+		{
+			name:          "authentication before validation",
+			projects:      []string{"proj-a"},
+			token:         "secret",
+			authorization: "",
+			project:       "proj-a",
+			wantStatus:    http.StatusUnauthorized,
+			wantInvalid:   false,
+		},
+		{
+			name:          "authorization before validation",
+			projects:      []string{"proj-a"},
+			token:         "secret",
+			authorization: "Bearer secret",
+			project:       "proj-b",
+			wantStatus:    http.StatusForbidden,
+			wantCode:      "policy_forbidden",
+			wantInvalid:   false,
+		},
+		{
+			name:          "pause before validation",
+			projects:      []string{"proj-a"},
+			pausedProject: "proj-a",
+			token:         "secret",
+			authorization: "Bearer secret",
+			project:       "proj-a",
+			wantStatus:    http.StatusConflict,
+			wantCode:      "sync-paused",
+			wantInvalid:   false,
+		},
+		{
+			name:          "validation after active policy gates",
+			projects:      []string{"proj-a"},
+			token:         "secret",
+			authorization: "Bearer secret",
+			project:       "proj-a",
+			wantStatus:    http.StatusBadRequest,
+			wantCode:      "payload_invalid",
+			wantInvalid:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ms := newFakeMutationStore()
+			if tt.pausedProject != "" {
+				ms.syncEnabledMap[tt.pausedProject] = false
+			}
+			srv := newMutationTestServer(ms, tt.token, tt.projects)
+			entry := makeMutationEntries(1, tt.project)[0]
+			entry.Payload = json.RawMessage(`{"sync_id":"obs-invalid","session_id":"session-1","type":"decision","title":"Title","content":"","scope":"project"}`)
+
+			rec := performMutationPush(t, srv, []MutationEntry{entry}, tt.authorization)
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("expected status %d, got %d body=%q", tt.wantStatus, rec.Code, rec.Body.String())
+			}
+			if tt.wantStatus == http.StatusUnauthorized {
+				if strings.Contains(rec.Body.String(), "payload_invalid") {
+					t.Fatalf("authentication error exposed payload validation details: %q", rec.Body.String())
+				}
+				return
+			}
+
+			var raw map[string]json.RawMessage
+			if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+				t.Fatalf("decode response: %v; body=%q", err, rec.Body.String())
+			}
+			var code string
+			if err := json.Unmarshal(raw["error_code"], &code); err != nil {
+				t.Fatalf("decode error_code: %v; body=%q", err, rec.Body.String())
+			}
+			if code != tt.wantCode {
+				t.Errorf("error_code: got %q, want %q", code, tt.wantCode)
+			}
+			_, hasInvalid := raw["invalid"]
+			if hasInvalid != tt.wantInvalid {
+				t.Errorf("invalid details present=%t, want %t; body=%q", hasInvalid, tt.wantInvalid, rec.Body.String())
+			}
+			if ms.insertCalls != 0 || len(ms.mutations) != 0 {
+				t.Fatalf("preflight rejection crossed storage boundary: insert_calls=%d mutations=%d", ms.insertCalls, len(ms.mutations))
+			}
+		})
+	}
+}
+
+// TestMutationPushChecksAllProjectPoliciesBeforeValidation verifies that a
+// paused project in a multi-project batch wins over payload validation for an
+// otherwise authorized project.
+func TestMutationPushChecksAllProjectPoliciesBeforeValidation(t *testing.T) {
+	ms := newFakeMutationStore()
+	ms.syncEnabledMap["proj-b"] = false
+	srv := newMutationTestServer(ms, "secret", []string{"proj-a", "proj-b"})
+	invalidActive := MutationEntry{
+		Project:   "proj-a",
+		Entity:    store.SyncEntityObservation,
+		EntityKey: "obs-invalid",
+		Op:        store.SyncOpUpsert,
+		Payload:   json.RawMessage(`{"sync_id":"obs-invalid","session_id":"session-1","type":"decision","title":"Title","content":"","scope":"project"}`),
+	}
+	validPaused := makeMutationEntries(1, "proj-b")[0]
+
+	rec := performMutationPush(t, srv, []MutationEntry{invalidActive, validPaused}, "secret")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for paused project, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode pause response: %v", err)
+	}
+	var errorCode string
+	if err := json.Unmarshal(raw["error_code"], &errorCode); err != nil {
+		t.Fatalf("decode pause error code: %v", err)
+	}
+	if errorCode != "sync-paused" {
+		t.Fatalf("error_code: got %q, want %q", errorCode, "sync-paused")
+	}
+	if _, ok := raw["invalid"]; ok {
+		t.Fatalf("pause response exposed payload validation details: %s", rec.Body.Bytes())
+	}
+	if _, ok := raw["accepted_seqs"]; ok {
+		t.Fatalf("pause response acknowledged mutations: %s", rec.Body.Bytes())
+	}
+	if ms.insertCalls != 0 || len(ms.mutations) != 0 {
+		t.Fatalf("policy rejection crossed storage boundary: insert_calls=%d mutations=%d", ms.insertCalls, len(ms.mutations))
+	}
+}
+
+// TestMutationPushValidatesAuthorizedMultiProjectBatchAtomically triangulates
+// the preflight with two authorized active projects and a cross-project invalid
+// entry that must prevent the valid entry from reaching storage.
+func TestMutationPushValidatesAuthorizedMultiProjectBatchAtomically(t *testing.T) {
+	ms := newFakeMutationStore()
+	srv := newMutationTestServer(ms, "secret", []string{"proj-a", "proj-b"})
+	valid := makeMutationEntries(1, "proj-a")[0]
+	invalid := MutationEntry{
+		Project:   "proj-b",
+		Entity:    store.SyncEntityPrompt,
+		EntityKey: "prompt-invalid",
+		Op:        store.SyncOpUpsert,
+		Payload:   json.RawMessage(`{"sync_id":"prompt-invalid","session_id":" ","content":"Prompt"}`),
+	}
+
+	rec := performMutationPush(t, srv, []MutationEntry{valid, invalid}, "secret")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	var response mutationPushValidationResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode validation envelope: %v", err)
+	}
+	want := []mutationValidationDetail{{Index: 1, Entity: store.SyncEntityPrompt, Field: "session_id"}}
+	if !reflect.DeepEqual(response.Invalid, want) {
+		t.Fatalf("invalid details: got %+v, want %+v", response.Invalid, want)
+	}
+	if response.ErrorCode != constants.MutationErrorCodePayloadInvalid {
+		t.Fatalf("error_code: got %q, want %q", response.ErrorCode, constants.MutationErrorCodePayloadInvalid)
+	}
+	if ms.insertCalls != 0 || len(ms.mutations) != 0 {
+		t.Fatalf("cross-project invalid batch crossed storage boundary: insert_calls=%d mutations=%d", ms.insertCalls, len(ms.mutations))
+	}
+}
+
+// TestHandleMutationPush_LegacyObsMissingRequired_Returns400 verifies that the
+// obsolete minimal legacy observation upsert no longer bypasses canonical rules.
+func TestHandleMutationPush_LegacyObsMissingRequired_Returns400(t *testing.T) {
 	ms := newFakeMutationStore()
 	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
 
-	// Minimal observation payload: only sync_id, no optional fields
+	// Minimal observation payload: sync_id and title are insufficient for an upsert.
 	minimalPayload := json.RawMessage(`{"sync_id":"obs-001","title":"My observation"}`)
 	entries := []MutationEntry{
 		{Project: "proj-a", Entity: "observation", EntityKey: "obs-001", Op: "upsert", Payload: minimalPayload},
 	}
-	body := marshalPushRequest(t, entries)
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", body)
-	req.Header.Set("Authorization", "Bearer secret")
-	req.Header.Set("Content-Type", "application/json")
-	srv.Handler().ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("D.1d: expected 200 for legacy obs with minimal payload, got %d body=%q", rec.Code, rec.Body.String())
+	rec := performMutationPush(t, srv, entries, "secret")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for legacy obs with missing canonical fields, got %d body=%q", rec.Code, rec.Body.String())
 	}
-	if len(ms.mutations) != 1 {
-		t.Fatalf("D.1d: expected 1 mutation stored, got %d", len(ms.mutations))
+	var response mutationPushValidationResponse
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.ErrorCode != "payload_invalid" || len(response.Invalid) != 1 || response.Invalid[0].Field != "session_id" {
+		t.Fatalf("expected canonical session_id validation detail, got %+v", response)
+	}
+	if ms.insertCalls != 0 || len(ms.mutations) != 0 {
+		t.Fatalf("minimal legacy payload crossed storage boundary: insert_calls=%d mutations=%d", ms.insertCalls, len(ms.mutations))
 	}
 }
 
@@ -1283,13 +1783,45 @@ func makeMutationEntries(count int, project string) []MutationEntry {
 	for i := range entries {
 		entries[i] = MutationEntry{
 			Project:   project,
-			Entity:    "observation",
+			Entity:    store.SyncEntityObservation,
 			EntityKey: fmt.Sprintf("obs-%d", i),
-			Op:        "upsert",
-			Payload:   json.RawMessage(`{"title":"test"}`),
+			Op:        store.SyncOpUpsert,
+			Payload: json.RawMessage(fmt.Sprintf(
+				`{"sync_id":"obs-%d","session_id":"session-%d","type":"decision","title":"test","content":"test content","scope":"project"}`,
+				i, i)),
 		}
 	}
 	return entries
+}
+
+type mutationValidationDetail struct {
+	Index  int    `json:"index"`
+	Entity string `json:"entity"`
+	Field  string `json:"field"`
+}
+
+type mutationPushValidationResponse struct {
+	ErrorClass   string                     `json:"error_class"`
+	ErrorCode    string                     `json:"error_code"`
+	Error        string                     `json:"error"`
+	ReasonCode   string                     `json:"reason_code"`
+	Invalid      []mutationValidationDetail `json:"invalid"`
+	AcceptedSeqs []int64                    `json:"accepted_seqs"`
+}
+
+func performMutationPush(t *testing.T, srv *CloudServer, entries []MutationEntry, authorization string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", marshalPushRequest(t, entries))
+	if authorization != "" {
+		if !strings.HasPrefix(authorization, "Bearer ") {
+			authorization = "Bearer " + authorization
+		}
+		req.Header.Set("Authorization", authorization)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+	return rec
 }
 
 func marshalPushRequest(t *testing.T, entries []MutationEntry) *bytes.Buffer {
@@ -1686,16 +2218,17 @@ func TestRelationSync_ServerValidation_MissingField(t *testing.T) {
 	}
 }
 
-// TestRelationSync_BackwardsCompat_LegacyClient (G.5) verifies REQ-008:
-// An older client that pushes only session + observation mutations (no entity='relation')
-// succeeds with HTTP 200. No behavior change for legacy entities.
+// TestRelationSync_BackwardsCompat_LegacyClient (G.5) verifies REQ-216:
+// A client that pushes only session + observation mutations (no entity='relation')
+// succeeds with HTTP 200 when the legacy entities satisfy their canonical upsert
+// contract. Relation support is additive and does not change these entity types.
 func TestRelationSync_BackwardsCompat_LegacyClient(t *testing.T) {
 	ms := newFakeMutationStore()
 	srv := newMutationTestServer(ms, "secret", []string{"proj-g5"})
 
 	// Simulate a legacy client push: session + observation only, no relation.
-	sessionPayload := json.RawMessage(`{"sync_id":"ses-g5-001","directory":"/tmp/g5"}`)
-	obsPayload := json.RawMessage(`{"sync_id":"obs-g5-001","title":"Legacy observation"}`)
+	sessionPayload := json.RawMessage(`{"id":"ses-g5-001","directory":"/tmp/g5"}`)
+	obsPayload := json.RawMessage(`{"sync_id":"obs-g5-001","session_id":"ses-g5-001","type":"decision","title":"Legacy observation","content":"Legacy content","scope":"project"}`)
 
 	entries := []MutationEntry{
 		{Project: "proj-g5", Entity: "session", EntityKey: "ses-g5-001", Op: "upsert", Payload: sessionPayload},

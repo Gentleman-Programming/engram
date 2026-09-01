@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -304,6 +305,121 @@ func ValidateRelationPayload(payload json.RawMessage) (string, bool) {
 		}
 	}
 	return "", true
+}
+
+// MutationValidationIssue describes the first canonical field that prevents a
+// mutation from being admitted. Message is suitable for a human-facing error,
+// while Field is stable machine-readable detail for the mutation API.
+type MutationValidationIssue struct {
+	Field   string
+	Message string
+}
+
+// ValidateMutationEntry validates a mutation before it crosses the cloud-store
+// boundary. It deliberately requires the wire payload to be an object. Chunk
+// canonicalization continues to use DecodeSyncMutationPayload directly and
+// therefore retains its compatibility with encoded payloads.
+func ValidateMutationEntry(entity, op, entityKey string, payload json.RawMessage) (MutationValidationIssue, bool) {
+	entity = strings.TrimSpace(entity)
+	op = strings.TrimSpace(op)
+	entityKey = strings.TrimSpace(entityKey)
+
+	if err := validateSupportedMutation(entity, op); err != nil {
+		field := "entity"
+		if isSupportedMutationEntity(entity) {
+			field = "op"
+		}
+		return MutationValidationIssue{Field: field, Message: err.Error()}, false
+	}
+
+	trimmedPayload := strings.TrimSpace(string(payload))
+	if trimmedPayload == "" {
+		return MutationValidationIssue{
+			Field:   "payload",
+			Message: "mutation payload is required",
+		}, false
+	}
+
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(trimmedPayload), &object); err != nil || object == nil {
+		return MutationValidationIssue{
+			Field:   "payload",
+			Message: "mutation payload must be a JSON object",
+		}, false
+	}
+
+	_, expectedEntityKey, err := normalizeMutationPayload(entity, op, trimmedPayload, "")
+	if err != nil {
+		return mutationValidationIssue(entity, op, err), false
+	}
+	if entityKey != "" && entityKey != expectedEntityKey {
+		return MutationValidationIssue{
+			Field:   "entity_key",
+			Message: fmt.Sprintf("entity_key %q does not match payload key %q", entityKey, expectedEntityKey),
+		}, false
+	}
+
+	return MutationValidationIssue{}, true
+}
+
+func mutationValidationIssue(entity, op string, err error) MutationValidationIssue {
+	message := err.Error()
+	requiredFields := mutationRequiredFields(entity, op)
+	for _, field := range requiredFields {
+		if strings.Contains(message, "payload "+field+" is required") {
+			return MutationValidationIssue{Field: field, Message: message}
+		}
+	}
+
+	var typeError *json.UnmarshalTypeError
+	if errors.As(err, &typeError) {
+		fieldName := typeError.Field
+		if separator := strings.LastIndex(fieldName, "."); separator >= 0 {
+			fieldName = fieldName[separator+1:]
+		}
+		fieldName = strings.ToLower(strings.ReplaceAll(fieldName, "_", ""))
+		for _, field := range requiredFields {
+			canonicalName := strings.ToLower(strings.ReplaceAll(field, "_", ""))
+			if fieldName == canonicalName {
+				return MutationValidationIssue{Field: field, Message: message}
+			}
+		}
+	}
+
+	return MutationValidationIssue{Field: "payload", Message: message}
+}
+
+func mutationRequiredFields(entity, op string) []string {
+	switch entity {
+	case store.SyncEntitySession:
+		if op == store.SyncOpDelete {
+			return []string{"id"}
+		}
+		return []string{"id", "directory"}
+	case store.SyncEntityObservation:
+		if op == store.SyncOpDelete {
+			return []string{"sync_id"}
+		}
+		return []string{"sync_id", "session_id", "type", "title", "content", "scope"}
+	case store.SyncEntityPrompt:
+		if op == store.SyncOpDelete {
+			return []string{"sync_id"}
+		}
+		return []string{"sync_id", "session_id", "content"}
+	case store.SyncEntityRelation:
+		return []string{"sync_id", "source_id", "target_id", "relation", "judgment_status", "marked_by_actor", "marked_by_kind"}
+	default:
+		return nil
+	}
+}
+
+func isSupportedMutationEntity(entity string) bool {
+	switch entity {
+	case store.SyncEntitySession, store.SyncEntityObservation, store.SyncEntityPrompt, store.SyncEntityRelation:
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizeChunkMutation(raw map[string]any, project string) (map[string]any, error) {
