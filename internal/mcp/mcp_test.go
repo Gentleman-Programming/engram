@@ -3052,13 +3052,102 @@ func compareMCPToolInventory(expected, actual map[string]*server.ServerTool) err
 	return nil
 }
 
+func mcpToolInventoryFromV1Fixture(t *testing.T) map[string]*server.ServerTool {
+	t.Helper()
+
+	raw, err := os.ReadFile("testdata/tool-contract-v1.json")
+	if err != nil {
+		t.Fatalf("read v1 tool contract fixture: %v", err)
+	}
+	fixture, err := readMCPToolContractFixture(raw)
+	if err != nil {
+		t.Fatalf("read v1 tool contract fixture: %v", err)
+	}
+	inventory := make(map[string]*server.ServerTool, len(fixture))
+	for name := range fixture {
+		inventory[name] = &server.ServerTool{}
+	}
+	return inventory
+}
+
+func TestCompareMCPToolInventory(t *testing.T) {
+	tests := []struct {
+		name     string
+		expected map[string]*server.ServerTool
+		actual   map[string]*server.ServerTool
+		wantErr  bool
+	}{
+		{
+			name: "equal inventories",
+			expected: map[string]*server.ServerTool{
+				"mem_save":   &server.ServerTool{},
+				"mem_search": &server.ServerTool{},
+			},
+			actual: map[string]*server.ServerTool{
+				"mem_save":   &server.ServerTool{},
+				"mem_search": &server.ServerTool{},
+			},
+		},
+		{
+			name:     "both empty",
+			expected: map[string]*server.ServerTool{},
+			actual:   map[string]*server.ServerTool{},
+		},
+		{
+			name: "count mismatch",
+			expected: map[string]*server.ServerTool{
+				"mem_save":   &server.ServerTool{},
+				"mem_search": &server.ServerTool{},
+			},
+			actual: map[string]*server.ServerTool{
+				"mem_save": &server.ServerTool{},
+			},
+			wantErr: true,
+		},
+		{
+			name: "actual extra tool with expected tools present",
+			expected: map[string]*server.ServerTool{
+				"mem_save":   &server.ServerTool{},
+				"mem_search": &server.ServerTool{},
+			},
+			actual: map[string]*server.ServerTool{
+				"mem_save":   &server.ServerTool{},
+				"mem_search": &server.ServerTool{},
+				"mem_stats":  &server.ServerTool{},
+			},
+			wantErr: true,
+		},
+		{
+			name: "missing tool with equal count",
+			expected: map[string]*server.ServerTool{
+				"mem_save":   &server.ServerTool{},
+				"mem_search": &server.ServerTool{},
+			},
+			actual: map[string]*server.ServerTool{
+				"mem_save":  &server.ServerTool{},
+				"mem_stats": &server.ServerTool{},
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := compareMCPToolInventory(tt.expected, tt.actual)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("compareMCPToolInventory() error = %v, want error = %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestNewServerWithToolsNilRegistersAll(t *testing.T) {
 	s := newMCPTestStore(t)
 	srv := NewServerWithTools(s, nil)
 	if srv == nil {
 		t.Fatal("expected MCP server instance")
 	}
-	if err := compareMCPToolInventory(NewServer(s).ListTools(), srv.ListTools()); err != nil {
+	if err := compareMCPToolInventory(mcpToolInventoryFromV1Fixture(t), srv.ListTools()); err != nil {
 		t.Fatalf("nil allowlist inventory: %v", err)
 	}
 }
@@ -3764,7 +3853,7 @@ func TestNewServerWithConfig(t *testing.T) {
 	if srv == nil {
 		t.Fatal("expected MCP server instance")
 	}
-	if err := compareMCPToolInventory(NewServer(s).ListTools(), srv.ListTools()); err != nil {
+	if err := compareMCPToolInventory(mcpToolInventoryFromV1Fixture(t), srv.ListTools()); err != nil {
 		t.Fatalf("default config inventory: %v", err)
 	}
 }
