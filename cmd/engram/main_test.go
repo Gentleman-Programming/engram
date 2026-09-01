@@ -348,14 +348,14 @@ func TestPrintPostInstall(t *testing.T) {
 	}{
 		{
 			name:       "opencode with subagent monitor enabled",
-			result:     &setup.Result{Agent: "opencode", TUIPluginEnabled: true},
-			expects:    []string{"Restart OpenCode", "opencode-subagent-statusline", "auto-starts"},
+			result:     &setup.Result{Agent: "opencode", MCPConfigured: true, TUIPluginEnabled: true},
+			expects:    []string{"Configuration written", "opencode mcp list", "new OpenCode agent session", "cannot verify tool exposure", "opencode-subagent-statusline", "auto-starts"},
 			notExpects: []string{"engram serve &"},
 		},
 		{
-			name:       "opencode with subagent monitor not enabled",
-			result:     &setup.Result{Agent: "opencode", TUIPluginEnabled: false},
-			expects:    []string{"Restart OpenCode", "auto-starts"},
+			name:       "opencode with incomplete MCP registration",
+			result:     &setup.Result{Agent: "opencode", MCPConfigured: false, TUIPluginEnabled: false},
+			expects:    []string{"Plugin written", "manual configuration", "opencode mcp list", "new OpenCode agent session", "cannot verify tool exposure", "auto-starts"},
 			notExpects: []string{"opencode-subagent-statusline", "engram serve &"},
 		},
 		{
