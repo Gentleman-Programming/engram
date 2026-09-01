@@ -166,7 +166,7 @@ func (s *Store) ListOrphanedObservationSessionEvidence(project string) ([]Orphan
 		query += ` AND o.project = ?`
 		args = append(args, project)
 	}
-	query += ` GROUP BY o.project, o.session_id ORDER BY ifnull(o.project, ''), o.session_id`
+	query += ` GROUP BY ifnull(o.project, ''), o.session_id ORDER BY ifnull(o.project, ''), o.session_id`
 
 	rows, err := s.queryItHook(s.db, query, args...)
 	if err != nil {

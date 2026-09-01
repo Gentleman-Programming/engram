@@ -131,6 +131,13 @@ func TestOrphanedObservationSessionCheckIsOKWhenEveryObservationHasASession(t *t
 func TestOrphanedObservationSessionCheckReportsGroupedEvidence(t *testing.T) {
 	s := newDiagnosticTestStore(t)
 	seedDiagnosticOrphanedObservation(t, s, "obs-orphan", "missing-session", "engram")
+	var foreignKeysEnabled int
+	if err := s.DB().QueryRow(`PRAGMA foreign_keys`).Scan(&foreignKeysEnabled); err != nil {
+		t.Fatalf("read foreign key enforcement: %v", err)
+	}
+	if foreignKeysEnabled != 1 {
+		t.Fatalf("foreign key enforcement=%d, want 1", foreignKeysEnabled)
+	}
 
 	report, err := NewRunner().RunOne(context.Background(), Scope{Store: s, Project: "engram"}, CheckOrphanedObservationSession)
 	if err != nil {
@@ -159,12 +166,40 @@ func TestOrphanedObservationSessionCheckReportsGroupedEvidence(t *testing.T) {
 	}
 }
 
+func TestOrphanedObservationSessionCheckPropagatesStoreFailure(t *testing.T) {
+	s := newDiagnosticTestStore(t)
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	report, err := NewRunner().RunOne(context.Background(), Scope{Store: s, Project: "engram"}, CheckOrphanedObservationSession)
+	if err == nil {
+		t.Fatalf("report=%+v, want store query error", report)
+	}
+	if report.Status == StatusOK || len(report.Checks) != 0 {
+		t.Fatalf("report=%+v, want no clean report", report)
+	}
+}
+
 func seedDiagnosticOrphanedObservation(t *testing.T, s *store.Store, syncID, sessionID, project string) {
 	t.Helper()
-	if _, err := s.DB().Exec(`PRAGMA foreign_keys = OFF`); err != nil {
+	ctx := context.Background()
+	conn, err := s.DB().Conn(ctx)
+	if err != nil {
+		t.Fatalf("database connection: %v", err)
+	}
+	defer func() {
+		if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`); err != nil {
+			t.Errorf("restore foreign keys: %v", err)
+		}
+		if err := conn.Close(); err != nil {
+			t.Errorf("close database connection: %v", err)
+		}
+	}()
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
 		t.Fatalf("disable foreign keys: %v", err)
 	}
-	if _, err := s.DB().Exec(`
+	if _, err := conn.ExecContext(ctx, `
 		INSERT INTO observations
 			(sync_id, session_id, type, title, content, project, scope, normalized_hash, revision_count, duplicate_count, created_at, updated_at)
 		VALUES (?, ?, 'bugfix', 'orphan', 'content', ?, 'project', ?, 1, 1, datetime('now'), datetime('now'))
