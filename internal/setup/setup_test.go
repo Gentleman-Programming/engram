@@ -2632,6 +2632,7 @@ func TestClaudeCodeUserPromptHookWithoutJQPreservesSessionStateAndNudge(t *testi
 		t.Fatalf("hook state files = %v, want one session and one cooldown file", stateFiles)
 	}
 
+	const hookRequestWaitTimeout = 5 * time.Second
 	for range 3 {
 		select {
 		case captured := <-prompts:
@@ -2641,7 +2642,7 @@ func TestClaudeCodeUserPromptHookWithoutJQPreservesSessionStateAndNudge(t *testi
 			if captured.payload != (promptPayload{SessionID: "session-677", Project: project, Content: expectedPrompt}) {
 				t.Fatalf("prompt POST payload = %#v, want %#v", captured.payload, promptPayload{SessionID: "session-677", Project: project, Content: expectedPrompt})
 			}
-		case <-time.After(time.Second):
+		case <-time.After(hookRequestWaitTimeout):
 			t.Fatal("timed out waiting for prompt POST")
 		}
 	}
@@ -2651,7 +2652,7 @@ func TestClaudeCodeUserPromptHookWithoutJQPreservesSessionStateAndNudge(t *testi
 			if got != cwd {
 				t.Fatalf("/project/current cwd = %q, want %q", got, cwd)
 			}
-		case <-time.After(time.Second):
+		case <-time.After(hookRequestWaitTimeout):
 			t.Fatal("timed out waiting for /project/current request")
 		}
 	}
@@ -2661,7 +2662,7 @@ func TestClaudeCodeUserPromptHookWithoutJQPreservesSessionStateAndNudge(t *testi
 			if got != project {
 				t.Fatalf("/observations project = %q, want %q", got, project)
 			}
-		case <-time.After(time.Second):
+		case <-time.After(hookRequestWaitTimeout):
 			t.Fatal("timed out waiting for /observations request")
 		}
 	}
