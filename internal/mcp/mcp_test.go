@@ -6545,9 +6545,25 @@ func TestResolveReadProject_UnknownOverrideStatsGenerationChange(t *testing.T) {
 	})
 
 	s := newMCPTestStore(t)
-	_, err := resolveReadProject(s, "does-not-exist")
+	res, err := resolveReadProject(s, "does-not-exist")
 	if !errors.Is(err, store.ErrDatabaseGenerationChanged) {
 		t.Fatalf("resolveReadProject error = %v; want ErrDatabaseGenerationChanged", err)
+	}
+
+	result := readProjectErrorResult(NewSessionActivity(time.Minute), res, err)
+	var envelope map[string]any
+	if err := json.Unmarshal([]byte(callResultText(t, result)), &envelope); err != nil {
+		t.Fatalf("unmarshal project error result: %v", err)
+	}
+	if got := envelope["error_code"]; got != "database_generation_changed" {
+		t.Errorf("error_code = %q; want database_generation_changed", got)
+	}
+	message, _ := envelope["message"].(string)
+	if !strings.Contains(message, "restart Engram") {
+		t.Errorf("message = %q; want restart guidance", message)
+	}
+	if _, ok := envelope["recovery_token"]; ok {
+		t.Error("project error result included recovery_token")
 	}
 }
 
