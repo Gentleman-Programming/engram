@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -12,7 +13,18 @@ func TestCodexSubagentStopAlwaysEmitsHookEnvelope(t *testing.T) {
 	bash := codexTestBash(t)
 	requireCodexUnixTools(t, bash)
 	script := repoRoot(t) + "/plugin/codex/scripts/subagent-stop.sh"
-	for _, input := range []string{"", `{}`, `{"cwd":"/missing","last_assistant_message":"captured"}`} {
+	missingCWD := filepath.Join(t.TempDir(), "missing")
+	inputWithMissingCWD, err := json.Marshal(struct {
+		CWD                  string `json:"cwd"`
+		LastAssistantMessage string `json:"last_assistant_message"`
+	}{
+		CWD:                  missingCWD,
+		LastAssistantMessage: "captured",
+	})
+	if err != nil {
+		t.Fatalf("marshal test input: %v", err)
+	}
+	for _, input := range []string{"", `{}`, string(inputWithMissingCWD)} {
 		run := exec.Command(bash, script)
 		run.Stdin = strings.NewReader(input)
 		var stdout, stderr bytes.Buffer
