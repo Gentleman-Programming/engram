@@ -141,7 +141,7 @@ The distribution counts targeted regression cases/subcases, not every pre-existi
 
 | Requirement | Status | Notes |
 |---|---|---|
-| REQ-215 canonical validation | Implemented | `chunkcodec.ValidateMutationEntry` centralizes supported entities, operation rules, object payloads, canonical non-blank fields, typed field mapping, and entity-key consistency; the handler invokes it before storage. |
+| REQ-215 canonical validation | Implemented | `chunkcodec.ValidateMutationEntry` centralizes supported entities, operation rules, native/encoded object payloads, canonical non-blank fields, typed field mapping, and entity-key consistency; the handler invokes it before storage. |
 | REQ-216 delete compatibility and atomic admission | Implemented | Delete identity requirements are operation-specific; relation delete is rejected; all entries are scanned before the single `InsertMutationBatch` call, preventing partial storage or acknowledgement. |
 | REQ-217 structured errors and policy ordering | Implemented | Mutation-specific `payload_invalid` is separate from chunk upgrade codes; the handler authorizes every project, pause-gates every authorized project, then emits indexed repairable details. |
 

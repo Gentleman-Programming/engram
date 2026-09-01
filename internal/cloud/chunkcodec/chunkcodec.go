@@ -316,9 +316,8 @@ type MutationValidationIssue struct {
 }
 
 // ValidateMutationEntry validates a mutation before it crosses the cloud-store
-// boundary. It deliberately requires the wire payload to be an object. Chunk
-// canonicalization continues to use DecodeSyncMutationPayload directly and
-// therefore retains its compatibility with encoded payloads.
+// boundary. The payload may be a native JSON object or a JSON string containing
+// an encoded object; both forms are decoded and checked by the canonical rules.
 func ValidateMutationEntry(entity, op, entityKey string, payload json.RawMessage) (MutationValidationIssue, bool) {
 	entity = strings.TrimSpace(entity)
 	op = strings.TrimSpace(op)
@@ -341,10 +340,10 @@ func ValidateMutationEntry(entity, op, entityKey string, payload json.RawMessage
 	}
 
 	var object map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(trimmedPayload), &object); err != nil || object == nil {
+	if err := DecodeSyncMutationPayload(trimmedPayload, &object); err != nil || object == nil {
 		return MutationValidationIssue{
 			Field:   "payload",
-			Message: "mutation payload must be a JSON object",
+			Message: "mutation payload must be a JSON object or encoded JSON object",
 		}, false
 	}
 

@@ -21,7 +21,7 @@ Expose one `internal/cloud/chunkcodec` validation seam and call it from `CloudSe
       → full decode/chunkcodec.ValidateMutationEntry (all entries)
       → structured 400 OR InsertMutationBatch → accepted_seqs 200
 
-The preflight retains raw bytes and extracts only `entries[*].project`; nested fields are not inspected before authorization. Unauthorized projects receive the existing structured 403 without validation details. Pause checks remain after authorization and before validation; paused projects receive 409 `sync-paused` without `invalid`. `ValidateMutationEntry` enforces JSON objects, supported operations/entities, non-blank upsert fields, delete identities, and `entity_key` consistency. The normalizer still derives keys, rewrites ownership, and accepts encoded payloads.
+The preflight retains raw bytes and extracts only `entries[*].project`; nested fields are not inspected before authorization. Unauthorized projects receive the existing structured 403 without validation details. Pause checks remain after authorization and before validation; paused projects receive 409 `sync-paused` without `invalid`. `ValidateMutationEntry` accepts native objects and encoded JSON-string objects, then enforces supported operations/entities, non-blank upsert fields, delete identities, and `entity_key` consistency through the canonical decoder. Arrays, scalars, malformed strings, and decoded invalid objects remain rejected. The normalizer still derives keys and rewrites ownership.
 
 ## File Changes
 

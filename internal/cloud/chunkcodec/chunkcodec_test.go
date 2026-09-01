@@ -457,6 +457,30 @@ func TestValidateMutationEntryCanonicalContract(t *testing.T) {
 			entity:    store.SyncEntitySession,
 			op:        store.SyncOpUpsert,
 			payload:   encodedMutationPayload(t, validPayloads[store.SyncEntitySession]),
+			wantValid: true,
+		},
+		{
+			name:      "encoded array payload",
+			entity:    store.SyncEntitySession,
+			op:        store.SyncOpUpsert,
+			entityKey: "session-1",
+			payload:   encodedRawMutationPayload(t, `[]`),
+			wantField: "payload",
+		},
+		{
+			name:      "encoded scalar payload",
+			entity:    store.SyncEntitySession,
+			op:        store.SyncOpUpsert,
+			entityKey: "session-1",
+			payload:   encodedRawMutationPayload(t, `42`),
+			wantField: "payload",
+		},
+		{
+			name:      "encoded malformed object payload",
+			entity:    store.SyncEntitySession,
+			op:        store.SyncOpUpsert,
+			entityKey: "session-1",
+			payload:   encodedRawMutationPayload(t, `{"id":"session-1"`),
 			wantField: "payload",
 		},
 		{
@@ -606,6 +630,11 @@ func rawMutationPayload(t *testing.T, fields map[string]any) json.RawMessage {
 func encodedMutationPayload(t *testing.T, fields map[string]any) json.RawMessage {
 	t.Helper()
 	payload := rawMutationPayload(t, fields)
+	return encodedRawMutationPayload(t, string(payload))
+}
+
+func encodedRawMutationPayload(t *testing.T, payload string) json.RawMessage {
+	t.Helper()
 	encoded, err := json.Marshal(string(payload))
 	if err != nil {
 		t.Fatalf("marshal encoded mutation payload: %v", err)

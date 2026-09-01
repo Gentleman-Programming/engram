@@ -1366,6 +1366,73 @@ func TestMutationPushInvalidEntriesReturnIndexedRepairable400(t *testing.T) {
 	}
 }
 
+func TestMutationPushEncodedPayloadCompatibility(t *testing.T) {
+	tests := []struct {
+		name      string
+		payload   json.RawMessage
+		wantValid bool
+		wantField string
+	}{
+		{
+			name:      "encoded object reaches storage and acknowledgement",
+			payload:   encodedMutationPayloadForEndpoint(t, `{"id":"session-encoded","directory":"/tmp/session-encoded"}`),
+			wantValid: true,
+		},
+		{
+			name:      "encoded array remains invalid",
+			payload:   encodedMutationPayloadForEndpoint(t, `[]`),
+			wantField: "payload",
+		},
+		{
+			name:      "encoded malformed object remains invalid",
+			payload:   encodedMutationPayloadForEndpoint(t, `{"id":"session-encoded"`),
+			wantField: "payload",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ms := newFakeMutationStore()
+			srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
+			entry := MutationEntry{
+				Project:   "proj-a",
+				Entity:    store.SyncEntitySession,
+				EntityKey: "session-encoded",
+				Op:        store.SyncOpUpsert,
+				Payload:   tt.payload,
+			}
+			rec := performMutationPush(t, srv, []MutationEntry{entry}, "secret")
+			if tt.wantValid {
+				if rec.Code != http.StatusOK {
+					t.Fatalf("expected 200, got %d body=%q", rec.Code, rec.Body.String())
+				}
+				var response mutationPushValidationResponse
+				if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+					t.Fatalf("decode success response: %v", err)
+				}
+				if len(response.AcceptedSeqs) != 1 || ms.insertCalls != 1 || len(ms.mutations) != 1 {
+					t.Fatalf("encoded payload did not follow normal storage/ack path: response=%+v calls=%d stored=%d", response, ms.insertCalls, len(ms.mutations))
+				}
+				return
+			}
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d body=%q", rec.Code, rec.Body.String())
+			}
+			var response mutationPushValidationResponse
+			if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+				t.Fatalf("decode validation response: %v", err)
+			}
+			if response.ErrorClass != constants.UpgradeErrorClassRepairable || response.ErrorCode != constants.MutationErrorCodePayloadInvalid || len(response.Invalid) != 1 || response.Invalid[0].Field != tt.wantField {
+				t.Fatalf("unexpected encoded-payload validation response: %+v", response)
+			}
+			if ms.insertCalls != 0 || len(ms.mutations) != 0 {
+				t.Fatalf("invalid encoded payload crossed storage boundary: calls=%d stored=%d", ms.insertCalls, len(ms.mutations))
+			}
+		})
+	}
+}
+
 // TestMutationPushReportsAllInvalidEntriesWithRepairableEnvelope verifies the
 // complete mutation validation contract when more than one entry is invalid.
 func TestMutationPushReportsAllInvalidEntriesWithRepairableEnvelope(t *testing.T) {
@@ -1792,6 +1859,15 @@ func marshalPushRequest(t *testing.T, entries []MutationEntry) *bytes.Buffer {
 		t.Fatalf("marshal push request: %v", err)
 	}
 	return bytes.NewBuffer(body)
+}
+
+func encodedMutationPayloadForEndpoint(t *testing.T, payload string) json.RawMessage {
+	t.Helper()
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal encoded endpoint payload: %v", err)
+	}
+	return encoded
 }
 
 func marshalPushRequestWithCreatedBy(t *testing.T, entries []MutationEntry, createdBy string) *bytes.Buffer {

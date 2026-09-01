@@ -15,7 +15,7 @@ Scope: #503 under #854; excludes #814/#892.
 | `prompt` | `sync_id`, `session_id`, `content` |
 | `relation` | `sync_id`, `source_id`, `target_id`, `relation`, `judgment_status`, `marked_by_actor`, `marked_by_kind` |
 
-The mutation payload MUST be a JSON object. If `entity_key` is supplied, it MUST match the canonical identity in the payload; an omitted key MAY be derived from that identity.
+The mutation payload MUST be either a native JSON object or a JSON string containing an encoded JSON object. Both forms MUST pass the same canonical validation. Encoded arrays, scalars, malformed strings, and decoded invalid objects MUST be rejected. If `entity_key` is supplied, it MUST match the canonical identity in the payload; an omitted key MAY be derived from that identity.
 
 #### Scenario: Blank observation content is repairably rejected
 
