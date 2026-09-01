@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Engram — SubagentStop hook for Claude Code (async)
 #
 # Thin hook: reads the subagent output from stdin, POSTs it to

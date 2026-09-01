@@ -1,0 +1,2 @@
+plugin/claude-code/scripts/*.sh text eol=lf
+plugin/codex/scripts/*.sh text eol=lf
