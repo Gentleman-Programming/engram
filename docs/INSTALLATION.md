@@ -36,10 +36,10 @@ brew update && brew upgrade engram
 
 ## mise (macOS / Linux / Windows)
 
-[mise](https://mise.jdx.dev) is a polyglot toolchain and version manager. engram isn't yet published under its short registry name, so pin it directly from the GitHub repo:
+[mise](https://mise.jdx.dev) is a polyglot toolchain and version manager. Pin engram with:
 
 ```bash
-mise use -g github:Gentleman-Programming/engram@latest
+mise use -g engram@latest
 ```
 
 > **Note:** `mise use -g` only registers the pin — it does not by itself put `engram` on your `PATH`. You also need either `mise activate` (shell integration, see the [mise docs](https://mise.jdx.dev/getting-started.html)) or shims configured. If you haven't set either up, run engram through mise instead:
