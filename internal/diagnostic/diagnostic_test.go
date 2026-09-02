@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
-	"github.com/Gentleman-Programming/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/constants"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
 	_ "modernc.org/sqlite"
 )
 

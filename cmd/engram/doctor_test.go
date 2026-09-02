@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	engrammcp "github.com/Gentleman-Programming/engram/internal/mcp"
-	"github.com/Gentleman-Programming/engram/internal/store"
+	engrammcp "github.com/Gentleman-Programming/engram/v2/internal/mcp"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
 	mcppkg "github.com/mark3labs/mcp-go/mcp"
 	_ "modernc.org/sqlite"
 )

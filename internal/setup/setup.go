@@ -24,7 +24,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Gentleman-Programming/engram/internal/mcp"
+	"github.com/Gentleman-Programming/engram/v2/internal/mcp"
 )
 
 var (

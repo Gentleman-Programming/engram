@@ -7,8 +7,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/Gentleman-Programming/engram/internal/diagnostic"
-	"github.com/Gentleman-Programming/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/v2/internal/diagnostic"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
 )
 
 func cmdDoctor(cfg store.Config) {

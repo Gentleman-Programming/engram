@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gentleman-Programming/engram/internal/cloudconfig"
-	"github.com/Gentleman-Programming/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloudconfig"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
