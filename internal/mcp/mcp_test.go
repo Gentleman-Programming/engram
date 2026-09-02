@@ -4964,6 +4964,7 @@ func TestWriteToolsRejectUnregisteredSessionID(t *testing.T) {
 		name    string
 		handler func(*store.Store) server.ToolHandlerFunc
 		args    map[string]any
+		assert  func(*testing.T, *store.Store)
 	}{
 		{
 			name: "mem_save",
@@ -4971,6 +4972,13 @@ func TestWriteToolsRejectUnregisteredSessionID(t *testing.T) {
 				return handleSave(s, MCPConfig{DefaultProject: project}, NewSessionActivity(10*time.Minute))
 			},
 			args: map[string]any{"title": "invented session", "content": "must not persist"},
+			assert: func(t *testing.T, s *store.Store) {
+				t.Helper()
+				observations, err := s.RecentObservations(project, "project", 10)
+				if err != nil || len(observations) != 1 || observations[0].SessionID != defaultSessionID(project) || observations[0].Type != "manual" || observations[0].Title != "invented session" || observations[0].Content != "must not persist" {
+					t.Fatalf("recovered mem_save observation = %#v, err=%v", observations, err)
+				}
+			},
 		},
 		{
 			name: "mem_save_prompt",
@@ -4978,6 +4986,13 @@ func TestWriteToolsRejectUnregisteredSessionID(t *testing.T) {
 				return handleSavePrompt(s, MCPConfig{DefaultProject: project}, NewSessionActivity(10*time.Minute))
 			},
 			args: map[string]any{"content": "must not persist"},
+			assert: func(t *testing.T, s *store.Store) {
+				t.Helper()
+				prompts, err := s.RecentPrompts(project, 10)
+				if err != nil || len(prompts) != 1 || prompts[0].SessionID != defaultSessionID(project) || prompts[0].Content != "must not persist" {
+					t.Fatalf("recovered mem_save_prompt prompts = %#v, err=%v", prompts, err)
+				}
+			},
 		},
 		{
 			name: "mem_session_summary",
@@ -4985,13 +5000,27 @@ func TestWriteToolsRejectUnregisteredSessionID(t *testing.T) {
 				return handleSessionSummary(s, MCPConfig{DefaultProject: project}, NewSessionActivity(10*time.Minute))
 			},
 			args: map[string]any{"content": "## Goal\nMust not persist"},
+			assert: func(t *testing.T, s *store.Store) {
+				t.Helper()
+				observations, err := s.RecentObservations(project, "project", 10)
+				if err != nil || len(observations) != 1 || observations[0].SessionID != defaultSessionID(project) || observations[0].Type != "session_summary" || observations[0].Title != "Session summary: "+project || observations[0].Content != "## Goal\nMust not persist" {
+					t.Fatalf("recovered mem_session_summary observation = %#v, err=%v", observations, err)
+				}
+			},
 		},
 		{
 			name: "mem_capture_passive",
 			handler: func(s *store.Store) server.ToolHandlerFunc {
 				return handleCapturePassive(s, MCPConfig{DefaultProject: project}, NewSessionActivity(10*time.Minute))
 			},
-			args: map[string]any{"content": "## Key Learnings:\n- Must not persist"},
+			args: map[string]any{"content": "## Key Learnings:\n- Retried passive learning is persisted as an observation"},
+			assert: func(t *testing.T, s *store.Store) {
+				t.Helper()
+				observations, err := s.RecentObservations(project, "project", 10)
+				if err != nil || len(observations) != 1 || observations[0].SessionID != defaultSessionID(project) || observations[0].Type != "passive" || observations[0].Content != "Retried passive learning is persisted as an observation" || observations[0].ToolName == nil || *observations[0].ToolName != "mcp-passive" {
+					t.Fatalf("recovered mem_capture_passive observation = %#v, err=%v", observations, err)
+				}
+			},
 		},
 	}
 
@@ -5026,6 +5055,13 @@ func TestWriteToolsRejectUnregisteredSessionID(t *testing.T) {
 			if err != nil || len(prompts) != 0 {
 				t.Fatalf("prompts after rejected request = %d, err=%v", len(prompts), err)
 			}
+
+			delete(args, "session_id")
+			retryRes, err := tt.handler(s)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: args}})
+			if err != nil || retryRes.IsError {
+				t.Fatalf("retry without session_id: err=%v isError=%v text=%q", err, retryRes.IsError, callResultText(t, retryRes))
+			}
+			tt.assert(t, s)
 		})
 	}
 }
