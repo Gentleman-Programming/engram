@@ -1647,7 +1647,7 @@ func cmdImport(cfg store.Config) {
 
 	fmt.Printf("Imported from %s\n", inFile)
 	fmt.Printf("  Sessions:     %d\n", result.SessionsImported)
-	fmt.Printf("  Observations: %d\n", result.ObservationsImported)
+	fmt.Printf("  Observations: %d imported, %d updated, %d skipped stale\n", result.ObservationsImported, result.ObservationsUpdated, result.ObservationsSkippedStale)
 	fmt.Printf("  Prompts:      %d\n", result.PromptsImported)
 }
 

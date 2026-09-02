@@ -5183,6 +5183,90 @@ func TestImportObservationUsesLastWriteWinsOrdering(t *testing.T) {
 	}
 }
 
+func TestImportObservationPreservesFieldsFromPartialNewerSnapshot(t *testing.T) {
+	project := "engram"
+	base := Observation{
+		SyncID:         "import-partial-observation",
+		SessionID:      "import-partial-session",
+		Type:           "note",
+		Title:          "base",
+		Content:        "base",
+		Project:        &project,
+		Scope:          "project",
+		RevisionCount:  4,
+		DuplicateCount: 3,
+		CreatedAt:      "2026-01-01 00:00:00",
+		UpdatedAt:      "2026-01-01 00:00:00",
+	}
+	baseData := &ExportData{
+		Sessions:     []Session{{ID: base.SessionID, Project: project, Directory: "/tmp", StartedAt: base.CreatedAt}},
+		Observations: []Observation{base},
+	}
+
+	for _, tc := range []struct {
+		name, createdAt string
+		revisionCount   int
+		duplicateCount  int
+	}{
+		{name: "empty created at and zero counts", revisionCount: 0, duplicateCount: 0},
+		{name: "invalid created at and negative counts", createdAt: "not-a-time", revisionCount: -1, duplicateCount: -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if _, err := s.Import(baseData); err != nil {
+				t.Fatalf("base import: %v", err)
+			}
+
+			partial := base
+			partial.Title = "newer partial"
+			partial.Content = "newer partial"
+			partial.CreatedAt = tc.createdAt
+			partial.UpdatedAt = "2026-01-02 00:00:00"
+			partial.RevisionCount = tc.revisionCount
+			partial.DuplicateCount = tc.duplicateCount
+			if result, err := s.Import(&ExportData{Observations: []Observation{partial}}); err != nil || result.ObservationsUpdated != 1 {
+				t.Fatalf("partial newer import = %+v, %v", result, err)
+			}
+
+			if got := scalarString(t, s, `SELECT created_at FROM observations WHERE sync_id = ?`, base.SyncID); got != base.CreatedAt {
+				t.Fatalf("created_at = %q, want %q", got, base.CreatedAt)
+			}
+			if got := scalarInt(t, s, `SELECT revision_count FROM observations WHERE sync_id = ?`, base.SyncID); got != base.RevisionCount {
+				t.Fatalf("revision_count = %d, want %d", got, base.RevisionCount)
+			}
+			if got := scalarInt(t, s, `SELECT duplicate_count FROM observations WHERE sync_id = ?`, base.SyncID); got != base.DuplicateCount {
+				t.Fatalf("duplicate_count = %d, want %d", got, base.DuplicateCount)
+			}
+		})
+	}
+
+	t.Run("valid created at and positive counts apply", func(t *testing.T) {
+		s := newTestStore(t)
+		if _, err := s.Import(baseData); err != nil {
+			t.Fatalf("base import: %v", err)
+		}
+
+		newer := base
+		newer.CreatedAt = "2025-12-31 00:00:00"
+		newer.UpdatedAt = "2026-01-02 00:00:00"
+		newer.RevisionCount = 6
+		newer.DuplicateCount = 5
+		if result, err := s.Import(&ExportData{Observations: []Observation{newer}}); err != nil || result.ObservationsUpdated != 1 {
+			t.Fatalf("newer import = %+v, %v", result, err)
+		}
+
+		if got := scalarString(t, s, `SELECT created_at FROM observations WHERE sync_id = ?`, base.SyncID); got != newer.CreatedAt {
+			t.Fatalf("created_at = %q, want %q", got, newer.CreatedAt)
+		}
+		if got := scalarInt(t, s, `SELECT revision_count FROM observations WHERE sync_id = ?`, base.SyncID); got != newer.RevisionCount {
+			t.Fatalf("revision_count = %d, want %d", got, newer.RevisionCount)
+		}
+		if got := scalarInt(t, s, `SELECT duplicate_count FROM observations WHERE sync_id = ?`, base.SyncID); got != newer.DuplicateCount {
+			t.Fatalf("duplicate_count = %d, want %d", got, newer.DuplicateCount)
+		}
+	})
+}
+
 func TestImportOlderObservationDoesNotResurrectLocalDeletion(t *testing.T) {
 	s := newTestStore(t)
 	project := "engram"
