@@ -598,24 +598,16 @@ func (s *Store) JudgeRelation(p JudgeRelationParams) (*Relation, error) {
 
 	if err := s.withTx(func(tx *sql.Tx) error {
 		// ── Cross-project guard (Phase 2, REQ-003) ─────────────────────────
-		// Derive source and target project for enrollment checks and the guard.
-		// Use the same session-fallback form as JudgeBySemantic so that enrolled
-		// projects whose observations have a blank project column (but whose session
-		// carries the project) are resolved correctly. Missing observation → empty
-		// string (REQ-011 edge) because the LEFT JOIN returns no row.
-		var srcProject, tgtProject string
+		// Derive the source project using the same session fallback as
+		// JudgeBySemantic. A relation's cloud ownership follows its source; a
+		// missing source therefore has no authoritative project for replication.
+		var srcProject string
 		_ = tx.QueryRow(
 			`SELECT coalesce(nullif(o.project,''), s.project, '')
-			   FROM observations o
-			   LEFT JOIN sessions s ON s.id = o.session_id
-			  WHERE o.sync_id = ?`, sourceID,
+				   FROM observations o
+				   LEFT JOIN sessions s ON s.id = o.session_id
+				  WHERE o.sync_id = ?`, sourceID,
 		).Scan(&srcProject)
-		_ = tx.QueryRow(
-			`SELECT coalesce(nullif(o.project,''), s.project, '')
-			   FROM observations o
-			   LEFT JOIN sessions s ON s.id = o.session_id
-			  WHERE o.sync_id = ?`, targetID,
-		).Scan(&tgtProject)
 
 		// Delegate to shared helper; reject cross-project pairs.
 		if err := validateCrossProjectGuard(tx, sourceID, targetID); err != nil {
@@ -651,31 +643,21 @@ func (s *Store) JudgeRelation(p JudgeRelationParams) (*Relation, error) {
 		}
 
 		// ── Enqueue sync mutation when project is enrolled (REQ-001) ───────
-		// Derive project from source observation; empty string if source missing.
-		// (REQ-011: loud failure is the server's job; we enqueue project='' and log.)
-		//
-		// Enrollment check: prefer srcProject; fall back to tgtProject when source
-		// is missing locally (race condition). This ensures enqueue happens with
-		// project='' when source is absent but target's project IS enrolled.
-		enrollCheckProject := srcProject
-		if enrollCheckProject == "" {
-			enrollCheckProject = tgtProject
+		// Never invent cloud ownership from the target: source ownership is the
+		// relation's authoritative project. Preserve the local judgment, but leave
+		// it local-only until the source can provide a project.
+		if srcProject == "" {
+			log.Printf("[store] WARNING: JudgeRelation kept relation %s local-only; source observation project is unavailable, so no cloud mutation was enqueued", p.JudgmentID)
+			return nil
 		}
 		var enrolled int
 		if err := tx.QueryRow(
-			`SELECT 1 FROM sync_enrolled_projects WHERE project = ? LIMIT 1`, enrollCheckProject,
+			`SELECT 1 FROM sync_enrolled_projects WHERE project = ? LIMIT 1`, srcProject,
 		).Scan(&enrolled); err != nil && err != sql.ErrNoRows {
 			return fmt.Errorf("JudgeRelation: check enrollment: %w", err)
 		}
 		if enrolled == 0 {
 			return nil // not enrolled — no mutation enqueued
-		}
-
-		// REQ-011: log at WARNING level when source observation is missing locally
-		// (project='' race condition). The server will reject with 400; this log
-		// is the local breadcrumb so the gap is not silently swallowed.
-		if srcProject == "" {
-			log.Printf("[store] WARNING: JudgeRelation enqueueing relation %s with project='' (source observation missing locally); server will reject", p.JudgmentID)
 		}
 
 		// Read the full updated row to build the payload.

@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	engrammcp "github.com/Gentleman-Programming/engram/internal/mcp"
-	"github.com/Gentleman-Programming/engram/internal/store"
+	engrammcp "github.com/Gentleman-Programming/engram/v2/internal/mcp"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
 	mcppkg "github.com/mark3labs/mcp-go/mcp"
 	_ "modernc.org/sqlite"
 )
@@ -151,6 +151,7 @@ func TestCmdDoctorRepairValidation(t *testing.T) {
 	}{
 		{name: "missing mode", args: []string{"engram", "doctor", "repair", "--project", "sias-app", "--check", "session_project_directory_mismatch"}, want: "exactly one of --plan, --dry-run, or --apply is required"},
 		{name: "multiple modes", args: []string{"engram", "doctor", "repair", "--project", "sias-app", "--check", "session_project_directory_mismatch", "--plan", "--apply"}, want: "exactly one of --plan, --dry-run, or --apply is required"},
+		{name: "multiple sync mutation modes", args: []string{"engram", "doctor", "repair", "--check", "sync_mutation_required_fields", "--dry-run", "--apply"}, want: "exactly one of --plan, --dry-run, or --apply is required"},
 		{name: "missing project", args: []string{"engram", "doctor", "repair", "--check", "session_project_directory_mismatch", "--plan"}, want: "--project is required"},
 		{name: "unsupported check", args: []string{"engram", "doctor", "repair", "--project", "sias-app", "--check", "not_real", "--plan"}, want: "unsupported repair check"},
 		{name: "orphaned observation session is report only", args: []string{"engram", "doctor", "repair", "--project", "sias-app", "--check", "orphaned_observation_session", "--apply"}, want: "unsupported repair check orphaned_observation_session"},
@@ -502,7 +503,92 @@ func TestCmdDoctorSyncMutationRequiredFieldsBlockedEnvelope(t *testing.T) {
 	}
 }
 
-func TestCmdDoctorRepairQuarantinesOnlyIrreparableMutations(t *testing.T) {
+func TestCmdDoctorRepairDefaultsSourceObservationRepairToDryRun(t *testing.T) {
+	cfg := testConfig(t)
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	if err := s.CreateSession("source-observation", "engram", "/work/engram"); err != nil {
+		s.Close()
+		t.Fatalf("CreateSession: %v", err)
+	}
+	id, err := s.AddObservation(store.AddObservationParams{SessionID: "source-observation", Type: "decision", Title: "valid", Content: "Recovered source title. Details.\nA later line.", Project: "engram", Scope: "project"})
+	if err != nil {
+		s.Close()
+		t.Fatalf("AddObservation: %v", err)
+	}
+	observation, err := s.GetObservation(id)
+	if err != nil {
+		s.Close()
+		t.Fatalf("GetObservation: %v", err)
+	}
+	if _, err := s.DB().Exec(`UPDATE observations SET title = '' WHERE id = ?`, id); err != nil {
+		s.Close()
+		t.Fatalf("blank source title: %v", err)
+	}
+	if _, err := s.DB().Exec(`DELETE FROM sync_mutations WHERE entity = ? AND entity_key = ?`, store.SyncEntityObservation, observation.SyncID); err != nil {
+		s.Close()
+		t.Fatalf("remove pending mutation: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	withArgs(t, "engram", "doctor", "repair", "--project", "engram", "--check", "sync_mutation_required_fields")
+	dryOut, dryErr := captureOutput(t, func() { cmdDoctor(cfg) })
+	if dryErr != "" {
+		t.Fatalf("dry-run stderr=%q", dryErr)
+	}
+	dry := decodeRepairPlan(t, dryOut)
+	if dry["applied"] != false {
+		t.Fatalf("dry-run applied=%v, want false", dry["applied"])
+	}
+	sourceRepairs := dry["source_repairs"].([]any)
+	if len(sourceRepairs) != 1 || sourceRepairs[0].(map[string]any)["id"] != float64(id) || sourceRepairs[0].(map[string]any)["title"] != "Recovered source title." {
+		t.Fatalf("dry-run=%v", dry)
+	}
+	s, err = store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New after dry-run: %v", err)
+	}
+	observation, err = s.GetObservation(id)
+	if err != nil {
+		s.Close()
+		t.Fatalf("GetObservation after dry-run: %v", err)
+	}
+	if observation.Title != "" {
+		s.Close()
+		t.Fatalf("title after dry-run=%q, want empty", observation.Title)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store after dry-run: %v", err)
+	}
+
+	withArgs(t, "engram", "doctor", "repair", "--project", "engram", "--check", "sync_mutation_required_fields", "--apply")
+	applyOut, applyErr := captureOutput(t, func() { cmdDoctor(cfg) })
+	if applyErr != "" {
+		t.Fatalf("apply stderr=%q", applyErr)
+	}
+	applied := decodeRepairPlan(t, applyOut)
+	if applied["applied"] != true || len(applied["source_repairs"].([]any)) != 1 || applied["source_repair_backup_path"] == "" {
+		t.Fatalf("apply=%v", applied)
+	}
+	s, err = store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New after apply: %v", err)
+	}
+	defer s.Close()
+	observation, err = s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("GetObservation after apply: %v", err)
+	}
+	if observation.Title != "Recovered source title." {
+		t.Fatalf("title after apply=%q", observation.Title)
+	}
+}
+
+func TestCmdDoctorRepairQuarantinesInvalidEmptyProjectMutations(t *testing.T) {
 	cfg := testConfig(t)
 	s, err := store.New(cfg)
 	if err != nil {
@@ -520,7 +606,7 @@ func TestCmdDoctorRepairQuarantinesOnlyIrreparableMutations(t *testing.T) {
 		t.Fatalf("dry-run stderr=%q", dryErr)
 	}
 	dry := decodeRepairPlan(t, dryOut)
-	if dry["applied"] != false || len(dry["actions"].([]any)) != 1 {
+	if dry["applied"] != false || len(dry["actions"].([]any)) != 2 {
 		t.Fatalf("dry-run=%v", dry)
 	}
 
@@ -530,7 +616,7 @@ func TestCmdDoctorRepairQuarantinesOnlyIrreparableMutations(t *testing.T) {
 		t.Fatalf("apply stderr=%q", applyErr)
 	}
 	applied := decodeRepairPlan(t, applyOut)
-	if applied["applied"] != true || len(applied["actions"].([]any)) != 1 {
+	if applied["applied"] != true || len(applied["actions"].([]any)) != 2 {
 		t.Fatalf("apply=%v", applied)
 	}
 	db, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
@@ -545,7 +631,7 @@ func TestCmdDoctorRepairQuarantinesOnlyIrreparableMutations(t *testing.T) {
 	if err := db.QueryRow(`SELECT disposition FROM sync_mutations WHERE entity_key = 'later'`).Scan(&later); err != nil {
 		t.Fatalf("read later: %v", err)
 	}
-	if poison != store.SyncMutationDispositionQuarantined || later != store.SyncMutationDispositionPending {
+	if poison != store.SyncMutationDispositionQuarantined || later != store.SyncMutationDispositionQuarantined {
 		t.Fatalf("dispositions poison=%q later=%q", poison, later)
 	}
 }
@@ -717,7 +803,7 @@ func TestPrintDoctorUsageMarksProjectOptionalOnlyForSyncMutationRepair(t *testin
 	wantLines := []string{
 		"usage: engram doctor [--json] [--project PROJECT] [--check CODE]",
 		"       engram doctor repair --project PROJECT --check CODE (--plan|--dry-run|--apply)",
-		"       engram doctor repair [--project PROJECT] --check sync_mutation_required_fields (--plan|--dry-run|--apply)",
+		"       engram doctor repair [--project PROJECT] --check sync_mutation_required_fields [--plan|--dry-run|--apply] (default: --dry-run)",
 	}
 	for _, line := range wantLines {
 		if !strings.Contains(stdout, line+"\n") {

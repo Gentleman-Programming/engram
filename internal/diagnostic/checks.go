@@ -6,9 +6,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
-	projectpkg "github.com/Gentleman-Programming/engram/internal/project"
-	"github.com/Gentleman-Programming/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/constants"
+	projectpkg "github.com/Gentleman-Programming/engram/v2/internal/project"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
 )
 
 const (
@@ -162,12 +162,28 @@ func cloudSyncInUse(scope Scope) (bool, error) {
 
 func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {
 	_ = ctx
+	sourceObservations, err := scope.Store.ListDiagnosticObservationRequiredFields(scope.Project)
+	if err != nil {
+		return CheckResult{}, err
+	}
 	mutations, err := scope.Store.ListPendingProjectMutations(scope.Project)
 	if err != nil {
 		return CheckResult{}, err
 	}
 	blocking := make([]Finding, 0)
 	quarantined := make([]Finding, 0)
+	for _, observation := range sourceObservations {
+		blocking = append(blocking, Finding{
+			CheckID:              c.Code(),
+			Severity:             SeverityBlocking,
+			ReasonCode:           "observation_source_missing_required_fields",
+			Message:              fmt.Sprintf("Observation source row %d is missing required fields: %s", observation.ID, strings.Join(observation.MissingFields, ", ")),
+			Why:                  "A corrupt local observation source can produce rejected cloud payloads even when no pending mutation remains to diagnose.",
+			Evidence:             mustJSON(observation),
+			SafeNextStep:         "Run `engram cloud upgrade doctor repair --check sync_mutation_required_fields --dry-run` to inspect title-only repairs; content and type require manual recovery.",
+			RequiresConfirmation: true,
+		})
+	}
 	for _, mutation := range mutations {
 		// A quarantined row is an explicit, already-taken disposition: it no
 		// longer reaches transport, so it must not keep doctor blocked. It stays
@@ -197,7 +213,7 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 	}
 	// Quarantined rows are already-taken dispositions, so they never count as
 	// work still pending delivery.
-	evidence := map[string]any{"pending_mutations_evaluated": len(mutations) - len(quarantined)}
+	evidence := map[string]any{"pending_mutations_evaluated": len(mutations) - len(quarantined), "corrupt_source_observations": len(sourceObservations)}
 	if len(quarantined) > 0 {
 		evidence["quarantined_mutations"] = len(quarantined)
 	}
