@@ -16,13 +16,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/internal/mcp"
-	"github.com/Gentleman-Programming/engram/internal/obsidian"
-	"github.com/Gentleman-Programming/engram/internal/project"
-	"github.com/Gentleman-Programming/engram/internal/setup"
-	"github.com/Gentleman-Programming/engram/internal/store"
-	engramsync "github.com/Gentleman-Programming/engram/internal/sync"
-	versioncheck "github.com/Gentleman-Programming/engram/internal/version"
+	"github.com/Gentleman-Programming/engram/v2/internal/mcp"
+	"github.com/Gentleman-Programming/engram/v2/internal/obsidian"
+	"github.com/Gentleman-Programming/engram/v2/internal/project"
+	"github.com/Gentleman-Programming/engram/v2/internal/setup"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	engramsync "github.com/Gentleman-Programming/engram/v2/internal/sync"
+	versioncheck "github.com/Gentleman-Programming/engram/v2/internal/version"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
@@ -340,6 +340,12 @@ func TestPrintUsage(t *testing.T) {
 }
 
 func TestPrintPostInstall(t *testing.T) {
+	const (
+		mcpConfiguredMessage = "Configuration written: the OpenCode plugin and Engram MCP registration."
+		mcpManualMessage     = "Plugin written, but Engram MCP registration needs the manual configuration shown above."
+		toolGuidance         = "confirm it can use an `engram_mem_*` tool before relying on Engram."
+	)
+
 	tests := []struct {
 		name       string
 		result     *setup.Result
@@ -348,15 +354,27 @@ func TestPrintPostInstall(t *testing.T) {
 	}{
 		{
 			name:       "opencode with subagent monitor enabled",
-			result:     &setup.Result{Agent: "opencode", TUIPluginEnabled: true},
-			expects:    []string{"Restart OpenCode", "opencode-subagent-statusline", "auto-starts"},
-			notExpects: []string{"engram serve &"},
+			result:     &setup.Result{Agent: "opencode", MCPConfigured: true, TUIPluginEnabled: true},
+			expects:    []string{mcpConfiguredMessage, "opencode mcp list", toolGuidance, "cannot verify tool exposure", "opencode-subagent-statusline", "auto-starts"},
+			notExpects: []string{mcpManualMessage, "engram serve &"},
 		},
 		{
-			name:       "opencode with subagent monitor not enabled",
-			result:     &setup.Result{Agent: "opencode", TUIPluginEnabled: false},
-			expects:    []string{"Restart OpenCode", "auto-starts"},
-			notExpects: []string{"opencode-subagent-statusline", "engram serve &"},
+			name:       "opencode with MCP configured and subagent monitor disabled",
+			result:     &setup.Result{Agent: "opencode", MCPConfigured: true, TUIPluginEnabled: false},
+			expects:    []string{mcpConfiguredMessage, "opencode mcp list", toolGuidance, "cannot verify tool exposure", "auto-starts"},
+			notExpects: []string{mcpManualMessage, "opencode-subagent-statusline", "engram serve &"},
+		},
+		{
+			name:       "opencode with incomplete MCP registration and subagent monitor enabled",
+			result:     &setup.Result{Agent: "opencode", MCPConfigured: false, TUIPluginEnabled: true},
+			expects:    []string{mcpManualMessage, "opencode mcp list", toolGuidance, "cannot verify tool exposure", "opencode-subagent-statusline", "auto-starts"},
+			notExpects: []string{mcpConfiguredMessage, "engram serve &"},
+		},
+		{
+			name:       "opencode with incomplete MCP registration",
+			result:     &setup.Result{Agent: "opencode", MCPConfigured: false, TUIPluginEnabled: false},
+			expects:    []string{mcpManualMessage, "opencode mcp list", toolGuidance, "cannot verify tool exposure", "auto-starts"},
+			notExpects: []string{mcpConfiguredMessage, "opencode-subagent-statusline", "engram serve &"},
 		},
 		{
 			name:       "pi",
@@ -977,7 +995,14 @@ func TestMainVersionAndHelpAliases(t *testing.T) {
 	oldVersion := version
 	version = "9.9.9-test"
 	t.Cleanup(func() { version = oldVersion })
-	stubCheckForUpdates(t, versioncheck.CheckResult{Status: versioncheck.StatusUpToDate})
+
+	checks := 0
+	oldCheckForUpdates := checkForUpdates
+	checkForUpdates = func(string) versioncheck.CheckResult {
+		checks++
+		return versioncheck.CheckResult{Status: versioncheck.StatusUpToDate}
+	}
+	t.Cleanup(func() { checkForUpdates = oldCheckForUpdates })
 
 	tests := []struct {
 		name      string
@@ -995,6 +1020,7 @@ func TestMainVersionAndHelpAliases(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			checks = 0
 			withArgs(t, "engram", tc.arg)
 			stdout, stderr := captureOutput(t, func() { main() })
 			if tc.notStderr && stderr != "" {
@@ -1003,55 +1029,42 @@ func TestMainVersionAndHelpAliases(t *testing.T) {
 			if !strings.Contains(stdout, tc.contains) {
 				t.Fatalf("stdout %q does not include %q", stdout, tc.contains)
 			}
+			if checks != 0 {
+				t.Fatalf("update checks = %d, want 0", checks)
+			}
 		})
 	}
 }
 
 func TestMainPrintsUpdateFailuresAndUpdates(t *testing.T) {
-	oldVersion := version
-	version = "1.10.7"
-	t.Cleanup(func() { version = oldVersion })
-
 	t.Run("prints check failure", func(t *testing.T) {
-		stubCheckForUpdates(t, versioncheck.CheckResult{
-			Status:  versioncheck.StatusCheckFailed,
-			Message: "Could not check for updates: GitHub took too long to respond.",
+		_, stderr := captureOutput(t, func() {
+			printUpdateCheckResult(versioncheck.CheckResult{
+				Status:  versioncheck.StatusCheckFailed,
+				Message: "Could not check for updates: GitHub took too long to respond.",
+			})
 		})
-		withArgs(t, "engram", "version")
-
-		stdout, stderr := captureOutput(t, func() { main() })
-		if !strings.Contains(stdout, "engram 1.10.7") {
-			t.Fatalf("stdout = %q", stdout)
-		}
 		if !strings.Contains(stderr, "Could not check for updates") {
 			t.Fatalf("stderr = %q", stderr)
 		}
 	})
 
 	t.Run("prints available update", func(t *testing.T) {
-		stubCheckForUpdates(t, versioncheck.CheckResult{
-			Status:  versioncheck.StatusUpdateAvailable,
-			Message: "Update available: 1.10.7 -> 1.10.8",
+		_, stderr := captureOutput(t, func() {
+			printUpdateCheckResult(versioncheck.CheckResult{
+				Status:  versioncheck.StatusUpdateAvailable,
+				Message: "Update available: 1.10.7 -> 1.10.8",
+			})
 		})
-		withArgs(t, "engram", "version")
-
-		stdout, stderr := captureOutput(t, func() { main() })
-		if !strings.Contains(stdout, "engram 1.10.7") {
-			t.Fatalf("stdout = %q", stdout)
-		}
 		if !strings.Contains(stderr, "Update available") {
 			t.Fatalf("stderr = %q", stderr)
 		}
 	})
 
 	t.Run("prints nothing when up to date", func(t *testing.T) {
-		stubCheckForUpdates(t, versioncheck.CheckResult{Status: versioncheck.StatusUpToDate})
-		withArgs(t, "engram", "version")
-
-		stdout, stderr := captureOutput(t, func() { main() })
-		if !strings.Contains(stdout, "engram 1.10.7") {
-			t.Fatalf("stdout = %q", stdout)
-		}
+		_, stderr := captureOutput(t, func() {
+			printUpdateCheckResult(versioncheck.CheckResult{Status: versioncheck.StatusUpToDate})
+		})
 		if stderr != "" {
 			t.Fatalf("stderr = %q, want empty", stderr)
 		}

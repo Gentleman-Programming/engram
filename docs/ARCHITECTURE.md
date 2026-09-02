@@ -126,14 +126,14 @@ Examples:
 - `pattern/error-handling-convention`
 - `config/ci-environment`
 
-**Why this format?** SQLite FTS5 tokenises on word boundaries. Lowercase kebab-case ensures the key fragments are individually searchable and do not create unexpected FTS5 token splits.
+**Why this format?** Topic keys support exact key lookups and trigram FTS substring search. Lowercase kebab-case keeps identifiers stable, readable, and consistent across callers.
 
 **Anti-patterns to avoid:**
 
 | Anti-pattern | Problem | Correct form |
 |---|---|---|
-| `authModel` | camelCase breaks FTS5 tokenisation | `architecture/auth-model` |
-| `auth model` | spaces create accidental multi-token keys | `architecture/auth-model` |
+| `authModel` | camelCase is inconsistent with canonical topic keys | `architecture/auth-model` |
+| `auth model` | spaces make exact topic identifiers harder to use | `architecture/auth-model` |
 | `ARCHITECTURE/AUTH` | uppercase is inconsistent with FTS5 normalisation | `architecture/auth-model` |
 | `auth/model/v2/final` | more than 2 levels — use `v2` in the description | `architecture/auth-model-v2` |
 | `bugfix` | no slash — looks like a family with no description | `bug/auth-nil-panic` |
