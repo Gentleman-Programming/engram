@@ -4961,17 +4961,19 @@ func TestWriteToolsRejectUnregisteredSessionID(t *testing.T) {
 	)
 
 	tests := []struct {
-		name    string
-		handler func(*store.Store) server.ToolHandlerFunc
-		args    map[string]any
-		assert  func(*testing.T, *store.Store)
+		name                    string
+		handler                 func(*store.Store) server.ToolHandlerFunc
+		args                    map[string]any
+		assert                  func(*testing.T, *store.Store)
+		testWithExplicitProject bool
 	}{
 		{
 			name: "mem_save",
 			handler: func(s *store.Store) server.ToolHandlerFunc {
 				return handleSave(s, MCPConfig{DefaultProject: project}, NewSessionActivity(10*time.Minute))
 			},
-			args: map[string]any{"title": "invented session", "content": "must not persist"},
+			args:                    map[string]any{"title": "invented session", "content": "must not persist"},
+			testWithExplicitProject: true,
 			assert: func(t *testing.T, s *store.Store) {
 				t.Helper()
 				observations, err := s.RecentObservations(project, "project", 10)
@@ -4999,7 +5001,8 @@ func TestWriteToolsRejectUnregisteredSessionID(t *testing.T) {
 			handler: func(s *store.Store) server.ToolHandlerFunc {
 				return handleSessionSummary(s, MCPConfig{DefaultProject: project}, NewSessionActivity(10*time.Minute))
 			},
-			args: map[string]any{"content": "## Goal\nMust not persist"},
+			args:                    map[string]any{"content": "## Goal\nMust not persist"},
+			testWithExplicitProject: true,
 			assert: func(t *testing.T, s *store.Store) {
 				t.Helper()
 				observations, err := s.RecentObservations(project, "project", 10)
@@ -5025,44 +5028,69 @@ func TestWriteToolsRejectUnregisteredSessionID(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := newMCPTestStore(t)
-			args := make(map[string]any, len(tt.args)+1)
-			for key, value := range tt.args {
-				args[key] = value
-			}
-			args["session_id"] = invented
+		requestVariants := []struct {
+			name            string
+			explicitProject bool
+		}{{name: "project omitted"}}
+		if tt.testWithExplicitProject {
+			requestVariants = append(requestVariants, struct {
+				name            string
+				explicitProject bool
+			}{name: "explicit project", explicitProject: true})
+		}
 
-			res, err := tt.handler(s)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: args}})
-			if err != nil {
-				t.Fatalf("handler error: %v", err)
-			}
-			if !res.IsError {
-				t.Fatal("expected unregistered session_id to fail")
-			}
-			body := callResultJSON(t, res)
-			if body["error_code"] != "unknown_session" || body["invalid_session_id"] != invented || body["retry_without_session_id"] != true {
-				t.Fatalf("unexpected unknown-session envelope: %v", body)
-			}
-			if _, err := s.GetSession(invented); !errors.Is(err, sql.ErrNoRows) {
-				t.Fatalf("invented session was created: %v", err)
-			}
-			observations, err := s.RecentObservations(project, "project", 10)
-			if err != nil || len(observations) != 0 {
-				t.Fatalf("observations after rejected request = %d, err=%v", len(observations), err)
-			}
-			prompts, err := s.RecentPrompts(project, 10)
-			if err != nil || len(prompts) != 0 {
-				t.Fatalf("prompts after rejected request = %d, err=%v", len(prompts), err)
-			}
+		for _, variant := range requestVariants {
+			t.Run(tt.name+"/"+variant.name, func(t *testing.T) {
+				s := newMCPTestStore(t)
+				if variant.explicitProject {
+					// Establish a known explicit project without seeding observations or prompts.
+					if err := s.CreateSession("known-explicit-project", project, t.TempDir()); err != nil {
+						t.Fatalf("create explicit-project setup session: %v", err)
+					}
+					if err := s.EndSession("known-explicit-project", ""); err != nil {
+						t.Fatalf("end explicit-project setup session: %v", err)
+					}
+				}
+				args := make(map[string]any, len(tt.args)+1)
+				for key, value := range tt.args {
+					args[key] = value
+				}
+				if variant.explicitProject {
+					args["project"] = project
+				}
+				args["session_id"] = invented
 
-			delete(args, "session_id")
-			retryRes, err := tt.handler(s)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: args}})
-			if err != nil || retryRes.IsError {
-				t.Fatalf("retry without session_id: err=%v isError=%v text=%q", err, retryRes.IsError, callResultText(t, retryRes))
-			}
-			tt.assert(t, s)
-		})
+				res, err := tt.handler(s)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: args}})
+				if err != nil {
+					t.Fatalf("handler error: %v", err)
+				}
+				if !res.IsError {
+					t.Fatal("expected unregistered session_id to fail")
+				}
+				body := callResultJSON(t, res)
+				if body["error_code"] != "unknown_session" || body["invalid_session_id"] != invented || body["retry_without_session_id"] != true {
+					t.Fatalf("unexpected unknown-session envelope: %v", body)
+				}
+				if _, err := s.GetSession(invented); !errors.Is(err, sql.ErrNoRows) {
+					t.Fatalf("invented session was created: %v", err)
+				}
+				observations, err := s.RecentObservations(project, "project", 10)
+				if err != nil || len(observations) != 0 {
+					t.Fatalf("observations after rejected request = %d, err=%v", len(observations), err)
+				}
+				prompts, err := s.RecentPrompts(project, 10)
+				if err != nil || len(prompts) != 0 {
+					t.Fatalf("prompts after rejected request = %d, err=%v", len(prompts), err)
+				}
+
+				delete(args, "session_id")
+				retryRes, err := tt.handler(s)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: args}})
+				if err != nil || retryRes.IsError {
+					t.Fatalf("retry without session_id: err=%v isError=%v text=%q", err, retryRes.IsError, callResultText(t, retryRes))
+				}
+				tt.assert(t, s)
+			})
+		}
 	}
 }
 
