@@ -10844,6 +10844,213 @@ func TestListPendingProjectMutationsAndPayloadValidation(t *testing.T) {
 	}
 }
 
+func TestListDiagnosticObservationRequiredFieldsHandlesLegacyNulls(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE observations (id INTEGER PRIMARY KEY, sync_id TEXT, project TEXT, type TEXT, title TEXT, content TEXT, deleted_at TEXT)`); err != nil {
+		t.Fatalf("create legacy observations: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO observations (id, sync_id, project, type, title, content) VALUES (1, NULL, 'Project-A', NULL, NULL, NULL)`); err != nil {
+		t.Fatalf("insert legacy observation: %v", err)
+	}
+
+	findings, err := (&Store{db: db}).ListDiagnosticObservationRequiredFields("")
+	if err != nil || len(findings) != 1 {
+		t.Fatalf("findings=%+v err=%v", findings, err)
+	}
+	if got := findings[0]; got.ID != 1 || got.SyncID != "" || got.Project != "project-a" || strings.Join(got.MissingFields, ",") != "type,title,content" {
+		t.Fatalf("finding=%+v", got)
+	}
+}
+
+func TestDiagnosticObservationRequiredFieldsAndTitleRepair(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("observation-diagnostic", "project-a", "/work/project-a"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	add := func(t *testing.T, title, content, observationType string) Observation {
+		t.Helper()
+		id, err := s.AddObservation(AddObservationParams{SessionID: "observation-diagnostic", Type: observationType, Title: title, Content: content, Project: "project-a", Scope: "project"})
+		if err != nil {
+			t.Fatalf("AddObservation: %v", err)
+		}
+		observation, err := s.GetObservation(id)
+		if err != nil {
+			t.Fatalf("GetObservation: %v", err)
+		}
+		return *observation
+	}
+	titleMissing := add(t, "valid title", "First line. Additional detail.\nSecond line must not become the title.", "decision")
+	contentMissing := add(t, "content title", "valid content", "decision")
+	typeMissing := add(t, "type title", "valid content", "decision")
+	if _, err := s.db.Exec(`UPDATE observations SET title = ? WHERE id = ?`, "\u2003", titleMissing.ID); err != nil {
+		t.Fatalf("blank title: %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE observations SET content = ? WHERE id = ?`, " \t\n", contentMissing.ID); err != nil {
+		t.Fatalf("blank content: %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE observations SET type = ? WHERE id = ?`, "\u2003", typeMissing.ID); err != nil {
+		t.Fatalf("blank type: %v", err)
+	}
+	if _, err := s.db.Exec(`DELETE FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntityObservation, titleMissing.SyncID); err != nil {
+		t.Fatalf("remove title mutation: %v", err)
+	}
+
+	findings, err := s.ListDiagnosticObservationRequiredFields("PROJECT-A")
+	if err != nil {
+		t.Fatalf("ListDiagnosticObservationRequiredFields: %v", err)
+	}
+	if len(findings) != 3 {
+		t.Fatalf("findings=%+v", findings)
+	}
+	for i, want := range []struct {
+		id      int64
+		syncID  string
+		missing string
+	}{
+		{titleMissing.ID, titleMissing.SyncID, "title"},
+		{contentMissing.ID, contentMissing.SyncID, "content"},
+		{typeMissing.ID, typeMissing.SyncID, "type"},
+	} {
+		got := findings[i]
+		if got.ID != want.id || got.SyncID != want.syncID || got.Project != "project-a" || strings.Join(got.MissingFields, ",") != want.missing {
+			t.Fatalf("finding[%d]=%+v, want id=%d sync_id=%q project=project-a missing=%q", i, got, want.id, want.syncID, want.missing)
+		}
+	}
+
+	dryRun, err := s.RepairObservationSourceTitles("project-a", false)
+	if err != nil || len(dryRun.Actions) != 1 || dryRun.Actions[0].ID != titleMissing.ID || dryRun.Actions[0].Title != "First line." {
+		t.Fatalf("dry-run=%+v err=%v", dryRun, err)
+	}
+	var title sql.NullString
+	if err := s.db.QueryRow(`SELECT title FROM observations WHERE id = ?`, titleMissing.ID).Scan(&title); err != nil || !title.Valid || title.String != "\u2003" {
+		t.Fatalf("dry-run changed title=%v err=%v", title, err)
+	}
+
+	applied, err := s.RepairObservationSourceTitles("project-a", true)
+	if err != nil || !applied.Applied || applied.BackupPath == "" || !reflect.DeepEqual(applied.Actions, dryRun.Actions) {
+		t.Fatalf("apply=%+v dry-run=%+v err=%v", applied, dryRun, err)
+	}
+	if err := s.db.QueryRow(`SELECT title FROM observations WHERE id = ?`, titleMissing.ID).Scan(&title); err != nil || !title.Valid || title.String != "First line." {
+		t.Fatalf("repaired title=%v err=%v", title, err)
+	}
+	var mutationCount int
+	if err := s.db.QueryRow(`SELECT count(*) FROM sync_mutations WHERE entity = ? AND entity_key = ? AND acked_at IS NULL AND disposition = 'pending'`, SyncEntityObservation, titleMissing.SyncID).Scan(&mutationCount); err != nil || mutationCount != 1 {
+		t.Fatalf("canonical mutation count=%d err=%v", mutationCount, err)
+	}
+	if again, err := s.RepairObservationSourceTitles("project-a", true); err != nil || len(again.Actions) != 0 {
+		t.Fatalf("repeat=%+v err=%v", again, err)
+	}
+
+	if _, err := s.db.Exec(`UPDATE observations SET title = '' WHERE id = ?`, typeMissing.ID); err != nil {
+		t.Fatalf("blank type-missing title: %v", err)
+	}
+	if _, err := s.db.Exec(`DELETE FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntityObservation, typeMissing.SyncID); err != nil {
+		t.Fatalf("remove type-missing mutation: %v", err)
+	}
+	typeOnlyRepair, err := s.RepairObservationSourceTitles("project-a", true)
+	if err != nil || len(typeOnlyRepair.Actions) != 1 || typeOnlyRepair.Actions[0].ID != typeMissing.ID {
+		t.Fatalf("type-only repair=%+v err=%v", typeOnlyRepair, err)
+	}
+	var observationType string
+	if err := s.db.QueryRow(`SELECT type FROM observations WHERE id = ?`, typeMissing.ID).Scan(&observationType); err != nil || observationType != "\u2003" {
+		t.Fatalf("type was fabricated as %q err=%v", observationType, err)
+	}
+	if err := s.db.QueryRow(`SELECT count(*) FROM sync_mutations WHERE entity = ? AND entity_key = ? AND acked_at IS NULL AND disposition = 'pending'`, SyncEntityObservation, typeMissing.SyncID).Scan(&mutationCount); err != nil || mutationCount != 0 {
+		t.Fatalf("invalid source emitted mutation count=%d err=%v", mutationCount, err)
+	}
+}
+
+func TestRepairObservationSourceTitlesRollsBackWhenCanonicalMutationFails(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("source-title-rollback", "project-a", "/work/project-a"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	id, err := s.AddObservation(AddObservationParams{SessionID: "source-title-rollback", Type: "decision", Title: "valid", Content: "Recoverable source title.", Project: "project-a", Scope: "project"})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+	observation, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("GetObservation: %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE observations SET title = '' WHERE id = ?`, id); err != nil {
+		t.Fatalf("blank title: %v", err)
+	}
+	if _, err := s.db.Exec(`DELETE FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntityObservation, observation.SyncID); err != nil {
+		t.Fatalf("remove mutation: %v", err)
+	}
+	if _, err := s.db.Exec(`CREATE TRIGGER reject_source_repair_mutation BEFORE INSERT ON sync_mutations WHEN NEW.entity = 'observation' BEGIN SELECT RAISE(ABORT, 'mutation blocked'); END`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+	if _, err := s.RepairObservationSourceTitles("project-a", true); err == nil {
+		t.Fatal("expected repair failure")
+	}
+	var title string
+	if err := s.db.QueryRow(`SELECT title FROM observations WHERE id = ?`, id).Scan(&title); err != nil || title != "" {
+		t.Fatalf("repair was not rolled back title=%q err=%v", title, err)
+	}
+}
+
+func TestRepairObservationSourceTitlesReconcilesPendingMutations(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		pendingOp    string
+		wantMutation int
+		wantTitle    string
+	}{
+		{name: "refreshes stale pending upsert", pendingOp: SyncOpUpsert, wantMutation: 1, wantTitle: "Recovered title."},
+		{name: "preserves pending delete", pendingOp: SyncOpDelete, wantMutation: 1, wantTitle: "old title"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if err := s.CreateSession("source-title-pending", "project-a", "/work/project-a"); err != nil {
+				t.Fatalf("CreateSession: %v", err)
+			}
+			id, err := s.AddObservation(AddObservationParams{SessionID: "source-title-pending", Type: "decision", Title: "old title", Content: "Recovered title.\nDetails.", Project: "project-a", Scope: "project"})
+			if err != nil {
+				t.Fatalf("AddObservation: %v", err)
+			}
+			observation, err := s.GetObservation(id)
+			if err != nil {
+				t.Fatalf("GetObservation: %v", err)
+			}
+			if _, err := s.db.Exec(`UPDATE observations SET title = '' WHERE id = ?`, id); err != nil {
+				t.Fatalf("blank title: %v", err)
+			}
+			if _, err := s.db.Exec(`UPDATE sync_mutations SET op = ? WHERE entity = ? AND entity_key = ?`, tc.pendingOp, SyncEntityObservation, observation.SyncID); err != nil {
+				t.Fatalf("set pending mutation op: %v", err)
+			}
+
+			if _, err := s.RepairObservationSourceTitles("project-a", true); err != nil {
+				t.Fatalf("RepairObservationSourceTitles: %v", err)
+			}
+
+			if got := scalarInt(t, s, `SELECT count(*) FROM sync_mutations WHERE entity = ? AND entity_key = ? AND acked_at IS NULL AND disposition = ?`, SyncEntityObservation, observation.SyncID, SyncMutationDispositionPending); got != tc.wantMutation {
+				t.Fatalf("pending mutation count=%d, want %d", got, tc.wantMutation)
+			}
+			var op, payload string
+			if err := s.db.QueryRow(`SELECT op, payload FROM sync_mutations WHERE entity = ? AND entity_key = ? AND acked_at IS NULL AND disposition = ?`, SyncEntityObservation, observation.SyncID, SyncMutationDispositionPending).Scan(&op, &payload); err != nil {
+				t.Fatalf("read pending mutation: %v", err)
+			}
+			if op != tc.pendingOp {
+				t.Fatalf("pending op=%q, want %q", op, tc.pendingOp)
+			}
+			var body map[string]any
+			if err := json.Unmarshal([]byte(payload), &body); err != nil {
+				t.Fatalf("decode pending payload: %v", err)
+			}
+			if body["title"] != tc.wantTitle {
+				t.Fatalf("pending payload title=%q, want %q", body["title"], tc.wantTitle)
+			}
+		})
+	}
+}
+
 func TestValidateSyncMutationPayloadRelationRequiresServerFields(t *testing.T) {
 	payload := `{"sync_id":"rel-1","source_id":"obs-a","target_id":"obs-b","relation":"conflicts_with","judgment_status":"judged","project":"engram"}`
 	validation := ValidateSyncMutationPayload(SyncEntityRelation, SyncOpUpsert, payload, "rel-1")

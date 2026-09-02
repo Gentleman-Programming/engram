@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -314,6 +315,46 @@ func TestSyncMutationRequiredFieldsIgnoresBacklogWithoutCloudEnrollment(t *testi
 	}
 	if report.Status != StatusOK || len(report.Checks[0].Findings) != 0 {
 		t.Fatalf("local-only install must not be blocked, got %+v", report)
+	}
+}
+
+func TestSyncMutationRequiredFieldsReportsCorruptSourceObservations(t *testing.T) {
+	s := newDiagnosticTestStore(t)
+	if err := s.CreateSession("source-observation", "engram", "/work/engram"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	id, err := s.AddObservation(store.AddObservationParams{SessionID: "source-observation", Type: "decision", Title: "valid", Content: "Source evidence is retained.", Project: "engram", Scope: "project"})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+	observation, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("GetObservation: %v", err)
+	}
+	if _, err := s.DB().Exec(`UPDATE observations SET title = ?, content = ?, type = ? WHERE id = ?`, "  ", " \n", "\t", id); err != nil {
+		t.Fatalf("corrupt source observation: %v", err)
+	}
+	if _, err := s.DB().Exec(`DELETE FROM sync_mutations WHERE entity = ? AND entity_key = ?`, store.SyncEntityObservation, observation.SyncID); err != nil {
+		t.Fatalf("remove pending mutation: %v", err)
+	}
+
+	report, err := NewRunner().RunOne(context.Background(), Scope{Store: s, Project: "engram"}, CheckSyncMutationRequiredFields)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if report.Status != StatusBlocked || len(report.Checks) != 1 || len(report.Checks[0].Findings) != 1 {
+		t.Fatalf("report=%+v", report)
+	}
+	finding := report.Checks[0].Findings[0]
+	if finding.ReasonCode != "observation_source_missing_required_fields" || finding.Severity != SeverityBlocking {
+		t.Fatalf("finding=%+v", finding)
+	}
+	var evidence map[string]any
+	if err := json.Unmarshal(finding.Evidence, &evidence); err != nil {
+		t.Fatalf("decode evidence: %v", err)
+	}
+	if evidence["id"] != float64(id) || evidence["sync_id"] != observation.SyncID || evidence["project"] != "engram" || !reflect.DeepEqual(evidence["missing_fields"], []any{"type", "title", "content"}) {
+		t.Fatalf("evidence=%v", evidence)
 	}
 }
 
