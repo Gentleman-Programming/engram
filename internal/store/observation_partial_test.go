@@ -65,7 +65,7 @@ func TestResolveObservationReadOffsetPastEndIsEmpty(t *testing.T) {
 }
 
 func TestResolveObservationReadFindWindows(t *testing.T) {
-	content := "xxTESTyyTESTzz"
+	content := "xxTESTyyyyyTESTzz"
 	find := "TEST"
 	contextRunes := 2
 	got, err := ResolveObservationRead(content, ObservationReadRequest{Find: &find, Context: &contextRunes})
@@ -78,8 +78,125 @@ func TestResolveObservationReadFindWindows(t *testing.T) {
 	if got.Windows[0].Offset != 0 || got.Windows[0].Content != "xxTESTyy" {
 		t.Fatalf("first window = %+v", got.Windows[0])
 	}
-	if got.Windows[1].Offset != 6 || got.Windows[1].Content != "yyTESTzz" {
+	if got.Windows[1].Offset != 9 || got.Windows[1].Content != "yyTESTzz" {
 		t.Fatalf("second window = %+v", got.Windows[1])
+	}
+}
+
+func TestResolveObservationReadFindMergesOverlappingOccurrences(t *testing.T) {
+	content := "aaaaa"
+	find := "aa"
+	contextRunes := 0
+	got, err := ResolveObservationRead(content, ObservationReadRequest{Find: &find, Context: &contextRunes})
+	if err != nil {
+		t.Fatalf("ResolveObservationRead: %v", err)
+	}
+	if got.MatchCount != 4 {
+		t.Fatalf("match count = %d, want 4", got.MatchCount)
+	}
+	if len(got.Windows) != 1 {
+		t.Fatalf("windows = %d, want 1", len(got.Windows))
+	}
+	if got.Windows[0].Offset != 0 || got.Windows[0].Content != content {
+		t.Fatalf("merged window = %+v", got.Windows[0])
+	}
+}
+
+func TestResolveObservationReadFindMergesAdjacentContexts(t *testing.T) {
+	find := "a"
+	contextRunes := 1
+	got, err := ResolveObservationRead("abca", ObservationReadRequest{Find: &find, Context: &contextRunes})
+	if err != nil {
+		t.Fatalf("ResolveObservationRead: %v", err)
+	}
+	if got.MatchCount != 2 || len(got.Windows) != 1 {
+		t.Fatalf("matches/windows = %d/%d, want 2/1", got.MatchCount, len(got.Windows))
+	}
+	if got.Windows[0].Offset != 0 || got.Windows[0].Content != "abca" {
+		t.Fatalf("merged adjacent window = %+v", got.Windows[0])
+	}
+}
+
+func TestResolveObservationReadFindDefaultContextDoesNotDuplicateContent(t *testing.T) {
+	find := "needle"
+	content := strings.Repeat("a", DefaultFindContext+100) + find + strings.Repeat("b", 100) + find + strings.Repeat("c", DefaultFindContext+100)
+	got, err := ResolveObservationRead(content, ObservationReadRequest{Find: &find})
+	if err != nil {
+		t.Fatalf("ResolveObservationRead: %v", err)
+	}
+	if got.MatchCount != 2 || len(got.Windows) != 1 {
+		t.Fatalf("matches/windows = %d/%d, want 2/1", got.MatchCount, len(got.Windows))
+	}
+	windowRunes := 0
+	for _, window := range got.Windows {
+		windowRunes += len([]rune(window.Content))
+	}
+	if windowRunes > len([]rune(content)) {
+		t.Fatalf("window runes = %d, source runes = %d", windowRunes, len([]rune(content)))
+	}
+}
+
+func TestResolveObservationReadFindWindowRunesStayBoundedAcrossIndependentWindows(t *testing.T) {
+	find := "needle"
+	contextRunes := 10
+	content := strings.Repeat("a", 20) + find + strings.Repeat("b", 2_000) + find + strings.Repeat("c", 20)
+	got, err := ResolveObservationRead(content, ObservationReadRequest{Find: &find, Context: &contextRunes})
+	if err != nil {
+		t.Fatalf("ResolveObservationRead: %v", err)
+	}
+	if got.MatchCount != 2 || len(got.Windows) != 2 {
+		t.Fatalf("matches/windows = %d/%d, want 2/2", got.MatchCount, len(got.Windows))
+	}
+	windowRunes := 0
+	for _, window := range got.Windows {
+		windowRunes += len([]rune(window.Content))
+	}
+	if windowRunes > len([]rune(content)) {
+		t.Fatalf("window runes = %d, source runes = %d", windowRunes, len([]rune(content)))
+	}
+}
+
+func TestResolveObservationReadFindLargeNearMatch(t *testing.T) {
+	find := strings.Repeat("a", 5_000) + "b"
+	content := strings.Repeat("a", 10_000) + "b"
+	contextRunes := 0
+	got, err := ResolveObservationRead(content, ObservationReadRequest{Find: &find, Context: &contextRunes})
+	if err != nil {
+		t.Fatalf("ResolveObservationRead: %v", err)
+	}
+	if got.MatchCount != 1 || len(got.Windows) != 1 {
+		t.Fatalf("matches/windows = %d/%d, want 1/1", got.MatchCount, len(got.Windows))
+	}
+	if got.Windows[0].Offset != 5_000 || got.Windows[0].Content != find {
+		t.Fatalf("near-match window = %+v", got.Windows[0])
+	}
+}
+
+func TestResolveObservationReadHugeLimitsClampToContent(t *testing.T) {
+	huge := int(^uint(0) >> 1)
+	cases := []struct {
+		name string
+		req  ObservationReadRequest
+	}{
+		{"range limit", ObservationReadRequest{Limit: &huge}},
+		{"find context", func() ObservationReadRequest {
+			find := "cd"
+			return ObservationReadRequest{Find: &find, Context: &huge}
+		}()},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ResolveObservationRead("abcdef", tc.req)
+			if err != nil {
+				t.Fatalf("ResolveObservationRead: %v", err)
+			}
+			if tc.req.Find == nil && got.Content != "abcdef" {
+				t.Fatalf("range content = %q", got.Content)
+			}
+			if tc.req.Find != nil && (len(got.Windows) != 1 || got.Windows[0].Content != "abcdef") {
+				t.Fatalf("find windows = %+v", got.Windows)
+			}
+		})
 	}
 }
 

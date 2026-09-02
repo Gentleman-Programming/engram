@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"strconv"
 	"strings"
 	"testing"
@@ -105,7 +106,7 @@ func TestHandleGetObservationRange(t *testing.T) {
 
 func TestHandleGetObservationFindWindows(t *testing.T) {
 	s := newMCPTestStore(t)
-	id := seedObservation(t, s, "design Part A", "aaTESTbbTESTcc")
+	id := seedObservation(t, s, "design Part A", "aaTESTyyyyyTESTcc")
 	text := callGetObservation(t, s, map[string]any{
 		"id":      float64(id),
 		"find":    "TEST",
@@ -114,8 +115,44 @@ func TestHandleGetObservationFindWindows(t *testing.T) {
 	if !strings.Contains(text, "2 matches for") {
 		t.Fatalf("expected match count, got %q", text)
 	}
-	if !strings.Contains(text, "[offset 0]") || !strings.Contains(text, "[offset 6]") {
+	if !strings.Contains(text, "[offset 0]") || !strings.Contains(text, "[offset 9]") {
 		t.Fatalf("expected window offsets, got %q", text)
+	}
+	if strings.Contains(text, "yyyyTEST") {
+		t.Fatalf("expected distant text to remain outside both windows, got %q", text)
+	}
+}
+
+func TestHandleGetObservationFindMergesOverlappingOccurrences(t *testing.T) {
+	s := newMCPTestStore(t)
+	id := seedObservation(t, s, "overlap", "aaaaa")
+	text := callGetObservation(t, s, map[string]any{
+		"id":      float64(id),
+		"find":    "aa",
+		"context": float64(0),
+	})
+	if !strings.Contains(text, "4 matches for") {
+		t.Fatalf("expected overlapping occurrence count, got %q", text)
+	}
+	if strings.Count(text, "[offset ") != 1 || strings.Count(text, "aaaaa") != 1 {
+		t.Fatalf("expected one merged window with one body, got %q", text)
+	}
+}
+
+func TestHandleGetObservationFindDefaultContextDoesNotDuplicateContent(t *testing.T) {
+	s := newMCPTestStore(t)
+	find := "needle"
+	content := strings.Repeat("a", store.DefaultFindContext+100) + find + strings.Repeat("b", 100) + find + strings.Repeat("c", store.DefaultFindContext+100)
+	id := seedObservation(t, s, "repeated", content)
+	text := callGetObservation(t, s, map[string]any{
+		"id":   float64(id),
+		"find": find,
+	})
+	if !strings.Contains(text, "2 matches for") {
+		t.Fatalf("expected occurrence count, got %q", text)
+	}
+	if strings.Count(text, "[offset ") != 1 || strings.Count(text, find) != 3 {
+		t.Fatalf("expected one merged body containing each match once, got %q", text)
 	}
 }
 
@@ -191,5 +228,67 @@ func TestHandleGetObservationRangeUsesRunesNotBytes(t *testing.T) {
 	})
 	if !strings.Contains(text, "é😊") {
 		t.Fatalf("expected rune slice, got %q", text)
+	}
+}
+
+func TestHandleGetObservationRejectsUnsafeOptionalNumbers(t *testing.T) {
+	s := newMCPTestStore(t)
+	id := seedObservation(t, s, "numbers", "abcdef")
+	cases := []struct {
+		name string
+		args map[string]any
+		want string
+	}{
+		{"fractional offset", map[string]any{"id": float64(id), "offset": 1.5}, "offset must be a safe integer"},
+		{"fractional limit", map[string]any{"id": float64(id), "limit": 1.5}, "limit must be a safe integer"},
+		{"fractional context", map[string]any{"id": float64(id), "find": "cd", "context": 1.5}, "context must be a safe integer"},
+		{"out of range offset", map[string]any{"id": float64(id), "offset": math.MaxFloat64}, "offset must be a safe integer"},
+		{"out of range limit", map[string]any{"id": float64(id), "limit": math.MaxFloat64}, "limit must be a safe integer"},
+		{"out of range context", map[string]any{"id": float64(id), "find": "cd", "context": math.MaxFloat64}, "context must be a safe integer"},
+		{"nan offset", map[string]any{"id": float64(id), "offset": math.NaN()}, "offset must be a safe integer"},
+		{"infinite limit", map[string]any{"id": float64(id), "limit": math.Inf(1)}, "limit must be a safe integer"},
+		{"wrong type offset", map[string]any{"id": float64(id), "offset": "1"}, "offset must be a safe integer"},
+		{"wrong type limit", map[string]any{"id": float64(id), "limit": true}, "limit must be a safe integer"},
+		{"wrong type context", map[string]any{"id": float64(id), "find": "cd", "context": "1"}, "context must be a safe integer"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := handleGetObservation(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{
+				Params: mcppkg.CallToolParams{Arguments: tc.args},
+			})
+			if err != nil {
+				t.Fatalf("handler error: %v", err)
+			}
+			if !res.IsError || !strings.Contains(callResultText(t, res), tc.want) {
+				t.Fatalf("result = %q, want tool error containing %q", callResultText(t, res), tc.want)
+			}
+		})
+	}
+}
+
+func TestHandleGetObservationNegativeOptionalNumbersUseStoreValidation(t *testing.T) {
+	s := newMCPTestStore(t)
+	id := seedObservation(t, s, "numbers", "abcdef")
+	cases := []struct {
+		name string
+		args map[string]any
+		want string
+	}{
+		{"offset", map[string]any{"id": float64(id), "offset": float64(-1)}, "offset must be >= 0"},
+		{"limit", map[string]any{"id": float64(id), "limit": float64(-1)}, "limit must be >= 0"},
+		{"context", map[string]any{"id": float64(id), "find": "cd", "context": float64(-1)}, "context must be >= 0"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := handleGetObservation(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{
+				Params: mcppkg.CallToolParams{Arguments: tc.args},
+			})
+			if err != nil {
+				t.Fatalf("handler error: %v", err)
+			}
+			if !res.IsError || !strings.Contains(callResultText(t, res), tc.want) {
+				t.Fatalf("result = %q, want store validation %q", callResultText(t, res), tc.want)
+			}
+		})
 	}
 }

@@ -40,6 +40,7 @@ type ObservationReadResult struct {
 	Offset     int
 	Limit      int
 	Find       string
+	MatchCount int
 	Windows    []ObservationWindow
 	Content    string
 }
@@ -91,7 +92,7 @@ func ResolveObservationRead(content string, req ObservationReadRequest) (Observa
 			contextRunes = *req.Context
 		}
 		result.Find = find
-		result.Windows = findContentWindows(runes, find, contextRunes)
+		result.Windows, result.MatchCount = findContentWindows(runes, find, contextRunes)
 		return result, nil
 	}
 
@@ -115,49 +116,86 @@ func sliceRunes(runes []rune, offset, limit int) string {
 	if offset >= len(runes) || limit == 0 {
 		return ""
 	}
-	end := offset + limit
-	if end > len(runes) {
-		end = len(runes)
+	if limit >= len(runes)-offset {
+		return string(runes[offset:])
 	}
-	return string(runes[offset:end])
+	return string(runes[offset : offset+limit])
 }
 
-func findContentWindows(runes []rune, find string, contextRunes int) []ObservationWindow {
+type observationInterval struct {
+	start int
+	end   int
+}
+
+func findContentWindows(runes []rune, find string, contextRunes int) ([]ObservationWindow, int) {
 	needle := []rune(find)
 	if len(needle) == 0 {
-		return nil
+		return nil, 0
 	}
-	var windows []ObservationWindow
-	for i := 0; i <= len(runes)-len(needle); {
-		if !runePrefixEqual(runes[i:], needle) {
-			i++
+	prefix := runePrefixTable(needle)
+	merged := make([]observationInterval, 0)
+	matchCount := 0
+	matched := 0
+	for i, r := range runes {
+		for matched > 0 && r != needle[matched] {
+			matched = prefix[matched-1]
+		}
+		if r == needle[matched] {
+			matched++
+		}
+		if matched != len(needle) {
 			continue
 		}
-		start := i - contextRunes
-		if start < 0 {
-			start = 0
+
+		matchCount++
+		matchStart := i - len(needle) + 1
+		matchEnd := i + 1
+		start := 0
+		if contextRunes < matchStart {
+			start = matchStart - contextRunes
 		}
-		end := i + len(needle) + contextRunes
-		if end > len(runes) {
+		end := matchEnd
+		if contextRunes >= len(runes)-end {
 			end = len(runes)
+		} else {
+			end += contextRunes
 		}
-		windows = append(windows, ObservationWindow{
-			Offset:  start,
-			Content: string(runes[start:end]),
-		})
-		i += len(needle)
+		appendMergedObservationInterval(&merged, observationInterval{start: start, end: end})
+		matched = prefix[matched-1]
 	}
-	return windows
+
+	windows := make([]ObservationWindow, 0, len(merged))
+	for _, interval := range merged {
+		windows = append(windows, ObservationWindow{
+			Offset:  interval.start,
+			Content: string(runes[interval.start:interval.end]),
+		})
+	}
+	return windows, matchCount
 }
 
-func runePrefixEqual(haystack, needle []rune) bool {
-	if len(haystack) < len(needle) {
-		return false
+func appendMergedObservationInterval(merged *[]observationInterval, interval observationInterval) {
+	last := len(*merged) - 1
+	if last < 0 || interval.start > (*merged)[last].end {
+		*merged = append(*merged, interval)
+		return
 	}
-	for i, r := range needle {
-		if haystack[i] != r {
-			return false
+	if interval.end > (*merged)[last].end {
+		(*merged)[last].end = interval.end
+	}
+}
+
+func runePrefixTable(needle []rune) []int {
+	prefix := make([]int, len(needle))
+	matched := 0
+	for i := 1; i < len(needle); i++ {
+		for matched > 0 && needle[i] != needle[matched] {
+			matched = prefix[matched-1]
 		}
+		if needle[i] == needle[matched] {
+			matched++
+		}
+		prefix[i] = matched
 	}
-	return true
+	return prefix
 }

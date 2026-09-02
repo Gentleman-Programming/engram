@@ -939,9 +939,11 @@ With no extra parameters this returns the full untruncated body (unchanged). Opt
 
 `mem_get_observation(id: 475, offset: 12000, limit: 2000)` returns runes `[offset, offset+limit)`. `limit` without `offset` starts at `0`. `offset` past the end returns an empty window (no error). Default `limit` is 2000.
 
+Optional partial-read numeric values must be safe integers; negative values are rejected.
+
 **Match-scoped read — `find` + `context`**
 
-`mem_get_observation(id: 475, find: "test 7", context: 600)` returns a window of `context` runes on each side of every literal match, prefixed with the window's rune offset. `find` with no matches returns zero windows (no error). `context` without `find` is an error. Default `context` is 600.
+`mem_get_observation(id: 475, find: "test 7", context: 600)` returns merged windows of `context` runes on each side of every literal match, prefixed with each window's rune offset. Overlapping or adjacent contexts are merged; the header still reports literal occurrence count. `find` with no matches returns zero windows (no error). `context` without `find` is an error. Default `context` is 600.
 
 `offset`/`limit` and `find`/`context` are mutually exclusive.
 
