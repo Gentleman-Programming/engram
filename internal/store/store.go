@@ -8062,7 +8062,7 @@ func normalizeComparableTimestamp(value string) string {
 	if err != nil {
 		return ""
 	}
-	return parsed.Format("2006-01-02 15:04:05.000000000")
+	return parsed.UTC().Format("2006-01-02 15:04:05.000000000")
 }
 
 func parseObservationTime(value string) (time.Time, error) {

@@ -5132,6 +5132,15 @@ func TestImportObservationUsesLastWriteWinsOrdering(t *testing.T) {
 	if result, err := s.Import(&newer); err != nil || result.ObservationsImported != 0 || result.ObservationsUpdated != 1 || result.ObservationsSkippedStale != 0 {
 		t.Fatalf("newer import = %+v, %v; updates must not be counted as inserts", result, err)
 	}
+	offsetOlder := newer
+	offsetOlder.Observations[0].Title = "offset older"
+	offsetOlder.Observations[0].UpdatedAt = "2026-01-02T01:00:00+02:00"
+	if result, err := s.Import(&offsetOlder); err != nil || result.ObservationsSkippedStale != 1 {
+		t.Fatalf("offset older import = %+v, %v", result, err)
+	}
+	if got := scalarString(t, s, `SELECT title FROM observations WHERE sync_id = ?`, "import-lww-observation"); got != "new" {
+		t.Fatalf("offset older changed title to %q", got)
+	}
 	older := newer
 	older.Observations = []Observation{{SyncID: "import-lww-observation", SessionID: "import-lww-session", Type: "note", Title: "older", Content: "older", Project: &project, Scope: "project", CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-01 12:00:00"}}
 	if result, err := s.Import(&older); err != nil || result.ObservationsSkippedStale != 1 {
@@ -5312,6 +5321,13 @@ func TestImportPromptIdentityAndTombstoneOrdering(t *testing.T) {
 	if result, err := s.Import(stale); err != nil || result.PromptsImported != 0 {
 		t.Fatalf("stale tombstoned prompt import = %+v, %v", result, err)
 	}
+	if _, err := s.db.Exec(`INSERT INTO prompt_tombstones (sync_id, session_id, project, deleted_at) VALUES (?, ?, ?, ?)`, "offset-tombstoned-prompt", "import-prompt-session", "engram", "2026-01-02T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.Import(&ExportData{Prompts: []Prompt{{SyncID: "offset-tombstoned-prompt", SessionID: "import-prompt-session", Content: "stale", Project: "engram", CreatedAt: "2026-01-02T01:00:00+02:00"}}})
+	if err != nil || result.PromptsImported != 0 || scalarInt(t, s, `SELECT count(*) FROM prompt_tombstones WHERE sync_id = ?`, "offset-tombstoned-prompt") != 1 || scalarInt(t, s, `SELECT count(*) FROM user_prompts WHERE sync_id = ?`, "offset-tombstoned-prompt") != 0 {
+		t.Fatalf("offset stale tombstoned prompt import = %+v, %v", result, err)
+	}
 	newer := &ExportData{Prompts: []Prompt{{SyncID: "import-tombstoned-prompt", SessionID: "import-prompt-session", Content: "newer", Project: "engram", CreatedAt: "2026-01-03 00:00:00"}}}
 	if result, err := s.Import(newer); err != nil || result.PromptsImported != 1 {
 		t.Fatalf("newer tombstoned prompt import = %+v, %v", result, err)
@@ -5346,7 +5362,7 @@ func TestImportPromptIdentityAndTombstoneOrdering(t *testing.T) {
 	if _, err := s.db.Exec(`INSERT INTO prompt_tombstones (sync_id, session_id, project, deleted_at) VALUES (?, ?, ?, ?)`, "invalid-tombstone", "import-prompt-session", "engram", "not-a-time"); err != nil {
 		t.Fatal(err)
 	}
-	result, err := s.Import(&ExportData{Prompts: []Prompt{{SyncID: "invalid-tombstone", SessionID: "import-prompt-session", Content: "must remain deleted", Project: "engram", CreatedAt: "2026-01-05 00:00:00"}}})
+	result, err = s.Import(&ExportData{Prompts: []Prompt{{SyncID: "invalid-tombstone", SessionID: "import-prompt-session", Content: "must remain deleted", Project: "engram", CreatedAt: "2026-01-05 00:00:00"}}})
 	if err != nil || result.PromptsImported != 0 {
 		t.Fatalf("invalid tombstone import = %+v, %v", result, err)
 	}
