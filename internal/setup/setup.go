@@ -24,7 +24,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Gentleman-Programming/engram/internal/mcp"
+	"github.com/Gentleman-Programming/engram/v2/internal/mcp"
 )
 
 var (
@@ -75,6 +75,7 @@ type Result struct {
 	Agent            string
 	Destination      string
 	Files            int
+	MCPConfigured    bool
 	TUIPluginEnabled bool
 }
 
@@ -83,7 +84,8 @@ const codexMarketplace = "Gentleman-Programming/engram"
 
 const openCodeSubagentStatuslinePlugin = "opencode-subagent-statusline"
 
-const piGentleEngramPackage = "npm:gentle-engram@0.1.8"
+const piGentleEngramPackage = "npm:gentle-engram@0.1.11"
+const piLegacyGentleEngramPackage = "npm:gentle-engram@0.1.8"
 const piMCPAdapterPackage = "npm:pi-mcp-adapter"
 
 // claudeCodeMCPTools are the MCP tool permission names for the agent profile
@@ -338,15 +340,41 @@ func ensurePiPackageSettings(settingsPath string) (bool, error) {
 		return false, err
 	}
 	changed := false
-	for _, pkg := range []string{piGentleEngramPackage, piMCPAdapterPackage} {
-		if !rawArrayContainsString(packages, pkg) {
-			raw, err := jsonMarshalFn(pkg)
-			if err != nil {
-				return false, fmt.Errorf("marshal Pi package %q: %w", pkg, err)
+	updatedPackages := make([]json.RawMessage, 0, len(packages)+1)
+	hasGentleEngramPackage := false
+	for _, raw := range packages {
+		var pkg string
+		if err := json.Unmarshal(raw, &pkg); err == nil {
+			switch pkg {
+			case piLegacyGentleEngramPackage:
+				changed = true
+				continue
+			case piGentleEngramPackage:
+				if hasGentleEngramPackage {
+					changed = true
+					continue
+				}
+				hasGentleEngramPackage = true
 			}
-			packages = append(packages, raw)
-			changed = true
 		}
+		updatedPackages = append(updatedPackages, raw)
+	}
+	packages = updatedPackages
+	if !hasGentleEngramPackage {
+		raw, err := jsonMarshalFn(piGentleEngramPackage)
+		if err != nil {
+			return false, fmt.Errorf("marshal Pi package %q: %w", piGentleEngramPackage, err)
+		}
+		packages = append(packages, raw)
+		changed = true
+	}
+	if !rawArrayContainsString(packages, piMCPAdapterPackage) {
+		raw, err := jsonMarshalFn(piMCPAdapterPackage)
+		if err != nil {
+			return false, fmt.Errorf("marshal Pi package %q: %w", piMCPAdapterPackage, err)
+		}
+		packages = append(packages, raw)
+		changed = true
 	}
 	if !changed {
 		return false, nil
@@ -559,6 +587,7 @@ func installOpenCode() (*Result, error) {
 
 	// Register engram MCP server in opencode.json and the subagent monitor in tui.json.
 	files := 1
+	mcpConfigured := false
 	if err := injectOpenCodeMCPFn(); err != nil {
 		// Non-fatal: plugin works, MCP just needs manual config
 		cmd := resolveEngramCommand()
@@ -567,6 +596,7 @@ func installOpenCode() (*Result, error) {
 		fmt.Fprintf(os.Stderr, "  \"engram\": { \"type\": \"local\", \"command\": [%q, \"mcp\", \"--tools=agent\"], \"enabled\": true }\n", cmd)
 	} else {
 		files++
+		mcpConfigured = true
 	}
 
 	tuiEnabled := false
@@ -582,6 +612,7 @@ func installOpenCode() (*Result, error) {
 		Agent:            "opencode",
 		Destination:      dir,
 		Files:            files,
+		MCPConfigured:    mcpConfigured,
 		TUIPluginEnabled: tuiEnabled,
 	}, nil
 }

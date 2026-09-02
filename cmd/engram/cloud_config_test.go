@@ -1,8 +1,8 @@
 package main
 
 import (
-	"github.com/Gentleman-Programming/engram/internal/cloudconfig"
-	"github.com/Gentleman-Programming/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloudconfig"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
 )
 
 type cloudConfig = cloudconfig.Config

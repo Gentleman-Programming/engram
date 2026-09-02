@@ -24,9 +24,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
-	"github.com/Gentleman-Programming/engram/internal/cloud/syncguidance"
-	"github.com/Gentleman-Programming/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/constants"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/syncguidance"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
 )
 
 // ─── Phase Constants ─────────────────────────────────────────────────────────
@@ -96,6 +96,12 @@ type LocalStore interface {
 
 type enrolledProjectRepairEnsurer interface {
 	EnsureEnrolledProjectSyncMutations(ctx context.Context) error
+}
+
+// irreparableSyncMutationQuarantiner prevents malformed legacy rows from
+// repeatedly reaching transport while preserving their local audit evidence.
+type irreparableSyncMutationQuarantiner interface {
+	QuarantineIrreparableSyncMutations(targetKey, project string, apply bool) (store.SyncMutationQuarantineReport, error)
 }
 
 type nonEnrolledPendingError struct {
@@ -498,6 +504,15 @@ func (m *Manager) push(ctx context.Context) error {
 			return fmt.Errorf("repair enrolled sync journal: %w", err)
 		}
 	}
+	if quarantiner, ok := m.store.(irreparableSyncMutationQuarantiner); ok {
+		report, err := quarantiner.QuarantineIrreparableSyncMutations(m.cfg.TargetKey, "", true)
+		if err != nil {
+			return fmt.Errorf("quarantine irreparable pending mutations: %w", err)
+		}
+		if len(report.Actions) > 0 {
+			log.Printf("[autosync] quarantined %d irreparable pending mutation(s); inspect with `engram doctor --check sync_mutation_required_fields`", len(report.Actions))
+		}
+	}
 
 	pending, err := m.store.ListPendingSyncMutations(m.cfg.TargetKey, m.cfg.PushBatchSize)
 	if err != nil {
@@ -514,18 +529,23 @@ func (m *Manager) push(ctx context.Context) error {
 		return nil
 	}
 
-	// Group by project (preserve order).
+	// Group by project (preserve order). Empty or padded project values are invalid
+	// for cloud transport: never send them, but continue with healthy project groups.
 	groups := make(map[string][]store.SyncMutation)
 	order := make([]string, 0)
+	var failures []error
 	for _, mut := range pending {
 		project := mut.Project
+		if strings.TrimSpace(project) != project || project == "" {
+			failures = append(failures, fmt.Errorf("pending mutation seq %d (%s/%s) has an empty or padded project and was not sent; repair local project metadata or inspect `engram doctor --check sync_mutation_required_fields`", mut.Seq, mut.Entity, mut.EntityKey))
+			continue
+		}
 		if _, ok := groups[project]; !ok {
 			order = append(order, project)
 		}
 		groups[project] = append(groups[project], mut)
 	}
 
-	var failures []error
 	for _, project := range order {
 		if err := ctx.Err(); err != nil {
 			failures = append(failures, err)

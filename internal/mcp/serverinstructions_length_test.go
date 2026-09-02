@@ -26,11 +26,29 @@ import (
 // this repo.
 func TestServerInstructionsStaysUnderClientTruncationLimit(t *testing.T) {
 	const clientTruncationCeiling = 2048
-	runes := utf8.RuneCountInString(serverInstructions)
-	t.Logf("serverInstructions rune count: %d (byte count: %d)", runes, len(serverInstructions))
-	if runes >= clientTruncationCeiling {
-		t.Errorf("serverInstructions is %d runes (>=%d) — exceeds the documented 2048-rune MCP client truncation ceiling. Trim prose.",
-			runes, clientTruncationCeiling)
+
+	profiles := map[string]map[string]bool{
+		"all (nil)": nil,
+		"agent":     ProfileAgent,
+		"admin":     ProfileAdmin,
+		"empty":     {},
+		"custom": {
+			"mem_save":   true,
+			"mem_search": true,
+			"mem_judge":  true,
+		},
+	}
+
+	for name, allowlist := range profiles {
+		t.Run(name, func(t *testing.T) {
+			instructions := buildServerInstructions(allowlist)
+			runes := utf8.RuneCountInString(instructions)
+			t.Logf("profile %q instructions rune count: %d (byte count: %d)", name, runes, len(instructions))
+			if runes >= clientTruncationCeiling {
+				t.Errorf("profile %q instructions is %d runes (>=%d) — exceeds the documented 2048-rune MCP client truncation ceiling. Trim prose.",
+					name, runes, clientTruncationCeiling)
+			}
+		})
 	}
 }
 

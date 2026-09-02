@@ -16,7 +16,7 @@ The memory flow does not start in the database. It starts with the agent decidin
    mem_save / mem_session_summary / mem_save_prompt / mem_capture_passive
 
 3. internal/mcp resolves the project and validates the contract
-   cwd → .engram/config.json → git remote/root → child repo → basename
+   cwd → .engram/config.json → Git shared-metadata binding (initial remote/root label) → child repo → basename
 
 4. internal/store persists
    sessions / observations / user_prompts / memory_relations / sync_mutations
