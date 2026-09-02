@@ -6,8 +6,8 @@
 //
 // Tool profiles allow agents to load only the tools they need:
 //
-//	engram mcp                    → all 19 tools (default)
-//	engram mcp --tools=agent      → 15 tools agents actually use (per skill files)
+//	engram mcp                    → all 22 tools (default)
+//	engram mcp --tools=agent      → 18 tools agents actually use (per skill files)
 //	engram mcp --tools=admin      → 4 tools for TUI/CLI (delete, stats, timeline, merge)
 //	engram mcp --tools=agent,admin → combine profiles
 //	engram mcp --tools=mem_save,mem_search → individual tool names
@@ -23,10 +23,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/internal/diagnostic"
-	projectpkg "github.com/Gentleman-Programming/engram/internal/project"
-	"github.com/Gentleman-Programming/engram/internal/store"
-	"github.com/Gentleman-Programming/engram/internal/timeutil"
+	"github.com/Gentleman-Programming/engram/v2/internal/diagnostic"
+	projectpkg "github.com/Gentleman-Programming/engram/v2/internal/project"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	"github.com/Gentleman-Programming/engram/v2/internal/timeutil"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -194,33 +194,82 @@ func NewServer(s *store.Store) *server.MCPServer {
 	return NewServerWithConfig(s, MCPConfig{}, nil)
 }
 
+type coreToolDesc struct {
+	name string
+	desc string
+}
+
+var coreTools = []coreToolDesc{
+	{"mem_save", "mem_save — save decisions, bugs, discoveries, conventions PROACTIVELY (do not wait to be asked)"},
+	{"mem_search", "mem_search — find past work, decisions, or context from previous sessions"},
+	{"mem_context", "mem_context — get recent session history (call at session start or after compaction)"},
+	{"mem_session_summary", "mem_session_summary — save end-of-session summary (MANDATORY before saying \"done\")"},
+	{"mem_get_observation", "mem_get_observation — get full untruncated content of a search result by ID"},
+	{"mem_save_prompt", "mem_save_prompt — save user prompt for context"},
+	{"mem_current_project", "mem_current_project — detect current project from cwd (recommended first call)"},
+	{"mem_judge", "mem_judge — record a verdict on a pending memory conflict (judgment_required flow)"},
+	{"mem_compare", "mem_compare — persist a semantic verdict you have already judged externally"},
+}
+
+var deferredTools = []string{
+	"mem_update", "mem_review", "mem_pin", "mem_unpin", "mem_suggest_topic_key",
+	"mem_session_start", "mem_session_end", "mem_doctor", "mem_capture_passive",
+	"mem_stats", "mem_delete", "mem_timeline", "mem_merge_projects",
+}
+
+// buildServerInstructions dynamically generates the instructions for MCP clients
+// based on which tools are allowed/registered.
+func buildServerInstructions(allowlist map[string]bool) string {
+	var b strings.Builder
+	b.WriteString("Engram provides persistent memory that survives across sessions and compactions.\n\n")
+
+	var activeCore []string
+	for _, ct := range coreTools {
+		if shouldRegister(ct.name, allowlist) {
+			activeCore = append(activeCore, ct.desc)
+		}
+	}
+	if len(activeCore) > 0 {
+		b.WriteString("CORE TOOLS (always available — use without ToolSearch):\n")
+		for _, desc := range activeCore {
+			b.WriteString("  ")
+			b.WriteString(desc)
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
+
+	var activeDeferred []string
+	for _, dt := range deferredTools {
+		if shouldRegister(dt, allowlist) {
+			activeDeferred = append(activeDeferred, dt)
+		}
+	}
+	if len(activeDeferred) > 0 {
+		b.WriteString("DEFERRED TOOLS (use ToolSearch when needed):\n  ")
+		b.WriteString(strings.Join(activeDeferred, ", "))
+		b.WriteString("\n\n")
+	}
+
+	if shouldRegister("mem_save", allowlist) {
+		b.WriteString("PROACTIVE SAVE RULE: Call mem_save immediately after ANY decision, bug fix, discovery, or convention — not just when asked.\n\n")
+	}
+
+	if shouldRegister("mem_save", allowlist) && shouldRegister("mem_judge", allowlist) {
+		b.WriteString("## CONFLICT SURFACING\n\n" +
+			"After mem_save: if judgment_required, iterate candidates[] and call mem_judge\n" +
+			"once per entry using that entry's judgment_id; never reuse the top-level judgment_id.\n" +
+			"Ask conversationally when confidence < 0.7 OR (relation in\n" +
+			"{supersedes, conflicts_with} AND type in {architecture, policy, decision}); else\n" +
+			"resolve with related | compatible | scoped | not_conflict. Pass evidence from user reply.")
+	}
+
+	return strings.TrimSpace(b.String())
+}
+
 // serverInstructions tells MCP clients when to use Engram's tools.
-// 7 core tools are eager (always in context). The rest are deferred
-// and require ToolSearch to load.
-const serverInstructions = `Engram provides persistent memory that survives across sessions and compactions.
-
-CORE TOOLS (always available — use without ToolSearch):
-  mem_save — save decisions, bugs, discoveries, conventions PROACTIVELY (do not wait to be asked)
-  mem_search — find past work, decisions, or context from previous sessions
-  mem_context — get recent session history (call at session start or after compaction)
-  mem_session_summary — save end-of-session summary (MANDATORY before saying "done")
-  mem_get_observation — get full untruncated content of a search result by ID
-  mem_save_prompt — save user prompt for context
-  mem_current_project — detect current project from cwd (recommended first call)
-
-DEFERRED TOOLS (use ToolSearch when needed):
-  mem_update, mem_review, mem_pin, mem_unpin, mem_suggest_topic_key, mem_session_start, mem_session_end,
-  mem_stats, mem_delete, mem_timeline, mem_capture_passive, mem_merge_projects
-
-PROACTIVE SAVE RULE: Call mem_save immediately after ANY decision, bug fix, discovery, or convention — not just when asked.
-
-## CONFLICT SURFACING
-
-After mem_save: if judgment_required, iterate candidates[] and call mem_judge
-once per entry using that entry's judgment_id; never reuse the top-level judgment_id.
-Ask conversationally when confidence < 0.7 OR (relation in
-{supersedes, conflicts_with} AND type in {architecture, policy, decision}); else
-resolve with related | compatible | scoped | not_conflict. Pass evidence from user reply.`
+// Retained as package-level variable for backward compatibility.
+var serverInstructions = buildServerInstructions(nil)
 
 // NewServerWithTools creates an MCP server registering only the tools in
 // the allowlist. If allowlist is nil, all tools are registered.
@@ -239,7 +288,7 @@ func newServerWithActivity(s *store.Store, cfg MCPConfig, allowlist map[string]b
 		"engram",
 		"0.1.0",
 		server.WithToolCapabilities(true),
-		server.WithInstructions(serverInstructions),
+		server.WithInstructions(buildServerInstructions(allowlist)),
 	)
 
 	registerTools(srv, s, cfg, allowlist, activity)

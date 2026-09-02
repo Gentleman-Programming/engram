@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/internal/cloud/cloudstore"
-	"github.com/Gentleman-Programming/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/cloudstore"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
 )
 
 var ErrSecretTooShort = errors.New("jwt secret must be at least 32 bytes")

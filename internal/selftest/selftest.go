@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
 )
 
 const (

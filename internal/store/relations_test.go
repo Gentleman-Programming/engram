@@ -1135,9 +1135,9 @@ func TestJudgeRelation_RejectsCrossProject(t *testing.T) {
 	}
 }
 
-// C.1e — When the source observation is missing, JudgeRelation must enqueue a
-// mutation with project=” (empty string, not an error).
-func TestJudgeRelation_MissingSource_EnqueuesEmptyProject(t *testing.T) {
+// C.1e — When the source observation is missing, JudgeRelation preserves the
+// local judgment but must not enqueue a cloud mutation without a project.
+func TestJudgeRelation_MissingSource_KeepsJudgmentLocalOnly(t *testing.T) {
 	s := setupEnrolledStore(t)
 
 	// Use a non-existent source sync_id and a real target.
@@ -1167,13 +1167,20 @@ func TestJudgeRelation_MissingSource_EnqueuesEmptyProject(t *testing.T) {
 	}
 
 	after := countRelationMutations(t, s, SyncEntityRelation, "")
-	if after <= before {
-		t.Errorf("expected mutation with project='' when source is missing; before=%d after=%d", before, after)
+	if after != before {
+		t.Errorf("source-missing relation must not enqueue an empty-project mutation; before=%d after=%d", before, after)
+	}
+	rel, err := s.GetRelation(relSyncID)
+	if err != nil {
+		t.Fatalf("GetRelation: %v", err)
+	}
+	if rel.JudgmentStatus != JudgmentStatusJudged {
+		t.Errorf("local relation judgment was not preserved: got %q", rel.JudgmentStatus)
 	}
 }
 
-// REQ-011 verify-followup: JudgeRelation with missing source MUST emit a
-// WARNING-level log mentioning the relation sync_id and the empty project.
+// REQ-011 verify-followup: JudgeRelation with missing source MUST emit an
+// actionable warning that the local judgment was not replicated.
 func TestJudgeRelation_MissingSource_EmitsWarningLog(t *testing.T) {
 	s := setupEnrolledStore(t)
 
@@ -1212,8 +1219,8 @@ func TestJudgeRelation_MissingSource_EmitsWarningLog(t *testing.T) {
 	if !strings.Contains(logged, relSyncID) {
 		t.Errorf("expected relation sync_id %q in log output; got: %q", relSyncID, logged)
 	}
-	if !strings.Contains(logged, "project=''") {
-		t.Errorf("expected \"project=''\" hint in log output; got: %q", logged)
+	if !strings.Contains(logged, "local-only") || !strings.Contains(logged, "no cloud mutation was enqueued") {
+		t.Errorf("expected actionable local-only replication warning; got: %q", logged)
 	}
 }
 

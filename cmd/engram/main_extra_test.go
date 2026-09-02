@@ -16,17 +16,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/internal/cloud"
-	"github.com/Gentleman-Programming/engram/internal/cloud/autosync"
-	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
-	"github.com/Gentleman-Programming/engram/internal/cloud/remote"
-	"github.com/Gentleman-Programming/engram/internal/mcp"
-	engramsrv "github.com/Gentleman-Programming/engram/internal/server"
-	"github.com/Gentleman-Programming/engram/internal/setup"
-	"github.com/Gentleman-Programming/engram/internal/store"
-	engramsync "github.com/Gentleman-Programming/engram/internal/sync"
-	"github.com/Gentleman-Programming/engram/internal/tui"
-	versioncheck "github.com/Gentleman-Programming/engram/internal/version"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/autosync"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/constants"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/remote"
+	"github.com/Gentleman-Programming/engram/v2/internal/mcp"
+	engramsrv "github.com/Gentleman-Programming/engram/v2/internal/server"
+	"github.com/Gentleman-Programming/engram/v2/internal/setup"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	engramsync "github.com/Gentleman-Programming/engram/v2/internal/sync"
+	"github.com/Gentleman-Programming/engram/v2/internal/tui"
+	versioncheck "github.com/Gentleman-Programming/engram/v2/internal/version"
 
 	tea "github.com/charmbracelet/bubbletea"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -681,20 +681,31 @@ func TestCloudEnrollReportsNormalizedProjectName(t *testing.T) {
 }
 
 func TestUpdateChecksSkipCriticalStartupCommands(t *testing.T) {
-	if shouldCheckForUpdates([]string{"mcp"}) {
-		t.Fatal("mcp startup must not run update check")
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "mcp", args: []string{"mcp"}},
+		{name: "serve", args: []string{"serve"}},
+		{name: "cloud serve", args: []string{"cloud", "serve"}},
+		{name: "protocol mode", args: []string{"protocol-mode", "claude-code"}},
+		{name: "version", args: []string{"version"}},
+		{name: "version short", args: []string{"-v"}},
+		{name: "version long", args: []string{"--version"}},
+		{name: "help", args: []string{"help"}},
+		{name: "help short", args: []string{"-h"}},
+		{name: "help long", args: []string{"--help"}},
+		{name: "tui", args: []string{"tui"}},
+		{name: "regular command", args: []string{"search", "query"}, want: true},
 	}
-	if shouldCheckForUpdates([]string{"serve"}) {
-		t.Fatal("serve startup must not run update check")
-	}
-	if shouldCheckForUpdates([]string{"cloud", "serve"}) {
-		t.Fatal("cloud serve startup must not run update check")
-	}
-	if shouldCheckForUpdates([]string{"protocol-mode", "claude-code"}) {
-		t.Fatal("protocol-mode startup must not run update check")
-	}
-	if !shouldCheckForUpdates([]string{"version"}) {
-		t.Fatal("normal commands should keep update output")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldCheckForUpdates(tt.args); got != tt.want {
+				t.Fatalf("shouldCheckForUpdates(%q) = %t, want %t", tt.args, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -2734,6 +2745,26 @@ func TestMainDispatchServeMCPAndTUI(t *testing.T) {
 	_, stderr, recovered = captureOutputAndRecover(t, func() { main() })
 	if recovered != nil || stderr != "" {
 		t.Fatalf("tui dispatch failed: panic=%v stderr=%q", recovered, stderr)
+	}
+}
+
+func TestMainTUISkipsOuterUpdateCheck(t *testing.T) {
+	stubRuntimeHooks(t)
+	t.Setenv("ENGRAM_DATA_DIR", t.TempDir())
+	withArgs(t, "engram", "tui")
+
+	checks := 0
+	checkForUpdates = func(string) versioncheck.CheckResult {
+		checks++
+		return versioncheck.CheckResult{Status: versioncheck.StatusUpToDate}
+	}
+
+	_, stderr, recovered := captureOutputAndRecover(t, func() { main() })
+	if recovered != nil || stderr != "" {
+		t.Fatalf("tui dispatch failed: panic=%v stderr=%q", recovered, stderr)
+	}
+	if checks != 0 {
+		t.Fatalf("outer tui update checks = %d, want 0", checks)
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,8 +27,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	projectpkg "github.com/Gentleman-Programming/engram/internal/project"
-	"github.com/Gentleman-Programming/engram/internal/timeutil"
+	projectpkg "github.com/Gentleman-Programming/engram/v2/internal/project"
+	"github.com/Gentleman-Programming/engram/v2/internal/timeutil"
 	sqlite "modernc.org/sqlite"
 )
 
@@ -851,6 +852,7 @@ func (s *Store) migrate() error {
 			type,
 			project,
 			topic_key,
+			tokenize='trigram',
 			content='observations',
 			content_rowid='id'
 		);
@@ -879,6 +881,7 @@ func (s *Store) migrate() error {
 		CREATE VIRTUAL TABLE IF NOT EXISTS prompts_fts USING fts5(
 			content,
 			project,
+			tokenize='trigram',
 			content='user_prompts',
 			content_rowid='id'
 		);
@@ -967,6 +970,9 @@ func (s *Store) migrate() error {
 	}
 
 	if err := s.addColumnIfNotExists("user_prompts", "sync_id", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.migrateFTS(); err != nil {
 		return err
 	}
 
@@ -1143,74 +1149,11 @@ func (s *Store) migrate() error {
 		return err
 	}
 
-	// Create triggers to keep FTS in sync (idempotent check)
-	var name string
-	err := s.db.QueryRow(
-		"SELECT name FROM sqlite_master WHERE type='trigger' AND name='obs_fts_insert'",
-	).Scan(&name)
-
-	if err == sql.ErrNoRows {
-		triggers := `
-			CREATE TRIGGER obs_fts_insert AFTER INSERT ON observations BEGIN
-				INSERT INTO observations_fts(rowid, title, content, tool_name, type, project, topic_key)
-				VALUES (new.id, new.title, new.content, new.tool_name, new.type, new.project, new.topic_key);
-			END;
-
-			CREATE TRIGGER obs_fts_delete AFTER DELETE ON observations BEGIN
-				INSERT INTO observations_fts(observations_fts, rowid, title, content, tool_name, type, project, topic_key)
-				VALUES ('delete', old.id, old.title, old.content, old.tool_name, old.type, old.project, old.topic_key);
-			END;
-
-			CREATE TRIGGER obs_fts_update AFTER UPDATE ON observations BEGIN
-				INSERT INTO observations_fts(observations_fts, rowid, title, content, tool_name, type, project, topic_key)
-				VALUES ('delete', old.id, old.title, old.content, old.tool_name, old.type, old.project, old.topic_key);
-				INSERT INTO observations_fts(rowid, title, content, tool_name, type, project, topic_key)
-				VALUES (new.id, new.title, new.content, new.tool_name, new.type, new.project, new.topic_key);
-			END;
-		`
-		if _, err := s.execHook(s.db, triggers); err != nil {
-			return err
-		}
-	}
-
-	if err := s.migrateFTSTopicKey(); err != nil {
-		return err
-	}
 	if err := s.withTx(func(tx *sql.Tx) error {
 		_, err := s.execHook(tx, `UPDATE observations SET project = CAST(project AS TEXT) WHERE typeof(project) = 'blob'`)
 		return err
 	}); err != nil {
 		return err
-	}
-
-	// Prompts FTS triggers (separate idempotent check)
-	var promptTrigger string
-	err = s.db.QueryRow(
-		"SELECT name FROM sqlite_master WHERE type='trigger' AND name='prompt_fts_insert'",
-	).Scan(&promptTrigger)
-
-	if err == sql.ErrNoRows {
-		promptTriggers := `
-			CREATE TRIGGER prompt_fts_insert AFTER INSERT ON user_prompts BEGIN
-				INSERT INTO prompts_fts(rowid, content, project)
-				VALUES (new.id, new.content, new.project);
-			END;
-
-			CREATE TRIGGER prompt_fts_delete AFTER DELETE ON user_prompts BEGIN
-				INSERT INTO prompts_fts(prompts_fts, rowid, content, project)
-				VALUES ('delete', old.id, old.content, old.project);
-			END;
-
-			CREATE TRIGGER prompt_fts_update AFTER UPDATE ON user_prompts BEGIN
-				INSERT INTO prompts_fts(prompts_fts, rowid, content, project)
-				VALUES ('delete', old.id, old.content, old.project);
-				INSERT INTO prompts_fts(rowid, content, project)
-				VALUES (new.id, new.content, new.project);
-			END;
-		`
-		if _, err := s.execHook(s.db, promptTriggers); err != nil {
-			return err
-		}
 	}
 
 	// Phase 3: add republish CLI, surface dead rows via mem_status.
@@ -1771,6 +1714,9 @@ func (s *Store) evaluateCloudUpgradeLegacyMutationTx(tx *sql.Tx, mutation SyncMu
 		finding.Message = msg
 		return cloudUpgradeLegacyMutationEvaluation{finding: finding, hasIssue: true, canRepair: false}
 	}
+	if base.Project == "" || base.Project != mutation.Project {
+		return blocked(UpgradeReasonBlockedLegacyMutationManual, "mutation project must be non-empty and canonical for cloud transport and cannot be inferred from authoritative local state"), nil
+	}
 
 	if payload == "" {
 		return blocked(UpgradeReasonBlockedLegacyMutationManual, "legacy mutation payload is empty"), nil
@@ -2221,53 +2167,197 @@ func normalizeUpgradeRepairClass(class string) string {
 	}
 }
 
-func (s *Store) migrateFTSTopicKey() error {
-	var colCount int
-	err := s.db.QueryRow("SELECT COUNT(*) FROM pragma_table_xinfo('observations_fts') WHERE name = 'topic_key'").Scan(&colCount)
-	if err != nil || colCount > 0 {
-		return nil
-	}
+const observationsFTSDefinition = `
+	CREATE VIRTUAL TABLE observations_fts USING fts5(
+		title,
+		content,
+		tool_name,
+		type,
+		project,
+		topic_key,
+		tokenize='trigram',
+		content='observations',
+		content_rowid='id'
+	);
+`
 
-	if _, err := s.execHook(s.db, `
-		DROP TRIGGER IF EXISTS obs_fts_insert;
-		DROP TRIGGER IF EXISTS obs_fts_update;
-		DROP TRIGGER IF EXISTS obs_fts_delete;
-		DROP TABLE IF EXISTS observations_fts;
-		CREATE VIRTUAL TABLE observations_fts USING fts5(
-			title,
-			content,
-			tool_name,
-			type,
-			project,
-			topic_key,
-			content='observations',
-			content_rowid='id'
-		);
+const promptsFTSDefinition = `
+	CREATE VIRTUAL TABLE prompts_fts USING fts5(
+		content,
+		project,
+		tokenize='trigram',
+		content='user_prompts',
+		content_rowid='id'
+	);
+`
+
+const observationsFTSTriggers = `
+	CREATE TRIGGER obs_fts_insert AFTER INSERT ON observations
+	WHEN new.deleted_at IS NULL BEGIN
 		INSERT INTO observations_fts(rowid, title, content, tool_name, type, project, topic_key)
-		SELECT id, title, content, tool_name, type, project, topic_key
-		FROM observations
-		WHERE deleted_at IS NULL;
+		VALUES (new.id, new.title, new.content, new.tool_name, new.type, new.project, new.topic_key);
+	END;
 
-		CREATE TRIGGER obs_fts_insert AFTER INSERT ON observations BEGIN
-			INSERT INTO observations_fts(rowid, title, content, tool_name, type, project, topic_key)
-			VALUES (new.id, new.title, new.content, new.tool_name, new.type, new.project, new.topic_key);
-		END;
+	CREATE TRIGGER obs_fts_delete BEFORE DELETE ON observations
+	WHEN old.deleted_at IS NULL BEGIN
+		DELETE FROM observations_fts WHERE rowid = old.id;
+	END;
 
-		CREATE TRIGGER obs_fts_delete AFTER DELETE ON observations BEGIN
-			INSERT INTO observations_fts(observations_fts, rowid, title, content, tool_name, type, project, topic_key)
-			VALUES ('delete', old.id, old.title, old.content, old.tool_name, old.type, old.project, old.topic_key);
-		END;
+	CREATE TRIGGER obs_fts_update BEFORE UPDATE ON observations
+	WHEN old.deleted_at IS NULL BEGIN
+		DELETE FROM observations_fts WHERE rowid = old.id;
+	END;
 
-		CREATE TRIGGER obs_fts_update AFTER UPDATE ON observations BEGIN
-			INSERT INTO observations_fts(observations_fts, rowid, title, content, tool_name, type, project, topic_key)
-			VALUES ('delete', old.id, old.title, old.content, old.tool_name, old.type, old.project, old.topic_key);
-			INSERT INTO observations_fts(rowid, title, content, tool_name, type, project, topic_key)
-			VALUES (new.id, new.title, new.content, new.tool_name, new.type, new.project, new.topic_key);
-		END;
-	`); err != nil {
-		return fmt.Errorf("migrate fts topic_key: %w", err)
+	CREATE TRIGGER obs_fts_update_insert AFTER UPDATE ON observations
+	WHEN new.deleted_at IS NULL BEGIN
+		INSERT INTO observations_fts(rowid, title, content, tool_name, type, project, topic_key)
+		VALUES (new.id, new.title, new.content, new.tool_name, new.type, new.project, new.topic_key);
+	END;
+`
+
+const promptsFTSTriggers = `
+	CREATE TRIGGER prompt_fts_insert AFTER INSERT ON user_prompts BEGIN
+		INSERT INTO prompts_fts(rowid, content, project)
+		VALUES (new.id, new.content, new.project);
+	END;
+
+	CREATE TRIGGER prompt_fts_delete BEFORE DELETE ON user_prompts BEGIN
+		DELETE FROM prompts_fts WHERE rowid = old.id;
+	END;
+
+	CREATE TRIGGER prompt_fts_update BEFORE UPDATE ON user_prompts BEGIN
+		DELETE FROM prompts_fts WHERE rowid = old.id;
+	END;
+
+	CREATE TRIGGER prompt_fts_update_insert AFTER UPDATE ON user_prompts BEGIN
+		INSERT INTO prompts_fts(rowid, content, project)
+		VALUES (new.id, new.content, new.project);
+	END;
+`
+
+// migrateFTS upgrades older FTS tables and trigger definitions together. The
+// external-content rows must be removed before their source rows change; using
+// ordinary DELETE statements in BEFORE triggers avoids the trigram tokenizer's
+// unsafe special FTS5 'delete' command on recent SQLite versions.
+func (s *Store) migrateFTS() error {
+	return s.withTx(func(tx *sql.Tx) error {
+		observationsOK, err := ftsTableMatches(tx, "observations_fts", []string{"title", "content", "tool_name", "type", "project", "topic_key"}, "observations")
+		if err != nil {
+			return fmt.Errorf("inspect observations fts: %w", err)
+		}
+		promptsOK, err := ftsTableMatches(tx, "prompts_fts", []string{"content", "project"}, "user_prompts")
+		if err != nil {
+			return fmt.Errorf("inspect prompts fts: %w", err)
+		}
+
+		observationsRebuild := !observationsOK || !ftsTriggersMatch(tx, map[string][]string{
+			"obs_fts_insert":        {"afterinsertonobservations", "whennew.deleted_atisnull"},
+			"obs_fts_delete":        {"beforedeleteonobservations", "whenold.deleted_atisnull", "deletefromobservations_ftswhererowid=old.id"},
+			"obs_fts_update":        {"beforeupdateonobservations", "whenold.deleted_atisnull", "deletefromobservations_ftswhererowid=old.id"},
+			"obs_fts_update_insert": {"afterupdateonobservations", "whennew.deleted_atisnull"},
+		})
+		promptsRebuild := !promptsOK || !ftsTriggersMatch(tx, map[string][]string{
+			"prompt_fts_insert":        {"afterinsertonuser_prompts"},
+			"prompt_fts_delete":        {"beforedeleteonuser_prompts", "deletefromprompts_ftswhererowid=old.id"},
+			"prompt_fts_update":        {"beforeupdateonuser_prompts", "deletefromprompts_ftswhererowid=old.id"},
+			"prompt_fts_update_insert": {"afterupdateonuser_prompts"},
+		})
+
+		if observationsRebuild {
+			if _, err := s.execHook(tx, `
+				DROP TRIGGER IF EXISTS obs_fts_insert;
+				DROP TRIGGER IF EXISTS obs_fts_update_insert;
+				DROP TRIGGER IF EXISTS obs_fts_update;
+				DROP TRIGGER IF EXISTS obs_fts_delete;
+				DROP TABLE IF EXISTS observations_fts;
+			`+observationsFTSDefinition+observationsFTSTriggers+`
+				INSERT INTO observations_fts(rowid, title, content, tool_name, type, project, topic_key)
+				SELECT id, title, content, tool_name, type, project, topic_key
+				FROM observations
+				WHERE deleted_at IS NULL;
+			`); err != nil {
+				return fmt.Errorf("rebuild observations fts: %w", err)
+			}
+		}
+
+		if promptsRebuild {
+			if _, err := s.execHook(tx, `
+				DROP TRIGGER IF EXISTS prompt_fts_insert;
+				DROP TRIGGER IF EXISTS prompt_fts_update_insert;
+				DROP TRIGGER IF EXISTS prompt_fts_update;
+				DROP TRIGGER IF EXISTS prompt_fts_delete;
+				DROP TABLE IF EXISTS prompts_fts;
+			`+promptsFTSDefinition+promptsFTSTriggers+`
+				INSERT INTO prompts_fts(rowid, content, project)
+				SELECT id, content, project FROM user_prompts;
+			`); err != nil {
+				return fmt.Errorf("rebuild prompts fts: %w", err)
+			}
+		}
+		return nil
+	})
+}
+
+func ftsTableMatches(tx *sql.Tx, table string, expectedColumns []string, contentTable string) (bool, error) {
+	var ddl string
+	err := tx.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&ddl)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
 	}
-	return nil
+	if err != nil {
+		return false, err
+	}
+
+	rows, err := tx.Query(`SELECT name FROM pragma_table_xinfo(?) WHERE hidden = 0 ORDER BY cid`, table)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	var columns []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return false, err
+		}
+		columns = append(columns, name)
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	if !slices.Equal(columns, expectedColumns) {
+		return false, nil
+	}
+
+	normalized := normalizeFTSSQL(ddl)
+	return strings.Contains(normalized, "createvirtualtable"+table+"usingfts5(") &&
+		strings.Contains(normalized, "tokenize='trigram'") &&
+		strings.Contains(normalized, "content='"+contentTable+"'") &&
+		strings.Contains(normalized, "content_rowid='id'"), nil
+}
+
+func ftsTriggersMatch(tx *sql.Tx, expected map[string][]string) bool {
+	for name, fragments := range expected {
+		var ddl string
+		if err := tx.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?`, name).Scan(&ddl); err != nil {
+			return false
+		}
+		normalized := normalizeFTSSQL(ddl)
+		for _, fragment := range fragments {
+			if !strings.Contains(normalized, fragment) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func normalizeFTSSQL(ddl string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return -1
+		}
+		return unicode.ToLower(r)
+	}, ddl)
 }
 
 // ─── Sessions ────────────────────────────────────────────────────────────────
@@ -3166,23 +3256,28 @@ func (s *Store) SearchPrompts(query string, project string, limit int) ([]Prompt
 		limit = 10
 	}
 
-	ftsQuery := sanitizeFTS(query)
+	var sql string
+	var args []any
+	if hasShortFTSTerm(query) {
+		sql, args = buildPromptLIKEQuery(query, project, limit)
+	} else {
+		ftsQuery := sanitizeFTS(query)
+		sql = `
+			SELECT p.id, ifnull(p.sync_id, '') as sync_id, p.session_id, p.content, ifnull(p.project, '') as project, p.created_at
+			FROM prompts_fts fts
+			JOIN user_prompts p ON p.id = fts.rowid
+			WHERE prompts_fts MATCH ?
+		`
+		args = []any{ftsQuery}
 
-	sql := `
-		SELECT p.id, ifnull(p.sync_id, '') as sync_id, p.session_id, p.content, ifnull(p.project, '') as project, p.created_at
-		FROM prompts_fts fts
-		JOIN user_prompts p ON p.id = fts.rowid
-		WHERE prompts_fts MATCH ?
-	`
-	args := []any{ftsQuery}
+		if project != "" {
+			sql += " AND p.project = ?"
+			args = append(args, project)
+		}
 
-	if project != "" {
-		sql += " AND p.project = ?"
-		args = append(args, project)
+		sql += " ORDER BY fts.rank LIMIT ?"
+		args = append(args, limit)
 	}
-
-	sql += " ORDER BY fts.rank LIMIT ?"
-	args = append(args, limit)
 
 	rows, err := s.queryItHook(s.db, sql, args...)
 	if err != nil {
@@ -3687,15 +3782,20 @@ func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOpti
 		}
 	}
 
-	// Build FTS5 query: "all" (default) uses AND semantics; "any" uses OR for broader recall.
-	var ftsQuery string
-	if opts.MatchMode == "any" {
-		ftsQuery = sanitizeFTSCandidates(query)
+	var sqlQ string
+	var args []any
+	if hasShortFTSTerm(query) {
+		sqlQ, args = buildSearchLIKEQuery(query, opts, limit)
 	} else {
-		ftsQuery = sanitizeFTS(query)
+		// Build FTS5 query: "all" (default) uses AND semantics; "any" uses OR for broader recall.
+		var ftsQuery string
+		if opts.MatchMode == "any" {
+			ftsQuery = sanitizeFTSCandidates(query)
+		} else {
+			ftsQuery = sanitizeFTS(query)
+		}
+		sqlQ, args = buildSearchFTSQuery(ftsQuery, opts, limit)
 	}
-
-	sqlQ, args := buildSearchFTSQuery(ftsQuery, opts, limit)
 	rows, err := s.queryItContextHook(ctx, sqlQ, args...)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -3776,6 +3876,94 @@ func buildSearchFTSQuery(ftsQuery string, opts SearchOptions, limit int) (string
 	}
 
 	sqlQ += " ORDER BY rank LIMIT ?"
+	return sqlQ, append(args, limit)
+}
+
+// hasShortFTSTerm identifies the only queries trigram FTS5 cannot satisfy.
+// Those terms use a bounded, escaped base-table fallback instead of changing
+// normal FTS ranking or treating every search as a LIKE scan.
+func hasShortFTSTerm(query string) bool {
+	for _, term := range searchTerms(query) {
+		if utf8.RuneCountInString(term) < 3 {
+			return true
+		}
+	}
+	return false
+}
+
+func searchTerms(query string) []string {
+	var terms []string
+	for _, term := range strings.Fields(query) {
+		term = strings.Trim(term, `"`)
+		if term != "" {
+			terms = append(terms, term)
+		}
+	}
+	return terms
+}
+
+func escapeLIKE(term string) string {
+	term = strings.ReplaceAll(term, `\`, `\\`)
+	term = strings.ReplaceAll(term, `%`, `\%`)
+	return strings.ReplaceAll(term, `_`, `\_`)
+}
+
+func buildSearchLIKEQuery(query string, opts SearchOptions, limit int) (string, []any) {
+	sqlQ := `
+		SELECT o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
+		       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.review_after, o.pinned, o.created_at, o.updated_at, o.deleted_at,
+		       0.0 AS rank
+		FROM observations o
+		WHERE o.deleted_at IS NULL
+	`
+	args := []any{}
+	termGroups := make([]string, 0)
+	for _, term := range searchTerms(query) {
+		termGroups = append(termGroups, `(o.title LIKE ? ESCAPE '\' OR o.content LIKE ? ESCAPE '\' OR o.tool_name LIKE ? ESCAPE '\' OR o.type LIKE ? ESCAPE '\' OR o.project LIKE ? ESCAPE '\' OR o.topic_key LIKE ? ESCAPE '\')`)
+		pattern := "%" + escapeLIKE(term) + "%"
+		for range 6 {
+			args = append(args, pattern)
+		}
+	}
+	joiner := " AND "
+	if opts.MatchMode == "any" {
+		joiner = " OR "
+	}
+	sqlQ += " AND (" + strings.Join(termGroups, joiner) + ")"
+	if opts.Type != "" {
+		sqlQ += " AND o.type = ?"
+		args = append(args, opts.Type)
+	}
+	if opts.Project != "" {
+		sqlQ += " AND LOWER(o.project) = ?"
+		args = append(args, opts.Project)
+	}
+	if opts.Scope != "" {
+		sqlQ += " AND o.scope = ?"
+		args = append(args, normalizeScope(opts.Scope))
+	}
+	sqlQ += " ORDER BY datetime(o.updated_at) DESC, o.id DESC LIMIT ?"
+	return sqlQ, append(args, limit)
+}
+
+func buildPromptLIKEQuery(query, project string, limit int) (string, []any) {
+	sqlQ := `
+		SELECT p.id, ifnull(p.sync_id, '') as sync_id, p.session_id, p.content, ifnull(p.project, '') as project, p.created_at
+		FROM user_prompts p
+		WHERE `
+	args := []any{}
+	termGroups := make([]string, 0)
+	for _, term := range searchTerms(query) {
+		termGroups = append(termGroups, `(p.content LIKE ? ESCAPE '\' OR p.project LIKE ? ESCAPE '\')`)
+		pattern := "%" + escapeLIKE(term) + "%"
+		args = append(args, pattern, pattern)
+	}
+	sqlQ += "(" + strings.Join(termGroups, " AND ") + ")"
+	if project != "" {
+		sqlQ += " AND p.project = ?"
+		args = append(args, project)
+	}
+	sqlQ += " ORDER BY p.created_at DESC, p.id DESC LIMIT ?"
 	return sqlQ, append(args, limit)
 }
 
@@ -4235,6 +4423,39 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 	// Import observations (use new IDs — AUTOINCREMENT, skip duplicate sync IDs)
 	for _, obs := range data.Observations {
 		syncID := normalizeExistingSyncID(obs.SyncID, "obs")
+		existing, lookupErr := s.getObservationBySyncIDTx(tx, syncID, true)
+		if lookupErr != nil && lookupErr != sql.ErrNoRows {
+			return nil, fmt.Errorf("import observation %d: %w", obs.ID, lookupErr)
+		}
+		if lookupErr == nil {
+			// Import snapshots use timestamp ordering. A missing timestamp cannot
+			// prove that the incoming snapshot is newer, so leave the local row
+			// untouched in that case as well.
+			incoming := normalizeComparableTimestamp(obs.UpdatedAt)
+			current := normalizeComparableTimestamp(existing.UpdatedAt)
+			if incoming == "" || current == "" || incoming <= current {
+				result.ObservationsSkippedStale++
+				continue
+			}
+			createdAt := obs.CreatedAt
+			if normalizeComparableTimestamp(createdAt) == "" {
+				createdAt = existing.CreatedAt
+			}
+			revisionCount := obs.RevisionCount
+			if revisionCount <= 0 {
+				revisionCount = existing.RevisionCount
+			}
+			duplicateCount := obs.DuplicateCount
+			if duplicateCount <= 0 {
+				duplicateCount = existing.DuplicateCount
+			}
+			if _, err := s.execHook(tx, `UPDATE observations SET session_id = ?, type = ?, title = ?, content = ?, tool_name = CAST(? AS TEXT), project = ?, scope = ?, topic_key = ?, normalized_hash = ?, revision_count = ?, duplicate_count = ?, last_seen_at = ?, review_after = ?, created_at = ?, updated_at = ?, deleted_at = ? WHERE id = ?`,
+				obs.SessionID, obs.Type, obs.Title, obs.Content, obs.ToolName, obs.Project, normalizeScope(obs.Scope), nullableString(normalizeTopicKey(derefString(obs.TopicKey))), hashNormalized(obs.Content), revisionCount, duplicateCount, obs.LastSeenAt, obs.ReviewAfter, createdAt, obs.UpdatedAt, obs.DeletedAt, existing.ID); err != nil {
+				return nil, fmt.Errorf("import observation %d: %w", obs.ID, err)
+			}
+			result.ObservationsUpdated++
+			continue
+		}
 		res, err := s.execHook(tx,
 			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, review_after, created_at, updated_at, deleted_at)
 			 SELECT ?, ?, ?, ?, ?, ?, CAST(? AS TEXT), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
@@ -4267,15 +4488,28 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 
 	// Import prompts
 	for _, p := range data.Prompts {
-		_, err := s.execHook(tx,
+		syncID := normalizeExistingSyncID(p.SyncID, "prompt")
+		var tombstoneDeletedAt string
+		if err := tx.QueryRow(`SELECT deleted_at FROM prompt_tombstones WHERE sync_id = ?`, syncID).Scan(&tombstoneDeletedAt); err == nil {
+			if isStalePromptUpsert(syncPromptPayload{CreatedAt: p.CreatedAt}, tombstoneDeletedAt) {
+				continue
+			}
+			if _, err := s.execHook(tx, `DELETE FROM prompt_tombstones WHERE sync_id = ?`, syncID); err != nil {
+				return nil, fmt.Errorf("import prompt %d: remove tombstone: %w", p.ID, err)
+			}
+		} else if err != sql.ErrNoRows {
+			return nil, fmt.Errorf("import prompt %d: %w", p.ID, err)
+		}
+		res, err := s.execHook(tx,
 			`INSERT INTO user_prompts (sync_id, session_id, content, project, created_at)
-			 VALUES (?, ?, ?, ?, ?)`,
-			normalizeExistingSyncID(p.SyncID, "prompt"), p.SessionID, p.Content, p.Project, p.CreatedAt,
+			 SELECT ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM user_prompts WHERE sync_id = ?)`,
+			syncID, p.SessionID, p.Content, p.Project, p.CreatedAt, syncID,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("import prompt %d: %w", p.ID, err)
 		}
-		result.PromptsImported++
+		n, _ := res.RowsAffected()
+		result.PromptsImported += int(n)
 	}
 
 	if err := s.commitHook(tx); err != nil {
@@ -4286,9 +4520,11 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 }
 
 type ImportResult struct {
-	SessionsImported     int `json:"sessions_imported"`
-	ObservationsImported int `json:"observations_imported"`
-	PromptsImported      int `json:"prompts_imported"`
+	SessionsImported         int `json:"sessions_imported"`
+	ObservationsImported     int `json:"observations_imported"`
+	ObservationsUpdated      int `json:"observations_updated"`
+	ObservationsSkippedStale int `json:"observations_skipped_stale"`
+	PromptsImported          int `json:"prompts_imported"`
 }
 
 // ─── Sync Chunk Tracking ─────────────────────────────────────────────────────
@@ -4441,7 +4677,8 @@ func (s *Store) ListPendingSyncMutationsAfterSeq(targetKey string, afterSeq int6
 // QuarantineIrreparableSyncMutations explicitly disposes of pending mutations
 // the existing legacy validator proves cannot be repaired from local state.
 // It never acknowledges, rewrites, or deletes a mutation.
-func (s *Store) QuarantineIrreparableSyncMutations(project string, apply bool) (SyncMutationQuarantineReport, error) {
+func (s *Store) QuarantineIrreparableSyncMutations(targetKey, project string, apply bool) (SyncMutationQuarantineReport, error) {
+	targetKey = normalizeSyncTargetKey(targetKey)
 	project, _ = NormalizeProject(project)
 	project = strings.TrimSpace(project)
 	report := SyncMutationQuarantineReport{Project: project, Applied: apply, Actions: []SyncMutationQuarantineAction{}}
@@ -4450,7 +4687,7 @@ func (s *Store) QuarantineIrreparableSyncMutations(project string, apply bool) (
 		quarantinedAny := false
 		query := `SELECT seq, target_key, entity, entity_key, op, payload, source, project, occurred_at, acked_at
 			FROM sync_mutations WHERE target_key = ? AND acked_at IS NULL AND disposition = 'pending'`
-		args := []any{DefaultSyncTargetKey}
+		args := []any{targetKey}
 		if project != "" {
 			query += ` AND project = ?`
 			args = append(args, project)
@@ -4482,7 +4719,7 @@ func (s *Store) QuarantineIrreparableSyncMutations(project string, apply bool) (
 			if !apply {
 				continue
 			}
-			result, err := s.execHook(tx, `UPDATE sync_mutations SET disposition = 'quarantined', disposition_reason = ?, disposition_evidence = ?, disposition_at = datetime('now') WHERE target_key = ? AND seq = ? AND acked_at IS NULL AND disposition = 'pending'`, action.ReasonCode, action.Evidence, DefaultSyncTargetKey, action.Seq)
+			result, err := s.execHook(tx, `UPDATE sync_mutations SET disposition = 'quarantined', disposition_reason = ?, disposition_evidence = ?, disposition_at = datetime('now') WHERE target_key = ? AND seq = ? AND acked_at IS NULL AND disposition = 'pending'`, action.ReasonCode, action.Evidence, targetKey, action.Seq)
 			if err != nil {
 				return err
 			}
@@ -4508,12 +4745,14 @@ func (s *Store) QuarantineIrreparableSyncMutations(project string, apply bool) (
 		if !apply || !quarantinedAny {
 			return nil
 		}
-		if err := s.refreshSyncLifecycleTx(tx, DefaultSyncTargetKey); err != nil {
+		if err := s.refreshSyncLifecycleTx(tx, targetKey); err != nil {
 			return err
 		}
-		for affectedProject := range affectedProjects {
-			if err := s.refreshProjectSyncLifecycleTx(tx, affectedProject); err != nil {
-				return err
+		if targetKey == DefaultSyncTargetKey {
+			for affectedProject := range affectedProjects {
+				if err := s.refreshProjectSyncLifecycleTx(tx, affectedProject); err != nil {
+					return err
+				}
 			}
 		}
 		return nil
@@ -6346,9 +6585,13 @@ func (s *Store) DeleteProject(project string, hardDelete bool) (*DeleteProjectRe
 
 		// 3. Delete sessions — only when hard-deleting, because observation rows
 		//    reference sessions via a NOT NULL FK and soft-deleted rows are still
-		//    present in the table.
+		//    present in the table. Keep sessions referenced by either table, even
+		//    when the remaining rows belong to another project.
 		if hardDelete {
-			res, err = s.execHook(tx, `DELETE FROM sessions WHERE project = ?`, project)
+			res, err = s.execHook(tx, `DELETE FROM sessions
+				WHERE project = ?
+				  AND NOT EXISTS (SELECT 1 FROM observations WHERE observations.session_id = sessions.id)
+				  AND NOT EXISTS (SELECT 1 FROM user_prompts WHERE user_prompts.session_id = sessions.id)`, project)
 			if err != nil {
 				return fmt.Errorf("delete project: delete sessions: %w", err)
 			}
@@ -6559,9 +6802,11 @@ func (s *Store) enqueueMissingLocalMutationTx(tx *sql.Tx, entity, entityKey stri
 	return true, nil
 }
 
-// projectNeedsBackfill returns true when a project has any sessions, live observations,
-// or prompts that are missing a corresponding sync_mutation row.
-// It runs three lightweight COUNT queries — no cursor is held open.
+// projectNeedsBackfill returns true when a project has any backfillable source
+// row missing its corresponding sync_mutation row. It runs lightweight COUNT
+// queries — no cursor is held open. The predicates mirror the six backfill
+// sources: sessions, live/deleted observations, live/tombstoned prompts, and
+// eligible relations.
 func (s *Store) projectNeedsBackfill(project string) (bool, error) {
 	type countQuery struct {
 		q    string
@@ -6595,6 +6840,17 @@ func (s *Store) projectNeedsBackfill(project string) (bool, error) {
 			args: []any{project, project, DefaultSyncTargetKey, SyncEntityObservation, SyncSourceLocal},
 		},
 		{
+			q: `SELECT COUNT(*) FROM observations o
+			    LEFT JOIN sessions s ON s.id = o.session_id
+			    WHERE (ifnull(o.project,'') = ? OR (ifnull(o.project,'') = '' AND ifnull(s.project,'') = ?))
+			      AND o.deleted_at IS NOT NULL
+			      AND NOT EXISTS (
+			        SELECT 1 FROM sync_mutations sm
+			        WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = o.sync_id AND sm.op = ? AND sm.source = ?
+			      )`,
+			args: []any{project, project, DefaultSyncTargetKey, SyncEntityObservation, SyncOpDelete, SyncSourceLocal},
+		},
+		{
 			q: `SELECT COUNT(*) FROM user_prompts p
 			    LEFT JOIN sessions s ON s.id = p.session_id
 			    WHERE (ifnull(p.project,'') = ? OR (ifnull(p.project,'') = '' AND ifnull(s.project,'') = ?))
@@ -6603,6 +6859,16 @@ func (s *Store) projectNeedsBackfill(project string) (bool, error) {
 			        WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = p.sync_id AND sm.source = ?
 			      )`,
 			args: []any{project, project, DefaultSyncTargetKey, SyncEntityPrompt, SyncSourceLocal},
+		},
+		{
+			q: `SELECT COUNT(*) FROM prompt_tombstones p
+			    LEFT JOIN sessions s ON s.id = p.session_id
+			    WHERE (ifnull(p.project,'') = ? OR (ifnull(p.project,'') = '' AND ifnull(s.project,'') = ?))
+			      AND NOT EXISTS (
+			        SELECT 1 FROM sync_mutations sm
+			        WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = p.sync_id AND sm.source = ? AND sm.op = ?
+			      )`,
+			args: []any{project, project, DefaultSyncTargetKey, SyncEntityPrompt, SyncSourceLocal, SyncOpDelete},
 		},
 		{
 			// Count only fully-judged relations (not orphaned, not pending, with
@@ -6639,6 +6905,74 @@ func (s *Store) projectNeedsBackfill(project string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// enrolledProjectsNeedingBackfill discovers all enrolled projects with at least
+// one journal row missing from the corresponding backfill SELECT. Keeping this
+// as one set-based query avoids running the detector once per enrolled project;
+// the actual backfill remains per-project and transactional.
+func (s *Store) enrolledProjectsNeedingBackfill() ([]string, error) {
+	rows, err := s.db.Query(`
+		SELECT ep.project
+		FROM sync_enrolled_projects ep
+		JOIN (
+			SELECT x.project
+			FROM sessions x
+			WHERE trim(x.id, ?) != ''
+			  AND NOT EXISTS (SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = x.id AND sm.source = ?)
+			UNION
+			SELECT coalesce(nullif(x.project, ''), ifnull(xs.project, ''))
+			FROM observations x LEFT JOIN sessions xs ON xs.id = x.session_id
+			WHERE x.deleted_at IS NULL
+			  AND NOT EXISTS (SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = x.sync_id AND sm.source = ?)
+			UNION
+			SELECT coalesce(nullif(x.project, ''), ifnull(xs.project, ''))
+			FROM observations x LEFT JOIN sessions xs ON xs.id = x.session_id
+			WHERE x.deleted_at IS NOT NULL
+			  AND NOT EXISTS (SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = x.sync_id AND sm.op = ? AND sm.source = ?)
+			UNION
+			SELECT coalesce(nullif(x.project, ''), ifnull(xs.project, ''))
+			FROM user_prompts x LEFT JOIN sessions xs ON xs.id = x.session_id
+			WHERE NOT EXISTS (SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = x.sync_id AND sm.source = ?)
+			UNION
+			SELECT coalesce(nullif(x.project, ''), ifnull(xs.project, ''))
+			FROM prompt_tombstones x LEFT JOIN sessions xs ON xs.id = x.session_id
+			WHERE NOT EXISTS (SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = x.sync_id AND sm.source = ? AND sm.op = ?)
+			UNION
+			SELECT coalesce(nullif(src.project, ''), src_s.project, '')
+			FROM memory_relations r
+			JOIN observations src ON src.sync_id = r.source_id AND src.deleted_at IS NULL
+			JOIN observations tgt ON tgt.sync_id = r.target_id AND tgt.deleted_at IS NULL
+			LEFT JOIN sessions src_s ON src_s.id = src.session_id
+			WHERE r.judgment_status NOT IN (?, ?)
+			  AND ifnull(r.marked_by_actor, '') != ''
+			  AND ifnull(r.marked_by_kind, '') != ''
+			  AND NOT EXISTS (SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = r.sync_id AND sm.source = ?)
+		) candidates ON candidates.project = ep.project
+		ORDER BY ep.project ASC`,
+		sqlWhitespaceTrimSet, DefaultSyncTargetKey, SyncEntitySession, SyncSourceLocal,
+		DefaultSyncTargetKey, SyncEntityObservation, SyncSourceLocal,
+		DefaultSyncTargetKey, SyncEntityObservation, SyncOpDelete, SyncSourceLocal,
+		DefaultSyncTargetKey, SyncEntityPrompt, SyncSourceLocal,
+		DefaultSyncTargetKey, SyncEntityPrompt, SyncSourceLocal, SyncOpDelete,
+		JudgmentStatusOrphaned, JudgmentStatusPending, DefaultSyncTargetKey, SyncEntityRelation, SyncSourceLocal,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var projects []string
+	for rows.Next() {
+		var project string
+		if err := rows.Scan(&project); err != nil {
+			return nil, err
+		}
+		projects = append(projects, project)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return projects, nil
 }
 
 // EnsureEnrolledProjectSyncMutations repairs legacy enrolled-project journal
@@ -6691,36 +7025,13 @@ func (s *Store) EnsureEnrolledProjectSyncMutations(ctx context.Context) error {
 }
 
 func (s *Store) repairEnrolledProjectSyncMutations() error {
-	// Collect enrolled projects outside a transaction so we avoid holding a read
-	// cursor open while we later write inside backfillProjectSyncMutationsTx.
-	rows, err := s.db.Query(`SELECT project FROM sync_enrolled_projects ORDER BY project ASC`)
+	// Discover projects outside transactions; each selected project is still
+	// repaired atomically by the existing per-project backfill transaction.
+	projects, err := s.enrolledProjectsNeedingBackfill()
 	if err != nil {
 		return err
 	}
-	var projects []string
-	for rows.Next() {
-		var project string
-		if err := rows.Scan(&project); err != nil {
-			return closeRowsWithError(rows, err)
-		}
-		projects = append(projects, project)
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-
 	for _, project := range projects {
-		// Fast path: if the project is already fully backfilled, skip the write tx entirely.
-		needs, err := s.projectNeedsBackfill(project)
-		if err != nil {
-			return err
-		}
-		if !needs {
-			continue
-		}
 		if err := s.withTx(func(tx *sql.Tx) error {
 			return s.backfillProjectSyncMutationsTx(tx, project)
 		}); err != nil {
@@ -7996,21 +8307,19 @@ func (s *Store) applyPromptDeleteTx(tx *sql.Tx, payload syncPromptPayload) error
 
 func isStalePromptUpsert(payload syncPromptPayload, tombstoneDeletedAt string) bool {
 	upsertTime := normalizeComparableTimestamp(payload.CreatedAt)
-	if strings.TrimSpace(upsertTime) == "" {
+	tombstoneTime := normalizeComparableTimestamp(tombstoneDeletedAt)
+	if upsertTime == "" || tombstoneTime == "" {
 		return true
 	}
-	return upsertTime <= normalizeComparableTimestamp(tombstoneDeletedAt)
+	return upsertTime <= tombstoneTime
 }
 
 func normalizeComparableTimestamp(value string) string {
-	trimmed := strings.TrimSpace(value)
-	if trimmed == "" {
+	parsed, err := parseObservationTime(value)
+	if err != nil {
 		return ""
 	}
-	if parsed, err := time.Parse(time.RFC3339, trimmed); err == nil {
-		return parsed.UTC().Format("2006-01-02 15:04:05")
-	}
-	return trimmed
+	return parsed.UTC().Format("2006-01-02 15:04:05.000000000")
 }
 
 func parseObservationTime(value string) (time.Time, error) {

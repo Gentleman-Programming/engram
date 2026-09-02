@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/internal/cloud"
-	cloudauth "github.com/Gentleman-Programming/engram/internal/cloud/auth"
-	"github.com/Gentleman-Programming/engram/internal/cloud/cloudstore"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud"
+	cloudauth "github.com/Gentleman-Programming/engram/v2/internal/cloud/auth"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/cloudstore"
 )
 
 // fakeCloudBootstrapStore is an in-memory cloudBootstrapStore double so CLI

@@ -218,8 +218,17 @@ engram setup opencode
 This does three things:
 
 1. Copies the plugin to `~/.config/opencode/plugins/engram.ts` (session tracking, Memory Protocol, compaction recovery)
-2. Adds the `engram` MCP server entry to your `opencode.json` with `--tools=agent` (15 agent-facing tools)
+2. Adds the `engram` MCP server entry to your `opencode.json` with `--tools=agent` (18 agent-facing tools)
 3. Adds `opencode-subagent-statusline` to your `tui.json` or `tui.jsonc` so OpenCode shows sub-agent activity in the sidebar/home footer
+
+### Verify each layer after setup
+
+`engram setup opencode` confirms only that it wrote the plugin and, when no warning was printed, the OpenCode MCP registration. It cannot confirm that OpenCode connected to the server or that an already-running agent session exposes the tools.
+
+1. Restart OpenCode, then run `opencode mcp list`. Confirm that OpenCode reports the `engram` server as connected. This verifies the client/server connection, not tool exposure in an agent session.
+2. Start a **new** OpenCode agent session and confirm that it can use an `engram_mem_*` tool before relying on Engram. A connected server, HTTP health check, or successful `engram setup` does not by itself prove that tools are visible in the active agent session.
+
+If the server is connected but the new session does not expose Engram tools, restart OpenCode and create another new session. Engram cannot directly inspect or verify the tool exposure of the active OpenCode agent session.
 
 The plugin auto-starts the HTTP server if needed for session tracking. If your environment blocks background processes, run it manually:
 
@@ -229,7 +238,7 @@ engram serve &
 
 > **Windows**: OpenCode uses `~/.config/opencode/` on Windows too (it does not read `%APPDATA%\opencode\`). `engram setup opencode` writes to `~/.config/opencode/plugins/` and `~/.config/opencode/opencode.json`. To run the server in the background: `Start-Process engram -ArgumentList "serve" -WindowStyle Hidden` (PowerShell) or just run `engram serve` in a separate terminal.
 
-**Alternative: Manual MCP-only setup** (no plugin, all 19 tools by default):
+**Alternative: Manual MCP-only setup** (no plugin, all 22 tools by default):
 
 Add to your `opencode.json` (global: `~/.config/opencode/opencode.json` on all platforms, or project-level):
 
@@ -281,7 +290,7 @@ engram setup claude-code
 
 During setup, Engram also attempts to write durable user-level MCP config to `~/.claude/mcp/engram.json` using the absolute `engram` binary path; if that write is not possible, setup warns and continues. You'll be asked whether to add engram's agent-profile MCP tools to `~/.claude/settings.json` `permissions.allow`. The setup writes entries for both the durable user-level MCP server id (`mcp__engram__...`) and the plugin-scoped server id used by older Claude Code plugin installs, so re-running setup repairs stale or incomplete allowlists without adding startup delay.
 
-**Option C: Bare MCP** — all 19 tools by default, no session management:
+**Option C: Bare MCP** — all 22 tools by default, no session management:
 
 Add to your `.claude/settings.json` (project) or `~/.claude/settings.json` (global):
 

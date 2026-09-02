@@ -42,6 +42,7 @@
           {
             "type": "command",
             "command": "\"${PLUGIN_ROOT}/scripts/subagent-stop.sh\"",
+            "commandWindows": "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"${PLUGIN_ROOT}\\scripts\\subagent-stop.ps1\"",
             "timeout": 10
           }
         ]

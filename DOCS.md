@@ -14,7 +14,7 @@ This is the complete technical reference for Engram. For getting started, see th
 | --------------------------------------------------------- | ------------------------------------------------------------ |
 | [Database Schema](#database-schema)                       | Tables, FTS5, SQLite config                                  |
 | [HTTP API](#http-api-endpoints)                           | All REST endpoints with request/response details             |
-| [MCP Tools](#mcp-tools-20-tools)                          | Detailed reference for all 20 memory tools                   |
+| [MCP Tools](#mcp-tools-22-tools)                          | Detailed reference for all 22 memory tools                   |
 | [MCP Project Resolution](#mcp-project-resolution)         | Auto-detection algorithm, response envelope, tool categories |
 | [Memory Protocol](#memory-protocol)                       | When/how agents should use the tools                         |
 | [Project Name Normalization](#project-name-normalization) | Auto-detection, normalization, similar-project warnings      |
@@ -487,6 +487,8 @@ Response:
 
 ### Environment Variables
 
+Release update checks are skipped for `version`, `--version`, `-v`, `help`, `--help`, and `-h`. `engram tui` performs its single update check from inside the TUI. Set `ENGRAM_NO_UPDATE_CHECK=1` to disable every update check, including the TUI check.
+
 | Variable                        | Description                                                                                                                                                                                                                                               | Default              |
 | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
 | `ENGRAM_DATA_DIR`               | Override data directory                                                                                                                                                                                                                                   | `~/.engram`          |
@@ -495,6 +497,7 @@ Response:
 | `ENGRAM_HTTP_TOKEN`             | Optional Bearer auth for the local HTTP server. When set, `DELETE /sessions/{id}`, `DELETE /observations/{id}`, `DELETE /prompts/{id}`, `GET /export`, and `POST /import` require `Authorization: Bearer <token>`. `POST /projects/rescue-ownership` (and deprecated alias `POST /projects/migrate`) always requires a configured token and matching Bearer credential. Comparison is constant-time. Token is read at request time (no restart needed). Other routes remain open when unset (zero-config default). Ownership repair never depends on this token: `engram projects rescue-ownership` performs the same repair against the local store. | (unset — HTTP rescue route not served; CLI repair still available) |
 | `ENGRAM_TIMEZONE`               | Timezone for timestamp display in the TUI and cloud dashboard. Accepts any IANA zone name (e.g. `America/New_York`, `Europe/Berlin`). Falls back to system local time when unset or invalid.                                                               | system local         |
 | `ENGRAM_AGENT_CLI`              | LLM runner name used by `engram conflicts scan --semantic` and the HTTP `/conflicts/scan` endpoint. Accepted values: `claude`, `opencode`.                                                                                                                | (unset)              |
+| `ENGRAM_NO_UPDATE_CHECK`        | Set to `1` to disable GitHub release update checks for every caller, including the TUI. `true`, `yes`, and `on` are also accepted.                                                                                                                       | (unset — eligible commands check for updates) |
 | `ENGRAM_CLOUD_AUTOSYNC`         | Set to `1` to enable background autosync. Requires `ENGRAM_CLOUD_TOKEN` and `ENGRAM_CLOUD_SERVER` to also be set.                                                                                                                                         | (unset — disabled)   |
 | `ENGRAM_CLOUD_SERVER`           | Cloud server URL used by the autosync manager and `engram sync --cloud`.                                                                                                                                                                                  | (unset)              |
 | `ENGRAM_DATABASE_URL`           | Postgres DSN for `engram cloud serve`.                                                                                                                                                                                                                    | (unset)              |
@@ -856,7 +859,7 @@ Returns success even when cwd is ambiguous — empty `project` + non-empty `avai
 
 ---
 
-## MCP Tools (20 tools)
+## MCP Tools (22 tools)
 
 ### mem_search
 
@@ -924,6 +927,14 @@ Delete an observation by ID. Uses soft-delete by default (`deleted_at`); optiona
 
 Save user prompts — records what the user asked so future sessions have context about user goals. It applies the same post-redaction byte limit and truncation metadata as `mem_save`; `mem_save_prompt` warns when it truncates.
 When called in the same MCP process, this also feeds process-local current prompt context used by later `mem_save` calls with `capture_prompt=true`. The same MCP process lifecycle must receive the prompt context before the later save; prompt capture is best-effort and `mem_save` still succeeds when no context is available.
+
+### mem_pin
+
+Pin a local observation so it appears before recent observations in memory context. Pinned state is local to this device and is not synced.
+
+### mem_unpin
+
+Unpin a local observation so it only appears in normal recency order. Pinned state is local to this device and is not synced.
 
 ### mem_context
 
