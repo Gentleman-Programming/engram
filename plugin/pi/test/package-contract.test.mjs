@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 // Regression test for https://github.com/Gentleman-Programming/engram/issues/853
 //
@@ -16,6 +20,21 @@ const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url),
 const indexSource = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
 
 const PI_TUI = "@earendil-works/pi-tui";
+const PACKAGE_NAME = "npm:gentle-engram@0.1.11";
+const LEGACY_PACKAGE_NAME = "npm:gentle-engram@0.1.8";
+const MCP_ADAPTER_PACKAGE = "npm:pi-mcp-adapter";
+const CLI_PATH = fileURLToPath(new URL("../cli.js", import.meta.url));
+
+function runCli(agentDir, ...args) {
+	return execFileSync(process.execPath, [CLI_PATH, ...args], {
+		encoding: "utf8",
+		env: { ...process.env, PI_CODING_AGENT_DIR: agentDir },
+	});
+}
+
+function readPackages(agentDir) {
+	return JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8")).packages;
+}
 
 /**
  * Minimal range check for the peer declaration contract. Supports the range forms the
@@ -97,4 +116,37 @@ test("the peer declaration stays justified by actual pi-tui usage", () => {
 		/from "@earendil-works\/pi-tui"/,
 		"index.ts imports pi-tui; if that import is ever removed, drop the peer dependency too",
 	);
+});
+
+test("pi-engram init adds the current package and help names its install command", () => {
+	const agentDir = mkdtempSync(join(tmpdir(), "engram-pi-cli-"));
+	try {
+		const output = runCli(agentDir, "init");
+		assert.deepEqual(readPackages(agentDir), [MCP_ADAPTER_PACKAGE, PACKAGE_NAME]);
+		assert.match(output, new RegExp(`Added ${PACKAGE_NAME} in settings\\.json`));
+		assert.match(runCli(agentDir), new RegExp(`pi install ${PACKAGE_NAME}`));
+	} finally {
+		rmSync(agentDir, { recursive: true, force: true });
+	}
+});
+
+test("pi-engram init replaces legacy package entries without disturbing other packages", () => {
+	const agentDir = mkdtempSync(join(tmpdir(), "engram-pi-cli-"));
+	try {
+		writeFileSync(
+			join(agentDir, "settings.json"),
+			JSON.stringify({ packages: ["npm:existing", LEGACY_PACKAGE_NAME, PACKAGE_NAME, LEGACY_PACKAGE_NAME, MCP_ADAPTER_PACKAGE] }),
+		);
+
+		const output = runCli(agentDir, "init");
+		assert.deepEqual(readPackages(agentDir), ["npm:existing", PACKAGE_NAME, MCP_ADAPTER_PACKAGE]);
+		assert.match(output, new RegExp(`Added ${PACKAGE_NAME} in settings\\.json`));
+
+		const settingsAfterMigration = readFileSync(join(agentDir, "settings.json"), "utf8");
+		const repeatOutput = runCli(agentDir, "init");
+		assert.equal(readFileSync(join(agentDir, "settings.json"), "utf8"), settingsAfterMigration);
+		assert.match(repeatOutput, new RegExp(`Kept ${PACKAGE_NAME} in settings\\.json`));
+	} finally {
+		rmSync(agentDir, { recursive: true, force: true });
+	}
 });

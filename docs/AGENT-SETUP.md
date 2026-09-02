@@ -44,14 +44,14 @@ Install Engram's Pi package, the MCP adapter, and Pi MCP config:
 engram setup pi
 ```
 
-`engram setup pi` runs `pi install npm:gentle-engram@0.1.8` and `pi install npm:pi-mcp-adapter`, then ensures Pi settings contain both packages and writes `mcpServers.engram` in the Pi agent MCP config when no Engram server is already configured. Existing `mcpServers.engram` entries are preserved.
+`engram setup pi` runs `pi install npm:gentle-engram@0.1.11` and `pi install npm:pi-mcp-adapter`, then ensures Pi settings contain both packages and writes `mcpServers.engram` in the Pi agent MCP config when no Engram server is already configured. Existing `mcpServers.engram` entries are preserved.
 
 When [mise](https://mise.jdx.dev/) is detected in `PATH`, `engram setup pi` also auto-pins `npmCommand` in Pi's `settings.json` to `["mise", "exec", "node@<version>", "--", "npm"]`, preventing Node version drift from silently changing which npm root Pi uses. If `npmCommand` already exists in `settings.json`, the existing value is preserved. This step is a no-op when mise is not installed.
 
 Manual equivalent:
 
 ```bash
-pi install npm:gentle-engram@0.1.8
+pi install npm:gentle-engram@0.1.11
 pi install npm:pi-mcp-adapter
 pi-engram init
 ```
