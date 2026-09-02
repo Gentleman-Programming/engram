@@ -8,6 +8,12 @@
 </p>
 
 <p align="center">
+  <a href="https://engram.gentlemanprogramming.com/"><strong>Website</strong></a> &bull;
+  <a href="https://gentle-ai.gentlemanprogramming.com/"><strong>Gentle-AI</strong></a> &bull;
+  <a href="https://gentle-ai-wiki.gentlemanprogramming.com/"><strong>Gentle-AI Wiki</strong></a>
+</p>
+
+<p align="center">
   <a href="docs/INSTALLATION.md">Installation</a> &bull;
   <a href="docs/engram-cloud/README.md">Engram Cloud</a> &bull;
   <a href="docs/AGENT-SETUP.md">Agent Setup</a> &bull;
