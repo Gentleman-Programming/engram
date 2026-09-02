@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -272,6 +273,12 @@ func TestUpdateInstructions(t *testing.T) {
 	msg := updateInstructions()
 	if msg == "" {
 		t.Fatal("expected non-empty update instructions")
+	}
+	if runtime.GOOS != "darwin" && !strings.Contains(msg, "github.com/Gentleman-Programming/engram/v2/cmd/engram@latest") {
+		t.Fatalf("update instructions = %q, want v2 Go install command", msg)
+	}
+	if runtime.GOOS != "linux" && !strings.Contains(msg, "https://github.com/Gentleman-Programming/engram/releases/latest") {
+		t.Fatalf("update instructions = %q, want canonical GitHub Releases URL", msg)
 	}
 }
 

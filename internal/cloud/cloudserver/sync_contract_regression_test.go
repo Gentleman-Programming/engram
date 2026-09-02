@@ -9,7 +9,7 @@ import (
 	"sort"
 	"testing"
 
-	engramsync "github.com/Gentleman-Programming/engram/internal/sync"
+	engramsync "github.com/Gentleman-Programming/engram/v2/internal/sync"
 )
 
 // This file locks down the /sync/* route table and wire schemas as they existed
