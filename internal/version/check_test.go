@@ -23,6 +23,31 @@ func TestNormalizeVersion(t *testing.T) {
 	}
 }
 
+func TestUpdateCheckDisabled(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{name: "unset", value: "", want: false},
+		{name: "one", value: "1", want: true},
+		{name: "true", value: "true", want: true},
+		{name: "yes", value: "yes", want: true},
+		{name: "on", value: "on", want: true},
+		{name: "case and whitespace", value: " TRUE ", want: true},
+		{name: "other value", value: "0", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(EnvNoUpdateCheck, tt.value)
+			if got := updateCheckDisabled(); got != tt.want {
+				t.Fatalf("updateCheckDisabled() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSplitVersion(t *testing.T) {
 	tests := []struct {
 		in   string
@@ -60,6 +85,26 @@ func TestIsNewer(t *testing.T) {
 }
 
 func TestCheckLatest(t *testing.T) {
+	t.Run("opt out skips the HTTP transport for a released version", func(t *testing.T) {
+		t.Setenv("ENGRAM_NO_UPDATE_CHECK", "1")
+
+		calls := 0
+		oldClient := httpClient
+		httpClient = &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			calls++
+			return nil, fmt.Errorf("update check transport should not run")
+		})}
+		t.Cleanup(func() { httpClient = oldClient })
+
+		result := CheckLatest("1.10.7")
+		if calls != 0 {
+			t.Fatalf("HTTP transport calls = %d, want 0", calls)
+		}
+		if result != (CheckResult{}) {
+			t.Fatalf("result = %+v, want empty result", result)
+		}
+	})
+
 	t.Run("dev and empty versions fail honestly", func(t *testing.T) {
 		result := CheckLatest("dev")
 		if result.Status != StatusCheckFailed {
@@ -168,6 +213,12 @@ func TestCheckLatest(t *testing.T) {
 			t.Fatalf("message = %q", result.Message)
 		}
 	})
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 func TestCheckLatestUsesGitHubToken(t *testing.T) {

@@ -588,7 +588,7 @@ func TestCmdDoctorRepairDefaultsSourceObservationRepairToDryRun(t *testing.T) {
 	}
 }
 
-func TestCmdDoctorRepairQuarantinesOnlyIrreparableMutations(t *testing.T) {
+func TestCmdDoctorRepairQuarantinesInvalidEmptyProjectMutations(t *testing.T) {
 	cfg := testConfig(t)
 	s, err := store.New(cfg)
 	if err != nil {
@@ -606,7 +606,7 @@ func TestCmdDoctorRepairQuarantinesOnlyIrreparableMutations(t *testing.T) {
 		t.Fatalf("dry-run stderr=%q", dryErr)
 	}
 	dry := decodeRepairPlan(t, dryOut)
-	if dry["applied"] != false || len(dry["actions"].([]any)) != 1 {
+	if dry["applied"] != false || len(dry["actions"].([]any)) != 2 {
 		t.Fatalf("dry-run=%v", dry)
 	}
 
@@ -616,7 +616,7 @@ func TestCmdDoctorRepairQuarantinesOnlyIrreparableMutations(t *testing.T) {
 		t.Fatalf("apply stderr=%q", applyErr)
 	}
 	applied := decodeRepairPlan(t, applyOut)
-	if applied["applied"] != true || len(applied["actions"].([]any)) != 1 {
+	if applied["applied"] != true || len(applied["actions"].([]any)) != 2 {
 		t.Fatalf("apply=%v", applied)
 	}
 	db, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
@@ -631,7 +631,7 @@ func TestCmdDoctorRepairQuarantinesOnlyIrreparableMutations(t *testing.T) {
 	if err := db.QueryRow(`SELECT disposition FROM sync_mutations WHERE entity_key = 'later'`).Scan(&later); err != nil {
 		t.Fatalf("read later: %v", err)
 	}
-	if poison != store.SyncMutationDispositionQuarantined || later != store.SyncMutationDispositionPending {
+	if poison != store.SyncMutationDispositionQuarantined || later != store.SyncMutationDispositionQuarantined {
 		t.Fatalf("dispositions poison=%q later=%q", poison, later)
 	}
 }
