@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/internal/cloudconfig"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloudconfig"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
