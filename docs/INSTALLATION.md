@@ -37,12 +37,20 @@ brew update && brew upgrade engram
 
 **Option A: Install via `go install` (recommended for technical users)**
 
-If you have Go installed, this is the cleanest and most trustworthy path — the binary is compiled on your machine from source, so no antivirus will flag it:
+If you have Go installed, this is the cleanest and most trustworthy path — the binary is compiled on your machine from source, so no antivirus will flag it.
+
+Two paths exist because Go's [Semantic Import Versioning](https://go.dev/ref/mod#major-version-suffixes) rule appends `/v2` (and above) to the module path starting at major version 2. Pick the line that matches the major version you want:
 
 ```powershell
+# Stable line (v1.x — recommended for production; currently tracks @v1.20.0)
 go install github.com/Gentleman-Programming/engram/cmd/engram@latest
+
+# v2 line (release candidates and future v2.x stable; currently @v2.0.0-rc.3)
+go install github.com/Gentleman-Programming/engram/v2/cmd/engram@latest
 # Binary goes to %GOPATH%\bin\engram.exe (typically %USERPROFILE%\go\bin\)
 ```
+
+For the v2 line, `@latest` resolves to the highest non-prerelease tag (none yet — once `v2.0.0` ships it will point there). Pin to a specific RC with `@v2.0.0-rc.3` if you want the latest prerelease.
 
 Ensure `%GOPATH%\bin` (or `%USERPROFILE%\go\bin`) is on your `PATH`.
 
@@ -119,11 +127,23 @@ Expand-Archive engram_*_windows_amd64.zip -DestinationPath "$env:USERPROFILE\bin
 
 ## Install from source (macOS / Linux)
 
+Pick the line that matches the major version you want — the `/v2` suffix exists starting at major version 2 because of Go's [Semantic Import Versioning](https://go.dev/ref/mod#major-version-suffixes) rule:
+
+```bash
+# Stable line (v1.x — recommended for production; currently tracks @v1.20.0)
+go install github.com/Gentleman-Programming/engram/cmd/engram@latest
+
+# v2 line (release candidates and future v2.x stable; currently @v2.0.0-rc.3)
+go install github.com/Gentleman-Programming/engram/v2/cmd/engram@latest
+# Binary goes to $GOPATH/bin (typically ~/go/bin/)
+```
+
+Or build from a local clone:
+
 ```bash
 git clone https://github.com/Gentleman-Programming/engram.git
 cd engram
 go install ./cmd/engram
-# Binary goes to $GOPATH/bin (typically ~/go/bin/)
 ```
 
 > **Want a real version string instead of `dev`?**
