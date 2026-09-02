@@ -88,18 +88,22 @@ Background mutation-based replication for `engram serve` and `engram mcp`:
 - **feat(autosync):** `StopForUpgrade` / `ResumeAfterUpgrade` for upgrade-window pause without releasing the sync lease
 - **fix(autosync):** SIGTERM cancels context → `releaseLease()` deferred in `Run()` for graceful shutdown
 
-### BREAKING CHANGE: MCP write tools no longer accept a `project` field
+### MCP write-tool project selection (historical correction)
 
-The `project` argument has been removed from the JSON schemas of 7 MCP write tools:
-`mem_save`, `mem_save_prompt`, `mem_session_start`, `mem_session_end`, `mem_session_summary`, `mem_capture_passive`, `mem_update`.
+An earlier version of this changelog incorrectly stated that MCP write tools
+removed or discarded the `project` field. That statement is not the current
+contract. Current-project writes may use an explicit project override where the
+tool schema supports it; `mem_session_end` and `mem_capture_passive` continue
+to resolve their project from the current process context.
 
-**Before:** agents could pass `project: "my-project"` to write tools.
-**After:** the project is auto-detected from the server's working directory (cwd). Any `project` argument sent by the LLM is silently discarded.
+**Current behavior:** explicit project values are resolved and validated by the
+server for the supported write tools. When no override is supplied, Engram
+uses its normal process override and cwd-detection precedence.
 
 **Migration:**
 
-- Remove `project` from write tool calls in your agent's memory protocol.
-- Use `mem_current_project` (new tool) to inspect which project Engram will use before writing.
+- When no explicit project override is supplied, use `mem_current_project` to inspect which project Engram will use before writing; it reports cwd-based detection.
+- An explicit project override takes precedence over process and cwd detection. Invalid or unbacked explicit names fail without fallback.
 - If the cwd is ambiguous (multiple git repos), Engram returns a structured error with `available_projects`. Navigate to one of the repos before writing.
 - Read tools (`mem_search`, `mem_context`, `mem_timeline`, `mem_get_observation`, `mem_stats`) still accept an optional `project` override — validated against the store.
 

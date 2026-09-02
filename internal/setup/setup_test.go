@@ -866,6 +866,9 @@ func TestInstallOpenCodeSuccessAndMCPRegistered(t *testing.T) {
 	if result.Files != 3 {
 		t.Fatalf("expected 3 files after MCP + TUI registration, got %d", result.Files)
 	}
+	if !result.MCPConfigured {
+		t.Fatal("expected successful OpenCode install to report MCP configuration")
+	}
 
 	pluginPath := filepath.Join(xdg, "opencode", "plugins", "engram.ts")
 	if _, err := os.Stat(pluginPath); err != nil {
@@ -958,6 +961,9 @@ func TestInstallOpenCodeMCPInjectionFailureIsNonFatal(t *testing.T) {
 	if result.Files != 2 {
 		t.Fatalf("expected plugin file + TUI config when MCP injection fails, got %d", result.Files)
 	}
+	if result.MCPConfigured {
+		t.Fatal("expected failed OpenCode MCP injection to remain unconfigured")
+	}
 }
 
 func TestInstallOpenCodeTUIInjectionFailureIsNonFatal(t *testing.T) {
@@ -975,6 +981,39 @@ func TestInstallOpenCodeTUIInjectionFailureIsNonFatal(t *testing.T) {
 	}
 	if result.Files != 2 {
 		t.Fatalf("expected plugin file + MCP config when TUI injection fails, got %d", result.Files)
+	}
+	if !result.MCPConfigured {
+		t.Fatal("expected successful OpenCode MCP injection to report configuration")
+	}
+	if result.TUIPluginEnabled {
+		t.Fatal("expected failed OpenCode TUI injection to remain disabled")
+	}
+}
+
+func TestInstallOpenCodeBothInjectionFailuresAreNonFatal(t *testing.T) {
+	resetSetupSeams(t)
+	home := useTestHome(t)
+	runtimeGOOS = "linux"
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "xdg"))
+	injectOpenCodeMCPFn = func() error {
+		return errors.New("cannot write config")
+	}
+	injectOpenCodeTUIPluginFn = func() error {
+		return errors.New("cannot write tui config")
+	}
+
+	result, err := installOpenCode()
+	if err != nil {
+		t.Fatalf("expected both injection failures to be non-fatal, got %v", err)
+	}
+	if result.Files != 1 {
+		t.Fatalf("expected only the plugin file when both injections fail, got %d", result.Files)
+	}
+	if result.MCPConfigured {
+		t.Fatal("expected failed OpenCode MCP injection to remain unconfigured")
+	}
+	if result.TUIPluginEnabled {
+		t.Fatal("expected failed OpenCode TUI injection to remain disabled")
 	}
 }
 

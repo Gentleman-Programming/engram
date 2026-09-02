@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/internal/command"
+	"github.com/Gentleman-Programming/engram/v2/internal/command"
 )
 
 // ErrAmbiguousProject is returned when the working directory is a parent of

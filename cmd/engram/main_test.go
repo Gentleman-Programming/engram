@@ -16,13 +16,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/internal/mcp"
-	"github.com/Gentleman-Programming/engram/internal/obsidian"
-	"github.com/Gentleman-Programming/engram/internal/project"
-	"github.com/Gentleman-Programming/engram/internal/setup"
-	"github.com/Gentleman-Programming/engram/internal/store"
-	engramsync "github.com/Gentleman-Programming/engram/internal/sync"
-	versioncheck "github.com/Gentleman-Programming/engram/internal/version"
+	"github.com/Gentleman-Programming/engram/v2/internal/mcp"
+	"github.com/Gentleman-Programming/engram/v2/internal/obsidian"
+	"github.com/Gentleman-Programming/engram/v2/internal/project"
+	"github.com/Gentleman-Programming/engram/v2/internal/setup"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	engramsync "github.com/Gentleman-Programming/engram/v2/internal/sync"
+	versioncheck "github.com/Gentleman-Programming/engram/v2/internal/version"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
@@ -340,6 +340,12 @@ func TestPrintUsage(t *testing.T) {
 }
 
 func TestPrintPostInstall(t *testing.T) {
+	const (
+		mcpConfiguredMessage = "Configuration written: the OpenCode plugin and Engram MCP registration."
+		mcpManualMessage     = "Plugin written, but Engram MCP registration needs the manual configuration shown above."
+		toolGuidance         = "confirm it can use an `engram_mem_*` tool before relying on Engram."
+	)
+
 	tests := []struct {
 		name       string
 		result     *setup.Result
@@ -348,15 +354,27 @@ func TestPrintPostInstall(t *testing.T) {
 	}{
 		{
 			name:       "opencode with subagent monitor enabled",
-			result:     &setup.Result{Agent: "opencode", TUIPluginEnabled: true},
-			expects:    []string{"Restart OpenCode", "opencode-subagent-statusline", "auto-starts"},
-			notExpects: []string{"engram serve &"},
+			result:     &setup.Result{Agent: "opencode", MCPConfigured: true, TUIPluginEnabled: true},
+			expects:    []string{mcpConfiguredMessage, "opencode mcp list", toolGuidance, "cannot verify tool exposure", "opencode-subagent-statusline", "auto-starts"},
+			notExpects: []string{mcpManualMessage, "engram serve &"},
 		},
 		{
-			name:       "opencode with subagent monitor not enabled",
-			result:     &setup.Result{Agent: "opencode", TUIPluginEnabled: false},
-			expects:    []string{"Restart OpenCode", "auto-starts"},
-			notExpects: []string{"opencode-subagent-statusline", "engram serve &"},
+			name:       "opencode with MCP configured and subagent monitor disabled",
+			result:     &setup.Result{Agent: "opencode", MCPConfigured: true, TUIPluginEnabled: false},
+			expects:    []string{mcpConfiguredMessage, "opencode mcp list", toolGuidance, "cannot verify tool exposure", "auto-starts"},
+			notExpects: []string{mcpManualMessage, "opencode-subagent-statusline", "engram serve &"},
+		},
+		{
+			name:       "opencode with incomplete MCP registration and subagent monitor enabled",
+			result:     &setup.Result{Agent: "opencode", MCPConfigured: false, TUIPluginEnabled: true},
+			expects:    []string{mcpManualMessage, "opencode mcp list", toolGuidance, "cannot verify tool exposure", "opencode-subagent-statusline", "auto-starts"},
+			notExpects: []string{mcpConfiguredMessage, "engram serve &"},
+		},
+		{
+			name:       "opencode with incomplete MCP registration",
+			result:     &setup.Result{Agent: "opencode", MCPConfigured: false, TUIPluginEnabled: false},
+			expects:    []string{mcpManualMessage, "opencode mcp list", toolGuidance, "cannot verify tool exposure", "auto-starts"},
+			notExpects: []string{mcpConfiguredMessage, "opencode-subagent-statusline", "engram serve &"},
 		},
 		{
 			name:       "pi",
@@ -872,6 +890,15 @@ func TestCmdExportAndImport(t *testing.T) {
 	}
 	if !strings.Contains(importOut, "Imported from "+exportPath) {
 		t.Fatalf("unexpected import output: %q", importOut)
+	}
+	for _, want := range []string{
+		"  Sessions:",
+		"  Observations: 1 imported, 0 updated, 0 skipped stale",
+		"  Prompts:",
+	} {
+		if !strings.Contains(importOut, want) {
+			t.Fatalf("import output missing %q: %q", want, importOut)
+		}
 	}
 
 	s, err := store.New(targetCfg)
