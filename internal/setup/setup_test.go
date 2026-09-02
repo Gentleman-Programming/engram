@@ -2991,6 +2991,14 @@ func isolatedHookPath(t *testing.T) (string, []string) {
 		if err != nil {
 			t.Skipf("required hook tool %q is unavailable: %v", tool, err)
 		}
+		// Hardlink the resolved target, not the lookup path: link(2) does not follow
+		// symlinks, so a Homebrew-style relative symlink (curl -> ../Cellar/curl/x/bin/curl)
+		// would be hardlinked as-is and dangle once placed in the temp bin dir.
+		resolved, err := filepath.EvalSymlinks(toolPath)
+		if err != nil {
+			t.Fatalf("resolve hook tool %q at %q: %v", tool, toolPath, err)
+		}
+		toolPath = resolved
 		linkPath := filepath.Join(binDir, filepath.Base(toolPath))
 		if err := os.Link(toolPath, linkPath); err != nil {
 			if err := os.Symlink(toolPath, linkPath); err != nil {
