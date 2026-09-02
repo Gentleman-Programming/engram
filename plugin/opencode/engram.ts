@@ -46,6 +46,12 @@ const SESSION_ATTRIBUTED_WRITE_TOOLS = new Set([
   "mem_capture_passive",
 ])
 
+// OpenCode qualifies MCP tool IDs as <server>_<tool>; only normalize Engram's.
+function canonicalEngramToolName(tool: string): string {
+  const canonical = tool.toLowerCase()
+  return canonical.startsWith("engram_") ? canonical.slice("engram_".length) : canonical
+}
+
 // ─── Memory Instructions ─────────────────────────────────────────────────────
 // These get injected into the agent's context so it knows to call mem_save.
 
@@ -556,7 +562,7 @@ export const Engram: Plugin = async (ctx) => {
     // the passive capture endpoint so the server extracts learnings.
 
     "tool.execute.before": async (input, output) => {
-      if (!SESSION_ATTRIBUTED_WRITE_TOOLS.has(input.tool.toLowerCase())) return
+      if (!SESSION_ATTRIBUTED_WRITE_TOOLS.has(canonicalEngramToolName(input.tool))) return
       const authoritativeSessionID = await resolveAuthoritativeSessionID(input.sessionID)
       if (!authoritativeSessionID) {
         throw new Error(`gentle-engram could not resolve an authoritative OpenCode runtime session for ${input.tool}`)
@@ -574,7 +580,7 @@ export const Engram: Plugin = async (ctx) => {
     },
 
     "tool.execute.after": async (input, output) => {
-      if (ENGRAM_TOOLS.has(input.tool.toLowerCase())) return
+      if (ENGRAM_TOOLS.has(canonicalEngramToolName(input.tool))) return
 
       // input.sessionID comes from OpenCode — always available
       const sessionId = await resolveAuthoritativeSessionID(input.sessionID)
