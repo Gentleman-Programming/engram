@@ -11,10 +11,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/internal/cloud"
-	"github.com/Gentleman-Programming/engram/internal/cloud/chunkcodec"
-	"github.com/Gentleman-Programming/engram/internal/store"
-	engramsync "github.com/Gentleman-Programming/engram/internal/sync"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/chunkcodec"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	engramsync "github.com/Gentleman-Programming/engram/v2/internal/sync"
 	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -356,7 +356,7 @@ func (cs *CloudStore) indexChunkSessionsWith(ctx context.Context, execer chunkSe
 
 func materializedChunkMutations(project string, chunk engramsync.ChunkData) ([]MutationEntry, error) {
 	project = strings.TrimSpace(project)
-	entries := make([]MutationEntry, 0, len(chunk.Sessions)+len(chunk.Observations)+len(chunk.Prompts))
+	entries := make([]MutationEntry, 0, len(chunk.Sessions)+len(chunk.Observations)+len(chunk.Prompts)+len(chunk.Mutations))
 
 	for i, session := range chunk.Sessions {
 		entityKey := strings.TrimSpace(session.ID)
@@ -394,7 +394,58 @@ func materializedChunkMutations(project string, chunk engramsync.ChunkData) ([]M
 		entries = append(entries, MutationEntry{Project: project, Entity: store.SyncEntityPrompt, EntityKey: entityKey, Op: store.SyncOpUpsert, Payload: payload})
 	}
 
+	// Relations travel only as relation-entity entries in chunk.Mutations — there is no
+	// typed collection for them like Sessions/Observations/Prompts — so materialize them
+	// here to mirror the mutation-push path (#379).
+	//
+	// Session/observation/prompt UPSERTS are already materialized from the typed
+	// collections above, so they are skipped to avoid duplicate cloud_mutations rows.
+	// Their DELETES are not, and must be materialized here (#837): a hard-deleted row is
+	// gone locally, so it cannot ride in a typed collection at all, and a soft-deleted one
+	// only rides as an upsert carrying deleted_at, which a cloud_mutations replay reads as
+	// still present. Appending the delete after the typed entries gives it the higher seq,
+	// so the tombstone wins on replay.
+	for i, mutation := range chunk.Mutations {
+		entity := strings.TrimSpace(mutation.Entity)
+		op := strings.TrimSpace(mutation.Op)
+		if op == "" {
+			op = store.SyncOpUpsert
+		}
+		if !materializableChunkMutation(entity, op) {
+			continue
+		}
+		entityKey := strings.TrimSpace(mutation.EntityKey)
+		if entityKey == "" {
+			return nil, fmt.Errorf("cloudstore: materialize chunk: mutations[%d].entity_key is required for %s", i, entity)
+		}
+		payload := json.RawMessage(strings.TrimSpace(mutation.Payload))
+		if len(payload) == 0 {
+			payload = json.RawMessage("{}")
+		}
+		if entity == store.SyncEntityRelation {
+			if field, ok := chunkcodec.ValidateRelationPayload(payload); !ok {
+				return nil, fmt.Errorf("cloudstore: materialize chunk: mutations[%d].payload.%s is required for relation", i, field)
+			}
+		}
+		entries = append(entries, MutationEntry{Project: project, Entity: entity, EntityKey: entityKey, Op: op, Payload: payload})
+	}
+
 	return entries, nil
+}
+
+// materializableChunkMutation reports whether a chunk.Mutations entry still needs a
+// cloud_mutations row after the typed collections have been materialized.
+func materializableChunkMutation(entity, op string) bool {
+	switch entity {
+	case store.SyncEntityRelation:
+		// Relations have no typed collection, so every relation entry materializes.
+		return true
+	case store.SyncEntitySession, store.SyncEntityObservation, store.SyncEntityPrompt:
+		// Upserts already came from the typed collections; only tombstones are missing.
+		return op == store.SyncOpDelete
+	default:
+		return false
+	}
 }
 
 func insertMaterializedMutations(ctx context.Context, tx *sql.Tx, entries []MutationEntry) error {

@@ -24,7 +24,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Gentleman-Programming/engram/internal/mcp"
+	"github.com/Gentleman-Programming/engram/v2/internal/mcp"
 )
 
 var (
@@ -75,6 +75,7 @@ type Result struct {
 	Agent            string
 	Destination      string
 	Files            int
+	MCPConfigured    bool
 	TUIPluginEnabled bool
 }
 
@@ -176,7 +177,10 @@ Also search memory PROACTIVELY when:
 ### SESSION CLOSE PROTOCOL (mandatory)
 
 Before ending a session or saying "done" / "listo" / "that's it", you MUST:
-1. Call mem_session_summary with this structure:
+1. Call mem_session_summary with the structure below.
+2. Call mem_session_end with the active session id and an optional summary of work completed.
+
+mem_session_summary structure:
 
 ## Goal
 [What we were working on this session]
@@ -220,6 +224,14 @@ If you see a message about compaction or context reset, or if you see "FIRST ACT
 3. Only THEN continue working
 
 Do not skip step 1. Without it, everything done before compaction is lost from memory.
+`
+
+const geminiSessionCloseInstruction = `
+
+### GEMINI CLI SESSION CLOSE (mandatory)
+
+After mem_session_summary succeeds, call mem_session_end before closing the session.
+Do not call mem_session_end before mem_session_summary.
 `
 
 const codexCompactPromptMarkdown = `You are compacting a coding session that uses Engram persistent memory.
@@ -548,6 +560,7 @@ func installOpenCode() (*Result, error) {
 
 	// Register engram MCP server in opencode.json and the subagent monitor in tui.json.
 	files := 1
+	mcpConfigured := false
 	if err := injectOpenCodeMCPFn(); err != nil {
 		// Non-fatal: plugin works, MCP just needs manual config
 		cmd := resolveEngramCommand()
@@ -556,6 +569,7 @@ func installOpenCode() (*Result, error) {
 		fmt.Fprintf(os.Stderr, "  \"engram\": { \"type\": \"local\", \"command\": [%q, \"mcp\", \"--tools=agent\"], \"enabled\": true }\n", cmd)
 	} else {
 		files++
+		mcpConfigured = true
 	}
 
 	tuiEnabled := false
@@ -571,6 +585,7 @@ func installOpenCode() (*Result, error) {
 		Agent:            "opencode",
 		Destination:      dir,
 		Files:            files,
+		MCPConfigured:    mcpConfigured,
 		TUIPluginEnabled: tuiEnabled,
 	}, nil
 }
@@ -1114,7 +1129,7 @@ func writeGeminiSystemPrompt() error {
 		return fmt.Errorf("create gemini system prompt dir: %w", err)
 	}
 
-	if err := os.WriteFile(systemPath, []byte(memoryProtocolMarkdown), 0644); err != nil {
+	if err := os.WriteFile(systemPath, []byte(memoryProtocolMarkdown+geminiSessionCloseInstruction), 0644); err != nil {
 		return fmt.Errorf("write gemini system prompt: %w", err)
 	}
 

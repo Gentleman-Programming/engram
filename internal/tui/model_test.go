@@ -4,9 +4,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/Gentleman-Programming/engram/internal/setup"
-	"github.com/Gentleman-Programming/engram/internal/store"
-	"github.com/Gentleman-Programming/engram/internal/version"
+	"github.com/Gentleman-Programming/engram/v2/internal/setup"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	"github.com/Gentleman-Programming/engram/v2/internal/version"
 )
 
 type testFixture struct {
@@ -86,6 +86,31 @@ func TestNewInitializesModelDefaults(t *testing.T) {
 	}
 }
 
+func TestScreenCloudSettingsConstant(t *testing.T) {
+	if ScreenCloudSettings != ScreenSetup+1 {
+		t.Fatalf("ScreenCloudSettings = %d, want %d (ScreenSetup+1)", ScreenCloudSettings, ScreenSetup+1)
+	}
+
+	seen := map[Screen]bool{}
+	for _, s := range []Screen{
+		ScreenDashboard,
+		ScreenSearch,
+		ScreenSearchResults,
+		ScreenRecent,
+		ScreenObservationDetail,
+		ScreenTimeline,
+		ScreenSessions,
+		ScreenSessionDetail,
+		ScreenSetup,
+		ScreenCloudSettings,
+	} {
+		if seen[s] {
+			t.Fatalf("screen constant %d is duplicated", s)
+		}
+		seen[s] = true
+	}
+}
+
 func TestInitReturnsCommand(t *testing.T) {
 	m := New(newTestFixture(t).store, "")
 	if cmd := m.Init(); cmd == nil {
@@ -104,6 +129,19 @@ func TestDataLoadingCommands(t *testing.T) {
 		}
 		if loaded.result.Status != version.StatusCheckFailed {
 			t.Fatalf("status = %q, want %q", loaded.result.Status, version.StatusCheckFailed)
+		}
+	})
+
+	t.Run("checkForUpdate honors opt out", func(t *testing.T) {
+		t.Setenv(version.EnvNoUpdateCheck, "1")
+
+		msg := checkForUpdate("1.10.7")()
+		loaded, ok := msg.(updateCheckMsg)
+		if !ok {
+			t.Fatalf("message type = %T", msg)
+		}
+		if loaded.result != (version.CheckResult{}) {
+			t.Fatalf("result = %+v, want empty result", loaded.result)
 		}
 	})
 

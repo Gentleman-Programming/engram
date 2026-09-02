@@ -70,6 +70,7 @@ These run automatically and **all must pass** before merge:
 | **Check PR Has type:\* Label** | PR has exactly one `type:*` label | ⏳ |
 | **Unit Tests** | `go test ./...` passes | ⏳ |
 | **E2E Tests** | `go test -tags e2e ./internal/server/...` passes | ⏳ |
+| **Plugin Tests** | `npm test` passes in `plugin/pi` | ⏳ |
 
 ---
 
