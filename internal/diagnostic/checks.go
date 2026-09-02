@@ -6,9 +6,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
-	projectpkg "github.com/Gentleman-Programming/engram/internal/project"
-	"github.com/Gentleman-Programming/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/constants"
+	projectpkg "github.com/Gentleman-Programming/engram/v2/internal/project"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
 )
 
 const (
