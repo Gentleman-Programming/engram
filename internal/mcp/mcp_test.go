@@ -3170,6 +3170,208 @@ func TestServerInstructionsConstantIsNonEmpty(t *testing.T) {
 	}
 }
 
+func TestBuildServerInstructions_NilOrAll(t *testing.T) {
+	instructions := buildServerInstructions(nil)
+	if instructions == "" {
+		t.Fatal("buildServerInstructions(nil) returned empty string")
+	}
+
+	// Intro header
+	if !strings.Contains(instructions, "Engram provides persistent memory that survives across sessions and compactions.") {
+		t.Errorf("missing intro header in nil allowlist instructions")
+	}
+
+	// CORE tools
+	coreTools := []string{
+		"mem_save", "mem_search", "mem_context", "mem_session_summary",
+		"mem_get_observation", "mem_save_prompt", "mem_current_project", "mem_judge", "mem_compare",
+	}
+	for _, tool := range coreTools {
+		if !strings.Contains(instructions, tool) {
+			t.Errorf("expected core tool %q in nil allowlist instructions", tool)
+		}
+	}
+
+	// DEFERRED tools (both agent and admin)
+	deferredTools := []string{
+		"mem_update", "mem_review", "mem_pin", "mem_unpin", "mem_suggest_topic_key",
+		"mem_session_start", "mem_session_end", "mem_doctor", "mem_capture_passive",
+		"mem_stats", "mem_delete", "mem_timeline", "mem_merge_projects",
+	}
+	for _, tool := range deferredTools {
+		if !strings.Contains(instructions, tool) {
+			t.Errorf("expected deferred tool %q in nil allowlist instructions", tool)
+		}
+	}
+
+	// Proactive save rule & conflict surfacing
+	if !strings.Contains(instructions, "PROACTIVE SAVE RULE:") {
+		t.Errorf("expected PROACTIVE SAVE RULE in nil allowlist instructions")
+	}
+	if !strings.Contains(instructions, "## CONFLICT SURFACING") {
+		t.Errorf("expected CONFLICT SURFACING in nil allowlist instructions")
+	}
+}
+
+func TestBuildServerInstructions_ProfileAgent(t *testing.T) {
+	instructions := buildServerInstructions(ProfileAgent)
+
+	// CORE tools should all be present
+	coreTools := []string{
+		"mem_save", "mem_search", "mem_context", "mem_session_summary",
+		"mem_get_observation", "mem_save_prompt", "mem_current_project", "mem_judge", "mem_compare",
+	}
+	for _, tool := range coreTools {
+		if !strings.Contains(instructions, tool) {
+			t.Errorf("expected core tool %q in agent instructions", tool)
+		}
+	}
+
+	// Agent deferred tools present
+	agentDeferred := []string{
+		"mem_update", "mem_review", "mem_pin", "mem_unpin", "mem_suggest_topic_key",
+		"mem_session_start", "mem_session_end", "mem_doctor", "mem_capture_passive",
+	}
+	for _, tool := range agentDeferred {
+		if !strings.Contains(instructions, tool) {
+			t.Errorf("expected agent deferred tool %q in agent instructions", tool)
+		}
+	}
+
+	// Conflict surfacing and proactive save rule present
+	if !strings.Contains(instructions, "## CONFLICT SURFACING") {
+		t.Errorf("expected CONFLICT SURFACING in agent instructions")
+	}
+	if !strings.Contains(instructions, "PROACTIVE SAVE RULE:") {
+		t.Errorf("expected PROACTIVE SAVE RULE in agent instructions")
+	}
+
+	// Admin tools MUST NOT be advertised in agent instructions
+	adminTools := []string{"mem_stats", "mem_delete", "mem_timeline", "mem_merge_projects"}
+	for _, tool := range adminTools {
+		if strings.Contains(instructions, tool) {
+			t.Errorf("admin tool %q MUST NOT be advertised in agent instructions", tool)
+		}
+	}
+}
+
+func TestBuildServerInstructions_ProfileAdmin(t *testing.T) {
+	instructions := buildServerInstructions(ProfileAdmin)
+
+	// Admin tools should be present in deferred
+	adminTools := []string{"mem_stats", "mem_delete", "mem_timeline", "mem_merge_projects"}
+	for _, tool := range adminTools {
+		if !strings.Contains(instructions, tool) {
+			t.Errorf("expected admin tool %q in admin instructions", tool)
+		}
+	}
+
+	// CORE TOOLS, PROACTIVE SAVE RULE, CONFLICT SURFACING should NOT be present
+	if strings.Contains(instructions, "CORE TOOLS (always available") {
+		t.Errorf("admin instructions should not include CORE TOOLS section")
+	}
+	if strings.Contains(instructions, "PROACTIVE SAVE RULE:") {
+		t.Errorf("admin instructions should not include PROACTIVE SAVE RULE")
+	}
+	if strings.Contains(instructions, "## CONFLICT SURFACING") {
+		t.Errorf("admin instructions should not include CONFLICT SURFACING section")
+	}
+
+	// Agent-only deferred tools should NOT be present
+	agentOnly := []string{"mem_review", "mem_doctor", "mem_compare", "mem_capture_passive"}
+	for _, tool := range agentOnly {
+		if strings.Contains(instructions, tool) {
+			t.Errorf("agent tool %q should not be in admin instructions", tool)
+		}
+	}
+}
+
+func TestBuildServerInstructions_CustomAndConditional(t *testing.T) {
+	t.Run("only mem_save and mem_update", func(t *testing.T) {
+		allowlist := map[string]bool{
+			"mem_save":   true,
+			"mem_update": true,
+		}
+		instructions := buildServerInstructions(allowlist)
+
+		if !strings.Contains(instructions, "CORE TOOLS") {
+			t.Errorf("expected CORE TOOLS section when mem_save is present")
+		}
+		if !strings.Contains(instructions, "mem_save — ") {
+			t.Errorf("expected mem_save in CORE TOOLS")
+		}
+		if strings.Contains(instructions, "mem_search") {
+			t.Errorf("mem_search should not be present in custom instructions")
+		}
+
+		if !strings.Contains(instructions, "DEFERRED TOOLS") {
+			t.Errorf("expected DEFERRED TOOLS section when mem_update is present")
+		}
+		if !strings.Contains(instructions, "mem_update") {
+			t.Errorf("expected mem_update in DEFERRED TOOLS")
+		}
+		if strings.Contains(instructions, "mem_review") {
+			t.Errorf("mem_review should not be present in custom instructions")
+		}
+
+		if !strings.Contains(instructions, "PROACTIVE SAVE RULE:") {
+			t.Errorf("expected PROACTIVE SAVE RULE when mem_save is present")
+		}
+		if strings.Contains(instructions, "## CONFLICT SURFACING") {
+			t.Errorf("conflict surfacing should not be present when mem_judge is absent")
+		}
+	})
+
+	t.Run("only mem_judge", func(t *testing.T) {
+		allowlist := map[string]bool{
+			"mem_judge": true,
+		}
+		instructions := buildServerInstructions(allowlist)
+
+		if !strings.Contains(instructions, "CORE TOOLS") {
+			t.Errorf("CORE TOOLS should be present when mem_judge (core, eager) is registered")
+		}
+		if !strings.Contains(instructions, "mem_judge — ") {
+			t.Errorf("expected mem_judge in CORE TOOLS when registered")
+		}
+		if strings.Contains(instructions, "DEFERRED TOOLS") {
+			t.Errorf("DEFERRED TOOLS should be absent when no deferred tools are registered")
+		}
+		if strings.Contains(instructions, "PROACTIVE SAVE RULE:") {
+			t.Errorf("PROACTIVE SAVE RULE should be absent when mem_save is absent")
+		}
+		if strings.Contains(instructions, "## CONFLICT SURFACING") {
+			t.Errorf("CONFLICT SURFACING should be absent when mem_save is absent")
+		}
+		if strings.Contains(instructions, "mem_save") {
+			t.Errorf("mem_save should not be mentioned when it is not registered")
+		}
+	})
+
+	t.Run("mem_save and mem_judge", func(t *testing.T) {
+		allowlist := map[string]bool{
+			"mem_save":  true,
+			"mem_judge": true,
+		}
+		instructions := buildServerInstructions(allowlist)
+
+		if !strings.Contains(instructions, "## CONFLICT SURFACING") {
+			t.Errorf("CONFLICT SURFACING should be present when mem_save and mem_judge are registered")
+		}
+		if !strings.Contains(instructions, "After mem_save:") {
+			t.Errorf("conflict guidance should mention mem_save when it is registered")
+		}
+	})
+
+	t.Run("empty allowlist", func(t *testing.T) {
+		instructions := buildServerInstructions(map[string]bool{})
+		expected := "Engram provides persistent memory that survives across sessions and compactions."
+		if instructions != expected {
+			t.Errorf("empty allowlist should only produce header, got %q", instructions)
+		}
+	})
+}
+
 // ─── Tool Annotations ────────────────────────────────────────────────────────
 
 func TestCoreToolsAreNotDeferred(t *testing.T) {
@@ -3179,7 +3381,7 @@ func TestCoreToolsAreNotDeferred(t *testing.T) {
 
 	coreTools := []string{
 		"mem_save", "mem_search", "mem_context", "mem_session_summary",
-		"mem_get_observation", "mem_save_prompt",
+		"mem_get_observation", "mem_save_prompt", "mem_judge", "mem_compare",
 	}
 	for _, name := range coreTools {
 		tool := tools[name]
@@ -4981,6 +5183,215 @@ func TestMemSave_MissingSessionIDFailsLoudly(t *testing.T) {
 	wrongResults, _ := s.Search("missing session should fail", store.SearchOptions{Project: "process-session-missing", Limit: 5})
 	if len(wrongResults) != 0 {
 		t.Fatal("missing session must not fall back to cwd-detected project")
+	}
+}
+
+func TestWriteToolsRejectUnregisteredSessionID(t *testing.T) {
+	const (
+		project  = "unknown-session-project"
+		invented = "issue-1096-update-20260813"
+	)
+
+	tests := []struct {
+		name                    string
+		handler                 func(*store.Store) server.ToolHandlerFunc
+		args                    map[string]any
+		assert                  func(*testing.T, *store.Store)
+		testWithExplicitProject bool
+	}{
+		{
+			name: "mem_save",
+			handler: func(s *store.Store) server.ToolHandlerFunc {
+				return handleSave(s, MCPConfig{DefaultProject: project}, NewSessionActivity(10*time.Minute))
+			},
+			args:                    map[string]any{"title": "invented session", "content": "must not persist"},
+			testWithExplicitProject: true,
+			assert: func(t *testing.T, s *store.Store) {
+				t.Helper()
+				observations, err := s.RecentObservations(project, "project", 10)
+				if err != nil || len(observations) != 1 || observations[0].SessionID != defaultSessionID(project) || observations[0].Type != "manual" || observations[0].Title != "invented session" || observations[0].Content != "must not persist" {
+					t.Fatalf("recovered mem_save observation = %#v, err=%v", observations, err)
+				}
+			},
+		},
+		{
+			name: "mem_save_prompt",
+			handler: func(s *store.Store) server.ToolHandlerFunc {
+				return handleSavePrompt(s, MCPConfig{DefaultProject: project}, NewSessionActivity(10*time.Minute))
+			},
+			args: map[string]any{"content": "must not persist"},
+			assert: func(t *testing.T, s *store.Store) {
+				t.Helper()
+				prompts, err := s.RecentPrompts(project, 10)
+				if err != nil || len(prompts) != 1 || prompts[0].SessionID != defaultSessionID(project) || prompts[0].Content != "must not persist" {
+					t.Fatalf("recovered mem_save_prompt prompts = %#v, err=%v", prompts, err)
+				}
+			},
+		},
+		{
+			name: "mem_session_summary",
+			handler: func(s *store.Store) server.ToolHandlerFunc {
+				return handleSessionSummary(s, MCPConfig{DefaultProject: project}, NewSessionActivity(10*time.Minute))
+			},
+			args:                    map[string]any{"content": "## Goal\nMust not persist"},
+			testWithExplicitProject: true,
+			assert: func(t *testing.T, s *store.Store) {
+				t.Helper()
+				observations, err := s.RecentObservations(project, "project", 10)
+				if err != nil || len(observations) != 1 || observations[0].SessionID != defaultSessionID(project) || observations[0].Type != "session_summary" || observations[0].Title != "Session summary: "+project || observations[0].Content != "## Goal\nMust not persist" {
+					t.Fatalf("recovered mem_session_summary observation = %#v, err=%v", observations, err)
+				}
+			},
+		},
+		{
+			name: "mem_capture_passive",
+			handler: func(s *store.Store) server.ToolHandlerFunc {
+				return handleCapturePassive(s, MCPConfig{DefaultProject: project}, NewSessionActivity(10*time.Minute))
+			},
+			args: map[string]any{"content": "## Key Learnings:\n- Retried passive learning is persisted as an observation"},
+			assert: func(t *testing.T, s *store.Store) {
+				t.Helper()
+				observations, err := s.RecentObservations(project, "project", 10)
+				if err != nil || len(observations) != 1 || observations[0].SessionID != defaultSessionID(project) || observations[0].Type != "passive" || observations[0].Content != "Retried passive learning is persisted as an observation" || observations[0].ToolName == nil || *observations[0].ToolName != "mcp-passive" {
+					t.Fatalf("recovered mem_capture_passive observation = %#v, err=%v", observations, err)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		requestVariants := []struct {
+			name            string
+			explicitProject bool
+		}{{name: "project omitted"}}
+		if tt.testWithExplicitProject {
+			requestVariants = append(requestVariants, struct {
+				name            string
+				explicitProject bool
+			}{name: "explicit project", explicitProject: true})
+		}
+
+		for _, variant := range requestVariants {
+			t.Run(tt.name+"/"+variant.name, func(t *testing.T) {
+				s := newMCPTestStore(t)
+				if variant.explicitProject {
+					// Establish a known explicit project without seeding observations or prompts.
+					if err := s.CreateSession("known-explicit-project", project, t.TempDir()); err != nil {
+						t.Fatalf("create explicit-project setup session: %v", err)
+					}
+					if err := s.EndSession("known-explicit-project", ""); err != nil {
+						t.Fatalf("end explicit-project setup session: %v", err)
+					}
+				}
+				args := make(map[string]any, len(tt.args)+1)
+				for key, value := range tt.args {
+					args[key] = value
+				}
+				if variant.explicitProject {
+					args["project"] = project
+				}
+				args["session_id"] = invented
+
+				res, err := tt.handler(s)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: args}})
+				if err != nil {
+					t.Fatalf("handler error: %v", err)
+				}
+				if !res.IsError {
+					t.Fatal("expected unregistered session_id to fail")
+				}
+				body := callResultJSON(t, res)
+				if body["error_code"] != "unknown_session" || body["invalid_session_id"] != invented || body["retry_without_session_id"] != true {
+					t.Fatalf("unexpected unknown-session envelope: %v", body)
+				}
+				if _, err := s.GetSession(invented); !errors.Is(err, sql.ErrNoRows) {
+					t.Fatalf("invented session was created: %v", err)
+				}
+				observations, err := s.RecentObservations(project, "project", 10)
+				if err != nil || len(observations) != 0 {
+					t.Fatalf("observations after rejected request = %d, err=%v", len(observations), err)
+				}
+				prompts, err := s.RecentPrompts(project, 10)
+				if err != nil || len(prompts) != 0 {
+					t.Fatalf("prompts after rejected request = %d, err=%v", len(prompts), err)
+				}
+
+				delete(args, "session_id")
+				retryRes, err := tt.handler(s)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: args}})
+				if err != nil || retryRes.IsError {
+					t.Fatalf("retry without session_id: err=%v isError=%v text=%q", err, retryRes.IsError, callResultText(t, retryRes))
+				}
+				tt.assert(t, s)
+			})
+		}
+	}
+}
+
+func TestExplicitSessionIDUsesRegisteredProject(t *testing.T) {
+	const (
+		defaultProject    = "default-project"
+		registeredProject = "registered-project"
+		sessionID         = "registered-session"
+		sessionPath       = "/work/registered-project"
+	)
+
+	tests := []struct {
+		name    string
+		handler func(*store.Store) server.ToolHandlerFunc
+		args    map[string]any
+		assert  func(*testing.T, *store.Store)
+	}{
+		{
+			name: "mem_save_prompt",
+			handler: func(s *store.Store) server.ToolHandlerFunc {
+				return handleSavePrompt(s, MCPConfig{DefaultProject: defaultProject}, NewSessionActivity(10*time.Minute))
+			},
+			args: map[string]any{"content": "retain the registered project"},
+			assert: func(t *testing.T, s *store.Store) {
+				t.Helper()
+				prompts, err := s.RecentPrompts(registeredProject, 10)
+				if err != nil || len(prompts) != 1 || prompts[0].SessionID != sessionID {
+					t.Fatalf("registered-project prompts = %#v, err=%v", prompts, err)
+				}
+			},
+		},
+		{
+			name: "mem_capture_passive",
+			handler: func(s *store.Store) server.ToolHandlerFunc {
+				return handleCapturePassive(s, MCPConfig{DefaultProject: defaultProject}, NewSessionActivity(10*time.Minute))
+			},
+			args: map[string]any{"content": "## Key Learnings:\n- Retain the registered project."},
+			assert: func(t *testing.T, s *store.Store) {
+				t.Helper()
+				observations, err := s.RecentObservations(registeredProject, "project", 10)
+				if err != nil || len(observations) != 1 || observations[0].SessionID != sessionID {
+					t.Fatalf("registered-project observations = %#v, err=%v", observations, err)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newMCPTestStore(t)
+			if err := s.CreateSession(sessionID, registeredProject, sessionPath); err != nil {
+				t.Fatalf("create session: %v", err)
+			}
+			args := make(map[string]any, len(tt.args)+1)
+			for key, value := range tt.args {
+				args[key] = value
+			}
+			args["session_id"] = sessionID
+
+			res, err := tt.handler(s)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: args}})
+			if err != nil || res.IsError {
+				t.Fatalf("write with registered session: err=%v isError=%v text=%q", err, res.IsError, callResultText(t, res))
+			}
+			body := callResultJSON(t, res)
+			if body["project"] != registeredProject || body["project_source"] != project.SourceSessionProject || body["project_path"] != sessionPath {
+				t.Fatalf("registered session envelope = %v", body)
+			}
+			tt.assert(t, s)
+		})
 	}
 }
 
@@ -7179,6 +7590,76 @@ func TestHandleSearch_SuccessUsesEnvelope(t *testing.T) {
 	}
 }
 
+// TestHandleSearch_PreviewMarkerCountsRunes pins the truncation marker to the
+// same unit truncate() cuts on. truncate() slices runes, so content of 300
+// runes or fewer is always emitted whole; marking it "[preview]" tells the
+// agent to spend a mem_get_observation call on content it already has in full.
+// Every case uses accented runes, so byte length always exceeds rune length,
+// and the cases sit on both sides of the limit plus exactly on it.
+func TestHandleSearch_PreviewMarkerCountsRunes(t *testing.T) {
+	const footer = "Results above are previews (300 chars)."
+
+	cases := []struct {
+		name       string
+		runes      int
+		wantMarker bool
+	}{
+		{"whole content is never a preview", 200, false},
+		{"content exactly at the limit is not cut", 300, false},
+		{"cut content is still a preview", 301, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			initTestGitRepo(t, dir)
+			t.Chdir(dir)
+
+			s := newMCPTestStore(t)
+			if err := s.CreateSession("sess-rune-preview", "rune-preview-project", "/tmp"); err != nil {
+				t.Fatal(err)
+			}
+			content := strings.Repeat("é", tc.runes)
+			if len(content) <= 300 {
+				t.Fatalf("test content must exceed 300 bytes to exercise the boundary, got %d", len(content))
+			}
+			if _, err := s.AddObservation(store.AddObservationParams{
+				SessionID: "sess-rune-preview",
+				Type:      "manual",
+				Title:     "runepreview boundary",
+				Content:   content,
+				Project:   "rune-preview-project",
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			h := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+			res, err := h(context.Background(), mcppkg.CallToolRequest{
+				Params: mcppkg.CallToolParams{Arguments: map[string]any{
+					"query":   "runepreview",
+					"project": "rune-preview-project",
+				}},
+			})
+			if err != nil || res.IsError {
+				t.Fatalf("search: err=%v isError=%v text=%q", err, res.IsError, callResultText(t, res))
+			}
+			text := callResultText(t, res)
+
+			if got := strings.Contains(text, "[preview]"); got != tc.wantMarker {
+				t.Errorf("[preview] marker present = %v, want %v for %d runes (%d bytes)\n%s",
+					got, tc.wantMarker, tc.runes, len(content), text)
+			}
+			if got := strings.Contains(text, footer); got != tc.wantMarker {
+				t.Errorf("preview footer present = %v, want %v for %d runes (%d bytes)\n%s",
+					got, tc.wantMarker, tc.runes, len(content), text)
+			}
+			if !tc.wantMarker && !strings.Contains(text, content) {
+				t.Errorf("content of %d runes must be emitted whole, got:\n%s", tc.runes, text)
+			}
+		})
+	}
+}
+
 // JR2-1 RED: TestHandleSearch_EnvelopeProjectMatchesQueryProject
 // When the git repo name contains double hyphens (e.g. "my--app"), NormalizeProject
 // collapses it to "my-app". The envelope project field must match the normalized form
@@ -8320,8 +8801,8 @@ func TestLifecycleHandlersHonorDefaultProject(t *testing.T) {
 	if err != nil || captureRes.IsError {
 		t.Fatalf("passive capture: err=%v result=%q", err, callResultText(t, captureRes))
 	}
-	if got := callResultJSON(t, captureRes)["project_source"]; got != sourceProcessOverride {
-		t.Fatalf("capture source = %v; want %s", got, sourceProcessOverride)
+	if got := callResultJSON(t, captureRes)["project_source"]; got != project.SourceSessionProject {
+		t.Fatalf("capture source = %v; want %s from the registered session", got, project.SourceSessionProject)
 	}
 
 	end := handleSessionEnd(s, cfg, activity)

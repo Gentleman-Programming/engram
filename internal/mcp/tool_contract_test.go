@@ -404,11 +404,28 @@ func TestCompareMCPToolContract(t *testing.T) {
 		{"new required property", map[string]mcpToolSchema{"x": {Types: []string{"object"}, Properties: map[string]mcpToolSchema{"optional": {Types: []string{"integer"}}, "required": base["x"].Properties["required"], "new": {Types: []string{"string"}}}, Required: []string{"required", "new"}, Additional: false}}, "new-required-property"},
 		{"type narrowed", map[string]mcpToolSchema{"x": {Types: []string{"object"}, Properties: map[string]mcpToolSchema{"optional": {Types: []string{"integer"}}, "required": {Types: []string{"array"}, Items: &mcpToolSchema{Types: []string{"number"}}}}, Required: []string{"required"}, Additional: false}}, "type-narrowed"},
 		{"enum narrowed", map[string]mcpToolSchema{"x": {Types: []string{"object"}, Properties: map[string]mcpToolSchema{"optional": {Types: []string{"integer"}}, "required": {Types: []string{"array"}, Items: &mcpToolSchema{Types: []string{"string"}, Enum: []string{`"b"`}}}}, Required: []string{"required"}, Additional: false}}, "enum-narrowed"},
-		{"unproven optional addition", map[string]mcpToolSchema{"x": {Types: []string{"object"}, Properties: map[string]mcpToolSchema{"optional": {Types: []string{"integer"}}, "required": base["x"].Properties["required"], "new": {Types: []string{"object"}, Properties: map[string]mcpToolSchema{"nested": {Types: []string{"string"}}}}}, Required: []string{"required"}, Additional: false}}, "unproven-optional-addition"},
+		{"optional complex addition to closed object", map[string]mcpToolSchema{"x": {Types: []string{"object"}, Properties: map[string]mcpToolSchema{"optional": {Types: []string{"integer"}}, "required": base["x"].Properties["required"], "new": {Types: []string{"object"}, Properties: map[string]mcpToolSchema{"nested": {Types: []string{"string"}}}}}, Required: []string{"required"}, Additional: false}}, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			err := compareMCPToolContract(base, tc.live)
+			if tc.want == "" && err != nil || tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name, want string
+		v1, live   mcpToolSchema
+	}{
+		{"object plus null", "", mcpToolSchema{Types: []string{"object"}, Properties: map[string]mcpToolSchema{"nested": {Types: []string{"string"}}}}, mcpToolSchema{Types: []string{"object", "null"}, Properties: map[string]mcpToolSchema{"nested": {Types: []string{"string"}}}}},
+		{"array with items plus null", "", mcpToolSchema{Types: []string{"array"}, Items: &mcpToolSchema{Types: []string{"string"}}}, mcpToolSchema{Types: []string{"array", "null"}, Items: &mcpToolSchema{Types: []string{"string"}}}},
+		{"new array branch with items", "", mcpToolSchema{Types: []string{"object"}, Properties: map[string]mcpToolSchema{"nested": {Types: []string{"string"}}}}, mcpToolSchema{Types: []string{"object", "array"}, Properties: map[string]mcpToolSchema{"nested": {Types: []string{"string"}}}, Items: &mcpToolSchema{Types: []string{"string"}}}},
+		{"existing array branch gains items", "shape-drift", mcpToolSchema{Types: []string{"array"}}, mcpToolSchema{Types: []string{"array"}, Items: &mcpToolSchema{Types: []string{"string"}}}},
+		{"typeless schema gains items", "shape-drift", mcpToolSchema{}, mcpToolSchema{Items: &mcpToolSchema{Types: []string{"string"}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := compareMCPToolContract(map[string]mcpToolSchema{"x": tc.v1}, map[string]mcpToolSchema{"x": tc.live})
 			if tc.want == "" && err != nil || tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
 				t.Fatalf("error = %v, want %q", err, tc.want)
 			}
@@ -420,7 +437,7 @@ func TestCompareMCPToolContract(t *testing.T) {
 		t.Fatalf("additionalProperties narrowing error = %v", err)
 	}
 	permissiveBase := map[string]mcpToolSchema{"x": {Types: []string{"object"}, Additional: true}}
-	permissiveLive := map[string]mcpToolSchema{"x": {Types: []string{"object"}, Properties: map[string]mcpToolSchema{"new": {Types: []string{"boolean"}}}, Additional: true}}
+	permissiveLive := map[string]mcpToolSchema{"x": {Types: []string{"object"}, Properties: map[string]mcpToolSchema{"new": {Types: []string{"object"}, Properties: map[string]mcpToolSchema{"nested": {Types: []string{"string"}}}}}, Additional: true}}
 	if err := compareMCPToolContract(permissiveBase, permissiveLive); err == nil || !strings.Contains(err.Error(), "/tools/x/properties/new: additional-properties-narrowed") {
 		t.Fatalf("permissive additionalProperties optional addition error = %v", err)
 	}
@@ -650,7 +667,7 @@ func compareMCPToolSchema(drifts *[]mcpToolContractDrift, path string, v1, live 
 			break
 		}
 	}
-	if hasExtraType(v1.Types, live.Types) && (!simplePrimitive(v1) || !simplePrimitive(live)) {
+	if hasExtraType(v1.Types, live.Types) && !compatibleExtraMCPToolTypes(v1, live) && (!simplePrimitive(v1) || !simplePrimitive(live)) {
 		drift("unproven-type-drift")
 	}
 	if v1.Additional && !live.Additional {
@@ -666,7 +683,7 @@ func compareMCPToolSchema(drifts *[]mcpToolContractDrift, path string, v1, live 
 			}
 		}
 	}
-	if v1.Items == nil && live.Items != nil {
+	if v1.Items == nil && live.Items != nil && (len(v1.Types) == 0 || slices.Contains(v1.Types, "array")) {
 		drift("shape-drift")
 	} else if v1.Items != nil && live.Items != nil {
 		compareMCPToolSchema(drifts, jsonPointer(path, "items"), *v1.Items, *live.Items)
@@ -692,8 +709,6 @@ func compareMCPToolSchema(drifts *[]mcpToolContractDrift, path string, v1, live 
 		if _, exists := v1.Properties[name]; !exists && !slices.Contains(live.Required, name) {
 			if v1.Additional {
 				driftAt(drifts, jsonPointer(jsonPointer(path, "properties"), name), "additional-properties-narrowed", mcpToolSchema{}, live.Properties[name])
-			} else if !simplePrimitive(live.Properties[name]) {
-				driftAt(drifts, jsonPointer(jsonPointer(path, "properties"), name), "unproven-optional-addition", mcpToolSchema{}, live.Properties[name])
 			}
 		}
 	}
@@ -783,6 +798,26 @@ func hasExtraType(v1, live []string) bool {
 		}
 	}
 	return false
+}
+func compatibleExtraMCPToolTypes(v1, live mcpToolSchema) bool {
+	for _, typ := range live.Types {
+		if slices.Contains(v1.Types, typ) || typ == "number" && slices.Contains(v1.Types, "integer") {
+			continue
+		}
+		switch typ {
+		case "null":
+			if !slices.Contains(v1.Types, "object") && !slices.Contains(v1.Types, "array") {
+				return false
+			}
+		case "array":
+			if slices.Contains(v1.Types, "array") || live.Items == nil {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 func simplePrimitive(schema mcpToolSchema) bool {
 	if len(schema.Types) == 0 || len(schema.Properties) > 0 || schema.Items != nil || len(schema.Enum) > 0 {

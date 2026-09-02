@@ -54,6 +54,7 @@ Breaking changes are always marked with a `type:breaking-change` label and docum
 
 ### Pi package (`pi-engram`)
 
+- **fix(plugin):** declare `@earendil-works/pi-tui` as an optional peer dependency instead of a hard `^0.74.0` dependency. The extension only renders `Text` from it while running inside pi, which always ships its own copy; the hard dependency gave npm a legal reason to hoist a `0.74.x` over the `^0.84.x` range declared by the installed pi-coding-agent and crash every pi child spawn with `SyntaxError: ... does not provide an export named 'TuiMainScreen'`. With the peer declaration the host's copy wins, npm never auto-installs a second pi-tui, and the range `>=0.74.0` accepts both pi-tui lines the plugin is verified against ([#853](https://github.com/Gentleman-Programming/engram/issues/853)).
 - **fix(plugin):** allow `mem_session_summary` to accept an explicit `project` fallback when automatic project detection is unavailable.
 - **fix(plugin):** fall back to local `.engram/config.json` and surface a clearer version-mismatch diagnostic when the running Engram server lacks `/project/current`.
 - **feat(plugin):** add `gentle-engram` package for Pi marketplace installs, with HTTP event capture, Memory Protocol prompt injection, safe `engram mcp` launcher config, and `pi-engram init` setup helper.
