@@ -1627,7 +1627,7 @@ func TestPinnedObservationsAndFormatContextPriority(t *testing.T) {
 		t.Fatalf("marshal export without timestamp: %v", err)
 	}
 	if string(exportedJSONNoTimestamp) != string(exportedBeforePinJSON) {
-		t.Fatalf("pinning must not change export payload:\nbefore: %s\nafter:  %s", exportedBeforePinJSON, exportedJSON)
+		t.Fatalf("pinning must not change export payload:\nbefore: %s\nafter:  %s", exportedBeforePinJSON, exportedJSONNoTimestamp)
 	}
 
 	if err := s.UnpinObservation(ids[0]); err != nil {
