@@ -37,6 +37,8 @@ import (
 // See https://www.sqlite.org/rescode.html#constraint_foreignkey
 const sqliteConstraintForeignKey = 787
 
+const maxFTSQueryBytes = 65_536
+
 const (
 	sqlitePrimaryBusy   = 5
 	sqlitePrimaryLocked = 6
@@ -67,6 +69,7 @@ var (
 	ErrObservationTitleRequired    = errors.New("observation title is required")
 	ErrObservationContentRequired  = errors.New("observation content is required")
 	ErrPromptContentRequired       = errors.New("prompt content is required")
+	ErrFTSQueryTooLarge            = errors.New("fts query too large")
 )
 
 // Sentinel errors for relation sync apply path (Phase 2).
@@ -3252,6 +3255,9 @@ func (s *Store) compactionPrompts(sessionID, project string, limit int) ([]Promp
 }
 
 func (s *Store) SearchPrompts(query string, project string, limit int) ([]Prompt, error) {
+	if err := validateFTSQueryLength(query); err != nil {
+		return nil, err
+	}
 	if limit <= 0 {
 		limit = 10
 	}
@@ -3712,6 +3718,10 @@ func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOpti
 		// valid
 	default:
 		return nil, fmt.Errorf("invalid match_mode %q: must be \"all\" or \"any\"", opts.MatchMode)
+	}
+
+	if err := validateFTSQueryLength(query); err != nil {
+		return nil, err
 	}
 
 	// Normalize project filter so "Engram" finds records stored as "engram"
@@ -8857,6 +8867,13 @@ func stripPrivateTags(s string) string {
 	// Clean up multiple consecutive [REDACTED] and excessive whitespace
 	result = strings.TrimSpace(result)
 	return result
+}
+
+func validateFTSQueryLength(query string) error {
+	if len(query) > maxFTSQueryBytes {
+		return fmt.Errorf("%w: got %d bytes; maximum is %d bytes; shorten the query and retry", ErrFTSQueryTooLarge, len(query), maxFTSQueryBytes)
+	}
+	return nil
 }
 
 // sanitizeFTS wraps each word in quotes so FTS5 doesn't choke on special chars.

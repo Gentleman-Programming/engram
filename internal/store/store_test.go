@@ -13177,6 +13177,52 @@ func TestSearchContext_AlreadyCanceled(t *testing.T) {
 	}
 }
 
+func TestFTSQueryLengthLimit(t *testing.T) {
+	s := newTestStore(t)
+	atLimit := strings.Repeat("é", 32_768)
+	if got := len(atLimit); got != 65_536 {
+		t.Fatalf("at-limit query length = %d, want 65536", got)
+	}
+	tooLarge := atLimit + "a"
+	if got := len(tooLarge); got != 65_537 {
+		t.Fatalf("oversized query length = %d, want 65537", got)
+	}
+
+	if err := validateFTSQueryLength(atLimit); err != nil {
+		t.Fatalf("query at 65536 bytes: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		run  func(string) error
+	}{
+		{
+			name: "observations",
+			run: func(query string) error {
+				_, err := s.Search(query, SearchOptions{Project: "engram", Limit: 10})
+				return err
+			},
+		},
+		{
+			name: "prompts",
+			run: func(query string) error {
+				_, err := s.SearchPrompts(query, "engram", 10)
+				return err
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.run(tooLarge); err == nil {
+				t.Fatal("query at 65537 bytes returned nil error")
+			} else if !errors.Is(err, ErrFTSQueryTooLarge) {
+				t.Fatalf("oversized query error = %v, want ErrFTSQueryTooLarge", err)
+			} else if got, want := err.Error(), "fts query too large: got 65537 bytes; maximum is 65536 bytes; shorten the query and retry"; got != want {
+				t.Fatalf("oversized query error = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestFTSQueriesUseFTSFirstCrossJoin(t *testing.T) {
 	searchQuery, _ := buildSearchFTSQuery(`"memory"`, SearchOptions{}, 10)
 	for name, query := range map[string]string{

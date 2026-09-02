@@ -110,6 +110,63 @@ func TestFindCandidates_HappyPath(t *testing.T) {
 	}
 }
 
+func TestFindCandidatesValidatesStoredTitleLength(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, _ = addTestObs(t, s, "candidate title", "decision", "testproject", "project")
+
+	atLimitID, _ := addTestObs(t, s, strings.Repeat("é", 32_768), "decision", "testproject", "project")
+	if _, err := s.FindCandidates(atLimitID, CandidateOptions{
+		Project:    "testproject",
+		Scope:      "project",
+		Query:      "candidate",
+		SkipInsert: true,
+	}); err != nil {
+		t.Fatalf("FindCandidates with a 65536-byte stored title: %v", err)
+	}
+
+	title := strings.Repeat("a", 65_537)
+	savedID, _ := addTestObs(t, s, title, "decision", "testproject", "project")
+	_, err := s.FindCandidates(savedID, CandidateOptions{
+		Project:    "testproject",
+		Scope:      "project",
+		SkipInsert: true,
+	})
+	if err == nil {
+		t.Fatal("FindCandidates with a 65537-byte stored title returned nil error")
+	}
+	if !errors.Is(err, ErrFTSQueryTooLarge) {
+		t.Fatalf("FindCandidates error = %v, want ErrFTSQueryTooLarge", err)
+	}
+	if got, want := err.Error(), "fts query too large: got 65537 bytes; maximum is 65536 bytes; shorten the query and retry"; got != want {
+		t.Fatalf("FindCandidates error = %q, want %q", got, want)
+	}
+}
+
+func TestFindCandidatesUsesEffectiveQueryForLengthValidation(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, _ = addTestObs(t, s, "candidate title", "decision", "testproject", "project")
+
+	oversizedTitleID, _ := addTestObs(t, s, strings.Repeat("a", 65_537), "decision", "testproject", "project")
+	if _, err := s.FindCandidates(oversizedTitleID, CandidateOptions{
+		Project:    "testproject",
+		Scope:      "project",
+		Query:      "candidate",
+		SkipInsert: true,
+	}); err != nil {
+		t.Fatalf("FindCandidates with valid override query: %v", err)
+	}
+
+	_, err := s.FindCandidates(oversizedTitleID, CandidateOptions{
+		Project:    "testproject",
+		Scope:      "project",
+		Query:      strings.Repeat("b", 65_537),
+		SkipInsert: true,
+	})
+	if !errors.Is(err, ErrFTSQueryTooLarge) {
+		t.Fatalf("FindCandidates error = %v, want ErrFTSQueryTooLarge", err)
+	}
+}
+
 func TestFindCandidates_EscapesInteriorQuotes(t *testing.T) {
 	s := setupRelationsStore(t)
 	_, _ = addTestObs(t, s, `hello"world candidate`, "decision", "testproject", "project")

@@ -383,6 +383,9 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 	if strings.TrimSpace(queryText) == "" {
 		queryText = title
 	}
+	if err := validateFTSQueryLength(queryText); err != nil {
+		return nil, err
+	}
 	ftsQuery := sanitizeFTSCandidates(queryText)
 	if ftsQuery == "" {
 		return nil, nil
