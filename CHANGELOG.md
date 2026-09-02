@@ -54,6 +54,7 @@ Breaking changes are always marked with a `type:breaking-change` label and docum
 
 ### Pi package (`pi-engram`)
 
+- **fix(plugin):** declare `@earendil-works/pi-tui` as an optional peer dependency instead of a hard `^0.74.0` dependency. The extension only renders `Text` from it while running inside pi, which always ships its own copy; the hard dependency gave npm a legal reason to hoist a `0.74.x` over the `^0.84.x` range declared by the installed pi-coding-agent and crash every pi child spawn with `SyntaxError: ... does not provide an export named 'TuiMainScreen'`. With the peer declaration the host's copy wins, npm never auto-installs a second pi-tui, and the range `>=0.74.0` accepts both pi-tui lines the plugin is verified against ([#853](https://github.com/Gentleman-Programming/engram/issues/853)).
 - **fix(plugin):** allow `mem_session_summary` to accept an explicit `project` fallback when automatic project detection is unavailable.
 - **fix(plugin):** fall back to local `.engram/config.json` and surface a clearer version-mismatch diagnostic when the running Engram server lacks `/project/current`.
 - **feat(plugin):** add `gentle-engram` package for Pi marketplace installs, with HTTP event capture, Memory Protocol prompt injection, safe `engram mcp` launcher config, and `pi-engram init` setup helper.
@@ -88,18 +89,22 @@ Background mutation-based replication for `engram serve` and `engram mcp`:
 - **feat(autosync):** `StopForUpgrade` / `ResumeAfterUpgrade` for upgrade-window pause without releasing the sync lease
 - **fix(autosync):** SIGTERM cancels context → `releaseLease()` deferred in `Run()` for graceful shutdown
 
-### BREAKING CHANGE: MCP write tools no longer accept a `project` field
+### MCP write-tool project selection (historical correction)
 
-The `project` argument has been removed from the JSON schemas of 7 MCP write tools:
-`mem_save`, `mem_save_prompt`, `mem_session_start`, `mem_session_end`, `mem_session_summary`, `mem_capture_passive`, `mem_update`.
+An earlier version of this changelog incorrectly stated that MCP write tools
+removed or discarded the `project` field. That statement is not the current
+contract. Current-project writes may use an explicit project override where the
+tool schema supports it; `mem_session_end` and `mem_capture_passive` continue
+to resolve their project from the current process context.
 
-**Before:** agents could pass `project: "my-project"` to write tools.
-**After:** the project is auto-detected from the server's working directory (cwd). Any `project` argument sent by the LLM is silently discarded.
+**Current behavior:** explicit project values are resolved and validated by the
+server for the supported write tools. When no override is supplied, Engram
+uses its normal process override and cwd-detection precedence.
 
 **Migration:**
 
-- Remove `project` from write tool calls in your agent's memory protocol.
-- Use `mem_current_project` (new tool) to inspect which project Engram will use before writing.
+- When no explicit project override is supplied, use `mem_current_project` to inspect which project Engram will use before writing; it reports cwd-based detection.
+- An explicit project override takes precedence over process and cwd detection. Invalid or unbacked explicit names fail without fallback.
 - If the cwd is ambiguous (multiple git repos), Engram returns a structured error with `available_projects`. Navigate to one of the repos before writing.
 - Read tools (`mem_search`, `mem_context`, `mem_timeline`, `mem_get_observation`, `mem_stats`) still accept an optional `project` override — validated against the store.
 
