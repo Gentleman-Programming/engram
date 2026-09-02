@@ -1560,6 +1560,11 @@ func TestPinnedObservationsAndFormatContextPriority(t *testing.T) {
 	if err != nil {
 		t.Fatalf("export project before pin: %v", err)
 	}
+	// exported_at is wall-clock time at second resolution; zero it before
+	// comparing payloads so a second boundary crossed by the real DB work
+	// between the two exports below can't make an otherwise-identical
+	// payload look different.
+	exportedBeforePin.ExportedAt = ""
 	exportedBeforePinJSON, err := json.Marshal(exportedBeforePin)
 	if err != nil {
 		t.Fatalf("marshal export before pin: %v", err)
@@ -1616,8 +1621,13 @@ func TestPinnedObservationsAndFormatContextPriority(t *testing.T) {
 	if strings.Contains(string(exportedJSON), `"pinned"`) {
 		t.Fatalf("pinned state must stay out of sync/export JSON, got %s", exportedJSON)
 	}
-	if string(exportedJSON) != string(exportedBeforePinJSON) {
-		t.Fatalf("pinning must not change export payload:\nbefore: %s\nafter:  %s", exportedBeforePinJSON, exportedJSON)
+	exported.ExportedAt = ""
+	exportedJSONNoTimestamp, err := json.Marshal(exported)
+	if err != nil {
+		t.Fatalf("marshal export without timestamp: %v", err)
+	}
+	if string(exportedJSONNoTimestamp) != string(exportedBeforePinJSON) {
+		t.Fatalf("pinning must not change export payload:\nbefore: %s\nafter:  %s", exportedBeforePinJSON, exportedJSONNoTimestamp)
 	}
 
 	if err := s.UnpinObservation(ids[0]); err != nil {

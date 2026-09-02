@@ -14,7 +14,7 @@ This is the complete technical reference for Engram. For getting started, see th
 | --------------------------------------------------------- | ------------------------------------------------------------ |
 | [Database Schema](#database-schema)                       | Tables, FTS5, SQLite config                                  |
 | [HTTP API](#http-api-endpoints)                           | All REST endpoints with request/response details             |
-| [MCP Tools](#mcp-tools-20-tools)                          | Detailed reference for all 20 memory tools                   |
+| [MCP Tools](#mcp-tools-22-tools)                          | Detailed reference for all 22 memory tools                   |
 | [MCP Project Resolution](#mcp-project-resolution)         | Auto-detection algorithm, response envelope, tool categories |
 | [Memory Protocol](#memory-protocol)                       | When/how agents should use the tools                         |
 | [Project Name Normalization](#project-name-normalization) | Auto-detection, normalization, similar-project warnings      |
@@ -859,7 +859,7 @@ Returns success even when cwd is ambiguous — empty `project` + non-empty `avai
 
 ---
 
-## MCP Tools (20 tools)
+## MCP Tools (22 tools)
 
 ### mem_search
 
@@ -927,6 +927,14 @@ Delete an observation by ID. Uses soft-delete by default (`deleted_at`); optiona
 
 Save user prompts — records what the user asked so future sessions have context about user goals. It applies the same post-redaction byte limit and truncation metadata as `mem_save`; `mem_save_prompt` warns when it truncates.
 When called in the same MCP process, this also feeds process-local current prompt context used by later `mem_save` calls with `capture_prompt=true`. The same MCP process lifecycle must receive the prompt context before the later save; prompt capture is best-effort and `mem_save` still succeeds when no context is available.
+
+### mem_pin
+
+Pin a local observation so it appears before recent observations in memory context. Pinned state is local to this device and is not synced.
+
+### mem_unpin
+
+Unpin a local observation so it only appears in normal recency order. Pinned state is local to this device and is not synced.
 
 ### mem_context
 

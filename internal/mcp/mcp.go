@@ -6,8 +6,8 @@
 //
 // Tool profiles allow agents to load only the tools they need:
 //
-//	engram mcp                    → all 19 tools (default)
-//	engram mcp --tools=agent      → 15 tools agents actually use (per skill files)
+//	engram mcp                    → all 22 tools (default)
+//	engram mcp --tools=agent      → 18 tools agents actually use (per skill files)
 //	engram mcp --tools=admin      → 4 tools for TUI/CLI (delete, stats, timeline, merge)
 //	engram mcp --tools=agent,admin → combine profiles
 //	engram mcp --tools=mem_save,mem_search → individual tool names
@@ -194,33 +194,82 @@ func NewServer(s *store.Store) *server.MCPServer {
 	return NewServerWithConfig(s, MCPConfig{}, nil)
 }
 
+type coreToolDesc struct {
+	name string
+	desc string
+}
+
+var coreTools = []coreToolDesc{
+	{"mem_save", "mem_save — save decisions, bugs, discoveries, conventions PROACTIVELY (do not wait to be asked)"},
+	{"mem_search", "mem_search — find past work, decisions, or context from previous sessions"},
+	{"mem_context", "mem_context — get recent session history (call at session start or after compaction)"},
+	{"mem_session_summary", "mem_session_summary — save end-of-session summary (MANDATORY before saying \"done\")"},
+	{"mem_get_observation", "mem_get_observation — get full untruncated content of a search result by ID"},
+	{"mem_save_prompt", "mem_save_prompt — save user prompt for context"},
+	{"mem_current_project", "mem_current_project — detect current project from cwd (recommended first call)"},
+	{"mem_judge", "mem_judge — record a verdict on a pending memory conflict (judgment_required flow)"},
+	{"mem_compare", "mem_compare — persist a semantic verdict you have already judged externally"},
+}
+
+var deferredTools = []string{
+	"mem_update", "mem_review", "mem_pin", "mem_unpin", "mem_suggest_topic_key",
+	"mem_session_start", "mem_session_end", "mem_doctor", "mem_capture_passive",
+	"mem_stats", "mem_delete", "mem_timeline", "mem_merge_projects",
+}
+
+// buildServerInstructions dynamically generates the instructions for MCP clients
+// based on which tools are allowed/registered.
+func buildServerInstructions(allowlist map[string]bool) string {
+	var b strings.Builder
+	b.WriteString("Engram provides persistent memory that survives across sessions and compactions.\n\n")
+
+	var activeCore []string
+	for _, ct := range coreTools {
+		if shouldRegister(ct.name, allowlist) {
+			activeCore = append(activeCore, ct.desc)
+		}
+	}
+	if len(activeCore) > 0 {
+		b.WriteString("CORE TOOLS (always available — use without ToolSearch):\n")
+		for _, desc := range activeCore {
+			b.WriteString("  ")
+			b.WriteString(desc)
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
+
+	var activeDeferred []string
+	for _, dt := range deferredTools {
+		if shouldRegister(dt, allowlist) {
+			activeDeferred = append(activeDeferred, dt)
+		}
+	}
+	if len(activeDeferred) > 0 {
+		b.WriteString("DEFERRED TOOLS (use ToolSearch when needed):\n  ")
+		b.WriteString(strings.Join(activeDeferred, ", "))
+		b.WriteString("\n\n")
+	}
+
+	if shouldRegister("mem_save", allowlist) {
+		b.WriteString("PROACTIVE SAVE RULE: Call mem_save immediately after ANY decision, bug fix, discovery, or convention — not just when asked.\n\n")
+	}
+
+	if shouldRegister("mem_save", allowlist) && shouldRegister("mem_judge", allowlist) {
+		b.WriteString("## CONFLICT SURFACING\n\n" +
+			"After mem_save: if judgment_required, iterate candidates[] and call mem_judge\n" +
+			"once per entry using that entry's judgment_id; never reuse the top-level judgment_id.\n" +
+			"Ask conversationally when confidence < 0.7 OR (relation in\n" +
+			"{supersedes, conflicts_with} AND type in {architecture, policy, decision}); else\n" +
+			"resolve with related | compatible | scoped | not_conflict. Pass evidence from user reply.")
+	}
+
+	return strings.TrimSpace(b.String())
+}
+
 // serverInstructions tells MCP clients when to use Engram's tools.
-// 7 core tools are eager (always in context). The rest are deferred
-// and require ToolSearch to load.
-const serverInstructions = `Engram provides persistent memory that survives across sessions and compactions.
-
-CORE TOOLS (always available — use without ToolSearch):
-  mem_save — save decisions, bugs, discoveries, conventions PROACTIVELY (do not wait to be asked)
-  mem_search — find past work, decisions, or context from previous sessions
-  mem_context — get recent session history (call at session start or after compaction)
-  mem_session_summary — save end-of-session summary (MANDATORY before saying "done")
-  mem_get_observation — get full untruncated content of a search result by ID
-  mem_save_prompt — save user prompt for context
-  mem_current_project — detect current project from cwd (recommended first call)
-
-DEFERRED TOOLS (use ToolSearch when needed):
-  mem_update, mem_review, mem_pin, mem_unpin, mem_suggest_topic_key, mem_session_start, mem_session_end,
-  mem_stats, mem_delete, mem_timeline, mem_capture_passive, mem_merge_projects
-
-PROACTIVE SAVE RULE: Call mem_save immediately after ANY decision, bug fix, discovery, or convention — not just when asked.
-
-## CONFLICT SURFACING
-
-After mem_save: if judgment_required, iterate candidates[] and call mem_judge
-once per entry using that entry's judgment_id; never reuse the top-level judgment_id.
-Ask conversationally when confidence < 0.7 OR (relation in
-{supersedes, conflicts_with} AND type in {architecture, policy, decision}); else
-resolve with related | compatible | scoped | not_conflict. Pass evidence from user reply.`
+// Retained as package-level variable for backward compatibility.
+var serverInstructions = buildServerInstructions(nil)
 
 // NewServerWithTools creates an MCP server registering only the tools in
 // the allowlist. If allowlist is nil, all tools are registered.
@@ -239,7 +288,7 @@ func newServerWithActivity(s *store.Store, cfg MCPConfig, allowlist map[string]b
 		"engram",
 		"0.1.0",
 		server.WithToolCapabilities(true),
-		server.WithInstructions(serverInstructions),
+		server.WithInstructions(buildServerInstructions(allowlist)),
 	)
 
 	registerTools(srv, s, cfg, allowlist, activity)
@@ -345,7 +394,7 @@ Examples:
 					mcp.Description("Category: decision, architecture, bugfix, pattern, config, discovery, learning (default: manual)"),
 				),
 				mcp.WithString("session_id",
-					mcp.Description("Session ID to associate with. When omitted, attempts unique active runtime-session selection using current worktree evidence; falls back to manual-save-{project} when no candidate remains, and rejects ambiguity rather than selecting by recency."),
+					mcp.Description("Session ID to associate with. Only pass an ID you supplied to a successful mem_session_start registration, or the ID from an authoritative already-registered runtime binding; mem_session_start does not generate or return a new ID. Never invent one from a task name, issue number, or date. An unregistered ID is rejected with error_code=unknown_session; retry the same call with session_id omitted rather than guessing another value. When omitted (the common case), attempts unique active runtime-session selection using current worktree evidence; falls back to manual-save-{project} when no candidate remains, and rejects ambiguity rather than selecting by recency."),
 				),
 				mcp.WithString("scope",
 					mcp.Description("Scope for this observation: project (default) or personal"),
@@ -489,7 +538,7 @@ Examples:
 					mcp.Description("The user's prompt text"),
 				),
 				mcp.WithString("session_id",
-					mcp.Description("Session ID to associate with. When omitted, attempts unique active runtime-session selection using current worktree evidence; falls back to manual-save-{project} when no candidate remains, and rejects ambiguity rather than selecting by recency."),
+					mcp.Description("Session ID to associate with. Only pass an ID you supplied to a successful mem_session_start registration, or the ID from an authoritative already-registered runtime binding; mem_session_start does not generate or return a new ID. Never invent one from a task name, issue number, or date. An unregistered ID is rejected with error_code=unknown_session; retry the same call with session_id omitted rather than guessing another value. When omitted (the common case), attempts unique active runtime-session selection using current worktree evidence; falls back to manual-save-{project} when no candidate remains, and rejects ambiguity rather than selecting by recency."),
 				),
 				mcp.WithString("project",
 					mcp.Description("Optional recovery target only after ambiguous_project. Ignored unless project_choice_reason is user_selected_after_ambiguous_project."),
@@ -673,7 +722,7 @@ GUIDELINES:
 					mcp.Description("Full session summary using the Goal/Instructions/Discoveries/Accomplished/Next Steps/Relevant Files format"),
 				),
 				mcp.WithString("session_id",
-					mcp.Description("Session ID to associate with. When omitted, attempts unique active runtime-session selection using current worktree evidence; falls back to manual-save-{project} when no candidate remains, and rejects ambiguity rather than selecting by recency."),
+					mcp.Description("Session ID to associate with. Only pass an ID you supplied to a successful mem_session_start registration, or the ID from an authoritative already-registered runtime binding; mem_session_start does not generate or return a new ID. Never invent one from a task name, issue number, or date. An unregistered ID is rejected with error_code=unknown_session; retry the same call with session_id omitted rather than guessing another value. When omitted (the common case), attempts unique active runtime-session selection using current worktree evidence; falls back to manual-save-{project} when no candidate remains, and rejects ambiguity rather than selecting by recency."),
 				),
 				mcp.WithString("project",
 					mcp.Description("Optional explicit project for this memory. Accepted only when backed by known context (existing project, matching session, repo config, or ambiguous-project recovery); invalid or unbacked names fail loudly."),
@@ -755,7 +804,7 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 					mcp.Description("The text output containing a '## Key Learnings:' section with numbered or bulleted items"),
 				),
 				mcp.WithString("session_id",
-					mcp.Description("Session ID to associate with. When omitted, attempts unique active runtime-session selection using current worktree evidence; falls back to manual-save-{project} when no candidate remains, and rejects ambiguity rather than selecting by recency."),
+					mcp.Description("Session ID to associate with. Only pass an ID you supplied to a successful mem_session_start registration, or the ID from an authoritative already-registered runtime binding; mem_session_start does not generate or return a new ID. Never invent one from a task name, issue number, or date. An unregistered ID is rejected with error_code=unknown_session; retry the same call with session_id omitted rather than guessing another value. When omitted (the common case), attempts unique active runtime-session selection using current worktree evidence; falls back to manual-save-{project} when no candidate remains, and rejects ambiguity rather than selecting by recency."),
 				),
 				mcp.WithString("source",
 					mcp.Description("Source identifier (e.g. 'subagent-stop', 'session-end')"),
@@ -1683,7 +1732,13 @@ func handleSavePrompt(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 			return true, activity.ValidateAmbiguousProjectRecoveryToken(recoverySessionID, recoveryToken, strings.TrimSpace(choice), res.AvailableProjects, res.Path)
 		}
 
-		detRes, err := resolveWriteProjectWithChoiceAndProcessOverride(s, projectChoice, projectChoiceReason, validateRecoveryToken, cfg.DefaultProject)
+		var detRes projectpkg.DetectionResult
+		var err error
+		if strings.TrimSpace(sessionID) != "" {
+			detRes, err = resolveSaveWriteProjectWithProcessOverride(s, "", false, "", sessionID, nil, cfg.DefaultProject)
+		} else {
+			detRes, err = resolveWriteProjectWithChoiceAndProcessOverride(s, projectChoice, projectChoiceReason, validateRecoveryToken, cfg.DefaultProject)
+		}
 		if err != nil {
 			return writeProjectErrorResult(activity, recoverySessionID, detRes, err), nil
 		}
@@ -2115,9 +2170,9 @@ func handleCapturePassive(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		source, _ := req.GetArguments()["source"].(string)
 		// project field intentionally not read — auto-detect only (REQ-308)
 
-		detRes, err := resolveWriteProjectWithProcessOverride(s, cfg.DefaultProject, false)
+		detRes, err := resolveSaveWriteProjectWithProcessOverride(s, "", false, "", sessionID, nil, cfg.DefaultProject)
 		if err != nil {
-			return writeProjectErrorResult(nil, "", detRes, err), nil
+			return writeProjectErrorResult(activity, sessionID, detRes, err), nil
 		}
 		project, _ := store.NormalizeProject(detRes.Project)
 
@@ -2988,10 +3043,19 @@ func writeProjectErrorResult(activity *SessionActivity, sessionID string, res pr
 	}
 	var unknownSessionErr *unknownSessionError
 	if errors.As(err, &unknownSessionErr) {
-		return errorWithMeta("unknown_session",
+		result := errorWithMeta("unknown_session",
 			fmt.Sprintf("Session %q was provided but does not exist", unknownSessionErr.SessionID),
 			res.AvailableProjects,
 		)
+		// Structured recovery fields let a caller retry deterministically
+		// instead of re-parsing the hint string: drop session_id and retry
+		// the same call unchanged (#683). Never auto-retry on the caller's
+		// behalf here — that would hide typos and fragment session history.
+		addErrorMetadata(result, map[string]any{
+			"invalid_session_id":       unknownSessionErr.SessionID,
+			"retry_without_session_id": true,
+		})
+		return result
 	}
 	var unknownProjectErr *unknownProjectError
 	if errors.As(err, &unknownProjectErr) {

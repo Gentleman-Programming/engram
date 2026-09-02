@@ -84,7 +84,8 @@ const codexMarketplace = "Gentleman-Programming/engram"
 
 const openCodeSubagentStatuslinePlugin = "opencode-subagent-statusline"
 
-const piGentleEngramPackage = "npm:gentle-engram@0.1.8"
+const piGentleEngramPackage = "npm:gentle-engram@0.1.11"
+const piLegacyGentleEngramPackage = "npm:gentle-engram@0.1.8"
 const piMCPAdapterPackage = "npm:pi-mcp-adapter"
 
 // claudeCodeMCPTools are the MCP tool permission names for the agent profile
@@ -339,15 +340,41 @@ func ensurePiPackageSettings(settingsPath string) (bool, error) {
 		return false, err
 	}
 	changed := false
-	for _, pkg := range []string{piGentleEngramPackage, piMCPAdapterPackage} {
-		if !rawArrayContainsString(packages, pkg) {
-			raw, err := jsonMarshalFn(pkg)
-			if err != nil {
-				return false, fmt.Errorf("marshal Pi package %q: %w", pkg, err)
+	updatedPackages := make([]json.RawMessage, 0, len(packages)+1)
+	hasGentleEngramPackage := false
+	for _, raw := range packages {
+		var pkg string
+		if err := json.Unmarshal(raw, &pkg); err == nil {
+			switch pkg {
+			case piLegacyGentleEngramPackage:
+				changed = true
+				continue
+			case piGentleEngramPackage:
+				if hasGentleEngramPackage {
+					changed = true
+					continue
+				}
+				hasGentleEngramPackage = true
 			}
-			packages = append(packages, raw)
-			changed = true
 		}
+		updatedPackages = append(updatedPackages, raw)
+	}
+	packages = updatedPackages
+	if !hasGentleEngramPackage {
+		raw, err := jsonMarshalFn(piGentleEngramPackage)
+		if err != nil {
+			return false, fmt.Errorf("marshal Pi package %q: %w", piGentleEngramPackage, err)
+		}
+		packages = append(packages, raw)
+		changed = true
+	}
+	if !rawArrayContainsString(packages, piMCPAdapterPackage) {
+		raw, err := jsonMarshalFn(piMCPAdapterPackage)
+		if err != nil {
+			return false, fmt.Errorf("marshal Pi package %q: %w", piMCPAdapterPackage, err)
+		}
+		packages = append(packages, raw)
+		changed = true
 	}
 	if !changed {
 		return false, nil
