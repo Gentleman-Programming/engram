@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/internal/cloud/autosync"
-	engramsrv "github.com/Gentleman-Programming/engram/internal/server"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/autosync"
+	engramsrv "github.com/Gentleman-Programming/engram/v2/internal/server"
 )
 
 // fakeStatusProvider implements server.SyncStatusProvider for fallback tests.

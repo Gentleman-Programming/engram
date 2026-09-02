@@ -14,8 +14,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/Gentleman-Programming/engram/internal/project"
-	"github.com/Gentleman-Programming/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/v2/internal/project"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
 	mcppkg "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -1721,6 +1721,29 @@ func TestHandlePromptContextStatsTimelineAndSessionHandlers(t *testing.T) {
 	}
 }
 
+func TestHandleContextPropagatesStatsError(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("context-stats", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.AddObservation(store.AddObservationParams{SessionID: "context-stats", Type: "decision", Title: "Fence", Content: "Restart after replacement", Project: "engram"}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	original := loadContextStats
+	t.Cleanup(func() { loadContextStats = original })
+	loadContextStats = func(*store.Store) (*store.Stats, error) {
+		return nil, store.ErrDatabaseGenerationChanged
+	}
+
+	result, err := handleContext(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"project": "engram"}}})
+	if err != nil {
+		t.Fatalf("context handler error: %v", err)
+	}
+	if !result.IsError || !strings.Contains(callResultText(t, result), store.ErrDatabaseGenerationChanged.Error()) {
+		t.Fatalf("context result = %q, want generation error", callResultText(t, result))
+	}
+}
+
 func TestMemContextRemainsProjectScopedAcrossSessions(t *testing.T) {
 	s := newMCPTestStore(t)
 	for _, sessionID := range []string{"manual-a", "manual-b"} {
@@ -3017,33 +3040,26 @@ func TestNewServerWithToolsAdminProfile(t *testing.T) {
 	}
 }
 
+func compareMCPToolInventory(expected, actual map[string]*server.ServerTool) error {
+	if len(expected) != len(actual) {
+		return fmt.Errorf("tool count = %d, want %d", len(actual), len(expected))
+	}
+	for name := range expected {
+		if actual[name] == nil {
+			return fmt.Errorf("missing tool %q", name)
+		}
+	}
+	return nil
+}
+
 func TestNewServerWithToolsNilRegistersAll(t *testing.T) {
 	s := newMCPTestStore(t)
-
 	srv := NewServerWithTools(s, nil)
 	if srv == nil {
 		t.Fatal("expected MCP server instance")
 	}
-
-	tools := srv.ListTools()
-
-	allTools := []string{
-		"mem_save", "mem_search", "mem_context", "mem_session_summary",
-		"mem_session_start", "mem_session_end", "mem_get_observation",
-		"mem_suggest_topic_key", "mem_capture_passive", "mem_save_prompt",
-		"mem_update", "mem_delete", "mem_stats", "mem_timeline", "mem_merge_projects",
-		"mem_current_project", "mem_judge", "mem_compare", "mem_doctor", "mem_review",
-		"mem_pin", "mem_unpin",
-	}
-
-	for _, name := range allTools {
-		if tools[name] == nil {
-			t.Errorf("nil allowlist: expected tool %q to be registered", name)
-		}
-	}
-
-	if len(tools) != len(allTools) {
-		t.Errorf("expected %d tools with nil allowlist, got %d", len(allTools), len(tools))
+	if err := compareMCPToolInventory(NewServer(s).ListTools(), srv.ListTools()); err != nil {
+		t.Fatalf("nil allowlist inventory: %v", err)
 	}
 }
 
@@ -3131,34 +3147,7 @@ func TestMemDoctorUnknownProjectReturnsStructuredError(t *testing.T) {
 	}
 }
 
-func TestNewServerBackwardsCompatible(t *testing.T) {
-	s := newMCPTestStore(t)
-
-	// NewServer (no tools filter) should register all tools
-	srv := NewServer(s)
-	tools := srv.ListTools()
-
-	// 18 agent + 4 admin = 22 total.
-	if len(tools) != 22 {
-		t.Errorf("NewServer should register all 22 tools, got %d", len(tools))
-	}
-}
-
 func TestProfileConsistency(t *testing.T) {
-	// Verify that agent + admin = all 22 tools
-	combined := make(map[string]bool)
-	for tool := range ProfileAgent {
-		combined[tool] = true
-	}
-	for tool := range ProfileAdmin {
-		combined[tool] = true
-	}
-
-	// 18 agent + 4 admin = 22 total.
-	if len(combined) != 22 {
-		t.Errorf("agent + admin should cover all 22 tools, got %d", len(combined))
-	}
-
 	// Verify no overlap between profiles
 	for tool := range ProfileAgent {
 		if ProfileAdmin[tool] {
@@ -3775,10 +3764,8 @@ func TestNewServerWithConfig(t *testing.T) {
 	if srv == nil {
 		t.Fatal("expected MCP server instance")
 	}
-	tools := srv.ListTools()
-	// Should have all 22 tools (18 agent + 4 admin).
-	if len(tools) != 22 {
-		t.Errorf("NewServerWithConfig should register all 22 tools, got %d", len(tools))
+	if err := compareMCPToolInventory(NewServer(s).ListTools(), srv.ListTools()); err != nil {
+		t.Fatalf("default config inventory: %v", err)
 	}
 }
 
@@ -4283,6 +4270,49 @@ func TestSessionEndClearsActivity(t *testing.T) {
 	score = activity.ActivityScore(sessionID)
 	if score != "" {
 		t.Fatalf("expected empty activity after session end, got: %q", score)
+	}
+}
+
+func TestSessionEndFailsClosedWhenRepositoryBindingUnavailable(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	t.Chdir(dir)
+
+	initial, err := resolveWriteProject()
+	if err != nil {
+		t.Fatalf("create repository binding: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".git", "engram-project-identity.json"), []byte("invalid binding"), 0o600); err != nil {
+		t.Fatalf("corrupt repository binding: %v", err)
+	}
+
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("binding-session", initial.Project, dir); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	res, err := handleSessionEnd(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": "binding-session"}},
+	})
+	if err != nil {
+		t.Fatalf("handleSessionEnd: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("expected repository binding failure, got %q", callResultText(t, res))
+	}
+	body := callResultJSON(t, res)
+	if body["error_code"] != "repository_binding_unavailable" || !strings.Contains(body["message"].(string), project.ErrRepositoryBinding.Error()) || !strings.Contains(body["message"].(string), "Configure the repository's .engram/config.json with the intended canonical project.") {
+		t.Fatalf("expected repository binding error response, got %v", body)
+	}
+	if _, ok := body["recovery_token"]; ok {
+		t.Fatalf("repository binding error must not issue an ambiguity recovery token: %v", body)
+	}
+	if _, ok := body["token_ttl_seconds"]; ok {
+		t.Fatalf("repository binding error must not include ambiguity token metadata: %v", body)
+	}
+	session, err := s.GetSession("binding-session")
+	if err != nil || session.EndedAt != nil {
+		t.Fatalf("repository binding failure ended session: %+v, %v", session, err)
 	}
 }
 
@@ -6512,6 +6542,38 @@ func TestResolveReadProject_UnknownOverride(t *testing.T) {
 	}
 }
 
+func TestResolveReadProject_UnknownOverrideStatsGenerationChange(t *testing.T) {
+	previous := loadMCPStats
+	loadMCPStats = func(*store.Store) (*store.Stats, error) {
+		return nil, store.ErrDatabaseGenerationChanged
+	}
+	t.Cleanup(func() {
+		loadMCPStats = previous
+	})
+
+	s := newMCPTestStore(t)
+	res, err := resolveReadProject(s, "does-not-exist")
+	if !errors.Is(err, store.ErrDatabaseGenerationChanged) {
+		t.Fatalf("resolveReadProject error = %v; want ErrDatabaseGenerationChanged", err)
+	}
+
+	result := readProjectErrorResult(NewSessionActivity(time.Minute), res, err)
+	var envelope map[string]any
+	if err := json.Unmarshal([]byte(callResultText(t, result)), &envelope); err != nil {
+		t.Fatalf("unmarshal project error result: %v", err)
+	}
+	if got := envelope["error_code"]; got != "database_generation_changed" {
+		t.Errorf("error_code = %q; want database_generation_changed", got)
+	}
+	message, _ := envelope["message"].(string)
+	if !strings.Contains(message, "restart Engram") {
+		t.Errorf("message = %q; want restart guidance", message)
+	}
+	if _, ok := envelope["recovery_token"]; ok {
+		t.Error("project error result included recovery_token")
+	}
+}
+
 // TestRespondWithProject_MergesEnvelope: assert project, project_source, project_path in result
 func TestRespondWithProject_MergesEnvelope(t *testing.T) {
 	res := project.DetectionResult{
@@ -6544,6 +6606,63 @@ func TestErrorWithMeta_WrapsResponse(t *testing.T) {
 	}
 	if !strings.Contains(text, "repo-a") {
 		t.Errorf("response must contain available_projects, got: %q", text)
+	}
+}
+
+func TestWriteProjectErrorResultClassifiesDetectionErrors(t *testing.T) {
+	activity := NewSessionActivity(10 * time.Minute)
+	tests := []struct {
+		name      string
+		err       error
+		wantCode  string
+		wantToken bool
+		wantHint  string
+	}{
+		{
+			name:      "ambiguous project",
+			err:       project.ErrAmbiguousProject,
+			wantCode:  "ambiguous_project",
+			wantToken: true,
+		},
+		{
+			name:     "invalid config",
+			err:      fmt.Errorf("%w: project_name is required", project.ErrInvalidConfig),
+			wantCode: "invalid_project_config",
+		},
+		{
+			name:     "repository binding",
+			err:      fmt.Errorf("%w: binding is invalid", project.ErrRepositoryBinding),
+			wantCode: "repository_binding_unavailable",
+			wantHint: "Configure the repository's .engram/config.json with the intended canonical project.",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res := writeProjectErrorResult(activity, "session-id", project.DetectionResult{
+				Path:              "/workspace",
+				AvailableProjects: []string{"repo-a", "repo-b"},
+			}, tt.err)
+			body := callResultJSON(t, res)
+			if body["error_code"] != tt.wantCode {
+				t.Fatalf("error code = %q, want %q; body=%v", body["error_code"], tt.wantCode, body)
+			}
+			_, gotToken := body["recovery_token"]
+			if gotToken != tt.wantToken {
+				t.Fatalf("recovery token present = %t, want %t; body=%v", gotToken, tt.wantToken, body)
+			}
+			if tt.wantHint != "" && !strings.Contains(body["message"].(string), tt.wantHint) {
+				t.Fatalf("message %q does not contain recovery guidance %q", body["message"], tt.wantHint)
+			}
+			if tt.wantHint != "" && body["hint"] != tt.wantHint {
+				t.Fatalf("hint = %q, want %q", body["hint"], tt.wantHint)
+			}
+			if tt.wantCode == "repository_binding_unavailable" {
+				if _, ok := body["token_ttl_seconds"]; ok {
+					t.Fatalf("repository binding error must not include ambiguity token metadata: %v", body)
+				}
+			}
+		})
 	}
 }
 

@@ -82,7 +82,7 @@ If the binary is missing, the MCP launcher exits cleanly instead of crashing Pi 
 
 ### Project auto-detection (important)
 
-`mem_save` resolves its write project in this order: validated explicit `project`, existing `session_id` association, repo `.engram/config.json`/cwd detection, then directory-basename fallback. Use an explicit `project` when you intentionally want to target a known project; invalid or unbacked names fail loudly instead of silently falling back.
+`mem_save` resolves its write project in this order: validated explicit `project`, existing `session_id` association, repo `.engram/config.json`/cwd detection, then directory-basename fallback. Automatic Git detection stores the first normalized remote/root label in private shared Git metadata, so remote renames, linked worktrees, and repository moves keep using that label. If that binding is corrupt or cannot be written, detection fails closed; set `.engram/config.json` to the intended project rather than relying on the current remote name. Global local/cloud `project_id` propagation and alias migration remain deferred. Use an explicit `project` when you intentionally want to target a known project; invalid or unbacked names fail loudly instead of silently falling back.
 
 Other write tools still primarily use cwd/repo detection unless their schema says otherwise. Start the MCP server from the repo or add `.engram/config.json` when you want deterministic default writes.
 
@@ -220,6 +220,15 @@ This does three things:
 1. Copies the plugin to `~/.config/opencode/plugins/engram.ts` (session tracking, Memory Protocol, compaction recovery)
 2. Adds the `engram` MCP server entry to your `opencode.json` with `--tools=agent` (15 agent-facing tools)
 3. Adds `opencode-subagent-statusline` to your `tui.json` or `tui.jsonc` so OpenCode shows sub-agent activity in the sidebar/home footer
+
+### Verify each layer after setup
+
+`engram setup opencode` confirms only that it wrote the plugin and, when no warning was printed, the OpenCode MCP registration. It cannot confirm that OpenCode connected to the server or that an already-running agent session exposes the tools.
+
+1. Restart OpenCode, then run `opencode mcp list`. Confirm that OpenCode reports the `engram` server as connected. This verifies the client/server connection, not tool exposure in an agent session.
+2. Start a **new** OpenCode agent session and confirm that it can use an `engram_mem_*` tool before relying on Engram. A connected server, HTTP health check, or successful `engram setup` does not by itself prove that tools are visible in the active agent session.
+
+If the server is connected but the new session does not expose Engram tools, restart OpenCode and create another new session. Engram cannot directly inspect or verify the tool exposure of the active OpenCode agent session.
 
 The plugin auto-starts the HTTP server if needed for session tracking. If your environment blocks background processes, run it manually:
 

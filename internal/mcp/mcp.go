@@ -23,10 +23,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/internal/diagnostic"
-	projectpkg "github.com/Gentleman-Programming/engram/internal/project"
-	"github.com/Gentleman-Programming/engram/internal/store"
-	"github.com/Gentleman-Programming/engram/internal/timeutil"
+	"github.com/Gentleman-Programming/engram/v2/internal/diagnostic"
+	projectpkg "github.com/Gentleman-Programming/engram/v2/internal/project"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	"github.com/Gentleman-Programming/engram/v2/internal/timeutil"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -69,6 +69,10 @@ var findSessionSummaryCandidates = func(s *store.Store, savedID int64, opts stor
 }
 
 var loadMCPStats = func(s *store.Store) (*store.Stats, error) {
+	return s.Stats()
+}
+
+var loadContextStats = func(s *store.Store) (*store.Stats, error) {
 	return s.Stats()
 }
 
@@ -1749,7 +1753,10 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 			return respondWithProject(detRes, "No previous session memories found.", nil), nil
 		}
 
-		stats, _ := s.Stats()
+		stats, err := loadContextStats(s)
+		if err != nil {
+			return mcp.NewToolResultError("Failed to get context stats: " + err.Error()), nil
+		}
 		var projects string
 		if len(stats.Projects) > 0 {
 			projects = strings.Join(stats.Projects, ", ")
@@ -2076,7 +2083,7 @@ func handleSessionEnd(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 
 		detRes, err := resolveWriteProjectWithProcessOverride(s, cfg.DefaultProject, false)
 		if err != nil {
-			if errors.Is(err, projectpkg.ErrInvalidConfig) {
+			if errors.Is(err, projectpkg.ErrInvalidConfig) || errors.Is(err, projectpkg.ErrRepositoryBinding) {
 				return writeProjectErrorResult(nil, "", detRes, err), nil
 			}
 			// For session end, still complete the operation even if project resolution fails.
@@ -2876,7 +2883,10 @@ func resolveMCPProjectWithPolicy(s *store.Store, explicit, defaultProject string
 	}
 	var unknown *projectpkg.UnknownProjectError
 	if errors.As(err, &unknown) {
-		stats, _ := s.Stats()
+		stats, err := loadMCPStats(s)
+		if err != nil {
+			return result, err
+		}
 		return result, &unknownProjectError{Name: unknown.Name, AvailableProjects: stats.Projects}
 	}
 	if errors.Is(err, projectpkg.ErrInvalidProjectName) {
@@ -2919,6 +2929,16 @@ func respondWithProject(res projectpkg.DetectionResult, text string, extra map[s
 // resolution fails. It handles ambiguous project errors and invalid configs.
 func writeProjectErrorResult(activity *SessionActivity, sessionID string, res projectpkg.DetectionResult, err error) *mcp.CallToolResult {
 	code := "ambiguous_project"
+	if errors.Is(err, store.ErrDatabaseGenerationChanged) {
+		return errorWithMeta("database_generation_changed", err.Error(), res.AvailableProjects)
+	}
+	if errors.Is(err, projectpkg.ErrRepositoryBinding) {
+		return errorWithMeta(
+			"repository_binding_unavailable",
+			fmt.Sprintf("Cannot determine project: %s. Configure the repository's .engram/config.json with the intended canonical project.", err),
+			nil,
+		)
+	}
 	if errors.Is(err, projectpkg.ErrInvalidConfig) {
 		code = "invalid_project_config"
 	}
@@ -3062,6 +3082,8 @@ func errorWithMeta(code, msg string, availableProjects []string) *mcp.CallToolRe
 	switch code {
 	case "ambiguous_project":
 		envelope["hint"] = "Ask the user to choose one of available_projects, then retry the same write tool (mem_save, mem_save_prompt, or mem_session_summary) with project and project_choice_reason=user_selected_after_ambiguous_project; alternatively cd into the target repo or add repo .engram/config.json."
+	case "database_generation_changed":
+		envelope["hint"] = "Restart Engram and retry."
 	case "invalid_project_choice":
 		envelope["hint"] = "Use exactly one of available_projects after asking the user, or cd into the target repo, or add repo .engram/config.json."
 	case "missing_recovery_token":
@@ -3072,6 +3094,8 @@ func errorWithMeta(code, msg string, availableProjects []string) *mcp.CallToolRe
 		envelope["hint"] = "Use one of the available_projects values, or omit project to auto-detect."
 	case "invalid_project_config":
 		envelope["hint"] = "Fix .engram/config.json so project_name is a non-empty project name."
+	case "repository_binding_unavailable":
+		envelope["hint"] = "Configure the repository's .engram/config.json with the intended canonical project."
 	case "invalid_project":
 		envelope["hint"] = "Use a non-empty project name, not a path."
 	case "unknown_session":

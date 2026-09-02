@@ -5092,8 +5092,8 @@ func TestImportSkipsObservationWithExistingSyncID(t *testing.T) {
 		if err != nil {
 			t.Fatalf("import attempt %d: %v", attempt, err)
 		}
-		if result.ObservationsImported != 0 {
-			t.Fatalf("import attempt %d observations = %d, want 0", attempt, result.ObservationsImported)
+		if result.ObservationsImported != 0 || result.ObservationsUpdated != 0 || result.ObservationsSkippedStale != 3 {
+			t.Fatalf("import attempt %d result = %+v, want three stale skips", attempt, result)
 		}
 	}
 
@@ -5123,6 +5123,261 @@ func TestImportStoresObservationProjectAsText(t *testing.T) {
 	}
 	if storageClass != "text" {
 		t.Fatalf("project storage class = %q, want text", storageClass)
+	}
+}
+
+func TestImportObservationUsesLastWriteWinsOrdering(t *testing.T) {
+	s := newTestStore(t)
+	project := "engram"
+	base := &ExportData{
+		Sessions:     []Session{{ID: "import-lww-session", Project: project, Directory: "/tmp", StartedAt: "2026-01-01 00:00:00"}},
+		Observations: []Observation{{SyncID: "import-lww-observation", SessionID: "import-lww-session", Type: "note", Title: "old", Content: "old", Project: &project, Scope: "project", CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-01 00:00:00"}},
+	}
+	if result, err := s.Import(base); err != nil || result.ObservationsImported != 1 {
+		t.Fatalf("base import = %+v, %v", result, err)
+	}
+
+	newer := *base
+	newer.Observations = []Observation{{SyncID: "import-lww-observation", SessionID: "import-lww-session", Type: "note", Title: "new", Content: "new", Project: &project, Scope: "project", CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-02 00:00:00"}}
+	if result, err := s.Import(&newer); err != nil || result.ObservationsImported != 0 || result.ObservationsUpdated != 1 || result.ObservationsSkippedStale != 0 {
+		t.Fatalf("newer import = %+v, %v; updates must not be counted as inserts", result, err)
+	}
+	offsetOlder := newer
+	offsetOlder.Observations[0].Title = "offset older"
+	offsetOlder.Observations[0].UpdatedAt = "2026-01-02T01:00:00+02:00"
+	if result, err := s.Import(&offsetOlder); err != nil || result.ObservationsSkippedStale != 1 {
+		t.Fatalf("offset older import = %+v, %v", result, err)
+	}
+	if got := scalarString(t, s, `SELECT title FROM observations WHERE sync_id = ?`, "import-lww-observation"); got != "new" {
+		t.Fatalf("offset older changed title to %q", got)
+	}
+	older := newer
+	older.Observations = []Observation{{SyncID: "import-lww-observation", SessionID: "import-lww-session", Type: "note", Title: "older", Content: "older", Project: &project, Scope: "project", CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-01 12:00:00"}}
+	if result, err := s.Import(&older); err != nil || result.ObservationsSkippedStale != 1 {
+		t.Fatalf("older import: %v", err)
+	}
+	if got := scalarString(t, s, `SELECT title FROM observations WHERE sync_id = ?`, "import-lww-observation"); got != "new" {
+		t.Fatalf("title = %q, want newer snapshot", got)
+	}
+
+	for _, tc := range []struct {
+		name, updatedAt, wantTitle string
+	}{
+		{name: "fractional newer", updatedAt: "2026-01-02 00:00:00.500000000", wantTitle: "fractional newer"},
+		{name: "fractional older", updatedAt: "2026-01-02 00:00:00.400000000", wantTitle: "fractional newer"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := s.Import(&ExportData{Observations: []Observation{{SyncID: "import-lww-observation", SessionID: "import-lww-session", Type: "note", Title: tc.name, Content: tc.name, Project: &project, Scope: "project", CreatedAt: "2026-01-01 00:00:00", UpdatedAt: tc.updatedAt}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.name == "fractional newer" && (result.ObservationsUpdated != 1 || result.ObservationsSkippedStale != 0) {
+				t.Fatalf("result = %+v, want update", result)
+			}
+			if tc.name == "fractional older" && (result.ObservationsUpdated != 0 || result.ObservationsSkippedStale != 1) {
+				t.Fatalf("result = %+v, want stale skip", result)
+			}
+			if got := scalarString(t, s, `SELECT title FROM observations WHERE sync_id = ?`, "import-lww-observation"); got != tc.wantTitle {
+				t.Fatalf("title = %q, want %q", got, tc.wantTitle)
+			}
+		})
+	}
+
+	result, err := s.Import(&ExportData{Observations: []Observation{{SyncID: "import-lww-observation", SessionID: "import-lww-session", Type: "note", Title: "invalid incoming", Content: "invalid incoming", Project: &project, Scope: "project", CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "not-a-time"}}})
+	if err != nil || result.ObservationsSkippedStale != 1 {
+		t.Fatalf("invalid incoming import = %+v, %v", result, err)
+	}
+	if got := scalarString(t, s, `SELECT title FROM observations WHERE sync_id = ?`, "import-lww-observation"); got != "fractional newer" {
+		t.Fatalf("invalid incoming changed title to %q", got)
+	}
+	if _, err := s.db.Exec(`UPDATE observations SET updated_at = ? WHERE sync_id = ?`, "not-a-time", "import-lww-observation"); err != nil {
+		t.Fatal(err)
+	}
+	result, err = s.Import(&ExportData{Observations: []Observation{{SyncID: "import-lww-observation", SessionID: "import-lww-session", Type: "note", Title: "invalid current", Content: "invalid current", Project: &project, Scope: "project", CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-03 00:00:00"}}})
+	if err != nil || result.ObservationsSkippedStale != 1 {
+		t.Fatalf("invalid current import = %+v, %v", result, err)
+	}
+	if got := scalarString(t, s, `SELECT title FROM observations WHERE sync_id = ?`, "import-lww-observation"); got != "fractional newer" {
+		t.Fatalf("invalid current changed title to %q", got)
+	}
+}
+
+func TestImportObservationPreservesFieldsFromPartialNewerSnapshot(t *testing.T) {
+	project := "engram"
+	base := Observation{
+		SyncID:         "import-partial-observation",
+		SessionID:      "import-partial-session",
+		Type:           "note",
+		Title:          "base",
+		Content:        "base",
+		Project:        &project,
+		Scope:          "project",
+		RevisionCount:  4,
+		DuplicateCount: 3,
+		CreatedAt:      "2026-01-01 00:00:00",
+		UpdatedAt:      "2026-01-01 00:00:00",
+	}
+	baseData := &ExportData{
+		Sessions:     []Session{{ID: base.SessionID, Project: project, Directory: "/tmp", StartedAt: base.CreatedAt}},
+		Observations: []Observation{base},
+	}
+
+	for _, tc := range []struct {
+		name, createdAt string
+		revisionCount   int
+		duplicateCount  int
+	}{
+		{name: "empty created at and zero counts", revisionCount: 0, duplicateCount: 0},
+		{name: "invalid created at and negative counts", createdAt: "not-a-time", revisionCount: -1, duplicateCount: -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if _, err := s.Import(baseData); err != nil {
+				t.Fatalf("base import: %v", err)
+			}
+
+			partial := base
+			partial.Title = "newer partial"
+			partial.Content = "newer partial"
+			partial.CreatedAt = tc.createdAt
+			partial.UpdatedAt = "2026-01-02 00:00:00"
+			partial.RevisionCount = tc.revisionCount
+			partial.DuplicateCount = tc.duplicateCount
+			if result, err := s.Import(&ExportData{Observations: []Observation{partial}}); err != nil || result.ObservationsUpdated != 1 {
+				t.Fatalf("partial newer import = %+v, %v", result, err)
+			}
+
+			if got := scalarString(t, s, `SELECT created_at FROM observations WHERE sync_id = ?`, base.SyncID); got != base.CreatedAt {
+				t.Fatalf("created_at = %q, want %q", got, base.CreatedAt)
+			}
+			if got := scalarInt(t, s, `SELECT revision_count FROM observations WHERE sync_id = ?`, base.SyncID); got != base.RevisionCount {
+				t.Fatalf("revision_count = %d, want %d", got, base.RevisionCount)
+			}
+			if got := scalarInt(t, s, `SELECT duplicate_count FROM observations WHERE sync_id = ?`, base.SyncID); got != base.DuplicateCount {
+				t.Fatalf("duplicate_count = %d, want %d", got, base.DuplicateCount)
+			}
+		})
+	}
+
+	t.Run("valid created at and positive counts apply", func(t *testing.T) {
+		s := newTestStore(t)
+		if _, err := s.Import(baseData); err != nil {
+			t.Fatalf("base import: %v", err)
+		}
+
+		newer := base
+		newer.CreatedAt = "2025-12-31 00:00:00"
+		newer.UpdatedAt = "2026-01-02 00:00:00"
+		newer.RevisionCount = 6
+		newer.DuplicateCount = 5
+		if result, err := s.Import(&ExportData{Observations: []Observation{newer}}); err != nil || result.ObservationsUpdated != 1 {
+			t.Fatalf("newer import = %+v, %v", result, err)
+		}
+
+		if got := scalarString(t, s, `SELECT created_at FROM observations WHERE sync_id = ?`, base.SyncID); got != newer.CreatedAt {
+			t.Fatalf("created_at = %q, want %q", got, newer.CreatedAt)
+		}
+		if got := scalarInt(t, s, `SELECT revision_count FROM observations WHERE sync_id = ?`, base.SyncID); got != newer.RevisionCount {
+			t.Fatalf("revision_count = %d, want %d", got, newer.RevisionCount)
+		}
+		if got := scalarInt(t, s, `SELECT duplicate_count FROM observations WHERE sync_id = ?`, base.SyncID); got != newer.DuplicateCount {
+			t.Fatalf("duplicate_count = %d, want %d", got, newer.DuplicateCount)
+		}
+	})
+}
+
+func TestImportOlderObservationDoesNotResurrectLocalDeletion(t *testing.T) {
+	s := newTestStore(t)
+	project := "engram"
+	if _, err := s.Import(&ExportData{
+		Sessions:     []Session{{ID: "import-delete-session", Project: project, Directory: "/tmp", StartedAt: "2026-01-01 00:00:00"}},
+		Observations: []Observation{{SyncID: "import-delete-observation", SessionID: "import-delete-session", Type: "note", Title: "active", Content: "active", Project: &project, Scope: "project", CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-01 00:00:00"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE observations SET deleted_at = ?, updated_at = ? WHERE sync_id = ?`, "2026-01-02 00:00:00", "2026-01-02 00:00:00", "import-delete-observation"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.Import(&ExportData{Observations: []Observation{{SyncID: "import-delete-observation", SessionID: "import-delete-session", Type: "note", Title: "stale active", Content: "stale active", Project: &project, Scope: "project", CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-01 12:00:00"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ObservationsImported != 0 || result.ObservationsSkippedStale != 1 || scalarInt(t, s, `SELECT count(*) FROM observations WHERE sync_id = ? AND deleted_at IS NOT NULL`, "import-delete-observation") != 1 {
+		t.Fatalf("older active snapshot changed local deletion: result=%+v", result)
+	}
+}
+
+func TestImportPromptIdentityAndTombstoneOrdering(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("import-prompt-session", "engram", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	base := &ExportData{Prompts: []Prompt{{SyncID: "import-prompt", SessionID: "import-prompt-session", Content: "first", Project: "engram", CreatedAt: "2026-01-01 00:00:00"}}}
+	if result, err := s.Import(base); err != nil || result.PromptsImported != 1 {
+		t.Fatalf("base prompt import = %+v, %v", result, err)
+	}
+	duplicate := &ExportData{Prompts: []Prompt{{SyncID: "import-prompt", SessionID: "import-prompt-session", Content: "must remain first", Project: "engram", CreatedAt: "2026-01-02 00:00:00"}}}
+	if result, err := s.Import(duplicate); err != nil || result.PromptsImported != 0 {
+		t.Fatalf("duplicate prompt import = %+v, %v", result, err)
+	}
+	if got := scalarString(t, s, `SELECT content FROM user_prompts WHERE sync_id = ?`, "import-prompt"); got != "first" {
+		t.Fatalf("prompt content = %q, want immutable original", got)
+	}
+
+	if _, err := s.db.Exec(`INSERT INTO prompt_tombstones (sync_id, session_id, project, deleted_at) VALUES (?, ?, ?, ?)`, "import-tombstoned-prompt", "import-prompt-session", "engram", "2026-01-02 00:00:00"); err != nil {
+		t.Fatal(err)
+	}
+	stale := &ExportData{Prompts: []Prompt{{SyncID: "import-tombstoned-prompt", SessionID: "import-prompt-session", Content: "stale", Project: "engram", CreatedAt: "2026-01-01 00:00:00"}}}
+	if result, err := s.Import(stale); err != nil || result.PromptsImported != 0 {
+		t.Fatalf("stale tombstoned prompt import = %+v, %v", result, err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO prompt_tombstones (sync_id, session_id, project, deleted_at) VALUES (?, ?, ?, ?)`, "offset-tombstoned-prompt", "import-prompt-session", "engram", "2026-01-02T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.Import(&ExportData{Prompts: []Prompt{{SyncID: "offset-tombstoned-prompt", SessionID: "import-prompt-session", Content: "stale", Project: "engram", CreatedAt: "2026-01-02T01:00:00+02:00"}}})
+	if err != nil || result.PromptsImported != 0 || scalarInt(t, s, `SELECT count(*) FROM prompt_tombstones WHERE sync_id = ?`, "offset-tombstoned-prompt") != 1 || scalarInt(t, s, `SELECT count(*) FROM user_prompts WHERE sync_id = ?`, "offset-tombstoned-prompt") != 0 {
+		t.Fatalf("offset stale tombstoned prompt import = %+v, %v", result, err)
+	}
+	newer := &ExportData{Prompts: []Prompt{{SyncID: "import-tombstoned-prompt", SessionID: "import-prompt-session", Content: "newer", Project: "engram", CreatedAt: "2026-01-03 00:00:00"}}}
+	if result, err := s.Import(newer); err != nil || result.PromptsImported != 1 {
+		t.Fatalf("newer tombstoned prompt import = %+v, %v", result, err)
+	}
+	if got := scalarInt(t, s, `SELECT count(*) FROM prompt_tombstones WHERE sync_id = ?`, "import-tombstoned-prompt"); got != 0 {
+		t.Fatalf("newer prompt left tombstone: %d", got)
+	}
+
+	if _, err := s.db.Exec(`INSERT INTO prompt_tombstones (sync_id, session_id, project, deleted_at) VALUES (?, ?, ?, ?)`, "fractional-tombstone", "import-prompt-session", "engram", "2026-01-04 00:00:00.500000000"); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, createdAt              string
+		wantImported, wantTombstones int
+	}{
+		{name: "fractional older", createdAt: "2026-01-04 00:00:00.400000000", wantImported: 0, wantTombstones: 1},
+		{name: "fractional newer", createdAt: "2026-01-04 00:00:00.600000000", wantImported: 1, wantTombstones: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := s.Import(&ExportData{Prompts: []Prompt{{SyncID: "fractional-tombstone", SessionID: "import-prompt-session", Content: tc.name, Project: "engram", CreatedAt: tc.createdAt}}})
+			if err != nil || result.PromptsImported != tc.wantImported {
+				t.Fatalf("result = %+v, err = %v", result, err)
+			}
+			if got := scalarInt(t, s, `SELECT count(*) FROM prompt_tombstones WHERE sync_id = ?`, "fractional-tombstone"); got != tc.wantTombstones {
+				t.Fatalf("tombstones = %d, want %d", got, tc.wantTombstones)
+			}
+		})
+	}
+	if got := scalarString(t, s, `SELECT content FROM user_prompts WHERE sync_id = ?`, "fractional-tombstone"); got != "fractional newer" {
+		t.Fatalf("prompt content = %q, want fractional newer", got)
+	}
+	if _, err := s.db.Exec(`INSERT INTO prompt_tombstones (sync_id, session_id, project, deleted_at) VALUES (?, ?, ?, ?)`, "invalid-tombstone", "import-prompt-session", "engram", "not-a-time"); err != nil {
+		t.Fatal(err)
+	}
+	result, err = s.Import(&ExportData{Prompts: []Prompt{{SyncID: "invalid-tombstone", SessionID: "import-prompt-session", Content: "must remain deleted", Project: "engram", CreatedAt: "2026-01-05 00:00:00"}}})
+	if err != nil || result.PromptsImported != 0 {
+		t.Fatalf("invalid tombstone import = %+v, %v", result, err)
+	}
+	if got := scalarInt(t, s, `SELECT count(*) FROM prompt_tombstones WHERE sync_id = ?`, "invalid-tombstone"); got != 1 {
+		t.Fatalf("invalid tombstone was removed: %d", got)
 	}
 }
 
@@ -5754,7 +6009,7 @@ func TestStoreUncoveredBranchesPushToHundred(t *testing.T) {
 	t.Run("new open database hook error", func(t *testing.T) {
 		orig := openDB
 		t.Cleanup(func() { openDB = orig })
-		openDB = func(driverName, dataSourceName string) (*sql.DB, error) {
+		openDB = func(_ string, _ *databaseGeneration) (*sql.DB, error) {
 			return nil, errors.New("forced open error")
 		}
 
@@ -9907,13 +10162,8 @@ func TestQuarantineIrreparableSyncMutationsPreservesJournalAndUnblocksTransport(
 			t.Fatalf("seed mutation %s: %v", mutation.key, err)
 		}
 	}
-	var laterSeq int64
-	if err := s.db.QueryRow(`SELECT seq FROM sync_mutations WHERE entity_key = 'later'`).Scan(&laterSeq); err != nil {
-		t.Fatalf("read later sequence: %v", err)
-	}
-
-	dryRun, err := s.QuarantineIrreparableSyncMutations("", false)
-	if err != nil || len(dryRun.Actions) != 1 {
+	dryRun, err := s.QuarantineIrreparableSyncMutations(DefaultSyncTargetKey, "", false)
+	if err != nil || len(dryRun.Actions) != 2 {
 		t.Fatalf("dry-run report=%+v err=%v", dryRun, err)
 	}
 	var disposition string
@@ -9921,8 +10171,8 @@ func TestQuarantineIrreparableSyncMutationsPreservesJournalAndUnblocksTransport(
 		t.Fatalf("dry-run disposition=%q err=%v", disposition, err)
 	}
 
-	report, err := s.QuarantineIrreparableSyncMutations("", true)
-	if err != nil || len(report.Actions) != 1 {
+	report, err := s.QuarantineIrreparableSyncMutations(DefaultSyncTargetKey, "", true)
+	if err != nil || len(report.Actions) != 2 {
 		t.Fatalf("apply report=%+v err=%v", report, err)
 	}
 	var payload, reason, evidence string
@@ -9934,20 +10184,45 @@ func TestQuarantineIrreparableSyncMutationsPreservesJournalAndUnblocksTransport(
 		t.Fatalf("quarantine did not preserve audit state: payload=%q disposition=%q reason=%q evidence=%q at=%v acked=%v", payload, disposition, reason, evidence, dispositionAt, ackedAt)
 	}
 	pending, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 10)
-	if err != nil || len(pending) != 1 || pending[0].EntityKey != "later" || pending[0].Seq != laterSeq {
+	if err != nil || len(pending) != 0 {
 		t.Fatalf("transport pending=%+v err=%v", pending, err)
 	}
 	state, err := s.GetSyncState(DefaultSyncTargetKey)
 	if err != nil || state.LastAckedSeq != 0 {
 		t.Fatalf("state=%+v err=%v", state, err)
 	}
-	again, err := s.QuarantineIrreparableSyncMutations("", true)
+	again, err := s.QuarantineIrreparableSyncMutations(DefaultSyncTargetKey, "", true)
 	if err != nil || len(again.Actions) != 0 {
 		t.Fatalf("repeat report=%+v err=%v", again, err)
 	}
 	var repeatedEvidence string
 	if err := s.db.QueryRow(`SELECT disposition_evidence FROM sync_mutations WHERE entity_key = 'poison'`).Scan(&repeatedEvidence); err != nil || repeatedEvidence != evidence {
 		t.Fatalf("repeat changed evidence=%q err=%v", repeatedEvidence, err)
+	}
+}
+
+func TestQuarantineIrreparableSyncMutationsQuarantinesEmptyProject(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.db.Exec(`
+		INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project)
+		VALUES ('cloud', 'session', 'legacy-empty-project', 'upsert', '{"id":"legacy-empty-project","directory":"/tmp/legacy"}', 'local', '')
+	`); err != nil {
+		t.Fatalf("seed empty-project mutation: %v", err)
+	}
+
+	report, err := s.QuarantineIrreparableSyncMutations(DefaultSyncTargetKey, "", true)
+	if err != nil || len(report.Actions) != 1 {
+		t.Fatalf("quarantine report=%+v err=%v", report, err)
+	}
+	if !strings.Contains(report.Actions[0].Message, "project must be non-empty and canonical for cloud transport") {
+		t.Fatalf("expected actionable project reason, got %+v", report.Actions[0])
+	}
+	var disposition string
+	if err := s.db.QueryRow(`SELECT disposition FROM sync_mutations WHERE entity_key = 'legacy-empty-project'`).Scan(&disposition); err != nil {
+		t.Fatalf("read empty-project disposition: %v", err)
+	}
+	if disposition != SyncMutationDispositionQuarantined {
+		t.Fatalf("expected empty-project mutation to be quarantined, got %q", disposition)
 	}
 }
 
@@ -9969,7 +10244,7 @@ func TestQuarantineIrreparableSyncMutationsRefreshesAffectedLifecycles(t *testin
 			t.Fatalf("mark project pending: %v", err)
 		}
 
-		report, err := s.QuarantineIrreparableSyncMutations("project-a", true)
+		report, err := s.QuarantineIrreparableSyncMutations(DefaultSyncTargetKey, "project-a", true)
 		if err != nil || len(report.Actions) != 1 {
 			t.Fatalf("apply report=%+v err=%v", report, err)
 		}
@@ -9989,7 +10264,7 @@ func TestQuarantineIrreparableSyncMutationsRefreshesAffectedLifecycles(t *testin
 			}
 		}
 
-		again, err := s.QuarantineIrreparableSyncMutations("project-a", true)
+		again, err := s.QuarantineIrreparableSyncMutations(DefaultSyncTargetKey, "project-a", true)
 		if err != nil || len(again.Actions) != 0 {
 			t.Fatalf("repeat report=%+v err=%v", again, err)
 		}
@@ -10015,7 +10290,7 @@ func TestQuarantineIrreparableSyncMutationsRefreshesAffectedLifecycles(t *testin
 			}
 		}
 
-		if _, err := s.QuarantineIrreparableSyncMutations("project-a", true); err != nil {
+		if _, err := s.QuarantineIrreparableSyncMutations(DefaultSyncTargetKey, "project-a", true); err != nil {
 			t.Fatalf("quarantine project-a: %v", err)
 		}
 		for _, targetKey := range []string{DefaultSyncTargetKey, syncTargetKeyForProject("project-b")} {
@@ -10050,7 +10325,7 @@ func TestQuarantineIrreparableSyncMutationsKeepsProjectPendingWhenWorkRemains(t 
 		}
 	}
 
-	report, err := s.QuarantineIrreparableSyncMutations("project-a", true)
+	report, err := s.QuarantineIrreparableSyncMutations(DefaultSyncTargetKey, "project-a", true)
 	if err != nil || len(report.Actions) != 1 || report.Actions[0].EntityKey != "poison" {
 		t.Fatalf("apply report=%+v err=%v", report, err)
 	}
@@ -10080,7 +10355,7 @@ func TestQuarantineIrreparableSyncMutationsKeepsProjectPendingWhenWorkRemains(t 
 	if _, err := s.db.Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, 'session', 'poison-2', 'upsert', '{"id":"poison-2"}', 'local', 'project-a')`, DefaultSyncTargetKey); err != nil {
 		t.Fatalf("seed second poison mutation: %v", err)
 	}
-	second, err := s.QuarantineIrreparableSyncMutations("project-a", true)
+	second, err := s.QuarantineIrreparableSyncMutations(DefaultSyncTargetKey, "project-a", true)
 	if err != nil || len(second.Actions) != 1 || second.Actions[0].EntityKey != "poison-2" {
 		t.Fatalf("second quarantine report=%+v err=%v", second, err)
 	}
@@ -10101,7 +10376,7 @@ func TestQuarantineIrreparableSyncMutationsClearsCloudUpgradeBlockers(t *testing
 		t.Fatalf("legacy report before quarantine=%+v err=%v", before, err)
 	}
 
-	if _, err := s.QuarantineIrreparableSyncMutations("project-a", true); err != nil {
+	if _, err := s.QuarantineIrreparableSyncMutations(DefaultSyncTargetKey, "project-a", true); err != nil {
 		t.Fatalf("quarantine: %v", err)
 	}
 
@@ -10131,7 +10406,7 @@ func TestQuarantineIrreparableSyncMutationsFailsClosed(t *testing.T) {
 	if _, err := s.db.Exec(`CREATE TRIGGER reject_quarantine BEFORE UPDATE OF disposition ON sync_mutations BEGIN SELECT RAISE(ABORT, 'quarantine blocked'); END`); err != nil {
 		t.Fatalf("create reject trigger: %v", err)
 	}
-	if _, err := s.QuarantineIrreparableSyncMutations("", true); err == nil {
+	if _, err := s.QuarantineIrreparableSyncMutations(DefaultSyncTargetKey, "", true); err == nil {
 		t.Fatal("expected quarantine persistence error")
 	}
 	var disposition string
@@ -10159,7 +10434,7 @@ func TestQuarantineIrreparableSyncMutationsRollsBackWhenLifecycleRefreshFails(t 
 		t.Fatalf("create lifecycle refresh trigger: %v", err)
 	}
 
-	if _, err := s.QuarantineIrreparableSyncMutations("project-a", true); err == nil {
+	if _, err := s.QuarantineIrreparableSyncMutations(DefaultSyncTargetKey, "project-a", true); err == nil {
 		t.Fatal("expected lifecycle refresh error")
 	}
 	var disposition string
@@ -10831,6 +11106,213 @@ func TestListPendingProjectMutationsAndPayloadValidation(t *testing.T) {
 	}
 	if strings.Join(validation.MissingFields, ",") != "session_id,type,title,content,scope" {
 		t.Fatalf("missing fields=%v", validation.MissingFields)
+	}
+}
+
+func TestListDiagnosticObservationRequiredFieldsHandlesLegacyNulls(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE observations (id INTEGER PRIMARY KEY, sync_id TEXT, project TEXT, type TEXT, title TEXT, content TEXT, deleted_at TEXT)`); err != nil {
+		t.Fatalf("create legacy observations: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO observations (id, sync_id, project, type, title, content) VALUES (1, NULL, 'Project-A', NULL, NULL, NULL)`); err != nil {
+		t.Fatalf("insert legacy observation: %v", err)
+	}
+
+	findings, err := (&Store{db: db}).ListDiagnosticObservationRequiredFields("")
+	if err != nil || len(findings) != 1 {
+		t.Fatalf("findings=%+v err=%v", findings, err)
+	}
+	if got := findings[0]; got.ID != 1 || got.SyncID != "" || got.Project != "project-a" || strings.Join(got.MissingFields, ",") != "type,title,content" {
+		t.Fatalf("finding=%+v", got)
+	}
+}
+
+func TestDiagnosticObservationRequiredFieldsAndTitleRepair(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("observation-diagnostic", "project-a", "/work/project-a"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	add := func(t *testing.T, title, content, observationType string) Observation {
+		t.Helper()
+		id, err := s.AddObservation(AddObservationParams{SessionID: "observation-diagnostic", Type: observationType, Title: title, Content: content, Project: "project-a", Scope: "project"})
+		if err != nil {
+			t.Fatalf("AddObservation: %v", err)
+		}
+		observation, err := s.GetObservation(id)
+		if err != nil {
+			t.Fatalf("GetObservation: %v", err)
+		}
+		return *observation
+	}
+	titleMissing := add(t, "valid title", "First line. Additional detail.\nSecond line must not become the title.", "decision")
+	contentMissing := add(t, "content title", "valid content", "decision")
+	typeMissing := add(t, "type title", "valid content", "decision")
+	if _, err := s.db.Exec(`UPDATE observations SET title = ? WHERE id = ?`, "\u2003", titleMissing.ID); err != nil {
+		t.Fatalf("blank title: %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE observations SET content = ? WHERE id = ?`, " \t\n", contentMissing.ID); err != nil {
+		t.Fatalf("blank content: %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE observations SET type = ? WHERE id = ?`, "\u2003", typeMissing.ID); err != nil {
+		t.Fatalf("blank type: %v", err)
+	}
+	if _, err := s.db.Exec(`DELETE FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntityObservation, titleMissing.SyncID); err != nil {
+		t.Fatalf("remove title mutation: %v", err)
+	}
+
+	findings, err := s.ListDiagnosticObservationRequiredFields("PROJECT-A")
+	if err != nil {
+		t.Fatalf("ListDiagnosticObservationRequiredFields: %v", err)
+	}
+	if len(findings) != 3 {
+		t.Fatalf("findings=%+v", findings)
+	}
+	for i, want := range []struct {
+		id      int64
+		syncID  string
+		missing string
+	}{
+		{titleMissing.ID, titleMissing.SyncID, "title"},
+		{contentMissing.ID, contentMissing.SyncID, "content"},
+		{typeMissing.ID, typeMissing.SyncID, "type"},
+	} {
+		got := findings[i]
+		if got.ID != want.id || got.SyncID != want.syncID || got.Project != "project-a" || strings.Join(got.MissingFields, ",") != want.missing {
+			t.Fatalf("finding[%d]=%+v, want id=%d sync_id=%q project=project-a missing=%q", i, got, want.id, want.syncID, want.missing)
+		}
+	}
+
+	dryRun, err := s.RepairObservationSourceTitles("project-a", false)
+	if err != nil || len(dryRun.Actions) != 1 || dryRun.Actions[0].ID != titleMissing.ID || dryRun.Actions[0].Title != "First line." {
+		t.Fatalf("dry-run=%+v err=%v", dryRun, err)
+	}
+	var title sql.NullString
+	if err := s.db.QueryRow(`SELECT title FROM observations WHERE id = ?`, titleMissing.ID).Scan(&title); err != nil || !title.Valid || title.String != "\u2003" {
+		t.Fatalf("dry-run changed title=%v err=%v", title, err)
+	}
+
+	applied, err := s.RepairObservationSourceTitles("project-a", true)
+	if err != nil || !applied.Applied || applied.BackupPath == "" || !reflect.DeepEqual(applied.Actions, dryRun.Actions) {
+		t.Fatalf("apply=%+v dry-run=%+v err=%v", applied, dryRun, err)
+	}
+	if err := s.db.QueryRow(`SELECT title FROM observations WHERE id = ?`, titleMissing.ID).Scan(&title); err != nil || !title.Valid || title.String != "First line." {
+		t.Fatalf("repaired title=%v err=%v", title, err)
+	}
+	var mutationCount int
+	if err := s.db.QueryRow(`SELECT count(*) FROM sync_mutations WHERE entity = ? AND entity_key = ? AND acked_at IS NULL AND disposition = 'pending'`, SyncEntityObservation, titleMissing.SyncID).Scan(&mutationCount); err != nil || mutationCount != 1 {
+		t.Fatalf("canonical mutation count=%d err=%v", mutationCount, err)
+	}
+	if again, err := s.RepairObservationSourceTitles("project-a", true); err != nil || len(again.Actions) != 0 {
+		t.Fatalf("repeat=%+v err=%v", again, err)
+	}
+
+	if _, err := s.db.Exec(`UPDATE observations SET title = '' WHERE id = ?`, typeMissing.ID); err != nil {
+		t.Fatalf("blank type-missing title: %v", err)
+	}
+	if _, err := s.db.Exec(`DELETE FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntityObservation, typeMissing.SyncID); err != nil {
+		t.Fatalf("remove type-missing mutation: %v", err)
+	}
+	typeOnlyRepair, err := s.RepairObservationSourceTitles("project-a", true)
+	if err != nil || len(typeOnlyRepair.Actions) != 1 || typeOnlyRepair.Actions[0].ID != typeMissing.ID {
+		t.Fatalf("type-only repair=%+v err=%v", typeOnlyRepair, err)
+	}
+	var observationType string
+	if err := s.db.QueryRow(`SELECT type FROM observations WHERE id = ?`, typeMissing.ID).Scan(&observationType); err != nil || observationType != "\u2003" {
+		t.Fatalf("type was fabricated as %q err=%v", observationType, err)
+	}
+	if err := s.db.QueryRow(`SELECT count(*) FROM sync_mutations WHERE entity = ? AND entity_key = ? AND acked_at IS NULL AND disposition = 'pending'`, SyncEntityObservation, typeMissing.SyncID).Scan(&mutationCount); err != nil || mutationCount != 0 {
+		t.Fatalf("invalid source emitted mutation count=%d err=%v", mutationCount, err)
+	}
+}
+
+func TestRepairObservationSourceTitlesRollsBackWhenCanonicalMutationFails(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("source-title-rollback", "project-a", "/work/project-a"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	id, err := s.AddObservation(AddObservationParams{SessionID: "source-title-rollback", Type: "decision", Title: "valid", Content: "Recoverable source title.", Project: "project-a", Scope: "project"})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+	observation, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("GetObservation: %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE observations SET title = '' WHERE id = ?`, id); err != nil {
+		t.Fatalf("blank title: %v", err)
+	}
+	if _, err := s.db.Exec(`DELETE FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntityObservation, observation.SyncID); err != nil {
+		t.Fatalf("remove mutation: %v", err)
+	}
+	if _, err := s.db.Exec(`CREATE TRIGGER reject_source_repair_mutation BEFORE INSERT ON sync_mutations WHEN NEW.entity = 'observation' BEGIN SELECT RAISE(ABORT, 'mutation blocked'); END`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+	if _, err := s.RepairObservationSourceTitles("project-a", true); err == nil {
+		t.Fatal("expected repair failure")
+	}
+	var title string
+	if err := s.db.QueryRow(`SELECT title FROM observations WHERE id = ?`, id).Scan(&title); err != nil || title != "" {
+		t.Fatalf("repair was not rolled back title=%q err=%v", title, err)
+	}
+}
+
+func TestRepairObservationSourceTitlesReconcilesPendingMutations(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		pendingOp    string
+		wantMutation int
+		wantTitle    string
+	}{
+		{name: "refreshes stale pending upsert", pendingOp: SyncOpUpsert, wantMutation: 1, wantTitle: "Recovered title."},
+		{name: "preserves pending delete", pendingOp: SyncOpDelete, wantMutation: 1, wantTitle: "old title"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if err := s.CreateSession("source-title-pending", "project-a", "/work/project-a"); err != nil {
+				t.Fatalf("CreateSession: %v", err)
+			}
+			id, err := s.AddObservation(AddObservationParams{SessionID: "source-title-pending", Type: "decision", Title: "old title", Content: "Recovered title.\nDetails.", Project: "project-a", Scope: "project"})
+			if err != nil {
+				t.Fatalf("AddObservation: %v", err)
+			}
+			observation, err := s.GetObservation(id)
+			if err != nil {
+				t.Fatalf("GetObservation: %v", err)
+			}
+			if _, err := s.db.Exec(`UPDATE observations SET title = '' WHERE id = ?`, id); err != nil {
+				t.Fatalf("blank title: %v", err)
+			}
+			if _, err := s.db.Exec(`UPDATE sync_mutations SET op = ? WHERE entity = ? AND entity_key = ?`, tc.pendingOp, SyncEntityObservation, observation.SyncID); err != nil {
+				t.Fatalf("set pending mutation op: %v", err)
+			}
+
+			if _, err := s.RepairObservationSourceTitles("project-a", true); err != nil {
+				t.Fatalf("RepairObservationSourceTitles: %v", err)
+			}
+
+			if got := scalarInt(t, s, `SELECT count(*) FROM sync_mutations WHERE entity = ? AND entity_key = ? AND acked_at IS NULL AND disposition = ?`, SyncEntityObservation, observation.SyncID, SyncMutationDispositionPending); got != tc.wantMutation {
+				t.Fatalf("pending mutation count=%d, want %d", got, tc.wantMutation)
+			}
+			var op, payload string
+			if err := s.db.QueryRow(`SELECT op, payload FROM sync_mutations WHERE entity = ? AND entity_key = ? AND acked_at IS NULL AND disposition = ?`, SyncEntityObservation, observation.SyncID, SyncMutationDispositionPending).Scan(&op, &payload); err != nil {
+				t.Fatalf("read pending mutation: %v", err)
+			}
+			if op != tc.pendingOp {
+				t.Fatalf("pending op=%q, want %q", op, tc.pendingOp)
+			}
+			var body map[string]any
+			if err := json.Unmarshal([]byte(payload), &body); err != nil {
+				t.Fatalf("decode pending payload: %v", err)
+			}
+			if body["title"] != tc.wantTitle {
+				t.Fatalf("pending payload title=%q, want %q", body["title"], tc.wantTitle)
+			}
+		})
 	}
 }
 
@@ -12104,6 +12586,114 @@ func TestDeleteProjectCascadesAllEntities(t *testing.T) {
 	}
 	if obsCount != 0 {
 		t.Errorf("expected obs #%d to be hard-deleted, got count %d", obsID1, obsCount)
+	}
+}
+
+func TestDeleteProjectPreservesCrossProjectObservationSession(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s-del-proj-cross-obs", "alpha", "/tmp/alpha"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	for _, project := range []string{"alpha", "beta"} {
+		_, err := s.AddObservation(AddObservationParams{
+			SessionID: "s-del-proj-cross-obs",
+			Type:      "decision",
+			Title:     project + " observation",
+			Content:   project + " content",
+			Project:   project,
+			Scope:     "project",
+		})
+		if err != nil {
+			t.Fatalf("add %s observation: %v", project, err)
+		}
+	}
+
+	if _, err := s.DeleteProject("alpha", true); err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
+
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE project = ?`, "beta").Scan(&count); err != nil {
+		t.Fatalf("count cross-project observations: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected cross-project observation to survive, got %d rows", count)
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE id = ?`, "s-del-proj-cross-obs").Scan(&count); err != nil {
+		t.Fatalf("count shared session: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected shared session to survive, got %d rows", count)
+	}
+}
+
+func TestDeleteProjectPreservesCrossProjectPromptSession(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s-del-proj-cross-prompt", "alpha", "/tmp/alpha"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	for _, project := range []string{"alpha", "beta"} {
+		if _, err := s.AddPrompt(AddPromptParams{
+			SessionID: "s-del-proj-cross-prompt",
+			Content:   project + " prompt",
+			Project:   project,
+		}); err != nil {
+			t.Fatalf("add %s prompt: %v", project, err)
+		}
+	}
+
+	if _, err := s.DeleteProject("alpha", true); err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
+
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM user_prompts WHERE project = ?`, "beta").Scan(&count); err != nil {
+		t.Fatalf("count cross-project prompts: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected cross-project prompt to survive, got %d rows", count)
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE id = ?`, "s-del-proj-cross-prompt").Scan(&count); err != nil {
+		t.Fatalf("count shared session: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected shared session to survive, got %d rows", count)
+	}
+}
+
+func TestDeleteProjectHardDeleteRemovesOrphanSession(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s-del-proj-orphan", "alpha", "/tmp/alpha"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-del-proj-orphan",
+		Type:      "decision",
+		Title:     "orphaned session observation",
+		Content:   "content",
+		Project:   "alpha",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	result, err := s.DeleteProject("alpha", true)
+	if err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
+	if result.SessionsDeleted != 1 {
+		t.Fatalf("SessionsDeleted = %d, want 1", result.SessionsDeleted)
+	}
+
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE id = ?`, "s-del-proj-orphan").Scan(&count); err != nil {
+		t.Fatalf("count orphan session: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected orphan session to be deleted, got %d rows", count)
 	}
 }
 
