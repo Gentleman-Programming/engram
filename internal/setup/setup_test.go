@@ -990,6 +990,33 @@ func TestInstallOpenCodeTUIInjectionFailureIsNonFatal(t *testing.T) {
 	}
 }
 
+func TestInstallOpenCodeBothInjectionFailuresAreNonFatal(t *testing.T) {
+	resetSetupSeams(t)
+	home := useTestHome(t)
+	runtimeGOOS = "linux"
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "xdg"))
+	injectOpenCodeMCPFn = func() error {
+		return errors.New("cannot write config")
+	}
+	injectOpenCodeTUIPluginFn = func() error {
+		return errors.New("cannot write tui config")
+	}
+
+	result, err := installOpenCode()
+	if err != nil {
+		t.Fatalf("expected both injection failures to be non-fatal, got %v", err)
+	}
+	if result.Files != 1 {
+		t.Fatalf("expected only the plugin file when both injections fail, got %d", result.Files)
+	}
+	if result.MCPConfigured {
+		t.Fatal("expected failed OpenCode MCP injection to remain unconfigured")
+	}
+	if result.TUIPluginEnabled {
+		t.Fatal("expected failed OpenCode TUI injection to remain disabled")
+	}
+}
+
 func TestInjectOpenCodeMCPPreservesExistingAndIsIdempotent(t *testing.T) {
 	resetSetupSeams(t)
 	home := useTestHome(t)
