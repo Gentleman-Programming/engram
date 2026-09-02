@@ -1,0 +1,205 @@
+{
+  "version": "engram.mcp-tool-contract/v1",
+  "tools": {
+    "mem_capture_passive": {
+      "type": ["object"],
+      "properties": {
+        "content": {"type":["string"],"additionalProperties":true},
+        "session_id": {"type":["string"],"additionalProperties":true},
+        "source": {"type":["string"],"additionalProperties":true}
+      },
+      "required": ["content"],
+      "additionalProperties": true},
+    "mem_compare": {
+      "type": ["object"],
+      "properties": {
+        "confidence": {"type":["number"],"additionalProperties":true},
+        "memory_id_a": {"type":["number"],"additionalProperties":true},
+        "memory_id_b": {"type":["number"],"additionalProperties":true},
+        "model": {"type":["string"],"additionalProperties":true},
+        "reasoning": {"type":["string"],"additionalProperties":true},
+        "relation": {"type":["string"],"additionalProperties":true}
+      },
+      "required": ["confidence","memory_id_a","memory_id_b","reasoning","relation"],
+      "additionalProperties": true},
+    "mem_context": {
+      "type": ["object"],
+      "properties": {
+        "project": {"type":["string"],"additionalProperties":true},
+        "scope": {"type":["string"],"additionalProperties":true}
+      },
+      "additionalProperties": true},
+    "mem_current_project": {"type":["object"],"additionalProperties":true},
+    "mem_delete": {
+      "type": ["object"],
+      "properties": {
+        "hard_delete": {"type":["boolean"],"additionalProperties":true},
+        "id": {"type":["number"],"additionalProperties":true}
+      },
+      "required": ["id"],
+      "additionalProperties": true},
+    "mem_doctor": {
+      "type": ["object"],
+      "properties": {
+        "check": {"type":["string"],"additionalProperties":true},
+        "project": {"type":["string"],"additionalProperties":true}
+      },
+      "additionalProperties": true},
+    "mem_get_observation": {
+      "type": ["object"],
+      "properties": {
+        "id": {"type":["number"],"additionalProperties":true}
+      },
+      "required": ["id"],
+      "additionalProperties": true},
+    "mem_judge": {
+      "type": ["object"],
+      "properties": {
+        "confidence": {"type":["number"],"additionalProperties":true},
+        "evidence": {"type":["string"],"additionalProperties":true},
+        "judgment_id": {"type":["string"],"additionalProperties":true},
+        "reason": {"type":["string"],"additionalProperties":true},
+        "relation": {"type":["string"],"additionalProperties":true},
+        "session_id": {"type":["string"],"additionalProperties":true}
+      },
+      "required": ["judgment_id","relation"],
+      "additionalProperties": true},
+    "mem_merge_projects": {
+      "type": ["object"],
+      "properties": {
+        "from": {"type":["string"],"additionalProperties":true},
+        "to": {"type":["string"],"additionalProperties":true}
+      },
+      "required": ["from","to"],
+      "additionalProperties": true},
+    "mem_pin": {
+      "type": ["object"],
+      "properties": {
+        "id": {"type":["number"],"additionalProperties":true}
+      },
+      "required": ["id"],
+      "additionalProperties": true},
+    "mem_review": {
+      "type": ["object"],
+      "properties": {
+        "action": {"type":["string"],"additionalProperties":true},
+        "id": {"type":["number"],"additionalProperties":true},
+        "limit": {"type":["number"],"additionalProperties":true},
+        "observation_id": {"type":["number"],"additionalProperties":true},
+        "project": {"type":["string"],"additionalProperties":true}
+      },
+      "required": ["action"],
+      "additionalProperties": true},
+    "mem_save": {
+      "type": ["object"],
+      "properties": {
+        "capture_prompt": {"type":["boolean"],"additionalProperties":true},
+        "content": {"type":["string"],"additionalProperties":true},
+        "observation": {"type":["string"],"additionalProperties":true},
+        "project": {"type":["string"],"additionalProperties":true},
+        "project_choice_reason": {"type":["string"],"additionalProperties":true},
+        "recovery_token": {"type":["string"],"additionalProperties":true},
+        "scope": {"type":["string"],"additionalProperties":true},
+        "session_id": {"type":["string"],"additionalProperties":true},
+        "title": {"type":["string"],"additionalProperties":true},
+        "topic_key": {"type":["string"],"additionalProperties":true},
+        "type": {"type":["string"],"additionalProperties":true}
+      },
+      "required": ["title"],
+      "additionalProperties": true},
+    "mem_save_prompt": {
+      "type": ["object"],
+      "properties": {
+        "content": {"type":["string"],"additionalProperties":true},
+        "project": {"type":["string"],"additionalProperties":true},
+        "project_choice_reason": {"type":["string"],"additionalProperties":true},
+        "recovery_token": {"type":["string"],"additionalProperties":true},
+        "session_id": {"type":["string"],"additionalProperties":true}
+      },
+      "required": ["content"],
+      "additionalProperties": true},
+    "mem_search": {
+      "type": ["object"],
+      "properties": {
+        "all_projects": {"type":["boolean"],"additionalProperties":true},
+        "limit": {"type":["number"],"additionalProperties":true},
+        "match_mode": {"type":["string"],"additionalProperties":true},
+        "project": {"type":["string"],"additionalProperties":true},
+        "query": {"type":["string"],"additionalProperties":true},
+        "scope": {"type":["string"],"additionalProperties":true},
+        "type": {"type":["string"],"additionalProperties":true}
+      },
+      "required": ["query"],
+      "additionalProperties": true},
+    "mem_session_end": {
+      "type": ["object"],
+      "properties": {
+        "id": {"type":["string"],"additionalProperties":true},
+        "summary": {"type":["string"],"additionalProperties":true}
+      },
+      "required": ["id"],
+      "additionalProperties": true},
+    "mem_session_start": {
+      "type": ["object"],
+      "properties": {
+        "directory": {"type":["string"],"additionalProperties":true},
+        "id": {"type":["string"],"additionalProperties":true}
+      },
+      "required": ["id"],
+      "additionalProperties": true},
+    "mem_session_summary": {
+      "type": ["object"],
+      "properties": {
+        "content": {"type":["string"],"additionalProperties":true},
+        "project": {"type":["string"],"additionalProperties":true},
+        "project_choice_reason": {"type":["string"],"additionalProperties":true},
+        "recovery_token": {"type":["string"],"additionalProperties":true},
+        "session_id": {"type":["string"],"additionalProperties":true}
+      },
+      "required": ["content"],
+      "additionalProperties": true},
+    "mem_stats": {
+      "type": ["object"],
+      "properties": {
+        "project": {"type":["string"],"additionalProperties":true}
+      },
+      "additionalProperties": true},
+    "mem_suggest_topic_key": {
+      "type": ["object"],
+      "properties": {
+        "content": {"type":["string"],"additionalProperties":true},
+        "title": {"type":["string"],"additionalProperties":true},
+        "type": {"type":["string"],"additionalProperties":true}
+      },
+      "additionalProperties": true},
+    "mem_timeline": {
+      "type": ["object"],
+      "properties": {
+        "after": {"type":["number"],"additionalProperties":true},
+        "before": {"type":["number"],"additionalProperties":true},
+        "observation_id": {"type":["number"],"additionalProperties":true},
+        "project": {"type":["string"],"additionalProperties":true}
+      },
+      "required": ["observation_id"],
+      "additionalProperties": true},
+    "mem_unpin": {
+      "type": ["object"],
+      "properties": {
+        "id": {"type":["number"],"additionalProperties":true}
+      },
+      "required": ["id"],
+      "additionalProperties": true},
+    "mem_update": {
+      "type": ["object"],
+      "properties": {
+        "content": {"type":["string"],"additionalProperties":true},
+        "id": {"type":["number"],"additionalProperties":true},
+        "scope": {"type":["string"],"additionalProperties":true},
+        "title": {"type":["string"],"additionalProperties":true},
+        "topic_key": {"type":["string"],"additionalProperties":true},
+        "type": {"type":["string"],"additionalProperties":true}
+      },
+      "required": ["id"],
+      "additionalProperties": true}
+  }
+}

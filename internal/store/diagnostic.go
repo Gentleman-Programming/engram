@@ -40,6 +40,33 @@ type SyncMutationPayloadValidation struct {
 	Message       string   `json:"message,omitempty"`
 }
 
+// ObservationRequiredFieldsEvidence identifies a corrupt source observation
+// without exposing its content in diagnostic output.
+type ObservationRequiredFieldsEvidence struct {
+	ID            int64    `json:"id"`
+	SyncID        string   `json:"sync_id"`
+	Project       string   `json:"project"`
+	MissingFields []string `json:"missing_fields"`
+}
+
+// ObservationSourceTitleRepairAction records a title derived from a corrupt
+// source observation's first non-empty line.
+type ObservationSourceTitleRepairAction struct {
+	ID      int64  `json:"id"`
+	SyncID  string `json:"sync_id"`
+	Project string `json:"project"`
+	Title   string `json:"title"`
+}
+
+// ObservationSourceTitleRepairReport is the local recovery result for source
+// observation title repairs. A backup is created only when an apply changes rows.
+type ObservationSourceTitleRepairReport struct {
+	Project    string                               `json:"project,omitempty"`
+	Applied    bool                                 `json:"applied"`
+	Actions    []ObservationSourceTitleRepairAction `json:"actions"`
+	BackupPath string                               `json:"backup_path,omitempty"`
+}
+
 // SyncMutationTitleRepairAction records a title restored from its matching
 // local observation without creating another sync mutation.
 type SyncMutationTitleRepairAction struct {
@@ -197,6 +224,183 @@ func (s *Store) ListPendingProjectMutations(project string) ([]SyncMutation, err
 	project, _ = NormalizeProject(project)
 	project = strings.TrimSpace(project)
 	return s.listPendingProjectMutationsTxLike(s.db, project)
+}
+
+type diagnosticObservationRow struct {
+	ObservationRequiredFieldsEvidence
+	title   string
+	content string
+}
+
+// ListDiagnosticObservationRequiredFields reports active source observations
+// whose cloud-required title, content, or type is NULL, empty, or whitespace.
+// It is deliberately independent of sync_mutations so doctor can find source
+// corruption even when no journal row remains.
+func (s *Store) ListDiagnosticObservationRequiredFields(project string) ([]ObservationRequiredFieldsEvidence, error) {
+	rows, err := s.listDiagnosticObservationRequiredFields(s.db, project)
+	if err != nil {
+		return nil, err
+	}
+	evidence := make([]ObservationRequiredFieldsEvidence, len(rows))
+	for i, row := range rows {
+		evidence[i] = row.ObservationRequiredFieldsEvidence
+	}
+	return evidence, nil
+}
+
+func (s *Store) listDiagnosticObservationRequiredFields(q rowQuerier, project string) ([]diagnosticObservationRow, error) {
+	project, _ = NormalizeProject(project)
+	project = strings.TrimSpace(project)
+	query := `SELECT id, ifnull(sync_id, ''), ifnull(project, ''), ifnull(type, ''), ifnull(title, ''), ifnull(content, '')
+		FROM observations WHERE deleted_at IS NULL`
+	args := []any{}
+	if project != "" {
+		query += ` AND project = ?`
+		args = append(args, project)
+	}
+	query += ` ORDER BY id ASC`
+	rows, err := s.queryItHook(q, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	findings := make([]diagnosticObservationRow, 0)
+	for rows.Next() {
+		var item diagnosticObservationRow
+		var observationType string
+		if err := rows.Scan(&item.ID, &item.SyncID, &item.Project, &observationType, &item.title, &item.content); err != nil {
+			return nil, err
+		}
+		item.Project, _ = NormalizeProject(item.Project)
+		item.Project = strings.TrimSpace(item.Project)
+		if strings.TrimSpace(observationType) == "" {
+			item.MissingFields = append(item.MissingFields, "type")
+		}
+		if strings.TrimSpace(item.title) == "" {
+			item.MissingFields = append(item.MissingFields, "title")
+		}
+		if strings.TrimSpace(item.content) == "" {
+			item.MissingFields = append(item.MissingFields, "content")
+		}
+		if len(item.MissingFields) > 0 {
+			findings = append(findings, item)
+		}
+	}
+	return findings, rows.Err()
+}
+
+// RepairObservationSourceTitles restores only source titles that can be
+// derived from the first non-empty line of their own content. It never invents
+// content or type. When no pending local mutation exists and the repaired row
+// is otherwise sync-valid, it emits one canonical upsert for the local repair.
+func (s *Store) RepairObservationSourceTitles(project string, apply bool) (ObservationSourceTitleRepairReport, error) {
+	project, _ = NormalizeProject(project)
+	project = strings.TrimSpace(project)
+	report := ObservationSourceTitleRepairReport{Project: project, Applied: apply, Actions: []ObservationSourceTitleRepairAction{}}
+	rows, err := s.listDiagnosticObservationRequiredFields(s.db, project)
+	if err != nil {
+		return ObservationSourceTitleRepairReport{}, fmt.Errorf("list source observation repairs: %w", err)
+	}
+	actions := observationSourceTitleRepairActions(rows)
+	if !apply || len(actions) == 0 {
+		report.Actions = actions
+		return report, nil
+	}
+	backupPath, err := s.BackupSQLite()
+	if err != nil {
+		return ObservationSourceTitleRepairReport{}, err
+	}
+	if err := s.withTx(func(tx *sql.Tx) error {
+		currentRows, err := s.listDiagnosticObservationRequiredFields(tx, project)
+		if err != nil {
+			return err
+		}
+		actions = observationSourceTitleRepairActions(currentRows)
+		for _, action := range actions {
+			result, err := s.execHook(tx, `UPDATE observations SET title = ?, updated_at = datetime('now') WHERE id = ? AND ifnull(sync_id, '') = ? AND deleted_at IS NULL`, action.Title, action.ID, action.SyncID)
+			if err != nil {
+				return fmt.Errorf("repair source observation title %d: %w", action.ID, err)
+			}
+			if changed, _ := result.RowsAffected(); changed != 1 {
+				return fmt.Errorf("repair source observation title %d", action.ID)
+			}
+			observation, err := s.getObservationTx(tx, action.ID)
+			if err != nil {
+				return fmt.Errorf("read repaired source observation %d: %w", action.ID, err)
+			}
+			if err := s.enqueueSourceObservationRepairMutationTx(tx, observation); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return ObservationSourceTitleRepairReport{}, fmt.Errorf("repair source observation titles: %w", err)
+	}
+	report.Actions = actions
+	report.BackupPath = backupPath
+	return report, nil
+}
+
+func observationSourceTitleRepairActions(rows []diagnosticObservationRow) []ObservationSourceTitleRepairAction {
+	actions := make([]ObservationSourceTitleRepairAction, 0)
+	for _, row := range rows {
+		if !containsString(row.MissingFields, "title") {
+			continue
+		}
+		title := deriveObservationSourceRepairTitle(row.content)
+		if ValidateObservationTitle(title) != nil {
+			continue
+		}
+		actions = append(actions, ObservationSourceTitleRepairAction{ID: row.ID, SyncID: row.SyncID, Project: row.Project, Title: title})
+	}
+	return actions
+}
+
+func (s *Store) enqueueSourceObservationRepairMutationTx(tx *sql.Tx, observation *Observation) error {
+	payload, err := json.Marshal(observationPayloadFromObservation(observation))
+	if err != nil {
+		return err
+	}
+	if validation := ValidateSyncMutationPayload(SyncEntityObservation, SyncOpUpsert, string(payload), observation.SyncID); validation.ReasonCode != "" {
+		return nil
+	}
+	var pendingDeletes int
+	if err := tx.QueryRow(`SELECT count(*) FROM sync_mutations WHERE target_key = ? AND entity = ? AND entity_key = ? AND op = ? AND source = ? AND acked_at IS NULL AND disposition = ?`, DefaultSyncTargetKey, SyncEntityObservation, observation.SyncID, SyncOpDelete, SyncSourceLocal, SyncMutationDispositionPending).Scan(&pendingDeletes); err != nil {
+		return err
+	}
+	if pendingDeletes > 0 {
+		return nil
+	}
+	result, err := s.execHook(tx, `UPDATE sync_mutations SET payload = ? WHERE target_key = ? AND entity = ? AND entity_key = ? AND op = ? AND source = ? AND acked_at IS NULL AND disposition = ?`, string(payload), DefaultSyncTargetKey, SyncEntityObservation, observation.SyncID, SyncOpUpsert, SyncSourceLocal, SyncMutationDispositionPending)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed > 0 {
+		return nil
+	}
+	return s.enqueueSyncMutationTx(tx, SyncEntityObservation, observation.SyncID, SyncOpUpsert, observationPayloadFromObservation(observation))
+}
+
+func deriveObservationSourceRepairTitle(content string) string {
+	content = strings.TrimSpace(stripPrivateTags(content))
+	if lineEnd := strings.IndexByte(content, '\n'); lineEnd >= 0 {
+		content = content[:lineEnd]
+	}
+	return deriveObservationRepairTitle(content)
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 // ListInvalidSessionIdentityEvidence reports blank source session IDs together

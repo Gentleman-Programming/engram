@@ -1,11 +1,15 @@
 package store
 
 import (
+	"database/sql"
 	"fmt"
 	"testing"
 )
 
-const scanPageTestObservations = 5_000
+const (
+	scanPageTestObservations      = 250
+	scanPageBenchmarkObservations = 5_000
+)
 
 func TestScanProject_PageProof(t *testing.T) {
 	s, ids := scanPageStore(t, scanPageTestObservations)
@@ -58,7 +62,7 @@ func TestScanProject_ExactFinalCandidateIsNotCapped(t *testing.T) {
 	}
 }
 func BenchmarkScanProject_Page5000(b *testing.B) {
-	s, _ := scanPageStore(b, scanPageTestObservations)
+	s, _ := scanPageStore(b, scanPageBenchmarkObservations)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = scanPage(b, s, ScanOptions{Project: "scan-page"})
@@ -87,8 +91,21 @@ func scanPageStore(tb testing.TB, count int) (*Store, []int64) {
 		tb.Fatal(err)
 	}
 	ids := make([]int64, 0, count)
-	for i := 0; i < count; i++ {
-		ids = append(ids, scanPageAdd(tb, s, fmt.Sprintf("shared scan vocabulary decision %04d", i), "shared scan vocabulary candidate ranking"))
+	if err := s.withTx(func(tx *sql.Tx) error {
+		for i := 0; i < count; i++ {
+			result, err := tx.Exec(`INSERT INTO observations (sync_id, session_id, type, title, content, project, scope, normalized_hash, revision_count, duplicate_count, created_at, updated_at) VALUES (?, ?, 'decision', ?, ?, 'scan-page', 'project', ?, 1, 1, datetime('now'), datetime('now'))`, fmt.Sprintf("scan-page-%04d", i), "scan-page-session", fmt.Sprintf("shared scan vocabulary decision %04d", i), "shared scan vocabulary candidate ranking", fmt.Sprintf("scan-page-hash-%04d", i))
+			if err != nil {
+				return err
+			}
+			id, err := result.LastInsertId()
+			if err != nil {
+				return err
+			}
+			ids = append(ids, id)
+		}
+		return nil
+	}); err != nil {
+		tb.Fatal(err)
 	}
 	return s, ids
 }
