@@ -6802,9 +6802,11 @@ func (s *Store) enqueueMissingLocalMutationTx(tx *sql.Tx, entity, entityKey stri
 	return true, nil
 }
 
-// projectNeedsBackfill returns true when a project has any sessions, live observations,
-// or prompts that are missing a corresponding sync_mutation row.
-// It runs three lightweight COUNT queries — no cursor is held open.
+// projectNeedsBackfill returns true when a project has any backfillable source
+// row missing its corresponding sync_mutation row. It runs lightweight COUNT
+// queries — no cursor is held open. The predicates mirror the six backfill
+// sources: sessions, live/deleted observations, live/tombstoned prompts, and
+// eligible relations.
 func (s *Store) projectNeedsBackfill(project string) (bool, error) {
 	type countQuery struct {
 		q    string
@@ -6838,6 +6840,17 @@ func (s *Store) projectNeedsBackfill(project string) (bool, error) {
 			args: []any{project, project, DefaultSyncTargetKey, SyncEntityObservation, SyncSourceLocal},
 		},
 		{
+			q: `SELECT COUNT(*) FROM observations o
+			    LEFT JOIN sessions s ON s.id = o.session_id
+			    WHERE (ifnull(o.project,'') = ? OR (ifnull(o.project,'') = '' AND ifnull(s.project,'') = ?))
+			      AND o.deleted_at IS NOT NULL
+			      AND NOT EXISTS (
+			        SELECT 1 FROM sync_mutations sm
+			        WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = o.sync_id AND sm.op = ? AND sm.source = ?
+			      )`,
+			args: []any{project, project, DefaultSyncTargetKey, SyncEntityObservation, SyncOpDelete, SyncSourceLocal},
+		},
+		{
 			q: `SELECT COUNT(*) FROM user_prompts p
 			    LEFT JOIN sessions s ON s.id = p.session_id
 			    WHERE (ifnull(p.project,'') = ? OR (ifnull(p.project,'') = '' AND ifnull(s.project,'') = ?))
@@ -6846,6 +6859,16 @@ func (s *Store) projectNeedsBackfill(project string) (bool, error) {
 			        WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = p.sync_id AND sm.source = ?
 			      )`,
 			args: []any{project, project, DefaultSyncTargetKey, SyncEntityPrompt, SyncSourceLocal},
+		},
+		{
+			q: `SELECT COUNT(*) FROM prompt_tombstones p
+			    LEFT JOIN sessions s ON s.id = p.session_id
+			    WHERE (ifnull(p.project,'') = ? OR (ifnull(p.project,'') = '' AND ifnull(s.project,'') = ?))
+			      AND NOT EXISTS (
+			        SELECT 1 FROM sync_mutations sm
+			        WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = p.sync_id AND sm.source = ? AND sm.op = ?
+			      )`,
+			args: []any{project, project, DefaultSyncTargetKey, SyncEntityPrompt, SyncSourceLocal, SyncOpDelete},
 		},
 		{
 			// Count only fully-judged relations (not orphaned, not pending, with
@@ -6882,6 +6905,74 @@ func (s *Store) projectNeedsBackfill(project string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// enrolledProjectsNeedingBackfill discovers all enrolled projects with at least
+// one journal row missing from the corresponding backfill SELECT. Keeping this
+// as one set-based query avoids running the detector once per enrolled project;
+// the actual backfill remains per-project and transactional.
+func (s *Store) enrolledProjectsNeedingBackfill() ([]string, error) {
+	rows, err := s.db.Query(`
+		SELECT ep.project
+		FROM sync_enrolled_projects ep
+		JOIN (
+			SELECT x.project
+			FROM sessions x
+			WHERE trim(x.id, ?) != ''
+			  AND NOT EXISTS (SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = x.id AND sm.source = ?)
+			UNION
+			SELECT coalesce(nullif(x.project, ''), ifnull(xs.project, ''))
+			FROM observations x LEFT JOIN sessions xs ON xs.id = x.session_id
+			WHERE x.deleted_at IS NULL
+			  AND NOT EXISTS (SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = x.sync_id AND sm.source = ?)
+			UNION
+			SELECT coalesce(nullif(x.project, ''), ifnull(xs.project, ''))
+			FROM observations x LEFT JOIN sessions xs ON xs.id = x.session_id
+			WHERE x.deleted_at IS NOT NULL
+			  AND NOT EXISTS (SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = x.sync_id AND sm.op = ? AND sm.source = ?)
+			UNION
+			SELECT coalesce(nullif(x.project, ''), ifnull(xs.project, ''))
+			FROM user_prompts x LEFT JOIN sessions xs ON xs.id = x.session_id
+			WHERE NOT EXISTS (SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = x.sync_id AND sm.source = ?)
+			UNION
+			SELECT coalesce(nullif(x.project, ''), ifnull(xs.project, ''))
+			FROM prompt_tombstones x LEFT JOIN sessions xs ON xs.id = x.session_id
+			WHERE NOT EXISTS (SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = x.sync_id AND sm.source = ? AND sm.op = ?)
+			UNION
+			SELECT coalesce(nullif(src.project, ''), src_s.project, '')
+			FROM memory_relations r
+			JOIN observations src ON src.sync_id = r.source_id AND src.deleted_at IS NULL
+			JOIN observations tgt ON tgt.sync_id = r.target_id AND tgt.deleted_at IS NULL
+			LEFT JOIN sessions src_s ON src_s.id = src.session_id
+			WHERE r.judgment_status NOT IN (?, ?)
+			  AND ifnull(r.marked_by_actor, '') != ''
+			  AND ifnull(r.marked_by_kind, '') != ''
+			  AND NOT EXISTS (SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = ? AND sm.entity_key = r.sync_id AND sm.source = ?)
+		) candidates ON candidates.project = ep.project
+		ORDER BY ep.project ASC`,
+		sqlWhitespaceTrimSet, DefaultSyncTargetKey, SyncEntitySession, SyncSourceLocal,
+		DefaultSyncTargetKey, SyncEntityObservation, SyncSourceLocal,
+		DefaultSyncTargetKey, SyncEntityObservation, SyncOpDelete, SyncSourceLocal,
+		DefaultSyncTargetKey, SyncEntityPrompt, SyncSourceLocal,
+		DefaultSyncTargetKey, SyncEntityPrompt, SyncSourceLocal, SyncOpDelete,
+		JudgmentStatusOrphaned, JudgmentStatusPending, DefaultSyncTargetKey, SyncEntityRelation, SyncSourceLocal,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var projects []string
+	for rows.Next() {
+		var project string
+		if err := rows.Scan(&project); err != nil {
+			return nil, err
+		}
+		projects = append(projects, project)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return projects, nil
 }
 
 // EnsureEnrolledProjectSyncMutations repairs legacy enrolled-project journal
@@ -6934,36 +7025,13 @@ func (s *Store) EnsureEnrolledProjectSyncMutations(ctx context.Context) error {
 }
 
 func (s *Store) repairEnrolledProjectSyncMutations() error {
-	// Collect enrolled projects outside a transaction so we avoid holding a read
-	// cursor open while we later write inside backfillProjectSyncMutationsTx.
-	rows, err := s.db.Query(`SELECT project FROM sync_enrolled_projects ORDER BY project ASC`)
+	// Discover projects outside transactions; each selected project is still
+	// repaired atomically by the existing per-project backfill transaction.
+	projects, err := s.enrolledProjectsNeedingBackfill()
 	if err != nil {
 		return err
 	}
-	var projects []string
-	for rows.Next() {
-		var project string
-		if err := rows.Scan(&project); err != nil {
-			return closeRowsWithError(rows, err)
-		}
-		projects = append(projects, project)
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-
 	for _, project := range projects {
-		// Fast path: if the project is already fully backfilled, skip the write tx entirely.
-		needs, err := s.projectNeedsBackfill(project)
-		if err != nil {
-			return err
-		}
-		if !needs {
-			continue
-		}
 		if err := s.withTx(func(tx *sql.Tx) error {
 			return s.backfillProjectSyncMutationsTx(tx, project)
 		}); err != nil {
