@@ -365,11 +365,22 @@ func (s *Store) enqueueSourceObservationRepairMutationTx(tx *sql.Tx, observation
 	if validation := ValidateSyncMutationPayload(SyncEntityObservation, SyncOpUpsert, string(payload), observation.SyncID); validation.ReasonCode != "" {
 		return nil
 	}
-	var pending int
-	if err := tx.QueryRow(`SELECT count(*) FROM sync_mutations WHERE target_key = ? AND entity = ? AND entity_key = ? AND source = ? AND acked_at IS NULL AND disposition = 'pending'`, DefaultSyncTargetKey, SyncEntityObservation, observation.SyncID, SyncSourceLocal).Scan(&pending); err != nil {
+	var pendingDeletes int
+	if err := tx.QueryRow(`SELECT count(*) FROM sync_mutations WHERE target_key = ? AND entity = ? AND entity_key = ? AND op = ? AND source = ? AND acked_at IS NULL AND disposition = ?`, DefaultSyncTargetKey, SyncEntityObservation, observation.SyncID, SyncOpDelete, SyncSourceLocal, SyncMutationDispositionPending).Scan(&pendingDeletes); err != nil {
 		return err
 	}
-	if pending > 0 {
+	if pendingDeletes > 0 {
+		return nil
+	}
+	result, err := s.execHook(tx, `UPDATE sync_mutations SET payload = ? WHERE target_key = ? AND entity = ? AND entity_key = ? AND op = ? AND source = ? AND acked_at IS NULL AND disposition = ?`, string(payload), DefaultSyncTargetKey, SyncEntityObservation, observation.SyncID, SyncOpUpsert, SyncSourceLocal, SyncMutationDispositionPending)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed > 0 {
 		return nil
 	}
 	return s.enqueueSyncMutationTx(tx, SyncEntityObservation, observation.SyncID, SyncOpUpsert, observationPayloadFromObservation(observation))

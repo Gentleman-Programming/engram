@@ -10996,6 +10996,61 @@ func TestRepairObservationSourceTitlesRollsBackWhenCanonicalMutationFails(t *tes
 	}
 }
 
+func TestRepairObservationSourceTitlesReconcilesPendingMutations(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		pendingOp    string
+		wantMutation int
+		wantTitle    string
+	}{
+		{name: "refreshes stale pending upsert", pendingOp: SyncOpUpsert, wantMutation: 1, wantTitle: "Recovered title."},
+		{name: "preserves pending delete", pendingOp: SyncOpDelete, wantMutation: 1, wantTitle: "old title"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if err := s.CreateSession("source-title-pending", "project-a", "/work/project-a"); err != nil {
+				t.Fatalf("CreateSession: %v", err)
+			}
+			id, err := s.AddObservation(AddObservationParams{SessionID: "source-title-pending", Type: "decision", Title: "old title", Content: "Recovered title.\nDetails.", Project: "project-a", Scope: "project"})
+			if err != nil {
+				t.Fatalf("AddObservation: %v", err)
+			}
+			observation, err := s.GetObservation(id)
+			if err != nil {
+				t.Fatalf("GetObservation: %v", err)
+			}
+			if _, err := s.db.Exec(`UPDATE observations SET title = '' WHERE id = ?`, id); err != nil {
+				t.Fatalf("blank title: %v", err)
+			}
+			if _, err := s.db.Exec(`UPDATE sync_mutations SET op = ? WHERE entity = ? AND entity_key = ?`, tc.pendingOp, SyncEntityObservation, observation.SyncID); err != nil {
+				t.Fatalf("set pending mutation op: %v", err)
+			}
+
+			if _, err := s.RepairObservationSourceTitles("project-a", true); err != nil {
+				t.Fatalf("RepairObservationSourceTitles: %v", err)
+			}
+
+			if got := scalarInt(t, s, `SELECT count(*) FROM sync_mutations WHERE entity = ? AND entity_key = ? AND acked_at IS NULL AND disposition = ?`, SyncEntityObservation, observation.SyncID, SyncMutationDispositionPending); got != tc.wantMutation {
+				t.Fatalf("pending mutation count=%d, want %d", got, tc.wantMutation)
+			}
+			var op, payload string
+			if err := s.db.QueryRow(`SELECT op, payload FROM sync_mutations WHERE entity = ? AND entity_key = ? AND acked_at IS NULL AND disposition = ?`, SyncEntityObservation, observation.SyncID, SyncMutationDispositionPending).Scan(&op, &payload); err != nil {
+				t.Fatalf("read pending mutation: %v", err)
+			}
+			if op != tc.pendingOp {
+				t.Fatalf("pending op=%q, want %q", op, tc.pendingOp)
+			}
+			var body map[string]any
+			if err := json.Unmarshal([]byte(payload), &body); err != nil {
+				t.Fatalf("decode pending payload: %v", err)
+			}
+			if body["title"] != tc.wantTitle {
+				t.Fatalf("pending payload title=%q, want %q", body["title"], tc.wantTitle)
+			}
+		})
+	}
+}
+
 func TestValidateSyncMutationPayloadRelationRequiresServerFields(t *testing.T) {
 	payload := `{"sync_id":"rel-1","source_id":"obs-a","target_id":"obs-b","relation":"conflicts_with","judgment_status":"judged","project":"engram"}`
 	validation := ValidateSyncMutationPayload(SyncEntityRelation, SyncOpUpsert, payload, "rel-1")
