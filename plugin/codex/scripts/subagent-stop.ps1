@@ -26,7 +26,7 @@ function Resolve-EngramProject {
 
     try {
         $encodedCwd = [System.Uri]::EscapeDataString($Cwd)
-        $resolution = Invoke-RestMethod -Method Get -Uri "$EngramUrl/project/current?cwd=$encodedCwd" -TimeoutSec $TimeoutSec -ErrorAction Stop
+        $resolution = Invoke-RestMethod -Method Get -Uri "$EngramUrl/project/current?cwd=$encodedCwd" -TimeoutSec $TimeoutSec -MaximumRedirection 0 -ErrorAction Stop
         $projectProperty = @($resolution.PSObject.Properties | Where-Object { $_.Name -ceq 'project' })
         $sourceProperty = @($resolution.PSObject.Properties | Where-Object { $_.Name -ceq 'project_source' })
         $validSources = @('config', 'git_remote', 'git_root', 'git_child', 'dir_basename', 'process_override')
@@ -74,30 +74,39 @@ try {
         }
 
         if (-not [string]::IsNullOrEmpty($output)) {
-            $engramPort = if ([string]::IsNullOrWhiteSpace($env:ENGRAM_PORT)) { '7437' } else { $env:ENGRAM_PORT }
-            $engramUrl = "http://127.0.0.1:$engramPort"
-            $networkBudgetSec = 7
-            $networkDeadline = [DateTime]::UtcNow.AddSeconds($networkBudgetSec)
-            $project = Resolve-EngramProject -EngramUrl $engramUrl -Cwd ([string]$payload.cwd) -TimeoutSec 2
+            $portText = [Environment]::GetEnvironmentVariable('ENGRAM_PORT')
+            if ([string]::IsNullOrWhiteSpace($portText)) {
+                $portText = '7437'
+            }
 
-            if ([string]::IsNullOrWhiteSpace($project)) {
-                Write-HookDiagnostic 'unable to resolve project; skipping passive capture'
+            $port = 0
+            if ($portText -notmatch '^[0-9]+$' -or -not [int]::TryParse($portText, [ref]$port) -or $port -lt 1 -or $port -gt 65535) {
+                Write-HookDiagnostic 'invalid ENGRAM_PORT; skipping passive capture'
             } else {
-                $body = [PSCustomObject]@{
-                    session_id = [string]$payload.session_id
-                    content    = $output
-                    project    = $project
-                    source     = 'subagent-stop'
-                } | ConvertTo-Json -Compress
+                $engramUrl = "http://127.0.0.1:$port"
+                $networkBudgetSec = 7
+                $networkDeadline = [DateTime]::UtcNow.AddSeconds($networkBudgetSec)
+                $project = Resolve-EngramProject -EngramUrl $engramUrl -Cwd ([string]$payload.cwd) -TimeoutSec 2
 
-                $captureTimeoutSec = Get-RemainingNetworkTimeoutSec -Deadline $networkDeadline
-                if ($null -eq $captureTimeoutSec) {
-                    Write-HookDiagnostic 'network budget exhausted; skipping passive capture'
+                if ([string]::IsNullOrWhiteSpace($project)) {
+                    Write-HookDiagnostic 'unable to resolve project; skipping passive capture'
                 } else {
-                    try {
-                        Invoke-WebRequest -Uri "$engramUrl/observations/passive" -Method Post -ContentType 'application/json' -Body $body -UseBasicParsing -TimeoutSec $captureTimeoutSec -ErrorAction Stop *> $null
-                    } catch {
-                        Write-HookDiagnostic 'passive capture failed; skipping'
+                    $body = [PSCustomObject]@{
+                        session_id = [string]$payload.session_id
+                        content    = $output
+                        project    = $project
+                        source     = 'subagent-stop'
+                    } | ConvertTo-Json -Compress
+
+                    $captureTimeoutSec = Get-RemainingNetworkTimeoutSec -Deadline $networkDeadline
+                    if ($null -eq $captureTimeoutSec) {
+                        Write-HookDiagnostic 'network budget exhausted; skipping passive capture'
+                    } else {
+                        try {
+                            Invoke-WebRequest -Uri "$engramUrl/observations/passive" -Method Post -ContentType 'application/json' -Body $body -UseBasicParsing -TimeoutSec $captureTimeoutSec -MaximumRedirection 0 -ErrorAction Stop *> $null
+                        } catch {
+                            Write-HookDiagnostic 'passive capture failed; skipping'
+                        }
                     }
                 }
             }

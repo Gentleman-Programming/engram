@@ -57,6 +57,7 @@ func TestCodexWindowsSubagentStopAdapter(t *testing.T) {
 	}
 
 	requests := make(chan map[string]any, 2)
+	redirectedRequests := make(chan string, 2)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -64,6 +65,10 @@ func TestCodexWindowsSubagentStopAdapter(t *testing.T) {
 	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/project/current":
+			if r.URL.Query().Get("cwd") == "redirect-project" {
+				http.Redirect(w, r, "/redirected-project", http.StatusFound)
+				return
+			}
 			if r.URL.Query().Get("cwd") != root {
 				http.NotFound(w, r)
 				return
@@ -79,7 +84,14 @@ func TestCodexWindowsSubagentStopAdapter(t *testing.T) {
 				http.Error(w, "capture unavailable", http.StatusServiceUnavailable)
 				return
 			}
+			if payload["content"] == "redirect capture" {
+				http.Redirect(w, r, "/redirected-capture", http.StatusFound)
+				return
+			}
 			requests <- payload
+			w.WriteHeader(http.StatusOK)
+		case "/redirected-project", "/redirected-capture":
+			redirectedRequests <- r.URL.Path
 			w.WriteHeader(http.StatusOK)
 		default:
 			http.NotFound(w, r)
@@ -101,6 +113,20 @@ func TestCodexWindowsSubagentStopAdapter(t *testing.T) {
 			}
 		case <-time.After(3 * time.Second):
 			t.Fatal("manifest command did not post passive capture")
+		}
+	})
+
+	t.Run("captures stdout when last assistant message is omitted", func(t *testing.T) {
+		stdoutFallbackInput := `{"session_id":"session-stdout","cwd":"` + strings.ReplaceAll(root, `\`, `\\`) + `","stdout":"captured from stdout"}`
+		stdout, stderr, code := runCodexWindowsSubagentStop(t, adapterPath, stdoutFallbackInput, &port)
+		assertCodexSubagentStopHookEnvelope(t, stdout, stderr, code)
+		select {
+		case payload := <-requests:
+			if payload["content"] != "captured from stdout" {
+				t.Fatalf("passive capture content = %#v, want stdout fallback", payload["content"])
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("stdout fallback did not post passive capture")
 		}
 	})
 
@@ -159,6 +185,60 @@ func TestCodexWindowsSubagentStopAdapter(t *testing.T) {
 			}
 		})
 	}
+
+	for _, tc := range []struct {
+		name string
+		port string
+	}{
+		{name: "rejects nonnumeric port", port: "invalid"},
+		{name: "rejects zero port", port: "0"},
+		{name: "rejects out of range port", port: "65536"},
+		{name: "rejects signed port", port: "-1"},
+		{name: "rejects padded port", port: " 7437"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdout, stderr, code := runCodexWindowsSubagentStop(t, adapterPath, input, &tc.port)
+			assertCodexSubagentStopHookEnvelope(t, stdout, stderr, code)
+			if strings.Count(stderr, "engram:") != 1 || !strings.Contains(stderr, "invalid ENGRAM_PORT") {
+				t.Fatalf("stderr=%q, want one invalid port diagnostic", stderr)
+			}
+			select {
+			case payload := <-requests:
+				t.Fatalf("unexpected passive capture payload: %#v", payload)
+			case redirected := <-redirectedRequests:
+				t.Fatalf("unexpected redirected request: %q", redirected)
+			default:
+			}
+		})
+	}
+
+	t.Run("refuses project resolution redirects", func(t *testing.T) {
+		redirectInput := `{"session_id":"session-redirect-project","cwd":"redirect-project","last_assistant_message":"captured"}`
+		stdout, stderr, code := runCodexWindowsSubagentStop(t, adapterPath, redirectInput, &port)
+		assertCodexSubagentStopHookEnvelope(t, stdout, stderr, code)
+		if !strings.Contains(stderr, "unable to resolve project") {
+			t.Fatalf("stderr=%q, want project resolution diagnostic", stderr)
+		}
+		select {
+		case redirected := <-redirectedRequests:
+			t.Fatalf("followed project resolution redirect to %q", redirected)
+		default:
+		}
+	})
+
+	t.Run("refuses passive capture redirects", func(t *testing.T) {
+		redirectInput := strings.Replace(input, "completed normally", "redirect capture", 1)
+		stdout, stderr, code := runCodexWindowsSubagentStop(t, adapterPath, redirectInput, &port)
+		assertCodexSubagentStopHookEnvelope(t, stdout, stderr, code)
+		if !strings.Contains(stderr, "passive capture failed") {
+			t.Fatalf("stderr=%q, want passive capture failure diagnostic", stderr)
+		}
+		select {
+		case redirected := <-redirectedRequests:
+			t.Fatalf("followed passive capture redirect to %q", redirected)
+		default:
+		}
+	})
 }
 
 func runCodexWindowsSubagentStop(t *testing.T, adapterPath, input string, port *string) (string, string, int) {
