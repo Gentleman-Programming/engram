@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -851,6 +852,7 @@ func (s *Store) migrate() error {
 			type,
 			project,
 			topic_key,
+			tokenize='trigram',
 			content='observations',
 			content_rowid='id'
 		);
@@ -879,6 +881,7 @@ func (s *Store) migrate() error {
 		CREATE VIRTUAL TABLE IF NOT EXISTS prompts_fts USING fts5(
 			content,
 			project,
+			tokenize='trigram',
 			content='user_prompts',
 			content_rowid='id'
 		);
@@ -967,6 +970,9 @@ func (s *Store) migrate() error {
 	}
 
 	if err := s.addColumnIfNotExists("user_prompts", "sync_id", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.migrateFTS(); err != nil {
 		return err
 	}
 
@@ -1143,74 +1149,11 @@ func (s *Store) migrate() error {
 		return err
 	}
 
-	// Create triggers to keep FTS in sync (idempotent check)
-	var name string
-	err := s.db.QueryRow(
-		"SELECT name FROM sqlite_master WHERE type='trigger' AND name='obs_fts_insert'",
-	).Scan(&name)
-
-	if err == sql.ErrNoRows {
-		triggers := `
-			CREATE TRIGGER obs_fts_insert AFTER INSERT ON observations BEGIN
-				INSERT INTO observations_fts(rowid, title, content, tool_name, type, project, topic_key)
-				VALUES (new.id, new.title, new.content, new.tool_name, new.type, new.project, new.topic_key);
-			END;
-
-			CREATE TRIGGER obs_fts_delete AFTER DELETE ON observations BEGIN
-				INSERT INTO observations_fts(observations_fts, rowid, title, content, tool_name, type, project, topic_key)
-				VALUES ('delete', old.id, old.title, old.content, old.tool_name, old.type, old.project, old.topic_key);
-			END;
-
-			CREATE TRIGGER obs_fts_update AFTER UPDATE ON observations BEGIN
-				INSERT INTO observations_fts(observations_fts, rowid, title, content, tool_name, type, project, topic_key)
-				VALUES ('delete', old.id, old.title, old.content, old.tool_name, old.type, old.project, old.topic_key);
-				INSERT INTO observations_fts(rowid, title, content, tool_name, type, project, topic_key)
-				VALUES (new.id, new.title, new.content, new.tool_name, new.type, new.project, new.topic_key);
-			END;
-		`
-		if _, err := s.execHook(s.db, triggers); err != nil {
-			return err
-		}
-	}
-
-	if err := s.migrateFTSTopicKey(); err != nil {
-		return err
-	}
 	if err := s.withTx(func(tx *sql.Tx) error {
 		_, err := s.execHook(tx, `UPDATE observations SET project = CAST(project AS TEXT) WHERE typeof(project) = 'blob'`)
 		return err
 	}); err != nil {
 		return err
-	}
-
-	// Prompts FTS triggers (separate idempotent check)
-	var promptTrigger string
-	err = s.db.QueryRow(
-		"SELECT name FROM sqlite_master WHERE type='trigger' AND name='prompt_fts_insert'",
-	).Scan(&promptTrigger)
-
-	if err == sql.ErrNoRows {
-		promptTriggers := `
-			CREATE TRIGGER prompt_fts_insert AFTER INSERT ON user_prompts BEGIN
-				INSERT INTO prompts_fts(rowid, content, project)
-				VALUES (new.id, new.content, new.project);
-			END;
-
-			CREATE TRIGGER prompt_fts_delete AFTER DELETE ON user_prompts BEGIN
-				INSERT INTO prompts_fts(prompts_fts, rowid, content, project)
-				VALUES ('delete', old.id, old.content, old.project);
-			END;
-
-			CREATE TRIGGER prompt_fts_update AFTER UPDATE ON user_prompts BEGIN
-				INSERT INTO prompts_fts(prompts_fts, rowid, content, project)
-				VALUES ('delete', old.id, old.content, old.project);
-				INSERT INTO prompts_fts(rowid, content, project)
-				VALUES (new.id, new.content, new.project);
-			END;
-		`
-		if _, err := s.execHook(s.db, promptTriggers); err != nil {
-			return err
-		}
 	}
 
 	// Phase 3: add republish CLI, surface dead rows via mem_status.
@@ -2224,53 +2167,197 @@ func normalizeUpgradeRepairClass(class string) string {
 	}
 }
 
-func (s *Store) migrateFTSTopicKey() error {
-	var colCount int
-	err := s.db.QueryRow("SELECT COUNT(*) FROM pragma_table_xinfo('observations_fts') WHERE name = 'topic_key'").Scan(&colCount)
-	if err != nil || colCount > 0 {
-		return nil
-	}
+const observationsFTSDefinition = `
+	CREATE VIRTUAL TABLE observations_fts USING fts5(
+		title,
+		content,
+		tool_name,
+		type,
+		project,
+		topic_key,
+		tokenize='trigram',
+		content='observations',
+		content_rowid='id'
+	);
+`
 
-	if _, err := s.execHook(s.db, `
-		DROP TRIGGER IF EXISTS obs_fts_insert;
-		DROP TRIGGER IF EXISTS obs_fts_update;
-		DROP TRIGGER IF EXISTS obs_fts_delete;
-		DROP TABLE IF EXISTS observations_fts;
-		CREATE VIRTUAL TABLE observations_fts USING fts5(
-			title,
-			content,
-			tool_name,
-			type,
-			project,
-			topic_key,
-			content='observations',
-			content_rowid='id'
-		);
+const promptsFTSDefinition = `
+	CREATE VIRTUAL TABLE prompts_fts USING fts5(
+		content,
+		project,
+		tokenize='trigram',
+		content='user_prompts',
+		content_rowid='id'
+	);
+`
+
+const observationsFTSTriggers = `
+	CREATE TRIGGER obs_fts_insert AFTER INSERT ON observations
+	WHEN new.deleted_at IS NULL BEGIN
 		INSERT INTO observations_fts(rowid, title, content, tool_name, type, project, topic_key)
-		SELECT id, title, content, tool_name, type, project, topic_key
-		FROM observations
-		WHERE deleted_at IS NULL;
+		VALUES (new.id, new.title, new.content, new.tool_name, new.type, new.project, new.topic_key);
+	END;
 
-		CREATE TRIGGER obs_fts_insert AFTER INSERT ON observations BEGIN
-			INSERT INTO observations_fts(rowid, title, content, tool_name, type, project, topic_key)
-			VALUES (new.id, new.title, new.content, new.tool_name, new.type, new.project, new.topic_key);
-		END;
+	CREATE TRIGGER obs_fts_delete BEFORE DELETE ON observations
+	WHEN old.deleted_at IS NULL BEGIN
+		DELETE FROM observations_fts WHERE rowid = old.id;
+	END;
 
-		CREATE TRIGGER obs_fts_delete AFTER DELETE ON observations BEGIN
-			INSERT INTO observations_fts(observations_fts, rowid, title, content, tool_name, type, project, topic_key)
-			VALUES ('delete', old.id, old.title, old.content, old.tool_name, old.type, old.project, old.topic_key);
-		END;
+	CREATE TRIGGER obs_fts_update BEFORE UPDATE ON observations
+	WHEN old.deleted_at IS NULL BEGIN
+		DELETE FROM observations_fts WHERE rowid = old.id;
+	END;
 
-		CREATE TRIGGER obs_fts_update AFTER UPDATE ON observations BEGIN
-			INSERT INTO observations_fts(observations_fts, rowid, title, content, tool_name, type, project, topic_key)
-			VALUES ('delete', old.id, old.title, old.content, old.tool_name, old.type, old.project, old.topic_key);
-			INSERT INTO observations_fts(rowid, title, content, tool_name, type, project, topic_key)
-			VALUES (new.id, new.title, new.content, new.tool_name, new.type, new.project, new.topic_key);
-		END;
-	`); err != nil {
-		return fmt.Errorf("migrate fts topic_key: %w", err)
+	CREATE TRIGGER obs_fts_update_insert AFTER UPDATE ON observations
+	WHEN new.deleted_at IS NULL BEGIN
+		INSERT INTO observations_fts(rowid, title, content, tool_name, type, project, topic_key)
+		VALUES (new.id, new.title, new.content, new.tool_name, new.type, new.project, new.topic_key);
+	END;
+`
+
+const promptsFTSTriggers = `
+	CREATE TRIGGER prompt_fts_insert AFTER INSERT ON user_prompts BEGIN
+		INSERT INTO prompts_fts(rowid, content, project)
+		VALUES (new.id, new.content, new.project);
+	END;
+
+	CREATE TRIGGER prompt_fts_delete BEFORE DELETE ON user_prompts BEGIN
+		DELETE FROM prompts_fts WHERE rowid = old.id;
+	END;
+
+	CREATE TRIGGER prompt_fts_update BEFORE UPDATE ON user_prompts BEGIN
+		DELETE FROM prompts_fts WHERE rowid = old.id;
+	END;
+
+	CREATE TRIGGER prompt_fts_update_insert AFTER UPDATE ON user_prompts BEGIN
+		INSERT INTO prompts_fts(rowid, content, project)
+		VALUES (new.id, new.content, new.project);
+	END;
+`
+
+// migrateFTS upgrades older FTS tables and trigger definitions together. The
+// external-content rows must be removed before their source rows change; using
+// ordinary DELETE statements in BEFORE triggers avoids the trigram tokenizer's
+// unsafe special FTS5 'delete' command on recent SQLite versions.
+func (s *Store) migrateFTS() error {
+	return s.withTx(func(tx *sql.Tx) error {
+		observationsOK, err := ftsTableMatches(tx, "observations_fts", []string{"title", "content", "tool_name", "type", "project", "topic_key"}, "observations")
+		if err != nil {
+			return fmt.Errorf("inspect observations fts: %w", err)
+		}
+		promptsOK, err := ftsTableMatches(tx, "prompts_fts", []string{"content", "project"}, "user_prompts")
+		if err != nil {
+			return fmt.Errorf("inspect prompts fts: %w", err)
+		}
+
+		observationsRebuild := !observationsOK || !ftsTriggersMatch(tx, map[string][]string{
+			"obs_fts_insert":        {"afterinsertonobservations", "whennew.deleted_atisnull"},
+			"obs_fts_delete":        {"beforedeleteonobservations", "whenold.deleted_atisnull", "deletefromobservations_ftswhererowid=old.id"},
+			"obs_fts_update":        {"beforeupdateonobservations", "whenold.deleted_atisnull", "deletefromobservations_ftswhererowid=old.id"},
+			"obs_fts_update_insert": {"afterupdateonobservations", "whennew.deleted_atisnull"},
+		})
+		promptsRebuild := !promptsOK || !ftsTriggersMatch(tx, map[string][]string{
+			"prompt_fts_insert":        {"afterinsertonuser_prompts"},
+			"prompt_fts_delete":        {"beforedeleteonuser_prompts", "deletefromprompts_ftswhererowid=old.id"},
+			"prompt_fts_update":        {"beforeupdateonuser_prompts", "deletefromprompts_ftswhererowid=old.id"},
+			"prompt_fts_update_insert": {"afterupdateonuser_prompts"},
+		})
+
+		if observationsRebuild {
+			if _, err := s.execHook(tx, `
+				DROP TRIGGER IF EXISTS obs_fts_insert;
+				DROP TRIGGER IF EXISTS obs_fts_update_insert;
+				DROP TRIGGER IF EXISTS obs_fts_update;
+				DROP TRIGGER IF EXISTS obs_fts_delete;
+				DROP TABLE IF EXISTS observations_fts;
+			`+observationsFTSDefinition+observationsFTSTriggers+`
+				INSERT INTO observations_fts(rowid, title, content, tool_name, type, project, topic_key)
+				SELECT id, title, content, tool_name, type, project, topic_key
+				FROM observations
+				WHERE deleted_at IS NULL;
+			`); err != nil {
+				return fmt.Errorf("rebuild observations fts: %w", err)
+			}
+		}
+
+		if promptsRebuild {
+			if _, err := s.execHook(tx, `
+				DROP TRIGGER IF EXISTS prompt_fts_insert;
+				DROP TRIGGER IF EXISTS prompt_fts_update_insert;
+				DROP TRIGGER IF EXISTS prompt_fts_update;
+				DROP TRIGGER IF EXISTS prompt_fts_delete;
+				DROP TABLE IF EXISTS prompts_fts;
+			`+promptsFTSDefinition+promptsFTSTriggers+`
+				INSERT INTO prompts_fts(rowid, content, project)
+				SELECT id, content, project FROM user_prompts;
+			`); err != nil {
+				return fmt.Errorf("rebuild prompts fts: %w", err)
+			}
+		}
+		return nil
+	})
+}
+
+func ftsTableMatches(tx *sql.Tx, table string, expectedColumns []string, contentTable string) (bool, error) {
+	var ddl string
+	err := tx.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&ddl)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
 	}
-	return nil
+	if err != nil {
+		return false, err
+	}
+
+	rows, err := tx.Query(`SELECT name FROM pragma_table_xinfo(?) WHERE hidden = 0 ORDER BY cid`, table)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	var columns []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return false, err
+		}
+		columns = append(columns, name)
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	if !slices.Equal(columns, expectedColumns) {
+		return false, nil
+	}
+
+	normalized := normalizeFTSSQL(ddl)
+	return strings.Contains(normalized, "createvirtualtable"+table+"usingfts5(") &&
+		strings.Contains(normalized, "tokenize='trigram'") &&
+		strings.Contains(normalized, "content='"+contentTable+"'") &&
+		strings.Contains(normalized, "content_rowid='id'"), nil
+}
+
+func ftsTriggersMatch(tx *sql.Tx, expected map[string][]string) bool {
+	for name, fragments := range expected {
+		var ddl string
+		if err := tx.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?`, name).Scan(&ddl); err != nil {
+			return false
+		}
+		normalized := normalizeFTSSQL(ddl)
+		for _, fragment := range fragments {
+			if !strings.Contains(normalized, fragment) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func normalizeFTSSQL(ddl string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return -1
+		}
+		return unicode.ToLower(r)
+	}, ddl)
 }
 
 // ─── Sessions ────────────────────────────────────────────────────────────────
@@ -3169,23 +3256,28 @@ func (s *Store) SearchPrompts(query string, project string, limit int) ([]Prompt
 		limit = 10
 	}
 
-	ftsQuery := sanitizeFTS(query)
+	var sql string
+	var args []any
+	if hasShortFTSTerm(query) {
+		sql, args = buildPromptLIKEQuery(query, project, limit)
+	} else {
+		ftsQuery := sanitizeFTS(query)
+		sql = `
+			SELECT p.id, ifnull(p.sync_id, '') as sync_id, p.session_id, p.content, ifnull(p.project, '') as project, p.created_at
+			FROM prompts_fts fts
+			JOIN user_prompts p ON p.id = fts.rowid
+			WHERE prompts_fts MATCH ?
+		`
+		args = []any{ftsQuery}
 
-	sql := `
-		SELECT p.id, ifnull(p.sync_id, '') as sync_id, p.session_id, p.content, ifnull(p.project, '') as project, p.created_at
-		FROM prompts_fts fts
-		JOIN user_prompts p ON p.id = fts.rowid
-		WHERE prompts_fts MATCH ?
-	`
-	args := []any{ftsQuery}
+		if project != "" {
+			sql += " AND p.project = ?"
+			args = append(args, project)
+		}
 
-	if project != "" {
-		sql += " AND p.project = ?"
-		args = append(args, project)
+		sql += " ORDER BY fts.rank LIMIT ?"
+		args = append(args, limit)
 	}
-
-	sql += " ORDER BY fts.rank LIMIT ?"
-	args = append(args, limit)
 
 	rows, err := s.queryItHook(s.db, sql, args...)
 	if err != nil {
@@ -3690,15 +3782,20 @@ func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOpti
 		}
 	}
 
-	// Build FTS5 query: "all" (default) uses AND semantics; "any" uses OR for broader recall.
-	var ftsQuery string
-	if opts.MatchMode == "any" {
-		ftsQuery = sanitizeFTSCandidates(query)
+	var sqlQ string
+	var args []any
+	if hasShortFTSTerm(query) {
+		sqlQ, args = buildSearchLIKEQuery(query, opts, limit)
 	} else {
-		ftsQuery = sanitizeFTS(query)
+		// Build FTS5 query: "all" (default) uses AND semantics; "any" uses OR for broader recall.
+		var ftsQuery string
+		if opts.MatchMode == "any" {
+			ftsQuery = sanitizeFTSCandidates(query)
+		} else {
+			ftsQuery = sanitizeFTS(query)
+		}
+		sqlQ, args = buildSearchFTSQuery(ftsQuery, opts, limit)
 	}
-
-	sqlQ, args := buildSearchFTSQuery(ftsQuery, opts, limit)
 	rows, err := s.queryItContextHook(ctx, sqlQ, args...)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -3779,6 +3876,94 @@ func buildSearchFTSQuery(ftsQuery string, opts SearchOptions, limit int) (string
 	}
 
 	sqlQ += " ORDER BY rank LIMIT ?"
+	return sqlQ, append(args, limit)
+}
+
+// hasShortFTSTerm identifies the only queries trigram FTS5 cannot satisfy.
+// Those terms use a bounded, escaped base-table fallback instead of changing
+// normal FTS ranking or treating every search as a LIKE scan.
+func hasShortFTSTerm(query string) bool {
+	for _, term := range searchTerms(query) {
+		if utf8.RuneCountInString(term) < 3 {
+			return true
+		}
+	}
+	return false
+}
+
+func searchTerms(query string) []string {
+	var terms []string
+	for _, term := range strings.Fields(query) {
+		term = strings.Trim(term, `"`)
+		if term != "" {
+			terms = append(terms, term)
+		}
+	}
+	return terms
+}
+
+func escapeLIKE(term string) string {
+	term = strings.ReplaceAll(term, `\`, `\\`)
+	term = strings.ReplaceAll(term, `%`, `\%`)
+	return strings.ReplaceAll(term, `_`, `\_`)
+}
+
+func buildSearchLIKEQuery(query string, opts SearchOptions, limit int) (string, []any) {
+	sqlQ := `
+		SELECT o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
+		       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.review_after, o.pinned, o.created_at, o.updated_at, o.deleted_at,
+		       0.0 AS rank
+		FROM observations o
+		WHERE o.deleted_at IS NULL
+	`
+	args := []any{}
+	termGroups := make([]string, 0)
+	for _, term := range searchTerms(query) {
+		termGroups = append(termGroups, `(o.title LIKE ? ESCAPE '\' OR o.content LIKE ? ESCAPE '\' OR o.tool_name LIKE ? ESCAPE '\' OR o.type LIKE ? ESCAPE '\' OR o.project LIKE ? ESCAPE '\' OR o.topic_key LIKE ? ESCAPE '\')`)
+		pattern := "%" + escapeLIKE(term) + "%"
+		for range 6 {
+			args = append(args, pattern)
+		}
+	}
+	joiner := " AND "
+	if opts.MatchMode == "any" {
+		joiner = " OR "
+	}
+	sqlQ += " AND (" + strings.Join(termGroups, joiner) + ")"
+	if opts.Type != "" {
+		sqlQ += " AND o.type = ?"
+		args = append(args, opts.Type)
+	}
+	if opts.Project != "" {
+		sqlQ += " AND LOWER(o.project) = ?"
+		args = append(args, opts.Project)
+	}
+	if opts.Scope != "" {
+		sqlQ += " AND o.scope = ?"
+		args = append(args, normalizeScope(opts.Scope))
+	}
+	sqlQ += " ORDER BY datetime(o.updated_at) DESC, o.id DESC LIMIT ?"
+	return sqlQ, append(args, limit)
+}
+
+func buildPromptLIKEQuery(query, project string, limit int) (string, []any) {
+	sqlQ := `
+		SELECT p.id, ifnull(p.sync_id, '') as sync_id, p.session_id, p.content, ifnull(p.project, '') as project, p.created_at
+		FROM user_prompts p
+		WHERE `
+	args := []any{}
+	termGroups := make([]string, 0)
+	for _, term := range searchTerms(query) {
+		termGroups = append(termGroups, `(p.content LIKE ? ESCAPE '\' OR p.project LIKE ? ESCAPE '\')`)
+		pattern := "%" + escapeLIKE(term) + "%"
+		args = append(args, pattern, pattern)
+	}
+	sqlQ += "(" + strings.Join(termGroups, " AND ") + ")"
+	if project != "" {
+		sqlQ += " AND p.project = ?"
+		args = append(args, project)
+	}
+	sqlQ += " ORDER BY p.created_at DESC, p.id DESC LIMIT ?"
 	return sqlQ, append(args, limit)
 }
 
