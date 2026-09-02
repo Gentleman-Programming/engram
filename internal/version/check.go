@@ -164,7 +164,7 @@ func updateInstructions() string {
 	case "linux":
 		return "  brew update && brew upgrade engram\n  or: go install github.com/Gentleman-Programming/engram/v2/cmd/engram@latest"
 	default:
-		return "  go install github.com/Gentleman-Programming/engram/v2/cmd/engram@latest\n  or: https://github.com/Gentleman-Programming/engram/v2/releases/latest"
+		return "  go install github.com/Gentleman-Programming/engram/v2/cmd/engram@latest\n  or: https://github.com/Gentleman-Programming/engram/releases/latest"
 	}
 }
 

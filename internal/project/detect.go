@@ -549,15 +549,9 @@ func detectFromGitRemote(dir string) string {
 //   - SSH:   git@github.com:user/repo.git
 //   - HTTPS: https://github.com/user/repo.git
 //   - Either with or without the trailing .git suffix
-//   - URLs with a Go module major version suffix like /v2 or /v3 are normalized
-//     to the underlying repository name.
 func extractRepoName(url string) string {
 	// Strip trailing .git suffix
 	url = strings.TrimSuffix(url, ".git")
-
-	// Strip Go module major version suffix (e.g., /v2, /v3) so the
-	// repo name matches the underlying repository, not the module version.
-	url = stripGoModuleMajorVersionSuffix(url)
 
 	// Split on both "/" and ":" to handle SSH and HTTPS uniformly
 	parts := strings.FieldsFunc(url, func(r rune) bool {
@@ -568,25 +562,4 @@ func extractRepoName(url string) string {
 	}
 	name := parts[len(parts)-1]
 	return strings.TrimSpace(name)
-}
-
-// stripGoModuleMajorVersionSuffix removes a trailing Go module major version
-// path segment like "/v2", "/v3", "/v10" from a git remote URL. Go modules
-// use this convention to denote the module's major version; it is not part
-// of the underlying repository name.
-func stripGoModuleMajorVersionSuffix(url string) string {
-	parts := strings.Split(url, "/")
-	if len(parts) == 0 {
-		return url
-	}
-	last := parts[len(parts)-1]
-	if len(last) < 2 || last[0] != 'v' {
-		return url
-	}
-	for _, c := range last[1:] {
-		if c < '0' || c > '9' {
-			return url
-		}
-	}
-	return strings.Join(parts[:len(parts)-1], "/")
 }

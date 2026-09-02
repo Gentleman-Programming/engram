@@ -45,12 +45,12 @@ Two paths exist because Go's [Semantic Import Versioning](https://go.dev/ref/mod
 # Stable line (v1.x — recommended for production; currently tracks @v1.20.0)
 go install github.com/Gentleman-Programming/engram/cmd/engram@latest
 
-# v2 line (release candidates and future v2.x stable; currently @v2.0.0-rc.3)
+# v2 line (first post-migration release candidate or any later v2 release)
 go install github.com/Gentleman-Programming/engram/v2/cmd/engram@latest
 # Binary goes to %GOPATH%\bin\engram.exe (typically %USERPROFILE%\go\bin\)
 ```
 
-For the v2 line, `@latest` resolves to the highest non-prerelease tag (none yet — once `v2.0.0` ships it will point there). Pin to a specific RC with `@v2.0.0-rc.3` if you want the latest prerelease.
+The `/v2` command requires the first release candidate published after this migration, or a later v2 release; existing `v2.0.0-rc.1` through `v2.0.0-rc.3` cannot use it. `@latest` selects the latest released version for the requested module path and does not make those earlier RCs compatible. Until then, use the v1 command above or build v2 from a local clone.
 
 Ensure `%GOPATH%\bin` (or `%USERPROFILE%\go\bin`) is on your `PATH`.
 
@@ -133,10 +133,12 @@ Pick the line that matches the major version you want — the `/v2` suffix exist
 # Stable line (v1.x — recommended for production; currently tracks @v1.20.0)
 go install github.com/Gentleman-Programming/engram/cmd/engram@latest
 
-# v2 line (release candidates and future v2.x stable; currently @v2.0.0-rc.3)
+# v2 line (first post-migration release candidate or any later v2 release)
 go install github.com/Gentleman-Programming/engram/v2/cmd/engram@latest
 # Binary goes to $GOPATH/bin (typically ~/go/bin/)
 ```
+
+The `/v2` command requires the first release candidate published after this migration, or a later v2 release; existing `v2.0.0-rc.1` through `v2.0.0-rc.3` cannot use it. `@latest` selects the latest released version for the requested module path and does not make those earlier RCs compatible. Until then, use the v1 command above or build v2 from a local clone.
 
 Or build from a local clone:
 
