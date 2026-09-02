@@ -14,8 +14,9 @@ import (
 )
 
 const (
-	repoOwner = "Gentleman-Programming"
-	repoName  = "engram"
+	repoOwner        = "Gentleman-Programming"
+	repoName         = "engram"
+	EnvNoUpdateCheck = "ENGRAM_NO_UPDATE_CHECK"
 )
 
 var (
@@ -45,6 +46,10 @@ type githubRelease struct {
 // CheckLatest compares the running version against the latest GitHub release.
 // It distinguishes between up-to-date, update available, and check failures.
 func CheckLatest(current string) CheckResult {
+	if updateCheckDisabled() {
+		return CheckResult{}
+	}
+
 	switch current {
 	case "":
 		return checkFailed("Could not check for updates: current version is unknown.")
@@ -104,6 +109,11 @@ func CheckLatest(current string) CheckResult {
 			running, latest, updateInstructions(),
 		),
 	}
+}
+
+func updateCheckDisabled() bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv(EnvNoUpdateCheck)))
+	return v == "1" || v == "true" || v == "yes" || v == "on"
 }
 
 // normalizeVersion strips a leading "v" prefix.
