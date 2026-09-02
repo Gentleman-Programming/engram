@@ -5082,8 +5082,8 @@ func TestImportSkipsObservationWithExistingSyncID(t *testing.T) {
 		if err != nil {
 			t.Fatalf("import attempt %d: %v", attempt, err)
 		}
-		if result.ObservationsImported != 0 {
-			t.Fatalf("import attempt %d observations = %d, want 0", attempt, result.ObservationsImported)
+		if result.ObservationsImported != 0 || result.ObservationsUpdated != 0 || result.ObservationsSkippedStale != 3 {
+			t.Fatalf("import attempt %d result = %+v, want three stale skips", attempt, result)
 		}
 	}
 
@@ -5113,6 +5113,261 @@ func TestImportStoresObservationProjectAsText(t *testing.T) {
 	}
 	if storageClass != "text" {
 		t.Fatalf("project storage class = %q, want text", storageClass)
+	}
+}
+
+func TestImportObservationUsesLastWriteWinsOrdering(t *testing.T) {
+	s := newTestStore(t)
+	project := "engram"
+	base := &ExportData{
+		Sessions:     []Session{{ID: "import-lww-session", Project: project, Directory: "/tmp", StartedAt: "2026-01-01 00:00:00"}},
+		Observations: []Observation{{SyncID: "import-lww-observation", SessionID: "import-lww-session", Type: "note", Title: "old", Content: "old", Project: &project, Scope: "project", CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-01 00:00:00"}},
+	}
+	if result, err := s.Import(base); err != nil || result.ObservationsImported != 1 {
+		t.Fatalf("base import = %+v, %v", result, err)
+	}
+
+	newer := *base
+	newer.Observations = []Observation{{SyncID: "import-lww-observation", SessionID: "import-lww-session", Type: "note", Title: "new", Content: "new", Project: &project, Scope: "project", CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-02 00:00:00"}}
+	if result, err := s.Import(&newer); err != nil || result.ObservationsImported != 0 || result.ObservationsUpdated != 1 || result.ObservationsSkippedStale != 0 {
+		t.Fatalf("newer import = %+v, %v; updates must not be counted as inserts", result, err)
+	}
+	offsetOlder := newer
+	offsetOlder.Observations[0].Title = "offset older"
+	offsetOlder.Observations[0].UpdatedAt = "2026-01-02T01:00:00+02:00"
+	if result, err := s.Import(&offsetOlder); err != nil || result.ObservationsSkippedStale != 1 {
+		t.Fatalf("offset older import = %+v, %v", result, err)
+	}
+	if got := scalarString(t, s, `SELECT title FROM observations WHERE sync_id = ?`, "import-lww-observation"); got != "new" {
+		t.Fatalf("offset older changed title to %q", got)
+	}
+	older := newer
+	older.Observations = []Observation{{SyncID: "import-lww-observation", SessionID: "import-lww-session", Type: "note", Title: "older", Content: "older", Project: &project, Scope: "project", CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-01 12:00:00"}}
+	if result, err := s.Import(&older); err != nil || result.ObservationsSkippedStale != 1 {
+		t.Fatalf("older import: %v", err)
+	}
+	if got := scalarString(t, s, `SELECT title FROM observations WHERE sync_id = ?`, "import-lww-observation"); got != "new" {
+		t.Fatalf("title = %q, want newer snapshot", got)
+	}
+
+	for _, tc := range []struct {
+		name, updatedAt, wantTitle string
+	}{
+		{name: "fractional newer", updatedAt: "2026-01-02 00:00:00.500000000", wantTitle: "fractional newer"},
+		{name: "fractional older", updatedAt: "2026-01-02 00:00:00.400000000", wantTitle: "fractional newer"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := s.Import(&ExportData{Observations: []Observation{{SyncID: "import-lww-observation", SessionID: "import-lww-session", Type: "note", Title: tc.name, Content: tc.name, Project: &project, Scope: "project", CreatedAt: "2026-01-01 00:00:00", UpdatedAt: tc.updatedAt}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.name == "fractional newer" && (result.ObservationsUpdated != 1 || result.ObservationsSkippedStale != 0) {
+				t.Fatalf("result = %+v, want update", result)
+			}
+			if tc.name == "fractional older" && (result.ObservationsUpdated != 0 || result.ObservationsSkippedStale != 1) {
+				t.Fatalf("result = %+v, want stale skip", result)
+			}
+			if got := scalarString(t, s, `SELECT title FROM observations WHERE sync_id = ?`, "import-lww-observation"); got != tc.wantTitle {
+				t.Fatalf("title = %q, want %q", got, tc.wantTitle)
+			}
+		})
+	}
+
+	result, err := s.Import(&ExportData{Observations: []Observation{{SyncID: "import-lww-observation", SessionID: "import-lww-session", Type: "note", Title: "invalid incoming", Content: "invalid incoming", Project: &project, Scope: "project", CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "not-a-time"}}})
+	if err != nil || result.ObservationsSkippedStale != 1 {
+		t.Fatalf("invalid incoming import = %+v, %v", result, err)
+	}
+	if got := scalarString(t, s, `SELECT title FROM observations WHERE sync_id = ?`, "import-lww-observation"); got != "fractional newer" {
+		t.Fatalf("invalid incoming changed title to %q", got)
+	}
+	if _, err := s.db.Exec(`UPDATE observations SET updated_at = ? WHERE sync_id = ?`, "not-a-time", "import-lww-observation"); err != nil {
+		t.Fatal(err)
+	}
+	result, err = s.Import(&ExportData{Observations: []Observation{{SyncID: "import-lww-observation", SessionID: "import-lww-session", Type: "note", Title: "invalid current", Content: "invalid current", Project: &project, Scope: "project", CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-03 00:00:00"}}})
+	if err != nil || result.ObservationsSkippedStale != 1 {
+		t.Fatalf("invalid current import = %+v, %v", result, err)
+	}
+	if got := scalarString(t, s, `SELECT title FROM observations WHERE sync_id = ?`, "import-lww-observation"); got != "fractional newer" {
+		t.Fatalf("invalid current changed title to %q", got)
+	}
+}
+
+func TestImportObservationPreservesFieldsFromPartialNewerSnapshot(t *testing.T) {
+	project := "engram"
+	base := Observation{
+		SyncID:         "import-partial-observation",
+		SessionID:      "import-partial-session",
+		Type:           "note",
+		Title:          "base",
+		Content:        "base",
+		Project:        &project,
+		Scope:          "project",
+		RevisionCount:  4,
+		DuplicateCount: 3,
+		CreatedAt:      "2026-01-01 00:00:00",
+		UpdatedAt:      "2026-01-01 00:00:00",
+	}
+	baseData := &ExportData{
+		Sessions:     []Session{{ID: base.SessionID, Project: project, Directory: "/tmp", StartedAt: base.CreatedAt}},
+		Observations: []Observation{base},
+	}
+
+	for _, tc := range []struct {
+		name, createdAt string
+		revisionCount   int
+		duplicateCount  int
+	}{
+		{name: "empty created at and zero counts", revisionCount: 0, duplicateCount: 0},
+		{name: "invalid created at and negative counts", createdAt: "not-a-time", revisionCount: -1, duplicateCount: -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if _, err := s.Import(baseData); err != nil {
+				t.Fatalf("base import: %v", err)
+			}
+
+			partial := base
+			partial.Title = "newer partial"
+			partial.Content = "newer partial"
+			partial.CreatedAt = tc.createdAt
+			partial.UpdatedAt = "2026-01-02 00:00:00"
+			partial.RevisionCount = tc.revisionCount
+			partial.DuplicateCount = tc.duplicateCount
+			if result, err := s.Import(&ExportData{Observations: []Observation{partial}}); err != nil || result.ObservationsUpdated != 1 {
+				t.Fatalf("partial newer import = %+v, %v", result, err)
+			}
+
+			if got := scalarString(t, s, `SELECT created_at FROM observations WHERE sync_id = ?`, base.SyncID); got != base.CreatedAt {
+				t.Fatalf("created_at = %q, want %q", got, base.CreatedAt)
+			}
+			if got := scalarInt(t, s, `SELECT revision_count FROM observations WHERE sync_id = ?`, base.SyncID); got != base.RevisionCount {
+				t.Fatalf("revision_count = %d, want %d", got, base.RevisionCount)
+			}
+			if got := scalarInt(t, s, `SELECT duplicate_count FROM observations WHERE sync_id = ?`, base.SyncID); got != base.DuplicateCount {
+				t.Fatalf("duplicate_count = %d, want %d", got, base.DuplicateCount)
+			}
+		})
+	}
+
+	t.Run("valid created at and positive counts apply", func(t *testing.T) {
+		s := newTestStore(t)
+		if _, err := s.Import(baseData); err != nil {
+			t.Fatalf("base import: %v", err)
+		}
+
+		newer := base
+		newer.CreatedAt = "2025-12-31 00:00:00"
+		newer.UpdatedAt = "2026-01-02 00:00:00"
+		newer.RevisionCount = 6
+		newer.DuplicateCount = 5
+		if result, err := s.Import(&ExportData{Observations: []Observation{newer}}); err != nil || result.ObservationsUpdated != 1 {
+			t.Fatalf("newer import = %+v, %v", result, err)
+		}
+
+		if got := scalarString(t, s, `SELECT created_at FROM observations WHERE sync_id = ?`, base.SyncID); got != newer.CreatedAt {
+			t.Fatalf("created_at = %q, want %q", got, newer.CreatedAt)
+		}
+		if got := scalarInt(t, s, `SELECT revision_count FROM observations WHERE sync_id = ?`, base.SyncID); got != newer.RevisionCount {
+			t.Fatalf("revision_count = %d, want %d", got, newer.RevisionCount)
+		}
+		if got := scalarInt(t, s, `SELECT duplicate_count FROM observations WHERE sync_id = ?`, base.SyncID); got != newer.DuplicateCount {
+			t.Fatalf("duplicate_count = %d, want %d", got, newer.DuplicateCount)
+		}
+	})
+}
+
+func TestImportOlderObservationDoesNotResurrectLocalDeletion(t *testing.T) {
+	s := newTestStore(t)
+	project := "engram"
+	if _, err := s.Import(&ExportData{
+		Sessions:     []Session{{ID: "import-delete-session", Project: project, Directory: "/tmp", StartedAt: "2026-01-01 00:00:00"}},
+		Observations: []Observation{{SyncID: "import-delete-observation", SessionID: "import-delete-session", Type: "note", Title: "active", Content: "active", Project: &project, Scope: "project", CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-01 00:00:00"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE observations SET deleted_at = ?, updated_at = ? WHERE sync_id = ?`, "2026-01-02 00:00:00", "2026-01-02 00:00:00", "import-delete-observation"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.Import(&ExportData{Observations: []Observation{{SyncID: "import-delete-observation", SessionID: "import-delete-session", Type: "note", Title: "stale active", Content: "stale active", Project: &project, Scope: "project", CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-01 12:00:00"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ObservationsImported != 0 || result.ObservationsSkippedStale != 1 || scalarInt(t, s, `SELECT count(*) FROM observations WHERE sync_id = ? AND deleted_at IS NOT NULL`, "import-delete-observation") != 1 {
+		t.Fatalf("older active snapshot changed local deletion: result=%+v", result)
+	}
+}
+
+func TestImportPromptIdentityAndTombstoneOrdering(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("import-prompt-session", "engram", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	base := &ExportData{Prompts: []Prompt{{SyncID: "import-prompt", SessionID: "import-prompt-session", Content: "first", Project: "engram", CreatedAt: "2026-01-01 00:00:00"}}}
+	if result, err := s.Import(base); err != nil || result.PromptsImported != 1 {
+		t.Fatalf("base prompt import = %+v, %v", result, err)
+	}
+	duplicate := &ExportData{Prompts: []Prompt{{SyncID: "import-prompt", SessionID: "import-prompt-session", Content: "must remain first", Project: "engram", CreatedAt: "2026-01-02 00:00:00"}}}
+	if result, err := s.Import(duplicate); err != nil || result.PromptsImported != 0 {
+		t.Fatalf("duplicate prompt import = %+v, %v", result, err)
+	}
+	if got := scalarString(t, s, `SELECT content FROM user_prompts WHERE sync_id = ?`, "import-prompt"); got != "first" {
+		t.Fatalf("prompt content = %q, want immutable original", got)
+	}
+
+	if _, err := s.db.Exec(`INSERT INTO prompt_tombstones (sync_id, session_id, project, deleted_at) VALUES (?, ?, ?, ?)`, "import-tombstoned-prompt", "import-prompt-session", "engram", "2026-01-02 00:00:00"); err != nil {
+		t.Fatal(err)
+	}
+	stale := &ExportData{Prompts: []Prompt{{SyncID: "import-tombstoned-prompt", SessionID: "import-prompt-session", Content: "stale", Project: "engram", CreatedAt: "2026-01-01 00:00:00"}}}
+	if result, err := s.Import(stale); err != nil || result.PromptsImported != 0 {
+		t.Fatalf("stale tombstoned prompt import = %+v, %v", result, err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO prompt_tombstones (sync_id, session_id, project, deleted_at) VALUES (?, ?, ?, ?)`, "offset-tombstoned-prompt", "import-prompt-session", "engram", "2026-01-02T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.Import(&ExportData{Prompts: []Prompt{{SyncID: "offset-tombstoned-prompt", SessionID: "import-prompt-session", Content: "stale", Project: "engram", CreatedAt: "2026-01-02T01:00:00+02:00"}}})
+	if err != nil || result.PromptsImported != 0 || scalarInt(t, s, `SELECT count(*) FROM prompt_tombstones WHERE sync_id = ?`, "offset-tombstoned-prompt") != 1 || scalarInt(t, s, `SELECT count(*) FROM user_prompts WHERE sync_id = ?`, "offset-tombstoned-prompt") != 0 {
+		t.Fatalf("offset stale tombstoned prompt import = %+v, %v", result, err)
+	}
+	newer := &ExportData{Prompts: []Prompt{{SyncID: "import-tombstoned-prompt", SessionID: "import-prompt-session", Content: "newer", Project: "engram", CreatedAt: "2026-01-03 00:00:00"}}}
+	if result, err := s.Import(newer); err != nil || result.PromptsImported != 1 {
+		t.Fatalf("newer tombstoned prompt import = %+v, %v", result, err)
+	}
+	if got := scalarInt(t, s, `SELECT count(*) FROM prompt_tombstones WHERE sync_id = ?`, "import-tombstoned-prompt"); got != 0 {
+		t.Fatalf("newer prompt left tombstone: %d", got)
+	}
+
+	if _, err := s.db.Exec(`INSERT INTO prompt_tombstones (sync_id, session_id, project, deleted_at) VALUES (?, ?, ?, ?)`, "fractional-tombstone", "import-prompt-session", "engram", "2026-01-04 00:00:00.500000000"); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, createdAt              string
+		wantImported, wantTombstones int
+	}{
+		{name: "fractional older", createdAt: "2026-01-04 00:00:00.400000000", wantImported: 0, wantTombstones: 1},
+		{name: "fractional newer", createdAt: "2026-01-04 00:00:00.600000000", wantImported: 1, wantTombstones: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := s.Import(&ExportData{Prompts: []Prompt{{SyncID: "fractional-tombstone", SessionID: "import-prompt-session", Content: tc.name, Project: "engram", CreatedAt: tc.createdAt}}})
+			if err != nil || result.PromptsImported != tc.wantImported {
+				t.Fatalf("result = %+v, err = %v", result, err)
+			}
+			if got := scalarInt(t, s, `SELECT count(*) FROM prompt_tombstones WHERE sync_id = ?`, "fractional-tombstone"); got != tc.wantTombstones {
+				t.Fatalf("tombstones = %d, want %d", got, tc.wantTombstones)
+			}
+		})
+	}
+	if got := scalarString(t, s, `SELECT content FROM user_prompts WHERE sync_id = ?`, "fractional-tombstone"); got != "fractional newer" {
+		t.Fatalf("prompt content = %q, want fractional newer", got)
+	}
+	if _, err := s.db.Exec(`INSERT INTO prompt_tombstones (sync_id, session_id, project, deleted_at) VALUES (?, ?, ?, ?)`, "invalid-tombstone", "import-prompt-session", "engram", "not-a-time"); err != nil {
+		t.Fatal(err)
+	}
+	result, err = s.Import(&ExportData{Prompts: []Prompt{{SyncID: "invalid-tombstone", SessionID: "import-prompt-session", Content: "must remain deleted", Project: "engram", CreatedAt: "2026-01-05 00:00:00"}}})
+	if err != nil || result.PromptsImported != 0 {
+		t.Fatalf("invalid tombstone import = %+v, %v", result, err)
+	}
+	if got := scalarInt(t, s, `SELECT count(*) FROM prompt_tombstones WHERE sync_id = ?`, "invalid-tombstone"); got != 1 {
+		t.Fatalf("invalid tombstone was removed: %d", got)
 	}
 }
 

@@ -891,6 +891,15 @@ func TestCmdExportAndImport(t *testing.T) {
 	if !strings.Contains(importOut, "Imported from "+exportPath) {
 		t.Fatalf("unexpected import output: %q", importOut)
 	}
+	for _, want := range []string{
+		"  Sessions:",
+		"  Observations: 1 imported, 0 updated, 0 skipped stale",
+		"  Prompts:",
+	} {
+		if !strings.Contains(importOut, want) {
+			t.Fatalf("import output missing %q: %q", want, importOut)
+		}
+	}
 
 	s, err := store.New(targetCfg)
 	if err != nil {
