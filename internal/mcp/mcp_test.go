@@ -4954,67 +4954,148 @@ func TestMemSave_MissingSessionIDFailsLoudly(t *testing.T) {
 	}
 }
 
-// TestMemSessionSummary_UnregisteredTaskLikeSessionIDRejectedWithRecoveryMetadata
-// covers the #683 lifecycle failure: an agent invents a session_id from a task
-// or issue label (e.g. "issue-1096-update-20260813") instead of one returned by
-// mem_session_start. The unknown_session error must carry structured recovery
-// fields an agent can act on deterministically, the summary must not be
-// persisted under the guessed ID, and the documented recovery — retrying with
-// session_id omitted — must actually succeed.
-func TestMemSessionSummary_UnregisteredTaskLikeSessionIDRejectedWithRecoveryMetadata(t *testing.T) {
-	dir := t.TempDir()
-	initTestGitRepo(t, dir)
-	cmd := exec.Command("git", "-C", dir, "remote", "add", "origin",
-		"git@github.com:user/unregistered-session-summary.git")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git remote add: %v\n%s", err, out)
-	}
-	t.Chdir(dir)
+func TestWriteToolsRejectUnregisteredSessionID(t *testing.T) {
+	const (
+		project  = "unknown-session-project"
+		invented = "issue-1096-update-20260813"
+	)
 
-	s := newMCPTestStore(t)
-	h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
-
-	invented := "issue-1096-update-20260813"
-	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"content":    "## Goal\nfix the thing",
-		"session_id": invented,
-	}}})
-	if err != nil {
-		t.Fatalf("handler error: %v", err)
-	}
-	if !res.IsError {
-		t.Fatal("expected model-invented session_id to fail")
-	}
-	body := callResultJSON(t, res)
-	if body["error_code"] != "unknown_session" {
-		t.Fatalf("expected unknown_session error, got %v", body)
-	}
-	if body["invalid_session_id"] != invented {
-		t.Fatalf("expected invalid_session_id=%q, got %v", invented, body["invalid_session_id"])
-	}
-	if body["retry_without_session_id"] != true {
-		t.Fatalf("expected retry_without_session_id=true, got %v", body["retry_without_session_id"])
-	}
-
-	// The rejected call must never reach the write path under the guessed ID.
-	if _, err := s.GetSession(invented); err == nil {
-		t.Fatal("unregistered session_id must not be implicitly created")
-	}
-	wrongResults, _ := s.Search("fix the thing", store.SearchOptions{Project: "unregistered-session-summary", Limit: 5})
-	if len(wrongResults) != 0 {
-		t.Fatal("summary must not persist under an unregistered session_id")
+	tests := []struct {
+		name    string
+		handler func(*store.Store) server.ToolHandlerFunc
+		args    map[string]any
+	}{
+		{
+			name: "mem_save",
+			handler: func(s *store.Store) server.ToolHandlerFunc {
+				return handleSave(s, MCPConfig{DefaultProject: project}, NewSessionActivity(10*time.Minute))
+			},
+			args: map[string]any{"title": "invented session", "content": "must not persist"},
+		},
+		{
+			name: "mem_save_prompt",
+			handler: func(s *store.Store) server.ToolHandlerFunc {
+				return handleSavePrompt(s, MCPConfig{DefaultProject: project}, NewSessionActivity(10*time.Minute))
+			},
+			args: map[string]any{"content": "must not persist"},
+		},
+		{
+			name: "mem_session_summary",
+			handler: func(s *store.Store) server.ToolHandlerFunc {
+				return handleSessionSummary(s, MCPConfig{DefaultProject: project}, NewSessionActivity(10*time.Minute))
+			},
+			args: map[string]any{"content": "## Goal\nMust not persist"},
+		},
+		{
+			name: "mem_capture_passive",
+			handler: func(s *store.Store) server.ToolHandlerFunc {
+				return handleCapturePassive(s, MCPConfig{DefaultProject: project}, NewSessionActivity(10*time.Minute))
+			},
+			args: map[string]any{"content": "## Key Learnings:\n- Must not persist"},
+		},
 	}
 
-	// The documented recovery — omit session_id and retry unchanged — must succeed.
-	retryRes, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"content": "## Goal\nfix the thing",
-	}}})
-	if err != nil || retryRes.IsError {
-		t.Fatalf("retry without session_id: err=%v isError=%v text=%s", err, retryRes.IsError, callResultText(t, retryRes))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newMCPTestStore(t)
+			args := make(map[string]any, len(tt.args)+1)
+			for key, value := range tt.args {
+				args[key] = value
+			}
+			args["session_id"] = invented
+
+			res, err := tt.handler(s)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: args}})
+			if err != nil {
+				t.Fatalf("handler error: %v", err)
+			}
+			if !res.IsError {
+				t.Fatal("expected unregistered session_id to fail")
+			}
+			body := callResultJSON(t, res)
+			if body["error_code"] != "unknown_session" || body["invalid_session_id"] != invented || body["retry_without_session_id"] != true {
+				t.Fatalf("unexpected unknown-session envelope: %v", body)
+			}
+			if _, err := s.GetSession(invented); !errors.Is(err, sql.ErrNoRows) {
+				t.Fatalf("invented session was created: %v", err)
+			}
+			observations, err := s.RecentObservations(project, "project", 10)
+			if err != nil || len(observations) != 0 {
+				t.Fatalf("observations after rejected request = %d, err=%v", len(observations), err)
+			}
+			prompts, err := s.RecentPrompts(project, 10)
+			if err != nil || len(prompts) != 0 {
+				t.Fatalf("prompts after rejected request = %d, err=%v", len(prompts), err)
+			}
+		})
 	}
-	recoveredResults, _ := s.Search("fix the thing", store.SearchOptions{Project: "unregistered-session-summary", Limit: 5})
-	if len(recoveredResults) != 1 {
-		t.Fatalf("expected summary persisted after omitted-session_id retry, got %d", len(recoveredResults))
+}
+
+func TestExplicitSessionIDUsesRegisteredProject(t *testing.T) {
+	const (
+		defaultProject    = "default-project"
+		registeredProject = "registered-project"
+		sessionID         = "registered-session"
+		sessionPath       = "/work/registered-project"
+	)
+
+	tests := []struct {
+		name    string
+		handler func(*store.Store) server.ToolHandlerFunc
+		args    map[string]any
+		assert  func(*testing.T, *store.Store)
+	}{
+		{
+			name: "mem_save_prompt",
+			handler: func(s *store.Store) server.ToolHandlerFunc {
+				return handleSavePrompt(s, MCPConfig{DefaultProject: defaultProject}, NewSessionActivity(10*time.Minute))
+			},
+			args: map[string]any{"content": "retain the registered project"},
+			assert: func(t *testing.T, s *store.Store) {
+				t.Helper()
+				prompts, err := s.RecentPrompts(registeredProject, 10)
+				if err != nil || len(prompts) != 1 || prompts[0].SessionID != sessionID {
+					t.Fatalf("registered-project prompts = %#v, err=%v", prompts, err)
+				}
+			},
+		},
+		{
+			name: "mem_capture_passive",
+			handler: func(s *store.Store) server.ToolHandlerFunc {
+				return handleCapturePassive(s, MCPConfig{DefaultProject: defaultProject}, NewSessionActivity(10*time.Minute))
+			},
+			args: map[string]any{"content": "## Key Learnings:\n- Retain the registered project."},
+			assert: func(t *testing.T, s *store.Store) {
+				t.Helper()
+				observations, err := s.RecentObservations(registeredProject, "project", 10)
+				if err != nil || len(observations) != 1 || observations[0].SessionID != sessionID {
+					t.Fatalf("registered-project observations = %#v, err=%v", observations, err)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newMCPTestStore(t)
+			if err := s.CreateSession(sessionID, registeredProject, sessionPath); err != nil {
+				t.Fatalf("create session: %v", err)
+			}
+			args := make(map[string]any, len(tt.args)+1)
+			for key, value := range tt.args {
+				args[key] = value
+			}
+			args["session_id"] = sessionID
+
+			res, err := tt.handler(s)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: args}})
+			if err != nil || res.IsError {
+				t.Fatalf("write with registered session: err=%v isError=%v text=%q", err, res.IsError, callResultText(t, res))
+			}
+			body := callResultJSON(t, res)
+			if body["project"] != registeredProject || body["project_source"] != project.SourceSessionProject || body["project_path"] != sessionPath {
+				t.Fatalf("registered session envelope = %v", body)
+			}
+			tt.assert(t, s)
+		})
 	}
 }
 
@@ -8265,8 +8346,8 @@ func TestLifecycleHandlersHonorDefaultProject(t *testing.T) {
 	if err != nil || captureRes.IsError {
 		t.Fatalf("passive capture: err=%v result=%q", err, callResultText(t, captureRes))
 	}
-	if got := callResultJSON(t, captureRes)["project_source"]; got != sourceProcessOverride {
-		t.Fatalf("capture source = %v; want %s", got, sourceProcessOverride)
+	if got := callResultJSON(t, captureRes)["project_source"]; got != project.SourceSessionProject {
+		t.Fatalf("capture source = %v; want %s from the registered session", got, project.SourceSessionProject)
 	}
 
 	end := handleSessionEnd(s, cfg, activity)
