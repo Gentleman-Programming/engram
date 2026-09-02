@@ -354,6 +354,23 @@ test("write tool hook binds only the four attributed writes to authoritative run
   assert.doesNotMatch(source, /knownSessions\.add\(sessionId\)[\s\S]{0,160}await engramFetch\("\/sessions"/)
 })
 
+test("qualified Engram write IDs inject the authoritative root session", async (t) => {
+  const runtime = await createRuntime(t, { sessionGet: sdkLookup(CHILD_SESSIONS) })
+  for (const { tool, sessionID, expectedSessionID } of [
+    { tool: "engram_mem_save", sessionID: "root", expectedSessionID: "root" },
+    { tool: "engram_mem_save_prompt", sessionID: "root", expectedSessionID: "root" },
+    { tool: "engram_mem_session_summary", sessionID: "leaf", expectedSessionID: "root" },
+    { tool: "engram_mem_capture_passive", sessionID: "root", expectedSessionID: "root" },
+  ]) {
+    const output = toolOutput(undefined)
+    await runtime.before({ tool, sessionID }, output)
+    assert.equal(output.args.session_id, expectedSessionID)
+  }
+
+  assert.deepEqual(runtime.sessionGetIDs, ["root", "leaf"])
+  assert.deepEqual(runtime.registeredIDs, ["root"], "a child must reuse its authoritative root")
+})
+
 test("subagent sessions resolve to the authoritative parent and never register themselves", () => {
   assert.match(source, /parentSessions\.set\(sessionId, parentID\)/)
   assert.match(source, /resolveAuthoritativeSessionID/)
