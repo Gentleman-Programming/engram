@@ -132,6 +132,19 @@ func TestDataLoadingCommands(t *testing.T) {
 		}
 	})
 
+	t.Run("checkForUpdate honors opt out", func(t *testing.T) {
+		t.Setenv(version.EnvNoUpdateCheck, "1")
+
+		msg := checkForUpdate("1.10.7")()
+		loaded, ok := msg.(updateCheckMsg)
+		if !ok {
+			t.Fatalf("message type = %T", msg)
+		}
+		if loaded.result != (version.CheckResult{}) {
+			t.Fatalf("result = %+v, want empty result", loaded.result)
+		}
+	})
+
 	t.Run("loadStats", func(t *testing.T) {
 		msg := loadStats(fx.store)()
 		loaded, ok := msg.(statsLoadedMsg)
