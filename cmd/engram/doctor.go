@@ -167,7 +167,7 @@ func cmdDoctorRepair(cfg store.Config) {
 			failDoctorRepair(err.Error())
 			return
 		}
-		report, err := s.QuarantineIrreparableSyncMutations(project, mode == diagnostic.RepairModeApply)
+		report, err := s.QuarantineIrreparableSyncMutations(store.DefaultSyncTargetKey, project, mode == diagnostic.RepairModeApply)
 		if err != nil {
 			failDoctorRepair(err.Error())
 			return

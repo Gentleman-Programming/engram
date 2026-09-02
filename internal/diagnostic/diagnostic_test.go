@@ -632,7 +632,7 @@ func TestSyncMutationRequiredFieldsSeparatesQuarantinedEvidenceFromBlockingWork(
 		t.Fatalf("expected blocked report before quarantine, got %+v", report)
 	}
 
-	quarantine, err := s.QuarantineIrreparableSyncMutations("engram", true)
+	quarantine, err := s.QuarantineIrreparableSyncMutations(store.DefaultSyncTargetKey, "engram", true)
 	if err != nil || len(quarantine.Actions) != 1 {
 		t.Fatalf("quarantine report=%+v err=%v", quarantine, err)
 	}
@@ -692,7 +692,7 @@ func TestSyncMutationRequiredFieldsReportsQuarantinedEvidenceWithoutCloudEnrollm
 	s, cfg := newDiagnosticTestStoreWithConfig(t)
 	seedDiagnosticPendingMutation(t, cfg.DataDir, "engram", store.SyncEntitySession, "poison", store.SyncOpUpsert, `{"id":"poison"}`)
 
-	quarantine, err := s.QuarantineIrreparableSyncMutations("engram", true)
+	quarantine, err := s.QuarantineIrreparableSyncMutations(store.DefaultSyncTargetKey, "engram", true)
 	if err != nil || len(quarantine.Actions) != 1 {
 		t.Fatalf("quarantine report=%+v err=%v", quarantine, err)
 	}
