@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -27,21 +28,27 @@ func assertContains(t *testing.T, label, out string, wants ...string) {
 		}
 	}
 }
-func fakeEngram(t *testing.T, dir, failProj string) {
+
+type fakeFailure struct {
+	project string
+	phase   string
+}
+
+func fakeEngram(t *testing.T, dir string, fail fakeFailure) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
-		body := "@echo off\r\nset PROJ=\r\n:parse\r\nif \"%1\"==\"\" goto run\r\nif \"%1\"==\"--project\" (set PROJ=%~2& shift & shift & goto parse)\r\nshift\r\ngoto parse\r\n:run\r\necho stdout: syncing project=%PROJ%\r\necho stderr: project=%PROJ% 1>&2\r\n"
-		if failProj != "" {
-			body += "if \"%PROJ%\"==\"" + failProj + "\" (echo fake: forced failure for %PROJ% 1>&2 & exit 1)\r\n"
+		body := "@echo off\r\nset \"ARGS=%*\"\r\nset PROJ=\r\nset IMPORT=0\r\n:parse\r\nif \"%1\"==\"\" goto run\r\nif \"%1\"==\"--import\" (set IMPORT=1& shift & goto parse)\r\nif \"%1\"==\"--project\" (set PROJ=%~2& shift & shift & goto parse)\r\nshift\r\ngoto parse\r\n:run\r\nset PHASE=export\r\nif \"%IMPORT%\"==\"1\" set PHASE=import\r\nif not \"%FAKE_ENGRAM_ARGS_LOG%\"==\"\" echo %ARGS%>>\"%FAKE_ENGRAM_ARGS_LOG%\"\r\necho stdout: %PHASE% project=%PROJ%\r\necho stderr: %PHASE% project=%PROJ% 1>&2\r\n"
+		if fail.project != "" {
+			body += "if \"%PROJ%\"==\"" + fail.project + "\" if \"%PHASE%\"==\"" + fail.phase + "\" (echo fake: forced " + fail.phase + " failure for %PROJ% 1>&2 & exit 1)\r\n"
 		}
 		if err := os.WriteFile(filepath.Join(dir, "engram.cmd"), []byte(body+"exit 0\r\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 		return
 	}
-	s := "#!/usr/bin/env bash\nproj=\"\"; while [ $# -gt 0 ]; do case \"$1\" in --project) proj=\"$2\"; shift 2 ;; *) shift ;; esac; done\nprintf 'stdout: syncing project=%s\\n' \"$proj\"; printf 'stderr: project=%s\\n' \"$proj\" >&2\n"
-	if failProj != "" {
-		s += fmt.Sprintf("if [ \"$proj\" = %q ]; then echo \"fake: forced failure for $proj\" >&2; exit 1; fi\n", failProj)
+	s := "#!/usr/bin/env bash\nargv=\"$*\"\nproj=\"\"\nphase=export\nwhile [ $# -gt 0 ]; do case \"$1\" in --import) phase=import; shift ;; --project) proj=\"$2\"; shift 2 ;; *) shift ;; esac; done\nif [ -n \"${FAKE_ENGRAM_ARGS_LOG:-}\" ]; then printf '%s\\n' \"$argv\" >>\"$FAKE_ENGRAM_ARGS_LOG\"; fi\nprintf 'stdout: %s project=%s\\n' \"$phase\" \"$proj\"; printf 'stderr: %s project=%s\\n' \"$phase\" \"$proj\" >&2\n"
+	if fail.project != "" {
+		s += fmt.Sprintf("if [ \"$proj\" = %q ] && [ \"$phase\" = %q ]; then echo \"fake: forced %s failure for $proj\" >&2; exit 1; fi\n", fail.project, fail.phase, fail.phase)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "engram"), []byte(s+"exit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
@@ -78,11 +85,30 @@ func run(t *testing.T, interp, wrapper, fakeDir string, add, args []string) (int
 }
 
 type wcase struct {
-	name                                       string
-	projects                                   []string
-	failProj, envLog, explicitLog, wantLogPath string
-	wantExit                                   int
-	wantIn, wantLog, wantNotIn                 []string
+	name                                 string
+	projects                             []string
+	fail                                 fakeFailure
+	envLog, explicitLog, wantLogPath     string
+	wantExit                             int
+	wantIn, wantLog, wantNotIn, wantArgs []string
+}
+
+func assertInvocationOrder(t *testing.T, path string, want []string) {
+	t.Helper()
+	if len(want) == 0 {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("unexpected CLI invocation log %s", path)
+		}
+		return
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read CLI invocation log: %v", err)
+	}
+	got := strings.FieldsFunc(string(b), func(r rune) bool { return r == '\r' || r == '\n' })
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("CLI argv sequence = %#v, want %#v", got, want)
+	}
 }
 
 func TestCloudSyncWrappers(t *testing.T) {
@@ -110,12 +136,18 @@ func TestCloudSyncWrappers(t *testing.T) {
 			}
 			defLog := filepath.Join(dataDir, "cloud-sync-projects.log")
 			envLog, envLogUnused, explicitLog, pfLog := filepath.Join(tmp, "env.log"), filepath.Join(tmp, "env-unused.log"), filepath.Join(tmp, "explicit.log"), filepath.Join(tmp, "pf.log")
+			argvLog := filepath.Join(tmp, "engram-argv.log")
+			spaceArgs := []string{"sync --cloud --project my project", "sync --cloud --import --project my project"}
+			if runtime.GOOS == "windows" {
+				spaceArgs = []string{"sync --cloud --project \"my project\"", "sync --cloud --import --project \"my project\""}
+			}
 			cases := []wcase{
-				{name: "DefaultLogPath", projects: []string{"alpha"}, wantExit: 0, wantLogPath: defLog, wantIn: []string{"stdout: syncing project=alpha", "stderr: project=alpha", "project SUCCESS project=alpha exit=0"}, wantLog: []string{"] project SUCCESS project=alpha exit=0", "stderr: project=alpha"}},
-				{name: "EnvLogOverride", projects: []string{"beta"}, envLog: envLog, wantExit: 0, wantLogPath: envLog, wantIn: []string{"stdout: syncing project=beta", "project SUCCESS project=beta exit=0"}, wantLog: []string{"] project SUCCESS project=beta exit=0"}},
-				{name: "ExplicitLogPrecedence", projects: []string{"gamma"}, envLog: envLogUnused, explicitLog: explicitLog, wantExit: 0, wantLogPath: explicitLog, wantIn: []string{"stdout: syncing project=gamma", "project SUCCESS project=gamma exit=0"}, wantLog: []string{"] project SUCCESS project=gamma exit=0"}},
-				{name: "PartialFailureContinuesAggregate1", projects: []string{"good", "mid", "tail"}, failProj: "mid", envLog: pfLog, wantExit: 1, wantLogPath: pfLog, wantIn: []string{"project FAILURE project=mid exit=1", "project START project=tail", "wrapper END result=failure overall=1"}, wantLog: []string{"] project FAILURE project=mid exit=1"}},
-				{name: "SpaceInProjectName", projects: []string{"my project"}, wantExit: 0, wantLogPath: defLog, wantIn: []string{"stdout: syncing project=my project", "project SUCCESS project=my project exit=0"}, wantLog: []string{"] project SUCCESS project=my project exit=0"}},
+				{name: "DefaultLogPath", projects: []string{"alpha"}, wantExit: 0, wantLogPath: defLog, wantIn: []string{"stdout: export project=alpha", "stdout: import project=alpha", "phase=import SUCCESS project=alpha exit=0"}, wantLog: []string{"] phase=export SUCCESS project=alpha exit=0", "stderr: import project=alpha"}, wantArgs: []string{"sync --cloud --project alpha", "sync --cloud --import --project alpha"}},
+				{name: "EnvLogOverride", projects: []string{"beta"}, envLog: envLog, wantExit: 0, wantLogPath: envLog, wantIn: []string{"stdout: export project=beta", "phase=import SUCCESS project=beta exit=0"}, wantLog: []string{"] phase=import SUCCESS project=beta exit=0"}, wantArgs: []string{"sync --cloud --project beta", "sync --cloud --import --project beta"}},
+				{name: "ExplicitLogPrecedence", projects: []string{"gamma"}, envLog: envLogUnused, explicitLog: explicitLog, wantExit: 0, wantLogPath: explicitLog, wantIn: []string{"stdout: export project=gamma", "phase=import SUCCESS project=gamma exit=0"}, wantLog: []string{"] phase=import SUCCESS project=gamma exit=0"}, wantArgs: []string{"sync --cloud --project gamma", "sync --cloud --import --project gamma"}},
+				{name: "ExportFailureSkipsImportAndContinues", projects: []string{"good", "mid", "tail"}, fail: fakeFailure{project: "mid", phase: "export"}, envLog: pfLog, wantExit: 1, wantLogPath: pfLog, wantIn: []string{"phase=export FAILURE project=mid exit=1", "project START project=tail", "wrapper END result=failure overall=1"}, wantLog: []string{"] phase=export FAILURE project=mid exit=1"}, wantArgs: []string{"sync --cloud --project good", "sync --cloud --import --project good", "sync --cloud --project mid", "sync --cloud --project tail", "sync --cloud --import --project tail"}},
+				{name: "ImportFailureReachesAggregateResult", projects: []string{"good", "mid", "tail"}, fail: fakeFailure{project: "mid", phase: "import"}, envLog: pfLog, wantExit: 1, wantLogPath: pfLog, wantIn: []string{"phase=import FAILURE project=mid exit=1", "project START project=tail", "wrapper END result=failure overall=1"}, wantLog: []string{"] phase=import FAILURE project=mid exit=1"}, wantArgs: []string{"sync --cloud --project good", "sync --cloud --import --project good", "sync --cloud --project mid", "sync --cloud --import --project mid", "sync --cloud --project tail", "sync --cloud --import --project tail"}},
+				{name: "SpaceInProjectName", projects: []string{"my project"}, wantExit: 0, wantLogPath: defLog, wantIn: []string{"stdout: export project=my project", "phase=import SUCCESS project=my project exit=0"}, wantLog: []string{"] phase=import SUCCESS project=my project exit=0"}, wantArgs: spaceArgs},
 				{name: "MissingArgsUsage2", wantExit: 2, wantIn: []string{"at least one project is required"}},
 				{name: "InvalidLogExits1", projects: []string{"alpha"}, explicitLog: dataDir, wantExit: 1, wantNotIn: []string{"stdout: syncing project=alpha"}},
 			}
@@ -126,8 +158,11 @@ func TestCloudSyncWrappers(t *testing.T) {
 			}
 			for _, tc := range cases {
 				t.Run(tc.name, func(t *testing.T) {
-					fakeEngram(t, fakeDir, tc.failProj)
-					add := []string{"ENGRAM_DATA_DIR=" + dataDir}
+					if err := os.Remove(argvLog); err != nil && !os.IsNotExist(err) {
+						t.Fatal(err)
+					}
+					fakeEngram(t, fakeDir, tc.fail)
+					add := []string{"ENGRAM_DATA_DIR=" + dataDir, "FAKE_ENGRAM_ARGS_LOG=" + argvLog}
 					if tc.envLog != "" {
 						add = append(add, "ENGRAM_CLOUD_SYNC_LOG="+tc.envLog)
 					}
@@ -140,6 +175,7 @@ func TestCloudSyncWrappers(t *testing.T) {
 						t.Fatalf("exit=%d want %d; output:\n%s", exit, tc.wantExit, out)
 					}
 					assertContains(t, "console", out, tc.wantIn...)
+					assertInvocationOrder(t, argvLog, tc.wantArgs)
 					for _, n := range tc.wantNotIn {
 						if strings.Contains(out, n) {
 							t.Fatalf("console unexpectedly contains %q:\n%s", n, out)

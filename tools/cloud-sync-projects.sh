@@ -7,7 +7,8 @@ DEFAULT_LOG_NAME="cloud-sync-projects.log"
 usage() {
   cat <<'USAGE'
 Usage: cloud-sync-projects.sh [--log <path>] <project> [<project> ...]
-Run `engram sync --cloud --project <project>` once per explicitly named project.
+Run export then import for each explicitly named project.
+An export failure skips that project's import, matching native autosync.
 Exit 0 if all succeed, 1 if any project/log op fails, 2 on usage error.
   --log <path>  Overrides default and ENGRAM_CLOUD_SYNC_LOG.
   -h, --help    Show this help.
@@ -46,20 +47,33 @@ logline() {
   printf '[%s] %s\n' "$ts" "$*"
 }
 
-run_project() {
-  local proj="$1" rc tee_rc
+run_phase() {
+  local proj="$1" phase="$2" rc tee_rc
   local -a statuses
-  logline "project START project=$proj" || return 1
-  engram sync --cloud --project "$proj" 2>&1 | tee -a "$log_path"
+  logline "phase=$phase START project=$proj" || return 1
+  if [ "$phase" = "export" ]; then
+    engram sync --cloud --project "$proj" 2>&1 | tee -a "$log_path"
+  else
+    engram sync --cloud --import --project "$proj" 2>&1 | tee -a "$log_path"
+  fi
   statuses=("${PIPESTATUS[@]}")  # snapshot before any other command mutates it
   rc=${statuses[0]:-1}; tee_rc=${statuses[1]:-1}
   if [ "$rc" -eq 0 ]; then
-    logline "project SUCCESS project=$proj exit=0" || return 1
+    logline "phase=$phase SUCCESS project=$proj exit=0" || return 1
   else
-    logline "project FAILURE project=$proj exit=$rc" || return 1
+    logline "phase=$phase FAILURE project=$proj exit=$rc" || return 1
   fi
   [ "$tee_rc" -ne 0 ] && [ "$rc" -eq 0 ] && return 1  # tee/log failed
   return "$rc"
+}
+
+run_project() {
+  local proj="$1" rc
+  logline "project START project=$proj" || return 1
+  run_phase "$proj" export
+  rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"  # Native autosync does not pull after a failed push.
+  run_phase "$proj" import
 }
 
 overall=0

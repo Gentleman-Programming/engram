@@ -1553,7 +1553,7 @@ For a step-by-step recovery guide covering `chunk_id does not match payload cont
 
 ## Scheduled Explicit Cloud Sync Wrappers
 
-The wrappers under `tools/` are an **alternative** to native autosync for hosts where you cannot keep `engram serve` running. They run `engram sync --cloud --project <project>` once per explicitly named project. **Choose ONE mode** -- native autosync (recommended) when a daemon is feasible, OR these wrappers for the no-daemon case. Do **not** run both at once. Cloud `--all` is intentionally unsupported; projects are never inferred from cwd or an env var.
+The wrappers under `tools/` are an **alternative** to native autosync for hosts where you cannot keep `engram serve` running. For each explicitly named project, they run the native autosync order: export/push (`engram sync --cloud --project <project>`), then import/pull (`engram sync --cloud --import --project <project>`). **Choose ONE mode** -- native autosync (recommended) when a daemon is feasible, OR these wrappers for the no-daemon case. Do **not** run both at once. Cloud `--all` is intentionally unsupported; projects are never inferred from cwd or an env var.
 
 ### Bash: `tools/cloud-sync-projects.sh`
 
@@ -1562,7 +1562,7 @@ The wrappers under `tools/` are an **alternative** to native autosync for hosts 
 ./tools/cloud-sync-projects.sh --log /var/log/engram-cloud-sync.log my-project
 ```
 
-Exit `0` if all syncs and log succeeded; `1` if any project or logging op failed; `2` on usage error. Default durable log `$ENGRAM_DATA_DIR/cloud-sync-projects.log` (`~/.engram` fallback); override `--log` > `ENGRAM_CLOUD_SYNC_LOG` > default. Status lines go to both timestamped console and log; command stdout+stderr preserved on console and appended to log. Nothing retried or silenced.
+Exit `0` if every attempted export, import, and log operation succeeded; `1` if any attempted phase or logging operation failed; `2` on usage error. If export fails, that project's import is skipped, matching native autosync; the wrapper records the export failure and continues with later projects. If import fails, it is recorded and makes the aggregate result nonzero. Default durable log `$ENGRAM_DATA_DIR/cloud-sync-projects.log` (`~/.engram` fallback); override `--log` > `ENGRAM_CLOUD_SYNC_LOG` > default. Per-project, per-phase status lines go to both timestamped console and log; command stdout+stderr stays live on the console and is appended to the log. Nothing retried or silenced.
 
 ### PowerShell: `tools/cloud-sync-projects.ps1`
 
@@ -1571,20 +1571,22 @@ pwsh ./tools/cloud-sync-projects.ps1 my-project my-other-project
 pwsh ./tools/cloud-sync-projects.ps1 -LogPath C:\logs\engram-cloud-sync.log my-project
 ```
 
-Requires PowerShell 7 (`pwsh`); 5.1 is not supported. Same behavior, exit codes, and log defaults as Bash; override `-LogPath` > `ENGRAM_CLOUD_SYNC_LOG` > default.
+Requires PowerShell 7 (`pwsh`); 5.1 is not supported. Same export-then-import order, skipped-import behavior after an export failure, exit codes, and log defaults as Bash; override `-LogPath` > `ENGRAM_CLOUD_SYNC_LOG` > default.
+
+Both wrapper files are included in every GoReleaser release archive under `tools/`; copy the one for your scheduler host from the extracted archive.
 
 ### Inspecting the last failure
 
-`project FAILURE project=<name> exit=<n>` records the exact exit code from `engram sync --cloud --project <name>`:
+`phase=<export|import> FAILURE project=<name> exit=<n>` records the exact exit code from the failing CLI phase:
 
 ```sh
-grep 'project FAILURE' "${ENGRAM_DATA_DIR:-$HOME/.engram}/cloud-sync-projects.log" | tail -n 5
+grep 'phase=.* FAILURE' "${ENGRAM_DATA_DIR:-$HOME/.engram}/cloud-sync-projects.log" | tail -n 5
 ```
 
 ```powershell
 # PowerShell 7 ($env:ENGRAM_DATA_DIR or $HOME/.engram fallback)
 $d = if ($env:ENGRAM_DATA_DIR) { $env:ENGRAM_DATA_DIR } else { Join-Path $HOME '.engram' }
-Select-String 'project FAILURE' (Join-Path $d 'cloud-sync-projects.log') | Select-Object -Last 5
+Select-String 'phase=.* FAILURE' (Join-Path $d 'cloud-sync-projects.log') | Select-Object -Last 5
 ```
 
 Pass the failing project to [Engram Cloud Troubleshooting](docs/engram-cloud/troubleshooting.md) -- the wrappers record and propagate, not interpret or retry.

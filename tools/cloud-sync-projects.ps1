@@ -16,7 +16,8 @@ if ($PSVersionTable.PSVersion.Major -lt 7) {
 function Write-Usage {
   @'
 Usage: cloud-sync-projects.ps1 [-LogPath <path>] <project> [<project> ...]
-Run `engram sync --cloud --project <project>` once per explicitly named project.
+Run export then import for each explicitly named project.
+An export failure skips that project's import, matching native autosync.
 Exit 0 if all succeed, 1 if any project/log op fails, 2 on usage error.
   -LogPath <path>  Overrides default and ENGRAM_CLOUD_SYNC_LOG.
   -Help            Show this help.
@@ -53,25 +54,37 @@ function Write-LogLine {
   return $true
 }
 
-function Invoke-Project {
-  param([string]$Project)
-  if (-not (Write-LogLine "project START project=$Project")) { return -1 }
+function Invoke-ProjectPhase {
+  param([string]$Project, [string]$Phase)
+  if (-not (Write-LogLine "phase=$Phase START project=$Project")) { return -1 }
   $exitCode = 0
   $prevPref = $ErrorActionPreference
   try {
     $ErrorActionPreference = 'Continue'
-    & engram sync --cloud --project $Project 2>&1 | Tee-Object -FilePath $resolvedLog -Append -ErrorAction Stop | ForEach-Object { Write-Host $_ }
+    if ($Phase -eq 'export') {
+      & engram sync --cloud --project $Project 2>&1 | Tee-Object -FilePath $resolvedLog -Append -ErrorAction Stop | ForEach-Object { Write-Host $_ }
+    } else {
+      & engram sync --cloud --import --project $Project 2>&1 | Tee-Object -FilePath $resolvedLog -Append -ErrorAction Stop | ForEach-Object { Write-Host $_ }
+    }
     $exitCode = $LASTEXITCODE
     if ($null -eq $exitCode) { $exitCode = 0 }
   } catch {
-    [Console]::Error.WriteLine("cloud-sync-projects.ps1: error: invoke/tee failed for '$Project': $($_.Exception.Message)")
+    [Console]::Error.WriteLine("cloud-sync-projects.ps1: error: $Phase invoke/tee failed for '$Project': $($_.Exception.Message)")
     return -1
   } finally {
     $ErrorActionPreference = $prevPref
   }
-  if ($exitCode -eq 0) { if (-not (Write-LogLine "project SUCCESS project=$Project exit=0")) { return -1 } }
-  else { if (-not (Write-LogLine "project FAILURE project=$Project exit=$exitCode")) { return -1 } }
+  if ($exitCode -eq 0) { if (-not (Write-LogLine "phase=$Phase SUCCESS project=$Project exit=0")) { return -1 } }
+  else { if (-not (Write-LogLine "phase=$Phase FAILURE project=$Project exit=$exitCode")) { return -1 } }
   return $exitCode
+}
+
+function Invoke-Project {
+  param([string]$Project)
+  if (-not (Write-LogLine "project START project=$Project")) { return -1 }
+  $exportExit = Invoke-ProjectPhase -Project $Project -Phase 'export'
+  if ($exportExit -ne 0) { return $exportExit } # Native autosync does not pull after a failed push.
+  return Invoke-ProjectPhase -Project $Project -Phase 'import'
 }
 
 $overall = 0
