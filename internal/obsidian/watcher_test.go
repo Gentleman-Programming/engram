@@ -17,7 +17,7 @@ import (
 type fakeExporter struct {
 	mu           sync.Mutex
 	callCount    int
-	callTimes    []time.Time
+	calls        chan int
 	graphConfigs []GraphConfigMode
 	errOnCycle   map[int]error // 1-indexed: return this error on the Nth call
 	result       *ExportResult // returned on success (defaults to zero ExportResult)
@@ -35,7 +35,12 @@ func (f *fakeExporter) Export() (*ExportResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.callCount++
-	f.callTimes = append(f.callTimes, time.Now())
+	if f.calls != nil {
+		select {
+		case f.calls <- f.callCount:
+		default:
+		}
+	}
 	f.graphConfigs = append(f.graphConfigs, f.config.GraphConfig)
 	if err, ok := f.errOnCycle[f.callCount]; ok {
 		return nil, err
@@ -62,14 +67,6 @@ func (f *fakeExporter) Count() int {
 	return f.callCount
 }
 
-func (f *fakeExporter) Times() []time.Time {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	cp := make([]time.Time, len(f.callTimes))
-	copy(cp, f.callTimes)
-	return cp
-}
-
 func (f *fakeExporter) GraphConfigs() []GraphConfigMode {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -82,43 +79,64 @@ func (f *fakeExporter) GraphConfigs() []GraphConfigMode {
 
 // TestWatcherRunsImmediatelyThenTicks verifies REQ-WATCH-03:
 // - first cycle fires immediately (before first tick)
-// - subsequent cycles fire on ticker interval
-// - with 10ms interval and 55ms timeout, we expect at least 3 cycles
+// - subsequent ticker events produce subsequent cycles
 func TestWatcherRunsImmediatelyThenTicks(t *testing.T) {
 	fe := newFakeExporter()
 	fe.config.GraphConfig = GraphConfigForce
 
-	before := time.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), 55*time.Millisecond)
-	defer cancel()
-
 	w := NewWatcher(WatcherConfig{
 		Exporter: fe,
-		Interval: 10 * time.Millisecond,
+		Interval: time.Hour,
 	})
 
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
 	err := w.Run(ctx)
-	if err != context.DeadlineExceeded && err != context.Canceled {
-		t.Errorf("Run() returned unexpected error: %v (want context.DeadlineExceeded or Canceled)", err)
+	if err != context.Canceled {
+		t.Errorf("Run() returned %v, want context.Canceled", err)
+	}
+	if count := fe.Count(); count != 1 {
+		t.Fatalf("expected one immediate cycle before cancellation, got %d", count)
 	}
 
-	count := fe.Count()
-	if count < 3 {
-		t.Errorf("expected at least 3 cycles in 55ms with 10ms interval, got %d", count)
+	fe = newFakeExporter()
+	fe.calls = make(chan int, 2)
+	w = NewWatcher(WatcherConfig{
+		Exporter: fe,
+		Interval: time.Millisecond,
+	})
+
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- w.Run(ctx)
+	}()
+
+	cycleTimeout := time.NewTimer(time.Second)
+	defer cycleTimeout.Stop()
+	for want := 1; want <= 2; want++ {
+		select {
+		case got := <-fe.calls:
+			if got != want {
+				t.Fatalf("cycle order: got %d, want %d", got, want)
+			}
+		case <-cycleTimeout.C:
+			t.Fatalf("timed out waiting for cycle %d", want)
+		}
 	}
 
-	times := fe.Times()
-	if len(times) < 1 {
-		t.Fatal("no call times recorded")
+	cancel()
+	shutdownTimeout := time.NewTimer(time.Second)
+	defer shutdownTimeout.Stop()
+	select {
+	case err := <-done:
+		if err != context.Canceled {
+			t.Errorf("Run() returned %v, want context.Canceled", err)
+		}
+	case <-shutdownTimeout.C:
+		t.Fatal("Run() did not return after cancellation")
 	}
-
-	// First cycle must happen before the first tick (within ~2ms of start)
-	firstCallDelay := times[0].Sub(before)
-	if firstCallDelay > 5*time.Millisecond {
-		t.Errorf("first cycle not immediate: fired after %v (want < 5ms)", firstCallDelay)
-	}
-
-	t.Logf("total cycles: %d, first call delay: %v", count, firstCallDelay)
 }
 
 // ─── Task 3.3: TestWatcherLogsCycleResults ────────────────────────────────────

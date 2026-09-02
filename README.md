@@ -8,6 +8,12 @@
 </p>
 
 <p align="center">
+  <a href="https://engram.gentlemanprogramming.com/"><strong>Website</strong></a> &bull;
+  <a href="https://gentle-ai.gentlemanprogramming.com/"><strong>Gentle-AI</strong></a> &bull;
+  <a href="https://gentle-ai-wiki.gentlemanprogramming.com/"><strong>Gentle-AI Wiki</strong></a>
+</p>
+
+<p align="center">
   <a href="docs/INSTALLATION.md">Installation</a> &bull;
   <a href="docs/engram-cloud/README.md">Engram Cloud</a> &bull;
   <a href="docs/AGENT-SETUP.md">Agent Setup</a> &bull;
@@ -19,13 +25,35 @@
   <a href="DOCS.md">Full Docs</a>
 </p>
 
+<div align="center">
+
+<!--
+  sealed_token is a GitHub fine-grained token encrypted against Star History's
+  public key, so only the encrypted value is published here. It is required
+  because GitHub restricted the stargazers API to a repository's admins and
+  collaborators on 2026-06-30; without it the chart renders an error placeholder.
+  Regenerate it at https://www.star-history.com/?repos=Gentleman-Programming%2Fengram&type=date&legend=top-left
+-->
+
+<a href="https://www.star-history.com/?repos=Gentleman-Programming%2Fengram&type=date&legend=top-left">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=Gentleman-Programming%2Fengram&type=date&theme=dark&legend=top-left&sealed_token=zwrd_DfwYZeJU7nhGYNtREEheKWYEslW_uzrqORlZ36v-JSMepdqGLkKExp1M-xbNq6t-ebVS5iM3WoPDO26tXbSGkjXC2Jo3kHQ3uNzlRkCrWoqRHkPVQXvosKciY109ObiwGV1z8aajyedcloppmekCGrvVKJb6KWxGLXW_mHcRAVIBZUOa4SzW75D" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=Gentleman-Programming%2Fengram&type=date&legend=top-left&sealed_token=zwrd_DfwYZeJU7nhGYNtREEheKWYEslW_uzrqORlZ36v-JSMepdqGLkKExp1M-xbNq6t-ebVS5iM3WoPDO26tXbSGkjXC2Jo3kHQ3uNzlRkCrWoqRHkPVQXvosKciY109ObiwGV1z8aajyedcloppmekCGrvVKJb6KWxGLXW_mHcRAVIBZUOa4SzW75D" />
+    <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=Gentleman-Programming%2Fengram&type=date&legend=top-left&sealed_token=zwrd_DfwYZeJU7nhGYNtREEheKWYEslW_uzrqORlZ36v-JSMepdqGLkKExp1M-xbNq6t-ebVS5iM3WoPDO26tXbSGkjXC2Jo3kHQ3uNzlRkCrWoqRHkPVQXvosKciY109ObiwGV1z8aajyedcloppmekCGrvVKJb6KWxGLXW_mHcRAVIBZUOa4SzW75D" />
+  </picture>
+</a>
+
+</div>
+
 ---
 
 > **engram** `/ˈen.ɡræm/` — _neuroscience_: the physical trace of a memory in the brain.
 
 Your AI coding agent forgets everything when the session ends. Engram gives it a brain.
 
-A **Go binary** with SQLite + FTS5 full-text search, exposed via CLI, HTTP API, MCP server, and an interactive TUI. Works with **any agent** that supports MCP — Claude Code, OpenCode, Gemini CLI, Codex, VS Code (Copilot), Antigravity, Cursor, Windsurf, or anything else.
+A **Go binary** with SQLite + FTS5 full-text search, exposed through CLI, HTTP API, MCP, and an interactive TUI. It works with any MCP-compatible agent, including Claude Code, OpenCode, Gemini CLI, Codex, VS Code (Copilot), Antigravity, Cursor, and Windsurf.
+
+No Node.js, Python, or Docker is required: one binary, one SQLite file.
 
 ```
 Agent (Claude Code / OpenCode / Gemini CLI / Codex / VS Code / Antigravity / ...)
@@ -35,7 +63,47 @@ Engram (single Go binary)
 SQLite + FTS5 (~/.engram/engram.db)
 ```
 
-## Quick Start
+## For agents
+
+Treat Engram as a curated project memory, not a transcript sink. Use this operating contract throughout the session.
+
+1. **Orient before writing.** Start with `mem_current_project` to confirm the resolved project and its source. At the start of related work, use `mem_context` and `mem_search` to recover the relevant history.
+2. **Search before repeating.** Before revisiting a decision, bug, convention, or request that may already be known, search with focused terms. Search results are previews, not the complete record.
+3. **Retrieve progressively.** Use `mem_search` for candidates, `mem_timeline` when surrounding session context matters, and `mem_get_observation` before relying on a full observation.
+4. **Save significant knowledge deliberately.** Save completed bug fixes, decisions, discoveries, configuration changes, patterns, and durable user constraints with `mem_save`. Do not capture raw tool output or every conversational turn.
+5. **Keep evolving knowledge stable.** Give an evolving topic a stable `topic_key` such as `architecture/auth-model`; reuse it to update that topic rather than creating competing memories. Use `mem_suggest_topic_key` when the key is unclear.
+6. **Leave a handoff.** Before ending a session, save a `mem_session_summary` with the goal, instructions, discoveries, accomplished work, next steps, and relevant files.
+7. **Recover after compaction.** Persist the compacted handoff with `mem_session_summary` first. Then call `mem_context` to recover recent session history before continuing.
+
+### A useful memory is structured
+
+```markdown
+**What**: Added retry-safe upload handling.
+**Why**: Retries could create duplicate records.
+**Where**: internal/upload/handler.go
+**Learned**: Reuse the request id as the idempotency key.
+```
+
+Use a short, searchable title and a fitting type with that content. The full [Memory Protocol](DOCS.md#memory-protocol) defines the durable-save rules and session-summary shape.
+
+### Choose MCP tools by intent
+
+Tool availability can vary by MCP profile. Start with the intent, then use your client's tool discovery mechanism (such as `ToolSearch`) only when a deferred tool is needed.
+
+| Intent | Start with |
+| --- | --- |
+| Confirm the project and recover recent work | `mem_current_project`, `mem_context` |
+| Find prior knowledge without repeating work | `mem_search` |
+| Inspect a result in enough detail | `mem_timeline`, `mem_get_observation` |
+| Save or refine durable knowledge | `mem_save`, `mem_update`, `mem_suggest_topic_key` |
+| Preserve the user's request | `mem_save_prompt` |
+| Hand off or close a session | `mem_session_summary`, `mem_session_start`, `mem_session_end` |
+| Review stale knowledge or memory relationships | `mem_review`, `mem_judge`, `mem_compare` |
+| Diagnose project or store state | `mem_doctor` |
+
+For parameters and the complete, current tool reference, see [the full documentation](DOCS.md).
+
+## Quick start
 
 ### Install
 
@@ -43,107 +111,56 @@ SQLite + FTS5 (~/.engram/engram.db)
 brew install gentleman-programming/tap/engram
 ```
 
-Windows, Linux, and other install methods → [docs/INSTALLATION.md](docs/INSTALLATION.md)
+For Windows, Linux, source builds, and downloads, see [Installation](docs/INSTALLATION.md).
 
-### Setup Your Agent
+### Set up your agent
 
-| Agent                       | One-liner                                                                                    |
-| --------------------------- | -------------------------------------------------------------------------------------------- |
-| Claude Code                 | `claude plugin marketplace add Gentleman-Programming/engram && claude plugin install engram` |
-| Pi                          | `engram setup pi`                                                                            |
-| OpenCode                    | `engram setup opencode`                                                                      |
-| Gemini CLI                  | `engram setup gemini-cli`                                                                    |
-| Codex                       | `engram setup codex`                                                                         |
-| Antigravity CLI             | `engram setup antigravity-cli`                                                               |
-| Windsurf                    | `engram setup windsurf`                                                                      |
-| Qwen Code                   | `engram setup qwen`                                                                          |
-| Kiro                        | `engram setup kiro`                                                                          |
-| Cursor                      | `engram setup cursor`                                                                        |
-| VS Code (Copilot)           | `engram setup vscode-copilot`                                                                |
-| Kilo Code                   | `engram setup kilocode`                                                                      |
-| Any other MCP client        | See [docs/AGENT-SETUP.md](docs/AGENT-SETUP.md)                                               |
+Run the setup command for the agent you use, then restart that agent. `engram setup` writes the applicable MCP and integration configuration; it does not require you to start a server for the usual stdio-only setup.
 
-Full per-agent config, Memory Protocol, and compaction survival → [docs/AGENT-SETUP.md](docs/AGENT-SETUP.md)
+| Agent | Setup |
+| --- | --- |
+| Claude Code | `claude plugin marketplace add Gentleman-Programming/engram && claude plugin install engram` |
+| Pi | `engram setup pi` |
+| OpenCode | `engram setup opencode` |
+| Gemini CLI | `engram setup gemini-cli` |
+| Codex | `engram setup codex` |
+| Antigravity CLI | `engram setup antigravity-cli` |
+| Windsurf | `engram setup windsurf` |
+| Qwen Code | `engram setup qwen` |
+| Kiro | `engram setup kiro` |
+| Cursor | `engram setup cursor` |
+| VS Code (Copilot) | `engram setup vscode-copilot` |
+| Kilo Code | `engram setup kilocode` |
+| Another MCP-compatible agent | [Manual MCP setup](docs/AGENT-SETUP.md#any-other-mcp-agent) |
 
-**What `engram setup` does** — it writes MCP config and plugin files for the chosen agent. After setup, restart your agent and it is ready. No server to start manually.
+See [Agent Setup](docs/AGENT-SETUP.md) for per-agent configuration, plugin behavior, manual MCP setup, compaction resilience, and troubleshooting. Pi users can also find the package at [`gentle-engram`](plugin/pi/README.md).
 
-> **Do I need to run `engram serve` or `engram mcp` myself?**
->
-> For most agents (Claude Code, Gemini CLI, Codex, VS Code, Cursor, Windsurf) — **no**. Your agent launches `engram mcp` automatically as a short-lived stdio subprocess whenever it starts a session. You never run it manually.
->
-> `engram serve` is only needed when a plugin uses the HTTP API for session tracking: the **OpenCode plugin** and the **Pi extension** both talk to `engram serve` in the background. `engram setup opencode` and `engram setup pi` note this; the plugins auto-start the server when possible. If your environment blocks background processes, start it manually in a separate terminal:
->
-> ```bash
-> engram serve   # runs on port 7437 by default; keep it running
-> ```
->
-> You do not need `engram serve` at all for stdio-only agents (Claude Code, Gemini CLI, Codex, VS Code, Cursor, Windsurf).
+## Local first, portable when needed
 
-No Node.js, no Python, no Docker. **One binary, one SQLite file.**
+Engram keeps memory local by default. The local SQLite database is authoritative; Git Sync exports portable compressed chunks for sharing across machines, and Engram Cloud is optional, project-scoped replication/shared access with browser visibility.
 
-### Pi Package
+| Need | Start here |
+| --- | --- |
+| Local memory and the runtime model | [Architecture](docs/ARCHITECTURE.md) |
+| Share memory with Git | [Git Sync reference](DOCS.md#git-sync-chunked) |
+| Use optional Cloud replication | [Engram Cloud](docs/engram-cloud/README.md) |
+| Diagnose or recover Cloud operations | [Cloud troubleshooting](docs/engram-cloud/troubleshooting.md) |
 
-Engram has a first-class Pi package: [`gentle-engram`](plugin/pi/README.md).
+For an existing local database, use the guided upgrade sequence. If the dry run reports changes, apply them before bootstrap; otherwise continue directly to bootstrap.
 
 ```bash
-engram setup pi
+engram cloud upgrade doctor --project <project>
+engram cloud upgrade repair --project <project> --dry-run
+engram cloud upgrade repair --project <project> --apply # only when the dry run reports changes
+engram cloud upgrade bootstrap --project <project>
+engram cloud upgrade status --project <project>
 ```
 
-It gives Pi persistent project memory, compaction recovery, and shared memory with other MCP agents through the same local-or-cloud Engram brain. The package is part of the Gentleman Programming agentic-coding ecosystem alongside Gentle-AI, SDD, skills, and Engram Cloud.
+See the [Cloud upgrade reference](DOCS.md#cloud-upgrade-flow) for apply, rollback, and recovery details.
 
-### Setup FAQ
+### Project-aware reads
 
-**When do I need to manually add config to my agent's prompt or settings?**
-
-`engram setup` covers the MCP wiring automatically. Manual config — adding a Memory Protocol snippet to your `CLAUDE.md`, `GEMINI.md`, `.cursorrules`, etc. — is only needed if your agent keeps forgetting to use Engram after long sessions or context compaction. That manual step is called the "nuclear option" in the detailed docs because system prompts survive everything, including compaction. It is a reliability boost for heavy users, not a required first step. See [Agent Setup → Surviving Compaction](docs/AGENT-SETUP.md#surviving-compaction-recommended) for the snippets.
-
-**Can Docker agents (or remote agents) connect to Engram's MCP?**
-
-Engram's MCP transport is **stdio only** — there is no HTTP or network MCP endpoint. `engram mcp` speaks the MCP protocol over stdin/stdout; it cannot be reached over a TCP port.
-
-If you have agents running in Docker that need to write to Engram on the host, the available paths are:
-
-- **HTTP REST API** (`engram serve`): note that `engram serve` currently binds to `127.0.0.1` only, so it is **not** reachable from inside a container out of the box — a container cannot reach the host's loopback, and there is no bind-address flag yet. `ENGRAM_URL` lets the **Pi plugin** target an `engram serve` reachable on a routable host/port (e.g. `ENGRAM_URL=http://host.docker.internal:7437 pi`), but that only works once the server listens on a non-loopback interface, which is not supported today. The HTTP API is not the MCP protocol; Pi uses it for session capture and Pi-native `mem_*` tools. For Docker right now, prefer the stdio path below.
-- **Stdio MCP** (mount the binary): the cleanest path for a Dockerized agent that needs MCP tools is to mount the `engram` binary into the container and let the agent launch `engram mcp` locally via stdio, pointing `ENGRAM_DATA_DIR` at a volume shared with the host.
-
-Full environment variable reference → [DOCS.md#environment-variables](DOCS.md#environment-variables)
-
-## How It Works
-
-```
-1. Agent completes significant work (bugfix, architecture decision, etc.)
-2. Agent calls mem_save → title, type, What/Why/Where/Learned
-3. Engram persists to SQLite with FTS5 indexing
-4. Next session: agent searches memory, gets relevant context
-```
-
-Full details on session lifecycle, topic keys, and memory hygiene → [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-
-### Broader memory search
-
-`mem_search` uses `match_mode: "all"` by default, so every query token must match. Use `match_mode: "any"` when you want broader recall across a collection of keywords:
-
-```json
-{
-  "query": "authentication compliance session",
-  "match_mode": "any"
-}
-```
-
-With `any`, a memory can match one or more query tokens instead of requiring all of them. This is useful when you remember related keywords but not the exact wording stored in Engram.
-
-## MCP Tools (20)
-
-| Category               | Tools                                                                                                            |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| **Save & Update**      | `mem_save`, `mem_update`, `mem_delete`, `mem_suggest_topic_key`                                                  |
-| **Search & Retrieve**  | `mem_search`, `mem_context`, `mem_timeline`, `mem_get_observation`                                               |
-| **Session Lifecycle**  | `mem_session_start`, `mem_session_end`, `mem_session_summary`                                                    |
-| **Conflict Surfacing** | `mem_judge`, `mem_compare`                                                                                       |
-| **Lifecycle Review**   | `mem_review`                                                                                                      |
-| **Utilities**          | `mem_save_prompt`, `mem_stats`, `mem_capture_passive`, `mem_merge_projects`, `mem_current_project`, `mem_doctor` |
-
-Full tool reference with parameters → [DOCS.md#mcp-tools-20-tools](DOCS.md#mcp-tools-20-tools)
+Project-aware reads use the canonical current project when no selector is supplied: an explicit project, then `ENGRAM_PROJECT`, then cwd detection. Use `--all` in the CLI or `all_projects=true` in HTTP for an intentional global read; do not combine either with an explicit project. `engram context` retains its positional project as an alias for `--project`. `GET /sync/status` supports one resolved project and rejects `all_projects=true` because its provider cannot aggregate status.
 
 ## Terminal UI
 
@@ -152,266 +169,40 @@ engram tui
 ```
 
 <p align="center">
-<img src="assets/tui-dashboard.png" alt="TUI Dashboard" width="400" />
-  <img width="400" alt="image" src="https://github.com/user-attachments/assets/0308991a-58bb-4ad8-9aa2-201c059f8b64" />
+  <img src="assets/tui-dashboard.png" alt="TUI Dashboard" width="400" />
+  <img width="400" alt="TUI recent observations" src="assets/tui-recent.png" />
   <img src="assets/tui-detail.png" alt="TUI Observation Detail" width="400" />
   <img src="assets/tui-search.png" alt="TUI Search Results" width="400" />
 </p>
 
-**Navigation**: `j/k` vim keys, `Enter` to drill in, `c` to copy content to clipboard (OSC 52), `/` to search, `Esc` back. Catppuccin Mocha theme.
-
-## Git Sync
-
-Share memories across machines. Uses compressed chunks — no merge conflicts, no huge files.
-
-Local SQLite remains the source of truth. Cloud integration is opt-in replication.
-
-```bash
-engram sync                    # Export new memories as compressed chunk
-git add .engram/ && git commit -m "sync engram memories"
-engram sync --import           # On another machine: import new chunks
-engram sync --status           # Check sync status
-```
-
-Full sync documentation → [DOCS.md](DOCS.md)
-
-## Cloud Integration (Opt-In Replication)
-
-Cloud is optional. Local SQLite stays authoritative; cloud is replication/shared access only.
-
-**Recommended first path (local smoke):**
-
-```bash
-docker compose -f docker-compose.cloud.yml up -d
-engram cloud config --server http://127.0.0.1:18080
-engram cloud enroll smoke-project
-engram sync --cloud --project smoke-project
-```
-
-Cloud mode is always project-scoped (`--project` is required; `engram sync --cloud --all` is intentionally blocked).
-`ENGRAM_CLOUD_ALLOWED_PROJECTS` is required for `engram cloud serve` in both token-auth and insecure modes. Set it to `*` to allow all projects (useful for dev/internal deploys) — this bypasses per-project name enforcement while still requiring a non-empty project on each request.
-Known repairable cloud sync/upsert/canonicalization failures keep the original error visible and recommend the explicit `doctor`/`repair` flow below; Engram never auto-applies repair from sync or autosync.
-For blocked cloud sync, `transport_failed`, or legacy session directory repair, see [Engram Cloud Troubleshooting](docs/engram-cloud/troubleshooting.md).
-If cloud sync stays blocked after `doctor`/`repair`, download the rescue helper and run the recommended exported-row repair:
-
-```bash
-tools/repair-missing-session-directory.sh --apply --interactive --fix-exported <project>
-engram sync --cloud --project <project>
-```
-
-`--fix-exported` repairs local exported `sessions[].directory` and `observations[]` required fields that can still break the final push after `doctor` reports ready. For sequential legacy `sync_mutations` blockers, use `tools/repair-missing-session-directory.sh --apply --interactive --all <project>`.
-
-**After upgrading `engram` while an MCP client is already running:**
-
-```bash
-engram setup claude-code
-```
-
-Then restart Claude Code so it reloads the Engram MCP subprocess and refreshed hook/config files. Updating the `engram` binary on disk does not replace an already-running stdio MCP process.
-
-**Upgrade flow for existing local databases** (diagnose → repair → bootstrap → status):
-
-```bash
-engram cloud upgrade doctor --project smoke-project        # read-only readiness check
-engram cloud upgrade repair --project smoke-project --dry-run
-engram cloud upgrade repair --project smoke-project --apply
-engram cloud upgrade bootstrap --project smoke-project     # resumable enroll + push + verify
-engram cloud upgrade status --project smoke-project        # stage/class/reason
-```
-
-See [DOCS.md — Cloud upgrade flow](DOCS.md#cloud-upgrade-flow) for the full state machine.
-
-`engram cloud bootstrap admin` creates the first managed admin (with optional project grants and a one-time issued token) directly in the cloud database. Set `ENGRAM_CLOUD_TOKEN_PEPPER` on `engram cloud serve` to enable managed tokens to authenticate at runtime (resolved first, before falling back to legacy `ENGRAM_CLOUD_TOKEN`/`ENGRAM_CLOUD_ADMIN`); without it, the server still starts and continues to authenticate via the legacy env-token credentials only. See [DOCS.md — Managed users, tokens, and CLI bootstrap](DOCS.md#managed-users-tokens-and-cli-bootstrap).
-
-For authenticated mode, upgrade flow, dashboard behavior, reason codes, and full runtime/env details:
-
-- [Engram Cloud docs landing](docs/engram-cloud/README.md)
-- [Engram Cloud quickstart](docs/engram-cloud/quickstart.md)
-- [DOCS.md — Cloud CLI reference](DOCS.md#cloud-cli-opt-in)
-- [DOCS.md — Cloud Autosync](DOCS.md#cloud-autosync)
-
-## Steps to Test (Beta — Phases 2+3+4)
-
-Try the new memory-conflict-surfacing features in **complete isolation** from your existing engram setup. Docker uses non-default ports + a separate data dir + a beta-only token, so your prod cloud and `~/.engram/` are untouched. Cleanup is one command.
-
-**What's in the beta**:
-
-- 🔄 Cloud sync of conflict relations cross-machine
-- 🔍 `engram conflicts` CLI + HTTP API for retroactive audit + scan
-- 🧠 `--semantic` scan that uses **your existing Claude Code or OpenCode CLI** to judge FTS5 conflict candidates with LLM reasoning — **$0 if you're on a Pro/Max/Plus subscription**
-
-### Setup (4 commands)
-
-```bash
-git clone https://github.com/Gentleman-Programming/engram.git engram-beta-repo
-cd engram-beta-repo && git checkout feat/memory-conflict-surfacing-cloud-sync
-docker compose -f docker-compose.beta.yml up -d
-go build -o ./engram-beta ./cmd/engram
-
-# Isolated env (does NOT touch ~/.engram or your prod cloud)
-export ENGRAM_DATA_DIR=/tmp/engram-beta-data
-export ENGRAM_CLOUD_SERVER=http://127.0.0.1:28080
-export ENGRAM_CLOUD_TOKEN=beta-token-CHANGE-ME-please-32chars
-mkdir -p "$ENGRAM_DATA_DIR"
-```
-
-### Use cases
-
-**1️⃣ Phase 1 — Conflict detection on save (sanity)**
-
-```bash
-./engram-beta save \
-  "Use Clean Architecture" \
-  "Layers: entities, use cases, adapters." \
-  --type architecture --project beta-test
-
-./engram-beta save \
-  "Use Hexagonal Architecture" \
-  "Ports and adapters separate domain from infra." \
-  --type architecture --project beta-test
-```
-
-✅ Second save returns `candidates[]` with the first memory's id.
-
-**2️⃣ Phase 2 — Cloud sync of relations cross-machine**
-
-```bash
-./engram-beta cloud enroll beta-test
-./engram-beta sync --cloud --project beta-test
-./engram-beta cloud status
-
-# Simulate a "second machine"
-ENGRAM_DATA_DIR=/tmp/engram-beta-data-2 ./engram-beta cloud enroll beta-test
-ENGRAM_DATA_DIR=/tmp/engram-beta-data-2 ./engram-beta sync --cloud --project beta-test
-ENGRAM_DATA_DIR=/tmp/engram-beta-data-2 ./engram-beta search "Architecture"
-```
-
-✅ The "second machine" sees memories synced from the first.
-
-**3️⃣ Phase 3 — Admin CLI + HTTP API**
-
-```bash
-./engram-beta conflicts list --project beta-test
-./engram-beta conflicts stats --project beta-test
-./engram-beta conflicts scan --project beta-test --dry-run
-./engram-beta conflicts scan --project beta-test --apply --max-insert 10
-
-# In another terminal: ./engram-beta serve
-curl -s "http://127.0.0.1:7437/conflicts?project=beta-test" | jq
-```
-
-✅ List/scan/stats return sensible data.
-
-**4️⃣ Phase 4 — Semantic LLM-judge (the killer feature) 🎯**
-
-```bash
-export ENGRAM_AGENT_CLI=claude   # or opencode
-
-./engram-beta conflicts scan --project beta-test --semantic --apply \
-  --max-semantic 5 --concurrency 3 --yes
-```
-
-✅ Your agent's LLM judges semantic similarity. **$0 if on a subscription**.
-
-**5️⃣ The case where FTS5 finds a candidate, then the LLM judges meaning**
-
-Lexically related candidate titles with a semantic conflict:
-
-```bash
-./engram-beta save \
-  "Use Postgres for the user database" \
-  "Postgres 15 is our SQL store for users." \
-  --type architecture --project beta-test
-
-./engram-beta save \
-  "Replace the user database with MongoDB" \
-  "Document store now backs the user collection. SQL is gone." \
-  --type decision --project beta-test
-
-./engram-beta conflicts scan --project beta-test --semantic --apply \
-  --max-semantic 5 --yes
-
-./engram-beta conflicts list --project beta-test --status judged
-```
-
-✅ FTS5 supplies the candidate pair through shared title terms like `user` / `database`; the LLM then judges whether it is `supersedes` / `conflicts_with`. `--semantic` does not discover totally lexically unrelated pairs on its own.
-
-### Cleanup (zero residue)
-
-```bash
-docker compose -f docker-compose.beta.yml down -v
-rm -rf /tmp/engram-beta-data /tmp/engram-beta-data-2 ./engram-beta
-```
-
-Your production engram is fully untouched throughout.
-
-### Full guide + troubleshooting
-
-→ [docs/BETA_TESTING.md](docs/BETA_TESTING.md)
-
-→ Report feedback: [issues with `beta-phase-2-3-4` label](https://github.com/Gentleman-Programming/engram/issues)
-
-## CLI Reference
-
-| Command                                    | Description                                                     |
-| ------------------------------------------ | --------------------------------------------------------------- |
-| `engram setup [agent]`                     | Install agent integration                                       |
-| `engram serve [port]`                      | Start HTTP API (default: 7437)                                  |
-| `engram mcp [--tools=PROFILE] [--project NAME]` | Start MCP server (stdio transport)                         |
-| `engram tui`                               | Launch terminal UI                                              |
-| `engram search <query>`                    | Search memories                                                 |
-| `engram save <title> <msg>`                | Save a memory                                                   |
-| `engram delete <obs_id>`                   | Delete an observation (soft by default; `--hard` removes permanently) |
-| `engram delete session <id>`               | Delete a session by ID (must have no observations)                    |
-| `engram delete prompt <id>`                | Delete a prompt by ID (permanent)                                     |
-| `engram delete project <name> [--hard]`    | Cascade-delete a project: soft-deletes observations by default (`--hard` removes permanently and also removes sessions) |
-| `engram timeline <obs_id>`                 | Chronological context                                           |
-| `engram context [project]`                 | Recent session context                                          |
-| `engram stats`                             | Memory statistics                                               |
-| `engram export [file]`                     | Export to JSON                                                  |
-| `engram import <file>`                     | Import from JSON                                                |
-| `engram sync`                              | Git sync export/import                                          |
-| `engram conflicts <sub>`                   | Inspect and manage memory conflict relations                    |
-| `engram doctor`                            | Run read-only operational diagnostics                           |
-| `engram cloud <subcommand>`                | Opt-in cloud config/status/enrollment + cloud runtime (`serve`) |
-| `engram projects list\|consolidate\|prune` | Manage project names                                            |
-| `engram obsidian-export`                   | Export to Obsidian vault (beta)                                 |
-| `engram version`                           | Show version                                                    |
-
-Full CLI with all flags → [docs/ARCHITECTURE.md#cli-reference](docs/ARCHITECTURE.md#cli-reference)
-
-### Key Environment Variables
-
-| Variable                        | Description                                                                                                            | Default        |
-| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | -------------- |
-| `ENGRAM_DATA_DIR`               | Override data directory                                                                                                | `~/.engram`    |
-| `ENGRAM_PORT`                   | Override HTTP server port                                                                                              | `7437`         |
-| `ENGRAM_URL`                    | Point the **Pi plugin** at an existing `engram serve` instance instead of auto-starting one. Not an MCP endpoint — used by the HTTP event-capture path only. (The OpenCode plugin honors `ENGRAM_PORT`/`ENGRAM_BIN`, not `ENGRAM_URL`.) | (unset, defaults to `http://127.0.0.1:<ENGRAM_PORT>`) |
-| `ENGRAM_HTTP_TOKEN`             | Optional Bearer auth for local HTTP server. When set, destructive and export routes require `Authorization: Bearer <token>`. Unset = open (zero-config default). | (unset) |
-| `ENGRAM_TIMEZONE`               | Timezone for timestamp display in TUI and cloud dashboard (e.g. `America/New_York`). Falls back to system local when unset or invalid. | system local |
-| `ENGRAM_CLOUD_AUTOSYNC`         | Set to `1` to enable background autosync (also requires `ENGRAM_CLOUD_TOKEN` + `ENGRAM_CLOUD_SERVER`).                 | (unset)        |
-| `ENGRAM_CLOUD_ALLOWED_PROJECTS` | Comma-separated project allowlist for `engram cloud serve`. Use `*` to allow all projects.                             | (unset)        |
-| `ENGRAM_CLOUD_TOKEN_PEPPER`     | Dedicated secret used to hash managed tokens. Required to issue tokens via `engram cloud bootstrap admin --issue-token` AND to enable managed-token authentication on `engram cloud serve`; must differ from `ENGRAM_JWT_SECRET`. Without it, `engram cloud serve` still starts and authenticates via legacy `ENGRAM_CLOUD_TOKEN`/`ENGRAM_CLOUD_ADMIN` only. | (unset)        |
-
-Full environment variable reference → [DOCS.md#environment-variables](DOCS.md#environment-variables)
+Navigate with `j`/`k`, use `Enter` to drill in, `c` to copy content to the clipboard, `/` to search, and `Esc` to go back. The TUI uses the Catppuccin Mocha theme.
 
 ## Documentation
 
-| Doc                                           | Description                                                            |
-| --------------------------------------------- | ---------------------------------------------------------------------- |
-| [Installation](docs/INSTALLATION.md)          | All install methods + platform support                                 |
-| [Engram Cloud](docs/engram-cloud/README.md)   | Cloud landing page, quickstart, branding, and deep links               |
-| [Agent Setup](docs/AGENT-SETUP.md)            | Per-agent configuration + Memory Protocol                              |
-| [Codebase Guide](docs/CODEBASE-GUIDE.md)      | Guide to the repository structure, flows, and implementation landmarks |
-| [Architecture](docs/ARCHITECTURE.md)          | How it works + MCP tools + project structure                           |
-| [Plugins](docs/PLUGINS.md)                    | OpenCode & Claude Code plugin details                                  |
-| [Comparison](docs/COMPARISON.md)              | Why Engram vs claude-mem                                               |
-| [Intended Usage](docs/intended-usage.md)      | Mental model — how Engram is meant to be used                          |
-| [Obsidian Brain](docs/beta/obsidian-brain.md) | Export memories as Obsidian knowledge graph (beta)                     |
-| [Contributing](CONTRIBUTING.md)               | Contribution workflow + standards                                      |
-| [Full Docs](DOCS.md)                          | Complete technical reference                                           |
+| Doc | Description |
+| --- | --- |
+| [Installation](docs/INSTALLATION.md) | Platform support and all installation methods |
+| [Agent Setup](docs/AGENT-SETUP.md) | Per-agent configuration and compaction resilience |
+| [Intended Usage](docs/intended-usage.md) | The human mental model for using Engram |
+| [Architecture](docs/ARCHITECTURE.md) | Memory model, tool behavior, and project structure |
+| [Codebase Guide](docs/CODEBASE-GUIDE.md) | Repository structure, flows, and implementation landmarks |
+| [Plugins](docs/PLUGINS.md) | OpenCode and Claude Code plugin details |
+| [Team Usage](docs/TEAM-USAGE.md) | Shared-memory conventions |
+| [Engram Cloud](docs/engram-cloud/README.md) | Cloud quickstart, deployment, and technical links |
+| [Doctor](docs/DOCTOR.md) | Operational diagnosis and repair workflows |
+| [Binary self-testing](docs/SELF-TESTING.md) | Isolated reliability and performance checks for released binaries |
+| [Beta Testing](docs/BETA_TESTING.md) | Isolated beta testing flows and cleanup guidance |
+| [Comparison](docs/COMPARISON.md) | Engram compared with claude-mem |
+| [Obsidian Brain](docs/beta/obsidian-brain.md) | Export memories as an Obsidian knowledge graph (beta) |
+| [Full Docs](DOCS.md) | Complete CLI, environment, API, and operational reference |
 
-> **Dashboard contributors**: if you modify `.templ` files in `internal/cloud/dashboard/`, run `make templ` to regenerate before committing. See [DOCS.md — Dashboard templ regeneration](DOCS.md#dashboard-templ-regeneration).
+> **Dashboard contributors:** if you modify `.templ` files in `internal/cloud/dashboard/`, run `make templ` to regenerate before committing. See [Dashboard templ regeneration](DOCS.md#dashboard-templ-regeneration).
+
+## Contributing
+
+Every change starts with an approved issue. See [Contributing](CONTRIBUTING.md) for the issue-first workflow, labels, review requirements, and contributor standards.
+
+> **Trademark notice:** The Engram names and logos are trademarks of Alan Buscaglia. The MIT License applies to the code; it does not permit implying endorsement or official affiliation. See [TRADEMARKS.md](TRADEMARKS.md).
 
 ## License
 

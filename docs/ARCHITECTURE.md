@@ -71,6 +71,8 @@ Next session starts → Previous session context is injected automatically
 | `mem_current_project` | Detect project from cwd — never errors, recommended first call |
 | `mem_doctor` | Run read-only operational diagnostics for project detection and store health |
 | `mem_review` | List observations whose `review_after` lifecycle is stale; `mark_reviewed` resets the local review cycle |
+| `mem_pin` | Pin a local observation so it appears before recent memory context; not synced |
+| `mem_unpin` | Remove a local observation pin so normal recency order applies; not synced |
 | `mem_judge` | Record a verdict for a pending memory conflict surfaced by `mem_save` |
 | `mem_compare` | Persist a semantic relation verdict between two existing observations |
 
@@ -126,14 +128,14 @@ Examples:
 - `pattern/error-handling-convention`
 - `config/ci-environment`
 
-**Why this format?** SQLite FTS5 tokenises on word boundaries. Lowercase kebab-case ensures the key fragments are individually searchable and do not create unexpected FTS5 token splits.
+**Why this format?** Topic keys support exact key lookups and trigram FTS substring search. Lowercase kebab-case keeps identifiers stable, readable, and consistent across callers.
 
 **Anti-patterns to avoid:**
 
 | Anti-pattern | Problem | Correct form |
 |---|---|---|
-| `authModel` | camelCase breaks FTS5 tokenisation | `architecture/auth-model` |
-| `auth model` | spaces create accidental multi-token keys | `architecture/auth-model` |
+| `authModel` | camelCase is inconsistent with canonical topic keys | `architecture/auth-model` |
+| `auth model` | spaces make exact topic identifiers harder to use | `architecture/auth-model` |
 | `ARCHITECTURE/AUTH` | uppercase is inconsistent with FTS5 normalisation | `architecture/auth-model` |
 | `auth/model/v2/final` | more than 2 levels — use `v2` in the description | `architecture/auth-model-v2` |
 | `bugfix` | no slash — looks like a family with no description | `bug/auth-nil-panic` |
@@ -161,7 +163,7 @@ When you are not sure which key to use, call `mem_suggest_topic_key` before `mem
    → creates new observation (revision_count=1)
 
 3. (later session) mem_save(..., topic_key="architecture/auth-model")
-   → updates existing observation (revision_count=2)
+   → updates the existing observation (revision_count=2) and attributes it to the latest writer session
 ```
 
 `mem_suggest_topic_key` families:
@@ -211,7 +213,7 @@ engram/
 ├── internal/
 │   ├── store/store.go              # Core: SQLite + FTS5 + all data ops
 │   ├── server/server.go            # HTTP REST API (port 7437)
-│   ├── mcp/mcp.go                  # MCP stdio server (20 tools)
+│   ├── mcp/mcp.go                  # MCP stdio server (22 tools)
 │   ├── setup/setup.go              # Agent plugin installer (go:embed)
 │   ├── cloud/                       # Optional cloud runtime (Postgres + dashboard)
 │   │   ├── cloudserver/             # /sync API + dashboard mount + auth/session bridge
@@ -252,7 +254,7 @@ engram setup [agent]      Install/setup agent integration (opencode, claude-code
 engram serve [port]       Start HTTP API server (default: 7437)
 engram mcp                Start MCP server (stdio transport)
 engram tui                Launch interactive terminal UI
-engram search <query>     Search memories
+engram search <query>     Search memories [--project P|--all]
 engram save <title> <msg> Save a memory
 engram delete <obs_id>    Delete an observation [--hard] (soft-delete by default; --hard removes permanently)
 engram delete session <id>
@@ -262,10 +264,10 @@ engram delete prompt <id>
 engram delete project <name> [--hard]
                           Cascade-delete a project: soft-deletes observations (or hard-deletes
                           with --hard, which also removes sessions); always removes prompts
-engram timeline <obs_id>  Chronological context around an observation
-engram context [project]  Recent context from previous sessions
-engram stats              Memory statistics
-engram export [file]      Export all memories to JSON
+engram timeline <obs_id>  Chronological context around an observation [--project P|--all]
+engram context [project]  Recent context from previous sessions [--project P|--all]
+engram stats              Memory statistics [--project P|--all]
+engram export [file]      Export current-project memories to JSON [--project P|--all]
 engram import <file>      Import memories from JSON
 engram sync               Export new memories as compressed chunk to .engram/
 engram sync --all         Export ALL projects (ignore directory-based filter)
@@ -287,16 +289,21 @@ engram cloud bootstrap admin --username <name> [--email <email>]
                           Create the first managed admin (see DOCS.md for details
                           and the current server-side auth wiring limitation)
 engram projects list      Show all projects with obs/session/prompt counts
-engram projects consolidate  Interactive merge of similar project names [--all] [--dry-run]
+engram projects consolidate  Interactive merge of normalization-equivalent project names [--all] [--dry-run]
 engram projects prune     Remove projects with 0 observations [--dry-run]
-engram obsidian-export    Export memories to Obsidian vault (beta)
+engram projects rescue-ownership --project <name> [--session <id>] [--observation <id>] [--prompt <id>]
+                          Assign explicit ownership to legacy rows that carry none. Reaches the local
+                          store directly, so it needs no server token and works in a zero-config install.
+engram obsidian-export    Export current-project memories to Obsidian vault (beta; --all for every project)
 engram version            Show version
 ```
 
 Local server auth:
 
-- `ENGRAM_HTTP_TOKEN`: optional Bearer auth for `engram serve`. When set, the following routes require `Authorization: Bearer <token>`: `DELETE /sessions/{id}`, `DELETE /observations/{id}`, `DELETE /prompts/{id}`, `GET /export`, `POST /import`, `POST /projects/migrate`. Comparison is constant-time; token is read per-request. When unset, all routes are open (zero-config default).
+- `ENGRAM_HTTP_TOKEN`: optional Bearer auth for `engram serve`. When set, `DELETE /sessions/{id}`, `DELETE /observations/{id}`, `DELETE /prompts/{id}`, `GET /export`, and `POST /import` require `Authorization: Bearer <token>`. `POST /projects/rescue-ownership` always requires a configured token and matching Bearer credential; deprecated alias `POST /projects/migrate` uses the same handler and requirement. Comparison is constant-time; token is read per-request. Other routes remain open when unset (zero-config default). Ownership repair does not depend on this token: `engram projects rescue-ownership` does the same work against the local store.
 - `ENGRAM_TIMEZONE`: IANA zone name for timestamp display in TUI and cloud dashboard (e.g. `America/New_York`). Falls back to system local when unset or invalid.
+
+Project selection for reads is explicit: omitted project selectors resolve the current project (explicit project, then `ENGRAM_PROJECT`, then cwd detection). Use `--all` in the CLI or `all_projects=true` in HTTP to intentionally read every project. Do not combine an explicit project with an all-project selector. `engram context` accepts its legacy positional project as an alias for `--project`; the two forms cannot be combined. `GET /sync/status` supports only one resolved project and rejects `all_projects=true`.
 
 Cloud constraints (current behavior):
 

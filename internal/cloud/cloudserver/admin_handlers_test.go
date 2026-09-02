@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	cloudauth "github.com/Gentleman-Programming/engram/internal/cloud/auth"
-	"github.com/Gentleman-Programming/engram/internal/cloud/cloudstore"
+	cloudauth "github.com/Gentleman-Programming/engram/v2/internal/cloud/auth"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/cloudstore"
 )
 
 type adminTestStore struct {
@@ -244,6 +244,38 @@ func performAdminRequest(srv *CloudServer, method, path, body string) *httptest.
 	return rec
 }
 
+func assertJSONWireContract(t *testing.T, body []byte, expectedKeys, forbiddenKeys []string) {
+	t.Helper()
+
+	trimmed := bytes.TrimSpace(body)
+	var objects []map[string]json.RawMessage
+	if len(trimmed) > 0 && trimmed[0] == '{' {
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal(trimmed, &object); err != nil {
+			t.Fatalf("decode JSON object: %v", err)
+		}
+		objects = []map[string]json.RawMessage{object}
+	} else if err := json.Unmarshal(trimmed, &objects); err != nil {
+		t.Fatalf("decode JSON object list: %v", err)
+	}
+	if len(objects) == 0 {
+		t.Fatalf("expected at least one JSON object, got %q", body)
+	}
+
+	for index, object := range objects {
+		for _, key := range expectedKeys {
+			if _, ok := object[key]; !ok {
+				t.Errorf("response object %d missing expected key %q: %s", index, key, body)
+			}
+		}
+		for _, key := range forbiddenKeys {
+			if _, ok := object[key]; ok {
+				t.Errorf("response object %d contains forbidden key %q: %s", index, key, body)
+			}
+		}
+	}
+}
+
 func TestAdminHandlersRequireManagedAdminAndLeaveNoStateForMembers(t *testing.T) {
 	forbiddenPrincipals := []struct {
 		name      string
@@ -316,6 +348,10 @@ func TestAdminHandlersManageUsersTokensAndGrantsWithRedactedResponses(t *testing
 	if userResp.PrincipalID != "p-user-alice" || userResp.Username != "alice" || userResp.Role != "member" || !userResp.Enabled {
 		t.Fatalf("unexpected created user response: %+v", userResp)
 	}
+	assertJSONWireContract(t, createUser.Body.Bytes(),
+		[]string{"principal_id", "username", "email", "display_name", "role", "enabled", "created_at"},
+		[]string{"PrincipalID", "Username", "Email", "DisplayName", "Role", "Enabled", "CreatedAt"},
+	)
 
 	listUsers := performAdminRequest(srv, http.MethodGet, "/admin/users", "")
 	if listUsers.Code != http.StatusOK {
@@ -328,6 +364,10 @@ func TestAdminHandlersManageUsersTokensAndGrantsWithRedactedResponses(t *testing
 	if len(users) != 1 || users[0].PrincipalID != "p-user-alice" {
 		t.Fatalf("expected created user in list, got %+v", users)
 	}
+	assertJSONWireContract(t, listUsers.Body.Bytes(),
+		[]string{"principal_id", "username", "email", "display_name", "role", "enabled", "created_at"},
+		[]string{"PrincipalID", "Username", "Email", "DisplayName", "Role", "Enabled", "CreatedAt"},
+	)
 
 	disableUser := performAdminRequest(srv, http.MethodPost, "/admin/users/p-user-alice/disable", "")
 	if disableUser.Code != http.StatusOK {
@@ -380,6 +420,10 @@ func TestAdminHandlersManageUsersTokensAndGrantsWithRedactedResponses(t *testing
 	if createGrant.Code != http.StatusCreated {
 		t.Fatalf("expected create grant 201, got %d body=%q", createGrant.Code, createGrant.Body.String())
 	}
+	assertJSONWireContract(t, createGrant.Body.Bytes(),
+		[]string{"principal_id", "project", "granted_by_principal_id", "created_at"},
+		[]string{"PrincipalID", "Project", "GrantedByPrincipalID", "CreatedAt"},
+	)
 	listGrants := performAdminRequest(srv, http.MethodGet, "/admin/users/p-user-alice/grants", "")
 	if listGrants.Code != http.StatusOK {
 		t.Fatalf("expected list grants 200, got %d body=%q", listGrants.Code, listGrants.Body.String())
@@ -391,6 +435,10 @@ func TestAdminHandlersManageUsersTokensAndGrantsWithRedactedResponses(t *testing
 	if len(grants) != 1 || grants[0].Project != "alpha" || grants[0].GrantedByPrincipalID != "p-admin" {
 		t.Fatalf("unexpected grants: %+v", grants)
 	}
+	assertJSONWireContract(t, listGrants.Body.Bytes(),
+		[]string{"principal_id", "project", "granted_by_principal_id", "created_at"},
+		[]string{"PrincipalID", "Project", "GrantedByPrincipalID", "CreatedAt"},
+	)
 
 	revokeGrant := performAdminRequest(srv, http.MethodPost, "/admin/users/p-user-alice/grants/alpha/revoke", "")
 	if revokeGrant.Code != http.StatusOK {
