@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
 )
 
 // ─── Fakes ───────────────────────────────────────────────────────────────────
@@ -21,6 +21,7 @@ type fakeLocalStore struct {
 	mutations         []store.SyncMutation
 	syncState         *store.SyncState
 	leaseOwner        string
+	leaseCalls        int
 	pushErr           error
 	pullErr           error
 	failureMessage    string
@@ -95,6 +96,7 @@ func (s *fakeLocalStore) AckSyncMutationSeqs(_ string, seqs []int64) error {
 func (s *fakeLocalStore) AcquireSyncLease(_, owner string, ttl time.Duration, now time.Time) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.leaseCalls++
 	if !s.acquireGranted {
 		return false, nil
 	}
@@ -423,6 +425,177 @@ func TestManagerPushIsolatesProjectLocalFailures(t *testing.T) {
 				t.Fatalf("expected only healthy beta mutation to be acked, got %v", acked)
 			}
 		})
+	}
+}
+
+func TestManagerPushSkipsEmptyProjectAndSyncsValidGroups(t *testing.T) {
+	ls := newFakeLocalStore()
+	ls.mutations = []store.SyncMutation{
+		{Seq: 1, Entity: "relation", EntityKey: "legacy", Op: "upsert", Project: ""},
+		{Seq: 2, Entity: "obs", EntityKey: "alpha", Op: "upsert", Project: "alpha"},
+	}
+	tr := newFakeTransport()
+	tr.pushResultByProject = map[string]*PushMutationsResult{
+		"alpha": {AcceptedSeqs: []int64{2}},
+	}
+
+	err := New(ls, tr, DefaultConfig()).push(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "has an empty or padded project and was not sent") {
+		t.Fatalf("expected actionable empty-project error, got %v", err)
+	}
+	if got := attemptedProjects(tr); fmt.Sprint(got) != "[alpha]" {
+		t.Fatalf("expected only alpha to reach transport, got %v", got)
+	}
+	if fmt.Sprint(ls.ackedSeqs) != "[2]" {
+		t.Fatalf("expected only the valid mutation to be acked, got %v", ls.ackedSeqs)
+	}
+}
+
+func TestManagerPushSkipsPaddedProjectAndSyncsValidGroups(t *testing.T) {
+	ls := newFakeLocalStore()
+	ls.mutations = []store.SyncMutation{
+		{Seq: 1, Entity: "relation", EntityKey: "legacy", Op: "upsert", Project: " alpha "},
+		{Seq: 2, Entity: "obs", EntityKey: "alpha", Op: "upsert", Project: "alpha"},
+	}
+	tr := newFakeTransport()
+	tr.pushResultByProject = map[string]*PushMutationsResult{
+		"alpha": {AcceptedSeqs: []int64{2}},
+	}
+
+	err := New(ls, tr, DefaultConfig()).push(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "has an empty or padded project and was not sent") {
+		t.Fatalf("expected actionable padded-project error, got %v", err)
+	}
+	if got := attemptedProjects(tr); fmt.Sprint(got) != "[alpha]" {
+		t.Fatalf("expected only alpha to reach transport, got %v", got)
+	}
+	if fmt.Sprint(ls.ackedSeqs) != "[2]" {
+		t.Fatalf("expected only the valid mutation to be acked, got %v", ls.ackedSeqs)
+	}
+}
+
+func TestManagerPushQuarantinesLegacyPaddedProjectBeforeSendingValidGroups(t *testing.T) {
+	cfg, err := store.DefaultConfig()
+	if err != nil {
+		t.Fatalf("store default config: %v", err)
+	}
+	cfg.DataDir = t.TempDir()
+	local, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer local.Close() //nolint:errcheck
+	if err := local.EnrollProject("alpha"); err != nil {
+		t.Fatalf("enroll alpha: %v", err)
+	}
+	if _, err := local.DB().Exec(`
+		INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project)
+		VALUES
+			('cloud', 'session', 'legacy', 'upsert', '{"id":"legacy","directory":"/tmp/legacy"}', 'local', ' alpha '),
+			('cloud', 'session', 'alpha', 'upsert', '{"id":"alpha","directory":"/tmp/alpha","project":"alpha"}', 'local', 'alpha')
+	`); err != nil {
+		t.Fatalf("seed legacy and valid mutations: %v", err)
+	}
+	var alphaSeq int64
+	if err := local.DB().QueryRow(`SELECT seq FROM sync_mutations WHERE entity_key = 'alpha'`).Scan(&alphaSeq); err != nil {
+		t.Fatalf("read alpha sequence: %v", err)
+	}
+	tr := newFakeTransport()
+	tr.pushResultByProject = map[string]*PushMutationsResult{
+		"alpha": {AcceptedSeqs: []int64{alphaSeq}},
+	}
+
+	if err := New(local, tr, DefaultConfig()).push(context.Background()); err != nil {
+		t.Fatalf("push valid group alongside quarantined legacy row: %v", err)
+	}
+	if got := attemptedProjects(tr); fmt.Sprint(got) != "[alpha]" {
+		t.Fatalf("expected only alpha to reach transport, got %v", got)
+	}
+	var disposition string
+	if err := local.DB().QueryRow(`SELECT disposition FROM sync_mutations WHERE entity_key = 'legacy'`).Scan(&disposition); err != nil {
+		t.Fatalf("read legacy mutation disposition: %v", err)
+	}
+	if disposition != store.SyncMutationDispositionQuarantined {
+		t.Fatalf("expected legacy row to be quarantined, got %q", disposition)
+	}
+}
+
+func TestManagerPushQuarantinesOnlyConfiguredTarget(t *testing.T) {
+	const targetKey = "replica"
+	cfg, err := store.DefaultConfig()
+	if err != nil {
+		t.Fatalf("store default config: %v", err)
+	}
+	cfg.DataDir = t.TempDir()
+	local, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer local.Close() //nolint:errcheck
+	if err := local.EnrollProject("alpha"); err != nil {
+		t.Fatalf("enroll alpha: %v", err)
+	}
+	if _, err := local.GetSyncState(targetKey); err != nil {
+		t.Fatalf("initialize configured target state: %v", err)
+	}
+	if _, err := local.DB().Exec(`
+		INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project)
+		VALUES
+			(?, 'session', 'replica-legacy', 'upsert', '{"id":"replica-legacy","directory":"/tmp/legacy"}', 'local', ' alpha '),
+			(?, 'session', 'replica-valid', 'upsert', '{"id":"replica-valid","directory":"/tmp/alpha","project":"alpha"}', 'local', 'alpha'),
+			(?, 'session', 'default-legacy', 'upsert', '{"id":"default-legacy","directory":"/tmp/default"}', 'local', ' beta ')
+	`, targetKey, targetKey, store.DefaultSyncTargetKey); err != nil {
+		t.Fatalf("seed target-scoped mutations: %v", err)
+	}
+	if err := local.MarkSyncPending(store.DefaultSyncTargetKey); err != nil {
+		t.Fatalf("mark default target pending: %v", err)
+	}
+	var validSeq int64
+	if err := local.DB().QueryRow(`SELECT seq FROM sync_mutations WHERE entity_key = 'replica-valid'`).Scan(&validSeq); err != nil {
+		t.Fatalf("read valid mutation sequence: %v", err)
+	}
+	tr := newFakeTransport()
+	tr.pushResultByProject = map[string]*PushMutationsResult{
+		"alpha": {AcceptedSeqs: []int64{validSeq}},
+	}
+	autosyncCfg := DefaultConfig()
+	autosyncCfg.TargetKey = targetKey
+	mgr := New(local, tr, autosyncCfg)
+
+	if err := mgr.push(context.Background()); err != nil {
+		t.Fatalf("push configured target: %v", err)
+	}
+	if got := attemptedProjects(tr); fmt.Sprint(got) != "[alpha]" {
+		t.Fatalf("expected configured target valid group to reach transport, got %v", got)
+	}
+	if err := mgr.push(context.Background()); err != nil {
+		t.Fatalf("repeat push configured target: %v", err)
+	}
+	if got := atomic.LoadInt32(&tr.pushCalls); got != 1 {
+		t.Fatalf("expected no repeated transport attempt for quarantined row, got %d", got)
+	}
+
+	for _, check := range []struct {
+		key  string
+		want string
+	}{
+		{key: "replica-legacy", want: store.SyncMutationDispositionQuarantined},
+		{key: "default-legacy", want: store.SyncMutationDispositionPending},
+	} {
+		var disposition string
+		if err := local.DB().QueryRow(`SELECT disposition FROM sync_mutations WHERE entity_key = ?`, check.key).Scan(&disposition); err != nil {
+			t.Fatalf("read %s disposition: %v", check.key, err)
+		}
+		if disposition != check.want {
+			t.Fatalf("%s disposition = %q, want %q", check.key, disposition, check.want)
+		}
+	}
+	state, err := local.GetSyncState(store.DefaultSyncTargetKey)
+	if err != nil {
+		t.Fatalf("read default target lifecycle: %v", err)
+	}
+	if state.Lifecycle != store.SyncLifecyclePending {
+		t.Fatalf("default target lifecycle = %q, want %q", state.Lifecycle, store.SyncLifecyclePending)
 	}
 }
 
@@ -859,6 +1032,234 @@ func TestManagerBackoffCeiling(t *testing.T) {
 	}
 }
 
+func TestManagerCycleAtFailureCeilingWithActiveBackoffSkipsWork(t *testing.T) {
+	ls := newFakeLocalStore()
+	tr := newFakeTransport()
+	cfg := DefaultConfig()
+	cfg.MaxConsecutiveFailures = 3
+	mgr := New(ls, tr, cfg)
+	backoffUntil := time.Now().Add(time.Minute)
+
+	mgr.mu.Lock()
+	mgr.status.Phase = PhasePushFailed
+	mgr.status.ConsecutiveFailures = cfg.MaxConsecutiveFailures
+	mgr.status.BackoffUntil = &backoffUntil
+	mgr.mu.Unlock()
+
+	mgr.cycle(context.Background())
+
+	ls.mu.Lock()
+	leaseCalls := ls.leaseCalls
+	ls.mu.Unlock()
+	if leaseCalls != 0 {
+		t.Fatalf("expected no lease work during active ceiling backoff, got %d attempts", leaseCalls)
+	}
+	if got := atomic.LoadInt32(&tr.pushCalls); got != 0 {
+		t.Fatalf("expected no push work during active ceiling backoff, got %d calls", got)
+	}
+	if got := atomic.LoadInt32(&tr.pullCalls); got != 0 {
+		t.Fatalf("expected no pull work during active ceiling backoff, got %d calls", got)
+	}
+	if got := mgr.Status().Phase; got != PhaseBackoff {
+		t.Fatalf("expected PhaseBackoff during active ceiling backoff, got %q", got)
+	}
+}
+
+func TestManagerCycleAtFailureCeilingAfterBackoffExpiryRecovers(t *testing.T) {
+	ls := newFakeLocalStore()
+	ls.mutations = []store.SyncMutation{{Seq: 1, Entity: "obs", EntityKey: "k1", Project: "proj-a"}}
+	tr := newFakeTransport()
+	tr.pushResult = &PushMutationsResult{AcceptedSeqs: []int64{1}}
+	cfg := DefaultConfig()
+	cfg.MaxConsecutiveFailures = 3
+	mgr := New(ls, tr, cfg)
+	backoffUntil := time.Now().Add(-time.Second)
+
+	mgr.mu.Lock()
+	mgr.status.Phase = PhasePushFailed
+	mgr.status.ConsecutiveFailures = cfg.MaxConsecutiveFailures
+	mgr.status.BackoffUntil = &backoffUntil
+	mgr.mu.Unlock()
+
+	mgr.cycle(context.Background())
+
+	ls.mu.Lock()
+	leaseCalls := ls.leaseCalls
+	healthyCalls := ls.healthyCalls
+	ls.mu.Unlock()
+	if leaseCalls != 1 {
+		t.Fatalf("expected one lease attempt after backoff expiry, got %d", leaseCalls)
+	}
+	if got := atomic.LoadInt32(&tr.pushCalls); got != 1 {
+		t.Fatalf("expected one push after backoff expiry, got %d calls", got)
+	}
+	if got := atomic.LoadInt32(&tr.pullCalls); got != 1 {
+		t.Fatalf("expected one pull after backoff expiry, got %d calls", got)
+	}
+	if healthyCalls != 1 {
+		t.Fatalf("expected healthy state to be persisted once, got %d calls", healthyCalls)
+	}
+	st := mgr.Status()
+	if st.Phase != PhaseHealthy || st.ConsecutiveFailures != 0 || st.BackoffUntil != nil {
+		t.Fatalf("expected healthy reset after backoff expiry, got %+v", st)
+	}
+}
+
+func TestManagerCycleAfterBackoffExpirySchedulesAnotherBackoff(t *testing.T) {
+	ls := newFakeLocalStore()
+	ls.mutations = []store.SyncMutation{{Seq: 1, Entity: "obs", EntityKey: "k1", Project: "proj-a"}}
+	tr := newFakeTransport()
+	tr.pushErr = errors.New("transport down")
+	cfg := DefaultConfig()
+	cfg.MaxConsecutiveFailures = 3
+	cfg.BaseBackoff = time.Second
+	cfg.MaxBackoff = 5 * time.Second
+	mgr := New(ls, tr, cfg)
+	backoffUntil := time.Now().Add(-time.Second)
+
+	mgr.mu.Lock()
+	mgr.status.Phase = PhasePushFailed
+	mgr.status.ConsecutiveFailures = cfg.MaxConsecutiveFailures
+	mgr.status.BackoffUntil = &backoffUntil
+	mgr.mu.Unlock()
+
+	mgr.cycle(context.Background())
+
+	if got := atomic.LoadInt32(&tr.pushCalls); got != 1 {
+		t.Fatalf("expected one push after backoff expiry, got %d calls", got)
+	}
+	st := mgr.Status()
+	if st.Phase != PhasePushFailed || st.ConsecutiveFailures != cfg.MaxConsecutiveFailures+1 || st.BackoffUntil == nil {
+		t.Fatalf("expected another failed backoff after expiry, got %+v", st)
+	}
+	remaining := time.Until(*st.BackoffUntil)
+	if remaining <= 0 || remaining > cfg.MaxBackoff {
+		t.Fatalf("expected bounded future backoff, got remaining duration %v", remaining)
+	}
+}
+
+func TestManagerCycleAfterRepairRetriesFreshPayloadWithoutRestart(t *testing.T) {
+	const (
+		stalePayload    = `{"sync_id":"obs-704","title":""}`
+		repairedPayload = `{"sync_id":"obs-704","title":"Recovered title"}`
+	)
+
+	ls := newFakeLocalStore()
+	ls.mutations = []store.SyncMutation{{
+		Seq:       1,
+		Entity:    "observation",
+		EntityKey: "obs-704",
+		Op:        "upsert",
+		Project:   "proj-a",
+		Payload:   stalePayload,
+	}}
+	tr := newFakeTransport()
+	tr.pushErr = errors.New("canonicalize materialized mutation batch chunk: mutations[0]: observation payload title is required for upsert")
+	cfg := DefaultConfig()
+	cfg.MaxConsecutiveFailures = 1
+	mgr := New(ls, tr, cfg)
+
+	mgr.cycle(context.Background())
+
+	st := mgr.Status()
+	if st.ConsecutiveFailures != cfg.MaxConsecutiveFailures || st.BackoffUntil == nil {
+		t.Fatalf("expected first push to reach the failure ceiling with backoff, got %+v", st)
+	}
+
+	// Simulate `cloud upgrade repair --apply` rewriting the queued mutation in
+	// another process while this Manager remains alive and in backoff.
+	ls.mu.Lock()
+	ls.mutations[0].Payload = repairedPayload
+	ls.mu.Unlock()
+	tr.mu.Lock()
+	tr.pushErr = nil
+	tr.pushResult = &PushMutationsResult{AcceptedSeqs: []int64{1}}
+	tr.mu.Unlock()
+
+	expired := time.Now().Add(-time.Second)
+	mgr.mu.Lock()
+	mgr.status.BackoffUntil = &expired
+	mgr.mu.Unlock()
+
+	mgr.cycle(context.Background())
+
+	tr.mu.Lock()
+	attempted := append([][]MutationEntry(nil), tr.attempted...)
+	tr.mu.Unlock()
+	if len(attempted) != 2 {
+		t.Fatalf("expected one stale attempt and one post-repair retry, got %d attempts", len(attempted))
+	}
+	if len(attempted[0]) != 1 || string(attempted[0][0].Payload) != stalePayload {
+		t.Fatalf("expected first attempt to carry stale payload, got %+v", attempted[0])
+	}
+	if len(attempted[1]) != 1 || string(attempted[1][0].Payload) != repairedPayload {
+		t.Fatalf("expected retry to reload repaired payload, got %+v", attempted[1])
+	}
+
+	st = mgr.Status()
+	if st.Phase != PhaseHealthy || st.ConsecutiveFailures != 0 || st.BackoffUntil != nil {
+		t.Fatalf("expected repaired retry to recover without Manager restart, got %+v", st)
+	}
+	ls.mu.Lock()
+	acked := append([]int64(nil), ls.ackedSeqs...)
+	ls.mu.Unlock()
+	if fmt.Sprint(acked) != "[1]" {
+		t.Fatalf("expected repaired local mutation to be acked, got %v", acked)
+	}
+}
+
+func TestManagerBackoffSaturatesBeforeDurationConversion(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.BaseBackoff = time.Second
+	cfg.MaxBackoff = 5 * time.Minute
+	mgr := &Manager{cfg: cfg}
+
+	for _, failures := range []int{34, 35, 1000} {
+		t.Run(fmt.Sprintf("failures=%d", failures), func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("computeBackoff panicked: %v", r)
+				}
+			}()
+
+			d := mgr.computeBackoff(failures)
+			if d < cfg.BaseBackoff/2 || d > cfg.MaxBackoff {
+				t.Fatalf("backoff %v outside configured bounds [%v, %v]", d, cfg.BaseBackoff/2, cfg.MaxBackoff)
+			}
+		})
+	}
+}
+
+func TestManagerBackoffSaturatesPositiveJitterBeforeDurationOverflow(t *testing.T) {
+	const maxDuration = time.Duration(1<<63 - 1)
+
+	for _, tc := range []struct {
+		name   string
+		base   time.Duration
+		jitter time.Duration
+		want   time.Duration
+	}{
+		{
+			name:   "saturates overflowing positive jitter",
+			base:   maxDuration - 1,
+			jitter: 2,
+			want:   maxDuration,
+		},
+		{
+			name:   "adds positive jitter below ceiling",
+			base:   maxDuration - 2,
+			jitter: 1,
+			want:   maxDuration - 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := saturatingAddBackoffJitter(tc.base, tc.jitter, maxDuration); got != tc.want {
+				t.Fatalf("saturatingAddBackoffJitter(%v, %v, %v) = %v, want %v", tc.base, tc.jitter, maxDuration, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestManagerBackoffResetOnSuccess(t *testing.T) {
 	ls := newFakeLocalStore()
 	tr := newFakeTransport()
@@ -1097,31 +1498,59 @@ func TestManagerRunPanicRecovery(t *testing.T) {
 	ls := newFakeLocalStore()
 	tr := newFakeTransport()
 	panicOnce := int32(1)
+	panicObserved := make(chan struct{}, 1)
+	subsequentPull := make(chan struct{}, 1)
 
 	cfg := DefaultConfig()
-	cfg.DebounceDuration = 10 * time.Millisecond
-	cfg.PollInterval = 10 * time.Millisecond
-	cfg.BaseBackoff = 10 * time.Millisecond
-	cfg.MaxBackoff = 100 * time.Millisecond
+	cfg.DebounceDuration = time.Millisecond
+	cfg.PollInterval = time.Millisecond
+	cfg.BaseBackoff = time.Nanosecond
+	cfg.MaxBackoff = time.Nanosecond
 
 	mgr := New(ls, tr, cfg)
-	mgr.transport = &panicOnceTransport{delegate: tr, panicOnce: &panicOnce}
+	mgr.transport = &panicOnceTransport{
+		delegate:       tr,
+		panicOnce:      &panicOnce,
+		panicObserved:  panicObserved,
+		subsequentPull: subsequentPull,
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	go mgr.Run(ctx)
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan struct{})
+	go func() {
+		mgr.Run(ctx)
+		close(runDone)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-runDone:
+		case <-time.After(time.Second):
+			t.Error("Run did not return after context cancellation")
+		}
+	})
 	mgr.NotifyDirty()
 
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		st := mgr.Status()
-		if st.Phase == PhaseBackoff && st.ReasonCode == "internal_error" {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
+	select {
+	case <-panicObserved:
+	case <-time.After(time.Second):
+		t.Fatal("panic was not reached")
 	}
-	t.Fatalf("expected PhaseBackoff/internal_error after panic, got phase=%q code=%q",
-		mgr.Status().Phase, mgr.Status().ReasonCode)
+
+	select {
+	case <-subsequentPull:
+		if got := atomic.LoadInt32(&tr.pullCalls); got < 1 {
+			t.Fatalf("expected a successful pull after panic recovery, got %d calls", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run did not perform work after panic recovery")
+	}
+
+	select {
+	case <-runDone:
+		t.Fatal("Run returned after recovering from panic")
+	default:
+	}
 }
 
 // ─── StopForUpgrade / ResumeAfterUpgrade (REQ-208) ───────────────────────────
@@ -1247,69 +1676,31 @@ func TestManagerPanicSetsBackoff(t *testing.T) {
 	tr := newFakeTransport()
 	panicOnce := int32(1)
 
-	cfg := DefaultConfig()
-	cfg.DebounceDuration = 10 * time.Millisecond
-	cfg.PollInterval = 10 * time.Millisecond
-	cfg.BaseBackoff = 10 * time.Millisecond
-	cfg.MaxBackoff = 100 * time.Millisecond
-
-	mgr := New(ls, tr, cfg)
+	mgr := New(ls, tr, DefaultConfig())
 	mgr.transport = &panicOnceTransport{delegate: tr, panicOnce: &panicOnce}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-	defer cancel()
-	go mgr.Run(ctx)
-	mgr.NotifyDirty()
+	before := time.Now()
+	mgr.safeRun(context.Background())
 
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		st := mgr.Status()
-		if st.Phase == PhaseBackoff && st.ReasonCode == "internal_error" {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
+	st := mgr.Status()
+	if st.Phase != PhaseBackoff {
+		t.Fatalf("expected PhaseBackoff after panic, got %q", st.Phase)
 	}
-	t.Fatalf("expected PhaseBackoff/internal_error, got phase=%q code=%q",
-		mgr.Status().Phase, mgr.Status().ReasonCode)
-}
-
-func TestManagerLoopContinuesAfterPanic(t *testing.T) {
-	ls := newFakeLocalStore()
-	tr := newFakeTransport()
-	panicOnce := int32(1)
-
-	cfg := DefaultConfig()
-	cfg.DebounceDuration = 10 * time.Millisecond
-	cfg.PollInterval = 20 * time.Millisecond
-	cfg.BaseBackoff = 20 * time.Millisecond
-	cfg.MaxBackoff = 50 * time.Millisecond
-	cfg.MaxConsecutiveFailures = 5
-
-	mgr := New(ls, tr, cfg)
-	mgr.transport = &panicOnceTransport{delegate: tr, panicOnce: &panicOnce}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	go mgr.Run(ctx)
-	mgr.NotifyDirty()
-
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		if mgr.Status().Phase == PhaseBackoff {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
+	if st.ReasonCode != "internal_error" {
+		t.Fatalf("expected reason code internal_error after panic, got %q", st.ReasonCode)
 	}
-
-	before := atomic.LoadInt32(&tr.pullCalls)
-	deadline = time.Now().Add(1 * time.Second)
-	for time.Now().Before(deadline) {
-		if atomic.LoadInt32(&tr.pullCalls) > before {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	if st.ReasonMessage != "panic: test panic in cycle" {
+		t.Fatalf("expected panic reason message, got %q", st.ReasonMessage)
 	}
-	t.Fatal("loop did not continue after panic recovery")
+	if st.ConsecutiveFailures != 1 {
+		t.Fatalf("expected one panic failure, got %d", st.ConsecutiveFailures)
+	}
+	if st.BackoffUntil == nil {
+		t.Fatal("expected a backoff deadline after panic")
+	}
+	if !st.BackoffUntil.After(before) {
+		t.Fatalf("expected a future backoff deadline, got %v", st.BackoffUntil)
+	}
 }
 
 // ─── BW5: Auth/policy error surfacing ────────────────────────────────────────
@@ -1914,8 +2305,10 @@ func TestPullDeferredScopeReplayErrorIsNonFatal(t *testing.T) {
 // ─── Helper types ─────────────────────────────────────────────────────────────
 
 type panicOnceTransport struct {
-	delegate  *fakeCloudTransport
-	panicOnce *int32
+	delegate       *fakeCloudTransport
+	panicOnce      *int32
+	panicObserved  chan<- struct{}
+	subsequentPull chan<- struct{}
 }
 
 func (p *panicOnceTransport) PushMutations(mutations []MutationEntry) (*PushMutationsResult, error) {
@@ -1924,7 +2317,20 @@ func (p *panicOnceTransport) PushMutations(mutations []MutationEntry) (*PushMuta
 
 func (p *panicOnceTransport) PullMutations(sinceSeq int64, limit int) (*PullMutationsResponse, error) {
 	if atomic.CompareAndSwapInt32(p.panicOnce, 1, 0) {
+		p.signal(p.panicObserved)
 		panic(fmt.Sprintf("test panic in cycle"))
 	}
-	return p.delegate.PullMutations(sinceSeq, limit)
+	result, err := p.delegate.PullMutations(sinceSeq, limit)
+	p.signal(p.subsequentPull)
+	return result, err
+}
+
+func (p *panicOnceTransport) signal(ch chan<- struct{}) {
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
 }

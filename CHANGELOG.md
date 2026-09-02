@@ -31,6 +31,7 @@ Breaking changes are always marked with a `type:breaking-change` label and docum
 - **fix(server):** report rescue outcomes unambiguously. The response carries `complete` and a `blocked` list naming every item left behind with its reason, and `status` is `partially_rescued` rather than `rescued` when anything was; a partial outcome is no longer indistinguishable from a clean one.
 - **fix(store):** read `sessions.project` as nullable in `GetSession`, so a legacy NULL row no longer fails every caller that inspects the session with an opaque scan error.
 - **fix(doctor):** read `sessions.project` through `ifnull()` in the diagnostic queries, so `engram doctor` no longer dies with `converting NULL to string is unsupported` on a database upgraded from the schema where the column was nullable. That population is precisely the one the `project_ownership_required` remedy sends to doctor, and it previously got no report at all.
+- **fix(doctor):** report grouped `orphaned_observation_session` findings when active or soft-deleted observations reference a missing local session. The diagnostic is report-only because the canonical session cannot be reconstructed automatically; `engram doctor repair` rejects it and creates no backup.
 - **fix(store):** read `sessions.project` through `ifnull()` at every remaining site that scanned it raw. An audit of the whole store found the same crash in `RecentSessions` and `AllSessions` (so a single legacy row denied the user `engram context`, `mem_context`, and the TUI session list), in `Export` (the way data leaves the store before a repair), and in `DeleteSession`, `EndSession`, and the `CreateSession` readback (so a legacy session could not be deleted, ended, or re-registered). `sessions.project` is the only column in the schema that is nullable in practice but declared `NOT NULL`: the table is only ever created with `CREATE TABLE IF NOT EXISTS`, so the declaration never reaches rows written before it, and no migration rewrites or backfills the column.
 - **feat(doctor):** add the `unowned_session_project` check. It reports every session that identifies no project — NULL or blank — and carries the exact `engram projects rescue-ownership --project <name> --session <id>` repair, so the legacy ownership state doctor can now read is also surfaced instead of silently passing. The listing is unscoped by design: an unowned session belongs to no project, so `--project` cannot filter it away.
 - **fix(pi):** surface background capture failures on stderr instead of discarding them, so a user whose passive memories stopped being saved gets a signal.
@@ -87,18 +88,22 @@ Background mutation-based replication for `engram serve` and `engram mcp`:
 - **feat(autosync):** `StopForUpgrade` / `ResumeAfterUpgrade` for upgrade-window pause without releasing the sync lease
 - **fix(autosync):** SIGTERM cancels context → `releaseLease()` deferred in `Run()` for graceful shutdown
 
-### BREAKING CHANGE: MCP write tools no longer accept a `project` field
+### MCP write-tool project selection (historical correction)
 
-The `project` argument has been removed from the JSON schemas of 7 MCP write tools:
-`mem_save`, `mem_save_prompt`, `mem_session_start`, `mem_session_end`, `mem_session_summary`, `mem_capture_passive`, `mem_update`.
+An earlier version of this changelog incorrectly stated that MCP write tools
+removed or discarded the `project` field. That statement is not the current
+contract. Current-project writes may use an explicit project override where the
+tool schema supports it; `mem_session_end` and `mem_capture_passive` continue
+to resolve their project from the current process context.
 
-**Before:** agents could pass `project: "my-project"` to write tools.
-**After:** the project is auto-detected from the server's working directory (cwd). Any `project` argument sent by the LLM is silently discarded.
+**Current behavior:** explicit project values are resolved and validated by the
+server for the supported write tools. When no override is supplied, Engram
+uses its normal process override and cwd-detection precedence.
 
 **Migration:**
 
-- Remove `project` from write tool calls in your agent's memory protocol.
-- Use `mem_current_project` (new tool) to inspect which project Engram will use before writing.
+- When no explicit project override is supplied, use `mem_current_project` to inspect which project Engram will use before writing; it reports cwd-based detection.
+- An explicit project override takes precedence over process and cwd detection. Invalid or unbacked explicit names fail without fallback.
 - If the cwd is ambiguous (multiple git repos), Engram returns a structured error with `available_projects`. Navigate to one of the repos before writing.
 - Read tools (`mem_search`, `mem_context`, `mem_timeline`, `mem_get_observation`, `mem_stats`) still accept an optional `project` override — validated against the store.
 

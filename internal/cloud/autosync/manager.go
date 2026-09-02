@@ -17,7 +17,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"math"
 	"math/rand"
 	"runtime/debug"
 	"sort"
@@ -25,9 +24,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
-	"github.com/Gentleman-Programming/engram/internal/cloud/syncguidance"
-	"github.com/Gentleman-Programming/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/constants"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/syncguidance"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
 )
 
 // ─── Phase Constants ─────────────────────────────────────────────────────────
@@ -97,6 +96,12 @@ type LocalStore interface {
 
 type enrolledProjectRepairEnsurer interface {
 	EnsureEnrolledProjectSyncMutations(ctx context.Context) error
+}
+
+// irreparableSyncMutationQuarantiner prevents malformed legacy rows from
+// repeatedly reaching transport while preserving their local audit evidence.
+type irreparableSyncMutationQuarantiner interface {
+	QuarantineIrreparableSyncMutations(targetKey, project string, apply bool) (store.SyncMutationQuarantineReport, error)
 }
 
 type nonEnrolledPendingError struct {
@@ -394,8 +399,8 @@ func (m *Manager) cycle(ctx context.Context) {
 		return
 	}
 
-	// Check if we've exceeded the failure ceiling — enters PhaseBackoff.
-	if failures >= m.cfg.MaxConsecutiveFailures {
+	// At the failure ceiling, remain in backoff only until the current deadline expires.
+	if failures >= m.cfg.MaxConsecutiveFailures && backoffUntil != nil && time.Now().Before(*backoffUntil) {
 		m.setPhase(PhaseBackoff)
 		return
 	}
@@ -499,6 +504,15 @@ func (m *Manager) push(ctx context.Context) error {
 			return fmt.Errorf("repair enrolled sync journal: %w", err)
 		}
 	}
+	if quarantiner, ok := m.store.(irreparableSyncMutationQuarantiner); ok {
+		report, err := quarantiner.QuarantineIrreparableSyncMutations(m.cfg.TargetKey, "", true)
+		if err != nil {
+			return fmt.Errorf("quarantine irreparable pending mutations: %w", err)
+		}
+		if len(report.Actions) > 0 {
+			log.Printf("[autosync] quarantined %d irreparable pending mutation(s); inspect with `engram doctor --check sync_mutation_required_fields`", len(report.Actions))
+		}
+	}
 
 	pending, err := m.store.ListPendingSyncMutations(m.cfg.TargetKey, m.cfg.PushBatchSize)
 	if err != nil {
@@ -515,18 +529,23 @@ func (m *Manager) push(ctx context.Context) error {
 		return nil
 	}
 
-	// Group by project (preserve order).
+	// Group by project (preserve order). Empty or padded project values are invalid
+	// for cloud transport: never send them, but continue with healthy project groups.
 	groups := make(map[string][]store.SyncMutation)
 	order := make([]string, 0)
+	var failures []error
 	for _, mut := range pending {
 		project := mut.Project
+		if strings.TrimSpace(project) != project || project == "" {
+			failures = append(failures, fmt.Errorf("pending mutation seq %d (%s/%s) has an empty or padded project and was not sent; repair local project metadata or inspect `engram doctor --check sync_mutation_required_fields`", mut.Seq, mut.Entity, mut.EntityKey))
+			continue
+		}
 		if _, ok := groups[project]; !ok {
 			order = append(order, project)
 		}
 		groups[project] = append(groups[project], mut)
 	}
 
-	var failures []error
 	for _, project := range order {
 		if err := ctx.Err(); err != nil {
 			failures = append(failures, err)
@@ -736,23 +755,34 @@ func (m *Manager) computeBackoff(failures int) time.Duration {
 	if failures <= 0 {
 		return m.cfg.BaseBackoff
 	}
-	exp := math.Pow(2, float64(failures-1))
-	base := time.Duration(float64(m.cfg.BaseBackoff) * exp)
+	base := m.cfg.BaseBackoff
 	if base > m.cfg.MaxBackoff {
 		base = m.cfg.MaxBackoff
+	}
+	for i := 1; i < failures && base < m.cfg.MaxBackoff; i++ {
+		if base > m.cfg.MaxBackoff/2 {
+			base = m.cfg.MaxBackoff
+		} else {
+			base *= 2
+		}
 	}
 	// ±25% jitter: uniform in [-base/4, +base/4].
 	// rand.Int63n(int64(base/2)+1) gives [0, base/2]; subtracting base/4 shifts to [-base/4, +base/4].
 	jitter := time.Duration(rand.Int63n(int64(base/2)+1)) - time.Duration(base/4)
-	result := base + jitter
-	if result > m.cfg.MaxBackoff {
-		result = m.cfg.MaxBackoff
-	}
+	result := saturatingAddBackoffJitter(base, jitter, m.cfg.MaxBackoff)
 	// Floor at BaseBackoff/2 to avoid extremely short intervals on large negative jitter.
 	if result < m.cfg.BaseBackoff/2 {
 		result = m.cfg.BaseBackoff / 2
 	}
 	return result
+}
+
+func saturatingAddBackoffJitter(base, jitter, maxBackoff time.Duration) time.Duration {
+	const maxDuration = time.Duration(1<<63 - 1)
+	if jitter > 0 && (base > maxBackoff-jitter || base > maxDuration-jitter) {
+		return maxBackoff
+	}
+	return base + jitter
 }
 
 func (m *Manager) releaseLease() {

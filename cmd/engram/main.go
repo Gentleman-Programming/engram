@@ -27,21 +27,22 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/internal/cloud/autosync"
-	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
-	"github.com/Gentleman-Programming/engram/internal/cloud/remote"
-	"github.com/Gentleman-Programming/engram/internal/cloud/syncguidance"
-	"github.com/Gentleman-Programming/engram/internal/diagnostic"
-	"github.com/Gentleman-Programming/engram/internal/mcp"
-	"github.com/Gentleman-Programming/engram/internal/obsidian"
-	"github.com/Gentleman-Programming/engram/internal/project"
-	"github.com/Gentleman-Programming/engram/internal/server"
-	"github.com/Gentleman-Programming/engram/internal/setup"
-	"github.com/Gentleman-Programming/engram/internal/store"
-	engramsync "github.com/Gentleman-Programming/engram/internal/sync"
-	"github.com/Gentleman-Programming/engram/internal/timeutil"
-	"github.com/Gentleman-Programming/engram/internal/tui"
-	versioncheck "github.com/Gentleman-Programming/engram/internal/version"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/autosync"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/constants"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/remote"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/syncguidance"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloudconfig"
+	"github.com/Gentleman-Programming/engram/v2/internal/diagnostic"
+	"github.com/Gentleman-Programming/engram/v2/internal/mcp"
+	"github.com/Gentleman-Programming/engram/v2/internal/obsidian"
+	"github.com/Gentleman-Programming/engram/v2/internal/project"
+	"github.com/Gentleman-Programming/engram/v2/internal/server"
+	"github.com/Gentleman-Programming/engram/v2/internal/setup"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	engramsync "github.com/Gentleman-Programming/engram/v2/internal/sync"
+	"github.com/Gentleman-Programming/engram/v2/internal/timeutil"
+	"github.com/Gentleman-Programming/engram/v2/internal/tui"
+	versioncheck "github.com/Gentleman-Programming/engram/v2/internal/version"
 
 	tea "github.com/charmbracelet/bubbletea"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -201,7 +202,7 @@ func resolveCLIProjectWithDetector(s *store.Store, explicit string, requireKnown
 }
 
 func detectProjectForSync(dir string) project.DetectionResult {
-	return project.DetectionResult{Project: detectProject(dir), Source: project.SourceDirBasename, Path: dir}
+	return detectProjectFull(dir)
 }
 
 type cloudSyncStatus struct {
@@ -412,7 +413,7 @@ func (p storeSyncStatusProvider) cloudSyncEnabled(project string) (bool, string,
 	if cc == nil || strings.TrimSpace(cc.ServerURL) == "" {
 		return false, "cloud_not_configured", "cloud sync is not configured"
 	}
-	if _, err := validateCloudServerURL(cc.ServerURL); err != nil {
+	if _, err := cloudconfig.ValidateServerURL(cc.ServerURL); err != nil {
 		return false, "cloud_config_error", fmt.Sprintf("cloud config error: invalid cloud runtime server URL: %v", err)
 	}
 	if strings.TrimSpace(project) == "" {
@@ -430,8 +431,8 @@ func (p storeSyncStatusProvider) cloudSyncEnabled(project string) (bool, string,
 
 func syncStatusFromState(state *store.SyncState) server.SyncStatus {
 	var lastSyncAt *time.Time
-	if state != nil && state.Lifecycle == store.SyncLifecycleHealthy {
-		lastSyncAt = parseSyncStateTimestamp(state.UpdatedAt)
+	if state != nil {
+		lastSyncAt = parseSyncStateTimestamp(derefString(state.LastSuccessAt))
 	}
 	return server.SyncStatus{
 		Phase:               state.Lifecycle,
@@ -503,28 +504,17 @@ func envBool(key string) bool {
 	return v == "1" || v == "true" || v == "yes" || v == "on"
 }
 
-func resolveCloudRuntimeConfig(cfg store.Config) (*cloudConfig, error) {
-	cc, err := loadCloudConfig(cfg)
+func resolveCloudRuntimeConfig(cfg store.Config) (*cloudconfig.Config, error) {
+	cc, err := cloudconfig.Load(cfg.DataDir)
 	if err != nil {
 		return nil, fmt.Errorf("read cloud config: %w", err)
 	}
-	if cc == nil {
-		cc = &cloudConfig{}
-	}
-	// ENGRAM_CLOUD_TOKEN overrides any token stored in cloud.json.
-	// When the env var is absent, the persisted token from cloud.json is used
-	// as a fallback so that `engram sync --cloud` works without requiring the
-	// env var to be set in every shell session (fix for issue #343).
-	if v := strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_SERVER")); v != "" {
-		cc.ServerURL = v
-	}
-	if v := strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_TOKEN")); v != "" {
-		cc.Token = v
-	}
+	cc = cloudconfig.ApplyServerOverride(cc)
+	cc.Token, _ = cloudconfig.EffectiveToken(cfg.DataDir)
 	return cc, nil
 }
 
-func preflightCloudSync(s *store.Store, cfg store.Config, project string, mutateState bool) (*cloudConfig, error) {
+func preflightCloudSync(s *store.Store, cfg store.Config, project string, mutateState bool) (*cloudconfig.Config, error) {
 	project = strings.TrimSpace(project)
 	if project != "" {
 		project, _ = store.NormalizeProject(project)
@@ -543,7 +533,7 @@ func preflightCloudSync(s *store.Store, cfg store.Config, project string, mutate
 		}
 		return nil, fmt.Errorf("cloud sync %s: %s", constants.ReasonCloudConfigError, message)
 	}
-	if _, err := validateCloudServerURL(cc.ServerURL); err != nil {
+	if _, err := cloudconfig.ValidateServerURL(cc.ServerURL); err != nil {
 		message := fmt.Sprintf("invalid cloud runtime server URL: %v", err)
 		if mutateState {
 			_ = s.MarkSyncBlocked(targetKey, constants.ReasonCloudConfigError, message)
@@ -746,7 +736,7 @@ func shouldCheckForUpdates(args []string) bool {
 	}
 	command := strings.ToLower(strings.TrimSpace(args[0]))
 	switch command {
-	case "mcp", "serve", "protocol-mode":
+	case "mcp", "serve", "protocol-mode", "tui", "version", "--version", "-v", "help", "--help", "-h":
 		return false
 	case "cloud":
 		return len(args) < 2 || strings.ToLower(strings.TrimSpace(args[1])) != "serve"
@@ -1657,7 +1647,7 @@ func cmdImport(cfg store.Config) {
 
 	fmt.Printf("Imported from %s\n", inFile)
 	fmt.Printf("  Sessions:     %d\n", result.SessionsImported)
-	fmt.Printf("  Observations: %d\n", result.ObservationsImported)
+	fmt.Printf("  Observations: %d imported, %d updated, %d skipped stale\n", result.ObservationsImported, result.ObservationsUpdated, result.ObservationsSkippedStale)
 	fmt.Printf("  Prompts:      %d\n", result.PromptsImported)
 }
 
@@ -2373,7 +2363,12 @@ func cmdProjectsConsolidate(cfg store.Config) {
 		if err != nil {
 			fatal(err)
 		}
-		canonical, _ := store.NormalizeProject(detectProject(cwd))
+		res := detectProjectFull(cwd)
+		if res.Error != nil {
+			fatal(res.Error)
+			return
+		}
+		canonical, _ := store.NormalizeProject(res.Project)
 
 		allNames, err := s.ListProjectNames()
 		if err != nil {
@@ -2963,8 +2958,15 @@ func printPostInstall(result *setup.Result) {
 	switch result.Agent {
 	case "opencode":
 		fmt.Println("\nNext steps:")
-		fmt.Println("  1. Restart OpenCode — plugin + MCP server are ready")
-		fmt.Println("  2. The plugin auto-starts the Engram HTTP server when needed")
+		if result.MCPConfigured {
+			fmt.Println("  1. Configuration written: the OpenCode plugin and Engram MCP registration.")
+		} else {
+			fmt.Println("  1. Plugin written, but Engram MCP registration needs the manual configuration shown above.")
+		}
+		fmt.Println("  2. Restart OpenCode, then run `opencode mcp list` to confirm that OpenCode reports Engram connected.")
+		fmt.Println("  3. Start a new OpenCode agent session and confirm it can use an `engram_mem_*` tool before relying on Engram.")
+		fmt.Println("     Setup and server connectivity checks cannot verify tool exposure in the active agent session.")
+		fmt.Println("  4. The plugin auto-starts the Engram HTTP server when needed.")
 		if result.TUIPluginEnabled {
 			fmt.Println("\nAlso enabled: opencode-subagent-statusline in tui.json — sub-agent activity in the sidebar/footer.")
 		}
@@ -3026,7 +3028,7 @@ Commands:
   serve [port]       Start HTTP API server (default: 7437)
   mcp [--tools=PROFILE] [--project NAME]
                      Start MCP server (stdio transport, for any AI agent)
-                       Profiles: agent (15 tools), admin (4 tools), all (default, 19)
+                        Profiles: agent (18 tools), admin (4 tools), all (default, 22)
                        Combine: --tools=agent,admin or pick individual tools
                        Example: engram mcp --tools=agent
                        --project NAME  Set process-level default project (overrides cwd detection).

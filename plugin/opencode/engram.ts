@@ -46,6 +46,12 @@ const SESSION_ATTRIBUTED_WRITE_TOOLS = new Set([
   "mem_capture_passive",
 ])
 
+// OpenCode qualifies MCP tool IDs as <server>_<tool>; only normalize Engram's.
+function canonicalEngramToolName(tool: string): string {
+  const canonical = tool.toLowerCase()
+  return canonical.startsWith("engram_") ? canonical.slice("engram_".length) : canonical
+}
+
 // ─── Memory Instructions ─────────────────────────────────────────────────────
 // These get injected into the agent's context so it knows to call mem_save.
 
@@ -239,6 +245,12 @@ export const Engram: Plugin = async (ctx) => {
   // This prevents late hooks or events from reviving an expired runtime chain.
   const invalidSessions = new Set<string>()
 
+  // Terminal root closures are retained after invalidation so duplicate deletion
+  // events can retry a failed endpoint call without treating it as confirmed.
+  const deletedRootSessions = new Set<string>()
+  const closedSessions = new Set<string>()
+  const closingSessions = new Map<string, Promise<boolean>>()
+
   function invalidateSessionTree(sessionId: string): void {
     const invalidated = new Set([sessionId])
     let foundDescendant = true
@@ -260,6 +272,33 @@ export const Engram: Plugin = async (ctx) => {
       toolCounts.delete(invalidID)
       lastNudgeTime.delete(invalidID)
     }
+  }
+
+  function isKnownAuthoritativeRootSession(sessionId: string): boolean {
+    return knownSessions.has(sessionId) && parentSessions.get(sessionId) === null
+  }
+
+  async function closeDeletedRootSession(sessionId: string): Promise<boolean> {
+    if (closedSessions.has(sessionId)) return true
+    if (!deletedRootSessions.has(sessionId)) {
+      if (!isKnownAuthoritativeRootSession(sessionId)) return false
+      deletedRootSessions.add(sessionId)
+    }
+
+    const inFlight = closingSessions.get(sessionId)
+    if (inFlight) return inFlight
+
+    const close = engramFetch(`/sessions/${encodeURIComponent(sessionId)}/end`, {
+      method: "POST",
+    }).then((acknowledgement) => {
+      if (acknowledgement === null) return false
+      closedSessions.add(sessionId)
+      return true
+    }).finally(() => {
+      closingSessions.delete(sessionId)
+    })
+    closingSessions.set(sessionId, close)
+    return close
   }
 
   function cacheSessionInfo(info: { id?: unknown; parentID?: unknown; projectID?: unknown } | undefined): boolean {
@@ -466,6 +505,9 @@ export const Engram: Plugin = async (ctx) => {
         const info = (event.properties as any)?.info
         const sessionId = info?.id
         if (sessionId) {
+          // Only a registered, event-validated root owns an Engram lifecycle.
+          // Await the best-effort endpoint before invalidating local ownership.
+          await closeDeletedRootSession(sessionId)
           invalidateSessionTree(sessionId)
         }
       }
@@ -520,7 +562,7 @@ export const Engram: Plugin = async (ctx) => {
     // the passive capture endpoint so the server extracts learnings.
 
     "tool.execute.before": async (input, output) => {
-      if (!SESSION_ATTRIBUTED_WRITE_TOOLS.has(input.tool.toLowerCase())) return
+      if (!SESSION_ATTRIBUTED_WRITE_TOOLS.has(canonicalEngramToolName(input.tool))) return
       const authoritativeSessionID = await resolveAuthoritativeSessionID(input.sessionID)
       if (!authoritativeSessionID) {
         throw new Error(`gentle-engram could not resolve an authoritative OpenCode runtime session for ${input.tool}`)
@@ -538,7 +580,7 @@ export const Engram: Plugin = async (ctx) => {
     },
 
     "tool.execute.after": async (input, output) => {
-      if (ENGRAM_TOOLS.has(input.tool.toLowerCase())) return
+      if (ENGRAM_TOOLS.has(canonicalEngramToolName(input.tool))) return
 
       // input.sessionID comes from OpenCode — always available
       const sessionId = await resolveAuthoritativeSessionID(input.sessionID)

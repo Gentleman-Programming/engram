@@ -1,10 +1,152 @@
 package store
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestListOrphanedObservationSessionEvidenceGroupsScopesAndExcludesBlankIDs(t *testing.T) {
+	s := newTestStore(t)
+	seedOrphanedObservationSession(t, s, "obs-nil", "missing-0", nil, nil)
+	seedOrphanedObservationSession(t, s, "obs-nil-project", "missing-shared", nil, nil)
+	seedOrphanedObservationSession(t, s, "obs-empty-project", "missing-shared", "", nil)
+	seedOrphanedObservationSession(t, s, "obs-alpha-active", "missing-1", "alpha", nil)
+	seedOrphanedObservationSession(t, s, "obs-alpha-deleted", "missing-1", "alpha", "2026-01-01 00:00:00")
+	seedOrphanedObservationSession(t, s, "obs-alpha-second", "missing-2", "alpha", nil)
+	seedOrphanedObservationSession(t, s, "obs-beta", "missing-a", "beta", nil)
+	seedOrphanedObservationSession(t, s, "obs-empty", "", "alpha", nil)
+	seedOrphanedObservationSession(t, s, "obs-spaces", "  ", "alpha", nil)
+	seedOrphanedObservationSession(t, s, "obs-tab", "\t", "alpha", nil)
+	assertForeignKeysEnabled(t, s)
+
+	got, err := s.ListOrphanedObservationSessionEvidence("")
+	if err != nil {
+		t.Fatalf("ListOrphanedObservationSessionEvidence: %v", err)
+	}
+	want := []OrphanedObservationSessionEvidence{
+		{Project: "", SessionID: "missing-0", ObservationCount: 1},
+		{Project: "", SessionID: "missing-shared", ObservationCount: 2},
+		{Project: "alpha", SessionID: "missing-1", ObservationCount: 2},
+		{Project: "alpha", SessionID: "missing-2", ObservationCount: 1},
+		{Project: "beta", SessionID: "missing-a", ObservationCount: 1},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("evidence=%+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("evidence[%d]=%+v, want %+v", i, got[i], want[i])
+		}
+	}
+
+	scoped, err := s.ListOrphanedObservationSessionEvidence(" Alpha ")
+	if err != nil {
+		t.Fatalf("ListOrphanedObservationSessionEvidence scoped: %v", err)
+	}
+	if len(scoped) != 2 || scoped[0].Project != "alpha" || scoped[0].SessionID != "missing-1" || scoped[1].SessionID != "missing-2" {
+		t.Fatalf("scoped evidence=%+v", scoped)
+	}
+}
+
+func TestListOrphanedObservationSessionEvidencePropagatesQueryFailure(t *testing.T) {
+	s := newTestStore(t)
+	wantErr := errors.New("diagnostic query failed")
+	oldQueryIt := s.hooks.queryIt
+	s.hooks.queryIt = func(queryer, string, ...any) (rowScanner, error) {
+		return nil, wantErr
+	}
+	t.Cleanup(func() { s.hooks.queryIt = oldQueryIt })
+
+	_, err := s.ListOrphanedObservationSessionEvidence("")
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("error=%v, want %v", err, wantErr)
+	}
+}
+
+func TestListOrphanedObservationSessionEvidencePropagatesRowProcessingFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rows *fakeRows
+	}{
+		{
+			name: "scan failure",
+			rows: &fakeRows{next: []bool{true}, scanErr: errors.New("scan failed")},
+		},
+		{
+			name: "rows error",
+			rows: &fakeRows{err: errors.New("rows failed")},
+		},
+		{
+			name: "close failure",
+			rows: &fakeRows{closeErr: errors.New("close failed")},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			oldQueryIt := s.hooks.queryIt
+			s.hooks.queryIt = func(queryer, string, ...any) (rowScanner, error) {
+				return tc.rows, nil
+			}
+			t.Cleanup(func() { s.hooks.queryIt = oldQueryIt })
+
+			_, err := s.ListOrphanedObservationSessionEvidence("")
+			wantErr := tc.rows.scanErr
+			if wantErr == nil {
+				wantErr = tc.rows.err
+			}
+			if wantErr == nil {
+				wantErr = tc.rows.closeErr
+			}
+			if err != wantErr {
+				t.Fatalf("error=%v, want exact %v", err, wantErr)
+			}
+			if !tc.rows.closed {
+				t.Fatal("rows were not closed")
+			}
+		})
+	}
+}
+
+func seedOrphanedObservationSession(t *testing.T, s *Store, syncID, sessionID string, project, deletedAt any) {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := s.DB().Conn(ctx)
+	if err != nil {
+		t.Fatalf("database connection: %v", err)
+	}
+	defer func() {
+		if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`); err != nil {
+			t.Errorf("restore foreign keys: %v", err)
+		}
+		if err := conn.Close(); err != nil {
+			t.Errorf("close database connection: %v", err)
+		}
+	}()
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		t.Fatalf("disable foreign keys: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, `
+		INSERT INTO observations
+			(sync_id, session_id, type, title, content, project, scope, normalized_hash, revision_count, duplicate_count, created_at, updated_at, deleted_at)
+		VALUES (?, ?, 'bugfix', 'orphan', 'content', ?, 'project', ?, 1, 1, datetime('now'), datetime('now'), ?)
+	`, syncID, sessionID, project, syncID, deletedAt); err != nil {
+		t.Fatalf("seed orphaned observation %q: %v", syncID, err)
+	}
+}
+
+func assertForeignKeysEnabled(t *testing.T, s *Store) {
+	t.Helper()
+	var enabled int
+	if err := s.DB().QueryRow(`PRAGMA foreign_keys`).Scan(&enabled); err != nil {
+		t.Fatalf("read foreign key enforcement: %v", err)
+	}
+	if enabled != 1 {
+		t.Fatalf("foreign key enforcement=%d, want 1", enabled)
+	}
+}
 
 func TestEstimateSessionProjectReclassificationDoesNotMutate(t *testing.T) {
 	s := newTestStore(t)

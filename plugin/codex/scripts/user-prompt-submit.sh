@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Engram — UserPromptSubmit hook for Codex
 #
 # On the FIRST message of a session: injects a ToolSearch instruction to force

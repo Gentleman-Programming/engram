@@ -71,6 +71,8 @@ Next session starts → Previous session context is injected automatically
 | `mem_current_project` | Detect project from cwd — never errors, recommended first call |
 | `mem_doctor` | Run read-only operational diagnostics for project detection and store health |
 | `mem_review` | List observations whose `review_after` lifecycle is stale; `mark_reviewed` resets the local review cycle |
+| `mem_pin` | Pin a local observation so it appears before recent memory context; not synced |
+| `mem_unpin` | Remove a local observation pin so normal recency order applies; not synced |
 | `mem_judge` | Record a verdict for a pending memory conflict surfaced by `mem_save` |
 | `mem_compare` | Persist a semantic relation verdict between two existing observations |
 
@@ -126,14 +128,14 @@ Examples:
 - `pattern/error-handling-convention`
 - `config/ci-environment`
 
-**Why this format?** SQLite FTS5 tokenises on word boundaries. Lowercase kebab-case ensures the key fragments are individually searchable and do not create unexpected FTS5 token splits.
+**Why this format?** Topic keys support exact key lookups and trigram FTS substring search. Lowercase kebab-case keeps identifiers stable, readable, and consistent across callers.
 
 **Anti-patterns to avoid:**
 
 | Anti-pattern | Problem | Correct form |
 |---|---|---|
-| `authModel` | camelCase breaks FTS5 tokenisation | `architecture/auth-model` |
-| `auth model` | spaces create accidental multi-token keys | `architecture/auth-model` |
+| `authModel` | camelCase is inconsistent with canonical topic keys | `architecture/auth-model` |
+| `auth model` | spaces make exact topic identifiers harder to use | `architecture/auth-model` |
 | `ARCHITECTURE/AUTH` | uppercase is inconsistent with FTS5 normalisation | `architecture/auth-model` |
 | `auth/model/v2/final` | more than 2 levels — use `v2` in the description | `architecture/auth-model-v2` |
 | `bugfix` | no slash — looks like a family with no description | `bug/auth-nil-panic` |
@@ -211,7 +213,7 @@ engram/
 ├── internal/
 │   ├── store/store.go              # Core: SQLite + FTS5 + all data ops
 │   ├── server/server.go            # HTTP REST API (port 7437)
-│   ├── mcp/mcp.go                  # MCP stdio server (20 tools)
+│   ├── mcp/mcp.go                  # MCP stdio server (22 tools)
 │   ├── setup/setup.go              # Agent plugin installer (go:embed)
 │   ├── cloud/                       # Optional cloud runtime (Postgres + dashboard)
 │   │   ├── cloudserver/             # /sync API + dashboard mount + auth/session bridge
