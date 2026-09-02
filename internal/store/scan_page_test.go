@@ -6,7 +6,10 @@ import (
 	"testing"
 )
 
-const scanPageTestObservations = 250
+const (
+	scanPageTestObservations      = 250
+	scanPageBenchmarkObservations = 5_000
+)
 
 func TestScanProject_PageProof(t *testing.T) {
 	s, ids := scanPageStore(t, scanPageTestObservations)
@@ -59,7 +62,7 @@ func TestScanProject_ExactFinalCandidateIsNotCapped(t *testing.T) {
 	}
 }
 func BenchmarkScanProject_Page5000(b *testing.B) {
-	s, _ := scanPageStore(b, scanPageTestObservations)
+	s, _ := scanPageStore(b, scanPageBenchmarkObservations)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = scanPage(b, s, ScanOptions{Project: "scan-page"})
