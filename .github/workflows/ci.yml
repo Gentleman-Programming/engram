@@ -43,6 +43,23 @@ jobs:
       - name: Run e2e tests
         run: go test -tags e2e ./internal/server/...
 
+  windows-setup-test:
+    name: Windows Setup Test
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.25.10"
+
+      - name: Run Windows-specific setup test
+        run: go test ./internal/setup/ -run TestClaudeCodeEngramCommandPreservesWindowsAbsolutePath -count=1
+
   wrapper-tests-windows:
     name: Cloud Sync Wrapper Tests (Windows)
     runs-on: windows-latest

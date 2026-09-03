@@ -501,7 +501,18 @@ func TestInstallPiInstallsPackagesAndWritesConfig(t *testing.T) {
 	resetSetupSeams(t)
 	agentDir := t.TempDir()
 	t.Setenv("PI_CODING_AGENT_DIR", agentDir)
-	osExecutable = func() (string, error) { return "/opt/engram/bin/engram", nil }
+	prefix := t.TempDir()
+	exe := filepath.Join(prefix, "Cellar", "engram", "1.16.1", "bin", "engram")
+	if err := os.MkdirAll(filepath.Dir(exe), 0755); err != nil {
+		t.Fatalf("create Cellar executable directory: %v", err)
+	}
+	if err := os.WriteFile(exe, []byte("engram"), 0755); err != nil {
+		t.Fatalf("write Cellar executable: %v", err)
+	}
+	if !filepath.IsAbs(exe) {
+		t.Fatalf("expected absolute Cellar executable, got %q", exe)
+	}
+	osExecutable = func() (string, error) { return exe, nil }
 
 	var commands []string
 	runCommand = func(name string, args ...string) ([]byte, error) {
@@ -556,7 +567,7 @@ func TestInstallPiInstallsPackagesAndWritesConfig(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected mcpServers.engram in %#v", mcpConfig.MCPServers)
 	}
-	if server.Command != "/opt/engram/bin/engram" || !reflect.DeepEqual(server.Args, []string{"mcp", "--tools=agent"}) || server.Lifecycle != "lazy" || server.DirectTools {
+	if server.Command != exe || !reflect.DeepEqual(server.Args, []string{"mcp", "--tools=agent"}) || server.Lifecycle != "lazy" || server.DirectTools {
 		t.Fatalf("unexpected engram MCP server: %#v", server)
 	}
 }
@@ -1504,6 +1515,103 @@ func TestWriteClaudeCodeUserMCP(t *testing.T) {
 		}
 	})
 
+	t.Run("homebrew cellar path maps to stable bin symlink", func(t *testing.T) {
+		// Regression for issue #461: a versioned Cellar executable (the real
+		// target of <brew-prefix>/bin/engram) must be rewritten to the stable
+		// symlink so the written command survives `brew upgrade`. Previously
+		// writeClaudeCodeUserMCP called EvalSymlinks directly and baked in the
+		// versioned Cellar path, which broke once brew removed the old version.
+		resetSetupSeams(t)
+		home := useTestHome(t)
+		cellarExe := "/opt/homebrew/Cellar/engram/1.20.0/bin/engram"
+		stableSymlink := "/opt/homebrew/bin/engram"
+		osExecutable = func() (string, error) { return cellarExe, nil }
+		statFn = func(name string) (os.FileInfo, error) {
+			if filepath.ToSlash(name) == stableSymlink {
+				return nil, nil // stable symlink exists on disk
+			}
+			return nil, os.ErrNotExist
+		}
+
+		if err := writeClaudeCodeUserMCP(); err != nil {
+			t.Fatalf("writeClaudeCodeUserMCP failed: %v", err)
+		}
+
+		mcpPath := filepath.Join(home, ".claude", "mcp", "engram.json")
+		raw, err := os.ReadFile(mcpPath)
+		if err != nil {
+			t.Fatalf("read mcp config: %v", err)
+		}
+		var cfg map[string]any
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			t.Fatalf("parse mcp config: %v", err)
+		}
+		got, ok := cfg["command"].(string)
+		if !ok {
+			t.Fatalf("expected string command, got %#v", cfg["command"])
+		}
+		if filepath.ToSlash(got) != stableSymlink {
+			t.Fatalf("expected stable symlink %q, got %q", stableSymlink, got)
+		}
+		if strings.Contains(got, "Cellar") {
+			t.Fatalf("command must not contain a versioned Cellar path, got %q", got)
+		}
+	})
+
+	t.Run("homebrew cellar with missing stable symlink preserves absolute exe (issue #461 pr713)", func(t *testing.T) {
+		// Regression for PR #713 CodeRabbit Major: a Cellar exe with the stable
+		// symlink absent must not persist bare "engram"; writeClaudeCodeUserMCP
+		// must preserve the already-obtained absolute exe, or error.
+		resetSetupSeams(t)
+		home := useTestHome(t)
+		cellarExe := "/opt/homebrew/Cellar/engram/1.20.0/bin/engram"
+		osExecutable = func() (string, error) { return cellarExe, nil }
+		statFn = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
+
+		if err := writeClaudeCodeUserMCP(); err != nil {
+			t.Fatalf("writeClaudeCodeUserMCP failed: %v", err)
+		}
+
+		mcpPath := filepath.Join(home, ".claude", "mcp", "engram.json")
+		raw, err := os.ReadFile(mcpPath)
+		if err != nil {
+			t.Fatalf("read mcp config: %v", err)
+		}
+		var cfg map[string]any
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			t.Fatalf("parse mcp config: %v", err)
+		}
+		got, ok := cfg["command"].(string)
+		if !ok {
+			t.Fatalf("expected string command, got %#v", cfg["command"])
+		}
+		if got == "engram" {
+			t.Fatalf("must not persist bare 'engram' when absolute exe is available, got %q", got)
+		}
+		if !filepath.IsAbs(got) {
+			t.Fatalf("expected absolute command, got %q", got)
+		}
+		if filepath.ToSlash(got) != cellarExe {
+			t.Fatalf("expected absolute exe %q preserved, got %q", cellarExe, got)
+		}
+	})
+
+	t.Run("non-absolute executable returns error instead of writing bare command", func(t *testing.T) {
+		// Defensive guard: non-absolute exe + non-absolute canonical fallback
+		// must refuse to write rather than persist a PATH-dependent command.
+		resetSetupSeams(t)
+		useTestHome(t)
+		osExecutable = func() (string, error) { return "engram", nil }
+
+		err := writeClaudeCodeUserMCP()
+		if err == nil {
+			t.Fatalf("expected error for non-absolute executable, got nil")
+		}
+		if !strings.Contains(err.Error(), "absolute") {
+			t.Fatalf("expected absolute-path error, got %v", err)
+		}
+	})
+
 	t.Run("os.Executable failure returns error", func(t *testing.T) {
 		resetSetupSeams(t)
 		useTestHome(t)
@@ -1631,8 +1739,11 @@ func TestResolveEngramCommand(t *testing.T) {
 // Homebrew/Linuxbrew Cellar path into MCP client configs. Such paths (e.g.
 // .../Cellar/engram/1.16.1/bin/engram) are removed on `brew upgrade`, leaving
 // OpenCode/Codex with a stale command that fails to spawn (ENOENT). The command
-// must resolve to the stable <brew-prefix>/bin/engram symlink, or bare "engram"
-// when that symlink is missing.
+// must resolve to the stable <brew-prefix>/bin/engram symlink when present. When
+// that launcher is absent but os.Executable() supplied an absolute executable,
+// resolveEngramCommand preserves that original path to avoid a PATH-dependent
+// command. canonicalEngramCommand retains its bare "engram" fallback; the shared
+// resolver applies the absolute-path preservation policy.
 func TestResolveEngramCommandHomebrewCellar(t *testing.T) {
 	cases := []struct {
 		name         string
@@ -1659,12 +1770,6 @@ func TestResolveEngramCommandHomebrewCellar(t *testing.T) {
 			want:         "/usr/local/bin/engram",
 		},
 		{
-			name:         "cellar path with missing stable symlink falls back to bare name",
-			exe:          "/opt/homebrew/Cellar/engram/1.16.1/bin/engram",
-			stableOnDisk: "",
-			want:         "engram",
-		},
-		{
 			name:         "non-cellar absolute path is preserved",
 			exe:          "/opt/engram/bin/engram",
 			stableOnDisk: "",
@@ -1688,6 +1793,91 @@ func TestResolveEngramCommandHomebrewCellar(t *testing.T) {
 			// filepath.FromSlash while tc.want is written with forward slashes.
 			if got := filepath.ToSlash(resolveEngramCommand()); got != tc.want {
 				t.Fatalf("resolveEngramCommand() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+
+	t.Run("cellar path with missing stable symlink preserves absolute executable", func(t *testing.T) {
+		resetSetupSeams(t)
+
+		prefix := t.TempDir()
+		exe := filepath.Join(prefix, "Cellar", "engram", "1.16.1", "bin", "engram")
+		if err := os.MkdirAll(filepath.Dir(exe), 0755); err != nil {
+			t.Fatalf("create Cellar executable directory: %v", err)
+		}
+		if err := os.WriteFile(exe, []byte("engram"), 0755); err != nil {
+			t.Fatalf("write Cellar executable: %v", err)
+		}
+		if !filepath.IsAbs(exe) {
+			t.Fatalf("expected absolute Cellar executable, got %q", exe)
+		}
+		osExecutable = func() (string, error) { return exe, nil }
+
+		if got := resolveEngramCommand(); got != exe {
+			t.Fatalf("resolveEngramCommand() = %q, want original absolute executable %q", got, exe)
+		}
+	})
+}
+
+// TestCanonicalEngramCommand proves the canonicalization helper derives the
+// command from an already-resolved executable path (no second osExecutable()
+// call) and keeps Homebrew mapping behavior identical to resolveEngramCommand.
+// This guards the atomic single-executable-result contract shared by
+// writeClaudeCodeUserMCP after the issue #461 refactor.
+func TestCanonicalEngramCommand(t *testing.T) {
+	cases := []struct {
+		name         string
+		exe          string
+		stableOnDisk string // stable symlink present on disk; "" means none
+		want         string
+	}{
+		{
+			name:         "linuxbrew cellar maps to stable bin symlink",
+			exe:          "/home/linuxbrew/.linuxbrew/Cellar/engram/1.20.0/bin/engram",
+			stableOnDisk: "/home/linuxbrew/.linuxbrew/bin/engram",
+			want:         "/home/linuxbrew/.linuxbrew/bin/engram",
+		},
+		{
+			name:         "macos arm cellar maps to stable bin symlink",
+			exe:          "/opt/homebrew/Cellar/engram/1.20.0/bin/engram",
+			stableOnDisk: "/opt/homebrew/bin/engram",
+			want:         "/opt/homebrew/bin/engram",
+		},
+		{
+			name:         "cellar with missing stable symlink falls back to bare name",
+			exe:          "/opt/homebrew/Cellar/engram/1.20.0/bin/engram",
+			stableOnDisk: "",
+			want:         "engram",
+		},
+		{
+			name:         "non-cellar absolute path is preserved",
+			exe:          "/opt/engram/bin/engram",
+			stableOnDisk: "",
+			want:         "/opt/engram/bin/engram",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resetSetupSeams(t)
+			statFn = func(name string) (os.FileInfo, error) {
+				if tc.stableOnDisk != "" && filepath.ToSlash(name) == tc.stableOnDisk {
+					return nil, nil // exists
+				}
+				return nil, os.ErrNotExist
+			}
+
+			// canonicalEngramCommand must NOT call osExecutable: if it did,
+			// the seam override below would make it return a sentinel path and
+			// the assertion would fail. This proves the single-result contract.
+			osExecutable = func() (string, error) {
+				t.Fatal("canonicalEngramCommand must not call osExecutable")
+				return "", nil
+			}
+
+			got := canonicalEngramCommand(tc.exe)
+			if filepath.ToSlash(got) != tc.want {
+				t.Fatalf("canonicalEngramCommand(%q) = %q, want %q", tc.exe, got, tc.want)
 			}
 		})
 	}
