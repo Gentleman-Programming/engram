@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -23,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -707,6 +709,15 @@ func (s *Store) commitHook(tx *sql.Tx) error {
 }
 
 func New(cfg Config) (*Store, error) {
+	return newStore(cfg)
+}
+
+// newWithoutRepair is retained as a test helper alias for New.
+func newWithoutRepair(cfg Config) (*Store, error) {
+	return newStore(cfg)
+}
+
+func newStore(cfg Config) (*Store, error) {
 	if !filepath.IsAbs(cfg.DataDir) {
 		return nil, fmt.Errorf("engram: data directory must be an absolute path, got %q — set ENGRAM_DATA_DIR or ensure your home directory is resolvable", cfg.DataDir)
 	}
@@ -734,70 +745,16 @@ func New(cfg Config) (*Store, error) {
 		}
 	}()
 
-	// SQLite performance pragmas
-	pragmas := []string{
-		"PRAGMA journal_mode = WAL",
-		"PRAGMA busy_timeout = 5000",
-		"PRAGMA synchronous = NORMAL",
-		"PRAGMA foreign_keys = ON",
-	}
-	for _, p := range pragmas {
-		if _, err := db.Exec(p); err != nil {
-			return nil, fmt.Errorf("engram: pragma %q: %w", p, err)
-		}
+	if err := primeConnection(db); err != nil {
+		return nil, err
 	}
 
 	s := &Store{db: db, cfg: cfg, hooks: defaultStoreHooks()}
-	if err := s.migrate(); err != nil {
-		return nil, fmt.Errorf("engram: migration: %w", err)
+	if err := s.runStartupMigrations(); err != nil {
+		return nil, err
 	}
 
 	succeeded = true
-	return s, nil
-}
-
-// newWithoutRepair is retained as a test helper alias for New. Enrolled-project
-// repair is deferred until the first synchronization operation in both cases.
-func newWithoutRepair(cfg Config) (*Store, error) {
-	if !filepath.IsAbs(cfg.DataDir) {
-		return nil, fmt.Errorf("engram: data directory must be an absolute path, got %q — set ENGRAM_DATA_DIR or ensure your home directory is resolvable", cfg.DataDir)
-	}
-	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
-		return nil, fmt.Errorf("engram: create data dir: %w", err)
-	}
-
-	dbPath := filepath.Join(cfg.DataDir, "engram.db")
-	if err := ensureDatabaseFile(dbPath); err != nil {
-		return nil, fmt.Errorf("engram: create database file: %w", err)
-	}
-	generation, err := newDatabaseGeneration(dbPath)
-	if err != nil {
-		return nil, fmt.Errorf("engram: capture database generation: %w", err)
-	}
-	db, err := openDB(dbPath, generation)
-	if err != nil {
-		return nil, fmt.Errorf("engram: open database: %w", err)
-	}
-	db.SetMaxOpenConns(1)
-
-	pragmas := []string{
-		"PRAGMA journal_mode = WAL",
-		"PRAGMA busy_timeout = 5000",
-		"PRAGMA synchronous = NORMAL",
-		"PRAGMA foreign_keys = ON",
-	}
-	for _, p := range pragmas {
-		if _, err := db.Exec(p); err != nil {
-			_ = db.Close()
-			return nil, fmt.Errorf("engram: pragma %q: %w", p, err)
-		}
-	}
-
-	s := &Store{db: db, cfg: cfg, hooks: defaultStoreHooks()}
-	if err := s.migrate(); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("engram: migration: %w", err)
-	}
 	return s, nil
 }
 
@@ -806,6 +763,134 @@ func (s *Store) Close() error {
 }
 
 // ─── Migrations ──────────────────────────────────────────────────────────────
+
+// storeDSN builds the modernc.org/sqlite DSN for dbPath with the session
+// pragmas encoded as _pragma query parameters. The driver applies these to
+// every physical connection it opens, including replacement pool connections.
+func storeDSN(dbPath string) string {
+	q := url.Values{}
+	for _, p := range []string{
+		"busy_timeout(5000)",
+		"journal_mode(WAL)",
+		"synchronous(NORMAL)",
+		"foreign_keys(1)",
+	} {
+		q.Add("_pragma", p)
+	}
+	if filepath.Separator == '/' {
+		return (&url.URL{Scheme: "file", Path: dbPath}).String() + "?" + q.Encode()
+	}
+	return dbPath + "?" + q.Encode()
+}
+
+var walSwitchRetryBackoffs = []time.Duration{
+	10 * time.Millisecond,
+	25 * time.Millisecond,
+	50 * time.Millisecond,
+	100 * time.Millisecond,
+	200 * time.Millisecond,
+}
+
+// primeConnection opens the first physical connection with a bounded retry
+// while concurrent cold starts race the rollback-journal-to-WAL conversion.
+func primeConnection(db *sql.DB) error {
+	ctx := context.Background()
+	var conn *sql.Conn
+	var lastErr error
+	for attempt := 0; attempt <= len(walSwitchRetryBackoffs); attempt++ {
+		conn, lastErr = db.Conn(ctx)
+		if lastErr == nil {
+			break
+		}
+		if !isRetryableSQLiteLockError(lastErr) || attempt == len(walSwitchRetryBackoffs) {
+			return fmt.Errorf("engram: open initial connection: %w", lastErr)
+		}
+		time.Sleep(walSwitchRetryBackoffs[attempt])
+	}
+	defer conn.Close()
+
+	return conn.Raw(func(driverConn any) error {
+		fc, ok := driverConn.(sqlite.FileControl)
+		if !ok {
+			return fmt.Errorf("engram: driver connection %T does not implement sqlite.FileControl", driverConn)
+		}
+		mode, err := fc.FileControlPersistWAL("main", 1)
+		if err != nil {
+			return fmt.Errorf("engram: enable persistent WAL: %w", err)
+		}
+		if mode != 1 {
+			return fmt.Errorf("engram: persistent WAL not active (file control returned mode %d)", mode)
+		}
+		return nil
+	})
+}
+
+const schemaVersion = 1
+
+var migrateRunCount atomic.Int64
+
+// runStartupMigrations serializes migrations and the every-open repair. It
+// never writes a database with a schema version newer than this binary.
+func (s *Store) runStartupMigrations() error {
+	current, err := s.readUserVersion()
+	if err != nil {
+		return fmt.Errorf("engram: read user_version: %w", err)
+	}
+	if isFutureSchemaVersion(current) {
+		return nil
+	}
+	unlock, err := acquireMigrationLock(filepath.Join(s.cfg.DataDir, ".migrate.lock"))
+	if err != nil {
+		return fmt.Errorf("engram: acquire migration lock: %w", err)
+	}
+	defer unlock()
+
+	// Re-read under the lock before deciding whether any startup write is safe:
+	// another process may have migrated this database, or a newer binary may
+	// have replaced it, while this process waited for the lock.
+	current, err = s.readUserVersion()
+	if err != nil {
+		return fmt.Errorf("engram: re-read user_version: %w", err)
+	}
+	if isFutureSchemaVersion(current) {
+		return nil
+	}
+
+	needsVersionStamp := current < schemaVersion
+	if needsVersionStamp {
+		migrateRunCount.Add(1)
+	}
+	if err := s.migrate(); err != nil {
+		return fmt.Errorf("engram: migration: %w", err)
+	}
+	if needsVersionStamp {
+		if err := s.setUserVersion(schemaVersion); err != nil {
+			return fmt.Errorf("engram: set user_version: %w", err)
+		}
+	}
+	return nil
+}
+
+func isFutureSchemaVersion(current int) bool {
+	if current > schemaVersion {
+		log.Printf("[store] database schema version %d is newer than this binary's %d — skipping migrations (upgrade engram to manage this database)", current, schemaVersion)
+		return true
+	}
+	return false
+}
+
+func (s *Store) readUserVersion() (int, error) {
+	var v int
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
+		return 0, err
+	}
+	return v, nil
+}
+
+func (s *Store) setUserVersion(v int) error {
+	_, err := s.execHook(s.db, fmt.Sprintf("PRAGMA user_version = %d", v))
+	return err
+}
 
 func (s *Store) migrate() error {
 	schema := `
