@@ -81,7 +81,7 @@ func TestPluginAssetsDoNotLeakSpanishTriggers(t *testing.T) {
 
 func TestClaudeCodePluginDoesNotShipMCPManifest(t *testing.T) {
 	path := filepath.Join(repoRoot(t), "plugin", "claude-code", ".mcp.json")
-	if _, err := os.Stat(path); err == nil {
+	if _, err := os.Lstat(path); err == nil {
 		t.Errorf("Claude Code plugin must not ship a duplicate MCP manifest: %s", path)
 	} else if !os.IsNotExist(err) {
 		t.Fatalf("stat %s: %v", path, err)
