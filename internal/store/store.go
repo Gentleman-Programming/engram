@@ -7782,8 +7782,8 @@ func (s *Store) enqueueRescuedProjectMutationsTx(tx *sql.Tx, target string, sess
 	}
 	for _, id := range p.ObservationIDs {
 		var payload syncObservationPayload
-		err := tx.QueryRow(`SELECT sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at FROM observations WHERE id = ? AND project = ?`, id, target).
-			Scan(&payload.SyncID, &payload.SessionID, &payload.Type, &payload.Title, &payload.Content, &payload.ToolName, &payload.Project, &payload.Scope, &payload.TopicKey, &payload.RevisionCount, &payload.DuplicateCount, &payload.LastSeenAt, &payload.CreatedAt, &payload.UpdatedAt, &payload.DeletedAt)
+		err := tx.QueryRow(`SELECT sync_id, session_id, type, title, content, tool_name, project, scope, org, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at FROM observations WHERE id = ? AND project = ?`, id, target).
+			Scan(&payload.SyncID, &payload.SessionID, &payload.Type, &payload.Title, &payload.Content, &payload.ToolName, &payload.Project, &payload.Scope, &payload.Org, &payload.TopicKey, &payload.RevisionCount, &payload.DuplicateCount, &payload.LastSeenAt, &payload.CreatedAt, &payload.UpdatedAt, &payload.DeletedAt)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
 		}

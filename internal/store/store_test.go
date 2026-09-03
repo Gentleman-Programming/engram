@@ -1143,6 +1143,68 @@ func TestRescueNullProjectOwnershipRefusesRecordsOwnedByAnotherSessionProject(t 
 	}
 }
 
+// TestRescueNullProjectOwnershipJournalsOrgOnRescuedObservation is a
+// regression test for #776: enqueueRescuedProjectMutationsTx used a
+// hand-rolled SELECT/Scan pair (not observationSelectColumns/
+// scanObservationRow) that never learned about the org column, so a rescued
+// observation's org silently dropped out of the journaled sync mutation.
+func TestRescueNullProjectOwnershipJournalsOrgOnRescuedObservation(t *testing.T) {
+	s := newTestStore(t)
+	enrollTestProject(t, s, "target")
+	if err := s.CreateSession("legacy-session", "legacy", "/tmp"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	observationID, err := s.AddObservation(AddObservationParams{
+		SessionID: "legacy-session",
+		Type:      "note",
+		Title:     "legacy org obs",
+		Content:   "content",
+		Project:   "legacy",
+		Org:       "acme-corp",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+	for _, statement := range []struct {
+		query string
+		args  []any
+	}{
+		{`UPDATE sessions SET project = '' WHERE id = ?`, []any{"legacy-session"}},
+		{`UPDATE observations SET project = NULL WHERE id = ?`, []any{observationID}},
+		{`DELETE FROM sync_mutations WHERE entity_key = (SELECT sync_id FROM observations WHERE id = ?)`, []any{observationID}},
+	} {
+		if _, err := s.DB().Exec(statement.query, statement.args...); err != nil {
+			t.Fatalf("seed legacy ownership: %v", err)
+		}
+	}
+
+	result, err := s.RescueNullProjectOwnership(ProjectRescueParams{TargetProject: "target", ObservationIDs: []int64{observationID}})
+	if err != nil {
+		t.Fatalf("RescueNullProjectOwnership: %v", err)
+	}
+	if result.Rescued() != 2 || !result.Journaled { // observation + its unowned session
+		t.Fatalf("unexpected rescue result: %#v", result)
+	}
+
+	var syncID, payloadJSON string
+	if err := s.DB().QueryRow(`SELECT sync_id FROM observations WHERE id = ?`, observationID).Scan(&syncID); err != nil {
+		t.Fatalf("read rescued sync_id: %v", err)
+	}
+	if err := s.DB().QueryRow(
+		`SELECT payload FROM sync_mutations WHERE entity = ? AND entity_key = ? ORDER BY seq DESC LIMIT 1`,
+		SyncEntityObservation, syncID,
+	).Scan(&payloadJSON); err != nil {
+		t.Fatalf("read journaled mutation payload: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		t.Fatalf("decode journaled payload: %v", err)
+	}
+	if payload["org"] != "acme-corp" {
+		t.Fatalf("expected journaled payload org=acme-corp, got %#v (payload=%s)", payload["org"], payloadJSON)
+	}
+}
+
 func TestEnqueueMissingLocalMutationRefusesBlankOwnedSession(t *testing.T) {
 	s := newTestStore(t)
 	err := s.withTx(func(tx *sql.Tx) error {
