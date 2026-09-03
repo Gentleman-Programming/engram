@@ -32,7 +32,7 @@ func agentAdapters() []agentAdapter {
 		},
 		{
 			slug:        "claude-code",
-			description: "Claude Code — Native plugin via marketplace (hooks, skills, MCP, compaction recovery)",
+			description: "Claude Code — Native marketplace plugin (hooks, skills, compaction recovery) plus MCP registration",
 			custom:      installClaudeCode,
 			installDir:  func() string { return "managed by claude plugin system" },
 		},
