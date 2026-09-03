@@ -88,6 +88,82 @@ func TestApplyPulledObservationStoresProjectAsText(t *testing.T) {
 	}
 }
 
+func TestApplyPulledObservationDeletePreservesTombstoneVersion(t *testing.T) {
+	tests := []struct {
+		name             string
+		payloadUpdatedAt string
+		payloadDeletedAt string
+		wantUpdatedAt    string
+	}{
+		{
+			name:             "uses trimmed payload updated at",
+			payloadUpdatedAt: " 2025-03-04 05:06:07 ",
+			payloadDeletedAt: "2025-03-04 05:00:00",
+			wantUpdatedAt:    "2025-03-04 05:06:07",
+		},
+		{
+			name:             "uses deleted at when updated at is absent",
+			payloadDeletedAt: "2025-03-04 05:00:00",
+			wantUpdatedAt:    "2025-03-04 05:00:00",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if err := s.CreateSession("s-pulled-delete", "engram", "/tmp/engram"); err != nil {
+				t.Fatalf("create session: %v", err)
+			}
+			observationID, err := s.AddObservation(AddObservationParams{
+				SessionID: "s-pulled-delete",
+				Type:      "bugfix",
+				Title:     "Pulled tombstone",
+				Content:   "Sync apply preserves the replicated version",
+				Project:   "engram",
+				Scope:     "project",
+			})
+			if err != nil {
+				t.Fatalf("add observation: %v", err)
+			}
+			observation, err := s.GetObservation(observationID)
+			if err != nil {
+				t.Fatalf("get observation: %v", err)
+			}
+
+			payload, err := json.Marshal(syncObservationPayload{
+				SyncID:    observation.SyncID,
+				UpdatedAt: tt.payloadUpdatedAt,
+				DeletedAt: &tt.payloadDeletedAt,
+			})
+			if err != nil {
+				t.Fatalf("marshal delete payload: %v", err)
+			}
+			if err := s.withTx(func(tx *sql.Tx) error {
+				return s.applyPulledMutationTx(tx, SyncMutation{
+					Entity:    SyncEntityObservation,
+					EntityKey: observation.SyncID,
+					Op:        SyncOpDelete,
+					Payload:   string(payload),
+					Source:    SyncSourceRemote,
+				})
+			}); err != nil {
+				t.Fatalf("apply pulled delete: %v", err)
+			}
+
+			var deletedAt, updatedAt string
+			if err := s.db.QueryRow(`SELECT deleted_at, updated_at FROM observations WHERE id = ?`, observationID).Scan(&deletedAt, &updatedAt); err != nil {
+				t.Fatalf("read tombstone timestamps: %v", err)
+			}
+			if deletedAt != tt.payloadDeletedAt {
+				t.Fatalf("deleted_at = %q, want %q", deletedAt, tt.payloadDeletedAt)
+			}
+			if updatedAt != tt.wantUpdatedAt {
+				t.Fatalf("updated_at = %q, want %q", updatedAt, tt.wantUpdatedAt)
+			}
+		})
+	}
+}
+
 // countRelationRows returns the count of rows in memory_relations with the
 // given sync_id.
 func countRelationRows(t *testing.T, s *Store, syncID string) int {
