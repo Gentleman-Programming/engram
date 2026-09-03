@@ -182,6 +182,8 @@ Cloud is opt-in and project-scoped. Local SQLite remains the source of truth; cl
 
 If you only want HTTP session capture against an already running Engram server, set `ENGRAM_URL` and the extension will not auto-start a local `engram serve` process.
 
+When `ENGRAM_URL` is unset, a confirmed local server that later refuses connections gets one bounded restart attempt per initialized runtime. Pi replays only safe reads and idempotent session registration after health returns `2xx`; other writes report the transport failure instead of risking a duplicate mutation.
+
 ## Configuration
 
 ### Existing Engram server
