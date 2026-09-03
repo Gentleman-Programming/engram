@@ -60,7 +60,7 @@ Call `mem_save` IMMEDIATELY and WITHOUT BEING ASKED after any of these:
 Format for `mem_save`:
 - **title**: Verb + what — short, searchable (e.g. "Fixed N+1 query in UserList", "Chose Zustand over Redux")
 - **type**: bugfix | decision | architecture | discovery | pattern | config | preference
-- **scope**: `project` (default) | `personal`
+- **scope**: `project` (default) | `personal` | `global`
 - **topic_key** (optional but recommended for evolving topics): stable key like `architecture/auth-model`
 - **content**:
   **What**: One sentence — what was done
