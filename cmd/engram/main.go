@@ -87,6 +87,7 @@ var (
 	setupInstallAgent            = setup.Install
 	setupAddClaudeCodeAllowlist  = setup.AddClaudeCodeAllowlist
 	setupEnsureClaudeCodeUserMCP = setup.EnsureClaudeCodeUserMCP
+	setupVerifyClaudeCodeSlim    = setup.VerifyClaudeCodeSlimCapability
 	scanInputLine                = fmt.Scanln
 
 	storeSearch = func(s *store.Store, query string, opts store.SearchOptions) ([]store.SearchResult, error) {
@@ -2806,7 +2807,9 @@ func cmdSetup(cfg store.Config) {
 			fatal(err)
 		}
 		if protocolFlag {
-			applyProtocolMode(cfg, slug, resolveProtocolModeFlag(protocolRaw))
+			mode := resolveProtocolModeFlag(protocolRaw)
+			applyProtocolMode(cfg, slug, mode)
+			warnIfClaudeCodeSlimUnverified(slug, mode)
 		}
 		fmt.Printf("✓ Installed %s plugin (%d files)\n", result.Agent, result.Files)
 		fmt.Printf("  → %s\n", result.Destination)
@@ -2857,6 +2860,7 @@ func cmdSetupInteractive(cfg store.Config, mode string) {
 	}
 	if mode != "" {
 		applyProtocolMode(cfg, selected.Name, mode)
+		warnIfClaudeCodeSlimUnverified(selected.Name, mode)
 	}
 
 	fmt.Printf("✓ Installed %s plugin (%d files)\n", result.Agent, result.Files)
@@ -2879,6 +2883,8 @@ func printSetupUsage() {
 	fmt.Println("                          missing values fall back to full with a warning.")
 	fmt.Println("                          slim currently only takes effect for claude-code,")
 	fmt.Println("                          and only with a clean tagged engram release >= 1.4.0.")
+	fmt.Println("                          Claude Code slim also requires Engram plugin >= 0.1.1;")
+	fmt.Println("                          setup warns, but continues, when it cannot verify it.")
 	fmt.Println("  --help, -h              Show this help and exit.")
 }
 
@@ -2917,6 +2923,17 @@ func applyProtocolMode(cfg store.Config, slug, mode string) {
 		return
 	}
 	fmt.Fprintf(os.Stderr, "warning: slim will remain full: engram %q is not a clean tagged release; install a clean tagged release at or above 1.4.0.\n", strings.TrimSpace(version))
+}
+
+func warnIfClaudeCodeSlimUnverified(slug, mode string) {
+	if slug != "claude-code" || mode != setup.ProtocolModeSlim {
+		return
+	}
+	if err := setupVerifyClaudeCodeSlim(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: unable to verify the Claude Code Engram plugin supports --protocol=slim (requires plugin 0.1.1+): %v\n", err)
+		fmt.Fprintln(os.Stderr, "  Update the plugin through your normal Claude Code plugin update path, then restart Claude Code.")
+		fmt.Fprintln(os.Stderr, "  Session-only plugins loaded with `claude --plugin-dir ...` cannot be detected by this check.")
+	}
 }
 
 // cmdProtocolMode implements `engram protocol-mode <slug>`: prints "slim" to

@@ -37,6 +37,9 @@ func TestCmdSetupHelpAnyPositionShowsProtocolFlagAndSkipsStdin(t *testing.T) {
 		if !strings.Contains(stdout, "--protocol") {
 			t.Fatalf("args=%v: usage output missing literal --protocol: %q", args, stdout)
 		}
+		if !strings.Contains(stdout, "plugin >= 0.1.1") {
+			t.Fatalf("args=%v: usage output missing Claude Code plugin floor: %q", args, stdout)
+		}
 	}
 }
 
@@ -125,6 +128,7 @@ func TestCmdSetupProtocolEqualsFormPersistsSlim(t *testing.T) {
 	setupInstallAgent = func(agent string) (*setup.Result, error) {
 		return &setup.Result{Agent: agent, Destination: "/tmp/dest", Files: 2}, nil
 	}
+	scanInputLine = func(...any) (int, error) { return 0, nil }
 
 	withArgs(t, "engram", "setup", "myagent", "--protocol=slim")
 	_, stderr, recovered := captureOutputAndRecover(t, func() { cmdSetup(cfg) })
@@ -134,6 +138,102 @@ func TestCmdSetupProtocolEqualsFormPersistsSlim(t *testing.T) {
 
 	if got := setup.ReadProtocolMode(cfg.DataDir, "myagent"); got != setup.ProtocolModeSlim {
 		t.Fatalf("ReadProtocolMode = %q, want slim", got)
+	}
+}
+
+func TestCmdSetupClaudeCodeSlimWarningPersistsMode(t *testing.T) {
+	stubRuntimeHooks(t)
+	stubExitWithPanic(t)
+	cfg := testConfig(t)
+	setProtocolVersion(t, "1.4.0")
+
+	setupInstallAgent = func(agent string) (*setup.Result, error) {
+		return &setup.Result{Agent: agent, Destination: "/tmp/dest", Files: 2}, nil
+	}
+	scanInputLine = func(...any) (int, error) { return 0, nil }
+	oldVerify := setupVerifyClaudeCodeSlim
+	setupVerifyClaudeCodeSlim = func() error { return errors.New("claude plugin list --json timed out") }
+	t.Cleanup(func() { setupVerifyClaudeCodeSlim = oldVerify })
+
+	withArgs(t, "engram", "setup", "claude-code", "--protocol=slim")
+	stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdSetup(cfg) })
+	if recovered != nil {
+		t.Fatalf("slim capability warning must not fail setup, panic=%v", recovered)
+	}
+	if !strings.Contains(stdout, "Installed claude-code plugin") {
+		t.Fatalf("setup should still succeed: %q", stdout)
+	}
+	if !strings.Contains(stderr, "requires plugin 0.1.1+") || !strings.Contains(stderr, "--plugin-dir") {
+		t.Fatalf("expected actionable slim capability warning, got %q", stderr)
+	}
+	if strings.Contains(stderr, "slim will remain full") {
+		t.Fatalf("plugin capability warning must not include a binary-version warning: %q", stderr)
+	}
+	if got := setup.ReadProtocolMode(cfg.DataDir, "claude-code"); got != setup.ProtocolModeSlim {
+		t.Fatalf("ReadProtocolMode = %q, want slim despite warning", got)
+	}
+}
+
+func TestCmdSetupOnlyChecksClaudeCodeSlim(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		selected   string
+		wantMode   string
+		wantChecks int
+	}{
+		{name: "Claude Code full", args: []string{"engram", "setup", "claude-code", "--protocol=full"}, wantMode: setup.ProtocolModeFull},
+		{name: "Claude Code default", args: []string{"engram", "setup", "claude-code"}, wantMode: setup.ProtocolModeFull},
+		{name: "other agent slim", args: []string{"engram", "setup", "opencode", "--protocol=slim"}, wantMode: setup.ProtocolModeSlim},
+		{name: "interactive other agent slim", args: []string{"engram", "setup", "--protocol=slim"}, selected: "opencode", wantMode: setup.ProtocolModeSlim},
+		{name: "interactive Claude Code slim", args: []string{"engram", "setup", "--protocol=slim"}, selected: "claude-code", wantMode: setup.ProtocolModeSlim, wantChecks: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stubRuntimeHooks(t)
+			stubExitWithPanic(t)
+			cfg := testConfig(t)
+			setProtocolVersion(t, "1.4.0")
+			setupInstallAgent = func(agent string) (*setup.Result, error) {
+				return &setup.Result{Agent: agent, Destination: "/tmp/dest", Files: 2}, nil
+			}
+			scanInputLine = func(...any) (int, error) { return 0, nil }
+			if tt.selected != "" {
+				setupSupportedAgents = func() []setup.Agent {
+					return []setup.Agent{{Name: tt.selected, Description: tt.selected, InstallDir: "/tmp/dest"}}
+				}
+				scanInputLine = func(a ...any) (int, error) {
+					*a[0].(*string) = "1"
+					return 1, nil
+				}
+			}
+			checks := 0
+			oldVerify := setupVerifyClaudeCodeSlim
+			setupVerifyClaudeCodeSlim = func() error {
+				checks++
+				return nil
+			}
+			t.Cleanup(func() { setupVerifyClaudeCodeSlim = oldVerify })
+
+			withArgs(t, tt.args...)
+			_, stderr, recovered := captureOutputAndRecover(t, func() { cmdSetup(cfg) })
+			if recovered != nil || stderr != "" {
+				t.Fatalf("panic=%v stderr=%q", recovered, stderr)
+			}
+			if checks != tt.wantChecks {
+				t.Fatalf("capability checks = %d, want %d", checks, tt.wantChecks)
+			}
+			slug := "claude-code"
+			if tt.selected != "" {
+				slug = tt.selected
+			} else if strings.Contains(tt.args[2], "opencode") {
+				slug = "opencode"
+			}
+			if got := setup.ReadProtocolMode(cfg.DataDir, slug); got != tt.wantMode {
+				t.Fatalf("ReadProtocolMode(%q) = %q, want %q", slug, got, tt.wantMode)
+			}
+		})
 	}
 }
 

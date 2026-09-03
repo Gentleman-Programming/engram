@@ -44,6 +44,9 @@ remain on `full`. For Claude Code, slim activates only when Engram is a clean
 tagged release at or above 1.4.0. Local `dev`, Go pseudo-version, dirty, and
 other non-release builds remain on `full`; setup persists the selection and
 warns so you can install a supported tagged release.
+Claude slim also requires plugin 0.1.1+. If setup cannot verify the enabled
+marketplace plugin, it warns without changing the selected mode; session-only
+`claude --plugin-dir ...` installs cannot be detected.
 
 ## Pi
 
@@ -298,6 +301,8 @@ engram setup claude-code
 ```
 
 `engram setup claude-code` is the sole MCP registration owner. It writes the durable user-level config at `~/.claude/mcp/engram.json` with the absolute `engram` binary path. If that write is not possible, setup warns and completes the plugin installation; resolve the error and rerun setup before using plugin MCP tools. You'll be asked whether to add engram's agent-profile MCP tools to `~/.claude/settings.json` `permissions.allow`. The setup writes entries for both the durable user-level MCP server id (`mcp__engram__...`) and the plugin-scoped server id used by older Claude Code plugin installs, so re-running setup repairs stale or incomplete allowlists without adding startup delay. Existing marketplace plugin copies receive hooks, scripts, and skills updates through normal Claude Code plugin updates; do not edit the plugin cache manually.
+
+`engram setup claude-code --protocol=slim` requires Engram plugin version 0.1.1 or later. Setup checks `claude plugin list --json` after a successful install and warns, without failing or changing the selected slim mode, when it cannot verify the installed enabled marketplace plugin. Update through your normal Claude Code plugin update path and restart Claude Code. Session-only `claude --plugin-dir ...` plugins cannot be detected by this check.
 
 **Option C: Bare MCP** — all 22 tools by default, no session management:
 
