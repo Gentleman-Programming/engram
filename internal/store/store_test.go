@@ -13187,6 +13187,13 @@ func TestFTSQueryLengthLimit(t *testing.T) {
 	if got := len(tooLarge); got != 65_537 {
 		t.Fatalf("oversized query length = %d, want 65537", got)
 	}
+	runeTooLarge := strings.Repeat("é", 32_769)
+	if got := utf8.RuneCountInString(runeTooLarge); got != 32_769 {
+		t.Fatalf("rune-oversized query rune count = %d, want 32769", got)
+	}
+	if got := len(runeTooLarge); got != 65_538 {
+		t.Fatalf("rune-oversized query byte length = %d, want 65538", got)
+	}
 
 	if err := validateFTSQueryLength(atLimit); err != nil {
 		t.Fatalf("query at 65536 bytes: %v", err)
@@ -13197,9 +13204,16 @@ func TestFTSQueryLengthLimit(t *testing.T) {
 		run  func(string) error
 	}{
 		{
-			name: "observations",
+			name: "search",
 			run: func(query string) error {
 				_, err := s.Search(query, SearchOptions{Project: "engram", Limit: 10})
+				return err
+			},
+		},
+		{
+			name: "search context",
+			run: func(query string) error {
+				_, err := s.SearchContext(context.Background(), query, SearchOptions{Project: "engram", Limit: 10})
 				return err
 			},
 		},
@@ -13211,15 +13225,32 @@ func TestFTSQueryLengthLimit(t *testing.T) {
 			},
 		},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if err := tc.run(tooLarge); err == nil {
-				t.Fatal("query at 65537 bytes returned nil error")
-			} else if !errors.Is(err, ErrFTSQueryTooLarge) {
-				t.Fatalf("oversized query error = %v, want ErrFTSQueryTooLarge", err)
-			} else if got, want := err.Error(), "fts query too large: got 65537 bytes; maximum is 65536 bytes; shorten the query and retry"; got != want {
-				t.Fatalf("oversized query error = %q, want %q", got, want)
-			}
-		})
+		for _, query := range []struct {
+			name string
+			text string
+			want string
+		}{
+			{
+				name: "65537 bytes",
+				text: tooLarge,
+				want: "fts query too large: got 65537 bytes; maximum is 65536 bytes; shorten the query and retry",
+			},
+			{
+				name: "32769 runes and 65538 bytes",
+				text: runeTooLarge,
+				want: "fts query too large: got 65538 bytes; maximum is 65536 bytes; shorten the query and retry",
+			},
+		} {
+			t.Run(tc.name+"/"+query.name, func(t *testing.T) {
+				if err := tc.run(query.text); err == nil {
+					t.Fatalf("query at %s returned nil error", query.name)
+				} else if !errors.Is(err, ErrFTSQueryTooLarge) {
+					t.Fatalf("oversized query error = %v, want ErrFTSQueryTooLarge", err)
+				} else if got := err.Error(); got != query.want {
+					t.Fatalf("oversized query error = %q, want %q", got, query.want)
+				}
+			})
+		}
 	}
 }
 

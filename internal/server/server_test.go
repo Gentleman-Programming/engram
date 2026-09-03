@@ -862,6 +862,32 @@ func TestSearchEndpointsRejectOversizedFTSQueries(t *testing.T) {
 	}
 }
 
+func TestSearchEndpointsReturnInternalErrorForStoreFailure(t *testing.T) {
+	st := newServerTestStore(t)
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+	srv := New(st, 0)
+
+	for _, path := range []string{"/search?q=x", "/prompts/search?q=x"} {
+		t.Run(path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+
+			if rec.Code != http.StatusInternalServerError {
+				t.Fatalf("status = %d, want 500: %s", rec.Code, rec.Body.String())
+			}
+			var response map[string]string
+			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if response["error"] == "" {
+				t.Fatalf("internal store error response missing error: %s", rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestSearchEndpointsRejectTooManyShortFTSTerms(t *testing.T) {
 	srv := New(newServerTestStore(t), 0)
 	query := strings.TrimSpace(strings.Repeat("x ", 769))
