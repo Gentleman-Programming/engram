@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -14,10 +15,11 @@ const ambiguousProjectRecoveryTTL = 5 * time.Minute
 
 // SessionActivity tracks tool call activity for save reminders and activity scores.
 type SessionActivity struct {
-	mu         sync.Mutex
-	sessions   map[string]*sessionState
-	nudgeAfter time.Duration
-	now        func() time.Time // injectable for testing
+	mu                sync.Mutex
+	sessions          map[string]*sessionState
+	projectLastSaveAt map[string]time.Time
+	nudgeAfter        time.Duration
+	now               func() time.Time // injectable for testing
 }
 
 type sessionState struct {
@@ -44,9 +46,10 @@ type ambiguousProjectRecovery struct {
 // NewSessionActivity creates a new activity tracker with the given nudge threshold.
 func NewSessionActivity(nudgeAfter time.Duration) *SessionActivity {
 	return &SessionActivity{
-		sessions:   make(map[string]*sessionState),
-		nudgeAfter: nudgeAfter,
-		now:        time.Now,
+		sessions:          make(map[string]*sessionState),
+		projectLastSaveAt: make(map[string]time.Time),
+		nudgeAfter:        nudgeAfter,
+		now:               time.Now,
 	}
 }
 
@@ -146,6 +149,39 @@ func (a *SessionActivity) RecordSave(sessionID string) {
 	s.lastSaveAt = a.now()
 }
 
+// RecordSaveForProject records a save in its session and for project-level
+// nudge freshness.
+func (a *SessionActivity) RecordSaveForProject(sessionID, project string) {
+	project = strings.TrimSpace(project)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	now := a.now()
+	s := a.getOrCreate(sessionID)
+	s.saveCount++
+	s.lastSaveAt = now
+	if project == "" {
+		return
+	}
+	a.expireProjectFreshness(now)
+	a.projectLastSaveAt[project] = now
+}
+
+// RecordProjectSave records a successful save for project-level nudge freshness.
+// It does not affect per-session activity scores.
+func (a *SessionActivity) RecordProjectSave(project string) {
+	project = strings.TrimSpace(project)
+	if project == "" {
+		return
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	now := a.now()
+	a.expireProjectFreshness(now)
+	a.projectLastSaveAt[project] = now
+}
+
 // RecordPrompt stores the latest user prompt observed for a session. MCP does
 // not currently receive user prompts on every tool call, so callers must feed
 // this explicitly when prompt text is available.
@@ -176,13 +212,28 @@ func (a *SessionActivity) CurrentPrompt(sessionID, project string) (string, bool
 func (a *SessionActivity) NudgeIfNeeded(sessionID string) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	return a.nudgeIfNeeded(sessionID, "")
+}
+
+// NudgeIfNeededForProject returns a nudge using session activity unless a
+// recent successful save exists for the project.
+func (a *SessionActivity) NudgeIfNeededForProject(sessionID, project string) string {
+	project = strings.TrimSpace(project)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.nudgeIfNeeded(sessionID, project)
+}
+
+func (a *SessionActivity) nudgeIfNeeded(sessionID, project string) string {
+	now := a.now()
+	if project != "" {
+		a.expireProjectFreshness(now)
+	}
 
 	s, ok := a.sessions[sessionID]
 	if !ok {
 		return ""
 	}
-
-	now := a.now()
 
 	// Don't nudge if session is too young
 	if now.Sub(s.startedAt) < a.nudgeAfter {
@@ -205,8 +256,22 @@ func (a *SessionActivity) NudgeIfNeeded(sessionID string) string {
 		return ""
 	}
 
+	if project != "" {
+		if _, ok := a.projectLastSaveAt[project]; ok {
+			return ""
+		}
+	}
+
 	minutes := int(elapsed.Minutes())
 	return fmt.Sprintf("\n\n⚠️ No mem_save calls for this project in %d minutes. Did you make any decisions, fix bugs, or discover something worth persisting?", minutes)
+}
+
+func (a *SessionActivity) expireProjectFreshness(now time.Time) {
+	for project, savedAt := range a.projectLastSaveAt {
+		if !now.Before(savedAt.Add(a.nudgeAfter)) {
+			delete(a.projectLastSaveAt, project)
+		}
+	}
 }
 
 // ActivityScore returns a formatted activity score string for the session.

@@ -41,6 +41,7 @@ func resetSetupSeams(t *testing.T) {
 	oldLookPathFn := lookPathFn
 	oldRunCommand := runCommand
 	oldStatFn := statFn
+	oldLstatFn := lstatFn
 	oldOpenCodeReadFile := openCodeReadFile
 	oldOpenCodeWriteFileFn := openCodeWriteFileFn
 	oldReadFileFn := readFileFn
@@ -57,6 +58,7 @@ func resetSetupSeams(t *testing.T) {
 	oldAddClaudeCodeAllowlistFn := addClaudeCodeAllowlistFn
 	oldOsExecutable := osExecutable
 	oldWriteClaudeCodeUserMCPFn := writeClaudeCodeUserMCPFn
+	oldCreateClaudeCodeUserMCPFn := createClaudeCodeUserMCPFn
 	oldResolveMiseNodeVersionFn := resolveMiseNodeVersionFn
 
 	t.Cleanup(func() {
@@ -65,6 +67,7 @@ func resetSetupSeams(t *testing.T) {
 		lookPathFn = oldLookPathFn
 		runCommand = oldRunCommand
 		statFn = oldStatFn
+		lstatFn = oldLstatFn
 		openCodeReadFile = oldOpenCodeReadFile
 		openCodeWriteFileFn = oldOpenCodeWriteFileFn
 		readFileFn = oldReadFileFn
@@ -81,6 +84,7 @@ func resetSetupSeams(t *testing.T) {
 		addClaudeCodeAllowlistFn = oldAddClaudeCodeAllowlistFn
 		osExecutable = oldOsExecutable
 		writeClaudeCodeUserMCPFn = oldWriteClaudeCodeUserMCPFn
+		createClaudeCodeUserMCPFn = oldCreateClaudeCodeUserMCPFn
 		resolveMiseNodeVersionFn = oldResolveMiseNodeVersionFn
 	})
 }
@@ -1403,6 +1407,9 @@ func TestInstallClaudeCodeBranches(t *testing.T) {
 		if result.Files != 1 {
 			t.Fatalf("expected 1 file when user MCP write succeeds, got %d", result.Files)
 		}
+		if !result.MCPConfigured {
+			t.Fatal("expected successful user MCP write to report MCP configuration")
+		}
 		// Destination should point to the .claude/mcp dir, not be empty
 		expectedDir := filepath.Join(home, ".claude", "mcp")
 		if result.Destination != expectedDir {
@@ -1462,6 +1469,9 @@ func TestInstallClaudeCodeBranches(t *testing.T) {
 		// files == 0 when writeClaudeCodeUserMCP fails
 		if result.Files != 0 {
 			t.Fatalf("expected 0 files when user MCP write fails, got %d", result.Files)
+		}
+		if result.MCPConfigured {
+			t.Fatal("expected failed user MCP write to remain unconfigured")
 		}
 	})
 }
@@ -1682,6 +1692,133 @@ func TestWriteClaudeCodeUserMCP(t *testing.T) {
 		err := writeClaudeCodeUserMCP()
 		if err == nil || !strings.Contains(err.Error(), "create mcp dir") {
 			t.Fatalf("expected create mcp dir error, got %v", err)
+		}
+	})
+}
+
+func TestEnsureClaudeCodeUserMCP(t *testing.T) {
+	t.Run("existing regular file is left untouched", func(t *testing.T) {
+		resetSetupSeams(t)
+		home := useTestHome(t)
+		path := filepath.Join(home, ".claude", "mcp", "engram.json")
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatalf("create MCP directory: %v", err)
+		}
+		const existing = `{"command":"user-owned"}`
+		if err := os.WriteFile(path, []byte(existing), 0644); err != nil {
+			t.Fatalf("write existing MCP config: %v", err)
+		}
+
+		if err := EnsureClaudeCodeUserMCP(); err != nil {
+			t.Fatalf("EnsureClaudeCodeUserMCP: %v", err)
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read existing MCP config: %v", err)
+		}
+		if string(raw) != existing {
+			t.Fatalf("existing MCP config was changed: got %q want %q", raw, existing)
+		}
+	})
+
+	t.Run("missing path is created exclusively", func(t *testing.T) {
+		resetSetupSeams(t)
+		home := useTestHome(t)
+		executable := filepath.Join(t.TempDir(), "engram")
+		osExecutable = func() (string, error) { return executable, nil }
+
+		if err := EnsureClaudeCodeUserMCP(); err != nil {
+			t.Fatalf("EnsureClaudeCodeUserMCP: %v", err)
+		}
+		info, err := os.Lstat(filepath.Join(home, ".claude", "mcp", "engram.json"))
+		if err != nil {
+			t.Fatalf("lstat created MCP config: %v", err)
+		}
+		if !info.Mode().IsRegular() {
+			t.Fatalf("created MCP config mode = %v, want regular file", info.Mode())
+		}
+	})
+
+	t.Run("lstat error is returned", func(t *testing.T) {
+		resetSetupSeams(t)
+		useTestHome(t)
+		lstatFn = func(string) (os.FileInfo, error) { return nil, errors.New("lstat boom") }
+
+		err := EnsureClaudeCodeUserMCP()
+		if err == nil || !strings.Contains(err.Error(), "stat user MCP config") {
+			t.Fatalf("expected stat error, got %v", err)
+		}
+	})
+
+	t.Run("exclusive create error is returned", func(t *testing.T) {
+		resetSetupSeams(t)
+		useTestHome(t)
+		executable := filepath.Join(t.TempDir(), "engram")
+		osExecutable = func() (string, error) { return executable, nil }
+		createClaudeCodeUserMCPFn = func(string, []byte, os.FileMode) error {
+			return errors.New("write boom")
+		}
+
+		err := EnsureClaudeCodeUserMCP()
+		if err == nil || !strings.Contains(err.Error(), "create user MCP config") {
+			t.Fatalf("expected exclusive create error, got %v", err)
+		}
+	})
+
+	t.Run("concurrent creator wins without clobbering", func(t *testing.T) {
+		resetSetupSeams(t)
+		home := useTestHome(t)
+		path := filepath.Join(home, ".claude", "mcp", "engram.json")
+		executable := filepath.Join(t.TempDir(), "engram")
+		osExecutable = func() (string, error) { return executable, nil }
+
+		checked := make(chan struct{})
+		continueEnsure := make(chan struct{})
+		lstatCalls := 0
+		lstatFn = func(name string) (os.FileInfo, error) {
+			if name == path && lstatCalls == 0 {
+				lstatCalls++
+				close(checked)
+				<-continueEnsure
+				return nil, os.ErrNotExist
+			}
+			return os.Lstat(name)
+		}
+
+		done := make(chan error, 1)
+		go func() { done <- EnsureClaudeCodeUserMCP() }()
+		<-checked
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatalf("create MCP directory: %v", err)
+		}
+		const concurrentConfig = `{"command":"concurrent-owner"}`
+		if err := os.WriteFile(path, []byte(concurrentConfig), 0644); err != nil {
+			t.Fatalf("write concurrent MCP config: %v", err)
+		}
+		close(continueEnsure)
+		if err := <-done; err != nil {
+			t.Fatalf("EnsureClaudeCodeUserMCP: %v", err)
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read concurrent MCP config: %v", err)
+		}
+		if string(raw) != concurrentConfig {
+			t.Fatalf("concurrent MCP config was clobbered: got %q want %q", raw, concurrentConfig)
+		}
+	})
+
+	t.Run("non-regular path is rejected", func(t *testing.T) {
+		resetSetupSeams(t)
+		home := useTestHome(t)
+		path := filepath.Join(home, ".claude", "mcp", "engram.json")
+		if err := os.MkdirAll(path, 0755); err != nil {
+			t.Fatalf("create directory at MCP config path: %v", err)
+		}
+
+		err := EnsureClaudeCodeUserMCP()
+		if err == nil || !strings.Contains(err.Error(), "regular file") {
+			t.Fatalf("expected non-regular path error, got %v", err)
 		}
 	})
 }
