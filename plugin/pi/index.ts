@@ -83,8 +83,14 @@ Format for \`mem_save\`:
 
 ### WHEN TO SEARCH MEMORY
 
-When the user asks to recall past work, first call \`mem_context\`. If not found,
-call \`mem_search\`, then \`mem_get_observation\` for full content.
+When the user asks to recall past work:
+1. Start with \`mem_context\`, then search with 1–2 distinctive keywords.
+2. Ordinary \`mem_search\` is scoped to the detected active project; its default
+   \`match_mode:"all"\` means AND. For broad recall, use \`match_mode:"any"\` with
+   \`all_projects:true\`. If a scoped search is empty, retry once this way before
+   concluding no memory exists.
+3. After hits, narrow follow-up searches by project, type, or \`match_mode:"all"\`,
+   then use \`mem_get_observation\` for full content.
 
 ### SESSION CLOSE PROTOCOL
 
