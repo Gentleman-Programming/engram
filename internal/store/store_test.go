@@ -13179,7 +13179,7 @@ func TestSearchContext_AlreadyCanceled(t *testing.T) {
 
 func TestFTSQueryLengthLimit(t *testing.T) {
 	s := newTestStore(t)
-	atLimit := strings.Repeat("é", 32_768)
+	atLimit := strings.Repeat("abc", 21_845) + "a"
 	if got := len(atLimit); got != 65_536 {
 		t.Fatalf("at-limit query length = %d, want 65536", got)
 	}
@@ -13201,30 +13201,38 @@ func TestFTSQueryLengthLimit(t *testing.T) {
 
 	for _, tc := range []struct {
 		name string
-		run  func(string) error
+		run  func(context.Context, string) error
 	}{
 		{
 			name: "search",
-			run: func(query string) error {
+			run: func(_ context.Context, query string) error {
 				_, err := s.Search(query, SearchOptions{Project: "engram", Limit: 10})
 				return err
 			},
 		},
 		{
 			name: "search context",
-			run: func(query string) error {
-				_, err := s.SearchContext(context.Background(), query, SearchOptions{Project: "engram", Limit: 10})
+			run: func(ctx context.Context, query string) error {
+				_, err := s.SearchContext(ctx, query, SearchOptions{Project: "engram", Limit: 10})
 				return err
 			},
 		},
 		{
 			name: "prompts",
-			run: func(query string) error {
+			run: func(_ context.Context, query string) error {
 				_, err := s.SearchPrompts(query, "engram", 10)
 				return err
 			},
 		},
 	} {
+		t.Run(tc.name+"/65536 bytes", func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			if err := tc.run(ctx, atLimit); err != nil {
+				t.Fatalf("query at 65536 bytes: %v", err)
+			}
+		})
+
 		for _, query := range []struct {
 			name string
 			text string
@@ -13242,7 +13250,7 @@ func TestFTSQueryLengthLimit(t *testing.T) {
 			},
 		} {
 			t.Run(tc.name+"/"+query.name, func(t *testing.T) {
-				if err := tc.run(query.text); err == nil {
+				if err := tc.run(context.Background(), query.text); err == nil {
 					t.Fatalf("query at %s returned nil error", query.name)
 				} else if !errors.Is(err, ErrFTSQueryTooLarge) {
 					t.Fatalf("oversized query error = %v, want ErrFTSQueryTooLarge", err)
