@@ -34,21 +34,15 @@ func TestDatabaseGeneration(t *testing.T) {
 			assertGenerationChanged(t, generation.check())
 		})
 
-		t.Run("handles disappearance "+sidecarName(sidecar), func(t *testing.T) {
+		t.Run("detects disappearance "+sidecarName(sidecar), func(t *testing.T) {
 			generation, dbPath := newTestDatabaseGeneration(t, sidecar == "-wal", sidecar == "-shm")
 			if err := os.Remove(dbPath + sidecar); err != nil {
 				t.Fatalf("remove generation file: %v", err)
 			}
-			if sidecar == "" {
+			assertGenerationChanged(t, generation.check())
+			if sidecar != "" {
+				writeTestFile(t, dbPath+sidecar)
 				assertGenerationChanged(t, generation.check())
-				return
-			}
-			if err := generation.check(); err != nil {
-				t.Fatalf("check after sidecar disappearance: %v", err)
-			}
-			writeTestFile(t, dbPath+sidecar)
-			if err := generation.check(); err != nil {
-				t.Fatalf("adopt replacement sidecar: %v", err)
 			}
 		})
 	}
