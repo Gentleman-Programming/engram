@@ -117,6 +117,9 @@ type DetectionResult struct {
 	Error error
 	// AvailableProjects is populated only when Error==ErrAmbiguousProject.
 	AvailableProjects []string
+	// Org is the optional grouping label from .engram/config.json's "org" field.
+	// Only populated when Source==SourceConfig; empty means unset (#776).
+	Org string
 }
 
 // DetectProjectFull resolves the project for dir using a 6-case algorithm:
@@ -225,6 +228,9 @@ func detectFromGitBinding(dir string) (DetectionResult, bool) {
 
 type configFile struct {
 	ProjectName string `json:"project_name"`
+	// Org is a free-text grouping axis orthogonal to scope (#776). Unlike
+	// ProjectName it has no canonicalization beyond trimming whitespace.
+	Org string `json:"org"`
 }
 
 func detectFromConfig(dir string) (DetectionResult, bool) {
@@ -286,7 +292,7 @@ func readConfigAt(projectDir string) (DetectionResult, bool) {
 	if err != nil {
 		return invalidConfigResult(projectDir, err), true
 	}
-	return DetectionResult{Project: projectName, Source: SourceConfig, Path: projectDir}, true
+	return DetectionResult{Project: projectName, Source: SourceConfig, Path: projectDir, Org: strings.TrimSpace(cfg.Org)}, true
 }
 
 func invalidConfigResult(path string, err error) DetectionResult {
