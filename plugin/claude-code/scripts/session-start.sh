@@ -21,6 +21,9 @@ INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 
+if [ ! -f "$HOME/.claude/mcp/engram.json" ] && engram setup claude-code --mcp-only >/dev/null 2>&1; then
+  printf '%s\n' "Engram MCP registration migrated. Restart Claude Code to enable MCP tools."
+fi
 # Ensure engram server is running
 if ! curl -sf "${ENGRAM_URL}/health" --max-time 1 > /dev/null 2>&1; then
   ENGRAM_SERVE_DATA_DIR="${ENGRAM_DATA_DIR:-$HOME/.engram}"

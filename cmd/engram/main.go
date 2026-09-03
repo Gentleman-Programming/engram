@@ -2727,6 +2727,7 @@ func cmdSetup(cfg store.Config) {
 		helpSeen        bool
 		protocolRaw     string
 		protocolFlag    bool
+		mcpOnly         bool
 		slug            string
 		slugSeen        bool
 		extraBareSeen   bool
@@ -2754,6 +2755,8 @@ func cmdSetup(cfg store.Config) {
 		case strings.HasPrefix(token, "--protocol="):
 			protocolRaw = strings.TrimPrefix(token, "--protocol=")
 			protocolFlag = true
+		case token == "--mcp-only":
+			mcpOnly = true
 		case strings.HasPrefix(token, "-"):
 			// Unrecognized hyphen-prefixed token: record it but keep
 			// scanning so a --protocol appearing later is still parsed
@@ -2787,6 +2790,15 @@ func cmdSetup(cfg store.Config) {
 			mode = resolveProtocolModeFlag(protocolRaw)
 		}
 		cmdSetupInteractive(cfg, mode)
+		return
+	case mcpOnly:
+		if !slugSeen || slug != "claude-code" {
+			fatal(fmt.Errorf("--mcp-only requires claude-code"))
+			return
+		}
+		if err := setup.EnsureClaudeCodeUserMCP(); err != nil {
+			fatal(err)
+		}
 		return
 	case slugSeen:
 		result, err := setupInstallAgent(slug)
