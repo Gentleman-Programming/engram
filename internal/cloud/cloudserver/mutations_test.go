@@ -937,6 +937,16 @@ func TestMutationPushRejectsMixedProjectBatch(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("expected 403 for mixed batch with unauthorized project, got %d body=%q", rec.Code, rec.Body.String())
 	}
+	payload := decodeActionableError(t, rec)
+	if payload.ErrorClass != "policy" {
+		t.Fatalf("expected policy class, got %q", payload.ErrorClass)
+	}
+	if payload.ErrorCode != "policy_forbidden" {
+		t.Fatalf("expected policy_forbidden error code, got %q", payload.ErrorCode)
+	}
+	if payload.Error != `forbidden: project "proj-b" is not allowed` {
+		t.Fatalf("expected denied project in error message, got %q", payload.Error)
+	}
 
 	// Verify nothing was stored for proj-a either (all-or-nothing rejection)
 	if len(ms.mutations) != 0 {

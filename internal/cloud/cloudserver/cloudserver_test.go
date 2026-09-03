@@ -772,6 +772,9 @@ func TestHandlerProjectScopeForbiddenReturnsPolicyClassPayload(t *testing.T) {
 	if payload.ErrorCode != "policy_forbidden" {
 		t.Fatalf("expected policy_forbidden error code, got %q", payload.ErrorCode)
 	}
+	if payload.Error != `forbidden: project "proj-a" is not allowed` {
+		t.Fatalf("expected denied project in error message, got %q", payload.Error)
+	}
 }
 
 func TestHandlerPushRejectsOversizedPayload(t *testing.T) {
