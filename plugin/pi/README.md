@@ -135,6 +135,8 @@ Full tool details remain available by expanding the tool output in Pi. If `gentl
 
 ## What Pi can remember
 
+Pi sends eligible non-Engram tool results to Engram for passive scanning after redaction. Only structured learnings recognized by Engram's parser are persisted; raw or general tool output is not saved as an observation.
+
 - Architecture decisions and tradeoffs
 - Bug fixes, root causes, and gotchas
 - User preferences and project conventions

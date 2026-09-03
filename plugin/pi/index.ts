@@ -1282,15 +1282,20 @@ export default function registerEngram(pi: ExtensionAPI) {
     await ensureSessionBestEffort(sessionId);
     toolCounts.set(sessionId, (toolCounts.get(sessionId) ?? 0) + 1);
 
-    if (toolName !== "Task" || event.result === undefined) return;
-    const content = typeof event.result === "string" ? event.result : JSON.stringify(event.result);
-    if (content.length <= 50) return;
+    if (event.result === undefined) return;
+    let content: string | undefined;
+    try {
+      content = typeof event.result === "string" ? event.result : JSON.stringify(event.result);
+    } catch {
+      return;
+    }
+    if (!content || content.length <= 50) return;
 
     const body: PassiveCaptureBody = {
       session_id: sessionId,
       content: stripPrivateTags(content),
       project,
-      source: "task-complete",
+      source: toolName,
     };
     await bestEffortEngramFetch("/observations/passive", { method: "POST", body });
   });
