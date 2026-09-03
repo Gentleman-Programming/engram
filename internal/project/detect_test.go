@@ -306,6 +306,47 @@ func TestDetectProjectFull_ConfigCanonicalizesRepeatedSeparators(t *testing.T) {
 	}
 }
 
+// TestDetectProjectFull_ConfigOrgIsExposedAndTrimmed verifies the "org" field
+// (#776) is read from .engram/config.json, trimmed, and exposed on
+// DetectionResult when the org grouping label is set.
+func TestDetectProjectFull_ConfigOrgIsExposedAndTrimmed(t *testing.T) {
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, ".engram")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(`{"project_name":"acme-app","org":"  acme-corp  "}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res := DetectProjectFull(dir)
+	if res.Source != SourceConfig || res.Project != "acme-app" {
+		t.Fatalf("config detection = %+v, want source=%q project=%q", res, SourceConfig, "acme-app")
+	}
+	if res.Org != "acme-corp" {
+		t.Fatalf("expected trimmed org %q, got %q", "acme-corp", res.Org)
+	}
+}
+
+// TestDetectProjectFull_ConfigWithoutOrgLeavesItEmpty proves an unset "org"
+// field never leaks a stray value onto DetectionResult (#776) — single-context
+// users with an existing config.json see zero behavior change.
+func TestDetectProjectFull_ConfigWithoutOrgLeavesItEmpty(t *testing.T) {
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, ".engram")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(`{"project_name":"acme-app"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res := DetectProjectFull(dir)
+	if res.Org != "" {
+		t.Fatalf("expected empty org when config omits it, got %q", res.Org)
+	}
+}
+
 func TestDetectProjectFull_NearestSubprojectConfigOverridesRepoRoot(t *testing.T) {
 	root := t.TempDir()
 	initGit(t, root)
