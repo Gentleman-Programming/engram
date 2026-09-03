@@ -184,7 +184,7 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 
 ### Passive Capture
 
-- `POST /observations/passive` — Extract structured learnings from text. Body: `{content, session_id, project?}`
+- `POST /observations/passive` — Scan submitted text and persist only structured learnings recognized by the parser. Body: `{content, session_id, project?, source?}`. General or raw text is not saved as an observation.
 
 ### Export / Import
 
