@@ -79,6 +79,54 @@ func TestSessionActivity_RecordSave_ResetsNudge(t *testing.T) {
 	}
 }
 
+func TestSessionActivity_ProjectFreshness(t *testing.T) {
+	now := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	a := NewSessionActivity(10 * time.Minute)
+	a.now = func() time.Time { return now }
+
+	for _, project := range []string{"project-a", "project-b"} {
+		for i := 0; i < 6; i++ {
+			a.RecordToolCall(defaultSessionID(project))
+		}
+	}
+	now = now.Add(15 * time.Minute)
+
+	a.RecordProjectSave("project-a")
+	if got := a.NudgeIfNeededForProject(defaultSessionID("project-a"), "project-a"); got != "" {
+		t.Fatalf("expected fresh project save to suppress nudge, got %q", got)
+	}
+	if got := a.NudgeIfNeededForProject(defaultSessionID("project-b"), "project-b"); got == "" {
+		t.Fatal("expected project freshness to remain isolated")
+	}
+
+	now = now.Add(10 * time.Minute)
+	if got := a.NudgeIfNeededForProject(defaultSessionID("project-a"), "project-a"); got == "" {
+		t.Fatal("expected nudge after project freshness expires")
+	}
+	if _, ok := a.projectLastSaveAt["project-a"]; ok {
+		t.Fatal("expected expired project freshness to be removed")
+	}
+}
+
+func TestSessionActivity_EmptyProjectFreshnessDoesNotSuppressNudge(t *testing.T) {
+	now := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	a := NewSessionActivity(10 * time.Minute)
+	a.now = func() time.Time { return now }
+	sessionID := defaultSessionID("")
+	for i := 0; i < 6; i++ {
+		a.RecordToolCall(sessionID)
+	}
+	now = now.Add(15 * time.Minute)
+
+	a.RecordProjectSave("")
+	if len(a.projectLastSaveAt) != 0 {
+		t.Fatalf("expected no freshness entry for an empty project, got %v", a.projectLastSaveAt)
+	}
+	if got := a.NudgeIfNeededForProject(sessionID, ""); got == "" {
+		t.Fatal("expected empty project save not to suppress nudge")
+	}
+}
+
 func TestSessionActivity_ActivityScore(t *testing.T) {
 	a := NewSessionActivity(10 * time.Minute)
 	sid := "test-session"
