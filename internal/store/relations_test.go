@@ -1379,6 +1379,36 @@ func TestCountRelations_NoPredicate(t *testing.T) {
 	}
 }
 
+func TestConflictViewsExcludeNotConflictButEnumerationRetainsIt(t *testing.T) {
+	s, alphaSync1, alphaSync2, _ := setupTwoProjectStore(t)
+	if _, err := s.JudgeBySemantic(JudgeBySemanticParams{
+		SourceID: alphaSync1, TargetID: alphaSync2, Relation: RelationNotConflict, Confidence: 0.9,
+	}); err != nil {
+		t.Fatalf("JudgeBySemantic: %v", err)
+	}
+	insertRelationWithStatus(t, s, alphaSync1, alphaSync2, "pending")
+
+	all, err := s.ListRelations(ListRelationsOptions{Project: "alpha"})
+	if err != nil || len(all) != 2 {
+		t.Fatalf("inclusive ListRelations = %d, %v; want 2 rows", len(all), err)
+	}
+	conflicts, err := s.ListRelations(ListRelationsOptions{Project: "alpha", ExcludeNotConflict: true})
+	if err != nil || len(conflicts) != 1 {
+		t.Fatalf("conflict ListRelations = %d, %v; want 1 row", len(conflicts), err)
+	}
+	total, err := s.CountRelations(ListRelationsOptions{Project: "alpha", ExcludeNotConflict: true})
+	if err != nil || total != 1 {
+		t.Fatalf("conflict CountRelations = %d, %v; want 1", total, err)
+	}
+	stats, err := s.GetRelationStats("alpha")
+	if err != nil {
+		t.Fatalf("GetRelationStats: %v", err)
+	}
+	if _, ok := stats.ByRelation[RelationNotConflict]; ok {
+		t.Fatalf("conflict stats included %q: %v", RelationNotConflict, stats.ByRelation)
+	}
+}
+
 // TestGetRelationStats_MixedStatuses verifies GetRelationStats aggregates correctly.
 func TestGetRelationStats_MixedStatuses(t *testing.T) {
 	s, alphaSync1, alphaSync2, _ := setupTwoProjectStore(t)

@@ -123,10 +123,11 @@ func cmdConflictsList(cfg store.Config) {
 	proj := resolveConflictsProject(s, projectFlag, allProjects)
 
 	opts := store.ListRelationsOptions{
-		Project:   proj,
-		Status:    statusFlag,
-		SinceTime: sinceTime,
-		Limit:     limit,
+		Project:            proj,
+		Status:             statusFlag,
+		SinceTime:          sinceTime,
+		Limit:              limit,
+		ExcludeNotConflict: true,
 	}
 
 	items, err := s.ListRelations(opts)

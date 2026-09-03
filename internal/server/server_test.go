@@ -2003,6 +2003,34 @@ func TestHandleListConflicts_ProjectFilter(t *testing.T) {
 	}
 }
 
+func TestHandleListConflicts_ExcludesNotConflict(t *testing.T) {
+	st, _ := conflictsTestStore(t)
+	srv := New(st, 0)
+	srcSync, tgtSync := seedConflictsSession(t, st, "alpha")
+	rel, err := st.SaveRelation(store.SaveRelationParams{SyncID: "rel-alpha-not-conflict", SourceID: srcSync, TargetID: tgtSync})
+	if err != nil {
+		t.Fatalf("SaveRelation: %v", err)
+	}
+	if _, err := st.JudgeRelation(store.JudgeRelationParams{JudgmentID: rel.SyncID, Relation: store.RelationNotConflict}); err != nil {
+		t.Fatalf("JudgeRelation: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/conflicts?project=alpha", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Total     int   `json:"total"`
+		Relations []any `json:"relations"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Total != 0 || len(response.Relations) != 0 {
+		t.Fatalf("conflicts response included not_conflict: %+v", response)
+	}
+}
+
 func TestHandleListConflicts_LimitClampsTo500(t *testing.T) {
 	st, _ := conflictsTestStore(t)
 	srv := New(st, 0)

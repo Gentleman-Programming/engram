@@ -142,9 +142,9 @@ func TestJudgeBySemantic_UpsertIdempotency(t *testing.T) {
 
 // ─── C.2c — TestJudgeBySemantic_NotConflictIsNoOp ────────────────────────────
 
-// TestJudgeBySemantic_NotConflictIsNoOp verifies that passing Relation="not_conflict"
-// inserts no row and returns an empty sync_id without error.
-func TestJudgeBySemantic_NotConflictIsNoOp(t *testing.T) {
+// TestJudgeBySemantic_NotConflictPersists verifies that not_conflict retains a
+// judged relation so future candidate scans suppress the pair.
+func TestJudgeBySemantic_NotConflictPersists(t *testing.T) {
 	s := setupRelationsStore(t)
 
 	_, syncA := addTestObs(t, s, "Unrelated auth decision", "decision", "testproject", "project")
@@ -161,20 +161,16 @@ func TestJudgeBySemantic_NotConflictIsNoOp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("JudgeBySemantic(not_conflict): unexpected error: %v", err)
 	}
-	if syncID != "" {
-		t.Errorf("JudgeBySemantic(not_conflict): expected empty sync_id; got %q", syncID)
+	if syncID == "" {
+		t.Fatal("JudgeBySemantic(not_conflict): expected a persisted sync_id")
 	}
 
-	// No row must exist for this pair.
-	var count int
-	if err := s.db.QueryRow(
-		`SELECT count(*) FROM memory_relations WHERE source_id = ? OR target_id = ?`,
-		syncA, syncA,
-	).Scan(&count); err != nil {
-		t.Fatalf("count query: %v", err)
+	relation, err := s.GetRelation(syncID)
+	if err != nil {
+		t.Fatalf("GetRelation: %v", err)
 	}
-	if count != 0 {
-		t.Errorf("expected 0 rows for not_conflict pair; got %d", count)
+	if relation.Relation != RelationNotConflict || relation.JudgmentStatus != JudgmentStatusJudged {
+		t.Errorf("persisted relation = %+v, want judged not_conflict", relation)
 	}
 }
 

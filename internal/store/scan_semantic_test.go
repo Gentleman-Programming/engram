@@ -262,9 +262,9 @@ func TestScanProject_Semantic_DryRunDoesNotPersist(t *testing.T) {
 
 // ─── C.5b — TestScanProject_Semantic_NotConflictSkipped ──────────────────────
 
-// TestScanProject_Semantic_NotConflictSkipped verifies that verdicts of
-// "not_conflict" are counted in SemanticSkipped and do NOT produce relation rows.
-func TestScanProject_Semantic_NotConflictSkipped(t *testing.T) {
+// TestScanProject_Semantic_NotConflictDryRunIsSkipped verifies that dry-run
+// not_conflict verdicts are counted in SemanticSkipped without relation rows.
+func TestScanProject_Semantic_NotConflictDryRunIsSkipped(t *testing.T) {
 	s := newTestStore(t)
 	seedSimilarPair(t, s, "sem-skip-project")
 
@@ -279,7 +279,7 @@ func TestScanProject_Semantic_NotConflictSkipped(t *testing.T) {
 
 	result, err := s.ScanProject(ScanOptions{
 		Project:        "sem-skip-project",
-		Apply:          true,
+		Apply:          false,
 		Semantic:       true,
 		Concurrency:    1,
 		TimeoutPerCall: 5 * time.Second,
@@ -304,6 +304,47 @@ func TestScanProject_Semantic_NotConflictSkipped(t *testing.T) {
 	).Scan(&count)
 	if count != 0 {
 		t.Errorf("expected no 'engram' relation rows for not_conflict; got %d", count)
+	}
+}
+
+func TestScanProject_Semantic_NotConflictPersistsAndSuppressesRepeat(t *testing.T) {
+	s := newTestStore(t)
+	_, syncA, _, syncB := seedSimilarPair(t, s, "sem-persist-project")
+	if err := s.EnrollProject("sem-persist-project"); err != nil {
+		t.Fatalf("EnrollProject: %v", err)
+	}
+
+	runner := &verdictRunner{verdict: SemanticVerdict{Relation: RelationNotConflict, Confidence: 0.99}}
+	opts := ScanOptions{
+		Project: "sem-persist-project", Apply: true, Semantic: true, Concurrency: 1,
+		TimeoutPerCall: 5 * time.Second, MaxSemantic: 10, Runner: runner, BuildPrompt: identityPromptBuilder,
+	}
+	result, err := s.ScanProject(opts)
+	if err != nil {
+		t.Fatalf("first ScanProject: %v", err)
+	}
+	if result.SemanticJudged != 1 || result.SemanticSkipped != 0 {
+		t.Fatalf("first semantic counters = judged:%d skipped:%d, want judged:1 skipped:0", result.SemanticJudged, result.SemanticSkipped)
+	}
+	var persisted, mutations int
+	if err := s.db.QueryRow(`SELECT count(*) FROM memory_relations WHERE relation = ? AND ((source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?))`, RelationNotConflict, syncA, syncB, syncB, syncA).Scan(&persisted); err != nil {
+		t.Fatalf("count persisted relation: %v", err)
+	}
+	if err := s.db.QueryRow(`SELECT count(*) FROM sync_mutations WHERE entity = ?`, SyncEntityRelation).Scan(&mutations); err != nil {
+		t.Fatalf("count relation mutations: %v", err)
+	}
+	if persisted != 1 || mutations == 0 {
+		t.Fatalf("persisted=%d mutations=%d, want one persisted relation and a sync mutation", persisted, mutations)
+	}
+
+	repeatRunner := &verdictRunner{verdict: SemanticVerdict{Relation: RelationNotConflict, Confidence: 0.99}}
+	opts.Runner = repeatRunner
+	repeat, err := s.ScanProject(opts)
+	if err != nil {
+		t.Fatalf("repeat ScanProject: %v", err)
+	}
+	if repeat.SemanticJudged != 0 || repeatRunner.calls != 0 {
+		t.Fatalf("repeat scan re-evaluated persisted pair: judged=%d calls=%d", repeat.SemanticJudged, repeatRunner.calls)
 	}
 }
 
@@ -490,6 +531,28 @@ func TestScanProject_Semantic_MaxSemanticCap(t *testing.T) {
 	if total > 2 {
 		t.Errorf("MaxSemantic=2: expected total semantic calls <= 2; got %d (judged=%d, skipped=%d, errors=%d)",
 			total, result.SemanticJudged, result.SemanticSkipped, result.SemanticErrors)
+	}
+	if runner.calls > 2 {
+		t.Errorf("MaxSemantic=2: runner calls = %d, want <= 2", runner.calls)
+	}
+}
+
+func TestScanProject_Semantic_MaxSemanticCapIgnoresDuplicateTail(t *testing.T) {
+	s := newTestStore(t)
+	seedSimilarPair(t, s, "cap-duplicate-tail-project")
+	runner := &verdictRunner{verdict: SemanticVerdict{Relation: RelationCompatible, Confidence: 0.8}}
+	result, err := s.ScanProject(ScanOptions{
+		Project: "cap-duplicate-tail-project", Apply: true, Semantic: true, Concurrency: 1,
+		TimeoutPerCall: 5 * time.Second, MaxSemantic: 1, Runner: runner, BuildPrompt: identityPromptBuilder,
+	})
+	if err != nil {
+		t.Fatalf("ScanProject: %v", err)
+	}
+	if result.Capped {
+		t.Fatal("duplicate-only semantic remainder must not cap the scan")
+	}
+	if runner.calls != 1 || result.SemanticJudged != 1 {
+		t.Fatalf("runner calls=%d judged=%d, want 1", runner.calls, result.SemanticJudged)
 	}
 }
 
