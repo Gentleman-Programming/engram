@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"math"
 	"testing"
 )
 
@@ -139,82 +140,11 @@ func TestJudgeBySemantic_UpsertIdempotency(t *testing.T) {
 	}
 }
 
-// ─── C.2b2 — TestJudgeBySemantic_UpsertRewritesDirection ───────────────────
+// ─── C.2c — TestJudgeBySemantic_NotConflictIsNoOp ────────────────────────────
 
-// TestJudgeBySemantic_UpsertRewritesDirection verifies that when the bidirectional
-// existence check matches a row whose (source_id, target_id) direction is the
-// reverse of the caller's request, the UPDATE overwrites source_id and target_id
-// to match the caller's intent. Without this, directional verbs like "supersedes"
-// would be persisted with reversed polarity (e.g. "B supersedes A" stored when the
-// caller asked for "A supersedes B" because the existing row was (B, A, pending)).
-func TestJudgeBySemantic_UpsertRewritesDirection(t *testing.T) {
-	s := setupRelationsStore(t)
-
-	_, syncA := addTestObs(t, s, "JWT auth approach v1 decision", "decision", "testproject", "project")
-	_, syncB := addTestObs(t, s, "JWT auth approach v0 legacy", "decision", "testproject", "project")
-
-	// Seed a pending row in the reversed direction (B -> A) via SaveRelation.
-	// This simulates the case where FindCandidates created the row with the
-	// candidate as source and the original observation as target.
-	revRel, err := s.SaveRelation(SaveRelationParams{
-		SyncID: "rel-reversed-pending", SourceID: syncB, TargetID: syncA,
-	})
-	if err != nil || revRel == nil {
-		t.Fatalf("SaveRelation reversed: %v", err)
-	}
-
-	// Now JudgeBySemantic with A -> B, supersedes. The existence check must
-	// find the (B, A) row via the OR clause and UPDATE it.
-	syncID, err := s.JudgeBySemantic(JudgeBySemanticParams{
-		SourceID:   syncA,
-		TargetID:   syncB,
-		Relation:   "supersedes",
-		Confidence: 0.92,
-		Reasoning:  "v1 supersedes v0",
-		Model:      "test-model",
-	})
-	if err != nil {
-		t.Fatalf("JudgeBySemantic: %v", err)
-	}
-	if syncID != "rel-reversed-pending" {
-		t.Errorf("expected sync_id to match existing row; got %q", syncID)
-	}
-
-	// Verify the row was rewritten with the caller's direction.
-	rel, err := s.GetRelation(syncID)
-	if err != nil {
-		t.Fatalf("GetRelation: %v", err)
-	}
-	if rel.SourceID != syncA {
-		t.Errorf("source_id: want %q (caller's source); got %q", syncA, rel.SourceID)
-	}
-	if rel.TargetID != syncB {
-		t.Errorf("target_id: want %q (caller's target); got %q", syncB, rel.TargetID)
-	}
-	if rel.Relation != "supersedes" {
-		t.Errorf("relation: want %q; got %q", "supersedes", rel.Relation)
-	}
-
-	// Only one row must exist for this pair in either direction.
-	var count int
-	if err := s.db.QueryRow(
-		`SELECT count(*) FROM memory_relations
-		 WHERE (source_id = ? AND target_id = ?)
-		    OR (source_id = ? AND target_id = ?)`,
-		syncA, syncB, syncB, syncA,
-	).Scan(&count); err != nil {
-		t.Fatalf("count query: %v", err)
-	}
-	if count != 1 {
-		t.Errorf("expected 1 row for pair (either direction); got %d", count)
-	}
-}
-
-// ─── C.2c — TestJudgeBySemantic_NotConflictPersists ─────────────────────────
-
-// TestJudgeBySemantic_NotConflictPersists verifies that passing Relation="not_conflict"
-// inserts a row and returns a non-empty sync_id, so the pair is tracked as evaluated.
-func TestJudgeBySemantic_NotConflictPersists(t *testing.T) {
+// TestJudgeBySemantic_NotConflictIsNoOp verifies that passing Relation="not_conflict"
+// inserts no row and returns an empty sync_id without error.
+func TestJudgeBySemantic_NotConflictIsNoOp(t *testing.T) {
 	s := setupRelationsStore(t)
 
 	_, syncA := addTestObs(t, s, "Unrelated auth decision", "decision", "testproject", "project")
@@ -231,20 +161,20 @@ func TestJudgeBySemantic_NotConflictPersists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("JudgeBySemantic(not_conflict): unexpected error: %v", err)
 	}
-	if syncID == "" {
-		t.Errorf("JudgeBySemantic(not_conflict): expected non-empty sync_id; got empty")
+	if syncID != "" {
+		t.Errorf("JudgeBySemantic(not_conflict): expected empty sync_id; got %q", syncID)
 	}
 
-	// A row must exist for this pair with relation = 'not_conflict'.
+	// No row must exist for this pair.
 	var count int
 	if err := s.db.QueryRow(
-		`SELECT count(*) FROM memory_relations WHERE source_id = ? AND target_id = ? AND relation = 'not_conflict'`,
-		syncA, syncB,
+		`SELECT count(*) FROM memory_relations WHERE source_id = ? OR target_id = ?`,
+		syncA, syncA,
 	).Scan(&count); err != nil {
 		t.Fatalf("count query: %v", err)
 	}
-	if count != 1 {
-		t.Errorf("expected 1 not_conflict row for pair; got %d", count)
+	if count != 0 {
+		t.Errorf("expected 0 rows for not_conflict pair; got %d", count)
 	}
 }
 
@@ -328,6 +258,74 @@ func TestJudgeBySemantic_ValidationErrors(t *testing.T) {
 	}
 }
 
+// TestJudgeBySemantic_RejectsNonFiniteConfidence verifies that non-finite
+// confidence values are rejected before relation or sync state can change.
+func TestJudgeBySemantic_RejectsNonFiniteConfidence(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, syncA := addTestObs(t, s, "Some decision", "decision", "testproject", "project")
+	_, syncB := addTestObs(t, s, "Another decision", "decision", "testproject", "project")
+	if err := s.EnrollProject("testproject"); err != nil {
+		t.Fatalf("EnrollProject: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name       string
+		confidence float64
+	}{
+		{name: "NaN", confidence: math.NaN()},
+		{name: "positive infinity", confidence: math.Inf(1)},
+		{name: "negative infinity", confidence: math.Inf(-1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var relationsBefore, mutationsBefore int
+			if err := s.db.QueryRow(`SELECT count(*) FROM memory_relations`).Scan(&relationsBefore); err != nil {
+				t.Fatalf("count relations before judgment: %v", err)
+			}
+			if err := s.db.QueryRow(`SELECT count(*) FROM sync_mutations`).Scan(&mutationsBefore); err != nil {
+				t.Fatalf("count sync mutations before judgment: %v", err)
+			}
+			syncStateBefore, err := s.GetSyncState(DefaultSyncTargetKey)
+			if err != nil {
+				t.Fatalf("GetSyncState before judgment: %v", err)
+			}
+
+			syncID, err := s.JudgeBySemantic(JudgeBySemanticParams{
+				SourceID:   syncA,
+				TargetID:   syncB,
+				Relation:   RelationCompatible,
+				Confidence: tc.confidence,
+			})
+			if err == nil {
+				t.Fatalf("expected confidence validation error; got sync_id=%q", syncID)
+			}
+			if syncID != "" {
+				t.Errorf("expected empty sync_id; got %q", syncID)
+			}
+
+			var relationsAfter, mutationsAfter int
+			if err := s.db.QueryRow(`SELECT count(*) FROM memory_relations`).Scan(&relationsAfter); err != nil {
+				t.Fatalf("count relations after judgment: %v", err)
+			}
+			if relationsAfter != relationsBefore {
+				t.Errorf("relation count = %d, want unchanged %d", relationsAfter, relationsBefore)
+			}
+			if err := s.db.QueryRow(`SELECT count(*) FROM sync_mutations`).Scan(&mutationsAfter); err != nil {
+				t.Fatalf("count sync mutations after judgment: %v", err)
+			}
+			if mutationsAfter != mutationsBefore {
+				t.Errorf("sync mutation count = %d, want unchanged %d", mutationsAfter, mutationsBefore)
+			}
+			syncStateAfter, err := s.GetSyncState(DefaultSyncTargetKey)
+			if err != nil {
+				t.Fatalf("GetSyncState after judgment: %v", err)
+			}
+			if syncStateAfter.LastEnqueuedSeq != syncStateBefore.LastEnqueuedSeq || syncStateAfter.Lifecycle != syncStateBefore.Lifecycle {
+				t.Errorf("sync state changed: before last_enqueued_seq=%d lifecycle=%q; after last_enqueued_seq=%d lifecycle=%q", syncStateBefore.LastEnqueuedSeq, syncStateBefore.Lifecycle, syncStateAfter.LastEnqueuedSeq, syncStateAfter.Lifecycle)
+			}
+		})
+	}
+}
+
 // ─── C.2e — TestJudgeBySemantic_CrossProjectRejected ─────────────────────────
 
 // TestJudgeBySemantic_CrossProjectRejected verifies that observations from
@@ -383,8 +381,8 @@ func TestJudgeBySemantic_CrossProjectRejected(t *testing.T) {
 
 // ─── C.2f — TestJudgeBySemantic_AllValidRelations ────────────────────────────
 
-// TestJudgeBySemantic_AllValidRelations verifies that all 6 relation verbs
-// (including not_conflict) are accepted and persisted by JudgeBySemantic.
+// TestJudgeBySemantic_AllValidRelations verifies that all 5 non-not_conflict
+// relation verbs are accepted by JudgeBySemantic.
 func TestJudgeBySemantic_AllValidRelations(t *testing.T) {
 	validRelations := []string{
 		RelationRelated,
@@ -392,7 +390,6 @@ func TestJudgeBySemantic_AllValidRelations(t *testing.T) {
 		RelationScoped,
 		RelationConflictsWith,
 		RelationSupersedes,
-		RelationNotConflict,
 	}
 
 	for _, rel := range validRelations {

@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Gentleman-Programming/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
 )
 
 func ChunkID(payload []byte) string {
@@ -276,6 +276,34 @@ type mutationRelationPayload struct {
 	Project        string   `json:"project"`
 	CreatedAt      string   `json:"created_at,omitempty"`
 	UpdatedAt      string   `json:"updated_at,omitempty"`
+}
+
+// ValidateRelationPayload reports the first required relation payload field that
+// is absent, not a string, or empty after trimming whitespace.
+func ValidateRelationPayload(payload json.RawMessage) (string, bool) {
+	var fields map[string]any
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		return "sync_id", false
+	}
+	for _, field := range []string{
+		"sync_id",
+		"source_id",
+		"target_id",
+		"relation",
+		"judgment_status",
+		"marked_by_actor",
+		"marked_by_kind",
+	} {
+		value, ok := fields[field]
+		if !ok {
+			return field, false
+		}
+		text, ok := value.(string)
+		if !ok || strings.TrimSpace(text) == "" {
+			return field, false
+		}
+	}
+	return "", true
 }
 
 func normalizeChunkMutation(raw map[string]any, project string) (map[string]any, error) {

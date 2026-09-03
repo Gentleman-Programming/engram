@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
 	mcppkg "github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -86,9 +86,9 @@ func TestHandleCompare_HappyPath(t *testing.T) {
 	}
 }
 
-// TestHandleCompare_NotConflict_Persists — not_conflict inserts a row and returns non-empty sync_id.
-// REQ-011 | Design §9 (not_conflict is persisted to track evaluated pairs)
-func TestHandleCompare_NotConflict_Persists(t *testing.T) {
+// TestHandleCompare_NotConflict_NoRow — not_conflict returns success without inserting a row.
+// REQ-011 | Design §9 (not_conflict is still persisted but JudgeBySemantic handles it as no-op)
+func TestHandleCompare_NotConflict_NoRow(t *testing.T) {
 	s := newMCPTestStore(t)
 	idA, idB := seedCompareFixture(t, s)
 
@@ -115,17 +115,10 @@ func TestHandleCompare_NotConflict_Persists(t *testing.T) {
 		t.Fatalf("response not valid JSON: %v", err)
 	}
 
-	// not_conflict should now persist — sync_id must be non-empty
+	// not_conflict is a no-op — sync_id should be empty string
 	syncID, _ := envelope["sync_id"].(string)
-	if syncID == "" {
-		t.Fatalf("expected non-empty sync_id for not_conflict, got empty")
-	}
-	rel, err := s.GetRelation(syncID)
-	if err != nil {
-		t.Fatalf("expected persisted relation row for sync_id=%q: %v", syncID, err)
-	}
-	if rel.Relation != store.RelationNotConflict {
-		t.Fatalf("expected relation=%q, got %q", store.RelationNotConflict, rel.Relation)
+	if syncID != "" {
+		t.Fatalf("expected empty sync_id for not_conflict, got %q", syncID)
 	}
 }
 

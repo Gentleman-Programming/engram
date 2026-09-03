@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"log"
 	"strings"
@@ -19,6 +20,21 @@ func setupRelationsStore(t *testing.T) *Store {
 		t.Fatalf("CreateSession: %v", err)
 	}
 	return s
+}
+
+func TestGetRelationsForObservationsContext_AlreadyCanceled(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, syncID := addTestObs(t, s, "Contextual relation", "decision", "testproject", "project")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	relations, err := s.GetRelationsForObservationsContext(ctx, []string{syncID})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context cancellation, got relations=%v err=%v", relations, err)
+	}
+	if relations != nil {
+		t.Fatalf("expected no relations from canceled enrichment, got %v", relations)
+	}
 }
 
 // addTestObs inserts a single observation and returns its (id, syncID).
@@ -94,42 +110,22 @@ func TestFindCandidates_HappyPath(t *testing.T) {
 	}
 }
 
-// TestFindCandidates_SkipsExistingRelation verifies that FindCandidates does
-// NOT re-surface a pair that already has a relation row in memory_relations.
-// This is the core fix for issue #490: without this check, every save re-inserts
-// a fresh pending row for the same pair, causing the agent to re-evaluate it.
-func TestFindCandidates_SkipsExistingRelation(t *testing.T) {
+func TestFindCandidates_EscapesInteriorQuotes(t *testing.T) {
 	s := setupRelationsStore(t)
+	_, _ = addTestObs(t, s, `hello"world candidate`, "decision", "testproject", "project")
+	savedID, _ := addTestObs(t, s, `hello"world source`, "decision", "testproject", "project")
 
-	// Seed a similar observation first.
-	_, _ = addTestObs(t, s, "We use sessions for auth token storage", "decision", "testproject", "project")
-
-	// Save second (target) observation with a similar title.
-	savedID, _ := addTestObs(t, s, "Switched from sessions to JWT for auth", "decision", "testproject", "project")
-
-	opts := CandidateOptions{
+	candidates, err := s.FindCandidates(savedID, CandidateOptions{
 		Project:   "testproject",
 		Scope:     "project",
 		Limit:     3,
-		BM25Floor: ptrFloat64(-2.0),
-	}
-
-	// First call: should surface the pair and insert a pending relation row.
-	firstCandidates, err := s.FindCandidates(savedID, opts)
+		BM25Floor: ptrFloat64(-10.0),
+	})
 	if err != nil {
-		t.Fatalf("FindCandidates (first call): %v", err)
+		t.Fatalf("FindCandidates: %v", err)
 	}
-	if len(firstCandidates) == 0 {
-		t.Fatal("first call: expected at least 1 candidate; got 0")
-	}
-
-	// Second call: same pair should NOT be re-surfaced — a relation row now exists.
-	secondCandidates, err := s.FindCandidates(savedID, opts)
-	if err != nil {
-		t.Fatalf("FindCandidates (second call): %v", err)
-	}
-	if len(secondCandidates) != 0 {
-		t.Errorf("expected 0 candidates on second call (pair already has relation row); got %d", len(secondCandidates))
+	if len(candidates) != 1 {
+		t.Fatalf("expected 1 candidate, got %d", len(candidates))
 	}
 }
 
@@ -422,12 +418,12 @@ func TestJudgeRelation_HappyPath(t *testing.T) {
 
 	confidence := 0.9
 	judged, err := s.JudgeRelation(JudgeRelationParams{
-		JudgmentID:     relSyncID,
-		Relation:       "not_conflict",
-		Confidence:     &confidence,
-		MarkedByActor:  "agent:claude-sonnet-4-6",
-		MarkedByKind:   "agent",
-		MarkedByModel:  "claude-sonnet-4-6",
+		JudgmentID:    relSyncID,
+		Relation:      "not_conflict",
+		Confidence:    &confidence,
+		MarkedByActor: "agent:claude-sonnet-4-6",
+		MarkedByKind:  "agent",
+		MarkedByModel: "claude-sonnet-4-6",
 	})
 	if err != nil {
 		t.Fatalf("JudgeRelation: %v", err)
@@ -634,14 +630,14 @@ func TestProvenance_FullRowPersisted(t *testing.T) {
 	evidence := `{"basis":"title overlap"}`
 	reason := "titles are nearly identical"
 	judged, err := s.JudgeRelation(JudgeRelationParams{
-		JudgmentID:     relSyncID,
-		Relation:       "compatible",
-		Confidence:     &confidence,
-		Evidence:       &evidence,
-		Reason:         &reason,
-		MarkedByActor:  "agent:claude-sonnet-4-6",
-		MarkedByKind:   "agent",
-		MarkedByModel:  "claude-sonnet-4-6",
+		JudgmentID:    relSyncID,
+		Relation:      "compatible",
+		Confidence:    &confidence,
+		Evidence:      &evidence,
+		Reason:        &reason,
+		MarkedByActor: "agent:claude-sonnet-4-6",
+		MarkedByKind:  "agent",
+		MarkedByModel: "claude-sonnet-4-6",
 	})
 	if err != nil {
 		t.Fatalf("JudgeRelation: %v", err)
@@ -1139,9 +1135,9 @@ func TestJudgeRelation_RejectsCrossProject(t *testing.T) {
 	}
 }
 
-// C.1e — When the source observation is missing, JudgeRelation must enqueue a
-// mutation with project='' (empty string, not an error).
-func TestJudgeRelation_MissingSource_EnqueuesEmptyProject(t *testing.T) {
+// C.1e — When the source observation is missing, JudgeRelation preserves the
+// local judgment but must not enqueue a cloud mutation without a project.
+func TestJudgeRelation_MissingSource_KeepsJudgmentLocalOnly(t *testing.T) {
 	s := setupEnrolledStore(t)
 
 	// Use a non-existent source sync_id and a real target.
@@ -1171,13 +1167,20 @@ func TestJudgeRelation_MissingSource_EnqueuesEmptyProject(t *testing.T) {
 	}
 
 	after := countRelationMutations(t, s, SyncEntityRelation, "")
-	if after <= before {
-		t.Errorf("expected mutation with project='' when source is missing; before=%d after=%d", before, after)
+	if after != before {
+		t.Errorf("source-missing relation must not enqueue an empty-project mutation; before=%d after=%d", before, after)
+	}
+	rel, err := s.GetRelation(relSyncID)
+	if err != nil {
+		t.Fatalf("GetRelation: %v", err)
+	}
+	if rel.JudgmentStatus != JudgmentStatusJudged {
+		t.Errorf("local relation judgment was not preserved: got %q", rel.JudgmentStatus)
 	}
 }
 
-// REQ-011 verify-followup: JudgeRelation with missing source MUST emit a
-// WARNING-level log mentioning the relation sync_id and the empty project.
+// REQ-011 verify-followup: JudgeRelation with missing source MUST emit an
+// actionable warning that the local judgment was not replicated.
 func TestJudgeRelation_MissingSource_EmitsWarningLog(t *testing.T) {
 	s := setupEnrolledStore(t)
 
@@ -1216,8 +1219,8 @@ func TestJudgeRelation_MissingSource_EmitsWarningLog(t *testing.T) {
 	if !strings.Contains(logged, relSyncID) {
 		t.Errorf("expected relation sync_id %q in log output; got: %q", relSyncID, logged)
 	}
-	if !strings.Contains(logged, "project=''") {
-		t.Errorf("expected \"project=''\" hint in log output; got: %q", logged)
+	if !strings.Contains(logged, "local-only") || !strings.Contains(logged, "no cloud mutation was enqueued") {
+		t.Errorf("expected actionable local-only replication warning; got: %q", logged)
 	}
 }
 
@@ -1422,6 +1425,34 @@ func TestGetRelationStats_EmptyProject(t *testing.T) {
 	}
 }
 
+func TestGetRelationStats_ScopesDeferredCountsByProject(t *testing.T) {
+	s := newTestStore(t)
+	for _, row := range []struct {
+		syncID  string
+		project string
+		status  string
+	}{
+		{syncID: "deferred-alpha", project: "alpha", status: "deferred"},
+		{syncID: "dead-beta", project: "beta", status: "dead"},
+	} {
+		if _, err := s.db.Exec(`
+			INSERT INTO sync_apply_deferred
+				(sync_id, entity, payload, target_key, project, scope_class, apply_status, first_seen_at)
+			VALUES (?, 'relation', '{}', 'cloud', ?, 'scoped', ?, datetime('now'))
+		`, row.syncID, row.project, row.status); err != nil {
+			t.Fatalf("seed %s deferred row: %v", row.project, err)
+		}
+	}
+
+	stats, err := s.GetRelationStats("alpha")
+	if err != nil {
+		t.Fatalf("GetRelationStats alpha: %v", err)
+	}
+	if stats.DeferredCount != 1 || stats.DeadCount != 0 {
+		t.Fatalf("alpha deferred stats = deferred=%d dead=%d, want 1/0", stats.DeferredCount, stats.DeadCount)
+	}
+}
+
 // ─── C.3 [RED] — ScanProject ─────────────────────────────────────────────────
 
 // setupScanStore creates a store with two similar observations in project "scan-proj"
@@ -1470,6 +1501,79 @@ func TestScanProject_DryRunNoInsert(t *testing.T) {
 	}
 	if result.Inspected < 1 {
 		t.Errorf("expected Inspected>=1; got %d", result.Inspected)
+	}
+}
+
+func TestScanAllProjectsIncludesEveryProjectWithoutCrossProjectCandidates(t *testing.T) {
+	s := newTestStore(t)
+	for _, project := range []string{"alpha", "beta", ""} {
+		sessionID := "scan-global-" + project
+		seedProject := project
+		if seedProject == "" {
+			sessionID = "scan-global-blank"
+			seedProject = "legacy"
+		}
+		if err := s.CreateSession(sessionID, seedProject, "/tmp/"+sessionID); err != nil {
+			t.Fatalf("CreateSession %q: %v", sessionID, err)
+		}
+		for _, title := range []string{"shared global conflict scan primary", "shared global conflict scan secondary"} {
+			addTestObsSession(t, s, sessionID, title, "decision", seedProject, "project")
+		}
+		if project == "" {
+			if _, err := s.db.Exec(`UPDATE observations SET project = '' WHERE session_id = ?`, sessionID); err != nil {
+				t.Fatalf("clear observation project: %v", err)
+			}
+			if _, err := s.db.Exec(`UPDATE sessions SET project = '' WHERE id = ?`, sessionID); err != nil {
+				t.Fatalf("clear session project: %v", err)
+			}
+		}
+	}
+
+	for _, project := range []string{"alpha", "beta", ""} {
+		result, err := s.ScanProject(ScanOptions{Project: project})
+		if err != nil {
+			t.Fatalf("ScanProject %q: %v", project, err)
+		}
+		if result.Inspected != 2 {
+			t.Fatalf("ScanProject %q inspected %d observations, want 2", project, result.Inspected)
+		}
+	}
+
+	result, err := s.ScanAllProjects(ScanOptions{Apply: true})
+	if err != nil {
+		t.Fatalf("ScanAllProjects: %v", err)
+	}
+	if result.Inspected != 6 || result.RelationsInserted != 3 {
+		t.Fatalf("ScanAllProjects result = %#v, want 6 inspected and 3 relations", result)
+	}
+
+	var crossProjectRelations int
+	if err := s.db.QueryRow(`
+		SELECT COUNT(*)
+		FROM memory_relations r
+		JOIN observations src ON src.sync_id = r.source_id
+		JOIN observations tgt ON tgt.sync_id = r.target_id
+		WHERE ifnull(src.project, '') != ifnull(tgt.project, '')
+	`).Scan(&crossProjectRelations); err != nil {
+		t.Fatalf("count cross-project relations: %v", err)
+	}
+	if crossProjectRelations != 0 {
+		t.Fatalf("ScanAllProjects created %d cross-project relations", crossProjectRelations)
+	}
+	for _, project := range []string{"alpha", "beta", ""} {
+		var relations int
+		if err := s.db.QueryRow(`
+			SELECT COUNT(*)
+			FROM memory_relations r
+			JOIN observations src ON src.sync_id = r.source_id
+			JOIN observations tgt ON tgt.sync_id = r.target_id
+			WHERE ifnull(src.project, '') = ? AND ifnull(tgt.project, '') = ?
+		`, project, project).Scan(&relations); err != nil {
+			t.Fatalf("count relations for project %q: %v", project, err)
+		}
+		if relations != 1 {
+			t.Fatalf("relations for project %q = %d, want 1", project, relations)
+		}
 	}
 }
 

@@ -17,8 +17,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gentleman-Programming/engram/internal/store"
-	versioncheck "github.com/Gentleman-Programming/engram/internal/version"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	versioncheck "github.com/Gentleman-Programming/engram/v2/internal/version"
 	_ "modernc.org/sqlite"
 )
 
@@ -178,17 +178,14 @@ func TestCmdConflictsList_HappyPath(t *testing.T) {
 	}
 }
 
-// TestCmdConflictsList_EmptyProject verifies that when there are no relations for
-// a project, the command exits 0 and indicates zero results.
-func TestCmdConflictsList_EmptyProject(t *testing.T) {
+// TestCmdConflictsList_UnknownProject verifies explicit selectors are validated.
+func TestCmdConflictsList_UnknownProject(t *testing.T) {
 	cfg := testConfig(t)
 	withArgs(t, "engram", "conflicts", "list", "--project", "no-such-project")
-	stdout, stderr := captureOutput(t, func() { cmdConflicts(cfg) })
-	if stderr != "" {
-		t.Fatalf("unexpected stderr: %q", stderr)
-	}
-	if !strings.Contains(stdout, "0") && !strings.Contains(strings.ToLower(stdout), "no relations") {
-		t.Errorf("expected zero-results indication; got: %q", stdout)
+	stubExitWithPanic(t)
+	_, stderr, recovered := captureOutputAndRecover(t, func() { cmdConflicts(cfg) })
+	if recovered == nil || !strings.Contains(stderr, "unknown project") {
+		t.Fatalf("unknown explicit project must fail before listing: stderr=%q panic=%v", stderr, recovered)
 	}
 }
 
@@ -206,6 +203,40 @@ func TestCmdConflictsStats_HappyPath(t *testing.T) {
 	if !strings.Contains(strings.ToLower(stdout), "pending") {
 		t.Errorf("expected stats output to mention 'pending'; got: %q", stdout)
 	}
+}
+
+func TestCmdConflictsSelectorsUseCurrentAndExplicitAll(t *testing.T) {
+	cfg := testConfig(t)
+	seedRelation(t, cfg, "alpha")
+	seedRelation(t, cfg, "beta")
+	t.Setenv("ENGRAM_PROJECT", "alpha")
+
+	withArgs(t, "engram", "conflicts", "list")
+	current, stderr := captureOutput(t, func() { cmdConflicts(cfg) })
+	if stderr != "" || !strings.Contains(current, "project: alpha") || strings.Contains(current, "project: beta") {
+		t.Fatalf("current conflicts list must be alpha-only: stdout=%q stderr=%q", current, stderr)
+	}
+	withArgs(t, "engram", "conflicts", "list", "--all")
+	all, stderr := captureOutput(t, func() { cmdConflicts(cfg) })
+	if stderr != "" || !strings.Contains(all, "Total:  2") {
+		t.Fatalf("all conflicts list must include both relations: stdout=%q stderr=%q", all, stderr)
+	}
+
+	withArgs(t, "engram", "conflicts", "stats", "--all")
+	stats, stderr := captureOutput(t, func() { cmdConflicts(cfg) })
+	if stderr != "" {
+		t.Fatalf("all conflicts stats must be global: stdout=%q stderr=%q", stats, stderr)
+	}
+	for _, line := range strings.Split(stats, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == "pending:" {
+			if fields[1] != "2" {
+				t.Fatalf("global pending conflicts = %s, want 2: stdout=%q", fields[1], stats)
+			}
+			return
+		}
+	}
+	t.Fatalf("global conflicts stats did not report a pending count: stdout=%q", stats)
 }
 
 // TestCmdConflictsScan_DryRun verifies `engram conflicts scan --project X` (dry-run
@@ -227,6 +258,64 @@ func TestCmdConflictsScan_DryRun(t *testing.T) {
 	// dry_run flag should be shown
 	if !strings.Contains(strings.ToLower(stdout), "dry") {
 		t.Errorf("expected dry-run indicator in output; got: %q", stdout)
+	}
+}
+
+func TestCmdConflictsScanAllProjectsUsesGlobalScan(t *testing.T) {
+	cfg := testConfig(t)
+	for _, project := range []string{"alpha", "beta", "legacy"} {
+		sessionID := "scan-cli-" + project
+		for _, title := range []string{"shared CLI conflict scan primary", "shared CLI conflict scan secondary"} {
+			mustSeedObservation(t, cfg, sessionID, project, "decision", title, "shared CLI conflict scan", "project")
+		}
+	}
+	db := openTestDB(t, cfg)
+	if _, err := db.Exec(`UPDATE observations SET project = '' WHERE session_id = 'scan-cli-legacy'`); err != nil {
+		t.Fatalf("clear blank observation project: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE sessions SET project = '' WHERE id = 'scan-cli-legacy'`); err != nil {
+		t.Fatalf("clear blank session project: %v", err)
+	}
+
+	withArgs(t, "engram", "conflicts", "scan", "--project", "alpha")
+	alpha, stderr := captureOutput(t, func() { cmdConflicts(cfg) })
+	if stderr != "" || !strings.Contains(alpha, "inspected:        2") {
+		t.Fatalf("explicit project scan must inspect alpha only: stdout=%q stderr=%q", alpha, stderr)
+	}
+
+	withArgs(t, "engram", "conflicts", "scan", "--all", "--apply", "--max-insert", "10")
+	all, stderr := captureOutput(t, func() { cmdConflicts(cfg) })
+	if stderr != "" || !strings.Contains(all, "inspected:        6") || !strings.Contains(all, "inserted:         3") {
+		t.Fatalf("all-project scan must inspect every project scope: stdout=%q stderr=%q", all, stderr)
+	}
+}
+
+func TestCmdConflictsScan_PageContract(t *testing.T) {
+	cfg := testConfig(t)
+	for i := 0; i < 2; i++ {
+		mustSeedObservation(t, cfg, "scan-page", "scan-page", "decision", fmt.Sprintf("scan page %d", i), "scan page", "project")
+	}
+
+	withArgs(t, "engram", "conflicts", "scan", "--project", "scan-page", "--limit", "1")
+	stdout, stderr := captureOutput(t, func() { cmdConflicts(cfg) })
+	if stderr != "" {
+		t.Fatalf("stderr = %q", stderr)
+	}
+	if !strings.Contains(stdout, "inspected:        1") || !strings.Contains(stdout, "ranked_queries:   1") || !strings.Contains(stdout, "next_cursor:") {
+		t.Fatalf("page output = %q", stdout)
+	}
+
+	stubExitWithPanic(t)
+	withArgs(t, "engram", "conflicts", "scan", "--project", "scan-page", "--limit", "0")
+	_, stderr, recovered := captureOutputAndRecover(t, func() { cmdConflicts(cfg) })
+	if recovered == nil || !strings.Contains(stderr, "--limit must be between") {
+		t.Fatalf("invalid limit stderr = %q, panic = %v", stderr, recovered)
+	}
+
+	withArgs(t, "engram", "conflicts", "scan", "--project", "scan-page", "--limit", "1", "--apply", "--max-insert", "1")
+	stdout, stderr = captureOutput(t, func() { cmdConflictsScan(cfg) })
+	if stderr != "" || !strings.Contains(stdout, "next_cursor:") || strings.Contains(stdout, "no continuation") {
+		t.Fatalf("completed page output = %q stderr = %q", stdout, stderr)
 	}
 }
 
@@ -347,6 +436,42 @@ func TestCmdConflictsDeferred_InspectHappyPath(t *testing.T) {
 	}
 }
 
+// TestCmdConflictsDeferred_InspectShowsMutationIdentity verifies that a row keyed
+// on the discarded mutation's own material still names the mutation it holds:
+// the derived key is opaque, so the audit surface must print the entity_key and
+// op the mutation carried.
+func TestCmdConflictsDeferred_InspectShowsMutationIdentity(t *testing.T) {
+	cfg := testConfig(t)
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	s.Close()
+
+	db := openTestDB(t, cfg)
+	const derivedKey = "relation-dead-0123456789abcdef"
+	if _, err := db.Exec(`
+		INSERT INTO sync_apply_deferred
+			(sync_id, entity, payload, entity_key, op, retry_count, apply_status, first_seen_at)
+		VALUES (?, 'relation', ?, 'rel-carried-key', 'upsert', 0, 'dead', datetime('now'))
+	`, derivedKey, `{"sync_id":"rel-carried-key","source_id":"x","target_id":"y"}`); err != nil {
+		t.Fatalf("seed derived-key row: %v", err)
+	}
+
+	withArgs(t, "engram", "conflicts", "deferred", "--inspect", derivedKey)
+	stdout, stderr := captureOutput(t, func() { cmdConflicts(cfg) })
+	if stderr != "" {
+		t.Fatalf("unexpected stderr: %q", stderr)
+	}
+	if !strings.Contains(stdout, "rel-carried-key") {
+		t.Errorf("expected the mutation entity_key in output; got: %q", stdout)
+	}
+	if !strings.Contains(stdout, "op:") {
+		t.Errorf("expected the mutation op in output; got: %q", stdout)
+	}
+}
+
 // TestCmdConflictsShow_NotFound verifies `engram conflicts show <id>` with a
 // non-existent relation_id prints not-found and exits non-zero.
 func TestCmdConflictsShow_NotFound(t *testing.T) {
@@ -422,6 +547,7 @@ func TestCmdMain_ConflictsWired(t *testing.T) {
 // FTS scores are all below floor) but asserts the command never errors.
 func TestG1_ConflictsLifecycle_EmptyThenScanThenList(t *testing.T) {
 	cfg := testConfig(t)
+	mustSeedObservation(t, cfg, "ses-g1-initial", "g1proj", "note", "Initial observation", "Establishes the project without creating a relation.", "project")
 
 	// Step 1 — list with no relations should report zero.
 	withArgs(t, "engram", "conflicts", "list", "--project", "g1proj")
@@ -631,6 +757,7 @@ func TestResolveAgentRunner_InvalidName(t *testing.T) {
 func TestCmdConflictsScan_SemanticFlagNoEnv(t *testing.T) {
 	cfg := testConfig(t)
 	t.Setenv("ENGRAM_AGENT_CLI", "")
+	mustSeedObservation(t, cfg, "semantic-no-env", "noproj", "note", "Known project", "content", "project")
 
 	// factory must NOT be called when env is empty.
 	factoryCalled := false
