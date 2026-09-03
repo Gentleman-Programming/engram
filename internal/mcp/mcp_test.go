@@ -7379,6 +7379,44 @@ func TestMemCurrentProject_OmitsOrgWhenNotConfigured(t *testing.T) {
 	}
 }
 
+// TestMemCurrentProject_PreservesOrgUnderProcessOverride is a regression test
+// for #776: a process-level override (ENGRAM_PROJECT / mcp --project) only
+// resolves Project/Source/Path and never reads .engram/config.json, so it
+// used to fully replace the cwd-detected DetectionResult and silently drop
+// the org label. The override still wins for project identity; org must
+// survive.
+func TestMemCurrentProject_PreservesOrgUnderProcessOverride(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, ".engram"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".engram", "config.json"), []byte(`{"project_name":"acme-app","org":"acme-corp"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	h := handleCurrentProject(s, MCPConfig{DefaultProject: "Trusted Project"})
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", callResultText(t, res))
+	}
+	body := callResultJSON(t, res)
+	if body["project"] != "trusted project" {
+		t.Fatalf("expected the process override to win project identity, got %v", body["project"])
+	}
+	if body["project_source"] != sourceProcessOverride {
+		t.Fatalf("project_source = %v, want %s", body["project_source"], sourceProcessOverride)
+	}
+	if body["org"] != "acme-corp" {
+		t.Fatalf("expected org=acme-corp to survive the process override, got %v", body["org"])
+	}
+}
+
 // TestMemCurrentProject_AmbiguousNoError: IsError==false, project=="", available_projects non-empty (REQ-313)
 func TestMemCurrentProject_AmbiguousNoError(t *testing.T) {
 	parent := t.TempDir()
