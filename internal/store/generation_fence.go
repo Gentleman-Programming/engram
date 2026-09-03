@@ -48,8 +48,7 @@ func (g *databaseGeneration) check() error {
 		info, err := statFile(path)
 		if err != nil {
 			if os.IsNotExist(err) {
-				if i > 0 {
-					g.files[i], g.observed[i] = nil, false
+				if i > 0 && !g.observed[i] {
 					continue
 				}
 				g.err = ErrDatabaseGenerationChanged

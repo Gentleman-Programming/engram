@@ -16,7 +16,7 @@ Engram works with **any MCP-compatible agent**. Pick your agent below.
 
 | Agent         | One-liner                                                                                    | Manual Config                                      |
 | ------------- | -------------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| Claude Code   | `claude plugin marketplace add Gentleman-Programming/engram && claude plugin install engram` | [Details](#claude-code)                            |
+| Claude Code   | `engram setup claude-code`                                                                    | [Details](#claude-code)                            |
 | Pi            | `engram setup pi`                                                                            | [Details](#pi)                                     |
 | OpenCode      | `engram setup opencode`                                                                      | [Details](#opencode)                               |
 | Gemini CLI    | `engram setup gemini-cli`                                                                    | [Details](#gemini-cli)                             |
@@ -262,14 +262,14 @@ See [Plugins → OpenCode Plugin](PLUGINS.md#opencode-plugin) for details on wha
 
 > **Prerequisite**: Install the `engram` binary first (via [Homebrew](INSTALLATION.md#homebrew-macos--linux), [Windows binary](INSTALLATION.md#windows), [binary download](INSTALLATION.md#download-binary-all-platforms), or [source](INSTALLATION.md#install-from-source-macos--linux)). The plugin needs it for the MCP server and session tracking scripts.
 
-**Option A: Plugin via marketplace (recommended)** — full session management, auto-import, compaction recovery, and Memory Protocol skill:
+**Option A: Plugin via marketplace** — installs session hooks, scripts, compaction recovery, and the Memory Protocol skill:
 
 ```bash
 claude plugin marketplace add Gentleman-Programming/engram
 claude plugin install engram
 ```
 
-That's it. The plugin registers the MCP server, hooks, and Memory Protocol skill automatically.
+Marketplace installation provides plugin assets only; it does not register the MCP server.
 
 > **If the marketplace command fails with a schema error**
 >
@@ -282,13 +282,13 @@ That's it. The plugin registers the MCP server, hooks, and Memory Protocol skill
 >
 > Then re-run the marketplace command. If you cannot update for some reason, **Option C (Bare MCP)** below works on any Claude Code version because it does not go through the marketplace.
 
-**Option B: Plugin via `engram setup`** — same plugin, installed from the embedded binary:
+**Option B: Supported complete setup (required for plugin MCP)** — run after Option A, or run it alone to install or refresh the marketplace plugin and register MCP:
 
 ```bash
 engram setup claude-code
 ```
 
-During setup, Engram also attempts to write durable user-level MCP config to `~/.claude/mcp/engram.json` using the absolute `engram` binary path; if that write is not possible, setup warns and continues. You'll be asked whether to add engram's agent-profile MCP tools to `~/.claude/settings.json` `permissions.allow`. The setup writes entries for both the durable user-level MCP server id (`mcp__engram__...`) and the plugin-scoped server id used by older Claude Code plugin installs, so re-running setup repairs stale or incomplete allowlists without adding startup delay.
+`engram setup claude-code` is the sole MCP registration owner. It writes the durable user-level config at `~/.claude/mcp/engram.json` with the absolute `engram` binary path. If that write is not possible, setup warns and completes the plugin installation; resolve the error and rerun setup before using plugin MCP tools. You'll be asked whether to add engram's agent-profile MCP tools to `~/.claude/settings.json` `permissions.allow`. The setup writes entries for both the durable user-level MCP server id (`mcp__engram__...`) and the plugin-scoped server id used by older Claude Code plugin installs, so re-running setup repairs stale or incomplete allowlists without adding startup delay. Existing marketplace plugin copies receive hooks, scripts, and skills updates through normal Claude Code plugin updates; do not edit the plugin cache manually.
 
 **Option C: Bare MCP** — all 22 tools by default, no session management:
 

@@ -35,7 +35,6 @@
 6. **Access surfaces**: `internal/mcp/mcp.go`, `internal/server/server.go`, `internal/tui/`.
 7. **Sync and cloud**: `internal/sync/sync.go`, `internal/cloud/*`.
 8. **Integrations**: `internal/setup/setup.go`, `plugin/`.
-9. **Historical/active specs**: `openspec/changes/` and `openspec/specs/`.
 
 ### PR review path
 
