@@ -279,8 +279,9 @@ func TestMutationPushAcceptsSparseLegacyPayloads(t *testing.T) {
 				t.Fatalf("decode stored %s payload: %v", tt.name, err)
 			}
 			for _, field := range tt.requiredFields {
-				value, ok := payload[field]
-				if !ok || strings.TrimSpace(fmt.Sprint(value)) == "" {
+				value, exists := payload[field]
+				text, isString := value.(string)
+				if !exists || !isString || strings.TrimSpace(text) == "" {
 					t.Errorf("expected non-empty canonical %s field %q, got %#v", tt.name, field, value)
 				}
 			}
