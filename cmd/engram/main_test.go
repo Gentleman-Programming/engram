@@ -26,8 +26,26 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
+func clearTestEnvVars(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"ENGRAM_PROJECT",
+		"ENGRAM_CLOUD_SERVER",
+		"ENGRAM_CLOUD_TOKEN",
+		"ENGRAM_CLOUD_INSECURE_NO_AUTH",
+		"ENGRAM_CLOUD_ALLOWED_PROJECTS",
+		"ENGRAM_CLOUD_HOST",
+		"ENGRAM_CLOUD_PORT",
+		"ENGRAM_CLOUD_MAX_PUSH_BYTES",
+		"ENGRAM_JWT_SECRET",
+	} {
+		t.Setenv(key, "")
+	}
+}
+
 func testConfig(t *testing.T) store.Config {
 	t.Helper()
+	clearTestEnvVars(t)
 	cfg, err := store.DefaultConfig()
 	if err != nil {
 		t.Fatalf("DefaultConfig: %v", err)

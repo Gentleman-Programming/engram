@@ -114,6 +114,7 @@ func cloudRuntimeServerOptions(cfg cloud.Config, cs *cloudstore.CloudStore, allo
 		cloudserver.WithPrincipalStateStore(cs),
 		cloudserver.WithDashboardAdminToken(cfg.AdminToken),
 		cloudserver.WithMaxPushBodyBytes(cfg.MaxPushBodyBytes),
+		cloudserver.WithDashboardEnableDelete(cfg.DashboardEnableDelete),
 		cloudserver.WithSyncStatusProvider(cloudDashboardStatusProvider{store: cs, projects: allowedProjects}),
 	}
 	if authenticator != nil {
