@@ -108,6 +108,66 @@ func TestSessionActivity_ProjectFreshness(t *testing.T) {
 	}
 }
 
+func TestSessionActivity_ProjectFreshnessNormalizesProjectNames(t *testing.T) {
+	const (
+		canonicalProject = "project-a"
+		explicitSession  = "explicit-session"
+	)
+
+	tests := []struct {
+		name        string
+		record      func(*SessionActivity)
+		wantSession bool
+	}{
+		{
+			name: "session and project save",
+			record: func(a *SessionActivity) {
+				a.RecordSaveForProject(explicitSession, "  project-a\t")
+			},
+			wantSession: true,
+		},
+		{
+			name: "project-only save",
+			record: func(a *SessionActivity) {
+				a.RecordProjectSave("\nproject-a  ")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			now := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+			a := NewSessionActivity(10 * time.Minute)
+			a.now = func() time.Time { return now }
+			defaultSession := defaultSessionID(canonicalProject)
+			for i := 0; i < 6; i++ {
+				a.RecordToolCall(defaultSession)
+			}
+			now = now.Add(15 * time.Minute)
+
+			tt.record(a)
+
+			if len(a.projectLastSaveAt) != 1 {
+				t.Fatalf("expected one canonical freshness entry, got %v", a.projectLastSaveAt)
+			}
+			if _, ok := a.projectLastSaveAt[canonicalProject]; !ok {
+				t.Fatalf("expected canonical project key, got %v", a.projectLastSaveAt)
+			}
+			if got := a.NudgeIfNeededForProject(defaultSession, "\tproject-a\n"); got != "" {
+				t.Fatalf("expected normalized project lookup to suppress nudge, got %q", got)
+			}
+
+			score := a.ActivityScore(explicitSession)
+			if tt.wantSession && !strings.Contains(score, "1 save") {
+				t.Fatalf("expected explicit session save to be recorded, got %q", score)
+			}
+			if !tt.wantSession && score != "" {
+				t.Fatalf("expected project-only save not to create session activity, got %q", score)
+			}
+		})
+	}
+}
+
 func TestSessionActivity_EmptyProjectFreshnessDoesNotSuppressNudge(t *testing.T) {
 	now := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
 	a := NewSessionActivity(10 * time.Minute)
