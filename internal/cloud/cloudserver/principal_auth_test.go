@@ -237,6 +237,16 @@ func TestManagedPrincipalProjectGrantsAuthorizeChunkPullAndPush(t *testing.T) {
 	if chunkDenied.Code != http.StatusForbidden {
 		t.Fatalf("expected ungranted chunk pull 403, got %d body=%q", chunkDenied.Code, chunkDenied.Body.String())
 	}
+	chunkDeniedPayload := decodeActionableError(t, chunkDenied)
+	if chunkDeniedPayload.ErrorClass != "policy" {
+		t.Fatalf("expected policy class, got %q", chunkDeniedPayload.ErrorClass)
+	}
+	if chunkDeniedPayload.ErrorCode != "policy_forbidden" {
+		t.Fatalf("expected policy_forbidden error code, got %q", chunkDeniedPayload.ErrorCode)
+	}
+	if chunkDeniedPayload.Error != `forbidden: project "beta" is not allowed` {
+		t.Fatalf("expected denied project in error message, got %q", chunkDeniedPayload.Error)
+	}
 
 	pushGranted := httptest.NewRecorder()
 	pushGrantedBody := strings.NewReader(`{"project":"alpha","created_by":"tester","data":{"sessions":[{"id":"s-1","directory":"/tmp/s-1"}]}}`)

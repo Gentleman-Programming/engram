@@ -921,10 +921,11 @@ func TestMutationPushRejectsMixedProjectBatch(t *testing.T) {
 	// Token authorized only for "proj-a"
 	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
 
-	// Batch contains both "proj-a" (authorized) and "proj-b" (unauthorized)
+	// Batch contains both "proj-a" (authorized) and "PROJ-B" (unauthorized).
+	// The denied project must be reported in its canonical form.
 	entries := []MutationEntry{
 		{Project: "proj-a", Entity: "obs", EntityKey: "k1", Op: "upsert", Payload: json.RawMessage(`{}`)},
-		{Project: "proj-b", Entity: "obs", EntityKey: "k2", Op: "upsert", Payload: json.RawMessage(`{}`)},
+		{Project: "PROJ-B", Entity: "obs", EntityKey: "k2", Op: "upsert", Payload: json.RawMessage(`{}`)},
 	}
 	body := marshalPushRequest(t, entries)
 

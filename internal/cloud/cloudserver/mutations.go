@@ -116,7 +116,7 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 	// guarantees every entry has a non-empty project before this loop is reached.
 	seen := make(map[string]struct{})
 	for _, entry := range req.Entries {
-		project := strings.TrimSpace(entry.Project)
+		project := project.CanonicalizeProjectName(entry.Project)
 		if _, ok := seen[project]; ok {
 			continue
 		}
