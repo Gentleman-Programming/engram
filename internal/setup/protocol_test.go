@@ -86,7 +86,7 @@ func TestWriteProtocolModePreservesOtherSlugs(t *testing.T) {
 }
 
 // TestWriteProtocolModeCorruptedFileReturnsErrorAndPreservesFile guards
-// JD-013(b): a corrupted (unparseable) mode file must not be silently
+// A corrupted (unparseable) mode file must not be silently
 // treated as "start fresh" — that would overwrite whatever previously-valid
 // slug entries the file might still contain with a single-slug file,
 // compounding the data loss. WriteProtocolMode must return an error instead
@@ -111,7 +111,7 @@ func TestWriteProtocolModeCorruptedFileReturnsErrorAndPreservesFile(t *testing.T
 }
 
 // TestWriteProtocolModeAtomicShapeNeverOpensFinalPathForWrite guards
-// JD-013(a): the write path must go through a temp file in the same
+// The write path must go through a temp file in the same
 // directory followed by os.Rename, and must never open the final
 // protocol-mode.json path directly for writing (which would risk a torn
 // read by a concurrent reader).

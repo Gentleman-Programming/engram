@@ -142,6 +142,67 @@ func TestRelationSync_PushPull_CrossMachine(t *testing.T) {
 	}
 }
 
+func TestRelationSync_NotConflictSuppressesCandidatesAfterPull(t *testing.T) {
+	machineA, machineB, syncObsX, syncObsY := setupIntegrationStores(t)
+	var sourceID int64
+	if err := machineA.db.QueryRow(`SELECT id FROM observations WHERE sync_id = ?`, syncObsX).Scan(&sourceID); err != nil {
+		t.Fatalf("A: find source observation: %v", err)
+	}
+	preJudgmentCandidates, err := machineA.FindCandidates(sourceID, CandidateOptions{Project: "proj-int", Scope: "project", SkipInsert: true})
+	if err != nil {
+		t.Fatalf("A: FindCandidates before judgment: %v", err)
+	}
+	foundCandidate := false
+	for _, candidate := range preJudgmentCandidates {
+		if candidate.SyncID == syncObsY {
+			foundCandidate = true
+			break
+		}
+	}
+	if !foundCandidate {
+		t.Fatalf("A: expected %q as a candidate before judgment, got %+v", syncObsY, preJudgmentCandidates)
+	}
+
+	relationID, err := machineA.JudgeBySemantic(JudgeBySemanticParams{
+		SourceID: syncObsX, TargetID: syncObsY, Relation: RelationNotConflict, Confidence: 0.99,
+	})
+	if err != nil {
+		t.Fatalf("A: JudgeBySemantic: %v", err)
+	}
+	if relationID == "" {
+		t.Fatal("A: not_conflict must be persisted")
+	}
+	if countRelationMutations(t, machineA, SyncEntityRelation, "proj-int") == 0 {
+		t.Fatal("A: not_conflict must enqueue a relation mutation")
+	}
+	if transferMutations(t, machineA, machineB) == 0 {
+		t.Fatal("expected mutations to transfer")
+	}
+	relation, err := machineB.GetRelation(relationID)
+	if err != nil {
+		t.Fatalf("B: retained relation missing after pull: %v", err)
+	}
+	if relation.Relation != RelationNotConflict {
+		t.Errorf("B: relation = %q, want %q", relation.Relation, RelationNotConflict)
+	}
+	if relation.JudgmentStatus != JudgmentStatusJudged {
+		t.Errorf("B: judgment status = %q, want %q", relation.JudgmentStatus, JudgmentStatusJudged)
+	}
+	var pulledSourceID int64
+	if err := machineB.db.QueryRow(`SELECT id FROM observations WHERE sync_id = ?`, syncObsX).Scan(&pulledSourceID); err != nil {
+		t.Fatalf("B: find source observation: %v", err)
+	}
+	candidates, err := machineB.FindCandidates(pulledSourceID, CandidateOptions{Project: "proj-int", Scope: "project", SkipInsert: true})
+	if err != nil {
+		t.Fatalf("B: FindCandidates: %v", err)
+	}
+	for _, candidate := range candidates {
+		if candidate.SyncID == syncObsY {
+			t.Fatal("B: retained not_conflict pair was offered as a candidate")
+		}
+	}
+}
+
 // ─── G.2 — FK miss → defer → retry success ────────────────────────────────────
 
 // TestRelationSync_FKMissDeferRetrySuccess (G.2) verifies REQ-002 + REQ-007:
@@ -149,6 +210,8 @@ func TestRelationSync_PushPull_CrossMachine(t *testing.T) {
 // deferred. Then observations arrive. replayDeferred() succeeds.
 func TestRelationSync_FKMissDeferRetrySuccess(t *testing.T) {
 	s := newTestStore(t)
+	actor := "test-actor"
+	kind := "test"
 	if err := s.CreateSession("ses-g2-a", "proj-g2", "/tmp/g2-a"); err != nil {
 		t.Fatalf("G.2: CreateSession: %v", err)
 	}
@@ -166,6 +229,8 @@ func TestRelationSync_FKMissDeferRetrySuccess(t *testing.T) {
 		TargetID:       missingTargetSyncID,
 		Relation:       RelationSupersedes,
 		JudgmentStatus: JudgmentStatusJudged,
+		MarkedByActor:  &actor,
+		MarkedByKind:   &kind,
 		Project:        "proj-g2",
 		CreatedAt:      "2026-04-26T12:00:00Z",
 		UpdatedAt:      "2026-04-26T12:00:00Z",
@@ -212,6 +277,8 @@ func TestRelationSync_FKMissDeferRetrySuccess(t *testing.T) {
 		TargetID:       arrivedTargetSyncID,
 		Relation:       RelationSupersedes,
 		JudgmentStatus: JudgmentStatusJudged,
+		MarkedByActor:  &actor,
+		MarkedByKind:   &kind,
 		Project:        "proj-g2",
 		CreatedAt:      "2026-04-26T12:00:00Z",
 		UpdatedAt:      "2026-04-26T12:00:00Z",
@@ -249,6 +316,8 @@ func TestRelationSync_FKMissDeferRetrySuccess(t *testing.T) {
 // After 5 retries, apply_status='dead' and the row is no longer attempted.
 func TestRelationSync_RetryCapDead(t *testing.T) {
 	s := newTestStore(t)
+	actor := "test-actor"
+	kind := "test"
 	if err := s.CreateSession("ses-g3", "proj-g3", "/tmp/g3"); err != nil {
 		t.Fatalf("G.3: CreateSession: %v", err)
 	}
@@ -262,6 +331,8 @@ func TestRelationSync_RetryCapDead(t *testing.T) {
 		TargetID:       missingTarget,
 		Relation:       RelationCompatible,
 		JudgmentStatus: JudgmentStatusJudged,
+		MarkedByActor:  &actor,
+		MarkedByKind:   &kind,
 		Project:        "proj-g3",
 		CreatedAt:      "2026-04-26T12:00:00Z",
 		UpdatedAt:      "2026-04-26T12:00:00Z",

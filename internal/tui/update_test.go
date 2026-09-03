@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gentleman-Programming/engram/internal/setup"
-	"github.com/Gentleman-Programming/engram/internal/store"
-	"github.com/Gentleman-Programming/engram/internal/version"
+	"github.com/Gentleman-Programming/engram/v2/internal/setup"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	"github.com/Gentleman-Programming/engram/v2/internal/version"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -319,6 +319,110 @@ func TestCloudSettingsMenuNavigation(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("enter on Back should refresh stats")
 	}
+}
+
+func TestCloudSettingsActionsOpenTheirScreens(t *testing.T) {
+	fx := newTestFixture(t)
+	tests := []struct {
+		name   string
+		cursor int
+		want   Screen
+	}{
+		{name: "configure server", cursor: 0, want: ScreenCloudConfig},
+		{name: "view status", cursor: 1, want: ScreenCloudStatus},
+		{name: "enroll projects", cursor: 2, want: ScreenCloudEnrollment},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := New(fx.store, "")
+			m.Screen = ScreenCloudSettings
+			m.Cursor = tt.cursor
+
+			updatedModel, cmd := m.handleCloudSettingsKeys("enter")
+			updated := updatedModel.(Model)
+			if updated.Screen != tt.want {
+				t.Fatalf("screen = %v, want %v", updated.Screen, tt.want)
+			}
+			if cmd == nil {
+				t.Fatal("selected cloud settings action should start its load command")
+			}
+		})
+	}
+}
+
+func TestCloudEnrollmentCursorResetsAndClampsWhenLoading(t *testing.T) {
+	t.Run("entering enrollment resets the cursor", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen = ScreenCloudSettings
+		m.Cursor = 2
+
+		updatedModel, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		updated := updatedModel.(Model)
+		if updated.Screen != ScreenCloudEnrollment || updated.Cursor != 0 {
+			t.Fatalf("entering enrollment screen/cursor = %v/%d, want %v/0", updated.Screen, updated.Cursor, ScreenCloudEnrollment)
+		}
+		if cmd == nil {
+			t.Fatal("entering enrollment should load projects")
+		}
+	})
+
+	for _, tt := range []struct {
+		name       string
+		cursor     int
+		priorItems []cloudEnrollmentItem
+		items      []cloudEnrollmentItem
+		wantCursor int
+	}{
+		{name: "zero items", cursor: 3, wantCursor: 0},
+		{name: "one item", cursor: 3, items: []cloudEnrollmentItem{{project: "one"}}, wantCursor: 0},
+		{name: "two items", cursor: 1, items: []cloudEnrollmentItem{{project: "one"}, {project: "two"}}, wantCursor: 1},
+		{name: "shrinking list", cursor: 2, priorItems: []cloudEnrollmentItem{{project: "one"}, {project: "two"}, {project: "three"}}, items: []cloudEnrollmentItem{{project: "one"}}, wantCursor: 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			m := New(nil, "")
+			m.Screen = ScreenCloudEnrollment
+			m.Cursor = tt.cursor
+			m.CloudEnrollmentItems = tt.priorItems
+
+			updatedModel, _ := m.Update(cloudEnrollmentLoadedMsg{items: tt.items})
+			updated := updatedModel.(Model)
+			if updated.Cursor != tt.wantCursor {
+				t.Fatalf("cursor = %d, want %d", updated.Cursor, tt.wantCursor)
+			}
+		})
+	}
+
+	t.Run("enter with an empty list remains a no-op", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen = ScreenCloudEnrollment
+		m.Cursor = 3
+
+		updatedModel, _ := m.Update(cloudEnrollmentLoadedMsg{})
+		updated := updatedModel.(Model)
+		_, cmd := updated.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		if cmd != nil {
+			t.Fatal("enter with no enrollment items should not toggle a project")
+		}
+	})
+
+	t.Run("late enrollment load preserves cloud settings Back selection", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen = ScreenCloudSettings
+		m.Cursor = 3 // Back
+		m.CloudEnrollmentLoading = true
+
+		updatedModel, _ := m.Update(cloudEnrollmentLoadedMsg{items: []cloudEnrollmentItem{{project: "one"}}})
+		updated := updatedModel.(Model)
+		if updated.Cursor != 3 || updated.CloudEnrollmentLoading || len(updated.CloudEnrollmentItems) != 1 {
+			t.Fatalf("late enrollment load altered settings state: cursor=%d loading=%t items=%+v", updated.Cursor, updated.CloudEnrollmentLoading, updated.CloudEnrollmentItems)
+		}
+		updatedModel, cmd := updated.handleCloudSettingsKeys("enter")
+		updated = updatedModel.(Model)
+		if updated.Screen != ScreenDashboard || cmd == nil {
+			t.Fatalf("Back selection after late enrollment load = screen %v cmd %v, want dashboard with refresh", updated.Screen, cmd)
+		}
+	})
 }
 
 func TestHandleRecentTimelineSessionsAndDetailKeyPaths(t *testing.T) {

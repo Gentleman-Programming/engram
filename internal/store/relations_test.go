@@ -2,9 +2,12 @@ package store
 
 import (
 	"bytes"
+	"context"
+	"database/sql"
 	"errors"
 	"log"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -19,6 +22,21 @@ func setupRelationsStore(t *testing.T) *Store {
 		t.Fatalf("CreateSession: %v", err)
 	}
 	return s
+}
+
+func TestGetRelationsForObservationsContext_AlreadyCanceled(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, syncID := addTestObs(t, s, "Contextual relation", "decision", "testproject", "project")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	relations, err := s.GetRelationsForObservationsContext(ctx, []string{syncID})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context cancellation, got relations=%v err=%v", relations, err)
+	}
+	if relations != nil {
+		t.Fatalf("expected no relations from canceled enrichment, got %v", relations)
+	}
 }
 
 // addTestObs inserts a single observation and returns its (id, syncID).
@@ -41,6 +59,13 @@ func addTestObs(t *testing.T, s *Store, title, obsType, project, scope string) (
 	}
 	return id, obs.SyncID
 }
+
+type rowsAffectedErrorResult struct {
+	err error
+}
+
+func (r rowsAffectedErrorResult) LastInsertId() (int64, error) { return 0, nil }
+func (r rowsAffectedErrorResult) RowsAffected() (int64, error) { return 0, r.err }
 
 // ─── C.1 — TestFindCandidates_HappyPath ──────────────────────────────────────
 
@@ -94,6 +119,25 @@ func TestFindCandidates_HappyPath(t *testing.T) {
 	}
 }
 
+func TestFindCandidates_EscapesInteriorQuotes(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, _ = addTestObs(t, s, `hello"world candidate`, "decision", "testproject", "project")
+	savedID, _ := addTestObs(t, s, `hello"world source`, "decision", "testproject", "project")
+
+	candidates, err := s.FindCandidates(savedID, CandidateOptions{
+		Project:   "testproject",
+		Scope:     "project",
+		Limit:     3,
+		BM25Floor: ptrFloat64(-10.0),
+	})
+	if err != nil {
+		t.Fatalf("FindCandidates: %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("expected 1 candidate, got %d", len(candidates))
+	}
+}
+
 // TestFindCandidates_EarlyBreakDoesNotSelfBlockWithSingleConnection verifies
 // that FindCandidates closes its FTS rows before follow-up QueryRow/Exec calls.
 // With SetMaxOpenConns(1), leaving rows open after the early-break path can
@@ -143,6 +187,133 @@ func TestFindCandidates_EarlyBreakDoesNotSelfBlockWithSingleConnection(t *testin
 	}
 	if result.candidates[0].JudgmentID == "" {
 		t.Fatal("expected relation insert to populate candidate JudgmentID")
+	}
+}
+
+// TestFindCandidates_DoesNotDuplicatePendingPairs verifies that normal candidate
+// detection creates a pending row only once, while semantic dry runs can still
+// retrieve that pending pair for judgment.
+func TestFindCandidates_DoesNotDuplicatePendingPairs(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, candidateSyncID := addTestObs(t, s, "Pending pair duplicate candidate", "decision", "testproject", "project")
+	savedID, sourceSyncID := addTestObs(t, s, "Pending pair duplicate source", "decision", "testproject", "project")
+	opts := CandidateOptions{
+		Project:   "testproject",
+		Scope:     "project",
+		Limit:     3,
+		BM25Floor: ptrFloat64(-10.0),
+	}
+
+	first, err := s.FindCandidates(savedID, opts)
+	if err != nil {
+		t.Fatalf("first FindCandidates: %v", err)
+	}
+	if len(first) != 1 || first[0].SyncID != candidateSyncID || first[0].JudgmentID == "" {
+		t.Fatalf("first FindCandidates = %+v, want one inserted candidate %q", first, candidateSyncID)
+	}
+
+	second, err := s.FindCandidates(savedID, opts)
+	if err != nil {
+		t.Fatalf("second FindCandidates: %v", err)
+	}
+	if len(second) != 0 {
+		t.Fatalf("second FindCandidates = %+v, want no duplicate pending pair", second)
+	}
+
+	var count int
+	if err := s.db.QueryRow(
+		`SELECT count(*) FROM memory_relations WHERE source_id = ? AND target_id = ?`,
+		sourceSyncID, candidateSyncID,
+	).Scan(&count); err != nil {
+		t.Fatalf("count pending relations: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("pending relation count = %d, want 1", count)
+	}
+
+	semanticCandidates, err := s.FindCandidates(savedID, CandidateOptions{
+		Project:    "testproject",
+		Scope:      "project",
+		Limit:      3,
+		BM25Floor:  ptrFloat64(-10.0),
+		SkipInsert: true,
+	})
+	if err != nil {
+		t.Fatalf("semantic FindCandidates: %v", err)
+	}
+	if len(semanticCandidates) != 1 || semanticCandidates[0].SyncID != candidateSyncID {
+		t.Fatalf("semantic FindCandidates = %+v, want existing pending candidate %q", semanticCandidates, candidateSyncID)
+	}
+}
+
+// TestFindCandidates_ConcurrentCallsInsertOnePendingPair verifies that
+// simultaneous normal candidate detection calls create and return one pending
+// relation for a pair, even when every call initially finds the same candidate.
+func TestFindCandidates_ConcurrentCallsInsertOnePendingPair(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, candidateSyncID := addTestObs(t, s, "Concurrent pending pair candidate", "decision", "testproject", "project")
+	savedID, sourceSyncID := addTestObs(t, s, "Concurrent pending pair source", "decision", "testproject", "project")
+	opts := CandidateOptions{
+		Project:   "testproject",
+		Scope:     "project",
+		Limit:     3,
+		BM25Floor: ptrFloat64(-10.0),
+	}
+
+	const callers = 16
+	type findResult struct {
+		candidates []Candidate
+		err        error
+	}
+	start := make(chan struct{})
+	results := make(chan findResult, callers)
+	var ready sync.WaitGroup
+	ready.Add(callers)
+	for range callers {
+		go func() {
+			ready.Done()
+			<-start
+			candidates, err := s.FindCandidates(savedID, opts)
+			results <- findResult{candidates: candidates, err: err}
+		}()
+	}
+	ready.Wait()
+	close(start)
+
+	var findErrors []error
+	returnedCandidates := make([]Candidate, 0, 1)
+	for range callers {
+		result := <-results
+		if result.err != nil {
+			findErrors = append(findErrors, result.err)
+			continue
+		}
+		returnedCandidates = append(returnedCandidates, result.candidates...)
+	}
+	if len(findErrors) != 0 {
+		t.Fatalf("FindCandidates errors = %v", findErrors)
+	}
+	if len(returnedCandidates) != 1 {
+		t.Fatalf("returned inserted candidates = %+v, want exactly one", returnedCandidates)
+	}
+	if returnedCandidates[0].SyncID != candidateSyncID {
+		t.Fatalf("FindCandidates returned candidate %q, want %q", returnedCandidates[0].SyncID, candidateSyncID)
+	}
+	if returnedCandidates[0].JudgmentID == "" {
+		t.Fatal("FindCandidates returned a candidate without an inserted judgment ID")
+	}
+
+	var pendingCount int
+	if err := s.db.QueryRow(`
+		SELECT count(*) FROM memory_relations
+		WHERE ((source_id = ? AND target_id = ?)
+		    OR (source_id = ? AND target_id = ?))
+		  AND judgment_status = 'pending'
+	`, sourceSyncID, candidateSyncID, candidateSyncID, sourceSyncID).Scan(&pendingCount); err != nil {
+		t.Fatalf("count pending relations: %v", err)
+	}
+	if pendingCount != 1 {
+		t.Errorf("pending relation count = %d, want 1", pendingCount)
 	}
 }
 
@@ -383,12 +554,12 @@ func TestJudgeRelation_HappyPath(t *testing.T) {
 
 	confidence := 0.9
 	judged, err := s.JudgeRelation(JudgeRelationParams{
-		JudgmentID:     relSyncID,
-		Relation:       "not_conflict",
-		Confidence:     &confidence,
-		MarkedByActor:  "agent:claude-sonnet-4-6",
-		MarkedByKind:   "agent",
-		MarkedByModel:  "claude-sonnet-4-6",
+		JudgmentID:    relSyncID,
+		Relation:      "not_conflict",
+		Confidence:    &confidence,
+		MarkedByActor: "agent:claude-sonnet-4-6",
+		MarkedByKind:  "agent",
+		MarkedByModel: "claude-sonnet-4-6",
 	})
 	if err != nil {
 		t.Fatalf("JudgeRelation: %v", err)
@@ -595,14 +766,14 @@ func TestProvenance_FullRowPersisted(t *testing.T) {
 	evidence := `{"basis":"title overlap"}`
 	reason := "titles are nearly identical"
 	judged, err := s.JudgeRelation(JudgeRelationParams{
-		JudgmentID:     relSyncID,
-		Relation:       "compatible",
-		Confidence:     &confidence,
-		Evidence:       &evidence,
-		Reason:         &reason,
-		MarkedByActor:  "agent:claude-sonnet-4-6",
-		MarkedByKind:   "agent",
-		MarkedByModel:  "claude-sonnet-4-6",
+		JudgmentID:    relSyncID,
+		Relation:      "compatible",
+		Confidence:    &confidence,
+		Evidence:      &evidence,
+		Reason:        &reason,
+		MarkedByActor: "agent:claude-sonnet-4-6",
+		MarkedByKind:  "agent",
+		MarkedByModel: "claude-sonnet-4-6",
 	})
 	if err != nil {
 		t.Fatalf("JudgeRelation: %v", err)
@@ -1100,9 +1271,9 @@ func TestJudgeRelation_RejectsCrossProject(t *testing.T) {
 	}
 }
 
-// C.1e — When the source observation is missing, JudgeRelation must enqueue a
-// mutation with project='' (empty string, not an error).
-func TestJudgeRelation_MissingSource_EnqueuesEmptyProject(t *testing.T) {
+// C.1e — When the source observation is missing, JudgeRelation preserves the
+// local judgment but must not enqueue a cloud mutation without a project.
+func TestJudgeRelation_MissingSource_KeepsJudgmentLocalOnly(t *testing.T) {
 	s := setupEnrolledStore(t)
 
 	// Use a non-existent source sync_id and a real target.
@@ -1132,13 +1303,20 @@ func TestJudgeRelation_MissingSource_EnqueuesEmptyProject(t *testing.T) {
 	}
 
 	after := countRelationMutations(t, s, SyncEntityRelation, "")
-	if after <= before {
-		t.Errorf("expected mutation with project='' when source is missing; before=%d after=%d", before, after)
+	if after != before {
+		t.Errorf("source-missing relation must not enqueue an empty-project mutation; before=%d after=%d", before, after)
+	}
+	rel, err := s.GetRelation(relSyncID)
+	if err != nil {
+		t.Fatalf("GetRelation: %v", err)
+	}
+	if rel.JudgmentStatus != JudgmentStatusJudged {
+		t.Errorf("local relation judgment was not preserved: got %q", rel.JudgmentStatus)
 	}
 }
 
-// REQ-011 verify-followup: JudgeRelation with missing source MUST emit a
-// WARNING-level log mentioning the relation sync_id and the empty project.
+// REQ-011 verify-followup: JudgeRelation with missing source MUST emit an
+// actionable warning that the local judgment was not replicated.
 func TestJudgeRelation_MissingSource_EmitsWarningLog(t *testing.T) {
 	s := setupEnrolledStore(t)
 
@@ -1177,8 +1355,8 @@ func TestJudgeRelation_MissingSource_EmitsWarningLog(t *testing.T) {
 	if !strings.Contains(logged, relSyncID) {
 		t.Errorf("expected relation sync_id %q in log output; got: %q", relSyncID, logged)
 	}
-	if !strings.Contains(logged, "project=''") {
-		t.Errorf("expected \"project=''\" hint in log output; got: %q", logged)
+	if !strings.Contains(logged, "local-only") || !strings.Contains(logged, "no cloud mutation was enqueued") {
+		t.Errorf("expected actionable local-only replication warning; got: %q", logged)
 	}
 }
 
@@ -1337,6 +1515,36 @@ func TestCountRelations_NoPredicate(t *testing.T) {
 	}
 }
 
+func TestConflictViewsExcludeNotConflictButEnumerationRetainsIt(t *testing.T) {
+	s, alphaSync1, alphaSync2, _ := setupTwoProjectStore(t)
+	if _, err := s.JudgeBySemantic(JudgeBySemanticParams{
+		SourceID: alphaSync1, TargetID: alphaSync2, Relation: RelationNotConflict, Confidence: 0.9,
+	}); err != nil {
+		t.Fatalf("JudgeBySemantic: %v", err)
+	}
+	insertRelationWithStatus(t, s, alphaSync1, alphaSync2, "pending")
+
+	all, err := s.ListRelations(ListRelationsOptions{Project: "alpha"})
+	if err != nil || len(all) != 2 {
+		t.Fatalf("inclusive ListRelations = %d, %v; want 2 rows", len(all), err)
+	}
+	conflicts, err := s.ListRelations(ListRelationsOptions{Project: "alpha", ExcludeNotConflict: true})
+	if err != nil || len(conflicts) != 1 {
+		t.Fatalf("conflict ListRelations = %d, %v; want 1 row", len(conflicts), err)
+	}
+	total, err := s.CountRelations(ListRelationsOptions{Project: "alpha", ExcludeNotConflict: true})
+	if err != nil || total != 1 {
+		t.Fatalf("conflict CountRelations = %d, %v; want 1", total, err)
+	}
+	stats, err := s.GetRelationStats("alpha")
+	if err != nil {
+		t.Fatalf("GetRelationStats: %v", err)
+	}
+	if _, ok := stats.ByRelation[RelationNotConflict]; ok {
+		t.Fatalf("conflict stats included %q: %v", RelationNotConflict, stats.ByRelation)
+	}
+}
+
 // TestGetRelationStats_MixedStatuses verifies GetRelationStats aggregates correctly.
 func TestGetRelationStats_MixedStatuses(t *testing.T) {
 	s, alphaSync1, alphaSync2, _ := setupTwoProjectStore(t)
@@ -1380,6 +1588,34 @@ func TestGetRelationStats_EmptyProject(t *testing.T) {
 	}
 	if stats.DeferredCount != 0 || stats.DeadCount != 0 {
 		t.Errorf("expected DeferredCount=0 DeadCount=0; got %d %d", stats.DeferredCount, stats.DeadCount)
+	}
+}
+
+func TestGetRelationStats_ScopesDeferredCountsByProject(t *testing.T) {
+	s := newTestStore(t)
+	for _, row := range []struct {
+		syncID  string
+		project string
+		status  string
+	}{
+		{syncID: "deferred-alpha", project: "alpha", status: "deferred"},
+		{syncID: "dead-beta", project: "beta", status: "dead"},
+	} {
+		if _, err := s.db.Exec(`
+			INSERT INTO sync_apply_deferred
+				(sync_id, entity, payload, target_key, project, scope_class, apply_status, first_seen_at)
+			VALUES (?, 'relation', '{}', 'cloud', ?, 'scoped', ?, datetime('now'))
+		`, row.syncID, row.project, row.status); err != nil {
+			t.Fatalf("seed %s deferred row: %v", row.project, err)
+		}
+	}
+
+	stats, err := s.GetRelationStats("alpha")
+	if err != nil {
+		t.Fatalf("GetRelationStats alpha: %v", err)
+	}
+	if stats.DeferredCount != 1 || stats.DeadCount != 0 {
+		t.Fatalf("alpha deferred stats = deferred=%d dead=%d, want 1/0", stats.DeferredCount, stats.DeadCount)
 	}
 }
 
@@ -1431,6 +1667,79 @@ func TestScanProject_DryRunNoInsert(t *testing.T) {
 	}
 	if result.Inspected < 1 {
 		t.Errorf("expected Inspected>=1; got %d", result.Inspected)
+	}
+}
+
+func TestScanAllProjectsIncludesEveryProjectWithoutCrossProjectCandidates(t *testing.T) {
+	s := newTestStore(t)
+	for _, project := range []string{"alpha", "beta", ""} {
+		sessionID := "scan-global-" + project
+		seedProject := project
+		if seedProject == "" {
+			sessionID = "scan-global-blank"
+			seedProject = "legacy"
+		}
+		if err := s.CreateSession(sessionID, seedProject, "/tmp/"+sessionID); err != nil {
+			t.Fatalf("CreateSession %q: %v", sessionID, err)
+		}
+		for _, title := range []string{"shared global conflict scan primary", "shared global conflict scan secondary"} {
+			addTestObsSession(t, s, sessionID, title, "decision", seedProject, "project")
+		}
+		if project == "" {
+			if _, err := s.db.Exec(`UPDATE observations SET project = '' WHERE session_id = ?`, sessionID); err != nil {
+				t.Fatalf("clear observation project: %v", err)
+			}
+			if _, err := s.db.Exec(`UPDATE sessions SET project = '' WHERE id = ?`, sessionID); err != nil {
+				t.Fatalf("clear session project: %v", err)
+			}
+		}
+	}
+
+	for _, project := range []string{"alpha", "beta", ""} {
+		result, err := s.ScanProject(ScanOptions{Project: project})
+		if err != nil {
+			t.Fatalf("ScanProject %q: %v", project, err)
+		}
+		if result.Inspected != 2 {
+			t.Fatalf("ScanProject %q inspected %d observations, want 2", project, result.Inspected)
+		}
+	}
+
+	result, err := s.ScanAllProjects(ScanOptions{Apply: true})
+	if err != nil {
+		t.Fatalf("ScanAllProjects: %v", err)
+	}
+	if result.Inspected != 6 || result.RelationsInserted != 3 {
+		t.Fatalf("ScanAllProjects result = %#v, want 6 inspected and 3 relations", result)
+	}
+
+	var crossProjectRelations int
+	if err := s.db.QueryRow(`
+		SELECT COUNT(*)
+		FROM memory_relations r
+		JOIN observations src ON src.sync_id = r.source_id
+		JOIN observations tgt ON tgt.sync_id = r.target_id
+		WHERE ifnull(src.project, '') != ifnull(tgt.project, '')
+	`).Scan(&crossProjectRelations); err != nil {
+		t.Fatalf("count cross-project relations: %v", err)
+	}
+	if crossProjectRelations != 0 {
+		t.Fatalf("ScanAllProjects created %d cross-project relations", crossProjectRelations)
+	}
+	for _, project := range []string{"alpha", "beta", ""} {
+		var relations int
+		if err := s.db.QueryRow(`
+			SELECT COUNT(*)
+			FROM memory_relations r
+			JOIN observations src ON src.sync_id = r.source_id
+			JOIN observations tgt ON tgt.sync_id = r.target_id
+			WHERE ifnull(src.project, '') = ? AND ifnull(tgt.project, '') = ?
+		`, project, project).Scan(&relations); err != nil {
+			t.Fatalf("count relations for project %q: %v", project, err)
+		}
+		if relations != 1 {
+			t.Fatalf("relations for project %q = %d, want 1", project, relations)
+		}
 	}
 }
 
@@ -1541,6 +1850,82 @@ func TestFindCandidates_SkipInsert_True(t *testing.T) {
 	// Candidates should still be returned (non-nil and possibly non-empty).
 	// We don't hard-fail on empty (FTS might not match) but the nil check matters.
 	_ = candidates // presence check only; count depends on FTS scoring
+}
+
+func TestFindCandidates_ExecErrorSkipsCandidate(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, _ = addTestObs(t, s, "JWT auth token session management", "decision", "testproject", "project")
+	savedID, _ := addTestObs(t, s, "Session-based auth token handling", "decision", "testproject", "project")
+
+	originalExecHook := s.hooks.exec
+	t.Cleanup(func() { s.hooks.exec = originalExecHook })
+	hookCalled := false
+	s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+		hookCalled = true
+		return nil, errors.New("conditional insert failed")
+	}
+
+	candidates, err := s.FindCandidates(savedID, CandidateOptions{
+		Project:   "testproject",
+		Scope:     "project",
+		Limit:     3,
+		BM25Floor: ptrFloat64(-10.0),
+	})
+	if err != nil {
+		t.Fatalf("FindCandidates: %v", err)
+	}
+	if !hookCalled {
+		t.Fatal("expected conditional insert to use exec hook")
+	}
+	if len(candidates) != 0 {
+		t.Fatalf("candidates = %v, want none after exec error", candidates)
+	}
+
+	var relationCount int
+	if err := s.db.QueryRow(`SELECT count(*) FROM memory_relations`).Scan(&relationCount); err != nil {
+		t.Fatalf("count relations: %v", err)
+	}
+	if relationCount != 0 {
+		t.Fatalf("pending relations = %d, want 0", relationCount)
+	}
+}
+
+func TestFindCandidates_RowsAffectedErrorSkipsCandidate(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, _ = addTestObs(t, s, "JWT auth token session management", "decision", "testproject", "project")
+	savedID, _ := addTestObs(t, s, "Session-based auth token handling", "decision", "testproject", "project")
+
+	originalExecHook := s.hooks.exec
+	t.Cleanup(func() { s.hooks.exec = originalExecHook })
+	hookCalled := false
+	s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+		hookCalled = true
+		return rowsAffectedErrorResult{err: errors.New("rows affected failed")}, nil
+	}
+
+	candidates, err := s.FindCandidates(savedID, CandidateOptions{
+		Project:   "testproject",
+		Scope:     "project",
+		Limit:     3,
+		BM25Floor: ptrFloat64(-10.0),
+	})
+	if err != nil {
+		t.Fatalf("FindCandidates: %v", err)
+	}
+	if !hookCalled {
+		t.Fatal("expected conditional insert to use exec hook")
+	}
+	if len(candidates) != 0 {
+		t.Fatalf("candidates = %v, want none after RowsAffected error", candidates)
+	}
+
+	var relationCount int
+	if err := s.db.QueryRow(`SELECT count(*) FROM memory_relations`).Scan(&relationCount); err != nil {
+		t.Fatalf("count relations: %v", err)
+	}
+	if relationCount != 0 {
+		t.Fatalf("pending relations = %d, want 0", relationCount)
+	}
 }
 
 // ─── G.3 — TestScanProject_CapBehavior (Phase G integration) ─────────────────
