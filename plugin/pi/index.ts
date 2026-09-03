@@ -111,6 +111,12 @@ interface EngramFetchResult<TResponse> {
 
 type EngramFetcher = <TResponse = unknown>(path: string, opts?: FetchOptions) => Promise<TResponse | null>;
 
+function isSafeToReplay(path: string, method: string): boolean {
+  // Session creation is explicitly idempotent on the server (INSERT OR IGNORE). Other writes
+  // have no idempotency key, so only reads and this registration request can be replayed.
+  return method === "GET" || (method === "POST" && path === "/sessions");
+}
+
 interface SessionBody {
   id: string;
   project: string;
@@ -190,6 +196,7 @@ async function engramFetchResult<TResponse = unknown>(path: string, opts: FetchO
   const method = opts.method ?? "GET";
   let res: Response | undefined;
   let timedOut = false;
+  let refused = false;
   for (let attempt = 0; attempt < ENGRAM_FETCH_MAX_ATTEMPTS; attempt += 1) {
     try {
       res = await fetch(`${ENGRAM_URL}${redactUrlPath(path)}`, {
@@ -208,12 +215,20 @@ async function engramFetchResult<TResponse = unknown>(path: string, opts: FetchO
         timedOut = true;
         break;
       }
-      if (attempt < ENGRAM_FETCH_MAX_ATTEMPTS - 1) await wait(ENGRAM_FETCH_BACKOFF_BASE_MS * 2 ** attempt);
+      refused = isConnectionRefusedError(error);
+      if (!isSafeToReplay(path, method) || attempt === ENGRAM_FETCH_MAX_ATTEMPTS - 1) break;
+      await wait(ENGRAM_FETCH_BACKOFF_BASE_MS * 2 ** attempt);
     }
   }
 
   if (!res) {
     if (timedOut) return { data: null, timedOutMethod: method };
+    // A confirmed local refusal after successful initialization means the implicitly owned
+    // server may have died. One generation-scoped recovery is shared by every caller. Only
+    // operations whose idempotence is established above are replayed after it is healthy.
+    if (refused && await recoverImplicitEngramServer() && isSafeToReplay(path, method)) {
+      return engramFetchResult<TResponse>(path, opts);
+    }
     throw new Error(unreachableMessage(undefined));
   }
 
@@ -339,6 +354,10 @@ function hasConnectionRefusedCode(value: unknown, depth = 0): boolean {
   return hasConnectionRefusedCode(record.cause, depth + 1);
 }
 
+function isConnectionRefusedError(error: unknown): boolean {
+  return (error instanceof Error && error.message === "connection refused") || hasConnectionRefusedCode(error);
+}
+
 async function probeEngramHealth(): Promise<EngramHealth> {
   try {
     const res = await fetch(`${ENGRAM_URL}/health`, {
@@ -347,7 +366,7 @@ async function probeEngramHealth(): Promise<EngramHealth> {
     return res.ok ? "ready" : "indeterminate";
   } catch (error) {
     if (isTimeoutError(error)) return "indeterminate";
-    if ((error instanceof Error && error.message === "connection refused") || hasConnectionRefusedCode(error)) {
+    if (isConnectionRefusedError(error)) {
       return "refused";
     }
     return "indeterminate";
@@ -588,6 +607,9 @@ let initialization: Promise<void> | undefined;
 let startupFailures = 0;
 let startupRetryAt = 0;
 let startupFailure: Error | undefined;
+let initializationGeneration = 0;
+let recoveredInitializationGeneration = 0;
+let recoveryFlight: { generation: number; promise: Promise<boolean> } | undefined;
 
 function startupBackoffMs(failures: number): number {
   return Math.min(ENGRAM_STARTUP_RETRY_MAX_MS, ENGRAM_STARTUP_RETRY_BASE_MS * 2 ** (failures - 1));
@@ -607,6 +629,7 @@ function sharedInitialization(start: () => Promise<void>): Promise<void> {
       startupFailures = 0;
       startupRetryAt = 0;
       startupFailure = undefined;
+      initializationGeneration += 1;
     },
     (error: unknown) => {
       initialization = undefined;
@@ -617,6 +640,27 @@ function sharedInitialization(start: () => Promise<void>): Promise<void> {
     },
   );
   return initialization;
+}
+
+// Initialization remains fulfilled for the session, so a later refusal needs a separate,
+// bounded recovery path. Marking a generation before starting prevents a failed restart from
+// becoming a spawn storm; tagging the flight prevents callers from joining an older generation.
+function recoverImplicitEngramServer(): Promise<boolean> {
+  const generation = initializationGeneration;
+  if (CONFIGURED_ENGRAM_URL !== undefined || generation === 0) return Promise.resolve(false);
+  const activeFlight = recoveryFlight;
+  if (activeFlight?.generation === generation) return activeFlight.promise;
+  if (recoveredInitializationGeneration === generation) return Promise.resolve(false);
+
+  recoveredInitializationGeneration = generation;
+  const promise = initializeEngramServer().then(
+    () => true,
+    () => false,
+  ).finally(() => {
+    if (recoveryFlight?.generation === generation) recoveryFlight = undefined;
+  });
+  recoveryFlight = { generation, promise };
+  return promise;
 }
 
 let project = "unknown";

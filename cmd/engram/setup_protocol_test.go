@@ -120,6 +120,7 @@ func TestCmdSetupProtocolEqualsFormPersistsSlim(t *testing.T) {
 	stubRuntimeHooks(t)
 	stubExitWithPanic(t)
 	cfg := testConfig(t)
+	setProtocolVersion(t, "1.4.0")
 
 	setupInstallAgent = func(agent string) (*setup.Result, error) {
 		return &setup.Result{Agent: agent, Destination: "/tmp/dest", Files: 2}, nil
@@ -140,6 +141,7 @@ func TestCmdSetupProtocolSpaceFormPersistsSlim(t *testing.T) {
 	stubRuntimeHooks(t)
 	stubExitWithPanic(t)
 	cfg := testConfig(t)
+	setProtocolVersion(t, "1.4.0")
 
 	setupInstallAgent = func(agent string) (*setup.Result, error) {
 		return &setup.Result{Agent: agent, Destination: "/tmp/dest", Files: 2}, nil
@@ -160,6 +162,7 @@ func TestCmdSetupProtocolFlagFirstThenSlug(t *testing.T) {
 	stubRuntimeHooks(t)
 	stubExitWithPanic(t)
 	cfg := testConfig(t)
+	setProtocolVersion(t, "1.4.0")
 
 	setupInstallAgent = func(agent string) (*setup.Result, error) {
 		return &setup.Result{Agent: agent, Destination: "/tmp/dest", Files: 2}, nil
@@ -183,6 +186,7 @@ func TestCmdSetupUnknownFlagFallbackForwardsParsedProtocolMode(t *testing.T) {
 	stubRuntimeHooks(t)
 	stubExitWithPanic(t)
 	cfg := testConfig(t)
+	setProtocolVersion(t, "1.4.0")
 
 	setupSupportedAgents = func() []setup.Agent {
 		return []setup.Agent{{Name: "opencode", Description: "OpenCode", InstallDir: "/tmp/opencode"}}
@@ -217,6 +221,7 @@ func TestCmdSetupUnknownFlagBeforeProtocolStillForwardsMode(t *testing.T) {
 	stubRuntimeHooks(t)
 	stubExitWithPanic(t)
 	cfg := testConfig(t)
+	setProtocolVersion(t, "1.4.0")
 
 	setupSupportedAgents = func() []setup.Agent {
 		return []setup.Agent{{Name: "opencode", Description: "OpenCode", InstallDir: "/tmp/opencode"}}
@@ -396,6 +401,7 @@ func TestCmdSetupNoSlugWithProtocolAppliesToSelectedAgent(t *testing.T) {
 	stubRuntimeHooks(t)
 	stubExitWithPanic(t)
 	cfg := testConfig(t)
+	setProtocolVersion(t, "1.4.0")
 
 	setupSupportedAgents = func() []setup.Agent {
 		return []setup.Agent{{Name: "opencode", Description: "OpenCode", InstallDir: "/tmp/opencode"}}
@@ -429,6 +435,7 @@ func TestCmdSetupNoSlugWithProtocolAppliesToSelectedAgent(t *testing.T) {
 func TestCmdSetupWriteReadPathParityUnderEnvDataDir(t *testing.T) {
 	stubRuntimeHooks(t)
 	stubExitWithPanic(t)
+	setProtocolVersion(t, "1.4.0")
 
 	dataDir := t.TempDir()
 	t.Setenv("ENGRAM_DATA_DIR", dataDir)
@@ -462,10 +469,10 @@ func TestCmdSetupWriteReadPathParityUnderEnvDataDir(t *testing.T) {
 	if recovered != nil || stderr != "" {
 		t.Fatalf("panic=%v stderr=%q", recovered, stderr)
 	}
-	// version == "dev" in the test binary, so the version floor is never
-	// met — this assertion targets read-path parity, not the floor check.
-	if strings.TrimSpace(stdout) != "full" {
-		t.Fatalf("stdout = %q, want %q (version=dev fails the floor check)", stdout, "full")
+	// A supported version makes slim output prove that the runtime read uses
+	// exactly the data directory setup wrote to.
+	if strings.TrimSpace(stdout) != "slim" {
+		t.Fatalf("stdout = %q, want %q (write/read path mismatch)", stdout, "slim")
 	}
 }
 
@@ -594,25 +601,110 @@ func TestCmdProtocolModeMissingSlugKeyDefaultsFull(t *testing.T) {
 
 func TestMeetsProtocolVersionFloor(t *testing.T) {
 	tests := []struct {
-		in   string
-		want bool
+		name           string
+		version        string
+		classification protocolVersionClassification
+		wantSlim       bool
 	}{
-		{"1.4.0", true},
-		{"1.4.1", true},
-		{"1.5.0", true},
-		{"2.0.0", true},
-		{"1.3.9", false},
-		{"1.0.0", false},
-		{"0.9.9", false},
-		{"dev", false},
-		{"", false},
-		{"not-a-version", false},
-		{"v1.4.0", true},
-		{"1.4", true},
+		{"supported release", "1.4.0", protocolVersionSupported, true},
+		{"supported tagged release", "v1.5.0", protocolVersionSupported, true},
+		{"legacy numeric release", "1.4", protocolVersionSupported, true},
+		{"below-floor release", "1.3.9", protocolVersionBelowFloor, false},
+		{"development build", "dev", protocolVersionUnsupported, false},
+		{"empty version", "", protocolVersionUnsupported, false},
+		{"Go pseudo-version", "v1.4.0-0.20260102030405-abcdef012345", protocolVersionUnsupported, false},
+		{"dirty build", "1.4.0-dirty", protocolVersionUnsupported, false},
+		{"non-release input", "not-a-version", protocolVersionUnsupported, false},
 	}
 	for _, tt := range tests {
-		if got := meetsProtocolVersionFloor(tt.in); got != tt.want {
-			t.Errorf("meetsProtocolVersionFloor(%q) = %v, want %v", tt.in, got, tt.want)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			if got := classifyProtocolVersion(tt.version); got != tt.classification {
+				t.Fatalf("classifyProtocolVersion(%q) = %v, want %v", tt.version, got, tt.classification)
+			}
+			if got := meetsProtocolVersionFloor(tt.version); got != tt.wantSlim {
+				t.Fatalf("meetsProtocolVersionFloor(%q) = %v, want %v", tt.version, got, tt.wantSlim)
+			}
+		})
 	}
+}
+
+func TestApplyProtocolModeWarnsOnlyWhenSlimCannotActivate(t *testing.T) {
+	tests := []struct {
+		name        string
+		version     string
+		mode        string
+		wantWarning string
+	}{
+		{"supported release", "1.4.0", setup.ProtocolModeSlim, ""},
+		{"full mode", "dev", setup.ProtocolModeFull, ""},
+		{"below-floor release", "1.3.9", setup.ProtocolModeSlim, "below 1.4.0"},
+		{"development build", "dev", setup.ProtocolModeSlim, "not a clean tagged release"},
+		{"Go pseudo-version", "v1.4.0-0.20260102030405-abcdef012345", setup.ProtocolModeSlim, "not a clean tagged release"},
+		{"dirty build", "1.4.0-dirty", setup.ProtocolModeSlim, "not a clean tagged release"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := testConfig(t)
+			setProtocolVersion(t, tt.version)
+
+			stdout, stderr := captureOutput(t, func() {
+				applyProtocolMode(cfg, "claude-code", tt.mode)
+			})
+			if stdout != "" {
+				t.Fatalf("stdout = %q, want empty", stdout)
+			}
+			if tt.wantWarning == "" {
+				if stderr != "" {
+					t.Fatalf("stderr = %q, want no warning", stderr)
+				}
+			} else if !strings.Contains(stderr, tt.wantWarning) || !strings.Contains(stderr, "install a clean tagged release") {
+				t.Fatalf("stderr = %q, want actionable warning containing %q", stderr, tt.wantWarning)
+			}
+			if got := setup.ReadProtocolMode(cfg.DataDir, "claude-code"); got != tt.mode {
+				t.Fatalf("ReadProtocolMode = %q, want %q", got, tt.mode)
+			}
+		})
+	}
+}
+
+func TestCmdProtocolModeOutputsOnlyModeForUnsupportedVersions(t *testing.T) {
+	tests := []struct {
+		name    string
+		version string
+		want    string
+	}{
+		{"supported release", "1.4.0", setup.ProtocolModeSlim},
+		{"below-floor release", "1.3.9", setup.ProtocolModeFull},
+		{"development build", "dev", setup.ProtocolModeFull},
+		{"Go pseudo-version", "v1.4.0-0.20260102030405-abcdef012345", setup.ProtocolModeFull},
+		{"dirty build", "1.4.0-dirty", setup.ProtocolModeFull},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stubExitWithPanic(t)
+			cfg := testConfig(t)
+			if err := setup.WriteProtocolMode(cfg.DataDir, "claude-code", setup.ProtocolModeSlim); err != nil {
+				t.Fatalf("seed WriteProtocolMode: %v", err)
+			}
+			setProtocolVersion(t, tt.version)
+
+			withArgs(t, "engram", "protocol-mode", "claude-code")
+			stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdProtocolMode(cfg) })
+			if recovered != nil || stderr != "" {
+				t.Fatalf("panic=%v stderr=%q", recovered, stderr)
+			}
+			if stdout != tt.want+"\n" {
+				t.Fatalf("stdout = %q, want exactly %q", stdout, tt.want+"\n")
+			}
+		})
+	}
+}
+
+func setProtocolVersion(t *testing.T, value string) {
+	t.Helper()
+	oldVersion := version
+	version = value
+	t.Cleanup(func() { version = oldVersion })
 }
