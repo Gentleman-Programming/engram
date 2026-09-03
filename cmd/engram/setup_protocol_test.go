@@ -611,6 +611,7 @@ func TestMeetsProtocolVersionFloor(t *testing.T) {
 		{"legacy numeric release", "1.4", protocolVersionSupported, true},
 		{"below-floor release", "1.3.9", protocolVersionBelowFloor, false},
 		{"development build", "dev", protocolVersionUnsupported, false},
+		{"empty version", "", protocolVersionUnsupported, false},
 		{"Go pseudo-version", "v1.4.0-0.20260102030405-abcdef012345", protocolVersionUnsupported, false},
 		{"dirty build", "1.4.0-dirty", protocolVersionUnsupported, false},
 		{"non-release input", "not-a-version", protocolVersionUnsupported, false},
