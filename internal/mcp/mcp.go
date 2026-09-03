@@ -1137,7 +1137,7 @@ ERROR: Returns IsError=true if IDs are unknown, relation is invalid, or cross-pr
 // a store-query failure is surfaced as a tool error.
 func handleListProjects(s *store.Store) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		projects, err := s.ListProjectsWithStats()
+		projects, err := s.ListProjectsWithStats("")
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("List projects failed: %v", err)), nil
 		}
