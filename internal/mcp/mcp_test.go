@@ -650,6 +650,75 @@ func TestHandleSaveAcceptsObservationAliasForContent(t *testing.T) {
 	t.Fatalf("expected pending observation upsert sync mutation, got %#v", mutations)
 }
 
+// ─── Org grouping axis (#776) ────────────────────────────────────────────────
+
+func TestHandleSave_OrgInheritsFromConfig(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, ".engram"), 0755); err != nil {
+		t.Fatalf("create config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".engram", "config.json"), []byte(`{"project_name":"engram","org":"acme-corp"}`), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "Inherited org save",
+		"content": "This should inherit org from .engram/config.json",
+	}}})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected save error: %s", callResultText(t, res))
+	}
+
+	obs, err := s.RecentObservations("engram", "project", 5)
+	if err != nil {
+		t.Fatalf("recent observations: %v", err)
+	}
+	if len(obs) != 1 || obs[0].Org == nil || *obs[0].Org != "acme-corp" {
+		t.Fatalf("expected org inherited from config, got %#v", obs)
+	}
+}
+
+func TestHandleSave_ExplicitOrgOverridesConfig(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, ".engram"), 0755); err != nil {
+		t.Fatalf("create config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".engram", "config.json"), []byte(`{"project_name":"engram","org":"acme-corp"}`), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "Explicit org save",
+		"content": "The org parameter should win over config",
+		"org":     "globex-inc",
+	}}})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected save error: %s", callResultText(t, res))
+	}
+
+	obs, err := s.RecentObservations("engram", "project", 5)
+	if err != nil {
+		t.Fatalf("recent observations: %v", err)
+	}
+	if len(obs) != 1 || obs[0].Org == nil || *obs[0].Org != "globex-inc" {
+		t.Fatalf("expected explicit org to override config, got %#v", obs)
+	}
+}
+
 func TestHandleSaveRejectsMissingContent(t *testing.T) {
 	s := newMCPTestStore(t)
 	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
@@ -1610,6 +1679,59 @@ func TestHandleSearchAndCRUDHandlers(t *testing.T) {
 	}
 	if !strings.Contains(callResultText(t, delRes), "permanently deleted") {
 		t.Fatalf("expected hard delete message")
+	}
+}
+
+func TestHandleSearch_FiltersByOrg(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("s-mcp", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	if _, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "s-mcp",
+		Type:      "decision",
+		Title:     "Acme decision",
+		Content:   "acme grouping content",
+		Project:   "engram",
+		Scope:     "project",
+		Org:       "acme-corp",
+	}); err != nil {
+		t.Fatalf("add acme observation: %v", err)
+	}
+	if _, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "s-mcp",
+		Type:      "decision",
+		Title:     "Globex decision",
+		Content:   "globex grouping content",
+		Project:   "engram",
+		Scope:     "project",
+		Org:       "globex-inc",
+	}); err != nil {
+		t.Fatalf("add globex observation: %v", err)
+	}
+
+	search := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	res, err := search(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"query":   "grouping",
+		"project": "engram",
+		"org":     "acme-corp",
+		"limit":   5.0,
+	}}})
+	if err != nil {
+		t.Fatalf("search handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected search error: %s", callResultText(t, res))
+	}
+	body := callResultJSON(t, res)
+	results, ok := body["results"].([]any)
+	if !ok || len(results) != 1 {
+		t.Fatalf("expected exactly one org-filtered result, got %v", body["results"])
+	}
+	firstResult, _ := results[0].(map[string]any)
+	if firstResult["org"] != "acme-corp" {
+		t.Fatalf("expected result org=acme-corp, got %v", firstResult["org"])
 	}
 }
 
@@ -3935,6 +4057,73 @@ func TestHandleSessionSummaryCreatesProjectScopedSession(t *testing.T) {
 		t.Fatalf("expected directory=%q, got %q", dir, sess.Directory)
 	}
 	assertSessionSyncMutationDirectory(t, s, "manual-save-summary-session-project", dir)
+}
+
+// TestHandleSessionSummary_OrgInheritsFromConfig is a regression test for
+// #776: unlike handleSave, handleSessionSummary never inherited org from
+// .engram/config.json, so session summaries saved in an org-scoped repo
+// silently carried no org and vanished from org-filtered views. There is no
+// explicit "org" argument on mem_session_summary, so config inheritance is
+// the only source.
+func TestHandleSessionSummary_OrgInheritsFromConfig(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, ".engram"), 0755); err != nil {
+		t.Fatalf("create config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".engram", "config.json"), []byte(`{"project_name":"engram","org":"acme-corp"}`), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"content": "## Goal\nInherit org from config",
+	}}})
+	if err != nil || res.IsError {
+		t.Fatalf("session summary: err=%v isError=%v text=%s", err, res.IsError, callResultText(t, res))
+	}
+
+	obs, err := s.RecentObservations("engram", "project", 5)
+	if err != nil {
+		t.Fatalf("recent observations: %v", err)
+	}
+	if len(obs) != 1 || obs[0].Org == nil || *obs[0].Org != "acme-corp" {
+		t.Fatalf("expected org inherited from config, got %#v", obs)
+	}
+}
+
+// TestHandleSessionSummary_NoConfigLeavesOrgNil covers the counterpart: a
+// repo with no .engram/config.json (or none with an org field) must save the
+// summary with a nil org, not an empty-string placeholder.
+func TestHandleSessionSummary_NoConfigLeavesOrgNil(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	cmd := exec.Command("git", "-C", dir, "remote", "add", "origin",
+		"git@github.com:user/summary-no-org.git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"content": "## Goal\nNo org configured",
+	}}})
+	if err != nil || res.IsError {
+		t.Fatalf("session summary: err=%v isError=%v text=%s", err, res.IsError, callResultText(t, res))
+	}
+
+	obs, err := s.RecentObservations("summary-no-org", "project", 5)
+	if err != nil {
+		t.Fatalf("recent observations: %v", err)
+	}
+	if len(obs) != 1 || obs[0].Org != nil {
+		t.Fatalf("expected nil org without config, got %#v", obs)
+	}
 }
 
 func TestHandleSessionSummarySkipsConflictCandidates(t *testing.T) {
@@ -7137,6 +7326,56 @@ func TestMemCurrentProject_NormalResult(t *testing.T) {
 	}
 	if !strings.Contains(text, "project_path") {
 		t.Errorf("expected project_path in response, got: %q", text)
+	}
+}
+
+// TestMemCurrentProject_IncludesOrgWhenConfigured verifies the "org" field
+// (#776) surfaces in mem_current_project's response when .engram/config.json
+// sets one, and is omitted when it doesn't (single-context users see no change).
+func TestMemCurrentProject_IncludesOrgWhenConfigured(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, ".engram"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".engram", "config.json"), []byte(`{"project_name":"acme-app","org":"acme-corp"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	h := handleCurrentProject(s, MCPConfig{})
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", callResultText(t, res))
+	}
+	body := callResultJSON(t, res)
+	if body["org"] != "acme-corp" {
+		t.Fatalf("expected org=acme-corp in response, got %v", body["org"])
+	}
+}
+
+func TestMemCurrentProject_OmitsOrgWhenNotConfigured(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	h := handleCurrentProject(s, MCPConfig{})
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", callResultText(t, res))
+	}
+	body := callResultJSON(t, res)
+	if _, present := body["org"]; present {
+		t.Fatalf("expected org to be omitted when not configured, got %v", body["org"])
 	}
 }
 
@@ -10349,6 +10588,66 @@ func TestMemListProjects_ReturnsProjectsWithStats(t *testing.T) {
 	if envelope.Projects[0].Name != "alpha-project" {
 		t.Fatalf("expected observation-count-descending order, got %q first",
 			envelope.Projects[0].Name)
+	}
+}
+
+// TestMemListProjects_FiltersByOrg: mem_list_projects must honor an optional
+// "org" argument the same way `engram projects list --org` does, scoping the
+// listing to projects with at least one observation tagged with that org
+// (engram#776).
+func TestMemListProjects_FiltersByOrg(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("sess-acme", "acme-project", "/tmp/acme"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if err := s.CreateSession("sess-globex", "globex-project", "/tmp/globex"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "sess-acme",
+		Type:      "decision",
+		Title:     "Acme decision",
+		Content:   "acme content",
+		Project:   "acme-project",
+		Scope:     "project",
+		Org:       "acme-corp",
+	}); err != nil {
+		t.Fatalf("add acme observation: %v", err)
+	}
+	if _, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "sess-globex",
+		Type:      "decision",
+		Title:     "Globex decision",
+		Content:   "globex content",
+		Project:   "globex-project",
+		Scope:     "project",
+		Org:       "globex-inc",
+	}); err != nil {
+		t.Fatalf("add globex observation: %v", err)
+	}
+
+	h := handleListProjects(s)
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"org": "acme-corp",
+	}}})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", callResultText(t, res))
+	}
+
+	var envelope struct {
+		Count    int `json:"count"`
+		Projects []struct {
+			Name string `json:"name"`
+		} `json:"projects"`
+	}
+	if err := json.Unmarshal([]byte(callResultText(t, res)), &envelope); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if envelope.Count != 1 || len(envelope.Projects) != 1 || envelope.Projects[0].Name != "acme-project" {
+		t.Fatalf("expected only acme-project when filtering by org=acme-corp, got %#v", envelope)
 	}
 }
 
