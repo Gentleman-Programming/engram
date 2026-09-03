@@ -1173,9 +1173,15 @@ func handleCurrentProject(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc 
 		cwd, _ := os.Getwd()
 		res := projectpkg.DetectProjectFull(cwd)
 		if processRes, ok, err := processProjectResult(cfg.DefaultProject); ok {
+			// A process-level override (ENGRAM_PROJECT / mcp --project) only
+			// decides Project/Source/Path — it never reads .engram/config.json,
+			// so it can't know org. Carry the cwd-detected Org through so the
+			// override doesn't silently hide a repo's org label (#776).
+			org := res.Org
 			if err != nil {
-				res = projectpkg.DetectionResult{Source: projectpkg.SourceProcessOverride, Error: err}
+				res = projectpkg.DetectionResult{Source: projectpkg.SourceProcessOverride, Error: err, Org: org}
 			} else {
+				processRes.Org = org
 				res = processRes
 			}
 		}
