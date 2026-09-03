@@ -269,6 +269,33 @@ func TestNewServerRegistersTools(t *testing.T) {
 	}
 }
 
+func TestNewServerScopeDescriptions(t *testing.T) {
+	srv := NewServer(newMCPTestStore(t))
+	for _, tt := range []struct {
+		toolName string
+		want     string
+	}{
+		{"mem_search", "Filter by scope: project, personal, or global. Omit to apply no scope filter."},
+		{"mem_save", "Scope for this observation: project (default), personal, or global"},
+		{"mem_update", "New scope: project, personal, or global"},
+		{"mem_context", "Filter observations by scope: project, personal, or global. Omit to apply no scope filter."},
+	} {
+		t.Run(tt.toolName, func(t *testing.T) {
+			tool := srv.GetTool(tt.toolName)
+			if tool == nil {
+				t.Fatalf("tool %q not registered", tt.toolName)
+			}
+			scope, ok := tool.Tool.InputSchema.Properties["scope"].(map[string]any)
+			if !ok {
+				t.Fatalf("tool %q scope schema = %T; want object", tt.toolName, tool.Tool.InputSchema.Properties["scope"])
+			}
+			if got, _ := scope["description"].(string); got != tt.want {
+				t.Errorf("tool %q scope description = %q; want %q", tt.toolName, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestHandleMergeProjectsRejectsNonEquivalentSourceWithoutMutation(t *testing.T) {
 	s := newMCPTestStore(t)
 	if err := s.CreateSession("merge-source", "engram-memory", "/tmp/engram-memory"); err != nil {
@@ -9555,5 +9582,280 @@ func TestHandleUpdateRejectsBlankTitleWithoutSideEffects(t *testing.T) {
 				t.Fatalf("rejected update enqueued a mutation: got %d, want %d", got, mutationsBefore)
 			}
 		})
+	}
+}
+
+func TestHandleSaveGlobalScope(t *testing.T) {
+	s := newMCPTestStore(t)
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	if err := s.CreateSession("sess-global-save", "test-project", dir); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":      "Global memory title",
+		"content":    "**What**: Machine-wide convention",
+		"scope":      "global",
+		"project":    "test-project",
+		"session_id": "sess-global-save",
+	}}})
+	if err != nil {
+		t.Fatalf("handleSave error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %s", callResultText(t, res))
+	}
+
+	obss, err := s.Search("Global memory title", store.SearchOptions{
+		Project: "test-project",
+		Scope:   "global",
+	})
+	if err != nil {
+		t.Fatalf("search observations: %v", err)
+	}
+	if len(obss) != 1 {
+		t.Fatalf("expected 1 global observation, got %d", len(obss))
+	}
+	if obss[0].Scope != "global" {
+		t.Fatalf("expected Scope=global, got %q", obss[0].Scope)
+	}
+	if obss[0].Title != "Global memory title" {
+		t.Fatalf("expected Title=%q, got %q", "Global memory title", obss[0].Title)
+	}
+}
+
+func TestHandleSearchGlobalScopeFilter(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("sess-global-test", "global-project", t.TempDir()); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	_, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "sess-global-test",
+		Type:      "decision",
+		Title:     "project scoped note",
+		Content:   "content for project",
+		Project:   "global-project",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add project observation: %v", err)
+	}
+
+	_, err = s.AddObservation(store.AddObservationParams{
+		SessionID: "sess-global-test",
+		Type:      "decision",
+		Title:     "personal scoped note",
+		Content:   "content for personal",
+		Project:   "global-project",
+		Scope:     "personal",
+	})
+	if err != nil {
+		t.Fatalf("add personal observation: %v", err)
+	}
+
+	_, err = s.AddObservation(store.AddObservationParams{
+		SessionID: "sess-global-test",
+		Type:      "decision",
+		Title:     "global scoped note",
+		Content:   "content for global",
+		Project:   "global-project",
+		Scope:     "global",
+	})
+	if err != nil {
+		t.Fatalf("add global observation: %v", err)
+	}
+
+	h := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	t.Run("filter by scope global", func(t *testing.T) {
+		res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"query":        "scoped note",
+			"scope":        "global",
+			"all_projects": true,
+		}}})
+		if err != nil {
+			t.Fatalf("search error: %v", err)
+		}
+		if res.IsError {
+			t.Fatalf("unexpected tool error: %s", callResultText(t, res))
+		}
+		text := callResultText(t, res)
+		if !strings.Contains(text, "global scoped note") {
+			t.Errorf("expected 'global scoped note' in results, got: %s", text)
+		}
+		if strings.Contains(text, "project scoped note") {
+			t.Errorf("did not expect 'project scoped note' in results, got: %s", text)
+		}
+		if strings.Contains(text, "personal scoped note") {
+			t.Errorf("did not expect 'personal scoped note' in results, got: %s", text)
+		}
+	})
+
+	t.Run("filter by scope project", func(t *testing.T) {
+		res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"query":   "scoped note",
+			"scope":   "project",
+			"project": "global-project",
+		}}})
+		if err != nil {
+			t.Fatalf("search error: %v", err)
+		}
+		if res.IsError {
+			t.Fatalf("unexpected tool error: %s", callResultText(t, res))
+		}
+		text := callResultText(t, res)
+		if !strings.Contains(text, "project scoped note") {
+			t.Errorf("expected 'project scoped note' in results, got: %s", text)
+		}
+		if strings.Contains(text, "global scoped note") {
+			t.Errorf("did not expect 'global scoped note' in results, got: %s", text)
+		}
+	})
+
+	t.Run("no scope filter returns all", func(t *testing.T) {
+		res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"query":   "scoped note",
+			"project": "global-project",
+		}}})
+		if err != nil {
+			t.Fatalf("search error: %v", err)
+		}
+		if res.IsError {
+			t.Fatalf("unexpected tool error: %s", callResultText(t, res))
+		}
+		text := callResultText(t, res)
+		if !strings.Contains(text, "global scoped note") || !strings.Contains(text, "personal scoped note") || !strings.Contains(text, "project scoped note") {
+			t.Errorf("expected global, personal, and project notes in results, got: %s", text)
+		}
+	})
+}
+
+func TestHandleContextGlobalScopeFilter(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("ctx-global-sess", "ctx-proj", t.TempDir()); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	_, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "ctx-global-sess",
+		Type:      "decision",
+		Title:     "ctx project observation",
+		Content:   "content",
+		Project:   "ctx-proj",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add project observation: %v", err)
+	}
+
+	_, err = s.AddObservation(store.AddObservationParams{
+		SessionID: "ctx-global-sess",
+		Type:      "decision",
+		Title:     "ctx personal observation",
+		Content:   "content",
+		Project:   "ctx-proj",
+		Scope:     "personal",
+	})
+	if err != nil {
+		t.Fatalf("add personal observation: %v", err)
+	}
+
+	_, err = s.AddObservation(store.AddObservationParams{
+		SessionID: "ctx-global-sess",
+		Type:      "decision",
+		Title:     "ctx global observation",
+		Content:   "content",
+		Project:   "ctx-proj",
+		Scope:     "global",
+	})
+	if err != nil {
+		t.Fatalf("add global observation: %v", err)
+	}
+
+	h := handleContext(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	t.Run("filter by scope global", func(t *testing.T) {
+		res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"project": "ctx-proj",
+			"scope":   "global",
+		}}})
+		if err != nil {
+			t.Fatalf("handleContext error: %v", err)
+		}
+		if res.IsError {
+			t.Fatalf("unexpected tool error: %s", callResultText(t, res))
+		}
+		text := callResultText(t, res)
+		if !strings.Contains(text, "ctx global observation") {
+			t.Errorf("expected global observation in context results, got: %s", text)
+		}
+		if strings.Contains(text, "ctx project observation") {
+			t.Errorf("did not expect project observation in global context results, got: %s", text)
+		}
+		if strings.Contains(text, "ctx personal observation") {
+			t.Errorf("did not expect personal observation in global context results, got: %s", text)
+		}
+	})
+
+	t.Run("no scope filter returns all", func(t *testing.T) {
+		res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"project": "ctx-proj",
+		}}})
+		if err != nil {
+			t.Fatalf("handleContext error: %v", err)
+		}
+		if res.IsError {
+			t.Fatalf("unexpected tool error: %s", callResultText(t, res))
+		}
+		text := callResultText(t, res)
+		if !strings.Contains(text, "ctx global observation") || !strings.Contains(text, "ctx personal observation") || !strings.Contains(text, "ctx project observation") {
+			t.Errorf("expected global, personal, and project observations in context results, got: %s", text)
+		}
+	})
+}
+
+func TestHandleUpdateGlobalScope(t *testing.T) {
+	s := newMCPTestStore(t)
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	if err := s.CreateSession("update-global-sess", "update-proj", dir); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	id, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "update-global-sess",
+		Type:      "note",
+		Title:     "Updatable observation",
+		Content:   "Initial content",
+		Project:   "update-proj",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	h := handleUpdate(s, MCPConfig{DefaultProject: "update-proj"})
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"id":    float64(id),
+		"scope": "global",
+	}}})
+	if err != nil {
+		t.Fatalf("handleUpdate error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %s", callResultText(t, res))
+	}
+
+	obs, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("get observation: %v", err)
+	}
+	if obs.Scope != "global" {
+		t.Fatalf("expected Scope=global after update, got %q", obs.Scope)
 	}
 }

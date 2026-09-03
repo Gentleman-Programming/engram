@@ -58,8 +58,20 @@ session_state_key_part() {
   JSON_VALUE="$encoded"
 }
 
+# Emit the first-message ToolSearch bootstrap.
+#
+# Uses hookSpecificOutput.additionalContext (NOT systemMessage): on a
+# UserPromptSubmit hook, only stdout/additionalContext enters the model's
+# context. A systemMessage payload is rendered to the terminal as
+# "UserPromptSubmit says: ..." (issue #145) and never reaches the model, so the
+# bootstrap silently no-ops. session-start.sh already uses additionalContext.
+#
+# The select list carries BOTH tool-name prefixes: mcp__plugin_engram_engram__*
+# for plugin/marketplace installs and mcp__engram__* for direct MCP-server
+# installs. ToolSearch select: returns whichever names exist and silently
+# ignores the rest, so one list covers both install modes (issue #534).
 print_toolsearch_message() {
-  printf '%s\n' '{"systemMessage":"CRITICAL FIRST ACTION — Execute this ToolSearch NOW before responding to the user:\nselect:mcp__engram__mem_save,mcp__engram__mem_search,mcp__engram__mem_context,mcp__engram__mem_session_summary,mcp__engram__mem_session_start,mcp__engram__mem_session_end,mcp__engram__mem_get_observation,mcp__engram__mem_suggest_topic_key,mcp__engram__mem_capture_passive,mcp__engram__mem_save_prompt,mcp__engram__mem_update,mcp__engram__mem_current_project,mcp__engram__mem_judge\n\nAfter loading tools, call mem_context to check for prior session history before responding."}'
+  printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"CRITICAL FIRST ACTION - Execute this ToolSearch NOW before responding to the user:\nselect:mcp__plugin_engram_engram__mem_save,mcp__plugin_engram_engram__mem_search,mcp__plugin_engram_engram__mem_context,mcp__plugin_engram_engram__mem_session_summary,mcp__plugin_engram_engram__mem_session_start,mcp__plugin_engram_engram__mem_session_end,mcp__plugin_engram_engram__mem_get_observation,mcp__plugin_engram_engram__mem_suggest_topic_key,mcp__plugin_engram_engram__mem_capture_passive,mcp__plugin_engram_engram__mem_save_prompt,mcp__plugin_engram_engram__mem_update,mcp__plugin_engram_engram__mem_current_project,mcp__plugin_engram_engram__mem_judge,mcp__engram__mem_save,mcp__engram__mem_search,mcp__engram__mem_context,mcp__engram__mem_session_summary,mcp__engram__mem_session_start,mcp__engram__mem_session_end,mcp__engram__mem_get_observation,mcp__engram__mem_suggest_topic_key,mcp__engram__mem_capture_passive,mcp__engram__mem_save_prompt,mcp__engram__mem_update,mcp__engram__mem_current_project,mcp__engram__mem_judge\n\nAfter loading tools, call mem_context to check for prior session history before responding."}}'
 }
 
 json_string_value_without_jq() {
@@ -542,9 +554,11 @@ if [ "$ELAPSED" -gt 900 ]; then
   esac
 
   if [ -z "$LAST_NUDGE_EPOCH" ] || [ "$(( NOW_EPOCH - LAST_NUDGE_EPOCH ))" -ge "$NUDGE_COOLDOWN" ]; then
-    printf '%s' "$NOW_EPOCH" > "$NUDGE_STATE_FILE" 2>/dev/null || true
+    printf '%s\n' "$NOW_EPOCH" > "$NUDGE_STATE_FILE" 2>/dev/null || true
+    # additionalContext (not systemMessage) so the nudge reaches the model — see
+    # print_toolsearch_message above.
     OUTPUT=$(jq -n \
-      '{"systemMessage": "MEMORY REMINDER: It'\''s been over 15 minutes since your last save. If you'\''ve made decisions, discoveries, or completed significant work, call mem_save now."}')
+      '{hookSpecificOutput: {hookEventName: "UserPromptSubmit", additionalContext: "MEMORY REMINDER: It'\''s been over 15 minutes since your last save. If you'\''ve made decisions, discoveries, or completed significant work, call mem_save now."}}')
   fi
 fi
 
