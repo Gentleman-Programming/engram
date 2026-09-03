@@ -17,11 +17,17 @@ import (
 	engramsync "github.com/Gentleman-Programming/engram/v2/internal/sync"
 )
 
+const (
+	ordinaryOperationTimeout = 30 * time.Second
+	writeChunkTimeout        = 5 * time.Minute
+)
+
 type RemoteTransport struct {
-	baseURL    string
-	token      string
-	project    string
-	httpClient *http.Client
+	baseURL         string
+	token           string
+	project         string
+	httpClient      *http.Client
+	writeHTTPClient *http.Client
 }
 
 type HTTPStatusError struct {
@@ -92,7 +98,10 @@ func NewRemoteTransport(baseURL, token, project string) (*RemoteTransport, error
 		token:   strings.TrimSpace(token),
 		project: project,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: ordinaryOperationTimeout,
+		},
+		writeHTTPClient: &http.Client{
+			Timeout: writeChunkTimeout,
 		},
 	}, nil
 }
@@ -210,7 +219,7 @@ func (rt *RemoteTransport) WriteChunk(chunkID string, data []byte, entry engrams
 	req.Header.Set("Content-Type", "application/json")
 	rt.setAuthorization(req)
 
-	resp, err := rt.httpClient.Do(req)
+	resp, err := rt.writeHTTPClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("cloud: push chunk %s: %w", chunkID, err)
 	}
@@ -312,7 +321,7 @@ func NewMutationTransport(baseURL, token string) (*MutationTransport, error) {
 		baseURL: normalized,
 		token:   strings.TrimSpace(token),
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: ordinaryOperationTimeout,
 		},
 	}, nil
 }
