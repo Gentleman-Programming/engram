@@ -1239,7 +1239,7 @@ func cmdTUI(cfg store.Config) {
 
 func cmdSearch(cfg store.Config) {
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "usage: engram search <query> [--type TYPE] [--project PROJECT|--all] [--scope SCOPE] [--limit N] [--match all|any]")
+		fmt.Fprintln(os.Stderr, "usage: engram search <query> [--type TYPE] [--project PROJECT|--all] [--scope SCOPE] [--org ORG] [--limit N] [--match all|any]")
 		exitFunc(1)
 	}
 
@@ -1279,6 +1279,14 @@ func cmdSearch(cfg store.Config) {
 				opts.MatchMode = os.Args[i+1]
 				i++
 			}
+		case "--org":
+			if i+1 >= len(os.Args) || strings.HasPrefix(os.Args[i+1], "-") {
+				fmt.Fprintln(os.Stderr, "error: --org requires a value")
+				exitFunc(1)
+				return
+			}
+			opts.Org = os.Args[i+1]
+			i++
 		default:
 			queryParts = append(queryParts, os.Args[i])
 		}
@@ -1320,14 +1328,18 @@ func cmdSearch(cfg store.Config) {
 		if r.Project != nil {
 			project = fmt.Sprintf(" | project: %s", *r.Project)
 		}
-		fmt.Printf("[%d] #%d (%s) — %s\n    %s\n    %s%s | scope: %s\n\n",
+		org := ""
+		if r.Org != nil {
+			org = fmt.Sprintf(" | org: %s", *r.Org)
+		}
+		fmt.Printf("[%d] #%d (%s) — %s\n    %s\n    %s%s | scope: %s%s\n\n",
 			i+1, r.ID, r.Type, r.Title,
 			truncate(r.Content, 300),
-			timeutil.FormatLocal(r.CreatedAt), project, r.Scope)
+			timeutil.FormatLocal(r.CreatedAt), project, r.Scope, org)
 	}
 }
 
-const saveUsage = "usage: engram save <title> <content> [--type TYPE] [--project PROJECT] [--scope SCOPE] [--topic TOPIC_KEY]"
+const saveUsage = "usage: engram save <title> <content> [--type TYPE] [--project PROJECT] [--scope SCOPE] [--topic TOPIC_KEY] [--org ORG]"
 
 type saveArgs struct {
 	title       string
@@ -1336,6 +1348,7 @@ type saveArgs struct {
 	projectName string
 	scope       string
 	topicKey    string
+	org         string
 }
 
 // parseSaveArgs accepts save flags anywhere around the two required positionals.
@@ -1352,7 +1365,7 @@ func parseSaveArgs(args []string) (saveArgs, error) {
 			continue
 		}
 		if !endOfOptions && strings.HasPrefix(arg, "-") {
-			if arg != "--type" && arg != "--project" && arg != "--scope" && arg != "--topic" {
+			if arg != "--type" && arg != "--project" && arg != "--scope" && arg != "--topic" && arg != "--org" {
 				return saveArgs{}, fmt.Errorf("unknown save flag: %s", arg)
 			}
 			if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" || strings.HasPrefix(args[i+1], "-") {
@@ -1368,6 +1381,8 @@ func parseSaveArgs(args []string) (saveArgs, error) {
 				parsed.scope = args[i]
 			case "--topic":
 				parsed.topicKey = args[i]
+			case "--org":
+				parsed.org = args[i]
 			}
 			continue
 		}
@@ -1398,6 +1413,7 @@ func cmdSave(cfg store.Config) {
 	projectName := args.projectName
 	scope := args.scope
 	topicKey := args.topicKey
+	org := args.org
 
 	// Reject titleless saves before opening the store or creating a session
 	// (#459). The store applies the same rule as a backstop.
@@ -1446,6 +1462,15 @@ func cmdSave(cfg store.Config) {
 		return
 	}
 
+	// --org wins when given explicitly; otherwise inherit from the nearest
+	// .engram/config.json org field for this cwd, independent of how the
+	// project name itself was resolved (#776).
+	if strings.TrimSpace(org) == "" {
+		if cfgResult := detectProjectFull(cwd); cfgResult.Org != "" {
+			org = cfgResult.Org
+		}
+	}
+
 	s, err := storeNew(cfg)
 	if err != nil {
 		fatal(err)
@@ -1464,6 +1489,7 @@ func cmdSave(cfg store.Config) {
 		Project:   projectName,
 		Scope:     scope,
 		TopicKey:  topicKey,
+		Org:       org,
 	})
 	if err != nil {
 		fatal(err)
@@ -2329,6 +2355,7 @@ func cmdObsidianExport(cfg store.Config) {
 	var (
 		vault       string
 		project     string
+		org         string
 		limit       int
 		since       string
 		force       bool
@@ -2350,6 +2377,14 @@ func cmdObsidianExport(cfg store.Config) {
 				project = os.Args[i+1]
 				i++
 			}
+		case "--org":
+			if i+1 >= len(os.Args) || strings.HasPrefix(os.Args[i+1], "-") {
+				fmt.Fprintln(os.Stderr, "error: --org requires a value")
+				exitFunc(1)
+				return
+			}
+			org = os.Args[i+1]
+			i++
 		case "--all":
 			allProjects = true
 		case "--limit":
@@ -2428,6 +2463,7 @@ func cmdObsidianExport(cfg store.Config) {
 	exportCfg := obsidian.ExportConfig{
 		VaultPath:   vault,
 		Project:     project,
+		Org:         org,
 		Limit:       limit,
 		Force:       force,
 		GraphConfig: graphMode,
@@ -2626,13 +2662,27 @@ func cmdProjectsRescueOwnership(cfg store.Config) {
 }
 
 func cmdProjectsList(cfg store.Config) {
+	org := ""
+	for i := 3; i < len(os.Args); i++ {
+		switch os.Args[i] {
+		case "--org":
+			if i+1 >= len(os.Args) || strings.HasPrefix(os.Args[i+1], "-") {
+				fmt.Fprintln(os.Stderr, "error: --org requires a value")
+				exitFunc(1)
+				return
+			}
+			org = os.Args[i+1]
+			i++
+		}
+	}
+
 	s, err := storeNew(cfg)
 	if err != nil {
 		fatal(err)
 	}
 	defer s.Close()
 
-	projects, err := s.ListProjectsWithStats()
+	projects, err := s.ListProjectsWithStats(org)
 	if err != nil {
 		fatal(err)
 	}
@@ -2642,7 +2692,11 @@ func cmdProjectsList(cfg store.Config) {
 		return
 	}
 
-	fmt.Printf("Projects (%d):\n", len(projects))
+	if org != "" {
+		fmt.Printf("Projects (%d) — org: %s\n", len(projects), org)
+	} else {
+		fmt.Printf("Projects (%d):\n", len(projects))
+	}
 	for _, p := range projects {
 		sessionWord := "sessions"
 		if p.SessionCount == 1 {
@@ -2813,7 +2867,7 @@ func cmdProjectsConsolidate(cfg store.Config) {
 		// Only normalization-equivalent legacy names are safe automatic candidates.
 		similar := findNormalizationEquivalentProjects(canonical, allNames)
 
-		allStats, _ := s.ListProjectsWithStats()
+		allStats, _ := s.ListProjectsWithStats("")
 		statsMap := make(map[string]store.ProjectStats)
 		for _, ps := range allStats {
 			statsMap[ps.Name] = ps
@@ -2902,7 +2956,7 @@ func cmdProjectsConsolidate(cfg store.Config) {
 	}
 
 	// --all mode: group all projects by normalization equivalence.
-	projects, err := s.ListProjectsWithStats()
+	projects, err := s.ListProjectsWithStats("")
 	if err != nil {
 		fatal(err)
 	}
@@ -3057,7 +3111,7 @@ func cmdProjectsPrune(cfg store.Config) {
 	}
 	defer s.Close()
 
-	allStats, err := s.ListProjectsWithStats()
+	allStats, err := s.ListProjectsWithStats("")
 	if err != nil {
 		fatal(err)
 	}
@@ -3605,8 +3659,8 @@ Commands:
   test [suite] [--quick] [--json]
                      Run isolated local reliability and performance self-tests
                        suites: reliability, performance (default: both)
-  search <query>     Search memories [--type TYPE] [--project PROJECT|--all] [--scope SCOPE] [--limit N] [--match all|any]
-  save <title> <msg> Save a memory  [--type TYPE] [--project PROJECT] [--scope SCOPE]
+  search <query>     Search memories [--type TYPE] [--project PROJECT|--all] [--scope SCOPE] [--org ORG] [--limit N] [--match all|any]
+  save <title> <msg> Save a memory  [--type TYPE] [--project PROJECT] [--scope SCOPE] [--org ORG]
   delete <obs_id>    Delete an observation [--hard] (soft-delete by default; --hard removes permanently)
   delete session <id>
                      Delete a session by ID (session must have no observations)
@@ -3634,7 +3688,8 @@ Commands:
   import <file>      Import memories from a JSON export file
   init [name]        Initialize an Engram project (.engram/config.json) in current directory
                        --force, -f   Overwrite existing .engram/config.json
-  projects list      List all projects with observation, session, and prompt counts
+  projects list [--org ORG]
+                     List all projects with observation, session, and prompt counts
   projects consolidate [--all] [--dry-run]
                      Merge similar project names into one canonical name
                        --all      Scan ALL projects for similar name groups
@@ -3661,6 +3716,7 @@ Commands:
                      Export memories to an Obsidian-compatible markdown vault
                        --vault         Path to Obsidian vault root (required)
                         --project       Filter export to a single project (optional; cannot combine with --all)
+                        --org           Filter export to a single org (optional)
                         --all           Export every project
                        --limit         Cap exported observations at N (optional)
                        --since         Export only observations after this date, e.g. 2026-01-01 (optional)
