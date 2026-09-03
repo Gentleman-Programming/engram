@@ -8,15 +8,9 @@ import (
 	"testing"
 )
 
-// Layer 2 of the Claude Code hook test strategy: static assertions over hook
-// sources and hooks.json.
-//
-// These run without bash or jq, so they still guard the contracts when
-// claude_code_hook_behavior_test.go skips. They are deliberately coarse — a
-// source-text assertion can always be satisfied by text that does not satisfy
-// the contract, which is why the behavior tests exist. Assert here only what
-// has no interpreter to run (hooks.json) or no dependable runner (the
-// PowerShell fallback); everything else belongs in Layer 1.
+// Layer 2 of the Claude Code hook test strategy: the small interpreter-free
+// backstops for hooks.json and the PowerShell fallback. Bash contracts belong
+// to the behavior tests, which execute the hooks and parse their output.
 
 func claudeScript(t *testing.T, name string) string {
 	t.Helper()
@@ -27,6 +21,78 @@ func claudeScript(t *testing.T, name string) string {
 		t.Fatalf("cannot read %s: %v", name, err)
 	}
 	return string(data)
+}
+
+var powerShellBootstrapTools = []string{
+	"mem_save", "mem_search", "mem_context", "mem_session_summary",
+	"mem_session_start", "mem_session_end", "mem_get_observation",
+	"mem_suggest_topic_key", "mem_capture_passive", "mem_save_prompt",
+	"mem_update", "mem_current_project", "mem_judge",
+}
+
+// powerShellToolSearchSet reads the ToolSearch message assignment inside its
+// intended function body and returns its exact comma-delimited tokens.
+func powerShellToolSearchSet(t *testing.T, script string) map[string]bool {
+	t.Helper()
+	const functionStart = "function Write-ToolSearchMessage {"
+	start := strings.Index(script, functionStart)
+	if start < 0 {
+		t.Fatal("PowerShell hook has no Write-ToolSearchMessage function")
+	}
+	body := script[start+len(functionStart):]
+	endBody := strings.Index(body, "\n}")
+	if endBody < 0 {
+		t.Fatal("PowerShell hook has an unterminated Write-ToolSearchMessage function")
+	}
+	for _, line := range strings.Split(body[:endBody], "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, `$message = "`) {
+			continue
+		}
+		list := line[len(`$message = "`):]
+		start := strings.Index(list, "select:")
+		if start < 0 {
+			continue
+		}
+		list = list[start+len("select:"):]
+		end := strings.Index(list, "`n")
+		if end < 0 {
+			t.Fatalf("PowerShell ToolSearch message has no terminating `n: %q", line)
+		}
+		set := make(map[string]bool)
+		for _, token := range strings.Split(list[:end], ",") {
+			if token != "" {
+				set[token] = true
+			}
+		}
+		return set
+	}
+	t.Fatal("PowerShell hook has no $message assignment with a ToolSearch select: list")
+	return nil
+}
+
+func powerShellToolSearchFixture(lines ...string) string {
+	return "function Write-ToolSearchMessage {\n" + strings.Join(lines, "\n") + "\n}"
+}
+
+func assertExactPowerShellToolSearchNames(t *testing.T, listed map[string]bool) {
+	t.Helper()
+	want := make(map[string]bool, len(powerShellBootstrapTools)*2)
+	for _, prefix := range []string{"mcp__engram__", "mcp__plugin_engram_engram__"} {
+		for _, tool := range powerShellBootstrapTools {
+			want[prefix+tool] = true
+		}
+	}
+	for name := range want {
+		if !listed[name] {
+			t.Errorf("PowerShell ToolSearch list is missing %q", name)
+		}
+	}
+	for name := range listed {
+		if !want[name] {
+			t.Errorf("PowerShell ToolSearch list contains unexpected name %q", name)
+		}
+	}
 }
 
 // Defect 4: the SessionStart matcher must cover resumed and forked sessions.
@@ -69,41 +135,24 @@ func TestSessionStartMatcherCoversResumeAndFork(t *testing.T) {
 	for _, tok := range strings.Split(matcher, "|") {
 		tokens[tok] = true
 	}
-	for _, want := range []string{"startup", "resume", "clear", "fork"} {
-		if !tokens[want] {
-			t.Errorf("SessionStart session-start.sh matcher %q is missing exact token %q - resumed/forked sessions get no context injection", matcher, want)
+	want := map[string]bool{"startup": true, "resume": true, "clear": true, "fork": true}
+	for token := range want {
+		if !tokens[token] {
+			t.Errorf("SessionStart session-start.sh matcher %q is missing exact token %q - resumed/forked sessions get no context injection", matcher, token)
+		}
+	}
+	for token := range tokens {
+		if !want[token] {
+			t.Errorf("SessionStart session-start.sh matcher %q includes unexpected token %q", matcher, token)
 		}
 	}
 }
 
-// Defect 1 (bash): the emitted payload shape is asserted by executing the hook
-// and parsing its stdout — see TestBootstrapEmitsToolSearchPayload and
-// TestNudgeEmitsMemoryReminder in claude_code_hook_behavior_test.go. A parsed
-// payload cannot be satisfied by a comment, by the wrong nesting level, or by
-// a systemMessage, so the string prohibitions this test used to carry are gone.
-//
-// This assertion remains because it costs nothing and localises the failure to
-// the emitting function when the behavior tests skip for a missing jq.
-func TestUserPromptSubmitShellHasBootstrapEmitter(t *testing.T) {
-	script := claudeScript(t, "user-prompt-submit.sh")
-
-	if !strings.Contains(script, "print_toolsearch_message()") {
-		t.Error("user-prompt-submit.sh no longer defines print_toolsearch_message - the first-message bootstrap emitter is gone")
-	}
-}
-
 // Defect 1 (PowerShell parity): the Windows-native fallback must use the same
-// additionalContext shape. The assertions target emit-only tokens (property
-// assignments and the quoted event value), not bare words: the .ps1 comments
-// mention "additionalContext" and "systemMessage", so a word search would pass
-// even if the emitted object wrapper or event value were removed.
+// additionalContext shape and preserve its documented empty subsequent reply.
 func TestUserPromptSubmitPowerShellUsesAdditionalContext(t *testing.T) {
-	root := repoRoot(t)
-	data, err := os.ReadFile(filepath.Join(root, "plugin", "claude-code", "scripts", "user-prompt-submit.ps1"))
-	if err != nil {
-		t.Fatalf("cannot read user-prompt-submit.ps1: %v", err)
-	}
-	script := string(data)
+	script := claudeScript(t, "user-prompt-submit.ps1")
+	normalized := strings.ReplaceAll(script, "\r\n", "\n")
 
 	for _, want := range []string{
 		"hookSpecificOutput = [PSCustomObject]", // the wrapper object
@@ -118,22 +167,37 @@ func TestUserPromptSubmitPowerShellUsesAdditionalContext(t *testing.T) {
 	if strings.Contains(script, "systemMessage =") {
 		t.Error("user-prompt-submit.ps1 still emits a systemMessage output field - it never reaches the model (issue #145)")
 	}
+	if !strings.Contains(normalized, "function Write-EmptyHookResponse {\n  Write-Output '{}'\n}") ||
+		!strings.Contains(normalized, "Write-EmptyHookResponse\n  exit 0") {
+		t.Error("user-prompt-submit.ps1 must retain its documented empty subsequent response")
+	}
+	assertExactPowerShellToolSearchNames(t, powerShellToolSearchSet(t, script))
 }
 
-// Defect 2 (wrong tool-name prefix / dual-prefix bootstrap) is covered by
-// TestClaudeCodeUserPromptHookCovers{Direct,Plugin}ServerID in
-// internal/setup/setup_test.go, alongside the other Claude Code setup tests.
-
-// Defect 3: extraction precedence and the .stdout fallback are asserted by
-// executing the hook against fixture payloads and inspecting the captured POST
-// — see TestSubagentStopPrefersLastAssistantMessage,
-// TestSubagentStopFallsBackToStdout, and TestSubagentStopSkipsEmptyPayload in
-// claude_code_hook_behavior_test.go. Those also cover the pipeline's quoting,
-// which this file cannot reach.
-func TestSubagentStopPostsToPassiveEndpoint(t *testing.T) {
-	script := claudeScript(t, "subagent-stop.sh")
-
-	if !strings.Contains(script, "/observations/passive") {
-		t.Error("subagent-stop.sh no longer posts to /observations/passive - passive capture is dead")
-	}
+// mem_save is a prefix of mem_save_prompt; compare parsed tokens, not source
+// substrings. A comment that looks like an assignment must not become the list.
+func TestPowerShellToolSearchSetRejectsFalsePositives(t *testing.T) {
+	t.Run("substring", func(t *testing.T) {
+		set := powerShellToolSearchSet(t, powerShellToolSearchFixture("$message = \"select:mcp__engram__mem_save_prompt`n\""))
+		if set["mcp__engram__mem_save"] || !set["mcp__engram__mem_save_prompt"] {
+			t.Errorf("set = %v, want only mem_save_prompt", set)
+		}
+	})
+	t.Run("comment marker", func(t *testing.T) {
+		script := powerShellToolSearchFixture(
+			"# $message = \"select:mcp__engram__mem_save`n\"",
+			"$message = \"select:mcp__engram__mem_search`n\"")
+		set := powerShellToolSearchSet(t, script)
+		if set["mcp__engram__mem_save"] || !set["mcp__engram__mem_search"] {
+			t.Errorf("set = %v, want only the real mem_search assignment", set)
+		}
+	})
+	t.Run("misplaced assignment", func(t *testing.T) {
+		script := "$message = \"select:mcp__engram__mem_save`n\"\n" +
+			powerShellToolSearchFixture("$message = \"select:mcp__engram__mem_search`n\"")
+		set := powerShellToolSearchSet(t, script)
+		if set["mcp__engram__mem_save"] || !set["mcp__engram__mem_search"] {
+			t.Errorf("set = %v, want only the Write-ToolSearchMessage assignment", set)
+		}
+	})
 }

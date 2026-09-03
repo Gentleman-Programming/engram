@@ -38,14 +38,16 @@ type hookPayload struct {
 	SystemMessage string `json:"systemMessage"`
 }
 
-// requireHookBinaries skips when an interpreter the hooks need is missing.
-// Skipping is acceptable only because Layer 2 still guards these contracts
-// statically; without that backstop a skip would leave them unchecked.
+// requireHookBinaries skips only when the host cannot run the Bash hooks.
+// hooks.json and the PowerShell fallback still have interpreter-free backstops.
 func requireHookBinaries(t *testing.T) {
 	t.Helper()
 	for _, bin := range []string{"bash", "jq"} {
 		if _, err := exec.LookPath(bin); err != nil {
-			t.Skipf("%s not in PATH - skipping hook behavior tests (claude_code_hook_enforcement_test.go still covers these contracts statically)", bin)
+			t.Skipf("%s not in PATH - skipping Bash hook behavior tests", bin)
+		}
+		if err := exec.Command(bin, "--version").Run(); err != nil {
+			t.Skipf("%s is not runnable - skipping Bash hook behavior tests: %v", bin, err)
 		}
 	}
 }
@@ -123,12 +125,9 @@ func serverPort(t *testing.T, srv *httptest.Server) string {
 // scan stops at the newline terminating the list, so no name can be satisfied
 // by a longer name that merely contains it.
 //
-// This is a counterpart to toolSearchSelectSet (internal/setup/setup_test.go).
-// The key difference: selectNames parses RUNTIME-emitted additionalContext
-// (no comments → a single select: anchor is sufficient), while toolSearchSelectSet
-// parses SCRIPT SOURCE (has comments → needs scan-largest robustness to avoid
-// accidental coupling to comment content). Keep them in sync if the select:
-// format changes.
+// Unlike the PowerShell source parser in claude_code_hook_enforcement_test.go,
+// this parses runtime-emitted additionalContext, where a single select: anchor
+// has no comment-marker ambiguity.
 func selectNames(t *testing.T, additionalContext string) map[string]bool {
 	t.Helper()
 	idx := strings.Index(additionalContext, "select:")
@@ -146,6 +145,33 @@ func selectNames(t *testing.T, additionalContext string) map[string]bool {
 		}
 	}
 	return set
+}
+
+var claudeCodeBootstrapTools = []string{
+	"mem_save", "mem_search", "mem_context", "mem_session_summary",
+	"mem_session_start", "mem_session_end", "mem_get_observation",
+	"mem_suggest_topic_key", "mem_capture_passive", "mem_save_prompt",
+	"mem_update", "mem_current_project", "mem_judge",
+}
+
+func assertToolSearchNames(t *testing.T, listed map[string]bool) {
+	t.Helper()
+	want := make(map[string]bool, len(claudeCodeBootstrapTools)*2)
+	for _, prefix := range []string{"mcp__engram__", "mcp__plugin_engram_engram__"} {
+		for _, tool := range claudeCodeBootstrapTools {
+			want[prefix+tool] = true
+		}
+	}
+	for name := range want {
+		if !listed[name] {
+			t.Errorf("emitted select: list is missing %q", name)
+		}
+	}
+	for name := range listed {
+		if !want[name] {
+			t.Errorf("emitted select: list contains unexpected name %q", name)
+		}
+	}
 }
 
 // decodeHookPayload parses hook stdout and fails loudly on malformed JSON: the
@@ -169,9 +195,8 @@ func deadServer(t *testing.T) *httptest.Server {
 	return srv
 }
 
-// Defect 1: the first-message bootstrap must reach the model, which means
-// additionalContext nested inside hookSpecificOutput — not systemMessage, and
-// not additionalContext at the top level.
+// Defects 1 and 2: the first-message bootstrap must reach the model through
+// additionalContext and load the exact ToolSearch names for both install modes.
 func TestBootstrapEmitsToolSearchPayload(t *testing.T) {
 	requireHookBinaries(t)
 	sessionID := newSessionID(t)
@@ -190,33 +215,7 @@ func TestBootstrapEmitsToolSearchPayload(t *testing.T) {
 	if payload.HookSpecificOutput.AdditionalContext == "" {
 		t.Error("hookSpecificOutput.additionalContext is empty - the bootstrap delivers nothing")
 	}
-}
-
-// Defect 2: one select: list must serve both install modes. ToolSearch resolves
-// whichever names exist and ignores the rest, so listing both prefixes is safe.
-func TestBootstrapCoversBothInstallPrefixes(t *testing.T) {
-	requireHookBinaries(t)
-	sessionID := newSessionID(t)
-	srv := deadServer(t)
-
-	stdin := fmt.Sprintf(`{"session_id":%q,"cwd":%q}`, sessionID, t.TempDir())
-	payload := decodeHookPayload(t, runHook(t, "user-prompt-submit.sh", stdin,
-		map[string]string{"ENGRAM_PORT": serverPort(t, srv)}))
-
-	listed := selectNames(t, payload.HookSpecificOutput.AdditionalContext)
-	tools := []string{
-		"mem_save", "mem_search", "mem_context", "mem_session_summary",
-		"mem_session_start", "mem_session_end", "mem_get_observation",
-		"mem_suggest_topic_key", "mem_capture_passive", "mem_save_prompt",
-		"mem_update", "mem_current_project", "mem_judge",
-	}
-	for _, prefix := range []string{"mcp__engram__", "mcp__plugin_engram_engram__"} {
-		for _, tool := range tools {
-			if want := prefix + tool; !listed[want] {
-				t.Errorf("emitted select: list is missing %q", want)
-			}
-		}
-	}
+	assertToolSearchNames(t, selectNames(t, payload.HookSpecificOutput.AdditionalContext))
 }
 
 // The marker file makes the bootstrap fire exactly once per session; a repeat
@@ -229,7 +228,11 @@ func TestSecondMessageEmitsNoContext(t *testing.T) {
 	stdin := fmt.Sprintf(`{"session_id":%q,"cwd":%q}`, sessionID, t.TempDir())
 
 	runHook(t, "user-prompt-submit.sh", stdin, env)
-	payload := decodeHookPayload(t, runHook(t, "user-prompt-submit.sh", stdin, env))
+	stdout := runHook(t, "user-prompt-submit.sh", stdin, env)
+	if got := strings.TrimSpace(stdout); got != "{}" {
+		t.Errorf("second message response = %q, want {}", got)
+	}
+	payload := decodeHookPayload(t, stdout)
 
 	if payload.HookSpecificOutput.AdditionalContext != "" {
 		t.Errorf("bootstrap fired twice for one session: %q", payload.HookSpecificOutput.AdditionalContext)
@@ -264,68 +267,47 @@ func markSessionBootstrapped(t *testing.T, sessionID string) {
 	}
 }
 
-// A save older than 15 minutes must produce a nudge the model actually sees,
-// which again means additionalContext nested in hookSpecificOutput.
-func TestNudgeEmitsMemoryReminder(t *testing.T) {
-	requireHookBinaries(t)
-	sessionID := newSessionID(t)
-	markSessionBootstrapped(t, sessionID)
-	srv := observationsServer(t, 20*time.Minute)
+func TestNudgeBehavior(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		lastSaveAge time.Duration
+		runs        int
+		wantNudge   bool
+	}{
+		{"TestNudgeEmitsMemoryReminder", 20 * time.Minute, 1, true},
+		{"TestNoNudgeWhenSaveIsRecent", time.Minute, 1, false},
+		// Back-to-back runs are inside the 900-second default cooldown. This is
+		// the regression proof for the nudge timestamp's trailing newline.
+		{"TestNudgeIsDebouncedWithinCooldown", 20 * time.Minute, 2, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			requireHookBinaries(t)
+			sessionID := newSessionID(t)
+			markSessionBootstrapped(t, sessionID)
+			srv := observationsServer(t, tt.lastSaveAge)
+			stdin := fmt.Sprintf(`{"session_id":%q,"cwd":%q}`, sessionID, t.TempDir())
+			env := map[string]string{"ENGRAM_PORT": serverPort(t, srv)}
 
-	stdin := fmt.Sprintf(`{"session_id":%q,"cwd":%q}`, sessionID, t.TempDir())
-	payload := decodeHookPayload(t, runHook(t, "user-prompt-submit.sh", stdin,
-		map[string]string{"ENGRAM_PORT": serverPort(t, srv)}))
-
-	if payload.SystemMessage != "" {
-		t.Errorf("nudge emitted systemMessage %q - it never reaches the model (issue #145)", payload.SystemMessage)
-	}
-	if got := payload.HookSpecificOutput.HookEventName; got != "UserPromptSubmit" {
-		t.Errorf("nudge hookSpecificOutput.hookEventName = %q, want %q", got, "UserPromptSubmit")
-	}
-	if !strings.Contains(payload.HookSpecificOutput.AdditionalContext, "MEMORY REMINDER") {
-		t.Errorf("nudge additionalContext = %q, want it to carry MEMORY REMINDER", payload.HookSpecificOutput.AdditionalContext)
-	}
-}
-
-// A recent save must stay silent, or the reminder fires on every message.
-func TestNoNudgeWhenSaveIsRecent(t *testing.T) {
-	requireHookBinaries(t)
-	sessionID := newSessionID(t)
-	markSessionBootstrapped(t, sessionID)
-	srv := observationsServer(t, 1*time.Minute)
-
-	stdin := fmt.Sprintf(`{"session_id":%q,"cwd":%q}`, sessionID, t.TempDir())
-	payload := decodeHookPayload(t, runHook(t, "user-prompt-submit.sh", stdin,
-		map[string]string{"ENGRAM_PORT": serverPort(t, srv)}))
-
-	if payload.HookSpecificOutput.AdditionalContext != "" {
-		t.Errorf("nudged after a 1-minute-old save: %q", payload.HookSpecificOutput.AdditionalContext)
-	}
-}
-
-// The nudge is debounced per session: without persisting the last-nudge
-// timestamp, an agent with nothing to save never resets the clock and the
-// reminder repeats on every message. This test is the regression proof for the
-// user-prompt-submit.sh:284 trailing-newline fix.
-func TestNudgeIsDebouncedWithinCooldown(t *testing.T) {
-	// Both hook runs occur within the default ENGRAM_NUDGE_COOLDOWN_SECS (900s)
-	// window — trivially true for two back-to-back invocations — so this test
-	// proves the debounce logic, not timing behavior.
-	requireHookBinaries(t)
-	sessionID := newSessionID(t)
-	markSessionBootstrapped(t, sessionID)
-	srv := observationsServer(t, 20*time.Minute)
-	env := map[string]string{"ENGRAM_PORT": serverPort(t, srv)}
-	stdin := fmt.Sprintf(`{"session_id":%q,"cwd":%q}`, sessionID, t.TempDir())
-
-	first := decodeHookPayload(t, runHook(t, "user-prompt-submit.sh", stdin, env))
-	if !strings.Contains(first.HookSpecificOutput.AdditionalContext, "MEMORY REMINDER") {
-		t.Fatalf("first nudge did not fire: %q", first.HookSpecificOutput.AdditionalContext)
-	}
-
-	second := decodeHookPayload(t, runHook(t, "user-prompt-submit.sh", stdin, env))
-	if second.HookSpecificOutput.AdditionalContext != "" {
-		t.Errorf("nudge repeated inside the cooldown window: %q", second.HookSpecificOutput.AdditionalContext)
+			first := decodeHookPayload(t, runHook(t, "user-prompt-submit.sh", stdin, env))
+			gotNudge := strings.Contains(first.HookSpecificOutput.AdditionalContext, "MEMORY REMINDER")
+			if gotNudge != tt.wantNudge {
+				t.Errorf("first nudge = %q, want nudge %t", first.HookSpecificOutput.AdditionalContext, tt.wantNudge)
+			}
+			if tt.wantNudge {
+				if first.SystemMessage != "" {
+					t.Errorf("nudge emitted systemMessage %q - it never reaches the model (issue #145)", first.SystemMessage)
+				}
+				if got := first.HookSpecificOutput.HookEventName; got != "UserPromptSubmit" {
+					t.Errorf("nudge hookSpecificOutput.hookEventName = %q, want %q", got, "UserPromptSubmit")
+				}
+			}
+			if tt.runs == 2 {
+				second := decodeHookPayload(t, runHook(t, "user-prompt-submit.sh", stdin, env))
+				if second.HookSpecificOutput.AdditionalContext != "" {
+					t.Errorf("nudge repeated inside the cooldown window: %q", second.HookSpecificOutput.AdditionalContext)
+				}
+			}
+		})
 	}
 }
 
@@ -369,85 +351,48 @@ func captureServer(t *testing.T) (*httptest.Server, func() []passiveCapture) {
 	}
 }
 
-// Defect 3: Claude Code's SubagentStop payload carries the subagent's final text
-// in last_assistant_message. Reading .stdout captured nothing and every subagent
-// run no-op'd.
-func TestSubagentStopPrefersLastAssistantMessage(t *testing.T) {
-	requireHookBinaries(t)
-	srv, captured := captureServer(t)
-
-	stdin := fmt.Sprintf(`{"session_id":"sess-primary","cwd":%q,"last_assistant_message":"from last_assistant_message","stdout":"from stdout"}`, t.TempDir())
-	runHook(t, "subagent-stop.sh", stdin, map[string]string{"ENGRAM_PORT": serverPort(t, srv)})
-
-	got := captured()
-	if len(got) != 1 {
-		t.Fatalf("got %d passive captures, want 1: %+v", len(got), got)
-	}
-	if got[0].Content != "from last_assistant_message" {
-		t.Errorf("content = %q, want the last_assistant_message value", got[0].Content)
-	}
-	if got[0].SessionID != "sess-primary" {
-		t.Errorf("session_id = %q, want %q", got[0].SessionID, "sess-primary")
-	}
-	if got[0].Source != "subagent-stop" {
-		t.Errorf("source = %q, want %q", got[0].Source, "subagent-stop")
-	}
-}
-
-// The .stdout fallback keeps other harnesses working; a
-// last_assistant_message-only extraction would silently break them.
-func TestSubagentStopFallsBackToStdout(t *testing.T) {
-	requireHookBinaries(t)
-	srv, captured := captureServer(t)
-
-	stdin := fmt.Sprintf(`{"session_id":"sess-fallback","cwd":%q,"stdout":"from stdout"}`, t.TempDir())
-	runHook(t, "subagent-stop.sh", stdin, map[string]string{"ENGRAM_PORT": serverPort(t, srv)})
-
-	got := captured()
-	if len(got) != 1 {
-		t.Fatalf("got %d passive captures, want 1: %+v", len(got), got)
-	}
-	if got[0].Content != "from stdout" {
-		t.Errorf("content = %q, want the stdout value", got[0].Content)
-	}
-}
-
-// Neither field present: the hook must exit without POSTing an empty capture.
-func TestSubagentStopSkipsEmptyPayload(t *testing.T) {
-	requireHookBinaries(t)
-	srv, captured := captureServer(t)
-
-	stdin := fmt.Sprintf(`{"session_id":"sess-empty","cwd":%q}`, t.TempDir())
-	runHook(t, "subagent-stop.sh", stdin, map[string]string{"ENGRAM_PORT": serverPort(t, srv)})
-
-	if got := captured(); len(got) != 0 {
-		t.Errorf("posted %d captures for an empty payload, want 0: %+v", len(got), got)
-	}
-}
-
-// Content that would break naive shell quoting must survive verbatim. Source-
-// text assertions cannot reach this: they see the jq expression, not the
-// quoting of the pipeline that feeds it.
-func TestSubagentStopPreservesShellMetacharacters(t *testing.T) {
-	requireHookBinaries(t)
-	srv, captured := captureServer(t)
-
+func TestSubagentStopPayloadHandling(t *testing.T) {
 	const tricky = "line one\nline \"two\" $HOME `id` 'quoted' \\backslash"
-	payload, err := json.Marshal(map[string]string{
-		"session_id":            "sess-quoting",
-		"cwd":                   t.TempDir(),
-		"last_assistant_message": tricky,
-	})
-	if err != nil {
-		t.Fatalf("marshal fixture: %v", err)
-	}
-	runHook(t, "subagent-stop.sh", string(payload), map[string]string{"ENGRAM_PORT": serverPort(t, srv)})
+	for _, tt := range []struct {
+		name, sessionID, lastAssistantMessage, stdout, want string
+	}{
+		{"TestSubagentStopPrefersLastAssistantMessage", "sess-primary", "from last_assistant_message", "from stdout", "from last_assistant_message"},
+		{"TestSubagentStopFallsBackToStdout", "sess-fallback", "", "from stdout", "from stdout"},
+		{"TestSubagentStopSkipsEmptyPayload", "sess-empty", "", "", ""},
+		{"TestSubagentStopPreservesShellMetacharacters", "sess-quoting", tricky, "", tricky},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			requireHookBinaries(t)
+			srv, captured := captureServer(t)
+			input := map[string]string{"session_id": tt.sessionID, "cwd": t.TempDir()}
+			if tt.lastAssistantMessage != "" {
+				input["last_assistant_message"] = tt.lastAssistantMessage
+			}
+			if tt.stdout != "" {
+				input["stdout"] = tt.stdout
+			}
+			payload, err := json.Marshal(input)
+			if err != nil {
+				t.Fatalf("marshal fixture: %v", err)
+			}
+			runHook(t, "subagent-stop.sh", string(payload), map[string]string{"ENGRAM_PORT": serverPort(t, srv)})
 
-	got := captured()
-	if len(got) != 1 {
-		t.Fatalf("got %d passive captures, want 1: %+v", len(got), got)
-	}
-	if got[0].Content != tricky {
-		t.Errorf("content = %q, want %q", got[0].Content, tricky)
+			got := captured()
+			if tt.want == "" {
+				if len(got) != 0 {
+					t.Errorf("posted %d captures for an empty payload, want 0: %+v", len(got), got)
+				}
+				return
+			}
+			if len(got) != 1 {
+				t.Fatalf("got %d passive captures, want 1: %+v", len(got), got)
+			}
+			if got[0].Content != tt.want {
+				t.Errorf("content = %q, want %q", got[0].Content, tt.want)
+			}
+			if got[0].SessionID != tt.sessionID || got[0].Source != "subagent-stop" {
+				t.Errorf("passive capture = %+v, want session_id %q and source subagent-stop", got[0], tt.sessionID)
+			}
+		})
 	}
 }
