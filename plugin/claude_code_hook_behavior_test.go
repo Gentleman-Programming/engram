@@ -1,6 +1,8 @@
 package plugin_test
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -62,18 +64,16 @@ func nudgeFilePath(sessionID string) string {
 	return filepath.Join("/tmp", "engram-claude-"+sessionID+"-last-nudge")
 }
 
-// newSessionID derives a unique, deterministic id from the test name. It clears
-// state left by an interrupted earlier run so the first-message path is
-// reachable, and registers the same cleanup on exit.
+// newSessionID derives a unique, deterministic UUID from the test name. This
+// matches the hook's unencoded session-key contract. It clears state left by an
+// interrupted earlier run so the first-message path is reachable, and registers
+// the same cleanup on exit.
 func newSessionID(t *testing.T) string {
 	t.Helper()
-	id := strings.Map(func(r rune) rune {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-			return r
-		}
-		return '-'
-	}, t.Name())
+	hash := sha256.Sum256([]byte(t.Name()))
+	id := hex.EncodeToString(hash[:16])
+	id = id[:12] + "4" + id[13:16] + "8" + id[17:]
+	id = id[:8] + "-" + id[8:12] + "-" + id[12:16] + "-" + id[16:20] + "-" + id[20:]
 
 	clean := func() {
 		os.Remove(stateFilePath(id))
@@ -246,6 +246,11 @@ func TestSecondMessageEmitsNoContext(t *testing.T) {
 func observationsServer(t *testing.T, lastSaveAge time.Duration) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/project/current" {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"project":"engram","project_source":"config"}`)
+			return
+		}
 		if !strings.HasPrefix(r.URL.Path, "/observations") {
 			http.NotFound(w, r)
 			return
@@ -328,6 +333,11 @@ func captureServer(t *testing.T) (*httptest.Server, func() []passiveCapture) {
 	var got []passiveCapture
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/project/current" {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"project":"engram","project_source":"config"}`)
+			return
+		}
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Errorf("read passive capture body: %v", err)
