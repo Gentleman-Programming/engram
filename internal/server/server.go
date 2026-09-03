@@ -1552,7 +1552,7 @@ func (s *Server) handleCompactionContext(w http.ResponseWriter, r *http.Request)
 // backed by the same store query as the MCP tool and `engram projects list` so
 // CLI, MCP, and HTTP never diverge. An empty store is a successful empty listing.
 func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
-	projects, err := s.store.ListProjectsWithStats()
+	projects, err := s.store.ListProjectsWithStats("")
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
