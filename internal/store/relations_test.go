@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -234,6 +235,77 @@ func TestFindCandidates_DoesNotDuplicatePendingPairs(t *testing.T) {
 	}
 	if len(semanticCandidates) != 1 || semanticCandidates[0].SyncID != candidateSyncID {
 		t.Fatalf("semantic FindCandidates = %+v, want existing pending candidate %q", semanticCandidates, candidateSyncID)
+	}
+}
+
+// TestFindCandidates_ConcurrentCallsInsertOnePendingPair verifies that
+// simultaneous normal candidate detection calls create and return one pending
+// relation for a pair, even when every call initially finds the same candidate.
+func TestFindCandidates_ConcurrentCallsInsertOnePendingPair(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, candidateSyncID := addTestObs(t, s, "Concurrent pending pair candidate", "decision", "testproject", "project")
+	savedID, sourceSyncID := addTestObs(t, s, "Concurrent pending pair source", "decision", "testproject", "project")
+	opts := CandidateOptions{
+		Project:   "testproject",
+		Scope:     "project",
+		Limit:     3,
+		BM25Floor: ptrFloat64(-10.0),
+	}
+
+	const callers = 16
+	type findResult struct {
+		candidates []Candidate
+		err        error
+	}
+	start := make(chan struct{})
+	results := make(chan findResult, callers)
+	var ready sync.WaitGroup
+	ready.Add(callers)
+	for range callers {
+		go func() {
+			ready.Done()
+			<-start
+			candidates, err := s.FindCandidates(savedID, opts)
+			results <- findResult{candidates: candidates, err: err}
+		}()
+	}
+	ready.Wait()
+	close(start)
+
+	var findErrors []error
+	returnedCandidates := make([]Candidate, 0, 1)
+	for range callers {
+		result := <-results
+		if result.err != nil {
+			findErrors = append(findErrors, result.err)
+			continue
+		}
+		returnedCandidates = append(returnedCandidates, result.candidates...)
+	}
+	if len(findErrors) != 0 {
+		t.Fatalf("FindCandidates errors = %v", findErrors)
+	}
+	if len(returnedCandidates) != 1 {
+		t.Fatalf("returned inserted candidates = %+v, want exactly one", returnedCandidates)
+	}
+	if returnedCandidates[0].SyncID != candidateSyncID {
+		t.Fatalf("FindCandidates returned candidate %q, want %q", returnedCandidates[0].SyncID, candidateSyncID)
+	}
+	if returnedCandidates[0].JudgmentID == "" {
+		t.Fatal("FindCandidates returned a candidate without an inserted judgment ID")
+	}
+
+	var pendingCount int
+	if err := s.db.QueryRow(`
+		SELECT count(*) FROM memory_relations
+		WHERE ((source_id = ? AND target_id = ?)
+		    OR (source_id = ? AND target_id = ?))
+		  AND judgment_status = 'pending'
+	`, sourceSyncID, candidateSyncID, candidateSyncID, sourceSyncID).Scan(&pendingCount); err != nil {
+		t.Fatalf("count pending relations: %v", err)
+	}
+	if pendingCount != 1 {
+		t.Errorf("pending relation count = %d, want 1", pendingCount)
 	}
 }
 

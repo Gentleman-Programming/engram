@@ -450,29 +450,28 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 	// Insert a pending relation row for each candidate.
 	candidates := make([]Candidate, 0, len(raw))
 	for _, rc := range raw {
-		var existing int
-		err := s.db.QueryRow(`
-			SELECT 1 FROM memory_relations
-			WHERE (source_id = ? AND target_id = ?)
-			   OR (source_id = ? AND target_id = ?)
-			LIMIT 1
-		`, sourceSyncID, rc.syncID, rc.syncID, sourceSyncID).Scan(&existing)
-		if err != nil && err != sql.ErrNoRows {
-			log.Printf("[store] FindCandidates: existence check src=%s cand=%s: %v", sourceSyncID, rc.syncID, err)
-			continue
-		}
-		if err == nil {
-			continue
-		}
-
 		judgmentID := newSyncID("rel")
-		_, err = s.db.Exec(`
+		result, err := s.db.Exec(`
 			INSERT INTO memory_relations
 				(sync_id, source_id, target_id, relation, judgment_status, created_at, updated_at)
-			VALUES (?, ?, ?, 'pending', 'pending', datetime('now'), datetime('now'))
-		`, judgmentID, sourceSyncID, rc.syncID)
+			SELECT ?, ?, ?, 'pending', 'pending', datetime('now'), datetime('now')
+			WHERE NOT EXISTS (
+				SELECT 1 FROM memory_relations
+				WHERE (source_id = ? AND target_id = ?)
+				   OR (source_id = ? AND target_id = ?)
+			)
+		`, judgmentID, sourceSyncID, rc.syncID, sourceSyncID, rc.syncID, rc.syncID, sourceSyncID)
 		if err != nil {
 			// Log and skip — don't fail the whole detection.
+			log.Printf("[store] FindCandidates: conditional insert src=%.64s cand=%.64s: %v", sourceSyncID, rc.syncID, err)
+			continue
+		}
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			log.Printf("[store] FindCandidates: conditional insert rows affected src=%.64s cand=%.64s: %v", sourceSyncID, rc.syncID, err)
+			continue
+		}
+		if rowsAffected != 1 {
 			continue
 		}
 		candidates = append(candidates, Candidate{
