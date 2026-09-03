@@ -137,8 +137,7 @@ func TestInstallDeclarativeAgentsRegisterMCPAndInstructions(t *testing.T) {
 			}
 
 			// Instruction surface contains the FULL protocol text. Declarative
-			// adapters (this table) are out of scope for --protocol=slim (see
-			// openspec/changes/setup-protocol-flag/proposal.md, Out of Scope):
+			// adapters (this table) are out of scope for --protocol=slim:
 			// their protocol text is baked in at setup time from
 			// memoryProtocolMarkdown, not read at runtime, so it must always be
 			// the complete markdown — never a truncated/slim variant.
