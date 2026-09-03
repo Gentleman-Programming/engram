@@ -3,6 +3,7 @@
 // re-implementing it with stubs.
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
+import { createServer as createHTTPServer } from "node:http";
 import { createServer } from "node:net";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -83,8 +84,13 @@ async function loadPlugin({ engramBin, port, cwd, sandbox }) {
     },
   });
 
-  const ctx = { cwd, sessionManager: { getSessionId: () => "session-startup" } };
-  return { tools, hooks, ctx };
+  const statusCalls = [];
+  const ctx = {
+    cwd,
+    sessionManager: { getSessionId: () => "session-startup" },
+    ui: { setStatus: (key, text) => statusCalls.push([key, text]) },
+  };
+  return { tools, hooks, ctx, statusCalls };
 }
 
 async function withFixture(options, run) {
@@ -92,10 +98,22 @@ async function withFixture(options, run) {
   const originalBin = process.env.ENGRAM_BIN;
   const originalPort = process.env.ENGRAM_PORT;
   const originalUrl = process.env.ENGRAM_URL;
+  let readyServer;
   try {
     const spawnLog = join(dir, "spawns.log");
     await writeFile(spawnLog, "", "utf8");
     const port = await freePort();
+    readyServer = options.readyServer && createHTTPServer((request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(request.url.startsWith("/project/current") ? { project: "fake-project" } : {}));
+    });
+    if (readyServer) await new Promise((resolve, reject) => {
+      readyServer.once("error", reject);
+      readyServer.listen(port, "127.0.0.1", () => {
+        readyServer.off("error", reject);
+        resolve();
+      });
+    });
     const engramBin = options.missingBin
       ? join(dir, "engram-does-not-exist")
       : await writeFakeEngramBin(dir, { spawnLog, port, readyAfterMs: options.readyAfterMs ?? 0, exitCode: options.exitCode });
@@ -106,6 +124,7 @@ async function withFixture(options, run) {
     if (originalBin === undefined) delete process.env.ENGRAM_BIN; else process.env.ENGRAM_BIN = originalBin;
     if (originalPort === undefined) delete process.env.ENGRAM_PORT; else process.env.ENGRAM_PORT = originalPort;
     if (originalUrl === undefined) delete process.env.ENGRAM_URL; else process.env.ENGRAM_URL = originalUrl;
+    if (readyServer?.listening) await new Promise((resolve) => readyServer.close(resolve));
     await rm(dir, { recursive: true, force: true });
   }
 }
@@ -114,6 +133,22 @@ async function countSpawns(spawnLog) {
   const log = await readFile(spawnLog, "utf8");
   return log.split("\n").filter((line) => line === "serve").length;
 }
+
+test("an initially healthy Engram provider publishes ready status", async () => {
+  await withFixture({ readyServer: true }, async ({ hooks, ctx, statusCalls }) => {
+    await hooks.get("session_start")({}, ctx);
+
+    assert.deepEqual(statusCalls, [["engram", "🧠 fake-project · ready"]]);
+  });
+});
+
+test("an initially unavailable Engram provider publishes offline status", async () => {
+  await withFixture({ exitCode: 1 }, async ({ hooks, ctx, statusCalls, dir }) => {
+    await hooks.get("session_start")({}, ctx);
+
+    assert.deepEqual(statusCalls, [["engram", `🧠 ${dir.split(/[\\/]/).at(-1).toLowerCase()} · offline`]]);
+  });
+});
 
 test("a slow health probe never authorizes a duplicate spawn", async () => {
   await withFixture({ readyAfterMs: 600 }, async ({ hooks, ctx, spawnLog }) => {
