@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/internal/cloud/cloudstore"
-	"github.com/Gentleman-Programming/engram/internal/store"
-	engramsync "github.com/Gentleman-Programming/engram/internal/sync"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/cloudstore"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	engramsync "github.com/Gentleman-Programming/engram/v2/internal/sync"
 )
 
 // ─── Fakes for mutation tests ─────────────────────────────────────────────────
@@ -182,6 +182,175 @@ func (s *fakeMutationStore) InsertMutationBatch(ctx context.Context, batch []Mut
 		s.mutations = append(s.mutations, batch[i])
 	}
 	return seqs, nil
+}
+
+func TestMutationPushStoresCanonicalEncodedPayload(t *testing.T) {
+	ms := newFakeMutationStore()
+	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
+	entries := []MutationEntry{{
+		Project: " proj-a ", Entity: " observation ", Op: " upsert ", Payload: json.RawMessage(`"{\"sync_id\":\"obs-encoded\",\"session_id\":\"sess-1\",\"type\":\"note\",\"title\":\"Encoded\",\"content\":\"stored natively\",\"scope\":\"project\",\"project\":\"wrong\"}"`),
+	}}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", marshalPushRequest(t, entries))
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if len(ms.mutations) != 1 {
+		t.Fatalf("expected one stored mutation, got %+v", ms.mutations)
+	}
+	stored := ms.mutations[0]
+	if stored.Project != "proj-a" || stored.Entity != store.SyncEntityObservation || stored.Op != store.SyncOpUpsert || stored.EntityKey != "obs-encoded" {
+		t.Fatalf("expected canonical stored entry, got %+v", stored)
+	}
+	if len(stored.Payload) == 0 || stored.Payload[0] != '{' {
+		t.Fatalf("expected native JSON payload, got %s", stored.Payload)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(stored.Payload, &payload); err != nil {
+		t.Fatalf("decode stored payload: %v", err)
+	}
+	if payload["project"] != "proj-a" {
+		t.Fatalf("expected authorized project in payload, got %#v", payload["project"])
+	}
+}
+
+func TestMutationPushAcceptsSparseLegacyPayloads(t *testing.T) {
+	tests := []struct {
+		name              string
+		entry             MutationEntry
+		requiredFields    []string
+		expectedCanonical map[string]string
+	}{
+		{
+			name: "session",
+			entry: MutationEntry{
+				Project: "proj-a", Entity: store.SyncEntitySession, EntityKey: "sess-legacy", Op: store.SyncOpUpsert,
+				Payload: json.RawMessage(`{"sync_id":"sess-legacy"}`),
+			},
+			requiredFields: []string{"id", "directory"},
+			expectedCanonical: map[string]string{
+				"id": "sess-legacy", "directory": ".", "project": "proj-a",
+			},
+		},
+		{
+			name: "observation",
+			entry: MutationEntry{
+				Project: "proj-a", Entity: store.SyncEntityObservation, EntityKey: "obs-legacy", Op: store.SyncOpUpsert,
+				Payload: json.RawMessage(`{"sync_id":"obs-legacy","title":"Legacy observation"}`),
+			},
+			requiredFields: []string{"sync_id", "session_id", "type", "title", "content", "scope", "project"},
+			expectedCanonical: map[string]string{
+				"sync_id": "obs-legacy", "session_id": "legacy-obs-legacy", "type": "legacy", "title": "Legacy observation", "content": "obs-legacy", "scope": "project", "project": "proj-a",
+			},
+		},
+		{
+			name: "prompt",
+			entry: MutationEntry{
+				Project: "proj-a", Entity: store.SyncEntityPrompt, EntityKey: "prompt-legacy", Op: store.SyncOpUpsert,
+				Payload: json.RawMessage(`{"sync_id":"prompt-legacy"}`),
+			},
+			requiredFields: []string{"sync_id", "session_id", "content", "project"},
+			expectedCanonical: map[string]string{
+				"sync_id": "prompt-legacy", "session_id": "legacy-prompt-legacy", "content": "prompt-legacy", "project": "proj-a",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ms := newFakeMutationStore()
+			srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", marshalPushRequest(t, []MutationEntry{tt.entry}))
+			req.Header.Set("Authorization", "Bearer secret")
+			req.Header.Set("Content-Type", "application/json")
+			srv.Handler().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected sparse legacy %s payload to return 200, got %d body=%q", tt.name, rec.Code, rec.Body.String())
+			}
+			if len(ms.mutations) != 1 {
+				t.Fatalf("expected one stored %s mutation, got %+v", tt.name, ms.mutations)
+			}
+			stored := ms.mutations[0]
+			if stored.Project != "proj-a" || stored.Entity != tt.entry.Entity || stored.EntityKey != tt.entry.EntityKey || stored.Op != store.SyncOpUpsert {
+				t.Fatalf("expected canonical stored %s metadata, got %+v", tt.name, stored)
+			}
+			if len(stored.Payload) == 0 || stored.Payload[0] != '{' {
+				t.Fatalf("expected native JSON payload, got %s", stored.Payload)
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(stored.Payload, &payload); err != nil {
+				t.Fatalf("decode stored %s payload: %v", tt.name, err)
+			}
+			for _, field := range tt.requiredFields {
+				value, exists := payload[field]
+				text, isString := value.(string)
+				if !exists || !isString || strings.TrimSpace(text) == "" {
+					t.Errorf("expected non-empty canonical %s field %q, got %#v", tt.name, field, value)
+				}
+			}
+			for field, want := range tt.expectedCanonical {
+				if got := payload[field]; got != want {
+					t.Errorf("expected canonical %s field %q to be %q, got %#v", tt.name, field, want, got)
+				}
+			}
+		})
+	}
+}
+
+func TestMutationPushRejectsMalformedMixedBatchWithoutAcknowledgement(t *testing.T) {
+	ms := newFakeMutationStore()
+	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
+	entries := []MutationEntry{
+		{
+			Project: "proj-a", Entity: store.SyncEntitySession, EntityKey: "sess-valid", Op: store.SyncOpUpsert,
+			Payload: json.RawMessage(`{"sync_id":"sess-valid"}`),
+		},
+		{
+			Project: "proj-a", Entity: store.SyncEntityObservation, EntityKey: "obs-invalid", Op: store.SyncOpUpsert,
+			Payload: json.RawMessage(`{"sync_id":"obs-invalid","session_id":"sess-valid","type":"note","title":"Invalid","content":"","scope":"project"}`),
+		},
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", marshalPushRequest(t, entries))
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected malformed mixed batch to return 400, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	var response map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode rejection response: %v", err)
+	}
+	if string(response["error_class"]) != `"repairable"` || string(response["error_code"]) != `"upgrade_repairable_payload_invalid"` {
+		t.Fatalf("expected repairable payload error, got %s", rec.Body.String())
+	}
+	var invalid []struct {
+		Index  int    `json:"index"`
+		Field  string `json:"field"`
+		Entity string `json:"entity"`
+	}
+	if err := json.Unmarshal(response["invalid"], &invalid); err != nil {
+		t.Fatalf("decode invalid entries: %v", err)
+	}
+	if len(invalid) != 1 || invalid[0].Index != 1 || invalid[0].Field != "payload" || invalid[0].Entity != store.SyncEntityObservation {
+		t.Fatalf("expected invalid observation at index 1, got %+v", invalid)
+	}
+	if _, acknowledged := response["accepted_seqs"]; acknowledged {
+		t.Fatalf("expected no accepted sequences for rejected batch, got %s", rec.Body.String())
+	}
+	if len(ms.mutations) != 0 {
+		t.Fatalf("expected atomic rejection with no stored mutations, got %+v", ms.mutations)
+	}
 }
 
 func (s *fakeMutationStore) ListMutationsSince(ctx context.Context, sinceSeq int64, limit int, allowedProjects []string) ([]StoredMutation, bool, int64, error) {

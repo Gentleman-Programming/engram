@@ -1,0 +1,3 @@
+plugin/claude-code/scripts/*.sh text eol=lf
+plugin/codex/scripts/*.sh text eol=lf
+internal/mcp/testdata/tool-contract-v1.json text eol=lf

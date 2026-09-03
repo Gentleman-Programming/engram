@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/internal/llm"
-	"github.com/Gentleman-Programming/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/v2/internal/llm"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
 )
 
 // cmdConflicts is the top-level dispatcher for `engram conflicts <subcommand>`.
@@ -41,35 +41,22 @@ func printConflictsUsage() {
 	fmt.Fprintln(os.Stderr, "usage: engram conflicts <subcommand> [options]")
 	fmt.Fprintln(os.Stderr, "subcommands: list, show, stats, scan, deferred")
 	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, "  list       [--project P]  [--status S]  [--since RFC3339]  [--limit N]")
+	fmt.Fprintln(os.Stderr, "  list       [--project P|--all]  [--status S]  [--since RFC3339]  [--limit N]")
 	fmt.Fprintln(os.Stderr, "  show       <relation_id>")
-	fmt.Fprintln(os.Stderr, "  stats      [--project P]")
-	fmt.Fprintln(os.Stderr, "  scan       [--project P]  [--since RFC3339]  [--dry-run]  [--apply]  [--max-insert N]")
+	fmt.Fprintln(os.Stderr, "  stats      [--project P|--all]")
+	fmt.Fprintln(os.Stderr, "  scan       [--project P|--all]  [--since RFC3339]  [--limit N]  [--cursor ID]  [--dry-run]  [--apply]  [--max-insert N]")
 	fmt.Fprintln(os.Stderr, "             [--semantic]  [--concurrency N]  [--timeout-per-call SECONDS]")
 	fmt.Fprintln(os.Stderr, "             [--max-semantic N]  [--yes]")
 	fmt.Fprintln(os.Stderr, "  deferred   [--status S]  [--limit N]  [--inspect SYNC_ID]  [--replay]")
 }
 
-// resolveConflictsProject returns the explicit project if non-empty, otherwise falls
-// back to detecting the project from the current working directory.
-// On detection failure, writes an error to stderr and calls exitFunc(1).
-func resolveConflictsProject(explicit string) string {
-	if strings.TrimSpace(explicit) != "" {
-		return strings.TrimSpace(explicit)
-	}
-	cwd, err := os.Getwd()
+func resolveConflictsProject(s *store.Store, explicit string, all bool) string {
+	project, err := resolveCLIProjectScope(s, explicit, all, true)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: cannot resolve cwd: %v\n", err)
-		fmt.Fprintln(os.Stderr, "hint: use --project to specify the project explicitly")
-		exitFunc(1)
+		fatal(err)
+		return ""
 	}
-	detected := detectProject(cwd)
-	if detected == "" {
-		fmt.Fprintln(os.Stderr, "error: could not detect project from cwd")
-		fmt.Fprintln(os.Stderr, "hint: use --project to specify the project explicitly")
-		exitFunc(1)
-	}
-	return detected
+	return project
 }
 
 // ─── list ─────────────────────────────────────────────────────────────────────
@@ -78,6 +65,7 @@ func cmdConflictsList(cfg store.Config) {
 	args := os.Args[3:]
 
 	var projectFlag, statusFlag, sinceFlag string
+	allProjects := false
 	limit := 50
 
 	for i := 0; i < len(args); i++ {
@@ -87,6 +75,8 @@ func cmdConflictsList(cfg store.Config) {
 				projectFlag = args[i+1]
 				i++
 			}
+		case "--all":
+			allProjects = true
 		case "--status":
 			if i+1 < len(args) {
 				statusFlag = args[i+1]
@@ -106,8 +96,6 @@ func cmdConflictsList(cfg store.Config) {
 			}
 		}
 	}
-
-	proj := resolveConflictsProject(projectFlag)
 
 	var sinceTime time.Time
 	if sinceFlag != "" {
@@ -132,6 +120,7 @@ func cmdConflictsList(cfg store.Config) {
 		return
 	}
 	defer s.Close()
+	proj := resolveConflictsProject(s, projectFlag, allProjects)
 
 	opts := store.ListRelationsOptions{
 		Project:   proj,
@@ -239,6 +228,7 @@ func cmdConflictsStats(cfg store.Config) {
 	args := os.Args[3:]
 
 	var projectFlag string
+	allProjects := false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--project":
@@ -246,10 +236,10 @@ func cmdConflictsStats(cfg store.Config) {
 				projectFlag = args[i+1]
 				i++
 			}
+		case "--all":
+			allProjects = true
 		}
 	}
-
-	proj := resolveConflictsProject(projectFlag)
 
 	s, err := storeNew(cfg)
 	if err != nil {
@@ -257,6 +247,7 @@ func cmdConflictsStats(cfg store.Config) {
 		return
 	}
 	defer s.Close()
+	proj := resolveConflictsProject(s, projectFlag, allProjects)
 
 	stats, err := s.GetRelationStats(proj)
 	if err != nil {
@@ -303,9 +294,12 @@ func cmdConflictsScan(cfg store.Config) {
 	args := os.Args[3:]
 
 	var projectFlag, sinceFlag string
+	allProjects := false
 	dryRun := true // default
 	apply := false
 	maxInsert := 100
+	limit := 0
+	var cursor int64
 
 	// Phase 4 semantic flags (parsed here; wired into ScanOptions below).
 	semantic := false
@@ -321,6 +315,8 @@ func cmdConflictsScan(cfg store.Config) {
 				projectFlag = args[i+1]
 				i++
 			}
+		case "--all":
+			allProjects = true
 		case "--since":
 			if i+1 < len(args) {
 				sinceFlag = args[i+1]
@@ -339,6 +335,34 @@ func cmdConflictsScan(cfg store.Config) {
 				}
 				i++
 			}
+		case "--limit":
+			if i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "error: --limit requires a value")
+				exitFunc(1)
+				return
+			}
+			value, err := strconv.Atoi(args[i+1])
+			if err != nil || value < 1 || value > store.DefaultScanLimit {
+				fmt.Fprintf(os.Stderr, "error: --limit must be between 1 and %d\n", store.DefaultScanLimit)
+				exitFunc(1)
+				return
+			}
+			limit = value
+			i++
+		case "--cursor":
+			if i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "error: --cursor requires a value")
+				exitFunc(1)
+				return
+			}
+			value, err := strconv.ParseInt(args[i+1], 10, 64)
+			if err != nil || value < 0 {
+				fmt.Fprintln(os.Stderr, "error: --cursor must be a non-negative observation ID")
+				exitFunc(1)
+				return
+			}
+			cursor = value
+			i++
 		case "--semantic":
 			semantic = true
 		case "--concurrency":
@@ -381,8 +405,6 @@ func cmdConflictsScan(cfg store.Config) {
 		return
 	}
 
-	proj := resolveConflictsProject(projectFlag)
-
 	var sinceTime time.Time
 	if sinceFlag != "" {
 		t, err := time.Parse(time.RFC3339, sinceFlag)
@@ -393,10 +415,19 @@ func cmdConflictsScan(cfg store.Config) {
 		}
 		sinceTime = t
 	}
+	s, err := storeNew(cfg)
+	if err != nil {
+		fatal(err)
+		return
+	}
+	defer s.Close()
+	proj := resolveConflictsProject(s, projectFlag, allProjects)
 
 	opts := store.ScanOptions{
 		Project:   proj,
 		Since:     sinceTime,
+		Limit:     limit,
+		Cursor:    cursor,
 		Apply:     apply,
 		MaxInsert: maxInsert,
 	}
@@ -440,14 +471,12 @@ func cmdConflictsScan(cfg store.Config) {
 		opts.BuildPrompt = buildPrompt
 	}
 
-	s, err := storeNew(cfg)
-	if err != nil {
-		fatal(err)
-		return
+	var result store.ScanResult
+	if allProjects {
+		result, err = s.ScanAllProjects(opts)
+	} else {
+		result, err = s.ScanProject(opts)
 	}
-	defer s.Close()
-
-	result, err := s.ScanProject(opts)
 	if err != nil {
 		fatal(err)
 		return
@@ -455,11 +484,14 @@ func cmdConflictsScan(cfg store.Config) {
 
 	fmt.Printf("Conflicts Scan (project: %s)\n", proj)
 	fmt.Printf("  inspected:        %d\n", result.Inspected)
+	fmt.Printf("  ranked_queries:   %d\n", result.RankedQueries)
 	fmt.Printf("  candidates_found: %d\n", result.CandidatesFound)
 	fmt.Printf("  already_related:  %d\n", result.AlreadyRelated)
 	fmt.Printf("  inserted:         %d\n", result.RelationsInserted)
 	fmt.Printf("  dry_run:          %v\n", result.DryRun)
-
+	if result.NextCursor != nil {
+		fmt.Printf("  next_cursor:      %d\n", *result.NextCursor)
+	}
 	if semantic {
 		fmt.Printf("  semantic_judged:  %d\n", result.SemanticJudged)
 		fmt.Printf("  semantic_skipped: %d\n", result.SemanticSkipped)
@@ -468,9 +500,9 @@ func cmdConflictsScan(cfg store.Config) {
 
 	if result.Capped {
 		if semantic {
-			fmt.Printf("WARNING: max-semantic cap of %d reached — stopped early. Re-run to continue.\n", maxSemantic)
+			fmt.Printf("WARNING: max-semantic cap of %d reached — this page has no continuation; re-run with --cursor %d and a higher cap.\n", maxSemantic, cursor)
 		} else {
-			fmt.Printf("WARNING: max-insert cap of %d reached — stopped early. Re-run to continue.\n", maxInsert)
+			fmt.Printf("WARNING: max-insert cap of %d reached — this page has no continuation; re-run with --cursor %d and a higher cap.\n", maxInsert, cursor)
 		}
 	}
 }
@@ -547,6 +579,10 @@ func cmdConflictsDeferred(cfg store.Config) {
 		fmt.Printf("Deferred Row\n")
 		fmt.Printf("  sync_id:          %s\n", row.SyncID)
 		fmt.Printf("  entity:           %s\n", row.Entity)
+		// A quarantined row is keyed on the discarded mutation's own material, so
+		// its key does not name the mutation. Print what the mutation carried.
+		fmt.Printf("  entity_key:       %s\n", row.EntityKey)
+		fmt.Printf("  op:               %s\n", row.Op)
 		fmt.Printf("  apply_status:     %s\n", row.ApplyStatus)
 		fmt.Printf("  retry_count:      %d\n", row.RetryCount)
 		fmt.Printf("  payload_valid:    %v\n", row.PayloadValid)
@@ -582,6 +618,7 @@ func cmdConflictsDeferred(cfg store.Config) {
 	fmt.Println()
 	for _, row := range rows {
 		fmt.Printf("  sync_id:      %s\n", row.SyncID)
+		fmt.Printf("  entity_key:   %s\n", row.EntityKey)
 		fmt.Printf("  apply_status: %s\n", row.ApplyStatus)
 		fmt.Printf("  retry_count:  %d\n", row.RetryCount)
 		fmt.Printf("  first_seen_at: %s\n", row.FirstSeenAt)

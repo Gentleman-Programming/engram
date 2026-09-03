@@ -24,7 +24,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Gentleman-Programming/engram/internal/mcp"
+	"github.com/Gentleman-Programming/engram/v2/internal/mcp"
 )
 
 var (
@@ -75,6 +75,7 @@ type Result struct {
 	Agent            string
 	Destination      string
 	Files            int
+	MCPConfigured    bool
 	TUIPluginEnabled bool
 }
 
@@ -83,7 +84,8 @@ const codexMarketplace = "Gentleman-Programming/engram"
 
 const openCodeSubagentStatuslinePlugin = "opencode-subagent-statusline"
 
-const piGentleEngramPackage = "npm:gentle-engram@0.1.8"
+const piGentleEngramPackage = "npm:gentle-engram@0.1.11"
+const piLegacyGentleEngramPackage = "npm:gentle-engram@0.1.8"
 const piMCPAdapterPackage = "npm:pi-mcp-adapter"
 
 // claudeCodeMCPTools are the MCP tool permission names for the agent profile
@@ -146,7 +148,7 @@ Call mem_save IMMEDIATELY after any of these:
 Format for mem_save:
 - **title**: Verb + what — short, searchable (e.g. "Fixed N+1 query in UserList", "Chose Zustand over Redux")
 - **type**: bugfix | decision | architecture | discovery | pattern | config | preference
-- **scope**: project (default) | personal
+- **scope**: project (default) | personal | global
 - **topic_key** (optional, recommended for evolving decisions): stable key like architecture/auth-model
 - **content**:
   **What**: One sentence — what was done
@@ -176,7 +178,10 @@ Also search memory PROACTIVELY when:
 ### SESSION CLOSE PROTOCOL (mandatory)
 
 Before ending a session or saying "done" / "listo" / "that's it", you MUST:
-1. Call mem_session_summary with this structure:
+1. Call mem_session_summary with the structure below.
+2. Call mem_session_end with the active session id and an optional summary of work completed.
+
+mem_session_summary structure:
 
 ## Goal
 [What we were working on this session]
@@ -220,6 +225,14 @@ If you see a message about compaction or context reset, or if you see "FIRST ACT
 3. Only THEN continue working
 
 Do not skip step 1. Without it, everything done before compaction is lost from memory.
+`
+
+const geminiSessionCloseInstruction = `
+
+### GEMINI CLI SESSION CLOSE (mandatory)
+
+After mem_session_summary succeeds, call mem_session_end before closing the session.
+Do not call mem_session_end before mem_session_summary.
 `
 
 const codexCompactPromptMarkdown = `You are compacting a coding session that uses Engram persistent memory.
@@ -327,15 +340,41 @@ func ensurePiPackageSettings(settingsPath string) (bool, error) {
 		return false, err
 	}
 	changed := false
-	for _, pkg := range []string{piGentleEngramPackage, piMCPAdapterPackage} {
-		if !rawArrayContainsString(packages, pkg) {
-			raw, err := jsonMarshalFn(pkg)
-			if err != nil {
-				return false, fmt.Errorf("marshal Pi package %q: %w", pkg, err)
+	updatedPackages := make([]json.RawMessage, 0, len(packages)+1)
+	hasGentleEngramPackage := false
+	for _, raw := range packages {
+		var pkg string
+		if err := json.Unmarshal(raw, &pkg); err == nil {
+			switch pkg {
+			case piLegacyGentleEngramPackage:
+				changed = true
+				continue
+			case piGentleEngramPackage:
+				if hasGentleEngramPackage {
+					changed = true
+					continue
+				}
+				hasGentleEngramPackage = true
 			}
-			packages = append(packages, raw)
-			changed = true
 		}
+		updatedPackages = append(updatedPackages, raw)
+	}
+	packages = updatedPackages
+	if !hasGentleEngramPackage {
+		raw, err := jsonMarshalFn(piGentleEngramPackage)
+		if err != nil {
+			return false, fmt.Errorf("marshal Pi package %q: %w", piGentleEngramPackage, err)
+		}
+		packages = append(packages, raw)
+		changed = true
+	}
+	if !rawArrayContainsString(packages, piMCPAdapterPackage) {
+		raw, err := jsonMarshalFn(piMCPAdapterPackage)
+		if err != nil {
+			return false, fmt.Errorf("marshal Pi package %q: %w", piMCPAdapterPackage, err)
+		}
+		packages = append(packages, raw)
+		changed = true
 	}
 	if !changed {
 		return false, nil
@@ -548,6 +587,7 @@ func installOpenCode() (*Result, error) {
 
 	// Register engram MCP server in opencode.json and the subagent monitor in tui.json.
 	files := 1
+	mcpConfigured := false
 	if err := injectOpenCodeMCPFn(); err != nil {
 		// Non-fatal: plugin works, MCP just needs manual config
 		cmd := resolveEngramCommand()
@@ -556,6 +596,7 @@ func installOpenCode() (*Result, error) {
 		fmt.Fprintf(os.Stderr, "  \"engram\": { \"type\": \"local\", \"command\": [%q, \"mcp\", \"--tools=agent\"], \"enabled\": true }\n", cmd)
 	} else {
 		files++
+		mcpConfigured = true
 	}
 
 	tuiEnabled := false
@@ -571,6 +612,7 @@ func installOpenCode() (*Result, error) {
 		Agent:            "opencode",
 		Destination:      dir,
 		Files:            files,
+		MCPConfigured:    mcpConfigured,
 		TUIPluginEnabled: tuiEnabled,
 	}, nil
 }
@@ -846,23 +888,30 @@ func claudeCodeUserMCPPath() string {
 	return filepath.Join(claudeCodeMCPDir(), "engram.json")
 }
 
-// writeClaudeCodeUserMCP writes ~/.claude/mcp/engram.json with the absolute
-// path to the engram binary. This is idempotent — it always writes (overwrites)
-// so that if the binary moves (e.g. brew upgrade), running setup again fixes it.
-// Using os.Executable() instead of PATH lookup ensures the correct binary is
-// referenced even when PATH is not propagated to MCP subprocesses (Windows).
+// writeClaudeCodeUserMCP writes ~/.claude/mcp/engram.json with the canonical
+// absolute path to the engram binary. This is idempotent — it always writes
+// (overwrites) so that if the binary moves (e.g. brew upgrade), running setup
+// again fixes it. The command is resolved via canonicalEngramCommand() so a
+// versioned Homebrew/Linuxbrew Cellar path maps to the stable
+// <brew-prefix>/bin/engram symlink that survives `brew upgrade`.
+//
+// os.Executable() is called exactly once and its result is passed to the
+// canonicalization helper, so the written path is always derived from the same
+// executable result that was checked for an error. The error contract preserves
+// the original "resolve binary path" failure — the Claude Code user MCP config
+// must not be written with a PATH-dependent command when the binary cannot be
+// resolved absolutely.
 func writeClaudeCodeUserMCP() error {
 	exe, err := osExecutable()
 	if err != nil {
 		return fmt.Errorf("resolve binary path: %w", err)
 	}
-	// Resolve any symlinks so the path is stable across package manager updates.
-	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
-		exe = resolved
+	cmd, err := claudeCodeEngramCommand(exe)
+	if err != nil {
+		return err
 	}
-
 	entry := map[string]any{
-		"command": exe,
+		"command": cmd,
 		"args":    []string{"mcp", "--tools=agent"},
 	}
 	data, err := jsonMarshalIndentFn(entry, "", "  ")
@@ -1066,13 +1115,29 @@ func injectGeminiMCP(configPath string) error {
 // leaves a stale command that fails to spawn (ENOENT). When the resolved
 // executable points into a versioned Cellar directory we prefer the stable
 // <brew-prefix>/bin/engram symlink, which brew repoints at the current version,
-// so registrations survive upgrades. Falls back to bare "engram" only when
-// os.Executable() fails or the stable symlink is missing.
+// so registrations survive upgrades. It falls back to bare "engram" only when
+// os.Executable() fails; an absolute executable is preserved if canonicalization
+// cannot resolve an absolute command.
 func resolveEngramCommand() string {
 	exe, err := osExecutable()
 	if err != nil {
 		return "engram" // fallback to PATH-based name
 	}
+	canonical := canonicalEngramCommand(exe)
+	if filepath.IsAbs(exe) && !filepath.IsAbs(canonical) {
+		return exe
+	}
+	return canonical
+}
+
+// canonicalEngramCommand resolves an already-obtained executable path to the
+// canonical engram command: it resolves symlinks via filepath.EvalSymlinks and
+// maps a versioned Homebrew/Linuxbrew Cellar path to the stable
+// <brew-prefix>/bin/engram symlink that brew keeps pointing at the current
+// version (see stableHomebrewEngramCommand). Non-Homebrew installs keep their
+// resolved absolute path. It does not call osExecutable() — the caller is
+// responsible for obtaining exe and for any PATH-based fallback on failure.
+func canonicalEngramCommand(exe string) string {
 	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
 		exe = resolved
 	}
@@ -1080,6 +1145,24 @@ func resolveEngramCommand() string {
 		return stable
 	}
 	return exe
+}
+
+// claudeCodeEngramCommand is the caller-specific absolute-path policy for
+// writeClaudeCodeUserMCP. canonicalEngramCommand may return the bare "engram"
+// fallback when a Homebrew Cellar exe has no stable <brew-prefix>/bin/engram
+// symlink on disk — correct for resolveEngramCommand (PATH discovery), but
+// the durable Claude Code user MCP config must never persist a PATH-dependent
+// command. This helper preserves the already-obtained absolute exe on a
+// non-absolute fallback and errors when the obtained exe is non-absolute.
+func claudeCodeEngramCommand(exe string) (string, error) {
+	canonical := canonicalEngramCommand(exe)
+	if filepath.IsAbs(canonical) {
+		return canonical, nil
+	}
+	if filepath.IsAbs(exe) {
+		return exe, nil
+	}
+	return "", fmt.Errorf("resolve absolute engram command: executable path %q is not absolute", exe)
 }
 
 // stableHomebrewEngramCommand maps a versioned Homebrew Cellar path to the
@@ -1114,7 +1197,7 @@ func writeGeminiSystemPrompt() error {
 		return fmt.Errorf("create gemini system prompt dir: %w", err)
 	}
 
-	if err := os.WriteFile(systemPath, []byte(memoryProtocolMarkdown), 0644); err != nil {
+	if err := os.WriteFile(systemPath, []byte(memoryProtocolMarkdown+geminiSessionCloseInstruction), 0644); err != nil {
 		return fmt.Errorf("write gemini system prompt: %w", err)
 	}
 

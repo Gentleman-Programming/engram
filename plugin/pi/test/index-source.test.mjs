@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { test } from "node:test";
 
-const source = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
+const source = readFileSync(new URL("../index.ts", import.meta.url), "utf8").replaceAll("\r\n", "\n");
 
 function extractFunctionBody(name, marker) {
   const signatureIndex = source.indexOf(`function ${name}`);
@@ -30,10 +32,10 @@ function buildEngramFetchForTest({
   maxAttempts = 3,
   backoffBaseMs = 150,
 } = {}) {
-  const body = extractFunctionBody("engramFetch", "{\n  const method")
+  const body = extractFunctionBody("engramFetchResult", "{\n  const method")
     .replace("let res: Response | undefined;", "let res;")
     .replace("let data: unknown = null;", "let data = null;")
-    .replace("return data as TResponse;", "return data;");
+    .replace("return { data: data as TResponse };", "return { data };");
   const factory = new Function(
     "fetch",
     "wait",
@@ -55,11 +57,14 @@ function buildEngramFetchForTest({
     function isTimeoutError(error) {
       ${extractFunctionBody("isTimeoutError", "{\n  return error instanceof Error")}
     }
-    let lastFetchTimeoutMethod;
-    const engramFetch = async function engramFetch(path, opts = {}) {
+    function unreachableMessage() {
+      return "gentle-engram could not reach the Engram HTTP server";
+    }
+    const engramFetchResult = async function engramFetchResult(path, opts = {}) {
       ${body}
     };
-    return { engramFetch, timedOutMethod: () => lastFetchTimeoutMethod };
+    const engramFetch = async (path, opts = {}) => (await engramFetchResult(path, opts)).data;
+    return { engramFetch, engramFetchResult };
   `,
   );
   return factory(
@@ -103,6 +108,210 @@ function buildScheduleEngramSelfHealForTest({ waitUnref, isEngramRunning, maxAtt
   return factory(waitUnref, isEngramRunning, 1, maxAttempts);
 }
 
+function buildInitializeEngramServerForTest({
+  configuredUrl = false,
+  probeEngramHealth,
+  spawnAndWaitForEngram,
+  waitForEngramReadiness,
+  timeoutMs = 10000,
+}) {
+  const body = extractFunctionBody("initializeEngramServer", "{\n  if (CONFIGURED_ENGRAM_URL");
+  const factory = new Function(
+    "CONFIGURED_ENGRAM_URL",
+    "probeEngramHealth",
+    "spawnAndWaitForEngram",
+    "waitForEngramReadiness",
+    "ENGRAM_STARTUP_TIMEOUT_MS",
+    `
+    async function initializeEngramServer() {
+      ${body}
+    }
+    return initializeEngramServer;
+    `,
+  );
+  return factory(
+    configuredUrl ? "http://configured" : undefined,
+    probeEngramHealth,
+    spawnAndWaitForEngram,
+    waitForEngramReadiness,
+    timeoutMs,
+  );
+}
+
+function buildProbeEngramHealthForTest({ fetch, isTimeoutError }) {
+  const body = extractFunctionBody("probeEngramHealth", "{\n  try");
+  const refusedBody = extractFunctionBody("hasConnectionRefusedCode", "{\n  if (depth")
+    .replace("value as Record<string, unknown>", "value");
+  const factory = new Function(
+    "fetch",
+    "isTimeoutError",
+    "ENGRAM_URL",
+    "AbortSignal",
+    `
+    function hasConnectionRefusedCode(value, depth = 0) {
+      ${refusedBody}
+    }
+    async function probeEngramHealth() {
+      ${body}
+    }
+    return probeEngramHealth;
+    `,
+  );
+  return factory(fetch, isTimeoutError, "http://127.0.0.1:7437", { timeout: () => undefined });
+}
+
+// The retry backoff is clock-driven, so the test owns the clock: nothing here sleeps, and a
+// backoff window is crossed by moving `clock.now` instead of by waiting for wall time.
+function buildSharedInitializationForTest({ retryBaseMs = 1000, retryMaxMs = 60000 } = {}) {
+  const clock = { now: 1_000_000 };
+  const body = extractFunctionBody("sharedInitialization", "{\n  if (initialization)")
+    .replace("(error: unknown) =>", "(error) =>");
+  const backoffBody = extractFunctionBody("startupBackoffMs", "{\n  return Math.min");
+  const factory = new Function(
+    "Date",
+    "ENGRAM_STARTUP_RETRY_BASE_MS",
+    "ENGRAM_STARTUP_RETRY_MAX_MS",
+    `
+    let initialization;
+    let startupFailures = 0;
+    let startupRetryAt = 0;
+    let startupFailure;
+    function startupBackoffMs(failures) {
+      ${backoffBody}
+    }
+    function sharedInitialization(start) {
+      ${body}
+    }
+    return sharedInitialization;
+    `,
+  );
+  const sharedInitialization = factory({ now: () => clock.now }, retryBaseMs, retryMaxMs);
+  return { sharedInitialization, clock };
+}
+
+// A fake child process: an EventEmitter with the ChildProcess members the startup path
+// touches, plus counters so a test can prove the child was released or killed.
+function createFakeChild() {
+  const child = new EventEmitter();
+  child.unrefCalls = 0;
+  child.killCalls = 0;
+  child.unref = () => {
+    child.unrefCalls += 1;
+  };
+  child.kill = () => {
+    child.killCalls += 1;
+    return true;
+  };
+  return child;
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Deadlines are absolute, so a test that must not time out gets a far one and a test that
+// asserts the timeout gets a near one; neither depends on how loaded the runner is.
+function deadlineIn(ms) {
+  return Date.now() + ms;
+}
+
+function buildWaitForEngramReadinessForTest({ probeEngramHealth, pollMs = 5 }) {
+  const factory = new Function(
+    "probeEngramHealth",
+    "ENGRAM_URL",
+    "ENGRAM_STARTUP_POLL_MS",
+    `
+    function waitCancellable(ms, signal) {
+      ${extractFunctionBody("waitCancellable", "{\n  return new Promise")}
+    }
+    async function waitForEngramReadiness(signal, deadline) {
+      ${extractFunctionBody("waitForEngramReadiness", "{\n  while (Date.now()")}
+    }
+    return waitForEngramReadiness;
+    `,
+  );
+  return factory(probeEngramHealth, "http://127.0.0.1:7437", pollMs);
+}
+
+function buildSpawnAndWaitForEngramForTest({ spawn, probeEngramHealth, pollMs = 5 }) {
+  const spawnBody = extractFunctionBody("spawnAndWaitForEngram", "{\n  return new Promise")
+    .replace("let proc: ChildProcess | undefined;", "let proc;")
+    .replace("function settle(error?: Error): void {", "function settle(error) {")
+    .replace("const onError = (error: Error): void =>", "const onError = (error) =>")
+    .replace("const onExit = (code: number | null, signal: NodeJS.Signals | null): void =>", "const onExit = (code, signal) =>");
+  const factory = new Function(
+    "spawn",
+    "probeEngramHealth",
+    "ENGRAM_BIN",
+    "ENGRAM_URL",
+    "ENGRAM_STARTUP_POLL_MS",
+    `
+    function waitCancellable(ms, signal) {
+      ${extractFunctionBody("waitCancellable", "{\n  return new Promise")}
+    }
+    async function waitForEngramReadiness(signal, deadline) {
+      ${extractFunctionBody("waitForEngramReadiness", "{\n  while (Date.now()")}
+    }
+    function stopAbandonedChild(proc) {
+      ${extractFunctionBody("stopAbandonedChild", "{\n  if (proc === undefined) return;")}
+    }
+    function spawnAndWaitForEngram(deadline) {
+      ${spawnBody}
+    }
+    return spawnAndWaitForEngram;
+    `,
+  );
+  return factory(spawn, probeEngramHealth, "engram", "http://127.0.0.1:7437", pollMs);
+}
+
+function buildEnsureSessionForTest(engramFetch) {
+  const body = extractFunctionBody("ensureSession", "{\n  const key")
+    .replace("const body: SessionBody", "const body");
+  const factory = new Function("knownSessions", "sessionRegistrationsInFlight", "engramFetch", "project", "directory", `
+    return async function ensureSession(sessionId, sessionProject = project, fetch = engramFetch) {
+      ${body}
+    };
+  `);
+  const knownSessions = new Set();
+  const sessionRegistrationsInFlight = new Map();
+  return {
+    ensureSession: factory(knownSessions, sessionRegistrationsInFlight, engramFetch, "engram", "/work/engram"),
+    knownSessions,
+  };
+}
+
+function buildProjectDetectionBoundaryForTest() {
+  const safeProjectBody = extractFunctionBody("isSafeDetectedProject", "{\n  const candidate");
+  const applyBody = extractFunctionBody("applyDetectedProject", "{\n  if (!detected)");
+  const requireBody = extractFunctionBody("requireResolvedProject", "{\n  if (projectResolutionError)");
+  const factory = new Function(`
+    let project = "fallback-project";
+    let projectResolutionError;
+    let projectDetectionPending = false;
+    function isSafeDetectedProject(detected) {
+      ${safeProjectBody}
+    }
+    function applyDetectedProject(detected) {
+      ${applyBody}
+    }
+    function requireResolvedProject() {
+      ${requireBody}
+    }
+    const requests = [];
+    function writeMemory() {
+      requireResolvedProject();
+      requests.push("/sessions", "/observations");
+    }
+    return {
+      applyDetectedProject,
+      writeMemory,
+      requests,
+      state: () => ({ project, projectResolutionError, projectDetectionPending }),
+    };
+  `);
+  return factory();
+}
+
 function sessionCtx(id, sink) {
   return {
     sessionManager: { getSessionId: () => id },
@@ -112,13 +321,25 @@ function sessionCtx(id, sink) {
 
 test("mem_session_summary accepts explicit project fallback", () => {
   assert.match(source, /mem_session_summary: Type\.Object\(\{[\s\S]*project: optionalString\("Optional project to use when automatic detection is unavailable"\)/);
-  assert.match(source, /case "mem_session_summary":[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*ensureSession\(activeSessionId, activeProject\)[\s\S]*project: activeProject/);
+  assert.match(source, /case "mem_session_summary":[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*ensureSession\(summarySessionId, activeProject, fetch\)[\s\S]*project: activeProject/);
+});
+
+test("mem_save_prompt returns a prompt-scoped identity", () => {
+  assert.match(source, /case "mem_save_prompt":[\s\S]*const response = await fetch<\{ id: number \}>\("\/prompts",/);
+  assert.match(source, /case "mem_save_prompt":[\s\S]*return response \? \{ prompt_id: response\.id, status: "saved" \} : response;/);
 });
 
 test("mem_search exposes and forwards match_mode and all_projects", () => {
   assert.match(source, /mem_search: Type\.Object\(\{[\s\S]*all_projects: optionalBoolean\("Search across every project; when true project is ignored"\)/);
   assert.match(source, /mem_search: Type\.Object\(\{[\s\S]*match_mode: optionalString\("Match mode: all \(default\) or any for broader recall"\)/);
-  assert.match(source, /case "mem_search":[\s\S]*project: params\.all_projects \? undefined : params\.project[\s\S]*match_mode: params\.match_mode[\s\S]*all_projects: params\.all_projects/);
+  assert.match(source, /case "mem_search":[\s\S]*if \(!params\.all_projects && !requestedProject\) requireResolvedProject\(\);[\s\S]*project: params\.all_projects \? undefined : activeProject[\s\S]*match_mode: params\.match_mode[\s\S]*all_projects: params\.all_projects/);
+});
+
+test("scope descriptions document values and unfiltered omission", () => {
+  assert.match(source, /mem_search: Type\.Object\(\{[\s\S]*scope: optionalString\("Filter by scope: project, personal, or global\. Omit to apply no scope filter\."\)/);
+  assert.match(source, /mem_save: Type\.Object\(\{[\s\S]*scope: optionalString\("Scope: project, personal, or global"\)/);
+  assert.match(source, /mem_context: Type\.Object\(\{[\s\S]*scope: optionalString\("Filter observations by scope: project, personal, or global\. Omit to apply no scope filter\."\)/);
+  assert.match(source, /mem_update: Type\.Object\(\{[\s\S]*scope: optionalString\("New scope: project, personal, or global"\)/);
 });
 
 test("project detection 404 falls back to local config or diagnostic", () => {
@@ -126,6 +347,37 @@ test("project detection 404 falls back to local config or diagnostic", () => {
   assert.match(source, /project_name/);
   assert.match(source, /error\.status === 404[\s\S]*detectLocalConfigProject\(cwd\) \|\| projectCurrentUnsupportedError\(cwd\)/);
   assert.match(source, /does not support \/project\/current/);
+});
+
+test("unsafe detected projects do not reach session or memory writes", () => {
+  assert.match(source, /case "mem_save":[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*ensureSession/);
+  assert.match(source, /case "mem_save_prompt":[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*ensureSession/);
+  assert.match(source, /case "mem_session_summary":[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*ensureSession/);
+
+  for (const detected of [
+    undefined,
+    { project: "unknown" },
+    { project: "alpha", error_hint: "" },
+    { project: "nested/project" },
+    { project: "C:\\workspace" },
+    { project: "safe\u0000name" },
+  ]) {
+    const boundary = buildProjectDetectionBoundaryForTest();
+    assert.equal(boundary.applyDetectedProject(detected), false);
+    assert.equal(boundary.state().project, "unknown");
+    assert.throws(() => boundary.writeMemory());
+    assert.deepEqual(boundary.requests, []);
+  }
+});
+
+test("safe detected projects continue through session and memory writes", () => {
+  for (const project of ["engram", "c:compiler"]) {
+    const boundary = buildProjectDetectionBoundaryForTest();
+    assert.equal(boundary.applyDetectedProject({ project }), true);
+    assert.equal(boundary.state().project, project);
+    boundary.writeMemory();
+    assert.deepEqual(boundary.requests, ["/sessions", "/observations"]);
+  }
 });
 
 test("ambiguous_project error maps to actionable status label, not generic 'error'", () => {
@@ -144,6 +396,436 @@ test("memory protocol declares gentle-engram as the Pi-native provider", () => {
   assert.match(source, /These instructions are injected by gentle-engram, the Pi-native memory provider/);
   assert.match(source, /Use the memory tools named in this section as the authoritative Pi memory contract/);
   assert.match(source, /Do not infer alternative Engram tool names from other integrations/);
+});
+
+test("an inconclusive health probe still attempts the spawn", async () => {
+  let probes = 0;
+  let spawns = 0;
+  let readinessWaits = 0;
+  const initializeEngramServer = buildInitializeEngramServerForTest({
+    probeEngramHealth: async () => {
+      probes += 1;
+      return "indeterminate";
+    },
+    spawnAndWaitForEngram: async () => { spawns += 1; },
+    waitForEngramReadiness: async () => { readinessWaits += 1; },
+  });
+
+  await initializeEngramServer();
+  assert.equal(probes, 1);
+  assert.equal(spawns, 1, "no evidence of a live server means launch one, not wait for one");
+  assert.equal(readinessWaits, 0, "the spawned child owns its readiness result");
+});
+
+test("an already-ready health endpoint neither spawns nor waits", async () => {
+  let spawns = 0;
+  let readinessWaits = 0;
+  const initializeEngramServer = buildInitializeEngramServerForTest({
+    probeEngramHealth: async () => "ready",
+    spawnAndWaitForEngram: async () => { spawns += 1; },
+    waitForEngramReadiness: async () => { readinessWaits += 1; },
+  });
+
+  await initializeEngramServer();
+  assert.equal(spawns, 0);
+  assert.equal(readinessWaits, 0);
+});
+
+test("an inconclusive probe falls back to an already-starting server when our child loses the port", async () => {
+  let readinessWaits = 0;
+  const initializeEngramServer = buildInitializeEngramServerForTest({
+    probeEngramHealth: async () => "indeterminate",
+    spawnAndWaitForEngram: async () => { throw new Error("Engram server exited before readiness (code 1)"); },
+    waitForEngramReadiness: async () => { readinessWaits += 1; },
+  });
+
+  await initializeEngramServer();
+  assert.equal(readinessWaits, 1, "an inconclusive probe leaves room for another instance to be coming up");
+});
+
+test("an inconclusive probe reports the child failure when nothing becomes ready", async () => {
+  const initializeEngramServer = buildInitializeEngramServerForTest({
+    probeEngramHealth: async () => "indeterminate",
+    spawnAndWaitForEngram: async () => { throw new Error("Engram server exited before readiness (code 1)"); },
+    waitForEngramReadiness: async () => { throw new Error("did not become ready before startup timeout"); },
+  });
+
+  await assert.rejects(initializeEngramServer(), /exited before readiness/, "the spawn failure is the actionable one");
+});
+
+test("a generic connection-refused health error is a definitive refusal", async () => {
+  const probeEngramHealth = buildProbeEngramHealthForTest({
+    fetch: async () => { throw new Error("connection refused"); },
+    isTimeoutError: () => false,
+  });
+
+  assert.equal(await probeEngramHealth(), "refused");
+});
+
+test("a nested ECONNREFUSED health error is a definitive refusal", async () => {
+  const probeEngramHealth = buildProbeEngramHealthForTest({
+    fetch: async () => {
+      throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED" } });
+    },
+    isTimeoutError: () => false,
+  });
+
+  assert.equal(await probeEngramHealth(), "refused");
+});
+
+test("an aggregate of per-address ECONNREFUSED errors is a definitive refusal", async () => {
+  const probeEngramHealth = buildProbeEngramHealthForTest({
+    fetch: async () => {
+      // What Node actually rejects with for a refused localhost that resolves to both ::1
+      // and 127.0.0.1: the code lives on the per-address errors, not on the cause itself.
+      const aggregate = new AggregateError([
+        Object.assign(new Error("connect ECONNREFUSED ::1:7437"), { code: "ECONNREFUSED" }),
+        Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:7437"), { code: "ECONNREFUSED" }),
+      ], "");
+      throw Object.assign(new TypeError("fetch failed"), { cause: aggregate });
+    },
+    isTimeoutError: () => false,
+  });
+
+  assert.equal(await probeEngramHealth(), "refused");
+});
+
+test("the refusal classifier matches what Node actually rejects with on a closed port", async () => {
+  // Exercises the real rejection shape rather than a hand-written stand-in for it: Node wraps
+  // the refusal in a `cause`, and neither the message nor the code is where the outer error is.
+  const port = await new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", () => {
+      const { port: chosen } = probe.address();
+      probe.close(() => resolve(chosen));
+    });
+  });
+  const probeEngramHealth = buildProbeEngramHealthForTest({
+    fetch: () => globalThis.fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2000) }),
+    isTimeoutError: (candidate) => candidate instanceof Error && (candidate.name === "TimeoutError" || candidate.name === "AbortError"),
+  });
+
+  assert.equal(await probeEngramHealth(), "refused");
+});
+
+test("an inherited ECONNREFUSED code on the cause is a definitive refusal", async () => {
+  const probeEngramHealth = buildProbeEngramHealthForTest({
+    fetch: async () => {
+      // A cause whose `code` comes from its prototype has no own `code` key, so an
+      // own-property check would misread a plain refusal as inconclusive.
+      throw Object.assign(new TypeError("fetch failed"), { cause: Object.create({ code: "ECONNREFUSED" }) });
+    },
+    isTimeoutError: () => false,
+  });
+
+  assert.equal(await probeEngramHealth(), "refused");
+});
+
+test("timeout-shaped health errors remain indeterminate", async () => {
+  for (const error of [
+    Object.assign(new Error("timed out"), { name: "TimeoutError" }),
+    Object.assign(new Error("aborted"), { name: "AbortError" }),
+    new Error("request timeout"),
+  ]) {
+    const probeEngramHealth = buildProbeEngramHealthForTest({
+      fetch: async () => { throw error; },
+      isTimeoutError: (candidate) => candidate instanceof Error && (candidate.name === "TimeoutError" || candidate.name === "AbortError"),
+    });
+    assert.equal(await probeEngramHealth(), "indeterminate");
+  }
+});
+
+test("a definitive refusal spawns once and awaits spawned-server readiness", async () => {
+  let spawns = 0;
+  let readinessWaits = 0;
+  const initializeEngramServer = buildInitializeEngramServerForTest({
+    probeEngramHealth: async () => "refused",
+    spawnAndWaitForEngram: async () => { spawns += 1; },
+    waitForEngramReadiness: async () => { readinessWaits += 1; },
+  });
+
+  await initializeEngramServer();
+  assert.equal(spawns, 1);
+  assert.equal(readinessWaits, 0, "the spawned child owns its readiness result");
+});
+
+test("a child error or bind-collision exit is a terminal initialization failure", async () => {
+  const initializeEngramServer = buildInitializeEngramServerForTest({
+    probeEngramHealth: async () => "refused",
+    spawnAndWaitForEngram: async () => { throw new Error("Engram server exited before readiness (code 1)"); },
+    waitForEngramReadiness: async () => assert.fail("a failed child must not fall through to readiness"),
+  });
+
+  await assert.rejects(initializeEngramServer(), /exited before readiness/);
+});
+
+test("concurrent initialization callers share one startup and its terminal result", async () => {
+  const { sharedInitialization } = buildSharedInitializationForTest();
+  let starts = 0;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const start = async () => {
+    starts += 1;
+    await gate;
+  };
+
+  const first = sharedInitialization(start);
+  const second = sharedInitialization(start);
+  assert.strictEqual(first, second);
+  assert.equal(starts, 1);
+  release();
+  await Promise.all([first, second]);
+});
+
+test("ENGRAM_URL bypasses Pi readiness and automatic spawn", async () => {
+  let spawns = 0;
+  let probes = 0;
+  let readinessWaits = 0;
+  const initializeEngramServer = buildInitializeEngramServerForTest({
+    configuredUrl: true,
+    probeEngramHealth: async () => { probes += 1; return "refused"; },
+    spawnAndWaitForEngram: async () => { spawns += 1; },
+    waitForEngramReadiness: async () => { readinessWaits += 1; },
+  });
+
+  await initializeEngramServer();
+  assert.equal(spawns, 0);
+  assert.equal(probes, 0);
+  assert.equal(readinessWaits, 0);
+});
+
+test("a child that reaches readiness is released to keep running, never killed", async () => {
+  const child = createFakeChild();
+  let probes = 0;
+  const spawnAndWaitForEngram = buildSpawnAndWaitForEngramForTest({
+    spawn: () => {
+      queueMicrotask(() => child.emit("spawn"));
+      return child;
+    },
+    probeEngramHealth: async () => {
+      probes += 1;
+      return probes >= 2 ? "ready" : "indeterminate";
+    },
+  });
+
+  await spawnAndWaitForEngram(deadlineIn(30_000));
+
+  assert.equal(child.unrefCalls, 1, "a ready child is released from the event loop");
+  assert.equal(child.killCalls, 0, "the server we just started must survive initialization");
+  const probesAtReadiness = probes;
+  await delay(60);
+  assert.equal(probes, probesAtReadiness, "readiness stops the health poll");
+});
+
+test("a child that errors before readiness is killed and stops health polling", async () => {
+  const child = createFakeChild();
+  let probes = 0;
+  const spawnAndWaitForEngram = buildSpawnAndWaitForEngramForTest({
+    spawn: () => {
+      queueMicrotask(() => child.emit("spawn"));
+      return child;
+    },
+    probeEngramHealth: async () => {
+      probes += 1;
+      return "indeterminate";
+    },
+  });
+
+  const pending = spawnAndWaitForEngram(deadlineIn(30_000));
+  await delay(20);
+  child.emit("error", new Error("spawn ENOENT"));
+
+  await assert.rejects(pending, /failed before readiness/);
+  assert.equal(child.killCalls, 1, "the error path does not abandon a live child");
+  assert.equal(child.unrefCalls, 1, "the error path releases the child");
+  const probesAtRejection = probes;
+  await delay(60);
+  assert.equal(probes, probesAtRejection, "the error path cancels the health poll");
+});
+
+test("a child that exits before readiness is released and stops health polling", async () => {
+  const child = createFakeChild();
+  let probes = 0;
+  const spawnAndWaitForEngram = buildSpawnAndWaitForEngramForTest({
+    spawn: () => {
+      queueMicrotask(() => child.emit("spawn"));
+      return child;
+    },
+    probeEngramHealth: async () => {
+      probes += 1;
+      return "indeterminate";
+    },
+  });
+
+  const pending = spawnAndWaitForEngram(deadlineIn(30_000));
+  await delay(20);
+  child.emit("exit", 1, null);
+
+  await assert.rejects(pending, /exited before readiness \(code 1/);
+  assert.equal(child.unrefCalls, 1, "the exit path releases the child");
+  const probesAtRejection = probes;
+  await delay(60);
+  assert.equal(probes, probesAtRejection, "the exit path cancels the health poll");
+});
+
+test("a startup timeout kills the child instead of leaving it running", async () => {
+  const child = createFakeChild();
+  let probes = 0;
+  const spawnAndWaitForEngram = buildSpawnAndWaitForEngramForTest({
+    spawn: () => {
+      queueMicrotask(() => child.emit("spawn"));
+      return child;
+    },
+    probeEngramHealth: async () => {
+      probes += 1;
+      return "indeterminate";
+    },
+    pollMs: 5,
+  });
+
+  await assert.rejects(spawnAndWaitForEngram(deadlineIn(60)), /did not become ready before startup timeout/);
+  assert.equal(child.killCalls, 1, "a child we gave up on is not left running detached");
+  assert.equal(child.unrefCalls, 1, "the timeout path releases the child");
+  const probesAtTimeout = probes;
+  await delay(60);
+  assert.equal(probes, probesAtTimeout, "the timeout path cancels the health poll");
+});
+
+test("a child that cannot be spawned rejects without leaving a health poll running", async () => {
+  let probes = 0;
+  const spawnAndWaitForEngram = buildSpawnAndWaitForEngramForTest({
+    spawn: () => {
+      throw new Error("EACCES");
+    },
+    probeEngramHealth: async () => {
+      probes += 1;
+      return "indeterminate";
+    },
+  });
+
+  await assert.rejects(spawnAndWaitForEngram(deadlineIn(30_000)), /EACCES/);
+  await delay(60);
+  assert.equal(probes, 0, "a child that never spawned never starts a health poll");
+});
+
+test("repeated failed initializations do not accumulate live children", async () => {
+  const children = [];
+  const spawnAndWaitForEngram = buildSpawnAndWaitForEngramForTest({
+    spawn: () => {
+      const child = createFakeChild();
+      children.push(child);
+      queueMicrotask(() => {
+        child.emit("spawn");
+        // A server that starts and then never answers /health: the readiness budget, not the
+        // child, is what ends the attempt — exactly the shape that leaked orphans.
+      });
+      return child;
+    },
+    probeEngramHealth: async () => "indeterminate",
+    pollMs: 5,
+  });
+  const initializeEngramServer = buildInitializeEngramServerForTest({
+    probeEngramHealth: async () => "refused",
+    spawnAndWaitForEngram,
+    waitForEngramReadiness: async () => assert.fail("a definitive refusal has no phantom server to wait for"),
+    timeoutMs: 40,
+  });
+  const { sharedInitialization, clock } = buildSharedInitializationForTest();
+
+  for (let attempt = 0; attempt < 25; attempt += 1) {
+    await assert.rejects(sharedInitialization(() => initializeEngramServer()));
+  }
+  assert.equal(children.length, 1, "a hot retry loop must not spawn a child per call");
+
+  clock.now += 5000;
+  await assert.rejects(sharedInitialization(() => initializeEngramServer()));
+  assert.equal(children.length, 2, "once the backoff expires the startup is attempted again");
+
+  for (const child of children) {
+    assert.equal(child.killCalls, 1, "every abandoned child is killed, not left detached");
+  }
+});
+
+test("aborting the readiness wait cancels the health poll immediately", async () => {
+  let probes = 0;
+  const waitForEngramReadiness = buildWaitForEngramReadinessForTest({
+    probeEngramHealth: async () => {
+      probes += 1;
+      return "indeterminate";
+    },
+    pollMs: 5,
+  });
+
+  const controller = new AbortController();
+  const pending = waitForEngramReadiness(controller.signal, deadlineIn(30_000));
+  await delay(20);
+  controller.abort();
+
+  await assert.rejects(pending, /cancelled/);
+  const probesAtAbort = probes;
+  await delay(60);
+  assert.equal(probes, probesAtAbort, "an aborted readiness wait issues no further probes");
+});
+
+test("a failing startup backs off instead of re-running on every caller", async () => {
+  const { sharedInitialization } = buildSharedInitializationForTest({ retryBaseMs: 1000, retryMaxMs: 60000 });
+  let starts = 0;
+  const start = async () => {
+    starts += 1;
+    throw new Error("did not become ready before startup timeout");
+  };
+
+  for (let call = 0; call < 20; call += 1) {
+    await assert.rejects(sharedInitialization(start), /did not become ready/);
+  }
+
+  assert.equal(starts, 1, "callers inside the backoff window replay the failure instead of paying the budget");
+});
+
+test("the startup backoff expires so a transient failure is still retried", async () => {
+  const { sharedInitialization, clock } = buildSharedInitializationForTest({ retryBaseMs: 1000, retryMaxMs: 60000 });
+  let starts = 0;
+  const start = async () => {
+    starts += 1;
+    if (starts === 1) throw new Error("did not become ready before startup timeout");
+  };
+
+  await assert.rejects(sharedInitialization(start));
+  assert.equal(starts, 1);
+
+  clock.now += 1000;
+  await sharedInitialization(start);
+  assert.equal(starts, 2, "a transient failure recovers once its backoff window closes");
+
+  await sharedInitialization(start);
+  assert.equal(starts, 2, "a successful startup is cached, not re-run");
+});
+
+test("the startup backoff grows with consecutive failures and stays capped", async () => {
+  const { sharedInitialization, clock } = buildSharedInitializationForTest({ retryBaseMs: 1000, retryMaxMs: 4000 });
+  const start = async () => {
+    throw new Error("did not become ready before startup timeout");
+  };
+  const attemptAt = async (advanceMs) => {
+    clock.now += advanceMs;
+    let ran = false;
+    await assert.rejects(sharedInitialization(async () => {
+      ran = true;
+      await start();
+    }));
+    return ran;
+  };
+
+  assert.equal(await attemptAt(0), true, "the first failure runs the startup");
+  assert.equal(await attemptAt(999), false, "still inside the 1000ms window");
+  assert.equal(await attemptAt(1), true, "the 1000ms window has closed");
+  assert.equal(await attemptAt(1999), false, "the second failure doubled the window to 2000ms");
+  assert.equal(await attemptAt(1), true);
+  assert.equal(await attemptAt(3999), false, "the third failure doubled the window to 4000ms");
+  assert.equal(await attemptAt(1), true);
+  assert.equal(await attemptAt(3999), false, "the window is capped at 4000ms, it does not keep doubling");
+  assert.equal(await attemptAt(1), true);
 });
 
 test("native tool fetches retry transient HTTP startup failures", async () => {
@@ -236,24 +918,25 @@ test("a timeout resolves to null like any other failure, so callers keep their f
     throw timeout;
   };
   try {
-    const { engramFetch, timedOutMethod } = buildEngramFetchForTest();
+    const { engramFetch, engramFetchResult } = buildEngramFetchForTest();
     assert.equal(await engramFetch("/sessions", { method: "POST", body: { id: "s" } }), null);
-    // The timeout detail travels out-of-band instead of through the return value.
-    assert.equal(timedOutMethod(), "POST");
+    assert.deepEqual(await engramFetchResult("/sessions", { method: "POST", body: { id: "s" } }), { data: null, timedOutMethod: "POST" });
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
-test("a connection failure records no timeout method, so the generic message is used", async () => {
+test("a connection failure reports the generic unavailable error", async () => {
   const originalFetch = globalThis.fetch;
+  let calls = 0;
   globalThis.fetch = async () => {
+    calls += 1;
     throw new Error("connection refused");
   };
   try {
-    const { engramFetch, timedOutMethod } = buildEngramFetchForTest();
-    assert.equal(await engramFetch("/observations", { method: "POST", body: { title: "t" } }), null);
-    assert.equal(timedOutMethod(), undefined);
+    const { engramFetch } = buildEngramFetchForTest();
+    await assert.rejects(() => engramFetch("/observations", { method: "POST", body: { title: "t" } }), /could not reach/);
+    assert.equal(calls, 3, "every retry attempt is spent before giving up");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -286,35 +969,47 @@ test("the tool layer reports unknown write outcome instead of inviting a blind r
   assert.doesNotMatch(unreachable, /timed out/);
 });
 
-test("a session-creation timeout still lets the observation write through", async () => {
-  // Regression: when engramFetch threw on timeout, the unguarded ensureSession call in
-  // mem_save aborted the whole tool call before /observations was ever attempted, silently
-  // dropping the user's memory while telling the agent not to retry.
-  assert.match(source, /await ensureSession\(activeSessionId, activeProject\);/);
-  assert.doesNotMatch(source, /throw new EngramTimeoutError/);
+test("session registration requires acknowledgement and failed acknowledgement remains retryable", async () => {
+  let calls = 0;
+  const { ensureSession, knownSessions } = buildEnsureSessionForTest(async () => {
+    calls += 1;
+    return calls === 1 ? null : { status: "created" };
+  });
 
-  const originalFetch = globalThis.fetch;
-  const paths = [];
-  globalThis.fetch = async (url, init) => {
-    const path = new URL(url).pathname;
-    paths.push(path);
-    if (path === "/sessions") {
-      const timeout = new Error("The operation was aborted due to timeout");
-      timeout.name = "TimeoutError";
-      throw timeout;
-    }
-    return { ok: true, async json() { return { id: 1 }; } };
-  };
-  try {
-    const { engramFetch } = buildEngramFetchForTest();
-    // ensureSession's own call fails soft...
-    assert.equal(await engramFetch("/sessions", { method: "POST", body: { id: "s" } }), null);
-    // ...and the observation write that follows it still lands.
-    assert.deepEqual(await engramFetch("/observations", { method: "POST", body: { title: "t" } }), { id: 1 });
-    assert.deepEqual(paths, ["/sessions", "/observations"]);
-  } finally {
-    globalThis.fetch = originalFetch;
+  await assert.rejects(ensureSession("runtime"), /could not confirm session registration/);
+  assert.equal(knownSessions.has("engram:runtime"), false);
+  await ensureSession("runtime");
+  assert.equal(knownSessions.has("engram:runtime"), true);
+  await ensureSession("runtime");
+  assert.equal(calls, 2);
+});
+
+test("session compaction strictly registers before forwarding its summary", () => {
+  const compactStart = source.indexOf('pi.on("session_compact"');
+  const compactEnd = source.indexOf('\n  pi.on("before_agent_start"', compactStart);
+  assert.notEqual(compactStart, -1, "session_compact handler not found");
+  assert.notEqual(compactEnd, -1, "session_compact handler end not found");
+  const compactHandler = source.slice(compactStart, compactEnd);
+
+  const registration = compactHandler.indexOf("if (sessionId) await ensureSession(sessionId);");
+  const summaryPost = compactHandler.indexOf('bestEffortEngramFetch("/observations"');
+  assert.notEqual(registration, -1, "session_compact must await strict session registration");
+  assert.notEqual(summaryPost, -1, "session_compact summary post not found");
+  assert.ok(registration < summaryPost, "strict registration must precede summary forwarding");
+  assert.doesNotMatch(compactHandler, /ensureSessionBestEffort/, "session_compact must not hide registration failure");
+});
+
+test("four session-attributed writes ignore model session_id and require the Pi runtime ID", () => {
+  for (const tool of ["mem_save", "mem_save_prompt", "mem_session_summary", "mem_capture_passive"]) {
+    const schema = source.match(new RegExp(`${tool}: Type\\.Object\\(\\{([\\s\\S]*?)\\n  \\}\\),`));
+    assert.ok(schema, `${tool} schema not found`);
+    assert.doesNotMatch(schema[1], /session_id:/, `${tool} must not invite model-supplied session identity`);
   }
+  assert.match(source, /function requireRuntimeSessionID/);
+  assert.match(source, /ctx\.sessionManager\.getSessionId\(\)/);
+  assert.match(source, /Pi runtime session ID is unavailable/);
+  assert.doesNotMatch(source, /const activeSessionId = String\(params\.session_id/);
+  assert.doesNotMatch(source, /manual-save-\$\{requestedProject\}/);
 });
 
 test("a timeout on the session leg does not mislabel an unrelated failure on the write leg", async () => {
@@ -331,11 +1026,15 @@ test("a timeout on the session leg does not mislabel an unrelated failure on the
     throw new Error("connection refused");
   };
   try {
-    const { engramFetch, timedOutMethod } = buildEngramFetchForTest();
-    assert.equal(await engramFetch("/sessions", { method: "POST", body: { id: "s" } }), null);
-    assert.equal(timedOutMethod(), "POST", "the session leg did time out");
-    assert.equal(await engramFetch("/observations", { method: "POST", body: { title: "t" } }), null);
-    assert.equal(timedOutMethod(), undefined, "the write leg's own failure must supersede the stale timeout");
+    const { engramFetch, engramFetchResult } = buildEngramFetchForTest();
+    assert.deepEqual(
+      await engramFetchResult("/sessions", { method: "POST", body: { id: "s" } }),
+      { data: null, timedOutMethod: "POST" },
+    );
+    await assert.rejects(
+      () => engramFetch("/observations", { method: "POST", body: { title: "t" } }),
+      /could not reach/,
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -535,10 +1234,32 @@ test("native tool unavailable error names the Pi-native HTTP path", () => {
 test("mem_review is registered as a Pi-native executable memory tool", () => {
   assert.match(source, /const ENGRAM_TOOLS = \[[\s\S]*"mem_review"/);
   assert.match(source, /mem_review: Type\.Object\(\{[\s\S]*action: Type\.String\(\{ description: "Action: list \| mark_reviewed" \}\)/);
+  assert.match(source, /mem_review: Type\.Object\(\{[\s\S]*project: optionalString\("Optional project selector: filters list and scopes mark_reviewed; list remains global when omitted"\)/);
+  assert.doesNotMatch(source, /project: optionalString\("Optional project filter for action=list"\)/);
   assert.match(source, /mem_review: Type\.Object\(\{[\s\S]*observation_id: optionalNumber\("Observation id for action=mark_reviewed"\)/);
   assert.match(source, /mem_review: Type\.Object\(\{[\s\S]*id: optionalNumber\("Alias for observation_id"\)/);
-  assert.match(source, /case "mem_review":[\s\S]*action === "list"[\s\S]*engramFetch\(`\/review\$\{queryString\(\{ project: params\.project, limit: params\.limit \}\)\}`\)/);
-  assert.match(source, /case "mem_review":[\s\S]*action === "mark_reviewed"[\s\S]*engramFetch\("\/review\/mark_reviewed"/);
+  assert.match(source, /case "mem_review":[\s\S]*action === "list"[\s\S]*fetch\(`\/review\$\{queryString\(\{ project: requestedProject, limit: params\.limit, all_projects: requestedProject \? undefined : true \}\)\}`\)/);
+  assert.match(source, /case "mem_review":[\s\S]*action === "mark_reviewed"[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*fetch\(`\/review\/mark_reviewed\$\{queryString\(\{ project: activeProject \}\)\}`/);
   assert.match(source, /case "mem_review":[\s\S]*body: \{ observation_id: params\.observation_id \|\| params\.id \}/);
   assert.match(source, /for \(const toolName of ENGRAM_TOOLS\)[\s\S]*executeMemoryTool\(toolName/);
+});
+
+test("mem_stats explicitly requests its global aggregate contract", () => {
+  assert.match(source, /case "mem_stats":[\s\S]*fetch\(`\/stats\$\{queryString\(\{ all_projects: true \}\)\}`\)/);
+});
+
+test("best-effort capture failures are surfaced instead of silently discarded", () => {
+  // A passive capture that the server rejects (for example because the parent
+  // session carries no project ownership) must not vanish: the operator has no
+  // other signal that memories stopped being saved.
+  assert.match(source, /function warnEngramFailure\(/);
+  assert.match(source, /process\.stderr\.write/);
+  assert.match(
+    source,
+    /async function bestEffortEngramFetch[\s\S]*catch \(error\) \{[\s\S]*warnEngramFailure\(path, error\)/,
+  );
+  assert.doesNotMatch(
+    source,
+    /async function bestEffortEngramFetch[\s\S]{0,200}catch \{\s*\n\s*return null;/,
+  );
 });

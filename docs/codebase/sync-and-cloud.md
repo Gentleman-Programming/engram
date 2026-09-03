@@ -30,6 +30,10 @@ Local SQLite
 
 Project-scoped chunks carry sessions, observations, prompts, and the non-orphaned `memory_relations` graph for observations in that project. Relation rows travel as existing `relation` sync mutations inside the chunk so imports reuse the same idempotent relation apply path as cloud sync.
 
+During incremental local project exports, an observation absent from available chunk history bypasses the manifest watermark. A direct historical row or an observation mutation, including a tombstone, establishes historical presence; sessions and prompts otherwise retain timestamp-only filtering, while sessions needed by emitted observations are included for dependency closure.
+
+Cloud exports are size-bounded: `engram sync --cloud` splits the pending mutation replay into deterministic, dependency-complete chunks of at most 4 MiB each, so a large initial replay stays within the server's `ENGRAM_CLOUD_MAX_PUSH_BYTES` limit (default 8 MiB). Each chunk acknowledges only its own mutation sequences after a successful push, so an interrupted sync resumes from the first unacknowledged mutation instead of replaying acknowledged work.
+
 Guardrails:
 
 - Do not modify old chunks to “update” them.
@@ -48,6 +52,36 @@ Guardrails:
 - degraded state with `reason_code` and message.
 
 Business rule: **if sync is blocked, fail loudly and visibly**. No silent drops.
+
+### Blank session identities
+
+A session identity is blank when `strings.TrimSpace` reduces it to the empty
+string. That is the only definition. SQL predicates express it through the
+shared whitespace trim set in `internal/store/store.go` (`sqlSessionIDBlank` /
+`sqlSessionIDNotBlank`), because SQLite's bare `trim()` strips only `U+0020` and
+would otherwise let a tab- or newline-only legacy ID be blank to Go and
+non-blank to SQL.
+
+Local writes fail closed. `enqueueSyncMutationTx` rejects a blank session
+identity for every caller, so no blank-identity mutation can enter the journal
+regardless of which Store method enqueues it.
+
+Pulled mutations are **skip-plus-evidence**, not fail-closed. Servers enrolled
+before the identity rule existed still hold historical chunks whose session
+identity is blank. No local action can make those valid, so halting the pull
+would pin the cursor forever and block every later mutation behind it. Instead
+the mutation is quarantined in `sync_apply_deferred` with reason code
+`sync_session_identity_invalid`, the rest of the chunk applies, and the cursor
+advances. A payload that does not decode at all stays fail-closed — that is a
+transport fault, not known-corrupt historical data.
+
+Quarantined mutations are never silent, so the "no silent drops" rule holds:
+`engram doctor --check invalid_session_identity` reports each one as a warning
+finding with reason code `quarantined_pulled_session_identity`, and `engram
+conflicts deferred` lists the raw row. The same doctor check reports blank
+identities found in the local `sessions` table as blocking findings. Neither is
+auto-repaired, because inventing a canonical session ID would fabricate identity
+data.
 
 ## Cloud transport: `internal/cloud/remote` + `internal/cloud/cloudserver`
 
