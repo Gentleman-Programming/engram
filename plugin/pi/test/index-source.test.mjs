@@ -32,10 +32,10 @@ function buildEngramFetchForTest({
   maxAttempts = 3,
   backoffBaseMs = 150,
 } = {}) {
-  const body = extractFunctionBody("engramFetch", "{\n  const method")
+  const body = extractFunctionBody("engramFetchResult", "{\n  const method")
     .replace("let res: Response | undefined;", "let res;")
     .replace("let data: unknown = null;", "let data = null;")
-    .replace("return data as TResponse;", "return data;");
+    .replace("return { data: data as TResponse };", "return { data };");
   const factory = new Function(
     "fetch",
     "wait",
@@ -57,11 +57,14 @@ function buildEngramFetchForTest({
     function isTimeoutError(error) {
       ${extractFunctionBody("isTimeoutError", "{\n  return error instanceof Error")}
     }
-    let lastFetchTimeoutMethod;
-    const engramFetch = async function engramFetch(path, opts = {}) {
+    function unreachableMessage() {
+      return "gentle-engram could not reach the Engram HTTP server";
+    }
+    const engramFetchResult = async function engramFetchResult(path, opts = {}) {
       ${body}
     };
-    return { engramFetch, timedOutMethod: () => lastFetchTimeoutMethod };
+    const engramFetch = async (path, opts = {}) => (await engramFetchResult(path, opts)).data;
+    return { engramFetch, engramFetchResult };
   `,
   );
   return factory(
@@ -265,7 +268,7 @@ function buildEnsureSessionForTest(engramFetch) {
   const body = extractFunctionBody("ensureSession", "{\n  const key")
     .replace("const body: SessionBody", "const body");
   const factory = new Function("knownSessions", "sessionRegistrationsInFlight", "engramFetch", "project", "directory", `
-    return async function ensureSession(sessionId, sessionProject = project) {
+    return async function ensureSession(sessionId, sessionProject = project, fetch = engramFetch) {
       ${body}
     };
   `);
@@ -318,11 +321,11 @@ function sessionCtx(id, sink) {
 
 test("mem_session_summary accepts explicit project fallback", () => {
   assert.match(source, /mem_session_summary: Type\.Object\(\{[\s\S]*project: optionalString\("Optional project to use when automatic detection is unavailable"\)/);
-  assert.match(source, /case "mem_session_summary":[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*ensureSession\(summarySessionId, activeProject\)[\s\S]*project: activeProject/);
+  assert.match(source, /case "mem_session_summary":[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*ensureSession\(summarySessionId, activeProject, fetch\)[\s\S]*project: activeProject/);
 });
 
 test("mem_save_prompt returns a prompt-scoped identity", () => {
-  assert.match(source, /case "mem_save_prompt":[\s\S]*const response = await engramFetch<\{ id: number \}>\("\/prompts",/);
+  assert.match(source, /case "mem_save_prompt":[\s\S]*const response = await fetch<\{ id: number \}>\("\/prompts",/);
   assert.match(source, /case "mem_save_prompt":[\s\S]*return response \? \{ prompt_id: response\.id, status: "saved" \} : response;/);
 });
 
@@ -330,6 +333,13 @@ test("mem_search exposes and forwards match_mode and all_projects", () => {
   assert.match(source, /mem_search: Type\.Object\(\{[\s\S]*all_projects: optionalBoolean\("Search across every project; when true project is ignored"\)/);
   assert.match(source, /mem_search: Type\.Object\(\{[\s\S]*match_mode: optionalString\("Match mode: all \(default\) or any for broader recall"\)/);
   assert.match(source, /case "mem_search":[\s\S]*if \(!params\.all_projects && !requestedProject\) requireResolvedProject\(\);[\s\S]*project: params\.all_projects \? undefined : activeProject[\s\S]*match_mode: params\.match_mode[\s\S]*all_projects: params\.all_projects/);
+});
+
+test("scope descriptions document values and unfiltered omission", () => {
+  assert.match(source, /mem_search: Type\.Object\(\{[\s\S]*scope: optionalString\("Filter by scope: project, personal, or global\. Omit to apply no scope filter\."\)/);
+  assert.match(source, /mem_save: Type\.Object\(\{[\s\S]*scope: optionalString\("Scope: project, personal, or global"\)/);
+  assert.match(source, /mem_context: Type\.Object\(\{[\s\S]*scope: optionalString\("Filter observations by scope: project, personal, or global\. Omit to apply no scope filter\."\)/);
+  assert.match(source, /mem_update: Type\.Object\(\{[\s\S]*scope: optionalString\("New scope: project, personal, or global"\)/);
 });
 
 test("project detection 404 falls back to local config or diagnostic", () => {
@@ -908,24 +918,25 @@ test("a timeout resolves to null like any other failure, so callers keep their f
     throw timeout;
   };
   try {
-    const { engramFetch, timedOutMethod } = buildEngramFetchForTest();
+    const { engramFetch, engramFetchResult } = buildEngramFetchForTest();
     assert.equal(await engramFetch("/sessions", { method: "POST", body: { id: "s" } }), null);
-    // The timeout detail travels out-of-band instead of through the return value.
-    assert.equal(timedOutMethod(), "POST");
+    assert.deepEqual(await engramFetchResult("/sessions", { method: "POST", body: { id: "s" } }), { data: null, timedOutMethod: "POST" });
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
-test("a connection failure records no timeout method, so the generic message is used", async () => {
+test("a connection failure reports the generic unavailable error", async () => {
   const originalFetch = globalThis.fetch;
+  let calls = 0;
   globalThis.fetch = async () => {
+    calls += 1;
     throw new Error("connection refused");
   };
   try {
-    const { engramFetch, timedOutMethod } = buildEngramFetchForTest();
-    assert.equal(await engramFetch("/observations", { method: "POST", body: { title: "t" } }), null);
-    assert.equal(timedOutMethod(), undefined);
+    const { engramFetch } = buildEngramFetchForTest();
+    await assert.rejects(() => engramFetch("/observations", { method: "POST", body: { title: "t" } }), /could not reach/);
+    assert.equal(calls, 3, "every retry attempt is spent before giving up");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1015,11 +1026,15 @@ test("a timeout on the session leg does not mislabel an unrelated failure on the
     throw new Error("connection refused");
   };
   try {
-    const { engramFetch, timedOutMethod } = buildEngramFetchForTest();
-    assert.equal(await engramFetch("/sessions", { method: "POST", body: { id: "s" } }), null);
-    assert.equal(timedOutMethod(), "POST", "the session leg did time out");
-    assert.equal(await engramFetch("/observations", { method: "POST", body: { title: "t" } }), null);
-    assert.equal(timedOutMethod(), undefined, "the write leg's own failure must supersede the stale timeout");
+    const { engramFetch, engramFetchResult } = buildEngramFetchForTest();
+    assert.deepEqual(
+      await engramFetchResult("/sessions", { method: "POST", body: { id: "s" } }),
+      { data: null, timedOutMethod: "POST" },
+    );
+    await assert.rejects(
+      () => engramFetch("/observations", { method: "POST", body: { title: "t" } }),
+      /could not reach/,
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1223,14 +1238,14 @@ test("mem_review is registered as a Pi-native executable memory tool", () => {
   assert.doesNotMatch(source, /project: optionalString\("Optional project filter for action=list"\)/);
   assert.match(source, /mem_review: Type\.Object\(\{[\s\S]*observation_id: optionalNumber\("Observation id for action=mark_reviewed"\)/);
   assert.match(source, /mem_review: Type\.Object\(\{[\s\S]*id: optionalNumber\("Alias for observation_id"\)/);
-  assert.match(source, /case "mem_review":[\s\S]*action === "list"[\s\S]*engramFetch\(`\/review\$\{queryString\(\{ project: requestedProject, limit: params\.limit, all_projects: requestedProject \? undefined : true \}\)\}`\)/);
-  assert.match(source, /case "mem_review":[\s\S]*action === "mark_reviewed"[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*engramFetch\(`\/review\/mark_reviewed\$\{queryString\(\{ project: activeProject \}\)\}`/);
+  assert.match(source, /case "mem_review":[\s\S]*action === "list"[\s\S]*fetch\(`\/review\$\{queryString\(\{ project: requestedProject, limit: params\.limit, all_projects: requestedProject \? undefined : true \}\)\}`\)/);
+  assert.match(source, /case "mem_review":[\s\S]*action === "mark_reviewed"[\s\S]*if \(!requestedProject\) requireResolvedProject\(\);[\s\S]*fetch\(`\/review\/mark_reviewed\$\{queryString\(\{ project: activeProject \}\)\}`/);
   assert.match(source, /case "mem_review":[\s\S]*body: \{ observation_id: params\.observation_id \|\| params\.id \}/);
   assert.match(source, /for \(const toolName of ENGRAM_TOOLS\)[\s\S]*executeMemoryTool\(toolName/);
 });
 
 test("mem_stats explicitly requests its global aggregate contract", () => {
-  assert.match(source, /case "mem_stats":[\s\S]*engramFetch\(`\/stats\$\{queryString\(\{ all_projects: true \}\)\}`\)/);
+  assert.match(source, /case "mem_stats":[\s\S]*fetch\(`\/stats\$\{queryString\(\{ all_projects: true \}\)\}`\)/);
 });
 
 test("best-effort capture failures are surfaced instead of silently discarded", () => {

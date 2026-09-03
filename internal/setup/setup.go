@@ -14,6 +14,7 @@
 package setup
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Gentleman-Programming/engram/v2/internal/command"
 	"github.com/Gentleman-Programming/engram/v2/internal/mcp"
 )
 
@@ -33,7 +35,7 @@ var (
 	lookPathFn   = exec.LookPath
 	osExecutable = os.Executable
 	runCommand   = func(name string, args ...string) ([]byte, error) {
-		return exec.Command(name, args...).CombinedOutput()
+		return command.NewContext(context.Background(), name, args...).CombinedOutput()
 	}
 	openCodeReadFile = func(path string) ([]byte, error) {
 		return openCodeFS.ReadFile(path)
@@ -148,7 +150,7 @@ Call mem_save IMMEDIATELY after any of these:
 Format for mem_save:
 - **title**: Verb + what — short, searchable (e.g. "Fixed N+1 query in UserList", "Chose Zustand over Redux")
 - **type**: bugfix | decision | architecture | discovery | pattern | config | preference
-- **scope**: project (default) | personal
+- **scope**: project (default) | personal | global
 - **topic_key** (optional, recommended for evolving decisions): stable key like architecture/auth-model
 - **content**:
   **What**: One sentence — what was done
@@ -888,23 +890,30 @@ func claudeCodeUserMCPPath() string {
 	return filepath.Join(claudeCodeMCPDir(), "engram.json")
 }
 
-// writeClaudeCodeUserMCP writes ~/.claude/mcp/engram.json with the absolute
-// path to the engram binary. This is idempotent — it always writes (overwrites)
-// so that if the binary moves (e.g. brew upgrade), running setup again fixes it.
-// Using os.Executable() instead of PATH lookup ensures the correct binary is
-// referenced even when PATH is not propagated to MCP subprocesses (Windows).
+// writeClaudeCodeUserMCP writes ~/.claude/mcp/engram.json with the canonical
+// absolute path to the engram binary. This is idempotent — it always writes
+// (overwrites) so that if the binary moves (e.g. brew upgrade), running setup
+// again fixes it. The command is resolved via canonicalEngramCommand() so a
+// versioned Homebrew/Linuxbrew Cellar path maps to the stable
+// <brew-prefix>/bin/engram symlink that survives `brew upgrade`.
+//
+// os.Executable() is called exactly once and its result is passed to the
+// canonicalization helper, so the written path is always derived from the same
+// executable result that was checked for an error. The error contract preserves
+// the original "resolve binary path" failure — the Claude Code user MCP config
+// must not be written with a PATH-dependent command when the binary cannot be
+// resolved absolutely.
 func writeClaudeCodeUserMCP() error {
 	exe, err := osExecutable()
 	if err != nil {
 		return fmt.Errorf("resolve binary path: %w", err)
 	}
-	// Resolve any symlinks so the path is stable across package manager updates.
-	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
-		exe = resolved
+	cmd, err := claudeCodeEngramCommand(exe)
+	if err != nil {
+		return err
 	}
-
 	entry := map[string]any{
-		"command": exe,
+		"command": cmd,
 		"args":    []string{"mcp", "--tools=agent"},
 	}
 	data, err := jsonMarshalIndentFn(entry, "", "  ")
@@ -1108,13 +1117,29 @@ func injectGeminiMCP(configPath string) error {
 // leaves a stale command that fails to spawn (ENOENT). When the resolved
 // executable points into a versioned Cellar directory we prefer the stable
 // <brew-prefix>/bin/engram symlink, which brew repoints at the current version,
-// so registrations survive upgrades. Falls back to bare "engram" only when
-// os.Executable() fails or the stable symlink is missing.
+// so registrations survive upgrades. It falls back to bare "engram" only when
+// os.Executable() fails; an absolute executable is preserved if canonicalization
+// cannot resolve an absolute command.
 func resolveEngramCommand() string {
 	exe, err := osExecutable()
 	if err != nil {
 		return "engram" // fallback to PATH-based name
 	}
+	canonical := canonicalEngramCommand(exe)
+	if filepath.IsAbs(exe) && !filepath.IsAbs(canonical) {
+		return exe
+	}
+	return canonical
+}
+
+// canonicalEngramCommand resolves an already-obtained executable path to the
+// canonical engram command: it resolves symlinks via filepath.EvalSymlinks and
+// maps a versioned Homebrew/Linuxbrew Cellar path to the stable
+// <brew-prefix>/bin/engram symlink that brew keeps pointing at the current
+// version (see stableHomebrewEngramCommand). Non-Homebrew installs keep their
+// resolved absolute path. It does not call osExecutable() — the caller is
+// responsible for obtaining exe and for any PATH-based fallback on failure.
+func canonicalEngramCommand(exe string) string {
 	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
 		exe = resolved
 	}
@@ -1122,6 +1147,24 @@ func resolveEngramCommand() string {
 		return stable
 	}
 	return exe
+}
+
+// claudeCodeEngramCommand is the caller-specific absolute-path policy for
+// writeClaudeCodeUserMCP. canonicalEngramCommand may return the bare "engram"
+// fallback when a Homebrew Cellar exe has no stable <brew-prefix>/bin/engram
+// symlink on disk — correct for resolveEngramCommand (PATH discovery), but
+// the durable Claude Code user MCP config must never persist a PATH-dependent
+// command. This helper preserves the already-obtained absolute exe on a
+// non-absolute fallback and errors when the obtained exe is non-absolute.
+func claudeCodeEngramCommand(exe string) (string, error) {
+	canonical := canonicalEngramCommand(exe)
+	if filepath.IsAbs(canonical) {
+		return canonical, nil
+	}
+	if filepath.IsAbs(exe) {
+		return exe, nil
+	}
+	return "", fmt.Errorf("resolve absolute engram command: executable path %q is not absolute", exe)
 }
 
 // stableHomebrewEngramCommand maps a versioned Homebrew Cellar path to the

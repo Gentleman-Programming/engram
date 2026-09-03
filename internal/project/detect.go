@@ -16,6 +16,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/Gentleman-Programming/engram/v2/internal/command"
 )
 
 // ErrAmbiguousProject is returned when the working directory is a parent of
@@ -380,7 +382,7 @@ func detectGitCommonDir(dir string) string {
 }
 
 func gitRevParsePath(ctx context.Context, dir, argument string) string {
-	cmd := newProjectCommandContext(ctx, "git", "-C", dir, "rev-parse", "--path-format=absolute", argument)
+	cmd := command.NewContext(ctx, "git", "-C", dir, "rev-parse", "--path-format=absolute", argument)
 	out, err := cmd.Output()
 	if err != nil {
 		return ""
@@ -405,7 +407,7 @@ func detectGitWorktreeDir(dir string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	cmd := newProjectCommandContext(ctx, "git", "-C", dir, "rev-parse", "--show-toplevel")
+	cmd := command.NewContext(ctx, "git", "-C", dir, "rev-parse", "--show-toplevel")
 	out, err := cmd.Output()
 	if err != nil {
 		return ""
@@ -534,7 +536,7 @@ func detectFromGitRemote(dir string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	cmd := newProjectCommandContext(ctx, "git", "-C", dir, "remote", "get-url", "origin")
+	cmd := command.NewContext(ctx, "git", "-C", dir, "remote", "get-url", "origin")
 	out, err := cmd.Output()
 	if err != nil {
 		return ""
