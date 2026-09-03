@@ -92,8 +92,17 @@ function Invoke-Project {
   param([string]$Project)
   if (-not (Write-LogLine "project START project=$Project")) { return -1 }
   $exportExit = Invoke-ProjectPhase -Project $Project -Phase 'export'
-  if ($exportExit -ne 0) { return $exportExit } # Native autosync does not pull after a failed push.
-  return Invoke-ProjectPhase -Project $Project -Phase 'import'
+  if ($exportExit -ne 0) {
+    if (-not (Write-LogLine "project FAILURE project=$Project phase=export exit=$exportExit")) { return -1 }
+    return $exportExit # Native autosync does not pull after a failed push.
+  }
+  $importExit = Invoke-ProjectPhase -Project $Project -Phase 'import'
+  if ($importExit -ne 0) {
+    if (-not (Write-LogLine "project FAILURE project=$Project phase=import exit=$importExit")) { return -1 }
+    return $importExit
+  }
+  if (-not (Write-LogLine "project SUCCESS project=$Project")) { return -1 }
+  return 0
 }
 
 $overall = 0

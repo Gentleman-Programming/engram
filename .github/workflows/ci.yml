@@ -51,7 +51,7 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: "1.25.10"
-      - run: go test ./tools/ -run TestCloudSyncWrappers -v
+      - run: go test ./tools/ -run '^TestCloudSync(Wrappers|PowerShellMissingEngram)$' -v
 
   plugin-tests:
     name: Plugin Tests

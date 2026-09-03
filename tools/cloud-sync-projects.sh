@@ -72,8 +72,17 @@ run_project() {
   logline "project START project=$proj" || return 1
   run_phase "$proj" export
   rc=$?
-  [ "$rc" -eq 0 ] || return "$rc"  # Native autosync does not pull after a failed push.
+  if [ "$rc" -ne 0 ]; then
+    logline "project FAILURE project=$proj phase=export exit=$rc" || return 1
+    return "$rc"  # Native autosync does not pull after a failed push.
+  fi
   run_phase "$proj" import
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    logline "project FAILURE project=$proj phase=import exit=$rc" || return 1
+    return "$rc"
+  fi
+  logline "project SUCCESS project=$proj" || return 1
 }
 
 overall=0
