@@ -80,8 +80,15 @@ func ensureDatabaseFile(path string) error {
 }
 
 var openDB = func(dbPath string, generation *databaseGeneration) (*sql.DB, error) {
-	d := &generationDriver{Driver: &sqlite.Driver{}, generation: generation}
-	return sql.OpenDB(generationConnector{driver: d, name: dbPath}), nil
+	sqliteDriver := &sqlite.Driver{}
+	sqliteDriver.RegisterConnectionHook(func(conn sqlite.ExecQuerierContext, _ string) error {
+		if fc, ok := conn.(sqlite.FileControl); ok {
+			_, _ = fc.FileControlPersistWAL("main", 1)
+		}
+		return nil
+	})
+	d := &generationDriver{Driver: sqliteDriver, generation: generation}
+	return sql.OpenDB(generationConnector{driver: d, name: storeDSN(dbPath)}), nil
 }
 
 type generationConnector struct {
@@ -265,6 +272,28 @@ func (c generationConn) CheckNamedValue(value *driver.NamedValue) error {
 		return checker.CheckNamedValue(value)
 	}
 	return driver.ErrSkip
+}
+
+// FileControlPersistWAL forwards modernc's optional FileControl interface
+// through the generation fence. database/sql exposes this wrapped connection
+// to primeConnection via Conn.Raw, so omitting it would make persistent WAL
+// unavailable whenever generation fencing is enabled.
+func (c generationConn) FileControlPersistWAL(dbName string, mode int) (int, error) {
+	if err := c.generation.check(); err != nil {
+		return 0, err
+	}
+	fc, ok := c.Conn.(sqlite.FileControl)
+	if !ok {
+		return 0, errors.New("database connection does not implement sqlite.FileControl")
+	}
+	result, err := fc.FileControlPersistWAL(dbName, mode)
+	if err != nil {
+		return 0, err
+	}
+	if err := c.generation.check(); err != nil {
+		return 0, err
+	}
+	return result, nil
 }
 
 type generationStmt struct {
