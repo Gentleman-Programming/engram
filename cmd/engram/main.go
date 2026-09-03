@@ -87,6 +87,7 @@ var (
 	setupInstallAgent            = setup.Install
 	setupAddClaudeCodeAllowlist  = setup.AddClaudeCodeAllowlist
 	setupEnsureClaudeCodeUserMCP = setup.EnsureClaudeCodeUserMCP
+	setupVerifyClaudeCodeSlim    = setup.VerifyClaudeCodeSlimCapability
 	scanInputLine                = fmt.Scanln
 
 	storeSearch = func(s *store.Store, query string, opts store.SearchOptions) ([]store.SearchResult, error) {
@@ -2806,7 +2807,9 @@ func cmdSetup(cfg store.Config) {
 			fatal(err)
 		}
 		if protocolFlag {
-			applyProtocolMode(cfg, slug, resolveProtocolModeFlag(protocolRaw))
+			mode := resolveProtocolModeFlag(protocolRaw)
+			applyProtocolMode(cfg, slug, mode)
+			warnIfClaudeCodeSlimUnverified(slug, mode)
 		}
 		fmt.Printf("✓ Installed %s plugin (%d files)\n", result.Agent, result.Files)
 		fmt.Printf("  → %s\n", result.Destination)
@@ -2857,6 +2860,7 @@ func cmdSetupInteractive(cfg store.Config, mode string) {
 	}
 	if mode != "" {
 		applyProtocolMode(cfg, selected.Name, mode)
+		warnIfClaudeCodeSlimUnverified(selected.Name, mode)
 	}
 
 	fmt.Printf("✓ Installed %s plugin (%d files)\n", result.Agent, result.Files)
@@ -2878,7 +2882,9 @@ func printSetupUsage() {
 	fmt.Println("                          installed agent slug (default: full). Unknown or")
 	fmt.Println("                          missing values fall back to full with a warning.")
 	fmt.Println("                          slim currently only takes effect for claude-code,")
-	fmt.Println("                          and only when the installed engram is >= 1.4.0.")
+	fmt.Println("                          and only with a clean tagged engram release >= 1.4.0.")
+	fmt.Println("                          Claude Code slim also requires Engram plugin >= 0.1.1;")
+	fmt.Println("                          setup warns, but continues, when it cannot verify it.")
 	fmt.Println("  --help, -h              Show this help and exit.")
 }
 
@@ -2905,6 +2911,28 @@ func resolveProtocolModeFlag(raw string) string {
 func applyProtocolMode(cfg store.Config, slug, mode string) {
 	if err := setup.WriteProtocolMode(cfg.DataDir, slug, mode); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not persist protocol mode: %v\n", err)
+	}
+
+	classification := classifyProtocolVersion(version)
+	if mode != setup.ProtocolModeSlim || classification == protocolVersionSupported {
+		return
+	}
+
+	if classification == protocolVersionBelowFloor {
+		fmt.Fprintf(os.Stderr, "warning: slim will remain full: engram %q is below 1.4.0; install a clean tagged release at or above 1.4.0.\n", strings.TrimSpace(version))
+		return
+	}
+	fmt.Fprintf(os.Stderr, "warning: slim will remain full: engram %q is not a clean tagged release; install a clean tagged release at or above 1.4.0.\n", strings.TrimSpace(version))
+}
+
+func warnIfClaudeCodeSlimUnverified(slug, mode string) {
+	if slug != "claude-code" || mode != setup.ProtocolModeSlim {
+		return
+	}
+	if err := setupVerifyClaudeCodeSlim(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: unable to verify the Claude Code Engram plugin supports --protocol=slim (requires plugin 0.1.1+): %v\n", err)
+		fmt.Fprintln(os.Stderr, "  Update the plugin through your normal Claude Code plugin update path, then restart Claude Code.")
+		fmt.Fprintln(os.Stderr, "  Session-only plugins loaded with `claude --plugin-dir ...` cannot be detected by this check.")
 	}
 }
 
@@ -2936,34 +2964,51 @@ func cmdProtocolMode(cfg store.Config) {
 // MCP serverInstructions duplication fix shipped in this release.
 var protocolVersionFloor = [3]int{1, 4, 0}
 
-// meetsProtocolVersionFloor reports whether v (e.g. "1.4.0", "v1.5.2", or the
-// build-time "dev" placeholder) is >= protocolVersionFloor. Any unparseable
-// or empty value returns false — the caller then falls back to "full".
-func meetsProtocolVersionFloor(v string) bool {
+type protocolVersionClassification uint8
+
+const (
+	protocolVersionUnsupported protocolVersionClassification = iota
+	protocolVersionBelowFloor
+	protocolVersionSupported
+)
+
+// classifyProtocolVersion distinguishes clean releases that can use slim from
+// releases below the floor and development, pseudo, dirty, or other non-release
+// build versions. Legacy numeric versions such as "1.4" remain supported.
+func classifyProtocolVersion(v string) protocolVersionClassification {
 	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
-	if v == "" || v == "dev" {
-		return false
+	segments := strings.Split(v, ".")
+	if len(segments) < 2 || len(segments) > 3 {
+		return protocolVersionUnsupported
 	}
 
-	segments := strings.SplitN(v, ".", 3)
 	var parts [3]int
-	for i, s := range segments {
-		if i >= 3 {
-			break
+	for i, segment := range segments {
+		if segment == "" {
+			return protocolVersionUnsupported
 		}
-		n, err := strconv.Atoi(strings.TrimSpace(s))
-		if err != nil {
-			return false
+		n, err := strconv.Atoi(segment)
+		if err != nil || n < 0 {
+			return protocolVersionUnsupported
 		}
 		parts[i] = n
 	}
 
 	for i := 0; i < 3; i++ {
 		if parts[i] != protocolVersionFloor[i] {
-			return parts[i] > protocolVersionFloor[i]
+			if parts[i] > protocolVersionFloor[i] {
+				return protocolVersionSupported
+			}
+			return protocolVersionBelowFloor
 		}
 	}
-	return true
+	return protocolVersionSupported
+}
+
+// meetsProtocolVersionFloor reports whether v is a clean release at or above
+// protocolVersionFloor. Unsupported versions fall back to "full".
+func meetsProtocolVersionFloor(v string) bool {
+	return classifyProtocolVersion(v) == protocolVersionSupported
 }
 
 func printPostInstall(result *setup.Result) {

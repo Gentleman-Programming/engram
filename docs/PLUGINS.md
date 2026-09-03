@@ -93,6 +93,8 @@ claude --plugin-dir ./plugin/claude-code
 
 Existing marketplace-only copies create their durable MCP registration at the next SessionStart and require one more Claude Code restart before MCP tools return; do not edit the plugin cache manually.
 
+The `--protocol=slim` setup option requires Engram plugin 0.1.1 or later. After successful Claude Code setup, Engram checks `claude plugin list --json`; an unverifiable, disabled, or older plugin produces a warning but does not fail setup or replace the selected slim mode. Use your normal Claude Code plugin update path, then restart Claude Code. Plugins loaded with session-only `claude --plugin-dir ...` cannot be detected.
+
 ### What the Plugin Provides with Setup (vs bare MCP)
 
 | Feature | Bare MCP | Plugin + setup |
