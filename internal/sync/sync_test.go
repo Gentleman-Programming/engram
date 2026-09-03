@@ -1272,6 +1272,66 @@ func TestLocalChunkExportUsesObservationHistory(t *testing.T) {
 	}
 }
 
+func TestLocalChunkExportConvergesAfterImportingHistoricalTombstone(t *testing.T) {
+	const (
+		sessionID = "session-historical-tombstone"
+		obsSyncID = "observation-historical-tombstone"
+		createdAt = "2025-01-01 00:00:00"
+		deletedAt = "2025-02-01 00:00:00"
+	)
+	tombstoneDeletedAt := deletedAt
+
+	syncDir := filepath.Join(t.TempDir(), ".engram")
+	writeLocalChunkFile(t, syncDir, "initial", ChunkData{
+		Sessions: []store.Session{{
+			ID:        sessionID,
+			Project:   "proj-a",
+			Directory: "/tmp/proj-a",
+			StartedAt: createdAt,
+		}},
+		Observations: []store.Observation{{
+			SyncID:    obsSyncID,
+			SessionID: sessionID,
+			Type:      "bugfix",
+			Title:     "Historical tombstone",
+			Content:   "Previously exported observation",
+			Scope:     "project",
+			CreatedAt: createdAt,
+			UpdatedAt: createdAt,
+		}},
+	})
+	writeLocalChunkFile(t, syncDir, "tombstone", ChunkData{
+		Observations: []store.Observation{{
+			SyncID:    obsSyncID,
+			SessionID: sessionID,
+			Type:      "bugfix",
+			Title:     "Historical tombstone",
+			Content:   "Previously exported observation",
+			Scope:     "project",
+			CreatedAt: createdAt,
+			UpdatedAt: deletedAt,
+			DeletedAt: &tombstoneDeletedAt,
+		}},
+	})
+	writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{
+		{ID: "initial", CreatedAt: "2025-01-01T00:00:00Z"},
+		{ID: "tombstone", CreatedAt: "2025-02-01T00:00:00Z"},
+	}})
+
+	s := newTestStore(t)
+	if _, err := New(s, syncDir).Import(); err != nil {
+		t.Fatalf("import tombstone: %v", err)
+	}
+
+	result, err := New(s, syncDir).Export("alice", "proj-a")
+	if err != nil {
+		t.Fatalf("repeat export after tombstone import: %v", err)
+	}
+	if !result.IsEmpty {
+		t.Fatalf("repeat export = %+v, want empty", result)
+	}
+}
+
 func TestExportedChunkKeysObservationMutationIdentity(t *testing.T) {
 	validPayload := `{"sync_id":" obs-mutation-only ","session_id":"session","type":"decision","title":"title","content":"content","scope":"project"}`
 	quotedPayload, err := json.Marshal(validPayload)

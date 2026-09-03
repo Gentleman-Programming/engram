@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -37,6 +38,82 @@ func TestCmdSetupHelpAnyPositionShowsProtocolFlagAndSkipsStdin(t *testing.T) {
 			t.Fatalf("args=%v: usage output missing literal --protocol: %q", args, stdout)
 		}
 	}
+}
+
+func TestCmdSetupMCPOnly(t *testing.T) {
+	stubRuntimeHooks(t)
+	stubExitWithPanic(t)
+	cfg := testConfig(t)
+
+	oldEnsure := setupEnsureClaudeCodeUserMCP
+	t.Cleanup(func() { setupEnsureClaudeCodeUserMCP = oldEnsure })
+
+	t.Run("success", func(t *testing.T) {
+		called := false
+		setupEnsureClaudeCodeUserMCP = func() error {
+			called = true
+			return nil
+		}
+
+		withArgs(t, "engram", "setup", "claude-code", "--mcp-only")
+		stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdSetup(cfg) })
+		if recovered != nil || stdout != "" || stderr != "" {
+			t.Fatalf("success panic=%v stdout=%q stderr=%q", recovered, stdout, stderr)
+		}
+		if !called {
+			t.Fatal("expected MCP-only setup to ensure the Claude Code MCP config")
+		}
+	})
+
+	t.Run("invalid slug", func(t *testing.T) {
+		setupEnsureClaudeCodeUserMCP = func() error {
+			t.Fatal("MCP-only setup must reject an invalid slug before ensuring")
+			return nil
+		}
+
+		withArgs(t, "engram", "setup", "codex", "--mcp-only")
+		_, stderr, recovered := captureOutputAndRecover(t, func() { cmdSetup(cfg) })
+		if _, ok := recovered.(exitCode); !ok || !strings.Contains(stderr, "--mcp-only requires claude-code") {
+			t.Fatalf("invalid slug panic=%v stderr=%q", recovered, stderr)
+		}
+	})
+
+	t.Run("ensure failure", func(t *testing.T) {
+		setupEnsureClaudeCodeUserMCP = func() error { return errors.New("MCP config unavailable") }
+
+		withArgs(t, "engram", "setup", "claude-code", "--mcp-only")
+		_, stderr, recovered := captureOutputAndRecover(t, func() { cmdSetup(cfg) })
+		if _, ok := recovered.(exitCode); !ok || !strings.Contains(stderr, "MCP config unavailable") {
+			t.Fatalf("ensure failure panic=%v stderr=%q", recovered, stderr)
+		}
+	})
+}
+
+func TestPrintPostInstallClaudeCodeReportsMCPStatus(t *testing.T) {
+	oldScan := scanInputLine
+	scanInputLine = func(...any) (int, error) { return 0, nil }
+	t.Cleanup(func() { scanInputLine = oldScan })
+
+	t.Run("configured", func(t *testing.T) {
+		stdout, stderr := captureOutput(t, func() {
+			printPostInstall(&setup.Result{Agent: "claude-code", MCPConfigured: true})
+		})
+		if stderr != "" || !strings.Contains(stdout, "MCP config written to ~/.claude/mcp/engram.json") {
+			t.Fatalf("configured output stdout=%q stderr=%q", stdout, stderr)
+		}
+	})
+
+	t.Run("not configured", func(t *testing.T) {
+		stdout, stderr := captureOutput(t, func() {
+			printPostInstall(&setup.Result{Agent: "claude-code"})
+		})
+		if stderr != "" || !strings.Contains(stdout, "MCP configuration was not written") || !strings.Contains(stdout, "Re-run 'engram setup claude-code'") {
+			t.Fatalf("unconfigured output stdout=%q stderr=%q", stdout, stderr)
+		}
+		if strings.Contains(stdout, "MCP config written to ~/.claude/mcp/engram.json") {
+			t.Fatalf("unconfigured output must not report a successful MCP config: %q", stdout)
+		}
+	})
 }
 
 func TestCmdSetupProtocolEqualsFormPersistsSlim(t *testing.T) {
