@@ -8312,13 +8312,20 @@ func (s *Store) applyObservationDeleteTx(tx *sql.Tx, payload syncObservationPayl
 		return err
 	}
 	deletedAt := payload.DeletedAt
+	updatedAt := strings.TrimSpace(payload.UpdatedAt)
 	if deletedAt == nil {
 		now := Now()
 		deletedAt = &now
+		if updatedAt == "" {
+			updatedAt = now
+		}
+	}
+	if updatedAt == "" {
+		updatedAt = *deletedAt
 	}
 	_, err = s.execHook(tx,
-		`UPDATE observations SET deleted_at = ?, updated_at = datetime('now') WHERE id = ?`,
-		deletedAt, existing.ID,
+		`UPDATE observations SET deleted_at = ?, updated_at = ? WHERE id = ?`,
+		deletedAt, updatedAt, existing.ID,
 	)
 	return err
 }
