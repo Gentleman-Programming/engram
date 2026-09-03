@@ -12,9 +12,10 @@ package tui
 import (
 	"errors"
 
-	"github.com/Gentleman-Programming/engram/internal/setup"
-	"github.com/Gentleman-Programming/engram/internal/store"
-	"github.com/Gentleman-Programming/engram/internal/version"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloudconfig"
+	"github.com/Gentleman-Programming/engram/v2/internal/setup"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	"github.com/Gentleman-Programming/engram/v2/internal/version"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -37,6 +38,16 @@ const (
 	ScreenSessionDetail
 	ScreenSetup
 	ScreenCloudSettings
+	ScreenCloudConfig
+	ScreenCloudStatus
+	ScreenCloudEnrollment
+)
+
+const (
+	cloudConfigFocusInput = iota
+	cloudConfigFocusTest
+	cloudConfigFocusSave
+	cloudConfigFocusCancel
 )
 
 type SessionDeleteState int
@@ -99,6 +110,44 @@ type setupInstallMsg struct {
 	err    error
 }
 
+type cloudConfigLoadedMsg struct {
+	generation  uint64
+	serverURL   string
+	tokenSource string
+	err         error
+}
+
+type cloudPingMsg struct {
+	origin     cloudPingOrigin
+	generation uint64
+	serverURL  string
+	status     string
+	err        error
+}
+
+type cloudStatusLoadedMsg struct {
+	generation   uint64
+	serverURL    string
+	lastSync     string
+	pendingCount int64
+	lastError    string
+	err          error
+}
+
+type cloudEnrollmentItem struct {
+	project  string
+	enrolled bool
+}
+
+type cloudEnrollmentLoadedMsg struct {
+	items []cloudEnrollmentItem
+	err   error
+}
+
+type cloudEnrollmentToggledMsg struct {
+	err error
+}
+
 // ─── Model ───────────────────────────────────────────────────────────────────
 
 type Model struct {
@@ -159,6 +208,30 @@ type Model struct {
 	SetupAllowlistApplied bool   // true = allowlist was added successfully
 	SetupAllowlistError   string // error message if allowlist injection failed
 	SetupSpinner          spinner.Model
+
+	// Cloud configuration
+	CloudConfigInput       textinput.Model
+	CloudConfigTokenSource string
+	CloudConfigError       string
+	CloudConfigFocus       int
+	CloudConfigPingStatus  string
+	CloudConfigSaving      bool
+	CloudConfigTest        bool
+	CloudRequestGeneration uint64
+
+	// Cloud status
+	CloudStatusServerURL    string
+	CloudStatusHealth       string
+	CloudStatusLastSync     string
+	CloudStatusPendingCount int64
+	CloudStatusLastError    string
+	CloudStatusHealthError  string
+	CloudStatusLoading      bool
+
+	// Cloud enrollment
+	CloudEnrollmentItems   []cloudEnrollmentItem
+	CloudEnrollmentError   string
+	CloudEnrollmentLoading bool
 }
 
 // New creates a new TUI model connected to the given store.
@@ -167,17 +240,22 @@ func New(s *store.Store, version string) Model {
 	ti.Placeholder = "Search memories..."
 	ti.CharLimit = 256
 	ti.Width = 60
+	ci := textinput.New()
+	ci.Placeholder = "https://cloud.example.com"
+	ci.CharLimit = 256
+	ci.Width = 60
 
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(colorLavender)
 
 	return Model{
-		store:        s,
-		Version:      version,
-		Screen:       ScreenDashboard,
-		SearchInput:  ti,
-		SetupSpinner: sp,
+		store:            s,
+		Version:          version,
+		Screen:           ScreenDashboard,
+		SearchInput:      ti,
+		CloudConfigInput: ci,
+		SetupSpinner:     sp,
 	}
 }
 
@@ -266,3 +344,79 @@ func installAgent(agentName string) tea.Cmd {
 
 var installAgentFn = setup.Install
 var addClaudeCodeAllowlistFn = setup.AddClaudeCodeAllowlist
+
+func loadCloudConfigCmd(dataDir string, generation uint64) tea.Cmd {
+	return func() tea.Msg {
+		cfg, err := loadCloudConfigForUI(dataDir)
+		if err != nil {
+			return cloudConfigLoadedMsg{generation: generation, err: err}
+		}
+		_, source := cloudconfig.EffectiveToken(dataDir)
+		return cloudConfigLoadedMsg{generation: generation, serverURL: cfg.ServerURL, tokenSource: cloudconfig.SourceLabel(source)}
+	}
+}
+
+func loadCloudStatusCmd(s *store.Store, generation uint64) tea.Cmd {
+	return func() tea.Msg {
+		if s == nil {
+			return cloudStatusLoadedMsg{generation: generation, err: errors.New("store is unavailable")}
+		}
+		dataDir := s.DataDir()
+		cfg, err := loadCloudConfigForUI(dataDir)
+		if err != nil {
+			return cloudStatusLoadedMsg{generation: generation, err: err}
+		}
+		summary, err := s.CloudSyncSummary()
+		if err != nil {
+			return cloudStatusLoadedMsg{generation: generation, err: err}
+		}
+		return cloudStatusLoadedMsg{
+			generation:   generation,
+			serverURL:    cfg.ServerURL,
+			lastSync:     summary.LastSuccessAt,
+			pendingCount: summary.PendingMutations,
+			lastError:    summary.LastError,
+		}
+	}
+}
+
+func loadCloudEnrollmentCmd(s *store.Store) tea.Cmd {
+	return func() tea.Msg {
+		if s == nil {
+			return cloudEnrollmentLoadedMsg{err: errors.New("store is unavailable")}
+		}
+		names, err := s.ListProjectsForCloudEnrollment()
+		if err != nil {
+			return cloudEnrollmentLoadedMsg{err: err}
+		}
+		enrolledProjects, err := s.ListEnrolledProjects()
+		if err != nil {
+			return cloudEnrollmentLoadedMsg{err: err}
+		}
+		enrolled := make(map[string]struct{}, len(enrolledProjects))
+		for _, project := range enrolledProjects {
+			name, _ := store.NormalizeProject(project.Project)
+			if name != "" {
+				enrolled[name] = struct{}{}
+			}
+		}
+		items := make([]cloudEnrollmentItem, 0, len(names))
+		for _, name := range names {
+			_, isEnrolled := enrolled[name]
+			items = append(items, cloudEnrollmentItem{project: name, enrolled: isEnrolled})
+		}
+		return cloudEnrollmentLoadedMsg{items: items}
+	}
+}
+
+func toggleCloudEnrollmentCmd(s *store.Store, item cloudEnrollmentItem) tea.Cmd {
+	return func() tea.Msg {
+		if s == nil {
+			return cloudEnrollmentToggledMsg{err: errors.New("store is unavailable")}
+		}
+		if item.enrolled {
+			return cloudEnrollmentToggledMsg{err: s.UnenrollProject(item.project)}
+		}
+		return cloudEnrollmentToggledMsg{err: s.EnrollProject(item.project)}
+	}
+}

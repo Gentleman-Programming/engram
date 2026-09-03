@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,28 +12,45 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
-	"github.com/Gentleman-Programming/engram/internal/project"
-	"github.com/Gentleman-Programming/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/v2/internal/project"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
 	mcppkg "github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
 )
 
 func newMCPTestStore(t *testing.T) *store.Store {
+	s, _ := newMCPTestStoreWithDataDir(t)
+	return s
+}
+
+func newMCPTestStoreWithMaxContentLength(t *testing.T, maxContentLength int) *store.Store {
+	s, _ := newMCPTestStoreWithOptions(t, maxContentLength)
+	return s
+}
+
+func newMCPTestStoreWithDataDir(t *testing.T) (*store.Store, string) {
+	return newMCPTestStoreWithOptions(t, 0)
+}
+
+func newMCPTestStoreWithOptions(t *testing.T, maxContentLength int) (*store.Store, string) {
 	t.Helper()
 	cfg, err := store.DefaultConfig()
 	if err != nil {
 		t.Fatalf("DefaultConfig: %v", err)
 	}
 	cfg.DataDir = t.TempDir()
+	if maxContentLength > 0 {
+		cfg.MaxObservationLength = maxContentLength
+	}
 
 	s, err := store.New(cfg)
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = s.Close()
-	})
-	return s
+	t.Cleanup(func() { _ = s.Close() })
+	return s, cfg.DataDir
 }
 
 func callResultText(t *testing.T, res *mcppkg.CallToolResult) string {
@@ -89,11 +107,226 @@ func countPromptUpsertSyncMutations(t *testing.T, s *store.Store) int {
 	return count
 }
 
+func assertTruncationMetadata(t *testing.T, body map[string]any, originalBytes, limitBytes int, truncated bool) {
+	metadata, ok := body["truncation"].(map[string]any)
+	if !ok || metadata["original_bytes"] != float64(originalBytes) || metadata["limit_bytes"] != float64(limitBytes) || metadata["truncated"] != truncated {
+		t.Fatalf("truncation metadata = %v, want bytes=%d/%d truncated=%v", metadata, originalBytes, limitBytes, truncated)
+	}
+}
+
+func TestMCPWriteToolsReportByteTruncation(t *testing.T) {
+	const (
+		content = "a😀z"
+		limit   = 5
+		want    = "a😀... [truncated]"
+	)
+
+	tests := []struct {
+		name  string
+		write func(*testing.T, *store.Store) (*mcppkg.CallToolResult, string)
+	}{
+		{
+			name: "mem_save",
+			write: func(t *testing.T, s *store.Store) (*mcppkg.CallToolResult, string) {
+				res, err := handleSave(s, MCPConfig{}, nil)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"title": "UTF-8 save", "content": content, "project": "engram"}}})
+				if err != nil {
+					t.Fatalf("mem_save: %v", err)
+				}
+				observations, err := s.RecentObservations("engram", "project", 1)
+				if err != nil {
+					t.Fatalf("recent observations: %v", err)
+				}
+				return res, observations[0].Content
+			},
+		},
+		{
+			name: "mem_update",
+			write: func(t *testing.T, s *store.Store) (*mcppkg.CallToolResult, string) {
+				if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+					t.Fatalf("create session: %v", err)
+				}
+				id, err := s.AddObservation(store.AddObservationParams{SessionID: "s1", Type: "bugfix", Title: "Before", Content: "before", Project: "engram", Scope: "project"})
+				if err != nil {
+					t.Fatalf("seed observation: %v", err)
+				}
+				res, err := handleUpdate(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": float64(id), "content": content}}})
+				if err != nil {
+					t.Fatalf("mem_update: %v", err)
+				}
+				observation, err := s.GetObservation(id)
+				if err != nil {
+					t.Fatalf("get observation: %v", err)
+				}
+				return res, observation.Content
+			},
+		},
+		{
+			name: "mem_save_prompt",
+			write: func(t *testing.T, s *store.Store) (*mcppkg.CallToolResult, string) {
+				res, err := handleSavePrompt(s, MCPConfig{}, nil)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"content": content, "project": "engram"}}})
+				if err != nil {
+					t.Fatalf("mem_save_prompt: %v", err)
+				}
+				prompts, err := s.RecentPrompts("engram", 1)
+				if err != nil {
+					t.Fatalf("recent prompts: %v", err)
+				}
+				return res, prompts[0].Content
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newMCPTestStoreWithMaxContentLength(t, limit)
+			res, persisted := tc.write(t, s)
+			if persisted != want || !utf8.ValidString(persisted) {
+				t.Fatalf("persisted content = %q, want valid UTF-8 %q", persisted, want)
+			}
+			body := callResultJSON(t, res)
+			assertTruncationMetadata(t, body, len(content), limit, true)
+			result, _ := body["result"].(string)
+			if !strings.Contains(result, "from 6 to 5 bytes") || strings.Contains(result, "chars") {
+				t.Fatalf("expected byte warning, got %q", result)
+			}
+		})
+	}
+}
+
+func TestMCPTruncationUsesRedactedByteCounts(t *testing.T) {
+	const redacted = "ok[REDACTED]"
+	content := "ok<private>" + strings.Repeat("secret", 10) + "</private>"
+
+	for _, tc := range []struct {
+		name  string
+		write func(*testing.T, *store.Store) *mcppkg.CallToolResult
+	}{
+		{
+			name: "mem_save",
+			write: func(t *testing.T, s *store.Store) *mcppkg.CallToolResult {
+				res, err := handleSave(s, MCPConfig{}, nil)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"title": "Redacted save", "content": content, "project": "engram"}}})
+				if err != nil {
+					t.Fatalf("mem_save: %v", err)
+				}
+				return res
+			},
+		},
+		{
+			name: "mem_update",
+			write: func(t *testing.T, s *store.Store) *mcppkg.CallToolResult {
+				if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+					t.Fatalf("create session: %v", err)
+				}
+				id, err := s.AddObservation(store.AddObservationParams{SessionID: "s1", Type: "bugfix", Title: "Before", Content: "before", Project: "engram", Scope: "project"})
+				if err != nil {
+					t.Fatalf("seed observation: %v", err)
+				}
+				res, err := handleUpdate(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": float64(id), "content": content}}})
+				if err != nil {
+					t.Fatalf("mem_update: %v", err)
+				}
+				return res
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newMCPTestStoreWithMaxContentLength(t, len(redacted))
+			res := tc.write(t, s)
+			body := callResultJSON(t, res)
+			assertTruncationMetadata(t, body, len(redacted), len(redacted), false)
+			if result, _ := body["result"].(string); strings.Contains(result, "WARNING") {
+				t.Fatalf("redacted content below limit must not warn: %q", result)
+			}
+		})
+	}
+}
+
+func TestMCPTruncationMetadataKeepsSchemasAndNormalResponsesCompatible(t *testing.T) {
+	s := newMCPTestStore(t)
+	srv := NewServer(s)
+	for toolName, field := range map[string]string{"mem_save": "observation", "mem_update": "topic_key", "mem_save_prompt": "project"} {
+		props := srv.GetTool(toolName).Tool.InputSchema.Properties
+		if _, ok := props[field]; !ok {
+			t.Errorf("%s schema lost %q", toolName, field)
+		}
+		if _, ok := props["truncation"]; ok {
+			t.Errorf("%s must not add truncation to its input schema", toolName)
+		}
+	}
+	res, err := handleSave(s, MCPConfig{}, nil)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"title": "Normal", "content": "short", "project": "engram"}}})
+	if err != nil || res.IsError {
+		t.Fatalf("normal mem_save failed: err=%v result=%q", err, callResultText(t, res))
+	}
+	body := callResultJSON(t, res)
+	assertTruncationMetadata(t, body, len("short"), s.MaxObservationLength(), false)
+}
+
 func TestNewServerRegistersTools(t *testing.T) {
 	s := newMCPTestStore(t)
 	srv := NewServer(s)
 	if srv == nil {
 		t.Fatalf("expected MCP server instance")
+	}
+}
+
+func TestNewServerScopeDescriptions(t *testing.T) {
+	srv := NewServer(newMCPTestStore(t))
+	for _, tt := range []struct {
+		toolName string
+		want     string
+	}{
+		{"mem_search", "Filter by scope: project, personal, or global. Omit to apply no scope filter."},
+		{"mem_save", "Scope for this observation: project (default), personal, or global"},
+		{"mem_update", "New scope: project, personal, or global"},
+		{"mem_context", "Filter observations by scope: project, personal, or global. Omit to apply no scope filter."},
+	} {
+		t.Run(tt.toolName, func(t *testing.T) {
+			tool := srv.GetTool(tt.toolName)
+			if tool == nil {
+				t.Fatalf("tool %q not registered", tt.toolName)
+			}
+			scope, ok := tool.Tool.InputSchema.Properties["scope"].(map[string]any)
+			if !ok {
+				t.Fatalf("tool %q scope schema = %T; want object", tt.toolName, tool.Tool.InputSchema.Properties["scope"])
+			}
+			if got, _ := scope["description"].(string); got != tt.want {
+				t.Errorf("tool %q scope description = %q; want %q", tt.toolName, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHandleMergeProjectsRejectsNonEquivalentSourceWithoutMutation(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("merge-source", "engram-memory", "/tmp/engram-memory"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "merge-source",
+		Type:      "decision",
+		Title:     "Unrelated project",
+		Content:   "This record must not be merged.",
+		Project:   "engram-memory",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	result, err := handleMergeProjects(s)(context.Background(), mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{"from": "engram-memory", "to": "engram"}},
+	})
+	if err != nil {
+		t.Fatalf("handle merge projects: %v", err)
+	}
+	if !result.IsError || !strings.Contains(callResultText(t, result), "must normalize") {
+		t.Fatalf("merge result = %q, want normalization rejection", callResultText(t, result))
+	}
+	observations, err := s.RecentObservations("engram-memory", "", 10)
+	if err != nil {
+		t.Fatalf("recent observations: %v", err)
+	}
+	if len(observations) != 1 {
+		t.Fatalf("source observations = %d, want 1", len(observations))
 	}
 }
 
@@ -295,6 +528,71 @@ func TestHandleSaveRejectsMissingContent(t *testing.T) {
 	}
 }
 
+func TestSaveHandlersExposeStoreAdmissionErrors(t *testing.T) {
+	tests := []struct {
+		name      string
+		handler   server.ToolHandlerFunc
+		arguments map[string]any
+		wantError string
+		countRows func(*store.Store) (int, error)
+	}{
+		{
+			name:      "observation title",
+			arguments: map[string]any{"title": " \t\n ", "content": "valid content", "project": "engram"},
+			wantError: "Failed to save: observation title is required",
+			countRows: func(s *store.Store) (int, error) {
+				var count int
+				err := s.DB().QueryRow(`SELECT count(*) FROM observations`).Scan(&count)
+				return count, err
+			},
+		},
+		{
+			name:      "prompt content",
+			arguments: map[string]any{"content": " \t\n ", "project": "engram"},
+			wantError: "Failed to save prompt: prompt content is required",
+			countRows: func(s *store.Store) (int, error) {
+				var count int
+				err := s.DB().QueryRow(`SELECT count(*) FROM user_prompts`).Scan(&count)
+				return count, err
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newMCPTestStore(t)
+			if tc.name == "observation title" {
+				tc.handler = handleSave(s, MCPConfig{}, nil)
+			} else {
+				tc.handler = handleSavePrompt(s, MCPConfig{}, nil)
+			}
+
+			before, err := tc.countRows(s)
+			if err != nil {
+				t.Fatalf("count rows before invalid write: %v", err)
+			}
+			res, err := tc.handler(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: tc.arguments}})
+			if err != nil {
+				t.Fatalf("handler error: %v", err)
+			}
+			if !res.IsError {
+				t.Fatalf("expected tool error, got %q", callResultText(t, res))
+			}
+			if got := callResultText(t, res); got != tc.wantError {
+				t.Fatalf("expected error %q, got %q", tc.wantError, got)
+			}
+
+			after, err := tc.countRows(s)
+			if err != nil {
+				t.Fatalf("count rows after invalid write: %v", err)
+			}
+			if after != before {
+				t.Fatalf("invalid write persisted a primary row: %d->%d", before, after)
+			}
+		})
+	}
+}
+
 func TestHandleSaveAutoCapturesCurrentPromptByDefault(t *testing.T) {
 	s := newMCPTestStore(t)
 	if err := s.EnrollProject("engram"); err != nil {
@@ -388,11 +686,15 @@ func TestHandleSaveRecordsActivityForExplicitSessionID(t *testing.T) {
 // store-based resolution is the only thing that survives the process split.
 func TestHandleSaveResolvesActiveSessionFromStore(t *testing.T) {
 	s := newMCPTestStore(t)
+	originalWorkingDirectory := currentWorkingDirectory
+	currentWorkingDirectory = func() string { return "/work/engram" }
+	t.Cleanup(func() { currentWorkingDirectory = originalWorkingDirectory })
+	runtimeDirectory := runtimeSessionDirectory("/work/engram")
 
 	// Simulate the SessionStart hook registering a UUID session (POST /sessions
 	// ultimately calls store.CreateSession).
 	const uuidSession = "0c8e7f2a-1b34-4d9e-9a77-aaaabbbbcccc"
-	if err := s.CreateSession(uuidSession, "engram", "/work/engram"); err != nil {
+	if err := s.CreateSession(uuidSession, "engram", runtimeDirectory); err != nil {
 		t.Fatalf("create UUID session: %v", err)
 	}
 
@@ -420,6 +722,141 @@ func TestHandleSaveResolvesActiveSessionFromStore(t *testing.T) {
 	}
 	if obs[0].SessionID != uuidSession {
 		t.Fatalf("expected observation to attach to active UUID session %q, got %q (regression #386: fell back to manual-save)", uuidSession, obs[0].SessionID)
+	}
+}
+
+func TestHandleSaveBindsNestedWriteToSessionRegisteredAtRepositoryRoot(t *testing.T) {
+	s := newMCPTestStore(t)
+	repository := project.DetectProjectFull(".")
+	if repository.Error != nil {
+		t.Fatalf("detect repository: %v", repository.Error)
+	}
+	if repository.Path == "" {
+		t.Fatal("expected repository detection to provide a canonical root")
+	}
+
+	nestedDirectory := filepath.Join(repository.Path, "internal", "mcp")
+	nested := project.DetectProjectFull(nestedDirectory)
+	if nested.Error != nil {
+		t.Fatalf("detect nested directory: %v", nested.Error)
+	}
+	if nested.Path != repository.Path {
+		t.Fatalf("nested directory resolved to %q, want repository root %q", nested.Path, repository.Path)
+	}
+	t.Chdir(repository.Path)
+
+	start := handleSessionStart(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	startResult, err := start(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"id": "jd-runtime-session",
+	}}})
+	if err != nil || startResult.IsError {
+		t.Fatalf("start session: err=%v text=%q", err, callResultText(t, startResult))
+	}
+
+	originalWorkingDirectory := currentWorkingDirectory
+	currentWorkingDirectory = func() string { return nestedDirectory }
+	t.Cleanup(func() { currentWorkingDirectory = originalWorkingDirectory })
+
+	save := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	saveResult, err := save(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "Nested runtime save",
+		"content": "**What**: saved from a nested directory\n**Why**: runtime session binding regression",
+		"type":    "bugfix",
+		"project": repository.Project,
+	}}})
+	if err != nil || saveResult.IsError {
+		t.Fatalf("save: err=%v text=%q", err, callResultText(t, saveResult))
+	}
+
+	observations, err := s.RecentObservations(repository.Project, "project", 1)
+	if err != nil {
+		t.Fatalf("recent observations: %v", err)
+	}
+	if len(observations) != 1 || observations[0].SessionID != "jd-runtime-session" {
+		t.Fatalf("nested write attached to %#v, want session %q", observations, "jd-runtime-session")
+	}
+}
+
+func TestHandleSaveBindsNestedWriteToExplicitNestedRuntimeSession(t *testing.T) {
+	s := newMCPTestStore(t)
+	repository := t.TempDir()
+	nestedDirectory := filepath.Join(repository, "nested")
+	if err := os.MkdirAll(nestedDirectory, 0o755); err != nil {
+		t.Fatalf("create nested directory: %v", err)
+	}
+	initTestGitRepo(t, repository)
+	projectResult := project.DetectProjectFull(nestedDirectory)
+
+	start := handleSessionStart(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	startResult, err := start(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"id":        "jd-explicit-nested-runtime-session",
+		"directory": nestedDirectory,
+	}}})
+	if err != nil || startResult.IsError {
+		t.Fatalf("start session: err=%v text=%q", err, callResultText(t, startResult))
+	}
+	wantDirectory := runtimeSessionDirectory(repository)
+	if session, err := s.GetSession("jd-explicit-nested-runtime-session"); err != nil || session.Directory != wantDirectory {
+		t.Fatalf("explicit session directory = %#v, err=%v; want worktree root %q", session, err, wantDirectory)
+	}
+
+	originalWorkingDirectory := currentWorkingDirectory
+	currentWorkingDirectory = func() string { return repository }
+	t.Cleanup(func() { currentWorkingDirectory = originalWorkingDirectory })
+	saveResult, err := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "Explicit nested runtime save",
+		"content": "**What**: saved from an explicit nested runtime directory\n**Why**: runtime session binding regression",
+		"type":    "bugfix",
+		"project": projectResult.Project,
+	}}})
+	if err != nil || saveResult.IsError {
+		t.Fatalf("save: err=%v text=%q", err, callResultText(t, saveResult))
+	}
+	observations, err := s.RecentObservations(projectResult.Project, "project", 1)
+	if err != nil || len(observations) != 1 || observations[0].SessionID != "jd-explicit-nested-runtime-session" {
+		t.Fatalf("nested write attached to %#v, err=%v", observations, err)
+	}
+}
+
+func TestHandleSaveBindsRelativeDirectoryRuntimeSession(t *testing.T) {
+	s := newMCPTestStore(t)
+	repository := t.TempDir()
+	initTestGitRepo(t, repository)
+	t.Chdir(repository)
+
+	start := handleSessionStart(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	startResult, err := start(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"id":        "relative-runtime-session",
+		"directory": ".",
+	}}})
+	if err != nil || startResult.IsError {
+		t.Fatalf("start session: err=%v text=%q", err, callResultText(t, startResult))
+	}
+
+	session, err := s.GetSession("relative-runtime-session")
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	wantDirectory := runtimeSessionDirectory(".")
+	if session.Directory != wantDirectory {
+		t.Fatalf("relative session directory = %q, want stable absolute directory %q", session.Directory, wantDirectory)
+	}
+
+	originalWorkingDirectory := currentWorkingDirectory
+	currentWorkingDirectory = func() string { return repository }
+	t.Cleanup(func() { currentWorkingDirectory = originalWorkingDirectory })
+	saveResult, err := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "Relative runtime save",
+		"content": "**What**: saved from a relative runtime directory\n**Why**: runtime session binding regression",
+		"type":    "bugfix",
+		"project": session.Project,
+	}}})
+	if err != nil || saveResult.IsError {
+		t.Fatalf("save: err=%v text=%q", err, callResultText(t, saveResult))
+	}
+	observations, err := s.RecentObservations(session.Project, "project", 1)
+	if err != nil || len(observations) != 1 || observations[0].SessionID != "relative-runtime-session" {
+		t.Fatalf("relative runtime write attached to %#v, err=%v", observations, err)
 	}
 }
 
@@ -455,47 +892,124 @@ func TestHandleSaveFallsBackToManualSaveWhenNoActiveSession(t *testing.T) {
 	}
 }
 
-// TestHandleSaveResolvesMostRecentActiveSession covers the multi-session edge
-// case: two un-ended sessions exist; mem_save must attach to the most recent.
-func TestHandleSaveResolvesMostRecentActiveSession(t *testing.T) {
+// TestHandleSaveRejectsAmbiguousActiveSessions ensures an omitted session_id
+// never selects one of several active runtime sessions in the same directory.
+func TestHandleSaveRejectsAmbiguousActiveSessions(t *testing.T) {
 	s := newMCPTestStore(t)
+	originalWorkingDirectory := currentWorkingDirectory
+	currentWorkingDirectory = func() string { return "/work/engram" }
+	t.Cleanup(func() { currentWorkingDirectory = originalWorkingDirectory })
+	runtimeDirectory := runtimeSessionDirectory("/work/engram")
 
-	if err := s.CreateSession("uuid-older", "engram", "/work/engram"); err != nil {
-		t.Fatalf("create older session: %v", err)
+	if err := s.CreateSession("uuid-first", "engram", runtimeDirectory); err != nil {
+		t.Fatalf("create first session: %v", err)
 	}
-	if _, err := s.DB().Exec(`UPDATE sessions SET started_at = ? WHERE id = ?`, "2025-01-01 00:00:00", "uuid-older"); err != nil {
-		t.Fatalf("backdate older session: %v", err)
-	}
-	if err := s.CreateSession("uuid-newer", "engram", "/work/engram"); err != nil {
-		t.Fatalf("create newer session: %v", err)
-	}
-	if _, err := s.DB().Exec(`UPDATE sessions SET started_at = ? WHERE id = ?`, "2025-06-01 00:00:00", "uuid-newer"); err != nil {
-		t.Fatalf("set newer session started_at: %v", err)
+	if err := s.CreateSession("uuid-second", "engram", runtimeDirectory); err != nil {
+		t.Fatalf("create second session: %v", err)
 	}
 
 	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"title":   "Most recent active session",
-		"content": "**What**: saved with two active sessions\n**Why**: multi-session edge case",
+		"title":   "Ambiguous active sessions",
+		"content": "**What**: saved without session_id\n**Why**: ambiguous runtime sessions must fail",
 		"type":    "bugfix",
 		"project": "engram",
 	}}})
 	if err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
-	if res.IsError {
-		t.Fatalf("unexpected save error: %s", callResultText(t, res))
+	if !res.IsError {
+		t.Fatal("expected ambiguous omitted session_id to fail")
+	}
+	if got := callResultText(t, res); !strings.Contains(got, "multiple active runtime sessions") {
+		t.Fatalf("expected ambiguity error, got %q", got)
+	}
+	obs, err := s.RecentObservations("engram", "project", 5)
+	if err != nil {
+		t.Fatalf("recent observations: %v", err)
+	}
+	if len(obs) != 0 {
+		t.Fatalf("expected no write after ambiguous session resolution, got %#v", obs)
+	}
+}
+
+func TestHandleSaveFallsBackWhenActiveSessionIsInAnotherDirectory(t *testing.T) {
+	s := newMCPTestStore(t)
+	originalWorkingDirectory := currentWorkingDirectory
+	currentWorkingDirectory = func() string { return "/work/current" }
+	t.Cleanup(func() { currentWorkingDirectory = originalWorkingDirectory })
+	if err := s.CreateSession("other-worktree-session", "engram", runtimeSessionDirectory("/work/other")); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "Different worktree fallback",
+		"content": "**What**: saved without session_id\n**Why**: worktree regression guard",
+		"project": "engram",
+	}}})
+	if err != nil || res.IsError {
+		t.Fatalf("save failed: err=%v text=%q", err, callResultText(t, res))
 	}
 
 	obs, err := s.RecentObservations("engram", "project", 5)
 	if err != nil {
 		t.Fatalf("recent observations: %v", err)
 	}
-	if len(obs) == 0 {
-		t.Fatalf("expected at least one observation, got none")
+	if len(obs) != 1 || obs[0].SessionID != defaultSessionID("engram") {
+		t.Fatalf("expected manual fallback, got %#v", obs)
 	}
-	if obs[0].SessionID != "uuid-newer" {
-		t.Fatalf("expected most recent active session uuid-newer, got %q", obs[0].SessionID)
+}
+
+func TestHandleSaveExcludesRuntimeSessionInSiblingLinkedWorktree(t *testing.T) {
+	s := newMCPTestStore(t)
+	parent := t.TempDir()
+	primary := filepath.Join(parent, "primary")
+	sibling := filepath.Join(parent, "sibling")
+	if err := os.MkdirAll(primary, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initTestGitRepo(t, primary)
+	commit := exec.Command("git", "-C", primary, "commit", "--allow-empty", "-m", "initial commit")
+	if out, err := commit.CombinedOutput(); err != nil {
+		t.Fatalf("create initial commit: %v\n%s", err, out)
+	}
+	addWorktree := exec.Command("git", "-C", primary, "worktree", "add", "-b", "sibling", sibling)
+	if out, err := addWorktree.CombinedOutput(); err != nil {
+		t.Fatalf("add sibling worktree: %v\n%s", err, out)
+	}
+	t.Chdir(primary)
+
+	start := handleSessionStart(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	startResult, err := start(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"id": "primary-runtime-session",
+	}}})
+	if err != nil || startResult.IsError {
+		t.Fatalf("start primary session: err=%v text=%q", err, callResultText(t, startResult))
+	}
+	primarySession, err := s.GetSession("primary-runtime-session")
+	if err != nil {
+		t.Fatalf("get primary session: %v", err)
+	}
+	if primarySession.Directory == runtimeSessionDirectory(sibling) {
+		t.Fatalf("primary runtime directory %q collapsed to sibling worktree", primarySession.Directory)
+	}
+
+	originalWorkingDirectory := currentWorkingDirectory
+	currentWorkingDirectory = func() string { return sibling }
+	t.Cleanup(func() { currentWorkingDirectory = originalWorkingDirectory })
+	saveResult, err := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "Sibling worktree runtime save",
+		"content": "**What**: saved from a sibling worktree\n**Why**: runtime sessions must not cross worktree boundaries",
+		"type":    "bugfix",
+		"project": primarySession.Project,
+	}}})
+	if err != nil || saveResult.IsError {
+		t.Fatalf("save: err=%v text=%q", err, callResultText(t, saveResult))
+	}
+	observations, err := s.RecentObservations(primarySession.Project, "project", 1)
+	if err != nil || len(observations) != 1 || observations[0].SessionID != defaultSessionID(primarySession.Project) {
+		t.Fatalf("sibling worktree write attached to %#v, err=%v", observations, err)
 	}
 }
 
@@ -876,7 +1390,7 @@ func TestHandleSearchAndCRUDHandlers(t *testing.T) {
 		t.Fatalf("expected search result pinned=true, got %v", firstResult["pinned"])
 	}
 
-	update := handleUpdate(s)
+	update := handleUpdate(s, MCPConfig{})
 	updateReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"id":    float64(obsID),
 		"title": "Fix parser panic",
@@ -915,6 +1429,41 @@ func TestHandleSearchAndCRUDHandlers(t *testing.T) {
 	}
 	if !strings.Contains(callResultText(t, delRes), "permanently deleted") {
 		t.Fatalf("expected hard delete message")
+	}
+}
+
+func TestHandleSearch_PropagatesCanceledContext(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("s-canceled-search", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "s-canceled-search",
+		Type:      "decision",
+		Title:     "Canceled search must stop",
+		Content:   "Search cancellation is observable at the handler boundary.",
+		Project:   "engram",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	result, err := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(ctx, mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"query":   "canceled search",
+			"project": "engram",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("handle search: %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("expected canceled search to be a tool error, got %s", callResultText(t, result))
+	}
+	if !strings.Contains(callResultText(t, result), context.Canceled.Error()) {
+		t.Fatalf("expected cancellation error, got %s", callResultText(t, result))
 	}
 }
 
@@ -1023,6 +1572,41 @@ func TestHandleReviewMarkReviewedAcceptsIDAlias(t *testing.T) {
 	body := callResultJSON(t, res)
 	if body["state"] != store.ObservationStateActive {
 		t.Fatalf("expected active after id alias mark_reviewed, got %v", body["state"])
+	}
+}
+
+func TestHandleReviewMarkReviewedEnforcesResolvedProjectAtMutation(t *testing.T) {
+	s := newMCPTestStore(t)
+	for _, project := range []string{"alpha", "beta"} {
+		if err := s.CreateSession("review-scope-"+project, project, "/tmp/"+project); err != nil {
+			t.Fatalf("create %s session: %v", project, err)
+		}
+	}
+	id, err := s.AddObservation(store.AddObservationParams{SessionID: "review-scope-alpha", Type: "decision", Title: "Alpha review", Content: "must remain scoped", Project: "alpha"})
+	if err != nil {
+		t.Fatalf("add alpha observation: %v", err)
+	}
+	past := time.Now().UTC().Add(-time.Hour).Format("2006-01-02 15:04:05")
+	if _, err := s.DB().Exec(`UPDATE observations SET review_after = ? WHERE id = ?`, past, id); err != nil {
+		t.Fatalf("backdate review_after: %v", err)
+	}
+
+	res, err := handleReview(s, MCPConfig{DefaultProject: "beta"})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"action":         "mark_reviewed",
+		"observation_id": float64(id),
+	}}})
+	if err != nil {
+		t.Fatalf("mark reviewed handler error: %v", err)
+	}
+	if !res.IsError || !strings.Contains(callResultText(t, res), "observation not found in resolved project") {
+		t.Fatalf("mismatched project mark reviewed result = %s", callResultText(t, res))
+	}
+	obs, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("GetObservation: %v", err)
+	}
+	if obs.State() != store.ObservationStateNeedsReview {
+		t.Fatalf("mismatched project mutation changed review state to %q", obs.State())
 	}
 }
 
@@ -1164,6 +1748,66 @@ func TestHandlePromptContextStatsTimelineAndSessionHandlers(t *testing.T) {
 	}
 }
 
+func TestHandleContextPropagatesStatsError(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("context-stats", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.AddObservation(store.AddObservationParams{SessionID: "context-stats", Type: "decision", Title: "Fence", Content: "Restart after replacement", Project: "engram"}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	original := loadContextStats
+	t.Cleanup(func() { loadContextStats = original })
+	loadContextStats = func(*store.Store) (*store.Stats, error) {
+		return nil, store.ErrDatabaseGenerationChanged
+	}
+
+	result, err := handleContext(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"project": "engram"}}})
+	if err != nil {
+		t.Fatalf("context handler error: %v", err)
+	}
+	if !result.IsError || !strings.Contains(callResultText(t, result), store.ErrDatabaseGenerationChanged.Error()) {
+		t.Fatalf("context result = %q, want generation error", callResultText(t, result))
+	}
+}
+
+func TestMemContextRemainsProjectScopedAcrossSessions(t *testing.T) {
+	s := newMCPTestStore(t)
+	for _, sessionID := range []string{"manual-a", "manual-b"} {
+		if err := s.CreateSession(sessionID, "engram", "/tmp/engram"); err != nil {
+			t.Fatalf("create %s: %v", sessionID, err)
+		}
+		if _, err := s.AddObservation(store.AddObservationParams{
+			SessionID: sessionID,
+			Type:      "decision",
+			Title:     sessionID,
+			Content:   "content-" + sessionID,
+			Project:   "engram",
+			Scope:     "project",
+		}); err != nil {
+			t.Fatalf("add %s observation: %v", sessionID, err)
+		}
+	}
+
+	h := handleContext(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"project": "engram",
+		"scope":   "project",
+	}}})
+	if err != nil {
+		t.Fatalf("mem_context handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected mem_context error: %s", callResultText(t, res))
+	}
+	context := callResultText(t, res)
+	for _, value := range []string{"manual-a", "manual-b"} {
+		if !strings.Contains(context, value) {
+			t.Fatalf("manual mem_context must remain project-scoped and include %q:\n%s", value, context)
+		}
+	}
+}
+
 func TestMCPHandlersErrorBranches(t *testing.T) {
 	s := newMCPTestStore(t)
 
@@ -1180,7 +1824,7 @@ func TestMCPHandlersErrorBranches(t *testing.T) {
 		t.Fatalf("expected no memories response")
 	}
 
-	update := handleUpdate(s)
+	update := handleUpdate(s, MCPConfig{})
 	missingIDRes, err := update(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{}}})
 	if err != nil {
 		t.Fatalf("update missing id error: %v", err)
@@ -1264,7 +1908,7 @@ func TestMCPHandlersReturnErrorsWhenStoreClosed(t *testing.T) {
 		t.Fatalf("expected search to return tool error when store is closed")
 	}
 
-	updateRes, err := handleUpdate(s)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": 1.0, "title": "new"}}})
+	updateRes, err := handleUpdate(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": 1.0, "title": "new"}}})
 	if err != nil {
 		t.Fatalf("closed store update call: %v", err)
 	}
@@ -1461,12 +2105,11 @@ func TestHandleUpdateAcceptsAllOptionalFields(t *testing.T) {
 		t.Fatalf("add observation: %v", err)
 	}
 
-	res, err := handleUpdate(s)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+	res, err := handleUpdate(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"id":        float64(id),
 		"title":     "Updated",
 		"content":   "Updated content",
 		"type":      "architecture",
-		"project":   "engram",
 		"scope":     "personal",
 		"topic_key": "architecture/auth-model",
 	}}})
@@ -1476,6 +2119,187 @@ func TestHandleUpdateAcceptsAllOptionalFields(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("unexpected update error: %s", callResultText(t, res))
 	}
+}
+
+func TestHandleUpdateRejectsFieldOnlyUpdateFromDifferentDetectedProject(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("s-stored-project", "stored-project", "/tmp/stored-project"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "s-stored-project",
+		Type:      "note",
+		Title:     "Original",
+		Content:   "Original content",
+		Project:   "stored-project",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	cwd := t.TempDir()
+	if err := os.Mkdir(filepath.Join(cwd, ".engram"), 0755); err != nil {
+		t.Fatalf("create detected-project configuration: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cwd, ".engram", "config.json"), []byte(`{"project_name":"different-project"}`), 0644); err != nil {
+		t.Fatalf("write detected-project configuration: %v", err)
+	}
+	t.Chdir(cwd)
+
+	res, err := handleUpdate(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"id":    float64(id),
+		"title": "Updated from another project",
+	}}})
+	if err != nil {
+		t.Fatalf("update handler error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("expected field-only update from another project to fail")
+	}
+	envelope := callResultJSON(t, res)
+	if envelope["error_code"] != "project_mismatch" {
+		t.Fatalf("error code = %v, want project_mismatch", envelope["error_code"])
+	}
+	if _, ok := envelope["available_projects"].([]any); !ok {
+		t.Fatalf("available_projects = %#v, want array", envelope["available_projects"])
+	}
+	if hint, _ := envelope["hint"].(string); !strings.Contains(hint, "owning project") {
+		t.Fatalf("hint = %q, want owning-project guidance", hint)
+	}
+	updated, err := s.GetObservation(id)
+	if err != nil || updated.Title != "Original" {
+		t.Fatalf("updated observation = %#v, err=%v", updated, err)
+	}
+}
+
+func TestHandleUpdateRejectsNullOwnedObservationWithStructuredMetadata(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("s-owned", "owned-project", "/tmp/owned-project"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "s-owned",
+		Type:      "note",
+		Title:     "Original",
+		Content:   "Original content",
+		Project:   "owned-project",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	if _, err := s.DB().Exec(`UPDATE observations SET project = NULL WHERE id = ?`, id); err != nil {
+		t.Fatalf("clear observation project: %v", err)
+	}
+
+	res, err := handleUpdate(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"id":    float64(id),
+		"title": "Updated",
+	}}})
+	if err != nil {
+		t.Fatalf("update handler error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("expected NULL-owned observation update to fail")
+	}
+	envelope := callResultJSON(t, res)
+	if envelope["error_code"] != "project_required" {
+		t.Fatalf("error code = %v, want project_required", envelope["error_code"])
+	}
+	if _, ok := envelope["available_projects"].([]any); !ok {
+		t.Fatalf("available_projects = %#v, want array", envelope["available_projects"])
+	}
+	if hint, _ := envelope["hint"].(string); !strings.Contains(hint, "ownership rescue") {
+		t.Fatalf("hint = %q, want ownership rescue guidance", hint)
+	}
+}
+
+// seedUpdatableObservationOutsideDetectedProject stores an observation owned by
+// "trusted project" and points the working directory at an unrelated detected
+// project, so only a process-level override can authorize the update.
+func seedUpdatableObservationOutsideDetectedProject(t *testing.T, s *store.Store) int64 {
+	t.Helper()
+	if err := s.CreateSession("s-process-override", "trusted project", "/tmp/trusted"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "s-process-override",
+		Type:      "note",
+		Title:     "Original",
+		Content:   "Original content",
+		Project:   "trusted project",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	cwd := t.TempDir()
+	if err := os.Mkdir(filepath.Join(cwd, ".engram"), 0755); err != nil {
+		t.Fatalf("create detected-project configuration: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cwd, ".engram", "config.json"), []byte(`{"project_name":"different-project"}`), 0644); err != nil {
+		t.Fatalf("write detected-project configuration: %v", err)
+	}
+	t.Chdir(cwd)
+	return id
+}
+
+func assertUpdateAppliedThroughProcessOverride(t *testing.T, s *store.Store, res *mcppkg.CallToolResult, err error, id int64) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("update handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("process override update failed: %s", callResultText(t, res))
+	}
+	envelope := callResultJSON(t, res)
+	if envelope["project"] != "trusted project" {
+		t.Fatalf("project = %v, want trusted project", envelope["project"])
+	}
+	if envelope["project_source"] != sourceProcessOverride {
+		t.Fatalf("project_source = %v, want %s", envelope["project_source"], sourceProcessOverride)
+	}
+	updated, err := s.GetObservation(id)
+	if err != nil || updated.Title != "Updated" {
+		t.Fatalf("updated observation = %#v, err=%v", updated, err)
+	}
+}
+
+func TestHandleUpdateHonorsProcessDefaultProjectOverride(t *testing.T) {
+	s := newMCPTestStore(t)
+	id := seedUpdatableObservationOutsideDetectedProject(t, s)
+
+	res, err := handleUpdate(s, MCPConfig{DefaultProject: "Trusted Project"})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"id":    float64(id),
+		"title": "Updated",
+	}}})
+	assertUpdateAppliedThroughProcessOverride(t, s, res, err, id)
+}
+
+func TestHandleUpdateHonorsEngramProjectEnvironmentOverride(t *testing.T) {
+	s := newMCPTestStore(t)
+	id := seedUpdatableObservationOutsideDetectedProject(t, s)
+	t.Setenv("ENGRAM_PROJECT", "Trusted Project")
+
+	res, err := handleUpdate(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"id":    float64(id),
+		"title": "Updated",
+	}}})
+	assertUpdateAppliedThroughProcessOverride(t, s, res, err, id)
+}
+
+func TestHandleUpdateProcessDefaultProjectBeatsEnvironmentOverride(t *testing.T) {
+	s := newMCPTestStore(t)
+	id := seedUpdatableObservationOutsideDetectedProject(t, s)
+	t.Setenv("ENGRAM_PROJECT", "env-project")
+
+	res, err := handleUpdate(s, MCPConfig{DefaultProject: "Trusted Project"})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"id":    float64(id),
+		"title": "Updated",
+	}}})
+	assertUpdateAppliedThroughProcessOverride(t, s, res, err, id)
 }
 
 func TestHandleContextWithSessionOnlyUsesNoneProjects(t *testing.T) {
@@ -2243,33 +3067,26 @@ func TestNewServerWithToolsAdminProfile(t *testing.T) {
 	}
 }
 
+func compareMCPToolInventory(expected, actual map[string]*server.ServerTool) error {
+	if len(expected) != len(actual) {
+		return fmt.Errorf("tool count = %d, want %d", len(actual), len(expected))
+	}
+	for name := range expected {
+		if actual[name] == nil {
+			return fmt.Errorf("missing tool %q", name)
+		}
+	}
+	return nil
+}
+
 func TestNewServerWithToolsNilRegistersAll(t *testing.T) {
 	s := newMCPTestStore(t)
-
 	srv := NewServerWithTools(s, nil)
 	if srv == nil {
 		t.Fatal("expected MCP server instance")
 	}
-
-	tools := srv.ListTools()
-
-	allTools := []string{
-		"mem_save", "mem_search", "mem_context", "mem_session_summary",
-		"mem_session_start", "mem_session_end", "mem_get_observation",
-		"mem_suggest_topic_key", "mem_capture_passive", "mem_save_prompt",
-		"mem_update", "mem_delete", "mem_stats", "mem_timeline", "mem_merge_projects",
-		"mem_current_project", "mem_judge", "mem_compare", "mem_doctor", "mem_review",
-		"mem_pin", "mem_unpin",
-	}
-
-	for _, name := range allTools {
-		if tools[name] == nil {
-			t.Errorf("nil allowlist: expected tool %q to be registered", name)
-		}
-	}
-
-	if len(tools) != len(allTools) {
-		t.Errorf("expected %d tools with nil allowlist, got %d", len(allTools), len(tools))
+	if err := compareMCPToolInventory(NewServer(s).ListTools(), srv.ListTools()); err != nil {
+		t.Fatalf("nil allowlist inventory: %v", err)
 	}
 }
 
@@ -2357,34 +3174,7 @@ func TestMemDoctorUnknownProjectReturnsStructuredError(t *testing.T) {
 	}
 }
 
-func TestNewServerBackwardsCompatible(t *testing.T) {
-	s := newMCPTestStore(t)
-
-	// NewServer (no tools filter) should register all tools
-	srv := NewServer(s)
-	tools := srv.ListTools()
-
-	// 18 agent + 4 admin = 22 total.
-	if len(tools) != 22 {
-		t.Errorf("NewServer should register all 22 tools, got %d", len(tools))
-	}
-}
-
 func TestProfileConsistency(t *testing.T) {
-	// Verify that agent + admin = all 22 tools
-	combined := make(map[string]bool)
-	for tool := range ProfileAgent {
-		combined[tool] = true
-	}
-	for tool := range ProfileAdmin {
-		combined[tool] = true
-	}
-
-	// 18 agent + 4 admin = 22 total.
-	if len(combined) != 22 {
-		t.Errorf("agent + admin should cover all 22 tools, got %d", len(combined))
-	}
-
 	// Verify no overlap between profiles
 	for tool := range ProfileAgent {
 		if ProfileAdmin[tool] {
@@ -2407,6 +3197,208 @@ func TestServerInstructionsConstantIsNonEmpty(t *testing.T) {
 	}
 }
 
+func TestBuildServerInstructions_NilOrAll(t *testing.T) {
+	instructions := buildServerInstructions(nil)
+	if instructions == "" {
+		t.Fatal("buildServerInstructions(nil) returned empty string")
+	}
+
+	// Intro header
+	if !strings.Contains(instructions, "Engram provides persistent memory that survives across sessions and compactions.") {
+		t.Errorf("missing intro header in nil allowlist instructions")
+	}
+
+	// CORE tools
+	coreTools := []string{
+		"mem_save", "mem_search", "mem_context", "mem_session_summary",
+		"mem_get_observation", "mem_save_prompt", "mem_current_project", "mem_judge", "mem_compare",
+	}
+	for _, tool := range coreTools {
+		if !strings.Contains(instructions, tool) {
+			t.Errorf("expected core tool %q in nil allowlist instructions", tool)
+		}
+	}
+
+	// DEFERRED tools (both agent and admin)
+	deferredTools := []string{
+		"mem_update", "mem_review", "mem_pin", "mem_unpin", "mem_suggest_topic_key",
+		"mem_session_start", "mem_session_end", "mem_doctor", "mem_capture_passive",
+		"mem_stats", "mem_delete", "mem_timeline", "mem_merge_projects",
+	}
+	for _, tool := range deferredTools {
+		if !strings.Contains(instructions, tool) {
+			t.Errorf("expected deferred tool %q in nil allowlist instructions", tool)
+		}
+	}
+
+	// Proactive save rule & conflict surfacing
+	if !strings.Contains(instructions, "PROACTIVE SAVE RULE:") {
+		t.Errorf("expected PROACTIVE SAVE RULE in nil allowlist instructions")
+	}
+	if !strings.Contains(instructions, "## CONFLICT SURFACING") {
+		t.Errorf("expected CONFLICT SURFACING in nil allowlist instructions")
+	}
+}
+
+func TestBuildServerInstructions_ProfileAgent(t *testing.T) {
+	instructions := buildServerInstructions(ProfileAgent)
+
+	// CORE tools should all be present
+	coreTools := []string{
+		"mem_save", "mem_search", "mem_context", "mem_session_summary",
+		"mem_get_observation", "mem_save_prompt", "mem_current_project", "mem_judge", "mem_compare",
+	}
+	for _, tool := range coreTools {
+		if !strings.Contains(instructions, tool) {
+			t.Errorf("expected core tool %q in agent instructions", tool)
+		}
+	}
+
+	// Agent deferred tools present
+	agentDeferred := []string{
+		"mem_update", "mem_review", "mem_pin", "mem_unpin", "mem_suggest_topic_key",
+		"mem_session_start", "mem_session_end", "mem_doctor", "mem_capture_passive",
+	}
+	for _, tool := range agentDeferred {
+		if !strings.Contains(instructions, tool) {
+			t.Errorf("expected agent deferred tool %q in agent instructions", tool)
+		}
+	}
+
+	// Conflict surfacing and proactive save rule present
+	if !strings.Contains(instructions, "## CONFLICT SURFACING") {
+		t.Errorf("expected CONFLICT SURFACING in agent instructions")
+	}
+	if !strings.Contains(instructions, "PROACTIVE SAVE RULE:") {
+		t.Errorf("expected PROACTIVE SAVE RULE in agent instructions")
+	}
+
+	// Admin tools MUST NOT be advertised in agent instructions
+	adminTools := []string{"mem_stats", "mem_delete", "mem_timeline", "mem_merge_projects"}
+	for _, tool := range adminTools {
+		if strings.Contains(instructions, tool) {
+			t.Errorf("admin tool %q MUST NOT be advertised in agent instructions", tool)
+		}
+	}
+}
+
+func TestBuildServerInstructions_ProfileAdmin(t *testing.T) {
+	instructions := buildServerInstructions(ProfileAdmin)
+
+	// Admin tools should be present in deferred
+	adminTools := []string{"mem_stats", "mem_delete", "mem_timeline", "mem_merge_projects"}
+	for _, tool := range adminTools {
+		if !strings.Contains(instructions, tool) {
+			t.Errorf("expected admin tool %q in admin instructions", tool)
+		}
+	}
+
+	// CORE TOOLS, PROACTIVE SAVE RULE, CONFLICT SURFACING should NOT be present
+	if strings.Contains(instructions, "CORE TOOLS (always available") {
+		t.Errorf("admin instructions should not include CORE TOOLS section")
+	}
+	if strings.Contains(instructions, "PROACTIVE SAVE RULE:") {
+		t.Errorf("admin instructions should not include PROACTIVE SAVE RULE")
+	}
+	if strings.Contains(instructions, "## CONFLICT SURFACING") {
+		t.Errorf("admin instructions should not include CONFLICT SURFACING section")
+	}
+
+	// Agent-only deferred tools should NOT be present
+	agentOnly := []string{"mem_review", "mem_doctor", "mem_compare", "mem_capture_passive"}
+	for _, tool := range agentOnly {
+		if strings.Contains(instructions, tool) {
+			t.Errorf("agent tool %q should not be in admin instructions", tool)
+		}
+	}
+}
+
+func TestBuildServerInstructions_CustomAndConditional(t *testing.T) {
+	t.Run("only mem_save and mem_update", func(t *testing.T) {
+		allowlist := map[string]bool{
+			"mem_save":   true,
+			"mem_update": true,
+		}
+		instructions := buildServerInstructions(allowlist)
+
+		if !strings.Contains(instructions, "CORE TOOLS") {
+			t.Errorf("expected CORE TOOLS section when mem_save is present")
+		}
+		if !strings.Contains(instructions, "mem_save — ") {
+			t.Errorf("expected mem_save in CORE TOOLS")
+		}
+		if strings.Contains(instructions, "mem_search") {
+			t.Errorf("mem_search should not be present in custom instructions")
+		}
+
+		if !strings.Contains(instructions, "DEFERRED TOOLS") {
+			t.Errorf("expected DEFERRED TOOLS section when mem_update is present")
+		}
+		if !strings.Contains(instructions, "mem_update") {
+			t.Errorf("expected mem_update in DEFERRED TOOLS")
+		}
+		if strings.Contains(instructions, "mem_review") {
+			t.Errorf("mem_review should not be present in custom instructions")
+		}
+
+		if !strings.Contains(instructions, "PROACTIVE SAVE RULE:") {
+			t.Errorf("expected PROACTIVE SAVE RULE when mem_save is present")
+		}
+		if strings.Contains(instructions, "## CONFLICT SURFACING") {
+			t.Errorf("conflict surfacing should not be present when mem_judge is absent")
+		}
+	})
+
+	t.Run("only mem_judge", func(t *testing.T) {
+		allowlist := map[string]bool{
+			"mem_judge": true,
+		}
+		instructions := buildServerInstructions(allowlist)
+
+		if !strings.Contains(instructions, "CORE TOOLS") {
+			t.Errorf("CORE TOOLS should be present when mem_judge (core, eager) is registered")
+		}
+		if !strings.Contains(instructions, "mem_judge — ") {
+			t.Errorf("expected mem_judge in CORE TOOLS when registered")
+		}
+		if strings.Contains(instructions, "DEFERRED TOOLS") {
+			t.Errorf("DEFERRED TOOLS should be absent when no deferred tools are registered")
+		}
+		if strings.Contains(instructions, "PROACTIVE SAVE RULE:") {
+			t.Errorf("PROACTIVE SAVE RULE should be absent when mem_save is absent")
+		}
+		if strings.Contains(instructions, "## CONFLICT SURFACING") {
+			t.Errorf("CONFLICT SURFACING should be absent when mem_save is absent")
+		}
+		if strings.Contains(instructions, "mem_save") {
+			t.Errorf("mem_save should not be mentioned when it is not registered")
+		}
+	})
+
+	t.Run("mem_save and mem_judge", func(t *testing.T) {
+		allowlist := map[string]bool{
+			"mem_save":  true,
+			"mem_judge": true,
+		}
+		instructions := buildServerInstructions(allowlist)
+
+		if !strings.Contains(instructions, "## CONFLICT SURFACING") {
+			t.Errorf("CONFLICT SURFACING should be present when mem_save and mem_judge are registered")
+		}
+		if !strings.Contains(instructions, "After mem_save:") {
+			t.Errorf("conflict guidance should mention mem_save when it is registered")
+		}
+	})
+
+	t.Run("empty allowlist", func(t *testing.T) {
+		instructions := buildServerInstructions(map[string]bool{})
+		expected := "Engram provides persistent memory that survives across sessions and compactions."
+		if instructions != expected {
+			t.Errorf("empty allowlist should only produce header, got %q", instructions)
+		}
+	})
+}
+
 // ─── Tool Annotations ────────────────────────────────────────────────────────
 
 func TestCoreToolsAreNotDeferred(t *testing.T) {
@@ -2416,7 +3408,7 @@ func TestCoreToolsAreNotDeferred(t *testing.T) {
 
 	coreTools := []string{
 		"mem_save", "mem_search", "mem_context", "mem_session_summary",
-		"mem_get_observation", "mem_save_prompt",
+		"mem_get_observation", "mem_save_prompt", "mem_judge", "mem_compare",
 	}
 	for _, name := range coreTools {
 		tool := tools[name]
@@ -2623,6 +3615,298 @@ func TestHandleSessionSummaryCreatesProjectScopedSession(t *testing.T) {
 	assertSessionSyncMutationDirectory(t, s, "manual-save-summary-session-project", dir)
 }
 
+func TestHandleSessionSummarySurfacesConflictCandidates(t *testing.T) {
+	s := newMCPTestStore(t)
+	for _, sessionID := range []string{"summary-candidates-1", "summary-candidates-2", "summary-candidates-3"} {
+		if err := s.CreateSession(sessionID, "summary-candidates", t.TempDir()); err != nil {
+			t.Fatalf("CreateSession(%q): %v", sessionID, err)
+		}
+	}
+	h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	first, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"project":    "summary-candidates",
+		"session_id": "summary-candidates-1",
+		"content": `## Goal
+PostgreSQL partition pruning migration
+
+## Instructions
+Benchmark invoice ledger backfill
+
+## Discoveries
+Btree vacuum checkpoint behavior
+
+## Accomplished
+Created partition indexes
+
+## Next Steps
+Rehearse failover
+
+## Relevant Files
+internal/billing/ledger.go`,
+	}}})
+	if err != nil || first.IsError {
+		t.Fatalf("first session summary: err=%v isError=%v text=%s", err, first.IsError, callResultText(t, first))
+	}
+	firstEnvelope := parseEnvelope(t, "first session summary", first)
+	firstSyncID, _ := firstEnvelope["sync_id"].(string)
+	firstSummary, err := s.GetObservationBySyncID(firstSyncID)
+	if err != nil {
+		t.Fatalf("GetObservationBySyncID(%q): %v", firstSyncID, err)
+	}
+
+	second, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"project":    "summary-candidates",
+		"session_id": "summary-candidates-2",
+		"content": `## Goal
+PostgreSQL partition strategy revision
+
+## Instructions
+Benchmark archive ledger ingestion
+
+## Discoveries
+Btree statistics refresh behavior
+
+## Accomplished
+Created partition constraints
+
+## Next Steps
+Rehearse rollback
+
+## Relevant Files
+internal/billing/archive.go`,
+	}}})
+	if err != nil || second.IsError {
+		t.Fatalf("second session summary: err=%v isError=%v text=%s", err, second.IsError, callResultText(t, second))
+	}
+
+	envelope := parseEnvelope(t, "session summary candidates", second)
+	if required, _ := envelope["judgment_required"].(bool); !required {
+		t.Fatalf("expected judgment_required=true, got %v", envelope["judgment_required"])
+	}
+	candidates, _ := envelope["candidates"].([]any)
+	if len(candidates) == 0 {
+		t.Fatal("expected a summary conflict candidate")
+	}
+	candidate, ok := candidates[0].(map[string]any)
+	if !ok {
+		t.Fatalf("candidate has type %T, want object", candidates[0])
+	}
+	for _, field := range []string{"id", "sync_id", "title", "type", "score", "judgment_id"} {
+		if _, ok := candidate[field]; !ok {
+			t.Errorf("candidate is missing %q", field)
+		}
+	}
+	if candidate["title"] != "Session summary: summary-candidates" {
+		t.Fatalf("summary title changed to %q", candidate["title"])
+	}
+	judgmentID, _ := candidate["judgment_id"].(string)
+	relation, err := s.GetRelation(judgmentID)
+	if err != nil {
+		t.Fatalf("GetRelation(%q): %v", judgmentID, err)
+	}
+	if relation.JudgmentStatus != store.JudgmentStatusPending {
+		t.Fatalf("judgment status = %q, want pending", relation.JudgmentStatus)
+	}
+	third, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"project":    "summary-candidates",
+		"session_id": "summary-candidates-3",
+		"content": `## Goal
+Mobile screenreader navigation release
+
+## Instructions
+Audit focus order contrast
+
+## Discoveries
+VoiceOver rotor semantics
+
+## Accomplished
+Updated accessible labels
+
+## Next Steps
+Validate TalkBack gestures
+
+## Relevant Files
+web/mobile/navigation.ts`,
+	}}})
+	if err != nil || third.IsError {
+		t.Fatalf("third session summary: err=%v isError=%v text=%s", err, third.IsError, callResultText(t, third))
+	}
+	thirdEnvelope := parseEnvelope(t, "unrelated session summary", third)
+	if required, _ := thirdEnvelope["judgment_required"].(bool); required {
+		t.Fatalf("unrelated summary should not match only because session summary titles are constant: %v", thirdEnvelope["candidates"])
+	}
+
+	summaries, err := s.RecentObservations("summary-candidates", firstSummary.Scope, 10)
+	if err != nil {
+		t.Fatalf("RecentObservations: %v", err)
+	}
+	if len(summaries) != 3 {
+		t.Fatalf("expected three separate summaries, got %d", len(summaries))
+	}
+	for _, summary := range summaries {
+		if summary.TopicKey != nil {
+			t.Fatalf("summary %d unexpectedly has topic_key %q", summary.ID, *summary.TopicKey)
+		}
+	}
+}
+
+func TestHandleSessionSummarySkipsCandidatesForHeadingsOnlyContent(t *testing.T) {
+	s := newMCPTestStore(t)
+	const project = "headings-only-summary"
+	const sessionID = "headings-only-summary-session"
+	if err := s.CreateSession(sessionID, project, t.TempDir()); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	originalFindCandidates := findSessionSummaryCandidates
+	candidateSearchCalled := false
+	findSessionSummaryCandidates = func(*store.Store, int64, store.CandidateOptions) ([]store.Candidate, error) {
+		candidateSearchCalled = true
+		return nil, nil
+	}
+	t.Cleanup(func() { findSessionSummaryCandidates = originalFindCandidates })
+
+	h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	result, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"project":    project,
+		"session_id": sessionID,
+		"content": `## Goal
+## Instructions
+## Discoveries
+## Accomplished
+## Next Steps
+## Relevant Files`,
+	}}})
+	if err != nil || result.IsError {
+		t.Fatalf("session summary: err=%v isError=%v text=%s", err, result.IsError, callResultText(t, result))
+	}
+	if candidateSearchCalled {
+		t.Fatal("headings-only session summary should skip candidate search")
+	}
+
+	envelope := parseEnvelope(t, "headings-only session summary", result)
+	if required, _ := envelope["judgment_required"].(bool); required {
+		t.Fatalf("judgment_required = %v, want false", envelope["judgment_required"])
+	}
+	if _, ok := envelope["candidates"]; ok {
+		t.Fatalf("headings-only session summary should not include candidates: %v", envelope["candidates"])
+	}
+}
+
+func TestHandleSessionSummaryCandidateQueryUsesPersistedContent(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		maxContent int
+		content    string
+		absentTerm string
+	}{
+		{
+			name:       "private tag redaction",
+			content:    "<private>codenameaerolith</private> public summary text",
+			absentTerm: "codenameaerolith",
+		},
+		{
+			name:       "storage truncation",
+			maxContent: 32,
+			content:    "visible summary text candidategammafourteen",
+			absentTerm: "candidategammafourteen",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newMCPTestStoreWithMaxContentLength(t, tc.maxContent)
+			const project = "persisted-summary-candidates"
+			for _, sessionID := range []string{"candidate-source", "summary-source"} {
+				if err := s.CreateSession(sessionID, project, t.TempDir()); err != nil {
+					t.Fatalf("CreateSession(%q): %v", sessionID, err)
+				}
+			}
+			if _, err := s.AddObservation(store.AddObservationParams{
+				SessionID: "candidate-source",
+				Type:      "decision",
+				Title:     tc.absentTerm,
+				Content:   tc.absentTerm,
+				Project:   project,
+				Scope:     "project",
+			}); err != nil {
+				t.Fatalf("AddObservation(candidate): %v", err)
+			}
+
+			originalFindCandidates := findSessionSummaryCandidates
+			var candidateQuery string
+			findSessionSummaryCandidates = func(s *store.Store, savedID int64, opts store.CandidateOptions) ([]store.Candidate, error) {
+				candidateQuery = opts.Query
+				if strings.Contains(opts.Query, tc.absentTerm) {
+					return originalFindCandidates(s, savedID, opts)
+				}
+				return nil, nil
+			}
+			t.Cleanup(func() { findSessionSummaryCandidates = originalFindCandidates })
+
+			h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+			result, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+				"project":    project,
+				"session_id": "summary-source",
+				"content":    tc.content,
+			}}})
+			if err != nil || result.IsError {
+				t.Fatalf("session summary: err=%v isError=%v text=%s", err, result.IsError, callResultText(t, result))
+			}
+
+			envelope := parseEnvelope(t, "persisted summary candidate query", result)
+			syncID, _ := envelope["sync_id"].(string)
+			summary, err := s.GetObservationBySyncID(syncID)
+			if err != nil {
+				t.Fatalf("GetObservationBySyncID(%q): %v", syncID, err)
+			}
+			if strings.Contains(summary.Content, tc.absentTerm) {
+				t.Fatalf("persisted content %q unexpectedly contains candidate term %q", summary.Content, tc.absentTerm)
+			}
+			if candidateQuery != summary.Content {
+				t.Fatalf("candidate query = %q, want persisted content %q", candidateQuery, summary.Content)
+			}
+			if required, _ := envelope["judgment_required"].(bool); required {
+				t.Fatalf("unexpected candidate from content absent after persistence %q: %v", summary.Content, envelope["candidates"])
+			}
+		})
+	}
+}
+
+func TestHandleSessionSummaryPersistsWhenCandidateDetectionFails(t *testing.T) {
+	s := newMCPTestStore(t)
+	const sessionID = "summary-candidate-failure"
+	if err := s.CreateSession(sessionID, "summary-candidate-failure", t.TempDir()); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	originalFindCandidates := findSessionSummaryCandidates
+	findSessionSummaryCandidates = func(*store.Store, int64, store.CandidateOptions) ([]store.Candidate, error) {
+		return nil, errors.New("forced candidate detection failure")
+	}
+	t.Cleanup(func() { findSessionSummaryCandidates = originalFindCandidates })
+
+	content := "The session summary must survive a candidate detection failure."
+	h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	result, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"project":    "summary-candidate-failure",
+		"session_id": sessionID,
+		"content":    content,
+	}}})
+	if err != nil || result.IsError {
+		t.Fatalf("session summary should succeed when candidate detection fails: err=%v isError=%v text=%s", err, result.IsError, callResultText(t, result))
+	}
+
+	envelope := parseEnvelope(t, "candidate detection failure", result)
+	syncID, _ := envelope["sync_id"].(string)
+	summary, err := s.GetObservationBySyncID(syncID)
+	if err != nil {
+		t.Fatalf("GetObservationBySyncID(%q): %v", syncID, err)
+	}
+	if summary.Type != "session_summary" || summary.Content != content {
+		t.Fatalf("persisted summary = type %q content %q, want session_summary and %q", summary.Type, summary.Content, content)
+	}
+}
+
 func TestHandleCapturePassiveCreatesProjectScopedSession(t *testing.T) {
 	s := newMCPTestStore(t)
 	h := handleCapturePassive(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
@@ -2709,10 +3993,8 @@ func TestNewServerWithConfig(t *testing.T) {
 	if srv == nil {
 		t.Fatal("expected MCP server instance")
 	}
-	tools := srv.ListTools()
-	// Should have all 22 tools (18 agent + 4 admin).
-	if len(tools) != 22 {
-		t.Errorf("NewServerWithConfig should register all 22 tools, got %d", len(tools))
+	if err := compareMCPToolInventory(NewServer(s).ListTools(), srv.ListTools()); err != nil {
+		t.Fatalf("default config inventory: %v", err)
 	}
 }
 
@@ -2883,39 +4165,23 @@ func TestHandleSaveNoSimilarWarningWhenProjectExists(t *testing.T) {
 }
 
 func TestHandleMergeProjects(t *testing.T) {
-	s := newMCPTestStore(t)
-
-	// Set up observations under different project name variants
-	if err := s.CreateSession("s-Engram", "Engram", ""); err != nil {
-		t.Fatalf("create session Engram: %v", err)
+	s, dataDir := newMCPTestStoreWithDataDir(t)
+	rawDB, err := sql.Open("sqlite", filepath.Join(dataDir, "engram.db"))
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
 	}
-	if _, err := s.AddObservation(store.AddObservationParams{
-		SessionID: "s-Engram",
-		Type:      "decision",
-		Title:     "From Engram",
-		Content:   "Content from Engram",
-		Project:   "engram", // store normalizes to lowercase
-	}); err != nil {
-		t.Fatalf("add observation Engram: %v", err)
+	t.Cleanup(func() { _ = rawDB.Close() })
+	if _, err := rawDB.Exec(`INSERT INTO sessions (id, project, directory) VALUES (?, ?, ?)`, "s-legacy", "ENGRAM", ""); err != nil {
+		t.Fatalf("insert legacy session: %v", err)
 	}
-
-	if err := s.CreateSession("s-engram-memory", "engram-memory", ""); err != nil {
-		t.Fatalf("create session engram-memory: %v", err)
-	}
-	if _, err := s.AddObservation(store.AddObservationParams{
-		SessionID: "s-engram-memory",
-		Type:      "decision",
-		Title:     "From engram-memory",
-		Content:   "Content from engram-memory",
-		Project:   "engram-memory",
-	}); err != nil {
-		t.Fatalf("add observation engram-memory: %v", err)
+	if _, err := rawDB.Exec(`INSERT INTO observations (sync_id, session_id, type, title, content, project, scope, normalized_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, "legacy-obs", "s-legacy", "decision", "From legacy Engram", "Content from legacy Engram", "ENGRAM", "project", "legacy-hash"); err != nil {
+		t.Fatalf("insert legacy observation: %v", err)
 	}
 
 	h := handleMergeProjects(s)
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"from": "engram-memory, ENGRAM", // comma-separated, with spaces and uppercase
+		"from": "ENGRAM",
 		"to":   "engram",
 	}}}
 
@@ -2931,18 +4197,26 @@ func TestHandleMergeProjects(t *testing.T) {
 	if !strings.Contains(text, "engram") {
 		t.Fatalf("expected merge result mentioning canonical project, got %q", text)
 	}
-	if !strings.Contains(text, "Observations moved") {
-		t.Fatalf("expected observations count in result, got %q", text)
+	if !strings.Contains(text, "Observations moved: 1") {
+		t.Fatalf("expected positive observations count in result, got %q", text)
 	}
 
-	// Verify that engram-memory observations are now under "engram"
 	obs, err := s.RecentObservations("engram", "project", 10)
 	if err != nil {
 		t.Fatalf("recent observations: %v", err)
 	}
-	// Should have both: original "engram" obs + migrated "engram-memory" obs
-	if len(obs) < 2 {
-		t.Fatalf("expected at least 2 observations after merge, got %d", len(obs))
+	if len(obs) != 1 {
+		t.Fatalf("canonical observations = %d, want 1", len(obs))
+	}
+	var legacyRows, canonicalRows int
+	if err := rawDB.QueryRow(`SELECT COUNT(*) FROM observations WHERE project = ?`, "ENGRAM").Scan(&legacyRows); err != nil {
+		t.Fatalf("count legacy observations: %v", err)
+	}
+	if err := rawDB.QueryRow(`SELECT COUNT(*) FROM observations WHERE project = ?`, "engram").Scan(&canonicalRows); err != nil {
+		t.Fatalf("count canonical observations: %v", err)
+	}
+	if legacyRows != 0 || canonicalRows != 1 {
+		t.Fatalf("observation projects after merge: legacy=%d canonical=%d, want 0 and 1", legacyRows, canonicalRows)
 	}
 }
 
@@ -3228,6 +4502,73 @@ func TestSessionEndClearsActivity(t *testing.T) {
 	}
 }
 
+func TestSessionEndFailsClosedWhenRepositoryBindingUnavailable(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	t.Chdir(dir)
+
+	initial, err := resolveWriteProject()
+	if err != nil {
+		t.Fatalf("create repository binding: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".git", "engram-project-identity.json"), []byte("invalid binding"), 0o600); err != nil {
+		t.Fatalf("corrupt repository binding: %v", err)
+	}
+
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("binding-session", initial.Project, dir); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	res, err := handleSessionEnd(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": "binding-session"}},
+	})
+	if err != nil {
+		t.Fatalf("handleSessionEnd: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("expected repository binding failure, got %q", callResultText(t, res))
+	}
+	body := callResultJSON(t, res)
+	if body["error_code"] != "repository_binding_unavailable" || !strings.Contains(body["message"].(string), project.ErrRepositoryBinding.Error()) || !strings.Contains(body["message"].(string), "Configure the repository's .engram/config.json with the intended canonical project.") {
+		t.Fatalf("expected repository binding error response, got %v", body)
+	}
+	if _, ok := body["recovery_token"]; ok {
+		t.Fatalf("repository binding error must not issue an ambiguity recovery token: %v", body)
+	}
+	if _, ok := body["token_ttl_seconds"]; ok {
+		t.Fatalf("repository binding error must not include ambiguity token metadata: %v", body)
+	}
+	session, err := s.GetSession("binding-session")
+	if err != nil || session.EndedAt != nil {
+		t.Fatalf("repository binding failure ended session: %+v, %v", session, err)
+	}
+}
+
+func TestSessionEndRejectsBlankIDsWithoutMutation(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("valid-session", "engram", "/tmp"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	end := handleSessionEnd(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	for _, id := range []string{"", " \t"} {
+		t.Run(fmt.Sprintf("%q", id), func(t *testing.T) {
+			res, err := end(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": id}}})
+			if err != nil || !res.IsError || !strings.Contains(callResultText(t, res), "session id is required") {
+				t.Fatalf("session end result=%+v err=%v", res, err)
+			}
+			session, err := s.GetSession("valid-session")
+			if err != nil || session.EndedAt != nil {
+				t.Fatalf("valid session changed: %+v, %v", session, err)
+			}
+			var mutations int
+			if err := s.DB().QueryRow(`SELECT count(*) FROM sync_mutations WHERE entity = 'session' AND entity_key = ?`, id).Scan(&mutations); err != nil || mutations != 0 {
+				t.Fatalf("blank session mutations=%d, err=%v", mutations, err)
+			}
+		})
+	}
+}
+
 func TestCapturePassiveRecordsToolCall(t *testing.T) {
 	s := newMCPTestStore(t)
 
@@ -3299,6 +4640,29 @@ func TestSessionStartUsesDefaultSessionID(t *testing.T) {
 	realScore := activity.ActivityScore("real-unique-session-id")
 	if realScore != "" {
 		t.Fatalf("expected no activity under real session ID, got: %q", realScore)
+	}
+}
+
+func TestSessionStartRejectsEmptyID(t *testing.T) {
+	s := newMCPTestStore(t)
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	t.Chdir(dir)
+
+	res, err := handleSessionStart(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": " \t"}},
+	})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if !res.IsError || !strings.Contains(callResultText(t, res), "session id is required") {
+		t.Fatalf("result isError=%v text=%q, want clear required-id error", res.IsError, callResultText(t, res))
+	}
+	if _, err := s.GetSession(" \t"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("whitespace session was persisted: %v", err)
+	}
+	if _, err := s.GetSession(""); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("empty session was persisted: %v", err)
 	}
 }
 
@@ -3420,8 +4784,9 @@ func TestSessionStartWithExplicitDirectoryPreservesDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get session: %v", err)
 	}
-	if sess.Directory != explicitDir {
-		t.Fatalf("expected directory=%q, got %q", explicitDir, sess.Directory)
+	wantDirectory := runtimeSessionDirectory(explicitDir)
+	if sess.Directory != wantDirectory {
+		t.Fatalf("expected directory=%q, got %q", wantDirectory, sess.Directory)
 	}
 }
 
@@ -3470,8 +4835,9 @@ func TestSessionStartWithExplicitDirectoryResolvesProjectFromDirectory(t *testin
 	if sess.Project != "explicit-session-project" {
 		t.Fatalf("expected explicit directory project, got %q", sess.Project)
 	}
-	if sess.Directory != explicitDir {
-		t.Fatalf("expected persisted directory=%q, got %q", explicitDir, sess.Directory)
+	wantDirectory := runtimeSessionDirectory(rightRepo)
+	if sess.Directory != wantDirectory {
+		t.Fatalf("expected persisted worktree root=%q, got %q", wantDirectory, sess.Directory)
 	}
 }
 
@@ -3511,8 +4877,9 @@ func TestSessionStartWithExplicitDirectoryTrimsWhitespaceBeforePersisting(t *tes
 	if sess.Project != "trimmed-session-project" {
 		t.Fatalf("expected trimmed explicit directory project, got %q", sess.Project)
 	}
-	if sess.Directory != trimmedDir {
-		t.Fatalf("expected trimmed persisted directory=%q, got %q", trimmedDir, sess.Directory)
+	wantDirectory := runtimeSessionDirectory(repoDir)
+	if sess.Directory != wantDirectory {
+		t.Fatalf("expected trimmed persisted worktree root=%q, got %q", wantDirectory, sess.Directory)
 	}
 }
 
@@ -3556,8 +4923,9 @@ func TestSessionStartWithExplicitPlainDirectoryUsesDirectoryBasenameProject(t *t
 	if sess.Project != "plain-session-target" {
 		t.Fatalf("expected explicit plain directory project, got %q", sess.Project)
 	}
-	if sess.Directory != explicitDir {
-		t.Fatalf("expected persisted directory=%q, got %q", explicitDir, sess.Directory)
+	wantDirectory := runtimeSessionDirectory(explicitDir)
+	if sess.Directory != wantDirectory {
+		t.Fatalf("expected persisted directory=%q, got %q", wantDirectory, sess.Directory)
 	}
 
 	body := callResultJSON(t, res)
@@ -3842,6 +5210,215 @@ func TestMemSave_MissingSessionIDFailsLoudly(t *testing.T) {
 	wrongResults, _ := s.Search("missing session should fail", store.SearchOptions{Project: "process-session-missing", Limit: 5})
 	if len(wrongResults) != 0 {
 		t.Fatal("missing session must not fall back to cwd-detected project")
+	}
+}
+
+func TestWriteToolsRejectUnregisteredSessionID(t *testing.T) {
+	const (
+		project  = "unknown-session-project"
+		invented = "issue-1096-update-20260813"
+	)
+
+	tests := []struct {
+		name                    string
+		handler                 func(*store.Store) server.ToolHandlerFunc
+		args                    map[string]any
+		assert                  func(*testing.T, *store.Store)
+		testWithExplicitProject bool
+	}{
+		{
+			name: "mem_save",
+			handler: func(s *store.Store) server.ToolHandlerFunc {
+				return handleSave(s, MCPConfig{DefaultProject: project}, NewSessionActivity(10*time.Minute))
+			},
+			args:                    map[string]any{"title": "invented session", "content": "must not persist"},
+			testWithExplicitProject: true,
+			assert: func(t *testing.T, s *store.Store) {
+				t.Helper()
+				observations, err := s.RecentObservations(project, "project", 10)
+				if err != nil || len(observations) != 1 || observations[0].SessionID != defaultSessionID(project) || observations[0].Type != "manual" || observations[0].Title != "invented session" || observations[0].Content != "must not persist" {
+					t.Fatalf("recovered mem_save observation = %#v, err=%v", observations, err)
+				}
+			},
+		},
+		{
+			name: "mem_save_prompt",
+			handler: func(s *store.Store) server.ToolHandlerFunc {
+				return handleSavePrompt(s, MCPConfig{DefaultProject: project}, NewSessionActivity(10*time.Minute))
+			},
+			args: map[string]any{"content": "must not persist"},
+			assert: func(t *testing.T, s *store.Store) {
+				t.Helper()
+				prompts, err := s.RecentPrompts(project, 10)
+				if err != nil || len(prompts) != 1 || prompts[0].SessionID != defaultSessionID(project) || prompts[0].Content != "must not persist" {
+					t.Fatalf("recovered mem_save_prompt prompts = %#v, err=%v", prompts, err)
+				}
+			},
+		},
+		{
+			name: "mem_session_summary",
+			handler: func(s *store.Store) server.ToolHandlerFunc {
+				return handleSessionSummary(s, MCPConfig{DefaultProject: project}, NewSessionActivity(10*time.Minute))
+			},
+			args:                    map[string]any{"content": "## Goal\nMust not persist"},
+			testWithExplicitProject: true,
+			assert: func(t *testing.T, s *store.Store) {
+				t.Helper()
+				observations, err := s.RecentObservations(project, "project", 10)
+				if err != nil || len(observations) != 1 || observations[0].SessionID != defaultSessionID(project) || observations[0].Type != "session_summary" || observations[0].Title != "Session summary: "+project || observations[0].Content != "## Goal\nMust not persist" {
+					t.Fatalf("recovered mem_session_summary observation = %#v, err=%v", observations, err)
+				}
+			},
+		},
+		{
+			name: "mem_capture_passive",
+			handler: func(s *store.Store) server.ToolHandlerFunc {
+				return handleCapturePassive(s, MCPConfig{DefaultProject: project}, NewSessionActivity(10*time.Minute))
+			},
+			args: map[string]any{"content": "## Key Learnings:\n- Retried passive learning is persisted as an observation"},
+			assert: func(t *testing.T, s *store.Store) {
+				t.Helper()
+				observations, err := s.RecentObservations(project, "project", 10)
+				if err != nil || len(observations) != 1 || observations[0].SessionID != defaultSessionID(project) || observations[0].Type != "passive" || observations[0].Content != "Retried passive learning is persisted as an observation" || observations[0].ToolName == nil || *observations[0].ToolName != "mcp-passive" {
+					t.Fatalf("recovered mem_capture_passive observation = %#v, err=%v", observations, err)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		requestVariants := []struct {
+			name            string
+			explicitProject bool
+		}{{name: "project omitted"}}
+		if tt.testWithExplicitProject {
+			requestVariants = append(requestVariants, struct {
+				name            string
+				explicitProject bool
+			}{name: "explicit project", explicitProject: true})
+		}
+
+		for _, variant := range requestVariants {
+			t.Run(tt.name+"/"+variant.name, func(t *testing.T) {
+				s := newMCPTestStore(t)
+				if variant.explicitProject {
+					// Establish a known explicit project without seeding observations or prompts.
+					if err := s.CreateSession("known-explicit-project", project, t.TempDir()); err != nil {
+						t.Fatalf("create explicit-project setup session: %v", err)
+					}
+					if err := s.EndSession("known-explicit-project", ""); err != nil {
+						t.Fatalf("end explicit-project setup session: %v", err)
+					}
+				}
+				args := make(map[string]any, len(tt.args)+1)
+				for key, value := range tt.args {
+					args[key] = value
+				}
+				if variant.explicitProject {
+					args["project"] = project
+				}
+				args["session_id"] = invented
+
+				res, err := tt.handler(s)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: args}})
+				if err != nil {
+					t.Fatalf("handler error: %v", err)
+				}
+				if !res.IsError {
+					t.Fatal("expected unregistered session_id to fail")
+				}
+				body := callResultJSON(t, res)
+				if body["error_code"] != "unknown_session" || body["invalid_session_id"] != invented || body["retry_without_session_id"] != true {
+					t.Fatalf("unexpected unknown-session envelope: %v", body)
+				}
+				if _, err := s.GetSession(invented); !errors.Is(err, sql.ErrNoRows) {
+					t.Fatalf("invented session was created: %v", err)
+				}
+				observations, err := s.RecentObservations(project, "project", 10)
+				if err != nil || len(observations) != 0 {
+					t.Fatalf("observations after rejected request = %d, err=%v", len(observations), err)
+				}
+				prompts, err := s.RecentPrompts(project, 10)
+				if err != nil || len(prompts) != 0 {
+					t.Fatalf("prompts after rejected request = %d, err=%v", len(prompts), err)
+				}
+
+				delete(args, "session_id")
+				retryRes, err := tt.handler(s)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: args}})
+				if err != nil || retryRes.IsError {
+					t.Fatalf("retry without session_id: err=%v isError=%v text=%q", err, retryRes.IsError, callResultText(t, retryRes))
+				}
+				tt.assert(t, s)
+			})
+		}
+	}
+}
+
+func TestExplicitSessionIDUsesRegisteredProject(t *testing.T) {
+	const (
+		defaultProject    = "default-project"
+		registeredProject = "registered-project"
+		sessionID         = "registered-session"
+		sessionPath       = "/work/registered-project"
+	)
+
+	tests := []struct {
+		name    string
+		handler func(*store.Store) server.ToolHandlerFunc
+		args    map[string]any
+		assert  func(*testing.T, *store.Store)
+	}{
+		{
+			name: "mem_save_prompt",
+			handler: func(s *store.Store) server.ToolHandlerFunc {
+				return handleSavePrompt(s, MCPConfig{DefaultProject: defaultProject}, NewSessionActivity(10*time.Minute))
+			},
+			args: map[string]any{"content": "retain the registered project"},
+			assert: func(t *testing.T, s *store.Store) {
+				t.Helper()
+				prompts, err := s.RecentPrompts(registeredProject, 10)
+				if err != nil || len(prompts) != 1 || prompts[0].SessionID != sessionID {
+					t.Fatalf("registered-project prompts = %#v, err=%v", prompts, err)
+				}
+			},
+		},
+		{
+			name: "mem_capture_passive",
+			handler: func(s *store.Store) server.ToolHandlerFunc {
+				return handleCapturePassive(s, MCPConfig{DefaultProject: defaultProject}, NewSessionActivity(10*time.Minute))
+			},
+			args: map[string]any{"content": "## Key Learnings:\n- Retain the registered project."},
+			assert: func(t *testing.T, s *store.Store) {
+				t.Helper()
+				observations, err := s.RecentObservations(registeredProject, "project", 10)
+				if err != nil || len(observations) != 1 || observations[0].SessionID != sessionID {
+					t.Fatalf("registered-project observations = %#v, err=%v", observations, err)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newMCPTestStore(t)
+			if err := s.CreateSession(sessionID, registeredProject, sessionPath); err != nil {
+				t.Fatalf("create session: %v", err)
+			}
+			args := make(map[string]any, len(tt.args)+1)
+			for key, value := range tt.args {
+				args[key] = value
+			}
+			args["session_id"] = sessionID
+
+			res, err := tt.handler(s)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: args}})
+			if err != nil || res.IsError {
+				t.Fatalf("write with registered session: err=%v isError=%v text=%q", err, res.IsError, callResultText(t, res))
+			}
+			body := callResultJSON(t, res)
+			if body["project"] != registeredProject || body["project_source"] != project.SourceSessionProject || body["project_path"] != sessionPath {
+				t.Fatalf("registered session envelope = %v", body)
+			}
+			tt.assert(t, s)
+		})
 	}
 }
 
@@ -5403,6 +6980,38 @@ func TestResolveReadProject_UnknownOverride(t *testing.T) {
 	}
 }
 
+func TestResolveReadProject_UnknownOverrideStatsGenerationChange(t *testing.T) {
+	previous := loadMCPStats
+	loadMCPStats = func(*store.Store) (*store.Stats, error) {
+		return nil, store.ErrDatabaseGenerationChanged
+	}
+	t.Cleanup(func() {
+		loadMCPStats = previous
+	})
+
+	s := newMCPTestStore(t)
+	res, err := resolveReadProject(s, "does-not-exist")
+	if !errors.Is(err, store.ErrDatabaseGenerationChanged) {
+		t.Fatalf("resolveReadProject error = %v; want ErrDatabaseGenerationChanged", err)
+	}
+
+	result := readProjectErrorResult(NewSessionActivity(time.Minute), res, err)
+	var envelope map[string]any
+	if err := json.Unmarshal([]byte(callResultText(t, result)), &envelope); err != nil {
+		t.Fatalf("unmarshal project error result: %v", err)
+	}
+	if got := envelope["error_code"]; got != "database_generation_changed" {
+		t.Errorf("error_code = %q; want database_generation_changed", got)
+	}
+	message, _ := envelope["message"].(string)
+	if !strings.Contains(message, "restart Engram") {
+		t.Errorf("message = %q; want restart guidance", message)
+	}
+	if _, ok := envelope["recovery_token"]; ok {
+		t.Error("project error result included recovery_token")
+	}
+}
+
 // TestRespondWithProject_MergesEnvelope: assert project, project_source, project_path in result
 func TestRespondWithProject_MergesEnvelope(t *testing.T) {
 	res := project.DetectionResult{
@@ -5435,6 +7044,63 @@ func TestErrorWithMeta_WrapsResponse(t *testing.T) {
 	}
 	if !strings.Contains(text, "repo-a") {
 		t.Errorf("response must contain available_projects, got: %q", text)
+	}
+}
+
+func TestWriteProjectErrorResultClassifiesDetectionErrors(t *testing.T) {
+	activity := NewSessionActivity(10 * time.Minute)
+	tests := []struct {
+		name      string
+		err       error
+		wantCode  string
+		wantToken bool
+		wantHint  string
+	}{
+		{
+			name:      "ambiguous project",
+			err:       project.ErrAmbiguousProject,
+			wantCode:  "ambiguous_project",
+			wantToken: true,
+		},
+		{
+			name:     "invalid config",
+			err:      fmt.Errorf("%w: project_name is required", project.ErrInvalidConfig),
+			wantCode: "invalid_project_config",
+		},
+		{
+			name:     "repository binding",
+			err:      fmt.Errorf("%w: binding is invalid", project.ErrRepositoryBinding),
+			wantCode: "repository_binding_unavailable",
+			wantHint: "Configure the repository's .engram/config.json with the intended canonical project.",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res := writeProjectErrorResult(activity, "session-id", project.DetectionResult{
+				Path:              "/workspace",
+				AvailableProjects: []string{"repo-a", "repo-b"},
+			}, tt.err)
+			body := callResultJSON(t, res)
+			if body["error_code"] != tt.wantCode {
+				t.Fatalf("error code = %q, want %q; body=%v", body["error_code"], tt.wantCode, body)
+			}
+			_, gotToken := body["recovery_token"]
+			if gotToken != tt.wantToken {
+				t.Fatalf("recovery token present = %t, want %t; body=%v", gotToken, tt.wantToken, body)
+			}
+			if tt.wantHint != "" && !strings.Contains(body["message"].(string), tt.wantHint) {
+				t.Fatalf("message %q does not contain recovery guidance %q", body["message"], tt.wantHint)
+			}
+			if tt.wantHint != "" && body["hint"] != tt.wantHint {
+				t.Fatalf("hint = %q, want %q", body["hint"], tt.wantHint)
+			}
+			if tt.wantCode == "repository_binding_unavailable" {
+				if _, ok := body["token_ttl_seconds"]; ok {
+					t.Fatalf("repository binding error must not include ambiguity token metadata: %v", body)
+				}
+			}
+		})
 	}
 }
 
@@ -5951,6 +7617,76 @@ func TestHandleSearch_SuccessUsesEnvelope(t *testing.T) {
 	}
 }
 
+// TestHandleSearch_PreviewMarkerCountsRunes pins the truncation marker to the
+// same unit truncate() cuts on. truncate() slices runes, so content of 300
+// runes or fewer is always emitted whole; marking it "[preview]" tells the
+// agent to spend a mem_get_observation call on content it already has in full.
+// Every case uses accented runes, so byte length always exceeds rune length,
+// and the cases sit on both sides of the limit plus exactly on it.
+func TestHandleSearch_PreviewMarkerCountsRunes(t *testing.T) {
+	const footer = "Results above are previews (300 chars)."
+
+	cases := []struct {
+		name       string
+		runes      int
+		wantMarker bool
+	}{
+		{"whole content is never a preview", 200, false},
+		{"content exactly at the limit is not cut", 300, false},
+		{"cut content is still a preview", 301, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			initTestGitRepo(t, dir)
+			t.Chdir(dir)
+
+			s := newMCPTestStore(t)
+			if err := s.CreateSession("sess-rune-preview", "rune-preview-project", "/tmp"); err != nil {
+				t.Fatal(err)
+			}
+			content := strings.Repeat("é", tc.runes)
+			if len(content) <= 300 {
+				t.Fatalf("test content must exceed 300 bytes to exercise the boundary, got %d", len(content))
+			}
+			if _, err := s.AddObservation(store.AddObservationParams{
+				SessionID: "sess-rune-preview",
+				Type:      "manual",
+				Title:     "runepreview boundary",
+				Content:   content,
+				Project:   "rune-preview-project",
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			h := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+			res, err := h(context.Background(), mcppkg.CallToolRequest{
+				Params: mcppkg.CallToolParams{Arguments: map[string]any{
+					"query":   "runepreview",
+					"project": "rune-preview-project",
+				}},
+			})
+			if err != nil || res.IsError {
+				t.Fatalf("search: err=%v isError=%v text=%q", err, res.IsError, callResultText(t, res))
+			}
+			text := callResultText(t, res)
+
+			if got := strings.Contains(text, "[preview]"); got != tc.wantMarker {
+				t.Errorf("[preview] marker present = %v, want %v for %d runes (%d bytes)\n%s",
+					got, tc.wantMarker, tc.runes, len(content), text)
+			}
+			if got := strings.Contains(text, footer); got != tc.wantMarker {
+				t.Errorf("preview footer present = %v, want %v for %d runes (%d bytes)\n%s",
+					got, tc.wantMarker, tc.runes, len(content), text)
+			}
+			if !tc.wantMarker && !strings.Contains(text, content) {
+				t.Errorf("content of %d runes must be emitted whole, got:\n%s", tc.runes, text)
+			}
+		})
+	}
+}
+
 // JR2-1 RED: TestHandleSearch_EnvelopeProjectMatchesQueryProject
 // When the git repo name contains double hyphens (e.g. "my--app"), NormalizeProject
 // collapses it to "my-app". The envelope project field must match the normalized form
@@ -6018,11 +7754,9 @@ func TestHandleContext_EnvelopeProjectMatchesQueryProject(t *testing.T) {
 	}
 }
 
-// JR2-3 RED: TestHandleGetObservation_DegradedPathNoEnvelope
-// When the cwd is ambiguous (multiple git repos), resolveReadProject returns an error.
-// The handler must degrade gracefully: IsError=false, result contains observation content,
-// and the response is NOT JSON (no project_source envelope field).
-func TestHandleGetObservation_DegradedPathNoEnvelope(t *testing.T) {
+// TestHandleGetObservation_AmbiguousReturnsRecoveryEnvelope verifies that a
+// get-by-ID request preserves actionable project-resolution metadata.
+func TestHandleGetObservation_AmbiguousReturnsRecoveryEnvelope(t *testing.T) {
 	// Create a parent dir with two child git repos → ambiguous cwd.
 	parent := t.TempDir()
 	for _, name := range []string{"repo-a", "repo-b"} {
@@ -6058,19 +7792,21 @@ func TestHandleGetObservation_DegradedPathNoEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if res.IsError {
-		t.Fatalf("degraded path must not return IsError=true; text=%q", callResultText(t, res))
+	if !res.IsError {
+		t.Fatalf("ambiguous resolution must return an error; text=%q", callResultText(t, res))
 	}
-	text := callResultText(t, res)
-	if !strings.Contains(text, "degraded obs content") {
-		t.Errorf("degraded path must contain observation content; got: %q", text)
+	body := callResultJSON(t, res)
+	if got := body["error_code"]; got != "ambiguous_project" {
+		t.Fatalf("error_code = %v, want ambiguous_project; body=%v", got, body)
 	}
-	// The degraded path returns plain text (no JSON envelope), so project_source must be absent.
-	var m map[string]any
-	if json.Unmarshal([]byte(text), &m) == nil {
-		if _, hasSource := m["project_source"]; hasSource {
-			t.Error("degraded path must NOT include 'project_source' envelope field")
-		}
+	if token, ok := body["recovery_token"].(string); !ok || token == "" {
+		t.Fatalf("missing recovery_token in %v", body)
+	}
+	if got := body["project_source"]; got != project.SourceAmbiguous {
+		t.Fatalf("project_source = %v, want %q", got, project.SourceAmbiguous)
+	}
+	if got := body["project_path"]; got != parent {
+		t.Fatalf("project_path = %v, want %q", got, parent)
 	}
 }
 
@@ -6840,6 +8576,9 @@ func TestProcessOverrideReadResolutionBeforeCWD(t *testing.T) {
 	t.Chdir(parent)
 
 	s := newMCPTestStore(t)
+	if err := s.CreateSession("trusted-project-session", "trusted project", t.TempDir()); err != nil {
+		t.Fatalf("seed trusted project: %v", err)
+	}
 	res, err := resolveReadProjectWithProcessOverride(s, "", "Trusted Project")
 	if err != nil {
 		t.Fatalf("resolve read with process override: %v", err)
@@ -6894,6 +8633,149 @@ func TestProcessOverrideSaveWriteResolutionBeforeCWD(t *testing.T) {
 	}
 }
 
+func TestProjectResolvingReadHandlersPreserveAmbiguityRecoveryMetadata(t *testing.T) {
+	parent := t.TempDir()
+	for _, name := range []string{"repo-read-a", "repo-read-b"} {
+		child := filepath.Join(parent, name)
+		if err := os.MkdirAll(child, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		initTestGitRepo(t, child)
+	}
+	t.Chdir(parent)
+
+	s := newMCPTestStore(t)
+	activity := NewSessionActivity(10 * time.Minute)
+	tests := []struct {
+		name string
+		call func() (*mcppkg.CallToolResult, error)
+	}{
+		{
+			name: "search",
+			call: func() (*mcppkg.CallToolResult, error) {
+				return handleSearch(s, MCPConfig{}, activity)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"query": "identity"}}})
+			},
+		},
+		{
+			name: "context",
+			call: func() (*mcppkg.CallToolResult, error) {
+				return handleContext(s, MCPConfig{}, activity)(context.Background(), mcppkg.CallToolRequest{})
+			},
+		},
+		{
+			name: "stats",
+			call: func() (*mcppkg.CallToolResult, error) {
+				return handleStats(s, MCPConfig{}, activity)(context.Background(), mcppkg.CallToolRequest{})
+			},
+		},
+		{
+			name: "doctor",
+			call: func() (*mcppkg.CallToolResult, error) {
+				return handleDoctor(s, MCPConfig{}, activity)(context.Background(), mcppkg.CallToolRequest{})
+			},
+		},
+		{
+			name: "timeline",
+			call: func() (*mcppkg.CallToolResult, error) {
+				return handleTimeline(s, MCPConfig{}, activity)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"observation_id": 1.0}}})
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := tc.call()
+			if err != nil || !result.IsError {
+				t.Fatalf("result err=%v isError=%v text=%q", err, result.IsError, callResultText(t, result))
+			}
+			body := callResultJSON(t, result)
+			if got := body["error_code"]; got != "ambiguous_project" {
+				t.Fatalf("error_code = %v, want ambiguous_project; body=%v", got, body)
+			}
+			available, ok := body["available_projects"].([]any)
+			if !ok || len(available) != 2 {
+				t.Fatalf("available_projects = %#v, want both cwd repos", body["available_projects"])
+			}
+			if token, ok := body["recovery_token"].(string); !ok || token == "" {
+				t.Fatalf("missing recovery_token in %v", body)
+			}
+		})
+	}
+}
+
+func TestGetObservationAndReviewPreserveAmbiguityRecoveryMetadata(t *testing.T) {
+	parent := t.TempDir()
+	for _, name := range []string{"repo-read-a", "repo-read-b"} {
+		child := filepath.Join(parent, name)
+		if err := os.MkdirAll(child, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		initTestGitRepo(t, child)
+	}
+	t.Chdir(parent)
+
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("ambiguous-read", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "ambiguous-read",
+		Type:      "decision",
+		Title:     "Ambiguous read",
+		Content:   "Must not be marked reviewed when project resolution is ambiguous.",
+		Project:   "engram",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	past := time.Now().UTC().Add(-time.Hour).Format("2006-01-02 15:04:05")
+	if _, err := s.DB().Exec(`UPDATE observations SET review_after = ? WHERE id = ?`, past, id); err != nil {
+		t.Fatalf("backdate review_after: %v", err)
+	}
+
+	assertAmbiguousRecovery := func(t *testing.T, result *mcppkg.CallToolResult, err error) {
+		t.Helper()
+		if err != nil || !result.IsError {
+			t.Fatalf("result err=%v isError=%v text=%q", err, result.IsError, callResultText(t, result))
+		}
+		body := callResultJSON(t, result)
+		if got := body["error_code"]; got != "ambiguous_project" {
+			t.Fatalf("error_code = %v, want ambiguous_project; body=%v", got, body)
+		}
+		available, ok := body["available_projects"].([]any)
+		if !ok || len(available) != 2 {
+			t.Fatalf("available_projects = %#v, want both cwd repos", body["available_projects"])
+		}
+		if token, ok := body["recovery_token"].(string); !ok || token == "" {
+			t.Fatalf("missing recovery_token in %v", body)
+		}
+		if got := body["project_source"]; got != project.SourceAmbiguous {
+			t.Fatalf("project_source = %v, want %q", got, project.SourceAmbiguous)
+		}
+		if got := body["project_path"]; got != parent {
+			t.Fatalf("project_path = %v, want %q", got, parent)
+		}
+	}
+
+	t.Run("get observation", func(t *testing.T) {
+		result, err := handleGetObservation(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": float64(id)}}})
+		assertAmbiguousRecovery(t, result, err)
+	})
+
+	t.Run("mark reviewed", func(t *testing.T) {
+		result, err := handleReview(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"action": "mark_reviewed", "observation_id": float64(id)}}})
+		assertAmbiguousRecovery(t, result, err)
+
+		obs, err := s.GetObservation(id)
+		if err != nil {
+			t.Fatalf("reload observation: %v", err)
+		}
+		if obs.ReviewAfter == nil || *obs.ReviewAfter != past {
+			t.Fatalf("review_after = %v, want unchanged %q", obs.ReviewAfter, past)
+		}
+	})
+}
+
 func TestProcessOverrideSaveHandlerWritesToDefaultProject(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
@@ -6914,6 +8796,125 @@ func TestProcessOverrideSaveHandlerWritesToDefaultProject(t *testing.T) {
 	}
 	if len(results) != 1 {
 		t.Fatalf("results in trusted project = %d; want 1", len(results))
+	}
+}
+
+func TestLifecycleHandlersHonorDefaultProject(t *testing.T) {
+	s := newMCPTestStore(t)
+	activity := NewSessionActivity(10 * time.Minute)
+	cfg := MCPConfig{DefaultProject: "Lifecycle Project"}
+
+	start := handleSessionStart(s, cfg, activity)
+	startRes, err := start(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": "lifecycle-default"}}})
+	if err != nil || startRes.IsError {
+		t.Fatalf("session start: err=%v result=%q", err, callResultText(t, startRes))
+	}
+	if got := callResultJSON(t, startRes)["project_source"]; got != sourceProcessOverride {
+		t.Fatalf("session start source = %v; want %s", got, sourceProcessOverride)
+	}
+	session, err := s.GetSession("lifecycle-default")
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if session.Project != "lifecycle project" {
+		t.Fatalf("session project = %q", session.Project)
+	}
+
+	capture := handleCapturePassive(s, cfg, activity)
+	captureRes, err := capture(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"session_id": "lifecycle-default",
+		"content":    "## Key Learnings:\n- Lifecycle uses the configured project.",
+	}}})
+	if err != nil || captureRes.IsError {
+		t.Fatalf("passive capture: err=%v result=%q", err, callResultText(t, captureRes))
+	}
+	if got := callResultJSON(t, captureRes)["project_source"]; got != project.SourceSessionProject {
+		t.Fatalf("capture source = %v; want %s from the registered session", got, project.SourceSessionProject)
+	}
+
+	end := handleSessionEnd(s, cfg, activity)
+	endRes, err := end(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": "lifecycle-default"}}})
+	if err != nil || endRes.IsError {
+		t.Fatalf("session end: err=%v result=%q", err, callResultText(t, endRes))
+	}
+	if got := callResultJSON(t, endRes)["project_source"]; got != sourceProcessOverride {
+		t.Fatalf("session end source = %v; want %s", got, sourceProcessOverride)
+	}
+}
+
+func TestTimelineRejectsObservationOutsideResolvedProject(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("timeline-project-a", "project-a", t.TempDir()); err != nil {
+		t.Fatalf("seed project a: %v", err)
+	}
+	if err := s.CreateSession("timeline-project-b", "project-b", t.TempDir()); err != nil {
+		t.Fatalf("seed project b: %v", err)
+	}
+	observation, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "timeline-project-b",
+		Project:   "project-b",
+		Type:      "discovery",
+		Title:     "private timeline",
+		Content:   "must not cross projects",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("seed observation: %v", err)
+	}
+
+	result, err := handleTimeline(s, MCPConfig{DefaultProject: "project-a"})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"observation_id": float64(observation)}}})
+	if err != nil {
+		t.Fatalf("timeline: %v", err)
+	}
+	if !result.IsError || !strings.Contains(callResultText(t, result), "not found in resolved project") {
+		t.Fatalf("timeline result = %#v", result)
+	}
+}
+
+func TestReviewMarkReviewedRejectsObservationOutsideResolvedProjectWithoutMutation(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("review-project-a", "project-a", t.TempDir()); err != nil {
+		t.Fatalf("seed project a: %v", err)
+	}
+	if err := s.CreateSession("review-project-b", "project-b", t.TempDir()); err != nil {
+		t.Fatalf("seed project b: %v", err)
+	}
+	id, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "review-project-b",
+		Project:   "project-b",
+		Type:      "decision",
+		Title:     "private review",
+		Content:   "must not cross projects",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("seed observation: %v", err)
+	}
+	past := "2000-01-01 00:00:00"
+	if _, err := s.DB().Exec(`UPDATE observations SET review_after = ? WHERE id = ?`, past, id); err != nil {
+		t.Fatalf("backdate review_after: %v", err)
+	}
+
+	result, err := handleReview(s, MCPConfig{DefaultProject: "project-a"})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"action":         "mark_reviewed",
+		"observation_id": float64(id),
+	}}})
+	if err != nil {
+		t.Fatalf("mark reviewed: %v", err)
+	}
+	if !result.IsError || !strings.Contains(callResultText(t, result), "observation not found in resolved project") {
+		t.Fatalf("mark reviewed result = %#v", result)
+	}
+	if strings.Contains(callResultText(t, result), "Memory marked reviewed") {
+		t.Fatalf("cross-project review falsely claimed success: %q", callResultText(t, result))
+	}
+
+	obs, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("reload observation: %v", err)
+	}
+	if obs.ReviewAfter == nil || *obs.ReviewAfter != past {
+		t.Fatalf("cross-project review mutated review_after: %v, want %q", obs.ReviewAfter, past)
 	}
 }
 
@@ -7376,7 +9377,7 @@ func seedMCPMatchModeFixture(t *testing.T, s *store.Store) {
 		t.Fatalf("create session: %v", err)
 	}
 	obs := []store.AddObservationParams{
-		{SessionID: "s-mcp-matchmode", Type: "decision", Title: "Auth session middleware", Content: "", Project: "engram", Scope: "project"},
+		{SessionID: "s-mcp-matchmode", Type: "decision", Title: "Auth session middleware", Content: "request routing layer", Project: "engram", Scope: "project"},
 		{SessionID: "s-mcp-matchmode", Type: "decision", Title: "Compliance audit notes", Content: "session policy", Project: "engram", Scope: "project"},
 		{SessionID: "s-mcp-matchmode", Type: "decision", Title: "OAuth tokens", Content: "auth and compliance", Project: "engram", Scope: "project"},
 	}
@@ -7450,5 +9451,411 @@ func TestHandleSearch_MatchModeInvalidError(t *testing.T) {
 	}
 	if strings.Contains(text, "Try simpler keywords") {
 		t.Fatalf("parameter-validation error must not contain query-advice suffix \"Try simpler keywords\", got: %s", text)
+	}
+}
+
+// TestHandleSaveRejectsEmptyTitle pins that mem_save refuses a titleless save
+// (#459) instead of persisting an observation whose cloud upsert would block
+// the project's mutation queue.
+func TestHandleSaveRejectsEmptyTitle(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		title any
+	}{
+		{"missing title", nil},
+		{"empty title", ""},
+		{"whitespace only title", "   "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newMCPTestStore(t)
+			h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+			args := map[string]any{
+				"content": "Body that would otherwise be saved",
+				"type":    "note",
+				"project": "engram",
+			}
+			if tc.title != nil {
+				args["title"] = tc.title
+			}
+
+			res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: args}})
+			if err != nil {
+				t.Fatalf("handler error: %v", err)
+			}
+			if !res.IsError {
+				t.Fatalf("expected tool error, got %q", callResultText(t, res))
+			}
+			if !strings.Contains(callResultText(t, res), "observation title is required") {
+				t.Fatalf("unexpected error text: %q", callResultText(t, res))
+			}
+
+			obs, err := s.RecentObservations("engram", "project", 5)
+			if err != nil {
+				t.Fatalf("recent observations: %v", err)
+			}
+			if len(obs) != 0 {
+				t.Fatalf("expected no observation persisted, got %#v", obs)
+			}
+
+			// The guard runs before project resolution and session creation, so
+			// a rejected save must leave no session behind either.
+			var sessions int
+			if err := s.DB().QueryRow(`SELECT count(*) FROM sessions`).Scan(&sessions); err != nil {
+				t.Fatalf("count sessions: %v", err)
+			}
+			if sessions != 0 {
+				t.Fatalf("expected no session created by a rejected save, got %d", sessions)
+			}
+
+			mutations, err := s.ListPendingSyncMutations(store.DefaultSyncTargetKey, 100)
+			if err != nil {
+				t.Fatalf("list pending sync mutations: %v", err)
+			}
+			if len(mutations) != 0 {
+				t.Fatalf("expected no sync mutation enqueued, got %#v", mutations)
+			}
+		})
+	}
+}
+
+func TestHandleUpdateRejectsBlankTitleWithoutSideEffects(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("s-update-title-guard", "engram", t.TempDir()); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "s-update-title-guard",
+		Type:      "note",
+		Title:     "Original title",
+		Content:   "Original content",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	before, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("get original observation: %v", err)
+	}
+	countMutations := func() int {
+		t.Helper()
+		mutations, err := s.ListPendingSyncMutations(store.DefaultSyncTargetKey, 10)
+		if err != nil {
+			t.Fatalf("list pending mutations: %v", err)
+		}
+		count := 0
+		for _, mutation := range mutations {
+			if mutation.Entity == store.SyncEntityObservation && mutation.EntityKey == before.SyncID {
+				count++
+			}
+		}
+		return count
+	}
+	mutationsBefore := countMutations()
+
+	for _, title := range []string{"", " \t\n "} {
+		title := title
+		t.Run("blank title", func(t *testing.T) {
+			res, err := handleUpdate(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+				"id":    float64(id),
+				"title": title,
+			}}})
+			if err != nil {
+				t.Fatalf("handler error: %v", err)
+			}
+			if !res.IsError {
+				t.Fatalf("expected tool error, got %q", callResultText(t, res))
+			}
+			if !strings.Contains(callResultText(t, res), "observation title is required") {
+				t.Fatalf("unexpected error text: %q", callResultText(t, res))
+			}
+			after, err := s.GetObservation(id)
+			if err != nil {
+				t.Fatalf("get observation after rejected update: %v", err)
+			}
+			if after.Title != before.Title || after.Content != before.Content || after.RevisionCount != before.RevisionCount {
+				t.Fatalf("rejected update changed observation: before=%#v after=%#v", before, after)
+			}
+			if got := countMutations(); got != mutationsBefore {
+				t.Fatalf("rejected update enqueued a mutation: got %d, want %d", got, mutationsBefore)
+			}
+		})
+	}
+}
+
+func TestHandleSaveGlobalScope(t *testing.T) {
+	s := newMCPTestStore(t)
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	if err := s.CreateSession("sess-global-save", "test-project", dir); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":      "Global memory title",
+		"content":    "**What**: Machine-wide convention",
+		"scope":      "global",
+		"project":    "test-project",
+		"session_id": "sess-global-save",
+	}}})
+	if err != nil {
+		t.Fatalf("handleSave error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %s", callResultText(t, res))
+	}
+
+	obss, err := s.Search("Global memory title", store.SearchOptions{
+		Project: "test-project",
+		Scope:   "global",
+	})
+	if err != nil {
+		t.Fatalf("search observations: %v", err)
+	}
+	if len(obss) != 1 {
+		t.Fatalf("expected 1 global observation, got %d", len(obss))
+	}
+	if obss[0].Scope != "global" {
+		t.Fatalf("expected Scope=global, got %q", obss[0].Scope)
+	}
+	if obss[0].Title != "Global memory title" {
+		t.Fatalf("expected Title=%q, got %q", "Global memory title", obss[0].Title)
+	}
+}
+
+func TestHandleSearchGlobalScopeFilter(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("sess-global-test", "global-project", t.TempDir()); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	_, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "sess-global-test",
+		Type:      "decision",
+		Title:     "project scoped note",
+		Content:   "content for project",
+		Project:   "global-project",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add project observation: %v", err)
+	}
+
+	_, err = s.AddObservation(store.AddObservationParams{
+		SessionID: "sess-global-test",
+		Type:      "decision",
+		Title:     "personal scoped note",
+		Content:   "content for personal",
+		Project:   "global-project",
+		Scope:     "personal",
+	})
+	if err != nil {
+		t.Fatalf("add personal observation: %v", err)
+	}
+
+	_, err = s.AddObservation(store.AddObservationParams{
+		SessionID: "sess-global-test",
+		Type:      "decision",
+		Title:     "global scoped note",
+		Content:   "content for global",
+		Project:   "global-project",
+		Scope:     "global",
+	})
+	if err != nil {
+		t.Fatalf("add global observation: %v", err)
+	}
+
+	h := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	t.Run("filter by scope global", func(t *testing.T) {
+		res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"query":        "scoped note",
+			"scope":        "global",
+			"all_projects": true,
+		}}})
+		if err != nil {
+			t.Fatalf("search error: %v", err)
+		}
+		if res.IsError {
+			t.Fatalf("unexpected tool error: %s", callResultText(t, res))
+		}
+		text := callResultText(t, res)
+		if !strings.Contains(text, "global scoped note") {
+			t.Errorf("expected 'global scoped note' in results, got: %s", text)
+		}
+		if strings.Contains(text, "project scoped note") {
+			t.Errorf("did not expect 'project scoped note' in results, got: %s", text)
+		}
+		if strings.Contains(text, "personal scoped note") {
+			t.Errorf("did not expect 'personal scoped note' in results, got: %s", text)
+		}
+	})
+
+	t.Run("filter by scope project", func(t *testing.T) {
+		res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"query":   "scoped note",
+			"scope":   "project",
+			"project": "global-project",
+		}}})
+		if err != nil {
+			t.Fatalf("search error: %v", err)
+		}
+		if res.IsError {
+			t.Fatalf("unexpected tool error: %s", callResultText(t, res))
+		}
+		text := callResultText(t, res)
+		if !strings.Contains(text, "project scoped note") {
+			t.Errorf("expected 'project scoped note' in results, got: %s", text)
+		}
+		if strings.Contains(text, "global scoped note") {
+			t.Errorf("did not expect 'global scoped note' in results, got: %s", text)
+		}
+	})
+
+	t.Run("no scope filter returns all", func(t *testing.T) {
+		res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"query":   "scoped note",
+			"project": "global-project",
+		}}})
+		if err != nil {
+			t.Fatalf("search error: %v", err)
+		}
+		if res.IsError {
+			t.Fatalf("unexpected tool error: %s", callResultText(t, res))
+		}
+		text := callResultText(t, res)
+		if !strings.Contains(text, "global scoped note") || !strings.Contains(text, "personal scoped note") || !strings.Contains(text, "project scoped note") {
+			t.Errorf("expected global, personal, and project notes in results, got: %s", text)
+		}
+	})
+}
+
+func TestHandleContextGlobalScopeFilter(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("ctx-global-sess", "ctx-proj", t.TempDir()); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	_, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "ctx-global-sess",
+		Type:      "decision",
+		Title:     "ctx project observation",
+		Content:   "content",
+		Project:   "ctx-proj",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add project observation: %v", err)
+	}
+
+	_, err = s.AddObservation(store.AddObservationParams{
+		SessionID: "ctx-global-sess",
+		Type:      "decision",
+		Title:     "ctx personal observation",
+		Content:   "content",
+		Project:   "ctx-proj",
+		Scope:     "personal",
+	})
+	if err != nil {
+		t.Fatalf("add personal observation: %v", err)
+	}
+
+	_, err = s.AddObservation(store.AddObservationParams{
+		SessionID: "ctx-global-sess",
+		Type:      "decision",
+		Title:     "ctx global observation",
+		Content:   "content",
+		Project:   "ctx-proj",
+		Scope:     "global",
+	})
+	if err != nil {
+		t.Fatalf("add global observation: %v", err)
+	}
+
+	h := handleContext(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+
+	t.Run("filter by scope global", func(t *testing.T) {
+		res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"project": "ctx-proj",
+			"scope":   "global",
+		}}})
+		if err != nil {
+			t.Fatalf("handleContext error: %v", err)
+		}
+		if res.IsError {
+			t.Fatalf("unexpected tool error: %s", callResultText(t, res))
+		}
+		text := callResultText(t, res)
+		if !strings.Contains(text, "ctx global observation") {
+			t.Errorf("expected global observation in context results, got: %s", text)
+		}
+		if strings.Contains(text, "ctx project observation") {
+			t.Errorf("did not expect project observation in global context results, got: %s", text)
+		}
+		if strings.Contains(text, "ctx personal observation") {
+			t.Errorf("did not expect personal observation in global context results, got: %s", text)
+		}
+	})
+
+	t.Run("no scope filter returns all", func(t *testing.T) {
+		res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"project": "ctx-proj",
+		}}})
+		if err != nil {
+			t.Fatalf("handleContext error: %v", err)
+		}
+		if res.IsError {
+			t.Fatalf("unexpected tool error: %s", callResultText(t, res))
+		}
+		text := callResultText(t, res)
+		if !strings.Contains(text, "ctx global observation") || !strings.Contains(text, "ctx personal observation") || !strings.Contains(text, "ctx project observation") {
+			t.Errorf("expected global, personal, and project observations in context results, got: %s", text)
+		}
+	})
+}
+
+func TestHandleUpdateGlobalScope(t *testing.T) {
+	s := newMCPTestStore(t)
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	if err := s.CreateSession("update-global-sess", "update-proj", dir); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	id, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "update-global-sess",
+		Type:      "note",
+		Title:     "Updatable observation",
+		Content:   "Initial content",
+		Project:   "update-proj",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	h := handleUpdate(s, MCPConfig{DefaultProject: "update-proj"})
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"id":    float64(id),
+		"scope": "global",
+	}}})
+	if err != nil {
+		t.Fatalf("handleUpdate error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %s", callResultText(t, res))
+	}
+
+	obs, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("get observation: %v", err)
+	}
+	if obs.Scope != "global" {
+		t.Fatalf("expected Scope=global after update, got %q", obs.Scope)
 	}
 }

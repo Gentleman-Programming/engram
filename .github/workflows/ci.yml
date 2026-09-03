@@ -25,6 +25,9 @@ jobs:
       - name: Run unit tests
         run: go test ./...
 
+      - name: Run binary quick self-test
+        run: go build -o engram-selftest ./cmd/engram && ./engram-selftest test --quick
+
   e2e-tests:
     name: E2E Tests
     runs-on: ubuntu-latest
@@ -39,3 +42,55 @@ jobs:
 
       - name: Run e2e tests
         run: go test -tags e2e ./internal/server/...
+
+  windows-setup-test:
+    name: Windows Setup Test
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.25.10"
+
+      - name: Run Windows-specific setup test
+        run: go test ./internal/setup/ -run TestClaudeCodeEngramCommandPreservesWindowsAbsolutePath -count=1
+
+  wrapper-tests-windows:
+    name: Cloud Sync Wrapper Tests (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.10"
+      - run: go test ./tools/ -run '^TestCloudSync(Wrappers|PowerShellMissingEngram)$' -v
+
+  plugin-tests:
+    name: Plugin Tests
+    runs-on: ubuntu-latest
+    # The suite is ~11s of wall time, dominated by one fixture that deliberately
+    # exercises the full 10s startup deadline. Ten minutes leaves ample headroom
+    # for a cold runner while still catching a genuine hang.
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # Must match publish-pi.yml: the suite imports index.ts directly and relies
+      # on native TypeScript type stripping.
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+
+      # No install step: test/plugin-sandbox.mjs copies the plugin into a temp
+      # directory with its own stubbed node_modules, so the suite runs from a
+      # clean checkout and never writes into plugin/pi/node_modules.
+      - name: Run Pi plugin tests
+        working-directory: plugin/pi
+        run: npm test

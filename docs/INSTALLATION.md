@@ -37,12 +37,20 @@ brew update && brew upgrade engram
 
 **Option A: Install via `go install` (recommended for technical users)**
 
-If you have Go installed, this is the cleanest and most trustworthy path — the binary is compiled on your machine from source, so no antivirus will flag it:
+If you have Go installed, this is the cleanest and most trustworthy path — the binary is compiled on your machine from source, so no antivirus will flag it.
+
+Two paths exist because Go's [Semantic Import Versioning](https://go.dev/ref/mod#major-version-suffixes) rule appends `/v2` (and above) to the module path starting at major version 2. Pick the line that matches the major version you want:
 
 ```powershell
+# Stable line (v1.x — recommended for production; currently tracks @v1.20.0)
 go install github.com/Gentleman-Programming/engram/cmd/engram@latest
+
+# v2 line (first post-migration release candidate or any later v2 release)
+go install github.com/Gentleman-Programming/engram/v2/cmd/engram@latest
 # Binary goes to %GOPATH%\bin\engram.exe (typically %USERPROFILE%\go\bin\)
 ```
+
+The `/v2` command requires the first release candidate published after this migration, or a later v2 release; existing `v2.0.0-rc.1` through `v2.0.0-rc.3` cannot use it. `@latest` selects the latest released version for the requested module path and does not make those earlier RCs compatible. Until then, use the v1 command above or build v2 from a local clone.
 
 Ensure `%GOPATH%\bin` (or `%USERPROFILE%\go\bin`) is on your `PATH`.
 
@@ -119,11 +127,25 @@ Expand-Archive engram_*_windows_amd64.zip -DestinationPath "$env:USERPROFILE\bin
 
 ## Install from source (macOS / Linux)
 
+Pick the line that matches the major version you want — the `/v2` suffix exists starting at major version 2 because of Go's [Semantic Import Versioning](https://go.dev/ref/mod#major-version-suffixes) rule:
+
+```bash
+# Stable line (v1.x — recommended for production; currently tracks @v1.20.0)
+go install github.com/Gentleman-Programming/engram/cmd/engram@latest
+
+# v2 line (first post-migration release candidate or any later v2 release)
+go install github.com/Gentleman-Programming/engram/v2/cmd/engram@latest
+# Binary goes to $GOPATH/bin (typically ~/go/bin/)
+```
+
+The `/v2` command requires the first release candidate published after this migration, or a later v2 release; existing `v2.0.0-rc.1` through `v2.0.0-rc.3` cannot use it. `@latest` selects the latest released version for the requested module path and does not make those earlier RCs compatible. Until then, use the v1 command above or build v2 from a local clone.
+
+Or build from a local clone:
+
 ```bash
 git clone https://github.com/Gentleman-Programming/engram.git
 cd engram
 go install ./cmd/engram
-# Binary goes to $GOPATH/bin (typically ~/go/bin/)
 ```
 
 > **Want a real version string instead of `dev`?**
