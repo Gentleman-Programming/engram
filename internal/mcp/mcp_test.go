@@ -1114,8 +1114,8 @@ func TestHandleSaveCapturePromptFalseSkipsCurrentPrompt(t *testing.T) {
 	h := handleSave(s, MCPConfig{}, activity)
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"title":          "SDD artifact",
-		"content":        "## Apply progress",
+		"title":          "Automated save",
+		"content":        "## Generated record",
 		"type":           "architecture",
 		"project":        "engram",
 		"capture_prompt": false,

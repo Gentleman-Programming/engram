@@ -892,7 +892,7 @@ Save structured observations. The tool description teaches agents the format:
 - **type**: `decision` | `architecture` | `bugfix` | `pattern` | `config` | `discovery` | `learning`
 - **scope**: `project` (default) | `personal` | `global` — see [Team Usage](docs/TEAM-USAGE.md) for conventions and sync caveats
 - **topic_key**: optional canonical topic id (e.g. `architecture/auth-model`) used to upsert evolving memories
-- **capture_prompt**: optional boolean, default `true`; when current prompt context is available in the same MCP process for the same project/session, Engram best-effort records it alongside the observation. If that process-local context is unavailable or prompt capture fails, `mem_save` still succeeds. Automated pipeline saves such as SDD artifacts should pass `false`.
+- **capture_prompt**: optional boolean, default `true`; when current prompt context is available in the same MCP process for the same project/session, Engram best-effort records it alongside the observation. If that process-local context is unavailable or prompt capture fails, `mem_save` still succeeds. Automated artifact saves should pass `false`.
 - **content**: Structured with `**What**`, `**Why**`, `**Where**`, `**Learned**`; required unless the legacy `observation` alias is provided
 - **observation**: backward-compatible alias for `content` for older/raw MCP clients; prefer `content` for new integrations
 

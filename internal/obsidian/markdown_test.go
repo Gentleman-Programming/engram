@@ -140,12 +140,12 @@ func TestObservationToMarkdown(t *testing.T) {
 	})
 
 	t.Run("multi-segment topic_key — prefix uses last slash part", func(t *testing.T) {
-		topicKey := "sdd/obsidian-plugin/explore"
+		topicKey := "architecture/obsidian-plugin/explore"
 		project := "engram"
 		obs := store.Observation{
 			ID:        4,
 			Type:      "architecture",
-			Title:     "SDD Explore",
+			Title:     "Architecture Exploration",
 			Content:   "Content here.",
 			Project:   &project,
 			Scope:     "project",
@@ -158,14 +158,14 @@ func TestObservationToMarkdown(t *testing.T) {
 		got := ObservationToMarkdown(obs)
 
 		// Design says: wikilink prefix = topic_key split on LAST "/"
-		// "sdd/obsidian-plugin/explore" → last segment = "explore"
+		// "architecture/obsidian-plugin/explore" → last segment = "explore"
 		// But design also says prefix for _topics/ uses -- instead of /
-		// Looking at design section 4: [[topic-sdd--obsidian-plugin]] where prefix = topic_key split on last "/"
+		// The topic link uses the prefix split on the last "/".
 		// Re-reading: "[[topic-{prefix}]] where prefix = topic_key split on last '/'"
-		// For "sdd/obsidian-plugin/explore" → split on last "/" → prefix = "sdd/obsidian-plugin"
-		// In the wikilink, "/" → "--" → [[topic-sdd--obsidian-plugin]]
-		if !strings.Contains(got, "[[topic-sdd--obsidian-plugin]]") {
-			t.Errorf("expected topic wikilink [[topic-sdd--obsidian-plugin]] for topic_key=%q, got:\n%s", topicKey, got)
+		// For "architecture/obsidian-plugin/explore" → split on last "/" → prefix = "architecture/obsidian-plugin"
+		// In the wikilink, "/" → "--" → [[topic-architecture--obsidian-plugin]]
+		if !strings.Contains(got, "[[topic-architecture--obsidian-plugin]]") {
+			t.Errorf("expected topic wikilink [[topic-architecture--obsidian-plugin]] for topic_key=%q, got:\n%s", topicKey, got)
 		}
 	})
 }
