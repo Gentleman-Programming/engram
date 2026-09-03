@@ -100,10 +100,10 @@ func (s *Store) FinalizeSession(p FinalizeSessionParams) (FinalizeSessionResult,
 // ownership validation, deduplication policy, and sync enqueueing.
 func (s *Store) insertObservationTx(tx *sql.Tx, p AddObservationParams, title, content, scope, topicKey, normHash string) (int64, error) {
 	res, err := s.execHook(tx,
-		`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, updated_at)
- VALUES (?, ?, ?, ?, ?, ?, CAST(? AS TEXT), ?, ?, ?, 1, 1, datetime('now'), datetime('now'))`,
+		`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, org, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, updated_at)
+ VALUES (?, ?, ?, ?, ?, ?, CAST(? AS TEXT), ?, ?, ?, ?, 1, 1, datetime('now'), datetime('now'))`,
 		newSyncID("obs"), p.SessionID, p.Type, title, content,
-		nullableString(p.ToolName), nullableString(p.Project), scope, nullableString(topicKey), normHash)
+		nullableString(p.ToolName), nullableString(p.Project), scope, nullableString(p.Org), nullableString(topicKey), normHash)
 	if err != nil {
 		return 0, err
 	}

@@ -16,6 +16,7 @@ import (
 type ExportConfig struct {
 	VaultPath   string          // --vault (required): path to the Obsidian vault root
 	Project     string          // --project (optional): filter export to a single project
+	Org         string          // --org (optional): filter export to a single org (#776)
 	Limit       int             // --limit (0 = no limit)
 	Since       time.Time       // --since (zero = use state file)
 	Force       bool            // --force: ignore state, full re-export
