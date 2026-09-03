@@ -37,7 +37,15 @@ import (
 // See https://www.sqlite.org/rescode.html#constraint_foreignkey
 const sqliteConstraintForeignKey = 787
 
-const maxFTSQueryBytes = 65_536
+const (
+	maxFTSQueryBytes = 65_536
+
+	// maxFTSShortTermQueryTerms keeps LIKE fallbacks below empirically observed
+	// SQLite failures. Filtered SearchContext first failed at 990 terms, while
+	// SearchPrompts first failed at 997 terms. The cap of 768 leaves at least
+	// 221 terms of headroom below the observed worst path.
+	maxFTSShortTermQueryTerms = 768
+)
 
 const (
 	sqlitePrimaryBusy   = 5
@@ -3265,6 +3273,9 @@ func (s *Store) SearchPrompts(query string, project string, limit int) ([]Prompt
 	var sql string
 	var args []any
 	if hasShortFTSTerm(query) {
+		if err := validateShortTermFTSQuery(query); err != nil {
+			return nil, err
+		}
 		sql, args = buildPromptLIKEQuery(query, project, limit)
 	} else {
 		ftsQuery := sanitizeFTS(query)
@@ -3795,6 +3806,9 @@ func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOpti
 	var sqlQ string
 	var args []any
 	if hasShortFTSTerm(query) {
+		if err := validateShortTermFTSQuery(query); err != nil {
+			return nil, err
+		}
 		sqlQ, args = buildSearchLIKEQuery(query, opts, limit)
 	} else {
 		// Build FTS5 query: "all" (default) uses AND semantics; "any" uses OR for broader recall.
@@ -8872,6 +8886,13 @@ func stripPrivateTags(s string) string {
 func validateFTSQueryLength(query string) error {
 	if len(query) > maxFTSQueryBytes {
 		return fmt.Errorf("%w: got %d bytes; maximum is %d bytes; shorten the query and retry", ErrFTSQueryTooLarge, len(query), maxFTSQueryBytes)
+	}
+	return nil
+}
+
+func validateShortTermFTSQuery(query string) error {
+	if terms := len(searchTerms(query)); terms > maxFTSShortTermQueryTerms {
+		return fmt.Errorf("%w: got %d terms; maximum is %d terms for short-term search; shorten the query and retry", ErrFTSQueryTooLarge, terms, maxFTSShortTermQueryTerms)
 	}
 	return nil
 }

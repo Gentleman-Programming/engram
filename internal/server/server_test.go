@@ -862,6 +862,31 @@ func TestSearchEndpointsRejectOversizedFTSQueries(t *testing.T) {
 	}
 }
 
+func TestSearchEndpointsRejectTooManyShortFTSTerms(t *testing.T) {
+	srv := New(newServerTestStore(t), 0)
+	query := strings.TrimSpace(strings.Repeat("x ", 769))
+	want := "fts query too large: got 769 terms; maximum is 768 terms for short-term search; shorten the query and retry"
+
+	for _, path := range []string{"/search", "/prompts/search"} {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, path+"?q="+url.QueryEscape(query), nil)
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
+			}
+			var response map[string]string
+			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if got := response["error"]; got != want {
+				t.Fatalf("error = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestHandleSearchAllowsEmptyMatchMode(t *testing.T) {
 	st := newServerTestStore(t)
 	srv := New(st, 0)

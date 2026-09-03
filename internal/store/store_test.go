@@ -13223,6 +13223,78 @@ func TestFTSQueryLengthLimit(t *testing.T) {
 	}
 }
 
+func TestShortTermFTSQueryTermLimit(t *testing.T) {
+	s := newTestStore(t)
+	queryWithTerms := func(count int) string {
+		return strings.TrimSpace(strings.Repeat("x ", count))
+	}
+
+	atLimit := queryWithTerms(768)
+	if got := len(atLimit); got >= maxFTSQueryBytes {
+		t.Fatalf("at-limit short-term query length = %d, want below %d bytes", got, maxFTSQueryBytes)
+	}
+	tooManyTerms := queryWithTerms(769)
+	longTerms := strings.TrimSpace(strings.Repeat("term ", 769))
+	want := "fts query too large: got 769 terms; maximum is 768 terms for short-term search; shorten the query and retry"
+
+	searches := []struct {
+		name string
+		run  func(string) error
+	}{
+		{
+			name: "observations",
+			run: func(query string) error {
+				_, err := s.SearchContext(context.Background(), query, SearchOptions{Project: "engram", Limit: 10})
+				return err
+			},
+		},
+		{
+			name: "prompts",
+			run: func(query string) error {
+				_, err := s.SearchPrompts(query, "engram", 10)
+				return err
+			},
+		},
+	}
+
+	for _, tc := range searches {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.run(atLimit); err != nil {
+				t.Fatalf("query at 768 short terms: %v", err)
+			}
+			if err := tc.run(longTerms); err != nil {
+				t.Fatalf("query with 769 non-short FTS terms: %v", err)
+			}
+			if err := tc.run(tooManyTerms); err == nil {
+				t.Fatal("query at 769 short terms returned nil error")
+			} else if !errors.Is(err, ErrFTSQueryTooLarge) {
+				t.Fatalf("over-term query error = %v, want ErrFTSQueryTooLarge", err)
+			} else if got := err.Error(); got != want {
+				t.Fatalf("over-term query error = %q, want %q", got, want)
+			}
+		})
+	}
+
+	t.Run("mixed short and long terms", func(t *testing.T) {
+		mixedTerms := func(count int) string {
+			return "x " + strings.TrimSpace(strings.Repeat("term ", count-1))
+		}
+
+		for _, tc := range searches {
+			t.Run(tc.name, func(t *testing.T) {
+				if err := tc.run(mixedTerms(768)); err != nil {
+					t.Fatalf("query at 768 mixed terms: %v", err)
+				}
+				if err := tc.run(mixedTerms(769)); err == nil {
+					t.Fatal("query at 769 mixed terms returned nil error")
+				} else if !errors.Is(err, ErrFTSQueryTooLarge) {
+					t.Fatalf("over-term query error = %v, want ErrFTSQueryTooLarge", err)
+				}
+			})
+		}
+	})
+}
+
 func TestFTSQueriesUseFTSFirstCrossJoin(t *testing.T) {
 	searchQuery, _ := buildSearchFTSQuery(`"memory"`, SearchOptions{}, 10)
 	for name, query := range map[string]string{
