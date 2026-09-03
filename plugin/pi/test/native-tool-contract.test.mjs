@@ -168,6 +168,74 @@ test("registered Pi-native mem_search reports native provider transport failure"
   }
 });
 
+test("a malformed 200 Pi response is a tool error rather than a successful null or unavailable transport", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  globalThis.fetch = async (url) => {
+    const path = new URL(url).pathname;
+    if (path === "/health") return new Response(JSON.stringify({ status: "ok" }));
+    if (path === "/project/current") return new Response(JSON.stringify({ project: "engram" }));
+    if (path === "/search") return new Response('{"observations":', { status: 200, headers: { "Content-Type": "application/json" } });
+    throw new Error(`unexpected request: ${url}`);
+  };
+
+  try {
+    await withPluginSandbox("engram-pi-contract-", async ({ sandbox }) => {
+      const { registeredTools } = await loadPluginHarness(sandbox);
+      const result = await registeredTools.get("mem_search").execute(
+        "malformed-json",
+        { query: "malformed" },
+        undefined,
+        undefined,
+        runtimeContext("malformed-json-session"),
+      );
+
+      assert.equal(result.isError, true);
+      assert.equal(result.details.data, undefined, "a malformed body must not become successful JSON null");
+      assert.doesNotMatch(result.content[0].text, /could not reach the Engram HTTP server/);
+      assert.doesNotMatch(result.content[0].text, /native memory provider is not currently responding/);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+test("a 204 Pi response is a successful null without JSON parsing", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  globalThis.fetch = async (url) => {
+    const path = new URL(url).pathname;
+    if (path === "/health") return new Response(JSON.stringify({ status: "ok" }));
+    if (path === "/project/current") return new Response(JSON.stringify({ project: "engram" }));
+    if (path === "/search") return new Response(null, { status: 204 });
+    throw new Error(`unexpected request: ${url}`);
+  };
+
+  try {
+    await withPluginSandbox("engram-pi-contract-", async ({ sandbox }) => {
+      const { registeredTools } = await loadPluginHarness(sandbox);
+      const result = await registeredTools.get("mem_search").execute(
+        "no-content",
+        { query: "no-content" },
+        undefined,
+        undefined,
+        runtimeContext("no-content-session"),
+      );
+
+      assert.notEqual(result.isError, true);
+      assert.equal(result.details.data, null);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
 test("a timed-out Pi request cannot make a concurrent JSON-null request unavailable", async () => {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.ENGRAM_URL;

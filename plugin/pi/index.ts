@@ -218,10 +218,12 @@ async function engramFetchResult<TResponse = unknown>(path: string, opts: FetchO
   }
 
   let data: unknown = null;
-  try {
-    data = await res.json();
-  } catch {
-    data = null;
+  if (res.status !== 204) {
+    try {
+      data = await res.json();
+    } catch (error) {
+      if (res.ok) throw error;
+    }
   }
 
   if (!res.ok) {
