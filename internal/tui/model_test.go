@@ -4,9 +4,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/Gentleman-Programming/engram/internal/setup"
-	"github.com/Gentleman-Programming/engram/internal/store"
-	"github.com/Gentleman-Programming/engram/internal/version"
+	"github.com/Gentleman-Programming/engram/v2/internal/setup"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	"github.com/Gentleman-Programming/engram/v2/internal/version"
 )
 
 type testFixture struct {
@@ -129,6 +129,19 @@ func TestDataLoadingCommands(t *testing.T) {
 		}
 		if loaded.result.Status != version.StatusCheckFailed {
 			t.Fatalf("status = %q, want %q", loaded.result.Status, version.StatusCheckFailed)
+		}
+	})
+
+	t.Run("checkForUpdate honors opt out", func(t *testing.T) {
+		t.Setenv(version.EnvNoUpdateCheck, "1")
+
+		msg := checkForUpdate("1.10.7")()
+		loaded, ok := msg.(updateCheckMsg)
+		if !ok {
+			t.Fatalf("message type = %T", msg)
+		}
+		if loaded.result != (version.CheckResult{}) {
+			t.Fatalf("result = %+v, want empty result", loaded.result)
 		}
 	})
 

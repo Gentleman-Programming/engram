@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"net/url"
 
-	"github.com/Gentleman-Programming/engram/internal/cloud/cloudstore"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/cloudstore"
 )
 
 // ─── Shared Components ──────────────────────────────────────────────────────

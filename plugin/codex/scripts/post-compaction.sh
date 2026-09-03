@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Engram — Post-compaction hook for Codex
 #
 # When compaction happens, inject Memory Protocol + context and instruct
@@ -15,7 +15,7 @@ source "${SCRIPT_DIR}/_helpers.sh"
 INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
-PROJECT=$(detect_project "$CWD")
+PROJECT=$(resolve_project "$CWD") || PROJECT=""
 
 # Ensure session exists
 if [ -n "$SESSION_ID" ] && [ -n "$PROJECT" ]; then
@@ -28,8 +28,11 @@ if [ -n "$SESSION_ID" ] && [ -n "$PROJECT" ]; then
 fi
 
 # Fetch context from previous sessions
-ENCODED_PROJECT=$(printf '%s' "$PROJECT" | jq -sRr @uri)
-CONTEXT=$(curl -sf "${ENGRAM_URL}/context?project=${ENCODED_PROJECT}" --max-time 3 2>/dev/null | jq -r '.context // empty')
+CONTEXT=""
+if [ -n "$PROJECT" ]; then
+  ENCODED_PROJECT=$(printf '%s' "$PROJECT" | jq -sRr @uri)
+  CONTEXT=$(curl -sf "${ENGRAM_URL}/context?project=${ENCODED_PROJECT}" --max-time 3 2>/dev/null | jq -r '.context // empty')
+fi
 
 # Inject Memory Protocol + compaction instruction + context
 cat <<'PROTOCOL'
@@ -38,9 +41,9 @@ cat <<'PROTOCOL'
 You have engram memory tools. This protocol is MANDATORY and ALWAYS ACTIVE.
 
 ### CORE TOOLS — always available, no ToolSearch needed
-mem_save, mem_search, mem_context, mem_session_summary, mem_get_observation, mem_save_prompt
+mem_save, mem_search, mem_context, mem_session_summary, mem_get_observation, mem_save_prompt, mem_current_project, mem_judge, mem_compare
 
-Use ToolSearch for other tools: mem_update, mem_suggest_topic_key, mem_session_start, mem_session_end, mem_stats, mem_delete, mem_timeline, mem_capture_passive
+Use ToolSearch for other tools: mem_update, mem_review, mem_pin, mem_unpin, mem_suggest_topic_key, mem_session_start, mem_session_end, mem_doctor, mem_capture_passive
 
 ### PROACTIVE SAVE — do NOT wait for user to ask
 Call `mem_save` IMMEDIATELY after ANY of these:
