@@ -89,22 +89,39 @@ func TestApplyPulledObservationStoresProjectAsText(t *testing.T) {
 }
 
 func TestApplyPulledObservationDeletePreservesTombstoneVersion(t *testing.T) {
+	suppliedDeletedAt := "2025-03-04 05:00:00"
 	tests := []struct {
-		name             string
-		payloadUpdatedAt string
-		payloadDeletedAt string
-		wantUpdatedAt    string
+		name                          string
+		payloadUpdatedAt              string
+		payloadDeletedAt              *string
+		wantUpdatedAt                 string
+		wantDeletedAt                 string
+		wantGeneratedDeletedAt        bool
+		wantDeletedAtMatchesUpdatedAt bool
 	}{
 		{
 			name:             "uses trimmed payload updated at",
 			payloadUpdatedAt: " 2025-03-04 05:06:07 ",
-			payloadDeletedAt: "2025-03-04 05:00:00",
+			payloadDeletedAt: &suppliedDeletedAt,
 			wantUpdatedAt:    "2025-03-04 05:06:07",
+			wantDeletedAt:    suppliedDeletedAt,
 		},
 		{
 			name:             "uses deleted at when updated at is absent",
-			payloadDeletedAt: "2025-03-04 05:00:00",
-			wantUpdatedAt:    "2025-03-04 05:00:00",
+			payloadDeletedAt: &suppliedDeletedAt,
+			wantUpdatedAt:    suppliedDeletedAt,
+			wantDeletedAt:    suppliedDeletedAt,
+		},
+		{
+			name:                   "generates deleted at and preserves supplied updated at",
+			payloadUpdatedAt:       " 2025-03-04 05:06:07 ",
+			wantUpdatedAt:          "2025-03-04 05:06:07",
+			wantGeneratedDeletedAt: true,
+		},
+		{
+			name:                          "generates matching deleted and updated at timestamps",
+			wantGeneratedDeletedAt:        true,
+			wantDeletedAtMatchesUpdatedAt: true,
 		},
 	}
 
@@ -133,7 +150,7 @@ func TestApplyPulledObservationDeletePreservesTombstoneVersion(t *testing.T) {
 			payload, err := json.Marshal(syncObservationPayload{
 				SyncID:    observation.SyncID,
 				UpdatedAt: tt.payloadUpdatedAt,
-				DeletedAt: &tt.payloadDeletedAt,
+				DeletedAt: tt.payloadDeletedAt,
 			})
 			if err != nil {
 				t.Fatalf("marshal delete payload: %v", err)
@@ -154,11 +171,18 @@ func TestApplyPulledObservationDeletePreservesTombstoneVersion(t *testing.T) {
 			if err := s.db.QueryRow(`SELECT deleted_at, updated_at FROM observations WHERE id = ?`, observationID).Scan(&deletedAt, &updatedAt); err != nil {
 				t.Fatalf("read tombstone timestamps: %v", err)
 			}
-			if deletedAt != tt.payloadDeletedAt {
-				t.Fatalf("deleted_at = %q, want %q", deletedAt, tt.payloadDeletedAt)
+			if tt.wantGeneratedDeletedAt {
+				if deletedAt == "" {
+					t.Fatal("deleted_at is empty, want generated timestamp")
+				}
+			} else if deletedAt != tt.wantDeletedAt {
+				t.Fatalf("deleted_at = %q, want %q", deletedAt, tt.wantDeletedAt)
 			}
-			if updatedAt != tt.wantUpdatedAt {
+			if tt.wantUpdatedAt != "" && updatedAt != tt.wantUpdatedAt {
 				t.Fatalf("updated_at = %q, want %q", updatedAt, tt.wantUpdatedAt)
+			}
+			if tt.wantDeletedAtMatchesUpdatedAt && deletedAt != updatedAt {
+				t.Fatalf("deleted_at = %q, want it to match updated_at = %q", deletedAt, updatedAt)
 			}
 		})
 	}
