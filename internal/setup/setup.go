@@ -41,6 +41,7 @@ var (
 		return openCodeFS.ReadFile(path)
 	}
 	statFn                             = os.Stat
+	lstatFn                            = os.Lstat
 	openCodeWriteFileFn                = os.WriteFile
 	readFileFn                         = os.ReadFile
 	writeFileFn                        = os.WriteFile
@@ -55,6 +56,7 @@ var (
 	injectCodexMemoryConfigFn          = injectCodexMemoryConfig
 	addClaudeCodeAllowlistFn           = AddClaudeCodeAllowlist
 	writeClaudeCodeUserMCPFn           = writeClaudeCodeUserMCP
+	createClaudeCodeUserMCPFn          = createClaudeCodeUserMCP
 
 	// resolveMiseNodeVersionFn resolves the active Node version managed by mise.
 	// It runs "mise current node" and returns the result as a "node@X.Y.Z" specifier.
@@ -91,7 +93,7 @@ const piLegacyGentleEngramPackage = "npm:gentle-engram@0.1.8"
 const piMCPAdapterPackage = "npm:pi-mcp-adapter"
 
 // claudeCodeMCPTools are the MCP tool permission names for the agent profile
-// registered by the engram Claude Code plugin and durable user-level MCP config.
+// registered in the durable Claude Code user-level MCP config.
 // Adding these to ~/.claude/settings.json permissions.allow prevents Claude Code
 // from prompting for confirmation on every tool call.
 var claudeCodeMCPTools = claudeCodePermissionTools(mcp.ResolveTools("agent"))
@@ -857,23 +859,26 @@ func installClaudeCode() (*Result, error) {
 		}
 	}
 
-	// Step 3: Write a durable user-level MCP config at ~/.claude/mcp/engram.json
+	// Step 3: Write the sole durable user-level MCP registration at ~/.claude/mcp/engram.json
 	// with the absolute binary path. This survives plugin cache auto-updates and
 	// works on Windows where MCP subprocesses may not inherit PATH.
 	files := 0
+	mcpConfigured := false
 	if err := writeClaudeCodeUserMCPFn(); err != nil {
-		// Non-fatal: the plugin still works via the plugin cache .mcp.json.
-		// Warn so Windows users know to check their PATH if tools don't appear.
+		// Non-fatal: the plugin installs, but MCP tools remain unavailable until
+		// setup can write the user-level registration.
 		fmt.Fprintf(os.Stderr, "warning: could not write user MCP config (~/.claude/mcp/engram.json): %v\n", err)
-		fmt.Fprintf(os.Stderr, "  The plugin is installed but MCP may not start on Windows if engram is not in PATH.\n")
+		fmt.Fprintf(os.Stderr, "  The plugin is installed, but rerun `engram setup claude-code` after resolving this error to register MCP tools.\n")
 	} else {
 		files = 1
+		mcpConfigured = true
 	}
 
 	return &Result{
-		Agent:       "claude-code",
-		Destination: claudeCodeMCPDir(),
-		Files:       files,
+		Agent:         "claude-code",
+		Destination:   claudeCodeMCPDir(),
+		Files:         files,
+		MCPConfigured: mcpConfigured,
 	}, nil
 }
 
@@ -904,21 +909,9 @@ func claudeCodeUserMCPPath() string {
 // must not be written with a PATH-dependent command when the binary cannot be
 // resolved absolutely.
 func writeClaudeCodeUserMCP() error {
-	exe, err := osExecutable()
-	if err != nil {
-		return fmt.Errorf("resolve binary path: %w", err)
-	}
-	cmd, err := claudeCodeEngramCommand(exe)
+	data, err := claudeCodeUserMCPData()
 	if err != nil {
 		return err
-	}
-	entry := map[string]any{
-		"command": cmd,
-		"args":    []string{"mcp", "--tools=agent"},
-	}
-	data, err := jsonMarshalIndentFn(entry, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal mcp config: %w", err)
 	}
 
 	dir := claudeCodeMCPDir()
@@ -930,6 +923,74 @@ func writeClaudeCodeUserMCP() error {
 		return fmt.Errorf("write mcp config: %w", err)
 	}
 
+	return nil
+}
+
+func claudeCodeUserMCPData() ([]byte, error) {
+	exe, err := osExecutable()
+	if err != nil {
+		return nil, fmt.Errorf("resolve binary path: %w", err)
+	}
+	cmd, err := claudeCodeEngramCommand(exe)
+	if err != nil {
+		return nil, err
+	}
+	entry := map[string]any{
+		"command": cmd,
+		"args":    []string{"mcp", "--tools=agent"},
+	}
+	data, err := jsonMarshalIndentFn(entry, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshal mcp config: %w", err)
+	}
+	return data, nil
+}
+
+func createClaudeCodeUserMCP(path string, data []byte, perm os.FileMode) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
+}
+
+// EnsureClaudeCodeUserMCP creates the user-owned registration only when absent.
+func EnsureClaudeCodeUserMCP() error {
+	path := claudeCodeUserMCPPath()
+	if info, err := lstatFn(path); err == nil {
+		return validateClaudeCodeUserMCP(path, info)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat user MCP config: %w", err)
+	}
+
+	data, err := claudeCodeUserMCPData()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(claudeCodeMCPDir(), 0755); err != nil {
+		return fmt.Errorf("create mcp dir: %w", err)
+	}
+	if err := createClaudeCodeUserMCPFn(path, data, 0644); err == nil {
+		return nil
+	} else if !os.IsExist(err) {
+		return fmt.Errorf("create user MCP config: %w", err)
+	}
+
+	info, err := lstatFn(path)
+	if err != nil {
+		return fmt.Errorf("stat user MCP config: %w", err)
+	}
+	return validateClaudeCodeUserMCP(path, info)
+}
+
+func validateClaudeCodeUserMCP(path string, info os.FileInfo) error {
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("user MCP config must be a regular file: %s", path)
+	}
 	return nil
 }
 

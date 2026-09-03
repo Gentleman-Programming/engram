@@ -676,21 +676,21 @@ func buildPipelineFixtures(deletedAt string) *store.ExportData {
 	}
 
 	// Build 20 observations:
-	//   - obs 1..4: project-a, sess-alpha, topic "sdd/plugin" (cluster ≥2)
-	//   - obs 5..8: project-a, sess-beta, topic "sdd/design" (same cluster "sdd")
+	//   - obs 1..4: project-a, sess-alpha, topic "architecture/plugin" (cluster ≥2)
+	//   - obs 5..8: project-a, sess-beta, topic "architecture/design" (same cluster "architecture")
 	//   - obs 9..12: project-b, sess-gamma, topic "auth/jwt" (cluster ≥2)
 	//   - obs 13..16: project-b, sess-delta, topic "auth/sessions"
 	//   - obs 17..19: project-c, sess-epsilon, no topic (singleton project)
 	//   - obs 20: project-a, deleted (should not be exported / creates delete on 2nd run)
 	observations := []store.Observation{
-		makeObs(1, "sess-alpha", "project-a", "architecture", "SDD Plugin Arch", "sdd/plugin", "2026-01-01T01:00:00Z"),
-		makeObs(2, "sess-alpha", "project-a", "decision", "SDD Plugin Decision", "sdd/plugin", "2026-01-01T02:00:00Z"),
-		makeObs(3, "sess-alpha", "project-a", "bugfix", "SDD Plugin Fix", "sdd/plugin", "2026-01-01T03:00:00Z"),
-		makeObs(4, "sess-alpha", "project-a", "learning", "SDD Plugin Learning", "sdd/plugin", "2026-01-01T04:00:00Z"),
-		makeObs(5, "sess-beta", "project-a", "architecture", "SDD Design Arch", "sdd/design", "2026-01-02T01:00:00Z"),
-		makeObs(6, "sess-beta", "project-a", "decision", "SDD Design Decision", "sdd/design", "2026-01-02T02:00:00Z"),
-		makeObs(7, "sess-beta", "project-a", "bugfix", "SDD Design Fix", "sdd/design", "2026-01-02T03:00:00Z"),
-		makeObs(8, "sess-beta", "project-a", "pattern", "SDD Design Pattern", "sdd/design", "2026-01-02T04:00:00Z"),
+		makeObs(1, "sess-alpha", "project-a", "architecture", "Plugin Architecture", "architecture/plugin", "2026-01-01T01:00:00Z"),
+		makeObs(2, "sess-alpha", "project-a", "decision", "Plugin Decision", "architecture/plugin", "2026-01-01T02:00:00Z"),
+		makeObs(3, "sess-alpha", "project-a", "bugfix", "Plugin Fix", "architecture/plugin", "2026-01-01T03:00:00Z"),
+		makeObs(4, "sess-alpha", "project-a", "learning", "Plugin Learning", "architecture/plugin", "2026-01-01T04:00:00Z"),
+		makeObs(5, "sess-beta", "project-a", "architecture", "Design Architecture", "architecture/design", "2026-01-02T01:00:00Z"),
+		makeObs(6, "sess-beta", "project-a", "decision", "Design Decision", "architecture/design", "2026-01-02T02:00:00Z"),
+		makeObs(7, "sess-beta", "project-a", "bugfix", "Design Fix", "architecture/design", "2026-01-02T03:00:00Z"),
+		makeObs(8, "sess-beta", "project-a", "pattern", "Design Pattern", "architecture/design", "2026-01-02T04:00:00Z"),
 		makeObs(9, "sess-gamma", "project-b", "architecture", "Auth JWT Arch", "auth/jwt", "2026-01-03T01:00:00Z"),
 		makeObs(10, "sess-gamma", "project-b", "decision", "Auth JWT Decision", "auth/jwt", "2026-01-03T02:00:00Z"),
 		makeObs(11, "sess-gamma", "project-b", "bugfix", "Auth JWT Fix", "auth/jwt", "2026-01-03T03:00:00Z"),

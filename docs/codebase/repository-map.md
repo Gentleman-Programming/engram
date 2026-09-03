@@ -22,7 +22,6 @@
 | Change project detection | `internal/project/detect.go` | `internal/project/similar.go`, `docs/AGENT-SETUP.md` |
 | Change the TUI | `internal/tui/model.go` | `internal/tui/update.go`, `internal/tui/view.go`, `internal/tui/styles.go` |
 | Change Obsidian | `internal/obsidian/` | `plugin/obsidian/`, `docs/beta/obsidian-brain.md` |
-| Prepare a large feature | `openspec/changes/*` | `openspec/specs/*`, `CONTRIBUTING.md` |
 
 ## Package ownership
 
@@ -45,7 +44,6 @@
 | `plugin/` | Thin adapters per agent/host. | Contain core behavior that should live in Go. |
 | `skills/` | Guardrails for contributor agents. | Replace specs, tests, or code. |
 | `docs/` | Usage, architecture, cloud, plugin, installation, and doctor guides. | Document unimplemented aspirations. |
-| `openspec/` | Per-change proposals, specs, designs, and tasks. | Act as end-user documentation. |
 
 ## Golden placement rule
 

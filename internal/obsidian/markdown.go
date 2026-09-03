@@ -89,7 +89,7 @@ func buildWikilinks(sessionID, topicKey string) []string {
 
 // topicPrefix extracts the prefix from a topic_key.
 // For "auth/jwt" → "auth"
-// For "sdd/obsidian-plugin/explore" → "sdd/obsidian-plugin"
+// For "architecture/obsidian-plugin/explore" → "architecture/obsidian-plugin"
 // For "standalone" → "standalone"
 func topicPrefix(topicKey string) string {
 	idx := strings.LastIndex(topicKey, "/")

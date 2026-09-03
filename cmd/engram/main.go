@@ -83,10 +83,11 @@ var (
 
 	checkForUpdates = versioncheck.CheckLatest
 
-	setupSupportedAgents        = setup.SupportedAgents
-	setupInstallAgent           = setup.Install
-	setupAddClaudeCodeAllowlist = setup.AddClaudeCodeAllowlist
-	scanInputLine               = fmt.Scanln
+	setupSupportedAgents         = setup.SupportedAgents
+	setupInstallAgent            = setup.Install
+	setupAddClaudeCodeAllowlist  = setup.AddClaudeCodeAllowlist
+	setupEnsureClaudeCodeUserMCP = setup.EnsureClaudeCodeUserMCP
+	scanInputLine                = fmt.Scanln
 
 	storeSearch = func(s *store.Store, query string, opts store.SearchOptions) ([]store.SearchResult, error) {
 		return s.Search(query, opts)
@@ -2711,8 +2712,7 @@ func isPathLikeProjectName(name string) bool {
 }
 
 // cmdSetup classifies os.Args[2:] with a two-pass, order-independent
-// algorithm (see openspec/changes/setup-protocol-flag/proposal.md,
-// Approach; JD-014 residual fix). The FIRST pass scans every token and only
+// algorithm. The FIRST pass scans every token and only
 // accumulates classification state — it never dispatches mid-loop. This
 // guarantees a token like --protocol=<v> is always parsed regardless of
 // what precedes it (e.g. an earlier unrecognized hyphen-prefixed token no
@@ -2727,6 +2727,7 @@ func cmdSetup(cfg store.Config) {
 		helpSeen        bool
 		protocolRaw     string
 		protocolFlag    bool
+		mcpOnly         bool
 		slug            string
 		slugSeen        bool
 		extraBareSeen   bool
@@ -2754,10 +2755,12 @@ func cmdSetup(cfg store.Config) {
 		case strings.HasPrefix(token, "--protocol="):
 			protocolRaw = strings.TrimPrefix(token, "--protocol=")
 			protocolFlag = true
+		case token == "--mcp-only":
+			mcpOnly = true
 		case strings.HasPrefix(token, "-"):
 			// Unrecognized hyphen-prefixed token: record it but keep
 			// scanning so a --protocol appearing later is still parsed
-			// (JD-014 residual).
+			// (regression fix).
 			unknownFlagSeen = true
 		default:
 			if slugSeen {
@@ -2781,12 +2784,21 @@ func cmdSetup(cfg store.Config) {
 		// Preserve the legacy fallback to the interactive menu (keeps
 		// TestCmdSetupHyphenArgFallsBackToInteractive green), but forward
 		// the already-parsed --protocol mode (if any) instead of dropping
-		// it (JD-014), regardless of the unknown flag's position.
+		// it, regardless of the unknown flag's position.
 		mode := ""
 		if protocolFlag {
 			mode = resolveProtocolModeFlag(protocolRaw)
 		}
 		cmdSetupInteractive(cfg, mode)
+		return
+	case mcpOnly:
+		if !slugSeen || slug != "claude-code" {
+			fatal(fmt.Errorf("--mcp-only requires claude-code"))
+			return
+		}
+		if err := setupEnsureClaudeCodeUserMCP(); err != nil {
+			fatal(err)
+		}
 		return
 	case slugSeen:
 		result, err := setupInstallAgent(slug)
@@ -2996,8 +3008,12 @@ func printPostInstall(result *setup.Result) {
 		fmt.Println("\nNext steps:")
 		fmt.Println("  1. Restart Claude Code — the plugin is active immediately")
 		fmt.Println("  2. Verify with: claude plugin list")
-		fmt.Println("  3. MCP config written to ~/.claude/mcp/engram.json using absolute binary path")
-		fmt.Println("     (survives plugin auto-updates; re-run 'engram setup claude-code' if you move the binary)")
+		if result.MCPConfigured {
+			fmt.Println("  3. MCP config written to ~/.claude/mcp/engram.json using absolute binary path")
+			fmt.Println("     (survives plugin auto-updates; re-run 'engram setup claude-code' if you move the binary)")
+		} else {
+			fmt.Println("  3. MCP configuration was not written. Re-run 'engram setup claude-code' after resolving the reported error.")
+		}
 	default:
 		// Every other agent's "next steps" are declared as data in the registry,
 		// so the message is rendered generically instead of one case per agent.
