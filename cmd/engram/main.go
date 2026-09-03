@@ -2711,8 +2711,7 @@ func isPathLikeProjectName(name string) bool {
 }
 
 // cmdSetup classifies os.Args[2:] with a two-pass, order-independent
-// algorithm (see openspec/changes/setup-protocol-flag/proposal.md,
-// Approach; JD-014 residual fix). The FIRST pass scans every token and only
+// algorithm. The FIRST pass scans every token and only
 // accumulates classification state — it never dispatches mid-loop. This
 // guarantees a token like --protocol=<v> is always parsed regardless of
 // what precedes it (e.g. an earlier unrecognized hyphen-prefixed token no
@@ -2757,7 +2756,7 @@ func cmdSetup(cfg store.Config) {
 		case strings.HasPrefix(token, "-"):
 			// Unrecognized hyphen-prefixed token: record it but keep
 			// scanning so a --protocol appearing later is still parsed
-			// (JD-014 residual).
+			// (regression fix).
 			unknownFlagSeen = true
 		default:
 			if slugSeen {
@@ -2781,7 +2780,7 @@ func cmdSetup(cfg store.Config) {
 		// Preserve the legacy fallback to the interactive menu (keeps
 		// TestCmdSetupHyphenArgFallsBackToInteractive green), but forward
 		// the already-parsed --protocol mode (if any) instead of dropping
-		// it (JD-014), regardless of the unknown flag's position.
+		// it, regardless of the unknown flag's position.
 		mode := ""
 		if protocolFlag {
 			mode = resolveProtocolModeFlag(protocolRaw)

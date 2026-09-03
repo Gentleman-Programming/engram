@@ -271,7 +271,7 @@ Old clients that read only the `result` string continue to work — these fields
 
 ### mem_save prompt capture
 
-`mem_save` accepts `capture_prompt` as an optional boolean. The default is `true`: if the same MCP process lifecycle already has the current user prompt for the same project and session, Engram best-effort stores it in `user_prompts` using exact project + session + content dedupe. Passing `capture_prompt=false` skips that prompt capture path and is intended for automated artifacts such as SDD progress saves.
+`mem_save` accepts `capture_prompt` as an optional boolean. The default is `true`: if the same MCP process lifecycle already has the current user prompt for the same project and session, Engram best-effort stores it in `user_prompts` using exact project + session + content dedupe. Passing `capture_prompt=false` skips that prompt capture path and is intended for automated saves.
 
 If no current prompt is available to the MCP process, or if best-effort prompt capture fails, `mem_save` still succeeds and no prompt is invented from the observation content. Plugins/protocol hooks that can observe user prompts must feed that prompt context before relying on automatic capture. Calling `mem_save_prompt` in the same MCP process records the prompt and makes it available to later `mem_save` calls for the same project/session; a different MCP process lifecycle does not inherit that in-memory prompt context.
 
@@ -340,9 +340,9 @@ Records a verdict on a semantic comparison between two memories. The agent reads
 On success, `mem_compare`:
 - Persists a relation row with system provenance (`marked_by_kind="system"`, `marked_by_actor="engram"`)
 - Is idempotent: the same `(source_id, target_id)` pair updates the existing row rather than inserting a duplicate
-- Returns `{"sync_id": "<rel-hex>"}` on a persisted verdict
+- Returns `{"sync_id": "<rel-hex>"}` on every persisted verdict
 
-`not_conflict` verdicts are no-ops — the call succeeds and returns `{"sync_id": ""}` but no row is written, matching the scan flow contract.
+`not_conflict` verdicts persist as judged relations and return their `sync_id`, suppressing future candidate scans without appearing in conflict-facing lists or statistics.
 
 Cross-project relations (where `memory_id_a` and `memory_id_b` belong to different projects) are rejected with an error.
 

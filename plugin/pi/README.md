@@ -47,7 +47,7 @@ Install it once. Keep coding. Pi remembers.
 Engram is not an abandoned side script or a black-box SaaS. It is built in public by **Gentleman Programming** for developers who are already using coding agents seriously.
 
 - **YouTube channel**: tutorials, demos, and product thinking around AI coding workflows — <https://www.youtube.com/c/GentlemanProgramming>
-- **Engram + SDD + Skills demo**: <https://www.youtube.com/watch?v=UoS_LP-PCG8>
+- **Engram + Skills demo**: <https://www.youtube.com/watch?v=UoS_LP-PCG8>
 - **Engram Cloud demo**: <https://www.youtube.com/watch?v=JPZkbGgJNUQ>
 - **GitHub community**: issues, discussions, beta feedback, contributors, and transparent roadmap work — <https://github.com/Gentleman-Programming/engram>
 
