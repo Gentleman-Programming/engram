@@ -184,6 +184,41 @@ func (s *fakeMutationStore) InsertMutationBatch(ctx context.Context, batch []Mut
 	return seqs, nil
 }
 
+func TestMutationPushStoresCanonicalEncodedPayload(t *testing.T) {
+	ms := newFakeMutationStore()
+	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
+	entries := []MutationEntry{{
+		Project: " proj-a ", Entity: " observation ", Op: " upsert ", Payload: json.RawMessage(`"{\"sync_id\":\"obs-encoded\",\"session_id\":\"sess-1\",\"type\":\"note\",\"title\":\"Encoded\",\"content\":\"stored natively\",\"scope\":\"project\",\"project\":\"wrong\"}"`),
+	}}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", marshalPushRequest(t, entries))
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if len(ms.mutations) != 1 {
+		t.Fatalf("expected one stored mutation, got %+v", ms.mutations)
+	}
+	stored := ms.mutations[0]
+	if stored.Project != "proj-a" || stored.Entity != store.SyncEntityObservation || stored.Op != store.SyncOpUpsert || stored.EntityKey != "obs-encoded" {
+		t.Fatalf("expected canonical stored entry, got %+v", stored)
+	}
+	if len(stored.Payload) == 0 || stored.Payload[0] != '{' {
+		t.Fatalf("expected native JSON payload, got %s", stored.Payload)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(stored.Payload, &payload); err != nil {
+		t.Fatalf("decode stored payload: %v", err)
+	}
+	if payload["project"] != "proj-a" {
+		t.Fatalf("expected authorized project in payload, got %#v", payload["project"])
+	}
+}
+
 func (s *fakeMutationStore) ListMutationsSince(ctx context.Context, sinceSeq int64, limit int, allowedProjects []string) ([]StoredMutation, bool, int64, error) {
 	if s.errList != nil {
 		return nil, false, 0, s.errList
