@@ -189,6 +189,22 @@ test("a child that exits before readiness never escapes the session hooks", asyn
   });
 });
 
+test("before_agent_start injects actionable mem_search recall guidance", async () => {
+  await withFixture({ readyServer: true }, async ({ hooks, ctx }) => {
+    const beforeAgentStart = hooks.get("before_agent_start");
+    assert.ok(beforeAgentStart, "before_agent_start is registered");
+
+    const result = await beforeAgentStart({ systemPrompt: "base", prompt: "recall past work" }, ctx);
+    assert.match(result.systemPrompt, /Start with `mem_context`, then search with 1–2 distinctive keywords/);
+    assert.match(result.systemPrompt, /Ordinary `mem_search` is scoped to the detected active project/);
+    assert.match(result.systemPrompt, /`match_mode:"all"` means AND/);
+    assert.match(result.systemPrompt, /`match_mode:"any"` with\s+`all_projects:true`/);
+    assert.match(result.systemPrompt, /If a scoped search is empty, retry once this way/);
+    assert.match(result.systemPrompt, /After hits, narrow follow-up searches by project, type, or `match_mode:"all"`/);
+    assert.match(result.systemPrompt, /then use `mem_get_observation` for full content/);
+  });
+});
+
 test("a child that cannot be spawned surfaces a normalized error through tools and hooks", async () => {
   await withFixture({ missingBin: true }, async ({ tools, hooks, ctx }) => {
     await assert.doesNotReject(hooks.get("session_start")({}, ctx));
