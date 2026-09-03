@@ -57,17 +57,26 @@ function Write-LogLine {
 function Invoke-ProjectPhase {
   param([string]$Project, [string]$Phase)
   if (-not (Write-LogLine "phase=$Phase START project=$Project")) { return -1 }
+  $engram = Get-Command engram -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($null -eq $engram) {
+    [Console]::Error.WriteLine("cloud-sync-projects.ps1: error: $Phase failed for '$Project': engram executable not found")
+    return -1
+  }
   $exitCode = 0
   $prevPref = $ErrorActionPreference
   try {
     $ErrorActionPreference = 'Continue'
+    $global:LASTEXITCODE = $null
     if ($Phase -eq 'export') {
-      & engram sync --cloud --project $Project 2>&1 | Tee-Object -FilePath $resolvedLog -Append -ErrorAction Stop | ForEach-Object { Write-Host $_ }
+      & $engram.Path sync --cloud --project $Project 2>&1 | Tee-Object -FilePath $resolvedLog -Append -ErrorAction Stop | ForEach-Object { Write-Host $_ }
     } else {
-      & engram sync --cloud --import --project $Project 2>&1 | Tee-Object -FilePath $resolvedLog -Append -ErrorAction Stop | ForEach-Object { Write-Host $_ }
+      & $engram.Path sync --cloud --import --project $Project 2>&1 | Tee-Object -FilePath $resolvedLog -Append -ErrorAction Stop | ForEach-Object { Write-Host $_ }
     }
     $exitCode = $LASTEXITCODE
-    if ($null -eq $exitCode) { $exitCode = 0 }
+    if ($null -eq $exitCode) {
+      [Console]::Error.WriteLine("cloud-sync-projects.ps1: error: $Phase launch failed for '$Project': engram returned no exit code")
+      return -1
+    }
   } catch {
     [Console]::Error.WriteLine("cloud-sync-projects.ps1: error: $Phase invoke/tee failed for '$Project': $($_.Exception.Message)")
     return -1

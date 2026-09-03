@@ -56,10 +56,18 @@ func fakeEngram(t *testing.T, dir string, fail fakeFailure) {
 }
 func run(t *testing.T, interp, wrapper, fakeDir string, add, args []string) (int, string) {
 	t.Helper()
+	pathOverride := false
+	for _, e := range add {
+		key, _, _ := strings.Cut(e, "=")
+		pathOverride = pathOverride || strings.EqualFold(key, "PATH")
+	}
 	env := []string{}
 	for _, e := range os.Environ() {
 		k, v, ok := strings.Cut(e, "=")
 		if !ok || strings.EqualFold(k, "ENGRAM_CLOUD_SYNC_LOG") || strings.EqualFold(k, "ENGRAM_DATA_DIR") {
+			continue
+		}
+		if pathOverride && strings.EqualFold(k, "PATH") {
 			continue
 		}
 		if fakeDir != "" && strings.EqualFold(k, "PATH") {
@@ -212,5 +220,38 @@ func TestCloudSyncWrappers(t *testing.T) {
 				t.Fatalf("missing %q diagnostic:\n%s", want, out)
 			}
 		})
+	}
+}
+
+func TestCloudSyncPowerShellMissingEngram(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("PowerShell wrapper test is Windows-only")
+	}
+	pwsh, err := exec.LookPath("pwsh")
+	if err != nil {
+		t.Fatal("pwsh is required to test cloud-sync-projects.ps1")
+	}
+	tmp := t.TempDir()
+	bin, data := filepath.Join(tmp, "bin"), filepath.Join(tmp, "data")
+	for _, dir := range []string{bin, data} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exit, out := run(t, pwsh, wrapperAbs(t, "cloud-sync-projects.ps1"), bin, []string{"PATH=" + bin, "ENGRAM_DATA_DIR=" + data}, []string{"alpha"})
+	if exit != 1 {
+		t.Fatalf("exit=%d want 1; output:\n%s", exit, out)
+	}
+	assertContains(t, "console", out, "engram executable not found", "wrapper END result=failure overall=1")
+	for _, args := range [][]string{{"-Help"}, {}} {
+		exit, out = run(t, pwsh, wrapperAbs(t, "cloud-sync-projects.ps1"), bin, []string{"PATH=" + bin, "ENGRAM_DATA_DIR=" + data}, args)
+		if exit != map[bool]int{true: 0, false: 2}[len(args) > 0] {
+			t.Fatalf("args=%q exit=%d; output:\n%s", args, exit, out)
+		}
+		if len(args) > 0 {
+			assertContains(t, "help", out, "Usage:")
+		} else {
+			assertContains(t, "usage", out, "at least one project is required")
+		}
 	}
 }
