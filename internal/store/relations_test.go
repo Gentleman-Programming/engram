@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"log"
 	"strings"
@@ -58,6 +59,13 @@ func addTestObs(t *testing.T, s *Store, title, obsType, project, scope string) (
 	}
 	return id, obs.SyncID
 }
+
+type rowsAffectedErrorResult struct {
+	err error
+}
+
+func (r rowsAffectedErrorResult) LastInsertId() (int64, error) { return 0, nil }
+func (r rowsAffectedErrorResult) RowsAffected() (int64, error) { return 0, r.err }
 
 // ─── C.1 — TestFindCandidates_HappyPath ──────────────────────────────────────
 
@@ -1842,6 +1850,82 @@ func TestFindCandidates_SkipInsert_True(t *testing.T) {
 	// Candidates should still be returned (non-nil and possibly non-empty).
 	// We don't hard-fail on empty (FTS might not match) but the nil check matters.
 	_ = candidates // presence check only; count depends on FTS scoring
+}
+
+func TestFindCandidates_ExecErrorSkipsCandidate(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, _ = addTestObs(t, s, "JWT auth token session management", "decision", "testproject", "project")
+	savedID, _ := addTestObs(t, s, "Session-based auth token handling", "decision", "testproject", "project")
+
+	originalExecHook := s.hooks.exec
+	t.Cleanup(func() { s.hooks.exec = originalExecHook })
+	hookCalled := false
+	s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+		hookCalled = true
+		return nil, errors.New("conditional insert failed")
+	}
+
+	candidates, err := s.FindCandidates(savedID, CandidateOptions{
+		Project:   "testproject",
+		Scope:     "project",
+		Limit:     3,
+		BM25Floor: ptrFloat64(-10.0),
+	})
+	if err != nil {
+		t.Fatalf("FindCandidates: %v", err)
+	}
+	if !hookCalled {
+		t.Fatal("expected conditional insert to use exec hook")
+	}
+	if len(candidates) != 0 {
+		t.Fatalf("candidates = %v, want none after exec error", candidates)
+	}
+
+	var relationCount int
+	if err := s.db.QueryRow(`SELECT count(*) FROM memory_relations`).Scan(&relationCount); err != nil {
+		t.Fatalf("count relations: %v", err)
+	}
+	if relationCount != 0 {
+		t.Fatalf("pending relations = %d, want 0", relationCount)
+	}
+}
+
+func TestFindCandidates_RowsAffectedErrorSkipsCandidate(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, _ = addTestObs(t, s, "JWT auth token session management", "decision", "testproject", "project")
+	savedID, _ := addTestObs(t, s, "Session-based auth token handling", "decision", "testproject", "project")
+
+	originalExecHook := s.hooks.exec
+	t.Cleanup(func() { s.hooks.exec = originalExecHook })
+	hookCalled := false
+	s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+		hookCalled = true
+		return rowsAffectedErrorResult{err: errors.New("rows affected failed")}, nil
+	}
+
+	candidates, err := s.FindCandidates(savedID, CandidateOptions{
+		Project:   "testproject",
+		Scope:     "project",
+		Limit:     3,
+		BM25Floor: ptrFloat64(-10.0),
+	})
+	if err != nil {
+		t.Fatalf("FindCandidates: %v", err)
+	}
+	if !hookCalled {
+		t.Fatal("expected conditional insert to use exec hook")
+	}
+	if len(candidates) != 0 {
+		t.Fatalf("candidates = %v, want none after RowsAffected error", candidates)
+	}
+
+	var relationCount int
+	if err := s.db.QueryRow(`SELECT count(*) FROM memory_relations`).Scan(&relationCount); err != nil {
+		t.Fatalf("count relations: %v", err)
+	}
+	if relationCount != 0 {
+		t.Fatalf("pending relations = %d, want 0", relationCount)
+	}
 }
 
 // ─── G.3 — TestScanProject_CapBehavior (Phase G integration) ─────────────────

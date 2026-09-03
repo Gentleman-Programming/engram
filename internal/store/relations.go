@@ -451,7 +451,7 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 	candidates := make([]Candidate, 0, len(raw))
 	for _, rc := range raw {
 		judgmentID := newSyncID("rel")
-		result, err := s.db.Exec(`
+		result, err := s.execHook(s.db, `
 			INSERT INTO memory_relations
 				(sync_id, source_id, target_id, relation, judgment_status, created_at, updated_at)
 			SELECT ?, ?, ?, 'pending', 'pending', datetime('now'), datetime('now')
