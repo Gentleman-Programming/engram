@@ -1115,14 +1115,19 @@ func injectGeminiMCP(configPath string) error {
 // leaves a stale command that fails to spawn (ENOENT). When the resolved
 // executable points into a versioned Cellar directory we prefer the stable
 // <brew-prefix>/bin/engram symlink, which brew repoints at the current version,
-// so registrations survive upgrades. Falls back to bare "engram" only when
-// os.Executable() fails or the stable symlink is missing.
+// so registrations survive upgrades. It falls back to bare "engram" only when
+// os.Executable() fails; an absolute executable is preserved if canonicalization
+// cannot resolve an absolute command.
 func resolveEngramCommand() string {
 	exe, err := osExecutable()
 	if err != nil {
 		return "engram" // fallback to PATH-based name
 	}
-	return canonicalEngramCommand(exe)
+	canonical := canonicalEngramCommand(exe)
+	if filepath.IsAbs(exe) && !filepath.IsAbs(canonical) {
+		return exe
+	}
+	return canonical
 }
 
 // canonicalEngramCommand resolves an already-obtained executable path to the
