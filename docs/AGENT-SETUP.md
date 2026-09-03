@@ -44,6 +44,9 @@ remain on `full`. For Claude Code, slim activates only when Engram is a clean
 tagged release at or above 1.4.0. Local `dev`, Go pseudo-version, dirty, and
 other non-release builds remain on `full`; setup persists the selection and
 warns so you can install a supported tagged release.
+Claude slim also requires plugin 0.1.1+. If setup cannot verify the enabled
+marketplace plugin, it warns without changing the selected mode; session-only
+`claude --plugin-dir ...` installs cannot be detected.
 
 ## Pi
 

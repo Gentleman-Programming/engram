@@ -145,6 +145,7 @@ func TestCmdSetupClaudeCodeSlimWarningPersistsMode(t *testing.T) {
 	stubRuntimeHooks(t)
 	stubExitWithPanic(t)
 	cfg := testConfig(t)
+	setProtocolVersion(t, "1.4.0")
 
 	setupInstallAgent = func(agent string) (*setup.Result, error) {
 		return &setup.Result{Agent: agent, Destination: "/tmp/dest", Files: 2}, nil
@@ -164,6 +165,9 @@ func TestCmdSetupClaudeCodeSlimWarningPersistsMode(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "requires plugin 0.1.1+") || !strings.Contains(stderr, "--plugin-dir") {
 		t.Fatalf("expected actionable slim capability warning, got %q", stderr)
+	}
+	if strings.Contains(stderr, "slim will remain full") {
+		t.Fatalf("plugin capability warning must not include a binary-version warning: %q", stderr)
 	}
 	if got := setup.ReadProtocolMode(cfg.DataDir, "claude-code"); got != setup.ProtocolModeSlim {
 		t.Fatalf("ReadProtocolMode = %q, want slim despite warning", got)
