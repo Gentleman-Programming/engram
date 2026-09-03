@@ -271,6 +271,73 @@ func TestCreatePrincipalTokenWithAuditRollsBackTokenWhenAuditValidationFails(t *
 	}
 }
 
+// TestBootstrapCompletionAuditsPersistBooleanIssuedToken proves the real
+// CloudStore audit boundary accepts and round-trips the completion metadata
+// emitted by token and grant-only CLI bootstrap paths.
+func TestBootstrapCompletionAuditsPersistBooleanIssuedToken(t *testing.T) {
+	cases := []struct {
+		name        string
+		issuedToken bool
+	}{
+		{name: "token bootstrap completion", issuedToken: true},
+		{name: "grant-only bootstrap completion", issuedToken: false},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			cs := openIsolatedCloudStore(t)
+			admin, err := cs.CreateFirstAdminHumanUser(ctx, CreateHumanUserParams{Username: "bootstrap-completion", DisplayName: "Bootstrap Completion"})
+			if err != nil {
+				t.Fatalf("CreateFirstAdminHumanUser: %v", err)
+			}
+
+			metadata := map[string]any{
+				"created_admin": true,
+				"username":      admin.Username,
+				"issued_token":  tt.issuedToken,
+			}
+			event := AuthAuditEvent{
+				ActorSource:       "bootstrap_cli",
+				TargetPrincipalID: admin.PrincipalID,
+				Action:            "bootstrap.cli",
+				Outcome:           "success",
+				ReasonCode:        "bootstrap_completed",
+				Metadata:          metadata,
+			}
+			if tt.issuedToken {
+				_, err = cs.CreatePrincipalTokenWithAudit(ctx, CreatePrincipalTokenParams{
+					PrincipalID:          admin.PrincipalID,
+					TokenPrefix:          "egc_live_bootstrap",
+					TokenHash:            "hmac-sha256:v1:bootstrap",
+					Name:                 "bootstrap",
+					CreatedByPrincipalID: admin.PrincipalID,
+				}, event)
+			} else {
+				_, err = cs.CreateProjectGrant(ctx, CreateProjectGrantParams{
+					PrincipalID:          admin.PrincipalID,
+					Project:              "bootstrap-completion",
+					GrantedByPrincipalID: admin.PrincipalID,
+				})
+				if err == nil {
+					err = cs.InsertAuthAuditEvent(ctx, event)
+				}
+			}
+			if err != nil {
+				t.Fatalf("persist bootstrap completion audit: %v", err)
+			}
+
+			events, err := cs.ListAuthAuditEvents(ctx, AuthAuditQuery{Limit: 10})
+			if err != nil {
+				t.Fatalf("ListAuthAuditEvents: %v", err)
+			}
+			if len(events) != 1 || events[0].ReasonCode != "bootstrap_completed" || events[0].Metadata["issued_token"] != tt.issuedToken {
+				t.Fatalf("expected persisted completion audit with issued_token=%t, got %+v", tt.issuedToken, events)
+			}
+		})
+	}
+}
+
 func TestRecoverStrandedAdminTokenWithAuditPreservesGrants(t *testing.T) {
 	ctx := context.Background()
 	cs := openIsolatedCloudStore(t)
@@ -942,6 +1009,31 @@ func TestCloudstoreIdentityPureHelpers(t *testing.T) {
 	}
 	if err := rejectSensitiveAuthAuditMetadata(map[string]any{"events": []map[string]any{{"raw_token": "secret"}}}); !errors.Is(err, ErrSensitiveAuditMetadata) {
 		t.Fatalf("typed nested slice sensitive audit metadata must be rejected, got %v", err)
+	}
+	// Regression: the bootstrap completion audit metadata (created by
+	// cloudBootstrapCompletionMetadata) carries the boolean flag "issued_token".
+	// It is not a secret and must be accepted, otherwise
+	// `engram cloud bootstrap admin --issue-token` fails atomically and no admin
+	// token is ever minted.
+	if err := rejectSensitiveAuthAuditMetadata(map[string]any{"issued_token": true, "username": "admin", "created_admin": true}); err != nil {
+		t.Fatalf("bootstrap completion metadata must be accepted, got %v", err)
+	}
+	// issued_token is false for grant-only bootstraps (no --issue-token); both
+	// boolean values must be accepted.
+	if err := rejectSensitiveAuthAuditMetadata(map[string]any{"issued_token": false}); err != nil {
+		t.Fatalf("false issued_token must be accepted, got %v", err)
+	}
+	// issued_token is exempt ONLY as a boolean flag. A non-boolean value (e.g. a
+	// string that could carry secret material) must NOT bypass the filter, at
+	// the top level or nested.
+	if err := rejectSensitiveAuthAuditMetadata(map[string]any{"issued_token": "egc_live_would_be_leaked"}); !errors.Is(err, ErrSensitiveAuditMetadata) {
+		t.Fatalf("non-boolean issued_token must be rejected, got %v", err)
+	}
+	if err := rejectSensitiveAuthAuditMetadata(map[string]any{"outer": map[string]any{"issued_token": "egc_live_would_be_leaked"}}); !errors.Is(err, ErrSensitiveAuditMetadata) {
+		t.Fatalf("nested non-boolean issued_token must be rejected, got %v", err)
+	}
+	if err := rejectSensitiveAuthAuditMetadata(map[string]any{"outer": map[string]any{"issued_token": true}}); err != nil {
+		t.Fatalf("nested boolean issued_token must be accepted, got %v", err)
 	}
 }
 
