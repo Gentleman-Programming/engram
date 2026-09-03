@@ -150,7 +150,7 @@ func TestCmdSetupClaudeCodeSlimWarningPersistsMode(t *testing.T) {
 	}
 	scanInputLine = func(...any) (int, error) { return 0, nil }
 	oldVerify := setupVerifyClaudeCodeSlim
-	setupVerifyClaudeCodeSlim = func() error { return errors.New("plugin version 0.1.0 does not meet the required 0.1.1 floor") }
+	setupVerifyClaudeCodeSlim = func() error { return errors.New("claude plugin list --json timed out") }
 	t.Cleanup(func() { setupVerifyClaudeCodeSlim = oldVerify })
 
 	withArgs(t, "engram", "setup", "claude-code", "--protocol=slim")

@@ -25,6 +25,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Gentleman-Programming/engram/v2/internal/command"
 	"github.com/Gentleman-Programming/engram/v2/internal/mcp"
@@ -37,6 +38,9 @@ var (
 	osExecutable = os.Executable
 	runCommand   = func(name string, args ...string) ([]byte, error) {
 		return command.NewContext(context.Background(), name, args...).CombinedOutput()
+	}
+	runCommandWithContext = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		return command.NewContext(ctx, name, args...).CombinedOutput()
 	}
 	openCodeReadFile = func(path string) ([]byte, error) {
 		return openCodeFS.ReadFile(path)
@@ -87,6 +91,7 @@ type Result struct {
 const claudeCodeMarketplace = "Gentleman-Programming/engram"
 const codexMarketplace = "Gentleman-Programming/engram"
 const claudeCodeSlimPluginFloor = "0.1.1"
+const claudeCodePluginListTimeout = 2 * time.Second // bounds only the read-only Claude plugin capability probe
 
 const openCodeSubagentStatuslinePlugin = "opencode-subagent-statusline"
 
@@ -851,8 +856,13 @@ func VerifyClaudeCodeSlimCapability() error {
 		return fmt.Errorf("locate claude: %w", err)
 	}
 
-	out, err := runCommand(claudeBin, "plugin", "list", "--json")
+	ctx, cancel := context.WithTimeout(context.Background(), claudeCodePluginListTimeout)
+	defer cancel()
+	out, err := runCommandWithContext(ctx, claudeBin, "plugin", "list", "--json")
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("claude plugin list --json timed out")
+		}
 		return fmt.Errorf("claude plugin list --json: %w", err)
 	}
 

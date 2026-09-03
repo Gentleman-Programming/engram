@@ -40,6 +40,7 @@ func resetSetupSeams(t *testing.T) {
 	oldUserHomeDir := userHomeDir
 	oldLookPathFn := lookPathFn
 	oldRunCommand := runCommand
+	oldRunCommandWithContext := runCommandWithContext
 	oldStatFn := statFn
 	oldLstatFn := lstatFn
 	oldOpenCodeReadFile := openCodeReadFile
@@ -66,6 +67,7 @@ func resetSetupSeams(t *testing.T) {
 		userHomeDir = oldUserHomeDir
 		lookPathFn = oldLookPathFn
 		runCommand = oldRunCommand
+		runCommandWithContext = oldRunCommandWithContext
 		statFn = oldStatFn
 		lstatFn = oldLstatFn
 		openCodeReadFile = oldOpenCodeReadFile
@@ -1508,7 +1510,7 @@ func TestVerifyClaudeCodeSlimCapability(t *testing.T) {
 			resetSetupSeams(t)
 			lookPathFn = func(string) (string, error) { return "/test/claude", nil }
 			calls := 0
-			runCommand = func(name string, args ...string) ([]byte, error) {
+			runCommandWithContext = func(_ context.Context, name string, args ...string) ([]byte, error) {
 				calls++
 				if name != "/test/claude" || !reflect.DeepEqual(args, []string{"plugin", "list", "--json"}) {
 					t.Fatalf("command = %q %q, want claude plugin list --json", name, args)
@@ -1524,6 +1526,29 @@ func TestVerifyClaudeCodeSlimCapability(t *testing.T) {
 				t.Fatalf("claude plugin list invocations = %d, want 1", calls)
 			}
 		})
+	}
+}
+
+func TestVerifyClaudeCodeSlimCapabilityProbeBounds(t *testing.T) {
+	resetSetupSeams(t)
+	lookPathFn = func(string) (string, error) { return "", errors.New("not found") }
+	runCommandWithContext = func(context.Context, string, ...string) ([]byte, error) {
+		t.Fatal("probe must not run")
+		return nil, nil
+	}
+	if err := VerifyClaudeCodeSlimCapability(); err == nil {
+		t.Fatal("expected missing Claude error")
+	}
+	lookPathFn = func(string) (string, error) { return "/test/claude", nil }
+	runCommandWithContext = func(ctx context.Context, _ string, _ ...string) ([]byte, error) {
+		if _, ok := ctx.Deadline(); !ok {
+			t.Fatal("probe context has no deadline")
+		}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	if err := VerifyClaudeCodeSlimCapability(); err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("error = %v, want timeout", err)
 	}
 }
 
