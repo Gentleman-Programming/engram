@@ -73,7 +73,7 @@ Call \`mem_save\` IMMEDIATELY after any of these:
 Format for \`mem_save\`:
 - **title**: Verb + what — short, searchable
 - **type**: bugfix | decision | architecture | discovery | pattern | config | preference
-- **scope**: \`project\` (default) | \`personal\`
+- **scope**: \`project\` (default) | \`personal\` | \`global\`
 - **topic_key**: stable key for evolving decisions when relevant
 - **content**:
   **What**: One sentence — what was done
@@ -775,7 +775,7 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
     query: Type.String({ description: "Search query — natural language or keywords" }),
     type: optionalString("Filter by observation type"),
     project: optionalString("Filter by project name"),
-    scope: optionalString("Filter by scope: project or personal"),
+    scope: optionalString("Filter by scope: project, personal, or global. Omit to apply no scope filter."),
     limit: optionalNumber("Max results"),
     all_projects: optionalBoolean("Search across every project; when true project is ignored"),
     match_mode: optionalString("Match mode: all (default) or any for broader recall"),
@@ -784,7 +784,7 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
     title: Type.String({ description: "Short, searchable title" }),
     content: Type.String({ description: "Structured memory content" }),
     type: optionalString("Observation type/category"),
-    scope: optionalString("Scope: project or personal"),
+    scope: optionalString("Scope: project, personal, or global"),
     topic_key: optionalString("Stable topic key for upserts"),
     project: optionalString("Optional explicit project"),
     capture_prompt: optionalBoolean("Capture current prompt when available"),
@@ -794,7 +794,7 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
     title: optionalString("New title"),
     content: optionalString("New content"),
     type: optionalString("New type/category"),
-    scope: optionalString("New scope"),
+    scope: optionalString("New scope: project, personal, or global"),
     topic_key: optionalString("New topic key"),
   }),
   mem_delete: Type.Object({
@@ -816,7 +816,7 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
   }),
   mem_context: Type.Object({
     project: optionalString("Filter by project"),
-    scope: optionalString("Filter observations by scope"),
+    scope: optionalString("Filter observations by scope: project, personal, or global. Omit to apply no scope filter."),
   }),
   mem_stats: Type.Object({
     project: optionalString("Project to echo in UI chrome"),

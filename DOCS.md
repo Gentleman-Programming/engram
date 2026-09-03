@@ -1551,7 +1551,45 @@ For a step-by-step recovery guide covering `chunk_id does not match payload cont
 
 ---
 
----
+## Scheduled Explicit Cloud Sync Wrappers
+
+The wrappers under `tools/` are an **alternative** to native autosync for hosts where you cannot keep `engram serve` running. For each explicitly named project, they run the native autosync order: export/push (`engram sync --cloud --project <project>`), then import/pull (`engram sync --cloud --import --project <project>`). **Choose ONE mode** -- native autosync (recommended) when a daemon is feasible, OR these wrappers for the no-daemon case. Do **not** run both at once. Cloud `--all` is intentionally unsupported; projects are never inferred from cwd or an env var.
+
+### Bash: `tools/cloud-sync-projects.sh`
+
+```sh
+./tools/cloud-sync-projects.sh my-project my-other-project
+./tools/cloud-sync-projects.sh --log /var/log/engram-cloud-sync.log my-project
+```
+
+Exit `0` if every attempted export, import, and log operation succeeded; `1` if any attempted phase or logging operation failed; `2` on usage error. If export fails, that project's import is skipped, matching native autosync; the wrapper records the export failure and continues with later projects. If import fails, it is recorded and makes the aggregate result nonzero. Default durable log `$ENGRAM_DATA_DIR/cloud-sync-projects.log` (`~/.engram` fallback); override `--log` > `ENGRAM_CLOUD_SYNC_LOG` > default. Per-project, per-phase status lines go to both timestamped console and log; command stdout+stderr stays live on the console and is appended to the log. Nothing retried or silenced.
+
+### PowerShell: `tools/cloud-sync-projects.ps1`
+
+```powershell
+pwsh ./tools/cloud-sync-projects.ps1 my-project my-other-project
+pwsh ./tools/cloud-sync-projects.ps1 -LogPath C:\logs\engram-cloud-sync.log my-project
+```
+
+Requires PowerShell 7 (`pwsh`); 5.1 is not supported. Same export-then-import order, skipped-import behavior after an export failure, exit codes, and log defaults as Bash; override `-LogPath` > `ENGRAM_CLOUD_SYNC_LOG` > default.
+
+Both wrapper files are included in every GoReleaser release archive under `tools/`; copy the one for your scheduler host from the extracted archive.
+
+### Inspecting the last failure
+
+`phase=<export|import> FAILURE project=<name> exit=<n>` records the exact exit code from the failing CLI phase:
+
+```sh
+grep 'phase=.* FAILURE' "${ENGRAM_DATA_DIR:-$HOME/.engram}/cloud-sync-projects.log" | tail -n 5
+```
+
+```powershell
+# PowerShell 7 ($env:ENGRAM_DATA_DIR or $HOME/.engram fallback)
+$d = if ($env:ENGRAM_DATA_DIR) { $env:ENGRAM_DATA_DIR } else { Join-Path $HOME '.engram' }
+Select-String 'phase=.* FAILURE' (Join-Path $d 'cloud-sync-projects.log') | Select-Object -Last 5
+```
+
+Pass the failing project to [Engram Cloud Troubleshooting](docs/engram-cloud/troubleshooting.md) -- the wrappers record and propagate, not interpret or retry.
 
 ## Cloud Sync Audit Log
 

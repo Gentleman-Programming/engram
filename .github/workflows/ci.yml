@@ -43,6 +43,16 @@ jobs:
       - name: Run e2e tests
         run: go test -tags e2e ./internal/server/...
 
+  wrapper-tests-windows:
+    name: Cloud Sync Wrapper Tests (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.10"
+      - run: go test ./tools/ -run '^TestCloudSync(Wrappers|PowerShellMissingEngram)$' -v
+
   plugin-tests:
     name: Plugin Tests
     runs-on: ubuntu-latest

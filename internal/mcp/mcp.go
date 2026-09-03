@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Gentleman-Programming/engram/v2/internal/diagnostic"
 	projectpkg "github.com/Gentleman-Programming/engram/v2/internal/project"
@@ -332,7 +333,7 @@ func registerTools(srv *server.MCPServer, s *store.Store, cfg MCPConfig, allowli
 					mcp.Description("Search across every project instead of the current one. When true, the project argument is ignored and results may come from any project. Useful for recalling decisions logged elsewhere when you don't know the project key."),
 				),
 				mcp.WithString("scope",
-					mcp.Description("Filter by scope: project (default) or personal"),
+					mcp.Description("Filter by scope: project, personal, or global. Omit to apply no scope filter."),
 				),
 				mcp.WithString("match_mode",
 					mcp.Description("Token matching: \"all\" (default — every token must match, FTS5 AND) or \"any\" (any token matches — broader recall for multi-token queries). Any other value returns an error."),
@@ -397,7 +398,7 @@ Examples:
 					mcp.Description("Session ID to associate with. Only pass an ID you supplied to a successful mem_session_start registration, or the ID from an authoritative already-registered runtime binding; mem_session_start does not generate or return a new ID. Never invent one from a task name, issue number, or date. An unregistered ID is rejected with error_code=unknown_session; retry the same call with session_id omitted rather than guessing another value. When omitted (the common case), attempts unique active runtime-session selection using current worktree evidence; falls back to manual-save-{project} when no candidate remains, and rejects ambiguity rather than selecting by recency."),
 				),
 				mcp.WithString("scope",
-					mcp.Description("Scope for this observation: project (default) or personal"),
+					mcp.Description("Scope for this observation: project (default), personal, or global"),
 				),
 				mcp.WithString("topic_key",
 					mcp.Description("Optional topic identifier for upserts (e.g. architecture/auth-model). Reuses and updates the latest observation in same project+scope."),
@@ -444,7 +445,7 @@ Examples:
 					mcp.Description("New type/category"),
 				),
 				mcp.WithString("scope",
-					mcp.Description("New scope: project or personal"),
+					mcp.Description("New scope: project, personal, or global"),
 				),
 				mcp.WithString("topic_key",
 					mcp.Description("New topic key (normalized internally)"),
@@ -600,7 +601,7 @@ Examples:
 					mcp.Description("Filter by project (omit for all projects)"),
 				),
 				mcp.WithString("scope",
-					mcp.Description("Filter observations by scope: project (default) or personal"),
+					mcp.Description("Filter observations by scope: project, personal, or global. Omit to apply no scope filter."),
 				),
 				// JW7: limit param removed — schema advertised it but handleContext never read it.
 			),
@@ -1108,7 +1109,7 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 				projectDisplay = fmt.Sprintf(" | project: %s", *r.Project)
 			}
 			preview := truncate(r.Content, 300)
-			if len(r.Content) > 300 {
+			if utf8.RuneCountInString(r.Content) > 300 {
 				anyTruncated = true
 				preview += " [preview]"
 			}
