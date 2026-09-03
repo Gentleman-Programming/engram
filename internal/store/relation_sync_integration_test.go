@@ -144,6 +144,25 @@ func TestRelationSync_PushPull_CrossMachine(t *testing.T) {
 
 func TestRelationSync_NotConflictSuppressesCandidatesAfterPull(t *testing.T) {
 	machineA, machineB, syncObsX, syncObsY := setupIntegrationStores(t)
+	var sourceID int64
+	if err := machineA.db.QueryRow(`SELECT id FROM observations WHERE sync_id = ?`, syncObsX).Scan(&sourceID); err != nil {
+		t.Fatalf("A: find source observation: %v", err)
+	}
+	preJudgmentCandidates, err := machineA.FindCandidates(sourceID, CandidateOptions{Project: "proj-int", Scope: "project", SkipInsert: true})
+	if err != nil {
+		t.Fatalf("A: FindCandidates before judgment: %v", err)
+	}
+	foundCandidate := false
+	for _, candidate := range preJudgmentCandidates {
+		if candidate.SyncID == syncObsY {
+			foundCandidate = true
+			break
+		}
+	}
+	if !foundCandidate {
+		t.Fatalf("A: expected %q as a candidate before judgment, got %+v", syncObsY, preJudgmentCandidates)
+	}
+
 	relationID, err := machineA.JudgeBySemantic(JudgeBySemanticParams{
 		SourceID: syncObsX, TargetID: syncObsY, Relation: RelationNotConflict, Confidence: 0.99,
 	})
@@ -159,14 +178,21 @@ func TestRelationSync_NotConflictSuppressesCandidatesAfterPull(t *testing.T) {
 	if transferMutations(t, machineA, machineB) == 0 {
 		t.Fatal("expected mutations to transfer")
 	}
-	if _, err := machineB.GetRelation(relationID); err != nil {
+	relation, err := machineB.GetRelation(relationID)
+	if err != nil {
 		t.Fatalf("B: retained relation missing after pull: %v", err)
 	}
-	var sourceID int64
-	if err := machineB.db.QueryRow(`SELECT id FROM observations WHERE sync_id = ?`, syncObsX).Scan(&sourceID); err != nil {
+	if relation.Relation != RelationNotConflict {
+		t.Errorf("B: relation = %q, want %q", relation.Relation, RelationNotConflict)
+	}
+	if relation.JudgmentStatus != JudgmentStatusJudged {
+		t.Errorf("B: judgment status = %q, want %q", relation.JudgmentStatus, JudgmentStatusJudged)
+	}
+	var pulledSourceID int64
+	if err := machineB.db.QueryRow(`SELECT id FROM observations WHERE sync_id = ?`, syncObsX).Scan(&pulledSourceID); err != nil {
 		t.Fatalf("B: find source observation: %v", err)
 	}
-	candidates, err := machineB.FindCandidates(sourceID, CandidateOptions{Project: "proj-int", Scope: "project", SkipInsert: true})
+	candidates, err := machineB.FindCandidates(pulledSourceID, CandidateOptions{Project: "proj-int", Scope: "project", SkipInsert: true})
 	if err != nil {
 		t.Fatalf("B: FindCandidates: %v", err)
 	}

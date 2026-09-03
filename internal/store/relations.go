@@ -450,8 +450,23 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 	// Insert a pending relation row for each candidate.
 	candidates := make([]Candidate, 0, len(raw))
 	for _, rc := range raw {
+		var existing int
+		err := s.db.QueryRow(`
+			SELECT 1 FROM memory_relations
+			WHERE (source_id = ? AND target_id = ?)
+			   OR (source_id = ? AND target_id = ?)
+			LIMIT 1
+		`, sourceSyncID, rc.syncID, rc.syncID, sourceSyncID).Scan(&existing)
+		if err != nil && err != sql.ErrNoRows {
+			log.Printf("[store] FindCandidates: existence check src=%s cand=%s: %v", sourceSyncID, rc.syncID, err)
+			continue
+		}
+		if err == nil {
+			continue
+		}
+
 		judgmentID := newSyncID("rel")
-		_, err := s.db.Exec(`
+		_, err = s.db.Exec(`
 			INSERT INTO memory_relations
 				(sync_id, source_id, target_id, relation, judgment_status, created_at, updated_at)
 			VALUES (?, ?, ?, 'pending', 'pending', datetime('now'), datetime('now'))
@@ -790,6 +805,8 @@ func (s *Store) JudgeBySemantic(p JudgeBySemanticParams) (string, error) {
 			if _, execErr := tx.Exec(`
 				UPDATE memory_relations
 				SET relation        = ?,
+				    source_id       = ?,
+				    target_id       = ?,
 				    judgment_status = 'judged',
 				    confidence      = ?,
 				    reason          = ?,
@@ -798,7 +815,7 @@ func (s *Store) JudgeBySemantic(p JudgeBySemanticParams) (string, error) {
 				    marked_by_model = ?,
 				    updated_at      = datetime('now')
 				WHERE sync_id = ?
-			`, p.Relation, confidence, p.Reasoning,
+			`, p.Relation, p.SourceID, p.TargetID, confidence, p.Reasoning,
 				actor, kind, modelPtr,
 				existingSyncID,
 			); execErr != nil {

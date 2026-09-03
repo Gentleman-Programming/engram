@@ -140,6 +140,63 @@ func TestJudgeBySemantic_UpsertIdempotency(t *testing.T) {
 	}
 }
 
+// TestJudgeBySemantic_UpsertRewritesDirection verifies that a reverse pending
+// row reused by a directional judgment retains its sync ID but is rewritten to
+// the requested source and target polarity.
+func TestJudgeBySemantic_UpsertRewritesDirection(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, syncA := addTestObs(t, s, "JWT auth approach v1 decision", "decision", "testproject", "project")
+	_, syncB := addTestObs(t, s, "JWT auth approach v0 legacy", "decision", "testproject", "project")
+
+	const reverseRelationID = "rel-reversed-pending"
+	if _, err := s.SaveRelation(SaveRelationParams{
+		SyncID:   reverseRelationID,
+		SourceID: syncB,
+		TargetID: syncA,
+	}); err != nil {
+		t.Fatalf("SaveRelation reverse pending: %v", err)
+	}
+
+	syncID, err := s.JudgeBySemantic(JudgeBySemanticParams{
+		SourceID:   syncA,
+		TargetID:   syncB,
+		Relation:   RelationSupersedes,
+		Confidence: 0.92,
+		Reasoning:  "v1 supersedes v0",
+		Model:      "test-model",
+	})
+	if err != nil {
+		t.Fatalf("JudgeBySemantic: %v", err)
+	}
+	if syncID != reverseRelationID {
+		t.Errorf("sync ID = %q, want existing row %q", syncID, reverseRelationID)
+	}
+
+	relation, err := s.GetRelation(syncID)
+	if err != nil {
+		t.Fatalf("GetRelation: %v", err)
+	}
+	if relation.SourceID != syncA || relation.TargetID != syncB {
+		t.Errorf("relation direction = (%q, %q), want (%q, %q)", relation.SourceID, relation.TargetID, syncA, syncB)
+	}
+	if relation.Relation != RelationSupersedes {
+		t.Errorf("relation = %q, want %q", relation.Relation, RelationSupersedes)
+	}
+
+	var count int
+	if err := s.db.QueryRow(
+		`SELECT count(*) FROM memory_relations
+		 WHERE (source_id = ? AND target_id = ?)
+		    OR (source_id = ? AND target_id = ?)`,
+		syncA, syncB, syncB, syncA,
+	).Scan(&count); err != nil {
+		t.Fatalf("count relation pair: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("relation pair count = %d, want 1", count)
+	}
+}
+
 // ─── C.2c — TestJudgeBySemantic_NotConflictIsNoOp ────────────────────────────
 
 // TestJudgeBySemantic_NotConflictPersists verifies that not_conflict retains a

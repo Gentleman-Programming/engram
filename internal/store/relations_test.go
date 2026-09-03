@@ -181,6 +181,62 @@ func TestFindCandidates_EarlyBreakDoesNotSelfBlockWithSingleConnection(t *testin
 	}
 }
 
+// TestFindCandidates_DoesNotDuplicatePendingPairs verifies that normal candidate
+// detection creates a pending row only once, while semantic dry runs can still
+// retrieve that pending pair for judgment.
+func TestFindCandidates_DoesNotDuplicatePendingPairs(t *testing.T) {
+	s := setupRelationsStore(t)
+	_, candidateSyncID := addTestObs(t, s, "Pending pair duplicate candidate", "decision", "testproject", "project")
+	savedID, sourceSyncID := addTestObs(t, s, "Pending pair duplicate source", "decision", "testproject", "project")
+	opts := CandidateOptions{
+		Project:   "testproject",
+		Scope:     "project",
+		Limit:     3,
+		BM25Floor: ptrFloat64(-10.0),
+	}
+
+	first, err := s.FindCandidates(savedID, opts)
+	if err != nil {
+		t.Fatalf("first FindCandidates: %v", err)
+	}
+	if len(first) != 1 || first[0].SyncID != candidateSyncID || first[0].JudgmentID == "" {
+		t.Fatalf("first FindCandidates = %+v, want one inserted candidate %q", first, candidateSyncID)
+	}
+
+	second, err := s.FindCandidates(savedID, opts)
+	if err != nil {
+		t.Fatalf("second FindCandidates: %v", err)
+	}
+	if len(second) != 0 {
+		t.Fatalf("second FindCandidates = %+v, want no duplicate pending pair", second)
+	}
+
+	var count int
+	if err := s.db.QueryRow(
+		`SELECT count(*) FROM memory_relations WHERE source_id = ? AND target_id = ?`,
+		sourceSyncID, candidateSyncID,
+	).Scan(&count); err != nil {
+		t.Fatalf("count pending relations: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("pending relation count = %d, want 1", count)
+	}
+
+	semanticCandidates, err := s.FindCandidates(savedID, CandidateOptions{
+		Project:    "testproject",
+		Scope:      "project",
+		Limit:      3,
+		BM25Floor:  ptrFloat64(-10.0),
+		SkipInsert: true,
+	})
+	if err != nil {
+		t.Fatalf("semantic FindCandidates: %v", err)
+	}
+	if len(semanticCandidates) != 1 || semanticCandidates[0].SyncID != candidateSyncID {
+		t.Fatalf("semantic FindCandidates = %+v, want existing pending candidate %q", semanticCandidates, candidateSyncID)
+	}
+}
+
 // hasPrefix is a simple helper to avoid importing strings in test.
 func hasPrefix(s, prefix string) bool {
 	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
