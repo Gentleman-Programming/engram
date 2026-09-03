@@ -178,6 +178,25 @@ func TestCmdConflictsList_HappyPath(t *testing.T) {
 	}
 }
 
+func TestCmdConflictsList_ExcludesNotConflict(t *testing.T) {
+	cfg := testConfig(t)
+	_, _, relationID := seedRelation(t, cfg, "alpha")
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.JudgeRelation(store.JudgeRelationParams{JudgmentID: relationID, Relation: store.RelationNotConflict}); err != nil {
+		t.Fatalf("JudgeRelation: %v", err)
+	}
+
+	withArgs(t, "engram", "conflicts", "list", "--project", "alpha")
+	stdout, stderr := captureOutput(t, func() { cmdConflicts(cfg) })
+	if stderr != "" || !strings.Contains(stdout, "Total:  0") || strings.Contains(stdout, "not_conflict") {
+		t.Fatalf("conflicts list must exclude not_conflict: stdout=%q stderr=%q", stdout, stderr)
+	}
+}
+
 // TestCmdConflictsList_UnknownProject verifies explicit selectors are validated.
 func TestCmdConflictsList_UnknownProject(t *testing.T) {
 	cfg := testConfig(t)

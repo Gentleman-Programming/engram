@@ -301,7 +301,7 @@ Response:
 { "sync_id": "rel-abc123" }
 ```
 
-`not_conflict` is a no-op verdict and returns an empty `sync_id`.
+`not_conflict` persists a judged relation and returns its `sync_id`, preventing future scans from re-evaluating the pair.
 
 Status codes:
 
@@ -363,7 +363,7 @@ Request body:
 - `apply: false` (default) — dry-run for the non-semantic lexical scan; reports candidates without inserting pending rows
 - `apply: true` — non-semantic lexical scan inserts new pending relation rows up to `max_insert` cap (default 100)
 - `semantic: true` — after FTS5 lexical scan, run LLM-judge semantic detection on the candidate pairs returned by `FindCandidates`. It does not discover totally lexically unrelated pairs on its own. Requires `ENGRAM_AGENT_CLI` to be set on the server to `claude` or `opencode`.
-- Semantic scans can persist non-`not_conflict` judged relations through `JudgeBySemantic` even when `apply: false`; `not_conflict` verdicts are not inserted.
+- Semantic dry-runs evaluate verdicts without persisting them; `not_conflict` results are reported as skipped. Applied semantic scans persist every valid verdict, including `not_conflict`.
 - `concurrency` — worker pool size for parallel LLM calls when `semantic: true` (default 5, range 1–20)
 - `timeout_per_call_seconds` — per-LLM-call timeout in seconds when `semantic: true` (default 60, range 1–600)
 - `max_semantic` — hard cap on LLM calls per scan (default 100); scan stops collecting new pairs once reached
@@ -549,7 +549,7 @@ Walk observations for the project, run FindCandidates, and report or insert new 
 - `--limit N`: inspect 1–100 observations per page (default 100), ordered by observation ID.
 - `--cursor ID`: resume after a printed `next_cursor`; no automatic follow-up page is run.
 - `--semantic`: enable LLM-judge semantic detection on FTS5 candidate pairs returned by `FindCandidates`. It can improve verdict quality for candidates that share lexical terms, but it does not discover totally lexically unrelated pairs on its own. Requires `ENGRAM_AGENT_CLI=claude` or `ENGRAM_AGENT_CLI=opencode`.
-- With `--semantic`, non-`not_conflict` verdicts are persisted by `JudgeBySemantic` even in the default `--dry-run` mode; `not_conflict` verdicts remain no-op.
+- With `--semantic`, `--dry-run` evaluates verdicts without persistence and reports `not_conflict` as skipped. `--apply` persists every valid verdict, including `not_conflict`.
 - `--concurrency N`: worker pool size for parallel LLM calls (default 5, max 20).
 - `--timeout-per-call N`: per-LLM-call timeout in seconds (default 60).
 - `--max-semantic N`: hard cap on LLM calls per scan run (default 100).
@@ -1029,7 +1029,7 @@ Behavior:
 
 - Persists a relation row via `JudgeBySemantic` with system provenance (`marked_by_kind="system"`, `marked_by_actor="engram"`)
 - Idempotent: the same `(source_id, target_id)` pair updates the existing row rather than inserting a duplicate
-- `not_conflict` verdicts are no-ops — acknowledged but not persisted, matching the scan flow contract
+- `not_conflict` verdicts persist as judged relations, suppressing future candidate scans without appearing in conflict-facing lists or statistics
 - Cross-project relations are rejected with an error
 
 ---
