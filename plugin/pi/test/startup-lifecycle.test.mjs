@@ -201,6 +201,7 @@ test("before_agent_start injects actionable mem_search recall guidance", async (
     assert.match(result.systemPrompt, /`match_mode:"any"` with\s+`all_projects:true`/);
     assert.match(result.systemPrompt, /If a scoped search is empty, retry once this way/);
     assert.match(result.systemPrompt, /After hits, narrow follow-up searches by project, type, or `match_mode:"all"`/);
+    assert.match(result.systemPrompt, /then use `mem_get_observation` for full content/);
   });
 });
 
