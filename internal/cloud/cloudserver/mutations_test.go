@@ -221,9 +221,10 @@ func TestMutationPushStoresCanonicalEncodedPayload(t *testing.T) {
 
 func TestMutationPushAcceptsSparseLegacyPayloads(t *testing.T) {
 	tests := []struct {
-		name           string
-		entry          MutationEntry
-		requiredFields []string
+		name              string
+		entry             MutationEntry
+		requiredFields    []string
+		expectedCanonical map[string]string
 	}{
 		{
 			name: "session",
@@ -232,6 +233,9 @@ func TestMutationPushAcceptsSparseLegacyPayloads(t *testing.T) {
 				Payload: json.RawMessage(`{"sync_id":"sess-legacy"}`),
 			},
 			requiredFields: []string{"id", "directory"},
+			expectedCanonical: map[string]string{
+				"id": "sess-legacy", "directory": ".", "project": "proj-a",
+			},
 		},
 		{
 			name: "observation",
@@ -240,6 +244,9 @@ func TestMutationPushAcceptsSparseLegacyPayloads(t *testing.T) {
 				Payload: json.RawMessage(`{"sync_id":"obs-legacy","title":"Legacy observation"}`),
 			},
 			requiredFields: []string{"sync_id", "session_id", "type", "title", "content", "scope", "project"},
+			expectedCanonical: map[string]string{
+				"sync_id": "obs-legacy", "session_id": "legacy-obs-legacy", "type": "legacy", "title": "Legacy observation", "content": "obs-legacy", "scope": "project", "project": "proj-a",
+			},
 		},
 		{
 			name: "prompt",
@@ -248,6 +255,9 @@ func TestMutationPushAcceptsSparseLegacyPayloads(t *testing.T) {
 				Payload: json.RawMessage(`{"sync_id":"prompt-legacy"}`),
 			},
 			requiredFields: []string{"sync_id", "session_id", "content", "project"},
+			expectedCanonical: map[string]string{
+				"sync_id": "prompt-legacy", "session_id": "legacy-prompt-legacy", "content": "prompt-legacy", "project": "proj-a",
+			},
 		},
 	}
 
@@ -283,6 +293,11 @@ func TestMutationPushAcceptsSparseLegacyPayloads(t *testing.T) {
 				text, isString := value.(string)
 				if !exists || !isString || strings.TrimSpace(text) == "" {
 					t.Errorf("expected non-empty canonical %s field %q, got %#v", tt.name, field, value)
+				}
+			}
+			for field, want := range tt.expectedCanonical {
+				if got := payload[field]; got != want {
+					t.Errorf("expected canonical %s field %q to be %q, got %#v", tt.name, field, want, got)
 				}
 			}
 		})
