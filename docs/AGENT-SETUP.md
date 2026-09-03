@@ -36,6 +36,15 @@ Engram works with **any MCP-compatible agent**. Pick your agent below.
 > agent's instruction surface, idempotently. The per-agent sections below describe
 > the exact files each command touches and the manual equivalent.
 
+### Protocol verbosity
+
+`engram setup claude-code --protocol=slim` requests the slim session-start
+protocol. Slim is honored only for the `claude-code` agent; all other agents
+remain on `full`. For Claude Code, slim activates only when Engram is a clean
+tagged release at or above 1.4.0. Local `dev`, Go pseudo-version, dirty, and
+other non-release builds remain on `full`; setup persists the selection and
+warns so you can install a supported tagged release.
+
 ## Pi
 
 Install Engram's Pi package, the MCP adapter, and Pi MCP config:
