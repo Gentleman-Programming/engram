@@ -1,4 +1,4 @@
-module github.com/Gentleman-Programming/engram
+module github.com/Gentleman-Programming/engram/v2
 
 go 1.25.10
 
@@ -10,7 +10,6 @@ require (
 	github.com/jackc/pgx/v5 v5.7.6
 	github.com/mark3labs/mcp-go v0.44.0
 	golang.org/x/net v0.52.0
-	golang.org/x/sys v0.43.0
 	modernc.org/sqlite v1.45.0
 )
 
@@ -60,6 +59,7 @@ require (
 	golang.org/x/exp v0.0.0-20251023183803-a4bb9ffd2546 // indirect
 	golang.org/x/mod v0.34.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
+	golang.org/x/sys v0.43.0 // indirect
 	golang.org/x/text v0.36.0 // indirect
 	golang.org/x/tools v0.43.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect

@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/internal/timeutil"
-	"github.com/Gentleman-Programming/engram/internal/version"
+	"github.com/Gentleman-Programming/engram/v2/internal/timeutil"
+	"github.com/Gentleman-Programming/engram/v2/internal/version"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -80,6 +80,14 @@ func (m Model) View() string {
 		content = m.viewSessionDetail()
 	case ScreenSetup:
 		content = m.viewSetup()
+	case ScreenCloudSettings:
+		content = m.viewCloudSettings()
+	case ScreenCloudConfig:
+		content = m.viewCloudConfig()
+	case ScreenCloudStatus:
+		content = m.viewCloudStatus()
+	case ScreenCloudEnrollment:
+		content = m.viewCloudEnrollment()
 	default:
 		content = "Unknown screen"
 	}
@@ -159,19 +167,141 @@ func (m Model) viewDashboard() string {
 	// Menu
 	b.WriteString(titleStyle.Render("  Actions"))
 	b.WriteString("\n")
+	b.WriteString(renderMenu(dashboardMenuItems, m.Cursor))
 
-	for i, item := range dashboardMenuItems {
-		if i == m.Cursor {
+	// Help
+	b.WriteString(helpStyle.Render("\n  j/k navigate • enter select • s search • q quit"))
+
+	return b.String()
+}
+
+func (m Model) viewCloudSettings() string {
+	var b strings.Builder
+
+	b.WriteString(headerStyle.Render("  Cloud sync settings"))
+	b.WriteString("\n\n")
+	b.WriteString(renderMenu(cloudSettingsMenuItems, m.Cursor))
+	b.WriteString(helpStyle.Render("\n  j/k navigate • enter select • esc/q back"))
+
+	return b.String()
+}
+
+func (m Model) viewCloudConfig() string {
+	var b strings.Builder
+	configLabelStyle := detailLabelStyle.Width(18)
+	b.WriteString(headerStyle.Render("  Configure cloud server"))
+	b.WriteString("\n\n")
+	b.WriteString(configLabelStyle.Render("  Server URL: "))
+	b.WriteString(searchInputStyle.Render(m.CloudConfigInput.View()))
+	b.WriteString("\n")
+	b.WriteString(configLabelStyle.Render("  Token source: ") + detailValueStyle.Render(emptyCloudValue(m.CloudConfigTokenSource, TokenSourceNone)))
+	b.WriteString("\n")
+	if m.CloudConfigTokenSource != TokenSourceEnv {
+		b.WriteString(timestampStyle.Render("  Set ENGRAM_CLOUD_TOKEN to override cloud.json.token"))
+		b.WriteString("\n")
+	}
+	b.WriteString("\n\n")
+	items := []string{"Test connection", "Save server", "Cancel"}
+	for i, item := range items {
+		focus := i + 1
+		if m.CloudConfigFocus == focus {
 			b.WriteString(menuSelectedStyle.Render("▸ " + item))
 		} else {
 			b.WriteString(menuItemStyle.Render("  " + item))
 		}
 		b.WriteString("\n")
 	}
+	if m.CloudConfigSaving {
+		b.WriteString(timestampStyle.Render("  Checking server..."))
+		b.WriteString("\n")
+	}
+	if m.CloudConfigPingStatus != "" {
+		b.WriteString(detailLabelStyle.Render("  Connection: ") + detailValueStyle.Render(m.CloudConfigPingStatus) + "\n")
+	}
+	if m.CloudConfigError != "" {
+		b.WriteString(errorStyle.Render("  Error: "+m.CloudConfigError) + "\n")
+	}
+	b.WriteString(helpStyle.Render("\n  j/k navigate • i edit URL • enter select • esc/q back"))
+	return b.String()
+}
 
-	// Help
-	b.WriteString(helpStyle.Render("\n  j/k navigate • enter select • s search • q quit"))
+func (m Model) viewCloudStatus() string {
+	var b strings.Builder
+	statusLabelStyle := detailLabelStyle.Width(20)
+	b.WriteString(headerStyle.Render("  Cloud status"))
+	b.WriteString("\n\n")
+	if m.CloudStatusLoading {
+		b.WriteString(timestampStyle.Render("  Loading cloud status...\n"))
+	}
+	lines := [][2]string{
+		{"Server URL", emptyCloudValue(m.CloudStatusServerURL, "not configured")},
+		{"Connection health", emptyCloudValue(m.CloudStatusHealth, "not checked")},
+		{"Last successful sync", emptyCloudValue(m.CloudStatusLastSync, "never")},
+		{"Pending mutations", fmt.Sprintf("%d", m.CloudStatusPendingCount)},
+		{"Last error", emptyCloudValue(cloudStatusLastError(m), "none")},
+	}
+	for _, line := range lines {
+		b.WriteString(statusLabelStyle.Render("  "+line[0]+": ") + detailValueStyle.Render(line[1]) + "\n")
+	}
+	b.WriteString(helpStyle.Render("\n  r refresh • esc/q back"))
+	return b.String()
+}
 
+func (m Model) viewCloudEnrollment() string {
+	var b strings.Builder
+	b.WriteString(headerStyle.Render("  Enroll projects for cloud sync"))
+	b.WriteString("\n\n")
+	if m.CloudEnrollmentLoading {
+		b.WriteString(timestampStyle.Render("  Loading projects...\n"))
+	}
+	if len(m.CloudEnrollmentItems) == 0 && !m.CloudEnrollmentLoading {
+		b.WriteString(timestampStyle.Render("  No local projects found.\n"))
+	}
+	for i, item := range m.CloudEnrollmentItems {
+		check := "[ ]"
+		if item.enrolled {
+			check = "[x]"
+		}
+		line := fmt.Sprintf("%s %s", check, item.project)
+		if i == m.Cursor {
+			b.WriteString(menuSelectedStyle.Render("▸ " + line))
+		} else {
+			b.WriteString(menuItemStyle.Render("  " + line))
+		}
+		b.WriteString("\n")
+	}
+	if m.CloudEnrollmentError != "" {
+		b.WriteString(errorStyle.Render("  Error: "+m.CloudEnrollmentError) + "\n")
+	}
+	b.WriteString(helpStyle.Render("\n  j/k navigate • enter toggle • r refresh • esc/q back"))
+	return b.String()
+}
+
+func emptyCloudValue(value, fallback string) string {
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func cloudStatusLastError(m Model) string {
+	if m.CloudStatusHealthError != "" {
+		return m.CloudStatusHealthError
+	}
+	return m.CloudStatusLastError
+}
+
+// renderMenu renders a vertical list of selectable menu items with a cursor.
+func renderMenu(items []string, cursor int) string {
+	var b strings.Builder
+	for i, item := range items {
+		if i == cursor {
+			b.WriteString(menuSelectedStyle.Render("▸ " + item))
+		} else {
+			b.WriteString(menuItemStyle.Render("  " + item))
+		}
+		b.WriteString("\n")
+	}
 	return b.String()
 }
 
@@ -466,6 +596,26 @@ func (m Model) viewSessions() string {
 	b.WriteString(headerStyle.Render(header))
 	b.WriteString("\n")
 
+	switch m.SessionDeleteState {
+	case SessionDeleteStateDeleting:
+		b.WriteString("\n")
+		b.WriteString(sectionHeadingStyle.Render("  Deleting Session"))
+		b.WriteString("\n\n")
+		b.WriteString(detailContentStyle.Render(fmt.Sprintf("  Deleting session %q...", m.SessionDeleteID)))
+		b.WriteString("\n")
+		return b.String()
+	case SessionDeleteStatePrompt:
+		b.WriteString("\n")
+		b.WriteString(sectionHeadingStyle.Render("  Confirm Session Delete"))
+		b.WriteString("\n\n")
+		b.WriteString(detailContentStyle.Render(fmt.Sprintf("  Delete session %q from project %q?", m.SessionDeleteID, m.SessionDeleteProject)))
+		b.WriteString("\n")
+		b.WriteString(timestampStyle.Render("  Sessions with observations cannot be deleted; Engram will refuse unsafe deletes."))
+		b.WriteString("\n\n")
+		b.WriteString(helpStyle.Render("  [y] Delete  [n] Cancel  [esc] Cancel"))
+		return b.String()
+	}
+
 	if count == 0 {
 		b.WriteString(noResultsStyle.Render("No sessions yet."))
 		b.WriteString("\n\n")
@@ -513,7 +663,7 @@ func (m Model) viewSessions() string {
 			timestampStyle.Render(fmt.Sprintf("showing %d-%d of %d", m.Scroll+1, end, count))))
 	}
 
-	b.WriteString(helpStyle.Render("\n  j/k navigate • enter view session • esc back"))
+	b.WriteString(helpStyle.Render("\n  j/k navigate • enter view session • d delete • esc back"))
 
 	return b.String()
 }

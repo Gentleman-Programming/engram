@@ -7,9 +7,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/Gentleman-Programming/engram/internal/cloud"
-	cloudauth "github.com/Gentleman-Programming/engram/internal/cloud/auth"
-	"github.com/Gentleman-Programming/engram/internal/cloud/cloudstore"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud"
+	cloudauth "github.com/Gentleman-Programming/engram/v2/internal/cloud/auth"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/cloudstore"
 )
 
 // cloudBootstrapAuditAction is the audit action recorded for every CLI
@@ -44,6 +44,7 @@ const (
 type cloudBootstrapStore interface {
 	CreateFirstAdminHumanUser(ctx context.Context, params cloudstore.CreateHumanUserParams) (cloudstore.HumanUser, error)
 	CreatePrincipalTokenWithAudit(ctx context.Context, params cloudstore.CreatePrincipalTokenParams, audit cloudstore.AuthAuditEvent) (cloudstore.PrincipalToken, error)
+	RecoverStrandedAdminTokenWithAudit(ctx context.Context, params cloudstore.RecoverStrandedAdminTokenParams, audit cloudstore.AuthAuditEvent) (cloudstore.PrincipalToken, error)
 	CreateProjectGrant(ctx context.Context, params cloudstore.CreateProjectGrantParams) (cloudstore.ProjectGrant, error)
 	InsertAuthAuditEvent(ctx context.Context, event cloudstore.AuthAuditEvent) error
 	Close() error
@@ -64,6 +65,10 @@ type cloudBootstrapAdminArgs struct {
 	issueTokenName string
 }
 
+type cloudBootstrapRecoverTokenArgs struct {
+	name string
+}
+
 func cmdCloudBootstrap() {
 	if len(os.Args) < 4 {
 		printCloudBootstrapUsage()
@@ -74,6 +79,8 @@ func cmdCloudBootstrap() {
 	switch strings.TrimSpace(os.Args[3]) {
 	case "admin":
 		cmdCloudBootstrapAdmin()
+	case "recover-token":
+		cmdCloudBootstrapRecoverToken()
 	case "--help", "-h", "help":
 		printCloudBootstrapUsage()
 	default:
@@ -85,7 +92,9 @@ func cmdCloudBootstrap() {
 
 func printCloudBootstrapUsage() {
 	fmt.Println("usage: engram cloud bootstrap admin --username <name> [--email <email>] [--grant-project <project>]... [--issue-token [name]]")
-	fmt.Println("creates the first managed admin for a self-hosted cloud deployment")
+	fmt.Println("       engram cloud bootstrap recover-token [--name <name>]")
+	fmt.Println("admin creates the first managed admin for a self-hosted cloud deployment")
+	fmt.Println("recover-token issues one token for the eligible stranded managed admin")
 }
 
 func cmdCloudBootstrapAdmin() {
@@ -254,6 +263,76 @@ func cmdCloudBootstrapAdmin() {
 	}
 }
 
+// cmdCloudBootstrapRecoverToken repairs only the partial bootstrap state where
+// the sole enabled managed human admin has no token anywhere in the deployment.
+// Eligibility and token-plus-audit atomicity are enforced by cloudstore; this
+// command only generates and hashes the one-time credential before that call.
+func cmdCloudBootstrapRecoverToken() {
+	args, err := parseCloudBootstrapRecoverTokenArgs(os.Args[4:])
+	if err != nil {
+		printCloudBootstrapUsage()
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		exitFunc(1)
+		return
+	}
+
+	runtimeCfg := cloud.ConfigFromEnv()
+	pepper := strings.TrimSpace(runtimeCfg.TokenPepper)
+	if pepper == "" {
+		fmt.Fprintln(os.Stderr, "error: recover-token requires ENGRAM_CLOUD_TOKEN_PEPPER to be configured (a dedicated cloud token pepper, distinct from ENGRAM_JWT_SECRET)")
+		exitFunc(1)
+		return
+	}
+	hasher, err := cloudauth.NewManagedTokenHasher([]byte(pepper))
+	if err != nil {
+		fatal(fmt.Errorf("cloud bootstrap recover-token: %w", err))
+		return
+	}
+
+	cs, err := newCloudBootstrapStore(runtimeCfg)
+	if err != nil {
+		fatal(fmt.Errorf("cloud bootstrap recover-token: connect cloud store: %w", err))
+		return
+	}
+	defer cs.Close()
+
+	managedToken, err := cloudauth.GenerateManagedToken("live")
+	if err != nil {
+		fatal(fmt.Errorf("cloud bootstrap recover-token: generate token: %w", err))
+		return
+	}
+	tokenHash, err := hasher.Hash(managedToken.Raw)
+	if err != nil {
+		fatal(fmt.Errorf("cloud bootstrap recover-token: hash token: %w", err))
+		return
+	}
+	name := strings.TrimSpace(args.name)
+	if name == "" {
+		name = "cli-bootstrap-recovery"
+	}
+	_, err = cs.RecoverStrandedAdminTokenWithAudit(context.Background(), cloudstore.RecoverStrandedAdminTokenParams{
+		TokenPrefix: managedToken.Prefix,
+		TokenHash:   tokenHash,
+		Name:        name,
+	}, cloudstore.AuthAuditEvent{
+		ActorSource: string(cloudauth.PrincipalSourceBootstrapCLI),
+		Action:      cloudBootstrapAuditAction,
+		Outcome:     cloudBootstrapAuditOutcomeSuccess,
+		ReasonCode:  "stranded_admin_token_recovered",
+		Metadata: map[string]any{
+			"recovered":    true,
+			"token_prefix": managedToken.Prefix,
+		},
+	})
+	if err != nil {
+		fatal(fmt.Errorf("cloud bootstrap recover-token: %w", err))
+		return
+	}
+
+	fmt.Println("Managed admin token recovered — SHOWN ONCE, copy and store it now, it cannot be retrieved again:")
+	fmt.Println(managedToken.Raw)
+}
+
 func cloudBootstrapCompletionMetadata(username string, issuedToken bool, grants []cloudstore.ProjectGrant) map[string]any {
 	metadata := map[string]any{
 		"created_admin": true,
@@ -331,6 +410,26 @@ func parseCloudBootstrapAdminArgs(args []string) (cloudBootstrapAdminArgs, error
 	}
 	if strings.TrimSpace(out.username) == "" {
 		return out, fmt.Errorf("--username is required")
+	}
+	return out, nil
+}
+
+func parseCloudBootstrapRecoverTokenArgs(args []string) (cloudBootstrapRecoverTokenArgs, error) {
+	var out cloudBootstrapRecoverTokenArgs
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--name":
+			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
+				return out, fmt.Errorf("--name requires a value")
+			}
+			i++
+			out.name = strings.TrimSpace(args[i])
+			if out.name == "" {
+				return out, fmt.Errorf("--name requires a non-empty value")
+			}
+		default:
+			return out, fmt.Errorf("unknown flag: %s", args[i])
+		}
 	}
 	return out, nil
 }

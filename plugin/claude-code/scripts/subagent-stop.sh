@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Engram — SubagentStop hook for Claude Code (async)
 #
 # Thin hook: reads the subagent output from stdin, POSTs it to
@@ -16,11 +16,15 @@ source "${SCRIPT_DIR}/_helpers.sh"
 INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
-OUTPUT=$(echo "$INPUT" | jq -r '.stdout // empty')
-PROJECT=$(detect_project "$CWD")
+# Claude Code's SubagentStop payload carries the subagent's final text in
+# last_assistant_message; there is no .stdout field, so reading .stdout captured
+# nothing and every subagent run no-op'd. Keep .stdout as a fallback for other
+# harnesses that reuse this script (parity with plugin/codex/scripts).
+OUTPUT=$(echo "$INPUT" | jq -r '.last_assistant_message // .stdout // empty')
 
 # Nothing to capture if no output
 [ -z "$OUTPUT" ] && exit 0
+PROJECT=$(resolve_project "$CWD") || exit 0
 
 # Fire and forget — server handles extraction, dedup, and storage
 curl -sf "${ENGRAM_URL}/observations/passive" \

@@ -42,18 +42,20 @@
           {
             "type": "command",
             "command": "\"${PLUGIN_ROOT}/scripts/subagent-stop.sh\"",
+            "commandWindows": "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"${PLUGIN_ROOT}\\scripts\\subagent-stop.ps1\"",
             "timeout": 10
           }
         ]
       }
     ],
-    "Stop": [
+    "SessionEnd": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "\"${PLUGIN_ROOT}/scripts/session-stop.sh\"",
-            "timeout": 5
+            "command": "\"${PLUGIN_ROOT}/scripts/session-end.sh\"",
+            "commandWindows": "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"${PLUGIN_ROOT}\\scripts\\session-end.ps1\"",
+            "timeout": 3
           }
         ]
       }

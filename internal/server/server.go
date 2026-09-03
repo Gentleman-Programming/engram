@@ -20,9 +20,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/internal/diagnostic"
-	projectpkg "github.com/Gentleman-Programming/engram/internal/project"
-	"github.com/Gentleman-Programming/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/v2/internal/diagnostic"
+	projectpkg "github.com/Gentleman-Programming/engram/v2/internal/project"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
 )
 
 var loadServerStats = func(s *store.Store) (*store.Stats, error) {
@@ -156,6 +156,46 @@ func requireAuth(h http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// writeOwnershipError reports an ownership failure the client can act on, and
+// names the concrete repair. The repair is a CLI path that reaches the store
+// directly, so it stays available in a zero-config install where the HTTP
+// rescue endpoint is not served. Returns false when err is not an ownership
+// failure and the caller should keep its own handling.
+func writeOwnershipError(w http.ResponseWriter, sessionID string, err error) bool {
+	code := ""
+	switch {
+	case errors.Is(err, store.ErrProjectOwnershipAmbiguous):
+		code = "project_ownership_ambiguous"
+	case errors.Is(err, store.ErrProjectRequired):
+		code = "project_ownership_required"
+	default:
+		return false
+	}
+	remedy := store.RescueOwnershipCommand + " --project <name>"
+	if strings.TrimSpace(sessionID) != "" {
+		remedy += " --session " + sessionID
+	}
+	jsonErrorWithFields(w, http.StatusConflict, err.Error(), map[string]any{
+		"code":   code,
+		"remedy": remedy,
+	})
+	return true
+}
+
+// requireConfiguredAuth rejects requests when the server token is not configured.
+// It is reserved for endpoints that must never use the zero-config auth default.
+// It is not the only way to repair ownership: store.RescueOwnershipCommand does
+// the same work locally without any server token.
+func requireConfiguredAuth(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if os.Getenv("ENGRAM_HTTP_TOKEN") == "" {
+			jsonError(w, http.StatusServiceUnavailable, "server authorization is not configured")
+			return
+		}
+		requireAuth(h)(w, r)
+	}
+}
+
 func (s *Server) Start() error {
 	addr := fmt.Sprintf("127.0.0.1:%d", s.port)
 	listenFn := s.listen
@@ -216,6 +256,7 @@ func (s *Server) routes() {
 
 	// Context
 	s.mux.HandleFunc("GET /context", s.handleContext)
+	s.mux.HandleFunc("GET /context/compaction", s.handleCompactionContext)
 
 	// Export / Import — sensitive: full data read and bulk mutation.
 	s.mux.HandleFunc("GET /export", requireAuth(s.handleExport))
@@ -225,9 +266,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /stats", s.handleStats)
 	s.mux.HandleFunc("GET /doctor", s.handleDoctor)
 
-	// Project detection / migration
+	// Project detection / ownership rescue
 	s.mux.HandleFunc("GET /project/current", s.handleCurrentProject)
-	s.mux.HandleFunc("POST /projects/migrate", requireAuth(s.handleMigrateProject))
+	s.mux.HandleFunc("POST /projects/rescue-ownership", requireConfiguredAuth(s.handleRescueProjectOwnership))
+	// Deprecated compatibility alias for older clients.
+	s.mux.HandleFunc("POST /projects/migrate", requireConfiguredAuth(s.handleRescueProjectOwnership))
 
 	// Sync status (degraded-state visibility for autosync)
 	s.mux.HandleFunc("GET /sync/status", s.handleSyncStatus)
@@ -268,7 +311,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.store.CreateSession(body.ID, body.Project, body.Directory); err != nil {
+	if err := s.store.CreateSession(body.ID, body.Project, projectpkg.RuntimeWorktreeDirectory(body.Directory)); err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -295,10 +338,14 @@ func (s *Server) handleEndSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRecentSessions(w http.ResponseWriter, r *http.Request) {
-	project := r.URL.Query().Get("project")
+	resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
+	if err != nil {
+		s.writeProjectResolutionError(w, resolved, err)
+		return
+	}
 	limit := queryInt(r, "limit", 5)
 
-	sessions, err := s.store.RecentSessions(project, limit)
+	sessions, err := s.store.RecentSessions(resolved.Project, limit)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -327,8 +374,15 @@ func (s *Server) handleAddObservation(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
-	if body.SessionID == "" || body.Title == "" || body.Content == "" {
-		jsonError(w, http.StatusBadRequest, "session_id, title, and content are required")
+	// Validate the title before the session lookup so a bad session or project
+	// cannot mask the documented title-validation 400 (#459). A whitespace-only
+	// title survives a raw `== ""` check, so it needs the shared predicate.
+	if err := store.ValidateObservationTitle(body.Title); err != nil {
+		jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if body.SessionID == "" || body.Content == "" {
+		jsonError(w, http.StatusBadRequest, "session_id and content are required")
 		return
 	}
 	if !s.validateSessionProject(w, body.SessionID, body.Project) {
@@ -337,7 +391,16 @@ func (s *Server) handleAddObservation(w http.ResponseWriter, r *http.Request) {
 
 	id, err := s.store.AddObservation(body)
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		// A titleless or contentless observation is a client mistake, not a
+		// server failure.
+		switch {
+		case errors.Is(err, store.ErrObservationTitleRequired),
+			errors.Is(err, store.ErrObservationContentRequired):
+			jsonError(w, http.StatusBadRequest, err.Error())
+		case writeOwnershipError(w, body.SessionID, err):
+		default:
+			jsonError(w, http.StatusInternalServerError, err.Error())
+		}
 		return
 	}
 
@@ -361,6 +424,9 @@ func (s *Server) handlePassiveCapture(w http.ResponseWriter, r *http.Request) {
 
 	result, err := s.store.PassiveCapture(body)
 	if err != nil {
+		if writeOwnershipError(w, body.SessionID, err) {
+			return
+		}
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -380,11 +446,15 @@ func (s *Server) handleListObservations(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleRecentObservations(w http.ResponseWriter, r *http.Request) {
-	project := r.URL.Query().Get("project")
+	resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
+	if err != nil {
+		s.writeProjectResolutionError(w, resolved, err)
+		return
+	}
 	scope := r.URL.Query().Get("scope")
 	limit := queryInt(r, "limit", 20)
 
-	obs, err := s.store.RecentObservations(project, scope, limit)
+	obs, err := s.store.RecentObservations(resolved.Project, scope, limit)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -401,9 +471,10 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	project := params.Get("project")
-	if queryBool(r, "all_projects", false) {
-		project = ""
+	resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
+	if err != nil {
+		s.writeProjectResolutionError(w, resolved, err)
+		return
 	}
 
 	matchMode := params.Get("match_mode")
@@ -414,7 +485,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	results, err := s.store.Search(query, store.SearchOptions{
 		Type:      params.Get("type"),
-		Project:   project,
+		Project:   resolved.Project,
 		Scope:     params.Get("scope"),
 		Limit:     queryInt(r, "limit", 10),
 		MatchMode: matchMode,
@@ -422,6 +493,9 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if results == nil {
+		results = []store.SearchResult{}
 	}
 
 	jsonResponse(w, http.StatusOK, results)
@@ -465,7 +539,13 @@ func (s *Server) handleUpdateObservation(w http.ResponseWriter, r *http.Request)
 
 	obs, err := s.store.UpdateObservation(id, body)
 	if err != nil {
-		jsonError(w, http.StatusNotFound, err.Error())
+		switch {
+		case errors.Is(err, store.ErrObservationTitleRequired),
+			errors.Is(err, store.ErrObservationContentRequired):
+			jsonError(w, http.StatusBadRequest, err.Error())
+		default:
+			jsonError(w, http.StatusNotFound, err.Error())
+		}
 		return
 	}
 
@@ -515,6 +595,20 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 
 	before := queryInt(r, "before", 5)
 	after := queryInt(r, "after", 5)
+	resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
+	if err != nil {
+		s.writeProjectResolutionError(w, resolved, err)
+		return
+	}
+	focus, err := s.store.GetObservation(id)
+	if err != nil {
+		jsonError(w, http.StatusNotFound, "observation not found")
+		return
+	}
+	if resolved.Project != "" && (focus.Project == nil || !strings.EqualFold(strings.TrimSpace(*focus.Project), resolved.Project)) {
+		jsonError(w, http.StatusNotFound, "observation not found in resolved project")
+		return
+	}
 
 	result, err := s.store.Timeline(id, before, after)
 	if err != nil {
@@ -526,10 +620,14 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleReviewList(w http.ResponseWriter, r *http.Request) {
-	project := r.URL.Query().Get("project")
+	resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
+	if err != nil {
+		s.writeProjectResolutionError(w, resolved, err)
+		return
+	}
 	limit := queryInt(r, "limit", 10)
 
-	observations, err := s.store.ObservationsNeedingReview(project, limit)
+	observations, err := s.store.ObservationsNeedingReview(resolved.Project, limit)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -564,9 +662,23 @@ func (s *Server) handleReviewMarkReviewed(w http.ResponseWriter, r *http.Request
 		jsonError(w, http.StatusBadRequest, "observation_id is required")
 		return
 	}
-
-	if err := s.store.MarkReviewed(id); err != nil {
+	resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
+	if err != nil {
+		s.writeProjectResolutionError(w, resolved, err)
+		return
+	}
+	markReviewed := s.store.MarkReviewed
+	if resolved.Project != "" {
+		markReviewed = func(observationID int64) error {
+			return s.store.MarkReviewedForProject(observationID, resolved.Project)
+		}
+	}
+	if err := markReviewed(id); err != nil {
 		if errors.Is(err, store.ErrObservationNotFound) {
+			if resolved.Project != "" {
+				jsonError(w, http.StatusNotFound, "observation not found in resolved project")
+				return
+			}
 			jsonError(w, http.StatusNotFound, err.Error())
 			return
 		}
@@ -626,7 +738,13 @@ func (s *Server) handleAddPrompt(w http.ResponseWriter, r *http.Request) {
 
 	id, err := s.store.AddPrompt(body)
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		switch {
+		case errors.Is(err, store.ErrPromptContentRequired):
+			jsonError(w, http.StatusBadRequest, err.Error())
+		case writeOwnershipError(w, body.SessionID, err):
+		default:
+			jsonError(w, http.StatusInternalServerError, err.Error())
+		}
 		return
 	}
 
@@ -635,10 +753,14 @@ func (s *Server) handleAddPrompt(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRecentPrompts(w http.ResponseWriter, r *http.Request) {
-	project := r.URL.Query().Get("project")
+	resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
+	if err != nil {
+		s.writeProjectResolutionError(w, resolved, err)
+		return
+	}
 	limit := queryInt(r, "limit", 20)
 
-	prompts, err := s.store.RecentPrompts(project, limit)
+	prompts, err := s.store.RecentPrompts(resolved.Project, limit)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -653,10 +775,15 @@ func (s *Server) handleSearchPrompts(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, "q parameter is required")
 		return
 	}
+	resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
+	if err != nil {
+		s.writeProjectResolutionError(w, resolved, err)
+		return
+	}
 
 	prompts, err := s.store.SearchPrompts(
 		query,
-		r.URL.Query().Get("project"),
+		resolved.Project,
 		queryInt(r, "limit", 10),
 	)
 	if err != nil {
@@ -716,19 +843,15 @@ func (s *Server) handleDeletePrompt(w http.ResponseWriter, r *http.Request) {
 // ─── Export / Import ─────────────────────────────────────────────────────────
 
 func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
-	query := r.URL.Query()
-	project := query.Get("project")
-	if _, provided := query["project"]; provided && strings.TrimSpace(project) == "" {
-		jsonError(w, http.StatusBadRequest, "project parameter must not be blank")
+	resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
+	if err != nil {
+		s.writeProjectResolutionError(w, resolved, err)
 		return
 	}
 
-	var (
-		data *store.ExportData
-		err  error
-	)
-	if strings.TrimSpace(project) != "" {
-		data, err = s.store.ExportProject(project)
+	var data *store.ExportData
+	if resolved.Project != "" {
+		data, err = s.store.ExportProject(resolved.Project)
 	} else {
 		data, err = s.store.Export()
 	}
@@ -771,10 +894,14 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 // ─── Context ─────────────────────────────────────────────────────────────────
 
 func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
-	project := r.URL.Query().Get("project")
+	resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
+	if err != nil {
+		s.writeProjectResolutionError(w, resolved, err)
+		return
+	}
 	scope := r.URL.Query().Get("scope")
 
-	context, err := s.store.FormatContext(project, scope)
+	context, err := s.store.FormatContext(resolved.Project, scope)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -783,8 +910,38 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]string{"context": context})
 }
 
+func (s *Server) handleCompactionContext(w http.ResponseWriter, r *http.Request) {
+	sessionID := strings.TrimSpace(r.URL.Query().Get("session_id"))
+	if sessionID == "" {
+		jsonError(w, http.StatusBadRequest, "session_id is required")
+		return
+	}
+
+	context, err := s.store.FormatCompactionContext(sessionID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			jsonError(w, http.StatusNotFound, "session not found")
+			return
+		}
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]string{"context": context})
+}
+
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	stats, err := loadServerStats(s.store)
+	resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
+	if err != nil {
+		s.writeProjectResolutionError(w, resolved, err)
+		return
+	}
+	var stats *store.Stats
+	if resolved.Project != "" {
+		stats, err = s.store.StatsProject(resolved.Project)
+	} else {
+		stats, err = loadServerStats(s.store)
+	}
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -794,58 +951,17 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
-	projectName := strings.TrimSpace(r.URL.Query().Get("project"))
-	if projectName != "" {
-		projectName, _ = store.NormalizeProject(projectName)
-		exists, err := s.store.ProjectExists(projectName)
-		if err != nil {
-			jsonError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		if !exists {
-			available, err := s.store.ListProjectNames()
-			if err != nil {
-				jsonError(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-			jsonErrorWithFields(w, http.StatusNotFound, fmt.Sprintf("project %q not found", projectName), map[string]any{
-				"code":               "unknown_project",
-				"available_projects": available,
-			})
-			return
-		}
-	} else {
-		cwd := strings.TrimSpace(r.URL.Query().Get("cwd"))
-		if cwd == "" {
-			var err error
-			cwd, err = os.Getwd()
-			if err != nil {
-				jsonError(w, http.StatusInternalServerError, "failed to detect cwd: "+err.Error())
-				return
-			}
-		}
-		res := projectpkg.DetectProjectFull(cwd)
-		if res.Error != nil {
-			code := "project_detection_failed"
-			if len(res.AvailableProjects) > 0 {
-				code = "ambiguous_project"
-			}
-			jsonErrorWithFields(w, http.StatusBadRequest, "project detection failed: "+res.Error.Error(), map[string]any{
-				"code":               code,
-				"available_projects": res.AvailableProjects,
-			})
-			return
-		}
-		projectName, _ = store.NormalizeProject(res.Project)
+	resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
+	if err != nil {
+		s.writeProjectResolutionError(w, resolved, err)
+		return
 	}
+	projectName := resolved.Project
 
 	check := strings.TrimSpace(r.URL.Query().Get("check"))
 	runner := diagnostic.NewRunner()
 	scope := diagnostic.Scope{Store: s.store, Project: projectName, Now: time.Now()}
-	var (
-		report diagnostic.Report
-		err    error
-	)
+	var report diagnostic.Report
 	if check != "" {
 		report, err = runner.RunOne(r.Context(), scope, check)
 	} else {
@@ -863,15 +979,21 @@ func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCurrentProject(w http.ResponseWriter, r *http.Request) {
 	cwd := strings.TrimSpace(r.URL.Query().Get("cwd"))
 	if cwd == "" {
-		var err error
-		cwd, err = os.Getwd()
-		if err != nil {
-			jsonError(w, http.StatusInternalServerError, "failed to detect cwd: "+err.Error())
+		var cwdErr error
+		cwd, cwdErr = os.Getwd()
+		if cwdErr != nil {
+			jsonError(w, http.StatusInternalServerError, "failed to detect cwd: "+cwdErr.Error())
 			return
 		}
 	}
-
-	res := projectpkg.DetectProjectFull(cwd)
+	res, err := projectpkg.Resolve(projectpkg.ResolutionOptions{
+		Mode:      projectpkg.ResolutionCurrent,
+		Directory: cwd,
+	})
+	if err != nil && !errors.Is(err, projectpkg.ErrAmbiguousProject) {
+		s.writeProjectResolutionError(w, res, err)
+		return
+	}
 	payload := map[string]any{
 		"project":            res.Project,
 		"project_source":     res.Source,
@@ -889,9 +1011,91 @@ func (s *Server) handleCurrentProject(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, payload)
 }
 
+// resolveRequestProject applies the shared resolution modes to HTTP operations.
+// Current-project reads require known explicit/process overrides, while cwd
+// detection remains usable before a project has any stored memories.
+func (s *Server) resolveRequestProject(r *http.Request, mode projectpkg.ResolutionMode, requireKnownOverrides bool) (projectpkg.DetectionResult, error) {
+	query := r.URL.Query()
+	projectValues, projectProvided := query["project"]
+	if projectProvided {
+		if len(projectValues) != 1 || strings.TrimSpace(projectValues[0]) == "" {
+			return projectpkg.DetectionResult{}, fmt.Errorf("%w: project parameter must be specified exactly once and must not be blank", projectpkg.ErrInvalidProjectName)
+		}
+	}
+	if raw, allProvided := query["all_projects"]; allProvided {
+		if len(raw) != 1 {
+			return projectpkg.DetectionResult{}, fmt.Errorf("%w: all_projects must be a boolean", projectpkg.ErrInvalidProjectName)
+		}
+		all, err := strconv.ParseBool(raw[0])
+		if err != nil {
+			return projectpkg.DetectionResult{}, fmt.Errorf("%w: all_projects must be a boolean", projectpkg.ErrInvalidProjectName)
+		}
+		if all {
+			if projectProvided {
+				return projectpkg.DetectionResult{}, fmt.Errorf("%w: project and all_projects cannot be used together", projectpkg.ErrInvalidProjectName)
+			}
+			mode = projectpkg.ResolutionAll
+		}
+	}
+	return projectpkg.Resolve(projectpkg.ResolutionOptions{
+		Mode:                 mode,
+		Explicit:             query.Get("project"),
+		Directory:            query.Get("cwd"),
+		ProjectExists:        s.store.ProjectExists,
+		RequireKnownExplicit: requireKnownOverrides,
+		RequireKnownProcess:  requireKnownOverrides,
+	})
+}
+
+func (s *Server) writeProjectResolutionError(w http.ResponseWriter, res projectpkg.DetectionResult, err error) {
+	var unknown *projectpkg.UnknownProjectError
+	if errors.As(err, &unknown) {
+		available, listErr := s.store.ListProjectNames()
+		if listErr != nil {
+			jsonErrorWithFields(w, http.StatusInternalServerError, "project resolution failed: "+listErr.Error(), map[string]any{
+				"code": "project_resolution_failed",
+			})
+			return
+		}
+		jsonErrorWithFields(w, http.StatusNotFound, fmt.Sprintf("project %q not found", unknown.Name), map[string]any{
+			"code":               "unknown_project",
+			"available_projects": available,
+		})
+		return
+	}
+	code := "project_resolution_failed"
+	status := http.StatusInternalServerError
+	if errors.Is(err, projectpkg.ErrInvalidProjectName) {
+		code = "invalid_project"
+		status = http.StatusBadRequest
+	}
+	if errors.Is(err, projectpkg.ErrAmbiguousProject) {
+		code = "ambiguous_project"
+		status = http.StatusConflict
+	}
+	fields := map[string]any{"code": code}
+	if errors.Is(err, projectpkg.ErrAmbiguousProject) {
+		fields["available_projects"] = res.AvailableProjects
+		fields["project_source"] = res.Source
+		fields["project_path"] = res.Path
+	}
+	jsonErrorWithFields(w, status, "project resolution failed: "+err.Error(), fields)
+}
+
 // ─── Sync Status ─────────────────────────────────────────────────────────────
 
 func (s *Server) handleSyncStatus(w http.ResponseWriter, r *http.Request) {
+	resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
+	if err != nil {
+		s.writeProjectResolutionError(w, resolved, err)
+		return
+	}
+	if resolved.Source == projectpkg.SourceAllProjects {
+		jsonErrorWithFields(w, http.StatusBadRequest, "all_projects is not supported for sync status", map[string]any{
+			"code": "unsupported_project_scope",
+		})
+		return
+	}
 	if s.syncStatus == nil {
 		jsonResponse(w, http.StatusOK, map[string]any{
 			"enabled": false,
@@ -900,7 +1104,7 @@ func (s *Server) handleSyncStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	status := s.syncStatus.Status(r.URL.Query().Get("project"))
+	status := s.syncStatus.Status(resolved.Project)
 	jsonResponse(w, http.StatusOK, map[string]any{
 		"enabled":              status.Enabled,
 		"phase":                status.Phase,
@@ -920,56 +1124,71 @@ func (s *Server) handleSyncStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ─── Project Migration ───────────────────────────────────────────────────────
+// ─── Project Ownership Rescue ─────────────────────────────────────────────────
 
-func (s *Server) handleMigrateProject(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<10) // 1 KB max
+func (s *Server) handleRescueProjectOwnership(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 8<<10) // 8 KB max
 	var body struct {
-		OldProject string `json:"old_project"`
-		NewProject string `json:"new_project"`
+		TargetProject  string   `json:"target_project"`
+		Confirmed      bool     `json:"confirmed"`
+		ObservationIDs []int64  `json:"observation_ids"`
+		SessionIDs     []string `json:"session_ids"`
+		PromptIDs      []int64  `json:"prompt_ids"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
-	if body.OldProject == "" || body.NewProject == "" {
-		jsonError(w, http.StatusBadRequest, "old_project and new_project are required")
+	target, _ := store.NormalizeProject(body.TargetProject)
+	if target == "" {
+		jsonError(w, http.StatusBadRequest, "target_project is required")
 		return
 	}
-	// Normalize both names using the same rules the store applies so that
-	// case-only differences (e.g. "repo_name" vs "Repo_Name") are treated as
-	// identical and do not trigger a migration that would create duplicates.
-	// See: https://github.com/Gentleman-Programming/engram/issues/438
-	normalizedOld, _ := store.NormalizeProject(body.OldProject)
-	normalizedNew, _ := store.NormalizeProject(body.NewProject)
-	if normalizedOld == normalizedNew {
-		jsonResponse(w, http.StatusOK, map[string]any{"status": "skipped", "reason": "names are identical"})
+	if !body.Confirmed {
+		jsonError(w, http.StatusBadRequest, "confirmed must be true")
 		return
 	}
-
-	result, err := s.store.MigrateProject(body.OldProject, body.NewProject)
+	result, err := s.store.RescueNullProjectOwnership(store.ProjectRescueParams{
+		TargetProject:  target,
+		ObservationIDs: body.ObservationIDs,
+		SessionIDs:     body.SessionIDs,
+		PromptIDs:      body.PromptIDs,
+	})
 	if err != nil {
-		log.Printf("[engram] project migration failed: %v", err)
-		jsonError(w, http.StatusInternalServerError, "migration failed")
+		if errors.Is(err, store.ErrProjectRequired) || errors.Is(err, store.ErrProjectRescueInvalidRequest) {
+			jsonError(w, http.StatusBadRequest, "invalid ownership rescue request: provide a target project and at least one positive record ID or non-blank session ID")
+			return
+		}
+		log.Printf("[engram] project ownership rescue failed: %v", err)
+		jsonError(w, http.StatusInternalServerError, "project ownership rescue is temporarily unavailable")
 		return
 	}
-
-	if !result.Migrated {
-		jsonResponse(w, http.StatusOK, map[string]any{"status": "skipped", "reason": "no records found"})
-		return
+	if result.Rescued() > 0 || result.Journaled {
+		s.notifyWrite()
 	}
-
-	log.Printf("[engram] migrated project %q → %q (obs: %d, sessions: %d, prompts: %d)",
-		body.OldProject, body.NewProject,
-		result.ObservationsUpdated, result.SessionsUpdated, result.PromptsUpdated)
-
+	// "rescued" and "partially_rescued" are distinguishable outcomes: the
+	// counters alone cannot tell a clean move apart from one that left records
+	// behind, so the status and the blocked list say it outright.
+	status := "rescued"
+	if !result.Complete {
+		status = "partially_rescued"
+	}
+	blocked := result.Blocked
+	if blocked == nil {
+		blocked = []store.ProjectRescueBlocked{}
+	}
 	jsonResponse(w, http.StatusOK, map[string]any{
-		"status":       "migrated",
-		"old_project":  body.OldProject,
-		"new_project":  body.NewProject,
-		"observations": result.ObservationsUpdated,
-		"sessions":     result.SessionsUpdated,
-		"prompts":      result.PromptsUpdated,
+		"status":                status,
+		"complete":              result.Complete,
+		"blocked":               blocked,
+		"target_project":        target,
+		"rescued_observations":  result.RescuedObservations,
+		"rescued_sessions":      result.RescuedSessions,
+		"rescued_prompts":       result.RescuedPrompts,
+		"conflicting_records":   result.ConflictingRecords,
+		"skipped_records":       result.SkippedRecords,
+		"journaled_local":       result.Journaled,
+		"reconciliation_status": "local journal pending autosync",
 	})
 }
 
@@ -995,7 +1214,12 @@ func clampConflictsLimit(v, defaultVal int) int {
 // handleListConflicts serves GET /conflicts
 // Query params: project, status, since (RFC3339), limit (default 50, max 500), offset.
 func (s *Server) handleListConflicts(w http.ResponseWriter, r *http.Request) {
-	project := r.URL.Query().Get("project")
+	resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
+	if err != nil {
+		s.writeProjectResolutionError(w, resolved, err)
+		return
+	}
+	project := resolved.Project
 	status := r.URL.Query().Get("status")
 	limit := clampConflictsLimit(queryInt(r, "limit", conflictsDefaultLimit), conflictsDefaultLimit)
 	offset := queryInt(r, "offset", 0)
@@ -1046,7 +1270,12 @@ func (s *Server) handleListConflicts(w http.ResponseWriter, r *http.Request) {
 // handleConflictsStats serves GET /conflicts/stats
 // Query params: project (optional — empty means global).
 func (s *Server) handleConflictsStats(w http.ResponseWriter, r *http.Request) {
-	project := r.URL.Query().Get("project")
+	resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
+	if err != nil {
+		s.writeProjectResolutionError(w, resolved, err)
+		return
+	}
+	project := resolved.Project
 
 	stats, err := s.store.GetRelationStats(project)
 	if err != nil {
@@ -1099,15 +1328,18 @@ func (s *Server) handleListDeferred(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleScanConflicts serves POST /conflicts/scan
-// Body: {"project":"X","since":"...","apply":bool,"max_insert":int,
+// Body: {"project":"X","since":"...","limit":int,"cursor":int,"apply":bool,"max_insert":int,
 //
 //	"semantic":bool,"concurrency":int,"timeout_per_call_seconds":int,"max_semantic":int}
 func (s *Server) handleScanConflicts(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Project   string `json:"project"`
-		Since     string `json:"since"`
-		Apply     bool   `json:"apply"`
-		MaxInsert int    `json:"max_insert"`
+		Project     string `json:"project"`
+		AllProjects bool   `json:"all_projects"`
+		Since       string `json:"since"`
+		Apply       bool   `json:"apply"`
+		MaxInsert   int    `json:"max_insert"`
+		Limit       *int   `json:"limit"`
+		Cursor      *int64 `json:"cursor"`
 
 		// Phase 4 semantic fields — all optional, defaults match CLI.
 		// Pointer types so absent fields are nil (use default) vs. explicit 0 (invalid).
@@ -1120,11 +1352,34 @@ func (s *Server) handleScanConflicts(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
-	if body.Project == "" {
-		jsonError(w, http.StatusBadRequest, "project is required")
+	if body.AllProjects && strings.TrimSpace(body.Project) != "" {
+		jsonError(w, http.StatusBadRequest, "project and all_projects cannot be used together")
 		return
 	}
-
+	mode := projectpkg.ResolutionCurrent
+	if body.AllProjects {
+		mode = projectpkg.ResolutionAll
+	}
+	resolved, err := projectpkg.Resolve(projectpkg.ResolutionOptions{
+		Mode:                 mode,
+		Explicit:             body.Project,
+		Directory:            r.URL.Query().Get("cwd"),
+		ProjectExists:        s.store.ProjectExists,
+		RequireKnownExplicit: true,
+		RequireKnownProcess:  true,
+	})
+	if err != nil {
+		s.writeProjectResolutionError(w, resolved, err)
+		return
+	}
+	if body.Limit != nil && (*body.Limit < 1 || *body.Limit > store.DefaultScanLimit) {
+		jsonError(w, http.StatusBadRequest, fmt.Sprintf("limit must be between 1 and %d", store.DefaultScanLimit))
+		return
+	}
+	if body.Cursor != nil && *body.Cursor < 0 {
+		jsonError(w, http.StatusBadRequest, "cursor must be non-negative")
+		return
+	}
 	// Resolve semantic params: validate explicit values, apply defaults for absent fields.
 	concurrency := 5
 	timeoutPerCallSeconds := 60
@@ -1156,10 +1411,12 @@ func (s *Server) handleScanConflicts(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	opts := store.ScanOptions{
-		Project:   body.Project,
-		Apply:     body.Apply,
-		MaxInsert: body.MaxInsert,
+	opts := store.ScanOptions{Project: resolved.Project, Apply: body.Apply, MaxInsert: body.MaxInsert}
+	if body.Limit != nil {
+		opts.Limit = *body.Limit
+	}
+	if body.Cursor != nil {
+		opts.Cursor = *body.Cursor
 	}
 	if body.Since != "" {
 		t, err := time.Parse(time.RFC3339, body.Since)
@@ -1200,7 +1457,12 @@ func (s *Server) handleScanConflicts(w http.ResponseWriter, r *http.Request) {
 		opts.BuildPrompt = promptBuilder
 	}
 
-	result, err := s.store.ScanProject(opts)
+	var result store.ScanResult
+	if body.AllProjects {
+		result, err = s.store.ScanAllProjects(opts)
+	} else {
+		result, err = s.store.ScanProject(opts)
+	}
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1209,6 +1471,7 @@ func (s *Server) handleScanConflicts(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
 		"project":          result.Project,
 		"inspected":        result.Inspected,
+		"ranked_queries":   result.RankedQueries,
 		"candidates_found": result.CandidatesFound,
 		"already_related":  result.AlreadyRelated,
 		"inserted":         result.RelationsInserted,
@@ -1219,8 +1482,11 @@ func (s *Server) handleScanConflicts(w http.ResponseWriter, r *http.Request) {
 		"semantic_skipped": result.SemanticSkipped,
 		"semantic_errors":  result.SemanticErrors,
 	}
+	if result.NextCursor != nil {
+		resp["next_cursor"] = *result.NextCursor
+	}
 	if result.Capped {
-		resp["warning"] = "cap reached: not all candidates were inserted"
+		resp["warning"] = "cap reached: this page has no continuation; rerun from the same cursor with a higher applicable cap"
 	}
 
 	jsonResponse(w, http.StatusOK, resp)

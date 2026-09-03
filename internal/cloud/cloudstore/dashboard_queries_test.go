@@ -1594,3 +1594,321 @@ func TestPromptDetailNotFoundReturnsPromptNotFoundError(t *testing.T) {
 		t.Errorf("must NOT be ErrDashboardProjectNotFound for missing prompt in valid project")
 	}
 }
+
+// TestDashboardCountsPiSavedPromptUnderItsProject closes the last gap #706 named: the reporter's
+// prompt "saved" locally while the cloud dashboard kept showing 0 prompts for the project.
+//
+// It seeds the read model with a prompt delivered the way a locally saved prompt actually reaches
+// the cloud — an upsert mutation keyed by sync_id — and asserts the dashboard surfaces that
+// prompt under its own project: the project prompt count, the recent-prompts list, and the detail
+// page the sync_id addresses. A neighbouring project must not see it.
+func TestDashboardCountsPiSavedPromptUnderItsProject(t *testing.T) {
+	const (
+		targetProject = "paidosdep"
+		otherProject  = "skill-registry"
+		promptSyncID  = "prompt-paidosdep-1"
+		promptSession = "manual-save-paidosdep"
+		promptContent = "preserve this exact user prompt about auth token rotation"
+	)
+
+	// Mirrors the payload the local store enqueues for a prompt upsert.
+	mutationPayload, err := json.Marshal(map[string]any{
+		"sync_id":    promptSyncID,
+		"session_id": promptSession,
+		"content":    promptContent,
+		"project":    targetProject,
+		"created_at": "2026-04-23T08:20:00Z",
+	})
+	if err != nil {
+		t.Fatalf("marshal mutation payload: %v", err)
+	}
+
+	targetChunk, err := json.Marshal(map[string]any{
+		"sessions": []map[string]any{
+			{"id": promptSession, "project": targetProject, "started_at": "2026-04-23T08:00:00Z"},
+		},
+		"mutations": []map[string]any{
+			{"entity": "prompt", "entity_key": promptSyncID, "op": "upsert", "payload": string(mutationPayload)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal target chunk: %v", err)
+	}
+
+	chunks := []dashboardChunkRow{
+		{
+			chunkID: "chunk-paidosdep-1", project: targetProject, createdBy: "alice",
+			createdAt: time.Date(2026, 4, 23, 10, 0, 0, 0, time.UTC),
+			parsed:    parseMustChunk(t, targetChunk),
+		},
+		{
+			chunkID: "chunk-skill-registry-1", project: otherProject, createdBy: "alice",
+			createdAt: time.Date(2026, 4, 23, 11, 0, 0, 0, time.UTC),
+			parsed: parseMustChunk(t, []byte(`{
+				"sessions":[{"id":"manual-save-skill-registry","project":"skill-registry","started_at":"2026-04-23T09:00:00Z"}],
+				"prompts":[{"sync_id":"prompt-skill-registry-1","session_id":"manual-save-skill-registry","project":"skill-registry","content":"an unrelated prompt","created_at":"2026-04-23T09:20:00Z"}]
+			}`)),
+		},
+	}
+
+	model, err := buildDashboardReadModel(chunks)
+	if err != nil {
+		t.Fatalf("buildDashboardReadModel: %v", err)
+	}
+	cs := &CloudStore{
+		dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil },
+	}
+
+	// The symptom in #706: the project row kept reporting 0 prompts.
+	projects, err := cs.ListProjects("")
+	if err != nil {
+		t.Fatalf("ListProjects: %v", err)
+	}
+	var targetRow *DashboardProjectRow
+	for i := range projects {
+		if projects[i].Project == targetProject {
+			targetRow = &projects[i]
+			break
+		}
+	}
+	if targetRow == nil {
+		t.Fatalf("project %q missing from the dashboard project list", targetProject)
+	}
+	if targetRow.Prompts != 1 {
+		t.Fatalf("expected 1 prompt on the %q dashboard row, got %d", targetProject, targetRow.Prompts)
+	}
+
+	prompts, err := cs.ListRecentPrompts(targetProject, "", 10)
+	if err != nil {
+		t.Fatalf("ListRecentPrompts: %v", err)
+	}
+	var listed *DashboardPromptRow
+	for i := range prompts {
+		if prompts[i].SyncID == promptSyncID {
+			listed = &prompts[i]
+			break
+		}
+	}
+	if listed == nil {
+		t.Fatalf("prompt %q not listed on the %q dashboard (got %d prompts)", promptSyncID, targetProject, len(prompts))
+	}
+	if listed.Content != promptContent {
+		t.Fatalf("dashboard prompt content changed: %q", listed.Content)
+	}
+	if listed.SessionID != promptSession {
+		t.Fatalf("expected dashboard prompt session %q, got %q", promptSession, listed.SessionID)
+	}
+	if listed.Project != targetProject {
+		t.Fatalf("expected dashboard prompt project %q, got %q", targetProject, listed.Project)
+	}
+
+	// The detail page is addressed by sync_id, so that identity must resolve.
+	detail, _, _, err := cs.GetPromptDetail(targetProject, promptSession, promptSyncID)
+	if err != nil {
+		t.Fatalf("GetPromptDetail: %v", err)
+	}
+	if detail.SyncID != promptSyncID || detail.Content != promptContent {
+		t.Fatalf("prompt detail does not describe the saved prompt: %+v", detail)
+	}
+
+	// Scope: the neighbouring project must not show this prompt.
+	otherPrompts, err := cs.ListRecentPrompts(otherProject, "", 10)
+	if err != nil {
+		t.Fatalf("ListRecentPrompts other project: %v", err)
+	}
+	for _, p := range otherPrompts {
+		if p.SyncID == promptSyncID {
+			t.Fatalf("prompt %q leaked onto the %q dashboard", promptSyncID, otherProject)
+		}
+	}
+}
+
+// ─── #837: local deletes must reach the dashboard ────────────────────────────
+
+// materializeChunkRowsForDashboard mirrors what WriteChunk persists: every chunk
+// row is materialized into cloud_mutations rows with monotonically increasing
+// seqs, so dashboard assertions run against the same data the cloud would store.
+func materializeChunkRowsForDashboard(t *testing.T, chunks []dashboardChunkRow) []dashboardMutationRow {
+	t.Helper()
+	rows := make([]dashboardMutationRow, 0)
+	seq := int64(0)
+	for _, chunk := range chunks {
+		entries, err := materializedChunkMutations(chunk.project, chunk.parsed)
+		if err != nil {
+			t.Fatalf("materializedChunkMutations for chunk %q: %v", chunk.chunkID, err)
+		}
+		for _, entry := range entries {
+			seq++
+			rows = append(rows, dashboardMutationRow{
+				seq:        seq,
+				project:    entry.Project,
+				entity:     entry.Entity,
+				entityKey:  entry.EntityKey,
+				op:         entry.Op,
+				payload:    []byte(entry.Payload),
+				occurredAt: chunk.createdAt,
+			})
+		}
+	}
+	return rows
+}
+
+// TestDeletedPromptDisappearsFromDashboard drives the full cloud-side path for
+// #837: a first sync uploads the prompt, a second sync uploads only the delete
+// mutation (the local row is hard-deleted, so it cannot ride in chunk.Prompts).
+// The dashboard must stop listing the prompt.
+func TestDeletedPromptDisappearsFromDashboard(t *testing.T) {
+	const project = "proj-prompt-delete"
+	chunks := []dashboardChunkRow{
+		{
+			chunkID: "chunk-prompt-save", project: project, createdBy: "dev",
+			createdAt: time.Date(2026, 4, 29, 10, 0, 0, 0, time.UTC),
+			parsed: parseMustChunk(t, []byte(`{
+				"sessions":[{"id":"sess-1","project":"proj-prompt-delete","started_at":"2026-04-29T09:00:00Z"}],
+				"prompts":[{"sync_id":"prompt-1","session_id":"sess-1","project":"proj-prompt-delete","content":"Keep me?","created_at":"2026-04-29T09:10:00Z"}],
+				"mutations":[
+					{"project":"proj-prompt-delete","entity":"session","entity_key":"sess-1","op":"upsert","payload":"{\"id\":\"sess-1\",\"project\":\"proj-prompt-delete\",\"started_at\":\"2026-04-29T09:00:00Z\"}"},
+					{"project":"proj-prompt-delete","entity":"prompt","entity_key":"prompt-1","op":"upsert","payload":"{\"sync_id\":\"prompt-1\",\"session_id\":\"sess-1\",\"project\":\"proj-prompt-delete\",\"content\":\"Keep me?\",\"created_at\":\"2026-04-29T09:10:00Z\"}"}
+				]
+			}`)),
+		},
+		{
+			chunkID: "chunk-prompt-delete", project: project, createdBy: "dev",
+			createdAt: time.Date(2026, 4, 29, 11, 0, 0, 0, time.UTC),
+			parsed: parseMustChunk(t, []byte(`{
+				"sessions":[{"id":"sess-1","project":"proj-prompt-delete","started_at":"2026-04-29T09:00:00Z"}],
+				"mutations":[
+					{"project":"proj-prompt-delete","entity":"prompt","entity_key":"prompt-1","op":"delete","payload":"{\"sync_id\":\"prompt-1\",\"session_id\":\"sess-1\",\"project\":\"proj-prompt-delete\",\"deleted\":true,\"hard_delete\":true,\"deleted_at\":\"2026-04-29T10:30:00Z\"}"}
+				]
+			}`)),
+		},
+	}
+
+	model, err := buildDashboardReadModelFromRows(chunks, materializeChunkRowsForDashboard(t, chunks))
+	if err != nil {
+		t.Fatalf("buildDashboardReadModelFromRows: %v", err)
+	}
+	cs := &CloudStore{
+		dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil },
+	}
+
+	prompts, err := cs.ListRecentPrompts(project, "", 10)
+	if err != nil {
+		t.Fatalf("ListRecentPrompts: %v", err)
+	}
+	for _, prompt := range prompts {
+		if prompt.SyncID == "prompt-1" {
+			t.Fatalf("deleted prompt still listed on the dashboard: %+v", prompt)
+		}
+	}
+
+	if _, _, _, err := cs.GetPromptDetail(project, "sess-1", "prompt-1"); !errors.Is(err, ErrDashboardPromptNotFound) {
+		t.Fatalf("expected ErrDashboardPromptNotFound for the deleted prompt, got %v", err)
+	}
+
+	detail, err := cs.ProjectDetail(project)
+	if err != nil {
+		t.Fatalf("ProjectDetail: %v", err)
+	}
+	if detail.Stats.Prompts != 0 {
+		t.Fatalf("expected 0 prompts in project stats, got %d", detail.Stats.Prompts)
+	}
+}
+
+// TestHardDeletedObservationDisappearsFromDashboard covers the sibling path:
+// DeleteObservation(id, hardDelete=true) removes the row, so the delete also
+// travels only as a chunk.Mutations entry.
+func TestHardDeletedObservationDisappearsFromDashboard(t *testing.T) {
+	const project = "proj-obs-hard-delete"
+	chunks := []dashboardChunkRow{
+		{
+			chunkID: "chunk-obs-save", project: project, createdBy: "dev",
+			createdAt: time.Date(2026, 4, 29, 10, 0, 0, 0, time.UTC),
+			parsed: parseMustChunk(t, []byte(`{
+				"sessions":[{"id":"sess-1","project":"proj-obs-hard-delete","started_at":"2026-04-29T09:00:00Z"}],
+				"observations":[{"sync_id":"obs-1","session_id":"sess-1","project":"proj-obs-hard-delete","type":"decision","title":"Keep me?","content":"Body","created_at":"2026-04-29T09:10:00Z"}],
+				"mutations":[
+					{"project":"proj-obs-hard-delete","entity":"observation","entity_key":"obs-1","op":"upsert","payload":"{\"sync_id\":\"obs-1\",\"session_id\":\"sess-1\",\"project\":\"proj-obs-hard-delete\",\"type\":\"decision\",\"title\":\"Keep me?\",\"content\":\"Body\",\"created_at\":\"2026-04-29T09:10:00Z\"}"}
+				]
+			}`)),
+		},
+		{
+			chunkID: "chunk-obs-delete", project: project, createdBy: "dev",
+			createdAt: time.Date(2026, 4, 29, 11, 0, 0, 0, time.UTC),
+			parsed: parseMustChunk(t, []byte(`{
+				"sessions":[{"id":"sess-1","project":"proj-obs-hard-delete","started_at":"2026-04-29T09:00:00Z"}],
+				"mutations":[
+					{"project":"proj-obs-hard-delete","entity":"observation","entity_key":"obs-1","op":"delete","payload":"{\"sync_id\":\"obs-1\",\"session_id\":\"sess-1\",\"project\":\"proj-obs-hard-delete\",\"deleted\":true,\"hard_delete\":true}"}
+				]
+			}`)),
+		},
+	}
+
+	model, err := buildDashboardReadModelFromRows(chunks, materializeChunkRowsForDashboard(t, chunks))
+	if err != nil {
+		t.Fatalf("buildDashboardReadModelFromRows: %v", err)
+	}
+	cs := &CloudStore{
+		dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil },
+	}
+
+	observations, err := cs.ListRecentObservations(project, "", 10)
+	if err != nil {
+		t.Fatalf("ListRecentObservations: %v", err)
+	}
+	for _, observation := range observations {
+		if observation.SyncID == "obs-1" {
+			t.Fatalf("hard-deleted observation still listed on the dashboard: %+v", observation)
+		}
+	}
+}
+
+// TestSoftDeletedObservationDisappearsFromDashboard covers the default
+// DeleteObservation path: the row survives with deleted_at set, so it still
+// rides in chunk.Observations and materializes an upsert. The paired delete
+// mutation must be materialized after it so the replay does not resurrect it.
+func TestSoftDeletedObservationDisappearsFromDashboard(t *testing.T) {
+	const project = "proj-obs-soft-delete"
+	chunks := []dashboardChunkRow{
+		{
+			chunkID: "chunk-obs-save", project: project, createdBy: "dev",
+			createdAt: time.Date(2026, 4, 29, 10, 0, 0, 0, time.UTC),
+			parsed: parseMustChunk(t, []byte(`{
+				"sessions":[{"id":"sess-1","project":"proj-obs-soft-delete","started_at":"2026-04-29T09:00:00Z"}],
+				"observations":[{"sync_id":"obs-1","session_id":"sess-1","project":"proj-obs-soft-delete","type":"decision","title":"Keep me?","content":"Body","created_at":"2026-04-29T09:10:00Z"}],
+				"mutations":[
+					{"project":"proj-obs-soft-delete","entity":"observation","entity_key":"obs-1","op":"upsert","payload":"{\"sync_id\":\"obs-1\",\"session_id\":\"sess-1\",\"project\":\"proj-obs-soft-delete\",\"type\":\"decision\",\"title\":\"Keep me?\",\"content\":\"Body\",\"created_at\":\"2026-04-29T09:10:00Z\"}"}
+				]
+			}`)),
+		},
+		{
+			chunkID: "chunk-obs-delete", project: project, createdBy: "dev",
+			createdAt: time.Date(2026, 4, 29, 11, 0, 0, 0, time.UTC),
+			parsed: parseMustChunk(t, []byte(`{
+				"sessions":[{"id":"sess-1","project":"proj-obs-soft-delete","started_at":"2026-04-29T09:00:00Z"}],
+				"observations":[{"sync_id":"obs-1","session_id":"sess-1","project":"proj-obs-soft-delete","type":"decision","title":"Keep me?","content":"Body","created_at":"2026-04-29T09:10:00Z","deleted_at":"2026-04-29T10:30:00Z"}],
+				"mutations":[
+					{"project":"proj-obs-soft-delete","entity":"observation","entity_key":"obs-1","op":"delete","payload":"{\"sync_id\":\"obs-1\",\"session_id\":\"sess-1\",\"project\":\"proj-obs-soft-delete\",\"deleted\":true}"}
+				]
+			}`)),
+		},
+	}
+
+	model, err := buildDashboardReadModelFromRows(chunks, materializeChunkRowsForDashboard(t, chunks))
+	if err != nil {
+		t.Fatalf("buildDashboardReadModelFromRows: %v", err)
+	}
+	cs := &CloudStore{
+		dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil },
+	}
+
+	observations, err := cs.ListRecentObservations(project, "", 10)
+	if err != nil {
+		t.Fatalf("ListRecentObservations: %v", err)
+	}
+	for _, observation := range observations {
+		if observation.SyncID == "obs-1" {
+			t.Fatalf("soft-deleted observation still listed on the dashboard: %+v", observation)
+		}
+	}
+}
