@@ -1084,14 +1084,6 @@ func claudeCodeUserMCPPath() string {
 // resolved absolutely.
 func writeClaudeCodeUserMCP() error {
 	path := claudeCodeUserMCPPath()
-	if info, err := lstatFn(path); err == nil {
-		if err := validateClaudeCodeUserMCP(path, info); err != nil {
-			return err
-		}
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("stat user MCP config: %w", err)
-	}
-
 	data, err := claudeCodeUserMCPData()
 	if err != nil {
 		return err
@@ -1100,6 +1092,13 @@ func writeClaudeCodeUserMCP() error {
 	dir := claudeCodeMCPDir()
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("create mcp dir: %w", err)
+	}
+	if info, err := lstatFn(path); err == nil {
+		if err := validateClaudeCodeUserMCP(path, info); err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat user MCP config: %w", err)
 	}
 
 	if err := writeFileFn(path, data, 0644); err != nil {
