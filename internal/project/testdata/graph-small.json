@@ -1,0 +1,39 @@
+{
+  "directed": false,
+  "multigraph": false,
+  "graph": {},
+  "nodes": [
+    {"id": "h1", "label": "svc.Handler", "file_type": "code", "source_file": "internal/api/handler.go", "community": 0},
+    {"id": "h2", "label": "svc.Router", "file_type": "code", "source_file": "internal/api/router.go", "community": 0},
+    {"id": "h3", "label": "svc.Middleware", "file_type": "code", "source_file": "internal/api/middleware.go", "community": 0},
+    {"id": "h4", "label": "svc.Config", "file_type": "code", "source_file": "internal/api/config.go", "community": 0},
+    {"id": "h5", "label": "svc.Logger", "file_type": "code", "source_file": "internal/api/logger.go", "community": 0},
+    {"id": "d1", "label": "db.Conn", "file_type": "code", "source_file": "internal/db/conn.go", "community": 1},
+    {"id": "d2", "label": "db.Query", "file_type": "code", "source_file": "internal/db/query.go", "community": 1},
+    {"id": "d3", "label": "db.Migration", "file_type": "code", "source_file": "internal/db/migration.go", "community": 1},
+    {"id": "d4", "label": "db.Pool", "file_type": "code", "source_file": "internal/db/pool.go", "community": 1},
+    {"id": "w1", "label": "worker.Job", "file_type": "code", "source_file": "internal/worker/job.go", "community": 2},
+    {"id": "w2", "label": "worker.Queue", "file_type": "code", "source_file": "internal/worker/queue.go", "community": 2},
+    {"id": "w3", "label": "worker.Retry", "file_type": "code", "source_file": "internal/worker/retry.go", "community": 2},
+    {"id": "w4", "label": "worker.Metrics", "file_type": "code", "source_file": "internal/worker/metrics.go", "community": 2},
+    {"id": "w5", "label": "worker.Scheduler", "file_type": "code", "source_file": "internal/worker/scheduler.go", "community": 2},
+    {"id": "doc1", "label": "README", "file_type": "document", "source_file": "docs/README.md", "community": 3}
+  ],
+  "links": [
+    {"source": "h1", "target": "h2", "relation": "calls", "confidence": "EXTRACTED"},
+    {"source": "h1", "target": "h3", "relation": "calls", "confidence": "EXTRACTED"},
+    {"source": "h1", "target": "h4", "relation": "references", "confidence": "EXTRACTED"},
+    {"source": "h1", "target": "h5", "relation": "references", "confidence": "EXTRACTED"},
+    {"source": "h1", "target": "d1", "relation": "calls", "confidence": "INFERRED"},
+    {"source": "h1", "target": "w1", "relation": "calls", "confidence": "EXTRACTED"},
+    {"source": "d1", "target": "d2", "relation": "calls", "confidence": "EXTRACTED"},
+    {"source": "d1", "target": "d3", "relation": "contains", "confidence": "EXTRACTED"},
+    {"source": "d1", "target": "d4", "relation": "contains", "confidence": "EXTRACTED"},
+    {"source": "w1", "target": "w2", "relation": "calls", "confidence": "EXTRACTED"},
+    {"source": "w1", "target": "w3", "relation": "calls", "confidence": "EXTRACTED"},
+    {"source": "w2", "target": "w4", "relation": "references", "confidence": "EXTRACTED"},
+    {"source": "w2", "target": "w5", "relation": "references", "confidence": "EXTRACTED"}
+  ],
+  "hyperedges": [],
+  "built_at_commit": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+}

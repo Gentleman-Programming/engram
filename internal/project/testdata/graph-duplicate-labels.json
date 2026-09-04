@@ -1,0 +1,29 @@
+{
+  "directed": false,
+  "multigraph": false,
+  "graph": {},
+  "nodes": [
+    {"id": "std1", "label": "Standard", "file_type": "code", "source_file": "internal/pkgA/standard.go", "community": 0},
+    {"id": "std2", "label": "Standard", "file_type": "code", "source_file": "internal/pkgB/standard.go", "community": 0},
+    {"id": "a1", "label": "A1", "file_type": "code", "source_file": "internal/pkgA/a1.go", "community": 0},
+    {"id": "a2", "label": "A2", "file_type": "code", "source_file": "internal/pkgA/a2.go", "community": 0},
+    {"id": "a3", "label": "A3", "file_type": "code", "source_file": "internal/pkgA/a3.go", "community": 0},
+    {"id": "a4", "label": "A4", "file_type": "code", "source_file": "internal/pkgA/a4.go", "community": 0},
+    {"id": "a5", "label": "A5", "file_type": "code", "source_file": "internal/pkgA/a5.go", "community": 0},
+    {"id": "b1", "label": "B1", "file_type": "code", "source_file": "internal/pkgB/b1.go", "community": 0},
+    {"id": "b2", "label": "B2", "file_type": "code", "source_file": "internal/pkgB/b2.go", "community": 0},
+    {"id": "b3", "label": "B3", "file_type": "code", "source_file": "internal/pkgB/b3.go", "community": 0}
+  ],
+  "links": [
+    {"source": "std1", "target": "a1", "relation": "calls", "confidence": "EXTRACTED"},
+    {"source": "std1", "target": "a2", "relation": "calls", "confidence": "EXTRACTED"},
+    {"source": "std1", "target": "a3", "relation": "calls", "confidence": "EXTRACTED"},
+    {"source": "std1", "target": "a4", "relation": "calls", "confidence": "EXTRACTED"},
+    {"source": "std1", "target": "a5", "relation": "calls", "confidence": "EXTRACTED"},
+    {"source": "std2", "target": "b1", "relation": "calls", "confidence": "EXTRACTED"},
+    {"source": "std2", "target": "b2", "relation": "calls", "confidence": "EXTRACTED"},
+    {"source": "std2", "target": "b3", "relation": "calls", "confidence": "EXTRACTED"}
+  ],
+  "hyperedges": [],
+  "built_at_commit": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+}

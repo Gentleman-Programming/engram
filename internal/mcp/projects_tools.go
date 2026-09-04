@@ -573,7 +573,7 @@ func handleProjectUpsert(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 			if repoDir == "" {
 				repoDir = detRes.Path
 			}
-			graphResult, err := s.SyncProjectGraph(project, repoDir, card.GraphPath)
+			graphResult, err := projectpkg.SyncGraph(s, project, repoDir, card.GraphPath)
 			switch {
 			case errors.Is(err, store.ErrGraphNotFound):
 				return projectToolError("graph_not_found", "graph.json not found", map[string]any{"repo_dir": repoDir, "graph_path": card.GraphPath}), nil

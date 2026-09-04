@@ -9,12 +9,9 @@ package store
 
 import (
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -326,10 +323,11 @@ func (s *Store) ProjectSyncSummary(slug string) (ProjectSyncSummary, error) {
 // GraphSyncResult backs the `graph` section of mem_project_upsert and
 // POST /projects/{slug}/graph/sync.
 //
-// Only the verifiable facts from graph.json's top level are captured here
-// (built_at_commit, node/edge/community counts). The richer graph_summary
-// blob (god nodes, labeled communities, GRAPH_REPORT.md parsing — RFC §8) is
-// T-04.06's indexing job; ProjectCard.GraphSummary is left nil until then.
+// The graph_summary blob itself (god nodes, labeled communities,
+// GRAPH_REPORT.md parsing — RFC §8) is computed by
+// internal/project.SyncGraph, which calls StampProjectGraph below to persist
+// it; that function returns this same struct so callers don't see a
+// difference in shape.
 type GraphSyncResult struct {
 	Synced         bool   `json:"synced"`
 	GraphCommit    string `json:"graph_commit"`
@@ -340,100 +338,30 @@ type GraphSyncResult struct {
 	CommunityCount int    `json:"community_count"`
 }
 
-type graphJSONNode struct {
-	Community *int `json:"community"`
-}
-
-type graphJSONFile struct {
-	BuiltAtCommit string            `json:"built_at_commit"`
-	Nodes         []graphJSONNode   `json:"nodes"`
-	Links         []json.RawMessage `json:"links"`
-}
-
-// SyncProjectGraph reads <repoDir>/<graphPath>, validates built_at_commit,
-// and stamps project_cards.graph_commit/graph_built_at in a single update.
-// It never writes graph_summary (see GraphSyncResult).
-func (s *Store) SyncProjectGraph(slug, repoDir, graphPath string) (GraphSyncResult, error) {
-	var result GraphSyncResult
-	if strings.TrimSpace(graphPath) == "" {
-		graphPath = "graphify-out/graph.json"
-	}
-	fullPath := graphPath
-	if !filepath.IsAbs(fullPath) {
-		fullPath = filepath.Join(repoDir, graphPath)
-	}
-	raw, err := os.ReadFile(fullPath)
-	if errors.Is(err, os.ErrNotExist) {
-		return result, ErrGraphNotFound
-	}
-	if err != nil {
-		return result, fmt.Errorf("engram-projects: read graph.json: %w", err)
-	}
-
-	var g graphJSONFile
-	if err := json.Unmarshal(raw, &g); err != nil {
-		return result, fmt.Errorf("engram-projects: parse graph.json: %w", err)
-	}
-	if len(g.BuiltAtCommit) != 40 {
-		return result, ErrGraphMissingCommit
-	}
-
-	communities := map[int]struct{}{}
-	for _, n := range g.Nodes {
-		if n.Community != nil {
-			communities[*n.Community] = struct{}{}
-		}
-	}
-
-	fi, statErr := os.Stat(fullPath)
-	builtAt := s.nowUTC()
-	if statErr == nil {
-		builtAt = fi.ModTime().UTC().Format("2006-01-02 15:04:05")
-	}
-
-	headCommit := gitHeadCommit(repoDir)
-
+// StampProjectGraph persists the code-graph pointer (graph_commit,
+// graph_built_at) and, when non-nil, the graph_summary blob for slug, in a
+// single UPDATE. It is the only write path for these three columns.
+//
+// The parsing and aggregation that produces graphSummary lives in
+// internal/project (see graph_summary.go there), not here: internal/project
+// already depends on internal/store for card/task/evidence access, so store
+// cannot depend back on project without an import cycle. This method is
+// store's half of that split — plain persistence, no graphify-specific
+// logic — which is also why it takes the summary pre-rendered as a JSON
+// string rather than a struct.
+//
+// The DDL constraint `CHECK (graph_summary IS NULL OR graph_commit IS NOT
+// NULL)` guarantees a summary is never stored without the commit it was
+// computed from (D-02); this method's signature makes that pairing the only
+// thing you can call it with in the first place.
+func (s *Store) StampProjectGraph(slug, graphCommit, graphBuiltAt string, graphSummary *string) error {
 	if _, err := s.db.Exec(
-		`UPDATE project_cards SET graph_commit = ?, graph_built_at = ?, updated_at = ? WHERE slug = ?`,
-		g.BuiltAtCommit, builtAt, s.nowUTC(), slug,
+		`UPDATE project_cards SET graph_commit = ?, graph_built_at = ?, graph_summary = ?, updated_at = ? WHERE slug = ?`,
+		graphCommit, graphBuiltAt, nullableStr(graphSummary), s.nowUTC(), slug,
 	); err != nil {
-		return result, fmt.Errorf("engram-projects: stamp graph commit: %w", err)
+		return fmt.Errorf("engram-projects: stamp graph commit: %w", err)
 	}
-
-	result.Synced = true
-	result.GraphCommit = g.BuiltAtCommit
-	result.HeadCommit = headCommit
-	result.Stale = headCommit != "" && headCommit != g.BuiltAtCommit
-	result.NodeCount = len(g.Nodes)
-	result.EdgeCount = len(g.Links)
-	result.CommunityCount = len(communities)
-	return result, nil
-}
-
-// gitHeadCommit runs `git -C repoDir rev-parse HEAD` with a short timeout,
-// mirroring the pattern documented in RFC §5.2. Any failure (not a repo, git
-// missing, timeout) yields "" rather than an error: a missing HEAD is a
-// staleness-check input, never a reason to fail the graph sync.
-func gitHeadCommit(repoDir string) string {
-	if strings.TrimSpace(repoDir) == "" {
-		return ""
-	}
-	ctxTimeout := 2 * time.Second
-	done := make(chan string, 1)
-	go func() {
-		out, err := exec.Command("git", "-C", repoDir, "rev-parse", "HEAD").Output()
-		if err != nil {
-			done <- ""
-			return
-		}
-		done <- strings.TrimSpace(string(out))
-	}()
-	select {
-	case v := <-done:
-		return v
-	case <-time.After(ctxTimeout):
-		return ""
-	}
+	return nil
 }
 
 // nowUTC returns the current UTC time formatted like SQLite's datetime('now'),

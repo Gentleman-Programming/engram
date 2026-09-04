@@ -1,0 +1,13 @@
+{
+  "directed": false,
+  "multigraph": false,
+  "graph": {},
+  "nodes": [
+    {"id": "h1", "label": "svc.Handler", "file_type": "code", "source_file": "internal/api/handler.go", "community": 0},
+    {"id": "h2", "label": "svc.Router", "file_type": "code", "source_file": "internal/api/router.go", "community": 0}
+  ],
+  "links": [
+    {"source": "h1", "target": "h2", "relation": "calls", "confidence": "EXTRACTED"}
+  ],
+  "hyperedges": []
+}
