@@ -80,6 +80,8 @@ type Manifest struct {
 	Chunks  []ChunkEntry `json:"chunks"`
 }
 
+const ownershipModeManifestVersion = 2
+
 // ChunkEntry describes a single chunk in the manifest.
 type ChunkEntry struct {
 	ID        string `json:"id"`         // SHA-256 hash prefix (8 chars) of content
@@ -413,13 +415,19 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 	if err != nil {
 		return nil, err
 	}
-
 	chunkTargetKey := sy.chunkTrackingTargetKey(project)
 
 	// Get chunk IDs already recorded locally.
 	locallySyncedChunks, err := storeGetSynced(sy.store, chunkTargetKey)
 	if err != nil {
 		return nil, fmt.Errorf("get synced chunks: %w", err)
+	}
+	projectOwned, err := sy.store.HasProjectOwnedSessions()
+	if err != nil {
+		return nil, fmt.Errorf("inspect session ownership modes: %w", err)
+	}
+	if projectOwned && len(manifest.Chunks) > 0 && manifest.Version < ownershipModeManifestVersion {
+		return nil, fmt.Errorf("sync downgrade is unsupported after project-owned sessions exist; peer manifest version %d does not support ownership modes", manifest.Version)
 	}
 	knownChunks := make(map[string]bool, len(locallySyncedChunks))
 	for chunkID, ok := range locallySyncedChunks {
@@ -445,6 +453,9 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 	}
 	if !sy.cloudMode && strings.TrimSpace(project) != "" {
 		data = filterExportDataToProjectScope(data)
+	}
+	if projectOwned {
+		manifest.Version = ownershipModeManifestVersion
 	}
 	if sy.cloudMode {
 		chunk, mutationSeqs, err := sy.filterByPendingMutations(data, project)
@@ -800,11 +811,17 @@ func (sy *Syncer) Import() (*ImportResult, error) {
 	if len(manifest.Chunks) == 0 {
 		return sy.finalizeImport(&ImportResult{})
 	}
-
 	// Get chunks we've already imported
 	knownChunks, err := storeGetSynced(sy.store, sy.chunkTrackingTargetKey(""))
 	if err != nil {
 		return nil, fmt.Errorf("get synced chunks: %w", err)
+	}
+	projectOwned, err := sy.store.HasProjectOwnedSessions()
+	if err != nil {
+		return nil, fmt.Errorf("inspect session ownership modes: %w", err)
+	}
+	if projectOwned && manifest.Version < ownershipModeManifestVersion {
+		return nil, fmt.Errorf("sync downgrade is unsupported after project-owned sessions exist; peer manifest version %d does not support ownership modes", manifest.Version)
 	}
 
 	entries := manifest.Chunks
