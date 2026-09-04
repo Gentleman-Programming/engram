@@ -24,7 +24,7 @@ function freePort() {
 
 // A fake `engram serve` that logs every invocation, then either dies before readiness or
 // starts answering /health after `readyAfterMs` — the slow-health window under test.
-async function writeFakeEngramBin(dir, { spawnLog, port, readyAfterMs, exitCode }) {
+async function writeFakeEngramBin(dir, { spawnLog, requestLog, port, readyAfterMs, exitCode }) {
   const binPath = join(dir, "fake-engram.cjs");
   const script = `#!/usr/bin/env node
 const { appendFileSync } = require("node:fs");
@@ -38,6 +38,7 @@ if (isServe) {
   appendFileSync(${JSON.stringify(spawnLog)}, "serve\\n");
   ${exitCode === undefined
       ? `const server = createServer((req, res) => {
+  appendFileSync(${JSON.stringify(requestLog)}, \`\${req.method} \${req.url}\\n\`);
   if (req.url.startsWith("/project/current")) {
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ project: "fake-project" }));
@@ -112,7 +113,9 @@ async function withFixture(options, run) {
   let readyServer;
   try {
     const spawnLog = join(dir, "spawns.log");
+    const requestLog = join(dir, "requests.log");
     await writeFile(spawnLog, "", "utf8");
+    await writeFile(requestLog, "", "utf8");
     const port = await freePort();
     readyServer = options.readyServer && createHTTPServer((request, response) => {
       response.writeHead(200, { "content-type": "application/json" });
@@ -127,13 +130,13 @@ async function withFixture(options, run) {
     });
     const fakeEngram = options.missingBin
       ? { engramBin: join(dir, "engram-does-not-exist") }
-      : await writeFakeEngramBin(dir, { spawnLog, port, readyAfterMs: options.readyAfterMs ?? 0, exitCode: options.exitCode });
+      : await writeFakeEngramBin(dir, { spawnLog, requestLog, port, readyAfterMs: options.readyAfterMs ?? 0, exitCode: options.exitCode });
     if (fakeEngram.nodeOptions) {
       process.env.NODE_OPTIONS = [originalNodeOptions, fakeEngram.nodeOptions].filter(Boolean).join(" ");
     }
     const sandbox = await createPluginSandbox(dir);
     const plugin = await loadPlugin({ engramBin: fakeEngram.engramBin, port, cwd: dir, sandbox });
-    await run({ ...plugin, spawnLog, dir, port });
+    await run({ ...plugin, spawnLog, requestLog, dir, port });
   } finally {
     if (originalBin === undefined) delete process.env.ENGRAM_BIN; else process.env.ENGRAM_BIN = originalBin;
     if (originalPort === undefined) delete process.env.ENGRAM_PORT; else process.env.ENGRAM_PORT = originalPort;
@@ -147,6 +150,11 @@ async function withFixture(options, run) {
 async function countSpawns(spawnLog) {
   const log = await readFile(spawnLog, "utf8");
   return log.split("\n").filter((line) => line === "serve").length;
+}
+
+async function readRequests(requestLog) {
+  const log = await readFile(requestLog, "utf8");
+  return log.split("\n").filter(Boolean);
 }
 
 test("an initially healthy Engram provider publishes ready status", async () => {
@@ -266,4 +274,24 @@ test("loading the plugin leaves the checkout's node_modules untouched", async ()
       `${stub} was replaced by a test double; the suite must not write into the real node_modules`,
     );
   }
+});
+
+test("session_shutdown ends the Engram runtime session on the server", async () => {
+  await withFixture({}, async ({ hooks, ctx, requestLog }) => {
+    await hooks.get("session_start")({}, ctx);
+    await hooks.get("session_shutdown")({}, ctx);
+
+    const requests = await readRequests(requestLog);
+    assert.ok(
+      requests.includes("POST /sessions/session-startup/end"),
+      `expected a session-end request, got: ${requests.join(", ")}`,
+    );
+  });
+});
+
+test("session_shutdown never throws or hangs when the Engram server is unreachable", async () => {
+  await withFixture({ exitCode: 1 }, async ({ hooks, ctx }) => {
+    await assert.doesNotReject(hooks.get("session_start")({}, ctx));
+    await assert.doesNotReject(hooks.get("session_shutdown")({}, ctx));
+  });
 });

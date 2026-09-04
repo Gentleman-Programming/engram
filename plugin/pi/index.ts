@@ -1317,6 +1317,12 @@ export default function registerEngram(pi: ExtensionAPI) {
   pi.on("session_shutdown", async (_event: unknown, ctx: SessionContext) => {
     const sessionId = observeRuntimeSessionID(ctx);
     if (!sessionId) return;
+    // Best-effort: an unreachable server must never keep shutdown from completing, and a
+    // session this process never registered still gets the same idempotent end request.
+    await bestEffortEngramFetch(`/sessions/${encodeURIComponent(sessionId)}/end`, {
+      method: "POST",
+      body: {},
+    });
     toolCounts.delete(sessionId);
     forgetKnownSession(sessionId);
     forgetSelfHealContext(sessionId);
