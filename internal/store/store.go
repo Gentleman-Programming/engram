@@ -5701,6 +5701,54 @@ func (s *Store) GetObservationBySyncID(syncID string) (*Observation, error) {
 
 // ─── Project Enrollment for Cloud Sync ───────────────────────────────────────
 
+var newRemirrorSource = func() string {
+	return fmt.Sprintf("remirror:%d", time.Now().UTC().UnixNano())
+}
+
+// RemirrorProject enqueues a fresh current-state replay for an enrolled project.
+// It leaves historical delivery rows untouched so recovery remains auditable.
+func (s *Store) RemirrorProject(project string) error {
+	project, _ = NormalizeProject(project)
+	project = strings.TrimSpace(project)
+	if project == "" {
+		return fmt.Errorf("cloud remirror requires project")
+	}
+	enrolled, err := s.IsProjectEnrolled(project)
+	if err != nil {
+		return fmt.Errorf("cloud remirror enrollment check: %w", err)
+	}
+	if !enrolled {
+		return fmt.Errorf("cloud remirror requires enrolled project %q", project)
+	}
+	return s.withTx(func(tx *sql.Tx) error {
+		source, err := s.nextRemirrorSourceTx(tx)
+		if err != nil {
+			return err
+		}
+		return s.backfillProjectSyncMutationsTx(tx, project, source)
+	})
+}
+
+func (s *Store) nextRemirrorSourceTx(tx *sql.Tx) (string, error) {
+	base := strings.TrimSpace(newRemirrorSource())
+	if base == "" {
+		return "", fmt.Errorf("cloud remirror source is required")
+	}
+	for suffix := 0; ; suffix++ {
+		source := base
+		if suffix > 0 {
+			source = fmt.Sprintf("%s:%d", base, suffix)
+		}
+		var exists bool
+		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM sync_mutations WHERE source = ?)`, source).Scan(&exists); err != nil {
+			return "", err
+		}
+		if !exists {
+			return source, nil
+		}
+	}
+}
+
 // EnrollProject registers a project for cloud sync. Idempotent — re-enrolling
 // an already-enrolled project is a no-op.
 func (s *Store) EnrollProject(project string) error {
@@ -6875,17 +6923,24 @@ func (s *Store) getSyncStateTx(tx *sql.Tx, targetKey string) (*SyncState, error)
 	return &state, nil
 }
 
-func (s *Store) backfillProjectSyncMutationsTx(tx *sql.Tx, project string) error {
-	if err := s.backfillSessionSyncMutationsTx(tx, project); err != nil {
+func (s *Store) backfillProjectSyncMutationsTx(tx *sql.Tx, project string, source ...string) error {
+	if err := s.backfillSessionSyncMutationsTx(tx, project, source...); err != nil {
 		return err
 	}
-	if err := s.backfillObservationSyncMutationsTx(tx, project); err != nil {
+	if err := s.backfillObservationSyncMutationsTx(tx, project, source...); err != nil {
 		return err
 	}
-	if err := s.backfillPromptSyncMutationsTx(tx, project); err != nil {
+	if err := s.backfillPromptSyncMutationsTx(tx, project, source...); err != nil {
 		return err
 	}
-	return s.backfillRelationSyncMutationsTx(tx, project)
+	return s.backfillRelationSyncMutationsTx(tx, project, source...)
+}
+
+func backfillMutationSource(source []string) string {
+	if len(source) == 0 || strings.TrimSpace(source[0]) == "" {
+		return SyncSourceLocal
+	}
+	return strings.TrimSpace(source[0])
 }
 
 // enqueueRescuedProjectMutationsTx journals the rescued rows. sessionIDs covers
@@ -7213,7 +7268,8 @@ func (s *Store) repairEnrolledProjectSyncMutations() error {
 	return nil
 }
 
-func (s *Store) backfillSessionSyncMutationsTx(tx *sql.Tx, project string) error {
+func (s *Store) backfillSessionSyncMutationsTx(tx *sql.Tx, project string, source ...string) error {
+	mutationSource := backfillMutationSource(source)
 	// Blank source identities are skipped, not enqueued: enqueueSyncMutationTx
 	// rejects them and a single corrupt row would otherwise roll back the whole
 	// backfill transaction. The predicate must stay identical to the COUNT in
@@ -7232,7 +7288,7 @@ func (s *Store) backfillSessionSyncMutationsTx(tx *sql.Tx, project string) error
 			  AND sm.source = ?
 		  )
 		ORDER BY started_at ASC, id ASC`,
-		project, sqlWhitespaceTrimSet, DefaultSyncTargetKey, SyncEntitySession, SyncSourceLocal,
+		project, sqlWhitespaceTrimSet, DefaultSyncTargetKey, SyncEntitySession, mutationSource,
 	)
 	if err != nil {
 		return err
@@ -7259,14 +7315,15 @@ func (s *Store) backfillSessionSyncMutationsTx(tx *sql.Tx, project string) error
 
 	// Phase 2: insert now that the read cursor is closed.
 	for _, payload := range pending {
-		if err := s.enqueueSyncMutationTx(tx, SyncEntitySession, payload.ID, SyncOpUpsert, payload); err != nil {
+		if err := s.enqueueSyncMutationWithSourceTx(tx, SyncEntitySession, payload.ID, SyncOpUpsert, payload, mutationSource); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (s *Store) backfillObservationSyncMutationsTx(tx *sql.Tx, project string) error {
+func (s *Store) backfillObservationSyncMutationsTx(tx *sql.Tx, project string, source ...string) error {
+	mutationSource := backfillMutationSource(source)
 	// ── Live observations ─────────────────────────────────────────────────────
 	rows, err := s.queryItHook(tx, `
 		SELECT o.sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project, o.scope, o.topic_key,
@@ -7287,7 +7344,7 @@ func (s *Store) backfillObservationSyncMutationsTx(tx *sql.Tx, project string) e
 			  AND sm.source = ?
 		  )
 		ORDER BY o.id ASC`,
-		project, project, DefaultSyncTargetKey, SyncEntityObservation, SyncSourceLocal,
+		project, project, DefaultSyncTargetKey, SyncEntityObservation, mutationSource,
 	)
 	if err != nil {
 		return err
@@ -7326,7 +7383,7 @@ func (s *Store) backfillObservationSyncMutationsTx(tx *sql.Tx, project string) e
 
 	// Phase 2: insert live observation mutations.
 	for _, payload := range pending {
-		if err := s.enqueueSyncMutationTx(tx, SyncEntityObservation, payload.SyncID, SyncOpUpsert, payload); err != nil {
+		if err := s.enqueueSyncMutationWithSourceTx(tx, SyncEntityObservation, payload.SyncID, SyncOpUpsert, payload, mutationSource); err != nil {
 			return err
 		}
 	}
@@ -7351,7 +7408,7 @@ func (s *Store) backfillObservationSyncMutationsTx(tx *sql.Tx, project string) e
 			  AND sm.source = ?
 		  )
 		ORDER BY o.id ASC`,
-		project, project, DefaultSyncTargetKey, SyncEntityObservation, SyncOpDelete, SyncSourceLocal,
+		project, project, DefaultSyncTargetKey, SyncEntityObservation, SyncOpDelete, mutationSource,
 	)
 	if err != nil {
 		return err
@@ -7377,14 +7434,15 @@ func (s *Store) backfillObservationSyncMutationsTx(tx *sql.Tx, project string) e
 
 	// Phase 2: insert deleted observation mutations.
 	for _, payload := range deletedPending {
-		if err := s.enqueueSyncMutationTx(tx, SyncEntityObservation, payload.SyncID, SyncOpDelete, payload); err != nil {
+		if err := s.enqueueSyncMutationWithSourceTx(tx, SyncEntityObservation, payload.SyncID, SyncOpDelete, payload, mutationSource); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (s *Store) backfillPromptSyncMutationsTx(tx *sql.Tx, project string) error {
+func (s *Store) backfillPromptSyncMutationsTx(tx *sql.Tx, project string, source ...string) error {
+	mutationSource := backfillMutationSource(source)
 	// ── Live prompts ──────────────────────────────────────────────────────────
 	rows, err := s.queryItHook(tx, `
 		SELECT p.sync_id, p.session_id, p.content, p.project, p.created_at
@@ -7403,7 +7461,7 @@ func (s *Store) backfillPromptSyncMutationsTx(tx *sql.Tx, project string) error 
 			  AND sm.source = ?
 		  )
 		ORDER BY p.id ASC`,
-		project, project, DefaultSyncTargetKey, SyncEntityPrompt, SyncSourceLocal,
+		project, project, DefaultSyncTargetKey, SyncEntityPrompt, mutationSource,
 	)
 	if err != nil {
 		return err
@@ -7427,7 +7485,7 @@ func (s *Store) backfillPromptSyncMutationsTx(tx *sql.Tx, project string) error 
 
 	// Phase 2: insert live prompt mutations.
 	for _, payload := range pending {
-		if err := s.enqueueSyncMutationTx(tx, SyncEntityPrompt, payload.SyncID, SyncOpUpsert, payload); err != nil {
+		if err := s.enqueueSyncMutationWithSourceTx(tx, SyncEntityPrompt, payload.SyncID, SyncOpUpsert, payload, mutationSource); err != nil {
 			return err
 		}
 	}
@@ -7451,7 +7509,7 @@ func (s *Store) backfillPromptSyncMutationsTx(tx *sql.Tx, project string) error 
 			  AND sm.op = ?
 		  )
 		ORDER BY deleted_at ASC`,
-		project, project, DefaultSyncTargetKey, SyncEntityPrompt, SyncSourceLocal, SyncOpDelete,
+		project, project, DefaultSyncTargetKey, SyncEntityPrompt, mutationSource, SyncOpDelete,
 	)
 	if err != nil {
 		return err
@@ -7477,7 +7535,7 @@ func (s *Store) backfillPromptSyncMutationsTx(tx *sql.Tx, project string) error 
 
 	// Phase 2: insert tombstone mutations.
 	for _, payload := range tombstonePending {
-		if err := s.enqueueSyncMutationTx(tx, SyncEntityPrompt, payload.SyncID, SyncOpDelete, payload); err != nil {
+		if err := s.enqueueSyncMutationWithSourceTx(tx, SyncEntityPrompt, payload.SyncID, SyncOpDelete, payload, mutationSource); err != nil {
 			return err
 		}
 	}
@@ -7500,7 +7558,8 @@ func (s *Store) backfillPromptSyncMutationsTx(tx *sql.Tx, project string) error 
 // ExportRelationMutations additionally filters by tgt.project; the backfill
 // intentionally omits that filter to avoid skipping cross-project edges where
 // only the source belongs to this project.
-func (s *Store) backfillRelationSyncMutationsTx(tx *sql.Tx, project string) error {
+func (s *Store) backfillRelationSyncMutationsTx(tx *sql.Tx, project string, source ...string) error {
+	mutationSource := backfillMutationSource(source)
 	// Only backfill fully-judged relations: exclude orphaned/pending and any row
 	// that is missing marked_by_actor or marked_by_kind.  Cloud validation
 	// (chunkcodec + server) hard-rejects mutations without those fields (HTTP 400),
@@ -7530,7 +7589,7 @@ func (s *Store) backfillRelationSyncMutationsTx(tx *sql.Tx, project string) erro
 		ORDER BY r.created_at ASC, r.sync_id ASC`,
 		JudgmentStatusOrphaned, JudgmentStatusPending,
 		project,
-		DefaultSyncTargetKey, SyncEntityRelation, SyncSourceLocal,
+		DefaultSyncTargetKey, SyncEntityRelation, mutationSource,
 	)
 	if err != nil {
 		return err
@@ -7558,7 +7617,7 @@ func (s *Store) backfillRelationSyncMutationsTx(tx *sql.Tx, project string) erro
 
 	// Phase 2: insert now that the read cursor is closed.
 	for _, p := range pending {
-		if err := s.enqueueSyncMutationTx(tx, SyncEntityRelation, p.SyncID, SyncOpUpsert, p); err != nil {
+		if err := s.enqueueSyncMutationWithSourceTx(tx, SyncEntityRelation, p.SyncID, SyncOpUpsert, p, mutationSource); err != nil {
 			return err
 		}
 	}
@@ -7566,8 +7625,16 @@ func (s *Store) backfillRelationSyncMutationsTx(tx *sql.Tx, project string) erro
 }
 
 func (s *Store) enqueueSyncMutationTx(tx *sql.Tx, entity, entityKey, op string, payload any) error {
+	return s.enqueueSyncMutationWithSourceTx(tx, entity, entityKey, op, payload, SyncSourceLocal)
+}
+
+func (s *Store) enqueueSyncMutationWithSourceTx(tx *sql.Tx, entity, entityKey, op string, payload any, source string) error {
 	if entity == SyncEntitySession && strings.TrimSpace(entityKey) == "" {
 		return ErrSessionIDRequired
+	}
+	source = strings.TrimSpace(source)
+	if source == "" {
+		source = SyncSourceLocal
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
@@ -7594,7 +7661,7 @@ func (s *Store) enqueueSyncMutationTx(tx *sql.Tx, entity, entityKey, op string, 
 	res, err := s.execHook(tx,
 		`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		DefaultSyncTargetKey, entity, entityKey, op, string(encoded), SyncSourceLocal, project,
+		DefaultSyncTargetKey, entity, entityKey, op, string(encoded), source, project,
 	)
 	if err != nil {
 		return err

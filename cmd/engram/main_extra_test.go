@@ -460,7 +460,7 @@ func TestTryStartAutosyncReturnsStopFn(t *testing.T) {
 	cfg := testConfig(t)
 	t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "1")
 	t.Setenv("ENGRAM_CLOUD_TOKEN", "test-token")
-	t.Setenv("ENGRAM_CLOUD_SERVER", "http://localhost:9999")
+	t.Setenv("ENGRAM_CLOUD_SERVER", "https://localhost:9999")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1506,6 +1506,9 @@ func TestCmdCloudUpgradeHelpShowsGuidedWorkflow(t *testing.T) {
 	if !strings.Contains(stdout, "doctor -> repair -> bootstrap -> status/rollback") {
 		t.Fatalf("expected guided workflow in help output, got %q", stdout)
 	}
+	if !strings.Contains(stdout, "use remirror only to rebuild cloud state from authoritative local data") {
+		t.Fatalf("expected remirror recovery guidance in help output, got %q", stdout)
+	}
 	if !strings.Contains(stdout, "local SQLite remains source of truth") {
 		t.Fatalf("expected local-first semantics in help output, got %q", stdout)
 	}
@@ -1524,6 +1527,7 @@ func TestCloudUpgradeDocsMatchHelpAndLocalFirstSemantics(t *testing.T) {
 
 	helpRequired := []string{
 		"doctor -> repair -> bootstrap -> status/rollback",
+		"use remirror only to rebuild cloud state from authoritative local data",
 		"local SQLite remains source of truth",
 	}
 	for _, token := range helpRequired {
@@ -4398,7 +4402,7 @@ func TestCmdMCP(t *testing.T) {
 	t.Run("cloud autosync env with token and server starts and stops manager", func(t *testing.T) {
 		t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "1")
 		t.Setenv("ENGRAM_CLOUD_TOKEN", "tok")
-		t.Setenv("ENGRAM_CLOUD_SERVER", "http://localhost:9999")
+		t.Setenv("ENGRAM_CLOUD_SERVER", "https://localhost:9999")
 
 		runStarted := make(chan struct{}, 1)
 		stopCalled := make(chan struct{}, 1)
@@ -4463,7 +4467,7 @@ func TestCmdMCPAutosyncPushesWriteDuringServe(t *testing.T) {
 	observationPushed := make(chan struct{})
 	var closeObservationPushed sync.Once
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -4508,6 +4512,7 @@ func TestCmdMCPAutosyncPushesWriteDuringServe(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
+	trustTLSServer(t, srv)
 
 	t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "1")
 	t.Setenv("ENGRAM_CLOUD_TOKEN", "test-token")
@@ -4586,7 +4591,7 @@ func TestCmdMCPAutosyncPollTickerPullsDuringServe(t *testing.T) {
 	pullCalled := make(chan struct{})
 	var closePullCalled sync.Once
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -4614,6 +4619,7 @@ func TestCmdMCPAutosyncPollTickerPullsDuringServe(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
+	trustTLSServer(t, srv)
 
 	t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "1")
 	t.Setenv("ENGRAM_CLOUD_TOKEN", "test-token")

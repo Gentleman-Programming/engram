@@ -232,10 +232,10 @@ ENGRAM_CLOUD_ALLOWED_PROJECTS="my-project" \
 engram cloud serve
 ```
 
-Then configure client endpoint + token:
+Then configure the client through an HTTPS TLS-terminating endpoint and set its token:
 
 ```bash
-engram cloud config --server http://127.0.0.1:8080
+engram cloud config --server https://your-tls-proxy:8443
 export ENGRAM_CLOUD_TOKEN="your-token"
 engram cloud enroll my-project
 engram sync --cloud --project my-project
@@ -243,6 +243,7 @@ engram sync --cloud --project my-project
 
 Rules that matter:
 - `ENGRAM_CLOUD_INSECURE_NO_AUTH=1` cannot be combined with `ENGRAM_CLOUD_TOKEN`
+- Bearer-token clients require HTTPS, including after redirects. Plain HTTP is supported only for tokenless local/dev smoke mode.
 - `ENGRAM_CLOUD_ALLOWED_PROJECTS` is required server-side in both modes
 - authenticated mode requires explicit non-default `ENGRAM_JWT_SECRET`
 - `ENGRAM_CLOUD_INSECURE_NO_AUTH=1` remains local/dev only (never production)
