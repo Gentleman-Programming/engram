@@ -188,6 +188,9 @@ func TestApplySessionProjectReclassificationBacksUpAndUpdatesAllowedTables(t *te
 		t.Fatalf("counts=%+v", result.Counts)
 	}
 	assertRepairProjects(t, s, "repair-s1", "engram", "engram", "engram")
+	if got := scalarString(t, s, `SELECT ownership_mode FROM sessions WHERE id = ?`, "repair-s1"); got != SessionOwnershipShared {
+		t.Fatalf("runtime repair ownership mode=%q, want %q", got, SessionOwnershipShared)
+	}
 	if got := scalarString(t, s, `SELECT COALESCE(group_concat(target_key || ':' || last_acked_seq || ':' || last_pulled_seq, ','), '') FROM sync_state`); got != beforeSyncState {
 		t.Fatalf("sync_state changed: before=%q after=%q", beforeSyncState, got)
 	}
@@ -202,6 +205,24 @@ func TestApplySessionProjectReclassificationBacksUpAndUpdatesAllowedTables(t *te
 	}
 	if got := scalarInt(t, s, `SELECT count(*) FROM user_prompts`); got != beforePromptCount {
 		t.Fatalf("prompt count changed: before=%d after=%d", beforePromptCount, got)
+	}
+}
+
+func TestApplySessionProjectReclassificationClassifiesManualSessionsAndCreatesBackup(t *testing.T) {
+	s := newTestStore(t)
+	seedRepairRows(t, s, "manual-save-engram", "sias-app")
+	result, err := s.ApplySessionProjectReclassification([]SessionProjectReclassification{{SessionID: "manual-save-engram", FromProject: "sias-app", ToProject: "engram"}})
+	if err != nil {
+		t.Fatalf("ApplySessionProjectReclassification: %v", err)
+	}
+	if result.BackupPath == "" {
+		t.Fatal("expected backup path")
+	}
+	if _, err := os.Stat(result.BackupPath); err != nil {
+		t.Fatalf("backup missing: %v", err)
+	}
+	if got := scalarString(t, s, `SELECT ownership_mode FROM sessions WHERE id = ?`, "manual-save-engram"); got != SessionOwnershipProjectOwned {
+		t.Fatalf("manual repair ownership mode=%q, want %q", got, SessionOwnershipProjectOwned)
 	}
 }
 

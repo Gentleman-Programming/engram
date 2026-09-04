@@ -125,7 +125,9 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 
 ### Sessions
 
-- `POST /sessions` — Create session. Body: `{id, project, directory}`
+- `POST /sessions` — Create session. Body: `{id, project, directory, ownership_mode?}`
+  - `ownership_mode` accepts `shared` or `project_owned`; when omitted it defaults to `shared`.
+  - An invalid non-empty `ownership_mode` returns `400` and does not create a session.
 - `POST /sessions/{id}/end` — End session. Body: `{summary}`
 - `GET /sessions/recent` — Recent sessions. Query: `?project=X&all_projects=true&limit=N`
 - `GET /sessions/{id}` — Get single session by ID
