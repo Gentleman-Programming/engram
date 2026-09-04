@@ -944,7 +944,10 @@ function queryString(params: Record<string, unknown>): string {
   return encoded ? `?${encoded}` : "";
 }
 
-function textResult(data: unknown): string {
+function textResult(data: unknown, toolName?: string): string {
+  if (toolName === "mem_search" && (data === null || (Array.isArray(data) && data.length === 0))) {
+    return "No memories found";
+  }
   if (typeof data === "string") return data;
   if (data && typeof data === "object" && "context" in data && typeof (data as ContextResponse).context === "string") {
     return (data as ContextResponse).context || "(empty context)";
@@ -1154,7 +1157,7 @@ async function executeMemoryTool(toolName: string, params: Record<string, unknow
     const data = await callMemoryTool(toolName, params, ctx, transport.fetch);
     const timedOutMethod = transport.timedOutMethod();
     if (timedOutMethod) throw new Error(unreachableMessage(timedOutMethod));
-    const result = { content: [{ type: "text" as const, text: textResult(data) }], details: { data } };
+    const result = { content: [{ type: "text" as const, text: textResult(data, toolName) }], details: { data } };
     if (toolName === "mem_doctor" && data && typeof data === "object" && "status" in data && data.status === "error") {
       const errorResult = { ...result, isError: true };
       ctx.ui?.setStatus?.("engram", `🧠 ${project} · ${compactResultStatus(toolName, errorResult)}`);
