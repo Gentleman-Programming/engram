@@ -75,10 +75,14 @@ func AppendGuidance(message, project string, err error) string {
 		message = err.Error()
 	}
 	if IsPolicyFailure(err) {
-		if strings.Contains(message, policyHeader) {
+		policyGuidance := PolicyGuidance(project)
+		if strings.Contains(message, policyGuidance) {
 			return message
 		}
-		return message + "\n\n" + PolicyGuidance(project)
+		if message == policyHeader {
+			return policyGuidance
+		}
+		return message + "\n\n" + policyGuidance
 	}
 	if !IsRepairableCloudSyncError(err) || strings.Contains(message, header) {
 		return message

@@ -308,6 +308,7 @@ type CloudSyncSummary struct {
 	LastSuccessAt    string
 	PendingMutations int64
 	LastError        string
+	ReasonCode       string
 }
 
 type SyncMutation struct {
@@ -4704,14 +4705,19 @@ func (s *Store) ListPendingSyncMutations(targetKey string, limit int) ([]SyncMut
 func (s *Store) CloudSyncSummary() (CloudSyncSummary, error) {
 	const cloudProjectTarget = "cloud:%"
 	var summary CloudSyncSummary
-	var lastSuccess, lastError sql.NullString
+	var lastSuccess, lastError, reasonCode sql.NullString
 	err := s.db.QueryRow(`
-		SELECT MAX(last_success_at), (
-			SELECT last_error FROM sync_state
+		WITH latest_error AS (
+			SELECT last_error, reason_code
+			FROM sync_state
 			WHERE target_key LIKE ? AND last_error IS NOT NULL
-			ORDER BY updated_at DESC LIMIT 1
+			ORDER BY updated_at DESC, target_key ASC
+			LIMIT 1
 		)
-		FROM sync_state WHERE target_key LIKE ?`, cloudProjectTarget, cloudProjectTarget).Scan(&lastSuccess, &lastError)
+		SELECT MAX(sync_state.last_success_at), latest_error.last_error, latest_error.reason_code
+		FROM sync_state
+		LEFT JOIN latest_error ON TRUE
+		WHERE sync_state.target_key LIKE ?`, cloudProjectTarget, cloudProjectTarget).Scan(&lastSuccess, &lastError, &reasonCode)
 	if err != nil {
 		return CloudSyncSummary{}, err
 	}
@@ -4720,6 +4726,9 @@ func (s *Store) CloudSyncSummary() (CloudSyncSummary, error) {
 	}
 	if lastError.Valid {
 		summary.LastError = lastError.String
+	}
+	if reasonCode.Valid {
+		summary.ReasonCode = reasonCode.String
 	}
 	err = s.db.QueryRow(`
 		SELECT COUNT(*)

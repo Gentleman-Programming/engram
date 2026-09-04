@@ -80,6 +80,9 @@ func TestCloudStatusDiagnosticUsesProjectScopedPolicyGuidance(t *testing.T) {
 	if !strings.Contains(stdout, "project-scoped cloud state") || !strings.Contains(stdout, message) {
 		t.Fatalf("project-scoped diagnostic = %q", stdout)
 	}
+	if !strings.Contains(stdout, "reason_code: policy_forbidden") {
+		t.Fatalf("project-scoped diagnostic lacks reason code: %q", stdout)
+	}
 }
 
 func TestCloudStatusDiagnosticSuppressesLegacyGlobalState(t *testing.T) {
@@ -106,7 +109,7 @@ func TestCloudStatusDiagnosticSuppressesLegacyGlobalState(t *testing.T) {
 			}
 
 			stdout, _ := captureOutput(t, func() { printCloudStatusSyncDiagnostic(cfg) })
-			if strings.Contains(stdout, tc.message) || (tc.reason != "" && strings.Contains(stdout, tc.reason)) {
+			if strings.TrimSpace(stdout) != "" {
 				t.Fatalf("legacy diagnostic leaked into cloud status: %q", stdout)
 			}
 		})

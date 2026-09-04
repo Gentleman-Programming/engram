@@ -673,6 +673,9 @@ func printCloudStatusSyncDiagnostic(cfg store.Config) {
 	}
 	if strings.TrimSpace(summary.LastError) != "" {
 		fmt.Println("Sync diagnostic: project-scoped cloud state")
+		if strings.TrimSpace(summary.ReasonCode) != "" {
+			fmt.Printf("reason_code: %s\n", summary.ReasonCode)
+		}
 		fmt.Printf("reason_message: %s\n", summary.LastError)
 		return
 	}

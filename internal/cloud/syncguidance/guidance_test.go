@@ -24,3 +24,11 @@ The server denied access to project "policy-project". Ask the server administrat
 		t.Fatalf("policy guidance must be idempotent, got %q", got)
 	}
 }
+
+func TestAppendGuidancePolicyFailureCompletesHeaderOnlyMessage(t *testing.T) {
+	err := policyError{err: errors.New(policyHeader)}
+
+	if got, want := AppendGuidance(policyHeader, "policy-project", err), PolicyGuidance("policy-project"); got != want {
+		t.Fatalf("policy guidance = %q, want %q", got, want)
+	}
+}
