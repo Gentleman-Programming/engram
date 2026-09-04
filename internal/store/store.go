@@ -3346,22 +3346,7 @@ func (s *Store) SearchPrompts(query string, project string, limit int) ([]Prompt
 	if hasShortFTSTerm(query) {
 		sql, args = buildPromptLIKEQuery(query, project, limit)
 	} else {
-		ftsQuery := sanitizeFTS(query)
-		sql = `
-			SELECT p.id, ifnull(p.sync_id, '') as sync_id, p.session_id, p.content, ifnull(p.project, '') as project, p.created_at
-			FROM prompts_fts fts
-			JOIN user_prompts p ON p.id = fts.rowid
-			WHERE prompts_fts MATCH ?
-		`
-		args = []any{ftsQuery}
-
-		if project != "" {
-			sql += " AND p.project = ?"
-			args = append(args, project)
-		}
-
-		sql += " ORDER BY fts.rank LIMIT ?"
-		args = append(args, limit)
+		sql, args = buildSearchPromptsFTSQuery(sanitizeFTS(query), project, limit)
 	}
 
 	rows, err := s.queryItHook(s.db, sql, args...)
@@ -3934,6 +3919,24 @@ func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOpti
 		results = results[:limit]
 	}
 	return results, nil
+}
+
+func buildSearchPromptsFTSQuery(ftsQuery, project string, limit int) (string, []any) {
+	sqlQ := `
+		SELECT p.id, ifnull(p.sync_id, '') as sync_id, p.session_id, p.content, ifnull(p.project, '') as project, p.created_at
+		FROM prompts_fts fts
+		CROSS JOIN user_prompts p ON p.id = fts.rowid
+		WHERE prompts_fts MATCH ?
+	`
+	args := []any{ftsQuery}
+
+	if project != "" {
+		sqlQ += " AND p.project = ?"
+		args = append(args, project)
+	}
+
+	sqlQ += " ORDER BY fts.rank LIMIT ?"
+	return sqlQ, append(args, limit)
 }
 
 func buildSearchFTSQuery(ftsQuery string, opts SearchOptions, limit int) (string, []any) {

@@ -1840,10 +1840,13 @@ func handleStats(s *store.Store, cfg MCPConfig, activities ...*SessionActivity) 
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		projectOverride, _ := req.GetArguments()["project"].(string)
 
-		// Resolve project: validate override or auto-detect (REQ-310, REQ-311, REQ-314)
-		detRes, err := resolveReadProjectWithProcessOverride(s, projectOverride, cfg.DefaultProject)
-		if err != nil {
-			return readProjectErrorResult(activity, detRes, err), nil
+		detRes := projectpkg.DetectionResult{Source: projectpkg.SourceAllProjects}
+		if strings.TrimSpace(projectOverride) != "" || strings.TrimSpace(cfg.DefaultProject) != "" {
+			var err error
+			detRes, err = resolveReadProjectWithProcessOverride(s, projectOverride, cfg.DefaultProject)
+			if err != nil {
+				return readProjectErrorResult(activity, detRes, err), nil
+			}
 		}
 
 		stats, err := loadMCPStats(s)

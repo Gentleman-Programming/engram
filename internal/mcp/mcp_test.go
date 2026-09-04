@@ -7253,8 +7253,8 @@ func TestHandleGetObservation_ResponseEnvelopeIncludesProject(t *testing.T) {
 	}
 }
 
-// TestHandleStats_AutoDetectsProject: stats response must include project envelope (REQ-314).
-func TestHandleStats_AutoDetectsProject(t *testing.T) {
+// TestHandleStats_WithoutProjectUsesAllProjects: no-project stats use all-project scope.
+func TestHandleStats_WithoutProjectUsesAllProjects(t *testing.T) {
 	dir := t.TempDir()
 	initTestGitRepo(t, dir)
 	cmd := exec.Command("git", "-C", dir, "remote", "add", "origin",
@@ -7272,11 +7272,114 @@ func TestHandleStats_AutoDetectsProject(t *testing.T) {
 	}
 
 	m := callResultJSON(t, res)
-	if _, ok := m["project"]; !ok {
-		t.Error("stats response must contain 'project' field")
+	if got := m["project"]; got != "" {
+		t.Errorf("project = %q; want empty global scope", got)
 	}
-	if _, ok := m["project_source"]; !ok {
-		t.Error("stats response must contain 'project_source' field")
+	if got := m["project_source"]; got != "all_projects" {
+		t.Errorf("project_source = %q; want %q", got, "all_projects")
+	}
+}
+
+func TestHandleStats_ExplicitAndDefaultProjectMetadataUseGlobalStats(t *testing.T) {
+	s := newMCPTestStore(t)
+	for _, projectName := range []string{"stats-alpha", "stats-beta"} {
+		sessionID := "session-" + projectName
+		if err := s.CreateSession(sessionID, projectName, "/tmp"); err != nil {
+			t.Fatalf("create session for %q: %v", projectName, err)
+		}
+		if _, err := s.AddObservation(store.AddObservationParams{
+			SessionID: sessionID,
+			Type:      "manual",
+			Title:     "observation for " + projectName,
+			Content:   "content",
+			Project:   projectName,
+		}); err != nil {
+			t.Fatalf("add observation for %q: %v", projectName, err)
+		}
+	}
+
+	tests := []struct {
+		name        string
+		cfg         MCPConfig
+		arguments   map[string]any
+		wantProject string
+		wantSource  string
+	}{
+		{
+			name:        "explicit project",
+			arguments:   map[string]any{"project": "stats-alpha"},
+			wantProject: "stats-alpha",
+			wantSource:  "explicit_override",
+		},
+		{
+			name:        "default project",
+			cfg:         MCPConfig{DefaultProject: "stats-beta"},
+			wantProject: "stats-beta",
+			wantSource:  "process_override",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res, err := handleStats(s, tt.cfg)(context.Background(), mcppkg.CallToolRequest{
+				Params: mcppkg.CallToolParams{Arguments: tt.arguments},
+			})
+			if err != nil || res.IsError {
+				t.Fatalf("stats: err=%v isError=%v text=%q", err, res.IsError, callResultText(t, res))
+			}
+
+			body := callResultJSON(t, res)
+			if got := body["project"]; got != tt.wantProject {
+				t.Errorf("project = %q; want %q", got, tt.wantProject)
+			}
+			if got := body["project_source"]; got != tt.wantSource {
+				t.Errorf("project_source = %q; want %q", got, tt.wantSource)
+			}
+
+			result, ok := body["result"].(string)
+			if !ok {
+				t.Fatalf("result = %#v; want string", body["result"])
+			}
+			for _, want := range []string{
+				"Sessions: 2",
+				"Observations: 2",
+				"Prompts: 0",
+				"Projects:",
+				"stats-alpha",
+				"stats-beta",
+			} {
+				if !strings.Contains(result, want) {
+					t.Errorf("result %q does not contain %q", result, want)
+				}
+			}
+		})
+	}
+}
+
+func TestHandleStats_WithoutProjectUsesAllProjectsInAmbiguousCWD(t *testing.T) {
+	parent := t.TempDir()
+	for _, name := range []string{"repo-a", "repo-b"} {
+		child := filepath.Join(parent, name)
+		if err := os.MkdirAll(child, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		initTestGitRepo(t, child)
+	}
+	t.Chdir(parent)
+
+	s := newMCPTestStore(t)
+	h := handleStats(s, MCPConfig{})
+	res, err := h(context.Background(), mcppkg.CallToolRequest{})
+	if err != nil || res.IsError {
+		t.Fatalf("stats: err=%v isError=%v text=%q", err, res.IsError, callResultText(t, res))
+	}
+
+	result := callResultJSON(t, res)
+	if got := result["project"]; got != "" {
+		t.Errorf("project = %q; want empty global scope", got)
+	}
+	if got := result["project_source"]; got != "all_projects" {
+		t.Errorf("project_source = %q; want %q", got, "all_projects")
 	}
 }
 
@@ -8736,7 +8839,7 @@ func TestProcessOverrideSaveWriteResolutionBeforeCWD(t *testing.T) {
 	}
 }
 
-func TestProjectResolvingReadHandlersPreserveAmbiguityRecoveryMetadata(t *testing.T) {
+func TestProjectResolvingReadHandlersExceptStatsPreserveAmbiguityRecoveryMetadata(t *testing.T) {
 	parent := t.TempDir()
 	for _, name := range []string{"repo-read-a", "repo-read-b"} {
 		child := filepath.Join(parent, name)
@@ -8763,12 +8866,6 @@ func TestProjectResolvingReadHandlersPreserveAmbiguityRecoveryMetadata(t *testin
 			name: "context",
 			call: func() (*mcppkg.CallToolResult, error) {
 				return handleContext(s, MCPConfig{}, activity)(context.Background(), mcppkg.CallToolRequest{})
-			},
-		},
-		{
-			name: "stats",
-			call: func() (*mcppkg.CallToolResult, error) {
-				return handleStats(s, MCPConfig{}, activity)(context.Background(), mcppkg.CallToolRequest{})
 			},
 		},
 		{
