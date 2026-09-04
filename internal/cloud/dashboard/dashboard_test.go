@@ -1288,9 +1288,10 @@ func newAuthedAdminMux(store DashboardStore) *http.ServeMux {
 			}
 			return errUnauthorized
 		},
-		IsAdmin:        func(_ *http.Request) bool { return true },
-		GetDisplayName: func(_ *http.Request) string { return "OPERATOR" },
-		Store:          store,
+		IsAdmin:               func(_ *http.Request) bool { return true },
+		CanManageManagedUsers: func(_ *http.Request) bool { return true },
+		GetDisplayName:        func(_ *http.Request) string { return "OPERATOR" },
+		Store:                 store,
 	}
 	if managed, ok := store.(ManagedUsersStore); ok {
 		cfg.ManagedUsers = managed

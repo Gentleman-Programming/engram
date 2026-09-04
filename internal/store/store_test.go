@@ -13189,15 +13189,107 @@ func TestSearchContext_AlreadyCanceled(t *testing.T) {
 
 func TestFTSQueriesUseFTSFirstCrossJoin(t *testing.T) {
 	searchQuery, _ := buildSearchFTSQuery(`"memory"`, SearchOptions{}, 10)
-	for name, query := range map[string]string{
-		"search":          searchQuery,
-		"find candidates": findCandidatesFTSQuery,
+	for _, tc := range []struct {
+		name      string
+		query     string
+		crossJoin string
+	}{
+		{"search", searchQuery, "CROSS JOIN observations o ON o.id = fts.rowid"},
+		{"find candidates", findCandidatesFTSQuery, "CROSS JOIN observations o ON o.id = fts.rowid"},
 	} {
-		t.Run(name, func(t *testing.T) {
-			if !strings.Contains(query, "CROSS JOIN observations o ON o.id = fts.rowid") {
-				t.Fatalf("expected FTS-first CROSS JOIN, got query:\n%s", query)
+		t.Run(tc.name, func(t *testing.T) {
+			if !strings.Contains(tc.query, tc.crossJoin) {
+				t.Fatalf("expected FTS-first CROSS JOIN, got query:\n%s", tc.query)
 			}
 		})
+	}
+
+	s := newTestStore(t)
+	for _, session := range []struct {
+		id      string
+		project string
+	}{
+		{"fts-plan-alpha", "alpha"},
+		{"fts-plan-beta", "beta"},
+	} {
+		if err := s.CreateSession(session.id, session.project, "/tmp/"+session.project); err != nil {
+			t.Fatalf("create %s session: %v", session.project, err)
+		}
+	}
+	for _, prompt := range []AddPromptParams{
+		{SessionID: "fts-plan-alpha", Content: "orbit alpha first", Project: "alpha"},
+		{SessionID: "fts-plan-alpha", Content: "orbit alpha second", Project: "alpha"},
+		{SessionID: "fts-plan-beta", Content: "orbit beta", Project: "beta"},
+	} {
+		if _, err := s.AddPrompt(prompt); err != nil {
+			t.Fatalf("add %s prompt: %v", prompt.Project, err)
+		}
+	}
+
+	var executedSQL string
+	var executedArgs []any
+	originalQueryIt := s.hooks.queryIt
+	s.hooks.queryIt = func(db queryer, query string, args ...any) (rowScanner, error) {
+		executedSQL = query
+		executedArgs = append([]any(nil), args...)
+		rows, err := db.Query(query, args...)
+		if err != nil {
+			return nil, err
+		}
+		return sqlRowScanner{rows: rows}, nil
+	}
+	t.Cleanup(func() { s.hooks.queryIt = originalQueryIt })
+
+	prompts, err := s.SearchPrompts("orbit", "alpha", 1)
+	if err != nil {
+		t.Fatalf("SearchPrompts: %v", err)
+	}
+	if len(prompts) != 1 || prompts[0].Project != "alpha" {
+		t.Fatalf("SearchPrompts project/limit result = %+v, want one alpha prompt", prompts)
+	}
+	if !strings.Contains(executedSQL, "FROM prompts_fts fts") {
+		t.Fatalf("SearchPrompts did not execute the prompts FTS query:\n%s", executedSQL)
+	}
+	if !strings.Contains(executedSQL, "CROSS JOIN user_prompts p ON p.id = fts.rowid") {
+		t.Fatalf("SearchPrompts did not execute an FTS-first CROSS JOIN:\n%s", executedSQL)
+	}
+	if !reflect.DeepEqual(executedArgs, []any{`"orbit"`, "alpha", 1}) {
+		t.Fatalf("SearchPrompts arguments = %#v, want %#v", executedArgs, []any{`"orbit"`, "alpha", 1})
+	}
+
+	rows, err := s.DB().Query("EXPLAIN QUERY PLAN "+executedSQL, executedArgs...)
+	if err != nil {
+		t.Fatalf("EXPLAIN QUERY PLAN: %v", err)
+	}
+	defer rows.Close()
+
+	var plan []string
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			t.Fatalf("scan plan row: %v", err)
+		}
+		plan = append(plan, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("plan rows: %v", err)
+	}
+
+	ftsScan, rowIDLookup := -1, -1
+	for i, detail := range plan {
+		if strings.Contains(detail, "idx_prompts_project") {
+			t.Fatalf("project index drives prompt FTS search: %v", plan)
+		}
+		if strings.Contains(detail, "fts VIRTUAL TABLE") {
+			ftsScan = i
+		}
+		if strings.Contains(detail, "p USING INTEGER PRIMARY KEY") {
+			rowIDLookup = i
+		}
+	}
+	if ftsScan == -1 || rowIDLookup == -1 || ftsScan >= rowIDLookup {
+		t.Fatalf("expected prompts_fts scan before user_prompts rowid lookup, got %v", plan)
 	}
 }
 
