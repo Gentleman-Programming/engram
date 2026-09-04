@@ -673,7 +673,7 @@ function recoverImplicitEngramServer(): Promise<boolean> {
 
 let project = "unknown";
 let directory = "";
-let pendingRecoveryNotice: string | undefined;
+let pendingRecoveryNotice: { sessionId: string; content: string } | undefined;
 let projectResolutionError: string | undefined;
 let projectDetectionPending = false;
 const observedRuntimeSessionIDs = new Set<string>();
@@ -854,6 +854,10 @@ function soleActiveRuntimeSessionID(): string | undefined {
   return !runtimeSessionIdentityAmbiguous && observedRuntimeSessionIDs.size === 1
     ? [...observedRuntimeSessionIDs][0]
     : undefined;
+}
+
+function soleObservedRuntimeSessionID(): string | undefined {
+  return observedRuntimeSessionIDs.size === 1 ? [...observedRuntimeSessionIDs][0] : undefined;
 }
 
 const optionalString = (description: string) => Type.Optional(Type.String({ description }));
@@ -1280,15 +1284,20 @@ export default function registerEngram(pi: ExtensionAPI) {
 
   pi.on("session_compact", async (event: unknown) => {
     const summary = extractCompactedSummary(event);
+    const sessionId = soleObservedRuntimeSessionID();
 
-    // Queue a safe fallback before every early exit. The next turn must receive this even when
-    // startup, project resolution, or strict session registration cannot reach Engram.
-    pendingRecoveryNotice = buildRecoveryNotice(project, undefined, ArchiveOutcome.Unavailable);
+    // Queue a session-scoped safe fallback before every early exit. The intended next turn must
+    // receive this even when startup, project resolution, or strict registration cannot reach Engram.
+    if (sessionId) {
+      pendingRecoveryNotice = {
+        sessionId,
+        content: buildRecoveryNotice(project, undefined, ArchiveOutcome.Unavailable),
+      };
+    }
     if (!summary || !(await initOnceForHook(directory))) return;
     await refreshProjectDetection(directory);
     if (projectDetectionPending || projectResolutionError) return;
-    const sessionId = soleActiveRuntimeSessionID();
-    if (!sessionId) return;
+    if (!sessionId || soleActiveRuntimeSessionID() !== sessionId) return;
 
     try {
       await ensureSession(sessionId);
@@ -1300,14 +1309,14 @@ export default function registerEngram(pi: ExtensionAPI) {
 
     const outcome = await archiveCompactionSummary(sessionId, summary);
     const context = soleActiveRuntimeSessionID() === sessionId ? await loadCompactionRecoveryContext(sessionId) : undefined;
-    pendingRecoveryNotice = buildRecoveryNotice(project, context, outcome);
+    pendingRecoveryNotice = { sessionId, content: buildRecoveryNotice(project, context, outcome) };
   });
 
   pi.on("before_agent_start", async (event: AgentStartEvent, ctx: SessionContext) => {
     let systemPrompt = event.systemPrompt.length > 0 ? `${event.systemPrompt}\n\n${MEMORY_INSTRUCTIONS}` : MEMORY_INSTRUCTIONS;
     const sessionId = observeRuntimeSessionID(ctx);
-    if (pendingRecoveryNotice !== undefined) {
-      systemPrompt = `${systemPrompt}\n\n${pendingRecoveryNotice}`;
+    if (pendingRecoveryNotice !== undefined && sessionId === pendingRecoveryNotice.sessionId) {
+      systemPrompt = `${systemPrompt}\n\n${pendingRecoveryNotice.content}`;
       pendingRecoveryNotice = undefined;
     }
     // The mem_* tools stay registered whether or not startup succeeded, so the agent still

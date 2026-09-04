@@ -661,7 +661,7 @@ test("an opaque runtime session ID stays byte-identical through registration, co
   }
 });
 
-test("compaction archives only after registration and recovers the exact cached runtime session", async () => {
+test("compaction recovery notice stays scoped to the exact cached runtime session", async () => {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.ENGRAM_URL;
   process.env.ENGRAM_URL = "http://127.0.0.1:17437";
@@ -682,7 +682,9 @@ test("compaction archives only after registration and recovers the exact cached 
         { compactionEntry: { summary: "current shape" }, summary: "conflicting legacy shape" },
         { cwd: ROOT, sessionManager: { getSessionId: () => { throw new Error("stale context accessed"); } } },
       );
+      const otherTurn = await eventHandlers.get("before_agent_start")({ systemPrompt: "base prompt" }, runtimeContext("other-session"));
       const nextTurn = await eventHandlers.get("before_agent_start")({ systemPrompt: "base prompt" }, runtimeContext(runtimeSessionId));
+      const consumedTurn = await eventHandlers.get("before_agent_start")({ systemPrompt: "base prompt" }, runtimeContext(runtimeSessionId));
 
       const registration = calls.find((call) => call.method === "POST" && call.path === "/sessions");
       const archive = calls.find((call) => call.method === "POST" && call.path === "/observations");
@@ -695,8 +697,11 @@ test("compaction archives only after registration and recovers the exact cached 
       assert.equal(archive.body.session_id, runtimeSessionId);
       assert.equal(archive.body.content, "current shape");
       assert.equal(new URL(`http://test${recovery.path}`).searchParams.get("session_id"), runtimeSessionId);
+      assert.doesNotMatch(otherTurn.systemPrompt, /exact-session context/);
+      assert.doesNotMatch(otherTurn.systemPrompt, /already saved/);
       assert.match(nextTurn.systemPrompt, /already saved/);
       assert.doesNotMatch(nextTurn.systemPrompt, /FIRST ACTION REQUIRED/);
+      assert.doesNotMatch(consumedTurn.systemPrompt, /already saved/);
     });
   } finally {
     globalThis.fetch = originalFetch;
