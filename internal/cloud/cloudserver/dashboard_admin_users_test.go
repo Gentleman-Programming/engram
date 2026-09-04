@@ -828,6 +828,14 @@ func TestDashboardManagedAdminSeesManagedUserMutationControls(t *testing.T) {
 		t.Fatalf("managed admin shell must expose managed-user creation controls, body=%q", shellRec.Body.String())
 	}
 
+	listRec := performDashboardRequest(srv, http.MethodGet, "/dashboard/admin/users/list", cookie)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("expected managed admin dashboard session to view the managed users list, got %d body=%q", listRec.Code, listRec.Body.String())
+	}
+	if !strings.Contains(listRec.Body.String(), `/dashboard/admin/users/p-target/disable`) {
+		t.Fatalf("managed admin list must expose the enabled user's disable control, body=%q", listRec.Body.String())
+	}
+
 	detailRec := performDashboardRequest(srv, http.MethodGet, "/dashboard/admin/users/p-target", cookie)
 	if detailRec.Code != http.StatusOK {
 		t.Fatalf("expected managed admin dashboard session to view the managed user detail page, got %d body=%q", detailRec.Code, detailRec.Body.String())
