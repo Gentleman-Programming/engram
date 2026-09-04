@@ -93,6 +93,7 @@ type Observation struct {
 	Title          string  `json:"title"`
 	Content        string  `json:"content"`
 	ToolName       *string `json:"tool_name,omitempty"`
+	Author         *string `json:"author,omitempty"`
 	Project        *string `json:"project,omitempty"`
 	Scope          string  `json:"scope"`
 	TopicKey       *string `json:"topic_key,omitempty"`
@@ -190,6 +191,7 @@ type AddObservationParams struct {
 	Title     string `json:"title"`
 	Content   string `json:"content"`
 	ToolName  string `json:"tool_name,omitempty"`
+	Author    string `json:"author,omitempty"`
 	Project   string `json:"project,omitempty"`
 	Scope     string `json:"scope,omitempty"`
 	TopicKey  string `json:"topic_key,omitempty"`
@@ -256,7 +258,7 @@ var decayReviewAfterMonths = map[string]int{
 }
 
 const observationSelectColumns = `id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
-	       scope, topic_key, revision_count, duplicate_count, last_seen_at, review_after, pinned, created_at, updated_at, deleted_at`
+	       scope, topic_key, revision_count, duplicate_count, last_seen_at, review_after, pinned, created_at, updated_at, deleted_at, author`
 
 type SyncState struct {
 	TargetKey           string  `json:"target_key"`
@@ -711,6 +713,7 @@ func (s *Store) migrate() error {
 			title      TEXT    NOT NULL,
 			content    TEXT    NOT NULL,
 			tool_name  TEXT,
+			author     TEXT,
 			project    TEXT,
 			scope      TEXT    NOT NULL DEFAULT 'project',
 			topic_key  TEXT,
@@ -824,6 +827,7 @@ func (s *Store) migrate() error {
 		definition string
 	}{
 		{name: "sync_id", definition: "TEXT"},
+		{name: "author", definition: "TEXT"},
 		{name: "scope", definition: "TEXT NOT NULL DEFAULT 'project'"},
 		{name: "topic_key", definition: "TEXT"},
 		{name: "normalized_hash", definition: "TEXT"},
@@ -2354,10 +2358,10 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 
 		syncID := newSyncID("obs")
 		res, err := s.execHook(tx,
-			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, datetime('now'), datetime('now'))`,
+			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, author, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, datetime('now'), datetime('now'))`,
 			syncID, p.SessionID, p.Type, title, content,
-			nullableString(p.ToolName), nullableString(p.Project), scope, nullableString(topicKey), normHash,
+			nullableString(p.ToolName), nullableString(p.Author), nullableString(p.Project), scope, nullableString(topicKey), normHash,
 		)
 		if err != nil {
 			return err
@@ -3573,8 +3577,8 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 	for _, obs := range data.Observations {
 		syncID := normalizeExistingSyncID(obs.SyncID, "obs")
 		res, err := s.execHook(tx,
-			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, review_after, created_at, updated_at, deleted_at)
-			 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, author, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, review_after, created_at, updated_at, deleted_at)
+			 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 			 WHERE NOT EXISTS (SELECT 1 FROM observations WHERE sync_id = ?)`,
 			syncID,
 			obs.SessionID,
@@ -3582,6 +3586,7 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 			obs.Title,
 			obs.Content,
 			obs.ToolName,
+			obs.Author,
 			obs.Project,
 			normalizeScope(obs.Scope),
 			nullableString(normalizeTopicKey(derefString(obs.TopicKey))),
@@ -6061,7 +6066,7 @@ func scanObservationRow(scanner observationScanner, o *Observation) error {
 	return scanner.Scan(
 		&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content,
 		&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt, &o.ReviewAfter,
-		&o.Pinned, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt,
+		&o.Pinned, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt, &o.Author,
 	)
 }
 
@@ -6254,6 +6259,7 @@ func (s *Store) migrateLegacyObservationsTable() error {
 			title      TEXT    NOT NULL,
 			content    TEXT    NOT NULL,
 			tool_name  TEXT,
+			author     TEXT,
 			project    TEXT,
 			scope      TEXT    NOT NULL DEFAULT 'project',
 			topic_key  TEXT,

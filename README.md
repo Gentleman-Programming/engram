@@ -290,7 +290,7 @@ curl -s "http://127.0.0.1:7437/conflicts?project=beta-test" | jq
 **4️⃣ Phase 4 — Semantic LLM-judge (the killer feature) 🎯**
 
 ```bash
-export ENGRAM_AGENT_CLI=claude   # or opencode
+export ENGRAM_AGENT_CLI=claude   # or opencode, or pi (routes via your provider config — cheap)
 
 ./engram-beta conflicts scan --project beta-test --semantic --apply \
   --max-semantic 5 --concurrency 3 --yes

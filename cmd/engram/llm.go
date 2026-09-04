@@ -69,7 +69,7 @@ func llmBuildPrompt(a, b store.ObservationSnippet) string {
 func resolveAgentRunner() (store.SemanticRunner, error) {
 	name := os.Getenv("ENGRAM_AGENT_CLI")
 	if name == "" {
-		return nil, errors.New("ENGRAM_AGENT_CLI is not set; required for --semantic scan (set to 'claude' or 'opencode')")
+		return nil, errors.New("ENGRAM_AGENT_CLI is not set; required for --semantic scan (set to 'claude', 'opencode', or 'pi')")
 	}
 	return agentRunnerFactory(name)
 }

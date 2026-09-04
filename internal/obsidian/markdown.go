@@ -35,6 +35,9 @@ func ObservationToMarkdown(obs store.Observation) string {
 	}
 	fmt.Fprintf(&sb, "session_id: %s\n", obs.SessionID)
 	fmt.Fprintf(&sb, "created_at: %q\n", obs.CreatedAt)
+	if obs.Author != nil && *obs.Author != "" {
+		fmt.Fprintf(&sb, "author: %q\n", *obs.Author)
+	}
 	fmt.Fprintf(&sb, "updated_at: %q\n", obs.UpdatedAt)
 	fmt.Fprintf(&sb, "revision_count: %d\n", obs.RevisionCount)
 	fmt.Fprintf(&sb, "tags:\n  - %s\n", project)

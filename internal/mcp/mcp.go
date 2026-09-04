@@ -352,6 +352,9 @@ Examples:
 				mcp.WithString("topic_key",
 					mcp.Description("Optional topic identifier for upserts (e.g. architecture/auth-model). Reuses and updates the latest observation in same project+scope."),
 				),
+				mcp.WithString("author",
+					mcp.Description("Who authored this memory, as agent/model (e.g. 'claude-code/opus-4.8', 'pi/deepseek-v4-pro'). Falls back to the ENGRAM_AUTHOR env var when unset."),
+				),
 				mcp.WithString("project",
 					mcp.Description("Optional explicit project for this memory. Accepted only when backed by known context (existing project, matching session, repo config, or ambiguous-project recovery); invalid or unbacked names fail loudly."),
 				),
@@ -1202,6 +1205,10 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		sessionID, _ := req.GetArguments()["session_id"].(string)
 		scope, _ := req.GetArguments()["scope"].(string)
 		topicKey, _ := req.GetArguments()["topic_key"].(string)
+		author, _ := req.GetArguments()["author"].(string)
+		if strings.TrimSpace(author) == "" {
+			author = strings.TrimSpace(os.Getenv("ENGRAM_AUTHOR"))
+		}
 		projectChoice, _ := req.GetArguments()["project"].(string)
 		_, explicitProjectProvided := req.GetArguments()["project"]
 		projectChoiceReason, _ := req.GetArguments()["project_choice_reason"].(string)
@@ -1272,6 +1279,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 			Project:   project,
 			Scope:     scope,
 			TopicKey:  topicKey,
+			Author:    author,
 		})
 		if err != nil {
 			return mcp.NewToolResultError("Failed to save: " + err.Error()), nil
@@ -1923,6 +1931,7 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 			Title:     fmt.Sprintf("Session summary: %s", project),
 			Content:   content,
 			Project:   project,
+			Author:    strings.TrimSpace(os.Getenv("ENGRAM_AUTHOR")),
 		})
 		if err != nil {
 			return mcp.NewToolResultError("Failed to save session summary: " + err.Error()), nil

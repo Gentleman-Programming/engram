@@ -199,6 +199,12 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) routes() {
+	s.mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/dashboard", http.StatusTemporaryRedirect)
+	})
+	s.mux.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 
 	// Dashboard
@@ -245,6 +251,7 @@ func (s *Server) routes() {
 
 	// Stats / diagnostics
 	s.mux.HandleFunc("GET /stats", s.handleStats)
+	s.mux.HandleFunc("GET /projects/stats", s.handleProjectStats)
 	s.mux.HandleFunc("GET /doctor", s.handleDoctor)
 
 	// Project detection / migration
@@ -817,7 +824,15 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	jsonResponse(w, http.StatusOK, stats)
+}
 
+func (s *Server) handleProjectStats(w http.ResponseWriter, r *http.Request) {
+	stats, err := s.store.ListProjectsWithStats()
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	jsonResponse(w, http.StatusOK, stats)
 }
 

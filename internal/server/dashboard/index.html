@@ -47,10 +47,46 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .obs-card .title { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
 .obs-card .preview { font-size: 13px; color: var(--fg2); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
 .obs-card .project-tag { color: var(--purple); font-size: 11px; }
-#detail-panel { border-top: 1px solid var(--border); background: var(--bg2); max-height: 50vh; overflow-y: auto; display: none; }
-#detail-panel.open { display: block; }
-#detail-panel .detail-header { padding: 14px 24px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: flex-start; }
-#detail-panel .detail-body { padding: 16px 24px; white-space: pre-wrap; font-size: 13px; line-height: 1.6; }
+.obs-card .author-tag { color: var(--green, #6ea77f); font-size: 11px; opacity: .85; }
+#detail-panel { position: fixed; inset: 0; z-index: 90; display: none; align-items: center; justify-content: center; padding: 40px; }
+#detail-panel.open { display: flex; }
+#detail-panel::before { content: ""; position: absolute; inset: 0; background: rgba(0,0,0,.55); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); }
+#detail-panel .detail-card { position: relative; width: 720px; max-width: 100%; max-height: 80vh; display: flex; flex-direction: column; background: rgba(22,27,34,.72); backdrop-filter: blur(18px) saturate(1.2); -webkit-backdrop-filter: blur(18px) saturate(1.2); border: 1px solid rgba(120,150,190,.35); border-radius: 16px; box-shadow: 0 24px 60px rgba(0,0,0,.5), 0 0 0 1px rgba(255,255,255,.04) inset; overflow: hidden; }
+#detail-panel .detail-header { padding: 18px 22px; border-bottom: 1px solid rgba(120,150,190,.22); display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; background: rgba(255,255,255,.03); }
+#detail-panel .detail-body { padding: 20px 22px; font-size: 13px; line-height: 1.65; overflow-y: auto; overflow-x: hidden; }
+#detail-panel .detail-body p { margin: 0 0 10px; }
+#detail-panel .detail-body p:last-child { margin-bottom: 0; }
+#detail-panel .detail-body h1,#detail-panel .detail-body h2,#detail-panel .detail-body h3,#detail-panel .detail-body h4 { margin: 16px 0 8px; font-weight: 700; line-height: 1.3; color: var(--fg); }
+#detail-panel .detail-body h1 { font-size: 18px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+#detail-panel .detail-body h2 { font-size: 15px; }
+#detail-panel .detail-body h3 { font-size: 13px; }
+#detail-panel .detail-body strong { font-weight: 700; color: var(--fg); }
+#detail-panel .detail-body em { font-style: italic; color: var(--fg); }
+#detail-panel .detail-body code { background: rgba(255,255,255,.08); padding: 1px 5px; border-radius: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; border: 1px solid rgba(255,255,255,.08); word-break: break-word; }
+#detail-panel .detail-body pre { background: #0d1117; padding: 12px; border-radius: 8px; overflow-x: auto; margin: 10px 0; border: 1px solid var(--border); }
+#detail-panel .detail-body pre code { background: transparent; border: none; padding: 0; font-size: 12px; display: block; white-space: pre; word-break: normal; }
+#detail-panel .detail-body ul, #detail-panel .detail-body ol { margin: 8px 0 10px 20px; }
+#detail-panel .detail-body li { margin: 4px 0; }
+#detail-panel .detail-body blockquote { border-left: 3px solid var(--accent); margin: 10px 0; padding: 8px 12px; border-radius: 0 6px 6px 0; background: rgba(88,166,255,.07); color: var(--fg2); font-style: italic; }
+#detail-panel .detail-body a { color: var(--accent); text-decoration: none; word-break: break-all; }
+#detail-panel .detail-body a:hover { text-decoration: underline; }
+#detail-panel .detail-body hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
+#detail-panel .detail-body table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 12px; }
+#detail-panel .detail-body th, #detail-panel .detail-body td { border: 1px solid var(--border); padding: 6px 8px; text-align: left; }
+#detail-panel .detail-body th { background: var(--bg3); font-weight: 600; }
+#detail-panel .detail-body .wiki-link { color: var(--purple); background: rgba(188,140,255,.12); padding: 1px 4px; border-radius: 4px; font-size: 12px; }
+.detail-title-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.detail-title-row h2 { font-size: 16px; font-weight: 700; line-height: 1.3; }
+.detail-meta-grid { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; align-items: center; }
+.meta-chip { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border-radius: 999px; font-size: 11px; line-height: 1; border: 1px solid rgba(255,255,255,.10); background: rgba(255,255,255,.06); max-width: 100%; }
+.meta-chip .k { color: var(--fg2); font-size: 10px; text-transform: uppercase; letter-spacing: .35px; font-weight: 700; white-space: nowrap; }
+.meta-chip .v { color: var(--fg); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px; }
+.meta-chip.mono .v { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+.meta-chip.project { border-color: rgba(188,140,255,.30); background: rgba(188,140,255,.14); }
+.meta-chip.project .v { color: #d6bcff; }
+.meta-chip.author { border-color: rgba(63,185,80,.30); background: rgba(63,185,80,.14); }
+.meta-chip.author .v { color: #7ee787; }
+.meta-chip.scope { border-color: rgba(88,166,255,.30); background: rgba(88,166,255,.13); }
 .detail-actions { display: flex; gap: 8px; }
 .detail-actions button { padding: 5px 12px; border-radius: 6px; border: 1px solid var(--border); font-size: 12px; cursor: pointer; }
 .btn-edit { background: var(--accent); color: #000; border-color: var(--accent); }
@@ -90,8 +126,12 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
     <div id="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>Select a project or search to begin</div>
   </div>
   <div id="detail-panel">
+    <div class="detail-card">
     <div class="detail-header">
-      <div><h2 id="detail-title"></h2><div class="meta" id="detail-meta"></div></div>
+      <div style="flex:1;min-width:0">
+        <div class="detail-title-row"><h2 id="detail-title"></h2><span id="detail-type-badge"></span></div>
+        <div class="detail-meta-grid" id="detail-meta"></div>
+      </div>
       <div class="detail-actions">
         <button class="btn-edit" onclick="editObservation(currentObs)">✎ Edit</button>
         <button class="btn-delete" onclick="deleteObservation(currentObs)">✕ Delete</button>
@@ -99,6 +139,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
       </div>
     </div>
     <div class="detail-body" id="detail-content"></div>
+    </div>
   </div>
 </section>
 <div id="edit-modal">
@@ -155,22 +196,26 @@ async function loadStats() {
     const list = document.getElementById("project-list");
     list.innerHTML = `<li class="${currentProject===''?'active':''}" onclick="setProject('')">All Projects <span class="count">${s.total_observations}</span></li>`;
     s.projects.forEach(p => {
-      const c = ""; // counts come from group query below
-      list.innerHTML += `<li class="${currentProject===p?'active':''}" onclick="setProject('${p}')">${p}</li>`;
+      list.innerHTML += `<li class="${currentProject===p?'active':''}" onclick="setProject('${p}')" data-project="${p.replace(/"/g, '&quot;')}">${p}</li>`;
     });
     loadProjectCounts(s.projects);
   } catch(e) { document.getElementById("stats-box").textContent = "Engram offline"; }
 }
 
 async function loadProjectCounts(projects) {
-  for (const p of projects) {
-    try {
-      const data = await api(`/observations?project=${encodeURIComponent(p)}&limit=1`);
-      const count = Array.isArray(data) ? data.length : 0;
-      const li = document.querySelector(`#project-list li[onclick="setProject('${p}')"]`);
-      if (li && count > 0) li.querySelector(".count") || (li.innerHTML += `<span class="count">${count}</span>`);
-    } catch(e) {}
-  }
+  const list = document.getElementById("project-list");
+  try {
+    const stats = await api("/projects/stats");
+    const counts = {};
+    (stats || []).forEach(p => { counts[p.name] = p.observation_count || 0; });
+    projects.forEach(p => {
+      const li = list.querySelector(`li[data-project="${CSS.escape(p)}"]`);
+      if (li) {
+        const count = counts[p] || 0;
+        li.innerHTML += `<span class="count">${count}</span>`;
+      }
+    });
+  } catch(e) {}
 }
 
 async function loadObservations(project) {
@@ -193,7 +238,7 @@ function renderObs(obs) {
   }
   obsEl.innerHTML = obs.map(o => `
     <div class="obs-card" onclick="showDetail(${o.id})">
-      <div class="meta">${badge(o.type)} <span>#${o.id}</span> <span>${fmtTime(o.created_at)}</span>${o.project ? `<span class="project-tag">@ ${o.project}</span>` : ""}</div>
+      <div class="meta">${badge(o.type)} <span>#${o.id}</span> <span>${fmtTime(o.created_at)}</span>${o.project ? `<span class="project-tag">@ ${o.project}</span>` : ""}${o.author ? `<span class="author-tag">✎ ${escapeHtml(o.author)}</span>` : ""}</div>
       <div class="title">${escapeHtml(o.title)}</div>
       <div class="preview">${escapeHtml((o.content||'').slice(0,200))}</div>
     </div>
@@ -202,19 +247,93 @@ function renderObs(obs) {
 
 function escapeHtml(s) { const d = document.createElement("div"); d.textContent = s; return d.innerHTML; }
 
+/* tiny markdown: headings, bold, italic, code, links, lists, blockquote, hr, tables, wiki-links — safe, no deps */
+function mdInline(raw) {
+  let s = escapeHtml(raw);
+  s = s.replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_, a, b) => `<span class="wiki-link">[[${b||a}]]</span>`);
+  s = s.replace(/`([^`\n]+)`/g, (_, c) => `<code>${c}</code>`);
+  s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, t, u) => `<a href="${u}" target="_blank" rel="noopener">${t}</a>`);
+  s = s.replace(/\*\*\*([^*]+)\*\*\*/g, '<strong><em>$1</em></strong>');
+  s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/__([^_\n]+)__/g, '<strong>$1</strong>');
+  s = s.replace(/(^|\W)\*([^\*\n]+)\*(?=\W|$)/g, (m, p, c) => `${p}<em>${c}</em>`);
+  s = s.replace(/(^|\W)_([^_\n]+)_(?=\W|$)/g, (m, p, c) => `${p}<em>${c}</em>`);
+  return s;
+}
+function mdBlock(md) {
+  md = md.replace(/\r\n/g, '\n');
+  const esc = (t) => t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const lines = md.split('\n');
+  let out = '', i = 0;
+  // fenced ``` blocks
+  let fenced = null;
+  const flushFenced = () => { if (fenced !== null) { out += `<pre><code>${esc(fenced.join('\n'))}</code></pre>`; fenced = null; } };
+  const flushList = (items, ordered) => {
+    if (!items.length) return;
+    const tag = ordered ? 'ol' : 'ul';
+    out += `<${tag}>` + items.map(li => `<li>${mdInline(li)}</li>`).join('') + `</${tag}>`;
+  };
+  let listBuf = [], listOrdered = false;
+  const flushLists = () => { if (listBuf.length) { flushList(listBuf, listOrdered); listBuf = []; } };
+  for (; i < lines.length; i++) {
+    let line = lines[i];
+    if (line.startsWith('```')) { if (fenced === null) { flushLists(); fenced = []; } else { flushFenced(); } continue; }
+    if (fenced !== null) { fenced.push(line); continue; }
+    if (/^\s*$/.test(line)) { flushLists(); continue; }
+    if (/^\s*---+\s*$/.test(line)) { flushLists(); out += '<hr>'; continue; }
+    const bq = line.match(/^\s*>\s?(.*)$/);
+    if (bq) { flushLists(); let bqLines=[]; while(i<lines.length){const m=lines[i].match(/^\s*>\s?(.*)$/); if(!m) break; bqLines.push(mdInline(m[1])); i++;} i--; out += `<blockquote>${bqLines.join('<br>')}</blockquote>`; continue; }
+    const tableRow = /^\s*\|.*\|\s*$/.test(line);
+    if (tableRow) { flushLists(); let rows=[]; while(i<lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) rows.push(lines[i]), i++; i--; if(rows.length>=2 && /^\s*\|[-| :]+\|\s*$/.test(rows[1])){const cells=c=>c.split('|').slice(1,-1).map(x=>x.trim()); const heads=cells(rows[0]); out+=`<table><thead><tr>`+heads.map(h=>`<th>${mdInline(h)}</th>`).join('')+`</tr></thead><tbody>`+rows.slice(2).map(r=>`<tr>`+cells(r).map(c=>`<td>${mdInline(c)}</td>`).join('')+`</tr>`).join('')+`</tbody></table>`;} else { rows.forEach(r=> out+=`<p>${mdInline(r)}</p>`);} continue; }
+    const h = line.match(/^(#{1,4})\s+(.*)$/);
+    if (h) { flushLists(); out += `<h${h[1].length}>${mdInline(h[2])}</h${h[1].length}>`; continue; }
+    const ul = line.match(/^\s*[-*]\s+(.*)$/);
+    const ol = line.match(/^\s*\d+\.\s+(.*)$/);
+    if (ul || ol) { const ordered = !!ol; const txt = (ul?ul[1]:ol[1]); if (listBuf.length && ordered !== listOrdered) { flushLists(); } listOrdered = ordered; listBuf.push(txt); continue; }
+    flushLists(); out += `<p>${mdInline(line)}</p>`;
+  }
+  flushFenced(); flushLists();
+  return out || '<p></p>';
+}
+
+function chip(k, v, extraClass) {
+  if (!v) return "";
+  const cls = extraClass ? ` meta-chip ${extraClass}` : " meta-chip";
+  const mono = k === "id" || k === "session" ? " mono" : "";
+  return `<span class="${cls}${mono}"><span class="k">${k}</span><span class="v">${escapeHtml(String(v))}</span></span>`;
+}
+function renderDetailMeta(o) {
+  const parts = [];
+  parts.push(chip("id", o.id));
+  parts.push(chip("scope", o.scope, "scope"));
+  parts.push(chip("created", fmtTime(o.created_at)));
+  if (o.updated_at && o.updated_at !== o.created_at) parts.push(chip("updated", fmtTime(o.updated_at)));
+  if (o.project) parts.push(chip("project", o.project, "project"));
+  if (o.topic_key) parts.push(chip("topic", o.topic_key));
+  if (o.author) parts.push(chip("author", o.author, "author"));
+  parts.push(chip("session", o.session_id));
+  if (o.sync_id) parts.push(chip("sync", o.sync_id.slice(0,18)));
+  if (o.revision_count != null) parts.push(chip("revisions", o.revision_count));
+  if (o.duplicate_count != null) parts.push(chip("dups", o.duplicate_count));
+  if (o.last_seen_at) parts.push(chip("seen", fmtTime(o.last_seen_at)));
+  return parts.join("");
+}
+
 async function showDetail(id) {
   try {
     const o = await api(`/observations/${id}`);
     currentObs = o;
-    const panel = document.getElementById("detail-panel");
     document.getElementById("detail-title").textContent = o.title;
-    document.getElementById("detail-meta").innerHTML = `${badge(o.type)} <span>#${o.id}</span> <span>${fmtTime(o.created_at)}</span> <span>updated ${fmtTime(o.updated_at)}</span> ${o.project ? `<span class="project-tag">@ ${o.project}</span>` : ""} · scope: ${o.scope} · session: ${o.session_id}`;
-    document.getElementById("detail-content").textContent = o.content;
-    panel.classList.add("open");
+    document.getElementById("detail-type-badge").innerHTML = badge(o.type);
+    document.getElementById("detail-meta").innerHTML = renderDetailMeta(o);
+    document.getElementById("detail-content").innerHTML = mdBlock(o.content || '');
+    document.getElementById("detail-panel").classList.add("open");
   } catch(e) { alert("Failed to load observation"); }
 }
 
 function closeDetail() { document.getElementById("detail-panel").classList.remove("open"); }
+document.getElementById("detail-panel").addEventListener("click", (e) => { if (e.target === e.currentTarget) closeDetail(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDetail(); });
 
 function editObservation(o) {
   if (!o) return;

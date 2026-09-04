@@ -17,6 +17,8 @@ var ErrInvalidRunnerName = errors.New("invalid runner name")
 // Supported values:
 //   - "claude"    → *ClaudeRunner (shells out to the claude CLI)
 //   - "opencode"  → *OpenCodeRunner (shells out to the opencode CLI)
+//   - "pi"        → *PiRunner (shells out to the pi CLI; routes via the user's
+//     own provider config, e.g. a cheap 9router model)
 //
 // For any other value, including the empty string, a descriptive error is
 // returned that names the ENGRAM_AGENT_CLI environment variable and the
@@ -33,15 +35,18 @@ func NewRunner(name string) (AgentRunner, error) {
 	case "opencode":
 		return NewOpenCodeRunner(), nil
 
+	case "pi":
+		return NewPiRunner(), nil
+
 	case "":
 		return nil, fmt.Errorf(
-			"%w: ENGRAM_AGENT_CLI is not set; supported values are: claude, opencode",
+			"%w: ENGRAM_AGENT_CLI is not set; supported values are: claude, opencode, pi",
 			ErrInvalidRunnerName,
 		)
 
 	default:
 		return nil, fmt.Errorf(
-			"%w: %q is not a recognized runner; set ENGRAM_AGENT_CLI to one of: claude, opencode",
+			"%w: %q is not a recognized runner; set ENGRAM_AGENT_CLI to one of: claude, opencode, pi",
 			ErrInvalidRunnerName,
 			name,
 		)

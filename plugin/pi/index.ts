@@ -654,6 +654,12 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
   const activeProject = requestedProject || project;
   const activeSessionId = String(params.session_id || (requestedProject ? `manual-save-${requestedProject}` : sessionId) || `manual-save-${project}`);
 
+  // Provenance: who authored this memory, as "pi/<model>". Falls back to
+  // ENGRAM_AUTHOR when the active model is not exposed on the context.
+  const activeModel = (ctx as { model?: { id?: string; name?: string } }).model;
+  const modelId = activeModel?.id || activeModel?.name;
+  const author = modelId ? `pi/${modelId}` : (process.env.ENGRAM_AUTHOR?.trim() || undefined);
+
   switch (toolName) {
     case "mem_search":
       return engramFetch(`/search${queryString({
@@ -687,6 +693,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
           project: activeProject,
           scope: params.scope || "project",
           topic_key: params.topic_key,
+          author,
         },
       });
     case "mem_update":
@@ -723,6 +730,7 @@ async function callMemoryTool(toolName: string, params: Record<string, unknown>,
           content: params.content,
           project: activeProject,
           scope: "project",
+          author,
         },
       });
     case "mem_session_start":
