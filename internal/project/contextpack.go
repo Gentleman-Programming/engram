@@ -2,6 +2,7 @@ package project
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
@@ -10,8 +11,22 @@ import (
 	"github.com/Gentleman-Programming/engram/internal/store"
 )
 
-// jiraBaseURL is PROJ's fixed Jira Cloud base (RFC rfc-engram-projects.md §5.10).
-const jiraBaseURL = "https://your-org.atlassian.net/browse/"
+// jiraBaseURL is the Jira Cloud browse base used to build task links. It is
+// read from the environment so a deployment is not tied to one Jira tenant:
+// set ENGRAM_JIRA_BASE_URL to your own instance. See RFC
+// rfc-engram-projects.md §5.10.
+var jiraBaseURL = jiraBaseURLFromEnv()
+
+func jiraBaseURLFromEnv() string {
+	v := strings.TrimSpace(os.Getenv("ENGRAM_JIRA_BASE_URL"))
+	if v == "" {
+		return "https://your-org.atlassian.net/browse/"
+	}
+	if !strings.HasSuffix(v, "/") {
+		v += "/"
+	}
+	return v
+}
 
 // ContextPackOptions holds mem_context_pack's tunable parameters.
 type ContextPackOptions struct {

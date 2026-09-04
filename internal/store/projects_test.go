@@ -545,3 +545,22 @@ func TestFindRunbooks(t *testing.T) {
 }
 
 func boolp(v bool) *bool { return &v }
+
+func TestDefaultJiraProject(t *testing.T) {
+	// Same reasoning as the Jira base URL: the fallback key must not name a
+	// particular organisation's project.
+	t.Setenv("ENGRAM_JIRA_PROJECT", "")
+	if got := DefaultJiraProject(); got != "PROJ" {
+		t.Fatalf("unset: expected the generic default, got %q", got)
+	}
+
+	t.Setenv("ENGRAM_JIRA_PROJECT", "ACME")
+	if got := DefaultJiraProject(); got != "ACME" {
+		t.Fatalf("set: expected the configured key, got %q", got)
+	}
+
+	t.Setenv("ENGRAM_JIRA_PROJECT", "  ")
+	if got := DefaultJiraProject(); got != "PROJ" {
+		t.Fatalf("blank: expected the default, got %q", got)
+	}
+}

@@ -74,7 +74,7 @@ func TestBuildContextPack_MarkdownIncludesAllSections(t *testing.T) {
 	if _, _, _, err := s.AddEvidence(store.AddEvidenceParams{
 		Task: task, Path: "acme/PROJ-10336/shot.png",
 		SHA256: "9f2b1c0a7e4d5b6c8a1f3e2d4c5b6a7f8e9d0c1b2a3f4e5d6c7b8a9f0e1d2c3b",
-		Kind: "png", Proves: "preview returns 200", SizeBytes: &size, AttachedJira: true,
+		Kind:   "png", Proves: "preview returns 200", SizeBytes: &size, AttachedJira: true,
 	}); err != nil {
 		t.Fatalf("AddEvidence: %v", err)
 	}
@@ -148,5 +148,30 @@ func TestBuildContextPack_SectionFilterAndMaxChars(t *testing.T) {
 	}
 	if strings.Contains(markdown, "**Proyecto**") {
 		t.Fatalf("expected card section to be excluded, got:\n%s", markdown)
+	}
+}
+
+func TestJiraBaseURLFromEnv(t *testing.T) {
+	// The base is read from the environment so a deployment is not tied to one
+	// Jira tenant; the default has to stay generic for the same reason.
+	t.Setenv("ENGRAM_JIRA_BASE_URL", "")
+	if got := jiraBaseURLFromEnv(); got != "https://your-org.atlassian.net/browse/" {
+		t.Fatalf("unset: expected the generic default, got %q", got)
+	}
+
+	t.Setenv("ENGRAM_JIRA_BASE_URL", "https://acme.atlassian.net/browse/")
+	if got := jiraBaseURLFromEnv(); got != "https://acme.atlassian.net/browse/" {
+		t.Fatalf("set: expected the configured base, got %q", got)
+	}
+
+	// A base without the trailing slash still has to concatenate cleanly.
+	t.Setenv("ENGRAM_JIRA_BASE_URL", "https://acme.atlassian.net/browse")
+	if got := jiraBaseURLFromEnv(); got != "https://acme.atlassian.net/browse/" {
+		t.Fatalf("no trailing slash: expected one to be added, got %q", got)
+	}
+
+	t.Setenv("ENGRAM_JIRA_BASE_URL", "   ")
+	if got := jiraBaseURLFromEnv(); got != "https://your-org.atlassian.net/browse/" {
+		t.Fatalf("blank: expected the default, got %q", got)
 	}
 }

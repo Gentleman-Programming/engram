@@ -12,7 +12,7 @@ import (
 //go:embed jira_state_map.json
 var jiraStateMapJSON []byte
 
-// jiraStateMap maps a literal PROJ Jira status.name to the corresponding
+// jiraStateMap maps a literal Jira status.name to the corresponding
 // engram-projects task state. Loaded once from jira_state_map.json so the
 // mapping table lives as data, not code, and can be extended without
 // touching Go source.

@@ -24,13 +24,13 @@ import (
 // ─── Shared validation ───────────────────────────────────────────────────────
 
 var (
-	projectSlugPattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
-	jiraKeyToolPattern  = regexp.MustCompile(`^[A-Z][A-Z0-9]+-[0-9]+$`)
-	sddChangePattern    = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+	projectSlugPattern    = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
+	jiraKeyToolPattern    = regexp.MustCompile(`^[A-Z][A-Z0-9]+-[0-9]+$`)
+	sddChangePattern      = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 	taskSyncIDToolPattern = regexp.MustCompile(`^task-[0-9a-f]{16}$`)
-	obsSyncIDPattern    = regexp.MustCompile(`^obs-[0-9a-f]{16,32}$`)
-	sha256ToolPattern   = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	runbookIDToolPattern = regexp.MustCompile(`^RB-[0-9]{3}$`)
+	obsSyncIDPattern      = regexp.MustCompile(`^obs-[0-9a-f]{16,32}$`)
+	sha256ToolPattern     = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	runbookIDToolPattern  = regexp.MustCompile(`^RB-[0-9]{3}$`)
 )
 
 var reservedProjectSlugs = map[string]bool{"migrate": true, "current": true}
@@ -266,7 +266,7 @@ func registerProjectTools(srv *server.MCPServer, s *store.Store, cfg MCPConfig, 
 				mcp.WithString("display_name", mcp.MaxLength(120)),
 				mcp.WithString("repo_url", mcp.MaxLength(300)),
 				mcp.WithString("default_branch", mcp.DefaultString("master")),
-				mcp.WithString("jira_project", mcp.DefaultString("PROJ")),
+				mcp.WithString("jira_project", mcp.DefaultString(store.DefaultJiraProject())),
 				mcp.WithString("jira_component"),
 				mcp.WithString("knowledge_hub_path", mcp.Description("Vault-relative path of the type: service hub")),
 				mcp.WithString("owner"),

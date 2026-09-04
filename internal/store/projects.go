@@ -26,12 +26,12 @@ import (
 // {"error", "code", ...} envelope; store methods never format that envelope
 // themselves so the same data layer can back the HTTP API (T-04.03) later.
 var (
-	ErrNoProjectCard      = errors.New("no project card")
-	ErrGraphNotFound      = errors.New("graph.json not found")
-	ErrGraphMissingCommit = errors.New("graph.json missing built_at_commit")
-	ErrUnknownTask        = errors.New("unknown task")
-	ErrUnknownObservation = errors.New("unknown observation")
-	ErrCrossProjectLink   = errors.New("link rejected: observation and task belong to different projects")
+	ErrNoProjectCard       = errors.New("no project card")
+	ErrGraphNotFound       = errors.New("graph.json not found")
+	ErrGraphMissingCommit  = errors.New("graph.json missing built_at_commit")
+	ErrUnknownTask         = errors.New("unknown task")
+	ErrUnknownObservation  = errors.New("unknown observation")
+	ErrCrossProjectLink    = errors.New("link rejected: observation and task belong to different projects")
 	ErrGraphCommitRequired = errors.New("graph_ref requires graph_commit")
 )
 
@@ -107,6 +107,16 @@ type UpsertProjectCardParams struct {
 
 // UpsertProjectCard creates or updates a project_cards row. It is idempotent:
 // omitted fields are never overwritten on an existing card.
+// DefaultJiraProject is the Jira project key applied when a card does not
+// carry one. It is read from the environment so a deployment is not tied to
+// one Jira project: set ENGRAM_JIRA_PROJECT to your own key.
+func DefaultJiraProject() string {
+	if v := strings.TrimSpace(os.Getenv("ENGRAM_JIRA_PROJECT")); v != "" {
+		return v
+	}
+	return "PROJ"
+}
+
 func (s *Store) UpsertProjectCard(p UpsertProjectCardParams) (ProjectCard, bool, error) {
 	existing, err := s.GetProjectCard(p.Slug)
 	created := false
@@ -129,7 +139,7 @@ func (s *Store) UpsertProjectCard(p UpsertProjectCardParams) (ProjectCard, bool,
 		if p.DefaultBranch != nil {
 			defaultBranch = *p.DefaultBranch
 		}
-		jiraProject := "PROJ"
+		jiraProject := DefaultJiraProject()
 		if p.JiraProject != nil {
 			jiraProject = *p.JiraProject
 		}
@@ -335,8 +345,8 @@ type graphJSONNode struct {
 }
 
 type graphJSONFile struct {
-	BuiltAtCommit string          `json:"built_at_commit"`
-	Nodes         []graphJSONNode `json:"nodes"`
+	BuiltAtCommit string            `json:"built_at_commit"`
+	Nodes         []graphJSONNode   `json:"nodes"`
 	Links         []json.RawMessage `json:"links"`
 }
 
