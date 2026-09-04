@@ -812,6 +812,67 @@ func TestMutationPushSyncPaused409(t *testing.T) {
 	}
 }
 
+func TestMutationPushAliasCannotBypassCanonicalPause(t *testing.T) {
+	ms := newFakeMutationStore()
+	ms.syncEnabledMap["proj-b"] = false
+	srv := newMutationTestServer(ms, "secret", []string{"proj-b"})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", marshalPushRequestWithCreatedBy(t, makeMutationEntries(2, "PROJ--B"), "alice"))
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected paused canonical project alias to return 409, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if len(ms.mutations) != 0 {
+		t.Fatalf("expected paused alias rejection to store no mutations, got %+v", ms.mutations)
+	}
+	if len(ms.auditCalls) != 1 || ms.auditCalls[0].Project != "proj-b" || ms.auditCalls[0].EntryCount != 2 {
+		t.Fatalf("expected canonical project in pause audit, got %+v", ms.auditCalls)
+	}
+	var response mutationPushResponseEnvelope
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("decode pause response: %v", err)
+	}
+	if response.Project != "proj-b" {
+		t.Fatalf("expected canonical project in pause response, got %q", response.Project)
+	}
+}
+
+func TestMutationPushAcceptedAliasUsesCanonicalProjectIdentity(t *testing.T) {
+	ms := newFakeMutationStore()
+	srv := newMutationTestServer(ms, "secret", []string{"proj-b"})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", marshalPushRequest(t, makeMutationEntries(1, " PROJ--B ")))
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected canonical project alias to return 200, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if len(ms.mutations) != 1 || ms.mutations[0].Project != "proj-b" {
+		t.Fatalf("expected canonical project in stored mutation, got %+v", ms.mutations)
+	}
+	var storedPayload map[string]any
+	if err := json.Unmarshal(ms.mutations[0].Payload, &storedPayload); err != nil {
+		t.Fatalf("decode stored mutation payload: %v", err)
+	}
+	if storedPayload["project"] != "proj-b" {
+		t.Fatalf("expected canonical project in stored mutation payload, got %#v", storedPayload["project"])
+	}
+	var response mutationPushResponseEnvelope
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("decode success response: %v", err)
+	}
+	if response.Project != "proj-b" {
+		t.Fatalf("expected canonical project in success response, got %q", response.Project)
+	}
+}
+
 func TestMutationPushNonPausedAccepted(t *testing.T) {
 	// REQ-203: non-paused → 200
 	ms := newFakeMutationStore()
@@ -921,10 +982,11 @@ func TestMutationPushRejectsMixedProjectBatch(t *testing.T) {
 	// Token authorized only for "proj-a"
 	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
 
-	// Batch contains both "proj-a" (authorized) and "proj-b" (unauthorized)
+	// Batch contains both "proj-a" (authorized) and "PROJ-B" (unauthorized).
+	// The denied project must be reported in its canonical form.
 	entries := []MutationEntry{
 		{Project: "proj-a", Entity: "obs", EntityKey: "k1", Op: "upsert", Payload: json.RawMessage(`{}`)},
-		{Project: "proj-b", Entity: "obs", EntityKey: "k2", Op: "upsert", Payload: json.RawMessage(`{}`)},
+		{Project: "PROJ-B", Entity: "obs", EntityKey: "k2", Op: "upsert", Payload: json.RawMessage(`{}`)},
 	}
 	body := marshalPushRequest(t, entries)
 
@@ -936,6 +998,16 @@ func TestMutationPushRejectsMixedProjectBatch(t *testing.T) {
 
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("expected 403 for mixed batch with unauthorized project, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	payload := decodeActionableError(t, rec)
+	if payload.ErrorClass != "policy" {
+		t.Fatalf("expected policy class, got %q", payload.ErrorClass)
+	}
+	if payload.ErrorCode != "policy_forbidden" {
+		t.Fatalf("expected policy_forbidden error code, got %q", payload.ErrorCode)
+	}
+	if payload.Error != `forbidden: project "proj-b" is not allowed` {
+		t.Fatalf("expected denied project in error message, got %q", payload.Error)
 	}
 
 	// Verify nothing was stored for proj-a either (all-or-nothing rejection)

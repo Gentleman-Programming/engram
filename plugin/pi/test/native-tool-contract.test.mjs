@@ -228,6 +228,41 @@ test("a 204 Pi response is a successful null without JSON parsing", async () => 
 
       assert.notEqual(result.isError, true);
       assert.equal(result.details.data, null);
+      assert.equal(result.content[0].text, "No memories found");
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+test("a successful empty Pi search presents no memories found", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  globalThis.fetch = async (url) => {
+    const path = new URL(url).pathname;
+    if (path === "/health") return new Response(JSON.stringify({ status: "ok" }));
+    if (path === "/project/current") return new Response(JSON.stringify({ project: "engram" }));
+    if (path === "/search") return new Response(JSON.stringify([]), { headers: { "Content-Type": "application/json" } });
+    throw new Error(`unexpected request: ${url}`);
+  };
+
+  try {
+    await withPluginSandbox("engram-pi-contract-", async ({ sandbox }) => {
+      const { registeredTools } = await loadPluginHarness(sandbox);
+      const result = await registeredTools.get("mem_search").execute(
+        "empty-search",
+        { query: "not found" },
+        undefined,
+        undefined,
+        runtimeContext("empty-search-session"),
+      );
+
+      assert.notEqual(result.isError, true);
+      assert.deepEqual(result.details.data, []);
+      assert.equal(result.content[0].text, "No memories found");
     });
   } finally {
     globalThis.fetch = originalFetch;
