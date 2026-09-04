@@ -5559,6 +5559,65 @@ func TestMemSave_ExplicitProjectMustMatchExistingSessionProject(t *testing.T) {
 	}
 }
 
+func TestMemSave_RejectsStaleManualSessionProjectMismatchWithoutWrites(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("known-target-project", "target-project", "/work/target-project"); err != nil {
+		t.Fatalf("create target session: %v", err)
+	}
+	if _, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "known-target-project",
+		Type:      "manual",
+		Title:     "target project seed",
+		Content:   "makes the explicit project known",
+		Project:   "target-project",
+	}); err != nil {
+		t.Fatalf("seed target project: %v", err)
+	}
+	if err := s.CreateSession("manual-save-target-project", "other-project", "/work/other-project"); err != nil {
+		t.Fatalf("create stale manual session: %v", err)
+	}
+
+	var beforeObservations, beforeMutations int
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM observations`).Scan(&beforeObservations); err != nil {
+		t.Fatalf("count observations before save: %v", err)
+	}
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM sync_mutations`).Scan(&beforeMutations); err != nil {
+		t.Fatalf("count sync mutations before save: %v", err)
+	}
+
+	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "stale manual session mismatch",
+		"content": "must not be stored",
+		"type":    "manual",
+		"project": "target-project",
+	}}})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("expected stale manual session mismatch to fail")
+	}
+	if got := callResultText(t, res); !strings.Contains(got, "session project does not match requested project") {
+		t.Fatalf("error = %q, want session project mismatch", got)
+	}
+
+	var afterObservations, afterMutations int
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM observations`).Scan(&afterObservations); err != nil {
+		t.Fatalf("count observations after save: %v", err)
+	}
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM sync_mutations`).Scan(&afterMutations); err != nil {
+		t.Fatalf("count sync mutations after save: %v", err)
+	}
+	if afterObservations != beforeObservations || afterMutations != beforeMutations {
+		t.Fatalf("failed save changed observations/mutations from %d/%d to %d/%d", beforeObservations, beforeMutations, afterObservations, afterMutations)
+	}
+}
+
 func TestMemSave_NonAmbiguousExplicitProjectIgnoresStaleRecoveryReason(t *testing.T) {
 	dir := t.TempDir()
 	initTestGitRepo(t, dir)

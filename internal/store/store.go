@@ -60,6 +60,7 @@ var (
 	ErrPromptNotFound              = errors.New("prompt not found")
 	ErrProjectNotFound             = errors.New("project not found")
 	ErrProjectRequired             = errors.New("project identity is required")
+	ErrSessionProjectMismatch      = errors.New("session project does not match requested project")
 	ErrProjectRescueInvalidRequest = errors.New("project rescue request is invalid")
 	// ErrProjectOwnershipAmbiguous is returned when an unowned session cannot
 	// adopt a write's project because it already parents records owned by a
@@ -2458,6 +2459,13 @@ func (s *Store) CreateSession(id, project, directory string) error {
 	}
 
 	return s.withTx(func(tx *sql.Tx) error {
+		existingProject, found, err := sessionOwnershipTx(tx, id)
+		if err != nil {
+			return err
+		}
+		if found && existingProject != "" && existingProject != project {
+			return fmt.Errorf("%w: session %q belongs to project %q, not %q", ErrSessionProjectMismatch, id, existingProject, project)
+		}
 		if err := s.createSessionTx(tx, id, project, directory); err != nil {
 			return err
 		}
@@ -7696,9 +7704,7 @@ func (s *Store) resolveWriteProjectTx(tx *sql.Tx, sessionID, requested string) (
 		return requested, nil
 	}
 	if sessionProject != "" {
-		// An owned session keeps its ownership; the caller decides whether a
-		// mismatch is an error. This preserves existing behavior.
-		return requested, nil
+		return "", fmt.Errorf("%w: session %q belongs to project %q, not %q", ErrSessionProjectMismatch, sessionID, sessionProject, requested)
 	}
 
 	kind, owner, err := foreignRecordOwnerTx(tx, sessionID, requested)

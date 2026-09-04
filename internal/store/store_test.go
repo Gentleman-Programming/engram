@@ -119,6 +119,58 @@ func TestProjectIdentityAdmissionRejectsEmptyWritesWithoutJournalState(t *testin
 	assertCounts(0, 0, 0, 0)
 }
 
+func TestProjectIdentityAdmissionRejectsOwnedManualSessionMismatchWithoutWrites(t *testing.T) {
+	s := newTestStore(t)
+	const sessionID = "manual-save-target-project"
+
+	if err := s.CreateSession(sessionID, "other-project", "/tmp/other-project"); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	assertCounts := func(wantObservations, wantMutations int) {
+		t.Helper()
+		for table, want := range map[string]int{"observations": wantObservations, "sync_mutations": wantMutations} {
+			var got int
+			if err := s.DB().QueryRow("SELECT COUNT(*) FROM " + table).Scan(&got); err != nil {
+				t.Fatalf("count %s: %v", table, err)
+			}
+			if got != want {
+				t.Fatalf("%s count = %d, want %d", table, got, want)
+			}
+		}
+	}
+	assertCounts(0, 1)
+
+	if err := s.CreateSession(sessionID, "target-project", "/tmp/target-project"); !errors.Is(err, ErrSessionProjectMismatch) {
+		t.Fatalf("CreateSession error = %v, want ErrSessionProjectMismatch", err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: sessionID,
+		Type:      "note",
+		Title:     "mismatched write",
+		Content:   "must not be stored",
+		Project:   "target-project",
+	}); !errors.Is(err, ErrSessionProjectMismatch) {
+		t.Fatalf("AddObservation error = %v, want ErrSessionProjectMismatch", err)
+	}
+	assertCounts(0, 1)
+
+	if got := sessionProjectOrNull(t, s, sessionID); got != "other-project" {
+		t.Fatalf("session project = %q, want other-project", got)
+	}
+}
+
+func TestCreateSessionAdoptsBlankProject(t *testing.T) {
+	type legacySession struct{ id, project string }
+	s := newTestStoreWithNullableLegacySessions(t, legacySession{"blank-session", ""})
+
+	if err := s.CreateSession("blank-session", "target-project", "/tmp/target-project"); err != nil {
+		t.Fatalf("CreateSession on blank session: %v", err)
+	}
+	if got := sessionProjectOrNull(t, s, "blank-session"); got != "target-project" {
+		t.Fatalf("session project = %q, want target-project", got)
+	}
+}
+
 func newTestStoreWithNullableLegacySessions(t *testing.T, sessions ...struct{ id, project string }) *Store {
 	t.Helper()
 	cfg := mustDefaultConfig(t)
