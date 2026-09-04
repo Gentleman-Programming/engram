@@ -294,7 +294,7 @@ Do not manually edit SQLite without a backup.
 | `observation payload title is required for upsert` | Run the missing session directory helper; it also repairs missing observation payload fields from local `observations` |
 | `observations[N].title is required` | Run the missing session directory helper with `--fix-empty-observations` or `--all` |
 | `401` or `auth_required` | Check `ENGRAM_CLOUD_TOKEN` on the client and server |
-| `403` or `policy_forbidden` | Check `ENGRAM_CLOUD_ALLOWED_PROJECTS` on the server |
+| `403` or `policy_forbidden` | Check the server-side `ENGRAM_CLOUD_ALLOWED_PROJECTS` policy for the denied project; a managed principal's project grant may also need checking. The client does not expose allowlist contents. |
 | `server_unsupported` | Redeploy a cloud server with mutation endpoints |
 
 ---

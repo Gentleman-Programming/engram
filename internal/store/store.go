@@ -5312,7 +5312,16 @@ func (s *Store) MarkSyncAuthRequired(targetKey, message string) error {
 }
 
 func (s *Store) MarkSyncFailure(targetKey, message string, backoffUntil time.Time) error {
+	return s.MarkSyncFailureWithReason(targetKey, "transport_failed", message, backoffUntil)
+}
+
+// MarkSyncFailureWithReason records a degraded failure while preserving its reason code.
+func (s *Store) MarkSyncFailureWithReason(targetKey, reasonCode, message string, backoffUntil time.Time) error {
 	targetKey = normalizeSyncTargetKey(targetKey)
+	reasonCode = strings.TrimSpace(reasonCode)
+	if reasonCode == "" {
+		reasonCode = "transport_failed"
+	}
 	backoff := backoffUntil.UTC().Format(time.RFC3339)
 	return s.withTx(func(tx *sql.Tx) error {
 		state, err := s.getSyncStateTx(tx, targetKey)
@@ -5323,7 +5332,7 @@ func (s *Store) MarkSyncFailure(targetKey, message string, backoffUntil time.Tim
 			`UPDATE sync_state
 			 SET lifecycle = ?, consecutive_failures = ?, backoff_until = ?, reason_code = ?, reason_message = ?, last_error = ?, updated_at = datetime('now')
 			 WHERE target_key = ?`,
-			SyncLifecycleDegraded, state.ConsecutiveFailures+1, backoff, "transport_failed", message, message, targetKey,
+			SyncLifecycleDegraded, state.ConsecutiveFailures+1, backoff, reasonCode, message, message, targetKey,
 		)
 		return err
 	})

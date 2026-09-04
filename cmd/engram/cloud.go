@@ -522,7 +522,7 @@ func cmdCloudUpgradeBootstrap(cfg store.Config) {
 
 	result, err := runUpgradeBootstrap(s, project, cc)
 	if err != nil {
-		fatal(err)
+		fatal(fmt.Errorf("%s", cloudSyncFailureMessage(project, err)))
 		return
 	}
 	fmt.Printf("project: %s\n", project)
@@ -667,22 +667,12 @@ func printCloudStatusSyncDiagnostic(cfg store.Config) {
 		return
 	}
 	defer s.Close()
-	state, err := s.GetSyncState(constants.TargetKeyCloud)
-	if err != nil || state == nil {
+	summary, err := s.CloudSyncSummary()
+	if err != nil || strings.TrimSpace(summary.LastError) == "" {
 		return
 	}
-	code := strings.TrimSpace(derefString(state.ReasonCode))
-	message := strings.TrimSpace(derefString(state.ReasonMessage))
-	if code == "" && message == "" {
-		return
-	}
-	fmt.Printf("Sync diagnostic: %s\n", state.Lifecycle)
-	if code != "" {
-		fmt.Printf("reason_code: %s\n", code)
-	}
-	if message != "" {
-		fmt.Printf("reason_message: %s\n", message)
-	}
+	fmt.Println("Sync diagnostic: project-scoped cloud state")
+	fmt.Printf("reason_message: %s\n", summary.LastError)
 }
 
 func cmdCloudEnroll(cfg store.Config) {
