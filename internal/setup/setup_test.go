@@ -1584,7 +1584,8 @@ func TestWriteClaudeCodeUserMCP(t *testing.T) {
 	t.Run("writes json with absolute binary path", func(t *testing.T) {
 		resetSetupSeams(t)
 		home := useTestHome(t)
-		osExecutable = func() (string, error) { return "/usr/local/bin/engram", nil }
+		executable := filepath.Join(t.TempDir(), "engram")
+		osExecutable = func() (string, error) { return executable, nil }
 
 		if err := writeClaudeCodeUserMCP(); err != nil {
 			t.Fatalf("writeClaudeCodeUserMCP failed: %v", err)
@@ -1601,7 +1602,7 @@ func TestWriteClaudeCodeUserMCP(t *testing.T) {
 			t.Fatalf("parse mcp config: %v", err)
 		}
 
-		if cfg["command"] != "/usr/local/bin/engram" {
+		if cfg["command"] != executable {
 			t.Fatalf("expected absolute path command, got %#v", cfg["command"])
 		}
 		args, ok := cfg["args"].([]any)
@@ -1613,7 +1614,8 @@ func TestWriteClaudeCodeUserMCP(t *testing.T) {
 	t.Run("overwrites existing (idempotent — always refreshes path)", func(t *testing.T) {
 		resetSetupSeams(t)
 		home := useTestHome(t)
-		osExecutable = func() (string, error) { return "/new/path/engram", nil }
+		executable := filepath.Join(t.TempDir(), "engram")
+		osExecutable = func() (string, error) { return executable, nil }
 
 		mcpDir := filepath.Join(home, ".claude", "mcp")
 		if err := os.MkdirAll(mcpDir, 0755); err != nil {
@@ -1635,8 +1637,70 @@ func TestWriteClaudeCodeUserMCP(t *testing.T) {
 		if err := json.Unmarshal(raw, &cfg); err != nil {
 			t.Fatalf("parse config: %v", err)
 		}
-		if cfg["command"] != "/new/path/engram" {
+		if cfg["command"] != executable {
 			t.Fatalf("expected updated command, got %#v", cfg["command"])
+		}
+	})
+
+	t.Run("rejects symlink without changing its target", func(t *testing.T) {
+		resetSetupSeams(t)
+		home := useTestHome(t)
+		osExecutable = func() (string, error) { return "/new/path/engram", nil }
+
+		target := filepath.Join(t.TempDir(), "user-owned.json")
+		const original = `{"command":"user-owned"}`
+		if err := os.WriteFile(target, []byte(original), 0644); err != nil {
+			t.Fatalf("write symlink target: %v", err)
+		}
+		path := filepath.Join(home, ".claude", "mcp", "engram.json")
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatalf("create MCP directory: %v", err)
+		}
+		if err := os.Symlink(target, path); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+
+		err := writeClaudeCodeUserMCP()
+		if err == nil || !strings.Contains(err.Error(), "regular file") {
+			t.Fatalf("expected symlink rejection, got %v", err)
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatalf("lstat MCP config: %v", err)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("MCP config is no longer a symlink: mode %v", info.Mode())
+		}
+		raw, err := os.ReadFile(target)
+		if err != nil {
+			t.Fatalf("read symlink target: %v", err)
+		}
+		if string(raw) != original {
+			t.Fatalf("symlink target was changed: got %q want %q", raw, original)
+		}
+	})
+
+	t.Run("rejects dangling symlink", func(t *testing.T) {
+		resetSetupSeams(t)
+		home := useTestHome(t)
+		path := filepath.Join(home, ".claude", "mcp", "engram.json")
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatalf("create MCP directory: %v", err)
+		}
+		if err := os.Symlink(filepath.Join(t.TempDir(), "missing.json"), path); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+
+		err := writeClaudeCodeUserMCP()
+		if err == nil || !strings.Contains(err.Error(), "regular file") {
+			t.Fatalf("expected dangling symlink rejection, got %v", err)
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatalf("lstat MCP config: %v", err)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("MCP config is no longer a symlink: mode %v", info.Mode())
 		}
 	})
 
@@ -1762,7 +1826,7 @@ func TestWriteClaudeCodeUserMCP(t *testing.T) {
 		}
 	})
 
-	t.Run("write error returns error", func(t *testing.T) {
+	t.Run("non-regular path is rejected", func(t *testing.T) {
 		resetSetupSeams(t)
 		home := useTestHome(t)
 		osExecutable = func() (string, error) { return "/bin/engram", nil }
@@ -1776,8 +1840,8 @@ func TestWriteClaudeCodeUserMCP(t *testing.T) {
 		}
 
 		err := writeClaudeCodeUserMCP()
-		if err == nil || !strings.Contains(err.Error(), "write mcp config") {
-			t.Fatalf("expected write mcp config error, got %v", err)
+		if err == nil || !strings.Contains(err.Error(), "regular file") {
+			t.Fatalf("expected non-regular path error, got %v", err)
 		}
 	})
 

@@ -1083,6 +1083,15 @@ func claudeCodeUserMCPPath() string {
 // must not be written with a PATH-dependent command when the binary cannot be
 // resolved absolutely.
 func writeClaudeCodeUserMCP() error {
+	path := claudeCodeUserMCPPath()
+	if info, err := lstatFn(path); err == nil {
+		if err := validateClaudeCodeUserMCP(path, info); err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat user MCP config: %w", err)
+	}
+
 	data, err := claudeCodeUserMCPData()
 	if err != nil {
 		return err
@@ -1093,7 +1102,7 @@ func writeClaudeCodeUserMCP() error {
 		return fmt.Errorf("create mcp dir: %w", err)
 	}
 
-	if err := writeFileFn(claudeCodeUserMCPPath(), data, 0644); err != nil {
+	if err := writeFileFn(path, data, 0644); err != nil {
 		return fmt.Errorf("write mcp config: %w", err)
 	}
 
@@ -1163,7 +1172,7 @@ func EnsureClaudeCodeUserMCP() error {
 
 func validateClaudeCodeUserMCP(path string, info os.FileInfo) error {
 	if !info.Mode().IsRegular() {
-		return fmt.Errorf("user MCP config must be a regular file: %s", path)
+		return fmt.Errorf("user MCP config must be a regular file; replace it manually before retrying: %s", path)
 	}
 	return nil
 }
