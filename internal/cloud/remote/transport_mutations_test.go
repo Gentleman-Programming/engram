@@ -223,25 +223,45 @@ func TestNewMutationTransportRejectsInvalidURL(t *testing.T) {
 
 func TestNewMutationTransportBearerHTTPSPolicy(t *testing.T) {
 	t.Run("rejects authenticated HTTP", func(t *testing.T) {
-		transport, err := NewMutationTransport("http://127.0.0.1:8080", "token")
-		if err == nil || transport != nil {
-			t.Fatalf("NewMutationTransport authenticated HTTP = (%v, %v), want nil transport and error", transport, err)
+		for _, tc := range []struct {
+			name  string
+			token string
+		}{
+			{name: "plain token", token: "token"},
+			{name: "padded token", token: "  token\t"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				transport, err := NewMutationTransport("http://127.0.0.1:8080", tc.token)
+				if err == nil || transport != nil {
+					t.Fatalf("NewMutationTransport authenticated HTTP = (%v, %v), want nil transport and error", transport, err)
+				}
+			})
 		}
 	})
 
 	t.Run("preserves tokenless HTTP", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("Authorization") != "" {
-				t.Errorf("tokenless request authorization = %q, want empty", r.Header.Get("Authorization"))
-			}
-			_, _ = w.Write([]byte(`{"accepted_seqs":[1]}`))
-		}))
-		defer server.Close()
+		for _, tc := range []struct {
+			name  string
+			token string
+		}{
+			{name: "empty token", token: ""},
+			{name: "whitespace-only token", token: " \t\n "},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Header.Get("Authorization") != "" {
+						t.Errorf("tokenless request authorization = %q, want empty", r.Header.Get("Authorization"))
+					}
+					_, _ = w.Write([]byte(`{"accepted_seqs":[1]}`))
+				}))
+				defer server.Close()
 
-		transport := mustNewMutationTransport(t, server.URL, "")
-		seqs, err := transport.PushMutations([]MutationEntry{{Project: "project-a", Entity: "obs", EntityKey: "key", Op: "upsert"}})
-		if err != nil || !reflect.DeepEqual(seqs, []int64{1}) {
-			t.Fatalf("tokenless HTTP push = (%v, %v), want ([1], nil)", seqs, err)
+				transport := mustNewMutationTransport(t, server.URL, tc.token)
+				seqs, err := transport.PushMutations([]MutationEntry{{Project: "project-a", Entity: "obs", EntityKey: "key", Op: "upsert"}})
+				if err != nil || !reflect.DeepEqual(seqs, []int64{1}) {
+					t.Fatalf("tokenless HTTP push = (%v, %v), want ([1], nil)", seqs, err)
+				}
+			})
 		}
 	})
 
