@@ -13189,13 +13189,19 @@ func TestSearchContext_AlreadyCanceled(t *testing.T) {
 
 func TestFTSQueriesUseFTSFirstCrossJoin(t *testing.T) {
 	searchQuery, _ := buildSearchFTSQuery(`"memory"`, SearchOptions{}, 10)
-	for name, query := range map[string]string{
-		"search":          searchQuery,
-		"find candidates": findCandidatesFTSQuery,
+	promptQuery, _ := buildSearchPromptsFTSQuery(`"memory"`, "", 10)
+	for _, tc := range []struct {
+		name      string
+		query     string
+		crossJoin string
+	}{
+		{"search", searchQuery, "CROSS JOIN observations o ON o.id = fts.rowid"},
+		{"find candidates", findCandidatesFTSQuery, "CROSS JOIN observations o ON o.id = fts.rowid"},
+		{"prompts", promptQuery, "CROSS JOIN user_prompts p ON p.id = fts.rowid"},
 	} {
-		t.Run(name, func(t *testing.T) {
-			if !strings.Contains(query, "CROSS JOIN observations o ON o.id = fts.rowid") {
-				t.Fatalf("expected FTS-first CROSS JOIN, got query:\n%s", query)
+		t.Run(tc.name, func(t *testing.T) {
+			if !strings.Contains(tc.query, tc.crossJoin) {
+				t.Fatalf("expected FTS-first CROSS JOIN, got query:\n%s", tc.query)
 			}
 		})
 	}
