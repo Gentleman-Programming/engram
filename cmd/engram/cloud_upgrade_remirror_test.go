@@ -63,6 +63,18 @@ func TestCmdCloudUpgradeRemirrorFailures(t *testing.T) {
 			want: "open failed",
 		},
 		{
+			name: "requires configured cloud server",
+			args: []string{"engram", "cloud", "upgrade", "remirror", "--project", "project-a"},
+			configure: func(t *testing.T, cfg store.Config) {
+				t.Helper()
+				t.Setenv("ENGRAM_CLOUD_SERVER", "")
+				if err := saveCloudConfig(cfg, &cloudConfig{ServerURL: " \t "}); err != nil {
+					t.Fatalf("save cloud config: %v", err)
+				}
+			},
+			want: "cloud upgrade remirror requires configured cloud server",
+		},
+		{
 			name: "configuration failure",
 			args: []string{"engram", "cloud", "upgrade", "remirror", "--project", "project-a"},
 			configure: func(t *testing.T, cfg store.Config) {
