@@ -47,7 +47,7 @@ Install it once. Keep coding. Pi remembers.
 Engram is not an abandoned side script or a black-box SaaS. It is built in public by **Gentleman Programming** for developers who are already using coding agents seriously.
 
 - **YouTube channel**: tutorials, demos, and product thinking around AI coding workflows — <https://www.youtube.com/c/GentlemanProgramming>
-- **Engram + SDD + Skills demo**: <https://www.youtube.com/watch?v=UoS_LP-PCG8>
+- **Engram + Skills demo**: <https://www.youtube.com/watch?v=UoS_LP-PCG8>
 - **Engram Cloud demo**: <https://www.youtube.com/watch?v=JPZkbGgJNUQ>
 - **GitHub community**: issues, discussions, beta feedback, contributors, and transparent roadmap work — <https://github.com/Gentleman-Programming/engram>
 
@@ -135,6 +135,8 @@ Full tool details remain available by expanding the tool output in Pi. If `gentl
 
 ## What Pi can remember
 
+Pi sends eligible non-Engram tool results to Engram for passive scanning after redaction. Only structured learnings recognized by Engram's parser are persisted; raw or general tool output is not saved as an observation.
+
 - Architecture decisions and tradeoffs
 - Bug fixes, root causes, and gotchas
 - User preferences and project conventions
@@ -158,9 +160,19 @@ This is a lightweight convenience convention, not a full secret-scanning system.
 
 ## Compaction recovery
 
-When Pi emits a compaction lifecycle event, `gentle-engram` best-effort extracts a compacted summary from supported event fields and saves it as a `session_summary` observation with topic key `session/compaction-recovery`.
+When Pi emits a compaction lifecycle event, `gentle-engram` reads the current payload field `compactionEntry.summary` first, then falls back to supported legacy fields when that value is absent or blank. It uses the opaque Pi runtime session identity captured from a fresh lifecycle event; it never accepts a model-supplied session ID for compaction recovery.
 
-Unsupported event shapes fail gracefully. The extension still injects a manual recovery instruction containing `FIRST ACTION REQUIRED`, so the next agent turn can call `mem_session_summary` if the Engram MCP tools are installed and active. If the tools are unavailable, save the compacted summary manually after Engram is available again.
+Before archiving, the extension requires Engram to acknowledge registration for that exact runtime session. It saves a `session_summary` observation with topic key `session/compaction-recovery`, then requests `/context/compaction?session_id=...` for recovery guidance scoped to the same session.
+After a second distinct or blank/missing runtime identity, compaction recovery permanently fails closed until the plugin process restarts.
+
+The next turn receives outcome-specific guidance:
+
+- **Confirmed archive:** the summary is already saved; no manual `mem_session_summary` call is needed.
+- **Definite archive failure:** the manual `FIRST ACTION REQUIRED` fallback remains available.
+- **Timeout or unknown archive outcome:** verify with `mem_search` or `mem_doctor` before retrying so a possibly completed write is not duplicated.
+- **Unavailable session, project, or registration:** no attributed archive is attempted; verify the active Engram session and project before saving manually.
+
+Unsupported event shapes fail gracefully and receive the same safe unavailable guidance rather than an attributed write.
 
 ## Local, sync, or cloud
 
@@ -181,6 +193,8 @@ Cloud is opt-in and project-scoped. Local SQLite remains the source of truth; cl
 - `pi-mcp-adapter` only if you want the optional MCP gateway for compatibility/debugging; Pi-native `mem_*` tools come from `gentle-engram`.
 
 If you only want HTTP session capture against an already running Engram server, set `ENGRAM_URL` and the extension will not auto-start a local `engram serve` process.
+
+When `ENGRAM_URL` is unset, a confirmed local server that later refuses connections gets one bounded restart attempt per initialized runtime. Pi replays only safe reads and idempotent session registration after health returns `2xx`; other writes report the transport failure instead of risking a duplicate mutation.
 
 ## Configuration
 

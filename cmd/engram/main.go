@@ -83,10 +83,12 @@ var (
 
 	checkForUpdates = versioncheck.CheckLatest
 
-	setupSupportedAgents        = setup.SupportedAgents
-	setupInstallAgent           = setup.Install
-	setupAddClaudeCodeAllowlist = setup.AddClaudeCodeAllowlist
-	scanInputLine               = fmt.Scanln
+	setupSupportedAgents         = setup.SupportedAgents
+	setupInstallAgent            = setup.Install
+	setupAddClaudeCodeAllowlist  = setup.AddClaudeCodeAllowlist
+	setupEnsureClaudeCodeUserMCP = setup.EnsureClaudeCodeUserMCP
+	setupVerifyClaudeCodeSlim    = setup.VerifyClaudeCodeSlimCapability
+	scanInputLine                = fmt.Scanln
 
 	storeSearch = func(s *store.Store, query string, opts store.SearchOptions) ([]store.SearchResult, error) {
 		return s.Search(query, opts)
@@ -1684,6 +1686,18 @@ func cmdSync(cfg store.Config) {
 		fatal(fmt.Errorf("--all and --project cannot be used together"))
 		return
 	}
+	cloudEnabled := doCloud || envBool("ENGRAM_CLOUD_SYNC")
+	if cloudEnabled && projectProvided {
+		decodedProject, warning, decodeErr := normalizeCloudCLIProjectInput(project)
+		if decodeErr != nil {
+			fatal(fmt.Errorf("cloud sync project: %w", decodeErr))
+			return
+		}
+		project = decodedProject
+		if warning != "" {
+			fmt.Fprintln(os.Stderr, warning)
+		}
+	}
 
 	syncDir := ".engram"
 
@@ -1703,7 +1717,6 @@ func cmdSync(cfg store.Config) {
 		project = resolved
 	}
 
-	cloudEnabled := doCloud || envBool("ENGRAM_CLOUD_SYNC")
 	if cloudEnabled {
 		if doAll {
 			fatal(fmt.Errorf("cloud sync requires a single explicit --project scope; --all is not supported"))
@@ -1769,6 +1782,9 @@ func cmdSync(cfg store.Config) {
 	if doStatus {
 		local, remote, pending, err := syncStatus(sy)
 		if err != nil {
+			if cloudEnabled {
+				fatal(errors.New(cloudSyncFailureMessage(project, err)))
+			}
 			fatal(err)
 		}
 		if cloudEnabled {
@@ -2711,8 +2727,7 @@ func isPathLikeProjectName(name string) bool {
 }
 
 // cmdSetup classifies os.Args[2:] with a two-pass, order-independent
-// algorithm (see openspec/changes/setup-protocol-flag/proposal.md,
-// Approach; JD-014 residual fix). The FIRST pass scans every token and only
+// algorithm. The FIRST pass scans every token and only
 // accumulates classification state — it never dispatches mid-loop. This
 // guarantees a token like --protocol=<v> is always parsed regardless of
 // what precedes it (e.g. an earlier unrecognized hyphen-prefixed token no
@@ -2727,6 +2742,7 @@ func cmdSetup(cfg store.Config) {
 		helpSeen        bool
 		protocolRaw     string
 		protocolFlag    bool
+		mcpOnly         bool
 		slug            string
 		slugSeen        bool
 		extraBareSeen   bool
@@ -2754,10 +2770,12 @@ func cmdSetup(cfg store.Config) {
 		case strings.HasPrefix(token, "--protocol="):
 			protocolRaw = strings.TrimPrefix(token, "--protocol=")
 			protocolFlag = true
+		case token == "--mcp-only":
+			mcpOnly = true
 		case strings.HasPrefix(token, "-"):
 			// Unrecognized hyphen-prefixed token: record it but keep
 			// scanning so a --protocol appearing later is still parsed
-			// (JD-014 residual).
+			// (regression fix).
 			unknownFlagSeen = true
 		default:
 			if slugSeen {
@@ -2781,12 +2799,21 @@ func cmdSetup(cfg store.Config) {
 		// Preserve the legacy fallback to the interactive menu (keeps
 		// TestCmdSetupHyphenArgFallsBackToInteractive green), but forward
 		// the already-parsed --protocol mode (if any) instead of dropping
-		// it (JD-014), regardless of the unknown flag's position.
+		// it, regardless of the unknown flag's position.
 		mode := ""
 		if protocolFlag {
 			mode = resolveProtocolModeFlag(protocolRaw)
 		}
 		cmdSetupInteractive(cfg, mode)
+		return
+	case mcpOnly:
+		if !slugSeen || slug != "claude-code" {
+			fatal(fmt.Errorf("--mcp-only requires claude-code"))
+			return
+		}
+		if err := setupEnsureClaudeCodeUserMCP(); err != nil {
+			fatal(err)
+		}
 		return
 	case slugSeen:
 		result, err := setupInstallAgent(slug)
@@ -2794,7 +2821,9 @@ func cmdSetup(cfg store.Config) {
 			fatal(err)
 		}
 		if protocolFlag {
-			applyProtocolMode(cfg, slug, resolveProtocolModeFlag(protocolRaw))
+			mode := resolveProtocolModeFlag(protocolRaw)
+			applyProtocolMode(cfg, slug, mode)
+			warnIfClaudeCodeSlimUnverified(slug, mode)
 		}
 		fmt.Printf("✓ Installed %s plugin (%d files)\n", result.Agent, result.Files)
 		fmt.Printf("  → %s\n", result.Destination)
@@ -2845,6 +2874,7 @@ func cmdSetupInteractive(cfg store.Config, mode string) {
 	}
 	if mode != "" {
 		applyProtocolMode(cfg, selected.Name, mode)
+		warnIfClaudeCodeSlimUnverified(selected.Name, mode)
 	}
 
 	fmt.Printf("✓ Installed %s plugin (%d files)\n", result.Agent, result.Files)
@@ -2866,7 +2896,9 @@ func printSetupUsage() {
 	fmt.Println("                          installed agent slug (default: full). Unknown or")
 	fmt.Println("                          missing values fall back to full with a warning.")
 	fmt.Println("                          slim currently only takes effect for claude-code,")
-	fmt.Println("                          and only when the installed engram is >= 1.4.0.")
+	fmt.Println("                          and only with a clean tagged engram release >= 1.4.0.")
+	fmt.Println("                          Claude Code slim also requires Engram plugin >= 0.1.1;")
+	fmt.Println("                          setup warns, but continues, when it cannot verify it.")
 	fmt.Println("  --help, -h              Show this help and exit.")
 }
 
@@ -2893,6 +2925,28 @@ func resolveProtocolModeFlag(raw string) string {
 func applyProtocolMode(cfg store.Config, slug, mode string) {
 	if err := setup.WriteProtocolMode(cfg.DataDir, slug, mode); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not persist protocol mode: %v\n", err)
+	}
+
+	classification := classifyProtocolVersion(version)
+	if mode != setup.ProtocolModeSlim || classification == protocolVersionSupported {
+		return
+	}
+
+	if classification == protocolVersionBelowFloor {
+		fmt.Fprintf(os.Stderr, "warning: slim will remain full: engram %q is below 1.4.0; install a clean tagged release at or above 1.4.0.\n", strings.TrimSpace(version))
+		return
+	}
+	fmt.Fprintf(os.Stderr, "warning: slim will remain full: engram %q is not a clean tagged release; install a clean tagged release at or above 1.4.0.\n", strings.TrimSpace(version))
+}
+
+func warnIfClaudeCodeSlimUnverified(slug, mode string) {
+	if slug != "claude-code" || mode != setup.ProtocolModeSlim {
+		return
+	}
+	if err := setupVerifyClaudeCodeSlim(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: unable to verify the Claude Code Engram plugin supports --protocol=slim (requires plugin 0.1.1+): %v\n", err)
+		fmt.Fprintln(os.Stderr, "  Update the plugin through your normal Claude Code plugin update path, then restart Claude Code.")
+		fmt.Fprintln(os.Stderr, "  Session-only plugins loaded with `claude --plugin-dir ...` cannot be detected by this check.")
 	}
 }
 
@@ -2924,34 +2978,51 @@ func cmdProtocolMode(cfg store.Config) {
 // MCP serverInstructions duplication fix shipped in this release.
 var protocolVersionFloor = [3]int{1, 4, 0}
 
-// meetsProtocolVersionFloor reports whether v (e.g. "1.4.0", "v1.5.2", or the
-// build-time "dev" placeholder) is >= protocolVersionFloor. Any unparseable
-// or empty value returns false — the caller then falls back to "full".
-func meetsProtocolVersionFloor(v string) bool {
+type protocolVersionClassification uint8
+
+const (
+	protocolVersionUnsupported protocolVersionClassification = iota
+	protocolVersionBelowFloor
+	protocolVersionSupported
+)
+
+// classifyProtocolVersion distinguishes clean releases that can use slim from
+// releases below the floor and development, pseudo, dirty, or other non-release
+// build versions. Legacy numeric versions such as "1.4" remain supported.
+func classifyProtocolVersion(v string) protocolVersionClassification {
 	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
-	if v == "" || v == "dev" {
-		return false
+	segments := strings.Split(v, ".")
+	if len(segments) < 2 || len(segments) > 3 {
+		return protocolVersionUnsupported
 	}
 
-	segments := strings.SplitN(v, ".", 3)
 	var parts [3]int
-	for i, s := range segments {
-		if i >= 3 {
-			break
+	for i, segment := range segments {
+		if segment == "" {
+			return protocolVersionUnsupported
 		}
-		n, err := strconv.Atoi(strings.TrimSpace(s))
-		if err != nil {
-			return false
+		n, err := strconv.Atoi(segment)
+		if err != nil || n < 0 {
+			return protocolVersionUnsupported
 		}
 		parts[i] = n
 	}
 
 	for i := 0; i < 3; i++ {
 		if parts[i] != protocolVersionFloor[i] {
-			return parts[i] > protocolVersionFloor[i]
+			if parts[i] > protocolVersionFloor[i] {
+				return protocolVersionSupported
+			}
+			return protocolVersionBelowFloor
 		}
 	}
-	return true
+	return protocolVersionSupported
+}
+
+// meetsProtocolVersionFloor reports whether v is a clean release at or above
+// protocolVersionFloor. Unsupported versions fall back to "full".
+func meetsProtocolVersionFloor(v string) bool {
+	return classifyProtocolVersion(v) == protocolVersionSupported
 }
 
 func printPostInstall(result *setup.Result) {
@@ -2996,8 +3067,12 @@ func printPostInstall(result *setup.Result) {
 		fmt.Println("\nNext steps:")
 		fmt.Println("  1. Restart Claude Code — the plugin is active immediately")
 		fmt.Println("  2. Verify with: claude plugin list")
-		fmt.Println("  3. MCP config written to ~/.claude/mcp/engram.json using absolute binary path")
-		fmt.Println("     (survives plugin auto-updates; re-run 'engram setup claude-code' if you move the binary)")
+		if result.MCPConfigured {
+			fmt.Println("  3. MCP config written to ~/.claude/mcp/engram.json using absolute binary path")
+			fmt.Println("     (survives plugin auto-updates; re-run 'engram setup claude-code' if you move the binary)")
+		} else {
+			fmt.Println("  3. MCP configuration was not written. Re-run 'engram setup claude-code' after resolving the reported error.")
+		}
 	default:
 		// Every other agent's "next steps" are declared as data in the registry,
 		// so the message is rendered generically instead of one case per agent.

@@ -10,7 +10,10 @@ import (
 	"github.com/Gentleman-Programming/engram/v2/internal/store"
 )
 
-const header = "Known repairable cloud sync failure detected."
+const (
+	header       = "Known repairable cloud sync failure detected."
+	policyHeader = "Cloud sync is blocked by server policy."
+)
 
 type repairableError interface {
 	IsRepairable() bool
@@ -18,6 +21,10 @@ type repairableError interface {
 
 type repairableMigrationError interface {
 	IsRepairableMigrationFailure() bool
+}
+
+type policyFailure interface {
+	IsPolicyFailure() bool
 }
 
 var projectInErrorPattern = regexp.MustCompile(`project "([^"]+)"`)
@@ -61,16 +68,36 @@ func IsRepairableCloudSyncError(err error) bool {
 }
 
 // AppendGuidance preserves the original message and appends deterministic,
-// non-mutating recovery instructions for known repairable cloud sync failures.
+// non-mutating recovery instructions for known repairable or policy failures.
 func AppendGuidance(message, project string, err error) string {
 	message = strings.TrimSpace(message)
 	if message == "" && err != nil {
 		message = err.Error()
 	}
+	if IsPolicyFailure(err) {
+		policyGuidance := PolicyGuidance(project)
+		if strings.Contains(message, policyGuidance) {
+			return message
+		}
+		if message == policyHeader {
+			return policyGuidance
+		}
+		return message + "\n\n" + policyGuidance
+	}
 	if !IsRepairableCloudSyncError(err) || strings.Contains(message, header) {
 		return message
 	}
 	return message + "\n\n" + Guidance(project)
+}
+
+// IsPolicyFailure reports whether an error represents a server policy denial.
+// It intentionally remains separate from locally repairable sync failures.
+func IsPolicyFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	var policy policyFailure
+	return errors.As(err, &policy) && policy.IsPolicyFailure()
 }
 
 func Guidance(project string) string {
@@ -81,6 +108,13 @@ Run these commands, then retry sync:
   engram cloud upgrade repair --project %s --dry-run
   engram cloud upgrade repair --project %s --apply
   engram sync --cloud --project %s`, header, project, project, project, project)
+}
+
+// PolicyGuidance explains the server-side checks needed after a policy denial.
+func PolicyGuidance(project string) string {
+	project = normalizeProject(project)
+	return fmt.Sprintf(`%s
+The server denied access to project %q. Ask the server administrator to check ENGRAM_CLOUD_ALLOWED_PROJECTS. If this client uses a managed principal, its project grant may also need checking. The client does not expose server allowlist contents.`, policyHeader, project)
 }
 
 // ProjectFromTargetKey derives the project suffix from cloud:<project> target keys.

@@ -12,7 +12,7 @@ import { basename, dirname, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { buildRecoveryNotice, extractCompactedSummary } from "./compaction-recovery.js";
+import { ArchiveOutcome, buildRecoveryNotice, extractCompactedSummary } from "./compaction-recovery.js";
 import { compactResultStatus, humanToolName, renderCallText, renderResultText } from "./memory-tool-chrome.js";
 import { redactPrivateTags, redactUrlPath, redactValue } from "./private-redaction.js";
 
@@ -83,8 +83,14 @@ Format for \`mem_save\`:
 
 ### WHEN TO SEARCH MEMORY
 
-When the user asks to recall past work, first call \`mem_context\`. If not found,
-call \`mem_search\`, then \`mem_get_observation\` for full content.
+When the user asks to recall past work:
+1. Start with \`mem_context\`, then search with 1–2 distinctive keywords.
+2. Ordinary \`mem_search\` is scoped to the detected active project; its default
+   \`match_mode:"all"\` means AND. For broad recall, use \`match_mode:"any"\` with
+   \`all_projects:true\`. If a scoped search is empty, retry once this way before
+   concluding no memory exists.
+3. After hits, narrow follow-up searches by project, type, or \`match_mode:"all"\`,
+   then use \`mem_get_observation\` for full content.
 
 ### SESSION CLOSE PROTOCOL
 
@@ -95,8 +101,9 @@ which project should receive the summary, then retry with \`project: "<name>"\`.
 
 ### AFTER COMPACTION
 
-If you see "FIRST ACTION REQUIRED" or a compacted summary, save it immediately
-with \`mem_session_summary\`, then call \`mem_context\` before continuing.
+When outcome-specific compaction recovery guidance is present, follow it. If a
+compacted summary appears without that guidance, save it immediately with
+\`mem_session_summary\`, then call \`mem_context\` before continuing.
 `;
 
 interface FetchOptions {
@@ -110,6 +117,12 @@ interface EngramFetchResult<TResponse> {
 }
 
 type EngramFetcher = <TResponse = unknown>(path: string, opts?: FetchOptions) => Promise<TResponse | null>;
+
+function isSafeToReplay(path: string, method: string): boolean {
+  // Session creation is explicitly idempotent on the server (INSERT OR IGNORE). Other writes
+  // have no idempotency key, so only reads and this registration request can be replayed.
+  return method === "GET" || (method === "POST" && path === "/sessions");
+}
 
 interface SessionBody {
   id: string;
@@ -190,6 +203,7 @@ async function engramFetchResult<TResponse = unknown>(path: string, opts: FetchO
   const method = opts.method ?? "GET";
   let res: Response | undefined;
   let timedOut = false;
+  let refused = false;
   for (let attempt = 0; attempt < ENGRAM_FETCH_MAX_ATTEMPTS; attempt += 1) {
     try {
       res = await fetch(`${ENGRAM_URL}${redactUrlPath(path)}`, {
@@ -208,12 +222,20 @@ async function engramFetchResult<TResponse = unknown>(path: string, opts: FetchO
         timedOut = true;
         break;
       }
-      if (attempt < ENGRAM_FETCH_MAX_ATTEMPTS - 1) await wait(ENGRAM_FETCH_BACKOFF_BASE_MS * 2 ** attempt);
+      refused = isConnectionRefusedError(error);
+      if (!isSafeToReplay(path, method) || attempt === ENGRAM_FETCH_MAX_ATTEMPTS - 1) break;
+      await wait(ENGRAM_FETCH_BACKOFF_BASE_MS * 2 ** attempt);
     }
   }
 
   if (!res) {
     if (timedOut) return { data: null, timedOutMethod: method };
+    // A confirmed local refusal after successful initialization means the implicitly owned
+    // server may have died. One generation-scoped recovery is shared by every caller. Only
+    // operations whose idempotence is established above are replayed after it is healthy.
+    if (refused && await recoverImplicitEngramServer() && isSafeToReplay(path, method)) {
+      return engramFetchResult<TResponse>(path, opts);
+    }
     throw new Error(unreachableMessage(undefined));
   }
 
@@ -339,6 +361,10 @@ function hasConnectionRefusedCode(value: unknown, depth = 0): boolean {
   return hasConnectionRefusedCode(record.cause, depth + 1);
 }
 
+function isConnectionRefusedError(error: unknown): boolean {
+  return (error instanceof Error && error.message === "connection refused") || hasConnectionRefusedCode(error);
+}
+
 async function probeEngramHealth(): Promise<EngramHealth> {
   try {
     const res = await fetch(`${ENGRAM_URL}/health`, {
@@ -347,7 +373,7 @@ async function probeEngramHealth(): Promise<EngramHealth> {
     return res.ok ? "ready" : "indeterminate";
   } catch (error) {
     if (isTimeoutError(error)) return "indeterminate";
-    if ((error instanceof Error && error.message === "connection refused") || hasConnectionRefusedCode(error)) {
+    if (isConnectionRefusedError(error)) {
       return "refused";
     }
     return "indeterminate";
@@ -381,7 +407,8 @@ function scheduleEngramSelfHeal(ctx: MemoryToolContext): void {
   // Track every session that observed the outage: this module is shared by all sessions in
   // the Pi process, so a single probe must clear the stale label on all of them, not just
   // whichever session happened to fail first.
-  engramSelfHealContexts.set(getSessionId(ctx) ?? ctx, ctx);
+  const sessionId = getSessionId(ctx);
+  engramSelfHealContexts.set(typeof sessionId === "string" ? sessionId : ctx, ctx);
   if (engramSelfHealInFlight) return;
   engramSelfHealInFlight = true;
   void (async () => {
@@ -588,6 +615,9 @@ let initialization: Promise<void> | undefined;
 let startupFailures = 0;
 let startupRetryAt = 0;
 let startupFailure: Error | undefined;
+let initializationGeneration = 0;
+let recoveredInitializationGeneration = 0;
+let recoveryFlight: { generation: number; promise: Promise<boolean> } | undefined;
 
 function startupBackoffMs(failures: number): number {
   return Math.min(ENGRAM_STARTUP_RETRY_MAX_MS, ENGRAM_STARTUP_RETRY_BASE_MS * 2 ** (failures - 1));
@@ -607,6 +637,7 @@ function sharedInitialization(start: () => Promise<void>): Promise<void> {
       startupFailures = 0;
       startupRetryAt = 0;
       startupFailure = undefined;
+      initializationGeneration += 1;
     },
     (error: unknown) => {
       initialization = undefined;
@@ -619,11 +650,34 @@ function sharedInitialization(start: () => Promise<void>): Promise<void> {
   return initialization;
 }
 
+// Initialization remains fulfilled for the session, so a later refusal needs a separate,
+// bounded recovery path. Marking a generation before starting prevents a failed restart from
+// becoming a spawn storm; tagging the flight prevents callers from joining an older generation.
+function recoverImplicitEngramServer(): Promise<boolean> {
+  const generation = initializationGeneration;
+  if (CONFIGURED_ENGRAM_URL !== undefined || generation === 0) return Promise.resolve(false);
+  const activeFlight = recoveryFlight;
+  if (activeFlight?.generation === generation) return activeFlight.promise;
+  if (recoveredInitializationGeneration === generation) return Promise.resolve(false);
+
+  recoveredInitializationGeneration = generation;
+  const promise = initializeEngramServer().then(
+    () => true,
+    () => false,
+  ).finally(() => {
+    if (recoveryFlight?.generation === generation) recoveryFlight = undefined;
+  });
+  recoveryFlight = { generation, promise };
+  return promise;
+}
+
 let project = "unknown";
 let directory = "";
-let pendingRecoveryNotice: string | undefined;
+let pendingRecoveryNotice: { sessionId: string; content: string } | undefined;
 let projectResolutionError: string | undefined;
 let projectDetectionPending = false;
+const observedRuntimeSessionIDs = new Set<string>();
+let runtimeSessionIdentityAmbiguous = false;
 
 const knownSessions = new Set<string>();
 const sessionRegistrationsInFlight = new Map<string, Promise<void>>();
@@ -776,6 +830,36 @@ function requireRuntimeSessionID(ctx: SessionContext): string {
   return sessionId;
 }
 
+// Compaction may arrive with a stale context after Pi has rebuilt its lifecycle objects. Retain
+// every observed opaque ID and permanently reject compaction once identity is uncertain.
+function observeRuntimeSessionID(ctx: SessionContext): string | undefined {
+  try {
+    const sessionId = getSessionId(ctx);
+    if (!sessionId || sessionId.trim().length === 0) {
+      runtimeSessionIdentityAmbiguous = true;
+      return undefined;
+    }
+    if (observedRuntimeSessionIDs.size > 0 && !observedRuntimeSessionIDs.has(sessionId)) {
+      runtimeSessionIdentityAmbiguous = true;
+    }
+    observedRuntimeSessionIDs.add(sessionId);
+    return sessionId;
+  } catch {
+    runtimeSessionIdentityAmbiguous = true;
+    return undefined;
+  }
+}
+
+function soleActiveRuntimeSessionID(): string | undefined {
+  return !runtimeSessionIdentityAmbiguous && observedRuntimeSessionIDs.size === 1
+    ? [...observedRuntimeSessionIDs][0]
+    : undefined;
+}
+
+function soleObservedRuntimeSessionID(): string | undefined {
+  return observedRuntimeSessionIDs.size === 1 ? [...observedRuntimeSessionIDs][0] : undefined;
+}
+
 const optionalString = (description: string) => Type.Optional(Type.String({ description }));
 const optionalNumber = (description: string) => Type.Optional(Type.Number({ description }));
 const optionalBoolean = (description: string) => Type.Optional(Type.Boolean({ description }));
@@ -894,7 +978,41 @@ function queryString(params: Record<string, unknown>): string {
   return encoded ? `?${encoded}` : "";
 }
 
-function textResult(data: unknown): string {
+async function archiveCompactionSummary(sessionId: string, summary: string): Promise<string> {
+  try {
+    if (soleActiveRuntimeSessionID() !== sessionId) return ArchiveOutcome.Unavailable;
+    const result = await engramFetchResult("/observations", {
+      method: "POST",
+      body: {
+        session_id: sessionId,
+        type: "session_summary",
+        title: "Compaction recovery summary",
+        content: summary,
+        project,
+        scope: "project",
+        topic_key: "session/compaction-recovery",
+      },
+    });
+    return result.timedOutMethod ? ArchiveOutcome.Unknown : ArchiveOutcome.Confirmed;
+  } catch (error) {
+    warnEngramFailure("/observations", error);
+    return ArchiveOutcome.Failed;
+  }
+}
+
+async function loadCompactionRecoveryContext(sessionId: string): Promise<string | undefined> {
+  try {
+    return (await engramFetchResult<ContextResponse>(`/context/compaction${queryString({ session_id: sessionId })}`)).data?.context;
+  } catch (error) {
+    warnEngramFailure("/context/compaction", error);
+    return undefined;
+  }
+}
+
+function textResult(data: unknown, toolName?: string): string {
+  if (toolName === "mem_search" && (data === null || (Array.isArray(data) && data.length === 0))) {
+    return "No memories found";
+  }
   if (typeof data === "string") return data;
   if (data && typeof data === "object" && "context" in data && typeof (data as ContextResponse).context === "string") {
     return (data as ContextResponse).context || "(empty context)";
@@ -1104,7 +1222,7 @@ async function executeMemoryTool(toolName: string, params: Record<string, unknow
     const data = await callMemoryTool(toolName, params, ctx, transport.fetch);
     const timedOutMethod = transport.timedOutMethod();
     if (timedOutMethod) throw new Error(unreachableMessage(timedOutMethod));
-    const result = { content: [{ type: "text" as const, text: textResult(data) }], details: { data } };
+    const result = { content: [{ type: "text" as const, text: textResult(data, toolName) }], details: { data } };
     if (toolName === "mem_doctor" && data && typeof data === "object" && "status" in data && data.status === "error") {
       const errorResult = { ...result, isError: true };
       ctx.ui?.setStatus?.("engram", `🧠 ${project} · ${compactResultStatus(toolName, errorResult)}`);
@@ -1149,6 +1267,7 @@ function registerMemoryTools(pi: ExtensionAPI): void {
 export default function registerEngram(pi: ExtensionAPI) {
   registerMemoryTools(pi);
   pi.on("session_start", async (_event: unknown, ctx: SessionContext) => {
+    observeRuntimeSessionID(ctx);
     const ready = await initOnceForHook(ctx.cwd);
     try {
       (ctx as MemoryToolContext).ui?.setStatus?.("engram", `🧠 ${project} · ${ready ? "ready" : "offline"}`);
@@ -1156,52 +1275,54 @@ export default function registerEngram(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async (_event: unknown, ctx: SessionContext) => {
-    const sessionId = getSessionId(ctx);
+    const sessionId = observeRuntimeSessionID(ctx);
     if (!sessionId) return;
     toolCounts.delete(sessionId);
     forgetKnownSession(sessionId);
     forgetSelfHealContext(sessionId);
   });
 
-  pi.on("session_compact", async (event: unknown, ctx: SessionContext) => {
-    if (!(await initOnceForHook(ctx.cwd))) return;
-    await refreshProjectDetection(ctx.cwd);
-    if (projectDetectionPending || projectResolutionError) return;
-    const sessionId = getSessionId(ctx);
-    if (sessionId) await ensureSession(sessionId);
-
+  pi.on("session_compact", async (event: unknown) => {
     const summary = extractCompactedSummary(event);
-    if (sessionId && summary) {
-      await bestEffortEngramFetch("/observations", {
-        method: "POST",
-        body: {
-          session_id: sessionId,
-          type: "session_summary",
-          title: "Compaction recovery summary",
-          content: summary,
-          project,
-          scope: "project",
-          topic_key: "session/compaction-recovery",
-        },
-      });
-    }
+    const sessionId = soleObservedRuntimeSessionID();
 
-    const data = await bestEffortEngramFetch<ContextResponse>(`/context?project=${encodeURIComponent(project)}`);
-    pendingRecoveryNotice = buildRecoveryNotice(project, data?.context);
+    // Queue a session-scoped safe fallback before every early exit. The intended next turn must
+    // receive this even when startup, project resolution, or strict registration cannot reach Engram.
+    if (sessionId) {
+      pendingRecoveryNotice = {
+        sessionId,
+        content: buildRecoveryNotice(project, undefined, ArchiveOutcome.Unavailable),
+      };
+    }
+    if (!summary || !(await initOnceForHook(directory))) return;
+    await refreshProjectDetection(directory);
+    if (projectDetectionPending || projectResolutionError) return;
+    if (!sessionId || soleActiveRuntimeSessionID() !== sessionId) return;
+
+    try {
+      await ensureSession(sessionId);
+    } catch (error) {
+      warnEngramFailure("/sessions", error);
+      return;
+    }
+    if (soleActiveRuntimeSessionID() !== sessionId) return;
+
+    const outcome = await archiveCompactionSummary(sessionId, summary);
+    const context = soleActiveRuntimeSessionID() === sessionId ? await loadCompactionRecoveryContext(sessionId) : undefined;
+    pendingRecoveryNotice = { sessionId, content: buildRecoveryNotice(project, context, outcome) };
   });
 
   pi.on("before_agent_start", async (event: AgentStartEvent, ctx: SessionContext) => {
     let systemPrompt = event.systemPrompt.length > 0 ? `${event.systemPrompt}\n\n${MEMORY_INSTRUCTIONS}` : MEMORY_INSTRUCTIONS;
+    const sessionId = observeRuntimeSessionID(ctx);
+    if (pendingRecoveryNotice !== undefined && sessionId === pendingRecoveryNotice.sessionId) {
+      systemPrompt = `${systemPrompt}\n\n${pendingRecoveryNotice.content}`;
+      pendingRecoveryNotice = undefined;
+    }
     // The mem_* tools stay registered whether or not startup succeeded, so the agent still
     // needs the memory protocol; only the server-backed work below is skipped.
     if (!(await initOnceForHook(ctx.cwd))) return { systemPrompt };
     await refreshProjectDetection(ctx.cwd);
-    const sessionId = getSessionId(ctx);
-
-    if (pendingRecoveryNotice !== undefined) {
-      systemPrompt = `${systemPrompt}\n\n${pendingRecoveryNotice}`;
-      pendingRecoveryNotice = undefined;
-    }
 
     const finalContent = event.prompt?.trim();
     if ((projectDetectionPending || projectResolutionError) && sessionId && finalContent && finalContent.length > 10) {
@@ -1221,26 +1342,31 @@ export default function registerEngram(pi: ExtensionAPI) {
   });
 
   pi.on("tool_execution_end", async (event: ToolEndEvent, ctx: SessionContext) => {
+    const sessionId = observeRuntimeSessionID(ctx);
     const toolName = event.toolName ?? "";
     if (ENGRAM_TOOL_NAMES.has(toolName.toLowerCase())) return;
 
     if (!(await initOnceForHook(ctx.cwd))) return;
     await refreshProjectDetection(ctx.cwd);
-    const sessionId = getSessionId(ctx);
     if (!sessionId || projectDetectionPending || projectResolutionError) return;
 
     await ensureSessionBestEffort(sessionId);
     toolCounts.set(sessionId, (toolCounts.get(sessionId) ?? 0) + 1);
 
-    if (toolName !== "Task" || event.result === undefined) return;
-    const content = typeof event.result === "string" ? event.result : JSON.stringify(event.result);
-    if (content.length <= 50) return;
+    if (event.result === undefined) return;
+    let content: string | undefined;
+    try {
+      content = typeof event.result === "string" ? event.result : JSON.stringify(event.result);
+    } catch {
+      return;
+    }
+    if (!content || content.length <= 50) return;
 
     const body: PassiveCaptureBody = {
       session_id: sessionId,
       content: stripPrivateTags(content),
       project,
-      source: "task-complete",
+      source: toolName,
     };
     await bestEffortEngramFetch("/observations/passive", { method: "POST", body });
   });

@@ -413,7 +413,7 @@ Examples:
 					mcp.Description("Short-lived token returned by an ambiguous_project error. Required with project_choice_reason=user_selected_after_ambiguous_project."),
 				),
 				mcp.WithBoolean("capture_prompt",
-					mcp.Description("Automatically capture the current user prompt when available (default: true). Set false for SDD artifacts or automated saves."),
+					mcp.Description("Automatically capture the current user prompt when available (default: true). Set false for automated saves."),
 				),
 			),
 			queuedWriteHandler(writeQueue, handleSave(s, cfg, activity)),
@@ -944,11 +944,11 @@ PARAMS:
 
 BEHAVIOR:
   - Persists the verdict via JudgeBySemantic with system provenance (marked_by_actor="engram").
-  - not_conflict: no row is inserted; tool returns success with empty sync_id (the verdict is recorded but not stored — it means "we evaluated these and they do not conflict").
+  - not_conflict: persists a judged relation and returns its sync_id, so future scans do not re-evaluate the pair.
   - Idempotent: calling again for the same pair updates the existing row.
   - Cross-project pairs are rejected.
 
-SUCCESS: Returns { "sync_id": "rel-..." } on persist, { "sync_id": "" } on not_conflict.
+SUCCESS: Returns { "sync_id": "rel-..." } on every persisted verdict.
 ERROR: Returns IsError=true if IDs are unknown, relation is invalid, or cross-project pair.`),
 				mcp.WithTitleAnnotation("Compare Memory Pair (Persist Semantic Verdict)"),
 				mcp.WithReadOnlyHintAnnotation(false),
@@ -1189,7 +1189,7 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			fmt.Fprintf(&b, "---\nResults above are previews (300 chars). To read the full content of a specific memory, call mem_get_observation(id: <ID>).\n")
 		}
 
-		if nudge := activity.NudgeIfNeeded(sessionID); nudge != "" {
+		if nudge := activity.NudgeIfNeededForProject(sessionID, project); nudge != "" {
 			b.WriteString(nudge)
 		}
 
@@ -1347,7 +1347,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		}
 
 		if activity != nil {
-			activity.RecordSave(sessionID)
+			activity.RecordSaveForProject(sessionID, project)
 		}
 
 		msg := fmt.Sprintf("Memory saved: %q (%s)", title, typ)
@@ -1823,7 +1823,7 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 		result := fmt.Sprintf("%s\n---\nMemory stats: %d sessions, %d observations across projects: %s",
 			contextResult, stats.TotalSessions, stats.TotalObservations, projects)
 
-		if nudge := activity.NudgeIfNeeded(sessionID); nudge != "" {
+		if nudge := activity.NudgeIfNeededForProject(sessionID, project); nudge != "" {
 			result += nudge
 		}
 
@@ -1840,10 +1840,13 @@ func handleStats(s *store.Store, cfg MCPConfig, activities ...*SessionActivity) 
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		projectOverride, _ := req.GetArguments()["project"].(string)
 
-		// Resolve project: validate override or auto-detect (REQ-310, REQ-311, REQ-314)
-		detRes, err := resolveReadProjectWithProcessOverride(s, projectOverride, cfg.DefaultProject)
-		if err != nil {
-			return readProjectErrorResult(activity, detRes, err), nil
+		detRes := projectpkg.DetectionResult{Source: projectpkg.SourceAllProjects}
+		if strings.TrimSpace(projectOverride) != "" || strings.TrimSpace(cfg.DefaultProject) != "" {
+			var err error
+			detRes, err = resolveReadProjectWithProcessOverride(s, projectOverride, cfg.DefaultProject)
+			if err != nil {
+				return readProjectErrorResult(activity, detRes, err), nil
+			}
 		}
 
 		stats, err := loadMCPStats(s)
@@ -2084,6 +2087,7 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		if err != nil {
 			return mcp.NewToolResultError("Failed to save session summary: " + err.Error()), nil
 		}
+		activity.RecordProjectSave(project)
 
 		msg := fmt.Sprintf("Session summary saved for project %q", project)
 		if score := activity.ActivityScore(defaultSessionID(project)); score != "" {
@@ -2346,7 +2350,6 @@ func handleCompare(s *store.Store, _ *SessionActivity) server.ToolHandlerFunc {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		// syncID is "" when relation == "not_conflict" (JudgeBySemantic no-op).
 		envelope := map[string]any{
 			"sync_id": syncID,
 		}

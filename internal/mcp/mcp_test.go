@@ -1114,8 +1114,8 @@ func TestHandleSaveCapturePromptFalseSkipsCurrentPrompt(t *testing.T) {
 	h := handleSave(s, MCPConfig{}, activity)
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"title":          "SDD artifact",
-		"content":        "## Apply progress",
+		"title":          "Automated save",
+		"content":        "## Generated record",
 		"type":           "architecture",
 		"project":        "engram",
 		"capture_prompt": false,
@@ -4402,6 +4402,76 @@ func TestSearchResponseIncludesNudgeAfterInactivity(t *testing.T) {
 	}
 }
 
+func TestExplicitSessionSaveSuppressesProjectNudges(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		call func(*store.Store, *SessionActivity) server.ToolHandlerFunc
+	}{
+		{
+			name: "mem_search",
+			call: func(s *store.Store, activity *SessionActivity) server.ToolHandlerFunc {
+				return handleSearch(s, MCPConfig{}, activity)
+			},
+		},
+		{
+			name: "mem_context",
+			call: func(s *store.Store, activity *SessionActivity) server.ToolHandlerFunc {
+				return handleContext(s, MCPConfig{}, activity)
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newMCPTestStore(t)
+			const project = "engram"
+			const explicitSessionID = "explicit-session"
+			if err := s.CreateSession(explicitSessionID, project, "/work/engram"); err != nil {
+				t.Fatalf("create explicit session: %v", err)
+			}
+
+			now := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+			activity := NewSessionActivity(10 * time.Minute)
+			activity.now = func() time.Time { return now }
+			defaultSessionID := defaultSessionID(project)
+			for i := 0; i < 6; i++ {
+				activity.RecordToolCall(defaultSessionID)
+			}
+			now = now.Add(15 * time.Minute)
+
+			save, err := handleSave(s, MCPConfig{}, activity)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+				"title":      "Explicit session freshness",
+				"content":    "Fresh save must suppress the project nudge.",
+				"project":    project,
+				"session_id": explicitSessionID,
+			}}})
+			if err != nil || save.IsError {
+				t.Fatalf("save: err=%v isError=%v text=%q", err, save.IsError, callResultText(t, save))
+			}
+
+			var req mcppkg.CallToolRequest
+			if tt.name == "mem_search" {
+				req = mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+					"query":   "freshness",
+					"project": project,
+				}}}
+			} else {
+				req = mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+					"project": project,
+				}}}
+			}
+			res, err := tt.call(s, activity)(context.Background(), req)
+			if err != nil || res.IsError {
+				t.Fatalf("%s: err=%v isError=%v text=%q", tt.name, err, res.IsError, callResultText(t, res))
+			}
+			if text := callResultText(t, res); strings.Contains(text, "No mem_save calls for this project") {
+				t.Fatalf("expected fresh explicit-session save to suppress nudge, got %q", text)
+			}
+			if score := activity.ActivityScore(defaultSessionID); !strings.Contains(score, "0 saves") {
+				t.Fatalf("expected default session score to remain isolated, got %q", score)
+			}
+		})
+	}
+}
+
 func TestSessionSummaryResponseIncludesActivityScore(t *testing.T) {
 	// Set up a git repo so auto-detect returns a known project (REQ-308).
 	dir := t.TempDir()
@@ -4451,6 +4521,39 @@ func TestSessionSummaryResponseIncludesActivityScore(t *testing.T) {
 	}
 	if !strings.Contains(text, "2 saves") {
 		t.Fatalf("expected 2 saves in score, got: %q", text)
+	}
+}
+
+func TestSessionSummaryRefreshesProjectFreshnessWithoutDefaultSaveScore(t *testing.T) {
+	s := newMCPTestStore(t)
+	const project = "engram"
+	const explicitSessionID = "summary-session"
+	if err := s.CreateSession(explicitSessionID, project, "/work/engram"); err != nil {
+		t.Fatalf("create explicit session: %v", err)
+	}
+
+	now := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	activity := NewSessionActivity(10 * time.Minute)
+	activity.now = func() time.Time { return now }
+	defaultSessionID := defaultSessionID(project)
+	for i := 0; i < 6; i++ {
+		activity.RecordToolCall(defaultSessionID)
+	}
+	now = now.Add(15 * time.Minute)
+
+	res, err := handleSessionSummary(s, MCPConfig{}, activity)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"content":    "## Goal\nPersist a summary without modifying activity scores.",
+		"project":    project,
+		"session_id": explicitSessionID,
+	}}})
+	if err != nil || res.IsError {
+		t.Fatalf("session summary: err=%v isError=%v text=%q", err, res.IsError, callResultText(t, res))
+	}
+	if score := activity.ActivityScore(defaultSessionID); !strings.Contains(score, "0 saves") {
+		t.Fatalf("expected summary not to increment default session saves, got %q", score)
+	}
+	if nudge := activity.NudgeIfNeededForProject(defaultSessionID, project); nudge != "" {
+		t.Fatalf("expected summary freshness to suppress nudge, got %q", nudge)
 	}
 }
 
@@ -7150,8 +7253,8 @@ func TestHandleGetObservation_ResponseEnvelopeIncludesProject(t *testing.T) {
 	}
 }
 
-// TestHandleStats_AutoDetectsProject: stats response must include project envelope (REQ-314).
-func TestHandleStats_AutoDetectsProject(t *testing.T) {
+// TestHandleStats_WithoutProjectUsesAllProjects: no-project stats use all-project scope.
+func TestHandleStats_WithoutProjectUsesAllProjects(t *testing.T) {
 	dir := t.TempDir()
 	initTestGitRepo(t, dir)
 	cmd := exec.Command("git", "-C", dir, "remote", "add", "origin",
@@ -7169,11 +7272,114 @@ func TestHandleStats_AutoDetectsProject(t *testing.T) {
 	}
 
 	m := callResultJSON(t, res)
-	if _, ok := m["project"]; !ok {
-		t.Error("stats response must contain 'project' field")
+	if got := m["project"]; got != "" {
+		t.Errorf("project = %q; want empty global scope", got)
 	}
-	if _, ok := m["project_source"]; !ok {
-		t.Error("stats response must contain 'project_source' field")
+	if got := m["project_source"]; got != "all_projects" {
+		t.Errorf("project_source = %q; want %q", got, "all_projects")
+	}
+}
+
+func TestHandleStats_ExplicitAndDefaultProjectMetadataUseGlobalStats(t *testing.T) {
+	s := newMCPTestStore(t)
+	for _, projectName := range []string{"stats-alpha", "stats-beta"} {
+		sessionID := "session-" + projectName
+		if err := s.CreateSession(sessionID, projectName, "/tmp"); err != nil {
+			t.Fatalf("create session for %q: %v", projectName, err)
+		}
+		if _, err := s.AddObservation(store.AddObservationParams{
+			SessionID: sessionID,
+			Type:      "manual",
+			Title:     "observation for " + projectName,
+			Content:   "content",
+			Project:   projectName,
+		}); err != nil {
+			t.Fatalf("add observation for %q: %v", projectName, err)
+		}
+	}
+
+	tests := []struct {
+		name        string
+		cfg         MCPConfig
+		arguments   map[string]any
+		wantProject string
+		wantSource  string
+	}{
+		{
+			name:        "explicit project",
+			arguments:   map[string]any{"project": "stats-alpha"},
+			wantProject: "stats-alpha",
+			wantSource:  "explicit_override",
+		},
+		{
+			name:        "default project",
+			cfg:         MCPConfig{DefaultProject: "stats-beta"},
+			wantProject: "stats-beta",
+			wantSource:  "process_override",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res, err := handleStats(s, tt.cfg)(context.Background(), mcppkg.CallToolRequest{
+				Params: mcppkg.CallToolParams{Arguments: tt.arguments},
+			})
+			if err != nil || res.IsError {
+				t.Fatalf("stats: err=%v isError=%v text=%q", err, res.IsError, callResultText(t, res))
+			}
+
+			body := callResultJSON(t, res)
+			if got := body["project"]; got != tt.wantProject {
+				t.Errorf("project = %q; want %q", got, tt.wantProject)
+			}
+			if got := body["project_source"]; got != tt.wantSource {
+				t.Errorf("project_source = %q; want %q", got, tt.wantSource)
+			}
+
+			result, ok := body["result"].(string)
+			if !ok {
+				t.Fatalf("result = %#v; want string", body["result"])
+			}
+			for _, want := range []string{
+				"Sessions: 2",
+				"Observations: 2",
+				"Prompts: 0",
+				"Projects:",
+				"stats-alpha",
+				"stats-beta",
+			} {
+				if !strings.Contains(result, want) {
+					t.Errorf("result %q does not contain %q", result, want)
+				}
+			}
+		})
+	}
+}
+
+func TestHandleStats_WithoutProjectUsesAllProjectsInAmbiguousCWD(t *testing.T) {
+	parent := t.TempDir()
+	for _, name := range []string{"repo-a", "repo-b"} {
+		child := filepath.Join(parent, name)
+		if err := os.MkdirAll(child, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		initTestGitRepo(t, child)
+	}
+	t.Chdir(parent)
+
+	s := newMCPTestStore(t)
+	h := handleStats(s, MCPConfig{})
+	res, err := h(context.Background(), mcppkg.CallToolRequest{})
+	if err != nil || res.IsError {
+		t.Fatalf("stats: err=%v isError=%v text=%q", err, res.IsError, callResultText(t, res))
+	}
+
+	result := callResultJSON(t, res)
+	if got := result["project"]; got != "" {
+		t.Errorf("project = %q; want empty global scope", got)
+	}
+	if got := result["project_source"]; got != "all_projects" {
+		t.Errorf("project_source = %q; want %q", got, "all_projects")
 	}
 }
 
@@ -8633,7 +8839,7 @@ func TestProcessOverrideSaveWriteResolutionBeforeCWD(t *testing.T) {
 	}
 }
 
-func TestProjectResolvingReadHandlersPreserveAmbiguityRecoveryMetadata(t *testing.T) {
+func TestProjectResolvingReadHandlersExceptStatsPreserveAmbiguityRecoveryMetadata(t *testing.T) {
 	parent := t.TempDir()
 	for _, name := range []string{"repo-read-a", "repo-read-b"} {
 		child := filepath.Join(parent, name)
@@ -8660,12 +8866,6 @@ func TestProjectResolvingReadHandlersPreserveAmbiguityRecoveryMetadata(t *testin
 			name: "context",
 			call: func() (*mcppkg.CallToolResult, error) {
 				return handleContext(s, MCPConfig{}, activity)(context.Background(), mcppkg.CallToolRequest{})
-			},
-		},
-		{
-			name: "stats",
-			call: func() (*mcppkg.CallToolResult, error) {
-				return handleStats(s, MCPConfig{}, activity)(context.Background(), mcppkg.CallToolRequest{})
 			},
 		},
 		{

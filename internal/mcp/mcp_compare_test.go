@@ -86,9 +86,8 @@ func TestHandleCompare_HappyPath(t *testing.T) {
 	}
 }
 
-// TestHandleCompare_NotConflict_NoRow — not_conflict returns success without inserting a row.
-// REQ-011 | Design §9 (not_conflict is still persisted but JudgeBySemantic handles it as no-op)
-func TestHandleCompare_NotConflict_NoRow(t *testing.T) {
+// TestHandleCompare_NotConflictPersists verifies not_conflict returns the retained relation.
+func TestHandleCompare_NotConflictPersists(t *testing.T) {
 	s := newMCPTestStore(t)
 	idA, idB := seedCompareFixture(t, s)
 
@@ -115,10 +114,17 @@ func TestHandleCompare_NotConflict_NoRow(t *testing.T) {
 		t.Fatalf("response not valid JSON: %v", err)
 	}
 
-	// not_conflict is a no-op — sync_id should be empty string
+	// not_conflict is retained, so the result identifies its relation row.
 	syncID, _ := envelope["sync_id"].(string)
-	if syncID != "" {
-		t.Fatalf("expected empty sync_id for not_conflict, got %q", syncID)
+	if syncID == "" {
+		t.Fatal("expected persisted sync_id for not_conflict")
+	}
+	relation, err := s.GetRelation(syncID)
+	if err != nil {
+		t.Fatalf("GetRelation: %v", err)
+	}
+	if relation.Relation != store.RelationNotConflict {
+		t.Fatalf("relation = %q, want %q", relation.Relation, store.RelationNotConflict)
 	}
 }
 

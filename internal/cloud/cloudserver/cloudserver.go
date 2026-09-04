@@ -249,6 +249,9 @@ func (s *CloudServer) routes() {
 		IsAdmin: func(r *http.Request) bool {
 			return s.isDashboardAdmin(r)
 		},
+		CanManageManagedUsers: func(r *http.Request) bool {
+			return s.canManageManagedUsers(r)
+		},
 		GetDisplayName: func(r *http.Request) string {
 			return s.dashboardDisplayName(r)
 		},
@@ -417,6 +420,14 @@ func (s *CloudServer) isDashboardAdmin(r *http.Request) bool {
 		return principal.Role == cloudauth.RoleAdmin && (principal.Source == cloudauth.PrincipalSourceManagedToken || principal.Source == cloudauth.PrincipalSourceLegacyEnvAdmin)
 	}
 	return s.verifyLegacyDashboardAdminCookie(r)
+}
+
+// canManageManagedUsers derives the rendering capability from the same
+// managed-admin principal policy enforced by requireManagedAdmin. It does not
+// authorize mutations; their handlers remain responsible for that enforcement.
+func (s *CloudServer) canManageManagedUsers(r *http.Request) bool {
+	principal, ok := s.dashboardActorPrincipal(r)
+	return ok && isManagedAdminPrincipal(principal)
 }
 
 func (s *CloudServer) handlePullManifest(w http.ResponseWriter, r *http.Request) {
@@ -624,7 +635,7 @@ func (s *CloudServer) authorizeProjectScope(ctx context.Context, w http.Response
 		}
 		if usesManagedProjectGrants(principal) {
 			if err := s.principalProject.AuthorizeProjectForPrincipal(ctx, principal, project); err != nil {
-				writeActionableError(w, http.StatusForbidden, constants.UpgradeErrorClassPolicy, constants.ReasonPolicyForbidden, "forbidden: project is not allowed")
+				writeProjectPolicyDenied(w, project)
 				return false
 			}
 			return true
@@ -634,7 +645,7 @@ func (s *CloudServer) authorizeProjectScope(ctx context.Context, w http.Response
 		return true
 	}
 	if err := s.projectAuth.AuthorizeProject(project); err != nil {
-		writeActionableError(w, http.StatusForbidden, constants.UpgradeErrorClassPolicy, constants.ReasonPolicyForbidden, "forbidden: project is not allowed")
+		writeProjectPolicyDenied(w, project)
 		return false
 	}
 	return true
@@ -650,6 +661,10 @@ func writeActionableError(w http.ResponseWriter, status int, class, code, messag
 		"error_code":  strings.TrimSpace(code),
 		"error":       strings.TrimSpace(message),
 	})
+}
+
+func writeProjectPolicyDenied(w http.ResponseWriter, project string) {
+	writeActionableError(w, http.StatusForbidden, constants.UpgradeErrorClassPolicy, constants.ReasonPolicyForbidden, fmt.Sprintf("forbidden: project %q is not allowed", project))
 }
 
 func coerceChunkProject(payload []byte, project string) ([]byte, error) {

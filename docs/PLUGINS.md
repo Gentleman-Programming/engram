@@ -18,7 +18,7 @@
 | Integration | Coverage |
 |---|---|
 | OpenCode | TypeScript plugin plus MCP registration via `engram setup opencode`. |
-| Claude Code | Marketplace/bundled plugin plus best-effort durable user MCP config via `engram setup claude-code`. |
+| Claude Code | Marketplace/bundled plugin for hooks, scripts, and skills; `engram setup claude-code` solely registers MCP. |
 | Codex | Codex plugin assets under `plugin/codex/`; `engram setup codex` best-effort installs the marketplace plugin and writes MCP/instruction config. |
 | Pi | Pi package under `plugin/pi/` exposes Pi-native HTTP memory tools and configures MCP through `pi-mcp-adapter`. |
 
@@ -77,24 +77,28 @@ The OpenCode plugin uses a defense-in-depth strategy to ensure memories survive 
 
 ## Claude Code Plugin
 
-For [Claude Code](https://docs.anthropic.com/en/docs/claude-code) users, a plugin adds enhanced session management using Claude's native hook and skill system:
+For [Claude Code](https://docs.anthropic.com/en/docs/claude-code) users, a plugin adds enhanced session management using Claude's native hook and skill system. Marketplace installation provides hooks, scripts, and skills; `engram setup claude-code` is required for the supported complete setup because it solely registers MCP:
 
 ```bash
-# Install via Claude Code marketplace (recommended)
+# Install plugin assets via Claude Code marketplace
 claude plugin marketplace add Gentleman-Programming/engram
 claude plugin install engram
 
-# Or via engram binary (works from Homebrew or binary install)
+# Register MCP for the supported complete setup
 engram setup claude-code
 
 # Or for local development/testing from the repo
 claude --plugin-dir ./plugin/claude-code
 ```
 
-### What the Plugin Provides (vs bare MCP)
+Existing marketplace-only copies create their durable MCP registration at the next SessionStart and require one more Claude Code restart before MCP tools return. If `~/.claude/mcp/engram.json` is a symlink or another non-regular path, SessionStart and direct setup refuse to replace it; inspect it and manually replace it with a regular file before rerunning `engram setup claude-code`. Do not edit the plugin cache manually.
 
-| Feature | Bare MCP | Plugin |
-|---------|----------|--------|
+The `--protocol=slim` setup option requires Engram plugin 0.1.1 or later. After successful Claude Code setup, Engram checks `claude plugin list --json`; an unverifiable, disabled, or older plugin produces a warning but does not fail setup or replace the selected slim mode. Use your normal Claude Code plugin update path, then restart Claude Code. Plugins loaded with session-only `claude --plugin-dir ...` cannot be detected.
+
+### What the Plugin Provides with Setup (vs bare MCP)
+
+| Feature | Bare MCP | Plugin + setup |
+|---------|----------|----------------|
 | MCP tools available | 22 default (`engram mcp`) | 18 agent-profile tools (`engram mcp --tools=agent`) |
 | Session tracking (auto-start) | ✗ | ✓ |
 | Auto-import git-synced memories | ✗ | ✓ |
@@ -107,7 +111,6 @@ claude --plugin-dir ./plugin/claude-code
 ```
 plugin/claude-code/
 ├── .claude-plugin/plugin.json     # Plugin manifest
-├── .mcp.json                      # Registers engram MCP server
 ├── hooks/hooks.json               # SessionStart + SubagentStop + Stop lifecycle hooks
 ├── scripts/
 │   ├── session-start.sh           # Ensures server, creates session, imports chunks, injects context
@@ -154,7 +157,7 @@ PowerShell local override/testing example for locked-down Windows endpoints:
           {
             "type": "command",
             "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"C:\\path\\to\\engram\\plugin\\claude-code\\scripts\\user-prompt-submit.ps1\"",
-            "timeout": 2
+            "timeout": 10
           }
         ]
       }
@@ -271,7 +274,7 @@ Old clients that read only the `result` string continue to work — these fields
 
 ### mem_save prompt capture
 
-`mem_save` accepts `capture_prompt` as an optional boolean. The default is `true`: if the same MCP process lifecycle already has the current user prompt for the same project and session, Engram best-effort stores it in `user_prompts` using exact project + session + content dedupe. Passing `capture_prompt=false` skips that prompt capture path and is intended for automated artifacts such as SDD progress saves.
+`mem_save` accepts `capture_prompt` as an optional boolean. The default is `true`: if the same MCP process lifecycle already has the current user prompt for the same project and session, Engram best-effort stores it in `user_prompts` using exact project + session + content dedupe. Passing `capture_prompt=false` skips that prompt capture path and is intended for automated saves.
 
 If no current prompt is available to the MCP process, or if best-effort prompt capture fails, `mem_save` still succeeds and no prompt is invented from the observation content. Plugins/protocol hooks that can observe user prompts must feed that prompt context before relying on automatic capture. Calling `mem_save_prompt` in the same MCP process records the prompt and makes it available to later `mem_save` calls for the same project/session; a different MCP process lifecycle does not inherit that in-memory prompt context.
 
@@ -340,9 +343,9 @@ Records a verdict on a semantic comparison between two memories. The agent reads
 On success, `mem_compare`:
 - Persists a relation row with system provenance (`marked_by_kind="system"`, `marked_by_actor="engram"`)
 - Is idempotent: the same `(source_id, target_id)` pair updates the existing row rather than inserting a duplicate
-- Returns `{"sync_id": "<rel-hex>"}` on a persisted verdict
+- Returns `{"sync_id": "<rel-hex>"}` on every persisted verdict
 
-`not_conflict` verdicts are no-ops — the call succeeds and returns `{"sync_id": ""}` but no row is written, matching the scan flow contract.
+`not_conflict` verdicts persist as judged relations and return their `sync_id`, suppressing future candidate scans without appearing in conflict-facing lists or statistics.
 
 Cross-project relations (where `memory_id_a` and `memory_id_b` belong to different projects) are rejected with an error.
 

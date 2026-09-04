@@ -81,7 +81,7 @@ func (s *fakeCloudBootstrapStore) CreateHumanUser(_ context.Context, params clou
 // the check and the create widens the race window enough that, WITHOUT the
 // lock, concurrent goroutines reliably interleave and create more than one
 // admin (see TestCloudBootstrapAdminConcurrentFirstAdminCreatesExactlyOneAdmin's
-// RED evidence in apply-progress.md).
+// concurrency regression test).
 func (s *fakeCloudBootstrapStore) CreateFirstAdminHumanUser(ctx context.Context, params cloudstore.CreateHumanUserParams) (cloudstore.HumanUser, error) {
 	s.createFirstAdminMu.Lock()
 	defer s.createFirstAdminMu.Unlock()
@@ -300,7 +300,7 @@ func TestCloudBootstrapAdminRefusesDuplicateFirstAdmin(t *testing.T) {
 // attempt is refused with cloudstore.ErrAdminAlreadyExists, with exactly one
 // admin durably present in the store afterward.
 //
-// RED evidence (recorded in apply-progress.md): before
+// Regression evidence: before
 // CreateFirstAdminHumanUser held its lock across the full check+create
 // section, an unsynchronized (check, sleep, create) implementation reliably
 // let all N goroutines observe "no active admin" and all create an admin,

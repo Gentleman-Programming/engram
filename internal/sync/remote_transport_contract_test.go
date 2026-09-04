@@ -10,7 +10,7 @@ import (
 )
 
 func TestRemoteTransportImplementsTransportContract(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/sync/pull":
 			if got := r.URL.Query().Get("project"); got != "proj-a" {
@@ -24,6 +24,10 @@ func TestRemoteTransportImplementsTransportContract(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
+
+	oldDefaultTransport := http.DefaultTransport
+	http.DefaultTransport = srv.Client().Transport
+	t.Cleanup(func() { http.DefaultTransport = oldDefaultTransport })
 
 	rt, err := remote.NewRemoteTransport(srv.URL, "token", "proj-a")
 	if err != nil {

@@ -17,11 +17,17 @@ import (
 	engramsync "github.com/Gentleman-Programming/engram/v2/internal/sync"
 )
 
+const (
+	ordinaryOperationTimeout = 30 * time.Second
+	writeChunkTimeout        = 5 * time.Minute
+)
+
 type RemoteTransport struct {
-	baseURL    string
-	token      string
-	project    string
-	httpClient *http.Client
+	baseURL         string
+	token           string
+	project         string
+	httpClient      *http.Client
+	writeHTTPClient *http.Client
 }
 
 type HTTPStatusError struct {
@@ -78,7 +84,7 @@ func newHTTPStatusError(operation string, statusCode int, body []byte) error {
 }
 
 func NewRemoteTransport(baseURL, token, project string) (*RemoteTransport, error) {
-	normalized, err := validateBaseURL(baseURL)
+	normalized, token, err := validateBearerBaseURL(baseURL, token)
 	if err != nil {
 		return nil, err
 	}
@@ -88,13 +94,37 @@ func NewRemoteTransport(baseURL, token, project string) (*RemoteTransport, error
 		return nil, fmt.Errorf("cloud: project is required")
 	}
 	return &RemoteTransport{
-		baseURL: normalized,
-		token:   strings.TrimSpace(token),
-		project: project,
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		baseURL:         normalized,
+		token:           token,
+		project:         project,
+		httpClient:      newRemoteHTTPClient(ordinaryOperationTimeout, token),
+		writeHTTPClient: newRemoteHTTPClient(writeChunkTimeout, token),
 	}, nil
+}
+
+func validateBearerBaseURL(baseURL, token string) (string, string, error) {
+	normalized, err := validateBaseURL(baseURL)
+	if err != nil {
+		return "", "", err
+	}
+	token = strings.TrimSpace(token)
+	if token != "" && !strings.HasPrefix(normalized, "https://") {
+		return "", "", fmt.Errorf("cloud: bearer token requires an HTTPS remote URL")
+	}
+	return normalized, token, nil
+}
+
+func newRemoteHTTPClient(timeout time.Duration, token string) *http.Client {
+	client := &http.Client{Timeout: timeout}
+	if token != "" {
+		client.CheckRedirect = func(req *http.Request, _ []*http.Request) error {
+			if req.URL.Scheme != "https" {
+				return fmt.Errorf("cloud: bearer token redirect requires HTTPS")
+			}
+			return nil
+		}
+	}
+	return client
 }
 
 func validateBaseURL(raw string) (string, error) {
@@ -210,7 +240,7 @@ func (rt *RemoteTransport) WriteChunk(chunkID string, data []byte, entry engrams
 	req.Header.Set("Content-Type", "application/json")
 	rt.setAuthorization(req)
 
-	resp, err := rt.httpClient.Do(req)
+	resp, err := rt.writeHTTPClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("cloud: push chunk %s: %w", chunkID, err)
 	}
@@ -301,19 +331,17 @@ type MutationTransport struct {
 	httpClient *http.Client
 }
 
-// NewMutationTransport creates a MutationTransport. baseURL must be a valid http/https URL.
-// BW6: Reuses validateBaseURL to reject empty/malformed URLs.
+// NewMutationTransport creates a MutationTransport. baseURL must be a valid HTTP(S) URL;
+// bearer-token transports require HTTPS.
 func NewMutationTransport(baseURL, token string) (*MutationTransport, error) {
-	normalized, err := validateBaseURL(baseURL)
+	normalized, token, err := validateBearerBaseURL(baseURL, token)
 	if err != nil {
 		return nil, err
 	}
 	return &MutationTransport{
-		baseURL: normalized,
-		token:   strings.TrimSpace(token),
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		baseURL:    normalized,
+		token:      token,
+		httpClient: newRemoteHTTPClient(ordinaryOperationTimeout, token),
 	}, nil
 }
 

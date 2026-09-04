@@ -184,7 +184,7 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 
 ### Passive Capture
 
-- `POST /observations/passive` — Extract structured learnings from text. Body: `{content, session_id, project?}`
+- `POST /observations/passive` — Scan submitted text and persist only structured learnings recognized by the parser. Body: `{content, session_id, project?, source?}`. General or raw text is not saved as an observation.
 
 ### Export / Import
 
@@ -301,7 +301,7 @@ Response:
 { "sync_id": "rel-abc123" }
 ```
 
-`not_conflict` is a no-op verdict and returns an empty `sync_id`.
+`not_conflict` persists a judged relation and returns its `sync_id`, preventing future scans from re-evaluating the pair.
 
 Status codes:
 
@@ -363,7 +363,7 @@ Request body:
 - `apply: false` (default) — dry-run for the non-semantic lexical scan; reports candidates without inserting pending rows
 - `apply: true` — non-semantic lexical scan inserts new pending relation rows up to `max_insert` cap (default 100)
 - `semantic: true` — after FTS5 lexical scan, run LLM-judge semantic detection on the candidate pairs returned by `FindCandidates`. It does not discover totally lexically unrelated pairs on its own. Requires `ENGRAM_AGENT_CLI` to be set on the server to `claude` or `opencode`.
-- Semantic scans can persist non-`not_conflict` judged relations through `JudgeBySemantic` even when `apply: false`; `not_conflict` verdicts are not inserted.
+- Semantic dry-runs evaluate verdicts without persisting them; `not_conflict` results are reported as skipped. Applied semantic scans persist every valid verdict, including `not_conflict`.
 - `concurrency` — worker pool size for parallel LLM calls when `semantic: true` (default 5, range 1–20)
 - `timeout_per_call_seconds` — per-LLM-call timeout in seconds when `semantic: true` (default 60, range 1–600)
 - `max_semantic` — hard cap on LLM calls per scan (default 100); scan stops collecting new pairs once reached
@@ -507,7 +507,7 @@ Release update checks are skipped for `version`, `--version`, `-v`, `help`, `--h
 | `ENGRAM_CLOUD_INSECURE_NO_AUTH` | Set to `1` for local insecure cloud serve (no auth). Cannot be combined with `ENGRAM_CLOUD_TOKEN`.                                                                                                                                                        | (unset)              |
 | `ENGRAM_CLOUD_ALLOWED_PROJECTS` | Comma-separated project allowlist enforced by `engram cloud serve`. Required in both token-auth and insecure modes. Use `*` to allow all projects (dev/internal deploys) — bypasses per-project name enforcement while still requiring a non-empty project on each request. | (unset) |
 | `ENGRAM_JWT_SECRET`             | Required in authenticated cloud serve mode. Must be explicitly set to a non-default value.                                                                                                                                                                | (unset)              |
-| `ENGRAM_CLOUD_ADMIN`            | Optional admin-only dashboard token in authenticated cloud serve mode. Ignored/rejected in insecure mode.                                                                                                                                                 | (unset)              |
+| `ENGRAM_CLOUD_ADMIN`            | Optional legacy dashboard-admin token in authenticated cloud serve mode. It can access dashboard admin read surfaces, project sync controls, and audit logs, but not managed-user, token, or grant mutations. Ignored/rejected in insecure mode. | (unset) |
 | `ENGRAM_CLOUD_TOKEN_PEPPER`     | Dedicated secret used to hash managed cloud tokens. Required both to issue tokens via `engram cloud bootstrap admin --issue-token` (and the admin API/dashboard) and to enable managed-token authentication on `engram cloud serve`. Distinct from `ENGRAM_JWT_SECRET` on purpose — see [Managed users, tokens, and CLI bootstrap](#managed-users-tokens-and-cli-bootstrap). | (unset)              |
 
 ### Conflict Audit CLI (admin)
@@ -549,7 +549,7 @@ Walk observations for the project, run FindCandidates, and report or insert new 
 - `--limit N`: inspect 1–100 observations per page (default 100), ordered by observation ID.
 - `--cursor ID`: resume after a printed `next_cursor`; no automatic follow-up page is run.
 - `--semantic`: enable LLM-judge semantic detection on FTS5 candidate pairs returned by `FindCandidates`. It can improve verdict quality for candidates that share lexical terms, but it does not discover totally lexically unrelated pairs on its own. Requires `ENGRAM_AGENT_CLI=claude` or `ENGRAM_AGENT_CLI=opencode`.
-- With `--semantic`, non-`not_conflict` verdicts are persisted by `JudgeBySemantic` even in the default `--dry-run` mode; `not_conflict` verdicts remain no-op.
+- With `--semantic`, `--dry-run` evaluates verdicts without persistence and reports `not_conflict` as skipped. `--apply` persists every valid verdict, including `not_conflict`.
 - `--concurrency N`: worker pool size for parallel LLM calls (default 5, max 20).
 - `--timeout-per-call N`: per-LLM-call timeout in seconds (default 60).
 - `--max-semantic N`: hard cap on LLM calls per scan run (default 100).
@@ -588,7 +588,7 @@ Cloud server always requires `ENGRAM_CLOUD_ALLOWED_PROJECTS` (comma-separated), 
 Authenticated mode also requires an explicit non-default `ENGRAM_JWT_SECRET`; implicit development defaults are rejected.
 Dashboard requests support browser login in authenticated mode: use `/dashboard/login` to exchange the bearer token for an HttpOnly dashboard cookie scoped to `/dashboard`. Protected `/dashboard/*` HTML routes require that cookie and do **not** treat raw `Authorization: Bearer ...` headers as an authenticated browser session. Sync API routes (`/sync/pull`, `/sync/pull/{chunkID}`, `/sync/push`, `/sync/mutations/push`, `/sync/mutations/pull`) remain header-auth only. In insecure mode (`ENGRAM_CLOUD_INSECURE_NO_AUTH=1` + no `ENGRAM_CLOUD_TOKEN`), dashboard auth is bypassed and `/dashboard/login` redirects to `/dashboard/`.
 
-`ENGRAM_CLOUD_ADMIN` is optional in authenticated mode; when set, `/dashboard/admin` is allowed only for sessions established with that exact token.
+`ENGRAM_CLOUD_ADMIN` is optional in authenticated mode. Its sessions can access the existing dashboard admin read surfaces, project sync controls, and audit logs, but managed-user, token, and project-grant mutations require a managed admin token.
 `ENGRAM_CLOUD_ADMIN` is rejected in insecure mode (`ENGRAM_CLOUD_INSECURE_NO_AUTH=1`) to avoid an incoherent admin/browser auth path.
 
 Cloud runtime bind host is controlled by `ENGRAM_CLOUD_HOST`:
@@ -608,7 +608,7 @@ Cloud runtime envs for `engram cloud serve`:
 | `ENGRAM_CLOUD_TOKEN`            | yes (authenticated mode) | Enables bearer auth mode                                                              |
 | `ENGRAM_JWT_SECRET`             | yes (authenticated mode) | Must be explicitly set and non-default when token mode is enabled                     |
 | `ENGRAM_CLOUD_INSECURE_NO_AUTH` | no                       | Set to `1` only for local insecure mode; cannot be combined with `ENGRAM_CLOUD_TOKEN` |
-| `ENGRAM_CLOUD_ADMIN`            | no                       | Optional admin dashboard token in authenticated mode; rejected in insecure mode       |
+| `ENGRAM_CLOUD_ADMIN`            | no                       | Optional legacy dashboard-admin token for read surfaces, project sync controls, and audit logs; managed-user mutations require a managed admin token; rejected in insecure mode |
 | `ENGRAM_CLOUD_TOKEN_PEPPER`     | no (required to enable managed-token auth) | Dedicated managed-token hashing secret. Must differ from `ENGRAM_JWT_SECRET`. Required both by `engram cloud bootstrap admin --issue-token` and by `engram cloud serve` to accept managed tokens at runtime (see below). |
 
 ### Managed users, tokens, and CLI bootstrap
@@ -640,13 +640,13 @@ engram cloud bootstrap recover-token --name replacement
 
 It requires `ENGRAM_CLOUD_TOKEN_PEPPER`, preserves existing grants, and prints the recovered raw token exactly once only after the token and its `bootstrap.cli` recovery audit event commit together. It refuses all other states, including multiple enabled managed human admins or any existing principal token; it does not create users, grants, or partial tokens.
 
-**Runtime authentication:** `engram cloud serve` resolves managed tokens first, then falls back to the legacy env-token credentials (`ENGRAM_CLOUD_TOKEN` for sync, `ENGRAM_CLOUD_ADMIN` for dashboard bootstrap/admin), on every `/sync/*`, `/admin/*`, and dashboard-login request:
+**Runtime authentication:** `engram cloud serve` resolves managed tokens first, then falls back to the legacy env-token credentials (`ENGRAM_CLOUD_TOKEN` for sync and `ENGRAM_CLOUD_ADMIN` for dashboard access), on every `/sync/*`, `/admin/*`, and dashboard-login request. Authentication does not grant managed-user mutation authority: only a managed-token admin principal may create or enable/disable users, create or revoke tokens, or create or revoke project grants.
 
 - Set `ENGRAM_CLOUD_TOKEN_PEPPER` to enable managed-token authentication. A token issued by `engram cloud bootstrap admin --issue-token` (or by the dashboard/`/admin/*` token-create routes) then authenticates directly against `/sync/*` and `/admin/*`, and can log into the dashboard as its resolved principal/role.
 - If `ENGRAM_CLOUD_TOKEN_PEPPER` is not set, managed-token authentication is simply disabled: the server still starts normally, and `ENGRAM_CLOUD_TOKEN` / `ENGRAM_CLOUD_ADMIN` continue to authenticate exactly as before (legacy-only mode).
 - Managed principals are deny-by-default for project sync: a managed token only reaches projects explicitly granted via `--grant-project` (or the dashboard/`/admin/*` grant routes). Legacy `ENGRAM_CLOUD_TOKEN` keeps its existing `ENGRAM_CLOUD_ALLOWED_PROJECTS` allowlist behavior, unaffected by managed grants.
 - Disabled managed users, revoked managed tokens, and revoked project grants stop authenticating/authorizing on the very next request — no server restart required.
-- No rollback action is required to keep using legacy credentials: legacy `ENGRAM_CLOUD_TOKEN` / `ENGRAM_CLOUD_ADMIN` behavior is unchanged and remains fully supported whether or not `ENGRAM_CLOUD_TOKEN_PEPPER` is configured.
+- No rollback action is required to keep using legacy credentials: legacy `ENGRAM_CLOUD_TOKEN` continues to use its existing sync allowlist, and `ENGRAM_CLOUD_ADMIN` continues to provide dashboard read access, project sync controls, audit logs, and the first-admin dashboard bootstrap entry point whether or not `ENGRAM_CLOUD_TOKEN_PEPPER` is configured. The CLI recovery command remains limited to its documented stranded-admin state. Use a managed admin token for managed-user administration.
 
 #### Managed admin API response JSON
 
@@ -677,6 +677,8 @@ engram sync --cloud --project <project>
 ```
 
 Sync/autosync never auto-applies repairs; only the explicit `repair --apply` command mutates local repairable upgrade state.
+
+When cloud sync receives `policy_forbidden`, Engram preserves the server's denied project message and advises the server administrator to check `ENGRAM_CLOUD_ALLOWED_PROJECTS`. A managed principal's project grant may also need checking; the client does not expose allowlist contents.
 
 For cloud servers that already accepted mutation pushes before mutation payloads were materialized into chunk history, run the server-side backfill against the Postgres DSN used by `engram cloud serve`:
 
@@ -734,7 +736,7 @@ Deterministic reason codes shared across store/CLI/server:
 - `blocked_unenrolled`
 - `auth_required`
 - `cloud_config_error`
-- `policy_forbidden`
+- `policy_forbidden` — check the server-side `ENGRAM_CLOUD_ALLOWED_PROJECTS` policy for the denied project; a managed principal's project grant may also need checking. The client does not expose allowlist contents.
 - `paused`
 - `transport_failed`
 
@@ -892,7 +894,7 @@ Save structured observations. The tool description teaches agents the format:
 - **type**: `decision` | `architecture` | `bugfix` | `pattern` | `config` | `discovery` | `learning`
 - **scope**: `project` (default) | `personal` | `global` — see [Team Usage](docs/TEAM-USAGE.md) for conventions and sync caveats
 - **topic_key**: optional canonical topic id (e.g. `architecture/auth-model`) used to upsert evolving memories
-- **capture_prompt**: optional boolean, default `true`; when current prompt context is available in the same MCP process for the same project/session, Engram best-effort records it alongside the observation. If that process-local context is unavailable or prompt capture fails, `mem_save` still succeeds. Automated pipeline saves such as SDD artifacts should pass `false`.
+- **capture_prompt**: optional boolean, default `true`; when current prompt context is available in the same MCP process for the same project/session, Engram best-effort records it alongside the observation. If that process-local context is unavailable or prompt capture fails, `mem_save` still succeeds. Automated artifact saves should pass `false`.
 - **content**: Structured with `**What**`, `**Why**`, `**Where**`, `**Learned**`; required unless the legacy `observation` alias is provided
 - **observation**: backward-compatible alias for `content` for older/raw MCP clients; prefer `content` for new integrations
 
@@ -1029,7 +1031,7 @@ Behavior:
 
 - Persists a relation row via `JudgeBySemantic` with system provenance (`marked_by_kind="system"`, `marked_by_actor="engram"`)
 - Idempotent: the same `(source_id, target_id)` pair updates the existing row rather than inserting a duplicate
-- `not_conflict` verdicts are no-ops — acknowledged but not persisted, matching the scan flow contract
+- `not_conflict` verdicts persist as judged relations, suppressing future candidate scans without appearing in conflict-facing lists or statistics
 - Cross-project relations are rejected with an error
 
 ---
@@ -1533,7 +1535,7 @@ Missing `ENGRAM_CLOUD_TOKEN` or `ENGRAM_CLOUD_SERVER` logs an `ERROR` and disabl
 | ------------------ | ------------------------------------------------------- | ---------------------------------------------------------------------------- |
 | `transport_failed` | Network error, server 5xx, or 404 on mutation endpoints | Check server health and network; if 404, see `server_unsupported` note below |
 | `auth_required`    | Bearer token rejected (401)                             | Rotate `ENGRAM_CLOUD_TOKEN`                                                  |
-| `policy_forbidden` | Project access denied (403)                             | Check `ENGRAM_CLOUD_ALLOWED_PROJECTS` on the server                          |
+| `policy_forbidden` | Project access denied (403)                             | Check the server-side `ENGRAM_CLOUD_ALLOWED_PROJECTS` policy for the denied project; a managed principal's project grant may also need checking. The client does not expose allowlist contents. |
 | `internal_error`   | Panic inside the sync cycle                             | Check logs for stack trace                                                   |
 | `upgrade_paused`   | Autosync paused during cloud upgrade (`PhaseDisabled`)  | Call `ResumeAfterUpgrade` or restart                                         |
 

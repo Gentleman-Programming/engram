@@ -141,7 +141,7 @@ The exporter only writes inside `{vault}/engram/`. It will never touch other fol
 │   │   ├── session-abc123.md
 │   │   └── session-def456.md
 │   ├── _topics/                         ← topic cluster hubs
-│   │   ├── sdd--obsidian-plugin.md
+│   │   ├── architecture--obsidian-plugin.md
 │   │   └── architecture--auth-model.md
 │   ├── engram/                          ← project folder
 │   │   ├── architecture/
@@ -167,7 +167,7 @@ id: 1719
 type: architecture
 project: engram
 scope: project
-topic_key: sdd/obsidian-plugin/explore
+topic_key: architecture/obsidian-plugin/explore
 session_id: session-abc123
 created_at: "2026-04-06T14:30:00Z"
 updated_at: "2026-04-06T14:35:00Z"
@@ -175,7 +175,7 @@ revision_count: 1
 tags:
   - engram
   - architecture
-  - sdd
+  - obsidian
 aliases:
   - "Exploration: Obsidian plugin for Engram brain visualization"
 ---
@@ -189,7 +189,7 @@ aliases:
 
 ---
 *Session*: [[session-session-abc123]]
-*Topic*: [[topic-sdd--obsidian-plugin]]
+*Topic*: [[topic-architecture--obsidian-plugin]]
 ```
 
 The wikilinks at the bottom are what give the graph view its connections. Obsidian indexes them automatically.
@@ -198,7 +198,7 @@ The wikilinks at the bottom are what give the graph view its connections. Obsidi
 
 **Session hubs** (in `_sessions/`) — one per session, contains backlinks to every observation captured in that session. Open one to see the full chronological story of a work session.
 
-**Topic hubs** (in `_topics/`) — one per `topic_key` prefix that has ≥2 observations. Groups related work across time. For example, all `sdd/obsidian-plugin/*` observations cluster under `_topics/sdd--obsidian-plugin.md`. Singletons don't get hubs (prevents orphan clutter).
+**Topic hubs** (in `_topics/`) — one per `topic_key` prefix that has ≥2 observations. Groups related work across time. For example, all `architecture/obsidian-plugin/*` observations cluster under `_topics/architecture--obsidian-plugin.md`. Singletons don't get hubs (prevents orphan clutter).
 
 Slashes in topic keys become `--` in filenames for filesystem safety.
 
@@ -400,7 +400,7 @@ In the Filter panel of Graph View:
 | `tag:#bugfix` | Constellation of every bug you've ever fixed |
 | `tag:#architecture path:engram/engram` | Architectural decisions in this project only |
 | `path:_topics` | Just the topic hubs — your "table of contents" |
-| `path:_sessions sdd` | Sessions that involved SDD work |
+| `path:_sessions architecture` | Sessions that involved architecture work |
 | `tag:#decision tag:#architecture` | Big architectural decisions |
 
 ### Navigating

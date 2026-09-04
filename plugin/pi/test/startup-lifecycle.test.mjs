@@ -25,15 +25,18 @@ function freePort() {
 // A fake `engram serve` that logs every invocation, then either dies before readiness or
 // starts answering /health after `readyAfterMs` — the slow-health window under test.
 async function writeFakeEngramBin(dir, { spawnLog, port, readyAfterMs, exitCode }) {
-  const binPath = join(dir, "fake-engram.mjs");
+  const binPath = join(dir, "fake-engram.cjs");
   const script = `#!/usr/bin/env node
-import { appendFileSync } from "node:fs";
-import { createServer } from "node:http";
+const { appendFileSync } = require("node:fs");
+const { createServer } = require("node:http");
+const { resolve } = require("node:path");
 
-if (process.argv[2] === "serve") {
+const syntheticServePath = resolve("serve");
+const isSyntheticServe = process.argv[1] === syntheticServePath;
+const isServe = process.argv[2] === "serve" || isSyntheticServe;
+if (isServe) {
   appendFileSync(${JSON.stringify(spawnLog)}, "serve\\n");
-}
-${exitCode === undefined
+  ${exitCode === undefined
       ? `const server = createServer((req, res) => {
   if (req.url.startsWith("/project/current")) {
     res.writeHead(200, { "content-type": "application/json" });
@@ -60,10 +63,17 @@ setTimeout(() => {
   setTimeout(() => { server.close(); process.exit(0); }, 5000);
 }, ${readyAfterMs});`
       : `process.exit(${exitCode});`}
+  if (isSyntheticServe) process.once("uncaughtException", (error) => {
+    if (error?.code === "MODULE_NOT_FOUND" && error.message.includes("Cannot find module '" + syntheticServePath + "'")) return;
+    throw error;
+  });
+}
 `;
   await writeFile(binPath, script, "utf8");
   await chmod(binPath, 0o755);
-  return binPath;
+  return process.platform === "win32"
+    ? { engramBin: process.execPath, nodeOptions: `--require "${binPath.replaceAll("\\", "\\\\")}"` }
+    : { engramBin: binPath };
 }
 
 async function loadPlugin({ engramBin, port, cwd, sandbox }) {
@@ -94,10 +104,11 @@ async function loadPlugin({ engramBin, port, cwd, sandbox }) {
 }
 
 async function withFixture(options, run) {
-  const dir = await mkdtemp(join(tmpdir(), "engram-pi-startup-"));
+  const dir = await mkdtemp(join(tmpdir(), "engram-pi-startup fixture-"));
   const originalBin = process.env.ENGRAM_BIN;
   const originalPort = process.env.ENGRAM_PORT;
   const originalUrl = process.env.ENGRAM_URL;
+  const originalNodeOptions = process.env.NODE_OPTIONS;
   let readyServer;
   try {
     const spawnLog = join(dir, "spawns.log");
@@ -114,16 +125,20 @@ async function withFixture(options, run) {
         resolve();
       });
     });
-    const engramBin = options.missingBin
-      ? join(dir, "engram-does-not-exist")
+    const fakeEngram = options.missingBin
+      ? { engramBin: join(dir, "engram-does-not-exist") }
       : await writeFakeEngramBin(dir, { spawnLog, port, readyAfterMs: options.readyAfterMs ?? 0, exitCode: options.exitCode });
+    if (fakeEngram.nodeOptions) {
+      process.env.NODE_OPTIONS = [originalNodeOptions, fakeEngram.nodeOptions].filter(Boolean).join(" ");
+    }
     const sandbox = await createPluginSandbox(dir);
-    const plugin = await loadPlugin({ engramBin, port, cwd: dir, sandbox });
+    const plugin = await loadPlugin({ engramBin: fakeEngram.engramBin, port, cwd: dir, sandbox });
     await run({ ...plugin, spawnLog, dir, port });
   } finally {
     if (originalBin === undefined) delete process.env.ENGRAM_BIN; else process.env.ENGRAM_BIN = originalBin;
     if (originalPort === undefined) delete process.env.ENGRAM_PORT; else process.env.ENGRAM_PORT = originalPort;
     if (originalUrl === undefined) delete process.env.ENGRAM_URL; else process.env.ENGRAM_URL = originalUrl;
+    if (originalNodeOptions === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = originalNodeOptions;
     if (readyServer?.listening) await new Promise((resolve) => readyServer.close(resolve));
     await rm(dir, { recursive: true, force: true });
   }
@@ -186,6 +201,22 @@ test("a child that exits before readiness never escapes the session hooks", asyn
 
     const result = await hooks.get("before_agent_start")({ systemPrompt: "base", prompt: "hello there" }, ctx);
     assert.match(result.systemPrompt, /^base\n\n/, "memory instructions still reach the agent");
+  });
+});
+
+test("before_agent_start injects actionable mem_search recall guidance", async () => {
+  await withFixture({ readyServer: true }, async ({ hooks, ctx }) => {
+    const beforeAgentStart = hooks.get("before_agent_start");
+    assert.ok(beforeAgentStart, "before_agent_start is registered");
+
+    const result = await beforeAgentStart({ systemPrompt: "base", prompt: "recall past work" }, ctx);
+    assert.match(result.systemPrompt, /Start with `mem_context`, then search with 1–2 distinctive keywords/);
+    assert.match(result.systemPrompt, /Ordinary `mem_search` is scoped to the detected active project/);
+    assert.match(result.systemPrompt, /`match_mode:"all"` means AND/);
+    assert.match(result.systemPrompt, /`match_mode:"any"` with\s+`all_projects:true`/);
+    assert.match(result.systemPrompt, /If a scoped search is empty, retry once this way/);
+    assert.match(result.systemPrompt, /After hits, narrow follow-up searches by project, type, or `match_mode:"all"`/);
+    assert.match(result.systemPrompt, /then use `mem_get_observation` for full content/);
   });
 });
 

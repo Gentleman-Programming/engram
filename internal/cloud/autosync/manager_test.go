@@ -25,6 +25,7 @@ type fakeLocalStore struct {
 	pushErr           error
 	pullErr           error
 	failureMessage    string
+	failureReason     string
 	blockedReason     string
 	blockedMessage    string
 	appliedMuts       []store.SyncMutation
@@ -126,6 +127,60 @@ func (s *fakeLocalStore) MarkSyncFailure(_, message string, _ time.Time) error {
 	defer s.mu.Unlock()
 	s.failureMessage = message
 	return nil
+}
+
+func (s *fakeLocalStore) MarkSyncFailureWithReason(_, reasonCode, message string, _ time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failureReason = reasonCode
+	s.failureMessage = message
+	return nil
+}
+
+func TestManagerPolicyFailurePersistsReasonAwareGuidance(t *testing.T) {
+	local := newFakeLocalStore()
+	cfg := DefaultConfig()
+	cfg.TargetKey = "cloud:policy-project"
+	manager := New(local, newFakeTransport(), cfg)
+	err := &fakeAuthErr{code: 403}
+
+	manager.recordFailureWithReason(
+		autosyncFailureMessage(cfg.TargetKey, "push: "+err.Error(), err),
+		"policy_forbidden",
+	)
+
+	if local.failureReason != "policy_forbidden" {
+		t.Fatalf("persisted failure reason = %q, want policy_forbidden", local.failureReason)
+	}
+	if !strings.Contains(local.failureMessage, "ENGRAM_CLOUD_ALLOWED_PROJECTS") {
+		t.Fatalf("persisted failure guidance = %q", local.failureMessage)
+	}
+}
+
+func TestManagerPolicyFailureGuidanceUsesDeniedProjectFromAggregate(t *testing.T) {
+	local := newFakeLocalStore()
+	local.mutations = []store.SyncMutation{
+		{Seq: 1, Entity: "obs", EntityKey: "alpha", Op: "upsert", Project: "alpha", Payload: `{"id":"alpha"}`},
+		{Seq: 2, Entity: "obs", EntityKey: "beta", Op: "upsert", Project: "beta", Payload: `{"id":"beta"}`},
+	}
+	transport := newFakeTransport()
+	transport.pushErrByProject = map[string]error{
+		"alpha": errors.New("generic push failure"),
+		"beta":  &fakeAuthErr{code: 403},
+	}
+	manager := New(local, transport, DefaultConfig())
+
+	manager.cycle(context.Background())
+
+	if local.failureReason != "policy_forbidden" {
+		t.Fatalf("persisted failure reason = %q, want policy_forbidden", local.failureReason)
+	}
+	if !strings.Contains(local.failureMessage, `The server denied access to project "beta".`) {
+		t.Fatalf("policy guidance must name beta, got %q", local.failureMessage)
+	}
+	if strings.Contains(local.failureMessage, `The server denied access to project "alpha".`) {
+		t.Fatalf("policy guidance must not misattribute alpha, got %q", local.failureMessage)
+	}
 }
 
 func (s *fakeLocalStore) MarkSyncBlocked(_, reasonCode, message string) error {
