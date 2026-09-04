@@ -51,6 +51,16 @@ export ENGRAM_CLOUD_TOKEN="your-token"
 
 The local `~/.engram/cloud.json` stores the server URL and may also store a `token` fallback. `ENGRAM_CLOUD_TOKEN` takes precedence over any token in `cloud.json`; if the env var is unset, Engram falls back to `cloud.json.token`. This fallback is intentional (issue #343) for use cases such as background autosync where exporting the env var on every shell is not practical.
 
+## Cloud project was recreated or deleted
+
+When a project's cloud data was deleted or recreated while the correct local data is already acknowledged, replay the current local project state with:
+
+```bash
+engram cloud upgrade remirror --project <project>
+```
+
+The project must already be enrolled and the configured cloud credentials must be authorized for it. Remirror creates new project-scoped upsert and locally represented tombstone mutations, then sends them through the normal cloud export path. It preserves existing acknowledgement and attempt history; it does not reopen acknowledged rows, delete mutation history, or reset `last_acked_seq`. Re-running the command is safe because remote entities use stable identities and upsert semantics.
+
 ---
 
 ## Error: `chunk_id does not match payload content hash`
