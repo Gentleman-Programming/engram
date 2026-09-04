@@ -26,7 +26,7 @@ if [ ! -f "$MCP_CONFIG" ] || [ -L "$MCP_CONFIG" ]; then
   if engram setup claude-code --mcp-only; then
     printf '%s\n' "Engram MCP registration migrated. Restart Claude Code to enable MCP tools."
   else
-    printf '%s\n' "warning: Engram MCP registration migration failed; run 'engram setup claude-code' to repair it." >&2
+    printf '%s\n' "warning: Engram MCP registration migration failed; manually replace ~/.claude/mcp/engram.json with a regular file, then run 'engram setup claude-code'." >&2
   fi
 fi
 # Ensure engram server is running
