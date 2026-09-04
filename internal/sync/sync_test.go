@@ -2306,6 +2306,48 @@ func TestOwnershipManifestCompatibilityIsScopedToSynchronizedSessions(t *testing
 		})
 	}
 
+	for _, tc := range []struct {
+		name, table string
+		mutation    store.SyncMutation
+	}{
+		{
+			name:  "observation for unrelated shared project",
+			table: "observations",
+			mutation: store.SyncMutation{Entity: store.SyncEntityObservation, EntityKey: "accepted-observation", Op: store.SyncOpUpsert, Project: "project-b",
+				Payload: `{"sync_id":"accepted-observation","session_id":"shared-project-b","type":"manual","title":"accepted","content":"accepted","scope":"project"}`},
+		},
+		{
+			name:  "prompt for unrelated shared project",
+			table: "user_prompts",
+			mutation: store.SyncMutation{Entity: store.SyncEntityPrompt, EntityKey: "accepted-prompt", Op: store.SyncOpUpsert,
+				Payload: `{"sync_id":"accepted-prompt","session_id":"shared-project-b","content":"accepted","project":"project-b"}`},
+		},
+	} {
+		t.Run("preflight accepts "+tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if err := s.CreateSessionWithOwnershipMode("manual-save-project-a", "project-a", "/tmp/a", store.SessionOwnershipProjectOwned); err != nil {
+				t.Fatalf("create unrelated project-owned session: %v", err)
+			}
+			if err := s.CreateSession("shared-project-b", "project-b", "/tmp/b"); err != nil {
+				t.Fatalf("create shared session: %v", err)
+			}
+			syncDir := filepath.Join(t.TempDir(), ".engram")
+			writeLocalChunkFile(t, syncDir, "accepted", ChunkData{Mutations: []store.SyncMutation{tc.mutation}})
+			writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "accepted", CreatedAt: "2020-01-01T00:00:00Z"}}})
+
+			if _, err := New(s, syncDir).Import(); err != nil {
+				t.Fatalf("import legacy %s: %v", tc.name, err)
+			}
+			var count int
+			if err := s.DB().QueryRow(`SELECT count(*) FROM `+tc.table+` WHERE sync_id = ?`, tc.mutation.EntityKey).Scan(&count); err != nil {
+				t.Fatalf("count imported %s: %v", tc.name, err)
+			}
+			if count != 1 {
+				t.Fatalf("imported %s count = %d, want 1", tc.name, count)
+			}
+		})
+	}
+
 	for _, tc := range []struct{ name, id string }{{"shared", "shared-session"}, {"absent", "absent-session"}} {
 		t.Run("legacy delete remains compatible for "+tc.name+" session", func(t *testing.T) {
 			s := newTestStore(t)
