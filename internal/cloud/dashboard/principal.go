@@ -9,8 +9,9 @@ import (
 // view over MountConfig closures — no context reads for identity are performed
 // inside handlers. Satisfies Design Decision 6.
 type Principal struct {
-	displayName string
-	isAdmin     bool
+	displayName           string
+	isAdmin               bool
+	canManageManagedUsers bool
 }
 
 // DisplayName returns the display name for this principal.
@@ -25,6 +26,10 @@ func (p Principal) DisplayName() string {
 // IsAdmin returns whether this principal has admin privileges.
 func (p Principal) IsAdmin() bool { return p.isAdmin }
 
+// CanManageManagedUsers reports whether this dashboard principal may mutate
+// managed users, tokens, and project grants.
+func (p Principal) CanManageManagedUsers() bool { return p.canManageManagedUsers }
+
 // principalFromRequest derives a Principal from the current request using the
 // MountConfig closures. Handlers call p := h.principalFromRequest(r) and never
 // read r.Context() for identity.
@@ -37,5 +42,9 @@ func (h *handlers) principalFromRequest(r *http.Request) Principal {
 	if h.cfg.IsAdmin != nil {
 		admin = h.cfg.IsAdmin(r)
 	}
-	return Principal{displayName: name, isAdmin: admin}
+	canManageManagedUsers := false
+	if h.cfg.CanManageManagedUsers != nil {
+		canManageManagedUsers = h.cfg.CanManageManagedUsers(r)
+	}
+	return Principal{displayName: name, isAdmin: admin, canManageManagedUsers: canManageManagedUsers}
 }

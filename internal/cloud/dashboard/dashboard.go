@@ -39,16 +39,17 @@ type staticSyncStatusProvider struct {
 func (s staticSyncStatusProvider) Status() SyncStatus { return s.status }
 
 type MountConfig struct {
-	RequireSession      func(r *http.Request) error
-	ValidateLoginToken  func(token string) error
-	CreateSessionCookie func(w http.ResponseWriter, r *http.Request, token string) error
-	ClearSessionCookie  func(w http.ResponseWriter, r *http.Request)
-	IsAdmin             func(r *http.Request) bool
-	GetDisplayName      func(r *http.Request) string
-	Store               DashboardStore
-	ManagedUsers        ManagedUsersStore
-	MaxLoginBodyBytes   int64
-	StatusProvider      SyncStatusProvider
+	RequireSession        func(r *http.Request) error
+	ValidateLoginToken    func(token string) error
+	CreateSessionCookie   func(w http.ResponseWriter, r *http.Request, token string) error
+	ClearSessionCookie    func(w http.ResponseWriter, r *http.Request)
+	IsAdmin               func(r *http.Request) bool
+	CanManageManagedUsers func(r *http.Request) bool
+	GetDisplayName        func(r *http.Request) string
+	Store                 DashboardStore
+	ManagedUsers          ManagedUsersStore
+	MaxLoginBodyBytes     int64
+	StatusProvider        SyncStatusProvider
 }
 
 type DashboardStore interface {
@@ -798,7 +799,7 @@ func (h *handlers) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	component := ManagedUsersPage()
+	component := ManagedUsersPage(p.CanManageManagedUsers())
 	if isHTMXRequest(r) {
 		renderComponent(w, r, component)
 		return
@@ -827,7 +828,7 @@ func (h *handlers) handleAdminUsersList(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	}
-	renderComponent(w, r, ManagedUsersListPartial(rows))
+	renderComponent(w, r, ManagedUsersListPartial(rows, p.CanManageManagedUsers()))
 }
 
 // handleAdminHealth handles GET /dashboard/admin/health.
