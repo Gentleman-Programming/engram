@@ -15,6 +15,7 @@
   <a href="docs/ARCHITECTURE.md">Architecture</a> &bull;
   <a href="docs/PLUGINS.md">Plugins</a> &bull;
   <a href="docs/TEAM-USAGE.md">Team Usage</a> &bull;
+  <a href="HANDOFF.md">Maintainer Handoff</a> &bull;
   <a href="CONTRIBUTING.md">Contributing</a> &bull;
   <a href="DOCS.md">Full Docs</a>
 </p>
@@ -390,6 +391,7 @@ Full environment variable reference → [DOCS.md#environment-variables](DOCS.md#
 | [Codebase Guide](docs/CODEBASE-GUIDE.md)      | Guide to the repository structure, flows, and implementation landmarks |
 | [Architecture](docs/ARCHITECTURE.md)          | How it works + MCP tools + project structure                           |
 | [Plugins](docs/PLUGINS.md)                    | OpenCode & Claude Code plugin details                                  |
+| [Maintainer Handoff](HANDOFF.md)               | Local fork state and cross-machine continuation notes                  |
 | [Comparison](docs/COMPARISON.md)              | Why Engram vs claude-mem                                               |
 | [Intended Usage](docs/intended-usage.md)      | Mental model — how Engram is meant to be used                          |
 | [Obsidian Brain](docs/beta/obsidian-brain.md) | Export memories as Obsidian knowledge graph (beta)                     |
