@@ -1067,6 +1067,16 @@ test("session compaction strictly registers before forwarding its summary", () =
   assert.match(source, /async function archiveCompactionSummary[\s\S]*engramFetchResult\("\/observations"/);
 });
 
+test("session compaction never captures or reads stale Pi context", () => {
+  const compactStart = source.indexOf('pi.on("session_compact"');
+  const compactEnd = source.indexOf('\n  pi.on("before_agent_start"', compactStart);
+  assert.notEqual(compactStart, -1, "session_compact handler not found");
+  assert.notEqual(compactEnd, -1, "session_compact handler end not found");
+
+  const compactHandler = source.slice(compactStart, compactEnd);
+  assert.doesNotMatch(compactHandler, /\bctx\b/, "session_compact must not capture or access stale Pi context");
+});
+
 test("four session-attributed writes ignore model session_id and require the Pi runtime ID", () => {
   for (const tool of ["mem_save", "mem_save_prompt", "mem_session_summary", "mem_capture_passive"]) {
     const schema = source.match(new RegExp(`${tool}: Type\\.Object\\(\\{([\\s\\S]*?)\\n  \\}\\),`));
