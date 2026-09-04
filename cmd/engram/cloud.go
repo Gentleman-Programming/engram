@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -698,24 +699,36 @@ func cmdCloudEnroll(cfg store.Config) {
 		exitFunc(1)
 	}
 
+	projectName, warning, err := normalizeCloudCLIProjectInput(os.Args[3])
+	if err != nil {
+		fatal(err)
+		return
+	}
+	if warning != "" {
+		fmt.Fprintln(os.Stderr, warning)
+	}
+
 	s, err := storeNew(cfg)
 	if err != nil {
 		fatal(err)
 		return
 	}
 	defer s.Close()
-
-	projectName := strings.TrimSpace(os.Args[3])
-	projectName, warning := store.NormalizeProject(projectName)
-	if warning != "" {
-		fmt.Fprintln(os.Stderr, warning)
-	}
 	if err := s.EnrollProject(projectName); err != nil {
 		fatal(err)
 		return
 	}
 
 	fmt.Printf("✓ Project %q enrolled for cloud sync\n", projectName)
+}
+
+func normalizeCloudCLIProjectInput(input string) (string, string, error) {
+	decoded, err := url.PathUnescape(strings.TrimSpace(input))
+	if err != nil {
+		return "", "", fmt.Errorf("invalid cloud project URL encoding %q: %w", input, err)
+	}
+	projectName, warning := store.NormalizeProject(decoded)
+	return projectName, warning, nil
 }
 
 func cmdCloudConfig(cfg store.Config) {

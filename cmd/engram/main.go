@@ -1686,6 +1686,18 @@ func cmdSync(cfg store.Config) {
 		fatal(fmt.Errorf("--all and --project cannot be used together"))
 		return
 	}
+	cloudEnabled := doCloud || envBool("ENGRAM_CLOUD_SYNC")
+	if cloudEnabled && projectProvided {
+		decodedProject, warning, decodeErr := normalizeCloudCLIProjectInput(project)
+		if decodeErr != nil {
+			fatal(fmt.Errorf("cloud sync project: %w", decodeErr))
+			return
+		}
+		project = decodedProject
+		if warning != "" {
+			fmt.Fprintln(os.Stderr, warning)
+		}
+	}
 
 	syncDir := ".engram"
 
@@ -1705,7 +1717,6 @@ func cmdSync(cfg store.Config) {
 		project = resolved
 	}
 
-	cloudEnabled := doCloud || envBool("ENGRAM_CLOUD_SYNC")
 	if cloudEnabled {
 		if doAll {
 			fatal(fmt.Errorf("cloud sync requires a single explicit --project scope; --all is not supported"))
