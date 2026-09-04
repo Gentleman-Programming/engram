@@ -29,7 +29,7 @@ func TestAutosyncPushPullRoundTrip(t *testing.T) {
 	latestSeq := int64(0)
 
 	// Fake cloud server implementing /sync/mutations/push and /sync/mutations/pull
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
 		if auth != "Bearer test-token" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -88,6 +88,7 @@ func TestAutosyncPushPullRoundTrip(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
+	trustTLSServer(t, srv)
 
 	// Create a real MutationTransport pointing at the test server.
 	mt, err := remote.NewMutationTransport(srv.URL, "test-token")
@@ -131,10 +132,11 @@ func TestAutosyncPushPullRoundTrip(t *testing.T) {
 // when the cloud transport is returning 500.
 func TestLocalWriteDuringTransport500(t *testing.T) {
 	// Fake cloud server always returns 500.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 	}))
 	defer srv.Close()
+	trustTLSServer(t, srv)
 
 	mt, err := remote.NewMutationTransport(srv.URL, "test-token")
 	if err != nil {
@@ -182,7 +184,7 @@ func TestLocalWriteDuringTransport500(t *testing.T) {
 // writes complete without deadlock while autosync is running in the background.
 func TestGoroutineIsolationConcurrentWrites(t *testing.T) {
 	// Fake cloud server with artificial delay to simulate network I/O.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(5 * time.Millisecond)
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
@@ -195,6 +197,7 @@ func TestGoroutineIsolationConcurrentWrites(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
+	trustTLSServer(t, srv)
 
 	mt, err := remote.NewMutationTransport(srv.URL, "test-token")
 	if err != nil {
@@ -367,4 +370,11 @@ func httpPushMutations(t *testing.T, serverURL, token string, entries []map[stri
 		t.Fatalf("httpPushMutations: %v", err)
 	}
 	return resp
+}
+
+func trustTLSServer(t *testing.T, server *httptest.Server) {
+	t.Helper()
+	previous := http.DefaultTransport
+	http.DefaultTransport = server.Client().Transport
+	t.Cleanup(func() { http.DefaultTransport = previous })
 }

@@ -138,7 +138,7 @@ func TestTryStartAutosyncUsesFileToken(t *testing.T) {
 
 	const fileToken = "file-only-token-421"
 	if err := saveCloudConfig(cfg, &cloudConfig{
-		ServerURL: "http://127.0.0.1:19998",
+		ServerURL: "https://127.0.0.1:19998",
 		Token:     fileToken,
 	}); err != nil {
 		t.Fatalf("save cloud config: %v", err)
