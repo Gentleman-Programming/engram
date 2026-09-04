@@ -8,10 +8,89 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Gentleman-Programming/engram/v2/internal/cloud/chunkcodec"
 	engramsync "github.com/Gentleman-Programming/engram/v2/internal/sync"
 )
+
+type remoteRoundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f remoteRoundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestNewRemoteTransportUsesOperationSpecificTimeouts(t *testing.T) {
+	rt, err := NewRemoteTransport("https://cloud.example.test", "token", "proj-a")
+	if err != nil {
+		t.Fatalf("NewRemoteTransport: %v", err)
+	}
+
+	if ordinaryOperationTimeout != 30*time.Second {
+		t.Fatalf("ordinary operation timeout = %s, want 30s", ordinaryOperationTimeout)
+	}
+	if writeChunkTimeout != 5*time.Minute {
+		t.Fatalf("write chunk timeout = %s, want 5m", writeChunkTimeout)
+	}
+	if rt.httpClient.Timeout != ordinaryOperationTimeout {
+		t.Fatalf("ordinary client timeout = %s, want %s", rt.httpClient.Timeout, ordinaryOperationTimeout)
+	}
+	if rt.writeHTTPClient.Timeout != writeChunkTimeout {
+		t.Fatalf("write client timeout = %s, want %s", rt.writeHTTPClient.Timeout, writeChunkTimeout)
+	}
+	if rt.httpClient == rt.writeHTTPClient {
+		t.Fatal("ordinary and write operations must use distinct HTTP clients")
+	}
+}
+
+func TestRemoteTransportUsesDedicatedWriteClient(t *testing.T) {
+	var ordinaryRequests, writeRequests int
+	rt := &RemoteTransport{
+		baseURL: "https://cloud.example.test",
+		project: "proj-a",
+		httpClient: &http.Client{
+			Timeout: ordinaryOperationTimeout,
+			Transport: remoteRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				ordinaryRequests++
+				if req.Method != http.MethodGet {
+					return nil, errors.New("ordinary client used for write")
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"version":1,"chunks":[]}`)),
+					Header:     make(http.Header),
+				}, nil
+			}),
+		},
+		writeHTTPClient: &http.Client{
+			Timeout: writeChunkTimeout,
+			Transport: remoteRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				writeRequests++
+				if req.Method != http.MethodPost {
+					return nil, errors.New("write client used for read")
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"status":"ok"}`)),
+					Header:     make(http.Header),
+				}, nil
+			}),
+		},
+	}
+
+	if _, err := rt.ReadManifest(); err != nil {
+		t.Fatalf("ReadManifest: %v", err)
+	}
+	if err := rt.WriteChunk("chunk-1", []byte(`{"sessions":[]}`), engramsync.ChunkEntry{CreatedBy: "tester", CreatedAt: "2026-04-01T00:00:00Z"}); err != nil {
+		t.Fatalf("WriteChunk: %v", err)
+	}
+	if ordinaryRequests != 1 {
+		t.Fatalf("ordinary client requests = %d, want 1", ordinaryRequests)
+	}
+	if writeRequests != 1 {
+		t.Fatalf("write client requests = %d, want 1", writeRequests)
+	}
+}
 
 func TestReadManifestReturnsHTTPStatusErrorForAuthAndPolicyFailures(t *testing.T) {
 	tests := []struct {
