@@ -1058,12 +1058,13 @@ test("session compaction strictly registers before forwarding its summary", () =
   assert.notEqual(compactEnd, -1, "session_compact handler end not found");
   const compactHandler = source.slice(compactStart, compactEnd);
 
-  const registration = compactHandler.indexOf("if (sessionId) await ensureSession(sessionId);");
-  const summaryPost = compactHandler.indexOf('bestEffortEngramFetch("/observations"');
+  const registration = compactHandler.indexOf("await ensureSession(sessionId);");
+  const summaryPost = compactHandler.indexOf("await archiveCompactionSummary(sessionId, summary);");
   assert.notEqual(registration, -1, "session_compact must await strict session registration");
   assert.notEqual(summaryPost, -1, "session_compact summary post not found");
   assert.ok(registration < summaryPost, "strict registration must precede summary forwarding");
   assert.doesNotMatch(compactHandler, /ensureSessionBestEffort/, "session_compact must not hide registration failure");
+  assert.match(source, /async function archiveCompactionSummary[\s\S]*engramFetchResult\("\/observations"/);
 });
 
 test("four session-attributed writes ignore model session_id and require the Pi runtime ID", () => {

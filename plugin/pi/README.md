@@ -160,9 +160,19 @@ This is a lightweight convenience convention, not a full secret-scanning system.
 
 ## Compaction recovery
 
-When Pi emits a compaction lifecycle event, `gentle-engram` best-effort extracts a compacted summary from supported event fields and saves it as a `session_summary` observation with topic key `session/compaction-recovery`.
+When Pi emits a compaction lifecycle event, `gentle-engram` reads the current payload field `compactionEntry.summary` first, then falls back to supported legacy fields when that value is absent or blank. It uses the opaque Pi runtime session identity captured from a fresh lifecycle event; it never accepts a model-supplied session ID for compaction recovery.
 
-Unsupported event shapes fail gracefully. The extension still injects a manual recovery instruction containing `FIRST ACTION REQUIRED`, so the next agent turn can call `mem_session_summary` if the Engram MCP tools are installed and active. If the tools are unavailable, save the compacted summary manually after Engram is available again.
+Before archiving, the extension requires Engram to acknowledge registration for that exact runtime session. It saves a `session_summary` observation with topic key `session/compaction-recovery`, then requests `/context/compaction?session_id=...` for recovery guidance scoped to the same session.
+After a second distinct or blank/missing runtime identity, compaction recovery permanently fails closed until the plugin process restarts.
+
+The next turn receives outcome-specific guidance:
+
+- **Confirmed archive:** the summary is already saved; no manual `mem_session_summary` call is needed.
+- **Definite archive failure:** the manual `FIRST ACTION REQUIRED` fallback remains available.
+- **Timeout or unknown archive outcome:** verify with `mem_search` or `mem_doctor` before retrying so a possibly completed write is not duplicated.
+- **Unavailable session, project, or registration:** no attributed archive is attempted; verify the active Engram session and project before saving manually.
+
+Unsupported event shapes fail gracefully and receive the same safe unavailable guidance rather than an attributed write.
 
 ## Local, sync, or cloud
 
