@@ -13250,6 +13250,9 @@ func TestFTSQueriesUseFTSFirstCrossJoin(t *testing.T) {
 	if !strings.Contains(executedSQL, "FROM prompts_fts fts") {
 		t.Fatalf("SearchPrompts did not execute the prompts FTS query:\n%s", executedSQL)
 	}
+	if !strings.Contains(executedSQL, "CROSS JOIN user_prompts p ON p.id = fts.rowid") {
+		t.Fatalf("SearchPrompts did not execute an FTS-first CROSS JOIN:\n%s", executedSQL)
+	}
 	if !reflect.DeepEqual(executedArgs, []any{`"orbit"`, "alpha", 1}) {
 		t.Fatalf("SearchPrompts arguments = %#v, want %#v", executedArgs, []any{`"orbit"`, "alpha", 1})
 	}
