@@ -88,22 +88,35 @@ func NewRemoteTransport(baseURL, token, project string) (*RemoteTransport, error
 	if err != nil {
 		return nil, err
 	}
+	token = strings.TrimSpace(token)
+	if token != "" && !strings.HasPrefix(normalized, "https://") {
+		return nil, fmt.Errorf("cloud: bearer token requires an HTTPS remote URL")
+	}
 	project, _ = store.NormalizeProject(project)
 	project = strings.TrimSpace(project)
 	if project == "" {
 		return nil, fmt.Errorf("cloud: project is required")
 	}
 	return &RemoteTransport{
-		baseURL: normalized,
-		token:   strings.TrimSpace(token),
-		project: project,
-		httpClient: &http.Client{
-			Timeout: ordinaryOperationTimeout,
-		},
-		writeHTTPClient: &http.Client{
-			Timeout: writeChunkTimeout,
-		},
+		baseURL:         normalized,
+		token:           token,
+		project:         project,
+		httpClient:      newRemoteHTTPClient(ordinaryOperationTimeout, token),
+		writeHTTPClient: newRemoteHTTPClient(writeChunkTimeout, token),
 	}, nil
+}
+
+func newRemoteHTTPClient(timeout time.Duration, token string) *http.Client {
+	client := &http.Client{Timeout: timeout}
+	if token != "" {
+		client.CheckRedirect = func(req *http.Request, _ []*http.Request) error {
+			if req.URL.Scheme != "https" {
+				return fmt.Errorf("cloud: bearer token redirect requires HTTPS")
+			}
+			return nil
+		}
+	}
+	return client
 }
 
 func validateBaseURL(raw string) (string, error) {

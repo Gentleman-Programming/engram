@@ -71,7 +71,7 @@ func TestSyncCloudSendsAuthorizationHeaderFromFileToken(t *testing.T) {
 	const fileToken = "secret-file-token"
 
 	var gotAuth string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/sync/pull":
@@ -85,6 +85,9 @@ func TestSyncCloudSendsAuthorizationHeaderFromFileToken(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
+	oldDefaultTransport := http.DefaultTransport
+	http.DefaultTransport = srv.Client().Transport
+	t.Cleanup(func() { http.DefaultTransport = oldDefaultTransport })
 
 	cfg := testConfig(t)
 
