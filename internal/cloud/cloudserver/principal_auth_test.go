@@ -219,6 +219,16 @@ func TestManagedPrincipalProjectGrantsAuthorizeChunkPullAndPush(t *testing.T) {
 	if pullDenied.Code != http.StatusForbidden {
 		t.Fatalf("expected ungranted manifest pull 403, got %d body=%q", pullDenied.Code, pullDenied.Body.String())
 	}
+	pullDeniedPayload := decodeActionableError(t, pullDenied)
+	if pullDeniedPayload.ErrorClass != "policy" {
+		t.Fatalf("expected policy class, got %q", pullDeniedPayload.ErrorClass)
+	}
+	if pullDeniedPayload.ErrorCode != "policy_forbidden" {
+		t.Fatalf("expected policy_forbidden error code, got %q", pullDeniedPayload.ErrorCode)
+	}
+	if pullDeniedPayload.Error != `forbidden: project "beta" is not allowed` {
+		t.Fatalf("expected denied project in error message, got %q", pullDeniedPayload.Error)
+	}
 
 	chunkDenied := httptest.NewRecorder()
 	chunkDeniedReq := httptest.NewRequest(http.MethodGet, "/sync/pull/chunk-alpha?project=beta", nil)
@@ -226,6 +236,16 @@ func TestManagedPrincipalProjectGrantsAuthorizeChunkPullAndPush(t *testing.T) {
 	srv.Handler().ServeHTTP(chunkDenied, chunkDeniedReq)
 	if chunkDenied.Code != http.StatusForbidden {
 		t.Fatalf("expected ungranted chunk pull 403, got %d body=%q", chunkDenied.Code, chunkDenied.Body.String())
+	}
+	chunkDeniedPayload := decodeActionableError(t, chunkDenied)
+	if chunkDeniedPayload.ErrorClass != "policy" {
+		t.Fatalf("expected policy class, got %q", chunkDeniedPayload.ErrorClass)
+	}
+	if chunkDeniedPayload.ErrorCode != "policy_forbidden" {
+		t.Fatalf("expected policy_forbidden error code, got %q", chunkDeniedPayload.ErrorCode)
+	}
+	if chunkDeniedPayload.Error != `forbidden: project "beta" is not allowed` {
+		t.Fatalf("expected denied project in error message, got %q", chunkDeniedPayload.Error)
 	}
 
 	pushGranted := httptest.NewRecorder()

@@ -772,6 +772,9 @@ func TestHandlerProjectScopeForbiddenReturnsPolicyClassPayload(t *testing.T) {
 	if payload.ErrorCode != "policy_forbidden" {
 		t.Fatalf("expected policy_forbidden error code, got %q", payload.ErrorCode)
 	}
+	if payload.Error != `forbidden: project "proj-a" is not allowed` {
+		t.Fatalf("expected denied project in error message, got %q", payload.Error)
+	}
 }
 
 func TestHandlerPushRejectsOversizedPayload(t *testing.T) {
@@ -807,8 +810,15 @@ func TestHandlerEnforcesProjectAllowlistWithoutBearerAuth(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("expected 403 with auth disabled but allowlist enforced, got %d body=%q", rec.Code, rec.Body.String())
 	}
-	if strings.Contains(rec.Body.String(), "proj-a") || strings.Contains(rec.Body.String(), "proj-b") {
-		t.Fatalf("forbidden response must not leak allowlist details, got body=%q", rec.Body.String())
+	payload := decodeActionableError(t, rec)
+	if payload.ErrorClass != "policy" || payload.ErrorCode != "policy_forbidden" {
+		t.Fatalf("expected policy_forbidden response, got class=%q code=%q", payload.ErrorClass, payload.ErrorCode)
+	}
+	if payload.Error != `forbidden: project "proj-a" is not allowed` {
+		t.Fatalf("expected denied project in error message, got %q", payload.Error)
+	}
+	if strings.Contains(rec.Body.String(), "proj-b") || strings.Contains(rec.Body.String(), "allowed:") || strings.Contains(rec.Body.String(), "for this token") {
+		t.Fatalf("forbidden response must not leak allowlist details or authorization internals, got body=%q", rec.Body.String())
 	}
 }
 
