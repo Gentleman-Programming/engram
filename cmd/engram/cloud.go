@@ -209,11 +209,11 @@ var runUpgradeBootstrap = func(s *store.Store, project string, cc *cloudconfig.C
 }
 
 var runUpgradeRemirror = func(s *store.Store, project string, cc *cloudconfig.Config) (*engramsync.SyncResult, error) {
-	if err := s.RemirrorProject(project); err != nil {
-		return nil, err
-	}
 	transport, err := remote.NewRemoteTransport(cc.ServerURL, cc.Token, project)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.RemirrorProject(project); err != nil {
 		return nil, err
 	}
 	return engramsync.NewCloudWithTransport(s, transport, project).Export("engram-cloud-remirror", project)
@@ -310,7 +310,8 @@ func cmdCloudUpgrade(cfg store.Config) {
 	command := strings.TrimSpace(strings.ToLower(os.Args[3]))
 	if command == "--help" || command == "-h" || command == "help" {
 		fmt.Println("engram cloud upgrade")
-		fmt.Println("workflow: doctor -> repair -> bootstrap -> remirror -> status/rollback")
+		fmt.Println("workflow: doctor -> repair -> bootstrap -> status/rollback")
+		fmt.Println("recovery: use remirror only to rebuild cloud state from authoritative local data")
 		fmt.Println("cloud is opt-in replication/shared access; local SQLite remains source of truth")
 		fmt.Println("usage: engram cloud upgrade <doctor|repair|bootstrap|remirror|status|rollback> --project <name>")
 		return

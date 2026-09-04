@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -207,6 +208,48 @@ func TestRunUpgradeRemirror(t *testing.T) {
 				t.Fatalf("runUpgradeRemirror result = %+v, want exported chunk and mutation counts", result)
 			}
 		})
+	}
+}
+
+func TestRunUpgradeRemirrorRejectsAuthenticatedHTTPBeforeLocalReplay(t *testing.T) {
+	cfg := testConfig(t)
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close() //nolint:errcheck
+	seedRemirrorProject(t, s)
+
+	beforeMutations, err := s.ListPendingSyncMutations(store.DefaultSyncTargetKey, 100)
+	if err != nil {
+		t.Fatalf("list pending mutations before remirror: %v", err)
+	}
+	beforeState, err := s.GetSyncState(store.DefaultSyncTargetKey)
+	if err != nil {
+		t.Fatalf("get sync state before remirror: %v", err)
+	}
+
+	_, err = runUpgradeRemirror(s, "project-a", &cloudconfig.Config{
+		ServerURL: "http://cloud.example.test",
+		Token:     "bearer-token",
+	})
+	if err == nil || !strings.Contains(err.Error(), "bearer token requires an HTTPS remote URL") {
+		t.Fatalf("runUpgradeRemirror error = %v, want bearer HTTPS validation error", err)
+	}
+
+	afterMutations, err := s.ListPendingSyncMutations(store.DefaultSyncTargetKey, 100)
+	if err != nil {
+		t.Fatalf("list pending mutations after remirror: %v", err)
+	}
+	afterState, err := s.GetSyncState(store.DefaultSyncTargetKey)
+	if err != nil {
+		t.Fatalf("get sync state after remirror: %v", err)
+	}
+	if !reflect.DeepEqual(afterMutations, beforeMutations) {
+		t.Fatalf("invalid transport queued remirror mutations: before=%+v after=%+v", beforeMutations, afterMutations)
+	}
+	if !reflect.DeepEqual(afterState, beforeState) {
+		t.Fatalf("invalid transport changed sync state: before=%+v after=%+v", beforeState, afterState)
 	}
 }
 

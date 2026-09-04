@@ -84,13 +84,9 @@ func newHTTPStatusError(operation string, statusCode int, body []byte) error {
 }
 
 func NewRemoteTransport(baseURL, token, project string) (*RemoteTransport, error) {
-	normalized, err := validateBaseURL(baseURL)
+	normalized, token, err := validateBearerBaseURL(baseURL, token)
 	if err != nil {
 		return nil, err
-	}
-	token = strings.TrimSpace(token)
-	if token != "" && !strings.HasPrefix(normalized, "https://") {
-		return nil, fmt.Errorf("cloud: bearer token requires an HTTPS remote URL")
 	}
 	project, _ = store.NormalizeProject(project)
 	project = strings.TrimSpace(project)
@@ -104,6 +100,18 @@ func NewRemoteTransport(baseURL, token, project string) (*RemoteTransport, error
 		httpClient:      newRemoteHTTPClient(ordinaryOperationTimeout, token),
 		writeHTTPClient: newRemoteHTTPClient(writeChunkTimeout, token),
 	}, nil
+}
+
+func validateBearerBaseURL(baseURL, token string) (string, string, error) {
+	normalized, err := validateBaseURL(baseURL)
+	if err != nil {
+		return "", "", err
+	}
+	token = strings.TrimSpace(token)
+	if token != "" && !strings.HasPrefix(normalized, "https://") {
+		return "", "", fmt.Errorf("cloud: bearer token requires an HTTPS remote URL")
+	}
+	return normalized, token, nil
 }
 
 func newRemoteHTTPClient(timeout time.Duration, token string) *http.Client {
@@ -323,19 +331,17 @@ type MutationTransport struct {
 	httpClient *http.Client
 }
 
-// NewMutationTransport creates a MutationTransport. baseURL must be a valid http/https URL.
-// BW6: Reuses validateBaseURL to reject empty/malformed URLs.
+// NewMutationTransport creates a MutationTransport. baseURL must be a valid HTTP(S) URL;
+// bearer-token transports require HTTPS.
 func NewMutationTransport(baseURL, token string) (*MutationTransport, error) {
-	normalized, err := validateBaseURL(baseURL)
+	normalized, token, err := validateBearerBaseURL(baseURL, token)
 	if err != nil {
 		return nil, err
 	}
 	return &MutationTransport{
-		baseURL: normalized,
-		token:   strings.TrimSpace(token),
-		httpClient: &http.Client{
-			Timeout: ordinaryOperationTimeout,
-		},
+		baseURL:    normalized,
+		token:      token,
+		httpClient: newRemoteHTTPClient(ordinaryOperationTimeout, token),
 	}, nil
 }
 
