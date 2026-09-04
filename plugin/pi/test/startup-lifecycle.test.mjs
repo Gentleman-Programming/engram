@@ -72,7 +72,7 @@ setTimeout(() => {
   await writeFile(binPath, script, "utf8");
   await chmod(binPath, 0o755);
   return process.platform === "win32"
-    ? { engramBin: process.execPath, nodeOptions: `--require=${binPath}` }
+    ? { engramBin: process.execPath, nodeOptions: `--require "${binPath.replaceAll("\\", "\\\\")}"` }
     : { engramBin: binPath };
 }
 
@@ -104,7 +104,7 @@ async function loadPlugin({ engramBin, port, cwd, sandbox }) {
 }
 
 async function withFixture(options, run) {
-  const dir = await mkdtemp(join(tmpdir(), "engram-pi-startup-"));
+  const dir = await mkdtemp(join(tmpdir(), "engram-pi-startup fixture-"));
   const originalBin = process.env.ENGRAM_BIN;
   const originalPort = process.env.ENGRAM_PORT;
   const originalUrl = process.env.ENGRAM_URL;
