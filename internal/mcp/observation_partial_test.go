@@ -10,7 +10,7 @@ import (
 
 	mcppkg "github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/Gentleman-Programming/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
 )
 
 func seedObservation(t *testing.T, s *store.Store, title, content string) int64 {
