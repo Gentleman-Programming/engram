@@ -316,11 +316,20 @@ user_prompt_submit_without_jq() {
   encoded_project="$JSON_VALUE"
   last_save_json=$(curl -sf "${ENGRAM_URL}/observations?project=${encoded_project}&limit=1&sort=created_at:desc" --max-time "$ENGRAM_HOOK_MAX_TIME" 2>/dev/null)
   json_string_value_without_jq "created_at" "$last_save_json" && last_save_at="$JSON_VALUE" || last_save_at=""
-  [ -n "$last_save_at" ] || { printf '%s\n' '{}'; return 0; }
-  last_epoch=$(parse_epoch "$last_save_at")
-  [ -n "$last_epoch" ] || { printf '%s\n' '{}'; return 0; }
-  now_epoch=$(date "+%s")
-  elapsed=$(( now_epoch - last_epoch ))
+  if [ -n "$last_save_at" ]; then
+    last_epoch=$(parse_epoch "$last_save_at")
+    [ -n "$last_epoch" ] || { printf '%s\n' '{}'; return 0; }
+    now_epoch=$(date "+%s")
+    elapsed=$(( now_epoch - last_epoch ))
+  else
+    if [ -n "$session_age_secs" ]; then
+      now_epoch=$(date "+%s")
+      elapsed="$session_age_secs"
+    else
+      printf '%s\n' '{}'
+      return 0
+    fi
+  fi
 
   if [ "$elapsed" -gt 900 ]; then
     nudge_cooldown="${ENGRAM_NUDGE_COOLDOWN_SECS:-900}"
@@ -404,8 +413,9 @@ parse_epoch() {
     date -j -u -f "%Y-%m-%dT%H:%M:%S" "$Z_TS" "+%s" 2>/dev/null && return 0
   fi
 
-  date -j -f "%Y-%m-%dT%H:%M:%S" "$TS" "+%s" 2>/dev/null \
-    || date -j -f "%Y-%m-%d %H:%M:%S" "$TS" "+%s" 2>/dev/null \
+  date -j -u -f "%Y-%m-%dT%H:%M:%S" "$TS" "+%s" 2>/dev/null \
+    || date -j -u -f "%Y-%m-%d %H:%M:%S" "$TS" "+%s" 2>/dev/null \
+    || date -u -d "$TS" "+%s" 2>/dev/null \
     || date -d "$TS" "+%s" 2>/dev/null
 }
 
@@ -522,21 +532,24 @@ if [ -z "$LAST_SAVE_JSON" ]; then
 fi
 
 LAST_SAVE_AT=$(echo "$LAST_SAVE_JSON" | jq -r '.[0].created_at // empty' 2>/dev/null)
-
-if [ -z "$LAST_SAVE_AT" ]; then
-  # No observations yet — no nudge (session might just be starting)
-  echo "$OUTPUT"
-  exit 0
-fi
-
-# Parse last save timestamp and compare to now
-LAST_EPOCH=$(parse_epoch "$LAST_SAVE_AT")
-if [ -z "$LAST_EPOCH" ]; then
-  echo "$OUTPUT"
-  exit 0
-fi
 NOW_EPOCH=$(date "+%s")
-ELAPSED=$(( NOW_EPOCH - LAST_EPOCH ))
+
+if [ -n "$LAST_SAVE_AT" ]; then
+  LAST_EPOCH=$(parse_epoch "$LAST_SAVE_AT")
+  if [ -z "$LAST_EPOCH" ]; then
+    echo "$OUTPUT"
+    exit 0
+  fi
+  ELAPSED=$(( NOW_EPOCH - LAST_EPOCH ))
+else
+  # No observations yet — use session age as elapsed time so active sessions are nudged
+  if [ -n "$SESSION_AGE_SECS" ]; then
+    ELAPSED="$SESSION_AGE_SECS"
+  else
+    echo "$OUTPUT"
+    exit 0
+  fi
+fi
 
 # Nudge if last save was > 15 minutes ago (900 seconds), but debounce so we do
 # not repeat the reminder on every message while the agent has nothing to save.

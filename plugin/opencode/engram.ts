@@ -688,11 +688,12 @@ export const Engram: Plugin = async (ctx) => {
           return
         }
 
-        // No observations yet — nothing to nudge about
-        if (lastObsEpoch === 0) return
+        // No observations yet — use session start epoch as fallback
+        const effectiveLastEpoch = lastObsEpoch > 0 ? lastObsEpoch : sessionStartEpoch
+        if (effectiveLastEpoch === 0) return
 
         // Only nudge if last save was more than 15 minutes ago
-        if (nowSecs - lastObsEpoch < 900) return
+        if (nowSecs - effectiveLastEpoch < 900) return
 
         // Append the nudge to the last system message
         const nudge =

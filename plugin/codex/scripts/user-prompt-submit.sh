@@ -81,8 +81,9 @@ parse_epoch() {
     date -j -u -f "%Y-%m-%dT%H:%M:%S" "$Z_TS" "+%s" 2>/dev/null && return 0
   fi
 
-  date -j -f "%Y-%m-%dT%H:%M:%S" "$TS" "+%s" 2>/dev/null \
-    || date -j -f "%Y-%m-%d %H:%M:%S" "$TS" "+%s" 2>/dev/null \
+  date -j -u -f "%Y-%m-%dT%H:%M:%S" "$TS" "+%s" 2>/dev/null \
+    || date -j -u -f "%Y-%m-%d %H:%M:%S" "$TS" "+%s" 2>/dev/null \
+    || date -u -d "$TS" "+%s" 2>/dev/null \
     || date -d "$TS" "+%s" 2>/dev/null
 }
 
@@ -167,21 +168,24 @@ if [ -z "$LAST_SAVE_JSON" ]; then
 fi
 
 LAST_SAVE_AT=$(echo "$LAST_SAVE_JSON" | jq -r '.[0].created_at // empty' 2>/dev/null)
-
-if [ -z "$LAST_SAVE_AT" ]; then
-  # No observations yet — no nudge (session might just be starting)
-  echo "$OUTPUT"
-  exit 0
-fi
-
-# Parse last save timestamp and compare to now
-LAST_EPOCH=$(parse_epoch "$LAST_SAVE_AT")
-if [ -z "$LAST_EPOCH" ]; then
-  echo "$OUTPUT"
-  exit 0
-fi
 NOW_EPOCH=$(date "+%s")
-ELAPSED=$(( NOW_EPOCH - LAST_EPOCH ))
+
+if [ -n "$LAST_SAVE_AT" ]; then
+  LAST_EPOCH=$(parse_epoch "$LAST_SAVE_AT")
+  if [ -z "$LAST_EPOCH" ]; then
+    echo "$OUTPUT"
+    exit 0
+  fi
+  ELAPSED=$(( NOW_EPOCH - LAST_EPOCH ))
+else
+  # No observations yet — use session age as elapsed time so active sessions are nudged
+  if [ -n "$SESSION_AGE_SECS" ]; then
+    ELAPSED="$SESSION_AGE_SECS"
+  else
+    echo "$OUTPUT"
+    exit 0
+  fi
+fi
 
 # Nudge if last save was > 15 minutes ago (900 seconds), but debounce so we do
 # not repeat the reminder on every message while the agent has nothing to save.

@@ -316,6 +316,78 @@ func TestNudgeBehavior(t *testing.T) {
 	}
 }
 
+func TestNudgeBehavior_NaiveSQLiteTimestampInNonUTCHost(t *testing.T) {
+	requireHookBinaries(t)
+	sessionID := newSessionID(t)
+	markSessionBootstrapped(t, sessionID)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/project/current" {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"project":"engram","project_source":"config"}`)
+			return
+		}
+		if !strings.HasPrefix(r.URL.Path, "/observations") {
+			http.NotFound(w, r)
+			return
+		}
+		// Naive SQLite timestamp without timezone marker
+		createdAt := time.Now().Add(-20 * time.Minute).UTC().Format("2006-01-02 15:04:05")
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `[{"created_at":%q}]`, createdAt)
+	}))
+	defer srv.Close()
+
+	stdin := fmt.Sprintf(`{"session_id":%q,"cwd":%q}`, sessionID, t.TempDir())
+	env := map[string]string{
+		"ENGRAM_PORT": serverPort(t, srv),
+		"TZ":          "America/Bogota", // UTC-5
+	}
+
+	payload := decodeHookPayload(t, runHook(t, "user-prompt-submit.sh", stdin, env))
+	if !strings.Contains(payload.HookSpecificOutput.AdditionalContext, "MEMORY REMINDER") {
+		t.Fatalf("expected nudge in non-UTC timezone, got: %q", payload.HookSpecificOutput.AdditionalContext)
+	}
+}
+
+func TestNudgeBehavior_ZeroObservationsWhenSessionAgePastThreshold(t *testing.T) {
+	requireHookBinaries(t)
+	sessionID := newSessionID(t)
+	markSessionBootstrapped(t, sessionID)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/project/current" {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"project":"engram","project_source":"config"}`)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/sessions/") {
+			startedAt := time.Now().Add(-20 * time.Minute).UTC().Format("2006-01-02 15:04:05")
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"started_at":%q}`, startedAt)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/observations") {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `[]`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	stdin := fmt.Sprintf(`{"session_id":%q,"cwd":%q}`, sessionID, t.TempDir())
+	env := map[string]string{
+		"ENGRAM_PORT": serverPort(t, srv),
+		"TZ":          "America/Bogota",
+	}
+
+	payload := decodeHookPayload(t, runHook(t, "user-prompt-submit.sh", stdin, env))
+	if !strings.Contains(payload.HookSpecificOutput.AdditionalContext, "MEMORY REMINDER") {
+		t.Fatalf("expected nudge for session with 0 observations past threshold, got: %q", payload.HookSpecificOutput.AdditionalContext)
+	}
+}
+
 // passiveCapture is the body subagent-stop.sh POSTs to /observations/passive.
 type passiveCapture struct {
 	SessionID string `json:"session_id"`
