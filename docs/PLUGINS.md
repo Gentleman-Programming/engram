@@ -157,7 +157,7 @@ PowerShell local override/testing example for locked-down Windows endpoints:
           {
             "type": "command",
             "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"C:\\path\\to\\engram\\plugin\\claude-code\\scripts\\user-prompt-submit.ps1\"",
-            "timeout": 2
+            "timeout": 10
           }
         ]
       }
