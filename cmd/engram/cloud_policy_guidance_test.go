@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/constants"
 	"github.com/Gentleman-Programming/engram/v2/internal/cloud/remote"
 	"github.com/Gentleman-Programming/engram/v2/internal/cloud/syncguidance"
 	"github.com/Gentleman-Programming/engram/v2/internal/store"
@@ -82,22 +83,32 @@ func TestCloudStatusDiagnosticUsesProjectScopedPolicyGuidance(t *testing.T) {
 }
 
 func TestCloudStatusDiagnosticSuppressesLegacyGlobalState(t *testing.T) {
-	cfg := testConfig(t)
-	s, err := store.New(cfg)
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	const staleReasonCode = "stale_legacy_reason"
-	const staleReasonMessage = "stale legacy cloud diagnostic"
-	if err := s.MarkSyncFailureWithReason("cloud", staleReasonCode, staleReasonMessage, time.Now().Add(time.Minute)); err != nil {
-		t.Fatalf("mark legacy failure: %v", err)
-	}
-	if err := s.Close(); err != nil {
-		t.Fatalf("close store: %v", err)
-	}
+	for _, tc := range []struct {
+		name    string
+		reason  string
+		message string
+	}{
+		{name: "policy forbidden", reason: constants.ReasonPolicyForbidden, message: "stale policy diagnostic"},
+		{name: "transport failure", reason: constants.ReasonTransportFailed, message: "stale transport diagnostic"},
+		{name: "uncoded", reason: "", message: "stale uncoded diagnostic"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig(t)
+			s, err := store.New(cfg)
+			if err != nil {
+				t.Fatalf("open store: %v", err)
+			}
+			if err := s.MarkSyncBlocked("cloud", tc.reason, tc.message); err != nil {
+				t.Fatalf("mark legacy state: %v", err)
+			}
+			if err := s.Close(); err != nil {
+				t.Fatalf("close store: %v", err)
+			}
 
-	stdout, _ := captureOutput(t, func() { printCloudStatusSyncDiagnostic(cfg) })
-	if strings.Contains(stdout, staleReasonCode) || strings.Contains(stdout, staleReasonMessage) {
-		t.Fatalf("legacy diagnostic leaked into cloud status: %q", stdout)
+			stdout, _ := captureOutput(t, func() { printCloudStatusSyncDiagnostic(cfg) })
+			if strings.Contains(stdout, tc.message) || (tc.reason != "" && strings.Contains(stdout, tc.reason)) {
+				t.Fatalf("legacy diagnostic leaked into cloud status: %q", stdout)
+			}
+		})
 	}
 }

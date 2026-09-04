@@ -668,10 +668,27 @@ func printCloudStatusSyncDiagnostic(cfg store.Config) {
 	}
 	defer s.Close()
 	summary, err := s.CloudSyncSummary()
-	if err == nil && strings.TrimSpace(summary.LastError) != "" {
+	if err != nil {
+		return
+	}
+	if strings.TrimSpace(summary.LastError) != "" {
 		fmt.Println("Sync diagnostic: project-scoped cloud state")
 		fmt.Printf("reason_message: %s\n", summary.LastError)
 		return
+	}
+	state, err := s.GetSyncState(constants.TargetKeyCloud)
+	if err != nil || state == nil {
+		return
+	}
+	code := strings.TrimSpace(derefString(state.ReasonCode))
+	if code != constants.ReasonNonEnrolledPendingMutations {
+		return
+	}
+	message := strings.TrimSpace(derefString(state.ReasonMessage))
+	fmt.Printf("Sync diagnostic: %s\n", state.Lifecycle)
+	fmt.Printf("reason_code: %s\n", code)
+	if message != "" {
+		fmt.Printf("reason_message: %s\n", message)
 	}
 }
 
