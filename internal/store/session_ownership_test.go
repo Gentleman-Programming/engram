@@ -147,3 +147,97 @@ func TestPulledLegacySessionPayloadPreservesSharedOwnershipMode(t *testing.T) {
 		t.Fatalf("session after legacy payload = %#v, %v; want shared", session, err)
 	}
 }
+
+func TestPulledSessionPayloadOwnershipModeValidation(t *testing.T) {
+	t.Run("invalid mode leaves no row or sync state", func(t *testing.T) {
+		s := newTestStore(t)
+		err := s.ApplyPulledMutation(LocalChunkTargetKey, SyncMutation{
+			Seq:       1,
+			Entity:    SyncEntitySession,
+			EntityKey: "invalid-pulled-session",
+			Op:        SyncOpUpsert,
+			Payload:   `{"id":"invalid-pulled-session","project":"project-a","ownership_mode":"exclusive","directory":"/tmp/a"}`,
+		})
+		if !errors.Is(err, ErrInvalidSessionOwnershipMode) {
+			t.Fatalf("ApplyPulledMutation invalid ownership mode error = %v, want ErrInvalidSessionOwnershipMode", err)
+		}
+
+		var sessionCount, stateCount int
+		if err := s.DB().QueryRow(`SELECT count(*) FROM sessions WHERE id = ?`, "invalid-pulled-session").Scan(&sessionCount); err != nil {
+			t.Fatalf("count invalid session rows: %v", err)
+		}
+		if err := s.DB().QueryRow(`SELECT count(*) FROM sync_state WHERE target_key = ?`, LocalChunkTargetKey).Scan(&stateCount); err != nil {
+			t.Fatalf("count local sync state rows: %v", err)
+		}
+		if sessionCount != 0 || stateCount != 0 {
+			t.Fatalf("invalid payload left sessionCount=%d stateCount=%d, want both 0", sessionCount, stateCount)
+		}
+	})
+
+	t.Run("omitted mode creates shared session", func(t *testing.T) {
+		s := newTestStore(t)
+		if err := s.ApplyPulledMutation(LocalChunkTargetKey, SyncMutation{
+			Seq:       1,
+			Entity:    SyncEntitySession,
+			EntityKey: "legacy-shared-session",
+			Op:        SyncOpUpsert,
+			Payload:   `{"id":"legacy-shared-session","project":"project-a","directory":"/tmp/a"}`,
+		}); err != nil {
+			t.Fatalf("apply legacy session payload: %v", err)
+		}
+		session, err := s.GetSession("legacy-shared-session")
+		if err != nil || session.OwnershipMode != SessionOwnershipShared {
+			t.Fatalf("legacy session = %#v, %v; want shared", session, err)
+		}
+	})
+}
+
+func TestImportedSessionOwnershipModeValidation(t *testing.T) {
+	t.Run("invalid mode leaves every import entity unchanged", func(t *testing.T) {
+		s := newTestStore(t)
+		_, err := s.Import(&ExportData{
+			Sessions: []Session{{ID: "invalid-import-session", Project: "project-a", OwnershipMode: "exclusive", Directory: "/tmp/a"}},
+			Observations: []Observation{{
+				SyncID:    "invalid-import-observation",
+				SessionID: "invalid-import-session",
+				Type:      "manual",
+				Title:     "blocked",
+				Content:   "blocked",
+				Scope:     "project",
+			}},
+			Prompts: []Prompt{{SyncID: "invalid-import-prompt", SessionID: "invalid-import-session", Content: "blocked"}},
+		})
+		if !errors.Is(err, ErrInvalidSessionOwnershipMode) {
+			t.Fatalf("Import invalid ownership mode error = %v, want ErrInvalidSessionOwnershipMode", err)
+		}
+
+		for _, tc := range []struct {
+			table string
+			key   string
+			value string
+		}{
+			{table: "sessions", key: "id", value: "invalid-import-session"},
+			{table: "observations", key: "sync_id", value: "invalid-import-observation"},
+			{table: "user_prompts", key: "sync_id", value: "invalid-import-prompt"},
+		} {
+			var count int
+			if err := s.DB().QueryRow(`SELECT count(*) FROM `+tc.table+` WHERE `+tc.key+` = ?`, tc.value).Scan(&count); err != nil {
+				t.Fatalf("count %s rows: %v", tc.table, err)
+			}
+			if count != 0 {
+				t.Fatalf("invalid import created %d %s row(s), want 0", count, tc.table)
+			}
+		}
+	})
+
+	t.Run("omitted mode imports as shared", func(t *testing.T) {
+		s := newTestStore(t)
+		if _, err := s.Import(&ExportData{Sessions: []Session{{ID: "legacy-import-session", Project: "project-a", Directory: "/tmp/a"}}}); err != nil {
+			t.Fatalf("import legacy session: %v", err)
+		}
+		session, err := s.GetSession("legacy-import-session")
+		if err != nil || session.OwnershipMode != SessionOwnershipShared {
+			t.Fatalf("legacy imported session = %#v, %v; want shared", session, err)
+		}
+	})
+}

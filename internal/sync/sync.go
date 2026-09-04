@@ -1332,47 +1332,66 @@ func (sy *Syncer) ensureChunkOwnershipCompatibility(manifestVersion int, chunk C
 	}
 
 	projects := make(map[string]struct{})
-	for _, mutation := range effectiveMutationsForImport(chunk) {
-		if mutation.Entity != store.SyncEntitySession {
-			continue
-		}
-		var payload struct {
-			Project       string `json:"project"`
-			OwnershipMode string `json:"ownership_mode"`
-			ID            string `json:"id"`
-			Deleted       bool   `json:"deleted"`
-			HardDelete    bool   `json:"hard_delete"`
-		}
-		isDelete := mutation.Op == store.SyncOpDelete
-		if !isDelete || strings.TrimSpace(mutation.Payload) != "" {
-			if err := decodeSyncPayloadForProject([]byte(mutation.Payload), &payload); err != nil {
-				return fmt.Errorf("decode session ownership payload: %w", err)
-			}
-		}
-		if isDelete || payload.Deleted || payload.HardDelete {
-			id := strings.TrimSpace(payload.ID)
-			if id == "" {
-				id = strings.TrimSpace(mutation.EntityKey)
-			}
-			session, err := sy.store.GetSession(id)
-			if errors.Is(err, sql.ErrNoRows) {
-				continue
-			}
-			if err != nil {
-				return fmt.Errorf("inspect session ownership: %w", err)
-			}
-			if session.OwnershipMode == store.SessionOwnershipProjectOwned {
-				return fmt.Errorf("sync downgrade is unsupported when a legacy delete targets project-owned session %q", id)
-			}
-			continue
-		}
-		project, _ := store.NormalizeProject(payload.Project)
+	addProject := func(project string) {
+		project, _ = store.NormalizeProject(strings.TrimSpace(project))
 		project = strings.TrimSpace(project)
-		if payload.OwnershipMode == store.SessionOwnershipProjectOwned {
-			return fmt.Errorf("sync downgrade is unsupported when incoming project-owned sessions exist; peer manifest version %d does not support ownership modes", manifestVersion)
-		}
 		if project != "" {
 			projects[project] = struct{}{}
+		}
+	}
+	for _, mutation := range effectiveMutationsForImport(chunk) {
+		switch mutation.Entity {
+		case store.SyncEntitySession:
+			var payload struct {
+				Project       string `json:"project"`
+				OwnershipMode string `json:"ownership_mode"`
+				ID            string `json:"id"`
+				Deleted       bool   `json:"deleted"`
+				HardDelete    bool   `json:"hard_delete"`
+			}
+			isDelete := mutation.Op == store.SyncOpDelete
+			if !isDelete || strings.TrimSpace(mutation.Payload) != "" {
+				if err := decodeSyncPayloadForProject([]byte(mutation.Payload), &payload); err != nil {
+					return fmt.Errorf("decode session ownership payload: %w", err)
+				}
+			}
+			if isDelete || payload.Deleted || payload.HardDelete {
+				id := strings.TrimSpace(payload.ID)
+				if id == "" {
+					id = strings.TrimSpace(mutation.EntityKey)
+				}
+				session, err := sy.store.GetSession(id)
+				if errors.Is(err, sql.ErrNoRows) {
+					continue
+				}
+				if err != nil {
+					return fmt.Errorf("inspect session ownership: %w", err)
+				}
+				if session.OwnershipMode == store.SessionOwnershipProjectOwned {
+					return fmt.Errorf("sync downgrade is unsupported when a legacy delete targets project-owned session %q", id)
+				}
+				continue
+			}
+			if payload.OwnershipMode == store.SessionOwnershipProjectOwned {
+				return fmt.Errorf("sync downgrade is unsupported when incoming project-owned sessions exist; peer manifest version %d does not support ownership modes", manifestVersion)
+			}
+			addProject(payload.Project)
+
+		case store.SyncEntityObservation, store.SyncEntityPrompt:
+			if mutation.Op != store.SyncOpUpsert {
+				continue
+			}
+			var payload struct {
+				Project *string `json:"project"`
+			}
+			if err := decodeSyncPayloadForProject([]byte(mutation.Payload), &payload); err != nil {
+				return fmt.Errorf("decode %s ownership payload: %w", mutation.Entity, err)
+			}
+			project := mutation.Project
+			if strings.TrimSpace(project) == "" && payload.Project != nil {
+				project = *payload.Project
+			}
+			addProject(project)
 		}
 	}
 	for project := range projects {

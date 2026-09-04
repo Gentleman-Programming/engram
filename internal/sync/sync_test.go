@@ -2256,6 +2256,56 @@ func TestOwnershipManifestCompatibilityIsScopedToSynchronizedSessions(t *testing
 		}
 	})
 
+	for _, tc := range []struct {
+		name     string
+		mutation store.SyncMutation
+	}{
+		{
+			name: "observation project from mutation",
+			mutation: store.SyncMutation{
+				Entity:    store.SyncEntityObservation,
+				EntityKey: "blocked-observation",
+				Op:        store.SyncOpUpsert,
+				Project:   "project-a",
+				Payload:   `{"sync_id":"blocked-observation","session_id":"manual-save-project-a","type":"manual","title":"blocked","content":"blocked","scope":"project"}`,
+			},
+		},
+		{
+			name: "prompt project from payload",
+			mutation: store.SyncMutation{
+				Entity:    store.SyncEntityPrompt,
+				EntityKey: "blocked-prompt",
+				Op:        store.SyncOpUpsert,
+				Payload:   `{"sync_id":"blocked-prompt","session_id":"manual-save-project-a","content":"blocked","project":"project-a"}`,
+			},
+		},
+	} {
+		t.Run("preflight rejects "+tc.name+" before applying any chunk", func(t *testing.T) {
+			s := newTestStore(t)
+			if err := s.CreateSessionWithOwnershipMode("manual-save-project-a", "project-a", "/tmp/a", store.SessionOwnershipProjectOwned); err != nil {
+				t.Fatalf("create project-owned session: %v", err)
+			}
+			syncDir := filepath.Join(t.TempDir(), ".engram")
+			writeLocalChunkFile(t, syncDir, "safe", ChunkData{Sessions: []store.Session{{ID: "would-import", Project: "project-b", OwnershipMode: store.SessionOwnershipShared, Directory: "/tmp/b"}}})
+			writeLocalChunkFile(t, syncDir, "blocked", ChunkData{Mutations: []store.SyncMutation{tc.mutation}})
+			writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "safe", CreatedAt: "2020-01-01T00:00:00Z"}, {ID: "blocked", CreatedAt: "2020-01-01T00:00:01Z"}}})
+
+			if _, err := New(s, syncDir).Import(); err == nil || !strings.Contains(err.Error(), `project "project-a"`) {
+				t.Fatalf("legacy %s preflight import error = %v, want project rejection", tc.name, err)
+			}
+			if _, err := s.GetSession("would-import"); !errors.Is(err, sql.ErrNoRows) {
+				t.Fatalf("safe chunk session after rejected preflight error = %v, want missing", err)
+			}
+			var localCursorCount int
+			if err := s.DB().QueryRow(`SELECT count(*) FROM sync_state WHERE target_key = ?`, store.LocalChunkTargetKey).Scan(&localCursorCount); err != nil {
+				t.Fatalf("count local cursor rows: %v", err)
+			}
+			if localCursorCount != 0 {
+				t.Fatalf("rejected preflight created %d local cursor rows, want 0", localCursorCount)
+			}
+		})
+	}
+
 	for _, tc := range []struct{ name, id string }{{"shared", "shared-session"}, {"absent", "absent-session"}} {
 		t.Run("legacy delete remains compatible for "+tc.name+" session", func(t *testing.T) {
 			s := newTestStore(t)
