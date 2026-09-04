@@ -317,6 +317,10 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		mode = store.SessionOwnershipShared
 	}
 	if err := s.store.CreateSessionWithOwnershipMode(body.ID, body.Project, projectpkg.RuntimeWorktreeDirectory(body.Directory), mode); err != nil {
+		if errors.Is(err, store.ErrInvalidSessionOwnershipMode) {
+			jsonError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

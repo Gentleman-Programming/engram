@@ -81,6 +81,7 @@ Title restoration supports `sync_mutation_required_fields` only when a pending o
 Repair never deletes or deduplicates rows, never edits sync cursors, and never writes cloud state. `--plan` and `--dry-run` are non-mutating. `--apply` creates a SQLite backup under `<ENGRAM_DATA_DIR>/backups/` before a project reclassification transaction updates only:
 
 - `sessions.project`
+- `sessions.ownership_mode` (`project_owned` for a session named `manual-save-{target_project}`, otherwise `shared`)
 - `observations.project`
 - `user_prompts.project`
 
@@ -137,4 +138,4 @@ ENGRAM_DATA_DIR=/tmp/engram-repair-clone engram doctor repair --project sias-app
 ENGRAM_DATA_DIR=/tmp/engram-repair-clone engram doctor repair --project sias-app --check session_project_directory_mismatch --apply
 ```
 
-After a project reclassification apply, verify that only the three allowed project columns changed for the planned session IDs and that a backup exists. If the repair is wrong, stop Engram processes and restore the `backup_path` database file manually.
+After a project reclassification apply, verify each planned session's `project` and `ownership_mode` classification, the related observation and prompt projects, and that `backup_path` exists. If the repair is wrong, stop Engram processes and restore the `backup_path` database file manually.

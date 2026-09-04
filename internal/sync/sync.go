@@ -422,7 +422,7 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 	if err != nil {
 		return nil, fmt.Errorf("get synced chunks: %w", err)
 	}
-	projectOwned, err := sy.store.HasProjectOwnedSessions()
+	projectOwned, err := sy.store.HasProjectOwnedSessionsForProject(project)
 	if err != nil {
 		return nil, fmt.Errorf("inspect session ownership modes: %w", err)
 	}
@@ -454,7 +454,7 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 	if !sy.cloudMode && strings.TrimSpace(project) != "" {
 		data = filterExportDataToProjectScope(data)
 	}
-	if projectOwned {
+	if projectOwned && manifest.Version < ownershipModeManifestVersion {
 		manifest.Version = ownershipModeManifestVersion
 	}
 	if sy.cloudMode {
@@ -816,20 +816,12 @@ func (sy *Syncer) Import() (*ImportResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("get synced chunks: %w", err)
 	}
-	projectOwned, err := sy.store.HasProjectOwnedSessions()
-	if err != nil {
-		return nil, fmt.Errorf("inspect session ownership modes: %w", err)
-	}
-	if projectOwned && manifest.Version < ownershipModeManifestVersion {
-		return nil, fmt.Errorf("sync downgrade is unsupported after project-owned sessions exist; peer manifest version %d does not support ownership modes", manifest.Version)
-	}
-
 	entries := manifest.Chunks
 	var result *ImportResult
 	if sy.cloudMode {
-		result, err = sy.importEntriesDependencySafe(entries, knownChunks, importModeCloud)
+		result, err = sy.importEntriesDependencySafe(entries, knownChunks, importModeCloud, manifest.Version)
 	} else {
-		result, err = sy.importEntriesDependencySafe(entries, knownChunks, importModeLocal)
+		result, err = sy.importEntriesDependencySafe(entries, knownChunks, importModeLocal, manifest.Version)
 	}
 	if err != nil {
 		return nil, err
@@ -862,7 +854,7 @@ const (
 	recoveredMissingSessionStartedAt            = "1970-01-01 00:00:00"
 )
 
-func (sy *Syncer) importEntriesDependencySafe(entries []ChunkEntry, knownChunks map[string]bool, mode importMode) (*ImportResult, error) {
+func (sy *Syncer) importEntriesDependencySafe(entries []ChunkEntry, knownChunks map[string]bool, mode importMode, manifestVersion int) (*ImportResult, error) {
 	result := &ImportResult{}
 	pendingEntries := make([]ChunkEntry, 0, len(entries))
 	for _, entry := range entries {
@@ -908,6 +900,9 @@ func (sy *Syncer) importEntriesDependencySafe(entries []ChunkEntry, knownChunks 
 			var chunk ChunkData
 			if err := json.Unmarshal(chunkJSON, &chunk); err != nil {
 				return nil, fmt.Errorf("parse chunk %s: %w", entry.ID, err)
+			}
+			if err := sy.ensureChunkOwnershipCompatibility(manifestVersion, chunk); err != nil {
+				return nil, err
 			}
 
 			if err := sy.importMutationChunk(entry.ID, chunk); err != nil {
@@ -1226,12 +1221,13 @@ func synthesizeMutationsFromChunk(chunk ChunkData) []store.SyncMutation {
 	mutations := make([]store.SyncMutation, 0, len(chunk.Sessions)+len(chunk.Observations)+len(chunk.Prompts))
 	for _, session := range chunk.Sessions {
 		payload, err := json.Marshal(map[string]any{
-			"id":         session.ID,
-			"project":    session.Project,
-			"directory":  session.Directory,
-			"started_at": session.StartedAt,
-			"ended_at":   session.EndedAt,
-			"summary":    session.Summary,
+			"id":             session.ID,
+			"project":        session.Project,
+			"ownership_mode": session.OwnershipMode,
+			"directory":      session.Directory,
+			"started_at":     session.StartedAt,
+			"ended_at":       session.EndedAt,
+			"summary":        session.Summary,
 		})
 		if err != nil {
 			continue
@@ -1296,6 +1292,64 @@ func synthesizeMutationsFromChunk(chunk ChunkData) []store.SyncMutation {
 		})
 	}
 	return mutations
+}
+
+func (sy *Syncer) ensureChunkOwnershipCompatibility(manifestVersion int, chunk ChunkData) error {
+	if manifestVersion >= ownershipModeManifestVersion {
+		return nil
+	}
+
+	projects := make(map[string]struct{})
+	for _, mutation := range effectiveMutationsForImport(chunk) {
+		if mutation.Entity != store.SyncEntitySession {
+			continue
+		}
+		var payload struct {
+			Project       string `json:"project"`
+			OwnershipMode string `json:"ownership_mode"`
+			ID            string `json:"id"`
+			Deleted       bool   `json:"deleted"`
+			HardDelete    bool   `json:"hard_delete"`
+		}
+		if err := json.Unmarshal([]byte(mutation.Payload), &payload); err != nil {
+			continue
+		}
+		if mutation.Op == store.SyncOpDelete || payload.Deleted || payload.HardDelete {
+			id := strings.TrimSpace(payload.ID)
+			if id == "" {
+				id = strings.TrimSpace(mutation.EntityKey)
+			}
+			session, err := sy.store.GetSession(id)
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			if err != nil {
+				return fmt.Errorf("inspect session ownership: %w", err)
+			}
+			if session.OwnershipMode == store.SessionOwnershipProjectOwned {
+				return fmt.Errorf("sync downgrade is unsupported when a legacy delete targets project-owned session %q", id)
+			}
+			continue
+		}
+		project, _ := store.NormalizeProject(payload.Project)
+		project = strings.TrimSpace(project)
+		if payload.OwnershipMode == store.SessionOwnershipProjectOwned {
+			return fmt.Errorf("sync downgrade is unsupported when incoming project-owned sessions exist; peer manifest version %d does not support ownership modes", manifestVersion)
+		}
+		if project != "" {
+			projects[project] = struct{}{}
+		}
+	}
+	for project := range projects {
+		projectOwned, err := sy.store.HasProjectOwnedSessionsForProject(project)
+		if err != nil {
+			return fmt.Errorf("inspect session ownership modes: %w", err)
+		}
+		if projectOwned {
+			return fmt.Errorf("sync downgrade is unsupported after project-owned sessions exist for project %q; peer manifest version %d does not support ownership modes", project, manifestVersion)
+		}
+	}
+	return nil
 }
 
 func estimateMutationImportResult(chunk ChunkData) *store.ImportResult {

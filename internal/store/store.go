@@ -60,6 +60,7 @@ var (
 	ErrPromptNotFound              = errors.New("prompt not found")
 	ErrProjectNotFound             = errors.New("project not found")
 	ErrProjectRequired             = errors.New("project identity is required")
+	ErrInvalidSessionOwnershipMode = errors.New("invalid session ownership mode")
 	ErrSessionOwnershipMismatch    = errors.New("session ownership does not match write project")
 	ErrProjectRescueInvalidRequest = errors.New("project rescue request is invalid")
 	// ErrProjectOwnershipAmbiguous is returned when an unowned session cannot
@@ -2482,7 +2483,7 @@ func (s *Store) CreateSessionWithOwnershipMode(id, project, directory, mode stri
 		return err
 	}
 	if !validSessionOwnershipMode(mode) {
-		return fmt.Errorf("invalid session ownership mode %q", mode)
+		return fmt.Errorf("%w %q", ErrInvalidSessionOwnershipMode, mode)
 	}
 	// Normalize project name before storing
 	project, _ = NormalizeProject(project)
@@ -4341,12 +4342,22 @@ func (s *Store) Export() (*ExportData, error) {
 	return s.exportWithProjectScope("")
 }
 
-// HasProjectOwnedSessions reports whether this database has entered the
-// ownership-mode sync generation. Returning true makes an older sync manifest
-// an unsafe downgrade rather than silently dropping the policy.
+// HasProjectOwnedSessions reports whether any session requires ownership-mode sync.
 func (s *Store) HasProjectOwnedSessions() (bool, error) {
 	var found int
 	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM sessions WHERE ownership_mode = ?)`, SessionOwnershipProjectOwned).Scan(&found)
+	return found != 0, err
+}
+
+// HasProjectOwnedSessionsForProject reports whether project requires ownership-mode sync.
+func (s *Store) HasProjectOwnedSessionsForProject(project string) (bool, error) {
+	project, _ = NormalizeProject(project)
+	project = strings.TrimSpace(project)
+	if project == "" {
+		return s.HasProjectOwnedSessions()
+	}
+	var found int
+	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM sessions WHERE project = ? AND ownership_mode = ?)`, project, SessionOwnershipProjectOwned).Scan(&found)
 	return found != 0, err
 }
 
@@ -8202,7 +8213,7 @@ func (s *Store) applySessionPayloadTx(tx *sql.Tx, payload syncSessionPayload) er
 		`INSERT INTO sessions (id, project, ownership_mode, directory, started_at, ended_at, summary)
 		 VALUES (?, ?, ?, ?, COALESCE(NULLIF(?, ''), datetime('now')), ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
-		   project = excluded.project,
+		   project = CASE WHEN sessions.ownership_mode = 'project_owned' THEN sessions.project ELSE excluded.project END,
 		   ownership_mode = CASE WHEN sessions.ownership_mode = 'project_owned' THEN sessions.ownership_mode ELSE excluded.ownership_mode END,
 		   directory = excluded.directory,
 		   started_at = COALESCE(NULLIF(excluded.started_at, ''), sessions.started_at),
