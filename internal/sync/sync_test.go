@@ -2222,6 +2222,40 @@ func TestOwnershipManifestCompatibilityIsScopedToSynchronizedSessions(t *testing
 		}
 	})
 
+	t.Run("preflight rejects later incompatible chunk before mutation", func(t *testing.T) {
+		s := newTestStore(t)
+		syncDir := filepath.Join(t.TempDir(), ".engram")
+		writeLocalChunkFile(t, syncDir, "shared", ChunkData{Sessions: []store.Session{{ID: "shared-session", Project: "project-a", OwnershipMode: store.SessionOwnershipShared}}})
+		writeLocalChunkFile(t, syncDir, "owned", ChunkData{Sessions: []store.Session{{ID: "manual-save-project-b", Project: "project-b", OwnershipMode: store.SessionOwnershipProjectOwned}}})
+		writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "shared", CreatedAt: "2020-01-01T00:00:00Z"}, {ID: "owned", CreatedAt: "2020-01-01T00:00:01Z"}}})
+
+		if _, err := New(s, syncDir).Import(); err == nil || !strings.Contains(err.Error(), "incoming project-owned sessions") {
+			t.Fatalf("legacy preflight import error = %v", err)
+		}
+		if _, err := s.GetSession("shared-session"); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("shared session after rejected preflight error = %v, want missing", err)
+		}
+	})
+
+	t.Run("preflight rejects JSON-string project-owned payload", func(t *testing.T) {
+		s := newTestStore(t)
+		syncDir := filepath.Join(t.TempDir(), ".engram")
+		writeLocalChunkFile(t, syncDir, "shared", ChunkData{Sessions: []store.Session{{ID: "shared-session", Project: "project-a", OwnershipMode: store.SessionOwnershipShared}}})
+		encoded, err := json.Marshal(`{"id":"manual-save-project-b","project":"project-b","ownership_mode":"project_owned"}`)
+		if err != nil {
+			t.Fatalf("encode session payload: %v", err)
+		}
+		writeLocalChunkFile(t, syncDir, "owned", ChunkData{Mutations: []store.SyncMutation{{Entity: store.SyncEntitySession, EntityKey: "manual-save-project-b", Op: store.SyncOpUpsert, Payload: string(encoded)}}})
+		writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "shared", CreatedAt: "2020-01-01T00:00:00Z"}, {ID: "owned", CreatedAt: "2020-01-01T00:00:01Z"}}})
+
+		if _, err := New(s, syncDir).Import(); err == nil || !strings.Contains(err.Error(), "incoming project-owned sessions") {
+			t.Fatalf("JSON-string legacy preflight import error = %v", err)
+		}
+		if _, err := s.GetSession("shared-session"); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("shared session after JSON-string preflight error = %v, want missing", err)
+		}
+	})
+
 	for _, tc := range []struct{ name, id string }{{"shared", "shared-session"}, {"absent", "absent-session"}} {
 		t.Run("legacy delete remains compatible for "+tc.name+" session", func(t *testing.T) {
 			s := newTestStore(t)

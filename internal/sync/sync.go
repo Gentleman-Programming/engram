@@ -869,6 +869,10 @@ func (sy *Syncer) importEntriesDependencySafe(entries []ChunkEntry, knownChunks 
 	if len(pendingEntries) == 0 {
 		return result, nil
 	}
+	legacyChunks, err := sy.preflightLegacyChunkOwnership(pendingEntries, mode, manifestVersion)
+	if err != nil {
+		return nil, err
+	}
 	availableSessionIDs := map[string]struct{}{}
 	if mode == importModeLocal {
 		var err error
@@ -884,25 +888,25 @@ func (sy *Syncer) importEntriesDependencySafe(entries []ChunkEntry, knownChunks 
 		nextPending := make([]ChunkEntry, 0, len(pendingEntries))
 
 		for _, entry := range pendingEntries {
-			// Read the chunk via transport
-			chunkJSON, err := sy.transport.ReadChunk(entry.ID)
-			if err != nil {
-				if errors.Is(err, ErrChunkNotFound) {
-					if mode == importModeCloud {
-						return nil, fmt.Errorf("read chunk %s: manifest references missing remote chunk", entry.ID)
+			chunk, loaded := legacyChunks[entry.ID]
+			if !loaded {
+				chunkJSON, err := sy.transport.ReadChunk(entry.ID)
+				if err != nil {
+					if errors.Is(err, ErrChunkNotFound) {
+						if mode == importModeCloud {
+							return nil, fmt.Errorf("read chunk %s: manifest references missing remote chunk", entry.ID)
+						}
+						result.ChunksSkipped++
+						continue
 					}
-					result.ChunksSkipped++
-					continue
+					return nil, fmt.Errorf("read chunk %s: %w", entry.ID, err)
 				}
-				return nil, fmt.Errorf("read chunk %s: %w", entry.ID, err)
-			}
-
-			var chunk ChunkData
-			if err := json.Unmarshal(chunkJSON, &chunk); err != nil {
-				return nil, fmt.Errorf("parse chunk %s: %w", entry.ID, err)
-			}
-			if err := sy.ensureChunkOwnershipCompatibility(manifestVersion, chunk); err != nil {
-				return nil, err
+				if err := json.Unmarshal(chunkJSON, &chunk); err != nil {
+					return nil, fmt.Errorf("parse chunk %s: %w", entry.ID, err)
+				}
+				if err := sy.ensureChunkOwnershipCompatibility(manifestVersion, chunk); err != nil {
+					return nil, err
+				}
 			}
 
 			if err := sy.importMutationChunk(entry.ID, chunk); err != nil {
@@ -949,6 +953,34 @@ func (sy *Syncer) importEntriesDependencySafe(entries []ChunkEntry, knownChunks 
 	}
 
 	return result, nil
+}
+
+func (sy *Syncer) preflightLegacyChunkOwnership(entries []ChunkEntry, mode importMode, manifestVersion int) (map[string]ChunkData, error) {
+	chunks := make(map[string]ChunkData)
+	if manifestVersion >= ownershipModeManifestVersion {
+		return chunks, nil
+	}
+	for _, entry := range entries {
+		payload, err := sy.transport.ReadChunk(entry.ID)
+		if err != nil {
+			if errors.Is(err, ErrChunkNotFound) && mode == importModeLocal {
+				continue
+			}
+			if errors.Is(err, ErrChunkNotFound) {
+				return nil, fmt.Errorf("read chunk %s: manifest references missing remote chunk", entry.ID)
+			}
+			return nil, fmt.Errorf("read chunk %s: %w", entry.ID, err)
+		}
+		var chunk ChunkData
+		if err := json.Unmarshal(payload, &chunk); err != nil {
+			return nil, fmt.Errorf("parse chunk %s: %w", entry.ID, err)
+		}
+		if err := sy.ensureChunkOwnershipCompatibility(manifestVersion, chunk); err != nil {
+			return nil, err
+		}
+		chunks[entry.ID] = chunk
+	}
+	return chunks, nil
 }
 
 func (sy *Syncer) importMutationChunk(chunkID string, chunk ChunkData) error {
@@ -1311,10 +1343,13 @@ func (sy *Syncer) ensureChunkOwnershipCompatibility(manifestVersion int, chunk C
 			Deleted       bool   `json:"deleted"`
 			HardDelete    bool   `json:"hard_delete"`
 		}
-		if err := json.Unmarshal([]byte(mutation.Payload), &payload); err != nil {
-			continue
+		isDelete := mutation.Op == store.SyncOpDelete
+		if !isDelete || strings.TrimSpace(mutation.Payload) != "" {
+			if err := decodeSyncPayloadForProject([]byte(mutation.Payload), &payload); err != nil {
+				return fmt.Errorf("decode session ownership payload: %w", err)
+			}
 		}
-		if mutation.Op == store.SyncOpDelete || payload.Deleted || payload.HardDelete {
+		if isDelete || payload.Deleted || payload.HardDelete {
 			id := strings.TrimSpace(payload.ID)
 			if id == "" {
 				id = strings.TrimSpace(mutation.EntityKey)

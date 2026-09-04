@@ -8214,7 +8214,9 @@ func (s *Store) applySessionPayloadTx(tx *sql.Tx, payload syncSessionPayload) er
 		 VALUES (?, ?, ?, ?, COALESCE(NULLIF(?, ''), datetime('now')), ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
 		   project = CASE WHEN sessions.ownership_mode = 'project_owned' THEN sessions.project ELSE excluded.project END,
-		   ownership_mode = CASE WHEN sessions.ownership_mode = 'project_owned' THEN sessions.ownership_mode ELSE excluded.ownership_mode END,
+		   ownership_mode = CASE
+		     WHEN sessions.ownership_mode = 'project_owned' OR excluded.ownership_mode IS NULL THEN sessions.ownership_mode
+		     ELSE excluded.ownership_mode END,
 		   directory = excluded.directory,
 		   started_at = COALESCE(NULLIF(excluded.started_at, ''), sessions.started_at),
 		   ended_at = COALESCE(excluded.ended_at, sessions.ended_at),

@@ -324,14 +324,17 @@ func TestHandleCreateSessionOwnershipModeContract(t *testing.T) {
 	h := New(st, 0).Handler()
 	for _, tc := range []struct {
 		name       string
+		id         string
 		body       string
 		wantStatus int
 		wantMode   string
 	}{
-		{name: "omitted defaults to shared", body: `{"id":"mode-omitted","project":"project-a"}`, wantStatus: http.StatusCreated, wantMode: store.SessionOwnershipShared},
-		{name: "explicit shared", body: `{"id":"mode-shared","project":"project-a","ownership_mode":"shared"}`, wantStatus: http.StatusCreated, wantMode: store.SessionOwnershipShared},
-		{name: "explicit project owned", body: `{"id":"mode-owned","project":"project-a","ownership_mode":"project_owned"}`, wantStatus: http.StatusCreated, wantMode: store.SessionOwnershipProjectOwned},
-		{name: "invalid mode", body: `{"id":"mode-invalid","project":"project-a","ownership_mode":"exclusive"}`, wantStatus: http.StatusBadRequest},
+		{name: "omitted defaults to shared", id: "mode-omitted", body: `{"id":"mode-omitted","project":"project-a"}`, wantStatus: http.StatusCreated, wantMode: store.SessionOwnershipShared},
+		{name: "explicit shared", id: "mode-shared", body: `{"id":"mode-shared","project":"project-a","ownership_mode":"shared"}`, wantStatus: http.StatusCreated, wantMode: store.SessionOwnershipShared},
+		{name: "explicit project owned", id: "mode-owned", body: `{"id":"mode-owned","project":"project-a","ownership_mode":"project_owned"}`, wantStatus: http.StatusCreated, wantMode: store.SessionOwnershipProjectOwned},
+		{name: "invalid mode", id: "mode-invalid", body: `{"id":"mode-invalid","project":"project-a","ownership_mode":"exclusive"}`, wantStatus: http.StatusBadRequest},
+		{name: "missing project", id: "mode-missing-project", body: `{"id":"mode-missing-project"}`, wantStatus: http.StatusBadRequest},
+		{name: "empty project", id: "mode-empty-project", body: `{"id":"mode-empty-project","project":""}`, wantStatus: http.StatusBadRequest},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
@@ -357,8 +360,8 @@ func TestHandleCreateSessionOwnershipModeContract(t *testing.T) {
 			if response["error"] == "" {
 				t.Fatalf("error response = %#v, want error body", response)
 			}
-			if _, err := st.GetSession("mode-invalid"); !errors.Is(err, sql.ErrNoRows) {
-				t.Fatalf("invalid ownership mode created session: %v", err)
+			if _, err := st.GetSession(tc.id); !errors.Is(err, sql.ErrNoRows) {
+				t.Fatalf("invalid request created session %q: %v", tc.id, err)
 			}
 		})
 	}

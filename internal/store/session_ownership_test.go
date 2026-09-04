@@ -133,3 +133,17 @@ func TestPulledSessionPayloadPreservesProjectOwnedProject(t *testing.T) {
 		t.Fatalf("write after conflicting payload error = %v, want ErrSessionOwnershipMismatch", err)
 	}
 }
+
+func TestPulledLegacySessionPayloadPreservesSharedOwnershipMode(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("shared-session", "project-a", "/tmp/a"); err != nil {
+		t.Fatalf("create shared session: %v", err)
+	}
+	if err := s.ApplyPulledMutation(LocalChunkTargetKey, SyncMutation{Seq: 1, Entity: SyncEntitySession, EntityKey: "shared-session", Op: SyncOpUpsert, Payload: `{"id":"shared-session","project":"project-a","directory":"/tmp/legacy"}`}); err != nil {
+		t.Fatalf("apply legacy session payload: %v", err)
+	}
+	session, err := s.GetSession("shared-session")
+	if err != nil || session.OwnershipMode != SessionOwnershipShared {
+		t.Fatalf("session after legacy payload = %#v, %v; want shared", session, err)
+	}
+}
