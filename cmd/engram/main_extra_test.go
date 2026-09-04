@@ -1503,7 +1503,7 @@ func TestCmdCloudUpgradeHelpShowsGuidedWorkflow(t *testing.T) {
 	if recovered != nil || stderr != "" {
 		t.Fatalf("upgrade help should succeed, panic=%v stderr=%q", recovered, stderr)
 	}
-	if !strings.Contains(stdout, "doctor -> repair -> bootstrap -> status/rollback") {
+	if !strings.Contains(stdout, "doctor -> repair -> bootstrap -> remirror -> status/rollback") {
 		t.Fatalf("expected guided workflow in help output, got %q", stdout)
 	}
 	if !strings.Contains(stdout, "local SQLite remains source of truth") {
@@ -1523,7 +1523,7 @@ func TestCloudUpgradeDocsMatchHelpAndLocalFirstSemantics(t *testing.T) {
 	}
 
 	helpRequired := []string{
-		"doctor -> repair -> bootstrap -> status/rollback",
+		"doctor -> repair -> bootstrap -> remirror -> status/rollback",
 		"local SQLite remains source of truth",
 	}
 	for _, token := range helpRequired {
