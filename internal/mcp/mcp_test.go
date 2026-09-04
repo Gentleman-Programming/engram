@@ -4769,6 +4769,59 @@ func TestSessionStartRejectsEmptyID(t *testing.T) {
 	}
 }
 
+func TestSessionStartRejectsEndedSessionWithoutMutation(t *testing.T) {
+	s := newMCPTestStore(t)
+	if err := s.CreateSession("ended-mcp-session", "engram", "/original"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if err := s.EndSession("ended-mcp-session", "completed"); err != nil {
+		t.Fatalf("end session: %v", err)
+	}
+	before, err := s.GetSession("ended-mcp-session")
+	if err != nil {
+		t.Fatalf("get ended session: %v", err)
+	}
+	var mutationsBefore int
+	if err := s.DB().QueryRow(`SELECT count(*) FROM sync_mutations WHERE entity = ? AND entity_key = ?`, store.SyncEntitySession, "ended-mcp-session").Scan(&mutationsBefore); err != nil {
+		t.Fatalf("count session mutations before refusal: %v", err)
+	}
+
+	res, err := handleSessionStart(s, MCPConfig{DefaultProject: "engram"}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"id":        "ended-mcp-session",
+			"directory": "/replacement",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("handleSessionStart: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("expected ended session rejection, got %q", callResultText(t, res))
+	}
+	body := callResultJSON(t, res)
+	if body["error_code"] != "session_already_ended" || body["session_id"] != "ended-mcp-session" {
+		t.Fatalf("ended session response = %v", body)
+	}
+	if !strings.Contains(body["hint"].(string), "new session ID") {
+		t.Fatalf("ended session hint = %q, want new-ID guidance", body["hint"])
+	}
+
+	after, err := s.GetSession("ended-mcp-session")
+	if err != nil {
+		t.Fatalf("get ended session after refusal: %v", err)
+	}
+	if after.Project != before.Project || after.Directory != before.Directory || after.StartedAt != before.StartedAt || after.EndedAt == nil || before.EndedAt == nil || *after.EndedAt != *before.EndedAt || after.Summary == nil || before.Summary == nil || *after.Summary != *before.Summary {
+		t.Fatalf("ended session changed: before=%+v after=%+v", before, after)
+	}
+	var mutationsAfter int
+	if err := s.DB().QueryRow(`SELECT count(*) FROM sync_mutations WHERE entity = ? AND entity_key = ?`, store.SyncEntitySession, "ended-mcp-session").Scan(&mutationsAfter); err != nil {
+		t.Fatalf("count session mutations after refusal: %v", err)
+	}
+	if mutationsAfter != mutationsBefore {
+		t.Fatalf("session mutations changed from %d to %d after refusal", mutationsBefore, mutationsAfter)
+	}
+}
+
 func TestSessionStartWithoutDirectoryUsesCurrentWorkingDirectory(t *testing.T) {
 	s := newMCPTestStore(t)
 

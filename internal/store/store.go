@@ -54,6 +54,7 @@ var sqliteWriteRetryBackoffs = []time.Duration{
 var (
 	ErrSessionNotFound             = errors.New("session not found")
 	ErrSessionIDRequired           = errors.New("session id is required")
+	ErrSessionAlreadyEnded         = errors.New("session has already ended")
 	ErrSessionHasObservations      = errors.New("session still has observations")
 	ErrSessionDeleteBlocked        = errors.New("session deletion is blocked while cloud sync enrollment is active")
 	ErrObservationNotFound         = errors.New("observation not found")
@@ -2460,6 +2461,42 @@ func (s *Store) CreateSession(id, project, directory string) error {
 
 	return s.withTx(func(tx *sql.Tx) error {
 		if err := s.createSessionTx(tx, id, project, directory); err != nil {
+			return err
+		}
+		var persisted Session
+		// sessions.project is read through ifnull() because a database upgraded from
+		// the schema where the column was nullable still carries rows that identify no
+		// project, and no migration rewrites them.
+		if err := tx.QueryRow(`SELECT id, ifnull(project, ''), directory, started_at, ended_at, summary FROM sessions WHERE id = ?`, id).Scan(
+			&persisted.ID, &persisted.Project, &persisted.Directory, &persisted.StartedAt, &persisted.EndedAt, &persisted.Summary,
+		); err != nil {
+			return err
+		}
+		return s.enqueueSyncMutationTx(tx, SyncEntitySession, persisted.ID, SyncOpUpsert, syncSessionPayload{
+			ID:        persisted.ID,
+			Project:   persisted.Project,
+			Directory: persisted.Directory,
+			StartedAt: persisted.StartedAt,
+			EndedAt:   persisted.EndedAt,
+			Summary:   persisted.Summary,
+		})
+	})
+}
+
+// StartSession registers a new session or idempotently starts an active one.
+// It refuses to reuse an ended session ID so MCP callers cannot silently strand
+// later writes on a fallback session.
+func (s *Store) StartSession(id, project, directory string) error {
+	if err := validateSessionID(id); err != nil {
+		return err
+	}
+	project, _ = NormalizeProject(project)
+	if strings.TrimSpace(project) == "" {
+		return ErrProjectRequired
+	}
+
+	return s.withTx(func(tx *sql.Tx) error {
+		if err := s.startSessionTx(tx, id, project, directory); err != nil {
 			return err
 		}
 		var persisted Session
@@ -6769,6 +6806,28 @@ func (s *Store) createSessionTx(tx *sql.Tx, id, project, directory string) error
 		id, project, directory,
 	)
 	return err
+}
+
+func (s *Store) startSessionTx(tx *sql.Tx, id, project, directory string) error {
+	result, err := s.execHook(tx,
+		`INSERT INTO sessions (id, project, directory) VALUES (?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET
+		   project   = CASE WHEN sessions.project = '' THEN excluded.project ELSE sessions.project END,
+		   directory = CASE WHEN sessions.directory = '' THEN excluded.directory ELSE sessions.directory END
+		 WHERE sessions.ended_at IS NULL`,
+		id, project, directory,
+	)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrSessionAlreadyEnded
+	}
+	return nil
 }
 
 func (s *Store) ensureSyncState(targetKey string) error {

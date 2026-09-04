@@ -2115,7 +2115,16 @@ func handleSessionStart(s *store.Store, cfg MCPConfig, activity *SessionActivity
 		activity.RecordToolCall(defaultSessionID(project))
 		resolvedDirectory = runtimeSessionDirectory(resolvedDirectory)
 
-		if err := s.CreateSession(id, project, resolvedDirectory); err != nil {
+		if err := s.StartSession(id, project, resolvedDirectory); err != nil {
+			if errors.Is(err, store.ErrSessionAlreadyEnded) {
+				result := errorWithMeta(
+					"session_already_ended",
+					fmt.Sprintf("Session %q has already ended. Choose a new session ID and retry mem_session_start.", id),
+					nil,
+				)
+				addErrorMetadata(result, map[string]any{"session_id": id})
+				return result, nil
+			}
 			return mcp.NewToolResultError("Failed to start session: " + err.Error()), nil
 		}
 
@@ -3168,6 +3177,8 @@ func errorWithMeta(code, msg string, availableProjects []string) *mcp.CallToolRe
 		envelope["hint"] = "Use a non-empty project name, not a path."
 	case "unknown_session":
 		envelope["hint"] = "Start the session first, omit session_id, or retry with an existing session_id."
+	case "session_already_ended":
+		envelope["hint"] = "Choose a new session ID and retry mem_session_start; ended sessions cannot be reopened."
 	case "session_project_mismatch":
 		envelope["hint"] = "Use a project that matches the existing session, or omit session_id and write to a different project."
 	case "project_required":

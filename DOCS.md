@@ -976,6 +976,8 @@ Save comprehensive end-of-session summary:
 
 Register the start of a new coding session.
 
+If the supplied session ID has already ended, the request is rejected with the structured error code `session_already_ended`, which includes that session ID. Choose a new session ID to continue; ended sessions cannot be reopened. New session IDs and IDs for active sessions remain accepted.
+
 ### mem_session_end
 
 Mark a session as completed with optional summary.

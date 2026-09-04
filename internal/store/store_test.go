@@ -6713,6 +6713,69 @@ func TestCreateSessionMutationUsesPersistedCanonicalData(t *testing.T) {
 	}
 }
 
+func TestStartSessionCreatesAndIdempotentlyStartsActiveSession(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.StartSession("strict-active", "engram", "/original"); err != nil {
+		t.Fatalf("initial StartSession: %v", err)
+	}
+	if err := s.StartSession("strict-active", "other", "/replacement"); err != nil {
+		t.Fatalf("idempotent StartSession: %v", err)
+	}
+
+	session, err := s.GetSession("strict-active")
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if session.Project != "engram" || session.Directory != "/original" || session.EndedAt != nil {
+		t.Fatalf("active session = %+v, want original active session", session)
+	}
+	var mutations int
+	if err := s.DB().QueryRow(`SELECT count(*) FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntitySession, "strict-active").Scan(&mutations); err != nil {
+		t.Fatalf("count session mutations: %v", err)
+	}
+	if mutations != 2 {
+		t.Fatalf("session mutations = %d, want 2 for two valid starts", mutations)
+	}
+}
+
+func TestStartSessionRejectsEndedSessionWithoutMutation(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("strict-ended", "engram", "/original"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if err := s.EndSession("strict-ended", "completed"); err != nil {
+		t.Fatalf("end session: %v", err)
+	}
+	before, err := s.GetSession("strict-ended")
+	if err != nil {
+		t.Fatalf("get ended session: %v", err)
+	}
+	var mutationsBefore int
+	if err := s.DB().QueryRow(`SELECT count(*) FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntitySession, "strict-ended").Scan(&mutationsBefore); err != nil {
+		t.Fatalf("count session mutations before refusal: %v", err)
+	}
+
+	if err := s.StartSession("strict-ended", "other", "/replacement"); !errors.Is(err, ErrSessionAlreadyEnded) {
+		t.Fatalf("StartSession error = %v, want ErrSessionAlreadyEnded", err)
+	}
+
+	after, err := s.GetSession("strict-ended")
+	if err != nil {
+		t.Fatalf("get ended session after refusal: %v", err)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("ended session changed: before=%+v after=%+v", before, after)
+	}
+	var mutationsAfter int
+	if err := s.DB().QueryRow(`SELECT count(*) FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntitySession, "strict-ended").Scan(&mutationsAfter); err != nil {
+		t.Fatalf("count session mutations after refusal: %v", err)
+	}
+	if mutationsAfter != mutationsBefore {
+		t.Fatalf("session mutations changed from %d to %d after refusal", mutationsBefore, mutationsAfter)
+	}
+}
+
 func TestImportRejectsBlankSessionIDAtomically(t *testing.T) {
 	s := newTestStore(t)
 	data := &ExportData{Sessions: []Session{
