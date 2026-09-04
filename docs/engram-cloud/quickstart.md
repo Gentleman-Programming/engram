@@ -211,7 +211,7 @@ engram sync --cloud --project my-project
 | `blocked_unenrolled` | Project is not enrolled for cloud replication |
 | `auth_required` | Authenticated runtime requires valid token/session |
 | `cloud_config_error` | Cloud endpoint config is missing/invalid |
-| `policy_forbidden` | Project blocked by cloud policy |
+| `policy_forbidden` | Project blocked by cloud policy. Check the server-side `ENGRAM_CLOUD_ALLOWED_PROJECTS` policy for the denied project; a managed principal's project grant may also need checking. The client does not expose allowlist contents. |
 | `paused` | Project sync paused in cloud control plane |
 | `transport_failed` | Cloud transport/network operation failed |
 

@@ -678,6 +678,8 @@ engram sync --cloud --project <project>
 
 Sync/autosync never auto-applies repairs; only the explicit `repair --apply` command mutates local repairable upgrade state.
 
+When cloud sync receives `policy_forbidden`, Engram preserves the server's denied project message and advises the server administrator to check `ENGRAM_CLOUD_ALLOWED_PROJECTS`. A managed principal's project grant may also need checking; the client does not expose allowlist contents.
+
 For cloud servers that already accepted mutation pushes before mutation payloads were materialized into chunk history, run the server-side backfill against the Postgres DSN used by `engram cloud serve`:
 
 ```bash
@@ -734,7 +736,7 @@ Deterministic reason codes shared across store/CLI/server:
 - `blocked_unenrolled`
 - `auth_required`
 - `cloud_config_error`
-- `policy_forbidden`
+- `policy_forbidden` — check the server-side `ENGRAM_CLOUD_ALLOWED_PROJECTS` policy for the denied project; a managed principal's project grant may also need checking. The client does not expose allowlist contents.
 - `paused`
 - `transport_failed`
 
@@ -1533,7 +1535,7 @@ Missing `ENGRAM_CLOUD_TOKEN` or `ENGRAM_CLOUD_SERVER` logs an `ERROR` and disabl
 | ------------------ | ------------------------------------------------------- | ---------------------------------------------------------------------------- |
 | `transport_failed` | Network error, server 5xx, or 404 on mutation endpoints | Check server health and network; if 404, see `server_unsupported` note below |
 | `auth_required`    | Bearer token rejected (401)                             | Rotate `ENGRAM_CLOUD_TOKEN`                                                  |
-| `policy_forbidden` | Project access denied (403)                             | Check `ENGRAM_CLOUD_ALLOWED_PROJECTS` on the server                          |
+| `policy_forbidden` | Project access denied (403)                             | Check the server-side `ENGRAM_CLOUD_ALLOWED_PROJECTS` policy for the denied project; a managed principal's project grant may also need checking. The client does not expose allowlist contents. |
 | `internal_error`   | Panic inside the sync cycle                             | Check logs for stack trace                                                   |
 | `upgrade_paused`   | Autosync paused during cloud upgrade (`PhaseDisabled`)  | Call `ResumeAfterUpgrade` or restart                                         |
 

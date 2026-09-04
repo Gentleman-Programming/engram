@@ -522,7 +522,7 @@ func cmdCloudUpgradeBootstrap(cfg store.Config) {
 
 	result, err := runUpgradeBootstrap(s, project, cc)
 	if err != nil {
-		fatal(err)
+		fatal(fmt.Errorf("%s", cloudSyncFailureMessage(project, err)))
 		return
 	}
 	fmt.Printf("project: %s\n", project)
@@ -667,19 +667,29 @@ func printCloudStatusSyncDiagnostic(cfg store.Config) {
 		return
 	}
 	defer s.Close()
+	summary, err := s.CloudSyncSummary()
+	if err != nil {
+		return
+	}
+	if strings.TrimSpace(summary.LastError) != "" {
+		fmt.Println("Sync diagnostic: project-scoped cloud state")
+		if strings.TrimSpace(summary.ReasonCode) != "" {
+			fmt.Printf("reason_code: %s\n", summary.ReasonCode)
+		}
+		fmt.Printf("reason_message: %s\n", summary.LastError)
+		return
+	}
 	state, err := s.GetSyncState(constants.TargetKeyCloud)
 	if err != nil || state == nil {
 		return
 	}
 	code := strings.TrimSpace(derefString(state.ReasonCode))
-	message := strings.TrimSpace(derefString(state.ReasonMessage))
-	if code == "" && message == "" {
+	if code != constants.ReasonNonEnrolledPendingMutations {
 		return
 	}
+	message := strings.TrimSpace(derefString(state.ReasonMessage))
 	fmt.Printf("Sync diagnostic: %s\n", state.Lifecycle)
-	if code != "" {
-		fmt.Printf("reason_code: %s\n", code)
-	}
+	fmt.Printf("reason_code: %s\n", code)
 	if message != "" {
 		fmt.Printf("reason_message: %s\n", message)
 	}

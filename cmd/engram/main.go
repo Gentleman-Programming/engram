@@ -1782,6 +1782,9 @@ func cmdSync(cfg store.Config) {
 	if doStatus {
 		local, remote, pending, err := syncStatus(sy)
 		if err != nil {
+			if cloudEnabled {
+				fatal(errors.New(cloudSyncFailureMessage(project, err)))
+			}
 			fatal(err)
 		}
 		if cloudEnabled {
