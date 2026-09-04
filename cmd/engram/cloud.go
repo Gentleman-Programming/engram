@@ -673,22 +673,6 @@ func printCloudStatusSyncDiagnostic(cfg store.Config) {
 		fmt.Printf("reason_message: %s\n", summary.LastError)
 		return
 	}
-	state, err := s.GetSyncState(constants.TargetKeyCloud)
-	if err != nil || state == nil {
-		return
-	}
-	code := strings.TrimSpace(derefString(state.ReasonCode))
-	message := strings.TrimSpace(derefString(state.ReasonMessage))
-	if code == "" && message == "" {
-		return
-	}
-	fmt.Printf("Sync diagnostic: %s\n", state.Lifecycle)
-	if code != "" {
-		fmt.Printf("reason_code: %s\n", code)
-	}
-	if message != "" {
-		fmt.Printf("reason_message: %s\n", message)
-	}
 }
 
 func cmdCloudEnroll(cfg store.Config) {
