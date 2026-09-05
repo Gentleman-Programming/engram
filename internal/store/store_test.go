@@ -7125,6 +7125,17 @@ func TestBackfillSkipsInvalidSourceAndBackfillsValidSession(t *testing.T) {
 	if validMutations != 1 || invalidMutations != 0 {
 		t.Fatalf("valid mutations=%d invalid mutations=%d", validMutations, invalidMutations)
 	}
+	var raw string
+	if err := s.db.QueryRow(`SELECT payload FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntitySession, "valid-session").Scan(&raw); err != nil {
+		t.Fatalf("load valid mutation: %v", err)
+	}
+	var payload syncSessionPayload
+	if err := decodeSyncPayload([]byte(raw), &payload); err != nil {
+		t.Fatalf("decode valid mutation: %v", err)
+	}
+	if payload.OwnershipMode != "" {
+		t.Fatalf("legacy ownership mode = %q, want empty", payload.OwnershipMode)
+	}
 }
 
 // blankSessionIDCases enumerates source identities that strings.TrimSpace
