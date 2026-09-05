@@ -298,18 +298,20 @@ func TestCmdServeParsesPortAndErrors(t *testing.T) {
 		wantPort  int
 		startErr  error
 		wantFatal bool
+		wantError string
 	}{
 		{name: "default port", wantPort: 7437},
 		{name: "env port", envPort: "8123", wantPort: 8123},
 		{name: "arg overrides env", envPort: "8123", argPort: "9001", wantPort: 9001},
 		{name: "invalid env keeps default", envPort: "nope", wantPort: 7437},
-		{name: "invalid arg keeps env", envPort: "8123", argPort: "bad", wantPort: 8123},
-		{name: "start failure", wantPort: 7437, startErr: errors.New("listen failed"), wantFatal: true},
+		{name: "invalid argument is rejected", envPort: "8123", argPort: "bad", wantPort: -1, wantFatal: true, wantError: "unknown serve argument"},
+		{name: "start failure", wantPort: 7437, startErr: errors.New("listen failed"), wantFatal: true, wantError: "listen failed"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			stubExitWithPanic(t)
+			t.Setenv("ENGRAM_SOCKET", "")
 			if tc.envPort != "" {
 				t.Setenv("ENGRAM_PORT", tc.envPort)
 			} else {
@@ -342,8 +344,8 @@ func TestCmdServeParsesPortAndErrors(t *testing.T) {
 				if _, ok := recovered.(exitCode); !ok {
 					t.Fatalf("expected fatal exit, got %v", recovered)
 				}
-				if !strings.Contains(stderr, "listen failed") {
-					t.Fatalf("stderr missing start error: %q", stderr)
+				if !strings.Contains(stderr, tc.wantError) {
+					t.Fatalf("stderr missing expected error: %q", stderr)
 				}
 			} else if recovered != nil {
 				t.Fatalf("expected no panic, got %v", recovered)

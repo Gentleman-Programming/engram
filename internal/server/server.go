@@ -16,8 +16,11 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/Gentleman-Programming/engram/v2/internal/diagnostic"
@@ -68,6 +71,11 @@ type Server struct {
 	port       int
 	listen     func(network, address string) (net.Listener, error)
 	serve      func(net.Listener, http.Handler) error
+	socketPath string
+	listener   net.Listener
+	socketInfo os.FileInfo
+	closeMu    sync.Mutex
+	closed     bool
 	onWrite    func() // called after successful local writes (for autosync notification)
 	syncStatus SyncStatusProvider
 
@@ -114,6 +122,14 @@ func (s *Server) SetRunnerFactory(fn SemanticRunnerFactory) {
 // When not set, an empty-string builder is used (valid for tests, not production).
 func (s *Server) SetPromptBuilder(fn SemanticPromptBuilder) {
 	s.promptBuilder = fn
+}
+
+// SetSocketPath configures an exclusive POSIX Unix-domain socket listener.
+// An empty path preserves the default loopback TCP listener.
+func (s *Server) SetSocketPath(path string) {
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
+	s.socketPath = strings.TrimSpace(path)
 }
 
 // notifyWrite calls the onWrite callback if configured (best-effort, non-blocking).
@@ -204,7 +220,25 @@ func requireConfiguredAuth(h http.HandlerFunc) http.HandlerFunc {
 }
 
 func (s *Server) Start() error {
+	s.closeMu.Lock()
+	if s.closed {
+		s.closeMu.Unlock()
+		return nil
+	}
+	socketPath := s.socketPath
+	s.closeMu.Unlock()
+
+	network := "tcp"
 	addr := fmt.Sprintf("127.0.0.1:%d", s.port)
+	if socketPath != "" {
+		var err error
+		socketPath, err = prepareUnixSocket(socketPath)
+		if err != nil {
+			return err
+		}
+		network = "unix"
+		addr = socketPath
+	}
 	listenFn := s.listen
 	if listenFn == nil {
 		listenFn = net.Listen
@@ -214,12 +248,130 @@ func (s *Server) Start() error {
 		serveFn = http.Serve
 	}
 
-	ln, err := listenFn("tcp", addr)
+	var (
+		ln         net.Listener
+		socketInfo os.FileInfo
+		err        error
+	)
+	if socketPath != "" {
+		ln, socketInfo, err = listenSecureUnixSocket(socketPath)
+	} else {
+		ln, err = listenFn(network, addr)
+	}
 	if err != nil {
 		return fmt.Errorf("engram server: listen %s: %w", addr, err)
 	}
+
+	s.closeMu.Lock()
+	if s.closed {
+		s.closeMu.Unlock()
+		_ = ln.Close()
+		removeOwnedUnixSocket(socketPath, socketInfo)
+		return nil
+	}
+	s.listener = ln
+	s.socketPath = socketPath
+	s.socketInfo = socketInfo
+	s.closeMu.Unlock()
+	defer s.Close()
+
 	log.Printf("[engram] HTTP server listening on %s", addr)
-	return serveFn(ln, s.mux)
+	err = serveFn(ln, s.mux)
+	if errors.Is(err, net.ErrClosed) {
+		return nil
+	}
+	return err
+}
+
+// Close stops the active listener and removes only the socket created by this
+// server. It is safe to call repeatedly.
+func (s *Server) Close() error {
+	s.closeMu.Lock()
+	if s.closed {
+		s.closeMu.Unlock()
+		return nil
+	}
+	s.closed = true
+	ln := s.listener
+	s.listener = nil
+	socketPath := s.socketPath
+	socketInfo := s.socketInfo
+	s.socketInfo = nil
+	s.closeMu.Unlock()
+
+	if ln == nil {
+		return nil
+	}
+	err := ln.Close()
+	if errors.Is(err, net.ErrClosed) {
+		err = nil
+	}
+	if removeErr := removeOwnedUnixSocket(socketPath, socketInfo); removeErr != nil && err == nil {
+		err = removeErr
+	}
+	return err
+}
+
+func prepareUnixSocket(socketPath string) (string, error) {
+	if socketPath == "" || socketPath == "." {
+		return "", fmt.Errorf("engram server: socket path is required")
+	}
+	canonicalPath, err := secureUnixSocketPath(socketPath)
+	if err != nil {
+		return "", err
+	}
+	parent := filepath.Dir(canonicalPath)
+	parentInfo, err := os.Stat(parent)
+	if err != nil {
+		return "", fmt.Errorf("engram server: socket parent %q: %w", parent, err)
+	}
+	if !parentInfo.IsDir() {
+		return "", fmt.Errorf("engram server: socket parent %q is not a directory", parent)
+	}
+
+	info, err := os.Lstat(canonicalPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return canonicalPath, nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("engram server: inspect socket %q: %w", canonicalPath, err)
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		return "", fmt.Errorf("engram server: socket path %q exists and is not a Unix socket", canonicalPath)
+	}
+
+	conn, err := net.DialTimeout("unix", canonicalPath, 250*time.Millisecond)
+	if err == nil {
+		_ = conn.Close()
+		return "", fmt.Errorf("engram server: socket %q is already in use", canonicalPath)
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		if err := removeOwnedUnixSocket(canonicalPath, info); err != nil {
+			return "", fmt.Errorf("engram server: remove stale socket %q: %w", canonicalPath, err)
+		}
+		return canonicalPath, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return canonicalPath, nil
+	}
+	return "", fmt.Errorf("engram server: cannot verify socket %q is stale: %w", canonicalPath, err)
+}
+
+func removeOwnedUnixSocket(socketPath string, expected os.FileInfo) error {
+	if socketPath == "" || expected == nil {
+		return nil
+	}
+	current, err := os.Lstat(socketPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if current.Mode()&os.ModeSocket == 0 || !os.SameFile(expected, current) {
+		return nil
+	}
+	return os.Remove(socketPath)
 }
 
 func (s *Server) Handler() http.Handler {

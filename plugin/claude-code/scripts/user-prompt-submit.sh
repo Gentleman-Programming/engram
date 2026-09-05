@@ -15,8 +15,6 @@
 #
 # MUST exit 0 always and output valid JSON — otherwise Claude Code blocks the message.
 
-ENGRAM_PORT="${ENGRAM_PORT:-7437}"
-ENGRAM_URL="http://127.0.0.1:${ENGRAM_PORT}"
 ENGRAM_HOOK_MAX_TIME="${ENGRAM_HOOK_MAX_TIME:-0.2}"
 
 # Windows Git Bash/MSYS2 can fail while forking helper processes under
@@ -353,7 +351,7 @@ resolve_project_without_jq() {
   [ -n "$dir" ] || return 1
   url_encode_without_jq "$dir"
   encoded="$JSON_VALUE"
-  response=$(curl -sf "${ENGRAM_URL}/project/current?cwd=${encoded}" --max-time 2 2>/dev/null) || return 1
+  response=$(engram_curl -sf "${ENGRAM_URL}/project/current?cwd=${encoded}" --max-time 2 2>/dev/null) || return 1
   json_string_value_without_jq "project" "$response" || return 1
   project="$JSON_VALUE"
   json_string_value_without_jq "project_source" "$response" || return 1
@@ -384,7 +382,7 @@ user_prompt_submit_without_jq() {
       json_escape_without_jq "$project"
       local escaped_project="$JSON_VALUE"
       json_escape_without_jq "$prompt"
-      curl -sf -X POST "${ENGRAM_URL}/prompts" --max-time 2 \
+      engram_curl -sf -X POST "${ENGRAM_URL}/prompts" --max-time 2 \
         -H 'Content-Type: application/json' \
         -d "{\"session_id\":\"${escaped_session}\",\"project\":\"${escaped_project}\",\"content\":\"${JSON_VALUE}\"}" >/dev/null 2>&1 || true
     ) &
@@ -411,7 +409,7 @@ user_prompt_submit_without_jq() {
   }
 
   if [ -n "$session_id" ]; then
-    session_start=$(curl -sf "${ENGRAM_URL}/sessions/${session_id}" --max-time "$ENGRAM_HOOK_MAX_TIME" 2>/dev/null)
+    session_start=$(engram_curl -sf "${ENGRAM_URL}/sessions/${session_id}" --max-time "$ENGRAM_HOOK_MAX_TIME" 2>/dev/null)
     json_string_value_without_jq "started_at" "$session_start" && session_start="$JSON_VALUE" || session_start=""
   fi
   if [ -n "$session_start" ]; then
@@ -424,7 +422,7 @@ user_prompt_submit_without_jq() {
 
   url_encode_without_jq "$project"
   encoded_project="$JSON_VALUE"
-  last_save_json=$(curl -sf "${ENGRAM_URL}/observations?project=${encoded_project}&limit=1&sort=created_at:desc" --max-time "$ENGRAM_HOOK_MAX_TIME" 2>/dev/null) || {
+  last_save_json=$(engram_curl -sf "${ENGRAM_URL}/observations?project=${encoded_project}&limit=1&sort=created_at:desc" --max-time "$ENGRAM_HOOK_MAX_TIME" 2>/dev/null) || {
     printf '%s\n' '{}'
     return 0
   }
@@ -493,7 +491,7 @@ fi
 # Load shared helpers after the Windows-safe fast path so Git Bash does not fork
 # for dirname/pwd before deciding whether the safe path applies.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-source "${SCRIPT_DIR}/_helpers.sh"
+source "${SCRIPT_DIR}/_helpers.sh" "__engram_hook_default_max_time=0.2"
 
 parse_epoch() {
   TS="$1"
@@ -561,7 +559,7 @@ if [ -n "$PROMPT" ] && [ -n "$SESSION_ID" ]; then
   # prompt's project from the session and rejects any mismatch.
   (
     PROJECT=$(resolve_project "$CWD") || exit 0
-    curl -sf -X POST "${ENGRAM_URL}/prompts" --max-time 2 \
+    engram_curl -sf -X POST "${ENGRAM_URL}/prompts" --max-time 2 \
       -H 'Content-Type: application/json' \
       -d "$(jq -n --arg s "$SESSION_ID" --arg p "$PROJECT" --arg c "$PROMPT" \
             '{session_id:$s, project:$p, content:$c}')" >/dev/null 2>&1 || true
@@ -616,7 +614,7 @@ fi
 # Get session start time to check if session is > 5 minutes old
 SESSION_START=""
 if [ -n "$SESSION_ID" ]; then
-  SESSION_START=$(curl -sf "${ENGRAM_URL}/sessions/${SESSION_ID}" --max-time "$ENGRAM_HOOK_MAX_TIME" 2>/dev/null \
+  SESSION_START=$(engram_curl -sf "${ENGRAM_URL}/sessions/${SESSION_ID}" --max-time "$ENGRAM_HOOK_MAX_TIME" 2>/dev/null \
     | jq -r '.started_at // empty' 2>/dev/null)
 fi
 
@@ -639,9 +637,9 @@ fi
 
 # Fetch the most recent observation for this project (any type)
 ENCODED_PROJECT=$(printf '%s' "$PROJECT" | jq -sRr @uri)
-LAST_SAVE_JSON=$(curl -sf \
+LAST_SAVE_JSON=$(engram_curl -sf \
   "${ENGRAM_URL}/observations?project=${ENCODED_PROJECT}&limit=1&sort=created_at:desc" \
-  --max-time "$ENGRAM_HOOK_MAX_TIME" 2>/dev/null)
+  --max-time "$ENGRAM_HOOK_MAX_TIME")
 
 if [ -z "$LAST_SAVE_JSON" ]; then
   # Server not responding or slow — fail silently, no nudge
