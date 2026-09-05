@@ -1,6 +1,7 @@
 package store
 
 import (
+	"cmp"
 	"fmt"
 	"sort"
 	"strings"
@@ -82,8 +83,13 @@ type scanCandidateMeta struct {
 // per-source path, preserving source-level failure behavior.
 func (s *Store) scanCandidateBatch(sources []scanSourceRow, candidateLimit int) (map[int64][]Candidate, error) {
 	result := make(map[int64][]Candidate, len(sources))
-	if len(sources) == 0 || candidateLimit <= 0 {
+	if len(sources) == 0 {
 		return result, nil
+	}
+	if candidateLimit <= 0 {
+		// Mirror the legacy FindCandidates default so a zero limit can never
+		// silently return no candidates where the legacy path returned three.
+		candidateLimit = defaultCandidateLimit
 	}
 
 	// ── Phase 1: distinct page vocabulary → one bounded FTS query per term ──
@@ -93,28 +99,31 @@ func (s *Store) scanCandidateBatch(sources []scanSourceRow, candidateLimit int) 
 			if _, seen := termRowids[term]; seen {
 				continue
 			}
-			termRowids[term] = nil // reserve before querying so failures retry cleanly
+			termRowids[term] = nil // reserve before querying so a repeated term is never queried twice
 			rows, err := s.db.Query(
 				`SELECT rowid FROM observations_fts WHERE observations_fts MATCH ?`, term,
 			)
 			if err != nil {
-				return nil, fmt.Errorf("scanCandidateBatch: term %s: %w", term, err)
+				// Error strings deliberately omit the term: terms derive from user
+				// observation titles and these errors reach the store log via the
+				// fallback path (review finding R1 on PR #1017).
+				return nil, fmt.Errorf("scanCandidateBatch: term query: %w", err)
 			}
 			var ids []int64
 			for rows.Next() {
 				var id int64
 				if err := rows.Scan(&id); err != nil {
 					rows.Close()
-					return nil, fmt.Errorf("scanCandidateBatch: scan term %s: %w", term, err)
+					return nil, fmt.Errorf("scanCandidateBatch: scan term row: %w", err)
 				}
 				ids = append(ids, id)
 			}
 			if err := rows.Err(); err != nil {
 				rows.Close()
-				return nil, fmt.Errorf("scanCandidateBatch: term %s rows: %w", term, err)
+				return nil, fmt.Errorf("scanCandidateBatch: term rows: %w", err)
 			}
 			if err := rows.Close(); err != nil {
-				return nil, fmt.Errorf("scanCandidateBatch: close term %s: %w", term, err)
+				return nil, fmt.Errorf("scanCandidateBatch: close term rows: %w", err)
 			}
 			termRowids[term] = ids
 		}
@@ -126,10 +135,10 @@ func (s *Store) scanCandidateBatch(sources []scanSourceRow, candidateLimit int) 
 		rowidUnion = append(rowidUnion, ids...)
 	}
 	sort.Slice(rowidUnion, func(i, j int) bool { return rowidUnion[i] < rowidUnion[j] })
-	rowidUnion = dedupSortedInt64(rowidUnion)
+	rowidUnion = dedupSorted(rowidUnion)
 
 	metaByID := make(map[int64]scanCandidateMeta, len(rowidUnion))
-	for _, chunk := range chunkInt64(rowidUnion, scanChunkSize) {
+	for _, chunk := range chunk(rowidUnion, scanChunkSize) {
 		placeholders := make([]string, len(chunk))
 		args := make([]any, len(chunk))
 		for i, id := range chunk {
@@ -170,10 +179,10 @@ func (s *Store) scanCandidateBatch(sources []scanSourceRow, candidateLimit int) 
 	for _, src := range sources {
 		pageSyncIDs = append(pageSyncIDs, src.syncID)
 	}
-	pageSyncIDs = dedupStrings(pageSyncIDs)
+	pageSyncIDs = dedupUnsorted(pageSyncIDs)
 
 	judgedPairs := make(map[string]struct{})
-	for _, chunk := range chunkStrings(pageSyncIDs, scanChunkSize) {
+	for _, chunk := range chunk(pageSyncIDs, scanChunkSize) {
 		placeholders := make([]string, len(chunk))
 		args := make([]any, 0, len(chunk)*2)
 		for i, id := range chunk {
@@ -212,7 +221,7 @@ func (s *Store) scanCandidateBatch(sources []scanSourceRow, candidateLimit int) 
 	// ── Phase 4: deterministic per-source scoring, ordering, and limit ──────
 	for _, src := range sources {
 		scored := make(map[int64]int)
-		for _, term := range dedupStrings(candidateTerms(src.title)) {
+		for _, term := range dedupUnsorted(candidateTerms(src.title)) {
 			for _, id := range termRowids[term] {
 				meta, ok := metaByID[id]
 				if !ok {
@@ -270,22 +279,22 @@ func judgedPairKey(a, b string) string {
 	return a + "\x00" + b
 }
 
-func dedupSortedInt64(ids []int64) []int64 {
-	if len(ids) == 0 {
-		return ids
+func dedupSorted[T cmp.Ordered](items []T) []T {
+	if len(items) == 0 {
+		return items
 	}
-	out := ids[:1]
-	for _, id := range ids[1:] {
-		if id != out[len(out)-1] {
-			out = append(out, id)
+	out := items[:1]
+	for _, item := range items[1:] {
+		if item != out[len(out)-1] {
+			out = append(out, item)
 		}
 	}
 	return out
 }
 
-func dedupStrings(items []string) []string {
-	seen := make(map[string]struct{}, len(items))
-	out := make([]string, 0, len(items))
+func dedupUnsorted[T comparable](items []T) []T {
+	seen := make(map[T]struct{}, len(items))
+	out := make([]T, 0, len(items))
 	for _, item := range items {
 		if _, ok := seen[item]; ok {
 			continue
@@ -296,20 +305,8 @@ func dedupStrings(items []string) []string {
 	return out
 }
 
-func chunkInt64(items []int64, size int) [][]int64 {
-	var chunks [][]int64
-	for len(items) > size {
-		chunks = append(chunks, items[:size])
-		items = items[size:]
-	}
-	if len(items) > 0 {
-		chunks = append(chunks, items)
-	}
-	return chunks
-}
-
-func chunkStrings(items []string, size int) [][]string {
-	var chunks [][]string
+func chunk[T any](items []T, size int) [][]T {
+	var chunks [][]T
 	for len(items) > size {
 		chunks = append(chunks, items[:size])
 		items = items[size:]

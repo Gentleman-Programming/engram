@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -224,6 +225,52 @@ func TestScanCandidateBatch_DeterministicOrderAndScore(t *testing.T) {
 	}
 	if !slices.Equal(scanBatchCandidateIDs(got), scanBatchCandidateIDs(again[source])) {
 		t.Fatalf("non-deterministic batch: %v vs %v", scanBatchCandidateIDs(got), scanBatchCandidateIDs(again[source]))
+	}
+}
+
+// TestScanCandidateBatch_NonPositiveLimitMirrorsLegacyDefault pins the R3
+// follow-up from the PR #1017 review: a non-positive candidate limit mirrors
+// the legacy FindCandidates default instead of silently returning nothing.
+func TestScanCandidateBatch_NonPositiveLimitMirrorsLegacyDefault(t *testing.T) {
+	s := scanBatchStore(t)
+	source := scanBatchAdd(t, s, scanBatchSeed{title: "limit probe mutual vocabulary row", content: "source", project: "batch-alpha", scope: "project"})
+	for i := 0; i < 5; i++ {
+		scanBatchAdd(t, s, scanBatchSeed{
+			title:   fmt.Sprintf("limit probe mutual vocabulary twin %d", i),
+			content: "twin",
+			project: "batch-alpha",
+			scope:   "project",
+		})
+	}
+	sources := scanBatchSources(t, s, source)
+	batch, err := s.scanCandidateBatch(sources, 0)
+	if err != nil {
+		t.Fatalf("scanCandidateBatch: %v", err)
+	}
+	if len(batch[source]) != defaultCandidateLimit {
+		t.Fatalf("zero limit: got %d candidates, want the legacy default %d", len(batch[source]), defaultCandidateLimit)
+	}
+}
+
+// TestScanCandidateBatch_ErrorsOmitTitleTerms pins the R1 follow-up from the
+// PR #1017 review: batch error strings never embed title-derived FTS terms,
+// because those errors reach the store log via the fallback path and the
+// legacy path logged only observation sync IDs.
+func TestScanCandidateBatch_ErrorsOmitTitleTerms(t *testing.T) {
+	s := scanBatchStore(t)
+	source := scanBatchAdd(t, s, scanBatchSeed{title: "secretword unshared token", content: "source", project: "batch-alpha", scope: "project"})
+	if _, err := s.db.Exec(`DROP TABLE observations_fts`); err != nil {
+		t.Fatalf("drop fts: %v", err)
+	}
+	sources := scanBatchSources(t, s, source)
+	_, err := s.scanCandidateBatch(sources, 10)
+	if err == nil {
+		t.Fatal("expected an error with the FTS table dropped")
+	}
+	for _, term := range []string{"secretword", "unshared", "token"} {
+		if strings.Contains(err.Error(), term) {
+			t.Fatalf("batch error leaks title-derived term %q: %v", term, err)
+		}
 	}
 }
 
