@@ -184,7 +184,11 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 
 ### Context
 
-- `GET /context` — Manual formatted context scoped by project and optional scope. Query: `?project=X&scope=project|personal|global`
+- `GET /context` — Manual formatted context scoped by project and optional scope. Query: `?project=X&scope=project|personal|global&observations=N&prompts=N&sessions=N&pinned=N&compact=BOOL&max_bytes=N`
+  - `observations`/`prompts`/`sessions`/`pinned`: `0` (or omitted/invalid) uses that section's legacy default, `>0` caps it (silently clamped to a `500` ceiling), `<0` omits the section and its `### ...` header entirely
+  - `compact=true` drops the inline content preview from `Pinned`/`Recent Observations` bullets, keeping just `- [type] **title**`
+  - `max_bytes`: `0`, omitted, invalid, or negative preserves the unbounded legacy output; a positive value caps the complete rendered context at that many bytes (silently clamped to `65536`). Truncation is UTF-8-safe and appends a `[truncated]` marker when it fits within the requested budget.
+  - Invalid or unparseable values silently fall back to their default — never a `400`
 - `GET /context/compaction` — Runtime compaction context scoped strictly to one persisted session. Query: `?session_id=X`. The server derives the session project; this endpoint does not accept project or scope selection.
 
 ### Passive Capture

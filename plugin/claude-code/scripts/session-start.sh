@@ -137,11 +137,17 @@ if [ -f "${CWD}/.engram/manifest.json" ]; then
   ) >/dev/null 2>&1 &
 fi
 
-# Fetch memory context
+# Fetch memory context.
+#
+# compact=1 renders observation bullets as `- [type] **title**` instead of
+# appending 300 chars of body: no row disappears, only the inline preview,
+# and the body is one mem_get_observation away when the agent actually wants
+# it. pinned=20 puts a ceiling on the one section that never had one.
+# max_bytes=16384 caps the final injected context without changing its defaults.
 CONTEXT=""
 if [ -n "$PROJECT" ]; then
   ENCODED_PROJECT=$(printf '%s' "$PROJECT" | jq -sRr @uri)
-  CONTEXT=$(curl -sf "${ENGRAM_URL}/context?project=${ENCODED_PROJECT}" --max-time 3 2>/dev/null | jq -r '.context // empty')
+  CONTEXT=$(curl -sf "${ENGRAM_URL}/context?project=${ENCODED_PROJECT}&compact=1&pinned=20&max_bytes=16384" --max-time 3 2>/dev/null | jq -r '.context // empty')
 fi
 
 # Resolve protocol verbosity mode for this slug. All slim/full branching
