@@ -173,20 +173,6 @@ func TestStartupMigrationBatchAvoidsRedundantGenerationProbes(t *testing.T) {
 
 	t.Run("rejects generation change after migration lock", func(t *testing.T) {
 		originalLock := acquireStartupMigrationLock
-		waiting, proceed := make(chan struct{}), make(chan struct{})
-		proceedReleased := false
-		releaseProceed := func() {
-			if !proceedReleased {
-				close(proceed)
-				proceedReleased = true
-			}
-		}
-		t.Cleanup(releaseProceed)
-		acquireStartupMigrationLock = func(string) (func(), error) {
-			close(waiting)
-			<-proceed
-			return func() {}, nil
-		}
 		t.Cleanup(func() { acquireStartupMigrationLock = originalLock })
 		replacement := filepath.Join(t.TempDir(), "engram.db")
 		writeTestFile(t, replacement)
@@ -197,26 +183,16 @@ func TestStartupMigrationBatchAvoidsRedundantGenerationProbes(t *testing.T) {
 			}
 			return originalStatFile(path)
 		}
+		acquireStartupMigrationLock = func(string) (func(), error) {
+			changed = true
+			return func() {}, nil
+		}
 		writes, originalExec := 0, s.hooks.exec
 		s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
 			writes++
 			return originalExec(db, query, args...)
 		}
-		errCh := make(chan error, 1)
-		go func() { errCh <- s.runStartupMigrations() }()
-		select {
-		case <-waiting:
-		case <-time.After(time.Second):
-			t.Fatal("runStartupMigrations did not reach the injected migration lock")
-		}
-		changed = true
-		releaseProceed()
-		select {
-		case err := <-errCh:
-			assertGenerationChanged(t, err)
-		case <-time.After(time.Second):
-			t.Fatal("runStartupMigrations did not return after migration lock release")
-		}
+		assertGenerationChanged(t, s.runStartupMigrations())
 		if writes != 0 {
 			t.Fatalf("startup writes after generation change = %d, want 0", writes)
 		}
