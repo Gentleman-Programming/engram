@@ -4,12 +4,15 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 )
 
 func TestResolveServeOptions(t *testing.T) {
+	veryLongPort := strings.Repeat("9", 1_000)
+
 	for _, tt := range []struct {
 		name       string
 		envPort    string
@@ -21,6 +24,14 @@ func TestResolveServeOptions(t *testing.T) {
 	}{
 		{name: "default TCP", wantPort: 7437},
 		{name: "environment TCP port", envPort: "8090", wantPort: 8090},
+		{name: "zero environment port falls back to default", envPort: "0", wantPort: 7437},
+		{name: "all-zero environment port falls back to default", envPort: "0000", wantPort: 7437},
+		{name: "leading-zero environment port is valid", envPort: "00080", wantPort: 80},
+		{name: "negative environment port falls back to default", envPort: "-1", wantPort: 7437},
+		{name: "plus-signed environment port falls back to default", envPort: "+7437", wantPort: 7437},
+		{name: "maximum environment port is valid", envPort: "65535", wantPort: 65535},
+		{name: "out-of-range environment port falls back to default", envPort: "65536", wantPort: 7437},
+		{name: "very long environment port falls back to default", envPort: veryLongPort, wantPort: 7437},
 		{name: "positional port overrides environment", envPort: "8090", args: []string{"9000"}, wantPort: 9000},
 		{name: "environment socket uses default port without ambiguity", envSocket: "/tmp/engram.sock", wantPort: 7437, wantSocket: "/tmp/engram.sock"},
 		{name: "socket flag overrides environment socket", envSocket: "/tmp/environment.sock", args: []string{"--socket", "/tmp/flag.sock"}, wantPort: 7437, wantSocket: "/tmp/flag.sock"},

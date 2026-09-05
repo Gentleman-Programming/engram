@@ -557,6 +557,14 @@ func TestClaudeHookWhitespacePortFallsBackToDefault(t *testing.T) {
 	}{
 		{name: "whitespace port uses default", env: map[string]string{"ENGRAM_PORT": " \t "}, want: "http://127.0.0.1:7437"},
 		{name: "nonnumeric port uses default", env: map[string]string{"ENGRAM_PORT": "invalid"}, want: "http://127.0.0.1:7437"},
+		{name: "zero port uses default", env: map[string]string{"ENGRAM_PORT": "0"}, want: "http://127.0.0.1:7437"},
+		{name: "all-zero port uses default", env: map[string]string{"ENGRAM_PORT": "0000"}, want: "http://127.0.0.1:7437"},
+		{name: "leading-zero port is valid", env: map[string]string{"ENGRAM_PORT": "00080"}, want: "http://127.0.0.1:80"},
+		{name: "negative port uses default", env: map[string]string{"ENGRAM_PORT": "-1"}, want: "http://127.0.0.1:7437"},
+		{name: "plus-signed port uses default", env: map[string]string{"ENGRAM_PORT": "+7437"}, want: "http://127.0.0.1:7437"},
+		{name: "maximum port is valid", env: map[string]string{"ENGRAM_PORT": "65535"}, want: "http://127.0.0.1:65535"},
+		{name: "out-of-range port uses default", env: map[string]string{"ENGRAM_PORT": "65536"}, want: "http://127.0.0.1:7437"},
+		{name: "very long port uses default", env: map[string]string{"ENGRAM_PORT": strings.Repeat("9", 1_000)}, want: "http://127.0.0.1:7437"},
 		{name: "non-empty port is trimmed", env: map[string]string{"ENGRAM_PORT": " 8123 "}, want: "http://127.0.0.1:8123"},
 		{name: "socket takes precedence", env: map[string]string{"ENGRAM_PORT": " \t ", "ENGRAM_SOCKET": " /tmp/engram.sock "}, want: "http://localhost"},
 	} {

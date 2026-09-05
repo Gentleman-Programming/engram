@@ -856,8 +856,8 @@ func resolveServeOptions(args []string) (serveOptions, error) {
 	options := serveOptions{port: 7437, socketPath: strings.TrimSpace(os.Getenv("ENGRAM_SOCKET"))}
 	portExplicit := false
 	if p := strings.TrimSpace(os.Getenv("ENGRAM_PORT")); p != "" {
-		if n, err := strconv.Atoi(p); err == nil {
-			options.port = n
+		if n, err := strconv.ParseUint(p, 10, 16); err == nil && n > 0 {
+			options.port = int(n)
 			portExplicit = true
 		}
 	}

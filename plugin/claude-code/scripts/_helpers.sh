@@ -9,8 +9,17 @@ trim_whitespace() {
   printf '%s' "$value"
 }
 
+is_valid_port() {
+  local port="$1"
+  [[ "$port" =~ ^[0-9]+$ ]] || return 1
+  port="${port#"${port%%[!0]*}"}"
+  [[ "$port" =~ ^([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$ ]]
+}
+
 ENGRAM_PORT="$(trim_whitespace "${ENGRAM_PORT:-}")"
-if [[ ! "$ENGRAM_PORT" =~ ^[+-]?[0-9]+$ ]]; then
+if is_valid_port "$ENGRAM_PORT"; then
+  ENGRAM_PORT="${ENGRAM_PORT#"${ENGRAM_PORT%%[!0]*}"}"
+else
   ENGRAM_PORT=7437
 fi
 ENGRAM_SOCKET="$(trim_whitespace "${ENGRAM_SOCKET:-}")"
