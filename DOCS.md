@@ -130,6 +130,7 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
   - An invalid non-empty `ownership_mode` returns `400` and does not create a session.
 - `POST /sessions/{id}/end` — End session. Body: `{summary}`
 - `GET /sessions/recent` — Recent sessions. Query: `?project=X&all_projects=true&limit=N`
+  - No-result responses return `200` with `[]` (never `null`)
 - `GET /sessions/{id}` — Get single session by ID
 - `DELETE /sessions/{id}` — Delete session
   - `200` when deleted
@@ -143,6 +144,7 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
   - `400` when `title` or `content` is missing, empty, or whitespace-only. The observation-create paths (`engram save`, `mem_save`, `POST /observations`) enforce the same title rule because cloud sync rejects observation upserts without a title, and one rejected mutation blocks every later mutation for the project
 - `GET /observations` — Recent observations compatibility endpoint. Query: `?project=X&all_projects=true&scope=project|personal|global&limit=N&sort=created_at:desc`
 - `GET /observations/recent` — Recent observations. Query: `?project=X&all_projects=true&scope=project|personal|global&limit=N`
+  - No-result responses from both observation collection endpoints return `200` with `[]` (never `null`)
 - `GET /observations/{id}` — Get single observation by ID
 - `PATCH /observations/{id}` — Update fields. Body: `{title?, content?, type?, project?, scope?, topic_key?}`
   - `400` when `title` or `content` is provided but empty or whitespace-only. Omitting a field leaves its current value unchanged
@@ -174,6 +176,7 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 - `POST /prompts` — Save user prompt. Body: `{session_id, content, project?}`
 - `GET /prompts/recent` — Recent prompts. Query: `?project=X&all_projects=true&limit=N`
 - `GET /prompts/search` — Search prompts. Query: `?q=QUERY&project=X&all_projects=true&limit=N`
+  - No-result responses from both prompt collection endpoints return `200` with `[]` (never `null`)
 - `DELETE /prompts/{id}` — Delete prompt
   - `200` when deleted
   - `400` for invalid prompt id

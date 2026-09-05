@@ -247,6 +247,46 @@ func TestFatal(t *testing.T) {
 	}
 }
 
+func TestCmdServeWiresBuildVersionIntoHealth(t *testing.T) {
+	cfg := testConfig(t)
+	stubRuntimeHooks(t)
+	withArgs(t, "engram", "serve")
+	t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "")
+
+	const buildVersion = "test-build-version"
+	oldVersion := version
+	version = buildVersion
+	t.Cleanup(func() { version = oldVersion })
+
+	var captured *engramsrv.Server
+	newHTTPServer = func(s *store.Store, port int) *engramsrv.Server {
+		captured = engramsrv.New(s, port)
+		return captured
+	}
+
+	cmdServe(cfg)
+	if captured == nil {
+		t.Fatal("cmdServe did not create an HTTP server")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	res := httptest.NewRecorder()
+	captured.Handler().ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("health status=%d want=%d", res.Code, http.StatusOK)
+	}
+	var health struct {
+		Version string `json:"version"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&health); err != nil {
+		t.Fatalf("decode health response: %v", err)
+	}
+	if health.Version != buildVersion {
+		t.Fatalf("health version=%q want=%q", health.Version, buildVersion)
+	}
+}
+
 func TestCmdServeParsesPortAndErrors(t *testing.T) {
 	cfg := testConfig(t)
 	stubRuntimeHooks(t)

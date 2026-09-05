@@ -60,6 +60,42 @@ func TestStartUsesInjectedServe(t *testing.T) {
 	}
 }
 
+func TestHealthReportsVersion(t *testing.T) {
+	tests := []struct {
+		name       string
+		setVersion bool
+		version    string
+	}{
+		{name: "defaults to dev", version: "dev"},
+		{name: "reports configured version", setVersion: true, version: "1.16.0"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := New(nil, 0)
+			if tt.setVersion {
+				srv.SetVersion(tt.version)
+			}
+
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected /health 200, got %d", rec.Code)
+			}
+
+			var response struct {
+				Version string `json:"version"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode /health response: %v", err)
+			}
+			if response.Version != tt.version {
+				t.Fatalf("/health version = %q, want %q", response.Version, tt.version)
+			}
+		})
+	}
+}
+
 func newServerTestStore(t *testing.T) *store.Store {
 	t.Helper()
 	cfg, err := store.DefaultConfig()
@@ -943,6 +979,33 @@ func TestHandleSearchNoHitsReturnsEmptyArray(t *testing.T) {
 	}
 	if body := strings.TrimSpace(rec.Body.String()); body != "[]" {
 		t.Fatalf("expected no-hit search body [], got %q", body)
+	}
+}
+
+func TestCollectionHandlersNoResultsReturnEmptyArrays(t *testing.T) {
+	srv := New(newServerTestStore(t), 0)
+
+	for _, tt := range []struct {
+		name string
+		path string
+	}{
+		{name: "recent sessions", path: "/sessions/recent"},
+		{name: "recent observations", path: "/observations/recent"},
+		{name: "observations alias", path: "/observations"},
+		{name: "recent prompts", path: "/prompts/recent"},
+		{name: "search prompts", path: "/prompts/search?q=no-hits"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, tt.path, nil))
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET %s = %d, want 200: %s", tt.path, rec.Code, rec.Body.String())
+			}
+			if body := strings.TrimSpace(rec.Body.String()); body != "[]" {
+				t.Fatalf("GET %s body = %q, want []", tt.path, body)
+			}
+		})
 	}
 }
 
