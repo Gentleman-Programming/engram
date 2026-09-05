@@ -271,24 +271,28 @@ func TestHandlerPullChunkCompressionNegotiationAndDecodedSizeLimit(t *testing.T)
 		accept          string
 		payload         []byte
 		wantContentType string
+		wantVary        string
 	}{
 		{
 			name:            "decoded payload at client limit is compressed",
 			accept:          chunkcodec.CompressedEnvelopeContentType(),
 			payload:         makePayload(int(chunkcodec.DefaultMaxDecodedBytes)),
 			wantContentType: chunkcodec.CompressedEnvelopeContentType(),
+			wantVary:        "Accept",
 		},
 		{
 			name:            "decoded payload over client limit falls back to legacy JSON",
 			accept:          chunkcodec.CompressedEnvelopeContentType(),
 			payload:         makePayload(int(chunkcodec.DefaultMaxDecodedBytes) + 1),
 			wantContentType: "application/json",
+			wantVary:        "Accept",
 		},
 		{
 			name:            "quality zero falls back to legacy JSON",
 			accept:          chunkcodec.CompressedEnvelopeContentType() + "; q=0",
 			payload:         []byte(`{"sessions":[]}`),
 			wantContentType: "application/json",
+			wantVary:        "Accept",
 		},
 	}
 
@@ -305,6 +309,9 @@ func TestHandlerPullChunkCompressionNegotiationAndDecodedSizeLimit(t *testing.T)
 			}
 			if got := rec.Header().Get("Content-Type"); got != tt.wantContentType {
 				t.Fatalf("Content-Type = %q, want %q", got, tt.wantContentType)
+			}
+			if got := rec.Header().Get("Vary"); got != tt.wantVary {
+				t.Fatalf("Vary = %q, want %q", got, tt.wantVary)
 			}
 			body := rec.Body.Bytes()
 			if tt.wantContentType == chunkcodec.CompressedEnvelopeContentType() {

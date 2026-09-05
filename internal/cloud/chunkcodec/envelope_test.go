@@ -84,6 +84,8 @@ func TestCompressedEnvelopeAcceptNegotiation(t *testing.T) {
 		{name: "supported envelope", accept: "application/json, " + CompressedEnvelopeContentType(), want: true},
 		{name: "supported envelope with parameters", accept: "application/json; q=0.5, " + CompressedEnvelopeMediaType + "; feature=chunk-pull; version=1", want: true},
 		{name: "quality zero", accept: CompressedEnvelopeContentType() + "; q=0", want: false},
+		{name: "quality below zero", accept: CompressedEnvelopeContentType() + "; q=-0.1", want: false},
+		{name: "quality above one", accept: CompressedEnvelopeContentType() + "; q=1.1", want: false},
 		{name: "invalid quality", accept: CompressedEnvelopeContentType() + "; q=invalid", want: false},
 		{name: "multiple ranges with acceptable envelope", accept: CompressedEnvelopeContentType() + "; q=0, " + CompressedEnvelopeContentType() + "; q=0.5", want: true},
 		{name: "unsupported envelope version", accept: CompressedEnvelopeMediaType + "; version=2", want: false},
