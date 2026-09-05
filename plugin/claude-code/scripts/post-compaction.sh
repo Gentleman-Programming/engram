@@ -31,7 +31,9 @@ fi
 CONTEXT=""
 if [ -n "$PROJECT" ]; then
   ENCODED_PROJECT=$(printf '%s' "$PROJECT" | jq -sRr @uri)
-  CONTEXT=$(curl -sf "${ENGRAM_URL}/context?project=${ENCODED_PROJECT}" --max-time 3 2>/dev/null | jq -r '.context // empty')
+  # Same bounded request as session-start.sh: compact bullets (titles kept,
+  # 300-char body previews dropped), a pinned-section ceiling, and a 16 KiB total cap.
+  CONTEXT=$(curl -sf "${ENGRAM_URL}/context?project=${ENCODED_PROJECT}&compact=1&pinned=20&max_bytes=16384" --max-time 3 2>/dev/null | jq -r '.context // empty')
 fi
 
 # Resolve protocol verbosity mode for this slug. All slim/full branching
