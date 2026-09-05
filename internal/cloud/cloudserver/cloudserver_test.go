@@ -335,7 +335,7 @@ func TestHandlerPullChunkCompressionNegotiationAndDecodedSizeLimit(t *testing.T)
 	}
 }
 
-func TestHandlerCompressedPushRejectsMalformedUnsupportedAndOversizedPayloads(t *testing.T) {
+func TestHandlerCompressedPushRejectsMalformedUnsupportedAndDecodedSizeLimitedPayloads(t *testing.T) {
 	tests := []struct {
 		name        string
 		body        []byte
@@ -377,6 +377,31 @@ func TestHandlerCompressedPushRejectsMalformedUnsupportedAndOversizedPayloads(t 
 				t.Fatalf("status = %d, want %d body=%q", rec.Code, tt.wantStatus, rec.Body.String())
 			}
 		})
+	}
+}
+
+func TestHandlerCompressedPushRejectsCompressedWireBodyOverLimit(t *testing.T) {
+	const wireLimit = int64(128)
+	const lowCompressibilityAlphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+	fixtureData := make([]byte, 384)
+	state := uint32(1)
+	for i := range fixtureData {
+		state = state*1664525 + 1013904223
+		fixtureData[i] = lowCompressibilityAlphabet[(state>>24)%uint32(len(lowCompressibilityAlphabet))]
+	}
+	wireBody := mustEncodeCompressedEnvelope(t, []byte(`{"project":"proj-a","data":"`+string(fixtureData)+`"}`))
+	if int64(len(wireBody)) <= wireLimit {
+		t.Fatalf("compressed wire fixture = %d bytes, must exceed configured wire limit %d", len(wireBody), wireLimit)
+	}
+
+	srv := New(&fakeStore{}, fakeAuth{}, 0, WithMaxPushBodyBytes(wireLimit))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sync/push", bytes.NewReader(wireBody))
+	req.Header.Set("Content-Type", chunkcodec.CompressedEnvelopeContentType())
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d body=%q", rec.Code, http.StatusRequestEntityTooLarge, rec.Body.String())
 	}
 }
 
