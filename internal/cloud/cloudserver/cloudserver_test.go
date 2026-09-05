@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	cloudauth "github.com/Gentleman-Programming/engram/v2/internal/cloud/auth"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/chunkcodec"
 	"github.com/Gentleman-Programming/engram/v2/internal/cloud/cloudstore"
 	"github.com/Gentleman-Programming/engram/v2/internal/cloud/dashboard"
 	"github.com/Gentleman-Programming/engram/v2/internal/store"
@@ -206,6 +207,211 @@ func TestHandlerSyncPushPullRoundTrip(t *testing.T) {
 	if string(bytes.TrimSpace(pullChunk.Body.Bytes())) != string(normalizedPayload) {
 		t.Fatalf("unexpected chunk body=%q", pullChunk.Body.String())
 	}
+}
+
+func TestHandlerSyncCompressedPushPullRoundTrip(t *testing.T) {
+	st := &fakeStore{}
+	srv := New(st, fakeAuth{}, 0)
+	const sentinel = "WAF-SENTINEL-738"
+	payload := []byte(`{"sessions":[{"id":"s-1","directory":"/tmp/s-1"}],"observations":[{"sync_id":"o-1","session_id":"s-1","type":"discovery","title":"sentinel observation","content":"` + sentinel + `","scope":"project"}]}`)
+	pushPayload := []byte(`{"project":"proj-a","created_by":"tester","data":` + string(payload) + `}`)
+	wireBody, err := chunkcodec.EncodeCompressedEnvelope(pushPayload)
+	if err != nil {
+		t.Fatalf("EncodeCompressedEnvelope: %v", err)
+	}
+	if bytes.Contains(wireBody, []byte(sentinel)) {
+		t.Fatal("compressed push body exposed observation text")
+	}
+
+	pushRec := httptest.NewRecorder()
+	pushReq := httptest.NewRequest(http.MethodPost, "/sync/push", bytes.NewReader(wireBody))
+	pushReq.Header.Set("Content-Type", chunkcodec.CompressedEnvelopeContentType())
+	srv.Handler().ServeHTTP(pushRec, pushReq)
+	if pushRec.Code != http.StatusOK {
+		t.Fatalf("expected compressed /sync/push=200, got %d body=%q", pushRec.Code, pushRec.Body.String())
+	}
+
+	normalizedPayload, err := coerceChunkProject(payload, "proj-a")
+	if err != nil {
+		t.Fatalf("coerce payload: %v", err)
+	}
+	chunkID := chunkIDFromPayload(normalizedPayload)
+	pullRec := httptest.NewRecorder()
+	pullReq := httptest.NewRequest(http.MethodGet, "/sync/pull/"+chunkID+"?project=proj-a", nil)
+	pullReq.Header.Set("Accept", chunkcodec.CompressedEnvelopeContentType())
+	srv.Handler().ServeHTTP(pullRec, pullReq)
+	if pullRec.Code != http.StatusOK {
+		t.Fatalf("expected compressed /sync/pull=200, got %d body=%q", pullRec.Code, pullRec.Body.String())
+	}
+	if pullRec.Header().Get("Content-Type") != chunkcodec.CompressedEnvelopeContentType() {
+		t.Fatalf("Content-Type = %q, want compressed envelope", pullRec.Header().Get("Content-Type"))
+	}
+	if bytes.Contains(pullRec.Body.Bytes(), []byte(sentinel)) {
+		t.Fatal("compressed pull body exposed observation text")
+	}
+	decoded, err := chunkcodec.DecodeCompressedEnvelope(pullRec.Body.Bytes(), chunkcodec.DefaultMaxDecodedBytes)
+	if err != nil {
+		t.Fatalf("DecodeCompressedEnvelope: %v", err)
+	}
+	if !bytes.Equal(decoded, normalizedPayload) {
+		t.Fatalf("decoded pull payload = %q, want %q", decoded, normalizedPayload)
+	}
+}
+
+func TestHandlerPullChunkCompressionNegotiationAndDecodedSizeLimit(t *testing.T) {
+	const chunkID = "chunk-1"
+	makePayload := func(size int) []byte {
+		prefix := []byte(`{"padding":"`)
+		suffix := []byte(`"}`)
+		return append(append(prefix, bytes.Repeat([]byte("x"), size-len(prefix)-len(suffix))...), suffix...)
+	}
+
+	tests := []struct {
+		name             string
+		accept           string
+		payload          []byte
+		wantContentType  string
+		wantVary         string
+		wantCacheControl string
+	}{
+		{
+			name:             "decoded payload at client limit is compressed",
+			accept:           chunkcodec.CompressedEnvelopeContentType(),
+			payload:          makePayload(int(chunkcodec.DefaultMaxDecodedBytes)),
+			wantContentType:  chunkcodec.CompressedEnvelopeContentType(),
+			wantVary:         "Accept",
+			wantCacheControl: "no-store",
+		},
+		{
+			name:             "decoded payload over client limit falls back to legacy JSON",
+			accept:           chunkcodec.CompressedEnvelopeContentType(),
+			payload:          makePayload(int(chunkcodec.DefaultMaxDecodedBytes) + 1),
+			wantContentType:  "application/json",
+			wantVary:         "Accept",
+			wantCacheControl: "no-store",
+		},
+		{
+			name:             "quality zero falls back to legacy JSON",
+			accept:           chunkcodec.CompressedEnvelopeContentType() + "; q=0",
+			payload:          []byte(`{"sessions":[]}`),
+			wantContentType:  "application/json",
+			wantVary:         "Accept",
+			wantCacheControl: "no-store",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := New(&fakeStore{chunks: map[string][]byte{chunkID: tt.payload}}, fakeAuth{}, 0)
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/sync/pull/"+chunkID+"?project=proj-a", nil)
+			req.Header.Set("Accept", tt.accept)
+			srv.Handler().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d body=%q", rec.Code, http.StatusOK, rec.Body.String())
+			}
+			if got := rec.Header().Get("Content-Type"); got != tt.wantContentType {
+				t.Fatalf("Content-Type = %q, want %q", got, tt.wantContentType)
+			}
+			if got := rec.Header().Get("Vary"); got != tt.wantVary {
+				t.Fatalf("Vary = %q, want %q", got, tt.wantVary)
+			}
+			if got := rec.Header().Get("Cache-Control"); got != tt.wantCacheControl {
+				t.Fatalf("Cache-Control = %q, want %q", got, tt.wantCacheControl)
+			}
+			body := rec.Body.Bytes()
+			if tt.wantContentType == chunkcodec.CompressedEnvelopeContentType() {
+				var err error
+				body, err = chunkcodec.DecodeCompressedEnvelope(body, chunkcodec.DefaultMaxDecodedBytes)
+				if err != nil {
+					t.Fatalf("DecodeCompressedEnvelope: %v", err)
+				}
+			}
+			if !bytes.Equal(body, tt.payload) {
+				t.Fatalf("response payload length = %d, want %d", len(body), len(tt.payload))
+			}
+		})
+	}
+}
+
+func TestHandlerCompressedPushRejectsMalformedUnsupportedAndDecodedSizeLimitedPayloads(t *testing.T) {
+	tests := []struct {
+		name        string
+		body        []byte
+		contentType string
+		limit       int64
+		wantStatus  int
+	}{
+		{
+			name:        "malformed compressed payload",
+			body:        []byte("not-gzip"),
+			contentType: chunkcodec.CompressedEnvelopeContentType(),
+			limit:       1024,
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			name:        "unsupported envelope version",
+			body:        []byte(`{}`),
+			contentType: chunkcodec.CompressedEnvelopeMediaType + "; version=2",
+			limit:       1024,
+			wantStatus:  http.StatusUnsupportedMediaType,
+		},
+		{
+			name:        "decoded payload exceeds limit",
+			body:        mustEncodeCompressedEnvelope(t, []byte(`{"project":"proj-a","data":"`+strings.Repeat("a", 512)+`"}`)),
+			contentType: chunkcodec.CompressedEnvelopeContentType(),
+			limit:       128,
+			wantStatus:  http.StatusRequestEntityTooLarge,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := New(&fakeStore{}, fakeAuth{}, 0, WithMaxPushBodyBytes(tt.limit))
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/sync/push", bytes.NewReader(tt.body))
+			req.Header.Set("Content-Type", tt.contentType)
+			srv.Handler().ServeHTTP(rec, req)
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d body=%q", rec.Code, tt.wantStatus, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestHandlerCompressedPushRejectsCompressedWireBodyOverLimit(t *testing.T) {
+	const wireLimit = int64(128)
+	const lowCompressibilityAlphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+	fixtureData := make([]byte, 384)
+	state := uint32(1)
+	for i := range fixtureData {
+		state = state*1664525 + 1013904223
+		fixtureData[i] = lowCompressibilityAlphabet[(state>>24)%uint32(len(lowCompressibilityAlphabet))]
+	}
+	wireBody := mustEncodeCompressedEnvelope(t, []byte(`{"project":"proj-a","data":"`+string(fixtureData)+`"}`))
+	if int64(len(wireBody)) <= wireLimit {
+		t.Fatalf("compressed wire fixture = %d bytes, must exceed configured wire limit %d", len(wireBody), wireLimit)
+	}
+
+	srv := New(&fakeStore{}, fakeAuth{}, 0, WithMaxPushBodyBytes(wireLimit))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sync/push", bytes.NewReader(wireBody))
+	req.Header.Set("Content-Type", chunkcodec.CompressedEnvelopeContentType())
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d body=%q", rec.Code, http.StatusRequestEntityTooLarge, rec.Body.String())
+	}
+}
+
+func mustEncodeCompressedEnvelope(t *testing.T, payload []byte) []byte {
+	t.Helper()
+	encoded, err := chunkcodec.EncodeCompressedEnvelope(payload)
+	if err != nil {
+		t.Fatalf("EncodeCompressedEnvelope: %v", err)
+	}
+	return encoded
 }
 
 func TestHandlerReturnsUnauthorizedWhenAuthFails(t *testing.T) {
