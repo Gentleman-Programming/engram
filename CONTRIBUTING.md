@@ -58,6 +58,28 @@ All five checks must pass before a PR can be merged.
 
 > **Repo admin note:** Set these as required status checks in branch protection rules for `main`: `Unit Tests`, `E2E Tests`, and `PR Validation`.
 
+### Performance Ratchet
+
+Pushes to `main` compare the store search and scan benchmarks with the exact
+previous `main` SHA from the push event on the same runner. This catches
+statistically significant slowdowns greater than the configured threshold
+without treating timing as a unit-test assertion.
+
+Run `make perf-check` against the committed baseline on a matching local
+configuration. To refresh that reviewed baseline deliberately after an accepted
+performance tradeoff, run `make perf-baseline` and include the baseline change
+with its justification. The baseline records its producing OS, architecture,
+and CPU and is only comparable on a matching host configuration; it is not a
+cross-host latency budget. CI instead compares the event's previous SHA and the
+new revision on one runner.
+
+For a repository's first main push, or when that previous revision has only a
+strict subset of the current benchmark suite, CI enters an explicit bootstrap
+mode. It verifies that the candidate benchmark names exactly match the versioned
+baseline, then deliberately skips a cross-host timing comparison. Later pushes
+must pair every benchmark from both revisions; an empty, renamed, partial, or
+configuration-split comparison fails.
+
 ---
 
 ## Label System
