@@ -3255,6 +3255,53 @@ func TestProjectScopedEndpointsResolveAndValidateProcessOverrides(t *testing.T) 
 	})
 }
 
+func TestContextMaxBytesQuery(t *testing.T) {
+	st := newServerTestStore(t)
+	if err := st.CreateSession("context-budget", "context-budget", t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AddObservation(store.AddObservationParams{
+		SessionID: "context-budget",
+		Project:   "context-budget",
+		Scope:     "project",
+		Type:      "note",
+		Title:     strings.Repeat("x", contextMaxBytes+128),
+		Content:   "context budget test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h := New(st, 0).Handler()
+
+	contextFor := func(t *testing.T, query string) string {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/context?project=context-budget"+query, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("context status = %d body=%q", rec.Code, rec.Body.String())
+		}
+		var body map[string]string
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode context response: %v", err)
+		}
+		return body["context"]
+	}
+
+	unbounded := contextFor(t, "")
+	if got := contextFor(t, "&max_bytes=not-a-number"); got != unbounded {
+		t.Fatal("invalid max_bytes must preserve the unbounded default response")
+	}
+
+	bounded := contextFor(t, "&max_bytes=96")
+	if len(bounded) > 96 || !strings.HasSuffix(bounded, "\n[truncated]\n") {
+		t.Fatalf("max_bytes wiring returned %d bytes: %q", len(bounded), bounded)
+	}
+
+	clamped := contextFor(t, "&max_bytes=999999999")
+	if len(clamped) != contextMaxBytes || !strings.HasSuffix(clamped, "\n[truncated]\n") {
+		t.Fatalf("max_bytes clamp returned %d bytes, want %d", len(clamped), contextMaxBytes)
+	}
+}
+
 func ambiguousProjectHTTPDirectory(t *testing.T) string {
 	t.Helper()
 	parent := t.TempDir()
