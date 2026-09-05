@@ -93,7 +93,7 @@ var currentWorkingDirectory = func() string {
 }
 
 func ensureImplicitSessionWithCWD(s *store.Store, sessionID, project string) error {
-	return s.CreateSession(sessionID, project, currentWorkingDirectory())
+	return s.CreateSessionWithOwnershipMode(sessionID, project, currentWorkingDirectory(), store.SessionOwnershipProjectOwned)
 }
 
 // runtimeSessionDirectory derives the worktree-specific key for omitted
@@ -2115,7 +2115,7 @@ func handleSessionStart(s *store.Store, cfg MCPConfig, activity *SessionActivity
 		activity.RecordToolCall(defaultSessionID(project))
 		resolvedDirectory = runtimeSessionDirectory(resolvedDirectory)
 
-		if err := s.CreateSession(id, project, resolvedDirectory); err != nil {
+		if err := s.CreateSessionWithOwnershipMode(id, project, resolvedDirectory, store.SessionOwnershipShared); err != nil {
 			return mcp.NewToolResultError("Failed to start session: " + err.Error()), nil
 		}
 

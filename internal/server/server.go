@@ -298,9 +298,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		ID        string `json:"id"`
-		Project   string `json:"project"`
-		Directory string `json:"directory"`
+		ID            string `json:"id"`
+		Project       string `json:"project"`
+		Directory     string `json:"directory"`
+		OwnershipMode string `json:"ownership_mode"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, http.StatusBadRequest, "invalid json: "+err.Error())
@@ -311,7 +312,15 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.store.CreateSession(body.ID, body.Project, projectpkg.RuntimeWorktreeDirectory(body.Directory)); err != nil {
+	mode := body.OwnershipMode
+	if mode == "" {
+		mode = store.SessionOwnershipShared
+	}
+	if err := s.store.CreateSessionWithOwnershipMode(body.ID, body.Project, projectpkg.RuntimeWorktreeDirectory(body.Directory), mode); err != nil {
+		if errors.Is(err, store.ErrInvalidSessionOwnershipMode) {
+			jsonError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
