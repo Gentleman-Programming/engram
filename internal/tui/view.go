@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
 	"github.com/Gentleman-Programming/engram/v2/internal/timeutil"
 	"github.com/Gentleman-Programming/engram/v2/internal/version"
 	"github.com/charmbracelet/lipgloss"
@@ -441,7 +442,7 @@ func (m Model) viewObservationDetail() string {
 			timestampStyle.Render(fmt.Sprintf("line %d-%d of %d", m.DetailScroll+1, end, len(contentLines)))))
 	}
 
-	b.WriteString(helpStyle.Render("\n  j/k scroll • c copy • t timeline • esc back"))
+	b.WriteString(observationDetailHelp())
 
 	return b.String()
 }
@@ -833,28 +834,51 @@ func (m Model) observationDetailChrome() string {
 	if obs == nil {
 		return ""
 	}
+	metadata := []string{
+		fmt.Sprintf("%s %s", detailLabelStyle.Render("Type:"), typeBadgeStyle.Render(obs.Type)),
+		fmt.Sprintf("%s %s", detailLabelStyle.Render("Title:"), detailValueStyle.Bold(true).Render(obs.Title)),
+		fmt.Sprintf("%s %s", detailLabelStyle.Render("Session:"), idStyle.Render(obs.SessionID)),
+		fmt.Sprintf("%s %s", detailLabelStyle.Render("Created:"), timestampStyle.Render(localTime(obs.CreatedAt))),
+		fmt.Sprintf("%s %s", detailLabelStyle.Render("State:"), renderObservationState(obs.State())),
+		fmt.Sprintf("%s %s", detailLabelStyle.Render("Pinned:"), detailValueStyle.Render(fmt.Sprintf("%t", obs.Pinned))),
+	}
+	if obs.ReviewAfter != nil {
+		metadata = append(metadata, fmt.Sprintf("%s %s", detailLabelStyle.Render("Review:"), timestampStyle.Render(formatReviewDate(*obs.ReviewAfter))))
+	}
+	if obs.ToolName != nil {
+		metadata = append(metadata, fmt.Sprintf("%s %s", detailLabelStyle.Render("Tool:"), detailValueStyle.Render(*obs.ToolName)))
+	}
+	if obs.Project != nil {
+		metadata = append(metadata, fmt.Sprintf("%s %s", detailLabelStyle.Render("Project:"), projectStyle.Render(*obs.Project)))
+	}
+
+	// On short terminals, remove trailing metadata until chrome leaves one content row.
+	for {
+		chrome := renderObservationDetailChrome(obs, metadata)
+		footer := fmt.Sprintf("\n  %s", timestampStyle.Render("line 1-1 of 1")) + observationDetailHelp()
+		if m.Height <= 0 || m.viewportHeight(chrome+footer) > 0 || len(metadata) == 0 {
+			return chrome
+		}
+		metadata = metadata[:len(metadata)-1]
+	}
+}
+
+func renderObservationDetailChrome(obs *store.Observation, metadata []string) string {
 	var b strings.Builder
 	b.WriteString(headerStyle.Render(fmt.Sprintf("  Observation #%d", obs.ID)))
 	b.WriteString("\n")
-	b.WriteString(fmt.Sprintf("%s %s\n", detailLabelStyle.Render("Type:"), typeBadgeStyle.Render(obs.Type)))
-	b.WriteString(fmt.Sprintf("%s %s\n", detailLabelStyle.Render("Title:"), detailValueStyle.Bold(true).Render(obs.Title)))
-	b.WriteString(fmt.Sprintf("%s %s\n", detailLabelStyle.Render("Session:"), idStyle.Render(obs.SessionID)))
-	b.WriteString(fmt.Sprintf("%s %s\n", detailLabelStyle.Render("Created:"), timestampStyle.Render(localTime(obs.CreatedAt))))
-	b.WriteString(fmt.Sprintf("%s %s\n", detailLabelStyle.Render("State:"), renderObservationState(obs.State())))
-	b.WriteString(fmt.Sprintf("%s %s\n", detailLabelStyle.Render("Pinned:"), detailValueStyle.Render(fmt.Sprintf("%t", obs.Pinned))))
-	if obs.ReviewAfter != nil {
-		b.WriteString(fmt.Sprintf("%s %s\n", detailLabelStyle.Render("Review:"), timestampStyle.Render(formatReviewDate(*obs.ReviewAfter))))
-	}
-	if obs.ToolName != nil {
-		b.WriteString(fmt.Sprintf("%s %s\n", detailLabelStyle.Render("Tool:"), detailValueStyle.Render(*obs.ToolName)))
-	}
-	if obs.Project != nil {
-		b.WriteString(fmt.Sprintf("%s %s\n", detailLabelStyle.Render("Project:"), projectStyle.Render(*obs.Project)))
+	for _, line := range metadata {
+		b.WriteString(line)
+		b.WriteString("\n")
 	}
 	b.WriteString("\n")
 	b.WriteString(sectionHeadingStyle.Render("  Content"))
 	b.WriteString("\n")
 	return b.String()
+}
+
+func observationDetailHelp() string {
+	return helpStyle.Render("\n  j/k scroll • c copy • t timeline • esc back")
 }
 
 func (m Model) observationDetailContentLines() []string {
