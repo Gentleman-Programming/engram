@@ -91,6 +91,12 @@ func TestViewRouterAndErrorRendering(t *testing.T) {
 	}
 }
 
+func TestAppStyleUsesDarkBaseBackground(t *testing.T) {
+	if got := appStyle.GetBackground(); got != colorBase {
+		t.Fatalf("appStyle background = %v, want %v", got, colorBase)
+	}
+}
+
 func TestViewSearchResultsAndScrollIndicator(t *testing.T) {
 	m := New(nil, "")
 	m.Screen = ScreenSearchResults
