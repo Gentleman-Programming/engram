@@ -316,6 +316,43 @@ func TestNudgeBehavior(t *testing.T) {
 	}
 }
 
+func TestNudgeFailsClosedForIncompleteObservations(t *testing.T) {
+	requireHookBinaries(t)
+	for _, tt := range []struct {
+		name         string
+		observations string
+	}{
+		{name: "empty object", observations: `[{}]`},
+		{name: "null timestamp", observations: `[{"created_at":null}]`},
+		{name: "non-string timestamp", observations: `[{"created_at":42}]`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			sessionID := newSessionID(t)
+			markSessionBootstrapped(t, sessionID)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/project/current":
+					_, _ = io.WriteString(w, `{"project":"engram","project_source":"config"}`)
+				case "/sessions/" + sessionID:
+					_, _ = fmt.Fprintf(w, `{"started_at":%q}`, time.Now().Add(-20*time.Minute).UTC().Format(time.RFC3339))
+				case "/observations":
+					_, _ = io.WriteString(w, tt.observations)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+
+			stdin := fmt.Sprintf(`{"session_id":%q,"cwd":%q}`, sessionID, t.TempDir())
+			payload := decodeHookPayload(t, runHook(t, "user-prompt-submit.sh", stdin,
+				map[string]string{"ENGRAM_PORT": serverPort(t, srv)}))
+			if strings.Contains(payload.HookSpecificOutput.AdditionalContext, "MEMORY REMINDER") {
+				t.Fatalf("nudge emitted for incomplete observations: %q", payload.HookSpecificOutput.AdditionalContext)
+			}
+		})
+	}
+}
+
 // passiveCapture is the body subagent-stop.sh POSTs to /observations/passive.
 type passiveCapture struct {
 	SessionID string `json:"session_id"`
