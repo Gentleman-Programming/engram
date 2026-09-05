@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -251,13 +252,15 @@ type fakeGzipWriter struct {
 }
 
 type fakeCloudTransport struct {
-	manifest          *Manifest
-	chunks            map[string][]byte
-	lastCreatedBy     string
-	readChunkErr      error
-	readManifestCalls int
-	writeChunkCalls   int
-	readChunkCalls    int
+	manifest           *Manifest
+	chunks             map[string][]byte
+	lastCreatedBy      string
+	readChunkErr       error
+	writeManifestErr   error
+	readManifestCalls  int
+	writeManifestCalls int
+	writeChunkCalls    int
+	readChunkCalls     int
 }
 
 type fakeUpgradeHooks struct {
@@ -290,6 +293,10 @@ func (f *fakeCloudTransport) ReadManifest() (*Manifest, error) {
 }
 
 func (f *fakeCloudTransport) WriteManifest(m *Manifest) error {
+	f.writeManifestCalls++
+	if f.writeManifestErr != nil {
+		return f.writeManifestErr
+	}
 	f.manifest = m
 	return nil
 }
@@ -2491,9 +2498,10 @@ func TestOwnershipManifestVersionUpgradesLegacyManifestOnEmptyExports(t *testing
 			if err != nil {
 				t.Fatalf("read seeded manifest: %v", err)
 			}
+			expectedChunks := append([]ChunkEntry(nil), manifest.Chunks...)
 			legacyManifest := &Manifest{Version: 1}
 			if tc.keepOldChunks {
-				legacyManifest.Chunks = manifest.Chunks
+				legacyManifest.Chunks = expectedChunks
 			}
 			writeManifestFile(t, syncDir, legacyManifest)
 
@@ -2511,7 +2519,38 @@ func TestOwnershipManifestVersionUpgradesLegacyManifestOnEmptyExports(t *testing
 			if manifest.Version != ownershipModeManifestVersion {
 				t.Fatalf("manifest version = %d, want %d", manifest.Version, ownershipModeManifestVersion)
 			}
+			if tc.keepOldChunks && !reflect.DeepEqual(manifest.Chunks, expectedChunks) {
+				t.Fatalf("manifest chunks = %#v, want %#v", manifest.Chunks, expectedChunks)
+			}
 		})
+	}
+}
+
+func TestOwnershipManifestVersionUpgradeWriteFailureStopsBeforeChunkOrTracking(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSessionWithOwnershipMode("manual-save-project-a", "project-a", "/tmp/a", store.SessionOwnershipProjectOwned); err != nil {
+		t.Fatalf("create project-owned session: %v", err)
+	}
+	wantErr := errors.New("forced early manifest write failure")
+	transport := newFakeCloudTransport()
+	transport.writeManifestErr = wantErr
+
+	_, err := NewWithTransport(s, transport).Export("alice", "project-a")
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("export error = %v, want %v", err, wantErr)
+	}
+	if transport.writeManifestCalls != 1 {
+		t.Fatalf("write manifest calls = %d, want 1", transport.writeManifestCalls)
+	}
+	if transport.writeChunkCalls != 0 || len(transport.chunks) != 0 {
+		t.Fatalf("chunk writes = %d, chunks = %#v; want none", transport.writeChunkCalls, transport.chunks)
+	}
+	synced, err := s.GetSyncedChunks()
+	if err != nil {
+		t.Fatalf("get synced chunks: %v", err)
+	}
+	if len(synced) != 0 {
+		t.Fatalf("synced chunks = %#v, want none", synced)
 	}
 }
 
