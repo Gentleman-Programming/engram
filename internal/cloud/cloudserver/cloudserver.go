@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -468,6 +469,16 @@ func (s *CloudServer) handlePullChunk(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("read chunk: %v", err), http.StatusInternalServerError)
 		return
 	}
+	if chunkcodec.AcceptsCompressedEnvelope(r.Header.Get("Accept")) {
+		compressed, err := chunkcodec.EncodeCompressedEnvelope(chunk)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("compress chunk: %v", err), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", chunkcodec.CompressedEnvelopeContentType())
+		_, _ = w.Write(compressed)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(chunk)
 }
@@ -475,17 +486,33 @@ func (s *CloudServer) handlePullChunk(w http.ResponseWriter, r *http.Request) {
 func (s *CloudServer) handlePushChunk(w http.ResponseWriter, r *http.Request) {
 	maxPushBodyBytes := s.pushBodyLimit()
 	r.Body = http.MaxBytesReader(w, r.Body, maxPushBodyBytes)
-	var req struct {
-		ChunkID         string          `json:"chunk_id"`
-		CreatedBy       string          `json:"created_by"`
-		ClientCreatedAt string          `json:"client_created_at"`
-		Project         string          `json:"project"`
-		Data            json.RawMessage `json:"data"`
+	var req chunkPushRequest
+	compressed, contentTypeErr := chunkcodec.IsCompressedEnvelopeContentType(r.Header.Get("Content-Type"))
+	if contentTypeErr != nil {
+		writeActionableError(w, http.StatusUnsupportedMediaType, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodePayloadInvalid, fmt.Sprintf("unsupported push payload: %v", contentTypeErr))
+		return
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	var err error
+	if compressed {
+		var encoded []byte
+		encoded, err = io.ReadAll(r.Body)
+		if err == nil {
+			encoded, err = chunkcodec.DecodeCompressedEnvelope(encoded, maxPushBodyBytes)
+		}
+		if err == nil {
+			err = json.Unmarshal(encoded, &req)
+		}
+	} else {
+		err = json.NewDecoder(r.Body).Decode(&req)
+	}
+	if err != nil {
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
 			writeActionableError(w, http.StatusRequestEntityTooLarge, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodePayloadTooLarge, fmt.Sprintf("push payload too large (max %d bytes)", maxPushBodyBytes))
+			return
+		}
+		if errors.Is(err, chunkcodec.ErrPayloadTooLarge) {
+			writeActionableError(w, http.StatusRequestEntityTooLarge, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodePayloadTooLarge, fmt.Sprintf("decoded push payload too large (max %d bytes)", maxPushBodyBytes))
 			return
 		}
 		writeActionableError(w, http.StatusBadRequest, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodePayloadInvalid, fmt.Sprintf("invalid push payload: %v", err))
@@ -605,6 +632,14 @@ func (s *CloudServer) handlePushChunk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"status": "ok", "chunk_id": computedChunkID})
+}
+
+type chunkPushRequest struct {
+	ChunkID         string          `json:"chunk_id"`
+	CreatedBy       string          `json:"created_by"`
+	ClientCreatedAt string          `json:"client_created_at"`
+	Project         string          `json:"project"`
+	Data            json.RawMessage `json:"data"`
 }
 
 func chunkIDFromPayload(payload []byte) string {
