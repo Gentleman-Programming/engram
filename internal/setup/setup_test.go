@@ -1645,7 +1645,8 @@ func TestWriteClaudeCodeUserMCP(t *testing.T) {
 	t.Run("rejects symlink without changing its target", func(t *testing.T) {
 		resetSetupSeams(t)
 		home := useTestHome(t)
-		osExecutable = func() (string, error) { return "/new/path/engram", nil }
+		executable := filepath.Join(t.TempDir(), "engram")
+		osExecutable = func() (string, error) { return executable, nil }
 
 		target := filepath.Join(t.TempDir(), "user-owned.json")
 		const original = `{"command":"user-owned"}`
@@ -1712,11 +1713,12 @@ func TestWriteClaudeCodeUserMCP(t *testing.T) {
 		// versioned Cellar path, which broke once brew removed the old version.
 		resetSetupSeams(t)
 		home := useTestHome(t)
-		cellarExe := "/opt/homebrew/Cellar/engram/1.20.0/bin/engram"
-		stableSymlink := "/opt/homebrew/bin/engram"
+		brewPrefix := t.TempDir()
+		cellarExe := filepath.Join(brewPrefix, "Cellar", "engram", "1.20.0", "bin", "engram")
+		stableSymlink := filepath.Join(brewPrefix, "bin", "engram")
 		osExecutable = func() (string, error) { return cellarExe, nil }
 		statFn = func(name string) (os.FileInfo, error) {
-			if filepath.ToSlash(name) == stableSymlink {
+			if filepath.ToSlash(name) == filepath.ToSlash(stableSymlink) {
 				return nil, nil // stable symlink exists on disk
 			}
 			return nil, os.ErrNotExist
@@ -1739,7 +1741,7 @@ func TestWriteClaudeCodeUserMCP(t *testing.T) {
 		if !ok {
 			t.Fatalf("expected string command, got %#v", cfg["command"])
 		}
-		if filepath.ToSlash(got) != stableSymlink {
+		if filepath.ToSlash(got) != filepath.ToSlash(stableSymlink) {
 			t.Fatalf("expected stable symlink %q, got %q", stableSymlink, got)
 		}
 		if strings.Contains(got, "Cellar") {
@@ -1753,7 +1755,7 @@ func TestWriteClaudeCodeUserMCP(t *testing.T) {
 		// must preserve the already-obtained absolute exe, or error.
 		resetSetupSeams(t)
 		home := useTestHome(t)
-		cellarExe := "/opt/homebrew/Cellar/engram/1.20.0/bin/engram"
+		cellarExe := filepath.Join(t.TempDir(), "Cellar", "engram", "1.20.0", "bin", "engram")
 		osExecutable = func() (string, error) { return cellarExe, nil }
 		statFn = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
 
@@ -1780,7 +1782,7 @@ func TestWriteClaudeCodeUserMCP(t *testing.T) {
 		if !filepath.IsAbs(got) {
 			t.Fatalf("expected absolute command, got %q", got)
 		}
-		if filepath.ToSlash(got) != cellarExe {
+		if filepath.ToSlash(got) != filepath.ToSlash(cellarExe) {
 			t.Fatalf("expected absolute exe %q preserved, got %q", cellarExe, got)
 		}
 	})
@@ -1815,7 +1817,8 @@ func TestWriteClaudeCodeUserMCP(t *testing.T) {
 	t.Run("marshal error returns error", func(t *testing.T) {
 		resetSetupSeams(t)
 		useTestHome(t)
-		osExecutable = func() (string, error) { return "/bin/engram", nil }
+		executable := filepath.Join(t.TempDir(), "engram")
+		osExecutable = func() (string, error) { return executable, nil }
 		jsonMarshalIndentFn = func(any, string, string) ([]byte, error) {
 			return nil, errors.New("marshal boom")
 		}
@@ -1829,7 +1832,8 @@ func TestWriteClaudeCodeUserMCP(t *testing.T) {
 	t.Run("non-regular path is rejected", func(t *testing.T) {
 		resetSetupSeams(t)
 		home := useTestHome(t)
-		osExecutable = func() (string, error) { return "/bin/engram", nil }
+		executable := filepath.Join(t.TempDir(), "engram")
+		osExecutable = func() (string, error) { return executable, nil }
 		// Make ~/.claude/mcp/engram.json a directory so write fails
 		mcpDir := filepath.Join(home, ".claude", "mcp")
 		if err := os.MkdirAll(mcpDir, 0755); err != nil {
@@ -1853,7 +1857,8 @@ func TestWriteClaudeCodeUserMCP(t *testing.T) {
 			t.Fatalf("write blocking file: %v", err)
 		}
 		userHomeDir = func() (string, error) { return blocked, nil }
-		osExecutable = func() (string, error) { return "/bin/engram", nil }
+		executable := filepath.Join(t.TempDir(), "engram")
+		osExecutable = func() (string, error) { return executable, nil }
 
 		err := writeClaudeCodeUserMCP()
 		if err == nil || !strings.Contains(err.Error(), "create mcp dir") {
