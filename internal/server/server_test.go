@@ -946,6 +946,33 @@ func TestHandleSearchNoHitsReturnsEmptyArray(t *testing.T) {
 	}
 }
 
+func TestCollectionHandlersNoResultsReturnEmptyArrays(t *testing.T) {
+	srv := New(newServerTestStore(t), 0)
+
+	for _, tt := range []struct {
+		name string
+		path string
+	}{
+		{name: "recent sessions", path: "/sessions/recent"},
+		{name: "recent observations", path: "/observations/recent"},
+		{name: "observations alias", path: "/observations"},
+		{name: "recent prompts", path: "/prompts/recent"},
+		{name: "search prompts", path: "/prompts/search?q=no-hits"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, tt.path, nil))
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET %s = %d, want 200: %s", tt.path, rec.Code, rec.Body.String())
+			}
+			if body := strings.TrimSpace(rec.Body.String()); body != "[]" {
+				t.Fatalf("GET %s body = %q, want []", tt.path, body)
+			}
+		})
+	}
+}
+
 func TestHandleSearchRejectsInvalidMatchMode(t *testing.T) {
 	srv := New(newServerTestStore(t), 0)
 	req := httptest.NewRequest(http.MethodGet, "/search?q=aurora&match_mode=or", nil)
