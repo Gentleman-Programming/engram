@@ -2469,6 +2469,52 @@ func TestOwnershipManifestVersionUpgradesNonEmptyLegacyManifest(t *testing.T) {
 	}
 }
 
+func TestOwnershipManifestVersionUpgradesLegacyManifestOnEmptyExports(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		keepOldChunks bool
+	}{
+		{name: "genuinely empty export", keepOldChunks: true},
+		{name: "deduplicated export"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if err := s.CreateSessionWithOwnershipMode("manual-save-project-a", "project-a", "/tmp/a", store.SessionOwnershipProjectOwned); err != nil {
+				t.Fatalf("create project-owned session: %v", err)
+			}
+			syncDir := filepath.Join(t.TempDir(), ".engram")
+			sy := New(s, syncDir)
+			if _, err := sy.Export("alice", "project-a"); err != nil {
+				t.Fatalf("seed export: %v", err)
+			}
+			manifest, err := NewFileTransport(syncDir).ReadManifest()
+			if err != nil {
+				t.Fatalf("read seeded manifest: %v", err)
+			}
+			legacyManifest := &Manifest{Version: 1}
+			if tc.keepOldChunks {
+				legacyManifest.Chunks = manifest.Chunks
+			}
+			writeManifestFile(t, syncDir, legacyManifest)
+
+			result, err := sy.Export("alice", "project-a")
+			if err != nil {
+				t.Fatalf("export through legacy manifest: %v", err)
+			}
+			if !result.IsEmpty {
+				t.Fatalf("export result = %#v, want empty", result)
+			}
+			manifest, err = NewFileTransport(syncDir).ReadManifest()
+			if err != nil {
+				t.Fatalf("read upgraded manifest: %v", err)
+			}
+			if manifest.Version != ownershipModeManifestVersion {
+				t.Fatalf("manifest version = %d, want %d", manifest.Version, ownershipModeManifestVersion)
+			}
+		})
+	}
+}
+
 func TestSynthesizeMutationsFromChunkPreservesSessionOwnershipMode(t *testing.T) {
 	mutations := synthesizeMutationsFromChunk(ChunkData{Sessions: []store.Session{{
 		ID:            "manual-save-project-a",

@@ -453,6 +453,9 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 	}
 	if projectOwned && manifest.Version < ownershipModeManifestVersion {
 		manifest.Version = ownershipModeManifestVersion
+		if err := sy.writeManifest(manifest); err != nil {
+			return nil, fmt.Errorf("write manifest: %w", err)
+		}
 	}
 	if sy.cloudMode {
 		chunk, mutationSeqs, err := sy.filterByPendingMutations(data, project)
