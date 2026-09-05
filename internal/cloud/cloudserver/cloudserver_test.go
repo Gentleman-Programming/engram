@@ -267,32 +267,36 @@ func TestHandlerPullChunkCompressionNegotiationAndDecodedSizeLimit(t *testing.T)
 	}
 
 	tests := []struct {
-		name            string
-		accept          string
-		payload         []byte
-		wantContentType string
-		wantVary        string
+		name             string
+		accept           string
+		payload          []byte
+		wantContentType  string
+		wantVary         string
+		wantCacheControl string
 	}{
 		{
-			name:            "decoded payload at client limit is compressed",
-			accept:          chunkcodec.CompressedEnvelopeContentType(),
-			payload:         makePayload(int(chunkcodec.DefaultMaxDecodedBytes)),
-			wantContentType: chunkcodec.CompressedEnvelopeContentType(),
-			wantVary:        "Accept",
+			name:             "decoded payload at client limit is compressed",
+			accept:           chunkcodec.CompressedEnvelopeContentType(),
+			payload:          makePayload(int(chunkcodec.DefaultMaxDecodedBytes)),
+			wantContentType:  chunkcodec.CompressedEnvelopeContentType(),
+			wantVary:         "Accept",
+			wantCacheControl: "no-store",
 		},
 		{
-			name:            "decoded payload over client limit falls back to legacy JSON",
-			accept:          chunkcodec.CompressedEnvelopeContentType(),
-			payload:         makePayload(int(chunkcodec.DefaultMaxDecodedBytes) + 1),
-			wantContentType: "application/json",
-			wantVary:        "Accept",
+			name:             "decoded payload over client limit falls back to legacy JSON",
+			accept:           chunkcodec.CompressedEnvelopeContentType(),
+			payload:          makePayload(int(chunkcodec.DefaultMaxDecodedBytes) + 1),
+			wantContentType:  "application/json",
+			wantVary:         "Accept",
+			wantCacheControl: "no-store",
 		},
 		{
-			name:            "quality zero falls back to legacy JSON",
-			accept:          chunkcodec.CompressedEnvelopeContentType() + "; q=0",
-			payload:         []byte(`{"sessions":[]}`),
-			wantContentType: "application/json",
-			wantVary:        "Accept",
+			name:             "quality zero falls back to legacy JSON",
+			accept:           chunkcodec.CompressedEnvelopeContentType() + "; q=0",
+			payload:          []byte(`{"sessions":[]}`),
+			wantContentType:  "application/json",
+			wantVary:         "Accept",
+			wantCacheControl: "no-store",
 		},
 	}
 
@@ -312,6 +316,9 @@ func TestHandlerPullChunkCompressionNegotiationAndDecodedSizeLimit(t *testing.T)
 			}
 			if got := rec.Header().Get("Vary"); got != tt.wantVary {
 				t.Fatalf("Vary = %q, want %q", got, tt.wantVary)
+			}
+			if got := rec.Header().Get("Cache-Control"); got != tt.wantCacheControl {
+				t.Fatalf("Cache-Control = %q, want %q", got, tt.wantCacheControl)
 			}
 			body := rec.Body.Bytes()
 			if tt.wantContentType == chunkcodec.CompressedEnvelopeContentType() {

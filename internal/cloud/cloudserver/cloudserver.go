@@ -469,6 +469,7 @@ func (s *CloudServer) handlePullChunk(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("read chunk: %v", err), http.StatusInternalServerError)
 		return
 	}
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Add("Vary", "Accept")
 	if chunkcodec.AcceptsCompressedEnvelope(r.Header.Get("Accept")) && int64(len(chunk)) <= chunkcodec.DefaultMaxDecodedBytes {
 		compressed, err := chunkcodec.EncodeCompressedEnvelope(chunk)
