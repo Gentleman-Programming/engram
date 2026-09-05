@@ -14120,3 +14120,84 @@ func TestFormatContextWithOptions(t *testing.T) {
 		}
 	})
 }
+
+func TestFormatContextWithOptionsMaxBytes(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("context-budget", "engram", t.TempDir()); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "context-budget",
+		Project:   "engram",
+		Scope:     "project",
+		Type:      "note",
+		Title:     strings.Repeat("ASCII title ", 20),
+		Content:   "context budget test",
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	base := ContextOptions{Sessions: -1, Pinned: -1, Prompts: -1}
+	unbounded, err := s.FormatContextWithOptions("engram", "project", base)
+	if err != nil {
+		t.Fatalf("format unbounded context: %v", err)
+	}
+
+	t.Run("zero preserves the unbounded output byte-for-byte", func(t *testing.T) {
+		got, err := s.FormatContextWithOptions("engram", "project", ContextOptions{
+			Sessions: -1, Pinned: -1, Prompts: -1, MaxBytes: 0,
+		})
+		if err != nil {
+			t.Fatalf("format zero-budget context: %v", err)
+		}
+		if got != unbounded {
+			t.Fatalf("MaxBytes=0 changed context output\ngot:\n%s\nwant:\n%s", got, unbounded)
+		}
+	})
+
+	t.Run("ASCII context never exceeds the requested budget", func(t *testing.T) {
+		const maxBytes = 96
+		if len(unbounded) <= maxBytes {
+			t.Fatalf("test fixture must exceed %d bytes, got %d", maxBytes, len(unbounded))
+		}
+		got, err := s.FormatContextWithOptions("engram", "project", ContextOptions{
+			Sessions: -1, Pinned: -1, Prompts: -1, MaxBytes: maxBytes,
+		})
+		if err != nil {
+			t.Fatalf("format bounded context: %v", err)
+		}
+		if len(got) > maxBytes {
+			t.Fatalf("context is %d bytes, exceeds budget %d", len(got), maxBytes)
+		}
+		if !strings.HasSuffix(got, contextTruncationMarker) {
+			t.Fatalf("truncated context missing marker: %q", got)
+		}
+		if !strings.Contains(got, "ASCII title") {
+			t.Fatalf("expected retained ASCII context before truncation, got %q", got)
+		}
+	})
+}
+
+func TestLimitContextBytesUTF8AndSmallBudget(t *testing.T) {
+	input := "prefix café" + strings.Repeat("界", 10)
+	maxBytes := len(contextTruncationMarker) + len("prefix caf") + 1
+	got := limitContextBytes(input, maxBytes)
+	if got != "prefix caf"+contextTruncationMarker {
+		t.Fatalf("UTF-8 truncation = %q, want %q", got, "prefix caf"+contextTruncationMarker)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("UTF-8 truncation produced invalid UTF-8: %q", got)
+	}
+
+	smallBudget := len(contextTruncationMarker) - 1
+	got = limitContextBytes(input, smallBudget)
+	if len(got) > smallBudget {
+		t.Fatalf("small budget output is %d bytes, exceeds %d", len(got), smallBudget)
+	}
+	if strings.Contains(got, contextTruncationMarker) {
+		t.Fatalf("marker must not be emitted when it does not fit: %q", got)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("small budget output produced invalid UTF-8: %q", got)
+	}
+}

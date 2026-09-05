@@ -4300,6 +4300,10 @@ SELECT 1 FROM (
 // reproduces FormatContext's output byte-for-byte. See issue #163
 // (bounded-size injection).
 type ContextOptions struct {
+	// MaxBytes caps the complete rendered context in bytes. Zero preserves the
+	// unbounded legacy output; a positive value returns at most that many bytes.
+	MaxBytes int
+
 	// Observations caps the "### Recent Observations" section (unpinned).
 	Observations int
 
@@ -4422,7 +4426,35 @@ func (s *Store) FormatContextWithOptions(project, scope string, opts ContextOpti
 		b.WriteString("\n")
 	}
 
-	return b.String(), nil
+	return limitContextBytes(b.String(), opts.MaxBytes), nil
+}
+
+const contextTruncationMarker = "\n[truncated]\n"
+
+// limitContextBytes caps rendered context without splitting a UTF-8 sequence.
+// When the marker fits, it replaces the final part of the context to make the
+// omission explicit while keeping the result within maxBytes.
+func limitContextBytes(context string, maxBytes int) string {
+	if maxBytes <= 0 || len(context) <= maxBytes {
+		return context
+	}
+	if maxBytes < len(contextTruncationMarker) {
+		return truncateUTF8Prefix(context, maxBytes)
+	}
+	return truncateUTF8Prefix(context, maxBytes-len(contextTruncationMarker)) + contextTruncationMarker
+}
+
+func truncateUTF8Prefix(s string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if maxBytes >= len(s) {
+		return s
+	}
+	for maxBytes > 0 && !utf8.RuneStart(s[maxBytes]) {
+		maxBytes--
+	}
+	return s[:maxBytes]
 }
 
 // FormatCompactionContext returns runtime context that is strictly limited to

@@ -925,6 +925,9 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 // GET /context, matching conflictsMaxLimit.
 const contextMaxSectionLimit = 500
 
+// contextMaxBytes is the largest total context budget accepted by GET /context.
+const contextMaxBytes = 64 * 1024
+
 // clampContextLimit caps a positive per-section limit at
 // contextMaxSectionLimit, so `observations=2147483647` cannot reach SQL as a
 // LIMIT wide enough to render a whole project into one response. Unlike
@@ -934,6 +937,16 @@ const contextMaxSectionLimit = 500
 func clampContextLimit(v int) int {
 	if v > contextMaxSectionLimit {
 		return contextMaxSectionLimit
+	}
+	return v
+}
+
+func clampContextBytes(v int) int {
+	if v <= 0 {
+		return 0
+	}
+	if v > contextMaxBytes {
+		return contextMaxBytes
 	}
 	return v
 }
@@ -956,6 +969,7 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 	// clampContextLimit only puts a ceiling on the >0 state; 0 and negatives
 	// pass through untouched so all three states survive.
 	opts := store.ContextOptions{
+		MaxBytes:     clampContextBytes(queryInt(r, "max_bytes", 0)),
 		Observations: clampContextLimit(queryInt(r, "observations", 0)),
 		Prompts:      clampContextLimit(queryInt(r, "prompts", 0)),
 		Sessions:     clampContextLimit(queryInt(r, "sessions", 0)),
