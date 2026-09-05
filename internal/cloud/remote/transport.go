@@ -219,7 +219,7 @@ func (rt *RemoteTransport) WriteChunk(chunkID string, data []byte, entry engrams
 		chunkID = canonicalChunkID
 	}
 
-	body, err := json.Marshal(map[string]any{
+	pushPayload, err := json.Marshal(map[string]any{
 		"chunk_id":          canonicalChunkID,
 		"created_by":        entry.CreatedBy,
 		"client_created_at": strings.TrimSpace(entry.CreatedAt),
@@ -229,6 +229,10 @@ func (rt *RemoteTransport) WriteChunk(chunkID string, data []byte, entry engrams
 	if err != nil {
 		return fmt.Errorf("cloud: marshal push request: %w", err)
 	}
+	body, err := chunkcodec.EncodeCompressedEnvelope(pushPayload)
+	if err != nil {
+		return fmt.Errorf("cloud: compress push request: %w", err)
+	}
 	pushURL, err := rt.endpointURL(nil, "sync", "push")
 	if err != nil {
 		return err
@@ -237,7 +241,7 @@ func (rt *RemoteTransport) WriteChunk(chunkID string, data []byte, entry engrams
 	if err != nil {
 		return fmt.Errorf("cloud: build push request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", chunkcodec.CompressedEnvelopeContentType())
 	rt.setAuthorization(req)
 
 	resp, err := rt.writeHTTPClient.Do(req)
@@ -261,6 +265,7 @@ func (rt *RemoteTransport) ReadChunk(chunkID string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cloud: build pull request: %w", err)
 	}
+	req.Header.Set("Accept", chunkcodec.CompressedEnvelopeContentType())
 	rt.setAuthorization(req)
 	resp, err := rt.httpClient.Do(req)
 	if err != nil {
@@ -280,6 +285,16 @@ func (rt *RemoteTransport) ReadChunk(chunkID string) ([]byte, error) {
 	}
 	if len(data) == 0 {
 		return nil, errors.New("cloud: empty chunk payload")
+	}
+	compressed, err := chunkcodec.IsCompressedEnvelopeContentType(resp.Header.Get("Content-Type"))
+	if err != nil {
+		return nil, fmt.Errorf("cloud: parse chunk response encoding: %w", err)
+	}
+	if compressed {
+		data, err = chunkcodec.DecodeCompressedEnvelope(data, chunkcodec.DefaultMaxDecodedBytes)
+		if err != nil {
+			return nil, fmt.Errorf("cloud: decode compressed chunk %s: %w", chunkID, err)
+		}
 	}
 	return data, nil
 }
