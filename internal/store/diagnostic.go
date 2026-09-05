@@ -14,10 +14,11 @@ import (
 // DiagnosticSessionEvidence is the read-only session projection used by
 // operational diagnostics. It intentionally avoids observation/prompt payloads.
 type DiagnosticSessionEvidence struct {
-	ID        string `json:"id"`
-	Project   string `json:"project"`
-	Directory string `json:"directory"`
-	Name      string `json:"name"`
+	ID            string `json:"id"`
+	Project       string `json:"project"`
+	OwnershipMode string `json:"ownership_mode"`
+	Directory     string `json:"directory"`
+	Name          string `json:"name"`
 }
 
 // OrphanedObservationSessionEvidence identifies observations whose stored
@@ -152,7 +153,7 @@ type SessionProjectReclassificationResult struct {
 func (s *Store) ListDiagnosticSessions(project string) ([]DiagnosticSessionEvidence, error) {
 	project, _ = NormalizeProject(project)
 	project = strings.TrimSpace(project)
-	query := `SELECT id, ifnull(project, ''), ifnull(directory, ''), id FROM sessions`
+	query := `SELECT id, ifnull(project, ''), ifnull(ownership_mode, ''), ifnull(directory, ''), id FROM sessions`
 	args := []any{}
 	if project != "" {
 		query += ` WHERE project = ?`
@@ -169,7 +170,7 @@ func (s *Store) ListDiagnosticSessions(project string) ([]DiagnosticSessionEvide
 	sessions := make([]DiagnosticSessionEvidence, 0)
 	for rows.Next() {
 		var ev DiagnosticSessionEvidence
-		if err := rows.Scan(&ev.ID, &ev.Project, &ev.Directory, &ev.Name); err != nil {
+		if err := rows.Scan(&ev.ID, &ev.Project, &ev.OwnershipMode, &ev.Directory, &ev.Name); err != nil {
 			return nil, err
 		}
 		sessions = append(sessions, ev)
@@ -882,7 +883,11 @@ func (s *Store) ApplySessionProjectReclassification(actions []SessionProjectRecl
 	result.BackupPath = backupPath
 	err = s.withTx(func(tx *sql.Tx) error {
 		for _, action := range normalized {
-			res, err := s.execHook(tx, `UPDATE sessions SET project = ? WHERE id = ? AND project = ?`, action.ToProject, action.SessionID, action.FromProject)
+			res, err := s.execHook(tx, `UPDATE sessions
+				SET project = ?, ownership_mode = CASE
+					WHEN id = 'manual-save-' || ? THEN 'project_owned'
+					ELSE 'shared' END
+				WHERE id = ? AND project = ?`, action.ToProject, action.ToProject, action.SessionID, action.FromProject)
 			if err != nil {
 				return fmt.Errorf("reclassify session %q: %w", action.SessionID, err)
 			}

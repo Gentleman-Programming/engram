@@ -208,6 +208,17 @@ var runUpgradeBootstrap = func(s *store.Store, project string, cc *cloudconfig.C
 	return engramsync.BootstrapProject(s, transport, engramsync.UpgradeBootstrapOptions{Project: project, CreatedBy: "engram-cloud-upgrade"})
 }
 
+var runUpgradeRemirror = func(s *store.Store, project string, cc *cloudconfig.Config) (*engramsync.SyncResult, error) {
+	transport, err := remote.NewRemoteTransport(cc.ServerURL, cc.Token, project)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.RemirrorProject(project); err != nil {
+		return nil, err
+	}
+	return engramsync.NewCloudWithTransport(s, transport, project).Export("engram-cloud-remirror", project)
+}
+
 func cmdCloud(cfg store.Config) {
 	if len(os.Args) < 3 {
 		fmt.Fprintln(os.Stderr, "usage: engram cloud <subcommand> [options]")
@@ -292,7 +303,7 @@ func cmdCloudRepair() {
 
 func cmdCloudUpgrade(cfg store.Config) {
 	if len(os.Args) < 4 {
-		fmt.Fprintln(os.Stderr, "usage: engram cloud upgrade <doctor|repair|bootstrap|status|rollback> --project <name>")
+		fmt.Fprintln(os.Stderr, "usage: engram cloud upgrade <doctor|repair|bootstrap|remirror|status|rollback> --project <name>")
 		exitFunc(1)
 		return
 	}
@@ -300,8 +311,9 @@ func cmdCloudUpgrade(cfg store.Config) {
 	if command == "--help" || command == "-h" || command == "help" {
 		fmt.Println("engram cloud upgrade")
 		fmt.Println("workflow: doctor -> repair -> bootstrap -> status/rollback")
+		fmt.Println("recovery: use remirror only to rebuild cloud state from authoritative local data")
 		fmt.Println("cloud is opt-in replication/shared access; local SQLite remains source of truth")
-		fmt.Println("usage: engram cloud upgrade <doctor|repair|bootstrap|status|rollback> --project <name>")
+		fmt.Println("usage: engram cloud upgrade <doctor|repair|bootstrap|remirror|status|rollback> --project <name>")
 		return
 	}
 	switch command {
@@ -311,13 +323,15 @@ func cmdCloudUpgrade(cfg store.Config) {
 		cmdCloudUpgradeRepair(cfg)
 	case "bootstrap":
 		cmdCloudUpgradeBootstrap(cfg)
+	case "remirror":
+		cmdCloudUpgradeRemirror(cfg)
 	case "status":
 		cmdCloudUpgradeStatus(cfg)
 	case "rollback":
 		cmdCloudUpgradeRollback(cfg)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown cloud upgrade command: %s\n", command)
-		fmt.Fprintln(os.Stderr, "supported cloud upgrade commands: doctor, repair, bootstrap, status, rollback")
+		fmt.Fprintln(os.Stderr, "supported cloud upgrade commands: doctor, repair, bootstrap, remirror, status, rollback")
 		exitFunc(1)
 	}
 }
@@ -529,6 +543,45 @@ func cmdCloudUpgradeBootstrap(cfg store.Config) {
 	fmt.Printf("stage: %s\n", result.Stage)
 	fmt.Printf("resumed: %t\n", result.Resumed)
 	fmt.Printf("noop: %t\n", result.NoOp)
+}
+
+func cmdCloudUpgradeRemirror(cfg store.Config) {
+	project := parseCloudUpgradeProjectArg(os.Args[4:])
+	if project == "" {
+		fmt.Fprintln(os.Stderr, "usage: engram cloud upgrade remirror --project <name>")
+		fmt.Fprintln(os.Stderr, "error: --project is required")
+		exitFunc(1)
+		return
+	}
+	s, err := storeNew(cfg)
+	if err != nil {
+		fatal(err)
+		return
+	}
+	defer s.Close()
+	cc, err := resolveCloudRuntimeConfig(cfg)
+	if err != nil {
+		fatal(err)
+		return
+	}
+	if cc == nil || strings.TrimSpace(cc.ServerURL) == "" {
+		fatal(fmt.Errorf("cloud upgrade remirror requires configured cloud server"))
+		return
+	}
+	validatedURL, err := cloudconfig.ValidateServerURL(cc.ServerURL)
+	if err != nil {
+		fatal(fmt.Errorf("invalid cloud runtime server URL: %w", err))
+		return
+	}
+	cc.ServerURL = validatedURL
+	result, err := runUpgradeRemirror(s, project, cc)
+	if err != nil {
+		fatal(fmt.Errorf("cloud remirror: %w", err))
+		return
+	}
+	fmt.Printf("project: %s\n", project)
+	fmt.Printf("chunks_exported: %d\n", result.ChunksExported)
+	fmt.Printf("mutations_exported: %d\n", result.MutationsExported)
 }
 
 func cmdCloudUpgradeStatus(cfg store.Config) {

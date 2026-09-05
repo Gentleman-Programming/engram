@@ -43,6 +43,65 @@ func TestNewRemoteTransportUsesOperationSpecificTimeouts(t *testing.T) {
 	}
 }
 
+func TestNewRemoteTransportRequiresHTTPSForBearerToken(t *testing.T) {
+	if _, err := NewRemoteTransport("http://cloud.example.test", "token", "proj-a"); err == nil || !strings.Contains(err.Error(), "HTTPS") {
+		t.Fatalf("NewRemoteTransport with bearer token over HTTP error = %v, want HTTPS requirement", err)
+	}
+
+	rt, err := NewRemoteTransport("http://cloud.example.test", "", "proj-a")
+	if err != nil {
+		t.Fatalf("NewRemoteTransport tokenless HTTP: %v", err)
+	}
+	if rt == nil {
+		t.Fatal("NewRemoteTransport tokenless HTTP returned nil transport")
+	}
+}
+
+func TestRemoteTransportRejectsBearerTokenHTTPRedirect(t *testing.T) {
+	insecure := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("bearer-token request reached HTTP redirect target")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer insecure.Close()
+
+	secure := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, insecure.URL, http.StatusFound)
+	}))
+	defer secure.Close()
+
+	rt, err := NewRemoteTransport(secure.URL, "token", "proj-a")
+	if err != nil {
+		t.Fatalf("NewRemoteTransport: %v", err)
+	}
+	rt.httpClient.Transport = secure.Client().Transport
+
+	_, err = rt.ReadManifest()
+	if err == nil || !strings.Contains(err.Error(), "HTTPS") {
+		t.Fatalf("ReadManifest redirect error = %v, want HTTPS requirement", err)
+	}
+}
+
+func TestRemoteTransportAllowsTokenlessHTTPRedirect(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"version":1,"chunks":[]}`))
+	}))
+	defer target.Close()
+
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer source.Close()
+
+	rt, err := NewRemoteTransport(source.URL, "", "proj-a")
+	if err != nil {
+		t.Fatalf("NewRemoteTransport: %v", err)
+	}
+	if _, err := rt.ReadManifest(); err != nil {
+		t.Fatalf("ReadManifest through tokenless HTTP redirect: %v", err)
+	}
+}
+
 func TestRemoteTransportUsesDedicatedWriteClient(t *testing.T) {
 	var ordinaryRequests, writeRequests int
 	rt := &RemoteTransport{
@@ -109,7 +168,7 @@ func TestReadManifestReturnsHTTPStatusErrorForAuthAndPolicyFailures(t *testing.T
 			}))
 			defer srv.Close()
 
-			rt, err := NewRemoteTransport(srv.URL, "token", "proj-a")
+			rt, err := NewRemoteTransport(srv.URL, "", "proj-a")
 			if err != nil {
 				t.Fatalf("NewRemoteTransport: %v", err)
 			}
@@ -138,7 +197,7 @@ func TestReadManifestParsesMachineActionableErrorPayload(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	rt, err := NewRemoteTransport(srv.URL, "token", "proj-a")
+	rt, err := NewRemoteTransport(srv.URL, "", "proj-a")
 	if err != nil {
 		t.Fatalf("NewRemoteTransport: %v", err)
 	}
@@ -198,7 +257,7 @@ func TestWriteChunkCanonicalizesPayloadAndChunkID(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	rt, err := NewRemoteTransport(srv.URL, "token", "proj-a")
+	rt, err := NewRemoteTransport(srv.URL, "", "proj-a")
 	if err != nil {
 		t.Fatalf("NewRemoteTransport: %v", err)
 	}
@@ -275,7 +334,7 @@ func TestRemoteTransportBuildsRequestURLsFromBasePath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	rt, err := NewRemoteTransport(srv.URL+"/api/v1", "token", "proj-a")
+	rt, err := NewRemoteTransport(srv.URL+"/api/v1", "", "proj-a")
 	if err != nil {
 		t.Fatalf("NewRemoteTransport: %v", err)
 	}

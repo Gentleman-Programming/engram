@@ -319,6 +319,66 @@ func TestClaudeSaveNudgeCompatibilityRoutes(t *testing.T) {
 	}
 }
 
+func TestHandleCreateSessionOwnershipModeContract(t *testing.T) {
+	st := newServerTestStore(t)
+	h := New(st, 0).Handler()
+	for _, tc := range []struct {
+		name       string
+		id         string
+		body       string
+		wantStatus int
+		wantMode   string
+	}{
+		{name: "omitted defaults to shared", id: "mode-omitted", body: `{"id":"mode-omitted","project":"project-a"}`, wantStatus: http.StatusCreated, wantMode: store.SessionOwnershipShared},
+		{name: "explicit shared", id: "mode-shared", body: `{"id":"mode-shared","project":"project-a","ownership_mode":"shared"}`, wantStatus: http.StatusCreated, wantMode: store.SessionOwnershipShared},
+		{name: "explicit project owned", id: "mode-owned", body: `{"id":"mode-owned","project":"project-a","ownership_mode":"project_owned"}`, wantStatus: http.StatusCreated, wantMode: store.SessionOwnershipProjectOwned},
+		{name: "invalid mode", id: "mode-invalid", body: `{"id":"mode-invalid","project":"project-a","ownership_mode":"exclusive"}`, wantStatus: http.StatusBadRequest},
+		{name: "missing project", id: "mode-missing-project", body: `{"id":"mode-missing-project"}`, wantStatus: http.StatusBadRequest},
+		{name: "empty project", id: "mode-empty-project", body: `{"id":"mode-empty-project","project":""}`, wantStatus: http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(tc.body)))
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("POST /sessions = %d, want %d: %s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			var response map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if tc.wantStatus == http.StatusCreated {
+				if response["status"] != "created" {
+					t.Fatalf("success response = %#v", response)
+				}
+				id := response["id"].(string)
+				session, err := st.GetSession(id)
+				if err != nil || session.OwnershipMode != tc.wantMode {
+					t.Fatalf("stored session = %#v, %v; want mode %q", session, err, tc.wantMode)
+				}
+				return
+			}
+			if response["error"] == "" {
+				t.Fatalf("error response = %#v, want error body", response)
+			}
+			if _, err := st.GetSession(tc.id); !errors.Is(err, sql.ErrNoRows) {
+				t.Fatalf("invalid request created session %q: %v", tc.id, err)
+			}
+		})
+	}
+
+	t.Run("storage failure remains internal server error", func(t *testing.T) {
+		brokenStore := newServerTestStore(t)
+		if err := brokenStore.Close(); err != nil {
+			t.Fatalf("close store: %v", err)
+		}
+		rec := httptest.NewRecorder()
+		New(brokenStore, 0).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(`{"id":"mode-storage-error","project":"project-a","ownership_mode":"shared"}`)))
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("POST /sessions with closed store = %d, want 500: %s", rec.Code, rec.Body.String())
+		}
+	})
+}
+
 func TestHandleCreateSessionStoresRuntimeWorktreeDirectory(t *testing.T) {
 	root := t.TempDir()
 	nested := filepath.Join(root, "nested", "child")

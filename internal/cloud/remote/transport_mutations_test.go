@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -28,17 +29,13 @@ func TestMutationTransportPushAccepted(t *testing.T) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		if r.Header.Get("Authorization") != "Bearer token123" {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"accepted_seqs":[1,2,3]}`))
 	}))
 	defer srv.Close()
 
-	mt := mustNewMutationTransport(t, srv.URL, "token123")
+	mt := mustNewMutationTransport(t, srv.URL, "")
 	entries := []MutationEntry{
 		{Project: "proj-a", Entity: "obs", EntityKey: "k1", Op: "upsert", Payload: json.RawMessage(`{}`)},
 		{Project: "proj-a", Entity: "obs", EntityKey: "k2", Op: "upsert", Payload: json.RawMessage(`{}`)},
@@ -60,7 +57,7 @@ func TestMutationTransportPushUnauth(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mt := mustNewMutationTransport(t, srv.URL, "bad-token")
+	mt := mustNewMutationTransport(t, srv.URL, "")
 	_, err := mt.PushMutations([]MutationEntry{{Project: "proj-a", Entity: "obs", EntityKey: "k1", Op: "upsert"}})
 	if err == nil {
 		t.Fatal("expected error")
@@ -81,10 +78,6 @@ func TestMutationTransportPullSinceSeq(t *testing.T) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		if r.Header.Get("Authorization") != "Bearer token123" {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
 		sinceSeq := r.URL.Query().Get("since_seq")
 		limit := r.URL.Query().Get("limit")
 		if sinceSeq == "" || limit == "" {
@@ -97,7 +90,7 @@ func TestMutationTransportPullSinceSeq(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mt := mustNewMutationTransport(t, srv.URL, "token123")
+	mt := mustNewMutationTransport(t, srv.URL, "")
 	resp, err := mt.PullMutations(5, 100)
 	if err != nil {
 		t.Fatalf("PullMutations: %v", err)
@@ -123,7 +116,7 @@ func TestMutationTransportPullUnauth(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mt := mustNewMutationTransport(t, srv.URL, "bad-token")
+	mt := mustNewMutationTransport(t, srv.URL, "")
 	_, err := mt.PullMutations(0, 100)
 	if err == nil {
 		t.Fatal("expected error")
@@ -144,7 +137,7 @@ func TestMutationTransportPush404ServerUnsupported(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mt := mustNewMutationTransport(t, srv.URL, "token123")
+	mt := mustNewMutationTransport(t, srv.URL, "")
 	_, err := mt.PushMutations([]MutationEntry{{Project: "proj-a", Entity: "obs", EntityKey: "k1", Op: "upsert"}})
 	if err == nil {
 		t.Fatal("expected error")
@@ -165,7 +158,7 @@ func TestMutationTransportPull404ServerUnsupported(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mt := mustNewMutationTransport(t, srv.URL, "token123")
+	mt := mustNewMutationTransport(t, srv.URL, "")
 	_, err := mt.PullMutations(0, 100)
 	if err == nil {
 		t.Fatal("expected error")
@@ -186,7 +179,7 @@ func TestMutationTransportPush401VsNotFound(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mt := mustNewMutationTransport(t, srv.URL, "bad-token")
+	mt := mustNewMutationTransport(t, srv.URL, "")
 	_, err := mt.PushMutations([]MutationEntry{{Project: "proj-a", Entity: "obs", EntityKey: "k1", Op: "upsert"}})
 	if err == nil {
 		t.Fatal("expected error")
@@ -228,23 +221,130 @@ func TestNewMutationTransportRejectsInvalidURL(t *testing.T) {
 	}
 }
 
-// TestNewMutationTransportAcceptsValidURL verifies BW6 triangulation:
-// valid URLs must be accepted.
-func TestNewMutationTransportAcceptsValidURL(t *testing.T) {
-	cases := []string{
-		"http://localhost:8080",
-		"https://example.com",
-		"http://127.0.0.1:9000/",
-	}
-	for _, u := range cases {
-		mt, err := NewMutationTransport(u, "token")
-		if err != nil {
-			t.Fatalf("expected nil error for URL %q, got %v", u, err)
+func TestNewMutationTransportBearerHTTPSPolicy(t *testing.T) {
+	t.Run("rejects authenticated HTTP", func(t *testing.T) {
+		for _, tc := range []struct {
+			name  string
+			token string
+		}{
+			{name: "plain token", token: "token"},
+			{name: "padded token", token: "  token\t"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				transport, err := NewMutationTransport("http://127.0.0.1:8080", tc.token)
+				if err == nil || transport != nil {
+					t.Fatalf("NewMutationTransport authenticated HTTP = (%v, %v), want nil transport and error", transport, err)
+				}
+			})
 		}
-		if mt == nil {
-			t.Fatalf("expected non-nil transport for URL %q", u)
+	})
+
+	t.Run("preserves tokenless HTTP", func(t *testing.T) {
+		for _, tc := range []struct {
+			name  string
+			token string
+		}{
+			{name: "empty token", token: ""},
+			{name: "whitespace-only token", token: " \t\n "},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Header.Get("Authorization") != "" {
+						t.Errorf("tokenless request authorization = %q, want empty", r.Header.Get("Authorization"))
+					}
+					_, _ = w.Write([]byte(`{"accepted_seqs":[1]}`))
+				}))
+				defer server.Close()
+
+				transport := mustNewMutationTransport(t, server.URL, tc.token)
+				seqs, err := transport.PushMutations([]MutationEntry{{Project: "project-a", Entity: "obs", EntityKey: "key", Op: "upsert"}})
+				if err != nil || !reflect.DeepEqual(seqs, []int64{1}) {
+					t.Fatalf("tokenless HTTP push = (%v, %v), want ([1], nil)", seqs, err)
+				}
+			})
 		}
-	}
+	})
+
+	t.Run("allows authenticated HTTPS", func(t *testing.T) {
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") != "Bearer token" {
+				t.Errorf("authorization = %q, want bearer token", r.Header.Get("Authorization"))
+			}
+			switch r.URL.Path {
+			case "/sync/mutations/push":
+				if r.Method != http.MethodPost {
+					t.Errorf("push method = %s, want POST", r.Method)
+				}
+				_, _ = w.Write([]byte(`{"accepted_seqs":[1]}`))
+			case "/sync/mutations/pull":
+				if r.Method != http.MethodGet {
+					t.Errorf("pull method = %s, want GET", r.Method)
+				}
+				_, _ = w.Write([]byte(`{"mutations":[],"has_more":false,"latest_seq":1}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+
+		transport := mustNewMutationTransport(t, server.URL, "token")
+		transport.httpClient.Transport = server.Client().Transport
+		if _, err := transport.PushMutations([]MutationEntry{{Project: "project-a", Entity: "obs", EntityKey: "key", Op: "upsert"}}); err != nil {
+			t.Fatalf("authenticated HTTPS push: %v", err)
+		}
+		if _, err := transport.PullMutations(0, 100); err != nil {
+			t.Fatalf("authenticated HTTPS pull: %v", err)
+		}
+	})
+
+	t.Run("allows authenticated HTTPS redirects", func(t *testing.T) {
+		type requestDetails struct {
+			method        string
+			authorization string
+		}
+		targetRequests := make(chan requestDetails, 1)
+		targetServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			targetRequests <- requestDetails{method: r.Method, authorization: r.Header.Get("Authorization")}
+			_, _ = w.Write([]byte(`{"accepted_seqs":[1]}`))
+		}))
+		defer targetServer.Close()
+		sourceServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, targetServer.URL+r.URL.Path, http.StatusTemporaryRedirect)
+		}))
+		defer sourceServer.Close()
+
+		transport := mustNewMutationTransport(t, sourceServer.URL, "token")
+		transport.httpClient.Transport = sourceServer.Client().Transport
+		if _, err := transport.PushMutations([]MutationEntry{{Project: "project-a", Entity: "obs", EntityKey: "key", Op: "upsert"}}); err != nil {
+			t.Fatalf("authenticated HTTPS redirect push: %v", err)
+		}
+		got := <-targetRequests
+		if got.method != http.MethodPost || got.authorization != "Bearer token" {
+			t.Fatalf("HTTPS redirect request = method %q authorization %q, want POST with bearer token", got.method, got.authorization)
+		}
+	})
+
+	t.Run("rejects HTTPS downgrade redirects", func(t *testing.T) {
+		downgraded := false
+		downgradeServer := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			downgraded = true
+		}))
+		defer downgradeServer.Close()
+		secureServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, downgradeServer.URL, http.StatusFound)
+		}))
+		defer secureServer.Close()
+
+		transport := mustNewMutationTransport(t, secureServer.URL, "token")
+		transport.httpClient.Transport = secureServer.Client().Transport
+		_, err := transport.PushMutations([]MutationEntry{{Project: "project-a", Entity: "obs", EntityKey: "key", Op: "upsert"}})
+		if err == nil || !strings.Contains(err.Error(), "bearer token redirect requires HTTPS") {
+			t.Fatalf("HTTPS downgrade redirect error = %v, want bearer HTTPS redirect error", err)
+		}
+		if downgraded {
+			t.Fatal("HTTPS downgrade redirect reached the HTTP server")
+		}
+	})
 }
 
 // ─── BC3: 404 warning log ─────────────────────────────────────────────────────
@@ -264,7 +364,7 @@ func TestTransport404LogsServerUnsupportedWarning(t *testing.T) {
 	log.SetOutput(&buf)
 	defer log.SetOutput(orig) // restore to original (never nil — prevents process-wide log corruption)
 
-	mt, err := NewMutationTransport(srv.URL, "token123")
+	mt, err := NewMutationTransport(srv.URL, "")
 	if err != nil {
 		t.Fatalf("NewMutationTransport: %v", err)
 	}

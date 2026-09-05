@@ -3271,6 +3271,139 @@ func TestClaudeCodeUserPromptHookWithoutJQPreservesSessionStateAndNudge(t *testi
 	}
 }
 
+func TestExposeHookToolPreservesLookupName(t *testing.T) {
+	binDir := t.TempDir()
+
+	t.Run("regular file", func(t *testing.T) {
+		toolPath := filepath.Join(t.TempDir(), "regular-tool")
+		if err := os.WriteFile(toolPath, []byte("regular tool"), 0o755); err != nil {
+			t.Fatalf("write regular tool: %v", err)
+		}
+
+		if err := exposeHookTool(binDir, toolPath); err != nil {
+			t.Fatalf("expose regular tool: %v", err)
+		}
+
+		linkPath := filepath.Join(binDir, "regular-tool")
+		if data, err := os.ReadFile(linkPath); err != nil {
+			t.Fatalf("read exposed regular tool: %v", err)
+		} else if string(data) != "regular tool" {
+			t.Fatalf("exposed regular tool = %q, want %q", data, "regular tool")
+		}
+	})
+
+	t.Run("symlink with different target name", func(t *testing.T) {
+		toolDir := t.TempDir()
+		targetDir := filepath.Join(toolDir, "target")
+		if err := os.Mkdir(targetDir, 0o755); err != nil {
+			t.Fatalf("create target directory: %v", err)
+		}
+		targetPath := filepath.Join(targetDir, "resolved-target")
+		if err := os.WriteFile(targetPath, []byte("resolved target"), 0o755); err != nil {
+			t.Fatalf("write resolved target: %v", err)
+		}
+		toolPath := filepath.Join(toolDir, "requested-command")
+		if err := os.Symlink(filepath.Join("target", "resolved-target"), toolPath); err != nil {
+			t.Skipf("create command symlink: %v", err)
+		}
+
+		if err := exposeHookTool(binDir, toolPath); err != nil {
+			t.Fatalf("expose symlinked tool: %v", err)
+		}
+
+		linkPath := filepath.Join(binDir, "requested-command")
+		if data, err := os.ReadFile(linkPath); err != nil {
+			t.Fatalf("read exposed symlinked tool: %v", err)
+		} else if string(data) != "resolved target" {
+			t.Fatalf("exposed symlinked tool = %q, want %q", data, "resolved target")
+		}
+		if _, err := os.Stat(filepath.Join(binDir, "resolved-target")); !os.IsNotExist(err) {
+			t.Fatalf("resolved target basename unexpectedly exposed: %v", err)
+		}
+	})
+
+	t.Run("relative tool path falls back to absolute symlink target", func(t *testing.T) {
+		fallbackBinDir := t.TempDir()
+		rootDir := t.TempDir()
+		toolDir := filepath.Join(rootDir, "tools")
+		targetDir := filepath.Join(toolDir, "target")
+		if err := os.MkdirAll(targetDir, 0o755); err != nil {
+			t.Fatalf("create target directory: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(targetDir, "resolved-target"), []byte("resolved target"), 0o755); err != nil {
+			t.Fatalf("write resolved target: %v", err)
+		}
+		if err := os.Symlink(filepath.Join("target", "resolved-target"), filepath.Join(toolDir, "requested-command")); err != nil {
+			t.Skipf("create command symlink: %v", err)
+		}
+		fallbackProbe := filepath.Join(fallbackBinDir, "symlink-fallback-probe")
+		if err := os.Symlink(filepath.Join(targetDir, "resolved-target"), fallbackProbe); err != nil {
+			t.Skipf("symlink fallback unavailable: %v", err)
+		}
+		if err := os.Remove(fallbackProbe); err != nil {
+			t.Fatalf("remove fallback symlink probe: %v", err)
+		}
+
+		t.Chdir(rootDir)
+		if err := exposeHookToolWithLink(fallbackBinDir, filepath.Join("tools", "requested-command"), func(string, string) error {
+			return fmt.Errorf("force symlink fallback")
+		}); err != nil {
+			t.Fatalf("expose symlinked tool with fallback: %v", err)
+		}
+
+		linkPath := filepath.Join(fallbackBinDir, "requested-command")
+		linkTarget, err := os.Readlink(linkPath)
+		if err != nil {
+			t.Fatalf("read fallback symlink: %v", err)
+		}
+		if !filepath.IsAbs(linkTarget) {
+			t.Fatalf("fallback symlink target = %q, want absolute path", linkTarget)
+		}
+		if data, err := os.ReadFile(linkPath); err != nil {
+			t.Fatalf("read fallback symlink target: %v", err)
+		} else if string(data) != "resolved target" {
+			t.Fatalf("fallback symlink target = %q, want %q", data, "resolved target")
+		}
+	})
+
+	t.Run("broken symlink", func(t *testing.T) {
+		toolPath := filepath.Join(t.TempDir(), "broken-command")
+		if err := os.Symlink(filepath.Join(t.TempDir(), "missing-target"), toolPath); err != nil {
+			t.Skipf("create broken command symlink: %v", err)
+		}
+
+		if err := exposeHookTool(binDir, toolPath); err == nil {
+			t.Fatal("expose broken symlink succeeded, want resolution error")
+		}
+	})
+}
+
+func exposeHookTool(binDir, toolPath string) error {
+	return exposeHookToolWithLink(binDir, toolPath, os.Link)
+}
+
+func exposeHookToolWithLink(binDir, toolPath string, link func(string, string) error) error {
+	linkName := filepath.Base(toolPath)
+	// Hardlink the resolved target, not the lookup path: link(2) does not follow
+	// symlinks, so a Homebrew-style relative symlink (curl -> ../Cellar/curl/x/bin/curl)
+	// would be hardlinked as-is and dangle once placed in the temp bin dir.
+	resolved, err := filepath.EvalSymlinks(toolPath)
+	if err != nil {
+		return fmt.Errorf("resolve tool at %q: %w", toolPath, err)
+	}
+	resolved, err = filepath.Abs(resolved)
+	if err != nil {
+		return fmt.Errorf("make resolved tool path absolute %q: %w", resolved, err)
+	}
+	linkPath := filepath.Join(binDir, linkName)
+	if err := link(resolved, linkPath); err != nil {
+		if err := os.Symlink(resolved, linkPath); err != nil {
+			return fmt.Errorf("expose resolved tool %q as %q: %w", resolved, linkPath, err)
+		}
+	}
+	return nil
+}
+
 func isolatedHookPath(t *testing.T) (string, []string) {
 	t.Helper()
 	if gitPath, err := exec.LookPath("git"); err == nil {
@@ -3294,11 +3427,8 @@ func isolatedHookPath(t *testing.T) (string, []string) {
 		if err != nil {
 			t.Skipf("required hook tool %q is unavailable: %v", tool, err)
 		}
-		linkPath := filepath.Join(binDir, filepath.Base(toolPath))
-		if err := os.Link(toolPath, linkPath); err != nil {
-			if err := os.Symlink(toolPath, linkPath); err != nil {
-				t.Fatalf("expose required hook tool %q without jq: %v", tool, err)
-			}
+		if err := exposeHookTool(binDir, toolPath); err != nil {
+			t.Fatalf("expose required hook tool %q without jq: %v", tool, err)
 		}
 	}
 	assertJQAbsent(t, []string{binDir})

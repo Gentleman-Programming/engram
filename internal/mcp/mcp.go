@@ -93,7 +93,7 @@ var currentWorkingDirectory = func() string {
 }
 
 func ensureImplicitSessionWithCWD(s *store.Store, sessionID, project string) error {
-	return s.CreateSession(sessionID, project, currentWorkingDirectory())
+	return s.CreateSessionWithOwnershipMode(sessionID, project, currentWorkingDirectory(), store.SessionOwnershipProjectOwned)
 }
 
 // runtimeSessionDirectory derives the worktree-specific key for omitted
