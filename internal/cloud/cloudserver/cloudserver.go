@@ -469,7 +469,7 @@ func (s *CloudServer) handlePullChunk(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("read chunk: %v", err), http.StatusInternalServerError)
 		return
 	}
-	if chunkcodec.AcceptsCompressedEnvelope(r.Header.Get("Accept")) {
+	if chunkcodec.AcceptsCompressedEnvelope(r.Header.Get("Accept")) && int64(len(chunk)) <= chunkcodec.DefaultMaxDecodedBytes {
 		compressed, err := chunkcodec.EncodeCompressedEnvelope(chunk)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("compress chunk: %v", err), http.StatusInternalServerError)

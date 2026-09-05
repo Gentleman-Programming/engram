@@ -76,10 +76,24 @@ func TestCompressedEnvelopeRejectsMalformedUnsupportedAndOversizedPayloads(t *te
 }
 
 func TestCompressedEnvelopeAcceptNegotiation(t *testing.T) {
-	if !AcceptsCompressedEnvelope("application/json, " + CompressedEnvelopeContentType()) {
-		t.Fatal("expected supported envelope in Accept header")
+	tests := []struct {
+		name   string
+		accept string
+		want   bool
+	}{
+		{name: "supported envelope", accept: "application/json, " + CompressedEnvelopeContentType(), want: true},
+		{name: "supported envelope with parameters", accept: "application/json; q=0.5, " + CompressedEnvelopeMediaType + "; feature=chunk-pull; version=1", want: true},
+		{name: "quality zero", accept: CompressedEnvelopeContentType() + "; q=0", want: false},
+		{name: "invalid quality", accept: CompressedEnvelopeContentType() + "; q=invalid", want: false},
+		{name: "multiple ranges with acceptable envelope", accept: CompressedEnvelopeContentType() + "; q=0, " + CompressedEnvelopeContentType() + "; q=0.5", want: true},
+		{name: "unsupported envelope version", accept: CompressedEnvelopeMediaType + "; version=2", want: false},
 	}
-	if AcceptsCompressedEnvelope(CompressedEnvelopeMediaType + "; version=2") {
-		t.Fatal("unsupported envelope version must not be accepted")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := AcceptsCompressedEnvelope(tt.accept); got != tt.want {
+				t.Fatalf("AcceptsCompressedEnvelope(%q) = %t, want %t", tt.accept, got, tt.want)
+			}
+		})
 	}
 }

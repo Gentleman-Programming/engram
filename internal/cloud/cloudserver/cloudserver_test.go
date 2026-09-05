@@ -258,6 +258,69 @@ func TestHandlerSyncCompressedPushPullRoundTrip(t *testing.T) {
 	}
 }
 
+func TestHandlerPullChunkCompressionNegotiationAndDecodedSizeLimit(t *testing.T) {
+	const chunkID = "chunk-1"
+	makePayload := func(size int) []byte {
+		prefix := []byte(`{"padding":"`)
+		suffix := []byte(`"}`)
+		return append(append(prefix, bytes.Repeat([]byte("x"), size-len(prefix)-len(suffix))...), suffix...)
+	}
+
+	tests := []struct {
+		name            string
+		accept          string
+		payload         []byte
+		wantContentType string
+	}{
+		{
+			name:            "decoded payload at client limit is compressed",
+			accept:          chunkcodec.CompressedEnvelopeContentType(),
+			payload:         makePayload(int(chunkcodec.DefaultMaxDecodedBytes)),
+			wantContentType: chunkcodec.CompressedEnvelopeContentType(),
+		},
+		{
+			name:            "decoded payload over client limit falls back to legacy JSON",
+			accept:          chunkcodec.CompressedEnvelopeContentType(),
+			payload:         makePayload(int(chunkcodec.DefaultMaxDecodedBytes) + 1),
+			wantContentType: "application/json",
+		},
+		{
+			name:            "quality zero falls back to legacy JSON",
+			accept:          chunkcodec.CompressedEnvelopeContentType() + "; q=0",
+			payload:         []byte(`{"sessions":[]}`),
+			wantContentType: "application/json",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := New(&fakeStore{chunks: map[string][]byte{chunkID: tt.payload}}, fakeAuth{}, 0)
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/sync/pull/"+chunkID+"?project=proj-a", nil)
+			req.Header.Set("Accept", tt.accept)
+			srv.Handler().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d body=%q", rec.Code, http.StatusOK, rec.Body.String())
+			}
+			if got := rec.Header().Get("Content-Type"); got != tt.wantContentType {
+				t.Fatalf("Content-Type = %q, want %q", got, tt.wantContentType)
+			}
+			body := rec.Body.Bytes()
+			if tt.wantContentType == chunkcodec.CompressedEnvelopeContentType() {
+				var err error
+				body, err = chunkcodec.DecodeCompressedEnvelope(body, chunkcodec.DefaultMaxDecodedBytes)
+				if err != nil {
+					t.Fatalf("DecodeCompressedEnvelope: %v", err)
+				}
+			}
+			if !bytes.Equal(body, tt.payload) {
+				t.Fatalf("response payload length = %d, want %d", len(body), len(tt.payload))
+			}
+		})
+	}
+}
+
 func TestHandlerCompressedPushRejectsMalformedUnsupportedAndOversizedPayloads(t *testing.T) {
 	tests := []struct {
 		name        string

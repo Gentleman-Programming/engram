@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime"
+	"strconv"
 	"strings"
 )
 
@@ -55,10 +57,17 @@ func IsCompressedEnvelopeContentType(contentType string) (bool, error) {
 // envelope. Requests without that explicit advertisement receive legacy JSON.
 func AcceptsCompressedEnvelope(accept string) bool {
 	for _, value := range strings.Split(accept, ",") {
-		ok, err := IsCompressedEnvelopeContentType(strings.TrimSpace(value))
-		if err == nil && ok {
-			return true
+		mediaType, params, err := mime.ParseMediaType(strings.TrimSpace(value))
+		if err != nil || mediaType != CompressedEnvelopeMediaType || params["version"] != envelopeVersion {
+			continue
 		}
+		if quality, ok := params["q"]; ok {
+			qualityValue, err := strconv.ParseFloat(quality, 64)
+			if err != nil || math.IsNaN(qualityValue) || qualityValue < 0 || qualityValue > 1 || qualityValue == 0 {
+				continue
+			}
+		}
+		return true
 	}
 	return false
 }

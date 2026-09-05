@@ -1,6 +1,7 @@
 package remote
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -333,6 +334,58 @@ func TestReadChunkAcceptsCompressedAndLegacyResponses(t *testing.T) {
 			}
 			if string(got) != string(payload) {
 				t.Fatalf("payload = %q, want %q", got, payload)
+			}
+		})
+	}
+}
+
+func TestReadChunkRejectsInvalidCompressedResponses(t *testing.T) {
+	overLimit, err := chunkcodec.EncodeCompressedEnvelope(bytes.Repeat([]byte("x"), int(chunkcodec.DefaultMaxDecodedBytes)+1))
+	if err != nil {
+		t.Fatalf("EncodeCompressedEnvelope: %v", err)
+	}
+
+	tests := []struct {
+		name        string
+		contentType string
+		body        []byte
+		want        error
+	}{
+		{
+			name:        "malformed gzip",
+			contentType: chunkcodec.CompressedEnvelopeContentType(),
+			body:        []byte("not-gzip"),
+		},
+		{
+			name:        "unsupported envelope version",
+			contentType: chunkcodec.CompressedEnvelopeMediaType + "; version=2",
+			body:        []byte("ignored"),
+			want:        chunkcodec.ErrUnsupportedEnvelopeVersion,
+		},
+		{
+			name:        "decoded payload over client limit",
+			contentType: chunkcodec.CompressedEnvelopeContentType(),
+			body:        overLimit,
+			want:        chunkcodec.ErrPayloadTooLarge,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", tt.contentType)
+				_, _ = w.Write(tt.body)
+			}))
+			defer srv.Close()
+
+			rt, err := NewRemoteTransport(srv.URL, "", "proj-a")
+			if err != nil {
+				t.Fatalf("NewRemoteTransport: %v", err)
+			}
+			if _, err := rt.ReadChunk("chunk-1"); err == nil {
+				t.Fatal("expected ReadChunk error")
+			} else if tt.want != nil && !errors.Is(err, tt.want) {
+				t.Fatalf("ReadChunk error = %v, want %v", err, tt.want)
 			}
 		})
 	}
