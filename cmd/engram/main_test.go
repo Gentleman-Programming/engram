@@ -748,12 +748,16 @@ func TestCmdSaveUsesDetectionSeamAndPrintsNormalizationWarning(t *testing.T) {
 	cfg := testConfig(t)
 	cwd := t.TempDir()
 	withCwd(t, cwd)
+	actualCWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get current working directory: %v", err)
+	}
 	withArgs(t, "engram", "save", "resolved-title", "resolved-content")
 
 	originalDetectProjectFull := detectProjectFull
 	detectProjectFull = func(gotCWD string) project.DetectionResult {
-		if gotCWD != cwd {
-			t.Fatalf("detection cwd = %q, want %q", gotCWD, cwd)
+		if gotCWD != actualCWD {
+			t.Fatalf("detection cwd = %q, want %q", gotCWD, actualCWD)
 		}
 		return project.DetectionResult{Project: " Configured--Project "}
 	}
