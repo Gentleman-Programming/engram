@@ -43,6 +43,11 @@ func startUnixSocketServer(t *testing.T, srv *Server, socketPath string) <-chan 
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
+		select {
+		case err := <-done:
+			t.Fatalf("server exited before Unix socket readiness: %v", err)
+		default:
+		}
 		info, err := os.Lstat(socketPath)
 		if err == nil && info.Mode()&os.ModeSocket != 0 {
 			return done
@@ -51,6 +56,41 @@ func startUnixSocketServer(t *testing.T, srv *Server, socketPath string) <-chan 
 	}
 	t.Fatal("Unix socket was not created")
 	return nil
+}
+
+func TestUnixSocketRejectsActiveSocketWithoutDisturbingListener(t *testing.T) {
+	requireUnixSockets(t)
+	socketPath := filepath.Join(t.TempDir(), "engram.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen on Unix socket: %v", err)
+	}
+	active := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})}
+	go func() { _ = active.Serve(listener) }()
+	t.Cleanup(func() {
+		_ = active.Close()
+		_ = listener.Close()
+		_ = os.Remove(socketPath)
+	})
+
+	candidate := New(newServerTestStore(t), 0)
+	candidate.SetSocketPath(socketPath)
+	if err := candidate.Start(); err == nil {
+		t.Fatal("expected active Unix socket to be rejected")
+	}
+
+	client := unixSocketClient(socketPath)
+	t.Cleanup(client.CloseIdleConnections)
+	response, err := client.Get("http://localhost/health")
+	if err != nil {
+		t.Fatalf("active listener no longer serves requests: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("active listener status = %d, want %d", response.StatusCode, http.StatusNoContent)
+	}
 }
 
 func unixSocketClient(socketPath string) *http.Client {

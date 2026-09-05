@@ -24,9 +24,12 @@ func TestResolveServeOptions(t *testing.T) {
 		{name: "positional port overrides environment", envPort: "8090", args: []string{"9000"}, wantPort: 9000},
 		{name: "environment socket uses default port without ambiguity", envSocket: "/tmp/engram.sock", wantPort: 7437, wantSocket: "/tmp/engram.sock"},
 		{name: "socket flag overrides environment socket", envSocket: "/tmp/environment.sock", args: []string{"--socket", "/tmp/flag.sock"}, wantPort: 7437, wantSocket: "/tmp/flag.sock"},
+		{name: "socket equals flag", args: []string{"--socket=/tmp/engram.sock"}, wantPort: 7437, wantSocket: "/tmp/engram.sock"},
 		{name: "socket and environment port are ambiguous", envPort: "8090", args: []string{"--socket", "/tmp/engram.sock"}, wantErr: true},
 		{name: "environment socket and positional port are ambiguous", envSocket: "/tmp/engram.sock", args: []string{"8090"}, wantErr: true},
 		{name: "socket requires path", args: []string{"--socket"}, wantErr: true},
+		{name: "socket equals flag requires path", args: []string{"--socket="}, wantErr: true},
+		{name: "unknown argument is rejected", args: []string{"--unknown"}, wantErr: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("ENGRAM_PORT", tt.envPort)

@@ -199,7 +199,7 @@ The binary includes SQLite (via [modernc.org/sqlite](https://pkg.go.dev/modernc.
 |---|---|---|
 | `ENGRAM_DATA_DIR` | Data directory | `~/.engram` (Windows: `%USERPROFILE%\.engram`) |
 | `ENGRAM_PORT` | HTTP server port | `7437` |
-| `ENGRAM_SOCKET` | POSIX-only Unix-domain socket path. Run `engram serve --socket /path/to/engram.sock` (or set `ENGRAM_SOCKET`) to listen exclusively on the socket; do not combine it with an explicit TCP port. Claude Bash hooks use the same socket when the variable is exported. PowerShell remains TCP-only. | (unset) |
+| `ENGRAM_SOCKET` | POSIX-only Unix-domain socket path. Run `engram serve --socket /path/to/engram.sock` (or set `ENGRAM_SOCKET`) to listen exclusively on the socket; do not combine it with an explicit TCP port. Claude Bash hooks use the same socket when the variable is exported and warn on stderr if socket transport cannot preserve memory capture. PowerShell remains TCP-only. | (unset) |
 
 ---
 

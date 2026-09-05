@@ -247,22 +247,18 @@ func (s *Server) Start() error {
 		serveFn = http.Serve
 	}
 
-	ln, err := listenFn(network, addr)
+	var (
+		ln         net.Listener
+		socketInfo os.FileInfo
+		err        error
+	)
+	if socketPath != "" {
+		ln, socketInfo, err = listenSecureUnixSocket(socketPath)
+	} else {
+		ln, err = listenFn(network, addr)
+	}
 	if err != nil {
 		return fmt.Errorf("engram server: listen %s: %w", addr, err)
-	}
-
-	var socketInfo os.FileInfo
-	if socketPath != "" {
-		if err := os.Chmod(socketPath, 0o600); err != nil {
-			_ = ln.Close()
-			return fmt.Errorf("engram server: secure socket %q: %w", socketPath, err)
-		}
-		socketInfo, err = os.Lstat(socketPath)
-		if err != nil {
-			_ = ln.Close()
-			return fmt.Errorf("engram server: stat socket %q: %w", socketPath, err)
-		}
 	}
 
 	s.closeMu.Lock()
@@ -1074,6 +1070,36 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 
 // ─── Context ─────────────────────────────────────────────────────────────────
 
+// contextMaxSectionLimit is the ceiling for a positive per-section cap on
+// GET /context, matching conflictsMaxLimit.
+const contextMaxSectionLimit = 500
+
+// contextMaxBytes is the largest total context budget accepted by GET /context.
+const contextMaxBytes = 64 * 1024
+
+// clampContextLimit caps a positive per-section limit at
+// contextMaxSectionLimit, so `observations=2147483647` cannot reach SQL as a
+// LIMIT wide enough to render a whole project into one response. Unlike
+// clampConflictsLimit it returns 0 and negatives untouched: those are the
+// legacy-default and omit-the-section states of the ContextOptions
+// convention, not out-of-range input.
+func clampContextLimit(v int) int {
+	if v > contextMaxSectionLimit {
+		return contextMaxSectionLimit
+	}
+	return v
+}
+
+func clampContextBytes(v int) int {
+	if v <= 0 {
+		return 0
+	}
+	if v > contextMaxBytes {
+		return contextMaxBytes
+	}
+	return v
+}
+
 func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 	resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
 	if err != nil {
@@ -1082,7 +1108,25 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 	}
 	scope := r.URL.Query().Get("scope")
 
-	context, err := s.store.FormatContext(resolved.Project, scope)
+	// Per-section caps via store.ContextOptions: 0 (param absent/empty/
+	// unparseable) keeps FormatContext's legacy default, >0 caps the
+	// section, and <0 is a DELIBERATE way to omit the section (and its
+	// "### ..." header) entirely — not a bug to be filtered out like the
+	// `err == nil && n > 0` guard in the upstream reference this was
+	// adapted from (PR #162). queryInt/queryBool already fall back to the
+	// zero value on any bad input, so garbage query params never 4xx here.
+	// clampContextLimit only puts a ceiling on the >0 state; 0 and negatives
+	// pass through untouched so all three states survive.
+	opts := store.ContextOptions{
+		MaxBytes:     clampContextBytes(queryInt(r, "max_bytes", 0)),
+		Observations: clampContextLimit(queryInt(r, "observations", 0)),
+		Prompts:      clampContextLimit(queryInt(r, "prompts", 0)),
+		Sessions:     clampContextLimit(queryInt(r, "sessions", 0)),
+		Pinned:       clampContextLimit(queryInt(r, "pinned", 0)),
+		Compact:      queryBool(r, "compact", false),
+	}
+
+	context, err := s.store.FormatContextWithOptions(resolved.Project, scope, opts)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return

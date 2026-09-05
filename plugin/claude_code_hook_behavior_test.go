@@ -91,6 +91,12 @@ func newSessionID(t *testing.T) string {
 // block the user's message.
 func runHook(t *testing.T, scriptName, stdin string, env map[string]string) string {
 	t.Helper()
+	stdout, _ := runHookWithStderr(t, scriptName, stdin, env)
+	return stdout
+}
+
+func runHookWithStderr(t *testing.T, scriptName, stdin string, env map[string]string) (string, string) {
+	t.Helper()
 	script := filepath.Join(repoRoot(t), "plugin", "claude-code", "scripts", scriptName)
 
 	cmd := exec.Command("bash", script)
@@ -116,7 +122,7 @@ func runHook(t *testing.T, scriptName, stdin string, env map[string]string) stri
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("%s must always exit 0, got %v\nstdout: %q\nstderr: %q", scriptName, err, stdout.String(), stderr.String())
 	}
-	return stdout.String()
+	return stdout.String(), stderr.String()
 }
 
 // serverPort extracts the port of a test server for ENGRAM_PORT. The hooks
@@ -494,7 +500,7 @@ func TestSubagentStopUsesUnixSocketTransport(t *testing.T) {
 	})
 
 	input := fmt.Sprintf(`{"session_id":%q,"cwd":%q,"last_assistant_message":"captured over UDS"}`, "uds-session", t.TempDir())
-	runHook(t, "subagent-stop.sh", input, map[string]string{"ENGRAM_SOCKET": socketPath})
+	runHook(t, "subagent-stop.sh", input, map[string]string{"ENGRAM_SOCKET": "  " + socketPath + "  ", "ENGRAM_PORT": " 7437 "})
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -503,5 +509,21 @@ func TestSubagentStopUsesUnixSocketTransport(t *testing.T) {
 	}
 	if len(captures) != 1 || captures[0].Content != "captured over UDS" {
 		t.Fatalf("captures = %+v, want one UDS passive capture", captures)
+	}
+}
+
+func TestUserPromptSocketFailureWarnsAndReturnsValidJSON(t *testing.T) {
+	requireHookBinaries(t)
+	sessionID := newSessionID(t)
+	markSessionBootstrapped(t, sessionID)
+	socketPath := filepath.Join(t.TempDir(), "unreachable.sock")
+	stdin := fmt.Sprintf(`{"session_id":%q,"cwd":%q}`, sessionID, t.TempDir())
+
+	stdout, stderr := runHookWithStderr(t, "user-prompt-submit.sh", stdin, map[string]string{"ENGRAM_SOCKET": socketPath})
+	if got := strings.TrimSpace(stdout); got != "{}" {
+		t.Fatalf("socket failure stdout = %q, want valid empty JSON", got)
+	}
+	if !strings.Contains(stderr, "warning: Engram") {
+		t.Fatalf("socket failure stderr = %q, want actionable Engram warning", stderr)
 	}
 }

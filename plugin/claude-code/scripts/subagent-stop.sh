@@ -33,6 +33,6 @@ engram_curl -sf "${ENGRAM_URL}/observations/passive" \
     --arg project "$PROJECT" \
     --arg source "subagent-stop" \
     '{session_id: $sid, content: $content, project: $project, source: $source}')" \
-  > /dev/null 2>&1
+  > /dev/null
 
 exit 0

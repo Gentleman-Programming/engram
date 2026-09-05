@@ -639,7 +639,7 @@ fi
 ENCODED_PROJECT=$(printf '%s' "$PROJECT" | jq -sRr @uri)
 LAST_SAVE_JSON=$(engram_curl -sf \
   "${ENGRAM_URL}/observations?project=${ENCODED_PROJECT}&limit=1&sort=created_at:desc" \
-  --max-time "$ENGRAM_HOOK_MAX_TIME" 2>/dev/null)
+  --max-time "$ENGRAM_HOOK_MAX_TIME")
 
 if [ -z "$LAST_SAVE_JSON" ]; then
   # Server not responding or slow — fail silently, no nudge

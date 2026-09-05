@@ -880,6 +880,8 @@ func resolveServeOptions(args []string) (serveOptions, error) {
 			if n, err := strconv.Atoi(arg); err == nil {
 				options.port = n
 				portExplicit = true
+			} else {
+				return serveOptions{}, fmt.Errorf("unknown serve argument: %s", arg)
 			}
 		}
 	}

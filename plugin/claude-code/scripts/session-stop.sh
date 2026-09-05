@@ -18,6 +18,6 @@ engram_curl -sf "${ENGRAM_URL}/sessions/${SESSION_ID}/end" \
   -X POST \
   -H "Content-Type: application/json" \
   -d '{}' \
-  > /dev/null 2>&1
+  > /dev/null
 
 exit 0

@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1006,6 +1007,109 @@ func TestCollectionHandlersNoResultsReturnEmptyArrays(t *testing.T) {
 				t.Fatalf("GET %s body = %q, want []", tt.path, body)
 			}
 		})
+	}
+}
+
+func TestCollectionHandlersReportProjectResolutionErrors(t *testing.T) {
+	t.Setenv("ENGRAM_PROJECT", "")
+
+	st := newServerTestStore(t)
+	for _, project := range []string{"alpha", "beta"} {
+		sessionID := "collection-resolution-" + project
+		if err := st.CreateSession(sessionID, project, t.TempDir()); err != nil {
+			t.Fatalf("create %s session: %v", project, err)
+		}
+		if _, err := st.AddObservation(store.AddObservationParams{
+			SessionID: sessionID,
+			Project:   project,
+			Type:      "note",
+			Title:     "collection resolution " + project,
+			Content:   "test observation",
+			Scope:     "project",
+		}); err != nil {
+			t.Fatalf("add %s observation: %v", project, err)
+		}
+	}
+	parent := ambiguousProjectHTTPDirectory(t)
+	h := New(st, 0).Handler()
+
+	endpoints := []struct {
+		name string
+		path string
+	}{
+		{name: "recent sessions", path: "/sessions/recent"},
+		{name: "recent observations", path: "/observations/recent"},
+		{name: "recent prompts", path: "/prompts/recent"},
+		{name: "search prompts", path: "/prompts/search?q=identity"},
+	}
+	resolutionCases := []struct {
+		name              string
+		query             string
+		wantStatus        int
+		wantCode          string
+		wantProjects      []string
+		sortProjects      bool
+		wantProjectSource string
+		wantProjectPath   string
+	}{
+		{
+			name:         "unknown project",
+			query:        "project=missing-project",
+			wantStatus:   http.StatusNotFound,
+			wantCode:     "unknown_project",
+			wantProjects: []string{"alpha", "beta"},
+		},
+		{
+			name:              "ambiguous cwd",
+			query:             "cwd=" + url.QueryEscape(parent),
+			wantStatus:        http.StatusConflict,
+			wantCode:          "ambiguous_project",
+			wantProjects:      []string{"repo-http-a", "repo-http-b"},
+			sortProjects:      true,
+			wantProjectSource: "ambiguous",
+			wantProjectPath:   parent,
+		},
+	}
+
+	for _, endpoint := range endpoints {
+		for _, resolutionCase := range resolutionCases {
+			t.Run(endpoint.name+"/"+resolutionCase.name, func(t *testing.T) {
+				separator := "?"
+				if strings.Contains(endpoint.path, "?") {
+					separator = "&"
+				}
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, endpoint.path+separator+resolutionCase.query, nil))
+
+				if rec.Code != resolutionCase.wantStatus {
+					t.Fatalf("GET %s = %d, want %d: %s", endpoint.path, rec.Code, resolutionCase.wantStatus, rec.Body.String())
+				}
+				var body struct {
+					Code              string   `json:"code"`
+					AvailableProjects []string `json:"available_projects"`
+					ProjectSource     string   `json:"project_source"`
+					ProjectPath       string   `json:"project_path"`
+				}
+				if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+					t.Fatalf("decode GET %s response: %v", endpoint.path, err)
+				}
+				if body.Code != resolutionCase.wantCode {
+					t.Fatalf("GET %s code = %q, want %q", endpoint.path, body.Code, resolutionCase.wantCode)
+				}
+				if resolutionCase.sortProjects {
+					sort.Strings(body.AvailableProjects)
+				}
+				if strings.Join(body.AvailableProjects, ",") != strings.Join(resolutionCase.wantProjects, ",") {
+					t.Fatalf("GET %s available_projects = %#v, want %#v", endpoint.path, body.AvailableProjects, resolutionCase.wantProjects)
+				}
+				if body.ProjectSource != resolutionCase.wantProjectSource {
+					t.Fatalf("GET %s project_source = %q, want %q", endpoint.path, body.ProjectSource, resolutionCase.wantProjectSource)
+				}
+				if body.ProjectPath != resolutionCase.wantProjectPath {
+					t.Fatalf("GET %s project_path = %q, want %q", endpoint.path, body.ProjectPath, resolutionCase.wantProjectPath)
+				}
+			})
+		}
 	}
 }
 
@@ -3253,6 +3357,53 @@ func TestProjectScopedEndpointsResolveAndValidateProcessOverrides(t *testing.T) 
 			t.Fatalf("current status = %d body=%q", rec.Code, rec.Body.String())
 		}
 	})
+}
+
+func TestContextMaxBytesQuery(t *testing.T) {
+	st := newServerTestStore(t)
+	if err := st.CreateSession("context-budget", "context-budget", t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AddObservation(store.AddObservationParams{
+		SessionID: "context-budget",
+		Project:   "context-budget",
+		Scope:     "project",
+		Type:      "note",
+		Title:     strings.Repeat("x", contextMaxBytes+128),
+		Content:   "context budget test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h := New(st, 0).Handler()
+
+	contextFor := func(t *testing.T, query string) string {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/context?project=context-budget"+query, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("context status = %d body=%q", rec.Code, rec.Body.String())
+		}
+		var body map[string]string
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode context response: %v", err)
+		}
+		return body["context"]
+	}
+
+	unbounded := contextFor(t, "")
+	if got := contextFor(t, "&max_bytes=not-a-number"); got != unbounded {
+		t.Fatal("invalid max_bytes must preserve the unbounded default response")
+	}
+
+	bounded := contextFor(t, "&max_bytes=96")
+	if len(bounded) > 96 || !strings.HasSuffix(bounded, "\n[truncated]\n") {
+		t.Fatalf("max_bytes wiring returned %d bytes: %q", len(bounded), bounded)
+	}
+
+	clamped := contextFor(t, "&max_bytes=999999999")
+	if len(clamped) != contextMaxBytes || !strings.HasSuffix(clamped, "\n[truncated]\n") {
+		t.Fatalf("max_bytes clamp returned %d bytes, want %d", len(clamped), contextMaxBytes)
+	}
 }
 
 func ambiguousProjectHTTPDirectory(t *testing.T) string {
