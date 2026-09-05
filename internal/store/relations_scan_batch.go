@@ -138,10 +138,10 @@ func (s *Store) scanCandidateBatch(sources []scanSourceRow, candidateLimit int) 
 	rowidUnion = dedupSorted(rowidUnion)
 
 	metaByID := make(map[int64]scanCandidateMeta, len(rowidUnion))
-	for _, chunk := range chunk(rowidUnion, scanChunkSize) {
-		placeholders := make([]string, len(chunk))
-		args := make([]any, len(chunk))
-		for i, id := range chunk {
+	for _, idChunk := range chunk(rowidUnion, scanChunkSize) {
+		placeholders := make([]string, len(idChunk))
+		args := make([]any, len(idChunk))
+		for i, id := range idChunk {
 			placeholders[i] = "?"
 			args[i] = id
 		}
@@ -182,14 +182,14 @@ func (s *Store) scanCandidateBatch(sources []scanSourceRow, candidateLimit int) 
 	pageSyncIDs = dedupUnsorted(pageSyncIDs)
 
 	judgedPairs := make(map[string]struct{})
-	for _, chunk := range chunk(pageSyncIDs, scanChunkSize) {
-		placeholders := make([]string, len(chunk))
-		args := make([]any, 0, len(chunk)*2)
-		for i, id := range chunk {
+	for _, syncChunk := range chunk(pageSyncIDs, scanChunkSize) {
+		placeholders := make([]string, len(syncChunk))
+		args := make([]any, 0, len(syncChunk)*2)
+		for i, id := range syncChunk {
 			placeholders[i] = "?"
 			args = append(args, id)
 		}
-		for _, id := range chunk {
+		for _, id := range syncChunk {
 			args = append(args, id)
 		}
 		rows, err := s.db.Query(fmt.Sprintf(`

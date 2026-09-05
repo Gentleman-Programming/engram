@@ -70,6 +70,10 @@ func isValidConfidence(confidence float64) bool {
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
+// defaultCandidateLimit is the fallback per-source candidate budget shared by
+// FindCandidates and the page-batched scan path when no positive limit is set.
+const defaultCandidateLimit = 3
+
 // CandidateOptions controls the FindCandidates query.
 type CandidateOptions struct {
 	// Project filters candidates to the same project as the saved observation.
@@ -351,10 +355,6 @@ type JudgeRelationParams struct {
 //
 // Errors from this method are expected to be logged and swallowed by callers —
 // detection failure must never fail the originating save.
-// defaultCandidateLimit is the fallback per-source candidate budget shared by
-// FindCandidates and the page-batched scan path when no positive limit is set.
-const defaultCandidateLimit = 3
-
 func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidate, error) {
 	// Apply defaults.
 	limit := opts.Limit
