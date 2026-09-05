@@ -199,7 +199,8 @@ func benchmarkJudgeMCPLayer(b *testing.B, newCall func(*testing.B, *judgeMCPBenc
 		calls                int
 	}{
 		{"One/Unenrolled", false, false, 1}, {"One/Enrolled", true, false, 1},
-		{"SequentialThree/Unenrolled", false, false, 3}, {"ConcurrentThree/Unenrolled", false, true, 3},
+		{"SequentialThree/Unenrolled", false, false, 3}, {"SequentialThree/Enrolled", true, false, 3},
+		{"ConcurrentThree/Unenrolled", false, true, 3}, {"ConcurrentThree/Enrolled", true, true, 3},
 	} {
 		b.Run(scenario.name, func(b *testing.B) {
 			fixture := newJudgeMCPBenchmarkFixture(b, scenario.enrolled)

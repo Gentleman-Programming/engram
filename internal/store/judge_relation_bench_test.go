@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -104,6 +105,12 @@ func benchmarkJudgeRelationCalls(b *testing.B, enrolled bool, calls int, concurr
 
 func benchmarkJudgeRelationExternalSQLiteLock(b *testing.B) {
 	fixture := newJudgeRelationBenchmarkFixture(b, true)
+	if _, err := fixture.store.DB().Exec("PRAGMA busy_timeout = 0"); err != nil {
+		b.Fatalf("disable Store SQLite busy timeout: %v", err)
+	}
+	originalBackoffs := sqliteWriteRetryBackoffs
+	sqliteWriteRetryBackoffs = make([]time.Duration, len(originalBackoffs))
+	b.Cleanup(func() { sqliteWriteRetryBackoffs = originalBackoffs })
 	external, err := sql.Open("sqlite", filepath.Join(fixture.store.DataDir(), "engram.db"))
 	if err != nil {
 		b.Fatalf("open external SQLite handle: %v", err)
@@ -111,15 +118,29 @@ func benchmarkJudgeRelationExternalSQLiteLock(b *testing.B) {
 	external.SetMaxOpenConns(1)
 	b.Cleanup(func() { _ = external.Close() })
 	const hold = 25 * time.Millisecond
+	originalExec := fixture.store.hooks.exec
+	var blocked chan<- struct{}
+	var retry <-chan struct{}
+	fixture.store.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+		result, err := originalExec(db, query, args...)
+		if strings.Contains(query, "UPDATE memory_relations") && isRetryableSQLiteLockError(err) {
+			blocked <- struct{}{}
+			<-retry
+		}
+		return result, err
+	}
+	b.Cleanup(func() { fixture.store.hooks.exec = originalExec })
 	b.ReportAllocs()
 	b.ReportMetric(float64(hold/time.Millisecond), "lock-hold-ms")
 	b.ResetTimer()
 	for range b.N {
 		b.StopTimer()
-		if _, err := external.Exec("BEGIN EXCLUSIVE"); err != nil {
+		if _, err := external.Exec("BEGIN IMMEDIATE"); err != nil {
 			b.Fatalf("acquire external SQLite lock: %v", err)
 		}
 		start, done := make(chan struct{}), make(chan error, 1)
+		updateBlocked, retryUpdate := make(chan struct{}), make(chan struct{})
+		blocked, retry = updateBlocked, retryUpdate
 		go func() {
 			<-start
 			_, err := fixture.store.JudgeRelation(judgeRelationBenchmarkParams(fixture.ids[0]))
@@ -127,11 +148,22 @@ func benchmarkJudgeRelationExternalSQLiteLock(b *testing.B) {
 		}()
 		b.StartTimer()
 		close(start)
+		select {
+		case <-updateBlocked:
+		case <-time.After(time.Second):
+			b.StopTimer()
+			_, _ = external.Exec("ROLLBACK")
+			close(retryUpdate)
+			b.Fatal("Store UPDATE did not report a SQLite lock")
+		}
 		time.Sleep(hold)
 		if _, err := external.Exec("COMMIT"); err != nil {
 			b.StopTimer()
+			_, _ = external.Exec("ROLLBACK")
+			close(retryUpdate)
 			b.Fatal(err)
 		}
+		close(retryUpdate)
 		if err := <-done; err != nil {
 			b.StopTimer()
 			b.Fatal(err)
