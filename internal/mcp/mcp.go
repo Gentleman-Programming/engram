@@ -93,7 +93,7 @@ var currentWorkingDirectory = func() string {
 }
 
 func ensureImplicitSessionWithCWD(s *store.Store, sessionID, project string) error {
-	return s.CreateSessionWithOwnershipMode(sessionID, project, currentWorkingDirectory(), store.SessionOwnershipProjectOwned)
+	return s.CreateSession(sessionID, project, currentWorkingDirectory())
 }
 
 // runtimeSessionDirectory derives the worktree-specific key for omitted
@@ -2600,6 +2600,7 @@ func resolveSaveWriteProject(s *store.Store, projectChoice string, explicitProje
 	trimmedProjectChoice := strings.TrimSpace(projectChoice)
 	trimmedReason := strings.TrimSpace(reason)
 	var sessionProject string
+	var sessionMode string
 	var sessionPath string
 	if trimmedSessionID != "" {
 		sess, err := s.GetSession(trimmedSessionID)
@@ -2610,6 +2611,7 @@ func resolveSaveWriteProject(s *store.Store, projectChoice string, explicitProje
 		if err != nil {
 			return projectpkg.DetectionResult{}, err
 		}
+		sessionMode = strings.TrimSpace(sess.OwnershipMode)
 		sessionPath = strings.TrimSpace(sess.Directory)
 	}
 
@@ -2643,7 +2645,7 @@ func resolveSaveWriteProject(s *store.Store, projectChoice string, explicitProje
 		if collisionErr := explicitWriteProjectCollision(trimmedProjectChoice, project, sessionProject, cwdRes); collisionErr != nil {
 			return cwdRes, collisionErr
 		}
-		if sessionProject != "" && project != sessionProject {
+		if sessionMode == store.SessionOwnershipProjectOwned && sessionProject != "" && project != sessionProject {
 			return projectpkg.DetectionResult{}, &sessionProjectMismatchError{
 				SessionID:       trimmedSessionID,
 				SessionProject:  sessionProject,
@@ -2716,7 +2718,7 @@ func resolveSaveWriteProject(s *store.Store, projectChoice string, explicitProje
 		if err != nil {
 			return res, err
 		}
-		if sessionProject != "" {
+		if sessionMode == store.SessionOwnershipProjectOwned && sessionProject != "" {
 			resolvedProject, err := normalizeExplicitWriteProject(res.Project)
 			if err != nil {
 				return projectpkg.DetectionResult{}, err

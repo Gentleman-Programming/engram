@@ -163,7 +163,7 @@ func TestProjectIdentityAdmissionRejectsNullableLegacySessionProjects(t *testing
 	type legacySession struct{ id, project string }
 	s := newTestStoreWithNullableLegacySessions(t,
 		legacySession{"null-session", "<NULL>"},
-		legacySession{"blank-session", " "},
+		legacySession{"blank-session", " \t"},
 	)
 
 	tests := []struct {
@@ -278,6 +278,106 @@ func TestProjectIdentityAdmissionAllowsOwnedWritesAndRejectsReassignment(t *test
 	}
 	if mutations != 2 {
 		t.Fatalf("sync mutations = %d, want 2", mutations)
+	}
+}
+
+func TestCreateProjectOwnedSessionRejectsMismatchWithoutMutation(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSessionWithOwnershipMode("owned-session", "alpha", "/tmp/alpha", SessionOwnershipProjectOwned); err != nil {
+		t.Fatalf("create owned session: %v", err)
+	}
+
+	var mutationsBefore int
+	if err := s.DB().QueryRow("SELECT COUNT(*) FROM sync_mutations").Scan(&mutationsBefore); err != nil {
+		t.Fatalf("count initial mutations: %v", err)
+	}
+	if err := s.CreateSessionWithOwnershipMode("owned-session", "beta", "/tmp/beta", SessionOwnershipProjectOwned); !errors.Is(err, ErrSessionOwnershipMismatch) {
+		t.Fatalf("CreateSessionWithOwnershipMode error = %v, want ErrSessionOwnershipMismatch", err)
+	}
+
+	session, err := s.GetSession("owned-session")
+	if err != nil {
+		t.Fatalf("get owned session: %v", err)
+	}
+	if session.Project != "alpha" || session.OwnershipMode != SessionOwnershipProjectOwned {
+		t.Fatalf("session = %#v, want project alpha and project-owned mode", session)
+	}
+	var observations, prompts, mutationsAfter int
+	if err := s.DB().QueryRow("SELECT COUNT(*) FROM observations").Scan(&observations); err != nil {
+		t.Fatalf("count observations: %v", err)
+	}
+	if err := s.DB().QueryRow("SELECT COUNT(*) FROM user_prompts").Scan(&prompts); err != nil {
+		t.Fatalf("count prompts: %v", err)
+	}
+	if err := s.DB().QueryRow("SELECT COUNT(*) FROM sync_mutations").Scan(&mutationsAfter); err != nil {
+		t.Fatalf("count mutations: %v", err)
+	}
+	if observations != 0 || prompts != 0 || mutationsAfter != mutationsBefore {
+		t.Fatalf("mismatch persisted observations=%d prompts=%d mutations=%d, want observations=0 prompts=0 mutations=%d", observations, prompts, mutationsAfter, mutationsBefore)
+	}
+
+	if err := s.CreateSessionWithOwnershipMode("owned-session", "ALPHA", "/tmp/alpha", SessionOwnershipProjectOwned); err != nil {
+		t.Fatalf("matching normalized project should succeed: %v", err)
+	}
+}
+
+func TestCreateProjectOwnedSessionAdoptsLegacyUnownedProject(t *testing.T) {
+	type legacySession struct{ id, project string }
+	s := newTestStoreWithNullableLegacySessions(t,
+		legacySession{"null-session", "<NULL>"},
+		legacySession{"empty-session", ""},
+		legacySession{"blank-session", " "},
+	)
+
+	for _, sessionID := range []string{"null-session", "empty-session", "blank-session"} {
+		t.Run(sessionID, func(t *testing.T) {
+			if err := s.CreateSessionWithOwnershipMode(sessionID, "target", "/tmp/target", SessionOwnershipProjectOwned); err != nil {
+				t.Fatalf("CreateSessionWithOwnershipMode: %v", err)
+			}
+			session, err := s.GetSession(sessionID)
+			if err != nil {
+				t.Fatalf("get adopted session: %v", err)
+			}
+			if session.Project != "target" || session.OwnershipMode != SessionOwnershipProjectOwned {
+				t.Fatalf("session = %#v, want project target and project-owned mode", session)
+			}
+		})
+	}
+}
+
+func TestAddObservationRejectsProjectOwnedSessionMismatchWithoutMutation(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSessionWithOwnershipMode("owned-session", "alpha", "/tmp/alpha", SessionOwnershipProjectOwned); err != nil {
+		t.Fatalf("create owned session: %v", err)
+	}
+
+	var mutationsBefore int
+	if err := s.DB().QueryRow("SELECT COUNT(*) FROM sync_mutations").Scan(&mutationsBefore); err != nil {
+		t.Fatalf("count initial mutations: %v", err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{SessionID: "owned-session", Type: "note", Title: "mismatch", Content: "must not persist", Project: "beta"}); !errors.Is(err, ErrSessionOwnershipMismatch) {
+		t.Fatalf("AddObservation error = %v, want ErrSessionOwnershipMismatch", err)
+	}
+
+	session, err := s.GetSession("owned-session")
+	if err != nil {
+		t.Fatalf("get owned session: %v", err)
+	}
+	if session.Project != "alpha" || session.OwnershipMode != SessionOwnershipProjectOwned {
+		t.Fatalf("session = %#v, want project alpha and project-owned mode", session)
+	}
+	var observations, prompts, mutationsAfter int
+	if err := s.DB().QueryRow("SELECT COUNT(*) FROM observations").Scan(&observations); err != nil {
+		t.Fatalf("count observations: %v", err)
+	}
+	if err := s.DB().QueryRow("SELECT COUNT(*) FROM user_prompts").Scan(&prompts); err != nil {
+		t.Fatalf("count prompts: %v", err)
+	}
+	if err := s.DB().QueryRow("SELECT COUNT(*) FROM sync_mutations").Scan(&mutationsAfter); err != nil {
+		t.Fatalf("count mutations: %v", err)
+	}
+	if observations != 0 || prompts != 0 || mutationsAfter != mutationsBefore {
+		t.Fatalf("mismatch persisted observations=%d prompts=%d mutations=%d, want observations=0 prompts=0 mutations=%d", observations, prompts, mutationsAfter, mutationsBefore)
 	}
 }
 
@@ -1687,29 +1787,18 @@ func TestFormatCompactionContextIsSessionScoped(t *testing.T) {
 	addObservation("session-a", "recent-a", "recent-content-a", false)
 	addObservation("session-b", "pinned-b", "pinned-content-b", true)
 	addObservation("session-b", "recent-b", "recent-content-b", false)
-	if _, err := s.AddObservation(AddObservationParams{
-		SessionID: "session-a",
-		Type:      "decision",
-		Title:     "foreign-project-observation",
-		Content:   "must-not-appear",
-		Project:   "foreign",
-		Scope:     "project",
-	}); err != nil {
-		t.Fatalf("add foreign-project observation: %v", err)
-	}
+	seedForeignOwnedObservation(t, s, "session-a", "foreign", "foreign-project-observation")
 
 	for _, prompt := range []struct{ sessionID, content string }{
 		{"session-a", "prompt-a"},
 		{"session-b", "prompt-b"},
-		{"session-a", "foreign-project-prompt"},
 	} {
-		project := "engram"
-		if prompt.content == "foreign-project-prompt" {
-			project = "foreign"
-		}
-		if _, err := s.AddPrompt(AddPromptParams{SessionID: prompt.sessionID, Content: prompt.content, Project: project}); err != nil {
+		if _, err := s.AddPrompt(AddPromptParams{SessionID: prompt.sessionID, Content: prompt.content, Project: "engram"}); err != nil {
 			t.Fatalf("add %s: %v", prompt.content, err)
 		}
+	}
+	if _, err := s.db.Exec(`INSERT INTO user_prompts (sync_id, session_id, content, project) VALUES (?, ?, ?, ?)`, newSyncID("prompt"), "session-a", "foreign-project-prompt", "foreign"); err != nil {
+		t.Fatalf("seed foreign-project prompt: %v", err)
 	}
 
 	for _, tc := range []struct {
@@ -2124,6 +2213,9 @@ func TestTopicKeyUpsertIsScopedByProjectAndScope(t *testing.T) {
 	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
+	if err := s.CreateSession("s2", "another-project", "/tmp/another-project"); err != nil {
+		t.Fatalf("create other-project session: %v", err)
+	}
 
 	baseID, err := s.AddObservation(AddObservationParams{
 		SessionID: "s1",
@@ -2152,7 +2244,7 @@ func TestTopicKeyUpsertIsScopedByProjectAndScope(t *testing.T) {
 	}
 
 	otherProjectID, err := s.AddObservation(AddObservationParams{
-		SessionID: "s1",
+		SessionID: "s2",
 		Type:      "architecture",
 		Title:     "Auth model",
 		Content:   "Other project",
@@ -2266,23 +2358,9 @@ func TestExportProjectPreservesSessionReferentialClosure(t *testing.T) {
 		t.Fatalf("create session proj-b: %v", err)
 	}
 
-	if _, err := s.AddObservation(AddObservationParams{
-		SessionID: "sess-owned-by-proj-b",
-		Type:      "note",
-		Title:     "cross-project obs",
-		Content:   "observation references proj-b session",
-		Project:   "proj-a",
-		Scope:     "project",
-	}); err != nil {
-		t.Fatalf("add cross-project observation: %v", err)
-	}
-
-	if _, err := s.AddPrompt(AddPromptParams{
-		SessionID: "sess-owned-by-proj-b",
-		Content:   "cross-project prompt",
-		Project:   "proj-a",
-	}); err != nil {
-		t.Fatalf("add cross-project prompt: %v", err)
+	seedForeignOwnedObservation(t, s, "sess-owned-by-proj-b", "proj-a", "cross-project obs")
+	if _, err := s.db.Exec(`INSERT INTO user_prompts (sync_id, session_id, content, project) VALUES (?, ?, ?, ?)`, newSyncID("prompt"), "sess-owned-by-proj-b", "cross-project prompt", "proj-a"); err != nil {
+		t.Fatalf("seed cross-project prompt: %v", err)
 	}
 
 	exported, err := s.ExportProject("proj-a")
@@ -2325,23 +2403,9 @@ func TestExportProjectDoesNotLeakRowsOwnedByOtherProjectsViaSessionMembership(t 
 		t.Fatalf("create session proj-a: %v", err)
 	}
 
-	if _, err := s.AddObservation(AddObservationParams{
-		SessionID: "sess-proj-a",
-		Type:      "note",
-		Title:     "owned-by-proj-b",
-		Content:   "should not leak in proj-a export",
-		Project:   "proj-b",
-		Scope:     "project",
-	}); err != nil {
-		t.Fatalf("add cross-owned observation: %v", err)
-	}
-
-	if _, err := s.AddPrompt(AddPromptParams{
-		SessionID: "sess-proj-a",
-		Content:   "prompt owned by proj-b",
-		Project:   "proj-b",
-	}); err != nil {
-		t.Fatalf("add cross-owned prompt: %v", err)
+	seedForeignOwnedObservation(t, s, "sess-proj-a", "proj-b", "owned-by-proj-b")
+	if _, err := s.db.Exec(`INSERT INTO user_prompts (sync_id, session_id, content, project) VALUES (?, ?, ?, ?)`, newSyncID("prompt"), "sess-proj-a", "prompt owned by proj-b", "proj-b"); err != nil {
+		t.Fatalf("seed cross-owned prompt: %v", err)
 	}
 
 	if _, err := s.AddObservation(AddObservationParams{
@@ -4805,6 +4869,12 @@ func TestStoreAdditionalQueryAndMutationBranches(t *testing.T) {
 	if err := s.CreateSession("s-q", "engram", "/tmp/engram"); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
+	if err := s.CreateSession("s-q-alpha", "alpha", "/tmp/alpha"); err != nil {
+		t.Fatalf("create alpha session: %v", err)
+	}
+	if err := s.CreateSession("s-q-beta", "beta", "/tmp/beta"); err != nil {
+		t.Fatalf("create beta session: %v", err)
+	}
 
 	longContent := strings.Repeat("x", s.cfg.MaxObservationLength+100)
 	obsID, err := s.AddObservation(AddObservationParams{
@@ -4845,10 +4915,10 @@ func TestStoreAdditionalQueryAndMutationBranches(t *testing.T) {
 		t.Fatalf("expected nil topic key after empty update")
 	}
 
-	if _, err := s.AddPrompt(AddPromptParams{SessionID: "s-q", Content: "alpha prompt", Project: "alpha"}); err != nil {
+	if _, err := s.AddPrompt(AddPromptParams{SessionID: "s-q-alpha", Content: "alpha prompt", Project: "alpha"}); err != nil {
 		t.Fatalf("add alpha prompt: %v", err)
 	}
-	if _, err := s.AddPrompt(AddPromptParams{SessionID: "s-q", Content: "beta prompt", Project: "beta"}); err != nil {
+	if _, err := s.AddPrompt(AddPromptParams{SessionID: "s-q-beta", Content: "beta prompt", Project: "beta"}); err != nil {
 		t.Fatalf("add beta prompt: %v", err)
 	}
 
@@ -6697,7 +6767,7 @@ func TestCreateSessionMutationUsesPersistedCanonicalData(t *testing.T) {
 	if err := s.CreateSession("canonical-session", "engram", "/canonical"); err != nil {
 		t.Fatalf("initial CreateSession: %v", err)
 	}
-	if err := s.CreateSession("canonical-session", "other", "/stale"); err != nil {
+	if err := s.CreateSession("canonical-session", "ENGRAM", "/stale"); err != nil {
 		t.Fatalf("idempotent CreateSession: %v", err)
 	}
 	var raw string
@@ -6736,6 +6806,30 @@ func TestStartSessionCreatesAndIdempotentlyStartsActiveSession(t *testing.T) {
 	}
 	if mutations != 2 {
 		t.Fatalf("session mutations = %d, want 2 for two valid starts", mutations)
+	}
+}
+
+func TestStartSessionAdoptsLegacyUnownedProject(t *testing.T) {
+	type legacySession struct{ id, project string }
+	s := newTestStoreWithNullableLegacySessions(t,
+		legacySession{"null-start-session", "<NULL>"},
+		legacySession{"empty-start-session", ""},
+		legacySession{"blank-start-session", " \t"},
+	)
+
+	for _, sessionID := range []string{"null-start-session", "empty-start-session", "blank-start-session"} {
+		t.Run(sessionID, func(t *testing.T) {
+			if err := s.StartSession(sessionID, "target", "/tmp/target"); err != nil {
+				t.Fatalf("StartSession: %v", err)
+			}
+			session, err := s.GetSession(sessionID)
+			if err != nil {
+				t.Fatalf("get adopted session: %v", err)
+			}
+			if session.Project != "target" || session.OwnershipMode != SessionOwnershipShared {
+				t.Fatalf("session = %#v, want project target and shared mode", session)
+			}
+		})
 	}
 }
 
@@ -7379,8 +7473,8 @@ func TestCreateSessionDoesNotOverwriteExistingProject(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 
-	// Second call with project B should NOT overwrite
-	if err := s.CreateSession("sess-preserve", "projectB", "/tmp/b"); err != nil {
+	// A matching normalized project must not overwrite persisted session data.
+	if err := s.CreateSession("sess-preserve", "PROJECTA", "/tmp/b"); err != nil {
 		t.Fatalf("upsert session: %v", err)
 	}
 
@@ -7404,8 +7498,8 @@ func TestCreateSessionPartialUpsert(t *testing.T) {
 		if err := s.CreateSession("sess-partial-1", "myproject", ""); err != nil {
 			t.Fatalf("create: %v", err)
 		}
-		// Second call fills directory but project stays
-		if err := s.CreateSession("sess-partial-1", "other", "/new/dir"); err != nil {
+		// A matching project fills the missing directory.
+		if err := s.CreateSession("sess-partial-1", "MYPROJECT", "/new/dir"); err != nil {
 			t.Fatalf("upsert: %v", err)
 		}
 		sess, err := s.GetSession("sess-partial-1")
@@ -9056,10 +9150,20 @@ func TestListProjectNames(t *testing.T) {
 	if err := s.CreateSession("s2", "beta", "/tmp"); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
+	if err := s.CreateSession("s3", "gamma", "/tmp"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
 
 	for _, project := range []string{"alpha", "alpha", "beta", "gamma"} {
+		sessionID := "s1"
+		if project == "beta" {
+			sessionID = "s2"
+		}
+		if project == "gamma" {
+			sessionID = "s3"
+		}
 		if _, err := s.AddObservation(AddObservationParams{
-			SessionID: "s1",
+			SessionID: sessionID,
 			Type:      "decision",
 			Title:     "test " + project,
 			Content:   "content for " + project,
@@ -12106,6 +12210,9 @@ func TestObservationsNeedingReview(t *testing.T) {
 	if err := s.CreateSession("review-sess", "review-proj", "/tmp/review"); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
+	if err := s.CreateSession("other-review-sess", "other-proj", "/tmp/other"); err != nil {
+		t.Fatalf("CreateSession other project: %v", err)
+	}
 
 	staleID, err := s.AddObservation(AddObservationParams{SessionID: "review-sess", Type: "decision", Title: "stale", Content: "stale content", Project: "review-proj"})
 	if err != nil {
@@ -12115,7 +12222,7 @@ func TestObservationsNeedingReview(t *testing.T) {
 	if err != nil {
 		t.Fatalf("add future: %v", err)
 	}
-	otherID, err := s.AddObservation(AddObservationParams{SessionID: "review-sess", Type: "decision", Title: "other", Content: "other content", Project: "other-proj"})
+	otherID, err := s.AddObservation(AddObservationParams{SessionID: "other-review-sess", Type: "decision", Title: "other", Content: "other content", Project: "other-proj"})
 	if err != nil {
 		t.Fatalf("add other: %v", err)
 	}
@@ -12669,19 +12776,17 @@ func TestDeleteProjectPreservesCrossProjectObservationSession(t *testing.T) {
 	if err := s.CreateSession("s-del-proj-cross-obs", "alpha", "/tmp/alpha"); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	for _, project := range []string{"alpha", "beta"} {
-		_, err := s.AddObservation(AddObservationParams{
-			SessionID: "s-del-proj-cross-obs",
-			Type:      "decision",
-			Title:     project + " observation",
-			Content:   project + " content",
-			Project:   project,
-			Scope:     "project",
-		})
-		if err != nil {
-			t.Fatalf("add %s observation: %v", project, err)
-		}
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-del-proj-cross-obs",
+		Type:      "decision",
+		Title:     "alpha observation",
+		Content:   "alpha content",
+		Project:   "alpha",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add alpha observation: %v", err)
 	}
+	seedForeignOwnedObservation(t, s, "s-del-proj-cross-obs", "beta", "beta observation")
 
 	if _, err := s.DeleteProject("alpha", true); err != nil {
 		t.Fatalf("DeleteProject: %v", err)
@@ -12708,14 +12813,15 @@ func TestDeleteProjectPreservesCrossProjectPromptSession(t *testing.T) {
 	if err := s.CreateSession("s-del-proj-cross-prompt", "alpha", "/tmp/alpha"); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	for _, project := range []string{"alpha", "beta"} {
-		if _, err := s.AddPrompt(AddPromptParams{
-			SessionID: "s-del-proj-cross-prompt",
-			Content:   project + " prompt",
-			Project:   project,
-		}); err != nil {
-			t.Fatalf("add %s prompt: %v", project, err)
-		}
+	if _, err := s.AddPrompt(AddPromptParams{
+		SessionID: "s-del-proj-cross-prompt",
+		Content:   "alpha prompt",
+		Project:   "alpha",
+	}); err != nil {
+		t.Fatalf("add alpha prompt: %v", err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO user_prompts (sync_id, session_id, content, project) VALUES (?, ?, ?, ?)`, newSyncID("prompt"), "s-del-proj-cross-prompt", "beta prompt", "beta"); err != nil {
+		t.Fatalf("seed beta prompt: %v", err)
 	}
 
 	if _, err := s.DeleteProject("alpha", true); err != nil {

@@ -2493,6 +2493,13 @@ func (s *Store) CreateSessionWithOwnershipMode(id, project, directory, mode stri
 	}
 
 	return s.withTx(func(tx *sql.Tx) error {
+		existingProject, existingMode, found, err := sessionOwnershipTx(tx, id)
+		if err != nil {
+			return err
+		}
+		if found && existingMode == SessionOwnershipProjectOwned && existingProject != "" && existingProject != project {
+			return fmt.Errorf("%w: session %q belongs to %q, not %q", ErrSessionOwnershipMismatch, id, existingProject, project)
+		}
 		if err := s.createSessionTx(tx, id, project, directory, mode); err != nil {
 			return err
 		}
@@ -6907,10 +6914,10 @@ func (s *Store) createSessionTx(tx *sql.Tx, id, project, directory, mode string)
 	_, err := s.execHook(tx,
 		`INSERT INTO sessions (id, project, ownership_mode, directory) VALUES (?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
-		   project   = CASE WHEN sessions.project = '' THEN excluded.project ELSE sessions.project END,
+			   project   = CASE WHEN ifnull(trim(sessions.project, ?), '') = '' THEN excluded.project ELSE sessions.project END,
 		   ownership_mode = CASE WHEN sessions.ownership_mode IS NULL THEN excluded.ownership_mode ELSE sessions.ownership_mode END,
 		   directory = CASE WHEN sessions.directory = '' THEN excluded.directory ELSE sessions.directory END`,
-		id, project, mode, directory,
+		id, project, mode, directory, sqlWhitespaceTrimSet,
 	)
 	return err
 }
@@ -6919,11 +6926,11 @@ func (s *Store) startSessionTx(tx *sql.Tx, id, project, directory, mode string) 
 	result, err := s.execHook(tx,
 		`INSERT INTO sessions (id, project, ownership_mode, directory) VALUES (?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
-		   project   = CASE WHEN sessions.project = '' THEN excluded.project ELSE sessions.project END,
+			   project   = CASE WHEN ifnull(trim(sessions.project, ?), '') = '' THEN excluded.project ELSE sessions.project END,
 		   ownership_mode = CASE WHEN sessions.ownership_mode IS NULL THEN excluded.ownership_mode ELSE sessions.ownership_mode END,
 		   directory = CASE WHEN sessions.directory = '' THEN excluded.directory ELSE sessions.directory END
 		 WHERE sessions.ended_at IS NULL`,
-		id, project, mode, directory,
+		id, project, mode, directory, sqlWhitespaceTrimSet,
 	)
 	if err != nil {
 		return err
@@ -7907,7 +7914,7 @@ func (s *Store) resolveWriteProjectTx(tx *sql.Tx, sessionID, requested string) (
 		}
 		return sessionProject, nil
 	}
-	if mode == SessionOwnershipProjectOwned && sessionProject != requested {
+	if mode == SessionOwnershipProjectOwned && sessionProject != "" && sessionProject != requested {
 		return "", fmt.Errorf("%w: session %q belongs to %q, not %q", ErrSessionOwnershipMismatch, sessionID, sessionProject, requested)
 	}
 
@@ -7917,8 +7924,7 @@ func (s *Store) resolveWriteProjectTx(tx *sql.Tx, sessionID, requested string) (
 		return requested, nil
 	}
 	if sessionProject != "" {
-		// An owned session keeps its ownership; the caller decides whether a
-		// mismatch is an error. This preserves existing behavior.
+		// Shared sessions deliberately accept writes for multiple projects.
 		return requested, nil
 	}
 

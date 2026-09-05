@@ -95,6 +95,59 @@ func TestProjectOwnedSessionRejectsMismatchedWriteWithoutMutation(t *testing.T) 
 	}
 }
 
+func TestProjectOwnedSessionRejectsMismatchedPromptWithoutMutation(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSessionWithOwnershipMode("manual-save-project-a", "project-a", "/tmp/a", SessionOwnershipProjectOwned); err != nil {
+		t.Fatalf("create project-owned session: %v", err)
+	}
+
+	var observationsBefore, promptsBefore, mutationsBefore int
+	if err := s.DB().QueryRow(`SELECT count(*) FROM observations`).Scan(&observationsBefore); err != nil {
+		t.Fatalf("count observations before mismatch: %v", err)
+	}
+	if err := s.DB().QueryRow(`SELECT count(*) FROM user_prompts`).Scan(&promptsBefore); err != nil {
+		t.Fatalf("count prompts before mismatch: %v", err)
+	}
+	if err := s.DB().QueryRow(`SELECT count(*) FROM sync_mutations`).Scan(&mutationsBefore); err != nil {
+		t.Fatalf("count mutations before mismatch: %v", err)
+	}
+	if _, err := s.AddPrompt(AddPromptParams{SessionID: "manual-save-project-a", Content: "blocked", Project: "project-b"}); !errors.Is(err, ErrSessionOwnershipMismatch) {
+		t.Fatalf("mismatched prompt error = %v, want ErrSessionOwnershipMismatch", err)
+	}
+
+	var observationsAfter, promptsAfter, mutationsAfter int
+	if err := s.DB().QueryRow(`SELECT count(*) FROM observations`).Scan(&observationsAfter); err != nil {
+		t.Fatalf("count observations after mismatch: %v", err)
+	}
+	if err := s.DB().QueryRow(`SELECT count(*) FROM user_prompts`).Scan(&promptsAfter); err != nil {
+		t.Fatalf("count prompts after mismatch: %v", err)
+	}
+	if err := s.DB().QueryRow(`SELECT count(*) FROM sync_mutations`).Scan(&mutationsAfter); err != nil {
+		t.Fatalf("count mutations after mismatch: %v", err)
+	}
+	if observationsAfter != observationsBefore || promptsAfter != promptsBefore || mutationsAfter != mutationsBefore {
+		t.Fatalf("mismatched prompt wrote observations=%d prompts=%d mutations=%d, want observations=%d prompts=%d mutations=%d", observationsAfter, promptsAfter, mutationsAfter, observationsBefore, promptsBefore, mutationsBefore)
+	}
+	session, err := s.GetSession("manual-save-project-a")
+	if err != nil || session.Project != "project-a" || session.OwnershipMode != SessionOwnershipProjectOwned {
+		t.Fatalf("session after mismatched prompt = %#v, %v", session, err)
+	}
+}
+
+func TestSharedSessionAllowsCrossProjectWrites(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("runtime-session", "project-a", "/tmp/a"); err != nil {
+		t.Fatalf("create shared session: %v", err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{SessionID: "runtime-session", Type: "manual", Title: "Cross-project write", Content: "content", Project: "project-b", Scope: "project"}); err != nil {
+		t.Fatalf("cross-project write through shared session: %v", err)
+	}
+	session, err := s.GetSession("runtime-session")
+	if err != nil || session.Project != "project-a" || session.OwnershipMode != SessionOwnershipShared {
+		t.Fatalf("shared session after cross-project write = %#v, %v", session, err)
+	}
+}
+
 func TestImportedLegacyModeDoesNotDowngradeProjectOwnedSession(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.CreateSessionWithOwnershipMode("manual-save-project-a", "project-a", "/tmp/a", SessionOwnershipProjectOwned); err != nil {
