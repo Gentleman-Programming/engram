@@ -567,9 +567,10 @@ func (s *Store) DataDir() string {
 // ─── Store ───────────────────────────────────────────────────────────────────
 
 type Store struct {
-	db    *sql.DB
-	cfg   Config
-	hooks storeHooks
+	db         *sql.DB
+	cfg        Config
+	generation *databaseGeneration
+	hooks      storeHooks
 
 	repairMu        sync.Mutex
 	repairDone      bool
@@ -760,7 +761,7 @@ func newStore(cfg Config) (*Store, error) {
 		return nil, err
 	}
 
-	s := &Store{db: db, cfg: cfg, hooks: defaultStoreHooks()}
+	s := &Store{db: db, cfg: cfg, generation: generation, hooks: defaultStoreHooks()}
 	if err := s.runStartupMigrations(); err != nil {
 		return nil, err
 	}
@@ -839,47 +840,53 @@ func primeConnection(db *sql.DB) error {
 const schemaVersion = 1
 
 var migrateRunCount atomic.Int64
+var acquireStartupMigrationLock = acquireMigrationLock
 
 // runStartupMigrations serializes migrations and the every-open repair. It
 // never writes a database with a schema version newer than this binary.
 func (s *Store) runStartupMigrations() error {
-	current, err := s.readUserVersion()
-	if err != nil {
-		return fmt.Errorf("engram: read user_version: %w", err)
-	}
-	if isFutureSchemaVersion(current) {
-		return nil
-	}
-	unlock, err := acquireMigrationLock(filepath.Join(s.cfg.DataDir, ".migrate.lock"))
-	if err != nil {
-		return fmt.Errorf("engram: acquire migration lock: %w", err)
-	}
-	defer unlock()
-
-	// Re-read under the lock before deciding whether any startup write is safe:
-	// another process may have migrated this database, or a newer binary may
-	// have replaced it, while this process waited for the lock.
-	current, err = s.readUserVersion()
-	if err != nil {
-		return fmt.Errorf("engram: re-read user_version: %w", err)
-	}
-	if isFutureSchemaVersion(current) {
-		return nil
-	}
-
-	needsVersionStamp := current < schemaVersion
-	if needsVersionStamp {
-		migrateRunCount.Add(1)
-	}
-	if err := s.migrate(); err != nil {
-		return fmt.Errorf("engram: migration: %w", err)
-	}
-	if needsVersionStamp {
-		if err := s.setUserVersion(schemaVersion); err != nil {
-			return fmt.Errorf("engram: set user_version: %w", err)
+	return s.generation.withStartupChecks(func() error {
+		current, err := s.readUserVersion()
+		if err != nil {
+			return fmt.Errorf("engram: read user_version: %w", err)
 		}
-	}
-	return nil
+		if isFutureSchemaVersion(current) {
+			return nil
+		}
+		unlock, err := acquireStartupMigrationLock(filepath.Join(s.cfg.DataDir, ".migrate.lock"))
+		if err != nil {
+			return fmt.Errorf("engram: acquire migration lock: %w", err)
+		}
+		defer unlock()
+		if err := s.generation.check(); err != nil {
+			return fmt.Errorf("engram: check database generation after migration lock: %w", err)
+		}
+
+		// Re-read under the lock before deciding whether any startup write is safe:
+		// another process may have migrated this database, or a newer binary may
+		// have replaced it, while this process waited for the lock.
+		current, err = s.readUserVersion()
+		if err != nil {
+			return fmt.Errorf("engram: re-read user_version: %w", err)
+		}
+		if isFutureSchemaVersion(current) {
+			return nil
+		}
+
+		needsVersionStamp := current < schemaVersion
+		if needsVersionStamp {
+			migrateRunCount.Add(1)
+		}
+		if err := s.migrate(); err != nil {
+			return fmt.Errorf("engram: migration: %w", err)
+		}
+		if needsVersionStamp {
+			if err := s.setUserVersion(schemaVersion); err != nil {
+				return fmt.Errorf("engram: set user_version: %w", err)
+			}
+		}
+		return nil
+	})
 }
 
 func isFutureSchemaVersion(current int) bool {

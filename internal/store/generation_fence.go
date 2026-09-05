@@ -9,6 +9,7 @@ import (
 	"os"
 	"reflect"
 	"sync"
+	"sync/atomic"
 
 	sqlite "modernc.org/sqlite"
 )
@@ -20,11 +21,12 @@ var ErrDatabaseGenerationChanged = errors.New("Engram database generation change
 var statFile = os.Stat
 
 type databaseGeneration struct {
-	paths    []string
-	files    []os.FileInfo
-	observed []bool
-	mu       sync.Mutex
-	err      error
+	paths        []string
+	files        []os.FileInfo
+	observed     []bool
+	mu           sync.Mutex
+	err          error
+	startupReads atomic.Bool
 }
 
 func newDatabaseGeneration(dbPath string) (*databaseGeneration, error) {
@@ -68,6 +70,26 @@ func (g *databaseGeneration) check() error {
 		}
 	}
 	return nil
+}
+
+func (g *databaseGeneration) checkRead() error {
+	if g.startupReads.Load() {
+		return nil
+	}
+	return g.check()
+}
+
+// withStartupChecks suppresses only read probes while startup writes remain fenced.
+func (g *databaseGeneration) withStartupChecks(fn func() error) (err error) {
+	if err := g.check(); err != nil {
+		return err
+	}
+	g.startupReads.Store(true)
+	defer func() {
+		g.startupReads.Store(false)
+		err = errors.Join(err, g.check())
+	}()
+	return fn()
 }
 
 func ensureDatabaseFile(path string) error {
@@ -196,7 +218,7 @@ func (c generationConn) ExecContext(ctx context.Context, query string, args []dr
 }
 
 func (c generationConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
-	if err := c.generation.check(); err != nil {
+	if err := c.generation.checkRead(); err != nil {
 		return nil, err
 	}
 	queryer, ok := c.Conn.(driver.QueryerContext)
@@ -207,7 +229,7 @@ func (c generationConn) QueryContext(ctx context.Context, query string, args []d
 	if err != nil {
 		return nil, err
 	}
-	if err := c.generation.check(); err != nil {
+	if err := c.generation.checkRead(); err != nil {
 		_ = rows.Close()
 		return nil, err
 	}
@@ -405,18 +427,18 @@ type generationRows struct {
 
 func (r generationRows) Close() error {
 	err := r.Rows.Close()
-	if generationErr := r.generation.check(); generationErr != nil {
+	if generationErr := r.generation.checkRead(); generationErr != nil {
 		return generationErr
 	}
 	return err
 }
 
 func (r generationRows) Next(dest []driver.Value) error {
-	if err := r.generation.check(); err != nil {
+	if err := r.generation.checkRead(); err != nil {
 		return err
 	}
 	err := r.Rows.Next(dest)
-	if generationErr := r.generation.check(); generationErr != nil {
+	if generationErr := r.generation.checkRead(); generationErr != nil {
 		return generationErr
 	}
 	return err

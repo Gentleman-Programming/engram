@@ -127,6 +127,85 @@ func TestUserVersionGateSkipsSecondOpen(t *testing.T) {
 	}
 }
 
+func TestStartupMigrationBatchAvoidsRedundantGenerationProbes(t *testing.T) {
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = t.TempDir()
+
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.CreateSession("startup-batch", "startup-project", cfg.DataDir); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if _, err := s.db.Exec(`
+		INSERT INTO observations (sync_id, session_id, type, title, content, project, scope)
+		VALUES ('startup-batch-blob', 'startup-batch', 'note', 'Startup batch', 'content', CAST('startup-project' AS BLOB), 'project')
+	`); err != nil {
+		t.Fatalf("seed repairable row: %v", err)
+	}
+
+	originalStatFile := statFile
+	probes := 0
+	statFile = func(path string) (os.FileInfo, error) {
+		probes++
+		return originalStatFile(path)
+	}
+	t.Cleanup(func() { statFile = originalStatFile })
+
+	if err := s.runStartupMigrations(); err != nil {
+		t.Fatalf("runStartupMigrations: %v", err)
+	}
+	if want := 1000; probes >= want {
+		t.Fatalf("generation probes during startup migration = %d, want fewer than %d", probes, want)
+	}
+
+	statFile = originalStatFile
+	var storageClass string
+	if err := s.db.QueryRow(`SELECT typeof(project) FROM observations WHERE sync_id = 'startup-batch-blob'`).Scan(&storageClass); err != nil {
+		t.Fatalf("read repaired row: %v", err)
+	}
+	if storageClass != "text" {
+		t.Fatalf("project storage class after startup repair = %q, want text", storageClass)
+	}
+
+	t.Run("rejects generation change after migration lock", func(t *testing.T) {
+		originalLock := acquireStartupMigrationLock
+		waiting, proceed := make(chan struct{}), make(chan struct{})
+		acquireStartupMigrationLock = func(string) (func(), error) {
+			close(waiting)
+			<-proceed
+			return func() {}, nil
+		}
+		t.Cleanup(func() { acquireStartupMigrationLock = originalLock })
+		replacement := filepath.Join(t.TempDir(), "engram.db")
+		writeTestFile(t, replacement)
+		changed := false
+		statFile = func(path string) (os.FileInfo, error) {
+			if changed && path == filepath.Join(cfg.DataDir, "engram.db") {
+				return originalStatFile(replacement)
+			}
+			return originalStatFile(path)
+		}
+		writes, originalExec := 0, s.hooks.exec
+		s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+			writes++
+			return originalExec(db, query, args...)
+		}
+		errCh := make(chan error, 1)
+		go func() { errCh <- s.runStartupMigrations() }()
+		<-waiting
+		changed = true
+		close(proceed)
+		assertGenerationChanged(t, <-errCh)
+		if writes != 0 {
+			t.Fatalf("startup writes after generation change = %d, want 0", writes)
+		}
+	})
+}
+
 func TestNewerSchemaVersionIsLeftUntouched(t *testing.T) {
 	cfg := mustDefaultConfig(t)
 	cfg.DataDir = t.TempDir()
