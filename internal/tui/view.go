@@ -412,92 +412,20 @@ func (m Model) viewRecent() string {
 // ─── Observation Detail ──────────────────────────────────────────────────────
 
 func (m Model) viewObservationDetail() string {
-	var b strings.Builder
-
 	if m.SelectedObservation == nil {
+		var b strings.Builder
 		b.WriteString(headerStyle.Render("  Observation Detail"))
 		b.WriteString("\n")
 		b.WriteString(noResultsStyle.Render("Loading..."))
 		return b.String()
 	}
 
-	obs := m.SelectedObservation
+	contentLines := m.observationDetailContentLines()
+	maxLines := m.observationDetailViewport()
+	m.DetailScroll = m.clampDetailScroll()
 
-	header := fmt.Sprintf("  Observation #%d", obs.ID)
-	b.WriteString(headerStyle.Render(header))
-	b.WriteString("\n")
-
-	// Metadata rows
-	b.WriteString(fmt.Sprintf("%s %s\n",
-		detailLabelStyle.Render("Type:"),
-		typeBadgeStyle.Render(obs.Type)))
-
-	b.WriteString(fmt.Sprintf("%s %s\n",
-		detailLabelStyle.Render("Title:"),
-		detailValueStyle.Bold(true).Render(obs.Title)))
-
-	b.WriteString(fmt.Sprintf("%s %s\n",
-		detailLabelStyle.Render("Session:"),
-		idStyle.Render(obs.SessionID)))
-
-	b.WriteString(fmt.Sprintf("%s %s\n",
-		detailLabelStyle.Render("Created:"),
-		timestampStyle.Render(localTime(obs.CreatedAt))))
-
-	b.WriteString(fmt.Sprintf("%s %s\n",
-		detailLabelStyle.Render("State:"),
-		renderObservationState(obs.State())))
-
-	b.WriteString(fmt.Sprintf("%s %s\n",
-		detailLabelStyle.Render("Pinned:"),
-		detailValueStyle.Render(fmt.Sprintf("%t", obs.Pinned))))
-
-	if obs.ReviewAfter != nil {
-		b.WriteString(fmt.Sprintf("%s %s\n",
-			detailLabelStyle.Render("Review:"),
-			timestampStyle.Render(formatReviewDate(*obs.ReviewAfter))))
-	}
-
-	if obs.ToolName != nil {
-		b.WriteString(fmt.Sprintf("%s %s\n",
-			detailLabelStyle.Render("Tool:"),
-			detailValueStyle.Render(*obs.ToolName)))
-	}
-
-	if obs.Project != nil {
-		b.WriteString(fmt.Sprintf("%s %s\n",
-			detailLabelStyle.Render("Project:"),
-			projectStyle.Render(*obs.Project)))
-	}
-
-	// Content section
-	b.WriteString("\n")
-	b.WriteString(sectionHeadingStyle.Render("  Content"))
-	b.WriteString("\n")
-
-	// Wrap content based on terminal width
-	wrapWidth := m.Width - 6 // basic padding
-	if wrapWidth < 20 {
-		wrapWidth = 20
-	}
-	wrappedContent := detailContentStyle.Width(wrapWidth).Render(obs.Content)
-
-	// Split wrapped content into lines
-	contentLines := strings.Split(wrappedContent, "\n")
-	maxLines := m.Height - 16
-	if maxLines < 5 {
-		maxLines = 5
-	}
-
-	// Clamp scroll
-	maxScroll := len(contentLines) - maxLines
-	if maxScroll < 0 {
-		maxScroll = 0
-	}
-	if m.DetailScroll > maxScroll {
-		m.DetailScroll = maxScroll
-	}
-
+	var b strings.Builder
+	b.WriteString(m.observationDetailChrome())
 	end := m.DetailScroll + maxLines
 	if end > len(contentLines) {
 		end = len(contentLines)
@@ -508,7 +436,7 @@ func (m Model) viewObservationDetail() string {
 		b.WriteString("\n")
 	}
 
-	if len(contentLines) > maxLines {
+	if maxLines > 0 && len(contentLines) > maxLines {
 		b.WriteString(fmt.Sprintf("\n  %s",
 			timestampStyle.Render(fmt.Sprintf("line %d-%d of %d", m.DetailScroll+1, end, len(contentLines)))))
 	}
@@ -891,6 +819,88 @@ func (m Model) renderObservationListItem(index int, id int64, obsType, title, co
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+func (m Model) viewportHeight(chrome string) int {
+	available := m.Height - lipgloss.Height(appStyle.Render(chrome))
+	if available < 0 {
+		return 0
+	}
+	return available
+}
+
+func (m Model) observationDetailChrome() string {
+	obs := m.SelectedObservation
+	if obs == nil {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(headerStyle.Render(fmt.Sprintf("  Observation #%d", obs.ID)))
+	b.WriteString("\n")
+	b.WriteString(fmt.Sprintf("%s %s\n", detailLabelStyle.Render("Type:"), typeBadgeStyle.Render(obs.Type)))
+	b.WriteString(fmt.Sprintf("%s %s\n", detailLabelStyle.Render("Title:"), detailValueStyle.Bold(true).Render(obs.Title)))
+	b.WriteString(fmt.Sprintf("%s %s\n", detailLabelStyle.Render("Session:"), idStyle.Render(obs.SessionID)))
+	b.WriteString(fmt.Sprintf("%s %s\n", detailLabelStyle.Render("Created:"), timestampStyle.Render(localTime(obs.CreatedAt))))
+	b.WriteString(fmt.Sprintf("%s %s\n", detailLabelStyle.Render("State:"), renderObservationState(obs.State())))
+	b.WriteString(fmt.Sprintf("%s %s\n", detailLabelStyle.Render("Pinned:"), detailValueStyle.Render(fmt.Sprintf("%t", obs.Pinned))))
+	if obs.ReviewAfter != nil {
+		b.WriteString(fmt.Sprintf("%s %s\n", detailLabelStyle.Render("Review:"), timestampStyle.Render(formatReviewDate(*obs.ReviewAfter))))
+	}
+	if obs.ToolName != nil {
+		b.WriteString(fmt.Sprintf("%s %s\n", detailLabelStyle.Render("Tool:"), detailValueStyle.Render(*obs.ToolName)))
+	}
+	if obs.Project != nil {
+		b.WriteString(fmt.Sprintf("%s %s\n", detailLabelStyle.Render("Project:"), projectStyle.Render(*obs.Project)))
+	}
+	b.WriteString("\n")
+	b.WriteString(sectionHeadingStyle.Render("  Content"))
+	b.WriteString("\n")
+	return b.String()
+}
+
+func (m Model) observationDetailContentLines() []string {
+	if m.SelectedObservation == nil {
+		return nil
+	}
+	wrapWidth := m.Width - 6
+	if m.Width <= 0 {
+		wrapWidth = 20
+	} else if wrapWidth < 1 {
+		wrapWidth = 1
+	}
+	return strings.Split(detailContentStyle.Width(wrapWidth).Render(m.SelectedObservation.Content), "\n")
+}
+
+func (m Model) observationDetailViewport() int {
+	if m.Height <= 0 {
+		return 5
+	}
+	chrome := m.observationDetailChrome() +
+		fmt.Sprintf("\n  %s", timestampStyle.Render("line 1-1 of 1")) +
+		helpStyle.Render("\n  j/k scroll • c copy • t timeline • esc back")
+	return m.viewportHeight(chrome)
+}
+
+func (m Model) observationDetailMaxScroll() int {
+	visibleLines := m.observationDetailViewport()
+	if visibleLines == 0 {
+		return 0
+	}
+	maxScroll := len(m.observationDetailContentLines()) - visibleLines
+	if maxScroll < 0 {
+		return 0
+	}
+	return maxScroll
+}
+
+func (m Model) clampDetailScroll() int {
+	if m.DetailScroll < 0 {
+		return 0
+	}
+	if maxScroll := m.observationDetailMaxScroll(); m.DetailScroll > maxScroll {
+		return maxScroll
+	}
+	return m.DetailScroll
+}
 
 // localTime converts a UTC timestamp string from SQLite to local time for display.
 func localTime(utc string) string {

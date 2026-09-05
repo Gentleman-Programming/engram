@@ -7,6 +7,8 @@ import (
 	"github.com/Gentleman-Programming/engram/v2/internal/setup"
 	"github.com/Gentleman-Programming/engram/v2/internal/store"
 	"github.com/Gentleman-Programming/engram/v2/internal/version"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 func TestTruncateStr(t *testing.T) {
@@ -222,7 +224,7 @@ func TestViewDashboardSearchAndRecent(t *testing.T) {
 
 func TestViewObservationDetailTimelineSessionsAndSessionDetail(t *testing.T) {
 	m := New(nil, "")
-	m.Height = 22
+	m.Height = 40
 
 	out := m.viewObservationDetail()
 	if !strings.Contains(out, "Loading") {
@@ -483,4 +485,51 @@ func TestViewSetupAllowlistPrompt(t *testing.T) {
 			t.Fatal("should show error message")
 		}
 	})
+}
+
+func TestObservationDetailScrollStopsAtContentBottom(t *testing.T) {
+	m := New(nil, "")
+	m.Screen = ScreenObservationDetail
+	m.Width = 80
+	m.Height = 24
+	m.SelectedObservation = &store.Observation{
+		ID:        1,
+		Type:      "artifact",
+		Title:     "Long observation",
+		SessionID: "session-1",
+		CreatedAt: "2026-01-01",
+		Content:   strings.Repeat("scrollable line\n", 141),
+	}
+
+	maxScroll := m.observationDetailMaxScroll()
+	if maxScroll == 0 {
+		t.Fatal("long observation should overflow the detail viewport")
+	}
+	for range maxScroll + 10 {
+		updatedModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+		m = updatedModel.(Model)
+	}
+	if m.DetailScroll != maxScroll {
+		t.Fatalf("detail scroll = %d, want maximum %d", m.DetailScroll, maxScroll)
+	}
+
+	updatedModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	m = updatedModel.(Model)
+	if m.DetailScroll != maxScroll-1 {
+		t.Fatalf("first up after bottom = %d, want %d", m.DetailScroll, maxScroll-1)
+	}
+	out := m.View()
+	if got := lipgloss.Height(out); got > m.Height {
+		t.Fatalf("render height = %d, terminal height = %d", got, m.Height)
+	}
+	if !strings.Contains(out, "j/k scroll") {
+		t.Fatal("detail help should remain visible in an 80x24 terminal")
+	}
+
+	m.DetailScroll = 999
+	updatedModel, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updatedModel.(Model)
+	if m.DetailScroll != m.observationDetailMaxScroll() {
+		t.Fatalf("resized detail scroll = %d, want maximum %d", m.DetailScroll, m.observationDetailMaxScroll())
+	}
 }
