@@ -9,7 +9,10 @@ trim_whitespace() {
   printf '%s' "$value"
 }
 
-ENGRAM_PORT="$(trim_whitespace "${ENGRAM_PORT:-7437}")"
+ENGRAM_PORT="$(trim_whitespace "${ENGRAM_PORT:-}")"
+if [ -z "$ENGRAM_PORT" ]; then
+  ENGRAM_PORT=7437
+fi
 ENGRAM_SOCKET="$(trim_whitespace "${ENGRAM_SOCKET:-}")"
 if [ -n "$ENGRAM_SOCKET" ]; then
   ENGRAM_URL="http://localhost"

@@ -1,3 +1,5 @@
+//go:build unix
+
 package server
 
 import (
@@ -8,33 +10,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 )
-
-func TestServerDefaultsToLoopbackTCP(t *testing.T) {
-	srv := New(nil, 7437)
-	var network, address string
-	srv.listen = func(gotNetwork, gotAddress string) (net.Listener, error) {
-		network, address = gotNetwork, gotAddress
-		return stubListener{}, nil
-	}
-	srv.serve = func(net.Listener, http.Handler) error { return errors.New("serve stopped") }
-	if err := srv.Start(); err == nil || err.Error() != "serve stopped" {
-		t.Fatalf("Start() error = %v, want serve stopped", err)
-	}
-	if network != "tcp" || address != "127.0.0.1:7437" {
-		t.Fatalf("listener = %s %s, want tcp 127.0.0.1:7437", network, address)
-	}
-}
-
-func requireUnixSockets(t *testing.T) {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("Unix-domain sockets are not supported on Windows")
-	}
-}
 
 func startUnixSocketServer(t *testing.T, srv *Server, socketPath string) <-chan error {
 	t.Helper()
@@ -58,8 +36,29 @@ func startUnixSocketServer(t *testing.T, srv *Server, socketPath string) <-chan 
 	return nil
 }
 
+func TestUnixSocketDirectoryTrustPolicy(t *testing.T) {
+	for _, tt := range []struct {
+		name                 string
+		mode                 os.FileMode
+		ownerUID, currentUID int
+		want                 bool
+	}{
+		{name: "private user directory", mode: 0o700, ownerUID: 1000, currentUID: 1000, want: true},
+		{name: "root-owned sticky temp directory", mode: os.ModeSticky | 0o777, ownerUID: 0, currentUID: 1000, want: true},
+		{name: "user-owned sticky temp directory", mode: os.ModeSticky | 0o777, ownerUID: 1000, currentUID: 1000, want: true},
+		{name: "foreign-owned sticky directory", mode: os.ModeSticky | 0o777, ownerUID: 2000, currentUID: 1000, want: false},
+		{name: "world-writable non-sticky directory", mode: 0o777, ownerUID: 0, currentUID: 1000, want: false},
+		{name: "group-writable non-sticky directory", mode: 0o770, ownerUID: 1000, currentUID: 1000, want: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := trustedUnixSocketDirectory(tt.mode, tt.ownerUID, tt.currentUID); got != tt.want {
+				t.Fatalf("trustedUnixSocketDirectory(%#o, %d, %d) = %t, want %t", tt.mode, tt.ownerUID, tt.currentUID, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestUnixSocketRejectsActiveSocketWithoutDisturbingListener(t *testing.T) {
-	requireUnixSockets(t)
 	socketPath := filepath.Join(t.TempDir(), "engram.sock")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
@@ -103,7 +102,6 @@ func unixSocketClient(socketPath string) *http.Client {
 }
 
 func TestUnixSocketServesHTTPWithRestrictivePermissions(t *testing.T) {
-	requireUnixSockets(t)
 	socketPath := filepath.Join(t.TempDir(), "engram.sock")
 	srv := New(newServerTestStore(t), 0)
 	srv.SetSocketPath(socketPath)
@@ -149,7 +147,6 @@ func TestUnixSocketServesHTTPWithRestrictivePermissions(t *testing.T) {
 }
 
 func TestUnixSocketReplacesOnlyStaleSockets(t *testing.T) {
-	requireUnixSockets(t)
 	socketPath := filepath.Join(t.TempDir(), "engram.sock")
 	stale, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
 	if err != nil {
@@ -186,7 +183,6 @@ func TestUnixSocketReplacesOnlyStaleSockets(t *testing.T) {
 }
 
 func TestUnixSocketCloseIsIdempotent(t *testing.T) {
-	requireUnixSockets(t)
 	socketPath := filepath.Join(t.TempDir(), "engram.sock")
 	srv := New(newServerTestStore(t), 0)
 	srv.SetSocketPath(socketPath)

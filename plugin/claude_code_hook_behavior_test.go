@@ -13,7 +13,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -123,6 +122,28 @@ func runHookWithStderr(t *testing.T, scriptName, stdin string, env map[string]st
 		t.Fatalf("%s must always exit 0, got %v\nstdout: %q\nstderr: %q", scriptName, err, stdout.String(), stderr.String())
 	}
 	return stdout.String(), stderr.String()
+}
+
+func resolveClaudeHookURL(t *testing.T, env map[string]string) string {
+	t.Helper()
+	helper := filepath.Join(repoRoot(t), "plugin", "claude-code", "scripts", "_helpers.sh")
+	cmd := exec.Command("bash", "-c", `source "$1"; printf '%s' "$ENGRAM_URL"`, "bash", helper)
+	cmd.Env = make([]string, 0, len(os.Environ())+len(env))
+	for _, entry := range os.Environ() {
+		upper := strings.ToUpper(entry)
+		if strings.HasPrefix(upper, "ENGRAM_PORT=") || strings.HasPrefix(upper, "ENGRAM_SOCKET=") {
+			continue
+		}
+		cmd.Env = append(cmd.Env, entry)
+	}
+	for key, value := range env {
+		cmd.Env = append(cmd.Env, key+"="+value)
+	}
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("resolve Claude hook URL: %v", err)
+	}
+	return string(output)
 }
 
 // serverPort extracts the port of a test server for ENGRAM_PORT. The hooks
@@ -462,9 +483,7 @@ func TestSubagentStopPayloadHandling(t *testing.T) {
 
 func TestSubagentStopUsesUnixSocketTransport(t *testing.T) {
 	requireHookBinaries(t)
-	if runtime.GOOS == "windows" {
-		t.Skip("Unix-domain sockets are not supported on Windows")
-	}
+	requireUnixSocketHooks(t)
 
 	socketPath := filepath.Join(t.TempDir(), "engram.sock")
 	listener, err := net.Listen("unix", socketPath)
@@ -514,6 +533,7 @@ func TestSubagentStopUsesUnixSocketTransport(t *testing.T) {
 
 func TestUserPromptSocketFailureWarnsAndReturnsValidJSON(t *testing.T) {
 	requireHookBinaries(t)
+	requireUnixSocketHooks(t)
 	sessionID := newSessionID(t)
 	markSessionBootstrapped(t, sessionID)
 	socketPath := filepath.Join(t.TempDir(), "unreachable.sock")
@@ -525,5 +545,24 @@ func TestUserPromptSocketFailureWarnsAndReturnsValidJSON(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "warning: Engram") {
 		t.Fatalf("socket failure stderr = %q, want actionable Engram warning", stderr)
+	}
+}
+
+func TestClaudeHookWhitespacePortFallsBackToDefault(t *testing.T) {
+	requireHookBinaries(t)
+	for _, tt := range []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{name: "whitespace port uses default", env: map[string]string{"ENGRAM_PORT": " \t "}, want: "http://127.0.0.1:7437"},
+		{name: "non-empty port is trimmed", env: map[string]string{"ENGRAM_PORT": " 8123 "}, want: "http://127.0.0.1:8123"},
+		{name: "socket takes precedence", env: map[string]string{"ENGRAM_PORT": " \t ", "ENGRAM_SOCKET": " /tmp/engram.sock "}, want: "http://localhost"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolveClaudeHookURL(t, tt.env); got != tt.want {
+				t.Fatalf("ENGRAM_URL = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

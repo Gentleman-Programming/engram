@@ -577,7 +577,7 @@ Inspect or replay the `sync_apply_deferred` queue.
 
 ### Cloud CLI (opt-in)
 
-- `engram cloud status` — show current cloud config state plus auth/sync readiness without mutating local state. When cloud is configured, also probes the local `engram serve` daemon at `127.0.0.1:7437` (respects `ENGRAM_PORT`) and prints a `Local daemon:` line (`running` / `not running` / `unreachable`) so you can detect a silently dead autosync. Exit code is unaffected; the line is informational
+- `engram cloud status` — show current cloud config state plus auth/sync readiness without mutating local state. When cloud is configured, also probes the local `engram serve` daemon at `127.0.0.1:7437` (respects `ENGRAM_PORT`) and prints a `Local daemon:` line (`running` / `not running` / `unreachable`) so you can detect a silently dead autosync. The probe currently uses the TCP daemon endpoint, so `ENGRAM_SOCKET` socket-only mode can report the daemon as not running. Exit code is unaffected; the line is informational
 - `engram cloud enroll <project>` — enroll one project for cloud replication
 - `engram cloud config --server <url>` — persist cloud server URL to `~/.engram/cloud.json`
 - `engram cloud serve` — run cloud backend API + dashboard (`/dashboard`) using Postgres config from env

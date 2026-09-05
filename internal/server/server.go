@@ -17,7 +17,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -232,7 +231,9 @@ func (s *Server) Start() error {
 	network := "tcp"
 	addr := fmt.Sprintf("127.0.0.1:%d", s.port)
 	if socketPath != "" {
-		if err := prepareUnixSocket(socketPath); err != nil {
+		var err error
+		socketPath, err = prepareUnixSocket(socketPath)
+		if err != nil {
 			return err
 		}
 		network = "unix"
@@ -269,6 +270,7 @@ func (s *Server) Start() error {
 		return nil
 	}
 	s.listener = ln
+	s.socketPath = socketPath
 	s.socketInfo = socketInfo
 	s.closeMu.Unlock()
 	defer s.Close()
@@ -310,48 +312,49 @@ func (s *Server) Close() error {
 	return err
 }
 
-func prepareUnixSocket(socketPath string) error {
-	if runtime.GOOS == "windows" {
-		return fmt.Errorf("engram server: Unix sockets are not supported on Windows")
-	}
+func prepareUnixSocket(socketPath string) (string, error) {
 	if socketPath == "" || socketPath == "." {
-		return fmt.Errorf("engram server: socket path is required")
+		return "", fmt.Errorf("engram server: socket path is required")
 	}
-	parent := filepath.Dir(socketPath)
+	canonicalPath, err := secureUnixSocketPath(socketPath)
+	if err != nil {
+		return "", err
+	}
+	parent := filepath.Dir(canonicalPath)
 	parentInfo, err := os.Stat(parent)
 	if err != nil {
-		return fmt.Errorf("engram server: socket parent %q: %w", parent, err)
+		return "", fmt.Errorf("engram server: socket parent %q: %w", parent, err)
 	}
 	if !parentInfo.IsDir() {
-		return fmt.Errorf("engram server: socket parent %q is not a directory", parent)
+		return "", fmt.Errorf("engram server: socket parent %q is not a directory", parent)
 	}
 
-	info, err := os.Lstat(socketPath)
+	info, err := os.Lstat(canonicalPath)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		return canonicalPath, nil
 	}
 	if err != nil {
-		return fmt.Errorf("engram server: inspect socket %q: %w", socketPath, err)
+		return "", fmt.Errorf("engram server: inspect socket %q: %w", canonicalPath, err)
 	}
 	if info.Mode()&os.ModeSocket == 0 {
-		return fmt.Errorf("engram server: socket path %q exists and is not a Unix socket", socketPath)
+		return "", fmt.Errorf("engram server: socket path %q exists and is not a Unix socket", canonicalPath)
 	}
 
-	conn, err := net.DialTimeout("unix", socketPath, 250*time.Millisecond)
+	conn, err := net.DialTimeout("unix", canonicalPath, 250*time.Millisecond)
 	if err == nil {
 		_ = conn.Close()
-		return fmt.Errorf("engram server: socket %q is already in use", socketPath)
+		return "", fmt.Errorf("engram server: socket %q is already in use", canonicalPath)
 	}
 	if errors.Is(err, syscall.ECONNREFUSED) {
-		if err := removeOwnedUnixSocket(socketPath, info); err != nil {
-			return fmt.Errorf("engram server: remove stale socket %q: %w", socketPath, err)
+		if err := removeOwnedUnixSocket(canonicalPath, info); err != nil {
+			return "", fmt.Errorf("engram server: remove stale socket %q: %w", canonicalPath, err)
 		}
-		return nil
+		return canonicalPath, nil
 	}
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		return canonicalPath, nil
 	}
-	return fmt.Errorf("engram server: cannot verify socket %q is stale: %w", socketPath, err)
+	return "", fmt.Errorf("engram server: cannot verify socket %q is stale: %w", canonicalPath, err)
 }
 
 func removeOwnedUnixSocket(socketPath string, expected os.FileInfo) error {

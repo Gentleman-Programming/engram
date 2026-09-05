@@ -311,6 +311,7 @@ func TestCmdServeParsesPortAndErrors(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			stubExitWithPanic(t)
+			t.Setenv("ENGRAM_SOCKET", "")
 			if tc.envPort != "" {
 				t.Setenv("ENGRAM_PORT", tc.envPort)
 			} else {
