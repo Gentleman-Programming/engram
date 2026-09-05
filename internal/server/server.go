@@ -359,6 +359,9 @@ func (s *Server) handleRecentSessions(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if sessions == nil {
+		sessions = []store.SessionSummary{}
+	}
 
 	jsonResponse(w, http.StatusOK, sessions)
 }
@@ -467,6 +470,9 @@ func (s *Server) handleRecentObservations(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if obs == nil {
+		obs = []store.Observation{}
 	}
 
 	jsonResponse(w, http.StatusOK, obs)
@@ -774,6 +780,9 @@ func (s *Server) handleRecentPrompts(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if prompts == nil {
+		prompts = []store.Prompt{}
+	}
 
 	jsonResponse(w, http.StatusOK, prompts)
 }
@@ -798,6 +807,9 @@ func (s *Server) handleSearchPrompts(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if prompts == nil {
+		prompts = []store.Prompt{}
 	}
 
 	jsonResponse(w, http.StatusOK, prompts)
