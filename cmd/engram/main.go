@@ -140,6 +140,9 @@ var (
 
 	exitFunc = os.Exit
 
+	notifySignals = signal.Notify
+	stopSignals   = signal.Stop
+
 	stdinScanner = func() *bufio.Scanner { return bufio.NewScanner(os.Stdin) }
 	userHomeDir  = os.UserHomeDir
 
@@ -779,17 +782,10 @@ func printUpdateCheckResult(result versioncheck.CheckResult) {
 // ─── Commands ────────────────────────────────────────────────────────────────
 
 func cmdServe(cfg store.Config) {
-	port := 7437 // "ENGR" on phone keypad vibes
-	if p := os.Getenv("ENGRAM_PORT"); p != "" {
-		if n, err := strconv.Atoi(p); err == nil {
-			port = n
-		}
-	}
-	// Allow: engram serve 8080
-	if len(os.Args) > 2 {
-		if n, err := strconv.Atoi(os.Args[2]); err == nil {
-			port = n
-		}
+	options, err := resolveServeOptions(os.Args[2:])
+	if err != nil {
+		fatal(err)
+		return
 	}
 
 	s, err := storeNew(cfg)
@@ -798,7 +794,8 @@ func cmdServe(cfg store.Config) {
 	}
 	defer s.Close()
 
-	srv := newHTTPServer(s, port)
+	srv := newHTTPServer(s, options.port)
+	srv.SetSocketPath(options.socketPath)
 	srv.SetVersion(version)
 
 	// Wire the semantic runner factory and prompt builder for POST /conflicts/scan.
@@ -826,20 +823,71 @@ func cmdServe(cfg store.Config) {
 
 	// Graceful shutdown on SIGINT/SIGTERM.
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	notifySignals(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals(sigCh)
+	done := make(chan struct{})
+	defer close(done)
 	go func() {
-		<-sigCh
-		log.Println("[engram] shutting down...")
-		cancel()
-		if mgrStop != nil {
-			mgrStop() // BW7: wait for Manager to release lease before exiting
+		select {
+		case <-sigCh:
+			log.Println("[engram] shutting down...")
+			cancel()
+			if mgrStop != nil {
+				mgrStop()
+			}
+			if err := srv.Close(); err != nil {
+				log.Printf("[engram] close server: %v", err)
+			}
+		case <-done:
 		}
-		exitFunc(0)
 	}()
 
 	if err := startHTTP(srv); err != nil {
 		fatal(err)
 	}
+}
+
+type serveOptions struct {
+	port       int
+	socketPath string
+}
+
+func resolveServeOptions(args []string) (serveOptions, error) {
+	options := serveOptions{port: 7437, socketPath: strings.TrimSpace(os.Getenv("ENGRAM_SOCKET"))}
+	portExplicit := false
+	if p := strings.TrimSpace(os.Getenv("ENGRAM_PORT")); p != "" {
+		if n, err := strconv.Atoi(p); err == nil {
+			options.port = n
+			portExplicit = true
+		}
+	}
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--socket":
+			if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" {
+				return serveOptions{}, fmt.Errorf("--socket requires a path")
+			}
+			i++
+			options.socketPath = strings.TrimSpace(args[i])
+		case strings.HasPrefix(arg, "--socket="):
+			options.socketPath = strings.TrimSpace(strings.TrimPrefix(arg, "--socket="))
+			if options.socketPath == "" {
+				return serveOptions{}, fmt.Errorf("--socket requires a path")
+			}
+		default:
+			if n, err := strconv.Atoi(arg); err == nil {
+				options.port = n
+				portExplicit = true
+			}
+		}
+	}
+
+	if options.socketPath != "" && portExplicit {
+		return serveOptions{}, fmt.Errorf("socket transport cannot be combined with an explicit TCP port")
+	}
+	return options, nil
 }
 
 func resolveServeSyncStatusProject() string {

@@ -6,8 +6,6 @@
 # 3. Auto-imports git-synced chunks if .engram/manifest.json exists
 # 4. Injects Memory Protocol instructions + memory context
 
-ENGRAM_PORT="${ENGRAM_PORT:-7437}"
-ENGRAM_URL="http://127.0.0.1:${ENGRAM_PORT}"
 IMPORT_TIMEOUT_SECS=8
 LOCK_TTL_SECS=$((IMPORT_TIMEOUT_SECS + 4))
 LOCK_METADATA_STALE_SECS=$((LOCK_TTL_SECS * 5))
@@ -30,7 +28,7 @@ if [ ! -f "$MCP_CONFIG" ] || [ -L "$MCP_CONFIG" ]; then
   fi
 fi
 # Ensure engram server is running
-if ! curl -sf "${ENGRAM_URL}/health" --max-time 1 > /dev/null 2>&1; then
+if ! engram_curl -sf "${ENGRAM_URL}/health" --max-time 1 > /dev/null 2>&1; then
   ENGRAM_SERVE_DATA_DIR="${ENGRAM_DATA_DIR:-$HOME/.engram}"
   if mkdir -p "$ENGRAM_SERVE_DATA_DIR" 2>/dev/null && : >> "$ENGRAM_SERVE_DATA_DIR/serve.err.log" 2>/dev/null; then
     ENGRAM_SERVE_ERR_LOG="$ENGRAM_SERVE_DATA_DIR/serve.err.log"
@@ -45,7 +43,7 @@ PROJECT=$(resolve_project "$CWD") || PROJECT=""
 
 # Create session
 if [ -n "$SESSION_ID" ] && [ -n "$PROJECT" ]; then
-  curl -sf "${ENGRAM_URL}/sessions" \
+  engram_curl -sf "${ENGRAM_URL}/sessions" \
     -X POST \
     -H "Content-Type: application/json" \
     -d "$(jq -n --arg id "$SESSION_ID" --arg project "$PROJECT" --arg dir "$CWD" \
@@ -141,7 +139,7 @@ fi
 CONTEXT=""
 if [ -n "$PROJECT" ]; then
   ENCODED_PROJECT=$(printf '%s' "$PROJECT" | jq -sRr @uri)
-  CONTEXT=$(curl -sf "${ENGRAM_URL}/context?project=${ENCODED_PROJECT}" --max-time 3 2>/dev/null | jq -r '.context // empty')
+  CONTEXT=$(engram_curl -sf "${ENGRAM_URL}/context?project=${ENCODED_PROJECT}" --max-time 3 2>/dev/null | jq -r '.context // empty')
 fi
 
 # Resolve protocol verbosity mode for this slug. All slim/full branching

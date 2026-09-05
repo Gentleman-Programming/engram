@@ -5,9 +5,6 @@
 # the passive capture endpoint. All extraction logic lives in the
 # Go server — this script is intentionally minimal.
 
-ENGRAM_PORT="${ENGRAM_PORT:-7437}"
-ENGRAM_URL="http://127.0.0.1:${ENGRAM_PORT}"
-
 # Load shared helpers
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/_helpers.sh"
@@ -27,7 +24,7 @@ OUTPUT=$(echo "$INPUT" | jq -r '.last_assistant_message // .stdout // empty')
 PROJECT=$(resolve_project "$CWD") || exit 0
 
 # Fire and forget — server handles extraction, dedup, and storage
-curl -sf "${ENGRAM_URL}/observations/passive" \
+engram_curl -sf "${ENGRAM_URL}/observations/passive" \
   -X POST \
   -H "Content-Type: application/json" \
   -d "$(jq -n \

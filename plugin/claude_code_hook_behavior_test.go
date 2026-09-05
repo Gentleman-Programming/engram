@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -95,7 +97,15 @@ func runHook(t *testing.T, scriptName, stdin string, env map[string]string) stri
 	cmd.Stdin = strings.NewReader(stdin)
 	// Force the POSIX path: the Windows-safe branch short-circuits before the
 	// logic under test, and OSTYPE/MSYSTEM could otherwise leak in from the env.
-	cmd.Env = append(os.Environ(), "ENGRAM_CLAUDE_WINDOWS_BASH_SAFE_MODE=0")
+	cmd.Env = make([]string, 0, len(os.Environ())+len(env)+1)
+	for _, entry := range os.Environ() {
+		upper := strings.ToUpper(entry)
+		if strings.HasPrefix(upper, "ENGRAM_PORT=") || strings.HasPrefix(upper, "ENGRAM_SOCKET=") {
+			continue
+		}
+		cmd.Env = append(cmd.Env, entry)
+	}
+	cmd.Env = append(cmd.Env, "ENGRAM_CLAUDE_WINDOWS_BASH_SAFE_MODE=0")
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
@@ -441,5 +451,57 @@ func TestSubagentStopPayloadHandling(t *testing.T) {
 				t.Errorf("passive capture = %+v, want session_id %q and source subagent-stop", got[0], tt.sessionID)
 			}
 		})
+	}
+}
+
+func TestSubagentStopUsesUnixSocketTransport(t *testing.T) {
+	requireHookBinaries(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-domain sockets are not supported on Windows")
+	}
+
+	socketPath := filepath.Join(t.TempDir(), "engram.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen on Unix socket: %v", err)
+	}
+	var mu sync.Mutex
+	var captures []passiveCapture
+	var host string
+	httpServer := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.URL.Path {
+		case "/project/current":
+			_, _ = io.WriteString(w, `{"project":"engram","project_source":"config"}`)
+		case "/observations/passive":
+			host = r.Host
+			var capture passiveCapture
+			if err := json.NewDecoder(r.Body).Decode(&capture); err != nil {
+				t.Errorf("decode passive capture: %v", err)
+				return
+			}
+			captures = append(captures, capture)
+		default:
+			http.NotFound(w, r)
+		}
+	})}
+	go func() { _ = httpServer.Serve(listener) }()
+	t.Cleanup(func() {
+		_ = httpServer.Close()
+		_ = listener.Close()
+		_ = os.Remove(socketPath)
+	})
+
+	input := fmt.Sprintf(`{"session_id":%q,"cwd":%q,"last_assistant_message":"captured over UDS"}`, "uds-session", t.TempDir())
+	runHook(t, "subagent-stop.sh", input, map[string]string{"ENGRAM_SOCKET": socketPath})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if host != "localhost" {
+		t.Fatalf("Unix socket request host = %q, want localhost", host)
+	}
+	if len(captures) != 1 || captures[0].Content != "captured over UDS" {
+		t.Fatalf("captures = %+v, want one UDS passive capture", captures)
 	}
 }
