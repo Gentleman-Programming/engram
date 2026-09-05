@@ -174,6 +174,14 @@ func TestStartupMigrationBatchAvoidsRedundantGenerationProbes(t *testing.T) {
 	t.Run("rejects generation change after migration lock", func(t *testing.T) {
 		originalLock := acquireStartupMigrationLock
 		waiting, proceed := make(chan struct{}), make(chan struct{})
+		proceedReleased := false
+		releaseProceed := func() {
+			if !proceedReleased {
+				close(proceed)
+				proceedReleased = true
+			}
+		}
+		t.Cleanup(releaseProceed)
 		acquireStartupMigrationLock = func(string) (func(), error) {
 			close(waiting)
 			<-proceed
@@ -196,10 +204,19 @@ func TestStartupMigrationBatchAvoidsRedundantGenerationProbes(t *testing.T) {
 		}
 		errCh := make(chan error, 1)
 		go func() { errCh <- s.runStartupMigrations() }()
-		<-waiting
+		select {
+		case <-waiting:
+		case <-time.After(time.Second):
+			t.Fatal("runStartupMigrations did not reach the injected migration lock")
+		}
 		changed = true
-		close(proceed)
-		assertGenerationChanged(t, <-errCh)
+		releaseProceed()
+		select {
+		case err := <-errCh:
+			assertGenerationChanged(t, err)
+		case <-time.After(time.Second):
+			t.Fatal("runStartupMigrations did not return after migration lock release")
+		}
 		if writes != 0 {
 			t.Fatalf("startup writes after generation change = %d, want 0", writes)
 		}
