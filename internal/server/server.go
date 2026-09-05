@@ -77,10 +77,12 @@ type Server struct {
 	// promptBuilder constructs LLM prompts for semantic scan pairs.
 	// When nil and semantic=true, a no-op builder is used (returns empty string).
 	promptBuilder SemanticPromptBuilder
+	// version is reported by GET /health and defaults to "dev" for local builds.
+	version string
 }
 
 func New(s *store.Store, port int) *Server {
-	srv := &Server{store: s, port: port, listen: net.Listen, serve: http.Serve}
+	srv := &Server{store: s, port: port, listen: net.Listen, serve: http.Serve, version: "dev"}
 	srv.mux = http.NewServeMux()
 	srv.routes()
 	return srv
@@ -90,6 +92,11 @@ func New(s *store.Store, port int) *Server {
 // This is used to notify autosync.Manager via NotifyDirty().
 func (s *Server) SetOnWrite(fn func()) {
 	s.onWrite = fn
+}
+
+// SetVersion sets the release version reported by GET /health.
+func (s *Server) SetVersion(v string) {
+	s.version = v
 }
 
 // SetSyncStatus configures the sync status provider for the /sync/status endpoint.
@@ -292,7 +299,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]any{
 		"status":  "ok",
 		"service": "engram",
-		"version": "0.1.0",
+		"version": s.version,
 	})
 }
 

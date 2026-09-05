@@ -799,6 +799,7 @@ func cmdServe(cfg store.Config) {
 	defer s.Close()
 
 	srv := newHTTPServer(s, port)
+	srv.SetVersion(version)
 
 	// Wire the semantic runner factory and prompt builder for POST /conflicts/scan.
 	// Both live in cmd/engram so internal/server avoids a direct dependency on internal/llm.
