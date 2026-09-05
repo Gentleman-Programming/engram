@@ -16,6 +16,52 @@ is_valid_port() {
   [[ "$port" =~ ^([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$ ]]
 }
 
+is_valid_hook_max_time() {
+  local value="$1" integer fraction prefix
+  local LC_ALL=C
+  [[ "$value" =~ ^([0-9]+(\.[0-9]*)?|\.[0-9]+)$ ]] || return 1
+  [[ "$value" == *[1-9]* ]] || return 1
+
+  if [[ "$value" == .* ]]; then
+    integer=0
+    fraction="${value#.}"
+  elif [[ "$value" == *.* ]]; then
+    integer="${value%%.*}"
+    fraction="${value#*.}"
+  else
+    integer="$value"
+    fraction=""
+  fi
+  integer="${integer#"${integer%%[!0]*}"}"
+  [ -n "$integer" ] || integer=0
+
+  if [ "${#integer}" -gt 7 ] || { [ "${#integer}" -eq 7 ] && [ "$integer" -gt 2147483 ]; }; then
+    return 1
+  fi
+  [ "$integer" = 2147483 ] || return 0
+
+  fraction="${fraction%"${fraction##*[!0]}"}"
+  while [ "${#fraction}" -lt 3 ]; do
+    fraction+="0"
+  done
+  prefix="${fraction:0:3}"
+  [ "$prefix" -gt 647 ] && return 1
+  [[ "$prefix" = 647 && "${fraction:3}" == *[1-9]* ]] && return 1
+  return 0
+}
+
+case "${1:-}" in
+  __engram_hook_default_max_time=*) ENGRAM_HOOK_CALLER_DEFAULT_MAX_TIME="${1#*=}" ;;
+  *) ENGRAM_HOOK_CALLER_DEFAULT_MAX_TIME=3 ;;
+esac
+if ! is_valid_hook_max_time "$ENGRAM_HOOK_CALLER_DEFAULT_MAX_TIME"; then
+  ENGRAM_HOOK_CALLER_DEFAULT_MAX_TIME=3
+fi
+if ! is_valid_hook_max_time "${ENGRAM_HOOK_MAX_TIME:-}"; then
+  ENGRAM_HOOK_MAX_TIME="$ENGRAM_HOOK_CALLER_DEFAULT_MAX_TIME"
+fi
+unset ENGRAM_HOOK_CALLER_DEFAULT_MAX_TIME
+
 ENGRAM_PORT="$(trim_whitespace "${ENGRAM_PORT:-}")"
 if is_valid_port "$ENGRAM_PORT"; then
   ENGRAM_PORT="${ENGRAM_PORT#"${ENGRAM_PORT%%[!0]*}"}"

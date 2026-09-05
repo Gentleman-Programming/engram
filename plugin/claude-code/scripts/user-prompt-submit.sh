@@ -491,7 +491,7 @@ fi
 # Load shared helpers after the Windows-safe fast path so Git Bash does not fork
 # for dirname/pwd before deciding whether the safe path applies.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-source "${SCRIPT_DIR}/_helpers.sh"
+source "${SCRIPT_DIR}/_helpers.sh" "__engram_hook_default_max_time=0.2"
 
 parse_epoch() {
   TS="$1"

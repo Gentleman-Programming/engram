@@ -146,6 +146,72 @@ func resolveClaudeHookURL(t *testing.T, env map[string]string) string {
 	return string(output)
 }
 
+func normalizedClaudeHookMaxTime(t *testing.T, configured, callerDefault string) string {
+	t.Helper()
+	helper := filepath.Join(repoRoot(t), "plugin", "claude-code", "scripts", "_helpers.sh")
+	cmd := exec.Command("bash", "-c", `source "$1" "__engram_hook_default_max_time=$2"; printf '%s' "$ENGRAM_HOOK_MAX_TIME"`, "bash", helper, callerDefault)
+	cmd.Env = make([]string, 0, len(os.Environ())+1)
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(strings.ToUpper(entry), "ENGRAM_HOOK_MAX_TIME=") {
+			cmd.Env = append(cmd.Env, entry)
+		}
+	}
+	if configured != "" {
+		cmd.Env = append(cmd.Env, "ENGRAM_HOOK_MAX_TIME="+configured)
+	}
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("normalize Claude hook max time: %v", err)
+	}
+	return string(output)
+}
+
+func capturedUserPromptMaxTimes(t *testing.T, configured string) []string {
+	t.Helper()
+	requireHookBinaries(t)
+	argsPath := filepath.Join(t.TempDir(), "curl-args")
+	bashEnv := filepath.Join(t.TempDir(), "fake-curl.sh")
+	const fakeCurlScript = `curl() {
+  printf '%s\n' "$@" >> "$ENGRAM_TEST_CURL_ARGS"
+  for arg in "$@"; do
+    case "$arg" in
+      */project/current*) printf '%s' '{"project":"engram","project_source":"config"}' ;;
+      */sessions/*) printf '%s' '{}' ;;
+      */observations*) printf '%s' '[]' ;;
+    esac
+  done
+}
+`
+	if err := os.WriteFile(bashEnv, []byte(fakeCurlScript), 0o600); err != nil {
+		t.Fatalf("write fake curl environment: %v", err)
+	}
+
+	sessionID := newSessionID(t)
+	stateDir := t.TempDir()
+	env := map[string]string{
+		"ENGRAM_HOOK_MAX_TIME":  configured,
+		"ENGRAM_TEST_CURL_ARGS": argsPath,
+		"BASH_ENV":              bashEnv,
+		"TMPDIR":                stateDir,
+	}
+	stdin := fmt.Sprintf(`{"session_id":%q,"cwd":%q}`, sessionID, t.TempDir())
+	runHook(t, "user-prompt-submit.sh", stdin, env)
+	runHook(t, "user-prompt-submit.sh", stdin, env)
+
+	data, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read fake curl arguments: %v", err)
+	}
+	var maxTimes []string
+	args := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "--max-time" {
+			maxTimes = append(maxTimes, args[i+1])
+		}
+	}
+	return maxTimes
+}
+
 // serverPort extracts the port of a test server for ENGRAM_PORT. The hooks
 // build their URL as http://127.0.0.1:${ENGRAM_PORT}, which is the interface
 // httptest listens on.
@@ -574,4 +640,48 @@ func TestClaudeHookWhitespacePortFallsBackToDefault(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestClaudeHookMaxTimeNormalization(t *testing.T) {
+	for _, tt := range []struct {
+		name, configured, callerDefault, want string
+	}{
+		{name: "other hooks default to three seconds", callerDefault: "3", want: "3"},
+		{name: "user prompt default is fractional", callerDefault: "0.2", want: "0.2"},
+		{name: "valid fractional override is preserved", configured: "1.5", callerDefault: "0.2", want: "1.5"},
+		{name: "largest curl-safe decimal is preserved", configured: "2147483.647", callerDefault: "3", want: "2147483.647"},
+		{name: "zero falls back to user prompt default", configured: "0", callerDefault: "0.2", want: "0.2"},
+		{name: "zero decimal falls back to user prompt default", configured: "0.0", callerDefault: "0.2", want: "0.2"},
+		{name: "signed value falls back to other hook default", configured: "+1", callerDefault: "3", want: "3"},
+		{name: "negative value falls back to other hook default", configured: "-1", callerDefault: "3", want: "3"},
+		{name: "invalid value falls back to other hook default", configured: "not-a-number", callerDefault: "3", want: "3"},
+		{name: "NaN falls back to other hook default", configured: "NaN", callerDefault: "3", want: "3"},
+		{name: "infinity falls back to other hook default", configured: "inf", callerDefault: "3", want: "3"},
+		{name: "curl overflow falls back to other hook default", configured: "2147484", callerDefault: "3", want: "3"},
+		{name: "invalid caller default fails safely", callerDefault: "0", want: "3"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := normalizedClaudeHookMaxTime(t, tt.configured, tt.callerDefault); got != tt.want {
+				t.Fatalf("ENGRAM_HOOK_MAX_TIME = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestUserPromptMaxTimeFallbackReachesDirectCurlCalls(t *testing.T) {
+	if got, want := capturedUserPromptMaxTimes(t, "0"), []string{"0.2", "2", "0.2", "0.2", "0.2", "0.2"}; !equalStrings(got, want) {
+		t.Fatalf("curl --max-time values = %q, want %q", got, want)
+	}
+}
+
+func equalStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
 }
