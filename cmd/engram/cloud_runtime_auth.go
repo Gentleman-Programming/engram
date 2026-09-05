@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/Gentleman-Programming/engram/internal/cloud/auth"
-	"github.com/Gentleman-Programming/engram/internal/cloud/cloudstore"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/auth"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/cloudstore"
 )
 
 // cloudRuntimeAuthenticator is the single Authenticator wired into
@@ -24,8 +24,7 @@ import (
 // a deliberate, safe deviation from design.md migration step 3's
 // "managed-first" wording.
 //
-// This is the fix for the runtime gap flagged in PR5's apply-progress
-// Discovery section: newCloudRuntime previously only ever constructed
+// This fixes a runtime gap: newCloudRuntime previously only ever constructed
 // *auth.Service directly as the Authenticator, and auth.Service's own
 // ResolveBearerToken only ever resolves the legacy sync token — so a
 // managed token minted via `engram cloud bootstrap admin --issue-token` (or

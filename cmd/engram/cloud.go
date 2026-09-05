@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/url"
@@ -11,15 +10,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/internal/cloud"
-	"github.com/Gentleman-Programming/engram/internal/cloud/auth"
-	"github.com/Gentleman-Programming/engram/internal/cloud/cloudserver"
-	"github.com/Gentleman-Programming/engram/internal/cloud/cloudstore"
-	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
-	"github.com/Gentleman-Programming/engram/internal/cloud/dashboard"
-	"github.com/Gentleman-Programming/engram/internal/cloud/remote"
-	"github.com/Gentleman-Programming/engram/internal/store"
-	engramsync "github.com/Gentleman-Programming/engram/internal/sync"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/auth"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/cloudserver"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/cloudstore"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/constants"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/dashboard"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/remote"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloudconfig"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	engramsync "github.com/Gentleman-Programming/engram/v2/internal/sync"
 )
 
 type cloudManifestReader interface {
@@ -200,7 +200,7 @@ func backfillAllowedProjectMutationChunks(ctx context.Context, cs *cloudstore.Cl
 	return nil
 }
 
-var runUpgradeBootstrap = func(s *store.Store, project string, cc *cloudConfig) (*engramsync.UpgradeBootstrapResult, error) {
+var runUpgradeBootstrap = func(s *store.Store, project string, cc *cloudconfig.Config) (*engramsync.UpgradeBootstrapResult, error) {
 	transport, err := remote.NewRemoteTransport(cc.ServerURL, cc.Token, project)
 	if err != nil {
 		return nil, err
@@ -208,9 +208,15 @@ var runUpgradeBootstrap = func(s *store.Store, project string, cc *cloudConfig) 
 	return engramsync.BootstrapProject(s, transport, engramsync.UpgradeBootstrapOptions{Project: project, CreatedBy: "engram-cloud-upgrade"})
 }
 
-type cloudConfig struct {
-	ServerURL string `json:"server_url"`
-	Token     string `json:"token"`
+var runUpgradeRemirror = func(s *store.Store, project string, cc *cloudconfig.Config) (*engramsync.SyncResult, error) {
+	transport, err := remote.NewRemoteTransport(cc.ServerURL, cc.Token, project)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.RemirrorProject(project); err != nil {
+		return nil, err
+	}
+	return engramsync.NewCloudWithTransport(s, transport, project).Export("engram-cloud-remirror", project)
 }
 
 func cmdCloud(cfg store.Config) {
@@ -297,7 +303,7 @@ func cmdCloudRepair() {
 
 func cmdCloudUpgrade(cfg store.Config) {
 	if len(os.Args) < 4 {
-		fmt.Fprintln(os.Stderr, "usage: engram cloud upgrade <doctor|repair|bootstrap|status|rollback> --project <name>")
+		fmt.Fprintln(os.Stderr, "usage: engram cloud upgrade <doctor|repair|bootstrap|remirror|status|rollback> --project <name>")
 		exitFunc(1)
 		return
 	}
@@ -305,8 +311,9 @@ func cmdCloudUpgrade(cfg store.Config) {
 	if command == "--help" || command == "-h" || command == "help" {
 		fmt.Println("engram cloud upgrade")
 		fmt.Println("workflow: doctor -> repair -> bootstrap -> status/rollback")
+		fmt.Println("recovery: use remirror only to rebuild cloud state from authoritative local data")
 		fmt.Println("cloud is opt-in replication/shared access; local SQLite remains source of truth")
-		fmt.Println("usage: engram cloud upgrade <doctor|repair|bootstrap|status|rollback> --project <name>")
+		fmt.Println("usage: engram cloud upgrade <doctor|repair|bootstrap|remirror|status|rollback> --project <name>")
 		return
 	}
 	switch command {
@@ -316,13 +323,15 @@ func cmdCloudUpgrade(cfg store.Config) {
 		cmdCloudUpgradeRepair(cfg)
 	case "bootstrap":
 		cmdCloudUpgradeBootstrap(cfg)
+	case "remirror":
+		cmdCloudUpgradeRemirror(cfg)
 	case "status":
 		cmdCloudUpgradeStatus(cfg)
 	case "rollback":
 		cmdCloudUpgradeRollback(cfg)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown cloud upgrade command: %s\n", command)
-		fmt.Fprintln(os.Stderr, "supported cloud upgrade commands: doctor, repair, bootstrap, status, rollback")
+		fmt.Fprintln(os.Stderr, "supported cloud upgrade commands: doctor, repair, bootstrap, remirror, status, rollback")
 		exitFunc(1)
 	}
 }
@@ -346,7 +355,7 @@ func cmdCloudUpgradeDoctor(cfg store.Config) {
 	cloudConfigured := false
 	if cc, cfgErr := resolveCloudRuntimeConfig(cfg); cfgErr == nil {
 		if cc != nil {
-			if validated, err := validateCloudServerURL(cc.ServerURL); err == nil && strings.TrimSpace(validated) != "" {
+			if validated, err := cloudconfig.ValidateServerURL(cc.ServerURL); err == nil && strings.TrimSpace(validated) != "" {
 				cloudConfigured = true
 			}
 		}
@@ -499,7 +508,7 @@ func cmdCloudUpgradeBootstrap(cfg store.Config) {
 		fatal(fmt.Errorf("cloud upgrade bootstrap requires configured cloud server"))
 		return
 	}
-	validatedURL, err := validateCloudServerURL(cc.ServerURL)
+	validatedURL, err := cloudconfig.ValidateServerURL(cc.ServerURL)
 	if err != nil {
 		fatal(fmt.Errorf("invalid cloud runtime server URL: %w", err))
 		return
@@ -527,13 +536,52 @@ func cmdCloudUpgradeBootstrap(cfg store.Config) {
 
 	result, err := runUpgradeBootstrap(s, project, cc)
 	if err != nil {
-		fatal(err)
+		fatal(fmt.Errorf("%s", cloudSyncFailureMessage(project, err)))
 		return
 	}
 	fmt.Printf("project: %s\n", project)
 	fmt.Printf("stage: %s\n", result.Stage)
 	fmt.Printf("resumed: %t\n", result.Resumed)
 	fmt.Printf("noop: %t\n", result.NoOp)
+}
+
+func cmdCloudUpgradeRemirror(cfg store.Config) {
+	project := parseCloudUpgradeProjectArg(os.Args[4:])
+	if project == "" {
+		fmt.Fprintln(os.Stderr, "usage: engram cloud upgrade remirror --project <name>")
+		fmt.Fprintln(os.Stderr, "error: --project is required")
+		exitFunc(1)
+		return
+	}
+	s, err := storeNew(cfg)
+	if err != nil {
+		fatal(err)
+		return
+	}
+	defer s.Close()
+	cc, err := resolveCloudRuntimeConfig(cfg)
+	if err != nil {
+		fatal(err)
+		return
+	}
+	if cc == nil || strings.TrimSpace(cc.ServerURL) == "" {
+		fatal(fmt.Errorf("cloud upgrade remirror requires configured cloud server"))
+		return
+	}
+	validatedURL, err := cloudconfig.ValidateServerURL(cc.ServerURL)
+	if err != nil {
+		fatal(fmt.Errorf("invalid cloud runtime server URL: %w", err))
+		return
+	}
+	cc.ServerURL = validatedURL
+	result, err := runUpgradeRemirror(s, project, cc)
+	if err != nil {
+		fatal(fmt.Errorf("cloud remirror: %w", err))
+		return
+	}
+	fmt.Printf("project: %s\n", project)
+	fmt.Printf("chunks_exported: %d\n", result.ChunksExported)
+	fmt.Printf("mutations_exported: %d\n", result.MutationsExported)
 }
 
 func cmdCloudUpgradeStatus(cfg store.Config) {
@@ -629,7 +677,7 @@ func cmdCloudStatus(cfg store.Config) {
 		fmt.Println("Cloud status: not configured")
 		return
 	}
-	validatedURL, err := validateCloudServerURL(cc.ServerURL)
+	validatedURL, err := cloudconfig.ValidateServerURL(cc.ServerURL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: invalid cloud runtime server URL: %v\n", err)
 		exitFunc(1)
@@ -672,19 +720,29 @@ func printCloudStatusSyncDiagnostic(cfg store.Config) {
 		return
 	}
 	defer s.Close()
+	summary, err := s.CloudSyncSummary()
+	if err != nil {
+		return
+	}
+	if strings.TrimSpace(summary.LastError) != "" {
+		fmt.Println("Sync diagnostic: project-scoped cloud state")
+		if strings.TrimSpace(summary.ReasonCode) != "" {
+			fmt.Printf("reason_code: %s\n", summary.ReasonCode)
+		}
+		fmt.Printf("reason_message: %s\n", summary.LastError)
+		return
+	}
 	state, err := s.GetSyncState(constants.TargetKeyCloud)
 	if err != nil || state == nil {
 		return
 	}
 	code := strings.TrimSpace(derefString(state.ReasonCode))
-	message := strings.TrimSpace(derefString(state.ReasonMessage))
-	if code == "" && message == "" {
+	if code != constants.ReasonNonEnrolledPendingMutations {
 		return
 	}
+	message := strings.TrimSpace(derefString(state.ReasonMessage))
 	fmt.Printf("Sync diagnostic: %s\n", state.Lifecycle)
-	if code != "" {
-		fmt.Printf("reason_code: %s\n", code)
-	}
+	fmt.Printf("reason_code: %s\n", code)
 	if message != "" {
 		fmt.Printf("reason_message: %s\n", message)
 	}
@@ -704,18 +762,21 @@ func cmdCloudEnroll(cfg store.Config) {
 		exitFunc(1)
 	}
 
+	projectName, warning, err := normalizeCloudCLIProjectInput(os.Args[3])
+	if err != nil {
+		fatal(err)
+		return
+	}
+	if warning != "" {
+		fmt.Fprintln(os.Stderr, warning)
+	}
+
 	s, err := storeNew(cfg)
 	if err != nil {
 		fatal(err)
 		return
 	}
 	defer s.Close()
-
-	projectName := strings.TrimSpace(os.Args[3])
-	projectName, warning := store.NormalizeProject(projectName)
-	if warning != "" {
-		fmt.Fprintln(os.Stderr, warning)
-	}
 	if err := s.EnrollProject(projectName); err != nil {
 		fatal(err)
 		return
@@ -724,51 +785,41 @@ func cmdCloudEnroll(cfg store.Config) {
 	fmt.Printf("✓ Project %q enrolled for cloud sync\n", projectName)
 }
 
+func normalizeCloudCLIProjectInput(input string) (string, string, error) {
+	decoded, err := url.PathUnescape(strings.TrimSpace(input))
+	if err != nil {
+		return "", "", fmt.Errorf("invalid cloud project URL encoding %q: %w", input, err)
+	}
+	projectName, warning := store.NormalizeProject(decoded)
+	return projectName, warning, nil
+}
+
 func cmdCloudConfig(cfg store.Config) {
 	if len(os.Args) < 5 || os.Args[3] != "--server" {
 		fmt.Fprintln(os.Stderr, "usage: engram cloud config --server <url>")
 		exitFunc(1)
 	}
-	cc := &cloudConfig{ServerURL: strings.TrimSpace(os.Args[4])}
+	cc, err := cloudconfig.Load(cfg.DataDir)
+	if err != nil {
+		fatal(err)
+		return
+	}
+	cc.ServerURL = strings.TrimSpace(os.Args[4])
 	if cc.ServerURL == "" {
 		fmt.Fprintln(os.Stderr, "error: server URL is required")
 		exitFunc(1)
 	}
-	validatedURL, err := validateCloudServerURL(cc.ServerURL)
+	validatedURL, err := cloudconfig.ValidateServerURL(cc.ServerURL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: invalid server URL: %v\n", err)
 		exitFunc(1)
 	}
 	cc.ServerURL = validatedURL
-	if err := saveCloudConfig(cfg, cc); err != nil {
+	if err := cloudconfig.Save(cfg.DataDir, cc); err != nil {
 		fatal(err)
 		return
 	}
 	fmt.Printf("✓ Cloud server set to %s\n", cc.ServerURL)
-}
-
-func validateCloudServerURL(raw string) (string, error) {
-	trimmed := strings.TrimSpace(raw)
-	parsed, err := url.ParseRequestURI(trimmed)
-	if err != nil {
-		return "", err
-	}
-	scheme := strings.ToLower(strings.TrimSpace(parsed.Scheme))
-	if scheme != "http" && scheme != "https" {
-		return "", fmt.Errorf("scheme must be http or https")
-	}
-	if strings.TrimSpace(parsed.Host) == "" || strings.TrimSpace(parsed.Hostname()) == "" {
-		return "", fmt.Errorf("host is required")
-	}
-	if strings.TrimSpace(parsed.RawQuery) != "" {
-		return "", fmt.Errorf("query is not allowed")
-	}
-	if strings.TrimSpace(parsed.Fragment) != "" {
-		return "", fmt.Errorf("fragment is not allowed")
-	}
-	parsed.RawQuery = ""
-	parsed.Fragment = ""
-	return parsed.String(), nil
 }
 
 func cmdCloudServe() {
@@ -838,35 +889,4 @@ func normalizeAllowedProjects(projects []string) []string {
 		normalized = append(normalized, name)
 	}
 	return normalized
-}
-
-func cloudConfigPath(cfg store.Config) string {
-	return filepath.Join(cfg.DataDir, "cloud.json")
-}
-
-func loadCloudConfig(cfg store.Config) (*cloudConfig, error) {
-	path := cloudConfigPath(cfg)
-	b, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	var cc cloudConfig
-	if err := json.Unmarshal(b, &cc); err != nil {
-		return nil, err
-	}
-	return &cc, nil
-}
-
-func saveCloudConfig(cfg store.Config, cc *cloudConfig) error {
-	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
-		return err
-	}
-	b, err := json.MarshalIndent(cc, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(cloudConfigPath(cfg), b, 0o644)
 }

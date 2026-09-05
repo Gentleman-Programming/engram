@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+
+	"github.com/Gentleman-Programming/engram/v2/internal/command"
 )
 
 // ─── ClaudeRunner ─────────────────────────────────────────────────────────────
@@ -137,7 +139,7 @@ func parseClaudeEnvelope(raw []byte) (Verdict, error) {
 // standard input, and returns the combined stdout+stderr output.
 // It translates exec.ErrNotFound into ErrCLINotInstalled.
 func defaultRunCLI(ctx context.Context, name string, args []string, stdin string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd := command.NewContext(ctx, name, args...)
 	cmd.Stdin = strings.NewReader(stdin)
 	out, err := cmd.Output()
 	if err != nil {

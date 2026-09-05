@@ -9,12 +9,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/internal/cloud/chunkcodec"
-	"github.com/Gentleman-Programming/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/chunkcodec"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
 	_ "modernc.org/sqlite"
 )
 
@@ -251,13 +252,15 @@ type fakeGzipWriter struct {
 }
 
 type fakeCloudTransport struct {
-	manifest          *Manifest
-	chunks            map[string][]byte
-	lastCreatedBy     string
-	readChunkErr      error
-	readManifestCalls int
-	writeChunkCalls   int
-	readChunkCalls    int
+	manifest           *Manifest
+	chunks             map[string][]byte
+	lastCreatedBy      string
+	readChunkErr       error
+	writeManifestErr   error
+	readManifestCalls  int
+	writeManifestCalls int
+	writeChunkCalls    int
+	readChunkCalls     int
 }
 
 type fakeUpgradeHooks struct {
@@ -290,6 +293,10 @@ func (f *fakeCloudTransport) ReadManifest() (*Manifest, error) {
 }
 
 func (f *fakeCloudTransport) WriteManifest(m *Manifest) error {
+	f.writeManifestCalls++
+	if f.writeManifestErr != nil {
+		return f.writeManifestErr
+	}
 	f.manifest = m
 	return nil
 }
@@ -508,7 +515,7 @@ func TestLocalChunkExportIncludesRelationsForObservationsInheritingSessionProjec
 	}
 }
 
-func TestLocalChunkExportIncludesRelationWithPriorChunkEndpoints(t *testing.T) {
+func TestLocalChunkExportIncludesRelationWithMutationOnlyPriorEndpoint(t *testing.T) {
 	s := newTestStore(t)
 	const (
 		project   = "proj-a"
@@ -555,17 +562,6 @@ func TestLocalChunkExportIncludesRelationWithPriorChunkEndpoints(t *testing.T) {
 	if _, err := s.DB().Exec(`UPDATE observations SET created_at = ?, updated_at = ? WHERE sync_id IN (?, ?)`, oldTime, oldTime, source.SyncID, target.SyncID); err != nil {
 		t.Fatalf("backdate endpoints: %v", err)
 	}
-	if _, err := s.AddObservation(store.AddObservationParams{
-		SessionID: sessionID,
-		Type:      "decision",
-		Title:     "new project observation",
-		Content:   "new project observation content",
-		Project:   project,
-		Scope:     "project",
-	}); err != nil {
-		t.Fatalf("add new project observation: %v", err)
-	}
-
 	const relationID = "rel-watermark-closure"
 	if _, err := s.SaveRelation(store.SaveRelationParams{SyncID: relationID, SourceID: source.SyncID, TargetID: target.SyncID}); err != nil {
 		t.Fatalf("save relation: %v", err)
@@ -580,12 +576,25 @@ func TestLocalChunkExportIncludesRelationWithPriorChunkEndpoints(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("judge relation: %v", err)
 	}
+	if _, err := s.DB().Exec(`UPDATE memory_relations SET created_at = ?, updated_at = ? WHERE sync_id = ?`, oldTime, oldTime, relationID); err != nil {
+		t.Fatalf("backdate relation: %v", err)
+	}
+	targetPayload, err := json.Marshal(target)
+	if err != nil {
+		t.Fatalf("marshal target endpoint: %v", err)
+	}
 
 	syncDir := filepath.Join(t.TempDir(), ".engram")
-	writeLocalChunkFile(t, syncDir, "previous-chunk", ChunkData{Observations: []store.Observation{
-		{SyncID: source.SyncID},
-		{SyncID: target.SyncID},
-	}})
+	writeLocalChunkFile(t, syncDir, "previous-chunk", ChunkData{
+		Sessions:     []store.Session{{ID: sessionID, Project: project, Directory: "/tmp/proj-a", StartedAt: oldTime}},
+		Observations: []store.Observation{*source},
+		Mutations: []store.SyncMutation{{
+			Entity:    store.SyncEntityObservation,
+			EntityKey: target.SyncID,
+			Op:        store.SyncOpUpsert,
+			Payload:   string(targetPayload),
+		}},
+	})
 	writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{
 		ID: "previous-chunk", CreatedAt: "2025-06-01T00:00:00Z",
 	}}})
@@ -593,6 +602,9 @@ func TestLocalChunkExportIncludesRelationWithPriorChunkEndpoints(t *testing.T) {
 	result, err := New(s, syncDir).Export("alice", project)
 	if err != nil {
 		t.Fatalf("export: %v", err)
+	}
+	if result.IsEmpty {
+		t.Fatal("expected pre-watermark relation with historical mutation endpoint to export")
 	}
 	chunkJSON, err := readGzip(filepath.Join(syncDir, "chunks", result.ChunkID+".jsonl.gz"))
 	if err != nil {
@@ -609,7 +621,7 @@ func TestLocalChunkExportIncludesRelationWithPriorChunkEndpoints(t *testing.T) {
 		}
 	}
 	if !foundRelation {
-		t.Fatalf("relation with prior-chunk endpoints was not exported: %+v", chunk.Mutations)
+		t.Fatalf("relation with prior mutation endpoint was not exported: %+v", chunk.Mutations)
 	}
 	for _, observation := range chunk.Observations {
 		if observation.SyncID == source.SyncID || observation.SyncID == target.SyncID {
@@ -1125,6 +1137,304 @@ func TestLocalChunkExportFailsLoudlyOnCorruptPriorChunk(t *testing.T) {
 	if _, err := New(s, syncDir).Export("alice", "proj-a"); err == nil {
 		t.Fatal("expected Export to fail loudly on a corrupt prior chunk, got nil error")
 	}
+}
+
+func TestLocalChunkExportUsesObservationHistory(t *testing.T) {
+	tests := []struct {
+		name               string
+		history            func(store.Observation) ChunkData
+		observationCreated string
+		observationUpdated string
+		wantObservation    bool
+		wantEmpty          bool
+	}{
+		{
+			name: "older observation absent from history bypasses global watermark",
+			history: func(_ store.Observation) ChunkData {
+				return ChunkData{}
+			},
+			observationUpdated: "2025-01-01 00:00:00",
+			wantObservation:    true,
+		},
+		{
+			name: "older observation in a direct historical row remains filtered",
+			history: func(observation store.Observation) ChunkData {
+				return ChunkData{Observations: []store.Observation{{SyncID: observation.SyncID}}}
+			},
+			observationUpdated: "2025-01-01 00:00:00",
+			wantEmpty:          true,
+		},
+		{
+			name: "observation tombstone mutation counts as historical presence",
+			history: func(observation store.Observation) ChunkData {
+				return ChunkData{Mutations: []store.SyncMutation{{
+					Entity:    store.SyncEntityObservation,
+					EntityKey: observation.SyncID,
+					Op:        store.SyncOpDelete,
+				}}}
+			},
+			observationUpdated: "2025-01-01 00:00:00",
+			wantEmpty:          true,
+		},
+		{
+			name: "newer observation still exports after historical presence",
+			history: func(observation store.Observation) ChunkData {
+				return ChunkData{Observations: []store.Observation{{SyncID: observation.SyncID}}}
+			},
+			observationUpdated: "2025-07-01 00:00:00",
+			wantObservation:    true,
+		},
+		{
+			name: "observation created after watermark still exports after historical presence",
+			history: func(observation store.Observation) ChunkData {
+				return ChunkData{Observations: []store.Observation{{SyncID: observation.SyncID}}}
+			},
+			observationCreated: "2025-07-01 00:00:00",
+			observationUpdated: "2025-07-01 00:00:00",
+			wantObservation:    true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			const sessionID = "session-observation-history"
+			if err := s.CreateSession(sessionID, "proj-a", "/tmp/proj-a"); err != nil {
+				t.Fatalf("create session: %v", err)
+			}
+			observationID, err := s.AddObservation(store.AddObservationParams{
+				SessionID: sessionID,
+				Type:      "decision",
+				Title:     "observation history",
+				Content:   "observation history",
+				Project:   "proj-a",
+				Scope:     "project",
+			})
+			if err != nil {
+				t.Fatalf("add observation: %v", err)
+			}
+			promptID, err := s.AddPrompt(store.AddPromptParams{SessionID: sessionID, Content: "prompt history", Project: "proj-a"})
+			if err != nil {
+				t.Fatalf("add prompt: %v", err)
+			}
+			if _, err := s.DB().Exec(`UPDATE sessions SET started_at = ? WHERE id = ?`, "2025-01-01 00:00:00", sessionID); err != nil {
+				t.Fatalf("backdate session: %v", err)
+			}
+			observationCreated := tc.observationCreated
+			if observationCreated == "" {
+				observationCreated = "2025-01-01 00:00:00"
+			}
+			if _, err := s.DB().Exec(`UPDATE observations SET created_at = ?, updated_at = ? WHERE id = ?`, observationCreated, tc.observationUpdated, observationID); err != nil {
+				t.Fatalf("backdate observation: %v", err)
+			}
+			if _, err := s.DB().Exec(`UPDATE user_prompts SET created_at = ? WHERE id = ?`, "2025-01-01 00:00:00", promptID); err != nil {
+				t.Fatalf("backdate prompt: %v", err)
+			}
+
+			observation, err := s.GetObservation(observationID)
+			if err != nil {
+				t.Fatalf("get observation: %v", err)
+			}
+			syncDir := filepath.Join(t.TempDir(), ".engram")
+			writeLocalChunkFile(t, syncDir, "history", tc.history(*observation))
+			writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{
+				ID: "history", CreatedAt: "2025-06-01T00:00:00Z",
+			}}})
+
+			result, err := New(s, syncDir).Export("alice", "proj-a")
+			if err != nil {
+				t.Fatalf("export: %v", err)
+			}
+			if result.IsEmpty != tc.wantEmpty {
+				t.Fatalf("empty export = %t, want %t", result.IsEmpty, tc.wantEmpty)
+			}
+			if got := result.SessionsExported; got != boolToInt(tc.wantObservation) {
+				t.Fatalf("exported sessions = %d, want %d", got, boolToInt(tc.wantObservation))
+			}
+			if result.IsEmpty {
+				return
+			}
+
+			payload, err := readGzip(filepath.Join(syncDir, "chunks", result.ChunkID+".jsonl.gz"))
+			if err != nil {
+				t.Fatalf("read export chunk: %v", err)
+			}
+			var exported ChunkData
+			if err := json.Unmarshal(payload, &exported); err != nil {
+				t.Fatalf("unmarshal export chunk: %v", err)
+			}
+			if got := len(exported.Observations); got != boolToInt(tc.wantObservation) {
+				t.Fatalf("exported observations = %d, want %d; chunk=%+v", got, boolToInt(tc.wantObservation), exported)
+			}
+			if got := len(exported.Sessions); got != boolToInt(tc.wantObservation) {
+				t.Fatalf("exported sessions = %d, want %d; chunk=%+v", got, boolToInt(tc.wantObservation), exported)
+			}
+			if exported.Sessions[0].ID != sessionID {
+				t.Fatalf("exported session = %q, want parent %q", exported.Sessions[0].ID, sessionID)
+			}
+			if len(exported.Prompts) != 0 {
+				t.Fatalf("old prompts must retain timestamp filtering: %+v", exported)
+			}
+		})
+	}
+}
+
+func TestLocalChunkExportConvergesAfterImportingHistoricalTombstone(t *testing.T) {
+	const (
+		sessionID = "session-historical-tombstone"
+		obsSyncID = "observation-historical-tombstone"
+		createdAt = "2025-01-01 00:00:00"
+		deletedAt = "2025-02-01 00:00:00"
+	)
+	tombstoneDeletedAt := deletedAt
+
+	syncDir := filepath.Join(t.TempDir(), ".engram")
+	writeLocalChunkFile(t, syncDir, "initial", ChunkData{
+		Sessions: []store.Session{{
+			ID:        sessionID,
+			Project:   "proj-a",
+			Directory: "/tmp/proj-a",
+			StartedAt: createdAt,
+		}},
+		Observations: []store.Observation{{
+			SyncID:    obsSyncID,
+			SessionID: sessionID,
+			Type:      "bugfix",
+			Title:     "Historical tombstone",
+			Content:   "Previously exported observation",
+			Scope:     "project",
+			CreatedAt: createdAt,
+			UpdatedAt: createdAt,
+		}},
+	})
+	writeLocalChunkFile(t, syncDir, "tombstone", ChunkData{
+		Observations: []store.Observation{{
+			SyncID:    obsSyncID,
+			SessionID: sessionID,
+			Type:      "bugfix",
+			Title:     "Historical tombstone",
+			Content:   "Previously exported observation",
+			Scope:     "project",
+			CreatedAt: createdAt,
+			UpdatedAt: deletedAt,
+			DeletedAt: &tombstoneDeletedAt,
+		}},
+	})
+	writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{
+		{ID: "initial", CreatedAt: "2025-01-01T00:00:00Z"},
+		{ID: "tombstone", CreatedAt: "2025-02-01T00:00:00Z"},
+	}})
+
+	s := newTestStore(t)
+	if _, err := New(s, syncDir).Import(); err != nil {
+		t.Fatalf("import tombstone: %v", err)
+	}
+
+	result, err := New(s, syncDir).Export("alice", "proj-a")
+	if err != nil {
+		t.Fatalf("repeat export after tombstone import: %v", err)
+	}
+	if !result.IsEmpty {
+		t.Fatalf("repeat export = %+v, want empty", result)
+	}
+}
+
+func TestExportedChunkKeysObservationMutationIdentity(t *testing.T) {
+	validPayload := `{"sync_id":" obs-mutation-only ","session_id":"session","type":"decision","title":"title","content":"content","scope":"project"}`
+	quotedPayload, err := json.Marshal(validPayload)
+	if err != nil {
+		t.Fatalf("marshal quoted payload: %v", err)
+	}
+	tests := []struct {
+		name           string
+		mutation       store.SyncMutation
+		wantHistorical bool
+		wantAvailable  bool
+		wantKey        string
+	}{
+		{
+			name:           "valid mutation-only upsert preserves its endpoint identity",
+			mutation:       store.SyncMutation{Entity: store.SyncEntityObservation, EntityKey: " obs-mutation-only ", Op: store.SyncOpUpsert, Payload: validPayload},
+			wantHistorical: true,
+			wantAvailable:  true,
+			wantKey:        " obs-mutation-only ",
+		},
+		{
+			name:           "JSON-string payload preserves its endpoint identity",
+			mutation:       store.SyncMutation{Entity: store.SyncEntityObservation, EntityKey: " obs-mutation-only ", Op: store.SyncOpUpsert, Payload: string(quotedPayload)},
+			wantHistorical: true,
+			wantAvailable:  true,
+			wantKey:        " obs-mutation-only ",
+		},
+		{
+			name:     "empty payload identity is rejected",
+			mutation: store.SyncMutation{Entity: store.SyncEntityObservation, EntityKey: "obs-empty", Op: store.SyncOpUpsert, Payload: `{"sync_id":"","session_id":"session","type":"decision","title":"title","content":"content","scope":"project"}`},
+		},
+		{
+			name:     "whitespace payload identity is rejected",
+			mutation: store.SyncMutation{Entity: store.SyncEntityObservation, EntityKey: " \t", Op: store.SyncOpUpsert, Payload: `{"sync_id":" \t","session_id":"session","type":"decision","title":"title","content":"content","scope":"project"}`},
+		},
+		{
+			name:     "malformed payload identity is rejected",
+			mutation: store.SyncMutation{Entity: store.SyncEntityObservation, EntityKey: "1", Op: store.SyncOpUpsert, Payload: `{"sync_id":1,"session_id":"session","type":"decision","title":"title","content":"content","scope":"project"}`},
+		},
+		{
+			name:     "malformed payload is rejected",
+			mutation: store.SyncMutation{Entity: store.SyncEntityObservation, EntityKey: "obs-malformed", Op: store.SyncOpUpsert, Payload: `{"sync_id"`},
+		},
+		{
+			name:     "missing payload identity is rejected",
+			mutation: store.SyncMutation{Entity: store.SyncEntityObservation, EntityKey: "obs-missing", Op: store.SyncOpUpsert, Payload: `{"session_id":"session","type":"decision","title":"title","content":"content","scope":"project"}`},
+		},
+		{
+			name:     "mismatched identity is rejected",
+			mutation: store.SyncMutation{Entity: store.SyncEntityObservation, EntityKey: "obs-entity-key", Op: store.SyncOpUpsert, Payload: `{"sync_id":"obs-payload","session_id":"session","type":"decision","title":"title","content":"content","scope":"project"}`},
+		},
+		{
+			name:           "tombstone preserves history but not endpoint availability",
+			mutation:       store.SyncMutation{Entity: store.SyncEntityObservation, EntityKey: "obs-tombstone", Op: store.SyncOpDelete},
+			wantHistorical: true,
+			wantKey:        "obs-tombstone",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := json.Marshal(ChunkData{Mutations: []store.SyncMutation{tc.mutation}})
+			if err != nil {
+				t.Fatalf("marshal chunk: %v", err)
+			}
+			transport := newFakeCloudTransport()
+			transport.chunks["history"] = raw
+			sy := NewWithTransport(nil, transport)
+			_, available, historical, err := sy.exportedChunkKeys(&Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "history"}}})
+			if err != nil {
+				t.Fatalf("exportedChunkKeys: %v", err)
+			}
+			if got := len(historical); got != boolToInt(tc.wantHistorical) {
+				t.Fatalf("historical keys = %v, want historical=%t", historical, tc.wantHistorical)
+			}
+			if got := len(available); got != boolToInt(tc.wantAvailable) {
+				t.Fatalf("available keys = %v, want available=%t", available, tc.wantAvailable)
+			}
+			if tc.wantKey == "" {
+				return
+			}
+			if _, ok := historical[tc.wantKey]; ok != tc.wantHistorical {
+				t.Fatalf("historical key %q present=%t, want %t", tc.wantKey, ok, tc.wantHistorical)
+			}
+			if _, ok := available[tc.wantKey]; ok != tc.wantAvailable {
+				t.Fatalf("available key %q present=%t, want %t", tc.wantKey, ok, tc.wantAvailable)
+			}
+		})
+	}
+}
+
+func boolToInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 // TestLocalChunkExportReexportsRelationUpdatedAfterLastChunk covers the second
@@ -1879,6 +2189,389 @@ func TestExportDoesNotReconcileLocallyMissingChunkByOwnershipHeuristic(t *testin
 	}
 	if transport.writeChunkCalls != 1 {
 		t.Fatalf("expected no duplicate remote chunk writes, got %d", transport.writeChunkCalls)
+	}
+}
+
+func TestOwnershipManifestCompatibilityIsScopedToSynchronizedSessions(t *testing.T) {
+	t.Run("shared project is compatible despite unrelated owned session", func(t *testing.T) {
+		s := newTestStore(t)
+		if err := s.CreateSession("shared-project-a", "project-a", "/tmp/a"); err != nil {
+			t.Fatalf("create shared session: %v", err)
+		}
+		if err := s.CreateSessionWithOwnershipMode("manual-save-project-b", "project-b", "/tmp/b", store.SessionOwnershipProjectOwned); err != nil {
+			t.Fatalf("create unrelated project-owned session: %v", err)
+		}
+		syncDir := filepath.Join(t.TempDir(), ".engram")
+		writeLocalChunkFile(t, syncDir, "legacy", ChunkData{})
+		writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "legacy", CreatedAt: "2020-01-01T00:00:00Z"}}})
+
+		if _, err := New(s, syncDir).Export("alice", "project-a"); err != nil {
+			t.Fatalf("export shared project against legacy manifest: %v", err)
+		}
+	})
+
+	t.Run("legacy delete cannot remove or downgrade project owned session", func(t *testing.T) {
+		s := newTestStore(t)
+		if err := s.CreateSessionWithOwnershipMode("manual-save-project-a", "project-a", "/original", store.SessionOwnershipProjectOwned); err != nil {
+			t.Fatalf("create project-owned session: %v", err)
+		}
+		syncDir := filepath.Join(t.TempDir(), ".engram")
+		writeLocalChunkFile(t, syncDir, "delete", ChunkData{Mutations: []store.SyncMutation{{Entity: store.SyncEntitySession, EntityKey: "manual-save-project-a", Op: store.SyncOpDelete, Payload: `{"id":"manual-save-project-a","deleted":true}`}}})
+		writeLocalChunkFile(t, syncDir, "recreate", ChunkData{Sessions: []store.Session{{ID: "manual-save-project-a", Project: "project-a", OwnershipMode: store.SessionOwnershipShared, Directory: "/recreated"}}})
+		writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "delete", CreatedAt: "2020-01-01T00:00:00Z"}, {ID: "recreate", CreatedAt: "2020-01-01T00:00:01Z"}}})
+
+		if _, err := New(s, syncDir).Import(); err == nil || !strings.Contains(err.Error(), "legacy delete targets project-owned session") {
+			t.Fatalf("legacy delete import error = %v", err)
+		}
+		session, err := s.GetSession("manual-save-project-a")
+		if err != nil || session.Project != "project-a" || session.OwnershipMode != store.SessionOwnershipProjectOwned || session.Directory != "/original" {
+			t.Fatalf("session after rejected legacy sequence = %#v, %v", session, err)
+		}
+	})
+
+	t.Run("preflight rejects later incompatible chunk before mutation", func(t *testing.T) {
+		s := newTestStore(t)
+		syncDir := filepath.Join(t.TempDir(), ".engram")
+		writeLocalChunkFile(t, syncDir, "shared", ChunkData{Sessions: []store.Session{{ID: "shared-session", Project: "project-a", OwnershipMode: store.SessionOwnershipShared}}})
+		writeLocalChunkFile(t, syncDir, "owned", ChunkData{Sessions: []store.Session{{ID: "manual-save-project-b", Project: "project-b", OwnershipMode: store.SessionOwnershipProjectOwned}}})
+		writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "shared", CreatedAt: "2020-01-01T00:00:00Z"}, {ID: "owned", CreatedAt: "2020-01-01T00:00:01Z"}}})
+
+		if _, err := New(s, syncDir).Import(); err == nil || !strings.Contains(err.Error(), "incoming project-owned sessions") {
+			t.Fatalf("legacy preflight import error = %v", err)
+		}
+		if _, err := s.GetSession("shared-session"); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("shared session after rejected preflight error = %v, want missing", err)
+		}
+	})
+
+	t.Run("preflight rejects JSON-string project-owned payload", func(t *testing.T) {
+		s := newTestStore(t)
+		syncDir := filepath.Join(t.TempDir(), ".engram")
+		writeLocalChunkFile(t, syncDir, "shared", ChunkData{Sessions: []store.Session{{ID: "shared-session", Project: "project-a", OwnershipMode: store.SessionOwnershipShared}}})
+		encoded, err := json.Marshal(`{"id":"manual-save-project-b","project":"project-b","ownership_mode":"project_owned"}`)
+		if err != nil {
+			t.Fatalf("encode session payload: %v", err)
+		}
+		writeLocalChunkFile(t, syncDir, "owned", ChunkData{Mutations: []store.SyncMutation{{Entity: store.SyncEntitySession, EntityKey: "manual-save-project-b", Op: store.SyncOpUpsert, Payload: string(encoded)}}})
+		writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "shared", CreatedAt: "2020-01-01T00:00:00Z"}, {ID: "owned", CreatedAt: "2020-01-01T00:00:01Z"}}})
+
+		if _, err := New(s, syncDir).Import(); err == nil || !strings.Contains(err.Error(), "incoming project-owned sessions") {
+			t.Fatalf("JSON-string legacy preflight import error = %v", err)
+		}
+		if _, err := s.GetSession("shared-session"); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("shared session after JSON-string preflight error = %v, want missing", err)
+		}
+	})
+
+	for _, tc := range []struct {
+		name     string
+		mutation store.SyncMutation
+	}{
+		{
+			name: "observation project from mutation",
+			mutation: store.SyncMutation{
+				Entity:    store.SyncEntityObservation,
+				EntityKey: "blocked-observation",
+				Op:        store.SyncOpUpsert,
+				Project:   "project-a",
+				Payload:   `{"sync_id":"blocked-observation","session_id":"manual-save-project-a","type":"manual","title":"blocked","content":"blocked","scope":"project"}`,
+			},
+		},
+		{
+			name: "prompt project from payload",
+			mutation: store.SyncMutation{
+				Entity:    store.SyncEntityPrompt,
+				EntityKey: "blocked-prompt",
+				Op:        store.SyncOpUpsert,
+				Payload:   `{"sync_id":"blocked-prompt","session_id":"manual-save-project-a","content":"blocked","project":"project-a"}`,
+			},
+		},
+	} {
+		t.Run("preflight rejects "+tc.name+" before applying any chunk", func(t *testing.T) {
+			s := newTestStore(t)
+			if err := s.CreateSessionWithOwnershipMode("manual-save-project-a", "project-a", "/tmp/a", store.SessionOwnershipProjectOwned); err != nil {
+				t.Fatalf("create project-owned session: %v", err)
+			}
+			syncDir := filepath.Join(t.TempDir(), ".engram")
+			writeLocalChunkFile(t, syncDir, "safe", ChunkData{Sessions: []store.Session{{ID: "would-import", Project: "project-b", OwnershipMode: store.SessionOwnershipShared, Directory: "/tmp/b"}}})
+			writeLocalChunkFile(t, syncDir, "blocked", ChunkData{Mutations: []store.SyncMutation{tc.mutation}})
+			writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "safe", CreatedAt: "2020-01-01T00:00:00Z"}, {ID: "blocked", CreatedAt: "2020-01-01T00:00:01Z"}}})
+
+			if _, err := New(s, syncDir).Import(); err == nil || !strings.Contains(err.Error(), `project "project-a"`) {
+				t.Fatalf("legacy %s preflight import error = %v, want project rejection", tc.name, err)
+			}
+			if _, err := s.GetSession("would-import"); !errors.Is(err, sql.ErrNoRows) {
+				t.Fatalf("safe chunk session after rejected preflight error = %v, want missing", err)
+			}
+			var localCursorCount int
+			if err := s.DB().QueryRow(`SELECT count(*) FROM sync_state WHERE target_key = ?`, store.LocalChunkTargetKey).Scan(&localCursorCount); err != nil {
+				t.Fatalf("count local cursor rows: %v", err)
+			}
+			if localCursorCount != 0 {
+				t.Fatalf("rejected preflight created %d local cursor rows, want 0", localCursorCount)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name, entity, key, payload string
+	}{
+		{"observation delete", store.SyncEntityObservation, "deleted-observation", `{"sync_id":"deleted-observation","session_id":"manual-save-project-a","project":"project-a","deleted":true}`},
+		{"prompt delete", store.SyncEntityPrompt, "deleted-prompt", `{"sync_id":"deleted-prompt","session_id":"manual-save-project-a","project":"project-a","deleted":true}`},
+	} {
+		t.Run("preflight rejects "+tc.name+" for project-owned session", func(t *testing.T) {
+			s := newTestStore(t)
+			if err := s.CreateSessionWithOwnershipMode("manual-save-project-a", "project-a", "/tmp/a", store.SessionOwnershipProjectOwned); err != nil {
+				t.Fatalf("create project-owned session: %v", err)
+			}
+			syncDir := filepath.Join(t.TempDir(), ".engram")
+			writeLocalChunkFile(t, syncDir, "delete", ChunkData{Mutations: []store.SyncMutation{{Entity: tc.entity, EntityKey: tc.key, Op: store.SyncOpDelete, Payload: tc.payload}}})
+			writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "delete", CreatedAt: "2020-01-01T00:00:00Z"}}})
+
+			if _, err := New(s, syncDir).Import(); err == nil || !strings.Contains(err.Error(), `project "project-a"`) {
+				t.Fatalf("legacy %s preflight import error = %v, want project rejection", tc.name, err)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name, table string
+		mutation    store.SyncMutation
+	}{
+		{
+			name:  "observation for unrelated shared project",
+			table: "observations",
+			mutation: store.SyncMutation{Entity: store.SyncEntityObservation, EntityKey: "accepted-observation", Op: store.SyncOpUpsert, Project: "project-b",
+				Payload: `{"sync_id":"accepted-observation","session_id":"shared-project-b","type":"manual","title":"accepted","content":"accepted","scope":"project"}`},
+		},
+		{
+			name:  "prompt for unrelated shared project",
+			table: "user_prompts",
+			mutation: store.SyncMutation{Entity: store.SyncEntityPrompt, EntityKey: "accepted-prompt", Op: store.SyncOpUpsert,
+				Payload: `{"sync_id":"accepted-prompt","session_id":"shared-project-b","content":"accepted","project":"project-b"}`},
+		},
+	} {
+		t.Run("preflight accepts "+tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if err := s.CreateSessionWithOwnershipMode("manual-save-project-a", "project-a", "/tmp/a", store.SessionOwnershipProjectOwned); err != nil {
+				t.Fatalf("create unrelated project-owned session: %v", err)
+			}
+			if err := s.CreateSession("shared-project-b", "project-b", "/tmp/b"); err != nil {
+				t.Fatalf("create shared session: %v", err)
+			}
+			syncDir := filepath.Join(t.TempDir(), ".engram")
+			writeLocalChunkFile(t, syncDir, "accepted", ChunkData{Mutations: []store.SyncMutation{tc.mutation}})
+			writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "accepted", CreatedAt: "2020-01-01T00:00:00Z"}}})
+
+			if _, err := New(s, syncDir).Import(); err != nil {
+				t.Fatalf("import legacy %s: %v", tc.name, err)
+			}
+			var count int
+			if err := s.DB().QueryRow(`SELECT count(*) FROM `+tc.table+` WHERE sync_id = ?`, tc.mutation.EntityKey).Scan(&count); err != nil {
+				t.Fatalf("count imported %s: %v", tc.name, err)
+			}
+			if count != 1 {
+				t.Fatalf("imported %s count = %d, want 1", tc.name, count)
+			}
+		})
+	}
+
+	for _, tc := range []struct{ name, id string }{{"shared", "shared-session"}, {"absent", "absent-session"}} {
+		t.Run("legacy delete remains compatible for "+tc.name+" session", func(t *testing.T) {
+			s := newTestStore(t)
+			if tc.name == "shared" {
+				if err := s.CreateSession(tc.id, "project-a", "/tmp/a"); err != nil {
+					t.Fatalf("create shared session: %v", err)
+				}
+			}
+			syncDir := filepath.Join(t.TempDir(), ".engram")
+			writeLocalChunkFile(t, syncDir, "delete", ChunkData{Mutations: []store.SyncMutation{{Entity: store.SyncEntitySession, EntityKey: tc.id, Op: store.SyncOpDelete, Payload: `{"id":"` + tc.id + `","deleted":true}`}}})
+			writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "delete", CreatedAt: "2020-01-01T00:00:00Z"}}})
+			if _, err := New(s, syncDir).Import(); err != nil {
+				t.Fatalf("legacy delete import: %v", err)
+			}
+			if _, err := s.GetSession(tc.id); !errors.Is(err, sql.ErrNoRows) {
+				t.Fatalf("session after legacy delete error = %v, want missing", err)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name      string
+		setup     func(t *testing.T, s *store.Store)
+		incoming  store.Session
+		wantError string
+	}{
+		{
+			name: "existing project owned session matches incoming project",
+			setup: func(t *testing.T, s *store.Store) {
+				t.Helper()
+				if err := s.CreateSessionWithOwnershipMode("manual-save-project-a", "project-a", "/tmp/a", store.SessionOwnershipProjectOwned); err != nil {
+					t.Fatalf("create project-owned session: %v", err)
+				}
+			},
+			incoming:  store.Session{ID: "incoming-shared-a", Project: "project-a", OwnershipMode: store.SessionOwnershipShared, Directory: "/tmp/a"},
+			wantError: "project \"project-a\"",
+		},
+		{
+			name:      "incoming project owned session",
+			setup:     func(*testing.T, *store.Store) {},
+			incoming:  store.Session{ID: "manual-save-project-c", Project: "project-c", OwnershipMode: store.SessionOwnershipProjectOwned, Directory: "/tmp/c"},
+			wantError: "incoming project-owned sessions",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			tc.setup(t, s)
+			syncDir := filepath.Join(t.TempDir(), ".engram")
+			writeLocalChunkFile(t, syncDir, "legacy", ChunkData{Sessions: []store.Session{tc.incoming}})
+			writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "legacy", CreatedAt: "2020-01-01T00:00:00Z"}}})
+
+			if _, err := New(s, syncDir).Import(); err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("import legacy manifest error = %v, want %q", err, tc.wantError)
+			}
+		})
+	}
+}
+
+func TestOwnershipManifestVersionDoesNotDowngradeFutureManifest(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSessionWithOwnershipMode("manual-save-project-a", "project-a", "/tmp/a", store.SessionOwnershipProjectOwned); err != nil {
+		t.Fatalf("create project-owned session: %v", err)
+	}
+	syncDir := filepath.Join(t.TempDir(), ".engram")
+	writeLocalChunkFile(t, syncDir, "existing", ChunkData{})
+	writeManifestFile(t, syncDir, &Manifest{Version: 3, Chunks: []ChunkEntry{{ID: "existing", CreatedAt: "2020-01-01T00:00:00Z"}}})
+
+	if _, err := New(s, syncDir).Export("alice", "project-a"); err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	manifest, err := NewFileTransport(syncDir).ReadManifest()
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if manifest.Version != 3 {
+		t.Fatalf("manifest version = %d, want 3", manifest.Version)
+	}
+}
+
+func TestOwnershipManifestVersionUpgradesNonEmptyLegacyManifest(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSessionWithOwnershipMode("manual-save-project-a", "project-a", "/tmp/a", store.SessionOwnershipProjectOwned); err != nil {
+		t.Fatalf("create project-owned session: %v", err)
+	}
+	syncDir := filepath.Join(t.TempDir(), ".engram")
+	writeLocalChunkFile(t, syncDir, "existing", ChunkData{})
+	writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "existing", CreatedAt: "2020-01-01T00:00:00Z"}}})
+
+	if _, err := New(s, syncDir).Export("alice", "project-a"); err != nil {
+		t.Fatalf("export project-owned data through legacy manifest: %v", err)
+	}
+	manifest, err := NewFileTransport(syncDir).ReadManifest()
+	if err != nil {
+		t.Fatalf("read upgraded manifest: %v", err)
+	}
+	if manifest.Version != ownershipModeManifestVersion {
+		t.Fatalf("manifest version = %d, want %d", manifest.Version, ownershipModeManifestVersion)
+	}
+}
+
+func TestOwnershipManifestVersionUpgradesLegacyManifestOnEmptyExports(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		keepOldChunks bool
+	}{
+		{name: "genuinely empty export", keepOldChunks: true},
+		{name: "deduplicated export"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if err := s.CreateSessionWithOwnershipMode("manual-save-project-a", "project-a", "/tmp/a", store.SessionOwnershipProjectOwned); err != nil {
+				t.Fatalf("create project-owned session: %v", err)
+			}
+			syncDir := filepath.Join(t.TempDir(), ".engram")
+			sy := New(s, syncDir)
+			if _, err := sy.Export("alice", "project-a"); err != nil {
+				t.Fatalf("seed export: %v", err)
+			}
+			manifest, err := NewFileTransport(syncDir).ReadManifest()
+			if err != nil {
+				t.Fatalf("read seeded manifest: %v", err)
+			}
+			expectedChunks := append([]ChunkEntry(nil), manifest.Chunks...)
+			legacyManifest := &Manifest{Version: 1}
+			if tc.keepOldChunks {
+				legacyManifest.Chunks = expectedChunks
+			}
+			writeManifestFile(t, syncDir, legacyManifest)
+
+			result, err := sy.Export("alice", "project-a")
+			if err != nil {
+				t.Fatalf("export through legacy manifest: %v", err)
+			}
+			if !result.IsEmpty {
+				t.Fatalf("export result = %#v, want empty", result)
+			}
+			manifest, err = NewFileTransport(syncDir).ReadManifest()
+			if err != nil {
+				t.Fatalf("read upgraded manifest: %v", err)
+			}
+			if manifest.Version != ownershipModeManifestVersion {
+				t.Fatalf("manifest version = %d, want %d", manifest.Version, ownershipModeManifestVersion)
+			}
+			if tc.keepOldChunks && !reflect.DeepEqual(manifest.Chunks, expectedChunks) {
+				t.Fatalf("manifest chunks = %#v, want %#v", manifest.Chunks, expectedChunks)
+			}
+		})
+	}
+}
+
+func TestOwnershipManifestVersionUpgradeWriteFailureStopsBeforeChunkOrTracking(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSessionWithOwnershipMode("manual-save-project-a", "project-a", "/tmp/a", store.SessionOwnershipProjectOwned); err != nil {
+		t.Fatalf("create project-owned session: %v", err)
+	}
+	wantErr := errors.New("forced early manifest write failure")
+	transport := newFakeCloudTransport()
+	transport.writeManifestErr = wantErr
+
+	_, err := NewWithTransport(s, transport).Export("alice", "project-a")
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("export error = %v, want %v", err, wantErr)
+	}
+	if transport.writeManifestCalls != 1 {
+		t.Fatalf("write manifest calls = %d, want 1", transport.writeManifestCalls)
+	}
+	if transport.writeChunkCalls != 0 || len(transport.chunks) != 0 {
+		t.Fatalf("chunk writes = %d, chunks = %#v; want none", transport.writeChunkCalls, transport.chunks)
+	}
+	synced, err := s.GetSyncedChunks()
+	if err != nil {
+		t.Fatalf("get synced chunks: %v", err)
+	}
+	if len(synced) != 0 {
+		t.Fatalf("synced chunks = %#v, want none", synced)
+	}
+}
+
+func TestSynthesizeMutationsFromChunkPreservesSessionOwnershipMode(t *testing.T) {
+	mutations := synthesizeMutationsFromChunk(ChunkData{Sessions: []store.Session{{
+		ID:            "manual-save-project-a",
+		Project:       "project-a",
+		OwnershipMode: store.SessionOwnershipProjectOwned,
+		Directory:     "/tmp/a",
+	}}})
+	if len(mutations) != 1 {
+		t.Fatalf("synthesized mutations = %#v, want one session mutation", mutations)
+	}
+	target := newTestStore(t)
+	mutations[0].Seq = 1
+	if err := target.ApplyPulledMutation(store.LocalChunkTargetKey, mutations[0]); err != nil {
+		t.Fatalf("apply synthesized session mutation: %v", err)
+	}
+	session, err := target.GetSession("manual-save-project-a")
+	if err != nil || session.OwnershipMode != store.SessionOwnershipProjectOwned {
+		t.Fatalf("round-tripped session = %#v, %v; want project_owned", session, err)
 	}
 }
 

@@ -14,6 +14,7 @@
 package setup
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -22,9 +23,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
-	"github.com/Gentleman-Programming/engram/internal/mcp"
+	"github.com/Gentleman-Programming/engram/v2/internal/command"
+	"github.com/Gentleman-Programming/engram/v2/internal/mcp"
 )
 
 var (
@@ -33,12 +37,16 @@ var (
 	lookPathFn   = exec.LookPath
 	osExecutable = os.Executable
 	runCommand   = func(name string, args ...string) ([]byte, error) {
-		return exec.Command(name, args...).CombinedOutput()
+		return command.NewContext(context.Background(), name, args...).CombinedOutput()
+	}
+	runCommandWithContext = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		return command.NewContext(ctx, name, args...).CombinedOutput()
 	}
 	openCodeReadFile = func(path string) ([]byte, error) {
 		return openCodeFS.ReadFile(path)
 	}
 	statFn                             = os.Stat
+	lstatFn                            = os.Lstat
 	openCodeWriteFileFn                = os.WriteFile
 	readFileFn                         = os.ReadFile
 	writeFileFn                        = os.WriteFile
@@ -53,6 +61,7 @@ var (
 	injectCodexMemoryConfigFn          = injectCodexMemoryConfig
 	addClaudeCodeAllowlistFn           = AddClaudeCodeAllowlist
 	writeClaudeCodeUserMCPFn           = writeClaudeCodeUserMCP
+	createClaudeCodeUserMCPFn          = createClaudeCodeUserMCP
 
 	// resolveMiseNodeVersionFn resolves the active Node version managed by mise.
 	// It runs "mise current node" and returns the result as a "node@X.Y.Z" specifier.
@@ -75,19 +84,23 @@ type Result struct {
 	Agent            string
 	Destination      string
 	Files            int
+	MCPConfigured    bool
 	TUIPluginEnabled bool
 }
 
 const claudeCodeMarketplace = "Gentleman-Programming/engram"
 const codexMarketplace = "Gentleman-Programming/engram"
+const claudeCodeSlimPluginFloor = "0.1.1"
+const claudeCodePluginListTimeout = 2 * time.Second // bounds only the read-only Claude plugin capability probe
 
 const openCodeSubagentStatuslinePlugin = "opencode-subagent-statusline"
 
-const piGentleEngramPackage = "npm:gentle-engram@0.1.8"
+const piGentleEngramPackage = "npm:gentle-engram@0.1.11"
+const piLegacyGentleEngramPackage = "npm:gentle-engram@0.1.8"
 const piMCPAdapterPackage = "npm:pi-mcp-adapter"
 
 // claudeCodeMCPTools are the MCP tool permission names for the agent profile
-// registered by the engram Claude Code plugin and durable user-level MCP config.
+// registered in the durable Claude Code user-level MCP config.
 // Adding these to ~/.claude/settings.json permissions.allow prevents Claude Code
 // from prompting for confirmation on every tool call.
 var claudeCodeMCPTools = claudeCodePermissionTools(mcp.ResolveTools("agent"))
@@ -146,7 +159,7 @@ Call mem_save IMMEDIATELY after any of these:
 Format for mem_save:
 - **title**: Verb + what — short, searchable (e.g. "Fixed N+1 query in UserList", "Chose Zustand over Redux")
 - **type**: bugfix | decision | architecture | discovery | pattern | config | preference
-- **scope**: project (default) | personal
+- **scope**: project (default) | personal | global
 - **topic_key** (optional, recommended for evolving decisions): stable key like architecture/auth-model
 - **content**:
   **What**: One sentence — what was done
@@ -176,7 +189,10 @@ Also search memory PROACTIVELY when:
 ### SESSION CLOSE PROTOCOL (mandatory)
 
 Before ending a session or saying "done" / "listo" / "that's it", you MUST:
-1. Call mem_session_summary with this structure:
+1. Call mem_session_summary with the structure below.
+2. Call mem_session_end with the active session id and an optional summary of work completed.
+
+mem_session_summary structure:
 
 ## Goal
 [What we were working on this session]
@@ -220,6 +236,14 @@ If you see a message about compaction or context reset, or if you see "FIRST ACT
 3. Only THEN continue working
 
 Do not skip step 1. Without it, everything done before compaction is lost from memory.
+`
+
+const geminiSessionCloseInstruction = `
+
+### GEMINI CLI SESSION CLOSE (mandatory)
+
+After mem_session_summary succeeds, call mem_session_end before closing the session.
+Do not call mem_session_end before mem_session_summary.
 `
 
 const codexCompactPromptMarkdown = `You are compacting a coding session that uses Engram persistent memory.
@@ -327,15 +351,41 @@ func ensurePiPackageSettings(settingsPath string) (bool, error) {
 		return false, err
 	}
 	changed := false
-	for _, pkg := range []string{piGentleEngramPackage, piMCPAdapterPackage} {
-		if !rawArrayContainsString(packages, pkg) {
-			raw, err := jsonMarshalFn(pkg)
-			if err != nil {
-				return false, fmt.Errorf("marshal Pi package %q: %w", pkg, err)
+	updatedPackages := make([]json.RawMessage, 0, len(packages)+1)
+	hasGentleEngramPackage := false
+	for _, raw := range packages {
+		var pkg string
+		if err := json.Unmarshal(raw, &pkg); err == nil {
+			switch pkg {
+			case piLegacyGentleEngramPackage:
+				changed = true
+				continue
+			case piGentleEngramPackage:
+				if hasGentleEngramPackage {
+					changed = true
+					continue
+				}
+				hasGentleEngramPackage = true
 			}
-			packages = append(packages, raw)
-			changed = true
 		}
+		updatedPackages = append(updatedPackages, raw)
+	}
+	packages = updatedPackages
+	if !hasGentleEngramPackage {
+		raw, err := jsonMarshalFn(piGentleEngramPackage)
+		if err != nil {
+			return false, fmt.Errorf("marshal Pi package %q: %w", piGentleEngramPackage, err)
+		}
+		packages = append(packages, raw)
+		changed = true
+	}
+	if !rawArrayContainsString(packages, piMCPAdapterPackage) {
+		raw, err := jsonMarshalFn(piMCPAdapterPackage)
+		if err != nil {
+			return false, fmt.Errorf("marshal Pi package %q: %w", piMCPAdapterPackage, err)
+		}
+		packages = append(packages, raw)
+		changed = true
 	}
 	if !changed {
 		return false, nil
@@ -548,6 +598,7 @@ func installOpenCode() (*Result, error) {
 
 	// Register engram MCP server in opencode.json and the subagent monitor in tui.json.
 	files := 1
+	mcpConfigured := false
 	if err := injectOpenCodeMCPFn(); err != nil {
 		// Non-fatal: plugin works, MCP just needs manual config
 		cmd := resolveEngramCommand()
@@ -556,6 +607,7 @@ func installOpenCode() (*Result, error) {
 		fmt.Fprintf(os.Stderr, "  \"engram\": { \"type\": \"local\", \"command\": [%q, \"mcp\", \"--tools=agent\"], \"enabled\": true }\n", cmd)
 	} else {
 		files++
+		mcpConfigured = true
 	}
 
 	tuiEnabled := false
@@ -571,6 +623,7 @@ func installOpenCode() (*Result, error) {
 		Agent:            "opencode",
 		Destination:      dir,
 		Files:            files,
+		MCPConfigured:    mcpConfigured,
 		TUIPluginEnabled: tuiEnabled,
 	}, nil
 }
@@ -786,6 +839,173 @@ func stripJSONC(data []byte) []byte {
 
 // ─── Claude Code ─────────────────────────────────────────────────────────────
 
+type claudeCodePlugin struct {
+	Name        string `json:"name"`
+	Version     string `json:"version"`
+	Enabled     *bool  `json:"enabled"`
+	Marketplace string `json:"marketplace"`
+}
+
+// VerifyClaudeCodeSlimCapability confirms that the installed marketplace plugin
+// has the hook guard required for the slim protocol. Claude Code does not promise
+// a complete JSON schema, so only known array and {"plugins": [...]} shapes are
+// accepted; an unfamiliar response remains unverified.
+func VerifyClaudeCodeSlimCapability() error {
+	claudeBin, err := lookPathFn("claude")
+	if err != nil {
+		return fmt.Errorf("locate claude: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), claudeCodePluginListTimeout)
+	defer cancel()
+	out, err := runCommandWithContext(ctx, claudeBin, "plugin", "list", "--json")
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("claude plugin list --json timed out")
+		}
+		return fmt.Errorf("claude plugin list --json: %w", err)
+	}
+
+	plugins, err := parseClaudeCodePluginList(out)
+	if err != nil {
+		return err
+	}
+
+	matches := make([]claudeCodePlugin, 0, 1)
+	for _, plugin := range plugins {
+		if isEngramClaudeCodePlugin(plugin) {
+			matches = append(matches, plugin)
+		}
+	}
+	if len(matches) == 0 {
+		return fmt.Errorf("no Engram plugin from the expected marketplace is listed")
+	}
+	if len(matches) != 1 {
+		return fmt.Errorf("multiple Engram plugins from the expected marketplace are listed")
+	}
+
+	plugin := matches[0]
+	if plugin.Enabled == nil || !*plugin.Enabled {
+		return fmt.Errorf("the listed Engram plugin is disabled")
+	}
+	if !meetsClaudeCodeSlimPluginFloor(plugin.Version) {
+		return fmt.Errorf("plugin version %q does not meet the required %s floor", plugin.Version, claudeCodeSlimPluginFloor)
+	}
+	return nil
+}
+
+func parseClaudeCodePluginList(raw []byte) ([]claudeCodePlugin, error) {
+	raw = []byte(strings.TrimSpace(string(raw)))
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("Claude plugin list returned empty JSON")
+	}
+	if raw[0] == '[' {
+		var plugins []claudeCodePlugin
+		if err := json.Unmarshal(raw, &plugins); err != nil {
+			return nil, fmt.Errorf("parse Claude plugin list JSON: %w", err)
+		}
+		return plugins, nil
+	}
+	if raw[0] == '{' {
+		var response struct {
+			Plugins json.RawMessage `json:"plugins"`
+		}
+		if err := json.Unmarshal(raw, &response); err != nil {
+			return nil, fmt.Errorf("parse Claude plugin list JSON: %w", err)
+		}
+		if len(response.Plugins) == 0 {
+			return nil, fmt.Errorf("Claude plugin list JSON has no plugins array")
+		}
+		var plugins []claudeCodePlugin
+		if err := json.Unmarshal(response.Plugins, &plugins); err != nil {
+			return nil, fmt.Errorf("parse Claude plugin list plugins: %w", err)
+		}
+		return plugins, nil
+	}
+	return nil, fmt.Errorf("unrecognized Claude plugin list JSON shape")
+}
+
+func isEngramClaudeCodePlugin(plugin claudeCodePlugin) bool {
+	name := strings.ToLower(strings.TrimSpace(plugin.Name))
+	if name != "engram" && name != "engram@engram" {
+		return false
+	}
+	marketplace := strings.TrimSpace(plugin.Marketplace)
+	return strings.EqualFold(marketplace, "engram") || strings.EqualFold(marketplace, claudeCodeMarketplace)
+}
+
+func meetsClaudeCodeSlimPluginFloor(version string) bool {
+	values, prerelease, ok := parseClaudeCodePluginVersion(version)
+	if !ok {
+		return false
+	}
+	if values == [3]int{0, 1, 1} && prerelease {
+		return false
+	}
+	return values[0] > 0 || (values[0] == 0 && (values[1] > 1 || (values[1] == 1 && values[2] >= 1)))
+}
+
+// parseClaudeCodePluginVersion accepts only SemVer's three numeric components
+// and its well-formed optional prerelease/build identifiers.
+func parseClaudeCodePluginVersion(version string) ([3]int, bool, bool) {
+	var values [3]int
+	if version == "" || version != strings.TrimSpace(version) {
+		return values, false, false
+	}
+	version, build, hasBuild := strings.Cut(version, "+")
+	if hasBuild && !validSemverIdentifiers(build, false) {
+		return values, false, false
+	}
+	if strings.Contains(build, "+") {
+		return values, false, false
+	}
+	core, prerelease, hasPrerelease := strings.Cut(version, "-")
+	if hasPrerelease && !validSemverIdentifiers(prerelease, true) {
+		return values, false, false
+	}
+	parts := strings.Split(core, ".")
+	if len(parts) != 3 {
+		return values, false, false
+	}
+	for i, part := range parts {
+		if !validSemverNumber(part) {
+			return values, false, false
+		}
+		value, err := strconv.Atoi(part)
+		if err != nil || value < 0 {
+			return values, false, false
+		}
+		values[i] = value
+	}
+	return values, hasPrerelease, true
+}
+
+func validSemverNumber(value string) bool {
+	if value == "" || (len(value) > 1 && value[0] == '0') {
+		return false
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func validSemverIdentifiers(value string, rejectLeadingZeroNumbers bool) bool {
+	for _, identifier := range strings.Split(value, ".") {
+		if identifier == "" || (rejectLeadingZeroNumbers && len(identifier) > 1 && identifier[0] == '0' && validSemverNumber(identifier)) {
+			return false
+		}
+		for _, char := range identifier {
+			if !(char >= '0' && char <= '9' || char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char == '-') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func installClaudeCode() (*Result, error) {
 	// Check that claude CLI is available
 	claudeBin, err := lookPathFn("claude")
@@ -813,23 +1033,26 @@ func installClaudeCode() (*Result, error) {
 		}
 	}
 
-	// Step 3: Write a durable user-level MCP config at ~/.claude/mcp/engram.json
+	// Step 3: Write the sole durable user-level MCP registration at ~/.claude/mcp/engram.json
 	// with the absolute binary path. This survives plugin cache auto-updates and
 	// works on Windows where MCP subprocesses may not inherit PATH.
 	files := 0
+	mcpConfigured := false
 	if err := writeClaudeCodeUserMCPFn(); err != nil {
-		// Non-fatal: the plugin still works via the plugin cache .mcp.json.
-		// Warn so Windows users know to check their PATH if tools don't appear.
+		// Non-fatal: the plugin installs, but MCP tools remain unavailable until
+		// setup can write the user-level registration.
 		fmt.Fprintf(os.Stderr, "warning: could not write user MCP config (~/.claude/mcp/engram.json): %v\n", err)
-		fmt.Fprintf(os.Stderr, "  The plugin is installed but MCP may not start on Windows if engram is not in PATH.\n")
+		fmt.Fprintf(os.Stderr, "  The plugin is installed, but rerun `engram setup claude-code` after resolving this error to register MCP tools.\n")
 	} else {
 		files = 1
+		mcpConfigured = true
 	}
 
 	return &Result{
-		Agent:       "claude-code",
-		Destination: claudeCodeMCPDir(),
-		Files:       files,
+		Agent:         "claude-code",
+		Destination:   claudeCodeMCPDir(),
+		Files:         files,
+		MCPConfigured: mcpConfigured,
 	}, nil
 }
 
@@ -846,39 +1069,110 @@ func claudeCodeUserMCPPath() string {
 	return filepath.Join(claudeCodeMCPDir(), "engram.json")
 }
 
-// writeClaudeCodeUserMCP writes ~/.claude/mcp/engram.json with the absolute
-// path to the engram binary. This is idempotent — it always writes (overwrites)
-// so that if the binary moves (e.g. brew upgrade), running setup again fixes it.
-// Using os.Executable() instead of PATH lookup ensures the correct binary is
-// referenced even when PATH is not propagated to MCP subprocesses (Windows).
+// writeClaudeCodeUserMCP writes ~/.claude/mcp/engram.json with the canonical
+// absolute path to the engram binary. This is idempotent — it always writes
+// (overwrites) so that if the binary moves (e.g. brew upgrade), running setup
+// again fixes it. The command is resolved via canonicalEngramCommand() so a
+// versioned Homebrew/Linuxbrew Cellar path maps to the stable
+// <brew-prefix>/bin/engram symlink that survives `brew upgrade`.
+//
+// os.Executable() is called exactly once and its result is passed to the
+// canonicalization helper, so the written path is always derived from the same
+// executable result that was checked for an error. The error contract preserves
+// the original "resolve binary path" failure — the Claude Code user MCP config
+// must not be written with a PATH-dependent command when the binary cannot be
+// resolved absolutely.
 func writeClaudeCodeUserMCP() error {
-	exe, err := osExecutable()
+	path := claudeCodeUserMCPPath()
+	data, err := claudeCodeUserMCPData()
 	if err != nil {
-		return fmt.Errorf("resolve binary path: %w", err)
-	}
-	// Resolve any symlinks so the path is stable across package manager updates.
-	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
-		exe = resolved
-	}
-
-	entry := map[string]any{
-		"command": exe,
-		"args":    []string{"mcp", "--tools=agent"},
-	}
-	data, err := jsonMarshalIndentFn(entry, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal mcp config: %w", err)
+		return err
 	}
 
 	dir := claudeCodeMCPDir()
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("create mcp dir: %w", err)
 	}
+	if info, err := lstatFn(path); err == nil {
+		if err := validateClaudeCodeUserMCP(path, info); err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat user MCP config: %w", err)
+	}
 
-	if err := writeFileFn(claudeCodeUserMCPPath(), data, 0644); err != nil {
+	if err := writeFileFn(path, data, 0644); err != nil {
 		return fmt.Errorf("write mcp config: %w", err)
 	}
 
+	return nil
+}
+
+func claudeCodeUserMCPData() ([]byte, error) {
+	exe, err := osExecutable()
+	if err != nil {
+		return nil, fmt.Errorf("resolve binary path: %w", err)
+	}
+	cmd, err := claudeCodeEngramCommand(exe)
+	if err != nil {
+		return nil, err
+	}
+	entry := map[string]any{
+		"command": cmd,
+		"args":    []string{"mcp", "--tools=agent"},
+	}
+	data, err := jsonMarshalIndentFn(entry, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshal mcp config: %w", err)
+	}
+	return data, nil
+}
+
+func createClaudeCodeUserMCP(path string, data []byte, perm os.FileMode) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
+}
+
+// EnsureClaudeCodeUserMCP creates the user-owned registration only when absent.
+func EnsureClaudeCodeUserMCP() error {
+	path := claudeCodeUserMCPPath()
+	if info, err := lstatFn(path); err == nil {
+		return validateClaudeCodeUserMCP(path, info)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat user MCP config: %w", err)
+	}
+
+	data, err := claudeCodeUserMCPData()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(claudeCodeMCPDir(), 0755); err != nil {
+		return fmt.Errorf("create mcp dir: %w", err)
+	}
+	if err := createClaudeCodeUserMCPFn(path, data, 0644); err == nil {
+		return nil
+	} else if !os.IsExist(err) {
+		return fmt.Errorf("create user MCP config: %w", err)
+	}
+
+	info, err := lstatFn(path)
+	if err != nil {
+		return fmt.Errorf("stat user MCP config: %w", err)
+	}
+	return validateClaudeCodeUserMCP(path, info)
+}
+
+func validateClaudeCodeUserMCP(path string, info os.FileInfo) error {
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("user MCP config must be a regular file; replace it manually before retrying: %s", path)
+	}
 	return nil
 }
 
@@ -1066,13 +1360,29 @@ func injectGeminiMCP(configPath string) error {
 // leaves a stale command that fails to spawn (ENOENT). When the resolved
 // executable points into a versioned Cellar directory we prefer the stable
 // <brew-prefix>/bin/engram symlink, which brew repoints at the current version,
-// so registrations survive upgrades. Falls back to bare "engram" only when
-// os.Executable() fails or the stable symlink is missing.
+// so registrations survive upgrades. It falls back to bare "engram" only when
+// os.Executable() fails; an absolute executable is preserved if canonicalization
+// cannot resolve an absolute command.
 func resolveEngramCommand() string {
 	exe, err := osExecutable()
 	if err != nil {
 		return "engram" // fallback to PATH-based name
 	}
+	canonical := canonicalEngramCommand(exe)
+	if filepath.IsAbs(exe) && !filepath.IsAbs(canonical) {
+		return exe
+	}
+	return canonical
+}
+
+// canonicalEngramCommand resolves an already-obtained executable path to the
+// canonical engram command: it resolves symlinks via filepath.EvalSymlinks and
+// maps a versioned Homebrew/Linuxbrew Cellar path to the stable
+// <brew-prefix>/bin/engram symlink that brew keeps pointing at the current
+// version (see stableHomebrewEngramCommand). Non-Homebrew installs keep their
+// resolved absolute path. It does not call osExecutable() — the caller is
+// responsible for obtaining exe and for any PATH-based fallback on failure.
+func canonicalEngramCommand(exe string) string {
 	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
 		exe = resolved
 	}
@@ -1080,6 +1390,24 @@ func resolveEngramCommand() string {
 		return stable
 	}
 	return exe
+}
+
+// claudeCodeEngramCommand is the caller-specific absolute-path policy for
+// writeClaudeCodeUserMCP. canonicalEngramCommand may return the bare "engram"
+// fallback when a Homebrew Cellar exe has no stable <brew-prefix>/bin/engram
+// symlink on disk — correct for resolveEngramCommand (PATH discovery), but
+// the durable Claude Code user MCP config must never persist a PATH-dependent
+// command. This helper preserves the already-obtained absolute exe on a
+// non-absolute fallback and errors when the obtained exe is non-absolute.
+func claudeCodeEngramCommand(exe string) (string, error) {
+	canonical := canonicalEngramCommand(exe)
+	if filepath.IsAbs(canonical) {
+		return canonical, nil
+	}
+	if filepath.IsAbs(exe) {
+		return exe, nil
+	}
+	return "", fmt.Errorf("resolve absolute engram command: executable path %q is not absolute", exe)
 }
 
 // stableHomebrewEngramCommand maps a versioned Homebrew Cellar path to the
@@ -1114,7 +1442,7 @@ func writeGeminiSystemPrompt() error {
 		return fmt.Errorf("create gemini system prompt dir: %w", err)
 	}
 
-	if err := os.WriteFile(systemPath, []byte(memoryProtocolMarkdown), 0644); err != nil {
+	if err := os.WriteFile(systemPath, []byte(memoryProtocolMarkdown+geminiSessionCloseInstruction), 0644); err != nil {
 		return fmt.Errorf("write gemini system prompt: %w", err)
 	}
 

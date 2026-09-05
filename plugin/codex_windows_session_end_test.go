@@ -1,6 +1,7 @@
 package plugin_test
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -125,8 +126,8 @@ func TestCodexSessionEndHook(t *testing.T) {
 		if err := json.Unmarshal(data, &manifest); err != nil {
 			t.Fatalf("parse Codex plugin manifest: %v", err)
 		}
-		if manifest.Version != "0.1.3" {
-			t.Errorf("Codex plugin version = %q, want 0.1.3", manifest.Version)
+		if manifest.Version != "0.1.4" {
+			t.Errorf("Codex plugin version = %q, want 0.1.4", manifest.Version)
 		}
 	})
 }
@@ -180,7 +181,7 @@ func TestCodexWindowsSessionEndAdapter(t *testing.T) {
 
 	t.Run("executes the manifest command through cmd.exe", func(t *testing.T) {
 		command := strings.ReplaceAll(codexWindowsSessionEndCommand(t, root), "${PLUGIN_ROOT}", pluginRoot)
-		stdout, stderr, code := runCodexWindowsSessionEndManifestCommand(t, command, `{"session_id":"session id/with?characters"}`, port)
+		stdout, stderr, code := runCodexWindowsManifestCommand(t, command, `{"session_id":"session id/with?characters"}`, port)
 		if code != 0 || stdout != "" || stderr != "" {
 			t.Fatalf("exit=%d stdout=%q stderr=%q, want silent exit 0", code, stdout, stderr)
 		}
@@ -236,7 +237,14 @@ func TestCodexWindowsSessionEndAdapter(t *testing.T) {
 
 func runCodexWindowsSessionEnd(t *testing.T, adapterPath, input string, port *string) (string, string, int) {
 	t.Helper()
-	run := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", adapterPath)
+	return runCodexWindowsPowerShell(t, adapterPath, input, port, 5*time.Second)
+}
+
+func runCodexWindowsPowerShell(t *testing.T, adapterPath, input string, port *string, timeout time.Duration) (string, string, int) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	run := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", adapterPath)
 	run.Env = make([]string, 0, len(os.Environ())+1)
 	for _, env := range os.Environ() {
 		if !strings.HasPrefix(strings.ToUpper(env), "ENGRAM_PORT=") {

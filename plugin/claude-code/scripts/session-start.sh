@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Engram — SessionStart hook for Claude Code
 #
 # 1. Ensures the engram server is running
@@ -21,9 +21,23 @@ INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 
+MCP_CONFIG="$HOME/.claude/mcp/engram.json"
+if [ ! -f "$MCP_CONFIG" ] || [ -L "$MCP_CONFIG" ]; then
+  if engram setup claude-code --mcp-only; then
+    printf '%s\n' "Engram MCP registration migrated. Restart Claude Code to enable MCP tools."
+  else
+    printf '%s\n' "warning: Engram MCP registration migration failed; manually replace ~/.claude/mcp/engram.json with a regular file, then run 'engram setup claude-code'." >&2
+  fi
+fi
 # Ensure engram server is running
 if ! curl -sf "${ENGRAM_URL}/health" --max-time 1 > /dev/null 2>&1; then
-  engram serve &>/dev/null &
+  ENGRAM_SERVE_DATA_DIR="${ENGRAM_DATA_DIR:-$HOME/.engram}"
+  if mkdir -p "$ENGRAM_SERVE_DATA_DIR" 2>/dev/null && : >> "$ENGRAM_SERVE_DATA_DIR/serve.err.log" 2>/dev/null; then
+    ENGRAM_SERVE_ERR_LOG="$ENGRAM_SERVE_DATA_DIR/serve.err.log"
+  else
+    ENGRAM_SERVE_ERR_LOG="${TMPDIR:-/tmp}/engram-serve.err.log"
+  fi
+  ENGRAM_CLOUD_AUTOSYNC=1 engram serve > /dev/null 2>> "$ENGRAM_SERVE_ERR_LOG" &
   sleep 0.5
 fi
 
@@ -154,9 +168,9 @@ cat <<'PROTOCOL'
 You have engram memory tools. This protocol is MANDATORY and ALWAYS ACTIVE.
 
 ### CORE TOOLS — always available, no ToolSearch needed
-mem_save, mem_search, mem_context, mem_session_summary, mem_get_observation, mem_save_prompt
+mem_save, mem_search, mem_context, mem_session_summary, mem_get_observation, mem_save_prompt, mem_current_project, mem_judge, mem_compare
 
-Use ToolSearch for other tools: mem_update, mem_suggest_topic_key, mem_session_start, mem_session_end, mem_stats, mem_delete, mem_timeline, mem_capture_passive
+Use ToolSearch for other tools: mem_update, mem_review, mem_pin, mem_unpin, mem_suggest_topic_key, mem_session_start, mem_session_end, mem_doctor, mem_capture_passive
 
 ### PROACTIVE SAVE — do NOT wait for user to ask
 Call `mem_save` IMMEDIATELY after ANY of these:

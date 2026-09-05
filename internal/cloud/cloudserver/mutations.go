@@ -10,10 +10,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Gentleman-Programming/engram/internal/cloud/chunkcodec"
-	"github.com/Gentleman-Programming/engram/internal/cloud/cloudstore"
-	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
-	"github.com/Gentleman-Programming/engram/internal/project"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/chunkcodec"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/cloudstore"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/constants"
+	"github.com/Gentleman-Programming/engram/v2/internal/project"
 )
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -92,13 +92,16 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 
 	// BR2-1: Reject any entry with an empty project before auth/pause checks.
 	// An empty project is always invalid: it bypasses per-project auth and would
-	// be inserted into cloud_mutations with a blank project column.
-	for _, entry := range req.Entries {
-		if strings.TrimSpace(entry.Project) == "" {
+	// be inserted into cloud_mutations with a blank project column. Normalize
+	// each validated entry at this boundary so every subsequent policy, audit,
+	// response, and storage use shares the same project identity.
+	for i := range req.Entries {
+		if strings.TrimSpace(req.Entries[i].Project) == "" {
 			writeActionableError(w, http.StatusBadRequest, "invalid_request", "empty_project",
 				"mutation entries must specify a project")
 			return
 		}
+		req.Entries[i].Project = project.CanonicalizeProjectName(req.Entries[i].Project)
 	}
 
 	// N4: Assert MutationStore once here; use ms throughout (pause gate + InsertMutationBatch).
@@ -116,12 +119,11 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 	// guarantees every entry has a non-empty project before this loop is reached.
 	seen := make(map[string]struct{})
 	for _, entry := range req.Entries {
-		project := strings.TrimSpace(entry.Project)
-		if _, ok := seen[project]; ok {
+		if _, ok := seen[entry.Project]; ok {
 			continue
 		}
-		seen[project] = struct{}{}
-		if !s.authorizeProjectScope(r.Context(), w, project) {
+		seen[entry.Project] = struct{}{}
+		if !s.authorizeProjectScope(r.Context(), w, entry.Project) {
 			// authorizeProjectScope already wrote the 403 response.
 			return
 		}
@@ -131,11 +133,11 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 	// Server-side has no filesystem cwd semantics; source is always "request_body".
 	// N3: The `if len(req.Entries) > 0` guard is removed — JC1 (above) guarantees
 	// at least one entry exists at this point.
-	primaryProject := strings.TrimSpace(req.Entries[0].Project)
+	primaryProject := req.Entries[0].Project
 
 	// Check sync pause per project (REQ-203 + BW9: use writeActionableError for 409).
 	for _, entry := range req.Entries {
-		proj := strings.TrimSpace(entry.Project)
+		proj := entry.Project
 		enabled, err := ms.IsProjectSyncEnabled(proj)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("check project sync: %v", err), http.StatusInternalServerError)
@@ -177,30 +179,41 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	// REQ-006 / REQ-008: Validate each entry's payload before storage.
-	// Relation entries are strictly validated (all required fields).
-	// Legacy entities (session, observation, prompt) use the lenient floor only.
-	// Any failure rejects the ENTIRE batch (atomic — no partial inserts).
+	// Canonicalize every entry before storage so accepted legacy sparse payloads
+	// materialize the same way as later chunk replay. Any failure rejects the
+	// ENTIRE batch before InsertMutationBatch is called.
 	var invalid []map[string]any
+	normalizedEntries := make([]MutationEntry, 0, len(req.Entries))
 	for i, entry := range req.Entries {
-		if field, ok := validateMutationEntry(entry); !ok {
+		if strings.TrimSpace(entry.Entity) == "relation" {
+			if field, ok := validateRelationPayload(entry.Payload); !ok {
+				invalid = append(invalid, map[string]any{"index": i, "field": field, "entity": strings.TrimSpace(entry.Entity)})
+				continue
+			}
+		}
+		normalized, err := canonicalMutationEntry(entry)
+		if err != nil {
 			invalid = append(invalid, map[string]any{
 				"index":  i,
-				"field":  field,
-				"entity": entry.Entity,
+				"field":  "payload",
+				"entity": strings.TrimSpace(entry.Entity),
 			})
+			continue
 		}
+		normalizedEntries = append(normalizedEntries, normalized)
 	}
 	if len(invalid) > 0 {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{
-			"error":       "invalid relation payload",
+			"error_class": constants.UpgradeErrorClassRepairable,
+			"error_code":  constants.UpgradeErrorCodePayloadInvalid,
+			"error":       "invalid mutation payload",
 			"reason_code": "validation_error",
 			"invalid":     invalid,
 		})
 		return
 	}
 
-	acceptedSeqs, err := ms.InsertMutationBatch(r.Context(), req.Entries)
+	acceptedSeqs, err := ms.InsertMutationBatch(r.Context(), normalizedEntries)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("insert mutations: %v", err), http.StatusInternalServerError)
 		return
@@ -213,6 +226,107 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 		"project_source": project.SourceRequestBody,
 		"project_path":   "",
 	})
+}
+
+// canonicalMutationEntry reuses the production chunk canonicalizer instead of
+// storing a payload form that would later fail during chunk materialization.
+func canonicalMutationEntry(entry MutationEntry) (MutationEntry, error) {
+	project := strings.TrimSpace(entry.Project)
+	payload, err := normalizeLegacyMutationPayload(entry, project)
+	if err != nil {
+		return MutationEntry{}, err
+	}
+	encoded, err := json.Marshal(map[string]any{"mutations": []map[string]string{{
+		"project": project, "entity": entry.Entity, "entity_key": entry.EntityKey,
+		"op": entry.Op, "payload": payload,
+	}}})
+	if err != nil {
+		return MutationEntry{}, err
+	}
+	canonical, err := chunkcodec.CanonicalizeForProject(encoded, project)
+	if err != nil {
+		return MutationEntry{}, err
+	}
+	var chunk struct {
+		Mutations []struct {
+			Project   string `json:"project"`
+			Entity    string `json:"entity"`
+			EntityKey string `json:"entity_key"`
+			Op        string `json:"op"`
+			Payload   string `json:"payload"`
+		} `json:"mutations"`
+	}
+	if err := json.Unmarshal(canonical, &chunk); err != nil || len(chunk.Mutations) != 1 {
+		if err == nil {
+			err = fmt.Errorf("expected one canonical mutation")
+		}
+		return MutationEntry{}, err
+	}
+	mutation := chunk.Mutations[0]
+	return MutationEntry{Project: mutation.Project, Entity: mutation.Entity, EntityKey: mutation.EntityKey, Op: mutation.Op, Payload: json.RawMessage(mutation.Payload)}, nil
+}
+
+// normalizeLegacyMutationPayload supplies deterministic placeholders only for
+// absent legacy upsert fields; supplied malformed values remain invalid.
+func normalizeLegacyMutationPayload(entry MutationEntry, project string) (string, error) {
+	entity, op := strings.TrimSpace(entry.Entity), strings.TrimSpace(entry.Op)
+	payload := strings.TrimSpace(string(entry.Payload))
+	if entity != "session" && entity != "observation" && entity != "prompt" {
+		return payload, nil
+	}
+	if strings.HasPrefix(payload, `"`) {
+		if err := json.Unmarshal([]byte(payload), &payload); err != nil {
+			return "", err
+		}
+	}
+	var fields map[string]any
+	if err := json.Unmarshal([]byte(payload), &fields); err != nil || fields == nil {
+		if err == nil {
+			err = fmt.Errorf("payload must be an object")
+		}
+		return "", err
+	}
+	key := strings.TrimSpace(entry.EntityKey)
+	if op == "upsert" {
+		switch entity {
+		case "session":
+			if _, ok := fields["id"]; !ok {
+				fields["id"] = firstLegacyID(fields, key)
+			}
+			if _, ok := fields["directory"]; !ok {
+				fields["directory"] = "."
+			}
+		case "observation":
+			if _, ok := fields["sync_id"]; !ok {
+				fields["sync_id"] = key
+			}
+			id := firstLegacyID(fields, key)
+			for field, value := range map[string]string{"session_id": "legacy-" + id, "type": "legacy", "title": id, "content": id, "scope": "project"} {
+				if _, ok := fields[field]; !ok {
+					fields[field] = value
+				}
+			}
+		case "prompt":
+			if _, ok := fields["sync_id"]; !ok {
+				fields["sync_id"] = key
+			}
+			id := firstLegacyID(fields, key)
+			for field, value := range map[string]string{"session_id": "legacy-" + id, "content": id, "project": project} {
+				if _, ok := fields[field]; !ok {
+					fields[field] = value
+				}
+			}
+		}
+	}
+	encoded, err := json.Marshal(fields)
+	return string(encoded), err
+}
+
+func firstLegacyID(fields map[string]any, fallback string) string {
+	if id, ok := fields["sync_id"].(string); ok && strings.TrimSpace(id) != "" {
+		return strings.TrimSpace(id)
+	}
+	return fallback
 }
 
 // handleMutationPull handles GET /sync/mutations/pull.

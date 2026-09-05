@@ -66,7 +66,6 @@
 | `plugin/claude-code/` | Claude Code plugin, hooks, and skill. |
 | `plugin/obsidian/` | Experimental Obsidian plugin. |
 | `skills/` | Agent contribution rules. |
-| `openspec/` | Per-change specs/designs/tasks. |
 
 ## Related codebase guide pages
 

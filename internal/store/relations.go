@@ -87,6 +87,9 @@ type CandidateOptions struct {
 	// BM25Floor preserves the deprecated legacy minimum-rank behavior. Candidates
 	// below this value are excluded. It cannot be combined with BM25MaxRank.
 	BM25Floor *float64
+	// Query optionally overrides the saved observation title as the candidate
+	// query source. Empty uses the saved title.
+	Query string
 	// SkipInsert controls whether FindCandidates inserts pending relation rows.
 	// When true, candidates are returned but NO rows are written to memory_relations.
 	// Default false preserves the existing behavior (rows are inserted).
@@ -108,6 +111,8 @@ type ListRelationsOptions struct {
 	Limit int
 	// Offset is the pagination offset.
 	Offset int
+	// ExcludeNotConflict omits persisted not_conflict verdicts from conflict-facing views.
+	ExcludeNotConflict bool
 }
 
 // RelationListItem represents a single row in a ListRelations result,
@@ -227,7 +232,7 @@ type JudgeBySemanticParams struct {
 	// TargetID is the TEXT sync_id of the target observation (required).
 	TargetID string
 	// Relation is the verdict verb (required); must be in validRelationVerbs.
-	// Passing "not_conflict" is a no-op: no row is inserted and no error is returned.
+	// not_conflict is persisted like every other valid semantic verdict.
 	Relation string
 	// Confidence is the LLM's self-reported confidence score [0.0, 1.0].
 	Confidence float64
@@ -342,6 +347,7 @@ type JudgeRelationParams struct {
 //
 // For each candidate, a pending memory_relations row is inserted and the row's
 // sync_id is exposed as Candidate.JudgmentID.
+// Candidates with an existing judged relation in either direction are excluded.
 //
 // Errors from this method are expected to be logged and swallowed by callers —
 // detection failure must never fail the originating save.
@@ -357,10 +363,10 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 	}
 
 	// Get the saved observation to build the FTS query and for project/scope filtering.
-	var title, project, scope string
+	var title, project, scope, sourceSyncID string
 	err = s.db.QueryRow(
-		`SELECT title, ifnull(project,''), scope FROM observations WHERE id = ?`, savedID,
-	).Scan(&title, &project, &scope)
+		`SELECT title, ifnull(project,''), scope, ifnull(sync_id,'') FROM observations WHERE id = ?`, savedID,
+	).Scan(&title, &project, &scope, &sourceSyncID)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("FindCandidates: observation %d not found", savedID)
 	}
@@ -376,13 +382,17 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 		scope = opts.Scope
 	}
 
-	ftsQuery := sanitizeFTSCandidates(title)
+	queryText := opts.Query
+	if strings.TrimSpace(queryText) == "" {
+		queryText = title
+	}
+	ftsQuery := sanitizeFTSCandidates(queryText)
 	if ftsQuery == "" {
 		return nil, nil
 	}
 
 	// Apply the rank predicate in SQL before ordering and limiting.
-	rows, err := s.db.Query(query, ftsQuery, savedID, project, scope, threshold, limit)
+	rows, err := s.db.Query(query, ftsQuery, savedID, sourceSyncID, sourceSyncID, project, scope, threshold, limit)
 	if err != nil {
 		return nil, fmt.Errorf("FindCandidates: FTS5 query: %w", err)
 	}
@@ -437,25 +447,31 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 		return candidates, nil
 	}
 
-	// Get the source observation's sync_id for the relation source_id.
-	var sourceSyncID string
-	if err := s.db.QueryRow(
-		`SELECT ifnull(sync_id,'') FROM observations WHERE id = ?`, savedID,
-	).Scan(&sourceSyncID); err != nil {
-		return nil, fmt.Errorf("FindCandidates: get source sync_id: %w", err)
-	}
-
 	// Insert a pending relation row for each candidate.
 	candidates := make([]Candidate, 0, len(raw))
 	for _, rc := range raw {
 		judgmentID := newSyncID("rel")
-		_, err := s.db.Exec(`
+		result, err := s.execHook(s.db, `
 			INSERT INTO memory_relations
 				(sync_id, source_id, target_id, relation, judgment_status, created_at, updated_at)
-			VALUES (?, ?, ?, 'pending', 'pending', datetime('now'), datetime('now'))
-		`, judgmentID, sourceSyncID, rc.syncID)
+			SELECT ?, ?, ?, 'pending', 'pending', datetime('now'), datetime('now')
+			WHERE NOT EXISTS (
+				SELECT 1 FROM memory_relations
+				WHERE (source_id = ? AND target_id = ?)
+				   OR (source_id = ? AND target_id = ?)
+			)
+		`, judgmentID, sourceSyncID, rc.syncID, sourceSyncID, rc.syncID, rc.syncID, sourceSyncID)
 		if err != nil {
 			// Log and skip — don't fail the whole detection.
+			log.Printf("[store] FindCandidates: conditional insert src=%.64s cand=%.64s: %v", sourceSyncID, rc.syncID, err)
+			continue
+		}
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			log.Printf("[store] FindCandidates: conditional insert rows affected src=%.64s cand=%.64s: %v", sourceSyncID, rc.syncID, err)
+			continue
+		}
+		if rowsAffected != 1 {
 			continue
 		}
 		candidates = append(candidates, Candidate{
@@ -591,24 +607,16 @@ func (s *Store) JudgeRelation(p JudgeRelationParams) (*Relation, error) {
 
 	if err := s.withTx(func(tx *sql.Tx) error {
 		// ── Cross-project guard (Phase 2, REQ-003) ─────────────────────────
-		// Derive source and target project for enrollment checks and the guard.
-		// Use the same session-fallback form as JudgeBySemantic so that enrolled
-		// projects whose observations have a blank project column (but whose session
-		// carries the project) are resolved correctly. Missing observation → empty
-		// string (REQ-011 edge) because the LEFT JOIN returns no row.
-		var srcProject, tgtProject string
+		// Derive the source project using the same session fallback as
+		// JudgeBySemantic. A relation's cloud ownership follows its source; a
+		// missing source therefore has no authoritative project for replication.
+		var srcProject string
 		_ = tx.QueryRow(
 			`SELECT coalesce(nullif(o.project,''), s.project, '')
-			   FROM observations o
-			   LEFT JOIN sessions s ON s.id = o.session_id
-			  WHERE o.sync_id = ?`, sourceID,
+				   FROM observations o
+				   LEFT JOIN sessions s ON s.id = o.session_id
+				  WHERE o.sync_id = ?`, sourceID,
 		).Scan(&srcProject)
-		_ = tx.QueryRow(
-			`SELECT coalesce(nullif(o.project,''), s.project, '')
-			   FROM observations o
-			   LEFT JOIN sessions s ON s.id = o.session_id
-			  WHERE o.sync_id = ?`, targetID,
-		).Scan(&tgtProject)
 
 		// Delegate to shared helper; reject cross-project pairs.
 		if err := validateCrossProjectGuard(tx, sourceID, targetID); err != nil {
@@ -644,31 +652,21 @@ func (s *Store) JudgeRelation(p JudgeRelationParams) (*Relation, error) {
 		}
 
 		// ── Enqueue sync mutation when project is enrolled (REQ-001) ───────
-		// Derive project from source observation; empty string if source missing.
-		// (REQ-011: loud failure is the server's job; we enqueue project='' and log.)
-		//
-		// Enrollment check: prefer srcProject; fall back to tgtProject when source
-		// is missing locally (race condition). This ensures enqueue happens with
-		// project='' when source is absent but target's project IS enrolled.
-		enrollCheckProject := srcProject
-		if enrollCheckProject == "" {
-			enrollCheckProject = tgtProject
+		// Never invent cloud ownership from the target: source ownership is the
+		// relation's authoritative project. Preserve the local judgment, but leave
+		// it local-only until the source can provide a project.
+		if srcProject == "" {
+			log.Printf("[store] WARNING: JudgeRelation kept relation %s local-only; source observation project is unavailable, so no cloud mutation was enqueued", p.JudgmentID)
+			return nil
 		}
 		var enrolled int
 		if err := tx.QueryRow(
-			`SELECT 1 FROM sync_enrolled_projects WHERE project = ? LIMIT 1`, enrollCheckProject,
+			`SELECT 1 FROM sync_enrolled_projects WHERE project = ? LIMIT 1`, srcProject,
 		).Scan(&enrolled); err != nil && err != sql.ErrNoRows {
 			return fmt.Errorf("JudgeRelation: check enrollment: %w", err)
 		}
 		if enrolled == 0 {
 			return nil // not enrolled — no mutation enqueued
-		}
-
-		// REQ-011: log at WARNING level when source observation is missing locally
-		// (project='' race condition). The server will reject with 400; this log
-		// is the local breadcrumb so the gap is not silently swallowed.
-		if srcProject == "" {
-			log.Printf("[store] WARNING: JudgeRelation enqueueing relation %s with project='' (source observation missing locally); server will reject", p.JudgmentID)
 		}
 
 		// Read the full updated row to build the payload.
@@ -735,9 +733,6 @@ func validateCrossProjectGuard(tx *sql.Tx, sourceID, targetID string) error {
 // the memory_relations table with system provenance (marked_by_kind="system",
 // marked_by_actor="engram", marked_by_model=params.Model).
 //
-// When params.Relation is "not_conflict" the call is a no-op: no row is inserted
-// and an empty sync_id is returned without error.
-//
 // Idempotency: if a row already exists for (source_id, target_id) in either
 // direction, the existing row is updated (UPSERT). The returned sync_id is
 // always the canonical row's sync_id.
@@ -758,11 +753,6 @@ func (s *Store) JudgeBySemantic(p JudgeBySemanticParams) (string, error) {
 	}
 	if !isValidConfidence(p.Confidence) {
 		return "", fmt.Errorf("JudgeBySemantic: confidence %v is out of range [0.0, 1.0]", p.Confidence)
-	}
-
-	// not_conflict is a no-op.
-	if p.Relation == RelationNotConflict {
-		return "", nil
 	}
 
 	var resultSyncID string
@@ -814,6 +804,8 @@ func (s *Store) JudgeBySemantic(p JudgeBySemanticParams) (string, error) {
 			if _, execErr := tx.Exec(`
 				UPDATE memory_relations
 				SET relation        = ?,
+				    source_id       = ?,
+				    target_id       = ?,
 				    judgment_status = 'judged',
 				    confidence      = ?,
 				    reason          = ?,
@@ -822,7 +814,7 @@ func (s *Store) JudgeBySemantic(p JudgeBySemanticParams) (string, error) {
 				    marked_by_model = ?,
 				    updated_at      = datetime('now')
 				WHERE sync_id = ?
-			`, p.Relation, confidence, p.Reasoning,
+			`, p.Relation, p.SourceID, p.TargetID, confidence, p.Reasoning,
 				actor, kind, modelPtr,
 				existingSyncID,
 			); execErr != nil {
@@ -1069,6 +1061,12 @@ const findCandidatesFTSQuery = `
 	CROSS JOIN observations o ON o.id = fts.rowid
 	WHERE observations_fts MATCH ?
 	  AND o.id != ?
+	  AND NOT EXISTS (
+		SELECT 1 FROM memory_relations r
+		WHERE ((r.source_id = ? AND r.target_id = ifnull(o.sync_id,''))
+		    OR (r.source_id = ifnull(o.sync_id,'') AND r.target_id = ?))
+		  AND r.judgment_status = 'judged'
+	  )
 	  AND o.deleted_at IS NULL
 	  AND ifnull(o.project,'') = ifnull(?,'')
 	  AND o.scope = ?
@@ -1224,6 +1222,9 @@ func buildRelationsQuery(opts ListRelationsOptions, countOnly bool) (string, []a
 		query += ` AND r.created_at >= ?`
 		args = append(args, opts.SinceTime.UTC().Format("2006-01-02T15:04:05Z"))
 	}
+	if opts.ExcludeNotConflict {
+		query += ` AND r.relation != 'not_conflict'`
+	}
 
 	if !countOnly {
 		query += ` ORDER BY r.created_at DESC`
@@ -1261,7 +1262,8 @@ func (s *Store) GetRelationStats(project string) (RelationStats, error) {
 			FROM memory_relations r
 			LEFT JOIN observations src ON src.sync_id = r.source_id AND src.deleted_at IS NULL
 			LEFT JOIN observations tgt ON tgt.sync_id = r.target_id AND tgt.deleted_at IS NULL
-			WHERE ifnull(src.project,'') = ? OR ifnull(tgt.project,'') = ?
+			WHERE (ifnull(src.project,'') = ? OR ifnull(tgt.project,'') = ?)
+			  AND r.relation != 'not_conflict'
 			GROUP BY r.relation, r.judgment_status
 		`
 		args = []any{project, project}
@@ -1269,6 +1271,7 @@ func (s *Store) GetRelationStats(project string) (RelationStats, error) {
 		q = `
 			SELECT relation, judgment_status, count(*) AS cnt
 			FROM memory_relations
+			WHERE relation != 'not_conflict'
 			GROUP BY relation, judgment_status
 		`
 	}
@@ -1311,8 +1314,8 @@ func (s *Store) GetRelationStats(project string) (RelationStats, error) {
 //
 // Phase 4 extension: when ScanOptions.Semantic is true, after the FTS5 candidate
 // collection a bounded worker pool calls Runner.Compare on each pair. Applied
-// scans persist non-"not_conflict" verdicts via JudgeBySemantic, while dry-runs
-// report their semantic results without persistence. Semantic=false (zero value)
+// scans persist judged verdicts via JudgeBySemantic, while dry-runs report their
+// semantic results without persistence. Semantic=false (zero value)
 // preserves Phase 3 behaviour exactly.
 //
 // Returns a ScanResult with counts, a continuation cursor when another page
@@ -1424,6 +1427,7 @@ func (s *Store) scanProject(opts ScanOptions, allProjects bool) (ScanResult, err
 		candidateSnippet ObservationSnippet
 	}
 	var semanticPairs []candidatePair
+	semanticPairKeys := map[string]struct{}{}
 	hasUnprocessedWork := func(candidateIndex, candidateCount int) bool {
 		return candidateIndex+1 < candidateCount
 	}
@@ -1451,11 +1455,6 @@ scan:
 		result.CandidatesFound += len(candidates)
 
 		if opts.Semantic {
-			if len(semanticPairs) >= maxSemantic && len(candidates) > 0 {
-				result.Capped = true
-				break scan
-			}
-
 			// In semantic mode, accumulate pairs for the worker pool.
 			// We need the full content for prompt building — fetch from DB.
 			var srcTitle, srcType, srcContent string
@@ -1470,7 +1469,18 @@ scan:
 				Content: srcContent,
 			}
 
-			for candidateIndex, c := range candidates {
+			for _, c := range candidates {
+				pairKey := obs.syncID + "\x00" + c.SyncID
+				if c.SyncID < obs.syncID {
+					pairKey = c.SyncID + "\x00" + obs.syncID
+				}
+				if _, seen := semanticPairKeys[pairKey]; seen {
+					continue
+				}
+				if len(semanticPairs) == maxSemantic {
+					result.Capped = true
+					break scan
+				}
 				var candTitle, candType, candContent string
 				_ = s.db.QueryRow(
 					`SELECT title, type, ifnull(content,'') FROM observations WHERE sync_id = ?`, c.SyncID,
@@ -1485,10 +1495,7 @@ scan:
 						Content: candContent,
 					},
 				})
-				if len(semanticPairs) == maxSemantic && hasUnprocessedWork(candidateIndex, len(candidates)) {
-					result.Capped = true
-					break scan
-				}
+				semanticPairKeys[pairKey] = struct{}{}
 			}
 			continue
 		}
@@ -1593,7 +1600,7 @@ scan:
 						return
 					}
 
-					if verdict.Relation == RelationNotConflict && isValidConfidence(verdict.Confidence) {
+					if !opts.Apply && verdict.Relation == RelationNotConflict && isValidConfidence(verdict.Confidence) {
 						mu.Lock()
 						result.SemanticSkipped++
 						mu.Unlock()
@@ -1614,7 +1621,7 @@ scan:
 						return
 					}
 
-					// Validate and persist non-skipped verdict.
+					// Validate and persist applied verdicts.
 					_, judgeErr := s.JudgeBySemantic(JudgeBySemanticParams{
 						SourceID:   pair.sourceSnippet.SyncID,
 						TargetID:   pair.candidateSnippet.SyncID,

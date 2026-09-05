@@ -27,21 +27,22 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/internal/cloud/autosync"
-	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
-	"github.com/Gentleman-Programming/engram/internal/cloud/remote"
-	"github.com/Gentleman-Programming/engram/internal/cloud/syncguidance"
-	"github.com/Gentleman-Programming/engram/internal/diagnostic"
-	"github.com/Gentleman-Programming/engram/internal/mcp"
-	"github.com/Gentleman-Programming/engram/internal/obsidian"
-	"github.com/Gentleman-Programming/engram/internal/project"
-	"github.com/Gentleman-Programming/engram/internal/server"
-	"github.com/Gentleman-Programming/engram/internal/setup"
-	"github.com/Gentleman-Programming/engram/internal/store"
-	engramsync "github.com/Gentleman-Programming/engram/internal/sync"
-	"github.com/Gentleman-Programming/engram/internal/timeutil"
-	"github.com/Gentleman-Programming/engram/internal/tui"
-	versioncheck "github.com/Gentleman-Programming/engram/internal/version"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/autosync"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/constants"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/remote"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/syncguidance"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloudconfig"
+	"github.com/Gentleman-Programming/engram/v2/internal/diagnostic"
+	"github.com/Gentleman-Programming/engram/v2/internal/mcp"
+	"github.com/Gentleman-Programming/engram/v2/internal/obsidian"
+	"github.com/Gentleman-Programming/engram/v2/internal/project"
+	"github.com/Gentleman-Programming/engram/v2/internal/server"
+	"github.com/Gentleman-Programming/engram/v2/internal/setup"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	engramsync "github.com/Gentleman-Programming/engram/v2/internal/sync"
+	"github.com/Gentleman-Programming/engram/v2/internal/timeutil"
+	"github.com/Gentleman-Programming/engram/v2/internal/tui"
+	versioncheck "github.com/Gentleman-Programming/engram/v2/internal/version"
 
 	tea "github.com/charmbracelet/bubbletea"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -82,10 +83,12 @@ var (
 
 	checkForUpdates = versioncheck.CheckLatest
 
-	setupSupportedAgents        = setup.SupportedAgents
-	setupInstallAgent           = setup.Install
-	setupAddClaudeCodeAllowlist = setup.AddClaudeCodeAllowlist
-	scanInputLine               = fmt.Scanln
+	setupSupportedAgents         = setup.SupportedAgents
+	setupInstallAgent            = setup.Install
+	setupAddClaudeCodeAllowlist  = setup.AddClaudeCodeAllowlist
+	setupEnsureClaudeCodeUserMCP = setup.EnsureClaudeCodeUserMCP
+	setupVerifyClaudeCodeSlim    = setup.VerifyClaudeCodeSlimCapability
+	scanInputLine                = fmt.Scanln
 
 	storeSearch = func(s *store.Store, query string, opts store.SearchOptions) ([]store.SearchResult, error) {
 		return s.Search(query, opts)
@@ -201,7 +204,7 @@ func resolveCLIProjectWithDetector(s *store.Store, explicit string, requireKnown
 }
 
 func detectProjectForSync(dir string) project.DetectionResult {
-	return project.DetectionResult{Project: detectProject(dir), Source: project.SourceDirBasename, Path: dir}
+	return detectProjectFull(dir)
 }
 
 type cloudSyncStatus struct {
@@ -412,7 +415,7 @@ func (p storeSyncStatusProvider) cloudSyncEnabled(project string) (bool, string,
 	if cc == nil || strings.TrimSpace(cc.ServerURL) == "" {
 		return false, "cloud_not_configured", "cloud sync is not configured"
 	}
-	if _, err := validateCloudServerURL(cc.ServerURL); err != nil {
+	if _, err := cloudconfig.ValidateServerURL(cc.ServerURL); err != nil {
 		return false, "cloud_config_error", fmt.Sprintf("cloud config error: invalid cloud runtime server URL: %v", err)
 	}
 	if strings.TrimSpace(project) == "" {
@@ -430,8 +433,8 @@ func (p storeSyncStatusProvider) cloudSyncEnabled(project string) (bool, string,
 
 func syncStatusFromState(state *store.SyncState) server.SyncStatus {
 	var lastSyncAt *time.Time
-	if state != nil && state.Lifecycle == store.SyncLifecycleHealthy {
-		lastSyncAt = parseSyncStateTimestamp(state.UpdatedAt)
+	if state != nil {
+		lastSyncAt = parseSyncStateTimestamp(derefString(state.LastSuccessAt))
 	}
 	return server.SyncStatus{
 		Phase:               state.Lifecycle,
@@ -503,28 +506,17 @@ func envBool(key string) bool {
 	return v == "1" || v == "true" || v == "yes" || v == "on"
 }
 
-func resolveCloudRuntimeConfig(cfg store.Config) (*cloudConfig, error) {
-	cc, err := loadCloudConfig(cfg)
+func resolveCloudRuntimeConfig(cfg store.Config) (*cloudconfig.Config, error) {
+	cc, err := cloudconfig.Load(cfg.DataDir)
 	if err != nil {
 		return nil, fmt.Errorf("read cloud config: %w", err)
 	}
-	if cc == nil {
-		cc = &cloudConfig{}
-	}
-	// ENGRAM_CLOUD_TOKEN overrides any token stored in cloud.json.
-	// When the env var is absent, the persisted token from cloud.json is used
-	// as a fallback so that `engram sync --cloud` works without requiring the
-	// env var to be set in every shell session (fix for issue #343).
-	if v := strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_SERVER")); v != "" {
-		cc.ServerURL = v
-	}
-	if v := strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_TOKEN")); v != "" {
-		cc.Token = v
-	}
+	cc = cloudconfig.ApplyServerOverride(cc)
+	cc.Token, _ = cloudconfig.EffectiveToken(cfg.DataDir)
 	return cc, nil
 }
 
-func preflightCloudSync(s *store.Store, cfg store.Config, project string, mutateState bool) (*cloudConfig, error) {
+func preflightCloudSync(s *store.Store, cfg store.Config, project string, mutateState bool) (*cloudconfig.Config, error) {
 	project = strings.TrimSpace(project)
 	if project != "" {
 		project, _ = store.NormalizeProject(project)
@@ -543,7 +535,7 @@ func preflightCloudSync(s *store.Store, cfg store.Config, project string, mutate
 		}
 		return nil, fmt.Errorf("cloud sync %s: %s", constants.ReasonCloudConfigError, message)
 	}
-	if _, err := validateCloudServerURL(cc.ServerURL); err != nil {
+	if _, err := cloudconfig.ValidateServerURL(cc.ServerURL); err != nil {
 		message := fmt.Sprintf("invalid cloud runtime server URL: %v", err)
 		if mutateState {
 			_ = s.MarkSyncBlocked(targetKey, constants.ReasonCloudConfigError, message)
@@ -746,7 +738,7 @@ func shouldCheckForUpdates(args []string) bool {
 	}
 	command := strings.ToLower(strings.TrimSpace(args[0]))
 	switch command {
-	case "mcp", "serve", "protocol-mode":
+	case "mcp", "serve", "protocol-mode", "tui", "version", "--version", "-v", "help", "--help", "-h":
 		return false
 	case "cloud":
 		return len(args) < 2 || strings.ToLower(strings.TrimSpace(args[1])) != "serve"
@@ -807,6 +799,7 @@ func cmdServe(cfg store.Config) {
 	defer s.Close()
 
 	srv := newHTTPServer(s, port)
+	srv.SetVersion(version)
 
 	// Wire the semantic runner factory and prompt builder for POST /conflicts/scan.
 	// Both live in cmd/engram so internal/server avoids a direct dependency on internal/llm.
@@ -1163,7 +1156,7 @@ func cmdSave(cfg store.Config) {
 	}
 	defer s.Close()
 	sessionID := "manual-save-" + projectName
-	if err := s.CreateSession(sessionID, projectName, cwd); err != nil {
+	if err := s.CreateSessionWithOwnershipMode(sessionID, projectName, cwd, store.SessionOwnershipProjectOwned); err != nil {
 		fatal(err)
 	}
 	id, err := storeAddObservation(s, store.AddObservationParams{
@@ -1657,7 +1650,7 @@ func cmdImport(cfg store.Config) {
 
 	fmt.Printf("Imported from %s\n", inFile)
 	fmt.Printf("  Sessions:     %d\n", result.SessionsImported)
-	fmt.Printf("  Observations: %d\n", result.ObservationsImported)
+	fmt.Printf("  Observations: %d imported, %d updated, %d skipped stale\n", result.ObservationsImported, result.ObservationsUpdated, result.ObservationsSkippedStale)
 	fmt.Printf("  Prompts:      %d\n", result.PromptsImported)
 }
 
@@ -1694,6 +1687,18 @@ func cmdSync(cfg store.Config) {
 		fatal(fmt.Errorf("--all and --project cannot be used together"))
 		return
 	}
+	cloudEnabled := doCloud || envBool("ENGRAM_CLOUD_SYNC")
+	if cloudEnabled && projectProvided {
+		decodedProject, warning, decodeErr := normalizeCloudCLIProjectInput(project)
+		if decodeErr != nil {
+			fatal(fmt.Errorf("cloud sync project: %w", decodeErr))
+			return
+		}
+		project = decodedProject
+		if warning != "" {
+			fmt.Fprintln(os.Stderr, warning)
+		}
+	}
 
 	syncDir := ".engram"
 
@@ -1713,7 +1718,6 @@ func cmdSync(cfg store.Config) {
 		project = resolved
 	}
 
-	cloudEnabled := doCloud || envBool("ENGRAM_CLOUD_SYNC")
 	if cloudEnabled {
 		if doAll {
 			fatal(fmt.Errorf("cloud sync requires a single explicit --project scope; --all is not supported"))
@@ -1779,6 +1783,9 @@ func cmdSync(cfg store.Config) {
 	if doStatus {
 		local, remote, pending, err := syncStatus(sy)
 		if err != nil {
+			if cloudEnabled {
+				fatal(errors.New(cloudSyncFailureMessage(project, err)))
+			}
 			fatal(err)
 		}
 		if cloudEnabled {
@@ -2373,7 +2380,12 @@ func cmdProjectsConsolidate(cfg store.Config) {
 		if err != nil {
 			fatal(err)
 		}
-		canonical, _ := store.NormalizeProject(detectProject(cwd))
+		res := detectProjectFull(cwd)
+		if res.Error != nil {
+			fatal(res.Error)
+			return
+		}
+		canonical, _ := store.NormalizeProject(res.Project)
 
 		allNames, err := s.ListProjectNames()
 		if err != nil {
@@ -2716,8 +2728,7 @@ func isPathLikeProjectName(name string) bool {
 }
 
 // cmdSetup classifies os.Args[2:] with a two-pass, order-independent
-// algorithm (see openspec/changes/setup-protocol-flag/proposal.md,
-// Approach; JD-014 residual fix). The FIRST pass scans every token and only
+// algorithm. The FIRST pass scans every token and only
 // accumulates classification state — it never dispatches mid-loop. This
 // guarantees a token like --protocol=<v> is always parsed regardless of
 // what precedes it (e.g. an earlier unrecognized hyphen-prefixed token no
@@ -2732,6 +2743,7 @@ func cmdSetup(cfg store.Config) {
 		helpSeen        bool
 		protocolRaw     string
 		protocolFlag    bool
+		mcpOnly         bool
 		slug            string
 		slugSeen        bool
 		extraBareSeen   bool
@@ -2759,10 +2771,12 @@ func cmdSetup(cfg store.Config) {
 		case strings.HasPrefix(token, "--protocol="):
 			protocolRaw = strings.TrimPrefix(token, "--protocol=")
 			protocolFlag = true
+		case token == "--mcp-only":
+			mcpOnly = true
 		case strings.HasPrefix(token, "-"):
 			// Unrecognized hyphen-prefixed token: record it but keep
 			// scanning so a --protocol appearing later is still parsed
-			// (JD-014 residual).
+			// (regression fix).
 			unknownFlagSeen = true
 		default:
 			if slugSeen {
@@ -2786,12 +2800,21 @@ func cmdSetup(cfg store.Config) {
 		// Preserve the legacy fallback to the interactive menu (keeps
 		// TestCmdSetupHyphenArgFallsBackToInteractive green), but forward
 		// the already-parsed --protocol mode (if any) instead of dropping
-		// it (JD-014), regardless of the unknown flag's position.
+		// it, regardless of the unknown flag's position.
 		mode := ""
 		if protocolFlag {
 			mode = resolveProtocolModeFlag(protocolRaw)
 		}
 		cmdSetupInteractive(cfg, mode)
+		return
+	case mcpOnly:
+		if !slugSeen || slug != "claude-code" {
+			fatal(fmt.Errorf("--mcp-only requires claude-code"))
+			return
+		}
+		if err := setupEnsureClaudeCodeUserMCP(); err != nil {
+			fatal(err)
+		}
 		return
 	case slugSeen:
 		result, err := setupInstallAgent(slug)
@@ -2799,7 +2822,9 @@ func cmdSetup(cfg store.Config) {
 			fatal(err)
 		}
 		if protocolFlag {
-			applyProtocolMode(cfg, slug, resolveProtocolModeFlag(protocolRaw))
+			mode := resolveProtocolModeFlag(protocolRaw)
+			applyProtocolMode(cfg, slug, mode)
+			warnIfClaudeCodeSlimUnverified(slug, mode)
 		}
 		fmt.Printf("✓ Installed %s plugin (%d files)\n", result.Agent, result.Files)
 		fmt.Printf("  → %s\n", result.Destination)
@@ -2850,6 +2875,7 @@ func cmdSetupInteractive(cfg store.Config, mode string) {
 	}
 	if mode != "" {
 		applyProtocolMode(cfg, selected.Name, mode)
+		warnIfClaudeCodeSlimUnverified(selected.Name, mode)
 	}
 
 	fmt.Printf("✓ Installed %s plugin (%d files)\n", result.Agent, result.Files)
@@ -2871,7 +2897,9 @@ func printSetupUsage() {
 	fmt.Println("                          installed agent slug (default: full). Unknown or")
 	fmt.Println("                          missing values fall back to full with a warning.")
 	fmt.Println("                          slim currently only takes effect for claude-code,")
-	fmt.Println("                          and only when the installed engram is >= 1.4.0.")
+	fmt.Println("                          and only with a clean tagged engram release >= 1.4.0.")
+	fmt.Println("                          Claude Code slim also requires Engram plugin >= 0.1.1;")
+	fmt.Println("                          setup warns, but continues, when it cannot verify it.")
 	fmt.Println("  --help, -h              Show this help and exit.")
 }
 
@@ -2898,6 +2926,28 @@ func resolveProtocolModeFlag(raw string) string {
 func applyProtocolMode(cfg store.Config, slug, mode string) {
 	if err := setup.WriteProtocolMode(cfg.DataDir, slug, mode); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not persist protocol mode: %v\n", err)
+	}
+
+	classification := classifyProtocolVersion(version)
+	if mode != setup.ProtocolModeSlim || classification == protocolVersionSupported {
+		return
+	}
+
+	if classification == protocolVersionBelowFloor {
+		fmt.Fprintf(os.Stderr, "warning: slim will remain full: engram %q is below 1.4.0; install a clean tagged release at or above 1.4.0.\n", strings.TrimSpace(version))
+		return
+	}
+	fmt.Fprintf(os.Stderr, "warning: slim will remain full: engram %q is not a clean tagged release; install a clean tagged release at or above 1.4.0.\n", strings.TrimSpace(version))
+}
+
+func warnIfClaudeCodeSlimUnverified(slug, mode string) {
+	if slug != "claude-code" || mode != setup.ProtocolModeSlim {
+		return
+	}
+	if err := setupVerifyClaudeCodeSlim(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: unable to verify the Claude Code Engram plugin supports --protocol=slim (requires plugin 0.1.1+): %v\n", err)
+		fmt.Fprintln(os.Stderr, "  Update the plugin through your normal Claude Code plugin update path, then restart Claude Code.")
+		fmt.Fprintln(os.Stderr, "  Session-only plugins loaded with `claude --plugin-dir ...` cannot be detected by this check.")
 	}
 }
 
@@ -2929,42 +2979,66 @@ func cmdProtocolMode(cfg store.Config) {
 // MCP serverInstructions duplication fix shipped in this release.
 var protocolVersionFloor = [3]int{1, 4, 0}
 
-// meetsProtocolVersionFloor reports whether v (e.g. "1.4.0", "v1.5.2", or the
-// build-time "dev" placeholder) is >= protocolVersionFloor. Any unparseable
-// or empty value returns false — the caller then falls back to "full".
-func meetsProtocolVersionFloor(v string) bool {
+type protocolVersionClassification uint8
+
+const (
+	protocolVersionUnsupported protocolVersionClassification = iota
+	protocolVersionBelowFloor
+	protocolVersionSupported
+)
+
+// classifyProtocolVersion distinguishes clean releases that can use slim from
+// releases below the floor and development, pseudo, dirty, or other non-release
+// build versions. Legacy numeric versions such as "1.4" remain supported.
+func classifyProtocolVersion(v string) protocolVersionClassification {
 	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
-	if v == "" || v == "dev" {
-		return false
+	segments := strings.Split(v, ".")
+	if len(segments) < 2 || len(segments) > 3 {
+		return protocolVersionUnsupported
 	}
 
-	segments := strings.SplitN(v, ".", 3)
 	var parts [3]int
-	for i, s := range segments {
-		if i >= 3 {
-			break
+	for i, segment := range segments {
+		if segment == "" {
+			return protocolVersionUnsupported
 		}
-		n, err := strconv.Atoi(strings.TrimSpace(s))
-		if err != nil {
-			return false
+		n, err := strconv.Atoi(segment)
+		if err != nil || n < 0 {
+			return protocolVersionUnsupported
 		}
 		parts[i] = n
 	}
 
 	for i := 0; i < 3; i++ {
 		if parts[i] != protocolVersionFloor[i] {
-			return parts[i] > protocolVersionFloor[i]
+			if parts[i] > protocolVersionFloor[i] {
+				return protocolVersionSupported
+			}
+			return protocolVersionBelowFloor
 		}
 	}
-	return true
+	return protocolVersionSupported
+}
+
+// meetsProtocolVersionFloor reports whether v is a clean release at or above
+// protocolVersionFloor. Unsupported versions fall back to "full".
+func meetsProtocolVersionFloor(v string) bool {
+	return classifyProtocolVersion(v) == protocolVersionSupported
 }
 
 func printPostInstall(result *setup.Result) {
 	switch result.Agent {
 	case "opencode":
 		fmt.Println("\nNext steps:")
-		fmt.Println("  1. Restart OpenCode — plugin + MCP server are ready")
-		fmt.Println("  2. The plugin auto-starts the Engram HTTP server when needed")
+		if result.MCPConfigured {
+			fmt.Println("  1. Configuration written: the OpenCode plugin and Engram MCP registration.")
+		} else {
+			fmt.Println("  1. Plugin written, but Engram MCP registration needs the manual configuration shown above.")
+		}
+		fmt.Println("  2. Restart OpenCode, then run `opencode mcp list` to confirm that OpenCode reports Engram connected.")
+		fmt.Println("  3. Start a new OpenCode agent session and confirm it can use an `engram_mem_*` tool before relying on Engram.")
+		fmt.Println("     Setup and server connectivity checks cannot verify tool exposure in the active agent session.")
+		fmt.Println("  4. The plugin auto-starts the Engram HTTP server when needed.")
 		if result.TUIPluginEnabled {
 			fmt.Println("\nAlso enabled: opencode-subagent-statusline in tui.json — sub-agent activity in the sidebar/footer.")
 		}
@@ -2994,8 +3068,12 @@ func printPostInstall(result *setup.Result) {
 		fmt.Println("\nNext steps:")
 		fmt.Println("  1. Restart Claude Code — the plugin is active immediately")
 		fmt.Println("  2. Verify with: claude plugin list")
-		fmt.Println("  3. MCP config written to ~/.claude/mcp/engram.json using absolute binary path")
-		fmt.Println("     (survives plugin auto-updates; re-run 'engram setup claude-code' if you move the binary)")
+		if result.MCPConfigured {
+			fmt.Println("  3. MCP config written to ~/.claude/mcp/engram.json using absolute binary path")
+			fmt.Println("     (survives plugin auto-updates; re-run 'engram setup claude-code' if you move the binary)")
+		} else {
+			fmt.Println("  3. MCP configuration was not written. Re-run 'engram setup claude-code' after resolving the reported error.")
+		}
 	default:
 		// Every other agent's "next steps" are declared as data in the registry,
 		// so the message is rendered generically instead of one case per agent.
@@ -3026,7 +3104,7 @@ Commands:
   serve [port]       Start HTTP API server (default: 7437)
   mcp [--tools=PROFILE] [--project NAME]
                      Start MCP server (stdio transport, for any AI agent)
-                       Profiles: agent (15 tools), admin (4 tools), all (default, 19)
+                        Profiles: agent (18 tools), admin (4 tools), all (default, 22)
                        Combine: --tools=agent,admin or pick individual tools
                        Example: engram mcp --tools=agent
                        --project NAME  Set process-level default project (overrides cwd detection).

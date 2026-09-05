@@ -20,9 +20,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/internal/diagnostic"
-	projectpkg "github.com/Gentleman-Programming/engram/internal/project"
-	"github.com/Gentleman-Programming/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/v2/internal/diagnostic"
+	projectpkg "github.com/Gentleman-Programming/engram/v2/internal/project"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
 )
 
 var loadServerStats = func(s *store.Store) (*store.Stats, error) {
@@ -77,10 +77,12 @@ type Server struct {
 	// promptBuilder constructs LLM prompts for semantic scan pairs.
 	// When nil and semantic=true, a no-op builder is used (returns empty string).
 	promptBuilder SemanticPromptBuilder
+	// version is reported by GET /health and defaults to "dev" for local builds.
+	version string
 }
 
 func New(s *store.Store, port int) *Server {
-	srv := &Server{store: s, port: port, listen: net.Listen, serve: http.Serve}
+	srv := &Server{store: s, port: port, listen: net.Listen, serve: http.Serve, version: "dev"}
 	srv.mux = http.NewServeMux()
 	srv.routes()
 	return srv
@@ -90,6 +92,11 @@ func New(s *store.Store, port int) *Server {
 // This is used to notify autosync.Manager via NotifyDirty().
 func (s *Server) SetOnWrite(fn func()) {
 	s.onWrite = fn
+}
+
+// SetVersion sets the release version reported by GET /health.
+func (s *Server) SetVersion(v string) {
+	s.version = v
 }
 
 // SetSyncStatus configures the sync status provider for the /sync/status endpoint.
@@ -292,15 +299,16 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]any{
 		"status":  "ok",
 		"service": "engram",
-		"version": "0.1.0",
+		"version": s.version,
 	})
 }
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		ID        string `json:"id"`
-		Project   string `json:"project"`
-		Directory string `json:"directory"`
+		ID            string `json:"id"`
+		Project       string `json:"project"`
+		Directory     string `json:"directory"`
+		OwnershipMode string `json:"ownership_mode"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, http.StatusBadRequest, "invalid json: "+err.Error())
@@ -311,7 +319,15 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.store.CreateSession(body.ID, body.Project, body.Directory); err != nil {
+	mode := body.OwnershipMode
+	if mode == "" {
+		mode = store.SessionOwnershipShared
+	}
+	if err := s.store.CreateSessionWithOwnershipMode(body.ID, body.Project, projectpkg.RuntimeWorktreeDirectory(body.Directory), mode); err != nil {
+		if errors.Is(err, store.ErrInvalidSessionOwnershipMode) {
+			jsonError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -349,6 +365,9 @@ func (s *Server) handleRecentSessions(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if sessions == nil {
+		sessions = []store.SessionSummary{}
 	}
 
 	jsonResponse(w, http.StatusOK, sessions)
@@ -458,6 +477,9 @@ func (s *Server) handleRecentObservations(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if obs == nil {
+		obs = []store.Observation{}
 	}
 
 	jsonResponse(w, http.StatusOK, obs)
@@ -765,6 +787,9 @@ func (s *Server) handleRecentPrompts(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if prompts == nil {
+		prompts = []store.Prompt{}
+	}
 
 	jsonResponse(w, http.StatusOK, prompts)
 }
@@ -789,6 +814,9 @@ func (s *Server) handleSearchPrompts(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if prompts == nil {
+		prompts = []store.Prompt{}
 	}
 
 	jsonResponse(w, http.StatusOK, prompts)
@@ -1259,10 +1287,11 @@ func (s *Server) handleListConflicts(w http.ResponseWriter, r *http.Request) {
 	offset := queryInt(r, "offset", 0)
 
 	opts := store.ListRelationsOptions{
-		Project: project,
-		Status:  status,
-		Limit:   limit,
-		Offset:  offset,
+		Project:            project,
+		Status:             status,
+		Limit:              limit,
+		Offset:             offset,
+		ExcludeNotConflict: true,
 	}
 
 	sinceStr := r.URL.Query().Get("since")
@@ -1283,9 +1312,10 @@ func (s *Server) handleListConflicts(w http.ResponseWriter, r *http.Request) {
 
 	// Count without limit/offset for the total field.
 	countOpts := store.ListRelationsOptions{
-		Project:   project,
-		Status:    status,
-		SinceTime: opts.SinceTime,
+		Project:            project,
+		Status:             status,
+		SinceTime:          opts.SinceTime,
+		ExcludeNotConflict: true,
 	}
 	total, err := s.store.CountRelations(countOpts)
 	if err != nil {

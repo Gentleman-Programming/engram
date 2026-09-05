@@ -6,9 +6,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
-	projectpkg "github.com/Gentleman-Programming/engram/internal/project"
-	"github.com/Gentleman-Programming/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/constants"
+	projectpkg "github.com/Gentleman-Programming/engram/v2/internal/project"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
 )
 
 const (
@@ -16,6 +16,7 @@ const (
 	CheckManualSessionNameProjectMismatch = "manual_session_name_project_mismatch"
 	CheckSyncMutationRequiredFields       = "sync_mutation_required_fields"
 	CheckInvalidSessionIdentity           = "invalid_session_identity"
+	CheckOrphanedObservationSession       = "orphaned_observation_session"
 	CheckUnownedSessionProject            = "unowned_session_project"
 	CheckSQLiteLockContention             = "sqlite_lock_contention"
 )
@@ -29,6 +30,7 @@ type SessionProjectDirectoryMismatchCheck struct{}
 type ManualSessionNameProjectMismatchCheck struct{}
 type SyncMutationRequiredFieldsCheck struct{}
 type InvalidSessionIdentityCheck struct{}
+type OrphanedObservationSessionCheck struct{}
 type UnownedSessionProjectCheck struct{}
 type SQLiteLockContentionCheck struct{}
 
@@ -40,6 +42,7 @@ func (ManualSessionNameProjectMismatchCheck) Code() string {
 }
 func (SyncMutationRequiredFieldsCheck) Code() string { return CheckSyncMutationRequiredFields }
 func (InvalidSessionIdentityCheck) Code() string     { return CheckInvalidSessionIdentity }
+func (OrphanedObservationSessionCheck) Code() string { return CheckOrphanedObservationSession }
 func (UnownedSessionProjectCheck) Code() string      { return CheckUnownedSessionProject }
 func (SQLiteLockContentionCheck) Code() string       { return CheckSQLiteLockContention }
 
@@ -121,9 +124,9 @@ func (c ManualSessionNameProjectMismatchCheck) Run(ctx context.Context, scope Sc
 			Severity:             SeverityWarning,
 			ReasonCode:           "manual_session_name_project_mismatch",
 			Message:              "Manual session name suffix does not match sessions.project.",
-			Why:                  "Manual session naming drift can hide memories from project-scoped context retrieval.",
-			Evidence:             mustJSON(map[string]any{"session_id": session.ID, "session_name": session.Name, "session_project": session.Project, "name_project": nameProject}),
-			SafeNextStep:         "Use `engram context --project <project>` or MCP `project` overrides explicitly before deciding whether to consolidate projects.",
+			Why:                  "Manual session naming drift cannot prove project ownership and must not be auto-rescued.",
+			Evidence:             mustJSON(map[string]any{"session_id": session.ID, "session_name": session.Name, "session_project": session.Project, "ownership_mode": session.OwnershipMode, "name_project": nameProject}),
+			SafeNextStep:         "Review the persisted project, then use the ownership rescue command deliberately; its SQLite backup is the rollback point.",
 			RequiresConfirmation: true,
 		})
 	}
@@ -159,12 +162,28 @@ func cloudSyncInUse(scope Scope) (bool, error) {
 
 func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {
 	_ = ctx
+	sourceObservations, err := scope.Store.ListDiagnosticObservationRequiredFields(scope.Project)
+	if err != nil {
+		return CheckResult{}, err
+	}
 	mutations, err := scope.Store.ListPendingProjectMutations(scope.Project)
 	if err != nil {
 		return CheckResult{}, err
 	}
 	blocking := make([]Finding, 0)
 	quarantined := make([]Finding, 0)
+	for _, observation := range sourceObservations {
+		blocking = append(blocking, Finding{
+			CheckID:              c.Code(),
+			Severity:             SeverityBlocking,
+			ReasonCode:           "observation_source_missing_required_fields",
+			Message:              fmt.Sprintf("Observation source row %d is missing required fields: %s", observation.ID, strings.Join(observation.MissingFields, ", ")),
+			Why:                  "A corrupt local observation source can produce rejected cloud payloads even when no pending mutation remains to diagnose.",
+			Evidence:             mustJSON(observation),
+			SafeNextStep:         "Run `engram cloud upgrade doctor repair --check sync_mutation_required_fields --dry-run` to inspect title-only repairs; content and type require manual recovery.",
+			RequiresConfirmation: true,
+		})
+	}
 	for _, mutation := range mutations {
 		// A quarantined row is an explicit, already-taken disposition: it no
 		// longer reaches transport, so it must not keep doctor blocked. It stays
@@ -194,7 +213,7 @@ func (c SyncMutationRequiredFieldsCheck) Run(ctx context.Context, scope Scope) (
 	}
 	// Quarantined rows are already-taken dispositions, so they never count as
 	// work still pending delivery.
-	evidence := map[string]any{"pending_mutations_evaluated": len(mutations) - len(quarantined)}
+	evidence := map[string]any{"pending_mutations_evaluated": len(mutations) - len(quarantined), "corrupt_source_observations": len(sourceObservations)}
 	if len(quarantined) > 0 {
 		evidence["quarantined_mutations"] = len(quarantined)
 	}
@@ -333,18 +352,20 @@ func (c UnownedSessionProjectCheck) Run(ctx context.Context, scope Scope) (Check
 	}
 	findings := make([]Finding, 0)
 	for _, session := range sessions {
-		if normalizeProjectName(session.Project) != "" {
+		mode := strings.TrimSpace(session.OwnershipMode)
+		if normalizeProjectName(session.Project) != "" && (mode == store.SessionOwnershipShared || mode == store.SessionOwnershipProjectOwned) {
 			continue
 		}
 		findings = append(findings, Finding{
 			CheckID:    c.Code(),
 			Severity:   SeverityWarning,
 			ReasonCode: CheckUnownedSessionProject,
-			Message:    fmt.Sprintf("Session %q identifies no project.", session.ID),
-			Why:        "A session left over from the schema where sessions.project was nullable owns no project, so its memories stay outside every project-scoped retrieval and writes to it must resolve ownership before they can land.",
+			Message:    fmt.Sprintf("Session %q has unclassified or invalid ownership metadata.", session.ID),
+			Why:        "Legacy, blank, and invalid ownership metadata cannot safely establish a project-owned session, so an operator must classify it explicitly before relying on ownership enforcement.",
 			Evidence: mustJSON(map[string]any{
 				"session_id":      session.ID,
 				"session_project": session.Project,
+				"ownership_mode":  session.OwnershipMode,
 				"directory":       session.Directory,
 			}),
 			SafeNextStep:         fmt.Sprintf("Assign ownership with `%s --project <name> --session %s` after confirming which project the session belongs to.", store.RescueOwnershipCommand, session.ID),
@@ -352,6 +373,28 @@ func (c UnownedSessionProjectCheck) Run(ctx context.Context, scope Scope) (Check
 		})
 	}
 	return resultFromFindings(c.Code(), map[string]any{"sessions_evaluated": len(sessions)}, findings), nil
+}
+
+func (c OrphanedObservationSessionCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {
+	_ = ctx
+	evidence, err := scope.Store.ListOrphanedObservationSessionEvidence(scope.Project)
+	if err != nil {
+		return CheckResult{}, err
+	}
+	findings := make([]Finding, 0, len(evidence))
+	for _, item := range evidence {
+		findings = append(findings, Finding{
+			CheckID:              c.Code(),
+			Severity:             SeverityWarning,
+			ReasonCode:           CheckOrphanedObservationSession,
+			Message:              fmt.Sprintf("%d observation(s) reference missing session %q.", item.ObservationCount, item.SessionID),
+			Why:                  "Observations reference a missing session, so their canonical session cannot be reconstructed automatically.",
+			Evidence:             mustJSON(item),
+			SafeNextStep:         "Inspect and recover the affected data deliberately. The canonical session cannot be reconstructed automatically, and no supported repair exists.",
+			RequiresConfirmation: true,
+		})
+	}
+	return resultFromFindings(c.Code(), map[string]any{"orphaned_session_references_evaluated": len(evidence)}, findings), nil
 }
 
 func (c SQLiteLockContentionCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {

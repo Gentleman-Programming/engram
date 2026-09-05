@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
 )
 
 const (
@@ -58,13 +58,13 @@ type UpdatePrincipalParams struct {
 }
 
 type HumanUser struct {
-	PrincipalID string
-	Username    string
-	Email       string
-	DisplayName string
-	Role        string
-	Enabled     bool
-	CreatedAt   time.Time
+	PrincipalID string    `json:"principal_id"`
+	Username    string    `json:"username"`
+	Email       string    `json:"email"`
+	DisplayName string    `json:"display_name"`
+	Role        string    `json:"role"`
+	Enabled     bool      `json:"enabled"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 type CreateHumanUserParams struct {
@@ -105,10 +105,10 @@ type RecoverStrandedAdminTokenParams struct {
 }
 
 type ProjectGrant struct {
-	PrincipalID          string
-	Project              string
-	GrantedByPrincipalID string
-	CreatedAt            time.Time
+	PrincipalID          string    `json:"principal_id"`
+	Project              string    `json:"project"`
+	GrantedByPrincipalID string    `json:"granted_by_principal_id"`
+	CreatedAt            time.Time `json:"created_at"`
 }
 
 type CreateProjectGrantParams struct {
@@ -1059,9 +1059,22 @@ func guardLastActiveAdminTx(ctx context.Context, tx *sql.Tx, principalID string,
 	return nil
 }
 
+// auditKeyValueExempt reports whether a (key, value) pair should bypass the
+// sensitive-key heuristic based on its value. issued_token is a boolean flag
+// written by the bootstrap completion audit (see cloudBootstrapCompletionMetadata);
+// it is exempt ONLY when the value is actually a bool, so the exemption cannot
+// be used to smuggle a secret string under a trusted key name.
+func auditKeyValueExempt(key string, value any) bool {
+	if strings.EqualFold(strings.TrimSpace(key), "issued_token") {
+		_, ok := value.(bool)
+		return ok
+	}
+	return false
+}
+
 func rejectSensitiveAuthAuditMetadata(metadata map[string]any) error {
 	for key, value := range metadata {
-		if sensitiveAuthAuditKey(key) {
+		if !auditKeyValueExempt(key, value) && sensitiveAuthAuditKey(key) {
 			return fmt.Errorf("%w: %s", ErrSensitiveAuditMetadata, key)
 		}
 		if err := rejectSensitiveAuthAuditValue(value); err != nil {
@@ -1089,10 +1102,11 @@ func rejectSensitiveAuthAuditValue(value any) error {
 		}
 		for _, key := range reflected.MapKeys() {
 			keyText := key.String()
-			if sensitiveAuthAuditKey(keyText) {
+			entryValue := reflected.MapIndex(key).Interface()
+			if !auditKeyValueExempt(keyText, entryValue) && sensitiveAuthAuditKey(keyText) {
 				return fmt.Errorf("%w: %s", ErrSensitiveAuditMetadata, keyText)
 			}
-			if err := rejectSensitiveAuthAuditValue(reflected.MapIndex(key).Interface()); err != nil {
+			if err := rejectSensitiveAuthAuditValue(entryValue); err != nil {
 				return err
 			}
 		}
@@ -1108,6 +1122,10 @@ func rejectSensitiveAuthAuditValue(value any) error {
 
 func sensitiveAuthAuditKey(key string) bool {
 	key = strings.ToLower(strings.TrimSpace(key))
+	// token_prefix is the short, non-secret token prefix; it matches the
+	// fragment heuristic below but never carries secret material. issued_token
+	// is handled by auditKeyValueExempt instead, because it is only safe when
+	// its value is the boolean flag the bootstrap completion audit records.
 	if key == "token_prefix" {
 		return false
 	}

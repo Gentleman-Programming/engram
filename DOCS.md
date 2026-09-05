@@ -14,7 +14,7 @@ This is the complete technical reference for Engram. For getting started, see th
 | --------------------------------------------------------- | ------------------------------------------------------------ |
 | [Database Schema](#database-schema)                       | Tables, FTS5, SQLite config                                  |
 | [HTTP API](#http-api-endpoints)                           | All REST endpoints with request/response details             |
-| [MCP Tools](#mcp-tools-20-tools)                          | Detailed reference for all 20 memory tools                   |
+| [MCP Tools](#mcp-tools-22-tools)                          | Detailed reference for all 22 memory tools                   |
 | [MCP Project Resolution](#mcp-project-resolution)         | Auto-detection algorithm, response envelope, tool categories |
 | [Memory Protocol](#memory-protocol)                       | When/how agents should use the tools                         |
 | [Project Name Normalization](#project-name-normalization) | Auto-detection, normalization, similar-project warnings      |
@@ -125,9 +125,12 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 
 ### Sessions
 
-- `POST /sessions` — Create session. Body: `{id, project, directory}`
+- `POST /sessions` — Create session. Body: `{id, project, directory, ownership_mode?}`
+  - `ownership_mode` accepts `shared` or `project_owned`; when omitted it defaults to `shared`.
+  - An invalid non-empty `ownership_mode` returns `400` and does not create a session.
 - `POST /sessions/{id}/end` — End session. Body: `{summary}`
 - `GET /sessions/recent` — Recent sessions. Query: `?project=X&all_projects=true&limit=N`
+  - No-result responses return `200` with `[]` (never `null`)
 - `GET /sessions/{id}` — Get single session by ID
 - `DELETE /sessions/{id}` — Delete session
   - `200` when deleted
@@ -141,6 +144,7 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
   - `400` when `title` or `content` is missing, empty, or whitespace-only. The observation-create paths (`engram save`, `mem_save`, `POST /observations`) enforce the same title rule because cloud sync rejects observation upserts without a title, and one rejected mutation blocks every later mutation for the project
 - `GET /observations` — Recent observations compatibility endpoint. Query: `?project=X&all_projects=true&scope=project|personal|global&limit=N&sort=created_at:desc`
 - `GET /observations/recent` — Recent observations. Query: `?project=X&all_projects=true&scope=project|personal|global&limit=N`
+  - No-result responses from both observation collection endpoints return `200` with `[]` (never `null`)
 - `GET /observations/{id}` — Get single observation by ID
 - `PATCH /observations/{id}` — Update fields. Body: `{title?, content?, type?, project?, scope?, topic_key?}`
   - `400` when `title` or `content` is provided but empty or whitespace-only. Omitting a field leaves its current value unchanged
@@ -172,6 +176,7 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 - `POST /prompts` — Save user prompt. Body: `{session_id, content, project?}`
 - `GET /prompts/recent` — Recent prompts. Query: `?project=X&all_projects=true&limit=N`
 - `GET /prompts/search` — Search prompts. Query: `?q=QUERY&project=X&all_projects=true&limit=N`
+  - No-result responses from both prompt collection endpoints return `200` with `[]` (never `null`)
 - `DELETE /prompts/{id}` — Delete prompt
   - `200` when deleted
   - `400` for invalid prompt id
@@ -187,7 +192,7 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 
 ### Passive Capture
 
-- `POST /observations/passive` — Extract structured learnings from text. Body: `{content, session_id, project?}`
+- `POST /observations/passive` — Scan submitted text and persist only structured learnings recognized by the parser. Body: `{content, session_id, project?, source?}`. General or raw text is not saved as an observation.
 
 ### Export / Import
 
@@ -210,6 +215,7 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
   - Always returns a success envelope with `{project, project_source, project_path, cwd, available_projects}` plus optional `warning`/`error_hint`
   - Ambiguous cwd is a successful discovery response: `project` is empty, `project_source` is `ambiguous`, `available_projects` lists the candidates, and `error_hint` explains why no project was selected.
   - Other current-project-scoped HTTP routes return `404` for an unknown explicit project, `409` with `{error, code:"ambiguous_project", available_projects, project_source, project_path}` for an ambiguous cwd, and `400` for an invalid selector or configuration.
+  - For automatic Git detection, Engram creates a private versioned binding in the repository's shared Git metadata. It retains the first normalized remote/root label through remote renames, linked worktrees, and repository moves; the binding is not tracked and clones or forks create their own opaque ID. A corrupt or unwritable binding fails closed: configure `.engram/config.json` with the intended project name rather than relying on a renamed remote. Global local/cloud `project_id` propagation and alias migration remain deferred.
 - `POST /projects/rescue-ownership` — Bulk-assign ownership to explicitly selected historical records that carry none. `POST /projects/migrate` is a deprecated compatibility alias routed to the same handler. The JSON body is limited to 8 KiB: `{target_project, confirmed:true, observation_ids?:[], session_ids?:[], prompt_ids?:[]}`.
   - A configured `ENGRAM_HTTP_TOKEN`, matching `Authorization: Bearer <token>`, `target_project`, `confirmed:true`, and at least one positive observation/prompt ID or non-blank session ID are required. Missing server token returns `503`; missing or wrong credentials return `401`; malformed or invalid requests return `400`.
   - This route is a convenience, not the only repair. `engram projects rescue-ownership --project <name> [--session <id>] [--observation <id>] [--prompt <id>]` performs the same operation against the local store and needs no server token, so ownership stays repairable in a zero-config install.
@@ -303,7 +309,7 @@ Response:
 { "sync_id": "rel-abc123" }
 ```
 
-`not_conflict` is a no-op verdict and returns an empty `sync_id`.
+`not_conflict` persists a judged relation and returns its `sync_id`, preventing future scans from re-evaluating the pair.
 
 Status codes:
 
@@ -365,7 +371,7 @@ Request body:
 - `apply: false` (default) — dry-run for the non-semantic lexical scan; reports candidates without inserting pending rows
 - `apply: true` — non-semantic lexical scan inserts new pending relation rows up to `max_insert` cap (default 100)
 - `semantic: true` — after FTS5 lexical scan, run LLM-judge semantic detection on the candidate pairs returned by `FindCandidates`. It does not discover totally lexically unrelated pairs on its own. Requires `ENGRAM_AGENT_CLI` to be set on the server to `claude` or `opencode`.
-- Semantic scans can persist non-`not_conflict` judged relations through `JudgeBySemantic` even when `apply: false`; `not_conflict` verdicts are not inserted.
+- Semantic dry-runs evaluate verdicts without persisting them; `not_conflict` results are reported as skipped. Applied semantic scans persist every valid verdict, including `not_conflict`.
 - `concurrency` — worker pool size for parallel LLM calls when `semantic: true` (default 5, range 1–20)
 - `timeout_per_call_seconds` — per-LLM-call timeout in seconds when `semantic: true` (default 60, range 1–600)
 - `max_semantic` — hard cap on LLM calls per scan (default 100); scan stops collecting new pairs once reached
@@ -489,6 +495,8 @@ Response:
 
 ### Environment Variables
 
+Release update checks are skipped for `version`, `--version`, `-v`, `help`, `--help`, and `-h`. `engram tui` performs its single update check from inside the TUI. Set `ENGRAM_NO_UPDATE_CHECK=1` to disable every update check, including the TUI check.
+
 | Variable                        | Description                                                                                                                                                                                                                                               | Default              |
 | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
 | `ENGRAM_DATA_DIR`               | Override data directory                                                                                                                                                                                                                                   | `~/.engram`          |
@@ -497,6 +505,7 @@ Response:
 | `ENGRAM_HTTP_TOKEN`             | Optional Bearer auth for the local HTTP server. When set, `DELETE /sessions/{id}`, `DELETE /observations/{id}`, `DELETE /prompts/{id}`, `GET /export`, and `POST /import` require `Authorization: Bearer <token>`. `POST /projects/rescue-ownership` (and deprecated alias `POST /projects/migrate`) always requires a configured token and matching Bearer credential. Comparison is constant-time. Token is read at request time (no restart needed). Other routes remain open when unset (zero-config default). Ownership repair never depends on this token: `engram projects rescue-ownership` performs the same repair against the local store. | (unset — HTTP rescue route not served; CLI repair still available) |
 | `ENGRAM_TIMEZONE`               | Timezone for timestamp display in the TUI and cloud dashboard. Accepts any IANA zone name (e.g. `America/New_York`, `Europe/Berlin`). Falls back to system local time when unset or invalid.                                                               | system local         |
 | `ENGRAM_AGENT_CLI`              | LLM runner name used by `engram conflicts scan --semantic` and the HTTP `/conflicts/scan` endpoint. Accepted values: `claude`, `opencode`.                                                                                                                | (unset)              |
+| `ENGRAM_NO_UPDATE_CHECK`        | Set to `1` to disable GitHub release update checks for every caller, including the TUI. `true`, `yes`, and `on` are also accepted.                                                                                                                       | (unset — eligible commands check for updates) |
 | `ENGRAM_CLOUD_AUTOSYNC`         | Set to `1` to enable background autosync. Requires `ENGRAM_CLOUD_TOKEN` and `ENGRAM_CLOUD_SERVER` to also be set.                                                                                                                                         | (unset — disabled)   |
 | `ENGRAM_CLOUD_SERVER`           | Cloud server URL used by the autosync manager and `engram sync --cloud`.                                                                                                                                                                                  | (unset)              |
 | `ENGRAM_DATABASE_URL`           | Postgres DSN for `engram cloud serve`.                                                                                                                                                                                                                    | (unset)              |
@@ -506,7 +515,7 @@ Response:
 | `ENGRAM_CLOUD_INSECURE_NO_AUTH` | Set to `1` for local insecure cloud serve (no auth). Cannot be combined with `ENGRAM_CLOUD_TOKEN`.                                                                                                                                                        | (unset)              |
 | `ENGRAM_CLOUD_ALLOWED_PROJECTS` | Comma-separated project allowlist enforced by `engram cloud serve`. Required in both token-auth and insecure modes. Use `*` to allow all projects (dev/internal deploys) — bypasses per-project name enforcement while still requiring a non-empty project on each request. | (unset) |
 | `ENGRAM_JWT_SECRET`             | Required in authenticated cloud serve mode. Must be explicitly set to a non-default value.                                                                                                                                                                | (unset)              |
-| `ENGRAM_CLOUD_ADMIN`            | Optional admin-only dashboard token in authenticated cloud serve mode. Ignored/rejected in insecure mode.                                                                                                                                                 | (unset)              |
+| `ENGRAM_CLOUD_ADMIN`            | Optional legacy dashboard-admin token in authenticated cloud serve mode. It can access dashboard admin read surfaces, project sync controls, and audit logs, but not managed-user, token, or grant mutations. Ignored/rejected in insecure mode. | (unset) |
 | `ENGRAM_CLOUD_TOKEN_PEPPER`     | Dedicated secret used to hash managed cloud tokens. Required both to issue tokens via `engram cloud bootstrap admin --issue-token` (and the admin API/dashboard) and to enable managed-token authentication on `engram cloud serve`. Distinct from `ENGRAM_JWT_SECRET` on purpose — see [Managed users, tokens, and CLI bootstrap](#managed-users-tokens-and-cli-bootstrap). | (unset)              |
 
 ### Conflict Audit CLI (admin)
@@ -548,7 +557,7 @@ Walk observations for the project, run FindCandidates, and report or insert new 
 - `--limit N`: inspect 1–100 observations per page (default 100), ordered by observation ID.
 - `--cursor ID`: resume after a printed `next_cursor`; no automatic follow-up page is run.
 - `--semantic`: enable LLM-judge semantic detection on FTS5 candidate pairs returned by `FindCandidates`. It can improve verdict quality for candidates that share lexical terms, but it does not discover totally lexically unrelated pairs on its own. Requires `ENGRAM_AGENT_CLI=claude` or `ENGRAM_AGENT_CLI=opencode`.
-- With `--semantic`, non-`not_conflict` verdicts are persisted by `JudgeBySemantic` even in the default `--dry-run` mode; `not_conflict` verdicts remain no-op.
+- With `--semantic`, `--dry-run` evaluates verdicts without persistence and reports `not_conflict` as skipped. `--apply` persists every valid verdict, including `not_conflict`.
 - `--concurrency N`: worker pool size for parallel LLM calls (default 5, max 20).
 - `--timeout-per-call N`: per-LLM-call timeout in seconds (default 60).
 - `--max-semantic N`: hard cap on LLM calls per scan run (default 100).
@@ -587,7 +596,7 @@ Cloud server always requires `ENGRAM_CLOUD_ALLOWED_PROJECTS` (comma-separated), 
 Authenticated mode also requires an explicit non-default `ENGRAM_JWT_SECRET`; implicit development defaults are rejected.
 Dashboard requests support browser login in authenticated mode: use `/dashboard/login` to exchange the bearer token for an HttpOnly dashboard cookie scoped to `/dashboard`. Protected `/dashboard/*` HTML routes require that cookie and do **not** treat raw `Authorization: Bearer ...` headers as an authenticated browser session. Sync API routes (`/sync/pull`, `/sync/pull/{chunkID}`, `/sync/push`, `/sync/mutations/push`, `/sync/mutations/pull`) remain header-auth only. In insecure mode (`ENGRAM_CLOUD_INSECURE_NO_AUTH=1` + no `ENGRAM_CLOUD_TOKEN`), dashboard auth is bypassed and `/dashboard/login` redirects to `/dashboard/`.
 
-`ENGRAM_CLOUD_ADMIN` is optional in authenticated mode; when set, `/dashboard/admin` is allowed only for sessions established with that exact token.
+`ENGRAM_CLOUD_ADMIN` is optional in authenticated mode. Its sessions can access the existing dashboard admin read surfaces, project sync controls, and audit logs, but managed-user, token, and project-grant mutations require a managed admin token.
 `ENGRAM_CLOUD_ADMIN` is rejected in insecure mode (`ENGRAM_CLOUD_INSECURE_NO_AUTH=1`) to avoid an incoherent admin/browser auth path.
 
 Cloud runtime bind host is controlled by `ENGRAM_CLOUD_HOST`:
@@ -607,7 +616,7 @@ Cloud runtime envs for `engram cloud serve`:
 | `ENGRAM_CLOUD_TOKEN`            | yes (authenticated mode) | Enables bearer auth mode                                                              |
 | `ENGRAM_JWT_SECRET`             | yes (authenticated mode) | Must be explicitly set and non-default when token mode is enabled                     |
 | `ENGRAM_CLOUD_INSECURE_NO_AUTH` | no                       | Set to `1` only for local insecure mode; cannot be combined with `ENGRAM_CLOUD_TOKEN` |
-| `ENGRAM_CLOUD_ADMIN`            | no                       | Optional admin dashboard token in authenticated mode; rejected in insecure mode       |
+| `ENGRAM_CLOUD_ADMIN`            | no                       | Optional legacy dashboard-admin token for read surfaces, project sync controls, and audit logs; managed-user mutations require a managed admin token; rejected in insecure mode |
 | `ENGRAM_CLOUD_TOKEN_PEPPER`     | no (required to enable managed-token auth) | Dedicated managed-token hashing secret. Must differ from `ENGRAM_JWT_SECRET`. Required both by `engram cloud bootstrap admin --issue-token` and by `engram cloud serve` to accept managed tokens at runtime (see below). |
 
 ### Managed users, tokens, and CLI bootstrap
@@ -639,13 +648,20 @@ engram cloud bootstrap recover-token --name replacement
 
 It requires `ENGRAM_CLOUD_TOKEN_PEPPER`, preserves existing grants, and prints the recovered raw token exactly once only after the token and its `bootstrap.cli` recovery audit event commit together. It refuses all other states, including multiple enabled managed human admins or any existing principal token; it does not create users, grants, or partial tokens.
 
-**Runtime authentication:** `engram cloud serve` resolves managed tokens first, then falls back to the legacy env-token credentials (`ENGRAM_CLOUD_TOKEN` for sync, `ENGRAM_CLOUD_ADMIN` for dashboard bootstrap/admin), on every `/sync/*`, `/admin/*`, and dashboard-login request:
+**Runtime authentication:** `engram cloud serve` resolves managed tokens first, then falls back to the legacy env-token credentials (`ENGRAM_CLOUD_TOKEN` for sync and `ENGRAM_CLOUD_ADMIN` for dashboard access), on every `/sync/*`, `/admin/*`, and dashboard-login request. Authentication does not grant managed-user mutation authority: only a managed-token admin principal may create or enable/disable users, create or revoke tokens, or create or revoke project grants.
 
 - Set `ENGRAM_CLOUD_TOKEN_PEPPER` to enable managed-token authentication. A token issued by `engram cloud bootstrap admin --issue-token` (or by the dashboard/`/admin/*` token-create routes) then authenticates directly against `/sync/*` and `/admin/*`, and can log into the dashboard as its resolved principal/role.
 - If `ENGRAM_CLOUD_TOKEN_PEPPER` is not set, managed-token authentication is simply disabled: the server still starts normally, and `ENGRAM_CLOUD_TOKEN` / `ENGRAM_CLOUD_ADMIN` continue to authenticate exactly as before (legacy-only mode).
 - Managed principals are deny-by-default for project sync: a managed token only reaches projects explicitly granted via `--grant-project` (or the dashboard/`/admin/*` grant routes). Legacy `ENGRAM_CLOUD_TOKEN` keeps its existing `ENGRAM_CLOUD_ALLOWED_PROJECTS` allowlist behavior, unaffected by managed grants.
 - Disabled managed users, revoked managed tokens, and revoked project grants stop authenticating/authorizing on the very next request — no server restart required.
-- No rollback action is required to keep using legacy credentials: legacy `ENGRAM_CLOUD_TOKEN` / `ENGRAM_CLOUD_ADMIN` behavior is unchanged and remains fully supported whether or not `ENGRAM_CLOUD_TOKEN_PEPPER` is configured.
+- No rollback action is required to keep using legacy credentials: legacy `ENGRAM_CLOUD_TOKEN` continues to use its existing sync allowlist, and `ENGRAM_CLOUD_ADMIN` continues to provide dashboard read access, project sync controls, audit logs, and the first-admin dashboard bootstrap entry point whether or not `ENGRAM_CLOUD_TOKEN_PEPPER` is configured. The CLI recovery command remains limited to its documented stranded-admin state. Use a managed admin token for managed-user administration.
+
+#### Managed admin API response JSON
+
+The managed-admin API returns snake_case JSON keys for user and grant objects:
+
+- `POST /admin/users` returns one user object and `GET /admin/users` returns an array of user objects. Each object contains `principal_id`, `username`, `email`, `display_name`, `role`, `enabled`, and `created_at`.
+- `POST /admin/users/{principalID}/grants` returns one grant object and `GET /admin/users/{principalID}/grants` returns an array of grant objects. Each object contains `principal_id`, `project`, `granted_by_principal_id`, and `created_at`.
 
 Cloud sync is still local-first and explicit:
 
@@ -669,6 +685,8 @@ engram sync --cloud --project <project>
 ```
 
 Sync/autosync never auto-applies repairs; only the explicit `repair --apply` command mutates local repairable upgrade state.
+
+When cloud sync receives `policy_forbidden`, Engram preserves the server's denied project message and advises the server administrator to check `ENGRAM_CLOUD_ALLOWED_PROJECTS`. A managed principal's project grant may also need checking; the client does not expose allowlist contents.
 
 For cloud servers that already accepted mutation pushes before mutation payloads were materialized into chunk history, run the server-side backfill against the Postgres DSN used by `engram cloud serve`:
 
@@ -726,7 +744,7 @@ Deterministic reason codes shared across store/CLI/server:
 - `blocked_unenrolled`
 - `auth_required`
 - `cloud_config_error`
-- `policy_forbidden`
+- `policy_forbidden` — check the server-side `ENGRAM_CLOUD_ALLOWED_PROJECTS` policy for the denied project; a managed principal's project grant may also need checking. The client does not expose allowlist contents.
 - `paused`
 - `transport_failed`
 
@@ -765,13 +783,15 @@ Engram resolves the project at MCP tool call time. The default source is the **s
 | Case | Condition                                                                                 | Source            | Project                            |
 | ---- | ----------------------------------------------------------------------------------------- | ----------------- | ---------------------------------- |
 | 1    | nearest `.engram/config.json` exists within the enclosing git root, or at cwd outside git | `config`          | `project_name` from config         |
-| 2    | cwd is a git root with `origin` remote                                                    | `git_remote`      | repo name from remote URL          |
-| 3    | cwd is inside a git repo (subdirectory)                                                   | `git_root`        | git root's directory basename      |
+| 2    | cwd is inside a git repo that currently has an `origin` remote                              | `git_remote`      | if the binding is absent, initialize it from the remote repo name; otherwise reuse the stored binding label |
+| 3    | cwd is inside a git repo that currently has no `origin` remote                               | `git_root`        | if the binding is absent, initialize it from the git-root basename; otherwise reuse the stored binding label |
 | 4    | cwd has exactly one git-repo child                                                        | `git_child`       | child repo name (warning included) |
 | 5    | cwd has multiple git-repo children                                                        | `ambiguous` error | — write tools fail fast            |
 | 6    | no git repo near cwd                                                                      | `dir_basename`    | basename of cwd                    |
 
 Child scan constraints: depth=1, max 20 entries, 200ms timeout, skips hidden dirs and noise dirs (`node_modules`, `vendor`, `.venv`, `__pycache__`, `target`, `dist`, `build`, `.idea`, `.vscode`).
+
+The Git binding is private to each clone and shared by that clone's linked worktrees. Independent clones and forks establish fresh opaque bindings. Cross-clone identity sharing and alias propagation are not currently supported.
 
 ### Response envelope
 
@@ -787,6 +807,8 @@ Most successful MCP tool responses use this envelope:
 ```
 
 Error responses include `available_projects` when the error is `ambiguous_project` or `unknown_project`.
+
+When a Git repository binding cannot be read or created, MCP returns `repository_binding_unavailable` with guidance to configure the repository's `.engram/config.json` with the intended canonical project. This is not an ambiguity and does not include ambiguity recovery tokens.
 
 Exceptions:
 
@@ -808,6 +830,7 @@ Guardrails:
 - An unbacked explicit `project` fails loudly and does not create a new bucket.
 - If a non-empty `session_id` is supplied and no session exists, `mem_save` fails with a structured error and does not write.
 - If both explicit `project` and `session_id` are supplied, they must resolve to the same normalized project or `mem_save` fails with a structured error and does not write.
+- When a write omits `session_id`, Engram uses the current process directory only to narrow active non-manual runtime sessions for the resolved project. It attaches to a session only when exactly one candidate remains, uses the project manual-save session when none remain, and rejects multiple candidates rather than selecting by recency. Directory is not session identity; callers with concurrent sessions must supply `session_id`.
 - `project_choice_reason=user_selected_after_ambiguous_project` is only honored when cwd resolution is actually ambiguous. On a non-ambiguous cwd, stale recovery flags do not override explicit-project precedence or session mismatch validation.
 - If ambiguous-project recovery is active, `project` must exactly match one of the previously returned `available_projects`; invented or normalized guesses are rejected.
 - Exact ambiguous-project choices can still fail with `project_name_collision` when multiple available names collapse to the same stored project bucket after normalization. Rename or disambiguate the colliding projects before retrying.
@@ -846,7 +869,7 @@ Returns success even when cwd is ambiguous — empty `project` + non-empty `avai
 
 ---
 
-## MCP Tools (20 tools)
+## MCP Tools (22 tools)
 
 ### mem_search
 
@@ -879,7 +902,7 @@ Save structured observations. The tool description teaches agents the format:
 - **type**: `decision` | `architecture` | `bugfix` | `pattern` | `config` | `discovery` | `learning`
 - **scope**: `project` (default) | `personal` | `global` — see [Team Usage](docs/TEAM-USAGE.md) for conventions and sync caveats
 - **topic_key**: optional canonical topic id (e.g. `architecture/auth-model`) used to upsert evolving memories
-- **capture_prompt**: optional boolean, default `true`; when current prompt context is available in the same MCP process for the same project/session, Engram best-effort records it alongside the observation. If that process-local context is unavailable or prompt capture fails, `mem_save` still succeeds. Automated pipeline saves such as SDD artifacts should pass `false`.
+- **capture_prompt**: optional boolean, default `true`; when current prompt context is available in the same MCP process for the same project/session, Engram best-effort records it alongside the observation. If that process-local context is unavailable or prompt capture fails, `mem_save` still succeeds. Automated artifact saves should pass `false`.
 - **content**: Structured with `**What**`, `**Why**`, `**Where**`, `**Learned**`; required unless the legacy `observation` alias is provided
 - **observation**: backward-compatible alias for `content` for older/raw MCP clients; prefer `content` for new integrations
 
@@ -914,6 +937,14 @@ Delete an observation by ID. Uses soft-delete by default (`deleted_at`); optiona
 
 Save user prompts — records what the user asked so future sessions have context about user goals. It applies the same post-redaction byte limit and truncation metadata as `mem_save`; `mem_save_prompt` warns when it truncates.
 When called in the same MCP process, this also feeds process-local current prompt context used by later `mem_save` calls with `capture_prompt=true`. The same MCP process lifecycle must receive the prompt context before the later save; prompt capture is best-effort and `mem_save` still succeeds when no context is available.
+
+### mem_pin
+
+Pin a local observation so it appears before recent observations in memory context. Pinned state is local to this device and is not synced.
+
+### mem_unpin
+
+Unpin a local observation so it only appears in normal recency order. Pinned state is local to this device and is not synced.
 
 ### mem_context
 
@@ -952,6 +983,8 @@ Save comprehensive end-of-session summary:
 ### mem_session_start
 
 Register the start of a new coding session.
+
+If the supplied session ID has already ended, the request is rejected with the structured error code `session_already_ended`, which includes that session ID. Choose a new session ID to continue; ended sessions cannot be reopened. New session IDs and IDs for active sessions remain accepted.
 
 ### mem_session_end
 
@@ -1008,7 +1041,7 @@ Behavior:
 
 - Persists a relation row via `JudgeBySemantic` with system provenance (`marked_by_kind="system"`, `marked_by_actor="engram"`)
 - Idempotent: the same `(source_id, target_id)` pair updates the existing row rather than inserting a duplicate
-- `not_conflict` verdicts are no-ops — acknowledged but not persisted, matching the scan flow contract
+- `not_conflict` verdicts persist as judged relations, suppressing future candidate scans without appearing in conflict-facing lists or statistics
 - Cross-project relations are rejected with an error
 
 ---
@@ -1128,8 +1161,8 @@ All project names are normalized on write and read: **lowercase**, **trimmed**, 
 MCP tools resolve project names at call time using the shared detection chain:
 
 1. Nearest `.engram/config.json` `project_name` within the enclosing git root, or at cwd outside git
-2. Git remote origin URL (extracts repo name)
-3. Git repository root directory name
+2. Git repository with an `origin` remote: initialize an absent private binding from the normalized repo name, otherwise reuse the stored binding label
+3. Git repository without an `origin` remote: initialize an absent private binding from the normalized root directory name, otherwise reuse the stored binding label
 4. Single git-repo child of cwd
 5. Multiple git-repo children of cwd returns `ambiguous_project` with `available_projects`
 6. Current working directory basename
@@ -1512,7 +1545,7 @@ Missing `ENGRAM_CLOUD_TOKEN` or `ENGRAM_CLOUD_SERVER` logs an `ERROR` and disabl
 | ------------------ | ------------------------------------------------------- | ---------------------------------------------------------------------------- |
 | `transport_failed` | Network error, server 5xx, or 404 on mutation endpoints | Check server health and network; if 404, see `server_unsupported` note below |
 | `auth_required`    | Bearer token rejected (401)                             | Rotate `ENGRAM_CLOUD_TOKEN`                                                  |
-| `policy_forbidden` | Project access denied (403)                             | Check `ENGRAM_CLOUD_ALLOWED_PROJECTS` on the server                          |
+| `policy_forbidden` | Project access denied (403)                             | Check the server-side `ENGRAM_CLOUD_ALLOWED_PROJECTS` policy for the denied project; a managed principal's project grant may also need checking. The client does not expose allowlist contents. |
 | `internal_error`   | Panic inside the sync cycle                             | Check logs for stack trace                                                   |
 | `upgrade_paused`   | Autosync paused during cloud upgrade (`PhaseDisabled`)  | Call `ResumeAfterUpgrade` or restart                                         |
 
@@ -1530,7 +1563,45 @@ For a step-by-step recovery guide covering `chunk_id does not match payload cont
 
 ---
 
----
+## Scheduled Explicit Cloud Sync Wrappers
+
+The wrappers under `tools/` are an **alternative** to native autosync for hosts where you cannot keep `engram serve` running. For each explicitly named project, they run the native autosync order: export/push (`engram sync --cloud --project <project>`), then import/pull (`engram sync --cloud --import --project <project>`). **Choose ONE mode** -- native autosync (recommended) when a daemon is feasible, OR these wrappers for the no-daemon case. Do **not** run both at once. Cloud `--all` is intentionally unsupported; projects are never inferred from cwd or an env var.
+
+### Bash: `tools/cloud-sync-projects.sh`
+
+```sh
+./tools/cloud-sync-projects.sh my-project my-other-project
+./tools/cloud-sync-projects.sh --log /var/log/engram-cloud-sync.log my-project
+```
+
+Exit `0` if every attempted export, import, and log operation succeeded; `1` if any attempted phase or logging operation failed; `2` on usage error. If export fails, that project's import is skipped, matching native autosync; the wrapper records the export failure and continues with later projects. If import fails, it is recorded and makes the aggregate result nonzero. Default durable log `$ENGRAM_DATA_DIR/cloud-sync-projects.log` (`~/.engram` fallback); override `--log` > `ENGRAM_CLOUD_SYNC_LOG` > default. Per-project, per-phase status lines go to both timestamped console and log; command stdout+stderr stays live on the console and is appended to the log. Nothing retried or silenced.
+
+### PowerShell: `tools/cloud-sync-projects.ps1`
+
+```powershell
+pwsh ./tools/cloud-sync-projects.ps1 my-project my-other-project
+pwsh ./tools/cloud-sync-projects.ps1 -LogPath C:\logs\engram-cloud-sync.log my-project
+```
+
+Requires PowerShell 7 (`pwsh`); 5.1 is not supported. Same export-then-import order, skipped-import behavior after an export failure, exit codes, and log defaults as Bash; override `-LogPath` > `ENGRAM_CLOUD_SYNC_LOG` > default.
+
+Both wrapper files are included in every GoReleaser release archive under `tools/`; copy the one for your scheduler host from the extracted archive.
+
+### Inspecting the last failure
+
+`phase=<export|import> FAILURE project=<name> exit=<n>` records the exact exit code from the failing CLI phase:
+
+```sh
+grep 'phase=.* FAILURE' "${ENGRAM_DATA_DIR:-$HOME/.engram}/cloud-sync-projects.log" | tail -n 5
+```
+
+```powershell
+# PowerShell 7 ($env:ENGRAM_DATA_DIR or $HOME/.engram fallback)
+$d = if ($env:ENGRAM_DATA_DIR) { $env:ENGRAM_DATA_DIR } else { Join-Path $HOME '.engram' }
+Select-String 'phase=.* FAILURE' (Join-Path $d 'cloud-sync-projects.log') | Select-Object -Last 5
+```
+
+Pass the failing project to [Engram Cloud Troubleshooting](docs/engram-cloud/troubleshooting.md) -- the wrappers record and propagate, not interpret or retry.
 
 ## Cloud Sync Audit Log
 

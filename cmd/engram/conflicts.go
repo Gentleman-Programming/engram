@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/internal/llm"
-	"github.com/Gentleman-Programming/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/v2/internal/llm"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
 )
 
 // cmdConflicts is the top-level dispatcher for `engram conflicts <subcommand>`.
@@ -123,10 +123,11 @@ func cmdConflictsList(cfg store.Config) {
 	proj := resolveConflictsProject(s, projectFlag, allProjects)
 
 	opts := store.ListRelationsOptions{
-		Project:   proj,
-		Status:    statusFlag,
-		SinceTime: sinceTime,
-		Limit:     limit,
+		Project:            proj,
+		Status:             statusFlag,
+		SinceTime:          sinceTime,
+		Limit:              limit,
+		ExcludeNotConflict: true,
 	}
 
 	items, err := s.ListRelations(opts)

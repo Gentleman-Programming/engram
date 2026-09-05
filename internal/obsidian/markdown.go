@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Gentleman-Programming/engram/internal/store"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
 )
 
 // ObservationToMarkdown converts a store.Observation into an Obsidian-compatible
@@ -89,7 +89,7 @@ func buildWikilinks(sessionID, topicKey string) []string {
 
 // topicPrefix extracts the prefix from a topic_key.
 // For "auth/jwt" → "auth"
-// For "sdd/obsidian-plugin/explore" → "sdd/obsidian-plugin"
+// For "architecture/obsidian-plugin/explore" → "architecture/obsidian-plugin"
 // For "standalone" → "standalone"
 func topicPrefix(topicKey string) string {
 	idx := strings.LastIndex(topicKey, "/")

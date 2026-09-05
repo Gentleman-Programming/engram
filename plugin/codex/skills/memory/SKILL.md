@@ -14,15 +14,15 @@ Core tools are loaded automatically at session start by the UserPromptSubmit hoo
 They are available immediately — no manual ToolSearch needed.
 
 - `mem_save`, `mem_search`, `mem_context`, `mem_session_summary`
-- `mem_get_observation`, `mem_suggest_topic_key`, `mem_update`
-- `mem_session_start`, `mem_session_end`, `mem_save_prompt`
+- `mem_get_observation`, `mem_save_prompt`, `mem_current_project`, `mem_judge`, `mem_compare`
+
+Deferred tools (use ToolSearch only if needed):
+- `mem_update`, `mem_review`, `mem_pin`, `mem_unpin`, `mem_suggest_topic_key`
+- `mem_session_start`, `mem_session_end`, `mem_doctor`, `mem_capture_passive`
 
 **Fallback**: If tools are unexpectedly unavailable, run `engram setup codex`
 again and restart Codex. Setup repairs the durable MCP config and
 permissions allowlist for the `mcp__engram__...` server ids.
-
-Admin tools (deferred — use ToolSearch only if needed):
-- `mem_stats`, `mem_delete`, `mem_timeline`, `mem_capture_passive`
 
 ## PROACTIVE SAVE TRIGGERS (mandatory — do NOT wait for user to ask)
 
@@ -59,7 +59,7 @@ Call `mem_save` IMMEDIATELY and WITHOUT BEING ASKED after any of these:
 Format for `mem_save`:
 - **title**: Verb + what — short, searchable (e.g. "Fixed N+1 query in UserList", "Chose Zustand over Redux")
 - **type**: bugfix | decision | architecture | discovery | pattern | config | preference
-- **scope**: `project` (default) | `personal`
+- **scope**: `project` (default) | `personal` | `global`
 - **topic_key** (optional but recommended for evolving topics): stable key like `architecture/auth-model`
 - **content**:
   **What**: One sentence — what was done

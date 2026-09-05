@@ -12,13 +12,15 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/Gentleman-Programming/engram/internal/store"
+	projectpkg "github.com/Gentleman-Programming/engram/v2/internal/project"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
 	_ "modernc.org/sqlite"
 )
 
@@ -55,6 +57,42 @@ func TestStartUsesInjectedServe(t *testing.T) {
 	err := s.Start()
 	if err == nil || err.Error() != "serve stopped" {
 		t.Fatalf("expected propagated serve error, got %v", err)
+	}
+}
+
+func TestHealthReportsVersion(t *testing.T) {
+	tests := []struct {
+		name       string
+		setVersion bool
+		version    string
+	}{
+		{name: "defaults to dev", version: "dev"},
+		{name: "reports configured version", setVersion: true, version: "1.16.0"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := New(nil, 0)
+			if tt.setVersion {
+				srv.SetVersion(tt.version)
+			}
+
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected /health 200, got %d", rec.Code)
+			}
+
+			var response struct {
+				Version string `json:"version"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode /health response: %v", err)
+			}
+			if response.Version != tt.version {
+				t.Fatalf("/health version = %q, want %q", response.Version, tt.version)
+			}
+		})
 	}
 }
 
@@ -314,6 +352,111 @@ func TestClaudeSaveNudgeCompatibilityRoutes(t *testing.T) {
 	h.ServeHTTP(missingSessionRec, missingSessionReq)
 	if missingSessionRec.Code != http.StatusNotFound {
 		t.Fatalf("expected missing session 404, got %d", missingSessionRec.Code)
+	}
+}
+
+func TestHandleCreateSessionOwnershipModeContract(t *testing.T) {
+	st := newServerTestStore(t)
+	h := New(st, 0).Handler()
+	for _, tc := range []struct {
+		name       string
+		id         string
+		body       string
+		wantStatus int
+		wantMode   string
+	}{
+		{name: "omitted defaults to shared", id: "mode-omitted", body: `{"id":"mode-omitted","project":"project-a"}`, wantStatus: http.StatusCreated, wantMode: store.SessionOwnershipShared},
+		{name: "explicit shared", id: "mode-shared", body: `{"id":"mode-shared","project":"project-a","ownership_mode":"shared"}`, wantStatus: http.StatusCreated, wantMode: store.SessionOwnershipShared},
+		{name: "explicit project owned", id: "mode-owned", body: `{"id":"mode-owned","project":"project-a","ownership_mode":"project_owned"}`, wantStatus: http.StatusCreated, wantMode: store.SessionOwnershipProjectOwned},
+		{name: "invalid mode", id: "mode-invalid", body: `{"id":"mode-invalid","project":"project-a","ownership_mode":"exclusive"}`, wantStatus: http.StatusBadRequest},
+		{name: "missing project", id: "mode-missing-project", body: `{"id":"mode-missing-project"}`, wantStatus: http.StatusBadRequest},
+		{name: "empty project", id: "mode-empty-project", body: `{"id":"mode-empty-project","project":""}`, wantStatus: http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(tc.body)))
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("POST /sessions = %d, want %d: %s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			var response map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if tc.wantStatus == http.StatusCreated {
+				if response["status"] != "created" {
+					t.Fatalf("success response = %#v", response)
+				}
+				id := response["id"].(string)
+				session, err := st.GetSession(id)
+				if err != nil || session.OwnershipMode != tc.wantMode {
+					t.Fatalf("stored session = %#v, %v; want mode %q", session, err, tc.wantMode)
+				}
+				return
+			}
+			if response["error"] == "" {
+				t.Fatalf("error response = %#v, want error body", response)
+			}
+			if _, err := st.GetSession(tc.id); !errors.Is(err, sql.ErrNoRows) {
+				t.Fatalf("invalid request created session %q: %v", tc.id, err)
+			}
+		})
+	}
+
+	t.Run("storage failure remains internal server error", func(t *testing.T) {
+		brokenStore := newServerTestStore(t)
+		if err := brokenStore.Close(); err != nil {
+			t.Fatalf("close store: %v", err)
+		}
+		rec := httptest.NewRecorder()
+		New(brokenStore, 0).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(`{"id":"mode-storage-error","project":"project-a","ownership_mode":"shared"}`)))
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("POST /sessions with closed store = %d, want 500: %s", rec.Code, rec.Body.String())
+		}
+	})
+}
+
+func TestHandleCreateSessionStoresRuntimeWorktreeDirectory(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "nested", "child")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("create nested directory: %v", err)
+	}
+	if output, err := exec.Command("git", "init", root).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, output)
+	}
+	t.Chdir(root)
+
+	st := newServerTestStore(t)
+	h := New(st, 0).Handler()
+	for _, tc := range []struct {
+		id        string
+		directory string
+	}{
+		{id: "nested-trailing", directory: nested + string(os.PathSeparator)},
+		{id: "nested-relative", directory: filepath.Join("nested", "child")},
+		{id: "omitted-directory"},
+	} {
+		t.Run(tc.id, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			body := fmt.Sprintf(`{"id":%q,"project":"engram"`, tc.id)
+			if tc.directory != "" {
+				body += fmt.Sprintf(`,"directory":%q`, tc.directory)
+			}
+			body += `}`
+			req := httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(body))
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("create session = %d, want 201: %s", rec.Code, rec.Body.String())
+			}
+
+			session, err := st.GetSession(tc.id)
+			if err != nil {
+				t.Fatalf("get session: %v", err)
+			}
+			if want := projectpkg.RuntimeWorktreeDirectory(root); session.Directory != want {
+				t.Fatalf("stored directory = %q, want worktree root %q", session.Directory, want)
+			}
+		})
 	}
 }
 
@@ -836,6 +979,33 @@ func TestHandleSearchNoHitsReturnsEmptyArray(t *testing.T) {
 	}
 	if body := strings.TrimSpace(rec.Body.String()); body != "[]" {
 		t.Fatalf("expected no-hit search body [], got %q", body)
+	}
+}
+
+func TestCollectionHandlersNoResultsReturnEmptyArrays(t *testing.T) {
+	srv := New(newServerTestStore(t), 0)
+
+	for _, tt := range []struct {
+		name string
+		path string
+	}{
+		{name: "recent sessions", path: "/sessions/recent"},
+		{name: "recent observations", path: "/observations/recent"},
+		{name: "observations alias", path: "/observations"},
+		{name: "recent prompts", path: "/prompts/recent"},
+		{name: "search prompts", path: "/prompts/search?q=no-hits"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, tt.path, nil))
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET %s = %d, want 200: %s", tt.path, rec.Code, rec.Body.String())
+			}
+			if body := strings.TrimSpace(rec.Body.String()); body != "[]" {
+				t.Fatalf("GET %s body = %q, want []", tt.path, body)
+			}
+		})
 	}
 }
 
@@ -1953,6 +2123,34 @@ func TestHandleListConflicts_ProjectFilter(t *testing.T) {
 	}
 	if total != 1 {
 		t.Errorf("expected total=1, got %v", total)
+	}
+}
+
+func TestHandleListConflicts_ExcludesNotConflict(t *testing.T) {
+	st, _ := conflictsTestStore(t)
+	srv := New(st, 0)
+	srcSync, tgtSync := seedConflictsSession(t, st, "alpha")
+	rel, err := st.SaveRelation(store.SaveRelationParams{SyncID: "rel-alpha-not-conflict", SourceID: srcSync, TargetID: tgtSync})
+	if err != nil {
+		t.Fatalf("SaveRelation: %v", err)
+	}
+	if _, err := st.JudgeRelation(store.JudgeRelationParams{JudgmentID: rel.SyncID, Relation: store.RelationNotConflict}); err != nil {
+		t.Fatalf("JudgeRelation: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/conflicts?project=alpha", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Total     int   `json:"total"`
+		Relations []any `json:"relations"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Total != 0 || len(response.Relations) != 0 {
+		t.Fatalf("conflicts response included not_conflict: %+v", response)
 	}
 }
 
