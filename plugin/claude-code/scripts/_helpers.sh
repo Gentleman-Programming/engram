@@ -10,7 +10,7 @@ trim_whitespace() {
 }
 
 ENGRAM_PORT="$(trim_whitespace "${ENGRAM_PORT:-}")"
-if [ -z "$ENGRAM_PORT" ]; then
+if [[ ! "$ENGRAM_PORT" =~ ^[+-]?[0-9]+$ ]]; then
   ENGRAM_PORT=7437
 fi
 ENGRAM_SOCKET="$(trim_whitespace "${ENGRAM_SOCKET:-}")"

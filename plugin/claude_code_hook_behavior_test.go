@@ -556,6 +556,7 @@ func TestClaudeHookWhitespacePortFallsBackToDefault(t *testing.T) {
 		want string
 	}{
 		{name: "whitespace port uses default", env: map[string]string{"ENGRAM_PORT": " \t "}, want: "http://127.0.0.1:7437"},
+		{name: "nonnumeric port uses default", env: map[string]string{"ENGRAM_PORT": "invalid"}, want: "http://127.0.0.1:7437"},
 		{name: "non-empty port is trimmed", env: map[string]string{"ENGRAM_PORT": " 8123 "}, want: "http://127.0.0.1:8123"},
 		{name: "socket takes precedence", env: map[string]string{"ENGRAM_PORT": " \t ", "ENGRAM_SOCKET": " /tmp/engram.sock "}, want: "http://localhost"},
 	} {
