@@ -1090,6 +1090,10 @@ Format for `mem_save`:
 - If unsure about the key, call `mem_suggest_topic_key` first and then reuse it
 - Use `mem_update` when you have an exact observation ID to correct
 
+### DELIVERY GUARANTEE
+
+Memory operations are internal bookkeeping, never the user-facing answer. Complete required memory work before composing the completed-task reply; send the complete answer as the final message of the turn with no later tool calls. If memory work fails or needs follow-up, still send the answer.
+
 ### WHEN TO SEARCH MEMORY
 
 When the user asks to recall something — any variation of "remember", "recall", "what did we do", "how did we solve", "recordar", "acordate", or references to past work:

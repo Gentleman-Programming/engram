@@ -15,6 +15,7 @@
 
 <p align="center">
   <a href="docs/INSTALLATION.md">Installation</a> &bull;
+  <a href="docs/RELEASE-POLICY.md">Release Policy</a> &bull;
   <a href="docs/engram-cloud/README.md">Engram Cloud</a> &bull;
   <a href="docs/AGENT-SETUP.md">Agent Setup</a> &bull;
   <a href="docs/CODEBASE-GUIDE.md">Codebase Guide</a> &bull;
@@ -107,7 +108,7 @@ For parameters and the complete, current tool reference, see [the full documenta
 
 ### Install
 
-For supported workflows and the best current reliability, download [v2.0.0-rc.6](https://github.com/Gentleman-Programming/engram/releases/tag/v2.0.0-rc.6). It remains a prerelease, but has undergone more real-world hardening and is considered more stable than v1.20.0 for supported workflows. Verify your download with [checksums.txt](https://github.com/Gentleman-Programming/engram/releases/download/v2.0.0-rc.6/checksums.txt), then follow the [Installation guide](docs/INSTALLATION.md).
+For production use and security support, install the latest stable release from [GitHub Releases](https://github.com/Gentleman-Programming/engram/releases). Release candidates are prerelease validation and feedback builds; choose one only when you accept prerelease risk. See the [Release Policy](docs/RELEASE-POLICY.md) before upgrading.
 
 Homebrew remains on the stable v1.20.0 line:
 
@@ -186,6 +187,7 @@ Navigate with `j`/`k`, use `Enter` to drill in, `c` to copy content to the clipb
 | Doc | Description |
 | --- | --- |
 | [Installation](docs/INSTALLATION.md) | Platform support and all installation methods |
+| [Release Policy](docs/RELEASE-POLICY.md) | Stable, RC, security-support, upgrade, and rollback guidance |
 | [Agent Setup](docs/AGENT-SETUP.md) | Per-agent configuration and compaction resilience |
 | [Intended Usage](docs/intended-usage.md) | The human mental model for using Engram |
 | [Architecture](docs/ARCHITECTURE.md) | Memory model, tool behavior, and project structure |
