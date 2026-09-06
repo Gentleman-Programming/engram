@@ -146,6 +146,7 @@ func TestInstallDeclarativeAgentsRegisterMCPAndInstructions(t *testing.T) {
 				t.Fatalf("read instruction file %s: %v", agent.instrPath(), err)
 			}
 			instr := string(instrRaw)
+			assertGeneratedDeliveryGuarantee(t, instr)
 			if !strings.Contains(instr, "Engram Persistent Memory") {
 				t.Errorf("%s: instruction file missing protocol content", agent.slug)
 			}
@@ -187,6 +188,20 @@ func TestInstallDeclarativeAgentsRegisterMCPAndInstructions(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func assertGeneratedDeliveryGuarantee(t *testing.T, instructions string) {
+	t.Helper()
+	for _, requirement := range []string{
+		"Memory operations are internal bookkeeping, never the user-facing answer.",
+		"Complete required memory work before composing the completed-task reply;",
+		"send the complete answer as the final message of the turn with no later tool calls.",
+		"If memory work fails or needs follow-up, still send the answer.",
+	} {
+		if !strings.Contains(instructions, requirement) {
+			t.Errorf("instruction file missing delivery guarantee: %q", requirement)
+		}
 	}
 }
 
