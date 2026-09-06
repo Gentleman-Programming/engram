@@ -37,7 +37,7 @@ Once the issue is approved:
 
 ### Step 4: Automated PR Checks
 
-Five checks run automatically on every PR:
+Six checks run automatically on every PR:
 
 #### PR Validation
 
@@ -53,10 +53,20 @@ Five checks run automatically on every PR:
 |-------|-------------|
 | **Unit Tests** | `go test ./...` — all tests except those tagged with `//go:build e2e` |
 | **E2E Tests** | `go test -tags e2e ./internal/server/...` — end-to-end integration tests |
+| **Dead-code Ratchet** | `make deadcode-check` — rejects newly unreachable functions |
 
-All five checks must pass before a PR can be merged.
+All six checks must pass before a PR can be merged.
 
 > **Repo admin note:** Set these as required status checks in branch protection rules for `main`: `Unit Tests`, `E2E Tests`, and `PR Validation`.
+
+### Quality Ratchets
+
+Every PR and push to `main` runs `make deadcode-check`. It analyzes all module
+packages with `golang.org/x/tools/cmd/deadcode@v0.30.0` and compares stable
+`file<TAB>symbol` identities with `.deadcode-baseline.txt`. New unreachable
+functions fail CI. Removed entries pass and report that the debt tightened;
+review and deliberately refresh the baseline with `make deadcode-baseline` in
+the same change. Do not update a baseline merely to accept new debt.
 
 ### Performance Ratchet
 

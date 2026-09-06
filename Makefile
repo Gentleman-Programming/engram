@@ -1,4 +1,4 @@
-.PHONY: templ perf-check perf-baseline
+.PHONY: templ perf-check perf-baseline deadcode-check deadcode-baseline
 
 templ:
 	go tool templ generate ./internal/cloud/dashboard/...
@@ -14,3 +14,9 @@ perf-check:
 
 perf-baseline:
 	bash scripts/perf-ratchet.sh --update
+
+deadcode-check:
+	bash scripts/deadcode-ratchet.sh
+
+deadcode-baseline:
+	bash scripts/deadcode-ratchet.sh --update
