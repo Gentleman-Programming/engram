@@ -81,6 +81,29 @@ func TestDeadcodeRatchetRejectsAnalyzerFailure(t *testing.T) {
 	}
 }
 
+func TestDeadcodeRatchetRejectsMalformedAnalyzerOutput(t *testing.T) {
+	shell := perfRatchetShell()
+	if shell == "" {
+		t.Skip("a usable bash installation is required to test the shell ratchet")
+	}
+
+	dir := t.TempDir()
+	baseline := writeRatchetFixture(t, dir, "baseline.txt", "internal/store/store.go\tStore.Save\n")
+	analyzer := writeRatchetFixture(t, dir, "deadcode", "#!/usr/bin/env bash\nprintf '%s\\n' 'unexpected analyzer output'\n")
+	if err := os.Chmod(analyzer, 0o755); err != nil {
+		t.Fatalf("chmod fake analyzer: %v", err)
+	}
+	cmd := exec.Command(shell, "deadcode-ratchet.sh")
+	cmd.Env = append(os.Environ(), "DEADCODE_RATCHET_BASELINE="+baseline, "DEADCODE_RATCHET_ANALYZER="+analyzer)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("deadcode-ratchet unexpectedly passed\n%s", output)
+	}
+	if !strings.Contains(string(output), "deadcode emitted unrecognized output; refusing an incomplete comparison") {
+		t.Fatalf("deadcode-ratchet output = %q, want malformed output refusal", output)
+	}
+}
+
 func TestDeadcodeRatchetNormalizesAnalyzerOutput(t *testing.T) {
 	shell := perfRatchetShell()
 	if shell == "" {
