@@ -3399,6 +3399,29 @@ func TestBuildServerInstructions_CustomAndConditional(t *testing.T) {
 	})
 }
 
+func TestBuildServerInstructions_DeliveryGuaranteeRequiresMemoryWriter(t *testing.T) {
+	for _, tool := range []string{
+		"mem_save", "mem_update", "mem_review", "mem_delete",
+		"mem_save_prompt", "mem_pin", "mem_unpin", "mem_session_summary",
+		"mem_session_start", "mem_session_end", "mem_capture_passive",
+		"mem_merge_projects", "mem_judge", "mem_compare",
+	} {
+		t.Run(tool, func(t *testing.T) {
+			instructions := buildServerInstructions(map[string]bool{tool: true})
+			if !strings.Contains(instructions, "## DELIVERY GUARANTEE") {
+				t.Errorf("expected DELIVERY GUARANTEE when %s is registered", tool)
+			}
+		})
+	}
+
+	t.Run("non-writer", func(t *testing.T) {
+		instructions := buildServerInstructions(map[string]bool{"mem_search": true})
+		if strings.Contains(instructions, "## DELIVERY GUARANTEE") {
+			t.Error("DELIVERY GUARANTEE should be absent when no memory writer is registered")
+		}
+	})
+}
+
 // ─── Tool Annotations ────────────────────────────────────────────────────────
 
 func TestCoreToolsAreNotDeferred(t *testing.T) {

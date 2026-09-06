@@ -214,6 +214,24 @@ var deferredTools = []string{
 	"mem_stats", "mem_delete", "mem_timeline", "mem_merge_projects",
 }
 
+// memoryWritingTools contains every registered tool that can mutate persistent
+// or local memory/session bookkeeping.
+var memoryWritingTools = []string{
+	"mem_save", "mem_update", "mem_review", "mem_delete",
+	"mem_save_prompt", "mem_pin", "mem_unpin", "mem_session_summary",
+	"mem_session_start", "mem_session_end", "mem_capture_passive",
+	"mem_merge_projects", "mem_judge", "mem_compare",
+}
+
+func hasRegisteredMemoryWriter(allowlist map[string]bool) bool {
+	for _, tool := range memoryWritingTools {
+		if shouldRegister(tool, allowlist) {
+			return true
+		}
+	}
+	return false
+}
+
 // buildServerInstructions dynamically generates the instructions for MCP clients
 // based on which tools are allowed/registered.
 func buildServerInstructions(allowlist map[string]bool) string {
@@ -251,7 +269,7 @@ func buildServerInstructions(allowlist map[string]bool) string {
 	if shouldRegister("mem_save", allowlist) {
 		b.WriteString("PROACTIVE SAVE RULE: Call mem_save immediately after ANY decision, bug fix, discovery, or convention — not just when asked.\n\n")
 	}
-	if shouldRegister("mem_save", allowlist) {
+	if hasRegisteredMemoryWriter(allowlist) {
 		b.WriteString("## DELIVERY GUARANTEE\n\n" +
 			"Memory operations are internal bookkeeping, never the user-facing answer. Complete required memory work before composing the completed-task reply; send the complete answer as the final message of the turn with no later tool calls. If memory work fails or needs follow-up, still send the answer.\n\n")
 	}
