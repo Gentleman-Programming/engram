@@ -1,7 +1,7 @@
 .PHONY: templ perf-check perf-baseline deadcode-check deadcode-baseline
 
 templ:
-	go tool templ generate ./internal/cloud/dashboard/...
+	go run github.com/a-h/templ/cmd/templ generate ./internal/cloud/dashboard/...
 
 perf-check:
 	@if [ -n "$(PERF_RATCHET_AGAINST)" ]; then \

@@ -22,6 +22,11 @@ jobs:
         with:
           go-version: "1.25.10"
 
+      - name: Verify generated templ output
+        run: |
+          make templ
+          git diff --exit-code -- internal/cloud/dashboard/*_templ.go
+
       - name: Run dead-code ratchet
         run: make deadcode-check
 
