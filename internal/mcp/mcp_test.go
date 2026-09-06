@@ -3400,6 +3400,22 @@ func TestBuildServerInstructions_CustomAndConditional(t *testing.T) {
 }
 
 func TestBuildServerInstructions_DeliveryGuaranteeRequiresMemoryWriter(t *testing.T) {
+	requiredPhrases := []string{
+		"## DELIVERY GUARANTEE",
+		"Memory operations are internal bookkeeping, never the user-facing answer.",
+		"Complete required memory work before composing the completed-task reply;",
+		"send the complete answer as the final message of the turn with no later tool calls.",
+		"If memory work fails or needs follow-up, still send the answer.",
+	}
+	assertDeliveryGuarantee := func(t *testing.T, instructions, scenario string) {
+		t.Helper()
+		for _, phrase := range requiredPhrases {
+			if !strings.Contains(instructions, phrase) {
+				t.Errorf("expected %q in delivery guarantee for %s", phrase, scenario)
+			}
+		}
+	}
+
 	for _, tool := range []string{
 		"mem_save", "mem_update", "mem_review", "mem_delete",
 		"mem_save_prompt", "mem_pin", "mem_unpin", "mem_session_summary",
@@ -3408,11 +3424,13 @@ func TestBuildServerInstructions_DeliveryGuaranteeRequiresMemoryWriter(t *testin
 	} {
 		t.Run(tool, func(t *testing.T) {
 			instructions := buildServerInstructions(map[string]bool{tool: true})
-			if !strings.Contains(instructions, "## DELIVERY GUARANTEE") {
-				t.Errorf("expected DELIVERY GUARANTEE when %s is registered", tool)
-			}
+			assertDeliveryGuarantee(t, instructions, tool+" allowlist")
 		})
 	}
+
+	t.Run("nil allowlist", func(t *testing.T) {
+		assertDeliveryGuarantee(t, buildServerInstructions(nil), "nil allowlist")
+	})
 
 	t.Run("non-writer", func(t *testing.T) {
 		instructions := buildServerInstructions(map[string]bool{"mem_search": true})
