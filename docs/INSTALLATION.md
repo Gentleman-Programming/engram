@@ -2,6 +2,7 @@
 
 # Installation
 
+- [Choose a release channel before installing](#choose-a-release-channel-before-installing)
 - [Homebrew (macOS / Linux)](#homebrew-macos--linux)
 - [Windows](#windows)
 - [Install from source (macOS / Linux)](#install-from-source-macos--linux)
@@ -9,6 +10,12 @@
 - [Requirements](#requirements)
 - [Environment Variables](#environment-variables)
 - [Windows Config Paths](#windows-config-paths)
+
+---
+
+## Choose a release channel before installing
+
+The latest stable release is the production and security-supported line. Release candidates are prerelease validation and feedback builds, not a universal production recommendation or a guaranteed security-supported channel. See the [Release Policy](./RELEASE-POLICY.md) for channel, upgrade, and rollback guidance.
 
 ---
 
