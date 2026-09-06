@@ -22,6 +22,9 @@ jobs:
         with:
           go-version: "1.25.10"
 
+      - name: Run dead-code ratchet
+        run: make deadcode-check
+
       - name: Run unit tests
         run: go test ./...
 
