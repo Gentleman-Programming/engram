@@ -30,6 +30,7 @@ Reset anytime with the cleanup section at the end.
 - Docker + Docker Compose
 - Go 1.25+ (to build the beta binary — see `go.mod`)
 - For Phase 4 testing: `claude` or `opencode` CLI installed and authenticated (whichever you already use)
+- On Windows: PowerShell 7+ for the PowerShell commands below
 
 ---
 
@@ -38,6 +39,14 @@ Reset anytime with the cleanup section at the end.
 ```bash
 git clone https://github.com/Gentleman-Programming/engram.git engram-beta-repo
 cd engram-beta-repo
+git checkout feat/memory-conflict-surfacing-cloud-sync
+```
+
+**Windows PowerShell 7:**
+
+```powershell
+git clone https://github.com/Gentleman-Programming/engram.git engram-beta-repo
+Set-Location engram-beta-repo
 git checkout feat/memory-conflict-surfacing-cloud-sync
 ```
 
@@ -61,6 +70,14 @@ curl -s http://127.0.0.1:28080/health
 # Expected: {"status":"ok",...}
 ```
 
+**Windows PowerShell 7:**
+
+```powershell
+$health = Invoke-RestMethod -Uri http://127.0.0.1:28080/health
+$health
+# Expected: status is ok
+```
+
 ---
 
 ## 3. Build the beta binary
@@ -69,7 +86,14 @@ curl -s http://127.0.0.1:28080/health
 go build -o ./engram-beta ./cmd/engram
 ```
 
+**Windows PowerShell 7:**
+
+```powershell
+go build -o .\engram-beta.exe .\cmd\engram
+```
+
 A standalone `./engram-beta` in your repo dir. **Does NOT replace your installed `engram`**.
+On Windows, the standalone binary is `.\engram-beta.exe` and likewise does not replace your installed `engram`.
 
 ---
 
@@ -92,6 +116,25 @@ export ENGRAM_CLOUD_TOKEN=beta-token-CHANGE-ME-please-32chars
 ```
 
 Expected: cloud status shows `configured=true`, server matches the beta URL.
+
+**Windows PowerShell 7:**
+
+```powershell
+# Separate absolute data dir — leaves the default Engram data location untouched
+$betaDataDir = Join-Path ([System.IO.Path]::GetTempPath()) 'engram-beta-data'
+New-Item -ItemType Directory -Path $betaDataDir -Force | Out-Null
+$env:ENGRAM_DATA_DIR = $betaDataDir
+
+# Point at the beta cloud for this PowerShell session only
+$env:ENGRAM_CLOUD_SERVER = 'http://127.0.0.1:28080'
+$env:ENGRAM_CLOUD_TOKEN = 'beta-token-CHANGE-ME-please-32chars'
+
+# Verify
+.\engram-beta.exe version
+.\engram-beta.exe cloud status
+```
+
+For the remaining workflow snippets, use `.\engram-beta.exe` in PowerShell wherever the POSIX version shows `./engram-beta`. Keep commands on one line, or replace Bash's trailing `\` continuation with PowerShell's trailing backtick. The POSIX snippets remain unchanged for POSIX shells.
 
 ---
 
@@ -148,6 +191,22 @@ ENGRAM_DATA_DIR="$ENGRAM_DATA_DIR_2" ./engram-beta search "Architecture" --proje
 
 The 2nd "machine" should see the memories synced from the 1st.
 
+**Windows PowerShell 7:**
+
+```powershell
+# Simulate a "second machine" with a separate absolute beta-only data dir
+$betaDataDir2 = Join-Path ([System.IO.Path]::GetTempPath()) 'engram-beta-data-2'
+New-Item -ItemType Directory -Path $betaDataDir2 -Force | Out-Null
+$env:ENGRAM_DATA_DIR_2 = $betaDataDir2
+
+# Scope these commands to the second data dir, then restore the first one
+$env:ENGRAM_DATA_DIR = $env:ENGRAM_DATA_DIR_2
+.\engram-beta.exe cloud enroll beta-test
+.\engram-beta.exe sync --cloud --project beta-test
+.\engram-beta.exe search 'Architecture' --project beta-test
+$env:ENGRAM_DATA_DIR = $betaDataDir
+```
+
 ---
 
 ### 5.3 Phase 3 — admin observability CLI
@@ -177,11 +236,32 @@ The HTTP API works too. The `/conflicts/*` routes live on the **local engram ser
 ./engram-beta serve
 ```
 
+**Windows PowerShell 7 (a second PowerShell window):** Replace `$betaClonePath` with the absolute path of your beta clone. These variables apply only to this PowerShell session.
+
+```powershell
+$betaClonePath = 'C:\replace-with-your-path\engram-beta-repo'
+Set-Location -LiteralPath $betaClonePath
+$betaDataDir = Join-Path ([System.IO.Path]::GetTempPath()) 'engram-beta-data'
+New-Item -ItemType Directory -Path $betaDataDir -Force | Out-Null
+$env:ENGRAM_DATA_DIR = $betaDataDir
+$env:ENGRAM_CLOUD_SERVER = 'http://127.0.0.1:28080'
+$env:ENGRAM_CLOUD_TOKEN = 'beta-token-CHANGE-ME-please-32chars'
+
+.\engram-beta.exe serve
+```
+
 Then query from anywhere:
 
 ```bash
 curl -s "http://127.0.0.1:7437/conflicts?project=beta-test" | jq
 curl -s "http://127.0.0.1:7437/conflicts/stats?project=beta-test" | jq
+```
+
+**Windows PowerShell 7:**
+
+```powershell
+Invoke-RestMethod -Uri 'http://127.0.0.1:7437/conflicts?project=beta-test' | ConvertTo-Json -Depth 10
+Invoke-RestMethod -Uri 'http://127.0.0.1:7437/conflicts/stats?project=beta-test' | ConvertTo-Json -Depth 10
 ```
 
 Note: this is the **client-side serve** (your local API), not the beta cloud. Cloud sync of relations happens in the background per Phase 2.
@@ -198,6 +278,16 @@ export ENGRAM_AGENT_CLI=claude   # or opencode
 
 # Run scan with semantic detection
 ./engram-beta conflicts scan --project beta-test --semantic --apply \
+  --max-semantic 5 --concurrency 3 --yes
+```
+
+**Windows PowerShell 7:**
+
+```powershell
+# Tell engram which agent CLI to use for this PowerShell session
+$env:ENGRAM_AGENT_CLI = 'claude' # or 'opencode'
+
+.\engram-beta.exe conflicts scan --project beta-test --semantic --apply `
   --max-semantic 5 --concurrency 3 --yes
 ```
 
@@ -249,6 +339,18 @@ If you have an agent connected via MCP to this beta engram:
 #   env: { ENGRAM_DATA_DIR: /tmp/engram-beta-data }
 ```
 
+For a Windows agent configuration, use the beta executable and the same absolute beta data directory from step 4. This is a JSON fragment; merge it into the appropriate MCP configuration structure for your agent.
+
+```json
+{
+  "command": "C:\\path\\to\\engram-beta-repo\\engram-beta.exe",
+  "args": ["mcp"],
+  "env": {
+    "ENGRAM_DATA_DIR": "C:\\Users\\<you>\\AppData\\Local\\Temp\\engram-beta-data"
+  }
+}
+```
+
 The agent will see `mem_compare(memory_id_a, memory_id_b, relation, confidence, reasoning, [model])` as a new tool.
 
 ---
@@ -280,6 +382,24 @@ rm -f ./engram-beta
 cd .. && rm -rf engram-beta-repo
 ```
 
+**Windows PowerShell 7:** Run this from the beta clone. It removes only the named beta Compose resources, beta data directories, beta binary, and (optionally) the named beta clone.
+
+```powershell
+# Stop and DESTROY beta cloud + its engram-beta-pg volume
+docker compose -f docker-compose.beta.yml down -v
+
+# Remove only the explicitly named beta data directories and beta binary
+$betaTempRoot = [System.IO.Path]::GetTempPath()
+$betaDataDir = Join-Path $betaTempRoot 'engram-beta-data'
+$betaDataDir2 = Join-Path $betaTempRoot 'engram-beta-data-2'
+Remove-Item -LiteralPath $betaDataDir, $betaDataDir2 -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath (Join-Path (Get-Location) 'engram-beta.exe') -Force -ErrorAction SilentlyContinue
+
+# Optional: move to the clone's parent, then remove only the named beta clone
+Set-Location ..
+Remove-Item -LiteralPath (Join-Path (Get-Location) 'engram-beta-repo') -Recurse -Force
+```
+
 Your production `engram` setup is **fully untouched**. Your prod cloud, your `~/.engram/engram.db`, your `engram` binary — none of those were modified during this test.
 
 ---
@@ -288,12 +408,14 @@ Your production `engram` setup is **fully untouched**. Your prod cloud, your `~/
 
 **`engram-beta cloud status` shows wrong server**
 Check `echo $ENGRAM_CLOUD_SERVER` — must point at `http://127.0.0.1:28080`.
+In PowerShell, check `$env:ENGRAM_CLOUD_SERVER` — it must point at `http://127.0.0.1:28080`.
 
 **`cloud-beta` container exits with auth error**
 The token in `docker-compose.beta.yml` must match `ENGRAM_CLOUD_TOKEN` exported in your shell. Default for both is `beta-token-CHANGE-ME-please-32chars`.
 
 **Phase 4 `--semantic` says "ENGRAM_AGENT_CLI is not set"**
 Export it: `export ENGRAM_AGENT_CLI=claude` (or `opencode`). The CLI must be on your `PATH` and authenticated.
+In PowerShell: `$env:ENGRAM_AGENT_CLI = 'claude'` (or `'opencode'`). The CLI must be on your `PATH` and authenticated.
 
 **Phase 4 prompt times out**
 Default timeout is 60s/call. Increase: `--timeout-per-call 120`. Or reduce concurrency: `--concurrency 2`.
