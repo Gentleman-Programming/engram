@@ -62,3 +62,16 @@ func TestServerInstructionsUsesCandidateJudgmentIDs(t *testing.T) {
 		t.Errorf("serverInstructions must require each candidate's judgment_id and prohibit reusing the top-level judgment_id")
 	}
 }
+
+func TestServerInstructionsDeliveryGuarantee(t *testing.T) {
+	for _, requirement := range []string{
+		"Memory operations are internal bookkeeping, never the user-facing answer.",
+		"Complete required memory work before composing the completed-task reply;",
+		"send the complete answer as the final message of the turn with no later tool calls.",
+		"If memory work fails or needs follow-up, still send the answer.",
+	} {
+		if !strings.Contains(serverInstructions, requirement) {
+			t.Errorf("server instructions missing delivery guarantee: %q", requirement)
+		}
+	}
+}
