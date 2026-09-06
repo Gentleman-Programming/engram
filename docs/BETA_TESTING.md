@@ -42,7 +42,7 @@ cd engram-beta-repo
 git checkout feat/memory-conflict-surfacing-cloud-sync
 ```
 
-**Windows PowerShell 7:**
+**Windows PowerShell 7:** Run this in the dedicated beta-only PowerShell session used for the remaining Windows steps.
 
 ```powershell
 git clone https://github.com/Gentleman-Programming/engram.git engram-beta-repo
@@ -89,7 +89,18 @@ go build -o ./engram-beta ./cmd/engram
 **Windows PowerShell 7:**
 
 ```powershell
-go build -o .\engram-beta.exe .\cmd\engram
+$betaClonePath = (Get-Location).Path
+$betaBinaryPath = Join-Path $betaClonePath 'engram-beta.exe'
+$betaBinaryOwnedByThisRun = $false
+if (Test-Path -LiteralPath $betaBinaryPath -PathType Leaf) {
+  throw "Refusing to overwrite an existing beta binary: $betaBinaryPath"
+}
+
+go build -o $betaBinaryPath .\cmd\engram
+if ($LASTEXITCODE -ne 0) {
+  throw "Failed to build the beta binary."
+}
+$betaBinaryOwnedByThisRun = $true
 ```
 
 A standalone `./engram-beta` in your repo dir. **Does NOT replace your installed `engram`**.
@@ -117,11 +128,10 @@ export ENGRAM_CLOUD_TOKEN=beta-token-CHANGE-ME-please-32chars
 
 Expected: cloud status shows `configured=true`, server matches the beta URL.
 
-**Windows PowerShell 7:** Use a dedicated beta-only PowerShell session. Close it after cleanup so its session-scoped `ENGRAM_*` values cannot affect later normal Engram commands.
+**Windows PowerShell 7:** Continue in the same dedicated beta-only PowerShell session. Close it after cleanup so its session-scoped `ENGRAM_*` values cannot affect later normal Engram commands.
 
 ```powershell
-# Record the absolute beta clone path and create a unique, run-owned data root
-$betaClonePath = (Get-Location).Path
+# Create a unique, run-owned data root
 $betaRunRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("engram-beta-" + [guid]::NewGuid().ToString('N'))
 $betaDataDir = Join-Path $betaRunRoot 'data'
 New-Item -ItemType Directory -Path $betaRunRoot -ErrorAction Stop | Out-Null
@@ -134,11 +144,11 @@ $env:ENGRAM_CLOUD_SERVER = 'http://127.0.0.1:28080'
 $env:ENGRAM_CLOUD_TOKEN = 'beta-token-CHANGE-ME-please-32chars'
 
 # Verify
-.\engram-beta.exe version
-.\engram-beta.exe cloud status
+& $betaBinaryPath version
+& $betaBinaryPath cloud status
 ```
 
-For the remaining workflow snippets, stay in this dedicated beta session and use `.\engram-beta.exe` wherever the POSIX version shows `./engram-beta`. Keep commands on one line, or replace Bash's trailing `\` continuation with PowerShell's trailing backtick. The POSIX snippets remain unchanged for POSIX shells.
+For the remaining workflow snippets, stay in this dedicated beta session and use `& $betaBinaryPath` wherever the POSIX version shows `./engram-beta`. Keep commands on one line, or replace Bash's trailing `\` continuation with PowerShell's trailing backtick. The POSIX snippets remain unchanged for POSIX shells.
 
 ---
 
@@ -205,9 +215,9 @@ New-Item -ItemType Directory -Path $betaDataDir2 -ErrorAction Stop | Out-Null
 # Scope these commands to the second data dir, then restore the first one
 $env:ENGRAM_DATA_DIR = $betaDataDir2
 try {
-  .\engram-beta.exe cloud enroll beta-test
-  .\engram-beta.exe sync --cloud --project beta-test
-  .\engram-beta.exe search 'Architecture' --project beta-test
+  & $betaBinaryPath cloud enroll beta-test
+  & $betaBinaryPath sync --cloud --project beta-test
+  & $betaBinaryPath search 'Architecture' --project beta-test
 } finally {
   $env:ENGRAM_DATA_DIR = $betaDataDir
 }
@@ -242,13 +252,17 @@ The HTTP API works too. The `/conflicts/*` routes live on the **local engram ser
 ./engram-beta serve
 ```
 
-**Windows PowerShell 7 (a second dedicated beta window):** Copy the printed `$betaRunRoot` value from step 4 and replace both placeholders below. This window reconstructs the same beta-only session; it does not create a new data directory.
+**Windows PowerShell 7 (a second dedicated beta window):** Copy the printed `$betaRunRoot` value from step 4 and replace both placeholders below. This window reconstructs the same beta-only session; it does not create a new data directory or own cleanup.
 
 ```powershell
 $betaClonePath = 'C:\replace-with-your-path\engram-beta-repo'
 $betaRunRoot = 'C:\replace-with-the-printed-beta-run-root'
 Set-Location -LiteralPath $betaClonePath
+$betaBinaryPath = Join-Path $betaClonePath 'engram-beta.exe'
 $betaDataDir = Join-Path $betaRunRoot 'data'
+if (-not (Test-Path -LiteralPath $betaBinaryPath -PathType Leaf)) {
+  throw "Beta binary not found: $betaBinaryPath"
+}
 if (-not (Test-Path -LiteralPath $betaDataDir -PathType Container)) {
   throw "Beta data directory not found: $betaDataDir"
 }
@@ -256,7 +270,7 @@ $env:ENGRAM_DATA_DIR = $betaDataDir
 $env:ENGRAM_CLOUD_SERVER = 'http://127.0.0.1:28080'
 $env:ENGRAM_CLOUD_TOKEN = 'beta-token-CHANGE-ME-please-32chars'
 
-.\engram-beta.exe serve
+& $betaBinaryPath serve
 ```
 
 Then query from anywhere:
@@ -296,7 +310,7 @@ export ENGRAM_AGENT_CLI=claude   # or opencode
 # Tell engram which agent CLI to use for this PowerShell session
 $env:ENGRAM_AGENT_CLI = 'claude' # or 'opencode'
 
-.\engram-beta.exe conflicts scan --project beta-test --semantic --apply `
+& $betaBinaryPath conflicts scan --project beta-test --semantic --apply `
   --max-semantic 5 --concurrency 3 --yes
 ```
 
@@ -351,8 +365,10 @@ If you have an agent connected via MCP to this beta engram:
 For a Windows agent configuration, generate a JSON fragment from the current beta session. It uses the exact `$betaDataDir` created in step 4; copy the output into the appropriate MCP configuration structure for your agent.
 
 ```powershell
+# Derive this run's MCP executable path; this configuration does not own cleanup.
+$betaBinaryPath = Join-Path $betaClonePath 'engram-beta.exe'
 $betaMcpConfig = [ordered]@{
-  command = Join-Path $betaClonePath 'engram-beta.exe'
+  command = $betaBinaryPath
   args = @('mcp')
   env = [ordered]@{
     ENGRAM_DATA_DIR = $betaDataDir
@@ -401,11 +417,11 @@ if ($LASTEXITCODE -ne 0) {
   throw "Failed to stop the beta Compose resources."
 }
 
-# Remove only this run's data and its beta binary; deletion failures stop visibly
-$betaBinaryPath = Join-Path $betaClonePath 'engram-beta.exe'
-if (Test-Path -LiteralPath $betaBinaryPath -PathType Leaf) {
+# Delete the binary only when this session built it; otherwise leave it untouched.
+if ($betaBinaryOwnedByThisRun -and (Test-Path -LiteralPath $betaBinaryPath -PathType Leaf)) {
   Remove-Item -LiteralPath $betaBinaryPath -Force -ErrorAction Stop
 }
+# Remove only this run's data; deletion failures stop visibly.
 if (Test-Path -LiteralPath $betaRunRoot -PathType Container) {
   Remove-Item -LiteralPath $betaRunRoot -Recurse -Force -ErrorAction Stop
 }
