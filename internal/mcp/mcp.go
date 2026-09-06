@@ -6,8 +6,8 @@
 //
 // Tool profiles allow agents to load only the tools they need:
 //
-//	engram mcp                    → all 22 tools (default)
-//	engram mcp --tools=agent      → 18 tools agents actually use (per skill files)
+//	engram mcp                    → all 23 tools (default)
+//	engram mcp --tools=agent      → 19 tools agents actually use (per skill files)
 //	engram mcp --tools=admin      → 4 tools for TUI/CLI (delete, stats, timeline, merge)
 //	engram mcp --tools=agent,admin → combine profiles
 //	engram mcp --tools=mem_save,mem_search → individual tool names
@@ -129,6 +129,7 @@ var ProfileAgent = map[string]bool{
 	"mem_save_prompt":       true, // save user prompts
 	"mem_update":            true, // update observation by ID — skills say "use mem_update when you have an exact ID to correct"
 	"mem_current_project":   true, // detect current project — recommended first call for agents (REQ-313)
+	"mem_list_projects":     true, // enumerate all known projects for cross-project discovery (engram#675)
 	"mem_judge":             true, // record verdict on a pending memory conflict (REQ-003, Phase D)
 	"mem_compare":           true, // persist an agent-judged semantic verdict via JudgeBySemantic (REQ-011, Phase G)
 	"mem_doctor":            true, // read-only operational diagnostics for agents
@@ -850,6 +851,21 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 		)
 	}
 
+	// ─── mem_list_projects (profile: agent) ───────────────────────────────
+	if shouldRegister("mem_list_projects", allowlist) {
+		srv.AddTool(
+			mcp.NewTool("mem_list_projects",
+				mcp.WithDescription("List every project known to Engram, with per-project observation/session/prompt counts, ordered by observation count (same view as `engram projects list`). Use for cross-project discovery when the working directory matches no known project: pick the right project, then scope mem_search/mem_context to it. Returns a successful empty list when nothing is stored yet; a store failure returns a tool error."),
+				mcp.WithTitleAnnotation("List Known Projects"),
+				mcp.WithReadOnlyHintAnnotation(true),
+				mcp.WithDestructiveHintAnnotation(false),
+				mcp.WithIdempotentHintAnnotation(true),
+				mcp.WithOpenWorldHintAnnotation(false),
+			),
+			handleListProjects(s),
+		)
+	}
+
 	// ─── mem_doctor (profile: agent, deferred) ──────────────────────────
 	if shouldRegister("mem_doctor", allowlist) {
 		srv.AddTool(
@@ -981,6 +997,30 @@ ERROR: Returns IsError=true if IDs are unknown, relation is invalid, or cross-pr
 }
 
 // ─── Tool Handlers ───────────────────────────────────────────────────────────
+
+// handleListProjects serves mem_list_projects (engram#675): the MCP view of
+// `engram projects list`, backed by the same store query (ListProjectsWithStats)
+// so CLI and MCP never diverge. An empty store is a successful empty listing;
+// a store-query failure is surfaced as a tool error.
+func handleListProjects(s *store.Store) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		projects, err := s.ListProjectsWithStats()
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("List projects failed: %v", err)), nil
+		}
+		if projects == nil {
+			projects = []store.ProjectStats{}
+		}
+		out, err := jsonMarshal(map[string]any{
+			"projects": projects,
+			"count":    len(projects),
+		})
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("List projects failed to encode response: %v", err)), nil
+		}
+		return mcp.NewToolResultText(string(out)), nil
+	}
+}
 
 // handleCurrentProject implements mem_current_project. It NEVER returns an error
 // even on ambiguous cwd — it always returns a success result with whatever
