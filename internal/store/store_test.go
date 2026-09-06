@@ -13367,6 +13367,163 @@ func TestSearchContext_AlreadyCanceled(t *testing.T) {
 	}
 }
 
+func TestFTSQueryLengthLimit(t *testing.T) {
+	s := newTestStore(t)
+	atLimit := strings.Repeat("abc", 21_845) + "a"
+	if got := len(atLimit); got != 65_536 {
+		t.Fatalf("at-limit query length = %d, want 65536", got)
+	}
+	tooLarge := atLimit + "a"
+	if got := len(tooLarge); got != 65_537 {
+		t.Fatalf("oversized query length = %d, want 65537", got)
+	}
+	runeTooLarge := strings.Repeat("é", 32_769)
+	if got := utf8.RuneCountInString(runeTooLarge); got != 32_769 {
+		t.Fatalf("rune-oversized query rune count = %d, want 32769", got)
+	}
+	if got := len(runeTooLarge); got != 65_538 {
+		t.Fatalf("rune-oversized query byte length = %d, want 65538", got)
+	}
+
+	if err := validateFTSQueryLength(atLimit); err != nil {
+		t.Fatalf("query at 65536 bytes: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		run  func(context.Context, string) error
+	}{
+		{
+			name: "search",
+			run: func(_ context.Context, query string) error {
+				_, err := s.Search(query, SearchOptions{Project: "engram", Limit: 10})
+				return err
+			},
+		},
+		{
+			name: "search context",
+			run: func(ctx context.Context, query string) error {
+				_, err := s.SearchContext(ctx, query, SearchOptions{Project: "engram", Limit: 10})
+				return err
+			},
+		},
+		{
+			name: "prompts",
+			run: func(_ context.Context, query string) error {
+				_, err := s.SearchPrompts(query, "engram", 10)
+				return err
+			},
+		},
+	} {
+		t.Run(tc.name+"/65536 bytes", func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			if err := tc.run(ctx, atLimit); err != nil {
+				t.Fatalf("query at 65536 bytes: %v", err)
+			}
+		})
+
+		for _, query := range []struct {
+			name string
+			text string
+			want string
+		}{
+			{
+				name: "65537 bytes",
+				text: tooLarge,
+				want: "fts query too large: got 65537 bytes; maximum is 65536 bytes; shorten the query and retry",
+			},
+			{
+				name: "32769 runes and 65538 bytes",
+				text: runeTooLarge,
+				want: "fts query too large: got 65538 bytes; maximum is 65536 bytes; shorten the query and retry",
+			},
+		} {
+			t.Run(tc.name+"/"+query.name, func(t *testing.T) {
+				if err := tc.run(context.Background(), query.text); err == nil {
+					t.Fatalf("query at %s returned nil error", query.name)
+				} else if !errors.Is(err, ErrFTSQueryTooLarge) {
+					t.Fatalf("oversized query error = %v, want ErrFTSQueryTooLarge", err)
+				} else if got := err.Error(); got != query.want {
+					t.Fatalf("oversized query error = %q, want %q", got, query.want)
+				}
+			})
+		}
+	}
+}
+
+func TestShortTermFTSQueryTermLimit(t *testing.T) {
+	s := newTestStore(t)
+	queryWithTerms := func(count int) string {
+		return strings.TrimSpace(strings.Repeat("x ", count))
+	}
+
+	atLimit := queryWithTerms(768)
+	if got := len(atLimit); got >= maxFTSQueryBytes {
+		t.Fatalf("at-limit short-term query length = %d, want below %d bytes", got, maxFTSQueryBytes)
+	}
+	tooManyTerms := queryWithTerms(769)
+	longTerms := strings.TrimSpace(strings.Repeat("term ", 769))
+	want := "fts query too large: got 769 terms; maximum is 768 terms for short-term search; shorten the query and retry"
+
+	searches := []struct {
+		name string
+		run  func(string) error
+	}{
+		{
+			name: "observations",
+			run: func(query string) error {
+				_, err := s.SearchContext(context.Background(), query, SearchOptions{Project: "engram", Limit: 10})
+				return err
+			},
+		},
+		{
+			name: "prompts",
+			run: func(query string) error {
+				_, err := s.SearchPrompts(query, "engram", 10)
+				return err
+			},
+		},
+	}
+
+	for _, tc := range searches {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.run(atLimit); err != nil {
+				t.Fatalf("query at 768 short terms: %v", err)
+			}
+			if err := tc.run(longTerms); err != nil {
+				t.Fatalf("query with 769 non-short FTS terms: %v", err)
+			}
+			if err := tc.run(tooManyTerms); err == nil {
+				t.Fatal("query at 769 short terms returned nil error")
+			} else if !errors.Is(err, ErrFTSQueryTooLarge) {
+				t.Fatalf("over-term query error = %v, want ErrFTSQueryTooLarge", err)
+			} else if got := err.Error(); got != want {
+				t.Fatalf("over-term query error = %q, want %q", got, want)
+			}
+		})
+	}
+
+	t.Run("mixed short and long terms", func(t *testing.T) {
+		mixedTerms := func(count int) string {
+			return "x " + strings.TrimSpace(strings.Repeat("term ", count-1))
+		}
+
+		for _, tc := range searches {
+			t.Run(tc.name, func(t *testing.T) {
+				if err := tc.run(mixedTerms(768)); err != nil {
+					t.Fatalf("query at 768 mixed terms: %v", err)
+				}
+				if err := tc.run(mixedTerms(769)); err == nil {
+					t.Fatal("query at 769 mixed terms returned nil error")
+				} else if !errors.Is(err, ErrFTSQueryTooLarge) {
+					t.Fatalf("over-term query error = %v, want ErrFTSQueryTooLarge", err)
+				}
+			})
+		}
+	})
+}
+
 func TestFTSQueriesUseFTSFirstCrossJoin(t *testing.T) {
 	searchQuery, _ := buildSearchFTSQuery(`"memory"`, SearchOptions{}, 10)
 	for _, tc := range []struct {

@@ -40,6 +40,16 @@ import (
 const sqliteConstraintForeignKey = 787
 
 const (
+	maxFTSQueryBytes = 65_536
+
+	// maxFTSShortTermQueryTerms keeps LIKE fallbacks below empirically observed
+	// SQLite failures. Filtered SearchContext first failed at 990 terms, while
+	// SearchPrompts first failed at 997 terms. The cap of 768 leaves at least
+	// 221 terms of headroom below the observed worst path.
+	maxFTSShortTermQueryTerms = 768
+)
+
+const (
 	sqlitePrimaryBusy   = 5
 	sqlitePrimaryLocked = 6
 )
@@ -72,6 +82,7 @@ var (
 	ErrObservationTitleRequired    = errors.New("observation title is required")
 	ErrObservationContentRequired  = errors.New("observation content is required")
 	ErrPromptContentRequired       = errors.New("prompt content is required")
+	ErrFTSQueryTooLarge            = errors.New("fts query too large")
 )
 
 // Sentinel errors for relation sync apply path (Phase 2).
@@ -3461,6 +3472,9 @@ func (s *Store) compactionPrompts(sessionID, project string, limit int) ([]Promp
 }
 
 func (s *Store) SearchPrompts(query string, project string, limit int) ([]Prompt, error) {
+	if err := validateFTSQueryLength(query); err != nil {
+		return nil, err
+	}
 	if limit <= 0 {
 		limit = 10
 	}
@@ -3468,6 +3482,9 @@ func (s *Store) SearchPrompts(query string, project string, limit int) ([]Prompt
 	var sql string
 	var args []any
 	if hasShortFTSTerm(query) {
+		if err := validateShortTermFTSQuery(query); err != nil {
+			return nil, err
+		}
 		sql, args = buildPromptLIKEQuery(query, project, limit)
 	} else {
 		sql, args = buildSearchPromptsFTSQuery(sanitizeFTS(query), project, limit)
@@ -3908,6 +3925,10 @@ func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOpti
 		return nil, fmt.Errorf("invalid match_mode %q: must be \"all\" or \"any\"", opts.MatchMode)
 	}
 
+	if err := validateFTSQueryLength(query); err != nil {
+		return nil, err
+	}
+
 	// Normalize project filter so "Engram" finds records stored as "engram"
 	opts.Project, _ = NormalizeProject(opts.Project)
 
@@ -3979,6 +4000,9 @@ func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOpti
 	var sqlQ string
 	var args []any
 	if hasShortFTSTerm(query) {
+		if err := validateShortTermFTSQuery(query); err != nil {
+			return nil, err
+		}
 		sqlQ, args = buildSearchLIKEQuery(query, opts, limit)
 	} else {
 		// Build FTS5 query: "all" (default) uses AND semantics; "any" uses OR for broader recall.
@@ -9363,6 +9387,20 @@ func stripPrivateTags(s string) string {
 	// Clean up multiple consecutive [REDACTED] and excessive whitespace
 	result = strings.TrimSpace(result)
 	return result
+}
+
+func validateFTSQueryLength(query string) error {
+	if len(query) > maxFTSQueryBytes {
+		return fmt.Errorf("%w: got %d bytes; maximum is %d bytes; shorten the query and retry", ErrFTSQueryTooLarge, len(query), maxFTSQueryBytes)
+	}
+	return nil
+}
+
+func validateShortTermFTSQuery(query string) error {
+	if terms := len(searchTerms(query)); terms > maxFTSShortTermQueryTerms {
+		return fmt.Errorf("%w: got %d terms; maximum is %d terms for short-term search; shorten the query and retry", ErrFTSQueryTooLarge, terms, maxFTSShortTermQueryTerms)
+	}
+	return nil
 }
 
 // sanitizeFTS wraps each word in quotes so FTS5 doesn't choke on special chars.
