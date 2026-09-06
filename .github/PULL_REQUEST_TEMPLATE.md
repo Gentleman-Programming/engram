@@ -4,7 +4,7 @@
   Every PR must:
   1. Link an approved issue (with status:approved label)
   2. Have exactly one type:* label
-  3. Pass all 5 automated checks
+  3. Pass all required automated checks
   
   See CONTRIBUTING.md for the full workflow.
 -->
@@ -53,6 +53,7 @@ Closes #
 
 - [ ] Unit tests pass locally: `go test ./...`
 - [ ] E2E tests pass locally: `go test -tags e2e ./internal/server/...`
+- [ ] Lint passes locally: `make lint`
 - [ ] Manually tested the affected functionality
 
 <!-- Describe any manual testing steps: -->
@@ -71,6 +72,7 @@ These run automatically and **all must pass** before merge:
 | **Unit Tests** | `go test ./...` passes | ⏳ |
 | **E2E Tests** | `go test -tags e2e ./internal/server/...` passes | ⏳ |
 | **Plugin Tests** | `npm test` passes in `plugin/pi` | ⏳ |
+| **Lint** | golangci-lint reports no new findings | ⏳ |
 
 ---
 
@@ -80,6 +82,7 @@ These run automatically and **all must pass** before merge:
 - [ ] I added exactly **one** `type:*` label to this PR
 - [ ] I ran unit tests locally: `go test ./...`
 - [ ] I ran e2e tests locally: `go test -tags e2e ./internal/server/...`
+- [ ] I ran lint locally: `make lint`
 - [ ] Docs updated (if behavior changed)
 - [ ] Commits follow [conventional commits](https://www.conventionalcommits.org/) format
 - [ ] No `Co-Authored-By` trailers in commits
