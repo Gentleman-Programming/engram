@@ -190,6 +190,8 @@ docker compose restart cloud
 If you upgrade the `engram` image tag, redeploy or restart the container so the
 running server picks up the new binary.
 
+Before exposing this deployment to users, complete the [Production Checklist](./production-checklist.md). The Compose example is a starting point, not a complete production platform.
+
 ### Client-side token setup
 
 On the machine that runs the Engram CLI, set the client token in the shell before
