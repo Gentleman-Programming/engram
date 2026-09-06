@@ -55,3 +55,9 @@ After compaction:
 1. Save summary first.
 2. Recover context.
 3. Continue work.
+
+---
+
+## Delivery Guarantee
+
+Memory operations are internal bookkeeping, never the user-facing answer. Complete required memory work before composing the completed-task reply; send the complete answer as the final message of the turn with no later tool calls. If memory work fails or needs follow-up, still send the answer.

@@ -251,6 +251,10 @@ func buildServerInstructions(allowlist map[string]bool) string {
 	if shouldRegister("mem_save", allowlist) {
 		b.WriteString("PROACTIVE SAVE RULE: Call mem_save immediately after ANY decision, bug fix, discovery, or convention — not just when asked.\n\n")
 	}
+	if shouldRegister("mem_save", allowlist) {
+		b.WriteString("## DELIVERY GUARANTEE\n\n" +
+			"Memory operations are internal bookkeeping, never the user-facing answer. Complete required memory work before composing the completed-task reply; send the complete answer as the final message of the turn with no later tool calls. If memory work fails or needs follow-up, still send the answer.\n\n")
+	}
 
 	if shouldRegister("mem_save", allowlist) && shouldRegister("mem_judge", allowlist) {
 		b.WriteString("## CONFLICT SURFACING\n\n" +

@@ -95,6 +95,11 @@ func TestOpenCodeEmbeddedAssetMatchesCanonicalSource(t *testing.T) {
 	if string(embedded) != string(canonical) {
 		t.Fatalf("embedded OpenCode plugin differs from canonical source; run go generate ./internal/setup")
 	}
+	for _, requirement := range deliveryGuaranteeRequirements() {
+		if !strings.Contains(string(canonical), requirement) {
+			t.Errorf("canonical OpenCode plugin missing delivery guarantee: %q", requirement)
+		}
+	}
 }
 
 func TestClaudeCodePluginDoesNotShipMCPManifest(t *testing.T) {
