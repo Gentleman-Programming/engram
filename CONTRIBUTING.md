@@ -52,9 +52,8 @@ Required checks run automatically on every PR:
 | Check | What it runs |
 |-------|-------------|
 | **Lint** | golangci-lint reports no new findings in Go changes |
-| **Unit Tests** | `go test ./...` — all tests except those tagged with `//go:build e2e` |
+| **Unit Tests** | `go test ./...` — all tests except those tagged with `//go:build e2e`; runs `make deadcode-check` to reject newly unreachable functions |
 | **E2E Tests** | `go test -tags e2e ./internal/server/...` — end-to-end integration tests |
-| **Dead-code Ratchet** | `make deadcode-check` — rejects newly unreachable functions |
 
 All required checks must pass before a PR can be merged.
 
@@ -98,8 +97,8 @@ linters. It reports only findings introduced by the pull request or the pushed
 main revision, so existing debt does not block adoption while new debt fails
 the check. Install golangci-lint v2.13.2 locally and run `make lint` before
 pushing; the target requires that exact version on `PATH` and fails before
-linting if it is missing or different. It reports findings in uncommitted
-changes, or in `HEAD~` when the tree is clean.
+linting if it is missing or different. It reports findings in staged, unstaged,
+untracked, and latest committed changes compared with `HEAD~`.
 
 ---
 

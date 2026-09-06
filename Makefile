@@ -18,7 +18,7 @@ lint:
 		echo "golangci-lint v$(GOLANGCI_LINT_VERSION) is required; found '$$version'."; \
 		exit 1; \
 	fi; \
-	golangci-lint run --new
+	golangci-lint run --new-from-rev=HEAD~
 
 perf-check:
 	@if [ -n "$(PERF_RATCHET_AGAINST)" ]; then \
