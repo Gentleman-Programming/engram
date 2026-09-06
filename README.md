@@ -107,11 +107,15 @@ For parameters and the complete, current tool reference, see [the full documenta
 
 ### Install
 
+For supported workflows and the best current reliability, download [v2.0.0-rc.6](https://github.com/Gentleman-Programming/engram/releases/tag/v2.0.0-rc.6). It remains a prerelease, but has undergone more real-world hardening and is considered more stable than v1.20.0 for supported workflows. Verify your download with [checksums.txt](https://github.com/Gentleman-Programming/engram/releases/download/v2.0.0-rc.6/checksums.txt), then follow the [Installation guide](docs/INSTALLATION.md).
+
+Homebrew remains on the stable v1.20.0 line:
+
 ```bash
 brew install gentleman-programming/tap/engram
 ```
 
-For Windows, Linux, source builds, and downloads, see [Installation](docs/INSTALLATION.md).
+For Windows, Linux, source builds, and all installation methods, see [Installation](docs/INSTALLATION.md).
 
 ### Set up your agent
 
