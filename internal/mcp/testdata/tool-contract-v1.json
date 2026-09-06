@@ -48,7 +48,11 @@
     "mem_get_observation": {
       "type": ["object"],
       "properties": {
-        "id": {"type":["number"],"additionalProperties":true}
+        "context": {"type":["number"],"additionalProperties":true},
+        "find": {"type":["string"],"additionalProperties":true},
+        "id": {"type":["number"],"additionalProperties":true},
+        "limit": {"type":["number"],"additionalProperties":true},
+        "offset": {"type":["number"],"additionalProperties":true}
       },
       "required": ["id"],
       "additionalProperties": true},

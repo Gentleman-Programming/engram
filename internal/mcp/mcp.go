@@ -18,8 +18,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -679,7 +681,7 @@ Examples:
 	if shouldRegister("mem_get_observation", allowlist) {
 		srv.AddTool(
 			mcp.NewTool("mem_get_observation",
-				mcp.WithDescription("Get the full content of a specific observation by ID. Use when you need the complete, untruncated content of an observation found via mem_search or mem_timeline."),
+				mcp.WithDescription("Get the content of a specific observation by ID. Omit partial-read params for the full untruncated body. Use offset/limit for a rune-ranged slice, or find/context for merged windows around literal occurrences. The find header reports occurrences, not window count. Optional numeric inputs must be safe integers; negative values are rejected. The two groups are mutually exclusive."),
 				mcp.WithTitleAnnotation("Get Observation"),
 				mcp.WithReadOnlyHintAnnotation(true),
 				mcp.WithDestructiveHintAnnotation(false),
@@ -688,6 +690,18 @@ Examples:
 				mcp.WithNumber("id",
 					mcp.Required(),
 					mcp.Description("The observation ID to retrieve"),
+				),
+				mcp.WithNumber("offset",
+					mcp.Description("Safe-integer rune offset for a ranged read. Negative values are rejected. Mutually exclusive with find/context. Omit with no other partial-read params to return the full body."),
+				),
+				mcp.WithNumber("limit",
+					mcp.Description("Safe-integer rune length for a ranged read (default 2000). Negative values are rejected. Limit without offset starts at offset 0. Mutually exclusive with find/context."),
+				),
+				mcp.WithString("find",
+					mcp.Description("Literal substring to locate inside the observation. Returns merged windows around overlapping or adjacent contexts; the header reports literal occurrences. Mutually exclusive with offset/limit."),
+				),
+				mcp.WithNumber("context",
+					mcp.Description("Safe-integer rune padding on each side of every find match (default 600). Negative values are rejected. Overlapping or adjacent contexts merge; the header reports literal occurrences. Requires find."),
 				),
 			),
 			handleGetObservation(s, cfg, activity),
@@ -1931,10 +1945,19 @@ func handleGetObservation(s *store.Store, cfg MCPConfig, activities ...*SessionA
 		if id == 0 {
 			return mcp.NewToolResultError("id is required"), nil
 		}
+		readReq, requestErr := observationReadRequest(req)
+		if requestErr != nil {
+			return mcp.NewToolResultError(requestErr.Error()), nil
+		}
 
 		obs, err := s.GetObservation(id)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Observation #%d not found", id)), nil
+		}
+
+		read, readErr := store.ResolveObservationRead(obs.Content, readReq)
+		if readErr != nil {
+			return mcp.NewToolResultError(readErr.Error()), nil
 		}
 
 		// Resolve project from process override/cwd (REQ-310, REQ-314). No per-call
@@ -1956,19 +1979,103 @@ func handleGetObservation(s *store.Store, cfg MCPConfig, activities ...*SessionA
 		}
 		duplicateMeta := fmt.Sprintf("\nDuplicates: %d", obs.DuplicateCount)
 		revisionMeta := fmt.Sprintf("\nRevisions: %d", obs.RevisionCount)
-
-		result := fmt.Sprintf("#%d [%s] %s\n%s\nSession: %s%s%s\nCreated: %s",
-			obs.ID, obs.Type, obs.Title,
-			obs.Content,
+		meta := fmt.Sprintf("Session: %s%s%s\nCreated: %s",
 			obs.SessionID, obsProject+scope+topic, toolName+duplicateMeta+revisionMeta,
 			timeutil.FormatLocal(obs.CreatedAt),
 		)
+
+		result := formatGetObservationResult(obs, read, meta)
 
 		if detErr != nil {
 			return readProjectErrorResult(activity, detRes, detErr), nil
 		}
 		return respondWithProject(detRes, result, nil), nil
 	}
+}
+
+func observationReadRequest(req mcp.CallToolRequest) (store.ObservationReadRequest, error) {
+	args := req.GetArguments()
+	out := store.ObservationReadRequest{}
+	var err error
+	if out.Offset, err = optionalSafeIntArgument(args, "offset"); err != nil {
+		return store.ObservationReadRequest{}, err
+	}
+	if out.Limit, err = optionalSafeIntArgument(args, "limit"); err != nil {
+		return store.ObservationReadRequest{}, err
+	}
+	if v, ok := args["find"].(string); ok {
+		out.Find = &v
+	}
+	if out.Context, err = optionalSafeIntArgument(args, "context"); err != nil {
+		return store.ObservationReadRequest{}, err
+	}
+	return out, nil
+}
+
+func optionalSafeIntArgument(args map[string]any, name string) (*int, error) {
+	raw, present := args[name]
+	if !present {
+		return nil, nil
+	}
+	v, ok := raw.(float64)
+	if !ok {
+		return nil, fmt.Errorf("%s must be a safe integer", name)
+	}
+	const maxSafeMCPInteger = (1 << 53) - 1
+	maxInt := int(^uint(0) >> 1)
+	minInt := -maxInt - 1
+	if math.IsNaN(v) || math.IsInf(v, 0) || math.Trunc(v) != v || v < -maxSafeMCPInteger || v > maxSafeMCPInteger || v < float64(minInt) || v > float64(maxInt) {
+		return nil, fmt.Errorf("%s must be a safe integer", name)
+	}
+	n := int(v)
+	return &n, nil
+}
+
+func formatGetObservationResult(obs *store.Observation, read store.ObservationReadResult, meta string) string {
+	if read.Mode == store.ObservationReadFull {
+		return fmt.Sprintf("#%d [%s] %s\n%s\n%s",
+			obs.ID, obs.Type, obs.Title, read.Content, meta)
+	}
+
+	header := fmt.Sprintf("#%d %q — %s", obs.ID, obs.Title, formatRuneCount(read.TotalRunes))
+	var b strings.Builder
+	if read.Mode == store.ObservationReadFind {
+		fmt.Fprintf(&b, "%s, %d matches for %q\n", header, read.MatchCount, read.Find)
+		for _, w := range read.Windows {
+			fmt.Fprintf(&b, "\n[offset %s]\n%s\n", formatIntWithComma(w.Offset), w.Content)
+		}
+	} else {
+		fmt.Fprintf(&b, "%s\n\n[offset %s, limit %s]\n%s\n",
+			header, formatIntWithComma(read.Offset), formatIntWithComma(read.Limit), read.Content)
+	}
+	b.WriteString("\n")
+	b.WriteString(meta)
+	return b.String()
+}
+
+func formatRuneCount(n int) string {
+	return formatIntWithComma(n) + " runes total"
+}
+
+func formatIntWithComma(n int) string {
+	if n < 0 {
+		return "-" + formatIntWithComma(-n)
+	}
+	s := strconv.Itoa(n)
+	if len(s) <= 3 {
+		return s
+	}
+	pre := len(s) % 3
+	if pre == 0 {
+		pre = 3
+	}
+	var b strings.Builder
+	b.WriteString(s[:pre])
+	for i := pre; i < len(s); i += 3 {
+		b.WriteByte(',')
+		b.WriteString(s[i : i+3])
+	}
+	return b.String()
 }
 
 // handleSessionSummary returns a tool handler function that saves a comprehensive

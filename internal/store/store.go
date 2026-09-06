@@ -71,6 +71,11 @@ var (
 	ErrObservationProjectImmutable = errors.New("observation project cannot be reassigned")
 	ErrObservationTitleRequired    = errors.New("observation title is required")
 	ErrObservationContentRequired  = errors.New("observation content is required")
+	ErrPartialReadModesExclusive   = errors.New("offset/limit and find/context are mutually exclusive")
+	ErrContextRequiresFind         = errors.New("context requires find")
+	ErrPartialReadOffsetNegative   = errors.New("offset must be >= 0")
+	ErrPartialReadLimitNegative    = errors.New("limit must be >= 0")
+	ErrPartialReadContextNegative  = errors.New("context must be >= 0")
 	ErrPromptContentRequired       = errors.New("prompt content is required")
 )
 
