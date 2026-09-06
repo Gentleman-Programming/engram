@@ -22,6 +22,9 @@ jobs:
         with:
           go-version: "1.25.10"
 
+      - name: Verify module metadata is tidy
+        run: go mod tidy -diff
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
         with:
