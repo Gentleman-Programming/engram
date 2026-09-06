@@ -36,25 +36,39 @@ normalize() {
 		return 1
 	fi
 	sed -nE 's#^(.+):[0-9]+:[0-9]+: unreachable func: (.+)$#\1\t\2#p' "${raw}" |
-		tr '\\' '/' | sort -u >"${output}"
+		tr '\134' '/' | sort -u >"${output}"
+}
+
+normalize_eol() {
+	sed 's/\r$//' "$1" >"$2"
 }
 
 compare() {
 	local old="$1"
 	local new="$2"
-	local additions removals result=0
+	local old_normalized new_normalized additions removals result=0
 	if [[ ! -f "${old}" ]]; then
 		printf 'missing %s; run scripts/deadcode-ratchet.sh --update deliberately\n' "${old}" >&2
 		return 1
 	fi
-	if ! sort -cu "${old}"; then
+	old_normalized="$(mktemp)"
+	new_normalized="$(mktemp)"
+	normalize_eol "${old}" "${old_normalized}"
+	normalize_eol "${new}" "${new_normalized}"
+	if ! sort -cu "${old_normalized}"; then
 		printf '%s must contain sorted, unique file<TAB>symbol identities\n' "${old}" >&2
+		rm -f "${old_normalized}" "${new_normalized}"
+		return 1
+	fi
+	if ! sort -cu "${new_normalized}"; then
+		printf '%s must contain sorted, unique file<TAB>symbol identities\n' "${new}" >&2
+		rm -f "${old_normalized}" "${new_normalized}"
 		return 1
 	fi
 	additions="$(mktemp)"
 	removals="$(mktemp)"
-	comm -13 "${old}" "${new}" >"${additions}"
-	comm -23 "${old}" "${new}" >"${removals}"
+	comm -13 "${old_normalized}" "${new_normalized}" >"${additions}"
+	comm -23 "${old_normalized}" "${new_normalized}" >"${removals}"
 	if [[ -s "${additions}" ]]; then
 		printf 'NEW UNREACHABLE FUNCTIONS (update reachability or review a baseline change):\n' >&2
 		cat "${additions}" >&2
@@ -65,7 +79,7 @@ compare() {
 	if [[ "${result}" -eq 0 ]]; then
 		printf 'no newly unreachable functions\n'
 	fi
-	rm -f "${additions}" "${removals}"
+	rm -f "${old_normalized}" "${new_normalized}" "${additions}" "${removals}"
 	return "${result}"
 }
 

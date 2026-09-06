@@ -24,6 +24,12 @@ func TestDeadcodeRatchetCompare(t *testing.T) {
 			wantOutput: "no newly unreachable functions",
 		},
 		{
+			name:       "accepts CRLF baseline",
+			baseline:   "internal/store/store.go\tStore.Save\r\n",
+			candidate:  "internal/store/store.go\tStore.Save\n",
+			wantOutput: "no newly unreachable functions",
+		},
+		{
 			name:       "rejects newly unreachable function",
 			baseline:   "internal/store/store.go\tStore.Save\n",
 			candidate:  "internal/store/store.go\tStore.Delete\ninternal/store/store.go\tStore.Save\n",
