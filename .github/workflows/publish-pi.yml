@@ -30,6 +30,10 @@ jobs:
           fi
           echo "Active npm: $(npm --version)"
 
+      - name: Run Pi plugin tests
+        working-directory: plugin/pi
+        run: npm test
+
       - name: Publish to npm with provenance
         working-directory: plugin/pi
         run: npm publish --provenance --access public
