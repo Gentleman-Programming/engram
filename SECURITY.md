@@ -2,12 +2,13 @@
 
 ## Supported Versions
 
-Only the latest stable release receives security fixes.
+Only the latest stable release receives security fixes. Release candidates are not guaranteed security support, and older releases do not receive security fixes. See the [Release Policy](./docs/RELEASE-POLICY.md) for release-channel guidance.
 
 | Version | Supported |
 |---------|-----------|
-| latest  | ✅        |
-| older   | ❌        |
+| Latest stable | ✅ |
+| Release candidate (RC) | Not guaranteed |
+| Older release | ❌ |
 
 ## Reporting a Vulnerability
 
