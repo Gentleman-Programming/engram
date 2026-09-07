@@ -126,6 +126,7 @@
         "match_mode": {"type":["string"],"additionalProperties":true},
         "project": {"type":["string"],"additionalProperties":true},
         "query": {"type":["string"],"additionalProperties":true},
+        "response_format": {"type":["string"],"additionalProperties":true},
         "scope": {"type":["string"],"additionalProperties":true},
         "type": {"type":["string"],"additionalProperties":true}
       },
