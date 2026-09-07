@@ -37,6 +37,10 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: node test/release-contract.mjs "$RELEASE_TAG"
 
+      - name: Run Pi plugin tests
+        working-directory: plugin/pi
+        run: npm test
+
       - name: Publish to npm with provenance
         working-directory: plugin/pi
         run: npm publish --provenance --access public
