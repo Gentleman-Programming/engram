@@ -3972,7 +3972,7 @@ func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOpti
 
 		tkRows, err := s.db.QueryContext(ctx, tkSQL, tkArgs...)
 		if err == nil {
-			defer tkRows.Close()
+			defer func() { _ = tkRows.Close() }()
 			for tkRows.Next() {
 				if err := ctx.Err(); err != nil {
 					return nil, err
@@ -4023,7 +4023,7 @@ func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOpti
 		}
 		return nil, fmt.Errorf("search: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	seen := make(map[int64]bool)
 	for _, dr := range directResults {
