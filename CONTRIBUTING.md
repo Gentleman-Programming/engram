@@ -37,7 +37,7 @@ Once the issue is approved:
 
 ### Step 4: Automated PR Checks
 
-Six checks run automatically on every PR:
+Required checks run automatically on every PR:
 
 #### PR Validation
 
@@ -51,13 +51,13 @@ Six checks run automatically on every PR:
 
 | Check | What it runs |
 |-------|-------------|
-| **Unit Tests** | `go test ./...` — all tests except those tagged with `//go:build e2e` |
+| **Lint** | golangci-lint reports no new findings in Go changes |
+| **Unit Tests** | `go test ./...` — all tests except those tagged with `//go:build e2e`; runs `make deadcode-check` to reject newly unreachable functions |
 | **E2E Tests** | `go test -tags e2e ./internal/server/...` — end-to-end integration tests |
-| **Dead-code Ratchet** | `make deadcode-check` — rejects newly unreachable functions |
 
-All six checks must pass before a PR can be merged.
+All required checks must pass before a PR can be merged.
 
-> **Repo admin note:** Set these as required status checks in branch protection rules for `main`: `Unit Tests`, `E2E Tests`, and `PR Validation`.
+> **Repo admin note:** Set these as required status checks in branch protection rules for `main`: `Lint`, `Unit Tests`, `E2E Tests`, `Plugin Tests`, and `PR Validation`.
 
 ### Quality Ratchets
 
@@ -89,6 +89,16 @@ mode. It verifies that the candidate benchmark names exactly match the versioned
 baseline, then deliberately skips a cross-host timing comparison. Later pushes
 must pair every benchmark from both revisions; an empty, renamed, partial, or
 configuration-split comparison fails.
+
+### Lint Ratchet
+
+CI runs golangci-lint v2.13.2 with the `errcheck`, `staticcheck`, and `unused`
+linters. It reports only findings introduced by the pull request or the pushed
+main revision, so existing debt does not block adoption while new debt fails
+the check. Install golangci-lint v2.13.2 locally and run `make lint` before
+pushing; the target requires that exact version on `PATH` and fails before
+linting if it is missing or different. It reports findings in staged, unstaged,
+untracked, and latest committed changes compared with `HEAD~`.
 
 ---
 
@@ -139,6 +149,7 @@ configuration-split comparison fails.
 - Ensure all tests pass locally before pushing:
   - Unit: `go test ./...`
   - E2E: `go test -tags e2e ./internal/server/...`
+  - Lint: `make lint` (requires golangci-lint v2.13.2)
 - Update docs in the same PR when behavior changes
 - Do not reference endpoints/scripts that do not exist in code
 - Do not include `Co-Authored-By` trailers in commits

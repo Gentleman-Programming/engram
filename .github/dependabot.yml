@@ -32,3 +32,19 @@ updates:
       prefix: "chore(ci)"
     reviewers:
       - "Gentleman-Programming"
+
+  # Docker image dependencies
+  - package-ecosystem: "docker"
+    directory: "/docker/cloud"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "type:chore"
+    commit-message:
+      prefix: "chore(deps)"
+    reviewers:
+      - "Gentleman-Programming"
