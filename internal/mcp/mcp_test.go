@@ -892,44 +892,75 @@ func TestHandleSaveFallsBackToManualSaveWhenNoActiveSession(t *testing.T) {
 	}
 }
 
-// TestHandleSaveRejectsAmbiguousActiveSessions ensures an omitted session_id
-// never selects one of several active runtime sessions in the same directory.
-func TestHandleSaveRejectsAmbiguousActiveSessions(t *testing.T) {
-	s := newMCPTestStore(t)
+// TestOmittedSessionIDRejectsAmbiguousActiveSessions ensures writes without a
+// session_id never select one of several active runtime sessions in the same directory.
+func TestOmittedSessionIDRejectsAmbiguousActiveSessions(t *testing.T) {
 	originalWorkingDirectory := currentWorkingDirectory
 	currentWorkingDirectory = func() string { return "/work/engram" }
 	t.Cleanup(func() { currentWorkingDirectory = originalWorkingDirectory })
 	runtimeDirectory := runtimeSessionDirectory("/work/engram")
 
-	if err := s.CreateSession("uuid-first", "engram", runtimeDirectory); err != nil {
-		t.Fatalf("create first session: %v", err)
+	tests := []struct {
+		name string
+		call func(*store.Store) (*mcppkg.CallToolResult, error)
+	}{
+		{
+			name: "mem_save",
+			call: func(s *store.Store) (*mcppkg.CallToolResult, error) {
+				return handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+					"title":   "Ambiguous active sessions",
+					"content": "**What**: saved without session_id\n**Why**: ambiguous runtime sessions must fail",
+					"type":    "bugfix",
+					"project": "engram",
+				}}})
+			},
+		},
+		{
+			name: "mem_session_summary",
+			call: func(s *store.Store) (*mcppkg.CallToolResult, error) {
+				return handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+					"content": "## Goal\nAmbiguous runtime sessions must fail",
+					"project": "engram",
+				}}})
+			},
+		},
 	}
-	if err := s.CreateSession("uuid-second", "engram", runtimeDirectory); err != nil {
-		t.Fatalf("create second session: %v", err)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newMCPTestStore(t)
+			for _, id := range []string{"uuid-first", "uuid-second"} {
+				if err := s.CreateSession(id, "engram", runtimeDirectory); err != nil {
+					t.Fatalf("create session %q: %v", id, err)
+				}
+			}
 
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
-	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"title":   "Ambiguous active sessions",
-		"content": "**What**: saved without session_id\n**Why**: ambiguous runtime sessions must fail",
-		"type":    "bugfix",
-		"project": "engram",
-	}}})
-	if err != nil {
-		t.Fatalf("handler error: %v", err)
-	}
-	if !res.IsError {
-		t.Fatal("expected ambiguous omitted session_id to fail")
-	}
-	if got := callResultText(t, res); !strings.Contains(got, "multiple active runtime sessions") {
-		t.Fatalf("expected ambiguity error, got %q", got)
-	}
-	obs, err := s.RecentObservations("engram", "project", 5)
-	if err != nil {
-		t.Fatalf("recent observations: %v", err)
-	}
-	if len(obs) != 0 {
-		t.Fatalf("expected no write after ambiguous session resolution, got %#v", obs)
+			res, err := tt.call(s)
+			if err != nil {
+				t.Fatalf("handler error: %v", err)
+			}
+			if !res.IsError {
+				t.Fatal("expected ambiguous omitted session_id to fail")
+			}
+			got := callResultText(t, res)
+			for _, want := range []string{"multiple active runtime sessions", "provide session_id", "end other active matching sessions"} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("expected actionable ambiguity error containing %q, got %q", want, got)
+				}
+			}
+			for _, id := range []string{"uuid-first", "uuid-second"} {
+				if strings.Contains(got, id) {
+					t.Fatalf("ambiguity error must not expose candidate session ID %q: %q", id, got)
+				}
+			}
+
+			obs, err := s.RecentObservations("engram", "project", 5)
+			if err != nil {
+				t.Fatalf("recent observations: %v", err)
+			}
+			if len(obs) != 0 {
+				t.Fatalf("expected no write attributed to either candidate, got %#v", obs)
+			}
+		})
 	}
 }
 
