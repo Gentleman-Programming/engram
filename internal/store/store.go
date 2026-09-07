@@ -6172,10 +6172,18 @@ func (s *Store) RescueNullProjectOwnership(p ProjectRescueParams) (*ProjectRescu
 			if !plan.stampOwnershipMode[sessionID] {
 				continue
 			}
-			if _, err := s.execHook(tx, rescueSessionQuery.updateOwnershipMode,
-				target, SessionOwnershipProjectOwned, SessionOwnershipShared, sessionID, target, sqlWhitespaceTrimSet,
-			); err != nil {
+			res, err := s.execHook(tx, rescueSessionQuery.updateOwnershipMode,
+				target, target, SessionOwnershipProjectOwned, SessionOwnershipShared, sessionID, sqlWhitespaceTrimSet,
+			)
+			if err != nil {
 				return err
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if n != 1 {
+				return fmt.Errorf("stamp ownership mode for session %q: updated %d rows, want 1", sessionID, n)
 			}
 			result.RescuedSessions++
 		}
@@ -6350,7 +6358,7 @@ var (
 	rescueSessionQuery = rescueRecordQuery{
 		selectProject:       `SELECT project FROM sessions WHERE id = ?`,
 		updateProject:       `UPDATE sessions SET project = ? WHERE id = ? AND ifnull(trim(project), '') = ''`,
-		updateOwnershipMode: `UPDATE sessions SET ownership_mode = CASE WHEN id = 'manual-save-' || ? THEN ? ELSE ? END WHERE id = ? AND project = ? AND ifnull(trim(ownership_mode, ?), '') = ''`,
+		updateOwnershipMode: `UPDATE sessions SET project = ?, ownership_mode = CASE WHEN id = 'manual-save-' || ? THEN ? ELSE ? END WHERE id = ? AND ifnull(trim(ownership_mode, ?), '') = ''`,
 	}
 )
 
@@ -7201,13 +7209,17 @@ func (s *Store) enqueueRescuedProjectMutationsTx(tx *sql.Tx, target string, sess
 	journaled := false
 	for _, id := range sessionIDs {
 		var payload syncSessionPayload
-		err := tx.QueryRow(`SELECT id, project, ifnull(ownership_mode, ''), directory, started_at, ended_at, summary FROM sessions WHERE id = ? AND project = ?`, id, target).
+		err := tx.QueryRow(`SELECT id, ifnull(project, ''), ifnull(ownership_mode, ''), directory, started_at, ended_at, summary FROM sessions WHERE id = ?`, id).
 			Scan(&payload.ID, &payload.Project, &payload.OwnershipMode, &payload.Directory, &payload.StartedAt, &payload.EndedAt, &payload.Summary)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
 		}
 		if err != nil {
 			return false, err
+		}
+		payload.Project, _ = NormalizeProject(strings.TrimSpace(payload.Project))
+		if payload.Project != target {
+			continue
 		}
 		if modeStamped[id] {
 			refreshed, err := s.refreshPendingLocalSessionMutationTx(tx, payload)

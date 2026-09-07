@@ -418,20 +418,23 @@ func TestRescueNullProjectOwnershipRescuesLegacyNullableSessionAndJournalsOnce(t
 	}
 }
 
-func TestRescueNullProjectOwnershipStampsBlankSameProjectOwnershipMode(t *testing.T) {
+func TestRescueNullProjectOwnershipStampsMissingSameProjectOwnershipMode(t *testing.T) {
 	for _, tc := range []struct {
-		name, sessionID, wantMode string
+		name, sessionID, project, wantMode string
+		ownershipMode                      any
 	}{
-		{"manual save session", "manual-save-target", SessionOwnershipProjectOwned},
-		{"shared session", "agent-session", SessionOwnershipShared},
+		{"manual save session", "manual-save-target", "target", SessionOwnershipProjectOwned, ""},
+		{"shared session", "agent-session", "target", SessionOwnershipShared, ""},
+		{"legacy NULL mode", "legacy-null-mode", "target", SessionOwnershipShared, nil},
+		{"padded target project", "padded-target", " target ", SessionOwnershipShared, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newTestStore(t)
 			if err := s.CreateSessionWithOwnershipMode(tc.sessionID, "target", "/tmp", SessionOwnershipShared); err != nil {
 				t.Fatalf("CreateSessionWithOwnershipMode: %v", err)
 			}
-			if _, err := s.DB().Exec(`UPDATE sessions SET ownership_mode = '' WHERE id = ?`, tc.sessionID); err != nil {
-				t.Fatalf("seed blank ownership mode: %v", err)
+			if _, err := s.DB().Exec(`UPDATE sessions SET project = ?, ownership_mode = ? WHERE id = ?`, tc.project, tc.ownershipMode, tc.sessionID); err != nil {
+				t.Fatalf("seed missing ownership mode: %v", err)
 			}
 			if _, err := s.DB().Exec(`UPDATE sync_mutations SET payload = ? WHERE entity = ? AND entity_key = ?`, `{"id":"`+tc.sessionID+`","project":"target"}`, SyncEntitySession, tc.sessionID); err != nil {
 				t.Fatalf("seed stale session mutation: %v", err)
@@ -446,8 +449,8 @@ func TestRescueNullProjectOwnershipStampsBlankSameProjectOwnershipMode(t *testin
 				t.Fatalf("rescue result = %#v, want one complete journaled mode stamp", result)
 			}
 			session, err := s.GetSession(tc.sessionID)
-			if err != nil || session.OwnershipMode != tc.wantMode {
-				t.Fatalf("rescued session = %#v, err=%v, want ownership mode %q", session, err, tc.wantMode)
+			if err != nil || session.Project != "target" || session.OwnershipMode != tc.wantMode {
+				t.Fatalf("rescued session = %#v, err=%v, want canonical target project and ownership mode %q", session, err, tc.wantMode)
 			}
 			var rawPayload string
 			if err := s.DB().QueryRow(`SELECT payload FROM sync_mutations WHERE entity = ? AND entity_key = ? AND acked_at IS NULL`, SyncEntitySession, tc.sessionID).Scan(&rawPayload); err != nil {
@@ -457,8 +460,8 @@ func TestRescueNullProjectOwnershipStampsBlankSameProjectOwnershipMode(t *testin
 			if err := json.Unmarshal([]byte(rawPayload), &payload); err != nil {
 				t.Fatalf("decode session mutation payload: %v", err)
 			}
-			if payload.OwnershipMode != tc.wantMode {
-				t.Fatalf("session mutation ownership mode = %q, want %q", payload.OwnershipMode, tc.wantMode)
+			if payload.Project != "target" || payload.OwnershipMode != tc.wantMode {
+				t.Fatalf("session mutation payload = %#v, want canonical target project and ownership mode %q", payload, tc.wantMode)
 			}
 
 			again, err := s.RescueNullProjectOwnership(params)
