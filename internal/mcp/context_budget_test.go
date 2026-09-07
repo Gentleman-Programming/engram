@@ -448,8 +448,8 @@ func TestMemContextBudgetNoMemoryMessageBounded(t *testing.T) {
 		if !utf8.ValidString(got) {
 			t.Fatalf("max_bytes=1 no-memory result is not valid UTF-8")
 		}
-		if !strings.HasPrefix("No previous session memories found.", got) {
-			t.Fatalf("max_bytes=1 no-memory result = %q, want a prefix of the message", got)
+		if got != "N" {
+			t.Fatalf("max_bytes=1 no-memory result = %q, want the exact one-byte prefix %q", got, "N")
 		}
 	})
 }
