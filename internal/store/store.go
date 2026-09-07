@@ -143,10 +143,14 @@ const (
 
 // State returns the virtual lifecycle state derived from review_after.
 func (o Observation) State() string {
-	if o.ReviewAfter == nil || strings.TrimSpace(*o.ReviewAfter) == "" {
+	return observationState(o.ReviewAfter)
+}
+
+func observationState(reviewAfterValue *string) string {
+	if reviewAfterValue == nil || strings.TrimSpace(*reviewAfterValue) == "" {
 		return ObservationStateActive
 	}
-	reviewAfter, err := parseObservationTime(*o.ReviewAfter)
+	reviewAfter, err := parseObservationTime(*reviewAfterValue)
 	if err != nil {
 		return ObservationStateActive
 	}
@@ -159,6 +163,28 @@ func (o Observation) State() string {
 type SearchResult struct {
 	Observation
 	Rank float64 `json:"rank"`
+}
+
+// SearchPreviewResult is the bounded result shape used by preview-only callers.
+// Content is deliberately excluded so those callers do not hydrate full bodies.
+type SearchPreviewResult struct {
+	ID          int64   `json:"id"`
+	SyncID      string  `json:"sync_id"`
+	Type        string  `json:"type"`
+	Title       string  `json:"title"`
+	Preview     string  `json:"preview"`
+	Truncated   bool    `json:"truncated"`
+	Project     *string `json:"project,omitempty"`
+	Scope       string  `json:"scope"`
+	ReviewAfter *string `json:"review_after,omitempty"`
+	Pinned      bool    `json:"-"`
+	CreatedAt   string  `json:"created_at"`
+	Rank        float64 `json:"rank"`
+}
+
+// State returns the virtual lifecycle state derived from review_after.
+func (r SearchPreviewResult) State() string {
+	return observationState(r.ReviewAfter)
 }
 
 type SessionSummary struct {
@@ -4045,6 +4071,133 @@ func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOpti
 	return results, nil
 }
 
+// SearchPreviewsContext searches using the same ranking and filters as
+// SearchContext while selecting only a bounded Unicode-safe content preview.
+func (s *Store) SearchPreviewsContext(ctx context.Context, query string, opts SearchOptions) ([]SearchPreviewResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	switch opts.MatchMode {
+	case "", "all", "any":
+	default:
+		return nil, fmt.Errorf("invalid match_mode %q: must be \"all\" or \"any\"", opts.MatchMode)
+	}
+
+	opts.Project, _ = NormalizeProject(opts.Project)
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > s.cfg.MaxSearchResults {
+		limit = s.cfg.MaxSearchResults
+	}
+
+	var directResults []SearchPreviewResult
+	if strings.Contains(query, "/") {
+		tkSQL := `
+			SELECT id, ifnull(sync_id, '') as sync_id, type, title,
+			       substr(content, 1, 300) as preview, length(content) > 300 as truncated,
+			       project, scope, review_after, pinned, created_at
+			FROM observations
+			WHERE topic_key = ? AND deleted_at IS NULL
+		`
+		tkArgs := []any{query}
+		if opts.Type != "" {
+			tkSQL += " AND type = ?"
+			tkArgs = append(tkArgs, opts.Type)
+		}
+		if opts.Project != "" {
+			tkSQL += " AND LOWER(project) = ?"
+			tkArgs = append(tkArgs, opts.Project)
+		}
+		if opts.Scope != "" {
+			tkSQL += " AND scope = ?"
+			tkArgs = append(tkArgs, normalizeScope(opts.Scope))
+		}
+		tkSQL += " ORDER BY updated_at DESC LIMIT ?"
+		tkArgs = append(tkArgs, limit)
+
+		tkRows, err := s.db.QueryContext(ctx, tkSQL, tkArgs...)
+		if err == nil {
+			defer func() { _ = tkRows.Close() }()
+			for tkRows.Next() {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+				var r SearchPreviewResult
+				if err := scanSearchPreviewRow(tkRows, &r, false); err != nil {
+					if ctxErr := ctx.Err(); ctxErr != nil {
+						return nil, ctxErr
+					}
+					break
+				}
+				r.Rank = -1000
+				directResults = append(directResults, r)
+			}
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		} else if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+	}
+
+	var sqlQ string
+	var args []any
+	if hasShortFTSTerm(query) {
+		sqlQ, args = buildSearchPreviewLIKEQuery(query, opts, limit)
+	} else {
+		ftsQuery := sanitizeFTS(query)
+		if opts.MatchMode == "any" {
+			ftsQuery = sanitizeFTSCandidates(query)
+		}
+		sqlQ, args = buildSearchPreviewFTSQuery(ftsQuery, opts, limit)
+	}
+	rows, err := s.queryItContextHook(ctx, sqlQ, args...)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, fmt.Errorf("search: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	seen := make(map[int64]bool)
+	for _, r := range directResults {
+		seen[r.ID] = true
+	}
+	results := append([]SearchPreviewResult{}, directResults...)
+	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		var r SearchPreviewResult
+		if err := scanSearchPreviewRow(rows, &r, true); err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+			return nil, err
+		}
+		if !seen[r.ID] {
+			results = append(results, r)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(results) > limit {
+		results = results[:limit]
+	}
+	return results, nil
+}
+
 func buildSearchPromptsFTSQuery(ftsQuery, project string, limit int) (string, []any) {
 	sqlQ := `
 		SELECT p.id, ifnull(p.sync_id, '') as sync_id, p.session_id, p.content, ifnull(p.project, '') as project, p.created_at
@@ -4064,9 +4217,19 @@ func buildSearchPromptsFTSQuery(ftsQuery, project string, limit int) (string, []
 }
 
 func buildSearchFTSQuery(ftsQuery string, opts SearchOptions, limit int) (string, []any) {
+	return buildSearchFTSQueryWithColumns(`o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
+	       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.review_after, o.pinned, o.created_at, o.updated_at, o.deleted_at`, ftsQuery, opts, limit)
+}
+
+func buildSearchPreviewFTSQuery(ftsQuery string, opts SearchOptions, limit int) (string, []any) {
+	return buildSearchFTSQueryWithColumns(`o.id, ifnull(o.sync_id, '') as sync_id, o.type, o.title,
+	       substr(o.content, 1, 300) as preview, length(o.content) > 300 as truncated,
+	       o.project, o.scope, o.review_after, o.pinned, o.created_at`, ftsQuery, opts, limit)
+}
+
+func buildSearchFTSQueryWithColumns(columns, ftsQuery string, opts SearchOptions, limit int) (string, []any) {
 	sqlQ := `
-		SELECT o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
-		       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.review_after, o.pinned, o.created_at, o.updated_at, o.deleted_at,
+		SELECT ` + columns + `,
 		       bm25(observations_fts, 5.0, 1.0, 0.0, 0.0, 0.0, 3.0) as rank
 		FROM observations_fts fts
 		CROSS JOIN observations o ON o.id = fts.rowid
@@ -4121,9 +4284,19 @@ func escapeLIKE(term string) string {
 }
 
 func buildSearchLIKEQuery(query string, opts SearchOptions, limit int) (string, []any) {
+	return buildSearchLIKEQueryWithColumns(`o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
+	       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.review_after, o.pinned, o.created_at, o.updated_at, o.deleted_at`, query, opts, limit)
+}
+
+func buildSearchPreviewLIKEQuery(query string, opts SearchOptions, limit int) (string, []any) {
+	return buildSearchLIKEQueryWithColumns(`o.id, ifnull(o.sync_id, '') as sync_id, o.type, o.title,
+	       substr(o.content, 1, 300) as preview, length(o.content) > 300 as truncated,
+	       o.project, o.scope, o.review_after, o.pinned, o.created_at`, query, opts, limit)
+}
+
+func buildSearchLIKEQueryWithColumns(columns, query string, opts SearchOptions, limit int) (string, []any) {
 	sqlQ := `
-		SELECT o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
-		       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.review_after, o.pinned, o.created_at, o.updated_at, o.deleted_at,
+		SELECT ` + columns + `,
 		       0.0 AS rank
 		FROM observations o
 		WHERE o.deleted_at IS NULL
@@ -6047,7 +6220,7 @@ type MigrateResult struct {
 }
 
 // ProjectRescueParams identifies historical rows whose missing project ownership
-// was explicitly confirmed by an operator. Only rows with a NULL project qualify.
+// or blank same-project ownership mode was explicitly confirmed by an operator.
 type ProjectRescueParams struct {
 	TargetProject  string
 	ObservationIDs []int64
@@ -6168,6 +6341,25 @@ func (s *Store) RescueNullProjectOwnership(p ProjectRescueParams) (*ProjectRescu
 			}
 			result.RescuedSessions++
 		}
+		for _, sessionID := range scope.ordered {
+			if !plan.stampOwnershipMode[sessionID] {
+				continue
+			}
+			res, err := s.execHook(tx, rescueSessionQuery.updateOwnershipMode,
+				target, target, SessionOwnershipProjectOwned, SessionOwnershipShared, sessionID, sqlWhitespaceTrimSet,
+			)
+			if err != nil {
+				return err
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if n != 1 {
+				return fmt.Errorf("stamp ownership mode for session %q: updated %d rows, want 1", sessionID, n)
+			}
+			result.RescuedSessions++
+		}
 		for _, query := range []struct {
 			query rescueRecordQuery
 			moves []int64
@@ -6184,7 +6376,7 @@ func (s *Store) RescueNullProjectOwnership(p ProjectRescueParams) (*ProjectRescu
 			}
 		}
 
-		journaled, err := s.enqueueRescuedProjectMutationsTx(tx, target, scope.ordered, p)
+		journaled, err := s.enqueueRescuedProjectMutationsTx(tx, target, scope.ordered, plan.stampOwnershipMode, p)
 		if err != nil {
 			return err
 		}
@@ -6203,6 +6395,9 @@ func (s *Store) RescueNullProjectOwnership(p ProjectRescueParams) (*ProjectRescu
 type rescuePlan struct {
 	// claim lists unowned sessions that will be moved to the target.
 	claim []string
+	// stampOwnershipMode identifies target-owned sessions whose blank ownership
+	// mode can be deterministically classified from their session ID.
+	stampOwnershipMode map[string]bool
 	// willOwn reports, for every session in scope, whether it belongs to the
 	// target once the plan is applied.
 	willOwn map[string]bool
@@ -6212,9 +6407,12 @@ type rescuePlan struct {
 // unowned session that already parents a record owned by another project stays
 // put: claiming it would split that record from its session.
 func planRescueSessionsTx(tx *sql.Tx, scope rescueSessionScope, target string, result *ProjectRescueResult) (rescuePlan, error) {
-	plan := rescuePlan{willOwn: make(map[string]bool, len(scope.ordered))}
+	plan := rescuePlan{
+		stampOwnershipMode: make(map[string]bool),
+		willOwn:            make(map[string]bool, len(scope.ordered)),
+	}
 	for _, sessionID := range scope.ordered {
-		project, _, found, err := sessionOwnershipTx(tx, sessionID)
+		project, mode, found, err := sessionOwnershipTx(tx, sessionID)
 		if err != nil {
 			return plan, err
 		}
@@ -6226,7 +6424,9 @@ func planRescueSessionsTx(tx *sql.Tx, scope rescueSessionScope, target string, r
 			}
 		case project == target:
 			plan.willOwn[sessionID] = true
-			if scope.explicit[sessionID] {
+			if mode == "" {
+				plan.stampOwnershipMode[sessionID] = true
+			} else if scope.explicit[sessionID] {
 				result.countOutcome(rescueAlreadyOwned)
 			}
 		case project != "":
@@ -6311,9 +6511,10 @@ func (r *ProjectRescueResult) countOutcome(outcome rescueOutcome) {
 type rescueRecordQuery struct {
 	// selectSessionID reads the parent session id of one record. It is empty for
 	// sessions, which have no parent.
-	selectSessionID string
-	selectProject   string
-	updateProject   string
+	selectSessionID     string
+	selectProject       string
+	updateProject       string
+	updateOwnershipMode string
 }
 
 var (
@@ -6328,8 +6529,9 @@ var (
 		updateProject:   `UPDATE user_prompts SET project = ? WHERE id = ? AND ifnull(trim(project), '') = ''`,
 	}
 	rescueSessionQuery = rescueRecordQuery{
-		selectProject: `SELECT project FROM sessions WHERE id = ?`,
-		updateProject: `UPDATE sessions SET project = ? WHERE id = ? AND ifnull(trim(project), '') = ''`,
+		selectProject:       `SELECT project FROM sessions WHERE id = ?`,
+		updateProject:       `UPDATE sessions SET project = ? WHERE id = ? AND ifnull(trim(project), '') = ''`,
+		updateOwnershipMode: `UPDATE sessions SET project = ?, ownership_mode = CASE WHEN id = 'manual-save-' || ? THEN ? ELSE ? END WHERE id = ? AND ifnull(trim(ownership_mode, ?), '') = ''`,
 	}
 )
 
@@ -7176,17 +7378,28 @@ func backfillMutationSource(source []string) string {
 // enqueueRescuedProjectMutationsTx journals the rescued rows. sessionIDs covers
 // the explicitly requested sessions plus every dependent parent session, so a
 // rescued observation is never pushed ahead of the session that now owns it.
-func (s *Store) enqueueRescuedProjectMutationsTx(tx *sql.Tx, target string, sessionIDs []string, p ProjectRescueParams) (bool, error) {
+func (s *Store) enqueueRescuedProjectMutationsTx(tx *sql.Tx, target string, sessionIDs []string, modeStamped map[string]bool, p ProjectRescueParams) (bool, error) {
 	journaled := false
 	for _, id := range sessionIDs {
 		var payload syncSessionPayload
-		err := tx.QueryRow(`SELECT id, project, directory, started_at, ended_at, summary FROM sessions WHERE id = ? AND project = ?`, id, target).
-			Scan(&payload.ID, &payload.Project, &payload.Directory, &payload.StartedAt, &payload.EndedAt, &payload.Summary)
+		err := tx.QueryRow(`SELECT id, ifnull(project, ''), ifnull(ownership_mode, ''), directory, started_at, ended_at, summary FROM sessions WHERE id = ?`, id).
+			Scan(&payload.ID, &payload.Project, &payload.OwnershipMode, &payload.Directory, &payload.StartedAt, &payload.EndedAt, &payload.Summary)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
 		}
 		if err != nil {
 			return false, err
+		}
+		payload.Project, _ = NormalizeProject(strings.TrimSpace(payload.Project))
+		if payload.Project != target {
+			continue
+		}
+		if modeStamped[id] {
+			refreshed, err := s.refreshPendingLocalSessionMutationTx(tx, payload)
+			if err != nil {
+				return false, err
+			}
+			journaled = journaled || refreshed
 		}
 		canonical, err := s.enqueueMissingLocalMutationTx(tx, SyncEntitySession, payload.ID, payload)
 		if err != nil {
@@ -7232,6 +7445,22 @@ func (s *Store) enqueueRescuedProjectMutationsTx(tx *sql.Tx, target string, sess
 		journaled = journaled || canonical
 	}
 	return journaled, nil
+}
+
+func (s *Store) refreshPendingLocalSessionMutationTx(tx *sql.Tx, payload syncSessionPayload) (bool, error) {
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return false, err
+	}
+	res, err := s.execHook(tx, `UPDATE sync_mutations SET project = ?, payload = ?
+		WHERE target_key = ? AND entity = ? AND entity_key = ? AND op = ? AND source = ? AND acked_at IS NULL`,
+		payload.Project, string(encoded), DefaultSyncTargetKey, SyncEntitySession, payload.ID, SyncOpUpsert, SyncSourceLocal,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 func (s *Store) enqueueMissingLocalMutationTx(tx *sql.Tx, entity, entityKey string, payload any, ops ...string) (bool, error) {
@@ -8852,6 +9081,17 @@ func scanObservationRow(scanner observationScanner, o *Observation) error {
 		&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt, &o.ReviewAfter,
 		&o.Pinned, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt,
 	)
+}
+
+func scanSearchPreviewRow(scanner observationScanner, r *SearchPreviewResult, withRank bool) error {
+	dest := []any{
+		&r.ID, &r.SyncID, &r.Type, &r.Title, &r.Preview, &r.Truncated,
+		&r.Project, &r.Scope, &r.ReviewAfter, &r.Pinned, &r.CreatedAt,
+	}
+	if withRank {
+		dest = append(dest, &r.Rank)
+	}
+	return scanner.Scan(dest...)
 }
 
 func (s *Store) queryObservations(query string, args ...any) ([]Observation, error) {

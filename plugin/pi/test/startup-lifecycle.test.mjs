@@ -217,6 +217,10 @@ test("before_agent_start injects actionable mem_search recall guidance", async (
     assert.match(result.systemPrompt, /If a scoped search is empty, retry once this way/);
     assert.match(result.systemPrompt, /After hits, narrow follow-up searches by project, type, or `match_mode:"all"`/);
     assert.match(result.systemPrompt, /then use `mem_get_observation` for full content/);
+    assert.match(result.systemPrompt, /Memory operations are internal bookkeeping, never the user-facing answer/);
+    assert.match(result.systemPrompt, /Complete required memory work before composing the completed-task reply/);
+    assert.match(result.systemPrompt, /complete answer as the final message of the turn with no later tool calls/);
+    assert.match(result.systemPrompt, /If memory work fails or needs follow-up, still send the answer/);
   });
 });
 

@@ -1594,21 +1594,30 @@ func TestCmdProjectsConsolidateDryRun(t *testing.T) {
 	// Seed a canonical name and rewrite a second project's records as a legacy case variant.
 	mustSeedObservation(t, cfg, "s-eng", "engram", "note", "eng note", "content", "project")
 	mustSeedObservation(t, cfg, "s-legacy", "legacy-source", "note", "legacy note", "content", "project")
+	mustSeedObservation(t, cfg, "s-padded", "padded-source", "note", "padded note", "content", "project")
 	rewriteLegacyProjectName(t, cfg, "legacy-source", "ENGRAM")
+	rewriteLegacyProjectName(t, cfg, "padded-source", " ENGRAM ")
 
 	old := detectProject
 	detectProject = func(string) string { return "engram" }
 	t.Cleanup(func() { detectProject = old })
+
+	oldScan := scanInputLine
+	scanInputLine = func(a ...any) (int, error) {
+		*a[0].(*string) = "1"
+		return 1, nil
+	}
+	t.Cleanup(func() { scanInputLine = oldScan })
 
 	withArgs(t, "engram", "projects", "consolidate", "--dry-run")
 	stdout, stderr := captureOutput(t, func() { cmdProjectsConsolidate(cfg) })
 	if stderr != "" {
 		t.Fatalf("expected no stderr, got: %q", stderr)
 	}
-	if !strings.Contains(stdout, "dry-run") {
-		t.Fatalf("expected dry-run message, got: %q", stdout)
+	if !strings.Contains(stdout, "[dry-run] Would merge 1 project(s)") {
+		t.Fatalf("expected selected dry-run plan, got: %q", stdout)
 	}
-	// Verify no actual merge happened (both project names still exist).
+	// Verify no actual merge happened.
 	s, err := store.New(cfg)
 	if err != nil {
 		t.Fatalf("store.New: %v", err)
@@ -1618,9 +1627,55 @@ func TestCmdProjectsConsolidateDryRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListProjectNames: %v", err)
 	}
-	// Should still have both names (no merge happened)
-	if len(names) != 2 || names[0] != "ENGRAM" || names[1] != "engram" {
+	// All three names remain because dry-run performs no merge.
+	if len(names) != 3 || !slices.Contains(names, " ENGRAM ") || !slices.Contains(names, "ENGRAM") || !slices.Contains(names, "engram") {
 		t.Fatalf("expected legacy and canonical names after dry-run, got: %v", names)
+	}
+}
+
+func TestCmdProjectsConsolidateDryRunRequiresSelection(t *testing.T) {
+	cfg := testConfig(t)
+
+	mustSeedObservation(t, cfg, "s-eng", "engram", "note", "eng note", "content", "project")
+	mustSeedObservation(t, cfg, "s-legacy", "legacy-source", "note", "legacy note", "content", "project")
+	rewriteLegacyProjectName(t, cfg, "legacy-source", "ENGRAM")
+
+	oldDetect := detectProject
+	detectProject = func(string) string { return "engram" }
+	t.Cleanup(func() { detectProject = oldDetect })
+
+	oldScan := scanInputLine
+	scanInputLine = func(...any) (int, error) { return 0, io.EOF }
+	t.Cleanup(func() { scanInputLine = oldScan })
+
+	exitCode := 0
+	oldExit := exitFunc
+	exitFunc = func(code int) { exitCode = code }
+	t.Cleanup(func() { exitFunc = oldExit })
+
+	withArgs(t, "engram", "projects", "consolidate", "--dry-run")
+	stdout, stderr := captureOutput(t, func() { cmdProjectsConsolidate(cfg) })
+	if exitCode != 1 {
+		t.Fatalf("exit code = %d, want 1", exitCode)
+	}
+	if !strings.Contains(stderr, "dry-run requires a confirmed selection") {
+		t.Fatalf("expected selection error, got: %q", stderr)
+	}
+	if strings.Contains(stdout, "[dry-run] Would merge") {
+		t.Fatalf("dry-run emitted an unselected merge plan: %q", stdout)
+	}
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	names, err := s.ListProjectNames()
+	if err != nil {
+		t.Fatalf("ListProjectNames: %v", err)
+	}
+	if len(names) != 2 || names[0] != "ENGRAM" || names[1] != "engram" {
+		t.Fatalf("dry-run without selection mutated projects: %v", names)
 	}
 }
 
@@ -1678,6 +1733,13 @@ func TestCmdProjectsConsolidateAllDryRun(t *testing.T) {
 	mustSeedObservation(t, cfg, "s-legacy", "legacy-source", "note", "legacy note", "content", "project")
 	rewriteLegacyProjectName(t, cfg, "legacy-source", "ENGRAM")
 
+	oldScan := scanInputLine
+	scanInputLine = func(...any) (int, error) {
+		t.Fatal("--all dry-run must not require a selection")
+		return 0, nil
+	}
+	t.Cleanup(func() { scanInputLine = oldScan })
+
 	withArgs(t, "engram", "projects", "consolidate", "--all", "--dry-run")
 	stdout, stderr := captureOutput(t, func() { cmdProjectsConsolidate(cfg) })
 	if stderr != "" {
@@ -1688,6 +1750,19 @@ func TestCmdProjectsConsolidateAllDryRun(t *testing.T) {
 	}
 	if !strings.Contains(stdout, `Would merge into "engram"`) {
 		t.Fatalf("expected normalized canonical in dry-run output, got: %q", stdout)
+	}
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	names, err := s.ListProjectNames()
+	if err != nil {
+		t.Fatalf("ListProjectNames: %v", err)
+	}
+	if len(names) != 2 || names[0] != "ENGRAM" || names[1] != "engram" {
+		t.Fatalf("--all dry-run mutated projects: %v", names)
 	}
 }
 

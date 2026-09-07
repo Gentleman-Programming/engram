@@ -61,7 +61,7 @@ engram cloud upgrade bootstrap --project smoke-project --resume
 engram cloud upgrade status --project smoke-project
 ```
 
-`rollback` is only available before bootstrap reaches `bootstrap_verified`.
+`rollback` is only available before bootstrap reaches `bootstrap_verified`. For general release upgrades and rollback expectations, see the [Release Policy](../RELEASE-POLICY.md).
 
 ---
 
@@ -70,6 +70,8 @@ engram cloud upgrade status --project smoke-project
 Do not build from source for production deploys. Use the published image:
 
 - `ghcr.io/gentleman-programming/engram:latest`
+
+The `:latest` tag is an image selector, not a support-channel guarantee. Choose a release channel deliberately and follow the [Release Policy](../RELEASE-POLICY.md) before upgrading a production deployment.
 
 Reference compose file:
 - [docker-compose.ghcr.yml](./docker-compose.ghcr.yml)
@@ -187,6 +189,8 @@ docker compose restart cloud
 
 If you upgrade the `engram` image tag, redeploy or restart the container so the
 running server picks up the new binary.
+
+Before exposing this deployment to users, complete the [Production Checklist](./production-checklist.md). The Compose example is a starting point, not a complete production platform.
 
 ### Client-side token setup
 
