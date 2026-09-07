@@ -80,6 +80,32 @@ func TestReleaseWorkflowChecksModuleMetadataInGoreleaserJob(t *testing.T) {
 			want: false,
 		},
 		{
+			name: "duplicate name field after empty value",
+			workflow: `jobs:
+  goreleaser:
+    steps:
+      - name:
+        name: Set up Go
+      - name: Verify module metadata is tidy
+        run: go mod tidy -diff
+      - name: Run GoReleaser
+`,
+			want: false,
+		},
+		{
+			name: "duplicate run field after empty value",
+			workflow: `jobs:
+  goreleaser:
+    steps:
+      - name: Set up Go
+      - name: Verify module metadata is tidy
+        run:
+        run: go mod tidy -diff
+      - name: Run GoReleaser
+`,
+			want: false,
+		},
+		{
 			name: "missing required step",
 			workflow: `jobs:
   goreleaser:
@@ -202,8 +228,10 @@ func releaseWorkflowChecksModuleMetadataInGoreleaserJob(workflow string) bool {
 }
 
 type releaseWorkflowStep struct {
-	name string
-	run  string
+	name    string
+	run     string
+	hasName bool
+	hasRun  bool
 }
 
 // releaseWorkflowGoreleaserSteps intentionally recognizes only this workflow's
@@ -254,14 +282,16 @@ func releaseWorkflowStepField(step *releaseWorkflowStep, field string) bool {
 
 	switch key {
 	case "name":
-		if step.name != "" {
+		if step.hasName {
 			return false
 		}
+		step.hasName = true
 		step.name = strings.TrimSpace(value)
 	case "run":
-		if step.run != "" {
+		if step.hasRun {
 			return false
 		}
+		step.hasRun = true
 		step.run = strings.TrimSpace(value)
 	}
 	return true
