@@ -2478,17 +2478,19 @@ func cmdProjectsConsolidate(cfg store.Config) {
 			fmt.Printf("  [%d] %-30s %3d obs  (%s)\n", i+1, sm.Name, obs, sm.MatchType)
 		}
 
-		if dryRun {
-			fmt.Printf("\n[dry-run] Would merge %d project(s) into %q\n", len(similar), canonical)
-			return
-		}
-
 		fmt.Printf("\nSelect which to merge into %q (comma-separated numbers, 'all', or 'none'): ", canonical)
 		var answer string
-		scanInputLine(&answer)
+		if n, err := scanInputLine(&answer); err != nil && dryRun && n == 0 {
+			fatal(fmt.Errorf("dry-run requires a confirmed selection: %w", err))
+			return
+		}
 		answer = strings.TrimSpace(strings.ToLower(answer))
 
 		if answer == "none" || answer == "n" || answer == "" {
+			if dryRun && answer == "" {
+				fatal(errors.New("dry-run requires a confirmed selection"))
+				return
+			}
 			fmt.Println("Cancelled.")
 			return
 		}
@@ -2505,6 +2507,9 @@ func cmdProjectsConsolidate(cfg store.Config) {
 				idx := 0
 				if _, err := fmt.Sscanf(part, "%d", &idx); err != nil || idx < 1 || idx > len(similar) {
 					fmt.Fprintf(os.Stderr, "Invalid selection: %q (expected 1-%d)\n", part, len(similar))
+					if dryRun {
+						exitFunc(1)
+					}
 					return
 				}
 				sources = append(sources, similar[idx-1].Name)
@@ -2513,6 +2518,10 @@ func cmdProjectsConsolidate(cfg store.Config) {
 
 		if len(sources) == 0 {
 			fmt.Println("Nothing selected.")
+			return
+		}
+		if dryRun {
+			fmt.Printf("\n[dry-run] Would merge %d project(s) into %q\n", len(sources), canonical)
 			return
 		}
 
