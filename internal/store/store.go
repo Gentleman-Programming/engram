@@ -143,10 +143,14 @@ const (
 
 // State returns the virtual lifecycle state derived from review_after.
 func (o Observation) State() string {
-	if o.ReviewAfter == nil || strings.TrimSpace(*o.ReviewAfter) == "" {
+	return observationState(o.ReviewAfter)
+}
+
+func observationState(reviewAfterValue *string) string {
+	if reviewAfterValue == nil || strings.TrimSpace(*reviewAfterValue) == "" {
 		return ObservationStateActive
 	}
-	reviewAfter, err := parseObservationTime(*o.ReviewAfter)
+	reviewAfter, err := parseObservationTime(*reviewAfterValue)
 	if err != nil {
 		return ObservationStateActive
 	}
@@ -159,6 +163,28 @@ func (o Observation) State() string {
 type SearchResult struct {
 	Observation
 	Rank float64 `json:"rank"`
+}
+
+// SearchPreviewResult is the bounded result shape used by preview-only callers.
+// Content is deliberately excluded so those callers do not hydrate full bodies.
+type SearchPreviewResult struct {
+	ID          int64   `json:"id"`
+	SyncID      string  `json:"sync_id"`
+	Type        string  `json:"type"`
+	Title       string  `json:"title"`
+	Preview     string  `json:"preview"`
+	Truncated   bool    `json:"truncated"`
+	Project     *string `json:"project,omitempty"`
+	Scope       string  `json:"scope"`
+	ReviewAfter *string `json:"review_after,omitempty"`
+	Pinned      bool    `json:"-"`
+	CreatedAt   string  `json:"created_at"`
+	Rank        float64 `json:"rank"`
+}
+
+// State returns the virtual lifecycle state derived from review_after.
+func (r SearchPreviewResult) State() string {
+	return observationState(r.ReviewAfter)
 }
 
 type SessionSummary struct {
@@ -4045,6 +4071,133 @@ func (s *Store) SearchContext(ctx context.Context, query string, opts SearchOpti
 	return results, nil
 }
 
+// SearchPreviewsContext searches using the same ranking and filters as
+// SearchContext while selecting only a bounded Unicode-safe content preview.
+func (s *Store) SearchPreviewsContext(ctx context.Context, query string, opts SearchOptions) ([]SearchPreviewResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	switch opts.MatchMode {
+	case "", "all", "any":
+	default:
+		return nil, fmt.Errorf("invalid match_mode %q: must be \"all\" or \"any\"", opts.MatchMode)
+	}
+
+	opts.Project, _ = NormalizeProject(opts.Project)
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > s.cfg.MaxSearchResults {
+		limit = s.cfg.MaxSearchResults
+	}
+
+	var directResults []SearchPreviewResult
+	if strings.Contains(query, "/") {
+		tkSQL := `
+			SELECT id, ifnull(sync_id, '') as sync_id, type, title,
+			       substr(content, 1, 300) as preview, length(content) > 300 as truncated,
+			       project, scope, review_after, pinned, created_at
+			FROM observations
+			WHERE topic_key = ? AND deleted_at IS NULL
+		`
+		tkArgs := []any{query}
+		if opts.Type != "" {
+			tkSQL += " AND type = ?"
+			tkArgs = append(tkArgs, opts.Type)
+		}
+		if opts.Project != "" {
+			tkSQL += " AND LOWER(project) = ?"
+			tkArgs = append(tkArgs, opts.Project)
+		}
+		if opts.Scope != "" {
+			tkSQL += " AND scope = ?"
+			tkArgs = append(tkArgs, normalizeScope(opts.Scope))
+		}
+		tkSQL += " ORDER BY updated_at DESC LIMIT ?"
+		tkArgs = append(tkArgs, limit)
+
+		tkRows, err := s.db.QueryContext(ctx, tkSQL, tkArgs...)
+		if err == nil {
+			defer tkRows.Close()
+			for tkRows.Next() {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+				var r SearchPreviewResult
+				if err := scanSearchPreviewRow(tkRows, &r, false); err != nil {
+					if ctxErr := ctx.Err(); ctxErr != nil {
+						return nil, ctxErr
+					}
+					break
+				}
+				r.Rank = -1000
+				directResults = append(directResults, r)
+			}
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		} else if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+	}
+
+	var sqlQ string
+	var args []any
+	if hasShortFTSTerm(query) {
+		sqlQ, args = buildSearchPreviewLIKEQuery(query, opts, limit)
+	} else {
+		ftsQuery := sanitizeFTS(query)
+		if opts.MatchMode == "any" {
+			ftsQuery = sanitizeFTSCandidates(query)
+		}
+		sqlQ, args = buildSearchPreviewFTSQuery(ftsQuery, opts, limit)
+	}
+	rows, err := s.queryItContextHook(ctx, sqlQ, args...)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, fmt.Errorf("search: %w", err)
+	}
+	defer rows.Close()
+
+	seen := make(map[int64]bool)
+	for _, r := range directResults {
+		seen[r.ID] = true
+	}
+	results := append([]SearchPreviewResult{}, directResults...)
+	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		var r SearchPreviewResult
+		if err := scanSearchPreviewRow(rows, &r, true); err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+			return nil, err
+		}
+		if !seen[r.ID] {
+			results = append(results, r)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(results) > limit {
+		results = results[:limit]
+	}
+	return results, nil
+}
+
 func buildSearchPromptsFTSQuery(ftsQuery, project string, limit int) (string, []any) {
 	sqlQ := `
 		SELECT p.id, ifnull(p.sync_id, '') as sync_id, p.session_id, p.content, ifnull(p.project, '') as project, p.created_at
@@ -4064,9 +4217,19 @@ func buildSearchPromptsFTSQuery(ftsQuery, project string, limit int) (string, []
 }
 
 func buildSearchFTSQuery(ftsQuery string, opts SearchOptions, limit int) (string, []any) {
+	return buildSearchFTSQueryWithColumns(`o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
+	       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.review_after, o.pinned, o.created_at, o.updated_at, o.deleted_at`, ftsQuery, opts, limit)
+}
+
+func buildSearchPreviewFTSQuery(ftsQuery string, opts SearchOptions, limit int) (string, []any) {
+	return buildSearchFTSQueryWithColumns(`o.id, ifnull(o.sync_id, '') as sync_id, o.type, o.title,
+	       substr(o.content, 1, 300) as preview, length(o.content) > 300 as truncated,
+	       o.project, o.scope, o.review_after, o.pinned, o.created_at`, ftsQuery, opts, limit)
+}
+
+func buildSearchFTSQueryWithColumns(columns, ftsQuery string, opts SearchOptions, limit int) (string, []any) {
 	sqlQ := `
-		SELECT o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
-		       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.review_after, o.pinned, o.created_at, o.updated_at, o.deleted_at,
+		SELECT ` + columns + `,
 		       bm25(observations_fts, 5.0, 1.0, 0.0, 0.0, 0.0, 3.0) as rank
 		FROM observations_fts fts
 		CROSS JOIN observations o ON o.id = fts.rowid
@@ -4121,9 +4284,19 @@ func escapeLIKE(term string) string {
 }
 
 func buildSearchLIKEQuery(query string, opts SearchOptions, limit int) (string, []any) {
+	return buildSearchLIKEQueryWithColumns(`o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
+	       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.review_after, o.pinned, o.created_at, o.updated_at, o.deleted_at`, query, opts, limit)
+}
+
+func buildSearchPreviewLIKEQuery(query string, opts SearchOptions, limit int) (string, []any) {
+	return buildSearchLIKEQueryWithColumns(`o.id, ifnull(o.sync_id, '') as sync_id, o.type, o.title,
+	       substr(o.content, 1, 300) as preview, length(o.content) > 300 as truncated,
+	       o.project, o.scope, o.review_after, o.pinned, o.created_at`, query, opts, limit)
+}
+
+func buildSearchLIKEQueryWithColumns(columns, query string, opts SearchOptions, limit int) (string, []any) {
 	sqlQ := `
-		SELECT o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
-		       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.review_after, o.pinned, o.created_at, o.updated_at, o.deleted_at,
+		SELECT ` + columns + `,
 		       0.0 AS rank
 		FROM observations o
 		WHERE o.deleted_at IS NULL
@@ -8852,6 +9025,17 @@ func scanObservationRow(scanner observationScanner, o *Observation) error {
 		&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt, &o.ReviewAfter,
 		&o.Pinned, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt,
 	)
+}
+
+func scanSearchPreviewRow(scanner observationScanner, r *SearchPreviewResult, withRank bool) error {
+	dest := []any{
+		&r.ID, &r.SyncID, &r.Type, &r.Title, &r.Preview, &r.Truncated,
+		&r.Project, &r.Scope, &r.ReviewAfter, &r.Pinned, &r.CreatedAt,
+	}
+	if withRank {
+		dest = append(dest, &r.Rank)
+	}
+	return scanner.Scan(dest...)
 }
 
 func (s *Store) queryObservations(query string, args ...any) ([]Observation, error) {
