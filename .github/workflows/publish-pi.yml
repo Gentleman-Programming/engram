@@ -30,6 +30,13 @@ jobs:
           fi
           echo "Active npm: $(npm --version)"
 
+      - name: Verify Pi release version
+        if: github.event_name == 'push'
+        working-directory: plugin/pi
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node test/release-contract.mjs "$RELEASE_TAG"
+
       - name: Run Pi plugin tests
         working-directory: plugin/pi
         run: npm test
