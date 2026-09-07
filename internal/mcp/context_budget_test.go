@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -259,5 +260,54 @@ func TestMemContextBudgetCompactParam(t *testing.T) {
 	}
 	if lines[0] != "- [note] **pinned-119**" {
 		t.Fatalf("compact pinned bullet = %q, want %q", lines[0], "- [note] **pinned-119**")
+	}
+}
+
+// TestMemContextBudgetSubIntegerAndMistypedMaxBytes pins the resolver's
+// never-unbounded guarantee for the input classes the first review round
+// flagged: positive fractions below 1 byte (int truncation must never reach
+// the store as MaxBytes=0, the unbounded legacy sentinel), NaN, and mistyped
+// (non-float64) values. All must render the default-bounded context.
+func TestMemContextBudgetSubIntegerAndMistypedMaxBytes(t *testing.T) {
+	mistyped := map[string]any{"project": "engram", "max_bytes": "1024"}
+	nan := map[string]any{"project": "engram", "max_bytes": math.NaN()}
+	fraction := map[string]any{"project": "engram", "max_bytes": 0.5}
+	for name, args := range map[string]map[string]any{
+		"fraction-below-one": fraction,
+		"nan":                nan,
+		"mistyped-string":    mistyped,
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := newMCPTestStore(t)
+			budgetDataset(t, s)
+
+			got := budgetContextPart(t, budgetCallContext(t, s, args))
+			want := budgetWant(t, s, store.ContextOptions{MaxBytes: 16 * 1024, Pinned: 20})
+
+			if got != want {
+				t.Fatalf("must fall back to the bounded 16 KiB default: got %d bytes, want %d bytes", len(got), len(want))
+			}
+			if !strings.Contains(want, "[truncated]") {
+				t.Fatalf("fallback should truncate the ~28 KiB dataset; got unbounded output (%d bytes)", len(want))
+			}
+		})
+	}
+}
+
+// TestMemContextBudgetCompactMistypedIsFalse documents the lenient parsing
+// convention shared with project/scope: a non-boolean compact argument is
+// ignored and renders the default (non-compact) context.
+func TestMemContextBudgetCompactMistypedIsFalse(t *testing.T) {
+	s := newMCPTestStore(t)
+	budgetDataset(t, s)
+
+	got := budgetContextPart(t, budgetCallContext(t, s, map[string]any{"project": "engram", "compact": "yes"}))
+	want := budgetWant(t, s, store.ContextOptions{MaxBytes: 16 * 1024, Pinned: 20})
+
+	if got != want {
+		t.Fatalf("mistyped compact must render the default non-compact context: got %d bytes, want %d bytes", len(got), len(want))
+	}
+	if !strings.Contains(budgetSection(t, got, "Pinned"), "- [note] **pinned-119**:") {
+		t.Fatalf("mistyped compact must keep the non-compact preview rendering (colon + body)")
 	}
 }

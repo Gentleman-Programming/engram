@@ -1779,11 +1779,13 @@ const (
 )
 
 // memContextMaxBytes resolves the optional max_bytes tool argument (MCP
-// numbers arrive as float64). Absent, mistyped, non-positive, or NaN input
-// falls back to the default budget — the MCP path must never resolve to the
-// unbounded legacy rendering. The ceiling comparison happens in float64
-// BEFORE the int conversion, because converting an out-of-range float to int
-// is spec-undefined in Go.
+// numbers arrive as float64). Absent, mistyped, non-positive, NaN, or
+// sub-integer positive input falls back to the default budget — the MCP path
+// must never resolve to the unbounded legacy rendering, and int(f) of a
+// fraction in (0,1) truncates to 0, which ContextOptions treats as the
+// unbounded zero value. The ceiling comparison happens in float64 BEFORE the
+// int conversion, because converting an out-of-range float to int is
+// spec-undefined in Go.
 func memContextMaxBytes(raw any) int {
 	v, ok := raw.(float64)
 	if !ok || !(v > 0) {
@@ -1792,7 +1794,11 @@ func memContextMaxBytes(raw any) int {
 	if v > float64(memContextMaxBytesCeiling) {
 		return memContextMaxBytesCeiling
 	}
-	return int(v)
+	n := int(v)
+	if n < 1 {
+		return memContextDefaultMaxBytes
+	}
+	return n
 }
 
 func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
