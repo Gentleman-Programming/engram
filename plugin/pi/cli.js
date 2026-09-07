@@ -3,7 +3,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-const PACKAGE_NAME = "npm:gentle-engram@0.1.11";
+const packageMetadata = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf-8"));
+const PACKAGE_NAME = `npm:${packageMetadata.name}@${packageMetadata.version}`;
 const LEGACY_PACKAGE_NAME = "npm:gentle-engram@0.1.8";
 const MCP_ADAPTER_PACKAGE = "npm:pi-mcp-adapter";
 const HELP = `pi-engram
@@ -13,7 +14,7 @@ Usage:
 
 Creates Pi's Engram MCP config in the Pi agent dir and ensures pi-mcp-adapter
 is declared in settings.json. The Pi extension itself is loaded by installing
-the package with: pi install npm:gentle-engram@0.1.11
+the package with: pi install ${PACKAGE_NAME}
 `;
 
 const MCP_LAUNCHER =
