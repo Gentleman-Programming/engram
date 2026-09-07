@@ -10,10 +10,18 @@ import (
 )
 
 var (
-	workflowActionPattern = regexp.MustCompile(`^\s*(?:-\s+)?uses:\s*([^@\s]+)@([^\s#]+)(?:\s+#\s*(.+?))?\s*$`)
+	workflowActionPattern = regexp.MustCompile(`^\s*(?:-\s+)?uses:\s*(["']?)([^@\s"']+)@([^\s#"']+)(["']?)(?:\s+#\s*(.+?))?\s*$`)
 	fullSHAPattern        = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
 	versionCommentPattern = regexp.MustCompile(`^v\d+(?:[.\w-]*)?$`)
 )
+
+func parseWorkflowAction(line string) (action, ref, comment string, ok bool) {
+	matches := workflowActionPattern.FindStringSubmatch(line)
+	if matches == nil || matches[1] != matches[4] {
+		return "", "", "", false
+	}
+	return matches[2], matches[3], matches[5], true
+}
 
 func TestWorkflowActionParsing(t *testing.T) {
 	const sha = "0123456789abcdef0123456789abcdef01234567"
@@ -29,26 +37,30 @@ func TestWorkflowActionParsing(t *testing.T) {
 		{name: "missing comment", line: "uses: actions/checkout@" + sha, action: "actions/checkout", ref: sha, classify: "actions/checkout", matched: true, external: true, fullSHA: true},
 		{name: "malformed version comment", line: "uses: actions/checkout@" + sha + " # release-6", action: "actions/checkout", ref: sha, comment: "release-6", classify: "actions/checkout", matched: true, external: true, fullSHA: true},
 		{name: "list item", line: "- uses: actions/checkout@" + sha + " # v6", action: "actions/checkout", ref: sha, comment: "v6", classify: "actions/checkout", matched: true, external: true, fullSHA: true, versionComment: true},
+		{name: "double quoted", line: "uses: \"actions/checkout@" + sha + "\" # v6", action: "actions/checkout", ref: sha, comment: "v6", classify: "actions/checkout", matched: true, external: true, fullSHA: true, versionComment: true},
+		{name: "single quoted", line: "uses: 'actions/checkout@" + sha + "' # v6", action: "actions/checkout", ref: sha, comment: "v6", classify: "actions/checkout", matched: true, external: true, fullSHA: true, versionComment: true},
 		{name: "local", line: "uses: ./local-action", classify: "./local-action"},
 		{name: "Docker", line: "uses: docker://alpine@sha256:abc", action: "docker://alpine", ref: "sha256:abc", classify: "docker://alpine", matched: true},
 		{name: "malformed", line: "uses actions/checkout@v6"},
+		{name: "missing closing quote", line: "uses: \"actions/checkout@" + sha + " # v6"},
+		{name: "mismatched quotes", line: "uses: \"actions/checkout@" + sha + "' # v6"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			matches := workflowActionPattern.FindStringSubmatch(tt.line)
-			if (matches != nil) != tt.matched {
-				t.Fatalf("matched = %v, want %v", matches != nil, tt.matched)
+			action, ref, comment, matched := parseWorkflowAction(tt.line)
+			if matched != tt.matched {
+				t.Fatalf("matched = %v, want %v", matched, tt.matched)
 			}
-			if matches != nil && (matches[1] != tt.action || matches[2] != tt.ref || matches[3] != tt.comment) {
-				t.Errorf("groups = %q, want [%q %q %q]", matches[1:], tt.action, tt.ref, tt.comment)
+			if matched && (action != tt.action || ref != tt.ref || comment != tt.comment) {
+				t.Errorf("parsed = [%q %q %q], want [%q %q %q]", action, ref, comment, tt.action, tt.ref, tt.comment)
 			}
-			if matches != nil && tt.external {
-				if got := fullSHAPattern.MatchString(matches[2]); got != tt.fullSHA {
-					t.Errorf("fullSHAPattern.MatchString(%q) = %v, want %v", matches[2], got, tt.fullSHA)
+			if matched && tt.external {
+				if got := fullSHAPattern.MatchString(ref); got != tt.fullSHA {
+					t.Errorf("fullSHAPattern.MatchString(%q) = %v, want %v", ref, got, tt.fullSHA)
 				}
-				if got := versionCommentPattern.MatchString(matches[3]); got != tt.versionComment {
-					t.Errorf("versionCommentPattern.MatchString(%q) = %v, want %v", matches[3], got, tt.versionComment)
+				if got := versionCommentPattern.MatchString(comment); got != tt.versionComment {
+					t.Errorf("versionCommentPattern.MatchString(%q) = %v, want %v", comment, got, tt.versionComment)
 				}
 			}
 			if tt.classify != "" {
@@ -79,15 +91,15 @@ func TestWorkflowExternalActionsArePinned(t *testing.T) {
 		}
 
 		for lineNumber, line := range strings.Split(string(content), "\n") {
-			matches := workflowActionPattern.FindStringSubmatch(line)
-			if matches == nil || !isExternalGitHubAction(matches[1]) {
+			action, ref, comment, ok := parseWorkflowAction(line)
+			if !ok || !isExternalGitHubAction(action) {
 				continue
 			}
-			if !fullSHAPattern.MatchString(matches[2]) {
-				t.Errorf("%s:%d: external action %q must use a full 40-hex commit SHA", path, lineNumber+1, matches[1])
+			if !fullSHAPattern.MatchString(ref) {
+				t.Errorf("%s:%d: external action %q must use a full 40-hex commit SHA", path, lineNumber+1, action)
 			}
-			if !versionCommentPattern.MatchString(matches[3]) {
-				t.Errorf("%s:%d: external action %q must have an adjacent version comment", path, lineNumber+1, matches[1])
+			if !versionCommentPattern.MatchString(comment) {
+				t.Errorf("%s:%d: external action %q must have an adjacent version comment", path, lineNumber+1, action)
 			}
 		}
 	}
