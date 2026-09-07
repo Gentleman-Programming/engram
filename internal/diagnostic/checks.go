@@ -124,9 +124,9 @@ func (c ManualSessionNameProjectMismatchCheck) Run(ctx context.Context, scope Sc
 			Severity:             SeverityWarning,
 			ReasonCode:           "manual_session_name_project_mismatch",
 			Message:              "Manual session name suffix does not match sessions.project.",
-			Why:                  "Manual session naming drift can hide memories from project-scoped context retrieval.",
-			Evidence:             mustJSON(map[string]any{"session_id": session.ID, "session_name": session.Name, "session_project": session.Project, "name_project": nameProject}),
-			SafeNextStep:         "Use `engram context --project <project>` or MCP `project` overrides explicitly before deciding whether to consolidate projects.",
+			Why:                  "Manual session naming drift cannot prove project ownership and must not be auto-rescued.",
+			Evidence:             mustJSON(map[string]any{"session_id": session.ID, "session_name": session.Name, "session_project": session.Project, "ownership_mode": session.OwnershipMode, "name_project": nameProject}),
+			SafeNextStep:         "Review the persisted project, then use the ownership rescue command deliberately; its SQLite backup is the rollback point.",
 			RequiresConfirmation: true,
 		})
 	}
@@ -352,18 +352,20 @@ func (c UnownedSessionProjectCheck) Run(ctx context.Context, scope Scope) (Check
 	}
 	findings := make([]Finding, 0)
 	for _, session := range sessions {
-		if normalizeProjectName(session.Project) != "" {
+		mode := strings.TrimSpace(session.OwnershipMode)
+		if normalizeProjectName(session.Project) != "" && (mode == store.SessionOwnershipShared || mode == store.SessionOwnershipProjectOwned) {
 			continue
 		}
 		findings = append(findings, Finding{
 			CheckID:    c.Code(),
 			Severity:   SeverityWarning,
 			ReasonCode: CheckUnownedSessionProject,
-			Message:    fmt.Sprintf("Session %q identifies no project.", session.ID),
-			Why:        "A session left over from the schema where sessions.project was nullable owns no project, so its memories stay outside every project-scoped retrieval and writes to it must resolve ownership before they can land.",
+			Message:    fmt.Sprintf("Session %q has unclassified or invalid ownership metadata.", session.ID),
+			Why:        "Legacy, blank, and invalid ownership metadata cannot safely establish a project-owned session, so an operator must classify it explicitly before relying on ownership enforcement.",
 			Evidence: mustJSON(map[string]any{
 				"session_id":      session.ID,
 				"session_project": session.Project,
+				"ownership_mode":  session.OwnershipMode,
 				"directory":       session.Directory,
 			}),
 			SafeNextStep:         fmt.Sprintf("Assign ownership with `%s --project <name> --session %s` after confirming which project the session belongs to.", store.RescueOwnershipCommand, session.ID),

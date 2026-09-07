@@ -723,14 +723,15 @@ func TestDashboardManagedUserDetailHidesRevokeFormForRevokedTokens(t *testing.T)
 	}
 }
 
-// TestDashboardLegacyAdminCanViewButNotMutateManagedUsers is a WARNING
-// coverage addition (FIX E): a legacy/bootstrap-admin dashboard session can
-// read the managed user detail page (lenient isDashboardAdmin check) but is
-// forbidden from mutating (requireManagedAdmin), proving the dual-tier
-// authorization boundary.
+// TestDashboardLegacyAdminCanViewButNotMutateManagedUsers proves that a legacy
+// dashboard-admin session retains managed-user read access while receiving no
+// managed-user mutation controls. Direct POSTs remain denied by the existing
+// requireManagedAdmin server-side guard.
 func TestDashboardLegacyAdminCanViewButNotMutateManagedUsers(t *testing.T) {
 	store := newLoginAuditTestStore()
 	store.users = append(store.users, cloudstore.HumanUser{PrincipalID: "p-target", Username: "target-user", Role: "member", Enabled: true})
+	store.tokens = append(store.tokens, cloudstore.PrincipalToken{ID: "tok-target", PrincipalID: "p-target", TokenPrefix: "egc_live_safe", Name: "laptop"})
+	store.grants = append(store.grants, cloudstore.ProjectGrant{PrincipalID: "p-target", Project: "alpha"})
 	hasher, err := cloudauth.NewManagedTokenHasher([]byte("test-token-pepper-at-least-32-bytes"))
 	if err != nil {
 		t.Fatalf("new token hasher: %v", err)
@@ -738,17 +739,121 @@ func TestDashboardLegacyAdminCanViewButNotMutateManagedUsers(t *testing.T) {
 	srv := New(store, legacyAdminOnlyAuthService(t), 0, WithAdminIdentityStore(store), WithManagedTokenHasher(hasher), WithDashboardAdminToken("legacy-admin-token"))
 	cookie := managedDashboardLogin(t, srv, "legacy-admin-token", false)
 
+	shellRec := performDashboardRequest(srv, http.MethodGet, "/dashboard/admin/users", cookie)
+	if shellRec.Code != http.StatusOK {
+		t.Fatalf("expected legacy admin dashboard session to view the managed users shell, got %d body=%q", shellRec.Code, shellRec.Body.String())
+	}
+	shellBody := shellRec.Body.String()
+	for _, marker := range []string{"Managed-user administration requires a managed admin token.", "engram cloud bootstrap admin --issue-token", "engram cloud bootstrap recover-token"} {
+		if !strings.Contains(shellBody, marker) {
+			t.Fatalf("expected actionable legacy-admin guidance %q, body=%q", marker, shellBody)
+		}
+	}
+	if strings.Contains(shellBody, `action="/dashboard/admin/users" class="managed-user-form"`) || strings.Contains(shellBody, "Create User") {
+		t.Fatalf("legacy admin shell must not expose managed-user creation controls, body=%q", shellBody)
+	}
+
+	listRec := performDashboardRequest(srv, http.MethodGet, "/dashboard/admin/users/list", cookie)
+	if listRec.Code != http.StatusOK || !strings.Contains(listRec.Body.String(), "target-user") {
+		t.Fatalf("expected legacy admin dashboard session to view the managed users list, got %d body=%q", listRec.Code, listRec.Body.String())
+	}
+	if strings.Contains(listRec.Body.String(), "/dashboard/admin/users/p-target/disable") {
+		t.Fatalf("legacy admin list must not expose enable/disable controls, body=%q", listRec.Body.String())
+	}
+
 	detailRec := performDashboardRequest(srv, http.MethodGet, "/dashboard/admin/users/p-target", cookie)
 	if detailRec.Code != http.StatusOK {
 		t.Fatalf("expected legacy admin dashboard session to view the managed user detail page, got %d body=%q", detailRec.Code, detailRec.Body.String())
 	}
-
-	createTokenRec := performDashboardForm(srv, http.MethodPost, "/dashboard/admin/users/p-target/tokens", "name=laptop", cookie, false)
-	if createTokenRec.Code != http.StatusForbidden {
-		t.Fatalf("expected legacy admin dashboard session to be forbidden from a managed-token mutation, got %d body=%q", createTokenRec.Code, createTokenRec.Body.String())
+	detailBody := detailRec.Body.String()
+	for _, marker := range []string{"target-user", "egc_live_safe", "alpha", "Managed-user administration requires a managed admin token."} {
+		if !strings.Contains(detailBody, marker) {
+			t.Fatalf("expected legacy admin detail marker %q, body=%q", marker, detailBody)
+		}
 	}
-	if store.createTokenCalls != 0 {
-		t.Fatalf("forbidden mutation must not create a token, got %d calls", store.createTokenCalls)
+	for _, unavailable := range []string{
+		`/dashboard/admin/users/p-target/disable`,
+		`/dashboard/admin/users/p-target/tokens`,
+		`/dashboard/admin/tokens/tok-target/revoke`,
+		`/dashboard/admin/users/p-target/grants`,
+		"Disable User",
+		"Create Token",
+		"Grant Project",
+		">Revoke</button>",
+	} {
+		if strings.Contains(detailBody, unavailable) {
+			t.Fatalf("legacy admin detail must not expose unavailable mutation control %q, body=%q", unavailable, detailBody)
+		}
+	}
+
+	for _, tc := range []struct {
+		path string
+		form string
+	}{
+		{path: "/dashboard/admin/users", form: "username=mallory&role=member"},
+		{path: "/dashboard/admin/users/p-target/disable"},
+		{path: "/dashboard/admin/users/p-target/enable"},
+		{path: "/dashboard/admin/users/p-target/tokens", form: "name=laptop"},
+		{path: "/dashboard/admin/tokens/tok-target/revoke", form: "reason=lost"},
+		{path: "/dashboard/admin/users/p-target/grants", form: "project=beta"},
+		{path: "/dashboard/admin/users/p-target/grants/alpha/revoke"},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			rec := performDashboardForm(srv, http.MethodPost, tc.path, tc.form, cookie, false)
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("expected legacy admin dashboard session to be forbidden from a managed-user mutation, got %d body=%q", rec.Code, rec.Body.String())
+			}
+		})
+	}
+	if store.createUserCalls != 0 || store.setEnabledCalls != 0 || store.createTokenCalls != 0 || store.revokeTokenCalls != 0 || store.createGrantCalls != 0 || store.revokeGrantCalls != 0 {
+		t.Fatalf("forbidden legacy dashboard requests must not mutate state: user=%d enabled=%d token=%d revokeToken=%d grant=%d revokeGrant=%d", store.createUserCalls, store.setEnabledCalls, store.createTokenCalls, store.revokeTokenCalls, store.createGrantCalls, store.revokeGrantCalls)
+	}
+}
+
+// TestDashboardManagedAdminSeesManagedUserMutationControls proves the managed
+// token admin capability is propagated to both the shell and user detail
+// rendering. Successful mutation flows remain covered by the focused tests
+// above for create/enable/disable/token/grant/revoke behavior.
+func TestDashboardManagedAdminSeesManagedUserMutationControls(t *testing.T) {
+	srv, store, cookie := dashboardAdminUsersTestServer(t)
+	store.users = append(store.users, cloudstore.HumanUser{PrincipalID: "p-target", Username: "target-user", Role: "member", Enabled: true})
+	store.tokens = append(store.tokens, cloudstore.PrincipalToken{ID: "tok-target", PrincipalID: "p-target", TokenPrefix: "egc_live_safe", Name: "laptop"})
+	store.grants = append(store.grants, cloudstore.ProjectGrant{PrincipalID: "p-target", Project: "alpha"})
+
+	shellRec := performDashboardRequest(srv, http.MethodGet, "/dashboard/admin/users", cookie)
+	if shellRec.Code != http.StatusOK {
+		t.Fatalf("expected managed admin dashboard session to view the managed users shell, got %d body=%q", shellRec.Code, shellRec.Body.String())
+	}
+	if !strings.Contains(shellRec.Body.String(), `action="/dashboard/admin/users" class="managed-user-form"`) || !strings.Contains(shellRec.Body.String(), "Create User") {
+		t.Fatalf("managed admin shell must expose managed-user creation controls, body=%q", shellRec.Body.String())
+	}
+
+	listRec := performDashboardRequest(srv, http.MethodGet, "/dashboard/admin/users/list", cookie)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("expected managed admin dashboard session to view the managed users list, got %d body=%q", listRec.Code, listRec.Body.String())
+	}
+	if !strings.Contains(listRec.Body.String(), `/dashboard/admin/users/p-target/disable`) {
+		t.Fatalf("managed admin list must expose the enabled user's disable control, body=%q", listRec.Body.String())
+	}
+
+	detailRec := performDashboardRequest(srv, http.MethodGet, "/dashboard/admin/users/p-target", cookie)
+	if detailRec.Code != http.StatusOK {
+		t.Fatalf("expected managed admin dashboard session to view the managed user detail page, got %d body=%q", detailRec.Code, detailRec.Body.String())
+	}
+	for _, control := range []string{
+		`/dashboard/admin/users/p-target/disable`,
+		`/dashboard/admin/users/p-target/tokens`,
+		`/dashboard/admin/tokens/tok-target/revoke`,
+		`/dashboard/admin/users/p-target/grants`,
+		`/dashboard/admin/users/p-target/grants/alpha/revoke`,
+		"Disable User",
+		"Create Token",
+		"Grant Project",
+		">Revoke</button>",
+	} {
+		if !strings.Contains(detailRec.Body.String(), control) {
+			t.Fatalf("managed admin detail must expose mutation control %q, body=%q", control, detailRec.Body.String())
+		}
 	}
 }
 

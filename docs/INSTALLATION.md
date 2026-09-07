@@ -2,6 +2,7 @@
 
 # Installation
 
+- [Choose a release channel before installing](#choose-a-release-channel-before-installing)
 - [Homebrew (macOS / Linux)](#homebrew-macos--linux)
 - [Windows](#windows)
 - [Install from source (macOS / Linux)](#install-from-source-macos--linux)
@@ -9,6 +10,12 @@
 - [Requirements](#requirements)
 - [Environment Variables](#environment-variables)
 - [Windows Config Paths](#windows-config-paths)
+
+---
+
+## Choose a release channel before installing
+
+The latest stable release is the production and security-supported line. Release candidates are prerelease validation and feedback builds, not a universal production recommendation or a guaranteed security-supported channel. See the [Release Policy](./RELEASE-POLICY.md) for channel, upgrade, and rollback guidance.
 
 ---
 
@@ -198,7 +205,8 @@ The binary includes SQLite (via [modernc.org/sqlite](https://pkg.go.dev/modernc.
 | Variable | Description | Default |
 |---|---|---|
 | `ENGRAM_DATA_DIR` | Data directory | `~/.engram` (Windows: `%USERPROFILE%\.engram`) |
-| `ENGRAM_PORT` | HTTP server port | `7437` |
+| `ENGRAM_PORT` | HTTP server port. Use an unsigned decimal value from `1` through `65535`; invalid values fall back to `7437` in `engram serve` and Claude Bash hooks. | `7437` |
+| `ENGRAM_SOCKET` | POSIX-only Unix-domain socket path. Run `engram serve --socket /path/to/engram.sock` (or set `ENGRAM_SOCKET`) to listen exclusively on the socket; do not combine it with an explicit TCP port. Claude Bash hooks use the same socket when the variable is exported and warn on stderr if socket transport cannot preserve memory capture. PowerShell remains TCP-only. | (unset) |
 
 ---
 

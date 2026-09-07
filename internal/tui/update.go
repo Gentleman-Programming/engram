@@ -20,6 +20,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.Width = msg.Width
 		m.Height = msg.Height
+		m = m.clampViewport()
 		return m, nil
 
 	case tea.KeyMsg:
@@ -544,13 +545,16 @@ func (m Model) handleRecentKeys(key string) (tea.Model, tea.Cmd) {
 // ─── Observation Detail ──────────────────────────────────────────────────────
 
 func (m Model) handleObservationDetailKeys(key string) (tea.Model, tea.Cmd) {
+	m.DetailScroll = m.clampDetailScroll()
 	switch key {
 	case "up", "k":
 		if m.DetailScroll > 0 {
 			m.DetailScroll--
 		}
 	case "down", "j":
-		m.DetailScroll++
+		if m.DetailScroll < m.observationDetailMaxScroll() {
+			m.DetailScroll++
+		}
 	case "c":
 		if m.SelectedObservation != nil {
 			return m, copyToClipboard(m.SelectedObservation.Content)
@@ -701,6 +705,14 @@ func (m Model) handleSessionDetailKeys(key string) (tea.Model, tea.Cmd) {
 		return m, loadRecentSessions(m.store)
 	}
 	return m, nil
+}
+
+func (m Model) clampViewport() Model {
+	switch m.Screen {
+	case ScreenObservationDetail:
+		m.DetailScroll = m.clampDetailScroll()
+	}
+	return m
 }
 
 // ─── Setup ───────────────────────────────────────────────────────────────────

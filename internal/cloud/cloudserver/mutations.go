@@ -92,13 +92,16 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 
 	// BR2-1: Reject any entry with an empty project before auth/pause checks.
 	// An empty project is always invalid: it bypasses per-project auth and would
-	// be inserted into cloud_mutations with a blank project column.
-	for _, entry := range req.Entries {
-		if strings.TrimSpace(entry.Project) == "" {
+	// be inserted into cloud_mutations with a blank project column. Normalize
+	// each validated entry at this boundary so every subsequent policy, audit,
+	// response, and storage use shares the same project identity.
+	for i := range req.Entries {
+		if strings.TrimSpace(req.Entries[i].Project) == "" {
 			writeActionableError(w, http.StatusBadRequest, "invalid_request", "empty_project",
 				"mutation entries must specify a project")
 			return
 		}
+		req.Entries[i].Project = project.CanonicalizeProjectName(req.Entries[i].Project)
 	}
 
 	// N4: Assert MutationStore once here; use ms throughout (pause gate + InsertMutationBatch).
@@ -116,12 +119,11 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 	// guarantees every entry has a non-empty project before this loop is reached.
 	seen := make(map[string]struct{})
 	for _, entry := range req.Entries {
-		project := strings.TrimSpace(entry.Project)
-		if _, ok := seen[project]; ok {
+		if _, ok := seen[entry.Project]; ok {
 			continue
 		}
-		seen[project] = struct{}{}
-		if !s.authorizeProjectScope(r.Context(), w, project) {
+		seen[entry.Project] = struct{}{}
+		if !s.authorizeProjectScope(r.Context(), w, entry.Project) {
 			// authorizeProjectScope already wrote the 403 response.
 			return
 		}
@@ -131,11 +133,11 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 	// Server-side has no filesystem cwd semantics; source is always "request_body".
 	// N3: The `if len(req.Entries) > 0` guard is removed — JC1 (above) guarantees
 	// at least one entry exists at this point.
-	primaryProject := strings.TrimSpace(req.Entries[0].Project)
+	primaryProject := req.Entries[0].Project
 
 	// Check sync pause per project (REQ-203 + BW9: use writeActionableError for 409).
 	for _, entry := range req.Entries {
-		proj := strings.TrimSpace(entry.Project)
+		proj := entry.Project
 		enabled, err := ms.IsProjectSyncEnabled(proj)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("check project sync: %v", err), http.StatusInternalServerError)

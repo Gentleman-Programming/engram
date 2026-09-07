@@ -930,8 +930,8 @@ func TestHandleSearchResultsAndObservationDetailRemainingBranches(t *testing.T) 
 	m.SelectedObservation = &store.Observation{ID: 5}
 	updatedModel, _ = m.handleObservationDetailKeys("down")
 	updated = updatedModel.(Model)
-	if updated.DetailScroll != 1 {
-		t.Fatal("down should increase detail scroll")
+	if updated.DetailScroll != 0 {
+		t.Fatal("detail scroll should stay at zero without an available viewport")
 	}
 	updatedModel, _ = updated.handleObservationDetailKeys("up")
 	if updatedModel.(Model).DetailScroll != 0 {

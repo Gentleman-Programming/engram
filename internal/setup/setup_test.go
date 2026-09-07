@@ -40,6 +40,7 @@ func resetSetupSeams(t *testing.T) {
 	oldUserHomeDir := userHomeDir
 	oldLookPathFn := lookPathFn
 	oldRunCommand := runCommand
+	oldRunCommandWithContext := runCommandWithContext
 	oldStatFn := statFn
 	oldLstatFn := lstatFn
 	oldOpenCodeReadFile := openCodeReadFile
@@ -66,6 +67,7 @@ func resetSetupSeams(t *testing.T) {
 		userHomeDir = oldUserHomeDir
 		lookPathFn = oldLookPathFn
 		runCommand = oldRunCommand
+		runCommandWithContext = oldRunCommandWithContext
 		statFn = oldStatFn
 		lstatFn = oldLstatFn
 		openCodeReadFile = oldOpenCodeReadFile
@@ -230,6 +232,7 @@ func TestInstallGeminiCLIInjectsMCPConfig(t *testing.T) {
 		t.Fatalf("read system prompt: %v", err)
 	}
 	systemText := string(systemRaw)
+	assertGeneratedDeliveryGuarantee(t, systemText)
 	if !strings.Contains(systemText, "### AFTER COMPACTION") {
 		t.Fatalf("expected AFTER COMPACTION section in system prompt")
 	}
@@ -355,6 +358,7 @@ func TestInstallCodexInjectsTOMLAndIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read codex instructions: %v", err)
 	}
+	assertGeneratedDeliveryGuarantee(t, string(instructionsRaw))
 	if !strings.Contains(string(instructionsRaw), "### AFTER COMPACTION") {
 		t.Fatalf("expected AFTER COMPACTION section in codex instructions")
 	}
@@ -1476,13 +1480,114 @@ func TestInstallClaudeCodeBranches(t *testing.T) {
 	})
 }
 
+func TestVerifyClaudeCodeSlimCapability(t *testing.T) {
+	verified := `{"plugins":[{"name":"engram","version":"0.1.1","enabled":true,"marketplace":"engram"}]}`
+	current := `[{"name":"engram@engram","version":"0.1.2","enabled":true,"marketplace":"Gentleman-Programming/engram"}]`
+
+	tests := []struct {
+		name    string
+		output  string
+		runErr  error
+		wantErr bool
+	}{
+		{name: "supported floor", output: verified},
+		{name: "supported current array", output: current},
+		{name: "old version", output: `{"plugins":[{"name":"engram","version":"0.1.0","enabled":true,"marketplace":"engram"}]}`, wantErr: true},
+		{name: "command failure", runErr: errors.New("unknown flag: --json"), wantErr: true},
+		{name: "malformed JSON", output: `{`, wantErr: true},
+		{name: "missing plugin", output: `{"plugins":[]}`, wantErr: true},
+		{name: "unrelated plugin name", output: `{"plugins":[{"name":"other","version":"0.1.2","enabled":true,"marketplace":"engram"}]}`, wantErr: true},
+		{name: "wrong marketplace", output: `{"plugins":[{"name":"engram","version":"0.1.2","enabled":true,"marketplace":"other"}]}`, wantErr: true},
+		{name: "disabled plugin", output: `{"plugins":[{"name":"engram","version":"0.1.2","enabled":false,"marketplace":"engram"}]}`, wantErr: true},
+		{name: "missing enabled", output: `{"plugins":[{"name":"engram","version":"0.1.2","marketplace":"engram"}]}`, wantErr: true},
+		{name: "ambiguous plugins", output: `{"plugins":[{"name":"engram","version":"0.1.2","enabled":true,"marketplace":"engram"},{"name":"engram","version":"0.1.2","enabled":true,"marketplace":"engram"}]}`, wantErr: true},
+		{name: "invalid version", output: `{"plugins":[{"name":"engram","version":"current","enabled":true,"marketplace":"engram"}]}`, wantErr: true},
+		{name: "floor prerelease", output: `{"plugins":[{"name":"engram","version":"0.1.1-beta.1","enabled":true,"marketplace":"engram"}]}`, wantErr: true},
+		{name: "malformed suffix", output: `{"plugins":[{"name":"engram","version":"0.1.1+","enabled":true,"marketplace":"engram"}]}`, wantErr: true},
+		{name: "missing marketplace", output: `{"plugins":[{"name":"engram","version":"0.1.2","enabled":true}]}`, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resetSetupSeams(t)
+			lookPathFn = func(string) (string, error) { return "/test/claude", nil }
+			calls := 0
+			runCommandWithContext = func(_ context.Context, name string, args ...string) ([]byte, error) {
+				calls++
+				if name != "/test/claude" || !reflect.DeepEqual(args, []string{"plugin", "list", "--json"}) {
+					t.Fatalf("command = %q %q, want claude plugin list --json", name, args)
+				}
+				return []byte(tt.output), tt.runErr
+			}
+
+			err := VerifyClaudeCodeSlimCapability()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("VerifyClaudeCodeSlimCapability() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if calls != 1 {
+				t.Fatalf("claude plugin list invocations = %d, want 1", calls)
+			}
+		})
+	}
+}
+
+func TestVerifyClaudeCodeSlimCapabilityProbeBounds(t *testing.T) {
+	resetSetupSeams(t)
+	lookPathFn = func(string) (string, error) { return "", errors.New("not found") }
+	runCommandWithContext = func(context.Context, string, ...string) ([]byte, error) {
+		t.Fatal("probe must not run")
+		return nil, nil
+	}
+	if err := VerifyClaudeCodeSlimCapability(); err == nil {
+		t.Fatal("expected missing Claude error")
+	}
+	lookPathFn = func(string) (string, error) { return "/test/claude", nil }
+	runCommandWithContext = func(ctx context.Context, _ string, _ ...string) ([]byte, error) {
+		if _, ok := ctx.Deadline(); !ok {
+			t.Fatal("probe context has no deadline")
+		}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	if err := VerifyClaudeCodeSlimCapability(); err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("error = %v, want timeout", err)
+	}
+}
+
+func TestParseClaudeCodePluginVersion(t *testing.T) {
+	tests := []struct {
+		version        string
+		wantPrerelease bool
+		wantValid      bool
+		wantFloor      bool
+	}{
+		{version: "0.1.1", wantValid: true, wantFloor: true},
+		{version: "0.1.1+build.7", wantValid: true, wantFloor: true},
+		{version: "0.1.2-rc.1", wantPrerelease: true, wantValid: true, wantFloor: true},
+		{version: "0.1.1-beta.1", wantPrerelease: true, wantValid: true},
+		{version: "0.1.1-"},
+		{version: "0.1.1+"},
+		{version: "0.1.1+bad+extra"},
+		{version: "0.1.1-beta..1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.version, func(t *testing.T) {
+			_, prerelease, valid := parseClaudeCodePluginVersion(tt.version)
+			if prerelease != tt.wantPrerelease || valid != tt.wantValid || meetsClaudeCodeSlimPluginFloor(tt.version) != tt.wantFloor {
+				t.Fatalf("parseClaudeCodePluginVersion(%q) = prerelease %v, valid %v; floor %v", tt.version, prerelease, valid, meetsClaudeCodeSlimPluginFloor(tt.version))
+			}
+		})
+	}
+}
+
 // ─── Issue #100: Windows PATH fix ────────────────────────────────────────────
 
 func TestWriteClaudeCodeUserMCP(t *testing.T) {
 	t.Run("writes json with absolute binary path", func(t *testing.T) {
 		resetSetupSeams(t)
 		home := useTestHome(t)
-		osExecutable = func() (string, error) { return "/usr/local/bin/engram", nil }
+		executable := filepath.Join(t.TempDir(), "engram")
+		osExecutable = func() (string, error) { return executable, nil }
 
 		if err := writeClaudeCodeUserMCP(); err != nil {
 			t.Fatalf("writeClaudeCodeUserMCP failed: %v", err)
@@ -1499,7 +1604,7 @@ func TestWriteClaudeCodeUserMCP(t *testing.T) {
 			t.Fatalf("parse mcp config: %v", err)
 		}
 
-		if cfg["command"] != "/usr/local/bin/engram" {
+		if cfg["command"] != executable {
 			t.Fatalf("expected absolute path command, got %#v", cfg["command"])
 		}
 		args, ok := cfg["args"].([]any)
@@ -1511,7 +1616,8 @@ func TestWriteClaudeCodeUserMCP(t *testing.T) {
 	t.Run("overwrites existing (idempotent — always refreshes path)", func(t *testing.T) {
 		resetSetupSeams(t)
 		home := useTestHome(t)
-		osExecutable = func() (string, error) { return "/new/path/engram", nil }
+		executable := filepath.Join(t.TempDir(), "engram")
+		osExecutable = func() (string, error) { return executable, nil }
 
 		mcpDir := filepath.Join(home, ".claude", "mcp")
 		if err := os.MkdirAll(mcpDir, 0755); err != nil {
@@ -1533,8 +1639,71 @@ func TestWriteClaudeCodeUserMCP(t *testing.T) {
 		if err := json.Unmarshal(raw, &cfg); err != nil {
 			t.Fatalf("parse config: %v", err)
 		}
-		if cfg["command"] != "/new/path/engram" {
+		if cfg["command"] != executable {
 			t.Fatalf("expected updated command, got %#v", cfg["command"])
+		}
+	})
+
+	t.Run("rejects symlink without changing its target", func(t *testing.T) {
+		resetSetupSeams(t)
+		home := useTestHome(t)
+		executable := filepath.Join(t.TempDir(), "engram")
+		osExecutable = func() (string, error) { return executable, nil }
+
+		target := filepath.Join(t.TempDir(), "user-owned.json")
+		const original = `{"command":"user-owned"}`
+		if err := os.WriteFile(target, []byte(original), 0644); err != nil {
+			t.Fatalf("write symlink target: %v", err)
+		}
+		path := filepath.Join(home, ".claude", "mcp", "engram.json")
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatalf("create MCP directory: %v", err)
+		}
+		if err := os.Symlink(target, path); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+
+		err := writeClaudeCodeUserMCP()
+		if err == nil || !strings.Contains(err.Error(), "regular file") {
+			t.Fatalf("expected symlink rejection, got %v", err)
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatalf("lstat MCP config: %v", err)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("MCP config is no longer a symlink: mode %v", info.Mode())
+		}
+		raw, err := os.ReadFile(target)
+		if err != nil {
+			t.Fatalf("read symlink target: %v", err)
+		}
+		if string(raw) != original {
+			t.Fatalf("symlink target was changed: got %q want %q", raw, original)
+		}
+	})
+
+	t.Run("rejects dangling symlink", func(t *testing.T) {
+		resetSetupSeams(t)
+		home := useTestHome(t)
+		path := filepath.Join(home, ".claude", "mcp", "engram.json")
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatalf("create MCP directory: %v", err)
+		}
+		if err := os.Symlink(filepath.Join(t.TempDir(), "missing.json"), path); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+
+		err := writeClaudeCodeUserMCP()
+		if err == nil || !strings.Contains(err.Error(), "regular file") {
+			t.Fatalf("expected dangling symlink rejection, got %v", err)
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatalf("lstat MCP config: %v", err)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("MCP config is no longer a symlink: mode %v", info.Mode())
 		}
 	})
 
@@ -1546,11 +1715,12 @@ func TestWriteClaudeCodeUserMCP(t *testing.T) {
 		// versioned Cellar path, which broke once brew removed the old version.
 		resetSetupSeams(t)
 		home := useTestHome(t)
-		cellarExe := "/opt/homebrew/Cellar/engram/1.20.0/bin/engram"
-		stableSymlink := "/opt/homebrew/bin/engram"
+		brewPrefix := t.TempDir()
+		cellarExe := filepath.Join(brewPrefix, "Cellar", "engram", "1.20.0", "bin", "engram")
+		stableSymlink := filepath.Join(brewPrefix, "bin", "engram")
 		osExecutable = func() (string, error) { return cellarExe, nil }
 		statFn = func(name string) (os.FileInfo, error) {
-			if filepath.ToSlash(name) == stableSymlink {
+			if filepath.ToSlash(name) == filepath.ToSlash(stableSymlink) {
 				return nil, nil // stable symlink exists on disk
 			}
 			return nil, os.ErrNotExist
@@ -1573,7 +1743,7 @@ func TestWriteClaudeCodeUserMCP(t *testing.T) {
 		if !ok {
 			t.Fatalf("expected string command, got %#v", cfg["command"])
 		}
-		if filepath.ToSlash(got) != stableSymlink {
+		if filepath.ToSlash(got) != filepath.ToSlash(stableSymlink) {
 			t.Fatalf("expected stable symlink %q, got %q", stableSymlink, got)
 		}
 		if strings.Contains(got, "Cellar") {
@@ -1587,7 +1757,7 @@ func TestWriteClaudeCodeUserMCP(t *testing.T) {
 		// must preserve the already-obtained absolute exe, or error.
 		resetSetupSeams(t)
 		home := useTestHome(t)
-		cellarExe := "/opt/homebrew/Cellar/engram/1.20.0/bin/engram"
+		cellarExe := filepath.Join(t.TempDir(), "Cellar", "engram", "1.20.0", "bin", "engram")
 		osExecutable = func() (string, error) { return cellarExe, nil }
 		statFn = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
 
@@ -1614,7 +1784,7 @@ func TestWriteClaudeCodeUserMCP(t *testing.T) {
 		if !filepath.IsAbs(got) {
 			t.Fatalf("expected absolute command, got %q", got)
 		}
-		if filepath.ToSlash(got) != cellarExe {
+		if filepath.ToSlash(got) != filepath.ToSlash(cellarExe) {
 			t.Fatalf("expected absolute exe %q preserved, got %q", cellarExe, got)
 		}
 	})
@@ -1649,7 +1819,8 @@ func TestWriteClaudeCodeUserMCP(t *testing.T) {
 	t.Run("marshal error returns error", func(t *testing.T) {
 		resetSetupSeams(t)
 		useTestHome(t)
-		osExecutable = func() (string, error) { return "/bin/engram", nil }
+		executable := filepath.Join(t.TempDir(), "engram")
+		osExecutable = func() (string, error) { return executable, nil }
 		jsonMarshalIndentFn = func(any, string, string) ([]byte, error) {
 			return nil, errors.New("marshal boom")
 		}
@@ -1660,10 +1831,11 @@ func TestWriteClaudeCodeUserMCP(t *testing.T) {
 		}
 	})
 
-	t.Run("write error returns error", func(t *testing.T) {
+	t.Run("non-regular path is rejected", func(t *testing.T) {
 		resetSetupSeams(t)
 		home := useTestHome(t)
-		osExecutable = func() (string, error) { return "/bin/engram", nil }
+		executable := filepath.Join(t.TempDir(), "engram")
+		osExecutable = func() (string, error) { return executable, nil }
 		// Make ~/.claude/mcp/engram.json a directory so write fails
 		mcpDir := filepath.Join(home, ".claude", "mcp")
 		if err := os.MkdirAll(mcpDir, 0755); err != nil {
@@ -1674,8 +1846,8 @@ func TestWriteClaudeCodeUserMCP(t *testing.T) {
 		}
 
 		err := writeClaudeCodeUserMCP()
-		if err == nil || !strings.Contains(err.Error(), "write mcp config") {
-			t.Fatalf("expected write mcp config error, got %v", err)
+		if err == nil || !strings.Contains(err.Error(), "regular file") {
+			t.Fatalf("expected non-regular path error, got %v", err)
 		}
 	})
 
@@ -1687,7 +1859,8 @@ func TestWriteClaudeCodeUserMCP(t *testing.T) {
 			t.Fatalf("write blocking file: %v", err)
 		}
 		userHomeDir = func() (string, error) { return blocked, nil }
-		osExecutable = func() (string, error) { return "/bin/engram", nil }
+		executable := filepath.Join(t.TempDir(), "engram")
+		osExecutable = func() (string, error) { return executable, nil }
 
 		err := writeClaudeCodeUserMCP()
 		if err == nil || !strings.Contains(err.Error(), "create mcp dir") {
@@ -3105,6 +3278,331 @@ func TestClaudeCodeUserPromptHookWithoutJQPreservesSessionStateAndNudge(t *testi
 	}
 }
 
+func TestClaudeCodeUserPromptHookWithoutJQValidatesObservationArraysAndFirstSaveThreshold(t *testing.T) {
+	if testing.Short() {
+		t.Skip("runs the Claude Code shell hook as a child process")
+	}
+
+	bashPath, pathDirs := isolatedHookPath(t)
+	scriptPath, err := filepath.Abs(filepath.Join("..", "..", "plugin", "claude-code", "scripts", "user-prompt-submit.sh"))
+	if err != nil {
+		t.Fatalf("resolve user prompt hook path: %v", err)
+	}
+
+	now := time.Now().UTC()
+	staleNaiveUTC := now.Add(-20 * time.Minute).Format(time.DateTime)
+	recentNaiveUTC := now.Add(-5 * time.Minute).Format(time.DateTime)
+	tests := []struct {
+		name               string
+		observations       string
+		observationsStatus int
+		sessionAge         time.Duration
+		timezone           string
+		wantNudge          bool
+	}{
+		{name: "first save before general gate", observations: "[]", sessionAge: 4 * time.Minute, wantNudge: false},
+		{name: "first save before save threshold", observations: "[]", sessionAge: 10 * time.Minute, wantNudge: false},
+		{name: "first save after save threshold", observations: "[]", sessionAge: 20 * time.Minute, wantNudge: true},
+		{name: "whitespace empty array", observations: " \n\t[ \r\n ] \n", sessionAge: 20 * time.Minute, wantNudge: true},
+		{name: "whitespace after object comma", observations: fmt.Sprintf("[{\"created_at\":%q, \n\t\"type\":\"bugfix\"}]", staleNaiveUTC), timezone: "EST5", wantNudge: true},
+		{name: "timezone-less UTC timestamp under EST5", observations: fmt.Sprintf(`[{"created_at":%q}]`, staleNaiveUTC), timezone: "EST5", wantNudge: true},
+		{name: "recent timezone-less UTC timestamp under JST-9", observations: fmt.Sprintf(`[{"created_at":%q}]`, recentNaiveUTC), timezone: "JST-9", wantNudge: false},
+		{name: "observations non-success response", observations: "[]", observationsStatus: http.StatusInternalServerError, wantNudge: false},
+		{name: "malformed payload", observations: "[{", wantNudge: false},
+		{name: "non-array payload", observations: `{}`, wantNudge: false},
+		{name: "non-empty array without timestamp", observations: `[{}]`, wantNudge: false},
+		{name: "non-empty array with null timestamp", observations: `[{"created_at":null}]`, wantNudge: false},
+		{name: "non-empty array with non-string timestamp", observations: `[{"created_at":42}]`, wantNudge: false},
+		{name: "non-empty array with invalid timestamp", observations: `[{"created_at":"invalid"}]`, wantNudge: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/project/current":
+					_, _ = w.Write([]byte(`{"project":"hook-test","project_source":"config"}`))
+				case "/sessions/session-empty-array":
+					startedAt := "2000-01-01T00:00:00Z"
+					if tt.sessionAge != 0 {
+						startedAt = time.Now().Add(-tt.sessionAge).UTC().Format(time.DateTime)
+					}
+					_, _ = fmt.Fprintf(w, `{"started_at":%q}`, startedAt)
+				case "/observations":
+					if tt.observationsStatus != 0 {
+						w.WriteHeader(tt.observationsStatus)
+					}
+					_, _ = w.Write([]byte(tt.observations))
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			serverURL, err := url.Parse(server.URL)
+			if err != nil {
+				t.Fatalf("parse test server URL: %v", err)
+			}
+
+			env := withoutEnv(os.Environ(), "PATH", "TMPDIR", "TZ", "ENGRAM_PORT", "ENGRAM_CLAUDE_WINDOWS_BASH_SAFE_MODE", "ENGRAM_HOOK_MAX_TIME")
+			env = append(env,
+				"PATH="+strings.Join(pathDirs, string(os.PathListSeparator)),
+				"TMPDIR="+t.TempDir(),
+				"TZ="+tt.timezone,
+				"ENGRAM_PORT="+serverURL.Port(),
+				"ENGRAM_CLAUDE_WINDOWS_BASH_SAFE_MODE=0",
+				"ENGRAM_HOOK_MAX_TIME=1",
+			)
+
+			runHook := func() string {
+				t.Helper()
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, bashPath, scriptPath)
+				cmd.Env = env
+				cmd.Stdin = strings.NewReader(`{"cwd":"/workspace","session_id":"session-empty-array"}`)
+				var stdout, stderr bytes.Buffer
+				cmd.Stdout = &stdout
+				cmd.Stderr = &stderr
+				if err := cmd.Run(); err != nil {
+					t.Fatalf("run user prompt hook without jq: %v\nstderr: %s", err, stderr.String())
+				}
+				var response map[string]any
+				if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &response); err != nil {
+					t.Fatalf("user prompt hook emitted invalid JSON %q: %v", stdout.String(), err)
+				}
+				return stdout.String()
+			}
+
+			runHook()
+			output := runHook()
+			gotNudge := strings.Contains(output, "MEMORY REMINDER")
+			if gotNudge != tt.wantNudge {
+				t.Fatalf("second hook invocation nudge = %t, want %t; output: %q", gotNudge, tt.wantNudge, output)
+			}
+		})
+	}
+}
+
+func TestClaudeCodeUserPromptHookWithoutJQFirstSaveThresholdIsExact(t *testing.T) {
+	if testing.Short() {
+		t.Skip("runs the Claude Code shell hook as a child process")
+	}
+
+	const sessionID = "session-first-save-boundary"
+	fixedNow := time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC)
+	bashEnvPath := filepath.Join(t.TempDir(), "fixed-date.sh")
+	bashEnv := fmt.Sprintf(`date() {
+case "$*" in
+  "+%%s") printf '%%d\n' %d ;;
+  *"2024-12-31 23:45:01"*) printf '%%d\n' %d ;;
+  *"2024-12-31 23:45:00"*) printf '%%d\n' %d ;;
+  *) return 1 ;;
+esac
+}
+`, fixedNow.Unix(), fixedNow.Add(-899*time.Second).Unix(), fixedNow.Add(-900*time.Second).Unix())
+	if err := os.WriteFile(bashEnvPath, []byte(bashEnv), 0o600); err != nil {
+		t.Fatalf("write fixed date environment: %v", err)
+	}
+
+	bashPath, pathDirs := isolatedHookPath(t)
+	scriptPath, err := filepath.Abs(filepath.Join("..", "..", "plugin", "claude-code", "scripts", "user-prompt-submit.sh"))
+	if err != nil {
+		t.Fatalf("resolve user prompt hook path: %v", err)
+	}
+
+	for _, tt := range []struct {
+		name      string
+		startedAt string
+		wantNudge bool
+	}{
+		{name: "899 seconds", startedAt: "2024-12-31 23:45:01", wantNudge: false},
+		{name: "900 seconds", startedAt: "2024-12-31 23:45:00", wantNudge: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/project/current":
+					_, _ = io.WriteString(w, `{"project":"hook-test","project_source":"config"}`)
+				case "/sessions/" + sessionID:
+					_, _ = fmt.Fprintf(w, `{"started_at":%q}`, tt.startedAt)
+				case "/observations":
+					_, _ = io.WriteString(w, "[]")
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			serverURL, err := url.Parse(server.URL)
+			if err != nil {
+				t.Fatalf("parse test server URL: %v", err)
+			}
+
+			env := withoutEnv(os.Environ(), "PATH", "TMPDIR", "BASH_ENV", "ENGRAM_PORT", "ENGRAM_CLAUDE_WINDOWS_BASH_SAFE_MODE", "ENGRAM_HOOK_MAX_TIME")
+			env = append(env,
+				"PATH="+strings.Join(pathDirs, string(os.PathListSeparator)),
+				"TMPDIR="+t.TempDir(),
+				"BASH_ENV="+bashEnvPath,
+				"ENGRAM_PORT="+serverURL.Port(),
+				"ENGRAM_CLAUDE_WINDOWS_BASH_SAFE_MODE=0",
+				"ENGRAM_HOOK_MAX_TIME=1",
+			)
+			runHook := func() string {
+				t.Helper()
+				cmd := exec.Command(bashPath, scriptPath)
+				cmd.Env = env
+				cmd.Stdin = strings.NewReader(`{"cwd":"/workspace","session_id":"` + sessionID + `"}`)
+				output, err := cmd.CombinedOutput()
+				if err != nil {
+					t.Fatalf("run user prompt hook without jq: %v\noutput: %s", err, output)
+				}
+				if !json.Valid(output) {
+					t.Fatalf("user prompt hook emitted invalid JSON %q", output)
+				}
+				return string(output)
+			}
+
+			runHook()
+			output := runHook()
+			if gotNudge := strings.Contains(output, "MEMORY REMINDER"); gotNudge != tt.wantNudge {
+				t.Fatalf("second hook invocation nudge = %t, want %t; output: %q", gotNudge, tt.wantNudge, output)
+			}
+		})
+	}
+}
+
+func TestExposeHookToolPreservesLookupName(t *testing.T) {
+	binDir := t.TempDir()
+
+	t.Run("regular file", func(t *testing.T) {
+		toolPath := filepath.Join(t.TempDir(), "regular-tool")
+		if err := os.WriteFile(toolPath, []byte("regular tool"), 0o755); err != nil {
+			t.Fatalf("write regular tool: %v", err)
+		}
+
+		if err := exposeHookTool(binDir, toolPath); err != nil {
+			t.Fatalf("expose regular tool: %v", err)
+		}
+
+		linkPath := filepath.Join(binDir, "regular-tool")
+		if data, err := os.ReadFile(linkPath); err != nil {
+			t.Fatalf("read exposed regular tool: %v", err)
+		} else if string(data) != "regular tool" {
+			t.Fatalf("exposed regular tool = %q, want %q", data, "regular tool")
+		}
+	})
+
+	t.Run("symlink with different target name", func(t *testing.T) {
+		toolDir := t.TempDir()
+		targetDir := filepath.Join(toolDir, "target")
+		if err := os.Mkdir(targetDir, 0o755); err != nil {
+			t.Fatalf("create target directory: %v", err)
+		}
+		targetPath := filepath.Join(targetDir, "resolved-target")
+		if err := os.WriteFile(targetPath, []byte("resolved target"), 0o755); err != nil {
+			t.Fatalf("write resolved target: %v", err)
+		}
+		toolPath := filepath.Join(toolDir, "requested-command")
+		if err := os.Symlink(filepath.Join("target", "resolved-target"), toolPath); err != nil {
+			t.Skipf("create command symlink: %v", err)
+		}
+
+		if err := exposeHookTool(binDir, toolPath); err != nil {
+			t.Fatalf("expose symlinked tool: %v", err)
+		}
+
+		linkPath := filepath.Join(binDir, "requested-command")
+		if data, err := os.ReadFile(linkPath); err != nil {
+			t.Fatalf("read exposed symlinked tool: %v", err)
+		} else if string(data) != "resolved target" {
+			t.Fatalf("exposed symlinked tool = %q, want %q", data, "resolved target")
+		}
+		if _, err := os.Stat(filepath.Join(binDir, "resolved-target")); !os.IsNotExist(err) {
+			t.Fatalf("resolved target basename unexpectedly exposed: %v", err)
+		}
+	})
+
+	t.Run("relative tool path falls back to absolute symlink target", func(t *testing.T) {
+		fallbackBinDir := t.TempDir()
+		rootDir := t.TempDir()
+		toolDir := filepath.Join(rootDir, "tools")
+		targetDir := filepath.Join(toolDir, "target")
+		if err := os.MkdirAll(targetDir, 0o755); err != nil {
+			t.Fatalf("create target directory: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(targetDir, "resolved-target"), []byte("resolved target"), 0o755); err != nil {
+			t.Fatalf("write resolved target: %v", err)
+		}
+		if err := os.Symlink(filepath.Join("target", "resolved-target"), filepath.Join(toolDir, "requested-command")); err != nil {
+			t.Skipf("create command symlink: %v", err)
+		}
+		fallbackProbe := filepath.Join(fallbackBinDir, "symlink-fallback-probe")
+		if err := os.Symlink(filepath.Join(targetDir, "resolved-target"), fallbackProbe); err != nil {
+			t.Skipf("symlink fallback unavailable: %v", err)
+		}
+		if err := os.Remove(fallbackProbe); err != nil {
+			t.Fatalf("remove fallback symlink probe: %v", err)
+		}
+
+		t.Chdir(rootDir)
+		if err := exposeHookToolWithLink(fallbackBinDir, filepath.Join("tools", "requested-command"), func(string, string) error {
+			return fmt.Errorf("force symlink fallback")
+		}); err != nil {
+			t.Fatalf("expose symlinked tool with fallback: %v", err)
+		}
+
+		linkPath := filepath.Join(fallbackBinDir, "requested-command")
+		linkTarget, err := os.Readlink(linkPath)
+		if err != nil {
+			t.Fatalf("read fallback symlink: %v", err)
+		}
+		if !filepath.IsAbs(linkTarget) {
+			t.Fatalf("fallback symlink target = %q, want absolute path", linkTarget)
+		}
+		if data, err := os.ReadFile(linkPath); err != nil {
+			t.Fatalf("read fallback symlink target: %v", err)
+		} else if string(data) != "resolved target" {
+			t.Fatalf("fallback symlink target = %q, want %q", data, "resolved target")
+		}
+	})
+
+	t.Run("broken symlink", func(t *testing.T) {
+		toolPath := filepath.Join(t.TempDir(), "broken-command")
+		if err := os.Symlink(filepath.Join(t.TempDir(), "missing-target"), toolPath); err != nil {
+			t.Skipf("create broken command symlink: %v", err)
+		}
+
+		if err := exposeHookTool(binDir, toolPath); err == nil {
+			t.Fatal("expose broken symlink succeeded, want resolution error")
+		}
+	})
+}
+
+func exposeHookTool(binDir, toolPath string) error {
+	return exposeHookToolWithLink(binDir, toolPath, os.Link)
+}
+
+func exposeHookToolWithLink(binDir, toolPath string, link func(string, string) error) error {
+	linkName := filepath.Base(toolPath)
+	// Hardlink the resolved target, not the lookup path: link(2) does not follow
+	// symlinks, so a Homebrew-style relative symlink (curl -> ../Cellar/curl/x/bin/curl)
+	// would be hardlinked as-is and dangle once placed in the temp bin dir.
+	resolved, err := filepath.EvalSymlinks(toolPath)
+	if err != nil {
+		return fmt.Errorf("resolve tool at %q: %w", toolPath, err)
+	}
+	resolved, err = filepath.Abs(resolved)
+	if err != nil {
+		return fmt.Errorf("make resolved tool path absolute %q: %w", resolved, err)
+	}
+	linkPath := filepath.Join(binDir, linkName)
+	if err := link(resolved, linkPath); err != nil {
+		if err := os.Symlink(resolved, linkPath); err != nil {
+			return fmt.Errorf("expose resolved tool %q as %q: %w", resolved, linkPath, err)
+		}
+	}
+	return nil
+}
+
 func isolatedHookPath(t *testing.T) (string, []string) {
 	t.Helper()
 	if gitPath, err := exec.LookPath("git"); err == nil {
@@ -3128,11 +3626,8 @@ func isolatedHookPath(t *testing.T) (string, []string) {
 		if err != nil {
 			t.Skipf("required hook tool %q is unavailable: %v", tool, err)
 		}
-		linkPath := filepath.Join(binDir, filepath.Base(toolPath))
-		if err := os.Link(toolPath, linkPath); err != nil {
-			if err := os.Symlink(toolPath, linkPath); err != nil {
-				t.Fatalf("expose required hook tool %q without jq: %v", tool, err)
-			}
+		if err := exposeHookTool(binDir, toolPath); err != nil {
+			t.Fatalf("expose required hook tool %q without jq: %v", tool, err)
 		}
 	}
 	assertJQAbsent(t, []string{binDir})
@@ -3205,8 +3700,8 @@ func TestClaudeCodeUserPromptSubmitHookTimeout(t *testing.T) {
 	if hook.Command != "\"${CLAUDE_PLUGIN_ROOT}/scripts/user-prompt-submit.sh\"" {
 		t.Fatalf("unexpected UserPromptSubmit command %q", hook.Command)
 	}
-	if hook.Timeout != 2 {
-		t.Fatalf("UserPromptSubmit timeout = %d, want 2", hook.Timeout)
+	if hook.Timeout != 10 {
+		t.Fatalf("UserPromptSubmit timeout = %d, want 10", hook.Timeout)
 	}
 }
 

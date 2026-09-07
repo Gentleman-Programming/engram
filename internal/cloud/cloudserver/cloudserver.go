@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -249,6 +250,9 @@ func (s *CloudServer) routes() {
 		IsAdmin: func(r *http.Request) bool {
 			return s.isDashboardAdmin(r)
 		},
+		CanManageManagedUsers: func(r *http.Request) bool {
+			return s.canManageManagedUsers(r)
+		},
 		GetDisplayName: func(r *http.Request) string {
 			return s.dashboardDisplayName(r)
 		},
@@ -419,6 +423,14 @@ func (s *CloudServer) isDashboardAdmin(r *http.Request) bool {
 	return s.verifyLegacyDashboardAdminCookie(r)
 }
 
+// canManageManagedUsers derives the rendering capability from the same
+// managed-admin principal policy enforced by requireManagedAdmin. It does not
+// authorize mutations; their handlers remain responsible for that enforcement.
+func (s *CloudServer) canManageManagedUsers(r *http.Request) bool {
+	principal, ok := s.dashboardActorPrincipal(r)
+	return ok && isManagedAdminPrincipal(principal)
+}
+
 func (s *CloudServer) handlePullManifest(w http.ResponseWriter, r *http.Request) {
 	project, ok := projectFromRequest(w, r)
 	if !ok {
@@ -457,6 +469,18 @@ func (s *CloudServer) handlePullChunk(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("read chunk: %v", err), http.StatusInternalServerError)
 		return
 	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Add("Vary", "Accept")
+	if chunkcodec.AcceptsCompressedEnvelope(r.Header.Get("Accept")) && int64(len(chunk)) <= chunkcodec.DefaultMaxDecodedBytes {
+		compressed, err := chunkcodec.EncodeCompressedEnvelope(chunk)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("compress chunk: %v", err), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", chunkcodec.CompressedEnvelopeContentType())
+		_, _ = w.Write(compressed)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(chunk)
 }
@@ -464,17 +488,33 @@ func (s *CloudServer) handlePullChunk(w http.ResponseWriter, r *http.Request) {
 func (s *CloudServer) handlePushChunk(w http.ResponseWriter, r *http.Request) {
 	maxPushBodyBytes := s.pushBodyLimit()
 	r.Body = http.MaxBytesReader(w, r.Body, maxPushBodyBytes)
-	var req struct {
-		ChunkID         string          `json:"chunk_id"`
-		CreatedBy       string          `json:"created_by"`
-		ClientCreatedAt string          `json:"client_created_at"`
-		Project         string          `json:"project"`
-		Data            json.RawMessage `json:"data"`
+	var req chunkPushRequest
+	compressed, contentTypeErr := chunkcodec.IsCompressedEnvelopeContentType(r.Header.Get("Content-Type"))
+	if contentTypeErr != nil {
+		writeActionableError(w, http.StatusUnsupportedMediaType, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodePayloadInvalid, fmt.Sprintf("unsupported push payload: %v", contentTypeErr))
+		return
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	var err error
+	if compressed {
+		var encoded []byte
+		encoded, err = io.ReadAll(r.Body)
+		if err == nil {
+			encoded, err = chunkcodec.DecodeCompressedEnvelope(encoded, maxPushBodyBytes)
+		}
+		if err == nil {
+			err = json.Unmarshal(encoded, &req)
+		}
+	} else {
+		err = json.NewDecoder(r.Body).Decode(&req)
+	}
+	if err != nil {
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
 			writeActionableError(w, http.StatusRequestEntityTooLarge, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodePayloadTooLarge, fmt.Sprintf("push payload too large (max %d bytes)", maxPushBodyBytes))
+			return
+		}
+		if errors.Is(err, chunkcodec.ErrPayloadTooLarge) {
+			writeActionableError(w, http.StatusRequestEntityTooLarge, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodePayloadTooLarge, fmt.Sprintf("decoded push payload too large (max %d bytes)", maxPushBodyBytes))
 			return
 		}
 		writeActionableError(w, http.StatusBadRequest, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodePayloadInvalid, fmt.Sprintf("invalid push payload: %v", err))
@@ -596,6 +636,14 @@ func (s *CloudServer) handlePushChunk(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]any{"status": "ok", "chunk_id": computedChunkID})
 }
 
+type chunkPushRequest struct {
+	ChunkID         string          `json:"chunk_id"`
+	CreatedBy       string          `json:"created_by"`
+	ClientCreatedAt string          `json:"client_created_at"`
+	Project         string          `json:"project"`
+	Data            json.RawMessage `json:"data"`
+}
+
 func chunkIDFromPayload(payload []byte) string {
 	return chunkcodec.ChunkID(payload)
 }
@@ -624,7 +672,7 @@ func (s *CloudServer) authorizeProjectScope(ctx context.Context, w http.Response
 		}
 		if usesManagedProjectGrants(principal) {
 			if err := s.principalProject.AuthorizeProjectForPrincipal(ctx, principal, project); err != nil {
-				writeActionableError(w, http.StatusForbidden, constants.UpgradeErrorClassPolicy, constants.ReasonPolicyForbidden, "forbidden: project is not allowed")
+				writeProjectPolicyDenied(w, project)
 				return false
 			}
 			return true
@@ -634,7 +682,7 @@ func (s *CloudServer) authorizeProjectScope(ctx context.Context, w http.Response
 		return true
 	}
 	if err := s.projectAuth.AuthorizeProject(project); err != nil {
-		writeActionableError(w, http.StatusForbidden, constants.UpgradeErrorClassPolicy, constants.ReasonPolicyForbidden, "forbidden: project is not allowed")
+		writeProjectPolicyDenied(w, project)
 		return false
 	}
 	return true
@@ -650,6 +698,10 @@ func writeActionableError(w http.ResponseWriter, status int, class, code, messag
 		"error_code":  strings.TrimSpace(code),
 		"error":       strings.TrimSpace(message),
 	})
+}
+
+func writeProjectPolicyDenied(w http.ResponseWriter, project string) {
+	writeActionableError(w, http.StatusForbidden, constants.UpgradeErrorClassPolicy, constants.ReasonPolicyForbidden, fmt.Sprintf("forbidden: project %q is not allowed", project))
 }
 
 func coerceChunkProject(payload []byte, project string) ([]byte, error) {

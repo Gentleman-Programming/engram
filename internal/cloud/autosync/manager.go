@@ -126,6 +126,21 @@ type transportStatusError interface {
 	IsPolicyFailure() bool
 }
 
+type reasonAwareFailureStore interface {
+	MarkSyncFailureWithReason(targetKey, reasonCode, message string, backoffUntil time.Time) error
+}
+
+type projectTransportFailure struct {
+	project string
+	err     error
+}
+
+func (e *projectTransportFailure) Error() string {
+	return fmt.Sprintf("transport push project %q: %v", e.project, e.err)
+}
+
+func (e *projectTransportFailure) Unwrap() error { return e.err }
+
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 // Config holds tuning parameters for the background sync manager.
@@ -465,11 +480,31 @@ func classifyTransportError(err error) string {
 }
 
 func autosyncFailureMessage(targetKey, message string, err error) string {
-	project := syncguidance.ProjectFromError(err)
+	project := projectForPolicyFailure(err)
+	if project == "" {
+		project = syncguidance.ProjectFromError(err)
+	}
 	if project == "" {
 		project = syncguidance.ProjectFromTargetKey(targetKey)
 	}
 	return syncguidance.AppendGuidance(message, project, err)
+}
+
+func projectForPolicyFailure(err error) string {
+	if err == nil {
+		return ""
+	}
+	if failure, ok := err.(*projectTransportFailure); ok && syncguidance.IsPolicyFailure(failure.err) {
+		return failure.project
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, child := range joined.Unwrap() {
+			if project := projectForPolicyFailure(child); project != "" {
+				return project
+			}
+		}
+	}
+	return projectForPolicyFailure(errors.Unwrap(err))
 }
 
 // unwrapTransportStatusError walks the error chain looking for transportStatusError.
@@ -567,7 +602,7 @@ func (m *Manager) push(ctx context.Context) error {
 
 		result, err := m.transport.PushMutations(entries)
 		if err != nil {
-			failures = append(failures, fmt.Errorf("transport push project %q: %w", project, err))
+			failures = append(failures, &projectTransportFailure{project: project, err: err})
 			continue
 		}
 		if result == nil {
@@ -710,6 +745,10 @@ func (m *Manager) recordFailureWithReason(msg, reasonCode string) {
 	}
 	m.mu.Unlock()
 
+	if reasonAware, ok := m.store.(reasonAwareFailureStore); ok {
+		_ = reasonAware.MarkSyncFailureWithReason(m.cfg.TargetKey, reasonCode, msg, bu)
+		return
+	}
 	_ = m.store.MarkSyncFailure(m.cfg.TargetKey, msg, bu)
 }
 

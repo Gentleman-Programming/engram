@@ -29,8 +29,15 @@ function sdkLookup(sessions) {
   return ({ path }) => sdkResult(sessions.get(path.id))
 }
 
-function httpResponse(data = { status: "created" }, ok = true, onJSON) {
-  return { ok, async json() { onJSON?.(); return data } }
+function httpResponse(data = { status: "created" }, ok = true, onJSON, jsonError) {
+  return {
+    ok,
+    async json() {
+      onJSON?.()
+      if (jsonError) throw jsonError
+      return data
+    },
+  }
 }
 
 function deferredEvent() {
@@ -100,9 +107,12 @@ async function createRuntime(t, {
 	projectCurrentOK = true,
   manifestExists = false,
    sessionGet = async ({ path }) => sdkResult(session(path.id)),
-   registrationResponse,
-   sessionEndResponse,
-   contextResponse,
+    registrationResponse,
+    sessionEndResponse,
+    contextResponse,
+    nudgeSessionResponse,
+    nudgeObservationsResponse,
+    nudgeObservationsError,
 } = {}) {
   const originalFetch = globalThis.fetch
   const originalBun = globalThis.Bun
@@ -140,6 +150,10 @@ async function createRuntime(t, {
       if (sessionEndResponse) return sessionEndResponse(requests.filter(({ path }) => path.startsWith("/sessions/") && path.endsWith("/end")).length)
       return httpResponse({})
     }
+    if (path.startsWith("/sessions/") && nudgeSessionResponse) return httpResponse(nudgeSessionResponse)
+    if (path === "/observations" && (nudgeObservationsResponse !== undefined || nudgeObservationsError)) {
+      return httpResponse(nudgeObservationsResponse, true, undefined, nudgeObservationsError)
+    }
     if (path === "/context/compaction" && contextResponse) return contextResponse()
     return httpResponse({})
   }
@@ -170,6 +184,7 @@ async function createRuntime(t, {
     chat: plugin["chat.message"],
     after: plugin["tool.execute.after"],
     compact: plugin["experimental.session.compacting"],
+    transform: plugin["experimental.chat.system.transform"],
     registeredIDs,
     sessionGetIDs,
     requests,
@@ -177,6 +192,29 @@ async function createRuntime(t, {
 		startupEvents,
   }
 }
+
+test("save nudge fails closed for malformed and non-array observation responses", async (t) => {
+  for (const scenario of [
+    { name: "malformed JSON", error: new SyntaxError("unexpected end of JSON input") },
+    { name: "non-array JSON", response: { observations: [] } },
+    { name: "non-empty observation without timestamp", response: [{}] },
+    { name: "non-empty observation with null timestamp", response: [{ created_at: null }] },
+    { name: "non-empty observation with non-string timestamp", response: [{ created_at: 42 }] },
+  ]) {
+    await t.test(scenario.name, async (t) => {
+      const runtime = await createRuntime(t, {
+        nudgeSessionResponse: { started_at: new Date(Date.now() - 20 * 60 * 1000).toISOString() },
+        nudgeObservationsResponse: scenario.response,
+        nudgeObservationsError: scenario.error,
+      })
+      const output = { system: ["base system prompt"] }
+
+      await runtime.transform({ sessionID: "root" }, output)
+
+      assert.doesNotMatch(output.system[0], /MEMORY REMINDER/)
+    })
+  }
+})
 
 test("project identity delegates Windows paths and worktrees to the canonical server", async (t) => {
   for (const scenario of [

@@ -4,9 +4,6 @@
 # When compaction happens, inject Memory Protocol + context and instruct
 # the agent to persist the compacted summary via mem_session_summary.
 
-ENGRAM_PORT="${ENGRAM_PORT:-7437}"
-ENGRAM_URL="http://127.0.0.1:${ENGRAM_PORT}"
-
 # Load shared helpers
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/_helpers.sh"
@@ -19,19 +16,21 @@ PROJECT=$(resolve_project "$CWD") || PROJECT=""
 
 # Ensure session exists
 if [ -n "$SESSION_ID" ] && [ -n "$PROJECT" ]; then
-  curl -sf "${ENGRAM_URL}/sessions" \
+  engram_curl -sf "${ENGRAM_URL}/sessions" \
     -X POST \
     -H "Content-Type: application/json" \
     -d "$(jq -n --arg id "$SESSION_ID" --arg project "$PROJECT" --arg dir "$CWD" \
       '{id: $id, project: $project, directory: $dir}')" \
-    > /dev/null 2>&1
+    > /dev/null
 fi
 
 # Fetch context from previous sessions
 CONTEXT=""
 if [ -n "$PROJECT" ]; then
   ENCODED_PROJECT=$(printf '%s' "$PROJECT" | jq -sRr @uri)
-  CONTEXT=$(curl -sf "${ENGRAM_URL}/context?project=${ENCODED_PROJECT}" --max-time 3 2>/dev/null | jq -r '.context // empty')
+  # Same bounded request as session-start.sh: compact bullets (titles kept,
+  # 300-char body previews dropped), a pinned-section ceiling, and a 16 KiB total cap.
+  CONTEXT=$(engram_curl -sf "${ENGRAM_URL}/context?project=${ENCODED_PROJECT}&compact=1&pinned=20&max_bytes=16384" --max-time 3 | jq -r '.context // empty' 2>/dev/null)
 fi
 
 # Resolve protocol verbosity mode for this slug. All slim/full branching
@@ -71,6 +70,9 @@ Call `mem_save` IMMEDIATELY after ANY of these:
 - Feature implemented with non-obvious approach
 
 **Self-check after EVERY task**: "Did I just make a decision, fix a bug, learn something, or establish a convention? If yes → mem_save NOW."
+
+### DELIVERY GUARANTEE
+Memory operations are internal bookkeeping, never the user-facing answer. Complete required memory work before composing the completed-task reply; send the complete answer as the final message of the turn with no later tool calls. If memory work fails or needs follow-up, still send the answer.
 
 ### SEARCH MEMORY when:
 - User asks to recall anything ("remember", "what did we do", or the equivalent in the user's language)

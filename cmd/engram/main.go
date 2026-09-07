@@ -87,6 +87,7 @@ var (
 	setupInstallAgent            = setup.Install
 	setupAddClaudeCodeAllowlist  = setup.AddClaudeCodeAllowlist
 	setupEnsureClaudeCodeUserMCP = setup.EnsureClaudeCodeUserMCP
+	setupVerifyClaudeCodeSlim    = setup.VerifyClaudeCodeSlimCapability
 	scanInputLine                = fmt.Scanln
 
 	storeSearch = func(s *store.Store, query string, opts store.SearchOptions) ([]store.SearchResult, error) {
@@ -138,6 +139,9 @@ var (
 	}
 
 	exitFunc = os.Exit
+
+	notifySignals = signal.Notify
+	stopSignals   = signal.Stop
 
 	stdinScanner = func() *bufio.Scanner { return bufio.NewScanner(os.Stdin) }
 	userHomeDir  = os.UserHomeDir
@@ -778,17 +782,10 @@ func printUpdateCheckResult(result versioncheck.CheckResult) {
 // ─── Commands ────────────────────────────────────────────────────────────────
 
 func cmdServe(cfg store.Config) {
-	port := 7437 // "ENGR" on phone keypad vibes
-	if p := os.Getenv("ENGRAM_PORT"); p != "" {
-		if n, err := strconv.Atoi(p); err == nil {
-			port = n
-		}
-	}
-	// Allow: engram serve 8080
-	if len(os.Args) > 2 {
-		if n, err := strconv.Atoi(os.Args[2]); err == nil {
-			port = n
-		}
+	options, err := resolveServeOptions(os.Args[2:])
+	if err != nil {
+		fatal(err)
+		return
 	}
 
 	s, err := storeNew(cfg)
@@ -797,7 +794,9 @@ func cmdServe(cfg store.Config) {
 	}
 	defer s.Close()
 
-	srv := newHTTPServer(s, port)
+	srv := newHTTPServer(s, options.port)
+	srv.SetSocketPath(options.socketPath)
+	srv.SetVersion(version)
 
 	// Wire the semantic runner factory and prompt builder for POST /conflicts/scan.
 	// Both live in cmd/engram so internal/server avoids a direct dependency on internal/llm.
@@ -824,20 +823,73 @@ func cmdServe(cfg store.Config) {
 
 	// Graceful shutdown on SIGINT/SIGTERM.
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	notifySignals(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals(sigCh)
+	done := make(chan struct{})
+	defer close(done)
 	go func() {
-		<-sigCh
-		log.Println("[engram] shutting down...")
-		cancel()
-		if mgrStop != nil {
-			mgrStop() // BW7: wait for Manager to release lease before exiting
+		select {
+		case <-sigCh:
+			log.Println("[engram] shutting down...")
+			cancel()
+			if mgrStop != nil {
+				mgrStop()
+			}
+			if err := srv.Close(); err != nil {
+				log.Printf("[engram] close server: %v", err)
+			}
+		case <-done:
 		}
-		exitFunc(0)
 	}()
 
 	if err := startHTTP(srv); err != nil {
 		fatal(err)
 	}
+}
+
+type serveOptions struct {
+	port       int
+	socketPath string
+}
+
+func resolveServeOptions(args []string) (serveOptions, error) {
+	options := serveOptions{port: 7437, socketPath: strings.TrimSpace(os.Getenv("ENGRAM_SOCKET"))}
+	portExplicit := false
+	if p := strings.TrimSpace(os.Getenv("ENGRAM_PORT")); p != "" {
+		if n, err := strconv.ParseUint(p, 10, 16); err == nil && n > 0 {
+			options.port = int(n)
+			portExplicit = true
+		}
+	}
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--socket":
+			if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" {
+				return serveOptions{}, fmt.Errorf("--socket requires a path")
+			}
+			i++
+			options.socketPath = strings.TrimSpace(args[i])
+		case strings.HasPrefix(arg, "--socket="):
+			options.socketPath = strings.TrimSpace(strings.TrimPrefix(arg, "--socket="))
+			if options.socketPath == "" {
+				return serveOptions{}, fmt.Errorf("--socket requires a path")
+			}
+		default:
+			if n, err := strconv.Atoi(arg); err == nil {
+				options.port = n
+				portExplicit = true
+			} else {
+				return serveOptions{}, fmt.Errorf("unknown serve argument: %s", arg)
+			}
+		}
+	}
+
+	if options.socketPath != "" && portExplicit {
+		return serveOptions{}, fmt.Errorf("socket transport cannot be combined with an explicit TCP port")
+	}
+	return options, nil
 }
 
 func resolveServeSyncStatusProject() string {
@@ -1154,7 +1206,7 @@ func cmdSave(cfg store.Config) {
 	}
 	defer s.Close()
 	sessionID := "manual-save-" + projectName
-	if err := s.CreateSession(sessionID, projectName, cwd); err != nil {
+	if err := s.CreateSessionWithOwnershipMode(sessionID, projectName, cwd, store.SessionOwnershipProjectOwned); err != nil {
 		fatal(err)
 	}
 	id, err := storeAddObservation(s, store.AddObservationParams{
@@ -1685,6 +1737,18 @@ func cmdSync(cfg store.Config) {
 		fatal(fmt.Errorf("--all and --project cannot be used together"))
 		return
 	}
+	cloudEnabled := doCloud || envBool("ENGRAM_CLOUD_SYNC")
+	if cloudEnabled && projectProvided {
+		decodedProject, warning, decodeErr := normalizeCloudCLIProjectInput(project)
+		if decodeErr != nil {
+			fatal(fmt.Errorf("cloud sync project: %w", decodeErr))
+			return
+		}
+		project = decodedProject
+		if warning != "" {
+			fmt.Fprintln(os.Stderr, warning)
+		}
+	}
 
 	syncDir := ".engram"
 
@@ -1704,7 +1768,6 @@ func cmdSync(cfg store.Config) {
 		project = resolved
 	}
 
-	cloudEnabled := doCloud || envBool("ENGRAM_CLOUD_SYNC")
 	if cloudEnabled {
 		if doAll {
 			fatal(fmt.Errorf("cloud sync requires a single explicit --project scope; --all is not supported"))
@@ -1770,6 +1833,9 @@ func cmdSync(cfg store.Config) {
 	if doStatus {
 		local, remote, pending, err := syncStatus(sy)
 		if err != nil {
+			if cloudEnabled {
+				fatal(errors.New(cloudSyncFailureMessage(project, err)))
+			}
 			fatal(err)
 		}
 		if cloudEnabled {
@@ -2412,17 +2478,19 @@ func cmdProjectsConsolidate(cfg store.Config) {
 			fmt.Printf("  [%d] %-30s %3d obs  (%s)\n", i+1, sm.Name, obs, sm.MatchType)
 		}
 
-		if dryRun {
-			fmt.Printf("\n[dry-run] Would merge %d project(s) into %q\n", len(similar), canonical)
-			return
-		}
-
 		fmt.Printf("\nSelect which to merge into %q (comma-separated numbers, 'all', or 'none'): ", canonical)
 		var answer string
-		scanInputLine(&answer)
+		if n, err := scanInputLine(&answer); err != nil && dryRun && n == 0 {
+			fatal(fmt.Errorf("dry-run requires a confirmed selection: %w", err))
+			return
+		}
 		answer = strings.TrimSpace(strings.ToLower(answer))
 
 		if answer == "none" || answer == "n" || answer == "" {
+			if dryRun && answer == "" {
+				fatal(errors.New("dry-run requires a confirmed selection"))
+				return
+			}
 			fmt.Println("Cancelled.")
 			return
 		}
@@ -2439,6 +2507,9 @@ func cmdProjectsConsolidate(cfg store.Config) {
 				idx := 0
 				if _, err := fmt.Sscanf(part, "%d", &idx); err != nil || idx < 1 || idx > len(similar) {
 					fmt.Fprintf(os.Stderr, "Invalid selection: %q (expected 1-%d)\n", part, len(similar))
+					if dryRun {
+						exitFunc(1)
+					}
 					return
 				}
 				sources = append(sources, similar[idx-1].Name)
@@ -2447,6 +2518,10 @@ func cmdProjectsConsolidate(cfg store.Config) {
 
 		if len(sources) == 0 {
 			fmt.Println("Nothing selected.")
+			return
+		}
+		if dryRun {
+			fmt.Printf("\n[dry-run] Would merge %d project(s) into %q\n", len(sources), canonical)
 			return
 		}
 
@@ -2806,7 +2881,9 @@ func cmdSetup(cfg store.Config) {
 			fatal(err)
 		}
 		if protocolFlag {
-			applyProtocolMode(cfg, slug, resolveProtocolModeFlag(protocolRaw))
+			mode := resolveProtocolModeFlag(protocolRaw)
+			applyProtocolMode(cfg, slug, mode)
+			warnIfClaudeCodeSlimUnverified(slug, mode)
 		}
 		fmt.Printf("✓ Installed %s plugin (%d files)\n", result.Agent, result.Files)
 		fmt.Printf("  → %s\n", result.Destination)
@@ -2857,6 +2934,7 @@ func cmdSetupInteractive(cfg store.Config, mode string) {
 	}
 	if mode != "" {
 		applyProtocolMode(cfg, selected.Name, mode)
+		warnIfClaudeCodeSlimUnverified(selected.Name, mode)
 	}
 
 	fmt.Printf("✓ Installed %s plugin (%d files)\n", result.Agent, result.Files)
@@ -2878,7 +2956,9 @@ func printSetupUsage() {
 	fmt.Println("                          installed agent slug (default: full). Unknown or")
 	fmt.Println("                          missing values fall back to full with a warning.")
 	fmt.Println("                          slim currently only takes effect for claude-code,")
-	fmt.Println("                          and only when the installed engram is >= 1.4.0.")
+	fmt.Println("                          and only with a clean tagged engram release >= 1.4.0.")
+	fmt.Println("                          Claude Code slim also requires Engram plugin >= 0.1.1;")
+	fmt.Println("                          setup warns, but continues, when it cannot verify it.")
 	fmt.Println("  --help, -h              Show this help and exit.")
 }
 
@@ -2905,6 +2985,28 @@ func resolveProtocolModeFlag(raw string) string {
 func applyProtocolMode(cfg store.Config, slug, mode string) {
 	if err := setup.WriteProtocolMode(cfg.DataDir, slug, mode); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not persist protocol mode: %v\n", err)
+	}
+
+	classification := classifyProtocolVersion(version)
+	if mode != setup.ProtocolModeSlim || classification == protocolVersionSupported {
+		return
+	}
+
+	if classification == protocolVersionBelowFloor {
+		fmt.Fprintf(os.Stderr, "warning: slim will remain full: engram %q is below 1.4.0; install a clean tagged release at or above 1.4.0.\n", strings.TrimSpace(version))
+		return
+	}
+	fmt.Fprintf(os.Stderr, "warning: slim will remain full: engram %q is not a clean tagged release; install a clean tagged release at or above 1.4.0.\n", strings.TrimSpace(version))
+}
+
+func warnIfClaudeCodeSlimUnverified(slug, mode string) {
+	if slug != "claude-code" || mode != setup.ProtocolModeSlim {
+		return
+	}
+	if err := setupVerifyClaudeCodeSlim(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: unable to verify the Claude Code Engram plugin supports --protocol=slim (requires plugin 0.1.1+): %v\n", err)
+		fmt.Fprintln(os.Stderr, "  Update the plugin through your normal Claude Code plugin update path, then restart Claude Code.")
+		fmt.Fprintln(os.Stderr, "  Session-only plugins loaded with `claude --plugin-dir ...` cannot be detected by this check.")
 	}
 }
 
@@ -2936,34 +3038,51 @@ func cmdProtocolMode(cfg store.Config) {
 // MCP serverInstructions duplication fix shipped in this release.
 var protocolVersionFloor = [3]int{1, 4, 0}
 
-// meetsProtocolVersionFloor reports whether v (e.g. "1.4.0", "v1.5.2", or the
-// build-time "dev" placeholder) is >= protocolVersionFloor. Any unparseable
-// or empty value returns false — the caller then falls back to "full".
-func meetsProtocolVersionFloor(v string) bool {
+type protocolVersionClassification uint8
+
+const (
+	protocolVersionUnsupported protocolVersionClassification = iota
+	protocolVersionBelowFloor
+	protocolVersionSupported
+)
+
+// classifyProtocolVersion distinguishes clean releases that can use slim from
+// releases below the floor and development, pseudo, dirty, or other non-release
+// build versions. Legacy numeric versions such as "1.4" remain supported.
+func classifyProtocolVersion(v string) protocolVersionClassification {
 	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
-	if v == "" || v == "dev" {
-		return false
+	segments := strings.Split(v, ".")
+	if len(segments) < 2 || len(segments) > 3 {
+		return protocolVersionUnsupported
 	}
 
-	segments := strings.SplitN(v, ".", 3)
 	var parts [3]int
-	for i, s := range segments {
-		if i >= 3 {
-			break
+	for i, segment := range segments {
+		if segment == "" {
+			return protocolVersionUnsupported
 		}
-		n, err := strconv.Atoi(strings.TrimSpace(s))
-		if err != nil {
-			return false
+		n, err := strconv.Atoi(segment)
+		if err != nil || n < 0 {
+			return protocolVersionUnsupported
 		}
 		parts[i] = n
 	}
 
 	for i := 0; i < 3; i++ {
 		if parts[i] != protocolVersionFloor[i] {
-			return parts[i] > protocolVersionFloor[i]
+			if parts[i] > protocolVersionFloor[i] {
+				return protocolVersionSupported
+			}
+			return protocolVersionBelowFloor
 		}
 	}
-	return true
+	return protocolVersionSupported
+}
+
+// meetsProtocolVersionFloor reports whether v is a clean release at or above
+// protocolVersionFloor. Unsupported versions fall back to "full".
+func meetsProtocolVersionFloor(v string) bool {
+	return classifyProtocolVersion(v) == protocolVersionSupported
 }
 
 func printPostInstall(result *setup.Result) {

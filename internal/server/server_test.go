@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -57,6 +58,42 @@ func TestStartUsesInjectedServe(t *testing.T) {
 	err := s.Start()
 	if err == nil || err.Error() != "serve stopped" {
 		t.Fatalf("expected propagated serve error, got %v", err)
+	}
+}
+
+func TestHealthReportsVersion(t *testing.T) {
+	tests := []struct {
+		name       string
+		setVersion bool
+		version    string
+	}{
+		{name: "defaults to dev", version: "dev"},
+		{name: "reports configured version", setVersion: true, version: "1.16.0"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := New(nil, 0)
+			if tt.setVersion {
+				srv.SetVersion(tt.version)
+			}
+
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected /health 200, got %d", rec.Code)
+			}
+
+			var response struct {
+				Version string `json:"version"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode /health response: %v", err)
+			}
+			if response.Version != tt.version {
+				t.Fatalf("/health version = %q, want %q", response.Version, tt.version)
+			}
+		})
 	}
 }
 
@@ -317,6 +354,66 @@ func TestClaudeSaveNudgeCompatibilityRoutes(t *testing.T) {
 	if missingSessionRec.Code != http.StatusNotFound {
 		t.Fatalf("expected missing session 404, got %d", missingSessionRec.Code)
 	}
+}
+
+func TestHandleCreateSessionOwnershipModeContract(t *testing.T) {
+	st := newServerTestStore(t)
+	h := New(st, 0).Handler()
+	for _, tc := range []struct {
+		name       string
+		id         string
+		body       string
+		wantStatus int
+		wantMode   string
+	}{
+		{name: "omitted defaults to shared", id: "mode-omitted", body: `{"id":"mode-omitted","project":"project-a"}`, wantStatus: http.StatusCreated, wantMode: store.SessionOwnershipShared},
+		{name: "explicit shared", id: "mode-shared", body: `{"id":"mode-shared","project":"project-a","ownership_mode":"shared"}`, wantStatus: http.StatusCreated, wantMode: store.SessionOwnershipShared},
+		{name: "explicit project owned", id: "mode-owned", body: `{"id":"mode-owned","project":"project-a","ownership_mode":"project_owned"}`, wantStatus: http.StatusCreated, wantMode: store.SessionOwnershipProjectOwned},
+		{name: "invalid mode", id: "mode-invalid", body: `{"id":"mode-invalid","project":"project-a","ownership_mode":"exclusive"}`, wantStatus: http.StatusBadRequest},
+		{name: "missing project", id: "mode-missing-project", body: `{"id":"mode-missing-project"}`, wantStatus: http.StatusBadRequest},
+		{name: "empty project", id: "mode-empty-project", body: `{"id":"mode-empty-project","project":""}`, wantStatus: http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(tc.body)))
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("POST /sessions = %d, want %d: %s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			var response map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if tc.wantStatus == http.StatusCreated {
+				if response["status"] != "created" {
+					t.Fatalf("success response = %#v", response)
+				}
+				id := response["id"].(string)
+				session, err := st.GetSession(id)
+				if err != nil || session.OwnershipMode != tc.wantMode {
+					t.Fatalf("stored session = %#v, %v; want mode %q", session, err, tc.wantMode)
+				}
+				return
+			}
+			if response["error"] == "" {
+				t.Fatalf("error response = %#v, want error body", response)
+			}
+			if _, err := st.GetSession(tc.id); !errors.Is(err, sql.ErrNoRows) {
+				t.Fatalf("invalid request created session %q: %v", tc.id, err)
+			}
+		})
+	}
+
+	t.Run("storage failure remains internal server error", func(t *testing.T) {
+		brokenStore := newServerTestStore(t)
+		if err := brokenStore.Close(); err != nil {
+			t.Fatalf("close store: %v", err)
+		}
+		rec := httptest.NewRecorder()
+		New(brokenStore, 0).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(`{"id":"mode-storage-error","project":"project-a","ownership_mode":"shared"}`)))
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("POST /sessions with closed store = %d, want 500: %s", rec.Code, rec.Body.String())
+		}
+	})
 }
 
 func TestHandleCreateSessionStoresRuntimeWorktreeDirectory(t *testing.T) {
@@ -883,6 +980,136 @@ func TestHandleSearchNoHitsReturnsEmptyArray(t *testing.T) {
 	}
 	if body := strings.TrimSpace(rec.Body.String()); body != "[]" {
 		t.Fatalf("expected no-hit search body [], got %q", body)
+	}
+}
+
+func TestCollectionHandlersNoResultsReturnEmptyArrays(t *testing.T) {
+	srv := New(newServerTestStore(t), 0)
+
+	for _, tt := range []struct {
+		name string
+		path string
+	}{
+		{name: "recent sessions", path: "/sessions/recent"},
+		{name: "recent observations", path: "/observations/recent"},
+		{name: "observations alias", path: "/observations"},
+		{name: "recent prompts", path: "/prompts/recent"},
+		{name: "search prompts", path: "/prompts/search?q=no-hits"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, tt.path, nil))
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET %s = %d, want 200: %s", tt.path, rec.Code, rec.Body.String())
+			}
+			if body := strings.TrimSpace(rec.Body.String()); body != "[]" {
+				t.Fatalf("GET %s body = %q, want []", tt.path, body)
+			}
+		})
+	}
+}
+
+func TestCollectionHandlersReportProjectResolutionErrors(t *testing.T) {
+	t.Setenv("ENGRAM_PROJECT", "")
+
+	st := newServerTestStore(t)
+	for _, project := range []string{"alpha", "beta"} {
+		sessionID := "collection-resolution-" + project
+		if err := st.CreateSession(sessionID, project, t.TempDir()); err != nil {
+			t.Fatalf("create %s session: %v", project, err)
+		}
+		if _, err := st.AddObservation(store.AddObservationParams{
+			SessionID: sessionID,
+			Project:   project,
+			Type:      "note",
+			Title:     "collection resolution " + project,
+			Content:   "test observation",
+			Scope:     "project",
+		}); err != nil {
+			t.Fatalf("add %s observation: %v", project, err)
+		}
+	}
+	parent := ambiguousProjectHTTPDirectory(t)
+	h := New(st, 0).Handler()
+
+	endpoints := []struct {
+		name string
+		path string
+	}{
+		{name: "recent sessions", path: "/sessions/recent"},
+		{name: "recent observations", path: "/observations/recent"},
+		{name: "recent prompts", path: "/prompts/recent"},
+		{name: "search prompts", path: "/prompts/search?q=identity"},
+	}
+	resolutionCases := []struct {
+		name              string
+		query             string
+		wantStatus        int
+		wantCode          string
+		wantProjects      []string
+		sortProjects      bool
+		wantProjectSource string
+		wantProjectPath   string
+	}{
+		{
+			name:         "unknown project",
+			query:        "project=missing-project",
+			wantStatus:   http.StatusNotFound,
+			wantCode:     "unknown_project",
+			wantProjects: []string{"alpha", "beta"},
+		},
+		{
+			name:              "ambiguous cwd",
+			query:             "cwd=" + url.QueryEscape(parent),
+			wantStatus:        http.StatusConflict,
+			wantCode:          "ambiguous_project",
+			wantProjects:      []string{"repo-http-a", "repo-http-b"},
+			sortProjects:      true,
+			wantProjectSource: "ambiguous",
+			wantProjectPath:   parent,
+		},
+	}
+
+	for _, endpoint := range endpoints {
+		for _, resolutionCase := range resolutionCases {
+			t.Run(endpoint.name+"/"+resolutionCase.name, func(t *testing.T) {
+				separator := "?"
+				if strings.Contains(endpoint.path, "?") {
+					separator = "&"
+				}
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, endpoint.path+separator+resolutionCase.query, nil))
+
+				if rec.Code != resolutionCase.wantStatus {
+					t.Fatalf("GET %s = %d, want %d: %s", endpoint.path, rec.Code, resolutionCase.wantStatus, rec.Body.String())
+				}
+				var body struct {
+					Code              string   `json:"code"`
+					AvailableProjects []string `json:"available_projects"`
+					ProjectSource     string   `json:"project_source"`
+					ProjectPath       string   `json:"project_path"`
+				}
+				if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+					t.Fatalf("decode GET %s response: %v", endpoint.path, err)
+				}
+				if body.Code != resolutionCase.wantCode {
+					t.Fatalf("GET %s code = %q, want %q", endpoint.path, body.Code, resolutionCase.wantCode)
+				}
+				if resolutionCase.sortProjects {
+					sort.Strings(body.AvailableProjects)
+				}
+				if strings.Join(body.AvailableProjects, ",") != strings.Join(resolutionCase.wantProjects, ",") {
+					t.Fatalf("GET %s available_projects = %#v, want %#v", endpoint.path, body.AvailableProjects, resolutionCase.wantProjects)
+				}
+				if body.ProjectSource != resolutionCase.wantProjectSource {
+					t.Fatalf("GET %s project_source = %q, want %q", endpoint.path, body.ProjectSource, resolutionCase.wantProjectSource)
+				}
+				if body.ProjectPath != resolutionCase.wantProjectPath {
+					t.Fatalf("GET %s project_path = %q, want %q", endpoint.path, body.ProjectPath, resolutionCase.wantProjectPath)
+				}
+			})
+		}
 	}
 }
 
@@ -3130,6 +3357,53 @@ func TestProjectScopedEndpointsResolveAndValidateProcessOverrides(t *testing.T) 
 			t.Fatalf("current status = %d body=%q", rec.Code, rec.Body.String())
 		}
 	})
+}
+
+func TestContextMaxBytesQuery(t *testing.T) {
+	st := newServerTestStore(t)
+	if err := st.CreateSession("context-budget", "context-budget", t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AddObservation(store.AddObservationParams{
+		SessionID: "context-budget",
+		Project:   "context-budget",
+		Scope:     "project",
+		Type:      "note",
+		Title:     strings.Repeat("x", contextMaxBytes+128),
+		Content:   "context budget test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h := New(st, 0).Handler()
+
+	contextFor := func(t *testing.T, query string) string {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/context?project=context-budget"+query, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("context status = %d body=%q", rec.Code, rec.Body.String())
+		}
+		var body map[string]string
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode context response: %v", err)
+		}
+		return body["context"]
+	}
+
+	unbounded := contextFor(t, "")
+	if got := contextFor(t, "&max_bytes=not-a-number"); got != unbounded {
+		t.Fatal("invalid max_bytes must preserve the unbounded default response")
+	}
+
+	bounded := contextFor(t, "&max_bytes=96")
+	if len(bounded) > 96 || !strings.HasSuffix(bounded, "\n[truncated]\n") {
+		t.Fatalf("max_bytes wiring returned %d bytes: %q", len(bounded), bounded)
+	}
+
+	clamped := contextFor(t, "&max_bytes=999999999")
+	if len(clamped) != contextMaxBytes || !strings.HasSuffix(clamped, "\n[truncated]\n") {
+		t.Fatalf("max_bytes clamp returned %d bytes, want %d", len(clamped), contextMaxBytes)
+	}
 }
 
 func ambiguousProjectHTTPDirectory(t *testing.T) string {

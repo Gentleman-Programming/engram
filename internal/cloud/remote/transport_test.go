@@ -1,6 +1,7 @@
 package remote
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -8,10 +9,148 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Gentleman-Programming/engram/v2/internal/cloud/chunkcodec"
 	engramsync "github.com/Gentleman-Programming/engram/v2/internal/sync"
 )
+
+type remoteRoundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f remoteRoundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestNewRemoteTransportUsesOperationSpecificTimeouts(t *testing.T) {
+	rt, err := NewRemoteTransport("https://cloud.example.test", "token", "proj-a")
+	if err != nil {
+		t.Fatalf("NewRemoteTransport: %v", err)
+	}
+
+	if ordinaryOperationTimeout != 30*time.Second {
+		t.Fatalf("ordinary operation timeout = %s, want 30s", ordinaryOperationTimeout)
+	}
+	if writeChunkTimeout != 5*time.Minute {
+		t.Fatalf("write chunk timeout = %s, want 5m", writeChunkTimeout)
+	}
+	if rt.httpClient.Timeout != ordinaryOperationTimeout {
+		t.Fatalf("ordinary client timeout = %s, want %s", rt.httpClient.Timeout, ordinaryOperationTimeout)
+	}
+	if rt.writeHTTPClient.Timeout != writeChunkTimeout {
+		t.Fatalf("write client timeout = %s, want %s", rt.writeHTTPClient.Timeout, writeChunkTimeout)
+	}
+	if rt.httpClient == rt.writeHTTPClient {
+		t.Fatal("ordinary and write operations must use distinct HTTP clients")
+	}
+}
+
+func TestNewRemoteTransportRequiresHTTPSForBearerToken(t *testing.T) {
+	if _, err := NewRemoteTransport("http://cloud.example.test", "token", "proj-a"); err == nil || !strings.Contains(err.Error(), "HTTPS") {
+		t.Fatalf("NewRemoteTransport with bearer token over HTTP error = %v, want HTTPS requirement", err)
+	}
+
+	rt, err := NewRemoteTransport("http://cloud.example.test", "", "proj-a")
+	if err != nil {
+		t.Fatalf("NewRemoteTransport tokenless HTTP: %v", err)
+	}
+	if rt == nil {
+		t.Fatal("NewRemoteTransport tokenless HTTP returned nil transport")
+	}
+}
+
+func TestRemoteTransportRejectsBearerTokenHTTPRedirect(t *testing.T) {
+	insecure := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("bearer-token request reached HTTP redirect target")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer insecure.Close()
+
+	secure := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, insecure.URL, http.StatusFound)
+	}))
+	defer secure.Close()
+
+	rt, err := NewRemoteTransport(secure.URL, "token", "proj-a")
+	if err != nil {
+		t.Fatalf("NewRemoteTransport: %v", err)
+	}
+	rt.httpClient.Transport = secure.Client().Transport
+
+	_, err = rt.ReadManifest()
+	if err == nil || !strings.Contains(err.Error(), "HTTPS") {
+		t.Fatalf("ReadManifest redirect error = %v, want HTTPS requirement", err)
+	}
+}
+
+func TestRemoteTransportAllowsTokenlessHTTPRedirect(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"version":1,"chunks":[]}`))
+	}))
+	defer target.Close()
+
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer source.Close()
+
+	rt, err := NewRemoteTransport(source.URL, "", "proj-a")
+	if err != nil {
+		t.Fatalf("NewRemoteTransport: %v", err)
+	}
+	if _, err := rt.ReadManifest(); err != nil {
+		t.Fatalf("ReadManifest through tokenless HTTP redirect: %v", err)
+	}
+}
+
+func TestRemoteTransportUsesDedicatedWriteClient(t *testing.T) {
+	var ordinaryRequests, writeRequests int
+	rt := &RemoteTransport{
+		baseURL: "https://cloud.example.test",
+		project: "proj-a",
+		httpClient: &http.Client{
+			Timeout: ordinaryOperationTimeout,
+			Transport: remoteRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				ordinaryRequests++
+				if req.Method != http.MethodGet {
+					return nil, errors.New("ordinary client used for write")
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"version":1,"chunks":[]}`)),
+					Header:     make(http.Header),
+				}, nil
+			}),
+		},
+		writeHTTPClient: &http.Client{
+			Timeout: writeChunkTimeout,
+			Transport: remoteRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				writeRequests++
+				if req.Method != http.MethodPost {
+					return nil, errors.New("write client used for read")
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"status":"ok"}`)),
+					Header:     make(http.Header),
+				}, nil
+			}),
+		},
+	}
+
+	if _, err := rt.ReadManifest(); err != nil {
+		t.Fatalf("ReadManifest: %v", err)
+	}
+	if err := rt.WriteChunk("chunk-1", []byte(`{"sessions":[]}`), engramsync.ChunkEntry{CreatedBy: "tester", CreatedAt: "2026-04-01T00:00:00Z"}); err != nil {
+		t.Fatalf("WriteChunk: %v", err)
+	}
+	if ordinaryRequests != 1 {
+		t.Fatalf("ordinary client requests = %d, want 1", ordinaryRequests)
+	}
+	if writeRequests != 1 {
+		t.Fatalf("write client requests = %d, want 1", writeRequests)
+	}
+}
 
 func TestReadManifestReturnsHTTPStatusErrorForAuthAndPolicyFailures(t *testing.T) {
 	tests := []struct {
@@ -30,7 +169,7 @@ func TestReadManifestReturnsHTTPStatusErrorForAuthAndPolicyFailures(t *testing.T
 			}))
 			defer srv.Close()
 
-			rt, err := NewRemoteTransport(srv.URL, "token", "proj-a")
+			rt, err := NewRemoteTransport(srv.URL, "", "proj-a")
 			if err != nil {
 				t.Fatalf("NewRemoteTransport: %v", err)
 			}
@@ -59,7 +198,7 @@ func TestReadManifestParsesMachineActionableErrorPayload(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	rt, err := NewRemoteTransport(srv.URL, "token", "proj-a")
+	rt, err := NewRemoteTransport(srv.URL, "", "proj-a")
 	if err != nil {
 		t.Fatalf("NewRemoteTransport: %v", err)
 	}
@@ -93,6 +232,7 @@ func TestWriteChunkCanonicalizesPayloadAndChunkID(t *testing.T) {
 	var gotChunkID string
 	var gotClientCreatedAt string
 	var gotData json.RawMessage
+	const sentinel = "WAF-SENTINEL-738"
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/sync/push" {
@@ -102,6 +242,16 @@ func TestWriteChunkCanonicalizesPayloadAndChunkID(t *testing.T) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Fatalf("read body: %v", err)
+		}
+		if r.Header.Get("Content-Type") != chunkcodec.CompressedEnvelopeContentType() {
+			t.Fatalf("Content-Type = %q, want %q", r.Header.Get("Content-Type"), chunkcodec.CompressedEnvelopeContentType())
+		}
+		if strings.Contains(string(body), sentinel) {
+			t.Fatal("wire request exposed observation text")
+		}
+		body, err = chunkcodec.DecodeCompressedEnvelope(body, chunkcodec.DefaultMaxDecodedBytes)
+		if err != nil {
+			t.Fatalf("decode request envelope: %v", err)
 		}
 		var req struct {
 			ChunkID         string          `json:"chunk_id"`
@@ -119,12 +269,12 @@ func TestWriteChunkCanonicalizesPayloadAndChunkID(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	rt, err := NewRemoteTransport(srv.URL, "token", "proj-a")
+	rt, err := NewRemoteTransport(srv.URL, "", "proj-a")
 	if err != nil {
 		t.Fatalf("NewRemoteTransport: %v", err)
 	}
 
-	originalPayload := []byte(`{"sessions":[{"id":"s-1","directory":"/tmp/s-1"}]}`)
+	originalPayload := []byte(`{"sessions":[{"id":"s-1","directory":"/tmp/s-1"}],"observations":[{"content":"` + sentinel + `"}]}`)
 	createdAt := "2026-04-01T12:30:00Z"
 	if err := rt.WriteChunk("deadbeef", originalPayload, engramsync.ChunkEntry{CreatedBy: "tester", CreatedAt: createdAt}); err != nil {
 		t.Fatalf("WriteChunk: %v", err)
@@ -144,6 +294,100 @@ func TestWriteChunkCanonicalizesPayloadAndChunkID(t *testing.T) {
 	}
 	if strings.TrimSpace(string(gotData)) != strings.TrimSpace(string(canonicalPayload)) {
 		t.Fatalf("expected canonical payload %s, got %s", string(canonicalPayload), string(gotData))
+	}
+}
+
+func TestReadChunkAcceptsCompressedAndLegacyResponses(t *testing.T) {
+	payload := []byte(`{"sessions":[{"id":"s-1","directory":"/tmp/s-1"}]}`)
+	compressed, err := chunkcodec.EncodeCompressedEnvelope(payload)
+	if err != nil {
+		t.Fatalf("EncodeCompressedEnvelope: %v", err)
+	}
+
+	tests := []struct {
+		name        string
+		contentType string
+		body        []byte
+	}{
+		{name: "compressed", contentType: chunkcodec.CompressedEnvelopeContentType(), body: compressed},
+		{name: "legacy JSON", contentType: "application/json", body: payload},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Accept") != chunkcodec.CompressedEnvelopeContentType() {
+					t.Fatalf("Accept = %q, want compressed envelope", r.Header.Get("Accept"))
+				}
+				w.Header().Set("Content-Type", tt.contentType)
+				_, _ = w.Write(tt.body)
+			}))
+			defer srv.Close()
+
+			rt, err := NewRemoteTransport(srv.URL, "", "proj-a")
+			if err != nil {
+				t.Fatalf("NewRemoteTransport: %v", err)
+			}
+			got, err := rt.ReadChunk("chunk-1")
+			if err != nil {
+				t.Fatalf("ReadChunk: %v", err)
+			}
+			if string(got) != string(payload) {
+				t.Fatalf("payload = %q, want %q", got, payload)
+			}
+		})
+	}
+}
+
+func TestReadChunkRejectsInvalidCompressedResponses(t *testing.T) {
+	overLimit, err := chunkcodec.EncodeCompressedEnvelope(bytes.Repeat([]byte("x"), int(chunkcodec.DefaultMaxDecodedBytes)+1))
+	if err != nil {
+		t.Fatalf("EncodeCompressedEnvelope: %v", err)
+	}
+
+	tests := []struct {
+		name        string
+		contentType string
+		body        []byte
+		want        error
+	}{
+		{
+			name:        "malformed gzip",
+			contentType: chunkcodec.CompressedEnvelopeContentType(),
+			body:        []byte("not-gzip"),
+		},
+		{
+			name:        "unsupported envelope version",
+			contentType: chunkcodec.CompressedEnvelopeMediaType + "; version=2",
+			body:        []byte("ignored"),
+			want:        chunkcodec.ErrUnsupportedEnvelopeVersion,
+		},
+		{
+			name:        "decoded payload over client limit",
+			contentType: chunkcodec.CompressedEnvelopeContentType(),
+			body:        overLimit,
+			want:        chunkcodec.ErrPayloadTooLarge,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", tt.contentType)
+				_, _ = w.Write(tt.body)
+			}))
+			defer srv.Close()
+
+			rt, err := NewRemoteTransport(srv.URL, "", "proj-a")
+			if err != nil {
+				t.Fatalf("NewRemoteTransport: %v", err)
+			}
+			if _, err := rt.ReadChunk("chunk-1"); err == nil {
+				t.Fatal("expected ReadChunk error")
+			} else if tt.want != nil && !errors.Is(err, tt.want) {
+				t.Fatalf("ReadChunk error = %v, want %v", err, tt.want)
+			}
+		})
 	}
 }
 
@@ -196,7 +440,7 @@ func TestRemoteTransportBuildsRequestURLsFromBasePath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	rt, err := NewRemoteTransport(srv.URL+"/api/v1", "token", "proj-a")
+	rt, err := NewRemoteTransport(srv.URL+"/api/v1", "", "proj-a")
 	if err != nil {
 		t.Fatalf("NewRemoteTransport: %v", err)
 	}

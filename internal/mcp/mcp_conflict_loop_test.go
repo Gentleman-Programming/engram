@@ -25,10 +25,10 @@ import (
 // ─── G.1 — Full save→judge→search loop ──────────────────────────────────────
 //
 // Verifies the complete end-to-end lifecycle:
-//   1. Save observation A (no candidates in empty store)
-//   2. Save observation B with overlapping title → candidates returned
-//   3. mem_judge one candidate as conflicts_with
-//   4. mem_search → B shows conflict annotation; A shows contested annotation
+//  1. Save observation A (no candidates in empty store)
+//  2. Save observation B with overlapping title → candidates returned
+//  3. mem_judge one candidate as conflicts_with
+//  4. mem_search → B shows conflict annotation; A shows contested annotation
 //
 // REQ-001 (candidate detection), REQ-002 (search annotations), REQ-003 (mem_judge)
 func TestConflictLoop_SaveJudgeSearch(t *testing.T) {
