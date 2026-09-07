@@ -25,7 +25,13 @@ jobs:
       - name: Verify generated templ output
         run: |
           make templ
-          git diff --exit-code -- internal/cloud/dashboard/*_templ.go
+          git diff --exit-code -- 'internal/cloud/dashboard/*_templ.go'
+          untracked_templ_outputs=$(git ls-files --others --exclude-standard -- 'internal/cloud/dashboard/*_templ.go')
+          if [[ -n "${untracked_templ_outputs}" ]]; then
+            echo '::error::Untracked generated templ output detected:' >&2
+            printf '%s\n' "${untracked_templ_outputs}" >&2
+            exit 1
+          fi
 
       - name: Run dead-code ratchet
         run: make deadcode-check
