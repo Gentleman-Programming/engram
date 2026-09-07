@@ -40,6 +40,46 @@ func TestReleaseWorkflowChecksModuleMetadataInGoreleaserJob(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "duplicate Set up Go steps",
+			workflow: `jobs:
+  goreleaser:
+    steps:
+      - name: Set up Go
+      - name: Set up Go
+      - name: Verify module metadata is tidy
+        run: go mod tidy -diff
+      - name: Run GoReleaser
+`,
+			want: false,
+		},
+		{
+			name: "duplicate Verify module metadata is tidy steps",
+			workflow: `jobs:
+  goreleaser:
+    steps:
+      - name: Set up Go
+      - name: Verify module metadata is tidy
+        run: go mod tidy -diff
+      - name: Verify module metadata is tidy
+        run: go mod tidy -diff
+      - name: Run GoReleaser
+`,
+			want: false,
+		},
+		{
+			name: "duplicate Run GoReleaser steps",
+			workflow: `jobs:
+  goreleaser:
+    steps:
+      - name: Set up Go
+      - name: Verify module metadata is tidy
+        run: go mod tidy -diff
+      - name: Run GoReleaser
+      - name: Run GoReleaser
+`,
+			want: false,
+		},
+		{
 			name: "missing required step",
 			workflow: `jobs:
   goreleaser:
