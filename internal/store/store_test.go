@@ -418,6 +418,86 @@ func TestRescueNullProjectOwnershipRescuesLegacyNullableSessionAndJournalsOnce(t
 	}
 }
 
+func TestRescueNullProjectOwnershipStampsBlankSameProjectOwnershipMode(t *testing.T) {
+	for _, tc := range []struct {
+		name, sessionID, wantMode string
+	}{
+		{"manual save session", "manual-save-target", SessionOwnershipProjectOwned},
+		{"shared session", "agent-session", SessionOwnershipShared},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if err := s.CreateSessionWithOwnershipMode(tc.sessionID, "target", "/tmp", SessionOwnershipShared); err != nil {
+				t.Fatalf("CreateSessionWithOwnershipMode: %v", err)
+			}
+			if _, err := s.DB().Exec(`UPDATE sessions SET ownership_mode = '' WHERE id = ?`, tc.sessionID); err != nil {
+				t.Fatalf("seed blank ownership mode: %v", err)
+			}
+			if _, err := s.DB().Exec(`UPDATE sync_mutations SET payload = ? WHERE entity = ? AND entity_key = ?`, `{"id":"`+tc.sessionID+`","project":"target"}`, SyncEntitySession, tc.sessionID); err != nil {
+				t.Fatalf("seed stale session mutation: %v", err)
+			}
+
+			params := ProjectRescueParams{TargetProject: "target", SessionIDs: []string{tc.sessionID}}
+			result, err := s.RescueNullProjectOwnership(params)
+			if err != nil {
+				t.Fatalf("RescueNullProjectOwnership: %v", err)
+			}
+			if result.RescuedSessions != 1 || !result.Journaled || !result.Complete {
+				t.Fatalf("rescue result = %#v, want one complete journaled mode stamp", result)
+			}
+			session, err := s.GetSession(tc.sessionID)
+			if err != nil || session.OwnershipMode != tc.wantMode {
+				t.Fatalf("rescued session = %#v, err=%v, want ownership mode %q", session, err, tc.wantMode)
+			}
+			var rawPayload string
+			if err := s.DB().QueryRow(`SELECT payload FROM sync_mutations WHERE entity = ? AND entity_key = ? AND acked_at IS NULL`, SyncEntitySession, tc.sessionID).Scan(&rawPayload); err != nil {
+				t.Fatalf("read session mutation payload: %v", err)
+			}
+			var payload syncSessionPayload
+			if err := json.Unmarshal([]byte(rawPayload), &payload); err != nil {
+				t.Fatalf("decode session mutation payload: %v", err)
+			}
+			if payload.OwnershipMode != tc.wantMode {
+				t.Fatalf("session mutation ownership mode = %q, want %q", payload.OwnershipMode, tc.wantMode)
+			}
+
+			again, err := s.RescueNullProjectOwnership(params)
+			if err != nil {
+				t.Fatalf("repeat RescueNullProjectOwnership: %v", err)
+			}
+			if again.RescuedSessions != 0 || again.SkippedRecords != 1 || !again.Journaled {
+				t.Fatalf("repeat rescue result = %#v, want one skipped canonical session", again)
+			}
+			var mutations int
+			if err := s.DB().QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ? AND acked_at IS NULL`, SyncEntitySession, tc.sessionID).Scan(&mutations); err != nil || mutations != 1 {
+				t.Fatalf("pending session mutations = %d, err=%v, want 1", mutations, err)
+			}
+		})
+	}
+}
+
+func TestRescueNullProjectOwnershipBlocksBlankModeForeignSession(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSessionWithOwnershipMode("foreign-session", "other", "/tmp", SessionOwnershipShared); err != nil {
+		t.Fatalf("CreateSessionWithOwnershipMode: %v", err)
+	}
+	if _, err := s.DB().Exec(`UPDATE sessions SET ownership_mode = '' WHERE id = 'foreign-session'`); err != nil {
+		t.Fatalf("seed blank ownership mode: %v", err)
+	}
+
+	result, err := s.RescueNullProjectOwnership(ProjectRescueParams{TargetProject: "target", SessionIDs: []string{"foreign-session"}})
+	if err != nil {
+		t.Fatalf("RescueNullProjectOwnership: %v", err)
+	}
+	if result.RescuedSessions != 0 || result.ConflictingRecords != 1 || len(result.Blocked) != 1 || result.Blocked[0].Reason != RescueBlockedOwnedByOtherProject {
+		t.Fatalf("rescue result = %#v, want the foreign session blocked", result)
+	}
+	session, err := s.GetSession("foreign-session")
+	if err != nil || session.Project != "other" || session.OwnershipMode != "" {
+		t.Fatalf("foreign session = %#v, err=%v, want unchanged foreign ownership", session, err)
+	}
+}
+
 // seedForeignOwnedObservationTx inserts an observation directly, bypassing the
 // write paths, so a test can construct the legacy shape where an unowned session
 // already parents a record owned by a different project.

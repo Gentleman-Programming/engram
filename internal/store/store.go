@@ -6047,7 +6047,7 @@ type MigrateResult struct {
 }
 
 // ProjectRescueParams identifies historical rows whose missing project ownership
-// was explicitly confirmed by an operator. Only rows with a NULL project qualify.
+// or blank same-project ownership mode was explicitly confirmed by an operator.
 type ProjectRescueParams struct {
 	TargetProject  string
 	ObservationIDs []int64
@@ -6168,6 +6168,17 @@ func (s *Store) RescueNullProjectOwnership(p ProjectRescueParams) (*ProjectRescu
 			}
 			result.RescuedSessions++
 		}
+		for _, sessionID := range scope.ordered {
+			if !plan.stampOwnershipMode[sessionID] {
+				continue
+			}
+			if _, err := s.execHook(tx, rescueSessionQuery.updateOwnershipMode,
+				target, SessionOwnershipProjectOwned, SessionOwnershipShared, sessionID, target, sqlWhitespaceTrimSet,
+			); err != nil {
+				return err
+			}
+			result.RescuedSessions++
+		}
 		for _, query := range []struct {
 			query rescueRecordQuery
 			moves []int64
@@ -6184,7 +6195,7 @@ func (s *Store) RescueNullProjectOwnership(p ProjectRescueParams) (*ProjectRescu
 			}
 		}
 
-		journaled, err := s.enqueueRescuedProjectMutationsTx(tx, target, scope.ordered, p)
+		journaled, err := s.enqueueRescuedProjectMutationsTx(tx, target, scope.ordered, plan.stampOwnershipMode, p)
 		if err != nil {
 			return err
 		}
@@ -6203,6 +6214,9 @@ func (s *Store) RescueNullProjectOwnership(p ProjectRescueParams) (*ProjectRescu
 type rescuePlan struct {
 	// claim lists unowned sessions that will be moved to the target.
 	claim []string
+	// stampOwnershipMode identifies target-owned sessions whose blank ownership
+	// mode can be deterministically classified from their session ID.
+	stampOwnershipMode map[string]bool
 	// willOwn reports, for every session in scope, whether it belongs to the
 	// target once the plan is applied.
 	willOwn map[string]bool
@@ -6212,9 +6226,12 @@ type rescuePlan struct {
 // unowned session that already parents a record owned by another project stays
 // put: claiming it would split that record from its session.
 func planRescueSessionsTx(tx *sql.Tx, scope rescueSessionScope, target string, result *ProjectRescueResult) (rescuePlan, error) {
-	plan := rescuePlan{willOwn: make(map[string]bool, len(scope.ordered))}
+	plan := rescuePlan{
+		stampOwnershipMode: make(map[string]bool),
+		willOwn:            make(map[string]bool, len(scope.ordered)),
+	}
 	for _, sessionID := range scope.ordered {
-		project, _, found, err := sessionOwnershipTx(tx, sessionID)
+		project, mode, found, err := sessionOwnershipTx(tx, sessionID)
 		if err != nil {
 			return plan, err
 		}
@@ -6226,7 +6243,9 @@ func planRescueSessionsTx(tx *sql.Tx, scope rescueSessionScope, target string, r
 			}
 		case project == target:
 			plan.willOwn[sessionID] = true
-			if scope.explicit[sessionID] {
+			if mode == "" {
+				plan.stampOwnershipMode[sessionID] = true
+			} else if scope.explicit[sessionID] {
 				result.countOutcome(rescueAlreadyOwned)
 			}
 		case project != "":
@@ -6311,9 +6330,10 @@ func (r *ProjectRescueResult) countOutcome(outcome rescueOutcome) {
 type rescueRecordQuery struct {
 	// selectSessionID reads the parent session id of one record. It is empty for
 	// sessions, which have no parent.
-	selectSessionID string
-	selectProject   string
-	updateProject   string
+	selectSessionID     string
+	selectProject       string
+	updateProject       string
+	updateOwnershipMode string
 }
 
 var (
@@ -6328,8 +6348,9 @@ var (
 		updateProject:   `UPDATE user_prompts SET project = ? WHERE id = ? AND ifnull(trim(project), '') = ''`,
 	}
 	rescueSessionQuery = rescueRecordQuery{
-		selectProject: `SELECT project FROM sessions WHERE id = ?`,
-		updateProject: `UPDATE sessions SET project = ? WHERE id = ? AND ifnull(trim(project), '') = ''`,
+		selectProject:       `SELECT project FROM sessions WHERE id = ?`,
+		updateProject:       `UPDATE sessions SET project = ? WHERE id = ? AND ifnull(trim(project), '') = ''`,
+		updateOwnershipMode: `UPDATE sessions SET ownership_mode = CASE WHEN id = 'manual-save-' || ? THEN ? ELSE ? END WHERE id = ? AND project = ? AND ifnull(trim(ownership_mode, ?), '') = ''`,
 	}
 )
 
@@ -7176,17 +7197,24 @@ func backfillMutationSource(source []string) string {
 // enqueueRescuedProjectMutationsTx journals the rescued rows. sessionIDs covers
 // the explicitly requested sessions plus every dependent parent session, so a
 // rescued observation is never pushed ahead of the session that now owns it.
-func (s *Store) enqueueRescuedProjectMutationsTx(tx *sql.Tx, target string, sessionIDs []string, p ProjectRescueParams) (bool, error) {
+func (s *Store) enqueueRescuedProjectMutationsTx(tx *sql.Tx, target string, sessionIDs []string, modeStamped map[string]bool, p ProjectRescueParams) (bool, error) {
 	journaled := false
 	for _, id := range sessionIDs {
 		var payload syncSessionPayload
-		err := tx.QueryRow(`SELECT id, project, directory, started_at, ended_at, summary FROM sessions WHERE id = ? AND project = ?`, id, target).
-			Scan(&payload.ID, &payload.Project, &payload.Directory, &payload.StartedAt, &payload.EndedAt, &payload.Summary)
+		err := tx.QueryRow(`SELECT id, project, ifnull(ownership_mode, ''), directory, started_at, ended_at, summary FROM sessions WHERE id = ? AND project = ?`, id, target).
+			Scan(&payload.ID, &payload.Project, &payload.OwnershipMode, &payload.Directory, &payload.StartedAt, &payload.EndedAt, &payload.Summary)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
 		}
 		if err != nil {
 			return false, err
+		}
+		if modeStamped[id] {
+			refreshed, err := s.refreshPendingLocalSessionMutationTx(tx, payload)
+			if err != nil {
+				return false, err
+			}
+			journaled = journaled || refreshed
 		}
 		canonical, err := s.enqueueMissingLocalMutationTx(tx, SyncEntitySession, payload.ID, payload)
 		if err != nil {
@@ -7232,6 +7260,22 @@ func (s *Store) enqueueRescuedProjectMutationsTx(tx *sql.Tx, target string, sess
 		journaled = journaled || canonical
 	}
 	return journaled, nil
+}
+
+func (s *Store) refreshPendingLocalSessionMutationTx(tx *sql.Tx, payload syncSessionPayload) (bool, error) {
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return false, err
+	}
+	res, err := s.execHook(tx, `UPDATE sync_mutations SET payload = ?
+		WHERE target_key = ? AND entity = ? AND entity_key = ? AND op = ? AND source = ? AND project = ? AND acked_at IS NULL`,
+		string(encoded), DefaultSyncTargetKey, SyncEntitySession, payload.ID, SyncOpUpsert, SyncSourceLocal, payload.Project,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 func (s *Store) enqueueMissingLocalMutationTx(tx *sql.Tx, entity, entityKey string, payload any, ops ...string) (bool, error) {
