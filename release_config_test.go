@@ -226,6 +226,19 @@ func TestReleaseWorkflowChecksModuleMetadataInGoreleaserJob(t *testing.T) {
 `,
 		},
 		{
+			name: "mutating tidy command after an environment assignment",
+			workflow: `jobs:
+  goreleaser:
+    steps:
+      - name: Set up Go
+      - name: Verify module metadata is tidy
+        run: go mod tidy -diff
+      - name: Mutate module metadata
+        run: CI=1 go mod tidy
+      - name: Run GoReleaser
+`,
+		},
+		{
 			name: "mutating tidy command in a double-quoted direct step",
 			workflow: `jobs:
   goreleaser:
@@ -493,6 +506,9 @@ func releaseWorkflowRunHasMutatingTidy(run string) bool {
 			return r == ';' || r == '&' || r == '|'
 		}) {
 			fields := strings.Fields(command)
+			for len(fields) > 0 && strings.Contains(fields[0], "=") {
+				fields = fields[1:]
+			}
 			if len(fields) < 3 || fields[0] != "go" || fields[1] != "mod" || fields[2] != "tidy" {
 				continue
 			}
