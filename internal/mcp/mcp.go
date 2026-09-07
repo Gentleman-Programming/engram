@@ -1508,6 +1508,12 @@ func handleUpdate(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 		if storedProject != resolvedProject {
 			return errorWithMeta("project_mismatch", "The current project does not own this observation", knownWriteProjects(s, detRes)), nil
 		}
+		if detRes.Source == projectpkg.SourceDirBasename {
+			session, err := s.GetSession(obs.SessionID)
+			if err != nil || strings.TrimSpace(session.Directory) == "" || runtimeSessionDirectory(session.Directory) != runtimeSessionDirectory(detRes.Path) {
+				return errorWithMeta("project_mismatch", "The current project does not own this observation", knownWriteProjects(s, detRes)), nil
+			}
+		}
 
 		var truncation *store.TruncationMetadata
 		if update.Content != nil {
@@ -2897,10 +2903,15 @@ func resolveMCPProject(s *store.Store, explicit, defaultProject string) (project
 }
 
 func resolveMCPProjectWithPolicy(s *store.Store, explicit, defaultProject string, requireKnownProcess bool) (projectpkg.DetectionResult, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = "."
+	}
 	result, err := projectpkg.Resolve(projectpkg.ResolutionOptions{
 		Mode:                 projectpkg.ResolutionCurrent,
 		Explicit:             explicit,
 		ProcessOverride:      defaultProject,
+		Directory:            cwd,
 		ProjectExists:        s.ProjectExists,
 		RequireKnownExplicit: strings.TrimSpace(explicit) != "",
 		RequireKnownProcess:  requireKnownProcess,

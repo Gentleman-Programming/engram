@@ -2173,6 +2173,105 @@ func TestHandleUpdateRejectsFieldOnlyUpdateFromDifferentDetectedProject(t *testi
 	}
 }
 
+func TestHandleUpdateUsesNonGitDirectoryBasenameProject(t *testing.T) {
+	s := newMCPTestStore(t)
+	cwd := filepath.Join(t.TempDir(), "Non Git Update Project")
+	if err := os.Mkdir(cwd, 0755); err != nil {
+		t.Fatalf("create non-git cwd: %v", err)
+	}
+	t.Chdir(cwd)
+	t.Setenv("ENGRAM_PROJECT", "")
+	projectName := project.CanonicalizeProjectName(filepath.Base(cwd))
+
+	current, err := handleCurrentProject(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{})
+	if err != nil {
+		t.Fatalf("current-project handler error: %v", err)
+	}
+	if current.IsError {
+		t.Fatalf("unexpected current-project error: %s", callResultText(t, current))
+	}
+	currentEnvelope := callResultJSON(t, current)
+	if currentEnvelope["project"] != projectName {
+		t.Fatalf("current project = %v, want %q", currentEnvelope["project"], projectName)
+	}
+	if currentEnvelope["project_source"] != project.SourceDirBasename {
+		t.Fatalf("current project source = %v, want %s", currentEnvelope["project_source"], project.SourceDirBasename)
+	}
+
+	if err := s.CreateSession("s-dir-basename", projectName, cwd); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "s-dir-basename",
+		Type:      "note",
+		Title:     "Original",
+		Content:   "Original content",
+		Project:   projectName,
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	updatedTitle := "Updated from directory basename project"
+	update := handleUpdate(s, MCPConfig{})
+	res, err := update(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"id":    float64(id),
+		"title": updatedTitle,
+	}}})
+	if err != nil {
+		t.Fatalf("update handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected update error: %s", callResultText(t, res))
+	}
+	updateEnvelope := callResultJSON(t, res)
+	if updateEnvelope["project"] != currentEnvelope["project"] {
+		t.Fatalf("update project = %v, want current project %v", updateEnvelope["project"], currentEnvelope["project"])
+	}
+	if updateEnvelope["project_source"] != currentEnvelope["project_source"] {
+		t.Fatalf("update project source = %v, want current project source %v", updateEnvelope["project_source"], currentEnvelope["project_source"])
+	}
+	persisted, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("get updated observation: %v", err)
+	}
+	if persisted.Title != updatedTitle {
+		t.Fatalf("persisted title = %q, want %q", persisted.Title, updatedTitle)
+	}
+
+	spoofCwd := filepath.Join(t.TempDir(), filepath.Base(cwd))
+	if err := os.Mkdir(spoofCwd, 0755); err != nil {
+		t.Fatalf("create spoof cwd: %v", err)
+	}
+	t.Chdir(spoofCwd)
+	res, err = update(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"id": float64(id), "title": "Spoofed update",
+	}}})
+	if err != nil || !res.IsError || callResultJSON(t, res)["error_code"] != "project_mismatch" {
+		t.Fatalf("spoof update = %v, %s", err, callResultText(t, res))
+	}
+	persisted, err = s.GetObservation(id)
+	if err != nil || persisted.Title != updatedTitle {
+		t.Fatalf("spoofed observation = %#v, err=%v", persisted, err)
+	}
+
+	t.Chdir(cwd)
+	if _, err := s.DB().Exec(`UPDATE sessions SET directory = '' WHERE id = ?`, "s-dir-basename"); err != nil {
+		t.Fatalf("clear session directory: %v", err)
+	}
+	res, err = update(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"id": float64(id), "title": "Empty-directory update",
+	}}})
+	if err != nil || !res.IsError || callResultJSON(t, res)["error_code"] != "project_mismatch" {
+		t.Fatalf("empty-directory update = %v, %s", err, callResultText(t, res))
+	}
+	persisted, err = s.GetObservation(id)
+	if err != nil || persisted.Title != updatedTitle {
+		t.Fatalf("empty-directory observation = %#v, err=%v", persisted, err)
+	}
+}
+
 func TestHandleUpdateRejectsNullOwnedObservationWithStructuredMetadata(t *testing.T) {
 	s := newMCPTestStore(t)
 	if err := s.CreateSession("s-owned", "owned-project", "/tmp/owned-project"); err != nil {
