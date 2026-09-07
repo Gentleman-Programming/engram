@@ -1669,7 +1669,7 @@ func TestCmdProjectsConsolidateDryRunRequiresSelection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.New: %v", err)
 	}
-	defer s.Close()
+	t.Cleanup(func() { _ = s.Close() })
 	names, err := s.ListProjectNames()
 	if err != nil {
 		t.Fatalf("ListProjectNames: %v", err)
@@ -1756,7 +1756,7 @@ func TestCmdProjectsConsolidateAllDryRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.New: %v", err)
 	}
-	defer s.Close()
+	t.Cleanup(func() { _ = s.Close() })
 	names, err := s.ListProjectNames()
 	if err != nil {
 		t.Fatalf("ListProjectNames: %v", err)
