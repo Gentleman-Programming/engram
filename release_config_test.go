@@ -106,6 +106,32 @@ func TestReleaseWorkflowChecksModuleMetadataInGoreleaserJob(t *testing.T) {
 			want: false,
 		},
 		{
+			name: "tidy check is skipped",
+			workflow: `jobs:
+  goreleaser:
+    steps:
+      - name: Set up Go
+      - name: Verify module metadata is tidy
+        if: false
+        run: go mod tidy -diff
+      - name: Run GoReleaser
+`,
+			want: false,
+		},
+		{
+			name: "tidy check is non-blocking",
+			workflow: `jobs:
+  goreleaser:
+    steps:
+      - name: Set up Go
+      - name: Verify module metadata is tidy
+        continue-on-error: true
+        run: go mod tidy -diff
+      - name: Run GoReleaser
+`,
+			want: false,
+		},
+		{
 			name: "missing required step",
 			workflow: `jobs:
   goreleaser:
@@ -212,7 +238,7 @@ func releaseWorkflowChecksModuleMetadataInGoreleaserJob(workflow string) bool {
 			}
 			setupGo = index
 		case "Verify module metadata is tidy":
-			if tidyCheck >= 0 || step.run != "go mod tidy -diff" {
+			if tidyCheck >= 0 || step.run != "go mod tidy -diff" || step.hasIf || step.hasContinueOnError {
 				return false
 			}
 			tidyCheck = index
@@ -228,10 +254,12 @@ func releaseWorkflowChecksModuleMetadataInGoreleaserJob(workflow string) bool {
 }
 
 type releaseWorkflowStep struct {
-	name    string
-	run     string
-	hasName bool
-	hasRun  bool
+	name               string
+	run                string
+	hasName            bool
+	hasRun             bool
+	hasIf              bool
+	hasContinueOnError bool
 }
 
 // releaseWorkflowGoreleaserSteps intentionally recognizes only this workflow's
@@ -293,6 +321,16 @@ func releaseWorkflowStepField(step *releaseWorkflowStep, field string) bool {
 		}
 		step.hasRun = true
 		step.run = strings.TrimSpace(value)
+	case "if":
+		if step.hasIf {
+			return false
+		}
+		step.hasIf = true
+	case "continue-on-error":
+		if step.hasContinueOnError {
+			return false
+		}
+		step.hasContinueOnError = true
 	}
 	return true
 }
