@@ -16,15 +16,101 @@ func TestReleaseChecksModuleMetadataWithoutMutatingTaggedSources(t *testing.T) {
 	}
 
 	workflow := releaseConfigFile(t, filepath.Join(root, ".github", "workflows", "release.yml"))
-	setupGo := strings.Index(workflow, "- name: Set up Go")
-	tidyCheck := strings.Index(workflow, "run: go mod tidy -diff")
-	goreleaserStep := strings.Index(workflow, "- name: Run GoReleaser")
-	if setupGo == -1 || tidyCheck == -1 || goreleaserStep == -1 {
-		t.Fatal("release workflow must set up Go, check tidy module metadata, and run GoReleaser")
+	if !releaseWorkflowChecksModuleMetadataInGoreleaserJob(workflow) {
+		t.Fatal("release workflow must set up Go, check tidy module metadata, and run GoReleaser in order in the goreleaser job")
 	}
-	if !(setupGo < tidyCheck && tidyCheck < goreleaserStep) {
-		t.Fatal("release workflow must check tidy module metadata after Go setup and before GoReleaser")
+}
+
+func TestReleaseWorkflowChecksModuleMetadataInGoreleaserJob(t *testing.T) {
+	tests := []struct {
+		name     string
+		workflow string
+		want     bool
+	}{
+		{
+			name: "valid same-job order",
+			workflow: `jobs:
+  goreleaser:
+    steps:
+      - name: Set up Go
+      - name: Verify module metadata is tidy
+        run: go mod tidy -diff
+      - name: Run GoReleaser
+`,
+			want: true,
+		},
+		{
+			name: "missing required step",
+			workflow: `jobs:
+  goreleaser:
+    steps:
+      - name: Set up Go
+      - name: Run GoReleaser
+`,
+		},
+		{
+			name: "incorrect order",
+			workflow: `jobs:
+  goreleaser:
+    steps:
+      - name: Verify module metadata is tidy
+        run: go mod tidy -diff
+      - name: Set up Go
+      - name: Run GoReleaser
+`,
+		},
+		{
+			name: "tidy check in a different job",
+			workflow: `jobs:
+  checks:
+    steps:
+      - name: Set up Go
+      - name: Verify module metadata is tidy
+        run: go mod tidy -diff
+  goreleaser:
+    steps:
+      - name: Set up Go
+      - name: Run GoReleaser
+`,
+		},
 	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := releaseWorkflowChecksModuleMetadataInGoreleaserJob(tt.workflow); got != tt.want {
+				t.Errorf("releaseWorkflowChecksModuleMetadataInGoreleaserJob() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
+func releaseWorkflowChecksModuleMetadataInGoreleaserJob(workflow string) bool {
+	job := releaseWorkflowGoreleaserJob(workflow)
+	setupGo := strings.Index(job, "- name: Set up Go")
+	tidyCheck := strings.Index(job, "run: go mod tidy -diff")
+	goreleaserStep := strings.Index(job, "- name: Run GoReleaser")
+	return setupGo >= 0 && tidyCheck >= 0 && goreleaserStep >= 0 && setupGo < tidyCheck && tidyCheck < goreleaserStep
+}
+
+func releaseWorkflowGoreleaserJob(workflow string) string {
+	lines := strings.Split(workflow, "\n")
+	for start, line := range lines {
+		if strings.TrimSuffix(line, "\r") != "  goreleaser:" {
+			continue
+		}
+		end := start + 1
+		for ; end < len(lines); end++ {
+			line := strings.TrimSuffix(lines[end], "\r")
+			if line != "" && !strings.HasPrefix(line, " ") {
+				break
+			}
+			if strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "    ") {
+				break
+			}
+		}
+		return strings.Join(lines[start:end], "\n")
+	}
+	return ""
 }
 
 func releaseConfigRepoRoot(t *testing.T) string {
