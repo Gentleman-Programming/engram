@@ -1,72 +1,62 @@
 package scripts
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 var (
-	workflowActionPattern = regexp.MustCompile(`^\s*(?:-\s+)?uses:\s*(["']?)([^@\s"']+)@([^\s#"']+)(["']?)(?:\s+#\s*(.+?))?\s*$`)
 	fullSHAPattern        = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
 	versionCommentPattern = regexp.MustCompile(`^v\d+(?:[.\w-]*)?$`)
 )
 
-func parseWorkflowAction(line string) (action, ref, comment string, ok bool) {
-	matches := workflowActionPattern.FindStringSubmatch(line)
-	if matches == nil || matches[1] != matches[4] {
-		return "", "", "", false
-	}
-	return matches[2], matches[3], matches[5], true
-}
-
 func TestWorkflowActionParsing(t *testing.T) {
 	const sha = "0123456789abcdef0123456789abcdef01234567"
 	tests := []struct {
-		name, line, action, ref, comment, classify string
-		matched, external, fullSHA, versionComment bool
+		name              string
+		workflow          string
+		wantErrors        []string
+		wantErrorContains string
 	}{
-		{name: "pinned", line: "uses: actions/checkout@" + sha + " # v6", action: "actions/checkout", ref: sha, comment: "v6", classify: "actions/checkout", matched: true, external: true, fullSHA: true, versionComment: true},
-		{name: "tag", line: "uses: actions/checkout@v6 # v6", action: "actions/checkout", ref: "v6", comment: "v6", classify: "actions/checkout", matched: true, external: true, versionComment: true},
-		{name: "branch", line: "uses: owner/action@main # v1", action: "owner/action", ref: "main", comment: "v1", classify: "owner/action", matched: true, external: true, versionComment: true},
-		{name: "wrong length SHA", line: "uses: actions/checkout@" + sha[:39] + " # v6", action: "actions/checkout", ref: sha[:39], comment: "v6", classify: "actions/checkout", matched: true, external: true, versionComment: true},
-		{name: "non-hex SHA", line: "uses: actions/checkout@" + strings.Repeat("g", 40) + " # v6", action: "actions/checkout", ref: strings.Repeat("g", 40), comment: "v6", classify: "actions/checkout", matched: true, external: true, versionComment: true},
-		{name: "missing comment", line: "uses: actions/checkout@" + sha, action: "actions/checkout", ref: sha, classify: "actions/checkout", matched: true, external: true, fullSHA: true},
-		{name: "malformed version comment", line: "uses: actions/checkout@" + sha + " # release-6", action: "actions/checkout", ref: sha, comment: "release-6", classify: "actions/checkout", matched: true, external: true, fullSHA: true},
-		{name: "list item", line: "- uses: actions/checkout@" + sha + " # v6", action: "actions/checkout", ref: sha, comment: "v6", classify: "actions/checkout", matched: true, external: true, fullSHA: true, versionComment: true},
-		{name: "double quoted", line: "uses: \"actions/checkout@" + sha + "\" # v6", action: "actions/checkout", ref: sha, comment: "v6", classify: "actions/checkout", matched: true, external: true, fullSHA: true, versionComment: true},
-		{name: "single quoted", line: "uses: 'actions/checkout@" + sha + "' # v6", action: "actions/checkout", ref: sha, comment: "v6", classify: "actions/checkout", matched: true, external: true, fullSHA: true, versionComment: true},
-		{name: "local", line: "uses: ./local-action", classify: "./local-action"},
-		{name: "Docker", line: "uses: docker://alpine@sha256:abc", action: "docker://alpine", ref: "sha256:abc", classify: "docker://alpine", matched: true},
-		{name: "malformed", line: "uses actions/checkout@v6"},
-		{name: "missing closing quote", line: "uses: \"actions/checkout@" + sha + " # v6"},
-		{name: "mismatched quotes", line: "uses: \"actions/checkout@" + sha + "' # v6"},
+		{name: "pinned step action", workflow: workflowWithStep("actions/checkout@" + sha + " # v6")},
+		{name: "double quoted step action", workflow: workflowWithStep("\"actions/checkout@" + sha + "\" # v6")},
+		{name: "single quoted step action", workflow: workflowWithStep("'actions/checkout@" + sha + "' # v6")},
+		{name: "pinned reusable workflow", workflow: "jobs:\n  call:\n    uses: owner/repo/.github/workflows/reusable.yml@" + sha + " # v1\n"},
+		{name: "mutable reusable workflow", workflow: "jobs:\n  call:\n    uses: owner/repo/.github/workflows/reusable.yml@main # v1\n", wantErrors: []string{"line 3: external action \"owner/repo/.github/workflows/reusable.yml\" must use a full 40-hex commit SHA"}},
+		{name: "local action", workflow: workflowWithStep("./local-action")},
+		{name: "Docker action", workflow: workflowWithStep("docker://alpine@sha256:abc")},
+		{name: "wrong length SHA", workflow: workflowWithStep("actions/checkout@" + sha[:39] + " # v6"), wantErrors: []string{"line 4: external action \"actions/checkout\" must use a full 40-hex commit SHA"}},
+		{name: "non-hex SHA", workflow: workflowWithStep("actions/checkout@" + strings.Repeat("g", 40) + " # v6"), wantErrors: []string{"line 4: external action \"actions/checkout\" must use a full 40-hex commit SHA"}},
+		{name: "missing version comment", workflow: workflowWithStep("actions/checkout@" + sha), wantErrors: []string{"line 4: external action \"actions/checkout\" must have an adjacent version comment"}},
+		{name: "malformed version comment", workflow: workflowWithStep("actions/checkout@" + sha + " # release-6"), wantErrors: []string{"line 4: external action \"actions/checkout\" must have an adjacent version comment"}},
+		{name: "scalar anchor", workflow: workflowWithStep("&checkout actions/checkout@" + sha + " # v6")},
+		{name: "scalar alias", workflow: "action: &checkout actions/checkout@" + sha + "\njobs:\n  test:\n    steps:\n      - uses: *checkout # v6\n"},
+		{name: "scalar alias requires an occurrence comment", workflow: "action: &checkout actions/checkout@" + sha + " # v6\njobs:\n  test:\n    steps:\n      - uses: *checkout\n", wantErrors: []string{"line 5: external action \"actions/checkout\" must have an adjacent version comment"}},
+		{name: "mutable scalar alias", workflow: "action: &checkout actions/checkout@main\njobs:\n  test:\n    steps:\n      - uses: *checkout # v6\n", wantErrors: []string{"line 5: external action \"actions/checkout\" must use a full 40-hex commit SHA"}},
+		{name: "non-scalar uses value", workflow: workflowWithStep("{action: actions/checkout@" + sha + "}"), wantErrors: []string{"line 4: uses value must resolve to a scalar, got mapping"}},
+		{name: "unrecognized uses value", workflow: workflowWithStep("checkout # v6"), wantErrors: []string{"line 4: uses value \"checkout\" is not a supported local, Docker, or GitHub action reference"}},
+		{name: "unresolved alias", workflow: workflowWithStep("*missing"), wantErrorContains: "parse workflow YAML:"},
+		{name: "malformed YAML", workflow: "jobs:\n  test: [\n", wantErrorContains: "parse workflow YAML:"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			action, ref, comment, matched := parseWorkflowAction(tt.line)
-			if matched != tt.matched {
-				t.Fatalf("matched = %v, want %v", matched, tt.matched)
-			}
-			if matched && (action != tt.action || ref != tt.ref || comment != tt.comment) {
-				t.Errorf("parsed = [%q %q %q], want [%q %q %q]", action, ref, comment, tt.action, tt.ref, tt.comment)
-			}
-			if matched && tt.external {
-				if got := fullSHAPattern.MatchString(ref); got != tt.fullSHA {
-					t.Errorf("fullSHAPattern.MatchString(%q) = %v, want %v", ref, got, tt.fullSHA)
+			got := errorStrings(validateWorkflowActions([]byte(tt.workflow)))
+			if tt.wantErrorContains != "" {
+				if len(got) != 1 || !strings.Contains(got[0], tt.wantErrorContains) {
+					t.Fatalf("errors = %v, want one error containing %q", got, tt.wantErrorContains)
 				}
-				if got := versionCommentPattern.MatchString(comment); got != tt.versionComment {
-					t.Errorf("versionCommentPattern.MatchString(%q) = %v, want %v", comment, got, tt.versionComment)
-				}
+				return
 			}
-			if tt.classify != "" {
-				if got := isExternalGitHubAction(tt.classify); got != tt.external {
-					t.Errorf("isExternalGitHubAction(%q) = %v, want %v", tt.classify, got, tt.external)
-				}
+			if diff := compareStringSlices(got, tt.wantErrors); diff != "" {
+				t.Fatal(diff)
 			}
 		})
 	}
@@ -90,17 +80,8 @@ func TestWorkflowExternalActionsArePinned(t *testing.T) {
 			t.Fatalf("read %s: %v", path, err)
 		}
 
-		for lineNumber, line := range strings.Split(string(content), "\n") {
-			action, ref, comment, ok := parseWorkflowAction(line)
-			if !ok || !isExternalGitHubAction(action) {
-				continue
-			}
-			if !fullSHAPattern.MatchString(ref) {
-				t.Errorf("%s:%d: external action %q must use a full 40-hex commit SHA", path, lineNumber+1, action)
-			}
-			if !versionCommentPattern.MatchString(comment) {
-				t.Errorf("%s:%d: external action %q must have an adjacent version comment", path, lineNumber+1, action)
-			}
+		for _, err := range validateWorkflowActions(content) {
+			t.Errorf("%s: %v", path, err)
 		}
 	}
 }
@@ -123,4 +104,151 @@ func workflowDirectory(t *testing.T) string {
 
 func isExternalGitHubAction(action string) bool {
 	return !strings.HasPrefix(action, "./") && !strings.HasPrefix(action, "docker://") && strings.Contains(action, "/")
+}
+
+func workflowWithStep(uses string) string {
+	return "jobs:\n  test:\n    steps:\n      - uses: " + uses + "\n"
+}
+
+func validateWorkflowActions(content []byte) []error {
+	var document yaml.Node
+	if err := yaml.Unmarshal(content, &document); err != nil {
+		return []error{fmt.Errorf("parse workflow YAML: %w", err)}
+	}
+	if len(document.Content) != 1 {
+		return nil
+	}
+
+	var violations []error
+	for _, jobs := range mappingValues(document.Content[0], "jobs") {
+		jobs, err := resolveYAMLNode(jobs)
+		if err != nil || jobs.Kind != yaml.MappingNode {
+			continue
+		}
+		for index := 1; index < len(jobs.Content); index += 2 {
+			job := jobs.Content[index]
+			job, err = resolveYAMLNode(job)
+			if err != nil || job.Kind != yaml.MappingNode {
+				continue
+			}
+
+			for _, uses := range mappingValues(job, "uses") {
+				violations = append(violations, validateWorkflowUses(uses)...)
+			}
+			for _, steps := range mappingValues(job, "steps") {
+				steps, err = resolveYAMLNode(steps)
+				if err != nil || steps.Kind != yaml.SequenceNode {
+					continue
+				}
+				for _, step := range steps.Content {
+					step, err = resolveYAMLNode(step)
+					if err != nil || step.Kind != yaml.MappingNode {
+						continue
+					}
+					for _, uses := range mappingValues(step, "uses") {
+						violations = append(violations, validateWorkflowUses(uses)...)
+					}
+				}
+			}
+		}
+	}
+	return violations
+}
+
+func mappingValues(node *yaml.Node, key string) []*yaml.Node {
+	if node.Kind != yaml.MappingNode {
+		return nil
+	}
+
+	var values []*yaml.Node
+	for index := 0; index+1 < len(node.Content); index += 2 {
+		if node.Content[index].Value == key {
+			values = append(values, node.Content[index+1])
+		}
+	}
+	return values
+}
+
+func resolveYAMLNode(node *yaml.Node) (*yaml.Node, error) {
+	visited := make(map[*yaml.Node]struct{})
+	for node != nil && node.Kind == yaml.AliasNode {
+		if _, ok := visited[node]; ok {
+			return nil, fmt.Errorf("alias cycle")
+		}
+		visited[node] = struct{}{}
+		node = node.Alias
+	}
+	if node == nil {
+		return nil, fmt.Errorf("unresolved alias")
+	}
+	return node, nil
+}
+
+func validateWorkflowUses(uses *yaml.Node) []error {
+	resolved, err := resolveYAMLNode(uses)
+	if err != nil {
+		return []error{fmt.Errorf("line %d: uses value must resolve to a scalar: %v", uses.Line, err)}
+	}
+	if resolved.Kind != yaml.ScalarNode {
+		return []error{fmt.Errorf("line %d: uses value must resolve to a scalar, got %s", uses.Line, yamlNodeKind(resolved.Kind))}
+	}
+
+	value := resolved.Value
+	if strings.HasPrefix(value, "./") || strings.HasPrefix(value, "docker://") {
+		return nil
+	}
+	if !isExternalGitHubAction(value) {
+		return []error{fmt.Errorf("line %d: uses value %q is not a supported local, Docker, or GitHub action reference", uses.Line, value)}
+	}
+
+	action, ref, ok := strings.Cut(value, "@")
+	if !ok || action == "" || ref == "" {
+		return []error{fmt.Errorf("line %d: external action %q must use the form owner/action@ref", uses.Line, value)}
+	}
+
+	var violations []error
+	if !fullSHAPattern.MatchString(ref) {
+		violations = append(violations, fmt.Errorf("line %d: external action %q must use a full 40-hex commit SHA", uses.Line, action))
+	}
+	if !versionCommentPattern.MatchString(strings.TrimSpace(strings.TrimPrefix(uses.LineComment, "#"))) {
+		violations = append(violations, fmt.Errorf("line %d: external action %q must have an adjacent version comment", uses.Line, action))
+	}
+	return violations
+}
+
+func yamlNodeKind(kind yaml.Kind) string {
+	switch kind {
+	case yaml.DocumentNode:
+		return "document"
+	case yaml.SequenceNode:
+		return "sequence"
+	case yaml.MappingNode:
+		return "mapping"
+	case yaml.ScalarNode:
+		return "scalar"
+	case yaml.AliasNode:
+		return "alias"
+	default:
+		return "unknown"
+	}
+}
+
+func errorStrings(errs []error) []string {
+	values := make([]string, len(errs))
+	for index, err := range errs {
+		values[index] = err.Error()
+	}
+	return values
+}
+
+func compareStringSlices(got, want []string) string {
+	if len(got) != len(want) {
+		return fmt.Sprintf("errors = %v, want %v", got, want)
+	}
+	for index := range got {
+		if got[index] != want[index] {
+			return fmt.Sprintf("errors = %v, want %v", got, want)
+		}
+	}
+	return ""
 }
