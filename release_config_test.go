@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -213,6 +214,32 @@ func TestReleaseWorkflowChecksModuleMetadataInGoreleaserJob(t *testing.T) {
 `,
 		},
 		{
+			name: "mutating tidy command in a double-quoted direct step",
+			workflow: `jobs:
+  goreleaser:
+    steps:
+      - name: Set up Go
+      - name: Verify module metadata is tidy
+        run: go mod tidy -diff
+      - name: Mutate module metadata
+        run: "go mod tidy"
+      - name: Run GoReleaser
+`,
+		},
+		{
+			name: "mutating tidy command in a single-quoted direct step",
+			workflow: `jobs:
+  goreleaser:
+    steps:
+      - name: Set up Go
+      - name: Verify module metadata is tidy
+        run: go mod tidy -diff
+      - name: Mutate module metadata
+        run: 'go mod tidy'
+      - name: Run GoReleaser
+`,
+		},
+		{
 			name: "tidy command appears only in a nested script",
 			workflow: `jobs:
   goreleaser:
@@ -366,7 +393,7 @@ func releaseWorkflowStepField(step *releaseWorkflowStep, field string) bool {
 		}
 		step.hasRun = true
 		step.run = strings.TrimSpace(value)
-		step.hasMutatingTidy = releaseWorkflowRunHasMutatingTidy(step.run)
+		step.hasMutatingTidy = releaseWorkflowRunHasMutatingTidy(releaseWorkflowDirectScalar(step.run))
 	case "if":
 		if step.hasIf {
 			return false
@@ -379,6 +406,23 @@ func releaseWorkflowStepField(step *releaseWorkflowStep, field string) bool {
 		step.hasContinueOnError = true
 	}
 	return true
+}
+
+func releaseWorkflowDirectScalar(value string) string {
+	if len(value) < 2 || value[0] != value[len(value)-1] {
+		return value
+	}
+
+	switch value[0] {
+	case '"':
+		decoded, err := strconv.Unquote(value)
+		if err == nil {
+			return decoded
+		}
+	case '\'':
+		return strings.ReplaceAll(value[1:len(value)-1], "''", "'")
+	}
+	return value
 }
 
 func releaseWorkflowRunBlock(run string) bool {
