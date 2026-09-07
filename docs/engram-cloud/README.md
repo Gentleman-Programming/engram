@@ -96,6 +96,7 @@ HTTPS and appropriate deployment controls for transport security.
 | Doc | Purpose |
 |---|---|
 | [Quickstart](./quickstart.md) | One recommended path first, then authenticated mode |
+| [Production Checklist](./production-checklist.md) | Self-hosted production boundaries, recovery, and operator responsibilities |
 | [GHCR Compose Example](./docker-compose.ghcr.yml) | Pull-and-run deployment sample for Dokploy/Coolify/Portainer/VPS |
 | [Branding](./branding.md) | Engram Cloud visual identity, asset usage, previews |
 | [Technical Cloud Reference](../../DOCS.md#cloud-cli-opt-in) | Full CLI + env/runtime details |

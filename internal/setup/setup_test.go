@@ -232,6 +232,7 @@ func TestInstallGeminiCLIInjectsMCPConfig(t *testing.T) {
 		t.Fatalf("read system prompt: %v", err)
 	}
 	systemText := string(systemRaw)
+	assertGeneratedDeliveryGuarantee(t, systemText)
 	if !strings.Contains(systemText, "### AFTER COMPACTION") {
 		t.Fatalf("expected AFTER COMPACTION section in system prompt")
 	}
@@ -357,6 +358,7 @@ func TestInstallCodexInjectsTOMLAndIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read codex instructions: %v", err)
 	}
+	assertGeneratedDeliveryGuarantee(t, string(instructionsRaw))
 	if !strings.Contains(string(instructionsRaw), "### AFTER COMPACTION") {
 		t.Fatalf("expected AFTER COMPACTION section in codex instructions")
 	}

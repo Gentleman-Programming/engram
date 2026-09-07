@@ -81,6 +81,10 @@ Format for \`mem_save\`:
   **Where**: Files or paths affected
   **Learned**: Gotchas, edge cases, things that surprised you
 
+### DELIVERY GUARANTEE
+
+Memory operations are internal bookkeeping, never the user-facing answer. Complete required memory work before composing the completed-task reply; send the complete answer as the final message of the turn with no later tool calls. If memory work fails or needs follow-up, still send the answer.
+
 ### WHEN TO SEARCH MEMORY
 
 When the user asks to recall past work:
