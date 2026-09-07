@@ -623,7 +623,15 @@ Examples:
 				mcp.WithString("scope",
 					mcp.Description("Filter observations by scope: project, personal, or global. Omit to apply no scope filter."),
 				),
-				// JW7: limit param removed — schema advertised it but handleContext never read it.
+				mcp.WithNumber("max_bytes",
+					mcp.Description("Total context budget in bytes. Default 16384; values above 65536 are clamped to 65536."),
+				),
+				mcp.WithBoolean("compact",
+					mcp.Description("Drop the inline content preview from observation bullets to save tokens."),
+				),
+				// JW7: the old limit param was removed because handleContext never
+				// read it; max_bytes and compact ARE read and forwarded to
+				// FormatContextWithOptions (#1039).
 			),
 			handleContext(s, cfg, activity),
 		)
@@ -1750,10 +1758,48 @@ func handleSavePrompt(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 	}
 }
 
+// mem_context output budget constants (issue #1039). The MCP tool must
+// never render the unbounded legacy context: absent arguments resolve to the
+// #1012 Claude Code hook budget, and explicit values are clamped to the same
+// ceiling the HTTP /context endpoint enforces.
+const (
+	// memContextDefaultMaxBytes is the default context budget for mem_context,
+	// matching the 16 KiB window the #1012 Claude Code hook budget uses so MCP
+	// context output stays aligned with hook context output.
+	memContextDefaultMaxBytes = 16 * 1024
+
+	// memContextMaxPinned caps the "### Pinned" section in mem_context output.
+	// Pinning is a hand-bounded action, but an unbounded pinned list could
+	// still dominate the response before MaxBytes applies.
+	memContextMaxPinned = 20
+
+	// memContextMaxBytesCeiling mirrors the HTTP server's contextMaxBytes
+	// ceiling for GET /context, keeping both transports' budgets aligned.
+	memContextMaxBytesCeiling = 64 * 1024
+)
+
+// memContextMaxBytes resolves the optional max_bytes tool argument (MCP
+// numbers arrive as float64). Absent, mistyped, non-positive, or NaN input
+// falls back to the default budget — the MCP path must never resolve to the
+// unbounded legacy rendering. The ceiling comparison happens in float64
+// BEFORE the int conversion, because converting an out-of-range float to int
+// is spec-undefined in Go.
+func memContextMaxBytes(raw any) int {
+	v, ok := raw.(float64)
+	if !ok || !(v > 0) {
+		return memContextDefaultMaxBytes
+	}
+	if v > float64(memContextMaxBytesCeiling) {
+		return memContextMaxBytesCeiling
+	}
+	return int(v)
+}
+
 func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		projectOverride, _ := req.GetArguments()["project"].(string)
 		scope, _ := req.GetArguments()["scope"].(string)
+		compact, _ := req.GetArguments()["compact"].(bool)
 
 		// Resolve project: validate override or auto-detect (REQ-310, REQ-311)
 		detRes, err := resolveReadProjectWithProcessOverride(s, projectOverride, cfg.DefaultProject)
@@ -1775,7 +1821,14 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 		sessionID := defaultSessionID(project)
 		activity.RecordToolCall(sessionID)
 
-		contextResult, err := s.FormatContext(contextProject, scope)
+		// #1039: render a bounded context instead of the unbounded legacy
+		// FormatContext output — 16 KiB by default, capped at 20 pinned rows,
+		// with optional max_bytes/compact tuning from the caller.
+		contextResult, err := s.FormatContextWithOptions(contextProject, scope, store.ContextOptions{
+			MaxBytes: memContextMaxBytes(req.GetArguments()["max_bytes"]),
+			Pinned:   memContextMaxPinned,
+			Compact:  compact,
+		})
 		if err != nil {
 			return mcp.NewToolResultError("Failed to get context: " + err.Error()), nil
 		}
