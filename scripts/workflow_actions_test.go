@@ -19,13 +19,16 @@ func TestWorkflowActionParsing(t *testing.T) {
 	const sha = "0123456789abcdef0123456789abcdef01234567"
 	tests := []struct {
 		name, line, action, ref, comment, classify string
-		matched, external                          bool
+		matched, external, fullSHA, versionComment bool
 	}{
-		{name: "pinned", line: "uses: actions/checkout@" + sha + " # v6", action: "actions/checkout", ref: sha, comment: "v6", classify: "actions/checkout", matched: true, external: true},
-		{name: "tag", line: "uses: actions/checkout@v6 # v6", action: "actions/checkout", ref: "v6", comment: "v6", classify: "actions/checkout", matched: true, external: true},
-		{name: "branch", line: "uses: owner/action@main # v1", action: "owner/action", ref: "main", comment: "v1", classify: "owner/action", matched: true, external: true},
-		{name: "missing comment", line: "uses: actions/checkout@" + sha, action: "actions/checkout", ref: sha, classify: "actions/checkout", matched: true, external: true},
-		{name: "list item", line: "- uses: actions/checkout@" + sha + " # v6", action: "actions/checkout", ref: sha, comment: "v6", classify: "actions/checkout", matched: true, external: true},
+		{name: "pinned", line: "uses: actions/checkout@" + sha + " # v6", action: "actions/checkout", ref: sha, comment: "v6", classify: "actions/checkout", matched: true, external: true, fullSHA: true, versionComment: true},
+		{name: "tag", line: "uses: actions/checkout@v6 # v6", action: "actions/checkout", ref: "v6", comment: "v6", classify: "actions/checkout", matched: true, external: true, versionComment: true},
+		{name: "branch", line: "uses: owner/action@main # v1", action: "owner/action", ref: "main", comment: "v1", classify: "owner/action", matched: true, external: true, versionComment: true},
+		{name: "wrong length SHA", line: "uses: actions/checkout@" + sha[:39] + " # v6", action: "actions/checkout", ref: sha[:39], comment: "v6", classify: "actions/checkout", matched: true, external: true, versionComment: true},
+		{name: "non-hex SHA", line: "uses: actions/checkout@" + strings.Repeat("g", 40) + " # v6", action: "actions/checkout", ref: strings.Repeat("g", 40), comment: "v6", classify: "actions/checkout", matched: true, external: true, versionComment: true},
+		{name: "missing comment", line: "uses: actions/checkout@" + sha, action: "actions/checkout", ref: sha, classify: "actions/checkout", matched: true, external: true, fullSHA: true},
+		{name: "malformed version comment", line: "uses: actions/checkout@" + sha + " # release-6", action: "actions/checkout", ref: sha, comment: "release-6", classify: "actions/checkout", matched: true, external: true, fullSHA: true},
+		{name: "list item", line: "- uses: actions/checkout@" + sha + " # v6", action: "actions/checkout", ref: sha, comment: "v6", classify: "actions/checkout", matched: true, external: true, fullSHA: true, versionComment: true},
 		{name: "local", line: "uses: ./local-action", classify: "./local-action"},
 		{name: "Docker", line: "uses: docker://alpine@sha256:abc", action: "docker://alpine", ref: "sha256:abc", classify: "docker://alpine", matched: true},
 		{name: "malformed", line: "uses actions/checkout@v6"},
@@ -39,6 +42,14 @@ func TestWorkflowActionParsing(t *testing.T) {
 			}
 			if matches != nil && (matches[1] != tt.action || matches[2] != tt.ref || matches[3] != tt.comment) {
 				t.Errorf("groups = %q, want [%q %q %q]", matches[1:], tt.action, tt.ref, tt.comment)
+			}
+			if matches != nil && tt.external {
+				if got := fullSHAPattern.MatchString(matches[2]); got != tt.fullSHA {
+					t.Errorf("fullSHAPattern.MatchString(%q) = %v, want %v", matches[2], got, tt.fullSHA)
+				}
+				if got := versionCommentPattern.MatchString(matches[3]); got != tt.versionComment {
+					t.Errorf("versionCommentPattern.MatchString(%q) = %v, want %v", matches[3], got, tt.versionComment)
+				}
 			}
 			if tt.classify != "" {
 				if got := isExternalGitHubAction(tt.classify); got != tt.external {
