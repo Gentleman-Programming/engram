@@ -41,6 +41,18 @@ func TestReleaseWorkflowChecksModuleMetadataInGoreleaserJob(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "valid quoted tidy preflight",
+			workflow: `jobs:
+  goreleaser:
+    steps:
+      - name: Set up Go
+      - name: Verify module metadata is tidy
+        run: "go mod tidy -diff"
+      - name: Run GoReleaser
+`,
+			want: true,
+		},
+		{
 			name: "duplicate Set up Go steps",
 			workflow: `jobs:
   goreleaser:
@@ -240,6 +252,19 @@ func TestReleaseWorkflowChecksModuleMetadataInGoreleaserJob(t *testing.T) {
 `,
 		},
 		{
+			name: "mutating tidy command with an inline YAML comment",
+			workflow: `jobs:
+  goreleaser:
+    steps:
+      - name: Set up Go
+      - name: Verify module metadata is tidy
+        run: go mod tidy -diff
+      - name: Mutate module metadata
+        run: 'go mod tidy' # mutates tagged sources
+      - name: Run GoReleaser
+`,
+		},
+		{
 			name: "tidy command appears only in a nested script",
 			workflow: `jobs:
   goreleaser:
@@ -392,8 +417,8 @@ func releaseWorkflowStepField(step *releaseWorkflowStep, field string) bool {
 			return false
 		}
 		step.hasRun = true
-		step.run = strings.TrimSpace(value)
-		step.hasMutatingTidy = releaseWorkflowRunHasMutatingTidy(releaseWorkflowDirectScalar(step.run))
+		step.run = releaseWorkflowDirectScalar(value)
+		step.hasMutatingTidy = releaseWorkflowRunHasMutatingTidy(step.run)
 	case "if":
 		if step.hasIf {
 			return false
@@ -409,6 +434,7 @@ func releaseWorkflowStepField(step *releaseWorkflowStep, field string) bool {
 }
 
 func releaseWorkflowDirectScalar(value string) string {
+	value = strings.TrimSpace(releaseWorkflowWithoutInlineComment(value))
 	if len(value) < 2 || value[0] != value[len(value)-1] {
 		return value
 	}
@@ -421,6 +447,37 @@ func releaseWorkflowDirectScalar(value string) string {
 		}
 	case '\'':
 		return strings.ReplaceAll(value[1:len(value)-1], "''", "'")
+	}
+	return value
+}
+
+func releaseWorkflowWithoutInlineComment(value string) string {
+	var quote byte
+	for index := 0; index < len(value); index++ {
+		switch quote {
+		case '"':
+			switch value[index] {
+			case '\\':
+				index++
+			case '"':
+				quote = 0
+			}
+		case '\'':
+			if value[index] == '\'' {
+				if index+1 < len(value) && value[index+1] == '\'' {
+					index++
+					continue
+				}
+				quote = 0
+			}
+		default:
+			switch value[index] {
+			case '"', '\'':
+				quote = value[index]
+			case '#':
+				return value[:index]
+			}
+		}
 	}
 	return value
 }
