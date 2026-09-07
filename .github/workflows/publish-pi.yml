@@ -33,7 +33,9 @@ jobs:
       - name: Verify Pi release version
         if: github.event_name == 'push'
         working-directory: plugin/pi
-        run: node test/release-contract.mjs "${{ github.ref_name }}"
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node test/release-contract.mjs "$RELEASE_TAG"
 
       - name: Publish to npm with provenance
         working-directory: plugin/pi

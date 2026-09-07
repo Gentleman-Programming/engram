@@ -25,6 +25,7 @@ const LEGACY_PACKAGE_NAME = "npm:gentle-engram@0.1.8";
 const MCP_ADAPTER_PACKAGE = "npm:pi-mcp-adapter";
 const CLI_PATH = fileURLToPath(new URL("../cli.js", import.meta.url));
 const RELEASE_CONTRACT_PATH = fileURLToPath(new URL("./release-contract.mjs", import.meta.url));
+const PUBLISH_WORKFLOW_SOURCE = readFileSync(new URL("../../../.github/workflows/publish-pi.yml", import.meta.url), "utf8");
 
 function runCli(agentDir, ...args) {
 	return execFileSync(process.execPath, [CLI_PATH, ...args], {
@@ -165,4 +166,17 @@ test("Pi release contract rejects a tag that differs from the package version", 
 	const result = runReleaseContract("pi-v0.0.0");
 	assert.notEqual(result.status, 0);
 	assert.match(result.stderr, /must match package version/);
+});
+
+test("Pi publish workflow passes the release tag through a shell environment variable", () => {
+	assert.match(
+		PUBLISH_WORKFLOW_SOURCE,
+		/env:\s*\n\s+RELEASE_TAG:\s*\$\{\{\s*github\.ref_name\s*\}\}\s*\n\s+run:\s*node test\/release-contract\.mjs "\$RELEASE_TAG"/,
+		"the release tag must be provided as RELEASE_TAG and quoted when passed to the release contract",
+	);
+	assert.doesNotMatch(
+		PUBLISH_WORKFLOW_SOURCE,
+		/run:\s*node test\/release-contract\.mjs\s+[^\n]*\$\{\{/,
+		"the release contract shell command must not interpolate a GitHub expression directly",
+	);
 });
