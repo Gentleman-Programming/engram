@@ -1914,7 +1914,10 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 		}
 
 		if contextResult == "" {
-			return respondWithProject(detRes, "No previous session memories found.", nil), nil
+			// The fixed no-context message is part of the complete mem_context
+			// result, so it flows through the same clamp: an explicit tiny
+			// max_bytes must bound it exactly like a rendered context block.
+			return respondWithProject(detRes, clampMemContextResult("No previous session memories found.", maxBytes), nil), nil
 		}
 
 		result := clampMemContextResult(contextResult+suffix, maxBytes)

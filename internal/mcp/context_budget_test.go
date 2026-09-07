@@ -418,3 +418,38 @@ func TestMemContextBudgetTotalResultBound(t *testing.T) {
 		})
 	}
 }
+
+// TestMemContextBudgetNoMemoryMessageBounded pins the second CodeRabbit
+// finding on PR #1074: the fixed no-context message is part of the complete
+// mem_context result, so it must flow through the same clamp. A caller with
+// max_bytes=1 and no matching memory gets a one-byte UTF-8-safe prefix of the
+// message instead of the full 36-byte sentence, while the default budget
+// keeps the message verbatim.
+func TestMemContextBudgetNoMemoryMessageBounded(t *testing.T) {
+	// A completely empty store keeps the explicit project override
+	// unresolvable (overrides are validated against the store), so both cases
+	// auto-detect like TestMCPAdditionalCoverageBranches does and reach the
+	// fixed-message no-context branch with zero memories to render.
+	t.Run("default-budget-verbatim", func(t *testing.T) {
+		s := newMCPTestStore(t)
+
+		got := budgetCallContext(t, s, nil)
+		if got != "No previous session memories found." {
+			t.Fatalf("no-memory default result = %q, want the verbatim message", got)
+		}
+	})
+	t.Run("max-bytes-one", func(t *testing.T) {
+		s := newMCPTestStore(t)
+
+		got := budgetCallContext(t, s, map[string]any{"max_bytes": 1.0})
+		if len(got) > 1 {
+			t.Fatalf("max_bytes=1 no-memory result = %d bytes (%q), want <= 1", len(got), got)
+		}
+		if !utf8.ValidString(got) {
+			t.Fatalf("max_bytes=1 no-memory result is not valid UTF-8")
+		}
+		if !strings.HasPrefix("No previous session memories found.", got) {
+			t.Fatalf("max_bytes=1 no-memory result = %q, want a prefix of the message", got)
+		}
+	})
+}
