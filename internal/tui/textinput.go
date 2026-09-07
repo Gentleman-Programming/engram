@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
-	"strings"
 	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -61,6 +60,10 @@ func (m textInput) Focused() bool {
 }
 
 func (m textInput) Update(msg tea.Msg) (textInput, tea.Cmd) {
+	if !m.focused {
+		return m, nil
+	}
+
 	switch msg := msg.(type) {
 	case textInputPasteMsg:
 		if msg.err == nil {
@@ -185,7 +188,18 @@ func (m *textInput) deleteWordAfter() {
 }
 
 func sanitizeInput(value []rune) []rune {
-	return []rune(strings.NewReplacer("\t", " ", "\n", " ", "\r", " ").Replace(string(value)))
+	sanitized := make([]rune, 0, len(value))
+	for _, r := range value {
+		switch r {
+		case '\t', '\n', '\r':
+			sanitized = append(sanitized, ' ')
+		default:
+			if !unicode.IsControl(r) {
+				sanitized = append(sanitized, r)
+			}
+		}
+	}
+	return sanitized
 }
 
 func readSystemClipboard() (string, error) {
