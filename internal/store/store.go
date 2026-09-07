@@ -7279,9 +7279,9 @@ func (s *Store) refreshPendingLocalSessionMutationTx(tx *sql.Tx, payload syncSes
 	if err != nil {
 		return false, err
 	}
-	res, err := s.execHook(tx, `UPDATE sync_mutations SET payload = ?
-		WHERE target_key = ? AND entity = ? AND entity_key = ? AND op = ? AND source = ? AND project = ? AND acked_at IS NULL`,
-		string(encoded), DefaultSyncTargetKey, SyncEntitySession, payload.ID, SyncOpUpsert, SyncSourceLocal, payload.Project,
+	res, err := s.execHook(tx, `UPDATE sync_mutations SET project = ?, payload = ?
+		WHERE target_key = ? AND entity = ? AND entity_key = ? AND op = ? AND source = ? AND acked_at IS NULL`,
+		payload.Project, string(encoded), DefaultSyncTargetKey, SyncEntitySession, payload.ID, SyncOpUpsert, SyncSourceLocal,
 	)
 	if err != nil {
 		return false, err
