@@ -385,6 +385,21 @@ func TestReleaseWorkflowChecksModuleMetadataInGoreleaserJob(t *testing.T) {
       - name: Run GoReleaser
 `,
 		},
+		{
+			name: "escaped newline before hash does not hide mutating tidy",
+			workflow: `jobs:
+  goreleaser:
+    steps:
+      - name: Set up Go
+      - name: Verify module metadata is tidy
+        run: go mod tidy -diff
+      - name: Mutate module metadata
+        run: |
+          echo prefix\
+          #suffix; go mod tidy
+      - name: Run GoReleaser
+`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -452,6 +467,13 @@ func releaseWorkflowGoreleaserSteps(job string) ([]releaseWorkflowStep, bool) {
 	var steps []releaseWorkflowStep
 	stepsStarted := false
 	runBlockStep := -1
+	var runBlock strings.Builder
+	flushRunBlock := func() {
+		if runBlockStep >= 0 {
+			steps[runBlockStep].hasMutatingTidy = steps[runBlockStep].hasMutatingTidy || releaseWorkflowRunHasMutatingTidy(runBlock.String())
+		}
+		runBlock.Reset()
+	}
 	for _, rawLine := range strings.Split(job, "\n") {
 		line := strings.TrimSuffix(rawLine, "\r")
 		if !stepsStarted {
@@ -462,9 +484,11 @@ func releaseWorkflowGoreleaserSteps(job string) ([]releaseWorkflowStep, bool) {
 		}
 
 		if line != "" && !strings.HasPrefix(line, "      ") {
+			flushRunBlock()
 			break
 		}
 		if strings.HasPrefix(line, stepPrefix) {
+			flushRunBlock()
 			steps = append(steps, releaseWorkflowStep{})
 			runBlockStep = -1
 			if !releaseWorkflowStepField(&steps[len(steps)-1], line[len(stepPrefix):]) {
@@ -476,6 +500,7 @@ func releaseWorkflowGoreleaserSteps(job string) ([]releaseWorkflowStep, bool) {
 			continue
 		}
 		if len(steps) > 0 && strings.HasPrefix(line, fieldPrefix) && !strings.HasPrefix(line, fieldPrefix+" ") {
+			flushRunBlock()
 			runBlockStep = -1
 			if !releaseWorkflowStepField(&steps[len(steps)-1], line[len(fieldPrefix):]) {
 				return nil, false
@@ -486,9 +511,11 @@ func releaseWorkflowGoreleaserSteps(job string) ([]releaseWorkflowStep, bool) {
 			continue
 		}
 		if runBlockStep >= 0 && strings.HasPrefix(line, fieldPrefix+" ") {
-			steps[runBlockStep].hasMutatingTidy = steps[runBlockStep].hasMutatingTidy || releaseWorkflowRunHasMutatingTidy(strings.TrimSpace(line))
+			runBlock.WriteString(strings.TrimSpace(line))
+			runBlock.WriteByte('\n')
 		}
 	}
+	flushRunBlock()
 
 	return steps, len(steps) > 0
 }
@@ -618,8 +645,60 @@ func releaseWorkflowWithoutShellComment(value string) string {
 	return value
 }
 
+func releaseWorkflowShellLogicalLines(run string) []string {
+	physicalLines := strings.Split(run, "\n")
+	logicalLines := make([]string, 0, len(physicalLines))
+	var logicalLine strings.Builder
+	for index, physicalLine := range physicalLines {
+		logicalLine.WriteString(strings.TrimSuffix(physicalLine, "\r"))
+		if index+1 < len(physicalLines) && releaseWorkflowEscapesNewline(logicalLine.String()) {
+			line := logicalLine.String()
+			logicalLine.Reset()
+			logicalLine.WriteString(strings.TrimSuffix(line, "\\"))
+			continue
+		}
+
+		logicalLines = append(logicalLines, logicalLine.String())
+		logicalLine.Reset()
+	}
+	return logicalLines
+}
+
+func releaseWorkflowEscapesNewline(value string) bool {
+	var quote byte
+	for index := 0; index < len(value); index++ {
+		switch quote {
+		case '"':
+			switch value[index] {
+			case '\\':
+				if index == len(value)-1 {
+					return true
+				}
+				index++
+			case '"':
+				quote = 0
+			}
+		case '\'':
+			if value[index] == '\'' {
+				quote = 0
+			}
+		default:
+			switch value[index] {
+			case '\\':
+				if index == len(value)-1 {
+					return true
+				}
+				index++
+			case '"', '\'':
+				quote = value[index]
+			}
+		}
+	}
+	return false
+}
+
 func releaseWorkflowRunHasMutatingTidy(run string) bool {
-	for _, line := range strings.Split(run, "\n") {
+	for _, line := range releaseWorkflowShellLogicalLines(run) {
 		line = releaseWorkflowWithoutShellComment(line)
 		for _, command := range strings.FieldsFunc(line, func(r rune) bool {
 			return r == ';' || r == '&' || r == '|'
