@@ -154,4 +154,3 @@ func TestFormatTimestampStrEmptyReturnsNever(t *testing.T) {
 		t.Fatalf("formatTimestampStr(empty) = %q, want %q", got, "Never")
 	}
 }
-
