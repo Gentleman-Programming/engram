@@ -8093,6 +8093,104 @@ func TestHandleSearch_PreviewMarkerCountsRunes(t *testing.T) {
 		})
 	}
 }
+func TestHandleSearch_CompactResponseUsesBoundedPreviewAndRelations(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	t.Chdir(dir)
+
+	s := newMCPTestStore(t)
+	const projectName = "compact-search-project"
+	if err := s.CreateSession("compact-search-session", projectName, "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	content := "compact preview " + strings.Repeat("世界", 160)
+	oldID, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "compact-search-session",
+		Type:      "decision",
+		Title:     "Older compact search decision",
+		Content:   content,
+		Project:   projectName,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newID, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "compact-search-session",
+		Type:      "decision",
+		Title:     "Newer compact search decision",
+		Content:   "compact preview relation",
+		Project:   projectName,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldObs, err := s.GetObservation(oldID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newObs, err := s.GetObservation(newID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SaveRelation(store.SaveRelationParams{
+		SyncID:   "compact-search-relation",
+		SourceID: newObs.SyncID,
+		TargetID: oldObs.SyncID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.JudgeRelation(store.JudgeRelationParams{
+		JudgmentID:    "compact-search-relation",
+		Relation:      store.RelationSupersedes,
+		MarkedByActor: "agent:test",
+		MarkedByKind:  "agent",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"query":           "compact preview",
+			"project":         projectName,
+			"response_format": "compact",
+		}},
+	})
+	if err != nil || res.IsError {
+		t.Fatalf("compact search: err=%v isError=%v text=%q", err, res.IsError, callResultText(t, res))
+	}
+	body := callResultJSON(t, res)
+	if got := body["result"]; got != "Found 2 memories." {
+		t.Fatalf("compact result = %#v, want summary only", got)
+	}
+	var foundPreview, foundRelation bool
+	for _, raw := range body["results"].([]any) {
+		entry := raw.(map[string]any)
+		if entry["id"] == float64(oldID) {
+			preview, ok := entry["preview"].(string)
+			if !ok || utf8.RuneCountInString(preview) != 300 || !utf8.ValidString(preview) {
+				t.Fatalf("preview must contain 300 valid Unicode runes, got %q", preview)
+			}
+			if entry["truncated"] != true {
+				t.Fatalf("truncated = %#v, want true", entry["truncated"])
+			}
+			foundPreview = true
+		}
+		if entry["id"] == float64(newID) {
+			relations := entry["relations"].(map[string]any)
+			asSource := relations["as_source"].([]any)
+			if len(asSource) == 0 || asSource[0].(map[string]any)["relation"] != store.RelationSupersedes {
+				t.Fatalf("compact relations = %#v, want structured supersedes data", relations)
+			}
+			foundRelation = true
+		}
+	}
+	if !foundPreview || !foundRelation {
+		t.Fatalf("compact results did not include expected preview and relation: %#v", body["results"])
+	}
+	full, err := s.GetObservation(oldID)
+	if err != nil || full.Content != content {
+		t.Fatalf("GetObservation must return complete content: err=%v got=%q", err, full.Content)
+	}
+}
 
 // JR2-1 RED: TestHandleSearch_EnvelopeProjectMatchesQueryProject
 // When the git repo name contains double hyphens (e.g. "my--app"), NormalizeProject
