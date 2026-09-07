@@ -200,6 +200,19 @@ func TestReleaseWorkflowChecksModuleMetadataInGoreleaserJob(t *testing.T) {
 `,
 		},
 		{
+			name: "mutating tidy command in an unrelated direct step",
+			workflow: `jobs:
+  goreleaser:
+    steps:
+      - name: Set up Go
+      - name: Verify module metadata is tidy
+        run: go mod tidy -diff
+      - name: Mutate module metadata
+        run: go mod tidy
+      - name: Run GoReleaser
+`,
+		},
+		{
 			name: "tidy command appears only in a nested script",
 			workflow: `jobs:
   goreleaser:
@@ -208,6 +221,21 @@ func TestReleaseWorkflowChecksModuleMetadataInGoreleaserJob(t *testing.T) {
       - name: Verify module metadata is tidy
         run: |
           echo "run: go mod tidy -diff"
+      - name: Run GoReleaser
+`,
+		},
+		{
+			name: "mutating tidy command in a multiline script",
+			workflow: `jobs:
+  goreleaser:
+    steps:
+      - name: Set up Go
+      - name: Verify module metadata is tidy
+        run: go mod tidy -diff
+      - name: Mutate module metadata
+        run: |
+          echo "checking module metadata"
+          go mod tidy
       - name: Run GoReleaser
 `,
 		},
@@ -231,6 +259,9 @@ func releaseWorkflowChecksModuleMetadataInGoreleaserJob(workflow string) bool {
 
 	setupGo, tidyCheck, goreleaserStep := -1, -1, -1
 	for index, step := range steps {
+		if step.hasMutatingTidy {
+			return false
+		}
 		switch step.name {
 		case "Set up Go":
 			if setupGo >= 0 {
@@ -260,6 +291,7 @@ type releaseWorkflowStep struct {
 	hasRun             bool
 	hasIf              bool
 	hasContinueOnError bool
+	hasMutatingTidy    bool
 }
 
 // releaseWorkflowGoreleaserSteps intentionally recognizes only this workflow's
@@ -273,6 +305,7 @@ func releaseWorkflowGoreleaserSteps(job string) ([]releaseWorkflowStep, bool) {
 
 	var steps []releaseWorkflowStep
 	stepsStarted := false
+	runBlockStep := -1
 	for _, rawLine := range strings.Split(job, "\n") {
 		line := strings.TrimSuffix(rawLine, "\r")
 		if !stepsStarted {
@@ -287,15 +320,27 @@ func releaseWorkflowGoreleaserSteps(job string) ([]releaseWorkflowStep, bool) {
 		}
 		if strings.HasPrefix(line, stepPrefix) {
 			steps = append(steps, releaseWorkflowStep{})
+			runBlockStep = -1
 			if !releaseWorkflowStepField(&steps[len(steps)-1], line[len(stepPrefix):]) {
 				return nil, false
+			}
+			if releaseWorkflowRunBlock(steps[len(steps)-1].run) {
+				runBlockStep = len(steps) - 1
 			}
 			continue
 		}
 		if len(steps) > 0 && strings.HasPrefix(line, fieldPrefix) && !strings.HasPrefix(line, fieldPrefix+" ") {
+			runBlockStep = -1
 			if !releaseWorkflowStepField(&steps[len(steps)-1], line[len(fieldPrefix):]) {
 				return nil, false
 			}
+			if releaseWorkflowRunBlock(steps[len(steps)-1].run) {
+				runBlockStep = len(steps) - 1
+			}
+			continue
+		}
+		if runBlockStep >= 0 && strings.HasPrefix(line, fieldPrefix+" ") {
+			steps[runBlockStep].hasMutatingTidy = steps[runBlockStep].hasMutatingTidy || releaseWorkflowRunHasMutatingTidy(strings.TrimSpace(line))
 		}
 	}
 
@@ -321,6 +366,7 @@ func releaseWorkflowStepField(step *releaseWorkflowStep, field string) bool {
 		}
 		step.hasRun = true
 		step.run = strings.TrimSpace(value)
+		step.hasMutatingTidy = releaseWorkflowRunHasMutatingTidy(step.run)
 	case "if":
 		if step.hasIf {
 			return false
@@ -333,6 +379,33 @@ func releaseWorkflowStepField(step *releaseWorkflowStep, field string) bool {
 		step.hasContinueOnError = true
 	}
 	return true
+}
+
+func releaseWorkflowRunBlock(run string) bool {
+	run = strings.TrimSpace(run)
+	return strings.HasPrefix(run, "|") || strings.HasPrefix(run, ">")
+}
+
+func releaseWorkflowRunHasMutatingTidy(run string) bool {
+	for _, line := range strings.Split(run, "\n") {
+		for _, command := range strings.FieldsFunc(line, func(r rune) bool {
+			return r == ';' || r == '&' || r == '|'
+		}) {
+			fields := strings.Fields(command)
+			if len(fields) < 3 || fields[0] != "go" || fields[1] != "mod" || fields[2] != "tidy" {
+				continue
+			}
+			for _, argument := range fields[3:] {
+				if argument == "-diff" {
+					goto nextCommand
+				}
+			}
+			return true
+
+		nextCommand:
+		}
+	}
+	return false
 }
 
 func releaseWorkflowGoreleaserJob(workflow string) string {
