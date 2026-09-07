@@ -22,7 +22,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/Gentleman-Programming/engram/v2/internal/diagnostic"
 	projectpkg "github.com/Gentleman-Programming/engram/v2/internal/project"
@@ -355,6 +354,9 @@ func registerTools(srv *server.MCPServer, s *store.Store, cfg MCPConfig, allowli
 				),
 				mcp.WithString("match_mode",
 					mcp.Description("Token matching: \"all\" (default — every token must match, FTS5 AND) or \"any\" (any token matches — broader recall for multi-token queries). Any other value returns an error."),
+				),
+				mcp.WithString("response_format",
+					mcp.Description("Response format: omit for the legacy response, or use \"compact\" for bounded previews and structured results."),
 				),
 				mcp.WithNumber("limit",
 					mcp.Description("Max results (default: 10, max: 20)"),
@@ -1045,6 +1047,7 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		projectOverride, _ := req.GetArguments()["project"].(string)
 		scope, _ := req.GetArguments()["scope"].(string)
 		matchMode, _ := req.GetArguments()["match_mode"].(string)
+		responseFormat, _ := req.GetArguments()["response_format"].(string)
 		allProjects := boolArg(req, "all_projects", false)
 		limit := intArg(req, "limit", 10)
 
@@ -1052,6 +1055,10 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		if matchMode != "" && matchMode != "all" && matchMode != "any" {
 			return mcp.NewToolResultError(fmt.Sprintf("invalid match_mode %q: must be \"all\" or \"any\"", matchMode)), nil
 		}
+		if responseFormat != "" && responseFormat != "compact" {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid response_format %q: must be \"compact\"", responseFormat)), nil
+		}
+		compact := responseFormat == "compact"
 
 		// all_projects=true short-circuits project resolution: we search globally
 		// regardless of the project override or any auto-detected project. This
@@ -1084,7 +1091,7 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		sessionID := defaultSessionID(project)
 		activity.RecordToolCall(sessionID)
 
-		results, err := s.SearchContext(ctx, query, store.SearchOptions{
+		results, err := s.SearchPreviewsContext(ctx, query, store.SearchOptions{
 			Type:      typ,
 			Project:   searchProject,
 			Scope:     scope,
@@ -1118,7 +1125,9 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		}
 
 		var b strings.Builder
-		fmt.Fprintf(&b, "Found %d memories:\n\n", len(results))
+		if !compact {
+			fmt.Fprintf(&b, "Found %d memories:\n\n", len(results))
+		}
 		anyTruncated := false
 		structuredResults := make([]map[string]any, 0, len(results))
 		for i, r := range results {
@@ -1126,8 +1135,8 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			if r.Project != nil {
 				projectDisplay = fmt.Sprintf(" | project: %s", *r.Project)
 			}
-			preview := truncate(r.Content, 300)
-			if utf8.RuneCountInString(r.Content) > 300 {
+			preview := r.Preview
+			if r.Truncated {
 				anyTruncated = true
 				preview += " [preview]"
 			}
@@ -1135,10 +1144,12 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			if r.State() == store.ObservationStateNeedsReview {
 				stateDisplay = " | state: needs_review"
 			}
-			fmt.Fprintf(&b, "[%d] #%d (%s) — %s\n    %s\n    %s%s | scope: %s%s\n",
-				i+1, r.ID, r.Type, r.Title,
-				preview,
-				timeutil.FormatLocal(r.CreatedAt), projectDisplay, r.Scope, stateDisplay)
+			if !compact {
+				fmt.Fprintf(&b, "[%d] #%d (%s) — %s\n    %s\n    %s%s | scope: %s%s\n",
+					i+1, r.ID, r.Type, r.Title,
+					preview,
+					timeutil.FormatLocal(r.CreatedAt), projectDisplay, r.Scope, stateDisplay)
+			}
 			entry := map[string]any{
 				"id":      r.ID,
 				"sync_id": r.SyncID,
@@ -1154,6 +1165,10 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			if r.ReviewAfter != nil {
 				entry["review_after"] = *r.ReviewAfter
 			}
+			if compact {
+				entry["preview"] = r.Preview
+				entry["truncated"] = r.Truncated
+			}
 			structuredResults = append(structuredResults, entry)
 
 			// Append relation annotations. Skip orphaned (filtered by store).
@@ -1168,51 +1183,62 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			// observation's title; "(deleted)" when the observation is missing or soft-deleted.
 			// Prefixes (supersedes:, superseded_by:, conflicts:) are stable across Phase 3.
 			if rels, ok := relationsMap[r.SyncID]; ok {
-				for _, rel := range rels.AsSource {
-					switch {
-					case rel.Relation == store.RelationSupersedes && rel.JudgmentStatus == store.JudgmentStatusJudged:
-						title := rel.TargetTitle
-						if rel.TargetMissing || title == "" {
-							title = "deleted"
-						}
-						fmt.Fprintf(&b, "    supersedes: #%d (%s)\n", rel.TargetIntID, title)
-					case rel.Relation == store.RelationConflictsWith && rel.JudgmentStatus == store.JudgmentStatusJudged:
-						title := rel.TargetTitle
-						if rel.TargetMissing || title == "" {
-							title = "deleted"
-						}
-						fmt.Fprintf(&b, "    conflicts: #%d (%s)\n", rel.TargetIntID, title)
-					case rel.JudgmentStatus == store.JudgmentStatusPending:
-						// UNCHANGED from Phase 1 — byte-for-byte preserved.
-						fmt.Fprintf(&b, "    conflict: contested by #%s (pending)\n", rel.TargetID)
-					}
+				if compact {
+					entry["relations"] = map[string]any{"as_source": rels.AsSource, "as_target": rels.AsTarget}
 				}
-				for _, rel := range rels.AsTarget {
-					switch {
-					case rel.Relation == store.RelationSupersedes && rel.JudgmentStatus == store.JudgmentStatusJudged:
-						title := rel.SourceTitle
-						if rel.SourceMissing || title == "" {
-							title = "deleted"
+				if !compact {
+					for _, rel := range rels.AsSource {
+						switch {
+						case rel.Relation == store.RelationSupersedes && rel.JudgmentStatus == store.JudgmentStatusJudged:
+							title := rel.TargetTitle
+							if rel.TargetMissing || title == "" {
+								title = "deleted"
+							}
+							fmt.Fprintf(&b, "    supersedes: #%d (%s)\n", rel.TargetIntID, title)
+						case rel.Relation == store.RelationConflictsWith && rel.JudgmentStatus == store.JudgmentStatusJudged:
+							title := rel.TargetTitle
+							if rel.TargetMissing || title == "" {
+								title = "deleted"
+							}
+							fmt.Fprintf(&b, "    conflicts: #%d (%s)\n", rel.TargetIntID, title)
+						case rel.JudgmentStatus == store.JudgmentStatusPending:
+							// UNCHANGED from Phase 1 — byte-for-byte preserved.
+							fmt.Fprintf(&b, "    conflict: contested by #%s (pending)\n", rel.TargetID)
 						}
-						fmt.Fprintf(&b, "    superseded_by: #%d (%s)\n", rel.SourceIntID, title)
-					case rel.JudgmentStatus == store.JudgmentStatusPending:
-						// UNCHANGED from Phase 1 — byte-for-byte preserved.
-						fmt.Fprintf(&b, "    conflict: contested by #%s (pending)\n", rel.SourceID)
+					}
+					for _, rel := range rels.AsTarget {
+						switch {
+						case rel.Relation == store.RelationSupersedes && rel.JudgmentStatus == store.JudgmentStatusJudged:
+							title := rel.SourceTitle
+							if rel.SourceMissing || title == "" {
+								title = "deleted"
+							}
+							fmt.Fprintf(&b, "    superseded_by: #%d (%s)\n", rel.SourceIntID, title)
+						case rel.JudgmentStatus == store.JudgmentStatusPending:
+							// UNCHANGED from Phase 1 — byte-for-byte preserved.
+							fmt.Fprintf(&b, "    conflict: contested by #%s (pending)\n", rel.SourceID)
+						}
 					}
 				}
 			}
-			b.WriteString("\n")
+			if !compact {
+				b.WriteString("\n")
+			}
 		}
-		if anyTruncated {
+		if !compact && anyTruncated {
 			fmt.Fprintf(&b, "---\nResults above are previews (300 chars). To read the full content of a specific memory, call mem_get_observation(id: <ID>).\n")
 		}
 
+		resultText := b.String()
+		if compact {
+			resultText = fmt.Sprintf("Found %d memories.", len(results))
+		}
 		if nudge := activity.NudgeIfNeededForProject(sessionID, project); nudge != "" {
-			b.WriteString(nudge)
+			resultText += nudge
 		}
 
 		// JW4: use respondWithProject for the success path (REQ-314).
-		return respondWithProject(detRes, b.String(), map[string]any{"results": structuredResults}), nil
+		return respondWithProject(detRes, resultText, map[string]any{"results": structuredResults}), nil
 	}
 }
 
