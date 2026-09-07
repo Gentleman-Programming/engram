@@ -344,6 +344,54 @@ func TestReleaseWorkflowChecksModuleMetadataInGoreleaserJob(t *testing.T) {
 `,
 		},
 		{
+			name: "folded scalar joins mutating tidy command",
+			workflow: `jobs:
+  goreleaser:
+    steps:
+      - name: Set up Go
+      - name: Verify module metadata is tidy
+        run: go mod tidy -diff
+      - name: Mutate module metadata
+        run: >
+          go mod
+          tidy
+      - name: Run GoReleaser
+`,
+		},
+		{
+			name: "literal scalar keeps split command",
+			workflow: `jobs:
+  goreleaser:
+    steps:
+      - name: Set up Go
+      - name: Verify module metadata is tidy
+        run: go mod tidy -diff
+      - name: Split command
+        run: |
+          go mod
+          tidy
+      - name: Run GoReleaser
+`,
+			want: true,
+		},
+		{
+			name: "folded scalar keeps blank line command boundary",
+			workflow: `jobs:
+  goreleaser:
+    steps:
+      - name: Set up Go
+      - name: Verify module metadata is tidy
+        run: go mod tidy -diff
+      - name: Split command
+        run: >
+          go mod
+
+          tidy
+      - name: Run GoReleaser
+`,
+			want: true,
+		},
+		{
 			name: "mutating tidy command with diff in a shell comment",
 			workflow: `jobs:
   goreleaser:
@@ -470,7 +518,11 @@ func releaseWorkflowGoreleaserSteps(job string) ([]releaseWorkflowStep, bool) {
 	var runBlock strings.Builder
 	flushRunBlock := func() {
 		if runBlockStep >= 0 {
-			steps[runBlockStep].hasMutatingTidy = steps[runBlockStep].hasMutatingTidy || releaseWorkflowRunHasMutatingTidy(runBlock.String())
+			run := runBlock.String()
+			if strings.HasPrefix(strings.TrimSpace(steps[runBlockStep].run), ">") {
+				run = releaseWorkflowFoldRunBlock(run)
+			}
+			steps[runBlockStep].hasMutatingTidy = steps[runBlockStep].hasMutatingTidy || releaseWorkflowRunHasMutatingTidy(run)
 		}
 		runBlock.Reset()
 	}
@@ -510,8 +562,10 @@ func releaseWorkflowGoreleaserSteps(job string) ([]releaseWorkflowStep, bool) {
 			}
 			continue
 		}
-		if runBlockStep >= 0 && strings.HasPrefix(line, fieldPrefix+" ") {
-			runBlock.WriteString(strings.TrimSpace(line))
+		if runBlockStep >= 0 && (line == "" || strings.HasPrefix(line, fieldPrefix+" ")) {
+			if line != "" {
+				runBlock.WriteString(strings.TrimSpace(line))
+			}
 			runBlock.WriteByte('\n')
 		}
 	}
@@ -606,6 +660,32 @@ func releaseWorkflowWithoutInlineComment(value string) string {
 func releaseWorkflowRunBlock(run string) bool {
 	run = strings.TrimSpace(run)
 	return strings.HasPrefix(run, "|") || strings.HasPrefix(run, ">")
+}
+
+func releaseWorkflowFoldRunBlock(run string) string {
+	lines := strings.Split(strings.TrimSuffix(run, "\n"), "\n")
+	var folded strings.Builder
+	pendingBreaks := 0
+	wroteLine := false
+	for _, line := range lines {
+		if line == "" {
+			pendingBreaks++
+			continue
+		}
+		if wroteLine {
+			if pendingBreaks == 0 {
+				folded.WriteByte(' ')
+			} else {
+				folded.WriteString(strings.Repeat("\n", pendingBreaks))
+			}
+		} else if pendingBreaks > 0 {
+			folded.WriteString(strings.Repeat("\n", pendingBreaks))
+		}
+		folded.WriteString(line)
+		pendingBreaks = 0
+		wroteLine = true
+	}
+	return folded.String()
 }
 
 func releaseWorkflowWithoutShellComment(value string) string {
