@@ -343,6 +343,20 @@ func TestReleaseWorkflowChecksModuleMetadataInGoreleaserJob(t *testing.T) {
       - name: Run GoReleaser
 `,
 		},
+		{
+			name: "mutating tidy command with diff in a shell comment",
+			workflow: `jobs:
+  goreleaser:
+    steps:
+      - name: Set up Go
+      - name: Verify module metadata is tidy
+        run: go mod tidy -diff
+      - name: Mutate module metadata
+        run: |
+          go mod tidy # -diff
+      - name: Run GoReleaser
+`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -541,6 +555,7 @@ func releaseWorkflowRunBlock(run string) bool {
 
 func releaseWorkflowRunHasMutatingTidy(run string) bool {
 	for _, line := range strings.Split(run, "\n") {
+		line = releaseWorkflowWithoutInlineComment(line)
 		for _, command := range strings.FieldsFunc(line, func(r rune) bool {
 			return r == ';' || r == '&' || r == '|'
 		}) {
