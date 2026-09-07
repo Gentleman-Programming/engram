@@ -18,10 +18,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Gentleman-Programming/engram/v2/internal/diagnostic"
 	projectpkg "github.com/Gentleman-Programming/engram/v2/internal/project"
@@ -1779,26 +1781,78 @@ const (
 )
 
 // memContextMaxBytes resolves the optional max_bytes tool argument (MCP
-// numbers arrive as float64). Absent, mistyped, non-positive, NaN, or
-// sub-integer positive input falls back to the default budget — the MCP path
-// must never resolve to the unbounded legacy rendering, and int(f) of a
-// fraction in (0,1) truncates to 0, which ContextOptions treats as the
-// unbounded zero value. The ceiling comparison happens in float64 BEFORE the
-// int conversion, because converting an out-of-range float to int is
-// spec-undefined in Go.
+// numbers arrive as float64). Absent, mistyped, non-positive, NaN, or any
+// fractional value falls back to the default budget — the MCP path must
+// never resolve to the unbounded legacy rendering, a byte budget is an
+// integer quantity (int(1.5) truncating to 1 would be a silent budget the
+// caller never requested), and int(f) of a fraction in (0,1) truncates to
+// 0, which ContextOptions treats as the unbounded zero value. The ceiling
+// comparison happens in float64 BEFORE the int conversion, because
+// converting an out-of-range float to int is spec-undefined in Go.
 func memContextMaxBytes(raw any) int {
 	v, ok := raw.(float64)
-	if !ok || !(v > 0) {
+	if !ok || !(v > 0) || v != math.Trunc(v) {
 		return memContextDefaultMaxBytes
 	}
 	if v > float64(memContextMaxBytesCeiling) {
 		return memContextMaxBytesCeiling
 	}
-	n := int(v)
-	if n < 1 {
-		return memContextDefaultMaxBytes
+	return int(v)
+}
+
+// memContextTruncationMarker mirrors the store's contextTruncationMarker
+// (internal/store/store.go): a visible marker that replaces the cut tail so
+// the omission is explicit.
+const memContextTruncationMarker = "\n[truncated]\n"
+
+// memContextMaxStatsProjects caps how many project names the "Memory stats"
+// suffix lists before degrading to "+N more". The join over every project in
+// the store is the unbounded part of the suffix (#1039, CodeRabbit major on
+// PR #1074); capping it keeps the suffix structurally small so the reserved
+// context budget stays meaningful even on stores with hundreds of projects.
+const memContextMaxStatsProjects = 8
+
+// formatContextProjects renders the projects list for the mem_context stats
+// suffix: "none", the full join, or the first memContextMaxStatsProjects
+// names plus a "+N more" overflow marker.
+func formatContextProjects(names []string) string {
+	if len(names) == 0 {
+		return "none"
 	}
-	return n
+	if len(names) <= memContextMaxStatsProjects {
+		return strings.Join(names, ", ")
+	}
+	return fmt.Sprintf("%s, +%d more", strings.Join(names[:memContextMaxStatsProjects], ", "), len(names)-memContextMaxStatsProjects)
+}
+
+// clampMemContextResult caps the complete mem_context tool result — context
+// block, stats line, and nudge — at the resolved byte budget, mirroring the
+// store's limitContextBytes semantics: a UTF-8-safe cut with the visible
+// [truncated] marker appended when it fits, and a bare UTF-8-safe prefix cut
+// for budgets smaller than the marker itself.
+func clampMemContextResult(result string, maxBytes int) string {
+	if maxBytes <= 0 || len(result) <= maxBytes {
+		return result
+	}
+	if maxBytes < len(memContextTruncationMarker) {
+		return truncateMemContextUTF8(result, maxBytes)
+	}
+	return truncateMemContextUTF8(result, maxBytes-len(memContextTruncationMarker)) + memContextTruncationMarker
+}
+
+// truncateMemContextUTF8 mirrors the store's truncateUTF8Prefix: never split
+// a UTF-8 sequence when cutting.
+func truncateMemContextUTF8(s string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if maxBytes >= len(s) {
+		return s
+	}
+	for maxBytes > 0 && !utf8.RuneStart(s[maxBytes]) {
+		maxBytes--
+	}
+	return s[:maxBytes]
 }
 
 func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
@@ -1830,8 +1884,28 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 		// #1039: render a bounded context instead of the unbounded legacy
 		// FormatContext output — 16 KiB by default, capped at 20 pinned rows,
 		// with optional max_bytes/compact tuning from the caller.
+		maxBytes := memContextMaxBytes(req.GetArguments()["max_bytes"])
+
+		// #1039 (CodeRabbit major on PR #1074): the budget applies to the
+		// COMPLETE result. The stats suffix joins every project name in the
+		// store (unbounded) and the nudge is appended after the context block,
+		// so the suffix is rendered FIRST and its bytes are reserved from the
+		// context budget; a final clamp backstops the pathological case where
+		// the suffix alone meets or exceeds the budget.
+		stats, err := loadContextStats(s)
+		if err != nil {
+			return mcp.NewToolResultError("Failed to get context stats: " + err.Error()), nil
+		}
+		suffix := fmt.Sprintf("\n---\nMemory stats: %d sessions, %d observations across projects: %s",
+			stats.TotalSessions, stats.TotalObservations, formatContextProjects(stats.Projects))
+		suffix += activity.NudgeIfNeededForProject(sessionID, project)
+
+		contextBudget := maxBytes - len(suffix)
+		if contextBudget < 1 {
+			contextBudget = 1
+		}
 		contextResult, err := s.FormatContextWithOptions(contextProject, scope, store.ContextOptions{
-			MaxBytes: memContextMaxBytes(req.GetArguments()["max_bytes"]),
+			MaxBytes: contextBudget,
 			Pinned:   memContextMaxPinned,
 			Compact:  compact,
 		})
@@ -1843,23 +1917,7 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 			return respondWithProject(detRes, "No previous session memories found.", nil), nil
 		}
 
-		stats, err := loadContextStats(s)
-		if err != nil {
-			return mcp.NewToolResultError("Failed to get context stats: " + err.Error()), nil
-		}
-		var projects string
-		if len(stats.Projects) > 0 {
-			projects = strings.Join(stats.Projects, ", ")
-		} else {
-			projects = "none"
-		}
-
-		result := fmt.Sprintf("%s\n---\nMemory stats: %d sessions, %d observations across projects: %s",
-			contextResult, stats.TotalSessions, stats.TotalObservations, projects)
-
-		if nudge := activity.NudgeIfNeededForProject(sessionID, project); nudge != "" {
-			result += nudge
-		}
+		result := clampMemContextResult(contextResult+suffix, maxBytes)
 
 		return respondWithProject(detRes, result, nil), nil
 	}
