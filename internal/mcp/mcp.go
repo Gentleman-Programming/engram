@@ -3197,7 +3197,7 @@ func resolveFallbackSessionID(s *store.Store, project string) (string, error) {
 			case 1:
 				return ids[0], nil
 			default:
-				return "", fmt.Errorf("multiple active runtime sessions match project %q and the current directory; provide session_id", project)
+				return "", fmt.Errorf("multiple active runtime sessions match the current project and directory; provide session_id or end other active matching sessions before retrying")
 			}
 		}
 	}
