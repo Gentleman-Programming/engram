@@ -419,6 +419,38 @@ func TestMemContextBudgetTotalResultBound(t *testing.T) {
 	}
 }
 
+// TestMemContextBudgetStatsErrorPropagates pins the budget path's error
+// coverage (CodeRabbit minor on PR #1074): when loadContextStats fails, the
+// bounded mem_context flow must surface the stats error verbatim instead of
+// attempting the render. The stub is scoped to this suite because the budget
+// options (max_bytes) must not change how the failure propagates.
+func TestMemContextBudgetStatsErrorPropagates(t *testing.T) {
+	s := newMCPTestStore(t)
+	budgetDataset(t, s)
+
+	original := loadContextStats
+	t.Cleanup(func() { loadContextStats = original })
+	loadContextStats = func(*store.Store) (*store.Stats, error) {
+		return nil, store.ErrDatabaseGenerationChanged
+	}
+
+	handler := handleContext(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	res, err := handler(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"project":   "engram",
+		"max_bytes": 1024.0,
+	}}})
+	if err != nil {
+		t.Fatalf("context handler error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("stats failure must surface an error result: %s", callResultText(t, res))
+	}
+	got := callResultText(t, res)
+	if !strings.Contains(got, "Failed to get context stats") || !strings.Contains(got, store.ErrDatabaseGenerationChanged.Error()) {
+		t.Fatalf("error result = %q, want the stats error text", got)
+	}
+}
+
 // TestMemContextBudgetNoMemoryMessageBounded pins the second CodeRabbit
 // finding on PR #1074: the fixed no-context message is part of the complete
 // mem_context result, so it must flow through the same clamp. A caller with
