@@ -95,9 +95,12 @@ const claudeCodePluginListTimeout = 2 * time.Second // bounds only the read-only
 
 const openCodeSubagentStatuslinePlugin = "opencode-subagent-statusline"
 
-const piGentleEngramPackage = "npm:gentle-engram@0.1.11"
-const piLegacyGentleEngramPackage = "npm:gentle-engram@0.1.8"
-const piMCPAdapterPackage = "npm:pi-mcp-adapter"
+const (
+	piGentleEngramPackage         = "npm:gentle-engram@0.1.12"
+	piLegacyGentleEngramPackage   = "npm:gentle-engram@0.1.8"
+	piPreviousGentleEngramPackage = "npm:gentle-engram@0.1.11"
+	piMCPAdapterPackage           = "npm:pi-mcp-adapter"
+)
 
 // claudeCodeMCPTools are the MCP tool permission names for the agent profile
 // registered in the durable Claude Code user-level MCP config.
@@ -361,7 +364,7 @@ func ensurePiPackageSettings(settingsPath string) (bool, error) {
 		var pkg string
 		if err := json.Unmarshal(raw, &pkg); err == nil {
 			switch pkg {
-			case piLegacyGentleEngramPackage:
+			case piLegacyGentleEngramPackage, piPreviousGentleEngramPackage:
 				changed = true
 				continue
 			case piGentleEngramPackage:
