@@ -15,6 +15,7 @@ const (
 	CheckSessionProjectDirectoryMismatch  = "session_project_directory_mismatch"
 	CheckManualSessionNameProjectMismatch = "manual_session_name_project_mismatch"
 	CheckSyncMutationRequiredFields       = "sync_mutation_required_fields"
+	CheckSyncTargetClosedSpace            = "sync_target_closed_space"
 	CheckInvalidSessionIdentity           = "invalid_session_identity"
 	CheckOrphanedObservationSession       = "orphaned_observation_session"
 	CheckUnownedSessionProject            = "unowned_session_project"
@@ -26,9 +27,15 @@ const (
 // apply path skipped rather than a corrupt local source row.
 const ReasonQuarantinedPulledSessionIdentity = "quarantined_pulled_session_identity"
 
+// ReasonForeignSyncTarget marks a finding of CheckSyncTargetClosedSpace whose
+// sync_state row carries a target key outside the closed set of legitimate sync
+// targets.
+const ReasonForeignSyncTarget = "foreign_sync_target"
+
 type SessionProjectDirectoryMismatchCheck struct{}
 type ManualSessionNameProjectMismatchCheck struct{}
 type SyncMutationRequiredFieldsCheck struct{}
+type SyncTargetClosedSpaceCheck struct{}
 type InvalidSessionIdentityCheck struct{}
 type OrphanedObservationSessionCheck struct{}
 type UnownedSessionProjectCheck struct{}
@@ -41,6 +48,7 @@ func (ManualSessionNameProjectMismatchCheck) Code() string {
 	return CheckManualSessionNameProjectMismatch
 }
 func (SyncMutationRequiredFieldsCheck) Code() string { return CheckSyncMutationRequiredFields }
+func (SyncTargetClosedSpaceCheck) Code() string      { return CheckSyncTargetClosedSpace }
 func (InvalidSessionIdentityCheck) Code() string     { return CheckInvalidSessionIdentity }
 func (OrphanedObservationSessionCheck) Code() string { return CheckOrphanedObservationSession }
 func (UnownedSessionProjectCheck) Code() string      { return CheckUnownedSessionProject }
@@ -286,6 +294,61 @@ func (c SyncMutationRequiredFieldsCheck) quarantinedFinding(mutation store.SyncM
 		SafeNextStep:         "No action required. Inspect the recorded disposition evidence if you need to know what was dropped from cloud sync.",
 		RequiresConfirmation: false,
 	}
+}
+
+func (c SyncTargetClosedSpaceCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {
+	_ = ctx
+	states, err := scope.Store.ListSyncStates()
+	if err != nil {
+		return CheckResult{}, err
+	}
+	enrolled, err := scope.Store.ListEnrolledProjects()
+	if err != nil {
+		return CheckResult{}, err
+	}
+	// The closed set of legitimate sync targets: the legacy global cloud target,
+	// the reserved cloud inbox target, the local chunk target, and one
+	// cloud:<project> target per enrolled project. The listing is deliberately
+	// unscoped even when scope.Project is set because sync_state rows are global:
+	// a foreign target belongs to no project, so a project-scoped query could
+	// never return it and doctor must still report the row that drifted in.
+	closed := map[string]bool{
+		store.DefaultSyncTargetKey: true,
+		store.SyncInboxTargetKey:   true,
+		store.LocalChunkTargetKey:  true,
+	}
+	for _, project := range enrolled {
+		closed[syncTargetKeyForClosedSpace(project.Project)] = true
+	}
+	findings := make([]Finding, 0)
+	for _, state := range states {
+		if closed[state.TargetKey] {
+			continue
+		}
+		findings = append(findings, Finding{
+			CheckID:    c.Code(),
+			Severity:   SeverityError,
+			ReasonCode: ReasonForeignSyncTarget,
+			Message:    fmt.Sprintf("Sync target %q is outside the closed set of legitimate sync targets.", state.TargetKey),
+			Why:        "A sync_state row for an unknown target records sync progress no configured delivery pipeline can ever advance, so its state can silently rot while appearing live.",
+			Evidence: mustJSON(map[string]any{
+				"target_key":        state.TargetKey,
+				"lifecycle":         state.Lifecycle,
+				"unacked_mutations": state.UnackedMutations,
+			}),
+			SafeNextStep:         "Run `engram cloud enroll <project>` if the target belongs to a project you want synced; otherwise acknowledge the row as stale until the cloud inbox CLI lands.",
+			RequiresConfirmation: true,
+		})
+	}
+	return resultFromFindings(c.Code(), map[string]any{"sync_targets_evaluated": len(states), "enrolled_projects": len(enrolled)}, findings), nil
+}
+
+func syncTargetKeyForClosedSpace(project string) string {
+	project = normalizeProjectName(project)
+	if project == "" {
+		return ""
+	}
+	return store.DefaultSyncTargetKey + ":" + project
 }
 
 func (c InvalidSessionIdentityCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {

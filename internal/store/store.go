@@ -284,11 +284,24 @@ const (
 	DefaultSyncTargetKey = "cloud"
 	LocalChunkTargetKey  = "local"
 
+	// SyncInboxTargetKey is the reserved sync target of the cloud inbox. It owns
+	// its own sync_state row and never represents an enrollable project.
+	SyncInboxTargetKey = "cloud:inbox"
+
+	// ReservedInboxProjectName is the project name the cloud inbox owns. Enrolling
+	// it is rejected because its cloud:<project> target key would collide with
+	// SyncInboxTargetKey.
+	ReservedInboxProjectName = "inbox"
+
 	SyncLifecycleIdle     = "idle"
 	SyncLifecyclePending  = "pending"
 	SyncLifecycleRunning  = "running"
 	SyncLifecycleHealthy  = "healthy"
 	SyncLifecycleDegraded = "degraded"
+
+	// SyncLifecycleInbox is the fixed lifecycle of the reserved cloud inbox
+	// target. Lifecycle setters and refresh helpers must never transition it.
+	SyncLifecycleInbox = "inbox"
 
 	SyncEntitySession     = "session"
 	SyncEntityObservation = "observation"
@@ -1282,6 +1295,11 @@ func (s *Store) migrate() error {
 		return err
 	}
 	if _, err := s.execHook(s.db, `INSERT OR IGNORE INTO sync_state (target_key, lifecycle, updated_at) VALUES ('cloud', 'idle', datetime('now'))`); err != nil {
+		return err
+	}
+	// The reserved cloud inbox target owns a permanent sync_state row pinned to
+	// the inbox lifecycle; every lifecycle transition on it is a no-op.
+	if _, err := s.execHook(s.db, `INSERT OR IGNORE INTO sync_state (target_key, lifecycle, updated_at) VALUES (?, ?, datetime('now'))`, SyncInboxTargetKey, SyncLifecycleInbox); err != nil {
 		return err
 	}
 	if _, err := s.execHook(s.db, `
@@ -5133,25 +5151,30 @@ func (s *Store) ListPendingSyncMutations(targetKey string, limit int) ([]SyncMut
 	return mutations, rows.Err()
 }
 
+// cloudProjectTargetKeyPattern matches the project-scoped cloud targets in
+// sync_state. The reserved cloud inbox target also matches the pattern and must
+// be excluded explicitly wherever the pattern aggregates project state.
+const cloudProjectTargetKeyPattern = "cloud:%"
+
 // CloudSyncSummary returns status across project-scoped cloud targets only.
 // It deliberately excludes the legacy global cloud target because explicit cloud
-// sync records state under cloud:<project>.
+// sync records state under cloud:<project>, and the reserved cloud inbox target
+// because the inbox is not a project.
 func (s *Store) CloudSyncSummary() (CloudSyncSummary, error) {
-	const cloudProjectTarget = "cloud:%"
 	var summary CloudSyncSummary
 	var lastSuccess, lastError, reasonCode sql.NullString
 	err := s.db.QueryRow(`
 		WITH latest_error AS (
 			SELECT last_error, reason_code
 			FROM sync_state
-			WHERE target_key LIKE ? AND last_error IS NOT NULL
+			WHERE target_key LIKE ? AND target_key <> ? AND last_error IS NOT NULL
 			ORDER BY updated_at DESC, target_key ASC
 			LIMIT 1
 		)
 		SELECT MAX(sync_state.last_success_at), latest_error.last_error, latest_error.reason_code
 		FROM sync_state
 		LEFT JOIN latest_error ON TRUE
-		WHERE sync_state.target_key LIKE ?`, cloudProjectTarget, cloudProjectTarget).Scan(&lastSuccess, &lastError, &reasonCode)
+		WHERE sync_state.target_key LIKE ? AND sync_state.target_key <> ?`, cloudProjectTargetKeyPattern, SyncInboxTargetKey, cloudProjectTargetKeyPattern, SyncInboxTargetKey).Scan(&lastSuccess, &lastError, &reasonCode)
 	if err != nil {
 		return CloudSyncSummary{}, err
 	}
@@ -5168,7 +5191,7 @@ func (s *Store) CloudSyncSummary() (CloudSyncSummary, error) {
 		SELECT COUNT(*)
 		FROM sync_mutations sm
 		JOIN sync_enrolled_projects sep ON sm.project = sep.project
-		WHERE sm.target_key LIKE ? AND sm.acked_at IS NULL AND sm.disposition = 'pending'`, cloudProjectTarget).Scan(&summary.PendingMutations)
+		WHERE sm.target_key LIKE ? AND sm.target_key <> ? AND sm.acked_at IS NULL AND sm.disposition = 'pending'`, cloudProjectTargetKeyPattern, SyncInboxTargetKey).Scan(&summary.PendingMutations)
 	if err != nil {
 		return CloudSyncSummary{}, err
 	}
@@ -5545,6 +5568,9 @@ func (s *Store) refreshProjectSyncStateTx(tx *sql.Tx, project string) error {
 		return nil
 	}
 	projectTargetKey := syncTargetKeyForProject(project)
+	if isSyncInboxTarget(projectTargetKey) {
+		return nil
+	}
 	state, err := s.getSyncStateTx(tx, projectTargetKey)
 	if err != nil {
 		return err
@@ -5650,6 +5676,9 @@ func (s *Store) refreshProjectSyncLifecycleTx(tx *sql.Tx, project string) error 
 }
 
 func (s *Store) applySyncLifecycleTx(tx *sql.Tx, targetKey string, pendingCount int) error {
+	if isSyncInboxTarget(targetKey) {
+		return nil
+	}
 	state, err := s.getSyncStateTx(tx, targetKey)
 	if err != nil {
 		return err
@@ -5733,8 +5762,18 @@ func (s *Store) ReleaseSyncLease(targetKey, owner string) error {
 	return err
 }
 
+// isSyncInboxTarget reports whether targetKey identifies the reserved cloud
+// inbox sync target, whose lifecycle setters and refresh helpers must never
+// transition it away from SyncLifecycleInbox.
+func isSyncInboxTarget(targetKey string) bool {
+	return normalizeSyncTargetKey(targetKey) == SyncInboxTargetKey
+}
+
 func (s *Store) MarkSyncBlocked(targetKey, reasonCode, message string) error {
 	targetKey = normalizeSyncTargetKey(targetKey)
+	if isSyncInboxTarget(targetKey) {
+		return nil
+	}
 	return s.withTx(func(tx *sql.Tx) error {
 		if _, err := s.getSyncStateTx(tx, targetKey); err != nil {
 			return err
@@ -5764,6 +5803,9 @@ func (s *Store) MarkSyncFailure(targetKey, message string, backoffUntil time.Tim
 // MarkSyncFailureWithReason records a degraded failure while preserving its reason code.
 func (s *Store) MarkSyncFailureWithReason(targetKey, reasonCode, message string, backoffUntil time.Time) error {
 	targetKey = normalizeSyncTargetKey(targetKey)
+	if isSyncInboxTarget(targetKey) {
+		return nil
+	}
 	reasonCode = strings.TrimSpace(reasonCode)
 	if reasonCode == "" {
 		reasonCode = "transport_failed"
@@ -5786,6 +5828,9 @@ func (s *Store) MarkSyncFailureWithReason(targetKey, reasonCode, message string,
 
 func (s *Store) MarkSyncHealthy(targetKey string) error {
 	targetKey = normalizeSyncTargetKey(targetKey)
+	if isSyncInboxTarget(targetKey) {
+		return nil
+	}
 	return s.withTx(func(tx *sql.Tx) error {
 		if _, err := s.getSyncStateTx(tx, targetKey); err != nil {
 			return err
@@ -5802,6 +5847,9 @@ func (s *Store) MarkSyncHealthy(targetKey string) error {
 
 func (s *Store) MarkSyncPending(targetKey string) error {
 	targetKey = normalizeSyncTargetKey(targetKey)
+	if isSyncInboxTarget(targetKey) {
+		return nil
+	}
 	return s.withTx(func(tx *sql.Tx) error {
 		if _, err := s.getSyncStateTx(tx, targetKey); err != nil {
 			return err
@@ -6135,6 +6183,9 @@ func (s *Store) EnrollProject(project string) error {
 	project, _ = NormalizeProject(project)
 	if project == "" {
 		return fmt.Errorf("project name must not be empty")
+	}
+	if project == ReservedInboxProjectName {
+		return fmt.Errorf("project name %q is reserved for the cloud inbox and cannot be enrolled", project)
 	}
 	return s.withTx(func(tx *sql.Tx) error {
 		res, err := s.execHook(tx,
@@ -7323,6 +7374,57 @@ func (s *Store) ensureSyncState(targetKey string) error {
 		targetKey, SyncLifecycleIdle,
 	)
 	return err
+}
+
+// SyncTargetState summarizes one sync_state row for diagnostics.
+// UnackedMutations counts journal rows still awaiting delivery for the target:
+// rows stored directly under the target key, plus the project-scoped journal
+// rows for cloud:<project> targets (those mutations live under the default
+// cloud key and carry the project in their own column).
+type SyncTargetState struct {
+	TargetKey        string `json:"target_key"`
+	Lifecycle        string `json:"lifecycle"`
+	UnackedMutations int    `json:"unacked_mutations"`
+}
+
+// ListSyncStates returns every sync_state row with its pending mutation count,
+// ordered by target key. Doctor uses it to verify the closed set of legitimate
+// sync targets.
+func (s *Store) ListSyncStates() ([]SyncTargetState, error) {
+	rows, err := s.queryItHook(s.db, `
+		SELECT ss.target_key, ss.lifecycle, (
+			SELECT COUNT(*)
+			FROM sync_mutations sm
+			WHERE sm.acked_at IS NULL
+			  AND sm.disposition = 'pending'
+			  AND (
+				sm.target_key = ss.target_key
+				OR (
+					ss.target_key LIKE ?
+					AND ss.target_key <> ?
+					AND sm.target_key = ?
+					AND sm.project = substr(ss.target_key, 7)
+				)
+			  )
+		)
+		FROM sync_state ss
+		ORDER BY ss.target_key ASC`,
+		cloudProjectTargetKeyPattern, SyncInboxTargetKey, DefaultSyncTargetKey,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var states []SyncTargetState
+	for rows.Next() {
+		var state SyncTargetState
+		if err := rows.Scan(&state.TargetKey, &state.Lifecycle, &state.UnackedMutations); err != nil {
+			return nil, err
+		}
+		states = append(states, state)
+	}
+	return states, rows.Err()
 }
 
 func (s *Store) getSyncState(targetKey string) (*SyncState, error) {

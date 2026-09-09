@@ -102,7 +102,7 @@ func TestSQLiteLockContentionBranches(t *testing.T) {
 
 func TestRegistryLookupAndOrdering(t *testing.T) {
 	codes := RegisteredCodes()
-	want := []string{CheckInvalidSessionIdentity, CheckManualSessionNameProjectMismatch, CheckOrphanedObservationSession, CheckSessionProjectDirectoryMismatch, CheckSQLiteLockContention, CheckSyncMutationRequiredFields, CheckUnownedSessionProject}
+	want := []string{CheckInvalidSessionIdentity, CheckManualSessionNameProjectMismatch, CheckOrphanedObservationSession, CheckSessionProjectDirectoryMismatch, CheckSQLiteLockContention, CheckSyncMutationRequiredFields, CheckSyncTargetClosedSpace, CheckUnownedSessionProject}
 	if strings.Join(codes, ",") != strings.Join(want, ",") {
 		t.Fatalf("RegisteredCodes = %v, want %v", codes, want)
 	}
@@ -397,6 +397,11 @@ func TestRunnerRunAllHealthyEvaluatesEveryMVPCheck(t *testing.T) {
 	s := newDiagnosticTestStore(t)
 	if err := s.CreateSession("manual-save-engram", "engram", "/work/engram"); err != nil {
 		t.Fatalf("CreateSession: %v", err)
+	}
+	// Session telemetry journals a cloud:<project> sync_state row, so a healthy
+	// store has the project enrolled to keep that target inside the closed set.
+	if err := s.EnrollProject("engram"); err != nil {
+		t.Fatalf("EnrollProject: %v", err)
 	}
 	report, err := NewRunner().RunAll(context.Background(), Scope{
 		Store:   s,
