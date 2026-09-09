@@ -132,6 +132,11 @@ func runHookWithStderrInDir(t *testing.T, scriptName, stdin string, env map[stri
 		if i := strings.IndexByte(entry, '='); i >= 0 {
 			key = entry[:i]
 		}
+		// Keep hook tests hermetic: CLAUDE_CONFIG_DIR is unset unless the
+		// caller explicitly supplies it in env.
+		if strings.EqualFold(key, "CLAUDE_CONFIG_DIR") {
+			continue
+		}
 		if _, override := env[key]; override {
 			continue
 		}
@@ -893,14 +898,20 @@ func TestSessionStartHonorsClaudeConfigDirForMCPMigrationGuard(t *testing.T) {
 		return false
 	}
 
-	t.Run("whitespace-only CLAUDE_CONFIG_DIR falls back to $HOME/.claude", func(t *testing.T) {
+	t.Run("unset or blank CLAUDE_CONFIG_DIR falls back to $HOME/.claude", func(t *testing.T) {
 		cases := []struct {
 			name          string
+			setConfig     bool
+			configDir     string
 			createConfig  bool
 			wantMigration bool
 		}{
-			{name: "config present", createConfig: true, wantMigration: false},
-			{name: "config absent", createConfig: false, wantMigration: true},
+			{name: "unset/config present", createConfig: true},
+			{name: "unset/config absent", wantMigration: true},
+			{name: "empty/config present", setConfig: true, createConfig: true},
+			{name: "empty/config absent", setConfig: true, wantMigration: true},
+			{name: "whitespace-only/config present", setConfig: true, configDir: "   \t  ", createConfig: true},
+			{name: "whitespace-only/config absent", setConfig: true, configDir: "   \t  ", wantMigration: true},
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
@@ -920,10 +931,12 @@ func TestSessionStartHonorsClaudeConfigDirForMCPMigrationGuard(t *testing.T) {
 				logPath := filepath.Join(t.TempDir(), "engram-invocations.log")
 				env := map[string]string{
 					"ENGRAM_PORT":            serverPort(t, srv),
-					"CLAUDE_CONFIG_DIR":      "   \t  ",
 					"HOME":                   home,
 					"PATH":                   stubDir + ":" + os.Getenv("PATH"),
 					"ENGRAM_TEST_ENGRAM_LOG": logPath,
+				}
+				if tc.setConfig {
+					env["CLAUDE_CONFIG_DIR"] = tc.configDir
 				}
 				stdin := fmt.Sprintf(`{"session_id":%q,"cwd":%q}`, newSessionID(t), t.TempDir())
 				runHook(t, "session-start.sh", stdin, env)
