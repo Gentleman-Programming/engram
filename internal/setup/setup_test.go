@@ -36,6 +36,8 @@ func TestEmbeddedOpenCodePluginMatchesSourceByteForByte(t *testing.T) {
 
 func resetSetupSeams(t *testing.T) {
 	t.Helper()
+	// Isolate tests from an ambient CLAUDE_CONFIG_DIR.
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	oldRuntimeGOOS := runtimeGOOS
 	oldUserHomeDir := userHomeDir
 	oldLookPathFn := lookPathFn
@@ -2240,8 +2242,50 @@ func TestClaudeCodeMCPDirPaths(t *testing.T) {
 	}
 
 	expectedPath := filepath.Join("/home/tester", ".claude", "mcp", "engram.json")
-	if got := claudeCodeUserMCPPath(); got != expectedPath {
+	if got := ClaudeCodeUserMCPPath(); got != expectedPath {
 		t.Fatalf("expected %s, got %s", expectedPath, got)
+	}
+}
+
+// TestClaudeCodeConfigRootHonorsClaudeConfigDir verifies claudeCodeConfigRoot's CLAUDE_CONFIG_DIR override (issue #1081).
+func TestClaudeCodeConfigRootHonorsClaudeConfigDir(t *testing.T) {
+	const fakeHome = "/home/tester"
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd: %v", err)
+	}
+
+	absDir := filepath.Join(t.TempDir(), "custom-config")
+
+	tests := []struct {
+		name   string
+		envSet bool
+		env    string
+		want   string
+	}{
+		{name: "unset", envSet: false, want: filepath.Join(fakeHome, ".claude")},
+		{name: "empty string", envSet: true, env: "", want: filepath.Join(fakeHome, ".claude")},
+		{name: "whitespace only", envSet: true, env: "   \t  ", want: filepath.Join(fakeHome, ".claude")},
+		{name: "absolute path", envSet: true, env: absDir, want: absDir},
+		{name: "relative path", envSet: true, env: filepath.Join("relative", "claude-config"), want: filepath.Join(cwd, "relative", "claude-config")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.envSet {
+				t.Setenv("CLAUDE_CONFIG_DIR", tt.env)
+			} else {
+				t.Setenv("CLAUDE_CONFIG_DIR", "")
+				if err := os.Unsetenv("CLAUDE_CONFIG_DIR"); err != nil {
+					t.Fatalf("os.Unsetenv: %v", err)
+				}
+			}
+
+			if got := claudeCodeConfigRoot(fakeHome); got != tt.want {
+				t.Fatalf("claudeCodeConfigRoot(%q) = %q, want %q", fakeHome, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -4036,11 +4080,11 @@ func TestAddClaudeCodeAllowlist(t *testing.T) {
 		}
 	})
 
-	t.Run("claudeCodeSettingsPath uses home dir", func(t *testing.T) {
+	t.Run("ClaudeCodeSettingsPath uses home dir", func(t *testing.T) {
 		resetSetupSeams(t)
 		userHomeDir = func() (string, error) { return "/test/home", nil }
 
-		got := claudeCodeSettingsPath()
+		got := ClaudeCodeSettingsPath()
 		expected := filepath.Join("/test/home", ".claude", "settings.json")
 		if got != expected {
 			t.Fatalf("expected %q, got %q", expected, got)

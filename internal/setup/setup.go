@@ -1048,7 +1048,7 @@ func installClaudeCode() (*Result, error) {
 	if err := writeClaudeCodeUserMCPFn(); err != nil {
 		// Non-fatal: the plugin installs, but MCP tools remain unavailable until
 		// setup can write the user-level registration.
-		fmt.Fprintf(os.Stderr, "warning: could not write user MCP config (~/.claude/mcp/engram.json): %v\n", err)
+		fmt.Fprintf(os.Stderr, "warning: could not write user MCP config (%s): %v\n", ClaudeCodeUserMCPPath(), err)
 		fmt.Fprintf(os.Stderr, "  The plugin is installed, but rerun `engram setup claude-code` after resolving this error to register MCP tools.\n")
 	} else {
 		files = 1
@@ -1063,16 +1063,33 @@ func installClaudeCode() (*Result, error) {
 	}, nil
 }
 
+// claudeCodeConfigRoot returns the Claude Code config directory: honors
+// CLAUDE_CONFIG_DIR when set (relative paths resolved against the cwd), otherwise ~/.claude.
+func claudeCodeConfigRoot(home string) string {
+	dir := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR"))
+	if dir == "" {
+		return filepath.Join(home, ".claude")
+	}
+	if filepath.IsAbs(dir) {
+		return dir
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return dir
+	}
+	return abs
+}
+
 // claudeCodeMCPDir returns the directory for user-level Claude Code MCP configs.
 // Files placed here are NOT managed by the plugin system and survive plugin updates.
 func claudeCodeMCPDir() string {
 	home, _ := userHomeDir()
-	return filepath.Join(home, ".claude", "mcp")
+	return filepath.Join(claudeCodeConfigRoot(home), "mcp")
 }
 
-// claudeCodeUserMCPPath returns the path for the engram MCP config in the
-// user-level MCP directory.
-func claudeCodeUserMCPPath() string {
+// ClaudeCodeUserMCPPath returns the path for the engram MCP config in the
+// user-level MCP directory (see claudeCodeConfigRoot).
+func ClaudeCodeUserMCPPath() string {
 	return filepath.Join(claudeCodeMCPDir(), "engram.json")
 }
 
@@ -1090,7 +1107,7 @@ func claudeCodeUserMCPPath() string {
 // must not be written with a PATH-dependent command when the binary cannot be
 // resolved absolutely.
 func writeClaudeCodeUserMCP() error {
-	path := claudeCodeUserMCPPath()
+	path := ClaudeCodeUserMCPPath()
 	data, err := claudeCodeUserMCPData()
 	if err != nil {
 		return err
@@ -1149,7 +1166,7 @@ func createClaudeCodeUserMCP(path string, data []byte, perm os.FileMode) error {
 
 // EnsureClaudeCodeUserMCP creates the user-owned registration only when absent.
 func EnsureClaudeCodeUserMCP() error {
-	path := claudeCodeUserMCPPath()
+	path := ClaudeCodeUserMCPPath()
 	if info, err := lstatFn(path); err == nil {
 		return validateClaudeCodeUserMCP(path, info)
 	} else if !os.IsNotExist(err) {
@@ -1183,16 +1200,18 @@ func validateClaudeCodeUserMCP(path string, info os.FileInfo) error {
 	return nil
 }
 
-func claudeCodeSettingsPath() string {
+// ClaudeCodeSettingsPath returns the path to Claude Code's user-level
+// settings.json file (see claudeCodeConfigRoot).
+func ClaudeCodeSettingsPath() string {
 	home, _ := userHomeDir()
-	return filepath.Join(home, ".claude", "settings.json")
+	return filepath.Join(claudeCodeConfigRoot(home), "settings.json")
 }
 
 // AddClaudeCodeAllowlist adds engram MCP tool names to ~/.claude/settings.json
 // permissions.allow so Claude Code doesn't prompt for confirmation on each call.
 // Idempotent: skips tools already present in the list.
 func AddClaudeCodeAllowlist() error {
-	settingsPath := claudeCodeSettingsPath()
+	settingsPath := ClaudeCodeSettingsPath()
 
 	// Read existing settings (or start fresh)
 	var config map[string]json.RawMessage

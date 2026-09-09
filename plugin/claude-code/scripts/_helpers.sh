@@ -9,6 +9,20 @@ trim_whitespace() {
   printf '%s' "$value"
 }
 
+# Resolves Claude Code's config dir: honors CLAUDE_CONFIG_DIR (relative paths resolved against $PWD), otherwise ~/.claude.
+claude_config_root() {
+  local dir
+  dir="$(trim_whitespace "${CLAUDE_CONFIG_DIR:-}")"
+  if [ -z "$dir" ]; then
+    printf '%s' "$HOME/.claude"
+    return
+  fi
+  case "$dir" in
+    /*) printf '%s' "$dir" ;;
+    *) printf '%s' "$PWD/$dir" ;;
+  esac
+}
+
 is_valid_port() {
   local port="$1"
   [[ "$port" =~ ^[0-9]+$ ]] || return 1

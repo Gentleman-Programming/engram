@@ -19,7 +19,7 @@ INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 
-MCP_CONFIG="$HOME/.claude/mcp/engram.json"
+MCP_CONFIG="$(claude_config_root)/mcp/engram.json"
 if [ ! -f "$MCP_CONFIG" ] || [ -L "$MCP_CONFIG" ]; then
   if engram setup claude-code --mcp-only; then
     printf '%s\n' "Engram MCP registration migrated. Restart Claude Code to enable MCP tools."
