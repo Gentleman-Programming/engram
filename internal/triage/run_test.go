@@ -420,6 +420,41 @@ func TestRunClientFailurePaths(t *testing.T) {
 			inject:    func(f *fakeTriageClient) { f.createCommentErr = apiFailure },
 			wantCalls: []string{"get-issue", "search", "list-comments", "ensure-label", "add-label", "create-comment"},
 		},
+		{
+			name: "ensure label failure: add-label never attempted",
+			inject: func(f *fakeTriageClient) {
+				f.ensureLabelErr = apiFailure
+			},
+			wantCalls: []string{"get-issue", "search", "list-comments", "ensure-label"},
+		},
+		{
+			name: "remove label failure: anchored comment never updated",
+			inject: func(f *fakeTriageClient) {
+				f.search = nil
+				f.issue = withLabels(target, LabelName)
+				f.comments = []Comment{{ID: 77, Body: CommentAnchor + "\n- #11: stale candidates\n", Author: DefaultBotAuthor}}
+				f.removeIssueLabelErr = apiFailure
+			},
+			wantCalls: []string{"get-issue", "search", "list-comments", "remove-label"},
+		},
+		{
+			name: "update comment failure on the no-candidates reconciliation path",
+			inject: func(f *fakeTriageClient) {
+				f.search = nil
+				f.comments = []Comment{{ID: 88, Body: CommentAnchor + "\n- #11: stale candidates\n", Author: DefaultBotAuthor}}
+				f.updateCommentErr = apiFailure
+			},
+			wantCalls: []string{"get-issue", "search", "list-comments", "update-comment:88"},
+		},
+		{
+			name: "update comment failure on the candidate-update path",
+			inject: func(f *fakeTriageClient) {
+				f.issue = withLabels(target, LabelName)
+				f.comments = []Comment{{ID: 55, Body: CommentAnchor + "\n- #99: old candidate\n", Author: DefaultBotAuthor}}
+				f.updateCommentErr = apiFailure
+			},
+			wantCalls: []string{"get-issue", "search", "list-comments", "update-comment:55"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -435,6 +470,9 @@ func TestRunClientFailurePaths(t *testing.T) {
 			}
 			if len(fake.createdBodies) != 0 {
 				t.Errorf("no comment body may be recorded on failure, got %v", fake.createdBodies)
+			}
+			if len(fake.updatedBodies) != 0 {
+				t.Errorf("no comment body may be patched on failure, got %v", fake.updatedBodies)
 			}
 			if got, want := fake.calls, tt.wantCalls; !reflect.DeepEqual(got, want) {
 				t.Fatalf("calls = %v, want %v", got, want)
