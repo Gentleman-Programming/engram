@@ -336,11 +336,23 @@ func (c SyncTargetClosedSpaceCheck) Run(ctx context.Context, scope Scope) (Check
 				"lifecycle":         state.Lifecycle,
 				"unacked_mutations": state.UnackedMutations,
 			}),
-			SafeNextStep:         "If the target belongs to a project you want synced, run `engram cloud enroll <project>`. Otherwise no action is required: the row is inert drift left by the removed derivation fallback, it cannot advance and no data is at risk, and a later cloud-inbox slice removes these legacy rows automatically.",
+			SafeNextStep:         safeNextStepForForeignSyncTarget(state),
 			RequiresConfirmation: true,
 		})
 	}
 	return resultFromFindings(c.Code(), map[string]any{"sync_targets_evaluated": len(states), "enrolled_projects": len(enrolled)}, findings), nil
+}
+
+// safeNextStepForForeignSyncTarget selects the doctor guidance for a foreign
+// sync_state row. Only rows with no pending mutations are inert drift the later
+// cloud-inbox cleanup can remove safely; rows with unacknowledged mutations
+// record writes no configured pipeline will ever deliver, so they demand an
+// explicit review decision before the row is discarded.
+func safeNextStepForForeignSyncTarget(state store.SyncTargetState) string {
+	if state.UnackedMutations == 0 {
+		return "If the target belongs to a project you want synced, run `engram cloud enroll <project>`. Otherwise no action is required: the row is inert drift left by the removed derivation fallback, it cannot advance and no data is at risk, and a later cloud-inbox slice removes these legacy rows automatically."
+	}
+	return fmt.Sprintf("Review the %d unacknowledged mutation(s) recorded for this target before removing the row: they record writes that no configured pipeline will deliver. If the target belongs to a project you want synced, run `engram cloud enroll <project>` so delivery can resume; otherwise clear or re-ack the pending mutations through a supported repair workflow first.", state.UnackedMutations)
 }
 
 func syncTargetKeyForClosedSpace(project string) string {

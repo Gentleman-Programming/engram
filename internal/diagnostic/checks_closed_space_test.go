@@ -3,6 +3,7 @@ package diagnostic
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/v2/internal/store"
@@ -14,11 +15,13 @@ import (
 // guidance; the reserved inbox row and the local chunk target never flag.
 func TestSyncTargetClosedSpaceCheck(t *testing.T) {
 	tests := []struct {
-		name        string
-		seed        func(t *testing.T, s *store.Store)
-		wantStatus  string
-		wantReason  string
-		wantFinding bool
+		name               string
+		seed               func(t *testing.T, s *store.Store)
+		wantStatus         string
+		wantReason         string
+		wantFinding        bool
+		wantNextStepHas    []string
+		wantNextStepLacks  []string
 	}{
 		{
 			name: "closed set is ok",
@@ -55,9 +58,10 @@ func TestSyncTargetClosedSpaceCheck(t *testing.T) {
 					t.Fatalf("seed phantom journal row: %v", err)
 				}
 			},
-			wantStatus:  StatusError,
-			wantReason:  ReasonForeignSyncTarget,
-			wantFinding: true,
+			wantStatus:      StatusError,
+			wantReason:      ReasonForeignSyncTarget,
+			wantFinding:     true,
+			wantNextStepHas: []string{"Review the 1 unacknowledged mutation(s)", "cloud enroll"},
 		},
 		{
 			name: "totally foreign key errors",
@@ -71,9 +75,25 @@ func TestSyncTargetClosedSpaceCheck(t *testing.T) {
 					t.Fatalf("seed foreign journal row: %v", err)
 				}
 			},
-			wantStatus:  StatusError,
-			wantReason:  ReasonForeignSyncTarget,
-			wantFinding: true,
+			wantStatus:      StatusError,
+			wantReason:      ReasonForeignSyncTarget,
+			wantFinding:     true,
+			wantNextStepHas: []string{"Review the 1 unacknowledged mutation(s)", "repair workflow"},
+		},
+		{
+			name: "inert foreign row with zero pending mutations keeps the no-action guidance",
+			seed: func(t *testing.T, s *store.Store) {
+				t.Helper()
+				// No journal rows at all: the foreign row is inert drift.
+				if _, err := s.DB().Exec(`INSERT INTO sync_state (target_key, lifecycle, updated_at) VALUES ('satellite:dormant', 'idle', datetime('now'))`); err != nil {
+					t.Fatalf("seed dormant foreign target: %v", err)
+				}
+			},
+			wantStatus:         StatusError,
+			wantReason:         ReasonForeignSyncTarget,
+			wantFinding:        true,
+			wantNextStepHas:    []string{"inert drift", "no action is required"},
+			wantNextStepLacks:  []string{"Review the", "repair workflow"},
 		},
 	}
 
@@ -115,6 +135,16 @@ func TestSyncTargetClosedSpaceCheck(t *testing.T) {
 				}
 				if _, ok := evidence["unacked_mutations"]; !ok {
 					t.Fatalf("evidence missing unacked_mutations: %s", finding.Evidence)
+				}
+				for _, want := range tc.wantNextStepHas {
+					if !strings.Contains(finding.SafeNextStep, want) {
+						t.Fatalf("safe_next_step missing %q: %s", want, finding.SafeNextStep)
+					}
+				}
+				for _, banned := range tc.wantNextStepLacks {
+					if strings.Contains(finding.SafeNextStep, banned) {
+						t.Fatalf("safe_next_step must not contain %q: %s", banned, finding.SafeNextStep)
+					}
 				}
 			} else if len(check.Findings) != 0 {
 				t.Fatalf("expected no findings, got %+v", check.Findings)
