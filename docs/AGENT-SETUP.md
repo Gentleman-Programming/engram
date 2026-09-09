@@ -232,7 +232,7 @@ engram setup opencode
 This does three things:
 
 1. Copies the plugin to `~/.config/opencode/plugins/engram.ts` (session tracking, Memory Protocol, compaction recovery)
-2. Adds the `engram` MCP server entry to your `opencode.json` with `--tools=agent` (18 agent-facing tools)
+2. Adds the `engram` MCP server entry to your `opencode.json` with `--tools=agent` (19 agent-facing tools)
 3. Adds `opencode-subagent-statusline` to your `tui.json` or `tui.jsonc` so OpenCode shows sub-agent activity in the sidebar/home footer
 
 ### Verify each layer after setup
