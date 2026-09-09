@@ -69,6 +69,7 @@ Next session starts → Previous session context is injected automatically
 | `mem_capture_passive` | Extract learnings from text output |
 | `mem_merge_projects` | Merge project name variants into canonical name (admin) |
 | `mem_current_project` | Detect project from cwd — never errors, recommended first call |
+| `mem_list_projects` | List every known project with counts — cross-project discovery when cwd matches nothing |
 | `mem_doctor` | Run read-only operational diagnostics for project detection and store health |
 | `mem_review` | List observations whose `review_after` lifecycle is stale; `mark_reviewed` resets the local review cycle |
 | `mem_pin` | Pin a local observation so it appears before recent memory context; not synced |
@@ -213,7 +214,7 @@ engram/
 ├── internal/
 │   ├── store/store.go              # Core: SQLite + FTS5 + all data ops
 │   ├── server/server.go            # HTTP REST API (port 7437)
-│   ├── mcp/mcp.go                  # MCP stdio server (22 tools)
+│   ├── mcp/mcp.go                  # MCP stdio server (23 tools)
 │   ├── setup/setup.go              # Agent plugin installer (go:embed)
 │   ├── cloud/                       # Optional cloud runtime (Postgres + dashboard)
 │   │   ├── cloudserver/             # /sync API + dashboard mount + auth/session bridge
