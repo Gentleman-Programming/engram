@@ -122,6 +122,10 @@ Dashboard route tree (`engram cloud serve`):
 
 Engram is local-first: local SQLite is authoritative; cloud features are optional replication/shared access and enrollment controls.
 
+### Mutation materialization attribution
+
+For an accepted `POST /sync/mutations/push`, each future materialized cloud chunk records the authenticated server principal's display name. If it is blank, the server uses the principal ID, then `unknown`. The mutation-envelope `created_by` value cannot control accepted chunk attribution. This is distinct from explicit `POST /sync/push`, which preserves its chunk `created_by` metadata. Existing cloud rows are not repaired or rewritten by this behavior.
+
 ### Health
 
 - Local runtime (`engram serve`): `GET /health` — Returns `{"status": "ok", "service": "engram", "version": "0.1.0"}`
