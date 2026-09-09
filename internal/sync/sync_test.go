@@ -2434,6 +2434,31 @@ func TestOwnershipManifestCompatibilityIsScopedToSynchronizedSessions(t *testing
 	}
 }
 
+func TestCloudImportAcceptsPendingProjectOwnedChunkFromV2Manifest(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSessionWithOwnershipMode("local-project-owned", "project-a", "/tmp/local", store.SessionOwnershipProjectOwned); err != nil {
+		t.Fatalf("create project-owned session: %v", err)
+	}
+	if err := s.EnrollProject("project-a"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+
+	transport := newFakeCloudTransport()
+	transport.manifest = &Manifest{Version: ownershipModeManifestVersion, Chunks: []ChunkEntry{{ID: "pending", CreatedAt: "2026-01-01T00:00:00Z"}}}
+	transport.chunks["pending"] = []byte(`{"sessions":[{"id":"shared-session","project":"project-a","directory":"/tmp/shared"}]}`)
+
+	result, err := NewCloudWithTransport(s, transport, "project-a").Import()
+	if err != nil {
+		t.Fatalf("import pending v2 cloud chunk: %v", err)
+	}
+	if result.ChunksImported != 1 || result.SessionsImported != 1 {
+		t.Fatalf("unexpected import result: %+v", result)
+	}
+	if _, err := s.GetSession("shared-session"); err != nil {
+		t.Fatalf("expected pending cloud session to import: %v", err)
+	}
+}
+
 func TestOwnershipManifestVersionDoesNotDowngradeFutureManifest(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.CreateSessionWithOwnershipMode("manual-save-project-a", "project-a", "/tmp/a", store.SessionOwnershipProjectOwned); err != nil {

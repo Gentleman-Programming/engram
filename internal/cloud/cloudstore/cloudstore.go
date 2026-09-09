@@ -168,7 +168,7 @@ func (cs *CloudStore) ReadManifest(ctx context.Context, project string) (*engram
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("cloudstore: iterate manifest: %w", err)
 	}
-	return &engramsync.Manifest{Version: 1, Chunks: toManifestEntries(manifestRows)}, nil
+	return &engramsync.Manifest{Version: 2, Chunks: toManifestEntries(manifestRows)}, nil
 }
 
 type manifestRow struct {
