@@ -1273,13 +1273,16 @@ func TestSuggestTopicKeyEndpoint(t *testing.T) {
 		t.Fatalf("topic_key = %q, want %q", response.TopicKey, want)
 	}
 
-	for name, body := range map[string]string{
-		"invalid json":  "{",
-		"missing input": `{}`,
-		"blank input":   `{"title":" ","content":"\n\t"}`,
+	for _, tt := range []struct {
+		name string
+		body string
+	}{
+		{name: "invalid json", body: "{"},
+		{name: "missing input", body: `{}`},
+		{name: "blank input", body: `{"title":" ","content":"\n\t"}`},
 	} {
-		t.Run(name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, "/topic-keys/suggest", strings.NewReader(body))
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/topic-keys/suggest", strings.NewReader(tt.body))
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, req)
 			if rec.Code != http.StatusBadRequest {
