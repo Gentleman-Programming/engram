@@ -1249,6 +1249,39 @@ func cmdDelete(cfg store.Config) {
 	}
 }
 
+// parseDeleteTrailingArgs validates the tokens that follow a delete command's
+// target and reports which supported flags were present. Delete paths mutate
+// persistent data, so any token other than a documented flag must be rejected
+// before the store is opened; silently ignoring an unsupported option such as
+// --dry-run would let the deletion proceed anyway. On rejection it prints the
+// offending token(s) and the usage line to stderr, calls exitFunc(1), and
+// reports ok=false.
+func parseDeleteTrailingArgs(args []string, usage string, supported ...string) (flags map[string]bool, ok bool) {
+	flags = make(map[string]bool)
+	var unexpected []string
+	for _, arg := range args {
+		known := false
+		for _, s := range supported {
+			if arg == s {
+				known = true
+				break
+			}
+		}
+		if known {
+			flags[arg] = true
+			continue
+		}
+		unexpected = append(unexpected, fmt.Sprintf("%q", arg))
+	}
+	if len(unexpected) > 0 {
+		fmt.Fprintf(os.Stderr, "error: unexpected argument(s): %s\n", strings.Join(unexpected, " "))
+		fmt.Fprintln(os.Stderr, "usage: "+usage)
+		exitFunc(1)
+		return nil, false
+	}
+	return flags, true
+}
+
 func cmdDeleteObservation(cfg store.Config) {
 	if len(os.Args) < 3 {
 		fmt.Fprintln(os.Stderr, "usage: engram delete <observation_id> [--hard]")
@@ -1263,12 +1296,11 @@ func cmdDeleteObservation(cfg store.Config) {
 		return
 	}
 
-	hard := false
-	for i := 3; i < len(os.Args); i++ {
-		if os.Args[i] == "--hard" {
-			hard = true
-		}
+	flags, ok := parseDeleteTrailingArgs(os.Args[3:], "engram delete <observation_id> [--hard]", "--hard")
+	if !ok {
+		return
 	}
+	hard := flags["--hard"]
 
 	s, err := storeNew(cfg)
 	if err != nil {
@@ -1298,6 +1330,10 @@ func cmdDeleteSession(cfg store.Config) {
 
 	id := os.Args[3]
 
+	if _, ok := parseDeleteTrailingArgs(os.Args[4:], "engram delete session <id>"); !ok {
+		return
+	}
+
 	s, err := storeNew(cfg)
 	if err != nil {
 		fatal(err)
@@ -1326,6 +1362,10 @@ func cmdDeletePrompt(cfg store.Config) {
 		return
 	}
 
+	if _, ok := parseDeleteTrailingArgs(os.Args[4:], "engram delete prompt <id>"); !ok {
+		return
+	}
+
 	s, err := storeNew(cfg)
 	if err != nil {
 		fatal(err)
@@ -1348,12 +1388,12 @@ func cmdDeleteProject(cfg store.Config) {
 	}
 
 	name := os.Args[3]
-	hard := false
-	for i := 4; i < len(os.Args); i++ {
-		if os.Args[i] == "--hard" {
-			hard = true
-		}
+
+	flags, ok := parseDeleteTrailingArgs(os.Args[4:], "engram delete project <name> [--hard]", "--hard")
+	if !ok {
+		return
 	}
+	hard := flags["--hard"]
 
 	s, err := storeNew(cfg)
 	if err != nil {
