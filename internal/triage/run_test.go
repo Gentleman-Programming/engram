@@ -10,13 +10,22 @@ import (
 )
 
 // fakeTriageClient records every Client call so tests can assert exactly which
-// mutations Run performed.
+// mutations Run performed. The *Err fields inject per-method failures; a
+// non-nil error is returned before the call is recorded as a mutation.
 type fakeTriageClient struct {
 	issue          Issue
 	search         []Issue
 	searchErr      error
 	comments       []Comment
 	listIncomplete bool // cap exhausted: anchored-comment absence is unprovable
+
+	getIssueErr         error
+	listCommentsErr     error
+	createCommentErr    error
+	updateCommentErr    error
+	ensureLabelErr      error
+	addIssueLabelErr    error
+	removeIssueLabelErr error
 
 	calls         []string
 	createdBodies []string
@@ -25,6 +34,9 @@ type fakeTriageClient struct {
 
 func (f *fakeTriageClient) GetIssue(ctx context.Context, number int) (Issue, error) {
 	f.calls = append(f.calls, "get-issue")
+	if f.getIssueErr != nil {
+		return Issue{}, f.getIssueErr
+	}
 	return f.issue, nil
 }
 
@@ -38,17 +50,26 @@ func (f *fakeTriageClient) SearchIssues(ctx context.Context, queryTokens []strin
 
 func (f *fakeTriageClient) ListComments(ctx context.Context, number int) ([]Comment, bool, error) {
 	f.calls = append(f.calls, "list-comments")
+	if f.listCommentsErr != nil {
+		return nil, false, f.listCommentsErr
+	}
 	return f.comments, !f.listIncomplete, nil
 }
 
 func (f *fakeTriageClient) CreateComment(ctx context.Context, number int, body string) error {
 	f.calls = append(f.calls, "create-comment")
+	if f.createCommentErr != nil {
+		return f.createCommentErr
+	}
 	f.createdBodies = append(f.createdBodies, body)
 	return nil
 }
 
 func (f *fakeTriageClient) UpdateComment(ctx context.Context, commentID int64, body string) error {
 	f.calls = append(f.calls, fmt.Sprintf("update-comment:%d", commentID))
+	if f.updateCommentErr != nil {
+		return f.updateCommentErr
+	}
 	if f.updatedBodies == nil {
 		f.updatedBodies = map[int64]string{}
 	}
@@ -58,17 +79,17 @@ func (f *fakeTriageClient) UpdateComment(ctx context.Context, commentID int64, b
 
 func (f *fakeTriageClient) EnsureLabel(ctx context.Context, name string) error {
 	f.calls = append(f.calls, "ensure-label")
-	return nil
+	return f.ensureLabelErr
 }
 
 func (f *fakeTriageClient) AddIssueLabel(ctx context.Context, number int, name string) error {
 	f.calls = append(f.calls, "add-label")
-	return nil
+	return f.addIssueLabelErr
 }
 
 func (f *fakeTriageClient) RemoveIssueLabel(ctx context.Context, number int, name string) error {
 	f.calls = append(f.calls, "remove-label")
-	return nil
+	return f.removeIssueLabelErr
 }
 
 // mutations returns the mutating calls in order, excluding reads.
@@ -137,6 +158,24 @@ func TestRunReconcilesLabelAndComment(t *testing.T) {
 			name:                "new candidate after rejection: label re-added, comment updated",
 			issue:               target,
 			search:              []Issue{candidateB}, // set differs from recorded {11}
+			comments:            []Comment{botComment(RenderCandidatesComment(RankCandidates(target, []Issue{candidateA})))},
+			wantMutations:       []string{"ensure-label", "add-label", "update-comment:101"},
+			wantUpdatedContains: "- #12:",
+		},
+		{
+			// Rejection stands unless a NEW candidate number appears: a recorded
+			// candidate disappearing (12 gone, no new number) must not reopen triage.
+			name:     "shrinking candidate set after rejection: still a no-op",
+			issue:    target, // label absent: maintainer rejected with {11, 12} recorded
+			search:   []Issue{candidateA},
+			comments: []Comment{botComment(RenderCandidatesComment(RankCandidates(target, []Issue{candidateA, candidateB})))},
+		},
+		{
+			// Strict superset is still new evidence: 12 was not in the recorded {11},
+			// so the rejection falls even though 11 is still recorded.
+			name:                "candidate added after rejection: label re-added, comment updated",
+			issue:               target,
+			search:              []Issue{candidateA, candidateB},
 			comments:            []Comment{botComment(RenderCandidatesComment(RankCandidates(target, []Issue{candidateA})))},
 			wantMutations:       []string{"ensure-label", "add-label", "update-comment:101"},
 			wantUpdatedContains: "- #12:",
@@ -345,5 +384,61 @@ func TestRunSkipsMutationsWhenCommentStateUnprovable(t *testing.T) {
 	}
 	if got := fake.mutations(); len(got) != 0 {
 		t.Fatalf("unprovable anchored-comment state must cause zero mutations, got %v", got)
+	}
+}
+
+// TestRunClientFailurePaths pins the exact call log when individual Client
+// methods fail: reads fail before any mutation, and a failed label add must
+// never leave a comment behind.
+func TestRunClientFailurePaths(t *testing.T) {
+	target := Issue{Number: 10, Title: "App crashes when saving large notes"}
+	candidateA := Issue{Number: 11, Title: "App crashes when saving a large note", State: "open"}
+	apiFailure := errors.New("502 bad gateway")
+
+	tests := []struct {
+		name      string
+		inject    func(*fakeTriageClient)
+		wantCalls []string
+	}{
+		{
+			name:      "get issue failure: zero mutations",
+			inject:    func(f *fakeTriageClient) { f.getIssueErr = apiFailure },
+			wantCalls: []string{"get-issue"},
+		},
+		{
+			name:      "list comments failure: zero mutations",
+			inject:    func(f *fakeTriageClient) { f.listCommentsErr = apiFailure },
+			wantCalls: []string{"get-issue", "search", "list-comments"},
+		},
+		{
+			name:      "add label failure: comment never created",
+			inject:    func(f *fakeTriageClient) { f.addIssueLabelErr = apiFailure },
+			wantCalls: []string{"get-issue", "search", "list-comments", "ensure-label", "add-label"},
+		},
+		{
+			name:      "create comment failure: error after label applied",
+			inject:    func(f *fakeTriageClient) { f.createCommentErr = apiFailure },
+			wantCalls: []string{"get-issue", "search", "list-comments", "ensure-label", "add-label", "create-comment"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := &fakeTriageClient{issue: target, search: []Issue{candidateA}}
+			tt.inject(fake)
+			err := Run(context.Background(), Options{IssueNumber: 10, Client: fake})
+			if err == nil {
+				t.Fatal("Run succeeded, want error")
+			}
+			if !strings.Contains(err.Error(), "502 bad gateway") {
+				t.Fatalf("Run error must wrap the injected failure, got: %v", err)
+			}
+			if len(fake.createdBodies) != 0 {
+				t.Errorf("no comment body may be recorded on failure, got %v", fake.createdBodies)
+			}
+			if got, want := fake.calls, tt.wantCalls; !reflect.DeepEqual(got, want) {
+				t.Fatalf("calls = %v, want %v", got, want)
+			}
+		})
 	}
 }

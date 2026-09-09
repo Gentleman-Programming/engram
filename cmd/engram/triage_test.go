@@ -144,8 +144,8 @@ func TestCmdTriageDuplicatesCleanNoCandidateRun(t *testing.T) {
 	if stderr != "" {
 		t.Errorf("expected clean stderr, got: %q", stderr)
 	}
-	if !strings.Contains(stdout, "") {
-		t.Error("unreachable")
+	if stdout != "" {
+		t.Errorf("expected empty stdout on a clean no-candidate run, got: %q", stdout)
 	}
 }
 

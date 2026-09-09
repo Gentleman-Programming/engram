@@ -4,6 +4,14 @@ on:
   issues:
     types: [opened, edited]
 
+# One triage run per issue at a time: runs for the same issue never execute
+# simultaneously, while different issues keep separate groups. Each run
+# recomputes the full label/comment state from the API, so canceling a stale
+# in-flight run in favor of the newest edit is safe.
+concurrency:
+  group: issue-triage-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 

@@ -35,8 +35,10 @@ func TestSearchTokens(t *testing.T) {
 		want  []string
 	}{
 		{
+			// More than five distinctive tokens: the first five must win, so the
+			// firstDistinctive cap is actually exercised (export would be sixth).
 			name:  "prefers distinctive tokens, caps at five",
-			title: "Crash when saving large notes on macOS",
+			title: "Crash when saving large notes on macOS during export",
 			want:  []string{"crash", "saving", "large", "notes", "macos"},
 		},
 		{
@@ -72,7 +74,7 @@ func TestExtractSnippets(t *testing.T) {
 		},
 		{
 			name: "fenced block content, language tag dropped",
-			body: "log:\n```\npanic: runtime error\n```\nend",
+			body: "log:\n```go\npanic: runtime error\n```\nend",
 			want: []string{"panic: runtime error"},
 		},
 		{
