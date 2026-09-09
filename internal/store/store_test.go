@@ -13233,6 +13233,145 @@ func TestActiveRuntimeSessionsReturnsAllMatchingActiveSessions(t *testing.T) {
 	}
 }
 
+// ageSession backdates a session's started_at so recency-bound behavior can be
+// exercised without waiting. Observations are backdated the same way.
+func ageSession(t *testing.T, s *Store, id, startedAt string) {
+	t.Helper()
+	if _, err := s.db.Exec(`UPDATE sessions SET started_at = ? WHERE id = ?`, startedAt, id); err != nil {
+		t.Fatalf("age session %s: %v", id, err)
+	}
+}
+
+func ageObservation(t *testing.T, s *Store, obsID int64, createdAt string) {
+	t.Helper()
+	if _, err := s.db.Exec(`UPDATE observations SET created_at = ? WHERE id = ?`, createdAt, obsID); err != nil {
+		t.Fatalf("age observation %d: %v", obsID, err)
+	}
+}
+
+func TestActiveRuntimeSessionsExcludesStaleSessionWithoutObservations(t *testing.T) {
+	s := newTestStore(t)
+
+	// A session left unclosed months ago, never used. No process owns it and it
+	// recorded nothing, so it must not keep the write path ambiguous forever.
+	if err := s.CreateSession("uuid-stale", "engram", "/work/engram"); err != nil {
+		t.Fatalf("create stale session: %v", err)
+	}
+	ageSession(t, s, "uuid-stale", "2025-01-01 00:00:00")
+
+	ids, err := s.ActiveRuntimeSessions("engram", "/work/engram")
+	if err != nil {
+		t.Fatalf("ActiveRuntimeSessions: %v", err)
+	}
+	if len(ids) != 0 {
+		t.Fatalf("expected stale session to be excluded, got %#v", ids)
+	}
+}
+
+func TestActiveRuntimeSessionsKeepsOldSessionWithRecentObservation(t *testing.T) {
+	s := newTestStore(t)
+
+	// started_at alone is not activity: a long-running session that wrote
+	// recently is still the session the agent is using.
+	if err := s.CreateSession("uuid-long-running", "engram", "/work/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	ageSession(t, s, "uuid-long-running", "2025-01-01 00:00:00")
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "uuid-long-running",
+		Type:      "note",
+		Title:     "recent work",
+		Content:   "content",
+		Project:   "engram",
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	ids, err := s.ActiveRuntimeSessions("engram", "/work/engram")
+	if err != nil {
+		t.Fatalf("ActiveRuntimeSessions: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != "uuid-long-running" {
+		t.Fatalf("expected long-running session to stay active, got %#v", ids)
+	}
+}
+
+func TestActiveRuntimeSessionsExcludesSessionWhoseLastObservationIsStale(t *testing.T) {
+	s := newTestStore(t)
+
+	// Recorded activity, but not for months. Same verdict as a session that
+	// never recorded anything.
+	if err := s.CreateSession("uuid-abandoned", "engram", "/work/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	ageSession(t, s, "uuid-abandoned", "2025-01-01 00:00:00")
+	obsID, err := s.AddObservation(AddObservationParams{
+		SessionID: "uuid-abandoned",
+		Type:      "note",
+		Title:     "old work",
+		Content:   "content",
+		Project:   "engram",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	ageObservation(t, s, obsID, "2025-01-02 00:00:00")
+
+	ids, err := s.ActiveRuntimeSessions("engram", "/work/engram")
+	if err != nil {
+		t.Fatalf("ActiveRuntimeSessions: %v", err)
+	}
+	if len(ids) != 0 {
+		t.Fatalf("expected abandoned session to be excluded, got %#v", ids)
+	}
+}
+
+// TestActiveRuntimeSessionsStillFailsClosedForConcurrentSessions guards the
+// behavior deliberately kept by #925, #1031 and #1090: two genuinely live
+// sessions for the same project and directory remain ambiguous. The recency
+// bound narrows which rows qualify as candidates; it must never collapse a real
+// ambiguity into a silent pick.
+func TestActiveRuntimeSessionsStillFailsClosedForConcurrentSessions(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("uuid-live-a", "engram", "/work/engram"); err != nil {
+		t.Fatalf("create session a: %v", err)
+	}
+	if err := s.CreateSession("uuid-live-b", "engram", "/work/engram"); err != nil {
+		t.Fatalf("create session b: %v", err)
+	}
+
+	ids, err := s.ActiveRuntimeSessions("engram", "/work/engram")
+	if err != nil {
+		t.Fatalf("ActiveRuntimeSessions: %v", err)
+	}
+	if !reflect.DeepEqual(ids, []string{"uuid-live-a", "uuid-live-b"}) {
+		t.Fatalf("expected both live sessions to stay ambiguous, got %#v", ids)
+	}
+}
+
+func TestActiveRuntimeSessionsStaleRowDoesNotBlockLiveSession(t *testing.T) {
+	s := newTestStore(t)
+
+	// The reported failure: one stranded legacy row plus the session actually in
+	// use. Resolution must land on the live one instead of failing closed.
+	if err := s.CreateSession("uuid-stranded", "engram", "/work/engram"); err != nil {
+		t.Fatalf("create stranded session: %v", err)
+	}
+	ageSession(t, s, "uuid-stranded", "2025-01-01 00:00:00")
+	if err := s.CreateSession("uuid-current", "engram", "/work/engram"); err != nil {
+		t.Fatalf("create current session: %v", err)
+	}
+
+	ids, err := s.ActiveRuntimeSessions("engram", "/work/engram")
+	if err != nil {
+		t.Fatalf("ActiveRuntimeSessions: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != "uuid-current" {
+		t.Fatalf("expected only the live session, got %#v", ids)
+	}
+}
+
 func TestActiveRuntimeSessionsIgnoresManualSaveSessions(t *testing.T) {
 	s := newTestStore(t)
 
