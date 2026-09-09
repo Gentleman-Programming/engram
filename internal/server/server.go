@@ -393,11 +393,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /observations", s.handleListObservations)
 	s.mux.HandleFunc("POST /observations/passive", s.handlePassiveCapture)
 	s.mux.HandleFunc("GET /observations/recent", s.handleRecentObservations)
-	s.mux.HandleFunc("PUT /observations/{id}/pin", s.handlePinObservation)
-	s.mux.HandleFunc("DELETE /observations/{id}/pin", s.handleUnpinObservation)
+	s.mux.HandleFunc("PUT /observations/{id}/pin", requireAuth(s.handlePinObservation))
+	s.mux.HandleFunc("DELETE /observations/{id}/pin", requireAuth(s.handleUnpinObservation))
 	s.mux.HandleFunc("PATCH /observations/{id}", s.handleUpdateObservation)
 	s.mux.HandleFunc("DELETE /observations/{id}", requireAuth(s.handleDeleteObservation))
-	s.mux.HandleFunc("POST /topic-keys/suggest", s.handleSuggestTopicKey)
+	s.mux.HandleFunc("POST /topic-keys/suggest", requireAuth(s.handleSuggestTopicKey))
 
 	// Search
 	s.mux.HandleFunc("GET /search", s.handleSearch)
@@ -740,7 +740,7 @@ func (s *Server) handleUnpinObservation(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) handleObservationPinState(w http.ResponseWriter, r *http.Request, pinned bool) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
+	if err != nil || id <= 0 {
 		jsonError(w, http.StatusBadRequest, "invalid observation id")
 		return
 	}
@@ -770,8 +770,24 @@ func (s *Server) handleSuggestTopicKey(w http.ResponseWriter, r *http.Request) {
 		Title   string `json:"title"`
 		Content string `json:"content"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, 50<<20)
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&body); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			jsonError(w, http.StatusBadRequest, "request body too large")
+			return
+		}
 		jsonError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			jsonError(w, http.StatusBadRequest, "request body too large")
+			return
+		}
+		jsonError(w, http.StatusBadRequest, "invalid json: trailing data")
 		return
 	}
 	if strings.TrimSpace(body.Title) == "" && strings.TrimSpace(body.Content) == "" {

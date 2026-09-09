@@ -1129,6 +1129,8 @@ func TestHandleSearchRejectsInvalidMatchMode(t *testing.T) {
 }
 
 func TestObservationPinEndpoints(t *testing.T) {
+	const token = "pin-token"
+	t.Setenv("ENGRAM_HTTP_TOKEN", token)
 	st := newServerTestStore(t)
 	if err := st.CreateSession("s-pin-http", "engram", "/tmp/engram"); err != nil {
 		t.Fatalf("create session: %v", err)
@@ -1167,9 +1169,26 @@ func TestObservationPinEndpoints(t *testing.T) {
 	srv := New(st, 0)
 	srv.SetOnWrite(func() { writes.Add(1) })
 	h := srv.Handler()
+	for _, tt := range []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{name: "pin", method: http.MethodPut, path: fmt.Sprintf("/observations/%d/pin", id)},
+		{name: "unpin", method: http.MethodDelete, path: fmt.Sprintf("/observations/%d/pin", id)},
+	} {
+		t.Run("requires authentication for "+tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(tt.method, tt.path, nil))
+			if rec.Code != http.StatusUnauthorized || strings.TrimSpace(rec.Body.String()) != `{"error":"authorization required"}` {
+				t.Fatalf("unauthorized %s = %d: %s", tt.name, rec.Code, rec.Body.String())
+			}
+		})
+	}
 	setPin := func(method string, wantPinned bool) {
 		t.Helper()
 		req := httptest.NewRequest(method, fmt.Sprintf("/observations/%d/pin", id), nil)
+		req.Header.Set("Authorization", "Bearer "+token)
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
@@ -1238,25 +1257,49 @@ func TestObservationPinEndpoints(t *testing.T) {
 	}
 
 	invalidID := httptest.NewRequest(http.MethodPut, "/observations/not-a-number/pin", nil)
+	invalidID.Header.Set("Authorization", "Bearer "+token)
 	invalidIDRec := httptest.NewRecorder()
 	h.ServeHTTP(invalidIDRec, invalidID)
-	if invalidIDRec.Code != http.StatusBadRequest {
+	if invalidIDRec.Code != http.StatusBadRequest || strings.TrimSpace(invalidIDRec.Body.String()) != `{"error":"invalid observation id"}` {
 		t.Fatalf("invalid observation id: got %d body=%s", invalidIDRec.Code, invalidIDRec.Body.String())
 	}
 
-	missing := httptest.NewRequest(http.MethodDelete, "/observations/999999/pin", nil)
-	missingRec := httptest.NewRecorder()
-	h.ServeHTTP(missingRec, missing)
-	if missingRec.Code != http.StatusNotFound {
-		t.Fatalf("missing observation: got %d body=%s", missingRec.Code, missingRec.Body.String())
+	for _, tt := range []struct {
+		name       string
+		method     string
+		path       string
+		wantStatus int
+		wantBody   string
+	}{
+		{name: "zero", method: http.MethodPut, path: "/observations/0/pin", wantStatus: http.StatusBadRequest, wantBody: `{"error":"invalid observation id"}`},
+		{name: "negative", method: http.MethodDelete, path: "/observations/-1/pin", wantStatus: http.StatusBadRequest, wantBody: `{"error":"invalid observation id"}`},
+		{name: "missing", method: http.MethodDelete, path: "/observations/999999/pin", wantStatus: http.StatusNotFound, wantBody: `{"error":"observation not found"}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			req.Header.Set("Authorization", "Bearer "+token)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != tt.wantStatus || strings.TrimSpace(rec.Body.String()) != tt.wantBody {
+				t.Fatalf("%s observation: got %d body=%s", tt.name, rec.Code, rec.Body.String())
+			}
+		})
 	}
 }
 
 func TestSuggestTopicKeyEndpoint(t *testing.T) {
+	const token = "suggest-token"
+	t.Setenv("ENGRAM_HTTP_TOKEN", token)
 	srv := New(newServerTestStore(t), 0)
 	h := srv.Handler()
+	unauthorized := httptest.NewRecorder()
+	h.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodPost, "/topic-keys/suggest", nil))
+	if unauthorized.Code != http.StatusUnauthorized || strings.TrimSpace(unauthorized.Body.String()) != `{"error":"authorization required"}` {
+		t.Fatalf("unauthorized suggest = %d: %s", unauthorized.Code, unauthorized.Body.String())
+	}
 
 	req := httptest.NewRequest(http.MethodPost, "/topic-keys/suggest", strings.NewReader(`{"type":"bugfix","title":"Fix nil auth token","content":"Avoid a panic"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -1272,6 +1315,19 @@ func TestSuggestTopicKeyEndpoint(t *testing.T) {
 	if response.TopicKey != want {
 		t.Fatalf("topic_key = %q, want %q", response.TopicKey, want)
 	}
+	contentOnly := httptest.NewRequest(http.MethodPost, "/topic-keys/suggest", strings.NewReader(`{"content":"Fix nil panic in auth middleware on empty token"}`))
+	contentOnly.Header.Set("Authorization", "Bearer "+token)
+	contentOnlyRec := httptest.NewRecorder()
+	h.ServeHTTP(contentOnlyRec, contentOnly)
+	if contentOnlyRec.Code != http.StatusOK {
+		t.Fatalf("content-only suggest: got %d body=%s", contentOnlyRec.Code, contentOnlyRec.Body.String())
+	}
+	if err := json.Unmarshal(contentOnlyRec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode content-only suggestion response: %v", err)
+	}
+	if want := store.SuggestTopicKey("", "", "Fix nil panic in auth middleware on empty token"); response.TopicKey != want {
+		t.Fatalf("content-only topic_key = %q, want %q", response.TopicKey, want)
+	}
 
 	for _, tt := range []struct {
 		name string
@@ -1283,10 +1339,29 @@ func TestSuggestTopicKeyEndpoint(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/topic-keys/suggest", strings.NewReader(tt.body))
+			req.Header.Set("Authorization", "Bearer "+token)
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, req)
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("got %d body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+	for _, tt := range []struct {
+		name     string
+		body     string
+		wantBody string
+	}{
+		{name: "trailing JSON", body: `{"title":"valid"} {}`, wantBody: `{"error":"invalid json: trailing data"}`},
+		{name: "oversized body", body: `{"content":"` + strings.Repeat("x", 50<<20+1) + `"}`, wantBody: `{"error":"request body too large"}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/topic-keys/suggest", strings.NewReader(tt.body))
+			req.Header.Set("Authorization", "Bearer "+token)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest || strings.TrimSpace(rec.Body.String()) != tt.wantBody {
+				t.Fatalf("%s = %d: %s", tt.name, rec.Code, rec.Body.String())
 			}
 		})
 	}
