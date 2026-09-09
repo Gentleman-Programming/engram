@@ -510,6 +510,11 @@ export const Engram: Plugin = async (ctx) => {
 	}
 
   return {
+    dispose: async () => {
+      const rootSessionIDs = [...knownSessions].filter(isKnownAuthoritativeRootSession)
+      await Promise.all(rootSessionIDs.map(closeDeletedRootSession))
+    },
+
     // ─── Event Listeners ───────────────────────────────────────────
 
     event: async ({ event }) => {
