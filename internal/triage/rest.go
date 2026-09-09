@@ -146,7 +146,7 @@ func (c *RESTClient) EnsureLabel(ctx context.Context, name string) error {
 	}
 	if resp.StatusCode == http.StatusNotFound {
 		_, _ = io.Copy(io.Discard, resp.Body) // drain 404 body before close
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		resp, err = c.do(ctx, http.MethodPost, fmt.Sprintf("repos/%s/labels", c.repo), nil, ghLabelCreate{
 			Name:        name,
 			Color:       LabelColor,
@@ -177,7 +177,7 @@ func (c *RESTClient) RemoveIssueLabel(ctx context.Context, number int, name stri
 	}
 	if resp.StatusCode == http.StatusNotFound {
 		_, _ = io.Copy(io.Discard, resp.Body) // drain 404 body before close
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil
 	}
 	return decodeResponse(resp, nil)
@@ -218,7 +218,7 @@ func (c *RESTClient) do(ctx context.Context, method, path string, query url.Valu
 // decodeResponse closes the response body and decodes a 2xx response into
 // out; non-2xx statuses become errors carrying the status code.
 func decodeResponse(resp *http.Response, out any) error {
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("triage: GitHub API %s: status %d: %s", resp.Request.Method, resp.StatusCode, strings.TrimSpace(string(detail)))

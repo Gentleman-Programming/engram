@@ -119,12 +119,12 @@ func TestCmdTriageDuplicatesToleratesSearchFailures(t *testing.T) {
 func TestCmdTriageDuplicatesCleanNoCandidateRun(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "test-token")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/repos/o/r/issues/5":
+		switch r.URL.Path {
+		case "/repos/o/r/issues/5":
 			_, _ = w.Write([]byte(`{"number": 5, "title": "Nothing similar", "body": "", "state": "open", "labels": []}`))
-		case r.URL.Path == "/search/issues":
+		case "/search/issues":
 			_, _ = w.Write([]byte(`{"total_count": 0, "items": []}`))
-		case r.URL.Path == "/repos/o/r/issues/5/comments":
+		case "/repos/o/r/issues/5/comments":
 			_, _ = w.Write([]byte(`[]`))
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
