@@ -336,7 +336,7 @@ func (c SyncTargetClosedSpaceCheck) Run(ctx context.Context, scope Scope) (Check
 				"lifecycle":         state.Lifecycle,
 				"unacked_mutations": state.UnackedMutations,
 			}),
-			SafeNextStep:         "Run `engram cloud enroll <project>` if the target belongs to a project you want synced; otherwise acknowledge the row as stale until the cloud inbox CLI lands.",
+			SafeNextStep:         "If the target belongs to a project you want synced, run `engram cloud enroll <project>`. Otherwise no action is required: the row is inert drift left by the removed derivation fallback, it cannot advance and no data is at risk, and a later cloud-inbox slice removes these legacy rows automatically.",
 			RequiresConfirmation: true,
 		})
 	}
