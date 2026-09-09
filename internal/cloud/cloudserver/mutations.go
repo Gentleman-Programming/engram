@@ -182,6 +182,7 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 	// Canonicalize every entry before storage so accepted legacy sparse payloads
 	// materialize the same way as later chunk replay. Any failure rejects the
 	// ENTIRE batch before InsertMutationBatch is called.
+	createdBy := mutationPushCreatedBy(r.Context())
 	var invalid []map[string]any
 	normalizedEntries := make([]MutationEntry, 0, len(req.Entries))
 	for i, entry := range req.Entries {
@@ -200,6 +201,7 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 			})
 			continue
 		}
+		normalized.CreatedBy = createdBy
 		normalizedEntries = append(normalizedEntries, normalized)
 	}
 	if len(invalid) > 0 {
@@ -226,6 +228,20 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 		"project_source": project.SourceRequestBody,
 		"project_path":   "",
 	})
+}
+
+func mutationPushCreatedBy(ctx context.Context) string {
+	principal, ok := PrincipalFromContext(ctx)
+	if !ok {
+		return "unknown"
+	}
+	if displayName := strings.TrimSpace(principal.DisplayName); displayName != "" {
+		return displayName
+	}
+	if id := strings.TrimSpace(principal.ID); id != "" {
+		return id
+	}
+	return "unknown"
 }
 
 // canonicalMutationEntry reuses the production chunk canonicalizer instead of
