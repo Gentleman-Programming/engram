@@ -1270,6 +1270,7 @@ async function executeMemoryTool(toolName: string, params: Record<string, unknow
     ctx.ui?.setStatus?.("engram", `🧠 ${project} · ${compactResultStatus(toolName, result)}`);
     return result;
   } catch (error) {
+    if (signal?.aborted) throw error;
     const timedOutMethod = transport.timedOutMethod();
     const message = timedOutMethod ? unreachableMessage(timedOutMethod) : error instanceof Error ? error.message : String(error);
     const details = error instanceof EngramHttpError

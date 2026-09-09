@@ -38,6 +38,37 @@ function buildAwaitWithAbortForTest() {
   `)();
 }
 
+function buildExecuteMemoryToolForTest({ awaitWithAbort, initOnce, refreshProjectDetection, callMemoryTool, scheduleEngramSelfHeal }) {
+  const body = extractFunctionBody("executeMemoryTool", "{\n  const action")
+    .replaceAll('type: "text" as const', 'type: "text"');
+  const factory = new Function(
+    "awaitWithAbort",
+    "initOnce",
+    "refreshProjectDetection",
+    "callMemoryTool",
+    "scheduleEngramSelfHeal",
+    `
+    let project = "engram";
+    class EngramHttpError extends Error {}
+    const humanToolName = (toolName) => toolName;
+    const createMemoryToolTransport = () => ({
+      fetch: async () => null,
+      timedOutMethod: () => undefined,
+    });
+    const unreachableMessage = () => "unreachable";
+    const textResult = () => "result";
+    const compactResultStatus = () => "complete";
+    const errorStatusLabel = () => "error";
+    const engramFetch = async () => null;
+    async function executeMemoryTool(toolName, params, ctx, signal) {
+      ${body}
+    }
+    return executeMemoryTool;
+    `,
+  );
+  return factory(awaitWithAbort, initOnce, refreshProjectDetection, callMemoryTool, scheduleEngramSelfHeal);
+}
+
 function buildEngramFetchForTest({
   wait = () => Promise.resolve(),
   timeoutMs = 3000,
@@ -1086,6 +1117,74 @@ test("Pi cancellation stops awaiting execution preflight without cancelling shar
 
   assert.match(source, /await awaitWithAbort\(initOnce\(ctx\.cwd\), signal\);[\s\S]*await refreshProjectDetection\(ctx\.cwd, engramFetch, signal\);/);
   assert.match(source, /async function detectServerProject[\s\S]*fetch<CurrentProjectResponse>\([^\n]*\{ signal \}\)[\s\S]*await awaitWithAbort\(wait\(200\), signal\)/);
+});
+
+test("cancelling initialization, project detection, or active memory work propagates without an outage status or recovery", async () => {
+  for (const stage of ["initialization", "project detection", "active memory work"]) {
+    const awaitWithAbort = buildAwaitWithAbortForTest();
+    const controller = new AbortController();
+    const statuses = [];
+    let release;
+    let entered;
+    let recoveries = 0;
+    const blocked = new Promise((resolve) => { release = resolve; });
+    const enterStage = new Promise((resolve) => { entered = resolve; });
+    const executeMemoryTool = buildExecuteMemoryToolForTest({
+      awaitWithAbort,
+      initOnce: () => {
+        if (stage === "initialization") {
+          entered();
+          return blocked;
+        }
+        return Promise.resolve();
+      },
+      refreshProjectDetection: async (_cwd, _fetch, signal) => {
+        if (stage === "project detection") {
+          entered();
+          return awaitWithAbort(blocked, signal);
+        }
+      },
+      callMemoryTool: () => {
+        if (stage === "active memory work") {
+          entered();
+          return blocked;
+        }
+        return Promise.resolve({});
+      },
+      scheduleEngramSelfHeal: () => { recoveries += 1; },
+    });
+
+    const execution = executeMemoryTool("mem_search", {}, { ...sessionCtx("session", statuses), cwd: "/work" }, controller.signal);
+    await enterStage;
+    controller.abort();
+
+    await assert.rejects(execution, /cancelled/);
+    release();
+    await blocked;
+    await flush();
+    assert.equal(statuses.some(([, text]) => text?.includes("error")), false, `${stage} cancellation must not show an error status`);
+    assert.equal(recoveries, 0, `${stage} cancellation must not schedule recovery`);
+  }
+  assert.match(source, /catch \(error\) \{\s*if \(signal\?\.aborted\) throw error;/);
+});
+
+test("a non-cancellation initialization failure still reports an outage and schedules recovery", async () => {
+  const statuses = [];
+  let recoveries = 0;
+  const executeMemoryTool = buildExecuteMemoryToolForTest({
+    awaitWithAbort: buildAwaitWithAbortForTest(),
+    initOnce: async () => { throw new Error("startup failed"); },
+    refreshProjectDetection: async () => assert.fail("failed initialization must not reach project detection"),
+    callMemoryTool: async () => assert.fail("failed initialization must not call memory"),
+    scheduleEngramSelfHeal: () => { recoveries += 1; },
+  });
+
+  const result = await executeMemoryTool("mem_search", {}, { ...sessionCtx("session", statuses), cwd: "/work" });
+
+  assert.equal(result.isError, true);
+  assert.equal(result.details.error, "startup failed");
+  assert.deepEqual(statuses, [["engram", "🧠 engram · error"]]);
+  assert.equal(recoveries, 1);
 });
 
 test("already-cancelled preflight observes a later shared initialization rejection", async () => {
