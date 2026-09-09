@@ -21,7 +21,7 @@ const indexSource = readFileSync(new URL("../index.ts", import.meta.url), "utf8"
 
 const PI_TUI = "@earendil-works/pi-tui";
 const PACKAGE_NAME = `npm:${pkg.name}@${pkg.version}`;
-const LEGACY_PACKAGE_NAME = "npm:gentle-engram@0.1.8";
+const LEGACY_PACKAGE_NAMES = ["npm:gentle-engram@0.1.8", "npm:gentle-engram@0.1.11"];
 const MCP_ADAPTER_PACKAGE = "npm:pi-mcp-adapter";
 const CLI_PATH = fileURLToPath(new URL("../cli.js", import.meta.url));
 const RELEASE_CONTRACT_PATH = fileURLToPath(new URL("./release-contract.mjs", import.meta.url));
@@ -141,12 +141,15 @@ test("pi-engram init replaces legacy package entries without disturbing other pa
 	try {
 		writeFileSync(
 			join(agentDir, "settings.json"),
-			JSON.stringify({ packages: ["npm:existing", LEGACY_PACKAGE_NAME, PACKAGE_NAME, LEGACY_PACKAGE_NAME, MCP_ADAPTER_PACKAGE] }),
+			JSON.stringify({ packages: ["npm:existing", ...LEGACY_PACKAGE_NAMES, PACKAGE_NAME, LEGACY_PACKAGE_NAMES[1], MCP_ADAPTER_PACKAGE] }),
 		);
+		const originalMcp = JSON.stringify({ mcpServers: { engram: { command: "custom-engram" }, existing: { command: "existing" } }, unrelated: true });
+		writeFileSync(join(agentDir, "mcp.json"), originalMcp);
 
 		const output = runCli(agentDir, "init");
 		assert.deepEqual(readPackages(agentDir), ["npm:existing", PACKAGE_NAME, MCP_ADAPTER_PACKAGE]);
 		assert.match(output, new RegExp(`Added ${PACKAGE_NAME} in settings\\.json`));
+		assert.equal(readFileSync(join(agentDir, "mcp.json"), "utf8"), originalMcp);
 
 		const settingsAfterMigration = readFileSync(join(agentDir, "settings.json"), "utf8");
 		const repeatOutput = runCli(agentDir, "init");
