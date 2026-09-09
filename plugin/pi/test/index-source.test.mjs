@@ -26,12 +26,26 @@ function flush(times = 2) {
     : new Promise((resolve) => setTimeout(resolve, 0)).then(() => flush(times - 1));
 }
 
+function buildAwaitWithAbortForTest() {
+  const body = extractFunctionBody("awaitWithAbort", "{\n  if (!signal)")
+    .replace("new Promise<T>", "new Promise")
+    .replace("(error: unknown) =>", "(error) =>");
+  return new Function(`
+    function awaitWithAbort(promise, signal) {
+      ${body}
+    }
+    return awaitWithAbort;
+  `)();
+}
+
 function buildEngramFetchForTest({
   wait = () => Promise.resolve(),
   timeoutMs = 3000,
   maxAttempts = 3,
   backoffBaseMs = 150,
   recover = async () => false,
+  abortSignal = AbortSignal,
+  url = "http://127.0.0.1:7437",
 } = {}) {
   const body = extractFunctionBody("engramFetchResult", "{\n  const method")
     .replace("let res: Response | undefined;", "let res;")
@@ -47,6 +61,7 @@ function buildEngramFetchForTest({
     "ENGRAM_FETCH_TIMEOUT_MS",
     "ENGRAM_FETCH_MAX_ATTEMPTS",
     "ENGRAM_FETCH_BACKOFF_BASE_MS",
+    "AbortSignal",
     "recoverImplicitEngramServer",
     `
     class EngramHttpError extends Error {
@@ -81,10 +96,11 @@ function buildEngramFetchForTest({
     wait,
     (value) => value,
     (value) => value,
-    "http://127.0.0.1:7437",
+    url,
     timeoutMs,
     maxAttempts,
     backoffBaseMs,
+    abortSignal,
     recover,
   );
 }
@@ -954,6 +970,140 @@ test("native tool fetch backs off exponentially and attaches a per-request timeo
     globalThis.fetch = originalFetch;
     AbortSignal.timeout = originalAbortSignalTimeout;
   }
+});
+
+test("Pi tool cancellation composes with the native request timeout", async () => {
+  const originalFetch = globalThis.fetch;
+  const callbackSignal = new AbortController().signal;
+  const timeoutSignal = new AbortController().signal;
+  let timeoutMs;
+  let composedSignals;
+  let requestSignal;
+  const abortSignal = {
+    timeout(ms) {
+      timeoutMs = ms;
+      return timeoutSignal;
+    },
+    any(signals) {
+      composedSignals = signals;
+      return { kind: "combined" };
+    },
+  };
+  globalThis.fetch = async (_url, init) => {
+    requestSignal = init?.signal;
+    return { ok: true, async json() { return { status: "ok" }; } };
+  };
+  try {
+    const { engramFetch } = buildEngramFetchForTest({ abortSignal });
+    assert.deepEqual(await engramFetch("/health", { signal: callbackSignal }), { status: "ok" });
+    assert.equal(timeoutMs, 3000, "the existing timeout policy remains active");
+    assert.deepEqual(composedSignals, [timeoutSignal, callbackSignal]);
+    assert.deepEqual(requestSignal, { kind: "combined" });
+    assert.match(source, /async execute\(_toolCallId, params, signal, _onUpdate, ctx\)[\s\S]*executeMemoryTool\(toolName, params as Record<string, unknown>, ctx as MemoryToolContext, signal\)/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a native request without a Pi signal keeps timeout-only behavior", async () => {
+  const originalFetch = globalThis.fetch;
+  const timeoutSignal = new AbortController().signal;
+  let timeoutMs;
+  let anyCalls = 0;
+  let requestSignal;
+  const abortSignal = {
+    timeout(ms) {
+      timeoutMs = ms;
+      return timeoutSignal;
+    },
+    any() {
+      anyCalls += 1;
+      return new AbortController().signal;
+    },
+  };
+  globalThis.fetch = async (_url, init) => {
+    requestSignal = init?.signal;
+    return { ok: true, async json() { return { status: "ok" }; } };
+  };
+  try {
+    const { engramFetch } = buildEngramFetchForTest({ abortSignal });
+    assert.deepEqual(await engramFetch("/health"), { status: "ok" });
+    assert.equal(timeoutMs, 3000, "the existing timeout policy remains active");
+    assert.equal(anyCalls, 0, "a request without Pi cancellation must not compose signals");
+    assert.equal(requestSignal, timeoutSignal);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Pi cancellation aborts a held native HTTP request before it can return a late result", async () => {
+  const { createServer } = await import("node:http");
+  let markRequestStarted;
+  let markRequestAborted;
+  const requestStarted = new Promise((resolve) => { markRequestStarted = resolve; });
+  const requestAborted = new Promise((resolve) => { markRequestAborted = resolve; });
+  const server = createServer((request) => {
+    markRequestStarted();
+    request.once("aborted", markRequestAborted);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+  const controller = new AbortController();
+  const { engramFetch } = buildEngramFetchForTest({
+    url: `http://127.0.0.1:${port}`,
+    maxAttempts: 1,
+  });
+
+  try {
+    const pending = engramFetch("/held", { signal: controller.signal });
+    await requestStarted;
+    controller.abort();
+    await assert.rejects(pending, (error) => error?.name === "AbortError");
+    await requestAborted;
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test("Pi cancellation stops awaiting execution preflight without cancelling shared initialization", async () => {
+  const awaitWithAbort = buildAwaitWithAbortForTest();
+  const controller = new AbortController();
+  let resolveShared;
+  let sharedSettled = false;
+  const sharedInitialization = new Promise((resolve) => {
+    resolveShared = () => {
+      sharedSettled = true;
+      resolve();
+    };
+  });
+
+  const waiting = awaitWithAbort(sharedInitialization, controller.signal);
+  controller.abort();
+  await assert.rejects(waiting, /cancelled/);
+  assert.equal(sharedSettled, false, "cancelling one tool call must not cancel shared initialization");
+  resolveShared();
+  await sharedInitialization;
+
+  assert.match(source, /await awaitWithAbort\(initOnce\(ctx\.cwd\), signal\);[\s\S]*await refreshProjectDetection\(ctx\.cwd, engramFetch, signal\);/);
+  assert.match(source, /async function detectServerProject[\s\S]*fetch<CurrentProjectResponse>\([^\n]*\{ signal \}\)[\s\S]*await awaitWithAbort\(wait\(200\), signal\)/);
+});
+
+test("already-cancelled preflight observes a later shared initialization rejection", async () => {
+  const awaitWithAbort = buildAwaitWithAbortForTest();
+  const controller = new AbortController();
+  controller.abort();
+  let rejectShared;
+  const sharedInitialization = new Promise((_, reject) => {
+    rejectShared = reject;
+  });
+  const waiting = awaitWithAbort(sharedInitialization, controller.signal);
+
+  await assert.rejects(waiting, /cancelled/);
+  rejectShared(new Error("shared startup failed"));
+  await flush();
+
+  assert.match(source, /if \(signal\.aborted\) \{\s*void promise\.then\(/);
+  assert.match(source, /const data = await awaitWithAbort\(callMemoryTool\(toolName, params, ctx, transport\.fetch\), signal\);/);
 });
 
 test("a timed-out write is not re-sent, so a slow-but-applied mem_save cannot be duplicated", async () => {

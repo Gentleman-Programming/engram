@@ -113,6 +113,7 @@ compacted summary appears without that guidance, save it immediately with
 interface FetchOptions {
   method?: string;
   body?: unknown;
+  signal?: AbortSignal;
 }
 
 interface EngramFetchResult<TResponse> {
@@ -214,7 +215,9 @@ async function engramFetchResult<TResponse = unknown>(path: string, opts: FetchO
         method,
         headers: opts.body ? { "Content-Type": "application/json" } : undefined,
         body: opts.body ? JSON.stringify(redactValue(opts.body)) : undefined,
-        signal: AbortSignal.timeout(ENGRAM_FETCH_TIMEOUT_MS),
+        signal: opts.signal
+          ? AbortSignal.any([AbortSignal.timeout(ENGRAM_FETCH_TIMEOUT_MS), opts.signal])
+          : AbortSignal.timeout(ENGRAM_FETCH_TIMEOUT_MS),
       });
       break;
     } catch (error) {
@@ -223,6 +226,7 @@ async function engramFetchResult<TResponse = unknown>(path: string, opts: FetchO
       // key). Only pre-send connection failures — the macOS wake-settle case this retry
       // exists for — are safe to repeat, and a hung server will not recover by retrying.
       if (isTimeoutError(error)) {
+        if (opts.signal?.aborted) throw error;
         timedOut = true;
         break;
       }
@@ -266,11 +270,11 @@ async function engramFetch<TResponse = unknown>(path: string, opts: FetchOptions
   return (await engramFetchResult<TResponse>(path, opts)).data;
 }
 
-function createMemoryToolTransport(): { fetch: EngramFetcher; timedOutMethod: () => string | undefined } {
+function createMemoryToolTransport(signal?: AbortSignal): { fetch: EngramFetcher; timedOutMethod: () => string | undefined } {
   let timedOutMethod: string | undefined;
   return {
     async fetch<TResponse = unknown>(path: string, opts: FetchOptions = {}): Promise<TResponse | null> {
-      const result = await engramFetchResult<TResponse>(path, opts);
+      const result = await engramFetchResult<TResponse>(path, { ...opts, signal });
       if (result.timedOutMethod) timedOutMethod = result.timedOutMethod;
       return result.data;
     },
@@ -455,6 +459,37 @@ function stripPrivateTags(str: string): string {
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// A tool call may stop awaiting shared startup work, but must not cancel it for other callers.
+function awaitWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  const cancelled = () => new Error("Engram tool execution was cancelled");
+  if (signal.aborted) {
+    void promise.then(
+      () => undefined,
+      () => undefined,
+    );
+    return Promise.reject(cancelled());
+  }
+  return new Promise<T>((resolve, reject) => {
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
+    const onAbort = () => {
+      cleanup();
+      reject(cancelled());
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error: unknown) => {
+        cleanup();
+        reject(error);
+      },
+    );
+  });
 }
 
 function spawnDetached(command: string, args: readonly string[], cwd?: string): Promise<boolean> {
@@ -713,17 +748,17 @@ async function ensureSession(sessionId: string, sessionProject = project, fetch:
   }
 }
 
-async function detectServerProject(cwd: string): Promise<CurrentProjectResponse | undefined> {
+async function detectServerProject(cwd: string, fetch: EngramFetcher = engramFetch, signal?: AbortSignal): Promise<CurrentProjectResponse | undefined> {
   for (let attempt = 0; attempt < 5; attempt += 1) {
     try {
-      const detected = await engramFetch<CurrentProjectResponse>(`/project/current${queryString({ cwd })}`);
+      const detected = await fetch<CurrentProjectResponse>(`/project/current${queryString({ cwd })}`, { signal });
       if (detected) return detected;
     } catch (error) {
       if (error instanceof EngramHttpError && error.status === 404) {
         return detectLocalConfigProject(cwd) || projectCurrentUnsupportedError(cwd);
       }
     }
-    if (attempt < 4) await wait(200);
+    if (attempt < 4) await awaitWithAbort(wait(200), signal);
   }
   return undefined;
 }
@@ -760,9 +795,9 @@ function applyDetectedProject(detected: CurrentProjectResponse | undefined): boo
   return false;
 }
 
-async function refreshProjectDetection(cwd: string): Promise<void> {
+async function refreshProjectDetection(cwd: string, fetch: EngramFetcher = engramFetch, signal?: AbortSignal): Promise<void> {
   if (!projectDetectionPending && !projectResolutionError) return;
-  applyDetectedProject(await detectServerProject(cwd));
+  applyDetectedProject(await detectServerProject(cwd, fetch, signal));
 }
 
 function forgetKnownSession(sessionId: string): void {
@@ -1213,17 +1248,17 @@ function unreachableMessage(timedOutMethod: string | undefined): string {
   return `gentle-engram could not reach the Engram HTTP server at ${ENGRAM_URL}. The Pi-native mem_* tools are registered, but the native memory provider is not currently responding. Run mem_doctor or restart Engram.`;
 }
 
-async function executeMemoryTool(toolName: string, params: Record<string, unknown>, ctx: MemoryToolContext) {
+async function executeMemoryTool(toolName: string, params: Record<string, unknown>, ctx: MemoryToolContext, signal?: AbortSignal) {
   const action = humanToolName(toolName);
-  const transport = createMemoryToolTransport();
+  const transport = createMemoryToolTransport(signal);
 
   try {
     // Initialization runs inside the guarded path: a rejected startup must reach the agent as
     // a normalized tool error, not as a rejection escaping the Pi tool boundary.
-    await initOnce(ctx.cwd);
-    await refreshProjectDetection(ctx.cwd);
+    await awaitWithAbort(initOnce(ctx.cwd), signal);
+    await refreshProjectDetection(ctx.cwd, engramFetch, signal);
     ctx.ui?.setStatus?.("engram", `🧠 ${project} · ${action}…`);
-    const data = await callMemoryTool(toolName, params, ctx, transport.fetch);
+    const data = await awaitWithAbort(callMemoryTool(toolName, params, ctx, transport.fetch), signal);
     const timedOutMethod = transport.timedOutMethod();
     if (timedOutMethod) throw new Error(unreachableMessage(timedOutMethod));
     const result = { content: [{ type: "text" as const, text: textResult(data, toolName) }], details: { data } };
@@ -1255,8 +1290,8 @@ function registerMemoryTools(pi: ExtensionAPI): void {
       promptSnippet: `Engram memory: ${humanToolName(toolName)}`,
       parameters: MEMORY_TOOL_SCHEMAS[toolName],
       renderShell: "self",
-      async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-        return executeMemoryTool(toolName, params as Record<string, unknown>, ctx as MemoryToolContext);
+      async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+        return executeMemoryTool(toolName, params as Record<string, unknown>, ctx as MemoryToolContext, signal);
       },
       renderCall(args) {
         return new Text(renderCallText(toolName, args), 0, 0);
