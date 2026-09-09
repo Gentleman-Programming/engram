@@ -161,6 +161,12 @@ func TestMutationPushCreatedByFallbacks(t *testing.T) {
 	}
 }
 
+func TestMutationPushCreatedByWithoutPrincipal(t *testing.T) {
+	if got := mutationPushCreatedBy(context.Background()); got != "unknown" {
+		t.Errorf("mutationPushCreatedBy() = %q, want %q", got, "unknown")
+	}
+}
+
 func TestLegacyAuthServiceResolvesSyncPrincipalIntoRequestContext(t *testing.T) {
 	svc, err := cloudauth.NewService(&cloudstore.CloudStore{}, strings.Repeat("x", 32))
 	if err != nil {
