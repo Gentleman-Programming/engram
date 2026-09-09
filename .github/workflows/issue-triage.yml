@@ -1,0 +1,36 @@
+name: Issue Triage
+
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  detect-duplicates:
+    name: Detect duplicate issues
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.25.10"
+
+      # The runner itself exits 0 on rate limits and API failures (logged as
+      # warnings), so triage can never block or fail the workflow.
+      - name: Run duplicate detection
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >
+          go run ./cmd/engram triage-duplicates
+          --repo "$GITHUB_REPOSITORY"
+          --issue "${{ github.event.issue.number }}"

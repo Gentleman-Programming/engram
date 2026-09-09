@@ -13,6 +13,7 @@ Open Issue → Get status:approved → Open PR → Add type:* label → Review &
 ### Step 1: Open an Issue
 
 Use the correct template:
+
 - **Bug Report** — for bugs
 - **Feature Request** — for new features or improvements
 
@@ -140,6 +141,27 @@ untracked, and latest committed changes compared with `HEAD~`.
 | `effort:medium` | 1–4 hours |
 | `effort:large` | > 4 hours or spans multiple files |
 
+### Triage Bot (duplicate detection)
+
+When an issue is opened or edited, a bot checks it against existing **open and
+closed** issues using deterministic lexical evidence: title-token similarity,
+shared distinctive terms, and exact matching code/error snippets. There is no
+semantic/LLM ranking.
+
+- When a plausible duplicate is found, the bot adds the
+  `triage:possible-duplicate` label and posts **one** anchored comment listing
+  up to three candidate issues with their evidence. Closed candidates are
+  marked as such.
+- **Reject a suggestion**: remove the `triage:possible-duplicate` label. The
+  bot will not re-suggest the same candidates — it only reports again when a
+  genuinely new candidate appears after an edit.
+- **Confirm a duplicate**: close the issue as a duplicate of the candidate, as
+  part of normal maintainer triage.
+- If edits make the candidates disappear, the bot removes the label and
+  updates its own comment to say so.
+- The bot never closes, edits, or consolidates issues by itself, and it never
+  sets `status:*` labels (those stay maintainer-owned).
+
 ---
 
 ## PR Rules
@@ -241,6 +263,7 @@ Use a **hybrid format**:
 2. Cookbook section (`If / Then / Example`) for repetitive actions
 
 Why hybrid:
+
 - Structured base protects correctness and architecture intent
 - Cookbook improves execution consistency for common flows
 
@@ -280,6 +303,7 @@ Run:
 ```
 
 This links repo `skills/*` into project-local:
+
 - `.claude/skills/*`
 - `.codex/skills/*`
 - `.gemini/skills/*`
