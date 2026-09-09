@@ -107,7 +107,11 @@ func TestCloudCLIEnrollRejectsReservedInboxProject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.New: %v", err)
 	}
-	defer s.Close()
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
 	enrolled, err := s.IsProjectEnrolled("inbox")
 	if err != nil {
 		t.Fatalf("IsProjectEnrolled(inbox): %v", err)

@@ -38,7 +38,11 @@ func TestInboxSyncStateRowIsReseededOnLegacyDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen store: %v", err)
 	}
-	defer reopened.Close()
+	t.Cleanup(func() {
+		if err := reopened.Close(); err != nil {
+			t.Errorf("close reopened store: %v", err)
+		}
+	})
 	var lifecycle string
 	if err := reopened.db.QueryRow(`SELECT lifecycle FROM sync_state WHERE target_key = ?`, SyncInboxTargetKey).Scan(&lifecycle); err != nil {
 		t.Fatalf("load reseeded inbox row: %v", err)
@@ -209,5 +213,48 @@ func TestListSyncStatesReportsLifecycleAndUnackedCounts(t *testing.T) {
 	}
 	if unacked := byKey["cloud:list-project"].UnackedMutations; unacked != 2 {
 		t.Fatalf("cloud:list-project unacked = %d, want 2 project-scoped rows", unacked)
+	}
+}
+
+// TestInboxRowRepairPinsLegacyConflictingState pins the migration repair: a
+// cloud:inbox row that an older version minted with a non-inbox lifecycle and
+// non-zero delivery cursors (for example by enrolling a project named "inbox"
+// before the name was reserved) is repinned and its cursors reset on open.
+func TestInboxRowRepairPinsLegacyConflictingState(t *testing.T) {
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = t.TempDir()
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	if _, err := s.db.Exec(`
+		UPDATE sync_state
+		SET lifecycle = ?, last_enqueued_seq = 7, last_acked_seq = 5, last_pulled_seq = 3
+		WHERE target_key = ?`, SyncLifecyclePending, SyncInboxTargetKey); err != nil {
+		t.Fatalf("corrupt inbox row: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	reopened, err := New(cfg)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := reopened.Close(); err != nil {
+			t.Errorf("close reopened store: %v", err)
+		}
+	})
+	var lifecycle string
+	var enqueued, acked, pulled int
+	if err := reopened.db.QueryRow(`
+		SELECT lifecycle, last_enqueued_seq, last_acked_seq, last_pulled_seq
+		FROM sync_state WHERE target_key = ?`, SyncInboxTargetKey).Scan(&lifecycle, &enqueued, &acked, &pulled); err != nil {
+		t.Fatalf("load repaired inbox row: %v", err)
+	}
+	if lifecycle != SyncLifecycleInbox || enqueued != 0 || acked != 0 || pulled != 0 {
+		t.Fatalf("inbox row after repair = lifecycle %q cursors %d/%d/%d, want %q 0/0/0",
+			lifecycle, enqueued, acked, pulled, SyncLifecycleInbox)
 	}
 }

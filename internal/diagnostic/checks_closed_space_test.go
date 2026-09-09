@@ -159,3 +159,52 @@ func TestSyncTargetClosedSpaceCheckNeverFlagsReservedTargets(t *testing.T) {
 		t.Fatalf("reserved targets must never flag, got %+v", report)
 	}
 }
+
+// TestSyncTargetClosedSpaceReportsEveryForeignTarget pins that each foreign
+// sync_state row produces its own finding, not a single collapsed report.
+func TestSyncTargetClosedSpaceReportsEveryForeignTarget(t *testing.T) {
+	s := newDiagnosticTestStore(t)
+	for _, key := range []string{"cloud:unenrolled", "satellite:foo"} {
+		if _, err := s.DB().Exec(`INSERT INTO sync_state (target_key, lifecycle, updated_at) VALUES (?, 'idle', datetime('now'))`, key); err != nil {
+			t.Fatalf("seed foreign target %s: %v", key, err)
+		}
+	}
+
+	report, err := NewRunner().RunOne(context.Background(), Scope{Store: s}, CheckSyncTargetClosedSpace)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	check := report.Checks[0]
+	if len(check.Findings) != 2 {
+		t.Fatalf("expected two findings, got %+v", check.Findings)
+	}
+	flagged := map[string]bool{}
+	for _, finding := range check.Findings {
+		var evidence struct {
+			TargetKey string `json:"target_key"`
+		}
+		if err := json.Unmarshal(finding.Evidence, &evidence); err != nil {
+			t.Fatalf("decode finding evidence: %v", err)
+		}
+		flagged[evidence.TargetKey] = true
+	}
+	for _, key := range []string{"cloud:unenrolled", "satellite:foo"} {
+		if !flagged[key] {
+			t.Fatalf("expected finding for %q, got %+v", key, flagged)
+		}
+	}
+}
+
+// TestSyncTargetClosedSpaceReturnsStoreReadError pins the error path: a store
+// whose database no longer reads surfaces the error instead of reporting ok.
+func TestSyncTargetClosedSpaceReturnsStoreReadError(t *testing.T) {
+	s := newDiagnosticTestStore(t)
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	report, err := NewRunner().RunOne(context.Background(), Scope{Store: s}, CheckSyncTargetClosedSpace)
+	if err == nil {
+		t.Fatalf("expected a store read error, got report %+v", report)
+	}
+}

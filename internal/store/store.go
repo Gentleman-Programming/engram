@@ -1302,6 +1302,18 @@ func (s *Store) migrate() error {
 	if _, err := s.execHook(s.db, `INSERT OR IGNORE INTO sync_state (target_key, lifecycle, updated_at) VALUES (?, ?, datetime('now'))`, SyncInboxTargetKey, SyncLifecycleInbox); err != nil {
 		return err
 	}
+	// Repair a legacy cloud:inbox row that an older version may have minted by
+	// enrolling a project named "inbox" before the name was reserved: pin the
+	// lifecycle and reset the delivery cursors the reserved target must never
+	// carry. The WHERE guard keeps the repair a no-op on already-clean state.
+	if _, err := s.execHook(s.db, `
+		UPDATE sync_state
+		SET lifecycle = ?, last_enqueued_seq = 0, last_acked_seq = 0, last_pulled_seq = 0
+		WHERE target_key = ?
+		  AND (lifecycle <> ? OR last_enqueued_seq <> 0 OR last_acked_seq <> 0 OR last_pulled_seq <> 0)`,
+		SyncLifecycleInbox, SyncInboxTargetKey, SyncLifecycleInbox); err != nil {
+		return err
+	}
 	if _, err := s.execHook(s.db, `
 		CREATE INDEX IF NOT EXISTS idx_cloud_upgrade_state_stage ON cloud_upgrade_state(stage);
 			CREATE INDEX IF NOT EXISTS idx_sync_mutations_lookup ON sync_mutations(target_key, entity, entity_key, source);
@@ -7414,17 +7426,16 @@ func (s *Store) ListSyncStates() ([]SyncTargetState, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
 	var states []SyncTargetState
 	for rows.Next() {
 		var state SyncTargetState
 		if err := rows.Scan(&state.TargetKey, &state.Lifecycle, &state.UnackedMutations); err != nil {
-			return nil, err
+			return nil, closeRowsWithError(rows, err)
 		}
 		states = append(states, state)
 	}
-	return states, rows.Err()
+	return states, closeRowsWithError(rows, rows.Err())
 }
 
 func (s *Store) getSyncState(targetKey string) (*SyncState, error) {
