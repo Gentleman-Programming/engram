@@ -34,6 +34,8 @@ func TestEmbeddedOpenCodePluginMatchesSourceByteForByte(t *testing.T) {
 	}
 }
 
+// resetSetupSeams saves every package-level seam this file overrides and
+// registers a t.Cleanup that restores each to its pre-test value.
 func resetSetupSeams(t *testing.T) {
 	t.Helper()
 	// Isolate tests from an ambient CLAUDE_CONFIG_DIR.
@@ -2232,6 +2234,9 @@ func TestCanonicalEngramCommand(t *testing.T) {
 	}
 }
 
+// TestClaudeCodeMCPDirPaths verifies claudeCodeMCPDir and ClaudeCodeUserMCPPath
+// derive their paths from the stubbed home directory under the default (no
+// CLAUDE_CONFIG_DIR) resolution.
 func TestClaudeCodeMCPDirPaths(t *testing.T) {
 	resetSetupSeams(t)
 	userHomeDir = func() (string, error) { return "/home/tester", nil }
@@ -2287,6 +2292,110 @@ func TestClaudeCodeConfigRootHonorsClaudeConfigDir(t *testing.T) {
 			}
 		})
 	}
+}
+
+// assertClaudeCodeWritesUnderRoot verifies writeClaudeCodeUserMCP,
+// EnsureClaudeCodeUserMCP, and AddClaudeCodeAllowlist all wrote under root
+// (not under the stubbed HOME) with the expected content shape.
+func assertClaudeCodeWritesUnderRoot(t *testing.T, root, executable string) {
+	t.Helper()
+
+	mcpRaw, err := os.ReadFile(filepath.Join(root, "mcp", "engram.json"))
+	if err != nil {
+		t.Fatalf("read mcp config under root: %v", err)
+	}
+	var mcpCfg map[string]any
+	if err := json.Unmarshal(mcpRaw, &mcpCfg); err != nil {
+		t.Fatalf("parse mcp config: %v", err)
+	}
+	if mcpCfg["command"] != executable {
+		t.Fatalf("expected mcp command %q, got %#v", executable, mcpCfg["command"])
+	}
+	args, ok := mcpCfg["args"].([]any)
+	if !ok || len(args) != 2 || args[0] != "mcp" || args[1] != "--tools=agent" {
+		t.Fatalf("expected args [mcp --tools=agent], got %#v", mcpCfg["args"])
+	}
+
+	settingsRaw, err := os.ReadFile(filepath.Join(root, "settings.json"))
+	if err != nil {
+		t.Fatalf("read settings under root: %v", err)
+	}
+	var settingsCfg map[string]any
+	if err := json.Unmarshal(settingsRaw, &settingsCfg); err != nil {
+		t.Fatalf("parse settings: %v", err)
+	}
+	perms, ok := settingsCfg["permissions"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected permissions object in settings, got %#v", settingsCfg["permissions"])
+	}
+	allow, ok := perms["allow"].([]any)
+	if !ok || len(allow) != len(claudeCodeMCPTools) {
+		t.Fatalf("expected %d allowlisted tools, got %#v", len(claudeCodeMCPTools), perms["allow"])
+	}
+	for i, tool := range claudeCodeMCPTools {
+		if allow[i] != tool {
+			t.Fatalf("expected tool %q at index %d, got %q", tool, i, allow[i])
+		}
+	}
+}
+
+// TestClaudeCodeWritesHonorClaudeConfigDir executes writeClaudeCodeUserMCP,
+// EnsureClaudeCodeUserMCP, and AddClaudeCodeAllowlist under an absolute and a
+// relative CLAUDE_CONFIG_DIR override, and verifies nothing is written under
+// the stubbed HOME's default ~/.claude (issue #1081).
+func TestClaudeCodeWritesHonorClaudeConfigDir(t *testing.T) {
+	t.Run("absolute", func(t *testing.T) {
+		resetSetupSeams(t)
+		home := useTestHome(t)
+		root := filepath.Join(t.TempDir(), "custom-config")
+		t.Setenv("CLAUDE_CONFIG_DIR", root)
+		executable := filepath.Join(t.TempDir(), "engram")
+		osExecutable = func() (string, error) { return executable, nil }
+
+		if err := writeClaudeCodeUserMCP(); err != nil {
+			t.Fatalf("writeClaudeCodeUserMCP failed: %v", err)
+		}
+		if err := EnsureClaudeCodeUserMCP(); err != nil {
+			t.Fatalf("EnsureClaudeCodeUserMCP failed: %v", err)
+		}
+		if err := AddClaudeCodeAllowlist(); err != nil {
+			t.Fatalf("AddClaudeCodeAllowlist failed: %v", err)
+		}
+
+		assertClaudeCodeWritesUnderRoot(t, root, executable)
+
+		if _, err := os.Stat(filepath.Join(home, ".claude")); !os.IsNotExist(err) {
+			t.Fatalf("expected %s/.claude to not exist, stat err=%v", home, err)
+		}
+	})
+
+	t.Run("relative", func(t *testing.T) {
+		resetSetupSeams(t)
+		home := useTestHome(t)
+		cwd := t.TempDir()
+		t.Chdir(cwd)
+		rel := filepath.Join("relative", "claude-config")
+		t.Setenv("CLAUDE_CONFIG_DIR", rel)
+		executable := filepath.Join(t.TempDir(), "engram")
+		osExecutable = func() (string, error) { return executable, nil }
+
+		if err := writeClaudeCodeUserMCP(); err != nil {
+			t.Fatalf("writeClaudeCodeUserMCP failed: %v", err)
+		}
+		if err := EnsureClaudeCodeUserMCP(); err != nil {
+			t.Fatalf("EnsureClaudeCodeUserMCP failed: %v", err)
+		}
+		if err := AddClaudeCodeAllowlist(); err != nil {
+			t.Fatalf("AddClaudeCodeAllowlist failed: %v", err)
+		}
+
+		root := filepath.Join(cwd, rel)
+		assertClaudeCodeWritesUnderRoot(t, root, executable)
+
+		if _, err := os.Stat(filepath.Join(home, ".claude")); !os.IsNotExist(err) {
+			t.Fatalf("expected %s/.claude to not exist, stat err=%v", home, err)
+		}
+	})
 }
 
 // TestGeminiInjectUsesAbsolutePath verifies that injectGeminiMCP writes the
@@ -3773,6 +3882,9 @@ func TestClaudeCodeUserPromptSubmitHookTimeout(t *testing.T) {
 	}
 }
 
+// TestAddClaudeCodeAllowlist verifies AddClaudeCodeAllowlist creates,
+// merges into, and idempotently skips rewriting settings.json's
+// permissions.allow list.
 func TestAddClaudeCodeAllowlist(t *testing.T) {
 	t.Run("creates file from scratch", func(t *testing.T) {
 		resetSetupSeams(t)

@@ -660,6 +660,8 @@ func (m Model) viewSessionDetail() string {
 
 // ─── Setup ───────────────────────────────────────────────────────────────────
 
+// viewSetup renders the agent-plugin install screen, including progress,
+// the permissions allowlist prompt, and post-install next steps.
 func (m Model) viewSetup() string {
 	var b strings.Builder
 

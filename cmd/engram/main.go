@@ -3085,6 +3085,8 @@ func meetsProtocolVersionFloor(v string) bool {
 	return classifyProtocolVersion(v) == protocolVersionSupported
 }
 
+// printPostInstall prints the agent-specific next steps after a successful
+// setup run, including MCP registration status and allowlist prompts.
 func printPostInstall(result *setup.Result) {
 	switch result.Agent {
 	case "opencode":

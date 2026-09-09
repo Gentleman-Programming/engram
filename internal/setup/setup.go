@@ -1013,6 +1013,8 @@ func validSemverIdentifiers(value string, rejectLeadingZeroNumbers bool) bool {
 	return true
 }
 
+// installClaudeCode installs the Claude Code plugin via the claude CLI and
+// registers engram's user-level MCP config, returning the install result.
 func installClaudeCode() (*Result, error) {
 	// Check that claude CLI is available
 	claudeBin, err := lookPathFn("claude")
