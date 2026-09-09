@@ -209,6 +209,8 @@ func TestHandleMergeProjectsHidesInfrastructureErrors(t *testing.T) {
 	t.Setenv("ENGRAM_HTTP_TOKEN", projectMergeTestToken)
 	st := newServerTestStore(t)
 	srv := New(st, 0)
+	var writes int32
+	srv.SetOnWrite(func() { atomic.AddInt32(&writes, 1) })
 	if err := st.Close(); err != nil {
 		t.Fatalf("close store: %v", err)
 	}
@@ -219,5 +221,8 @@ func TestHandleMergeProjectsHidesInfrastructureErrors(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), "database is closed") {
 		t.Fatalf("response leaked infrastructure error: %s", rec.Body.String())
+	}
+	if atomic.LoadInt32(&writes) != 0 {
+		t.Fatalf("failed merge notified autosync")
 	}
 }
