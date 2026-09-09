@@ -427,6 +427,7 @@ func (s *Server) routes() {
 
 	// Project detection / ownership rescue
 	s.mux.HandleFunc("GET /project/current", s.handleCurrentProject)
+	s.mux.HandleFunc("POST /projects/merge", requireConfiguredAuth(s.handleMergeProjects))
 	s.mux.HandleFunc("POST /projects/rescue-ownership", requireConfiguredAuth(s.handleRescueProjectOwnership))
 	// Deprecated compatibility alias for older clients.
 	s.mux.HandleFunc("POST /projects/migrate", requireConfiguredAuth(s.handleRescueProjectOwnership))
@@ -1350,6 +1351,45 @@ func (s *Server) handleSyncStatus(w http.ResponseWriter, r *http.Request) {
 			"reason_message": status.UpgradeReasonMessage,
 		},
 	})
+}
+
+// ─── Project Administration ───────────────────────────────────────────────────
+
+func (s *Server) handleMergeProjects(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 8<<10) // 8 KB max
+	var body struct {
+		From      []string `json:"from"`
+		To        string   `json:"to"`
+		Confirmed bool     `json:"confirmed"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if !body.Confirmed {
+		jsonError(w, http.StatusBadRequest, "confirmed must be true")
+		return
+	}
+	if len(body.From) == 0 {
+		jsonError(w, http.StatusBadRequest, "from must contain at least one source project")
+		return
+	}
+
+	result, err := s.store.MergeProjects(body.From, body.To)
+	if err != nil {
+		if errors.Is(err, store.ErrProjectMergeInvalidRequest) {
+			jsonError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		log.Printf("[engram] project merge failed: %v", err)
+		jsonError(w, http.StatusInternalServerError, "project merge is temporarily unavailable")
+		return
+	}
+
+	// MergeProjects can migrate sync enrollment or pending mutations even when
+	// its record counters are zero, so every successful call wakes autosync.
+	s.notifyWrite()
+	jsonResponse(w, http.StatusOK, result)
 }
 
 // ─── Project Ownership Rescue ─────────────────────────────────────────────────

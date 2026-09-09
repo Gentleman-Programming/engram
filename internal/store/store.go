@@ -64,6 +64,7 @@ var (
 	ErrInvalidSessionOwnershipMode = errors.New("invalid session ownership mode")
 	ErrSessionOwnershipMismatch    = errors.New("session ownership does not match write project")
 	ErrProjectRescueInvalidRequest = errors.New("project rescue request is invalid")
+	ErrProjectMergeInvalidRequest  = errors.New("project merge request is invalid")
 	// ErrProjectOwnershipAmbiguous is returned when an unowned session cannot
 	// adopt a write's project because it already parents records owned by a
 	// different one. Guessing there would split a record from its session.
@@ -6882,16 +6883,16 @@ type MergeResult struct {
 func (s *Store) MergeProjects(sources []string, canonical string) (*MergeResult, error) {
 	canonical, _ = NormalizeProject(canonical)
 	if canonical == "" {
-		return nil, fmt.Errorf("canonical project name must not be empty")
+		return nil, fmt.Errorf("%w: canonical project name must not be empty", ErrProjectMergeInvalidRequest)
 	}
 	validatedSources := make([]string, len(sources))
 	for i, source := range sources {
 		normalizedSource, _ := NormalizeProject(source)
 		if normalizedSource == "" {
-			return nil, fmt.Errorf("source project name must not be empty")
+			return nil, fmt.Errorf("%w: source project name must not be empty", ErrProjectMergeInvalidRequest)
 		}
 		if normalizedSource != canonical {
-			return nil, fmt.Errorf("source project %q must normalize to canonical project %q", source, canonical)
+			return nil, fmt.Errorf("%w: source project %q must normalize to canonical project %q", ErrProjectMergeInvalidRequest, source, canonical)
 		}
 		validatedSources[i] = normalizedSource
 	}
