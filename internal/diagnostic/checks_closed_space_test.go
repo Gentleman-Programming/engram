@@ -15,13 +15,13 @@ import (
 // guidance; the reserved inbox row and the local chunk target never flag.
 func TestSyncTargetClosedSpaceCheck(t *testing.T) {
 	tests := []struct {
-		name               string
-		seed               func(t *testing.T, s *store.Store)
-		wantStatus         string
-		wantReason         string
-		wantFinding        bool
-		wantNextStepHas    []string
-		wantNextStepLacks  []string
+		name              string
+		seed              func(t *testing.T, s *store.Store)
+		wantStatus        string
+		wantReason        string
+		wantFinding       bool
+		wantNextStepHas   []string
+		wantNextStepLacks []string
 	}{
 		{
 			name: "closed set is ok",
@@ -89,11 +89,11 @@ func TestSyncTargetClosedSpaceCheck(t *testing.T) {
 					t.Fatalf("seed dormant foreign target: %v", err)
 				}
 			},
-			wantStatus:         StatusError,
-			wantReason:         ReasonForeignSyncTarget,
-			wantFinding:        true,
-			wantNextStepHas:    []string{"inert drift", "no action is required"},
-			wantNextStepLacks:  []string{"Review the", "repair workflow"},
+			wantStatus:        StatusError,
+			wantReason:        ReasonForeignSyncTarget,
+			wantFinding:       true,
+			wantNextStepHas:   []string{"inert drift", "no action is required"},
+			wantNextStepLacks: []string{"Review the", "repair workflow"},
 		},
 	}
 
