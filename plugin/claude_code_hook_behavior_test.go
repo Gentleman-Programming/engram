@@ -862,6 +862,31 @@ func TestSessionStartHonorsClaudeConfigDirForMCPMigrationGuard(t *testing.T) {
 		}
 	})
 
+	t.Run("symlink under CLAUDE_CONFIG_DIR triggers migration once", func(t *testing.T) {
+		configDir := t.TempDir()
+		mcpDir := filepath.Join(configDir, "mcp")
+		if err := os.MkdirAll(mcpDir, 0o755); err != nil {
+			t.Fatalf("create mcp dir: %v", err)
+		}
+		target := filepath.Join(t.TempDir(), "existing-engram.json")
+		if err := os.WriteFile(target, []byte("{}"), 0o644); err != nil {
+			t.Fatalf("write symlink target: %v", err)
+		}
+		if err := os.Symlink(target, filepath.Join(mcpDir, "engram.json")); err != nil {
+			t.Skipf("symlink creation is unavailable: %v", err)
+		}
+
+		count := 0
+		for _, args := range runWithEngramStub(t, configDir) {
+			if args == "setup claude-code --mcp-only" {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("migration invocations for symlink MCP config = %d, want 1", count)
+		}
+	})
+
 	t.Run("migration creates the resolved config and runs once", func(t *testing.T) {
 		configDir := t.TempDir()
 		mcpConfig := filepath.Join(configDir, "mcp", "engram.json")
