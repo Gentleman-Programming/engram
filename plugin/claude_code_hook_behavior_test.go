@@ -193,6 +193,25 @@ func normalizedClaudeHookMaxTime(t *testing.T, configured, callerDefault string)
 	return string(output)
 }
 
+func resolveClaudeConfigRoot(t *testing.T, configured string) string {
+	t.Helper()
+	helper := filepath.Join(repoRoot(t), "plugin", "claude-code", "scripts", "_helpers.sh")
+	cmd := exec.Command("bash", "-c", `source "$1"; claude_config_root`, "bash", helper)
+	cmd.Dir = t.TempDir()
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if !strings.EqualFold(key, "CLAUDE_CONFIG_DIR") {
+			cmd.Env = append(cmd.Env, entry)
+		}
+	}
+	cmd.Env = append(cmd.Env, "CLAUDE_CONFIG_DIR="+configured)
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("resolve Claude config root: %v", err)
+	}
+	return string(output)
+}
+
 func capturedUserPromptMaxTimes(t *testing.T, configured string) []string {
 	t.Helper()
 	requireHookBinaries(t)
@@ -695,6 +714,23 @@ func TestClaudeHookMaxTimeNormalization(t *testing.T) {
 	}
 }
 
+func TestClaudeConfigRootRecognizesWindowsAbsolutePaths(t *testing.T) {
+	requireHookBinaries(t)
+	for _, tt := range []struct {
+		name, configured, want string
+	}{
+		{name: "drive with forward slashes", configured: " \tC:/Users/test/.claude\t ", want: "C:/Users/test/.claude"},
+		{name: "drive with backslashes", configured: `C:\Users\test\.claude`, want: `C:\Users\test\.claude`},
+		{name: "UNC", configured: `\\server\share\.claude`, want: `\\server\share\.claude`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolveClaudeConfigRoot(t, tt.configured); got != tt.want {
+				t.Fatalf("claude_config_root() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestUserPromptMaxTimeFallbackReachesDirectCurlCalls(t *testing.T) {
 	if got, want := capturedUserPromptMaxTimes(t, "0"), []string{"0.2", "2", "0.2", "0.2", "0.2", "0.2"}; !equalStrings(got, want) {
 		t.Fatalf("curl --max-time values = %q, want %q", got, want)
@@ -721,6 +757,17 @@ func writeRecordingEngramStub(t *testing.T) string {
 	content := "#!/bin/bash\nprintf '%s\\n' \"$*\" >> \"$ENGRAM_TEST_ENGRAM_LOG\"\nexit 0\n"
 	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
 		t.Fatalf("write recording engram stub: %v", err)
+	}
+	return dir
+}
+
+func writeMigratingEngramStub(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "engram")
+	content := "#!/bin/bash\nprintf '%s\\n' \"$*\" >> \"$ENGRAM_TEST_ENGRAM_LOG\"\nif [ \"$*\" = \"setup claude-code --mcp-only\" ]; then\n  mkdir -p \"$(dirname \"$ENGRAM_TEST_MCP_CONFIG\")\"\n  printf '{}' > \"$ENGRAM_TEST_MCP_CONFIG\"\nfi\nexit 0\n"
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("write migrating engram stub: %v", err)
 	}
 	return dir
 }
@@ -807,6 +854,31 @@ func TestSessionStartHonorsClaudeConfigDirForMCPMigrationGuard(t *testing.T) {
 		}
 		if !found {
 			t.Fatalf("migration was not invoked for a missing MCP config under CLAUDE_CONFIG_DIR; invocations: %v", invocations)
+		}
+	})
+
+	t.Run("migration creates the resolved config and runs once", func(t *testing.T) {
+		configDir := t.TempDir()
+		mcpConfig := filepath.Join(configDir, "mcp", "engram.json")
+		srv := healthyServer(t)
+		stubDir := writeMigratingEngramStub(t)
+		logPath := filepath.Join(t.TempDir(), "engram-invocations.log")
+		env := map[string]string{
+			"ENGRAM_PORT":            serverPort(t, srv),
+			"CLAUDE_CONFIG_DIR":      configDir,
+			"PATH":                   stubDir + ":" + os.Getenv("PATH"),
+			"ENGRAM_TEST_ENGRAM_LOG": logPath,
+			"ENGRAM_TEST_MCP_CONFIG": mcpConfig,
+		}
+		stdin := fmt.Sprintf(`{"session_id":%q,"cwd":%q}`, newSessionID(t), t.TempDir())
+		runHook(t, "session-start.sh", stdin, env)
+		info, err := os.Stat(mcpConfig)
+		if err != nil || !info.Mode().IsRegular() {
+			t.Fatalf("first migration must create regular MCP config at %q: info=%v, err=%v", mcpConfig, info, err)
+		}
+		runHook(t, "session-start.sh", stdin, env)
+		if got := strings.Count(strings.Join(readEngramInvocations(t, logPath), "\n"), "setup claude-code --mcp-only"); got != 1 {
+			t.Fatalf("migration invocations across two SessionStart runs = %d, want 1", got)
 		}
 	})
 

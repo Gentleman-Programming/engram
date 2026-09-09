@@ -18,7 +18,7 @@ claude_config_root() {
     return
   fi
   case "$dir" in
-    /*) printf '%s' "$dir" ;;
+    /*|[A-Za-z]:/*|[A-Za-z]:\\*|\\\\*) printf '%s' "$dir" ;;
     *) printf '%s' "$PWD/$dir" ;;
   esac
 }
