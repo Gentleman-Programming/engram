@@ -2579,6 +2579,52 @@ func TestObsidianExportCallsInjectedExporter(t *testing.T) {
 	}
 }
 
+func TestObsidianExportReportErrorsExitNonzero(t *testing.T) {
+	t.Run("completed export with a write error reports counts and exits nonzero", func(t *testing.T) {
+		cfg := testConfig(t)
+		vault := t.TempDir()
+		id := mustSeedObservation(t, cfg, "obsidian-write-error", "obsidian-errors", "bugfix", "Blocked export", "content", "project")
+		blockedPath := filepath.Join(vault, "engram", "obsidian-errors", "bugfix", fmt.Sprintf("blocked-export-%d.md", id))
+		if err := os.MkdirAll(blockedPath, 0755); err != nil {
+			t.Fatalf("setup blocked output directory: %v", err)
+		}
+
+		withArgs(t, "engram", "obsidian-export", "--vault", vault, "--project", "obsidian-errors")
+		stdout, stderr, exitCode := captureExitPanic(t, func() { cmdObsidianExport(cfg) })
+
+		if exitCode != 1 {
+			t.Fatalf("exit code = %d, want 1", exitCode)
+		}
+		for _, line := range []string{"Created: 0", "Updated: 0", "Deleted: 0", "Skipped: 0", "Hubs:    0"} {
+			if !strings.Contains(stdout, line) {
+				t.Fatalf("stdout missing %q: %q", line, stdout)
+			}
+		}
+		if !strings.Contains(stderr, "Errors: 1") || !strings.Contains(stderr, "write") {
+			t.Fatalf("stderr = %q, want one write error", stderr)
+		}
+	})
+
+	t.Run("successful export keeps zero exit status and empty stderr", func(t *testing.T) {
+		cfg := testConfig(t)
+		vault := t.TempDir()
+		mustSeedObservation(t, cfg, "obsidian-success", "obsidian-success", "bugfix", "Successful export", "content", "project")
+
+		withArgs(t, "engram", "obsidian-export", "--vault", vault, "--project", "obsidian-success")
+		stdout, stderr, exitCode := captureExitPanic(t, func() { cmdObsidianExport(cfg) })
+
+		if exitCode != 0 {
+			t.Fatalf("exit code = %d, want 0", exitCode)
+		}
+		if stderr != "" {
+			t.Fatalf("stderr = %q, want empty", stderr)
+		}
+		if !strings.Contains(stdout, "Created: 1") || !strings.Contains(stdout, "Hubs:    1") {
+			t.Fatalf("stdout = %q, want successful report counts", stdout)
+		}
+	})
+}
+
 // TestObsidianExportMinimalFlags verifies that --vault uses the current project.
 func TestObsidianExportMinimalFlags(t *testing.T) {
 	cfg := testConfig(t)

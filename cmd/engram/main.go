@@ -2204,6 +2204,7 @@ func cmdObsidianExport(cfg store.Config) {
 		for _, e := range result.Errors {
 			fmt.Fprintf(os.Stderr, "    - %v\n", e)
 		}
+		exitFunc(1)
 	}
 }
 
