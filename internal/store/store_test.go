@@ -13249,50 +13249,91 @@ func ageObservation(t *testing.T, s *Store, obsID int64, createdAt string) {
 	}
 }
 
-func TestActiveRuntimeSessionsExcludesStaleSessionWithoutObservations(t *testing.T) {
-	s := newTestStore(t)
-
-	// A session left unclosed months ago, never used. No process owns it and it
-	// recorded nothing, so it must not keep the write path ambiguous forever.
-	if err := s.CreateSession("uuid-stale", "engram", "/work/engram"); err != nil {
-		t.Fatalf("create stale session: %v", err)
+func useActiveRuntimeSessionReferenceTime(t *testing.T, s *Store, referenceTime string) {
+	t.Helper()
+	original := s.hooks.query
+	s.hooks.query = func(db queryer, query string, args ...any) (*sql.Rows, error) {
+		query = strings.Replace(
+			query,
+			"datetime('now', '"+activeRuntimeSessionWindow+"')",
+			"datetime('"+referenceTime+"', '"+activeRuntimeSessionWindow+"')",
+			1,
+		)
+		return original(db, query, args...)
 	}
-	ageSession(t, s, "uuid-stale", "2025-01-01 00:00:00")
+	t.Cleanup(func() { s.hooks.query = original })
+}
 
-	ids, err := s.ActiveRuntimeSessions("engram", "/work/engram")
-	if err != nil {
-		t.Fatalf("ActiveRuntimeSessions: %v", err)
-	}
-	if len(ids) != 0 {
-		t.Fatalf("expected stale session to be excluded, got %#v", ids)
+func TestActiveRuntimeSessionsAppliesSevenDayWindowToUnobservedSessions(t *testing.T) {
+	const referenceTime = "2026-01-08 00:00:00"
+
+	for _, tt := range []struct {
+		name      string
+		startedAt string
+		want      []string
+	}{
+		{name: "includes six-day-old session", startedAt: "2026-01-02 00:00:00", want: []string{"uuid-boundary"}},
+		{name: "includes exactly seven-day-old session", startedAt: "2026-01-01 00:00:00", want: []string{"uuid-boundary"}},
+		{name: "excludes eight-day-old session", startedAt: "2025-12-31 00:00:00"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if err := s.CreateSession("uuid-boundary", "engram", "/work/engram"); err != nil {
+				t.Fatalf("create session: %v", err)
+			}
+			ageSession(t, s, "uuid-boundary", tt.startedAt)
+			useActiveRuntimeSessionReferenceTime(t, s, referenceTime)
+
+			ids, err := s.ActiveRuntimeSessions("engram", "/work/engram")
+			if err != nil {
+				t.Fatalf("ActiveRuntimeSessions: %v", err)
+			}
+			if !reflect.DeepEqual(ids, tt.want) {
+				t.Fatalf("active session IDs = %#v, want %#v", ids, tt.want)
+			}
+		})
 	}
 }
 
-func TestActiveRuntimeSessionsKeepsOldSessionWithRecentObservation(t *testing.T) {
+func TestActiveRuntimeSessionsUsesLatestObservationActivity(t *testing.T) {
 	s := newTestStore(t)
 
-	// started_at alone is not activity: a long-running session that wrote
-	// recently is still the session the agent is using.
+	// The oldest observation must not make a session stale when later work is
+	// recorded. Only the latest observation is effective activity.
 	if err := s.CreateSession("uuid-long-running", "engram", "/work/engram"); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
 	ageSession(t, s, "uuid-long-running", "2025-01-01 00:00:00")
-	if _, err := s.AddObservation(AddObservationParams{
+	staleObservationID, err := s.AddObservation(AddObservationParams{
 		SessionID: "uuid-long-running",
 		Type:      "note",
-		Title:     "recent work",
+		Title:     "stale work",
 		Content:   "content",
 		Project:   "engram",
-	}); err != nil {
-		t.Fatalf("add observation: %v", err)
+	})
+	if err != nil {
+		t.Fatalf("add stale observation: %v", err)
 	}
+	ageObservation(t, s, staleObservationID, "2025-12-01 00:00:00")
+	currentObservationID, err := s.AddObservation(AddObservationParams{
+		SessionID: "uuid-long-running",
+		Type:      "note",
+		Title:     "current work",
+		Content:   "content",
+		Project:   "engram",
+	})
+	if err != nil {
+		t.Fatalf("add current observation: %v", err)
+	}
+	ageObservation(t, s, currentObservationID, "2026-01-07 00:00:00")
+	useActiveRuntimeSessionReferenceTime(t, s, "2026-01-08 00:00:00")
 
 	ids, err := s.ActiveRuntimeSessions("engram", "/work/engram")
 	if err != nil {
 		t.Fatalf("ActiveRuntimeSessions: %v", err)
 	}
 	if len(ids) != 1 || ids[0] != "uuid-long-running" {
-		t.Fatalf("expected long-running session to stay active, got %#v", ids)
+		t.Fatalf("expected latest observation to keep session active, got %#v", ids)
 	}
 }
 
