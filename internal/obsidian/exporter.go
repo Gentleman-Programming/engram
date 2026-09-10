@@ -339,7 +339,9 @@ func writeSessionHub(sessionsDir, name, content string) error {
 	if err != nil {
 		return err
 	}
-	defer root.Close()
+	defer func() {
+		_ = root.Close()
+	}()
 
 	if err := root.MkdirAll(filepath.Dir(name), 0755); err != nil {
 		return fmt.Errorf("mkdir session hub parent: %w", err)
