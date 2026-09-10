@@ -1128,6 +1128,215 @@ func TestHandleSearchRejectsInvalidMatchMode(t *testing.T) {
 	}
 }
 
+func TestObservationPinRoutesRemainOpenWithConfiguredToken(t *testing.T) {
+	t.Setenv("ENGRAM_HTTP_TOKEN", "secret-token")
+	st := newServerTestStore(t)
+	if err := st.CreateSession("s-pin-http", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := st.AddObservation(store.AddObservationParams{
+		SessionID: "s-pin-http",
+		Type:      "decision",
+		Title:     "Keep HTTP pinning local",
+		Content:   "Pin state must not enter sync or export payloads.",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	var updatedAtBefore string
+	if err := st.DB().QueryRow(`SELECT updated_at FROM observations WHERE id = ?`, id).Scan(&updatedAtBefore); err != nil {
+		t.Fatalf("read updated_at before pin: %v", err)
+	}
+	var mutationsBefore int
+	if err := st.DB().QueryRow(`SELECT COUNT(*) FROM sync_mutations`).Scan(&mutationsBefore); err != nil {
+		t.Fatalf("count sync mutations before pin: %v", err)
+	}
+	exportedBefore, err := st.ExportProject("engram")
+	if err != nil {
+		t.Fatalf("export before pin: %v", err)
+	}
+	exportedBefore.ExportedAt = ""
+	exportedBeforeJSON, err := json.Marshal(exportedBefore)
+	if err != nil {
+		t.Fatalf("marshal export before pin: %v", err)
+	}
+
+	var writes atomic.Int32
+	srv := New(st, 0)
+	srv.SetOnWrite(func() { writes.Add(1) })
+	h := srv.Handler()
+	setPin := func(method string, wantPinned bool) {
+		t.Helper()
+		req := httptest.NewRequest(method, fmt.Sprintf("/observations/%d/pin", id), nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s pin state: got %d body=%s", method, rec.Code, rec.Body.String())
+		}
+		var response struct {
+			ID     int64 `json:"id"`
+			Pinned bool  `json:"pinned"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+			t.Fatalf("decode %s pin response: %v", method, err)
+		}
+		if response.ID != id || response.Pinned != wantPinned {
+			t.Fatalf("%s pin response = %#v, want id=%d pinned=%t", method, response, id, wantPinned)
+		}
+		obs, err := st.GetObservation(id)
+		if err != nil {
+			t.Fatalf("reload observation after %s: %v", method, err)
+		}
+		if obs.Pinned != wantPinned {
+			t.Fatalf("stored pinned after %s = %t, want %t", method, obs.Pinned, wantPinned)
+		}
+	}
+
+	setPin(http.MethodPut, true)
+	setPin(http.MethodPut, true)
+
+	var updatedAtAfterPin string
+	if err := st.DB().QueryRow(`SELECT updated_at FROM observations WHERE id = ?`, id).Scan(&updatedAtAfterPin); err != nil {
+		t.Fatalf("read updated_at after pin: %v", err)
+	}
+	if updatedAtAfterPin != updatedAtBefore {
+		t.Fatalf("pin changed updated_at: before=%q after=%q", updatedAtBefore, updatedAtAfterPin)
+	}
+	exportedAfterPin, err := st.ExportProject("engram")
+	if err != nil {
+		t.Fatalf("export after pin: %v", err)
+	}
+	exportedAfterPin.ExportedAt = ""
+	exportedAfterPinJSON, err := json.Marshal(exportedAfterPin)
+	if err != nil {
+		t.Fatalf("marshal export after pin: %v", err)
+	}
+	if !bytes.Equal(exportedAfterPinJSON, exportedBeforeJSON) {
+		t.Fatalf("pin changed export payload:\nbefore: %s\nafter:  %s", exportedBeforeJSON, exportedAfterPinJSON)
+	}
+
+	setPin(http.MethodDelete, false)
+	setPin(http.MethodDelete, false)
+	var updatedAtAfterUnpin string
+	if err := st.DB().QueryRow(`SELECT updated_at FROM observations WHERE id = ?`, id).Scan(&updatedAtAfterUnpin); err != nil {
+		t.Fatalf("read updated_at after unpin: %v", err)
+	}
+	if updatedAtAfterUnpin != updatedAtBefore {
+		t.Fatalf("unpin changed updated_at: before=%q after=%q", updatedAtBefore, updatedAtAfterUnpin)
+	}
+	if writes.Load() != 0 {
+		t.Fatalf("local-only pin changes triggered %d sync notifications", writes.Load())
+	}
+	var mutationsAfter int
+	if err := st.DB().QueryRow(`SELECT COUNT(*) FROM sync_mutations`).Scan(&mutationsAfter); err != nil {
+		t.Fatalf("count sync mutations after unpin: %v", err)
+	}
+	if mutationsAfter != mutationsBefore {
+		t.Fatalf("pin endpoints changed sync mutations: before=%d after=%d", mutationsBefore, mutationsAfter)
+	}
+
+	invalidID := httptest.NewRequest(http.MethodPut, "/observations/not-a-number/pin", nil)
+	invalidIDRec := httptest.NewRecorder()
+	h.ServeHTTP(invalidIDRec, invalidID)
+	if invalidIDRec.Code != http.StatusBadRequest || strings.TrimSpace(invalidIDRec.Body.String()) != `{"error":"invalid observation id"}` {
+		t.Fatalf("invalid observation id: got %d body=%s", invalidIDRec.Code, invalidIDRec.Body.String())
+	}
+
+	for _, tt := range []struct {
+		name       string
+		method     string
+		path       string
+		wantStatus int
+		wantBody   string
+	}{
+		{name: "zero", method: http.MethodPut, path: "/observations/0/pin", wantStatus: http.StatusBadRequest, wantBody: `{"error":"invalid observation id"}`},
+		{name: "negative", method: http.MethodDelete, path: "/observations/-1/pin", wantStatus: http.StatusBadRequest, wantBody: `{"error":"invalid observation id"}`},
+		{name: "missing", method: http.MethodDelete, path: "/observations/999999/pin", wantStatus: http.StatusNotFound, wantBody: `{"error":"observation not found"}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != tt.wantStatus || strings.TrimSpace(rec.Body.String()) != tt.wantBody {
+				t.Fatalf("%s observation: got %d body=%s", tt.name, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestSuggestTopicKeyRouteRemainsOpenWithConfiguredToken(t *testing.T) {
+	t.Setenv("ENGRAM_HTTP_TOKEN", "secret-token")
+	srv := New(newServerTestStore(t), 0)
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodPost, "/topic-keys/suggest", strings.NewReader(`{"type":"bugfix","title":"Fix nil auth token","content":"Avoid a panic"}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("suggest topic key: got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		TopicKey string `json:"topic_key"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode suggestion response: %v", err)
+	}
+	want := store.SuggestTopicKey("bugfix", "Fix nil auth token", "Avoid a panic")
+	if response.TopicKey != want {
+		t.Fatalf("topic_key = %q, want %q", response.TopicKey, want)
+	}
+	contentOnly := httptest.NewRequest(http.MethodPost, "/topic-keys/suggest", strings.NewReader(`{"content":"Fix nil panic in auth middleware on empty token"}`))
+	contentOnlyRec := httptest.NewRecorder()
+	h.ServeHTTP(contentOnlyRec, contentOnly)
+	if contentOnlyRec.Code != http.StatusOK {
+		t.Fatalf("content-only suggest: got %d body=%s", contentOnlyRec.Code, contentOnlyRec.Body.String())
+	}
+	if err := json.Unmarshal(contentOnlyRec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode content-only suggestion response: %v", err)
+	}
+	if want := store.SuggestTopicKey("", "", "Fix nil panic in auth middleware on empty token"); response.TopicKey != want {
+		t.Fatalf("content-only topic_key = %q, want %q", response.TopicKey, want)
+	}
+
+	for _, tt := range []struct {
+		name string
+		body string
+	}{
+		{name: "invalid json", body: "{"},
+		{name: "missing input", body: `{}`},
+		{name: "blank input", body: `{"title":" ","content":"\n\t"}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/topic-keys/suggest", strings.NewReader(tt.body))
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("got %d body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+	for _, tt := range []struct {
+		name     string
+		body     string
+		wantBody string
+	}{
+		{name: "trailing JSON", body: `{"title":"valid"} {}`, wantBody: `{"error":"invalid json: trailing data"}`},
+		{name: "oversized body", body: `{"content":"` + strings.Repeat("x", 50<<20+1) + `"}`, wantBody: `{"error":"request body too large"}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/topic-keys/suggest", strings.NewReader(tt.body))
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest || strings.TrimSpace(rec.Body.String()) != tt.wantBody {
+				t.Fatalf("%s = %d: %s", tt.name, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestAdditionalServerErrorBranches(t *testing.T) {
 	st := newServerTestStore(t)
 	srv := New(st, 0)

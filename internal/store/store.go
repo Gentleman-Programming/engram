@@ -2703,6 +2703,13 @@ func (s *Store) GetSession(id string) (*Session, error) {
 	return &sess, nil
 }
 
+// activeRuntimeSessionWindow bounds how far back a session's last recorded
+// activity may be before it stops counting as a resolution candidate. It is
+// deliberately generous: excluding a session that is still in use would send
+// its writes to the manual-save fallback, which is worse than briefly keeping
+// a dead row as a candidate.
+const activeRuntimeSessionWindow = "-7 days"
+
 // MostRecentActiveSession resolves the active (un-ended) session for a project
 // from the persisted sessions table. It returns the session ID and ok=true when
 // such a session exists, or ok=false when none does.
@@ -2716,8 +2723,14 @@ func (s *Store) GetSession(id string) (*Session, error) {
 // Candidate rules:
 //   - Scope to the (normalized) project.
 //   - Scope to the current runtime directory.
-//   - Require ended_at IS NULL — ended sessions are never returned, so stale
-//     sessions naturally fall out without any explicit clearing step.
+//   - Require ended_at IS NULL — ended sessions are never returned.
+//   - Require recent effective activity. ended_at IS NULL alone means "never
+//     closed", not "in use": a session whose process is long gone stays a
+//     candidate forever, and two such rows make resolution fail permanently
+//     for that project and directory (#1101). Effective activity is the last
+//     observation the session recorded, falling back to started_at when it
+//     recorded none. The sessions table carries no pid or heartbeat, so
+//     liveness is not observable; recency of recorded work is.
 //   - Exclude the manual-save fallback sessions (id LIKE 'manual-save%'); those
 //     are created by the fallback path itself and must not be resolved as "the
 //     active session", which would make resolution circular.
@@ -2748,13 +2761,16 @@ func (s *Store) ActiveRuntimeSessions(project string, directories ...string) ([]
 	}
 
 	rows, err := s.queryHook(s.db, `
-		SELECT DISTINCT id
-		FROM sessions
-		WHERE LOWER(project) = ?
-		  AND directory IN (`+strings.Join(placeholders, ", ")+`)
-		  AND ended_at IS NULL
-		  AND id NOT LIKE 'manual-save%'
-		ORDER BY id
+		SELECT s.id
+		FROM sessions s
+		LEFT JOIN observations o ON o.session_id = s.id
+		WHERE LOWER(s.project) = ?
+		  AND s.directory IN (`+strings.Join(placeholders, ", ")+`)
+		  AND s.ended_at IS NULL
+		  AND s.id NOT LIKE 'manual-save%'
+		GROUP BY s.id
+		HAVING COALESCE(MAX(o.created_at), s.started_at) >= datetime('now', '`+activeRuntimeSessionWindow+`')
+		ORDER BY s.id
 	`, args...)
 	if err != nil {
 		return nil, err

@@ -102,6 +102,71 @@ func TestPrincipalResolverStoresPrincipalInRequestContext(t *testing.T) {
 	}
 }
 
+func TestMutationPushUsesResolvedPrincipalNotEnvelopeCreatedBy(t *testing.T) {
+	authn := resolvingAuth{principals: map[string]cloudauth.Principal{
+		"managed-token": {
+			ID:          "principal-1",
+			Kind:        cloudauth.PrincipalKindHuman,
+			DisplayName: "Server Alice",
+			Role:        cloudauth.RoleMember,
+			Source:      cloudauth.PrincipalSourceManagedToken,
+			Enabled:     true,
+		},
+	}}
+	ms := newFakeMutationStore()
+	srv := New(ms, authn, 0)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", strings.NewReader(`{"created_by":"forged-client-identity","entries":[{"project":"proj-a","entity":"session","entity_key":"session-1","op":"upsert","payload":{"id":"session-1","directory":"/tmp/session-1"}}]}`))
+	req.Header.Set("Authorization", "Bearer managed-token")
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("mutation push status = %d, want %d body=%q", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if len(ms.mutations) != 1 {
+		t.Fatalf("stored mutations = %d, want 1", len(ms.mutations))
+	}
+	if ms.mutations[0].CreatedBy != "Server Alice" {
+		t.Fatalf("stored mutation created_by = %q, want resolved principal %q", ms.mutations[0].CreatedBy, "Server Alice")
+	}
+}
+
+func TestMutationPushCreatedByFallbacks(t *testing.T) {
+	tests := []struct {
+		name      string
+		principal cloudauth.Principal
+		want      string
+	}{
+		{
+			name:      "uses trimmed principal ID when display name is blank",
+			principal: cloudauth.Principal{DisplayName: " \t ", ID: " principal-1 "},
+			want:      "principal-1",
+		},
+		{
+			name:      "uses unknown when display name and ID are blank",
+			principal: cloudauth.Principal{DisplayName: " \t ", ID: " \n "},
+			want:      "unknown",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := WithPrincipal(context.Background(), tt.principal)
+			if got := mutationPushCreatedBy(ctx); got != tt.want {
+				t.Errorf("mutationPushCreatedBy() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMutationPushCreatedByWithoutPrincipal(t *testing.T) {
+	if got := mutationPushCreatedBy(context.Background()); got != "unknown" {
+		t.Errorf("mutationPushCreatedBy() = %q, want %q", got, "unknown")
+	}
+}
+
 func TestLegacyAuthServiceResolvesSyncPrincipalIntoRequestContext(t *testing.T) {
 	svc, err := cloudauth.NewService(&cloudstore.CloudStore{}, strings.Repeat("x", 32))
 	if err != nil {
