@@ -86,6 +86,42 @@ func TestWorkflowExternalActionsArePinned(t *testing.T) {
 	}
 }
 
+func TestPRCheckRejectsTransientArtifacts(t *testing.T) {
+	workflowPath := filepath.Join(workflowDirectory(t), "pr-check.yml")
+	content, err := os.ReadFile(workflowPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", workflowPath, err)
+	}
+
+	workflow := string(content)
+	for _, required := range []string{
+		"check-transient-artifacts:",
+		"name: Check PR Has No Transient Artifacts",
+		"pull_request_target:",
+		"ref: ${{ github.event.pull_request.base.sha }}",
+		".github/scripts/transient-artifacts.mjs",
+		"await listPullRequestFiles(github, {",
+		"core.setFailed('❌ Could not load the trusted transient artifact policy: ' + err.message);",
+		"core.setFailed('❌ Could not enumerate PR files: ' + err.message);",
+	} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("%s does not contain %q", workflowPath, required)
+		}
+	}
+	if strings.Contains(workflow, "github.event.pull_request.head") {
+		t.Errorf("%s must not check out or execute candidate PR content", workflowPath)
+	}
+
+	helperPath := filepath.Join(filepath.Dir(filepath.Dir(workflowDirectory(t))), ".github", "scripts", "transient-artifacts.mjs")
+	helper, err := os.ReadFile(helperPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", helperPath, err)
+	}
+	if !strings.Contains(string(helper), "return github.paginate(github.rest.pulls.listFiles, {") {
+		t.Errorf("%s does not use GitHub pagination for PR file enumeration", helperPath)
+	}
+}
+
 func workflowDirectory(t *testing.T) string {
 	t.Helper()
 	_, sourceFile, _, ok := runtime.Caller(0)

@@ -48,6 +48,7 @@ Required checks run automatically on every PR:
 | **Check Issue Reference** | PR body contains `Closes #N`, `Fixes #N`, or `Resolves #N` |
 | **Check Issue Has status:approved** | The linked issue has the `status:approved` label |
 | **Check PR Has type:* Label** | PR has exactly one `type:*` label |
+| **Check PR Has No Transient Artifacts** | PR files do not include local, generated agent-link, binary, database/export, OS/editor, or backup artifacts |
 
 #### CI Tests
 
@@ -155,6 +156,7 @@ untracked, and latest committed changes compared with `HEAD~`.
 - Update docs in the same PR when behavior changes
 - Do not reference endpoints/scripts that do not exist in code
 - Do not include `Co-Authored-By` trailers in commits
+- Do not include transient local, generated agent-link, binary, database/export, OS/editor, or backup artifacts
 
 ### Conventional Commit Format
 
