@@ -94,11 +94,29 @@ func runHook(t *testing.T, scriptName, stdin string, env map[string]string) stri
 	return stdout
 }
 
+// runHookInDir is runHook with an explicit working directory for the hook
+// process, used to exercise CLAUDE_CONFIG_DIR resolution against a relative
+// path (issue #1081). An empty dir behaves exactly like runHook.
+func runHookInDir(t *testing.T, scriptName, stdin string, env map[string]string, dir string) string {
+	t.Helper()
+	stdout, _ := runHookWithStderrInDir(t, scriptName, stdin, env, dir)
+	return stdout
+}
+
 func runHookWithStderr(t *testing.T, scriptName, stdin string, env map[string]string) (string, string) {
+	t.Helper()
+	return runHookWithStderrInDir(t, scriptName, stdin, env, "")
+}
+
+// runHookWithStderrInDir is runHookWithStderr with an explicit working
+// directory for the hook process; an empty dir uses the test process's own
+// working directory (the exec.Cmd default).
+func runHookWithStderrInDir(t *testing.T, scriptName, stdin string, env map[string]string, dir string) (string, string) {
 	t.Helper()
 	script := filepath.Join(repoRoot(t), "plugin", "claude-code", "scripts", scriptName)
 
 	cmd := exec.Command("bash", script)
+	cmd.Dir = dir
 	cmd.Stdin = strings.NewReader(stdin)
 	// Force the POSIX path: the Windows-safe branch short-circuits before the
 	// logic under test, and OSTYPE/MSYSTEM could otherwise leak in from the env.
@@ -106,6 +124,20 @@ func runHookWithStderr(t *testing.T, scriptName, stdin string, env map[string]st
 	for _, entry := range os.Environ() {
 		upper := strings.ToUpper(entry)
 		if strings.HasPrefix(upper, "ENGRAM_PORT=") || strings.HasPrefix(upper, "ENGRAM_SOCKET=") {
+			continue
+		}
+		// Skip any other entry the caller's env map overrides, so the
+		// override is never shadowed by an earlier duplicate key in envp.
+		key := entry
+		if i := strings.IndexByte(entry, '='); i >= 0 {
+			key = entry[:i]
+		}
+		// Keep hook tests hermetic: CLAUDE_CONFIG_DIR is unset unless the
+		// caller explicitly supplies it in env.
+		if strings.EqualFold(key, "CLAUDE_CONFIG_DIR") {
+			continue
+		}
+		if _, override := env[key]; override {
 			continue
 		}
 		cmd.Env = append(cmd.Env, entry)
@@ -162,6 +194,25 @@ func normalizedClaudeHookMaxTime(t *testing.T, configured, callerDefault string)
 	output, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("normalize Claude hook max time: %v", err)
+	}
+	return string(output)
+}
+
+func resolveClaudeConfigRoot(t *testing.T, configured string) string {
+	t.Helper()
+	helper := filepath.Join(repoRoot(t), "plugin", "claude-code", "scripts", "_helpers.sh")
+	cmd := exec.Command("bash", "-c", `source "$1"; claude_config_root`, "bash", helper)
+	cmd.Dir = t.TempDir()
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if !strings.EqualFold(key, "CLAUDE_CONFIG_DIR") {
+			cmd.Env = append(cmd.Env, entry)
+		}
+	}
+	cmd.Env = append(cmd.Env, "CLAUDE_CONFIG_DIR="+configured)
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("resolve Claude config root: %v", err)
 	}
 	return string(output)
 }
@@ -668,6 +719,23 @@ func TestClaudeHookMaxTimeNormalization(t *testing.T) {
 	}
 }
 
+func TestClaudeConfigRootRecognizesWindowsAbsolutePaths(t *testing.T) {
+	requireHookBinaries(t)
+	for _, tt := range []struct {
+		name, configured, want string
+	}{
+		{name: "drive with forward slashes", configured: " \tC:/Users/test/.claude\t ", want: "C:/Users/test/.claude"},
+		{name: "drive with backslashes", configured: `C:\Users\test\.claude`, want: `C:\Users\test\.claude`},
+		{name: "UNC", configured: `\\server\share\.claude`, want: `\\server\share\.claude`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolveClaudeConfigRoot(t, tt.configured); got != tt.want {
+				t.Fatalf("claude_config_root() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestUserPromptMaxTimeFallbackReachesDirectCurlCalls(t *testing.T) {
 	if got, want := capturedUserPromptMaxTimes(t, "0"), []string{"0.2", "2", "0.2", "0.2", "0.2", "0.2"}; !equalStrings(got, want) {
 		t.Fatalf("curl --max-time values = %q, want %q", got, want)
@@ -684,4 +752,266 @@ func equalStrings(got, want []string) bool {
 		}
 	}
 	return true
+}
+
+// writeRecordingEngramStub writes a fake `engram` binary that logs each invocation's args to $ENGRAM_TEST_ENGRAM_LOG and exits 0.
+func writeRecordingEngramStub(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "engram")
+	content := "#!/bin/bash\nprintf '%s\\n' \"$*\" >> \"$ENGRAM_TEST_ENGRAM_LOG\"\nexit 0\n"
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("write recording engram stub: %v", err)
+	}
+	return dir
+}
+
+func writeMigratingEngramStub(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "engram")
+	content := "#!/bin/bash\nprintf '%s\\n' \"$*\" >> \"$ENGRAM_TEST_ENGRAM_LOG\"\nif [ \"$*\" = \"setup claude-code --mcp-only\" ]; then\n  mkdir -p \"$(dirname \"$ENGRAM_TEST_MCP_CONFIG\")\"\n  printf '{}' > \"$ENGRAM_TEST_MCP_CONFIG\"\nfi\nexit 0\n"
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("write migrating engram stub: %v", err)
+	}
+	return dir
+}
+
+// readEngramInvocations returns the argument lists recorded by writeRecordingEngramStub, in call order.
+func readEngramInvocations(t *testing.T, path string) []string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		t.Fatalf("read engram invocation log: %v", err)
+	}
+	trimmed := strings.TrimSuffix(string(data), "\n")
+	if trimmed == "" {
+		return nil
+	}
+	return strings.Split(trimmed, "\n")
+}
+
+// healthyServer answers 200 to /health and 404 to everything else.
+func healthyServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestSessionStartHonorsClaudeConfigDirForMCPMigrationGuard verifies session-start.sh's MCP-migration guard honors CLAUDE_CONFIG_DIR (issue #1081).
+func TestSessionStartHonorsClaudeConfigDirForMCPMigrationGuard(t *testing.T) {
+	requireHookBinaries(t)
+
+	runWithEngramStub := func(t *testing.T, configDir string) []string {
+		t.Helper()
+		srv := healthyServer(t)
+		stubDir := writeRecordingEngramStub(t)
+		logPath := filepath.Join(t.TempDir(), "engram-invocations.log")
+		// bash's PATH is always colon-separated, even under Git Bash on Windows.
+		env := map[string]string{
+			"ENGRAM_PORT":            serverPort(t, srv),
+			"CLAUDE_CONFIG_DIR":      configDir,
+			"PATH":                   stubDir + ":" + os.Getenv("PATH"),
+			"ENGRAM_TEST_ENGRAM_LOG": logPath,
+		}
+		stdin := fmt.Sprintf(`{"session_id":%q,"cwd":%q}`, newSessionID(t), t.TempDir())
+		runHook(t, "session-start.sh", stdin, env)
+		return readEngramInvocations(t, logPath)
+	}
+
+	t.Run("existing regular file under CLAUDE_CONFIG_DIR skips migration", func(t *testing.T) {
+		configDir := t.TempDir()
+		mcpDir := filepath.Join(configDir, "mcp")
+		if err := os.MkdirAll(mcpDir, 0o755); err != nil {
+			t.Fatalf("create mcp dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(mcpDir, "engram.json"), []byte("{}"), 0o644); err != nil {
+			t.Fatalf("write existing mcp config: %v", err)
+		}
+
+		for _, args := range runWithEngramStub(t, configDir) {
+			if args == "setup claude-code --mcp-only" {
+				t.Fatalf("migration invoked even though a regular MCP config already exists under CLAUDE_CONFIG_DIR")
+			}
+		}
+	})
+
+	t.Run("missing config under CLAUDE_CONFIG_DIR triggers migration", func(t *testing.T) {
+		configDir := t.TempDir() // mcp/engram.json intentionally absent
+
+		invocations := runWithEngramStub(t, configDir)
+		found := false
+		for _, args := range invocations {
+			if args == "setup claude-code --mcp-only" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("migration was not invoked for a missing MCP config under CLAUDE_CONFIG_DIR; invocations: %v", invocations)
+		}
+	})
+
+	t.Run("symlink under CLAUDE_CONFIG_DIR triggers migration once", func(t *testing.T) {
+		configDir := t.TempDir()
+		mcpDir := filepath.Join(configDir, "mcp")
+		if err := os.MkdirAll(mcpDir, 0o755); err != nil {
+			t.Fatalf("create mcp dir: %v", err)
+		}
+		target := filepath.Join(t.TempDir(), "existing-engram.json")
+		if err := os.WriteFile(target, []byte("{}"), 0o644); err != nil {
+			t.Fatalf("write symlink target: %v", err)
+		}
+		if err := os.Symlink(target, filepath.Join(mcpDir, "engram.json")); err != nil {
+			t.Skipf("symlink creation is unavailable: %v", err)
+		}
+
+		count := 0
+		for _, args := range runWithEngramStub(t, configDir) {
+			if args == "setup claude-code --mcp-only" {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("migration invocations for symlink MCP config = %d, want 1", count)
+		}
+	})
+
+	t.Run("migration creates the resolved config and runs once", func(t *testing.T) {
+		configDir := t.TempDir()
+		mcpConfig := filepath.Join(configDir, "mcp", "engram.json")
+		srv := healthyServer(t)
+		stubDir := writeMigratingEngramStub(t)
+		logPath := filepath.Join(t.TempDir(), "engram-invocations.log")
+		env := map[string]string{
+			"ENGRAM_PORT":            serverPort(t, srv),
+			"CLAUDE_CONFIG_DIR":      configDir,
+			"PATH":                   stubDir + ":" + os.Getenv("PATH"),
+			"ENGRAM_TEST_ENGRAM_LOG": logPath,
+			"ENGRAM_TEST_MCP_CONFIG": mcpConfig,
+		}
+		stdin := fmt.Sprintf(`{"session_id":%q,"cwd":%q}`, newSessionID(t), t.TempDir())
+		runHook(t, "session-start.sh", stdin, env)
+		info, err := os.Stat(mcpConfig)
+		if err != nil || !info.Mode().IsRegular() {
+			t.Fatalf("first migration must create regular MCP config at %q: info=%v, err=%v", mcpConfig, info, err)
+		}
+		runHook(t, "session-start.sh", stdin, env)
+		if got := strings.Count(strings.Join(readEngramInvocations(t, logPath), "\n"), "setup claude-code --mcp-only"); got != 1 {
+			t.Fatalf("migration invocations across two SessionStart runs = %d, want 1", got)
+		}
+	})
+
+	// migrationWasInvoked reports whether "setup claude-code --mcp-only"
+	// appears among the recorded engram invocations.
+	migrationWasInvoked := func(invocations []string) bool {
+		for _, args := range invocations {
+			if args == "setup claude-code --mcp-only" {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("unset or blank CLAUDE_CONFIG_DIR falls back to $HOME/.claude", func(t *testing.T) {
+		cases := []struct {
+			name          string
+			setConfig     bool
+			configDir     string
+			createConfig  bool
+			wantMigration bool
+		}{
+			{name: "unset/config present", createConfig: true},
+			{name: "unset/config absent", wantMigration: true},
+			{name: "empty/config present", setConfig: true, createConfig: true},
+			{name: "empty/config absent", setConfig: true, wantMigration: true},
+			{name: "whitespace-only/config present", setConfig: true, configDir: "   \t  ", createConfig: true},
+			{name: "whitespace-only/config absent", setConfig: true, configDir: "   \t  ", wantMigration: true},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				home := t.TempDir()
+				if tc.createConfig {
+					mcpDir := filepath.Join(home, ".claude", "mcp")
+					if err := os.MkdirAll(mcpDir, 0o755); err != nil {
+						t.Fatalf("create mcp dir: %v", err)
+					}
+					if err := os.WriteFile(filepath.Join(mcpDir, "engram.json"), []byte("{}"), 0o644); err != nil {
+						t.Fatalf("write existing mcp config: %v", err)
+					}
+				}
+
+				srv := healthyServer(t)
+				stubDir := writeRecordingEngramStub(t)
+				logPath := filepath.Join(t.TempDir(), "engram-invocations.log")
+				env := map[string]string{
+					"ENGRAM_PORT":            serverPort(t, srv),
+					"HOME":                   home,
+					"PATH":                   stubDir + ":" + os.Getenv("PATH"),
+					"ENGRAM_TEST_ENGRAM_LOG": logPath,
+				}
+				if tc.setConfig {
+					env["CLAUDE_CONFIG_DIR"] = tc.configDir
+				}
+				stdin := fmt.Sprintf(`{"session_id":%q,"cwd":%q}`, newSessionID(t), t.TempDir())
+				runHook(t, "session-start.sh", stdin, env)
+
+				if got := migrationWasInvoked(readEngramInvocations(t, logPath)); got != tc.wantMigration {
+					t.Fatalf("migration invoked=%v, want %v", got, tc.wantMigration)
+				}
+			})
+		}
+	})
+
+	t.Run("relative CLAUDE_CONFIG_DIR resolved against hook's working directory", func(t *testing.T) {
+		const rel = "relative-claude-config"
+		cases := []struct {
+			name          string
+			createConfig  bool
+			wantMigration bool
+		}{
+			{name: "config present", createConfig: true, wantMigration: false},
+			{name: "config absent", createConfig: false, wantMigration: true},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				workDir := t.TempDir()
+				if tc.createConfig {
+					mcpDir := filepath.Join(workDir, rel, "mcp")
+					if err := os.MkdirAll(mcpDir, 0o755); err != nil {
+						t.Fatalf("create mcp dir: %v", err)
+					}
+					if err := os.WriteFile(filepath.Join(mcpDir, "engram.json"), []byte("{}"), 0o644); err != nil {
+						t.Fatalf("write existing mcp config: %v", err)
+					}
+				}
+
+				srv := healthyServer(t)
+				stubDir := writeRecordingEngramStub(t)
+				logPath := filepath.Join(t.TempDir(), "engram-invocations.log")
+				env := map[string]string{
+					"ENGRAM_PORT":            serverPort(t, srv),
+					"CLAUDE_CONFIG_DIR":      rel,
+					"PATH":                   stubDir + ":" + os.Getenv("PATH"),
+					"ENGRAM_TEST_ENGRAM_LOG": logPath,
+				}
+				stdin := fmt.Sprintf(`{"session_id":%q,"cwd":%q}`, newSessionID(t), t.TempDir())
+				runHookInDir(t, "session-start.sh", stdin, env, workDir)
+
+				if got := migrationWasInvoked(readEngramInvocations(t, logPath)); got != tc.wantMigration {
+					t.Fatalf("migration invoked=%v, want %v", got, tc.wantMigration)
+				}
+			})
+		}
+	})
 }
