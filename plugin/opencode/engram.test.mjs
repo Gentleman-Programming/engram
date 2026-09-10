@@ -179,6 +179,7 @@ async function createRuntime(t, {
   })
   return {
     plugin,
+    dispose: plugin.dispose,
     event: (type, info) => plugin.event({ event: { type, properties: { info } } }),
     before: plugin["tool.execute.before"],
     chat: plugin["chat.message"],
@@ -964,4 +965,24 @@ test("deleting a parent invalidates descendants and prevents later writes or re-
   }
 
   assert.deepEqual(runtime.registeredIDs, ["parent"], "invalid descendants must never re-register as top-level sessions")
+})
+
+test("plugin disposal closes registered roots, not children, and waits for session ends", async (t) => {
+  const rootID = "root/with space"
+  const end = deferredResponse()
+  const runtime = await createRuntime(t, { sessionEndResponse: end.handler })
+  await runtime.event("session.created", session(rootID))
+  await runtime.event("session.created", session("child", rootID))
+
+  let settled = false
+  const pending = runtime.dispose().then(() => { settled = true })
+  await end.started
+  await Promise.resolve()
+  assert.equal(settled, false)
+  end.resolve(httpResponse({}))
+  await pending
+
+  const endRequests = runtime.requests.filter(({ path }) => path.startsWith("/sessions/") && path.endsWith("/end"))
+  assert.equal(endRequests.length, 1)
+  assert.equal(endRequests[0].path, `/sessions/${encodeURIComponent(rootID)}/end`)
 })

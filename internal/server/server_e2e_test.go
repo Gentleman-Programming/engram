@@ -178,6 +178,77 @@ func TestObservationsTopicUpsertAndDeleteE2E(t *testing.T) {
 	}
 }
 
+func TestObservationPinContextLifecycleE2E(t *testing.T) {
+	_, ts := newE2EServer(t)
+	client := ts.Client()
+
+	sessionResp := postJSON(t, client, ts.URL+"/sessions", map[string]any{
+		"id":        "s-pin-context",
+		"project":   "engram",
+		"directory": "/tmp/engram",
+	})
+	if sessionResp.StatusCode != http.StatusCreated {
+		t.Fatalf("create session: got %d", sessionResp.StatusCode)
+	}
+	sessionResp.Body.Close()
+
+	observationResp := postJSON(t, client, ts.URL+"/observations", map[string]any{
+		"session_id": "s-pin-context",
+		"type":       "decision",
+		"title":      "Pinned through HTTP",
+		"content":    "This memory should appear in the pinned context section.",
+		"project":    "engram",
+		"scope":      "project",
+	})
+	if observationResp.StatusCode != http.StatusCreated {
+		t.Fatalf("create observation: got %d", observationResp.StatusCode)
+	}
+	observation := decodeJSON[map[string]any](t, observationResp)
+	id := int64(observation["id"].(float64))
+
+	setPin := func(method string, wantPinned bool) {
+		t.Helper()
+		req, err := http.NewRequest(method, ts.URL+"/observations/"+strconv.FormatInt(id, 10)+"/pin", nil)
+		if err != nil {
+			t.Fatalf("new %s pin request: %v", method, err)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("%s pin request: %v", method, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s pin request: got %d", method, resp.StatusCode)
+		}
+		body := decodeJSON[map[string]any](t, resp)
+		if body["pinned"] != wantPinned {
+			t.Fatalf("%s pinned = %v, want %t", method, body["pinned"], wantPinned)
+		}
+	}
+	context := func() string {
+		t.Helper()
+		resp, err := client.Get(ts.URL + "/context?project=engram&scope=project&observations=-1&prompts=-1&sessions=-1")
+		if err != nil {
+			t.Fatalf("get context: %v", err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("get context: got %d", resp.StatusCode)
+		}
+		return decodeJSON[map[string]string](t, resp)["context"]
+	}
+
+	setPin(http.MethodPut, true)
+	pinnedContext := context()
+	if !strings.Contains(pinnedContext, "### Pinned") || !strings.Contains(pinnedContext, "Pinned through HTTP") {
+		t.Fatalf("pinned observation missing from context:\n%s", pinnedContext)
+	}
+
+	setPin(http.MethodDelete, false)
+	unpinnedContext := context()
+	if strings.Contains(unpinnedContext, "### Pinned") || strings.Contains(unpinnedContext, "Pinned through HTTP") {
+		t.Fatalf("unpinned observation remains in pinned-only context:\n%s", unpinnedContext)
+	}
+}
+
 func TestPassiveCaptureEndpointE2E(t *testing.T) {
 	_, ts := newE2EServer(t)
 	client := ts.Client()

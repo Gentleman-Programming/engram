@@ -1257,6 +1257,49 @@ func cmdDelete(cfg store.Config) {
 	}
 }
 
+// parseDeleteTrailingArgs validates the tokens that follow a delete command's
+// target and reports which supported flags were present. Delete paths mutate
+// persistent data, so any token other than a documented flag must be rejected
+// before the store is opened; silently ignoring an unsupported option such as
+// --dry-run would let the deletion proceed anyway. On rejection it prints the
+// offending token(s) and the usage line to stderr, calls exitFunc(1), and
+// reports ok=false.
+func parseDeleteTrailingArgs(args []string, usage string, supported ...string) (flags map[string]bool, ok bool) {
+	flags = make(map[string]bool)
+	var unexpected []string
+	for _, arg := range args {
+		known := false
+		for _, s := range supported {
+			if arg == s {
+				known = true
+				break
+			}
+		}
+		if known {
+			flags[arg] = true
+			continue
+		}
+		unexpected = append(unexpected, fmt.Sprintf("%q", arg))
+	}
+	if len(unexpected) > 0 {
+		fmt.Fprintf(os.Stderr, "error: unexpected argument(s): %s\n", strings.Join(unexpected, " "))
+		fmt.Fprintln(os.Stderr, "usage: "+usage)
+		exitFunc(1)
+		return nil, false
+	}
+	return flags, true
+}
+
+// rejectDeleteHelpTarget rejects standard CLI help tokens before store access.
+func rejectDeleteHelpTarget(target, usage string) bool {
+	if target != "--help" && target != "-h" {
+		return false
+	}
+	fmt.Fprintln(os.Stderr, "usage: "+usage)
+	exitFunc(1)
+	return true
+}
+
 func cmdDeleteObservation(cfg store.Config) {
 	if len(os.Args) < 3 {
 		fmt.Fprintln(os.Stderr, "usage: engram delete <observation_id> [--hard]")
@@ -1271,12 +1314,11 @@ func cmdDeleteObservation(cfg store.Config) {
 		return
 	}
 
-	hard := false
-	for i := 3; i < len(os.Args); i++ {
-		if os.Args[i] == "--hard" {
-			hard = true
-		}
+	flags, ok := parseDeleteTrailingArgs(os.Args[3:], "engram delete <observation_id> [--hard]", "--hard")
+	if !ok {
+		return
 	}
+	hard := flags["--hard"]
 
 	s, err := storeNew(cfg)
 	if err != nil {
@@ -1305,6 +1347,13 @@ func cmdDeleteSession(cfg store.Config) {
 	}
 
 	id := os.Args[3]
+	if rejectDeleteHelpTarget(id, "engram delete session <id>") {
+		return
+	}
+
+	if _, ok := parseDeleteTrailingArgs(os.Args[4:], "engram delete session <id>"); !ok {
+		return
+	}
 
 	s, err := storeNew(cfg)
 	if err != nil {
@@ -1334,6 +1383,10 @@ func cmdDeletePrompt(cfg store.Config) {
 		return
 	}
 
+	if _, ok := parseDeleteTrailingArgs(os.Args[4:], "engram delete prompt <id>"); !ok {
+		return
+	}
+
 	s, err := storeNew(cfg)
 	if err != nil {
 		fatal(err)
@@ -1356,12 +1409,15 @@ func cmdDeleteProject(cfg store.Config) {
 	}
 
 	name := os.Args[3]
-	hard := false
-	for i := 4; i < len(os.Args); i++ {
-		if os.Args[i] == "--hard" {
-			hard = true
-		}
+	if rejectDeleteHelpTarget(name, "engram delete project <name> [--hard]") {
+		return
 	}
+
+	flags, ok := parseDeleteTrailingArgs(os.Args[4:], "engram delete project <name> [--hard]", "--hard")
+	if !ok {
+		return
+	}
+	hard := flags["--hard"]
 
 	s, err := storeNew(cfg)
 	if err != nil {
@@ -2156,6 +2212,7 @@ func cmdObsidianExport(cfg store.Config) {
 		for _, e := range result.Errors {
 			fmt.Fprintf(os.Stderr, "    - %v\n", e)
 		}
+		exitFunc(1)
 	}
 }
 
@@ -3093,6 +3150,8 @@ func meetsProtocolVersionFloor(v string) bool {
 	return classifyProtocolVersion(v) == protocolVersionSupported
 }
 
+// printPostInstall prints the agent-specific next steps after a successful
+// setup run, including MCP registration status and allowlist prompts.
 func printPostInstall(result *setup.Result) {
 	switch result.Agent {
 	case "opencode":
@@ -3115,7 +3174,7 @@ func printPostInstall(result *setup.Result) {
 		fmt.Println("  2. Verify with: pi list")
 	case "claude-code":
 		// Offer to add engram tools to the permissions allowlist
-		fmt.Print("\nAdd engram tools to ~/.claude/settings.json allowlist?\n")
+		fmt.Printf("\nAdd engram tools to %s allowlist?\n", setup.ClaudeCodeSettingsPath())
 		fmt.Print("This prevents Claude Code from asking permission on every tool call.\n")
 		fmt.Print("Add to allowlist? (y/N): ")
 		var answer string
@@ -3124,19 +3183,19 @@ func printPostInstall(result *setup.Result) {
 		if answer == "y" || answer == "yes" {
 			if err := setupAddClaudeCodeAllowlist(); err != nil {
 				fmt.Fprintf(os.Stderr, "  warning: could not update allowlist: %v\n", err)
-				fmt.Fprintln(os.Stderr, "  You can add them manually to permissions.allow in ~/.claude/settings.json")
+				fmt.Fprintf(os.Stderr, "  You can add them manually to permissions.allow in %s\n", setup.ClaudeCodeSettingsPath())
 			} else {
 				fmt.Println("  ✓ Engram tools added to allowlist")
 			}
 		} else {
-			fmt.Println("  Skipped. You can add them later to permissions.allow in ~/.claude/settings.json")
+			fmt.Printf("  Skipped. You can add them later to permissions.allow in %s\n", setup.ClaudeCodeSettingsPath())
 		}
 
 		fmt.Println("\nNext steps:")
 		fmt.Println("  1. Restart Claude Code — the plugin is active immediately")
 		fmt.Println("  2. Verify with: claude plugin list")
 		if result.MCPConfigured {
-			fmt.Println("  3. MCP config written to ~/.claude/mcp/engram.json using absolute binary path")
+			fmt.Printf("  3. MCP config written to %s using absolute binary path\n", setup.ClaudeCodeUserMCPPath())
 			fmt.Println("     (survives plugin auto-updates; re-run 'engram setup claude-code' if you move the binary)")
 		} else {
 			fmt.Println("  3. MCP configuration was not written. Re-run 'engram setup claude-code' after resolving the reported error.")
