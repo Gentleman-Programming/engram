@@ -15,6 +15,7 @@ import (
 	"github.com/Gentleman-Programming/engram/v2/internal/cloud/chunkcodec"
 	"github.com/Gentleman-Programming/engram/v2/internal/cloud/cloudstore"
 	"github.com/Gentleman-Programming/engram/v2/internal/cloud/dashboard"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/remote"
 	"github.com/Gentleman-Programming/engram/v2/internal/store"
 	engramsync "github.com/Gentleman-Programming/engram/v2/internal/sync"
 )
@@ -166,7 +167,7 @@ func TestHandlerMountsDashboardAndHealth(t *testing.T) {
 }
 
 func TestHandlerSyncPushPullRoundTrip(t *testing.T) {
-	st := &fakeStore{}
+	st := &fakeStore{manifest: engramsync.Manifest{Version: 2}}
 	srv := New(st, fakeAuth{}, 0)
 
 	payload := []byte(`{"sessions":[{"id":"s-1","directory":"/tmp/s-1"}]}`)
@@ -192,6 +193,9 @@ func TestHandlerSyncPushPullRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(pullManifest.Body.Bytes(), &manifest); err != nil {
 		t.Fatalf("decode manifest: %v", err)
 	}
+	if manifest.Version != 2 {
+		t.Fatalf("expected /sync/pull manifest version 2, got %d", manifest.Version)
+	}
 	if len(manifest.Chunks) != 1 || manifest.Chunks[0].ID != chunkID {
 		t.Fatalf("unexpected manifest %+v", manifest.Chunks)
 	}
@@ -206,6 +210,45 @@ func TestHandlerSyncPushPullRoundTrip(t *testing.T) {
 	}
 	if string(bytes.TrimSpace(pullChunk.Body.Bytes())) != string(normalizedPayload) {
 		t.Fatalf("unexpected chunk body=%q", pullChunk.Body.String())
+	}
+}
+
+func TestRemoteTransportReadsV2ManifestAndBootstrapProjectVerifies(t *testing.T) {
+	server := httptest.NewServer(New(&fakeStore{manifest: engramsync.Manifest{Version: 2}}, fakeAuth{}, 0).Handler())
+	t.Cleanup(server.Close)
+
+	transport, err := remote.NewRemoteTransport(server.URL, "", "proj-a")
+	if err != nil {
+		t.Fatalf("create remote transport: %v", err)
+	}
+	manifest, err := transport.ReadManifest()
+	if err != nil {
+		t.Fatalf("read manifest through remote transport: %v", err)
+	}
+	if manifest.Version != 2 {
+		t.Fatalf("remote manifest version = %d, want 2", manifest.Version)
+	}
+
+	cfg, err := store.DefaultConfig()
+	if err != nil {
+		t.Fatalf("default store config: %v", err)
+	}
+	cfg.DataDir = t.TempDir()
+	local, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("create local store: %v", err)
+	}
+	t.Cleanup(func() { _ = local.Close() })
+	if err := local.CreateSessionWithOwnershipMode("project-owned", "proj-a", "/tmp/project-owned", store.SessionOwnershipProjectOwned); err != nil {
+		t.Fatalf("create project-owned session: %v", err)
+	}
+
+	result, err := engramsync.BootstrapProject(local, transport, engramsync.UpgradeBootstrapOptions{Project: "proj-a", CreatedBy: "test"})
+	if err != nil {
+		t.Fatalf("bootstrap project through remote transport: %v", err)
+	}
+	if result.Stage != store.UpgradeStageBootstrapVerified {
+		t.Fatalf("bootstrap stage = %q, want %q", result.Stage, store.UpgradeStageBootstrapVerified)
 	}
 }
 
