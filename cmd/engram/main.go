@@ -1032,7 +1032,7 @@ func cmdTUI(cfg store.Config) {
 
 func cmdSearch(cfg store.Config) {
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "usage: engram search <query> [--type TYPE] [--project PROJECT|--all] [--scope SCOPE] [--limit N]")
+		fmt.Fprintln(os.Stderr, "usage: engram search <query> [--type TYPE] [--project PROJECT|--all] [--scope SCOPE] [--limit N] [--match-mode all|any]")
 		exitFunc(1)
 	}
 
@@ -1065,6 +1065,11 @@ func cmdSearch(cfg store.Config) {
 		case "--scope":
 			if i+1 < len(os.Args) {
 				opts.Scope = os.Args[i+1]
+				i++
+			}
+		case "--match-mode":
+			if i+1 < len(os.Args) {
+				opts.MatchMode = os.Args[i+1]
 				i++
 			}
 		default:

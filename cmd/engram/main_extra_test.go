@@ -4102,6 +4102,32 @@ func TestCmdSearchAndSaveDanglingFlags(t *testing.T) {
 	}
 }
 
+func TestCmdSearchForwardsMatchModeWithoutChangingQuery(t *testing.T) {
+	cfg := testConfig(t)
+
+	var gotQuery string
+	var gotOpts store.SearchOptions
+	oldStoreSearch := storeSearch
+	storeSearch = func(_ *store.Store, query string, opts store.SearchOptions) ([]store.SearchResult, error) {
+		gotQuery = query
+		gotOpts = opts
+		return nil, nil
+	}
+	t.Cleanup(func() { storeSearch = oldStoreSearch })
+
+	withArgs(t, "engram", "search", "auth compliance session", "--all", "--match-mode", "any")
+	_, stderr, recovered := captureOutputAndRecover(t, func() { cmdSearch(cfg) })
+	if recovered != nil || stderr != "" {
+		t.Fatalf("search failed, panic=%v stderr=%q", recovered, stderr)
+	}
+	if gotOpts.MatchMode != "any" {
+		t.Fatalf("match mode=%q want any", gotOpts.MatchMode)
+	}
+	if gotQuery != "auth compliance session" {
+		t.Fatalf("query=%q want %q", gotQuery, "auth compliance session")
+	}
+}
+
 func TestCmdSetupHyphenArgFallsBackToInteractive(t *testing.T) {
 	stubRuntimeHooks(t)
 	stubExitWithPanic(t)
