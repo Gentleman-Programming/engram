@@ -1282,17 +1282,11 @@ func parseDeleteTrailingArgs(args []string, usage string, supported ...string) (
 	return flags, true
 }
 
-// rejectFlagShapedTarget guards string-typed delete targets (session IDs,
-// project names). A token that looks like a flag is far more likely a typoed
-// help or mode request than the literal name of a record, and a destructive
-// command must never act on it: reject before the store is opened, print the
-// offending token and the usage line, and exit 1. Reports handled=true when
-// the target was rejected.
-func rejectFlagShapedTarget(target, usage string) (handled bool) {
-	if !strings.HasPrefix(target, "-") {
+// rejectDeleteHelpTarget rejects standard CLI help tokens before store access.
+func rejectDeleteHelpTarget(target, usage string) bool {
+	if target != "--help" && target != "-h" {
 		return false
 	}
-	fmt.Fprintf(os.Stderr, "error: unexpected argument(s): %q\n", target)
 	fmt.Fprintln(os.Stderr, "usage: "+usage)
 	exitFunc(1)
 	return true
@@ -1345,8 +1339,7 @@ func cmdDeleteSession(cfg store.Config) {
 	}
 
 	id := os.Args[3]
-
-	if rejectFlagShapedTarget(id, "engram delete session <id>") {
+	if rejectDeleteHelpTarget(id, "engram delete session <id>") {
 		return
 	}
 
@@ -1408,8 +1401,7 @@ func cmdDeleteProject(cfg store.Config) {
 	}
 
 	name := os.Args[3]
-
-	if rejectFlagShapedTarget(name, "engram delete project <name> [--hard]") {
+	if rejectDeleteHelpTarget(name, "engram delete project <name> [--hard]") {
 		return
 	}
 

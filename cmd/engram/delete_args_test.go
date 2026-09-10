@@ -171,12 +171,9 @@ func TestCmdDeleteRejectsTrailingArgs(t *testing.T) {
 	}
 }
 
-// TestCmdDeleteRejectsFlagShapedTargets pins that a string-typed delete target
-// that looks like a flag aborts before the store is opened: a session ID or
-// project name literally starting with "-" is far more likely a typoed help
-// request than a real record, and a destructive command must never act on it.
-// Records named exactly "--help" are seeded and must survive untouched.
-func TestCmdDeleteRejectsFlagShapedTargets(t *testing.T) {
+// TestCmdDeleteRejectsHelpTargets proves that standard help tokens abort before
+// deletion and leave matching session and project records intact.
+func TestCmdDeleteRejectsHelpTargets(t *testing.T) {
 	tests := []struct {
 		name  string
 		usage string
@@ -217,10 +214,7 @@ func TestCmdDeleteRejectsFlagShapedTargets(t *testing.T) {
 			stdout, stderr := captureOutput(t, func() { cmdDelete(cfg) })
 
 			if len(*codes) == 0 || (*codes)[0] == 0 {
-				t.Fatalf("expected nonzero exit for flag-shaped target %v; command ran anyway (stdout=%q stderr=%q)", target, stdout, stderr)
-			}
-			if !strings.Contains(stderr, "\"--help\"") {
-				t.Errorf("expected stderr to name the rejected target %q, got: %q", "--help", stderr)
+				t.Fatalf("expected nonzero exit for help target %v; command ran anyway (stdout=%q stderr=%q)", target, stdout, stderr)
 			}
 			if !strings.Contains(stderr, "usage: "+tt.usage) {
 				t.Errorf("expected stderr to show usage %q, got: %q", "usage: "+tt.usage, stderr)
@@ -234,6 +228,15 @@ func TestCmdDeleteRejectsFlagShapedTargets(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRejectDeleteHelpTargetShortFormOnly(t *testing.T) {
+	codes := stubbedExit(t)
+	handled := false
+	_, _ = captureOutput(t, func() { handled = rejectDeleteHelpTarget("-h", "test") })
+	if !handled || rejectDeleteHelpTarget("-session-id", "test") || len(*codes) != 1 {
+		t.Fatalf("short help handling=%t exit=%v, want only -h rejected", handled, *codes)
 	}
 }
 
