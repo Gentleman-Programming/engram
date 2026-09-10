@@ -1032,7 +1032,7 @@ func cmdTUI(cfg store.Config) {
 
 func cmdSearch(cfg store.Config) {
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "usage: engram search <query> [--type TYPE] [--project PROJECT|--all] [--scope SCOPE] [--limit N]")
+		fmt.Fprintln(os.Stderr, "usage: engram search <query> [--type TYPE] [--project PROJECT|--all] [--scope SCOPE] [--limit N] [--match all|any]")
 		exitFunc(1)
 	}
 
@@ -1065,6 +1065,11 @@ func cmdSearch(cfg store.Config) {
 		case "--scope":
 			if i+1 < len(os.Args) {
 				opts.Scope = os.Args[i+1]
+				i++
+			}
+		case "--match":
+			if i+1 < len(os.Args) {
+				opts.MatchMode = os.Args[i+1]
 				i++
 			}
 		default:
@@ -3231,7 +3236,7 @@ Commands:
   test [suite] [--quick] [--json]
                      Run isolated local reliability and performance self-tests
                        suites: reliability, performance (default: both)
-  search <query>     Search memories [--type TYPE] [--project PROJECT|--all] [--scope SCOPE] [--limit N]
+  search <query>     Search memories [--type TYPE] [--project PROJECT|--all] [--scope SCOPE] [--limit N] [--match all|any]
   save <title> <msg> Save a memory  [--type TYPE] [--project PROJECT] [--scope SCOPE]
   delete <obs_id>    Delete an observation [--hard] (soft-delete by default; --hard removes permanently)
   delete session <id>
