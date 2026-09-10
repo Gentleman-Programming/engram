@@ -156,9 +156,15 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
 - `GET /observations/{id}` — Get single observation by ID
 - `PATCH /observations/{id}` — Update fields. Body: `{title?, content?, type?, project?, scope?, topic_key?}`
   - `400` when `title` or `content` is provided but empty or whitespace-only. Omitting a field leaves its current value unchanged
+- `PUT /observations/{id}/pin` — Pin an observation on this device. Returns `{id, pinned: true}`.
+- `DELETE /observations/{id}/pin` — Unpin an observation on this device. Returns `{id, pinned: false}`.
+  - Both pin routes are idempotent, return `400` for an invalid ID, and return `404` when the observation does not exist
+  - Pin state is local-only: these routes do not change `updated_at`, enqueue sync work, or alter export payloads
 - `DELETE /observations/{id}` — Delete observation (`?hard=true` for hard delete, soft delete by default)
   - `200` when deleted
   - `404` when observation does not exist
+- `POST /topic-keys/suggest` — Suggest a stable topic key using the same heuristic as `mem_suggest_topic_key`. Body: `{type?, title?, content?}`. Returns `{topic_key}`.
+  - At least one of `title` or `content` must be non-empty; invalid JSON or missing suggestion input returns `400`
 
 ### Review
 
