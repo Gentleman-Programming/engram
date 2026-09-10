@@ -393,11 +393,13 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /observations", s.handleListObservations)
 	s.mux.HandleFunc("POST /observations/passive", s.handlePassiveCapture)
 	s.mux.HandleFunc("GET /observations/recent", s.handleRecentObservations)
-	s.mux.HandleFunc("PUT /observations/{id}/pin", requireAuth(s.handlePinObservation))
-	s.mux.HandleFunc("DELETE /observations/{id}/pin", requireAuth(s.handleUnpinObservation))
+	// Pin state is local-only metadata and remains open with ENGRAM_HTTP_TOKEN like other non-destructive local HTTP writes.
+	s.mux.HandleFunc("PUT /observations/{id}/pin", s.handlePinObservation)
+	s.mux.HandleFunc("DELETE /observations/{id}/pin", s.handleUnpinObservation)
 	s.mux.HandleFunc("PATCH /observations/{id}", s.handleUpdateObservation)
 	s.mux.HandleFunc("DELETE /observations/{id}", requireAuth(s.handleDeleteObservation))
-	s.mux.HandleFunc("POST /topic-keys/suggest", requireAuth(s.handleSuggestTopicKey))
+	// Topic-key suggestion is read-only and remains open under the local HTTP policy.
+	s.mux.HandleFunc("POST /topic-keys/suggest", s.handleSuggestTopicKey)
 
 	// Search
 	s.mux.HandleFunc("GET /search", s.handleSearch)
