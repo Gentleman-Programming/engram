@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Gentleman-Programming/engram/v2/internal/setup"
 	"github.com/Gentleman-Programming/engram/v2/internal/store"
 	"github.com/Gentleman-Programming/engram/v2/internal/timeutil"
 	"github.com/Gentleman-Programming/engram/v2/internal/version"
@@ -659,6 +660,8 @@ func (m Model) viewSessionDetail() string {
 
 // ─── Setup ───────────────────────────────────────────────────────────────────
 
+// viewSetup renders the agent-plugin install screen, including progress,
+// the permissions allowlist prompt, and post-install next steps.
 func (m Model) viewSetup() string {
 	var b strings.Builder
 
@@ -693,7 +696,7 @@ func (m Model) viewSetup() string {
 
 		b.WriteString(sectionHeadingStyle.Render("  Permissions Allowlist"))
 		b.WriteString("\n\n")
-		b.WriteString(detailContentStyle.Render("  Add engram tools to ~/.claude/settings.json allowlist?"))
+		b.WriteString(detailContentStyle.Render("  Add engram tools to " + setup.ClaudeCodeSettingsPath() + " allowlist?"))
 		b.WriteString("\n")
 		b.WriteString(timestampStyle.Render("  This prevents Claude Code from asking permission on every tool call."))
 		b.WriteString("\n\n")
@@ -740,7 +743,7 @@ func (m Model) viewSetup() string {
 					b.WriteString(fmt.Sprintf("  %s %s\n",
 						lipgloss.NewStyle().Bold(true).Foreground(colorRed).Render("✗"),
 						detailContentStyle.Render("Allowlist update failed: "+m.SetupAllowlistError)))
-					b.WriteString(detailContentStyle.Render("  Add manually to permissions.allow in ~/.claude/settings.json"))
+					b.WriteString(detailContentStyle.Render("  Add manually to permissions.allow in " + setup.ClaudeCodeSettingsPath()))
 					b.WriteString("\n")
 				}
 				b.WriteString(detailContentStyle.Render("1. Restart Claude Code — the plugin is active immediately"))
