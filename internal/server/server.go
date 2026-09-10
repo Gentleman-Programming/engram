@@ -393,8 +393,13 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /observations", s.handleListObservations)
 	s.mux.HandleFunc("POST /observations/passive", s.handlePassiveCapture)
 	s.mux.HandleFunc("GET /observations/recent", s.handleRecentObservations)
+	// Pin state is local-only metadata and remains open with ENGRAM_HTTP_TOKEN like other non-destructive local HTTP writes.
+	s.mux.HandleFunc("PUT /observations/{id}/pin", s.handlePinObservation)
+	s.mux.HandleFunc("DELETE /observations/{id}/pin", s.handleUnpinObservation)
 	s.mux.HandleFunc("PATCH /observations/{id}", s.handleUpdateObservation)
 	s.mux.HandleFunc("DELETE /observations/{id}", requireAuth(s.handleDeleteObservation))
+	// Topic-key suggestion is read-only and remains open under the local HTTP policy.
+	s.mux.HandleFunc("POST /topic-keys/suggest", s.handleSuggestTopicKey)
 
 	// Search
 	s.mux.HandleFunc("GET /search", s.handleSearch)
@@ -725,6 +730,76 @@ func (s *Server) handleUpdateObservation(w http.ResponseWriter, r *http.Request)
 
 	s.notifyWrite()
 	jsonResponse(w, http.StatusOK, obs)
+}
+
+func (s *Server) handlePinObservation(w http.ResponseWriter, r *http.Request) {
+	s.handleObservationPinState(w, r, true)
+}
+
+func (s *Server) handleUnpinObservation(w http.ResponseWriter, r *http.Request) {
+	s.handleObservationPinState(w, r, false)
+}
+
+func (s *Server) handleObservationPinState(w http.ResponseWriter, r *http.Request, pinned bool) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		jsonError(w, http.StatusBadRequest, "invalid observation id")
+		return
+	}
+
+	setPinned := s.store.UnpinObservation
+	if pinned {
+		setPinned = s.store.PinObservation
+	}
+	if err := setPinned(id); err != nil {
+		if errors.Is(err, store.ErrObservationNotFound) {
+			jsonError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"id":     id,
+		"pinned": pinned,
+	})
+}
+
+func (s *Server) handleSuggestTopicKey(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Type    string `json:"type"`
+		Title   string `json:"title"`
+		Content string `json:"content"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 50<<20)
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&body); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			jsonError(w, http.StatusBadRequest, "request body too large")
+			return
+		}
+		jsonError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			jsonError(w, http.StatusBadRequest, "request body too large")
+			return
+		}
+		jsonError(w, http.StatusBadRequest, "invalid json: trailing data")
+		return
+	}
+	if strings.TrimSpace(body.Title) == "" && strings.TrimSpace(body.Content) == "" {
+		jsonError(w, http.StatusBadRequest, "provide title or content to suggest a topic_key")
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]string{
+		"topic_key": store.SuggestTopicKey(body.Type, body.Title, body.Content),
+	})
 }
 
 func (s *Server) handleDeleteObservation(w http.ResponseWriter, r *http.Request) {

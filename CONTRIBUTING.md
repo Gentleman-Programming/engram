@@ -20,6 +20,8 @@ Use the correct template:
 
 Fill in all required fields. Your issue will automatically receive the `status:needs-review` label.
 
+If useful for alignment, search existing issues before opening a new one.
+
 ### Step 2: Wait for Approval
 
 A maintainer will review the issue and add the `status:approved` label if it's accepted for implementation.

@@ -117,6 +117,8 @@ For monorepos, prefer subproject configs such as `backend/.engram/config.json` a
 
 **Recommended first call:** `mem_current_project` — confirms which project Engram detected before you start writing. Returns `project_source` (how it was detected) and `available_projects` (if cwd is ambiguous).
 
+**Cross-project recall:** when the detected project is empty or the wrong one, call `mem_list_projects` to enumerate every known project with counts, then scope `mem_search`/`mem_context` to the project you need. `mem_list_projects` is included in the `agent` profile, and `engram mcp` registers all tools by default — `--tools=agent` is not required.
+
 If a write tool returns `ambiguous_project`, the agent must not guess. This happens when the MCP server is started from a parent directory that contains multiple repositories, for example:
 
 ```text
@@ -231,7 +233,7 @@ engram setup opencode
 This does three things:
 
 1. Copies the plugin to `~/.config/opencode/plugins/engram.ts` (session tracking, Memory Protocol, compaction recovery)
-2. Adds the `engram` MCP server entry to your `opencode.json` with `--tools=agent` (18 agent-facing tools)
+2. Adds the `engram` MCP server entry to your `opencode.json` with `--tools=agent` (19 agent-facing tools)
 3. Adds `opencode-subagent-statusline` to your `tui.json` or `tui.jsonc` so OpenCode shows sub-agent activity in the sidebar/home footer
 
 ### Verify each layer after setup
@@ -251,7 +253,7 @@ engram serve &
 
 > **Windows**: OpenCode uses `~/.config/opencode/` on Windows too (it does not read `%APPDATA%\opencode\`). `engram setup opencode` writes to `~/.config/opencode/plugins/` and `~/.config/opencode/opencode.json`. To run the server in the background: `Start-Process engram -ArgumentList "serve" -WindowStyle Hidden` (PowerShell) or just run `engram serve` in a separate terminal.
 
-**Alternative: Manual MCP-only setup** (no plugin, all 22 tools by default):
+**Alternative: Manual MCP-only setup** (no plugin, all 23 tools by default):
 
 Add to your `opencode.json` (global: `~/.config/opencode/opencode.json` on all platforms, or project-level):
 
@@ -301,11 +303,11 @@ Marketplace installation provides plugin assets only; it does not register the M
 engram setup claude-code
 ```
 
-`engram setup claude-code` is the sole MCP registration owner. It writes the durable user-level config at `~/.claude/mcp/engram.json` with the absolute `engram` binary path. It refreshes an existing regular file, but refuses to replace a symlink or other non-regular path; inspect it and manually replace it with a regular file before rerunning setup. If that write is not possible, setup warns and completes the plugin installation; resolve the error and rerun setup before using plugin MCP tools. You'll be asked whether to add engram's agent-profile MCP tools to `~/.claude/settings.json` `permissions.allow`. The setup writes entries for both the durable user-level MCP server id (`mcp__engram__...`) and the plugin-scoped server id used by older Claude Code plugin installs, so re-running setup repairs stale or incomplete allowlists without adding startup delay. Existing marketplace plugin copies receive hooks, scripts, and skills updates through normal Claude Code plugin updates; do not edit the plugin cache manually.
+`engram setup claude-code` is the sole MCP registration owner. It writes the durable user-level config at `~/.claude/mcp/engram.json` with the absolute `engram` binary path. It refreshes an existing regular file, but refuses to replace a symlink or other non-regular path; inspect it and manually replace it with a regular file before rerunning setup. If that write is not possible, setup warns and completes the plugin installation; resolve the error and rerun setup before using plugin MCP tools. You'll be asked whether to add engram's agent-profile MCP tools to `~/.claude/settings.json` `permissions.allow`. The setup writes entries for both the durable user-level MCP server id (`mcp__engram__...`) and the plugin-scoped server id used by older Claude Code plugin installs, so re-running setup repairs stale or incomplete allowlists without adding startup delay. Existing marketplace plugin copies receive hooks, scripts, and skills updates through normal Claude Code plugin updates; do not edit the plugin cache manually. If `CLAUDE_CONFIG_DIR` is set, Engram writes the MCP registration and permissions allowlist under that directory instead (`$CLAUDE_CONFIG_DIR/mcp/engram.json`, `$CLAUDE_CONFIG_DIR/settings.json`), matching Claude Code's own config-directory override.
 
 `engram setup claude-code --protocol=slim` requires Engram plugin version 0.1.1 or later. Setup checks `claude plugin list --json` after a successful install and warns, without failing or changing the selected slim mode, when it cannot verify the installed enabled marketplace plugin. Update through your normal Claude Code plugin update path and restart Claude Code. Session-only `claude --plugin-dir ...` plugins cannot be detected by this check.
 
-**Option C: Bare MCP** — all 22 tools by default, no session management:
+**Option C: Bare MCP** — all 23 tools by default, no session management:
 
 Add to your `.claude/settings.json` (project) or `~/.claude/settings.json` (global):
 
@@ -581,6 +583,7 @@ Both `--project=my-project` and `ENGRAM_PROJECT=my-project` set `MCPConfig.Defau
 > The `--project` flag and `ENGRAM_PROJECT` env var are the same mechanism. If both are supplied, the flag wins. The value must be a project name, not a path. Operations that cannot establish project context reject unknown values; documented creation and recovery writes retain their creation semantics.
 
 Same pattern applies to:
+
 - WSL terminals where VS Code opens a remote window (`\\wsl$\...` paths) — the MCP server process runs inside WSL but VS Code does not forward the workspace directory as cwd.
 - CI pipelines (GitHub Actions, GitLab CI, etc.) where the agent runs in a container and the checkout path differs from the project name you use locally.
 - Any Docker-based agent host where the container cwd does not match your Engram project name.
@@ -754,7 +757,7 @@ You have access to Engram persistent memory via MCP tools (mem_save, mem_search,
 
 **For OpenCode** (agent prompt in `opencode.json`):
 
-```
+```text
 After any compaction or context reset, first persist the injected summary with mem_session_summary. Request mem_context only if additional context is needed.
 Save memories proactively with mem_save after significant work.
 ```
@@ -807,7 +810,7 @@ Save proactively after significant work. After context resets, first persist the
 
 **For Windsurf** (`.windsurfrules`):
 
-```
+```text
 You have access to Engram persistent memory (mem_save, mem_search, mem_context, mem_session_summary).
 Save proactively after significant work. After context resets, first persist the injected summary with mem_session_summary. Request mem_context only if additional context is needed.
 ```

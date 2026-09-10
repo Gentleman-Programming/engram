@@ -14,7 +14,7 @@ This is the complete technical reference for Engram. For getting started, see th
 | --------------------------------------------------------- | ------------------------------------------------------------ |
 | [Database Schema](#database-schema)                       | Tables, FTS5, SQLite config                                  |
 | [HTTP API](#http-api-endpoints)                           | All REST endpoints with request/response details             |
-| [MCP Tools](#mcp-tools-22-tools)                          | Detailed reference for all 22 memory tools                   |
+| [MCP Tools](#mcp-tools-23-tools)                          | Detailed reference for all 23 memory tools                   |
 | [MCP Project Resolution](#mcp-project-resolution)         | Auto-detection algorithm, response envelope, tool categories |
 | [Memory Protocol](#memory-protocol)                       | When/how agents should use the tools                         |
 | [Project Name Normalization](#project-name-normalization) | Auto-detection, normalization, similar-project warnings      |
@@ -122,6 +122,10 @@ Dashboard route tree (`engram cloud serve`):
 
 Engram is local-first: local SQLite is authoritative; cloud features are optional replication/shared access and enrollment controls.
 
+### Mutation materialization attribution
+
+For an accepted `POST /sync/mutations/push`, each future materialized cloud chunk records the authenticated server principal's display name. If it is blank, the server uses the principal ID, then `unknown`. The mutation-envelope `created_by` value cannot control accepted chunk attribution. This is distinct from explicit `POST /sync/push`, which preserves its chunk `created_by` metadata. Existing cloud rows are not repaired or rewritten by this behavior.
+
 ### Health
 
 - Local runtime (`engram serve`): `GET /health` — Returns `{"status": "ok", "service": "engram", "version": "0.1.0"}`
@@ -152,9 +156,15 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 - `GET /observations/{id}` — Get single observation by ID
 - `PATCH /observations/{id}` — Update fields. Body: `{title?, content?, type?, project?, scope?, topic_key?}`
   - `400` when `title` or `content` is provided but empty or whitespace-only. Omitting a field leaves its current value unchanged
+- `PUT /observations/{id}/pin` — Pin an observation on this device. Returns `{id, pinned: true}`.
+- `DELETE /observations/{id}/pin` — Unpin an observation on this device. Returns `{id, pinned: false}`.
+  - Both pin routes are idempotent, return `400` for an invalid ID, and return `404` when the observation does not exist
+  - Pin state is local-only: these routes do not change `updated_at`, enqueue sync work, or alter export payloads
 - `DELETE /observations/{id}` — Delete observation (`?hard=true` for hard delete, soft delete by default)
   - `200` when deleted
   - `404` when observation does not exist
+- `POST /topic-keys/suggest` — Suggest a stable topic key using the same heuristic as `mem_suggest_topic_key`. Body: `{type?, title?, content?}`. Returns `{topic_key}`.
+  - At least one of `title` or `content` must be non-empty; invalid JSON or missing suggestion input returns `400`
 
 ### Review
 
@@ -875,7 +885,8 @@ Returns success even when cwd is ambiguous — empty `project` + non-empty `avai
 
 ---
 
-## MCP Tools (22 tools)
+## MCP Tools (23 tools)
+
 
 ### mem_search
 
@@ -931,6 +942,26 @@ Actions:
 
 `mark_reviewed` is local-only for now: `review_after` is intentionally not part of sync payloads in this phase, so resetting the review cycle does not enqueue a sync mutation or propagate to other machines.
 
+### mem_pin
+
+Pin a local observation so it appears before recent observations in memory context. Pinned state is **local to this device and is not synced**. Available in the `agent` profile (`engram mcp --tools=agent`).
+
+Parameters:
+
+- **id** (required): int — observation ID to pin
+
+Returns `{ "result": "Memory #N pinned", "id": N, "sync_id": ..., "pinned": true }`. Idempotent: pinning an already-pinned observation succeeds without change. Errors: missing/zero `id` ("id is required"), or a store failure ("Failed to update pin state: ...").
+
+### mem_unpin
+
+Unpin a local observation so it only appears in normal recency order in memory context. Pinned state is **local to this device and is not synced**. Available in the `agent` profile (`engram mcp --tools=agent`).
+
+Parameters:
+
+- **id** (required): int — observation ID to unpin
+
+Returns `{ "result": "Memory #N unpinned", "id": N, "sync_id": ..., "pinned": false }`. Idempotent: unpinning an already-unpinned observation succeeds without change. Errors: missing/zero `id` ("id is required"), or a store failure ("Failed to update pin state: ...").
+
 ### mem_suggest_topic_key
 
 Suggest a stable `topic_key` from `type + title` (or content fallback). Uses family heuristics like `architecture/*`, `bug/*`, `decision/*`, etc. Use before `mem_save` when you want evolving topics to upsert into a single observation.
@@ -943,14 +974,6 @@ Delete an observation by ID. Uses soft-delete by default (`deleted_at`); optiona
 
 Save user prompts — records what the user asked so future sessions have context about user goals. It applies the same post-redaction byte limit and truncation metadata as `mem_save`; `mem_save_prompt` warns when it truncates.
 When called in the same MCP process, this also feeds process-local current prompt context used by later `mem_save` calls with `capture_prompt=true`. The same MCP process lifecycle must receive the prompt context before the later save; prompt capture is best-effort and `mem_save` still succeeds when no context is available.
-
-### mem_pin
-
-Pin a local observation so it appears before recent observations in memory context. Pinned state is local to this device and is not synced.
-
-### mem_unpin
-
-Unpin a local observation so it only appears in normal recency order. Pinned state is local to this device and is not synced.
 
 ### mem_context
 
@@ -1007,6 +1030,19 @@ Extract structured learnings from text output. Looks for `## Key Learnings:` sec
 ### mem_current_project
 
 Detect the current project from the working directory. Returns `project`, `project_source`, `project_path`, `cwd`, `available_projects`, and `warning`. Never returns an error — even on ambiguous cwd it returns success with an empty `project` and non-empty `available_projects`. Recommended as the first call when starting a session.
+
+### mem_list_projects
+
+List every project known to Engram with per-project `observation_count`, `session_count`, `prompt_count`, and known `directories`, ordered by observation count descending — the same view as `engram projects list`. Returns `{ "projects": [...], "count": N }`.
+
+Included in the `agent` profile; `engram mcp` registers all tools by default, so `--tools=agent` is not required to use it.
+
+Result semantics:
+
+- **Empty store** — successful response with `{ "projects": [], "count": 0 }`. Discovery never fails just because nothing is stored yet.
+- **Store-query failure** — returns a tool error (`List projects failed: ...`) instead of a success envelope, so the agent knows discovery failed rather than trusting an empty answer.
+
+Use it for cross-project discovery when the working directory matches no known project, then scope `mem_search`/`mem_context` to the chosen project.
 
 ### mem_doctor
 
@@ -1076,6 +1112,7 @@ Format for `mem_save`:
 - **scope**: `project` (default) | `personal` | `global`
 - **topic_key** (optional, recommended for evolving decisions): stable key like `architecture/auth-model`
 - **content**:
+
   ```
   **What**: One sentence — what was done
   **Why**: What motivated it (user request, bug, performance, etc.)
