@@ -28,11 +28,13 @@ Engram works with **any MCP-compatible agent**. Pick your agent below.
 | Cursor          | `engram setup cursor`                                                                        | [Details](#cursor)                                 |
 | VS Code Copilot | `engram setup vscode-copilot`                                                                | [Details](#vs-code-copilot--claude-code-extension) |
 | Kilo Code       | `engram setup kilocode`                                                                      | [Details](#kilo-code)                              |
+| CommandCode     | `engram setup commandcode`                                                                   | [Details](#commandcode)                            |
 | Any MCP agent   | `engram mcp` (stdio)                                                                         | [Details](#any-other-mcp-agent)                    |
 
 > **Native setup for all agents above.** `engram setup <agent>` writes the right
 > MCP registration (handling each client's config format — `mcpServers`,
-> `servers`, or OpenCode's `mcp` object) plus the Memory Protocol into that
+> including CommandCode's `transport`/`enabled` variant, `servers`, or
+> OpenCode's `mcp` object) plus the Memory Protocol into that
 > agent's instruction surface, idempotently. The per-agent sections below describe
 > the exact files each command touches and the manual equivalent.
 
@@ -720,6 +722,18 @@ engram setup kilocode
 ```
 
 Registers the engram server under the OpenCode-style `mcp` object in `~/.config/kilo/opencode.json` and writes the Memory Protocol as a marker block in `~/.config/kilo/AGENTS.md`.
+
+---
+
+## CommandCode
+
+**Automated:**
+
+```bash
+engram setup commandcode
+```
+
+Registers `mcpServers.engram` in the user-scope `~/.commandcode/mcp.json` (private, available across all projects) and writes the Memory Protocol as a marker block in the user-tier `~/.commandcode/AGENTS.md`. Memory is re-read every request, so `AGENTS.md` edits apply on the next turn with no restart; restart the session so the MCP server is picked up. On Windows the CLI binary is `cmdc` instead of `cmd`, but the config paths are the same.
 
 ---
 

@@ -30,6 +30,10 @@ const (
 	// shaped {type:"local", command:[bin, ...args], enabled:true}. Used by
 	// OpenCode and Kilocode.
 	opencodeObject
+	// commandCodeObject stores servers under a top-level "mcpServers" object,
+	// each entry shaped {transport:"stdio", enabled:true, command, args}.
+	// Used by CommandCode (verified against `cmd mcp add --scope user` output).
+	commandCodeObject
 )
 
 // instrStyle describes how an agent's instruction/prompt surface is written.
@@ -128,6 +132,13 @@ func mcpEntry(format mcpFormat) any {
 			"type":    "stdio",
 			"command": cmd,
 			"args":    []string{"mcp", "--tools=agent"},
+		}
+	case commandCodeObject:
+		return map[string]any{
+			"transport": "stdio",
+			"enabled":   true,
+			"command":   cmd,
+			"args":      []string{"mcp", "--tools=agent"},
 		}
 	default:
 		return map[string]any{
