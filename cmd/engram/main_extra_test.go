@@ -4115,7 +4115,7 @@ func TestCmdSearchForwardsMatchModeWithoutChangingQuery(t *testing.T) {
 	}
 	t.Cleanup(func() { storeSearch = oldStoreSearch })
 
-	withArgs(t, "engram", "search", "auth compliance session", "--all", "--match-mode", "any")
+	withArgs(t, "engram", "search", "auth", "compliance", "session", "--all", "--match", "any")
 	_, stderr, recovered := captureOutputAndRecover(t, func() { cmdSearch(cfg) })
 	if recovered != nil || stderr != "" {
 		t.Fatalf("search failed, panic=%v stderr=%q", recovered, stderr)
