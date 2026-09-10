@@ -16,6 +16,12 @@ test('identifies evidence-backed transient artifact paths', () => {
     'foo~',
     'foo.exe',
     'engram-export.json',
+    'plan.md',
+    'agent-report.md',
+    'agent-handoff.md',
+    'handoff.md',
+    'openspec/changes/reject-artifacts/proposal.md',
+    'sdd/changes/reject-artifacts/tasks.md',
   ];
 
   for (const filePath of rejectedPaths) {
@@ -30,6 +36,8 @@ test('allows reviewed and documented files', () => {
     '.deadcode-baseline.txt',
     '.perf-baseline.txt',
     'internal/cloud/dashboard/page_templ.go',
+    'docs/plan.md',
+    'specs/transient-artifact-policy.md',
   ];
 
   for (const filePath of allowedPaths) {
@@ -44,11 +52,19 @@ test('restricts generated agent-link rules to repository-root paths', () => {
 
 test('allows deleted artifacts and rejects renamed destinations', () => {
   const artifacts = findTransientArtifacts([
+    { filename: 'cmd/engram/main.go', status: 'added' },
+    { filename: 'docs/new-guide.md', status: 'modified' },
     { filename: 'old.db', status: 'removed' },
+    { filename: 'plan.md', status: 'added' },
+    { filename: 'openspec/changes/reject-artifacts/proposal.md', status: 'copied' },
     { filename: 'new.db', status: 'renamed' },
   ]);
 
-  assert.deepEqual(artifacts.map(file => file.filename), ['new.db']);
+  assert.deepEqual(artifacts.map(file => file.filename), [
+    'plan.md',
+    'openspec/changes/reject-artifacts/proposal.md',
+    'new.db',
+  ]);
 });
 
 test('enumerates all pull request files through GitHub pagination', async () => {

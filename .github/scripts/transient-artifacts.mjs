@@ -12,6 +12,18 @@ const rootBinaryPaths = new Set([
   'cmd/engram/engram',
 ]);
 
+const rootTransientDocumentNames = new Set([
+  'plan.md',
+  'agent-report.md',
+  'agent-handoff.md',
+  'handoff.md',
+]);
+
+const transientProcessArtifactDirectories = [
+  ['openspec', 'changes'],
+  ['sdd', 'changes'],
+];
+
 function normalizePath(filePath) {
   return filePath.replaceAll('\\', '/').replace(/^\.\//, '');
 }
@@ -46,6 +58,12 @@ export function transientArtifactReason(filePath) {
   }
   if (hasDirectory(normalizedPath, 'engram-dev')) {
     return 'engram-dev artifact';
+  }
+  if (rootTransientDocumentNames.has(normalizedPath)) {
+    return 'transient development document';
+  }
+  if (transientProcessArtifactDirectories.some(directory => hasRootSubpath(normalizedPath, directory))) {
+    return 'transient process artifact';
   }
   if (name === '.release-notes-beta.md') {
     return 'release-notes beta artifact';
