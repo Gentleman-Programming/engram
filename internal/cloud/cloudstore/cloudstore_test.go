@@ -373,6 +373,22 @@ func TestParseClientCreatedAt(t *testing.T) {
 	})
 }
 
+func TestReadManifestEmitsOwnershipModeVersion(t *testing.T) {
+	db, err := sql.Open(projectGrantBindingDriverName, "")
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	manifest, err := (&CloudStore{db: db}).ReadManifest(context.Background(), "proj-a")
+	if err != nil {
+		t.Fatalf("ReadManifest: %v", err)
+	}
+	if manifest.Version != 2 {
+		t.Fatalf("manifest version = %d, want 2", manifest.Version)
+	}
+}
+
 func TestSortManifestRowsByServerCreatedAtForReplay(t *testing.T) {
 	rows := []manifestRow{
 		{

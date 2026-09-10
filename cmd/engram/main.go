@@ -3141,6 +3141,8 @@ func meetsProtocolVersionFloor(v string) bool {
 	return classifyProtocolVersion(v) == protocolVersionSupported
 }
 
+// printPostInstall prints the agent-specific next steps after a successful
+// setup run, including MCP registration status and allowlist prompts.
 func printPostInstall(result *setup.Result) {
 	switch result.Agent {
 	case "opencode":
@@ -3163,7 +3165,7 @@ func printPostInstall(result *setup.Result) {
 		fmt.Println("  2. Verify with: pi list")
 	case "claude-code":
 		// Offer to add engram tools to the permissions allowlist
-		fmt.Print("\nAdd engram tools to ~/.claude/settings.json allowlist?\n")
+		fmt.Printf("\nAdd engram tools to %s allowlist?\n", setup.ClaudeCodeSettingsPath())
 		fmt.Print("This prevents Claude Code from asking permission on every tool call.\n")
 		fmt.Print("Add to allowlist? (y/N): ")
 		var answer string
@@ -3172,19 +3174,19 @@ func printPostInstall(result *setup.Result) {
 		if answer == "y" || answer == "yes" {
 			if err := setupAddClaudeCodeAllowlist(); err != nil {
 				fmt.Fprintf(os.Stderr, "  warning: could not update allowlist: %v\n", err)
-				fmt.Fprintln(os.Stderr, "  You can add them manually to permissions.allow in ~/.claude/settings.json")
+				fmt.Fprintf(os.Stderr, "  You can add them manually to permissions.allow in %s\n", setup.ClaudeCodeSettingsPath())
 			} else {
 				fmt.Println("  ✓ Engram tools added to allowlist")
 			}
 		} else {
-			fmt.Println("  Skipped. You can add them later to permissions.allow in ~/.claude/settings.json")
+			fmt.Printf("  Skipped. You can add them later to permissions.allow in %s\n", setup.ClaudeCodeSettingsPath())
 		}
 
 		fmt.Println("\nNext steps:")
 		fmt.Println("  1. Restart Claude Code — the plugin is active immediately")
 		fmt.Println("  2. Verify with: claude plugin list")
 		if result.MCPConfigured {
-			fmt.Println("  3. MCP config written to ~/.claude/mcp/engram.json using absolute binary path")
+			fmt.Printf("  3. MCP config written to %s using absolute binary path\n", setup.ClaudeCodeUserMCPPath())
 			fmt.Println("     (survives plugin auto-updates; re-run 'engram setup claude-code' if you move the binary)")
 		} else {
 			fmt.Println("  3. MCP configuration was not written. Re-run 'engram setup claude-code' after resolving the reported error.")
