@@ -11,6 +11,9 @@ jobs:
   check-type-label:
     name: Check PR Has type:* Label
     runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.workflow }}-type-label-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     steps:
       - name: Validate required type label from the trusted event payload
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
