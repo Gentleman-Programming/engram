@@ -312,6 +312,16 @@ func TestHandleSaveAbsolutePathWarning(t *testing.T) {
 			wantPersisted: "https://example.com/home/a",
 		},
 		{
+			name:          "HTTPS URI with Unicode path segment",
+			content:       "https://example.com/é/tmp",
+			wantPersisted: "https://example.com/é/tmp",
+		},
+		{
+			name:          "HTTPS URI with canonically decomposed Unicode path segment",
+			content:       "https://example.com/e\u0301/tmp",
+			wantPersisted: "https://example.com/e\u0301/tmp",
+		},
+		{
 			name:          "file URI",
 			content:       "file:///tmp/x",
 			wantPersisted: "file:///tmp/x",
@@ -342,9 +352,25 @@ func TestHandleSaveAbsolutePathWarning(t *testing.T) {
 			wantPersisted: "foo/bar",
 		},
 		{
+			name:          "relative path with Unicode segment",
+			content:       "src/é/config.yaml",
+			wantPersisted: "src/é/config.yaml",
+		},
+		{
+			name:          "relative path with canonically decomposed Unicode segment",
+			content:       "src/e\u0301/config.yaml",
+			wantPersisted: "src/e\u0301/config.yaml",
+		},
+		{
 			name:          "drive-relative path",
 			content:       "C:x",
 			wantPersisted: "C:x",
+		},
+		{
+			name:          "POSIX root path",
+			content:       "/",
+			wantWarning:   true,
+			wantPersisted: "/",
 		},
 		{
 			name:          "private absolute path",

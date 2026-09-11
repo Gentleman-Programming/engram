@@ -22,6 +22,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/Gentleman-Programming/engram/v2/internal/diagnostic"
 	projectpkg "github.com/Gentleman-Programming/engram/v2/internal/project"
@@ -90,9 +92,14 @@ func absolutePathWarning(content string) string {
 // without relying on the host operating system. Route-like POSIX paths such as
 // /api/v1 are intentionally treated as ambiguous matches for this non-blocking warning.
 func containsAbsoluteFilesystemPath(content string) bool {
-	for i := 0; i < len(content); i++ {
+	for i := 0; i < len(content); {
+		char, size := utf8.DecodeRuneInString(content[i:])
+		if char == utf8.RuneError && size == 1 {
+			i++
+			continue
+		}
 		if uriEnd := uriTokenEnd(content, i); uriEnd > i {
-			i = uriEnd - 1
+			i = uriEnd
 			continue
 		}
 
@@ -102,16 +109,34 @@ func containsAbsoluteFilesystemPath(content string) bool {
 		if content[i] == '\\' && i+2 < len(content) && content[i+1] == '\\' && content[i+2] != '\\' && content[i+2] != '/' {
 			return true
 		}
-		if content[i] == '/' && i+1 < len(content) && content[i+1] != '/' && (i == 0 || content[i-1] != '/' && !isPathWordCharacter(content[i-1])) {
+		if content[i] == '/' && (i+1 == len(content) || content[i+1] != '/') && isAbsolutePathBoundary(content, i) {
 			return true
 		}
+		i += size
 	}
 	return false
 }
 
+func isAbsolutePathBoundary(content string, index int) bool {
+	if index == 0 {
+		return true
+	}
+	previous, size := utf8.DecodeLastRuneInString(content[:index])
+	if previous == utf8.RuneError && size == 1 {
+		return false
+	}
+	return previous != '/' && !isPathWordCharacter(previous)
+}
+
 func uriTokenEnd(content string, start int) int {
-	if !isASCIILetter(content[start]) || (start > 0 && isPathWordCharacter(content[start-1])) {
+	if !isASCIILetter(content[start]) {
 		return start
+	}
+	if start > 0 {
+		previous, size := utf8.DecodeLastRuneInString(content[:start])
+		if (previous != utf8.RuneError || size != 1) && isPathWordCharacter(previous) {
+			return start
+		}
 	}
 
 	colon := start + 1
@@ -132,8 +157,12 @@ func uriTokenEnd(content string, start int) int {
 	if hasAuthority {
 		end++
 	}
-	for end < len(content) && isURITokenCharacter(content[end]) {
-		end++
+	for end < len(content) {
+		char, size := utf8.DecodeRuneInString(content[end:])
+		if char == utf8.RuneError && size == 1 || !isURITokenCharacter(char) {
+			break
+		}
+		end += size
 	}
 	return end
 }
@@ -142,12 +171,12 @@ func isASCIILetter(char byte) bool {
 	return char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z'
 }
 
-func isPathWordCharacter(char byte) bool {
-	return isASCIILetter(char) || char >= '0' && char <= '9' || char == '.' || char == '-' || char == '_'
+func isPathWordCharacter(char rune) bool {
+	return unicode.IsLetter(char) || unicode.IsDigit(char) || unicode.IsMark(char) || char == '.' || char == '-' || char == '_'
 }
 
-func isURITokenCharacter(char byte) bool {
-	return isPathWordCharacter(char) || strings.ContainsRune(":/?#[]@!$&'()*+,;=%~", rune(char))
+func isURITokenCharacter(char rune) bool {
+	return isPathWordCharacter(char) || strings.ContainsRune(":/?#[]@!$&'()*+,;=%~", char)
 }
 
 var currentWorkingDirectory = func() string {
