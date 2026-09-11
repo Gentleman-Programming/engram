@@ -1,0 +1,60 @@
+name: Transient Artifact Check
+
+on:
+  pull_request_target:
+    types: [opened, edited, labeled, unlabeled, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  check-transient-artifacts:
+    name: Check PR Has No Transient Artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout trusted base policy
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+
+      - name: Reject transient artifacts
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            let findTransientArtifacts;
+            let listPullRequestFiles;
+            try {
+              ({ findTransientArtifacts, listPullRequestFiles } = await import(
+                `${process.env.GITHUB_WORKSPACE}/.github/scripts/transient-artifacts.mjs`
+              ));
+            } catch (err) {
+              core.setFailed('❌ Could not load the trusted transient artifact policy: ' + err.message);
+              return;
+            }
+            const prNumber = context.payload.pull_request.number;
+            let files;
+
+            try {
+              files = await listPullRequestFiles(github, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pullNumber: prNumber,
+              });
+            } catch (err) {
+              core.setFailed('❌ Could not enumerate PR files: ' + err.message);
+              return;
+            }
+
+            const artifacts = findTransientArtifacts(files);
+            if (artifacts.length === 0) {
+              core.info('✅ No transient artifacts found in PR files.');
+              return;
+            }
+
+            core.setFailed(
+              '❌ PR contains transient artifacts that must not be committed:\n' +
+              artifacts.map(file => `- ${file.filename} (${file.reason})`).join('\n')
+            );
