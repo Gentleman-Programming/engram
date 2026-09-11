@@ -6,7 +6,7 @@ test('keeps the required PR label check on trusted workflow bytes', () => {
   const workflow = fs.readFileSync('.github/workflows/pr-label-check.yml', 'utf8');
 
   assert.match(workflow, /^  pull_request_target:/m);
-  assert.match(workflow, /types: \[opened, edited, labeled, unlabeled, synchronize\]/);
+  assert.match(workflow, /types: \[opened, edited, labeled, unlabeled, synchronize, reopened\]/);
   assert.match(workflow, /name: Check PR Has type:\* Label/);
   assert.doesNotMatch(workflow, /pull_request\.head|head\.sha/);
 

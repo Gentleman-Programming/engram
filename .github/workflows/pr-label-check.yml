@@ -2,7 +2,7 @@ name: PR Label Bootstrap
 
 on:
   pull_request_target:
-    types: [opened, edited, labeled, unlabeled, synchronize]
+    types: [opened, edited, labeled, unlabeled, synchronize, reopened]
 
 permissions:
   contents: read
