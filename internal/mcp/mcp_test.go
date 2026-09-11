@@ -942,7 +942,7 @@ func TestOmittedSessionIDRejectsAmbiguousActiveSessions(t *testing.T) {
 				t.Fatal("expected ambiguous omitted session_id to fail")
 			}
 			got := callResultText(t, res)
-			for _, want := range []string{"multiple active runtime sessions", "provide session_id", "end other active matching sessions"} {
+			for _, want := range []string{"multiple active runtime sessions", "provide session_id", "end other active matching sessions", `engram save "TITLE" "CONTENT" --project PROJECT --type TYPE --topic TOPIC_KEY`, "writes to an independent project manual-save session and does not bind it to this MCP session"} {
 				if !strings.Contains(got, want) {
 					t.Fatalf("expected actionable ambiguity error containing %q, got %q", want, got)
 				}
