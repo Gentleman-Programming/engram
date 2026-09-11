@@ -110,9 +110,14 @@ test('runs PR label policy from the trusted base with shell-safe label JSON', ()
   const labelWorkflow = fs.readFileSync('.github/workflows/pr-label-check.yml', 'utf8');
   assert.match(prWorkflow, /^  pull_request:/m);
   assert.doesNotMatch(prWorkflow, /^  pull_request_target:/m);
-  assert.match(labelWorkflow, /^  pull_request_target:/m);
+  assert.match(
+    labelWorkflow,
+    /^  pull_request_target:\r?\n    types: \[opened, edited, labeled, unlabeled, synchronize, reopened\]/m,
+  );
   assert.match(labelWorkflow, /name: Check PR Has type:\* Label/);
   assert.doesNotMatch(labelWorkflow, /name: Check PR Label Policy/);
+  assert.match(labelWorkflow, /group: \$\{\{ github\.workflow \}\}-type-label-\$\{\{ github\.event\.pull_request\.number \}\}/);
+  assert.match(labelWorkflow, /cancel-in-progress: true/);
   assert.match(labelWorkflow, /ref: \$\{\{ github\.event\.pull_request\.base\.sha \}\}/);
   assert.match(labelWorkflow, /PR_LABELS: \$\{\{ toJson\(github\.event\.pull_request\.labels\.\*\.name\) \}\}/);
   assert.match(labelWorkflow, /--labels-json "\$PR_LABELS"/);
@@ -186,9 +191,15 @@ test('exposes migration as an idempotent dry-run CLI', () => {
 
 test('documents singleton-safe duplicate status transitions', () => {
   const skill = fs.readFileSync('skills/issue-creation/SKILL.md', 'utf8');
-  const duplicateCommands = skill.slice(skill.indexOf('# Maintainer: clear every active status while evaluating'));
+  const duplicateCommands = skill.slice(skill.indexOf('# Maintainer: replace every active status while evaluating'));
 
-  assert.match(duplicateCommands, /select\(startswith\("status:"\)\)/);
-  assert.match(duplicateCommands, /--remove-label "\$status"/);
+  assert.match(duplicateCommands, /set -euo pipefail/);
+  assert.match(duplicateCommands, /other_statuses="\$\(gh issue view/);
   assert.match(duplicateCommands, /--add-label "status:possible-duplicate"/);
+  assert.match(duplicateCommands, /--remove-label "\$\{other_statuses\/\/\$'\\n'\/,\}"/);
+  assert.match(duplicateCommands, /gh issue edit <number> "\$\{status_args\[@\]\}"/);
+  assert.match(duplicateCommands, /updated_statuses="\$\(gh issue view/);
+  assert.match(duplicateCommands, /"\$updated_statuses" != "status:possible-duplicate"/);
+  assert.match(duplicateCommands, /stop without retrying/);
+  assert.doesNotMatch(duplicateCommands, /while IFS=[\s\S]*gh issue edit <number> --remove-label "\$status"/);
 });

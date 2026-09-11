@@ -2,7 +2,7 @@ name: PR Label Policy
 
 on:
   pull_request_target:
-    types: [opened, edited, labeled, unlabeled, synchronize]
+    types: [opened, edited, labeled, unlabeled, synchronize, reopened]
 
 permissions:
   contents: read
@@ -11,6 +11,9 @@ jobs:
   check-label-policy:
     name: Check PR Has type:* Label
     runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.workflow }}-type-label-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     steps:
       - name: Check out trusted base revision
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6

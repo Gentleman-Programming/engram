@@ -241,12 +241,21 @@ gh issue edit <number> --remove-label "status:needs-review" --add-label "status:
 # Maintainer: add priority
 gh issue edit <number> --add-label "priority:high"
 
-# Maintainer: clear every active status while evaluating a possible duplicate
-gh issue view <number> --json labels --jq '.labels[].name | select(startswith("status:"))' |
-  while IFS= read -r status; do
-    gh issue edit <number> --remove-label "$status"
-  done
-gh issue edit <number> --add-label "status:possible-duplicate"
+# Maintainer: replace every active status while evaluating a possible duplicate
+set -euo pipefail
+
+other_statuses="$(gh issue view <number> --json labels --jq '.labels[].name | select(startswith("status:") and . != "status:possible-duplicate")')"
+status_args=(--add-label "status:possible-duplicate")
+if [[ -n "$other_statuses" ]]; then
+  status_args+=(--remove-label "${other_statuses//$'\n'/,}")
+fi
+gh issue edit <number> "${status_args[@]}"
+
+updated_statuses="$(gh issue view <number> --json labels --jq '.labels[].name | select(startswith("status:"))')"
+if [[ "$updated_statuses" != "status:possible-duplicate" ]]; then
+  echo "status replacement could not be confirmed; stop without retrying" >&2
+  exit 1
+fi
 
 # Maintainer: close a confirmed duplicate, then replace evaluation status with resolution
 gh issue close <number> --reason "not planned" --comment "Closing as duplicate of #<canonical>."
