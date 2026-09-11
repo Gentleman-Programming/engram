@@ -93,7 +93,7 @@ func TestPRValidationAndTransientArtifactWorkflowContracts(t *testing.T) {
 		t.Fatalf("read %s: %v", prCheckPath, err)
 	}
 
-	prCheck := string(prCheckContent)
+	prCheck := strings.ReplaceAll(string(prCheckContent), "\r\n", "\n")
 	for _, required := range []string{
 		"pull_request:",
 		"types: [opened, edited, labeled, unlabeled, synchronize]",
@@ -101,8 +101,6 @@ func TestPRValidationAndTransientArtifactWorkflowContracts(t *testing.T) {
 		"name: Check Issue Reference",
 		"check-issue-approved:",
 		"name: Check Issue Has status:approved",
-		"check-type-label:",
-		"name: Check PR Has type:* Label",
 	} {
 		if !strings.Contains(prCheck, required) {
 			t.Errorf("%s does not contain %q", prCheckPath, required)
@@ -113,6 +111,17 @@ func TestPRValidationAndTransientArtifactWorkflowContracts(t *testing.T) {
 			t.Errorf("%s must not contain %q", prCheckPath, forbidden)
 		}
 	}
+	labelCheckPath := filepath.Join(workflowDirectory(t), "pr-label-check.yml")
+	labelCheckContent, err := os.ReadFile(labelCheckPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", labelCheckPath, err)
+	}
+	labelCheck := strings.ReplaceAll(string(labelCheckContent), "\r\n", "\n")
+	for _, required := range []string{"pull_request_target:", "check-label-policy:", "name: Check PR Label Policy", "ref: ${{ github.event.pull_request.base.sha }}", "persist-credentials: false"} {
+		if !strings.Contains(labelCheck, required) {
+			t.Errorf("%s does not contain %q", labelCheckPath, required)
+		}
+	}
 
 	artifactWorkflowPath := filepath.Join(workflowDirectory(t), "transient-artifacts.yml")
 	artifactWorkflowContent, err := os.ReadFile(artifactWorkflowPath)
@@ -120,7 +129,7 @@ func TestPRValidationAndTransientArtifactWorkflowContracts(t *testing.T) {
 		t.Fatalf("read %s: %v", artifactWorkflowPath, err)
 	}
 
-	artifactWorkflow := string(artifactWorkflowContent)
+	artifactWorkflow := strings.ReplaceAll(string(artifactWorkflowContent), "\r\n", "\n")
 	for _, required := range []string{
 		"pull_request_target:",
 		"types: [opened, edited, labeled, unlabeled, synchronize, reopened]",
