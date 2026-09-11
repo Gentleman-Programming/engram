@@ -6171,7 +6171,7 @@ func TestHookFallbacksAndAdditionalBranches(t *testing.T) {
 
 func TestSQLiteWriteRetryRetriesTransientLockErrors(t *testing.T) {
 	oldBackoffs := sqliteWriteRetryBackoffs
-	sqliteWriteRetryBackoffs = []time.Duration{0, 0, 0}
+	sqliteWriteRetryBackoffs = []time.Duration{0, 0, 0, 0, 0}
 	t.Cleanup(func() { sqliteWriteRetryBackoffs = oldBackoffs })
 
 	t.Run("begin lock is retried and succeeds", func(t *testing.T) {
@@ -6227,6 +6227,87 @@ func TestSQLiteWriteRetryRetriesTransientLockErrors(t *testing.T) {
 			t.Fatalf("expected bounded attempts=%d, got %d", len(sqliteWriteRetryBackoffs)+1, attempts)
 		}
 	})
+}
+
+func TestSQLiteWriteRetryPersistsAfterIndependentStoreReleasesLock(t *testing.T) {
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = t.TempDir()
+	cfg.DedupeWindow = time.Hour
+
+	writer, err := New(cfg)
+	if err != nil {
+		t.Fatalf("open writer store: %v", err)
+	}
+	t.Cleanup(func() { _ = writer.Close() })
+	locker, err := New(cfg)
+	if err != nil {
+		t.Fatalf("open locker store: %v", err)
+	}
+	t.Cleanup(func() { _ = locker.Close() })
+
+	if err := writer.CreateSession("retry-lock-session", "retry-lock-project", "/tmp/retry-lock-project"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := writer.DB().Exec("PRAGMA busy_timeout = 0"); err != nil {
+		t.Fatalf("disable writer SQLite busy timeout: %v", err)
+	}
+
+	lockConn, err := locker.DB().Conn(context.Background())
+	if err != nil {
+		t.Fatalf("acquire locker connection: %v", err)
+	}
+	t.Cleanup(func() { _ = lockConn.Close() })
+	if _, err := lockConn.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
+		t.Fatalf("acquire SQLite write lock: %v", err)
+	}
+	locked := true
+	t.Cleanup(func() {
+		if locked {
+			_, _ = lockConn.ExecContext(context.Background(), "ROLLBACK")
+		}
+	})
+
+	const lockFailuresBeforeRelease = 5
+	originalExec := writer.hooks.exec
+	lockFailures := 0
+	var releaseErr error
+	writer.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+		result, err := originalExec(db, query, args...)
+		if isRetryableSQLiteLockError(err) {
+			lockFailures++
+			if lockFailures == lockFailuresBeforeRelease {
+				_, releaseErr = lockConn.ExecContext(context.Background(), "COMMIT")
+				locked = false
+			}
+		}
+		return result, err
+	}
+	t.Cleanup(func() { writer.hooks.exec = originalExec })
+
+	id, err := writer.AddObservation(AddObservationParams{
+		SessionID: "retry-lock-session",
+		Project:   "retry-lock-project",
+		Type:      "bugfix",
+		Title:     "SQLite lock retry",
+		Content:   "The retry completed after the lock was released.",
+	})
+	if releaseErr != nil {
+		t.Fatalf("release SQLite write lock: %v", releaseErr)
+	}
+	if err != nil {
+		t.Fatalf("add observation after lock release: %v", err)
+	}
+	if lockFailures != lockFailuresBeforeRelease {
+		t.Fatalf("SQLite lock failures before success = %d, want %d", lockFailures, lockFailuresBeforeRelease)
+	}
+
+	var title string
+	if err := writer.DB().QueryRow("SELECT title FROM observations WHERE id = ?", id).Scan(&title); err != nil {
+		t.Fatalf("read persisted observation: %v", err)
+	}
+	if title != "SQLite lock retry" {
+		t.Fatalf("persisted observation title = %q, want %q", title, "SQLite lock retry")
+	}
 }
 
 func TestStoreUncoveredBranchesPushToHundred(t *testing.T) {
