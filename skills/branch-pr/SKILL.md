@@ -136,8 +136,11 @@ All boxes must be checked:
 | PR Validation | `Check Issue Reference` | Body contains `Closes/Fixes/Resolves #N` |
 | PR Validation | `Check Issue Has status:approved` | Linked issue has `status:approved` |
 | PR Validation | `Check PR Has type:* Label` | PR has exactly one `type:*` label |
+| Transient Artifact Check | `Check PR Has No Transient Artifacts` | PR files comply with the [Transient Artifact Policy](../../CONTRIBUTING.md#transient-artifact-policy) |
 | CI | `Unit Tests` | `go test ./...` passes |
 | CI | `E2E Tests` | `go test -tags e2e ./internal/server/...` passes |
+| CI | `Plugin Tests` | `npm test` passes in `plugin/pi` |
+| CI | `Lint` | golangci-lint reports no new findings in Go changes |
 
 ---
 
