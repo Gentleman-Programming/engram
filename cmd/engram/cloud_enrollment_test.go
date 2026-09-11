@@ -42,7 +42,7 @@ func TestCmdCloudUnenrollIsIdempotentAndPreservesPendingRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen store: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	enrolled, err := s.IsProjectEnrolled("project_one")
 	if err != nil {
 		t.Fatalf("check enrollment: %v", err)

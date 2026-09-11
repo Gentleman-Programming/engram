@@ -779,7 +779,7 @@ func printCloudStatusProjectEnrollment(cfg store.Config, project string) {
 		fmt.Printf("Project enrollment: unavailable (%v)\n", err)
 		return
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	enrolled, err := s.IsProjectEnrolled(project)
 	if err != nil {
 		fmt.Printf("Project enrollment: unavailable (%v)\n", err)
@@ -925,7 +925,7 @@ func cmdCloudUnenroll(cfg store.Config) {
 		fatal(err)
 		return
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	if err := s.UnenrollProject(projectName); err != nil {
 		fatal(err)
 		return
