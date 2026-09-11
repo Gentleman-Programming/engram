@@ -84,6 +84,11 @@ type Options struct {
 	// BotAuthor is the login whose anchored comments the bot owns; empty means
 	// DefaultBotAuthor.
 	BotAuthor string
+	// FixSource, when non-nil, enables deterministic fix-availability
+	// classification for every accepted candidate: one evidence block per
+	// candidate in the anchored comment. Nil disables the feature entirely
+	// (no extra API calls, byte-identical comments).
+	FixSource FixEvidenceSource
 	// Log receives informational action lines; nil means silent.
 	Log func(format string, args ...any)
 }
@@ -124,6 +129,20 @@ func Run(ctx context.Context, opts Options) error {
 			return fmt.Errorf("search issues: %w", err)
 		}
 		matches = RankCandidates(issue, found)
+	}
+
+	// Fix-availability classification is an optional add-on over the ranked
+	// candidates. Evidence failures never fail the run: they classify as
+	// ambiguous and the comment says so.
+	if opts.FixSource != nil && len(matches) > 0 {
+		reporterVersion := extractReporterVersion(issue.Body)
+		for i := range matches {
+			evidence := CollectFixEvidence(ctx, opts.FixSource, matches[i].Issue.Number)
+			evidence.ReporterVersion = reporterVersion
+			availability := ClassifyFixAvailability(evidence)
+			matches[i].Fix = &availability
+			log("triage: fix availability for candidate #%d: %s", matches[i].Issue.Number, availability.Class)
+		}
 	}
 
 	botAuthor := opts.BotAuthor

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -352,4 +353,247 @@ func TestNewRESTClientNormalizesBaseURL(t *testing.T) {
 	if _, err := client.GetIssue(context.Background(), 5); err != nil {
 		t.Fatalf("baseURL without trailing slash should still work: %v", err)
 	}
+}
+
+// fillerTimelineJSON builds a full page of irrelevant timeline events.
+func fillerTimelineJSON(count int) string {
+	var b strings.Builder
+	b.WriteString("[")
+	for i := 0; i < count; i++ {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		fmt.Fprintf(&b, `{"event": "commented", "body": "filler %d"}`, i+1)
+	}
+	b.WriteString("]")
+	return b.String()
+}
+
+func TestRESTClientMergedFixPRs(t *testing.T) {
+	t.Run("timeline cross-references resolve to merged PRs only", func(t *testing.T) {
+		client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+			requireHeaders(t, r)
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/issues/11/timeline":
+				if got := r.URL.Query().Get("per_page"); got != "100" {
+					t.Errorf("per_page = %q, want 100", got)
+				}
+				_, _ = w.Write([]byte(`[
+					{"event": "closed", "commit_id": "abc"},
+					{"event": "cross-referenced", "source": {"issue": {"number": 23, "title": "A plain issue"}}},
+					{"event": "cross-referenced", "source": {"issue": {"number": 22, "pull_request": {}}}},
+					{"event": "cross-referenced", "source": {"issue": {"number": 21, "pull_request": [{}]}}}
+				]`))
+			case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/pulls/21":
+				_, _ = w.Write([]byte(`{"number": 21, "merged": true, "merge_commit_sha": "fix-on-main"}`))
+			case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/pulls/22":
+				_, _ = w.Write([]byte(`{"number": 22, "merged": false, "merge_commit_sha": null}`))
+			default:
+				t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			}
+		})
+
+		prs, complete, err := client.MergedFixPRs(context.Background(), 11)
+		if err != nil {
+			t.Fatalf("MergedFixPRs: %v", err)
+		}
+		if !complete {
+			t.Fatal("a short first page must report a complete timeline")
+		}
+		// Issue 23 is not a pull request (never fetched), 22 is not merged:
+		// only 21 with its merge commit is fix evidence.
+		want := []FixPR{{Number: 21, MergeCommit: "fix-on-main"}}
+		if !reflect.DeepEqual(prs, want) {
+			t.Fatalf("prs = %+v, want %+v", prs, want)
+		}
+	})
+
+	t.Run("paginates until a short page", func(t *testing.T) {
+		var requests atomic.Int32
+		client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.URL.Path == "/repos/owner/repo/issues/11/timeline":
+				requests.Add(1)
+				if r.URL.Query().Get("page") == "1" {
+					_, _ = w.Write([]byte(fillerTimelineJSON(timelinePageSize)))
+					return
+				}
+				_, _ = w.Write([]byte(`[{"event": "cross-referenced", "source": {"issue": {"number": 21, "pull_request": {}}}}]`))
+			case r.URL.Path == "/repos/owner/repo/pulls/21":
+				_, _ = w.Write([]byte(`{"number": 21, "merged": true, "merge_commit_sha": "fix-on-main"}`))
+			default:
+				t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			}
+		})
+
+		prs, complete, err := client.MergedFixPRs(context.Background(), 11)
+		if err != nil {
+			t.Fatalf("MergedFixPRs: %v", err)
+		}
+		if !complete {
+			t.Fatal("a short page must report a complete timeline")
+		}
+		if len(prs) != 1 || prs[0].Number != 21 {
+			t.Fatalf("prs = %+v, want the page-2 cross-reference", prs)
+		}
+		if got := requests.Load(); got != 2 {
+			t.Errorf("expected 2 timeline pages, got %d requests", got)
+		}
+	})
+
+	t.Run("cap exhaustion reports incomplete without guessing", func(t *testing.T) {
+		var requests atomic.Int32
+		client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+			requests.Add(1)
+			_, _ = w.Write([]byte(fillerTimelineJSON(timelinePageSize)))
+		})
+
+		if _, complete, err := client.MergedFixPRs(context.Background(), 11); err != nil || complete {
+			t.Fatalf("cap exhaustion must be complete=false, err=nil; got complete=%t err=%v", complete, err)
+		}
+		if got := requests.Load(); got != int32(maxTimelinePages) {
+			t.Errorf("expected %d timeline pages, got %d", maxTimelinePages, got)
+		}
+	})
+
+	t.Run("API failure is an error", func(t *testing.T) {
+		client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusTooManyRequests)
+		})
+		if _, _, err := client.MergedFixPRs(context.Background(), 11); err == nil {
+			t.Fatal("429 must be an error")
+		}
+	})
+}
+
+// fillerTagsJSON builds a full page of tags.
+func fillerTagsJSON(count int) string {
+	var b strings.Builder
+	b.WriteString("[")
+	for i := 0; i < count; i++ {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		fmt.Fprintf(&b, `{"name": "v0.0.%d", "commit": {"sha": "t%d"}}`, i+1, i+1)
+	}
+	b.WriteString("]")
+	return b.String()
+}
+
+func TestRESTClientListTags(t *testing.T) {
+	t.Run("paginates until a short page", func(t *testing.T) {
+		client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+			requireHeaders(t, r)
+			if r.URL.Path != "/repos/owner/repo/tags" {
+				t.Errorf("path = %q, want /repos/owner/repo/tags", r.URL.Path)
+			}
+			if got := r.URL.Query().Get("per_page"); got != "100" {
+				t.Errorf("per_page = %q, want 100", got)
+			}
+			if r.URL.Query().Get("page") == "1" {
+				_, _ = w.Write([]byte(fillerTagsJSON(tagsPageSize)))
+				return
+			}
+			_, _ = w.Write([]byte(`[{"name": "v2.0.0-rc.1", "commit": {"sha": "rc-sha"}}]`))
+		})
+
+		tags, complete, err := client.ListTags(context.Background())
+		if err != nil {
+			t.Fatalf("ListTags: %v", err)
+		}
+		if !complete {
+			t.Fatal("a short page must report a complete tag list")
+		}
+		if len(tags) != tagsPageSize+1 {
+			t.Fatalf("got %d tags, want %d", len(tags), tagsPageSize+1)
+		}
+		last := tags[len(tags)-1]
+		if last.Name != "v2.0.0-rc.1" || last.Commit != "rc-sha" {
+			t.Fatalf("last tag = %+v, want the page-2 tag with its commit SHA", last)
+		}
+	})
+
+	t.Run("cap exhaustion reports incomplete", func(t *testing.T) {
+		var requests atomic.Int32
+		client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+			requests.Add(1)
+			_, _ = w.Write([]byte(fillerTagsJSON(tagsPageSize)))
+		})
+
+		tags, complete, err := client.ListTags(context.Background())
+		if err != nil {
+			t.Fatalf("ListTags: %v", err)
+		}
+		if complete {
+			t.Fatal("cap exhaustion without a short page must report incomplete")
+		}
+		if len(tags) != maxTagPages*tagsPageSize {
+			t.Fatalf("got %d tags, want %d", len(tags), maxTagPages*tagsPageSize)
+		}
+		if got := requests.Load(); got != int32(maxTagPages) {
+			t.Errorf("expected %d tag pages, got %d", maxTagPages, got)
+		}
+	})
+
+	t.Run("API failure is an error", func(t *testing.T) {
+		client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+		})
+		if _, _, err := client.ListTags(context.Background()); err == nil {
+			t.Fatal("403 must be an error")
+		}
+	})
+}
+
+// TestRESTClientCommitContainedInStatuses pins the exact compare statuses
+// accepted as proof of ancestry: "behind" or "identical" (tag as base, fix
+// commit as head) prove containment; "ahead" and "diverged" prove absence;
+// anything else is an ambiguous answer and must be an error.
+func TestRESTClientCommitContainedInStatuses(t *testing.T) {
+	tests := []struct {
+		status  string
+		want    bool
+		wantErr bool
+	}{
+		{status: "behind", want: true},
+		{status: "identical", want: true},
+		{status: "ahead", want: false},
+		{status: "diverged", want: false},
+		{status: "", wantErr: true},
+		{status: "confused", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run("status "+tt.status, func(t *testing.T) {
+			client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+				requireHeaders(t, r)
+				if want := "/repos/owner/repo/compare/v1.0.0...abc123"; r.URL.Path != want {
+					t.Errorf("path = %q, want %q", r.URL.Path, want)
+				}
+				fmt.Fprintf(w, `{"status": %q}`, tt.status)
+			})
+
+			contained, err := client.CommitContainedIn(context.Background(), "v1.0.0", "abc123")
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("status %q must be an error, got contained=%t", tt.status, contained)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("status %q: %v", tt.status, err)
+			}
+			if contained != tt.want {
+				t.Errorf("status %q: contained = %t, want %t", tt.status, contained, tt.want)
+			}
+		})
+	}
+
+	t.Run("HTTP failure is an error", func(t *testing.T) {
+		client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		})
+		if _, err := client.CommitContainedIn(context.Background(), "v1.0.0", "abc123"); err == nil {
+			t.Fatal("500 must be an error")
+		}
+	})
 }

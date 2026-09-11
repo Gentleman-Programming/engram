@@ -19,18 +19,23 @@ const (
 	triageRequestTimeout = 2 * time.Minute
 )
 
-// runTriageDuplicateDetection and newTriageClient are injectable for tests.
+// runTriageDuplicateDetection, newTriageClient, and newTriageFixSource are
+// injectable for tests.
 var (
 	runTriageDuplicateDetection = triage.Run
 	newTriageClient             = func(baseURL, repo, token string) triage.Client {
+		return triage.NewRESTClient(baseURL, repo, token, nil)
+	}
+	newTriageFixSource = func(baseURL, repo, token string) triage.FixEvidenceSource {
 		return triage.NewRESTClient(baseURL, repo, token, nil)
 	}
 )
 
 // triageOptions holds the parsed triage-duplicates command line.
 type triageOptions struct {
-	repo  string
-	issue int
+	repo            string
+	issue           int
+	fixAvailability bool
 }
 
 // cmdTriageDuplicates implements `engram triage-duplicates --repo owner/name
@@ -58,11 +63,15 @@ func cmdTriageDuplicates(args []string) int {
 
 	ctx, cancel := context.WithTimeout(context.Background(), triageRequestTimeout)
 	defer cancel()
-	err = runTriageDuplicateDetection(ctx, triage.Options{
+	runOptions := triage.Options{
 		IssueNumber: options.issue,
 		Client:      newTriageClient(triageGitHubAPIBase, options.repo, token),
 		Log:         log.Printf,
-	})
+	}
+	if options.fixAvailability {
+		runOptions.FixSource = newTriageFixSource(triageGitHubAPIBase, options.repo, token)
+	}
+	err = runTriageDuplicateDetection(ctx, runOptions)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: triage-duplicates failed (ignored): %v\n", err)
 		return triageExitSuccess
@@ -93,6 +102,8 @@ func parseTriageArgs(args []string) (triageOptions, bool, error) {
 				return triageOptions{}, false, fmt.Errorf("--issue requires a positive issue number, got %q", args[i])
 			}
 			opts.issue = number
+		case "--fix-availability":
+			opts.fixAvailability = true
 		case "--help", "-h":
 			help = true
 		default:
@@ -118,10 +129,13 @@ func parseTriageArgs(args []string) (triageOptions, bool, error) {
 }
 
 func printTriageUsage() {
-	fmt.Println("usage: engram triage-duplicates --repo owner/name --issue N")
+	fmt.Println("usage: engram triage-duplicates --repo owner/name --issue N [--fix-availability]")
 	fmt.Println()
 	fmt.Println("Detect possible duplicate issues for one issue and reconcile the")
 	fmt.Println("triage:possible-duplicate label and its single anchored comment.")
 	fmt.Println("Reads GITHUB_TOKEN from the environment (--repo falls back to")
 	fmt.Println("GITHUB_REPOSITORY). GitHub API failures are warnings, not errors.")
+	fmt.Println("--fix-availability also classifies, per candidate, whether a linked")
+	fmt.Println("merged fix is reachable from main or shipped in a release tag (off by")
+	fmt.Println("default).")
 }

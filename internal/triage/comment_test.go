@@ -109,3 +109,93 @@ func TestRenderedCommentNeverContainsMentions(t *testing.T) {
 		t.Errorf("snippet mention should be neutralized in place:\n%s", body)
 	}
 }
+
+func TestRenderCandidatesCommentWithFixAvailability(t *testing.T) {
+	stable, _ := ParseTagVersion("v1.10.1")
+	prerelease, _ := ParseTagVersion("v2.0.0-rc.3")
+	reporterOld, _ := ParseTagVersion("1.10.0")
+	reporterNew, _ := ParseTagVersion("1.10.1")
+
+	tests := []struct {
+		name string
+		fix  FixAvailability
+		want []string
+	}{
+		{
+			name: "unresolved",
+			fix:  FixAvailability{Class: FixUnresolved},
+			want: []string{
+				"  - Fix availability: no merged fix pull request is linked to this candidate, so the problem appears unresolved.",
+			},
+		},
+		{
+			name: "on main only",
+			fix:  FixAvailability{Class: FixOnMain},
+			want: []string{
+				"  - Fix availability: the linked fix is merged on the default branch and not in any release tag yet, so it is not yet generally available.",
+				"  - Fix routing: no stable release contains the fix yet, so the reporter cannot upgrade past this problem today.",
+			},
+		},
+		{
+			name: "prerelease only",
+			fix:  FixAvailability{Class: FixInPrerelease, EarliestPrerelease: &prerelease},
+			want: []string{
+				"  - Fix availability: the linked fix is included in v2.0.0-rc.3 (prerelease); no stable release contains it yet, so it is not yet generally available.",
+				"  - Fix routing: no stable release contains the fix yet, so the reporter cannot upgrade past this problem today.",
+			},
+		},
+		{
+			name: "stable with earlier prerelease (union per channel)",
+			fix:  FixAvailability{Class: FixInStable, EarliestStable: &stable, EarliestPrerelease: &prerelease},
+			want: []string{
+				"  - Fix availability: the linked fix is included in v1.10.1 (stable release), first shipped in v2.0.0-rc.3 (prerelease).",
+				"  - Fix routing: the reporter version is missing or malformed in the report body, so no version comparison was made.",
+			},
+		},
+		{
+			name: "upgrade routing",
+			fix:  FixAvailability{Class: FixInStable, EarliestStable: &stable, Reporter: &reporterOld, ReporterRaw: "1.10.0"},
+			want: []string{
+				"  - Fix availability: the linked fix is included in v1.10.1 (stable release).",
+				"  - Fix routing: the reporter runs 1.10.0, which predates the fix; the minimum fixed version is v1.10.1, so upgrading to v1.10.1 or later should resolve this report.",
+			},
+		},
+		{
+			name: "regression routing",
+			fix:  FixAvailability{Class: FixInStable, EarliestStable: &stable, Reporter: &reporterNew, ReporterRaw: "1.10.1"},
+			want: []string{
+				"  - Fix routing: the reporter runs 1.10.1, which is the same as or newer than the earliest stable fix v1.10.1; treat this report as a possible regression rather than an old occurrence.",
+			},
+		},
+		{
+			name: "ambiguous",
+			fix:  FixAvailability{Class: FixAmbiguous},
+			want: []string{
+				"  - Fix availability: linked fix evidence is incomplete or ambiguous, so availability was not verified; maintainers should check manually.",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			matches := []Match{{
+				Issue:           Issue{Number: 11, Title: "App crashes when saving a large note", State: "open"},
+				TitleSimilarity: 0.7,
+				Fix:             &tt.fix,
+			}}
+			body := RenderCandidatesComment(matches)
+			for _, want := range tt.want {
+				if !strings.Contains(body, want) {
+					t.Errorf("comment missing %q:\n%s", want, body)
+				}
+			}
+			if recorded := ParseRecordedCandidates(body); !reflect.DeepEqual(recorded, []int{11}) {
+				t.Errorf("ParseRecordedCandidates must ignore fix lines, got %v", recorded)
+			}
+			for _, line := range strings.Split(body, "\n") {
+				if strings.HasPrefix(line, "  - Fix") && strings.Contains(line, "—") {
+					t.Errorf("fix lines must not use em dashes: %q", line)
+				}
+			}
+		})
+	}
+}

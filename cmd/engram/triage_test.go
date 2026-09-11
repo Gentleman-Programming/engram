@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -257,5 +258,79 @@ func TestCmdMain_TriageDuplicatesWired(t *testing.T) {
 	_, stderr, _ := captureOutputAndRecover(t, func() { main() })
 	if strings.Contains(stderr, "unknown command: triage-duplicates") {
 		t.Errorf("triage-duplicates not wired in main switch; stderr: %q", stderr)
+	}
+}
+
+func TestParseTriageArgsFixAvailabilityFlag(t *testing.T) {
+	t.Run("default off", func(t *testing.T) {
+		opts, _, err := parseTriageArgs([]string{"--repo", "o/r", "--issue", "5"})
+		if err != nil {
+			t.Fatalf("parseTriageArgs: %v", err)
+		}
+		if opts.fixAvailability {
+			t.Error("fix availability must default to off")
+		}
+	})
+
+	t.Run("presence enables it", func(t *testing.T) {
+		opts, _, err := parseTriageArgs([]string{"--repo", "o/r", "--issue", "5", "--fix-availability"})
+		if err != nil {
+			t.Fatalf("parseTriageArgs: %v", err)
+		}
+		if !opts.fixAvailability {
+			t.Error("--fix-availability must enable the feature")
+		}
+	})
+
+	t.Run("value form is rejected as unknown", func(t *testing.T) {
+		if _, _, err := parseTriageArgs([]string{"--repo", "o/r", "--issue", "5", "--fix-availability=true"}); err == nil {
+			t.Error("only bare --fix-availability is supported")
+		}
+	})
+
+	t.Run("usage documents the flag", func(t *testing.T) {
+		var code int
+		stdout, _ := captureOutput(t, func() {
+			code = cmdTriageDuplicates([]string{"--help"})
+		})
+		if code != triageExitSuccess {
+			t.Fatalf("exit code = %d, want 0", code)
+		}
+		if !strings.Contains(stdout, "--fix-availability") {
+			t.Errorf("usage must document --fix-availability, got: %q", stdout)
+		}
+	})
+}
+
+// TestCmdTriageDuplicatesFixSourceOptional pins the CLI wiring: without the
+// flag Run receives a nil FixEvidenceSource (feature fully off); with it Run
+// receives a source.
+func TestCmdTriageDuplicatesFixSourceOptional(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_REPOSITORY", "")
+
+	var captured []triage.FixEvidenceSource
+	original := runTriageDuplicateDetection
+	runTriageDuplicateDetection = func(_ context.Context, opts triage.Options) error {
+		captured = append(captured, opts.FixSource)
+		return nil
+	}
+	t.Cleanup(func() { runTriageDuplicateDetection = original })
+
+	if code := cmdTriageDuplicates([]string{"--repo", "o/r", "--issue", "5"}); code != triageExitSuccess {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if code := cmdTriageDuplicates([]string{"--repo", "o/r", "--issue", "5", "--fix-availability"}); code != triageExitSuccess {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+
+	if len(captured) != 2 {
+		t.Fatalf("expected two Run invocations, got %d", len(captured))
+	}
+	if captured[0] != nil {
+		t.Error("FixSource must be nil without the flag")
+	}
+	if captured[1] == nil {
+		t.Error("FixSource must be provided with --fix-availability")
 	}
 }

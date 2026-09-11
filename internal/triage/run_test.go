@@ -480,3 +480,70 @@ func TestRunClientFailurePaths(t *testing.T) {
 		})
 	}
 }
+
+// TestRunFixAvailabilityWiring pins the optional FixSource dependency: nil
+// keeps the rendered comment byte-identical, a working source adds one
+// deterministic fix-availability block per candidate, and evidence failures
+// degrade to the conservative ambiguous wording without failing the run.
+func TestRunFixAvailabilityWiring(t *testing.T) {
+	target := Issue{Number: 10, Title: "App crashes when saving large notes", Body: "**Engram Version**\n1.10.0\n"}
+	candidate := Issue{Number: 11, Title: "App crashes when saving a large note", State: "open"}
+
+	t.Run("nil source leaves the comment byte-identical", func(t *testing.T) {
+		fake := &fakeTriageClient{issue: target, search: []Issue{candidate}}
+		if err := Run(context.Background(), Options{IssueNumber: 10, Client: fake}); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		want := RenderCandidatesComment(RankCandidates(target, []Issue{candidate}))
+		if len(fake.createdBodies) != 1 || fake.createdBodies[0] != want {
+			t.Fatalf("comment without a fix source must stay byte-identical to the baseline")
+		}
+	})
+
+	t.Run("stable fix renders availability and routing lines for the candidate", func(t *testing.T) {
+		source := &fakeFixSource{
+			prs:          []FixPR{{Number: 21, MergeCommit: "c1"}},
+			prsComplete:  true,
+			tags:         []RepoTag{{Name: "v1.10.1", Commit: "t1"}},
+			tagsComplete: true,
+			contained: map[string]bool{
+				"main...c1":    true,
+				"v1.10.1...c1": true,
+			},
+		}
+		fake := &fakeTriageClient{issue: target, search: []Issue{candidate}}
+		if err := Run(context.Background(), Options{IssueNumber: 10, Client: fake, FixSource: source}); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if len(fake.createdBodies) != 1 {
+			t.Fatalf("expected exactly one created comment, got %d", len(fake.createdBodies))
+		}
+		body := fake.createdBodies[0]
+		for _, want := range []string{
+			"  - Fix availability: the linked fix is included in v1.10.1 (stable release).",
+			"  - Fix routing: the reporter runs 1.10.0, which predates the fix; the minimum fixed version is v1.10.1, so upgrading to v1.10.1 or later should resolve this report.",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("comment missing %q:\n%s", want, body)
+			}
+		}
+		if source.timelineCalls != 1 {
+			t.Fatalf("evidence must be collected exactly once for the single candidate, got %d calls", source.timelineCalls)
+		}
+	})
+
+	t.Run("evidence failure degrades to the conservative ambiguous line", func(t *testing.T) {
+		source := &fakeFixSource{prsErr: errors.New("429 too many requests")}
+		fake := &fakeTriageClient{issue: target, search: []Issue{candidate}}
+		if err := Run(context.Background(), Options{IssueNumber: 10, Client: fake, FixSource: source}); err != nil {
+			t.Fatalf("evidence failures must not fail the run: %v", err)
+		}
+		if len(fake.createdBodies) != 1 {
+			t.Fatalf("expected exactly one created comment, got %d", len(fake.createdBodies))
+		}
+		body := fake.createdBodies[0]
+		if !strings.Contains(body, "  - Fix availability: linked fix evidence is incomplete or ambiguous") {
+			t.Errorf("comment missing the conservative ambiguous line:\n%s", body)
+		}
+	})
+}

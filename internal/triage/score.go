@@ -9,6 +9,10 @@ type Match struct {
 	TitleSimilarity  float64 // Jaccard over normalized title token sets
 	SharedTerms      []string
 	MatchingSnippets []string
+	// Fix carries the deterministic fix-availability classification for this
+	// candidate when the optional evidence source is enabled; nil renders no
+	// fix lines and changes nothing else.
+	Fix *FixAvailability
 }
 
 const (
