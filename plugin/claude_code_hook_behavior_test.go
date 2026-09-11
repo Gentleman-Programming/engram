@@ -302,7 +302,7 @@ func serverPort(t *testing.T, srv *httptest.Server) string {
 // Unlike the PowerShell source parser in claude_code_hook_enforcement_test.go,
 // this parses runtime-emitted additionalContext, where a single select: anchor
 // has no comment-marker ambiguity.
-func selectNames(t *testing.T, additionalContext string) map[string]bool {
+func selectNames(t *testing.T, additionalContext string) []string {
 	t.Helper()
 	idx := strings.Index(additionalContext, "select:")
 	if idx < 0 {
@@ -312,39 +312,33 @@ func selectNames(t *testing.T, additionalContext string) map[string]bool {
 	if nl := strings.IndexAny(rest, "\r\n"); nl >= 0 {
 		rest = rest[:nl]
 	}
-	set := make(map[string]bool)
+	var names []string
 	for _, name := range strings.Split(rest, ",") {
 		if name = strings.TrimSpace(name); name != "" {
-			set[name] = true
+			names = append(names, name)
 		}
 	}
-	return set
+	return names
 }
 
 var claudeCodeBootstrapTools = []string{
 	"mem_save", "mem_search", "mem_context", "mem_session_summary",
 	"mem_session_start", "mem_session_end", "mem_get_observation",
 	"mem_suggest_topic_key", "mem_capture_passive", "mem_save_prompt",
-	"mem_update", "mem_current_project", "mem_judge",
+	"mem_update", "mem_current_project", "mem_judge", "mem_doctor",
+	"mem_review", "mem_pin", "mem_unpin",
 }
 
-func assertToolSearchNames(t *testing.T, listed map[string]bool) {
+func assertToolSearchNames(t *testing.T, listed []string) {
 	t.Helper()
-	want := make(map[string]bool, len(claudeCodeBootstrapTools)*2)
-	for _, prefix := range []string{"mcp__engram__", "mcp__plugin_engram_engram__"} {
+	want := make([]string, 0, len(claudeCodeBootstrapTools)*2)
+	for _, prefix := range []string{"mcp__plugin_engram_engram__", "mcp__engram__"} {
 		for _, tool := range claudeCodeBootstrapTools {
-			want[prefix+tool] = true
+			want = append(want, prefix+tool)
 		}
 	}
-	for name := range want {
-		if !listed[name] {
-			t.Errorf("emitted select: list is missing %q", name)
-		}
-	}
-	for name := range listed {
-		if !want[name] {
-			t.Errorf("emitted select: list contains unexpected name %q", name)
-		}
+	if !equalStrings(listed, want) {
+		t.Errorf("emitted select: list = %q, want %q", listed, want)
 	}
 }
 
