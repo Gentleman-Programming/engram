@@ -159,7 +159,7 @@ untracked, and latest committed changes compared with `HEAD~`.
 |-------|---------|
 | `resolution:duplicate` | Confirmed duplicate after closure |
 
-Use `status:possible-duplicate` while evaluating a report. Close confirmed duplicates with `resolution:duplicate`; do not use it as an evaluation status.
+Use `status:possible-duplicate` while evaluating a report. After confirming and closing the duplicate, remove the evaluation status and apply `resolution:duplicate`.
 
 ### Priority Labels (set by maintainers)
 
