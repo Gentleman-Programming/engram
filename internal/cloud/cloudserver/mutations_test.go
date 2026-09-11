@@ -454,6 +454,65 @@ func TestMutationPushEndpointAccepted(t *testing.T) {
 	}
 }
 
+func TestMutationPushInsertFailureLogsBoundedSafeIdentityWithoutAudit(t *testing.T) {
+	const (
+		payloadSecret = "payload-secret-must-not-appear"
+		tokenSecret   = "token-secret-must-not-appear"
+		causeSecret   = "raw-cause-secret-must-not-appear"
+	)
+	entityKey := "safe-✓\n\t" + strings.Repeat("x", 80) + "not-retained"
+	ms := newFakeMutationStore()
+	ms.errInsert = &cloudstore.MutationBatchEntryError{
+		BatchIndex: 0,
+		Entity:     "observation",
+		EntityKey:  entityKey,
+		Err:        fmt.Errorf("database failure: %s", causeSecret),
+	}
+	srv := newMutationTestServer(ms, tokenSecret, []string{"proj-a"})
+
+	var logs bytes.Buffer
+	entries := []MutationEntry{{
+		Project:   "proj-a",
+		Entity:    "observation",
+		EntityKey: "safe-record",
+		Op:        "upsert",
+		Payload:   json.RawMessage(`{"title":"payload-secret-must-not-appear"}`),
+	}}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", marshalPushRequest(t, entries))
+	req = req.WithContext(withMutationPushLogWriter(req.Context(), &logs))
+	req.Header.Set("Authorization", "Bearer "+tokenSecret)
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if len(ms.auditCalls) != 0 {
+		t.Fatalf("expected no audit rows for insert failure, got %+v", ms.auditCalls)
+	}
+	output := logs.String()
+	if count := strings.Count(output, "mutation push rejected"); count != 1 {
+		t.Fatalf("expected exactly one rejection log, got %d logs=%q", count, output)
+	}
+	for _, want := range []string{"batch_index=0", `entity="observation"`, `entity_key="safe-✓\n\t`} {
+		if !strings.Contains(output, want) {
+			t.Errorf("rejection log = %q, want %q", output, want)
+		}
+	}
+	if strings.Count(output, "\n") != 1 {
+		t.Errorf("rejection log contains an injected physical line: %q", output)
+	}
+	for _, forbidden := range []string{payloadSecret, tokenSecret, causeSecret, "not-retained"} {
+		if strings.Contains(output, forbidden) {
+			t.Errorf("rejection log exposes %q: %q", forbidden, output)
+		}
+		if strings.Contains(rec.Body.String(), forbidden) {
+			t.Errorf("500 response exposes %q: %q", forbidden, rec.Body.String())
+		}
+	}
+}
+
 func TestMutationPushEndpointUnauth(t *testing.T) {
 	// REQ-200 missing token → 401
 	ms := newFakeMutationStore()
