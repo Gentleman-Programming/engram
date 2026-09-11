@@ -43,10 +43,7 @@ func (v Version) String() string { return v.raw }
 // Build metadata and anything else is malformed; callers must ignore malformed
 // tags rather than classify from them.
 func ParseTagVersion(s string) (Version, bool) {
-	trimmed := s
-	if strings.HasPrefix(trimmed, "v") {
-		trimmed = trimmed[1:]
-	}
+	trimmed := strings.TrimPrefix(s, "v")
 	core, prerelease, hasPrerelease := trimmed, "", false
 	if i := strings.Index(trimmed, "-"); i >= 0 {
 		core, prerelease, hasPrerelease = trimmed[:i], trimmed[i+1:], true

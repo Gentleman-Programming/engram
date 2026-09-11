@@ -411,15 +411,15 @@ func TestRESTClientMergedFixPRs(t *testing.T) {
 	t.Run("paginates until a short page", func(t *testing.T) {
 		var requests atomic.Int32
 		client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-			switch {
-			case r.URL.Path == "/repos/owner/repo/issues/11/timeline":
+			switch r.URL.Path {
+			case "/repos/owner/repo/issues/11/timeline":
 				requests.Add(1)
 				if r.URL.Query().Get("page") == "1" {
 					_, _ = w.Write([]byte(fillerTimelineJSON(timelinePageSize)))
 					return
 				}
 				_, _ = w.Write([]byte(`[{"event": "cross-referenced", "source": {"issue": {"number": 21, "pull_request": {}}}}]`))
-			case r.URL.Path == "/repos/owner/repo/pulls/21":
+			case "/repos/owner/repo/pulls/21":
 				_, _ = w.Write([]byte(`{"number": 21, "merged": true, "merge_commit_sha": "fix-on-main"}`))
 			default:
 				t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
@@ -569,7 +569,7 @@ func TestRESTClientCommitContainedInStatuses(t *testing.T) {
 				if want := "/repos/owner/repo/compare/v1.0.0...abc123"; r.URL.Path != want {
 					t.Errorf("path = %q, want %q", r.URL.Path, want)
 				}
-				fmt.Fprintf(w, `{"status": %q}`, tt.status)
+				_, _ = fmt.Fprintf(w, `{"status": %q}`, tt.status)
 			})
 
 			contained, err := client.CommitContainedIn(context.Background(), "v1.0.0", "abc123")
