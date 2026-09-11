@@ -7,25 +7,52 @@ import {
   listPullRequestFiles,
 } from './transient-artifacts.mjs';
 
-test('identifies evidence-backed transient artifact paths', () => {
-  const rejectedPaths = [
-    '.atl/skill-registry.md',
-    '.DS_Store',
-    'foo.db',
-    'foo.swp',
-    'foo~',
-    'foo.exe',
-    'engram-export.json',
-    'plan.md',
-    'agent-report.md',
-    'agent-handoff.md',
-    'handoff.md',
-    'openspec/changes/reject-artifacts/proposal.md',
-    'sdd/changes/reject-artifacts/tasks.md',
+test('identifies every configured transient artifact classifier and variant', () => {
+  const rejectedCases = [
+    { classifier: '.atl artifacts', paths: ['.atl/skill-registry.md'] },
+    {
+      classifier: 'generated agent-link roots',
+      paths: [
+        '.claude/skills/skill.md',
+        '.codex/skills/skill.md',
+        '.github/skills/skill.md',
+        '.gemini/skills/skill.md',
+      ],
+    },
+    { classifier: 'engram-dev artifacts', paths: ['engram-dev/state.json'] },
+    {
+      classifier: 'root transient development documents',
+      paths: ['plan.md', 'agent-report.md', 'agent-handoff.md', 'handoff.md'],
+    },
+    {
+      classifier: 'root transient process artifacts',
+      paths: [
+        'openspec/changes/reject-artifacts/proposal.md',
+        'sdd/changes/reject-artifacts/tasks.md',
+      ],
+    },
+    { classifier: 'release-notes beta artifacts', paths: ['.release-notes-beta.md'] },
+    { classifier: 'local databases', paths: ['foo.db', 'foo.db-wal', 'foo.db-shm'] },
+    { classifier: 'local exports', paths: ['engram-export.json'] },
+    {
+      classifier: 'binaries',
+      paths: [
+        'engram',
+        'cmd/engram/main',
+        'cmd/engram/gentle-creation',
+        'cmd/engram/engram',
+        'foo.exe',
+      ],
+    },
+    { classifier: 'OS metadata', paths: ['.DS_Store', 'Thumbs.db'] },
+    { classifier: 'editor metadata', paths: ['.idea/workspace.xml', '.vscode/settings.json'] },
+    { classifier: 'editor and backup files', paths: ['foo.swp', 'foo.swo', 'foo~'] },
   ];
 
-  for (const filePath of rejectedPaths) {
-    assert.equal(isTransientArtifactPath(filePath), true, filePath);
+  for (const { classifier, paths } of rejectedCases) {
+    for (const filePath of paths) {
+      assert.equal(isTransientArtifactPath(filePath), true, `${classifier}: ${filePath}`);
+    }
   }
 });
 
@@ -38,16 +65,19 @@ test('allows reviewed and documented files', () => {
     'internal/cloud/dashboard/page_templ.go',
     'docs/plan.md',
     'specs/transient-artifact-policy.md',
+    'fixtures/.claude/skills/skill.md',
+    'fixtures/.codex/skills/skill.md',
+    'fixtures/.github/skills/skill.md',
+    'fixtures/.gemini/skills/skill.md',
+    'fixtures/openspec/changes/reject-artifacts/proposal.md',
+    'fixtures/sdd/changes/reject-artifacts/tasks.md',
+    'tools/engram',
+    'fixtures/cmd/engram/main',
   ];
 
   for (const filePath of allowedPaths) {
     assert.equal(isTransientArtifactPath(filePath), false, filePath);
   }
-});
-
-test('restricts generated agent-link rules to repository-root paths', () => {
-  assert.equal(isTransientArtifactPath('.claude/skills/skill.md'), true);
-  assert.equal(isTransientArtifactPath('fixtures/.claude/skills/skill.md'), false);
 });
 
 test('allows deleted artifacts and rejects renamed destinations', () => {
@@ -119,6 +149,19 @@ test('propagates pull request file enumeration failures', async () => {
     paginate: async () => {
       throw failure;
     },
+  };
+
+  await assert.rejects(
+    listPullRequestFiles(github, { owner: 'Gentleman-Programming', repo: 'engram', pullNumber: 1093 }),
+    failure,
+  );
+});
+
+test('propagates pull request metadata failures', async () => {
+  const failure = new Error('GitHub pull request lookup unavailable');
+  const github = {
+    rest: { pulls: { get: async () => { throw failure; }, listFiles: () => {} } },
+    paginate: async () => assert.fail('pagination must not run after a pull request lookup failure'),
   };
 
   await assert.rejects(

@@ -48,7 +48,7 @@ Required checks run automatically on every PR:
 | **Check Issue Reference** | PR body contains `Closes #N`, `Fixes #N`, or `Resolves #N` |
 | **Check Issue Has status:approved** | The linked issue has the `status:approved` label |
 | **Check PR Has type:* Label** | PR has exactly one `type:*` label |
-| **Check PR Has No Transient Artifacts** | PR files do not include local, generated agent-link, binary, database/export, OS/editor, or backup artifacts |
+| **Check PR Has No Transient Artifacts** | PR files comply with the [Transient Artifact Policy](#transient-artifact-policy) |
 
 #### CI Tests
 
@@ -61,6 +61,25 @@ Required checks run automatically on every PR:
 All required checks must pass before a PR can be merged.
 
 > **Repo admin note:** Set these as required status checks in branch protection rules for `main`: `Lint`, `Unit Tests`, `E2E Tests`, `Plugin Tests`, and `PR Validation`.
+
+## Transient Artifact Policy
+
+PR validation inspects the complete changed-file set. Deleted artifacts are allowed; enforcement applies to added, modified, copied, and renamed destination paths. It rejects the following transient artifacts unless a path is explicitly described as repository-root-only:
+
+| Enforced class | Forbidden paths and variants |
+|---|---|
+| Agent-tool state | Any directory named `.atl` (at any depth) and `**/engram-dev/**` |
+| Generated agent links | Repository-root `.claude/skills/**`, `.codex/skills/**`, `.github/skills/**`, and `.gemini/skills/**` |
+| Transient development documents | Repository-root `plan.md`, `agent-report.md`, `agent-handoff.md`, and `handoff.md` |
+| Transient process artifacts | Repository-root `openspec/changes/**` and `sdd/changes/**` |
+| Release metadata | `**/.release-notes-beta.md` |
+| Local data | `**/*.db`, `**/*.db-wal`, `**/*.db-shm`, and `**/engram-export.json` |
+| Binaries | Repository-root `engram`, `cmd/engram/main`, `cmd/engram/gentle-creation`, `cmd/engram/engram`, and `**/*.exe` |
+| OS metadata | `**/.DS_Store` and `**/Thumbs.db` |
+| Editor metadata | `**/.idea/**` and `**/.vscode/**` |
+| Editor and backup files | `**/*.swp`, `**/*.swo`, and `**/*~` |
+
+Canonical, reviewable documentation is allowed. For example, `docs/plan.md` and `specs/transient-artifact-policy.md` are documentation, not root transient development documents. The four transient document names above are forbidden only at the repository root; do not use documentation paths to retain ephemeral local notes.
 
 ### Quality Ratchets
 
@@ -156,7 +175,7 @@ untracked, and latest committed changes compared with `HEAD~`.
 - Update docs in the same PR when behavior changes
 - Do not reference endpoints/scripts that do not exist in code
 - Do not include `Co-Authored-By` trailers in commits
-- Do not include transient local, generated agent-link, binary, database/export, OS/editor, or backup artifacts
+- Do not include paths prohibited by the [Transient Artifact Policy](#transient-artifact-policy)
 
 ### Conventional Commit Format
 

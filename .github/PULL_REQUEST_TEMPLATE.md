@@ -69,7 +69,7 @@ These run automatically and **all must pass** before merge:
 | **Check Issue Reference** | PR body contains `Closes #N` / `Fixes #N` / `Resolves #N` | ⏳ |
 | **Check Issue Has status:approved** | Linked issue has `status:approved` label | ⏳ |
 | **Check PR Has type:\* Label** | PR has exactly one `type:*` label | ⏳ |
-| **Check PR Has No Transient Artifacts** | PR files do not include transient local or generated artifacts | ⏳ |
+| **Check PR Has No Transient Artifacts** | PR files comply with the [Transient Artifact Policy](https://github.com/Gentleman-Programming/engram/blob/main/CONTRIBUTING.md#transient-artifact-policy) | ⏳ |
 | **Unit Tests** | `go test ./...` passes | ⏳ |
 | **E2E Tests** | `go test -tags e2e ./internal/server/...` passes | ⏳ |
 | **Plugin Tests** | `npm test` passes in `plugin/pi` | ⏳ |
@@ -87,7 +87,7 @@ These run automatically and **all must pass** before merge:
 - [ ] Docs updated (if behavior changed)
 - [ ] Commits follow [conventional commits](https://www.conventionalcommits.org/) format
 - [ ] No `Co-Authored-By` trailers in commits
-- [ ] No transient local, generated agent-link, binary, database/export, OS/editor, or backup artifacts are included
+- [ ] I checked every changed path against the [Transient Artifact Policy](https://github.com/Gentleman-Programming/engram/blob/main/CONTRIBUTING.md#transient-artifact-policy)
 
 ---
 
