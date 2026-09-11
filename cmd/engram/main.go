@@ -1305,9 +1305,11 @@ func parseDeleteTrailingArgs(args []string, usage string, supported ...string) (
 	return flags, true
 }
 
-// rejectDeleteHelpTarget rejects standard CLI help tokens before store access.
+// rejectDeleteHelpTarget rejects CLI help requests — the standard --help/-h
+// flags and the bare word "help" — before store access, so "engram delete
+// project help" can never cascade-delete a project actually named "help".
 func rejectDeleteHelpTarget(target, usage string) bool {
-	if target != "--help" && target != "-h" {
+	if target != "--help" && target != "-h" && target != "help" {
 		return false
 	}
 	fmt.Fprintln(os.Stderr, "usage: "+usage)
@@ -3257,6 +3259,7 @@ Commands:
   triage-duplicates --repo OWNER/NAME --issue N
                      Detect possible duplicate issues for one issue (GitHub triage bot;
                      reads GITHUB_TOKEN; API failures are warnings)
+                     --repo is optional when GITHUB_REPOSITORY (OWNER/NAME) is set
   search <query>     Search memories [--type TYPE] [--project PROJECT|--all] [--scope SCOPE] [--limit N] [--match all|any]
   save <title> <msg> Save a memory  [--type TYPE] [--project PROJECT] [--scope SCOPE]
   delete <obs_id>    Delete an observation [--hard] (soft-delete by default; --hard removes permanently)
