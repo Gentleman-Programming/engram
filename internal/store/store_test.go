@@ -6171,7 +6171,7 @@ func TestHookFallbacksAndAdditionalBranches(t *testing.T) {
 
 func TestSQLiteWriteRetryRetriesTransientLockErrors(t *testing.T) {
 	oldBackoffs := sqliteWriteRetryBackoffs
-	sqliteWriteRetryBackoffs = []time.Duration{0, 0, 0}
+	sqliteWriteRetryBackoffs = []time.Duration{0, 0, 0, 0, 0}
 	t.Cleanup(func() { sqliteWriteRetryBackoffs = oldBackoffs })
 
 	t.Run("begin lock is retried and succeeds", func(t *testing.T) {
@@ -6267,7 +6267,7 @@ func TestSQLiteWriteRetryPersistsAfterIndependentStoreReleasesLock(t *testing.T)
 		}
 	})
 
-	const lockFailuresBeforeRelease = 4
+	const lockFailuresBeforeRelease = 5
 	originalExec := writer.hooks.exec
 	lockFailures := 0
 	var releaseErr error
