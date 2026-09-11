@@ -368,6 +368,83 @@ func TestNew(t *testing.T) {
 	}
 }
 
+func TestImportWithProgressReportsOnlyCommittedChunks(t *testing.T) {
+	dst := newTestStore(t)
+	if err := dst.EnrollProject("proj-a"); err != nil {
+		t.Fatalf("enroll destination project: %v", err)
+	}
+
+	transport := newFakeCloudTransport()
+	transport.manifest = &Manifest{Version: ownershipModeManifestVersion, Chunks: []ChunkEntry{
+		{ID: "observation-first"},
+		{ID: "session-second"},
+	}}
+	project := "proj-a"
+	observation, err := json.Marshal(ChunkData{Observations: []store.Observation{{
+		SyncID: "obs-progress", SessionID: "sess-progress", Type: "note", Title: "progress", Content: "waits for session", Project: &project, Scope: "project",
+	}}})
+	if err != nil {
+		t.Fatalf("marshal observation chunk: %v", err)
+	}
+	session, err := json.Marshal(ChunkData{Sessions: []store.Session{{
+		ID: "sess-progress", Project: "proj-a", Directory: "/tmp/proj-a", StartedAt: "2026-01-01 00:00:00",
+	}}})
+	if err != nil {
+		t.Fatalf("marshal session chunk: %v", err)
+	}
+	transport.chunks["observation-first"] = observation
+	transport.chunks["session-second"] = session
+
+	var snapshots []ImportProgress
+	result, err := NewCloudWithTransport(dst, transport, "proj-a").ImportWithProgress(func(progress ImportProgress) {
+		snapshots = append(snapshots, progress)
+	})
+	if err != nil {
+		t.Fatalf("import with progress: %v", err)
+	}
+	if result.ChunksImported != 2 {
+		t.Fatalf("imported chunks = %d, want 2", result.ChunksImported)
+	}
+	if transport.readChunkCalls != 3 {
+		t.Fatalf("chunk reads = %d, want failed dependency attempt plus two commits", transport.readChunkCalls)
+	}
+	want := []ImportProgress{
+		{LocalChunks: 0, RemoteChunks: 2, PendingChunks: 2, Percentage: 0},
+		{LocalChunks: 1, RemoteChunks: 2, PendingChunks: 1, Percentage: 50},
+		{LocalChunks: 2, RemoteChunks: 2, PendingChunks: 0, Percentage: 100},
+	}
+	if !reflect.DeepEqual(snapshots, want) {
+		t.Fatalf("progress snapshots = %#v, want %#v", snapshots, want)
+	}
+}
+
+func TestImportWithProgressReportsCompletedNoOp(t *testing.T) {
+	dst := newTestStore(t)
+	if err := dst.EnrollProject("proj-a"); err != nil {
+		t.Fatalf("enroll destination project: %v", err)
+	}
+
+	transport := newFakeCloudTransport()
+	transport.manifest = &Manifest{Version: ownershipModeManifestVersion}
+	var snapshots []ImportProgress
+	result, err := NewCloudWithTransport(dst, transport, "proj-a").ImportWithProgress(func(progress ImportProgress) {
+		snapshots = append(snapshots, progress)
+	})
+	if err != nil {
+		t.Fatalf("no-op import with progress: %v", err)
+	}
+	if result.ChunksImported != 0 {
+		t.Fatalf("imported chunks = %d, want 0", result.ChunksImported)
+	}
+	want := []ImportProgress{
+		{LocalChunks: 0, RemoteChunks: 0, PendingChunks: 0, Percentage: 100},
+		{LocalChunks: 0, RemoteChunks: 0, PendingChunks: 0, Percentage: 100},
+	}
+	if !reflect.DeepEqual(snapshots, want) {
+		t.Fatalf("progress snapshots = %#v, want %#v", snapshots, want)
+	}
+}
+
 func TestExportImportFlowWithProjectFilter(t *testing.T) {
 	srcStore := newTestStore(t)
 	seedStoreForSync(t, srcStore)
