@@ -45,7 +45,14 @@
 4. Is there a test at the affected boundary?
 5. Did public docs stay aligned?
 6. Does the UI, if any, represent real behavior?
+7. Did the review inspect the complete changed-file set for prohibited transient artifacts?
 ```
+
+### Pull request artifact review
+
+- Inspect the complete changed-file set, including added, modified, copied, and renamed destinations.
+- Reject every class listed in the [Transient Artifact Policy](../../CONTRIBUTING.md#transient-artifact-policy); do not rely on a partial shorthand list.
+- Treat repository-root-only restrictions as scoped: canonical documentation such as `docs/plan.md` remains allowed.
 
 ## Guardrails that must not break
 
