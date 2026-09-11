@@ -933,10 +933,6 @@ const (
 	recoveredMissingSessionStartedAt            = "1970-01-01 00:00:00"
 )
 
-func (sy *Syncer) importEntriesDependencySafe(entries []ChunkEntry, knownChunks map[string]bool, mode importMode, manifestVersion int) (*ImportResult, error) {
-	return sy.importEntriesDependencySafeWithProgress(entries, knownChunks, mode, manifestVersion, nil)
-}
-
 func (sy *Syncer) importEntriesDependencySafeWithProgress(entries []ChunkEntry, knownChunks map[string]bool, mode importMode, manifestVersion int, afterCommit func()) (*ImportResult, error) {
 	result := &ImportResult{}
 	pendingEntries := make([]ChunkEntry, 0, len(entries))
