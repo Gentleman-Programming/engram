@@ -201,6 +201,7 @@ The only unnamespaced labels are maintainer-owned protected exceptions: `good fi
 | `bug` | `type:bug` | Canonical label wins | Stop for manual review |
 | `enhancement` | `type:feature` | Canonical label wins | Stop for manual review |
 | `question` | `type:question` | Canonical label wins | Stop for manual review |
+| `documentation` | `type:docs` | Canonical label wins | Stop for manual review |
 | `up for grabs` | `help wanted` | Canonical label wins | Stop for manual review |
 
 Preview a label migration locally before changing an issue or pull request:

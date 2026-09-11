@@ -117,9 +117,30 @@ func TestPRValidationAndTransientArtifactWorkflowContracts(t *testing.T) {
 		t.Fatalf("read %s: %v", labelCheckPath, err)
 	}
 	labelCheck := strings.ReplaceAll(string(labelCheckContent), "\r\n", "\n")
-	for _, required := range []string{"pull_request_target:", "types: [opened, edited, labeled, unlabeled, synchronize, reopened]", "check-label-policy:", "name: Check PR Has type:* Label", "group: ${{ github.workflow }}-type-label-${{ github.event.pull_request.number }}", "cancel-in-progress: true", "ref: ${{ github.event.pull_request.base.sha }}", "persist-credentials: false"} {
+	for _, required := range []string{
+		"pull_request_target:",
+		"types: [opened, edited, labeled, unlabeled, synchronize, reopened]",
+		"permissions:\n  contents: read\n  pull-requests: read",
+		"check-label-policy:\n    name: Check PR Has type:* Label\n    runs-on: ubuntu-latest\n    concurrency:\n      group: ${{ github.workflow }}-type-label-${{ github.event.pull_request.number }}\n      cancel-in-progress: true",
+		"id: current-labels",
+		"github.rest.pulls.get({",
+		"pull_number: context.issue.number",
+		"ref: ${{ github.event.pull_request.base.sha }}",
+		"persist-credentials: false",
+		"PR_LABELS: ${{ steps.current-labels.outputs.result }}",
+	} {
 		if !strings.Contains(labelCheck, required) {
 			t.Errorf("%s does not contain %q", labelCheckPath, required)
+		}
+	}
+	for _, forbidden := range []string{
+		"github.event.pull_request.labels",
+		"context.payload.pull_request.labels",
+		"pull_request.head",
+		"head.sha",
+	} {
+		if strings.Contains(labelCheck, forbidden) {
+			t.Errorf("%s must not contain %q", labelCheckPath, forbidden)
 		}
 	}
 

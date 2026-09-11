@@ -29,6 +29,7 @@
 - name: "type:docs"
   color: "0075ca"
   description: "Documentation only"
+  policy: { deprecated_aliases: [documentation], migration_precedence: canonical, migration_conflict: manual-review }
 
 - name: "type:refactor"
   color: "7B68EE"

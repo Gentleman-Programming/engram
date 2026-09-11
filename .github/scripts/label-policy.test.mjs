@@ -101,11 +101,12 @@ test('declares ownership and migration precedence as machine-readable policy', (
     ['bug', { canonical: 'type:bug', precedence: 'canonical', conflict: 'manual-review' }],
     ['enhancement', { canonical: 'type:feature', precedence: 'canonical', conflict: 'manual-review' }],
     ['question', { canonical: 'type:question', precedence: 'canonical', conflict: 'manual-review' }],
+    ['documentation', { canonical: 'type:docs', precedence: 'canonical', conflict: 'manual-review' }],
     ['up for grabs', { canonical: 'help wanted', precedence: 'canonical', conflict: 'manual-review' }],
   ]);
 });
 
-test('runs PR label policy from the trusted base with shell-safe label JSON', () => {
+test('runs PR label policy from the trusted base with current API labels', () => {
   const prWorkflow = fs.readFileSync('.github/workflows/pr-check.yml', 'utf8');
   const labelWorkflow = fs.readFileSync('.github/workflows/pr-label-check.yml', 'utf8');
   assert.match(prWorkflow, /^  pull_request:/m);
@@ -116,10 +117,18 @@ test('runs PR label policy from the trusted base with shell-safe label JSON', ()
   );
   assert.match(labelWorkflow, /name: Check PR Has type:\* Label/);
   assert.doesNotMatch(labelWorkflow, /name: Check PR Label Policy/);
-  assert.match(labelWorkflow, /group: \$\{\{ github\.workflow \}\}-type-label-\$\{\{ github\.event\.pull_request\.number \}\}/);
-  assert.match(labelWorkflow, /cancel-in-progress: true/);
+  assert.match(
+    labelWorkflow,
+    /^  check-label-policy:\r?\n    name: Check PR Has type:\* Label\r?\n    runs-on: ubuntu-latest\r?\n    concurrency:\r?\n      group: \$\{\{ github\.workflow \}\}-type-label-\$\{\{ github\.event\.pull_request\.number \}\}\r?\n      cancel-in-progress: true$/m,
+  );
+  assert.match(labelWorkflow, /^  pull-requests: read$/m);
+  assert.match(labelWorkflow, /id: current-labels/);
+  assert.match(labelWorkflow, /github\.rest\.pulls\.get\(\{/);
+  assert.match(labelWorkflow, /pull_number: context\.issue\.number/);
   assert.match(labelWorkflow, /ref: \$\{\{ github\.event\.pull_request\.base\.sha \}\}/);
-  assert.match(labelWorkflow, /PR_LABELS: \$\{\{ toJson\(github\.event\.pull_request\.labels\.\*\.name\) \}\}/);
+  assert.match(labelWorkflow, /PR_LABELS: \$\{\{ steps\.current-labels\.outputs\.result \}\}/);
+  assert.doesNotMatch(labelWorkflow, /github\.event\.pull_request\.labels|context\.payload\.pull_request\.labels/);
+  assert.doesNotMatch(labelWorkflow, /pull_request\.head|head\.sha/);
   assert.match(labelWorkflow, /--labels-json "\$PR_LABELS"/);
   assert.doesNotMatch(labelWorkflow, /--labels-json '\$\{\{/);
 });
@@ -129,6 +138,7 @@ test('migrates deprecated labels idempotently and preserves ambiguous combinatio
     ['bug', 'type:bug'],
     ['enhancement', 'type:feature'],
     ['question', 'type:question'],
+    ['documentation', 'type:docs'],
     ['up for grabs', 'help wanted'],
   ];
   for (const [alias, canonical] of aliases) {
