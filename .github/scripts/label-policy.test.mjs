@@ -133,6 +133,15 @@ test('runs PR label policy from the trusted base with current API labels', () =>
   assert.doesNotMatch(labelWorkflow, /--labels-json '\$\{\{/);
 });
 
+test('documents the PR label policy as a required status check', () => {
+  const contributing = fs.readFileSync('CONTRIBUTING.md', 'utf8');
+
+  assert.match(
+    contributing,
+    /> \*\*Repo admin note:\*\*[^\r\n]*`Check PR Has type:\* Label`/,
+  );
+});
+
 test('migrates deprecated labels idempotently and preserves ambiguous combinations', () => {
   const aliases = [
     ['bug', 'type:bug'],

@@ -63,7 +63,7 @@ Required checks run automatically on every PR:
 
 All required checks must pass before a PR can be merged.
 
-> **Repo admin note:** Set these as required status checks in branch protection rules for `main`: `Lint`, `Unit Tests`, `E2E Tests`, `Plugin Tests`, `PR Validation`, and `Check PR Has No Transient Artifacts`.
+> **Repo admin note:** Set these as required status checks in branch protection rules for `main`: `Lint`, `Unit Tests`, `E2E Tests`, `Plugin Tests`, `PR Validation`, `Check PR Has type:* Label`, and `Check PR Has No Transient Artifacts`.
 
 ## Transient Artifact Policy
 
