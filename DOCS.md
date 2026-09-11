@@ -604,6 +604,8 @@ Inspect or replay the `sync_apply_deferred` queue.
 - `engram cloud bootstrap admin --username <name> [--email <email>] [--grant-project <project>]... [--issue-token [name]]` — create the first managed admin (see [Managed users, tokens, and CLI bootstrap](#managed-users-tokens-and-cli-bootstrap))
 - `engram cloud bootstrap recover-token [--name <name>]` — recover the one stranded managed admin token state described below
 
+`engram sync --cloud --import --project <project>` runs in the foreground and prints plain-text import progress that is safe for non-interactive logs. It emits an initial snapshot, bounded event-count-throttled updates, and a final `100%` / `0 pending` snapshot before the normal import summary. Each snapshot includes local, remote, and pending chunk counts; percentage is based on the pending work captured at import start, so retries do not inflate completion.
+
 Cloud auth token is provided at runtime via `ENGRAM_CLOUD_TOKEN` (not by a dedicated CLI subcommand).
 Cloud server startup fails closed when the token is missing unless `ENGRAM_CLOUD_INSECURE_NO_AUTH=1` is explicitly set for local insecure development.
 `ENGRAM_CLOUD_INSECURE_NO_AUTH=1` cannot be combined with `ENGRAM_CLOUD_TOKEN`.

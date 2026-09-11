@@ -123,6 +123,16 @@ type ImportResult struct {
 	RelationsDead        int `json:"relations_dead"`
 }
 
+// ImportProgress is a point-in-time snapshot of an import. Percentage uses the
+// pending chunk count captured before the import starts, so retries never count
+// as completed work.
+type ImportProgress struct {
+	LocalChunks   int
+	RemoteChunks  int
+	PendingChunks int
+	Percentage    int
+}
+
 // ─── Syncer ──────────────────────────────────────────────────────────────────
 
 // Syncer handles exporting and importing memory chunks.
@@ -798,7 +808,15 @@ func marshaledSizeForSplit(v any) int {
 // ─── Import (chunks → DB) ────────────────────────────────────────────────────
 
 // Import reads the manifest and imports any chunks not yet in the local DB.
+// Its behavior remains compatible with callers that do not need progress.
 func (sy *Syncer) Import() (*ImportResult, error) {
+	return sy.ImportWithProgress(nil)
+}
+
+// ImportWithProgress reads the manifest and imports any chunks not yet in the
+// local DB, reporting an initial snapshot, successful committed chunks, and a
+// final snapshot. A failed or deferred attempt does not advance progress.
+func (sy *Syncer) ImportWithProgress(report func(ImportProgress)) (*ImportResult, error) {
 	if err := sy.ensureCloudPreflight(""); err != nil {
 		return nil, err
 	}
@@ -807,26 +825,87 @@ func (sy *Syncer) Import() (*ImportResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	entries := manifest.Chunks
 
-	if len(manifest.Chunks) == 0 {
-		return sy.finalizeImport(&ImportResult{})
+	if len(entries) == 0 {
+		if report == nil {
+			return sy.finalizeImport(&ImportResult{})
+		}
+		knownChunks, err := storeGetSynced(sy.store, sy.chunkTrackingTargetKey(""))
+		if err != nil {
+			return nil, fmt.Errorf("get synced chunks: %w", err)
+		}
+		snapshot := importProgressSnapshot(len(knownChunks), 0, 0, 0)
+		report(snapshot)
+		result, err := sy.finalizeImport(&ImportResult{})
+		if err != nil {
+			return nil, err
+		}
+		report(snapshot)
+		return result, nil
 	}
-	// Get chunks we've already imported
+
+	// Get chunks we've already imported.
 	knownChunks, err := storeGetSynced(sy.store, sy.chunkTrackingTargetKey(""))
 	if err != nil {
 		return nil, fmt.Errorf("get synced chunks: %w", err)
 	}
-	entries := manifest.Chunks
+	remainingPending, initialPending := 0, 0
+	var afterCommit func()
+	if report != nil {
+		remainingPending = pendingChunkCount(entries, knownChunks)
+		initialPending = remainingPending
+		report(importProgressSnapshot(len(knownChunks), len(entries), remainingPending, initialPending))
+		// The final committed chunk is reported by the final snapshot below, after
+		// deferred relations have been finalized, rather than as a duplicate event.
+		afterCommit = func() {
+			remainingPending--
+			if remainingPending > 0 {
+				report(importProgressSnapshot(len(knownChunks), len(entries), remainingPending, initialPending))
+			}
+		}
+	}
+
 	var result *ImportResult
 	if sy.cloudMode {
-		result, err = sy.importEntriesDependencySafe(entries, knownChunks, importModeCloud, manifest.Version)
+		result, err = sy.importEntriesDependencySafeWithProgress(entries, knownChunks, importModeCloud, manifest.Version, afterCommit)
 	} else {
-		result, err = sy.importEntriesDependencySafe(entries, knownChunks, importModeLocal, manifest.Version)
+		result, err = sy.importEntriesDependencySafeWithProgress(entries, knownChunks, importModeLocal, manifest.Version, afterCommit)
 	}
 	if err != nil {
 		return nil, err
 	}
-	return sy.finalizeImport(result)
+	result, err = sy.finalizeImport(result)
+	if err != nil {
+		return nil, err
+	}
+	if report != nil {
+		report(importProgressSnapshot(len(knownChunks), len(entries), remainingPending, initialPending))
+	}
+	return result, nil
+}
+
+func pendingChunkCount(entries []ChunkEntry, knownChunks map[string]bool) int {
+	pending := 0
+	for _, entry := range entries {
+		if !knownChunks[entry.ID] {
+			pending++
+		}
+	}
+	return pending
+}
+
+func importProgressSnapshot(local, remote, pending, initialPending int) ImportProgress {
+	percentage := 100
+	if initialPending > 0 {
+		percentage = (initialPending - pending) * 100 / initialPending
+	}
+	return ImportProgress{
+		LocalChunks:   local,
+		RemoteChunks:  remote,
+		PendingChunks: pending,
+		Percentage:    percentage,
+	}
 }
 
 // finalizeImport drives the bounded deferred-relation lifecycle after every
@@ -854,7 +933,7 @@ const (
 	recoveredMissingSessionStartedAt            = "1970-01-01 00:00:00"
 )
 
-func (sy *Syncer) importEntriesDependencySafe(entries []ChunkEntry, knownChunks map[string]bool, mode importMode, manifestVersion int) (*ImportResult, error) {
+func (sy *Syncer) importEntriesDependencySafeWithProgress(entries []ChunkEntry, knownChunks map[string]bool, mode importMode, manifestVersion int, afterCommit func()) (*ImportResult, error) {
 	result := &ImportResult{}
 	pendingEntries := make([]ChunkEntry, 0, len(entries))
 	for _, entry := range entries {
@@ -938,6 +1017,9 @@ func (sy *Syncer) importEntriesDependencySafe(entries []ChunkEntry, knownChunks 
 			result.SessionsImported += importResult.SessionsImported
 			result.ObservationsImported += importResult.ObservationsImported
 			result.PromptsImported += importResult.PromptsImported
+			if afterCommit != nil {
+				afterCommit()
+			}
 			progress = true
 		}
 
