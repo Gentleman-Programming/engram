@@ -261,6 +261,115 @@ func TestMCPTruncationMetadataKeepsSchemasAndNormalResponsesCompatible(t *testin
 	assertTruncationMetadata(t, body, len("short"), s.MaxObservationLength(), false)
 }
 
+func TestHandleSaveAbsolutePathWarning(t *testing.T) {
+	tests := []struct {
+		name          string
+		content       string
+		wantWarning   bool
+		wantPersisted string
+	}{
+		{
+			name:          "POSIX home path",
+			content:       "Saved under /home/a.",
+			wantWarning:   true,
+			wantPersisted: "Saved under /home/a.",
+		},
+		{
+			name:          "POSIX temporary path",
+			content:       "Saved under /tmp/x.",
+			wantWarning:   true,
+			wantPersisted: "Saved under /tmp/x.",
+		},
+		{
+			name:          "Windows backslash drive path",
+			content:       `Saved under C:\Users\a.`,
+			wantWarning:   true,
+			wantPersisted: `Saved under C:\Users\a.`,
+		},
+		{
+			name:          "Windows slash drive path",
+			content:       "Saved under C:/Users/a.",
+			wantWarning:   true,
+			wantPersisted: "Saved under C:/Users/a.",
+		},
+		{
+			name:          "UNC path",
+			content:       `Saved under \\server\share.`,
+			wantWarning:   true,
+			wantPersisted: `Saved under \\server\share.`,
+		},
+		{
+			name:          "path in Markdown code",
+			content:       "```go\npath := \"/tmp/x\"\n```",
+			wantWarning:   true,
+			wantPersisted: "```go\npath := \"/tmp/x\"\n```",
+		},
+		{
+			name:          "HTTPS URI",
+			content:       "https://example.com/home/a",
+			wantPersisted: "https://example.com/home/a",
+		},
+		{
+			name:          "file URI",
+			content:       "file:///tmp/x",
+			wantPersisted: "file:///tmp/x",
+		},
+		{
+			name:          "current-directory relative path",
+			content:       "./x",
+			wantPersisted: "./x",
+		},
+		{
+			name:          "parent-directory relative path",
+			content:       "../x",
+			wantPersisted: "../x",
+		},
+		{
+			name:          "relative path",
+			content:       "foo/bar",
+			wantPersisted: "foo/bar",
+		},
+		{
+			name:          "drive-relative path",
+			content:       "C:x",
+			wantPersisted: "C:x",
+		},
+		{
+			name:          "private absolute path",
+			content:       "Saved <private>/home/a</private> safely.",
+			wantPersisted: "Saved [REDACTED] safely.",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newMCPTestStore(t)
+			res, err := handleSave(s, MCPConfig{}, nil)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+				"title":   "Absolute path warning",
+				"content": tt.content,
+				"project": "engram",
+			}}})
+			if err != nil || res.IsError {
+				t.Fatalf("mem_save failed: err=%v result=%q", err, callResultText(t, res))
+			}
+
+			body := callResultJSON(t, res)
+			result, _ := body["result"].(string)
+			if got := strings.Contains(result, "⚠ WARNING: Content contains an absolute filesystem path"); got != tt.wantWarning {
+				t.Fatalf("warning presence = %v, want %v; result=%q", got, tt.wantWarning, result)
+			}
+
+			observations, err := s.RecentObservations("engram", "project", 1)
+			if err != nil {
+				t.Fatalf("recent observations: %v", err)
+			}
+			if len(observations) != 1 || observations[0].Content != tt.wantPersisted {
+				t.Fatalf("persisted observations = %#v, want content %q", observations, tt.wantPersisted)
+			}
+		})
+	}
+}
+
 func TestNewServerRegistersTools(t *testing.T) {
 	s := newMCPTestStore(t)
 	srv := NewServer(s)

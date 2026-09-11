@@ -79,6 +79,68 @@ func truncationWarning(metadata store.TruncationMetadata) string {
 	return fmt.Sprintf("\n⚠ WARNING: Content was truncated from %d to %d bytes. Consider splitting into smaller observations.", metadata.OriginalBytes, metadata.LimitBytes)
 }
 
+func absolutePathWarning(content string) string {
+	if !containsAbsoluteFilesystemPath(content) {
+		return ""
+	}
+	return "\n⚠ WARNING: Content contains an absolute filesystem path that may not be portable across machines."
+}
+
+// containsAbsoluteFilesystemPath recognizes common absolute path spellings
+// without relying on the host operating system. Route-like POSIX paths such as
+// /api/v1 are intentionally treated as ambiguous matches for this non-blocking warning.
+func containsAbsoluteFilesystemPath(content string) bool {
+	for i := 0; i < len(content); i++ {
+		if uriEnd := uriTokenEnd(content, i); uriEnd > i {
+			i = uriEnd - 1
+			continue
+		}
+
+		if isASCIILetter(content[i]) && i+2 < len(content) && content[i+1] == ':' && (content[i+2] == '/' || content[i+2] == '\\') {
+			return true
+		}
+		if content[i] == '\\' && i+2 < len(content) && content[i+1] == '\\' && content[i+2] != '\\' && content[i+2] != '/' {
+			return true
+		}
+		if content[i] == '/' && i+1 < len(content) && content[i+1] != '/' && (i == 0 || content[i-1] != '/' && !isPathWordCharacter(content[i-1])) {
+			return true
+		}
+	}
+	return false
+}
+
+func uriTokenEnd(content string, start int) int {
+	if !isASCIILetter(content[start]) || (start > 0 && isPathWordCharacter(content[start-1])) {
+		return start
+	}
+
+	colon := start + 1
+	for colon < len(content) && (isASCIILetter(content[colon]) || content[colon] >= '0' && content[colon] <= '9' || content[colon] == '+' || content[colon] == '-' || content[colon] == '.') {
+		colon++
+	}
+	if colon+2 >= len(content) || content[colon] != ':' || content[colon+1] != '/' || content[colon+2] != '/' {
+		return start
+	}
+
+	end := colon + 3
+	for end < len(content) && isURITokenCharacter(content[end]) {
+		end++
+	}
+	return end
+}
+
+func isASCIILetter(char byte) bool {
+	return char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z'
+}
+
+func isPathWordCharacter(char byte) bool {
+	return isASCIILetter(char) || char >= '0' && char <= '9' || char == '.' || char == '-' || char == '_'
+}
+
+func isURITokenCharacter(char byte) bool {
+	return isPathWordCharacter(char) || strings.ContainsRune(":/?#[]@!$&'()*+,;=%~", rune(char))
+}
+
 var currentWorkingDirectory = func() string {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -1417,6 +1479,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		if err != nil {
 			return mcp.NewToolResultError("Failed to save: " + err.Error()), nil
 		}
+		savedObservation, savedObservationErr := s.GetObservation(savedID)
 
 		if capturePrompt && activity != nil {
 			if prompt, ok := activity.CurrentPrompt(sessionID, project); ok {
@@ -1439,6 +1502,9 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 			msg += fmt.Sprintf("\nSuggested topic_key: %s", suggestedTopicKey)
 		}
 		msg += truncationWarning(truncation)
+		if savedObservationErr == nil {
+			msg += absolutePathWarning(savedObservation.Content)
+		}
 		if normWarning != "" {
 			msg += "\n" + normWarning
 		}
@@ -1467,13 +1533,13 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 
 		// Fetch the saved observation's sync_id for the envelope (REQ-001).
 		var savedSyncID string
-		if obs, obsErr := s.GetObservation(savedID); obsErr == nil {
-			savedSyncID = obs.SyncID
+		if savedObservationErr == nil {
+			savedSyncID = savedObservation.SyncID
 			extra["id"] = savedID
 			extra["sync_id"] = savedSyncID
-			extra["state"] = obs.State()
-			if obs.ReviewAfter != nil {
-				extra["review_after"] = *obs.ReviewAfter
+			extra["state"] = savedObservation.State()
+			if savedObservation.ReviewAfter != nil {
+				extra["review_after"] = *savedObservation.ReviewAfter
 			}
 		}
 		if len(candidates) > 0 {
