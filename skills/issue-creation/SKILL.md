@@ -241,8 +241,12 @@ gh issue edit <number> --remove-label "status:needs-review" --add-label "status:
 # Maintainer: add priority
 gh issue edit <number> --add-label "priority:high"
 
-# Maintainer: replace needs-review while evaluating a possible duplicate
-gh issue edit <number> --remove-label "status:needs-review" --add-label "status:possible-duplicate"
+# Maintainer: clear every active status while evaluating a possible duplicate
+gh issue view <number> --json labels --jq '.labels[].name | select(startswith("status:"))' |
+  while IFS= read -r status; do
+    gh issue edit <number> --remove-label "$status"
+  done
+gh issue edit <number> --add-label "status:possible-duplicate"
 
 # Maintainer: close a confirmed duplicate, then replace evaluation status with resolution
 gh issue close <number> --reason "not planned" --comment "Closing as duplicate of #<canonical>."

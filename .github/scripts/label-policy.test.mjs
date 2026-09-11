@@ -160,3 +160,12 @@ test('exposes migration as an idempotent dry-run CLI', () => {
     conflicts: ['type:* permits at most one label: type:bug, type:feature'],
   });
 });
+
+test('documents singleton-safe duplicate status transitions', () => {
+  const skill = fs.readFileSync('skills/issue-creation/SKILL.md', 'utf8');
+  const duplicateCommands = skill.slice(skill.indexOf('# Maintainer: clear every active status while evaluating'));
+
+  assert.match(duplicateCommands, /select\(startswith\("status:"\)\)/);
+  assert.match(duplicateCommands, /--remove-label "\$status"/);
+  assert.match(duplicateCommands, /--add-label "status:possible-duplicate"/);
+});
