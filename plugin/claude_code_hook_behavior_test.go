@@ -185,7 +185,7 @@ func bashScriptPath(t *testing.T, path string) string {
 	if len(volume) != 2 || volume[1] != ':' {
 		return path
 	}
-	remainder := strings.ReplaceAll(strings.TrimLeft(path[len(volume):], `\\/`), `\`, "/")
+	remainder := strings.ReplaceAll(strings.TrimLeft(path[len(volume):], `\/`), `\`, "/")
 	for _, candidate := range []string{
 		"/" + strings.ToLower(volume[:1]) + "/" + remainder,
 		"/mnt/" + strings.ToLower(volume[:1]) + "/" + remainder,
