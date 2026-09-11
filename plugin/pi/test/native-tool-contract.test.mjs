@@ -35,7 +35,7 @@ async function loadPluginHarness(sandbox) {
 function runtimeContext(sessionId) {
   return {
     cwd: ROOT,
-    sessionManager: { getSessionId: () => sessionId },
+    sessionManager: { getSessionId: typeof sessionId === "function" ? sessionId : () => sessionId },
     ui: { setStatus() {} },
   };
 }
@@ -228,6 +228,41 @@ test("a 204 Pi response is a successful null without JSON parsing", async () => 
 
       assert.notEqual(result.isError, true);
       assert.equal(result.details.data, null);
+      assert.equal(result.content[0].text, "No memories found");
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+test("a successful empty Pi search presents no memories found", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  globalThis.fetch = async (url) => {
+    const path = new URL(url).pathname;
+    if (path === "/health") return new Response(JSON.stringify({ status: "ok" }));
+    if (path === "/project/current") return new Response(JSON.stringify({ project: "engram" }));
+    if (path === "/search") return new Response(JSON.stringify([]), { headers: { "Content-Type": "application/json" } });
+    throw new Error(`unexpected request: ${url}`);
+  };
+
+  try {
+    await withPluginSandbox("engram-pi-contract-", async ({ sandbox }) => {
+      const { registeredTools } = await loadPluginHarness(sandbox);
+      const result = await registeredTools.get("mem_search").execute(
+        "empty-search",
+        { query: "not found" },
+        undefined,
+        undefined,
+        runtimeContext("empty-search-session"),
+      );
+
+      assert.notEqual(result.isError, true);
+      assert.deepEqual(result.details.data, []);
+      assert.equal(result.content[0].text, "No memories found");
     });
   } finally {
     globalThis.fetch = originalFetch;
@@ -623,5 +658,179 @@ test("an opaque runtime session ID stays byte-identical through registration, co
     globalThis.fetch = originalFetch;
     if (originalUrl === undefined) delete process.env.ENGRAM_URL;
     else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+test("compaction recovery notice stays scoped to the exact cached runtime session", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const { calls, fetchStub } = recordingFetch([
+    { method: "GET", path: "/project/current", body: { project: "pi" } },
+    { method: "POST", path: "/sessions", body: { status: "created" } },
+    { method: "POST", path: "/observations", body: { id: 1 } },
+    { method: "GET", path: "/context/compaction", body: { context: "exact-session context" } },
+  ]);
+  globalThis.fetch = fetchStub;
+
+  try {
+    await withPluginSandbox("engram-pi-contract-", async ({ sandbox }) => {
+      const { eventHandlers } = await loadPluginHarness(sandbox);
+      const runtimeSessionId = "  exact cached Pi identity  ";
+      await eventHandlers.get("session_start")({}, runtimeContext(runtimeSessionId));
+      await eventHandlers.get("session_compact")(
+        { compactionEntry: { summary: "current shape" }, summary: "conflicting legacy shape" },
+        { cwd: ROOT, sessionManager: { getSessionId: () => { throw new Error("stale context accessed"); } } },
+      );
+      const otherTurn = await eventHandlers.get("before_agent_start")({ systemPrompt: "base prompt" }, runtimeContext("other-session"));
+      const nextTurn = await eventHandlers.get("before_agent_start")({ systemPrompt: "base prompt" }, runtimeContext(runtimeSessionId));
+      const consumedTurn = await eventHandlers.get("before_agent_start")({ systemPrompt: "base prompt" }, runtimeContext(runtimeSessionId));
+
+      const registration = calls.find((call) => call.method === "POST" && call.path === "/sessions");
+      const archive = calls.find((call) => call.method === "POST" && call.path === "/observations");
+      const recovery = calls.find((call) => call.method === "GET" && call.path.startsWith("/context/compaction"));
+      assert.ok(registration, "compaction must acknowledge registration first");
+      assert.ok(archive, "compaction must archive its summary");
+      assert.ok(recovery, "compaction must load exact-session recovery guidance");
+      assert.ok(calls.indexOf(registration) < calls.indexOf(archive));
+      assert.equal(registration.body.id, runtimeSessionId);
+      assert.equal(archive.body.session_id, runtimeSessionId);
+      assert.equal(archive.body.content, "current shape");
+      assert.equal(new URL(`http://test${recovery.path}`).searchParams.get("session_id"), runtimeSessionId);
+      assert.doesNotMatch(otherTurn.systemPrompt, /exact-session context/);
+      assert.doesNotMatch(otherTurn.systemPrompt, /already saved/);
+      assert.match(nextTurn.systemPrompt, /already saved/);
+      assert.doesNotMatch(nextTurn.systemPrompt, /FIRST ACTION REQUIRED/);
+      assert.doesNotMatch(consumedTurn.systemPrompt, /already saved/);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+test("compaction timeout does not repeat its archive and queues verification guidance", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const request = new URL(url);
+    calls.push({ method: init.method ?? "GET", path: request.pathname + request.search });
+    if (request.pathname === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
+    if (request.pathname === "/sessions") return new Response(JSON.stringify({ status: "created" }));
+    if (request.pathname === "/observations") {
+      const timeout = new Error("The operation was aborted due to timeout");
+      timeout.name = "TimeoutError";
+      throw timeout;
+    }
+    if (request.pathname === "/context/compaction") return new Response(JSON.stringify({ context: "recovery context" }));
+    throw new Error(`unexpected request: ${request.pathname}`);
+  };
+
+  try {
+    await withPluginSandbox("engram-pi-contract-", async ({ sandbox }) => {
+      const { eventHandlers } = await loadPluginHarness(sandbox);
+      const ctx = runtimeContext("timeout-session");
+      await eventHandlers.get("session_start")({}, ctx);
+      await eventHandlers.get("session_compact")({ compactionEntry: { summary: "summary" } }, ctx);
+      const nextTurn = await eventHandlers.get("before_agent_start")({ systemPrompt: "base prompt" }, ctx);
+
+      assert.equal(calls.filter((call) => call.method === "POST" && call.path === "/observations").length, 1);
+      assert.match(nextTurn.systemPrompt, /could not confirm/);
+      assert.match(nextTurn.systemPrompt, /verify/i);
+      assert.match(nextTurn.systemPrompt, /Do NOT retry/);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+test("ambiguous runtime identity history permanently blocks compaction writes", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const calls = [];
+  const registrationGate = deferred();
+  globalThis.fetch = async (url, init = {}) => {
+    const request = new URL(url);
+    calls.push({ method: init.method ?? "GET", path: request.pathname + request.search });
+    if (request.pathname === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
+    if (request.pathname === "/sessions") {
+      await registrationGate.promise;
+      return new Response(JSON.stringify({ status: "created" }));
+    }
+    if (request.pathname === "/observations" || request.pathname === "/context/compaction") return new Response(JSON.stringify({ context: "must not load" }));
+    throw new Error(`unexpected request: ${request.pathname}`);
+  };
+
+  try {
+    await withPluginSandbox("engram-pi-contract-", async ({ sandbox }) => {
+      const { eventHandlers } = await loadPluginHarness(sandbox);
+      const a = runtimeContext("A");
+      const b = runtimeContext("B");
+      await eventHandlers.get("session_start")({}, a);
+      const compaction = eventHandlers.get("session_compact")({ summary: "summary" });
+      await new Promise((resolve) => setImmediate(resolve));
+      await eventHandlers.get("session_start")({}, b);
+      registrationGate.resolve();
+      await compaction;
+      await eventHandlers.get("session_shutdown")({}, a);
+      await eventHandlers.get("session_compact")({ summary: "delayed" });
+      await eventHandlers.get("session_shutdown")({}, b);
+      await eventHandlers.get("session_start")({}, a);
+      await eventHandlers.get("session_compact")({ summary: "repeated" });
+      const nextTurn = await eventHandlers.get("before_agent_start")({ systemPrompt: "base prompt" }, a);
+      assert.match(nextTurn.systemPrompt, /did not archive/);
+      assert.equal(calls.filter((call) => call.method === "POST" && call.path === "/sessions").length, 1);
+      assert.equal(calls.filter((call) => call.path.startsWith("/observations")).length, 0);
+      assert.equal(calls.filter((call) => call.path.startsWith("/context/compaction")).length, 0);
+    });
+    for (const invalidIdentity of [undefined, "   ", () => { throw new Error("identity unavailable"); }]) await withPluginSandbox("engram-pi-contract-", async ({ sandbox }) => {
+      const { eventHandlers } = await loadPluginHarness(sandbox);
+      const a = runtimeContext("A");
+      await eventHandlers.get("session_start")({}, a);
+      await eventHandlers.get("before_agent_start")({ systemPrompt: "base prompt" }, runtimeContext(invalidIdentity));
+      await eventHandlers.get("session_compact")({ summary: "unavailable identity" });
+      const nextTurn = await eventHandlers.get("before_agent_start")({ systemPrompt: "base prompt" }, a);
+      assert.match(nextTurn.systemPrompt, /did not archive/);
+      assert.equal(calls.filter((call) => call.path.startsWith("/observations")).length, 0);
+      assert.equal(calls.filter((call) => call.path.startsWith("/context/compaction")).length, 0);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+test("pending compaction recovery is injected even when startup remains unavailable", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  const originalBin = process.env.ENGRAM_BIN;
+  delete process.env.ENGRAM_URL;
+  process.env.ENGRAM_BIN = "engram-pi-compaction-test-missing-binary";
+  globalThis.fetch = async () => { throw new Error("connection refused"); };
+
+  try {
+    await withPluginSandbox("engram-pi-contract-", async ({ sandbox }) => {
+      const { eventHandlers } = await loadPluginHarness(sandbox);
+      const ctx = runtimeContext("startup-failure-session");
+      await eventHandlers.get("session_start")({}, ctx);
+      await eventHandlers.get("session_compact")({ compactionEntry: { summary: "summary" } }, ctx);
+      const nextTurn = await eventHandlers.get("before_agent_start")({ systemPrompt: "base prompt" }, ctx);
+
+      assert.match(nextTurn.systemPrompt, /did not archive/);
+      assert.match(nextTurn.systemPrompt, /verify/i);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+    if (originalBin === undefined) delete process.env.ENGRAM_BIN;
+    else process.env.ENGRAM_BIN = originalBin;
   }
 });

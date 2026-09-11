@@ -26,12 +26,57 @@ function flush(times = 2) {
     : new Promise((resolve) => setTimeout(resolve, 0)).then(() => flush(times - 1));
 }
 
+function buildAwaitWithAbortForTest() {
+  const body = extractFunctionBody("awaitWithAbort", "{\n  if (!signal)")
+    .replace("new Promise<T>", "new Promise")
+    .replace("(error: unknown) =>", "(error) =>");
+  return new Function(`
+    function awaitWithAbort(promise, signal) {
+      ${body}
+    }
+    return awaitWithAbort;
+  `)();
+}
+
+function buildExecuteMemoryToolForTest({ awaitWithAbort, initOnce, refreshProjectDetection, callMemoryTool, scheduleEngramSelfHeal }) {
+  const body = extractFunctionBody("executeMemoryTool", "{\n  const action")
+    .replaceAll('type: "text" as const', 'type: "text"');
+  const factory = new Function(
+    "awaitWithAbort",
+    "initOnce",
+    "refreshProjectDetection",
+    "callMemoryTool",
+    "scheduleEngramSelfHeal",
+    `
+    let project = "engram";
+    class EngramHttpError extends Error {}
+    const humanToolName = (toolName) => toolName;
+    const createMemoryToolTransport = () => ({
+      fetch: async () => null,
+      timedOutMethod: () => undefined,
+    });
+    const unreachableMessage = () => "unreachable";
+    const textResult = () => "result";
+    const compactResultStatus = () => "complete";
+    const errorStatusLabel = () => "error";
+    const engramFetch = async () => null;
+    async function executeMemoryTool(toolName, params, ctx, signal) {
+      ${body}
+    }
+    return executeMemoryTool;
+    `,
+  );
+  return factory(awaitWithAbort, initOnce, refreshProjectDetection, callMemoryTool, scheduleEngramSelfHeal);
+}
+
 function buildEngramFetchForTest({
   wait = () => Promise.resolve(),
   timeoutMs = 3000,
   maxAttempts = 3,
   backoffBaseMs = 150,
   recover = async () => false,
+  abortSignal = AbortSignal,
+  url = "http://127.0.0.1:7437",
 } = {}) {
   const body = extractFunctionBody("engramFetchResult", "{\n  const method")
     .replace("let res: Response | undefined;", "let res;")
@@ -47,6 +92,7 @@ function buildEngramFetchForTest({
     "ENGRAM_FETCH_TIMEOUT_MS",
     "ENGRAM_FETCH_MAX_ATTEMPTS",
     "ENGRAM_FETCH_BACKOFF_BASE_MS",
+    "AbortSignal",
     "recoverImplicitEngramServer",
     `
     class EngramHttpError extends Error {
@@ -81,10 +127,11 @@ function buildEngramFetchForTest({
     wait,
     (value) => value,
     (value) => value,
-    "http://127.0.0.1:7437",
+    url,
     timeoutMs,
     maxAttempts,
     backoffBaseMs,
+    abortSignal,
     recover,
   );
 }
@@ -100,6 +147,7 @@ function buildScheduleEngramSelfHealForTest({ waitUnref, isEngramRunning, maxAtt
     `
     let engramSelfHealInFlight = false;
     const engramSelfHealContexts = new Map();
+    const localEngramInstanceID = "00000000000000000000000000000000";
     const getSessionId = (ctx) => ctx.sessionManager?.getSessionId();
     function forgetSelfHealContext(sessionId) {
       ${forgetBody}
@@ -124,6 +172,7 @@ function buildInitializeEngramServerForTest({
   spawnAndWaitForEngram,
   waitForEngramReadiness,
   timeoutMs = 10000,
+  instanceID = "00000000000000000000000000000000",
 }) {
   const body = extractFunctionBody("initializeEngramServer", "{\n  if (CONFIGURED_ENGRAM_URL");
   const factory = new Function(
@@ -132,7 +181,10 @@ function buildInitializeEngramServerForTest({
     "spawnAndWaitForEngram",
     "waitForEngramReadiness",
     "ENGRAM_STARTUP_TIMEOUT_MS",
+    "instanceID",
     `
+    let localEngramInstanceID = "";
+    const localInstanceID = () => instanceID;
     async function initializeEngramServer() {
       ${body}
     }
@@ -145,11 +197,12 @@ function buildInitializeEngramServerForTest({
     spawnAndWaitForEngram,
     waitForEngramReadiness,
     timeoutMs,
+    instanceID,
   );
 }
 
 function buildProbeEngramHealthForTest({ fetch, isTimeoutError }) {
-  const body = extractFunctionBody("probeEngramHealth", "{\n  try");
+  const body = extractFunctionBody("probeEngramHealth", "{\n  try").replace("const health = await res.json() as { instance_id?: unknown };", "const health = await res.json();");
   const refusedBody = extractFunctionBody("hasConnectionRefusedCode", "{\n  if (depth")
     .replace("value as Record<string, unknown>", "value");
   const refusalBody = extractFunctionBody("isConnectionRefusedError", "{\n  return");
@@ -256,7 +309,7 @@ function buildWaitForEngramReadinessForTest({ probeEngramHealth, pollMs = 5 }) {
     function waitCancellable(ms, signal) {
       ${extractFunctionBody("waitCancellable", "{\n  return new Promise")}
     }
-    async function waitForEngramReadiness(signal, deadline) {
+    async function waitForEngramReadiness(signal, deadline, expectedID = "") {
       ${extractFunctionBody("waitForEngramReadiness", "{\n  while (Date.now()")}
     }
     return waitForEngramReadiness;
@@ -281,13 +334,13 @@ function buildSpawnAndWaitForEngramForTest({ spawn, probeEngramHealth, pollMs = 
     function waitCancellable(ms, signal) {
       ${extractFunctionBody("waitCancellable", "{\n  return new Promise")}
     }
-    async function waitForEngramReadiness(signal, deadline) {
+    async function waitForEngramReadiness(signal, deadline, expectedID = "") {
       ${extractFunctionBody("waitForEngramReadiness", "{\n  while (Date.now()")}
     }
     function stopAbandonedChild(proc) {
       ${extractFunctionBody("stopAbandonedChild", "{\n  if (proc === undefined) return;")}
     }
-    function spawnAndWaitForEngram(deadline) {
+    function spawnAndWaitForEngram(deadline, expectedID = "") {
       ${spawnBody}
     }
     return spawnAndWaitForEngram;
@@ -452,8 +505,12 @@ test("an inconclusive health probe still attempts the spawn", async () => {
 test("an already-ready health endpoint neither spawns nor waits", async () => {
   let spawns = 0;
   let readinessWaits = 0;
+  const expectedIDs = [];
   const initializeEngramServer = buildInitializeEngramServerForTest({
-    probeEngramHealth: async () => "ready",
+    probeEngramHealth: async (expectedID) => {
+      expectedIDs.push(expectedID);
+      return "ready";
+    },
     spawnAndWaitForEngram: async () => { spawns += 1; },
     waitForEngramReadiness: async () => { readinessWaits += 1; },
   });
@@ -461,6 +518,24 @@ test("an already-ready health endpoint neither spawns nor waits", async () => {
   await initializeEngramServer();
   assert.equal(spawns, 0);
   assert.equal(readinessWaits, 0);
+  assert.deepEqual(expectedIDs, ["00000000000000000000000000000000"], "the ready path must verify the local server identity");
+});
+
+test("instance-id command is bounded by the startup deadline", () => {
+  const body = extractFunctionBody("localInstanceID", "{\n  const result");
+  let options;
+  const bounded = new Function("spawnSync", "ENGRAM_BIN", "ENGRAM_STARTUP_TIMEOUT_MS", `
+    return function localInstanceID(timeoutMs = ENGRAM_STARTUP_TIMEOUT_MS) {
+      ${body}
+    };
+  `)((_command, _args, received) => {
+    options = received;
+    return { status: 0, stdout: "00000000000000000000000000000000\n" };
+  }, "engram", 10000);
+
+  assert.equal(bounded(123), "00000000000000000000000000000000");
+  assert.equal(options.timeout, 123);
+  assert.match(source, /localInstanceID\(Math\.max\(1, deadline - Date\.now\(\)\)\)/);
 });
 
 test("an inconclusive probe falls back to an already-starting server when our child loses the port", async () => {
@@ -956,6 +1031,208 @@ test("native tool fetch backs off exponentially and attaches a per-request timeo
   }
 });
 
+test("Pi tool cancellation composes with the native request timeout", async () => {
+  const originalFetch = globalThis.fetch;
+  const callbackSignal = new AbortController().signal;
+  const timeoutSignal = new AbortController().signal;
+  let timeoutMs;
+  let composedSignals;
+  let requestSignal;
+  const abortSignal = {
+    timeout(ms) {
+      timeoutMs = ms;
+      return timeoutSignal;
+    },
+    any(signals) {
+      composedSignals = signals;
+      return { kind: "combined" };
+    },
+  };
+  globalThis.fetch = async (_url, init) => {
+    requestSignal = init?.signal;
+    return { ok: true, async json() { return { status: "ok" }; } };
+  };
+  try {
+    const { engramFetch } = buildEngramFetchForTest({ abortSignal });
+    assert.deepEqual(await engramFetch("/health", { signal: callbackSignal }), { status: "ok" });
+    assert.equal(timeoutMs, 3000, "the existing timeout policy remains active");
+    assert.deepEqual(composedSignals, [timeoutSignal, callbackSignal]);
+    assert.deepEqual(requestSignal, { kind: "combined" });
+    assert.match(source, /async execute\(_toolCallId, params, signal, _onUpdate, ctx\)[\s\S]*executeMemoryTool\(toolName, params as Record<string, unknown>, ctx as MemoryToolContext, signal\)/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a native request without a Pi signal keeps timeout-only behavior", async () => {
+  const originalFetch = globalThis.fetch;
+  const timeoutSignal = new AbortController().signal;
+  let timeoutMs;
+  let anyCalls = 0;
+  let requestSignal;
+  const abortSignal = {
+    timeout(ms) {
+      timeoutMs = ms;
+      return timeoutSignal;
+    },
+    any() {
+      anyCalls += 1;
+      return new AbortController().signal;
+    },
+  };
+  globalThis.fetch = async (_url, init) => {
+    requestSignal = init?.signal;
+    return { ok: true, async json() { return { status: "ok" }; } };
+  };
+  try {
+    const { engramFetch } = buildEngramFetchForTest({ abortSignal });
+    assert.deepEqual(await engramFetch("/health"), { status: "ok" });
+    assert.equal(timeoutMs, 3000, "the existing timeout policy remains active");
+    assert.equal(anyCalls, 0, "a request without Pi cancellation must not compose signals");
+    assert.equal(requestSignal, timeoutSignal);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Pi cancellation aborts a held native HTTP request before it can return a late result", async () => {
+  const { createServer } = await import("node:http");
+  let markRequestStarted;
+  let markRequestAborted;
+  const requestStarted = new Promise((resolve) => { markRequestStarted = resolve; });
+  const requestAborted = new Promise((resolve) => { markRequestAborted = resolve; });
+  const server = createServer((request) => {
+    markRequestStarted();
+    request.once("aborted", markRequestAborted);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+  const controller = new AbortController();
+  const { engramFetch } = buildEngramFetchForTest({
+    url: `http://127.0.0.1:${port}`,
+    maxAttempts: 1,
+  });
+
+  try {
+    const pending = engramFetch("/held", { signal: controller.signal });
+    await requestStarted;
+    controller.abort();
+    await assert.rejects(pending, (error) => error?.name === "AbortError");
+    await requestAborted;
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test("Pi cancellation stops awaiting execution preflight without cancelling shared initialization", async () => {
+  const awaitWithAbort = buildAwaitWithAbortForTest();
+  const controller = new AbortController();
+  let resolveShared;
+  let sharedSettled = false;
+  const sharedInitialization = new Promise((resolve) => {
+    resolveShared = () => {
+      sharedSettled = true;
+      resolve();
+    };
+  });
+
+  const waiting = awaitWithAbort(sharedInitialization, controller.signal);
+  controller.abort();
+  await assert.rejects(waiting, /cancelled/);
+  assert.equal(sharedSettled, false, "cancelling one tool call must not cancel shared initialization");
+  resolveShared();
+  await sharedInitialization;
+
+  assert.match(source, /await awaitWithAbort\(initOnce\(ctx\.cwd\), signal\);[\s\S]*await refreshProjectDetection\(ctx\.cwd, engramFetch, signal\);/);
+  assert.match(source, /async function detectServerProject[\s\S]*fetch<CurrentProjectResponse>\([^\n]*\{ signal \}\)[\s\S]*await awaitWithAbort\(wait\(200\), signal\)/);
+});
+
+test("cancelling initialization, project detection, or active memory work propagates without an outage status or recovery", async () => {
+  for (const stage of ["initialization", "project detection", "active memory work"]) {
+    const awaitWithAbort = buildAwaitWithAbortForTest();
+    const controller = new AbortController();
+    const statuses = [];
+    let release;
+    let entered;
+    let recoveries = 0;
+    const blocked = new Promise((resolve) => { release = resolve; });
+    const enterStage = new Promise((resolve) => { entered = resolve; });
+    const executeMemoryTool = buildExecuteMemoryToolForTest({
+      awaitWithAbort,
+      initOnce: () => {
+        if (stage === "initialization") {
+          entered();
+          return blocked;
+        }
+        return Promise.resolve();
+      },
+      refreshProjectDetection: async (_cwd, _fetch, signal) => {
+        if (stage === "project detection") {
+          entered();
+          return awaitWithAbort(blocked, signal);
+        }
+      },
+      callMemoryTool: () => {
+        if (stage === "active memory work") {
+          entered();
+          return blocked;
+        }
+        return Promise.resolve({});
+      },
+      scheduleEngramSelfHeal: () => { recoveries += 1; },
+    });
+
+    const execution = executeMemoryTool("mem_search", {}, { ...sessionCtx("session", statuses), cwd: "/work" }, controller.signal);
+    await enterStage;
+    controller.abort();
+
+    await assert.rejects(execution, /cancelled/);
+    release();
+    await blocked;
+    await flush();
+    assert.equal(statuses.some(([, text]) => text?.includes("error")), false, `${stage} cancellation must not show an error status`);
+    assert.equal(recoveries, 0, `${stage} cancellation must not schedule recovery`);
+  }
+  assert.match(source, /catch \(error\) \{\s*if \(signal\?\.aborted\) throw error;/);
+});
+
+test("a non-cancellation initialization failure still reports an outage and schedules recovery", async () => {
+  const statuses = [];
+  let recoveries = 0;
+  const executeMemoryTool = buildExecuteMemoryToolForTest({
+    awaitWithAbort: buildAwaitWithAbortForTest(),
+    initOnce: async () => { throw new Error("startup failed"); },
+    refreshProjectDetection: async () => assert.fail("failed initialization must not reach project detection"),
+    callMemoryTool: async () => assert.fail("failed initialization must not call memory"),
+    scheduleEngramSelfHeal: () => { recoveries += 1; },
+  });
+
+  const result = await executeMemoryTool("mem_search", {}, { ...sessionCtx("session", statuses), cwd: "/work" });
+
+  assert.equal(result.isError, true);
+  assert.equal(result.details.error, "startup failed");
+  assert.deepEqual(statuses, [["engram", "🧠 engram · error"]]);
+  assert.equal(recoveries, 1);
+});
+
+test("already-cancelled preflight observes a later shared initialization rejection", async () => {
+  const awaitWithAbort = buildAwaitWithAbortForTest();
+  const controller = new AbortController();
+  controller.abort();
+  let rejectShared;
+  const sharedInitialization = new Promise((_, reject) => {
+    rejectShared = reject;
+  });
+  const waiting = awaitWithAbort(sharedInitialization, controller.signal);
+
+  await assert.rejects(waiting, /cancelled/);
+  rejectShared(new Error("shared startup failed"));
+  await flush();
+
+  assert.match(source, /if \(signal\.aborted\) \{\s*void promise\.then\(/);
+  assert.match(source, /const data = await awaitWithAbort\(callMemoryTool\(toolName, params, ctx, transport\.fetch\), signal\);/);
+});
+
 test("a timed-out write is not re-sent, so a slow-but-applied mem_save cannot be duplicated", async () => {
   const originalFetch = globalThis.fetch;
   const sentBodies = [];
@@ -1058,12 +1335,23 @@ test("session compaction strictly registers before forwarding its summary", () =
   assert.notEqual(compactEnd, -1, "session_compact handler end not found");
   const compactHandler = source.slice(compactStart, compactEnd);
 
-  const registration = compactHandler.indexOf("if (sessionId) await ensureSession(sessionId);");
-  const summaryPost = compactHandler.indexOf('bestEffortEngramFetch("/observations"');
+  const registration = compactHandler.indexOf("await ensureSession(sessionId);");
+  const summaryPost = compactHandler.indexOf("await archiveCompactionSummary(sessionId, summary);");
   assert.notEqual(registration, -1, "session_compact must await strict session registration");
   assert.notEqual(summaryPost, -1, "session_compact summary post not found");
   assert.ok(registration < summaryPost, "strict registration must precede summary forwarding");
   assert.doesNotMatch(compactHandler, /ensureSessionBestEffort/, "session_compact must not hide registration failure");
+  assert.match(source, /async function archiveCompactionSummary[\s\S]*engramFetchResult\("\/observations"/);
+});
+
+test("session compaction never captures or reads stale Pi context", () => {
+  const compactStart = source.indexOf('pi.on("session_compact"');
+  const compactEnd = source.indexOf('\n  pi.on("before_agent_start"', compactStart);
+  assert.notEqual(compactStart, -1, "session_compact handler not found");
+  assert.notEqual(compactEnd, -1, "session_compact handler end not found");
+
+  const compactHandler = source.slice(compactStart, compactEnd);
+  assert.doesNotMatch(compactHandler, /\bctx\b/, "session_compact must not capture or access stale Pi context");
 });
 
 test("four session-attributed writes ignore model session_id and require the Pi runtime ID", () => {

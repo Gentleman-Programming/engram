@@ -79,6 +79,29 @@ func TestPluginAssetsDoNotLeakSpanishTriggers(t *testing.T) {
 	}
 }
 
+func TestOpenCodeEmbeddedAssetMatchesCanonicalSource(t *testing.T) {
+	root := repoRoot(t)
+	canonicalPath := filepath.Join(root, "plugin", "opencode", "engram.ts")
+	embeddedPath := filepath.Join(root, "internal", "setup", "plugins", "opencode", "engram.ts")
+
+	canonical, err := os.ReadFile(canonicalPath)
+	if err != nil {
+		t.Fatalf("read canonical OpenCode plugin: %v", err)
+	}
+	embedded, err := os.ReadFile(embeddedPath)
+	if err != nil {
+		t.Fatalf("read embedded OpenCode plugin: %v", err)
+	}
+	if string(embedded) != string(canonical) {
+		t.Fatalf("embedded OpenCode plugin differs from canonical source; run go generate ./internal/setup")
+	}
+	for _, requirement := range deliveryGuaranteeRequirements() {
+		if !strings.Contains(string(canonical), requirement) {
+			t.Errorf("canonical OpenCode plugin missing delivery guarantee: %q", requirement)
+		}
+	}
+}
+
 func TestClaudeCodePluginDoesNotShipMCPManifest(t *testing.T) {
 	path := filepath.Join(repoRoot(t), "plugin", "claude-code", ".mcp.json")
 	if _, err := os.Lstat(path); err == nil {

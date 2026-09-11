@@ -1,10 +1,13 @@
 package plugin_test
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +16,75 @@ import (
 	"testing"
 	"time"
 )
+
+func TestCodexUnixUserPromptSubmitValidatesObservationsAndFirstSaveThreshold(t *testing.T) {
+	bashPath := codexTestBash(t)
+	requireCodexUnixTools(t, bashPath)
+	adapterPath := filepath.Join(repoRoot(t), "plugin", "codex", "scripts", "user-prompt-submit.sh")
+	now := time.Now().UTC()
+
+	tests := []struct {
+		name         string
+		observations string
+		sessionAge   time.Duration
+		timezone     string
+		wantNudge    bool
+	}{
+		{name: "first save before 15 minutes", observations: "[]", sessionAge: 10 * time.Minute, wantNudge: false},
+		{name: "first save after 15 minutes", observations: "[]", sessionAge: 20 * time.Minute, wantNudge: true},
+		{name: "naive UTC stale timestamp under EST5", observations: fmt.Sprintf(`[{"created_at":%q}]`, now.Add(-20*time.Minute).Format(time.DateTime)), sessionAge: 20 * time.Minute, timezone: "EST5", wantNudge: true},
+		{name: "recent UTC timestamp under JST-9", observations: fmt.Sprintf(`[{"created_at":%q}]`, now.Add(-5*time.Minute).Format(time.RFC3339)), sessionAge: 20 * time.Minute, timezone: "JST-9", wantNudge: false},
+		{name: "malformed JSON", observations: "[{", sessionAge: 20 * time.Minute, wantNudge: false},
+		{name: "non-array JSON", observations: `{}`, sessionAge: 20 * time.Minute, wantNudge: false},
+		{name: "non-empty array without timestamp", observations: `[{}]`, sessionAge: 20 * time.Minute, wantNudge: false},
+		{name: "non-empty array with null timestamp", observations: `[{"created_at":null}]`, sessionAge: 20 * time.Minute, wantNudge: false},
+		{name: "non-empty array with non-string timestamp", observations: `[{"created_at":42}]`, sessionAge: 20 * time.Minute, wantNudge: false},
+	}
+
+	for index, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sessionID := fmt.Sprintf("nudge-%d-%d", time.Now().UnixNano(), index)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/project/current":
+					_, _ = io.WriteString(w, `{"project":"test-project","project_source":"config"}`)
+				case "/sessions/" + sessionID:
+					_, _ = fmt.Fprintf(w, `{"started_at":%q}`, now.Add(-tt.sessionAge).Format(time.DateTime))
+				case "/observations":
+					_, _ = io.WriteString(w, tt.observations)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			port := strings.TrimPrefix(server.URL, "http://127.0.0.1:")
+			env := append(codexPromptTestEnv(port), "TZ="+tt.timezone)
+			runHook := func() string {
+				t.Helper()
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, bashPath, adapterPath)
+				cmd.Env = env
+				cmd.Stdin = strings.NewReader(fmt.Sprintf(`{"cwd":"/tmp/test","session_id":%q}`, sessionID))
+				output, err := cmd.CombinedOutput()
+				if err != nil {
+					t.Fatalf("run Codex user prompt hook: %v; output: %s", err, output)
+				}
+				if !json.Valid(output) {
+					t.Fatalf("Codex user prompt hook emitted invalid JSON %q", output)
+				}
+				return string(output)
+			}
+
+			runHook()
+			output := runHook()
+			if gotNudge := strings.Contains(output, "MEMORY REMINDER"); gotNudge != tt.wantNudge {
+				t.Fatalf("second hook invocation nudge = %t, want %t; output: %q", gotNudge, tt.wantNudge, output)
+			}
+		})
+	}
+}
 
 func TestCodexUnixUserPromptSubmitDetachesPromptPersistencePipes(t *testing.T) {
 	bashPath := codexTestBash(t)

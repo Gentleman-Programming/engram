@@ -902,7 +902,8 @@ func TestDetectProjectFull_SubmoduleUsesCheckoutRoot(t *testing.T) {
 }
 
 func TestDetectProjectFull_BareRepositoryUsesRepositoryName(t *testing.T) {
-	bare := filepath.Join(t.TempDir(), "canonical-repo.git")
+	parent := t.TempDir()
+	bare := filepath.Join(parent, "canonical-repo.git")
 	cmd := exec.Command("git", "init", "--bare", bare)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git init --bare: %v\n%s", err, out)
@@ -912,7 +913,8 @@ func TestDetectProjectFull_BareRepositoryUsesRepositoryName(t *testing.T) {
 	if res.Source != SourceGitRoot || res.Project != "canonical-repo" {
 		t.Fatalf("bare repository result = %+v, want git-root canonical-repo", res)
 	}
-	if got, want := canonicalizePath(res.Path), canonicalizePath(filepath.Join(filepath.Dir(bare), "canonical-repo")); got != want {
+	canonicalParent := canonicalizePath(parent)
+	if got, want := canonicalizePath(res.Path), filepath.Join(canonicalParent, "canonical-repo"); got != want {
 		t.Fatalf("bare repository path = %q, want %q", got, want)
 	}
 }

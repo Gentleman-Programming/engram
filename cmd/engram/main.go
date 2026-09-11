@@ -140,6 +140,9 @@ var (
 
 	exitFunc = os.Exit
 
+	notifySignals = signal.Notify
+	stopSignals   = signal.Stop
+
 	stdinScanner = func() *bufio.Scanner { return bufio.NewScanner(os.Stdin) }
 	userHomeDir  = os.UserHomeDir
 
@@ -678,6 +681,16 @@ func main() {
 		cfg.DataDir = dir
 	}
 
+	if os.Args[1] == "instance-id" {
+		id, err := store.EnsureInstanceID(cfg.DataDir)
+		if err != nil {
+			fatal(err)
+			return
+		}
+		fmt.Println(id)
+		return
+	}
+
 	// Migrate orphaned databases that ended up in wrong locations
 	// (e.g. drive root on Windows due to previous bug).
 	migrateOrphanedDB(cfg.DataDir)
@@ -779,17 +792,10 @@ func printUpdateCheckResult(result versioncheck.CheckResult) {
 // ─── Commands ────────────────────────────────────────────────────────────────
 
 func cmdServe(cfg store.Config) {
-	port := 7437 // "ENGR" on phone keypad vibes
-	if p := os.Getenv("ENGRAM_PORT"); p != "" {
-		if n, err := strconv.Atoi(p); err == nil {
-			port = n
-		}
-	}
-	// Allow: engram serve 8080
-	if len(os.Args) > 2 {
-		if n, err := strconv.Atoi(os.Args[2]); err == nil {
-			port = n
-		}
+	options, err := resolveServeOptions(os.Args[2:])
+	if err != nil {
+		fatal(err)
+		return
 	}
 
 	s, err := storeNew(cfg)
@@ -798,7 +804,9 @@ func cmdServe(cfg store.Config) {
 	}
 	defer s.Close()
 
-	srv := newHTTPServer(s, port)
+	srv := newHTTPServer(s, options.port)
+	srv.SetSocketPath(options.socketPath)
+	srv.SetVersion(version)
 
 	// Wire the semantic runner factory and prompt builder for POST /conflicts/scan.
 	// Both live in cmd/engram so internal/server avoids a direct dependency on internal/llm.
@@ -825,20 +833,73 @@ func cmdServe(cfg store.Config) {
 
 	// Graceful shutdown on SIGINT/SIGTERM.
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	notifySignals(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals(sigCh)
+	done := make(chan struct{})
+	defer close(done)
 	go func() {
-		<-sigCh
-		log.Println("[engram] shutting down...")
-		cancel()
-		if mgrStop != nil {
-			mgrStop() // BW7: wait for Manager to release lease before exiting
+		select {
+		case <-sigCh:
+			log.Println("[engram] shutting down...")
+			cancel()
+			if mgrStop != nil {
+				mgrStop()
+			}
+			if err := srv.Close(); err != nil {
+				log.Printf("[engram] close server: %v", err)
+			}
+		case <-done:
 		}
-		exitFunc(0)
 	}()
 
 	if err := startHTTP(srv); err != nil {
 		fatal(err)
 	}
+}
+
+type serveOptions struct {
+	port       int
+	socketPath string
+}
+
+func resolveServeOptions(args []string) (serveOptions, error) {
+	options := serveOptions{port: 7437, socketPath: strings.TrimSpace(os.Getenv("ENGRAM_SOCKET"))}
+	portExplicit := false
+	if p := strings.TrimSpace(os.Getenv("ENGRAM_PORT")); p != "" {
+		if n, err := strconv.ParseUint(p, 10, 16); err == nil && n > 0 {
+			options.port = int(n)
+			portExplicit = true
+		}
+	}
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--socket":
+			if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" {
+				return serveOptions{}, fmt.Errorf("--socket requires a path")
+			}
+			i++
+			options.socketPath = strings.TrimSpace(args[i])
+		case strings.HasPrefix(arg, "--socket="):
+			options.socketPath = strings.TrimSpace(strings.TrimPrefix(arg, "--socket="))
+			if options.socketPath == "" {
+				return serveOptions{}, fmt.Errorf("--socket requires a path")
+			}
+		default:
+			if n, err := strconv.Atoi(arg); err == nil {
+				options.port = n
+				portExplicit = true
+			} else {
+				return serveOptions{}, fmt.Errorf("unknown serve argument: %s", arg)
+			}
+		}
+	}
+
+	if options.socketPath != "" && portExplicit {
+		return serveOptions{}, fmt.Errorf("socket transport cannot be combined with an explicit TCP port")
+	}
+	return options, nil
 }
 
 func resolveServeSyncStatusProject() string {
@@ -981,7 +1042,7 @@ func cmdTUI(cfg store.Config) {
 
 func cmdSearch(cfg store.Config) {
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "usage: engram search <query> [--type TYPE] [--project PROJECT|--all] [--scope SCOPE] [--limit N]")
+		fmt.Fprintln(os.Stderr, "usage: engram search <query> [--type TYPE] [--project PROJECT|--all] [--scope SCOPE] [--limit N] [--match all|any]")
 		exitFunc(1)
 	}
 
@@ -1014,6 +1075,11 @@ func cmdSearch(cfg store.Config) {
 		case "--scope":
 			if i+1 < len(os.Args) {
 				opts.Scope = os.Args[i+1]
+				i++
+			}
+		case "--match":
+			if i+1 < len(os.Args) {
+				opts.MatchMode = os.Args[i+1]
 				i++
 			}
 		default:
@@ -1155,7 +1221,7 @@ func cmdSave(cfg store.Config) {
 	}
 	defer s.Close()
 	sessionID := "manual-save-" + projectName
-	if err := s.CreateSession(sessionID, projectName, cwd); err != nil {
+	if err := s.CreateSessionWithOwnershipMode(sessionID, projectName, cwd, store.SessionOwnershipProjectOwned); err != nil {
 		fatal(err)
 	}
 	id, err := storeAddObservation(s, store.AddObservationParams{
@@ -1198,6 +1264,49 @@ func cmdDelete(cfg store.Config) {
 	}
 }
 
+// parseDeleteTrailingArgs validates the tokens that follow a delete command's
+// target and reports which supported flags were present. Delete paths mutate
+// persistent data, so any token other than a documented flag must be rejected
+// before the store is opened; silently ignoring an unsupported option such as
+// --dry-run would let the deletion proceed anyway. On rejection it prints the
+// offending token(s) and the usage line to stderr, calls exitFunc(1), and
+// reports ok=false.
+func parseDeleteTrailingArgs(args []string, usage string, supported ...string) (flags map[string]bool, ok bool) {
+	flags = make(map[string]bool)
+	var unexpected []string
+	for _, arg := range args {
+		known := false
+		for _, s := range supported {
+			if arg == s {
+				known = true
+				break
+			}
+		}
+		if known {
+			flags[arg] = true
+			continue
+		}
+		unexpected = append(unexpected, fmt.Sprintf("%q", arg))
+	}
+	if len(unexpected) > 0 {
+		fmt.Fprintf(os.Stderr, "error: unexpected argument(s): %s\n", strings.Join(unexpected, " "))
+		fmt.Fprintln(os.Stderr, "usage: "+usage)
+		exitFunc(1)
+		return nil, false
+	}
+	return flags, true
+}
+
+// rejectDeleteHelpTarget rejects standard CLI help tokens before store access.
+func rejectDeleteHelpTarget(target, usage string) bool {
+	if target != "--help" && target != "-h" {
+		return false
+	}
+	fmt.Fprintln(os.Stderr, "usage: "+usage)
+	exitFunc(1)
+	return true
+}
+
 func cmdDeleteObservation(cfg store.Config) {
 	if len(os.Args) < 3 {
 		fmt.Fprintln(os.Stderr, "usage: engram delete <observation_id> [--hard]")
@@ -1212,12 +1321,11 @@ func cmdDeleteObservation(cfg store.Config) {
 		return
 	}
 
-	hard := false
-	for i := 3; i < len(os.Args); i++ {
-		if os.Args[i] == "--hard" {
-			hard = true
-		}
+	flags, ok := parseDeleteTrailingArgs(os.Args[3:], "engram delete <observation_id> [--hard]", "--hard")
+	if !ok {
+		return
 	}
+	hard := flags["--hard"]
 
 	s, err := storeNew(cfg)
 	if err != nil {
@@ -1246,6 +1354,13 @@ func cmdDeleteSession(cfg store.Config) {
 	}
 
 	id := os.Args[3]
+	if rejectDeleteHelpTarget(id, "engram delete session <id>") {
+		return
+	}
+
+	if _, ok := parseDeleteTrailingArgs(os.Args[4:], "engram delete session <id>"); !ok {
+		return
+	}
 
 	s, err := storeNew(cfg)
 	if err != nil {
@@ -1275,6 +1390,10 @@ func cmdDeletePrompt(cfg store.Config) {
 		return
 	}
 
+	if _, ok := parseDeleteTrailingArgs(os.Args[4:], "engram delete prompt <id>"); !ok {
+		return
+	}
+
 	s, err := storeNew(cfg)
 	if err != nil {
 		fatal(err)
@@ -1297,12 +1416,15 @@ func cmdDeleteProject(cfg store.Config) {
 	}
 
 	name := os.Args[3]
-	hard := false
-	for i := 4; i < len(os.Args); i++ {
-		if os.Args[i] == "--hard" {
-			hard = true
-		}
+	if rejectDeleteHelpTarget(name, "engram delete project <name> [--hard]") {
+		return
 	}
+
+	flags, ok := parseDeleteTrailingArgs(os.Args[4:], "engram delete project <name> [--hard]", "--hard")
+	if !ok {
+		return
+	}
+	hard := flags["--hard"]
 
 	s, err := storeNew(cfg)
 	if err != nil {
@@ -1686,6 +1808,18 @@ func cmdSync(cfg store.Config) {
 		fatal(fmt.Errorf("--all and --project cannot be used together"))
 		return
 	}
+	cloudEnabled := doCloud || envBool("ENGRAM_CLOUD_SYNC")
+	if cloudEnabled && projectProvided {
+		decodedProject, warning, decodeErr := normalizeCloudCLIProjectInput(project)
+		if decodeErr != nil {
+			fatal(fmt.Errorf("cloud sync project: %w", decodeErr))
+			return
+		}
+		project = decodedProject
+		if warning != "" {
+			fmt.Fprintln(os.Stderr, warning)
+		}
+	}
 
 	syncDir := ".engram"
 
@@ -1705,7 +1839,6 @@ func cmdSync(cfg store.Config) {
 		project = resolved
 	}
 
-	cloudEnabled := doCloud || envBool("ENGRAM_CLOUD_SYNC")
 	if cloudEnabled {
 		if doAll {
 			fatal(fmt.Errorf("cloud sync requires a single explicit --project scope; --all is not supported"))
@@ -1771,6 +1904,9 @@ func cmdSync(cfg store.Config) {
 	if doStatus {
 		local, remote, pending, err := syncStatus(sy)
 		if err != nil {
+			if cloudEnabled {
+				fatal(errors.New(cloudSyncFailureMessage(project, err)))
+			}
 			fatal(err)
 		}
 		if cloudEnabled {
@@ -2083,6 +2219,7 @@ func cmdObsidianExport(cfg store.Config) {
 		for _, e := range result.Errors {
 			fmt.Fprintf(os.Stderr, "    - %v\n", e)
 		}
+		exitFunc(1)
 	}
 }
 
@@ -2413,17 +2550,19 @@ func cmdProjectsConsolidate(cfg store.Config) {
 			fmt.Printf("  [%d] %-30s %3d obs  (%s)\n", i+1, sm.Name, obs, sm.MatchType)
 		}
 
-		if dryRun {
-			fmt.Printf("\n[dry-run] Would merge %d project(s) into %q\n", len(similar), canonical)
-			return
-		}
-
 		fmt.Printf("\nSelect which to merge into %q (comma-separated numbers, 'all', or 'none'): ", canonical)
 		var answer string
-		scanInputLine(&answer)
+		if n, err := scanInputLine(&answer); err != nil && dryRun && n == 0 {
+			fatal(fmt.Errorf("dry-run requires a confirmed selection: %w", err))
+			return
+		}
 		answer = strings.TrimSpace(strings.ToLower(answer))
 
 		if answer == "none" || answer == "n" || answer == "" {
+			if dryRun && answer == "" {
+				fatal(errors.New("dry-run requires a confirmed selection"))
+				return
+			}
 			fmt.Println("Cancelled.")
 			return
 		}
@@ -2440,6 +2579,9 @@ func cmdProjectsConsolidate(cfg store.Config) {
 				idx := 0
 				if _, err := fmt.Sscanf(part, "%d", &idx); err != nil || idx < 1 || idx > len(similar) {
 					fmt.Fprintf(os.Stderr, "Invalid selection: %q (expected 1-%d)\n", part, len(similar))
+					if dryRun {
+						exitFunc(1)
+					}
 					return
 				}
 				sources = append(sources, similar[idx-1].Name)
@@ -2448,6 +2590,10 @@ func cmdProjectsConsolidate(cfg store.Config) {
 
 		if len(sources) == 0 {
 			fmt.Println("Nothing selected.")
+			return
+		}
+		if dryRun {
+			fmt.Printf("\n[dry-run] Would merge %d project(s) into %q\n", len(sources), canonical)
 			return
 		}
 
@@ -3011,6 +3157,8 @@ func meetsProtocolVersionFloor(v string) bool {
 	return classifyProtocolVersion(v) == protocolVersionSupported
 }
 
+// printPostInstall prints the agent-specific next steps after a successful
+// setup run, including MCP registration status and allowlist prompts.
 func printPostInstall(result *setup.Result) {
 	switch result.Agent {
 	case "opencode":
@@ -3033,7 +3181,7 @@ func printPostInstall(result *setup.Result) {
 		fmt.Println("  2. Verify with: pi list")
 	case "claude-code":
 		// Offer to add engram tools to the permissions allowlist
-		fmt.Print("\nAdd engram tools to ~/.claude/settings.json allowlist?\n")
+		fmt.Printf("\nAdd engram tools to %s allowlist?\n", setup.ClaudeCodeSettingsPath())
 		fmt.Print("This prevents Claude Code from asking permission on every tool call.\n")
 		fmt.Print("Add to allowlist? (y/N): ")
 		var answer string
@@ -3042,19 +3190,19 @@ func printPostInstall(result *setup.Result) {
 		if answer == "y" || answer == "yes" {
 			if err := setupAddClaudeCodeAllowlist(); err != nil {
 				fmt.Fprintf(os.Stderr, "  warning: could not update allowlist: %v\n", err)
-				fmt.Fprintln(os.Stderr, "  You can add them manually to permissions.allow in ~/.claude/settings.json")
+				fmt.Fprintf(os.Stderr, "  You can add them manually to permissions.allow in %s\n", setup.ClaudeCodeSettingsPath())
 			} else {
 				fmt.Println("  ✓ Engram tools added to allowlist")
 			}
 		} else {
-			fmt.Println("  Skipped. You can add them later to permissions.allow in ~/.claude/settings.json")
+			fmt.Printf("  Skipped. You can add them later to permissions.allow in %s\n", setup.ClaudeCodeSettingsPath())
 		}
 
 		fmt.Println("\nNext steps:")
 		fmt.Println("  1. Restart Claude Code — the plugin is active immediately")
 		fmt.Println("  2. Verify with: claude plugin list")
 		if result.MCPConfigured {
-			fmt.Println("  3. MCP config written to ~/.claude/mcp/engram.json using absolute binary path")
+			fmt.Printf("  3. MCP config written to %s using absolute binary path\n", setup.ClaudeCodeUserMCPPath())
 			fmt.Println("     (survives plugin auto-updates; re-run 'engram setup claude-code' if you move the binary)")
 		} else {
 			fmt.Println("  3. MCP configuration was not written. Re-run 'engram setup claude-code' after resolving the reported error.")
@@ -3098,7 +3246,7 @@ Commands:
   test [suite] [--quick] [--json]
                      Run isolated local reliability and performance self-tests
                        suites: reliability, performance (default: both)
-  search <query>     Search memories [--type TYPE] [--project PROJECT|--all] [--scope SCOPE] [--limit N]
+  search <query>     Search memories [--type TYPE] [--project PROJECT|--all] [--scope SCOPE] [--limit N] [--match all|any]
   save <title> <msg> Save a memory  [--type TYPE] [--project PROJECT] [--scope SCOPE]
   delete <obs_id>    Delete an observation [--hard] (soft-delete by default; --hard removes permanently)
   delete session <id>

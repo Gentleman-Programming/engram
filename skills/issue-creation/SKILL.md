@@ -30,13 +30,12 @@ Use this skill when:
 ## Workflow
 
 ```
-1. Search existing issues for duplicates
+1. Consider searching existing issues for duplicates
 2. Choose the correct template (Bug Report or Feature Request)
 3. Fill in ALL required fields
-4. Check pre-flight checkboxes
-5. Submit → issue gets status:needs-review automatically
-6. Wait for maintainer to add status:approved
-7. Only then open a PR linking this issue
+4. Submit → issue gets status:needs-review automatically
+5. Wait for maintainer to add status:approved
+6. Only then open a PR linking this issue
 ```
 
 ---
@@ -52,7 +51,6 @@ Auto-labels: `bug`, `status:needs-review`
 
 | Field | Description |
 |-------|-------------|
-| **Pre-flight Checks** | Checkboxes: no duplicate + understands approval workflow |
 | **Bug Description** | Clear description of the bug |
 | **Steps to Reproduce** | Numbered steps to reproduce |
 | **Expected Behavior** | What should have happened |
@@ -74,10 +72,6 @@ Auto-labels: `bug`, `status:needs-review`
 gh issue create --template "bug_report.yml" \
   --title "fix(store): duplicate observations on concurrent saves" \
   --body "
-### Pre-flight Checks
-- [x] I have searched existing issues and this is not a duplicate
-- [x] I understand this issue needs status:approved before a PR can be opened
-
 ### Bug Description
 When two agents save observations concurrently, duplicates are created.
 
@@ -119,7 +113,6 @@ Auto-labels: `enhancement`, `status:needs-review`
 
 | Field | Description |
 |-------|-------------|
-| **Pre-flight Checks** | Checkboxes: no duplicate + understands approval workflow |
 | **Problem Description** | The pain point this feature solves |
 | **Proposed Solution** | How it should work from the user's perspective |
 | **Affected Area** | Dropdown: CLI, MCP Server, TUI, Store, Sync, Skills, Documentation, Other |
@@ -137,10 +130,6 @@ Auto-labels: `enhancement`, `status:needs-review`
 gh issue create --template "feature_request.yml" \
   --title "feat(cli): add --json flag to mem search" \
   --body "
-### Pre-flight Checks
-- [x] I have searched existing issues and this is not a duplicate
-- [x] I understand this issue needs status:approved before a PR can be opened
-
 ### Problem Description
 When scripting with engram, parsing the human-readable output of mem search is fragile. There's no machine-readable output format.
 
@@ -213,7 +202,7 @@ Is it a duplicate?              → Link to existing issue, close
 ## Commands
 
 ```bash
-# Search existing issues before creating
+# Consider searching existing issues before creating to avoid duplicates
 gh issue list --search "keyword"
 
 # Create bug report

@@ -247,6 +247,46 @@ func TestFatal(t *testing.T) {
 	}
 }
 
+func TestCmdServeWiresBuildVersionIntoHealth(t *testing.T) {
+	cfg := testConfig(t)
+	stubRuntimeHooks(t)
+	withArgs(t, "engram", "serve")
+	t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "")
+
+	const buildVersion = "test-build-version"
+	oldVersion := version
+	version = buildVersion
+	t.Cleanup(func() { version = oldVersion })
+
+	var captured *engramsrv.Server
+	newHTTPServer = func(s *store.Store, port int) *engramsrv.Server {
+		captured = engramsrv.New(s, port)
+		return captured
+	}
+
+	cmdServe(cfg)
+	if captured == nil {
+		t.Fatal("cmdServe did not create an HTTP server")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	res := httptest.NewRecorder()
+	captured.Handler().ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("health status=%d want=%d", res.Code, http.StatusOK)
+	}
+	var health struct {
+		Version string `json:"version"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&health); err != nil {
+		t.Fatalf("decode health response: %v", err)
+	}
+	if health.Version != buildVersion {
+		t.Fatalf("health version=%q want=%q", health.Version, buildVersion)
+	}
+}
+
 func TestCmdServeParsesPortAndErrors(t *testing.T) {
 	cfg := testConfig(t)
 	stubRuntimeHooks(t)
@@ -258,18 +298,20 @@ func TestCmdServeParsesPortAndErrors(t *testing.T) {
 		wantPort  int
 		startErr  error
 		wantFatal bool
+		wantError string
 	}{
 		{name: "default port", wantPort: 7437},
 		{name: "env port", envPort: "8123", wantPort: 8123},
 		{name: "arg overrides env", envPort: "8123", argPort: "9001", wantPort: 9001},
 		{name: "invalid env keeps default", envPort: "nope", wantPort: 7437},
-		{name: "invalid arg keeps env", envPort: "8123", argPort: "bad", wantPort: 8123},
-		{name: "start failure", wantPort: 7437, startErr: errors.New("listen failed"), wantFatal: true},
+		{name: "invalid argument is rejected", envPort: "8123", argPort: "bad", wantPort: -1, wantFatal: true, wantError: "unknown serve argument"},
+		{name: "start failure", wantPort: 7437, startErr: errors.New("listen failed"), wantFatal: true, wantError: "listen failed"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			stubExitWithPanic(t)
+			t.Setenv("ENGRAM_SOCKET", "")
 			if tc.envPort != "" {
 				t.Setenv("ENGRAM_PORT", tc.envPort)
 			} else {
@@ -302,8 +344,8 @@ func TestCmdServeParsesPortAndErrors(t *testing.T) {
 				if _, ok := recovered.(exitCode); !ok {
 					t.Fatalf("expected fatal exit, got %v", recovered)
 				}
-				if !strings.Contains(stderr, "listen failed") {
-					t.Fatalf("stderr missing start error: %q", stderr)
+				if !strings.Contains(stderr, tc.wantError) {
+					t.Fatalf("stderr missing expected error: %q", stderr)
 				}
 			} else if recovered != nil {
 				t.Fatalf("expected no panic, got %v", recovered)
@@ -460,7 +502,7 @@ func TestTryStartAutosyncReturnsStopFn(t *testing.T) {
 	cfg := testConfig(t)
 	t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "1")
 	t.Setenv("ENGRAM_CLOUD_TOKEN", "test-token")
-	t.Setenv("ENGRAM_CLOUD_SERVER", "http://localhost:9999")
+	t.Setenv("ENGRAM_CLOUD_SERVER", "https://localhost:9999")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1506,6 +1548,9 @@ func TestCmdCloudUpgradeHelpShowsGuidedWorkflow(t *testing.T) {
 	if !strings.Contains(stdout, "doctor -> repair -> bootstrap -> status/rollback") {
 		t.Fatalf("expected guided workflow in help output, got %q", stdout)
 	}
+	if !strings.Contains(stdout, "use remirror only to rebuild cloud state from authoritative local data") {
+		t.Fatalf("expected remirror recovery guidance in help output, got %q", stdout)
+	}
 	if !strings.Contains(stdout, "local SQLite remains source of truth") {
 		t.Fatalf("expected local-first semantics in help output, got %q", stdout)
 	}
@@ -1524,6 +1569,7 @@ func TestCloudUpgradeDocsMatchHelpAndLocalFirstSemantics(t *testing.T) {
 
 	helpRequired := []string{
 		"doctor -> repair -> bootstrap -> status/rollback",
+		"use remirror only to rebuild cloud state from authoritative local data",
 		"local SQLite remains source of truth",
 	}
 	for _, token := range helpRequired {
@@ -4056,6 +4102,32 @@ func TestCmdSearchAndSaveDanglingFlags(t *testing.T) {
 	}
 }
 
+func TestCmdSearchForwardsMatchModeWithoutChangingQuery(t *testing.T) {
+	cfg := testConfig(t)
+
+	var gotQuery string
+	var gotOpts store.SearchOptions
+	oldStoreSearch := storeSearch
+	storeSearch = func(_ *store.Store, query string, opts store.SearchOptions) ([]store.SearchResult, error) {
+		gotQuery = query
+		gotOpts = opts
+		return nil, nil
+	}
+	t.Cleanup(func() { storeSearch = oldStoreSearch })
+
+	withArgs(t, "engram", "search", "auth", "compliance", "session", "--all", "--match", "any")
+	_, stderr, recovered := captureOutputAndRecover(t, func() { cmdSearch(cfg) })
+	if recovered != nil || stderr != "" {
+		t.Fatalf("search failed, panic=%v stderr=%q", recovered, stderr)
+	}
+	if gotOpts.MatchMode != "any" {
+		t.Fatalf("match mode=%q want any", gotOpts.MatchMode)
+	}
+	if gotQuery != "auth compliance session" {
+		t.Fatalf("query=%q want %q", gotQuery, "auth compliance session")
+	}
+}
+
 func TestCmdSetupHyphenArgFallsBackToInteractive(t *testing.T) {
 	stubRuntimeHooks(t)
 	stubExitWithPanic(t)
@@ -4398,7 +4470,7 @@ func TestCmdMCP(t *testing.T) {
 	t.Run("cloud autosync env with token and server starts and stops manager", func(t *testing.T) {
 		t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "1")
 		t.Setenv("ENGRAM_CLOUD_TOKEN", "tok")
-		t.Setenv("ENGRAM_CLOUD_SERVER", "http://localhost:9999")
+		t.Setenv("ENGRAM_CLOUD_SERVER", "https://localhost:9999")
 
 		runStarted := make(chan struct{}, 1)
 		stopCalled := make(chan struct{}, 1)
@@ -4463,7 +4535,7 @@ func TestCmdMCPAutosyncPushesWriteDuringServe(t *testing.T) {
 	observationPushed := make(chan struct{})
 	var closeObservationPushed sync.Once
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -4508,6 +4580,7 @@ func TestCmdMCPAutosyncPushesWriteDuringServe(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
+	trustTLSServer(t, srv)
 
 	t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "1")
 	t.Setenv("ENGRAM_CLOUD_TOKEN", "test-token")
@@ -4586,7 +4659,7 @@ func TestCmdMCPAutosyncPollTickerPullsDuringServe(t *testing.T) {
 	pullCalled := make(chan struct{})
 	var closePullCalled sync.Once
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -4614,6 +4687,7 @@ func TestCmdMCPAutosyncPollTickerPullsDuringServe(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
+	trustTLSServer(t, srv)
 
 	t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "1")
 	t.Setenv("ENGRAM_CLOUD_TOKEN", "test-token")

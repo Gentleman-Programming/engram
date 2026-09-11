@@ -163,7 +163,7 @@ func TestProjectIdentityAdmissionRejectsNullableLegacySessionProjects(t *testing
 	type legacySession struct{ id, project string }
 	s := newTestStoreWithNullableLegacySessions(t,
 		legacySession{"null-session", "<NULL>"},
-		legacySession{"blank-session", " "},
+		legacySession{"blank-session", " \t"},
 	)
 
 	tests := []struct {
@@ -281,6 +281,106 @@ func TestProjectIdentityAdmissionAllowsOwnedWritesAndRejectsReassignment(t *test
 	}
 }
 
+func TestCreateProjectOwnedSessionRejectsMismatchWithoutMutation(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSessionWithOwnershipMode("owned-session", "alpha", "/tmp/alpha", SessionOwnershipProjectOwned); err != nil {
+		t.Fatalf("create owned session: %v", err)
+	}
+
+	var mutationsBefore int
+	if err := s.DB().QueryRow("SELECT COUNT(*) FROM sync_mutations").Scan(&mutationsBefore); err != nil {
+		t.Fatalf("count initial mutations: %v", err)
+	}
+	if err := s.CreateSessionWithOwnershipMode("owned-session", "beta", "/tmp/beta", SessionOwnershipProjectOwned); !errors.Is(err, ErrSessionOwnershipMismatch) {
+		t.Fatalf("CreateSessionWithOwnershipMode error = %v, want ErrSessionOwnershipMismatch", err)
+	}
+
+	session, err := s.GetSession("owned-session")
+	if err != nil {
+		t.Fatalf("get owned session: %v", err)
+	}
+	if session.Project != "alpha" || session.OwnershipMode != SessionOwnershipProjectOwned {
+		t.Fatalf("session = %#v, want project alpha and project-owned mode", session)
+	}
+	var observations, prompts, mutationsAfter int
+	if err := s.DB().QueryRow("SELECT COUNT(*) FROM observations").Scan(&observations); err != nil {
+		t.Fatalf("count observations: %v", err)
+	}
+	if err := s.DB().QueryRow("SELECT COUNT(*) FROM user_prompts").Scan(&prompts); err != nil {
+		t.Fatalf("count prompts: %v", err)
+	}
+	if err := s.DB().QueryRow("SELECT COUNT(*) FROM sync_mutations").Scan(&mutationsAfter); err != nil {
+		t.Fatalf("count mutations: %v", err)
+	}
+	if observations != 0 || prompts != 0 || mutationsAfter != mutationsBefore {
+		t.Fatalf("mismatch persisted observations=%d prompts=%d mutations=%d, want observations=0 prompts=0 mutations=%d", observations, prompts, mutationsAfter, mutationsBefore)
+	}
+
+	if err := s.CreateSessionWithOwnershipMode("owned-session", "ALPHA", "/tmp/alpha", SessionOwnershipProjectOwned); err != nil {
+		t.Fatalf("matching normalized project should succeed: %v", err)
+	}
+}
+
+func TestCreateProjectOwnedSessionAdoptsLegacyUnownedProject(t *testing.T) {
+	type legacySession struct{ id, project string }
+	s := newTestStoreWithNullableLegacySessions(t,
+		legacySession{"null-session", "<NULL>"},
+		legacySession{"empty-session", ""},
+		legacySession{"blank-session", " "},
+	)
+
+	for _, sessionID := range []string{"null-session", "empty-session", "blank-session"} {
+		t.Run(sessionID, func(t *testing.T) {
+			if err := s.CreateSessionWithOwnershipMode(sessionID, "target", "/tmp/target", SessionOwnershipProjectOwned); err != nil {
+				t.Fatalf("CreateSessionWithOwnershipMode: %v", err)
+			}
+			session, err := s.GetSession(sessionID)
+			if err != nil {
+				t.Fatalf("get adopted session: %v", err)
+			}
+			if session.Project != "target" || session.OwnershipMode != SessionOwnershipProjectOwned {
+				t.Fatalf("session = %#v, want project target and project-owned mode", session)
+			}
+		})
+	}
+}
+
+func TestAddObservationRejectsProjectOwnedSessionMismatchWithoutMutation(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSessionWithOwnershipMode("owned-session", "alpha", "/tmp/alpha", SessionOwnershipProjectOwned); err != nil {
+		t.Fatalf("create owned session: %v", err)
+	}
+
+	var mutationsBefore int
+	if err := s.DB().QueryRow("SELECT COUNT(*) FROM sync_mutations").Scan(&mutationsBefore); err != nil {
+		t.Fatalf("count initial mutations: %v", err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{SessionID: "owned-session", Type: "note", Title: "mismatch", Content: "must not persist", Project: "beta"}); !errors.Is(err, ErrSessionOwnershipMismatch) {
+		t.Fatalf("AddObservation error = %v, want ErrSessionOwnershipMismatch", err)
+	}
+
+	session, err := s.GetSession("owned-session")
+	if err != nil {
+		t.Fatalf("get owned session: %v", err)
+	}
+	if session.Project != "alpha" || session.OwnershipMode != SessionOwnershipProjectOwned {
+		t.Fatalf("session = %#v, want project alpha and project-owned mode", session)
+	}
+	var observations, prompts, mutationsAfter int
+	if err := s.DB().QueryRow("SELECT COUNT(*) FROM observations").Scan(&observations); err != nil {
+		t.Fatalf("count observations: %v", err)
+	}
+	if err := s.DB().QueryRow("SELECT COUNT(*) FROM user_prompts").Scan(&prompts); err != nil {
+		t.Fatalf("count prompts: %v", err)
+	}
+	if err := s.DB().QueryRow("SELECT COUNT(*) FROM sync_mutations").Scan(&mutationsAfter); err != nil {
+		t.Fatalf("count mutations: %v", err)
+	}
+	if observations != 0 || prompts != 0 || mutationsAfter != mutationsBefore {
+		t.Fatalf("mismatch persisted observations=%d prompts=%d mutations=%d, want observations=0 prompts=0 mutations=%d", observations, prompts, mutationsAfter, mutationsBefore)
+	}
+}
+
 func TestRescueNullProjectOwnershipRequiresExplicitScope(t *testing.T) {
 	s := newTestStore(t)
 	if _, err := s.RescueNullProjectOwnership(ProjectRescueParams{TargetProject: "target"}); !errors.Is(err, ErrProjectRescueInvalidRequest) {
@@ -315,6 +415,160 @@ func TestRescueNullProjectOwnershipRescuesLegacyNullableSessionAndJournalsOnce(t
 	var mutations int
 	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ? AND project = ? AND acked_at IS NULL`, SyncEntitySession, "legacy-session", "target").Scan(&mutations); err != nil || mutations != 1 {
 		t.Fatalf("canonical session mutations = %d, err=%v, want 1", mutations, err)
+	}
+}
+
+func TestRescueNullProjectOwnershipStampsMissingSameProjectOwnershipMode(t *testing.T) {
+	for _, tc := range []struct {
+		name, sessionID, project, pendingProject, wantMode string
+		ownershipMode                                      any
+	}{
+		{"manual save session", "manual-save-target", "target", "target", SessionOwnershipProjectOwned, ""},
+		{"shared session", "agent-session", "target", "target", SessionOwnershipShared, ""},
+		{"legacy NULL mode", "legacy-null-mode", "target", "target", SessionOwnershipShared, nil},
+		{"whitespace-only mode", "whitespace-mode", "target", "target", SessionOwnershipShared, " \t "},
+		{"padded pending project", "padded-target", " target ", " target ", SessionOwnershipShared, ""},
+		{"blank pending project", "blank-target", "target", "", SessionOwnershipShared, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if err := s.CreateSessionWithOwnershipMode(tc.sessionID, "target", "/tmp", SessionOwnershipShared); err != nil {
+				t.Fatalf("CreateSessionWithOwnershipMode: %v", err)
+			}
+			if _, err := s.DB().Exec(`UPDATE sessions SET project = ?, ownership_mode = ? WHERE id = ?`, tc.project, tc.ownershipMode, tc.sessionID); err != nil {
+				t.Fatalf("seed missing ownership mode: %v", err)
+			}
+			if _, err := s.DB().Exec(`UPDATE sync_mutations SET project = ?, payload = ? WHERE entity = ? AND entity_key = ?`, tc.pendingProject, `{"id":"`+tc.sessionID+`","project":"target"}`, SyncEntitySession, tc.sessionID); err != nil {
+				t.Fatalf("seed stale session mutation: %v", err)
+			}
+
+			params := ProjectRescueParams{TargetProject: "target", SessionIDs: []string{tc.sessionID}}
+			result, err := s.RescueNullProjectOwnership(params)
+			if err != nil {
+				t.Fatalf("RescueNullProjectOwnership: %v", err)
+			}
+			if result.RescuedSessions != 1 || !result.Journaled || !result.Complete {
+				t.Fatalf("rescue result = %#v, want one complete journaled mode stamp", result)
+			}
+			session, err := s.GetSession(tc.sessionID)
+			if err != nil || session.Project != "target" || session.OwnershipMode != tc.wantMode {
+				t.Fatalf("rescued session = %#v, err=%v, want canonical target project and ownership mode %q", session, err, tc.wantMode)
+			}
+			var rawPayload string
+			if err := s.DB().QueryRow(`SELECT payload FROM sync_mutations WHERE entity = ? AND entity_key = ? AND acked_at IS NULL`, SyncEntitySession, tc.sessionID).Scan(&rawPayload); err != nil {
+				t.Fatalf("read session mutation payload: %v", err)
+			}
+			var payload syncSessionPayload
+			if err := json.Unmarshal([]byte(rawPayload), &payload); err != nil {
+				t.Fatalf("decode session mutation payload: %v", err)
+			}
+			if payload.Project != "target" || payload.OwnershipMode != tc.wantMode {
+				t.Fatalf("session mutation payload = %#v, want canonical target project and ownership mode %q", payload, tc.wantMode)
+			}
+
+			again, err := s.RescueNullProjectOwnership(params)
+			if err != nil {
+				t.Fatalf("repeat RescueNullProjectOwnership: %v", err)
+			}
+			if again.RescuedSessions != 0 || again.SkippedRecords != 1 || !again.Journaled {
+				t.Fatalf("repeat rescue result = %#v, want one skipped canonical session", again)
+			}
+			var mutations int
+			if err := s.DB().QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ? AND acked_at IS NULL`, SyncEntitySession, tc.sessionID).Scan(&mutations); err != nil || mutations != 1 {
+				t.Fatalf("pending session mutations = %d, err=%v, want 1", mutations, err)
+			}
+			if err := s.DB().QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ? AND project = ? AND acked_at IS NULL AND json_extract(payload, '$.project') = ?`, SyncEntitySession, tc.sessionID, "target", "target").Scan(&mutations); err != nil || mutations != 1 {
+				t.Fatalf("canonical pending session mutations = %d, err=%v, want 1", mutations, err)
+			}
+		})
+	}
+}
+
+type rescueRowsAffectedResult struct {
+	affected int64
+	err      error
+}
+
+func (r rescueRowsAffectedResult) LastInsertId() (int64, error) { return 0, nil }
+func (r rescueRowsAffectedResult) RowsAffected() (int64, error) { return r.affected, r.err }
+
+func TestRescueNullProjectOwnershipRollsBackWhenOwnershipModeSealCannotConfirmOneRow(t *testing.T) {
+	rowsAffectedErr := errors.New("rows affected unavailable")
+	for _, tc := range []struct {
+		name    string
+		result  sql.Result
+		wantErr string
+	}{
+		{"rows affected error", rescueRowsAffectedResult{err: rowsAffectedErr}, rowsAffectedErr.Error()},
+		{"zero rows affected", rescueRowsAffectedResult{}, "updated 0 rows, want 1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if err := s.CreateSessionWithOwnershipMode("claimed-session", "legacy", "/tmp", SessionOwnershipShared); err != nil {
+				t.Fatalf("create claimed session: %v", err)
+			}
+			if err := s.CreateSessionWithOwnershipMode("stamp-session", "target", "/tmp", SessionOwnershipShared); err != nil {
+				t.Fatalf("create stamp session: %v", err)
+			}
+			if _, err := s.DB().Exec(`UPDATE sessions SET project = '' WHERE id = ?`, "claimed-session"); err != nil {
+				t.Fatalf("seed unowned claimed session: %v", err)
+			}
+			if _, err := s.DB().Exec(`UPDATE sessions SET ownership_mode = ? WHERE id = ?`, " \t ", "stamp-session"); err != nil {
+				t.Fatalf("seed blank stamp mode: %v", err)
+			}
+
+			originalExec := s.hooks.exec
+			hookCalled := false
+			s.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+				if query == rescueSessionQuery.updateOwnershipMode {
+					hookCalled = true
+					return tc.result, nil
+				}
+				return originalExec(db, query, args...)
+			}
+			t.Cleanup(func() { s.hooks.exec = originalExec })
+
+			_, err := s.RescueNullProjectOwnership(ProjectRescueParams{TargetProject: "target", SessionIDs: []string{"claimed-session", "stamp-session"}})
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("RescueNullProjectOwnership error = %v, want %q", err, tc.wantErr)
+			}
+			if !hookCalled {
+				t.Fatal("expected ownership mode seal to use exec hook")
+			}
+
+			var claimedProject, stampedMode string
+			if err := s.DB().QueryRow(`SELECT project FROM sessions WHERE id = ?`, "claimed-session").Scan(&claimedProject); err != nil {
+				t.Fatalf("read claimed session after rollback: %v", err)
+			}
+			if err := s.DB().QueryRow(`SELECT ownership_mode FROM sessions WHERE id = ?`, "stamp-session").Scan(&stampedMode); err != nil {
+				t.Fatalf("read stamped session after rollback: %v", err)
+			}
+			if claimedProject != "" || stampedMode != " \t " {
+				t.Fatalf("ownership persisted after rollback: project=%q mode=%q", claimedProject, stampedMode)
+			}
+		})
+	}
+}
+
+func TestRescueNullProjectOwnershipBlocksBlankModeForeignSession(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSessionWithOwnershipMode("foreign-session", "other", "/tmp", SessionOwnershipShared); err != nil {
+		t.Fatalf("CreateSessionWithOwnershipMode: %v", err)
+	}
+	if _, err := s.DB().Exec(`UPDATE sessions SET ownership_mode = '' WHERE id = 'foreign-session'`); err != nil {
+		t.Fatalf("seed blank ownership mode: %v", err)
+	}
+
+	result, err := s.RescueNullProjectOwnership(ProjectRescueParams{TargetProject: "target", SessionIDs: []string{"foreign-session"}})
+	if err != nil {
+		t.Fatalf("RescueNullProjectOwnership: %v", err)
+	}
+	if result.RescuedSessions != 0 || result.ConflictingRecords != 1 || len(result.Blocked) != 1 || result.Blocked[0].Reason != RescueBlockedOwnedByOtherProject {
+		t.Fatalf("rescue result = %#v, want the foreign session blocked", result)
+	}
+	session, err := s.GetSession("foreign-session")
+	if err != nil || session.Project != "other" || session.OwnershipMode != "" {
+		t.Fatalf("foreign session = %#v, err=%v, want unchanged foreign ownership", session, err)
 	}
 }
 
@@ -1687,29 +1941,18 @@ func TestFormatCompactionContextIsSessionScoped(t *testing.T) {
 	addObservation("session-a", "recent-a", "recent-content-a", false)
 	addObservation("session-b", "pinned-b", "pinned-content-b", true)
 	addObservation("session-b", "recent-b", "recent-content-b", false)
-	if _, err := s.AddObservation(AddObservationParams{
-		SessionID: "session-a",
-		Type:      "decision",
-		Title:     "foreign-project-observation",
-		Content:   "must-not-appear",
-		Project:   "foreign",
-		Scope:     "project",
-	}); err != nil {
-		t.Fatalf("add foreign-project observation: %v", err)
-	}
+	seedForeignOwnedObservation(t, s, "session-a", "foreign", "foreign-project-observation")
 
 	for _, prompt := range []struct{ sessionID, content string }{
 		{"session-a", "prompt-a"},
 		{"session-b", "prompt-b"},
-		{"session-a", "foreign-project-prompt"},
 	} {
-		project := "engram"
-		if prompt.content == "foreign-project-prompt" {
-			project = "foreign"
-		}
-		if _, err := s.AddPrompt(AddPromptParams{SessionID: prompt.sessionID, Content: prompt.content, Project: project}); err != nil {
+		if _, err := s.AddPrompt(AddPromptParams{SessionID: prompt.sessionID, Content: prompt.content, Project: "engram"}); err != nil {
 			t.Fatalf("add %s: %v", prompt.content, err)
 		}
+	}
+	if _, err := s.db.Exec(`INSERT INTO user_prompts (sync_id, session_id, content, project) VALUES (?, ?, ?, ?)`, newSyncID("prompt"), "session-a", "foreign-project-prompt", "foreign"); err != nil {
+		t.Fatalf("seed foreign-project prompt: %v", err)
 	}
 
 	for _, tc := range []struct {
@@ -2124,6 +2367,9 @@ func TestTopicKeyUpsertIsScopedByProjectAndScope(t *testing.T) {
 	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
+	if err := s.CreateSession("s2", "another-project", "/tmp/another-project"); err != nil {
+		t.Fatalf("create other-project session: %v", err)
+	}
 
 	baseID, err := s.AddObservation(AddObservationParams{
 		SessionID: "s1",
@@ -2152,7 +2398,7 @@ func TestTopicKeyUpsertIsScopedByProjectAndScope(t *testing.T) {
 	}
 
 	otherProjectID, err := s.AddObservation(AddObservationParams{
-		SessionID: "s1",
+		SessionID: "s2",
 		Type:      "architecture",
 		Title:     "Auth model",
 		Content:   "Other project",
@@ -2266,23 +2512,9 @@ func TestExportProjectPreservesSessionReferentialClosure(t *testing.T) {
 		t.Fatalf("create session proj-b: %v", err)
 	}
 
-	if _, err := s.AddObservation(AddObservationParams{
-		SessionID: "sess-owned-by-proj-b",
-		Type:      "note",
-		Title:     "cross-project obs",
-		Content:   "observation references proj-b session",
-		Project:   "proj-a",
-		Scope:     "project",
-	}); err != nil {
-		t.Fatalf("add cross-project observation: %v", err)
-	}
-
-	if _, err := s.AddPrompt(AddPromptParams{
-		SessionID: "sess-owned-by-proj-b",
-		Content:   "cross-project prompt",
-		Project:   "proj-a",
-	}); err != nil {
-		t.Fatalf("add cross-project prompt: %v", err)
+	seedForeignOwnedObservation(t, s, "sess-owned-by-proj-b", "proj-a", "cross-project obs")
+	if _, err := s.db.Exec(`INSERT INTO user_prompts (sync_id, session_id, content, project) VALUES (?, ?, ?, ?)`, newSyncID("prompt"), "sess-owned-by-proj-b", "cross-project prompt", "proj-a"); err != nil {
+		t.Fatalf("seed cross-project prompt: %v", err)
 	}
 
 	exported, err := s.ExportProject("proj-a")
@@ -2325,23 +2557,9 @@ func TestExportProjectDoesNotLeakRowsOwnedByOtherProjectsViaSessionMembership(t 
 		t.Fatalf("create session proj-a: %v", err)
 	}
 
-	if _, err := s.AddObservation(AddObservationParams{
-		SessionID: "sess-proj-a",
-		Type:      "note",
-		Title:     "owned-by-proj-b",
-		Content:   "should not leak in proj-a export",
-		Project:   "proj-b",
-		Scope:     "project",
-	}); err != nil {
-		t.Fatalf("add cross-owned observation: %v", err)
-	}
-
-	if _, err := s.AddPrompt(AddPromptParams{
-		SessionID: "sess-proj-a",
-		Content:   "prompt owned by proj-b",
-		Project:   "proj-b",
-	}); err != nil {
-		t.Fatalf("add cross-owned prompt: %v", err)
+	seedForeignOwnedObservation(t, s, "sess-proj-a", "proj-b", "owned-by-proj-b")
+	if _, err := s.db.Exec(`INSERT INTO user_prompts (sync_id, session_id, content, project) VALUES (?, ?, ?, ?)`, newSyncID("prompt"), "sess-proj-a", "prompt owned by proj-b", "proj-b"); err != nil {
+		t.Fatalf("seed cross-owned prompt: %v", err)
 	}
 
 	if _, err := s.AddObservation(AddObservationParams{
@@ -4805,6 +5023,12 @@ func TestStoreAdditionalQueryAndMutationBranches(t *testing.T) {
 	if err := s.CreateSession("s-q", "engram", "/tmp/engram"); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
+	if err := s.CreateSession("s-q-alpha", "alpha", "/tmp/alpha"); err != nil {
+		t.Fatalf("create alpha session: %v", err)
+	}
+	if err := s.CreateSession("s-q-beta", "beta", "/tmp/beta"); err != nil {
+		t.Fatalf("create beta session: %v", err)
+	}
 
 	longContent := strings.Repeat("x", s.cfg.MaxObservationLength+100)
 	obsID, err := s.AddObservation(AddObservationParams{
@@ -4845,10 +5069,10 @@ func TestStoreAdditionalQueryAndMutationBranches(t *testing.T) {
 		t.Fatalf("expected nil topic key after empty update")
 	}
 
-	if _, err := s.AddPrompt(AddPromptParams{SessionID: "s-q", Content: "alpha prompt", Project: "alpha"}); err != nil {
+	if _, err := s.AddPrompt(AddPromptParams{SessionID: "s-q-alpha", Content: "alpha prompt", Project: "alpha"}); err != nil {
 		t.Fatalf("add alpha prompt: %v", err)
 	}
-	if _, err := s.AddPrompt(AddPromptParams{SessionID: "s-q", Content: "beta prompt", Project: "beta"}); err != nil {
+	if _, err := s.AddPrompt(AddPromptParams{SessionID: "s-q-beta", Content: "beta prompt", Project: "beta"}); err != nil {
 		t.Fatalf("add beta prompt: %v", err)
 	}
 
@@ -5947,7 +6171,7 @@ func TestHookFallbacksAndAdditionalBranches(t *testing.T) {
 
 func TestSQLiteWriteRetryRetriesTransientLockErrors(t *testing.T) {
 	oldBackoffs := sqliteWriteRetryBackoffs
-	sqliteWriteRetryBackoffs = []time.Duration{0, 0, 0}
+	sqliteWriteRetryBackoffs = []time.Duration{0, 0, 0, 0, 0}
 	t.Cleanup(func() { sqliteWriteRetryBackoffs = oldBackoffs })
 
 	t.Run("begin lock is retried and succeeds", func(t *testing.T) {
@@ -6003,6 +6227,87 @@ func TestSQLiteWriteRetryRetriesTransientLockErrors(t *testing.T) {
 			t.Fatalf("expected bounded attempts=%d, got %d", len(sqliteWriteRetryBackoffs)+1, attempts)
 		}
 	})
+}
+
+func TestSQLiteWriteRetryPersistsAfterIndependentStoreReleasesLock(t *testing.T) {
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = t.TempDir()
+	cfg.DedupeWindow = time.Hour
+
+	writer, err := New(cfg)
+	if err != nil {
+		t.Fatalf("open writer store: %v", err)
+	}
+	t.Cleanup(func() { _ = writer.Close() })
+	locker, err := New(cfg)
+	if err != nil {
+		t.Fatalf("open locker store: %v", err)
+	}
+	t.Cleanup(func() { _ = locker.Close() })
+
+	if err := writer.CreateSession("retry-lock-session", "retry-lock-project", "/tmp/retry-lock-project"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := writer.DB().Exec("PRAGMA busy_timeout = 0"); err != nil {
+		t.Fatalf("disable writer SQLite busy timeout: %v", err)
+	}
+
+	lockConn, err := locker.DB().Conn(context.Background())
+	if err != nil {
+		t.Fatalf("acquire locker connection: %v", err)
+	}
+	t.Cleanup(func() { _ = lockConn.Close() })
+	if _, err := lockConn.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
+		t.Fatalf("acquire SQLite write lock: %v", err)
+	}
+	locked := true
+	t.Cleanup(func() {
+		if locked {
+			_, _ = lockConn.ExecContext(context.Background(), "ROLLBACK")
+		}
+	})
+
+	const lockFailuresBeforeRelease = 5
+	originalExec := writer.hooks.exec
+	lockFailures := 0
+	var releaseErr error
+	writer.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+		result, err := originalExec(db, query, args...)
+		if isRetryableSQLiteLockError(err) {
+			lockFailures++
+			if lockFailures == lockFailuresBeforeRelease {
+				_, releaseErr = lockConn.ExecContext(context.Background(), "COMMIT")
+				locked = false
+			}
+		}
+		return result, err
+	}
+	t.Cleanup(func() { writer.hooks.exec = originalExec })
+
+	id, err := writer.AddObservation(AddObservationParams{
+		SessionID: "retry-lock-session",
+		Project:   "retry-lock-project",
+		Type:      "bugfix",
+		Title:     "SQLite lock retry",
+		Content:   "The retry completed after the lock was released.",
+	})
+	if releaseErr != nil {
+		t.Fatalf("release SQLite write lock: %v", releaseErr)
+	}
+	if err != nil {
+		t.Fatalf("add observation after lock release: %v", err)
+	}
+	if lockFailures != lockFailuresBeforeRelease {
+		t.Fatalf("SQLite lock failures before success = %d, want %d", lockFailures, lockFailuresBeforeRelease)
+	}
+
+	var title string
+	if err := writer.DB().QueryRow("SELECT title FROM observations WHERE id = ?", id).Scan(&title); err != nil {
+		t.Fatalf("read persisted observation: %v", err)
+	}
+	if title != "SQLite lock retry" {
+		t.Fatalf("persisted observation title = %q, want %q", title, "SQLite lock retry")
+	}
 }
 
 func TestStoreUncoveredBranchesPushToHundred(t *testing.T) {
@@ -6697,7 +7002,7 @@ func TestCreateSessionMutationUsesPersistedCanonicalData(t *testing.T) {
 	if err := s.CreateSession("canonical-session", "engram", "/canonical"); err != nil {
 		t.Fatalf("initial CreateSession: %v", err)
 	}
-	if err := s.CreateSession("canonical-session", "other", "/stale"); err != nil {
+	if err := s.CreateSession("canonical-session", "ENGRAM", "/stale"); err != nil {
 		t.Fatalf("idempotent CreateSession: %v", err)
 	}
 	var raw string
@@ -6710,6 +7015,93 @@ func TestCreateSessionMutationUsesPersistedCanonicalData(t *testing.T) {
 	}
 	if payload.Project != "engram" || payload.Directory != "/canonical" {
 		t.Fatalf("mutation payload = %+v, want persisted canonical session", payload)
+	}
+}
+
+func TestStartSessionCreatesAndIdempotentlyStartsActiveSession(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.StartSession("strict-active", "engram", "/original"); err != nil {
+		t.Fatalf("initial StartSession: %v", err)
+	}
+	if err := s.StartSession("strict-active", "other", "/replacement"); err != nil {
+		t.Fatalf("idempotent StartSession: %v", err)
+	}
+
+	session, err := s.GetSession("strict-active")
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if session.Project != "engram" || session.Directory != "/original" || session.EndedAt != nil {
+		t.Fatalf("active session = %+v, want original active session", session)
+	}
+	var mutations int
+	if err := s.DB().QueryRow(`SELECT count(*) FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntitySession, "strict-active").Scan(&mutations); err != nil {
+		t.Fatalf("count session mutations: %v", err)
+	}
+	if mutations != 2 {
+		t.Fatalf("session mutations = %d, want 2 for two valid starts", mutations)
+	}
+}
+
+func TestStartSessionAdoptsLegacyUnownedProject(t *testing.T) {
+	type legacySession struct{ id, project string }
+	s := newTestStoreWithNullableLegacySessions(t,
+		legacySession{"null-start-session", "<NULL>"},
+		legacySession{"empty-start-session", ""},
+		legacySession{"blank-start-session", " \t"},
+	)
+
+	for _, sessionID := range []string{"null-start-session", "empty-start-session", "blank-start-session"} {
+		t.Run(sessionID, func(t *testing.T) {
+			if err := s.StartSession(sessionID, "target", "/tmp/target"); err != nil {
+				t.Fatalf("StartSession: %v", err)
+			}
+			session, err := s.GetSession(sessionID)
+			if err != nil {
+				t.Fatalf("get adopted session: %v", err)
+			}
+			if session.Project != "target" || session.OwnershipMode != SessionOwnershipShared {
+				t.Fatalf("session = %#v, want project target and shared mode", session)
+			}
+		})
+	}
+}
+
+func TestStartSessionRejectsEndedSessionWithoutMutation(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("strict-ended", "engram", "/original"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if err := s.EndSession("strict-ended", "completed"); err != nil {
+		t.Fatalf("end session: %v", err)
+	}
+	before, err := s.GetSession("strict-ended")
+	if err != nil {
+		t.Fatalf("get ended session: %v", err)
+	}
+	var mutationsBefore int
+	if err := s.DB().QueryRow(`SELECT count(*) FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntitySession, "strict-ended").Scan(&mutationsBefore); err != nil {
+		t.Fatalf("count session mutations before refusal: %v", err)
+	}
+
+	if err := s.StartSession("strict-ended", "other", "/replacement"); !errors.Is(err, ErrSessionAlreadyEnded) {
+		t.Fatalf("StartSession error = %v, want ErrSessionAlreadyEnded", err)
+	}
+
+	after, err := s.GetSession("strict-ended")
+	if err != nil {
+		t.Fatalf("get ended session after refusal: %v", err)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("ended session changed: before=%+v after=%+v", before, after)
+	}
+	var mutationsAfter int
+	if err := s.DB().QueryRow(`SELECT count(*) FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntitySession, "strict-ended").Scan(&mutationsAfter); err != nil {
+		t.Fatalf("count session mutations after refusal: %v", err)
+	}
+	if mutationsAfter != mutationsBefore {
+		t.Fatalf("session mutations changed from %d to %d after refusal", mutationsBefore, mutationsAfter)
 	}
 }
 
@@ -7062,6 +7454,17 @@ func TestBackfillSkipsInvalidSourceAndBackfillsValidSession(t *testing.T) {
 	if validMutations != 1 || invalidMutations != 0 {
 		t.Fatalf("valid mutations=%d invalid mutations=%d", validMutations, invalidMutations)
 	}
+	var raw string
+	if err := s.db.QueryRow(`SELECT payload FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntitySession, "valid-session").Scan(&raw); err != nil {
+		t.Fatalf("load valid mutation: %v", err)
+	}
+	var payload syncSessionPayload
+	if err := decodeSyncPayload([]byte(raw), &payload); err != nil {
+		t.Fatalf("decode valid mutation: %v", err)
+	}
+	if payload.OwnershipMode != "" {
+		t.Fatalf("legacy ownership mode = %q, want empty", payload.OwnershipMode)
+	}
 }
 
 // blankSessionIDCases enumerates source identities that strings.TrimSpace
@@ -7305,8 +7708,8 @@ func TestCreateSessionDoesNotOverwriteExistingProject(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 
-	// Second call with project B should NOT overwrite
-	if err := s.CreateSession("sess-preserve", "projectB", "/tmp/b"); err != nil {
+	// A matching normalized project must not overwrite persisted session data.
+	if err := s.CreateSession("sess-preserve", "PROJECTA", "/tmp/b"); err != nil {
 		t.Fatalf("upsert session: %v", err)
 	}
 
@@ -7330,8 +7733,8 @@ func TestCreateSessionPartialUpsert(t *testing.T) {
 		if err := s.CreateSession("sess-partial-1", "myproject", ""); err != nil {
 			t.Fatalf("create: %v", err)
 		}
-		// Second call fills directory but project stays
-		if err := s.CreateSession("sess-partial-1", "other", "/new/dir"); err != nil {
+		// A matching project fills the missing directory.
+		if err := s.CreateSession("sess-partial-1", "MYPROJECT", "/new/dir"); err != nil {
 			t.Fatalf("upsert: %v", err)
 		}
 		sess, err := s.GetSession("sess-partial-1")
@@ -8982,10 +9385,20 @@ func TestListProjectNames(t *testing.T) {
 	if err := s.CreateSession("s2", "beta", "/tmp"); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
+	if err := s.CreateSession("s3", "gamma", "/tmp"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
 
 	for _, project := range []string{"alpha", "alpha", "beta", "gamma"} {
+		sessionID := "s1"
+		if project == "beta" {
+			sessionID = "s2"
+		}
+		if project == "gamma" {
+			sessionID = "s3"
+		}
 		if _, err := s.AddObservation(AddObservationParams{
-			SessionID: "s1",
+			SessionID: sessionID,
 			Type:      "decision",
 			Title:     "test " + project,
 			Content:   "content for " + project,
@@ -12032,6 +12445,9 @@ func TestObservationsNeedingReview(t *testing.T) {
 	if err := s.CreateSession("review-sess", "review-proj", "/tmp/review"); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
+	if err := s.CreateSession("other-review-sess", "other-proj", "/tmp/other"); err != nil {
+		t.Fatalf("CreateSession other project: %v", err)
+	}
 
 	staleID, err := s.AddObservation(AddObservationParams{SessionID: "review-sess", Type: "decision", Title: "stale", Content: "stale content", Project: "review-proj"})
 	if err != nil {
@@ -12041,7 +12457,7 @@ func TestObservationsNeedingReview(t *testing.T) {
 	if err != nil {
 		t.Fatalf("add future: %v", err)
 	}
-	otherID, err := s.AddObservation(AddObservationParams{SessionID: "review-sess", Type: "decision", Title: "other", Content: "other content", Project: "other-proj"})
+	otherID, err := s.AddObservation(AddObservationParams{SessionID: "other-review-sess", Type: "decision", Title: "other", Content: "other content", Project: "other-proj"})
 	if err != nil {
 		t.Fatalf("add other: %v", err)
 	}
@@ -12595,19 +13011,17 @@ func TestDeleteProjectPreservesCrossProjectObservationSession(t *testing.T) {
 	if err := s.CreateSession("s-del-proj-cross-obs", "alpha", "/tmp/alpha"); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	for _, project := range []string{"alpha", "beta"} {
-		_, err := s.AddObservation(AddObservationParams{
-			SessionID: "s-del-proj-cross-obs",
-			Type:      "decision",
-			Title:     project + " observation",
-			Content:   project + " content",
-			Project:   project,
-			Scope:     "project",
-		})
-		if err != nil {
-			t.Fatalf("add %s observation: %v", project, err)
-		}
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-del-proj-cross-obs",
+		Type:      "decision",
+		Title:     "alpha observation",
+		Content:   "alpha content",
+		Project:   "alpha",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add alpha observation: %v", err)
 	}
+	seedForeignOwnedObservation(t, s, "s-del-proj-cross-obs", "beta", "beta observation")
 
 	if _, err := s.DeleteProject("alpha", true); err != nil {
 		t.Fatalf("DeleteProject: %v", err)
@@ -12634,14 +13048,15 @@ func TestDeleteProjectPreservesCrossProjectPromptSession(t *testing.T) {
 	if err := s.CreateSession("s-del-proj-cross-prompt", "alpha", "/tmp/alpha"); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	for _, project := range []string{"alpha", "beta"} {
-		if _, err := s.AddPrompt(AddPromptParams{
-			SessionID: "s-del-proj-cross-prompt",
-			Content:   project + " prompt",
-			Project:   project,
-		}); err != nil {
-			t.Fatalf("add %s prompt: %v", project, err)
-		}
+	if _, err := s.AddPrompt(AddPromptParams{
+		SessionID: "s-del-proj-cross-prompt",
+		Content:   "alpha prompt",
+		Project:   "alpha",
+	}); err != nil {
+		t.Fatalf("add alpha prompt: %v", err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO user_prompts (sync_id, session_id, content, project) VALUES (?, ?, ?, ?)`, newSyncID("prompt"), "s-del-proj-cross-prompt", "beta prompt", "beta"); err != nil {
+		t.Fatalf("seed beta prompt: %v", err)
 	}
 
 	if _, err := s.DeleteProject("alpha", true); err != nil {
@@ -12896,6 +13311,186 @@ func TestActiveRuntimeSessionsReturnsAllMatchingActiveSessions(t *testing.T) {
 	}
 	if !reflect.DeepEqual(ids, []string{"uuid-new", "uuid-old"}) {
 		t.Fatalf("expected both matching active sessions, got %#v", ids)
+	}
+}
+
+// ageSession backdates a session's started_at so recency-bound behavior can be
+// exercised without waiting. Observations are backdated the same way.
+func ageSession(t *testing.T, s *Store, id, startedAt string) {
+	t.Helper()
+	if _, err := s.db.Exec(`UPDATE sessions SET started_at = ? WHERE id = ?`, startedAt, id); err != nil {
+		t.Fatalf("age session %s: %v", id, err)
+	}
+}
+
+func ageObservation(t *testing.T, s *Store, obsID int64, createdAt string) {
+	t.Helper()
+	if _, err := s.db.Exec(`UPDATE observations SET created_at = ? WHERE id = ?`, createdAt, obsID); err != nil {
+		t.Fatalf("age observation %d: %v", obsID, err)
+	}
+}
+
+func useActiveRuntimeSessionReferenceTime(t *testing.T, s *Store, referenceTime string) {
+	t.Helper()
+	original := s.hooks.query
+	s.hooks.query = func(db queryer, query string, args ...any) (*sql.Rows, error) {
+		query = strings.Replace(
+			query,
+			"datetime('now', '"+activeRuntimeSessionWindow+"')",
+			"datetime('"+referenceTime+"', '"+activeRuntimeSessionWindow+"')",
+			1,
+		)
+		return original(db, query, args...)
+	}
+	t.Cleanup(func() { s.hooks.query = original })
+}
+
+func TestActiveRuntimeSessionsAppliesSevenDayWindowToUnobservedSessions(t *testing.T) {
+	const referenceTime = "2026-01-08 00:00:00"
+
+	for _, tt := range []struct {
+		name      string
+		startedAt string
+		want      []string
+	}{
+		{name: "includes six-day-old session", startedAt: "2026-01-02 00:00:00", want: []string{"uuid-boundary"}},
+		{name: "includes exactly seven-day-old session", startedAt: "2026-01-01 00:00:00", want: []string{"uuid-boundary"}},
+		{name: "excludes eight-day-old session", startedAt: "2025-12-31 00:00:00"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if err := s.CreateSession("uuid-boundary", "engram", "/work/engram"); err != nil {
+				t.Fatalf("create session: %v", err)
+			}
+			ageSession(t, s, "uuid-boundary", tt.startedAt)
+			useActiveRuntimeSessionReferenceTime(t, s, referenceTime)
+
+			ids, err := s.ActiveRuntimeSessions("engram", "/work/engram")
+			if err != nil {
+				t.Fatalf("ActiveRuntimeSessions: %v", err)
+			}
+			if !reflect.DeepEqual(ids, tt.want) {
+				t.Fatalf("active session IDs = %#v, want %#v", ids, tt.want)
+			}
+		})
+	}
+}
+
+func TestActiveRuntimeSessionsUsesLatestObservationActivity(t *testing.T) {
+	s := newTestStore(t)
+
+	// The oldest observation must not make a session stale when later work is
+	// recorded. Only the latest observation is effective activity.
+	if err := s.CreateSession("uuid-long-running", "engram", "/work/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	ageSession(t, s, "uuid-long-running", "2025-01-01 00:00:00")
+	staleObservationID, err := s.AddObservation(AddObservationParams{
+		SessionID: "uuid-long-running",
+		Type:      "note",
+		Title:     "stale work",
+		Content:   "content",
+		Project:   "engram",
+	})
+	if err != nil {
+		t.Fatalf("add stale observation: %v", err)
+	}
+	ageObservation(t, s, staleObservationID, "2025-12-01 00:00:00")
+	currentObservationID, err := s.AddObservation(AddObservationParams{
+		SessionID: "uuid-long-running",
+		Type:      "note",
+		Title:     "current work",
+		Content:   "content",
+		Project:   "engram",
+	})
+	if err != nil {
+		t.Fatalf("add current observation: %v", err)
+	}
+	ageObservation(t, s, currentObservationID, "2026-01-07 00:00:00")
+	useActiveRuntimeSessionReferenceTime(t, s, "2026-01-08 00:00:00")
+
+	ids, err := s.ActiveRuntimeSessions("engram", "/work/engram")
+	if err != nil {
+		t.Fatalf("ActiveRuntimeSessions: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != "uuid-long-running" {
+		t.Fatalf("expected latest observation to keep session active, got %#v", ids)
+	}
+}
+
+func TestActiveRuntimeSessionsExcludesSessionWhoseLastObservationIsStale(t *testing.T) {
+	s := newTestStore(t)
+
+	// Recorded activity, but not for months. Same verdict as a session that
+	// never recorded anything.
+	if err := s.CreateSession("uuid-abandoned", "engram", "/work/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	ageSession(t, s, "uuid-abandoned", "2025-01-01 00:00:00")
+	obsID, err := s.AddObservation(AddObservationParams{
+		SessionID: "uuid-abandoned",
+		Type:      "note",
+		Title:     "old work",
+		Content:   "content",
+		Project:   "engram",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	ageObservation(t, s, obsID, "2025-01-02 00:00:00")
+
+	ids, err := s.ActiveRuntimeSessions("engram", "/work/engram")
+	if err != nil {
+		t.Fatalf("ActiveRuntimeSessions: %v", err)
+	}
+	if len(ids) != 0 {
+		t.Fatalf("expected abandoned session to be excluded, got %#v", ids)
+	}
+}
+
+// TestActiveRuntimeSessionsStillFailsClosedForConcurrentSessions guards the
+// behavior deliberately kept by #925, #1031 and #1090: two genuinely live
+// sessions for the same project and directory remain ambiguous. The recency
+// bound narrows which rows qualify as candidates; it must never collapse a real
+// ambiguity into a silent pick.
+func TestActiveRuntimeSessionsStillFailsClosedForConcurrentSessions(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("uuid-live-a", "engram", "/work/engram"); err != nil {
+		t.Fatalf("create session a: %v", err)
+	}
+	if err := s.CreateSession("uuid-live-b", "engram", "/work/engram"); err != nil {
+		t.Fatalf("create session b: %v", err)
+	}
+
+	ids, err := s.ActiveRuntimeSessions("engram", "/work/engram")
+	if err != nil {
+		t.Fatalf("ActiveRuntimeSessions: %v", err)
+	}
+	if !reflect.DeepEqual(ids, []string{"uuid-live-a", "uuid-live-b"}) {
+		t.Fatalf("expected both live sessions to stay ambiguous, got %#v", ids)
+	}
+}
+
+func TestActiveRuntimeSessionsStaleRowDoesNotBlockLiveSession(t *testing.T) {
+	s := newTestStore(t)
+
+	// The reported failure: one stranded legacy row plus the session actually in
+	// use. Resolution must land on the live one instead of failing closed.
+	if err := s.CreateSession("uuid-stranded", "engram", "/work/engram"); err != nil {
+		t.Fatalf("create stranded session: %v", err)
+	}
+	ageSession(t, s, "uuid-stranded", "2025-01-01 00:00:00")
+	if err := s.CreateSession("uuid-current", "engram", "/work/engram"); err != nil {
+		t.Fatalf("create current session: %v", err)
+	}
+
+	ids, err := s.ActiveRuntimeSessions("engram", "/work/engram")
+	if err != nil {
+		t.Fatalf("ActiveRuntimeSessions: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != "uuid-current" {
+		t.Fatalf("expected only the live session, got %#v", ids)
 	}
 }
 
@@ -13189,15 +13784,107 @@ func TestSearchContext_AlreadyCanceled(t *testing.T) {
 
 func TestFTSQueriesUseFTSFirstCrossJoin(t *testing.T) {
 	searchQuery, _ := buildSearchFTSQuery(`"memory"`, SearchOptions{}, 10)
-	for name, query := range map[string]string{
-		"search":          searchQuery,
-		"find candidates": findCandidatesFTSQuery,
+	for _, tc := range []struct {
+		name      string
+		query     string
+		crossJoin string
+	}{
+		{"search", searchQuery, "CROSS JOIN observations o ON o.id = fts.rowid"},
+		{"find candidates", findCandidatesFTSQuery, "CROSS JOIN observations o ON o.id = fts.rowid"},
 	} {
-		t.Run(name, func(t *testing.T) {
-			if !strings.Contains(query, "CROSS JOIN observations o ON o.id = fts.rowid") {
-				t.Fatalf("expected FTS-first CROSS JOIN, got query:\n%s", query)
+		t.Run(tc.name, func(t *testing.T) {
+			if !strings.Contains(tc.query, tc.crossJoin) {
+				t.Fatalf("expected FTS-first CROSS JOIN, got query:\n%s", tc.query)
 			}
 		})
+	}
+
+	s := newTestStore(t)
+	for _, session := range []struct {
+		id      string
+		project string
+	}{
+		{"fts-plan-alpha", "alpha"},
+		{"fts-plan-beta", "beta"},
+	} {
+		if err := s.CreateSession(session.id, session.project, "/tmp/"+session.project); err != nil {
+			t.Fatalf("create %s session: %v", session.project, err)
+		}
+	}
+	for _, prompt := range []AddPromptParams{
+		{SessionID: "fts-plan-alpha", Content: "orbit alpha first", Project: "alpha"},
+		{SessionID: "fts-plan-alpha", Content: "orbit alpha second", Project: "alpha"},
+		{SessionID: "fts-plan-beta", Content: "orbit beta", Project: "beta"},
+	} {
+		if _, err := s.AddPrompt(prompt); err != nil {
+			t.Fatalf("add %s prompt: %v", prompt.Project, err)
+		}
+	}
+
+	var executedSQL string
+	var executedArgs []any
+	originalQueryIt := s.hooks.queryIt
+	s.hooks.queryIt = func(db queryer, query string, args ...any) (rowScanner, error) {
+		executedSQL = query
+		executedArgs = append([]any(nil), args...)
+		rows, err := db.Query(query, args...)
+		if err != nil {
+			return nil, err
+		}
+		return sqlRowScanner{rows: rows}, nil
+	}
+	t.Cleanup(func() { s.hooks.queryIt = originalQueryIt })
+
+	prompts, err := s.SearchPrompts("orbit", "alpha", 1)
+	if err != nil {
+		t.Fatalf("SearchPrompts: %v", err)
+	}
+	if len(prompts) != 1 || prompts[0].Project != "alpha" {
+		t.Fatalf("SearchPrompts project/limit result = %+v, want one alpha prompt", prompts)
+	}
+	if !strings.Contains(executedSQL, "FROM prompts_fts fts") {
+		t.Fatalf("SearchPrompts did not execute the prompts FTS query:\n%s", executedSQL)
+	}
+	if !strings.Contains(executedSQL, "CROSS JOIN user_prompts p ON p.id = fts.rowid") {
+		t.Fatalf("SearchPrompts did not execute an FTS-first CROSS JOIN:\n%s", executedSQL)
+	}
+	if !reflect.DeepEqual(executedArgs, []any{`"orbit"`, "alpha", 1}) {
+		t.Fatalf("SearchPrompts arguments = %#v, want %#v", executedArgs, []any{`"orbit"`, "alpha", 1})
+	}
+
+	rows, err := s.DB().Query("EXPLAIN QUERY PLAN "+executedSQL, executedArgs...)
+	if err != nil {
+		t.Fatalf("EXPLAIN QUERY PLAN: %v", err)
+	}
+	defer rows.Close()
+
+	var plan []string
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			t.Fatalf("scan plan row: %v", err)
+		}
+		plan = append(plan, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("plan rows: %v", err)
+	}
+
+	ftsScan, rowIDLookup := -1, -1
+	for i, detail := range plan {
+		if strings.Contains(detail, "idx_prompts_project") {
+			t.Fatalf("project index drives prompt FTS search: %v", plan)
+		}
+		if strings.Contains(detail, "fts VIRTUAL TABLE") {
+			ftsScan = i
+		}
+		if strings.Contains(detail, "p USING INTEGER PRIMARY KEY") {
+			rowIDLookup = i
+		}
+	}
+	if ftsScan == -1 || rowIDLookup == -1 || ftsScan >= rowIDLookup {
+		t.Fatalf("expected prompts_fts scan before user_prompts rowid lookup, got %v", plan)
 	}
 }
 
@@ -13538,5 +14225,394 @@ func TestUpdateObservationAcceptsPrivateTagOnlyTitle(t *testing.T) {
 	}
 	if payload["title"] != "[REDACTED]" {
 		t.Fatalf("expected redacted title in update payload, got %#v", payload["title"])
+	}
+}
+
+// ─── ContextOptions tests (issue #163) ──────────────────────────────────────
+//
+// FormatContextWithOptions caps each of the 4 sections independently via
+// ContextOptions (0 = legacy default, >0 = cap, <0 = omit the section and
+// its header) and can compact observation-shaped bullets. FormatContext is
+// now a thin wrapper delegating to FormatContextWithOptions with a
+// zero-value ContextOptions{}.
+
+// TestFormatContextWithOptionsErrorBranches exercises the four early
+// `return "", err` branches in FormatContextWithOptions (Sessions, Pinned,
+// Observations, Prompts) that TestFormatContextWithOptions (below) never
+// reaches because every fetch there succeeds. Each subtest closes the
+// store's DB first, so whichever fetch runs first fails — per the fetch
+// order in FormatContextWithOptions (Sessions, then Pinned, then
+// Observations, then Prompts), each subtest omits (opts < 0) every section
+// ahead of the one under test so that section's fetch is the one that
+// actually runs and fails.
+func TestFormatContextWithOptionsErrorBranches(t *testing.T) {
+	t.Run("sessions fetch error", func(t *testing.T) {
+		s := newTestStore(t)
+		if err := s.Close(); err != nil {
+			t.Fatalf("close store: %v", err)
+		}
+		if _, err := s.FormatContextWithOptions("engram", "project", ContextOptions{}); err == nil {
+			t.Fatal("expected error when the Sessions fetch fails on a closed db")
+		}
+	})
+
+	t.Run("pinned fetch error", func(t *testing.T) {
+		s := newTestStore(t)
+		if err := s.Close(); err != nil {
+			t.Fatalf("close store: %v", err)
+		}
+		if _, err := s.FormatContextWithOptions("engram", "project", ContextOptions{Sessions: -1}); err == nil {
+			t.Fatal("expected error when the Pinned fetch fails on a closed db")
+		}
+	})
+
+	t.Run("observations fetch error", func(t *testing.T) {
+		s := newTestStore(t)
+		if err := s.Close(); err != nil {
+			t.Fatalf("close store: %v", err)
+		}
+		if _, err := s.FormatContextWithOptions("engram", "project", ContextOptions{Sessions: -1, Pinned: -1}); err == nil {
+			t.Fatal("expected error when the Observations fetch fails on a closed db")
+		}
+	})
+
+	t.Run("prompts fetch error", func(t *testing.T) {
+		s := newTestStore(t)
+		if err := s.Close(); err != nil {
+			t.Fatalf("close store: %v", err)
+		}
+		if _, err := s.FormatContextWithOptions("engram", "project", ContextOptions{Sessions: -1, Pinned: -1, Observations: -1}); err == nil {
+			t.Fatal("expected error when the Prompts fetch fails on a closed db")
+		}
+	})
+}
+
+// TestFormatContextWithOptions seeds enough rows per section (more than
+// every legacy default) so defaults, explicit caps, and omission are all
+// distinguishable from "everything". cfg.MaxContextResults is pinned to 3
+// so the Observations legacy default is a known, assertable number.
+func TestFormatContextWithOptions(t *testing.T) {
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = t.TempDir()
+	cfg.DedupeWindow = time.Hour
+	cfg.MaxContextResults = 3
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	// 7 sessions: more than the legacy Sessions=5 default.
+	for i := 0; i < 7; i++ {
+		if err := s.CreateSession(fmt.Sprintf("ctx-sess-%d", i), "engram", "/tmp/engram"); err != nil {
+			t.Fatalf("create session %d: %v", i, err)
+		}
+	}
+
+	// 12 prompts: more than the legacy Prompts=10 default.
+	for i := 0; i < 12; i++ {
+		if _, err := s.AddPrompt(AddPromptParams{
+			SessionID: "ctx-sess-0",
+			Content:   fmt.Sprintf("prompt body %d", i),
+			Project:   "engram",
+		}); err != nil {
+			t.Fatalf("add prompt %d: %v", i, err)
+		}
+	}
+
+	// 5 unpinned observations with long multi-line bodies: more than
+	// cfg.MaxContextResults=3, and enough content for Compact to visibly drop.
+	for i := 0; i < 5; i++ {
+		if _, err := s.AddObservation(AddObservationParams{
+			SessionID: "ctx-sess-0",
+			Type:      "decision",
+			Title:     fmt.Sprintf("obs-%d", i),
+			Content:   fmt.Sprintf("## Goal\nLine one for obs %d\n\n## Details\nLorem ipsum dolor sit amet, a long body Compact mode should drop entirely.", i),
+			Project:   "engram",
+			Scope:     "project",
+		}); err != nil {
+			t.Fatalf("add obs %d: %v", i, err)
+		}
+	}
+
+	// 4 pinned observations: PinnedObservations has no legacy cap, so all 4
+	// must survive the zero-value default and only a positive Pinned should
+	// trim them.
+	for i := 0; i < 4; i++ {
+		id, err := s.AddObservation(AddObservationParams{
+			SessionID: "ctx-sess-0",
+			Type:      "architecture",
+			Title:     fmt.Sprintf("pin-%d", i),
+			Content:   fmt.Sprintf("Pinned body %d with a Lorem ipsum preview Compact should drop.", i),
+			Project:   "engram",
+			Scope:     "project",
+		})
+		if err != nil {
+			t.Fatalf("add pinned obs %d: %v", i, err)
+		}
+		if err := s.PinObservation(id); err != nil {
+			t.Fatalf("pin obs %d: %v", i, err)
+		}
+	}
+
+	legacyCtx, err := s.FormatContext("engram", "project")
+	if err != nil {
+		t.Fatalf("format context legacy: %v", err)
+	}
+
+	// ── Zero-value: the mandating test. FormatContextWithOptions with a
+	// zero-value ContextOptions must reproduce FormatContext byte-for-byte,
+	// since FormatContext is now defined purely as that delegation.
+	t.Run("zero value matches legacy FormatContext byte-for-byte", func(t *testing.T) {
+		got, err := s.FormatContextWithOptions("engram", "project", ContextOptions{})
+		if err != nil {
+			t.Fatalf("format context zero-value: %v", err)
+		}
+		if got != legacyCtx {
+			t.Fatalf("zero-value ContextOptions must match legacy FormatContext output.\nzero-value:\n%s\nlegacy:\n%s", got, legacyCtx)
+		}
+	})
+
+	// ── The zero-value output must actually carry the documented legacy
+	// numbers (5/10/cfg.MaxContextResults/unlimited), not just agree with
+	// itself — guards against both defaults drifting together silently.
+	t.Run("zero value applies the documented legacy defaults", func(t *testing.T) {
+		if got := strings.Count(legacyCtx, "- **engram** ("); got != 5 {
+			t.Fatalf("expected legacy default of 5 sessions, got %d\n%s", got, legacyCtx)
+		}
+		if got := strings.Count(legacyCtx, "prompt body "); got != 10 {
+			t.Fatalf("expected legacy default of 10 prompts, got %d\n%s", got, legacyCtx)
+		}
+		if got := strings.Count(legacyCtx, "- [decision] **obs-"); got != 3 {
+			t.Fatalf("expected legacy default of cfg.MaxContextResults=3 observations, got %d\n%s", got, legacyCtx)
+		}
+		if got := strings.Count(legacyCtx, "- [architecture] **pin-"); got != 4 {
+			t.Fatalf("expected legacy default of unlimited (4) pinned, got %d\n%s", got, legacyCtx)
+		}
+	})
+
+	t.Run("positive Sessions caps only sessions", func(t *testing.T) {
+		got, err := s.FormatContextWithOptions("engram", "project", ContextOptions{Sessions: 2})
+		if err != nil {
+			t.Fatalf("format context Sessions=2: %v", err)
+		}
+		if n := strings.Count(got, "- **engram** ("); n != 2 {
+			t.Fatalf("expected 2 sessions under Sessions=2, got %d\n%s", n, got)
+		}
+		if n := strings.Count(got, "prompt body "); n != 10 {
+			t.Fatalf("Sessions cap must not affect prompts, got %d\n%s", n, got)
+		}
+		if n := strings.Count(got, "- [decision] **obs-"); n != 3 {
+			t.Fatalf("Sessions cap must not affect observations, got %d\n%s", n, got)
+		}
+		if n := strings.Count(got, "- [architecture] **pin-"); n != 4 {
+			t.Fatalf("Sessions cap must not affect pinned, got %d\n%s", n, got)
+		}
+	})
+
+	t.Run("negative Sessions omits the section and its header", func(t *testing.T) {
+		got, err := s.FormatContextWithOptions("engram", "project", ContextOptions{Sessions: -1})
+		if err != nil {
+			t.Fatalf("format context Sessions=-1: %v", err)
+		}
+		if strings.Contains(got, "### Recent Sessions") {
+			t.Fatalf("expected Recent Sessions header omitted, got:\n%s", got)
+		}
+		if strings.Contains(got, "- **engram** (") {
+			t.Fatalf("expected no session bullets, got:\n%s", got)
+		}
+		if !strings.Contains(got, "### Recent Observations") {
+			t.Fatalf("Sessions omission must not touch other sections, got:\n%s", got)
+		}
+	})
+
+	t.Run("positive Prompts caps only prompts", func(t *testing.T) {
+		got, err := s.FormatContextWithOptions("engram", "project", ContextOptions{Prompts: 3})
+		if err != nil {
+			t.Fatalf("format context Prompts=3: %v", err)
+		}
+		if n := strings.Count(got, "prompt body "); n != 3 {
+			t.Fatalf("expected 3 prompts under Prompts=3, got %d\n%s", n, got)
+		}
+		if n := strings.Count(got, "- **engram** ("); n != 5 {
+			t.Fatalf("Prompts cap must not affect sessions, got %d\n%s", n, got)
+		}
+	})
+
+	t.Run("negative Prompts omits the section and its header", func(t *testing.T) {
+		got, err := s.FormatContextWithOptions("engram", "project", ContextOptions{Prompts: -1})
+		if err != nil {
+			t.Fatalf("format context Prompts=-1: %v", err)
+		}
+		if strings.Contains(got, "### Recent User Prompts") {
+			t.Fatalf("expected Recent User Prompts header omitted, got:\n%s", got)
+		}
+		if strings.Contains(got, "prompt body ") {
+			t.Fatalf("expected no prompt bullets, got:\n%s", got)
+		}
+		if !strings.Contains(got, "### Pinned") {
+			t.Fatalf("Prompts omission must not touch other sections, got:\n%s", got)
+		}
+	})
+
+	t.Run("positive Observations caps only observations", func(t *testing.T) {
+		got, err := s.FormatContextWithOptions("engram", "project", ContextOptions{Observations: 1})
+		if err != nil {
+			t.Fatalf("format context Observations=1: %v", err)
+		}
+		if n := strings.Count(got, "- [decision] **obs-"); n != 1 {
+			t.Fatalf("expected 1 observation under Observations=1, got %d\n%s", n, got)
+		}
+		if n := strings.Count(got, "- [architecture] **pin-"); n != 4 {
+			t.Fatalf("Observations cap must not affect pinned, got %d\n%s", n, got)
+		}
+	})
+
+	t.Run("negative Observations omits the section and its header", func(t *testing.T) {
+		got, err := s.FormatContextWithOptions("engram", "project", ContextOptions{Observations: -1})
+		if err != nil {
+			t.Fatalf("format context Observations=-1: %v", err)
+		}
+		if strings.Contains(got, "### Recent Observations") {
+			t.Fatalf("expected Recent Observations header omitted, got:\n%s", got)
+		}
+		if strings.Contains(got, "- [decision] **obs-") {
+			t.Fatalf("expected no observation bullets, got:\n%s", got)
+		}
+		if !strings.Contains(got, "### Pinned") {
+			t.Fatalf("Observations omission must not touch other sections, got:\n%s", got)
+		}
+	})
+
+	t.Run("positive Pinned caps only pinned", func(t *testing.T) {
+		got, err := s.FormatContextWithOptions("engram", "project", ContextOptions{Pinned: 2})
+		if err != nil {
+			t.Fatalf("format context Pinned=2: %v", err)
+		}
+		if n := strings.Count(got, "- [architecture] **pin-"); n != 2 {
+			t.Fatalf("expected 2 pinned under Pinned=2, got %d\n%s", n, got)
+		}
+		if n := strings.Count(got, "- [decision] **obs-"); n != 3 {
+			t.Fatalf("Pinned cap must not affect observations, got %d\n%s", n, got)
+		}
+	})
+
+	t.Run("negative Pinned omits the section and its header", func(t *testing.T) {
+		got, err := s.FormatContextWithOptions("engram", "project", ContextOptions{Pinned: -1})
+		if err != nil {
+			t.Fatalf("format context Pinned=-1: %v", err)
+		}
+		if strings.Contains(got, "### Pinned") {
+			t.Fatalf("expected Pinned header omitted, got:\n%s", got)
+		}
+		if strings.Contains(got, "- [architecture] **pin-") {
+			t.Fatalf("expected no pinned bullets, got:\n%s", got)
+		}
+		if !strings.Contains(got, "### Recent Observations") {
+			t.Fatalf("Pinned omission must not touch other sections, got:\n%s", got)
+		}
+	})
+
+	t.Run("Compact drops body previews from observation and pinned bullets only", func(t *testing.T) {
+		got, err := s.FormatContextWithOptions("engram", "project", ContextOptions{Compact: true})
+		if err != nil {
+			t.Fatalf("format context Compact: %v", err)
+		}
+		if strings.Contains(got, "Lorem ipsum") {
+			t.Fatalf("Compact should drop body previews, got:\n%s", got)
+		}
+		if !strings.Contains(got, "- [decision] **obs-4**\n") {
+			t.Fatalf("Compact should keep observation titles bullet-only, got:\n%s", got)
+		}
+		if !strings.Contains(got, "- [architecture] **pin-3**\n") {
+			t.Fatalf("Compact should keep pinned titles bullet-only, got:\n%s", got)
+		}
+		if !strings.Contains(got, "prompt body ") {
+			t.Fatalf("Compact must not affect prompt bullets, got:\n%s", got)
+		}
+		if len(got) >= len(legacyCtx) {
+			t.Fatalf("Compact output (%d) should be smaller than legacy output (%d)", len(got), len(legacyCtx))
+		}
+	})
+}
+
+func TestFormatContextWithOptionsMaxBytes(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("context-budget", "engram", t.TempDir()); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "context-budget",
+		Project:   "engram",
+		Scope:     "project",
+		Type:      "note",
+		Title:     strings.Repeat("ASCII title ", 20),
+		Content:   "context budget test",
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	base := ContextOptions{Sessions: -1, Pinned: -1, Prompts: -1}
+	unbounded, err := s.FormatContextWithOptions("engram", "project", base)
+	if err != nil {
+		t.Fatalf("format unbounded context: %v", err)
+	}
+
+	t.Run("zero preserves the unbounded output byte-for-byte", func(t *testing.T) {
+		got, err := s.FormatContextWithOptions("engram", "project", ContextOptions{
+			Sessions: -1, Pinned: -1, Prompts: -1, MaxBytes: 0,
+		})
+		if err != nil {
+			t.Fatalf("format zero-budget context: %v", err)
+		}
+		if got != unbounded {
+			t.Fatalf("MaxBytes=0 changed context output\ngot:\n%s\nwant:\n%s", got, unbounded)
+		}
+	})
+
+	t.Run("ASCII context never exceeds the requested budget", func(t *testing.T) {
+		const maxBytes = 96
+		if len(unbounded) <= maxBytes {
+			t.Fatalf("test fixture must exceed %d bytes, got %d", maxBytes, len(unbounded))
+		}
+		got, err := s.FormatContextWithOptions("engram", "project", ContextOptions{
+			Sessions: -1, Pinned: -1, Prompts: -1, MaxBytes: maxBytes,
+		})
+		if err != nil {
+			t.Fatalf("format bounded context: %v", err)
+		}
+		if len(got) > maxBytes {
+			t.Fatalf("context is %d bytes, exceeds budget %d", len(got), maxBytes)
+		}
+		if !strings.HasSuffix(got, contextTruncationMarker) {
+			t.Fatalf("truncated context missing marker: %q", got)
+		}
+		if !strings.Contains(got, "ASCII title") {
+			t.Fatalf("expected retained ASCII context before truncation, got %q", got)
+		}
+	})
+}
+
+func TestLimitContextBytesUTF8AndSmallBudget(t *testing.T) {
+	input := "prefix café" + strings.Repeat("界", 10)
+	maxBytes := len(contextTruncationMarker) + len("prefix caf") + 1
+	got := limitContextBytes(input, maxBytes)
+	if got != "prefix caf"+contextTruncationMarker {
+		t.Fatalf("UTF-8 truncation = %q, want %q", got, "prefix caf"+contextTruncationMarker)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("UTF-8 truncation produced invalid UTF-8: %q", got)
+	}
+
+	smallBudget := len(contextTruncationMarker) - 1
+	got = limitContextBytes(input, smallBudget)
+	if len(got) > smallBudget {
+		t.Fatalf("small budget output is %d bytes, exceeds %d", len(got), smallBudget)
+	}
+	if strings.Contains(got, contextTruncationMarker) {
+		t.Fatalf("marker must not be emitted when it does not fit: %q", got)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("small budget output produced invalid UTF-8: %q", got)
 	}
 }

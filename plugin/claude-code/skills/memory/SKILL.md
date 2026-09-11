@@ -21,9 +21,10 @@ Deferred tools (use ToolSearch only if needed):
 - `mem_session_start`, `mem_session_end`, `mem_doctor`, `mem_capture_passive`
 
 **Fallback**: If tools are unexpectedly unavailable, run `engram setup claude-code`
-again and restart Claude Code. Setup repairs the durable MCP config and
-permissions allowlist for both current (`mcp__engram__...`) and older
-plugin-scoped (`mcp__plugin_engram_engram__...`) server ids.
+again and restart Claude Code. Setup repairs a regular durable MCP config and
+the permissions allowlist for both current (`mcp__engram__...`) and older
+plugin-scoped (`mcp__plugin_engram_engram__...`) server ids. If the MCP config
+is a symlink or another non-regular path, replace it manually before rerunning setup.
 
 ## PROACTIVE SAVE TRIGGERS (mandatory — do NOT wait for user to ask)
 
@@ -88,6 +89,10 @@ Also search memory PROACTIVELY when:
 - The user mentions a topic you have no context on — check if past sessions covered it
 - The user's FIRST message references the project, a feature, or a problem — call `mem_search` with keywords from their message to check for prior work before responding
 
+## DELIVERY GUARANTEE
+
+Memory operations are internal bookkeeping, never the user-facing answer. Complete required memory work before composing the completed-task reply; send the complete answer as the final message of the turn with no later tool calls. If memory work fails or needs follow-up, still send the answer.
+
 ## SESSION CLOSE PROTOCOL (mandatory)
 
 Before ending a session or saying "done" / "that's it", you MUST:
@@ -121,4 +126,4 @@ If you see a message about compaction or context reset:
 3. Only THEN continue working
 
 Do not skip step 1. Without it, everything done before compaction is lost from memory.
-All core tools are loaded automatically by the hook at session start. If they are unexpectedly missing, rerun `engram setup claude-code` and restart Claude Code.
+All core tools are loaded automatically by the hook at session start. If they are unexpectedly missing, rerun `engram setup claude-code` and restart Claude Code. If the MCP config is a symlink or another non-regular path, replace it manually before rerunning setup.

@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -92,28 +93,47 @@ func TestCmdSetupMCPOnly(t *testing.T) {
 	})
 }
 
+// TestPrintPostInstallClaudeCodeReportsMCPStatus verifies printPostInstall
+// reports the resolved MCP config path when MCP was configured, and omits
+// it (with a rerun hint) when it was not.
 func TestPrintPostInstallClaudeCodeReportsMCPStatus(t *testing.T) {
 	oldScan := scanInputLine
 	scanInputLine = func(...any) (int, error) { return 0, nil }
 	t.Cleanup(func() { scanInputLine = oldScan })
 
 	t.Run("configured", func(t *testing.T) {
+		t.Setenv("CLAUDE_CONFIG_DIR", "")
+		expected := "MCP config written to " + setup.ClaudeCodeUserMCPPath()
 		stdout, stderr := captureOutput(t, func() {
 			printPostInstall(&setup.Result{Agent: "claude-code", MCPConfigured: true})
 		})
-		if stderr != "" || !strings.Contains(stdout, "MCP config written to ~/.claude/mcp/engram.json") {
+		if stderr != "" || !strings.Contains(stdout, expected) {
 			t.Fatalf("configured output stdout=%q stderr=%q", stdout, stderr)
 		}
 	})
 
+	t.Run("configured with CLAUDE_CONFIG_DIR override", func(t *testing.T) {
+		dir := t.TempDir()
+		t.Setenv("CLAUDE_CONFIG_DIR", dir)
+		expected := "MCP config written to " + filepath.Join(dir, "mcp", "engram.json")
+		stdout, stderr := captureOutput(t, func() {
+			printPostInstall(&setup.Result{Agent: "claude-code", MCPConfigured: true})
+		})
+		if stderr != "" || !strings.Contains(stdout, expected) {
+			t.Fatalf("CLAUDE_CONFIG_DIR override output stdout=%q stderr=%q, want substring %q", stdout, stderr, expected)
+		}
+	})
+
 	t.Run("not configured", func(t *testing.T) {
+		t.Setenv("CLAUDE_CONFIG_DIR", "")
+		notExpected := "MCP config written to " + setup.ClaudeCodeUserMCPPath()
 		stdout, stderr := captureOutput(t, func() {
 			printPostInstall(&setup.Result{Agent: "claude-code"})
 		})
 		if stderr != "" || !strings.Contains(stdout, "MCP configuration was not written") || !strings.Contains(stdout, "Re-run 'engram setup claude-code'") {
 			t.Fatalf("unconfigured output stdout=%q stderr=%q", stdout, stderr)
 		}
-		if strings.Contains(stdout, "MCP config written to ~/.claude/mcp/engram.json") {
+		if strings.Contains(stdout, notExpected) {
 			t.Fatalf("unconfigured output must not report a successful MCP config: %q", stdout)
 		}
 	})

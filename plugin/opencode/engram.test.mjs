@@ -29,8 +29,15 @@ function sdkLookup(sessions) {
   return ({ path }) => sdkResult(sessions.get(path.id))
 }
 
-function httpResponse(data = { status: "created" }, ok = true, onJSON) {
-  return { ok, async json() { onJSON?.(); return data } }
+function httpResponse(data = { status: "created" }, ok = true, onJSON, jsonError) {
+  return {
+    ok,
+    async json() {
+      onJSON?.()
+      if (jsonError) throw jsonError
+      return data
+    },
+  }
 }
 
 function deferredEvent() {
@@ -70,7 +77,8 @@ function buildEnsureResolvedProjectForTest(resolveProjectName) {
     let project = "unknown"
     let projectResolutionError = ""
     let projectResolutionGeneration = 0
-    const ctx = { directory: "/work/engram" }
+    let localReady = true; const ctx = { directory: "/work/engram" }
+		async function ensureLocalReady() { return localReady }
     async function ensureResolvedProject() {${body}}
     return {
       ensureResolvedProject,
@@ -98,22 +106,31 @@ async function createRuntime(t, {
   directory = "/work/engram",
   projectCurrentResponse = { project: "engram", project_source: "git_remote" },
 	projectCurrentOK = true,
-  manifestExists = false,
+	manifestExists = false,
+  configuredEngramURL,
+  healthOK = true,
    sessionGet = async ({ path }) => sdkResult(session(path.id)),
-   registrationResponse,
-   sessionEndResponse,
-   contextResponse,
+    registrationResponse,
+    sessionEndResponse,
+    contextResponse,
+    nudgeSessionResponse,
+    nudgeObservationsResponse,
+    nudgeObservationsError,
 } = {}) {
-  const originalFetch = globalThis.fetch
-  const originalBun = globalThis.Bun
+	const originalFetch = globalThis.fetch
+	const originalBun = globalThis.Bun
+	const originalEngramURL = process.env.ENGRAM_URL
   const registeredIDs = []
   const sessionGetIDs = []
   const requests = []
 	const spawns = []
 	const startupEvents = []
+	if (configuredEngramURL === undefined) delete process.env.ENGRAM_URL
+	else process.env.ENGRAM_URL = configuredEngramURL
   globalThis.Bun = {
     spawnSync(args) {
       if (args.includes("remote")) return { exitCode: 1, stdout: Buffer.from("") }
+			if (args[1] === "instance-id") return { exitCode: 0, stdout: Buffer.from("00000000000000000000000000000000\n") }
       return { exitCode: 0, stdout: Buffer.from("/work/engram\n") }
     },
 		spawn(args, options) {
@@ -124,7 +141,7 @@ async function createRuntime(t, {
   }
   globalThis.fetch = async (url, init) => {
     const path = new URL(url).pathname
-    if (path === "/health") return { ok: true, async json() { return { status: "ok" } } }
+		if (path === "/health") return httpResponse({ status: "ok", instance_id: "00000000000000000000000000000000" }, typeof healthOK === "function" ? healthOK() : healthOK)
     const body = init?.body ? JSON.parse(init.body) : undefined
     requests.push({ path, url: String(url), method: init?.method, body })
 		if (path === "/project/current") {
@@ -140,14 +157,20 @@ async function createRuntime(t, {
       if (sessionEndResponse) return sessionEndResponse(requests.filter(({ path }) => path.startsWith("/sessions/") && path.endsWith("/end")).length)
       return httpResponse({})
     }
+    if (path.startsWith("/sessions/") && nudgeSessionResponse) return httpResponse(nudgeSessionResponse)
+    if (path === "/observations" && (nudgeObservationsResponse !== undefined || nudgeObservationsError)) {
+      return httpResponse(nudgeObservationsResponse, true, undefined, nudgeObservationsError)
+    }
     if (path === "/context/compaction" && contextResponse) return contextResponse()
     return httpResponse({})
   }
 
-  t.after(() => {
-    globalThis.fetch = originalFetch
-    globalThis.Bun = originalBun
-  })
+	t.after(() => {
+		globalThis.fetch = originalFetch
+		globalThis.Bun = originalBun
+		if (originalEngramURL === undefined) delete process.env.ENGRAM_URL
+		else process.env.ENGRAM_URL = originalEngramURL
+	})
   runtimeImport += 1
   const moduleURL = new URL(`./engram.ts?sdk-runtime=${runtimeImport}`, import.meta.url)
   const { Engram } = await import(moduleURL.href)
@@ -165,11 +188,13 @@ async function createRuntime(t, {
   })
   return {
     plugin,
+    dispose: plugin.dispose,
     event: (type, info) => plugin.event({ event: { type, properties: { info } } }),
     before: plugin["tool.execute.before"],
     chat: plugin["chat.message"],
     after: plugin["tool.execute.after"],
     compact: plugin["experimental.session.compacting"],
+    transform: plugin["experimental.chat.system.transform"],
     registeredIDs,
     sessionGetIDs,
     requests,
@@ -177,6 +202,29 @@ async function createRuntime(t, {
 		startupEvents,
   }
 }
+
+test("save nudge fails closed for malformed and non-array observation responses", async (t) => {
+  for (const scenario of [
+    { name: "malformed JSON", error: new SyntaxError("unexpected end of JSON input") },
+    { name: "non-array JSON", response: { observations: [] } },
+    { name: "non-empty observation without timestamp", response: [{}] },
+    { name: "non-empty observation with null timestamp", response: [{ created_at: null }] },
+    { name: "non-empty observation with non-string timestamp", response: [{ created_at: 42 }] },
+  ]) {
+    await t.test(scenario.name, async (t) => {
+      const runtime = await createRuntime(t, {
+        nudgeSessionResponse: { started_at: new Date(Date.now() - 20 * 60 * 1000).toISOString() },
+        nudgeObservationsResponse: scenario.response,
+        nudgeObservationsError: scenario.error,
+      })
+      const output = { system: ["base system prompt"] }
+
+      await runtime.transform({ sessionID: "root" }, output)
+
+      assert.doesNotMatch(output.system[0], /MEMORY REMINDER/)
+    })
+  }
+})
 
 test("project identity delegates Windows paths and worktrees to the canonical server", async (t) => {
   for (const scenario of [
@@ -325,6 +373,17 @@ test("a stale project resolution failure cannot overwrite a newer success", asyn
 test("embedded and distributable OpenCode plugins remain identical", () => {
   const embedded = readFileSync(new URL("../../internal/setup/plugins/opencode/engram.ts", import.meta.url), "utf8")
   assert.equal(embedded, source)
+})
+
+test("a later event recovers an explicitly configured server that was not ready at startup", async (t) => {
+	let healthy = false
+	const runtime = await createRuntime(t, {
+		configuredEngramURL: "http://127.0.0.1:7438",
+		healthOK: () => healthy,
+	})
+	healthy = true
+	await runtime.event("session.created", session("runtime"))
+	assert.deepEqual(runtime.registeredIDs, ["runtime"])
 })
 
 test("registration enters the cache only after a successful acknowledgement", async (t) => {
@@ -926,4 +985,24 @@ test("deleting a parent invalidates descendants and prevents later writes or re-
   }
 
   assert.deepEqual(runtime.registeredIDs, ["parent"], "invalid descendants must never re-register as top-level sessions")
+})
+
+test("plugin disposal closes registered roots, not children, and waits for session ends", async (t) => {
+  const rootID = "root/with space"
+  const end = deferredResponse()
+  const runtime = await createRuntime(t, { sessionEndResponse: end.handler })
+  await runtime.event("session.created", session(rootID))
+  await runtime.event("session.created", session("child", rootID))
+
+  let settled = false
+  const pending = runtime.dispose().then(() => { settled = true })
+  await end.started
+  await Promise.resolve()
+  assert.equal(settled, false)
+  end.resolve(httpResponse({}))
+  await pending
+
+  const endRequests = runtime.requests.filter(({ path }) => path.startsWith("/sessions/") && path.endsWith("/end"))
+  assert.equal(endRequests.length, 1)
+  assert.equal(endRequests[0].path, `/sessions/${encodeURIComponent(rootID)}/end`)
 })

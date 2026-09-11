@@ -75,6 +75,20 @@ For a direct registry-based deploy example, use:
 - `GET /sync/pull`, `POST /sync/push`
 - `GET /dashboard/*` (browser surfaces)
 
+### Chunk transport compatibility and security
+
+Current chunk-sync clients send `POST /sync/push` using the versioned
+`application/vnd.engram.sync+gzip; version=1` envelope. The server decompresses
+it before its existing validation and storage steps. Chunk pulls use the same
+format only when the client explicitly advertises it with `Accept` and the
+decoded chunk is at most 8 MiB; otherwise pulls remain legacy JSON. The server
+continues to accept legacy JSON pushes, and current clients accept both
+compressed and legacy JSON pull responses.
+
+This envelope is compression/obfuscation intended to reduce false-positive WAF
+inspection. It is **not encryption** and does not provide confidentiality; use
+HTTPS and appropriate deployment controls for transport security.
+
 ---
 
 ## Cloud Docs Map
@@ -82,6 +96,7 @@ For a direct registry-based deploy example, use:
 | Doc | Purpose |
 |---|---|
 | [Quickstart](./quickstart.md) | One recommended path first, then authenticated mode |
+| [Production Checklist](./production-checklist.md) | Self-hosted production boundaries, recovery, and operator responsibilities |
 | [GHCR Compose Example](./docker-compose.ghcr.yml) | Pull-and-run deployment sample for Dokploy/Coolify/Portainer/VPS |
 | [Branding](./branding.md) | Engram Cloud visual identity, asset usage, previews |
 | [Technical Cloud Reference](../../DOCS.md#cloud-cli-opt-in) | Full CLI + env/runtime details |

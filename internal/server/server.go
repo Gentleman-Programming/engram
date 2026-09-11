@@ -16,8 +16,11 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/Gentleman-Programming/engram/v2/internal/diagnostic"
@@ -68,6 +71,11 @@ type Server struct {
 	port       int
 	listen     func(network, address string) (net.Listener, error)
 	serve      func(net.Listener, http.Handler) error
+	socketPath string
+	listener   net.Listener
+	socketInfo os.FileInfo
+	closeMu    sync.Mutex
+	closed     bool
 	onWrite    func() // called after successful local writes (for autosync notification)
 	syncStatus SyncStatusProvider
 
@@ -77,10 +85,16 @@ type Server struct {
 	// promptBuilder constructs LLM prompts for semantic scan pairs.
 	// When nil and semantic=true, a no-op builder is used (returns empty string).
 	promptBuilder SemanticPromptBuilder
+	// version is reported by GET /health and defaults to "dev" for local builds.
+	version    string
+	instanceID string
 }
 
 func New(s *store.Store, port int) *Server {
-	srv := &Server{store: s, port: port, listen: net.Listen, serve: http.Serve}
+	srv := &Server{store: s, port: port, listen: net.Listen, serve: http.Serve, version: "dev"}
+	if s != nil {
+		srv.instanceID = s.InstanceID()
+	}
 	srv.mux = http.NewServeMux()
 	srv.routes()
 	return srv
@@ -90,6 +104,11 @@ func New(s *store.Store, port int) *Server {
 // This is used to notify autosync.Manager via NotifyDirty().
 func (s *Server) SetOnWrite(fn func()) {
 	s.onWrite = fn
+}
+
+// SetVersion sets the release version reported by GET /health.
+func (s *Server) SetVersion(v string) {
+	s.version = v
 }
 
 // SetSyncStatus configures the sync status provider for the /sync/status endpoint.
@@ -107,6 +126,14 @@ func (s *Server) SetRunnerFactory(fn SemanticRunnerFactory) {
 // When not set, an empty-string builder is used (valid for tests, not production).
 func (s *Server) SetPromptBuilder(fn SemanticPromptBuilder) {
 	s.promptBuilder = fn
+}
+
+// SetSocketPath configures an exclusive POSIX Unix-domain socket listener.
+// An empty path preserves the default loopback TCP listener.
+func (s *Server) SetSocketPath(path string) {
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
+	s.socketPath = strings.TrimSpace(path)
 }
 
 // notifyWrite calls the onWrite callback if configured (best-effort, non-blocking).
@@ -197,7 +224,25 @@ func requireConfiguredAuth(h http.HandlerFunc) http.HandlerFunc {
 }
 
 func (s *Server) Start() error {
+	s.closeMu.Lock()
+	if s.closed {
+		s.closeMu.Unlock()
+		return nil
+	}
+	socketPath := s.socketPath
+	s.closeMu.Unlock()
+
+	network := "tcp"
 	addr := fmt.Sprintf("127.0.0.1:%d", s.port)
+	if socketPath != "" {
+		var err error
+		socketPath, err = prepareUnixSocket(socketPath)
+		if err != nil {
+			return err
+		}
+		network = "unix"
+		addr = socketPath
+	}
 	listenFn := s.listen
 	if listenFn == nil {
 		listenFn = net.Listen
@@ -207,12 +252,164 @@ func (s *Server) Start() error {
 		serveFn = http.Serve
 	}
 
-	ln, err := listenFn("tcp", addr)
+	var (
+		ln         net.Listener
+		socketInfo os.FileInfo
+		err        error
+	)
+	if socketPath != "" {
+		ln, socketInfo, err = listenSecureUnixSocket(socketPath)
+	} else {
+		ln, err = listenFn(network, addr)
+	}
 	if err != nil {
+		if socketPath == "" && isAddressInUse(err) {
+			if s.instanceOwnsPort() {
+				return nil
+			}
+			return fmt.Errorf("engram server: listen %s: already owned by a different or legacy instance", addr)
+		}
 		return fmt.Errorf("engram server: listen %s: %w", addr, err)
 	}
+
+	s.closeMu.Lock()
+	if s.closed {
+		s.closeMu.Unlock()
+		_ = ln.Close()
+		removeOwnedUnixSocket(socketPath, socketInfo)
+		return nil
+	}
+	s.listener = ln
+	s.socketPath = socketPath
+	s.socketInfo = socketInfo
+	s.closeMu.Unlock()
+	defer s.Close()
+
 	log.Printf("[engram] HTTP server listening on %s", addr)
-	return serveFn(ln, s.mux)
+	err = serveFn(ln, s.mux)
+	if errors.Is(err, net.ErrClosed) {
+		return nil
+	}
+	return err
+}
+
+func isAddressInUse(err error) bool {
+	message := strings.ToLower(err.Error())
+	return errors.Is(err, syscall.EADDRINUSE) || strings.Contains(message, "address already in use") || strings.Contains(message, "only one usage of each socket address")
+}
+
+func (s *Server) instanceOwnsPort() bool {
+	if s.instanceID == "" {
+		return false
+	}
+	client := http.Client{Timeout: 500 * time.Millisecond}
+	for attempt := 0; attempt < 5; attempt++ {
+		response, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/health", s.port))
+		if err == nil {
+			var health struct {
+				InstanceID string `json:"instance_id"`
+			}
+			err = json.NewDecoder(response.Body).Decode(&health)
+			_ = response.Body.Close()
+			if err == nil && health.InstanceID == s.instanceID {
+				return true
+			}
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return false
+}
+
+// Close stops the active listener and removes only the socket created by this
+// server. It is safe to call repeatedly.
+func (s *Server) Close() error {
+	s.closeMu.Lock()
+	if s.closed {
+		s.closeMu.Unlock()
+		return nil
+	}
+	s.closed = true
+	ln := s.listener
+	s.listener = nil
+	socketPath := s.socketPath
+	socketInfo := s.socketInfo
+	s.socketInfo = nil
+	s.closeMu.Unlock()
+
+	if ln == nil {
+		return nil
+	}
+	err := ln.Close()
+	if errors.Is(err, net.ErrClosed) {
+		err = nil
+	}
+	if removeErr := removeOwnedUnixSocket(socketPath, socketInfo); removeErr != nil && err == nil {
+		err = removeErr
+	}
+	return err
+}
+
+func prepareUnixSocket(socketPath string) (string, error) {
+	if socketPath == "" || socketPath == "." {
+		return "", fmt.Errorf("engram server: socket path is required")
+	}
+	canonicalPath, err := secureUnixSocketPath(socketPath)
+	if err != nil {
+		return "", err
+	}
+	parent := filepath.Dir(canonicalPath)
+	parentInfo, err := os.Stat(parent)
+	if err != nil {
+		return "", fmt.Errorf("engram server: socket parent %q: %w", parent, err)
+	}
+	if !parentInfo.IsDir() {
+		return "", fmt.Errorf("engram server: socket parent %q is not a directory", parent)
+	}
+
+	info, err := os.Lstat(canonicalPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return canonicalPath, nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("engram server: inspect socket %q: %w", canonicalPath, err)
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		return "", fmt.Errorf("engram server: socket path %q exists and is not a Unix socket", canonicalPath)
+	}
+
+	conn, err := net.DialTimeout("unix", canonicalPath, 250*time.Millisecond)
+	if err == nil {
+		_ = conn.Close()
+		return "", fmt.Errorf("engram server: socket %q is already in use", canonicalPath)
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		if err := removeOwnedUnixSocket(canonicalPath, info); err != nil {
+			return "", fmt.Errorf("engram server: remove stale socket %q: %w", canonicalPath, err)
+		}
+		return canonicalPath, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return canonicalPath, nil
+	}
+	return "", fmt.Errorf("engram server: cannot verify socket %q is stale: %w", canonicalPath, err)
+}
+
+func removeOwnedUnixSocket(socketPath string, expected os.FileInfo) error {
+	if socketPath == "" || expected == nil {
+		return nil
+	}
+	current, err := os.Lstat(socketPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if current.Mode()&os.ModeSocket == 0 || !os.SameFile(expected, current) {
+		return nil
+	}
+	return os.Remove(socketPath)
 }
 
 func (s *Server) Handler() http.Handler {
@@ -234,8 +431,13 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /observations", s.handleListObservations)
 	s.mux.HandleFunc("POST /observations/passive", s.handlePassiveCapture)
 	s.mux.HandleFunc("GET /observations/recent", s.handleRecentObservations)
+	// Pin state is local-only metadata and remains open with ENGRAM_HTTP_TOKEN like other non-destructive local HTTP writes.
+	s.mux.HandleFunc("PUT /observations/{id}/pin", s.handlePinObservation)
+	s.mux.HandleFunc("DELETE /observations/{id}/pin", s.handleUnpinObservation)
 	s.mux.HandleFunc("PATCH /observations/{id}", s.handleUpdateObservation)
 	s.mux.HandleFunc("DELETE /observations/{id}", requireAuth(s.handleDeleteObservation))
+	// Topic-key suggestion is read-only and remains open under the local HTTP policy.
+	s.mux.HandleFunc("POST /topic-keys/suggest", s.handleSuggestTopicKey)
 
 	// Search
 	s.mux.HandleFunc("GET /search", s.handleSearch)
@@ -290,17 +492,19 @@ func (s *Server) routes() {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]any{
-		"status":  "ok",
-		"service": "engram",
-		"version": "0.1.0",
+		"status":      "ok",
+		"service":     "engram",
+		"version":     s.version,
+		"instance_id": s.instanceID,
 	})
 }
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		ID        string `json:"id"`
-		Project   string `json:"project"`
-		Directory string `json:"directory"`
+		ID            string `json:"id"`
+		Project       string `json:"project"`
+		Directory     string `json:"directory"`
+		OwnershipMode string `json:"ownership_mode"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, http.StatusBadRequest, "invalid json: "+err.Error())
@@ -311,7 +515,15 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.store.CreateSession(body.ID, body.Project, projectpkg.RuntimeWorktreeDirectory(body.Directory)); err != nil {
+	mode := body.OwnershipMode
+	if mode == "" {
+		mode = store.SessionOwnershipShared
+	}
+	if err := s.store.CreateSessionWithOwnershipMode(body.ID, body.Project, projectpkg.RuntimeWorktreeDirectory(body.Directory), mode); err != nil {
+		if errors.Is(err, store.ErrInvalidSessionOwnershipMode) {
+			jsonError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -349,6 +561,9 @@ func (s *Server) handleRecentSessions(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if sessions == nil {
+		sessions = []store.SessionSummary{}
 	}
 
 	jsonResponse(w, http.StatusOK, sessions)
@@ -459,6 +674,9 @@ func (s *Server) handleRecentObservations(w http.ResponseWriter, r *http.Request
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if obs == nil {
+		obs = []store.Observation{}
+	}
 
 	jsonResponse(w, http.StatusOK, obs)
 }
@@ -551,6 +769,76 @@ func (s *Server) handleUpdateObservation(w http.ResponseWriter, r *http.Request)
 
 	s.notifyWrite()
 	jsonResponse(w, http.StatusOK, obs)
+}
+
+func (s *Server) handlePinObservation(w http.ResponseWriter, r *http.Request) {
+	s.handleObservationPinState(w, r, true)
+}
+
+func (s *Server) handleUnpinObservation(w http.ResponseWriter, r *http.Request) {
+	s.handleObservationPinState(w, r, false)
+}
+
+func (s *Server) handleObservationPinState(w http.ResponseWriter, r *http.Request, pinned bool) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		jsonError(w, http.StatusBadRequest, "invalid observation id")
+		return
+	}
+
+	setPinned := s.store.UnpinObservation
+	if pinned {
+		setPinned = s.store.PinObservation
+	}
+	if err := setPinned(id); err != nil {
+		if errors.Is(err, store.ErrObservationNotFound) {
+			jsonError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"id":     id,
+		"pinned": pinned,
+	})
+}
+
+func (s *Server) handleSuggestTopicKey(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Type    string `json:"type"`
+		Title   string `json:"title"`
+		Content string `json:"content"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 50<<20)
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&body); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			jsonError(w, http.StatusBadRequest, "request body too large")
+			return
+		}
+		jsonError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			jsonError(w, http.StatusBadRequest, "request body too large")
+			return
+		}
+		jsonError(w, http.StatusBadRequest, "invalid json: trailing data")
+		return
+	}
+	if strings.TrimSpace(body.Title) == "" && strings.TrimSpace(body.Content) == "" {
+		jsonError(w, http.StatusBadRequest, "provide title or content to suggest a topic_key")
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]string{
+		"topic_key": store.SuggestTopicKey(body.Type, body.Title, body.Content),
+	})
 }
 
 func (s *Server) handleDeleteObservation(w http.ResponseWriter, r *http.Request) {
@@ -765,6 +1053,9 @@ func (s *Server) handleRecentPrompts(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if prompts == nil {
+		prompts = []store.Prompt{}
+	}
 
 	jsonResponse(w, http.StatusOK, prompts)
 }
@@ -789,6 +1080,9 @@ func (s *Server) handleSearchPrompts(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if prompts == nil {
+		prompts = []store.Prompt{}
 	}
 
 	jsonResponse(w, http.StatusOK, prompts)
@@ -893,6 +1187,36 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 
 // ─── Context ─────────────────────────────────────────────────────────────────
 
+// contextMaxSectionLimit is the ceiling for a positive per-section cap on
+// GET /context, matching conflictsMaxLimit.
+const contextMaxSectionLimit = 500
+
+// contextMaxBytes is the largest total context budget accepted by GET /context.
+const contextMaxBytes = 64 * 1024
+
+// clampContextLimit caps a positive per-section limit at
+// contextMaxSectionLimit, so `observations=2147483647` cannot reach SQL as a
+// LIMIT wide enough to render a whole project into one response. Unlike
+// clampConflictsLimit it returns 0 and negatives untouched: those are the
+// legacy-default and omit-the-section states of the ContextOptions
+// convention, not out-of-range input.
+func clampContextLimit(v int) int {
+	if v > contextMaxSectionLimit {
+		return contextMaxSectionLimit
+	}
+	return v
+}
+
+func clampContextBytes(v int) int {
+	if v <= 0 {
+		return 0
+	}
+	if v > contextMaxBytes {
+		return contextMaxBytes
+	}
+	return v
+}
+
 func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 	resolved, err := s.resolveRequestProject(r, projectpkg.ResolutionCurrent, true)
 	if err != nil {
@@ -901,7 +1225,25 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 	}
 	scope := r.URL.Query().Get("scope")
 
-	context, err := s.store.FormatContext(resolved.Project, scope)
+	// Per-section caps via store.ContextOptions: 0 (param absent/empty/
+	// unparseable) keeps FormatContext's legacy default, >0 caps the
+	// section, and <0 is a DELIBERATE way to omit the section (and its
+	// "### ..." header) entirely — not a bug to be filtered out like the
+	// `err == nil && n > 0` guard in the upstream reference this was
+	// adapted from (PR #162). queryInt/queryBool already fall back to the
+	// zero value on any bad input, so garbage query params never 4xx here.
+	// clampContextLimit only puts a ceiling on the >0 state; 0 and negatives
+	// pass through untouched so all three states survive.
+	opts := store.ContextOptions{
+		MaxBytes:     clampContextBytes(queryInt(r, "max_bytes", 0)),
+		Observations: clampContextLimit(queryInt(r, "observations", 0)),
+		Prompts:      clampContextLimit(queryInt(r, "prompts", 0)),
+		Sessions:     clampContextLimit(queryInt(r, "sessions", 0)),
+		Pinned:       clampContextLimit(queryInt(r, "pinned", 0)),
+		Compact:      queryBool(r, "compact", false),
+	}
+
+	context, err := s.store.FormatContextWithOptions(resolved.Project, scope, opts)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return

@@ -7,7 +7,16 @@
 # 4. Injects Memory Protocol instructions + memory context
 
 ENGRAM_PORT="${ENGRAM_PORT:-7437}"
-ENGRAM_URL="http://127.0.0.1:${ENGRAM_PORT}"
+ENGRAM_EXTERNAL_URL="${ENGRAM_URL:-}"
+ENGRAM_EXTERNAL_URL="${ENGRAM_EXTERNAL_URL#"${ENGRAM_EXTERNAL_URL%%[![:space:]]*}"}"
+ENGRAM_EXTERNAL_URL="${ENGRAM_EXTERNAL_URL%"${ENGRAM_EXTERNAL_URL##*[![:space:]]}"}"
+if [ -n "$ENGRAM_EXTERNAL_URL" ]; then
+  ENGRAM_URL="$ENGRAM_EXTERNAL_URL"
+  ENGRAM_MANAGED_LOCAL=0
+else
+  ENGRAM_URL="http://127.0.0.1:${ENGRAM_PORT}"
+  ENGRAM_MANAGED_LOCAL=1
+fi
 IMPORT_TIMEOUT_SECS=8
 LOCK_TTL_SECS=$((IMPORT_TIMEOUT_SECS + 4))
 LOCK_METADATA_STALE_SECS=$((LOCK_TTL_SECS * 5))
@@ -21,8 +30,13 @@ INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 
-# Ensure engram server is running
-if ! curl -sf "${ENGRAM_URL}/health" --max-time 1 > /dev/null 2>&1; then
+# Explicit ENGRAM_URL intentionally delegates ownership to an external server.
+if [ "$ENGRAM_MANAGED_LOCAL" = 1 ]; then
+  ENGRAM_INSTANCE_ID=$(engram instance-id 2>/dev/null) || {
+    printf '%s\n' "warning: Engram could not resolve its local server identity." >&2
+    exit 0
+  }
+if ! engram_health_matches_instance "$ENGRAM_INSTANCE_ID"; then
   ENGRAM_SERVE_DATA_DIR="${ENGRAM_DATA_DIR:-$HOME/.engram}"
   if mkdir -p "$ENGRAM_SERVE_DATA_DIR" 2>/dev/null && : >> "$ENGRAM_SERVE_DATA_DIR/serve.err.log" 2>/dev/null; then
     ENGRAM_SERVE_ERR_LOG="$ENGRAM_SERVE_DATA_DIR/serve.err.log"
@@ -31,6 +45,11 @@ if ! curl -sf "${ENGRAM_URL}/health" --max-time 1 > /dev/null 2>&1; then
   fi
   ENGRAM_CLOUD_AUTOSYNC=1 engram serve > /dev/null 2>> "$ENGRAM_SERVE_ERR_LOG" &
   sleep 0.5
+fi
+if ! engram_health_matches_instance "$ENGRAM_INSTANCE_ID"; then
+  printf '%s\n' "warning: Engram server ownership mismatch; use ENGRAM_URL, ENGRAM_PORT, or ENGRAM_SOCKET to isolate it." >&2
+  exit 0
+fi
 fi
 
 PROJECT=$(resolve_project "$CWD") || PROJECT=""
@@ -162,6 +181,9 @@ Call `mem_save` IMMEDIATELY after ANY of these:
 - Discussion concludes with a clear direction chosen
 
 **Self-check after EVERY task**: "Did I or the user just make a decision, confirm a recommendation, express a preference, fix a bug, learn something, or establish a convention? If yes → mem_save NOW."
+
+### DELIVERY GUARANTEE
+Memory operations are internal bookkeeping, never the user-facing answer. Complete required memory work before composing the completed-task reply; send the complete answer as the final message of the turn with no later tool calls. If memory work fails or needs follow-up, still send the answer.
 
 ### SEARCH MEMORY when:
 - User asks to recall anything ("remember", "what did we do", or the equivalent in the user's language)

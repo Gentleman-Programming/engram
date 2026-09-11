@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -40,6 +41,31 @@ func TestCmdCloudConfigClearPersistsEmptyValuesAndReportsOverrides(t *testing.T)
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("cloud config clear missing %q: %q", want, stdout)
 		}
+	}
+
+	persisted, err := loadCloudConfig(cfg)
+	if err != nil {
+		t.Fatalf("load cleared cloud config: %v", err)
+	}
+	if persisted.ServerURL != "" || persisted.Token != "" {
+		t.Fatalf("persisted config = %+v, want empty values", persisted)
+	}
+}
+
+func TestCmdCloudConfigClearReplacesMalformedPersistedConfig(t *testing.T) {
+	stubExitWithPanic(t)
+	cfg := testConfig(t)
+	if err := os.WriteFile(cloudconfig.Path(cfg.DataDir), []byte("{malformed-json"), 0o600); err != nil {
+		t.Fatalf("write malformed cloud config: %v", err)
+	}
+
+	withArgs(t, "engram", "cloud", "config", "--clear")
+	stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloud(cfg) })
+	if recovered != nil || stderr != "" {
+		t.Fatalf("cloud config clear = stdout %q stderr %q panic %v", stdout, stderr, recovered)
+	}
+	if !strings.Contains(stdout, "Persisted cloud server URL and token cleared") {
+		t.Fatalf("cloud config clear output = %q", stdout)
 	}
 
 	persisted, err := loadCloudConfig(cfg)

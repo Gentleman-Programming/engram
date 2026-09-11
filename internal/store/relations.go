@@ -70,6 +70,10 @@ func isValidConfidence(confidence float64) bool {
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
+// defaultCandidateLimit is the fallback per-source candidate budget shared by
+// FindCandidates and the page-batched scan path when no positive limit is set.
+const defaultCandidateLimit = 3
+
 // CandidateOptions controls the FindCandidates query.
 type CandidateOptions struct {
 	// Project filters candidates to the same project as the saved observation.
@@ -355,7 +359,7 @@ func (s *Store) FindCandidates(savedID int64, opts CandidateOptions) ([]Candidat
 	// Apply defaults.
 	limit := opts.Limit
 	if limit <= 0 {
-		limit = 3
+		limit = defaultCandidateLimit
 	}
 	query, threshold, err := candidateRankQuery(opts)
 	if err != nil {
@@ -1103,33 +1107,9 @@ func validBM25Rank(rank float64) bool {
 // FindCandidates returns documents with ANY term overlap (not all terms).
 // Using implicit AND (sanitizeFTS) is too strict for candidate detection:
 // the full saved title would require every word to appear in candidates.
-// OR semantics give broader recall; BM25 score still captures relevance.
+// OR semantics give broader recall; the score still captures relevance.
 func sanitizeFTSCandidates(title string) string {
-	words := strings.Fields(title)
-	if len(words) == 0 {
-		return ""
-	}
-	quoted := make([]string, 0, len(words))
-	for _, w := range words {
-		w = strings.Trim(w, `"`)
-		if w != "" {
-			var escaped strings.Builder
-			for i := 0; i < len(w); i++ {
-				if w[i] == '"' {
-					// FTS5 escapes a literal quote by doubling it. Preserve an
-					// already escaped pair so callers do not get double escaped.
-					escaped.WriteString(`""`)
-					if i+1 < len(w) && w[i+1] == '"' {
-						i++
-					}
-					continue
-				}
-				escaped.WriteByte(w[i])
-			}
-			quoted = append(quoted, `"`+escaped.String()+`"`)
-		}
-	}
-	return strings.Join(quoted, " OR ")
+	return strings.Join(candidateTerms(title), " OR ")
 }
 
 // joinStrings joins a slice of strings with the given separator.
@@ -1374,7 +1354,7 @@ func (s *Store) scanProject(opts ScanOptions, allProjects bool) (ScanResult, err
 
 	// Load one ID-ordered page and one sentinel row before running candidate queries.
 	obsQuery := `
-		SELECT id, ifnull(sync_id,''), scope
+		SELECT id, ifnull(sync_id,''), scope, title, ifnull(project,'')
 		FROM observations
 		WHERE deleted_at IS NULL
 	`
@@ -1396,14 +1376,16 @@ func (s *Store) scanProject(opts ScanOptions, allProjects bool) (ScanResult, err
 	}
 
 	type obsRow struct {
-		id     int64
-		syncID string
-		scope  string
+		id      int64
+		syncID  string
+		scope   string
+		title   string
+		project string
 	}
 	observations := make([]obsRow, 0, limit+1)
 	for obsRows.Next() {
 		var o obsRow
-		if err := obsRows.Scan(&o.id, &o.syncID, &o.scope); err != nil {
+		if err := obsRows.Scan(&o.id, &o.syncID, &o.scope, &o.title, &o.project); err != nil {
 			obsRows.Close()
 			return result, fmt.Errorf("ScanProject: scan obs row: %w", err)
 		}
@@ -1418,6 +1400,28 @@ func (s *Store) scanProject(opts ScanOptions, allProjects bool) (ScanResult, err
 	hasMoreObservations := len(observations) > limit
 	if hasMoreObservations {
 		observations = observations[:limit]
+	}
+
+	// ── Page-level batched candidate ranking (#955) ──────────────────────────
+	// One bounded single-term FTS query per distinct page term instead of one
+	// multi-term scan per inspected observation; deterministic conflict scoring
+	// replaces the bm25 ordering per the issue contract. On batch failure the
+	// loop below falls back to the legacy per-source query so source-level
+	// failure behavior is unchanged.
+	batchSources := make([]scanSourceRow, len(observations))
+	for i, obs := range observations {
+		batchSources[i] = scanSourceRow{
+			id:      obs.id,
+			syncID:  obs.syncID,
+			scope:   obs.scope,
+			project: obs.project,
+			title:   obs.title,
+		}
+	}
+	batched, batchErr := s.scanCandidateBatch(batchSources, scanCandidateLimit)
+	if batchErr != nil {
+		log.Printf("[store] ScanProject: batched candidates failed, falling back to per-source ranking: %v", batchErr)
+		batched = nil
 	}
 
 	// ── Phase 4: collect all (source, candidate) pairs for semantic scan ──────
@@ -1437,20 +1441,27 @@ scan:
 		result.Inspected++
 		result.RankedQueries++
 
-		// Find candidates without inserting (SkipInsert=true per design §5).
-		candidateProject := opts.Project
-		if allProjects {
-			candidateProject = ""
-		}
-		candidates, err := s.FindCandidates(obs.id, CandidateOptions{
-			Project:    candidateProject,
-			Scope:      obs.scope,
-			Limit:      10,
-			SkipInsert: true,
-		})
-		if err != nil {
-			log.Printf("[store] ScanProject: FindCandidates obs=%s: %v", obs.syncID, err)
-			continue
+		// Page-batched candidates (#955) without inserting (SkipInsert=true per
+		// design §5); legacy per-source query when the batch could not run.
+		var candidates []Candidate
+		if batched != nil {
+			candidates = batched[obs.id]
+		} else {
+			candidateProject := opts.Project
+			if allProjects {
+				candidateProject = ""
+			}
+			var err error
+			candidates, err = s.FindCandidates(obs.id, CandidateOptions{
+				Project:    candidateProject,
+				Scope:      obs.scope,
+				Limit:      scanCandidateLimit,
+				SkipInsert: true,
+			})
+			if err != nil {
+				log.Printf("[store] ScanProject: FindCandidates obs=%s: %v", obs.syncID, err)
+				continue
+			}
 		}
 		result.CandidatesFound += len(candidates)
 

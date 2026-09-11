@@ -373,11 +373,15 @@ func (s *CloudServer) handleAdminRevokeGrant(w http.ResponseWriter, r *http.Requ
 
 func (s *CloudServer) requireManagedAdmin(w http.ResponseWriter, r *http.Request) (cloudauth.Principal, bool) {
 	principal, ok := PrincipalFromContext(r.Context())
-	if !ok || principal.Role != cloudauth.RoleAdmin || principal.Source != cloudauth.PrincipalSourceManagedToken {
+	if !ok || !isManagedAdminPrincipal(principal) {
 		writeActionableError(w, http.StatusForbidden, constants.UpgradeErrorClassPolicy, constants.ReasonPolicyForbidden, "forbidden: managed admin principal is required")
 		return cloudauth.Principal{}, false
 	}
 	return principal, true
+}
+
+func isManagedAdminPrincipal(principal cloudauth.Principal) bool {
+	return principal.Role == cloudauth.RoleAdmin && principal.Source == cloudauth.PrincipalSourceManagedToken
 }
 
 func (s *CloudServer) adminStore(w http.ResponseWriter) (AdminIdentityStore, bool) {

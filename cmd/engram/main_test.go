@@ -306,7 +306,7 @@ func TestPrintUsage(t *testing.T) {
 	if !strings.Contains(stdout, "engram vtest-version") {
 		t.Fatalf("usage missing version: %q", stdout)
 	}
-	if !strings.Contains(stdout, "search <query>") || !strings.Contains(stdout, "setup [agent]") {
+	if !strings.Contains(stdout, "search <query>") || !strings.Contains(stdout, "[--match all|any]") || !strings.Contains(stdout, "setup [agent]") {
 		t.Fatalf("usage missing expected commands: %q", stdout)
 	}
 	for _, agent := range []string{"opencode", "pi", "claude-code", "gemini-cli", "codex", "antigravity-cli", "windsurf", "qwen", "kiro", "cursor", "vscode-copilot", "kilocode"} {
@@ -748,12 +748,16 @@ func TestCmdSaveUsesDetectionSeamAndPrintsNormalizationWarning(t *testing.T) {
 	cfg := testConfig(t)
 	cwd := t.TempDir()
 	withCwd(t, cwd)
+	actualCWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get current working directory: %v", err)
+	}
 	withArgs(t, "engram", "save", "resolved-title", "resolved-content")
 
 	originalDetectProjectFull := detectProjectFull
 	detectProjectFull = func(gotCWD string) project.DetectionResult {
-		if gotCWD != cwd {
-			t.Fatalf("detection cwd = %q, want %q", gotCWD, cwd)
+		if gotCWD != actualCWD {
+			t.Fatalf("detection cwd = %q, want %q", gotCWD, actualCWD)
 		}
 		return project.DetectionResult{Project: " Configured--Project "}
 	}
@@ -1590,21 +1594,30 @@ func TestCmdProjectsConsolidateDryRun(t *testing.T) {
 	// Seed a canonical name and rewrite a second project's records as a legacy case variant.
 	mustSeedObservation(t, cfg, "s-eng", "engram", "note", "eng note", "content", "project")
 	mustSeedObservation(t, cfg, "s-legacy", "legacy-source", "note", "legacy note", "content", "project")
+	mustSeedObservation(t, cfg, "s-padded", "padded-source", "note", "padded note", "content", "project")
 	rewriteLegacyProjectName(t, cfg, "legacy-source", "ENGRAM")
+	rewriteLegacyProjectName(t, cfg, "padded-source", " ENGRAM ")
 
 	old := detectProject
 	detectProject = func(string) string { return "engram" }
 	t.Cleanup(func() { detectProject = old })
+
+	oldScan := scanInputLine
+	scanInputLine = func(a ...any) (int, error) {
+		*a[0].(*string) = "1"
+		return 1, nil
+	}
+	t.Cleanup(func() { scanInputLine = oldScan })
 
 	withArgs(t, "engram", "projects", "consolidate", "--dry-run")
 	stdout, stderr := captureOutput(t, func() { cmdProjectsConsolidate(cfg) })
 	if stderr != "" {
 		t.Fatalf("expected no stderr, got: %q", stderr)
 	}
-	if !strings.Contains(stdout, "dry-run") {
-		t.Fatalf("expected dry-run message, got: %q", stdout)
+	if !strings.Contains(stdout, "[dry-run] Would merge 1 project(s)") {
+		t.Fatalf("expected selected dry-run plan, got: %q", stdout)
 	}
-	// Verify no actual merge happened (both project names still exist).
+	// Verify no actual merge happened.
 	s, err := store.New(cfg)
 	if err != nil {
 		t.Fatalf("store.New: %v", err)
@@ -1614,9 +1627,55 @@ func TestCmdProjectsConsolidateDryRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListProjectNames: %v", err)
 	}
-	// Should still have both names (no merge happened)
-	if len(names) != 2 || names[0] != "ENGRAM" || names[1] != "engram" {
+	// All three names remain because dry-run performs no merge.
+	if len(names) != 3 || !slices.Contains(names, " ENGRAM ") || !slices.Contains(names, "ENGRAM") || !slices.Contains(names, "engram") {
 		t.Fatalf("expected legacy and canonical names after dry-run, got: %v", names)
+	}
+}
+
+func TestCmdProjectsConsolidateDryRunRequiresSelection(t *testing.T) {
+	cfg := testConfig(t)
+
+	mustSeedObservation(t, cfg, "s-eng", "engram", "note", "eng note", "content", "project")
+	mustSeedObservation(t, cfg, "s-legacy", "legacy-source", "note", "legacy note", "content", "project")
+	rewriteLegacyProjectName(t, cfg, "legacy-source", "ENGRAM")
+
+	oldDetect := detectProject
+	detectProject = func(string) string { return "engram" }
+	t.Cleanup(func() { detectProject = oldDetect })
+
+	oldScan := scanInputLine
+	scanInputLine = func(...any) (int, error) { return 0, io.EOF }
+	t.Cleanup(func() { scanInputLine = oldScan })
+
+	exitCode := 0
+	oldExit := exitFunc
+	exitFunc = func(code int) { exitCode = code }
+	t.Cleanup(func() { exitFunc = oldExit })
+
+	withArgs(t, "engram", "projects", "consolidate", "--dry-run")
+	stdout, stderr := captureOutput(t, func() { cmdProjectsConsolidate(cfg) })
+	if exitCode != 1 {
+		t.Fatalf("exit code = %d, want 1", exitCode)
+	}
+	if !strings.Contains(stderr, "dry-run requires a confirmed selection") {
+		t.Fatalf("expected selection error, got: %q", stderr)
+	}
+	if strings.Contains(stdout, "[dry-run] Would merge") {
+		t.Fatalf("dry-run emitted an unselected merge plan: %q", stdout)
+	}
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	names, err := s.ListProjectNames()
+	if err != nil {
+		t.Fatalf("ListProjectNames: %v", err)
+	}
+	if len(names) != 2 || names[0] != "ENGRAM" || names[1] != "engram" {
+		t.Fatalf("dry-run without selection mutated projects: %v", names)
 	}
 }
 
@@ -1674,6 +1733,13 @@ func TestCmdProjectsConsolidateAllDryRun(t *testing.T) {
 	mustSeedObservation(t, cfg, "s-legacy", "legacy-source", "note", "legacy note", "content", "project")
 	rewriteLegacyProjectName(t, cfg, "legacy-source", "ENGRAM")
 
+	oldScan := scanInputLine
+	scanInputLine = func(...any) (int, error) {
+		t.Fatal("--all dry-run must not require a selection")
+		return 0, nil
+	}
+	t.Cleanup(func() { scanInputLine = oldScan })
+
 	withArgs(t, "engram", "projects", "consolidate", "--all", "--dry-run")
 	stdout, stderr := captureOutput(t, func() { cmdProjectsConsolidate(cfg) })
 	if stderr != "" {
@@ -1684,6 +1750,19 @@ func TestCmdProjectsConsolidateAllDryRun(t *testing.T) {
 	}
 	if !strings.Contains(stdout, `Would merge into "engram"`) {
 		t.Fatalf("expected normalized canonical in dry-run output, got: %q", stdout)
+	}
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	names, err := s.ListProjectNames()
+	if err != nil {
+		t.Fatalf("ListProjectNames: %v", err)
+	}
+	if len(names) != 2 || names[0] != "ENGRAM" || names[1] != "engram" {
+		t.Fatalf("--all dry-run mutated projects: %v", names)
 	}
 }
 
@@ -2498,6 +2577,52 @@ func TestObsidianExportCallsInjectedExporter(t *testing.T) {
 	if capturedCfg.Since.IsZero() {
 		t.Fatalf("expected Since to be set from --since 2026-01-01, got zero")
 	}
+}
+
+func TestObsidianExportReportErrorsExitNonzero(t *testing.T) {
+	t.Run("completed export with a write error reports counts and exits nonzero", func(t *testing.T) {
+		cfg := testConfig(t)
+		vault := t.TempDir()
+		id := mustSeedObservation(t, cfg, "obsidian-write-error", "obsidian-errors", "bugfix", "Blocked export", "content", "project")
+		blockedPath := filepath.Join(vault, "engram", "obsidian-errors", "bugfix", fmt.Sprintf("blocked-export-%d.md", id))
+		if err := os.MkdirAll(blockedPath, 0755); err != nil {
+			t.Fatalf("setup blocked output directory: %v", err)
+		}
+
+		withArgs(t, "engram", "obsidian-export", "--vault", vault, "--project", "obsidian-errors")
+		stdout, stderr, exitCode := captureExitPanic(t, func() { cmdObsidianExport(cfg) })
+
+		if exitCode != 1 {
+			t.Fatalf("exit code = %d, want 1", exitCode)
+		}
+		for _, line := range []string{"Created: 0", "Updated: 0", "Deleted: 0", "Skipped: 0", "Hubs:    0"} {
+			if !strings.Contains(stdout, line) {
+				t.Fatalf("stdout missing %q: %q", line, stdout)
+			}
+		}
+		if !strings.Contains(stderr, "Errors: 1") || !strings.Contains(stderr, "write") {
+			t.Fatalf("stderr = %q, want one write error", stderr)
+		}
+	})
+
+	t.Run("successful export keeps zero exit status and empty stderr", func(t *testing.T) {
+		cfg := testConfig(t)
+		vault := t.TempDir()
+		mustSeedObservation(t, cfg, "obsidian-success", "obsidian-success", "bugfix", "Successful export", "content", "project")
+
+		withArgs(t, "engram", "obsidian-export", "--vault", vault, "--project", "obsidian-success")
+		stdout, stderr, exitCode := captureExitPanic(t, func() { cmdObsidianExport(cfg) })
+
+		if exitCode != 0 {
+			t.Fatalf("exit code = %d, want 0", exitCode)
+		}
+		if stderr != "" {
+			t.Fatalf("stderr = %q, want empty", stderr)
+		}
+		if !strings.Contains(stdout, "Created: 1") || !strings.Contains(stdout, "Hubs:    1") {
+			t.Fatalf("stdout = %q, want successful report counts", stdout)
+		}
+	})
 }
 
 // TestObsidianExportMinimalFlags verifies that --vault uses the current project.

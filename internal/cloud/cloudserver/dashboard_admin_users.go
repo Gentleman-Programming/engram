@@ -244,7 +244,7 @@ func (s *CloudServer) handleDashboardManagedUserDetail(w http.ResponseWriter, r 
 		http.Error(w, fmt.Sprintf("list grants: %v", err), http.StatusInternalServerError)
 		return
 	}
-	renderDashboardAdminComponent(w, r, s.dashboardAdminLayout(r, "Managed User", dashboard.ManagedUserDetailPage(user, tokens, grants)))
+	renderDashboardAdminComponent(w, r, s.dashboardAdminLayout(r, "Managed User", dashboard.ManagedUserDetailPage(user, tokens, grants, s.canManageManagedUsers(r))))
 }
 
 // handleDashboardCreateManagedToken handles POST /dashboard/admin/users/{principalID}/tokens.

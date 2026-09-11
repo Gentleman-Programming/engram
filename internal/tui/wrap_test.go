@@ -10,7 +10,7 @@ import (
 func TestViewObservationDetailWrapping(t *testing.T) {
 	m := Model{
 		Width:  40,
-		Height: 20,
+		Height: 0,
 		Screen: ScreenObservationDetail,
 		SelectedObservation: &store.Observation{
 			ID:      1,

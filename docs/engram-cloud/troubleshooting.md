@@ -65,6 +65,16 @@ engram cloud config --clear
 
 `cloud config --clear` clears only the persisted `cloud.json` server URL and token. Active `ENGRAM_CLOUD_SERVER` and `ENGRAM_CLOUD_TOKEN` overrides remain effective and are reported by the command and status output; unset them separately when you need them inactive.
 
+## Cloud project was recreated or deleted
+
+When a project's cloud data was deleted or recreated while the correct local data is already acknowledged, replay the current local project state with:
+
+```bash
+engram cloud upgrade remirror --project <project>
+```
+
+The project must already be enrolled and the configured cloud credentials must be authorized for it. Remirror creates new project-scoped upsert and locally represented tombstone mutations, then sends them through the normal cloud export path. It preserves existing acknowledgement and attempt history; it does not reopen acknowledged rows, delete mutation history, or reset `last_acked_seq`. Re-running the command is safe because remote entities use stable identities and upsert semantics.
+
 ---
 
 ## Error: `chunk_id does not match payload content hash`
@@ -308,7 +318,7 @@ Do not manually edit SQLite without a backup.
 | `observation payload title is required for upsert` | Run the missing session directory helper; it also repairs missing observation payload fields from local `observations` |
 | `observations[N].title is required` | Run the missing session directory helper with `--fix-empty-observations` or `--all` |
 | `401` or `auth_required` | Check `ENGRAM_CLOUD_TOKEN` on the client and server |
-| `403` or `policy_forbidden` | Check `ENGRAM_CLOUD_ALLOWED_PROJECTS` on the server |
+| `403` or `policy_forbidden` | Check the server-side `ENGRAM_CLOUD_ALLOWED_PROJECTS` policy for the denied project; a managed principal's project grant may also need checking. The client does not expose allowlist contents. |
 | `server_unsupported` | Redeploy a cloud server with mutation endpoints |
 
 ---

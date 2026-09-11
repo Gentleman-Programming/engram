@@ -18,8 +18,10 @@ import type { Plugin } from "@opencode-ai/plugin"
 // ─── Configuration ───────────────────────────────────────────────────────────
 
 const ENGRAM_PORT = parseInt(process.env.ENGRAM_PORT ?? "7437")
-const ENGRAM_URL = `http://127.0.0.1:${ENGRAM_PORT}`
+const CONFIGURED_ENGRAM_URL = process.env.ENGRAM_URL?.trim() || undefined
+const ENGRAM_URL = CONFIGURED_ENGRAM_URL ?? `http://127.0.0.1:${ENGRAM_PORT}`
 const ENGRAM_BIN = process.env.ENGRAM_BIN ?? "engram"
+let localReady = CONFIGURED_ENGRAM_URL !== undefined
 
 // Engram's own MCP tools — don't count these as "tool calls" for session stats
 const ENGRAM_TOOLS = new Set([
@@ -86,6 +88,10 @@ Topic rules:
 - If unsure about the key, call \`mem_suggest_topic_key\` first and then reuse it
 - Use \`mem_update\` when you have an exact observation ID to correct
 
+### DELIVERY GUARANTEE
+
+Memory operations are internal bookkeeping, never the user-facing answer. Complete required memory work before composing the completed-task reply; send the complete answer as the final message of the turn with no later tool calls. If memory work fails or needs follow-up, still send the answer.
+
 ### WHEN TO SEARCH MEMORY
 
 When the user asks to recall something — any variation of "remember", "recall", "what did we do",
@@ -140,6 +146,7 @@ async function engramFetch(
   path: string,
   opts: { method?: string; body?: any } = {}
 ): Promise<any> {
+	if (!await ensureLocalReady()) return null
   try {
     const res = await fetch(`${ENGRAM_URL}${path}`, {
       method: opts.method ?? "GET",
@@ -159,15 +166,27 @@ async function engramFetch(
   }
 }
 
-async function isEngramRunning(): Promise<boolean> {
+function localInstanceID(): string {
+  const result = Bun.spawnSync([ENGRAM_BIN, "instance-id"]); const id = Buffer.from(result.stdout).toString().trim()
+  if (result.exitCode !== 0 || !/^[a-f0-9]{32}$/.test(id)) throw new Error("gentle-engram could not resolve its local server identity")
+  return id
+}
+
+async function isEngramRunning(expectedID = ""): Promise<boolean> {
   try {
     const res = await fetch(`${ENGRAM_URL}/health`, {
       signal: AbortSignal.timeout(500),
     })
-    return res.ok
+    if (!res.ok || (expectedID && (await res.json())?.instance_id !== expectedID)) return false
+    return true
   } catch {
     return false
   }
+}
+
+async function ensureLocalReady(): Promise<boolean> {
+	if (!localReady) localReady = await isEngramRunning(CONFIGURED_ENGRAM_URL ? "" : localInstanceID())
+	return localReady
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -205,6 +224,37 @@ function stripPrivateTags(str: string): string {
   return str.replace(/<private>[\s\S]*?<\/private>/gi, "[REDACTED]").trim()
 }
 
+// SQLite datetime('now') returns "YYYY-MM-DD HH:MM:SS" in UTC with no zone
+// suffix; new Date() would parse that as local time. Normalize to UTC first so
+// the thresholds are correct in every timezone.
+function toEpochSecs(ts: string): number | null {
+  if (!ts) return null
+  const normalized = ts.replace(" ", "T")
+  const utcTimestamp = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(normalized) ? normalized : `${normalized}Z`
+  const ms = new Date(utcTimestamp).getTime()
+  return Number.isNaN(ms) ? null : Math.floor(ms / 1000)
+}
+
+// A successful empty list is the only response that proves a project has never
+// saved an observation. Every other incomplete observation response fails closed.
+export function shouldNudgeForObservations(
+  observationsResponseOK: boolean,
+  observations: unknown,
+  nowSecs: number,
+  sessionStartEpoch: number | null
+): boolean {
+  if (!observationsResponseOK || !Array.isArray(observations)) return false
+  if (observations.length === 0) {
+    return sessionStartEpoch !== null && sessionStartEpoch > 0 && nowSecs - sessionStartEpoch >= 900
+  }
+
+  const createdAt = observations[0]?.created_at
+  if (typeof createdAt !== "string") return false
+
+  const lastObsEpoch = toEpochSecs(createdAt)
+  return lastObsEpoch !== null && nowSecs - lastObsEpoch >= 900
+}
+
 // ─── Plugin Export ───────────────────────────────────────────────────────────
 
 export const Engram: Plugin = async (ctx) => {
@@ -213,6 +263,7 @@ export const Engram: Plugin = async (ctx) => {
 	let projectResolutionGeneration = 0
 
 	async function ensureResolvedProject(): Promise<boolean> {
+		if (!await ensureLocalReady()) return false
 		if (project !== "unknown" && !projectResolutionError) return true
 		const generation = ++projectResolutionGeneration
 		const resolved = await resolveProjectName(ctx.directory)
@@ -439,19 +490,19 @@ export const Engram: Plugin = async (ctx) => {
   }
 
   // Try to start engram server if not running
-  const running = await isEngramRunning()
-  if (!running) {
-    try {
-      Bun.spawn([ENGRAM_BIN, "serve"], {
+	try {
+		const expectedID = CONFIGURED_ENGRAM_URL ? "" : localInstanceID()
+		localReady = await isEngramRunning(expectedID)
+		if (!localReady && !CONFIGURED_ENGRAM_URL) {
+			Bun.spawn([ENGRAM_BIN, "serve"], {
         stdout: "ignore",
         stderr: "ignore",
         stdin: "ignore",
-      })
-      await new Promise((r) => setTimeout(r, 500))
-    } catch {
-      // Binary not found or can't start — plugin will silently no-op
-    }
-  }
+			})
+			await new Promise((r) => setTimeout(r, 500))
+			localReady = await isEngramRunning(expectedID)
+		}
+	} catch {}
 
 	if (await ensureResolvedProject()) {
 		// Auto-import: if .engram/manifest.json exists in the project repo,
@@ -475,9 +526,16 @@ export const Engram: Plugin = async (ctx) => {
 	}
 
   return {
+		dispose: async () => {
+			if (!localReady) return
+      const rootSessionIDs = [...knownSessions].filter(isKnownAuthoritativeRootSession)
+      await Promise.all(rootSessionIDs.map(closeDeletedRootSession))
+    },
+
     // ─── Event Listeners ───────────────────────────────────────────
 
-    event: async ({ event }) => {
+		event: async ({ event }) => {
+			if (!await ensureLocalReady()) return
       // --- Session Created / Updated ---
       if (event.type === "session.created" || event.type === "session.updated") {
         // Bug fix (#116): session data is nested under event.properties.info,
@@ -633,16 +691,6 @@ export const Engram: Plugin = async (ctx) => {
         const sessionID: string = input.sessionID ?? ""
         if (!sessionID || invalidSessions.has(sessionID) || subAgentSessions.has(sessionID)) return
 
-        // SQLite datetime('now') returns "YYYY-MM-DD HH:MM:SS" in UTC with no
-        // zone suffix; new Date() would parse that as local time. Normalize to
-        // UTC first so the thresholds are correct in every timezone.
-        const toEpochSecs = (ts: string): number => {
-          if (!ts) return 0
-          const normalized = ts.includes("T") ? ts : ts.replace(" ", "T") + "Z"
-          const ms = new Date(normalized).getTime()
-          return Number.isNaN(ms) ? 0 : Math.floor(ms / 1000)
-        }
-
         const cooldownSecs = parseInt(process.env.ENGRAM_NUDGE_COOLDOWN_SECS ?? "900", 10)
         const nowSecs = Math.floor(Date.now() / 1000)
 
@@ -651,7 +699,7 @@ export const Engram: Plugin = async (ctx) => {
         if (lastNudge !== undefined && nowSecs - lastNudge < cooldownSecs) return
 
         // Skip if the session is too young (< 5 minutes)
-        let sessionStartEpoch = 0
+        let sessionStartEpoch: number | null = null
         try {
           const sessionRes = await fetch(`${ENGRAM_URL}/sessions/${encodeURIComponent(sessionID)}`, {
             signal: AbortSignal.timeout(200),
@@ -667,36 +715,30 @@ export const Engram: Plugin = async (ctx) => {
           // Server unreachable or timed out — skip nudge
           return
         }
-        if (sessionStartEpoch > 0 && nowSecs - sessionStartEpoch < 300) return
+        if (sessionStartEpoch !== null && sessionStartEpoch > 0 && nowSecs - sessionStartEpoch < 300) return
 
         // Check when the last observation was saved for this project
-        let lastObsEpoch = 0
+        let obsData: unknown
+        let observationsResponseOK = false
         try {
           const obsRes = await fetch(
             `${ENGRAM_URL}/observations?project=${encodeURIComponent(project)}&limit=1&sort=created_at:desc`,
             { signal: AbortSignal.timeout(200) }
           )
           if (obsRes.ok) {
-            const obsData = await obsRes.json()
-            const createdAt: string = obsData?.[0]?.created_at ?? ""
-            if (createdAt) {
-              lastObsEpoch = toEpochSecs(createdAt)
-            }
+            observationsResponseOK = true
+            obsData = await obsRes.json()
           }
         } catch {
           // Server unreachable or timed out — skip nudge
           return
         }
 
-        // No observations yet — nothing to nudge about
-        if (lastObsEpoch === 0) return
-
-        // Only nudge if last save was more than 15 minutes ago
-        if (nowSecs - lastObsEpoch < 900) return
+        if (!shouldNudgeForObservations(observationsResponseOK, obsData, nowSecs, sessionStartEpoch)) return
 
         // Append the nudge to the last system message
         const nudge =
-          "\n\nMEMORY REMINDER: It's been over 15 minutes since your last memory save. " +
+          "\n\nMEMORY REMINDER: It's been at least 15 minutes since your last memory save. " +
           "If you've made decisions, discoveries, completed significant work, or found non-obvious things, " +
           "call mem_save now."
         if (output.system.length > 0) {

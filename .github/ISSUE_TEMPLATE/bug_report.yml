@@ -16,17 +16,6 @@ body:
         >
         > See [CONTRIBUTING.md](https://github.com/Gentleman-Programming/engram/blob/main/CONTRIBUTING.md) for the full workflow.
 
-  - type: checkboxes
-    id: preflight
-    attributes:
-      label: "📋 Pre-flight Checks"
-      description: Please confirm before submitting.
-      options:
-        - label: I have searched [existing issues](https://github.com/Gentleman-Programming/engram/issues) and this is not a duplicate
-          required: true
-        - label: I understand this issue needs `status:approved` before a PR can be opened
-          required: true
-
   - type: textarea
     id: description
     attributes:

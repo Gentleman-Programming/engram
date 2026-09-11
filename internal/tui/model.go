@@ -18,7 +18,6 @@ import (
 	"github.com/Gentleman-Programming/engram/v2/internal/version"
 
 	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -171,7 +170,7 @@ type Model struct {
 	Stats *store.Stats
 
 	// Search
-	SearchInput   textinput.Model
+	SearchInput   textInput
 	SearchQuery   string
 	SearchResults []store.SearchResult
 
@@ -210,7 +209,7 @@ type Model struct {
 	SetupSpinner          spinner.Model
 
 	// Cloud configuration
-	CloudConfigInput       textinput.Model
+	CloudConfigInput       textInput
 	CloudConfigTokenSource string
 	CloudConfigError       string
 	CloudConfigFocus       int
@@ -236,11 +235,11 @@ type Model struct {
 
 // New creates a new TUI model connected to the given store.
 func New(s *store.Store, version string) Model {
-	ti := textinput.New()
+	ti := newTextInput()
 	ti.Placeholder = "Search memories..."
 	ti.CharLimit = 256
 	ti.Width = 60
-	ci := textinput.New()
+	ci := newTextInput()
 	ci.Placeholder = "https://cloud.example.com"
 	ci.CharLimit = 256
 	ci.Width = 60
