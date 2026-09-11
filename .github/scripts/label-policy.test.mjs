@@ -30,6 +30,7 @@ test('validates canonical label combinations without a global maximum', () => {
 test('rejects missing type, singleton conflicts, unknown labels, and deprecated aliases', () => {
   const cases = [
     { name: 'missing required type', labels: ['status:needs-review'], expected: 'requires exactly one type:* label' },
+    { name: 'missing required issue status', labels: ['type:bug'], expected: 'requires exactly one status:* label' },
     { name: 'type conflict', labels: ['type:bug', 'type:docs'], expected: 'type:* permits at most one label' },
     { name: 'status conflict', labels: ['type:bug', 'status:approved', 'status:blocked'], expected: 'status:* permits at most one label' },
     { name: 'priority conflict', labels: ['type:bug', 'priority:high', 'priority:low'], expected: 'priority:* permits at most one label' },
@@ -44,7 +45,7 @@ test('rejects missing type, singleton conflicts, unknown labels, and deprecated 
 });
 
 test('allows only declared protected unnamespaced exceptions', () => {
-  assert.deepEqual(errorsFor(['type:feature', 'good first issue', 'help wanted']), []);
+  assert.deepEqual(errorsFor(['type:feature', 'status:needs-review', 'good first issue', 'help wanted']), []);
 });
 
 test('keeps issue template initial labels canonical', () => {
@@ -73,6 +74,7 @@ test('rejects labels outside their declared applicability', () => {
     ),
   );
   assert.deepEqual(errorsFor(['type:chore', 'size:exception'], 'pull-request'), []);
+  assert.deepEqual(errorsFor(['type:chore'], 'pull-request'), []);
   assert.ok(
     errorsFor(['type:chore', 'size:exception']).includes(
       'label size:exception does not apply to issue',
@@ -82,6 +84,25 @@ test('rejects labels outside their declared applicability', () => {
     policy.entries.find((entry) => entry.name === 'size:exception')?.policy.protected_exception,
     true,
   );
+});
+
+test('declares ownership and migration precedence as machine-readable policy', () => {
+  for (const entry of policy.entries) {
+    if (entry.name.includes(':')) {
+      const namespace = entry.name.split(':', 1)[0];
+      assert.equal(policy.namespaces.get(namespace)?.owner, 'maintainers', entry.name);
+    } else {
+      assert.equal(entry.policy.owner, 'maintainers', entry.name);
+    }
+  }
+
+  assert.deepEqual(policy.namespaces.get('status')?.requiredOn, ['issue']);
+  assert.deepEqual([...policy.migrations], [
+    ['bug', { canonical: 'type:bug', precedence: 'canonical', conflict: 'manual-review' }],
+    ['enhancement', { canonical: 'type:feature', precedence: 'canonical', conflict: 'manual-review' }],
+    ['question', { canonical: 'type:question', precedence: 'canonical', conflict: 'manual-review' }],
+    ['up for grabs', { canonical: 'help wanted', precedence: 'canonical', conflict: 'manual-review' }],
+  ]);
 });
 
 test('runs PR label policy from the trusted base with shell-safe label JSON', () => {

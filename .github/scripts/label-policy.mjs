@@ -15,6 +15,7 @@ function metadata(text) {
   return {
     ...fields,
     applies_to: list(fields.applies_to),
+    required_on: list(fields.required_on),
     deprecated_aliases: list(fields.deprecated_aliases),
     protected_exceptions: list(fields.protected_exceptions),
     protected_exception: fields.protected_exception === 'true',
@@ -29,17 +30,37 @@ export function loadLabelPolicy(policyPath = defaultPolicyPath) {
   });
   const namespaces = new Map();
   const aliases = new Map();
+  const migrations = new Map();
   const protectedExceptions = new Set();
 
   for (const entry of entries) {
     const { policy } = entry;
     if (policy.namespace) {
-      if (!policy.cardinality || policy.applies_to.length === 0) {
-        throw new Error(`namespace ${policy.namespace} requires cardinality and applies_to`);
+      if (!policy.owner || !policy.cardinality || policy.applies_to.length === 0) {
+        throw new Error(`namespace ${policy.namespace} requires owner, cardinality, and applies_to`);
       }
-      namespaces.set(policy.namespace, { cardinality: policy.cardinality, appliesTo: policy.applies_to });
+      if (policy.required_on.some((target) => !policy.applies_to.includes(target))) {
+        throw new Error(`namespace ${policy.namespace} required_on must be a subset of applies_to`);
+      }
+      namespaces.set(policy.namespace, {
+        owner: policy.owner,
+        cardinality: policy.cardinality,
+        requiredOn: policy.required_on,
+        appliesTo: policy.applies_to,
+      });
     }
-    for (const alias of policy.deprecated_aliases) aliases.set(alias, entry.name);
+    for (const alias of policy.deprecated_aliases) {
+      if (policy.migration_precedence !== 'canonical' || policy.migration_conflict !== 'manual-review') {
+        throw new Error(`deprecated alias ${alias} requires canonical precedence and manual-review conflicts`);
+      }
+      if (aliases.has(alias)) throw new Error(`deprecated alias ${alias} is declared more than once`);
+      aliases.set(alias, entry.name);
+      migrations.set(alias, {
+        canonical: entry.name,
+        precedence: policy.migration_precedence,
+        conflict: policy.migration_conflict,
+      });
+    }
     for (const exception of policy.protected_exceptions) protectedExceptions.add(exception);
   }
 
@@ -49,6 +70,8 @@ export function loadLabelPolicy(policyPath = defaultPolicyPath) {
       if (!namespaces.has(namespace)) throw new Error(`label ${entry.name} has no namespace policy`);
     } else if (!protectedExceptions.has(entry.name) || !entry.policy.protected_exception) {
       throw new Error(`unnamespaced label ${entry.name} is not a protected exception`);
+    } else if (!entry.policy.owner) {
+      throw new Error(`protected exception ${entry.name} requires owner`);
     }
   }
   for (const exception of protectedExceptions) {
@@ -57,15 +80,17 @@ export function loadLabelPolicy(policyPath = defaultPolicyPath) {
     }
   }
 
-  return { entries, namespaces, aliases, protectedExceptions };
+  return { entries, namespaces, aliases, migrations, protectedExceptions };
 }
 
-function singletonErrors(policy, labels) {
+function singletonErrors(policy, labels, target = 'issue') {
   const errors = [];
   for (const [namespace, rule] of policy.namespaces) {
+    if (!rule.appliesTo.includes(target)) continue;
     if (rule.cardinality === 'multi-valued') continue;
     const selected = labels.filter((label) => label.startsWith(`${namespace}:`));
-    if (rule.cardinality === 'required-singleton' && selected.length === 0) {
+    const required = rule.cardinality === 'required-singleton' || rule.requiredOn.includes(target);
+    if (required && selected.length === 0) {
       errors.push(`${namespace}:* requires exactly one ${namespace}:* label`);
     } else if (selected.length > 1) {
       errors.push(`${namespace}:* permits at most one label: ${selected.join(', ')}`);
@@ -95,14 +120,14 @@ export function validateLabels(policy, labels, target = 'issue') {
     const rule = policy.namespaces.get(label.split(':', 1)[0]);
     if (!rule.appliesTo.includes(target)) errors.push(`label ${label} does not apply to ${target}`);
   }
-  return { errors: [...errors, ...singletonErrors(policy, labels.filter((label) => declared.has(label))) ] };
+  return { errors: [...errors, ...singletonErrors(policy, labels.filter((label) => declared.has(label)), target) ] };
 }
 
 export function migrateLabels(policy, labels) {
-  const mapped = labels.map((label) => policy.aliases.get(label) ?? label);
+  const mapped = labels.map((label) => policy.migrations.get(label)?.canonical ?? label);
   const migrated = [...new Set(mapped)];
-  const conflicts = singletonErrors(policy, migrated);
-  if (conflicts.some((error) => error.includes('permits at most one'))) {
+  const conflicts = singletonErrors(policy, migrated).filter((error) => error.includes('permits at most one'));
+  if (conflicts.length > 0) {
     return { labels, changed: false, conflicts };
   }
   return { labels: migrated, changed: migrated.join('\0') !== labels.join('\0'), conflicts: [] };

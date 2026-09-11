@@ -14,17 +14,17 @@
 - name: "type:bug"
   color: "d73a4a"
   description: "Bug fix"
-  policy: { namespace: type, cardinality: required-singleton, applies_to: [issue, pull-request], deprecated_aliases: [bug], protected_exceptions: ["good first issue", "help wanted"] }
+  policy: { namespace: type, owner: maintainers, cardinality: required-singleton, applies_to: [issue, pull-request], deprecated_aliases: [bug], migration_precedence: canonical, migration_conflict: manual-review, protected_exceptions: ["good first issue", "help wanted"] }
 
 - name: "type:feature"
   color: "a2eeef"
   description: "New feature"
-  policy: { deprecated_aliases: [enhancement] }
+  policy: { deprecated_aliases: [enhancement], migration_precedence: canonical, migration_conflict: manual-review }
 
 - name: "type:question"
   color: "d876e3"
   description: "Question requiring issue tracking"
-  policy: { deprecated_aliases: [question] }
+  policy: { deprecated_aliases: [question], migration_precedence: canonical, migration_conflict: manual-review }
 
 - name: "type:docs"
   color: "0075ca"
@@ -46,7 +46,7 @@
 - name: "status:needs-review"
   color: "fbca04"
   description: "Awaiting maintainer review"
-  policy: { namespace: status, cardinality: optional-singleton, applies_to: [issue, pull-request] }
+  policy: { namespace: status, owner: maintainers, cardinality: optional-singleton, required_on: [issue], applies_to: [issue, pull-request] }
 
 - name: "status:approved"
   color: "0E8A16"
@@ -76,13 +76,13 @@
 - name: "resolution:duplicate"
   color: "c5def5"
   description: "Confirmed duplicate after closure"
-  policy: { namespace: resolution, cardinality: optional-singleton, applies_to: [issue] }
+  policy: { namespace: resolution, owner: maintainers, cardinality: optional-singleton, applies_to: [issue] }
 
 # --- Priority labels (set by maintainers) ---
 - name: "priority:high"
   color: "B60205"
   description: "High priority — exempt from stale bot"
-  policy: { namespace: priority, cardinality: optional-singleton, applies_to: [issue] }
+  policy: { namespace: priority, owner: maintainers, cardinality: optional-singleton, applies_to: [issue] }
 
 - name: "priority:critical"
   color: "B60205"
@@ -100,7 +100,7 @@
 - name: "effort:small"
   color: "d4edda"
   description: "< 1 hour — good for new contributors"
-  policy: { namespace: effort, cardinality: multi-valued, applies_to: [issue] }
+  policy: { namespace: effort, owner: maintainers, cardinality: multi-valued, applies_to: [issue] }
 
 - name: "effort:medium"
   color: "fff3cd"
@@ -114,15 +114,15 @@
 - name: "size:exception"
   color: "D93F0B"
   description: "Maintainer-approved exception to the 400-line review budget"
-  policy: { namespace: size, cardinality: optional-singleton, applies_to: [pull-request], protected_exception: true }
+  policy: { namespace: size, owner: maintainers, cardinality: optional-singleton, applies_to: [pull-request], protected_exception: true }
 
 # --- Protected unnamespaced exceptions ---
 - name: "good first issue"
   color: "7057ff"
   description: "Approachable contribution for new contributors"
-  policy: { protected_exception: true, applies_to: [issue] }
+  policy: { owner: maintainers, protected_exception: true, applies_to: [issue] }
 
 - name: "help wanted"
   color: "008672"
   description: "Maintainers welcome contributor help"
-  policy: { protected_exception: true, applies_to: [issue], deprecated_aliases: ["up for grabs"] }
+  policy: { owner: maintainers, protected_exception: true, applies_to: [issue], deprecated_aliases: ["up for grabs"], migration_precedence: canonical, migration_conflict: manual-review }

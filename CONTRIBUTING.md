@@ -179,9 +179,29 @@ Use `status:possible-duplicate` while evaluating a report. Close confirmed dupli
 
 `size:exception` records explicit maintainer approval for a pull request to exceed the 400-line review budget. It applies only to pull requests and does not replace the requirement for a focused, reviewable change.
 
-`type:*` is exactly one. `status:*`, `priority:*`, `resolution:*`, and `size:*` are optional singletons; `effort:*` is multi-valued. The only unnamespaced labels are protected exceptions: `good first issue` and `help wanted`. Deprecated aliases are invalid: `bug` → `type:bug`, `enhancement` → `type:feature`, `question` → `type:question`, and `up for grabs` → `help wanted`.
+### Namespace Contract
+
+All label namespaces are owned by maintainers. Their cardinality depends on the GitHub surface:
+
+| Namespace | Issues | Pull requests |
+|-----------|--------|---------------|
+| `type:*` | Exactly one | Exactly one |
+| `status:*` | Exactly one | At most one |
+| `priority:*` | At most one | Not applicable |
+| `resolution:*` | At most one | Not applicable |
+| `effort:*` | Multiple allowed | Not applicable |
+| `size:*` | Not applicable | At most one |
+
+The only unnamespaced labels are maintainer-owned protected exceptions: `good first issue` and `help wanted`.
 
 ### Deprecated Label Migration (maintainers only)
+
+| Deprecated label | Canonical label | Precedence | Conflicting canonical value |
+|------------------|-----------------|------------|-----------------------------|
+| `bug` | `type:bug` | Canonical label wins | Stop for manual review |
+| `enhancement` | `type:feature` | Canonical label wins | Stop for manual review |
+| `question` | `type:question` | Canonical label wins | Stop for manual review |
+| `up for grabs` | `help wanted` | Canonical label wins | Stop for manual review |
 
 Preview a label migration locally before changing an issue or pull request:
 
