@@ -125,7 +125,8 @@ async function createRuntime(t, {
   const requests = []
 	const spawns = []
 	const startupEvents = []
-	if (configuredEngramURL) process.env.ENGRAM_URL = configuredEngramURL
+	if (configuredEngramURL === undefined) delete process.env.ENGRAM_URL
+	else process.env.ENGRAM_URL = configuredEngramURL
   globalThis.Bun = {
     spawnSync(args) {
       if (args.includes("remote")) return { exitCode: 1, stdout: Buffer.from("") }

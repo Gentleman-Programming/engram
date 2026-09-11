@@ -172,6 +172,7 @@ function buildInitializeEngramServerForTest({
   spawnAndWaitForEngram,
   waitForEngramReadiness,
   timeoutMs = 10000,
+  instanceID = "00000000000000000000000000000000",
 }) {
   const body = extractFunctionBody("initializeEngramServer", "{\n  if (CONFIGURED_ENGRAM_URL");
   const factory = new Function(
@@ -180,8 +181,10 @@ function buildInitializeEngramServerForTest({
     "spawnAndWaitForEngram",
     "waitForEngramReadiness",
     "ENGRAM_STARTUP_TIMEOUT_MS",
+    "instanceID",
     `
-    const localInstanceID = () => "00000000000000000000000000000000";
+    let localEngramInstanceID = "";
+    const localInstanceID = () => instanceID;
     async function initializeEngramServer() {
       ${body}
     }
@@ -194,6 +197,7 @@ function buildInitializeEngramServerForTest({
     spawnAndWaitForEngram,
     waitForEngramReadiness,
     timeoutMs,
+    instanceID,
   );
 }
 
@@ -302,10 +306,10 @@ function buildWaitForEngramReadinessForTest({ probeEngramHealth, pollMs = 5 }) {
     "ENGRAM_URL",
     "ENGRAM_STARTUP_POLL_MS",
     `
-    const expectedID = ""; function waitCancellable(ms, signal) {
+    function waitCancellable(ms, signal) {
       ${extractFunctionBody("waitCancellable", "{\n  return new Promise")}
     }
-    async function waitForEngramReadiness(signal, deadline) {
+    async function waitForEngramReadiness(signal, deadline, expectedID = "") {
       ${extractFunctionBody("waitForEngramReadiness", "{\n  while (Date.now()")}
     }
     return waitForEngramReadiness;
@@ -327,16 +331,16 @@ function buildSpawnAndWaitForEngramForTest({ spawn, probeEngramHealth, pollMs = 
     "ENGRAM_URL",
     "ENGRAM_STARTUP_POLL_MS",
     `
-    const expectedID = ""; function waitCancellable(ms, signal) {
+    function waitCancellable(ms, signal) {
       ${extractFunctionBody("waitCancellable", "{\n  return new Promise")}
     }
-    async function waitForEngramReadiness(signal, deadline) {
+    async function waitForEngramReadiness(signal, deadline, expectedID = "") {
       ${extractFunctionBody("waitForEngramReadiness", "{\n  while (Date.now()")}
     }
     function stopAbandonedChild(proc) {
       ${extractFunctionBody("stopAbandonedChild", "{\n  if (proc === undefined) return;")}
     }
-    function spawnAndWaitForEngram(deadline) {
+    function spawnAndWaitForEngram(deadline, expectedID = "") {
       ${spawnBody}
     }
     return spawnAndWaitForEngram;
@@ -501,8 +505,12 @@ test("an inconclusive health probe still attempts the spawn", async () => {
 test("an already-ready health endpoint neither spawns nor waits", async () => {
   let spawns = 0;
   let readinessWaits = 0;
+  const expectedIDs = [];
   const initializeEngramServer = buildInitializeEngramServerForTest({
-    probeEngramHealth: async () => "ready",
+    probeEngramHealth: async (expectedID) => {
+      expectedIDs.push(expectedID);
+      return "ready";
+    },
     spawnAndWaitForEngram: async () => { spawns += 1; },
     waitForEngramReadiness: async () => { readinessWaits += 1; },
   });
@@ -510,6 +518,24 @@ test("an already-ready health endpoint neither spawns nor waits", async () => {
   await initializeEngramServer();
   assert.equal(spawns, 0);
   assert.equal(readinessWaits, 0);
+  assert.deepEqual(expectedIDs, ["00000000000000000000000000000000"], "the ready path must verify the local server identity");
+});
+
+test("instance-id command is bounded by the startup deadline", () => {
+  const body = extractFunctionBody("localInstanceID", "{\n  const result");
+  let options;
+  const bounded = new Function("spawnSync", "ENGRAM_BIN", "ENGRAM_STARTUP_TIMEOUT_MS", `
+    return function localInstanceID(timeoutMs = ENGRAM_STARTUP_TIMEOUT_MS) {
+      ${body}
+    };
+  `)((_command, _args, received) => {
+    options = received;
+    return { status: 0, stdout: "00000000000000000000000000000000\n" };
+  }, "engram", 10000);
+
+  assert.equal(bounded(123), "00000000000000000000000000000000");
+  assert.equal(options.timeout, 123);
+  assert.match(source, /localInstanceID\(Math\.max\(1, deadline - Date\.now\(\)\)\)/);
 });
 
 test("an inconclusive probe falls back to an already-starting server when our child loses the port", async () => {

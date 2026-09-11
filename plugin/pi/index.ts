@@ -355,8 +355,8 @@ async function ensureSessionBestEffort(sessionId: string, sessionProject = proje
 // but "ready" may be read as "a server is already there".
 type EngramHealth = "ready" | "refused" | "indeterminate" | "foreign";
 
-function localInstanceID(): string {
-  const result = spawnSync(ENGRAM_BIN, ["instance-id"], { encoding: "utf8" });
+function localInstanceID(timeoutMs = ENGRAM_STARTUP_TIMEOUT_MS): string {
+  const result = spawnSync(ENGRAM_BIN, ["instance-id"], { encoding: "utf8", timeout: Math.max(1, timeoutMs) });
   const id = result.status === 0 ? result.stdout.trim() : "";
   if (!/^[a-f0-9]{32}$/.test(id)) throw new Error("Engram could not resolve its local server identity");
   return id;
@@ -634,7 +634,7 @@ function spawnAndWaitForEngram(deadline: number, expectedID = ""): Promise<void>
 async function initializeEngramServer(): Promise<void> {
   if (CONFIGURED_ENGRAM_URL !== undefined) return;
   const deadline = Date.now() + ENGRAM_STARTUP_TIMEOUT_MS;
-	const instanceID = localEngramInstanceID = localInstanceID();
+  const instanceID = localEngramInstanceID = localInstanceID(Math.max(1, deadline - Date.now()));
   const health = await probeEngramHealth(instanceID);
   if (health === "ready") return;
   if (health === "foreign") throw new Error(`Engram server ownership mismatch at ${ENGRAM_URL}`);
