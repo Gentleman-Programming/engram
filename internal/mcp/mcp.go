@@ -83,7 +83,7 @@ func absolutePathWarning(content string) string {
 	if !containsAbsoluteFilesystemPath(content) {
 		return ""
 	}
-	return "\n⚠ WARNING: Content contains an absolute filesystem path that may not be portable across machines."
+	return "\n⚠ WARNING: Content contains an absolute filesystem path that may not be portable across machines. Use a repository-relative path instead."
 }
 
 // containsAbsoluteFilesystemPath recognizes common absolute path spellings
@@ -118,11 +118,20 @@ func uriTokenEnd(content string, start int) int {
 	for colon < len(content) && (isASCIILetter(content[colon]) || content[colon] >= '0' && content[colon] <= '9' || content[colon] == '+' || content[colon] == '-' || content[colon] == '.') {
 		colon++
 	}
-	if colon+2 >= len(content) || content[colon] != ':' || content[colon+1] != '/' || content[colon+2] != '/' {
+	if colon >= len(content) || content[colon] != ':' {
 		return start
 	}
 
-	end := colon + 3
+	hasAuthority := colon+2 < len(content) && content[colon+1] == '/' && content[colon+2] == '/'
+	hasAuthoritylessFilePath := colon+1 < len(content) && content[colon+1] == '/' && strings.EqualFold(content[start:colon], "file")
+	if !hasAuthority && !hasAuthoritylessFilePath {
+		return start
+	}
+
+	end := colon + 2
+	if hasAuthority {
+		end++
+	}
 	for end < len(content) && isURITokenCharacter(content[end]) {
 		end++
 	}

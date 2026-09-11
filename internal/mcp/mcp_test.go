@@ -262,6 +262,8 @@ func TestMCPTruncationMetadataKeepsSchemasAndNormalResponsesCompatible(t *testin
 }
 
 func TestHandleSaveAbsolutePathWarning(t *testing.T) {
+	const warningText = "⚠ WARNING: Content contains an absolute filesystem path that may not be portable across machines. Use a repository-relative path instead."
+
 	tests := []struct {
 		name          string
 		content       string
@@ -315,6 +317,16 @@ func TestHandleSaveAbsolutePathWarning(t *testing.T) {
 			wantPersisted: "file:///tmp/x",
 		},
 		{
+			name:          "authority-less file URI",
+			content:       "file:/tmp/x",
+			wantPersisted: "file:/tmp/x",
+		},
+		{
+			name:          "mixed-case authority-less file URI",
+			content:       "FiLe:/tmp/x",
+			wantPersisted: "FiLe:/tmp/x",
+		},
+		{
 			name:          "current-directory relative path",
 			content:       "./x",
 			wantPersisted: "./x",
@@ -357,6 +369,9 @@ func TestHandleSaveAbsolutePathWarning(t *testing.T) {
 			result, _ := body["result"].(string)
 			if got := strings.Contains(result, "⚠ WARNING: Content contains an absolute filesystem path"); got != tt.wantWarning {
 				t.Fatalf("warning presence = %v, want %v; result=%q", got, tt.wantWarning, result)
+			}
+			if tt.wantWarning && !strings.Contains(result, warningText) {
+				t.Fatalf("warning guidance = %q, want %q", result, warningText)
 			}
 
 			observations, err := s.RecentObservations("engram", "project", 1)
