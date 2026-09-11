@@ -74,6 +74,9 @@ test('rejects labels outside their declared applicability', () => {
 
 test('passes PR label JSON through a shell-safe workflow environment variable', () => {
   const workflow = fs.readFileSync('.github/workflows/pr-check.yml', 'utf8');
+  assert.match(workflow, /^  pull_request_target:/m);
+  assert.doesNotMatch(workflow, /^  pull_request:/m);
+  assert.match(workflow, /ref: \$\{\{ github\.event\.pull_request\.base\.sha \}\}/);
   assert.match(workflow, /PR_LABELS: \$\{\{ toJson\(github\.event\.pull_request\.labels\.\*\.name\) \}\}/);
   assert.match(workflow, /--labels-json "\$PR_LABELS"/);
   assert.doesNotMatch(workflow, /--labels-json '\$\{\{/);
