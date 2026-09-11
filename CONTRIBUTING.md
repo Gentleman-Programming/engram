@@ -150,7 +150,7 @@ untracked, and latest committed changes compared with `HEAD~`.
 | `status:in-progress` | Actively being worked on — auto-exempt from stale bot |
 | `status:blocked` | Blocked by another issue or external dependency |
 | `status:stale` | No activity for 30 days — auto-applied by stale bot |
-| `status:wontfix` | Intentionally not fixing — applied when closing stale/rejected items |
+| `status:wontfix` | Closed without implementation — applied to stale, rejected, or duplicate items |
 | `status:possible-duplicate` | Potential duplicate under evaluation |
 
 ### Resolution Labels (set after closure)
@@ -159,7 +159,7 @@ untracked, and latest committed changes compared with `HEAD~`.
 |-------|---------|
 | `resolution:duplicate` | Confirmed duplicate after closure |
 
-Replace the current `status:*` label with `status:possible-duplicate` while evaluating a report. After confirming and closing the duplicate, remove the evaluation status and apply `resolution:duplicate`.
+Replace the current `status:*` label with `status:possible-duplicate` while evaluating a report. After confirming and closing the duplicate, replace `status:possible-duplicate` with `status:wontfix` and apply `resolution:duplicate`.
 
 ### Priority Labels (set by maintainers)
 

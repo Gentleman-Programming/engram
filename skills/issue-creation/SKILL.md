@@ -188,6 +188,7 @@ Required fields: the question, why issue tracking is needed, and the affected ar
 | `priority:medium` | Important but not blocking |
 | `priority:low` | Nice to have |
 | `status:possible-duplicate` | Duplicate under evaluation |
+| `status:wontfix` | Closed without implementation, including confirmed duplicates |
 | `resolution:duplicate` | Confirmed duplicate after closure |
 
 ---
@@ -212,7 +213,7 @@ Is it a new feature/improvement? → Use Feature Request template
 Is it a general question?       → Use Discussions, NOT issues
 Is it a tracked question?       → Use the Tracked Question template
 Is it a possible duplicate?     → Replace the current status with status:possible-duplicate
-Is it a confirmed duplicate?    → Close it, clear evaluation status, then add resolution:duplicate
+Is it a confirmed duplicate?    → Close it, replace evaluation status with status:wontfix, then add resolution:duplicate
 ```
 
 ---
@@ -257,7 +258,7 @@ if [[ "$updated_statuses" != "status:possible-duplicate" ]]; then
   exit 1
 fi
 
-# Maintainer: close a confirmed duplicate, then replace evaluation status with resolution
+# Maintainer: close a confirmed duplicate, then replace evaluation status with terminal status and resolution
 gh issue close <number> --reason "not planned" --comment "Closing as duplicate of #<canonical>."
-gh issue edit <number> --remove-label "status:possible-duplicate" --add-label "resolution:duplicate"
+gh issue edit <number> --remove-label "status:possible-duplicate" --add-label "status:wontfix,resolution:duplicate"
 ```

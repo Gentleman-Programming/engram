@@ -201,8 +201,21 @@ test('exposes migration as an idempotent dry-run CLI', () => {
 
 test('documents singleton-safe duplicate status transitions', () => {
   const skill = fs.readFileSync('skills/issue-creation/SKILL.md', 'utf8');
+  const contributing = fs.readFileSync('CONTRIBUTING.md', 'utf8');
   const duplicateCommands = skill.slice(skill.indexOf('# Maintainer: replace every active status while evaluating'));
 
+  assert.deepEqual(
+    validateLabels(policy, ['type:bug', 'status:wontfix', 'resolution:duplicate'], 'issue'),
+    { errors: [] },
+  );
+  assert.match(
+    contributing,
+    /After confirming and closing the duplicate, replace `status:possible-duplicate` with `status:wontfix` and apply `resolution:duplicate`\./,
+  );
+  assert.match(
+    skill,
+    /Is it a confirmed duplicate\?\s+→ Close it, replace evaluation status with status:wontfix, then add resolution:duplicate/,
+  );
   assert.match(duplicateCommands, /set -euo pipefail/);
   assert.match(duplicateCommands, /other_statuses="\$\(gh issue view/);
   assert.match(duplicateCommands, /--add-label "status:possible-duplicate"/);
@@ -211,5 +224,9 @@ test('documents singleton-safe duplicate status transitions', () => {
   assert.match(duplicateCommands, /updated_statuses="\$\(gh issue view/);
   assert.match(duplicateCommands, /"\$updated_statuses" != "status:possible-duplicate"/);
   assert.match(duplicateCommands, /stop without retrying/);
+  assert.match(
+    duplicateCommands,
+    /--remove-label "status:possible-duplicate" --add-label "status:wontfix,resolution:duplicate"/,
+  );
   assert.doesNotMatch(duplicateCommands, /while IFS=[\s\S]*gh issue edit <number> --remove-label "\$status"/);
 });
