@@ -51,6 +51,20 @@ export ENGRAM_CLOUD_TOKEN="your-token"
 
 The local `~/.engram/cloud.json` stores the server URL and may also store a `token` fallback. `ENGRAM_CLOUD_TOKEN` takes precedence over any token in `cloud.json`; if the env var is unset, Engram falls back to `cloud.json.token`. This fallback is intentional (issue #343) for use cases such as background autosync where exporting the env var on every shell is not practical.
 
+### Stop future replication or clear persisted settings
+
+```bash
+engram cloud status --project <project>
+engram cloud unenroll <project>
+engram cloud config --clear
+```
+
+`cloud status` reports effective server/auth configuration separately from project enrollment. Use `--project` to see whether that project is enrolled.
+
+`cloud unenroll` is idempotent and stops future replication eligibility for that project. It does not delete local data, remote history, or pending journal rows, and it does not cancel an already in-flight push.
+
+`cloud config --clear` clears only the persisted `cloud.json` server URL and token. Active `ENGRAM_CLOUD_SERVER` and `ENGRAM_CLOUD_TOKEN` overrides remain effective and are reported by the command and status output; unset them separately when you need them inactive.
+
 ---
 
 ## Error: `chunk_id does not match payload content hash`
