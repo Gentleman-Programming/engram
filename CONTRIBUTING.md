@@ -50,7 +50,7 @@ Required checks run automatically on every PR:
 |-------|-----------------|
 | **Check Issue Reference** | PR body contains `Closes #N`, `Fixes #N`, or `Resolves #N` |
 | **Check Issue Has status:approved** | The linked issue has the `status:approved` label |
-| **Check PR Label Policy** | PR labels use the canonical vocabulary and cardinality |
+| **Check PR Has type:* Label** | PR labels use the canonical vocabulary and cardinality |
 | **Check PR Has No Transient Artifacts** | PR files comply with the [Transient Artifact Policy](#transient-artifact-policy) |
 
 #### CI Tests

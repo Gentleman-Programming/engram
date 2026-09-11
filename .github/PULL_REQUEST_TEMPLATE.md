@@ -22,7 +22,7 @@ Closes #
 ## 🏷️ PR Type
 
 <!-- REQUIRED: Check exactly ONE type below, then add the matching label to the PR. -->
-<!-- Automated check: "Check PR Label Policy" verifies canonical labels and cardinality. -->
+<!-- Automated check: "Check PR Has type:* Label" verifies canonical labels and cardinality. -->
 
 - [ ] `type:bug` — Bug fix
 - [ ] `type:feature` — New feature
@@ -69,7 +69,7 @@ These run automatically and **all must pass** before merge:
 |-------|-----------------|--------|
 | **Check Issue Reference** | PR body contains `Closes #N` / `Fixes #N` / `Resolves #N` | ⏳ |
 | **Check Issue Has status:approved** | Linked issue has `status:approved` label | ⏳ |
-| **Check PR Label Policy** | Canonical labels, applicability, and cardinality | ⏳ |
+| **Check PR Has type:* Label** | Canonical labels, applicability, and cardinality | ⏳ |
 | **Check PR Has No Transient Artifacts** | PR files comply with the [Transient Artifact Policy](https://github.com/Gentleman-Programming/engram/blob/main/CONTRIBUTING.md#transient-artifact-policy) | ⏳ |
 | **Unit Tests** | `go test ./...` passes | ⏳ |
 | **E2E Tests** | `go test -tags e2e ./internal/server/...` passes | ⏳ |

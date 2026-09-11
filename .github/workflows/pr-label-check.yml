@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   check-label-policy:
-    name: Check PR Label Policy
+    name: Check PR Has type:* Label
     runs-on: ubuntu-latest
     steps:
       - name: Check out trusted base revision

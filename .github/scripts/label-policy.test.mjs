@@ -90,6 +90,8 @@ test('runs PR label policy from the trusted base with shell-safe label JSON', ()
   assert.match(prWorkflow, /^  pull_request:/m);
   assert.doesNotMatch(prWorkflow, /^  pull_request_target:/m);
   assert.match(labelWorkflow, /^  pull_request_target:/m);
+  assert.match(labelWorkflow, /name: Check PR Has type:\* Label/);
+  assert.doesNotMatch(labelWorkflow, /name: Check PR Label Policy/);
   assert.match(labelWorkflow, /ref: \$\{\{ github\.event\.pull_request\.base\.sha \}\}/);
   assert.match(labelWorkflow, /PR_LABELS: \$\{\{ toJson\(github\.event\.pull_request\.labels\.\*\.name\) \}\}/);
   assert.match(labelWorkflow, /--labels-json "\$PR_LABELS"/);
