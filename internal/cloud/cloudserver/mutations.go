@@ -60,12 +60,6 @@ const defaultPullLimit = 100
 
 type mutationPushLogWriterContextKey struct{}
 
-// withMutationPushLogWriter injects a request-local writer for mutation push
-// rejection logs. Production requests fall back to stderr.
-func withMutationPushLogWriter(ctx context.Context, writer io.Writer) context.Context {
-	return context.WithValue(ctx, mutationPushLogWriterContextKey{}, writer)
-}
-
 func mutationPushLogWriter(ctx context.Context) io.Writer {
 	if writer, ok := ctx.Value(mutationPushLogWriterContextKey{}).(io.Writer); ok && writer != nil {
 		return writer

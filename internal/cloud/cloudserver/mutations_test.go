@@ -480,7 +480,7 @@ func TestMutationPushInsertFailureLogsBoundedSafeIdentityWithoutAudit(t *testing
 	}}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", marshalPushRequest(t, entries))
-	req = req.WithContext(withMutationPushLogWriter(req.Context(), &logs))
+	req = req.WithContext(context.WithValue(req.Context(), mutationPushLogWriterContextKey{}, &logs))
 	req.Header.Set("Authorization", "Bearer "+tokenSecret)
 	req.Header.Set("Content-Type", "application/json")
 	srv.Handler().ServeHTTP(rec, req)
