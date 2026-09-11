@@ -595,6 +595,7 @@ func (s *Store) DataDir() string {
 type Store struct {
 	db         *sql.DB
 	cfg        Config
+	instanceID string
 	generation *databaseGeneration
 	hooks      storeHooks
 
@@ -603,6 +604,9 @@ type Store struct {
 	repairInFlight  *enrolledProjectRepair
 	repairOperation func() error // test seam; production uses repairEnrolledProjectSyncMutations.
 }
+
+// InstanceID returns this store's stable local-server identity.
+func (s *Store) InstanceID() string { return s.instanceID }
 
 type enrolledProjectRepair struct {
 	done chan struct{}
@@ -762,6 +766,10 @@ func newStore(cfg Config) (*Store, error) {
 	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
 		return nil, fmt.Errorf("engram: create data dir: %w", err)
 	}
+	instanceID, err := EnsureInstanceID(cfg.DataDir)
+	if err != nil {
+		return nil, err
+	}
 
 	dbPath := filepath.Join(cfg.DataDir, "engram.db")
 	if err := ensureDatabaseFile(dbPath); err != nil {
@@ -787,7 +795,7 @@ func newStore(cfg Config) (*Store, error) {
 		return nil, err
 	}
 
-	s := &Store{db: db, cfg: cfg, generation: generation, hooks: defaultStoreHooks()}
+	s := &Store{db: db, cfg: cfg, instanceID: instanceID, generation: generation, hooks: defaultStoreHooks()}
 	if err := s.runStartupMigrations(); err != nil {
 		return nil, err
 	}

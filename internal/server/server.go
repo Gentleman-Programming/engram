@@ -86,11 +86,15 @@ type Server struct {
 	// When nil and semantic=true, a no-op builder is used (returns empty string).
 	promptBuilder SemanticPromptBuilder
 	// version is reported by GET /health and defaults to "dev" for local builds.
-	version string
+	version    string
+	instanceID string
 }
 
 func New(s *store.Store, port int) *Server {
 	srv := &Server{store: s, port: port, listen: net.Listen, serve: http.Serve, version: "dev"}
+	if s != nil {
+		srv.instanceID = s.InstanceID()
+	}
 	srv.mux = http.NewServeMux()
 	srv.routes()
 	return srv
@@ -259,6 +263,12 @@ func (s *Server) Start() error {
 		ln, err = listenFn(network, addr)
 	}
 	if err != nil {
+		if socketPath == "" && isAddressInUse(err) {
+			if s.instanceOwnsPort() {
+				return nil
+			}
+			return fmt.Errorf("engram server: listen %s: already owned by a different or legacy instance", addr)
+		}
 		return fmt.Errorf("engram server: listen %s: %w", addr, err)
 	}
 
@@ -281,6 +291,34 @@ func (s *Server) Start() error {
 		return nil
 	}
 	return err
+}
+
+func isAddressInUse(err error) bool {
+	message := strings.ToLower(err.Error())
+	return errors.Is(err, syscall.EADDRINUSE) || strings.Contains(message, "address already in use") || strings.Contains(message, "only one usage of each socket address")
+}
+
+func (s *Server) instanceOwnsPort() bool {
+	if s.instanceID == "" {
+		return false
+	}
+	client := http.Client{Timeout: 500 * time.Millisecond}
+	for attempt := 0; attempt < 5; attempt++ {
+		response, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/health", s.port))
+		if err == nil {
+			var health struct {
+				InstanceID string `json:"instance_id"`
+			}
+			err = json.NewDecoder(response.Body).Decode(&health)
+			_ = response.Body.Close()
+			if err == nil && health.InstanceID == s.instanceID {
+				return true
+			}
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return false
 }
 
 // Close stops the active listener and removes only the socket created by this
@@ -454,9 +492,10 @@ func (s *Server) routes() {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]any{
-		"status":  "ok",
-		"service": "engram",
-		"version": s.version,
+		"status":      "ok",
+		"service":     "engram",
+		"version":     s.version,
+		"instance_id": s.instanceID,
 	})
 }
 

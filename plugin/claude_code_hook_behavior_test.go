@@ -759,7 +759,7 @@ func writeRecordingEngramStub(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "engram")
-	content := "#!/bin/bash\nprintf '%s\\n' \"$*\" >> \"$ENGRAM_TEST_ENGRAM_LOG\"\nexit 0\n"
+	content := "#!/bin/bash\nprintf '%s\\n' \"$*\" >> \"$ENGRAM_TEST_ENGRAM_LOG\"\nif [ \"$*\" = \"instance-id\" ]; then printf '00000000000000000000000000000000\\n'; fi\nexit 0\n"
 	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
 		t.Fatalf("write recording engram stub: %v", err)
 	}
@@ -770,7 +770,7 @@ func writeMigratingEngramStub(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "engram")
-	content := "#!/bin/bash\nprintf '%s\\n' \"$*\" >> \"$ENGRAM_TEST_ENGRAM_LOG\"\nif [ \"$*\" = \"setup claude-code --mcp-only\" ]; then\n  mkdir -p \"$(dirname \"$ENGRAM_TEST_MCP_CONFIG\")\"\n  printf '{}' > \"$ENGRAM_TEST_MCP_CONFIG\"\nfi\nexit 0\n"
+	content := "#!/bin/bash\nprintf '%s\\n' \"$*\" >> \"$ENGRAM_TEST_ENGRAM_LOG\"\nif [ \"$*\" = \"instance-id\" ]; then printf '00000000000000000000000000000000\\n'; fi\nif [ \"$*\" = \"setup claude-code --mcp-only\" ]; then\n  mkdir -p \"$(dirname \"$ENGRAM_TEST_MCP_CONFIG\")\"\n  printf '{}' > \"$ENGRAM_TEST_MCP_CONFIG\"\nfi\nexit 0\n"
 	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
 		t.Fatalf("write migrating engram stub: %v", err)
 	}
@@ -799,7 +799,7 @@ func healthyServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health" {
-			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"instance_id":"00000000000000000000000000000000"}`))
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)

@@ -147,6 +147,7 @@ function buildScheduleEngramSelfHealForTest({ waitUnref, isEngramRunning, maxAtt
     `
     let engramSelfHealInFlight = false;
     const engramSelfHealContexts = new Map();
+    const localEngramInstanceID = "00000000000000000000000000000000";
     const getSessionId = (ctx) => ctx.sessionManager?.getSessionId();
     function forgetSelfHealContext(sessionId) {
       ${forgetBody}
@@ -180,6 +181,7 @@ function buildInitializeEngramServerForTest({
     "waitForEngramReadiness",
     "ENGRAM_STARTUP_TIMEOUT_MS",
     `
+    const localInstanceID = () => "00000000000000000000000000000000";
     async function initializeEngramServer() {
       ${body}
     }
@@ -196,7 +198,7 @@ function buildInitializeEngramServerForTest({
 }
 
 function buildProbeEngramHealthForTest({ fetch, isTimeoutError }) {
-  const body = extractFunctionBody("probeEngramHealth", "{\n  try");
+  const body = extractFunctionBody("probeEngramHealth", "{\n  try").replace("const health = await res.json() as { instance_id?: unknown };", "const health = await res.json();");
   const refusedBody = extractFunctionBody("hasConnectionRefusedCode", "{\n  if (depth")
     .replace("value as Record<string, unknown>", "value");
   const refusalBody = extractFunctionBody("isConnectionRefusedError", "{\n  return");
@@ -300,7 +302,7 @@ function buildWaitForEngramReadinessForTest({ probeEngramHealth, pollMs = 5 }) {
     "ENGRAM_URL",
     "ENGRAM_STARTUP_POLL_MS",
     `
-    function waitCancellable(ms, signal) {
+    const expectedID = ""; function waitCancellable(ms, signal) {
       ${extractFunctionBody("waitCancellable", "{\n  return new Promise")}
     }
     async function waitForEngramReadiness(signal, deadline) {
@@ -325,7 +327,7 @@ function buildSpawnAndWaitForEngramForTest({ spawn, probeEngramHealth, pollMs = 
     "ENGRAM_URL",
     "ENGRAM_STARTUP_POLL_MS",
     `
-    function waitCancellable(ms, signal) {
+    const expectedID = ""; function waitCancellable(ms, signal) {
       ${extractFunctionBody("waitCancellable", "{\n  return new Promise")}
     }
     async function waitForEngramReadiness(signal, deadline) {

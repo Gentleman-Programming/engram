@@ -681,6 +681,16 @@ func main() {
 		cfg.DataDir = dir
 	}
 
+	if os.Args[1] == "instance-id" {
+		id, err := store.EnsureInstanceID(cfg.DataDir)
+		if err != nil {
+			fatal(err)
+			return
+		}
+		fmt.Println(id)
+		return
+	}
+
 	// Migrate orphaned databases that ended up in wrong locations
 	// (e.g. drive root on Windows due to previous bug).
 	migrateOrphanedDB(cfg.DataDir)

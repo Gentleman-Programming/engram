@@ -77,7 +77,8 @@ function buildEnsureResolvedProjectForTest(resolveProjectName) {
     let project = "unknown"
     let projectResolutionError = ""
     let projectResolutionGeneration = 0
-    const ctx = { directory: "/work/engram" }
+    let localReady = true; const ctx = { directory: "/work/engram" }
+		async function ensureLocalReady() { return localReady }
     async function ensureResolvedProject() {${body}}
     return {
       ensureResolvedProject,
@@ -105,7 +106,9 @@ async function createRuntime(t, {
   directory = "/work/engram",
   projectCurrentResponse = { project: "engram", project_source: "git_remote" },
 	projectCurrentOK = true,
-  manifestExists = false,
+	manifestExists = false,
+  configuredEngramURL,
+  healthOK = true,
    sessionGet = async ({ path }) => sdkResult(session(path.id)),
     registrationResponse,
     sessionEndResponse,
@@ -114,16 +117,19 @@ async function createRuntime(t, {
     nudgeObservationsResponse,
     nudgeObservationsError,
 } = {}) {
-  const originalFetch = globalThis.fetch
-  const originalBun = globalThis.Bun
+	const originalFetch = globalThis.fetch
+	const originalBun = globalThis.Bun
+	const originalEngramURL = process.env.ENGRAM_URL
   const registeredIDs = []
   const sessionGetIDs = []
   const requests = []
 	const spawns = []
 	const startupEvents = []
+	if (configuredEngramURL) process.env.ENGRAM_URL = configuredEngramURL
   globalThis.Bun = {
     spawnSync(args) {
       if (args.includes("remote")) return { exitCode: 1, stdout: Buffer.from("") }
+			if (args[1] === "instance-id") return { exitCode: 0, stdout: Buffer.from("00000000000000000000000000000000\n") }
       return { exitCode: 0, stdout: Buffer.from("/work/engram\n") }
     },
 		spawn(args, options) {
@@ -134,7 +140,7 @@ async function createRuntime(t, {
   }
   globalThis.fetch = async (url, init) => {
     const path = new URL(url).pathname
-    if (path === "/health") return { ok: true, async json() { return { status: "ok" } } }
+		if (path === "/health") return httpResponse({ status: "ok", instance_id: "00000000000000000000000000000000" }, typeof healthOK === "function" ? healthOK() : healthOK)
     const body = init?.body ? JSON.parse(init.body) : undefined
     requests.push({ path, url: String(url), method: init?.method, body })
 		if (path === "/project/current") {
@@ -158,10 +164,12 @@ async function createRuntime(t, {
     return httpResponse({})
   }
 
-  t.after(() => {
-    globalThis.fetch = originalFetch
-    globalThis.Bun = originalBun
-  })
+	t.after(() => {
+		globalThis.fetch = originalFetch
+		globalThis.Bun = originalBun
+		if (originalEngramURL === undefined) delete process.env.ENGRAM_URL
+		else process.env.ENGRAM_URL = originalEngramURL
+	})
   runtimeImport += 1
   const moduleURL = new URL(`./engram.ts?sdk-runtime=${runtimeImport}`, import.meta.url)
   const { Engram } = await import(moduleURL.href)
@@ -364,6 +372,17 @@ test("a stale project resolution failure cannot overwrite a newer success", asyn
 test("embedded and distributable OpenCode plugins remain identical", () => {
   const embedded = readFileSync(new URL("../../internal/setup/plugins/opencode/engram.ts", import.meta.url), "utf8")
   assert.equal(embedded, source)
+})
+
+test("a later event recovers an explicitly configured server that was not ready at startup", async (t) => {
+	let healthy = false
+	const runtime = await createRuntime(t, {
+		configuredEngramURL: "http://127.0.0.1:7438",
+		healthOK: () => healthy,
+	})
+	healthy = true
+	await runtime.event("session.created", session("runtime"))
+	assert.deepEqual(runtime.registeredIDs, ["runtime"])
 })
 
 test("registration enters the cache only after a successful acknowledgement", async (t) => {
