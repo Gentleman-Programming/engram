@@ -93,11 +93,11 @@ type Options struct {
 //
 //   - No candidates: remove the label if present and leave a short
 //     "no candidates remain" note in the anchored comment when one exists.
-//   - No new candidate, label removed by a maintainer: respect the rejection
-//     and do nothing. A candidate set that is unchanged or only shrunk (an old
-//     candidate disappeared) counts as no new candidate.
-//   - New candidate: ensure the label exists, add it when absent, and create
-//     or update the anchored comment in place.
+//   - No new reported candidate, label removed by a maintainer: respect the
+//     rejection and do nothing. A displayed top-three set that is unchanged or
+//     only shrunk (an old candidate disappeared) counts as no new candidate.
+//   - New reported candidate: ensure the label exists, add it when absent, and
+//     create or update the anchored comment in place.
 //
 // API and network errors are returned for the caller to tolerate.
 func Run(ctx context.Context, opts Options) error {
@@ -166,9 +166,9 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	// Rejection semantics: the maintainer removed the label while the anchored
-	// comment still records every current candidate. Respect that until new
-	// evidence (a candidate number missing from the recorded set) appears; a
-	// merely shrunk candidate set is not new evidence.
+	// comment still records every current reported candidate. Respect that until
+	// the ranked top-three set contains a candidate missing from the recording;
+	// a merely shrunk reported set is not new evidence.
 	if !labelPresent && anchored != nil && rejectionStands(ParseRecordedCandidates(anchored.Body), matches) {
 		log("triage: rejection respected on issue #%d; no new candidates", opts.IssueNumber)
 		return nil
@@ -213,10 +213,10 @@ func findAnchoredComment(comments []Comment, botAuthor string) *Comment {
 }
 
 // rejectionStands reports whether the recorded numbers cover every freshly
-// computed match. It uses subset semantics: when the current candidate set is
-// contained in the recorded set, the only possible change is that old
+// computed reported match. It uses subset semantics: when the ranked top-three
+// set is contained in the recorded set, the only visible change is that old
 // candidates disappeared, so no new evidence exists and the maintainer's
-// rejection holds. Reopen requires a match number absent from the recording.
+// rejection holds. Reopen requires a reported match absent from the recording.
 func rejectionStands(recorded []int, matches []Match) bool {
 	current := make(map[int]bool, len(matches))
 	for _, match := range matches {

@@ -138,25 +138,41 @@ func (c *RESTClient) UpdateComment(ctx context.Context, commentID int64, body st
 }
 
 // EnsureLabel makes sure the label exists on the repository, creating it with
-// LabelColor when missing. Idempotent.
+// LabelColor when missing. If a concurrent creator wins the race, a 422 is
+// accepted only after the exact label endpoint proves the label now exists.
 func (c *RESTClient) EnsureLabel(ctx context.Context, name string) error {
-	resp, err := c.do(ctx, http.MethodGet, fmt.Sprintf("repos/%s/labels/%s", c.repo, labelPathEscape(name)), nil, nil)
+	path := fmt.Sprintf("repos/%s/labels/%s", c.repo, labelPathEscape(name))
+	resp, err := c.do(ctx, http.MethodGet, path, nil, nil)
 	if err != nil {
 		return err
 	}
-	if resp.StatusCode == http.StatusNotFound {
-		_, _ = io.Copy(io.Discard, resp.Body) // drain 404 body before close
-		_ = resp.Body.Close()
-		resp, err = c.do(ctx, http.MethodPost, fmt.Sprintf("repos/%s/labels", c.repo), nil, ghLabelCreate{
-			Name:        name,
-			Color:       LabelColor,
-			Description: "Possible duplicate — set by the triage bot; remove to reject",
-		})
-		if err != nil {
-			return err
-		}
+	if resp.StatusCode != http.StatusNotFound {
+		return decodeResponse(resp, nil)
 	}
-	return decodeResponse(resp, nil)
+	drainAndClose(resp)
+
+	resp, err = c.do(ctx, http.MethodPost, fmt.Sprintf("repos/%s/labels", c.repo), nil, ghLabelCreate{
+		Name:        name,
+		Color:       LabelColor,
+		Description: "Possible duplicate — set by the triage bot; remove to reject",
+	})
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		return decodeResponse(resp, nil)
+	}
+	creationErr := decodeResponse(resp, nil)
+
+	resp, err = c.do(ctx, http.MethodGet, path, nil, nil)
+	if err != nil {
+		return fmt.Errorf("triage: create label %q failed: %w; recheck request failed: %v", name, creationErr, err)
+	}
+	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+		return decodeResponse(resp, nil)
+	}
+	recheckErr := decodeResponse(resp, nil)
+	return fmt.Errorf("triage: create label %q failed: %w; recheck failed: %v", name, creationErr, recheckErr)
 }
 
 // AddIssueLabel adds a label to one issue.
@@ -215,16 +231,21 @@ func (c *RESTClient) do(ctx context.Context, method, path string, query url.Valu
 	return c.httpClient.Do(request)
 }
 
-// decodeResponse closes the response body and decodes a 2xx response into
-// out; non-2xx statuses become errors carrying the status code.
+// drainAndClose consumes a response body and closes it exactly once.
+func drainAndClose(resp *http.Response) {
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+}
+
+// decodeResponse drains and closes the response body, then decodes a 2xx
+// response into out; non-2xx statuses become errors carrying the status code.
 func decodeResponse(resp *http.Response, out any) error {
-	defer func() { _ = resp.Body.Close() }()
+	defer drainAndClose(resp)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("triage: GitHub API %s: status %d: %s", resp.Request.Method, resp.StatusCode, strings.TrimSpace(string(detail)))
 	}
 	if out == nil {
-		_, _ = io.Copy(io.Discard, resp.Body) // best-effort drain of unused body
 		return nil
 	}
 	return json.NewDecoder(resp.Body).Decode(out)

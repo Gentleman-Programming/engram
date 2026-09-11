@@ -64,6 +64,83 @@ func TestParseTriageArgs(t *testing.T) {
 	}
 }
 
+func TestParseTriageArgsValidatesGitHubRepository(t *testing.T) {
+	ownerAtLimit := "a" + strings.Repeat("b", 37) + "z"
+	repoAtLimit := "r" + strings.Repeat("a", 98) + "z"
+
+	valid := []struct {
+		name string
+		repo string
+		env  bool
+	}{
+		{name: "minimum segments", repo: "a/r"},
+		{name: "GitHub-compatible punctuation", repo: "owner-name/repo.name_1-2"},
+		{name: "maximum owner length", repo: ownerAtLimit + "/repo"},
+		{name: "maximum repository length", repo: "owner/" + repoAtLimit},
+		{name: "environment fallback", repo: "fallback/repo", env: true},
+	}
+	for _, tt := range valid {
+		t.Run("accepts "+tt.name, func(t *testing.T) {
+			t.Setenv("GITHUB_REPOSITORY", "")
+			args := []string{"--repo", tt.repo, "--issue", "5"}
+			if tt.env {
+				t.Setenv("GITHUB_REPOSITORY", tt.repo)
+				args = []string{"--issue", "5"}
+			}
+			opts, _, err := parseTriageArgs(args)
+			if err != nil {
+				t.Fatalf("parseTriageArgs(%v): %v", args, err)
+			}
+			if opts.repo != tt.repo {
+				t.Errorf("repo = %q, want %q", opts.repo, tt.repo)
+			}
+		})
+	}
+
+	invalid := []struct {
+		name string
+		repo string
+	}{
+		{name: "owner starts with hyphen", repo: "-owner/repo"},
+		{name: "owner ends with hyphen", repo: "owner-/repo"},
+		{name: "owner underscore", repo: "owner_name/repo"},
+		{name: "owner whitespace", repo: "owner name/repo"},
+		{name: "owner query", repo: "owner?name/repo"},
+		{name: "owner fragment", repo: "owner#name/repo"},
+		{name: "owner path punctuation", repo: "owner\\name/repo"},
+		{name: "owner non-ASCII", repo: "ownér/repo"},
+		{name: "owner too long", repo: "a" + strings.Repeat("b", 38) + "z/repo"},
+		{name: "repository dot", repo: "owner/."},
+		{name: "repository dot dot", repo: "owner/.."},
+		{name: "repository whitespace", repo: "owner/repo name"},
+		{name: "repository query", repo: "owner/repo?name"},
+		{name: "repository fragment", repo: "owner/repo#name"},
+		{name: "repository unsafe punctuation", repo: "owner/repo:name"},
+		{name: "additional path segment", repo: "owner/repo/other"},
+		{name: "empty path segment", repo: "owner//repo"},
+		{name: "repository too long", repo: "owner/" + "r" + strings.Repeat("a", 100)},
+	}
+	for _, tt := range invalid {
+		for _, env := range []bool{false, true} {
+			source := "explicit flag"
+			if env {
+				source = "environment fallback"
+			}
+			t.Run("rejects "+tt.name+" from "+source, func(t *testing.T) {
+				t.Setenv("GITHUB_REPOSITORY", "valid/repo")
+				args := []string{"--repo", tt.repo, "--issue", "5"}
+				if env {
+					t.Setenv("GITHUB_REPOSITORY", tt.repo)
+					args = []string{"--issue", "5"}
+				}
+				if _, _, err := parseTriageArgs(args); err == nil {
+					t.Fatalf("parseTriageArgs(%v) accepted invalid repository %q", args, tt.repo)
+				}
+			})
+		}
+	}
+}
+
 // triageTestServer returns an httptest GitHub API where the issue exists and
 // search responds with the given status.
 func triageTestServer(t *testing.T, searchStatus int) *httptest.Server {

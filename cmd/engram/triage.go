@@ -108,13 +108,52 @@ func parseTriageArgs(args []string) (triageOptions, bool, error) {
 	if opts.repo == "" {
 		return triageOptions{}, false, fmt.Errorf("--repo owner/name (or GITHUB_REPOSITORY) is required")
 	}
-	if strings.Count(opts.repo, "/") != 1 || strings.HasPrefix(opts.repo, "/") || strings.HasSuffix(opts.repo, "/") {
-		return triageOptions{}, false, fmt.Errorf("--repo must look like owner/name, got %q", opts.repo)
+	if !validGitHubRepository(opts.repo) {
+		return triageOptions{}, false, fmt.Errorf("--repo must be a GitHub owner/repository, got %q", opts.repo)
 	}
 	if opts.issue == 0 {
 		return triageOptions{}, false, fmt.Errorf("--issue is required")
 	}
 	return opts, help, nil
+}
+
+// validGitHubRepository accepts exactly one GitHub-compatible owner/repository
+// pair. It intentionally operates on ASCII bytes so whitespace, URL syntax,
+// and other unsafe path characters cannot reach REST path construction.
+func validGitHubRepository(value string) bool {
+	owner, repository, found := strings.Cut(value, "/")
+	if !found || strings.Contains(repository, "/") || !validGitHubOwner(owner) {
+		return false
+	}
+	return validGitHubRepositoryName(repository)
+}
+
+func validGitHubOwner(owner string) bool {
+	if len(owner) < 1 || len(owner) > 39 || !isASCIIAlphanumeric(owner[0]) || !isASCIIAlphanumeric(owner[len(owner)-1]) {
+		return false
+	}
+	for i := 0; i < len(owner); i++ {
+		if !isASCIIAlphanumeric(owner[i]) && owner[i] != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func validGitHubRepositoryName(repository string) bool {
+	if len(repository) < 1 || len(repository) > 100 || repository == "." || repository == ".." {
+		return false
+	}
+	for i := 0; i < len(repository); i++ {
+		if !isASCIIAlphanumeric(repository[i]) && repository[i] != '.' && repository[i] != '_' && repository[i] != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func isASCIIAlphanumeric(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9'
 }
 
 func printTriageUsage() {

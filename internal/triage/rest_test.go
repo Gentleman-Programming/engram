@@ -305,6 +305,56 @@ func TestRESTClientEnsureLabel(t *testing.T) {
 			t.Fatalf("EnsureLabel: %v", err)
 		}
 	})
+
+	t.Run("creation race rechecks the exact label after 422", func(t *testing.T) {
+		var requests atomic.Int32
+		client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+			switch requests.Add(1) {
+			case 1:
+				if r.Method != http.MethodGet || r.URL.Path != "/repos/owner/repo/labels/triage:possible-duplicate" {
+					t.Errorf("first request = %s %s, want label GET", r.Method, r.URL.Path)
+				}
+				w.WriteHeader(http.StatusNotFound)
+			case 2:
+				if r.Method != http.MethodPost || r.URL.Path != "/repos/owner/repo/labels" {
+					t.Errorf("second request = %s %s, want label POST", r.Method, r.URL.Path)
+				}
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				_, _ = w.Write([]byte(`{"message":"already exists"}`))
+			case 3:
+				if r.Method != http.MethodGet || r.URL.Path != "/repos/owner/repo/labels/triage:possible-duplicate" {
+					t.Errorf("third request = %s %s, want label GET", r.Method, r.URL.Path)
+				}
+				_, _ = w.Write([]byte(`{"name":"triage:possible-duplicate"}`))
+			default:
+				t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			}
+		})
+		if err := client.EnsureLabel(context.Background(), LabelName); err != nil {
+			t.Fatalf("EnsureLabel: %v", err)
+		}
+		if got := requests.Load(); got != 3 {
+			t.Errorf("requests = %d, want 3", got)
+		}
+	})
+
+	t.Run("unrelated creation 422 remains an error", func(t *testing.T) {
+		client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodGet:
+				w.WriteHeader(http.StatusNotFound)
+			case http.MethodPost:
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				_, _ = w.Write([]byte(`{"message":"invalid color"}`))
+			default:
+				t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			}
+		})
+		err := client.EnsureLabel(context.Background(), LabelName)
+		if err == nil || !strings.Contains(err.Error(), "422") || !strings.Contains(err.Error(), "invalid color") {
+			t.Fatalf("EnsureLabel error = %v, want original 422 creation failure", err)
+		}
+	})
 }
 
 func TestRESTClientAddAndRemoveIssueLabel(t *testing.T) {
