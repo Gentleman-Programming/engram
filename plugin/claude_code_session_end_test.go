@@ -3,6 +3,7 @@ package plugin_test
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -72,9 +73,10 @@ func TestClaudeCodeSessionEndHook(t *testing.T) {
 		var methods []string
 		var bodies []string
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			body := make([]byte, r.ContentLength)
-			if _, err := r.Body.Read(body); err != nil && err.Error() != "EOF" {
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
 				t.Errorf("read request body: %v", err)
+				return
 			}
 			mu.Lock()
 			paths = append(paths, r.URL.EscapedPath())
@@ -139,7 +141,7 @@ func TestClaudeCodeSessionEndHook(t *testing.T) {
 		}
 	})
 
-	for _, input := range []string{`{}`, `{"session_id":""}`, `{"session_id":42}`} {
+	for _, input := range []string{`{}`, `{"session_id":""}`, `{"session_id":42}`, `{"session_id":`} {
 		t.Run("fails open without posting "+input, func(t *testing.T) {
 			requests := 0
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
