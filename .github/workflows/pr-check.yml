@@ -1,7 +1,7 @@
 name: PR Validation
 
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, edited, labeled, unlabeled, synchronize]
 
 jobs:
@@ -82,18 +82,3 @@ jobs:
             if (failures.length > 0) {
               core.setFailed('❌ Linked issue(s) not approved:\n' + failures.join('\n'));
             }
-
-  check-label-policy:
-    name: Check PR Label Policy
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out trusted base revision
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          ref: ${{ github.event.pull_request.base.sha }}
-      - name: Validate canonical PR labels
-        env:
-          PR_LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
-        run: >-
-          node .github/scripts/label-policy.mjs --target pull-request
-          --labels-json "$PR_LABELS"

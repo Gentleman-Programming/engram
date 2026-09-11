@@ -72,14 +72,16 @@ test('rejects labels outside their declared applicability', () => {
   );
 });
 
-test('passes PR label JSON through a shell-safe workflow environment variable', () => {
-  const workflow = fs.readFileSync('.github/workflows/pr-check.yml', 'utf8');
-  assert.match(workflow, /^  pull_request_target:/m);
-  assert.doesNotMatch(workflow, /^  pull_request:/m);
-  assert.match(workflow, /ref: \$\{\{ github\.event\.pull_request\.base\.sha \}\}/);
-  assert.match(workflow, /PR_LABELS: \$\{\{ toJson\(github\.event\.pull_request\.labels\.\*\.name\) \}\}/);
-  assert.match(workflow, /--labels-json "\$PR_LABELS"/);
-  assert.doesNotMatch(workflow, /--labels-json '\$\{\{/);
+test('runs PR label policy from the trusted base with shell-safe label JSON', () => {
+  const prWorkflow = fs.readFileSync('.github/workflows/pr-check.yml', 'utf8');
+  const labelWorkflow = fs.readFileSync('.github/workflows/pr-label-check.yml', 'utf8');
+  assert.match(prWorkflow, /^  pull_request:/m);
+  assert.doesNotMatch(prWorkflow, /^  pull_request_target:/m);
+  assert.match(labelWorkflow, /^  pull_request_target:/m);
+  assert.match(labelWorkflow, /ref: \$\{\{ github\.event\.pull_request\.base\.sha \}\}/);
+  assert.match(labelWorkflow, /PR_LABELS: \$\{\{ toJson\(github\.event\.pull_request\.labels\.\*\.name\) \}\}/);
+  assert.match(labelWorkflow, /--labels-json "\$PR_LABELS"/);
+  assert.doesNotMatch(labelWorkflow, /--labels-json '\$\{\{/);
 });
 
 test('migrates deprecated labels idempotently and preserves ambiguous combinations', () => {

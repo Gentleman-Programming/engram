@@ -1,0 +1,25 @@
+name: PR Label Policy
+
+on:
+  pull_request_target:
+    types: [opened, edited, labeled, unlabeled, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  check-label-policy:
+    name: Check PR Label Policy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out trusted base revision
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - name: Validate canonical PR labels
+        env:
+          PR_LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+        run: >-
+          node .github/scripts/label-policy.mjs --target pull-request
+          --labels-json "$PR_LABELS"
