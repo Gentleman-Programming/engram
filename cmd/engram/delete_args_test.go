@@ -231,6 +231,66 @@ func TestCmdDeleteRejectsHelpTargets(t *testing.T) {
 	}
 }
 
+// TestCmdDeleteRejectsLiteralHelpTargets proves that the bare word "help"
+// also aborts before store access and leaves matching session and project
+// records intact: "engram delete project help" reads as a help request, not
+// as consent to cascade-delete a project actually named "help".
+func TestCmdDeleteRejectsLiteralHelpTargets(t *testing.T) {
+	tests := []struct {
+		name  string
+		usage string
+		seed  deleteSeed
+	}{
+		{
+			name:  "session",
+			usage: "engram delete session <id>",
+			seed: func(t *testing.T) (store.Config, []string, []rowCount) {
+				cfg := testConfig(t)
+				mustSeedSession(t, cfg, "help", "proj-literal-help-sess")
+				return cfg, []string{"session", "help"}, []rowCount{
+					{"SELECT COUNT(*) FROM sessions WHERE id = ?", "help", 1},
+				}
+			},
+		},
+		{
+			name:  "project",
+			usage: "engram delete project <name> [--hard]",
+			seed: func(t *testing.T) (store.Config, []string, []rowCount) {
+				cfg := testConfig(t)
+				mustSeedObservation(t, cfg, "sess-literal-help-proj", "help", "decision", "literal-help", "must survive", "project")
+				return cfg, []string{"project", "help"}, []rowCount{
+					{"SELECT COUNT(*) FROM observations WHERE project = ? AND deleted_at IS NULL", "help", 1},
+					{"SELECT COUNT(*) FROM observations WHERE project = ?", "help", 1},
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, target, intact := tt.seed(t)
+
+			codes := stubbedExit(t)
+			withArgs(t, append([]string{"engram", "delete"}, target...)...)
+			stdout, stderr := captureOutput(t, func() { cmdDelete(cfg) })
+
+			if len(*codes) == 0 || (*codes)[0] == 0 {
+				t.Fatalf("expected nonzero exit for help target %v; command ran anyway (stdout=%q stderr=%q)", target, stdout, stderr)
+			}
+			if !strings.Contains(stderr, "usage: "+tt.usage) {
+				t.Errorf("expected stderr to show usage %q, got: %q", "usage: "+tt.usage, stderr)
+			}
+			if strings.Contains(stdout, "deleted") {
+				t.Errorf("expected no deletion confirmation on stdout, got: %q", stdout)
+			}
+			for _, c := range intact {
+				if got := mustQueryCount(t, cfg, c.query, c.arg); got != c.want {
+					t.Errorf("record named help must remain intact (%s): got %d rows, want %d", c.query, got, c.want)
+				}
+			}
+		})
+	}
+}
+
 func TestRejectDeleteHelpTargetShortFormOnly(t *testing.T) {
 	codes := stubbedExit(t)
 	handled := false

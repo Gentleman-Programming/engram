@@ -655,6 +655,14 @@ func main() {
 		}
 		return
 	}
+	// Duplicate-issue triage is also config-free: a pure GitHub API command
+	// with no local state, run before update checks and configuration setup.
+	if strings.EqualFold(strings.TrimSpace(os.Args[1]), "triage-duplicates") {
+		if code := cmdTriageDuplicates(os.Args[2:]); code != triageExitSuccess {
+			exitFunc(code)
+		}
+		return
+	}
 
 	if shouldCheckForUpdates(os.Args[1:]) {
 		printUpdateCheckResult(checkForUpdates(version))
@@ -751,7 +759,7 @@ func shouldCheckForUpdates(args []string) bool {
 	}
 	command := strings.ToLower(strings.TrimSpace(args[0]))
 	switch command {
-	case "mcp", "serve", "protocol-mode", "tui", "version", "--version", "-v", "help", "--help", "-h":
+	case "mcp", "serve", "protocol-mode", "tui", "triage-duplicates", "version", "--version", "-v", "help", "--help", "-h":
 		return false
 	case "cloud":
 		return len(args) < 2 || strings.ToLower(strings.TrimSpace(args[1])) != "serve"
@@ -1297,9 +1305,11 @@ func parseDeleteTrailingArgs(args []string, usage string, supported ...string) (
 	return flags, true
 }
 
-// rejectDeleteHelpTarget rejects standard CLI help tokens before store access.
+// rejectDeleteHelpTarget rejects CLI help requests — the standard --help/-h
+// flags and the bare word "help" — before store access, so "engram delete
+// project help" can never cascade-delete a project actually named "help".
 func rejectDeleteHelpTarget(target, usage string) bool {
-	if target != "--help" && target != "-h" {
+	if target != "--help" && target != "-h" && target != "help" {
 		return false
 	}
 	fmt.Fprintln(os.Stderr, "usage: "+usage)
@@ -3246,6 +3256,10 @@ Commands:
   test [suite] [--quick] [--json]
                      Run isolated local reliability and performance self-tests
                        suites: reliability, performance (default: both)
+  triage-duplicates --repo OWNER/NAME --issue N
+                     Detect possible duplicate issues for one issue (GitHub triage bot;
+                     reads GITHUB_TOKEN; API failures are warnings)
+                     --repo is optional when GITHUB_REPOSITORY (OWNER/NAME) is set
   search <query>     Search memories [--type TYPE] [--project PROJECT|--all] [--scope SCOPE] [--limit N] [--match all|any]
   save <title> <msg> Save a memory  [--type TYPE] [--project PROJECT] [--scope SCOPE]
   delete <obs_id>    Delete an observation [--hard] (soft-delete by default; --hard removes permanently)

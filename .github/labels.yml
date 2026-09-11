@@ -83,3 +83,8 @@
 - name: "effort:large"
   color: "f8d7da"
   description: "> 4 hours or spans multiple files"
+
+# --- Triage labels (set by the duplicate-detection bot) ---
+- name: "triage:possible-duplicate"
+  color: "d4c5f9"
+  description: "Possible duplicate — set by triage bot, remove to reject"
