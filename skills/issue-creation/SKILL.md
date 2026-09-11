@@ -12,7 +12,7 @@ metadata:
 ## When to Use
 
 Use this skill when:
-- Creating a GitHub issue (bug report or feature request)
+- Creating a GitHub issue (bug report, feature request, docs improvement, or tracked question)
 - Helping a contributor file an issue
 - Triaging or approving issues as a maintainer
 
@@ -20,9 +20,9 @@ Use this skill when:
 
 ## Critical Rules
 
-1. **Blank issues are disabled** — MUST use a template (bug report or feature request)
+1. **Blank issues are disabled** — MUST use the matching bug, feature, docs, or tracked-question template
 2. **Every issue gets `status:needs-review` automatically** on creation
-3. **A maintainer MUST add `status:approved`** before any PR can be opened
+3. **A maintainer MUST replace `status:needs-review` with `status:approved`** before any PR can be opened
 4. **General questions go to [Discussions](https://github.com/Gentleman-Programming/engram/discussions)**; questions requiring tracked work use `type:question`
 
 ---
@@ -31,10 +31,10 @@ Use this skill when:
 
 ```
 1. Consider searching existing issues for duplicates
-2. Choose the correct template (Bug Report or Feature Request)
+2. Choose the correct template (Bug Report, Feature Request, Documentation Improvement, or Tracked Question)
 3. Fill in ALL required fields
 4. Submit → issue gets status:needs-review automatically
-5. Wait for maintainer to add status:approved
+5. Wait for a maintainer to replace status:needs-review with status:approved
 6. Only then open a PR linking this issue
 ```
 
@@ -156,6 +156,17 @@ Using \`jq\` to parse the current output, but it's unreliable since the format i
 
 ---
 
+### Tracked Question
+
+Template: `.github/ISSUE_TEMPLATE/tracked_question.yml`
+Auto-labels: `type:question`, `status:needs-review`
+
+Use this form only when the answer requires maintainer investigation, a repository change, or a durable decision. Send general questions and support to Discussions.
+
+Required fields: the question, why issue tracking is needed, and the affected area. Additional context is optional.
+
+---
+
 ## Label System
 
 ### Applied Automatically on Issue Creation
@@ -164,6 +175,8 @@ Using \`jq\` to parse the current output, but it's unreliable since the format i
 |----------|-------------|
 | Bug Report | `type:bug`, `status:needs-review` |
 | Feature Request | `type:feature`, `status:needs-review` |
+| Documentation Improvement | `type:docs`, `status:needs-review` |
+| Tracked Question | `type:question`, `status:needs-review` |
 
 ### Applied by Maintainers
 
@@ -184,7 +197,7 @@ Using \`jq\` to parse the current output, but it's unreliable since the format i
 ```
 1. New issue arrives with status:needs-review
 2. Review the issue — is it valid, clear, and in scope?
-3. If YES → add status:approved label
+3. If YES → replace status:needs-review with status:approved
 4. If NO → comment with reason, close if needed
 5. Contributor can now open a PR linking this issue
 ```
@@ -197,9 +210,9 @@ Using \`jq\` to parse the current output, but it's unreliable since the format i
 Is it a bug?                    → Use Bug Report template
 Is it a new feature/improvement? → Use Feature Request template
 Is it a general question?       → Use Discussions, NOT issues
-Is it a tracked question?       → Create an issue with type:question
-Is it a possible duplicate?     → Add status:possible-duplicate while evaluating
-Is it a confirmed duplicate?    → Close with resolution:duplicate
+Is it a tracked question?       → Use the Tracked Question template
+Is it a possible duplicate?     → Replace the current status with status:possible-duplicate
+Is it a confirmed duplicate?    → Close it, clear evaluation status, then add resolution:duplicate
 ```
 
 ---
@@ -216,13 +229,22 @@ gh issue create --template "bug_report.yml" --title "fix(scope): description"
 # Create feature request
 gh issue create --template "feature_request.yml" --title "feat(scope): description"
 
+# Create documentation improvement
+gh issue create --template "docs_improvement.yml" --title "docs(scope): description"
+
+# Create tracked question
+gh issue create --template "tracked_question.yml" --title "question(scope): description"
+
 # Maintainer: approve an issue
-gh issue edit <number> --add-label "status:approved"
+gh issue edit <number> --remove-label "status:needs-review" --add-label "status:approved"
 
 # Maintainer: add priority
 gh issue edit <number> --add-label "priority:high"
 
-# Maintainer: mark an evaluation or confirmed duplicate
-gh issue edit <number> --add-label "status:possible-duplicate"
-gh issue edit <number> --add-label "resolution:duplicate"
+# Maintainer: replace needs-review while evaluating a possible duplicate
+gh issue edit <number> --remove-label "status:needs-review" --add-label "status:possible-duplicate"
+
+# Maintainer: close a confirmed duplicate, then replace evaluation status with resolution
+gh issue close <number> --reason "not planned" --comment "Closing as duplicate of #<canonical>."
+gh issue edit <number> --remove-label "status:possible-duplicate" --add-label "resolution:duplicate"
 ```

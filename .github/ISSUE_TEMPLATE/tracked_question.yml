@@ -1,0 +1,55 @@
+name: Tracked Question
+description: Ask a question that needs maintainer investigation or a durable decision
+labels: ["type:question", "status:needs-review"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        # ❓ Tracked Question
+
+        Use this form only when the answer requires maintainer investigation, a repository change, or a durable project decision. Use [Discussions](https://github.com/Gentleman-Programming/engram/discussions) for general questions and support.
+
+        This issue starts with `status:needs-review`. Wait for a maintainer to replace it with `status:approved` before opening a PR.
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: State the question and the decision or information you need.
+      placeholder: What should Engram do when...?
+    validations:
+      required: true
+
+  - type: textarea
+    id: tracking_reason
+    attributes:
+      label: Why does this need issue tracking?
+      description: Explain what maintainer investigation, repository change, or durable decision may be needed.
+      placeholder: This needs to be tracked because...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Affected Area
+      options:
+        - CLI (commands, flags)
+        - MCP Server (tools, transport)
+        - TUI (terminal UI)
+        - Store (database, queries)
+        - Sync (multi-instance)
+        - Skills (agent skills)
+        - Documentation
+        - Project workflow or policy
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: Add links, examples, prior discussion, or constraints that help answer the question.
+    validations:
+      required: false

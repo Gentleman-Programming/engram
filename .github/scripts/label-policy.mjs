@@ -100,22 +100,33 @@ export function validateLabels(policy, labels, target = 'issue') {
 
 export function migrateLabels(policy, labels) {
   const mapped = labels.map((label) => policy.aliases.get(label) ?? label);
-  const conflicts = singletonErrors(policy, mapped);
+  const migrated = [...new Set(mapped)];
+  const conflicts = singletonErrors(policy, migrated);
   if (conflicts.some((error) => error.includes('permits at most one'))) {
     return { labels, changed: false, conflicts };
   }
-  const migrated = [...new Set(mapped)];
   return { labels: migrated, changed: migrated.join('\0') !== labels.join('\0'), conflicts: [] };
 }
 
 function run() {
   const args = process.argv.slice(2);
+  const migrate = args.includes('--migrate');
   const targetIndex = args.indexOf('--target');
   const labelsIndex = args.indexOf('--labels-json');
   const target = targetIndex >= 0 ? args[targetIndex + 1] : 'pull-request';
   const encoded = labelsIndex >= 0 ? args[labelsIndex + 1] : undefined;
-  if (!encoded) throw new Error('usage: label-policy.mjs --target <issue|pull-request> --labels-json <json-array>');
-  const result = validateLabels(loadLabelPolicy(), JSON.parse(encoded), target);
+  if (!encoded) {
+    throw new Error('usage: label-policy.mjs [--migrate | --target <issue|pull-request>] --labels-json <json-array>');
+  }
+  const policy = loadLabelPolicy();
+  const labels = JSON.parse(encoded);
+  if (migrate) {
+    const result = migrateLabels(policy, labels);
+    console.log(JSON.stringify(result));
+    if (result.conflicts.length > 0) process.exitCode = 1;
+    return;
+  }
+  const result = validateLabels(policy, labels, target);
   if (result.errors.length > 0) {
     console.error(`Label policy validation failed:\n${result.errors.map((error) => `- ${error}`).join('\n')}`);
     process.exitCode = 1;

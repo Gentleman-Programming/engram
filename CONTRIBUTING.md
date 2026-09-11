@@ -15,8 +15,11 @@ Open Issue → Get status:approved → Open PR → Add type:* label → Review &
 Use the correct template:
 - **Bug Report** — for bugs
 - **Feature Request** — for new features or improvements
+- **Documentation Improvement** — for missing, outdated, or unclear docs
+- **Tracked Question** — for questions requiring maintainer investigation, a repository change, or a durable decision
 
 > ⚠️ Blank issues are disabled. You must use a template.
+> General questions and support belong in [Discussions](https://github.com/Gentleman-Programming/engram/discussions).
 
 Fill in all required fields. Your issue will automatically receive the `status:needs-review` label.
 
@@ -24,7 +27,7 @@ If useful for alignment, search existing issues before opening a new one.
 
 ### Step 2: Wait for Approval
 
-A maintainer will review the issue and add the `status:approved` label if it's accepted for implementation.
+A maintainer will review the issue and replace `status:needs-review` with `status:approved` if it's accepted for implementation.
 
 **Do not open a PR until the issue is approved.** Automated checks will block PRs that reference unapproved issues.
 
@@ -172,7 +175,21 @@ Use `status:possible-duplicate` while evaluating a report. Close confirmed dupli
 | `effort:medium` | 1–4 hours |
 | `effort:large` | > 4 hours or spans multiple files |
 
-`type:*` is exactly one. `status:*`, `priority:*`, and `resolution:*` are optional singletons; other namespaces are multi-valued. The only unnamespaced labels are protected exceptions: `good first issue` and `help wanted`. Deprecated aliases are invalid: `bug` → `type:bug`, `enhancement` → `type:feature`, `question` → `type:question`, and `up for grabs` → `help wanted`.
+### PR Size Exception (maintainers only)
+
+`size:exception` records explicit maintainer approval for a pull request to exceed the 400-line review budget. It applies only to pull requests and does not replace the requirement for a focused, reviewable change.
+
+`type:*` is exactly one. `status:*`, `priority:*`, `resolution:*`, and `size:*` are optional singletons; `effort:*` is multi-valued. The only unnamespaced labels are protected exceptions: `good first issue` and `help wanted`. Deprecated aliases are invalid: `bug` → `type:bug`, `enhancement` → `type:feature`, `question` → `type:question`, and `up for grabs` → `help wanted`.
+
+### Deprecated Label Migration (maintainers only)
+
+Preview a label migration locally before changing an issue or pull request:
+
+```bash
+node .github/scripts/label-policy.mjs --migrate --labels-json '["bug","type:bug"]'
+```
+
+The command is a dry run: it prints the canonical label list as JSON and never writes to GitHub. A singleton conflict returns a non-zero exit code and leaves the original list unchanged; stop and resolve that ambiguity manually. Otherwise, apply only the reported replacements with `gh issue edit` or `gh pr edit`, then rerun the command until it reports `"changed":false`.
 
 ---
 

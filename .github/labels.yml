@@ -110,6 +110,12 @@
   color: "f8d7da"
   description: "> 4 hours or spans multiple files"
 
+# --- Pull request size exceptions (set by maintainers) ---
+- name: "size:exception"
+  color: "D93F0B"
+  description: "Maintainer-approved exception to the 400-line review budget"
+  policy: { namespace: size, cardinality: optional-singleton, applies_to: [pull-request], protected_exception: true }
+
 # --- Protected unnamespaced exceptions ---
 - name: "good first issue"
   color: "7057ff"

@@ -117,7 +117,7 @@ func TestPRValidationAndTransientArtifactWorkflowContracts(t *testing.T) {
 		t.Fatalf("read %s: %v", labelCheckPath, err)
 	}
 	labelCheck := strings.ReplaceAll(string(labelCheckContent), "\r\n", "\n")
-	for _, required := range []string{"pull_request_target:", "check-label-policy:", "name: Check PR Label Policy", "ref: ${{ github.event.pull_request.base.sha }}", "persist-credentials: false"} {
+	for _, required := range []string{"pull_request_target:", "types: [opened, edited, labeled, unlabeled, synchronize]", "check-label-policy:", "name: Check PR Label Policy", "ref: ${{ github.event.pull_request.base.sha }}", "persist-credentials: false"} {
 		if !strings.Contains(labelCheck, required) {
 			t.Errorf("%s does not contain %q", labelCheckPath, required)
 		}
