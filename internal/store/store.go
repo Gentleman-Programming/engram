@@ -48,6 +48,8 @@ var sqliteWriteRetryBackoffs = []time.Duration{
 	10 * time.Millisecond,
 	25 * time.Millisecond,
 	50 * time.Millisecond,
+	100 * time.Millisecond,
+	200 * time.Millisecond,
 }
 
 // Sentinel errors returned by Store operations so callers can use errors.Is.
