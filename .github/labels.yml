@@ -1,6 +1,8 @@
 # Label definitions for Gentleman-Programming/engram
 #
-# This file documents the canonical label set for this repo.
+# This file is the canonical label set and policy source for this repo.
+# `policy` metadata is machine-readable: namespace settings apply to every label
+# with that prefix; aliases belong to their canonical replacement label.
 # Apply labels via gh CLI (run from repo root, requires write access):
 #
 #   gh label create "<name>" --color "<hex>" --description "<desc>" --repo Gentleman-Programming/engram
@@ -12,10 +14,17 @@
 - name: "type:bug"
   color: "d73a4a"
   description: "Bug fix"
+  policy: { namespace: type, cardinality: required-singleton, applies_to: [issue, pull-request], deprecated_aliases: [bug], protected_exceptions: ["good first issue", "help wanted"] }
 
 - name: "type:feature"
   color: "a2eeef"
   description: "New feature"
+  policy: { deprecated_aliases: [enhancement] }
+
+- name: "type:question"
+  color: "d876e3"
+  description: "Question requiring issue tracking"
+  policy: { deprecated_aliases: [question] }
 
 - name: "type:docs"
   color: "0075ca"
@@ -37,6 +46,7 @@
 - name: "status:needs-review"
   color: "fbca04"
   description: "Awaiting maintainer review"
+  policy: { namespace: status, cardinality: optional-singleton, applies_to: [issue, pull-request] }
 
 - name: "status:approved"
   color: "0E8A16"
@@ -58,10 +68,25 @@
   color: "ffffff"
   description: "Intentionally not fixing"
 
+- name: "status:possible-duplicate"
+  color: "d876e3"
+  description: "Potential duplicate under evaluation"
+
+# --- Resolution labels (set after closure) ---
+- name: "resolution:duplicate"
+  color: "c5def5"
+  description: "Confirmed duplicate after closure"
+  policy: { namespace: resolution, cardinality: optional-singleton, applies_to: [issue] }
+
 # --- Priority labels (set by maintainers) ---
 - name: "priority:high"
   color: "B60205"
   description: "High priority — exempt from stale bot"
+  policy: { namespace: priority, cardinality: optional-singleton, applies_to: [issue] }
+
+- name: "priority:critical"
+  color: "B60205"
+  description: "Critical priority — exempt from stale bot"
 
 - name: "priority:medium"
   color: "fbca04"
@@ -75,6 +100,7 @@
 - name: "effort:small"
   color: "d4edda"
   description: "< 1 hour — good for new contributors"
+  policy: { namespace: effort, cardinality: multi-valued, applies_to: [issue] }
 
 - name: "effort:medium"
   color: "fff3cd"
@@ -83,3 +109,14 @@
 - name: "effort:large"
   color: "f8d7da"
   description: "> 4 hours or spans multiple files"
+
+# --- Protected unnamespaced exceptions ---
+- name: "good first issue"
+  color: "7057ff"
+  description: "Approachable contribution for new contributors"
+  policy: { protected_exception: true, applies_to: [issue] }
+
+- name: "help wanted"
+  color: "008672"
+  description: "Maintainers welcome contributor help"
+  policy: { protected_exception: true, applies_to: [issue], deprecated_aliases: ["up for grabs"] }

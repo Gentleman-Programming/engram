@@ -23,7 +23,7 @@ Use this skill when:
 1. **Blank issues are disabled** — MUST use a template (bug report or feature request)
 2. **Every issue gets `status:needs-review` automatically** on creation
 3. **A maintainer MUST add `status:approved`** before any PR can be opened
-4. **Questions go to [Discussions](https://github.com/Gentleman-Programming/engram/discussions)**, not issues
+4. **General questions go to [Discussions](https://github.com/Gentleman-Programming/engram/discussions)**; questions requiring tracked work use `type:question`
 
 ---
 
@@ -45,7 +45,7 @@ Use this skill when:
 ### Bug Report
 
 Template: `.github/ISSUE_TEMPLATE/bug_report.yml`
-Auto-labels: `bug`, `status:needs-review`
+Auto-labels: `type:bug`, `status:needs-review`
 
 #### Required Fields
 
@@ -107,7 +107,7 @@ UNIQUE constraint failed: observations.title
 ### Feature Request
 
 Template: `.github/ISSUE_TEMPLATE/feature_request.yml`
-Auto-labels: `enhancement`, `status:needs-review`
+Auto-labels: `type:feature`, `status:needs-review`
 
 #### Required Fields
 
@@ -162,17 +162,20 @@ Using \`jq\` to parse the current output, but it's unreliable since the format i
 
 | Template | Labels added |
 |----------|-------------|
-| Bug Report | `bug`, `status:needs-review` |
-| Feature Request | `enhancement`, `status:needs-review` |
+| Bug Report | `type:bug`, `status:needs-review` |
+| Feature Request | `type:feature`, `status:needs-review` |
 
 ### Applied by Maintainers
 
 | Label | When to apply |
 |-------|--------------|
 | `status:approved` | Issue accepted for implementation — PRs can now be opened |
-| `priority:high` | Critical bug or urgent feature |
+| `priority:critical` | Critical bug or urgent feature |
+| `priority:high` | High priority |
 | `priority:medium` | Important but not blocking |
 | `priority:low` | Nice to have |
+| `status:possible-duplicate` | Duplicate under evaluation |
+| `resolution:duplicate` | Confirmed duplicate after closure |
 
 ---
 
@@ -193,8 +196,10 @@ Using \`jq\` to parse the current output, but it's unreliable since the format i
 ```
 Is it a bug?                    → Use Bug Report template
 Is it a new feature/improvement? → Use Feature Request template
-Is it a question?               → Use Discussions, NOT issues
-Is it a duplicate?              → Link to existing issue, close
+Is it a general question?       → Use Discussions, NOT issues
+Is it a tracked question?       → Create an issue with type:question
+Is it a possible duplicate?     → Add status:possible-duplicate while evaluating
+Is it a confirmed duplicate?    → Close with resolution:duplicate
 ```
 
 ---
@@ -216,4 +221,8 @@ gh issue edit <number> --add-label "status:approved"
 
 # Maintainer: add priority
 gh issue edit <number> --add-label "priority:high"
+
+# Maintainer: mark an evaluation or confirmed duplicate
+gh issue edit <number> --add-label "status:possible-duplicate"
+gh issue edit <number> --add-label "resolution:duplicate"
 ```

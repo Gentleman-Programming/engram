@@ -47,7 +47,7 @@ Required checks run automatically on every PR:
 |-------|-----------------|
 | **Check Issue Reference** | PR body contains `Closes #N`, `Fixes #N`, or `Resolves #N` |
 | **Check Issue Has status:approved** | The linked issue has the `status:approved` label |
-| **Check PR Has type:* Label** | PR has exactly one `type:*` label |
+| **Check PR Label Policy** | PR labels use the canonical vocabulary and cardinality |
 | **Check PR Has No Transient Artifacts** | PR files comply with the [Transient Artifact Policy](#transient-artifact-policy) |
 
 #### CI Tests
@@ -132,6 +132,7 @@ untracked, and latest committed changes compared with `HEAD~`.
 |-------|-------|---------|
 | `type:bug` | 🔴 | Bug fixes |
 | `type:feature` | 🔵 | New features |
+| `type:question` | 🟣 | Questions requiring tracked work |
 | `type:docs` | 🔵 | Documentation-only changes |
 | `type:refactor` | 🟣 | Code refactoring with no behavior change |
 | `type:chore` | ⚪ | Maintenance, tooling, dependencies |
@@ -147,12 +148,21 @@ untracked, and latest committed changes compared with `HEAD~`.
 | `status:blocked` | Blocked by another issue or external dependency |
 | `status:stale` | No activity for 30 days — auto-applied by stale bot |
 | `status:wontfix` | Intentionally not fixing — applied when closing stale/rejected items |
+| `status:possible-duplicate` | Potential duplicate under evaluation |
+
+### Resolution Labels (set after closure)
+
+| Label | Meaning |
+|-------|---------|
+| `resolution:duplicate` | Confirmed duplicate after closure |
+
+Use `status:possible-duplicate` while evaluating a report. Close confirmed duplicates with `resolution:duplicate`; do not use it as an evaluation status.
 
 ### Priority Labels (set by maintainers)
 
-`priority:high`, `priority:medium`, `priority:low`
+`priority:critical`, `priority:high`, `priority:medium`, `priority:low`
 
-> Issues with `priority:high` and `status:approved` are never auto-closed by the stale bot.
+> Issues with `priority:critical`, `priority:high`, and `status:approved` are never auto-closed by the stale bot.
 
 ### Effort Labels (set by maintainers, for contributor guidance)
 
@@ -161,6 +171,8 @@ untracked, and latest committed changes compared with `HEAD~`.
 | `effort:small` | < 1 hour — good starting point for new contributors |
 | `effort:medium` | 1–4 hours |
 | `effort:large` | > 4 hours or spans multiple files |
+
+`type:*` is exactly one. `status:*`, `priority:*`, and `resolution:*` are optional singletons; other namespaces are multi-valued. The only unnamespaced labels are protected exceptions: `good first issue` and `help wanted`. Deprecated aliases are invalid: `bug` → `type:bug`, `enhancement` → `type:feature`, `question` → `type:question`, and `up for grabs` → `help wanted`.
 
 ---
 

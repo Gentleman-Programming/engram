@@ -83,39 +83,14 @@ jobs:
               core.setFailed('❌ Linked issue(s) not approved:\n' + failures.join('\n'));
             }
 
-  check-type-label:
-    name: Check PR Has type:* Label
+  check-label-policy:
+    name: Check PR Label Policy
     runs-on: ubuntu-latest
     steps:
-      - name: Verify PR has a type label
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const prNumber = context.payload.pull_request.number;
-
-            const { data: pullRequest } = await github.rest.pulls.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: prNumber,
-            });
-
-            const labels = pullRequest.labels.map(l => l.name);
-            core.info(`PR #${prNumber} labels: ${labels.join(', ') || '(none)'}`);
-
-            const typeLabels = labels.filter(l => l.startsWith('type:'));
-
-            if (typeLabels.length === 0) {
-              core.setFailed(
-                '❌ PR must have exactly one type:* label.\n' +
-                'Valid types: type:bug, type:feature, type:docs, type:refactor, type:chore, type:breaking-change\n' +
-                'Add the label to the PR after opening it.'
-              );
-            } else if (typeLabels.length > 1) {
-              core.setFailed(
-                `❌ PR has multiple type:* labels: ${typeLabels.join(', ')}.\n` +
-                'Please keep exactly one type label.'
-              );
-            } else {
-              core.info(`✅ PR has type label: ${typeLabels[0]}`);
-            }
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Validate canonical PR labels
+        env:
+          PR_LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+        run: >-
+          node .github/scripts/label-policy.mjs --target pull-request
+          --labels-json "$PR_LABELS"
