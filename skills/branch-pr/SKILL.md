@@ -22,7 +22,7 @@ Use this skill when:
 
 1. **Every PR MUST link an approved issue** — no exceptions
 2. **Every PR MUST have exactly one `type:*` label**
-3. **5 automated checks must pass** before merge is possible
+3. **All required automated checks must pass** before merge is possible
 4. **Blank PRs without issue linkage will be blocked** by GitHub Actions
 
 ---
@@ -34,9 +34,10 @@ Use this skill when:
 2. Create branch: feat/*, fix/*, docs/*, refactor/*, chore/*
 3. Implement changes
 4. Run tests locally (unit + e2e)
-5. Open PR using the template
-6. Add exactly one type:* label
-7. Wait for 5 automated checks to pass
+5. Check every changed path against the [Transient Artifact Policy](../../CONTRIBUTING.md#transient-artifact-policy)
+6. Open PR using the template
+7. Add exactly one type:* label
+8. Wait for all required automated checks to pass
 ```
 
 ---
@@ -124,18 +125,22 @@ All boxes must be checked:
 - Docs updated if behavior changed
 - Conventional commit format
 - No `Co-Authored-By` trailers
+- Every changed path complies with the [Transient Artifact Policy](../../CONTRIBUTING.md#transient-artifact-policy)
 
 ---
 
-## Automated Checks (all 5 must pass)
+## Automated Checks (all required checks must pass)
 
 | Check | Job name | What it verifies |
 |-------|----------|-----------------|
 | PR Validation | `Check Issue Reference` | Body contains `Closes/Fixes/Resolves #N` |
 | PR Validation | `Check Issue Has status:approved` | Linked issue has `status:approved` |
 | PR Validation | `Check PR Has type:* Label` | PR has exactly one `type:*` label |
+| Transient Artifact Check | `Check PR Has No Transient Artifacts` | PR files comply with the [Transient Artifact Policy](../../CONTRIBUTING.md#transient-artifact-policy) |
 | CI | `Unit Tests` | `go test ./...` passes |
 | CI | `E2E Tests` | `go test -tags e2e ./internal/server/...` passes |
+| CI | `Plugin Tests` | `npm test` passes in `plugin/pi` |
+| CI | `Lint` | golangci-lint reports no new findings in Go changes |
 
 ---
 

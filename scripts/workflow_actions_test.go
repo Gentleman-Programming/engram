@@ -86,6 +86,81 @@ func TestWorkflowExternalActionsArePinned(t *testing.T) {
 	}
 }
 
+func TestPRValidationAndTransientArtifactWorkflowContracts(t *testing.T) {
+	prCheckPath := filepath.Join(workflowDirectory(t), "pr-check.yml")
+	prCheckContent, err := os.ReadFile(prCheckPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", prCheckPath, err)
+	}
+
+	prCheck := string(prCheckContent)
+	for _, required := range []string{
+		"pull_request:",
+		"types: [opened, edited, labeled, unlabeled, synchronize]",
+		"check-issue-reference:",
+		"name: Check Issue Reference",
+		"check-issue-approved:",
+		"name: Check Issue Has status:approved",
+		"check-type-label:",
+		"name: Check PR Has type:* Label",
+	} {
+		if !strings.Contains(prCheck, required) {
+			t.Errorf("%s does not contain %q", prCheckPath, required)
+		}
+	}
+	for _, forbidden := range []string{"pull_request_target:", "check-transient-artifacts:"} {
+		if strings.Contains(prCheck, forbidden) {
+			t.Errorf("%s must not contain %q", prCheckPath, forbidden)
+		}
+	}
+
+	artifactWorkflowPath := filepath.Join(workflowDirectory(t), "transient-artifacts.yml")
+	artifactWorkflowContent, err := os.ReadFile(artifactWorkflowPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", artifactWorkflowPath, err)
+	}
+
+	artifactWorkflow := string(artifactWorkflowContent)
+	for _, required := range []string{
+		"pull_request_target:",
+		"types: [opened, edited, labeled, unlabeled, synchronize, reopened]",
+		"permissions:\n  contents: read\n  pull-requests: read",
+		"check-transient-artifacts:",
+		"name: Check PR Has No Transient Artifacts",
+		"actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6",
+		"ref: ${{ github.event.pull_request.base.sha }}",
+		"persist-credentials: false",
+		"actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8",
+		".github/scripts/transient-artifacts.mjs",
+		"({ findTransientArtifacts, listPullRequestFiles } = await import(",
+		"await listPullRequestFiles(github, {",
+		"owner: context.repo.owner",
+		"repo: context.repo.repo",
+		"pullNumber: prNumber",
+		"findTransientArtifacts(files)",
+		"core.setFailed('❌ Could not load the trusted transient artifact policy: ' + err.message);",
+		"core.setFailed('❌ Could not enumerate PR files: ' + err.message);",
+	} {
+		if !strings.Contains(artifactWorkflow, required) {
+			t.Errorf("%s does not contain %q", artifactWorkflowPath, required)
+		}
+	}
+	for _, forbidden := range []string{"github.event.pull_request.head", "write", "gh pr diff", "status: 'modified'"} {
+		if strings.Contains(artifactWorkflow, forbidden) {
+			t.Errorf("%s must not contain %q", artifactWorkflowPath, forbidden)
+		}
+	}
+
+	helperPath := filepath.Join(filepath.Dir(filepath.Dir(workflowDirectory(t))), ".github", "scripts", "transient-artifacts.mjs")
+	helper, err := os.ReadFile(helperPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", helperPath, err)
+	}
+	if !strings.Contains(string(helper), "const files = await github.paginate(github.rest.pulls.listFiles, {") {
+		t.Errorf("%s does not use GitHub pagination for PR file enumeration", helperPath)
+	}
+}
+
 func workflowDirectory(t *testing.T) string {
 	t.Helper()
 	_, sourceFile, _, ok := runtime.Caller(0)

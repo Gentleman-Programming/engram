@@ -97,6 +97,67 @@ func TestHealthReportsVersion(t *testing.T) {
 	}
 }
 
+func TestHealthReportsStoreInstanceID(t *testing.T) {
+	store := newServerTestStore(t)
+	rec := httptest.NewRecorder()
+	New(store, 0).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	var response struct {
+		InstanceID string `json:"instance_id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode health: %v", err)
+	}
+	if response.InstanceID != store.InstanceID() || response.InstanceID == "" {
+		t.Fatalf("health instance_id = %q, want %q", response.InstanceID, store.InstanceID())
+	}
+}
+
+func TestInstanceIDIsStableDistinctAndAtomic(t *testing.T) {
+	firstDir, secondDir := t.TempDir(), t.TempDir()
+	first, err := store.EnsureInstanceID(firstDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again, err := store.EnsureInstanceID(firstDir); err != nil || again != first {
+		t.Fatalf("stable identity = %q, %v; want %q", again, err, first)
+	}
+	if second, err := store.EnsureInstanceID(secondDir); err != nil || second == first {
+		t.Fatalf("distinct identity = %q, %v; want a value different from %q", second, err, first)
+	}
+	ids := make(chan string, 16)
+	errs := make(chan error, 16)
+	for range 16 {
+		go func() { id, err := store.EnsureInstanceID(firstDir); ids <- id; errs <- err }()
+	}
+	for range 16 {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+		if id := <-ids; id != first {
+			t.Fatalf("concurrent identity = %q, want %q", id, first)
+		}
+	}
+}
+
+func TestStartAcceptsOnlySameInstanceBindLoser(t *testing.T) {
+	owner := newServerTestStore(t)
+	winner := New(owner, 0)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	go func() { _ = http.Serve(ln, winner.Handler()) }()
+	t.Cleanup(func() { _ = ln.Close() })
+	if err := New(owner, port).Start(); err != nil {
+		t.Fatalf("same-instance bind loser: %v", err)
+	}
+	foreign := newServerTestStore(t)
+	if err := New(foreign, port).Start(); err == nil || !strings.Contains(err.Error(), "different or legacy") {
+		t.Fatalf("foreign-instance bind loser = %v, want ownership error", err)
+	}
+}
+
 func newServerTestStore(t *testing.T) *store.Store {
 	t.Helper()
 	cfg, err := store.DefaultConfig()

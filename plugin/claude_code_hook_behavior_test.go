@@ -41,7 +41,7 @@ type hookPayload struct {
 	SystemMessage string `json:"systemMessage"`
 }
 
-// requireHookBinaries skips only when the host cannot run the Bash hooks.
+// requireHookBinaries skips only when the host cannot run the Bash hooks from this workspace.
 // hooks.json and the PowerShell fallback still have interpreter-free backstops.
 func requireHookBinaries(t *testing.T) {
 	t.Helper()
@@ -53,6 +53,7 @@ func requireHookBinaries(t *testing.T) {
 			t.Skipf("%s is not runnable - skipping Bash hook behavior tests: %v", bin, err)
 		}
 	}
+	_ = bashScriptPath(t, filepath.Join(repoRoot(t), "plugin", "claude-code", "scripts", "_helpers.sh"))
 }
 
 // user-prompt-submit.sh hardcodes /tmp for its session markers (line 188 uses
@@ -115,7 +116,7 @@ func runHookWithStderrInDir(t *testing.T, scriptName, stdin string, env map[stri
 	t.Helper()
 	script := filepath.Join(repoRoot(t), "plugin", "claude-code", "scripts", scriptName)
 
-	cmd := exec.Command("bash", script)
+	cmd := exec.Command("bash", bashScriptPath(t, script))
 	cmd.Dir = dir
 	cmd.Stdin = strings.NewReader(stdin)
 	// Force the POSIX path: the Windows-safe branch short-circuits before the
@@ -123,7 +124,7 @@ func runHookWithStderrInDir(t *testing.T, scriptName, stdin string, env map[stri
 	cmd.Env = make([]string, 0, len(os.Environ())+len(env)+1)
 	for _, entry := range os.Environ() {
 		upper := strings.ToUpper(entry)
-		if strings.HasPrefix(upper, "ENGRAM_PORT=") || strings.HasPrefix(upper, "ENGRAM_SOCKET=") {
+		if strings.HasPrefix(upper, "ENGRAM_URL=") || strings.HasPrefix(upper, "ENGRAM_PORT=") || strings.HasPrefix(upper, "ENGRAM_SOCKET=") {
 			continue
 		}
 		// Skip any other entry the caller's env map overrides, so the
@@ -159,11 +160,11 @@ func runHookWithStderrInDir(t *testing.T, scriptName, stdin string, env map[stri
 func resolveClaudeHookURL(t *testing.T, env map[string]string) string {
 	t.Helper()
 	helper := filepath.Join(repoRoot(t), "plugin", "claude-code", "scripts", "_helpers.sh")
-	cmd := exec.Command("bash", "-c", `source "$1"; printf '%s' "$ENGRAM_URL"`, "bash", helper)
+	cmd := exec.Command("bash", "-c", `source "$1"; printf '%s' "$ENGRAM_URL"`, "bash", bashScriptPath(t, helper))
 	cmd.Env = make([]string, 0, len(os.Environ())+len(env))
 	for _, entry := range os.Environ() {
 		upper := strings.ToUpper(entry)
-		if strings.HasPrefix(upper, "ENGRAM_PORT=") || strings.HasPrefix(upper, "ENGRAM_SOCKET=") {
+		if strings.HasPrefix(upper, "ENGRAM_URL=") || strings.HasPrefix(upper, "ENGRAM_PORT=") || strings.HasPrefix(upper, "ENGRAM_SOCKET=") {
 			continue
 		}
 		cmd.Env = append(cmd.Env, entry)
@@ -178,10 +179,29 @@ func resolveClaudeHookURL(t *testing.T, env map[string]string) string {
 	return string(output)
 }
 
+func bashScriptPath(t *testing.T, path string) string {
+	t.Helper()
+	volume := filepath.VolumeName(path)
+	if len(volume) != 2 || volume[1] != ':' {
+		return path
+	}
+	remainder := strings.ReplaceAll(strings.TrimLeft(path[len(volume):], `\/`), `\`, "/")
+	for _, candidate := range []string{
+		"/" + strings.ToLower(volume[:1]) + "/" + remainder,
+		"/mnt/" + strings.ToLower(volume[:1]) + "/" + remainder,
+	} {
+		if exec.Command("bash", "-c", `[ -f "$1" ]`, "bash", candidate).Run() == nil {
+			return candidate
+		}
+	}
+	t.Skipf("bash cannot access hook script %q", path)
+	return ""
+}
+
 func normalizedClaudeHookMaxTime(t *testing.T, configured, callerDefault string) string {
 	t.Helper()
 	helper := filepath.Join(repoRoot(t), "plugin", "claude-code", "scripts", "_helpers.sh")
-	cmd := exec.Command("bash", "-c", `source "$1" "__engram_hook_default_max_time=$2"; printf '%s' "$ENGRAM_HOOK_MAX_TIME"`, "bash", helper, callerDefault)
+	cmd := exec.Command("bash", "-c", `source "$1" "__engram_hook_default_max_time=$2"; printf '%s' "$ENGRAM_HOOK_MAX_TIME"`, "bash", bashScriptPath(t, helper), callerDefault)
 	cmd.Env = make([]string, 0, len(os.Environ())+1)
 	for _, entry := range os.Environ() {
 		if !strings.HasPrefix(strings.ToUpper(entry), "ENGRAM_HOOK_MAX_TIME=") {
@@ -201,7 +221,7 @@ func normalizedClaudeHookMaxTime(t *testing.T, configured, callerDefault string)
 func resolveClaudeConfigRoot(t *testing.T, configured string) string {
 	t.Helper()
 	helper := filepath.Join(repoRoot(t), "plugin", "claude-code", "scripts", "_helpers.sh")
-	cmd := exec.Command("bash", "-c", `source "$1"; claude_config_root`, "bash", helper)
+	cmd := exec.Command("bash", "-c", `source "$1"; claude_config_root`, "bash", bashScriptPath(t, helper))
 	cmd.Dir = t.TempDir()
 	for _, entry := range os.Environ() {
 		key, _, _ := strings.Cut(entry, "=")
@@ -693,6 +713,46 @@ func TestClaudeHookWhitespacePortFallsBackToDefault(t *testing.T) {
 	}
 }
 
+func TestClaudeHookEnvironmentFiltersInheritedEngramURL(t *testing.T) {
+	t.Setenv("ENGRAM_URL", "http://127.0.0.1:1")
+	if got, want := resolveClaudeHookURL(t, map[string]string{"ENGRAM_PORT": "8123"}), "http://127.0.0.1:8123"; got != want {
+		t.Fatalf("inherited ENGRAM_URL leaked into helper: got %q, want %q", got, want)
+	}
+	if got, want := resolveClaudeHookURL(t, map[string]string{"ENGRAM_URL": "http://127.0.0.1:9999"}), "http://127.0.0.1:9999"; got != want {
+		t.Fatalf("explicit ENGRAM_URL = %q, want %q", got, want)
+	}
+}
+
+func TestCodexSessionStartWhitespaceURLUsesManagedLocalMode(t *testing.T) {
+	requireHookBinaries(t)
+	srv := healthyServer(t)
+	stubDir := writeRecordingEngramStub(t)
+	logPath := filepath.Join(t.TempDir(), "engram-invocations.log")
+	script := bashScriptPath(t, filepath.Join(repoRoot(t), "plugin", "codex", "scripts", "session-start.sh"))
+	cmd := exec.Command("bash", script)
+	cmd.Stdin = strings.NewReader(fmt.Sprintf(`{"session_id":%q,"cwd":%q}`, "codex-session", t.TempDir()))
+	for _, entry := range os.Environ() {
+		upper := strings.ToUpper(entry)
+		if strings.HasPrefix(upper, "ENGRAM_URL=") || strings.HasPrefix(upper, "ENGRAM_PORT=") || strings.HasPrefix(upper, "ENGRAM_SOCKET=") {
+			continue
+		}
+		cmd.Env = append(cmd.Env, entry)
+	}
+	cmd.Env = append(cmd.Env,
+		"ENGRAM_URL= \t ",
+		"ENGRAM_PORT="+serverPort(t, srv),
+		"PATH="+stubDir+":"+os.Getenv("PATH"),
+		"ENGRAM_TEST_ENGRAM_LOG="+logPath,
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("Codex session-start must exit successfully: %v\n%s", err, output)
+	}
+
+	if got := readEngramInvocations(t, logPath); len(got) != 1 || got[0] != "instance-id" {
+		t.Fatalf("whitespace ENGRAM_URL selected external mode; invocations = %v, want [instance-id]", got)
+	}
+}
+
 func TestClaudeHookMaxTimeNormalization(t *testing.T) {
 	for _, tt := range []struct {
 		name, configured, callerDefault, want string
@@ -759,7 +819,7 @@ func writeRecordingEngramStub(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "engram")
-	content := "#!/bin/bash\nprintf '%s\\n' \"$*\" >> \"$ENGRAM_TEST_ENGRAM_LOG\"\nexit 0\n"
+	content := "#!/bin/bash\nprintf '%s\\n' \"$*\" >> \"$ENGRAM_TEST_ENGRAM_LOG\"\nif [ \"$*\" = \"instance-id\" ]; then printf '00000000000000000000000000000000\\n'; fi\nexit 0\n"
 	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
 		t.Fatalf("write recording engram stub: %v", err)
 	}
@@ -770,7 +830,7 @@ func writeMigratingEngramStub(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "engram")
-	content := "#!/bin/bash\nprintf '%s\\n' \"$*\" >> \"$ENGRAM_TEST_ENGRAM_LOG\"\nif [ \"$*\" = \"setup claude-code --mcp-only\" ]; then\n  mkdir -p \"$(dirname \"$ENGRAM_TEST_MCP_CONFIG\")\"\n  printf '{}' > \"$ENGRAM_TEST_MCP_CONFIG\"\nfi\nexit 0\n"
+	content := "#!/bin/bash\nprintf '%s\\n' \"$*\" >> \"$ENGRAM_TEST_ENGRAM_LOG\"\nif [ \"$*\" = \"instance-id\" ]; then printf '00000000000000000000000000000000\\n'; fi\nif [ \"$*\" = \"setup claude-code --mcp-only\" ]; then\n  mkdir -p \"$(dirname \"$ENGRAM_TEST_MCP_CONFIG\")\"\n  printf '{}' > \"$ENGRAM_TEST_MCP_CONFIG\"\nfi\nexit 0\n"
 	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
 		t.Fatalf("write migrating engram stub: %v", err)
 	}
@@ -799,7 +859,7 @@ func healthyServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health" {
-			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"instance_id":"00000000000000000000000000000000"}`))
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)

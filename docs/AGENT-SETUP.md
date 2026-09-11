@@ -84,6 +84,10 @@ ENGRAM_URL=http://127.0.0.1:7437 pi
 
 `ENGRAM_URL` tells the `gentle-engram` Pi extension to use an already-running `engram serve` instance instead of auto-starting one. This is standard shell syntax: `KEY=value command`. The URL is the HTTP REST API base; it is not an MCP endpoint.
 
+### Local server ownership
+
+Loopback reachability is not an ownership boundary. Engram stores an opaque identity in each local data directory and default-managed Claude Code, Codex, Pi, and OpenCode startups only adopt a matching local server. A different or older local server without that identity is reported instead of silently sharing memory. Set an explicit `ENGRAM_URL` to opt into an external server, or use `ENGRAM_PORT` or `ENGRAM_SOCKET` to isolate local servers.
+
 Use a custom Engram binary for MCP tools and local auto-start:
 
 ```bash
