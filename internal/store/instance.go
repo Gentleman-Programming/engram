@@ -35,8 +35,8 @@ func EnsureInstanceID(dataDir string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("engram: create temporary instance identity: %w", err)
 		}
-		defer os.Remove(file.Name())
-		defer file.Close()
+		defer func() { _ = os.Remove(file.Name()) }()
+		defer func() { _ = file.Close() }()
 		if _, err := file.WriteString(id + "\n"); err != nil {
 			return "", fmt.Errorf("engram: write instance identity: %w", err)
 		}
