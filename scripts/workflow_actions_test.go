@@ -123,6 +123,7 @@ func TestPRValidationAndTransientArtifactWorkflowContracts(t *testing.T) {
 	artifactWorkflow := string(artifactWorkflowContent)
 	for _, required := range []string{
 		"pull_request_target:",
+		"types: [opened, edited, labeled, unlabeled, synchronize, reopened]",
 		"permissions:\n  contents: read\n  pull-requests: read",
 		"check-transient-artifacts:",
 		"name: Check PR Has No Transient Artifacts",
