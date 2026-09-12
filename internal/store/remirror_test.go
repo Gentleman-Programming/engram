@@ -105,6 +105,9 @@ func TestRemirrorProjectReplaysCurrentStateWithoutRewritingHistory(t *testing.T)
 		if got := scalarInt(t, s, `SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ? AND source = ?`, SyncEntityObservation, deletedSyncID, source); got != 1 {
 			t.Fatalf("tombstone mutations for %s = %d, want 1", source, got)
 		}
+		if got := scalarInt(t, s, `SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ? AND source = ? AND op = ? AND COALESCE(json_extract(payload, '$.hard_delete'), 0) = 1`, SyncEntityObservation, deletedSyncID, source, SyncOpDelete); got != 1 {
+			t.Fatalf("hard-delete tombstone mutations for %s = %d, want 1", source, got)
+		}
 	}
 	peer := newTestStore(t)
 	if err := peer.ApplyPulledMutation(DefaultSyncTargetKey, sessionMutation); err != nil {
