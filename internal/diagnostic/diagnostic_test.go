@@ -292,15 +292,15 @@ func TestSyncMutationRequiredFieldsSurfacesNonEnrolledCountFailure(t *testing.T)
 }
 
 // TestSyncMutationRequiredFieldsIgnoresBacklogWithoutCloudEnrollment proves a
-// local-only install is never reported as blocked for a non-enrolled backlog.
-// The store journals sync mutations unconditionally, so on a device that never
-// opted into cloud sync every pending mutation belongs to a non-enrolled
-// project: that is the normal steady state, not a fault.
+// local-only install is never reported as blocked for a legacy non-enrolled
+// backlog. Normal writes no longer create those rows, so the fixture seeds the
+// historical pending mutation directly.
 func TestSyncMutationRequiredFieldsIgnoresBacklogWithoutCloudEnrollment(t *testing.T) {
-	s := newDiagnosticTestStore(t)
+	s, cfg := newDiagnosticTestStoreWithConfig(t)
 	if err := s.CreateSession("manual-save-engram", "engram", "/work/engram"); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
+	seedDiagnosticPendingMutation(t, cfg.DataDir, "engram", store.SyncEntitySession, "manual-save-engram", store.SyncOpUpsert, `{"id":"manual-save-engram","project":"engram","directory":"/work/engram"}`)
 	pending, err := s.CountPendingNonEnrolledSyncMutations(store.DefaultSyncTargetKey)
 	if err != nil {
 		t.Fatalf("CountPendingNonEnrolledSyncMutations: %v", err)
@@ -363,7 +363,7 @@ func TestSyncMutationRequiredFieldsReportsCorruptSourceObservations(t *testing.T
 // project whose pending mutations cannot be delivered is reported as blocked
 // with the enrollment guidance, while the enrolled project stays silent.
 func TestSyncMutationRequiredFieldsBlocksNonEnrolledBacklogWhenCloudSyncInUse(t *testing.T) {
-	s := newDiagnosticTestStore(t)
+	s, cfg := newDiagnosticTestStoreWithConfig(t)
 	if err := s.CreateSession("manual-save-enrolled", "enrolled", "/work/enrolled"); err != nil {
 		t.Fatalf("CreateSession enrolled: %v", err)
 	}
@@ -373,6 +373,7 @@ func TestSyncMutationRequiredFieldsBlocksNonEnrolledBacklogWhenCloudSyncInUse(t 
 	if err := s.CreateSession("manual-save-local", "local", "/work/local"); err != nil {
 		t.Fatalf("CreateSession local: %v", err)
 	}
+	seedDiagnosticPendingMutation(t, cfg.DataDir, "local", store.SyncEntitySession, "manual-save-local", store.SyncOpUpsert, `{"id":"manual-save-local","project":"local","directory":"/work/local"}`)
 
 	report, err := NewRunner().RunOne(context.Background(), Scope{Store: s}, CheckSyncMutationRequiredFields)
 	if err != nil {

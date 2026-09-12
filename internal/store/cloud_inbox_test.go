@@ -152,6 +152,9 @@ func TestObservationAndRelationMutationsStillEnqueue(t *testing.T) {
 
 func TestTelemetryStillJournalsWhileProtocolRequiresSessions(t *testing.T) {
 	s := newTestStore(t)
+	if err := s.EnrollProject("protocol-project"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
 	if err := s.CreateSessionWithOwnershipMode("protocol-session", "protocol-project", "/tmp/protocol", SessionOwnershipProjectOwned); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -173,6 +176,41 @@ func TestTelemetryStillJournalsWhileProtocolRequiresSessions(t *testing.T) {
 		}
 		if state.Lifecycle != SyncLifecyclePending {
 			t.Fatalf("%s lifecycle = %q, want pending after telemetry enqueue", targetKey, state.Lifecycle)
+		}
+	}
+}
+
+func TestLocalCloudJournalWritesRequireEnrollmentAndBackfillCurrentState(t *testing.T) {
+	s := newTestStore(t)
+	const project = "enrollment-gated"
+	if err := s.CreateSession("gated-session", project, "/tmp/gated"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{SessionID: "gated-session", Type: "decision", Title: "before enrollment", Content: "local observation", Project: project, Scope: "project"}); err != nil {
+		t.Fatalf("add observation before enrollment: %v", err)
+	}
+	if _, err := s.AddPrompt(AddPromptParams{SessionID: "gated-session", Content: "local prompt", Project: project}); err != nil {
+		t.Fatalf("add prompt before enrollment: %v", err)
+	}
+	var before int
+	if err := s.db.QueryRow(`SELECT count(*) FROM sync_mutations WHERE project = ? AND acked_at IS NULL`, project).Scan(&before); err != nil || before != 0 {
+		t.Fatalf("pending mutations before enrollment = %d (err %v), want 0", before, err)
+	}
+
+	if err := s.EnrollProject(project); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{SessionID: "gated-session", Type: "decision", Title: "after enrollment", Content: "enrolled observation", Project: project, Scope: "project"}); err != nil {
+		t.Fatalf("add observation after enrollment: %v", err)
+	}
+	if _, err := s.AddPrompt(AddPromptParams{SessionID: "gated-session", Content: "enrolled prompt", Project: project}); err != nil {
+		t.Fatalf("add prompt after enrollment: %v", err)
+	}
+
+	for entity, want := range map[string]int{SyncEntitySession: 1, SyncEntityObservation: 2, SyncEntityPrompt: 2} {
+		var got int
+		if err := s.db.QueryRow(`SELECT count(*) FROM sync_mutations WHERE project = ? AND entity = ? AND acked_at IS NULL`, project, entity).Scan(&got); err != nil || got != want {
+			t.Fatalf("pending %s mutations = %d (err %v), want %d", entity, got, err, want)
 		}
 	}
 }

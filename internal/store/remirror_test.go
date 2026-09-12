@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"strings"
 	"testing"
 )
@@ -16,8 +17,8 @@ func TestRemirrorProjectReplaysCurrentStateWithoutRewritingHistory(t *testing.T)
 	}
 	_, sourceID := addTestObsSession(t, s, "remirror-session", "source", "decision", project, "project")
 	_, targetID := addTestObsSession(t, s, "remirror-session", "target", "decision", project, "project")
-	deletedID, _ := addTestObsSession(t, s, "remirror-session", "deleted", "decision", project, "project")
-	if err := s.DeleteObservation(deletedID, false); err != nil {
+	deletedID, deletedSyncID := addTestObsSession(t, s, "remirror-session", "deleted", "decision", project, "project")
+	if err := s.DeleteObservation(deletedID, true); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.AddPrompt(AddPromptParams{SessionID: "remirror-session", Content: "live", Project: project}); err != nil {
@@ -89,6 +90,23 @@ func TestRemirrorProjectReplaysCurrentStateWithoutRewritingHistory(t *testing.T)
 	for entity, count := range want {
 		if count != 0 {
 			t.Fatalf("missing remirror %s mutations: %+v", entity, want)
+		}
+	}
+	runTombstoneBackfill := func(source string) {
+		t.Helper()
+		if err := s.withTx(func(tx *sql.Tx) error { return s.backfillSyncDeleteTombstonesTx(tx, project, source) }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runTombstoneBackfill("remirror:same")
+	runTombstoneBackfill("remirror:same")
+	runTombstoneBackfill("remirror:new")
+	for _, source := range []string{"remirror:same", "remirror:new"} {
+		if got := scalarInt(t, s, `SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ? AND source = ?`, SyncEntityObservation, deletedSyncID, source); got != 1 {
+			t.Fatalf("tombstone mutations for %s = %d, want 1", source, got)
+		}
+		if got := scalarInt(t, s, `SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ? AND source = ? AND op = ? AND COALESCE(json_extract(payload, '$.hard_delete'), 0) = 1`, SyncEntityObservation, deletedSyncID, source, SyncOpDelete); got != 1 {
+			t.Fatalf("hard-delete tombstone mutations for %s = %d, want 1", source, got)
 		}
 	}
 	peer := newTestStore(t)

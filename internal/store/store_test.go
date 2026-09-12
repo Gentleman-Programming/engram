@@ -44,6 +44,13 @@ func newTestStore(t *testing.T) *Store {
 	return s
 }
 
+func enrollTestProject(t *testing.T, s *Store, project string) {
+	t.Helper()
+	if err := s.EnrollProject(project); err != nil {
+		t.Fatalf("enroll %q: %v", project, err)
+	}
+}
+
 func TestStoreDataDir(t *testing.T) {
 	cfg := mustDefaultConfig(t)
 	cfg.DataDir = t.TempDir()
@@ -254,6 +261,7 @@ func TestTruncateContentPreservesUTF8BytePrefix(t *testing.T) {
 
 func TestProjectIdentityAdmissionAllowsOwnedWritesAndRejectsReassignment(t *testing.T) {
 	s := newTestStore(t)
+	enrollTestProject(t, s, "project")
 	if err := s.CreateSession("owned-session", "Project", "/tmp"); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -397,9 +405,27 @@ func TestRescueNullProjectOwnershipRequiresExplicitScope(t *testing.T) {
 	}
 }
 
+func TestRescueNullProjectOwnershipDoesNotReportSuppressedUnenrolledJournal(t *testing.T) {
+	type legacySession struct{ id, project string }
+	s := newTestStoreWithNullableLegacySessions(t, legacySession{"legacy-session", "<NULL>"})
+
+	result, err := s.RescueNullProjectOwnership(ProjectRescueParams{TargetProject: "target", SessionIDs: []string{"legacy-session"}})
+	if err != nil {
+		t.Fatalf("RescueNullProjectOwnership: %v", err)
+	}
+	if result.Journaled {
+		t.Fatalf("rescue result = %#v, want Journaled false when enrollment suppresses the local mutation", result)
+	}
+	var mutations int
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE project = ? AND acked_at IS NULL`, "target").Scan(&mutations); err != nil || mutations != 0 {
+		t.Fatalf("pending target mutations = %d, err=%v, want 0", mutations, err)
+	}
+}
+
 func TestRescueNullProjectOwnershipRescuesLegacyNullableSessionAndJournalsOnce(t *testing.T) {
 	type legacySession struct{ id, project string }
 	s := newTestStoreWithNullableLegacySessions(t, legacySession{"legacy-session", "<NULL>"})
+	enrollTestProject(t, s, "target")
 
 	result, err := s.RescueNullProjectOwnership(ProjectRescueParams{TargetProject: "target", SessionIDs: []string{"legacy-session"}})
 	if err != nil {
@@ -432,6 +458,7 @@ func TestRescueNullProjectOwnershipStampsMissingSameProjectOwnershipMode(t *test
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newTestStore(t)
+			enrollTestProject(t, s, "target")
 			if err := s.CreateSessionWithOwnershipMode(tc.sessionID, "target", "/tmp", SessionOwnershipShared); err != nil {
 				t.Fatalf("CreateSessionWithOwnershipMode: %v", err)
 			}
@@ -617,6 +644,7 @@ func TestAddObservationAdoptsUnownedLegacySessionProject(t *testing.T) {
 				legacySession{"null-session", "<NULL>"},
 				legacySession{"blank-session", " "},
 			)
+			enrollTestProject(t, s, "target")
 
 			id, err := s.AddObservation(AddObservationParams{SessionID: tc.sessionID, Type: "note", Title: "upgraded", Content: "content", Project: "target"})
 			if err != nil {
@@ -812,6 +840,7 @@ func TestRescueNullProjectOwnershipRescuesOnlyNullRecordsAndJournalsOnce(t *test
 		}
 	}
 
+	enrollTestProject(t, s, "target")
 	params := ProjectRescueParams{TargetProject: "target", ObservationIDs: []int64{observationID, ownedID}, PromptIDs: []int64{promptID}}
 	result, err := s.RescueNullProjectOwnership(params)
 	if err != nil {
@@ -876,6 +905,7 @@ func TestRescueNullProjectOwnershipReplacesStaleAcknowledgedJournal(t *testing.T
 	if _, err := s.DB().Exec(`UPDATE sync_mutations SET project = 'stale', payload = '{"project":"stale"}', acked_at = datetime('now') WHERE entity = ? AND entity_key = ?`, SyncEntityObservation, syncID); err != nil {
 		t.Fatalf("seed stale journal: %v", err)
 	}
+	enrollTestProject(t, s, "target")
 	params := ProjectRescueParams{TargetProject: "target", ObservationIDs: []int64{id}}
 	result, err := s.RescueNullProjectOwnership(params)
 	if err != nil || !result.Journaled {
@@ -897,6 +927,7 @@ func TestRescueNullProjectOwnershipReplacesStaleAcknowledgedJournal(t *testing.T
 
 func TestRescueNullProjectOwnershipEnqueuesDeleteDespitePendingOppositeOperation(t *testing.T) {
 	s := newTestStore(t)
+	enrollTestProject(t, s, "legacy")
 	if err := s.CreateSession("legacy-session", "legacy", "/tmp"); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -918,6 +949,7 @@ func TestRescueNullProjectOwnershipEnqueuesDeleteDespitePendingOppositeOperation
 		t.Fatalf("seed pending opposite mutation: %v", err)
 	}
 
+	enrollTestProject(t, s, "target")
 	params := ProjectRescueParams{TargetProject: "target", ObservationIDs: []int64{id}}
 	assertCanonicalDelete := func() {
 		t.Helper()
@@ -941,6 +973,7 @@ func TestRescueNullProjectOwnershipEnqueuesDeleteDespitePendingOppositeOperation
 
 func TestRescueNullProjectOwnershipRollsBackWhenJournalEnqueueFails(t *testing.T) {
 	s := newTestStore(t)
+	enrollTestProject(t, s, "target")
 	if err := s.CreateSession("legacy-session", "legacy", "/tmp"); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -1012,6 +1045,7 @@ func assertNoBlankOwnedMutations(t *testing.T, s *Store) {
 func TestRescueNullProjectOwnershipMovesDependentSessionOwnershipAtomically(t *testing.T) {
 	type legacySession struct{ id, project string }
 	s := newTestStoreWithNullableLegacySessions(t, legacySession{"legacy-session", "<NULL>"})
+	enrollTestProject(t, s, "target")
 	observationID := seedUnownedObservation(t, s, "legacy-session", "obs-legacy", "legacy")
 
 	result, err := s.RescueNullProjectOwnership(ProjectRescueParams{TargetProject: "target", ObservationIDs: []int64{observationID}})
@@ -4531,6 +4565,7 @@ func TestApplyPulledSessionUpsertTombstoneRemovesSessionAndPrompts(t *testing.T)
 
 func TestSessionSyncPayloadPreservesStartedAtOnApply(t *testing.T) {
 	s := newTestStore(t)
+	enrollTestProject(t, s, "engram")
 
 	if err := s.CreateSession("local-session", "engram", "/tmp/engram"); err != nil {
 		t.Fatalf("create session: %v", err)
@@ -4766,6 +4801,7 @@ func TestApplyPulledPromptUpsertUpdatesCreatedAtOnExistingPrompt(t *testing.T) {
 
 func TestDeletePromptEnqueuesDeleteMutationAndTombstone(t *testing.T) {
 	s := newTestStore(t)
+	enrollTestProject(t, s, "engram")
 	if err := s.CreateSession("s-del-prompt", "engram", "/tmp/engram"); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -4801,6 +4837,7 @@ func TestDeletePromptEnqueuesDeleteMutationAndTombstone(t *testing.T) {
 
 func TestDeleteObservationHardDeleteEnqueuesProjectScopedMutationMetadata(t *testing.T) {
 	s := newTestStore(t)
+	enrollTestProject(t, s, "engram")
 	if err := s.CreateSession("s-del-obs", "engram", "/tmp/engram"); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -4847,6 +4884,7 @@ func TestDeleteObservationHardDeleteEnqueuesProjectScopedMutationMetadata(t *tes
 
 func TestDeleteObservationHardDeleteDerivesProjectFromSessionWhenEntityProjectEmpty(t *testing.T) {
 	s := newTestStore(t)
+	enrollTestProject(t, s, "engram")
 	if err := s.CreateSession("s-del-obs-empty", "engram", "/tmp/engram"); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -6953,6 +6991,7 @@ func TestSessionIdentityPreservesNonblankWhitespace(t *testing.T) {
 
 	t.Run("creation and journal", func(t *testing.T) {
 		s := newTestStore(t)
+		enrollTestProject(t, s, "engram")
 		if err := s.CreateSession(id, "engram", "/tmp/engram"); err != nil {
 			t.Fatalf("CreateSession: %v", err)
 		}
@@ -6999,6 +7038,7 @@ func TestSessionIdentityPreservesNonblankWhitespace(t *testing.T) {
 
 func TestCreateSessionMutationUsesPersistedCanonicalData(t *testing.T) {
 	s := newTestStore(t)
+	enrollTestProject(t, s, "engram")
 	if err := s.CreateSession("canonical-session", "engram", "/canonical"); err != nil {
 		t.Fatalf("initial CreateSession: %v", err)
 	}
@@ -7020,6 +7060,7 @@ func TestCreateSessionMutationUsesPersistedCanonicalData(t *testing.T) {
 
 func TestStartSessionCreatesAndIdempotentlyStartsActiveSession(t *testing.T) {
 	s := newTestStore(t)
+	enrollTestProject(t, s, "engram")
 
 	if err := s.StartSession("strict-active", "engram", "/original"); err != nil {
 		t.Fatalf("initial StartSession: %v", err)
@@ -7434,6 +7475,7 @@ func TestApplyPulledSessionMutationDoesNotNormalizeOpaqueIdentity(t *testing.T) 
 
 func TestBackfillSkipsInvalidSourceAndBackfillsValidSession(t *testing.T) {
 	s := newTestStore(t)
+	enrollTestProject(t, s, "engram")
 	if _, err := s.db.Exec(`INSERT INTO sessions (id, project, directory) VALUES ('', 'engram', '/tmp/engram')`); err != nil {
 		t.Fatalf("seed invalid session: %v", err)
 	}
@@ -7566,6 +7608,7 @@ func TestBackfillSessionSyncMutationsSkipsBlankSourceRows(t *testing.T) {
 	for _, tc := range blankSessionIDCases {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newTestStore(t)
+			enrollTestProject(t, s, "engram")
 			if _, err := s.DB().Exec(`INSERT INTO sessions (id, project, directory) VALUES (?, 'engram', '/tmp/blank')`, tc.id); err != nil {
 				t.Fatalf("seed blank session: %v", err)
 			}
@@ -7620,6 +7663,7 @@ func TestSessionIdentityPreservesWhitespacePaddedIdentities(t *testing.T) {
 	for _, id := range []string{"\tsession", "session\n", " \r session \v ", " session "} {
 		t.Run(fmt.Sprintf("%q", id), func(t *testing.T) {
 			s := newTestStore(t)
+			enrollTestProject(t, s, "engram")
 			if err := s.CreateSession(id, "engram", "/tmp"); err != nil {
 				t.Fatalf("CreateSession: %v", err)
 			}
@@ -7882,6 +7926,141 @@ func TestEnrollAndLookupProjectNormalization(t *testing.T) {
 	if enrolled {
 		t.Fatal("expected project to be unenrolled after normalized removal")
 	}
+}
+
+func TestDeleteSessionNormalizesPromptTombstoneProjectForReenrollment(t *testing.T) {
+	const canonicalProject = "legacy_project"
+	const sessionID = "legacy-padded-session"
+	const promptSyncID = "prompt-legacy-padded"
+
+	s := newTestStore(t)
+	if _, err := s.db.Exec(`INSERT INTO sessions (id, project, directory) VALUES (?, ?, ?)`, sessionID, "  LEGACY__PROJECT  ", "/tmp/legacy"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO user_prompts (sync_id, session_id, content, project) VALUES (?, ?, ?, ?)`, promptSyncID, sessionID, "legacy prompt", " \t "); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnrollProject(canonicalProject); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteSession(sessionID); err != nil {
+		t.Fatal(err)
+	}
+
+	var project, op string
+	if err := s.db.QueryRow(`SELECT project, op FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntityPrompt, promptSyncID).Scan(&project, &op); err != nil {
+		t.Fatalf("find re-enrolled prompt delete: %v", err)
+	}
+	if project != canonicalProject || op != SyncOpDelete {
+		t.Fatalf("re-enrolled prompt mutation = project %q op %q, want project %q op %q", project, op, canonicalProject, SyncOpDelete)
+	}
+	if got := scalarInt(t, s, `SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND op = ?`, SyncEntitySession, SyncOpDelete); got != 1 {
+		t.Fatalf("direct session deletes = %d, want 1", got)
+	}
+}
+
+func TestUnenrolledHardDeletesReplayAfterReenrollment(t *testing.T) {
+	t.Run("observation", func(t *testing.T) {
+		const project = "unenrolled-hard-observation"
+		s := newTestStore(t)
+		if err := s.CreateSession("unenrolled-hard-observation-session", project, "/tmp/unenrolled-hard-observation"); err != nil {
+			t.Fatal(err)
+		}
+		observationID, err := s.AddObservation(AddObservationParams{
+			SessionID: "unenrolled-hard-observation-session",
+			Type:      "decision",
+			Title:     "delete while unenrolled",
+			Content:   "keep delete intent",
+			Project:   project,
+			Scope:     "project",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var syncID string
+		if err := s.db.QueryRow(`SELECT sync_id FROM observations WHERE id = ?`, observationID).Scan(&syncID); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.DeleteObservation(observationID, true); err != nil {
+			t.Fatal(err)
+		}
+		if got := scalarInt(t, s, `SELECT COUNT(*) FROM sync_mutations`); got != 0 {
+			t.Fatalf("unenrolled hard delete wrote %d sync mutations, want 0", got)
+		}
+
+		if err := s.EnrollProject(project); err != nil {
+			t.Fatal(err)
+		}
+		mutations, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(mutations) != 2 || mutations[0].Entity != SyncEntitySession || mutations[0].Op != SyncOpUpsert || mutations[1].Entity != SyncEntityObservation || mutations[1].EntityKey != syncID || mutations[1].Op != SyncOpDelete {
+			t.Fatalf("re-enrollment mutations = %+v, want session upsert then observation delete", mutations)
+		}
+		firstDeleteSeq := mutations[1].Seq
+		if err := s.AckSyncMutations(DefaultSyncTargetKey, firstDeleteSeq); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.ApplyPulledMutation(DefaultSyncTargetKey, SyncMutation{Seq: 1, Entity: SyncEntityObservation, EntityKey: syncID, Op: SyncOpUpsert, Payload: fmt.Sprintf(`{"sync_id":%q,"session_id":"unenrolled-hard-observation-session","type":"decision","title":"recreated","content":"body","project":%q,"scope":"project"}`, syncID, project)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.UnenrollProject(project); err != nil {
+			t.Fatal(err)
+		}
+		recreated, err := s.GetObservationBySyncID(syncID)
+		if err != nil || s.DeleteObservation(recreated.ID, true) != nil {
+			t.Fatalf("delete reused observation: %+v, %v", recreated, err)
+		}
+		if err := s.EnrollProject(project); err != nil {
+			t.Fatal(err)
+		}
+		secondDeleteSeq := scalarInt(t, s, `SELECT MAX(seq) FROM sync_mutations WHERE entity = ? AND entity_key = ? AND op = ?`, SyncEntityObservation, syncID, SyncOpDelete)
+		if int64(secondDeleteSeq) <= firstDeleteSeq {
+			t.Fatalf("reused delete seq = %d, want > %d", secondDeleteSeq, firstDeleteSeq)
+		}
+		beforeRepeat := scalarInt(t, s, `SELECT COUNT(*) FROM sync_mutations`)
+		if err := s.withTx(func(tx *sql.Tx) error { return s.backfillProjectSyncMutationsTx(tx, project) }); err != nil {
+			t.Fatal(err)
+		}
+		if got := scalarInt(t, s, `SELECT COUNT(*) FROM sync_mutations`); got != beforeRepeat {
+			t.Fatalf("repeated backfill wrote duplicate mutations: got %d, want %d", got, beforeRepeat)
+		}
+	})
+
+	t.Run("session and prompts", func(t *testing.T) {
+		const project = "unenrolled-hard-session"
+		const sessionID = "unenrolled-hard-session-id"
+		s := newTestStore(t)
+		if err := s.CreateSession(sessionID, project, "/tmp/unenrolled-hard-session"); err != nil {
+			t.Fatal(err)
+		}
+		promptID, err := s.AddPrompt(AddPromptParams{SessionID: sessionID, Content: "delete with session", Project: project})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var promptSyncID string
+		if err := s.db.QueryRow(`SELECT sync_id FROM user_prompts WHERE id = ?`, promptID).Scan(&promptSyncID); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.DeleteSession(sessionID); err != nil {
+			t.Fatal(err)
+		}
+		if got := scalarInt(t, s, `SELECT COUNT(*) FROM sync_mutations`); got != 0 {
+			t.Fatalf("unenrolled session delete wrote %d sync mutations, want 0", got)
+		}
+
+		if err := s.EnrollProject(project); err != nil {
+			t.Fatal(err)
+		}
+		mutations, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(mutations) != 2 || mutations[0].Entity != SyncEntityPrompt || mutations[0].EntityKey != promptSyncID || mutations[0].Op != SyncOpDelete || mutations[1].Entity != SyncEntitySession || mutations[1].EntityKey != sessionID || mutations[1].Op != SyncOpDelete {
+			t.Fatalf("re-enrollment mutations = %+v, want prompt delete then session delete", mutations)
+		}
+	})
 }
 
 func TestEnrollProjectBackfillsHistoricalMutations(t *testing.T) {
@@ -8830,6 +9009,7 @@ func TestExtractProjectFromPayloadWithoutProjectField(t *testing.T) {
 
 func TestEnqueueSyncMutationPopulatesProjectFromSessionPayload(t *testing.T) {
 	s := newTestStore(t)
+	enrollTestProject(t, s, "enqueued-project")
 	if err := s.CreateSession("enq-session", "enqueued-project", "/tmp"); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -8850,6 +9030,7 @@ func TestEnqueueSyncMutationPopulatesProjectFromSessionPayload(t *testing.T) {
 
 func TestEnqueueSyncMutationPopulatesProjectFromObservationPayload(t *testing.T) {
 	s := newTestStore(t)
+	enrollTestProject(t, s, "obs-proj")
 	if err := s.CreateSession("obs-enq", "obs-proj", "/tmp"); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -8881,6 +9062,7 @@ func TestEnqueueSyncMutationPopulatesProjectFromObservationPayload(t *testing.T)
 
 func TestEnqueueSyncMutationPopulatesProjectFromPromptPayload(t *testing.T) {
 	s := newTestStore(t)
+	enrollTestProject(t, s, "prompt-proj")
 	if err := s.CreateSession("prompt-enq", "prompt-proj", "/tmp"); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -8909,6 +9091,7 @@ func TestEnqueueSyncMutationPopulatesProjectFromPromptPayload(t *testing.T) {
 
 func TestEnqueueSyncMutationUsesProjectScopedTargetKey(t *testing.T) {
 	s := newTestStore(t)
+	enrollTestProject(t, s, "target-proj")
 	if err := s.CreateSession("target-session", "target-proj", "/tmp"); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -8989,11 +9172,11 @@ func TestListPendingReturnsNoMutationsWhenNoneEnrolled(t *testing.T) {
 func TestSkipAckNonEnrolledMutationsBasic(t *testing.T) {
 	s := newTestStore(t)
 
-	if err := s.CreateSession("skip-session", "skip-proj", "/tmp"); err != nil {
-		t.Fatalf("create session: %v", err)
+	if _, err := s.DB().Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`, DefaultSyncTargetKey, SyncEntitySession, "skip-session", SyncOpUpsert, `{"id":"skip-session","project":"skip-proj"}`, SyncSourceLocal, "skip-proj"); err != nil {
+		t.Fatalf("seed non-enrolled mutation: %v", err)
 	}
 
-	// Do NOT enroll "skip-proj" → mutations should be skip-acked.
+	// Do NOT enroll "skip-proj" → the legacy pending mutation is skip-acked.
 	skipped, err := s.SkipAckNonEnrolledMutations(DefaultSyncTargetKey)
 	if err != nil {
 		t.Fatalf("skip-ack: %v", err)
@@ -9022,8 +9205,8 @@ func TestSkipAckPreservesEnrolledProjectMutations(t *testing.T) {
 	if err := s.CreateSession("s-enrolled", "enrolled", "/tmp"); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	if err := s.CreateSession("s-not-enrolled", "not-enrolled", "/tmp"); err != nil {
-		t.Fatalf("create session: %v", err)
+	if _, err := s.DB().Exec(`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`, DefaultSyncTargetKey, SyncEntitySession, "s-not-enrolled", SyncOpUpsert, `{"id":"s-not-enrolled","project":"not-enrolled"}`, SyncSourceLocal, "not-enrolled"); err != nil {
+		t.Fatalf("seed non-enrolled mutation: %v", err)
 	}
 
 	// Count total pending before skip-ack.
@@ -10937,6 +11120,7 @@ func TestRepairObservationMutationTitles(t *testing.T) {
 	seed := func(t *testing.T, content string, mutate func(map[string]json.RawMessage)) (*Store, Observation, SyncMutation, string) {
 		t.Helper()
 		s := newTestStore(t)
+		enrollTestProject(t, s, "project-a")
 		if err := s.CreateSession("title-repair", "project-a", "/work/project-a"); err != nil {
 			t.Fatalf("create session: %v", err)
 		}
@@ -11619,6 +11803,7 @@ func TestListDiagnosticObservationRequiredFieldsHandlesLegacyNulls(t *testing.T)
 
 func TestDiagnosticObservationRequiredFieldsAndTitleRepair(t *testing.T) {
 	s := newTestStore(t)
+	enrollTestProject(t, s, "project-a")
 	if err := s.CreateSession("observation-diagnostic", "project-a", "/work/project-a"); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -11718,6 +11903,7 @@ func TestDiagnosticObservationRequiredFieldsAndTitleRepair(t *testing.T) {
 
 func TestRepairObservationSourceTitlesRollsBackWhenCanonicalMutationFails(t *testing.T) {
 	s := newTestStore(t)
+	enrollTestProject(t, s, "project-a")
 	if err := s.CreateSession("source-title-rollback", "project-a", "/work/project-a"); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -11759,6 +11945,7 @@ func TestRepairObservationSourceTitlesReconcilesPendingMutations(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newTestStore(t)
+			enrollTestProject(t, s, "project-a")
 			if err := s.CreateSession("source-title-pending", "project-a", "/work/project-a"); err != nil {
 				t.Fatalf("CreateSession: %v", err)
 			}
@@ -14203,6 +14390,7 @@ func TestAddObservationRejectsEmptyTitle(t *testing.T) {
 // title whose private tags collapse into the redaction marker.
 func TestAddObservationAcceptsValidTitle(t *testing.T) {
 	s := newTestStore(t)
+	enrollTestProject(t, s, "engram")
 	if err := s.CreateSession("s-title-ok", "engram", "/tmp/engram"); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -14353,6 +14541,7 @@ func TestUpdateObservationRejectsBlankTitleWithoutSideEffects(t *testing.T) {
 
 func TestUpdateObservationAcceptsPrivateTagOnlyTitle(t *testing.T) {
 	s := newTestStore(t)
+	enrollTestProject(t, s, "engram")
 	if err := s.CreateSession("s-update-redaction", "engram", t.TempDir()); err != nil {
 		t.Fatalf("create session: %v", err)
 	}

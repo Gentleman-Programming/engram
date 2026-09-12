@@ -4649,6 +4649,9 @@ func TestCloudSyncPreservesPiPromptIdentityUnderProjectScope(t *testing.T) {
 	otherSession := "manual-save-" + otherProject
 
 	srcStore := newTestStore(t)
+	if err := srcStore.EnrollProject(targetProject); err != nil {
+		t.Fatalf("enroll target project: %v", err)
+	}
 	if err := srcStore.CreateSession(targetSession, targetProject, "/tmp/"+targetProject); err != nil {
 		t.Fatalf("create target session: %v", err)
 	}
@@ -4733,10 +4736,7 @@ func TestCloudSyncPreservesPiPromptIdentityUnderProjectScope(t *testing.T) {
 		}
 	}
 
-	// Push the enrolled project to the cloud and pull it into a clean store.
-	if err := srcStore.EnrollProject(targetProject); err != nil {
-		t.Fatalf("enroll src project: %v", err)
-	}
+	// Push the target project to the cloud and pull it into a clean store.
 	transport := newFakeCloudTransport()
 	exportResult, err := NewCloudWithTransport(srcStore, transport, targetProject).Export("alice", targetProject)
 	if err != nil {

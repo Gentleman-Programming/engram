@@ -723,6 +723,9 @@ func TestHandleRescueProjectOwnershipRescuesNullOwnershipAndReportsLocalJournal(
 	const token = "rescue-token"
 	t.Setenv("ENGRAM_HTTP_TOKEN", token)
 	st := newServerTestStore(t)
+	if err := st.EnrollProject("target"); err != nil {
+		t.Fatalf("enroll target project: %v", err)
+	}
 	if err := st.CreateSession("legacy-session", "legacy", "/tmp"); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -859,6 +862,9 @@ func TestHandleRescueProjectOwnershipNotifiesForMissingJournalWithoutRescue(t *t
 	const token = "rescue-token"
 	t.Setenv("ENGRAM_HTTP_TOKEN", token)
 	st := newServerTestStore(t)
+	if err := st.EnrollProject("target"); err != nil {
+		t.Fatalf("enroll target project: %v", err)
+	}
 	if err := st.CreateSession("owned-session", "target", "/tmp"); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
