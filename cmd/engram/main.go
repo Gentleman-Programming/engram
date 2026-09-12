@@ -123,6 +123,9 @@ var (
 		return sy.Status()
 	}
 	syncImport = func(sy *engramsync.Syncer) (*engramsync.ImportResult, error) { return sy.Import() }
+	syncImportWithProgress = func(sy *engramsync.Syncer, report func(engramsync.ImportProgress)) (*engramsync.ImportResult, error) {
+		return sy.ImportWithProgress(report)
+	}
 	syncExport = func(sy *engramsync.Syncer, createdBy, project string) (*engramsync.SyncResult, error) {
 		return sy.Export(createdBy, project)
 	}
@@ -1785,6 +1788,38 @@ func cmdImport(cfg store.Config) {
 	fmt.Printf("  Prompts:      %d\n", result.PromptsImported)
 }
 
+const maxCloudImportProgressUpdates = 10
+
+type cloudImportProgressRenderer struct {
+	initialPending int
+	interval       int
+}
+
+func (r *cloudImportProgressRenderer) Render(progress engramsync.ImportProgress) {
+	if r.initialPending == 0 && r.interval == 0 {
+		r.initialPending = progress.PendingChunks
+		r.interval = 1
+		if r.initialPending > maxCloudImportProgressUpdates {
+			r.interval = (r.initialPending + maxCloudImportProgressUpdates - 1) / maxCloudImportProgressUpdates
+		}
+		printCloudImportProgress(progress)
+		return
+	}
+	if progress.PendingChunks == 0 {
+		printCloudImportProgress(progress)
+		return
+	}
+	completed := r.initialPending - progress.PendingChunks
+	if completed > 0 && completed%r.interval == 0 {
+		printCloudImportProgress(progress)
+	}
+}
+
+func printCloudImportProgress(progress engramsync.ImportProgress) {
+	fmt.Printf("Cloud import progress: local=%d remote=%d pending=%d progress=%d%%\n",
+		progress.LocalChunks, progress.RemoteChunks, progress.PendingChunks, progress.Percentage)
+}
+
 func cmdSync(cfg store.Config) {
 	// Parse flags
 	doImport := false
@@ -1934,7 +1969,13 @@ func cmdSync(cfg store.Config) {
 	}
 
 	if doImport {
-		result, err := syncImport(sy)
+		var result *engramsync.ImportResult
+		if cloudEnabled {
+			renderer := &cloudImportProgressRenderer{}
+			result, err = syncImportWithProgress(sy, renderer.Render)
+		} else {
+			result, err = syncImport(sy)
+		}
 		if err != nil {
 			if cloudEnabled {
 				markCloudSyncFailure(s, cloudTargetKey, err)

@@ -151,7 +151,7 @@ untracked, and latest committed changes compared with `HEAD~`.
 | `status:blocked` | Blocked by another issue or external dependency |
 | `status:stale` | No activity for 30 days — auto-applied by stale bot |
 | `status:wontfix` | Closed without implementation — applied to stale, rejected, or duplicate items |
-| `status:possible-duplicate` | Potential duplicate under evaluation |
+| `status:possible-duplicate` | Maintainer-owned lifecycle state for a potential duplicate under evaluation |
 
 ### Resolution Labels (set after closure)
 
@@ -159,7 +159,7 @@ untracked, and latest committed changes compared with `HEAD~`.
 |-------|---------|
 | `resolution:duplicate` | Confirmed duplicate after closure |
 
-Replace the current `status:*` label with `status:possible-duplicate` while evaluating a report. After confirming and closing the duplicate, replace `status:possible-duplicate` with `status:wontfix` and apply `resolution:duplicate`.
+Duplicate lifecycle transitions are maintainer-owned. While evaluating a report, a maintainer may replace the current `status:*` label with `status:possible-duplicate`. After confirming and closing the duplicate, replace `status:possible-duplicate` with `status:wontfix` and apply `resolution:duplicate`.
 
 ### Priority Labels (set by maintainers)
 
@@ -181,12 +181,13 @@ Replace the current `status:*` label with `status:possible-duplicate` while eval
 
 ### Namespace Contract
 
-All label namespaces are owned by maintainers. Their cardinality depends on the GitHub surface:
+All label namespaces are governed by maintainers. Automation may apply only its documented evidence signals; cardinality depends on the GitHub surface:
 
 | Namespace | Issues | Pull requests |
 |-----------|--------|---------------|
 | `type:*` | Exactly one | Exactly one |
 | `status:*` | Exactly one | At most one |
+| `triage:*` | At most one | Not applicable |
 | `priority:*` | At most one | Not applicable |
 | `resolution:*` | At most one | Not applicable |
 | `effort:*` | Multiple allowed | Not applicable |
@@ -223,14 +224,17 @@ most recent GitHub matches; it is not an exhaustive repository search.
 - When a plausible duplicate is found, the bot adds the
   `triage:possible-duplicate` label and posts **one** anchored comment listing
   up to three candidate issues with their evidence. Closed candidates are
-  marked as such.
-- **Reject a suggestion**: remove the `triage:possible-duplicate` label. The
-  bot will not re-suggest the same candidates — it only reports again when a
-  new candidate enters the displayed top-three set after an edit.
-- **Confirm a duplicate**: close the issue as a duplicate of the candidate, as
-  part of normal maintainer triage.
-- If edits make the candidates disappear, the bot removes the label and
-  updates its own comment to say so.
+  marked as such. `triage:possible-duplicate` is an automated evidence and
+  suggestion signal, not a lifecycle decision.
+- **Reject a suggestion**: remove the `triage:possible-duplicate` label. This
+  leaves the current `status:*` label unchanged. The bot will not re-suggest
+  the same candidates — it only reports again when a new candidate enters the
+  displayed top-three set after an edit.
+- **Confirm a duplicate**: a maintainer owns the lifecycle decision and, after
+  closure, applies `status:wontfix` and `resolution:duplicate`.
+- If edits make the candidates disappear, the bot removes only the
+  `triage:possible-duplicate` label and updates its own comment to say so; the
+  ordinary `status:*` label remains unchanged.
 - The bot never closes, edits, or consolidates issues by itself, and it never
   sets `status:*` labels (those stay maintainer-owned).
 

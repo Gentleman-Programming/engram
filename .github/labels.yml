@@ -115,6 +115,7 @@
 - name: "triage:possible-duplicate"
   color: "d4c5f9"
   description: "Possible duplicate — set by triage bot, remove to reject"
+  policy: { namespace: triage, owner: maintainers, cardinality: optional-singleton, applies_to: [issue] }
 
 # --- Pull request size exceptions (set by maintainers) ---
 - name: "size:exception"
