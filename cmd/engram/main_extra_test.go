@@ -4874,3 +4874,62 @@ func TestCmdSyncCloudNoOpImportRendersInitialAndFinalProgress(t *testing.T) {
 		t.Fatalf("final no-op progress must precede the existing summary: %q", stdout)
 	}
 }
+
+// TestCmdSyncCloudImportPrintsSkippedRelationWarnings verifies that relation
+// upserts skipped for permanently missing endpoints surface as visible CLI
+// warnings (issue #1135) instead of dying silently in the deferred queue.
+func TestCmdSyncCloudImportPrintsSkippedRelationWarnings(t *testing.T) {
+	stubExitWithPanic(t)
+	stubRuntimeHooks(t)
+
+	originalSyncImport := syncImport
+	originalSyncImportWithProgress := syncImportWithProgress
+	originalSyncStatus := syncStatus
+	t.Cleanup(func() {
+		syncImport = originalSyncImport
+		syncImportWithProgress = originalSyncImportWithProgress
+		syncStatus = originalSyncStatus
+	})
+
+	workDir := t.TempDir()
+	withCwd(t, workDir)
+	cfg := testConfig(t)
+
+	t.Setenv("ENGRAM_CLOUD_SERVER", "https://cloud.example.test")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "token-abc")
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	if err := s.EnrollProject("proj-a"); err != nil {
+		_ = s.Close()
+		t.Fatalf("enroll project: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	syncImportWithProgress = func(_ *engramsync.Syncer, report func(engramsync.ImportProgress)) (*engramsync.ImportResult, error) {
+		report(engramsync.ImportProgress{Percentage: 100})
+		report(engramsync.ImportProgress{Percentage: 100})
+		return &engramsync.ImportResult{
+			ChunksImported:       1,
+			SessionsImported:     1,
+			ObservationsImported: 1,
+			SkippedRelations:     []string{"relation obs-a->obs-b: referenced observation missing permanently"},
+		}, nil
+	}
+	syncStatus = func(*engramsync.Syncer) (int, int, int, error) {
+		return 1, 1, 0, nil
+	}
+
+	withArgs(t, "engram", "sync", "--cloud", "--import", "--project", "proj-a")
+	stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdSync(cfg) })
+	if recovered != nil || stderr != "" {
+		t.Fatalf("expected successful cloud import, panic=%v stderr=%q", recovered, stderr)
+	}
+	if !strings.Contains(stdout, "WARNING skipped relation obs-a->obs-b: referenced observation missing permanently") {
+		t.Fatalf("expected skipped relation warning in import output, got:\n%s", stdout)
+	}
+}

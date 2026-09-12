@@ -6110,6 +6110,47 @@ func (s *Store) recordRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutat
 	return true, nil
 }
 
+// EnqueueDeferredRelation persists a relation upsert as deferred retry state
+// before any apply attempt (issue #1135 cloud import): the row keeps a skipped
+// edge recoverable so a later cycle whose endpoint arrives heals it via the
+// normal deferred replay. Mirrors recordRelationApplyFailureTx's deferred row,
+// keyed the same way, resetting retry state.
+func (s *Store) EnqueueDeferredRelation(targetKey string, mutation SyncMutation) error {
+	if mutation.Entity != SyncEntityRelation {
+		return fmt.Errorf("EnqueueDeferredRelation: unsupported entity %q", mutation.Entity)
+	}
+	// Same identity recordRelationApplyFailureTx stores for deferred rows: a
+	// redelivered edge collapses onto the single pending row.
+	syncID := relationApplyFailureSyncID("deferred", targetKey, mutation)
+
+	project := strings.TrimSpace(mutation.Project)
+	payloadSyncID := ""
+	var payload syncRelationPayload
+	if decodeSyncPayload([]byte(mutation.Payload), &payload) == nil {
+		if project == "" {
+			project = strings.TrimSpace(payload.Project)
+		}
+		payloadSyncID = strings.TrimSpace(payload.SyncID)
+	}
+	project, _ = NormalizeProject(project)
+	scopeClass := "target_scoped"
+	if project != "" {
+		scopeClass = "scoped"
+	}
+
+	// INSERT OR REPLACE: re-enqueueing replaces the row with fresh deferred state.
+	if _, err := s.execHook(s.db, `
+		INSERT OR REPLACE INTO sync_apply_deferred
+			(sync_id, entity, payload, target_key, entity_key, op, payload_sync_id, project, scope_class, apply_status, retry_count, last_error, first_seen_at, last_attempted_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'deferred', 0, ?, datetime('now'), datetime('now'))
+	`, syncID, mutation.Entity, mutation.Payload, targetKey, mutation.EntityKey, mutation.Op, payloadSyncID, project, scopeClass, "skipped before apply: relation endpoint missing permanently from local store and manifest snapshot (issue #1135)"); err != nil {
+		return fmt.Errorf("EnqueueDeferredRelation: %w", err)
+	}
+
+	log.Printf("[store] EnqueueDeferredRelation entity_key=%s sync_id=%s - queued before apply (issue #1135)", mutation.EntityKey, syncID)
+	return nil
+}
+
 // ApplyPulledChunk atomically applies all mutations contained in a pulled chunk
 // and records the chunk as synced in the same transaction. This guarantees
 // retry safety: a failed chunk import leaves no partial semantic mutations.
