@@ -160,6 +160,20 @@ func agentAdapters() []agentAdapter {
 				"Verify ~/.config/kilo/AGENTS.md has the Memory Protocol block",
 			},
 		},
+		{
+			slug:        "cline",
+			description: "Cline — MCP registration in ~/.cline/data/settings/cline_mcp_settings.json plus a dedicated rules file Memory Protocol",
+			mcpPath:     clineMCPPath,
+			mcpFormat:   mcpServersObject,
+			instructions: []instrSurface{
+				{path: clineRulesPath, style: wholeFile, body: memoryProtocolMarkdown},
+			},
+			postInstall: []string{
+				"Restart Cline so MCP config is reloaded",
+				"Verify ~/.cline/data/settings/cline_mcp_settings.json includes mcpServers.engram",
+				"Verify ~/.cline/rules/engram.md has the Memory Protocol",
+			},
+		},
 	}
 }
 
@@ -290,4 +304,23 @@ func kilocodeConfigPath() string {
 
 func kilocodeAgentsPath() string {
 	return filepath.Join(kilocodeConfigDir(), "AGENTS.md")
+}
+
+// ─── Cline paths ─────────────────────────────────────────────────────────────
+//
+// Cline stores its MCP registration under ~/.cline/data/settings/ and combines
+// every .md file in ~/.cline/rules/ into one ruleset, so the Memory Protocol
+// gets its own engram-owned file there instead of a marker block in a shared one.
+
+func clineDir() string {
+	home, _ := userHome()
+	return filepath.Join(home, ".cline")
+}
+
+func clineMCPPath() string {
+	return filepath.Join(clineDir(), "data", "settings", "cline_mcp_settings.json")
+}
+
+func clineRulesPath() string {
+	return filepath.Join(clineDir(), "rules", "engram.md")
 }

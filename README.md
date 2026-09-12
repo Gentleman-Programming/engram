@@ -136,6 +136,7 @@ Run the setup command for the agent you use, then restart that agent. `engram se
 | Cursor | `engram setup cursor` |
 | VS Code (Copilot) | `engram setup vscode-copilot` |
 | Kilo Code | `engram setup kilocode` |
+| Cline | `engram setup cline` |
 | Another MCP-compatible agent | [Manual MCP setup](docs/AGENT-SETUP.md#any-other-mcp-agent) |
 
 See [Agent Setup](docs/AGENT-SETUP.md) for per-agent configuration, plugin behavior, manual MCP setup, compaction resilience, and troubleshooting. Pi users can also find the package at [`gentle-engram`](plugin/pi/README.md).

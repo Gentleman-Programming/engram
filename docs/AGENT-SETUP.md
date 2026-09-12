@@ -28,6 +28,7 @@ Engram works with **any MCP-compatible agent**. Pick your agent below.
 | Cursor          | `engram setup cursor`                                                                        | [Details](#cursor)                                 |
 | VS Code Copilot | `engram setup vscode-copilot`                                                                | [Details](#vs-code-copilot--claude-code-extension) |
 | Kilo Code       | `engram setup kilocode`                                                                      | [Details](#kilo-code)                              |
+| Cline           | `engram setup cline`                                                                         | [Details](#cline)                                  |
 | Any MCP agent   | `engram mcp` (stdio)                                                                         | [Details](#any-other-mcp-agent)                    |
 
 > **Native setup for all agents above.** `engram setup <agent>` writes the right
@@ -720,6 +721,18 @@ engram setup kilocode
 ```
 
 Registers the engram server under the OpenCode-style `mcp` object in `~/.config/kilo/opencode.json` and writes the Memory Protocol as a marker block in `~/.config/kilo/AGENTS.md`.
+
+---
+
+## Cline
+
+**Automated:**
+
+```bash
+engram setup cline
+```
+
+Registers `mcpServers.engram` in `~/.cline/data/settings/cline_mcp_settings.json` and writes the Memory Protocol to `~/.cline/rules/engram.md`. Cline combines every `.md` file in `~/.cline/rules/` into one ruleset, so the protocol gets its own engram-owned file there instead of sharing one with your own rules.
 
 ---
 

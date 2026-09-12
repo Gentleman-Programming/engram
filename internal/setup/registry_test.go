@@ -31,6 +31,7 @@ func declarativeAgents() []declarativeAgent {
 		{"cursor", cursorMCPPath, "mcpServers", mcpServersObject, cursorMemoryProtocolPath, wholeFile},
 		{"vscode-copilot", vscodeMCPPath, "servers", serversObject, vscodePromptPath, wholeFile},
 		{"kilocode", kilocodeConfigPath, "mcp", opencodeObject, kilocodeAgentsPath, markerBlock},
+		{"cline", clineMCPPath, "mcpServers", mcpServersObject, clineRulesPath, wholeFile},
 	}
 }
 
@@ -58,7 +59,7 @@ func TestSupportedAgentsIncludesAllRegistryAgents(t *testing.T) {
 	want := []string{
 		"opencode", "pi", "claude-code", "gemini-cli", "codex",
 		"antigravity-cli", "windsurf", "qwen", "kiro", "cursor",
-		"vscode-copilot", "kilocode",
+		"vscode-copilot", "kilocode", "cline",
 	}
 	for _, slug := range want {
 		if !got[slug] {
