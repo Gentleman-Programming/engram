@@ -9346,7 +9346,11 @@ func TestMigrateCreatesLowercaseObservationProjectIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("explain lowercase project predicate: %v", err)
 	}
-	defer rows.Close()
+	defer func() {
+		if err := rows.Close(); err != nil {
+			t.Errorf("close query plan rows: %v", err)
+		}
+	}()
 
 	var plan []string
 	for rows.Next() {
