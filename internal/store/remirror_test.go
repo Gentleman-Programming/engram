@@ -101,8 +101,10 @@ func TestRemirrorProjectReplaysCurrentStateWithoutRewritingHistory(t *testing.T)
 	runTombstoneBackfill("remirror:same")
 	runTombstoneBackfill("remirror:same")
 	runTombstoneBackfill("remirror:new")
-	if got := scalarInt(t, s, `SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ? AND source LIKE 'remirror:%'`, SyncEntityObservation, deletedSyncID); got != 3 {
-		t.Fatalf("tombstone remirror mutations = %d, want 3", got)
+	for _, source := range []string{"remirror:same", "remirror:new"} {
+		if got := scalarInt(t, s, `SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ? AND source = ?`, SyncEntityObservation, deletedSyncID, source); got != 1 {
+			t.Fatalf("tombstone mutations for %s = %d, want 1", source, got)
+		}
 	}
 	peer := newTestStore(t)
 	if err := peer.ApplyPulledMutation(DefaultSyncTargetKey, sessionMutation); err != nil {

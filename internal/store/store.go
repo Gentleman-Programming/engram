@@ -1116,14 +1116,6 @@ func (s *Store) migrate() error {
 	if _, err := s.execHook(s.db, schema); err != nil {
 		return err
 	}
-	for _, c := range []struct{ name, definition string }{
-		{"active", "BOOLEAN NOT NULL DEFAULT 1"},
-		{"last_mutation_seq", "INTEGER NOT NULL DEFAULT 0"},
-	} {
-		if err := s.addColumnIfNotExists("sync_delete_tombstones", c.name, c.definition); err != nil {
-			return err
-		}
-	}
 	if err := s.redactCloudUpgradeSnapshots(); err != nil {
 		return err
 	}
