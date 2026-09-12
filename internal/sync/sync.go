@@ -1008,14 +1008,16 @@ func (sy *Syncer) importEntriesDependencySafeWithProgress(entries []ChunkEntry, 
 			// existing stall semantics.
 			applyChunk := chunk
 			var skippedEdges []string
+			var skippedMutations []store.SyncMutation
 			if dependencyOracle != nil {
-				filtered, warnings, filterErr := filterUnsatisfiableRelationUpserts(chunk, dependencyOracle)
+				filtered, skipped, warnings, filterErr := filterUnsatisfiableRelationUpserts(chunk, dependencyOracle)
 				if filterErr != nil {
 					return nil, filterErr
 				}
 				if len(warnings) > 0 {
 					applyChunk = filtered
 					skippedEdges = warnings
+					skippedMutations = skipped
 				}
 			}
 
@@ -1050,6 +1052,12 @@ func (sy *Syncer) importEntriesDependencySafeWithProgress(entries []ChunkEntry, 
 			result.PromptsImported += importResult.PromptsImported
 			if len(skippedEdges) > 0 {
 				result.SkippedRelations = append(result.SkippedRelations, skippedEdges...)
+				// #1135 correction: queue dropped edges so the skip stays reversible.
+				for _, skipped := range skippedMutations {
+					if err := sy.store.EnqueueDeferredRelation(sy.chunkTrackingTargetKey(""), skipped); err != nil {
+						return nil, fmt.Errorf("defer skipped relation %s: %w", skipped.EntityKey, err)
+					}
+				}
 			}
 			if afterCommit != nil {
 				afterCommit()
@@ -1241,15 +1249,16 @@ func (sy *Syncer) pendingObservationSyncIDs(entries []ChunkEntry, knownChunks ma
 
 // filterUnsatisfiableRelationUpserts returns the chunk with relation upserts
 // removed when at least one endpoint is provably unsatisfiable, together with
-// one visible warning per skipped edge. Mutations that cannot be classified
-// (undecodable payload, blank endpoints) are kept so the store keeps handling
-// them unchanged.
-func filterUnsatisfiableRelationUpserts(chunk ChunkData, oracle *importDependencyOracle) (ChunkData, []string, error) {
+// the removed mutations and one visible warning per skipped edge. Mutations
+// that cannot be classified (undecodable payload, blank endpoints) are kept so
+// the store keeps handling them unchanged.
+func filterUnsatisfiableRelationUpserts(chunk ChunkData, oracle *importDependencyOracle) (ChunkData, []store.SyncMutation, []string, error) {
 	if len(chunk.Mutations) == 0 {
 		// Legacy array chunks carry no relation upserts.
-		return chunk, nil, nil
+		return chunk, nil, nil, nil
 	}
 	filtered := make([]store.SyncMutation, 0, len(chunk.Mutations))
+	skipped := make([]store.SyncMutation, 0)
 	warnings := make([]string, 0)
 	changed := false
 	for _, mutation := range chunk.Mutations {
@@ -1264,25 +1273,26 @@ func filterUnsatisfiableRelationUpserts(chunk ChunkData, oracle *importDependenc
 		}
 		sourceOK, err := oracle.endpointSatisfiable(sourceID)
 		if err != nil {
-			return chunk, nil, err
+			return chunk, nil, nil, err
 		}
 		targetOK, err := oracle.endpointSatisfiable(targetID)
 		if err != nil {
-			return chunk, nil, err
+			return chunk, nil, nil, err
 		}
 		if sourceOK && targetOK {
 			filtered = append(filtered, mutation)
 			continue
 		}
 		changed = true
+		skipped = append(skipped, mutation)
 		warnings = append(warnings, fmt.Sprintf("relation %s->%s: referenced observation missing permanently", sourceID, targetID))
 	}
 	if !changed {
-		return chunk, nil, nil
+		return chunk, nil, nil, nil
 	}
 	filteredChunk := chunk
 	filteredChunk.Mutations = filtered
-	return filteredChunk, warnings, nil
+	return filteredChunk, skipped, warnings, nil
 }
 
 // relationUpsertEndpoints decodes the endpoints of a relation upsert payload.

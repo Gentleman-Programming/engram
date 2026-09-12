@@ -3936,7 +3936,8 @@ func TestCloudImportAppliesObservationsBeforeEarlierRelationInSameChunk(t *testi
 // TestCloudImportSkipsRelationWhenEndpointIsPermanentlyMissing pins the issue
 // #1135 contract for cloud import: a relation whose target observation is
 // absent from the local store and from every chunk is skipped with a visible
-// warning while the rest of the chunk imports and the chunk is marked synced.
+// warning while the rest of the chunk imports and the chunk is marked synced;
+// the skip stays recoverable via the deferred queue.
 func TestCloudImportSkipsRelationWhenEndpointIsPermanentlyMissing(t *testing.T) {
 	dst := newTestStore(t)
 	if err := dst.EnrollProject("proj-a"); err != nil {
@@ -3995,12 +3996,9 @@ func TestCloudImportSkipsRelationWhenEndpointIsPermanentlyMissing(t *testing.T) 
 	if len(result.SkippedRelations) != 1 || result.SkippedRelations[0] != wantWarning {
 		t.Fatalf("expected one skipped relation warning %q, got %+v", wantWarning, result.SkippedRelations)
 	}
-	deferred, dead, err := dst.CountDeferredAndDead()
-	if err != nil {
-		t.Fatalf("count deferred relation: %v", err)
-	}
-	if deferred != 0 || dead != 0 {
-		t.Fatalf("expected the skipped edge to bypass the deferred queue, got deferred=%d dead=%d", deferred, dead)
+	rows, err := dst.ListDeferred(store.ListDeferredOptions{})
+	if err != nil || len(rows) != 1 || rows[0].EntityKey != "rel-missing-endpoint" || rows[0].ApplyStatus != "deferred" {
+		t.Fatalf("expected the skipped edge queued as the only deferred row, err=%v rows=%+v", err, rows)
 	}
 	synced, err := dst.GetSyncedChunksForTarget(cloudTargetKey("proj-a"))
 	if err != nil {
@@ -4008,6 +4006,54 @@ func TestCloudImportSkipsRelationWhenEndpointIsPermanentlyMissing(t *testing.T) 
 	}
 	if !synced[chunkID] {
 		t.Fatalf("expected chunk %q with a deferred relation to be marked synced", chunkID)
+	}
+}
+
+// TestCloudImportDeferredRelationHealsWhenLateEndpointArrives verifies the
+// reversible side of the #1135 pre-apply skip: an edge skipped because its
+// endpoint had not reached the local store yet stays queued as deferred retry
+// state, and the importer's post-import replay heals it once the endpoint
+// arrives, instead of losing the relation permanently.
+func TestCloudImportDeferredRelationHealsWhenLateEndpointArrives(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnrollProject("proj-a"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+	transport := newFakeCloudTransport()
+	transport.manifest = &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "chunk-1135-late-endpoint", CreatedAt: "2026-08-25T00:00:00Z"}}}
+	transport.chunks["chunk-1135-late-endpoint"] = mustJSONChunk(t, "chunk-1135-late-endpoint", relationMissingEndpointChunk("sess-1135-late", "obs-1135-late-a", "obs-1135-late-b", "rel-1135-late"))
+
+	importer := NewCloudWithTransport(s, transport, "proj-a")
+	first, err := importer.Import()
+	if err != nil || len(first.SkippedRelations) != 1 {
+		t.Fatalf("expected import to skip the unsatisfiable edge with a warning, err=%v result=%+v", err, first)
+	}
+	rows, err := s.ListDeferred(store.ListDeferredOptions{Status: "deferred"})
+	if err != nil || len(rows) != 1 || rows[0].EntityKey != "rel-1135-late" {
+		t.Fatalf("expected the skipped edge queued as deferred, err=%v rows=%+v", err, rows)
+	}
+	// Later cycle: the endpoint reaches the local store outside any chunk.
+	if err := s.ApplyPulledMutation(cloudTargetKey("proj-a"), store.SyncMutation{
+		Seq:       4,
+		Entity:    store.SyncEntityObservation,
+		EntityKey: "obs-1135-late-b",
+		Op:        store.SyncOpUpsert,
+		Payload:   `{"sync_id":"obs-1135-late-b","session_id":"sess-1135-late","type":"decision","title":"late endpoint","content":"arrives after the manifest snapshot","project":"proj-a","scope":"project"}`,
+	}); err != nil {
+		t.Fatalf("apply late endpoint: %v", err)
+	}
+
+	// The importer's post-import replay (finalizeImport -> ReplayDeferredForScope).
+	final, err := importer.finalizeImport(&ImportResult{})
+	if err != nil || final.RelationsReplayed != 1 || final.RelationsDeferred != 0 || final.RelationsDead != 0 {
+		t.Fatalf("expected the deferred edge to replay successfully, err=%v result=%+v", err, final)
+	}
+	if _, err := s.GetRelation("rel-1135-late"); err != nil {
+		t.Fatalf("expected deferred relation to heal once the late endpoint arrives: %v", err)
+	}
+	rows, err = s.ListDeferred(store.ListDeferredOptions{Status: "deferred"})
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("expected the deferred row deleted after successful replay, err=%v rows=%+v", err, rows)
 	}
 }
 
@@ -4862,7 +4908,7 @@ func TestCloudImportHandlesRelationWithPermanentlyMissingEndpoint(t *testing.T) 
 			wantSkippedEdges: []string{
 				"relation obs-1135-a->obs-1135-deleted: referenced observation missing permanently",
 			},
-			wantDeferred: 0,
+			wantDeferred: 1,
 			wantDead:     0,
 			assertStore: func(t *testing.T, s *store.Store) {
 				t.Helper()
@@ -5029,6 +5075,11 @@ func TestCloudImportSkippedRelationWarningsAreIdempotent(t *testing.T) {
 	}
 	if second.ChunksSkipped != 1 {
 		t.Fatalf("expected chunk to be skipped as already known, got %+v", second)
+	}
+	// The known chunk must not re-enqueue: retry_count advanced 1 -> 2 above.
+	rows, err := s.ListDeferred(store.ListDeferredOptions{Status: "deferred"})
+	if err != nil || len(rows) != 1 || rows[0].EntityKey != "rel-1135-again" || rows[0].RetryCount != 2 {
+		t.Fatalf("expected the deferred row to survive re-import without re-enqueue, err=%v rows=%+v", err, rows)
 	}
 }
 
