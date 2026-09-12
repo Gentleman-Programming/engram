@@ -62,9 +62,10 @@ func init() {
 }
 
 var (
-	storeNew      = store.New
-	newHTTPServer = server.New
-	startHTTP     = (*server.Server).Start
+	storeNew           = store.New
+	storeDefaultConfig = store.DefaultConfig
+	newHTTPServer      = server.New
+	startHTTP          = (*server.Server).Start
 
 	newMCPServer           = mcp.NewServer
 	newMCPServerWithTools  = mcp.NewServerWithTools
@@ -81,10 +82,8 @@ var (
 	newTeaProgram = tea.NewProgram
 	runTeaProgram = (*tea.Program).Run
 
-	checkForUpdates = versioncheck.CheckLatest
-
-	// initConfigRename is injectable only to verify failed forced publication.
-	initConfigRename = os.Rename
+	checkForUpdates         = versioncheck.CheckLatest
+	migrateOrphanedDatabase = migrateOrphanedDB
 
 	setupSupportedAgents         = setup.SupportedAgents
 	setupInstallAgent            = setup.Install
@@ -669,7 +668,7 @@ func main() {
 		return
 	}
 
-	cfg, cfgErr := store.DefaultConfig()
+	cfg, cfgErr := storeDefaultConfig()
 	if cfgErr != nil {
 		// Fallback: try to resolve home directory from environment variables
 		// that os.UserHomeDir() might have missed (e.g. MCP subprocesses on
@@ -699,7 +698,7 @@ func main() {
 
 	// Migrate orphaned databases that ended up in wrong locations
 	// (e.g. drive root on Windows due to previous bug).
-	migrateOrphanedDB(cfg.DataDir)
+	migrateOrphanedDatabase(cfg.DataDir)
 
 	switch os.Args[1] {
 	case "serve":
@@ -736,8 +735,6 @@ func main() {
 		cmdObsidianExport(cfg)
 	case "projects":
 		cmdProjects(cfg)
-	case "init":
-		cmdInit()
 	case "setup":
 		cmdSetup(cfg)
 	case "protocol-mode":
@@ -786,6 +783,9 @@ func handleConfigFreeCommand(args []string) bool {
 				return true
 			}
 		}
+	case "init":
+		cmdInit()
+		return true
 	}
 	return false
 }
@@ -2972,107 +2972,6 @@ func cmdInit() {
 	}
 
 	fmt.Printf("Initialized Engram project %q in .engram/config.json\n", trimmed)
-}
-
-// writeInitConfig publishes config data for cwd without following unsafe project
-// config paths. Non-force creation is exclusive; forced replacement writes a
-// complete sibling file before atomically publishing it over the old config.
-func writeInitConfig(cwd string, data []byte, force bool) error {
-	configDir := filepath.Join(cwd, ".engram")
-	if err := ensureInitConfigDir(configDir); err != nil {
-		return err
-	}
-
-	configPath := filepath.Join(configDir, "config.json")
-	if info, err := os.Lstat(configPath); err == nil {
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf(".engram/config.json must not be a symlink")
-		}
-		if !force {
-			return fmt.Errorf(".engram/config.json already exists (use --force to overwrite)")
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("inspect .engram/config.json: %w", err)
-	}
-
-	if !force {
-		return createInitConfigExclusively(configPath, data)
-	}
-	return replaceInitConfigAtomically(configDir, configPath, data)
-}
-
-func ensureInitConfigDir(configDir string) error {
-	info, err := os.Lstat(configDir)
-	if errors.Is(err, os.ErrNotExist) {
-		if err := os.Mkdir(configDir, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
-			return fmt.Errorf("create .engram directory: %w", err)
-		}
-		info, err = os.Lstat(configDir)
-	}
-	if err != nil {
-		return fmt.Errorf("inspect .engram directory: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf(".engram must be a real directory, not a symlink")
-	}
-	if !info.IsDir() {
-		return fmt.Errorf(".engram must be a directory")
-	}
-	return nil
-}
-
-func createInitConfigExclusively(configPath string, data []byte) error {
-	file, err := os.OpenFile(configPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-	if errors.Is(err, os.ErrExist) {
-		return fmt.Errorf(".engram/config.json already exists (use --force to overwrite)")
-	}
-	if err != nil {
-		return fmt.Errorf("write .engram/config.json: %w", err)
-	}
-	if err := writeAndCloseInitConfig(file, data); err != nil {
-		_ = os.Remove(configPath)
-		return fmt.Errorf("write .engram/config.json: %w", err)
-	}
-	return nil
-}
-
-func replaceInitConfigAtomically(configDir, configPath string, data []byte) error {
-	temporary, err := os.CreateTemp(configDir, ".config.json-*")
-	if err != nil {
-		return fmt.Errorf("create replacement config: %w", err)
-	}
-	temporaryPath := temporary.Name()
-	published := false
-	defer func() {
-		if !published {
-			_ = os.Remove(temporaryPath)
-		}
-	}()
-
-	if err := temporary.Chmod(0o644); err != nil {
-		_ = temporary.Close()
-		return fmt.Errorf("prepare replacement config: %w", err)
-	}
-	if err := writeAndCloseInitConfig(temporary, data); err != nil {
-		return fmt.Errorf("write replacement config: %w", err)
-	}
-	if err := initConfigRename(temporaryPath, configPath); err != nil {
-		return fmt.Errorf("publish replacement config: %w", err)
-	}
-	published = true
-	return nil
-}
-
-func writeAndCloseInitConfig(file *os.File, data []byte) error {
-	written, writeErr := file.Write(data)
-	if writeErr == nil && written != len(data) {
-		writeErr = fmt.Errorf("short write: wrote %d of %d bytes", written, len(data))
-	}
-	closeErr := file.Close()
-	if writeErr != nil {
-		return writeErr
-	}
-	return closeErr
 }
 
 func isPathLikeProjectName(name string) bool {

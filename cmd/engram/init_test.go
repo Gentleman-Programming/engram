@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/v2/internal/project"
+	"github.com/Gentleman-Programming/engram/v2/internal/store"
 	versioncheck "github.com/Gentleman-Programming/engram/v2/internal/version"
 )
 
@@ -185,6 +186,19 @@ func TestMainDispatchInitSkipsUpdateCheck(t *testing.T) {
 	}
 	t.Cleanup(func() { checkForUpdates = oldCheckForUpdates })
 
+	oldStoreDefaultConfig := storeDefaultConfig
+	storeDefaultConfig = func() (store.Config, error) {
+		t.Fatal("init must not resolve global store config")
+		return store.Config{}, nil
+	}
+	t.Cleanup(func() { storeDefaultConfig = oldStoreDefaultConfig })
+
+	oldMigrateOrphanedDB := migrateOrphanedDatabase
+	migrateOrphanedDatabase = func(string) {
+		t.Fatal("init must not migrate orphaned databases")
+	}
+	t.Cleanup(func() { migrateOrphanedDatabase = oldMigrateOrphanedDB })
+
 	stdout, stderr, recovered := captureOutputAndRecover(t, main)
 	if recovered != nil || stderr != "" {
 		t.Fatalf("main init dispatch failed: panic=%v stderr=%q", recovered, stderr)
@@ -317,6 +331,57 @@ func TestWriteInitConfigRejectsSymlinkedConfig(t *testing.T) {
 			}
 			if string(got) != `{"project_name":"target"}` {
 				t.Fatalf("symlink target changed to %q", got)
+			}
+		})
+	}
+}
+
+func TestWriteInitConfigRetainsStableParentDuringReplacement(t *testing.T) {
+	for _, force := range []bool{false, true} {
+		t.Run(map[bool]string{false: "without force", true: "with force"}[force], func(t *testing.T) {
+			workDir := t.TempDir()
+			configDir := filepath.Join(workDir, ".engram")
+			if err := os.Mkdir(configDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if force {
+				if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(`{"project_name":"old"}`), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			externalDir := filepath.Join(workDir, "external")
+			if err := os.Mkdir(externalDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			externalConfig := filepath.Join(externalDir, "config.json")
+			externalContents := []byte(`{"project_name":"external"}`)
+			if err := os.WriteFile(externalConfig, externalContents, 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			oldAfterOpen := initConfigAfterOpen
+			publishedDir := ""
+			initConfigAfterOpen = func() {
+				publishedDir = replaceInitConfigParentForTest(t, configDir, externalDir)
+			}
+			t.Cleanup(func() { initConfigAfterOpen = oldAfterOpen })
+
+			if err := writeInitConfig(workDir, []byte(`{"project_name":"new"}`), force); err != nil {
+				t.Fatalf("write init config after parent replacement: %v", err)
+			}
+			gotExternal, err := os.ReadFile(externalConfig)
+			if err != nil {
+				t.Fatalf("read external config: %v", err)
+			}
+			if string(gotExternal) != string(externalContents) {
+				t.Fatalf("external config changed to %q, want %q", gotExternal, externalContents)
+			}
+			gotPublished, err := os.ReadFile(filepath.Join(publishedDir, "config.json"))
+			if err != nil {
+				t.Fatalf("read published config: %v", err)
+			}
+			if string(gotPublished) != `{"project_name":"new"}` {
+				t.Fatalf("published config = %q, want new config", gotPublished)
 			}
 		})
 	}
