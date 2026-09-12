@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"testing"
 	"time"
 )
@@ -72,5 +73,79 @@ func TestMarkSyncFailureWithReasonDefaultsWhitespaceReasonCode(t *testing.T) {
 	}
 	if state.ReasonCode == nil || *state.ReasonCode != "transport_failed" {
 		t.Fatalf("reason code = %v, want transport_failed", state.ReasonCode)
+	}
+}
+
+// TestInboxLifecycleSettersAreNoOps pins the reserved cloud inbox target against
+// every Mark* lifecycle setter: none of them may transition the row away from
+// the fixed inbox lifecycle or record failure state on it.
+func TestInboxLifecycleSettersAreNoOps(t *testing.T) {
+	s := newTestStore(t)
+	backoff := time.Now().Add(time.Minute)
+	setters := []struct {
+		name string
+		call func() error
+	}{
+		{name: "healthy", call: func() error { return s.MarkSyncHealthy(SyncInboxTargetKey) }},
+		{name: "pending", call: func() error { return s.MarkSyncPending(SyncInboxTargetKey) }},
+		{name: "failure", call: func() error { return s.MarkSyncFailure(SyncInboxTargetKey, "inbox boom", backoff) }},
+		{name: "failure with reason", call: func() error {
+			return s.MarkSyncFailureWithReason(SyncInboxTargetKey, "transport_failed", "inbox boom", backoff)
+		}},
+		{name: "blocked", call: func() error { return s.MarkSyncBlocked(SyncInboxTargetKey, "paused", "inbox paused") }},
+		{name: "paused", call: func() error { return s.MarkSyncPaused(SyncInboxTargetKey, "inbox paused") }},
+		{name: "auth required", call: func() error { return s.MarkSyncAuthRequired(SyncInboxTargetKey, "inbox auth") }},
+		{name: "uppercase variant", call: func() error { return s.MarkSyncHealthy("Cloud:Inbox") }},
+	}
+	for _, setter := range setters {
+		if err := setter.call(); err != nil {
+			t.Fatalf("%s on inbox target: %v", setter.name, err)
+		}
+	}
+
+	var lifecycle string
+	var consecutiveFailures int
+	var reasonCode, lastError, lastSuccess sql.NullString
+	if err := s.db.QueryRow(`
+		SELECT lifecycle, consecutive_failures, reason_code, last_error, last_success_at
+		FROM sync_state WHERE target_key = ?`, SyncInboxTargetKey).
+		Scan(&lifecycle, &consecutiveFailures, &reasonCode, &lastError, &lastSuccess); err != nil {
+		t.Fatalf("load inbox state: %v", err)
+	}
+	if lifecycle != SyncLifecycleInbox || consecutiveFailures != 0 || reasonCode.Valid || lastError.Valid || lastSuccess.Valid {
+		t.Fatalf("inbox row drifted: lifecycle=%q consecutive_failures=%d reason=%v last_error=%v last_success=%v",
+			lifecycle, consecutiveFailures, reasonCode, lastError, lastSuccess)
+	}
+}
+
+// TestInboxRefreshHelpersNeverTransitionLifecycle pins the refresh helpers:
+// even pending journal rows attributed to the inbox target must not flip its
+// lifecycle, because the row is pinned to the fixed inbox state.
+func TestInboxRefreshHelpersNeverTransitionLifecycle(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.db.Exec(`
+		INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project)
+		VALUES (?, ?, 'inbox-drift', ?, '{}', ?, ?)`,
+		SyncInboxTargetKey, SyncEntityObservation, SyncOpUpsert, SyncSourceLocal, ReservedInboxProjectName); err != nil {
+		t.Fatalf("seed inbox journal row: %v", err)
+	}
+	if err := s.withTx(func(tx *sql.Tx) error {
+		if err := s.applySyncLifecycleTx(tx, SyncInboxTargetKey, 3); err != nil {
+			return err
+		}
+		if err := s.refreshSyncLifecycleTx(tx, SyncInboxTargetKey); err != nil {
+			return err
+		}
+		return s.refreshProjectSyncStateTx(tx, ReservedInboxProjectName)
+	}); err != nil {
+		t.Fatalf("refresh inbox lifecycle: %v", err)
+	}
+
+	var lifecycle string
+	if err := s.db.QueryRow(`SELECT lifecycle FROM sync_state WHERE target_key = ?`, SyncInboxTargetKey).Scan(&lifecycle); err != nil {
+		t.Fatalf("load inbox state: %v", err)
+	}
+	if lifecycle != SyncLifecycleInbox {
+		t.Fatalf("inbox lifecycle = %q after refresh, want %q", lifecycle, SyncLifecycleInbox)
 	}
 }
