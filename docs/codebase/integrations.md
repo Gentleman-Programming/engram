@@ -39,7 +39,7 @@ is either:
 - **declarative** — just an MCP path + format (`mcpServers` / `servers` / OpenCode's
   `mcp` object) and instruction surfaces; the generic `injectMCP` / `writeInstruction`
   driver in `registry.go` does the writes. Antigravity CLI, Windsurf, Qwen, Kiro,
-  Cursor, VS Code Copilot, and Kilo Code are all declarative.
+  Cursor, VS Code Copilot, Kilo Code, and Kimi Code are all declarative.
 
 Adding a declarative agent is normally just a new entry in `agentAdapters()` plus
 its path helpers — no new install code path. Agents not in the registry remain
