@@ -235,7 +235,7 @@ engram/
 │       ├── .claude-plugin/plugin.json
 │       ├── .mcp.json
 │       ├── hooks/hooks.json
-│       ├── scripts/                # session-start, post-compaction, subagent-stop, session-stop
+│       ├── scripts/                # session-start, post-compaction, subagent-stop, session-end
 │       └── skills/memory/SKILL.md
 ├── skills/                         # Contributor AI skills (repo-wide standards + Engram-specific guardrails)
 ├── setup.sh                        # Links repo skills into .claude/.codex/.gemini (project-local)
@@ -255,7 +255,7 @@ engram setup [agent]      Install/setup agent integration (opencode, claude-code
 engram serve [port]       Start HTTP API server (default: 7437)
 engram mcp                Start MCP server (stdio transport)
 engram tui                Launch interactive terminal UI
-engram search <query>     Search memories [--project P|--all]
+engram search <query>     Search memories [--project P|--all] [--match all|any]
 engram save <title> <msg> Save a memory
 engram delete <obs_id>    Delete an observation [--hard] (soft-delete by default; --hard removes permanently)
 engram delete session <id>

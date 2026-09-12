@@ -1,6 +1,8 @@
 package obsidian
 
 import (
+	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -546,6 +548,250 @@ func TestExporterCallsGraphConfig(t *testing.T) {
 			t.Errorf("expected .obsidian/graph.json to NOT be created with zero-value GraphConfig, but it exists")
 		}
 	})
+}
+
+func TestExportSessionHubsCreateNestedDirectories(t *testing.T) {
+	for _, sessionID := range []string{
+		"sdd/change-2026-09-10/summary",
+		"sdd-apply/change-2026-09-10/apply",
+	} {
+		t.Run(sessionID, func(t *testing.T) {
+			vault := t.TempDir()
+			ms := &mockStore{
+				exportData: &store.ExportData{
+					Sessions: []store.Session{{ID: sessionID, Project: "engram"}},
+					Observations: []store.Observation{{
+						ID:        1,
+						SessionID: sessionID,
+						Type:      "bugfix",
+						Title:     "Nested session hub",
+						Content:   "content",
+						Scope:     "project",
+						CreatedAt: "2026-09-10T00:00:00Z",
+						UpdatedAt: "2026-09-10T00:00:00Z",
+						Project:   strPtr("engram"),
+					}},
+				},
+			}
+
+			result, err := NewExporter(ms, ExportConfig{VaultPath: vault, GraphConfig: GraphConfigSkip}).Export()
+			if err != nil {
+				t.Fatalf("Export() error: %v", err)
+			}
+			if result.Created != 1 || result.HubsCreated != 1 || len(result.Errors) != 0 {
+				t.Fatalf("result = %+v, want one observation and one hub without errors", result)
+			}
+
+			hubPath := filepath.Join(vault, "engram", "_sessions", sessionID+".md")
+			if _, err := os.Stat(hubPath); err != nil {
+				t.Fatalf("nested session hub %q: %v", hubPath, err)
+			}
+
+			state, err := ReadState(filepath.Join(vault, "engram", ".engram-sync-state.json"))
+			if err != nil {
+				t.Fatalf("ReadState: %v", err)
+			}
+			if got, want := state.SessionHubs[sessionID], filepath.Join("_sessions", sessionID+".md"); got != want {
+				t.Fatalf("state.SessionHubs[%q] = %q, want %q", sessionID, got, want)
+			}
+		})
+	}
+}
+
+func TestExportRejectsSessionHubPathsOutsideSessionsDirectory(t *testing.T) {
+	vault := t.TempDir()
+	sessionID := "../../outside/escape"
+	ms := &mockStore{
+		exportData: &store.ExportData{
+			Sessions: []store.Session{{ID: sessionID, Project: "engram"}},
+			Observations: []store.Observation{{
+				ID:        1,
+				SessionID: sessionID,
+				Type:      "bugfix",
+				Title:     "Traversal session hub",
+				Content:   "content",
+				Scope:     "project",
+				CreatedAt: "2026-09-10T00:00:00Z",
+				UpdatedAt: "2026-09-10T00:00:00Z",
+				Project:   strPtr("engram"),
+			}},
+		},
+	}
+
+	result, err := NewExporter(ms, ExportConfig{VaultPath: vault, GraphConfig: GraphConfigSkip}).Export()
+	if err != nil {
+		t.Fatalf("Export() error: %v", err)
+	}
+	if result.Created != 1 || result.HubsCreated != 0 || len(result.Errors) != 1 {
+		t.Fatalf("result = %+v, want one observation, no hub, and one path error", result)
+	}
+	if !strings.Contains(result.Errors[0].Error(), "unsafe session hub path") {
+		t.Fatalf("error = %v, want unsafe session hub path error", result.Errors[0])
+	}
+
+	outsideHub := filepath.Join(vault, "outside", "escape.md")
+	if _, err := os.Stat(outsideHub); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("outside hub %q exists or could not be checked: %v", outsideHub, err)
+	}
+	state, err := ReadState(filepath.Join(vault, "engram", ".engram-sync-state.json"))
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	if _, exists := state.SessionHubs[sessionID]; exists {
+		t.Fatalf("state recorded rejected session hub %q", sessionID)
+	}
+}
+
+func TestExportRecordsSessionHubParentCreationFailure(t *testing.T) {
+	vault := t.TempDir()
+	sessionID := "sdd/blocked/summary"
+	blockingFile := filepath.Join(vault, "engram", "_sessions", "sdd")
+	if err := os.MkdirAll(filepath.Dir(blockingFile), 0755); err != nil {
+		t.Fatalf("setup session hub parent: %v", err)
+	}
+	if err := os.WriteFile(blockingFile, []byte("not a directory"), 0644); err != nil {
+		t.Fatalf("setup blocking file: %v", err)
+	}
+
+	ms := &mockStore{
+		exportData: &store.ExportData{
+			Sessions: []store.Session{{ID: sessionID, Project: "engram"}},
+			Observations: []store.Observation{{
+				ID:        1,
+				SessionID: sessionID,
+				Type:      "bugfix",
+				Title:     "Blocked session hub",
+				Content:   "content",
+				Scope:     "project",
+				CreatedAt: "2026-09-10T00:00:00Z",
+				UpdatedAt: "2026-09-10T00:00:00Z",
+				Project:   strPtr("engram"),
+			}},
+		},
+	}
+
+	result, err := NewExporter(ms, ExportConfig{VaultPath: vault, GraphConfig: GraphConfigSkip}).Export()
+	if err != nil {
+		t.Fatalf("Export() error: %v", err)
+	}
+	if result.Created != 1 || result.HubsCreated != 0 || len(result.Errors) != 1 {
+		t.Fatalf("result = %+v, want one observation, no hub, and one parent error", result)
+	}
+	if !strings.Contains(result.Errors[0].Error(), "mkdir session hub") {
+		t.Fatalf("error = %v, want session hub parent creation error", result.Errors[0])
+	}
+
+	state, err := ReadState(filepath.Join(vault, "engram", ".engram-sync-state.json"))
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	if _, exists := state.SessionHubs[sessionID]; exists {
+		t.Fatalf("state recorded failed session hub %q", sessionID)
+	}
+	if _, err := os.Stat(filepath.Join(vault, "engram", "_sessions", "sdd", "blocked", "summary.md")); err == nil {
+		t.Fatal("session hub was written despite blocked parent")
+	}
+}
+
+func TestExportRejectsSessionHubSymlinkEscape(t *testing.T) {
+	vault := t.TempDir()
+	outside := t.TempDir()
+	sessionID := "sdd/escape"
+	sessionsDir := filepath.Join(vault, "engram", "_sessions")
+	if err := os.MkdirAll(sessionsDir, 0755); err != nil {
+		t.Fatalf("setup sessions directory: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(sessionsDir, "sdd")); err != nil {
+		t.Skipf("symlink creation is unavailable: %v", err)
+	}
+
+	ms := &mockStore{
+		exportData: &store.ExportData{
+			Sessions: []store.Session{{ID: sessionID, Project: "engram"}},
+			Observations: []store.Observation{{
+				ID:        1,
+				SessionID: sessionID,
+				Type:      "bugfix",
+				Title:     "Symlink session hub",
+				Content:   "content",
+				Scope:     "project",
+				CreatedAt: "2026-09-10T00:00:00Z",
+				UpdatedAt: "2026-09-10T00:00:00Z",
+				Project:   strPtr("engram"),
+			}},
+		},
+	}
+
+	result, err := NewExporter(ms, ExportConfig{VaultPath: vault, GraphConfig: GraphConfigSkip}).Export()
+	if err != nil {
+		t.Fatalf("Export() error: %v", err)
+	}
+	if result.Created != 1 || result.HubsCreated != 0 || len(result.Errors) != 1 {
+		t.Fatalf("result = %+v, want one observation, no hub, and one symlink error", result)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "escape.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("outside hub exists or could not be checked: %v", err)
+	}
+
+	state, err := ReadState(filepath.Join(vault, "engram", ".engram-sync-state.json"))
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	if _, exists := state.SessionHubs[sessionID]; exists {
+		t.Fatalf("state recorded rejected session hub %q", sessionID)
+	}
+}
+
+func TestExportRecordsGenuineObservationWriteFailures(t *testing.T) {
+	vault := t.TempDir()
+	blockedPath := filepath.Join(vault, "engram", "engram", "bugfix", "blocked-export-1.md")
+	if err := os.MkdirAll(blockedPath, 0755); err != nil {
+		t.Fatalf("setup blocked output directory: %v", err)
+	}
+
+	ms := &mockStore{
+		exportData: &store.ExportData{
+			Sessions: []store.Session{{ID: "session-1", Project: "engram"}},
+			Observations: []store.Observation{
+				{
+					ID:        1,
+					SessionID: "session-1",
+					Type:      "bugfix",
+					Title:     "Blocked export",
+					Content:   "blocked",
+					Scope:     "project",
+					CreatedAt: "2026-09-10T00:00:00Z",
+					UpdatedAt: "2026-09-10T00:00:00Z",
+					Project:   strPtr("engram"),
+				},
+				{
+					ID:        2,
+					SessionID: "session-1",
+					Type:      "bugfix",
+					Title:     "Successful export",
+					Content:   "written",
+					Scope:     "project",
+					CreatedAt: "2026-09-10T00:00:00Z",
+					UpdatedAt: "2026-09-10T00:00:00Z",
+					Project:   strPtr("engram"),
+				},
+			},
+		},
+	}
+
+	result, err := NewExporter(ms, ExportConfig{VaultPath: vault, GraphConfig: GraphConfigSkip}).Export()
+	if err != nil {
+		t.Fatalf("Export() error: %v", err)
+	}
+	if result.Created != 1 || result.HubsCreated != 1 || len(result.Errors) != 1 {
+		t.Fatalf("result = %+v, want one created observation, one hub, and one write error", result)
+	}
+	if !strings.Contains(result.Errors[0].Error(), "write") {
+		t.Fatalf("error = %v, want write failure", result.Errors[0])
+	}
+	if !fileExists(filepath.Join(vault, "engram", "engram", "bugfix", "successful-export-2.md")) {
+		t.Fatal("successful observation was not exported")
+	}
 }
 
 // ─── Security: TestPathTraversalPrevention (Issue #180) ──────────────────────

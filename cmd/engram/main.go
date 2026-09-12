@@ -123,6 +123,9 @@ var (
 		return sy.Status()
 	}
 	syncImport = func(sy *engramsync.Syncer) (*engramsync.ImportResult, error) { return sy.Import() }
+	syncImportWithProgress = func(sy *engramsync.Syncer, report func(engramsync.ImportProgress)) (*engramsync.ImportResult, error) {
+		return sy.ImportWithProgress(report)
+	}
 	syncExport = func(sy *engramsync.Syncer, createdBy, project string) (*engramsync.SyncResult, error) {
 		return sy.Export(createdBy, project)
 	}
@@ -681,6 +684,16 @@ func main() {
 		cfg.DataDir = dir
 	}
 
+	if os.Args[1] == "instance-id" {
+		id, err := store.EnsureInstanceID(cfg.DataDir)
+		if err != nil {
+			fatal(err)
+			return
+		}
+		fmt.Println(id)
+		return
+	}
+
 	// Migrate orphaned databases that ended up in wrong locations
 	// (e.g. drive root on Windows due to previous bug).
 	migrateOrphanedDB(cfg.DataDir)
@@ -1032,7 +1045,7 @@ func cmdTUI(cfg store.Config) {
 
 func cmdSearch(cfg store.Config) {
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "usage: engram search <query> [--type TYPE] [--project PROJECT|--all] [--scope SCOPE] [--limit N]")
+		fmt.Fprintln(os.Stderr, "usage: engram search <query> [--type TYPE] [--project PROJECT|--all] [--scope SCOPE] [--limit N] [--match all|any]")
 		exitFunc(1)
 	}
 
@@ -1065,6 +1078,11 @@ func cmdSearch(cfg store.Config) {
 		case "--scope":
 			if i+1 < len(os.Args) {
 				opts.Scope = os.Args[i+1]
+				i++
+			}
+		case "--match":
+			if i+1 < len(os.Args) {
+				opts.MatchMode = os.Args[i+1]
 				i++
 			}
 		default:
@@ -1760,6 +1778,38 @@ func cmdImport(cfg store.Config) {
 	fmt.Printf("  Prompts:      %d\n", result.PromptsImported)
 }
 
+const maxCloudImportProgressUpdates = 10
+
+type cloudImportProgressRenderer struct {
+	initialPending int
+	interval       int
+}
+
+func (r *cloudImportProgressRenderer) Render(progress engramsync.ImportProgress) {
+	if r.initialPending == 0 && r.interval == 0 {
+		r.initialPending = progress.PendingChunks
+		r.interval = 1
+		if r.initialPending > maxCloudImportProgressUpdates {
+			r.interval = (r.initialPending + maxCloudImportProgressUpdates - 1) / maxCloudImportProgressUpdates
+		}
+		printCloudImportProgress(progress)
+		return
+	}
+	if progress.PendingChunks == 0 {
+		printCloudImportProgress(progress)
+		return
+	}
+	completed := r.initialPending - progress.PendingChunks
+	if completed > 0 && completed%r.interval == 0 {
+		printCloudImportProgress(progress)
+	}
+}
+
+func printCloudImportProgress(progress engramsync.ImportProgress) {
+	fmt.Printf("Cloud import progress: local=%d remote=%d pending=%d progress=%d%%\n",
+		progress.LocalChunks, progress.RemoteChunks, progress.PendingChunks, progress.Percentage)
+}
+
 func cmdSync(cfg store.Config) {
 	// Parse flags
 	doImport := false
@@ -1909,7 +1959,13 @@ func cmdSync(cfg store.Config) {
 	}
 
 	if doImport {
-		result, err := syncImport(sy)
+		var result *engramsync.ImportResult
+		if cloudEnabled {
+			renderer := &cloudImportProgressRenderer{}
+			result, err = syncImportWithProgress(sy, renderer.Render)
+		} else {
+			result, err = syncImport(sy)
+		}
 		if err != nil {
 			if cloudEnabled {
 				markCloudSyncFailure(s, cloudTargetKey, err)
@@ -2204,6 +2260,7 @@ func cmdObsidianExport(cfg store.Config) {
 		for _, e := range result.Errors {
 			fmt.Fprintf(os.Stderr, "    - %v\n", e)
 		}
+		exitFunc(1)
 	}
 }
 
@@ -3230,7 +3287,7 @@ Commands:
   test [suite] [--quick] [--json]
                      Run isolated local reliability and performance self-tests
                        suites: reliability, performance (default: both)
-  search <query>     Search memories [--type TYPE] [--project PROJECT|--all] [--scope SCOPE] [--limit N]
+  search <query>     Search memories [--type TYPE] [--project PROJECT|--all] [--scope SCOPE] [--limit N] [--match all|any]
   save <title> <msg> Save a memory  [--type TYPE] [--project PROJECT] [--scope SCOPE]
   delete <obs_id>    Delete an observation [--hard] (soft-delete by default; --hard removes permanently)
   delete session <id>

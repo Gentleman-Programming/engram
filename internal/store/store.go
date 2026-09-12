@@ -48,6 +48,8 @@ var sqliteWriteRetryBackoffs = []time.Duration{
 	10 * time.Millisecond,
 	25 * time.Millisecond,
 	50 * time.Millisecond,
+	100 * time.Millisecond,
+	200 * time.Millisecond,
 }
 
 // Sentinel errors returned by Store operations so callers can use errors.Is.
@@ -321,6 +323,17 @@ const (
 	decayDecisionMonths   = 6
 	decayPolicyMonths     = 12
 	decayPreferenceMonths = 3
+
+	// Observation FTS reranking preserves the raw BM25 projection and applies
+	// bounded multiplicative boosts only to its SQL ordering.
+	searchFTSTitleWeight            = 5.0
+	searchFTSContentWeight          = 1.0
+	searchFTSTopicKeyWeight         = 3.0
+	searchPinnedBoost               = 0.10
+	searchRecencyBoost              = 0.06
+	searchRecencyHalfScoreDays      = 30.0
+	searchStabilityBoost            = 0.04
+	searchStabilityDiminishingScale = 4.0
 )
 
 // decayReviewAfterMonths maps observation type → month offset for review_after.
@@ -608,6 +621,7 @@ func (s *Store) DataDir() string {
 type Store struct {
 	db         *sql.DB
 	cfg        Config
+	instanceID string
 	generation *databaseGeneration
 	hooks      storeHooks
 
@@ -616,6 +630,9 @@ type Store struct {
 	repairInFlight  *enrolledProjectRepair
 	repairOperation func() error // test seam; production uses repairEnrolledProjectSyncMutations.
 }
+
+// InstanceID returns this store's stable local-server identity.
+func (s *Store) InstanceID() string { return s.instanceID }
 
 type enrolledProjectRepair struct {
 	done chan struct{}
@@ -775,6 +792,10 @@ func newStore(cfg Config) (*Store, error) {
 	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
 		return nil, fmt.Errorf("engram: create data dir: %w", err)
 	}
+	instanceID, err := EnsureInstanceID(cfg.DataDir)
+	if err != nil {
+		return nil, err
+	}
 
 	dbPath := filepath.Join(cfg.DataDir, "engram.db")
 	if err := ensureDatabaseFile(dbPath); err != nil {
@@ -800,7 +821,7 @@ func newStore(cfg Config) (*Store, error) {
 		return nil, err
 	}
 
-	s := &Store{db: db, cfg: cfg, generation: generation, hooks: defaultStoreHooks()}
+	s := &Store{db: db, cfg: cfg, instanceID: instanceID, generation: generation, hooks: defaultStoreHooks()}
 	if err := s.runStartupMigrations(); err != nil {
 		return nil, err
 	}
@@ -1135,6 +1156,7 @@ func (s *Store) migrate() error {
 	if _, err := s.execHook(s.db, `
 		CREATE INDEX IF NOT EXISTS idx_obs_scope ON observations(scope);
 		CREATE INDEX IF NOT EXISTS idx_obs_sync_id ON observations(sync_id);
+		CREATE INDEX IF NOT EXISTS idx_obs_project_lower ON observations(LOWER(project));
 		CREATE INDEX IF NOT EXISTS idx_obs_topic ON observations(topic_key, project, scope, updated_at DESC);
 		CREATE INDEX IF NOT EXISTS idx_obs_deleted ON observations(deleted_at);
 		CREATE INDEX IF NOT EXISTS idx_obs_dedupe ON observations(normalized_hash, project, scope, type, title, created_at DESC);
@@ -4274,9 +4296,29 @@ func buildSearchPreviewFTSQuery(ftsQuery string, opts SearchOptions, limit int) 
 }
 
 func buildSearchFTSQueryWithColumns(columns, ftsQuery string, opts SearchOptions, limit int) (string, []any) {
+	rawRank := fmt.Sprintf(
+		"bm25(observations_fts, %.1f, %.1f, 0.0, 0.0, 0.0, %.1f)",
+		searchFTSTitleWeight,
+		searchFTSContentWeight,
+		searchFTSTopicKeyWeight,
+	)
+	compositeRank := fmt.Sprintf(`
+		%s * (
+			1.0 +
+			CASE WHEN o.pinned THEN %.2f ELSE 0.0 END +
+			%.2f * (1.0 / (1.0 + MAX(0.0, julianday('now') - COALESCE(julianday(o.last_seen_at), julianday(o.updated_at), julianday(o.created_at), julianday('now'))) / %.1f)) +
+			%.2f * ((MAX(0, COALESCE(o.revision_count, 0)) + MAX(0, COALESCE(o.duplicate_count, 0))) / (MAX(0, COALESCE(o.revision_count, 0)) + MAX(0, COALESCE(o.duplicate_count, 0)) + %.1f))
+		)`,
+		rawRank,
+		searchPinnedBoost,
+		searchRecencyBoost,
+		searchRecencyHalfScoreDays,
+		searchStabilityBoost,
+		searchStabilityDiminishingScale,
+	)
 	sqlQ := `
 		SELECT ` + columns + `,
-		       bm25(observations_fts, 5.0, 1.0, 0.0, 0.0, 0.0, 3.0) as rank
+		       ` + rawRank + ` AS rank
 		FROM observations_fts fts
 		CROSS JOIN observations o ON o.id = fts.rowid
 		WHERE observations_fts MATCH ? AND o.deleted_at IS NULL
@@ -4296,7 +4338,7 @@ func buildSearchFTSQueryWithColumns(columns, ftsQuery string, opts SearchOptions
 		args = append(args, normalizeScope(opts.Scope))
 	}
 
-	sqlQ += " ORDER BY rank LIMIT ?"
+	sqlQ += " ORDER BY " + compositeRank + " ASC, COALESCE(NULLIF(o.sync_id, ''), printf('%020d', o.id)) ASC, o.id ASC LIMIT ?"
 	return sqlQ, append(args, limit)
 }
 
