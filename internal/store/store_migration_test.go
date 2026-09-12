@@ -938,26 +938,34 @@ func TestMigrate_LegacyDeferredRowsRemainAdministrativeOnly(t *testing.T) {
 func TestMigrateSyncDeleteTombstonesRepeatOpenSafe(t *testing.T) {
 	cfg := mustDefaultConfig(t)
 	cfg.DataDir = t.TempDir()
-
+	raw, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`CREATE TABLE sync_delete_tombstones (entity TEXT NOT NULL, entity_key TEXT NOT NULL, session_id TEXT, project TEXT NOT NULL DEFAULT '', deleted_at TEXT NOT NULL DEFAULT (datetime('now')), hard_delete BOOLEAN NOT NULL DEFAULT 1, PRIMARY KEY (entity, entity_key))`); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
 	first, err := New(cfg)
 	if err != nil {
 		t.Fatalf("first open: %v", err)
 	}
+	if _, err := first.db.Exec(`INSERT INTO sync_delete_tombstones (entity, entity_key) VALUES (?, ?)`, SyncEntityObservation, "migration-floor"); err != nil {
+		t.Fatal(err)
+	}
 	if err := first.Close(); err != nil {
 		t.Fatalf("close first store: %v", err)
 	}
-
 	second, err := New(cfg)
 	if err != nil {
 		t.Fatalf("repeat open: %v", err)
 	}
 	t.Cleanup(func() { _ = second.Close() })
-	var table string
-	if err := second.db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sync_delete_tombstones'`).Scan(&table); err != nil {
-		t.Fatalf("find sync delete tombstones table: %v", err)
-	}
-	if table != "sync_delete_tombstones" {
-		t.Fatalf("sync delete tombstones table = %q", table)
+	var active, floor int
+	if err := second.db.QueryRow(`SELECT active, last_mutation_seq FROM sync_delete_tombstones WHERE entity_key = ?`, "migration-floor").Scan(&active, &floor); err != nil || active != 1 || floor != 0 {
+		t.Fatalf("tombstone defaults = active=%d floor=%d err=%v", active, floor, err)
 	}
 }
 

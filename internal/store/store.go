@@ -1043,8 +1043,10 @@ func (s *Store) migrate() error {
 				entity_key  TEXT NOT NULL,
 				session_id  TEXT,
 				project     TEXT NOT NULL DEFAULT '',
-				deleted_at  TEXT NOT NULL DEFAULT (datetime('now')),
-				hard_delete BOOLEAN NOT NULL DEFAULT 1,
+				deleted_at        TEXT NOT NULL DEFAULT (datetime('now')),
+				hard_delete       BOOLEAN NOT NULL DEFAULT 1,
+				active            BOOLEAN NOT NULL DEFAULT 1,
+				last_mutation_seq INTEGER NOT NULL DEFAULT 0,
 				PRIMARY KEY (entity, entity_key)
 			);
 
@@ -1113,6 +1115,14 @@ func (s *Store) migrate() error {
 		`
 	if _, err := s.execHook(s.db, schema); err != nil {
 		return err
+	}
+	for _, c := range []struct{ name, definition string }{
+		{"active", "BOOLEAN NOT NULL DEFAULT 1"},
+		{"last_mutation_seq", "INTEGER NOT NULL DEFAULT 0"},
+	} {
+		if err := s.addColumnIfNotExists("sync_delete_tombstones", c.name, c.definition); err != nil {
+			return err
+		}
 	}
 	if err := s.redactCloudUpgradeSnapshots(); err != nil {
 		return err
@@ -2337,15 +2347,7 @@ func (s *Store) projectSyncBackfillRequired(project string) (bool, error) {
 			UNION ALL
 			SELECT 1
 			FROM sync_delete_tombstones tombstone
-			WHERE tombstone.project = ?
-			  AND NOT EXISTS (
-				SELECT 1 FROM sync_mutations sm
-				WHERE sm.target_key = ?
-				  AND sm.entity = tombstone.entity
-				  AND sm.entity_key = tombstone.entity_key
-				  AND sm.op = ?
-				  AND sm.source = ?
-			  )
+			WHERE tombstone.project = ? AND `+syncDeleteTombstoneNeedsBackfill("tombstone")+`
 		)
 	`, project, DefaultSyncTargetKey, SyncEntitySession, SyncSourceLocal, project, project, DefaultSyncTargetKey, SyncEntityObservation, SyncSourceLocal, project, DefaultSyncTargetKey, SyncOpDelete, SyncSourceLocal).Scan(&missing)
 	if err != nil {
@@ -3631,6 +3633,7 @@ func (s *Store) DeleteSession(id string) error {
 			}
 			return fmt.Errorf("delete session: load session: %w", err)
 		}
+		project, _ = NormalizeProject(strings.TrimSpace(project))
 
 		var enrolled int
 		if err := tx.QueryRow(`SELECT 1 FROM sync_enrolled_projects WHERE project = ? LIMIT 1`, project).Scan(&enrolled); err != nil {
@@ -7626,6 +7629,14 @@ func backfillMutationSource(source []string) string {
 	return strings.TrimSpace(source[0])
 }
 
+func syncDeleteTombstoneNeedsBackfill(alias string) string {
+	return fmt.Sprintf(`%[1]s.active = 1 AND NOT EXISTS (
+		SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = %[1]s.entity
+		AND sm.entity_key = %[1]s.entity_key AND sm.op = ? AND sm.source = ?
+		AND sm.seq > %[1]s.last_mutation_seq
+	)`, alias)
+}
+
 // recordSyncDeleteTombstoneTx preserves delete intent for entities whose local
 // row is physically removed. Prompt tombstones predate this table and retain
 // their own identity and stale-upsert semantics.
@@ -7637,16 +7648,24 @@ func (s *Store) recordSyncDeleteTombstoneTx(tx *sql.Tx, entity, entityKey, sessi
 	if entityKey == "" {
 		return fmt.Errorf("sync delete tombstone entity key is required")
 	}
+	var floor, history int64
+	if err := tx.QueryRow(`SELECT COALESCE(last_mutation_seq, 0) FROM sync_delete_tombstones WHERE entity = ? AND entity_key = ?`, entity, entityKey).Scan(&floor); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(seq), 0) FROM sync_mutations WHERE entity = ? AND entity_key = ? AND op = ?`, entity, entityKey, SyncOpDelete).Scan(&history); err != nil {
+		return err
+	}
+	if history > floor {
+		floor = history
+	}
 	project, _ = NormalizeProject(strings.TrimSpace(project))
 	_, err := s.execHook(tx, `
-		INSERT INTO sync_delete_tombstones (entity, entity_key, session_id, project, deleted_at, hard_delete)
-		VALUES (?, ?, ?, ?, ?, 1)
+		INSERT INTO sync_delete_tombstones (entity, entity_key, session_id, project, deleted_at, hard_delete, active, last_mutation_seq)
+		VALUES (?, ?, ?, ?, ?, 1, 1, ?)
 		ON CONFLICT(entity, entity_key) DO UPDATE SET
-			session_id = excluded.session_id,
-			project = excluded.project,
-			deleted_at = excluded.deleted_at,
-			hard_delete = excluded.hard_delete`,
-		entity, entityKey, nullableString(sessionID), project, deletedAt,
+			session_id = excluded.session_id, project = excluded.project, deleted_at = excluded.deleted_at,
+			hard_delete = excluded.hard_delete, active = 1, last_mutation_seq = MAX(sync_delete_tombstones.last_mutation_seq, excluded.last_mutation_seq)`,
+		entity, entityKey, nullableString(sessionID), project, deletedAt, floor,
 	)
 	return err
 }
@@ -7655,7 +7674,7 @@ func (s *Store) clearSyncDeleteTombstoneForUpsertTx(tx *sql.Tx, entity, entityKe
 	if entity != SyncEntitySession && entity != SyncEntityObservation {
 		return nil
 	}
-	_, err := s.execHook(tx, `DELETE FROM sync_delete_tombstones WHERE entity = ? AND entity_key = ?`, entity, entityKey)
+	_, err := s.execHook(tx, `UPDATE sync_delete_tombstones SET active = 0 WHERE entity = ? AND entity_key = ?`, entity, entityKey)
 	return err
 }
 
@@ -7843,11 +7862,7 @@ func (s *Store) projectNeedsBackfill(project string) (bool, error) {
 		},
 		{
 			q: `SELECT COUNT(*) FROM sync_delete_tombstones tombstone
-			    WHERE tombstone.project = ?
-			      AND NOT EXISTS (
-			        SELECT 1 FROM sync_mutations sm
-			        WHERE sm.target_key = ? AND sm.entity = tombstone.entity AND sm.entity_key = tombstone.entity_key AND sm.op = ? AND sm.source = ?
-			      )`,
+			    WHERE tombstone.project = ? AND ` + syncDeleteTombstoneNeedsBackfill("tombstone"),
 			args: []any{project, DefaultSyncTargetKey, SyncOpDelete, SyncSourceLocal},
 		},
 		{
@@ -7941,7 +7956,7 @@ func (s *Store) enrolledProjectsNeedingBackfill() ([]string, error) {
 			UNION
 			SELECT x.project
 			FROM sync_delete_tombstones x
-			WHERE NOT EXISTS (SELECT 1 FROM sync_mutations sm WHERE sm.target_key = ? AND sm.entity = x.entity AND sm.entity_key = x.entity_key AND sm.source = ? AND sm.op = ?)
+			WHERE `+syncDeleteTombstoneNeedsBackfill("x")+`
 			UNION
 			SELECT coalesce(nullif(src.project, ''), src_s.project, '')
 			FROM memory_relations r
@@ -7959,7 +7974,7 @@ func (s *Store) enrolledProjectsNeedingBackfill() ([]string, error) {
 		DefaultSyncTargetKey, SyncEntityObservation, SyncOpDelete, SyncSourceLocal,
 		DefaultSyncTargetKey, SyncEntityPrompt, SyncSourceLocal,
 		DefaultSyncTargetKey, SyncEntityPrompt, SyncSourceLocal, SyncOpDelete,
-		DefaultSyncTargetKey, SyncSourceLocal, SyncOpDelete,
+		DefaultSyncTargetKey, SyncOpDelete, SyncSourceLocal,
 		JudgmentStatusOrphaned, JudgmentStatusPending, DefaultSyncTargetKey, SyncEntityRelation, SyncSourceLocal,
 	)
 	if err != nil {
@@ -8224,15 +8239,7 @@ func (s *Store) backfillSyncDeleteTombstonesTx(tx *sql.Tx, project string, sourc
 	rows, err := s.queryItHook(tx, `
 		SELECT entity, entity_key, ifnull(session_id, ''), project, deleted_at, hard_delete
 		FROM sync_delete_tombstones tombstone
-		WHERE project = ?
-		  AND NOT EXISTS (
-			SELECT 1 FROM sync_mutations sm
-			WHERE sm.target_key = ?
-			  AND sm.entity = tombstone.entity
-			  AND sm.entity_key = tombstone.entity_key
-			  AND sm.op = ?
-			  AND sm.source = ?
-		  )
+		WHERE project = ? AND `+syncDeleteTombstoneNeedsBackfill("tombstone")+`
 		ORDER BY CASE entity WHEN 'observation' THEN 0 WHEN 'session' THEN 1 ELSE 2 END, deleted_at ASC, entity_key ASC`,
 		project, DefaultSyncTargetKey, SyncOpDelete, mutationSource,
 	)

@@ -7940,10 +7940,10 @@ func TestDeleteSessionNormalizesPromptTombstoneProjectForReenrollment(t *testing
 	if _, err := s.db.Exec(`INSERT INTO user_prompts (sync_id, session_id, content, project) VALUES (?, ?, ?, ?)`, promptSyncID, sessionID, "legacy prompt", " \t "); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DeleteSession(sessionID); err != nil {
+	if err := s.EnrollProject(canonicalProject); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.EnrollProject(canonicalProject); err != nil {
+	if err := s.DeleteSession(sessionID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -7953,6 +7953,9 @@ func TestDeleteSessionNormalizesPromptTombstoneProjectForReenrollment(t *testing
 	}
 	if project != canonicalProject || op != SyncOpDelete {
 		t.Fatalf("re-enrolled prompt mutation = project %q op %q, want project %q op %q", project, op, canonicalProject, SyncOpDelete)
+	}
+	if got := scalarInt(t, s, `SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND op = ?`, SyncEntitySession, SyncOpDelete); got != 1 {
+		t.Fatalf("direct session deletes = %d, want 1", got)
 	}
 }
 
@@ -7995,18 +7998,33 @@ func TestUnenrolledHardDeletesReplayAfterReenrollment(t *testing.T) {
 		if len(mutations) != 2 || mutations[0].Entity != SyncEntitySession || mutations[0].Op != SyncOpUpsert || mutations[1].Entity != SyncEntityObservation || mutations[1].EntityKey != syncID || mutations[1].Op != SyncOpDelete {
 			t.Fatalf("re-enrollment mutations = %+v, want session upsert then observation delete", mutations)
 		}
-		beforeRepeat := scalarInt(t, s, `SELECT COUNT(*) FROM sync_mutations`)
+		firstDeleteSeq := mutations[1].Seq
+		if err := s.AckSyncMutations(DefaultSyncTargetKey, firstDeleteSeq); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.ApplyPulledMutation(DefaultSyncTargetKey, SyncMutation{Seq: 1, Entity: SyncEntityObservation, EntityKey: syncID, Op: SyncOpUpsert, Payload: fmt.Sprintf(`{"sync_id":%q,"session_id":"unenrolled-hard-observation-session","type":"decision","title":"recreated","content":"body","project":%q,"scope":"project"}`, syncID, project)}); err != nil {
+			t.Fatal(err)
+		}
 		if err := s.UnenrollProject(project); err != nil {
 			t.Fatal(err)
+		}
+		recreated, err := s.GetObservationBySyncID(syncID)
+		if err != nil || s.DeleteObservation(recreated.ID, true) != nil {
+			t.Fatalf("delete reused observation: %+v, %v", recreated, err)
 		}
 		if err := s.EnrollProject(project); err != nil {
 			t.Fatal(err)
 		}
+		secondDeleteSeq := scalarInt(t, s, `SELECT MAX(seq) FROM sync_mutations WHERE entity = ? AND entity_key = ? AND op = ?`, SyncEntityObservation, syncID, SyncOpDelete)
+		if int64(secondDeleteSeq) <= firstDeleteSeq {
+			t.Fatalf("reused delete seq = %d, want > %d", secondDeleteSeq, firstDeleteSeq)
+		}
+		beforeRepeat := scalarInt(t, s, `SELECT COUNT(*) FROM sync_mutations`)
 		if err := s.withTx(func(tx *sql.Tx) error { return s.backfillProjectSyncMutationsTx(tx, project) }); err != nil {
 			t.Fatal(err)
 		}
 		if got := scalarInt(t, s, `SELECT COUNT(*) FROM sync_mutations`); got != beforeRepeat {
-			t.Fatalf("re-enrollment/repeated backfill wrote duplicate mutations: got %d, want %d", got, beforeRepeat)
+			t.Fatalf("repeated backfill wrote duplicate mutations: got %d, want %d", got, beforeRepeat)
 		}
 	})
 
