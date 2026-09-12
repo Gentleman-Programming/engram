@@ -1143,6 +1143,68 @@ func TestRescueNullProjectOwnershipRefusesRecordsOwnedByAnotherSessionProject(t 
 	}
 }
 
+// TestRescueNullProjectOwnershipJournalsOrgOnRescuedObservation is a
+// regression test for #776: enqueueRescuedProjectMutationsTx used a
+// hand-rolled SELECT/Scan pair (not observationSelectColumns/
+// scanObservationRow) that never learned about the org column, so a rescued
+// observation's org silently dropped out of the journaled sync mutation.
+func TestRescueNullProjectOwnershipJournalsOrgOnRescuedObservation(t *testing.T) {
+	s := newTestStore(t)
+	enrollTestProject(t, s, "target")
+	if err := s.CreateSession("legacy-session", "legacy", "/tmp"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	observationID, err := s.AddObservation(AddObservationParams{
+		SessionID: "legacy-session",
+		Type:      "note",
+		Title:     "legacy org obs",
+		Content:   "content",
+		Project:   "legacy",
+		Org:       "acme-corp",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+	for _, statement := range []struct {
+		query string
+		args  []any
+	}{
+		{`UPDATE sessions SET project = '' WHERE id = ?`, []any{"legacy-session"}},
+		{`UPDATE observations SET project = NULL WHERE id = ?`, []any{observationID}},
+		{`DELETE FROM sync_mutations WHERE entity_key = (SELECT sync_id FROM observations WHERE id = ?)`, []any{observationID}},
+	} {
+		if _, err := s.DB().Exec(statement.query, statement.args...); err != nil {
+			t.Fatalf("seed legacy ownership: %v", err)
+		}
+	}
+
+	result, err := s.RescueNullProjectOwnership(ProjectRescueParams{TargetProject: "target", ObservationIDs: []int64{observationID}})
+	if err != nil {
+		t.Fatalf("RescueNullProjectOwnership: %v", err)
+	}
+	if result.Rescued() != 2 || !result.Journaled { // observation + its unowned session
+		t.Fatalf("unexpected rescue result: %#v", result)
+	}
+
+	var syncID, payloadJSON string
+	if err := s.DB().QueryRow(`SELECT sync_id FROM observations WHERE id = ?`, observationID).Scan(&syncID); err != nil {
+		t.Fatalf("read rescued sync_id: %v", err)
+	}
+	if err := s.DB().QueryRow(
+		`SELECT payload FROM sync_mutations WHERE entity = ? AND entity_key = ? ORDER BY seq DESC LIMIT 1`,
+		SyncEntityObservation, syncID,
+	).Scan(&payloadJSON); err != nil {
+		t.Fatalf("read journaled mutation payload: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		t.Fatalf("decode journaled payload: %v", err)
+	}
+	if payload["org"] != "acme-corp" {
+		t.Fatalf("expected journaled payload org=acme-corp, got %#v (payload=%s)", payload["org"], payloadJSON)
+	}
+}
+
 func TestEnqueueMissingLocalMutationRefusesBlankOwnedSession(t *testing.T) {
 	s := newTestStore(t)
 	err := s.withTx(func(tx *sql.Tx) error {
@@ -1317,6 +1379,96 @@ func TestAddObservationDeduplicatesWithinWindow(t *testing.T) {
 	}
 	if obs.DuplicateCount != 2 {
 		t.Fatalf("expected duplicate_count=2, got %d", obs.DuplicateCount)
+	}
+}
+
+// TestAddObservationDeduplicatesSeparatelyPerOrg is a regression test for
+// #776: the dedupe window match (normalized_hash + project + scope + type +
+// title) did not include org, so two otherwise-identical observations saved
+// under different orgs collapsed into a single row and silently dropped the
+// second org. Identical content in different orgs must dedupe independently,
+// the same way it already dedupes independently per project and per scope.
+func TestAddObservationDeduplicatesSeparatelyPerOrg(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	acmeID, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "bugfix",
+		Title:     "Fixed tokenizer",
+		Content:   "Normalized tokenizer panic on edge case",
+		Project:   "engram",
+		Scope:     "project",
+		Org:       "acme-corp",
+	})
+	if err != nil {
+		t.Fatalf("add acme observation: %v", err)
+	}
+
+	globexID, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "bugfix",
+		Title:     "Fixed tokenizer",
+		Content:   "Normalized tokenizer panic on edge case",
+		Project:   "engram",
+		Scope:     "project",
+		Org:       "globex-inc",
+	})
+	if err != nil {
+		t.Fatalf("add globex observation: %v", err)
+	}
+
+	if acmeID == globexID {
+		t.Fatalf("expected identical content in different orgs to stay separate, both got id %d", acmeID)
+	}
+
+	acmeObs, err := s.GetObservation(acmeID)
+	if err != nil {
+		t.Fatalf("get acme observation: %v", err)
+	}
+	if acmeObs.DuplicateCount != 1 {
+		t.Fatalf("expected acme observation duplicate_count=1 (not merged), got %d", acmeObs.DuplicateCount)
+	}
+	if acmeObs.Org == nil || *acmeObs.Org != "acme-corp" {
+		t.Fatalf("expected acme observation org=acme-corp, got %#v", acmeObs.Org)
+	}
+
+	globexObs, err := s.GetObservation(globexID)
+	if err != nil {
+		t.Fatalf("get globex observation: %v", err)
+	}
+	if globexObs.DuplicateCount != 1 {
+		t.Fatalf("expected globex observation duplicate_count=1 (not merged), got %d", globexObs.DuplicateCount)
+	}
+	if globexObs.Org == nil || *globexObs.Org != "globex-inc" {
+		t.Fatalf("expected globex observation org=globex-inc, got %#v", globexObs.Org)
+	}
+
+	// A true duplicate within the SAME org must still dedupe as before.
+	repeatID, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "bugfix",
+		Title:     "Fixed tokenizer",
+		Content:   "normalized   tokenizer panic on EDGE case",
+		Project:   "engram",
+		Scope:     "project",
+		Org:       "acme-corp",
+	})
+	if err != nil {
+		t.Fatalf("add repeat acme observation: %v", err)
+	}
+	if repeatID != acmeID {
+		t.Fatalf("expected same-org duplicate to reuse id %d, got %d", acmeID, repeatID)
+	}
+	acmeObs, err = s.GetObservation(acmeID)
+	if err != nil {
+		t.Fatalf("get acme observation after repeat: %v", err)
+	}
+	if acmeObs.DuplicateCount != 2 {
+		t.Fatalf("expected acme observation duplicate_count=2 after same-org repeat, got %d", acmeObs.DuplicateCount)
 	}
 }
 
@@ -2279,6 +2431,114 @@ func TestNewMigratesLegacyObservationIDSchema(t *testing.T) {
 	}
 }
 
+// TestNewMigratesPreOrgDatabaseIdempotently is a regression test for #776:
+// migrate() must add the org column and its index to a database created
+// before org existed, without disturbing existing rows, and reopening that
+// same database afterward must be a no-op rather than erroring on a column
+// that is already there.
+func TestNewMigratesPreOrgDatabaseIdempotently(t *testing.T) {
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = t.TempDir()
+	cfg.DedupeWindow = time.Hour
+
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+		_ = s.Close()
+		t.Fatalf("create session: %v", err)
+	}
+	preExistingID, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "decision",
+		Title:     "Predates org",
+		Content:   "Written before the org column existed",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		_ = s.Close()
+		t.Fatalf("add pre-org observation: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	// Simulate a database created before #776: every other migration has
+	// already run (this store just applied them), but org and its index
+	// have not.
+	dbPath := filepath.Join(cfg.DataDir, "engram.db")
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("reopen raw db: %v", err)
+	}
+	if _, err := raw.Exec(`DROP INDEX IF EXISTS idx_obs_org`); err != nil {
+		_ = raw.Close()
+		t.Fatalf("drop org index: %v", err)
+	}
+	if _, err := raw.Exec(`ALTER TABLE observations DROP COLUMN org`); err != nil {
+		_ = raw.Close()
+		t.Fatalf("drop org column: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw db: %v", err)
+	}
+
+	// First reopen: migrate() must add org back without disturbing the
+	// pre-existing row.
+	s, err = New(cfg)
+	if err != nil {
+		t.Fatalf("new store after simulated pre-org schema: %v", err)
+	}
+	preExisting, err := s.GetObservation(preExistingID)
+	if err != nil {
+		_ = s.Close()
+		t.Fatalf("get pre-existing observation: %v", err)
+	}
+	if preExisting.Title != "Predates org" {
+		_ = s.Close()
+		t.Fatalf("expected pre-existing observation to survive migration, got %#v", preExisting)
+	}
+	if preExisting.Org != nil {
+		_ = s.Close()
+		t.Fatalf("expected pre-existing observation to have nil org, got %q", *preExisting.Org)
+	}
+
+	newID, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "decision",
+		Title:     "Post migration",
+		Content:   "Written after org was migrated back in",
+		Project:   "engram",
+		Scope:     "project",
+		Org:       "acme-corp",
+	})
+	if err != nil {
+		_ = s.Close()
+		t.Fatalf("add observation after migration: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	// Second reopen: migrate() must be idempotent on a database that already
+	// has org.
+	s, err = New(cfg)
+	if err != nil {
+		t.Fatalf("second reopen must be idempotent, got: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	newObs, err := s.GetObservation(newID)
+	if err != nil {
+		t.Fatalf("get post-migration observation: %v", err)
+	}
+	if newObs.Org == nil || *newObs.Org != "acme-corp" {
+		t.Fatalf("expected org %q to survive the idempotent reopen, got %#v", "acme-corp", newObs.Org)
+	}
+}
+
 func TestNewMigratesLegacyUserPromptsSyncIDSchema(t *testing.T) {
 	dataDir := t.TempDir()
 	dbPath := filepath.Join(dataDir, "engram.db")
@@ -2446,6 +2706,102 @@ func TestTopicKeyUpsertIsScopedByProjectAndScope(t *testing.T) {
 
 	if baseID == personalID || baseID == otherProjectID || personalID == otherProjectID {
 		t.Fatalf("expected topic upsert boundaries by project+scope, got ids base=%d personal=%d other=%d", baseID, personalID, otherProjectID)
+	}
+}
+
+// TestTopicKeyUpsertIsScopedByOrg is a regression test for #776: the
+// topic-key revision lookup (project+scope) did not include org, so saving
+// to the same topic key under a different org silently hijacked the first
+// org's row instead of starting an independent revision — the same identity
+// boundary org must now respect, alongside project and scope.
+func TestTopicKeyUpsertIsScopedByOrg(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	acmeID, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "architecture",
+		Title:     "Auth model",
+		Content:   "Acme uses JWT",
+		Project:   "engram",
+		Scope:     "project",
+		Org:       "acme-corp",
+		TopicKey:  "architecture/auth-model",
+	})
+	if err != nil {
+		t.Fatalf("add acme observation: %v", err)
+	}
+
+	globexID, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "architecture",
+		Title:     "Auth model",
+		Content:   "Globex uses OAuth",
+		Project:   "engram",
+		Scope:     "project",
+		Org:       "globex-inc",
+		TopicKey:  "architecture/auth-model",
+	})
+	if err != nil {
+		t.Fatalf("add globex observation: %v", err)
+	}
+
+	if acmeID == globexID {
+		t.Fatalf("expected the same topic key under different orgs to stay separate, both got id %d", acmeID)
+	}
+
+	acmeObs, err := s.GetObservation(acmeID)
+	if err != nil {
+		t.Fatalf("get acme observation: %v", err)
+	}
+	if acmeObs.Content != "Acme uses JWT" || acmeObs.Org == nil || *acmeObs.Org != "acme-corp" {
+		t.Fatalf("expected acme observation to keep its own content and org, got %#v", acmeObs)
+	}
+
+	globexObs, err := s.GetObservation(globexID)
+	if err != nil {
+		t.Fatalf("get globex observation: %v", err)
+	}
+	if globexObs.Content != "Globex uses OAuth" || globexObs.Org == nil || *globexObs.Org != "globex-inc" {
+		t.Fatalf("expected globex observation to keep its own content and org, got %#v", globexObs)
+	}
+
+	// A third save to the same topic key, back to acme-corp, must revise the
+	// acme row in place and leave the globex row untouched.
+	reviseID, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "architecture",
+		Title:     "Auth model",
+		Content:   "Acme uses JWT with refresh rotation",
+		Project:   "engram",
+		Scope:     "project",
+		Org:       "acme-corp",
+		TopicKey:  "architecture/auth-model",
+	})
+	if err != nil {
+		t.Fatalf("revise acme observation: %v", err)
+	}
+	if reviseID != acmeID {
+		t.Fatalf("expected acme revision to reuse id %d, got %d", acmeID, reviseID)
+	}
+
+	acmeObs, err = s.GetObservation(acmeID)
+	if err != nil {
+		t.Fatalf("get revised acme observation: %v", err)
+	}
+	if acmeObs.Content != "Acme uses JWT with refresh rotation" {
+		t.Fatalf("expected acme observation content revised, got %q", acmeObs.Content)
+	}
+
+	globexObs, err = s.GetObservation(globexID)
+	if err != nil {
+		t.Fatalf("get globex observation after acme revision: %v", err)
+	}
+	if globexObs.Content != "Globex uses OAuth" {
+		t.Fatalf("expected globex observation untouched by acme revision, got %q", globexObs.Content)
 	}
 }
 
@@ -4650,6 +5006,128 @@ func TestApplyPulledObservationPreservesChronologyAndRevisionMetadata(t *testing
 	}
 }
 
+// TestApplyPulledObservationPreservesOrgOnInsertAndUpdate is a regression
+// test for #776: applyObservationUpsertTx must carry org through both the
+// insert branch (first pull of a synced observation) and the update branch
+// (a later pull for the same sync_id), the same way it already preserves
+// chronology and revision metadata.
+func TestApplyPulledObservationPreservesOrgOnInsertAndUpdate(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("remote-org-session", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	insert := SyncMutation{
+		Seq:       10,
+		TargetKey: DefaultSyncTargetKey,
+		Entity:    SyncEntityObservation,
+		EntityKey: "obs-org-1",
+		Op:        SyncOpUpsert,
+		Payload:   `{"sync_id":"obs-org-1","session_id":"remote-org-session","type":"decision","title":"org meta","content":"preserve org on insert","project":"engram","scope":"project","org":"acme-corp","created_at":"2024-01-01 00:00:00","updated_at":"2024-01-05 12:30:00"}`,
+	}
+	if err := s.ApplyPulledMutation(DefaultSyncTargetKey, insert); err != nil {
+		t.Fatalf("apply pulled observation insert: %v", err)
+	}
+
+	obs, err := s.GetObservationBySyncID("obs-org-1")
+	if err != nil {
+		t.Fatalf("get pulled observation after insert: %v", err)
+	}
+	if obs.Org == nil || *obs.Org != "acme-corp" {
+		t.Fatalf("expected org acme-corp after insert, got %#v", obs.Org)
+	}
+
+	update := SyncMutation{
+		Seq:       11,
+		TargetKey: DefaultSyncTargetKey,
+		Entity:    SyncEntityObservation,
+		EntityKey: "obs-org-1",
+		Op:        SyncOpUpsert,
+		Payload:   `{"sync_id":"obs-org-1","session_id":"remote-org-session","type":"decision","title":"org meta","content":"preserve org on update","project":"engram","scope":"project","org":"globex-inc","created_at":"2024-01-01 00:00:00","updated_at":"2024-01-06 08:00:00"}`,
+	}
+	if err := s.ApplyPulledMutation(DefaultSyncTargetKey, update); err != nil {
+		t.Fatalf("apply pulled observation update: %v", err)
+	}
+
+	obs, err = s.GetObservationBySyncID("obs-org-1")
+	if err != nil {
+		t.Fatalf("get pulled observation after update: %v", err)
+	}
+	if obs.Org == nil || *obs.Org != "globex-inc" {
+		t.Fatalf("expected org globex-inc after update, got %#v", obs.Org)
+	}
+}
+
+// TestApplyPulledObservationLegacyPayloadPreservesOrg is a regression test:
+// a pulled payload from before org existed (#776) omits the "org" key
+// entirely, decoding syncObservationPayload.Org as nil. applyObservationUpsertTx
+// must preserve the existing org in that case rather than overwriting it with
+// NULL — the same nil-check-preserve pattern it already applies to
+// last_seen_at, created_at, and updated_at. A payload that explicitly carries
+// an empty org must still be honored as a real clear, not preserved.
+func TestApplyPulledObservationLegacyPayloadPreservesOrg(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("legacy-org-session", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	seed := SyncMutation{
+		Seq:       20,
+		TargetKey: DefaultSyncTargetKey,
+		Entity:    SyncEntityObservation,
+		EntityKey: "obs-legacy-org",
+		Op:        SyncOpUpsert,
+		Payload:   `{"sync_id":"obs-legacy-org","session_id":"legacy-org-session","type":"decision","title":"legacy org meta","content":"seed with org","project":"engram","scope":"project","org":"acme-corp","created_at":"2024-01-01 00:00:00","updated_at":"2024-01-05 12:30:00"}`,
+	}
+	if err := s.ApplyPulledMutation(DefaultSyncTargetKey, seed); err != nil {
+		t.Fatalf("seed pulled observation: %v", err)
+	}
+
+	// A legacy payload with no "org" key at all must not clobber the seeded org.
+	legacyUpdate := SyncMutation{
+		Seq:       21,
+		TargetKey: DefaultSyncTargetKey,
+		Entity:    SyncEntityObservation,
+		EntityKey: "obs-legacy-org",
+		Op:        SyncOpUpsert,
+		Payload:   `{"sync_id":"obs-legacy-org","session_id":"legacy-org-session","type":"decision","title":"legacy org meta","content":"updated by a pre-org payload","project":"engram","scope":"project","created_at":"2024-01-01 00:00:00","updated_at":"2024-01-06 08:00:00"}`,
+	}
+	if err := s.ApplyPulledMutation(DefaultSyncTargetKey, legacyUpdate); err != nil {
+		t.Fatalf("apply legacy-shaped update: %v", err)
+	}
+	obs, err := s.GetObservationBySyncID("obs-legacy-org")
+	if err != nil {
+		t.Fatalf("get observation after legacy update: %v", err)
+	}
+	if obs.Org == nil || *obs.Org != "acme-corp" {
+		t.Fatalf("expected org acme-corp preserved through legacy payload, got %#v", obs.Org)
+	}
+	if obs.Content != "updated by a pre-org payload" {
+		t.Fatalf("expected content updated by legacy payload, got %q", obs.Content)
+	}
+
+	// A payload that explicitly carries an empty org must clear it, not
+	// preserve the old value — presence, not truthiness, is what matters.
+	explicitClear := SyncMutation{
+		Seq:       22,
+		TargetKey: DefaultSyncTargetKey,
+		Entity:    SyncEntityObservation,
+		EntityKey: "obs-legacy-org",
+		Op:        SyncOpUpsert,
+		Payload:   `{"sync_id":"obs-legacy-org","session_id":"legacy-org-session","type":"decision","title":"legacy org meta","content":"explicitly cleared org","project":"engram","scope":"project","org":"","created_at":"2024-01-01 00:00:00","updated_at":"2024-01-07 08:00:00"}`,
+	}
+	if err := s.ApplyPulledMutation(DefaultSyncTargetKey, explicitClear); err != nil {
+		t.Fatalf("apply explicit-clear update: %v", err)
+	}
+	obs, err = s.GetObservationBySyncID("obs-legacy-org")
+	if err != nil {
+		t.Fatalf("get observation after explicit clear: %v", err)
+	}
+	if derefString(obs.Org) != "" {
+		t.Fatalf("expected org cleared by an explicit empty value, got %#v", obs.Org)
+	}
+}
+
 func TestApplyPulledChunkIsAtomicAndRetrySafe(t *testing.T) {
 	s := newTestStore(t)
 
@@ -5461,6 +5939,101 @@ func TestImportObservationUsesLastWriteWinsOrdering(t *testing.T) {
 	}
 	if got := scalarString(t, s, `SELECT title FROM observations WHERE sync_id = ?`, "import-lww-observation"); got != "fractional newer" {
 		t.Fatalf("invalid current changed title to %q", got)
+	}
+}
+
+// TestImportPreservesOrgOnInsertAndUpdate is a regression test for #776:
+// Import must carry org through both the insert branch (new sync_id) and
+// the update branch (an existing sync_id with a newer snapshot), mirroring
+// how the last-write-wins ordering test already covers title/content.
+func TestImportPreservesOrgOnInsertAndUpdate(t *testing.T) {
+	s := newTestStore(t)
+	project := "engram"
+	acme := "acme-corp"
+	globex := "globex-inc"
+
+	base := &ExportData{
+		Sessions:     []Session{{ID: "import-org-session", Project: project, Directory: "/tmp", StartedAt: "2026-01-01 00:00:00"}},
+		Observations: []Observation{{SyncID: "import-org-observation", SessionID: "import-org-session", Type: "note", Title: "org on insert", Content: "org on insert", Project: &project, Scope: "project", Org: &acme, CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-01 00:00:00"}},
+	}
+	if result, err := s.Import(base); err != nil || result.ObservationsImported != 1 {
+		t.Fatalf("base import = %+v, %v", result, err)
+	}
+	obs, err := s.GetObservationBySyncID("import-org-observation")
+	if err != nil {
+		t.Fatalf("get imported observation: %v", err)
+	}
+	if obs.Org == nil || *obs.Org != acme {
+		t.Fatalf("expected org %q after insert, got %#v", acme, obs.Org)
+	}
+
+	newer := *base
+	newer.Observations = []Observation{{SyncID: "import-org-observation", SessionID: "import-org-session", Type: "note", Title: "org on update", Content: "org on update", Project: &project, Scope: "project", Org: &globex, CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-02 00:00:00"}}
+	if result, err := s.Import(&newer); err != nil || result.ObservationsUpdated != 1 {
+		t.Fatalf("newer import = %+v, %v", result, err)
+	}
+	obs, err = s.GetObservationBySyncID("import-org-observation")
+	if err != nil {
+		t.Fatalf("get updated observation: %v", err)
+	}
+	if obs.Org == nil || *obs.Org != globex {
+		t.Fatalf("expected org %q after update, got %#v", globex, obs.Org)
+	}
+}
+
+// TestImportLegacySnapshotPreservesOrg is a regression test: a legacy export
+// snapshot from before org existed (#776) has no Org field set on its
+// Observation values at all — decoding to nil, same shape as a real legacy
+// JSON export file missing the "org" key entirely. Import's update branch
+// must preserve the existing org in that case rather than overwriting it
+// with NULL, the same nil-check-preserve pattern it already applies to
+// created_at, revision_count, and duplicate_count. A newer snapshot that
+// explicitly carries an empty org must still be honored as a real clear.
+func TestImportLegacySnapshotPreservesOrg(t *testing.T) {
+	s := newTestStore(t)
+	project := "engram"
+	acme := "acme-corp"
+	empty := ""
+
+	seed := &ExportData{
+		Sessions:     []Session{{ID: "import-legacy-org-session", Project: project, Directory: "/tmp", StartedAt: "2026-01-01 00:00:00"}},
+		Observations: []Observation{{SyncID: "import-legacy-org-observation", SessionID: "import-legacy-org-session", Type: "note", Title: "legacy org meta", Content: "seed with org", Project: &project, Scope: "project", Org: &acme, CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-01 00:00:00"}},
+	}
+	if result, err := s.Import(seed); err != nil || result.ObservationsImported != 1 {
+		t.Fatalf("seed import = %+v, %v", result, err)
+	}
+
+	// A legacy-shaped snapshot (Org never set, same as a pre-#776 export
+	// file) must not clobber the seeded org.
+	legacy := *seed
+	legacy.Observations = []Observation{{SyncID: "import-legacy-org-observation", SessionID: "import-legacy-org-session", Type: "note", Title: "legacy org meta", Content: "updated by a pre-org snapshot", Project: &project, Scope: "project", CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-02 00:00:00"}}
+	if result, err := s.Import(&legacy); err != nil || result.ObservationsUpdated != 1 {
+		t.Fatalf("legacy-shaped import = %+v, %v", result, err)
+	}
+	obs, err := s.GetObservationBySyncID("import-legacy-org-observation")
+	if err != nil {
+		t.Fatalf("get observation after legacy-shaped import: %v", err)
+	}
+	if obs.Org == nil || *obs.Org != acme {
+		t.Fatalf("expected org %q preserved through legacy-shaped snapshot, got %#v", acme, obs.Org)
+	}
+	if obs.Content != "updated by a pre-org snapshot" {
+		t.Fatalf("expected content updated by legacy-shaped snapshot, got %q", obs.Content)
+	}
+
+	// A snapshot that explicitly carries an empty org must clear it, not
+	// preserve the old value.
+	cleared := *seed
+	cleared.Observations = []Observation{{SyncID: "import-legacy-org-observation", SessionID: "import-legacy-org-session", Type: "note", Title: "legacy org meta", Content: "explicitly cleared org", Project: &project, Scope: "project", Org: &empty, CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-03 00:00:00"}}
+	if result, err := s.Import(&cleared); err != nil || result.ObservationsUpdated != 1 {
+		t.Fatalf("explicit-clear import = %+v, %v", result, err)
+	}
+	obs, err = s.GetObservationBySyncID("import-legacy-org-observation")
+	if err != nil {
+		t.Fatalf("get observation after explicit clear: %v", err)
+	}
+	if derefString(obs.Org) != "" {
+		t.Fatalf("expected org cleared by an explicit empty value, got %#v", obs.Org)
 	}
 }
 
@@ -9746,7 +10319,7 @@ func TestListProjectsWithStats(t *testing.T) {
 		t.Fatalf("AddObservation proj-b: %v", err)
 	}
 
-	stats, err := s.ListProjectsWithStats()
+	stats, err := s.ListProjectsWithStats("")
 	if err != nil {
 		t.Fatalf("ListProjectsWithStats: %v", err)
 	}
@@ -14977,5 +15550,471 @@ func TestLimitContextBytesUTF8AndSmallBudget(t *testing.T) {
 	}
 	if !utf8.ValidString(got) {
 		t.Fatalf("small budget output produced invalid UTF-8: %q", got)
+	}
+}
+
+// ─── Org grouping axis (#776) ────────────────────────────────────────────────
+
+func TestAddObservation_PersistsAndReturnsOrg(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("org-sess", "org-proj", "/tmp/org"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "org-sess",
+		Type:      "decision",
+		Title:     "Org tagged decision",
+		Content:   "This memory belongs to a specific org",
+		Project:   "org-proj",
+		Scope:     "project",
+		Org:       "acme-corp",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+
+	obs, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("GetObservation: %v", err)
+	}
+	if obs.Org == nil || *obs.Org != "acme-corp" {
+		t.Fatalf("expected org %q, got %#v", "acme-corp", obs.Org)
+	}
+}
+
+func TestAddObservation_OrgDefaultsToNilWhenUnset(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("no-org-sess", "no-org-proj", "/tmp/no-org"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "no-org-sess",
+		Type:      "decision",
+		Title:     "Untagged decision",
+		Content:   "This memory has no org",
+		Project:   "no-org-proj",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+
+	obs, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("GetObservation: %v", err)
+	}
+	if obs.Org != nil {
+		t.Fatalf("expected nil org, got %q", *obs.Org)
+	}
+}
+
+// TestAddObservation_TopicKeyRevisionPreservesOrg is a regression test: the
+// topic-key revision UPDATE must keep writing org on every revision. Org is
+// now part of the topic-key identity match (#776, see
+// TestTopicKeyUpsertIsScopedByOrg), so a revision can only happen when the
+// incoming org already equals the existing row's org — dropping `org = ?`
+// from the UPDATE's SET list would silently NULL it out on every revision
+// without a row-count change to notice.
+//
+// This supersedes the scenario this test originally covered, where a second
+// save with a DIFFERENT org was expected to "win" and revise the same row.
+// Under the topic-key-includes-org identity model that is no longer
+// reachable: a different org now starts a separate row instead (see
+// TestTopicKeyUpsertIsScopedByOrg).
+func TestAddObservation_TopicKeyRevisionPreservesOrg(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("org-sess", "org-proj", "/tmp/org"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	firstID, err := s.AddObservation(AddObservationParams{
+		SessionID: "org-sess",
+		Type:      "architecture",
+		Title:     "Auth model",
+		Content:   "Uses JWT with refresh rotation",
+		Project:   "org-proj",
+		Scope:     "project",
+		Org:       "acme-corp",
+		TopicKey:  "architecture/auth-model",
+	})
+	if err != nil {
+		t.Fatalf("add first revision: %v", err)
+	}
+
+	secondID, err := s.AddObservation(AddObservationParams{
+		SessionID: "org-sess",
+		Type:      "architecture",
+		Title:     "Auth model",
+		Content:   "Uses JWT with refresh rotation and rate limiting",
+		Project:   "org-proj",
+		Scope:     "project",
+		Org:       "acme-corp",
+		TopicKey:  "architecture/auth-model",
+	})
+	if err != nil {
+		t.Fatalf("add second revision: %v", err)
+	}
+	if secondID != firstID {
+		t.Fatalf("expected same-org topic-key save to revise the same row, got first=%d second=%d", firstID, secondID)
+	}
+
+	obs, err := s.GetObservation(firstID)
+	if err != nil {
+		t.Fatalf("GetObservation: %v", err)
+	}
+	if obs.Org == nil || *obs.Org != "acme-corp" {
+		t.Fatalf("expected revision to keep org %q, got %#v", "acme-corp", obs.Org)
+	}
+	if obs.Content != "Uses JWT with refresh rotation and rate limiting" {
+		t.Fatalf("expected revision to update content, got %q", obs.Content)
+	}
+}
+
+func TestSearch_FiltersByOrg(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "decision",
+		Title:     "Acme rollout plan",
+		Content:   "Keep the rollout gated behind a feature flag",
+		Project:   "engram",
+		Scope:     "project",
+		Org:       "acme-corp",
+	}); err != nil {
+		t.Fatalf("add acme observation: %v", err)
+	}
+
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "decision",
+		Title:     "Globex rollout plan",
+		Content:   "Keep the rollout gated behind a feature flag",
+		Project:   "engram",
+		Scope:     "project",
+		Org:       "globex-inc",
+	}); err != nil {
+		t.Fatalf("add globex observation: %v", err)
+	}
+
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "decision",
+		Title:     "Unaffiliated rollout plan",
+		Content:   "Keep the rollout gated behind a feature flag",
+		Project:   "engram",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add untagged observation: %v", err)
+	}
+
+	acmeResults, err := s.Search("rollout", SearchOptions{Project: "engram", Org: "acme-corp", Limit: 10})
+	if err != nil {
+		t.Fatalf("search org=acme-corp: %v", err)
+	}
+	if len(acmeResults) != 1 || acmeResults[0].Title != "Acme rollout plan" {
+		t.Fatalf("expected only the acme-corp observation, got %#v", acmeResults)
+	}
+
+	allResults, err := s.Search("rollout", SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("search without org filter: %v", err)
+	}
+	if len(allResults) != 3 {
+		t.Fatalf("expected all 3 observations without an org filter, got %d", len(allResults))
+	}
+}
+
+// TestSearchPreviewsContext_FiltersByOrgFTS is a regression test for #776:
+// buildSearchPreviewFTSQuery must apply the same org filter as the full
+// buildSearchFTSQuery, and scanSearchPreviewRow must expose it on each
+// preview result — matching how the FTS path is already covered for
+// SearchContext by TestSearch_FiltersByOrg.
+func TestSearchPreviewsContext_FiltersByOrgFTS(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "decision",
+		Title:     "Acme rollout plan",
+		Content:   "Keep the rollout gated behind a feature flag",
+		Project:   "engram",
+		Scope:     "project",
+		Org:       "acme-corp",
+	}); err != nil {
+		t.Fatalf("add acme observation: %v", err)
+	}
+
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "decision",
+		Title:     "Globex rollout plan",
+		Content:   "Keep the rollout gated behind a feature flag",
+		Project:   "engram",
+		Scope:     "project",
+		Org:       "globex-inc",
+	}); err != nil {
+		t.Fatalf("add globex observation: %v", err)
+	}
+
+	acmePreviews, err := s.SearchPreviewsContext(context.Background(), "rollout", SearchOptions{Project: "engram", Org: "acme-corp", Limit: 10})
+	if err != nil {
+		t.Fatalf("search previews org=acme-corp: %v", err)
+	}
+	if len(acmePreviews) != 1 || acmePreviews[0].Title != "Acme rollout plan" {
+		t.Fatalf("expected only the acme-corp preview, got %#v", acmePreviews)
+	}
+	if acmePreviews[0].Org == nil || *acmePreviews[0].Org != "acme-corp" {
+		t.Fatalf("expected preview to expose org acme-corp, got %#v", acmePreviews[0].Org)
+	}
+
+	allPreviews, err := s.SearchPreviewsContext(context.Background(), "rollout", SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("search previews without org filter: %v", err)
+	}
+	if len(allPreviews) != 2 {
+		t.Fatalf("expected both previews without an org filter, got %d", len(allPreviews))
+	}
+}
+
+// TestSearchPreviewsContext_FiltersByOrgLIKE is a regression test for #776:
+// a query with a term under 3 runes takes the LIKE fallback path
+// (hasShortFTSTerm), and buildSearchPreviewLIKEQuery must apply the org
+// filter there too, not just on the FTS path.
+func TestSearchPreviewsContext_FiltersByOrgLIKE(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "decision",
+		Title:     "Acme rollout plan",
+		Content:   "Keep the rollout gated behind a feature flag",
+		Project:   "engram",
+		Scope:     "project",
+		Org:       "acme-corp",
+	}); err != nil {
+		t.Fatalf("add acme observation: %v", err)
+	}
+
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "decision",
+		Title:     "Globex rollout plan",
+		Content:   "Keep the rollout gated behind a feature flag",
+		Project:   "engram",
+		Scope:     "project",
+		Org:       "globex-inc",
+	}); err != nil {
+		t.Fatalf("add globex observation: %v", err)
+	}
+
+	const shortQuery = "ro" // 2 runes: forces hasShortFTSTerm's LIKE fallback
+	acmePreviews, err := s.SearchPreviewsContext(context.Background(), shortQuery, SearchOptions{Project: "engram", Org: "acme-corp", Limit: 10})
+	if err != nil {
+		t.Fatalf("search previews org=acme-corp: %v", err)
+	}
+	if len(acmePreviews) != 1 || acmePreviews[0].Title != "Acme rollout plan" {
+		t.Fatalf("expected only the acme-corp preview via LIKE fallback, got %#v", acmePreviews)
+	}
+	if acmePreviews[0].Org == nil || *acmePreviews[0].Org != "acme-corp" {
+		t.Fatalf("expected preview to expose org acme-corp, got %#v", acmePreviews[0].Org)
+	}
+
+	allPreviews, err := s.SearchPreviewsContext(context.Background(), shortQuery, SearchOptions{Project: "engram", Limit: 10})
+	if err != nil {
+		t.Fatalf("search previews without org filter: %v", err)
+	}
+	if len(allPreviews) != 2 {
+		t.Fatalf("expected both previews without an org filter, got %d", len(allPreviews))
+	}
+}
+
+func TestSearch_TopicKeyDirectMatchFiltersByOrg(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s1", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "architecture",
+		Title:     "Auth model",
+		Content:   "Uses JWT with refresh rotation",
+		Project:   "engram",
+		Scope:     "project",
+		Org:       "acme-corp",
+		TopicKey:  "architecture/auth-model",
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	results, err := s.Search("architecture/auth-model", SearchOptions{Project: "engram", Org: "globex-inc", Limit: 10})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("expected topic_key direct match to respect org filter, got %#v", results)
+	}
+
+	results, err = s.Search("architecture/auth-model", SearchOptions{Project: "engram", Org: "acme-corp", Limit: 10})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected topic_key direct match for the matching org, got %#v", results)
+	}
+}
+
+// TestGetObservation_BackwardCompatNullOrg proves that rows persisted before
+// the org column existed (simulated here via a raw INSERT that omits it,
+// leaving SQLite's default NULL) still load cleanly through the same
+// observationSelectColumns/scanObservationRow path used everywhere else.
+func TestGetObservation_BackwardCompatNullOrg(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("legacy-sess", "legacy-proj", "/tmp/legacy"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	res, err := s.db.Exec(
+		`INSERT INTO observations (sync_id, session_id, type, title, content, project, scope, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+		"obs-legacy-no-org", "legacy-sess", "manual", "Legacy row", "Predates the org column", "legacy-proj", "project",
+	)
+	if err != nil {
+		t.Fatalf("raw legacy insert: %v", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("last insert id: %v", err)
+	}
+
+	obs, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("GetObservation on legacy row: %v", err)
+	}
+	if obs.Org != nil {
+		t.Fatalf("expected legacy row org to be nil, got %q", *obs.Org)
+	}
+	if obs.Title != "Legacy row" {
+		t.Fatalf("expected legacy row to load correctly, got %#v", obs)
+	}
+}
+
+func TestListProjectsWithStats_FiltersByOrg(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s1", "proj-acme", "/work/acme"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if err := s.CreateSession("s2", "proj-globex", "/work/globex"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "decision",
+		Title:     "acme obs",
+		Content:   "acme content",
+		Project:   "proj-acme",
+		Scope:     "project",
+		Org:       "acme-corp",
+	}); err != nil {
+		t.Fatalf("AddObservation proj-acme: %v", err)
+	}
+
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "s2",
+		Type:      "decision",
+		Title:     "globex obs",
+		Content:   "globex content",
+		Project:   "proj-globex",
+		Scope:     "project",
+		Org:       "globex-inc",
+	}); err != nil {
+		t.Fatalf("AddObservation proj-globex: %v", err)
+	}
+
+	stats, err := s.ListProjectsWithStats("acme-corp")
+	if err != nil {
+		t.Fatalf("ListProjectsWithStats: %v", err)
+	}
+	if len(stats) != 1 || stats[0].Name != "proj-acme" {
+		t.Fatalf("expected only proj-acme when filtering by org=acme-corp, got %#v", stats)
+	}
+
+	unfiltered, err := s.ListProjectsWithStats("")
+	if err != nil {
+		t.Fatalf("ListProjectsWithStats unfiltered: %v", err)
+	}
+	if len(unfiltered) < 2 {
+		t.Fatalf("expected at least 2 projects without an org filter, got %d", len(unfiltered))
+	}
+}
+
+// TestListProjectsWithStats_OrgFilterExcludesSessionAndPromptOnlyProjects is a
+// regression test for #776: org lives only on observations, so an org filter
+// must exclude a project that only has sessions and a project that only has
+// prompts, rather than reintroducing them from session or prompt data alone
+// (the guard clauses in ListProjectsWithStats' session/prompt merge loops).
+func TestListProjectsWithStats_OrgFilterExcludesSessionAndPromptOnlyProjects(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s1", "session-only-proj", "/work/session-only"); err != nil {
+		t.Fatalf("create session-only session: %v", err)
+	}
+	if err := s.CreateSession("s2", "prompt-only-proj", "/work/prompt-only"); err != nil {
+		t.Fatalf("create prompt-only session: %v", err)
+	}
+	if _, err := s.AddPrompt(AddPromptParams{
+		SessionID: "s2",
+		Content:   "a prompt with no observation",
+		Project:   "prompt-only-proj",
+	}); err != nil {
+		t.Fatalf("AddPrompt prompt-only-proj: %v", err)
+	}
+	if err := s.CreateSession("s3", "org-proj", "/work/org-proj"); err != nil {
+		t.Fatalf("create org-proj session: %v", err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "s3",
+		Type:      "decision",
+		Title:     "org-tagged obs",
+		Content:   "org-tagged content",
+		Project:   "org-proj",
+		Scope:     "project",
+		Org:       "acme-corp",
+	}); err != nil {
+		t.Fatalf("AddObservation org-proj: %v", err)
+	}
+
+	stats, err := s.ListProjectsWithStats("acme-corp")
+	if err != nil {
+		t.Fatalf("ListProjectsWithStats: %v", err)
+	}
+	if len(stats) != 1 || stats[0].Name != "org-proj" {
+		t.Fatalf("expected only org-proj when filtering by org=acme-corp, got %#v", stats)
+	}
+
+	unfiltered, err := s.ListProjectsWithStats("")
+	if err != nil {
+		t.Fatalf("ListProjectsWithStats unfiltered: %v", err)
+	}
+	names := make(map[string]bool, len(unfiltered))
+	for _, p := range unfiltered {
+		names[p.Name] = true
+	}
+	for _, want := range []string{"session-only-proj", "prompt-only-proj", "org-proj"} {
+		if !names[want] {
+			t.Fatalf("expected %q present without an org filter, got %#v", want, unfiltered)
+		}
 	}
 }

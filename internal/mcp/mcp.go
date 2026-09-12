@@ -454,6 +454,9 @@ func registerTools(srv *server.MCPServer, s *store.Store, cfg MCPConfig, allowli
 				mcp.WithString("scope",
 					mcp.Description("Filter by scope: project, personal, or global. Omit to apply no scope filter."),
 				),
+				mcp.WithString("org",
+					mcp.Description("Filter by org — a free-text grouping axis orthogonal to scope. Omit to apply no org filter."),
+				),
 				mcp.WithString("match_mode",
 					mcp.Description("Token matching: \"all\" (default — every token must match, FTS5 AND) or \"any\" (any token matches — broader recall for multi-token queries). Any other value returns an error."),
 				),
@@ -527,6 +530,9 @@ Examples:
 				),
 				mcp.WithString("project",
 					mcp.Description("Optional explicit project for this memory. Accepted only when backed by known context (existing project, matching session, repo config, or ambiguous-project recovery); invalid or unbacked names fail loudly."),
+				),
+				mcp.WithString("org",
+					mcp.Description("Optional org — a free-text grouping axis orthogonal to scope. Overrides the org inherited from .engram/config.json for the current directory, if any."),
 				),
 				mcp.WithString("project_choice_reason",
 					mcp.Description("Must be user_selected_after_ambiguous_project, and only after the user explicitly chose one of available_projects from an ambiguous_project error."),
@@ -994,6 +1000,9 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 				mcp.WithDestructiveHintAnnotation(false),
 				mcp.WithIdempotentHintAnnotation(true),
 				mcp.WithOpenWorldHintAnnotation(false),
+				mcp.WithString("org",
+					mcp.Description("Filter by org — a free-text grouping axis orthogonal to scope. Omit to apply no org filter."),
+				),
 			),
 			handleListProjects(s),
 		)
@@ -1137,7 +1146,8 @@ ERROR: Returns IsError=true if IDs are unknown, relation is invalid, or cross-pr
 // a store-query failure is surfaced as a tool error.
 func handleListProjects(s *store.Store) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		projects, err := s.ListProjectsWithStats()
+		org, _ := req.GetArguments()["org"].(string)
+		projects, err := s.ListProjectsWithStats(org)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("List projects failed: %v", err)), nil
 		}
@@ -1163,9 +1173,15 @@ func handleCurrentProject(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc 
 		cwd, _ := os.Getwd()
 		res := projectpkg.DetectProjectFull(cwd)
 		if processRes, ok, err := processProjectResult(cfg.DefaultProject); ok {
+			// A process-level override (ENGRAM_PROJECT / mcp --project) only
+			// decides Project/Source/Path — it never reads .engram/config.json,
+			// so it can't know org. Carry the cwd-detected Org through so the
+			// override doesn't silently hide a repo's org label (#776).
+			org := res.Org
 			if err != nil {
-				res = projectpkg.DetectionResult{Source: projectpkg.SourceProcessOverride, Error: err}
+				res = projectpkg.DetectionResult{Source: projectpkg.SourceProcessOverride, Error: err, Org: org}
 			} else {
+				processRes.Org = org
 				res = processRes
 			}
 		}
@@ -1176,6 +1192,9 @@ func handleCurrentProject(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc 
 			"project_path":       res.Path,
 			"cwd":                cwd,
 			"available_projects": res.AvailableProjects,
+		}
+		if res.Org != "" {
+			envelope["org"] = res.Org
 		}
 		if res.Warning != "" {
 			envelope["warning"] = res.Warning
@@ -1195,6 +1214,7 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		typ, _ := req.GetArguments()["type"].(string)
 		projectOverride, _ := req.GetArguments()["project"].(string)
 		scope, _ := req.GetArguments()["scope"].(string)
+		org, _ := req.GetArguments()["org"].(string)
 		matchMode, _ := req.GetArguments()["match_mode"].(string)
 		responseFormat, _ := req.GetArguments()["response_format"].(string)
 		allProjects := boolArg(req, "all_projects", false)
@@ -1244,6 +1264,7 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			Type:      typ,
 			Project:   searchProject,
 			Scope:     scope,
+			Org:       org,
 			Limit:     limit,
 			MatchMode: matchMode,
 		})
@@ -1310,6 +1331,9 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			}
 			if r.Project != nil {
 				entry["project"] = *r.Project
+			}
+			if r.Org != nil {
+				entry["org"] = *r.Org
 			}
 			if r.ReviewAfter != nil {
 				entry["review_after"] = *r.ReviewAfter
@@ -1449,6 +1473,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		sessionID, _ := req.GetArguments()["session_id"].(string)
 		scope, _ := req.GetArguments()["scope"].(string)
 		topicKey, _ := req.GetArguments()["topic_key"].(string)
+		org, _ := req.GetArguments()["org"].(string)
 		projectChoice, _ := req.GetArguments()["project"].(string)
 		_, explicitProjectProvided := req.GetArguments()["project"]
 		projectChoiceReason, _ := req.GetArguments()["project_choice_reason"].(string)
@@ -1512,6 +1537,17 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		// Ensure the implicit MCP session exists with the current working directory.
 		_ = ensureImplicitSessionWithCWD(s, sessionID, project)
 
+		// org wins when given explicitly; otherwise inherit from the nearest
+		// .engram/config.json org field for cwd, independent of how the project
+		// name itself was resolved (#776).
+		if strings.TrimSpace(org) == "" {
+			if cwd, cwdErr := os.Getwd(); cwdErr == nil {
+				if cfgResult := projectpkg.DetectProjectFull(cwd); cfgResult.Org != "" {
+					org = cfgResult.Org
+				}
+			}
+		}
+
 		truncation := s.ContentTruncation(content)
 
 		savedID, err := s.AddObservation(store.AddObservationParams{
@@ -1522,6 +1558,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 			Project:   project,
 			Scope:     scope,
 			TopicKey:  topicKey,
+			Org:       org,
 		})
 		if err != nil {
 			return mcp.NewToolResultError("Failed to save: " + err.Error()), nil
@@ -2315,12 +2352,23 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		// Ensure the implicit MCP session exists with the current working directory.
 		_ = ensureImplicitSessionWithCWD(s, sessionID, project)
 
+		// org inherits from the nearest .engram/config.json org field for cwd,
+		// the same as handleSave (#776) — mem_session_summary has no explicit
+		// org argument, so config inheritance is the only source.
+		var org string
+		if cwd, cwdErr := os.Getwd(); cwdErr == nil {
+			if cfgResult := projectpkg.DetectProjectFull(cwd); cfgResult.Org != "" {
+				org = cfgResult.Org
+			}
+		}
+
 		savedID, err := s.AddObservation(store.AddObservationParams{
 			SessionID: sessionID,
 			Type:      "session_summary",
 			Title:     fmt.Sprintf("Session summary: %s", project),
 			Content:   content,
 			Project:   project,
+			Org:       org,
 		})
 		if err != nil {
 			return mcp.NewToolResultError("Failed to save session summary: " + err.Error()), nil

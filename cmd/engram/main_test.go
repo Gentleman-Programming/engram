@@ -756,6 +756,250 @@ func TestCmdSaveExplicitProjectFlagBeatsEnvironmentOverride(t *testing.T) {
 	assertCmdSaveOwnedBy(t, cfg, "Flag-Project", "flag-project")
 }
 
+func TestCmdSaveResolvesConfiguredOrgWithoutFlag(t *testing.T) {
+	stubExitWithPanic(t)
+	cfg := testConfig(t)
+	cwd := t.TempDir()
+	configDir := filepath.Join(cwd, ".engram")
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		t.Fatalf("create project config directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(`{"project_name":"Configured-Project","org":"acme-corp"}`), 0644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+	withCwd(t, cwd)
+	withArgs(t, "engram", "save", "resolved-title", "resolved-content")
+
+	stdout, stderr := captureOutput(t, func() { cmdSave(cfg) })
+	if stderr != "" || !strings.Contains(stdout, "Memory saved:") {
+		t.Fatalf("cmdSave output = stdout %q stderr %q", stdout, stderr)
+	}
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	observations, err := s.RecentObservations("configured-project", "project", 10)
+	if err != nil || len(observations) != 1 {
+		t.Fatalf("resolved observations = %#v, err=%v", observations, err)
+	}
+	if observations[0].Org == nil || *observations[0].Org != "acme-corp" {
+		t.Fatalf("expected org inherited from config, got %#v", observations[0].Org)
+	}
+}
+
+func TestCmdSaveExplicitOrgFlagBeatsConfig(t *testing.T) {
+	stubExitWithPanic(t)
+	cfg := testConfig(t)
+	cwd := t.TempDir()
+	configDir := filepath.Join(cwd, ".engram")
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		t.Fatalf("create project config directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(`{"project_name":"Configured-Project","org":"acme-corp"}`), 0644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+	withCwd(t, cwd)
+	withArgs(t, "engram", "save", "resolved-title", "resolved-content", "--org", "globex-inc")
+
+	stdout, stderr := captureOutput(t, func() { cmdSave(cfg) })
+	if stderr != "" || !strings.Contains(stdout, "Memory saved:") {
+		t.Fatalf("cmdSave output = stdout %q stderr %q", stdout, stderr)
+	}
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	observations, err := s.RecentObservations("configured-project", "project", 10)
+	if err != nil || len(observations) != 1 {
+		t.Fatalf("resolved observations = %#v, err=%v", observations, err)
+	}
+	if observations[0].Org == nil || *observations[0].Org != "globex-inc" {
+		t.Fatalf("expected explicit --org to beat config, got %#v", observations[0].Org)
+	}
+}
+
+// TestCmdSaveRejectsInvalidOrgValue mirrors TestCmdSearchRejectsInvalidOrgValue
+// for `engram save --org`.
+func TestCmdSaveRejectsInvalidOrgValue(t *testing.T) {
+	t.Run("--org at end of args errors", func(t *testing.T) {
+		cfg := testConfig(t)
+		withArgs(t, "engram", "save", "a-title", "a-content", "--org")
+		_, stderr, exitCode := captureExitPanic(t, func() { cmdSave(cfg) })
+		if exitCode != 1 || !strings.Contains(stderr, "--org requires a value") {
+			t.Fatalf("exitCode=%d stderr=%q, want exit 1 and a clear --org error", exitCode, stderr)
+		}
+	})
+
+	t.Run("--org followed by another flag errors", func(t *testing.T) {
+		cfg := testConfig(t)
+		withArgs(t, "engram", "save", "a-title", "a-content", "--org", "--scope", "personal")
+		_, stderr, exitCode := captureExitPanic(t, func() { cmdSave(cfg) })
+		if exitCode != 1 || !strings.Contains(stderr, "--org requires a value") {
+			t.Fatalf("exitCode=%d stderr=%q, want exit 1 and a clear --org error", exitCode, stderr)
+		}
+	})
+
+	t.Run("--org with a real value still works", func(t *testing.T) {
+		cfg := testConfig(t)
+		withArgs(t, "engram", "save", "a-title", "a-content", "--org", "acme-corp")
+		_, stderr, exitCode := captureExitPanic(t, func() { cmdSave(cfg) })
+		if exitCode != 0 || strings.Contains(stderr, "--org requires a value") {
+			t.Fatalf("exitCode=%d stderr=%q, want a normal save", exitCode, stderr)
+		}
+	})
+}
+
+func TestCmdSearchFiltersByOrg(t *testing.T) {
+	cfg := testConfig(t)
+
+	withArgs(t, "engram", "save", "acme-title", "acme-content", "--project", "alpha", "--org", "acme-corp")
+	if _, stderr := captureOutput(t, func() { cmdSave(cfg) }); stderr != "" {
+		t.Fatalf("unexpected stderr saving acme observation: %q", stderr)
+	}
+	withArgs(t, "engram", "save", "globex-title", "globex-content", "--project", "alpha", "--org", "globex-inc")
+	if _, stderr := captureOutput(t, func() { cmdSave(cfg) }); stderr != "" {
+		t.Fatalf("unexpected stderr saving globex observation: %q", stderr)
+	}
+
+	withArgs(t, "engram", "search", "content", "--project", "alpha", "--org", "acme-corp", "--limit", "10")
+	stdout, stderr := captureOutput(t, func() { cmdSearch(cfg) })
+	if stderr != "" {
+		t.Fatalf("expected no stderr, got: %q", stderr)
+	}
+	if !strings.Contains(stdout, "acme-title") || strings.Contains(stdout, "globex-title") {
+		t.Fatalf("expected only the acme-corp result, got: %q", stdout)
+	}
+}
+
+// TestCmdSearchRejectsInvalidOrgValue is a regression test: --org at the end
+// of the args, or immediately followed by another flag, was silently
+// consumed as an empty or flag-shaped org instead of erroring, so a typo'd
+// invocation quietly searched with the wrong (or no) org filter.
+func TestCmdSearchRejectsInvalidOrgValue(t *testing.T) {
+	t.Run("--org at end of args errors", func(t *testing.T) {
+		cfg := testConfig(t)
+		withArgs(t, "engram", "search", "content", "--org")
+		_, stderr, exitCode := captureExitPanic(t, func() { cmdSearch(cfg) })
+		if exitCode != 1 || !strings.Contains(stderr, "--org requires a value") {
+			t.Fatalf("exitCode=%d stderr=%q, want exit 1 and a clear --org error", exitCode, stderr)
+		}
+	})
+
+	t.Run("--org followed by another flag errors", func(t *testing.T) {
+		cfg := testConfig(t)
+		withArgs(t, "engram", "search", "content", "--org", "--scope", "personal")
+		_, stderr, exitCode := captureExitPanic(t, func() { cmdSearch(cfg) })
+		if exitCode != 1 || !strings.Contains(stderr, "--org requires a value") {
+			t.Fatalf("exitCode=%d stderr=%q, want exit 1 and a clear --org error", exitCode, stderr)
+		}
+	})
+
+	t.Run("--org with a real value still works", func(t *testing.T) {
+		cfg := testConfig(t)
+		withArgs(t, "engram", "search", "content", "--org", "acme-corp")
+		_, stderr, exitCode := captureExitPanic(t, func() { cmdSearch(cfg) })
+		if exitCode != 0 || strings.Contains(stderr, "--org requires a value") {
+			t.Fatalf("exitCode=%d stderr=%q, want a normal search run", exitCode, stderr)
+		}
+	})
+}
+
+// TestCmdSearchDisplaysOrgInResults is a regression test: search results
+// printed project and scope but never org, so a cross-project search could
+// not tell which org each result belonged to. Non-nil org must render the
+// same way project already does; an untagged result must omit it.
+func TestCmdSearchDisplaysOrgInResults(t *testing.T) {
+	cfg := testConfig(t)
+
+	withArgs(t, "engram", "save", "acme-title", "acme-content", "--project", "alpha", "--org", "acme-corp")
+	if _, stderr := captureOutput(t, func() { cmdSave(cfg) }); stderr != "" {
+		t.Fatalf("unexpected stderr saving acme observation: %q", stderr)
+	}
+	withArgs(t, "engram", "save", "globex-title", "globex-content", "--project", "alpha", "--org", "globex-inc")
+	if _, stderr := captureOutput(t, func() { cmdSave(cfg) }); stderr != "" {
+		t.Fatalf("unexpected stderr saving globex observation: %q", stderr)
+	}
+	withArgs(t, "engram", "save", "untagged-title", "untagged-content", "--project", "alpha")
+	if _, stderr := captureOutput(t, func() { cmdSave(cfg) }); stderr != "" {
+		t.Fatalf("unexpected stderr saving untagged observation: %q", stderr)
+	}
+
+	withArgs(t, "engram", "search", "content", "--project", "alpha", "--limit", "10")
+	stdout, stderr := captureOutput(t, func() { cmdSearch(cfg) })
+	if stderr != "" {
+		t.Fatalf("expected no stderr, got: %q", stderr)
+	}
+	if !strings.Contains(stdout, "| org: acme-corp") {
+		t.Fatalf("expected acme-corp org label in results, got: %q", stdout)
+	}
+	if !strings.Contains(stdout, "| org: globex-inc") {
+		t.Fatalf("expected globex-inc org label in results, got: %q", stdout)
+	}
+	if got := strings.Count(stdout, "| org:"); got != 2 {
+		t.Fatalf("expected exactly 2 org labels (untagged result must omit org), got %d in: %q", got, stdout)
+	}
+}
+
+func TestCmdProjectsListFiltersByOrg(t *testing.T) {
+	cfg := testConfig(t)
+
+	withArgs(t, "engram", "save", "acme-title", "acme-content", "--project", "acme-project", "--org", "acme-corp")
+	if _, stderr := captureOutput(t, func() { cmdSave(cfg) }); stderr != "" {
+		t.Fatalf("unexpected stderr saving acme observation: %q", stderr)
+	}
+	withArgs(t, "engram", "save", "globex-title", "globex-content", "--project", "globex-project", "--org", "globex-inc")
+	if _, stderr := captureOutput(t, func() { cmdSave(cfg) }); stderr != "" {
+		t.Fatalf("unexpected stderr saving globex observation: %q", stderr)
+	}
+
+	withArgs(t, "engram", "projects", "list", "--org", "acme-corp")
+	stdout, stderr := captureOutput(t, func() { cmdProjectsList(cfg) })
+	if stderr != "" {
+		t.Fatalf("expected no stderr, got: %q", stderr)
+	}
+	if !strings.Contains(stdout, "Projects (1) — org: acme-corp") {
+		t.Fatalf("expected org-scoped header, got: %q", stdout)
+	}
+	if !strings.Contains(stdout, "acme-project") || strings.Contains(stdout, "globex-project") {
+		t.Fatalf("expected only acme-project in org-filtered listing, got: %q", stdout)
+	}
+}
+
+// TestCmdProjectsListRejectsInvalidOrgValue mirrors
+// TestCmdSearchRejectsInvalidOrgValue for `engram projects list --org`.
+func TestCmdProjectsListRejectsInvalidOrgValue(t *testing.T) {
+	t.Run("--org at end of args errors", func(t *testing.T) {
+		cfg := testConfig(t)
+		withArgs(t, "engram", "projects", "list", "--org")
+		_, stderr, exitCode := captureExitPanic(t, func() { cmdProjectsList(cfg) })
+		if exitCode != 1 || !strings.Contains(stderr, "--org requires a value") {
+			t.Fatalf("exitCode=%d stderr=%q, want exit 1 and a clear --org error", exitCode, stderr)
+		}
+	})
+
+	t.Run("--org followed by another flag errors", func(t *testing.T) {
+		cfg := testConfig(t)
+		withArgs(t, "engram", "projects", "list", "--org", "--all")
+		_, stderr, exitCode := captureExitPanic(t, func() { cmdProjectsList(cfg) })
+		if exitCode != 1 || !strings.Contains(stderr, "--org requires a value") {
+			t.Fatalf("exitCode=%d stderr=%q, want exit 1 and a clear --org error", exitCode, stderr)
+		}
+	})
+
+	t.Run("--org with a real value still works", func(t *testing.T) {
+		cfg := testConfig(t)
+		withArgs(t, "engram", "projects", "list", "--org", "acme-corp")
+		_, stderr, exitCode := captureExitPanic(t, func() { cmdProjectsList(cfg) })
+		if exitCode != 0 || strings.Contains(stderr, "--org requires a value") {
+			t.Fatalf("exitCode=%d stderr=%q, want a normal listing run", exitCode, stderr)
+		}
+	})
+}
+
 func TestCmdSaveUsesDetectionSeamAndPrintsNormalizationWarning(t *testing.T) {
 	stubExitWithPanic(t)
 	cfg := testConfig(t)
@@ -1800,7 +2044,7 @@ func TestCmdProjectsPrunePathsOnlyDryRun(t *testing.T) {
 		t.Fatalf("store.New: %v", err)
 	}
 	defer s.Close()
-	stats, err := s.ListProjectsWithStats()
+	stats, err := s.ListProjectsWithStats("")
 	if err != nil {
 		t.Fatalf("ListProjectsWithStats: %v", err)
 	}
@@ -1852,7 +2096,7 @@ func TestCmdProjectsPrunePathsOnly(t *testing.T) {
 			t.Fatalf("pruned session %q still exists", sessionID)
 		}
 	}
-	stats, err := s.ListProjectsWithStats()
+	stats, err := s.ListProjectsWithStats("")
 	if err != nil {
 		t.Fatalf("ListProjectsWithStats: %v", err)
 	}
@@ -2731,6 +2975,41 @@ func TestObsidianExportGraphConfigInvalid(t *testing.T) {
 	if !strings.Contains(stderr, "graph-config") {
 		t.Fatalf("expected 'graph-config' in stderr, got: %q", stderr)
 	}
+}
+
+// TestObsidianExportRejectsInvalidOrgValue mirrors
+// TestCmdSearchRejectsInvalidOrgValue for `engram obsidian-export --org`.
+func TestObsidianExportRejectsInvalidOrgValue(t *testing.T) {
+	t.Run("--org at end of args errors", func(t *testing.T) {
+		cfg := testConfig(t)
+		vaultDir := t.TempDir()
+		withArgs(t, "engram", "obsidian-export", "--vault", vaultDir, "--org")
+		_, stderr, code := captureExitPanic(t, func() { cmdObsidianExport(cfg) })
+		if code != 1 || !strings.Contains(stderr, "--org requires a value") {
+			t.Fatalf("exitCode=%d stderr=%q, want exit 1 and a clear --org error", code, stderr)
+		}
+	})
+
+	t.Run("--org followed by another flag errors", func(t *testing.T) {
+		cfg := testConfig(t)
+		vaultDir := t.TempDir()
+		withArgs(t, "engram", "obsidian-export", "--vault", vaultDir, "--org", "--all")
+		_, stderr, code := captureExitPanic(t, func() { cmdObsidianExport(cfg) })
+		if code != 1 || !strings.Contains(stderr, "--org requires a value") {
+			t.Fatalf("exitCode=%d stderr=%q, want exit 1 and a clear --org error", code, stderr)
+		}
+	})
+
+	t.Run("--org with a real value still works", func(t *testing.T) {
+		cfg := testConfig(t)
+		vaultDir := t.TempDir()
+		mustSeedObservation(t, cfg, "obsidian-org-flag", "obsidian-org-flag", "bugfix", "Org flag export", "content", "project")
+		withArgs(t, "engram", "obsidian-export", "--vault", vaultDir, "--project", "obsidian-org-flag", "--org", "acme-corp")
+		_, stderr, code := captureExitPanic(t, func() { cmdObsidianExport(cfg) })
+		if code != 0 || strings.Contains(stderr, "--org requires a value") {
+			t.Fatalf("exitCode=%d stderr=%q, want a normal export run", code, stderr)
+		}
+	})
 }
 
 // TestObsidianExportGraphConfigDefaultsToPreserve verifies that when --graph-config
