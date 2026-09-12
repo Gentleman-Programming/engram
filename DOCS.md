@@ -811,6 +811,12 @@ Child scan constraints: depth=1, max 20 entries, 200ms timeout, skips hidden dir
 
 The Git binding is private to each clone and shared by that clone's linked worktrees. Independent clones and forks establish fresh opaque bindings. Cross-clone identity sharing and alias propagation are not currently supported.
 
+### Initialize an explicit project identity
+
+Use `engram init [project_name] [--force]` to write `.engram/config.json` in the current directory. When `project_name` is omitted, Engram uses the current directory basename. `--force` replaces an existing config; without it, init stops and tells you that the config already exists.
+
+This is the explicit resolution path for a non-Git aggregator workspace that contains multiple child repositories. Run `engram init aggregator-name` at the aggregator root so its config resolves the workspace identity before child-repository scanning reports ambiguity.
+
 ### Response envelope
 
 Most successful MCP tool responses use this envelope:
