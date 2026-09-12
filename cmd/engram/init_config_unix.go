@@ -28,6 +28,10 @@ func openStableInitConfigDirectory(path string) (stableInitConfigDirectory, erro
 			return nil, fmt.Errorf(".engram must be a real directory, not a symlink")
 		}
 		if errors.Is(err, unix.ENOTDIR) {
+			var stat unix.Stat_t
+			if statErr := unix.Fstatat(unix.AT_FDCWD, path, &stat, unix.AT_SYMLINK_NOFOLLOW); statErr == nil && stat.Mode&unix.S_IFMT == unix.S_IFLNK {
+				return nil, fmt.Errorf(".engram must be a real directory, not a symlink")
+			}
 			return nil, fmt.Errorf(".engram must be a directory")
 		}
 		return nil, fmt.Errorf("inspect .engram directory: %w", err)

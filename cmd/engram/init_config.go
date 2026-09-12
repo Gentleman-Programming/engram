@@ -35,7 +35,9 @@ func writeInitConfig(cwd string, data []byte, force bool) error {
 	if err != nil {
 		return err
 	}
-	defer directory.close()
+	defer func() {
+		_ = directory.close()
+	}()
 
 	initConfigAfterOpen()
 
