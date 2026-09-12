@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	cloudauth "github.com/Gentleman-Programming/engram/v2/internal/cloud/auth"
 	"github.com/Gentleman-Programming/engram/v2/internal/cloud/chunkcodec"
@@ -1882,6 +1883,101 @@ func TestInsecureModeLoginRedirects(t *testing.T) {
 }
 
 // --- engram#1134: failed request-auth middleware auditing (cloud_auth_audit_log) ---
+
+// requestAuthAuditContextStore captures the context passed to request-auth audit
+// inserts while promoting the rest of adminTestStore's identity-store interface.
+type requestAuthAuditContextStore struct {
+	*adminTestStore
+	hasDeadline bool
+	deadline    time.Time
+	block       bool
+	done        chan struct{}
+	insertErr   error
+}
+
+func (s *requestAuthAuditContextStore) InsertAuthAuditEvent(ctx context.Context, event cloudstore.AuthAuditEvent) error {
+	s.deadline, s.hasDeadline = ctx.Deadline()
+	if s.block {
+		<-ctx.Done()
+		s.insertErr = ctx.Err()
+		close(s.done)
+		return s.insertErr
+	}
+	return s.adminTestStore.InsertAuthAuditEvent(ctx, event)
+}
+
+func TestRequestAuthDeniedAuditInsertUsesBoundedContext(t *testing.T) {
+	authn := resolvingAuth{errors: map[string]error{"unknown-token": cloudauth.ErrUnknownToken}}
+	store := &requestAuthAuditContextStore{adminTestStore: newAdminTestStore()}
+	srv := New(newFakeMutationStore(), authn, 0, WithAdminIdentityStore(store))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/sync/pull?project=proj-a", nil)
+	req.Header.Set("Authorization", "Bearer unknown-token")
+	requestStarted := time.Now()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if !store.hasDeadline {
+		t.Fatal("request auth audit insert context must have a deadline")
+	}
+	if store.deadline.Before(requestStarted) || store.deadline.After(requestStarted.Add(10*time.Second)) {
+		t.Fatalf("request auth audit insert deadline = %v, want within 10s of request start %v", store.deadline, requestStarted)
+	}
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if got, want := rec.Body.String(), "unauthorized: unknown token\n"; got != want {
+		t.Fatalf("401 body = %q, want %q", got, want)
+	}
+}
+
+func TestRequestAuthDeniedAuditInsertTimeoutStillRejects(t *testing.T) {
+	authn := resolvingAuth{errors: map[string]error{"unknown-token": cloudauth.ErrUnknownToken}}
+
+	baselineStore := newAdminTestStore()
+	baselineSrv := New(newFakeMutationStore(), authn, 0, WithAdminIdentityStore(baselineStore))
+	baselineRec := httptest.NewRecorder()
+	baselineReq := httptest.NewRequest(http.MethodGet, "/sync/pull?project=proj-a", nil)
+	baselineReq.Header.Set("Authorization", "Bearer unknown-token")
+	baselineSrv.Handler().ServeHTTP(baselineRec, baselineReq)
+
+	store := &requestAuthAuditContextStore{
+		adminTestStore: newAdminTestStore(),
+		block:          true,
+		done:           make(chan struct{}),
+	}
+	srv := New(newFakeMutationStore(), authn, 0, WithAdminIdentityStore(store))
+
+	var logBuf bytes.Buffer
+	origLog := log.Writer()
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(origLog)
+
+	parentCtx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/sync/pull?project=proj-a", nil).WithContext(parentCtx)
+	req.Header.Set("Authorization", "Bearer unknown-token")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if got, want := rec.Body.Bytes(), baselineRec.Body.Bytes(); !bytes.Equal(got, want) {
+		t.Fatalf("401 body = %q, want byte-identical baseline %q", got, want)
+	}
+	select {
+	case <-store.done:
+	default:
+		t.Fatal("request auth audit insert did not terminate after its context was done")
+	}
+	if !errors.Is(store.insertErr, context.DeadlineExceeded) {
+		t.Fatalf("request auth audit insert error = %v, want %v", store.insertErr, context.DeadlineExceeded)
+	}
+	if !strings.Contains(logBuf.String(), "request auth audit insert failed") {
+		t.Fatalf("expected best-effort audit insert failure log line, got %q", logBuf.String())
+	}
+}
 
 // assertRequestAuthDeniedEvent verifies the audit event contract for a
 // rejected sync/auth request: action sync.auth, outcome denied, the mapped

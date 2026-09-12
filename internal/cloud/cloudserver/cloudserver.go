@@ -110,6 +110,11 @@ const (
 	authAuditReasonAuthorizeError         = "authorize_error"
 )
 
+// requestAuthAuditInsertTimeout bounds the best-effort insert after a rejected
+// request auth: the rejection is already decided, so a stalled audit insert
+// must not hold the 401 response hostage while it waits.
+const requestAuthAuditInsertTimeout = 3 * time.Second
+
 // Bearer-extraction failure sentinels. bearerTokenFromRequest's error text is
 // part of the 401 response body, so the messages stay unchanged; wrapping them
 // as sentinels lets the audit reason mapping classify rejections with
@@ -395,9 +400,10 @@ func requestAuthDenyReason(err error) string {
 
 // recordRequestAuthDeniedAudit emits the per-rejection server log line and
 // records a best-effort cloud_auth_audit_log row for a rejected request
-// authentication (engram#1134). The rejection has already happened, so an
-// audit failure never changes the 401: it is logged and dropped, matching the
-// dashboard login best-effort convention (recordDashboardLoginAuditBestEffort).
+// authentication (engram#1134). The rejection has already happened, so the
+// bounded insert budget and any audit failure never change the 401: failures
+// are logged and dropped, matching the dashboard login best-effort convention
+// (recordDashboardLoginAuditBestEffort).
 // Successful request auth is intentionally unaudited per request (volume; the
 // dashboard login flow audits its own successes). The actor principal stays
 // null (no principal was resolved); ActorSource "request" labels the
@@ -409,7 +415,9 @@ func (s *CloudServer) recordRequestAuthDeniedAudit(r *http.Request, reason strin
 		log.Printf("cloudserver: admin identity store is not configured; request auth audit skipped")
 		return
 	}
-	if err := s.adminIdentity.InsertAuthAuditEvent(r.Context(), cloudstore.AuthAuditEvent{
+	insertCtx, cancel := context.WithTimeout(r.Context(), requestAuthAuditInsertTimeout)
+	defer cancel()
+	if err := s.adminIdentity.InsertAuthAuditEvent(insertCtx, cloudstore.AuthAuditEvent{
 		ActorSource: authAuditActorSourceRequest,
 		Action:      authAuditActionRequestAuth,
 		Outcome:     authAuditOutcomeDenied,
