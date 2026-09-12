@@ -6171,7 +6171,7 @@ func TestHookFallbacksAndAdditionalBranches(t *testing.T) {
 
 func TestSQLiteWriteRetryRetriesTransientLockErrors(t *testing.T) {
 	oldBackoffs := sqliteWriteRetryBackoffs
-	sqliteWriteRetryBackoffs = []time.Duration{0, 0, 0}
+	sqliteWriteRetryBackoffs = []time.Duration{0, 0, 0, 0, 0}
 	t.Cleanup(func() { sqliteWriteRetryBackoffs = oldBackoffs })
 
 	t.Run("begin lock is retried and succeeds", func(t *testing.T) {
@@ -6227,6 +6227,87 @@ func TestSQLiteWriteRetryRetriesTransientLockErrors(t *testing.T) {
 			t.Fatalf("expected bounded attempts=%d, got %d", len(sqliteWriteRetryBackoffs)+1, attempts)
 		}
 	})
+}
+
+func TestSQLiteWriteRetryPersistsAfterIndependentStoreReleasesLock(t *testing.T) {
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = t.TempDir()
+	cfg.DedupeWindow = time.Hour
+
+	writer, err := New(cfg)
+	if err != nil {
+		t.Fatalf("open writer store: %v", err)
+	}
+	t.Cleanup(func() { _ = writer.Close() })
+	locker, err := New(cfg)
+	if err != nil {
+		t.Fatalf("open locker store: %v", err)
+	}
+	t.Cleanup(func() { _ = locker.Close() })
+
+	if err := writer.CreateSession("retry-lock-session", "retry-lock-project", "/tmp/retry-lock-project"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := writer.DB().Exec("PRAGMA busy_timeout = 0"); err != nil {
+		t.Fatalf("disable writer SQLite busy timeout: %v", err)
+	}
+
+	lockConn, err := locker.DB().Conn(context.Background())
+	if err != nil {
+		t.Fatalf("acquire locker connection: %v", err)
+	}
+	t.Cleanup(func() { _ = lockConn.Close() })
+	if _, err := lockConn.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
+		t.Fatalf("acquire SQLite write lock: %v", err)
+	}
+	locked := true
+	t.Cleanup(func() {
+		if locked {
+			_, _ = lockConn.ExecContext(context.Background(), "ROLLBACK")
+		}
+	})
+
+	const lockFailuresBeforeRelease = 5
+	originalExec := writer.hooks.exec
+	lockFailures := 0
+	var releaseErr error
+	writer.hooks.exec = func(db execer, query string, args ...any) (sql.Result, error) {
+		result, err := originalExec(db, query, args...)
+		if isRetryableSQLiteLockError(err) {
+			lockFailures++
+			if lockFailures == lockFailuresBeforeRelease {
+				_, releaseErr = lockConn.ExecContext(context.Background(), "COMMIT")
+				locked = false
+			}
+		}
+		return result, err
+	}
+	t.Cleanup(func() { writer.hooks.exec = originalExec })
+
+	id, err := writer.AddObservation(AddObservationParams{
+		SessionID: "retry-lock-session",
+		Project:   "retry-lock-project",
+		Type:      "bugfix",
+		Title:     "SQLite lock retry",
+		Content:   "The retry completed after the lock was released.",
+	})
+	if releaseErr != nil {
+		t.Fatalf("release SQLite write lock: %v", releaseErr)
+	}
+	if err != nil {
+		t.Fatalf("add observation after lock release: %v", err)
+	}
+	if lockFailures != lockFailuresBeforeRelease {
+		t.Fatalf("SQLite lock failures before success = %d, want %d", lockFailures, lockFailuresBeforeRelease)
+	}
+
+	var title string
+	if err := writer.DB().QueryRow("SELECT title FROM observations WHERE id = ?", id).Scan(&title); err != nil {
+		t.Fatalf("read persisted observation: %v", err)
+	}
+	if title != "SQLite lock retry" {
+		t.Fatalf("persisted observation title = %q, want %q", title, "SQLite lock retry")
+	}
 }
 
 func TestStoreUncoveredBranchesPushToHundred(t *testing.T) {
@@ -9213,6 +9294,79 @@ func TestAddObservationNormalizesProject(t *testing.T) {
 			got = *obs.Project
 		}
 		t.Errorf("stored project = %q, want \"engram\"", got)
+	}
+}
+
+func TestMigrateCreatesLowercaseObservationProjectIndex(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("s-project-index", "engram", "/tmp"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-project-index",
+		Type:      "decision",
+		Title:     "Legacy project index fixture",
+		Content:   "exercise the lowercase project expression",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	if _, err := s.DB().Exec(`UPDATE observations SET project = 'EnGrAm' WHERE id = ?`, id); err != nil {
+		t.Fatalf("seed legacy mixed-case project: %v", err)
+	}
+
+	// Drop the new index to model an existing database, then rerun the
+	// idempotent migration that must install it.
+	if _, err := s.DB().Exec(`DROP INDEX IF EXISTS idx_obs_project_lower`); err != nil {
+		t.Fatalf("drop project expression index: %v", err)
+	}
+	if err := s.migrate(); err != nil {
+		t.Fatalf("migrate existing database: %v", err)
+	}
+
+	var definition string
+	if err := s.DB().QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_obs_project_lower'`).Scan(&definition); err != nil {
+		t.Errorf("find project expression index: %v", err)
+	} else if !strings.Contains(definition, "ON observations(LOWER(project))") {
+		t.Errorf("project expression index definition = %q", definition)
+	}
+
+	var count int
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM observations o WHERE LOWER(o.project) = ?`, "engram").Scan(&count); err != nil {
+		t.Fatalf("query legacy project predicate: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("legacy project predicate returned %d observations, want 1", count)
+	}
+
+	rows, err := s.DB().Query(`EXPLAIN QUERY PLAN SELECT o.id FROM observations o WHERE LOWER(o.project) = ?`, "engram")
+	if err != nil {
+		t.Fatalf("explain lowercase project predicate: %v", err)
+	}
+	defer func() {
+		if err := rows.Close(); err != nil {
+			t.Errorf("close query plan rows: %v", err)
+		}
+	}()
+
+	var plan []string
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			t.Fatalf("scan query plan: %v", err)
+		}
+		plan = append(plan, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read query plan: %v", err)
+	}
+	t.Logf("lowercase project query plan: %v", plan)
+	if !strings.Contains(strings.Join(plan, "\n"), "idx_obs_project_lower") {
+		t.Fatalf("lowercase project predicate did not use idx_obs_project_lower: %v", plan)
 	}
 }
 
@@ -13632,6 +13786,107 @@ func TestSearchMatchMode_EmptyQueryAnyReturnsError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for empty query with match_mode=any, got nil")
 	}
+}
+
+func TestSearchCompositeLexicalReranking(t *testing.T) {
+	const (
+		sessionID = "s-composite-rerank"
+		project   = "engram"
+		query     = "compositelexicalsignal"
+	)
+
+	seed := func(t *testing.T, s *Store, syncID, lastSeenAt string, pinned bool, revisions, duplicates int) int64 {
+		t.Helper()
+		result, err := s.db.Exec(`
+			INSERT INTO observations (
+				sync_id, session_id, type, title, content, project, scope,
+				revision_count, duplicate_count, last_seen_at, pinned, created_at, updated_at
+			) VALUES (?, ?, 'decision', ?, 'same lexical content', ?, 'project', ?, ?, ?, ?, ?, ?)
+		`, syncID, sessionID, query, project, revisions, duplicates, lastSeenAt, pinned, lastSeenAt, lastSeenAt)
+		if err != nil {
+			t.Fatalf("seed observation %q: %v", syncID, err)
+		}
+		id, err := result.LastInsertId()
+		if err != nil {
+			t.Fatalf("read seeded observation ID: %v", err)
+		}
+		return id
+	}
+	newStore := func(t *testing.T) *Store {
+		t.Helper()
+		s := newTestStore(t)
+		if err := s.CreateSession(sessionID, project, "/tmp/engram"); err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		return s
+	}
+	search := func(t *testing.T, s *Store) []SearchResult {
+		t.Helper()
+		results, err := s.SearchContext(context.Background(), query, SearchOptions{Project: project, Limit: 10})
+		if err != nil {
+			t.Fatalf("search: %v", err)
+		}
+		return results
+	}
+
+	t.Run("pinned outranks unpinned without changing raw rank", func(t *testing.T) {
+		s := newStore(t)
+		lastSeenAt := time.Now().UTC().Format("2006-01-02 15:04:05")
+		unpinnedID := seed(t, s, "rerank-pin-a", lastSeenAt, false, 1, 1)
+		pinnedID := seed(t, s, "rerank-pin-z", lastSeenAt, true, 1, 1)
+
+		results := search(t, s)
+		if len(results) != 2 || results[0].ID != pinnedID || results[1].ID != unpinnedID {
+			t.Fatalf("pinned ordering = %+v, want pinned %d before unpinned %d", results, pinnedID, unpinnedID)
+		}
+		if results[0].Rank != results[1].Rank {
+			t.Fatalf("rank projection changed by reranking: pinned=%v unpinned=%v", results[0].Rank, results[1].Rank)
+		}
+	})
+
+	t.Run("fresh outranks stale", func(t *testing.T) {
+		s := newStore(t)
+		staleID := seed(t, s, "rerank-recency-a", "2000-01-01 00:00:00", false, 1, 1)
+		freshID := seed(t, s, "rerank-recency-z", time.Now().UTC().Format("2006-01-02 15:04:05"), false, 1, 1)
+
+		results := search(t, s)
+		if len(results) != 2 || results[0].ID != freshID || results[1].ID != staleID {
+			t.Fatalf("recency ordering = %+v, want fresh %d before stale %d", results, freshID, staleID)
+		}
+	})
+
+	t.Run("stronger revision and duplicate stability outranks weaker stability", func(t *testing.T) {
+		s := newStore(t)
+		lastSeenAt := time.Now().UTC().Format("2006-01-02 15:04:05")
+		weakID := seed(t, s, "rerank-stability-a", lastSeenAt, false, 1, 1)
+		strongID := seed(t, s, "rerank-stability-z", lastSeenAt, false, 9, 9)
+
+		results := search(t, s)
+		if len(results) != 2 || results[0].ID != strongID || results[1].ID != weakID {
+			t.Fatalf("stability ordering = %+v, want strong %d before weak %d", results, strongID, weakID)
+		}
+	})
+
+	t.Run("shared preview path uses stable persisted identity tie-break", func(t *testing.T) {
+		s := newStore(t)
+		lastSeenAt := time.Now().UTC().Format("2006-01-02 15:04:05")
+		seed(t, s, "rerank-tie-b", lastSeenAt, false, 1, 1)
+		firstID := seed(t, s, "rerank-tie-a", lastSeenAt, false, 1, 1)
+
+		first := search(t, s)
+		second := search(t, s)
+		if len(first) != 2 || len(second) != 2 || first[0].ID != firstID || second[0].ID != firstID || first[0].ID != second[0].ID || first[1].ID != second[1].ID {
+			t.Fatalf("stable search ordering = first=%+v second=%+v, want sync_id tie-break order", first, second)
+		}
+
+		previews, err := s.SearchPreviewsContext(context.Background(), query, SearchOptions{Project: project, Limit: 10})
+		if err != nil {
+			t.Fatalf("search previews: %v", err)
+		}
+		if len(previews) != 2 || previews[0].ID != first[0].ID || previews[1].ID != first[1].ID {
+			t.Fatalf("preview ordering = %+v, want search ordering %+v", previews, first)
+		}
+	})
 }
 
 func TestSearch_WeightedBM25Ranking(t *testing.T) {

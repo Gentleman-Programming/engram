@@ -27,8 +27,14 @@ if [ ! -f "$MCP_CONFIG" ] || [ -L "$MCP_CONFIG" ]; then
     printf "warning: Engram MCP registration migration failed; manually replace %s with a regular file, then run 'engram setup claude-code'.\n" "$MCP_CONFIG" >&2
   fi
 fi
-# Ensure engram server is running
-if ! engram_curl -sf "${ENGRAM_URL}/health" --max-time 1 > /dev/null 2>&1; then
+# An explicit URL is an external-server opt-in. Only the default local endpoint
+# is owned by this data directory, so reachability alone is never sufficient.
+if [ "${ENGRAM_MANAGED_LOCAL:-0}" = 1 ]; then
+  ENGRAM_INSTANCE_ID=$(engram instance-id 2>/dev/null) || {
+    printf '%s\n' "warning: Engram could not resolve its local server identity." >&2
+    exit 0
+  }
+if ! engram_health_matches_instance "$ENGRAM_INSTANCE_ID"; then
   ENGRAM_SERVE_DATA_DIR="${ENGRAM_DATA_DIR:-$HOME/.engram}"
   if mkdir -p "$ENGRAM_SERVE_DATA_DIR" 2>/dev/null && : >> "$ENGRAM_SERVE_DATA_DIR/serve.err.log" 2>/dev/null; then
     ENGRAM_SERVE_ERR_LOG="$ENGRAM_SERVE_DATA_DIR/serve.err.log"
@@ -37,6 +43,11 @@ if ! engram_curl -sf "${ENGRAM_URL}/health" --max-time 1 > /dev/null 2>&1; then
   fi
   ENGRAM_CLOUD_AUTOSYNC=1 engram serve > /dev/null 2>> "$ENGRAM_SERVE_ERR_LOG" &
   sleep 0.5
+fi
+if ! engram_health_matches_instance "$ENGRAM_INSTANCE_ID"; then
+  printf '%s\n' "warning: Engram server ownership mismatch; use ENGRAM_URL, ENGRAM_PORT, or ENGRAM_SOCKET to isolate it." >&2
+  exit 0
+fi
 fi
 
 PROJECT=$(resolve_project "$CWD") || PROJECT=""

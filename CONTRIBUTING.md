@@ -15,8 +15,11 @@ Open Issue → Get status:approved → Open PR → Add type:* label → Review &
 Use the correct template:
 - **Bug Report** — for bugs
 - **Feature Request** — for new features or improvements
+- **Documentation Improvement** — for missing, outdated, or unclear docs
+- **Tracked Question** — for questions requiring maintainer investigation, a repository change, or a durable decision
 
 > ⚠️ Blank issues are disabled. You must use a template.
+> General questions and support belong in [Discussions](https://github.com/Gentleman-Programming/engram/discussions).
 
 Fill in all required fields. Your issue will automatically receive the `status:needs-review` label.
 
@@ -24,7 +27,7 @@ If useful for alignment, search existing issues before opening a new one.
 
 ### Step 2: Wait for Approval
 
-A maintainer will review the issue and add the `status:approved` label if it's accepted for implementation.
+A maintainer will review the issue and replace `status:needs-review` with `status:approved` if it's accepted for implementation.
 
 **Do not open a PR until the issue is approved.** Automated checks will block PRs that reference unapproved issues.
 
@@ -47,7 +50,8 @@ Required checks run automatically on every PR:
 |-------|-----------------|
 | **Check Issue Reference** | PR body contains `Closes #N`, `Fixes #N`, or `Resolves #N` |
 | **Check Issue Has status:approved** | The linked issue has the `status:approved` label |
-| **Check PR Has type:* Label** | PR has exactly one `type:*` label |
+| **Check PR Has type:* Label** | PR labels use the canonical vocabulary and cardinality |
+| **Check PR Has No Transient Artifacts** | PR files comply with the [Transient Artifact Policy](#transient-artifact-policy) |
 
 #### CI Tests
 
@@ -59,7 +63,26 @@ Required checks run automatically on every PR:
 
 All required checks must pass before a PR can be merged.
 
-> **Repo admin note:** Set these as required status checks in branch protection rules for `main`: `Lint`, `Unit Tests`, `E2E Tests`, `Plugin Tests`, and `PR Validation`.
+> **Repo admin note:** Set these as required status checks in branch protection rules for `main`: `Lint`, `Unit Tests`, `E2E Tests`, `Plugin Tests`, `PR Validation`, `Check PR Has type:* Label`, and `Check PR Has No Transient Artifacts`.
+
+## Transient Artifact Policy
+
+PR validation inspects the complete changed-file set. Deleted artifacts are allowed; enforcement applies to added, modified, copied, and renamed destination paths. It rejects the following transient artifacts unless a path is explicitly described as repository-root-only:
+
+| Enforced class | Forbidden paths and variants |
+|---|---|
+| Agent-tool state | Any directory named `.atl` (at any depth) and `**/engram-dev/**` |
+| Generated agent links | Repository-root `.claude/skills/**`, `.codex/skills/**`, `.github/skills/**`, and `.gemini/skills/**` |
+| Transient development documents | Repository-root `plan.md`, `agent-report.md`, `agent-handoff.md`, and `handoff.md` |
+| Transient process artifacts | Repository-root `openspec/changes/**` and `sdd/changes/**` |
+| Release metadata | `**/.release-notes-beta.md` |
+| Local data | `**/*.db`, `**/*.db-wal`, `**/*.db-shm`, and `**/engram-export.json` |
+| Binaries | Repository-root `engram`, `cmd/engram/main`, `cmd/engram/gentle-creation`, `cmd/engram/engram`, and `**/*.exe` |
+| OS metadata | `**/.DS_Store` and `**/Thumbs.db` |
+| Editor metadata | `**/.idea/**` and `**/.vscode/**` |
+| Editor and backup files | `**/*.swp`, `**/*.swo`, and `**/*~` |
+
+Canonical, reviewable documentation is allowed. For example, `docs/plan.md` and `specs/transient-artifact-policy.md` are documentation, not root transient development documents. The four transient document names above are forbidden only at the repository root; do not use documentation paths to retain ephemeral local notes.
 
 ### Quality Ratchets
 
@@ -112,6 +135,7 @@ untracked, and latest committed changes compared with `HEAD~`.
 |-------|-------|---------|
 | `type:bug` | 🔴 | Bug fixes |
 | `type:feature` | 🔵 | New features |
+| `type:question` | 🟣 | Questions requiring tracked work |
 | `type:docs` | 🔵 | Documentation-only changes |
 | `type:refactor` | 🟣 | Code refactoring with no behavior change |
 | `type:chore` | ⚪ | Maintenance, tooling, dependencies |
@@ -126,13 +150,22 @@ untracked, and latest committed changes compared with `HEAD~`.
 | `status:in-progress` | Actively being worked on — auto-exempt from stale bot |
 | `status:blocked` | Blocked by another issue or external dependency |
 | `status:stale` | No activity for 30 days — auto-applied by stale bot |
-| `status:wontfix` | Intentionally not fixing — applied when closing stale/rejected items |
+| `status:wontfix` | Closed without implementation — applied to stale, rejected, or duplicate items |
+| `status:possible-duplicate` | Potential duplicate under evaluation |
+
+### Resolution Labels (set after closure)
+
+| Label | Meaning |
+|-------|---------|
+| `resolution:duplicate` | Confirmed duplicate after closure |
+
+Replace the current `status:*` label with `status:possible-duplicate` while evaluating a report. After confirming and closing the duplicate, replace `status:possible-duplicate` with `status:wontfix` and apply `resolution:duplicate`.
 
 ### Priority Labels (set by maintainers)
 
-`priority:high`, `priority:medium`, `priority:low`
+`priority:critical`, `priority:high`, `priority:medium`, `priority:low`
 
-> Issues with `priority:high` and `status:approved` are never auto-closed by the stale bot.
+> Issues with `priority:critical`, `priority:high`, and `status:approved` are never auto-closed by the stale bot.
 
 ### Effort Labels (set by maintainers, for contributor guidance)
 
@@ -141,6 +174,43 @@ untracked, and latest committed changes compared with `HEAD~`.
 | `effort:small` | < 1 hour — good starting point for new contributors |
 | `effort:medium` | 1–4 hours |
 | `effort:large` | > 4 hours or spans multiple files |
+
+### PR Size Exception (maintainers only)
+
+`size:exception` records explicit maintainer approval for a pull request to exceed the 400-line review budget. It applies only to pull requests and does not replace the requirement for a focused, reviewable change.
+
+### Namespace Contract
+
+All label namespaces are owned by maintainers. Their cardinality depends on the GitHub surface:
+
+| Namespace | Issues | Pull requests |
+|-----------|--------|---------------|
+| `type:*` | Exactly one | Exactly one |
+| `status:*` | Exactly one | At most one |
+| `priority:*` | At most one | Not applicable |
+| `resolution:*` | At most one | Not applicable |
+| `effort:*` | Multiple allowed | Not applicable |
+| `size:*` | Not applicable | At most one |
+
+The only unnamespaced labels are maintainer-owned protected exceptions: `good first issue` and `help wanted`.
+
+### Deprecated Label Migration (maintainers only)
+
+| Deprecated label | Canonical label | Precedence | Conflicting canonical value |
+|------------------|-----------------|------------|-----------------------------|
+| `bug` | `type:bug` | Canonical label wins | Stop for manual review |
+| `enhancement` | `type:feature` | Canonical label wins | Stop for manual review |
+| `question` | `type:question` | Canonical label wins | Stop for manual review |
+| `documentation` | `type:docs` | Canonical label wins | Stop for manual review |
+| `up for grabs` | `help wanted` | Canonical label wins | Stop for manual review |
+
+Preview a label migration locally before changing an issue or pull request:
+
+```bash
+node .github/scripts/label-policy.mjs --migrate --labels-json '["bug","type:bug"]'
+```
+
+The command is a dry run: it prints the canonical label list as JSON and never writes to GitHub. A singleton conflict returns a non-zero exit code and leaves the original list unchanged; stop and resolve that ambiguity manually. Otherwise, apply only the reported replacements with `gh issue edit` or `gh pr edit`, then rerun the command until it reports `"changed":false`.
 
 ---
 
@@ -155,6 +225,7 @@ untracked, and latest committed changes compared with `HEAD~`.
 - Update docs in the same PR when behavior changes
 - Do not reference endpoints/scripts that do not exist in code
 - Do not include `Co-Authored-By` trailers in commits
+- Do not include paths prohibited by the [Transient Artifact Policy](#transient-artifact-policy)
 
 ### Conventional Commit Format
 

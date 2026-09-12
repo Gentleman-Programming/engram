@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/Gentleman-Programming/engram/v2/internal/diagnostic"
@@ -79,6 +80,104 @@ func truncationWarning(metadata store.TruncationMetadata) string {
 		return ""
 	}
 	return fmt.Sprintf("\n⚠ WARNING: Content was truncated from %d to %d bytes. Consider splitting into smaller observations.", metadata.OriginalBytes, metadata.LimitBytes)
+}
+
+func absolutePathWarning(content string) string {
+	if !containsAbsoluteFilesystemPath(content) {
+		return ""
+	}
+	return "\n⚠ WARNING: Content contains an absolute filesystem path that may not be portable across machines. Use a repository-relative path instead."
+}
+
+// containsAbsoluteFilesystemPath recognizes common absolute path spellings
+// without relying on the host operating system. Route-like POSIX paths such as
+// /api/v1 are intentionally treated as ambiguous matches for this non-blocking warning.
+func containsAbsoluteFilesystemPath(content string) bool {
+	for i := 0; i < len(content); {
+		char, size := utf8.DecodeRuneInString(content[i:])
+		if char == utf8.RuneError && size == 1 {
+			i++
+			continue
+		}
+		if uriEnd := uriTokenEnd(content, i); uriEnd > i {
+			i = uriEnd
+			continue
+		}
+
+		if isASCIILetter(content[i]) && i+2 < len(content) && content[i+1] == ':' && (content[i+2] == '/' || content[i+2] == '\\') {
+			return true
+		}
+		if content[i] == '\\' && i+2 < len(content) && content[i+1] == '\\' && content[i+2] != '\\' && content[i+2] != '/' {
+			return true
+		}
+		if content[i] == '/' && (i+1 == len(content) || content[i+1] != '/') && isAbsolutePathBoundary(content, i) {
+			return true
+		}
+		i += size
+	}
+	return false
+}
+
+func isAbsolutePathBoundary(content string, index int) bool {
+	if index == 0 {
+		return true
+	}
+	previous, size := utf8.DecodeLastRuneInString(content[:index])
+	if previous == utf8.RuneError && size == 1 {
+		return false
+	}
+	return previous != '/' && !isPathWordCharacter(previous)
+}
+
+func uriTokenEnd(content string, start int) int {
+	if !isASCIILetter(content[start]) {
+		return start
+	}
+	if start > 0 {
+		previous, size := utf8.DecodeLastRuneInString(content[:start])
+		if (previous != utf8.RuneError || size != 1) && isPathWordCharacter(previous) {
+			return start
+		}
+	}
+
+	colon := start + 1
+	for colon < len(content) && (isASCIILetter(content[colon]) || content[colon] >= '0' && content[colon] <= '9' || content[colon] == '+' || content[colon] == '-' || content[colon] == '.') {
+		colon++
+	}
+	if colon >= len(content) || content[colon] != ':' {
+		return start
+	}
+
+	hasAuthority := colon+2 < len(content) && content[colon+1] == '/' && content[colon+2] == '/'
+	hasAuthoritylessFilePath := colon+1 < len(content) && content[colon+1] == '/' && strings.EqualFold(content[start:colon], "file")
+	if !hasAuthority && !hasAuthoritylessFilePath {
+		return start
+	}
+
+	end := colon + 2
+	if hasAuthority {
+		end++
+	}
+	for end < len(content) {
+		char, size := utf8.DecodeRuneInString(content[end:])
+		if char == utf8.RuneError && size == 1 || !isURITokenCharacter(char) {
+			break
+		}
+		end += size
+	}
+	return end
+}
+
+func isASCIILetter(char byte) bool {
+	return char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z'
+}
+
+func isPathWordCharacter(char rune) bool {
+	return unicode.IsLetter(char) || unicode.IsDigit(char) || unicode.IsMark(char) || char == '.' || char == '-' || char == '_'
+}
+
+func isURITokenCharacter(char rune) bool {
+	return isPathWordCharacter(char) || strings.ContainsRune(":/?#[]@!$&'()*+,;=%~", char)
 }
 
 var currentWorkingDirectory = func() string {
@@ -1427,6 +1526,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		if err != nil {
 			return mcp.NewToolResultError("Failed to save: " + err.Error()), nil
 		}
+		savedObservation, savedObservationErr := s.GetObservation(savedID)
 
 		if capturePrompt && activity != nil {
 			if prompt, ok := activity.CurrentPrompt(sessionID, project); ok {
@@ -1449,6 +1549,9 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 			msg += fmt.Sprintf("\nSuggested topic_key: %s", suggestedTopicKey)
 		}
 		msg += truncationWarning(truncation)
+		if savedObservationErr == nil {
+			msg += absolutePathWarning(savedObservation.Content)
+		}
 		if normWarning != "" {
 			msg += "\n" + normWarning
 		}
@@ -1477,13 +1580,13 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 
 		// Fetch the saved observation's sync_id for the envelope (REQ-001).
 		var savedSyncID string
-		if obs, obsErr := s.GetObservation(savedID); obsErr == nil {
-			savedSyncID = obs.SyncID
+		if savedObservationErr == nil {
+			savedSyncID = savedObservation.SyncID
 			extra["id"] = savedID
 			extra["sync_id"] = savedSyncID
-			extra["state"] = obs.State()
-			if obs.ReviewAfter != nil {
-				extra["review_after"] = *obs.ReviewAfter
+			extra["state"] = savedObservation.State()
+			if savedObservation.ReviewAfter != nil {
+				extra["review_after"] = *savedObservation.ReviewAfter
 			}
 		}
 		if len(candidates) > 0 {
@@ -3383,7 +3486,7 @@ func resolveFallbackSessionID(s *store.Store, project string) (string, error) {
 			case 1:
 				return ids[0], nil
 			default:
-				return "", fmt.Errorf("multiple active runtime sessions match the current project and directory; provide session_id or end other active matching sessions before retrying")
+				return "", fmt.Errorf("multiple active runtime sessions match the current project and directory; provide session_id, end other active matching sessions, or save independently with engram save \"TITLE\" \"CONTENT\" --project PROJECT --type TYPE --topic TOPIC_KEY (writes to an independent project manual-save session and does not bind it to this MCP session)")
 			}
 		}
 	}
