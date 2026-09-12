@@ -709,6 +709,10 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		MatchMode: matchMode,
 	})
 	if err != nil {
+		if errors.Is(err, store.ErrFTSQueryTooLarge) {
+			jsonError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -1078,6 +1082,10 @@ func (s *Server) handleSearchPrompts(w http.ResponseWriter, r *http.Request) {
 		queryInt(r, "limit", 10),
 	)
 	if err != nil {
+		if errors.Is(err, store.ErrFTSQueryTooLarge) {
+			jsonError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
