@@ -5,9 +5,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/v2/internal/project"
+	versioncheck "github.com/Gentleman-Programming/engram/v2/internal/version"
 )
 
 func TestCmdInit_ExplicitProjectName(t *testing.T) {
@@ -167,5 +169,190 @@ func TestCmdInit_Help(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "usage: engram init") {
 		t.Fatalf("expected usage in stdout, got: %q", stdout)
+	}
+}
+
+func TestMainDispatchInitSkipsUpdateCheck(t *testing.T) {
+	workDir := t.TempDir()
+	withCwd(t, workDir)
+	t.Setenv("ENGRAM_DATA_DIR", t.TempDir())
+	withArgs(t, "engram", "init", "dispatched-project")
+
+	oldCheckForUpdates := checkForUpdates
+	checkForUpdates = func(string) versioncheck.CheckResult {
+		t.Fatal("init must not invoke the update check")
+		return versioncheck.CheckResult{}
+	}
+	t.Cleanup(func() { checkForUpdates = oldCheckForUpdates })
+
+	stdout, stderr, recovered := captureOutputAndRecover(t, main)
+	if recovered != nil || stderr != "" {
+		t.Fatalf("main init dispatch failed: panic=%v stderr=%q", recovered, stderr)
+	}
+	if !strings.Contains(stdout, `Initialized Engram project "dispatched-project"`) {
+		t.Fatalf("unexpected stdout: %q", stdout)
+	}
+
+	data, err := os.ReadFile(filepath.Join(workDir, ".engram", "config.json"))
+	if err != nil {
+		t.Fatalf("read dispatched config: %v", err)
+	}
+	var cfg struct {
+		ProjectName string `json:"project_name"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("parse dispatched config: %v", err)
+	}
+	if cfg.ProjectName != "dispatched-project" {
+		t.Fatalf("dispatched config project_name = %q, want %q", cfg.ProjectName, "dispatched-project")
+	}
+}
+
+func TestWriteInitConfigConcurrentNonForcePreservesWinner(t *testing.T) {
+	workDir := t.TempDir()
+	configs := [][]byte{
+		[]byte(`{"project_name":"first"}`),
+		[]byte(`{"project_name":"second"}`),
+	}
+
+	start := make(chan struct{})
+	errs := make(chan error, len(configs))
+	var wg sync.WaitGroup
+	for _, config := range configs {
+		wg.Add(1)
+		go func(config []byte) {
+			defer wg.Done()
+			<-start
+			errs <- writeInitConfig(workDir, config, false)
+		}(config)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	successes := 0
+	alreadyExists := 0
+	for err := range errs {
+		if err == nil {
+			successes++
+			continue
+		}
+		if strings.Contains(err.Error(), "already exists") {
+			alreadyExists++
+			continue
+		}
+		t.Fatalf("concurrent init returned unexpected error: %v", err)
+	}
+	if successes != 1 || alreadyExists != 1 {
+		t.Fatalf("concurrent init results: successes=%d alreadyExists=%d, want one each", successes, alreadyExists)
+	}
+
+	got, err := os.ReadFile(filepath.Join(workDir, ".engram", "config.json"))
+	if err != nil {
+		t.Fatalf("read winning config: %v", err)
+	}
+	if string(got) != string(configs[0]) && string(got) != string(configs[1]) {
+		t.Fatalf("winning config = %q, want one complete contender config", got)
+	}
+}
+
+func TestWriteInitConfigForceRenameFailurePreservesExistingConfig(t *testing.T) {
+	workDir := t.TempDir()
+	configDir := filepath.Join(workDir, ".engram")
+	if err := os.Mkdir(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(configDir, "config.json")
+	oldConfig := []byte(`{"project_name":"old"}`)
+	if err := os.WriteFile(configPath, oldConfig, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldRename := initConfigRename
+	initConfigRename = func(_, _ string) error { return os.ErrPermission }
+	t.Cleanup(func() { initConfigRename = oldRename })
+
+	if err := writeInitConfig(workDir, []byte(`{"project_name":"new"}`), true); err == nil {
+		t.Fatal("forced init succeeded despite publication failure")
+	}
+	got, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read original config: %v", err)
+	}
+	if string(got) != string(oldConfig) {
+		t.Fatalf("config after failed publication = %q, want %q", got, oldConfig)
+	}
+	entries, err := os.ReadDir(configDir)
+	if err != nil {
+		t.Fatalf("read config directory: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "config.json" {
+		t.Fatalf("config directory entries after failed publication = %v, want only config.json", entries)
+	}
+}
+
+func TestWriteInitConfigRejectsSymlinkedConfig(t *testing.T) {
+	for _, force := range []bool{false, true} {
+		t.Run(map[bool]string{false: "without force", true: "with force"}[force], func(t *testing.T) {
+			workDir := t.TempDir()
+			configDir := filepath.Join(workDir, ".engram")
+			if err := os.Mkdir(configDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			target := filepath.Join(workDir, "target.json")
+			if err := os.WriteFile(target, []byte(`{"project_name":"target"}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, filepath.Join(configDir, "config.json")); err != nil {
+				t.Skipf("symlinks unavailable on this OS: %v", err)
+			}
+
+			err := writeInitConfig(workDir, []byte(`{"project_name":"new"}`), force)
+			if err == nil || !strings.Contains(err.Error(), "symlink") {
+				t.Fatalf("symlinked config error = %v, want symlink rejection", err)
+			}
+			got, readErr := os.ReadFile(target)
+			if readErr != nil {
+				t.Fatalf("read symlink target: %v", readErr)
+			}
+			if string(got) != `{"project_name":"target"}` {
+				t.Fatalf("symlink target changed to %q", got)
+			}
+		})
+	}
+}
+
+func TestWriteInitConfigRejectsNonDirectoryConfigDirectory(t *testing.T) {
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, ".engram"), []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, force := range []bool{false, true} {
+		err := writeInitConfig(workDir, []byte(`{"project_name":"new"}`), force)
+		if err == nil || !strings.Contains(err.Error(), "must be a directory") {
+			t.Fatalf("non-directory .engram error with force=%t = %v, want directory rejection", force, err)
+		}
+	}
+}
+
+func TestWriteInitConfigRejectsSymlinkedConfigDirectory(t *testing.T) {
+	workDir := t.TempDir()
+	targetDir := filepath.Join(workDir, "target")
+	if err := os.Mkdir(targetDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(targetDir, filepath.Join(workDir, ".engram")); err != nil {
+		t.Skipf("symlinks unavailable on this OS: %v", err)
+	}
+
+	for _, force := range []bool{false, true} {
+		err := writeInitConfig(workDir, []byte(`{"project_name":"new"}`), force)
+		if err == nil || !strings.Contains(err.Error(), "symlink") {
+			t.Fatalf("symlinked .engram error with force=%t = %v, want symlink rejection", force, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(targetDir, "config.json")); !os.IsNotExist(err) {
+		t.Fatalf("symlink target directory was written: %v", err)
 	}
 }
