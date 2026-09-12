@@ -5,10 +5,6 @@ project_name: engram
 release:
   prerelease: auto
 
-before:
-  hooks:
-    - go mod tidy
-
 builds:
   - main: ./cmd/engram
     binary: engram

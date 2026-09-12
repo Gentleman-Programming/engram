@@ -80,6 +80,8 @@ type Manifest struct {
 	Chunks  []ChunkEntry `json:"chunks"`
 }
 
+const ownershipModeManifestVersion = 2
+
 // ChunkEntry describes a single chunk in the manifest.
 type ChunkEntry struct {
 	ID        string `json:"id"`         // SHA-256 hash prefix (8 chars) of content
@@ -119,6 +121,16 @@ type ImportResult struct {
 	RelationsReplayed    int `json:"relations_replayed"`
 	RelationsDeferred    int `json:"relations_deferred"`
 	RelationsDead        int `json:"relations_dead"`
+}
+
+// ImportProgress is a point-in-time snapshot of an import. Percentage uses the
+// pending chunk count captured before the import starts, so retries never count
+// as completed work.
+type ImportProgress struct {
+	LocalChunks   int
+	RemoteChunks  int
+	PendingChunks int
+	Percentage    int
 }
 
 // ─── Syncer ──────────────────────────────────────────────────────────────────
@@ -413,13 +425,16 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 	if err != nil {
 		return nil, err
 	}
-
 	chunkTargetKey := sy.chunkTrackingTargetKey(project)
 
 	// Get chunk IDs already recorded locally.
 	locallySyncedChunks, err := storeGetSynced(sy.store, chunkTargetKey)
 	if err != nil {
 		return nil, fmt.Errorf("get synced chunks: %w", err)
+	}
+	projectOwned, err := sy.store.HasProjectOwnedSessionsForProject(project)
+	if err != nil {
+		return nil, fmt.Errorf("inspect session ownership modes: %w", err)
 	}
 	knownChunks := make(map[string]bool, len(locallySyncedChunks))
 	for chunkID, ok := range locallySyncedChunks {
@@ -445,6 +460,12 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 	}
 	if !sy.cloudMode && strings.TrimSpace(project) != "" {
 		data = filterExportDataToProjectScope(data)
+	}
+	if projectOwned && manifest.Version < ownershipModeManifestVersion {
+		manifest.Version = ownershipModeManifestVersion
+		if err := sy.writeManifest(manifest); err != nil {
+			return nil, fmt.Errorf("write manifest: %w", err)
+		}
 	}
 	if sy.cloudMode {
 		chunk, mutationSeqs, err := sy.filterByPendingMutations(data, project)
@@ -787,7 +808,15 @@ func marshaledSizeForSplit(v any) int {
 // ─── Import (chunks → DB) ────────────────────────────────────────────────────
 
 // Import reads the manifest and imports any chunks not yet in the local DB.
+// Its behavior remains compatible with callers that do not need progress.
 func (sy *Syncer) Import() (*ImportResult, error) {
+	return sy.ImportWithProgress(nil)
+}
+
+// ImportWithProgress reads the manifest and imports any chunks not yet in the
+// local DB, reporting an initial snapshot, successful committed chunks, and a
+// final snapshot. A failed or deferred attempt does not advance progress.
+func (sy *Syncer) ImportWithProgress(report func(ImportProgress)) (*ImportResult, error) {
 	if err := sy.ensureCloudPreflight(""); err != nil {
 		return nil, err
 	}
@@ -796,28 +825,87 @@ func (sy *Syncer) Import() (*ImportResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	entries := manifest.Chunks
 
-	if len(manifest.Chunks) == 0 {
-		return sy.finalizeImport(&ImportResult{})
+	if len(entries) == 0 {
+		if report == nil {
+			return sy.finalizeImport(&ImportResult{})
+		}
+		knownChunks, err := storeGetSynced(sy.store, sy.chunkTrackingTargetKey(""))
+		if err != nil {
+			return nil, fmt.Errorf("get synced chunks: %w", err)
+		}
+		snapshot := importProgressSnapshot(len(knownChunks), 0, 0, 0)
+		report(snapshot)
+		result, err := sy.finalizeImport(&ImportResult{})
+		if err != nil {
+			return nil, err
+		}
+		report(snapshot)
+		return result, nil
 	}
 
-	// Get chunks we've already imported
+	// Get chunks we've already imported.
 	knownChunks, err := storeGetSynced(sy.store, sy.chunkTrackingTargetKey(""))
 	if err != nil {
 		return nil, fmt.Errorf("get synced chunks: %w", err)
 	}
+	remainingPending, initialPending := 0, 0
+	var afterCommit func()
+	if report != nil {
+		remainingPending = pendingChunkCount(entries, knownChunks)
+		initialPending = remainingPending
+		report(importProgressSnapshot(len(knownChunks), len(entries), remainingPending, initialPending))
+		// The final committed chunk is reported by the final snapshot below, after
+		// deferred relations have been finalized, rather than as a duplicate event.
+		afterCommit = func() {
+			remainingPending--
+			if remainingPending > 0 {
+				report(importProgressSnapshot(len(knownChunks), len(entries), remainingPending, initialPending))
+			}
+		}
+	}
 
-	entries := manifest.Chunks
 	var result *ImportResult
 	if sy.cloudMode {
-		result, err = sy.importEntriesDependencySafe(entries, knownChunks, importModeCloud)
+		result, err = sy.importEntriesDependencySafeWithProgress(entries, knownChunks, importModeCloud, manifest.Version, afterCommit)
 	} else {
-		result, err = sy.importEntriesDependencySafe(entries, knownChunks, importModeLocal)
+		result, err = sy.importEntriesDependencySafeWithProgress(entries, knownChunks, importModeLocal, manifest.Version, afterCommit)
 	}
 	if err != nil {
 		return nil, err
 	}
-	return sy.finalizeImport(result)
+	result, err = sy.finalizeImport(result)
+	if err != nil {
+		return nil, err
+	}
+	if report != nil {
+		report(importProgressSnapshot(len(knownChunks), len(entries), remainingPending, initialPending))
+	}
+	return result, nil
+}
+
+func pendingChunkCount(entries []ChunkEntry, knownChunks map[string]bool) int {
+	pending := 0
+	for _, entry := range entries {
+		if !knownChunks[entry.ID] {
+			pending++
+		}
+	}
+	return pending
+}
+
+func importProgressSnapshot(local, remote, pending, initialPending int) ImportProgress {
+	percentage := 100
+	if initialPending > 0 {
+		percentage = (initialPending - pending) * 100 / initialPending
+	}
+	return ImportProgress{
+		LocalChunks:   local,
+		RemoteChunks:  remote,
+		PendingChunks: pending,
+		Percentage:    percentage,
+	}
 }
 
 // finalizeImport drives the bounded deferred-relation lifecycle after every
@@ -845,7 +933,7 @@ const (
 	recoveredMissingSessionStartedAt            = "1970-01-01 00:00:00"
 )
 
-func (sy *Syncer) importEntriesDependencySafe(entries []ChunkEntry, knownChunks map[string]bool, mode importMode) (*ImportResult, error) {
+func (sy *Syncer) importEntriesDependencySafeWithProgress(entries []ChunkEntry, knownChunks map[string]bool, mode importMode, manifestVersion int, afterCommit func()) (*ImportResult, error) {
 	result := &ImportResult{}
 	pendingEntries := make([]ChunkEntry, 0, len(entries))
 	for _, entry := range entries {
@@ -859,6 +947,10 @@ func (sy *Syncer) importEntriesDependencySafe(entries []ChunkEntry, knownChunks 
 
 	if len(pendingEntries) == 0 {
 		return result, nil
+	}
+	legacyChunks, err := sy.preflightLegacyChunkOwnership(pendingEntries, mode, manifestVersion)
+	if err != nil {
+		return nil, err
 	}
 	availableSessionIDs := map[string]struct{}{}
 	if mode == importModeLocal {
@@ -875,22 +967,25 @@ func (sy *Syncer) importEntriesDependencySafe(entries []ChunkEntry, knownChunks 
 		nextPending := make([]ChunkEntry, 0, len(pendingEntries))
 
 		for _, entry := range pendingEntries {
-			// Read the chunk via transport
-			chunkJSON, err := sy.transport.ReadChunk(entry.ID)
-			if err != nil {
-				if errors.Is(err, ErrChunkNotFound) {
-					if mode == importModeCloud {
-						return nil, fmt.Errorf("read chunk %s: manifest references missing remote chunk", entry.ID)
+			chunk, loaded := legacyChunks[entry.ID]
+			if !loaded {
+				chunkJSON, err := sy.transport.ReadChunk(entry.ID)
+				if err != nil {
+					if errors.Is(err, ErrChunkNotFound) {
+						if mode == importModeCloud {
+							return nil, fmt.Errorf("read chunk %s: manifest references missing remote chunk", entry.ID)
+						}
+						result.ChunksSkipped++
+						continue
 					}
-					result.ChunksSkipped++
-					continue
+					return nil, fmt.Errorf("read chunk %s: %w", entry.ID, err)
 				}
-				return nil, fmt.Errorf("read chunk %s: %w", entry.ID, err)
-			}
-
-			var chunk ChunkData
-			if err := json.Unmarshal(chunkJSON, &chunk); err != nil {
-				return nil, fmt.Errorf("parse chunk %s: %w", entry.ID, err)
+				if err := json.Unmarshal(chunkJSON, &chunk); err != nil {
+					return nil, fmt.Errorf("parse chunk %s: %w", entry.ID, err)
+				}
+				if err := sy.ensureChunkOwnershipCompatibility(manifestVersion, chunk); err != nil {
+					return nil, err
+				}
 			}
 
 			if err := sy.importMutationChunk(entry.ID, chunk); err != nil {
@@ -922,6 +1017,9 @@ func (sy *Syncer) importEntriesDependencySafe(entries []ChunkEntry, knownChunks 
 			result.SessionsImported += importResult.SessionsImported
 			result.ObservationsImported += importResult.ObservationsImported
 			result.PromptsImported += importResult.PromptsImported
+			if afterCommit != nil {
+				afterCommit()
+			}
 			progress = true
 		}
 
@@ -937,6 +1035,34 @@ func (sy *Syncer) importEntriesDependencySafe(entries []ChunkEntry, knownChunks 
 	}
 
 	return result, nil
+}
+
+func (sy *Syncer) preflightLegacyChunkOwnership(entries []ChunkEntry, mode importMode, manifestVersion int) (map[string]ChunkData, error) {
+	chunks := make(map[string]ChunkData)
+	if manifestVersion >= ownershipModeManifestVersion {
+		return chunks, nil
+	}
+	for _, entry := range entries {
+		payload, err := sy.transport.ReadChunk(entry.ID)
+		if err != nil {
+			if errors.Is(err, ErrChunkNotFound) && mode == importModeLocal {
+				continue
+			}
+			if errors.Is(err, ErrChunkNotFound) {
+				return nil, fmt.Errorf("read chunk %s: manifest references missing remote chunk", entry.ID)
+			}
+			return nil, fmt.Errorf("read chunk %s: %w", entry.ID, err)
+		}
+		var chunk ChunkData
+		if err := json.Unmarshal(payload, &chunk); err != nil {
+			return nil, fmt.Errorf("parse chunk %s: %w", entry.ID, err)
+		}
+		if err := sy.ensureChunkOwnershipCompatibility(manifestVersion, chunk); err != nil {
+			return nil, err
+		}
+		chunks[entry.ID] = chunk
+	}
+	return chunks, nil
 }
 
 func (sy *Syncer) importMutationChunk(chunkID string, chunk ChunkData) error {
@@ -1209,12 +1335,13 @@ func synthesizeMutationsFromChunk(chunk ChunkData) []store.SyncMutation {
 	mutations := make([]store.SyncMutation, 0, len(chunk.Sessions)+len(chunk.Observations)+len(chunk.Prompts))
 	for _, session := range chunk.Sessions {
 		payload, err := json.Marshal(map[string]any{
-			"id":         session.ID,
-			"project":    session.Project,
-			"directory":  session.Directory,
-			"started_at": session.StartedAt,
-			"ended_at":   session.EndedAt,
-			"summary":    session.Summary,
+			"id":             session.ID,
+			"project":        session.Project,
+			"ownership_mode": session.OwnershipMode,
+			"directory":      session.Directory,
+			"started_at":     session.StartedAt,
+			"ended_at":       session.EndedAt,
+			"summary":        session.Summary,
 		})
 		if err != nil {
 			continue
@@ -1279,6 +1406,85 @@ func synthesizeMutationsFromChunk(chunk ChunkData) []store.SyncMutation {
 		})
 	}
 	return mutations
+}
+
+func (sy *Syncer) ensureChunkOwnershipCompatibility(manifestVersion int, chunk ChunkData) error {
+	if manifestVersion >= ownershipModeManifestVersion {
+		return nil
+	}
+
+	projects := make(map[string]struct{})
+	addProject := func(project string) {
+		project, _ = store.NormalizeProject(strings.TrimSpace(project))
+		project = strings.TrimSpace(project)
+		if project != "" {
+			projects[project] = struct{}{}
+		}
+	}
+	for _, mutation := range effectiveMutationsForImport(chunk) {
+		switch mutation.Entity {
+		case store.SyncEntitySession:
+			var payload struct {
+				Project       string `json:"project"`
+				OwnershipMode string `json:"ownership_mode"`
+				ID            string `json:"id"`
+				Deleted       bool   `json:"deleted"`
+				HardDelete    bool   `json:"hard_delete"`
+			}
+			isDelete := mutation.Op == store.SyncOpDelete
+			if !isDelete || strings.TrimSpace(mutation.Payload) != "" {
+				if err := decodeSyncPayloadForProject([]byte(mutation.Payload), &payload); err != nil {
+					return fmt.Errorf("decode session ownership payload: %w", err)
+				}
+			}
+			if isDelete || payload.Deleted || payload.HardDelete {
+				id := strings.TrimSpace(payload.ID)
+				if id == "" {
+					id = strings.TrimSpace(mutation.EntityKey)
+				}
+				session, err := sy.store.GetSession(id)
+				if errors.Is(err, sql.ErrNoRows) {
+					continue
+				}
+				if err != nil {
+					return fmt.Errorf("inspect session ownership: %w", err)
+				}
+				if session.OwnershipMode == store.SessionOwnershipProjectOwned {
+					return fmt.Errorf("sync downgrade is unsupported when a legacy delete targets project-owned session %q", id)
+				}
+				continue
+			}
+			if payload.OwnershipMode == store.SessionOwnershipProjectOwned {
+				return fmt.Errorf("sync downgrade is unsupported when incoming project-owned sessions exist; peer manifest version %d does not support ownership modes", manifestVersion)
+			}
+			addProject(payload.Project)
+
+		case store.SyncEntityObservation, store.SyncEntityPrompt:
+			var payload struct {
+				Project *string `json:"project"`
+			}
+			if mutation.Op == store.SyncOpUpsert || strings.TrimSpace(mutation.Payload) != "" {
+				if err := decodeSyncPayloadForProject([]byte(mutation.Payload), &payload); err != nil {
+					return fmt.Errorf("decode %s ownership payload: %w", mutation.Entity, err)
+				}
+			}
+			project := mutation.Project
+			if strings.TrimSpace(project) == "" && payload.Project != nil {
+				project = *payload.Project
+			}
+			addProject(project)
+		}
+	}
+	for project := range projects {
+		projectOwned, err := sy.store.HasProjectOwnedSessionsForProject(project)
+		if err != nil {
+			return fmt.Errorf("inspect session ownership modes: %w", err)
+		}
+		if projectOwned {
+			return fmt.Errorf("sync downgrade is unsupported after project-owned sessions exist for project %q; peer manifest version %d does not support ownership modes", project, manifestVersion)
+		}
+	}
+	return nil
 }
 
 func estimateMutationImportResult(chunk ChunkData) *store.ImportResult {

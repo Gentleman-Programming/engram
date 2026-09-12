@@ -14,7 +14,7 @@ This is the complete technical reference for Engram. For getting started, see th
 | --------------------------------------------------------- | ------------------------------------------------------------ |
 | [Database Schema](#database-schema)                       | Tables, FTS5, SQLite config                                  |
 | [HTTP API](#http-api-endpoints)                           | All REST endpoints with request/response details             |
-| [MCP Tools](#mcp-tools-22-tools)                          | Detailed reference for all 22 memory tools                   |
+| [MCP Tools](#mcp-tools-23-tools)                          | Detailed reference for all 23 memory tools                   |
 | [MCP Project Resolution](#mcp-project-resolution)         | Auto-detection algorithm, response envelope, tool categories |
 | [Memory Protocol](#memory-protocol)                       | When/how agents should use the tools                         |
 | [Project Name Normalization](#project-name-normalization) | Auto-detection, normalization, similar-project warnings      |
@@ -42,14 +42,18 @@ For other docs:
 
 ### Tables
 
-- **sessions** — `id` (TEXT PK), `project`, `directory`, `started_at`, `ended_at`, `summary`, `status`
-- **observations** — `id` (INTEGER PK AUTOINCREMENT), `session_id` (FK), `type`, `title`, `content`, `tool_name`, `project`, `scope`, `topic_key`, `normalized_hash`, `revision_count`, `duplicate_count`, `last_seen_at`, `created_at`, `updated_at`, `deleted_at`
-- **observations_fts** — FTS5 virtual table synced via triggers (`title`, `content`, `tool_name`, `type`, `project`)
-- **user_prompts** — `id` (INTEGER PK AUTOINCREMENT), `session_id` (FK), `content`, `project`, `created_at`
+The live schema is created and incrementally migrated by `Store.migrate` in [`internal/store/store.go`](internal/store/store.go); treat that migration as the source of authority when this summary and the database differ.
+
+- **sessions** — `id` (TEXT PK), `project`, `ownership_mode`, `directory`, `started_at`, `ended_at`, `summary`
+- **observations** — `id` (INTEGER PK AUTOINCREMENT), `sync_id`, `session_id` (FK), `type`, `title`, `content`, `tool_name`, `project`, `scope`, `topic_key`, `normalized_hash`, `revision_count`, `duplicate_count`, `last_seen_at`, `pinned`, `review_after`, `expires_at`, `embedding`, `embedding_model`, `embedding_created_at`, `created_at`, `updated_at`, `deleted_at`
+- **observations_fts** — FTS5 virtual table synced via triggers (`title`, `content`, `tool_name`, `type`, `project`, `topic_key`)
+- **user_prompts** — `id` (INTEGER PK AUTOINCREMENT), `sync_id`, `session_id` (FK), `content`, `project`, `created_at`; **prompt_tombstones** records deleted prompt `sync_id`, `session_id`, `project`, and `deleted_at`
 - **prompts_fts** — FTS5 virtual table synced via triggers (`content`, `project`)
 - **sync_chunks** — `target_key` (TEXT), `chunk_id` (TEXT), `imported_at`; composite PK (`target_key`, `chunk_id`) for target-scoped chunk tracking
-- **memory_relations** — stores conflict-surfacing verdicts from `mem_judge`; columns include `id` (INTEGER PK AUTOINCREMENT), `sync_id` (TEXT UNIQUE), `source_id`, `target_id`, `relation`, `judgment_status` (`pending` | `judged` | `orphaned` | `ignored`), `reason`, `evidence`, `confidence`, `marked_by_actor`, `marked_by_kind`, `marked_by_model`, `session_id`. The SQLite table does not store a `project` column; project is carried in relation sync payloads and derived from joined observations for project-scoped listing. Syncs across machines via local chunks and via cloud autosync when the project is enrolled.
-- **sync_apply_deferred** — holds pulled mutations that could not be applied locally due to a missing FK dependency (e.g. relation references an observation not yet present); columns: `sync_id` (TEXT PK), `entity`, `payload`, `apply_status` (`deferred` | `applied` | `dead`), `retry_count`, `last_error`, `last_attempted_at`, `first_seen_at`. Rows with `apply_status='dead'` have exceeded the retry cap (5 attempts) and will not be retried automatically.
+- **sync_state** — one row per `target_key`, with lifecycle, sequence, retry/backoff, lease, error, success, and update metadata; **sync_mutations** — ordered mutation queue with target, project, entity, operation, payload, source, acknowledgement, and disposition metadata
+- **sync_enrolled_projects** — enrolled project and enrollment timestamp; **cloud_upgrade_state** — per-project upgrade stage, repair class, snapshot, findings, actions, error, and update metadata
+- **memory_relations** — stores conflict-surfacing verdicts from `mem_judge`; columns include `id` (INTEGER PK AUTOINCREMENT), `sync_id` (TEXT UNIQUE), `source_id`, `target_id`, `relation`, `judgment_status` (`pending` | `judged` | `orphaned` | `ignored`), provenance, supersession, and timestamp metadata. The SQLite table does not store a `project` column; project is carried in relation sync payloads and derived from joined observations for project-scoped listing. Syncs across machines via local chunks and via cloud autosync when the project is enrolled.
+- **sync_apply_deferred** — holds pulled mutations that could not be applied locally due to a missing FK dependency (e.g. relation references an observation not yet present), including target, remote sequence, entity, operation, project, scope, retry, status, and error metadata. Rows with `apply_status='dead'` have exceeded the retry cap (5 attempts) and will not be retried automatically.
 
 ### SQLite Configuration
 
@@ -68,7 +72,7 @@ Project-aware reads resolve an omitted project to the canonical current project:
 
 Engram exposes two different runtimes. Keep routes split by runtime:
 
-- **Local runtime (`engram serve`, JSON on `127.0.0.1:7437`)**
+- **Local runtime (`engram serve`, JSON on `127.0.0.1:7437` by default, or a POSIX Unix socket when selected)**
   - `GET /health` (local service health)
   - includes memory CRUD/search/context endpoints documented below
   - includes `GET /sync/status` (local node sync status)
@@ -118,6 +122,10 @@ Dashboard route tree (`engram cloud serve`):
 
 Engram is local-first: local SQLite is authoritative; cloud features are optional replication/shared access and enrollment controls.
 
+### Mutation materialization attribution
+
+For an accepted `POST /sync/mutations/push`, each future materialized cloud chunk records the authenticated server principal's display name. If it is blank, the server uses the principal ID, then `unknown`. The mutation-envelope `created_by` value cannot control accepted chunk attribution. This is distinct from explicit `POST /sync/push`, which preserves its chunk `created_by` metadata. Existing cloud rows are not repaired or rewritten by this behavior.
+
 ### Health
 
 - Local runtime (`engram serve`): `GET /health` — Returns `{"status": "ok", "service": "engram", "version": "0.1.0"}`
@@ -125,9 +133,12 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 
 ### Sessions
 
-- `POST /sessions` — Create session. Body: `{id, project, directory}`
+- `POST /sessions` — Create session. Body: `{id, project, directory, ownership_mode?}`
+  - `ownership_mode` accepts `shared` or `project_owned`; when omitted it defaults to `shared`.
+  - An invalid non-empty `ownership_mode` returns `400` and does not create a session.
 - `POST /sessions/{id}/end` — End session. Body: `{summary}`
 - `GET /sessions/recent` — Recent sessions. Query: `?project=X&all_projects=true&limit=N`
+  - No-result responses return `200` with `[]` (never `null`)
 - `GET /sessions/{id}` — Get single session by ID
 - `DELETE /sessions/{id}` — Delete session
   - `200` when deleted
@@ -141,12 +152,19 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
   - `400` when `title` or `content` is missing, empty, or whitespace-only. The observation-create paths (`engram save`, `mem_save`, `POST /observations`) enforce the same title rule because cloud sync rejects observation upserts without a title, and one rejected mutation blocks every later mutation for the project
 - `GET /observations` — Recent observations compatibility endpoint. Query: `?project=X&all_projects=true&scope=project|personal|global&limit=N&sort=created_at:desc`
 - `GET /observations/recent` — Recent observations. Query: `?project=X&all_projects=true&scope=project|personal|global&limit=N`
+  - No-result responses from both observation collection endpoints return `200` with `[]` (never `null`)
 - `GET /observations/{id}` — Get single observation by ID
 - `PATCH /observations/{id}` — Update fields. Body: `{title?, content?, type?, project?, scope?, topic_key?}`
   - `400` when `title` or `content` is provided but empty or whitespace-only. Omitting a field leaves its current value unchanged
+- `PUT /observations/{id}/pin` — Pin an observation on this device. Returns `{id, pinned: true}`.
+- `DELETE /observations/{id}/pin` — Unpin an observation on this device. Returns `{id, pinned: false}`.
+  - Both pin routes are idempotent, return `400` for an invalid ID, and return `404` when the observation does not exist
+  - Pin state is local-only: these routes do not change `updated_at`, enqueue sync work, or alter export payloads
 - `DELETE /observations/{id}` — Delete observation (`?hard=true` for hard delete, soft delete by default)
   - `200` when deleted
   - `404` when observation does not exist
+- `POST /topic-keys/suggest` — Suggest a stable topic key using the same heuristic as `mem_suggest_topic_key`. Body: `{type?, title?, content?}`. Returns `{topic_key}`.
+  - At least one of `title` or `content` must be non-empty; invalid JSON or missing suggestion input returns `400`
 
 ### Review
 
@@ -172,6 +190,7 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 - `POST /prompts` — Save user prompt. Body: `{session_id, content, project?}`
 - `GET /prompts/recent` — Recent prompts. Query: `?project=X&all_projects=true&limit=N`
 - `GET /prompts/search` — Search prompts. Query: `?q=QUERY&project=X&all_projects=true&limit=N`
+  - No-result responses from both prompt collection endpoints return `200` with `[]` (never `null`)
 - `DELETE /prompts/{id}` — Delete prompt
   - `200` when deleted
   - `400` for invalid prompt id
@@ -179,7 +198,11 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 
 ### Context
 
-- `GET /context` — Manual formatted context scoped by project and optional scope. Query: `?project=X&scope=project|personal|global`
+- `GET /context` — Manual formatted context scoped by project and optional scope. Query: `?project=X&scope=project|personal|global&observations=N&prompts=N&sessions=N&pinned=N&compact=BOOL&max_bytes=N`
+  - `observations`/`prompts`/`sessions`/`pinned`: `0` (or omitted/invalid) uses that section's legacy default, `>0` caps it (silently clamped to a `500` ceiling), `<0` omits the section and its `### ...` header entirely
+  - `compact=true` drops the inline content preview from `Pinned`/`Recent Observations` bullets, keeping just `- [type] **title**`
+  - `max_bytes`: `0`, omitted, invalid, or negative preserves the unbounded legacy output; a positive value caps the complete rendered context at that many bytes (silently clamped to `65536`). Truncation is UTF-8-safe and appends a `[truncated]` marker when it fits within the requested budget.
+  - Invalid or unparseable values silently fall back to their default — never a `400`
 - `GET /context/compaction` — Runtime compaction context scoped strictly to one persisted session. Query: `?session_id=X`. The server derives the session project; this endpoint does not accept project or scope selection.
 
 ### Passive Capture
@@ -492,7 +515,8 @@ Release update checks are skipped for `version`, `--version`, `-v`, `help`, `--h
 | Variable                        | Description                                                                                                                                                                                                                                               | Default              |
 | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
 | `ENGRAM_DATA_DIR`               | Override data directory                                                                                                                                                                                                                                   | `~/.engram`          |
-| `ENGRAM_PORT`                   | Override HTTP server port                                                                                                                                                                                                                                 | `7437`               |
+| `ENGRAM_PORT`                   | Override HTTP server port. Use an unsigned decimal value from `1` through `65535`; invalid values fall back to `7437` in `engram serve` and Claude Bash hooks.                                                                                         | `7437`               |
+| `ENGRAM_SOCKET`                 | POSIX-only Unix-domain socket path for `engram serve` and Claude Bash hooks. Socket mode listens exclusively on this path; it cannot be combined with an explicit `ENGRAM_PORT` or positional port. The default TCP listener remains unchanged when unset. PowerShell stays TCP-only. Bash hooks warn on stderr if socket transport cannot preserve memory capture. | (unset) |
 | `ENGRAM_PROJECT`                | Process-level default project override for `current` project-scoped operations. Precedence: **explicit request project** (`engram save --project`, an MCP tool `project` argument) → **process override** (`engram mcp --project`, then `ENGRAM_PROJECT`) → **cwd detection**. The value must be a project name, not a path. Explicit/process values are checked against known context when an operation must not establish a bucket; documented creation and recovery writes retain that behavior. Deliberately global operations such as `mem_review` list with no project and `mem_search(all_projects=true)` remain global. | cwd-detected project |
 | `ENGRAM_HTTP_TOKEN`             | Optional Bearer auth for the local HTTP server. When set, `DELETE /sessions/{id}`, `DELETE /observations/{id}`, `DELETE /prompts/{id}`, `GET /export`, and `POST /import` require `Authorization: Bearer <token>`. `POST /projects/rescue-ownership` (and deprecated alias `POST /projects/migrate`) always requires a configured token and matching Bearer credential. Comparison is constant-time. Token is read at request time (no restart needed). Other routes remain open when unset (zero-config default). Ownership repair never depends on this token: `engram projects rescue-ownership` performs the same repair against the local store. | (unset — HTTP rescue route not served; CLI repair still available) |
 | `ENGRAM_TIMEZONE`               | Timezone for timestamp display in the TUI and cloud dashboard. Accepts any IANA zone name (e.g. `America/New_York`, `Europe/Berlin`). Falls back to system local time when unset or invalid.                                                               | system local         |
@@ -567,7 +591,7 @@ Inspect or replay the `sync_apply_deferred` queue.
 
 ### Cloud CLI (opt-in)
 
-- `engram cloud status` — show current cloud config state plus auth/sync readiness without mutating local state. When cloud is configured, also probes the local `engram serve` daemon at `127.0.0.1:7437` (respects `ENGRAM_PORT`) and prints a `Local daemon:` line (`running` / `not running` / `unreachable`) so you can detect a silently dead autosync. Exit code is unaffected; the line is informational
+- `engram cloud status` — show current cloud config state plus auth/sync readiness without mutating local state. When cloud is configured, also probes the local `engram serve` daemon at `127.0.0.1:7437` (respects `ENGRAM_PORT`) and prints a `Local daemon:` line (`running` / `not running` / `unreachable`) so you can detect a silently dead autosync. The probe currently uses the TCP daemon endpoint, so `ENGRAM_SOCKET` socket-only mode can report the daemon as not running. Exit code is unaffected; the line is informational
 - `engram cloud enroll <project>` — enroll one project for cloud replication
 - `engram cloud config --server <url>` — persist cloud server URL to `~/.engram/cloud.json`
 - `engram cloud serve` — run cloud backend API + dashboard (`/dashboard`) using Postgres config from env
@@ -579,6 +603,8 @@ Inspect or replay the `sync_apply_deferred` queue.
 - `engram cloud repair materialize-mutations --project <project> (--dry-run|--apply)` — explicit server-side Postgres repair that backfills existing `cloud_mutations` into compatible `cloud_chunks` without deleting remote data
 - `engram cloud bootstrap admin --username <name> [--email <email>] [--grant-project <project>]... [--issue-token [name]]` — create the first managed admin (see [Managed users, tokens, and CLI bootstrap](#managed-users-tokens-and-cli-bootstrap))
 - `engram cloud bootstrap recover-token [--name <name>]` — recover the one stranded managed admin token state described below
+
+`engram sync --cloud --import --project <project>` runs in the foreground and prints plain-text import progress that is safe for non-interactive logs. It emits an initial snapshot, bounded event-count-throttled updates, and a final `100%` / `0 pending` snapshot before the normal import summary. Each snapshot includes local, remote, and pending chunk counts; percentage is based on the pending work captured at import start, so retries do not inflate completion.
 
 Cloud auth token is provided at runtime via `ENGRAM_CLOUD_TOKEN` (not by a dedicated CLI subcommand).
 Cloud server startup fails closed when the token is missing unless `ENGRAM_CLOUD_INSECURE_NO_AUTH=1` is explicitly set for local insecure development.
@@ -822,7 +848,7 @@ Guardrails:
 - An unbacked explicit `project` fails loudly and does not create a new bucket.
 - If a non-empty `session_id` is supplied and no session exists, `mem_save` fails with a structured error and does not write.
 - If both explicit `project` and `session_id` are supplied, they must resolve to the same normalized project or `mem_save` fails with a structured error and does not write.
-- When a write omits `session_id`, Engram uses the current process directory only to narrow active non-manual runtime sessions for the resolved project. It attaches to a session only when exactly one candidate remains, uses the project manual-save session when none remain, and rejects multiple candidates rather than selecting by recency. Directory is not session identity; callers with concurrent sessions must supply `session_id`.
+- An explicit `session_id` is authoritative. When a write omits it, Engram uses the current process directory only to narrow active non-manual runtime sessions for the resolved project. It attaches to a session only when exactly one candidate remains, uses the project manual-save session when none remain, and fails closed when multiple candidates remain rather than selecting by recency. Directory is not session identity; callers with concurrent sessions must supply `session_id`, end other active matching sessions, or save independently with `engram save "TITLE" "CONTENT" --project PROJECT --type TYPE --topic TOPIC_KEY`. The CLI fallback writes to an independent project manual-save session and does not bind it to the current MCP session. Claude Code currently may require ending other active matching sessions because its MCP transport does not expose runtime identity to each tool call.
 - `project_choice_reason=user_selected_after_ambiguous_project` is only honored when cwd resolution is actually ambiguous. On a non-ambiguous cwd, stale recovery flags do not override explicit-project precedence or session mismatch validation.
 - If ambiguous-project recovery is active, `project` must exactly match one of the previously returned `available_projects`; invented or normalized guesses are rejected.
 - Exact ambiguous-project choices can still fail with `project_name_collision` when multiple available names collapse to the same stored project bucket after normalization. Rename or disambiguate the colliding projects before retrying.
@@ -861,7 +887,8 @@ Returns success even when cwd is ambiguous — empty `project` + non-empty `avai
 
 ---
 
-## MCP Tools (22 tools)
+## MCP Tools (23 tools)
+
 
 ### mem_search
 
@@ -917,6 +944,26 @@ Actions:
 
 `mark_reviewed` is local-only for now: `review_after` is intentionally not part of sync payloads in this phase, so resetting the review cycle does not enqueue a sync mutation or propagate to other machines.
 
+### mem_pin
+
+Pin a local observation so it appears before recent observations in memory context. Pinned state is **local to this device and is not synced**. Available in the `agent` profile (`engram mcp --tools=agent`).
+
+Parameters:
+
+- **id** (required): int — observation ID to pin
+
+Returns `{ "result": "Memory #N pinned", "id": N, "sync_id": ..., "pinned": true }`. Idempotent: pinning an already-pinned observation succeeds without change. Errors: missing/zero `id` ("id is required"), or a store failure ("Failed to update pin state: ...").
+
+### mem_unpin
+
+Unpin a local observation so it only appears in normal recency order in memory context. Pinned state is **local to this device and is not synced**. Available in the `agent` profile (`engram mcp --tools=agent`).
+
+Parameters:
+
+- **id** (required): int — observation ID to unpin
+
+Returns `{ "result": "Memory #N unpinned", "id": N, "sync_id": ..., "pinned": false }`. Idempotent: unpinning an already-unpinned observation succeeds without change. Errors: missing/zero `id` ("id is required"), or a store failure ("Failed to update pin state: ...").
+
 ### mem_suggest_topic_key
 
 Suggest a stable `topic_key` from `type + title` (or content fallback). Uses family heuristics like `architecture/*`, `bug/*`, `decision/*`, etc. Use before `mem_save` when you want evolving topics to upsert into a single observation.
@@ -930,14 +977,6 @@ Delete an observation by ID. Uses soft-delete by default (`deleted_at`); optiona
 Save user prompts — records what the user asked so future sessions have context about user goals. It applies the same post-redaction byte limit and truncation metadata as `mem_save`; `mem_save_prompt` warns when it truncates.
 When called in the same MCP process, this also feeds process-local current prompt context used by later `mem_save` calls with `capture_prompt=true`. The same MCP process lifecycle must receive the prompt context before the later save; prompt capture is best-effort and `mem_save` still succeeds when no context is available.
 
-### mem_pin
-
-Pin a local observation so it appears before recent observations in memory context. Pinned state is local to this device and is not synced.
-
-### mem_unpin
-
-Unpin a local observation so it only appears in normal recency order. Pinned state is local to this device and is not synced.
-
 ### mem_context
 
 Get recent memory context from previous sessions — shows sessions, prompts, and observations, with optional scope filtering for observations.
@@ -945,6 +984,8 @@ Get recent memory context from previous sessions — shows sessions, prompts, an
 When `project` is omitted, context is scoped to the resolved current project (process override before cwd detection). This is not an all-project query. `scope: personal` without an explicit project retains its cross-project personal-memory behavior.
 
 Scope values accepted by the `scope` parameter: `project` (default), `personal`, `global`. When `scope: personal` is passed without an explicit `project` override, the project filter is cleared and personal observations are returned across all projects (cross-project personal scope).
+
+MCP `mem_context` uses a 16 KiB default budget for the complete tool result and caps `max_bytes` at 64 KiB. `max_bytes` must be a positive integral number; absent, mistyped, non-positive, `NaN`, and fractional values fall back to the 16 KiB default. It includes at most 20 pinned observations by default. When the complete result exceeds its budget, truncation is UTF-8-safe and appends a visible `[truncated]` marker when the marker fits. `compact=true` removes inline content previews from pinned and recent-observation bullets, retaining their type and title. These MCP rules are distinct from the HTTP `GET /context` behavior documented above.
 
 ### mem_stats
 
@@ -976,6 +1017,8 @@ Save comprehensive end-of-session summary:
 
 Register the start of a new coding session.
 
+If the supplied session ID has already ended, the request is rejected with the structured error code `session_already_ended`, which includes that session ID. Choose a new session ID to continue; ended sessions cannot be reopened. New session IDs and IDs for active sessions remain accepted.
+
 ### mem_session_end
 
 Mark a session as completed with optional summary.
@@ -991,6 +1034,19 @@ Extract structured learnings from text output. Looks for `## Key Learnings:` sec
 ### mem_current_project
 
 Detect the current project from the working directory. Returns `project`, `project_source`, `project_path`, `cwd`, `available_projects`, and `warning`. Never returns an error — even on ambiguous cwd it returns success with an empty `project` and non-empty `available_projects`. Recommended as the first call when starting a session.
+
+### mem_list_projects
+
+List every project known to Engram with per-project `observation_count`, `session_count`, `prompt_count`, and known `directories`, ordered by observation count descending — the same view as `engram projects list`. Returns `{ "projects": [...], "count": N }`.
+
+Included in the `agent` profile; `engram mcp` registers all tools by default, so `--tools=agent` is not required to use it.
+
+Result semantics:
+
+- **Empty store** — successful response with `{ "projects": [], "count": 0 }`. Discovery never fails just because nothing is stored yet.
+- **Store-query failure** — returns a tool error (`List projects failed: ...`) instead of a success envelope, so the agent knows discovery failed rather than trusting an empty answer.
+
+Use it for cross-project discovery when the working directory matches no known project, then scope `mem_search`/`mem_context` to the chosen project.
 
 ### mem_doctor
 
@@ -1036,6 +1092,8 @@ Behavior:
 
 ---
 
+<a id="memory-protocol-full-text"></a>
+
 ## Memory Protocol
 
 The Memory Protocol teaches agents **when** and **how** to use Engram's MCP tools. Without it, the agent has the tools but no behavioral guidance. Add this to your agent's prompt file (see [Agent Setup](docs/AGENT-SETUP.md) for per-agent locations).
@@ -1058,6 +1116,7 @@ Format for `mem_save`:
 - **scope**: `project` (default) | `personal` | `global`
 - **topic_key** (optional, recommended for evolving decisions): stable key like `architecture/auth-model`
 - **content**:
+
   ```
   **What**: One sentence — what was done
   **Why**: What motivated it (user request, bug, performance, etc.)
@@ -1071,6 +1130,10 @@ Format for `mem_save`:
 - Reuse the same `topic_key` to update an evolving topic instead of creating new observations
 - If unsure about the key, call `mem_suggest_topic_key` first and then reuse it
 - Use `mem_update` when you have an exact observation ID to correct
+
+### DELIVERY GUARANTEE
+
+Memory operations are internal bookkeeping, never the user-facing answer. Complete required memory work before composing the completed-task reply; send the complete answer as the final message of the turn with no later tool calls. If memory work fails or needs follow-up, still send the answer.
 
 ### WHEN TO SEARCH MEMORY
 

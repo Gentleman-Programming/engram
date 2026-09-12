@@ -26,6 +26,7 @@ var (
 	// App frame
 	appStyle = lipgloss.NewStyle().
 			Foreground(colorText).
+			Background(colorBase).
 			Padding(1, 2)
 
 	// Header bar

@@ -32,7 +32,7 @@ const { createServer } = require("node:http");
 const { resolve } = require("node:path");
 
 const syntheticServePath = resolve("serve");
-const isSyntheticServe = process.argv[1] === syntheticServePath;
+const command = process.argv.at(-1); const isSyntheticServe = command === "serve" || command === syntheticServePath; if (command === "instance-id" || command === resolve("instance-id")) { process.stdout.write("00000000000000000000000000000000\\n"); process.exit(0); }
 const isServe = process.argv[2] === "serve" || isSyntheticServe;
 if (isServe) {
   appendFileSync(${JSON.stringify(spawnLog)}, "serve\\n");
@@ -44,7 +44,7 @@ if (isServe) {
     return;
   }
   res.writeHead(200, { "content-type": "application/json" });
-  res.end("{}");
+  res.end(JSON.stringify({ instance_id: "00000000000000000000000000000000" }));
 });
 // The port was picked by a probe socket that has since closed, so another process can win it
 // in between. Retry the bind for a bounded window instead of dying on a lost race.
@@ -116,7 +116,7 @@ async function withFixture(options, run) {
     const port = await freePort();
     readyServer = options.readyServer && createHTTPServer((request, response) => {
       response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify(request.url.startsWith("/project/current") ? { project: "fake-project" } : {}));
+      response.end(JSON.stringify(request.url.startsWith("/project/current") ? { project: "fake-project" } : { instance_id: "00000000000000000000000000000000" }));
     });
     if (readyServer) await new Promise((resolve, reject) => {
       readyServer.once("error", reject);
@@ -217,6 +217,10 @@ test("before_agent_start injects actionable mem_search recall guidance", async (
     assert.match(result.systemPrompt, /If a scoped search is empty, retry once this way/);
     assert.match(result.systemPrompt, /After hits, narrow follow-up searches by project, type, or `match_mode:"all"`/);
     assert.match(result.systemPrompt, /then use `mem_get_observation` for full content/);
+    assert.match(result.systemPrompt, /Memory operations are internal bookkeeping, never the user-facing answer/);
+    assert.match(result.systemPrompt, /Complete required memory work before composing the completed-task reply/);
+    assert.match(result.systemPrompt, /complete answer as the final message of the turn with no later tool calls/);
+    assert.match(result.systemPrompt, /If memory work fails or needs follow-up, still send the answer/);
   });
 });
 

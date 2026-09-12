@@ -61,7 +61,7 @@ engram cloud upgrade bootstrap --project smoke-project --resume
 engram cloud upgrade status --project smoke-project
 ```
 
-`rollback` is only available before bootstrap reaches `bootstrap_verified`.
+`rollback` is only available before bootstrap reaches `bootstrap_verified`. For general release upgrades and rollback expectations, see the [Release Policy](../RELEASE-POLICY.md).
 
 ---
 
@@ -70,6 +70,8 @@ engram cloud upgrade status --project smoke-project
 Do not build from source for production deploys. Use the published image:
 
 - `ghcr.io/gentleman-programming/engram:latest`
+
+The `:latest` tag is an image selector, not a support-channel guarantee. Choose a release channel deliberately and follow the [Release Policy](../RELEASE-POLICY.md) before upgrading a production deployment.
 
 Reference compose file:
 - [docker-compose.ghcr.yml](./docker-compose.ghcr.yml)
@@ -188,6 +190,8 @@ docker compose restart cloud
 If you upgrade the `engram` image tag, redeploy or restart the container so the
 running server picks up the new binary.
 
+Before exposing this deployment to users, complete the [Production Checklist](./production-checklist.md). The Compose example is a starting point, not a complete production platform.
+
 ### Client-side token setup
 
 On the machine that runs the Engram CLI, set the client token in the shell before
@@ -232,10 +236,10 @@ ENGRAM_CLOUD_ALLOWED_PROJECTS="my-project" \
 engram cloud serve
 ```
 
-Then configure client endpoint + token:
+Then configure the client through an HTTPS TLS-terminating endpoint and set its token:
 
 ```bash
-engram cloud config --server http://127.0.0.1:8080
+engram cloud config --server https://your-tls-proxy:8443
 export ENGRAM_CLOUD_TOKEN="your-token"
 engram cloud enroll my-project
 engram sync --cloud --project my-project
@@ -243,6 +247,7 @@ engram sync --cloud --project my-project
 
 Rules that matter:
 - `ENGRAM_CLOUD_INSECURE_NO_AUTH=1` cannot be combined with `ENGRAM_CLOUD_TOKEN`
+- Bearer-token clients require HTTPS, including after redirects. Plain HTTP is supported only for tokenless local/dev smoke mode.
 - `ENGRAM_CLOUD_ALLOWED_PROJECTS` is required server-side in both modes
 - authenticated mode requires explicit non-default `ENGRAM_JWT_SECRET`
 - `ENGRAM_CLOUD_INSECURE_NO_AUTH=1` remains local/dev only (never production)

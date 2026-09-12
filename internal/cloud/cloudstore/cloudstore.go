@@ -168,7 +168,7 @@ func (cs *CloudStore) ReadManifest(ctx context.Context, project string) (*engram
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("cloudstore: iterate manifest: %w", err)
 	}
-	return &engramsync.Manifest{Version: 1, Chunks: toManifestEntries(manifestRows)}, nil
+	return &engramsync.Manifest{Version: 2, Chunks: toManifestEntries(manifestRows)}, nil
 }
 
 type manifestRow struct {
@@ -803,7 +803,24 @@ type MutationEntry struct {
 	EntityKey string          `json:"entity_key"`
 	Op        string          `json:"op"`
 	Payload   json.RawMessage `json:"payload"`
+	CreatedBy string          `json:"-"`
 }
+
+// MutationBatchEntryError identifies the entry that caused an atomic mutation
+// batch insert to fail. Its identity fields are bounded and escaped because they
+// may originate from a client request.
+type MutationBatchEntryError struct {
+	BatchIndex int
+	Entity     string
+	EntityKey  string
+	Err        error
+}
+
+func (e *MutationBatchEntryError) Error() string {
+	return fmt.Sprintf("cloudstore: mutation batch entry rejected: reason=mutation_insert_rejected batch_index=%d entity=%.64q entity_key=%.64q", e.BatchIndex, e.Entity, e.EntityKey)
+}
+
+func (e *MutationBatchEntryError) Unwrap() error { return e.Err }
 
 // StoredMutation mirrors cloudserver.StoredMutation to avoid a circular import.
 type StoredMutation struct {
@@ -854,7 +871,7 @@ func (cs *CloudStore) InsertMutationBatch(ctx context.Context, batch []MutationE
 	}()
 
 	seqs := make([]int64, 0, len(batch))
-	for _, entry := range batch {
+	for batchIndex, entry := range batch {
 		project := strings.TrimSpace(entry.Project)
 		entity := strings.TrimSpace(entry.Entity)
 		entityKey := strings.TrimSpace(entry.EntityKey)
@@ -871,16 +888,25 @@ func (cs *CloudStore) InsertMutationBatch(ctx context.Context, batch []MutationE
 			project, entity, entityKey, op, payload,
 		).Scan(&seq)
 		if err != nil {
-			return nil, fmt.Errorf("cloudstore: insert mutation: %w", err)
+			return nil, &MutationBatchEntryError{
+				BatchIndex: batchIndex,
+				Entity:     entity,
+				EntityKey:  entityKey,
+				Err:        err,
+			}
 		}
 		seqs = append(seqs, seq)
 	}
 	for _, chunk := range chunks {
+		createdBy := strings.TrimSpace(chunk.createdBy)
+		if createdBy == "" {
+			createdBy = "unknown"
+		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO cloud_chunks (project_name, chunk_id, created_by, payload, sessions_count, observations_count, prompts_count)
 			VALUES ($1, $2, $3, $4, $5, $6, $7)
 			ON CONFLICT (project_name, chunk_id) DO NOTHING`,
-			chunk.project, chunk.id, "mutation-push", chunk.payload, chunk.counts.sessions, chunk.counts.observations, chunk.counts.prompts,
+			chunk.project, chunk.id, createdBy, chunk.payload, chunk.counts.sessions, chunk.counts.observations, chunk.counts.prompts,
 		); err != nil {
 			return nil, fmt.Errorf("cloudstore: materialize mutation batch chunk: %w", err)
 		}
@@ -1041,10 +1067,11 @@ func (cs *CloudStore) existingChunkMutationSignatures(ctx context.Context, proje
 }
 
 type materializedMutationChunk struct {
-	project string
-	id      string
-	payload []byte
-	counts  chunkSummary
+	project   string
+	id        string
+	createdBy string
+	payload   []byte
+	counts    chunkSummary
 }
 
 func materializedMutationBatchChunks(batch []MutationEntry) ([]materializedMutationChunk, error) {
@@ -1073,7 +1100,13 @@ func materializedMutationBatchChunks(batch []MutationEntry) ([]materializedMutat
 		if len(payload) == 0 {
 			continue
 		}
-		chunks = append(chunks, materializedMutationChunk{project: project, id: chunkIDFromPayload(payload), payload: payload, counts: counts})
+		chunks = append(chunks, materializedMutationChunk{
+			project:   project,
+			id:        chunkIDFromPayload(payload),
+			createdBy: strings.TrimSpace(groups[project][0].CreatedBy),
+			payload:   payload,
+			counts:    counts,
+		})
 	}
 	return chunks, nil
 }

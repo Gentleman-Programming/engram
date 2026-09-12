@@ -478,7 +478,6 @@ func scanChildren(dir string) (repos []string, timedOut bool) {
 			}
 		}
 	}
-	return repos, false
 }
 
 // DetectProject detects the project name for a given directory.

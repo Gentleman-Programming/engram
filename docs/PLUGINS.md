@@ -60,6 +60,7 @@ The plugin injects a strict protocol into every agent message:
 
 - **WHEN TO SAVE**: Mandatory after bugfixes, decisions, discoveries, config changes, patterns, preferences
 - **WHEN TO SEARCH**: Reactive (user says "remember"/"recordar") + proactive (starting work that might overlap past sessions)
+- **DELIVERY GUARANTEE**: Memory operations are internal bookkeeping, never the user-facing answer. Complete required memory work before composing the completed-task reply; send the complete answer as the final message of the turn with no later tool calls. If memory work fails or needs follow-up, still send the answer.
 - **SESSION CLOSE**: Mandatory `mem_session_summary` before ending — "This is NOT optional. If you skip this, the next session starts blind."
 - **AFTER COMPACTION**: Persist the injected session-only compaction context before requesting any additional project context
 
@@ -91,7 +92,7 @@ engram setup claude-code
 claude --plugin-dir ./plugin/claude-code
 ```
 
-Existing marketplace-only copies create their durable MCP registration at the next SessionStart and require one more Claude Code restart before MCP tools return. If `~/.claude/mcp/engram.json` is a symlink or another non-regular path, SessionStart and direct setup refuse to replace it; inspect it and manually replace it with a regular file before rerunning `engram setup claude-code`. Do not edit the plugin cache manually.
+Existing marketplace-only copies create their durable MCP registration at the next SessionStart and require one more Claude Code restart before MCP tools return. If `~/.claude/mcp/engram.json` is a symlink or another non-regular path, SessionStart and direct setup refuse to replace it; inspect it and manually replace it with a regular file before rerunning `engram setup claude-code`. Do not edit the plugin cache manually. When `CLAUDE_CONFIG_DIR` is set, Engram writes the MCP registration under that directory instead (`$CLAUDE_CONFIG_DIR/mcp/engram.json`, `$CLAUDE_CONFIG_DIR/settings.json`), the same directory Claude Code itself uses.
 
 The `--protocol=slim` setup option requires Engram plugin 0.1.1 or later. After successful Claude Code setup, Engram checks `claude plugin list --json`; an unverifiable, disabled, or older plugin produces a warning but does not fail setup or replace the selected slim mode. Use your normal Claude Code plugin update path, then restart Claude Code. Plugins loaded with session-only `claude --plugin-dir ...` cannot be detected.
 
@@ -111,14 +112,14 @@ The `--protocol=slim` setup option requires Engram plugin 0.1.1 or later. After 
 ```
 plugin/claude-code/
 ├── .claude-plugin/plugin.json     # Plugin manifest
-├── hooks/hooks.json               # SessionStart + SubagentStop + Stop lifecycle hooks
+├── hooks/hooks.json               # SessionStart + SubagentStop + SessionEnd lifecycle hooks
 ├── scripts/
 │   ├── session-start.sh           # Ensures server, creates session, imports chunks, injects context
 │   ├── post-compaction.sh         # Injects previous context + recovery instructions
 │   ├── user-prompt-submit.sh      # Loads MCP tools on first prompt; Windows Git Bash safe mode
 │   ├── user-prompt-submit.ps1     # Optional Windows-native fallback for locked-down endpoints
 │   ├── subagent-stop.sh           # Passive capture trigger on subagent completion
-│   └── session-stop.sh            # Logs end-of-session event
+│   └── session-end.sh             # Logs end-of-session event at session end
 └── skills/memory/SKILL.md         # Memory Protocol (when to save, search, close, recover)
 ```
 

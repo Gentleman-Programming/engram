@@ -6,8 +6,8 @@
 //
 // Tool profiles allow agents to load only the tools they need:
 //
-//	engram mcp                    → all 22 tools (default)
-//	engram mcp --tools=agent      → 18 tools agents actually use (per skill files)
+//	engram mcp                    → all 23 tools (default)
+//	engram mcp --tools=agent      → 19 tools agents actually use (per skill files)
 //	engram mcp --tools=admin      → 4 tools for TUI/CLI (delete, stats, timeline, merge)
 //	engram mcp --tools=agent,admin → combine profiles
 //	engram mcp --tools=mem_save,mem_search → individual tool names
@@ -18,10 +18,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/Gentleman-Programming/engram/v2/internal/diagnostic"
@@ -65,10 +67,6 @@ var addPromptIfMissing = func(s *store.Store, params store.AddPromptParams) (int
 	return s.AddPromptIfMissing(params)
 }
 
-var findSessionSummaryCandidates = func(s *store.Store, savedID int64, opts store.CandidateOptions) ([]store.Candidate, error) {
-	return s.FindCandidates(savedID, opts)
-}
-
 var loadMCPStats = func(s *store.Store) (*store.Stats, error) {
 	return s.Stats()
 }
@@ -82,6 +80,104 @@ func truncationWarning(metadata store.TruncationMetadata) string {
 		return ""
 	}
 	return fmt.Sprintf("\n⚠ WARNING: Content was truncated from %d to %d bytes. Consider splitting into smaller observations.", metadata.OriginalBytes, metadata.LimitBytes)
+}
+
+func absolutePathWarning(content string) string {
+	if !containsAbsoluteFilesystemPath(content) {
+		return ""
+	}
+	return "\n⚠ WARNING: Content contains an absolute filesystem path that may not be portable across machines. Use a repository-relative path instead."
+}
+
+// containsAbsoluteFilesystemPath recognizes common absolute path spellings
+// without relying on the host operating system. Route-like POSIX paths such as
+// /api/v1 are intentionally treated as ambiguous matches for this non-blocking warning.
+func containsAbsoluteFilesystemPath(content string) bool {
+	for i := 0; i < len(content); {
+		char, size := utf8.DecodeRuneInString(content[i:])
+		if char == utf8.RuneError && size == 1 {
+			i++
+			continue
+		}
+		if uriEnd := uriTokenEnd(content, i); uriEnd > i {
+			i = uriEnd
+			continue
+		}
+
+		if isASCIILetter(content[i]) && i+2 < len(content) && content[i+1] == ':' && (content[i+2] == '/' || content[i+2] == '\\') {
+			return true
+		}
+		if content[i] == '\\' && i+2 < len(content) && content[i+1] == '\\' && content[i+2] != '\\' && content[i+2] != '/' {
+			return true
+		}
+		if content[i] == '/' && (i+1 == len(content) || content[i+1] != '/') && isAbsolutePathBoundary(content, i) {
+			return true
+		}
+		i += size
+	}
+	return false
+}
+
+func isAbsolutePathBoundary(content string, index int) bool {
+	if index == 0 {
+		return true
+	}
+	previous, size := utf8.DecodeLastRuneInString(content[:index])
+	if previous == utf8.RuneError && size == 1 {
+		return false
+	}
+	return previous != '/' && !isPathWordCharacter(previous)
+}
+
+func uriTokenEnd(content string, start int) int {
+	if !isASCIILetter(content[start]) {
+		return start
+	}
+	if start > 0 {
+		previous, size := utf8.DecodeLastRuneInString(content[:start])
+		if (previous != utf8.RuneError || size != 1) && isPathWordCharacter(previous) {
+			return start
+		}
+	}
+
+	colon := start + 1
+	for colon < len(content) && (isASCIILetter(content[colon]) || content[colon] >= '0' && content[colon] <= '9' || content[colon] == '+' || content[colon] == '-' || content[colon] == '.') {
+		colon++
+	}
+	if colon >= len(content) || content[colon] != ':' {
+		return start
+	}
+
+	hasAuthority := colon+2 < len(content) && content[colon+1] == '/' && content[colon+2] == '/'
+	hasAuthoritylessFilePath := colon+1 < len(content) && content[colon+1] == '/' && strings.EqualFold(content[start:colon], "file")
+	if !hasAuthority && !hasAuthoritylessFilePath {
+		return start
+	}
+
+	end := colon + 2
+	if hasAuthority {
+		end++
+	}
+	for end < len(content) {
+		char, size := utf8.DecodeRuneInString(content[end:])
+		if char == utf8.RuneError && size == 1 || !isURITokenCharacter(char) {
+			break
+		}
+		end += size
+	}
+	return end
+}
+
+func isASCIILetter(char byte) bool {
+	return char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z'
+}
+
+func isPathWordCharacter(char rune) bool {
+	return unicode.IsLetter(char) || unicode.IsDigit(char) || unicode.IsMark(char) || char == '.' || char == '-' || char == '_'
+}
+
+func isURITokenCharacter(char rune) bool {
+	return isPathWordCharacter(char) || strings.ContainsRune(":/?#[]@!$&'()*+,;=%~", char)
 }
 
 var currentWorkingDirectory = func() string {
@@ -133,6 +229,7 @@ var ProfileAgent = map[string]bool{
 	"mem_save_prompt":       true, // save user prompts
 	"mem_update":            true, // update observation by ID — skills say "use mem_update when you have an exact ID to correct"
 	"mem_current_project":   true, // detect current project — recommended first call for agents (REQ-313)
+	"mem_list_projects":     true, // enumerate all known projects for cross-project discovery (engram#675)
 	"mem_judge":             true, // record verdict on a pending memory conflict (REQ-003, Phase D)
 	"mem_compare":           true, // persist an agent-judged semantic verdict via JudgeBySemantic (REQ-011, Phase G)
 	"mem_doctor":            true, // read-only operational diagnostics for agents
@@ -218,6 +315,24 @@ var deferredTools = []string{
 	"mem_stats", "mem_delete", "mem_timeline", "mem_merge_projects",
 }
 
+// memoryWritingTools contains every registered tool that can mutate persistent
+// or local memory/session bookkeeping.
+var memoryWritingTools = []string{
+	"mem_save", "mem_update", "mem_review", "mem_delete",
+	"mem_save_prompt", "mem_pin", "mem_unpin", "mem_session_summary",
+	"mem_session_start", "mem_session_end", "mem_capture_passive",
+	"mem_merge_projects", "mem_judge", "mem_compare",
+}
+
+func hasRegisteredMemoryWriter(allowlist map[string]bool) bool {
+	for _, tool := range memoryWritingTools {
+		if shouldRegister(tool, allowlist) {
+			return true
+		}
+	}
+	return false
+}
+
 // buildServerInstructions dynamically generates the instructions for MCP clients
 // based on which tools are allowed/registered.
 func buildServerInstructions(allowlist map[string]bool) string {
@@ -254,6 +369,10 @@ func buildServerInstructions(allowlist map[string]bool) string {
 
 	if shouldRegister("mem_save", allowlist) {
 		b.WriteString("PROACTIVE SAVE RULE: Call mem_save immediately after ANY decision, bug fix, discovery, or convention — not just when asked.\n\n")
+	}
+	if hasRegisteredMemoryWriter(allowlist) {
+		b.WriteString("## DELIVERY GUARANTEE\n\n" +
+			"Memory operations are internal bookkeeping, never the user-facing answer. Complete required memory work before composing the completed-task reply; send the complete answer as the final message of the turn with no later tool calls. If memory work fails or needs follow-up, still send the answer.\n\n")
 	}
 
 	if shouldRegister("mem_save", allowlist) && shouldRegister("mem_judge", allowlist) {
@@ -337,6 +456,9 @@ func registerTools(srv *server.MCPServer, s *store.Store, cfg MCPConfig, allowli
 				),
 				mcp.WithString("match_mode",
 					mcp.Description("Token matching: \"all\" (default — every token must match, FTS5 AND) or \"any\" (any token matches — broader recall for multi-token queries). Any other value returns an error."),
+				),
+				mcp.WithString("response_format",
+					mcp.Description("Response format: omit for the legacy response, or use \"compact\" for bounded previews and structured results."),
 				),
 				mcp.WithNumber("limit",
 					mcp.Description("Max results (default: 10, max: 20)"),
@@ -603,7 +725,15 @@ Examples:
 				mcp.WithString("scope",
 					mcp.Description("Filter observations by scope: project, personal, or global. Omit to apply no scope filter."),
 				),
-				// JW7: limit param removed — schema advertised it but handleContext never read it.
+				mcp.WithNumber("max_bytes",
+					mcp.Description("Total context budget in bytes. Default 16384; values above 65536 are clamped to 65536."),
+				),
+				mcp.WithBoolean("compact",
+					mcp.Description("Drop the inline content preview from observation bullets to save tokens."),
+				),
+				// JW7: the old limit param was removed because handleContext never
+				// read it; max_bytes and compact ARE read and forwarded to
+				// FormatContextWithOptions (#1039).
 			),
 			handleContext(s, cfg, activity),
 		)
@@ -854,6 +984,21 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 		)
 	}
 
+	// ─── mem_list_projects (profile: agent) ───────────────────────────────
+	if shouldRegister("mem_list_projects", allowlist) {
+		srv.AddTool(
+			mcp.NewTool("mem_list_projects",
+				mcp.WithDescription("List every project known to Engram, with per-project observation/session/prompt counts, ordered by observation count (same view as `engram projects list`). Use for cross-project discovery when the working directory matches no known project: pick the right project, then scope mem_search/mem_context to it. Returns a successful empty list when nothing is stored yet; a store failure returns a tool error."),
+				mcp.WithTitleAnnotation("List Known Projects"),
+				mcp.WithReadOnlyHintAnnotation(true),
+				mcp.WithDestructiveHintAnnotation(false),
+				mcp.WithIdempotentHintAnnotation(true),
+				mcp.WithOpenWorldHintAnnotation(false),
+			),
+			handleListProjects(s),
+		)
+	}
+
 	// ─── mem_doctor (profile: agent, deferred) ──────────────────────────
 	if shouldRegister("mem_doctor", allowlist) {
 		srv.AddTool(
@@ -986,6 +1131,30 @@ ERROR: Returns IsError=true if IDs are unknown, relation is invalid, or cross-pr
 
 // ─── Tool Handlers ───────────────────────────────────────────────────────────
 
+// handleListProjects serves mem_list_projects (engram#675): the MCP view of
+// `engram projects list`, backed by the same store query (ListProjectsWithStats)
+// so CLI and MCP never diverge. An empty store is a successful empty listing;
+// a store-query failure is surfaced as a tool error.
+func handleListProjects(s *store.Store) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		projects, err := s.ListProjectsWithStats()
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("List projects failed: %v", err)), nil
+		}
+		if projects == nil {
+			projects = []store.ProjectStats{}
+		}
+		out, err := jsonMarshal(map[string]any{
+			"projects": projects,
+			"count":    len(projects),
+		})
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("List projects failed to encode response: %v", err)), nil
+		}
+		return mcp.NewToolResultText(string(out)), nil
+	}
+}
+
 // handleCurrentProject implements mem_current_project. It NEVER returns an error
 // even on ambiguous cwd — it always returns a success result with whatever
 // detection info is available (REQ-313).
@@ -1027,6 +1196,7 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		projectOverride, _ := req.GetArguments()["project"].(string)
 		scope, _ := req.GetArguments()["scope"].(string)
 		matchMode, _ := req.GetArguments()["match_mode"].(string)
+		responseFormat, _ := req.GetArguments()["response_format"].(string)
 		allProjects := boolArg(req, "all_projects", false)
 		limit := intArg(req, "limit", 10)
 
@@ -1034,6 +1204,10 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		if matchMode != "" && matchMode != "all" && matchMode != "any" {
 			return mcp.NewToolResultError(fmt.Sprintf("invalid match_mode %q: must be \"all\" or \"any\"", matchMode)), nil
 		}
+		if responseFormat != "" && responseFormat != "compact" {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid response_format %q: must be \"compact\"", responseFormat)), nil
+		}
+		compact := responseFormat == "compact"
 
 		// all_projects=true short-circuits project resolution: we search globally
 		// regardless of the project override or any auto-detected project. This
@@ -1066,7 +1240,7 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		sessionID := defaultSessionID(project)
 		activity.RecordToolCall(sessionID)
 
-		results, err := s.SearchContext(ctx, query, store.SearchOptions{
+		results, err := s.SearchPreviewsContext(ctx, query, store.SearchOptions{
 			Type:      typ,
 			Project:   searchProject,
 			Scope:     scope,
@@ -1100,7 +1274,9 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		}
 
 		var b strings.Builder
-		fmt.Fprintf(&b, "Found %d memories:\n\n", len(results))
+		if !compact {
+			fmt.Fprintf(&b, "Found %d memories:\n\n", len(results))
+		}
 		anyTruncated := false
 		structuredResults := make([]map[string]any, 0, len(results))
 		for i, r := range results {
@@ -1108,8 +1284,8 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			if r.Project != nil {
 				projectDisplay = fmt.Sprintf(" | project: %s", *r.Project)
 			}
-			preview := truncate(r.Content, 300)
-			if utf8.RuneCountInString(r.Content) > 300 {
+			preview := r.Preview
+			if r.Truncated {
 				anyTruncated = true
 				preview += " [preview]"
 			}
@@ -1117,10 +1293,12 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			if r.State() == store.ObservationStateNeedsReview {
 				stateDisplay = " | state: needs_review"
 			}
-			fmt.Fprintf(&b, "[%d] #%d (%s) — %s\n    %s\n    %s%s | scope: %s%s\n",
-				i+1, r.ID, r.Type, r.Title,
-				preview,
-				timeutil.FormatLocal(r.CreatedAt), projectDisplay, r.Scope, stateDisplay)
+			if !compact {
+				fmt.Fprintf(&b, "[%d] #%d (%s) — %s\n    %s\n    %s%s | scope: %s%s\n",
+					i+1, r.ID, r.Type, r.Title,
+					preview,
+					timeutil.FormatLocal(r.CreatedAt), projectDisplay, r.Scope, stateDisplay)
+			}
 			entry := map[string]any{
 				"id":      r.ID,
 				"sync_id": r.SyncID,
@@ -1136,6 +1314,10 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			if r.ReviewAfter != nil {
 				entry["review_after"] = *r.ReviewAfter
 			}
+			if compact {
+				entry["preview"] = r.Preview
+				entry["truncated"] = r.Truncated
+			}
 			structuredResults = append(structuredResults, entry)
 
 			// Append relation annotations. Skip orphaned (filtered by store).
@@ -1150,51 +1332,62 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			// observation's title; "(deleted)" when the observation is missing or soft-deleted.
 			// Prefixes (supersedes:, superseded_by:, conflicts:) are stable across Phase 3.
 			if rels, ok := relationsMap[r.SyncID]; ok {
-				for _, rel := range rels.AsSource {
-					switch {
-					case rel.Relation == store.RelationSupersedes && rel.JudgmentStatus == store.JudgmentStatusJudged:
-						title := rel.TargetTitle
-						if rel.TargetMissing || title == "" {
-							title = "deleted"
-						}
-						fmt.Fprintf(&b, "    supersedes: #%d (%s)\n", rel.TargetIntID, title)
-					case rel.Relation == store.RelationConflictsWith && rel.JudgmentStatus == store.JudgmentStatusJudged:
-						title := rel.TargetTitle
-						if rel.TargetMissing || title == "" {
-							title = "deleted"
-						}
-						fmt.Fprintf(&b, "    conflicts: #%d (%s)\n", rel.TargetIntID, title)
-					case rel.JudgmentStatus == store.JudgmentStatusPending:
-						// UNCHANGED from Phase 1 — byte-for-byte preserved.
-						fmt.Fprintf(&b, "    conflict: contested by #%s (pending)\n", rel.TargetID)
-					}
+				if compact {
+					entry["relations"] = map[string]any{"as_source": rels.AsSource, "as_target": rels.AsTarget}
 				}
-				for _, rel := range rels.AsTarget {
-					switch {
-					case rel.Relation == store.RelationSupersedes && rel.JudgmentStatus == store.JudgmentStatusJudged:
-						title := rel.SourceTitle
-						if rel.SourceMissing || title == "" {
-							title = "deleted"
+				if !compact {
+					for _, rel := range rels.AsSource {
+						switch {
+						case rel.Relation == store.RelationSupersedes && rel.JudgmentStatus == store.JudgmentStatusJudged:
+							title := rel.TargetTitle
+							if rel.TargetMissing || title == "" {
+								title = "deleted"
+							}
+							fmt.Fprintf(&b, "    supersedes: #%d (%s)\n", rel.TargetIntID, title)
+						case rel.Relation == store.RelationConflictsWith && rel.JudgmentStatus == store.JudgmentStatusJudged:
+							title := rel.TargetTitle
+							if rel.TargetMissing || title == "" {
+								title = "deleted"
+							}
+							fmt.Fprintf(&b, "    conflicts: #%d (%s)\n", rel.TargetIntID, title)
+						case rel.JudgmentStatus == store.JudgmentStatusPending:
+							// UNCHANGED from Phase 1 — byte-for-byte preserved.
+							fmt.Fprintf(&b, "    conflict: contested by #%s (pending)\n", rel.TargetID)
 						}
-						fmt.Fprintf(&b, "    superseded_by: #%d (%s)\n", rel.SourceIntID, title)
-					case rel.JudgmentStatus == store.JudgmentStatusPending:
-						// UNCHANGED from Phase 1 — byte-for-byte preserved.
-						fmt.Fprintf(&b, "    conflict: contested by #%s (pending)\n", rel.SourceID)
+					}
+					for _, rel := range rels.AsTarget {
+						switch {
+						case rel.Relation == store.RelationSupersedes && rel.JudgmentStatus == store.JudgmentStatusJudged:
+							title := rel.SourceTitle
+							if rel.SourceMissing || title == "" {
+								title = "deleted"
+							}
+							fmt.Fprintf(&b, "    superseded_by: #%d (%s)\n", rel.SourceIntID, title)
+						case rel.JudgmentStatus == store.JudgmentStatusPending:
+							// UNCHANGED from Phase 1 — byte-for-byte preserved.
+							fmt.Fprintf(&b, "    conflict: contested by #%s (pending)\n", rel.SourceID)
+						}
 					}
 				}
 			}
-			b.WriteString("\n")
+			if !compact {
+				b.WriteString("\n")
+			}
 		}
-		if anyTruncated {
+		if !compact && anyTruncated {
 			fmt.Fprintf(&b, "---\nResults above are previews (300 chars). To read the full content of a specific memory, call mem_get_observation(id: <ID>).\n")
 		}
 
+		resultText := b.String()
+		if compact {
+			resultText = fmt.Sprintf("Found %d memories.", len(results))
+		}
 		if nudge := activity.NudgeIfNeededForProject(sessionID, project); nudge != "" {
-			b.WriteString(nudge)
+			resultText += nudge
 		}
 
 		// JW4: use respondWithProject for the success path (REQ-314).
-		return respondWithProject(detRes, b.String(), map[string]any{"results": structuredResults}), nil
+		return respondWithProject(detRes, resultText, map[string]any{"results": structuredResults}), nil
 	}
 }
 
@@ -1333,6 +1526,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		if err != nil {
 			return mcp.NewToolResultError("Failed to save: " + err.Error()), nil
 		}
+		savedObservation, savedObservationErr := s.GetObservation(savedID)
 
 		if capturePrompt && activity != nil {
 			if prompt, ok := activity.CurrentPrompt(sessionID, project); ok {
@@ -1355,6 +1549,9 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 			msg += fmt.Sprintf("\nSuggested topic_key: %s", suggestedTopicKey)
 		}
 		msg += truncationWarning(truncation)
+		if savedObservationErr == nil {
+			msg += absolutePathWarning(savedObservation.Content)
+		}
 		if normWarning != "" {
 			msg += "\n" + normWarning
 		}
@@ -1383,13 +1580,13 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 
 		// Fetch the saved observation's sync_id for the envelope (REQ-001).
 		var savedSyncID string
-		if obs, obsErr := s.GetObservation(savedID); obsErr == nil {
-			savedSyncID = obs.SyncID
+		if savedObservationErr == nil {
+			savedSyncID = savedObservation.SyncID
 			extra["id"] = savedID
 			extra["sync_id"] = savedSyncID
-			extra["state"] = obs.State()
-			if obs.ReviewAfter != nil {
-				extra["review_after"] = *obs.ReviewAfter
+			extra["state"] = savedObservation.State()
+			if savedObservation.ReviewAfter != nil {
+				extra["review_after"] = *savedObservation.ReviewAfter
 			}
 		}
 		if len(candidates) > 0 {
@@ -1422,81 +1619,6 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		detRes.Project = project
 		return respondWithProject(detRes, msg, extra), nil
 	}
-}
-
-// sessionSummaryCandidateResponse runs candidate detection only for a persisted
-// session summary and builds its conflict-review response metadata.
-func sessionSummaryCandidateResponse(s *store.Store, cfg MCPConfig, savedID int64, project string, msg *string) map[string]any {
-	extra := map[string]any{}
-	obs, obsErr := s.GetObservation(savedID)
-	if obsErr == nil {
-		extra["id"] = savedID
-		extra["sync_id"] = obs.SyncID
-		extra["state"] = obs.State()
-		if obs.ReviewAfter != nil {
-			extra["review_after"] = *obs.ReviewAfter
-		}
-	}
-	if obsErr != nil {
-		extra["judgment_required"] = false
-		return extra
-	}
-	query := sessionSummaryCandidateQuery(obs.Content)
-	if strings.TrimSpace(query) == "" {
-		extra["judgment_required"] = false
-		return extra
-	}
-	candOpts := store.CandidateOptions{Project: project, BM25Floor: cfg.BM25Floor, Query: query}
-	if cfg.Limit != nil {
-		candOpts.Limit = *cfg.Limit
-	}
-	candidates, candErr := findSessionSummaryCandidates(s, savedID, candOpts)
-	if candErr != nil {
-		// Candidate discovery is non-fatal after the source observation is saved.
-		fmt.Fprintf(os.Stderr, "engram: FindCandidates error (non-fatal): %v\n", candErr)
-	}
-
-	if len(candidates) == 0 {
-		extra["judgment_required"] = false
-		return extra
-	}
-
-	extra["judgment_required"] = true
-	extra["judgment_status"] = "pending"
-	extra["judgment_id"] = candidates[0].JudgmentID
-	candList := make([]map[string]any, 0, len(candidates))
-	for _, c := range candidates {
-		entry := map[string]any{"id": c.ID, "sync_id": c.SyncID, "title": c.Title, "type": c.Type, "score": c.Score, "judgment_id": c.JudgmentID}
-		if c.TopicKey != nil {
-			entry["topic_key"] = *c.TopicKey
-		}
-		candList = append(candList, entry)
-	}
-	extra["candidates"] = candList
-	*msg += fmt.Sprintf("\nCONFLICT REVIEW PENDING — %d candidate(s); use mem_judge to record verdicts.", len(candidates))
-	return extra
-}
-
-// sessionSummaryCandidateQuery removes the required protocol headings before
-// OR-based FTS matching so they cannot create candidates by themselves.
-func sessionSummaryCandidateQuery(content string) string {
-	mandatoryHeadings := map[string]struct{}{
-		"goal": {}, "instructions": {}, "discoveries": {}, "accomplished": {},
-		"next steps": {}, "relevant files": {},
-	}
-	lines := strings.Split(content, "\n")
-	retained := make([]string, 0, len(lines))
-	for _, line := range lines {
-		heading := strings.TrimSpace(line)
-		if strings.HasPrefix(heading, "#") {
-			heading = strings.TrimSpace(strings.TrimLeft(heading, "#"))
-			if _, mandatory := mandatoryHeadings[strings.ToLower(heading)]; mandatory {
-				continue
-			}
-		}
-		retained = append(retained, line)
-	}
-	return strings.Join(retained, "\n")
 }
 
 func handleSuggestTopicKey() server.ToolHandlerFunc {
@@ -1564,6 +1686,12 @@ func handleUpdate(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 		}
 		if storedProject != resolvedProject {
 			return errorWithMeta("project_mismatch", "The current project does not own this observation", knownWriteProjects(s, detRes)), nil
+		}
+		if detRes.Source == projectpkg.SourceDirBasename {
+			session, err := s.GetSession(obs.SessionID)
+			if err != nil || strings.TrimSpace(session.Directory) == "" || runtimeSessionDirectory(session.Directory) != runtimeSessionDirectory(detRes.Path) {
+				return errorWithMeta("project_mismatch", "The current project does not own this observation", knownWriteProjects(s, detRes)), nil
+			}
 		}
 
 		var truncation *store.TruncationMetadata
@@ -1775,10 +1903,106 @@ func handleSavePrompt(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 	}
 }
 
+// mem_context output budget constants (issue #1039). The MCP tool must
+// never render the unbounded legacy context: absent arguments resolve to the
+// #1012 Claude Code hook budget, and explicit values are clamped to the same
+// ceiling the HTTP /context endpoint enforces.
+const (
+	// memContextDefaultMaxBytes is the default context budget for mem_context,
+	// matching the 16 KiB window the #1012 Claude Code hook budget uses so MCP
+	// context output stays aligned with hook context output.
+	memContextDefaultMaxBytes = 16 * 1024
+
+	// memContextMaxPinned caps the "### Pinned" section in mem_context output.
+	// Pinning is a hand-bounded action, but an unbounded pinned list could
+	// still dominate the response before MaxBytes applies.
+	memContextMaxPinned = 20
+
+	// memContextMaxBytesCeiling mirrors the HTTP server's contextMaxBytes
+	// ceiling for GET /context, keeping both transports' budgets aligned.
+	memContextMaxBytesCeiling = 64 * 1024
+)
+
+// memContextMaxBytes resolves the optional max_bytes tool argument (MCP
+// numbers arrive as float64). Absent, mistyped, non-positive, NaN, or any
+// fractional value falls back to the default budget — the MCP path must
+// never resolve to the unbounded legacy rendering, a byte budget is an
+// integer quantity (int(1.5) truncating to 1 would be a silent budget the
+// caller never requested), and int(f) of a fraction in (0,1) truncates to
+// 0, which ContextOptions treats as the unbounded zero value. The ceiling
+// comparison happens in float64 BEFORE the int conversion, because
+// converting an out-of-range float to int is spec-undefined in Go.
+func memContextMaxBytes(raw any) int {
+	v, ok := raw.(float64)
+	if !ok || !(v > 0) || v != math.Trunc(v) {
+		return memContextDefaultMaxBytes
+	}
+	if v > float64(memContextMaxBytesCeiling) {
+		return memContextMaxBytesCeiling
+	}
+	return int(v)
+}
+
+// memContextTruncationMarker mirrors the store's contextTruncationMarker
+// (internal/store/store.go): a visible marker that replaces the cut tail so
+// the omission is explicit.
+const memContextTruncationMarker = "\n[truncated]\n"
+
+// memContextMaxStatsProjects caps how many project names the "Memory stats"
+// suffix lists before degrading to "+N more". The join over every project in
+// the store is the unbounded part of the suffix (#1039, CodeRabbit major on
+// PR #1074); capping it keeps the suffix structurally small so the reserved
+// context budget stays meaningful even on stores with hundreds of projects.
+const memContextMaxStatsProjects = 8
+
+// formatContextProjects renders the projects list for the mem_context stats
+// suffix: "none", the full join, or the first memContextMaxStatsProjects
+// names plus a "+N more" overflow marker.
+func formatContextProjects(names []string) string {
+	if len(names) == 0 {
+		return "none"
+	}
+	if len(names) <= memContextMaxStatsProjects {
+		return strings.Join(names, ", ")
+	}
+	return fmt.Sprintf("%s, +%d more", strings.Join(names[:memContextMaxStatsProjects], ", "), len(names)-memContextMaxStatsProjects)
+}
+
+// clampMemContextResult caps the complete mem_context tool result — context
+// block, stats line, and nudge — at the resolved byte budget, mirroring the
+// store's limitContextBytes semantics: a UTF-8-safe cut with the visible
+// [truncated] marker appended when it fits, and a bare UTF-8-safe prefix cut
+// for budgets smaller than the marker itself.
+func clampMemContextResult(result string, maxBytes int) string {
+	if maxBytes <= 0 || len(result) <= maxBytes {
+		return result
+	}
+	if maxBytes < len(memContextTruncationMarker) {
+		return truncateMemContextUTF8(result, maxBytes)
+	}
+	return truncateMemContextUTF8(result, maxBytes-len(memContextTruncationMarker)) + memContextTruncationMarker
+}
+
+// truncateMemContextUTF8 mirrors the store's truncateUTF8Prefix: never split
+// a UTF-8 sequence when cutting.
+func truncateMemContextUTF8(s string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if maxBytes >= len(s) {
+		return s
+	}
+	for maxBytes > 0 && !utf8.RuneStart(s[maxBytes]) {
+		maxBytes--
+	}
+	return s[:maxBytes]
+}
+
 func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		projectOverride, _ := req.GetArguments()["project"].(string)
 		scope, _ := req.GetArguments()["scope"].(string)
+		compact, _ := req.GetArguments()["compact"].(bool)
 
 		// Resolve project: validate override or auto-detect (REQ-310, REQ-311)
 		detRes, err := resolveReadProjectWithProcessOverride(s, projectOverride, cfg.DefaultProject)
@@ -1800,32 +2024,46 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 		sessionID := defaultSessionID(project)
 		activity.RecordToolCall(sessionID)
 
-		contextResult, err := s.FormatContext(contextProject, scope)
+		// #1039: render a bounded context instead of the unbounded legacy
+		// FormatContext output — 16 KiB by default, capped at 20 pinned rows,
+		// with optional max_bytes/compact tuning from the caller.
+		maxBytes := memContextMaxBytes(req.GetArguments()["max_bytes"])
+
+		// #1039 (CodeRabbit major on PR #1074): the budget applies to the
+		// COMPLETE result. The stats suffix joins every project name in the
+		// store (unbounded) and the nudge is appended after the context block,
+		// so the suffix is rendered FIRST and its bytes are reserved from the
+		// context budget; a final clamp backstops the pathological case where
+		// the suffix alone meets or exceeds the budget.
+		stats, err := loadContextStats(s)
+		if err != nil {
+			return mcp.NewToolResultError("Failed to get context stats: " + err.Error()), nil
+		}
+		suffix := fmt.Sprintf("\n---\nMemory stats: %d sessions, %d observations across projects: %s",
+			stats.TotalSessions, stats.TotalObservations, formatContextProjects(stats.Projects))
+		suffix += activity.NudgeIfNeededForProject(sessionID, project)
+
+		contextBudget := maxBytes - len(suffix)
+		if contextBudget < 1 {
+			contextBudget = 1
+		}
+		contextResult, err := s.FormatContextWithOptions(contextProject, scope, store.ContextOptions{
+			MaxBytes: contextBudget,
+			Pinned:   memContextMaxPinned,
+			Compact:  compact,
+		})
 		if err != nil {
 			return mcp.NewToolResultError("Failed to get context: " + err.Error()), nil
 		}
 
 		if contextResult == "" {
-			return respondWithProject(detRes, "No previous session memories found.", nil), nil
+			// The fixed no-context message is part of the complete mem_context
+			// result, so it flows through the same clamp: an explicit tiny
+			// max_bytes must bound it exactly like a rendered context block.
+			return respondWithProject(detRes, clampMemContextResult("No previous session memories found.", maxBytes), nil), nil
 		}
 
-		stats, err := loadContextStats(s)
-		if err != nil {
-			return mcp.NewToolResultError("Failed to get context stats: " + err.Error()), nil
-		}
-		var projects string
-		if len(stats.Projects) > 0 {
-			projects = strings.Join(stats.Projects, ", ")
-		} else {
-			projects = "none"
-		}
-
-		result := fmt.Sprintf("%s\n---\nMemory stats: %d sessions, %d observations across projects: %s",
-			contextResult, stats.TotalSessions, stats.TotalObservations, projects)
-
-		if nudge := activity.NudgeIfNeededForProject(sessionID, project); nudge != "" {
-			result += nudge
-		}
+		result := clampMemContextResult(contextResult+suffix, maxBytes)
 
 		return respondWithProject(detRes, result, nil), nil
 	}
@@ -2094,7 +2332,15 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 			msg += "\n" + score
 		}
 		detRes.Project = project
-		extra := sessionSummaryCandidateResponse(s, cfg, savedID, project, &msg)
+		extra := map[string]any{"judgment_required": false}
+		if obs, obsErr := s.GetObservation(savedID); obsErr == nil {
+			extra["id"] = savedID
+			extra["sync_id"] = obs.SyncID
+			extra["state"] = obs.State()
+			if obs.ReviewAfter != nil {
+				extra["review_after"] = *obs.ReviewAfter
+			}
+		}
 		return respondWithProject(detRes, msg, extra), nil
 	}
 }
@@ -2115,7 +2361,16 @@ func handleSessionStart(s *store.Store, cfg MCPConfig, activity *SessionActivity
 		activity.RecordToolCall(defaultSessionID(project))
 		resolvedDirectory = runtimeSessionDirectory(resolvedDirectory)
 
-		if err := s.CreateSession(id, project, resolvedDirectory); err != nil {
+		if err := s.StartSession(id, project, resolvedDirectory); err != nil {
+			if errors.Is(err, store.ErrSessionAlreadyEnded) {
+				result := errorWithMeta(
+					"session_already_ended",
+					fmt.Sprintf("Session %q has already ended. Choose a new session ID and retry mem_session_start.", id),
+					nil,
+				)
+				addErrorMetadata(result, map[string]any{"session_id": id})
+				return result, nil
+			}
 			return mcp.NewToolResultError("Failed to start session: " + err.Error()), nil
 		}
 
@@ -2473,6 +2728,20 @@ func (e *sessionProjectMismatchError) Error() string {
 	return fmt.Sprintf("session %q belongs to project %q, not %q", e.SessionID, e.SessionProject, e.ExplicitProject)
 }
 
+func sessionProjectResolutionError(sessionID, sessionProject, sessionMode, requestedProject string) error {
+	if sessionProject == "" || sessionProject == requestedProject || sessionMode == store.SessionOwnershipShared {
+		return nil
+	}
+	if sessionMode == store.SessionOwnershipProjectOwned {
+		return &sessionProjectMismatchError{
+			SessionID:       sessionID,
+			SessionProject:  sessionProject,
+			ExplicitProject: requestedProject,
+		}
+	}
+	return fmt.Errorf("%w: session %q has unclassified ownership for %q and cannot accept %q", store.ErrProjectOwnershipAmbiguous, sessionID, sessionProject, requestedProject)
+}
+
 // resolveWriteProject detects the current project from the process working
 // directory. Returns ErrAmbiguousProject if cwd is a parent of multiple repos.
 func resolveWriteProject() (projectpkg.DetectionResult, error) {
@@ -2591,6 +2860,7 @@ func resolveSaveWriteProject(s *store.Store, projectChoice string, explicitProje
 	trimmedProjectChoice := strings.TrimSpace(projectChoice)
 	trimmedReason := strings.TrimSpace(reason)
 	var sessionProject string
+	var sessionMode string
 	var sessionPath string
 	if trimmedSessionID != "" {
 		sess, err := s.GetSession(trimmedSessionID)
@@ -2601,6 +2871,7 @@ func resolveSaveWriteProject(s *store.Store, projectChoice string, explicitProje
 		if err != nil {
 			return projectpkg.DetectionResult{}, err
 		}
+		sessionMode = strings.TrimSpace(sess.OwnershipMode)
 		sessionPath = strings.TrimSpace(sess.Directory)
 	}
 
@@ -2634,12 +2905,8 @@ func resolveSaveWriteProject(s *store.Store, projectChoice string, explicitProje
 		if collisionErr := explicitWriteProjectCollision(trimmedProjectChoice, project, sessionProject, cwdRes); collisionErr != nil {
 			return cwdRes, collisionErr
 		}
-		if sessionProject != "" && project != sessionProject {
-			return projectpkg.DetectionResult{}, &sessionProjectMismatchError{
-				SessionID:       trimmedSessionID,
-				SessionProject:  sessionProject,
-				ExplicitProject: project,
-			}
+		if err := sessionProjectResolutionError(trimmedSessionID, sessionProject, sessionMode, project); err != nil {
+			return projectpkg.DetectionResult{}, err
 		}
 
 		exists, err := s.ProjectExists(project)
@@ -2712,12 +2979,8 @@ func resolveSaveWriteProject(s *store.Store, projectChoice string, explicitProje
 			if err != nil {
 				return projectpkg.DetectionResult{}, err
 			}
-			if resolvedProject != sessionProject {
-				return projectpkg.DetectionResult{}, &sessionProjectMismatchError{
-					SessionID:       trimmedSessionID,
-					SessionProject:  sessionProject,
-					ExplicitProject: resolvedProject,
-				}
+			if err := sessionProjectResolutionError(trimmedSessionID, sessionProject, sessionMode, resolvedProject); err != nil {
+				return projectpkg.DetectionResult{}, err
 			}
 		}
 		return res, nil
@@ -2929,10 +3192,15 @@ func resolveMCPProject(s *store.Store, explicit, defaultProject string) (project
 }
 
 func resolveMCPProjectWithPolicy(s *store.Store, explicit, defaultProject string, requireKnownProcess bool) (projectpkg.DetectionResult, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = "."
+	}
 	result, err := projectpkg.Resolve(projectpkg.ResolutionOptions{
 		Mode:                 projectpkg.ResolutionCurrent,
 		Explicit:             explicit,
 		ProcessOverride:      defaultProject,
+		Directory:            cwd,
 		ProjectExists:        s.ProjectExists,
 		RequireKnownExplicit: strings.TrimSpace(explicit) != "",
 		RequireKnownProcess:  requireKnownProcess,
@@ -2990,6 +3258,9 @@ func writeProjectErrorResult(activity *SessionActivity, sessionID string, res pr
 	code := "ambiguous_project"
 	if errors.Is(err, store.ErrDatabaseGenerationChanged) {
 		return errorWithMeta("database_generation_changed", err.Error(), res.AvailableProjects)
+	}
+	if errors.Is(err, store.ErrProjectOwnershipAmbiguous) {
+		return errorWithMeta("session_project_ownership_ambiguous", err.Error(), res.AvailableProjects)
 	}
 	if errors.Is(err, projectpkg.ErrRepositoryBinding) {
 		return errorWithMeta(
@@ -3168,8 +3439,12 @@ func errorWithMeta(code, msg string, availableProjects []string) *mcp.CallToolRe
 		envelope["hint"] = "Use a non-empty project name, not a path."
 	case "unknown_session":
 		envelope["hint"] = "Start the session first, omit session_id, or retry with an existing session_id."
+	case "session_already_ended":
+		envelope["hint"] = "Choose a new session ID and retry mem_session_start; ended sessions cannot be reopened."
 	case "session_project_mismatch":
 		envelope["hint"] = "Use a project that matches the existing session, or omit session_id and write to a different project."
+	case "session_project_ownership_ambiguous":
+		envelope["hint"] = "Use ownership rescue to classify the historical session before writing to a different project."
 	case "project_required":
 		envelope["hint"] = "Use ownership rescue before updating this historical record, then retry the field update."
 	case "project_mismatch":
@@ -3211,7 +3486,7 @@ func resolveFallbackSessionID(s *store.Store, project string) (string, error) {
 			case 1:
 				return ids[0], nil
 			default:
-				return "", fmt.Errorf("multiple active runtime sessions match project %q and the current directory; provide session_id", project)
+				return "", fmt.Errorf("multiple active runtime sessions match the current project and directory; provide session_id, end other active matching sessions, or save independently with engram save \"TITLE\" \"CONTENT\" --project PROJECT --type TYPE --topic TOPIC_KEY (writes to an independent project manual-save session and does not bind it to this MCP session)")
 			}
 		}
 	}

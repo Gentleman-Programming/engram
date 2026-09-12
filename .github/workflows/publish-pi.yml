@@ -13,9 +13,9 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
@@ -29,6 +29,17 @@ jobs:
             npm install -g npm@11.5.1
           fi
           echo "Active npm: $(npm --version)"
+
+      - name: Verify Pi release version
+        if: github.event_name == 'push'
+        working-directory: plugin/pi
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node test/release-contract.mjs "$RELEASE_TAG"
+
+      - name: Run Pi plugin tests
+        working-directory: plugin/pi
+        run: npm test
 
       - name: Publish to npm with provenance
         working-directory: plugin/pi

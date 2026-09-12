@@ -64,10 +64,10 @@ var _ AgentRunner = (*ClaudeRunner)(nil)
 
 // claudeEnvelope is the top-level JSON object returned by `claude --output-format json`.
 type claudeEnvelope struct {
-	Type        string                        `json:"type"`
-	Result      string                        `json:"result"`
-	DurationMS  int64                         `json:"duration_ms"`
-	ModelUsage  map[string]json.RawMessage    `json:"modelUsage"`
+	Type       string                     `json:"type"`
+	Result     string                     `json:"result"`
+	DurationMS int64                      `json:"duration_ms"`
+	ModelUsage map[string]json.RawMessage `json:"modelUsage"`
 }
 
 // innerVerdict is the JSON shape the LLM is prompted to return.

@@ -6,13 +6,13 @@ import "context"
 // It mirrors llm.Verdict but lives in this package to avoid a store→llm import cycle.
 type SemanticVerdict struct {
 	// Relation is one of: conflicts_with, supersedes, scoped, related, compatible, not_conflict.
-	Relation   string
+	Relation string
 	// Confidence is a 0.0–1.0 score from the runner.
 	Confidence float64
 	// Reasoning is a short human-readable explanation (≤200 chars).
-	Reasoning  string
+	Reasoning string
 	// Model is the model identifier reported by the CLI (e.g. "claude-haiku-4-5").
-	Model      string
+	Model string
 	// DurationMS is wall-clock time for the CLI invocation in milliseconds.
 	DurationMS int64
 }

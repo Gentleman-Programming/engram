@@ -152,6 +152,7 @@ func stubRuntimeHooks(t *testing.T) {
 	oldJSONMarshalIndent := jsonMarshalIndent
 	oldSyncStatus := syncStatus
 	oldSyncImport := syncImport
+	oldSyncImportWithProgress := syncImportWithProgress
 	oldSyncExport := syncExport
 	oldNewCloudAutosyncManager := newCloudAutosyncManager
 	oldCheckForUpdates := checkForUpdates
@@ -192,6 +193,9 @@ func stubRuntimeHooks(t *testing.T) {
 		return sy.Status()
 	}
 	syncImport = func(sy *engramsync.Syncer) (*engramsync.ImportResult, error) { return sy.Import() }
+	syncImportWithProgress = func(sy *engramsync.Syncer, report func(engramsync.ImportProgress)) (*engramsync.ImportResult, error) {
+		return sy.ImportWithProgress(report)
+	}
 	syncExport = func(sy *engramsync.Syncer, createdBy, project string) (*engramsync.SyncResult, error) {
 		return sy.Export(createdBy, project)
 	}
@@ -225,6 +229,7 @@ func stubRuntimeHooks(t *testing.T) {
 		jsonMarshalIndent = oldJSONMarshalIndent
 		syncStatus = oldSyncStatus
 		syncImport = oldSyncImport
+		syncImportWithProgress = oldSyncImportWithProgress
 		syncExport = oldSyncExport
 		newCloudAutosyncManager = oldNewCloudAutosyncManager
 		checkForUpdates = oldCheckForUpdates
@@ -247,6 +252,46 @@ func TestFatal(t *testing.T) {
 	}
 }
 
+func TestCmdServeWiresBuildVersionIntoHealth(t *testing.T) {
+	cfg := testConfig(t)
+	stubRuntimeHooks(t)
+	withArgs(t, "engram", "serve")
+	t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "")
+
+	const buildVersion = "test-build-version"
+	oldVersion := version
+	version = buildVersion
+	t.Cleanup(func() { version = oldVersion })
+
+	var captured *engramsrv.Server
+	newHTTPServer = func(s *store.Store, port int) *engramsrv.Server {
+		captured = engramsrv.New(s, port)
+		return captured
+	}
+
+	cmdServe(cfg)
+	if captured == nil {
+		t.Fatal("cmdServe did not create an HTTP server")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	res := httptest.NewRecorder()
+	captured.Handler().ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("health status=%d want=%d", res.Code, http.StatusOK)
+	}
+	var health struct {
+		Version string `json:"version"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&health); err != nil {
+		t.Fatalf("decode health response: %v", err)
+	}
+	if health.Version != buildVersion {
+		t.Fatalf("health version=%q want=%q", health.Version, buildVersion)
+	}
+}
+
 func TestCmdServeParsesPortAndErrors(t *testing.T) {
 	cfg := testConfig(t)
 	stubRuntimeHooks(t)
@@ -258,18 +303,20 @@ func TestCmdServeParsesPortAndErrors(t *testing.T) {
 		wantPort  int
 		startErr  error
 		wantFatal bool
+		wantError string
 	}{
 		{name: "default port", wantPort: 7437},
 		{name: "env port", envPort: "8123", wantPort: 8123},
 		{name: "arg overrides env", envPort: "8123", argPort: "9001", wantPort: 9001},
 		{name: "invalid env keeps default", envPort: "nope", wantPort: 7437},
-		{name: "invalid arg keeps env", envPort: "8123", argPort: "bad", wantPort: 8123},
-		{name: "start failure", wantPort: 7437, startErr: errors.New("listen failed"), wantFatal: true},
+		{name: "invalid argument is rejected", envPort: "8123", argPort: "bad", wantPort: -1, wantFatal: true, wantError: "unknown serve argument"},
+		{name: "start failure", wantPort: 7437, startErr: errors.New("listen failed"), wantFatal: true, wantError: "listen failed"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			stubExitWithPanic(t)
+			t.Setenv("ENGRAM_SOCKET", "")
 			if tc.envPort != "" {
 				t.Setenv("ENGRAM_PORT", tc.envPort)
 			} else {
@@ -302,8 +349,8 @@ func TestCmdServeParsesPortAndErrors(t *testing.T) {
 				if _, ok := recovered.(exitCode); !ok {
 					t.Fatalf("expected fatal exit, got %v", recovered)
 				}
-				if !strings.Contains(stderr, "listen failed") {
-					t.Fatalf("stderr missing start error: %q", stderr)
+				if !strings.Contains(stderr, tc.wantError) {
+					t.Fatalf("stderr missing expected error: %q", stderr)
 				}
 			} else if recovered != nil {
 				t.Fatalf("expected no panic, got %v", recovered)
@@ -460,7 +507,7 @@ func TestTryStartAutosyncReturnsStopFn(t *testing.T) {
 	cfg := testConfig(t)
 	t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "1")
 	t.Setenv("ENGRAM_CLOUD_TOKEN", "test-token")
-	t.Setenv("ENGRAM_CLOUD_SERVER", "http://localhost:9999")
+	t.Setenv("ENGRAM_CLOUD_SERVER", "https://localhost:9999")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1506,6 +1553,9 @@ func TestCmdCloudUpgradeHelpShowsGuidedWorkflow(t *testing.T) {
 	if !strings.Contains(stdout, "doctor -> repair -> bootstrap -> status/rollback") {
 		t.Fatalf("expected guided workflow in help output, got %q", stdout)
 	}
+	if !strings.Contains(stdout, "use remirror only to rebuild cloud state from authoritative local data") {
+		t.Fatalf("expected remirror recovery guidance in help output, got %q", stdout)
+	}
 	if !strings.Contains(stdout, "local SQLite remains source of truth") {
 		t.Fatalf("expected local-first semantics in help output, got %q", stdout)
 	}
@@ -1524,6 +1574,7 @@ func TestCloudUpgradeDocsMatchHelpAndLocalFirstSemantics(t *testing.T) {
 
 	helpRequired := []string{
 		"doctor -> repair -> bootstrap -> status/rollback",
+		"use remirror only to rebuild cloud state from authoritative local data",
 		"local SQLite remains source of truth",
 	}
 	for _, token := range helpRequired {
@@ -3387,10 +3438,12 @@ func TestCmdSyncCloudSuccessMarksTargetHealthy(t *testing.T) {
 
 	originalSyncStatus := syncStatus
 	originalSyncImport := syncImport
+	originalSyncImportWithProgress := syncImportWithProgress
 	originalSyncExport := syncExport
 	t.Cleanup(func() {
 		syncStatus = originalSyncStatus
 		syncImport = originalSyncImport
+		syncImportWithProgress = originalSyncImportWithProgress
 		syncExport = originalSyncExport
 	})
 
@@ -3414,7 +3467,9 @@ func TestCmdSyncCloudSuccessMarksTargetHealthy(t *testing.T) {
 			name: "import",
 			args: []string{"engram", "sync", "--cloud", "--import", "--project", "proj-a"},
 			stub: func() {
-				syncImport = func(*engramsync.Syncer) (*engramsync.ImportResult, error) {
+				syncImportWithProgress = func(_ *engramsync.Syncer, report func(engramsync.ImportProgress)) (*engramsync.ImportResult, error) {
+					report(engramsync.ImportProgress{Percentage: 100})
+					report(engramsync.ImportProgress{Percentage: 100})
 					return &engramsync.ImportResult{}, nil
 				}
 			},
@@ -3500,9 +3555,11 @@ func TestCmdSyncCloudImportKeepsPendingWhenLocalMutationsRemain(t *testing.T) {
 	stubRuntimeHooks(t)
 
 	originalSyncImport := syncImport
+	originalSyncImportWithProgress := syncImportWithProgress
 	originalSyncStatus := syncStatus
 	t.Cleanup(func() {
 		syncImport = originalSyncImport
+		syncImportWithProgress = originalSyncImportWithProgress
 		syncStatus = originalSyncStatus
 	})
 
@@ -3545,7 +3602,9 @@ func TestCmdSyncCloudImportKeepsPendingWhenLocalMutationsRemain(t *testing.T) {
 		t.Fatalf("close store: %v", err)
 	}
 
-	syncImport = func(*engramsync.Syncer) (*engramsync.ImportResult, error) {
+	syncImportWithProgress = func(_ *engramsync.Syncer, report func(engramsync.ImportProgress)) (*engramsync.ImportResult, error) {
+		report(engramsync.ImportProgress{Percentage: 100})
+		report(engramsync.ImportProgress{Percentage: 100})
 		return &engramsync.ImportResult{}, nil
 	}
 	syncStatus = func(*engramsync.Syncer) (int, int, int, error) {
@@ -4056,6 +4115,32 @@ func TestCmdSearchAndSaveDanglingFlags(t *testing.T) {
 	}
 }
 
+func TestCmdSearchForwardsMatchModeWithoutChangingQuery(t *testing.T) {
+	cfg := testConfig(t)
+
+	var gotQuery string
+	var gotOpts store.SearchOptions
+	oldStoreSearch := storeSearch
+	storeSearch = func(_ *store.Store, query string, opts store.SearchOptions) ([]store.SearchResult, error) {
+		gotQuery = query
+		gotOpts = opts
+		return nil, nil
+	}
+	t.Cleanup(func() { storeSearch = oldStoreSearch })
+
+	withArgs(t, "engram", "search", "auth", "compliance", "session", "--all", "--match", "any")
+	_, stderr, recovered := captureOutputAndRecover(t, func() { cmdSearch(cfg) })
+	if recovered != nil || stderr != "" {
+		t.Fatalf("search failed, panic=%v stderr=%q", recovered, stderr)
+	}
+	if gotOpts.MatchMode != "any" {
+		t.Fatalf("match mode=%q want any", gotOpts.MatchMode)
+	}
+	if gotQuery != "auth compliance session" {
+		t.Fatalf("query=%q want %q", gotQuery, "auth compliance session")
+	}
+}
+
 func TestCmdSetupHyphenArgFallsBackToInteractive(t *testing.T) {
 	stubRuntimeHooks(t)
 	stubExitWithPanic(t)
@@ -4398,7 +4483,7 @@ func TestCmdMCP(t *testing.T) {
 	t.Run("cloud autosync env with token and server starts and stops manager", func(t *testing.T) {
 		t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "1")
 		t.Setenv("ENGRAM_CLOUD_TOKEN", "tok")
-		t.Setenv("ENGRAM_CLOUD_SERVER", "http://localhost:9999")
+		t.Setenv("ENGRAM_CLOUD_SERVER", "https://localhost:9999")
 
 		runStarted := make(chan struct{}, 1)
 		stopCalled := make(chan struct{}, 1)
@@ -4463,7 +4548,7 @@ func TestCmdMCPAutosyncPushesWriteDuringServe(t *testing.T) {
 	observationPushed := make(chan struct{})
 	var closeObservationPushed sync.Once
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -4508,6 +4593,7 @@ func TestCmdMCPAutosyncPushesWriteDuringServe(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
+	trustTLSServer(t, srv)
 
 	t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "1")
 	t.Setenv("ENGRAM_CLOUD_TOKEN", "test-token")
@@ -4586,7 +4672,7 @@ func TestCmdMCPAutosyncPollTickerPullsDuringServe(t *testing.T) {
 	pullCalled := make(chan struct{})
 	var closePullCalled sync.Once
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -4614,6 +4700,7 @@ func TestCmdMCPAutosyncPollTickerPullsDuringServe(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
+	trustTLSServer(t, srv)
 
 	t.Setenv("ENGRAM_CLOUD_AUTOSYNC", "1")
 	t.Setenv("ENGRAM_CLOUD_TOKEN", "test-token")
@@ -4687,5 +4774,103 @@ func TestCmdSaveRejectsEmptyTitle(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "Memory saved") {
 		t.Fatalf("expected a saved memory, got stdout %q stderr %q", stdout, stderr)
+	}
+}
+
+func TestCmdSyncCloudImportRendersBoundedProgressBeforeSummary(t *testing.T) {
+	stubExitWithPanic(t)
+	stubRuntimeHooks(t)
+
+	originalSyncImportWithProgress := syncImportWithProgress
+	originalSyncStatus := syncStatus
+	t.Cleanup(func() {
+		syncImportWithProgress = originalSyncImportWithProgress
+		syncStatus = originalSyncStatus
+	})
+
+	cfg := testConfig(t)
+	t.Setenv("ENGRAM_CLOUD_SERVER", "https://cloud.example.test")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "token-abc")
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := s.EnrollProject("proj-a"); err != nil {
+		_ = s.Close()
+		t.Fatalf("enroll project: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	syncImportWithProgress = func(_ *engramsync.Syncer, report func(engramsync.ImportProgress)) (*engramsync.ImportResult, error) {
+		report(engramsync.ImportProgress{LocalChunks: 0, RemoteChunks: 12, PendingChunks: 12, Percentage: 0})
+		for completed := 1; completed <= 12; completed++ {
+			report(engramsync.ImportProgress{LocalChunks: completed, RemoteChunks: 12, PendingChunks: 12 - completed, Percentage: completed * 100 / 12})
+		}
+		return &engramsync.ImportResult{ChunksImported: 12}, nil
+	}
+	syncStatus = func(*engramsync.Syncer) (int, int, int, error) { return 12, 12, 0, nil }
+
+	withArgs(t, "engram", "sync", "--cloud", "--import", "--project", "proj-a")
+	stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdSync(cfg) })
+	if recovered != nil || stderr != "" {
+		t.Fatalf("cloud import should succeed, panic=%v stderr=%q", recovered, stderr)
+	}
+	if got := strings.Count(stdout, "Cloud import progress:"); got != 7 {
+		t.Fatalf("progress line count = %d, want initial + 5 bounded updates + final; output=%q", got, stdout)
+	}
+	if !strings.Contains(stdout, "Cloud import progress: local=0 remote=12 pending=12 progress=0%") ||
+		!strings.Contains(stdout, "Cloud import progress: local=12 remote=12 pending=0 progress=100%") {
+		t.Fatalf("progress output missing initial or final snapshot: %q", stdout)
+	}
+	if strings.LastIndex(stdout, "Cloud import progress:") > strings.Index(stdout, "Imported 12 new remote chunk(s)") {
+		t.Fatalf("final progress must precede the existing import summary: %q", stdout)
+	}
+}
+
+func TestCmdSyncCloudNoOpImportRendersInitialAndFinalProgress(t *testing.T) {
+	stubExitWithPanic(t)
+	stubRuntimeHooks(t)
+
+	originalSyncImportWithProgress := syncImportWithProgress
+	originalSyncStatus := syncStatus
+	t.Cleanup(func() {
+		syncImportWithProgress = originalSyncImportWithProgress
+		syncStatus = originalSyncStatus
+	})
+
+	cfg := testConfig(t)
+	t.Setenv("ENGRAM_CLOUD_SERVER", "https://cloud.example.test")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "token-abc")
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := s.EnrollProject("proj-a"); err != nil {
+		_ = s.Close()
+		t.Fatalf("enroll project: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	syncImportWithProgress = func(_ *engramsync.Syncer, report func(engramsync.ImportProgress)) (*engramsync.ImportResult, error) {
+		report(engramsync.ImportProgress{LocalChunks: 3, RemoteChunks: 3, PendingChunks: 0, Percentage: 100})
+		report(engramsync.ImportProgress{LocalChunks: 3, RemoteChunks: 3, PendingChunks: 0, Percentage: 100})
+		return &engramsync.ImportResult{}, nil
+	}
+	syncStatus = func(*engramsync.Syncer) (int, int, int, error) { return 3, 3, 0, nil }
+
+	withArgs(t, "engram", "sync", "--cloud", "--import", "--project", "proj-a")
+	stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdSync(cfg) })
+	if recovered != nil || stderr != "" {
+		t.Fatalf("cloud no-op import should succeed, panic=%v stderr=%q", recovered, stderr)
+	}
+	if got := strings.Count(stdout, "Cloud import progress: local=3 remote=3 pending=0 progress=100%"); got != 2 {
+		t.Fatalf("no-op progress snapshots = %d, want initial and final; output=%q", got, stdout)
+	}
+	if strings.LastIndex(stdout, "Cloud import progress:") > strings.Index(stdout, "No new chunks to import.") {
+		t.Fatalf("final no-op progress must precede the existing summary: %q", stdout)
 	}
 }

@@ -373,6 +373,22 @@ func TestParseClientCreatedAt(t *testing.T) {
 	})
 }
 
+func TestReadManifestEmitsOwnershipModeVersion(t *testing.T) {
+	db, err := sql.Open(projectGrantBindingDriverName, "")
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	manifest, err := (&CloudStore{db: db}).ReadManifest(context.Background(), "proj-a")
+	if err != nil {
+		t.Fatalf("ReadManifest: %v", err)
+	}
+	if manifest.Version != 2 {
+		t.Fatalf("manifest version = %d, want 2", manifest.Version)
+	}
+}
+
 func TestSortManifestRowsByServerCreatedAtForReplay(t *testing.T) {
 	rows := []manifestRow{
 		{
@@ -671,6 +687,45 @@ func TestMaterializedChunkMutationsMaterializesUpsertsExactlyOnce(t *testing.T) 
 		if count != 1 {
 			t.Fatalf("entry %s materialized %d times, want exactly 1", key, count)
 		}
+	}
+}
+
+func TestInsertMutationBatchFailureIdentifiesFailingEntryAndRollsBack(t *testing.T) {
+	resetPartialFailDriver(1) // succeed first INSERT, fail the second
+	db, err := sql.Open("cloudstore-partial-fail-driver", "dsn")
+	if err != nil {
+		t.Fatalf("open partial failure db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	cs := &CloudStore{db: db}
+
+	_, err = cs.InsertMutationBatch(context.Background(), []MutationEntry{
+		{Project: "proj-a", Entity: "custom", EntityKey: "first-entry", Op: "upsert", Payload: json.RawMessage(`{}`)},
+		{Project: "proj-a", Entity: "failing-entity", EntityKey: "failing-key", Op: "upsert", Payload: json.RawMessage(`{}`)},
+	})
+	if err == nil {
+		t.Fatal("expected the second entry to fail")
+	}
+	for _, want := range []string{
+		"batch_index=1",
+		`entity="failing-entity"`,
+		`entity_key="failing-key"`,
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("InsertMutationBatch error = %q, want %q", err, want)
+		}
+	}
+	if tx := partialFailDriverSingleton.lastTx; tx == nil || !tx.rolledBack || tx.committed {
+		t.Fatalf("expected rollback without commit after second-entry failure, got %+v", tx)
+	}
+
+	cause := errors.New("raw-cause-secret-must-not-appear")
+	entryErr := &MutationBatchEntryError{BatchIndex: 1, Entity: "failing-entity", EntityKey: "failing-key", Err: cause}
+	if strings.Contains(entryErr.Error(), cause.Error()) {
+		t.Fatalf("public mutation batch error exposes wrapped cause: %q", entryErr)
+	}
+	if !errors.Is(entryErr, cause) {
+		t.Fatal("expected wrapped cause to remain discoverable with errors.Is")
 	}
 }
 

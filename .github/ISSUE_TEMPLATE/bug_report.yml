@@ -11,21 +11,10 @@ body:
 
         > **How this works:**
         > 1. You submit this issue → it gets `status:needs-review` automatically
-        > 2. A maintainer reviews it → adds `status:approved` if accepted
+        > 2. A maintainer reviews it → replaces the review status with `status:approved` if accepted
         > 3. Only then can a PR be opened to fix it
         >
         > See [CONTRIBUTING.md](https://github.com/Gentleman-Programming/engram/blob/main/CONTRIBUTING.md) for the full workflow.
-
-  - type: checkboxes
-    id: preflight
-    attributes:
-      label: "📋 Pre-flight Checks"
-      description: Please confirm before submitting.
-      options:
-        - label: I have searched [existing issues](https://github.com/Gentleman-Programming/engram/issues) and this is not a duplicate
-          required: true
-        - label: I understand this issue needs `status:approved` before a PR can be opened
-          required: true
 
   - type: textarea
     id: description

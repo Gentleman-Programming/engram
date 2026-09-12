@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Verify PR links an issue
-        uses: actions/github-script@v8
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           script: |
             const body = context.payload.pull_request.body || '';
@@ -34,7 +34,7 @@ jobs:
     needs: check-issue-reference
     steps:
       - name: Verify linked issue is approved
-        uses: actions/github-script@v8
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
@@ -81,41 +81,4 @@ jobs:
 
             if (failures.length > 0) {
               core.setFailed('❌ Linked issue(s) not approved:\n' + failures.join('\n'));
-            }
-
-  check-type-label:
-    name: Check PR Has type:* Label
-    runs-on: ubuntu-latest
-    steps:
-      - name: Verify PR has a type label
-        uses: actions/github-script@v8
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const prNumber = context.payload.pull_request.number;
-
-            const { data: pullRequest } = await github.rest.pulls.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: prNumber,
-            });
-
-            const labels = pullRequest.labels.map(l => l.name);
-            core.info(`PR #${prNumber} labels: ${labels.join(', ') || '(none)'}`);
-
-            const typeLabels = labels.filter(l => l.startsWith('type:'));
-
-            if (typeLabels.length === 0) {
-              core.setFailed(
-                '❌ PR must have exactly one type:* label.\n' +
-                'Valid types: type:bug, type:feature, type:docs, type:refactor, type:chore, type:breaking-change\n' +
-                'Add the label to the PR after opening it.'
-              );
-            } else if (typeLabels.length > 1) {
-              core.setFailed(
-                `❌ PR has multiple type:* labels: ${typeLabels.join(', ')}.\n` +
-                'Please keep exactly one type label.'
-              );
-            } else {
-              core.info(`✅ PR has type label: ${typeLabels[0]}`);
             }
