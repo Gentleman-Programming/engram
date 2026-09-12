@@ -31,6 +31,7 @@ func declarativeAgents() []declarativeAgent {
 		{"cursor", cursorMCPPath, "mcpServers", mcpServersObject, cursorMemoryProtocolPath, wholeFile},
 		{"vscode-copilot", vscodeMCPPath, "servers", serversObject, vscodePromptPath, wholeFile},
 		{"kilocode", kilocodeConfigPath, "mcp", opencodeObject, kilocodeAgentsPath, markerBlock},
+		{"commandcode", commandcodeMCPPath, "mcpServers", commandCodeObject, commandcodeAgentsPath, markerBlock},
 	}
 }
 
@@ -58,7 +59,7 @@ func TestSupportedAgentsIncludesAllRegistryAgents(t *testing.T) {
 	want := []string{
 		"opencode", "pi", "claude-code", "gemini-cli", "codex",
 		"antigravity-cli", "windsurf", "qwen", "kiro", "cursor",
-		"vscode-copilot", "kilocode",
+		"vscode-copilot", "kilocode", "commandcode",
 	}
 	for _, slug := range want {
 		if !got[slug] {
@@ -133,6 +134,14 @@ func TestInstallDeclarativeAgentsRegisterMCPAndInstructions(t *testing.T) {
 				}
 				if agent.mcpFormat == serversObject && entry["type"] != "stdio" {
 					t.Errorf("%s: expected type stdio, got %#v", agent.slug, entry["type"])
+				}
+				if agent.mcpFormat == commandCodeObject {
+					if entry["transport"] != "stdio" {
+						t.Errorf("%s: expected transport stdio, got %#v", agent.slug, entry["transport"])
+					}
+					if entry["enabled"] != true {
+						t.Errorf("%s: expected enabled true, got %#v", agent.slug, entry["enabled"])
+					}
 				}
 			}
 
