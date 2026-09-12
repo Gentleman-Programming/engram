@@ -662,7 +662,9 @@ func TestCmdSaveResolvesConfiguredProjectWithoutFlag(t *testing.T) {
 		t.Fatalf("open store to enroll project: %v", err)
 	}
 	if err := s.EnrollProject("configured-project"); err != nil {
-		s.Close()
+		if closeErr := s.Close(); closeErr != nil {
+			t.Fatalf("close store after failed enrollment: %v", closeErr)
+		}
 		t.Fatalf("enroll project: %v", err)
 	}
 	if err := s.Close(); err != nil {

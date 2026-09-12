@@ -659,7 +659,9 @@ func TestCmdDoctorRepairRepairsTitleOnlyObservationMutation(t *testing.T) {
 		t.Fatalf("store.New: %v", err)
 	}
 	if err := s.EnrollProject("engram"); err != nil {
-		s.Close()
+		if closeErr := s.Close(); closeErr != nil {
+			t.Fatalf("close store after failed enrollment: %v", closeErr)
+		}
 		t.Fatalf("enroll project: %v", err)
 	}
 	if err := s.CreateSession("title-repair", "engram", "/work/engram"); err != nil {
