@@ -4057,6 +4057,73 @@ func TestCloudImportDeferredRelationHealsWhenLateEndpointArrives(t *testing.T) {
 	}
 }
 
+// TestCloudImportSkippedRelationEnqueuedBeforeChunkSynced pins the #1135
+// atomicity ordering: the skipped edge's deferred row is durable before the
+// chunk can be applied and marked synced — a crash leaves a queued, replayable edge.
+func TestCloudImportSkippedRelationEnqueuedBeforeChunkSynced(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnrollProject("proj-a"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+	transport := newFakeCloudTransport()
+	transport.manifest = &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "chunk-1135-atomic", CreatedAt: "2026-08-25T00:00:00Z"}}}
+	transport.chunks["chunk-1135-atomic"] = mustJSONChunk(t, "chunk-1135-atomic", relationMissingEndpointChunk("sess-1135-atomic", "obs-1135-atomic-a", "obs-1135-atomic-b", "rel-1135-atomic"))
+	origApply := storeApplyPulledChunk
+	storeApplyPulledChunk = func(*store.Store, string, string, []store.SyncMutation) error {
+		return errors.New("crash between enqueue and chunk apply")
+	}
+	defer func() { storeApplyPulledChunk = origApply }()
+	importer := NewCloudWithTransport(s, transport, "proj-a")
+	if _, err := importer.Import(); err == nil {
+		t.Fatal("expected the failed chunk apply to abort the import")
+	}
+	synced, err := s.GetSyncedChunksForTarget(cloudTargetKey("proj-a"))
+	if err != nil || synced["chunk-1135-atomic"] {
+		t.Fatalf("crashed chunk must not be marked synced, err=%v synced=%+v", err, synced)
+	}
+	rows, err := s.ListDeferred(store.ListDeferredOptions{Status: "deferred"})
+	if err != nil || len(rows) != 1 || rows[0].EntityKey != "rel-1135-atomic" {
+		t.Fatalf("skipped edge must stay queued after the crash, err=%v rows=%+v", err, rows)
+	}
+	storeApplyPulledChunk = origApply // remove the failure: recovery import applies the chunk, replay heals the edge
+	if _, err := importer.Import(); err != nil {
+		t.Fatalf("expected recovery import to apply the chunk, err=%v", err)
+	}
+	if err := s.ApplyPulledMutation(cloudTargetKey("proj-a"), store.SyncMutation{Seq: 4, Entity: store.SyncEntityObservation, EntityKey: "obs-1135-atomic-b", Op: store.SyncOpUpsert, Payload: `{"sync_id":"obs-1135-atomic-b","session_id":"sess-1135-atomic","type":"decision","title":"late endpoint","content":"arrives before the replay","project":"proj-a","scope":"project"}`}); err != nil {
+		t.Fatalf("apply late endpoint: %v", err)
+	}
+	final, err := importer.finalizeImport(&ImportResult{})
+	if err != nil || final.RelationsReplayed != 1 || final.RelationsDeferred != 0 || final.RelationsDead != 0 {
+		t.Fatalf("expected the queued edge to heal via replay, err=%v result=%+v", err, final)
+	}
+}
+
+// TestCloudImportEnqueueErrorAbortsBeforeChunkMutation pins the enqueue-error half: the import aborts before any chunk mutation, leaving the chunk unsynced.
+func TestCloudImportEnqueueErrorAbortsBeforeChunkMutation(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnrollProject("proj-a"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+	transport := newFakeCloudTransport()
+	transport.manifest = &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "chunk-1135-enqueue-error", CreatedAt: "2026-08-25T00:00:00Z"}}}
+	transport.chunks["chunk-1135-enqueue-error"] = mustJSONChunk(t, "chunk-1135-enqueue-error", relationMissingEndpointChunk("sess-1135-enqueue-error", "obs-1135-enqueue-a", "obs-1135-enqueue-b", "rel-1135-enqueue-error"))
+	// Break the deferred queue itself so the pre-apply enqueue fails.
+	if _, err := s.DB().Exec(`DROP TABLE sync_apply_deferred`); err != nil {
+		t.Fatalf("drop deferred queue: %v", err)
+	}
+	_, err := NewCloudWithTransport(s, transport, "proj-a").Import()
+	if err == nil || !strings.Contains(err.Error(), "defer skipped relation") {
+		t.Fatalf("expected the enqueue failure to abort the import, got %v", err)
+	}
+	synced, err := s.GetSyncedChunksForTarget(cloudTargetKey("proj-a"))
+	if err != nil || synced["chunk-1135-enqueue-error"] {
+		t.Fatalf("aborted chunk must not be marked synced, err=%v synced=%+v", err, synced)
+	}
+	if _, err := s.GetObservationBySyncID("obs-1135-enqueue-a"); err == nil {
+		t.Fatal("aborted import must not apply any chunk mutation")
+	}
+}
+
 func TestCloudImportEmptyProjectDoesNotReplayAnotherProjectDeferredRelation(t *testing.T) {
 	dst := newTestStore(t)
 	for _, project := range []string{"project-a", "project-b"} {

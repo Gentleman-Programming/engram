@@ -1021,6 +1021,19 @@ func (sy *Syncer) importEntriesDependencySafeWithProgress(entries []ChunkEntry, 
 				}
 			}
 
+			// #1135 correction: enqueue dropped edges BEFORE the filtered chunk can
+			// be applied, so the deferred row is durable before the chunk can be
+			// committed and marked synced. A crash in between can only leave a
+			// queued, replayable edge — never a lost one — and an enqueue error
+			// aborts before any chunk mutation.
+			if len(skippedEdges) > 0 {
+				for _, skipped := range skippedMutations {
+					if err := sy.store.EnqueueDeferredRelation(sy.chunkTrackingTargetKey(""), skipped); err != nil {
+						return nil, fmt.Errorf("defer skipped relation %s: %w", skipped.EntityKey, err)
+					}
+				}
+			}
+
 			if err := sy.importMutationChunk(entry.ID, applyChunk); err != nil {
 				if mode == importModeLocal {
 					recoveredChunk, recovered, recoveryErr := sy.recoverLocalMissingSessionDependencies(chunk, availableSessionIDs)
@@ -1052,12 +1065,6 @@ func (sy *Syncer) importEntriesDependencySafeWithProgress(entries []ChunkEntry, 
 			result.PromptsImported += importResult.PromptsImported
 			if len(skippedEdges) > 0 {
 				result.SkippedRelations = append(result.SkippedRelations, skippedEdges...)
-				// #1135 correction: queue dropped edges so the skip stays reversible.
-				for _, skipped := range skippedMutations {
-					if err := sy.store.EnqueueDeferredRelation(sy.chunkTrackingTargetKey(""), skipped); err != nil {
-						return nil, fmt.Errorf("defer skipped relation %s: %w", skipped.EntityKey, err)
-					}
-				}
 			}
 			if afterCommit != nil {
 				afterCommit()
