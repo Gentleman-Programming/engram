@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1877,5 +1878,203 @@ func TestInsecureModeLoginRedirects(t *testing.T) {
 	}
 	if loc := rec.Header().Get("Location"); loc != "/dashboard/" {
 		t.Fatalf("expected redirect to /dashboard/, got %q", loc)
+	}
+}
+
+// --- engram#1134: failed request-auth middleware auditing (cloud_auth_audit_log) ---
+
+// assertRequestAuthDeniedEvent verifies the audit event contract for a
+// rejected sync/auth request: action sync.auth, outcome denied, the mapped
+// reason code, and a null actor principal with the "request" actor source
+// (matching the claim in engram#1134).
+func assertRequestAuthDeniedEvent(t *testing.T, event cloudstore.AuthAuditEvent, wantReason string) {
+	t.Helper()
+	if event.Action != "sync.auth" {
+		t.Fatalf("audit action = %q, want %q", event.Action, "sync.auth")
+	}
+	if event.Outcome != authAuditOutcomeDenied {
+		t.Fatalf("audit outcome = %q, want %q", event.Outcome, authAuditOutcomeDenied)
+	}
+	if event.ReasonCode != wantReason {
+		t.Fatalf("audit reason_code = %q, want %q", event.ReasonCode, wantReason)
+	}
+	if event.ActorPrincipalID != "" {
+		t.Fatalf("rejected request auth must not reference an actor principal, got %q", event.ActorPrincipalID)
+	}
+	if event.ActorSource != "request" {
+		t.Fatalf("audit actor_source = %q, want %q", event.ActorSource, "request")
+	}
+	if event.Project != "" {
+		t.Fatalf("request auth audit must not claim a project, got %q", event.Project)
+	}
+	assertNoSensitiveAuditMetadata(t, event)
+}
+
+// TestRequestAuthDeniedAuditsUnknownToken is the engram#1134 regression test:
+// a sync request rejected by the principal resolver must still produce a
+// cloud_auth_audit_log row (best-effort) alongside the 401.
+func TestRequestAuthDeniedAuditsUnknownToken(t *testing.T) {
+	authn := resolvingAuth{errors: map[string]error{"unknown-token": cloudauth.ErrUnknownToken}}
+	store := newAdminTestStore()
+	srv := New(newFakeMutationStore(), authn, 0, WithAdminIdentityStore(store))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/sync/pull?project=proj-a", nil)
+	req.Header.Set("Authorization", "Bearer unknown-token")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if len(store.auditEvents) != 1 {
+		t.Fatalf("expected exactly one auth audit event for the rejected request, got %d: %+v", len(store.auditEvents), store.auditEvents)
+	}
+	assertRequestAuthDeniedEvent(t, store.auditEvents[0], "unknown_token")
+}
+
+// TestRequestAuthDeniedAuditReasonMapping pins the error-class-to-reason_code
+// mapping for every rejection path of the request auth middleware.
+func TestRequestAuthDeniedAuditReasonMapping(t *testing.T) {
+	cases := []struct {
+		name       string
+		header     string
+		sendHeader bool
+		tokenErr   error
+		wantReason string
+	}{
+		{name: "missing authorization header", sendHeader: false, wantReason: "missing_header"},
+		{name: "malformed bearer prefix", header: "Token abc", sendHeader: true, wantReason: "malformed_bearer"},
+		{name: "unknown token", header: "Bearer rejected-token", sendHeader: true, tokenErr: cloudauth.ErrUnknownToken, wantReason: "unknown_token"},
+		{name: "revoked token", header: "Bearer rejected-token", sendHeader: true, tokenErr: cloudauth.ErrTokenRevoked, wantReason: "token_revoked"},
+		{name: "disabled principal", header: "Bearer rejected-token", sendHeader: true, tokenErr: cloudauth.ErrPrincipalDisabled, wantReason: "principal_disabled"},
+		{name: "token principal mismatch", header: "Bearer rejected-token", sendHeader: true, tokenErr: fmt.Errorf("%w: token principal mismatch", cloudauth.ErrInvalidPrincipal), wantReason: "token_principal_mismatch"},
+		{name: "pepper missing", header: "Bearer rejected-token", sendHeader: true, tokenErr: cloudauth.ErrTokenPepperRequired, wantReason: "pepper_missing"},
+		{name: "resolver failure", header: "Bearer rejected-token", sendHeader: true, tokenErr: errors.New("resolver unavailable"), wantReason: "resolver_error"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			authn := resolvingAuth{}
+			if tc.tokenErr != nil {
+				authn.errors = map[string]error{"rejected-token": tc.tokenErr}
+			}
+			store := newAdminTestStore()
+			srv := New(newFakeMutationStore(), authn, 0, WithAdminIdentityStore(store))
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/sync/pull?project=proj-a", nil)
+			if tc.sendHeader {
+				req.Header.Set("Authorization", tc.header)
+			}
+			srv.Handler().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("expected 401, got %d body=%q", rec.Code, rec.Body.String())
+			}
+			if len(store.auditEvents) != 1 {
+				t.Fatalf("expected exactly one auth audit event, got %d: %+v", len(store.auditEvents), store.auditEvents)
+			}
+			assertRequestAuthDeniedEvent(t, store.auditEvents[0], tc.wantReason)
+		})
+	}
+}
+
+// TestRequestAuthDeniedAuditInsertFailureStillRejects proves the audit write
+// is best-effort: a failing audit insert must not turn the rejection into a
+// 500 and must surface both the per-rejection line and the insert failure.
+func TestRequestAuthDeniedAuditInsertFailureStillRejects(t *testing.T) {
+	authn := resolvingAuth{errors: map[string]error{"unknown-token": cloudauth.ErrUnknownToken}}
+	store := newAdminTestStore()
+	store.auditErr = errors.New("audit table unavailable")
+	srv := New(newFakeMutationStore(), authn, 0, WithAdminIdentityStore(store))
+
+	var logBuf bytes.Buffer
+	origLog := log.Writer()
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(origLog)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/sync/pull?project=proj-a", nil)
+	req.Header.Set("Authorization", "Bearer unknown-token")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("audit insert failure must not change the rejection status, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if len(store.auditEvents) != 0 {
+		t.Fatalf("failed audit inserts must not be recorded, got %+v", store.auditEvents)
+	}
+	logged := logBuf.String()
+	if !strings.Contains(logged, "request auth denied") || !strings.Contains(logged, "reason=unknown_token") {
+		t.Fatalf("expected per-rejection log line with mapped reason, got %q", logged)
+	}
+	if !strings.Contains(logged, "request auth audit insert failed") {
+		t.Fatalf("expected best-effort audit insert failure log line, got %q", logged)
+	}
+}
+
+// TestRequestAuthSuccessWritesNoAuditEvent pins the volume rule from the
+// engram#1134 claim: successful request auth stays unaudited per request.
+func TestRequestAuthSuccessWritesNoAuditEvent(t *testing.T) {
+	principal := cloudauth.Principal{ID: "p-managed", Kind: cloudauth.PrincipalKindHuman, Role: cloudauth.RoleMember, Source: cloudauth.PrincipalSourceManagedToken, Enabled: true}
+	authn := resolvingAuth{principals: map[string]cloudauth.Principal{"managed-token": principal}}
+	store := newAdminTestStore()
+	srv := New(newFakeMutationStore(), authn, 0, WithAdminIdentityStore(store))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/sync/pull?project=proj-a", nil)
+	req.Header.Set("Authorization", "Bearer managed-token")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if len(store.auditEvents) != 0 {
+		t.Fatalf("successful request auth must not write audit events, got %+v", store.auditEvents)
+	}
+}
+
+// TestLegacyAuthorizeDeniedAuditsAuthorizeError pins the legacy (non-principal)
+// auth branch: its failures are audited best-effort with reason authorize_error.
+func TestLegacyAuthorizeDeniedAuditsAuthorizeError(t *testing.T) {
+	authn := fakeAuth{err: errors.New("legacy token rejected")}
+	store := newAdminTestStore()
+	srv := New(newFakeMutationStore(), authn, 0, WithAdminIdentityStore(store))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/sync/pull?project=proj-a", nil)
+	req.Header.Set("Authorization", "Bearer legacy-token")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if len(store.auditEvents) != 1 {
+		t.Fatalf("expected exactly one auth audit event for the legacy rejection, got %d: %+v", len(store.auditEvents), store.auditEvents)
+	}
+	assertRequestAuthDeniedEvent(t, store.auditEvents[0], "authorize_error")
+}
+
+// TestRequestAuthDeniedWithoutAuditSinkStillRejects proves the middleware
+// keeps its rejection behavior when no admin identity store is configured.
+func TestRequestAuthDeniedWithoutAuditSinkStillRejects(t *testing.T) {
+	authn := resolvingAuth{errors: map[string]error{"unknown-token": cloudauth.ErrUnknownToken}}
+	srv := New(newFakeMutationStore(), authn, 0)
+
+	var logBuf bytes.Buffer
+	origLog := log.Writer()
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(origLog)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/sync/pull?project=proj-a", nil)
+	req.Header.Set("Authorization", "Bearer unknown-token")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without an audit sink, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(logBuf.String(), "request auth denied") {
+		t.Fatalf("expected per-rejection log line even without an audit sink, got %q", logBuf.String())
 	}
 }
