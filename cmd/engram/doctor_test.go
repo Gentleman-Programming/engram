@@ -588,6 +588,22 @@ func TestCmdDoctorRepairDefaultsSourceObservationRepairToDryRun(t *testing.T) {
 	}
 }
 
+func TestCmdDoctorRepairApplyNoOpReportsNoAction(t *testing.T) {
+	cfg := testConfig(t)
+	withArgs(t, "engram", "doctor", "repair", "--check", "sync_mutation_required_fields", "--apply")
+	stdout, stderr := captureOutput(t, func() { cmdDoctor(cfg) })
+	if stderr != "" {
+		t.Fatalf("stderr=%q", stderr)
+	}
+	report := decodeRepairPlan(t, stdout)
+	if report["applied"] != false || len(report["actions"].([]any)) != 0 || len(report["repairs"].([]any)) != 0 || len(report["source_repairs"].([]any)) != 0 {
+		t.Fatalf("no-op apply report=%v", report)
+	}
+	if _, ok := report["source_repair_backup_path"]; ok {
+		t.Fatalf("no-op apply created source repair backup: %v", report)
+	}
+}
+
 func TestCmdDoctorRepairQuarantinesInvalidEmptyProjectMutations(t *testing.T) {
 	cfg := testConfig(t)
 	s, err := store.New(cfg)
@@ -641,6 +657,10 @@ func TestCmdDoctorRepairRepairsTitleOnlyObservationMutation(t *testing.T) {
 	s, err := store.New(cfg)
 	if err != nil {
 		t.Fatalf("store.New: %v", err)
+	}
+	if err := s.EnrollProject("engram"); err != nil {
+		s.Close()
+		t.Fatalf("enroll project: %v", err)
 	}
 	if err := s.CreateSession("title-repair", "engram", "/work/engram"); err != nil {
 		t.Fatalf("create session: %v", err)

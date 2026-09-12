@@ -6312,6 +6312,14 @@ func (s *Store) ListEnrolledProjects() ([]EnrolledProject, error) {
 }
 
 // IsProjectEnrolled returns true if the given project is enrolled for cloud sync.
+func isProjectEnrolledTx(tx *sql.Tx, project string) (bool, error) {
+	var enrolled bool
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM sync_enrolled_projects WHERE project = ?)`, project).Scan(&enrolled); err != nil {
+		return false, err
+	}
+	return enrolled, nil
+}
+
 func (s *Store) IsProjectEnrolled(project string) (bool, error) {
 	project, _ = NormalizeProject(project)
 	if project == "" {
@@ -7653,6 +7661,13 @@ func (s *Store) enqueueMissingLocalMutationTx(tx *sql.Tx, entity, entityKey stri
 	if canonical {
 		return true, nil
 	}
+	enrolled, err := isProjectEnrolledTx(tx, project)
+	if err != nil {
+		return false, err
+	}
+	if !enrolled {
+		return false, nil
+	}
 	if err := s.enqueueSyncMutationTx(tx, entity, entityKey, op, payload); err != nil {
 		return false, err
 	}
@@ -8280,6 +8295,18 @@ func (s *Store) enqueueSyncMutationWithSourceTx(tx *sql.Tx, entity, entityKey, o
 			} else {
 				project = derived
 			}
+		}
+	}
+	// Cloud journal delivery is opt-in per project. Local writes remain durable in
+	// SQLite while an unenrolled project accumulates no cloud mutation rows; the
+	// enrollment backfill materializes its current local state once it opts in.
+	if source == SyncSourceLocal && project != "" {
+		enrolled, err := isProjectEnrolledTx(tx, project)
+		if err != nil {
+			return err
+		}
+		if !enrolled {
+			return nil
 		}
 	}
 	if _, err := s.execHook(tx,
