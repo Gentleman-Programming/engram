@@ -811,6 +811,12 @@ Child scan constraints: depth=1, max 20 entries, 200ms timeout, skips hidden dir
 
 The Git binding is private to each clone and shared by that clone's linked worktrees. Independent clones and forks establish fresh opaque bindings. Cross-clone identity sharing and alias propagation are not currently supported.
 
+### Initialize an explicit project identity
+
+Use `engram init [project_name] [--force]` to write `.engram/config.json` in the current directory. When `project_name` is omitted, Engram uses the current directory basename. `--force` replaces an existing config; without it, init stops and tells you that the config already exists.
+
+This is the explicit resolution path for a non-Git aggregator workspace that contains multiple child repositories. Run `engram init aggregator-name` at the aggregator root so its config resolves the workspace identity before child-repository scanning reports ambiguity.
+
 ### Response envelope
 
 Most successful MCP tool responses use this envelope:
@@ -984,6 +990,8 @@ Get recent memory context from previous sessions — shows sessions, prompts, an
 When `project` is omitted, context is scoped to the resolved current project (process override before cwd detection). This is not an all-project query. `scope: personal` without an explicit project retains its cross-project personal-memory behavior.
 
 Scope values accepted by the `scope` parameter: `project` (default), `personal`, `global`. When `scope: personal` is passed without an explicit `project` override, the project filter is cleared and personal observations are returned across all projects (cross-project personal scope).
+
+MCP `mem_context` uses a 16 KiB default budget for the complete tool result and caps `max_bytes` at 64 KiB. `max_bytes` must be a positive integral number; absent, mistyped, non-positive, `NaN`, and fractional values fall back to the 16 KiB default. It includes at most 20 pinned observations by default. When the complete result exceeds its budget, truncation is UTF-8-safe and appends a visible `[truncated]` marker when the marker fits. `compact=true` removes inline content previews from pinned and recent-observation bullets, retaining their type and title. These MCP rules are distinct from the HTTP `GET /context` behavior documented above.
 
 ### mem_stats
 
