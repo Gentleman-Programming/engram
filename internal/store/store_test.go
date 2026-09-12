@@ -7928,6 +7928,123 @@ func TestEnrollAndLookupProjectNormalization(t *testing.T) {
 	}
 }
 
+func TestDeleteSessionNormalizesPromptTombstoneProjectForReenrollment(t *testing.T) {
+	const canonicalProject = "legacy_project"
+	const sessionID = "legacy-padded-session"
+	const promptSyncID = "prompt-legacy-padded"
+
+	s := newTestStore(t)
+	if _, err := s.db.Exec(`INSERT INTO sessions (id, project, directory) VALUES (?, ?, ?)`, sessionID, "  LEGACY__PROJECT  ", "/tmp/legacy"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO user_prompts (sync_id, session_id, content, project) VALUES (?, ?, ?, ?)`, promptSyncID, sessionID, "legacy prompt", " \t "); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteSession(sessionID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnrollProject(canonicalProject); err != nil {
+		t.Fatal(err)
+	}
+
+	var project, op string
+	if err := s.db.QueryRow(`SELECT project, op FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntityPrompt, promptSyncID).Scan(&project, &op); err != nil {
+		t.Fatalf("find re-enrolled prompt delete: %v", err)
+	}
+	if project != canonicalProject || op != SyncOpDelete {
+		t.Fatalf("re-enrolled prompt mutation = project %q op %q, want project %q op %q", project, op, canonicalProject, SyncOpDelete)
+	}
+}
+
+func TestUnenrolledHardDeletesReplayAfterReenrollment(t *testing.T) {
+	t.Run("observation", func(t *testing.T) {
+		const project = "unenrolled-hard-observation"
+		s := newTestStore(t)
+		if err := s.CreateSession("unenrolled-hard-observation-session", project, "/tmp/unenrolled-hard-observation"); err != nil {
+			t.Fatal(err)
+		}
+		observationID, err := s.AddObservation(AddObservationParams{
+			SessionID: "unenrolled-hard-observation-session",
+			Type:      "decision",
+			Title:     "delete while unenrolled",
+			Content:   "keep delete intent",
+			Project:   project,
+			Scope:     "project",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var syncID string
+		if err := s.db.QueryRow(`SELECT sync_id FROM observations WHERE id = ?`, observationID).Scan(&syncID); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.DeleteObservation(observationID, true); err != nil {
+			t.Fatal(err)
+		}
+		if got := scalarInt(t, s, `SELECT COUNT(*) FROM sync_mutations`); got != 0 {
+			t.Fatalf("unenrolled hard delete wrote %d sync mutations, want 0", got)
+		}
+
+		if err := s.EnrollProject(project); err != nil {
+			t.Fatal(err)
+		}
+		mutations, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(mutations) != 2 || mutations[0].Entity != SyncEntitySession || mutations[0].Op != SyncOpUpsert || mutations[1].Entity != SyncEntityObservation || mutations[1].EntityKey != syncID || mutations[1].Op != SyncOpDelete {
+			t.Fatalf("re-enrollment mutations = %+v, want session upsert then observation delete", mutations)
+		}
+		beforeRepeat := scalarInt(t, s, `SELECT COUNT(*) FROM sync_mutations`)
+		if err := s.UnenrollProject(project); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.EnrollProject(project); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.withTx(func(tx *sql.Tx) error { return s.backfillProjectSyncMutationsTx(tx, project) }); err != nil {
+			t.Fatal(err)
+		}
+		if got := scalarInt(t, s, `SELECT COUNT(*) FROM sync_mutations`); got != beforeRepeat {
+			t.Fatalf("re-enrollment/repeated backfill wrote duplicate mutations: got %d, want %d", got, beforeRepeat)
+		}
+	})
+
+	t.Run("session and prompts", func(t *testing.T) {
+		const project = "unenrolled-hard-session"
+		const sessionID = "unenrolled-hard-session-id"
+		s := newTestStore(t)
+		if err := s.CreateSession(sessionID, project, "/tmp/unenrolled-hard-session"); err != nil {
+			t.Fatal(err)
+		}
+		promptID, err := s.AddPrompt(AddPromptParams{SessionID: sessionID, Content: "delete with session", Project: project})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var promptSyncID string
+		if err := s.db.QueryRow(`SELECT sync_id FROM user_prompts WHERE id = ?`, promptID).Scan(&promptSyncID); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.DeleteSession(sessionID); err != nil {
+			t.Fatal(err)
+		}
+		if got := scalarInt(t, s, `SELECT COUNT(*) FROM sync_mutations`); got != 0 {
+			t.Fatalf("unenrolled session delete wrote %d sync mutations, want 0", got)
+		}
+
+		if err := s.EnrollProject(project); err != nil {
+			t.Fatal(err)
+		}
+		mutations, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(mutations) != 2 || mutations[0].Entity != SyncEntityPrompt || mutations[0].EntityKey != promptSyncID || mutations[0].Op != SyncOpDelete || mutations[1].Entity != SyncEntitySession || mutations[1].EntityKey != sessionID || mutations[1].Op != SyncOpDelete {
+			t.Fatalf("re-enrollment mutations = %+v, want prompt delete then session delete", mutations)
+		}
+	})
+}
+
 func TestEnrollProjectBackfillsHistoricalMutations(t *testing.T) {
 	s := newTestStore(t)
 

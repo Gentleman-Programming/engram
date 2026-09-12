@@ -935,6 +935,32 @@ func TestMigrate_LegacyDeferredRowsRemainAdministrativeOnly(t *testing.T) {
 	}
 }
 
+func TestMigrateSyncDeleteTombstonesRepeatOpenSafe(t *testing.T) {
+	cfg := mustDefaultConfig(t)
+	cfg.DataDir = t.TempDir()
+
+	first, err := New(cfg)
+	if err != nil {
+		t.Fatalf("first open: %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("close first store: %v", err)
+	}
+
+	second, err := New(cfg)
+	if err != nil {
+		t.Fatalf("repeat open: %v", err)
+	}
+	t.Cleanup(func() { _ = second.Close() })
+	var table string
+	if err := second.db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sync_delete_tombstones'`).Scan(&table); err != nil {
+		t.Fatalf("find sync delete tombstones table: %v", err)
+	}
+	if table != "sync_delete_tombstones" {
+		t.Fatalf("sync delete tombstones table = %q", table)
+	}
+}
+
 func TestMigrate_AddsNullableLastSuccessAtWithoutBackfill(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "engram.db")
