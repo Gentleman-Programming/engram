@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 
@@ -55,6 +57,23 @@ type EnrolledProjectsProvider interface {
 
 const maxMutationBatchSize = 100
 const defaultPullLimit = 100
+
+type mutationPushLogWriterContextKey struct{}
+
+func mutationPushLogWriter(ctx context.Context) io.Writer {
+	if writer, ok := ctx.Value(mutationPushLogWriterContextKey{}).(io.Writer); ok && writer != nil {
+		return writer
+	}
+	return os.Stderr
+}
+
+func writeMutationPushRejectionLog(writer io.Writer, entryErr *cloudstore.MutationBatchEntryError) {
+	if entryErr == nil {
+		_, _ = fmt.Fprintln(writer, "cloudserver: mutation push rejected")
+		return
+	}
+	_, _ = fmt.Fprintf(writer, "cloudserver: mutation push rejected: batch_index=%d entity=%.64q entity_key=%.64q\n", entryErr.BatchIndex, entryErr.Entity, entryErr.EntityKey)
+}
 
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
@@ -217,7 +236,14 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 
 	acceptedSeqs, err := ms.InsertMutationBatch(r.Context(), normalizedEntries)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("insert mutations: %v", err), http.StatusInternalServerError)
+		var entryErr *cloudstore.MutationBatchEntryError
+		if errors.As(err, &entryErr) {
+			writeMutationPushRejectionLog(mutationPushLogWriter(r.Context()), entryErr)
+			http.Error(w, fmt.Sprintf("insert mutations: batch_index=%d entity=%.64q entity_key=%.64q", entryErr.BatchIndex, entryErr.Entity, entryErr.EntityKey), http.StatusInternalServerError)
+		} else {
+			writeMutationPushRejectionLog(mutationPushLogWriter(r.Context()), nil)
+			http.Error(w, "insert mutations failed", http.StatusInternalServerError)
+		}
 		return
 	}
 
