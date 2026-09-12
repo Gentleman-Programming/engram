@@ -1890,13 +1890,17 @@ type requestAuthAuditContextStore struct {
 	*adminTestStore
 	hasDeadline bool
 	deadline    time.Time
-	block       bool
-	done        chan struct{}
-	insertErr   error
+	// ctxErr captures ctx.Err() at insert time: the insert context must be
+	// live when the store is invoked, whatever happened to the request.
+	ctxErr    error
+	block     bool
+	done      chan struct{}
+	insertErr error
 }
 
 func (s *requestAuthAuditContextStore) InsertAuthAuditEvent(ctx context.Context, event cloudstore.AuthAuditEvent) error {
 	s.deadline, s.hasDeadline = ctx.Deadline()
+	s.ctxErr = ctx.Err()
 	if s.block {
 		<-ctx.Done()
 		s.insertErr = ctx.Err()
@@ -1977,6 +1981,41 @@ func TestRequestAuthDeniedAuditInsertTimeoutStillRejects(t *testing.T) {
 	if !strings.Contains(logBuf.String(), "request auth audit insert failed") {
 		t.Fatalf("expected best-effort audit insert failure log line, got %q", logBuf.String())
 	}
+
+	// Canceled-request scenario (PR #1156 CodeRabbit finding): the insert
+	// context used to derive from r.Context(), so a canceled request could
+	// drop the denied-audit persistence even though the 401 was already
+	// decided. Canceling the request must keep the bounded insert budget and
+	// still persist the audit event.
+	cancelStore := &requestAuthAuditContextStore{adminTestStore: newAdminTestStore()}
+	cancelSrv := New(newFakeMutationStore(), authn, 0, WithAdminIdentityStore(cancelStore))
+	canceledCtx, cancelRequest := context.WithCancel(context.Background())
+	cancelRequest()
+	canceledStarted := time.Now()
+	cancelRec := httptest.NewRecorder()
+	cancelReq := httptest.NewRequest(http.MethodGet, "/sync/pull?project=proj-a", nil).WithContext(canceledCtx)
+	cancelReq.Header.Set("Authorization", "Bearer unknown-token")
+	cancelSrv.Handler().ServeHTTP(cancelRec, cancelReq)
+
+	if cancelRec.Code != http.StatusUnauthorized {
+		t.Fatalf("canceled request: expected 401, got %d body=%q", cancelRec.Code, cancelRec.Body.String())
+	}
+	if got, want := cancelRec.Body.Bytes(), baselineRec.Body.Bytes(); !bytes.Equal(got, want) {
+		t.Fatalf("canceled request: 401 body = %q, want byte-identical baseline %q", got, want)
+	}
+	if cancelStore.ctxErr != nil {
+		t.Fatalf("request auth audit insert context was already done at insert time (%v); a canceled request must not take down the denied-audit insert", cancelStore.ctxErr)
+	}
+	if !cancelStore.hasDeadline {
+		t.Fatal("canceled request: audit insert context must keep its bounded deadline")
+	}
+	if cancelStore.deadline.Before(canceledStarted) || cancelStore.deadline.After(canceledStarted.Add(10*time.Second)) {
+		t.Fatalf("canceled request: audit insert deadline = %v, want within 10s of request start %v", cancelStore.deadline, canceledStarted)
+	}
+	if len(cancelStore.auditEvents) != 1 {
+		t.Fatalf("canceled request: expected exactly one persisted denied audit event, got %d", len(cancelStore.auditEvents))
+	}
+	assertRequestAuthDeniedEvent(t, cancelStore.auditEvents[0], "unknown_token")
 }
 
 // assertRequestAuthDeniedEvent verifies the audit event contract for a

@@ -403,7 +403,9 @@ func requestAuthDenyReason(err error) string {
 // authentication (engram#1134). The rejection has already happened, so the
 // bounded insert budget and any audit failure never change the 401: failures
 // are logged and dropped, matching the dashboard login best-effort convention
-// (recordDashboardLoginAuditBestEffort).
+// (recordDashboardLoginAuditBestEffort). The insert budget is detached from
+// r.Context() on purpose: a disconnecting client cancels the request context,
+// and that cancellation must not drop the already-decided denied-audit row.
 // Successful request auth is intentionally unaudited per request (volume; the
 // dashboard login flow audits its own successes). The actor principal stays
 // null (no principal was resolved); ActorSource "request" labels the
@@ -415,7 +417,9 @@ func (s *CloudServer) recordRequestAuthDeniedAudit(r *http.Request, reason strin
 		log.Printf("cloudserver: admin identity store is not configured; request auth audit skipped")
 		return
 	}
-	insertCtx, cancel := context.WithTimeout(r.Context(), requestAuthAuditInsertTimeout)
+	// Deliberately not r.Context(): the client may have disconnected, and the
+	// denied-audit row must still be attempted within its own bounded budget.
+	insertCtx, cancel := context.WithTimeout(context.Background(), requestAuthAuditInsertTimeout)
 	defer cancel()
 	if err := s.adminIdentity.InsertAuthAuditEvent(insertCtx, cloudstore.AuthAuditEvent{
 		ActorSource: authAuditActorSourceRequest,
