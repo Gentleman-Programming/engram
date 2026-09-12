@@ -1983,6 +1983,7 @@ func cmdSync(cfg store.Config) {
 				fmt.Printf("  (%d chunks already imported)\n", result.ChunksSkipped)
 			}
 			printImportRelationCounts(result)
+			printSkippedRelationWarnings(result)
 			return
 		}
 
@@ -1998,6 +1999,7 @@ func cmdSync(cfg store.Config) {
 			fmt.Printf("  Skipped:      %d (already imported)\n", result.ChunksSkipped)
 		}
 		printImportRelationCounts(result)
+		printSkippedRelationWarnings(result)
 		return
 	}
 
@@ -2055,6 +2057,15 @@ func printImportRelationCounts(result *engramsync.ImportResult) {
 	fmt.Printf("  Relations replayed: %d\n", result.RelationsReplayed)
 	fmt.Printf("  Relations deferred: %d\n", result.RelationsDeferred)
 	fmt.Printf("  Relations dead:     %d\n", result.RelationsDead)
+}
+
+// printSkippedRelationWarnings surfaces relation upserts that were skipped
+// because their referenced observations are permanently missing (issue #1135),
+// so a stale edge is visible instead of silently dying in the deferred queue.
+func printSkippedRelationWarnings(result *engramsync.ImportResult) {
+	for _, warning := range result.SkippedRelations {
+		fmt.Printf("  WARNING skipped %s\n", warning)
+	}
 }
 
 func printSyncUsage() {
