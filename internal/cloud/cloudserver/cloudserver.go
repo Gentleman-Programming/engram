@@ -93,6 +93,38 @@ const dashboardSessionCookieName = "engram_dashboard_token"
 
 var ErrDashboardSessionCodecRequired = errors.New("dashboard session codec is required for dashboard auth")
 
+// Request-auth audit vocabulary (engram#1134): every rejected sync/admin
+// request authentication is audited best-effort into cloud_auth_audit_log via
+// the same AdminIdentityStore sink the dashboard login/bootstrap flows use.
+const (
+	authAuditActionRequestAuth            = "sync.auth"
+	authAuditActorSourceRequest           = "request"
+	authAuditReasonMissingHeader          = "missing_header"
+	authAuditReasonMalformedBearer        = "malformed_bearer"
+	authAuditReasonUnknownToken           = "unknown_token"
+	authAuditReasonTokenRevoked           = "token_revoked"
+	authAuditReasonPrincipalDisabled      = "principal_disabled"
+	authAuditReasonTokenPrincipalMismatch = "token_principal_mismatch"
+	authAuditReasonPepperMissing          = "pepper_missing"
+	authAuditReasonResolverError          = "resolver_error"
+	authAuditReasonAuthorizeError         = "authorize_error"
+)
+
+// requestAuthAuditInsertTimeout bounds the best-effort insert after a rejected
+// request auth: the rejection is already decided, so a stalled audit insert
+// must not hold the 401 response hostage while it waits.
+const requestAuthAuditInsertTimeout = 3 * time.Second
+
+// Bearer-extraction failure sentinels. bearerTokenFromRequest's error text is
+// part of the 401 response body, so the messages stay unchanged; wrapping them
+// as sentinels lets the audit reason mapping classify rejections with
+// errors.Is instead of string matching.
+var (
+	errMissingAuthorizationHeader = errors.New("missing authorization header")
+	errAuthorizationNotBearer     = errors.New("authorization must use Bearer token")
+	errBearerTokenRequired        = errors.New("bearer token is required")
+)
+
 func WithSyncStatusProvider(provider dashboard.SyncStatusProvider) Option {
 	return func(s *CloudServer) {
 		s.syncStatus = provider
@@ -319,11 +351,13 @@ func (s *CloudServer) authenticateRequest(w http.ResponseWriter, r *http.Request
 	if s.principalAuth != nil {
 		token, err := bearerTokenFromRequest(r)
 		if err != nil {
+			s.recordRequestAuthDeniedAudit(r, requestAuthDenyReason(err))
 			http.Error(w, fmt.Sprintf("unauthorized: %v", err), http.StatusUnauthorized)
 			return r, false
 		}
 		principal, err := s.principalAuth.ResolveBearerToken(r.Context(), token)
 		if err != nil {
+			s.recordRequestAuthDeniedAudit(r, requestAuthDenyReason(err))
 			http.Error(w, fmt.Sprintf("unauthorized: %v", err), http.StatusUnauthorized)
 			return r, false
 		}
@@ -331,6 +365,7 @@ func (s *CloudServer) authenticateRequest(w http.ResponseWriter, r *http.Request
 	}
 	if s.auth != nil {
 		if err := s.auth.Authorize(r); err != nil {
+			s.recordRequestAuthDeniedAudit(r, authAuditReasonAuthorizeError)
 			http.Error(w, fmt.Sprintf("unauthorized: %v", err), http.StatusUnauthorized)
 			return r, false
 		}
@@ -338,18 +373,77 @@ func (s *CloudServer) authenticateRequest(w http.ResponseWriter, r *http.Request
 	return r, true
 }
 
+// requestAuthDenyReason maps a request-auth rejection to its audit
+// reason_code. Resolver errors are classified with errors.Is because
+// ResolveBearerToken wraps the sentinel classes (e.g.
+// fmt.Errorf("%w: token principal mismatch", ErrInvalidPrincipal)).
+func requestAuthDenyReason(err error) string {
+	switch {
+	case errors.Is(err, errMissingAuthorizationHeader), errors.Is(err, errBearerTokenRequired):
+		return authAuditReasonMissingHeader
+	case errors.Is(err, errAuthorizationNotBearer):
+		return authAuditReasonMalformedBearer
+	case errors.Is(err, cloudauth.ErrUnknownToken):
+		return authAuditReasonUnknownToken
+	case errors.Is(err, cloudauth.ErrTokenRevoked):
+		return authAuditReasonTokenRevoked
+	case errors.Is(err, cloudauth.ErrPrincipalDisabled):
+		return authAuditReasonPrincipalDisabled
+	case errors.Is(err, cloudauth.ErrInvalidPrincipal):
+		return authAuditReasonTokenPrincipalMismatch
+	case errors.Is(err, cloudauth.ErrTokenPepperRequired):
+		return authAuditReasonPepperMissing
+	default:
+		return authAuditReasonResolverError
+	}
+}
+
+// recordRequestAuthDeniedAudit emits the per-rejection server log line and
+// records a best-effort cloud_auth_audit_log row for a rejected request
+// authentication (engram#1134). The rejection has already happened, so the
+// bounded insert budget and any audit failure never change the 401: failures
+// are logged and dropped, matching the dashboard login best-effort convention
+// (recordDashboardLoginAuditBestEffort). The insert budget is detached from
+// r.Context() on purpose: a disconnecting client cancels the request context,
+// and that cancellation must not drop the already-decided denied-audit row.
+// Successful request auth is intentionally unaudited per request (volume; the
+// dashboard login flow audits its own successes). The actor principal stays
+// null (no principal was resolved); ActorSource "request" labels the
+// non-dashboard actor shape, mirroring the audit-only sentinel convention
+// documented for authAuditActorSourceUnauthenticated.
+func (s *CloudServer) recordRequestAuthDeniedAudit(r *http.Request, reason string) {
+	log.Printf("[engram-cloud] request auth denied: %s (reason=%s)", r.RemoteAddr, reason)
+	if s.adminIdentity == nil {
+		log.Printf("cloudserver: admin identity store is not configured; request auth audit skipped")
+		return
+	}
+	// Deliberately not r.Context(): the client may have disconnected, and the
+	// denied-audit row must still be attempted within its own bounded budget.
+	insertCtx, cancel := context.WithTimeout(context.Background(), requestAuthAuditInsertTimeout)
+	defer cancel()
+	if err := s.adminIdentity.InsertAuthAuditEvent(insertCtx, cloudstore.AuthAuditEvent{
+		ActorSource: authAuditActorSourceRequest,
+		Action:      authAuditActionRequestAuth,
+		Outcome:     authAuditOutcomeDenied,
+		ReasonCode:  reason,
+		Metadata:    map[string]any{"source": authAuditActorSourceRequest},
+	}); err != nil {
+		log.Printf("[engram-cloud] request auth audit insert failed (best-effort): %v", err)
+	}
+}
+
 func bearerTokenFromRequest(r *http.Request) (string, error) {
 	header := strings.TrimSpace(r.Header.Get("Authorization"))
 	if header == "" {
-		return "", fmt.Errorf("missing authorization header")
+		return "", errMissingAuthorizationHeader
 	}
 	parts := strings.Fields(header)
 	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-		return "", fmt.Errorf("authorization must use Bearer token")
+		return "", errAuthorizationNotBearer
 	}
 	token := strings.TrimSpace(parts[1])
 	if token == "" {
-		return "", fmt.Errorf("bearer token is required")
+		return "", errBearerTokenRequired
 	}
 	return token, nil
 }
