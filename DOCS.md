@@ -985,6 +985,8 @@ When `project` is omitted, context is scoped to the resolved current project (pr
 
 Scope values accepted by the `scope` parameter: `project` (default), `personal`, `global`. When `scope: personal` is passed without an explicit `project` override, the project filter is cleared and personal observations are returned across all projects (cross-project personal scope).
 
+MCP `mem_context` uses a 16 KiB default budget for the complete tool result and caps `max_bytes` at 64 KiB. `max_bytes` must be a positive integral number; absent, mistyped, non-positive, `NaN`, and fractional values fall back to the 16 KiB default. It includes at most 20 pinned observations by default. When the complete result exceeds its budget, truncation is UTF-8-safe and appends a visible `[truncated]` marker when the marker fits. `compact=true` removes inline content previews from pinned and recent-observation bullets, retaining their type and title. These MCP rules are distinct from the HTTP `GET /context` behavior documented above.
+
 ### mem_stats
 
 Show memory system statistics — sessions, observations, prompts, projects.
