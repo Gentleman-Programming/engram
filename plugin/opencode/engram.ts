@@ -329,12 +329,11 @@ export const Engram: Plugin = async (ctx) => {
     return knownSessions.has(sessionId) && parentSessions.get(sessionId) === null
   }
 
-  async function closeDeletedRootSession(sessionId: string): Promise<boolean> {
+  // Best-effort end of one Engram session. One POST per session lifetime:
+  // closedSessions dedups confirmed closures, closingSessions dedups calls
+  // that are still in flight.
+  async function endSessionInEngram(sessionId: string): Promise<boolean> {
     if (closedSessions.has(sessionId)) return true
-    if (!deletedRootSessions.has(sessionId)) {
-      if (!isKnownAuthoritativeRootSession(sessionId)) return false
-      deletedRootSessions.add(sessionId)
-    }
 
     const inFlight = closingSessions.get(sessionId)
     if (inFlight) return inFlight
@@ -350,6 +349,29 @@ export const Engram: Plugin = async (ctx) => {
     })
     closingSessions.set(sessionId, close)
     return close
+  }
+
+  async function closeDeletedRootSession(sessionId: string): Promise<boolean> {
+    if (closedSessions.has(sessionId)) return true
+    if (!deletedRootSessions.has(sessionId)) {
+      if (!isKnownAuthoritativeRootSession(sessionId)) return false
+      deletedRootSessions.add(sessionId)
+    }
+
+    return endSessionInEngram(sessionId)
+  }
+
+  // End any session this plugin registered in Engram. Confirmed roots keep
+  // the deletedRootSessions retry discipline; every other known
+  // registration (late-reclassified children, legacy misregistrations)
+  // ends exactly once. Unregistered sessions have nothing to close.
+  async function closeKnownSession(sessionId: string): Promise<boolean> {
+    if (closedSessions.has(sessionId)) return true
+    if (!knownSessions.has(sessionId) && !deletedRootSessions.has(sessionId)) return false
+    if (isKnownAuthoritativeRootSession(sessionId) || deletedRootSessions.has(sessionId)) {
+      return closeDeletedRootSession(sessionId)
+    }
+    return endSessionInEngram(sessionId)
   }
 
   function cacheSessionInfo(info: { id?: unknown; parentID?: unknown; projectID?: unknown } | undefined): boolean {
@@ -528,8 +550,10 @@ export const Engram: Plugin = async (ctx) => {
   return {
 		dispose: async () => {
 			if (!localReady) return
-      const rootSessionIDs = [...knownSessions].filter(isKnownAuthoritativeRootSession)
-      await Promise.all(rootSessionIDs.map(closeDeletedRootSession))
+      // Every known registration owns an Engram lifecycle (#1131) —
+      // including children misregistered before their parentID was known.
+      // Children that were never registered remain untouched.
+      await Promise.all([...knownSessions].map(closeKnownSession))
     },
 
     // ─── Event Listeners ───────────────────────────────────────────
@@ -552,6 +576,16 @@ export const Engram: Plugin = async (ctx) => {
         if (isSubAgent) subAgentSessions.add(sessionId)
         else subAgentSessions.delete(sessionId)
 
+        // Issue #1131: a session registered as a root that now reveals a
+        // parentID was misregistered. End its Engram session so no open row
+        // blocks directory-based session resolution, and drop it from
+        // knownSessions so nothing re-registers it. It stays tracked in
+        // subAgentSessions; sessions never registered have nothing to close.
+        if (isSubAgent && knownSessions.has(sessionId)) {
+          await closeKnownSession(sessionId)
+          knownSessions.delete(sessionId)
+        }
+
         if (event.type === "session.created" && sessionId && !isSubAgent) {
           await ensureSession(sessionId)
         }
@@ -563,9 +597,10 @@ export const Engram: Plugin = async (ctx) => {
         const info = (event.properties as any)?.info
         const sessionId = info?.id
         if (sessionId) {
-          // Only a registered, event-validated root owns an Engram lifecycle.
+          // Any known registration owns an Engram lifecycle (#1131):
+          // confirmed roots keep the deletedRootSessions retry discipline.
           // Await the best-effort endpoint before invalidating local ownership.
-          await closeDeletedRootSession(sessionId)
+          await closeKnownSession(sessionId)
           invalidateSessionTree(sessionId)
         }
       }
