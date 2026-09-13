@@ -4504,6 +4504,28 @@ func TestStoreHasObservationBySyncIDAnyState(t *testing.T) {
 	}
 }
 
+// TestStoreHasObservationBySyncIDAnyStateClosedStore pins the error path: on a
+// closed store the lookup must fail with the wrapped, identifiable message so
+// callers can tell an infrastructure fault apart from a genuinely absent
+// sync_id instead of reading an error as "not found".
+func TestStoreHasObservationBySyncIDAnyStateClosedStore(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	known, err := s.HasObservationBySyncIDAnyState("obs-after-close")
+	if err == nil {
+		t.Fatal("expected HasObservationBySyncIDAnyState on a closed store to fail")
+	}
+	if known {
+		t.Fatal("expected no observation to be reported when the lookup fails")
+	}
+	if !strings.Contains(err.Error(), "check observation sync_id") {
+		t.Fatalf("error = %v, want it to contain %q", err, "check observation sync_id")
+	}
+}
+
 func TestApplyPulledMutationClearsDegradedReasonFields(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.MarkSyncBlocked(DefaultSyncTargetKey, "blocked_unenrolled", "project not enrolled"); err != nil {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 )
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -1242,6 +1243,15 @@ func TestEnqueueDeferredRelationReArmsDeadRow(t *testing.T) {
 		enqueueAndDriveToDead(t, s, mut)
 		deadFirstSeen, deadLastError, _ := readDiagnostics(t, s, mut.EntityKey)
 
+		// Freeze last_attempted_at to a sentinel: the replays above already left
+		// it non-empty, so only a fresh, well-formed timestamp written by the
+		// re-enqueue itself proves the bump.
+		const sentinel = "2000-01-01 00:00:00"
+		sentinelAt := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+		if _, err := s.db.Exec(`UPDATE sync_apply_deferred SET last_attempted_at = ? WHERE sync_id = ?`, sentinel, mut.EntityKey); err != nil {
+			t.Fatalf("freeze last_attempted_at: %v", err)
+		}
+
 		if err := s.EnqueueDeferredRelation(DefaultSyncTargetKey, mut); err != nil {
 			t.Fatalf("re-enqueue: %v", err)
 		}
@@ -1259,8 +1269,10 @@ func TestEnqueueDeferredRelationReArmsDeadRow(t *testing.T) {
 		if len(rows) != 1 || rows[0].SyncID != mut.EntityKey || rows[0].RetryCount != 0 {
 			t.Fatalf("re-armed row = %+v, want the same relation with retry_count 0", rows)
 		}
-		if firstSeen, lastErr, lastAttempted := readDiagnostics(t, s, mut.EntityKey); firstSeen != deadFirstSeen || lastErr != deadLastError || lastAttempted == "" {
-			t.Fatalf("re-armed diagnostics = (%q, %q, %q), want first_seen_at=%q and last_error=%q preserved, last_attempted_at bumped", firstSeen, lastErr, lastAttempted, deadFirstSeen, deadLastError)
+		firstSeen, lastErr, lastAttempted := readDiagnostics(t, s, mut.EntityKey)
+		bumpedAt, parseErr := time.Parse("2006-01-02 15:04:05", lastAttempted)
+		if firstSeen != deadFirstSeen || lastErr != deadLastError || parseErr != nil || !bumpedAt.After(sentinelAt) {
+			t.Fatalf("re-armed diagnostics = (%q, %q, %q), want first_seen_at=%q and last_error=%q preserved and last_attempted_at a fresh timestamp after %q", firstSeen, lastErr, lastAttempted, deadFirstSeen, deadLastError, sentinel)
 		}
 	})
 
@@ -1295,6 +1307,30 @@ func TestEnqueueDeferredRelationReArmsDeadRow(t *testing.T) {
 		}
 		if got := countRelationRows(t, s, mut.EntityKey); got != 0 {
 			t.Fatalf("dead relation must stay unapplied, got %d rows", got)
+		}
+	})
+
+	t.Run("re-enqueue does not re-arm a dead row when entity key and payload sync_id disagree", func(t *testing.T) {
+		s, _, _ := setupSyncApplyStore(t)
+		mut := newMutation(t, newSyncID("rel-rearm-mismatch"))
+		enqueueAndDriveToDead(t, s, mut)
+		// The dead row is keyed by the relation's own sync_id. A delivery that
+		// claims that key while its payload encodes a different relation is not
+		// the expired retry state's own edge, so it must not resurrect the row.
+		foreign := newMutation(t, newSyncID("rel-rearm-foreign"))
+		foreign.EntityKey = mut.EntityKey
+		if err := s.EnqueueDeferredRelation(DefaultSyncTargetKey, foreign); err != nil {
+			t.Fatalf("re-enqueue with disagreeing payload sync_id: %v", err)
+		}
+		if status, retryCount := getDeferredRow(t, s, mut.EntityKey); status != "dead" || retryCount != 5 {
+			t.Fatalf("row after disagreeing re-enqueue = (%q, %d), want the dead row untouched at (dead, 5)", status, retryCount)
+		}
+		deferred, dead, err := s.CountDeferredAndDeadForScope(DefaultSyncTargetKey, "proj-enqueue-rearm")
+		if err != nil {
+			t.Fatalf("CountDeferredAndDeadForScope: %v", err)
+		}
+		if deferred != 0 || dead != 1 {
+			t.Fatalf("after disagreeing re-enqueue: deferred=%d dead=%d, want no re-armed deferred row", deferred, dead)
 		}
 	})
 

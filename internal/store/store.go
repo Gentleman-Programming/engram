@@ -6123,8 +6123,9 @@ func (s *Store) recordRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutat
 // apply redelivery always passes false and keeps the historical rule that a
 // dead row stays dead. Only EnqueueDeferredRelation passes true, and even then
 // a dead row is re-armed only when the computed identity is the relation's own
-// sync_id — the identity deferred retry state is keyed on, so a dead row there
-// can only be retry state that expired at ReplayDeferredForScope's retry cap.
+// sync_id — the identity deferred retry state is keyed on — and the payload's
+// decoded sync_id agrees with that identity, so a dead row there can only be
+// retry state that expired at ReplayDeferredForScope's retry cap.
 // Re-arming resets retry_count to 0 (a fresh bounded replay window), preserves
 // first_seen_at, keeps last_error as diagnostic history until the next replay
 // overwrites it, and bumps last_attempted_at as any write does. Rows under
@@ -6160,10 +6161,13 @@ func (s *Store) writeRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutati
 	syncID := relationApplyFailureSyncID(status, targetKey, mutation)
 
 	// Re-arm applies only when the computed identity is the relation's own
-	// sync_id (a non-blank entity key under the deferred status). Hash-keyed
+	// sync_id (a non-blank entity key under the deferred status) and the payload
+	// agrees: its decoded sync_id must equal that identity, so a mutation naming
+	// one relation in its key while encoding another in its payload can never
+	// resurrect the dead retry row keyed by that name. Hash-keyed
 	// identities — blank entity keys and every status='dead' write — land on
 	// dead-evidence rows that stay dead no matter which caller writes.
-	rearmDead := allowDeadRearm && syncID != "" && syncID == strings.TrimSpace(mutation.EntityKey)
+	rearmDead := allowDeadRearm && syncID != "" && syncID == strings.TrimSpace(mutation.EntityKey) && payloadSyncID == syncID
 	rearmFlag := 0
 	if rearmDead {
 		rearmFlag = 1
