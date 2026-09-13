@@ -83,12 +83,19 @@ else
   ENGRAM_PORT=7437
 fi
 ENGRAM_SOCKET="$(trim_whitespace "${ENGRAM_SOCKET:-}")"
-if [ -n "$ENGRAM_SOCKET" ]; then
-  ENGRAM_URL="http://localhost"
-  ENGRAM_CURL_TRANSPORT=(--unix-socket "$ENGRAM_SOCKET")
-else
-  ENGRAM_URL="http://127.0.0.1:${ENGRAM_PORT}"
+ENGRAM_EXTERNAL_URL="$(trim_whitespace "${ENGRAM_URL:-}")"
+if [ -n "$ENGRAM_EXTERNAL_URL" ]; then
+  ENGRAM_URL="$ENGRAM_EXTERNAL_URL"
   ENGRAM_CURL_TRANSPORT=()
+  ENGRAM_MANAGED_LOCAL=0
+elif [ -n "$ENGRAM_SOCKET" ]; then
+	ENGRAM_URL="http://localhost"
+	ENGRAM_CURL_TRANSPORT=(--unix-socket "$ENGRAM_SOCKET")
+	ENGRAM_MANAGED_LOCAL=1
+else
+	ENGRAM_URL="http://127.0.0.1:${ENGRAM_PORT}"
+	ENGRAM_CURL_TRANSPORT=()
+	ENGRAM_MANAGED_LOCAL=1
 fi
 
 engram_curl() {
@@ -98,6 +105,12 @@ engram_curl() {
     printf '%s\n' "warning: Engram Unix-socket request failed; check that the server is running and ENGRAM_SOCKET is configured." >&2
   fi
   return "$status"
+}
+
+engram_health_matches_instance() {
+  local expected="$1" response
+  response=$(engram_curl -sf "${ENGRAM_URL}/health" --max-time 1 2>/dev/null) || return 1
+  printf '%s' "$response" | jq -e --arg expected "$expected" '.instance_id? == $expected' >/dev/null 2>&1
 }
 
 # Resolve the project through the server, which owns project policy.

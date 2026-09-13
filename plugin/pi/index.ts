@@ -6,7 +6,7 @@
  * are configured separately through pi-mcp-adapter and `engram mcp`.
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -353,7 +353,14 @@ async function ensureSessionBestEffort(sessionId: string, sessionProject = proje
 // "refused" means we saw proof that nothing is listening; "indeterminate" means the probe
 // told us nothing either way. Only "ready" is proof that a server is answering, so nothing
 // but "ready" may be read as "a server is already there".
-type EngramHealth = "ready" | "refused" | "indeterminate";
+type EngramHealth = "ready" | "refused" | "indeterminate" | "foreign";
+
+function localInstanceID(timeoutMs = ENGRAM_STARTUP_TIMEOUT_MS): string {
+  const result = spawnSync(ENGRAM_BIN, ["instance-id"], { encoding: "utf8", timeout: Math.max(1, timeoutMs) });
+  const id = result.status === 0 ? result.stdout.trim() : "";
+  if (!/^[a-f0-9]{32}$/.test(id)) throw new Error("Engram could not resolve its local server identity");
+  return id;
+}
 
 // Node reports a refused localhost connection through several shapes: a bare Error whose
 // message is the refusal, a wrapper whose `cause` carries `code`, and — when the host
@@ -373,12 +380,15 @@ function isConnectionRefusedError(error: unknown): boolean {
   return (error instanceof Error && error.message === "connection refused") || hasConnectionRefusedCode(error);
 }
 
-async function probeEngramHealth(): Promise<EngramHealth> {
+async function probeEngramHealth(expectedID = ""): Promise<EngramHealth> {
   try {
     const res = await fetch(`${ENGRAM_URL}/health`, {
       signal: AbortSignal.timeout(500),
     });
-    return res.ok ? "ready" : "indeterminate";
+    if (!res.ok) return "indeterminate";
+    if (!expectedID) return "ready";
+    const health = await res.json() as { instance_id?: unknown };
+    return health.instance_id === expectedID ? "ready" : "foreign";
   } catch (error) {
     if (isTimeoutError(error)) return "indeterminate";
     if (isConnectionRefusedError(error)) {
@@ -388,9 +398,11 @@ async function probeEngramHealth(): Promise<EngramHealth> {
   }
 }
 
-async function isEngramRunning(): Promise<boolean> {
-  return (await probeEngramHealth()) === "ready";
+async function isEngramRunning(expectedID = ""): Promise<boolean> {
+	return (await probeEngramHealth(expectedID)) === "ready";
 }
+
+let localEngramInstanceID = "";
 
 function waitUnref(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -423,7 +435,7 @@ function scheduleEngramSelfHeal(ctx: MemoryToolContext): void {
     try {
       for (let attempt = 0; attempt < ENGRAM_SELF_HEAL_MAX_ATTEMPTS; attempt += 1) {
         await waitUnref(ENGRAM_SELF_HEAL_INTERVAL_MS);
-        if (await isEngramRunning()) {
+		if (await isEngramRunning(localEngramInstanceID)) {
           for (const pending of engramSelfHealContexts.values()) pending.ui?.setStatus?.("engram", undefined);
           return;
         }
@@ -544,10 +556,10 @@ function waitCancellable(ms: number, signal: AbortSignal): Promise<void> {
 
 // The deadline is absolute and passed in, so a spawn attempt and the fallback wait that
 // follows it share one startup budget instead of each starting a fresh one.
-async function waitForEngramReadiness(signal: AbortSignal, deadline: number): Promise<void> {
+async function waitForEngramReadiness(signal: AbortSignal, deadline: number, expectedID = ""): Promise<void> {
   while (Date.now() < deadline) {
     if (signal.aborted) throw new Error(`Engram startup readiness wait for ${ENGRAM_URL} was cancelled`);
-    if (await probeEngramHealth() === "ready") return;
+    if (await probeEngramHealth(expectedID) === "ready") return;
     // The probe itself can outlive the abort, so re-check before sleeping again.
     if (signal.aborted) throw new Error(`Engram startup readiness wait for ${ENGRAM_URL} was cancelled`);
     await waitCancellable(ENGRAM_STARTUP_POLL_MS, signal);
@@ -567,7 +579,7 @@ function stopAbandonedChild(proc: ChildProcess | undefined): void {
   proc.unref();
 }
 
-function spawnAndWaitForEngram(deadline: number): Promise<void> {
+function spawnAndWaitForEngram(deadline: number, expectedID = ""): Promise<void> {
   return new Promise((resolvePromise, rejectPromise) => {
     let proc: ChildProcess | undefined;
     let settled = false;
@@ -611,7 +623,7 @@ function spawnAndWaitForEngram(deadline: number): Promise<void> {
     proc.once("error", onError);
     proc.once("exit", onExit);
     proc.once("spawn", () => {
-      void waitForEngramReadiness(readiness.signal, deadline).then(
+      void waitForEngramReadiness(readiness.signal, deadline, expectedID).then(
         () => settle(),
         (error) => settle(error instanceof Error ? error : new Error(String(error))),
       );
@@ -622,8 +634,10 @@ function spawnAndWaitForEngram(deadline: number): Promise<void> {
 async function initializeEngramServer(): Promise<void> {
   if (CONFIGURED_ENGRAM_URL !== undefined) return;
   const deadline = Date.now() + ENGRAM_STARTUP_TIMEOUT_MS;
-  const health = await probeEngramHealth();
+  const instanceID = localEngramInstanceID = localInstanceID(Math.max(1, deadline - Date.now()));
+  const health = await probeEngramHealth(instanceID);
   if (health === "ready") return;
+  if (health === "foreign") throw new Error(`Engram server ownership mismatch at ${ENGRAM_URL}`);
 
   // Only "ready" proves a server is answering. Every other outcome — a definitive refusal, an
   // aborted probe, a DNS failure, an error shape we do not recognize — means we have no
@@ -631,7 +645,7 @@ async function initializeEngramServer(): Promise<void> {
   // instead is what let a cold machine burn the whole startup budget polling a port nobody
   // was ever going to bind.
   try {
-    await spawnAndWaitForEngram(deadline);
+    await spawnAndWaitForEngram(deadline, instanceID);
   } catch (error) {
     // An inconclusive probe leaves room for another Pi process to already own the port, which
     // is exactly what makes our child fail. Give that instance the rest of the shared
@@ -640,7 +654,7 @@ async function initializeEngramServer(): Promise<void> {
     if (health !== "indeterminate") throw error;
     const readiness = new AbortController();
     try {
-      await waitForEngramReadiness(readiness.signal, deadline);
+      await waitForEngramReadiness(readiness.signal, deadline, instanceID);
     } catch {
       // The spawn failure is the actionable one; a readiness timeout only restates it.
       throw error;

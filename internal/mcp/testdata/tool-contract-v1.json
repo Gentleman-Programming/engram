@@ -25,6 +25,8 @@
     "mem_context": {
       "type": ["object"],
       "properties": {
+        "compact": {"type":["boolean"],"additionalProperties":true},
+        "max_bytes": {"type":["number"],"additionalProperties":true},
         "project": {"type":["string"],"additionalProperties":true},
         "scope": {"type":["string"],"additionalProperties":true}
       },

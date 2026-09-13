@@ -293,8 +293,14 @@ func (e *Exporter) Export() (*ExportResult, error) {
 			continue
 		}
 		hubPath := filepath.Join(sessionsDir, sessionID+".md")
+		cleanSessionsDir := filepath.Clean(sessionsDir)
+		cleanHubPath := filepath.Clean(hubPath)
+		if !strings.HasPrefix(cleanHubPath, cleanSessionsDir+string(filepath.Separator)) {
+			result.Errors = append(result.Errors, fmt.Errorf("unsafe session hub path rejected (would escape sessions dir): %s", cleanHubPath))
+			continue
+		}
 		content := SessionHubMarkdown(sessionID, refs)
-		if err := os.WriteFile(hubPath, []byte(content), 0644); err != nil {
+		if err := writeSessionHub(sessionsDir, sessionID+".md", content); err != nil {
 			result.Errors = append(result.Errors, fmt.Errorf("write session hub %s: %w", hubPath, err))
 			continue
 		}
@@ -326,6 +332,29 @@ func (e *Exporter) Export() (*ExportResult, error) {
 	}
 
 	return result, nil
+}
+
+func writeSessionHub(sessionsDir, name, content string) error {
+	root, err := os.OpenRoot(sessionsDir)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = root.Close()
+	}()
+
+	if err := root.MkdirAll(filepath.Dir(name), 0755); err != nil {
+		return fmt.Errorf("mkdir session hub parent: %w", err)
+	}
+	file, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	if _, err := file.WriteString(content); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
 }
 
 // obsToRef converts a store.Observation to a lightweight ObsRef for hub building.

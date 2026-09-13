@@ -261,6 +261,156 @@ func TestMCPTruncationMetadataKeepsSchemasAndNormalResponsesCompatible(t *testin
 	assertTruncationMetadata(t, body, len("short"), s.MaxObservationLength(), false)
 }
 
+func TestHandleSaveAbsolutePathWarning(t *testing.T) {
+	const warningText = "⚠ WARNING: Content contains an absolute filesystem path that may not be portable across machines. Use a repository-relative path instead."
+
+	tests := []struct {
+		name          string
+		content       string
+		wantWarning   bool
+		wantPersisted string
+	}{
+		{
+			name:          "POSIX home path",
+			content:       "Saved under /home/a.",
+			wantWarning:   true,
+			wantPersisted: "Saved under /home/a.",
+		},
+		{
+			name:          "POSIX temporary path",
+			content:       "Saved under /tmp/x.",
+			wantWarning:   true,
+			wantPersisted: "Saved under /tmp/x.",
+		},
+		{
+			name:          "Windows backslash drive path",
+			content:       `Saved under C:\Users\a.`,
+			wantWarning:   true,
+			wantPersisted: `Saved under C:\Users\a.`,
+		},
+		{
+			name:          "Windows slash drive path",
+			content:       "Saved under C:/Users/a.",
+			wantWarning:   true,
+			wantPersisted: "Saved under C:/Users/a.",
+		},
+		{
+			name:          "UNC path",
+			content:       `Saved under \\server\share.`,
+			wantWarning:   true,
+			wantPersisted: `Saved under \\server\share.`,
+		},
+		{
+			name:          "path in Markdown code",
+			content:       "```go\npath := \"/tmp/x\"\n```",
+			wantWarning:   true,
+			wantPersisted: "```go\npath := \"/tmp/x\"\n```",
+		},
+		{
+			name:          "HTTPS URI",
+			content:       "https://example.com/home/a",
+			wantPersisted: "https://example.com/home/a",
+		},
+		{
+			name:          "HTTPS URI with Unicode path segment",
+			content:       "https://example.com/é/tmp",
+			wantPersisted: "https://example.com/é/tmp",
+		},
+		{
+			name:          "HTTPS URI with canonically decomposed Unicode path segment",
+			content:       "https://example.com/e\u0301/tmp",
+			wantPersisted: "https://example.com/e\u0301/tmp",
+		},
+		{
+			name:          "file URI",
+			content:       "file:///tmp/x",
+			wantPersisted: "file:///tmp/x",
+		},
+		{
+			name:          "authority-less file URI",
+			content:       "file:/tmp/x",
+			wantPersisted: "file:/tmp/x",
+		},
+		{
+			name:          "mixed-case authority-less file URI",
+			content:       "FiLe:/tmp/x",
+			wantPersisted: "FiLe:/tmp/x",
+		},
+		{
+			name:          "current-directory relative path",
+			content:       "./x",
+			wantPersisted: "./x",
+		},
+		{
+			name:          "parent-directory relative path",
+			content:       "../x",
+			wantPersisted: "../x",
+		},
+		{
+			name:          "relative path",
+			content:       "foo/bar",
+			wantPersisted: "foo/bar",
+		},
+		{
+			name:          "relative path with Unicode segment",
+			content:       "src/é/config.yaml",
+			wantPersisted: "src/é/config.yaml",
+		},
+		{
+			name:          "relative path with canonically decomposed Unicode segment",
+			content:       "src/e\u0301/config.yaml",
+			wantPersisted: "src/e\u0301/config.yaml",
+		},
+		{
+			name:          "drive-relative path",
+			content:       "C:x",
+			wantPersisted: "C:x",
+		},
+		{
+			name:          "POSIX root path",
+			content:       "/",
+			wantWarning:   true,
+			wantPersisted: "/",
+		},
+		{
+			name:          "private absolute path",
+			content:       "Saved <private>/home/a</private> safely.",
+			wantPersisted: "Saved [REDACTED] safely.",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newMCPTestStore(t)
+			res, err := handleSave(s, MCPConfig{}, nil)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+				"title":   "Absolute path warning",
+				"content": tt.content,
+				"project": "engram",
+			}}})
+			if err != nil || res.IsError {
+				t.Fatalf("mem_save failed: err=%v result=%q", err, callResultText(t, res))
+			}
+
+			body := callResultJSON(t, res)
+			result, _ := body["result"].(string)
+			if got := strings.Contains(result, "⚠ WARNING: Content contains an absolute filesystem path"); got != tt.wantWarning {
+				t.Fatalf("warning presence = %v, want %v; result=%q", got, tt.wantWarning, result)
+			}
+			if tt.wantWarning && !strings.Contains(result, warningText) {
+				t.Fatalf("warning guidance = %q, want %q", result, warningText)
+			}
+
+			observations, err := s.RecentObservations("engram", "project", 1)
+			if err != nil {
+				t.Fatalf("recent observations: %v", err)
+			}
+			if len(observations) != 1 || observations[0].Content != tt.wantPersisted {
+				t.Fatalf("persisted observations = %#v, want content %q", observations, tt.wantPersisted)
+			}
+		})
+	}
+}
+
 func TestNewServerRegistersTools(t *testing.T) {
 	s := newMCPTestStore(t)
 	srv := NewServer(s)
@@ -942,7 +1092,7 @@ func TestOmittedSessionIDRejectsAmbiguousActiveSessions(t *testing.T) {
 				t.Fatal("expected ambiguous omitted session_id to fail")
 			}
 			got := callResultText(t, res)
-			for _, want := range []string{"multiple active runtime sessions", "provide session_id", "end other active matching sessions"} {
+			for _, want := range []string{"multiple active runtime sessions", "provide session_id", "end other active matching sessions", `engram save "TITLE" "CONTENT" --project PROJECT --type TYPE --topic TOPIC_KEY`, "writes to an independent project manual-save session and does not bind it to this MCP session"} {
 				if !strings.Contains(got, want) {
 					t.Fatalf("expected actionable ambiguity error containing %q, got %q", want, got)
 				}

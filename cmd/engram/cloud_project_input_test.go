@@ -87,6 +87,40 @@ func TestNormalizeCloudCLIProjectInputRejectsMalformedEscapes(t *testing.T) {
 	}
 }
 
+// TestCloudCLIEnrollRejectsReservedInboxProject proves the CLI surfaces the
+// store-level rejection of the reserved cloud inbox project name and leaves
+// enrollment empty.
+func TestCloudCLIEnrollRejectsReservedInboxProject(t *testing.T) {
+	stubExitWithPanic(t)
+	cfg := testConfig(t)
+	withArgs(t, "engram", "cloud", "enroll", "inbox")
+
+	_, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloudEnroll(cfg) })
+	if code, ok := recovered.(exitCode); !ok || int(code) != 1 {
+		t.Fatalf("expected exit code 1, got %v", recovered)
+	}
+	if !strings.Contains(stderr, "reserved for the cloud inbox") {
+		t.Fatalf("expected reserved-name rejection on stderr, got %q", stderr)
+	}
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	enrolled, err := s.IsProjectEnrolled("inbox")
+	if err != nil {
+		t.Fatalf("IsProjectEnrolled(inbox): %v", err)
+	}
+	if enrolled {
+		t.Fatal("the reserved inbox project name must never enroll")
+	}
+}
+
 func TestCloudCLICommandsRejectMalformedProjectEscapes(t *testing.T) {
 	stubExitWithPanic(t)
 	cfg := testConfig(t)

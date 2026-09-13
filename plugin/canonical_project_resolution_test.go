@@ -152,7 +152,7 @@ func runLifecycleSessionStart(t *testing.T, bashPath, agent, serverURL, input st
 	}
 	adapterPath := filepath.Join(repoRoot(t), "plugin", agent, "scripts", "session-start.sh")
 	run := exec.Command(bashPath, adapterPath)
-	run.Env = append(os.Environ(), "ENGRAM_PORT="+parsedURL.Port())
+	run.Env = append(os.Environ(), "ENGRAM_URL="+serverURL, "ENGRAM_PORT="+parsedURL.Port())
 	run.Stdin = strings.NewReader(input)
 	if output, err := run.CombinedOutput(); err != nil {
 		t.Fatalf("run %s session start: %v: %s", agent, err, output)

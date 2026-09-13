@@ -192,6 +192,9 @@ func cmdDoctorRepair(cfg store.Config) {
 			failDoctorRepair(err.Error())
 			return
 		}
+		if mode == diagnostic.RepairModeApply {
+			report.Applied = len(repairs.Actions) > 0 || len(report.Actions) > 0 || len(sourceRepairs.Actions) > 0
+		}
 		writeDoctorRepairJSON(struct {
 			store.SyncMutationQuarantineReport
 			Repairs                []store.SyncMutationTitleRepairAction      `json:"repairs"`

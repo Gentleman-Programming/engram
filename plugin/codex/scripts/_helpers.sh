@@ -2,6 +2,12 @@
 # Engram — Shared helpers for Codex hooks
 # WARNING: Do not read from stdin here — scripts source this before reading their hook input.
 
+engram_health_matches_instance() {
+  local expected="$1" response
+  response=$(curl -sf "${ENGRAM_URL}/health" --max-time 1 2>/dev/null) || return 1
+  printf '%s' "$response" | jq -e --arg expected "$expected" '.instance_id? == $expected' >/dev/null 2>&1
+}
+
 # Resolve the project through the server, which owns project policy.
 # An unavailable, malformed, empty, or ambiguous response is not a project.
 resolve_project() {

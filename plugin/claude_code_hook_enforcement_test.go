@@ -27,7 +27,8 @@ var powerShellBootstrapTools = []string{
 	"mem_save", "mem_search", "mem_context", "mem_session_summary",
 	"mem_session_start", "mem_session_end", "mem_get_observation",
 	"mem_suggest_topic_key", "mem_capture_passive", "mem_save_prompt",
-	"mem_update", "mem_current_project", "mem_judge",
+	"mem_update", "mem_current_project", "mem_judge", "mem_doctor",
+	"mem_review", "mem_pin", "mem_unpin",
 }
 
 // powerShellToolSearchSet reads the ToolSearch message assignment inside its

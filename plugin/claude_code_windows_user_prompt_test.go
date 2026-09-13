@@ -59,7 +59,7 @@ func TestClaudeCodeWindowsPromptResolverRejectsMalformedCanonicalProject(t *test
 				}
 			}))
 
-			runClaudeCodeWindowsPromptHook(t, powershellPath, adapterPath, port, "resolver-malformed", cwd, "persist this prompt")
+			runClaudeCodeWindowsPromptHook(t, powershellPath, adapterPath, port, "resolver-malformed", cwd, "persist this prompt", true)
 
 			mu.Lock()
 			defer mu.Unlock()
@@ -114,7 +114,7 @@ func TestClaudeCodeWindowsPromptResolverPersistsCanonicalProject(t *testing.T) {
 		}
 	}))
 
-	runClaudeCodeWindowsPromptHook(t, powershellPath, adapterPath, port, "canonical-persistence", cwd, "persist this prompt")
+	runClaudeCodeWindowsPromptHook(t, powershellPath, adapterPath, port, "canonical-persistence", cwd, "persist this prompt", true)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -129,6 +129,28 @@ func TestClaudeCodeWindowsPromptResolverPersistsCanonicalProject(t *testing.T) {
 	}
 	if promptPayload.SessionID != "canonical-persistence" || promptPayload.Project != "canonical-project" || promptPayload.Content != "persist this prompt" {
 		t.Fatalf("prompt payload = %+v, want canonical project-bearing payload", promptPayload)
+	}
+}
+
+func TestClaudeCodeWindowsPromptBootstrapOutput(t *testing.T) {
+	powershellPath := claudeCodePowerShell(t)
+	adapterPath := filepath.Join(repoRoot(t), "plugin", "claude-code", "scripts", "user-prompt-submit.ps1")
+	port := claudeCodeWindowsPromptServer(t, http.NotFoundHandler())
+	const sessionID = "windows-bootstrap-output"
+
+	first := decodeHookPayload(t, runClaudeCodeWindowsPromptHook(t, powershellPath, adapterPath, port, sessionID, t.TempDir(), "first message", true))
+	if got := first.HookSpecificOutput.HookEventName; got != "UserPromptSubmit" {
+		t.Errorf("first message hookEventName = %q, want %q", got, "UserPromptSubmit")
+	}
+	assertToolSearchNames(t, selectNames(t, first.HookSpecificOutput.AdditionalContext))
+
+	secondOutput := runClaudeCodeWindowsPromptHook(t, powershellPath, adapterPath, port, sessionID, t.TempDir(), "second message", false)
+	if got := strings.TrimSpace(secondOutput); got != "{}" {
+		t.Errorf("second message response = %q, want {}", got)
+	}
+	second := decodeHookPayload(t, secondOutput)
+	if second.HookSpecificOutput.AdditionalContext != "" {
+		t.Errorf("bootstrap fired twice for one session: %q", second.HookSpecificOutput.AdditionalContext)
 	}
 }
 
@@ -150,11 +172,13 @@ func claudeCodeWindowsPromptServer(t *testing.T, handler http.Handler) string {
 	return strconv.Itoa(tcpAddr.Port)
 }
 
-func runClaudeCodeWindowsPromptHook(t *testing.T, powershellPath, adapterPath, port, sessionID, cwd, prompt string) {
+func runClaudeCodeWindowsPromptHook(t *testing.T, powershellPath, adapterPath, port, sessionID, cwd, prompt string, resetState bool) string {
 	t.Helper()
 	stateFile := filepath.Join(os.TempDir(), "engram-claude-"+sessionID+"-tools-loaded")
-	_ = os.Remove(stateFile)
-	t.Cleanup(func() { _ = os.Remove(stateFile) })
+	if resetState {
+		_ = os.Remove(stateFile)
+		t.Cleanup(func() { _ = os.Remove(stateFile) })
+	}
 
 	run := exec.Command(powershellPath, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", adapterPath)
 	run.Env = withoutEngramPort(os.Environ())
@@ -168,9 +192,11 @@ func runClaudeCodeWindowsPromptHook(t *testing.T, powershellPath, adapterPath, p
 		t.Fatalf("marshal prompt hook input: %v", err)
 	}
 	run.Stdin = strings.NewReader(string(input))
-	if output, err := run.CombinedOutput(); err != nil {
+	output, err := run.CombinedOutput()
+	if err != nil {
 		t.Fatalf("run UserPromptSubmit adapter: %v: %s", err, output)
 	}
+	return string(output)
 }
 
 func claudeCodePowerShell(t *testing.T) string {

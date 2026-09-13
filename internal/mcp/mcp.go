@@ -18,10 +18,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/Gentleman-Programming/engram/v2/internal/diagnostic"
 	projectpkg "github.com/Gentleman-Programming/engram/v2/internal/project"
@@ -77,6 +80,104 @@ func truncationWarning(metadata store.TruncationMetadata) string {
 		return ""
 	}
 	return fmt.Sprintf("\n⚠ WARNING: Content was truncated from %d to %d bytes. Consider splitting into smaller observations.", metadata.OriginalBytes, metadata.LimitBytes)
+}
+
+func absolutePathWarning(content string) string {
+	if !containsAbsoluteFilesystemPath(content) {
+		return ""
+	}
+	return "\n⚠ WARNING: Content contains an absolute filesystem path that may not be portable across machines. Use a repository-relative path instead."
+}
+
+// containsAbsoluteFilesystemPath recognizes common absolute path spellings
+// without relying on the host operating system. Route-like POSIX paths such as
+// /api/v1 are intentionally treated as ambiguous matches for this non-blocking warning.
+func containsAbsoluteFilesystemPath(content string) bool {
+	for i := 0; i < len(content); {
+		char, size := utf8.DecodeRuneInString(content[i:])
+		if char == utf8.RuneError && size == 1 {
+			i++
+			continue
+		}
+		if uriEnd := uriTokenEnd(content, i); uriEnd > i {
+			i = uriEnd
+			continue
+		}
+
+		if isASCIILetter(content[i]) && i+2 < len(content) && content[i+1] == ':' && (content[i+2] == '/' || content[i+2] == '\\') {
+			return true
+		}
+		if content[i] == '\\' && i+2 < len(content) && content[i+1] == '\\' && content[i+2] != '\\' && content[i+2] != '/' {
+			return true
+		}
+		if content[i] == '/' && (i+1 == len(content) || content[i+1] != '/') && isAbsolutePathBoundary(content, i) {
+			return true
+		}
+		i += size
+	}
+	return false
+}
+
+func isAbsolutePathBoundary(content string, index int) bool {
+	if index == 0 {
+		return true
+	}
+	previous, size := utf8.DecodeLastRuneInString(content[:index])
+	if previous == utf8.RuneError && size == 1 {
+		return false
+	}
+	return previous != '/' && !isPathWordCharacter(previous)
+}
+
+func uriTokenEnd(content string, start int) int {
+	if !isASCIILetter(content[start]) {
+		return start
+	}
+	if start > 0 {
+		previous, size := utf8.DecodeLastRuneInString(content[:start])
+		if (previous != utf8.RuneError || size != 1) && isPathWordCharacter(previous) {
+			return start
+		}
+	}
+
+	colon := start + 1
+	for colon < len(content) && (isASCIILetter(content[colon]) || content[colon] >= '0' && content[colon] <= '9' || content[colon] == '+' || content[colon] == '-' || content[colon] == '.') {
+		colon++
+	}
+	if colon >= len(content) || content[colon] != ':' {
+		return start
+	}
+
+	hasAuthority := colon+2 < len(content) && content[colon+1] == '/' && content[colon+2] == '/'
+	hasAuthoritylessFilePath := colon+1 < len(content) && content[colon+1] == '/' && strings.EqualFold(content[start:colon], "file")
+	if !hasAuthority && !hasAuthoritylessFilePath {
+		return start
+	}
+
+	end := colon + 2
+	if hasAuthority {
+		end++
+	}
+	for end < len(content) {
+		char, size := utf8.DecodeRuneInString(content[end:])
+		if char == utf8.RuneError && size == 1 || !isURITokenCharacter(char) {
+			break
+		}
+		end += size
+	}
+	return end
+}
+
+func isASCIILetter(char byte) bool {
+	return char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z'
+}
+
+func isPathWordCharacter(char rune) bool {
+	return unicode.IsLetter(char) || unicode.IsDigit(char) || unicode.IsMark(char) || char == '.' || char == '-' || char == '_'
+}
+
+func isURITokenCharacter(char rune) bool {
+	return isPathWordCharacter(char) || strings.ContainsRune(":/?#[]@!$&'()*+,;=%~", char)
 }
 
 var currentWorkingDirectory = func() string {
@@ -624,7 +725,15 @@ Examples:
 				mcp.WithString("scope",
 					mcp.Description("Filter observations by scope: project, personal, or global. Omit to apply no scope filter."),
 				),
-				// JW7: limit param removed — schema advertised it but handleContext never read it.
+				mcp.WithNumber("max_bytes",
+					mcp.Description("Total context budget in bytes. Default 16384; values above 65536 are clamped to 65536."),
+				),
+				mcp.WithBoolean("compact",
+					mcp.Description("Drop the inline content preview from observation bullets to save tokens."),
+				),
+				// JW7: the old limit param was removed because handleContext never
+				// read it; max_bytes and compact ARE read and forwarded to
+				// FormatContextWithOptions (#1039).
 			),
 			handleContext(s, cfg, activity),
 		)
@@ -1417,6 +1526,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		if err != nil {
 			return mcp.NewToolResultError("Failed to save: " + err.Error()), nil
 		}
+		savedObservation, savedObservationErr := s.GetObservation(savedID)
 
 		if capturePrompt && activity != nil {
 			if prompt, ok := activity.CurrentPrompt(sessionID, project); ok {
@@ -1439,6 +1549,9 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 			msg += fmt.Sprintf("\nSuggested topic_key: %s", suggestedTopicKey)
 		}
 		msg += truncationWarning(truncation)
+		if savedObservationErr == nil {
+			msg += absolutePathWarning(savedObservation.Content)
+		}
 		if normWarning != "" {
 			msg += "\n" + normWarning
 		}
@@ -1467,13 +1580,13 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 
 		// Fetch the saved observation's sync_id for the envelope (REQ-001).
 		var savedSyncID string
-		if obs, obsErr := s.GetObservation(savedID); obsErr == nil {
-			savedSyncID = obs.SyncID
+		if savedObservationErr == nil {
+			savedSyncID = savedObservation.SyncID
 			extra["id"] = savedID
 			extra["sync_id"] = savedSyncID
-			extra["state"] = obs.State()
-			if obs.ReviewAfter != nil {
-				extra["review_after"] = *obs.ReviewAfter
+			extra["state"] = savedObservation.State()
+			if savedObservation.ReviewAfter != nil {
+				extra["review_after"] = *savedObservation.ReviewAfter
 			}
 		}
 		if len(candidates) > 0 {
@@ -1790,10 +1903,106 @@ func handleSavePrompt(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 	}
 }
 
+// mem_context output budget constants (issue #1039). The MCP tool must
+// never render the unbounded legacy context: absent arguments resolve to the
+// #1012 Claude Code hook budget, and explicit values are clamped to the same
+// ceiling the HTTP /context endpoint enforces.
+const (
+	// memContextDefaultMaxBytes is the default context budget for mem_context,
+	// matching the 16 KiB window the #1012 Claude Code hook budget uses so MCP
+	// context output stays aligned with hook context output.
+	memContextDefaultMaxBytes = 16 * 1024
+
+	// memContextMaxPinned caps the "### Pinned" section in mem_context output.
+	// Pinning is a hand-bounded action, but an unbounded pinned list could
+	// still dominate the response before MaxBytes applies.
+	memContextMaxPinned = 20
+
+	// memContextMaxBytesCeiling mirrors the HTTP server's contextMaxBytes
+	// ceiling for GET /context, keeping both transports' budgets aligned.
+	memContextMaxBytesCeiling = 64 * 1024
+)
+
+// memContextMaxBytes resolves the optional max_bytes tool argument (MCP
+// numbers arrive as float64). Absent, mistyped, non-positive, NaN, or any
+// fractional value falls back to the default budget — the MCP path must
+// never resolve to the unbounded legacy rendering, a byte budget is an
+// integer quantity (int(1.5) truncating to 1 would be a silent budget the
+// caller never requested), and int(f) of a fraction in (0,1) truncates to
+// 0, which ContextOptions treats as the unbounded zero value. The ceiling
+// comparison happens in float64 BEFORE the int conversion, because
+// converting an out-of-range float to int is spec-undefined in Go.
+func memContextMaxBytes(raw any) int {
+	v, ok := raw.(float64)
+	if !ok || !(v > 0) || v != math.Trunc(v) {
+		return memContextDefaultMaxBytes
+	}
+	if v > float64(memContextMaxBytesCeiling) {
+		return memContextMaxBytesCeiling
+	}
+	return int(v)
+}
+
+// memContextTruncationMarker mirrors the store's contextTruncationMarker
+// (internal/store/store.go): a visible marker that replaces the cut tail so
+// the omission is explicit.
+const memContextTruncationMarker = "\n[truncated]\n"
+
+// memContextMaxStatsProjects caps how many project names the "Memory stats"
+// suffix lists before degrading to "+N more". The join over every project in
+// the store is the unbounded part of the suffix (#1039, CodeRabbit major on
+// PR #1074); capping it keeps the suffix structurally small so the reserved
+// context budget stays meaningful even on stores with hundreds of projects.
+const memContextMaxStatsProjects = 8
+
+// formatContextProjects renders the projects list for the mem_context stats
+// suffix: "none", the full join, or the first memContextMaxStatsProjects
+// names plus a "+N more" overflow marker.
+func formatContextProjects(names []string) string {
+	if len(names) == 0 {
+		return "none"
+	}
+	if len(names) <= memContextMaxStatsProjects {
+		return strings.Join(names, ", ")
+	}
+	return fmt.Sprintf("%s, +%d more", strings.Join(names[:memContextMaxStatsProjects], ", "), len(names)-memContextMaxStatsProjects)
+}
+
+// clampMemContextResult caps the complete mem_context tool result — context
+// block, stats line, and nudge — at the resolved byte budget, mirroring the
+// store's limitContextBytes semantics: a UTF-8-safe cut with the visible
+// [truncated] marker appended when it fits, and a bare UTF-8-safe prefix cut
+// for budgets smaller than the marker itself.
+func clampMemContextResult(result string, maxBytes int) string {
+	if maxBytes <= 0 || len(result) <= maxBytes {
+		return result
+	}
+	if maxBytes < len(memContextTruncationMarker) {
+		return truncateMemContextUTF8(result, maxBytes)
+	}
+	return truncateMemContextUTF8(result, maxBytes-len(memContextTruncationMarker)) + memContextTruncationMarker
+}
+
+// truncateMemContextUTF8 mirrors the store's truncateUTF8Prefix: never split
+// a UTF-8 sequence when cutting.
+func truncateMemContextUTF8(s string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if maxBytes >= len(s) {
+		return s
+	}
+	for maxBytes > 0 && !utf8.RuneStart(s[maxBytes]) {
+		maxBytes--
+	}
+	return s[:maxBytes]
+}
+
 func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		projectOverride, _ := req.GetArguments()["project"].(string)
 		scope, _ := req.GetArguments()["scope"].(string)
+		compact, _ := req.GetArguments()["compact"].(bool)
 
 		// Resolve project: validate override or auto-detect (REQ-310, REQ-311)
 		detRes, err := resolveReadProjectWithProcessOverride(s, projectOverride, cfg.DefaultProject)
@@ -1815,32 +2024,46 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 		sessionID := defaultSessionID(project)
 		activity.RecordToolCall(sessionID)
 
-		contextResult, err := s.FormatContext(contextProject, scope)
+		// #1039: render a bounded context instead of the unbounded legacy
+		// FormatContext output — 16 KiB by default, capped at 20 pinned rows,
+		// with optional max_bytes/compact tuning from the caller.
+		maxBytes := memContextMaxBytes(req.GetArguments()["max_bytes"])
+
+		// #1039 (CodeRabbit major on PR #1074): the budget applies to the
+		// COMPLETE result. The stats suffix joins every project name in the
+		// store (unbounded) and the nudge is appended after the context block,
+		// so the suffix is rendered FIRST and its bytes are reserved from the
+		// context budget; a final clamp backstops the pathological case where
+		// the suffix alone meets or exceeds the budget.
+		stats, err := loadContextStats(s)
+		if err != nil {
+			return mcp.NewToolResultError("Failed to get context stats: " + err.Error()), nil
+		}
+		suffix := fmt.Sprintf("\n---\nMemory stats: %d sessions, %d observations across projects: %s",
+			stats.TotalSessions, stats.TotalObservations, formatContextProjects(stats.Projects))
+		suffix += activity.NudgeIfNeededForProject(sessionID, project)
+
+		contextBudget := maxBytes - len(suffix)
+		if contextBudget < 1 {
+			contextBudget = 1
+		}
+		contextResult, err := s.FormatContextWithOptions(contextProject, scope, store.ContextOptions{
+			MaxBytes: contextBudget,
+			Pinned:   memContextMaxPinned,
+			Compact:  compact,
+		})
 		if err != nil {
 			return mcp.NewToolResultError("Failed to get context: " + err.Error()), nil
 		}
 
 		if contextResult == "" {
-			return respondWithProject(detRes, "No previous session memories found.", nil), nil
+			// The fixed no-context message is part of the complete mem_context
+			// result, so it flows through the same clamp: an explicit tiny
+			// max_bytes must bound it exactly like a rendered context block.
+			return respondWithProject(detRes, clampMemContextResult("No previous session memories found.", maxBytes), nil), nil
 		}
 
-		stats, err := loadContextStats(s)
-		if err != nil {
-			return mcp.NewToolResultError("Failed to get context stats: " + err.Error()), nil
-		}
-		var projects string
-		if len(stats.Projects) > 0 {
-			projects = strings.Join(stats.Projects, ", ")
-		} else {
-			projects = "none"
-		}
-
-		result := fmt.Sprintf("%s\n---\nMemory stats: %d sessions, %d observations across projects: %s",
-			contextResult, stats.TotalSessions, stats.TotalObservations, projects)
-
-		if nudge := activity.NudgeIfNeededForProject(sessionID, project); nudge != "" {
-			result += nudge
-		}
+		result := clampMemContextResult(contextResult+suffix, maxBytes)
 
 		return respondWithProject(detRes, result, nil), nil
 	}
@@ -3263,7 +3486,7 @@ func resolveFallbackSessionID(s *store.Store, project string) (string, error) {
 			case 1:
 				return ids[0], nil
 			default:
-				return "", fmt.Errorf("multiple active runtime sessions match the current project and directory; provide session_id or end other active matching sessions before retrying")
+				return "", fmt.Errorf("multiple active runtime sessions match the current project and directory; provide session_id, end other active matching sessions, or save independently with engram save \"TITLE\" \"CONTENT\" --project PROJECT --type TYPE --topic TOPIC_KEY (writes to an independent project manual-save session and does not bind it to this MCP session)")
 			}
 		}
 	}

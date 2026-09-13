@@ -806,6 +806,22 @@ type MutationEntry struct {
 	CreatedBy string          `json:"-"`
 }
 
+// MutationBatchEntryError identifies the entry that caused an atomic mutation
+// batch insert to fail. Its identity fields are bounded and escaped because they
+// may originate from a client request.
+type MutationBatchEntryError struct {
+	BatchIndex int
+	Entity     string
+	EntityKey  string
+	Err        error
+}
+
+func (e *MutationBatchEntryError) Error() string {
+	return fmt.Sprintf("cloudstore: mutation batch entry rejected: reason=mutation_insert_rejected batch_index=%d entity=%.64q entity_key=%.64q", e.BatchIndex, e.Entity, e.EntityKey)
+}
+
+func (e *MutationBatchEntryError) Unwrap() error { return e.Err }
+
 // StoredMutation mirrors cloudserver.StoredMutation to avoid a circular import.
 type StoredMutation struct {
 	Seq        int64           `json:"seq"`
@@ -855,7 +871,7 @@ func (cs *CloudStore) InsertMutationBatch(ctx context.Context, batch []MutationE
 	}()
 
 	seqs := make([]int64, 0, len(batch))
-	for _, entry := range batch {
+	for batchIndex, entry := range batch {
 		project := strings.TrimSpace(entry.Project)
 		entity := strings.TrimSpace(entry.Entity)
 		entityKey := strings.TrimSpace(entry.EntityKey)
@@ -872,7 +888,12 @@ func (cs *CloudStore) InsertMutationBatch(ctx context.Context, batch []MutationE
 			project, entity, entityKey, op, payload,
 		).Scan(&seq)
 		if err != nil {
-			return nil, fmt.Errorf("cloudstore: insert mutation: %w", err)
+			return nil, &MutationBatchEntryError{
+				BatchIndex: batchIndex,
+				Entity:     entity,
+				EntityKey:  entityKey,
+				Err:        err,
+			}
 		}
 		seqs = append(seqs, seq)
 	}

@@ -18,8 +18,10 @@ import type { Plugin } from "@opencode-ai/plugin"
 // ─── Configuration ───────────────────────────────────────────────────────────
 
 const ENGRAM_PORT = parseInt(process.env.ENGRAM_PORT ?? "7437")
-const ENGRAM_URL = `http://127.0.0.1:${ENGRAM_PORT}`
+const CONFIGURED_ENGRAM_URL = process.env.ENGRAM_URL?.trim() || undefined
+const ENGRAM_URL = CONFIGURED_ENGRAM_URL ?? `http://127.0.0.1:${ENGRAM_PORT}`
 const ENGRAM_BIN = process.env.ENGRAM_BIN ?? "engram"
+let localReady = CONFIGURED_ENGRAM_URL !== undefined
 
 // Engram's own MCP tools — don't count these as "tool calls" for session stats
 const ENGRAM_TOOLS = new Set([
@@ -144,6 +146,7 @@ async function engramFetch(
   path: string,
   opts: { method?: string; body?: any } = {}
 ): Promise<any> {
+	if (!await ensureLocalReady()) return null
   try {
     const res = await fetch(`${ENGRAM_URL}${path}`, {
       method: opts.method ?? "GET",
@@ -163,15 +166,27 @@ async function engramFetch(
   }
 }
 
-async function isEngramRunning(): Promise<boolean> {
+function localInstanceID(): string {
+  const result = Bun.spawnSync([ENGRAM_BIN, "instance-id"]); const id = Buffer.from(result.stdout).toString().trim()
+  if (result.exitCode !== 0 || !/^[a-f0-9]{32}$/.test(id)) throw new Error("gentle-engram could not resolve its local server identity")
+  return id
+}
+
+async function isEngramRunning(expectedID = ""): Promise<boolean> {
   try {
     const res = await fetch(`${ENGRAM_URL}/health`, {
       signal: AbortSignal.timeout(500),
     })
-    return res.ok
+    if (!res.ok || (expectedID && (await res.json())?.instance_id !== expectedID)) return false
+    return true
   } catch {
     return false
   }
+}
+
+async function ensureLocalReady(): Promise<boolean> {
+	if (!localReady) localReady = await isEngramRunning(CONFIGURED_ENGRAM_URL ? "" : localInstanceID())
+	return localReady
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -248,6 +263,7 @@ export const Engram: Plugin = async (ctx) => {
 	let projectResolutionGeneration = 0
 
 	async function ensureResolvedProject(): Promise<boolean> {
+		if (!await ensureLocalReady()) return false
 		if (project !== "unknown" && !projectResolutionError) return true
 		const generation = ++projectResolutionGeneration
 		const resolved = await resolveProjectName(ctx.directory)
@@ -474,19 +490,19 @@ export const Engram: Plugin = async (ctx) => {
   }
 
   // Try to start engram server if not running
-  const running = await isEngramRunning()
-  if (!running) {
-    try {
-      Bun.spawn([ENGRAM_BIN, "serve"], {
+	try {
+		const expectedID = CONFIGURED_ENGRAM_URL ? "" : localInstanceID()
+		localReady = await isEngramRunning(expectedID)
+		if (!localReady && !CONFIGURED_ENGRAM_URL) {
+			Bun.spawn([ENGRAM_BIN, "serve"], {
         stdout: "ignore",
         stderr: "ignore",
         stdin: "ignore",
-      })
-      await new Promise((r) => setTimeout(r, 500))
-    } catch {
-      // Binary not found or can't start — plugin will silently no-op
-    }
-  }
+			})
+			await new Promise((r) => setTimeout(r, 500))
+			localReady = await isEngramRunning(expectedID)
+		}
+	} catch {}
 
 	if (await ensureResolvedProject()) {
 		// Auto-import: if .engram/manifest.json exists in the project repo,
@@ -510,14 +526,16 @@ export const Engram: Plugin = async (ctx) => {
 	}
 
   return {
-    dispose: async () => {
+		dispose: async () => {
+			if (!localReady) return
       const rootSessionIDs = [...knownSessions].filter(isKnownAuthoritativeRootSession)
       await Promise.all(rootSessionIDs.map(closeDeletedRootSession))
     },
 
     // ─── Event Listeners ───────────────────────────────────────────
 
-    event: async ({ event }) => {
+		event: async ({ event }) => {
+			if (!await ensureLocalReady()) return
       // --- Session Created / Updated ---
       if (event.type === "session.created" || event.type === "session.updated") {
         // Bug fix (#116): session data is nested under event.properties.info,

@@ -152,6 +152,63 @@ func TestPromptDeletePropagatesFromLocalStoreToDashboard(t *testing.T) {
 // TestHardDeletedObservationPropagatesFromLocalStoreToDashboard covers the sibling
 // path flagged in #837: DeleteObservation(id, hardDelete=true) removes the row, so
 // its delete can only travel as a chunk.Mutations entry.
+func TestUnenrolledSessionDeleteReenrollmentRemovesDashboardRows(t *testing.T) {
+	const project = "proj-e2e-unenrolled-session-delete"
+	const sessionID = "sess-e2e-unenrolled-delete"
+	const promptContent = "delete with the session"
+
+	local := newPropagationTestStore(t)
+	transport := newCaptureTransport()
+	syncer := engramsync.NewCloudWithTransport(local, transport, project)
+	if err := local.EnrollProject(project); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+	if err := local.CreateSession(sessionID, project, "/tmp/"+project); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := local.AddPrompt(store.AddPromptParams{SessionID: sessionID, Content: promptContent, Project: project}); err != nil {
+		t.Fatalf("add prompt: %v", err)
+	}
+	if _, err := syncer.Export("dev", project); err != nil {
+		t.Fatalf("initial export: %v", err)
+	}
+	if !promptListedOnDashboard(t, transport, project, promptContent) {
+		t.Fatal("expected dashboard to list prompt before deletion")
+	}
+
+	if err := local.UnenrollProject(project); err != nil {
+		t.Fatalf("unenroll project: %v", err)
+	}
+	if err := local.DeleteSession(sessionID); err != nil {
+		t.Fatalf("delete session while unenrolled: %v", err)
+	}
+	if _, err := syncer.Export("dev", project); err == nil {
+		t.Fatal("expected unenrolled export to remain blocked")
+	}
+
+	if err := local.EnrollProject(project); err != nil {
+		t.Fatalf("re-enroll project: %v", err)
+	}
+	if result, err := syncer.Export("dev", project); err != nil {
+		t.Fatalf("re-enrollment export: %v", err)
+	} else if result.IsEmpty {
+		t.Fatal("expected re-enrollment to export delete mutations")
+	}
+	if promptListedOnDashboard(t, transport, project, promptContent) {
+		t.Fatal("re-enrolled session delete left prompt on dashboard")
+	}
+	chunkRows, mutationRows := transport.dashboardRows(t, project)
+	model, err := buildDashboardReadModelFromRows(chunkRows, mutationRows)
+	if err != nil {
+		t.Fatalf("build dashboard model: %v", err)
+	}
+	for _, session := range model.projectDetails[project].Sessions {
+		if session.SessionID == sessionID {
+			t.Fatalf("re-enrolled session delete left session on dashboard: %+v", session)
+		}
+	}
+}
+
 func TestHardDeletedObservationPropagatesFromLocalStoreToDashboard(t *testing.T) {
 	const project = "proj-e2e-obs-hard-delete"
 

@@ -11,7 +11,7 @@ body:
 
         > **How this works:**
         > 1. You submit this issue → it gets `status:needs-review` automatically
-        > 2. A maintainer reviews it → adds `status:approved` if accepted
+        > 2. A maintainer reviews it → replaces the review status with `status:approved` if accepted
         > 3. Only then can a PR be opened to implement it
         >
         > See [CONTRIBUTING.md](https://github.com/Gentleman-Programming/engram/blob/main/CONTRIBUTING.md) for the full workflow.

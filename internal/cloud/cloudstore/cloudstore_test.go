@@ -690,6 +690,45 @@ func TestMaterializedChunkMutationsMaterializesUpsertsExactlyOnce(t *testing.T) 
 	}
 }
 
+func TestInsertMutationBatchFailureIdentifiesFailingEntryAndRollsBack(t *testing.T) {
+	resetPartialFailDriver(1) // succeed first INSERT, fail the second
+	db, err := sql.Open("cloudstore-partial-fail-driver", "dsn")
+	if err != nil {
+		t.Fatalf("open partial failure db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	cs := &CloudStore{db: db}
+
+	_, err = cs.InsertMutationBatch(context.Background(), []MutationEntry{
+		{Project: "proj-a", Entity: "custom", EntityKey: "first-entry", Op: "upsert", Payload: json.RawMessage(`{}`)},
+		{Project: "proj-a", Entity: "failing-entity", EntityKey: "failing-key", Op: "upsert", Payload: json.RawMessage(`{}`)},
+	})
+	if err == nil {
+		t.Fatal("expected the second entry to fail")
+	}
+	for _, want := range []string{
+		"batch_index=1",
+		`entity="failing-entity"`,
+		`entity_key="failing-key"`,
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("InsertMutationBatch error = %q, want %q", err, want)
+		}
+	}
+	if tx := partialFailDriverSingleton.lastTx; tx == nil || !tx.rolledBack || tx.committed {
+		t.Fatalf("expected rollback without commit after second-entry failure, got %+v", tx)
+	}
+
+	cause := errors.New("raw-cause-secret-must-not-appear")
+	entryErr := &MutationBatchEntryError{BatchIndex: 1, Entity: "failing-entity", EntityKey: "failing-key", Err: cause}
+	if strings.Contains(entryErr.Error(), cause.Error()) {
+		t.Fatalf("public mutation batch error exposes wrapped cause: %q", entryErr)
+	}
+	if !errors.Is(entryErr, cause) {
+		t.Fatal("expected wrapped cause to remain discoverable with errors.Is")
+	}
+}
+
 func TestWriteChunkMaterializesRelationMutationIntoCloudMutations(t *testing.T) {
 	cs := openTestCloudStore(t)
 	project := "test-chunk-relation-" + strings.ReplaceAll(time.Now().UTC().Format("20060102150405.000000000"), ".", "-")

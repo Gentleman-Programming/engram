@@ -3,7 +3,7 @@
   
   Every PR must:
   1. Link an approved issue (with status:approved label)
-  2. Have exactly one type:* label
+  2. Have exactly one type:* label and only canonical labels
   3. Pass all required automated checks
   
   See CONTRIBUTING.md for the full workflow.
@@ -22,10 +22,11 @@ Closes #
 ## 🏷️ PR Type
 
 <!-- REQUIRED: Check exactly ONE type below, then add the matching label to the PR. -->
-<!-- Automated check: "Check PR Has type:* Label" verifies the label exists. -->
+<!-- Automated check: "Check PR Has type:* Label" verifies canonical labels and cardinality. -->
 
 - [ ] `type:bug` — Bug fix
 - [ ] `type:feature` — New feature
+- [ ] `type:question` — Question requiring tracked work
 - [ ] `type:docs` — Documentation only
 - [ ] `type:refactor` — Code refactoring (no behavior change)
 - [ ] `type:chore` — Maintenance, dependencies, tooling
@@ -68,7 +69,8 @@ These run automatically and **all must pass** before merge:
 |-------|-----------------|--------|
 | **Check Issue Reference** | PR body contains `Closes #N` / `Fixes #N` / `Resolves #N` | ⏳ |
 | **Check Issue Has status:approved** | Linked issue has `status:approved` label | ⏳ |
-| **Check PR Has type:\* Label** | PR has exactly one `type:*` label | ⏳ |
+| **Check PR Has type:* Label** | Canonical labels, applicability, and cardinality | ⏳ |
+| **Check PR Has No Transient Artifacts** | PR files comply with the [Transient Artifact Policy](https://github.com/Gentleman-Programming/engram/blob/main/CONTRIBUTING.md#transient-artifact-policy) | ⏳ |
 | **Unit Tests** | `go test ./...` passes | ⏳ |
 | **E2E Tests** | `go test -tags e2e ./internal/server/...` passes | ⏳ |
 | **Plugin Tests** | `npm test` passes in `plugin/pi` | ⏳ |
@@ -86,6 +88,7 @@ These run automatically and **all must pass** before merge:
 - [ ] Docs updated (if behavior changed)
 - [ ] Commits follow [conventional commits](https://www.conventionalcommits.org/) format
 - [ ] No `Co-Authored-By` trailers in commits
+- [ ] I checked every changed path against the [Transient Artifact Policy](https://github.com/Gentleman-Programming/engram/blob/main/CONTRIBUTING.md#transient-artifact-policy)
 
 ---
 

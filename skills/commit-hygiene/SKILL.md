@@ -26,7 +26,7 @@ Use this skill when:
 3. Keep one logical change per commit
 4. Message should explain **why**, not only what
 5. **NEVER** include `Co-Authored-By` trailers
-6. **NEVER** commit generated/temp/local files
+6. **NEVER** commit paths prohibited by the [Transient Artifact Policy](../../CONTRIBUTING.md#transient-artifact-policy)
 
 ---
 
@@ -132,6 +132,6 @@ fix_something                    ← missing "/" separator
 - [ ] Branch name matches `type/description` format
 - [ ] Diff matches commit scope (no unrelated changes)
 - [ ] No secrets, credentials, or `.env` files
-- [ ] No binaries, coverage outputs, or local artifacts
+- [ ] Every changed path complies with the [Transient Artifact Policy](../../CONTRIBUTING.md#transient-artifact-policy)
 - [ ] No `Co-Authored-By` trailers
 - [ ] Tests relevant to the change pass

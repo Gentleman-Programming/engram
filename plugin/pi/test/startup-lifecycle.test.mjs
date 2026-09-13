@@ -32,7 +32,7 @@ const { createServer } = require("node:http");
 const { resolve } = require("node:path");
 
 const syntheticServePath = resolve("serve");
-const isSyntheticServe = process.argv[1] === syntheticServePath;
+const command = process.argv.at(-1); const isSyntheticServe = command === "serve" || command === syntheticServePath; if (command === "instance-id" || command === resolve("instance-id")) { process.stdout.write("00000000000000000000000000000000\\n"); process.exit(0); }
 const isServe = process.argv[2] === "serve" || isSyntheticServe;
 if (isServe) {
   appendFileSync(${JSON.stringify(spawnLog)}, "serve\\n");
@@ -44,7 +44,7 @@ if (isServe) {
     return;
   }
   res.writeHead(200, { "content-type": "application/json" });
-  res.end("{}");
+  res.end(JSON.stringify({ instance_id: "00000000000000000000000000000000" }));
 });
 // The port was picked by a probe socket that has since closed, so another process can win it
 // in between. Retry the bind for a bounded window instead of dying on a lost race.
@@ -116,7 +116,7 @@ async function withFixture(options, run) {
     const port = await freePort();
     readyServer = options.readyServer && createHTTPServer((request, response) => {
       response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify(request.url.startsWith("/project/current") ? { project: "fake-project" } : {}));
+      response.end(JSON.stringify(request.url.startsWith("/project/current") ? { project: "fake-project" } : { instance_id: "00000000000000000000000000000000" }));
     });
     if (readyServer) await new Promise((resolve, reject) => {
       readyServer.once("error", reject);

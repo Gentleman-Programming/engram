@@ -112,14 +112,14 @@ The `--protocol=slim` setup option requires Engram plugin 0.1.1 or later. After 
 ```
 plugin/claude-code/
 ├── .claude-plugin/plugin.json     # Plugin manifest
-├── hooks/hooks.json               # SessionStart + SubagentStop + Stop lifecycle hooks
+├── hooks/hooks.json               # SessionStart + SubagentStop + SessionEnd lifecycle hooks
 ├── scripts/
 │   ├── session-start.sh           # Ensures server, creates session, imports chunks, injects context
 │   ├── post-compaction.sh         # Injects previous context + recovery instructions
 │   ├── user-prompt-submit.sh      # Loads MCP tools on first prompt; Windows Git Bash safe mode
 │   ├── user-prompt-submit.ps1     # Optional Windows-native fallback for locked-down endpoints
 │   ├── subagent-stop.sh           # Passive capture trigger on subagent completion
-│   └── session-stop.sh            # Logs end-of-session event
+│   └── session-end.sh             # Logs end-of-session event at session end
 └── skills/memory/SKILL.md         # Memory Protocol (when to save, search, close, recover)
 ```
 
