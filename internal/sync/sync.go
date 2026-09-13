@@ -61,6 +61,9 @@ var (
 	storeApplyPulledChunk = func(s *store.Store, targetKey, chunkID string, mutations []store.SyncMutation) error {
 		return s.ApplyPulledChunk(targetKey, chunkID, mutations)
 	}
+	storeApplyPulledChunkWithVersions = func(s *store.Store, targetKey, chunkID string, mutations []store.SyncMutation, versions []store.ObservationVersion) error {
+		return s.ApplyPulledChunkWithVersions(targetKey, chunkID, mutations, versions)
+	}
 	storeRecordSynced = func(s *store.Store, targetKey, chunkID string) error {
 		return s.RecordSyncedChunkForTarget(targetKey, chunkID)
 	}
@@ -97,7 +100,8 @@ type ChunkData struct {
 	Sessions     []store.Session      `json:"sessions"`
 	Observations []store.Observation  `json:"observations"`
 	Prompts      []store.Prompt       `json:"prompts"`
-	Mutations    []store.SyncMutation `json:"mutations,omitempty"`
+	Mutations           []store.SyncMutation       `json:"mutations,omitempty"`
+	ObservationVersions []store.ObservationVersion `json:"observation_versions,omitempty"`
 }
 
 // SyncResult is returned after a sync operation.
@@ -496,65 +500,60 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 	if err := filterRelationMutationsForEndpointAvailability(chunk, data, exportedObservations, strings.TrimSpace(project) != ""); err != nil {
 		return nil, fmt.Errorf("filter relation endpoints: %w", err)
 	}
+	knownVersions, err := sy.exportedObservationVersionKeys(manifest)
+	if err != nil {
+		return nil, fmt.Errorf("scan exported observation versions: %w", err)
+	}
+	chunk.ObservationVersions = versionsForObservations(data.ObservationVersions, chunk.Observations, knownVersions)
+	backfill := &ChunkData{ObservationVersions: versionsForObservationKeys(data.ObservationVersions, exportedObservations, knownVersions)}
+	backfill.ObservationVersions = withoutVersions(backfill.ObservationVersions, chunk.ObservationVersions)
 
-	// Nothing new to export
-	if len(chunk.Sessions) == 0 && len(chunk.Observations) == 0 && len(chunk.Prompts) == 0 && len(chunk.Mutations) == 0 {
+	result := &SyncResult{IsEmpty: true}
+	for _, candidate := range []*ChunkData{chunk, backfill} {
+		exported, err := sy.exportLocalChunk(manifest, knownChunks, locallySyncedChunks, chunkTargetKey, createdBy, candidate)
+		if err != nil {
+			return nil, err
+		}
+		if !exported.IsEmpty {
+			if result.IsEmpty {
+				*result = *exported
+			}
+			result.IsEmpty = false
+		}
+	}
+	return result, nil
+}
+
+func (sy *Syncer) exportLocalChunk(manifest *Manifest, known, local map[string]bool, targetKey, createdBy string, chunk *ChunkData) (*SyncResult, error) {
+	if len(chunk.Sessions) == 0 && len(chunk.Observations) == 0 && len(chunk.Prompts) == 0 && len(chunk.Mutations) == 0 && len(chunk.ObservationVersions) == 0 {
 		return &SyncResult{IsEmpty: true}, nil
 	}
-
-	// Serialize and compress the chunk
-	chunkJSON, err := jsonMarshalChunk(chunk)
+	payload, err := jsonMarshalChunk(chunk)
 	if err != nil {
 		return nil, fmt.Errorf("marshal chunk: %w", err)
 	}
-
-	// Generate chunk ID from content hash
-	chunkID := chunkcodec.ChunkID(chunkJSON)
-
-	// Check if this exact chunk already exists
-	if _, exists := knownChunks[chunkID]; exists {
-		if !locallySyncedChunks[chunkID] {
-			if err := storeRecordSynced(sy.store, chunkTargetKey, chunkID); err != nil {
-				return nil, fmt.Errorf("reconcile synced chunk %s: %w", chunkID, err)
+	id := chunkcodec.ChunkID(payload)
+	if known[id] {
+		if !local[id] {
+			if err := storeRecordSynced(sy.store, targetKey, id); err != nil {
+				return nil, fmt.Errorf("reconcile synced chunk %s: %w", id, err)
 			}
 		}
 		return &SyncResult{IsEmpty: true}, nil
 	}
-
-	// Build manifest entry
-	entry := ChunkEntry{
-		ID:        chunkID,
-		CreatedBy: createdBy,
-		CreatedAt: time.Now().UTC().Format(time.RFC3339),
-		Sessions:  len(chunk.Sessions),
-		Memories:  len(chunk.Observations),
-		Prompts:   len(chunk.Prompts),
-	}
-
-	// Write chunk via transport
-	if err := sy.transport.WriteChunk(chunkID, chunkJSON, entry); err != nil {
+	entry := ChunkEntry{ID: id, CreatedBy: createdBy, CreatedAt: time.Now().UTC().Format(time.RFC3339), Sessions: len(chunk.Sessions), Memories: len(chunk.Observations), Prompts: len(chunk.Prompts)}
+	if err := sy.transport.WriteChunk(id, payload, entry); err != nil {
 		return nil, fmt.Errorf("write chunk: %w", err)
 	}
-
-	// Update manifest
 	manifest.Chunks = append(manifest.Chunks, entry)
-
 	if err := sy.writeManifest(manifest); err != nil {
 		return nil, fmt.Errorf("write manifest: %w", err)
 	}
-
-	// Record this chunk as synced in the local DB
-	if err := storeRecordSynced(sy.store, chunkTargetKey, chunkID); err != nil {
+	if err := storeRecordSynced(sy.store, targetKey, id); err != nil {
 		return nil, fmt.Errorf("record synced chunk: %w", err)
 	}
-
-	return &SyncResult{
-		ChunkID:              chunkID,
-		SessionsExported:     len(chunk.Sessions),
-		ObservationsExported: len(chunk.Observations),
-		PromptsExported:      len(chunk.Prompts),
-		MutationsExported:    len(chunk.Mutations),
-	}, nil
+	known[id] = true
+	return &SyncResult{ChunkID: id, SessionsExported: len(chunk.Sessions), ObservationsExported: len(chunk.Observations), PromptsExported: len(chunk.Prompts), MutationsExported: len(chunk.Mutations)}, nil
 }
 
 // cloudExportMaxChunkBytes bounds the serialized size of a single cloud export
@@ -1066,9 +1065,11 @@ func (sy *Syncer) preflightLegacyChunkOwnership(entries []ChunkEntry, mode impor
 }
 
 func (sy *Syncer) importMutationChunk(chunkID string, chunk ChunkData) error {
-	mutations := buildImportMutations(chunk)
-	mutations = orderMutationsForApply(mutations)
-	return storeApplyPulledChunk(sy.store, sy.chunkTrackingTargetKey(""), chunkID, mutations)
+	mutations := orderMutationsForApply(buildImportMutations(chunk))
+	if sy.cloudMode {
+		return storeApplyPulledChunk(sy.store, sy.chunkTrackingTargetKey(""), chunkID, mutations)
+	}
+	return storeApplyPulledChunkWithVersions(sy.store, sy.chunkTrackingTargetKey(""), chunkID, mutations, chunk.ObservationVersions)
 }
 
 func importDependencyError(chunk ChunkData, err error) error {
@@ -1708,7 +1709,43 @@ func filterExportDataToProjectScope(data *store.ExportData) *store.ExportData {
 			filtered.Observations = append(filtered.Observations, observation)
 		}
 	}
+	filtered.ObservationVersions = versionsForObservations(data.ObservationVersions, filtered.Observations, nil)
 	return &filtered
+}
+
+func versionsForObservations(versions []store.ObservationVersion, observations []store.Observation, known map[string]struct{}) []store.ObservationVersion {
+	keys := make(map[string]struct{}, len(observations))
+	for _, observation := range observations {
+		keys[observation.SyncID] = struct{}{}
+	}
+	return versionsForObservationKeys(versions, keys, known)
+}
+
+func versionsForObservationKeys(versions []store.ObservationVersion, keys, known map[string]struct{}) []store.ObservationVersion {
+	selected := make([]store.ObservationVersion, 0, len(versions))
+	for _, version := range versions {
+		if _, ok := keys[version.ObservationSyncID]; !ok {
+			continue
+		}
+		if _, ok := known[version.VersionID]; !ok {
+			selected = append(selected, version)
+		}
+	}
+	return selected
+}
+
+func withoutVersions(versions, excluded []store.ObservationVersion) []store.ObservationVersion {
+	known := make(map[string]struct{}, len(excluded))
+	for _, version := range excluded {
+		known[version.VersionID] = struct{}{}
+	}
+	selected := versions[:0]
+	for _, version := range versions {
+		if _, ok := known[version.VersionID]; !ok {
+			selected = append(selected, version)
+		}
+	}
+	return selected
 }
 
 // filterRelationMutationsForEndpointAvailability retains relation upserts only
@@ -1836,6 +1873,32 @@ func (sy *Syncer) exportedChunkKeys(m *Manifest) (map[string]struct{}, map[strin
 		}
 	}
 	return relationKeys, observationKeys, historicalObservationKeys, nil
+}
+
+// exportedObservationVersionKeys identifies immutable versions already delivered.
+// Chunk content, not manifest time, remains the durable source of truth.
+func (sy *Syncer) exportedObservationVersionKeys(m *Manifest) (map[string]struct{}, error) {
+	known := map[string]struct{}{}
+	if m == nil {
+		return known, nil
+	}
+	for _, entry := range m.Chunks {
+		raw, err := sy.transport.ReadChunk(entry.ID)
+		if errors.Is(err, ErrChunkNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read chunk %s: %w", entry.ID, err)
+		}
+		var chunk ChunkData
+		if err := json.Unmarshal(raw, &chunk); err != nil {
+			return nil, fmt.Errorf("unmarshal chunk %s: %w", entry.ID, err)
+		}
+		for _, version := range chunk.ObservationVersions {
+			known[version.VersionID] = struct{}{}
+		}
+	}
+	return known, nil
 }
 
 // observationUpsertIdentity returns the payload-owned identity of a replayable

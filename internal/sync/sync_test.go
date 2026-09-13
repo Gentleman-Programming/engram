@@ -227,6 +227,7 @@ func resetSyncTestHooks(t *testing.T) {
 	origStoreListMutationsAfterSeq := storeListMutationsAfterSeq
 	origStoreAckMutationSeq := storeAckMutationSeq
 	origStoreApplyPulledChunk := storeApplyPulledChunk
+	origStoreApplyPulledChunkWithVersions := storeApplyPulledChunkWithVersions
 	origStoreRecordSynced := storeRecordSynced
 
 	t.Cleanup(func() {
@@ -242,6 +243,7 @@ func resetSyncTestHooks(t *testing.T) {
 		storeListMutationsAfterSeq = origStoreListMutationsAfterSeq
 		storeAckMutationSeq = origStoreAckMutationSeq
 		storeApplyPulledChunk = origStoreApplyPulledChunk
+		storeApplyPulledChunkWithVersions = origStoreApplyPulledChunkWithVersions
 		storeRecordSynced = origStoreRecordSynced
 	})
 }
@@ -1224,6 +1226,7 @@ func TestLocalChunkExportUsesObservationHistory(t *testing.T) {
 		observationUpdated string
 		wantObservation    bool
 		wantEmpty          bool
+		wantVersionBackfill bool
 	}{
 		{
 			name: "older observation absent from history bypasses global watermark",
@@ -1240,6 +1243,7 @@ func TestLocalChunkExportUsesObservationHistory(t *testing.T) {
 			},
 			observationUpdated: "2025-01-01 00:00:00",
 			wantEmpty:          true,
+			wantVersionBackfill: true,
 		},
 		{
 			name: "observation tombstone mutation counts as historical presence",
@@ -1322,8 +1326,9 @@ func TestLocalChunkExportUsesObservationHistory(t *testing.T) {
 			if err != nil {
 				t.Fatalf("export: %v", err)
 			}
-			if result.IsEmpty != tc.wantEmpty {
-				t.Fatalf("empty export = %t, want %t", result.IsEmpty, tc.wantEmpty)
+			wantEmpty := tc.wantEmpty && !tc.wantVersionBackfill
+			if result.IsEmpty != wantEmpty {
+				t.Fatalf("empty export = %t, want %t", result.IsEmpty, wantEmpty)
 			}
 			if got := result.SessionsExported; got != boolToInt(tc.wantObservation) {
 				t.Fatalf("exported sessions = %d, want %d", got, boolToInt(tc.wantObservation))
@@ -1345,6 +1350,12 @@ func TestLocalChunkExportUsesObservationHistory(t *testing.T) {
 			}
 			if got := len(exported.Sessions); got != boolToInt(tc.wantObservation) {
 				t.Fatalf("exported sessions = %d, want %d; chunk=%+v", got, boolToInt(tc.wantObservation), exported)
+			}
+			if !tc.wantObservation {
+				if !tc.wantVersionBackfill || len(exported.ObservationVersions) == 0 {
+					t.Fatalf("expected version-only backfill, got %+v", exported)
+				}
+				return
 			}
 			if exported.Sessions[0].ID != sessionID {
 				t.Fatalf("exported session = %q, want parent %q", exported.Sessions[0].ID, sessionID)
@@ -1411,8 +1422,19 @@ func TestLocalChunkExportConvergesAfterImportingHistoricalTombstone(t *testing.T
 	if err != nil {
 		t.Fatalf("repeat export after tombstone import: %v", err)
 	}
-	if !result.IsEmpty {
-		t.Fatalf("repeat export = %+v, want empty", result)
+	if result.IsEmpty {
+		t.Fatal("expected incomplete history version backfill")
+	}
+	payload, err := readGzip(filepath.Join(syncDir, "chunks", result.ChunkID+".jsonl.gz"))
+	if err != nil {
+		t.Fatalf("read history backfill: %v", err)
+	}
+	var chunk ChunkData
+	if err := json.Unmarshal(payload, &chunk); err != nil || len(chunk.Observations) != 0 || len(chunk.Mutations) != 0 || len(chunk.ObservationVersions) != 1 || !chunk.ObservationVersions[0].IsBaseline || chunk.ObservationVersions[0].HistoryComplete {
+		t.Fatalf("incomplete history backfill = %#v, %v", chunk, err)
+	}
+	if repeat, err := New(s, syncDir).Export("alice", "proj-a"); err != nil || !repeat.IsEmpty {
+		t.Fatalf("repeat history backfill export = %#v, %v", repeat, err)
 	}
 }
 
@@ -2083,6 +2105,7 @@ func TestExportErrors(t *testing.T) {
 			t.Fatalf("store export: %v", err)
 		}
 		chunk := sy.filterNewData(data, "")
+		chunk.ObservationVersions = versionsForObservations(data.ObservationVersions, chunk.Observations, nil)
 		chunkJSON, err := json.Marshal(chunk)
 		if err != nil {
 			t.Fatalf("marshal chunk: %v", err)
@@ -2820,7 +2843,7 @@ func TestImportBranches(t *testing.T) {
 			t.Fatalf("write gzip chunk: %v", err)
 		}
 
-		storeApplyPulledChunk = func(_ *store.Store, _, _ string, _ []store.SyncMutation) error {
+		storeApplyPulledChunkWithVersions = func(_ *store.Store, _, _ string, _ []store.SyncMutation, _ []store.ObservationVersion) error {
 			return errors.New("forced apply pulled chunk fail")
 		}
 
@@ -4792,5 +4815,145 @@ func TestCloudSyncPreservesPiPromptIdentityUnderProjectScope(t *testing.T) {
 		if p.SyncID == saved.SyncID {
 			t.Fatalf("prompt %q strayed into project %q after the round trip", saved.SyncID, otherProject)
 		}
+	}
+}
+
+func TestLocalVersionHistoryRoutingAndBackfill(t *testing.T) {
+	project := "proj-a"
+	source := newTestStore(t)
+	if err := source.CreateSession("history-session", project, "/tmp/proj-a"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := source.AddObservation(store.AddObservationParams{SessionID: "history-session", Type: "note", Title: "first", Content: "content", Project: project, Scope: "project"})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	updated := "second"
+	if _, err := source.UpdateObservation(id, store.UpdateObservationParams{Title: &updated}); err != nil {
+		t.Fatalf("update observation: %v", err)
+	}
+	observation, err := source.GetObservation(id)
+	if err != nil {
+		t.Fatalf("get observation: %v", err)
+	}
+	if _, err := source.DB().Exec(`INSERT INTO observation_versions (version_id, observation_id, observation_sync_id, session_id, type, title, content, project, scope, revision_count) SELECT ?, id, sync_id, session_id, type, title, content, project, scope, revision_count FROM observations WHERE id = ?`, "00000000-0000-4000-8000-000000000184", id); err != nil {
+		t.Fatalf("add concurrent history: %v", err)
+	}
+
+	freshDir := filepath.Join(t.TempDir(), ".engram")
+	fresh, err := New(source, freshDir).Export("alice", project)
+	if err != nil || fresh.IsEmpty {
+		t.Fatalf("fresh export = %#v, %v", fresh, err)
+	}
+	payload, err := readGzip(filepath.Join(freshDir, "chunks", fresh.ChunkID+".jsonl.gz"))
+	if err != nil {
+		t.Fatalf("read fresh chunk: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		t.Fatalf("unmarshal fresh chunk: %v", err)
+	}
+	var versions []store.ObservationVersion
+	if err := json.Unmarshal(raw["observation_versions"], &versions); err != nil || len(versions) != 3 {
+		t.Fatalf("fresh versions = %#v, %v; want complete concurrent history", versions, err)
+	}
+	if strings.Index(string(payload), `"observations"`) > strings.Index(string(payload), `"observation_versions"`) {
+		t.Fatal("fresh chunk serialized versions before their parent observations")
+	}
+	destination := newTestStore(t)
+	if result, err := New(destination, freshDir).Import(); err != nil || result.ChunksImported != 1 {
+		t.Fatalf("fresh import = %#v, %v", result, err)
+	}
+	imported, err := destination.ObservationVersions(observation.SyncID, 10)
+	if err != nil || len(imported) != 3 || !imported[0].HistoryComplete || imported[0].RevisionCount != imported[1].RevisionCount {
+		t.Fatalf("fresh imported history = %#v, %v", imported, err)
+	}
+	if result, err := New(destination, freshDir).Import(); err != nil || result.ChunksSkipped != 1 {
+		t.Fatalf("idempotent fresh import = %#v, %v", result, err)
+	}
+	if _, err := source.DB().Exec(`INSERT INTO observation_versions (version_id, observation_id, observation_sync_id, session_id, type, title, content, project, scope, revision_count) SELECT ?, id, sync_id, session_id, type, title, content, project, scope, revision_count FROM observations WHERE id = ?`, "00000000-0000-4000-8000-000000000185", id); err != nil {
+		t.Fatalf("add incremental concurrent history: %v", err)
+	}
+	incremental, err := New(source, freshDir).Export("alice", project)
+	if err != nil || incremental.IsEmpty {
+		t.Fatalf("incremental version export = %#v, %v", incremental, err)
+	}
+	incrementalPayload, err := readGzip(filepath.Join(freshDir, "chunks", incremental.ChunkID+".jsonl.gz"))
+	if err != nil {
+		t.Fatalf("read incremental version chunk: %v", err)
+	}
+	var incrementalChunk ChunkData
+	if err := json.Unmarshal(incrementalPayload, &incrementalChunk); err != nil || len(incrementalChunk.Sessions) != 0 || len(incrementalChunk.Observations) != 0 || len(incrementalChunk.Mutations) != 0 || len(incrementalChunk.ObservationVersions) != 1 || incrementalChunk.ObservationVersions[0].VersionID != "00000000-0000-4000-8000-000000000185" {
+		t.Fatalf("incremental version chunk = %#v, %v; want one version only", incrementalChunk, err)
+	}
+	if repeat, err := New(source, freshDir).Export("alice", project); err != nil || !repeat.IsEmpty {
+		t.Fatalf("repeat acknowledged incremental version export = %#v, %v", repeat, err)
+	}
+
+	legacyDir := filepath.Join(t.TempDir(), ".engram")
+	writeLocalChunkFile(t, legacyDir, "legacy-current", ChunkData{Sessions: []store.Session{{ID: "history-session", Project: project, Directory: "/tmp/proj-a", StartedAt: "2025-01-01 00:00:00"}}, Observations: []store.Observation{*observation}})
+	writeManifestFile(t, legacyDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: "legacy-current", CreatedAt: "2099-01-01T00:00:00Z"}}})
+	legacyDestination := newTestStore(t)
+	if _, err := New(legacyDestination, legacyDir).Import(); err != nil {
+		t.Fatalf("legacy current-state import: %v", err)
+	}
+	legacyHistory, err := legacyDestination.ObservationVersions(observation.SyncID, 10)
+	if err != nil || len(legacyHistory) != 1 || !legacyHistory[0].IsBaseline || legacyHistory[0].HistoryComplete {
+		t.Fatalf("legacy history = %#v, %v; want incomplete baseline", legacyHistory, err)
+	}
+	if _, err := legacyDestination.DB().Exec(`UPDATE observations SET title = 'newer destination' WHERE sync_id = ?`, observation.SyncID); err != nil {
+		t.Fatalf("seed newer destination projection: %v", err)
+	}
+	backfill, err := New(source, legacyDir).Export("alice", project)
+	if err != nil || backfill.IsEmpty {
+		t.Fatalf("legacy history backfill = %#v, %v", backfill, err)
+	}
+	backfillPayload, err := readGzip(filepath.Join(legacyDir, "chunks", backfill.ChunkID+".jsonl.gz"))
+	if err != nil {
+		t.Fatalf("read version-only backfill: %v", err)
+	}
+	var backfillChunk ChunkData
+	if err := json.Unmarshal(backfillPayload, &backfillChunk); err != nil || len(backfillChunk.Observations) != 0 || len(backfillChunk.Mutations) != 0 || len(backfillChunk.ObservationVersions) != 4 {
+		t.Fatalf("backfill chunk = %#v, %v; want all known-parent versions only", backfillChunk, err)
+	}
+	if _, err := New(legacyDestination, legacyDir).Import(); err != nil {
+		t.Fatalf("import version-only backfill: %v", err)
+	}
+	projection, err := legacyDestination.GetObservationBySyncID(observation.SyncID)
+	if err != nil || projection.Title != "newer destination" {
+		t.Fatalf("backfill replayed current projection = %#v, %v", projection, err)
+	}
+	if repeat, err := New(source, legacyDir).Export("alice", project); err != nil || !repeat.IsEmpty {
+		t.Fatalf("repeat known backfill export = %#v, %v", repeat, err)
+	}
+}
+
+func TestCloudExportExcludesObservationVersions(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnrollProject("proj-a"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+	if err := s.CreateSession("cloud-history", "proj-a", "/tmp/proj-a"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := s.AddObservation(store.AddObservationParams{SessionID: "cloud-history", Type: "note", Title: "cloud", Content: "history", Project: "proj-a", Scope: "project"})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	updated := "cloud updated"
+	if _, err := s.UpdateObservation(id, store.UpdateObservationParams{Title: &updated}); err != nil {
+		t.Fatalf("update observation: %v", err)
+	}
+	transport := newFakeCloudTransport()
+	result, err := NewCloudWithTransport(s, transport, "proj-a").Export("alice", "proj-a")
+	if err != nil || result.IsEmpty {
+		t.Fatalf("cloud export = %#v, %v", result, err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(transport.chunks[result.ChunkID], &raw); err != nil {
+		t.Fatalf("unmarshal cloud chunk: %v", err)
+	}
+	if _, present := raw["observation_versions"]; present {
+		t.Fatalf("cloud chunk must not contain observation versions: %s", transport.chunks[result.ChunkID])
 	}
 }
