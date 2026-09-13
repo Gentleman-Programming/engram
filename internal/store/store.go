@@ -98,6 +98,9 @@ var (
 
 	// ErrPulledSessionIdentityInvalid identifies an invalid identity after successful decoding and legacy fallback.
 	ErrPulledSessionIdentityInvalid = errors.New("pulled session identity is invalid")
+	// ErrPulledSessionDirectoryInvalid identifies a pulled or imported session that
+	// has no concrete directory and therefore cannot be admitted as cloud state.
+	ErrPulledSessionDirectoryInvalid = errors.New("pulled session directory is invalid")
 )
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -411,6 +414,21 @@ type SyncMutationQuarantineReport struct {
 	Project string                         `json:"project,omitempty"`
 	Applied bool                           `json:"applied"`
 	Actions []SyncMutationQuarantineAction `json:"actions"`
+}
+
+// ForeignSyncTargetCleanupAction records one foreign target cleanup classification.
+type ForeignSyncTargetCleanupAction struct {
+	TargetKey           string `json:"target_key"`
+	RetargetedMutations int64  `json:"retargeted_mutations"`
+	RetainedMutations   int64  `json:"retained_mutations"`
+	StateRemoved        bool   `json:"state_removed"`
+}
+
+// ForeignSyncTargetCleanupReport is the result of planning or applying closed
+// sync-target cleanup. Planning returns the same actions without mutating data.
+type ForeignSyncTargetCleanupReport struct {
+	Applied bool                             `json:"applied"`
+	Actions []ForeignSyncTargetCleanupAction `json:"actions"`
 }
 
 type PendingSyncMutationProjectCount struct {
@@ -5069,6 +5087,9 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 		if err := validateSessionID(sess.ID); err != nil {
 			return nil, fmt.Errorf("import session: %w", err)
 		}
+		if strings.TrimSpace(sess.Directory) == "" {
+			return nil, fmt.Errorf("import session %s: %w: directory is required", sess.ID, ErrPulledSessionDirectoryInvalid)
+		}
 		if strings.TrimSpace(sess.OwnershipMode) != "" && !validSessionOwnershipMode(sess.OwnershipMode) {
 			return nil, fmt.Errorf("import session %s: %w %q", sess.ID, ErrInvalidSessionOwnershipMode, sess.OwnershipMode)
 		}
@@ -7560,8 +7581,8 @@ func (s *Store) createSessionTx(tx *sql.Tx, id, project, directory, mode string)
 		 ON CONFLICT(id) DO UPDATE SET
 		   project   = CASE WHEN ifnull(trim(sessions.project, ?), '') = '' THEN excluded.project ELSE sessions.project END,
 		   ownership_mode = CASE WHEN ifnull(trim(sessions.ownership_mode, ?), '') = '' THEN excluded.ownership_mode ELSE sessions.ownership_mode END,
-		   directory = CASE WHEN sessions.directory = '' THEN excluded.directory ELSE sessions.directory END`,
-		id, project, mode, directory, sqlWhitespaceTrimSet, sqlWhitespaceTrimSet,
+		   directory = CASE WHEN trim(sessions.directory, ?) = '' THEN excluded.directory ELSE sessions.directory END`,
+		id, project, mode, directory, sqlWhitespaceTrimSet, sqlWhitespaceTrimSet, sqlWhitespaceTrimSet,
 	)
 	return err
 }
@@ -7572,9 +7593,9 @@ func (s *Store) startSessionTx(tx *sql.Tx, id, project, directory, mode string) 
 		 ON CONFLICT(id) DO UPDATE SET
 		   project   = CASE WHEN ifnull(trim(sessions.project, ?), '') = '' THEN excluded.project ELSE sessions.project END,
 		   ownership_mode = CASE WHEN ifnull(trim(sessions.ownership_mode, ?), '') = '' THEN excluded.ownership_mode ELSE sessions.ownership_mode END,
-		   directory = CASE WHEN sessions.directory = '' THEN excluded.directory ELSE sessions.directory END
+		   directory = CASE WHEN trim(sessions.directory, ?) = '' THEN excluded.directory ELSE sessions.directory END
 		 WHERE sessions.ended_at IS NULL`,
-		id, project, mode, directory, sqlWhitespaceTrimSet, sqlWhitespaceTrimSet,
+		id, project, mode, directory, sqlWhitespaceTrimSet, sqlWhitespaceTrimSet, sqlWhitespaceTrimSet,
 	)
 	if err != nil {
 		return err
@@ -7617,6 +7638,95 @@ type SyncTargetState struct {
 	TargetKey        string `json:"target_key"`
 	Lifecycle        string `json:"lifecycle"`
 	UnackedMutations int    `json:"unacked_mutations"`
+}
+
+// CleanupForeignSyncTargets retargets pending foreign rows to cloud and removes
+// their state only when no terminal journal rows remain.
+func (s *Store) CleanupForeignSyncTargets(apply bool) (ForeignSyncTargetCleanupReport, error) {
+	report := ForeignSyncTargetCleanupReport{Actions: []ForeignSyncTargetCleanupAction{}}
+	err := s.withTx(func(tx *sql.Tx) error {
+		rows, err := s.queryItHook(tx, `
+			SELECT ss.target_key,
+				SUM(CASE WHEN sm.acked_at IS NULL AND sm.disposition = 'pending' AND EXISTS(SELECT 1 FROM sync_enrolled_projects sep WHERE sep.project = sm.project) THEN 1 ELSE 0 END),
+				COUNT(sm.seq) - SUM(CASE WHEN sm.acked_at IS NULL AND sm.disposition = 'pending' AND EXISTS(SELECT 1 FROM sync_enrolled_projects sep WHERE sep.project = sm.project) THEN 1 ELSE 0 END)
+			FROM sync_state ss
+			LEFT JOIN sync_mutations sm ON sm.target_key = ss.target_key
+			WHERE ss.target_key NOT IN (?, ?, ?)
+			  AND NOT EXISTS (
+				SELECT 1 FROM sync_enrolled_projects sep
+				WHERE ss.target_key = ? || sep.project
+			  )
+			GROUP BY ss.target_key
+			ORDER BY ss.target_key ASC`,
+			DefaultSyncTargetKey, SyncInboxTargetKey, LocalChunkTargetKey, DefaultSyncTargetKey+":")
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var action ForeignSyncTargetCleanupAction
+			if err := rows.Scan(&action.TargetKey, &action.RetargetedMutations, &action.RetainedMutations); err != nil {
+				return closeRowsWithError(rows, err)
+			}
+			action.StateRemoved = action.RetainedMutations == 0
+			report.Actions = append(report.Actions, action)
+		}
+		if err := closeRowsWithError(rows, rows.Err()); err != nil {
+			return err
+		}
+		if !apply || len(report.Actions) == 0 {
+			return nil
+		}
+
+		affectedProjects := map[string]struct{}{}
+		movedAny, stateRemovedAny := false, false
+		for _, action := range report.Actions {
+			if action.RetargetedMutations > 0 {
+				projectRows, err := s.queryItHook(tx, `SELECT DISTINCT sm.project FROM sync_mutations sm JOIN sync_enrolled_projects sep ON sep.project = sm.project WHERE sm.target_key = ? AND sm.acked_at IS NULL AND sm.disposition = ?`, action.TargetKey, SyncMutationDispositionPending)
+				if err != nil {
+					return err
+				}
+				for projectRows.Next() {
+					var project string
+					if err := projectRows.Scan(&project); err != nil {
+						return closeRowsWithError(projectRows, err)
+					}
+					affectedProjects[project] = struct{}{}
+				}
+				if err := closeRowsWithError(projectRows, projectRows.Err()); err != nil {
+					return err
+				}
+				if _, err := s.execHook(tx, `UPDATE sync_mutations SET target_key = ? WHERE target_key = ? AND acked_at IS NULL AND disposition = ? AND EXISTS(SELECT 1 FROM sync_enrolled_projects sep WHERE sep.project = sync_mutations.project)`, DefaultSyncTargetKey, action.TargetKey, SyncMutationDispositionPending); err != nil {
+					return err
+				}
+				movedAny = true
+			}
+			if action.StateRemoved {
+				if _, err := s.execHook(tx, `DELETE FROM sync_state WHERE target_key = ?`, action.TargetKey); err != nil {
+					return err
+				}
+				stateRemovedAny = true
+			}
+		}
+		if movedAny {
+			if _, err := s.execHook(tx, `UPDATE sync_state SET last_enqueued_seq = MAX(last_enqueued_seq, (SELECT ifnull(MAX(seq), 0) FROM sync_mutations WHERE target_key = ?)), last_acked_seq = MAX(last_acked_seq, (SELECT ifnull(MAX(seq), 0) FROM sync_mutations WHERE target_key = ? AND acked_at IS NOT NULL)), updated_at = datetime('now') WHERE target_key = ?`, DefaultSyncTargetKey, DefaultSyncTargetKey, DefaultSyncTargetKey); err != nil {
+				return err
+			}
+			if err := s.refreshSyncLifecycleTx(tx, DefaultSyncTargetKey); err != nil {
+				return err
+			}
+			for project := range affectedProjects {
+				if err := s.refreshProjectSyncLifecycleTx(tx, project); err != nil {
+					return err
+				}
+			}
+		}
+		report.Applied = movedAny || stateRemovedAny
+		return nil
+	})
+	if err != nil {
+		return ForeignSyncTargetCleanupReport{}, fmt.Errorf("cleanup foreign sync targets: %w", err)
+	}
+	return report, nil
 }
 
 // ListSyncStates returns every sync_state row with its pending mutation count,
@@ -8573,6 +8683,11 @@ func (s *Store) enqueueSyncMutationWithSourceTx(tx *sql.Tx, entity, entityKey, o
 	if source == "" {
 		source = SyncSourceLocal
 	}
+	if source == SyncSourceLocal && entity == SyncEntitySession && op == SyncOpUpsert {
+		if session, ok := payload.(syncSessionPayload); ok && strings.TrimSpace(session.Directory) == "" {
+			return nil
+		}
+	}
 	if op == SyncOpUpsert {
 		if err := s.clearSyncDeleteTombstoneForUpsertTx(tx, entity, entityKey); err != nil {
 			return err
@@ -8604,6 +8719,14 @@ func (s *Store) enqueueSyncMutationWithSourceTx(tx *sql.Tx, entity, entityKey, o
 		}
 		if !enrolled {
 			return nil
+		}
+	}
+	if source == SyncSourceLocal && entity == SyncEntitySession && op == SyncOpUpsert {
+		if _, err := s.execHook(tx, `DELETE FROM sync_mutations
+			WHERE target_key = ? AND entity = ? AND entity_key = ? AND op = ? AND source = ? AND project = ? AND acked_at IS NULL`,
+			DefaultSyncTargetKey, entity, entityKey, op, source, project,
+		); err != nil {
+			return err
 		}
 	}
 	if _, err := s.execHook(tx,
@@ -8893,6 +9016,9 @@ func (s *Store) applyPulledMutationTx(tx *sql.Tx, mutation SyncMutation) error {
 		if mutation.Op == SyncOpDelete || isSessionDeletePayload(payload) {
 			return s.applySessionDeleteTx(tx, payload)
 		}
+		if err := validatePulledSessionDirectory([]byte(mutation.Payload)); err != nil {
+			return err
+		}
 		return s.applySessionPayloadTx(tx, payload)
 	case SyncEntityObservation:
 		var payload syncObservationPayload
@@ -8915,6 +9041,22 @@ func (s *Store) applyPulledMutationTx(tx *sql.Tx, mutation SyncMutation) error {
 	default:
 		return fmt.Errorf("unknown sync entity %q", mutation.Entity)
 	}
+}
+
+func validatePulledSessionDirectory(raw []byte) error {
+	var fields map[string]json.RawMessage
+	if err := decodeSyncPayload(raw, &fields); err != nil {
+		return err
+	}
+	directory, ok := fields["directory"]
+	if !ok {
+		return fmt.Errorf("%w: directory is required", ErrPulledSessionDirectoryInvalid)
+	}
+	var value string
+	if err := json.Unmarshal(directory, &value); err != nil || strings.TrimSpace(value) == "" {
+		return fmt.Errorf("%w: directory must be non-blank", ErrPulledSessionDirectoryInvalid)
+	}
+	return nil
 }
 
 // pulledSessionDeadLetterSyncID derives the identity of a quarantined pulled

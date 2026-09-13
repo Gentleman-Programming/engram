@@ -608,6 +608,9 @@ test("an opaque runtime session ID stays byte-identical through registration, co
   // identity, so normalizing it anywhere would split registration from
   // compaction and strand the cache entry that shutdown tries to clear.
   const runtimeSessionId = "  pi-runtime-session-id  ";
+  const sessionEndBodies = [];
+  const sessionEndMethods = [];
+  let failSessionEndRequest = false;
   const sessionBodies = [];
   const observationBodies = [];
   globalThis.fetch = async (url, init) => {
@@ -623,6 +626,16 @@ test("an opaque runtime session ID stays byte-identical through registration, co
     if (path === "/observations") {
       observationBodies.push(JSON.parse(init.body));
       return { ok: true, status: 201, async json() { return { id: observationBodies.length }; } };
+    }
+    if (path === `/sessions/${encodeURIComponent(runtimeSessionId)}/end`) {
+      sessionEndBodies.push(JSON.parse(init.body));
+      sessionEndMethods.push(init.method ?? "GET");
+      if (failSessionEndRequest) {
+        const timeout = new Error("session end timed out");
+        timeout.name = "TimeoutError";
+        throw timeout;
+      }
+      return { ok: true, async json() { return { status: "ended" }; } };
     }
     if (path === "/context") return { ok: true, async json() { return { context: "" }; } };
     return { ok: true, async json() { return {}; } };
@@ -648,11 +661,45 @@ test("an opaque runtime session ID stays byte-identical through registration, co
       assert.equal(compactionSummary.session_id, runtimeSessionId, "compaction must attribute the summary to the exact identity");
 
       await eventHandlers.get("session_shutdown")({}, ctx);
+      assert.deepEqual(sessionEndBodies, [{ summary: "" }], "shutdown must end the exact registered runtime session");
+      assert.deepEqual(sessionEndMethods, ["POST"], "shutdown must use the session-end POST contract");
+      await eventHandlers.get("session_shutdown")({}, ctx);
+      assert.equal(sessionEndBodies.length, 1, "repeated shutdown must not end an already discarded session twice");
 
+      await eventHandlers.get("session_start")({}, ctx);
       const afterShutdown = await memSave.execute("exact-2", { title: "second", content: "two" }, undefined, undefined, ctx);
       assert.equal(afterShutdown.isError, undefined);
       assert.equal(sessionBodies.length, 2, "shutdown must clear the cached entry so nothing is left behind");
       assert.equal(sessionBodies[1].id, runtimeSessionId, "re-registration must still use the exact runtime identity");
+
+      const memSessionEnd = registeredTools.get("mem_session_end");
+      const explicitlyEnded = await memSessionEnd.execute("explicit-end", { id: runtimeSessionId }, undefined, undefined, ctx);
+      assert.equal(explicitlyEnded.isError, undefined, "an explicit session end should succeed");
+      assert.equal(sessionEndBodies.length, 2, "the explicit end request must reach Engram once");
+      await eventHandlers.get("session_shutdown")({}, ctx);
+      assert.equal(sessionEndBodies.length, 2, "shutdown must not repeat a successful explicit end");
+
+      await eventHandlers.get("session_start")({}, ctx);
+      const afterExplicitEnd = await memSave.execute("exact-3", { title: "third", content: "three" }, undefined, undefined, ctx);
+      assert.equal(afterExplicitEnd.isError, undefined);
+      assert.equal(sessionBodies.length, 3, "an explicitly ended session must re-register before later writes");
+
+      failSessionEndRequest = true;
+      const failedExplicitEnd = await memSessionEnd.execute("failed-explicit-end", { id: runtimeSessionId }, undefined, undefined, ctx);
+      assert.equal(failedExplicitEnd.isError, true, "a failed explicit end must surface a tool error");
+      await eventHandlers.get("session_shutdown")({}, ctx);
+      assert.equal(sessionEndBodies.length, 3, "shutdown must not retry an uncertain explicit end");
+      await eventHandlers.get("session_start")({}, ctx);
+      const afterFailedShutdown = await memSave.execute("exact-4", { title: "fourth", content: "four" }, undefined, undefined, ctx);
+      assert.equal(afterFailedShutdown.isError, undefined, "a failed session end must not prevent cleanup");
+      assert.equal(sessionBodies.length, 4, "failed shutdown delivery must still clear the registration cache");
+
+      await eventHandlers.get("session_shutdown")({}, ctx);
+      assert.equal(sessionEndBodies.length, 4, "a timed-out shutdown must still send only one end request");
+      await eventHandlers.get("session_start")({}, ctx);
+      const afterTimedOutShutdown = await memSave.execute("exact-5", { title: "fifth", content: "five" }, undefined, undefined, ctx);
+      assert.equal(afterTimedOutShutdown.isError, undefined, "a timed-out shutdown must still clear the registration cache");
+      assert.equal(sessionBodies.length, 5, "writes after a timed-out shutdown must re-register");
     });
   } finally {
     globalThis.fetch = originalFetch;
@@ -661,7 +708,227 @@ test("an opaque runtime session ID stays byte-identical through registration, co
   }
 });
 
-test("compaction recovery notice stays scoped to the exact cached runtime session", async () => {
+test("Pi session shutdown serializes end delivery and waits for registration", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const endCalls = [];
+  const endStarted = deferred();
+  const endGate = deferred();
+  globalThis.fetch = async (url, init = {}) => {
+    const path = new URL(url).pathname;
+    if (path === "/health") return new Response(JSON.stringify({ status: "ok" }));
+    if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
+    if (path === "/sessions") return new Response(JSON.stringify({ status: "created" }));
+    if (path.endsWith("/end")) {
+      endCalls.push({ method: init.method ?? "GET", body: JSON.parse(init.body) });
+      endStarted.resolve();
+      await endGate.promise;
+      return new Response(JSON.stringify({ status: "ended" }));
+    }
+    if (path === "/observations") return new Response(JSON.stringify({ id: 1 }));
+    throw new Error(`unexpected request: ${path}`);
+  };
+
+  try {
+    await withPluginSandbox("engram-pi-contract-", async ({ sandbox }) => {
+      const { registeredTools, eventHandlers } = await loadPluginHarness(sandbox);
+      const ctx = runtimeContext("concurrent-shutdown-session");
+      await registeredTools.get("mem_save").execute("register", { title: "one", content: "one" }, undefined, undefined, ctx);
+      const firstShutdown = eventHandlers.get("session_shutdown")({}, ctx);
+      await endStarted.promise;
+      const explicitEnd = registeredTools.get("mem_session_end").execute("concurrent-explicit-end", { id: "concurrent-shutdown-session" }, undefined, undefined, ctx);
+      const secondShutdown = eventHandlers.get("session_shutdown")({}, ctx);
+      endGate.resolve();
+      const [, explicitEndResult] = await Promise.all([firstShutdown, explicitEnd, secondShutdown]);
+      assert.equal(explicitEndResult.isError, undefined, "an explicit end must join shutdown delivery");
+      assert.deepEqual(endCalls, [{ method: "POST", body: { summary: "" } }], "concurrent shutdown and explicit end must send one POST");
+
+      await eventHandlers.get("session_start")({}, runtimeContext(undefined));
+      await eventHandlers.get("session_shutdown")({}, runtimeContext(undefined));
+      assert.equal(endCalls.length, 1, "missing runtime identity must not send an end request");
+    });
+
+    const registrationGate = deferred();
+    const registrationStarted = deferred();
+    const raceEndCalls = [];
+    globalThis.fetch = async (url, init = {}) => {
+      const path = new URL(url).pathname;
+      if (path === "/health") return new Response(JSON.stringify({ status: "ok" }));
+      if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
+      if (path === "/sessions") {
+        registrationStarted.resolve();
+        await registrationGate.promise;
+        return new Response(JSON.stringify({ status: "created" }));
+      }
+      if (path.endsWith("/end")) {
+        raceEndCalls.push({ method: init.method ?? "GET", body: JSON.parse(init.body) });
+        return new Response(JSON.stringify({ status: "ended" }));
+      }
+      if (path === "/observations") return new Response(JSON.stringify({ id: 1 }));
+      throw new Error(`unexpected request: ${path}`);
+    };
+    await withPluginSandbox("engram-pi-contract-", async ({ sandbox }) => {
+      const { registeredTools, eventHandlers } = await loadPluginHarness(sandbox);
+      const ctx = runtimeContext("registration-race-session");
+      const write = registeredTools.get("mem_save").execute("register-race", { title: "one", content: "one" }, undefined, undefined, ctx);
+      await registrationStarted.promise;
+      const shutdown = eventHandlers.get("session_shutdown")({}, ctx);
+      registrationGate.resolve();
+      await Promise.all([write, shutdown]);
+      assert.deepEqual(raceEndCalls, [{ method: "POST", body: { summary: "" } }], "shutdown must end a registration that was already in flight");
+    });
+
+    const uncertainRegistration = deferred();
+    const uncertainRegistrationStarted = deferred();
+    const uncertainEndCalls = [];
+    globalThis.fetch = async (url, init = {}) => {
+      const path = new URL(url).pathname;
+      if (path === "/health") return new Response(JSON.stringify({ status: "ok" }));
+      if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
+      if (path === "/sessions") {
+        uncertainRegistrationStarted.resolve();
+        await uncertainRegistration.promise;
+        const timeout = new Error("registration timed out");
+        timeout.name = "TimeoutError";
+        throw timeout;
+      }
+      if (path.endsWith("/end")) {
+        uncertainEndCalls.push({ method: init.method ?? "GET", body: JSON.parse(init.body) });
+        return new Response(JSON.stringify({ status: "ended" }));
+      }
+      throw new Error(`unexpected request: ${path}`);
+    };
+    await withPluginSandbox("engram-pi-contract-", async ({ sandbox }) => {
+      const { registeredTools } = await loadPluginHarness(sandbox);
+      const ctx = runtimeContext("uncertain-registration-session");
+      const write = registeredTools.get("mem_save").execute("register-uncertain", { title: "one", content: "one" }, undefined, undefined, ctx);
+      await uncertainRegistrationStarted.promise;
+      const explicitEnd = registeredTools.get("mem_session_end").execute("end-uncertain", { id: "uncertain-registration-session" }, undefined, undefined, ctx);
+      uncertainRegistration.resolve();
+      const [writeResult, endResult] = await Promise.all([write, explicitEnd]);
+      assert.equal(writeResult.isError, true, "the registration outcome is uncertain");
+      assert.equal(endResult.isError, undefined, "explicit end must still attempt delivery");
+      assert.deepEqual(uncertainEndCalls, [{ method: "POST", body: { summary: "" } }]);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+test("shutdown closes a paused hook until the same runtime session starts again", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const projectLookupStarted = deferred();
+  const projectLookup = deferred();
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const path = new URL(url).pathname;
+    calls.push({ method: init.method ?? "GET", path });
+    if (path === "/project/current") {
+      projectLookupStarted.resolve();
+      return projectLookup.promise;
+    }
+    if (path === "/sessions") return new Response(JSON.stringify({ status: "created" }));
+    if (path === "/prompts") return new Response(JSON.stringify({ id: 1 }));
+    throw new Error(`unexpected request: ${path}`);
+  };
+
+  try {
+    await withPluginSandbox("engram-pi-contract-", async ({ sandbox }) => {
+      const { eventHandlers } = await loadPluginHarness(sandbox);
+      const ctx = runtimeContext("closing-race-session");
+      const pendingHook = eventHandlers.get("before_agent_start")({ systemPrompt: "base", prompt: "a prompt that should not be captured" }, ctx);
+      await projectLookupStarted.promise;
+      await eventHandlers.get("session_shutdown")({}, ctx);
+      projectLookup.resolve(new Response(JSON.stringify({ project: "pi" })));
+      await pendingHook;
+      assert.equal(calls.filter((call) => call.method === "POST").length, 0, "a hook paused before registration must not write after shutdown");
+
+      await eventHandlers.get("session_start")({}, ctx);
+      await eventHandlers.get("before_agent_start")({ systemPrompt: "base", prompt: "a prompt that may be captured now" }, ctx);
+      assert.deepEqual(calls.filter((call) => call.method === "POST").map((call) => call.path), ["/sessions", "/prompts"], "same-ID session_start must reopen registration");
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
+test("shutdown stops passive capture after registration", async () => {
+      const originalFetch = globalThis.fetch;
+      const originalUrl = process.env.ENGRAM_URL;
+      process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+      const calls = [];
+      let shutdown;
+      globalThis.fetch = async (url, init = {}) => {
+        const path = new URL(url).pathname;
+        calls.push({ method: init.method ?? "GET", path });
+        if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
+        if (path === "/sessions") return new Response(JSON.stringify({ status: "created" }));
+        if (path.endsWith("/end")) return new Response(JSON.stringify({ status: "ended" }));
+        if (path === "/observations/passive") return new Response(JSON.stringify({ id: 1 }));
+        throw new Error(`unexpected request: ${path}`);
+      };
+
+      try {
+        await withPluginSandbox("engram-pi-contract-", async ({ sandbox }) => {
+          const { eventHandlers } = await loadPluginHarness(sandbox);
+          const ctx = runtimeContext("post-registration-shutdown");
+          let resultReads = 0;
+          await eventHandlers.get("tool_execution_end")({
+            toolName: "shell",
+            get result() {
+              resultReads += 1;
+              if (resultReads === 1) shutdown = eventHandlers.get("session_shutdown")({}, ctx);
+              return "this eligible tool result is long enough for passive capture";
+            },
+          }, ctx);
+          await shutdown;
+          assert.equal(calls.filter((call) => call.path === "/observations/passive").length, 0, "shutdown after registration must stop passive capture");
+        });
+      } finally {
+        globalThis.fetch = originalFetch;
+        if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+        else process.env.ENGRAM_URL = originalUrl;
+      }
+    });
+
+    test("failed session registration stops prompt capture", async () => {
+      const originalFetch = globalThis.fetch;
+      const originalUrl = process.env.ENGRAM_URL;
+      process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+      const calls = [];
+      globalThis.fetch = async (url, init = {}) => {
+        const path = new URL(url).pathname;
+        calls.push({ method: init.method ?? "GET", path });
+        if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
+        if (path === "/sessions") return new Response(JSON.stringify({ error: "registration unavailable" }), { status: 503 });
+        if (path === "/prompts") return new Response(JSON.stringify({ id: 1 }));
+        throw new Error(`unexpected request: ${path}`);
+      };
+
+      try {
+        await withPluginSandbox("engram-pi-contract-", async ({ sandbox }) => {
+          const { eventHandlers } = await loadPluginHarness(sandbox);
+          await eventHandlers.get("before_agent_start")(
+            { systemPrompt: "base", prompt: "a prompt that must not follow failed registration" },
+            runtimeContext("failed-registration-session"),
+          );
+          assert.deepEqual(calls.filter((call) => call.method === "POST").map((call) => call.path), ["/sessions"]);
+        });
+      } finally {
+        globalThis.fetch = originalFetch;
+        if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+        else process.env.ENGRAM_URL = originalUrl;
+      }
+    });
+
+    test("compaction recovery notice stays scoped to the exact cached runtime session", async () => {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.ENGRAM_URL;
   process.env.ENGRAM_URL = "http://127.0.0.1:17437";

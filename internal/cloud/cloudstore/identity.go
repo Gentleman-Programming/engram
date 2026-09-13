@@ -20,6 +20,11 @@ const (
 
 	PrincipalRoleAdmin  = "admin"
 	PrincipalRoleMember = "member"
+
+	strandedAdminRecoveryAuditActorSource = "bootstrap_cli"
+	strandedAdminRecoveryAuditAction      = "bootstrap.cli"
+	strandedAdminRecoveryAuditOutcome     = "success"
+	strandedAdminRecoveryAuditReason      = "stranded_admin_token_recovered"
 )
 
 var (
@@ -99,9 +104,10 @@ type CreatePrincipalTokenParams struct {
 // RecoverStrandedAdminTokenParams contains the non-secret token data needed to
 // recover the single admin left without a token by a failed bootstrap.
 type RecoverStrandedAdminTokenParams struct {
-	TokenPrefix string
-	TokenHash   string
-	Name        string
+	TokenPrefix    string
+	TokenHash      string
+	Name           string
+	RevokeExisting bool
 }
 
 type ProjectGrant struct {
@@ -248,6 +254,16 @@ func (cs *CloudStore) CreateHumanUser(ctx context.Context, params CreateHumanUse
 		return HumanUser{}, fmt.Errorf("cloudstore: begin human user tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	// New admins have no existing principal row to lock, so acquire the shared
+	// guard before their enabled principal can become visible. This matches
+	// first-admin creation and serializes recovery eligibility with every
+	// enabled managed-human admin creation.
+	if role == PrincipalRoleAdmin {
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext('engram_cloud_active_admin_guard'))`); err != nil {
+			return HumanUser{}, fmt.Errorf("cloudstore: lock active admin guard: %w", err)
+		}
+	}
 
 	var principal Principal
 	const principalQ = `
@@ -487,9 +503,11 @@ func (cs *CloudStore) CreatePrincipalTokenWithAudit(ctx context.Context, params 
 
 // RecoverStrandedAdminTokenWithAudit atomically issues a token to the sole
 // enabled managed human admin only when no principal token exists anywhere in
-// the deployment. It is intentionally narrower than normal token issuance:
-// it repairs only the partial state left by the historical bootstrap audit
-// failure, preserves all grants, and cannot be repeated after a token exists.
+// the deployment. With RevokeExisting, it may instead replace exactly one
+// unused active token belonging to that admin. It is intentionally narrower
+// than normal token issuance: it repairs only the partial state left by the
+// historical bootstrap audit failure and preserves all grants. Explicit
+// replacement remains available only while exactly one active token is unused.
 func (cs *CloudStore) RecoverStrandedAdminTokenWithAudit(ctx context.Context, params RecoverStrandedAdminTokenParams, audit AuthAuditEvent) (PrincipalToken, error) {
 	if cs == nil || cs.db == nil {
 		return PrincipalToken{}, fmt.Errorf("cloudstore: not initialized")
@@ -530,15 +548,50 @@ func (cs *CloudStore) RecoverStrandedAdminTokenWithAudit(ctx context.Context, pa
 		return PrincipalToken{}, fmt.Errorf("%w: requires exactly one enabled managed human admin, found %d", ErrStrandedAdminRecoveryIneligible, len(adminIDs))
 	}
 
+	principalID := adminIDs[0]
 	var tokenCount int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM cloud_principal_tokens`).Scan(&tokenCount); err != nil {
 		return PrincipalToken{}, fmt.Errorf("cloudstore: count stranded admin recovery tokens: %w", err)
 	}
+
 	if tokenCount != 0 {
-		return PrincipalToken{}, fmt.Errorf("%w: requires zero principal tokens, found %d", ErrStrandedAdminRecoveryIneligible, tokenCount)
+		if !params.RevokeExisting {
+			return PrincipalToken{}, fmt.Errorf("%w: requires zero principal tokens, found %d", ErrStrandedAdminRecoveryIneligible, tokenCount)
+		}
+		var existing PrincipalToken
+		var activeTokenCount int
+		err := tx.QueryRowContext(ctx, `
+			SELECT id::text, principal_id::text, last_used_at, revoked_at,
+				(SELECT COUNT(*) FROM cloud_principal_tokens WHERE revoked_at IS NULL)
+			FROM cloud_principal_tokens
+			WHERE revoked_at IS NULL
+			ORDER BY id
+			LIMIT 1
+			FOR UPDATE`).Scan(&existing.ID, &existing.PrincipalID, &existing.LastUsedAt, &existing.RevokedAt, &activeTokenCount)
+		if errors.Is(err, sql.ErrNoRows) {
+			return PrincipalToken{}, fmt.Errorf("%w: replacement requires exactly one active principal token, found 0", ErrStrandedAdminRecoveryIneligible)
+		}
+		if err != nil {
+			return PrincipalToken{}, fmt.Errorf("cloudstore: lock active stranded admin recovery token: %w", err)
+		}
+		if activeTokenCount != 1 {
+			return PrincipalToken{}, fmt.Errorf("%w: replacement requires exactly one active principal token, found %d", ErrStrandedAdminRecoveryIneligible, activeTokenCount)
+		}
+		if existing.PrincipalID != principalID || existing.LastUsedAt != nil {
+			return PrincipalToken{}, fmt.Errorf("%w: replacement requires one unused active token owned by the sole enabled managed human admin", ErrStrandedAdminRecoveryIneligible)
+		}
+		res, err := tx.ExecContext(ctx, `
+			UPDATE cloud_principal_tokens
+			SET revoked_at = NOW(), revoked_by_principal_id = $2, revocation_reason = $3
+			WHERE id = $1 AND revoked_at IS NULL`, existing.ID, principalID, "stranded_admin_token_replaced")
+		if err != nil {
+			return PrincipalToken{}, fmt.Errorf("cloudstore: revoke stranded admin recovery token: %w", err)
+		}
+		if err := requireAffected(res, "principal token"); err != nil {
+			return PrincipalToken{}, err
+		}
 	}
 
-	principalID := adminIDs[0]
 	const q = `
 		INSERT INTO cloud_principal_tokens (principal_id, token_prefix, token_hash, name, created_by_principal_id)
 		VALUES ($1, $2, $3, $4, $1)
@@ -548,9 +601,15 @@ func (cs *CloudStore) RecoverStrandedAdminTokenWithAudit(ctx context.Context, pa
 		return PrincipalToken{}, fmt.Errorf("cloudstore: create stranded admin recovery token: %w", err)
 	}
 
-	// The store owns the target identity so a caller cannot create an audit
-	// event that claims recovery for a different principal.
+	// The store owns every durable recovery-marker dimension so callers cannot
+	// create a lookalike marker or claim recovery for another principal.
+	audit.ActorPrincipalID = ""
+	audit.ActorSource = strandedAdminRecoveryAuditActorSource
 	audit.TargetPrincipalID = principalID
+	audit.Project = ""
+	audit.Action = strandedAdminRecoveryAuditAction
+	audit.Outcome = strandedAdminRecoveryAuditOutcome
+	audit.ReasonCode = strandedAdminRecoveryAuditReason
 	if err := insertAuthAuditEvent(ctx, tx, audit); err != nil {
 		return PrincipalToken{}, fmt.Errorf("%w: %w", ErrAuthAuditInsertFailed, err)
 	}
