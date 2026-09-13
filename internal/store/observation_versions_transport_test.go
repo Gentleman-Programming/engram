@@ -246,3 +246,28 @@ func TestImportObservationVersionsLegacyAndAtomic(t *testing.T) {
 		}
 	}
 }
+
+func TestImportMixedVersionsCreatesOnlyLegacyBaseline(t *testing.T) {
+	project, at := "proj", "2099-01-01 00:00:00"
+	versioned := ObservationVersion{VersionID: "00000000-0000-4000-8000-000000000501", ObservationSyncID: "mixed-versioned", SessionID: "mixed-session", Type: "note", Title: "versioned", Content: "versioned", Project: &project, Scope: "project", RevisionCount: 1, CapturedAt: at}
+	data := &ExportData{Sessions: []Session{{ID: "mixed-session", Project: project, Directory: "/tmp", StartedAt: at}}, Observations: []Observation{{SyncID: versioned.ObservationSyncID, SessionID: versioned.SessionID, Type: "note", Title: "versioned", Content: "versioned", Project: &project, Scope: "project", CreatedAt: at, UpdatedAt: at}, {SyncID: "mixed-legacy", SessionID: versioned.SessionID, Type: "note", Title: "legacy", Content: "legacy", Project: &project, Scope: "project", CreatedAt: at, UpdatedAt: at}}, ObservationVersions: []ObservationVersion{versioned}}
+	s := newTestStore(t)
+	if _, err := s.Import(data); err != nil {
+		t.Fatalf("mixed import: %v", err)
+	}
+	for _, syncID := range []string{versioned.ObservationSyncID, "mixed-legacy"} {
+		observation, err := s.GetObservationBySyncID(syncID)
+		if err != nil {
+			t.Fatalf("get %s: %v", syncID, err)
+		}
+		title := "local " + syncID
+		if _, err := s.UpdateObservation(observation.ID, UpdateObservationParams{Title: &title}); err != nil {
+			t.Fatalf("update %s: %v", syncID, err)
+		}
+	}
+	versionedHistory, _ := s.ObservationVersions(versioned.ObservationSyncID, 10)
+	legacyHistory, _ := s.ObservationVersions("mixed-legacy", 10)
+	if len(versionedHistory) != 2 || versionedHistory[1].IsBaseline || len(legacyHistory) != 2 || !legacyHistory[1].IsBaseline || legacyHistory[0].HistoryComplete {
+		t.Fatalf("mixed histories = versioned %#v legacy %#v", versionedHistory, legacyHistory)
+	}
+}

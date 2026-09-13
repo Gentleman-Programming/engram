@@ -104,6 +104,20 @@ func sameObservationVersionState(version ObservationVersion, current *Observatio
 		version.RevisionCount == current.RevisionCount
 }
 
+func observationSyncIDsWithoutVersions(observationSyncIDs []string, versions []ObservationVersion) []string {
+	versioned := make(map[string]struct{}, len(versions))
+	for _, version := range versions {
+		versioned[version.ObservationSyncID] = struct{}{}
+	}
+	filtered := observationSyncIDs[:0]
+	for _, syncID := range observationSyncIDs {
+		if _, ok := versioned[syncID]; !ok {
+			filtered = append(filtered, syncID)
+		}
+	}
+	return filtered
+}
+
 func (s *Store) establishImportedObservationBaselinesTx(tx *sql.Tx, observationSyncIDs []string) error {
 	seen := map[string]struct{}{}
 	for _, syncID := range observationSyncIDs {

@@ -147,3 +147,27 @@ func TestApplyPulledChunkWithVersionsRollsBackInvalidAndSupportsNil(t *testing.T
 		}
 	})
 }
+
+func TestApplyPulledChunkWithMixedVersionsCreatesOnlyLegacyBaseline(t *testing.T) {
+	s := newVersionChunkStore(t)
+	versionedMutation, versioned := pulledObservationForVersionTest(t, "chunk-mixed-versioned", "versioned")
+	legacyMutation, _ := pulledObservationForVersionTest(t, "chunk-mixed-legacy", "legacy")
+	if err := s.ApplyPulledChunkWithVersions(DefaultSyncTargetKey, "mixed-versions", []SyncMutation{versionedMutation, legacyMutation}, []ObservationVersion{versioned}); err != nil {
+		t.Fatalf("mixed chunk: %v", err)
+	}
+	for _, syncID := range []string{versioned.ObservationSyncID, legacyMutation.EntityKey} {
+		observation, err := s.GetObservationBySyncID(syncID)
+		if err != nil {
+			t.Fatalf("get %s: %v", syncID, err)
+		}
+		title := "local " + syncID
+		if _, err := s.UpdateObservation(observation.ID, UpdateObservationParams{Title: &title}); err != nil {
+			t.Fatalf("update %s: %v", syncID, err)
+		}
+	}
+	versionedHistory, _ := s.ObservationVersions(versioned.ObservationSyncID, 10)
+	legacyHistory, _ := s.ObservationVersions(legacyMutation.EntityKey, 10)
+	if len(versionedHistory) != 2 || versionedHistory[1].IsBaseline || len(legacyHistory) != 2 || !legacyHistory[1].IsBaseline || legacyHistory[0].HistoryComplete {
+		t.Fatalf("mixed histories = versioned %#v legacy %#v", versionedHistory, legacyHistory)
+	}
+}

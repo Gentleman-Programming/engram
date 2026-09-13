@@ -5245,16 +5245,13 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 			observationSyncIDs = append(observationSyncIDs, syncID)
 		}
 	}
-	if len(data.ObservationVersions) == 0 {
-		if err := s.establishImportedObservationBaselinesTx(tx, observationSyncIDs); err != nil {
-			return nil, fmt.Errorf("import observation baselines: %w", err)
-		}
-	} else {
-		versionsImported, err := s.importObservationVersionsTx(tx, data.ObservationVersions)
-		if err != nil {
-			return nil, fmt.Errorf("import observation versions: %w", err)
-		}
-		result.VersionsImported = versionsImported
+	versionsImported, err := s.importObservationVersionsTx(tx, data.ObservationVersions)
+	if err != nil {
+		return nil, fmt.Errorf("import observation versions: %w", err)
+	}
+	result.VersionsImported = versionsImported
+	if err := s.establishImportedObservationBaselinesTx(tx, observationSyncIDsWithoutVersions(observationSyncIDs, data.ObservationVersions)); err != nil {
+		return nil, fmt.Errorf("import observation baselines: %w", err)
 	}
 
 	// Import prompts
@@ -6334,24 +6331,22 @@ func (s *Store) applyPulledChunk(targetKey, chunkID string, mutations []SyncMuta
 			}
 		}
 
-		if len(versions) == 0 {
-			observationSyncIDs := make([]string, 0)
-			for _, mutation := range mutations {
-				if mutation.Entity != SyncEntityObservation || mutation.Op == SyncOpDelete {
-					continue
-				}
-				var payload syncObservationPayload
-				if err := decodeSyncPayload([]byte(mutation.Payload), &payload); err != nil {
-					return fmt.Errorf("decode legacy chunk observation: %w", err)
-				}
-				observationSyncIDs = append(observationSyncIDs, payload.SyncID)
+		observationSyncIDs := make([]string, 0)
+		for _, mutation := range mutations {
+			if mutation.Entity != SyncEntityObservation || mutation.Op == SyncOpDelete {
+				continue
 			}
-			if err := s.establishImportedObservationBaselinesTx(tx, observationSyncIDs); err != nil {
-				return fmt.Errorf("establish legacy chunk observation baselines: %w", err)
+			var payload syncObservationPayload
+			if err := decodeSyncPayload([]byte(mutation.Payload), &payload); err != nil {
+				return fmt.Errorf("decode chunk observation: %w", err)
 			}
+			observationSyncIDs = append(observationSyncIDs, payload.SyncID)
 		}
 		if _, err := s.importObservationVersionsTx(tx, versions); err != nil {
 			return fmt.Errorf("import chunk versions: %w", err)
+		}
+		if err := s.establishImportedObservationBaselinesTx(tx, observationSyncIDsWithoutVersions(observationSyncIDs, versions)); err != nil {
+			return fmt.Errorf("establish chunk observation baselines: %w", err)
 		}
 		if _, err := s.execHook(tx,
 			`INSERT OR IGNORE INTO sync_chunks (target_key, chunk_id) VALUES (?, ?)`,
