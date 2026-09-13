@@ -97,14 +97,23 @@ func TestApplyPulledChunkWithVersionsRollsBackInvalidAndSupportsNil(t *testing.T
 			t.Fatalf("missing-parent receipt = %#v, %v", chunks, err)
 		}
 	})
-	t.Run("nil versions preserve mutation import", func(t *testing.T) {
+	t.Run("nil versions preserve incomplete pulled history", func(t *testing.T) {
 		s := newVersionChunkStore(t)
 		mutation, _ := pulledObservationForVersionTest(t, "chunk-nil-observation", "remote")
 		if err := s.ApplyPulledChunkWithVersions(DefaultSyncTargetKey, "versions-nil", []SyncMutation{mutation}, nil); err != nil {
 			t.Fatalf("nil version chunk: %v", err)
 		}
-		if _, err := s.GetObservationBySyncID(mutation.EntityKey); err != nil {
+		observation, err := s.GetObservationBySyncID(mutation.EntityKey)
+		if err != nil {
 			t.Fatalf("legacy parent import: %v", err)
+		}
+		updated := "local"
+		if _, err := s.UpdateObservation(observation.ID, UpdateObservationParams{Content: &updated}); err != nil {
+			t.Fatalf("update pulled observation: %v", err)
+		}
+		versions, err := s.ObservationVersions(mutation.EntityKey, 10)
+		if err != nil || len(versions) != 2 || versions[1].Content != "remote" || versions[0].HistoryComplete {
+			t.Fatalf("legacy pulled history = %#v, %v; want preserved incomplete baseline", versions, err)
 		}
 	})
 }

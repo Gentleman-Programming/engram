@@ -6330,6 +6330,22 @@ func (s *Store) applyPulledChunk(targetKey, chunkID string, mutations []SyncMuta
 			}
 		}
 
+		if len(versions) == 0 {
+			observationSyncIDs := make([]string, 0)
+			for _, mutation := range mutations {
+				if mutation.Entity != SyncEntityObservation || mutation.Op == SyncOpDelete {
+					continue
+				}
+				var payload syncObservationPayload
+				if err := decodeSyncPayload([]byte(mutation.Payload), &payload); err != nil {
+					return fmt.Errorf("decode legacy chunk observation: %w", err)
+				}
+				observationSyncIDs = append(observationSyncIDs, payload.SyncID)
+			}
+			if err := s.establishImportedObservationBaselinesTx(tx, observationSyncIDs); err != nil {
+				return fmt.Errorf("establish legacy chunk observation baselines: %w", err)
+			}
+		}
 		if _, err := s.importObservationVersionsTx(tx, versions); err != nil {
 			return fmt.Errorf("import chunk versions: %w", err)
 		}
