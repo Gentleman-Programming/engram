@@ -898,6 +898,36 @@ test("shutdown stops passive capture after registration", async () => {
       }
     });
 
+    test("failed session registration stops prompt capture", async () => {
+      const originalFetch = globalThis.fetch;
+      const originalUrl = process.env.ENGRAM_URL;
+      process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+      const calls = [];
+      globalThis.fetch = async (url, init = {}) => {
+        const path = new URL(url).pathname;
+        calls.push({ method: init.method ?? "GET", path });
+        if (path === "/project/current") return new Response(JSON.stringify({ project: "pi" }));
+        if (path === "/sessions") return new Response(JSON.stringify({ error: "registration unavailable" }), { status: 503 });
+        if (path === "/prompts") return new Response(JSON.stringify({ id: 1 }));
+        throw new Error(`unexpected request: ${path}`);
+      };
+
+      try {
+        await withPluginSandbox("engram-pi-contract-", async ({ sandbox }) => {
+          const { eventHandlers } = await loadPluginHarness(sandbox);
+          await eventHandlers.get("before_agent_start")(
+            { systemPrompt: "base", prompt: "a prompt that must not follow failed registration" },
+            runtimeContext("failed-registration-session"),
+          );
+          assert.deepEqual(calls.filter((call) => call.method === "POST").map((call) => call.path), ["/sessions"]);
+        });
+      } finally {
+        globalThis.fetch = originalFetch;
+        if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+        else process.env.ENGRAM_URL = originalUrl;
+      }
+    });
+
     test("compaction recovery notice stays scoped to the exact cached runtime session", async () => {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.ENGRAM_URL;

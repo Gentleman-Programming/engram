@@ -349,7 +349,7 @@ async function ensureSessionBestEffort(sessionId: string, sessionProject = proje
     await ensureSession(sessionId, sessionProject);
     return true;
   } catch {
-    return !knownSessions.has(`\u0000closing:${sessionId}`);
+    return false;
   }
 }
 
