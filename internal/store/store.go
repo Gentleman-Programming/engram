@@ -6278,6 +6278,16 @@ func (s *Store) recordRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutat
 // whole chunk, because an undecodable payload is a transport-level fault rather
 // than known-corrupt historical data.
 func (s *Store) ApplyPulledChunk(targetKey, chunkID string, mutations []SyncMutation) error {
+	return s.applyPulledChunk(targetKey, chunkID, mutations, nil)
+}
+
+// ApplyPulledChunkWithVersions atomically applies a chunk's current-state
+// mutations and immutable observation history before recording its receipt.
+func (s *Store) ApplyPulledChunkWithVersions(targetKey, chunkID string, mutations []SyncMutation, versions []ObservationVersion) error {
+	return s.applyPulledChunk(targetKey, chunkID, mutations, versions)
+}
+
+func (s *Store) applyPulledChunk(targetKey, chunkID string, mutations []SyncMutation, versions []ObservationVersion) error {
 	targetKey = normalizeSyncTargetKey(targetKey)
 	chunkTargetKey := normalizeChunkTargetKey(targetKey)
 	chunkID = strings.TrimSpace(chunkID)
@@ -6286,10 +6296,6 @@ func (s *Store) ApplyPulledChunk(targetKey, chunkID string, mutations []SyncMuta
 	}
 
 	return s.withTx(func(tx *sql.Tx) error {
-		if _, err := s.getSyncStateTx(tx, targetKey); err != nil {
-			return err
-		}
-
 		var alreadyImported int
 		if err := tx.QueryRow(`SELECT COUNT(*) FROM sync_chunks WHERE target_key = ? AND chunk_id = ?`, chunkTargetKey, chunkID).Scan(&alreadyImported); err != nil {
 			return err
@@ -6324,6 +6330,9 @@ func (s *Store) ApplyPulledChunk(targetKey, chunkID string, mutations []SyncMuta
 			}
 		}
 
+		if _, err := s.importObservationVersionsTx(tx, versions); err != nil {
+			return fmt.Errorf("import chunk versions: %w", err)
+		}
 		if _, err := s.execHook(tx,
 			`INSERT OR IGNORE INTO sync_chunks (target_key, chunk_id) VALUES (?, ?)`,
 			chunkTargetKey, chunkID,
