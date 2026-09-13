@@ -255,6 +255,16 @@ func (cs *CloudStore) CreateHumanUser(ctx context.Context, params CreateHumanUse
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// New admins have no existing principal row to lock, so acquire the shared
+	// guard before their enabled principal can become visible. This matches
+	// first-admin creation and serializes recovery eligibility with every
+	// enabled managed-human admin creation.
+	if role == PrincipalRoleAdmin {
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext('engram_cloud_active_admin_guard'))`); err != nil {
+			return HumanUser{}, fmt.Errorf("cloudstore: lock active admin guard: %w", err)
+		}
+	}
+
 	var principal Principal
 	const principalQ = `
 		INSERT INTO cloud_principals (kind, display_name, role, enabled)

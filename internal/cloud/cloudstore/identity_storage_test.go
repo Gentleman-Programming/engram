@@ -774,6 +774,84 @@ func TestPrincipalTokenIssuanceSerializesWithStrandedRecoveryEligibility(t *test
 	}
 }
 
+func TestHumanCreationSerializesWithStrandedRecoveryEligibility(t *testing.T) {
+	cases := []struct {
+		name       string
+		role       string
+		serialized bool
+	}{
+		{name: "admin creation waits for recovery eligibility", role: PrincipalRoleAdmin, serialized: true},
+		{name: "member creation does not wait for recovery eligibility", role: PrincipalRoleMember},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			cs := openIsolatedCloudStore(t)
+			if _, err := cs.CreateFirstAdminHumanUser(ctx, CreateHumanUserParams{Username: "recovery-target", DisplayName: "Recovery Target"}); err != nil {
+				t.Fatalf("CreateFirstAdminHumanUser: %v", err)
+			}
+
+			recovery, err := cs.db.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatalf("begin recovery eligibility tx: %v", err)
+			}
+			defer func() { _ = recovery.Rollback() }()
+			if _, err := lockedEnabledHumanAdminIDsTx(ctx, recovery); err != nil {
+				t.Fatalf("lock recovery admin rows: %v", err)
+			}
+			if _, err := recovery.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext('engram_cloud_active_admin_guard'))`); err != nil {
+				t.Fatalf("acquire recovery eligibility guard: %v", err)
+			}
+			adminIDs, err := lockedEnabledHumanAdminIDsTx(ctx, recovery)
+			if err != nil {
+				t.Fatalf("final recovery eligibility read: %v", err)
+			}
+			if len(adminIDs) != 1 {
+				t.Fatalf("expected one admin at final recovery eligibility read, got %d", len(adminIDs))
+			}
+
+			created := make(chan error, 1)
+			go func() {
+				_, err := cs.CreateHumanUser(ctx, CreateHumanUserParams{Username: "concurrent-" + tt.role, DisplayName: "Concurrent " + tt.role, Role: tt.role})
+				created <- err
+			}()
+			if tt.serialized {
+				waitForActiveAdminGuardWaiter(t, cs.db)
+				select {
+				case err := <-created:
+					t.Fatalf("admin creation committed while recovery held final eligibility guard: %v", err)
+				default:
+				}
+			} else {
+				select {
+				case err := <-created:
+					if err != nil {
+						t.Fatalf("member creation while recovery held guard: %v", err)
+					}
+				case <-time.After(lockOrderOperationTimeout):
+					t.Fatal("member creation was unnecessarily serialized by recovery eligibility guard")
+				}
+			}
+
+			if err := recovery.Commit(); err != nil {
+				t.Fatalf("release recovery eligibility guard: %v", err)
+			}
+			if tt.serialized {
+				if err := <-created; err != nil {
+					t.Fatalf("admin creation after recovery guard release: %v", err)
+			}
+			}
+			_, err = cs.RecoverStrandedAdminTokenWithAudit(ctx, RecoverStrandedAdminTokenParams{TokenPrefix: "egc_live_recovery-race-" + tt.role, TokenHash: "hmac-sha256:v1:recovery-race-" + tt.role}, AuthAuditEvent{ActorSource: "bootstrap_cli", Action: "bootstrap.cli", Outcome: "success", Metadata: map[string]any{"recovered": true}})
+			if tt.serialized && !errors.Is(err, ErrStrandedAdminRecoveryIneligible) {
+				t.Fatalf("recovery must see the serialized admin creation and refuse, got %v", err)
+			}
+			if !tt.serialized && err != nil {
+				t.Fatalf("recovery must remain eligible after concurrent member creation, got %v", err)
+			}
+		})
+	}
+}
+
 func TestTokenIssuanceAndLastAdminGuardLockTargetBeforeAdvisoryGuard(t *testing.T) {
 	cases := []struct {
 		name  string
