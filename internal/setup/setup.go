@@ -1080,13 +1080,6 @@ func claudeCodeConfigRoot(home string) string {
 	return abs
 }
 
-// claudeCodeMCPDir is retained for legacy path compatibility only. Claude user
-// MCP registration is authoritative only in ClaudeCodeUserMCPPath.
-func claudeCodeMCPDir() string {
-	home, _ := userHomeDir()
-	return filepath.Join(claudeCodeConfigRoot(home), "mcp")
-}
-
 // ClaudeCodeUserMCPPath returns the Claude Code user configuration file that
 // contains the top-level mcpServers object. Claude CLI owns all writes to it.
 func ClaudeCodeUserMCPPath() string {
@@ -1103,28 +1096,8 @@ func writeClaudeCodeUserMCP() error {
 	return EnsureClaudeCodeUserMCP()
 }
 
-func claudeCodeUserMCPData() ([]byte, error) {
-	exe, err := osExecutable()
-	if err != nil {
-		return nil, fmt.Errorf("resolve binary path: %w", err)
-	}
-	cmd, err := claudeCodeEngramCommand(exe)
-	if err != nil {
-		return nil, err
-	}
-	entry := map[string]any{
-		"command": cmd,
-		"args":    []string{"mcp", "--tools=agent"},
-	}
-	data, err := jsonMarshalIndentFn(entry, "", "  ")
-	if err != nil {
-		return nil, fmt.Errorf("marshal mcp config: %w", err)
-	}
-	return data, nil
-}
-
 func createClaudeCodeUserMCP(string, []byte, os.FileMode) error {
-	return fmt.Errorf("Claude CLI owns user MCP configuration writes")
+	return fmt.Errorf("claude CLI owns user MCP configuration writes")
 }
 
 type claudeCodeMCPState uint8
@@ -1209,7 +1182,7 @@ func EnsureClaudeCodeUserMCP() error {
 	case claudeCodeMCPExact:
 		return nil
 	case claudeCodeMCPConflict:
-		return fmt.Errorf("Claude Code MCP conflict at %s: mcpServers.engram differs from Engram's expected stdio command; resolve it manually", ClaudeCodeUserMCPPath())
+		return fmt.Errorf("claude Code MCP conflict at %s: mcpServers.engram differs from Engram's expected stdio command; resolve it manually", ClaudeCodeUserMCPPath())
 	}
 
 	claudeBin, err := lookPathFn("claude")
@@ -1220,28 +1193,26 @@ func EnsureClaudeCodeUserMCP() error {
 	if _, addErr := runCommand(claudeBin, addArgs...); addErr != nil {
 		state, inspectErr := inspectClaudeCodeUserMCP(command)
 		if inspectErr != nil {
-			return fmt.Errorf("Claude MCP add failed: %w; recheck failed: %v", addErr, inspectErr)
+			return fmt.Errorf("claude MCP add failed: %w; recheck failed: %v", addErr, inspectErr)
 		}
 		if state == claudeCodeMCPExact {
 			return nil
 		}
 		if state == claudeCodeMCPConflict {
-			return fmt.Errorf("Claude Code MCP conflict after add error: %w", addErr)
+			return fmt.Errorf("claude Code MCP conflict after add error: %w", addErr)
 		}
-		return fmt.Errorf("Claude MCP add: %w", addErr)
+		return fmt.Errorf("claude MCP add: %w", addErr)
 	}
 
 	state, verifyErr := inspectClaudeCodeUserMCP(command)
 	if verifyErr == nil && state == claudeCodeMCPExact {
 		return nil
 	}
-	verification := fmt.Errorf("verify Claude Code MCP registration")
+	verification := fmt.Errorf("verify Claude Code MCP registration: mcpServers.engram is absent")
 	if verifyErr != nil {
 		verification = fmt.Errorf("verify Claude Code MCP registration: %w", verifyErr)
 	} else if state == claudeCodeMCPConflict {
 		verification = fmt.Errorf("verify Claude Code MCP registration: registered entry conflicts with expected stdio command")
-	} else {
-		verification = fmt.Errorf("verify Claude Code MCP registration: mcpServers.engram is absent")
 	}
 	if _, rollbackErr := runCommand(claudeBin, "mcp", "remove", "engram", "--scope", "user"); rollbackErr != nil {
 		return fmt.Errorf("%v; rollback Claude MCP registration: %w", verification, rollbackErr)
