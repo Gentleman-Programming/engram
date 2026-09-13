@@ -1359,6 +1359,8 @@ func (s *Store) migrate() error {
 		);
 		CREATE INDEX IF NOT EXISTS idx_observation_versions_sync_revision
 			ON observation_versions(observation_sync_id, revision_count DESC, version_id DESC);
+		CREATE INDEX IF NOT EXISTS idx_observation_versions_observation_complete
+			ON observation_versions(observation_id, history_complete);
 	`); err != nil {
 		return err
 	}
@@ -5173,8 +5175,10 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 	}
 
 	// Import observations (use new IDs — AUTOINCREMENT, skip duplicate sync IDs)
+	observationSyncIDs := make([]string, 0, len(data.Observations))
 	for _, obs := range data.Observations {
 		syncID := normalizeExistingSyncID(obs.SyncID, "obs")
+		observationSyncIDs = append(observationSyncIDs, syncID)
 		existing, lookupErr := s.getObservationBySyncIDTx(tx, syncID, true)
 		if lookupErr != nil && lookupErr != sql.ErrNoRows {
 			return nil, fmt.Errorf("import observation %d: %w", obs.ID, lookupErr)
@@ -5237,11 +5241,17 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 		n, _ := res.RowsAffected()
 		result.ObservationsImported += int(n)
 	}
-	versionsImported, err := s.importObservationVersionsTx(tx, data.ObservationVersions)
-	if err != nil {
-		return nil, fmt.Errorf("import observation versions: %w", err)
+	if len(data.ObservationVersions) == 0 {
+		if err := s.establishImportedObservationBaselinesTx(tx, observationSyncIDs); err != nil {
+			return nil, fmt.Errorf("import observation baselines: %w", err)
+		}
+	} else {
+		versionsImported, err := s.importObservationVersionsTx(tx, data.ObservationVersions)
+		if err != nil {
+			return nil, fmt.Errorf("import observation versions: %w", err)
+		}
+		result.VersionsImported = versionsImported
 	}
-	result.VersionsImported = versionsImported
 
 	// Import prompts
 	for _, p := range data.Prompts {

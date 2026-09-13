@@ -60,14 +60,15 @@ func validateObservationVersion(version ObservationVersion) error {
 		"observation_sync_id": version.ObservationSyncID,
 		"session_id":          version.SessionID,
 		"type":                version.Type,
-		"title":               version.Title,
-		"content":             version.Content,
 		"scope":               version.Scope,
 		"captured_at":         version.CapturedAt,
 	} {
 		if strings.TrimSpace(value) == "" || value != strings.TrimSpace(value) {
 			return fmt.Errorf("%s is required", name)
 		}
+	}
+	if strings.TrimSpace(version.Title) == "" || strings.TrimSpace(version.Content) == "" {
+		return fmt.Errorf("title and content are required")
 	}
 	if !observationVersionIDPattern.MatchString(version.VersionID) {
 		return fmt.Errorf("version_id must be a canonical UUIDv4")
@@ -93,6 +94,45 @@ func sameObservationVersion(left, right ObservationVersion) bool {
 		sameOptionalString(left.TopicKey, right.TopicKey) && left.Scope == right.Scope &&
 		left.RevisionCount == right.RevisionCount && left.IsBaseline == right.IsBaseline &&
 		left.HistoryComplete == right.HistoryComplete && left.CapturedAt == right.CapturedAt
+}
+
+func (s *Store) establishImportedObservationBaselinesTx(tx *sql.Tx, observationSyncIDs []string) error {
+	seen := map[string]struct{}{}
+	for _, syncID := range observationSyncIDs {
+		if _, ok := seen[syncID]; ok {
+			continue
+		}
+		seen[syncID] = struct{}{}
+		current, err := s.getObservationBySyncIDTx(tx, syncID, true)
+		if err != nil {
+			return err
+		}
+		var exists bool
+		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM observation_versions WHERE observation_id = ?)`, current.ID).Scan(&exists); err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		versionID, err := newObservationVersionID()
+		if err != nil {
+			return err
+		}
+		capturedAt := current.UpdatedAt
+		if strings.TrimSpace(capturedAt) == "" {
+			capturedAt = Now()
+		}
+		if _, err := s.execHook(tx, `
+			INSERT INTO observation_versions (version_id, observation_id, observation_sync_id, session_id, type, title,
+				content, tool_name, project, scope, topic_key, revision_count, is_baseline, history_complete, captured_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?)`,
+			versionID, current.ID, current.SyncID, current.SessionID, current.Type, current.Title,
+			current.Content, current.ToolName, current.Project, current.Scope, current.TopicKey,
+			current.RevisionCount, capturedAt); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) importObservationVersionsTx(tx *sql.Tx, versions []ObservationVersion) (int, error) {

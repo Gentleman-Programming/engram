@@ -120,6 +120,70 @@ func TestImportObservationVersionsRejectsConflictsAndAllowsIdenticalDuplicates(t
 	}
 }
 
+func TestImportLegacyObservationCreatesIncompleteBaseline(t *testing.T) {
+	s := newTestStore(t)
+	project := "proj"
+	data := &ExportData{Sessions: []Session{{ID: "legacy-baseline-session", Project: project, Directory: "/tmp", StartedAt: Now()}}, Observations: []Observation{{SyncID: "legacy-baseline-observation", SessionID: "legacy-baseline-session", Type: "note", Title: "legacy", Content: "legacy", Project: &project, Scope: "project", CreatedAt: Now(), UpdatedAt: Now()}}}
+	if _, err := s.Import(data); err != nil {
+		t.Fatalf("legacy import: %v", err)
+	}
+	versions, err := s.ObservationVersions("legacy-baseline-observation", 10)
+	if err != nil || len(versions) != 1 || !versions[0].IsBaseline || versions[0].HistoryComplete {
+		t.Fatalf("legacy baseline = %#v, %v; want one incomplete baseline", versions, err)
+	}
+	updated := "updated"
+	observation, err := s.GetObservationBySyncID("legacy-baseline-observation")
+	if err != nil {
+		t.Fatalf("get imported observation: %v", err)
+	}
+	if _, err := s.UpdateObservation(observation.ID, UpdateObservationParams{Title: &updated}); err != nil {
+		t.Fatalf("update imported observation: %v", err)
+	}
+	versions, err = s.ObservationVersions("legacy-baseline-observation", 10)
+	if err != nil || len(versions) != 2 || versions[0].HistoryComplete {
+		t.Fatalf("history after update = %#v, %v; want incomplete history retained", versions, err)
+	}
+}
+
+func TestImportLegacyBlankSyncIDCreatesBaseline(t *testing.T) {
+	s := newTestStore(t)
+	project := "proj"
+	data := &ExportData{Sessions: []Session{{ID: "blank-sync-session", Project: project, Directory: "/tmp", StartedAt: Now()}}, Observations: []Observation{{SessionID: "blank-sync-session", Type: "note", Title: "before", Content: "before", Project: &project, Scope: "project", CreatedAt: Now(), UpdatedAt: Now()}}}
+	if _, err := s.Import(data); err != nil {
+		t.Fatalf("blank SyncID import: %v", err)
+	}
+	observations, err := s.RecentObservations("", "project", 1)
+	if err != nil || len(observations) != 1 || observations[0].SyncID == "" {
+		t.Fatalf("generated observation = %#v, %v", observations, err)
+	}
+	after := "after"
+	if _, err := s.UpdateObservation(observations[0].ID, UpdateObservationParams{Content: &after}); err != nil {
+		t.Fatalf("update imported observation: %v", err)
+	}
+	versions, err := s.ObservationVersions(observations[0].SyncID, 10)
+	if err != nil || len(versions) != 2 || versions[1].Content != "before" || versions[0].HistoryComplete {
+		t.Fatalf("generated-ID history = %#v, %v", versions, err)
+	}
+}
+
+func TestImportObservationVersionsPreservesWhitespaceAndMigrationIndex(t *testing.T) {
+	s := newTestStore(t)
+	project := "proj"
+	version := ObservationVersion{VersionID: "00000000-0000-4000-8000-000000000301", ObservationSyncID: "whitespace-observation", SessionID: "whitespace-session", Type: "note", Title: " title \n", Content: " content \n", Project: &project, Scope: "project", RevisionCount: 1, CapturedAt: Now()}
+	data := &ExportData{Sessions: []Session{{ID: "whitespace-session", Project: project, Directory: "/tmp", StartedAt: Now()}}, Observations: []Observation{{SyncID: version.ObservationSyncID, SessionID: version.SessionID, Type: version.Type, Title: version.Title, Content: version.Content, Project: &project, Scope: version.Scope, CreatedAt: Now(), UpdatedAt: Now()}}, ObservationVersions: []ObservationVersion{version}}
+	if _, err := s.Import(data); err != nil {
+		t.Fatalf("whitespace import: %v", err)
+	}
+	versions, err := s.ObservationVersions(version.ObservationSyncID, 10)
+	if err != nil || len(versions) != 1 || versions[0].Title != version.Title || versions[0].Content != version.Content {
+		t.Fatalf("whitespace version = %#v, %v", versions, err)
+	}
+	var name string
+	if err := s.DB().QueryRow(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_observation_versions_observation_complete'`).Scan(&name); err != nil || name == "" {
+		t.Fatalf("history completeness index = %q, %v", name, err)
+	}
+}
+
 func TestImportObservationVersionsLegacyAndAtomic(t *testing.T) {
 	legacy := &ExportData{Sessions: []Session{{ID: "legacy-session", Project: "proj", Directory: "/tmp", StartedAt: Now()}}, Observations: []Observation{{SyncID: "legacy-observation", SessionID: "legacy-session", Type: "note", Title: "legacy", Content: "legacy", Scope: "project", CreatedAt: Now(), UpdatedAt: Now()}}}
 	s := newTestStore(t)
