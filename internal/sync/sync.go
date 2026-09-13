@@ -508,20 +508,110 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 	backfill := &ChunkData{ObservationVersions: versionsForObservationKeys(data.ObservationVersions, exportedObservations, knownVersions)}
 	backfill.ObservationVersions = withoutVersions(backfill.ObservationVersions, chunk.ObservationVersions)
 
+	candidates, err := splitLocalExportChunks([]*ChunkData{chunk, backfill}, localExportMaxChunkBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	// Plan every local part before writing so an oversized version cannot leave a
+	// partially exported chunk set behind.
 	result := &SyncResult{IsEmpty: true}
-	for _, candidate := range []*ChunkData{chunk, backfill} {
+	for _, candidate := range candidates {
 		exported, err := sy.exportLocalChunk(manifest, knownChunks, locallySyncedChunks, chunkTargetKey, createdBy, candidate)
 		if err != nil {
 			return nil, err
 		}
-		if !exported.IsEmpty {
-			if result.IsEmpty {
-				*result = *exported
-			}
-			result.IsEmpty = false
+		if exported.IsEmpty {
+			continue
 		}
+		if result.IsEmpty {
+			*result = *exported
+			result.IsEmpty = false
+			continue
+		}
+		result.ChunksExported += exported.ChunksExported
+		result.SessionsExported += exported.SessionsExported
+		result.ObservationsExported += exported.ObservationsExported
+		result.PromptsExported += exported.PromptsExported
+		result.MutationsExported += exported.MutationsExported
 	}
 	return result, nil
+}
+
+// localExportMaxChunkBytes uses the same 4 MiB serialized-chunk convention as
+// cloud export. It is intentionally package-local so file sync gains no new
+// public configuration surface.
+var localExportMaxChunkBytes = 4 << 20
+
+// splitLocalExportChunks plans each candidate before export. Only version-bearing
+// chunks need partitioning: ordinary legacy chunks retain their historical shape.
+func splitLocalExportChunks(candidates []*ChunkData, maxBytes int) ([]*ChunkData, error) {
+	parts := make([]*ChunkData, 0, len(candidates))
+	for _, candidate := range candidates {
+		part, err := splitLocalExportChunk(candidate, maxBytes)
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, part...)
+	}
+	return parts, nil
+}
+
+// splitLocalExportChunk deterministically partitions observation versions using
+// actual serialized ChunkData sizes. Parent data stays in the first part; later
+// parts carry versions only, so version-only backfills remain independent.
+func splitLocalExportChunk(chunk *ChunkData, maxBytes int) ([]*ChunkData, error) {
+	if chunk == nil || (len(chunk.Sessions) == 0 && len(chunk.Observations) == 0 && len(chunk.Prompts) == 0 && len(chunk.Mutations) == 0 && len(chunk.ObservationVersions) == 0) {
+		return nil, nil
+	}
+	if len(chunk.ObservationVersions) == 0 || maxBytes <= 0 {
+		return []*ChunkData{chunk}, nil
+	}
+
+	base := *chunk
+	base.ObservationVersions = nil
+	hasParentData := len(base.Sessions) > 0 || len(base.Observations) > 0 || len(base.Prompts) > 0 || len(base.Mutations) > 0
+	if hasParentData {
+		payload, err := jsonMarshalChunk(&base)
+		if err != nil {
+			return nil, fmt.Errorf("marshal chunk: %w", err)
+		}
+		if len(payload) > maxBytes {
+			return nil, fmt.Errorf("local chunk parent data exceeds %d-byte limit", maxBytes)
+		}
+	}
+
+	current := &base
+	parts := make([]*ChunkData, 0, len(chunk.ObservationVersions)+1)
+	for _, version := range chunk.ObservationVersions {
+		candidate := *current
+		candidate.ObservationVersions = append(append([]store.ObservationVersion(nil), current.ObservationVersions...), version)
+		payload, err := jsonMarshalChunk(&candidate)
+		if err != nil {
+			return nil, fmt.Errorf("marshal chunk: %w", err)
+		}
+		if len(payload) <= maxBytes {
+			current = &candidate
+			continue
+		}
+
+		if hasParentData || len(current.ObservationVersions) > 0 {
+			parts = append(parts, current)
+		}
+		current = &ChunkData{ObservationVersions: []store.ObservationVersion{version}}
+		payload, err = jsonMarshalChunk(current)
+		if err != nil {
+			return nil, fmt.Errorf("marshal chunk: %w", err)
+		}
+		if len(payload) > maxBytes {
+			return nil, fmt.Errorf("oversized observation version %s exceeds %d-byte limit", version.VersionID, maxBytes)
+		}
+		hasParentData = false
+	}
+	if hasParentData || len(current.ObservationVersions) > 0 {
+		parts = append(parts, current)
+	}
+	return parts, nil
 }
 
 func (sy *Syncer) exportLocalChunk(manifest *Manifest, known, local map[string]bool, targetKey, createdBy string, chunk *ChunkData) (*SyncResult, error) {
@@ -553,7 +643,7 @@ func (sy *Syncer) exportLocalChunk(manifest *Manifest, known, local map[string]b
 		return nil, fmt.Errorf("record synced chunk: %w", err)
 	}
 	known[id] = true
-	return &SyncResult{ChunkID: id, SessionsExported: len(chunk.Sessions), ObservationsExported: len(chunk.Observations), PromptsExported: len(chunk.Prompts), MutationsExported: len(chunk.Mutations)}, nil
+	return &SyncResult{ChunkID: id, ChunksExported: 1, SessionsExported: len(chunk.Sessions), ObservationsExported: len(chunk.Observations), PromptsExported: len(chunk.Prompts), MutationsExported: len(chunk.Mutations)}, nil
 }
 
 // cloudExportMaxChunkBytes bounds the serialized size of a single cloud export
