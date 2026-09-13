@@ -64,6 +64,9 @@ var (
 	storeRecordSynced = func(s *store.Store, targetKey, chunkID string) error {
 		return s.RecordSyncedChunkForTarget(targetKey, chunkID)
 	}
+	storeEnqueueDeferredRelation = func(s *store.Store, targetKey string, mutation store.SyncMutation) error {
+		return s.EnqueueDeferredRelation(targetKey, mutation)
+	}
 )
 
 type gzipWriter interface {
@@ -971,7 +974,7 @@ func (sy *Syncer) importEntriesDependencySafeWithProgress(entries []ChunkEntry, 
 	// such edges before apply and surface them as visible warnings instead.
 	var dependencyOracle *importDependencyOracle
 	if mode == importModeCloud {
-		dependencyOracle = newImportDependencyOracle(sy, entries, knownChunks)
+		dependencyOracle = newImportDependencyOracle(sy, entries, knownChunks, legacyChunks, manifestVersion)
 	}
 
 	lastErrors := map[string]error{}
@@ -981,6 +984,11 @@ func (sy *Syncer) importEntriesDependencySafeWithProgress(entries []ChunkEntry, 
 
 		for _, entry := range pendingEntries {
 			chunk, loaded := legacyChunks[entry.ID]
+			if !loaded && dependencyOracle != nil {
+				if cached, ok := dependencyOracle.cachedChunk(entry.ID); ok {
+					chunk, loaded = cached, true
+				}
+			}
 			if !loaded {
 				chunkJSON, err := sy.transport.ReadChunk(entry.ID)
 				if err != nil {
@@ -999,6 +1007,9 @@ func (sy *Syncer) importEntriesDependencySafeWithProgress(entries []ChunkEntry, 
 				if err := sy.ensureChunkOwnershipCompatibility(manifestVersion, chunk); err != nil {
 					return nil, err
 				}
+				if dependencyOracle != nil {
+					dependencyOracle.rememberChunk(entry.ID, chunk)
+				}
 			}
 
 			// Issue #1135: in cloud mode, drop relation upserts whose endpoints
@@ -1008,14 +1019,30 @@ func (sy *Syncer) importEntriesDependencySafeWithProgress(entries []ChunkEntry, 
 			// existing stall semantics.
 			applyChunk := chunk
 			var skippedEdges []string
+			var skippedMutations []store.SyncMutation
 			if dependencyOracle != nil {
-				filtered, warnings, filterErr := filterUnsatisfiableRelationUpserts(chunk, dependencyOracle)
+				filtered, skipped, warnings, filterErr := filterUnsatisfiableRelationUpserts(chunk, dependencyOracle)
 				if filterErr != nil {
 					return nil, filterErr
 				}
 				if len(warnings) > 0 {
 					applyChunk = filtered
 					skippedEdges = warnings
+					skippedMutations = skipped
+				}
+			}
+
+			// An edge dropped here must survive a crash as replayable state, so
+			// every skipped relation is durably queued BEFORE the filtered chunk
+			// can apply and be marked synced. An enqueue error aborts before any
+			// chunk mutation, so the edge is never lost silently; the existing
+			// deferred replay heals the row once the endpoint reappears.
+			if len(skippedMutations) > 0 {
+				targetKey := sy.chunkTrackingTargetKey("")
+				for _, skipped := range skippedMutations {
+					if err := storeEnqueueDeferredRelation(sy.store, targetKey, skipped); err != nil {
+						return nil, fmt.Errorf("defer skipped relation %s: %w", strings.TrimSpace(skipped.EntityKey), err)
+					}
 				}
 			}
 
@@ -1112,121 +1139,213 @@ func (sy *Syncer) importMutationChunk(chunkID string, chunk ChunkData) error {
 // edge in sync_apply_deferred until it silently dies after repeated replays.
 // When an endpoint was deleted hub-side and no chunk re-upserts it, that
 // deferral can never converge and nothing tells the operator why. The cloud
-// import path therefore classifies relation upserts before apply: an edge
-// whose endpoints are absent from the local store (in any deletion state) and
-// from every chunk still pending in this run is provably unsatisfiable — a
-// chunk already imported during the same run has its observations in the
-// store, so the store lookup covers it. Such an edge is skipped and reported
-// as a visible warning on ImportResult.SkippedRelations. Everything else keeps
-// the original apply/stall behavior, and local import is untouched.
+// import path therefore classifies relation upserts before apply, but absence
+// alone is not proof: an endpoint that is merely missing from the local store
+// (in any deletion state) and from every chunk still pending in this run may
+// still be on its way, so such an edge is left to the store's existing
+// deferral. An edge may be called permanently unsatisfiable only with durable
+// hub evidence — an observation delete mutation for the absent endpoint inside
+// the current remote manifest snapshot, with no upsert for that ID anywhere in
+// the same snapshot. Such an edge is skipped and reported as a visible warning
+// on ImportResult.SkippedRelations. Everything else keeps the original
+// apply/stall behavior, and local import is untouched.
 
 // importDependencyOracle resolves whether a relation endpoint can ever be
 // satisfied locally: it exists in the store, or arrives with a chunk still
-// pending in this import run. The pending set is built lazily on the first
+// pending in this import run. The pending sets are built lazily on the first
 // relation classification, so relation-free imports never pay for extra chunk
 // reads; chunks imported before that point are covered by the store lookup.
 type importDependencyOracle struct {
 	sy                    *Syncer
 	entries               []ChunkEntry
 	knownChunks           map[string]bool
+	manifestVersion       int
 	pendingObservationIDs map[string]struct{}
+	deletedObservationIDs map[string]struct{}
+	chunkCache            map[string]ChunkData
 	built                 bool
 	buildErr              error
 }
 
-func newImportDependencyOracle(sy *Syncer, entries []ChunkEntry, knownChunks map[string]bool) *importDependencyOracle {
+func newImportDependencyOracle(sy *Syncer, entries []ChunkEntry, knownChunks map[string]bool, parsedChunks map[string]ChunkData, manifestVersion int) *importDependencyOracle {
+	// Seed the cache with whatever the legacy ownership preflight already
+	// parsed, so those chunks are never read from the transport again.
+	chunkCache := make(map[string]ChunkData, len(parsedChunks))
+	for id, chunk := range parsedChunks {
+		chunkCache[id] = chunk
+	}
 	return &importDependencyOracle{
-		sy:          sy,
-		entries:     entries,
-		knownChunks: knownChunks,
+		sy:              sy,
+		entries:         entries,
+		knownChunks:     knownChunks,
+		manifestVersion: manifestVersion,
+		chunkCache:      chunkCache,
 	}
 }
 
-// endpointSatisfiable reports whether an observation sync_id exists locally in
-// any deletion state or arrives with a chunk still pending in this run.
+// chunkForEntry returns the parsed chunk for a pending entry, serving it from
+// the classification cache and falling back to the transport when absent. A
+// transport read is parsed once, ownership-checked for legacy manifests, and
+// cached for both classification and the apply loop.
+func (o *importDependencyOracle) chunkForEntry(entryID string) (ChunkData, error) {
+	if cached, ok := o.chunkCache[entryID]; ok {
+		return cached, nil
+	}
+	chunkJSON, err := o.sy.transport.ReadChunk(entryID)
+	if err != nil {
+		if errors.Is(err, ErrChunkNotFound) {
+			return ChunkData{}, fmt.Errorf("read chunk %s: manifest references missing remote chunk", entryID)
+		}
+		return ChunkData{}, fmt.Errorf("read chunk %s: %w", entryID, err)
+	}
+	var chunk ChunkData
+	if err := json.Unmarshal(chunkJSON, &chunk); err != nil {
+		return ChunkData{}, fmt.Errorf("parse chunk %s: %w", entryID, err)
+	}
+	if err := o.sy.ensureChunkOwnershipCompatibility(o.manifestVersion, chunk); err != nil {
+		return ChunkData{}, err
+	}
+	o.chunkCache[entryID] = chunk
+	return chunk, nil
+}
+
+// cachedChunk exposes a chunk parsed during classification or a previous apply
+// pass so the apply loop can reuse it instead of reading and unmarshalling the
+// transport payload a second time. Entries absent from the cache keep their
+// remote-read fallback in the apply loop.
+func (o *importDependencyOracle) cachedChunk(entryID string) (ChunkData, bool) {
+	chunk, ok := o.chunkCache[entryID]
+	return chunk, ok
+}
+
+// rememberChunk adds an apply-loop parse to the classification cache.
+func (o *importDependencyOracle) rememberChunk(entryID string, chunk ChunkData) {
+	if o.chunkCache == nil {
+		o.chunkCache = make(map[string]ChunkData)
+	}
+	o.chunkCache[entryID] = chunk
+}
+
+// endpointPermanentlyMissing reports whether an observation sync_id is provably
+// gone. Mere absence is not permanence: the endpoint must be absent from the
+// local store in every deletion state, absent from every pending chunk's
+// upserts, AND carry a durable hub delete in the current manifest snapshot.
 // GetObservationBySyncID excludes soft-deleted rows, but the store's relation
 // FK precondition (applyRelationUpsertTx) counts them: an edge whose endpoint
 // is a local tombstone still applies today and must never be skipped.
 // HasObservationBySyncIDAnyState answers tombstone-inclusively through the
 // idx_obs_sync_id index, so classification never materializes an export.
-func (o *importDependencyOracle) endpointSatisfiable(syncID string) (bool, error) {
+func (o *importDependencyOracle) endpointPermanentlyMissing(syncID string) (bool, error) {
 	syncID = strings.TrimSpace(syncID)
 	if syncID == "" {
 		return false, nil
 	}
-	if err := o.ensurePendingObservationIDs(); err != nil {
+	if err := o.ensureBuilt(); err != nil {
 		return false, err
 	}
 	if _, pending := o.pendingObservationIDs[syncID]; pending {
-		return true, nil
+		// An upsert in the same snapshot makes the endpoint recoverable even
+		// when the snapshot also deletes it.
+		return false, nil
 	}
 	known, err := o.sy.store.HasObservationBySyncIDAnyState(syncID)
 	if err != nil {
 		return false, fmt.Errorf("check relation endpoint %s: %w", syncID, err)
 	}
-	return known, nil
+	if known {
+		return false, nil
+	}
+	_, deleted := o.deletedObservationIDs[syncID]
+	return deleted, nil
 }
 
-// ensurePendingObservationIDs builds the pending observation set on first use.
-// A pending chunk that cannot be read or parsed fails the import before the
-// first relation-bearing chunk applies, so no edge is ever classified against
-// an incomplete pending set.
-func (o *importDependencyOracle) ensurePendingObservationIDs() error {
+// ensureBuilt builds the pending observation sets on first use. A pending
+// chunk that cannot be read or parsed fails the import before the first
+// relation-bearing chunk applies, so no edge is ever classified against an
+// incomplete pending set.
+func (o *importDependencyOracle) ensureBuilt() error {
 	if o.built {
 		return o.buildErr
 	}
 	o.built = true
-	pending, err := o.sy.pendingObservationSyncIDs(o.entries, o.knownChunks)
+	upserts, deletes, err := o.classifyPendingChunks()
 	if err != nil {
 		o.buildErr = err
 		return err
 	}
-	o.pendingObservationIDs = pending
+	o.pendingObservationIDs = upserts
+	o.deletedObservationIDs = deletes
 	return nil
 }
 
-// pendingObservationSyncIDs collects the observation sync_ids upserted by any
-// chunk that is still pending for this import run.
-func (sy *Syncer) pendingObservationSyncIDs(entries []ChunkEntry, knownChunks map[string]bool) (map[string]struct{}, error) {
-	pending := make(map[string]struct{})
-	for _, entry := range entries {
-		if knownChunks[entry.ID] {
+// classifyPendingChunks collects, from every chunk still pending for this
+// import run, the observation sync_ids upserted by those chunks and the
+// observation sync_ids they durably delete. The upsert set keeps its
+// upsert-only semantics; the delete set is separate evidence for the
+// permanence check. Parsed chunks land in the cache so the apply loop reuses
+// them instead of re-reading the transport.
+func (o *importDependencyOracle) classifyPendingChunks() (upserts, deletes map[string]struct{}, err error) {
+	upserts = make(map[string]struct{})
+	deletes = make(map[string]struct{})
+	for _, entry := range o.entries {
+		if o.knownChunks[entry.ID] {
 			continue
 		}
-		chunkJSON, err := sy.transport.ReadChunk(entry.ID)
+		chunk, err := o.chunkForEntry(entry.ID)
 		if err != nil {
-			if errors.Is(err, ErrChunkNotFound) {
-				return nil, fmt.Errorf("read chunk %s: manifest references missing remote chunk", entry.ID)
-			}
-			return nil, fmt.Errorf("read chunk %s: %w", entry.ID, err)
-		}
-		var chunk ChunkData
-		if err := json.Unmarshal(chunkJSON, &chunk); err != nil {
-			return nil, fmt.Errorf("parse chunk %s: %w", entry.ID, err)
+			return nil, nil, err
 		}
 		for _, mutation := range buildImportMutations(chunk) {
-			if mutation.Entity != store.SyncEntityObservation || mutation.Op != store.SyncOpUpsert {
+			if mutation.Entity != store.SyncEntityObservation {
 				continue
 			}
-			if obsID := strings.TrimSpace(mutation.EntityKey); obsID != "" {
-				pending[obsID] = struct{}{}
+			switch mutation.Op {
+			case store.SyncOpUpsert:
+				if obsID := observationMutationSyncID(mutation); obsID != "" {
+					upserts[obsID] = struct{}{}
+				}
+			case store.SyncOpDelete:
+				if obsID := observationMutationSyncID(mutation); obsID != "" {
+					deletes[obsID] = struct{}{}
+				}
 			}
 		}
 	}
-	return pending, nil
+	return upserts, deletes, nil
+}
+
+// observationMutationSyncID resolves the observation identity an upsert or
+// delete mutation acts on. The store applies both operations by the payload's
+// sync_id (applyObservationUpsertTx / applyObservationDeleteTx), so a blank
+// entity_key falls back to the payload's trimmed sync_id, and an identity that
+// is still blank cannot be classified and is ignored.
+func observationMutationSyncID(mutation store.SyncMutation) string {
+	if obsID := strings.TrimSpace(mutation.EntityKey); obsID != "" {
+		return obsID
+	}
+	var payload struct {
+		SyncID string `json:"sync_id"`
+	}
+	if err := decodeSyncPayloadForProject([]byte(mutation.Payload), &payload); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(payload.SyncID)
 }
 
 // filterUnsatisfiableRelationUpserts returns the chunk with relation upserts
-// removed when at least one endpoint is provably unsatisfiable, together with
-// one visible warning per skipped edge. Mutations that cannot be classified
-// (undecodable payload, blank endpoints) are kept so the store keeps handling
-// them unchanged.
-func filterUnsatisfiableRelationUpserts(chunk ChunkData, oracle *importDependencyOracle) (ChunkData, []string, error) {
+// removed when at least one endpoint is provably permanently missing, together
+// with the removed mutations and one visible warning per skipped edge.
+// Mutations that cannot be classified (undecodable payload, blank endpoints)
+// are kept so the store keeps handling them unchanged, and an endpoint that is
+// merely absent — without durable delete evidence — stays in the chunk for the
+// store's existing deferral.
+func filterUnsatisfiableRelationUpserts(chunk ChunkData, oracle *importDependencyOracle) (ChunkData, []store.SyncMutation, []string, error) {
 	if len(chunk.Mutations) == 0 {
 		// Legacy array chunks carry no relation upserts.
-		return chunk, nil, nil
+		return chunk, nil, nil, nil
 	}
 	filtered := make([]store.SyncMutation, 0, len(chunk.Mutations))
+	skipped := make([]store.SyncMutation, 0)
 	warnings := make([]string, 0)
 	changed := false
 	for _, mutation := range chunk.Mutations {
@@ -1239,27 +1358,28 @@ func filterUnsatisfiableRelationUpserts(chunk ChunkData, oracle *importDependenc
 			filtered = append(filtered, mutation)
 			continue
 		}
-		sourceOK, err := oracle.endpointSatisfiable(sourceID)
+		sourceMissing, err := oracle.endpointPermanentlyMissing(sourceID)
 		if err != nil {
-			return chunk, nil, err
+			return chunk, nil, nil, err
 		}
-		targetOK, err := oracle.endpointSatisfiable(targetID)
+		targetMissing, err := oracle.endpointPermanentlyMissing(targetID)
 		if err != nil {
-			return chunk, nil, err
+			return chunk, nil, nil, err
 		}
-		if sourceOK && targetOK {
+		if !sourceMissing && !targetMissing {
 			filtered = append(filtered, mutation)
 			continue
 		}
 		changed = true
+		skipped = append(skipped, mutation)
 		warnings = append(warnings, fmt.Sprintf("relation %s->%s: referenced observation missing permanently", sourceID, targetID))
 	}
 	if !changed {
-		return chunk, nil, nil
+		return chunk, nil, nil, nil
 	}
 	filteredChunk := chunk
 	filteredChunk.Mutations = filtered
-	return filteredChunk, warnings, nil
+	return filteredChunk, skipped, warnings, nil
 }
 
 // relationUpsertEndpoints decodes the endpoints of a relation upsert payload.

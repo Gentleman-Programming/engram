@@ -6102,6 +6102,23 @@ func (s *Store) recordRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutat
 		return false, nil
 	}
 
+	syncID, err := s.writeRelationApplyFailureTx(tx, targetKey, mutation, status)
+	if err != nil {
+		return false, err
+	}
+
+	log.Printf("[store] relation apply seq=%d entity_key=%s sync_id=%s err=%v - marking %s", mutation.Seq, mutation.EntityKey, syncID, applyErr, status)
+	return true, nil
+}
+
+// writeRelationApplyFailureTx persists the one sync_apply_deferred row shared
+// by both relation-failure callers — recordRelationApplyFailureTx (post-apply
+// FK-miss and dead-letter evidence) and EnqueueDeferredRelation (pre-apply
+// skip evidence from the cloud import, issue #1135). Keeping a single writer
+// is what makes "same deterministic identity and scope semantics" structural:
+// a skipped edge and a later delivery of the same edge collapse onto a single
+// row, whichever wrote first. Returns the derived row identity.
+func (s *Store) writeRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutation SyncMutation, status string) (string, error) {
 	// Read the payload the same way applyRelationUpsertTx reads it, so the
 	// identity stored on the row is the identity the applier would recognise.
 	var payload syncRelationPayload
@@ -6145,7 +6162,7 @@ func (s *Store) recordRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutat
 			  AND payload = ?
 			  AND apply_status = 'dead'
 		`, mutation.Entity, mutation.EntityKey, mutation.Payload); err != nil {
-			return false, fmt.Errorf("retire legacy relation apply failure: %w", err)
+			return "", fmt.Errorf("retire legacy relation apply failure: %w", err)
 		}
 	}
 
@@ -6167,11 +6184,33 @@ func (s *Store) recordRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutat
 			END,
 			last_attempted_at = datetime('now')
 	`, syncID, mutation.Entity, mutation.Payload, targetKey, mutation.EntityKey, mutation.Op, payloadSyncID, project, scopeClass, status); err != nil {
-		return false, fmt.Errorf("write relation apply failure: %w", err)
+		return "", fmt.Errorf("write relation apply failure: %w", err)
 	}
 
-	log.Printf("[store] relation apply seq=%d entity_key=%s sync_id=%s err=%v - marking %s", mutation.Seq, mutation.EntityKey, syncID, applyErr, status)
-	return true, nil
+	return syncID, nil
+}
+
+// EnqueueDeferredRelation durably records a relation upsert as deferred retry
+// state before its chunk applies (issue #1135): when the cloud import skips an
+// edge as permanently unsatisfiable, this row is what keeps the skip
+// recoverable — ReplayDeferredForScope re-applies the edge once its endpoint
+// reappears, and the apply's success path deletes the row. It writes exactly
+// the row recordRelationApplyFailureTx writes for a deferred FK miss, so a
+// later delivery of the same edge collapses onto this row instead of queueing
+// it twice, and re-enqueueing never resets existing retry state.
+func (s *Store) EnqueueDeferredRelation(targetKey string, mutation SyncMutation) error {
+	if mutation.Entity != SyncEntityRelation {
+		return fmt.Errorf("EnqueueDeferredRelation: unsupported entity %q", mutation.Entity)
+	}
+	targetKey = normalizeSyncTargetKey(targetKey)
+	return s.withTx(func(tx *sql.Tx) error {
+		syncID, err := s.writeRelationApplyFailureTx(tx, targetKey, mutation, "deferred")
+		if err != nil {
+			return err
+		}
+		log.Printf("[store] EnqueueDeferredRelation entity_key=%s sync_id=%s - queued before apply (issue #1135)", mutation.EntityKey, syncID)
+		return nil
+	})
 }
 
 // ApplyPulledChunk atomically applies all mutations contained in a pulled chunk

@@ -1077,3 +1077,114 @@ func TestApplyPulledRelation_MultiActorSamePair(t *testing.T) {
 		t.Errorf("actor-2 sync_id: expected 1 row, got %d", n2)
 	}
 }
+
+// ─── EnqueueDeferredRelation — issue #1135 pre-apply skip queue ──────────────
+
+// TestEnqueueDeferredRelationMirrorsApplyFailureRow pins the store contract of
+// the pre-apply skip queue: EnqueueDeferredRelation must write exactly the row
+// recordRelationApplyFailureTx writes for a deferred FK miss — same identity,
+// scope, and conflict behavior — so a skipped edge and a later redelivery of
+// the same edge collapse onto one replayable row, and re-enqueueing never
+// resets existing retry state.
+func TestEnqueueDeferredRelationMirrorsApplyFailureRow(t *testing.T) {
+	newMutation := func(t *testing.T, syncID string, blankKey bool) SyncMutation {
+		t.Helper()
+		mut := buildRelationMutation(t, syncRelationPayload{
+			SyncID:         syncID,
+			SourceID:       "obs-enqueue-src",
+			TargetID:       "obs-enqueue-gone",
+			Relation:       RelationRelated,
+			JudgmentStatus: JudgmentStatusJudged,
+			Project:        "proj-enqueue",
+			CreatedAt:      "2026-09-12T10:00:00Z",
+			UpdatedAt:      "2026-09-12T10:00:00Z",
+		})
+		if blankKey {
+			mut.EntityKey = ""
+		}
+		return mut
+	}
+
+	t.Run("writes the deferred row the apply-failure path would write", func(t *testing.T) {
+		s := newTestStore(t)
+		mut := newMutation(t, "rel-enqueue-1", false)
+		if err := s.EnqueueDeferredRelation(DefaultSyncTargetKey, mut); err != nil {
+			t.Fatalf("EnqueueDeferredRelation: %v", err)
+		}
+		rows, err := s.ListDeferred(ListDeferredOptions{Status: "deferred"})
+		if err != nil {
+			t.Fatalf("list deferred rows: %v", err)
+		}
+		if len(rows) != 1 {
+			t.Fatalf("expected exactly one deferred row, got %+v", rows)
+		}
+		row := rows[0]
+		if row.SyncID != "rel-enqueue-1" || row.Entity != SyncEntityRelation || row.Op != SyncOpUpsert {
+			t.Fatalf("unexpected row identity: %+v", row)
+		}
+		if row.TargetKey != DefaultSyncTargetKey || row.Project != "proj-enqueue" || row.ScopeClass != "scoped" {
+			t.Fatalf("unexpected row scope: %+v", row)
+		}
+		if row.EntityKey != "rel-enqueue-1" || row.RetryCount != 0 {
+			t.Fatalf("unexpected row state: %+v", row)
+		}
+		var payloadSyncID string
+		if err := s.db.QueryRow(`SELECT payload_sync_id FROM sync_apply_deferred WHERE sync_id = ?`, "rel-enqueue-1").Scan(&payloadSyncID); err != nil {
+			t.Fatalf("read payload_sync_id: %v", err)
+		}
+		if payloadSyncID != "rel-enqueue-1" {
+			t.Fatalf("payload_sync_id = %q, want rel-enqueue-1", payloadSyncID)
+		}
+	})
+
+	t.Run("collapses onto the apply-failure row and preserves retry state", func(t *testing.T) {
+		s := newTestStore(t)
+		mut := newMutation(t, "rel-enqueue-2", false)
+		if err := s.EnqueueDeferredRelation(DefaultSyncTargetKey, mut); err != nil {
+			t.Fatalf("first enqueue: %v", err)
+		}
+		// A replay against the missing endpoint is the failure path the row
+		// must stay compatible with: it bumps retry_count and keeps 'deferred'.
+		replay, err := s.ReplayDeferred()
+		if err != nil {
+			t.Fatalf("replay against missing endpoint: %v", err)
+		}
+		if replay.Failed != 1 {
+			t.Fatalf("expected one still-deferred replay failure, got %+v", replay)
+		}
+		// Re-enqueueing the same edge must collapse onto the same row without
+		// resetting its retry state.
+		if err := s.EnqueueDeferredRelation(DefaultSyncTargetKey, mut); err != nil {
+			t.Fatalf("second enqueue: %v", err)
+		}
+		rows, err := s.ListDeferred(ListDeferredOptions{Status: "deferred"})
+		if err != nil {
+			t.Fatalf("list deferred rows: %v", err)
+		}
+		if len(rows) != 1 || rows[0].SyncID != "rel-enqueue-2" || rows[0].RetryCount != 1 {
+			t.Fatalf("re-enqueue reset or duplicated the retry row: %+v", rows)
+		}
+	})
+
+	t.Run("rejects non-relation mutations", func(t *testing.T) {
+		s := newTestStore(t)
+		err := s.EnqueueDeferredRelation(DefaultSyncTargetKey, SyncMutation{
+			Entity: SyncEntitySession, EntityKey: "sess-enqueue", Op: SyncOpUpsert, Payload: `{"id":"sess-enqueue"}`,
+		})
+		if err == nil {
+			t.Fatal("expected non-relation mutations to be rejected")
+		}
+	})
+
+	t.Run("blank entity key derives the deterministic hashed identity", func(t *testing.T) {
+		s := newTestStore(t)
+		mut := newMutation(t, "rel-enqueue-3", true)
+		if err := s.EnqueueDeferredRelation(DefaultSyncTargetKey, mut); err != nil {
+			t.Fatalf("enqueue with blank entity key: %v", err)
+		}
+		wantSyncID := relationApplyFailureSyncID("deferred", DefaultSyncTargetKey, mut)
+		if n := countDeferredRows(t, s, wantSyncID); n != 1 {
+			t.Fatalf("expected the hashed identity row %q to exist, found %d", wantSyncID, n)
+		}
+	})
+}
