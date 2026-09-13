@@ -6279,16 +6279,20 @@ func (s *Store) recordRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutat
 // whole chunk, because an undecodable payload is a transport-level fault rather
 // than known-corrupt historical data.
 func (s *Store) ApplyPulledChunk(targetKey, chunkID string, mutations []SyncMutation) error {
-	return s.applyPulledChunk(targetKey, chunkID, mutations, nil)
+	return s.applyPulledChunk(targetKey, chunkID, mutations, nil, nil)
 }
 
 // ApplyPulledChunkWithVersions atomically applies a chunk's current-state
 // mutations and immutable observation history before recording its receipt.
 func (s *Store) ApplyPulledChunkWithVersions(targetKey, chunkID string, mutations []SyncMutation, versions []ObservationVersion) error {
-	return s.applyPulledChunk(targetKey, chunkID, mutations, versions)
+	return s.applyPulledChunk(targetKey, chunkID, mutations, versions, nil)
 }
 
-func (s *Store) applyPulledChunk(targetKey, chunkID string, mutations []SyncMutation, versions []ObservationVersion) error {
+func (s *Store) ApplyPulledChunkWithVersionCoverage(targetKey, chunkID string, mutations []SyncMutation, versions []ObservationVersion, coverage []string) error {
+	return s.applyPulledChunk(targetKey, chunkID, mutations, versions, coverage)
+}
+
+func (s *Store) applyPulledChunk(targetKey, chunkID string, mutations []SyncMutation, versions []ObservationVersion, coverage []string) error {
 	targetKey = normalizeSyncTargetKey(targetKey)
 	chunkTargetKey := normalizeChunkTargetKey(targetKey)
 	chunkID = strings.TrimSpace(chunkID)
@@ -6345,7 +6349,17 @@ func (s *Store) applyPulledChunk(targetKey, chunkID string, mutations []SyncMuta
 		if _, err := s.importObservationVersionsTx(tx, versions); err != nil {
 			return fmt.Errorf("import chunk versions: %w", err)
 		}
-		if err := s.establishImportedObservationBaselinesTx(tx, observationSyncIDsWithoutVersions(observationSyncIDs, versions)); err != nil {
+		covered := make(map[string]struct{}, len(coverage))
+		for _, syncID := range coverage {
+			covered[syncID] = struct{}{}
+		}
+		uncovered := observationSyncIDs[:0]
+		for _, syncID := range observationSyncIDs {
+			if _, ok := covered[syncID]; !ok {
+				uncovered = append(uncovered, syncID)
+			}
+		}
+		if err := s.establishImportedObservationBaselinesTx(tx, observationSyncIDsWithoutVersions(uncovered, versions)); err != nil {
 			return fmt.Errorf("establish chunk observation baselines: %w", err)
 		}
 		if _, err := s.execHook(tx,

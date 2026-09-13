@@ -243,6 +243,85 @@ func TestLocalVersionExportSplitsFreshAndVersionOnlyBackfill(t *testing.T) {
 	}
 }
 
+func TestLocalVersionExportSplitsAggregateParentsWithoutPhantomBaselines(t *testing.T) {
+	source := newTestStore(t)
+	if err := source.CreateSession("aggregate-parent-session", "proj-a", "/tmp/proj-a"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	observations := make([]*store.Observation, 0, 100)
+	for i := 0; i < 100; i++ {
+		suffix := fmt.Sprintf("observation-%03d", i)
+		id, err := source.AddObservation(store.AddObservationParams{SessionID: "aggregate-parent-session", Type: "note", Title: suffix, Content: strings.Repeat(suffix, 1<<20), Project: "proj-a", Scope: "project"})
+		if err != nil {
+			t.Fatalf("add %s observation: %v", suffix, err)
+		}
+		updated := suffix + " updated"
+		if _, err := source.UpdateObservation(id, store.UpdateObservationParams{Title: &updated}); err != nil {
+			t.Fatalf("update %s observation: %v", suffix, err)
+		}
+		versionID := fmt.Sprintf("00000000-0000-4000-8000-%012d", len(observations)+101)
+		if _, err := source.DB().Exec(`INSERT INTO observation_versions (version_id, observation_id, observation_sync_id, session_id, type, title, content, project, scope, revision_count) SELECT ?, id, sync_id, session_id, type, title, 'history', project, scope, revision_count FROM observations WHERE id = ?`, versionID, id); err != nil {
+			t.Fatalf("insert %s version: %v", suffix, err)
+		}
+		observation, err := source.GetObservation(id)
+		if err != nil {
+			t.Fatalf("get %s observation: %v", suffix, err)
+		}
+		observations = append(observations, observation)
+	}
+	syncDir := filepath.Join(t.TempDir(), ".engram")
+	result, err := New(source, syncDir).Export("alice", "proj-a")
+	if err != nil || result.IsEmpty || result.ChunksExported < 2 {
+		t.Fatalf("aggregate parent export = %#v, %v", result, err)
+	}
+	manifest, err := New(source, syncDir).readManifest()
+	if err != nil {
+		t.Fatalf("read aggregate manifest: %v", err)
+	}
+	parents, versions := map[string]int{}, map[string]int{}
+	for index, entry := range manifest.Chunks {
+		payload, err := readGzip(filepath.Join(syncDir, "chunks", entry.ID+".jsonl.gz"))
+		if err != nil {
+			t.Fatalf("read aggregate chunk %s: %v", entry.ID, err)
+		}
+		if len(payload) > localExportMaxChunkBytes {
+			t.Fatalf("aggregate chunk %s = %d bytes, exceeds %d", entry.ID, len(payload), localExportMaxChunkBytes)
+		}
+		var chunk ChunkData
+		if err := json.Unmarshal(payload, &chunk); err != nil {
+			t.Fatalf("decode aggregate chunk %s: %v", entry.ID, err)
+		}
+		for _, observation := range chunk.Observations {
+			parents[observation.SyncID] = index
+		}
+		for _, version := range chunk.ObservationVersions {
+			versions[version.ObservationSyncID] = index
+		}
+	}
+	destination := newTestStore(t)
+	if imported, err := New(destination, syncDir).Import(); err != nil || imported.ChunksImported != len(manifest.Chunks) {
+		t.Fatalf("aggregate parent import = %#v, %v", imported, err)
+	}
+	for _, observation := range observations {
+		if parents[observation.SyncID] >= versions[observation.SyncID] {
+			t.Fatalf("parent/version order = %d/%d for %s", parents[observation.SyncID], versions[observation.SyncID], observation.SyncID)
+		}
+		sourceHistory, err := source.ObservationVersions(observation.SyncID, 10)
+		if err != nil {
+			t.Fatalf("source history %s: %v", observation.SyncID, err)
+		}
+		importedHistory, err := destination.ObservationVersions(observation.SyncID, 10)
+		if err != nil || len(importedHistory) != len(sourceHistory) {
+			t.Fatalf("imported history %s = %#v, %v; want %d versions", observation.SyncID, importedHistory, err, len(sourceHistory))
+		}
+		for _, version := range importedHistory {
+			if version.IsBaseline && !version.HistoryComplete {
+				t.Fatalf("phantom incomplete baseline for %s: %#v", observation.SyncID, importedHistory)
+			}
+		}
+	}
+}
+
 func TestLocalVersionExportRejectsOversizedVersionBeforeWritingChunks(t *testing.T) {
 	source := newTestStore(t)
 	seedLocalVersionHistory(t, source, 1, 1200)

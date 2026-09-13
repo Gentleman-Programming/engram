@@ -101,7 +101,8 @@ type ChunkData struct {
 	Observations []store.Observation  `json:"observations"`
 	Prompts      []store.Prompt       `json:"prompts"`
 	Mutations           []store.SyncMutation       `json:"mutations,omitempty"`
-	ObservationVersions []store.ObservationVersion `json:"observation_versions,omitempty"`
+	ObservationVersions        []store.ObservationVersion `json:"observation_versions,omitempty"`
+	ObservationVersionCoverage []string                   `json:"observation_version_coverage,omitempty"`
 }
 
 // SyncResult is returned after a sync operation.
@@ -567,35 +568,38 @@ func splitLocalExportChunk(chunk *ChunkData, maxBytes int) ([]*ChunkData, error)
 	if len(chunk.ObservationVersions) == 0 || maxBytes <= 0 {
 		return []*ChunkData{chunk}, nil
 	}
+	payload, err := jsonMarshalChunk(chunk)
+	if err != nil {
+		return nil, fmt.Errorf("marshal chunk: %w", err)
+	}
+	if len(payload) <= maxBytes {
+		return []*ChunkData{chunk}, nil
+	}
 
 	base := *chunk
 	base.ObservationVersions = nil
-	hasParentData := len(base.Sessions) > 0 || len(base.Observations) > 0 || len(base.Prompts) > 0 || len(base.Mutations) > 0
-	if hasParentData {
-		payload, err := jsonMarshalChunk(&base)
-		if err != nil {
-			return nil, fmt.Errorf("marshal chunk: %w", err)
-		}
-		if len(payload) > maxBytes {
-			return nil, fmt.Errorf("local chunk parent data exceeds %d-byte limit", maxBytes)
-		}
+	base.ObservationVersionCoverage = nil
+	versioned := make(map[string]struct{}, len(chunk.ObservationVersions))
+	for _, version := range chunk.ObservationVersions {
+		versioned[version.ObservationSyncID] = struct{}{}
+	}
+	parts, err := splitLocalParentData(&base, versioned, maxBytes)
+	if err != nil {
+		return nil, err
 	}
 
-	current := &base
-	parts := make([]*ChunkData, 0, len(chunk.ObservationVersions)+1)
+	current := &ChunkData{}
 	for _, version := range chunk.ObservationVersions {
-		candidate := *current
-		candidate.ObservationVersions = append(append([]store.ObservationVersion(nil), current.ObservationVersions...), version)
-		payload, err := jsonMarshalChunk(&candidate)
+		candidate := appendLocalChunkData(current, ChunkData{ObservationVersions: []store.ObservationVersion{version}})
+		payload, err := jsonMarshalChunk(candidate)
 		if err != nil {
 			return nil, fmt.Errorf("marshal chunk: %w", err)
 		}
 		if len(payload) <= maxBytes {
-			current = &candidate
+			current = candidate
 			continue
 		}
-
-		if hasParentData || len(current.ObservationVersions) > 0 {
+		if len(current.ObservationVersions) > 0 {
 			parts = append(parts, current)
 		}
 		current = &ChunkData{ObservationVersions: []store.ObservationVersion{version}}
@@ -606,12 +610,61 @@ func splitLocalExportChunk(chunk *ChunkData, maxBytes int) ([]*ChunkData, error)
 		if len(payload) > maxBytes {
 			return nil, fmt.Errorf("oversized observation version %s exceeds %d-byte limit", version.VersionID, maxBytes)
 		}
-		hasParentData = false
 	}
-	if hasParentData || len(current.ObservationVersions) > 0 {
+	if len(current.ObservationVersions) > 0 {
 		parts = append(parts, current)
 	}
 	return parts, nil
+}
+func splitLocalParentData(base *ChunkData, versioned map[string]struct{}, maxBytes int) ([]*ChunkData, error) {
+	parts := []*ChunkData{}
+	current := &ChunkData{}
+	add := func(unit ChunkData, label string) error {
+		candidate := appendLocalChunkData(current, unit)
+		payload, err := jsonMarshalChunk(candidate)
+		if err != nil {
+			return fmt.Errorf("marshal chunk: %w", err)
+		}
+		if len(payload) <= maxBytes {
+			current = candidate
+			return nil
+		}
+		if len(current.Sessions)+len(current.Observations)+len(current.Prompts)+len(current.Mutations) > 0 {
+			parts = append(parts, current)
+		}
+		current = &unit
+		payload, err = jsonMarshalChunk(current)
+		if err != nil {
+			return fmt.Errorf("marshal chunk: %w", err)
+		}
+		if len(payload) > maxBytes {
+			return fmt.Errorf("oversized local %s exceeds %d-byte limit", label, maxBytes)
+		}
+		return nil
+	}
+	for _, session := range base.Sessions {
+		if err := add(ChunkData{Sessions: []store.Session{session}}, "session"); err != nil { return nil, err }
+	}
+	for _, observation := range base.Observations {
+		unit := ChunkData{Observations: []store.Observation{observation}}
+		if _, ok := versioned[observation.SyncID]; ok { unit.ObservationVersionCoverage = []string{observation.SyncID} }
+		if err := add(unit, "observation "+observation.SyncID); err != nil { return nil, err }
+	}
+	for _, prompt := range base.Prompts {
+		if err := add(ChunkData{Prompts: []store.Prompt{prompt}}, "prompt"); err != nil { return nil, err }
+	}
+	for _, mutation := range base.Mutations {
+		if err := add(ChunkData{Mutations: []store.SyncMutation{mutation}}, "mutation "+mutation.EntityKey); err != nil { return nil, err }
+	}
+	if len(current.Sessions)+len(current.Observations)+len(current.Prompts)+len(current.Mutations) > 0 { parts = append(parts, current) }
+	return parts, nil
+}
+
+func appendLocalChunkData(current *ChunkData, unit ChunkData) *ChunkData {
+	return &ChunkData{
+		Sessions: append(append([]store.Session(nil), current.Sessions...), unit.Sessions...), Observations: append(append([]store.Observation(nil), current.Observations...), unit.Observations...), Prompts: append(append([]store.Prompt(nil), current.Prompts...), unit.Prompts...),
+		Mutations: append(append([]store.SyncMutation(nil), current.Mutations...), unit.Mutations...), ObservationVersions: append(append([]store.ObservationVersion(nil), current.ObservationVersions...), unit.ObservationVersions...), ObservationVersionCoverage: append(append([]string(nil), current.ObservationVersionCoverage...), unit.ObservationVersionCoverage...),
+	}
 }
 
 func (sy *Syncer) exportLocalChunk(manifest *Manifest, known, local map[string]bool, targetKey, createdBy string, chunk *ChunkData) (*SyncResult, error) {
@@ -1158,6 +1211,9 @@ func (sy *Syncer) importMutationChunk(chunkID string, chunk ChunkData) error {
 	mutations := orderMutationsForApply(buildImportMutations(chunk))
 	if sy.cloudMode {
 		return storeApplyPulledChunk(sy.store, sy.chunkTrackingTargetKey(""), chunkID, mutations)
+	}
+	if len(chunk.ObservationVersionCoverage) > 0 {
+		return sy.store.ApplyPulledChunkWithVersionCoverage(sy.chunkTrackingTargetKey(""), chunkID, mutations, chunk.ObservationVersions, chunk.ObservationVersionCoverage)
 	}
 	return storeApplyPulledChunkWithVersions(sy.store, sy.chunkTrackingTargetKey(""), chunkID, mutations, chunk.ObservationVersions)
 }
