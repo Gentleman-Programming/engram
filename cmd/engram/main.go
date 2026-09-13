@@ -3322,8 +3322,9 @@ func printPostInstall(result *setup.Result) {
 		fmt.Println("  1. Restart Claude Code — the plugin is active immediately")
 		fmt.Println("  2. Verify with: claude plugin list")
 		if result.MCPConfigured {
-			fmt.Printf("  3. MCP config written to %s using absolute binary path\n", setup.ClaudeCodeUserMCPPath())
-			fmt.Println("     (survives plugin auto-updates; re-run 'engram setup claude-code' if you move the binary)")
+			fmt.Printf("  3. Claude CLI registered the user MCP server in %s using an absolute binary path\n", setup.ClaudeCodeUserMCPPath())
+			fmt.Println("     If the binary moves, run: claude mcp remove engram --scope user")
+			fmt.Println("     Then re-run: engram setup claude-code")
 		} else {
 			fmt.Println("  3. MCP configuration was not written. Re-run 'engram setup claude-code' after resolving the reported error.")
 		}

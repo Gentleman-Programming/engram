@@ -37,6 +37,7 @@ type fakeCloudBootstrapStore struct {
 	createGrantCalls      int
 	createTokenCalls      int
 	recoverTokenCalls     int
+	recoverTokenParams    cloudstore.RecoverStrandedAdminTokenParams
 	createFirstAdminCalls int
 	auditCalls            int
 	closeCalls            int
@@ -134,6 +135,7 @@ func (s *fakeCloudBootstrapStore) CreatePrincipalTokenWithAudit(_ context.Contex
 
 func (s *fakeCloudBootstrapStore) RecoverStrandedAdminTokenWithAudit(_ context.Context, params cloudstore.RecoverStrandedAdminTokenParams, audit cloudstore.AuthAuditEvent) (cloudstore.PrincipalToken, error) {
 	s.recoverTokenCalls++
+	s.recoverTokenParams = params
 	if s.recoverTokenErr != nil {
 		return cloudstore.PrincipalToken{}, s.recoverTokenErr
 	}
@@ -752,6 +754,22 @@ func TestCloudBootstrapRecoverTokenIssuesOneTokenAndAuditsRecovery(t *testing.T)
 		if value == rawToken {
 			t.Fatalf("recovery audit metadata leaked the raw token: %+v", event.Metadata)
 		}
+	}
+}
+
+func TestCloudBootstrapRecoverTokenPassesExplicitReplacementOptIn(t *testing.T) {
+	stubExitWithPanic(t)
+	t.Setenv("ENGRAM_CLOUD_TOKEN_PEPPER", "dedicated-cloud-token-pepper-for-tests")
+	store := &fakeCloudBootstrapStore{}
+	stubNewCloudBootstrapStore(t, store)
+
+	withArgs(t, "engram", "cloud", "bootstrap", "recover-token", "--revoke-existing")
+	_, _, recovered := captureOutputAndRecover(t, cmdCloudBootstrap)
+	if recovered != nil {
+		t.Fatalf("expected explicit replacement recovery to succeed, got %v", recovered)
+	}
+	if store.recoverTokenCalls != 1 || !store.recoverTokenParams.RevokeExisting {
+		t.Fatalf("expected recovery to receive explicit revoke opt-in, calls=%d params=%+v", store.recoverTokenCalls, store.recoverTokenParams)
 	}
 }
 

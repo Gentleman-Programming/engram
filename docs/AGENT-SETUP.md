@@ -30,11 +30,11 @@ Engram works with **any MCP-compatible agent**. Pick your agent below.
 | Kilo Code       | `engram setup kilocode`                                                                      | [Details](#kilo-code)                              |
 | Any MCP agent   | `engram mcp` (stdio)                                                                         | [Details](#any-other-mcp-agent)                    |
 
-> **Native setup for all agents above.** `engram setup <agent>` writes the right
-> MCP registration (handling each client's config format — `mcpServers`,
-> `servers`, or OpenCode's `mcp` object) plus the Memory Protocol into that
-> agent's instruction surface, idempotently. The per-agent sections below describe
-> the exact files each command touches and the manual equivalent.
+> **Native setup for all agents above.** `engram setup <agent>` configures the
+> supported MCP registration and Memory Protocol idempotently. Claude Code is the
+> exception to direct config writes: its CLI owns user-scope MCP registration. The
+> per-agent sections below describe each integration's authoritative owner and
+> manual equivalent.
 
 ### Protocol verbosity
 
@@ -306,24 +306,19 @@ Marketplace installation provides plugin assets only; it does not register the M
 engram setup claude-code
 ```
 
-`engram setup claude-code` is the sole MCP registration owner. It writes the durable user-level config at `~/.claude/mcp/engram.json` with the absolute `engram` binary path. It refreshes an existing regular file, but refuses to replace a symlink or other non-regular path; inspect it and manually replace it with a regular file before rerunning setup. If that write is not possible, setup warns and completes the plugin installation; resolve the error and rerun setup before using plugin MCP tools. You'll be asked whether to add engram's agent-profile MCP tools to `~/.claude/settings.json` `permissions.allow`. The setup writes entries for both the durable user-level MCP server id (`mcp__engram__...`) and the plugin-scoped server id used by older Claude Code plugin installs, so re-running setup repairs stale or incomplete allowlists without adding startup delay. Existing marketplace plugin copies receive hooks, scripts, and skills updates through normal Claude Code plugin updates; do not edit the plugin cache manually. If `CLAUDE_CONFIG_DIR` is set, Engram writes the MCP registration and permissions allowlist under that directory instead (`$CLAUDE_CONFIG_DIR/mcp/engram.json`, `$CLAUDE_CONFIG_DIR/settings.json`), matching Claude Code's own config-directory override.
+`engram setup claude-code` delegates MCP registration to Claude CLI. Claude writes the user-scope top-level `mcpServers.engram` entry in `~/.claude.json` (Windows: `%USERPROFILE%\\.claude.json`); when `CLAUDE_CONFIG_DIR` is set, Claude uses `$CLAUDE_CONFIG_DIR/.claude.json`. Engram reads only that documented entry: an exact stdio command and arguments (`<absolute-engram-path> mcp --tools=agent`) is a no-op, while a missing entry is added with `claude mcp add --transport stdio --scope user engram -- <absolute-engram-path> mcp --tools=agent` and then verified. A mismatched or unreadable entry is reported as a conflict and is never overwritten. If verification fails after a proven-absent add, setup asks Claude to remove that user-scope entry and reports both errors if rollback fails. You'll be asked whether to add Engram's agent-profile MCP tools to `~/.claude/settings.json` `permissions.allow`. Existing marketplace plugin copies receive hooks, scripts, and skills updates through normal Claude Code plugin updates; do not edit the plugin cache manually.
 
 `engram setup claude-code --protocol=slim` requires Engram plugin version 0.1.1 or later. Setup checks `claude plugin list --json` after a successful install and warns, without failing or changing the selected slim mode, when it cannot verify the installed enabled marketplace plugin. Update through your normal Claude Code plugin update path and restart Claude Code. Session-only `claude --plugin-dir ...` plugins cannot be detected by this check.
 
 **Option C: Bare MCP** — all 23 tools by default, no session management:
 
-Add to your `.claude/settings.json` (project) or `~/.claude/settings.json` (global):
+Use Claude CLI to register the user-scope server (replace the placeholder with the absolute Engram executable path):
 
-```json
-{
-  "mcpServers": {
-    "engram": {
-      "command": "engram",
-      "args": ["mcp"]
-    }
-  }
-}
+```bash
+claude mcp add --transport stdio --scope user engram -- <absolute-engram-path> mcp --tools=agent
 ```
+
+Claude rejects an existing user-scope server with the same name rather than overwriting it. To remove the registration later, run `claude mcp remove engram --scope user`.
 
 With bare MCP, add a [Surviving Compaction](#surviving-compaction-recommended) prompt to your `CLAUDE.md` so the agent remembers to use Engram after context resets.
 

@@ -215,6 +215,28 @@ func cmdDoctorRepair(cfg store.Config) {
 		failDoctorRepair(err.Error())
 		return
 	}
+	if check == diagnostic.CheckSyncTargetClosedSpace {
+		cleanup, err := s.CleanupForeignSyncTargets(mode == diagnostic.RepairModeApply)
+		if err != nil {
+			failDoctorRepair(err.Error())
+			return
+		}
+		plan.TargetActions = make([]diagnostic.SyncTargetCleanupAction, 0, len(cleanup.Actions))
+		if mode == diagnostic.RepairModeApply && len(cleanup.Actions) > 0 {
+			plan.Status = "applied"
+		}
+		for _, action := range cleanup.Actions {
+			plan.TargetActions = append(plan.TargetActions, diagnostic.SyncTargetCleanupAction{TargetKey: action.TargetKey, RetargetedMutations: action.RetargetedMutations, RetainedMutations: action.RetainedMutations, StateRemoved: action.StateRemoved})
+			if action.RetainedMutations > 0 && mode == diagnostic.RepairModeApply {
+				plan.Status = "blocked"
+				if cleanup.Applied {
+					plan.Status = "partial"
+				}
+			}
+		}
+		writeDoctorRepairJSON(plan)
+		return
+	}
 	actions := make([]store.SessionProjectReclassification, 0, len(plan.Actions))
 	for _, action := range plan.Actions {
 		actions = append(actions, store.SessionProjectReclassification{SessionID: action.SessionID, FromProject: action.FromProject, ToProject: action.ToProject})
@@ -256,7 +278,8 @@ func isSupportedDoctorRepairCheck(check string) bool {
 	case diagnostic.CheckSessionProjectDirectoryMismatch,
 		diagnostic.CheckManualSessionNameProjectMismatch,
 		diagnostic.CheckInvalidSessionIdentity,
-		diagnostic.CheckSyncMutationRequiredFields:
+		diagnostic.CheckSyncMutationRequiredFields,
+		diagnostic.CheckSyncTargetClosedSpace:
 		return true
 	default:
 		return false
