@@ -6102,7 +6102,7 @@ func (s *Store) recordRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutat
 		return false, nil
 	}
 
-	syncID, err := s.writeRelationApplyFailureTx(tx, targetKey, mutation, status)
+	syncID, err := s.writeRelationApplyFailureTx(tx, targetKey, mutation, status, false)
 	if err != nil {
 		return false, err
 	}
@@ -6118,7 +6118,19 @@ func (s *Store) recordRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutat
 // is what makes "same deterministic identity and scope semantics" structural:
 // a skipped edge and a later delivery of the same edge collapse onto a single
 // row, whichever wrote first. Returns the derived row identity.
-func (s *Store) writeRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutation SyncMutation, status string) (string, error) {
+//
+// allowDeadRearm gates the only resurrection path in this writer; ordinary
+// apply redelivery always passes false and keeps the historical rule that a
+// dead row stays dead. Only EnqueueDeferredRelation passes true, and even then
+// a dead row is re-armed only when the computed identity is the relation's own
+// sync_id — the identity deferred retry state is keyed on, so a dead row there
+// can only be retry state that expired at ReplayDeferredForScope's retry cap.
+// Re-arming resets retry_count to 0 (a fresh bounded replay window), preserves
+// first_seen_at, keeps last_error as diagnostic history until the next replay
+// overwrites it, and bumps last_attempted_at as any write does. Rows under
+// hashed identities are dead evidence of non-retryable failures; no caller may
+// resurrect them.
+func (s *Store) writeRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutation SyncMutation, status string, allowDeadRearm bool) (string, error) {
 	// Read the payload the same way applyRelationUpsertTx reads it, so the
 	// identity stored on the row is the identity the applier would recognise.
 	var payload syncRelationPayload
@@ -6146,6 +6158,16 @@ func (s *Store) writeRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutati
 	}
 
 	syncID := relationApplyFailureSyncID(status, targetKey, mutation)
+
+	// Re-arm applies only when the computed identity is the relation's own
+	// sync_id (a non-blank entity key under the deferred status). Hash-keyed
+	// identities — blank entity keys and every status='dead' write — land on
+	// dead-evidence rows that stay dead no matter which caller writes.
+	rearmDead := allowDeadRearm && syncID != "" && syncID == strings.TrimSpace(mutation.EntityKey)
+	rearmFlag := 0
+	if rearmDead {
+		rearmFlag = 1
+	}
 
 	// Rows written before the identity above existed are keyed on the mutation's
 	// entity_key and store no entity_key of their own. Retire the one this exact
@@ -6180,10 +6202,15 @@ func (s *Store) writeRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutati
 			scope_class       = excluded.scope_class,
 			apply_status      = CASE
 				WHEN excluded.apply_status = 'dead' THEN 'dead'
+				WHEN ? AND sync_apply_deferred.apply_status = 'dead' THEN 'deferred'
 				ELSE sync_apply_deferred.apply_status
 			END,
+			retry_count       = CASE
+				WHEN ? AND sync_apply_deferred.apply_status = 'dead' THEN 0
+				ELSE sync_apply_deferred.retry_count
+			END,
 			last_attempted_at = datetime('now')
-	`, syncID, mutation.Entity, mutation.Payload, targetKey, mutation.EntityKey, mutation.Op, payloadSyncID, project, scopeClass, status); err != nil {
+	`, syncID, mutation.Entity, mutation.Payload, targetKey, mutation.EntityKey, mutation.Op, payloadSyncID, project, scopeClass, status, rearmFlag, rearmFlag); err != nil {
 		return "", fmt.Errorf("write relation apply failure: %w", err)
 	}
 
@@ -6197,14 +6224,17 @@ func (s *Store) writeRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutati
 // reappears, and the apply's success path deletes the row. It writes exactly
 // the row recordRelationApplyFailureTx writes for a deferred FK miss, so a
 // later delivery of the same edge collapses onto this row instead of queueing
-// it twice, and re-enqueueing never resets existing retry state.
+// it twice. Re-enqueueing a live deferred row never resets its retry state;
+// re-enqueueing a row that died at the replay retry cap re-arms it to
+// 'deferred' with retry_count reset to 0, giving the edge a fresh bounded
+// replay window. Hash-keyed dead evidence is never re-armed.
 func (s *Store) EnqueueDeferredRelation(targetKey string, mutation SyncMutation) error {
 	if mutation.Entity != SyncEntityRelation {
 		return fmt.Errorf("EnqueueDeferredRelation: unsupported entity %q", mutation.Entity)
 	}
 	targetKey = normalizeSyncTargetKey(targetKey)
 	return s.withTx(func(tx *sql.Tx) error {
-		syncID, err := s.writeRelationApplyFailureTx(tx, targetKey, mutation, "deferred")
+		syncID, err := s.writeRelationApplyFailureTx(tx, targetKey, mutation, "deferred", true)
 		if err != nil {
 			return err
 		}

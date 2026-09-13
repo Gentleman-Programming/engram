@@ -1188,3 +1188,142 @@ func TestEnqueueDeferredRelationMirrorsApplyFailureRow(t *testing.T) {
 		}
 	})
 }
+
+// TestEnqueueDeferredRelationReArmsDeadRow pins the recovery contract for a
+// pre-apply skipped relation that expired at the replay retry cap: only an
+// explicit re-enqueue may re-arm the dead row — to 'deferred' with
+// retry_count 0 — while ordinary apply redelivery and hash-keyed dead
+// evidence must stay dead.
+func TestEnqueueDeferredRelationReArmsDeadRow(t *testing.T) {
+	newMutation := func(t *testing.T, syncID string) SyncMutation {
+		t.Helper()
+		return buildRelationMutation(t, syncRelationPayload{
+			SyncID: syncID, SourceID: "obs-enqueue-rearm-src", TargetID: "obs-enqueue-rearm-gone",
+			Relation: RelationRelated, JudgmentStatus: JudgmentStatusJudged,
+			Project: "proj-enqueue-rearm", CreatedAt: "2026-09-12T10:00:00Z", UpdatedAt: "2026-09-12T10:00:00Z",
+		})
+	}
+
+	// enqueueAndDriveToDead enqueues the relation as pre-apply skip evidence
+	// and drives its row to 'dead' through real ReplayDeferredForScope
+	// retries: four still-deferred FK misses, the fifth hits the cap of 5.
+	enqueueAndDriveToDead := func(t *testing.T, s *Store, mut SyncMutation) {
+		t.Helper()
+		if err := s.EnqueueDeferredRelation(DefaultSyncTargetKey, mut); err != nil {
+			t.Fatalf("EnqueueDeferredRelation: %v", err)
+		}
+		for i := 1; i <= 5; i++ {
+			res, err := s.ReplayDeferredForScope(DefaultSyncTargetKey, "proj-enqueue-rearm")
+			if err != nil {
+				t.Fatalf("ReplayDeferredForScope (retry %d): %v", i, err)
+			}
+			if (i < 5 && (res.Failed != 1 || res.Dead != 0)) || (i == 5 && (res.Dead != 1 || res.Failed != 0)) {
+				t.Fatalf("replay %d: got %+v, want one deferred retry per replay, dead only at the cap", i, res)
+			}
+		}
+		if status, retryCount := getDeferredRow(t, s, mut.EntityKey); status != "dead" || retryCount != 5 {
+			t.Fatalf("pre-re-arm row = (%q, %d), want (dead, 5)", status, retryCount)
+		}
+	}
+
+	readDiagnostics := func(t *testing.T, s *Store, syncID string) (firstSeen, lastErr, lastAttempted string) {
+		t.Helper()
+		if err := s.db.QueryRow(
+			`SELECT first_seen_at, ifnull(last_error, ''), ifnull(last_attempted_at, '') FROM sync_apply_deferred WHERE sync_id = ?`, syncID,
+		).Scan(&firstSeen, &lastErr, &lastAttempted); err != nil {
+			t.Fatalf("read row diagnostics for %s: %v", syncID, err)
+		}
+		return firstSeen, lastErr, lastAttempted
+	}
+
+	t.Run("re-enqueue re-arms a retry-cap dead row with a fresh retry window", func(t *testing.T) {
+		s, _, _ := setupSyncApplyStore(t)
+		mut := newMutation(t, newSyncID("rel-rearm"))
+		enqueueAndDriveToDead(t, s, mut)
+		deadFirstSeen, deadLastError, _ := readDiagnostics(t, s, mut.EntityKey)
+
+		if err := s.EnqueueDeferredRelation(DefaultSyncTargetKey, mut); err != nil {
+			t.Fatalf("re-enqueue: %v", err)
+		}
+		deferred, dead, err := s.CountDeferredAndDeadForScope(DefaultSyncTargetKey, "proj-enqueue-rearm")
+		if err != nil {
+			t.Fatalf("CountDeferredAndDeadForScope: %v", err)
+		}
+		if deferred != 1 || dead != 0 {
+			t.Fatalf("after re-enqueue: deferred=%d dead=%d, want one re-armed deferred row and no dead row", deferred, dead)
+		}
+		rows, err := s.ListDeferred(ListDeferredOptions{Status: "deferred"})
+		if err != nil {
+			t.Fatalf("list deferred rows: %v", err)
+		}
+		if len(rows) != 1 || rows[0].SyncID != mut.EntityKey || rows[0].RetryCount != 0 {
+			t.Fatalf("re-armed row = %+v, want the same relation with retry_count 0", rows)
+		}
+		if firstSeen, lastErr, lastAttempted := readDiagnostics(t, s, mut.EntityKey); firstSeen != deadFirstSeen || lastErr != deadLastError || lastAttempted == "" {
+			t.Fatalf("re-armed diagnostics = (%q, %q, %q), want first_seen_at=%q and last_error=%q preserved, last_attempted_at bumped", firstSeen, lastErr, lastAttempted, deadFirstSeen, deadLastError)
+		}
+	})
+
+	t.Run("first replay after re-arm becomes retry 1 and stays deferred", func(t *testing.T) {
+		s, _, _ := setupSyncApplyStore(t)
+		mut := newMutation(t, newSyncID("rel-rearm-retry1"))
+		enqueueAndDriveToDead(t, s, mut)
+		if err := s.EnqueueDeferredRelation(DefaultSyncTargetKey, mut); err != nil {
+			t.Fatalf("re-enqueue: %v", err)
+		}
+		res, err := s.ReplayDeferredForScope(DefaultSyncTargetKey, "proj-enqueue-rearm")
+		if err != nil {
+			t.Fatalf("replay after re-arm: %v", err)
+		}
+		if res.Retried != 1 || res.Failed != 1 || res.Dead != 0 {
+			t.Fatalf("replay after re-arm = %+v, want exactly one still-deferred retry", res)
+		}
+		if status, retryCount := getDeferredRow(t, s, mut.EntityKey); status != "deferred" || retryCount != 1 {
+			t.Fatalf("row after replay = (%q, %d), want (deferred, 1)", status, retryCount)
+		}
+	})
+
+	t.Run("ordinary apply redelivery leaves the retry-cap dead row dead", func(t *testing.T) {
+		s, _, _ := setupSyncApplyStore(t)
+		mut := newMutation(t, newSyncID("rel-rearm-redelivery"))
+		enqueueAndDriveToDead(t, s, mut)
+		if err := s.ApplyPulledChunk(DefaultSyncTargetKey, "chunk-rearm-redelivery", []SyncMutation{mut}); err != nil {
+			t.Fatalf("ApplyPulledChunk: %v", err)
+		}
+		if status, retryCount := getDeferredRow(t, s, mut.EntityKey); status != "dead" || retryCount != 5 {
+			t.Fatalf("redelivered row = (%q, %d), want the dead row untouched at (dead, 5)", status, retryCount)
+		}
+		if got := countRelationRows(t, s, mut.EntityKey); got != 0 {
+			t.Fatalf("dead relation must stay unapplied, got %d rows", got)
+		}
+	})
+
+	t.Run("re-enqueue does not resurrect hash-keyed dead evidence", func(t *testing.T) {
+		s, _, _ := setupSyncApplyStore(t)
+		mut := newMutation(t, newSyncID("rel-rearm-hash"))
+		mut.EntityKey = ""
+		mut.Payload = "not json" // blank key: hashed identity; payload cannot apply
+		// The skip queue writes the row as deferred under the hashed identity; an
+		// ordinary apply of the same mutation records dead evidence under the same
+		// hash and wins the conflict.
+		if err := s.EnqueueDeferredRelation(DefaultSyncTargetKey, mut); err != nil {
+			t.Fatalf("EnqueueDeferredRelation (blank key): %v", err)
+		}
+		if err := s.ApplyPulledChunk(DefaultSyncTargetKey, "chunk-rearm-hash", []SyncMutation{mut}); err != nil {
+			t.Fatalf("ApplyPulledChunk: %v", err)
+		}
+		deadSyncID := relationApplyFailureSyncID("dead", DefaultSyncTargetKey, mut)
+		if status, _ := getDeferredRow(t, s, deadSyncID); status != "dead" {
+			t.Fatalf("hash-keyed row = %q, want dead evidence before re-enqueue", status)
+		}
+		if err := s.EnqueueDeferredRelation(DefaultSyncTargetKey, mut); err != nil {
+			t.Fatalf("re-enqueue over hash-keyed dead evidence: %v", err)
+		}
+		if status, _ := getDeferredRow(t, s, deadSyncID); status != "dead" {
+			t.Fatalf("hash-keyed dead evidence = %q after re-enqueue, want dead", status)
+		}
+		if got := countDeferredRows(t, s, deadSyncID); got != 1 {
+			t.Fatalf("hash-keyed dead row duplicated or lost: %d rows", got)
+		}
+	})
+}
