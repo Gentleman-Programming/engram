@@ -4471,8 +4471,9 @@ func TestClaudeCodeUserMCPPathUsesClaudeJSONLocations(t *testing.T) {
 		useTestHome(t)
 		override := t.TempDir()
 		t.Setenv("CLAUDE_CONFIG_DIR", override)
-		osExecutable = func() (string, error) { return `C:\Engram\engram.exe`, nil }
-		if err := os.WriteFile(ClaudeCodeUserMCPPath(), []byte(`{"mcpServers":{"engram":{"type":"stdio","command":"C:\\Engram\\engram.exe","args":["mcp","--tools=agent"]}}}`), 0644); err != nil {
+		command := filepath.Join(t.TempDir(), "engram")
+		osExecutable = func() (string, error) { return command, nil }
+		if err := os.WriteFile(ClaudeCodeUserMCPPath(), []byte(fmt.Sprintf(`{"mcpServers":{"engram":{"type":"stdio","command":%q,"args":["mcp","--tools=agent"]}}}`, command)), 0644); err != nil {
 			t.Fatalf("write overridden Claude config: %v", err)
 		}
 		lookPathFn = func(string) (string, error) {
