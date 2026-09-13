@@ -106,7 +106,7 @@ func (s *Store) ObservationVersionsPage(syncID string, beforeRevision int, befor
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var versions []ObservationVersion
 	for rows.Next() {

@@ -37,7 +37,7 @@ func (s *Store) exportObservationVersions(observations []Observation) ([]Observa
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var versions []ObservationVersion
 	for rows.Next() {
