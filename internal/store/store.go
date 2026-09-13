@@ -1337,6 +1337,47 @@ func (s *Store) migrate() error {
 	if _, err := s.execHook(s.db, `UPDATE observations SET sync_id = 'obs-' || lower(hex(randomblob(16))) WHERE sync_id IS NULL OR sync_id = ''`); err != nil {
 		return err
 	}
+	if _, err := s.execHook(s.db, `
+		CREATE TABLE IF NOT EXISTS observation_versions (
+			id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+			version_id          TEXT NOT NULL UNIQUE,
+			observation_id      INTEGER NOT NULL REFERENCES observations(id) ON DELETE CASCADE,
+			observation_sync_id TEXT NOT NULL,
+			session_id          TEXT NOT NULL,
+			type                TEXT NOT NULL,
+			title               TEXT NOT NULL,
+			content             TEXT NOT NULL,
+			tool_name           TEXT,
+			project             TEXT,
+			scope               TEXT NOT NULL,
+			topic_key           TEXT,
+			revision_count      INTEGER NOT NULL,
+			is_baseline         BOOLEAN NOT NULL DEFAULT 0,
+			history_complete    BOOLEAN NOT NULL DEFAULT 1,
+			captured_at         TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+		CREATE INDEX IF NOT EXISTS idx_observation_versions_sync_revision
+			ON observation_versions(observation_sync_id, revision_count DESC, version_id DESC);
+	`); err != nil {
+		return err
+	}
+	// A legacy database has only its current projection. Preserve that state as
+	// one explicitly incomplete baseline rather than inventing prior revisions.
+	if _, err := s.execHook(s.db, `
+		INSERT INTO observation_versions (
+			version_id, observation_id, observation_sync_id, session_id, type, title,
+			content, tool_name, project, scope, topic_key, revision_count, is_baseline,
+			history_complete
+		)
+		SELECT lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' ||
+		       substr(lower(hex(randomblob(2))), 2) || '-' ||
+		       substr('89ab', abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))), 2) || '-' ||
+		       lower(hex(randomblob(6))), id, sync_id, session_id, type, title, content,
+		       tool_name, project, scope, topic_key, revision_count, 1, 0
+		FROM observations
+		WHERE NOT EXISTS (SELECT 1 FROM observation_versions WHERE observation_id = observations.id)`); err != nil {
+		return err
+	}
 
 	if _, err := s.execHook(s.db, `UPDATE user_prompts SET project = '' WHERE project IS NULL`); err != nil {
 		return err
@@ -3073,6 +3114,9 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 					return err
 				}
 				observationID = existingID
+				if err := s.appendObservationVersionTx(tx, obs); err != nil {
+					return err
+				}
 				return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpUpsert, observationPayloadFromObservation(obs))
 			}
 			if err != sql.ErrNoRows {
@@ -3147,6 +3191,9 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 
 		obs, err = s.getObservationTx(tx, observationID)
 		if err != nil {
+			return err
+		}
+		if err := s.appendObservationVersionTx(tx, obs); err != nil {
 			return err
 		}
 		return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpUpsert, observationPayloadFromObservation(obs))
@@ -3876,6 +3923,9 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 
 		updated, err = s.getObservationTx(tx, id)
 		if err != nil {
+			return err
+		}
+		if err := s.appendObservationVersionTx(tx, updated); err != nil {
 			return err
 		}
 		return s.enqueueSyncMutationTx(tx, SyncEntityObservation, updated.SyncID, SyncOpUpsert, observationPayloadFromObservation(updated))
