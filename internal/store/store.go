@@ -580,11 +580,12 @@ type syncRelationPayload struct {
 
 // ExportData is the full serializable dump of the engram database.
 type ExportData struct {
-	Version      string        `json:"version"`
-	ExportedAt   string        `json:"exported_at"`
-	Sessions     []Session     `json:"sessions"`
-	Observations []Observation `json:"observations"`
-	Prompts      []Prompt      `json:"prompts"`
+	Version             string               `json:"version"`
+	ExportedAt          string               `json:"exported_at"`
+	Sessions            []Session            `json:"sessions"`
+	Observations        []Observation        `json:"observations"`
+	ObservationVersions []ObservationVersion `json:"observation_versions,omitempty"`
+	Prompts             []Prompt             `json:"prompts"`
 }
 
 // ─── Config ──────────────────────────────────────────────────────────────────
@@ -5102,6 +5103,11 @@ func (s *Store) exportWithProjectScope(project string) (*ExportData, error) {
 	if err := obsRows.Err(); err != nil {
 		return nil, err
 	}
+	versions, err := s.exportObservationVersions(data.Observations)
+	if err != nil {
+		return nil, fmt.Errorf("export observation versions: %w", err)
+	}
+	data.ObservationVersions = versions
 
 	// Prompts
 	promptQuery := "SELECT id, ifnull(sync_id, '') as sync_id, session_id, content, ifnull(project, '') as project, created_at FROM user_prompts"
@@ -5231,6 +5237,11 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 		n, _ := res.RowsAffected()
 		result.ObservationsImported += int(n)
 	}
+	versionsImported, err := s.importObservationVersionsTx(tx, data.ObservationVersions)
+	if err != nil {
+		return nil, fmt.Errorf("import observation versions: %w", err)
+	}
+	result.VersionsImported = versionsImported
 
 	// Import prompts
 	for _, p := range data.Prompts {
@@ -5270,6 +5281,7 @@ type ImportResult struct {
 	ObservationsImported     int `json:"observations_imported"`
 	ObservationsUpdated      int `json:"observations_updated"`
 	ObservationsSkippedStale int `json:"observations_skipped_stale"`
+	VersionsImported         int `json:"versions_imported"`
 	PromptsImported          int `json:"prompts_imported"`
 }
 
