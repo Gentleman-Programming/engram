@@ -374,9 +374,12 @@ func (s *CloudServer) authenticateRequest(w http.ResponseWriter, r *http.Request
 }
 
 // requestAuthDenyReason maps a request-auth rejection to its audit
-// reason_code. Resolver errors are classified with errors.Is because
-// ResolveBearerToken wraps the sentinel classes (e.g.
-// fmt.Errorf("%w: token principal mismatch", ErrInvalidPrincipal)).
+// reason_code. Resolver errors are classified with errors.Is against the
+// sentinel classes ResolveBearerToken returns and wraps. A token record whose
+// principal ID does not match the resolved principal is
+// ErrTokenPrincipalMismatch (token_principal_mismatch); a stored principal
+// that fails Validate() wraps ErrInvalidPrincipal and is a malformed stored
+// principal, so it falls to the generic resolver_error bucket.
 func requestAuthDenyReason(err error) string {
 	switch {
 	case errors.Is(err, errMissingAuthorizationHeader), errors.Is(err, errBearerTokenRequired):
@@ -389,7 +392,7 @@ func requestAuthDenyReason(err error) string {
 		return authAuditReasonTokenRevoked
 	case errors.Is(err, cloudauth.ErrPrincipalDisabled):
 		return authAuditReasonPrincipalDisabled
-	case errors.Is(err, cloudauth.ErrInvalidPrincipal):
+	case errors.Is(err, cloudauth.ErrTokenPrincipalMismatch):
 		return authAuditReasonTokenPrincipalMismatch
 	case errors.Is(err, cloudauth.ErrTokenPepperRequired):
 		return authAuditReasonPepperMissing
@@ -433,11 +436,11 @@ func bearerTokenFromRequest(r *http.Request) (string, error) {
 	if header == "" {
 		return "", errMissingAuthorizationHeader
 	}
-	parts := strings.Fields(header)
-	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+	scheme, credentials, _ := strings.Cut(header, " ")
+	if !strings.EqualFold(scheme, "Bearer") {
 		return "", errAuthorizationNotBearer
 	}
-	token := strings.TrimSpace(parts[1])
+	token := strings.TrimSpace(credentials)
 	if token == "" {
 		return "", errBearerTokenRequired
 	}

@@ -1920,8 +1920,14 @@ func TestRequestAuthDeniedAuditInsertUsesBoundedContext(t *testing.T) {
 	if !store.hasDeadline {
 		t.Fatal("request auth audit insert context must have a deadline")
 	}
-	if store.deadline.Before(requestStarted) || store.deadline.After(requestStarted.Add(10*time.Second)) {
-		t.Fatalf("request auth audit insert deadline = %v, want within 10s of request start %v", store.deadline, requestStarted)
+	// The insert context must carry the bounded requestAuthAuditInsertTimeout
+	// budget, not merely any deadline: a regression to a longer timeout (e.g. 9s)
+	// must fail here. Monotonic-clock comparisons with a narrow tolerance band
+	// absorb scheduling jitter without accepting a different timeout value.
+	minDeadline := requestStarted.Add(requestAuthAuditInsertTimeout - 25*time.Millisecond)
+	maxDeadline := requestStarted.Add(requestAuthAuditInsertTimeout + 250*time.Millisecond)
+	if store.deadline.Before(minDeadline) || store.deadline.After(maxDeadline) {
+		t.Fatalf("request auth audit insert deadline = %v, want approximately requestStarted+%v (allowed band [%v, %v])", store.deadline, requestAuthAuditInsertTimeout, minDeadline, maxDeadline)
 	}
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d body=%q", rec.Code, rec.Body.String())
@@ -2037,13 +2043,17 @@ func TestRequestAuthDeniedAuditReasonMapping(t *testing.T) {
 		sendHeader bool
 		tokenErr   error
 		wantReason string
+		wantBody   string
 	}{
 		{name: "missing authorization header", sendHeader: false, wantReason: "missing_header"},
 		{name: "malformed bearer prefix", header: "Token abc", sendHeader: true, wantReason: "malformed_bearer"},
+		{name: "empty bearer credentials", header: "Bearer ", sendHeader: true, wantReason: "missing_header", wantBody: "unauthorized: bearer token is required\n"},
+		{name: "bare bearer scheme", header: "Bearer", sendHeader: true, wantReason: "missing_header", wantBody: "unauthorized: bearer token is required\n"},
 		{name: "unknown token", header: "Bearer rejected-token", sendHeader: true, tokenErr: cloudauth.ErrUnknownToken, wantReason: "unknown_token"},
 		{name: "revoked token", header: "Bearer rejected-token", sendHeader: true, tokenErr: cloudauth.ErrTokenRevoked, wantReason: "token_revoked"},
 		{name: "disabled principal", header: "Bearer rejected-token", sendHeader: true, tokenErr: cloudauth.ErrPrincipalDisabled, wantReason: "principal_disabled"},
-		{name: "token principal mismatch", header: "Bearer rejected-token", sendHeader: true, tokenErr: fmt.Errorf("%w: token principal mismatch", cloudauth.ErrInvalidPrincipal), wantReason: "token_principal_mismatch"},
+		{name: "token principal mismatch", header: "Bearer rejected-token", sendHeader: true, tokenErr: cloudauth.ErrTokenPrincipalMismatch, wantReason: "token_principal_mismatch"},
+		{name: "invalid stored principal", header: "Bearer rejected-token", sendHeader: true, tokenErr: fmt.Errorf("%w: invalid role", cloudauth.ErrInvalidPrincipal), wantReason: "resolver_error"},
 		{name: "pepper missing", header: "Bearer rejected-token", sendHeader: true, tokenErr: cloudauth.ErrTokenPepperRequired, wantReason: "pepper_missing"},
 		{name: "resolver failure", header: "Bearer rejected-token", sendHeader: true, tokenErr: errors.New("resolver unavailable"), wantReason: "resolver_error"},
 	}
@@ -2071,7 +2081,66 @@ func TestRequestAuthDeniedAuditReasonMapping(t *testing.T) {
 				t.Fatalf("expected exactly one auth audit event, got %d: %+v", len(store.auditEvents), store.auditEvents)
 			}
 			assertRequestAuthDeniedEvent(t, store.auditEvents[0], tc.wantReason)
+			if tc.wantBody != "" && rec.Body.String() != tc.wantBody {
+				t.Fatalf("401 body = %q, want %q", rec.Body.String(), tc.wantBody)
+			}
 		})
+	}
+}
+
+// TestBearerTokenFromRequest pins the Authorization-header grammar of the
+// request auth middleware: a missing or blank header is
+// errMissingAuthorizationHeader, a non-Bearer scheme is
+// errAuthorizationNotBearer, and a Bearer scheme with empty credentials (with
+// or without a trailing space) is errBearerTokenRequired — not a malformed
+// scheme. Scheme matching is case-insensitive per RFC 7235.
+func TestBearerTokenFromRequest(t *testing.T) {
+	cases := []struct {
+		name      string
+		header    string
+		setHeader bool
+		wantToken string
+		wantErr   error
+	}{
+		{name: "missing header", setHeader: false, wantErr: errMissingAuthorizationHeader},
+		{name: "blank header", header: "   ", setHeader: true, wantErr: errMissingAuthorizationHeader},
+		{name: "valid bearer token", header: "Bearer sync-token", setHeader: true, wantToken: "sync-token"},
+		{name: "lowercase scheme", header: "bearer sync-token", setHeader: true, wantToken: "sync-token"},
+		{name: "extra inner spaces", header: "Bearer   sync-token", setHeader: true, wantToken: "sync-token"},
+		{name: "non-bearer scheme", header: "Token sync-token", setHeader: true, wantErr: errAuthorizationNotBearer},
+		{name: "scheme glued to token", header: "Bearersync-token", setHeader: true, wantErr: errAuthorizationNotBearer},
+		{name: "bearer with trailing space", header: "Bearer ", setHeader: true, wantErr: errBearerTokenRequired},
+		{name: "bare bearer scheme", header: "Bearer", setHeader: true, wantErr: errBearerTokenRequired},
+		{name: "bearer with only spaces", header: "Bearer    ", setHeader: true, wantErr: errBearerTokenRequired},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/sync/pull?project=proj-a", nil)
+			if tc.setHeader {
+				req.Header.Set("Authorization", tc.header)
+			}
+			token, err := bearerTokenFromRequest(req)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("bearerTokenFromRequest(%q) error = %v, want %v", tc.header, err, tc.wantErr)
+			}
+			if token != tc.wantToken {
+				t.Fatalf("bearerTokenFromRequest(%q) token = %q, want %q", tc.header, token, tc.wantToken)
+			}
+		})
+	}
+}
+
+// TestRequestAuthDenyReasonClassifiesPrincipalValidationErrors pins the
+// sentinel split between a token/record principal mismatch and a stored
+// principal that fails Validate(): only the former is
+// token_principal_mismatch; the latter falls to the generic resolver_error
+// bucket.
+func TestRequestAuthDenyReasonClassifiesPrincipalValidationErrors(t *testing.T) {
+	if got := requestAuthDenyReason(fmt.Errorf("%w: invalid role", cloudauth.ErrInvalidPrincipal)); got != authAuditReasonResolverError {
+		t.Fatalf("requestAuthDenyReason(principal Validate failure) = %q, want %q", got, authAuditReasonResolverError)
+	}
+	if got := requestAuthDenyReason(cloudauth.ErrTokenPrincipalMismatch); got != authAuditReasonTokenPrincipalMismatch {
+		t.Fatalf("requestAuthDenyReason(ErrTokenPrincipalMismatch) = %q, want %q", got, authAuditReasonTokenPrincipalMismatch)
 	}
 }
 
