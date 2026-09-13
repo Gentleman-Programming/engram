@@ -306,6 +306,22 @@ Do not manually edit SQLite without a backup.
 
 ---
 
+## Error: `invalid push payload: invalid character '\x1f' looking for beginning of value`
+
+Full symptom during `engram sync --cloud`:
+
+```text
+write chunk: cloud: push chunk ...: status 400: invalid push payload: invalid character '\x1f' looking for beginning of value
+```
+
+**Cause:** the client sends the push body as a gzip-compressed envelope declared with `Content-Type: application/vnd.engram.sync+gzip; version=1`. `\x1f` is the first byte of the gzip magic number (`0x1f 0x8b`), so this error means the server tried to decode raw gzip bytes as plain JSON. That happens when a proxy in front of the cloud server dropped or rewrote the request `Content-Type` header, or when the running server binary predates the compressed envelope support.
+
+**Current server behavior:** up-to-date `engram cloud serve` binaries sniff the gzip magic bytes and decode the compressed envelope regardless of the declared `Content-Type`, so a rewritten header no longer causes this error server-side. If you still see it, the running server binary is older than this fix — upgrade the server.
+
+**Proxy advice:** if you run a proxy (nginx, Traefik, an API gateway, a WAF) in front of the cloud server, configure it to preserve the client request `Content-Type` header — in particular `application/vnd.engram.sync+gzip; version=1` — instead of replacing it with `application/json` or stripping it.
+
+---
+
 ## Error: `transport_failed`
 
 `transport_failed` is a wrapper around network, auth, server, or payload errors. Look for the concrete error message below it.

@@ -505,7 +505,22 @@ func (s *CloudServer) handlePushChunk(w http.ResponseWriter, r *http.Request) {
 			err = json.Unmarshal(encoded, &req)
 		}
 	} else {
-		err = json.NewDecoder(r.Body).Decode(&req)
+		body, readErr := io.ReadAll(r.Body)
+		if readErr != nil {
+			err = readErr
+		} else if chunkcodec.HasGzipMagic(body) {
+			// Resilience against proxies that drop or rewrite the request
+			// Content-Type: a gzip stream is identified by its magic bytes, so
+			// decode the compressed envelope even though the header disagrees.
+			log.Printf("cloudserver: push body is a gzip stream but Content-Type is %q; sniffing and decoding as compressed envelope", r.Header.Get("Content-Type"))
+			var decoded []byte
+			decoded, err = chunkcodec.DecodeCompressedEnvelope(body, maxPushBodyBytes)
+			if err == nil {
+				err = json.Unmarshal(decoded, &req)
+			}
+		} else {
+			err = json.Unmarshal(body, &req)
+		}
 	}
 	if err != nil {
 		var maxBytesErr *http.MaxBytesError
@@ -517,7 +532,7 @@ func (s *CloudServer) handlePushChunk(w http.ResponseWriter, r *http.Request) {
 			writeActionableError(w, http.StatusRequestEntityTooLarge, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodePayloadTooLarge, fmt.Sprintf("decoded push payload too large (max %d bytes)", maxPushBodyBytes))
 			return
 		}
-		writeActionableError(w, http.StatusBadRequest, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodePayloadInvalid, fmt.Sprintf("invalid push payload: %v", err))
+		writeActionableError(w, http.StatusBadRequest, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodePayloadInvalid, fmt.Sprintf("invalid push payload: %v (content-type: %q)", err, r.Header.Get("Content-Type")))
 		return
 	}
 	if len(req.Data) == 0 {
