@@ -145,6 +145,48 @@ func TestImportLegacyObservationCreatesIncompleteBaseline(t *testing.T) {
 	}
 }
 
+func TestImportLegacyUpdateExtendsExistingHistoryAsIncomplete(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateSession("legacy-gap-session", "proj", "/tmp"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := s.AddObservation(AddObservationParams{SessionID: "legacy-gap-session", Type: "note", Title: "before", Content: "before", Project: "proj"})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	current, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("get observation: %v", err)
+	}
+	incoming := *current
+	incoming.Title, incoming.Content, incoming.UpdatedAt = "legacy", "legacy", "2099-01-01 00:00:00"
+	data := &ExportData{Observations: []Observation{incoming}}
+	if _, err := s.Import(data); err != nil {
+		t.Fatalf("newer legacy import: %v", err)
+	}
+	versions, err := s.ObservationVersions(current.SyncID, 10)
+	gap := false
+	for _, version := range versions {
+		gap = gap || (version.Title == "legacy" && version.IsBaseline && !version.HistoryComplete)
+	}
+	if err != nil || len(versions) != 2 || !gap {
+		t.Fatalf("history after legacy update = %#v, %v; want incomplete gap snapshot", versions, err)
+	}
+	if result, err := s.Import(data); err != nil || result.ObservationsSkippedStale != 1 {
+		t.Fatalf("identical legacy replay = %#v, %v; want stale no-op", result, err)
+	}
+	if versions, err = s.ObservationVersions(current.SyncID, 10); err != nil || len(versions) != 2 {
+		t.Fatalf("history after stale replay = %#v, %v; want no duplicate", versions, err)
+	}
+	local := "local"
+	if _, err := s.UpdateObservation(id, UpdateObservationParams{Title: &local}); err != nil {
+		t.Fatalf("local update: %v", err)
+	}
+	if versions, err = s.ObservationVersions(current.SyncID, 10); err != nil || len(versions) != 3 || versions[0].HistoryComplete {
+		t.Fatalf("history after local update = %#v, %v; want incomplete retained", versions, err)
+	}
+}
+
 func TestImportLegacyBlankSyncIDCreatesBaseline(t *testing.T) {
 	s := newTestStore(t)
 	project := "proj"

@@ -10,7 +10,7 @@ import (
 func pulledObservationForVersionTest(t *testing.T, syncID, title string) (SyncMutation, ObservationVersion) {
 	t.Helper()
 	project := "proj"
-	at := "2026-01-01 00:00:00"
+	at := "2099-01-01 00:00:00"
 	payload, err := json.Marshal(syncObservationPayload{SyncID: syncID, SessionID: "chunk-session", Type: "note", Title: title, Content: title, Project: &project, Scope: "project", RevisionCount: 1, DuplicateCount: 1, CreatedAt: at, UpdatedAt: at})
 	if err != nil {
 		t.Fatalf("marshal observation payload: %v", err)
@@ -67,6 +67,36 @@ func TestApplyPulledChunkWithVersionsAtomicAndIdempotent(t *testing.T) {
 	versions, _ = s.ObservationVersions(version.ObservationSyncID, 10)
 	if len(versions) != 1 {
 		t.Fatalf("versions after retry = %#v, want one", versions)
+	}
+}
+
+func TestVersionlessPulledUpdateExtendsHistoryOnce(t *testing.T) {
+	s := newVersionChunkStore(t)
+	id, err := s.AddObservation(AddObservationParams{SessionID: "chunk-session", Type: "note", Title: "before", Content: "before", Project: "proj"})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	observation, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("get observation: %v", err)
+	}
+	mutation, _ := pulledObservationForVersionTest(t, observation.SyncID, "pulled")
+	if err := s.ApplyPulledChunkWithVersions(DefaultSyncTargetKey, "gap-pull-one", []SyncMutation{mutation}, nil); err != nil {
+		t.Fatalf("pulled update: %v", err)
+	}
+	versions, err := s.ObservationVersions(observation.SyncID, 10)
+	gap := false
+	for _, version := range versions {
+		gap = gap || (version.Title == "pulled" && version.IsBaseline && !version.HistoryComplete)
+	}
+	if err != nil || len(versions) != 2 || !gap {
+		t.Fatalf("history after pulled update = %#v, %v; want incomplete gap snapshot", versions, err)
+	}
+	if err := s.ApplyPulledChunkWithVersions(DefaultSyncTargetKey, "gap-pull-replay", []SyncMutation{mutation}, nil); err != nil {
+		t.Fatalf("same-state pulled replay: %v", err)
+	}
+	if versions, err = s.ObservationVersions(observation.SyncID, 10); err != nil || len(versions) != 2 {
+		t.Fatalf("history after new-id replay = %#v, %v; want no duplicate", versions, err)
 	}
 }
 

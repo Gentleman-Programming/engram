@@ -96,6 +96,14 @@ func sameObservationVersion(left, right ObservationVersion) bool {
 		left.HistoryComplete == right.HistoryComplete && left.CapturedAt == right.CapturedAt
 }
 
+func sameObservationVersionState(version ObservationVersion, current *Observation) bool {
+	return version.ObservationSyncID == current.SyncID && version.SessionID == current.SessionID &&
+		version.Type == current.Type && version.Title == current.Title && version.Content == current.Content &&
+		sameOptionalString(version.ToolName, current.ToolName) && sameOptionalString(version.Project, current.Project) &&
+		sameOptionalString(version.TopicKey, current.TopicKey) && version.Scope == current.Scope &&
+		version.RevisionCount == current.RevisionCount
+}
+
 func (s *Store) establishImportedObservationBaselinesTx(tx *sql.Tx, observationSyncIDs []string) error {
 	seen := map[string]struct{}{}
 	for _, syncID := range observationSyncIDs {
@@ -107,12 +115,20 @@ func (s *Store) establishImportedObservationBaselinesTx(tx *sql.Tx, observationS
 		if err != nil {
 			return err
 		}
-		var exists bool
-		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM observation_versions WHERE observation_id = ?)`, current.ID).Scan(&exists); err != nil {
-			return err
-		}
-		if exists {
+		var latest ObservationVersion
+		err = tx.QueryRow(`SELECT version_id, observation_sync_id, session_id, type, title, content, tool_name,
+			project, scope, topic_key, revision_count, is_baseline, history_complete, captured_at
+			FROM observation_versions WHERE observation_id = ?
+			ORDER BY revision_count DESC, captured_at DESC, version_id DESC LIMIT 1`, current.ID).Scan(
+			&latest.VersionID, &latest.ObservationSyncID, &latest.SessionID, &latest.Type, &latest.Title,
+			&latest.Content, &latest.ToolName, &latest.Project, &latest.Scope, &latest.TopicKey,
+			&latest.RevisionCount, &latest.IsBaseline, &latest.HistoryComplete, &latest.CapturedAt,
+		)
+		if err == nil && sameObservationVersionState(latest, current) {
 			continue
+		}
+		if err != nil && err != sql.ErrNoRows {
+			return err
 		}
 		versionID, err := newObservationVersionID()
 		if err != nil {

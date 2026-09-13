@@ -5178,7 +5178,7 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 	observationSyncIDs := make([]string, 0, len(data.Observations))
 	for _, obs := range data.Observations {
 		syncID := normalizeExistingSyncID(obs.SyncID, "obs")
-		observationSyncIDs = append(observationSyncIDs, syncID)
+
 		existing, lookupErr := s.getObservationBySyncIDTx(tx, syncID, true)
 		if lookupErr != nil && lookupErr != sql.ErrNoRows {
 			return nil, fmt.Errorf("import observation %d: %w", obs.ID, lookupErr)
@@ -5210,6 +5210,7 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 				return nil, fmt.Errorf("import observation %d: %w", obs.ID, err)
 			}
 			result.ObservationsUpdated++
+			observationSyncIDs = append(observationSyncIDs, syncID)
 			continue
 		}
 		res, err := s.execHook(tx,
@@ -5240,6 +5241,9 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 		}
 		n, _ := res.RowsAffected()
 		result.ObservationsImported += int(n)
+		if n > 0 {
+			observationSyncIDs = append(observationSyncIDs, syncID)
+		}
 	}
 	if len(data.ObservationVersions) == 0 {
 		if err := s.establishImportedObservationBaselinesTx(tx, observationSyncIDs); err != nil {
