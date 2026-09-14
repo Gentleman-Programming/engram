@@ -7442,22 +7442,31 @@ func TestEnqueueSessionMutationRejectsBlankKeyAndRollsBack(t *testing.T) {
 	}
 }
 
-func TestInboundSessionDirectoryAdmissionRejectsBlankValues(t *testing.T) {
-	t.Run("pulled mutation", func(t *testing.T) {
-		s := newTestStore(t)
-		err := s.ApplyPulledMutation(DefaultSyncTargetKey, SyncMutation{
-			Seq: 1, Entity: SyncEntitySession, EntityKey: "blank-directory", Op: SyncOpUpsert,
-			Payload: `{"id":"blank-directory","project":"engram","directory":" \t "}`,
+func TestInboundSessionDirectoryAdmissionRejectsInvalidValues(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		id      string
+		payload string
+	}{
+		{name: "pulled mutation with blank directory", id: "blank-directory", payload: `{"id":"blank-directory","project":"engram","directory":" \t "}`},
+		{name: "pulled mutation with omitted directory", id: "omitted-directory", payload: `{"id":"omitted-directory","project":"engram"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			err := s.ApplyPulledMutation(DefaultSyncTargetKey, SyncMutation{
+				Seq: 1, Entity: SyncEntitySession, EntityKey: tc.id, Op: SyncOpUpsert,
+				Payload: tc.payload,
+			})
+			if !errors.Is(err, ErrPulledSessionDirectoryInvalid) {
+				t.Fatalf("ApplyPulledMutation error = %v, want ErrPulledSessionDirectoryInvalid", err)
+			}
+			if _, err := s.GetSession(tc.id); !errors.Is(err, sql.ErrNoRows) {
+				t.Fatalf("invalid pulled session persisted: %v", err)
+			}
 		})
-		if !errors.Is(err, ErrPulledSessionDirectoryInvalid) {
-			t.Fatalf("ApplyPulledMutation error = %v, want ErrPulledSessionDirectoryInvalid", err)
-		}
-		if _, err := s.GetSession("blank-directory"); !errors.Is(err, sql.ErrNoRows) {
-			t.Fatalf("blank pulled session persisted: %v", err)
-		}
-	})
+	}
 
-	t.Run("direct import", func(t *testing.T) {
+	t.Run("direct import with blank directory", func(t *testing.T) {
 		s := newTestStore(t)
 		_, err := s.Import(&ExportData{Sessions: []Session{{ID: "blank-import", Project: "engram", Directory: " "}}})
 		if !errors.Is(err, ErrPulledSessionDirectoryInvalid) {
