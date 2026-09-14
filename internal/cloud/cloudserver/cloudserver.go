@@ -17,6 +17,7 @@ import (
 	"github.com/Gentleman-Programming/engram/v2/internal/cloud/constants"
 	"github.com/Gentleman-Programming/engram/v2/internal/cloud/dashboard"
 	engramproject "github.com/Gentleman-Programming/engram/v2/internal/project"
+	"github.com/google/uuid"
 	"github.com/Gentleman-Programming/engram/v2/internal/store"
 	engramsync "github.com/Gentleman-Programming/engram/v2/internal/sync"
 )
@@ -592,6 +593,11 @@ func (s *CloudServer) handlePushChunk(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	versioned, err := validateOriginalVersionedChunkProvenance(req.Data, project)
+	if err != nil {
+		writeActionableError(w, http.StatusBadRequest, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodePayloadInvalid, "invalid versioned push payload")
+		return
+	}
 	normalizedData, err := coerceChunkProject(req.Data, project)
 	if err != nil {
 		writeActionableError(w, http.StatusBadRequest, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodePayloadInvalid, fmt.Sprintf("invalid push payload: %v", err))
@@ -626,8 +632,16 @@ func (s *CloudServer) handlePushChunk(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.store.WriteChunk(r.Context(), project, computedChunkID, req.CreatedBy, clientCreatedAt, normalizedData); err != nil {
-		if errors.Is(err, cloudstore.ErrChunkConflict) {
-			writeActionableError(w, http.StatusConflict, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodeChunkConflict, fmt.Sprintf("write chunk: %v", err))
+		if errors.Is(err, cloudstore.ErrChunkConflict) || (versioned && strings.Contains(err.Error(), "conflicts with immutable stored snapshot")) {
+			writeActionableError(w, http.StatusConflict, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodeChunkConflict, "write chunk conflict")
+			return
+		}
+		if versioned && strings.Contains(err.Error(), "parent session/observation not found") {
+			writeActionableError(w, http.StatusBadRequest, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodePayloadInvalid, "invalid versioned push payload")
+			return
+		}
+		if versioned {
+			writeActionableError(w, http.StatusInternalServerError, constants.UpgradeErrorClassBlocked, constants.UpgradeErrorCodeInternal, "write versioned chunk failed")
 			return
 		}
 		writeActionableError(w, http.StatusInternalServerError, constants.UpgradeErrorClassBlocked, constants.UpgradeErrorCodeInternal, fmt.Sprintf("write chunk: %v", err))
@@ -706,6 +720,116 @@ func writeProjectPolicyDenied(w http.ResponseWriter, project string) {
 
 func coerceChunkProject(payload []byte, project string) ([]byte, error) {
 	return chunkcodec.CanonicalizeForProject(payload, project)
+}
+
+type originalObservationVersion struct {
+	VersionID         string  `json:"version_id"`
+	ObservationSyncID string  `json:"observation_sync_id"`
+	SessionID         string  `json:"session_id"`
+	Project           *string `json:"project"`
+	Scope             string  `json:"scope"`
+}
+
+type originalVersionedObservation struct {
+	Project *string `json:"project"`
+	Scope   string  `json:"scope"`
+}
+
+type originalVersionedMutation struct {
+	Entity  string          `json:"entity"`
+	Op      string          `json:"op"`
+	Project string          `json:"project"`
+	Payload json.RawMessage `json:"payload"`
+}
+
+// validateOriginalVersionedChunkProvenance protects the original wire values
+// before canonicalization intentionally rewrites legacy current-observation data.
+func validateOriginalVersionedChunkProvenance(payload []byte, project string) (bool, error) {
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &doc); err != nil {
+		return false, nil // Canonicalization keeps legacy parse-error behavior.
+	}
+	versions, ok := doc["observation_versions"]
+	if !ok {
+		return false, nil
+	}
+	if err := validateOriginalObservationVersions(versions, project); err != nil {
+		return true, err
+	}
+	if err := validateOriginalCurrentObservations(doc["observations"], project); err != nil {
+		return true, err
+	}
+	if err := validateOriginalObservationMutations(doc["mutations"], project); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+func validateOriginalObservationVersions(raw json.RawMessage, project string) error {
+	if strings.TrimSpace(string(raw)) == "null" {
+		return nil
+	}
+	var versions []originalObservationVersion
+	if err := json.Unmarshal(raw, &versions); err != nil {
+		return errors.New("invalid observation version")
+	}
+	for _, version := range versions {
+		id, err := uuid.Parse(version.VersionID)
+		if err != nil || id.Version() != 4 || id.String() != version.VersionID || strings.TrimSpace(version.ObservationSyncID) == "" || strings.TrimSpace(version.SessionID) == "" {
+			return errors.New("invalid observation version identity")
+		}
+		if version.Project == nil || *version.Project != project || version.Scope != "project" {
+			return errors.New("invalid observation version provenance")
+		}
+	}
+	return nil
+}
+
+func validateOriginalCurrentObservations(raw json.RawMessage, project string) error {
+	if len(raw) == 0 || strings.TrimSpace(string(raw)) == "null" {
+		return nil
+	}
+	var observations []originalVersionedObservation
+	if err := json.Unmarshal(raw, &observations); err != nil {
+		return errors.New("invalid versioned observation")
+	}
+	for _, observation := range observations {
+		if observation.Scope != "project" || observation.Project == nil || !matchesOriginalProject(*observation.Project, project) {
+			return errors.New("invalid versioned observation provenance")
+		}
+	}
+	return nil
+}
+
+func matchesOriginalProject(value, project string) bool {
+	if strings.TrimSpace(value) == "" {
+		return false
+	}
+	normalized, _ := store.NormalizeProject(value)
+	return normalized == project
+}
+
+func validateOriginalObservationMutations(raw json.RawMessage, project string) error {
+	if len(raw) == 0 || strings.TrimSpace(string(raw)) == "null" {
+		return nil
+	}
+	var mutations []originalVersionedMutation
+	if err := json.Unmarshal(raw, &mutations); err != nil {
+		return errors.New("invalid versioned mutation")
+	}
+	for _, mutation := range mutations {
+		if strings.TrimSpace(mutation.Entity) != store.SyncEntityObservation || strings.TrimSpace(mutation.Op) != store.SyncOpUpsert {
+			continue
+		}
+		if !matchesOriginalProject(mutation.Project, project) {
+			return errors.New("invalid versioned observation mutation provenance")
+		}
+		var observation originalVersionedObservation
+		if err := decodeSyncMutationPayload(string(mutation.Payload), &observation); err != nil || observation.Scope != "project" || observation.Project == nil || !matchesOriginalProject(*observation.Project, project) {
+			return errors.New("invalid versioned observation mutation provenance")
+		}
+	}
+	return nil
 }
 
 func decodeSyncMutationPayload(payload string, dest any) error {

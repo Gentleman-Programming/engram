@@ -3,14 +3,18 @@ package cloudserver
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud"
 	cloudauth "github.com/Gentleman-Programming/engram/v2/internal/cloud/auth"
 	"github.com/Gentleman-Programming/engram/v2/internal/cloud/chunkcodec"
 	"github.com/Gentleman-Programming/engram/v2/internal/cloud/cloudstore"
@@ -1888,4 +1892,120 @@ func TestInsecureModeLoginRedirects(t *testing.T) {
 	if loc := rec.Header().Get("Location"); loc != "/dashboard/" {
 		t.Fatalf("expected redirect to /dashboard/, got %q", loc)
 	}
+}
+
+func TestHandlerPushVersionedChunksRejectOriginalProvenance(t *testing.T) {
+	const project, secret = "proj-a", "VERSION-PAYLOAD-SECRET"
+	version := func(id string) string {
+		return fmt.Sprintf(`{"version_id":%q,"observation_sync_id":"obs-1","session_id":"s-1","type":"decision","title":%q,"content":%q,"project":%q,"scope":"project","revision_count":1,"captured_at":"2026-05-01T00:00:00Z"}`, id, secret, secret, project)
+	}
+	observation := func(scope, observationProject string) string {
+		return fmt.Sprintf(`{"sync_id":"obs-1","session_id":"s-1","type":"decision","title":%q,"content":%q,"scope":%q,"project":%q}`, secret, secret, scope, observationProject)
+	}
+	mutation := func(envelopeProject, payloadProject, scope string) string {
+		payload := fmt.Sprintf(`{"sync_id":"obs-1","session_id":"s-1","type":"decision","title":%q,"content":%q,"scope":%q,"project":%q}`, secret, secret, scope, payloadProject)
+		return fmt.Sprintf(`{"entity":"observation","entity_key":"obs-1","op":"upsert","project":%q,"payload":%q}`, envelopeProject, payload)
+	}
+	validVersion := version("7b49d3c4-9b55-4d85-9e27-7b5762e0a638")
+	tests := []struct {
+		name string
+		data string
+		want int
+	}{
+		{"typed observation project", fmt.Sprintf(`{"observations":[%s],"observation_versions":[%s]}`, observation("project", "other"), validVersion), http.StatusBadRequest},
+		{"typed observation missing project", fmt.Sprintf(`{"observations":[%s],"observation_versions":[%s]}`, strings.Replace(observation("project", project), `,"project":"proj-a"}`, `}`, 1), validVersion), http.StatusBadRequest},
+		{"typed observation blank project", fmt.Sprintf(`{"observations":[%s],"observation_versions":[%s]}`, observation("project", " "), validVersion), http.StatusBadRequest},
+		{"typed observation normalized project", fmt.Sprintf(`{"observations":[%s],"observation_versions":[%s]}`, observation("project", " PROJ-A "), validVersion), http.StatusOK},
+		{"typed observation private scope", fmt.Sprintf(`{"observations":[%s],"observation_versions":[%s]}`, observation("private", project), validVersion), http.StatusBadRequest},
+		{"mutation envelope project", fmt.Sprintf(`{"mutations":[%s],"observation_versions":[%s]}`, mutation("other", project, "project"), validVersion), http.StatusBadRequest},
+		{"mutation envelope missing project", fmt.Sprintf(`{"mutations":[%s],"observation_versions":[%s]}`, strings.Replace(mutation(project, project, "project"), `"project":"proj-a","payload"`, `"payload"`, 1), validVersion), http.StatusBadRequest},
+		{"mutation envelope blank project", fmt.Sprintf(`{"mutations":[%s],"observation_versions":[%s]}`, mutation(" ", project, "project"), validVersion), http.StatusBadRequest},
+		{"mutation payload project", fmt.Sprintf(`{"mutations":[%s],"observation_versions":[%s]}`, mutation(project, "other", "project"), validVersion), http.StatusBadRequest},
+		{"mutation payload missing project", fmt.Sprintf(`{"mutations":[%s],"observation_versions":[%s]}`, strings.Replace(mutation(project, project, "project"), `,\"project\":\"proj-a\"}`, `}`, 1), validVersion), http.StatusBadRequest},
+		{"mutation payload blank project", fmt.Sprintf(`{"mutations":[%s],"observation_versions":[%s]}`, strings.Replace(mutation(project, project, "project"), `\"project\":\"proj-a\"`, `\"project\":\" \"`, 1), validVersion), http.StatusBadRequest},
+		{"mutation padded selectors", fmt.Sprintf(`{"mutations":[%s],"observation_versions":[%s]}`, strings.Replace(strings.Replace(mutation(" ", project, "project"), `"entity":"observation"`, `"entity":" observation "`, 1), `"op":"upsert"`, `"op":" upsert "`, 1), validVersion), http.StatusBadRequest},
+		{"mutation private scope", fmt.Sprintf(`{"mutations":[%s],"observation_versions":[%s]}`, mutation(project, project, "private"), validVersion), http.StatusBadRequest},
+		{"version project", fmt.Sprintf(`{"observation_versions":[%s]}`, strings.Replace(validVersion, `"project":"proj-a"`, `"project":"other"`, 1)), http.StatusBadRequest},
+		{"version scope", fmt.Sprintf(`{"observation_versions":[%s]}`, strings.Replace(validVersion, `"scope":"project"`, `"scope":"personal"`, 1)), http.StatusBadRequest},
+		{"malformed version", `{"observation_versions":[[]]}`, http.StatusBadRequest},
+		{"invalid version UUID", fmt.Sprintf(`{"observation_versions":[%s]}`, version("not-a-uuid")), http.StatusBadRequest},
+		{"missing version identity", fmt.Sprintf(`{"observation_versions":[%s]}`, strings.Replace(validVersion, `"session_id":"s-1"`, `"session_id":""`, 1)), http.StatusBadRequest},
+		{"legacy coercion remains compatible", fmt.Sprintf(`{"observations":[%s]}`, observation("private", "other")), http.StatusOK},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := New(&fakeStore{sessions: map[string]map[string]struct{}{project: {"s-1": {}}}}, fakeAuth{}, 0)
+			rec := pushChunk(t, srv, project, tt.data)
+			if rec.Code != tt.want {
+				t.Fatalf("status = %d, want %d body=%q", rec.Code, tt.want, rec.Body.String())
+			}
+			if strings.Contains(rec.Body.String(), secret) {
+				t.Fatalf("error leaked payload content: %q", rec.Body.String())
+			}
+		})
+	}
+}
+
+func pushChunk(t *testing.T, srv *CloudServer, project, data string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	body := fmt.Sprintf(`{"project":%q,"created_by":"tester","data":%s}`, project, data)
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sync/push", strings.NewReader(body)))
+	return rec
+}
+
+func TestHandlerPushVersionedChunksUsePriorParentsAndMapStorageErrors(t *testing.T) {
+	cs := openVersionedCloudStore(t)
+	srv := New(cs, fakeAuth{}, 0)
+	const project = "versioned-http-project"
+	version := func(id, title string) string {
+		return fmt.Sprintf(`{"version_id":%q,"observation_sync_id":"obs-1","session_id":"s-1","type":"decision","title":%q,"content":"body","project":%q,"scope":"project","revision_count":1,"captured_at":"2026-05-01T00:00:00Z"}`, id, title, project)
+	}
+	parent := `{"sessions":[{"id":"s-1","directory":"/tmp/s-1"}],"observations":[{"sync_id":"obs-1","session_id":"s-1","type":"decision","title":"current","content":"body","scope":"project"}]}`
+	if rec := pushChunk(t, srv, project, parent+` `); rec.Code != http.StatusOK {
+		t.Fatalf("parent status = %d body=%q", rec.Code, rec.Body.String())
+	}
+	if rec := pushChunk(t, srv, project, fmt.Sprintf(`{"observation_versions":[%s]}`, version("7b49d3c4-9b55-4d85-9e27-7b5762e0a638", "first"))); rec.Code != http.StatusOK {
+		t.Fatalf("prior-parent version status = %d body=%q", rec.Code, rec.Body.String())
+	}
+	if rec := pushChunk(t, srv, project, fmt.Sprintf(`{"sessions":[{"id":"s-2","directory":"/tmp/s-2"}],"observations":[{"sync_id":"obs-2","session_id":"s-2","type":"decision","title":"current","content":"body","scope":"project"}],"observation_versions":[%s]}`, fmt.Sprintf(`{"version_id":"8b49d3c4-9b55-4d85-9e27-7b5762e0a638","observation_sync_id":"obs-2","session_id":"s-2","type":"decision","title":"same","content":"body","project":%q,"scope":"project","revision_count":1,"captured_at":"2026-05-01T00:00:00Z"}`, project))); rec.Code != http.StatusBadRequest {
+		t.Fatalf("same-chunk parent status = %d body=%q", rec.Code, rec.Body.String())
+	}
+	conflictID := "9b49d3c4-9b55-4d85-9e27-7b5762e0a638"
+	if rec := pushChunk(t, srv, project, fmt.Sprintf(`{"observation_versions":[%s]}`, version(conflictID, "stored"))); rec.Code != http.StatusOK {
+		t.Fatalf("initial version status = %d body=%q", rec.Code, rec.Body.String())
+	}
+	if rec := pushChunk(t, srv, project, fmt.Sprintf(`{"observation_versions":[%s]}`, version(conflictID, "changed"))); rec.Code != http.StatusConflict {
+		t.Fatalf("immutable version conflict status = %d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+func openVersionedCloudStore(t *testing.T) *cloudstore.CloudStore {
+	t.Helper()
+	dsn := os.Getenv("CLOUDSTORE_TEST_DSN")
+	if !strings.HasPrefix(dsn, "postgres://") && !strings.HasPrefix(dsn, "postgresql://") {
+		t.Skip("CLOUDSTORE_TEST_DSN must be a PostgreSQL URL")
+	}
+	schema := fmt.Sprintf("cloudserver_version_%d", time.Now().UnixNano())
+	admin, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open PostgreSQL admin connection: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = admin.Exec(`DROP SCHEMA IF EXISTS ` + schema + ` CASCADE`)
+		_ = admin.Close()
+	})
+	if _, err := admin.Exec(`CREATE SCHEMA ` + schema); err != nil {
+		t.Fatalf("create isolated PostgreSQL schema: %v", err)
+	}
+	separator := "?"
+	if strings.Contains(dsn, "?") {
+		separator = "&"
+	}
+	cs, err := cloudstore.New(cloud.Config{DSN: dsn + separator + "search_path=" + schema})
+	if err != nil {
+		t.Fatalf("open cloudstore: %v", err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+	return cs
 }
