@@ -81,6 +81,39 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.DetailScroll = 0
 		return m, nil
 
+	case observationHistoryMsg:
+		if m.Screen != ScreenObservationHistory || m.SelectedObservation == nil || msg.requestID != m.historyRequestID || msg.syncID != m.SelectedObservation.SyncID {
+			return m, nil
+		}
+		m.HistoryLoading = false
+		if msg.err != nil {
+			m.HistoryError = msg.err.Error()
+			if msg.reset {
+				m = m.resetObservationHistory()
+				m.HistoryError = msg.err.Error()
+			}
+			return m, nil
+		}
+		if msg.reset {
+			m = m.resetObservationHistory()
+		}
+		seen := make(map[string]struct{}, len(m.HistoryVersions))
+		for _, version := range m.HistoryVersions {
+			seen[version.VersionID] = struct{}{}
+		}
+		for _, version := range msg.versions {
+			if _, exists := seen[version.VersionID]; !exists {
+				m.HistoryVersions = append(m.HistoryVersions, version)
+			}
+		}
+		m.HistoryMore, m.HistoryError = msg.more, ""
+		if len(m.HistoryVersions) > 0 {
+			last := m.HistoryVersions[len(m.HistoryVersions)-1]
+			m.HistoryCursorRevision, m.historyCursorVersionID = last.RevisionCount, last.VersionID
+		}
+		m.HistoryScroll = m.clampHistoryScroll()
+		return m, nil
+
 	case timelineMsg:
 		if msg.err != nil {
 			m.ErrorMsg = msg.err.Error()
@@ -293,6 +326,8 @@ func (m Model) handleKeyPress(key string) (tea.Model, tea.Cmd) {
 		return m.handleRecentKeys(key)
 	case ScreenObservationDetail:
 		return m.handleObservationDetailKeys(key)
+	case ScreenObservationHistory:
+		return m.handleObservationHistoryKeys(key)
 	case ScreenTimeline:
 		return m.handleTimelineKeys(key)
 	case ScreenSessions:
@@ -564,6 +599,16 @@ func (m Model) handleObservationDetailKeys(key string) (tea.Model, tea.Cmd) {
 		if m.SelectedObservation != nil {
 			return m, loadTimeline(m.store, m.SelectedObservation.ID)
 		}
+	case "h":
+		if m.SelectedObservation != nil {
+			m.HistoryDetailPrevScreen = m.PrevScreen
+			m.PrevScreen = ScreenObservationDetail
+			m.Screen = ScreenObservationHistory
+			m = m.resetObservationHistory()
+			m.HistoryLoading = true
+			m.historyRequestID++
+			return m, loadObservationHistory(m.store, m.SelectedObservation.SyncID, 0, "", true, m.historyRequestID)
+		}
 	case "esc", "q":
 		m.Screen = m.PrevScreen
 		m.Cursor = 0
@@ -574,6 +619,38 @@ func (m Model) handleObservationDetailKeys(key string) (tea.Model, tea.Cmd) {
 }
 
 // ─── Timeline ────────────────────────────────────────────────────────────────
+
+func (m Model) handleObservationHistoryKeys(key string) (tea.Model, tea.Cmd) {
+	m.HistoryScroll = m.clampHistoryScroll()
+	switch key {
+	case "up", "k":
+		if m.HistoryScroll > 0 {
+			m.HistoryScroll--
+		}
+	case "down", "j":
+		if m.HistoryScroll < m.historyMaxScroll() {
+			m.HistoryScroll++
+		}
+	case "n":
+		if m.SelectedObservation != nil && m.HistoryMore && !m.HistoryLoading && len(m.HistoryVersions) > 0 {
+			m.HistoryLoading = true
+			m.historyRequestID++
+			return m, loadObservationHistory(m.store, m.SelectedObservation.SyncID, m.HistoryCursorRevision, m.historyCursorVersionID, false, m.historyRequestID)
+		}
+	case "r":
+		if m.SelectedObservation != nil {
+			m = m.resetObservationHistory()
+			m.HistoryLoading = true
+			m.historyRequestID++
+			return m, loadObservationHistory(m.store, m.SelectedObservation.SyncID, 0, "", true, m.historyRequestID)
+		}
+	case "esc", "q":
+		m.historyRequestID++
+		m.HistoryLoading = false
+		m.Screen, m.PrevScreen = ScreenObservationDetail, m.HistoryDetailPrevScreen
+	}
+	return m, nil
+}
 
 func (m Model) handleTimelineKeys(key string) (tea.Model, tea.Cmd) {
 	switch key {
@@ -711,8 +788,50 @@ func (m Model) clampViewport() Model {
 	switch m.Screen {
 	case ScreenObservationDetail:
 		m.DetailScroll = m.clampDetailScroll()
+	case ScreenObservationHistory:
+		m.HistoryScroll = m.clampHistoryScroll()
 	}
 	return m
+}
+
+func (m Model) resetObservationHistory() Model {
+	m.HistoryVersions = nil
+	m.HistoryScroll = 0
+	m.HistoryMore = false
+	m.HistoryLoading = false
+	m.HistoryError = ""
+	m.HistoryCursorRevision = 0
+	m.historyCursorVersionID = ""
+	return m
+}
+
+func (m Model) historyVisibleItems() int {
+	visible := m.Height - 7
+	if visible < 3 {
+		visible = 3
+	}
+	if visible > historyPageSize {
+		return historyPageSize
+	}
+	return visible
+}
+
+func (m Model) historyMaxScroll() int {
+	maxScroll := len(m.HistoryVersions) - m.historyVisibleItems()
+	if maxScroll < 0 {
+		return 0
+	}
+	return maxScroll
+}
+
+func (m Model) clampHistoryScroll() int {
+	if m.HistoryScroll < 0 {
+		return 0
+	}
+	if m.HistoryScroll > m.historyMaxScroll() {
+		return m.historyMaxScroll()
+	}
+	return m.HistoryScroll
 }
 
 // ─── Setup ───────────────────────────────────────────────────────────────────

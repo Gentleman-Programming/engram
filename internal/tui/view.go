@@ -74,6 +74,8 @@ func (m Model) View() string {
 		content = m.viewRecent()
 	case ScreenObservationDetail:
 		content = m.viewObservationDetail()
+	case ScreenObservationHistory:
+		content = m.viewObservationHistory()
 	case ScreenTimeline:
 		content = m.viewTimeline()
 	case ScreenSessions:
@@ -449,6 +451,49 @@ func (m Model) viewObservationDetail() string {
 }
 
 // ─── Timeline ────────────────────────────────────────────────────────────────
+
+func (m Model) viewObservationHistory() string {
+	var b strings.Builder
+	b.WriteString(headerStyle.Render("  Observation History"))
+	b.WriteString("\n")
+	if m.HistoryLoading {
+		b.WriteString(timestampStyle.Render("  Loading history..."))
+		b.WriteString("\n")
+	}
+	if m.HistoryError != "" {
+		b.WriteString(errorStyle.Render("  Unable to load history: " + m.HistoryError))
+		b.WriteString("\n")
+	} else if len(m.HistoryVersions) == 0 && !m.HistoryLoading {
+		b.WriteString(noResultsStyle.Render("  No history available."))
+		b.WriteString("\n")
+	} else {
+		m.HistoryScroll = m.clampHistoryScroll()
+		end := m.HistoryScroll + m.historyVisibleItems()
+		if end > len(m.HistoryVersions) {
+			end = len(m.HistoryVersions)
+		}
+		for _, version := range m.HistoryVersions[m.HistoryScroll:end] {
+			status := ""
+			if version.IsBaseline {
+				status += " baseline"
+			}
+			if !version.HistoryComplete {
+				status += " history incomplete"
+			}
+			fmt.Fprintf(&b, "  Revision %d%s — %s\n", version.RevisionCount, status, truncateStr(version.Title, 60))
+			if version.Content != "" {
+				b.WriteString(contentPreviewStyle.Render("    " + truncateStr(version.Content, 80)))
+				b.WriteString("\n")
+			}
+		}
+	}
+	if m.HistoryMore {
+		b.WriteString(timestampStyle.Render("  More history available — press n for older versions."))
+		b.WriteString("\n")
+	}
+	b.WriteString(helpStyle.Render("\n  j/k scroll • n older • r reload • esc/q back"))
+	return b.String()
+}
 
 func (m Model) viewTimeline() string {
 	var b strings.Builder
@@ -881,7 +926,7 @@ func renderObservationDetailChrome(obs *store.Observation, metadata []string) st
 }
 
 func observationDetailHelp() string {
-	return helpStyle.Render("\n  j/k scroll • c copy • t timeline • esc back")
+	return helpStyle.Render("\n  j/k scroll • c copy • t timeline • h history • esc back")
 }
 
 func (m Model) observationDetailContentLines() []string {
@@ -903,7 +948,7 @@ func (m Model) observationDetailViewport() int {
 	}
 	chrome := m.observationDetailChrome() +
 		fmt.Sprintf("\n  %s", timestampStyle.Render("line 1-1 of 1")) +
-		helpStyle.Render("\n  j/k scroll • c copy • t timeline • esc back")
+		helpStyle.Render("\n  j/k scroll • c copy • t timeline • h history • esc back")
 	return m.viewportHeight(chrome)
 }
 

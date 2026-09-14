@@ -32,6 +32,7 @@ const (
 	ScreenSearchResults
 	ScreenRecent
 	ScreenObservationDetail
+	ScreenObservationHistory
 	ScreenTimeline
 	ScreenSessions
 	ScreenSessionDetail
@@ -87,6 +88,15 @@ type observationDetailMsg struct {
 type timelineMsg struct {
 	timeline *store.TimelineResult
 	err      error
+}
+
+type observationHistoryMsg struct {
+	versions  []store.ObservationVersion
+	more      bool
+	reset     bool
+	requestID uint64
+	syncID    string
+	err       error
 }
 
 type recentSessionsMsg struct {
@@ -178,8 +188,17 @@ type Model struct {
 	RecentObservations []store.Observation
 
 	// Observation detail
-	SelectedObservation *store.Observation
-	DetailScroll        int
+	SelectedObservation     *store.Observation
+	DetailScroll            int
+	HistoryVersions         []store.ObservationVersion
+	HistoryScroll           int
+	HistoryMore             bool
+	HistoryLoading          bool
+	HistoryError            string
+	HistoryDetailPrevScreen Screen
+	HistoryCursorRevision   int
+	historyCursorVersionID  string
+	historyRequestID        uint64
 
 	// Timeline
 	Timeline *store.TimelineResult
@@ -307,6 +326,25 @@ func loadTimeline(s *store.Store, obsID int64) tea.Cmd {
 	return func() tea.Msg {
 		tl, err := s.Timeline(obsID, 10, 10)
 		return timelineMsg{timeline: tl, err: err}
+	}
+}
+
+const historyPageSize = 20
+
+func loadObservationHistory(s *store.Store, syncID string, beforeRevision int, beforeVersionID string, reset bool, requestID uint64) tea.Cmd {
+	return func() tea.Msg {
+		if s == nil {
+			return observationHistoryMsg{reset: reset, requestID: requestID, syncID: syncID, err: errors.New("store is unavailable")}
+		}
+		versions, err := s.ObservationVersionsPage(syncID, beforeRevision, beforeVersionID, historyPageSize+1)
+		if err != nil {
+			return observationHistoryMsg{reset: reset, requestID: requestID, syncID: syncID, err: err}
+		}
+		more := len(versions) > historyPageSize
+		if more {
+			versions = versions[:historyPageSize]
+		}
+		return observationHistoryMsg{versions: versions, more: more, reset: reset, requestID: requestID, syncID: syncID}
 	}
 }
 

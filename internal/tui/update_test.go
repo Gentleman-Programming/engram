@@ -12,6 +12,118 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+func TestObservationHistoryNavigationPagingAndReload(t *testing.T) {
+	m := New(nil, "")
+	m.Screen = ScreenObservationDetail
+	m.PrevScreen = ScreenRecent
+	m.DetailScroll = 2
+	m.Height = 40
+	m.SelectedObservation = &store.Observation{SyncID: "observation-sync-id", Content: strings.Repeat("line\n", 100)}
+
+	updatedModel, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("h")})
+	m = updatedModel.(Model)
+	if m.Screen != ScreenObservationHistory || !m.HistoryLoading || cmd == nil {
+		t.Fatal("h should open and load observation history")
+	}
+	if m.HistoryDetailPrevScreen != ScreenRecent {
+		t.Fatalf("detail context = %v, want recent", m.HistoryDetailPrevScreen)
+	}
+	m.Height = 10
+	requestID := m.historyRequestID
+
+	versions := []store.ObservationVersion{{VersionID: "v4", RevisionCount: 4}, {VersionID: "v3", RevisionCount: 3}, {VersionID: "v2", RevisionCount: 2}, {VersionID: "v1", RevisionCount: 1}}
+	updatedModel, _ = m.Update(observationHistoryMsg{versions: versions, more: true, reset: true, requestID: requestID, syncID: m.SelectedObservation.SyncID})
+	m = updatedModel.(Model)
+	for range 10 {
+		updatedModel, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+		m = updatedModel.(Model)
+	}
+	if m.HistoryScroll != 1 {
+		t.Fatalf("history scroll = %d, want bounded 1", m.HistoryScroll)
+	}
+
+	updatedModel, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	m = updatedModel.(Model)
+	if cmd == nil {
+		t.Fatal("n should load an older page when more history exists")
+	}
+	requestID = m.historyRequestID
+	updatedModel, _ = m.Update(observationHistoryMsg{versions: []store.ObservationVersion{{VersionID: "v1", RevisionCount: 1}, {VersionID: "v0", RevisionCount: 0}}, reset: false, requestID: requestID, syncID: m.SelectedObservation.SyncID})
+	m = updatedModel.(Model)
+	if len(m.HistoryVersions) != 5 || m.HistoryScroll > m.historyMaxScroll() {
+		t.Fatalf("appended history = %d versions, scroll %d", len(m.HistoryVersions), m.HistoryScroll)
+	}
+	_, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	if cmd != nil {
+		t.Fatal("n should not load history when no older page exists")
+	}
+
+	m.HistoryError = "stale error"
+	updatedModel, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	m = updatedModel.(Model)
+	if cmd == nil || !m.HistoryLoading || len(m.HistoryVersions) != 0 || m.HistoryError != "" || m.HistoryScroll != 0 {
+		t.Fatal("r should clear stale history state and reload from newest")
+	}
+	updatedModel, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updatedModel.(Model)
+	if m.Screen != ScreenObservationDetail || m.PrevScreen != ScreenRecent || m.DetailScroll != 2 || m.SelectedObservation == nil {
+		t.Fatal("history back should preserve observation detail context")
+	}
+}
+
+func TestObservationHistoryIgnoresStaleMessagesAndNilSelection(t *testing.T) {
+	m := New(nil, "")
+	m.Screen = ScreenObservationHistory
+	m.SelectedObservation = &store.Observation{SyncID: "active"}
+	m.HistoryVersions = []store.ObservationVersion{{VersionID: "active-version"}}
+	m.HistoryLoading, m.HistoryError, m.historyRequestID = true, "active error", 2
+
+	for _, msg := range []observationHistoryMsg{
+		{versions: []store.ObservationVersion{{VersionID: "old"}}, reset: true, requestID: 1, syncID: "active"},
+		{versions: []store.ObservationVersion{{VersionID: "other"}}, reset: false, requestID: 2, syncID: "other"},
+	} {
+		updatedModel, _ := m.Update(msg)
+		updated := updatedModel.(Model)
+		if len(updated.HistoryVersions) != 1 || updated.HistoryVersions[0].VersionID != "active-version" || !updated.HistoryLoading || updated.HistoryError != "active error" {
+			t.Fatalf("stale message changed active history: %#v", updated)
+		}
+	}
+
+	m.SelectedObservation = nil
+	for _, key := range []string{"n", "r"} {
+		if _, cmd := m.handleObservationHistoryKeys(key); cmd != nil {
+			t.Fatalf("%q without an observation should be a no-op", key)
+		}
+	}
+}
+
+func TestObservationHistoryExitInvalidatesInFlightRequest(t *testing.T) {
+	for _, key := range []string{"esc", "q"} {
+		t.Run(key, func(t *testing.T) {
+			m := New(nil, "")
+			m.Screen, m.PrevScreen, m.HistoryDetailPrevScreen = ScreenObservationHistory, ScreenObservationDetail, ScreenRecent
+			m.SelectedObservation = &store.Observation{SyncID: "active"}
+			m.HistoryVersions = []store.ObservationVersion{{VersionID: "active-version"}}
+			m.HistoryLoading, m.HistoryError, m.historyRequestID = true, "active error", 7
+			msg := tea.KeyMsg{Type: tea.KeyEsc}
+			if key == "q" {
+				msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)}
+			}
+
+			updatedModel, _ := m.Update(msg)
+			m = updatedModel.(Model)
+			if m.Screen != ScreenObservationDetail || m.PrevScreen != ScreenRecent || m.SelectedObservation == nil || m.HistoryLoading {
+				t.Fatalf("history exit lost detail context: %#v", m)
+			}
+			updatedModel, _ = m.Update(observationHistoryMsg{versions: []store.ObservationVersion{{VersionID: "stale"}}, reset: true, requestID: 7, syncID: "active"})
+			m = updatedModel.(Model)
+			if len(m.HistoryVersions) != 1 || m.HistoryVersions[0].VersionID != "active-version" || m.HistoryLoading || m.HistoryError != "active error" {
+				t.Fatalf("stale response after exit changed state: %#v", m)
+			}
+		})
+	}
+}
+
 func TestUpdateHandlesWindowSizeAndCtrlC(t *testing.T) {
 	m := New(nil, "")
 

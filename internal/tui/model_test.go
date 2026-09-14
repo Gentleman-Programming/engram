@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/v2/internal/setup"
@@ -245,6 +246,32 @@ func TestDataLoadingCommands(t *testing.T) {
 			t.Fatalf("observations = %d, want >= 2", len(loaded.observations))
 		}
 	})
+}
+
+func TestLoadObservationHistoryUsesSyncIDAndLookahead(t *testing.T) {
+	fx := newTestFixture(t)
+	observation, err := fx.store.GetObservation(fx.obsID)
+	if err != nil {
+		t.Fatalf("GetObservation: %v", err)
+	}
+	for i := range 20 {
+		title := fmt.Sprintf("revision %d", i)
+		if _, err := fx.store.UpdateObservation(fx.obsID, store.UpdateObservationParams{Title: &title}); err != nil {
+			t.Fatalf("UpdateObservation(%d): %v", i, err)
+		}
+	}
+
+	first := loadObservationHistory(fx.store, observation.SyncID, 0, "", true, 1)().(observationHistoryMsg)
+	if first.err != nil || len(first.versions) != historyPageSize || !first.more || !first.reset || first.requestID != 1 || first.syncID != observation.SyncID {
+		t.Fatalf("first page = %#v", first)
+	}
+	second := loadObservationHistory(fx.store, observation.SyncID, first.versions[len(first.versions)-1].RevisionCount, first.versions[len(first.versions)-1].VersionID, false, 2)().(observationHistoryMsg)
+	if second.err != nil || len(second.versions) != 1 || second.more || second.reset || second.requestID != 2 || second.syncID != observation.SyncID {
+		t.Fatalf("second page = %#v", second)
+	}
+	if second.versions[0].VersionID == first.versions[len(first.versions)-1].VersionID {
+		t.Fatal("cursor page must not overlap its predecessor")
+	}
 }
 
 func TestInstallAgentCommand(t *testing.T) {

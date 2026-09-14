@@ -11,6 +11,35 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+func TestObservationHistoryViewStatesHideVersionID(t *testing.T) {
+	base := New(nil, "")
+	base.Screen = ScreenObservationHistory
+	base.Height = 40
+	version := store.ObservationVersion{VersionID: "secret-version-id", RevisionCount: 3, Title: "Immutable title", Content: "snapshot", IsBaseline: true, HistoryComplete: false}
+
+	for _, tt := range []struct {
+		name string
+		set  func(*Model)
+		want string
+	}{
+		{"loading", func(m *Model) { m.HistoryLoading = true }, "Loading history"},
+		{"empty", func(m *Model) {}, "No history available"},
+		{"error", func(m *Model) { m.HistoryError = "store unavailable" }, "Unable to load history"},
+		{"baseline", func(m *Model) { m.HistoryVersions = []store.ObservationVersion{version} }, "baseline"},
+		{"incomplete", func(m *Model) { m.HistoryVersions = []store.ObservationVersion{version} }, "history incomplete"},
+		{"more", func(m *Model) { m.HistoryVersions = []store.ObservationVersion{version}; m.HistoryMore = true }, "More history available"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			m := base
+			tt.set(&m)
+			out := m.View()
+			if !strings.Contains(out, tt.want) || strings.Contains(out, version.VersionID) {
+				t.Fatalf("history output missing %q or exposed VersionID: %q", tt.want, out)
+			}
+		})
+	}
+}
+
 func TestTruncateStr(t *testing.T) {
 	tests := []struct {
 		name string
