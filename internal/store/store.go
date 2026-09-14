@@ -2632,7 +2632,7 @@ func (s *Store) CreateSessionWithOwnershipMode(id, project, directory, mode stri
 			return err
 		}
 		if found {
-			if mode == SessionOwnershipProjectOwned && (existingMode == SessionOwnershipShared || existingMode == SessionOwnershipProjectOwned) && existingProject != "" && existingProject != project {
+			if mode == SessionOwnershipProjectOwned && existingProject != "" && existingProject != project {
 				return &SessionProjectConflictError{SessionID: id, OwnerProject: existingProject, RequestedProject: project}
 			}
 			if err := sessionProjectWriteError(id, existingProject, existingMode, project); err != nil {

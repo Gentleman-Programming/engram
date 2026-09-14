@@ -204,9 +204,18 @@ func TestUnclassifiedSessionRejectsMismatchedWritesWithoutMutation(t *testing.T)
 				return
 			}
 			sessionsBefore, observationsBefore, promptsBefore, mutationsBefore := counts()
+			sessionBefore, err := s.GetSession(sessionID)
+			if err != nil {
+				t.Fatalf("read session before strict mismatch: %v", err)
+			}
 
-			if err := s.CreateSessionWithOwnershipMode(sessionID, "project-b", "/tmp/b", SessionOwnershipProjectOwned); !errors.Is(err, ErrProjectOwnershipAmbiguous) {
-				t.Fatalf("mismatched CreateSessionWithOwnershipMode error = %v, want ErrProjectOwnershipAmbiguous", err)
+			err = s.CreateSessionWithOwnershipMode(sessionID, "project-b", "/tmp/b", SessionOwnershipProjectOwned)
+			if !errors.Is(err, ErrSessionOwnershipMismatch) {
+				t.Fatalf("mismatched strict registration error = %v, want ErrSessionOwnershipMismatch", err)
+			}
+			var conflict *SessionProjectConflictError
+			if !errors.As(err, &conflict) || conflict.SessionID != sessionID || conflict.OwnerProject != "project-a" || conflict.RequestedProject != "project-b" {
+				t.Fatalf("mismatched strict registration conflict = %#v", conflict)
 			}
 			if _, err := s.AddObservation(AddObservationParams{SessionID: sessionID, Type: "manual", Title: "blocked", Content: "blocked", Project: "project-b", Scope: "project"}); !errors.Is(err, ErrProjectOwnershipAmbiguous) {
 				t.Fatalf("mismatched observation error = %v, want ErrProjectOwnershipAmbiguous", err)
@@ -217,6 +226,10 @@ func TestUnclassifiedSessionRejectsMismatchedWritesWithoutMutation(t *testing.T)
 			sessionsAfter, observationsAfter, promptsAfter, mutationsAfter := counts()
 			if sessionsAfter != sessionsBefore || observationsAfter != observationsBefore || promptsAfter != promptsBefore || mutationsAfter != mutationsBefore {
 				t.Fatalf("rejected mismatches changed sessions=%d observations=%d prompts=%d mutations=%d; want %d %d %d %d", sessionsAfter, observationsAfter, promptsAfter, mutationsAfter, sessionsBefore, observationsBefore, promptsBefore, mutationsBefore)
+			}
+			sessionAfter, err := s.GetSession(sessionID)
+			if err != nil || *sessionAfter != *sessionBefore {
+				t.Fatalf("rejected strict registration changed session from %#v to %#v, err=%v", sessionBefore, sessionAfter, err)
 			}
 
 			if _, err := s.AddObservation(AddObservationParams{SessionID: sessionID, Type: "manual", Title: "allowed", Content: "allowed", Project: "project-a", Scope: "project"}); err != nil {

@@ -521,6 +521,23 @@ func TestHandleCreateSessionRejectsStrictProjectRegistrationConflict(t *testing.
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("shared POST /sessions = %d, want 201: %s", rec.Code, rec.Body.String())
 	}
+
+	for _, tc := range []struct {
+		id   string
+		mode any
+	}{{"legacy-null", nil}, {"legacy-blank", " \t"}} {
+		if _, err := st.DB().Exec(`INSERT INTO sessions (id, project, directory, ownership_mode) VALUES (?, ?, ?, ?)`, tc.id, "project-a", "/tmp/a", tc.mode); err != nil {
+			t.Fatalf("seed %s legacy session: %v", tc.id, err)
+		}
+		rec = httptest.NewRecorder()
+		New(st, 0).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(fmt.Sprintf(`{"id":%q,"project":"project-b","ownership_mode":"project_owned"}`, tc.id))))
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("strict legacy POST /sessions = %d, want 409: %s", rec.Code, rec.Body.String())
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil || response.Code != "session_project_conflict" || response.SessionID != tc.id || response.OwnerProject != "project-a" || response.RequestedProject != "project-b" {
+			t.Fatalf("legacy conflict response = %#v, err=%v", response, err)
+		}
+	}
 }
 
 func TestHandleCreateSessionStoresRuntimeWorktreeDirectory(t *testing.T) {
