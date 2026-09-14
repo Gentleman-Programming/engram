@@ -102,12 +102,95 @@ func TestSQLiteLockContentionBranches(t *testing.T) {
 
 func TestRegistryLookupAndOrdering(t *testing.T) {
 	codes := RegisteredCodes()
-	want := []string{CheckInvalidSessionIdentity, CheckManualSessionNameProjectMismatch, CheckOrphanedObservationSession, CheckSessionProjectDirectoryMismatch, CheckSQLiteLockContention, CheckSyncMutationRequiredFields, CheckSyncTargetClosedSpace, CheckUnownedSessionProject}
+	want := []string{CheckAmbiguousActiveRuntimeSessions, CheckInvalidSessionIdentity, CheckManualSessionNameProjectMismatch, CheckOrphanedObservationSession, CheckSessionProjectDirectoryMismatch, CheckSQLiteLockContention, CheckSyncMutationRequiredFields, CheckSyncTargetClosedSpace, CheckUnownedSessionProject}
 	if strings.Join(codes, ",") != strings.Join(want, ",") {
 		t.Fatalf("RegisteredCodes = %v, want %v", codes, want)
 	}
 	if _, err := DefaultRegistry().Lookup("not_real"); err == nil {
 		t.Fatal("expected invalid check error")
+	}
+}
+
+func TestAmbiguousActiveRuntimeSessionsCheck(t *testing.T) {
+	type session struct{ id, project, directory string }
+	tests := []struct {
+		name             string
+		project          string
+		sessions         []session
+		wantStatus       string
+		wantDirectories  []string
+		wantSessionIDs   []string
+		wantCandidateCnt int
+	}{
+		{
+			name:    "reports concurrent candidates in one directory",
+			project: "engram",
+			sessions: []session{
+				{id: "runtime-a", project: "engram", directory: "/work/engram"},
+				{id: "runtime-b", project: "engram", directory: "/work/engram"},
+			},
+			wantStatus:       StatusWarning,
+			wantDirectories:  []string{"/work/engram"},
+			wantSessionIDs:   []string{"runtime-a", "runtime-b"},
+			wantCandidateCnt: 2,
+		},
+		{
+			name:    "ignores one candidate",
+			project: "engram",
+			sessions: []session{
+				{id: "runtime-only", project: "engram", directory: "/work/engram"},
+			},
+			wantStatus: StatusOK,
+		},
+		{
+			name:    "ignores candidates in distinct directories",
+			project: "engram",
+			sessions: []session{
+				{id: "runtime-one", project: "engram", directory: "/work/one"},
+				{id: "runtime-two", project: "engram", directory: "/work/two"},
+			},
+			wantStatus: StatusOK,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newDiagnosticTestStore(t)
+			for _, session := range tt.sessions {
+				if err := s.CreateSession(session.id, session.project, session.directory); err != nil {
+					t.Fatalf("CreateSession(%q): %v", session.id, err)
+				}
+			}
+
+			report, err := NewRunner().RunOne(context.Background(), Scope{Store: s, Project: tt.project}, "ambiguous_active_runtime_sessions")
+			if err != nil {
+				t.Fatalf("RunOne: %v", err)
+			}
+			if report.Status != tt.wantStatus {
+				t.Fatalf("report status=%q, want %q: %+v", report.Status, tt.wantStatus, report)
+			}
+			if tt.wantCandidateCnt == 0 {
+				if len(report.Checks[0].Findings) != 0 {
+					t.Fatalf("findings=%+v, want none", report.Checks[0].Findings)
+				}
+				return
+			}
+			if len(report.Checks[0].Findings) != 1 {
+				t.Fatalf("findings=%+v, want one per project", report.Checks[0].Findings)
+			}
+			var evidence struct {
+				Project              string   `json:"project"`
+				ActiveCandidateCount int      `json:"active_candidate_count"`
+				Directories          []string `json:"directories"`
+				SessionIDs           []string `json:"session_ids"`
+			}
+			if err := json.Unmarshal(report.Checks[0].Findings[0].Evidence, &evidence); err != nil {
+				t.Fatalf("decode finding evidence: %v", err)
+			}
+			if evidence.Project != tt.project || evidence.ActiveCandidateCount != tt.wantCandidateCnt || !reflect.DeepEqual(evidence.Directories, tt.wantDirectories) || !reflect.DeepEqual(evidence.SessionIDs, tt.wantSessionIDs) {
+				t.Fatalf("evidence=%+v, want project=%q candidates=%d directories=%v session_ids=%v", evidence, tt.project, tt.wantCandidateCnt, tt.wantDirectories, tt.wantSessionIDs)
+			}
+		})
 	}
 }
 
