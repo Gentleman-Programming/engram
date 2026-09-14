@@ -75,7 +75,7 @@ func cmdHistory(cfg store.Config) {
 		fatal(err)
 		return
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	observation, err := s.GetObservation(observationID)
 	if err != nil {
 		fatal(err)
@@ -246,5 +246,5 @@ func failHistory(message string) {
 }
 
 func printHistoryUsage() {
-	fmt.Fprintln(os.Stdout, "usage: engram history <observation_id> [--limit N] [--cursor CURSOR] [--json]")
+	_, _ = fmt.Fprintln(os.Stdout, "usage: engram history <observation_id> [--limit N] [--cursor CURSOR] [--json]")
 }

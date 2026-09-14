@@ -106,7 +106,7 @@ func createHistoryObservation(t *testing.T, cfg store.Config) (int64, string) {
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	if err := s.CreateSession("history-session", "engram", t.TempDir()); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
