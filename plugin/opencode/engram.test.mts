@@ -209,31 +209,3 @@ test("#1131 never ends sessions that were never registered", async (t) => {
   assert.equal(endRequests(runtime.requests, "sess-unknown").length, 0)
   assert.deepEqual(runtime.registeredIDs, ["sess-root"])
 })
-
-function deferred<T>() {
-  let resolve!: (value: T) => void
-  return { promise: new Promise<T>((done) => { resolve = done }), resolve }
-}
-
-test("#1159 awaits pending registrations before deletion or reclassification closes", async (t) => {
-  for (const { sessionID, close } of [
-    { sessionID: "sess-root", close: (runtime: any) => runtime.event("session.deleted", { id: "sess-root" }) },
-    { sessionID: "sess-child", close: (runtime: any) => runtime.event("session.updated", sessionInfo("sess-child", "sess-root")) },
-  ]) {
-    const registration = deferred<ReturnType<typeof httpResponse>>()
-    const registrationStarted = deferred<void>()
-    const runtime = await createRuntime(t, { sessionRegistration: () => {
-      registrationStarted.resolve()
-      return registration.promise
-    } })
-    const created = runtime.event("session.created", sessionInfo(sessionID))
-    await registrationStarted.promise
-    let callbackReturned = false
-    const closing = close(runtime).then(() => { callbackReturned = true })
-    await new Promise<void>((done) => setImmediate(done))
-    assert.equal(callbackReturned, false)
-    registration.resolve(httpResponse())
-    await Promise.all([created, closing])
-    assert.equal(endRequests(runtime.requests, sessionID).length, 1)
-  }
-})

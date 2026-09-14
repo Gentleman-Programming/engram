@@ -354,6 +354,22 @@ test("project identity retries a failed resolution on later events", async (t) =
 	assert.equal(registration?.body.project, "engram")
 })
 
+test("disposal prevents registrations waiting for project resolution", async (t) => {
+  const resolution = deferredResponse()
+  let attempts = 0
+  const runtime = await createRuntime(t, {
+    projectCurrentResponse: () => ++attempts === 1 ? { project: "unknown" } : resolution.handler(),
+  })
+
+  const created = runtime.event("session.created", session("runtime"))
+  await resolution.started
+  const disposed = runtime.dispose()
+  resolution.resolve({ project: "engram" })
+  await Promise.all([created, disposed])
+
+  assertNoRegistration(runtime)
+})
+
 test("a stale project resolution failure cannot overwrite a newer success", async () => {
   const stale = deferredEvent()
   let calls = 0
@@ -733,6 +749,8 @@ test("write tool hook revalidates leaf and ancestor ownership after registration
       registration.resolve(httpResponse())
 
       await Promise.all([mutation, assertNoForward(pending, output)])
+      if (scenario.name === "root ancestor deleted")
+        assert.equal(runtime.requests.filter(({ path }) => path === "/sessions/old-root/end").length, 1)
       assert.deepEqual(runtime.registeredIDs, ["old-root"])
       assert.deepEqual(runtime.sessionGetIDs, [])
     })
@@ -852,6 +870,7 @@ test("automatic hooks omit writes when ownership changes during registration", a
       await Promise.all([pending, reparented])
 
       assert.deepEqual(runtime.registeredIDs, ["runtime"])
+      assert.equal(runtime.requests.filter(({ path }) => path === "/sessions/runtime/end").length, 1)
       assert.equal(runtime.requests.some(({ path }) => path === scenario.forbiddenPath), false)
     })
   }

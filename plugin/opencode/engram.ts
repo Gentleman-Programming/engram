@@ -261,6 +261,7 @@ export const Engram: Plugin = async (ctx) => {
 	let project = "unknown"
 	let projectResolutionError = ""
 	let projectResolutionGeneration = 0
+    let disposed = false
 
 	async function ensureResolvedProject(): Promise<boolean> {
 		if (!await ensureLocalReady()) return false
@@ -507,7 +508,7 @@ export const Engram: Plugin = async (ctx) => {
    * Silently skips sub-agent sessions (tracked in `subAgentSessions`).
    */
   async function ensureSession(sessionId: string): Promise<boolean> {
-		if (!await ensureResolvedProject()) return false
+      if (disposed || !await ensureResolvedProject() || disposed) return false
     if (!sessionId || invalidSessions.has(sessionId) || closeRequestedSessions.has(sessionId) || closedSessions.has(sessionId)) return false
     if (knownSessions.has(sessionId)) return true
     // Do not register sub-agent sessions in Engram (issue #116).
@@ -565,6 +566,7 @@ export const Engram: Plugin = async (ctx) => {
 
   return {
 		dispose: async () => {
+      disposed = true
 			if (!localReady) return
       // Every registration attempt owns an Engram lifecycle (#1131), including
       // children misregistered before their parentID was known.
