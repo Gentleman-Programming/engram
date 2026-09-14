@@ -520,11 +520,20 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		mode = store.SessionOwnershipShared
 	}
 	if err := s.store.CreateSessionWithOwnershipMode(body.ID, body.Project, projectpkg.RuntimeWorktreeDirectory(body.Directory), mode); err != nil {
-		if errors.Is(err, store.ErrInvalidSessionOwnershipMode) {
+		var conflict *store.SessionProjectConflictError
+		switch {
+		case errors.As(err, &conflict):
+			jsonErrorWithFields(w, http.StatusConflict, err.Error(), map[string]any{
+				"code":              "session_project_conflict",
+				"session_id":        conflict.SessionID,
+				"owner_project":     conflict.OwnerProject,
+				"requested_project": conflict.RequestedProject,
+			})
+		case errors.Is(err, store.ErrInvalidSessionOwnershipMode):
 			jsonError(w, http.StatusBadRequest, err.Error())
-			return
+		default:
+			jsonError(w, http.StatusInternalServerError, err.Error())
 		}
-		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 

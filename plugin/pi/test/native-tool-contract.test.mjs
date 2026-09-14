@@ -204,6 +204,100 @@ test("one Pi runtime session cannot capture prompts or passive observations acro
   }
 });
 
+test("fresh Pi state honors a structured session-project conflict without capturing prompts or passive observations", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  const originalStderrWrite = process.stderr.write;
+  const calls = [];
+  const warnings = [];
+  let phase = "project-a";
+  process.stderr.write = (chunk) => {
+    warnings.push(String(chunk));
+    return true;
+  };
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  globalThis.fetch = async (url, init = {}) => {
+    const path = new URL(url).pathname;
+    const method = init.method ?? "GET";
+    const body = init.body ? JSON.parse(init.body) : undefined;
+    calls.push({ method, path, body });
+    if (path === "/project/current") return new Response(JSON.stringify({ project: phase }));
+    if (path === "/sessions") {
+      if (phase === "generic-error") return new Response(JSON.stringify({ error: "registration unavailable" }), { status: 500 });
+      if (body.project === "project-b" && body.ownership_mode === "project_owned") {
+        return new Response(JSON.stringify({
+          error: "session ownership does not match write project",
+          code: "session_project_conflict",
+          session_id: "resumed-runtime-session",
+          owner_project: "project-a",
+          requested_project: "project-b",
+        }), { status: 409 });
+      }
+      return new Response(JSON.stringify({ status: "created" }), { status: 201 });
+    }
+    if (path === "/prompts") return new Response(JSON.stringify({ id: 1 }), { status: 201 });
+    if (path === "/observations/passive") return new Response(JSON.stringify({ id: 2 }));
+    if (path === "/observations") return new Response(JSON.stringify({ id: 3 }), { status: 201 });
+    throw new Error(`unexpected request: ${path}`);
+  };
+
+  try {
+    const sessionId = "resumed-runtime-session";
+    await withPluginSandbox("engram-pi-contract-", async ({ sandbox }) => {
+      const { registeredTools } = await loadPluginHarness(sandbox);
+      const saved = await registeredTools.get("mem_save_prompt").execute(
+        "project-a-save",
+        { content: "persisted under project-a", project: "project-a" },
+        undefined,
+        undefined,
+        runtimeContext(sessionId),
+      );
+      assert.equal(saved.isError, undefined);
+    });
+
+    phase = "project-b";
+    await withPluginSandbox("engram-pi-contract-", async ({ sandbox }) => {
+      const { eventHandlers } = await loadPluginHarness(sandbox);
+      const ctx = runtimeContext(sessionId);
+      await eventHandlers.get("before_agent_start")(
+        { systemPrompt: "base", prompt: "this prompt must not cross the server-owned session boundary" },
+        ctx,
+      );
+      const passiveEvent = { toolName: "shell", result: "this eligible passive observation must not cross the server-owned session boundary" };
+      await eventHandlers.get("tool_execution_end")(passiveEvent, ctx);
+      await eventHandlers.get("tool_execution_end")(passiveEvent, ctx);
+    });
+
+    const projectBSessionCalls = calls.filter((call) => call.method === "POST" && call.path === "/sessions" && call.body.project === "project-b");
+    assert.ok(projectBSessionCalls.length >= 2, "fresh state must rely on the core conflict response, not a stale local cache");
+    assert.ok(projectBSessionCalls.every((call) => call.body.ownership_mode === "project_owned"), "Pi registrations must opt into strict project ownership");
+    assert.equal(calls.filter((call) => call.method === "POST" && call.path === "/prompts").length, 1, "the resumed project-b process must not capture a prompt");
+    assert.equal(calls.filter((call) => call.method === "POST" && call.path === "/observations/passive").length, 0, "the resumed project-b process must not capture passive observations");
+    assert.equal(warnings.length, 1, "repeated fresh-state conflict attempts must emit one actionable warning");
+    assert.match(warnings[0], /fresh Pi session/i);
+
+    phase = "generic-error";
+    await withPluginSandbox("engram-pi-contract-", async ({ sandbox }) => {
+      const { registeredTools } = await loadPluginHarness(sandbox);
+      const result = await registeredTools.get("mem_save").execute(
+        "generic-registration-error",
+        { title: "must remain generic", content: "content" },
+        undefined,
+        undefined,
+        runtimeContext("generic-registration-error"),
+      );
+      assert.equal(result.isError, true);
+      assert.match(result.content[0].text, /registration unavailable/);
+      assert.doesNotMatch(result.content[0].text, /fresh Pi session/i);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stderr.write = originalStderrWrite;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
 test("registered Pi-native mem_search reports native provider transport failure", async () => {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.ENGRAM_URL;

@@ -115,6 +115,20 @@ type Session struct {
 	Summary       *string `json:"summary,omitempty"`
 }
 
+// SessionProjectConflictError identifies a strict registration that would reuse
+// a persisted session under another project while preserving errors.Is behavior.
+type SessionProjectConflictError struct {
+	SessionID        string
+	OwnerProject     string
+	RequestedProject string
+}
+
+func (e *SessionProjectConflictError) Error() string {
+	return fmt.Sprintf("%s: session %q belongs to %q, not %q", ErrSessionOwnershipMismatch, e.SessionID, e.OwnerProject, e.RequestedProject)
+}
+
+func (e *SessionProjectConflictError) Unwrap() error { return ErrSessionOwnershipMismatch }
+
 const (
 	SessionOwnershipShared       = "shared"
 	SessionOwnershipProjectOwned = "project_owned"
@@ -2618,6 +2632,9 @@ func (s *Store) CreateSessionWithOwnershipMode(id, project, directory, mode stri
 			return err
 		}
 		if found {
+			if mode == SessionOwnershipProjectOwned && (existingMode == SessionOwnershipShared || existingMode == SessionOwnershipProjectOwned) && existingProject != "" && existingProject != project {
+				return &SessionProjectConflictError{SessionID: id, OwnerProject: existingProject, RequestedProject: project}
+			}
 			if err := sessionProjectWriteError(id, existingProject, existingMode, project); err != nil {
 				return err
 			}

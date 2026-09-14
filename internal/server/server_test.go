@@ -477,6 +477,52 @@ func TestHandleCreateSessionOwnershipModeContract(t *testing.T) {
 	})
 }
 
+func TestHandleCreateSessionRejectsStrictProjectRegistrationConflict(t *testing.T) {
+	st := newServerTestStore(t)
+	if err := st.CreateSession("shared-session", "project-a", "/tmp/a"); err != nil {
+		t.Fatalf("create shared session: %v", err)
+	}
+	var mutationsBefore int
+	if err := st.DB().QueryRow(`SELECT count(*) FROM sync_mutations`).Scan(&mutationsBefore); err != nil {
+		t.Fatalf("count mutations before conflict: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	New(st, 0).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(`{"id":"shared-session","project":"project-b","ownership_mode":"project_owned"}`)))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("strict conflicting POST /sessions = %d, want 409: %s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Code             string `json:"code"`
+		SessionID        string `json:"session_id"`
+		OwnerProject     string `json:"owner_project"`
+		RequestedProject string `json:"requested_project"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode conflict response: %v", err)
+	}
+	if response.Code != "session_project_conflict" || response.SessionID != "shared-session" || response.OwnerProject != "project-a" || response.RequestedProject != "project-b" {
+		t.Fatalf("conflict response = %#v", response)
+	}
+	session, err := st.GetSession("shared-session")
+	if err != nil || session.Project != "project-a" || session.OwnershipMode != store.SessionOwnershipShared {
+		t.Fatalf("session after conflict = %#v, %v; want unchanged project-a shared session", session, err)
+	}
+	var mutationsAfter int
+	if err := st.DB().QueryRow(`SELECT count(*) FROM sync_mutations`).Scan(&mutationsAfter); err != nil {
+		t.Fatalf("count mutations after conflict: %v", err)
+	}
+	if mutationsAfter != mutationsBefore {
+		t.Fatalf("strict conflict changed sync mutations from %d to %d", mutationsBefore, mutationsAfter)
+	}
+
+	rec = httptest.NewRecorder()
+	New(st, 0).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(`{"id":"shared-session","project":"project-b","ownership_mode":"shared"}`)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("shared POST /sessions = %d, want 201: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestHandleCreateSessionStoresRuntimeWorktreeDirectory(t *testing.T) {
 	root := t.TempDir()
 	nested := filepath.Join(root, "nested", "child")

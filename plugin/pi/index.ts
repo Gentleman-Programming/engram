@@ -133,6 +133,7 @@ interface SessionBody {
   id: string;
   project: string;
   directory: string;
+  ownership_mode: "project_owned";
 }
 
 interface PromptBody {
@@ -208,6 +209,20 @@ class SessionProjectConflictError extends Error {
     this.ownerProject = ownerProject;
     this.requestedProject = requestedProject;
   }
+}
+
+function sessionProjectConflictFromResponse(error: unknown, sessionId: string, requestedProject: string): SessionProjectConflictError | undefined {
+  if (!(error instanceof EngramHttpError) || error.status !== 409 || !error.data || typeof error.data !== "object") return undefined;
+  const data = error.data as Record<string, unknown>;
+  const ownerProject = typeof data.owner_project === "string" ? data.owner_project : "";
+  if (
+    data.code !== "session_project_conflict"
+    || data.session_id !== sessionId
+    || data.requested_project !== requestedProject
+    || ownerProject.length === 0
+    || ownerProject === requestedProject
+  ) return undefined;
+  return new SessionProjectConflictError(sessionId, ownerProject, requestedProject);
 }
 
 // Node rejects an AbortSignal.timeout() fetch with a DOMException named "TimeoutError",
@@ -785,8 +800,13 @@ async function ensureSession(sessionId: string, sessionProject = project, fetch:
   if (existingRegistration) return existingRegistration;
 
   const registration = (async () => {
-    const body: SessionBody = { id: sessionId, project: sessionProject, directory };
-    const acknowledgement = await fetch("/sessions", { method: "POST", body });
+    const body: SessionBody = { id: sessionId, project: sessionProject, directory, ownership_mode: "project_owned" };
+    let acknowledgement: unknown;
+    try {
+      acknowledgement = await fetch("/sessions", { method: "POST", body });
+    } catch (error) {
+      throw sessionProjectConflictFromResponse(error, sessionId, sessionProject) || error;
+    }
     if (acknowledgement === null) {
       throw new Error(`gentle-engram could not confirm session registration for Pi runtime session ${sessionId}`);
     }

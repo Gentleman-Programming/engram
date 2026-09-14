@@ -135,6 +135,7 @@ For an accepted `POST /sync/mutations/push`, each future materialized cloud chun
 
 - `POST /sessions` — Create session. Body: `{id, project, directory, ownership_mode?}`
   - `ownership_mode` accepts `shared` or `project_owned`; when omitted it defaults to `shared`.
+  - A `project_owned` registration cannot reuse a session with a nonblank persisted project different from its requested project. It returns `409` with `{error, code:"session_project_conflict", session_id, owner_project, requested_project}` and does not mutate the session or local sync journal. Same-project registration remains idempotent; omitted or `shared` registration retains compatibility for shared sessions.
   - An invalid non-empty `ownership_mode` returns `400` and does not create a session.
 - `POST /sessions/{id}/end` — End session. Body: `{summary}`
 - `GET /sessions/recent` — Recent sessions. Query: `?project=X&all_projects=true&limit=N`
