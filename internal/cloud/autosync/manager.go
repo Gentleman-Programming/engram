@@ -98,6 +98,16 @@ type enrolledProjectRepairEnsurer interface {
 	EnsureEnrolledProjectSyncMutations(ctx context.Context) error
 }
 
+// ObservationVersionReconciler exports immutable history after its current
+// observation parent has been accepted by the mutation transport.
+type ObservationVersionReconciler interface {
+	ReconcileObservationVersions(ctx context.Context, project string) error
+}
+
+type enrolledProjectLister interface {
+	ListEnrolledProjects() ([]store.EnrolledProject, error)
+}
+
 // irreparableSyncMutationQuarantiner prevents malformed legacy rows from
 // repeatedly reaching transport while preserving their local audit evidence.
 type irreparableSyncMutationQuarantiner interface {
@@ -197,6 +207,7 @@ type Manager struct {
 	store     LocalStore
 	transport CloudTransport
 	cfg       Config
+	reconciler ObservationVersionReconciler
 
 	mu        sync.RWMutex
 	status    Status
@@ -243,6 +254,14 @@ func New(localStore LocalStore, transport CloudTransport, cfg Config) *Manager {
 		status:    Status{Phase: PhaseIdle},
 		dirtyCh:   make(chan struct{}, 1),
 	}
+}
+
+// SetObservationVersionReconciler enables optional push-side history repair.
+// It is separate from New so existing direct Manager callers retain legacy flow.
+func (m *Manager) SetObservationVersionReconciler(reconciler ObservationVersionReconciler) {
+	m.mu.Lock()
+	m.reconciler = reconciler
+	m.mu.Unlock()
 }
 
 // NotifyDirty signals the manager that local state has changed.
@@ -534,6 +553,9 @@ func (m *Manager) push(ctx context.Context) error {
 	}
 
 	m.setPhase(PhasePushing)
+	m.mu.RLock()
+	reconciler := m.reconciler
+	m.mu.RUnlock()
 	if repairer, ok := m.store.(enrolledProjectRepairEnsurer); ok {
 		if err := repairer.EnsureEnrolledProjectSyncMutations(ctx); err != nil {
 			return fmt.Errorf("repair enrolled sync journal: %w", err)
@@ -561,7 +583,7 @@ func (m *Manager) push(ctx context.Context) error {
 		if len(counts) > 0 {
 			return &nonEnrolledPendingError{counts: counts}
 		}
-		return nil
+		return m.reconcileEmptyProjects(ctx, reconciler, nil)
 	}
 
 	// Group by project (preserve order). Empty or padded project values are invalid
@@ -617,8 +639,42 @@ func (m *Manager) push(ctx context.Context) error {
 			failures = append(failures, fmt.Errorf("ack project %q: %w", project, err))
 			return errors.Join(failures...)
 		}
+		if reconciler != nil {
+			if err := reconciler.ReconcileObservationVersions(ctx, project); err != nil {
+				failures = append(failures, fmt.Errorf("reconcile observation versions project %q: %w", project, err))
+			}
+		}
 	}
+	if err := m.reconcileEmptyProjects(ctx, reconciler, groups); err != nil {
+		failures = append(failures, err)
+	}
+	return errors.Join(failures...)
+}
 
+func (m *Manager) reconcileEmptyProjects(ctx context.Context, reconciler ObservationVersionReconciler, queued map[string][]store.SyncMutation) error {
+	if reconciler == nil {
+		return nil
+	}
+	lister, ok := m.store.(enrolledProjectLister)
+	if !ok {
+		return nil
+	}
+	projects, err := lister.ListEnrolledProjects()
+	if err != nil {
+		return fmt.Errorf("list enrolled projects for observation version reconciliation: %w", err)
+	}
+	var failures []error
+	for _, enrolled := range projects {
+		if _, pending := queued[enrolled.Project]; pending {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return errors.Join(append(failures, err)...)
+		}
+		if err := reconciler.ReconcileObservationVersions(ctx, enrolled.Project); err != nil {
+			failures = append(failures, fmt.Errorf("reconcile observation versions project %q: %w", enrolled.Project, err))
+		}
+	}
 	return errors.Join(failures...)
 }
 

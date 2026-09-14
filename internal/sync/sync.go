@@ -557,6 +557,45 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 	return result, nil
 }
 
+// ReconcileCloudObservationVersions exports only immutable observation history
+// whose project-scoped parents are already present in accepted remote chunks.
+func (sy *Syncer) ReconcileCloudObservationVersions(createdBy, project string) (*SyncResult, error) {
+	if !sy.cloudMode {
+		return nil, fmt.Errorf("observation version reconciliation requires cloud mode")
+	}
+	if err := sy.ensureCloudPreflight(project); err != nil {
+		return nil, err
+	}
+	project, _ = store.NormalizeProject(project)
+	if strings.TrimSpace(project) == "" {
+		project = sy.project
+	}
+	manifest, err := sy.readManifest()
+	if err != nil {
+		return nil, err
+	}
+	local, err := storeGetSynced(sy.store, sy.chunkTrackingTargetKey(project))
+	if err != nil {
+		return nil, fmt.Errorf("get synced chunks: %w", err)
+	}
+	known := make(map[string]bool, len(local)+len(manifest.Chunks))
+	for id := range local { known[id] = true }
+	for _, entry := range manifest.Chunks { known[entry.ID] = true }
+	data, err := storeExportDataForProject(sy.store, project)
+	if err != nil {
+		return nil, fmt.Errorf("export project data: %w", err)
+	}
+	versions, err := sy.exportedObservationVersionKeys(manifest)
+	if err != nil {
+		return nil, fmt.Errorf("scan exported observation versions: %w", err)
+	}
+	_, parents, _, err := sy.exportedChunkKeys(manifest)
+	if err != nil {
+		return nil, fmt.Errorf("scan exported observation parents: %w", err)
+	}
+	return sy.exportCloudVersionChunks(manifest, known, local, sy.chunkTrackingTargetKey(project), createdBy, project, cloudObservationVersionsForExport(data, project, parents, versions))
+}
+
 // localExportMaxChunkBytes uses the same 4 MiB serialized-chunk convention as
 // cloud export. It is intentionally package-local so file sync gains no new
 // public configuration surface.

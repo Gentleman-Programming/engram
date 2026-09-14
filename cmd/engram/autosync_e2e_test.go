@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -13,8 +14,10 @@ import (
 	"time"
 
 	"github.com/Gentleman-Programming/engram/v2/internal/cloud/autosync"
+	"github.com/Gentleman-Programming/engram/v2/internal/cloud/chunkcodec"
 	"github.com/Gentleman-Programming/engram/v2/internal/cloud/remote"
 	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	engramsync "github.com/Gentleman-Programming/engram/v2/internal/sync"
 	_ "modernc.org/sqlite"
 )
 
@@ -244,6 +247,89 @@ func TestGoroutineIsolationConcurrentWrites(t *testing.T) {
 		t.Fatalf("deadlock detected: only %d/%d writes completed",
 			atomic.LoadInt64(&completed), concurrentWrites)
 	}
+}
+
+func TestAutosyncVersionSidecarAcknowledgesThenRetries(t *testing.T) {
+	cfg, err := store.DefaultConfig()
+	if err != nil { t.Fatal(err) }
+	cfg.DataDir = t.TempDir()
+	s, err := store.New(cfg)
+	if err != nil { t.Fatal(err) }
+	defer s.Close() //nolint:errcheck
+	const project = "autosync-history"
+	if err := s.EnrollProject(project); err != nil { t.Fatal(err) }
+	if err := s.CreateSession("history-session", project, "/tmp/history"); err != nil { t.Fatal(err) }
+	id, err := s.AddObservation(store.AddObservationParams{SessionID: "history-session", Type: "note", Title: "history", Content: "content", Project: project, Scope: "project"})
+	if err != nil { t.Fatal(err) }
+	observation, err := s.GetObservation(id)
+	if err != nil { t.Fatal(err) }
+	parent, err := json.Marshal(engramsync.ChunkData{Observations: []store.Observation{*observation}})
+	if err != nil { t.Fatal(err) }
+
+	var mu sync.Mutex
+	mutationPushes, versionPushes := 0, 0
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/sync/mutations/push":
+			var request struct{ Entries []json.RawMessage `json:"entries"` }
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil { http.Error(w, err.Error(), 400); return }
+			mu.Lock(); mutationPushes++; mu.Unlock()
+			seqs := make([]int64, len(request.Entries)); for i := range seqs { seqs[i] = int64(i + 1) }
+			_ = json.NewEncoder(w).Encode(map[string]any{"accepted_seqs": seqs})
+		case "/sync/mutations/pull":
+			_ = json.NewEncoder(w).Encode(map[string]any{"mutations": []any{}, "has_more": false})
+		case "/sync/pull":
+			_ = json.NewEncoder(w).Encode(engramsync.Manifest{Version: 2, Chunks: []engramsync.ChunkEntry{{ID: "accepted-parent"}}})
+		case "/sync/pull/accepted-parent":
+			_, _ = w.Write(parent)
+		case "/sync/push":
+			body, _ := io.ReadAll(r.Body)
+			decoded, err := chunkcodec.DecodeCompressedEnvelope(body, chunkcodec.DefaultMaxDecodedBytes)
+			if err != nil { http.Error(w, err.Error(), 400); return }
+			var request struct{ Data json.RawMessage `json:"data"` }
+			var chunk engramsync.ChunkData
+			if json.Unmarshal(decoded, &request) != nil || json.Unmarshal(request.Data, &chunk) != nil || len(chunk.ObservationVersions) == 0 { http.Error(w, "expected version sidecar", 400); return }
+			mu.Lock(); versionPushes++; attempt := versionPushes; mu.Unlock()
+			if attempt == 1 { http.Error(w, "sidecar unavailable", 500); return }
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	trustTLSServer(t, srv)
+
+	transport, err := remote.NewMutationTransport(srv.URL, "test-token")
+	if err != nil { t.Fatal(err) }
+	managerCfg := autosync.DefaultConfig()
+	managerCfg.DebounceDuration, managerCfg.PollInterval = time.Millisecond, 5*time.Millisecond
+	managerCfg.BaseBackoff, managerCfg.MaxBackoff = 5*time.Millisecond, 10*time.Millisecond
+	manager := autosync.New(s, &mutationTransportAdapter{remote: transport}, managerCfg)
+	manager.SetObservationVersionReconciler(ackCheckingReconciler{store: s, delegate: cloudObservationVersionReconciler{store: s, serverURL: srv.URL, token: "test-token"}})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	go manager.Run(ctx)
+	defer manager.Stop()
+	manager.NotifyDirty()
+	deadline := time.Now().Add(800 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		mu.Lock(); mutations, versions := mutationPushes, versionPushes; mu.Unlock()
+		if mutations == 1 && versions == 2 { return }
+		time.Sleep(10 * time.Millisecond)
+	}
+	mu.Lock(); defer mu.Unlock()
+	t.Fatalf("mutation pushes=%d version pushes=%d; want parent ACK then one sidecar retry", mutationPushes, versionPushes)
+}
+
+type ackCheckingReconciler struct {
+	store *store.Store
+	delegate autosync.ObservationVersionReconciler
+}
+
+func (r ackCheckingReconciler) ReconcileObservationVersions(ctx context.Context, project string) error {
+	pending, err := r.store.ListPendingSyncMutations(store.DefaultSyncTargetKey, 1)
+	if err != nil { return err }
+	if len(pending) != 0 { return fmt.Errorf("sidecar attempted before parent mutation ACK") }
+	return r.delegate.ReconcileObservationVersions(ctx, project)
 }
 
 // ─── Fake store for E2E tests ─────────────────────────────────────────────────

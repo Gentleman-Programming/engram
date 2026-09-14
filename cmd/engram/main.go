@@ -316,6 +316,19 @@ func (a *mutationTransportAdapter) PullMutations(sinceSeq int64, limit int) (*au
 	}, nil
 }
 
+type cloudObservationVersionReconciler struct {
+	store *store.Store
+	serverURL, token string
+}
+
+func (r cloudObservationVersionReconciler) ReconcileObservationVersions(ctx context.Context, project string) error {
+	if err := ctx.Err(); err != nil { return err }
+	transport, err := remote.NewRemoteTransport(r.serverURL, r.token, project)
+	if err != nil { return err }
+	_, err = engramsync.NewCloudWithTransport(r.store, transport, project).ReconcileCloudObservationVersions("autosync", project)
+	return err
+}
+
 type storeSyncStatusProvider struct {
 	store          *store.Store
 	defaultProject string
@@ -966,6 +979,9 @@ func tryStartAutosync(ctx context.Context, s *store.Store, cfg store.Config) (au
 	// BR2-3: Call newAutosyncManager (injectable) instead of autosync.New directly,
 	// so tests can stub the factory and avoid real goroutine/network side effects.
 	mgr := newAutosyncManager(s, transport, mgrCfg)
+	if historyManager, ok := mgr.(interface{ SetObservationVersionReconciler(autosync.ObservationVersionReconciler) }); ok {
+		historyManager.SetObservationVersionReconciler(cloudObservationVersionReconciler{store: s, serverURL: serverURL, token: token})
+	}
 
 	go mgr.Run(ctx)
 	log.Printf("[autosync] started (server=%s)", serverURL)

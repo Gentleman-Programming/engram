@@ -2357,6 +2357,67 @@ func TestPullDeferredScopeReplayErrorIsNonFatal(t *testing.T) {
 	}
 }
 
+type enrolledLocalStore struct {
+	*fakeLocalStore
+	enrolled []store.EnrolledProject
+}
+
+func (s *enrolledLocalStore) ListEnrolledProjects() ([]store.EnrolledProject, error) {
+	return append([]store.EnrolledProject(nil), s.enrolled...), nil
+}
+
+type recordingVersionReconciler struct {
+	calls []string
+	err   map[string]error
+	onCall func(string)
+}
+
+func (r *recordingVersionReconciler) ReconcileObservationVersions(_ context.Context, project string) error {
+	r.calls = append(r.calls, project)
+	if r.onCall != nil { r.onCall(project) }
+	return r.err[project]
+}
+
+func TestManagerReconcilesVersionsAfterAckAndForEmptyEnrolledProjects(t *testing.T) {
+	local := &enrolledLocalStore{fakeLocalStore: newFakeLocalStore(), enrolled: []store.EnrolledProject{{Project: "alpha"}, {Project: "beta"}}}
+	local.mutations = []store.SyncMutation{{Seq: 1, Entity: "observation", EntityKey: "alpha", Op: "upsert", Project: "alpha"}}
+	transport := newFakeTransport()
+	transport.pushResultByProject = map[string]*PushMutationsResult{"alpha": {AcceptedSeqs: []int64{1}}}
+	reconciler := &recordingVersionReconciler{onCall: func(project string) {
+		if project == "alpha" && fmt.Sprint(local.ackedSeqs) != "[1]" { t.Fatalf("sidecar ran before parent ack: %v", local.ackedSeqs) }
+	}}
+	manager := New(local, transport, DefaultConfig())
+	manager.SetObservationVersionReconciler(reconciler)
+	if err := manager.push(context.Background()); err != nil { t.Fatalf("push: %v", err) }
+	if got := fmt.Sprint(reconciler.calls); got != "[alpha beta]" { t.Fatalf("sidecar projects = %s, want [alpha beta]", got) }
+}
+
+func TestManagerSidecarFailureBacksOffWithoutReplayingParentMutation(t *testing.T) {
+	local := &enrolledLocalStore{fakeLocalStore: newFakeLocalStore(), enrolled: []store.EnrolledProject{{Project: "alpha"}, {Project: "beta"}}}
+	local.mutations = []store.SyncMutation{{Seq: 1, Entity: "observation", EntityKey: "alpha", Op: "upsert", Project: "alpha"}}
+	transport := newFakeTransport()
+	transport.pushResultByProject = map[string]*PushMutationsResult{"alpha": {AcceptedSeqs: []int64{1}}}
+	reconciler := &recordingVersionReconciler{err: map[string]error{"alpha": errors.New("sidecar down")}}
+	manager := New(local, transport, DefaultConfig())
+	manager.SetObservationVersionReconciler(reconciler)
+	manager.cycle(context.Background())
+	if st := manager.Status(); st.Phase != PhasePushFailed || st.BackoffUntil == nil { t.Fatalf("sidecar failure state = %+v", st) }
+	if got := fmt.Sprint(local.ackedSeqs); got != "[1]" { t.Fatalf("parent ack = %s, want [1]", got) }
+	local.mutations = nil // real stores remove acknowledged mutations before the retry.
+	manager.mu.Lock()
+	past := time.Now().Add(-time.Second)
+	manager.status.BackoffUntil = &past
+	manager.mu.Unlock()
+	manager.cycle(context.Background())
+	if got := atomic.LoadInt32(&transport.pushCalls); got != 1 { t.Fatalf("mutation pushes = %d, want 1", got) }
+	if got := fmt.Sprint(reconciler.calls); got != "[alpha beta alpha beta]" { t.Fatalf("sidecar retries = %s", got) }
+}
+
+func TestManagerWithoutVersionReconcilerRemainsCompatible(t *testing.T) {
+	manager := New(newFakeLocalStore(), newFakeTransport(), DefaultConfig())
+	if err := manager.push(context.Background()); err != nil { t.Fatalf("legacy push: %v", err) }
+}
+
 // ─── Helper types ─────────────────────────────────────────────────────────────
 
 type panicOnceTransport struct {

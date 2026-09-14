@@ -4986,12 +4986,12 @@ func TestCloudVersionHistoryExportImportAndBackfill(t *testing.T) {
 	if repeat, err := exporter.Export("alice", project); err != nil || !repeat.IsEmpty { t.Fatalf("repeat export = %#v, %v", repeat, err) }
 
 	if _, err := s.DB().Exec(`INSERT INTO observation_versions (version_id, observation_id, observation_sync_id, session_id, type, title, content, project, scope, revision_count) SELECT ?, id, sync_id, session_id, type, title, content, project, scope, revision_count FROM observations WHERE id = ?`, "00000000-0000-4000-8000-000000000185", projectID); err != nil { t.Fatalf("seed incremental version: %v", err) }
-	incremental, err := exporter.Export("alice", project)
+	incremental, err := exporter.ReconcileCloudObservationVersions("alice", project)
 	if err != nil || incremental.IsEmpty || incremental.ChunksExported != 1 { t.Fatalf("existing-parent backfill = %#v, %v", incremental, err) }
 	var backfill ChunkData
 	if err := json.Unmarshal(transport.chunks[incremental.ChunkID], &backfill); err != nil { t.Fatalf("decode backfill chunk: %v", err) }
 	if len(backfill.Mutations) != 0 || len(backfill.Observations) != 0 || len(backfill.ObservationVersions) != 1 || backfill.ObservationVersions[0].VersionID != "00000000-0000-4000-8000-000000000185" { t.Fatalf("unexpected version-only backfill: %+v", backfill) }
-	if repeat, err := exporter.Export("alice", project); err != nil || !repeat.IsEmpty { t.Fatalf("repeat backfill = %#v, %v", repeat, err) }
+	if repeat, err := exporter.ReconcileCloudObservationVersions("alice", project); err != nil || !repeat.IsEmpty { t.Fatalf("repeat backfill = %#v, %v", repeat, err) }
 }
 
 func TestCloudVersionExportRejectsOversizedSidecarBeforeWrites(t *testing.T) {
