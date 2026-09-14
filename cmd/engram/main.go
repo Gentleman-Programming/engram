@@ -8,6 +8,7 @@
 //	engram save           Save a memory from CLI
 //	engram context        Show recent context
 //	engram stats          Show memory stats
+//	engram history <id>   Show version history for one observation
 package main
 
 import (
@@ -735,6 +736,8 @@ func main() {
 		cmdDelete(cfg)
 	case "timeline":
 		cmdTimeline(cfg)
+	case "history":
+		cmdHistory(cfg)
 	case "conflicts":
 		cmdConflicts(cfg)
 	case "doctor":
@@ -3404,6 +3407,7 @@ Commands:
                      Cascade-delete a project: soft-deletes observations (or hard if --hard),
                      removes prompts; with --hard also removes sessions
   timeline <obs_id>  Show chronological context around an observation [--before N] [--after N] [--project PROJECT|--all]
+  history <obs_id>   Show version history [--limit N] [--cursor CURSOR] [--json]
   conflicts <sub>   Inspect and manage memory conflict relations
                        list     [--project P]  [--status S]  [--since RFC3339]  [--limit N]
                        show     <relation_id>
