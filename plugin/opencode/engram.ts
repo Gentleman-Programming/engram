@@ -299,6 +299,9 @@ export const Engram: Plugin = async (ctx) => {
   // Terminal root closures are retained after invalidation so duplicate deletion
   // events can retry a failed endpoint call without treating it as confirmed.
   const deletedRootSessions = new Set<string>()
+  const registrationAttempts = new Set<string>()
+  const registeringSessions = new Map<string, Promise<boolean>>()
+  const closeRequestedSessions = new Set<string>()
   const closedSessions = new Set<string>()
   const closingSessions = new Map<string, Promise<boolean>>()
 
@@ -343,6 +346,8 @@ export const Engram: Plugin = async (ctx) => {
     }).then((acknowledgement) => {
       if (acknowledgement === null) return false
       closedSessions.add(sessionId)
+      for (const sessions of [knownSessions, registrationAttempts, deletedRootSessions, closeRequestedSessions])
+        sessions.delete(sessionId)
       return true
     }).finally(() => {
       closingSessions.delete(sessionId)
@@ -361,13 +366,14 @@ export const Engram: Plugin = async (ctx) => {
     return endSessionInEngram(sessionId)
   }
 
-  // End any session this plugin registered in Engram. Confirmed roots keep
-  // the deletedRootSessions retry discipline; every other known
-  // registration (late-reclassified children, legacy misregistrations)
-  // ends exactly once. Unregistered sessions have nothing to close.
+  // End a session the plugin attempted to register. Confirmed roots retain deletion retries;
+  // other attempts, including late reclassifications and ambiguous responses, stay cleanup-eligible.
   async function closeKnownSession(sessionId: string): Promise<boolean> {
     if (closedSessions.has(sessionId)) return true
-    if (!knownSessions.has(sessionId) && !deletedRootSessions.has(sessionId)) return false
+    if (!registrationAttempts.has(sessionId)) return false
+    closeRequestedSessions.add(sessionId)
+    const registration = registeringSessions.get(sessionId)
+    if (registration) await registration
     if (isKnownAuthoritativeRootSession(sessionId) || deletedRootSessions.has(sessionId)) {
       return closeDeletedRootSession(sessionId)
     }
@@ -377,7 +383,7 @@ export const Engram: Plugin = async (ctx) => {
   function cacheSessionInfo(info: { id?: unknown; parentID?: unknown; projectID?: unknown } | undefined): boolean {
     const rawSessionID = info?.id
     const sessionId = typeof rawSessionID === "string" && rawSessionID ? rawSessionID : ""
-    if (!sessionId) return false
+    if (!sessionId || closedSessions.has(sessionId)) return false
     const rawParentID = info?.parentID
     const parentID = rawParentID === undefined
       ? null
@@ -394,6 +400,14 @@ export const Engram: Plugin = async (ctx) => {
       parentSessions.delete(sessionId)
       subAgentSessions.delete(sessionId)
       return false
+    }
+    // A close-requested child may repeat its authoritative reclassification
+    // to retry a failed end. Parentless events must not revive it as a root.
+    if (closeRequestedSessions.has(sessionId)) {
+      if (!parentID) return false
+      parentSessions.set(sessionId, parentID)
+      subAgentSessions.add(sessionId)
+      return true
     }
     if (invalidSessions.has(sessionId) || (parentID && invalidSessions.has(parentID))) {
       invalidateSessionTree(sessionId)
@@ -423,7 +437,7 @@ export const Engram: Plugin = async (ctx) => {
     let current = sessionId
     while (true) {
       if (visited.has(current)) return ""
-      if (invalidSessions.has(current)) {
+      if (invalidSessions.has(current) || closeRequestedSessions.has(current) || closedSessions.has(current)) {
         invalidateResolvedTree(current)
         return ""
       }
@@ -494,21 +508,23 @@ export const Engram: Plugin = async (ctx) => {
    */
   async function ensureSession(sessionId: string): Promise<boolean> {
 		if (!await ensureResolvedProject()) return false
-    if (!sessionId || invalidSessions.has(sessionId)) return false
+    if (!sessionId || invalidSessions.has(sessionId) || closeRequestedSessions.has(sessionId) || closedSessions.has(sessionId)) return false
     if (knownSessions.has(sessionId)) return true
     // Do not register sub-agent sessions in Engram (issue #116).
     if (subAgentSessions.has(sessionId)) return false
-    const acknowledgement = await engramFetch("/sessions", {
+    const inFlight = registeringSessions.get(sessionId)
+    if (inFlight) return await inFlight && !closeRequestedSessions.has(sessionId)
+    registrationAttempts.add(sessionId)
+    const registration = engramFetch("/sessions", {
       method: "POST",
-      body: {
-        id: sessionId,
-        project,
-        directory: ctx.directory,
-      },
-    })
-    if (acknowledgement === null || invalidSessions.has(sessionId)) return false
-    knownSessions.add(sessionId)
-    return true
+      body: { id: sessionId, project, directory: ctx.directory },
+    }).then((acknowledgement) => {
+      if (acknowledgement === null) return false
+      knownSessions.add(sessionId)
+      return true
+    }).finally(() => registeringSessions.delete(sessionId))
+    registeringSessions.set(sessionId, registration)
+    return await registration && !invalidSessions.has(sessionId) && !closeRequestedSessions.has(sessionId)
   }
 
   // Try to start engram server if not running
@@ -550,10 +566,9 @@ export const Engram: Plugin = async (ctx) => {
   return {
 		dispose: async () => {
 			if (!localReady) return
-      // Every known registration owns an Engram lifecycle (#1131) —
-      // including children misregistered before their parentID was known.
-      // Children that were never registered remain untouched.
-      await Promise.all([...knownSessions].map(closeKnownSession))
+      // Every registration attempt owns an Engram lifecycle (#1131), including
+      // children misregistered before their parentID was known.
+      await Promise.all([...registrationAttempts].map(closeKnownSession))
     },
 
     // ─── Event Listeners ───────────────────────────────────────────
@@ -577,13 +592,10 @@ export const Engram: Plugin = async (ctx) => {
         else subAgentSessions.delete(sessionId)
 
         // Issue #1131: a session registered as a root that now reveals a
-        // parentID was misregistered. End its Engram session so no open row
-        // blocks directory-based session resolution, and drop it from
-        // knownSessions so nothing re-registers it. It stays tracked in
-        // subAgentSessions; sessions never registered have nothing to close.
-        if (isSubAgent && knownSessions.has(sessionId)) {
+        // parentID was misregistered. Await its closure, including an
+        // in-flight registration, before this lifecycle callback returns.
+        if (isSubAgent && registrationAttempts.has(sessionId)) {
           await closeKnownSession(sessionId)
-          knownSessions.delete(sessionId)
         }
 
         if (event.type === "session.created" && sessionId && !isSubAgent) {
@@ -597,9 +609,9 @@ export const Engram: Plugin = async (ctx) => {
         const info = (event.properties as any)?.info
         const sessionId = info?.id
         if (sessionId) {
-          // Any known registration owns an Engram lifecycle (#1131):
+          // Any registration attempt owns an Engram lifecycle (#1131):
           // confirmed roots keep the deletedRootSessions retry discipline.
-          // Await the best-effort endpoint before invalidating local ownership.
+          // Await an in-flight registration before invalidating local ownership.
           await closeKnownSession(sessionId)
           invalidateSessionTree(sessionId)
         }

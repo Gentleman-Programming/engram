@@ -729,10 +729,10 @@ test("write tool hook revalidates leaf and ancestor ownership after registration
       const output = toolOutput()
       const pending = runtime.before({ tool: "mem_save", sessionID: "leaf" }, output)
       await registration.started
-      await scenario.mutate(runtime)
+      const mutation = scenario.mutate(runtime)
       registration.resolve(httpResponse())
 
-      await assertNoForward(pending, output)
+      await Promise.all([mutation, assertNoForward(pending, output)])
       assert.deepEqual(runtime.registeredIDs, ["old-root"])
       assert.deepEqual(runtime.sessionGetIDs, [])
     })
@@ -847,9 +847,9 @@ test("automatic hooks omit writes when ownership changes during registration", a
       const pending = scenario.invoke(runtime)
       await registration.started
       await runtime.event("session.updated", session("new-root"))
-      await runtime.event("session.updated", session("runtime", "new-root"))
+      const reparented = runtime.event("session.updated", session("runtime", "new-root"))
       registration.resolve(httpResponse())
-      await pending
+      await Promise.all([pending, reparented])
 
       assert.deepEqual(runtime.registeredIDs, ["runtime"])
       assert.equal(runtime.requests.some(({ path }) => path === scenario.forbiddenPath), false)

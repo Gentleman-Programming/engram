@@ -60,7 +60,13 @@ function endRequests(requests: RecordedRequest[], sessionID: string) {
   return requests.filter(({ path, method }) => method === "POST" && path === `/sessions/${sessionID}/end`)
 }
 
-async function createRuntime(t: any, { sessionGet }: { sessionGet?: (request: { path: { id: string } }) => any } = {}) {
+interface RuntimeOptions {
+  sessionGet?: (request: { path: { id: string } }) => any
+  sessionRegistration?: (sessionID: string) => any
+  sessionEnd?: (sessionID: string) => any
+}
+
+async function createRuntime(t: any, { sessionGet, sessionRegistration, sessionEnd }: RuntimeOptions = {}) {
   const originalFetch = globalThis.fetch
   const originalBun = (globalThis as any).Bun
   const originalEngramURL = process.env.ENGRAM_URL
@@ -93,7 +99,11 @@ async function createRuntime(t: any, { sessionGet }: { sessionGet?: (request: { 
       return httpResponse({ project: "engram", project_source: "git_remote" })
     if (path === "/sessions") {
       registeredIDs.push(body.id)
-      return httpResponse()
+      return sessionRegistration ? await sessionRegistration(body.id) : httpResponse()
+    }
+    if (path.endsWith("/end")) {
+      const sessionID = path.split("/")[2]
+      return sessionEnd ? await sessionEnd(sessionID) : httpResponse({})
     }
     return httpResponse({})
   }) as typeof fetch
@@ -139,31 +149,35 @@ test("#1131 ends a root registration in Engram when a later event reveals a pare
 
   assert.equal(endRequests(runtime.requests, "sess-child").length, 1)
 
-  // The session must stay de-registered: a later root-path flow must not
-  // register it again and duplicate events must not end it twice.
+  // The session must stay de-registered: parentless events and normal hooks
+  // must not register or attribute it again, and duplicate ends stay deduplicated.
   await runtime.event("session.updated", sessionInfo("sess-child", "sess-root"))
-  await runtime.after({ tool: "Bash", sessionID: "sess-child" }, { args: {} })
+  await runtime.event("session.updated", sessionInfo("sess-child"))
+  await runtime.after({ tool: "Task", sessionID: "sess-child" }, "task output long enough to be passively captured")
   assert.deepEqual(runtime.registeredIDs, ["sess-root", "sess-child"])
   assert.equal(endRequests(runtime.requests, "sess-child").length, 1)
+  assert.equal(runtime.requests.filter(({ path }) => path === "/observations/passive").length, 0)
 })
 
-// A registered root whose ownership confirmation was invalidated by a
-// later malformed event stays in knownSessions but is no longer an
-// authoritative root: the legacy misregistration that must still be ended.
+// A registered root whose ownership confirmation becomes invalid still owns a
+// cleanup attempt, even after its known-session cache entry is removed.
 async function registerMisregisteredChild(runtime: Awaited<ReturnType<typeof createRuntime>>) {
   await runtime.event("session.created", sessionInfo("sess-child"))
   await runtime.event("session.updated", { id: "sess-child", projectID: "other-project" })
 }
 
-test("#1131 ends a known child registration when session.deleted fires", async (t) => {
-  const runtime = await createRuntime(t)
+test("#1131 retries a failed child deletion during disposal", async (t) => {
+  let childEnds = 0
+  const runtime = await createRuntime(t, {
+    sessionEnd: (id) => httpResponse({}, id !== "sess-child" || ++childEnds > 1),
+  })
   await runtime.event("session.created", sessionInfo("sess-root"))
   await registerMisregisteredChild(runtime)
-
   await runtime.event("session.deleted", { id: "sess-child" })
+  await runtime.dispose()
 
-  assert.equal(endRequests(runtime.requests, "sess-child").length, 1)
-  assert.equal(endRequests(runtime.requests, "sess-root").length, 0)
+  assert.equal(endRequests(runtime.requests, "sess-child").length, 2)
+  assert.equal(endRequests(runtime.requests, "sess-root").length, 1)
 })
 
 test("#1131 disposal ends every known session including misregistered children", async (t) => {
@@ -196,12 +210,30 @@ test("#1131 never ends sessions that were never registered", async (t) => {
   assert.deepEqual(runtime.registeredIDs, ["sess-root"])
 })
 
-test("#1131 duplicate reclassification events fire exactly one end POST", async (t) => {
-  const runtime = await createRuntime(t)
-  await runtime.event("session.created", sessionInfo("sess-child"))
-  await runtime.event("session.updated", sessionInfo("sess-child", "sess-root"))
-  await runtime.event("session.updated", sessionInfo("sess-child", "sess-root"))
-  await runtime.dispose()
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  return { promise: new Promise<T>((done) => { resolve = done }), resolve }
+}
 
-  assert.equal(endRequests(runtime.requests, "sess-child").length, 1)
+test("#1159 awaits pending registrations before deletion or reclassification closes", async (t) => {
+  for (const { sessionID, close } of [
+    { sessionID: "sess-root", close: (runtime: any) => runtime.event("session.deleted", { id: "sess-root" }) },
+    { sessionID: "sess-child", close: (runtime: any) => runtime.event("session.updated", sessionInfo("sess-child", "sess-root")) },
+  ]) {
+    const registration = deferred<ReturnType<typeof httpResponse>>()
+    const registrationStarted = deferred<void>()
+    const runtime = await createRuntime(t, { sessionRegistration: () => {
+      registrationStarted.resolve()
+      return registration.promise
+    } })
+    const created = runtime.event("session.created", sessionInfo(sessionID))
+    await registrationStarted.promise
+    let callbackReturned = false
+    const closing = close(runtime).then(() => { callbackReturned = true })
+    await new Promise<void>((done) => setImmediate(done))
+    assert.equal(callbackReturned, false)
+    registration.resolve(httpResponse())
+    await Promise.all([created, closing])
+    assert.equal(endRequests(runtime.requests, sessionID).length, 1)
+  }
 })
