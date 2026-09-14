@@ -196,6 +196,20 @@ class EngramHttpError extends Error {
   }
 }
 
+class SessionProjectConflictError extends Error {
+  readonly sessionId: string;
+  readonly ownerProject: string;
+  readonly requestedProject: string;
+
+  constructor(sessionId: string, ownerProject: string, requestedProject: string) {
+    super(`Pi runtime session ${sessionId} belongs to Engram project ${ownerProject}, not ${requestedProject}. Start a fresh Pi session in ${requestedProject} before capturing memory.`);
+    this.name = "SessionProjectConflictError";
+    this.sessionId = sessionId;
+    this.ownerProject = ownerProject;
+    this.requestedProject = requestedProject;
+  }
+}
+
 // Node rejects an AbortSignal.timeout() fetch with a DOMException named "TimeoutError",
 // which is an instanceof Error; a caller-supplied abort surfaces as "AbortError".
 function isTimeoutError(error: unknown): boolean {
@@ -348,7 +362,8 @@ async function ensureSessionBestEffort(sessionId: string, sessionProject = proje
   try {
     await ensureSession(sessionId, sessionProject);
     return true;
-  } catch {
+  } catch (error) {
+    warnSessionProjectConflictOnce(error);
     return false;
   }
 }
@@ -736,14 +751,34 @@ const observedRuntimeSessionIDs = new Set<string>();
 let runtimeSessionIdentityAmbiguous = false;
 
 const knownSessions = new Set<string>();
+const registeredSessionProjects = new Map<string, string>();
 const sessionRegistrationsInFlight = new Map<string, Promise<void>>();
+const sessionRegistrationProjects = new Map<string, string>();
 const sessionEndingsInFlight = new Map<string, Promise<unknown>>();
+const warnedSessionProjectConflicts = new Set<string>();
 const toolCounts = new Map<string, number>();
+
+function sessionProjectConflict(sessionId: string, sessionProject: string): SessionProjectConflictError | undefined {
+  const ownerProject = registeredSessionProjects.get(sessionId) || sessionRegistrationProjects.get(sessionId);
+  return ownerProject && ownerProject !== sessionProject
+    ? new SessionProjectConflictError(sessionId, ownerProject, sessionProject)
+    : undefined;
+}
+
+function warnSessionProjectConflictOnce(error: unknown): void {
+  if (!(error instanceof SessionProjectConflictError)) return;
+  const key = `${error.sessionId}\u0000${error.ownerProject}\u0000${error.requestedProject}`;
+  if (warnedSessionProjectConflicts.has(key)) return;
+  warnedSessionProjectConflicts.add(key);
+  warnEngramFailure("/sessions", error);
+}
 
 async function ensureSession(sessionId: string, sessionProject = project, fetch: EngramFetcher = engramFetch): Promise<void> {
   const key = `${sessionProject}:${sessionId}`;
   if (!sessionId) return;
   if (knownSessions.has(`\u0000closing:${sessionId}`)) throw new Error(`Pi runtime session ${sessionId} is closing`);
+  const conflict = sessionProjectConflict(sessionId, sessionProject);
+  if (conflict) throw conflict;
   if (knownSessions.has(key)) return;
 
   const existingRegistration = sessionRegistrationsInFlight.get(key);
@@ -756,15 +791,18 @@ async function ensureSession(sessionId: string, sessionProject = project, fetch:
       throw new Error(`gentle-engram could not confirm session registration for Pi runtime session ${sessionId}`);
     }
     if (knownSessions.has(`\u0000closing:${sessionId}`)) throw new Error(`Pi runtime session ${sessionId} is closing`);
+    registeredSessionProjects.set(sessionId, sessionProject);
     knownSessions.add(key);
   })();
   sessionRegistrationsInFlight.set(key, registration);
+  sessionRegistrationProjects.set(sessionId, sessionProject);
 
   try {
     await registration;
   } finally {
     if (sessionRegistrationsInFlight.get(key) === registration) {
       sessionRegistrationsInFlight.delete(key);
+      if (!registeredSessionProjects.has(sessionId)) sessionRegistrationProjects.delete(sessionId);
     }
   }
 }
@@ -827,6 +865,8 @@ function hasKnownSession(sessionId: string): boolean {
 
 function forgetKnownSession(sessionId: string): void {
   knownSessions.delete(sessionId);
+  registeredSessionProjects.delete(sessionId);
+  sessionRegistrationProjects.delete(sessionId);
   for (const key of knownSessions) {
     if (key !== `\u0000closing:${sessionId}` && key.endsWith(`:${sessionId}`)) knownSessions.delete(key);
   }

@@ -122,6 +122,88 @@ test("registered Pi-native mem_save_prompt persists through the Engram /prompts 
   }
 });
 
+test("one Pi runtime session cannot capture prompts or passive observations across projects", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.ENGRAM_URL;
+  const originalStderrWrite = process.stderr.write;
+  const warnings = [];
+  process.stderr.write = (chunk) => {
+    warnings.push(String(chunk));
+    return true;
+  };
+  process.env.ENGRAM_URL = "http://127.0.0.1:17437";
+  const { calls, fetchStub } = recordingFetch([
+    { method: "GET", path: "/health", body: { status: "ok" } },
+    { method: "GET", path: "/project/current", body: { project: "project-b" } },
+    { method: "POST", path: "/sessions", body: { status: "created" } },
+    { method: "POST", path: "/prompts", body: { id: 1 } },
+    { method: "POST", path: "/observations/passive", body: { id: 2 } },
+  ]);
+  globalThis.fetch = fetchStub;
+
+  try {
+    await withPluginSandbox("engram-pi-contract-", async ({ sandbox }) => {
+      const { registeredTools, eventHandlers } = await loadPluginHarness(sandbox);
+      const memSavePrompt = registeredTools.get("mem_save_prompt");
+      const sessionId = "cross-project-runtime-session";
+      const ctx = runtimeContext(sessionId);
+
+      const firstPrompt = await memSavePrompt.execute(
+        "project-a-first-prompt",
+        { content: "first prompt under the persisted project owner", project: "project-a" },
+        undefined,
+        undefined,
+        ctx,
+      );
+      const sameProjectPrompt = await memSavePrompt.execute(
+        "project-a-second-prompt",
+        { content: "normal same-project capture remains available", project: "project-a" },
+        undefined,
+        undefined,
+        ctx,
+      );
+      assert.equal(firstPrompt.isError, undefined);
+      assert.equal(sameProjectPrompt.isError, undefined, "same-project prompt capture must remain available");
+
+      const crossProjectPrompt = await memSavePrompt.execute(
+        "project-b-prompt",
+        { content: "this prompt must not be sent under another project", project: "project-b" },
+        undefined,
+        undefined,
+        ctx,
+      );
+      assert.equal(crossProjectPrompt.isError, true, "a cross-project prompt must fail before a write is attempted");
+      assert.match(crossProjectPrompt.content[0].text, /fresh Pi session/i);
+
+      const passiveEvent = { toolName: "shell", result: "this eligible passive observation must not cross the persisted project boundary" };
+      await eventHandlers.get("tool_execution_end")(passiveEvent, ctx);
+      await eventHandlers.get("tool_execution_end")(passiveEvent, ctx);
+
+      const sessionProjects = calls
+        .filter((call) => call.method === "POST" && call.path === "/sessions")
+        .map((call) => call.body.project);
+      assert.deepEqual(sessionProjects, ["project-a"], "the adapter must not re-register one identity under project-b");
+      assert.equal(
+        calls.filter((call) => call.method === "POST" && call.path === "/prompts").length,
+        2,
+        "only same-project prompts may be captured",
+      );
+      assert.equal(
+        calls.filter((call) => call.method === "POST" && call.path === "/observations/passive").length,
+        0,
+        "passive capture must be suppressed for the cross-project conflict",
+      );
+      assert.equal(warnings.length, 1, "repeated passive events must not repeat the same conflict warning");
+      assert.match(warnings[0], /fresh Pi session/i);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stderr.write = originalStderrWrite;
+    if (originalUrl === undefined) delete process.env.ENGRAM_URL;
+    else process.env.ENGRAM_URL = originalUrl;
+  }
+});
+
 test("registered Pi-native mem_search reports native provider transport failure", async () => {
   const originalFetch = globalThis.fetch;
   const originalUrl = process.env.ENGRAM_URL;
