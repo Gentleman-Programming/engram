@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/Gentleman-Programming/engram/v2/internal/project"
 	"github.com/Gentleman-Programming/engram/v2/internal/store"
+	"github.com/Gentleman-Programming/engram/v2/internal/timeutil"
 	mcppkg "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -2656,6 +2658,164 @@ func TestHandleTimelineBeforeSectionAndSummaryBranches(t *testing.T) {
 	text := callResultText(t, res)
 	if !strings.Contains(text, "timeline summary") || !strings.Contains(text, "Before") {
 		t.Fatalf("expected timeline output with summary and before section, got %q", text)
+	}
+}
+
+func TestHandleGetObservationHistoryReadIsOptionalAndPortable(t *testing.T) {
+	s := newMCPTestStore(t)
+	const project = "history-project"
+	if err := s.CreateSession("history-session", project, "/tmp/history"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	id, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "history-session", Type: "decision", Title: "first", Content: "first content", Project: project,
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	for _, title := range []string{"second", "third", "fourth"} {
+		if _, err := s.UpdateObservation(id, store.UpdateObservationParams{Title: &title}); err != nil {
+			t.Fatalf("update %q: %v", title, err)
+		}
+	}
+	obs, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("get observation: %v", err)
+	}
+	if _, err := s.DB().Exec(`UPDATE observation_versions SET is_baseline = 1, history_complete = 0 WHERE observation_sync_id = ? AND revision_count = 1`, obs.SyncID); err != nil {
+		t.Fatalf("mark baseline fixture: %v", err)
+	}
+	otherID, err := s.AddObservation(store.AddObservationParams{
+		SessionID: "history-session", Type: "note", Title: "other", Content: "other content", Project: project,
+	})
+	if err != nil {
+		t.Fatalf("add other observation: %v", err)
+	}
+	other, err := s.GetObservation(otherID)
+	if err != nil {
+		t.Fatalf("get other observation: %v", err)
+	}
+	h := handleGetObservation(s, MCPConfig{DefaultProject: project})
+	call := func(args map[string]any) *mcppkg.CallToolResult {
+		t.Helper()
+		res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: args}})
+		if err != nil {
+			t.Fatalf("get observation: %v", err)
+		}
+		return res
+	}
+
+	tool := NewServer(s).GetTool("mem_get_observation")
+	for _, field := range []string{"include_history", "limit", "cursor"} {
+		if _, ok := tool.Tool.InputSchema.Properties[field]; !ok {
+			t.Errorf("history schema missing optional %q", field)
+		}
+	}
+	defaultResult := call(map[string]any{"id": float64(id)})
+	if defaultResult.IsError {
+		t.Fatalf("default get failed: %s", callResultText(t, defaultResult))
+	}
+	defaultBody := callResultJSON(t, defaultResult)
+	if _, ok := defaultBody["history"]; ok {
+		t.Fatalf("default response must not add history: %v", defaultBody)
+	}
+	if got := defaultBody["result"]; got != fmt.Sprintf("#%d [decision] fourth\nfirst content\nSession: history-session\nProject: %s\nScope: project\nDuplicates: 1\nRevisions: 4\nCreated: %s", id, project, timeutil.FormatLocal(obs.CreatedAt)) {
+		t.Fatalf("default response changed: %q", got)
+	}
+
+	defaultHistory := call(map[string]any{"id": float64(id), "include_history": true})
+	if defaultHistory.IsError || len(callResultJSON(t, defaultHistory)["history"].(map[string]any)["versions"].([]any)) != 4 {
+		t.Fatalf("default history page must use bounded default limit: %s", callResultText(t, defaultHistory))
+	}
+	firstResult := call(map[string]any{"id": float64(id), "include_history": true, "limit": float64(3)})
+	if firstResult.IsError {
+		t.Fatalf("first history page failed: %s", callResultText(t, firstResult))
+	}
+	firstBody := callResultJSON(t, firstResult)
+	history, ok := firstBody["history"].(map[string]any)
+	if !ok || history["has_more"] != true {
+		t.Fatalf("first history page = %v", firstBody)
+	}
+	versions, ok := history["versions"].([]any)
+	if !ok || len(versions) != 3 {
+		t.Fatalf("first versions = %#v", history["versions"])
+	}
+	for index, wantRevision := range []float64{4, 3, 2} {
+		version, ok := versions[index].(map[string]any)
+		if !ok || version["revision_count"] != wantRevision || version["id"] != nil || version["observation_id"] != nil {
+			t.Fatalf("version %d = %#v, want portable revision %v without local ID", index, version, wantRevision)
+		}
+	}
+	cursor, ok := history["next_cursor"].(string)
+	if !ok || cursor == "" {
+		t.Fatalf("missing continuation cursor: %v", history)
+	}
+	cursorJSON, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		t.Fatalf("cursor must be URL-safe base64: %v", err)
+	}
+	var cursorPayload map[string]any
+	if err := json.Unmarshal(cursorJSON, &cursorPayload); err != nil {
+		t.Fatalf("cursor JSON: %v", err)
+	}
+	if cursorPayload["sync_id"] != obs.SyncID || cursorPayload["revision_count"] != float64(2) || cursorPayload["version_id"] != versions[2].(map[string]any)["version_id"] || cursorPayload["id"] != nil || cursorPayload["observation_id"] != nil {
+		t.Fatalf("cursor payload = %#v, want portable continuation identity", cursorPayload)
+	}
+
+	secondResult := call(map[string]any{"id": float64(id), "include_history": true, "cursor": cursor})
+	if secondResult.IsError {
+		t.Fatalf("second history page failed: %s", callResultText(t, secondResult))
+	}
+	secondHistory := callResultJSON(t, secondResult)["history"].(map[string]any)
+	secondVersions := secondHistory["versions"].([]any)
+	baseline := secondVersions[0].(map[string]any)
+	if len(secondVersions) != 1 || baseline["revision_count"] != float64(1) || baseline["is_baseline"] != true || baseline["history_complete"] != false || secondHistory["has_more"] != false {
+		t.Fatalf("second history page = %#v", secondHistory)
+	}
+	if _, ok := secondHistory["next_cursor"]; ok {
+		t.Fatalf("terminal history page must not include next_cursor: %#v", secondHistory)
+	}
+	for _, field := range []string{"history_complete", "total", "count"} {
+		if _, ok := secondHistory[field]; ok {
+			t.Fatalf("history must not include aggregate %q: %#v", field, secondHistory)
+		}
+	}
+
+	encodeCursor := func(payload map[string]any) string {
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("marshal cursor: %v", err)
+		}
+		return base64.RawURLEncoding.EncodeToString(encoded)
+	}
+	for _, args := range []map[string]any{
+		{"id": float64(id), "limit": float64(1)},
+		{"id": float64(id), "cursor": cursor},
+		{"id": float64(id), "include_history": true, "limit": "1"},
+		{"id": float64(id), "include_history": true, "limit": float64(1.5)},
+		{"id": float64(id), "include_history": true, "limit": float64(0)},
+		{"id": float64(id), "include_history": true, "limit": float64(21)},
+		{"id": float64(id), "include_history": true, "cursor": "%%%"},
+		{"id": float64(id), "include_history": true, "cursor": encodeCursor(map[string]any{"sync_id": obs.SyncID})},
+		{"id": float64(id), "include_history": true, "cursor": encodeCursor(map[string]any{"sync_id": obs.SyncID, "revision_count": 2, "version_id": "00000000-0000-4000-8000-000000000000"})},
+		{"id": float64(id), "include_history": true, "cursor": encodeCursor(map[string]any{"sync_id": other.SyncID, "revision_count": 1, "version_id": "00000000-0000-4000-8000-000000000000"})},
+	} {
+		res := call(args)
+		if !res.IsError {
+			t.Fatalf("invalid history request succeeded: %#v", args)
+		}
+		body := callResultJSON(t, res)
+		if body["error_code"] != "invalid_history_request" {
+			t.Fatalf("invalid history error = %#v", body)
+		}
+		if _, leaked := body["result"]; leaked {
+			t.Fatalf("invalid history response leaked payload: %#v", body)
+		}
+	}
+
+	notFound := call(map[string]any{"id": float64(999999)})
+	if !notFound.IsError || callResultText(t, notFound) != "Observation #999999 not found" {
+		t.Fatalf("not-found compatibility changed: %q", callResultText(t, notFound))
 	}
 }
 

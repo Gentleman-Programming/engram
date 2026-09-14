@@ -14,10 +14,13 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -800,6 +803,15 @@ Examples:
 				mcp.WithNumber("id",
 					mcp.Required(),
 					mcp.Description("The observation ID to retrieve"),
+				),
+				mcp.WithBoolean("include_history",
+					mcp.Description("Include newest-first version history (default: false)."),
+				),
+				mcp.WithNumber("limit",
+					mcp.Description("History page size when include_history=true (default: 10, max: 20)."),
+				),
+				mcp.WithString("cursor",
+					mcp.Description("Opaque history continuation cursor returned by a previous request."),
 				),
 			),
 			handleGetObservation(s, cfg, activity),
@@ -2218,6 +2230,17 @@ func handleTimeline(s *store.Store, cfg MCPConfig, activities ...*SessionActivit
 	}
 }
 
+const (
+	defaultMCPHistoryLimit = 10
+	maxMCPHistoryLimit     = 20
+)
+
+type observationHistoryCursor struct {
+	SyncID        string `json:"sync_id"`
+	RevisionCount int    `json:"revision_count"`
+	VersionID     string `json:"version_id"`
+}
+
 // handleGetObservation returns a tool handler function for mem_get_observation.
 func handleGetObservation(s *store.Store, cfg MCPConfig, activities ...*SessionActivity) server.ToolHandlerFunc {
 	activity := recoveryActivity(activities)
@@ -2226,10 +2249,17 @@ func handleGetObservation(s *store.Store, cfg MCPConfig, activities ...*SessionA
 		if id == 0 {
 			return mcp.NewToolResultError("id is required"), nil
 		}
+		includeHistory, limit, cursor, historyErr := parseObservationHistoryRequest(req)
+		if historyErr != nil {
+			return invalidHistoryRequest(), nil
+		}
 
 		obs, err := s.GetObservation(id)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Observation #%d not found", id)), nil
+		}
+		if includeHistory && cursor != nil && (cursor.SyncID != obs.SyncID || !historyCursorExists(s, *cursor)) {
+			return invalidHistoryRequest(), nil
 		}
 
 		// Resolve project from process override/cwd (REQ-310, REQ-314). No per-call
@@ -2262,8 +2292,95 @@ func handleGetObservation(s *store.Store, cfg MCPConfig, activities ...*SessionA
 		if detErr != nil {
 			return readProjectErrorResult(activity, detRes, detErr), nil
 		}
-		return respondWithProject(detRes, result, nil), nil
+		if !includeHistory {
+			return respondWithProject(detRes, result, nil), nil
+		}
+		versions, err := observationHistoryPage(s, obs.SyncID, cursor, limit)
+		if err != nil {
+			return mcp.NewToolResultError("Observation history unavailable"), nil
+		}
+		history := map[string]any{"versions": versions, "has_more": len(versions) > limit}
+		if len(versions) > limit {
+			versions = versions[:limit]
+			history["versions"] = versions
+			history["next_cursor"] = encodeObservationHistoryCursor(obs.SyncID, versions[len(versions)-1])
+		}
+		return respondWithProject(detRes, result, map[string]any{"history": history}), nil
 	}
+}
+
+func parseObservationHistoryRequest(req mcp.CallToolRequest) (bool, int, *observationHistoryCursor, error) {
+	args := req.GetArguments()
+	includeHistory := false
+	if raw, ok := args["include_history"]; ok {
+		value, ok := raw.(bool)
+		if !ok {
+			return false, 0, nil, errors.New("invalid include_history")
+		}
+		includeHistory = value
+	}
+	_, hasLimit := args["limit"]
+	rawCursor, hasCursor := args["cursor"]
+	if !includeHistory {
+		if hasLimit || hasCursor {
+			return false, 0, nil, errors.New("history arguments require include_history")
+		}
+		return false, 0, nil, nil
+	}
+	limit := defaultMCPHistoryLimit
+	if hasLimit {
+		value, ok := args["limit"].(float64)
+		if !ok || math.Trunc(value) != value || value < 1 || value > maxMCPHistoryLimit {
+			return false, 0, nil, errors.New("invalid history limit")
+		}
+		limit = int(value)
+	}
+	if !hasCursor {
+		return true, limit, nil, nil
+	}
+	encoded, ok := rawCursor.(string)
+	if !ok || encoded == "" {
+		return false, 0, nil, errors.New("invalid history cursor")
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		return false, 0, nil, err
+	}
+	var cursor observationHistoryCursor
+	decoder := json.NewDecoder(bytes.NewReader(decoded))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&cursor); err != nil || decoder.Decode(&struct{}{}) != io.EOF || cursor.SyncID == "" || cursor.RevisionCount < 1 || cursor.VersionID == "" {
+		return false, 0, nil, errors.New("invalid history cursor")
+	}
+	return true, limit, &cursor, nil
+}
+
+func historyCursorExists(s *store.Store, cursor observationHistoryCursor) bool {
+	var exists bool
+	return s.DB().QueryRow(`SELECT EXISTS(SELECT 1 FROM observation_versions WHERE observation_sync_id = ? AND revision_count = ? AND version_id = ?)`, cursor.SyncID, cursor.RevisionCount, cursor.VersionID).Scan(&exists) == nil && exists
+}
+
+func observationHistoryPage(s *store.Store, syncID string, cursor *observationHistoryCursor, limit int) ([]store.ObservationVersion, error) {
+	beforeRevision, beforeVersionID := 0, ""
+	if cursor != nil {
+		beforeRevision, beforeVersionID = cursor.RevisionCount, cursor.VersionID
+	}
+	versions, err := s.ObservationVersionsPage(syncID, beforeRevision, beforeVersionID, limit+1)
+	if errors.Is(err, store.ErrObservationNotFound) && cursor != nil {
+		return []store.ObservationVersion{}, nil
+	}
+	return versions, err
+}
+
+func encodeObservationHistoryCursor(syncID string, version store.ObservationVersion) string {
+	payload, _ := json.Marshal(observationHistoryCursor{SyncID: syncID, RevisionCount: version.RevisionCount, VersionID: version.VersionID})
+	return base64.RawURLEncoding.EncodeToString(payload)
+}
+
+func invalidHistoryRequest() *mcp.CallToolResult {
+	result := mcp.NewToolResultText(`{"error_code":"invalid_history_request","message":"Invalid observation history request"}`)
+	result.IsError = true
+	return result
 }
 
 // handleSessionSummary returns a tool handler function that saves a comprehensive
