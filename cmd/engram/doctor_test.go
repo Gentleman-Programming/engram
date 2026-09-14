@@ -505,12 +505,12 @@ func TestCmdDoctorInvalidCheckFailsLoudly(t *testing.T) {
 	}
 }
 
-func TestCmdDoctorJSONMatchesMemDoctorEnvelope(t *testing.T) {
+func TestCmdDoctorJSONMatchesMemDoctorEnvelopeForAmbiguousRuntimeSessions(t *testing.T) {
 	cfg := testConfig(t)
-	otherRepo := newDoctorGitRepo(t, "other")
-	seedDoctorSession(t, cfg, "manual-save-engram", "engram", otherRepo)
+	seedDoctorSession(t, cfg, "runtime-a", "engram", "/work/engram")
+	seedDoctorSession(t, cfg, "runtime-b", "engram", "/work/engram")
 
-	withArgs(t, "engram", "doctor", "--json", "--project", "engram", "--check", "session_project_directory_mismatch")
+	withArgs(t, "engram", "doctor", "--json", "--project", "engram", "--check", "ambiguous_active_runtime_sessions")
 	cliStdout, cliStderr := captureOutput(t, func() { cmdDoctor(cfg) })
 	if cliStderr != "" {
 		t.Fatalf("cli stderr=%q", cliStderr)
@@ -518,6 +518,9 @@ func TestCmdDoctorJSONMatchesMemDoctorEnvelope(t *testing.T) {
 	var cliEnvelope map[string]any
 	if err := json.Unmarshal([]byte(cliStdout), &cliEnvelope); err != nil {
 		t.Fatalf("cli json invalid: %v\n%s", err, cliStdout)
+	}
+	if cliEnvelope["status"] != "warning" {
+		t.Fatalf("cli envelope=%v, want ambiguous-session warning", cliEnvelope)
 	}
 
 	s, err := store.New(cfg)
@@ -527,7 +530,7 @@ func TestCmdDoctorJSONMatchesMemDoctorEnvelope(t *testing.T) {
 	defer s.Close()
 	mcpRes, err := engrammcp.DoctorToolHandler(s)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"project": "engram",
-		"check":   "session_project_directory_mismatch",
+		"check":   "ambiguous_active_runtime_sessions",
 	}}})
 	if err != nil {
 		t.Fatalf("mem_doctor handler: %v", err)
