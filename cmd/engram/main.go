@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -24,6 +25,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -71,7 +73,28 @@ var (
 	newMCPServerWithTools  = mcp.NewServerWithTools
 	newMCPServerWithConfig = mcp.NewServerWithConfig
 	resolveMCPTools        = mcp.ResolveTools
-	serveMCP               = mcpserver.ServeStdio
+	serveMCP               = runMCPStdio
+
+	// mcpStdioInput is the raw stdin source for the MCP stdio transport. It is
+	// injectable for testing so tests can drive EOF-driven shutdown with an
+	// os.Pipe instead of the real stdin. runMCPStdio wraps it in exactly one
+	// eofShutdownReader; nothing else may read from it.
+	mcpStdioInput io.Reader = os.Stdin
+
+	// mcpStdioStopAutosync publishes cmdMCP's once-guarded autosync stop to
+	// runMCPStdio so the graceful shutdown sequence (cancel + lease release)
+	// runs when the parent closes the stdio pipe or SIGINT/SIGTERM arrives.
+	// It is read once when runMCPStdio starts serving. The fixed serveMCP
+	// signature leaves no other way to hand the stop closure over.
+	mcpStdioStopAutosync = func() {}
+
+	// listenMCPStdio runs the mcp-go stdio transport on the given streams.
+	// Injectable for testing: mcp-go's StdioServer.Listen registers a
+	// package-singleton stdio session, so tests keep it to a single real
+	// invocation per test process.
+	listenMCPStdio = func(ctx context.Context, server *mcpserver.MCPServer, stdin io.Reader, stdout io.Writer) error {
+		return mcpserver.NewStdioServer(server).Listen(ctx, stdin, stdout)
+	}
 
 	// detectProject is injectable for testing; wraps project.DetectProject.
 	detectProject = project.DetectProject
@@ -1011,16 +1034,17 @@ func cmdMCP(cfg store.Config) {
 	// startup fatal when cloud config is missing or invalid.
 	ctx, cancel := context.WithCancel(context.Background())
 	_, mgrStop := tryStartAutosync(ctx, s, cfg)
-	autosyncStopped := false
+	// stopAutosync is invoked concurrently: cmdMCP's deferred call runs on the
+	// main goroutine while the stdio EOF unwind hook may call it from the
+	// MCP reader goroutine. sync.Once provides the required synchronization.
+	var stopAutosyncOnce sync.Once
 	stopAutosync := func() {
-		if autosyncStopped {
-			return
-		}
-		autosyncStopped = true
-		cancel()
-		if mgrStop != nil {
-			mgrStop()
-		}
+		stopAutosyncOnce.Do(func() {
+			cancel()
+			if mgrStop != nil {
+				mgrStop()
+			}
+		})
 	}
 	defer stopAutosync()
 
@@ -1028,10 +1052,82 @@ func cmdMCP(cfg store.Config) {
 	allowlist := resolveMCPTools(toolsFilter)
 	mcpSrv := newMCPServerWithConfig(s, mcpCfg, allowlist)
 
+	// Publish the once-guarded autosync stop to the stdio transport so an
+	// EOF- or signal-initiated unwind (issue #886) releases the sync lease
+	// before Listen returns.
+	mcpStdioStopAutosync = stopAutosync
+
 	if err := serveMCP(mcpSrv); err != nil {
 		stopAutosync()
 		fatal(err)
 	}
+}
+
+// runMCPStdio serves server over stdio with engram-owned lifecycle handling.
+// It replaces mcp-go's ServeStdio (issue #886): when the parent closes its
+// end of the stdio pipe, the EOF surfaces through eofShutdownReader, which
+// runs the same graceful shutdown sequence as SIGINT/SIGTERM — cancel the
+// transport context and release the autosync sync lease — before Listen
+// unwinds. A signal-initiated shutdown makes the transport return
+// context.Canceled, which is translated to nil so cmdMCP exits cleanly via
+// its own defers instead of fatal.
+func runMCPStdio(server *mcpserver.MCPServer, _ ...mcpserver.StdioOption) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// shutdown is the graceful sequence shared by the signal watcher and the
+	// stdin wrapper; once-guarded so either trigger runs it exactly once.
+	stopAutosync := mcpStdioStopAutosync
+	var shutdownOnce sync.Once
+	shutdown := func() {
+		shutdownOnce.Do(func() {
+			cancel()
+			stopAutosync()
+		})
+	}
+
+	// Graceful shutdown on SIGINT/SIGTERM (mirrors cmdServe).
+	sigCh := make(chan os.Signal, 1)
+	notifySignals(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals(sigCh)
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-sigCh:
+			log.Println("[engram] shutting down...")
+			shutdown()
+		case <-done:
+		}
+	}()
+
+	err := listenMCPStdio(ctx, server, &eofShutdownReader{inner: mcpStdioInput, onUnwind: shutdown}, os.Stdout)
+	if errors.Is(err, context.Canceled) {
+		// Signal-initiated shutdown is graceful: exit cleanly instead of fatal.
+		return nil
+	}
+	return err
+}
+
+// eofShutdownReader is the single reader between the MCP stdio transport and
+// the process stdin: the SDK's bufio.Reader sits on top of it, so no second
+// raw reader ever touches the stream. Bytes pass through untouched; when the
+// underlying stream reports EOF or a read error — the parent closed its end
+// of the pipe — it runs the graceful shutdown sequence before propagating the
+// result, so Listen unwinds through the same path as a signal shutdown.
+// onUnwind must be once-guarded because bufio may issue further reads after
+// the stream has ended.
+type eofShutdownReader struct {
+	inner    io.Reader
+	onUnwind func()
+}
+
+func (r *eofShutdownReader) Read(p []byte) (int, error) {
+	n, err := r.inner.Read(p)
+	if err != nil {
+		r.onUnwind()
+	}
+	return n, err
 }
 
 func cmdTUI(cfg store.Config) {
