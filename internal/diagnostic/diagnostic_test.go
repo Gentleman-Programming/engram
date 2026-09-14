@@ -112,7 +112,11 @@ func TestRegistryLookupAndOrdering(t *testing.T) {
 }
 
 func TestAmbiguousActiveRuntimeSessionsCheck(t *testing.T) {
-	type session struct{ id, project, directory string }
+	type session struct {
+		id, project, directory string
+		ended                  bool
+		startedAt              string
+	}
 	tests := []struct {
 		name             string
 		project          string
@@ -151,6 +155,33 @@ func TestAmbiguousActiveRuntimeSessionsCheck(t *testing.T) {
 			},
 			wantStatus: StatusOK,
 		},
+		{
+			name:    "ignores ended sessions",
+			project: "engram",
+			sessions: []session{
+				{id: "runtime-ended-a", project: "engram", directory: "/work/engram", ended: true},
+				{id: "runtime-ended-b", project: "engram", directory: "/work/engram", ended: true},
+			},
+			wantStatus: StatusOK,
+		},
+		{
+			name:    "ignores manual save sessions",
+			project: "engram",
+			sessions: []session{
+				{id: "manual-save-a", project: "engram", directory: "/work/engram"},
+				{id: "manual-save-b", project: "engram", directory: "/work/engram"},
+			},
+			wantStatus: StatusOK,
+		},
+		{
+			name:    "ignores stale sessions",
+			project: "engram",
+			sessions: []session{
+				{id: "runtime-stale-a", project: "engram", directory: "/work/engram", startedAt: "2000-01-01 00:00:00"},
+				{id: "runtime-stale-b", project: "engram", directory: "/work/engram", startedAt: "2000-01-01 00:00:00"},
+			},
+			wantStatus: StatusOK,
+		},
 	}
 
 	for _, tt := range tests {
@@ -159,6 +190,16 @@ func TestAmbiguousActiveRuntimeSessionsCheck(t *testing.T) {
 			for _, session := range tt.sessions {
 				if err := s.CreateSession(session.id, session.project, session.directory); err != nil {
 					t.Fatalf("CreateSession(%q): %v", session.id, err)
+				}
+				if session.startedAt != "" {
+					if _, err := s.DB().Exec(`UPDATE sessions SET started_at = ? WHERE id = ?`, session.startedAt, session.id); err != nil {
+						t.Fatalf("set started_at for %q: %v", session.id, err)
+					}
+				}
+				if session.ended {
+					if err := s.EndSession(session.id, "done"); err != nil {
+						t.Fatalf("EndSession(%q): %v", session.id, err)
+					}
 				}
 			}
 
@@ -191,6 +232,21 @@ func TestAmbiguousActiveRuntimeSessionsCheck(t *testing.T) {
 				t.Fatalf("evidence=%+v, want project=%q candidates=%d directories=%v session_ids=%v", evidence, tt.project, tt.wantCandidateCnt, tt.wantDirectories, tt.wantSessionIDs)
 			}
 		})
+	}
+}
+
+func TestAmbiguousActiveRuntimeSessionsCheckPropagatesActiveSessionQueryFailure(t *testing.T) {
+	s := newDiagnosticTestStore(t)
+	if err := s.CreateSession("runtime-a", "engram", "/work/engram"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if _, err := s.DB().Exec(`DROP TABLE observations`); err != nil {
+		t.Fatalf("drop observations: %v", err)
+	}
+
+	report, err := NewRunner().RunOne(context.Background(), Scope{Store: s, Project: "engram"}, CheckAmbiguousActiveRuntimeSessions)
+	if err == nil || !strings.Contains(err.Error(), "observations") {
+		t.Fatalf("RunOne report=%+v err=%v, want active-session query failure", report, err)
 	}
 }
 
