@@ -54,9 +54,15 @@ func TestCodexRegisteredSessionHandoff(t *testing.T) {
 						switch r.URL.Path {
 						case "/external/project/current":
 							if tc.noProject {
-								io.WriteString(w, `{"project":"","project_source":"ambiguous"}`)
+								if _, err := io.WriteString(w, `{"project":"","project_source":"ambiguous"}`); err != nil {
+									t.Errorf("write ambiguous project: %v", err)
+									return
+								}
 							} else {
-								io.WriteString(w, `{"project":"test-project","project_source":"config"}`)
+								if _, err := io.WriteString(w, `{"project":"test-project","project_source":"config"}`); err != nil {
+									t.Errorf("write project: %v", err)
+									return
+								}
 							}
 						case "/external/sessions":
 							var payload map[string]string
@@ -70,7 +76,9 @@ func TestCodexRegisteredSessionHandoff(t *testing.T) {
 									t.Errorf("hijack: %v", err)
 									return
 								}
-								conn.Close()
+								if err := conn.Close(); err != nil {
+									t.Errorf("close hijacked connection: %v", err)
+								}
 								return
 							}
 							status := tc.status
@@ -78,13 +86,25 @@ func TestCodexRegisteredSessionHandoff(t *testing.T) {
 								status = http.StatusCreated
 							}
 							w.WriteHeader(status)
+							if status == http.StatusNoContent {
+								return
+							}
 							if tc.body != "" {
-								io.WriteString(w, tc.body)
+								if _, err := io.WriteString(w, tc.body); err != nil {
+									t.Errorf("write registration response: %v", err)
+									return
+								}
 							} else {
-								json.NewEncoder(w).Encode(map[string]any{"id": tc.id, "status": "created"})
+								if err := json.NewEncoder(w).Encode(map[string]any{"id": tc.id, "status": "created"}); err != nil {
+									t.Errorf("encode registration response: %v", err)
+									return
+								}
 							}
 						case "/external/context":
-							io.WriteString(w, `{"context":"retained-memory-context"}`)
+							if _, err := io.WriteString(w, `{"context":"retained-memory-context"}`); err != nil {
+								t.Errorf("write context: %v", err)
+								return
+							}
 						default:
 							t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 							http.NotFound(w, r)
