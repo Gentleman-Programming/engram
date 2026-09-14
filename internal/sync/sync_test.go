@@ -263,6 +263,7 @@ type fakeCloudTransport struct {
 	writeManifestCalls int
 	writeChunkCalls    int
 	readChunkCalls     int
+	onWriteChunk       func([]byte)
 }
 
 type fakeUpgradeHooks struct {
@@ -307,6 +308,9 @@ func (f *fakeCloudTransport) WriteChunk(chunkID string, data []byte, entry Chunk
 	f.writeChunkCalls++
 	f.chunks[chunkID] = data
 	f.lastCreatedBy = entry.CreatedBy
+	if f.onWriteChunk != nil {
+		f.onWriteChunk(data)
+	}
 	return nil
 }
 
@@ -3321,15 +3325,15 @@ func TestCloudSyncEnrolledExportImportAndIdempotentPull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cloud import: %v", err)
 	}
-	if importResult.ChunksImported != 1 {
-		t.Fatalf("expected one imported chunk, got %+v", importResult)
+	if importResult.ChunksImported != 2 {
+		t.Fatalf("expected mutation and version chunks, got %+v", importResult)
 	}
 
 	importAgain, err := importer.Import()
 	if err != nil {
 		t.Fatalf("second cloud import: %v", err)
 	}
-	if importAgain.ChunksImported != 0 || importAgain.ChunksSkipped != 1 {
+	if importAgain.ChunksImported != 0 || importAgain.ChunksSkipped != 2 {
 		t.Fatalf("expected idempotent second import, got %+v", importAgain)
 	}
 }
@@ -3352,8 +3356,8 @@ func TestCloudExportRepairsEnrolledJournalBeforeListingMutations(t *testing.T) {
 	if result.IsEmpty || result.MutationsExported != 3 {
 		t.Fatalf("export result = %+v, want three repaired mutations", result)
 	}
-	if transport.writeChunkCalls != 1 {
-		t.Fatalf("write chunk calls = %d, want 1", transport.writeChunkCalls)
+	if transport.writeChunkCalls != 2 {
+		t.Fatalf("write chunk calls = %d, want mutation and version chunks", transport.writeChunkCalls)
 	}
 }
 
@@ -3546,6 +3550,7 @@ func TestCloudExportKnownChunkReconcileFailureDoesNotAckMutations(t *testing.T) 
 	if err != nil {
 		t.Fatalf("filter by pending mutations: %v", err)
 	}
+	chunk.ObservationVersionCoverage = cloudObservationVersionCoverage(chunk.Observations)
 	if len(seqs) == 0 {
 		t.Fatal("expected pending mutation seqs")
 	}
@@ -4928,32 +4933,161 @@ func TestLocalVersionHistoryRoutingAndBackfill(t *testing.T) {
 	}
 }
 
-func TestCloudExportExcludesObservationVersions(t *testing.T) {
+func TestCloudVersionHistoryExportImportAndBackfill(t *testing.T) {
+	resetSyncTestHooks(t)
+	const project = "proj-a"
 	s := newTestStore(t)
-	if err := s.EnrollProject("proj-a"); err != nil {
-		t.Fatalf("enroll project: %v", err)
-	}
-	if err := s.CreateSession("cloud-history", "proj-a", "/tmp/proj-a"); err != nil {
-		t.Fatalf("create session: %v", err)
-	}
-	id, err := s.AddObservation(store.AddObservationParams{SessionID: "cloud-history", Type: "note", Title: "cloud", Content: "history", Project: "proj-a", Scope: "project"})
-	if err != nil {
-		t.Fatalf("add observation: %v", err)
-	}
+	if err := s.EnrollProject(project); err != nil { t.Fatalf("enroll project: %v", err) }
+	if err := s.CreateSession("cloud-history", project, "/tmp/proj-a"); err != nil { t.Fatalf("create session: %v", err) }
+	projectID, err := s.AddObservation(store.AddObservationParams{SessionID: "cloud-history", Type: "note", Title: "cloud", Content: "history", Project: project, Scope: "project"})
+	if err != nil { t.Fatalf("add project observation: %v", err) }
+	personalID, err := s.AddObservation(store.AddObservationParams{SessionID: "cloud-history", Type: "note", Title: "private", Content: "history", Project: project, Scope: "personal"})
+	if err != nil { t.Fatalf("add personal observation: %v", err) }
 	updated := "cloud updated"
-	if _, err := s.UpdateObservation(id, store.UpdateObservationParams{Title: &updated}); err != nil {
-		t.Fatalf("update observation: %v", err)
-	}
+	if _, err := s.UpdateObservation(projectID, store.UpdateObservationParams{Title: &updated}); err != nil { t.Fatalf("update project observation: %v", err) }
+	if _, err := s.UpdateObservation(personalID, store.UpdateObservationParams{Title: &updated}); err != nil { t.Fatalf("update personal observation: %v", err) }
+	projectObservation, err := s.GetObservation(projectID)
+	if err != nil { t.Fatalf("get project observation: %v", err) }
+	if _, err := s.DB().Exec(`INSERT INTO observation_versions (version_id, observation_id, observation_sync_id, session_id, type, title, content, project, scope, revision_count) SELECT ?, id, 'orphan-parent', session_id, type, title, content, project, scope, revision_count FROM observations WHERE id = ?`, "00000000-0000-4000-8000-000000000184", projectID); err != nil { t.Fatalf("seed orphan version: %v", err) }
+
 	transport := newFakeCloudTransport()
-	result, err := NewCloudWithTransport(s, transport, "proj-a").Export("alice", "proj-a")
-	if err != nil || result.IsEmpty {
-		t.Fatalf("cloud export = %#v, %v", result, err)
+	var events []string
+	acked := false
+	transport.onWriteChunk = func(payload []byte) {
+		var chunk ChunkData
+		if err := json.Unmarshal(payload, &chunk); err != nil { t.Fatalf("decode written chunk: %v", err) }
+		if len(chunk.ObservationVersions) == 0 { events = append(events, "mutation"); return }
+		if !acked { t.Fatal("version-only chunk was written before parent mutation acknowledgement") }
+		if len(chunk.Mutations) != 0 || len(chunk.Observations) != 0 { t.Fatalf("version chunk contains parent evidence: %+v", chunk) }
+		events = append(events, "versions")
 	}
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(transport.chunks[result.ChunkID], &raw); err != nil {
-		t.Fatalf("unmarshal cloud chunk: %v", err)
+	storeAckMutationSeq = func(storeRef *store.Store, target string, seqs []int64) error {
+		events = append(events, "ack")
+		acked = true
+		return storeRef.AckSyncMutationSeqs(target, seqs)
 	}
-	if _, present := raw["observation_versions"]; present {
-		t.Fatalf("cloud chunk must not contain observation versions: %s", transport.chunks[result.ChunkID])
+	exporter := NewCloudWithTransport(s, transport, project)
+	result, err := exporter.Export("alice", project)
+	if err != nil || result.IsEmpty || result.ChunksExported != 2 { t.Fatalf("initial cloud export = %#v, %v", result, err) }
+	if got := strings.Join(events, ","); got != "mutation,ack,versions" { t.Fatalf("cloud write order = %q", got) }
+	versionChunk := transport.chunks[transport.manifest.Chunks[len(transport.manifest.Chunks)-1].ID]
+	var exported ChunkData
+	if err := json.Unmarshal(versionChunk, &exported); err != nil { t.Fatalf("decode version chunk: %v", err) }
+	if len(exported.ObservationVersions) != 2 { t.Fatalf("exported versions = %+v, want project history only", exported.ObservationVersions) }
+	for _, version := range exported.ObservationVersions {
+		if version.ObservationSyncID != projectObservation.SyncID || version.Scope != "project" { t.Fatalf("non-project or orphan history leaked: %+v", version) }
 	}
+
+	dst := newTestStore(t)
+	if err := dst.EnrollProject(project); err != nil { t.Fatalf("enroll destination project: %v", err) }
+	if _, err := NewCloudWithTransport(dst, transport, project).Import(); err != nil { t.Fatalf("cloud import: %v", err) }
+	versions, err := dst.ObservationVersions(projectObservation.SyncID, 10)
+	if err != nil || len(versions) != 2 { t.Fatalf("imported project history = %#v, %v", versions, err) }
+	if repeat, err := exporter.Export("alice", project); err != nil || !repeat.IsEmpty { t.Fatalf("repeat export = %#v, %v", repeat, err) }
+
+	if _, err := s.DB().Exec(`INSERT INTO observation_versions (version_id, observation_id, observation_sync_id, session_id, type, title, content, project, scope, revision_count) SELECT ?, id, sync_id, session_id, type, title, content, project, scope, revision_count FROM observations WHERE id = ?`, "00000000-0000-4000-8000-000000000185", projectID); err != nil { t.Fatalf("seed incremental version: %v", err) }
+	incremental, err := exporter.Export("alice", project)
+	if err != nil || incremental.IsEmpty || incremental.ChunksExported != 1 { t.Fatalf("existing-parent backfill = %#v, %v", incremental, err) }
+	var backfill ChunkData
+	if err := json.Unmarshal(transport.chunks[incremental.ChunkID], &backfill); err != nil { t.Fatalf("decode backfill chunk: %v", err) }
+	if len(backfill.Mutations) != 0 || len(backfill.Observations) != 0 || len(backfill.ObservationVersions) != 1 || backfill.ObservationVersions[0].VersionID != "00000000-0000-4000-8000-000000000185" { t.Fatalf("unexpected version-only backfill: %+v", backfill) }
+	if repeat, err := exporter.Export("alice", project); err != nil || !repeat.IsEmpty { t.Fatalf("repeat backfill = %#v, %v", repeat, err) }
+}
+
+func TestCloudVersionExportRejectsOversizedSidecarBeforeWrites(t *testing.T) {
+	resetSyncTestHooks(t)
+	const project = "proj-a"
+	s := newTestStore(t)
+	if err := s.EnrollProject(project); err != nil { t.Fatalf("enroll project: %v", err) }
+	if err := s.CreateSession("oversized-history", project, "/tmp/proj-a"); err != nil { t.Fatalf("create session: %v", err) }
+	id, err := s.AddObservation(store.AddObservationParams{SessionID: "oversized-history", Type: "note", Title: "oversized", Content: strings.Repeat("x", 256), Project: project, Scope: "project"})
+	if err != nil { t.Fatalf("add observation: %v", err) }
+	observation, err := s.GetObservation(id)
+	if err != nil { t.Fatalf("get observation: %v", err) }
+	pending, err := s.ListPendingSyncMutations(store.DefaultSyncTargetKey, 10)
+	if err != nil { t.Fatalf("list pending mutations: %v", err) }
+	seqs := make([]int64, 0, len(pending))
+	for _, mutation := range pending { seqs = append(seqs, mutation.Seq) }
+	if err := s.AckSyncMutationSeqs(store.DefaultSyncTargetKey, seqs); err != nil { t.Fatalf("ack parent mutations: %v", err) }
+
+	parentPayload, err := json.Marshal(ChunkData{Observations: []store.Observation{*observation}})
+	if err != nil { t.Fatalf("marshal parent chunk: %v", err) }
+	parentPayload, err = chunkcodec.CanonicalizeForProject(parentPayload, project)
+	if err != nil { t.Fatalf("canonicalize parent chunk: %v", err) }
+	parentID := chunkcodec.ChunkID(parentPayload)
+	transport := newFakeCloudTransport()
+	transport.manifest.Chunks = []ChunkEntry{{ID: parentID}}
+	transport.chunks[parentID] = parentPayload
+	originalLimit := cloudExportMaxChunkBytes
+	cloudExportMaxChunkBytes = 1
+	t.Cleanup(func() { cloudExportMaxChunkBytes = originalLimit })
+
+	if _, err := NewCloudWithTransport(s, transport, project).Export("alice", project); err == nil || !strings.Contains(err.Error(), "oversized cloud observation version") {
+		t.Fatalf("expected oversized version failure, got %v", err)
+	}
+	if transport.writeChunkCalls != 0 || len(transport.manifest.Chunks) != 1 {
+		t.Fatalf("oversized sidecar must not write or mark a version chunk: writes=%d manifest=%+v", transport.writeChunkCalls, transport.manifest.Chunks)
+	}
+}
+
+func TestSplitCloudVersionChunksBoundsEachSidecar(t *testing.T) {
+	project := "proj-a"
+	versions := []store.ObservationVersion{
+		{VersionID: "00000000-0000-4000-8000-000000000188", ObservationSyncID: "observation-a", SessionID: "session-a", Type: "note", Title: "first", Content: strings.Repeat("x", 128), Project: &project, Scope: "project", RevisionCount: 1},
+		{VersionID: "00000000-0000-4000-8000-000000000189", ObservationSyncID: "observation-a", SessionID: "session-a", Type: "note", Title: "second", Content: strings.Repeat("y", 128), Project: &project, Scope: "project", RevisionCount: 2},
+	}
+	one, err := json.Marshal(ChunkData{ObservationVersions: versions[:1]})
+	if err != nil { t.Fatalf("marshal single version: %v", err) }
+	parts, err := splitCloudVersionChunks(versions, len(one)+1)
+	if err != nil || len(parts) != 2 { t.Fatalf("split sidecars = %#v, %v", parts, err) }
+	for _, part := range parts {
+		payload, err := json.Marshal(part)
+		if err != nil || len(payload) > len(one)+1 { t.Fatalf("bounded sidecar payload=%d err=%v", len(payload), err) }
+	}
+}
+
+func TestCloudVersionImportMissingParentRollsBackReceipt(t *testing.T) {
+	const project = "proj-a"
+	dst := newTestStore(t)
+	if err := dst.EnrollProject(project); err != nil { t.Fatalf("enroll destination project: %v", err) }
+	transport := newFakeCloudTransport()
+	chunkID := "missing-version-parent"
+	projectValue := project
+	payload, err := json.Marshal(ChunkData{ObservationVersions: []store.ObservationVersion{{VersionID: "00000000-0000-4000-8000-000000000186", ObservationSyncID: "missing-parent", SessionID: "missing-session", Type: "note", Title: "missing", Content: "missing", Project: &projectValue, Scope: "project", RevisionCount: 1}}})
+	if err != nil { t.Fatalf("marshal invalid sidecar: %v", err) }
+	transport.manifest.Chunks = []ChunkEntry{{ID: chunkID}}
+	transport.chunks[chunkID] = payload
+	if _, err := NewCloudWithTransport(dst, transport, project).Import(); err == nil { t.Fatal("expected missing-parent version import failure") }
+	synced, err := dst.GetSyncedChunksForTarget(cloudTargetKey(project))
+	if err != nil { t.Fatalf("get synced chunks: %v", err) }
+	if synced[chunkID] { t.Fatal("failed version sidecar must not record its receipt") }
+}
+
+func TestCloudVersionImportConflictRollsBackReceipt(t *testing.T) {
+	const project = "proj-a"
+	dst := newTestStore(t)
+	if err := dst.EnrollProject(project); err != nil { t.Fatalf("enroll destination project: %v", err) }
+	projectValue := project
+	version := store.ObservationVersion{VersionID: "00000000-0000-4000-8000-000000000187", ObservationSyncID: "conflict-observation", SessionID: "conflict-session", Type: "note", Title: "original", Content: "content", Project: &projectValue, Scope: "project", RevisionCount: 1, CapturedAt: "2026-01-01 00:00:00"}
+	transport := newFakeCloudTransport()
+	parentID := "version-parent"
+	parent, err := json.Marshal(ChunkData{Mutations: []store.SyncMutation{
+		{Entity: store.SyncEntitySession, EntityKey: "conflict-session", Op: store.SyncOpUpsert, Payload: `{"id":"conflict-session","project":"proj-a","directory":"/tmp/proj-a"}`},
+		{Entity: store.SyncEntityObservation, EntityKey: "conflict-observation", Op: store.SyncOpUpsert, Payload: `{"sync_id":"conflict-observation","session_id":"conflict-session","type":"note","title":"original","content":"content","project":"proj-a","scope":"project"}`},
+	}, ObservationVersions: []store.ObservationVersion{version}})
+	if err != nil { t.Fatalf("marshal parent version chunk: %v", err) }
+	transport.manifest.Chunks = []ChunkEntry{{ID: parentID}}
+	transport.chunks[parentID] = parent
+	importer := NewCloudWithTransport(dst, transport, project)
+	if _, err := importer.Import(); err != nil { t.Fatalf("import parent version chunk: %v", err) }
+	version.Title = "conflicting"
+	conflictID := "version-conflict"
+	conflict, err := json.Marshal(ChunkData{ObservationVersions: []store.ObservationVersion{version}})
+	if err != nil { t.Fatalf("marshal conflicting sidecar: %v", err) }
+	transport.manifest.Chunks = append(transport.manifest.Chunks, ChunkEntry{ID: conflictID})
+	transport.chunks[conflictID] = conflict
+	if _, err := importer.Import(); err == nil { t.Fatal("expected conflicting immutable version import failure") }
+	synced, err := dst.GetSyncedChunksForTarget(cloudTargetKey(project))
+	if err != nil { t.Fatalf("get synced chunks: %v", err) }
+	if synced[conflictID] { t.Fatal("conflicting version sidecar must not record its receipt") }
 }

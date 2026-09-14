@@ -477,7 +477,25 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 		if err != nil {
 			return nil, fmt.Errorf("build mutation-backed export: %w", err)
 		}
-		return sy.exportCloudMutationChunks(manifest, knownChunks, locallySyncedChunks, chunkTargetKey, createdBy, project, chunk, mutationSeqs)
+		chunk.ObservationVersionCoverage = cloudObservationVersionCoverage(chunk.Observations)
+		mutationResult, err := sy.exportCloudMutationChunks(manifest, knownChunks, locallySyncedChunks, chunkTargetKey, createdBy, project, chunk, mutationSeqs)
+		if err != nil {
+			return nil, err
+		}
+		knownVersions, err := sy.exportedObservationVersionKeys(manifest)
+		if err != nil {
+			return nil, fmt.Errorf("scan exported observation versions: %w", err)
+		}
+		_, remoteObservations, _, err := sy.exportedChunkKeys(manifest)
+		if err != nil {
+			return nil, fmt.Errorf("scan exported observation parents: %w", err)
+		}
+		versions := cloudObservationVersionsForExport(data, project, remoteObservations, knownVersions)
+		versionResult, err := sy.exportCloudVersionChunks(manifest, knownChunks, locallySyncedChunks, chunkTargetKey, createdBy, project, versions)
+		if err != nil {
+			return nil, err
+		}
+		return combineSyncResults(mutationResult, versionResult), nil
 	}
 
 	relationMutations, err := storeExportRelations(sy.store, project)
@@ -851,6 +869,10 @@ func splitCloudExportChunk(chunk *ChunkData, seqs []int64, maxBytes int) []cloud
 	currentSessions := map[string]struct{}{}
 	currentObservations := map[string]struct{}{}
 	currentPrompts := map[string]struct{}{}
+	coveredObservations := make(map[string]struct{}, len(chunk.ObservationVersionCoverage))
+	for _, syncID := range chunk.ObservationVersionCoverage {
+		coveredObservations[syncID] = struct{}{}
+	}
 
 	reset := func() {
 		current = &cloudExportPart{chunk: &ChunkData{}}
@@ -926,6 +948,9 @@ func splitCloudExportChunk(chunk *ChunkData, seqs []int64, maxBytes int) []cloud
 		}
 		if add.obsID != "" {
 			current.chunk.Observations = append(current.chunk.Observations, observationBySyncID[add.obsID])
+			if _, covered := coveredObservations[add.obsID]; covered {
+				current.chunk.ObservationVersionCoverage = append(current.chunk.ObservationVersionCoverage, add.obsID)
+			}
 			currentObservations[add.obsID] = struct{}{}
 		}
 		if add.promptID != "" {
@@ -937,6 +962,107 @@ func splitCloudExportChunk(chunk *ChunkData, seqs []int64, maxBytes int) []cloud
 	closeCurrent()
 
 	return parts
+}
+
+// splitCloudVersionChunks partitions standalone history chunks by their actual
+// serialized size. Versions never share a chunk with their parent mutation: cloud
+// ingress validates parent existence before accepting the history sidecar.
+func splitCloudVersionChunks(versions []store.ObservationVersion, maxBytes int) ([]*ChunkData, error) {
+	if len(versions) == 0 {
+		return nil, nil
+	}
+	if maxBytes <= 0 {
+		return []*ChunkData{{ObservationVersions: versions}}, nil
+	}
+	parts := make([]*ChunkData, 0, 1)
+	current := &ChunkData{}
+	for _, version := range versions {
+		candidate := appendLocalChunkData(current, ChunkData{ObservationVersions: []store.ObservationVersion{version}})
+		payload, err := jsonMarshalChunk(candidate)
+		if err != nil {
+			return nil, fmt.Errorf("marshal version chunk: %w", err)
+		}
+		if len(payload) <= maxBytes {
+			current = candidate
+			continue
+		}
+		if len(current.ObservationVersions) > 0 {
+			parts = append(parts, current)
+		}
+		current = &ChunkData{ObservationVersions: []store.ObservationVersion{version}}
+		payload, err = jsonMarshalChunk(current)
+		if err != nil {
+			return nil, fmt.Errorf("marshal version chunk: %w", err)
+		}
+		if len(payload) > maxBytes {
+			return nil, fmt.Errorf("oversized cloud observation version %s exceeds %d-byte limit", version.VersionID, maxBytes)
+		}
+	}
+	return append(parts, current), nil
+}
+
+// exportCloudVersionChunks writes immutable history only after the mutation export
+// has acknowledged its parent evidence. It intentionally uses the manifest's
+// accepted chunk contents for idempotency instead of the mutable mutation ledger.
+func (sy *Syncer) exportCloudVersionChunks(manifest *Manifest, knownChunks, locallySyncedChunks map[string]bool, chunkTargetKey, createdBy, project string, versions []store.ObservationVersion) (*SyncResult, error) {
+	parts, err := splitCloudVersionChunks(versions, cloudExportMaxChunkBytes)
+	if err != nil {
+		return nil, err
+	}
+	result := &SyncResult{IsEmpty: true}
+	project, _ = store.NormalizeProject(project)
+	for _, part := range parts {
+		payload, err := jsonMarshalChunk(part)
+		if err != nil {
+			return nil, fmt.Errorf("marshal version chunk: %w", err)
+		}
+		payload, err = chunkcodec.CanonicalizeForProject(payload, project)
+		if err != nil {
+			return nil, fmt.Errorf("canonicalize cloud version chunk: %w", err)
+		}
+		chunkID := chunkcodec.ChunkID(payload)
+		if knownChunks[chunkID] {
+			if !locallySyncedChunks[chunkID] {
+				if err := storeRecordSynced(sy.store, chunkTargetKey, chunkID); err != nil {
+					return nil, fmt.Errorf("reconcile synced chunk %s: %w", chunkID, err)
+				}
+			}
+			continue
+		}
+		entry := ChunkEntry{ID: chunkID, CreatedBy: createdBy, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
+		if err := sy.transport.WriteChunk(chunkID, payload, entry); err != nil {
+			return nil, fmt.Errorf("write version chunk: %w", err)
+		}
+		manifest.Chunks = append(manifest.Chunks, entry)
+		if err := sy.writeManifest(manifest); err != nil {
+			return nil, fmt.Errorf("write manifest: %w", err)
+		}
+		if err := storeRecordSynced(sy.store, chunkTargetKey, chunkID); err != nil {
+			return nil, fmt.Errorf("record synced chunk: %w", err)
+		}
+		knownChunks[chunkID] = true
+		result = &SyncResult{ChunkID: chunkID, ChunksExported: result.ChunksExported + 1}
+	}
+	return result, nil
+}
+
+func combineSyncResults(results ...*SyncResult) *SyncResult {
+	combined := &SyncResult{IsEmpty: true}
+	for _, result := range results {
+		if result == nil || result.IsEmpty {
+			continue
+		}
+		combined.IsEmpty = false
+		if combined.ChunkID == "" {
+			combined.ChunkID = result.ChunkID
+		}
+		combined.ChunksExported += result.ChunksExported
+		combined.SessionsExported += result.SessionsExported
+		combined.ObservationsExported += result.ObservationsExported
+		combined.PromptsExported += result.PromptsExported
+		combined.MutationsExported += result.MutationsExported
+	}
+	return combined
 }
 
 func marshaledSizeForSplit(v any) int {
@@ -1210,7 +1336,10 @@ func (sy *Syncer) preflightLegacyChunkOwnership(entries []ChunkEntry, mode impor
 func (sy *Syncer) importMutationChunk(chunkID string, chunk ChunkData) error {
 	mutations := orderMutationsForApply(buildImportMutations(chunk))
 	if sy.cloudMode {
-		return storeApplyPulledChunk(sy.store, sy.chunkTrackingTargetKey(""), chunkID, mutations)
+		if len(chunk.ObservationVersionCoverage) > 0 {
+			return sy.store.ApplyPulledChunkWithVersionCoverage(sy.chunkTrackingTargetKey(""), chunkID, mutations, chunk.ObservationVersions, chunk.ObservationVersionCoverage)
+		}
+		return storeApplyPulledChunkWithVersions(sy.store, sy.chunkTrackingTargetKey(""), chunkID, mutations, chunk.ObservationVersions)
 	}
 	if len(chunk.ObservationVersionCoverage) > 0 {
 		return sy.store.ApplyPulledChunkWithVersionCoverage(sy.chunkTrackingTargetKey(""), chunkID, mutations, chunk.ObservationVersions, chunk.ObservationVersionCoverage)
@@ -1857,6 +1986,62 @@ func filterExportDataToProjectScope(data *store.ExportData) *store.ExportData {
 	}
 	filtered.ObservationVersions = versionsForObservations(data.ObservationVersions, filtered.Observations, nil)
 	return &filtered
+}
+
+func cloudObservationVersionCoverage(observations []store.Observation) []string {
+	coverage := make([]string, 0, len(observations))
+	for _, observation := range observations {
+		if observation.Scope == "project" {
+			coverage = append(coverage, observation.SyncID)
+		}
+	}
+	return coverage
+}
+
+// cloudObservationVersionsForExport selects only project-scoped history whose
+// current parent is already present in an accepted remote chunk. Version identity
+// is immutable, so remote chunk contents—not sync_mutations—are the export ledger.
+func cloudObservationVersionsForExport(data *store.ExportData, project string, remoteParents, knownVersions map[string]struct{}) []store.ObservationVersion {
+	project, _ = store.NormalizeProject(project)
+	sessionProjects := make(map[string]string, len(data.Sessions))
+	for _, session := range data.Sessions {
+		normalized, _ := store.NormalizeProject(session.Project)
+		sessionProjects[session.ID] = normalized
+	}
+	parents := make(map[string]struct{}, len(data.Observations))
+	for _, observation := range data.Observations {
+		observationProject := sessionProjects[observation.SessionID]
+		if observation.Project != nil {
+			observationProject, _ = store.NormalizeProject(*observation.Project)
+		}
+		if observation.Scope == "project" && observationProject == project {
+			parents[observation.SyncID] = struct{}{}
+		}
+	}
+	selected := make([]store.ObservationVersion, 0, len(data.ObservationVersions))
+	for _, version := range data.ObservationVersions {
+		if version.Scope != "project" {
+			continue
+		}
+		versionProject := project
+		if version.Project != nil {
+			versionProject, _ = store.NormalizeProject(*version.Project)
+			if versionProject != project {
+				continue
+			}
+		}
+		if _, ok := parents[version.ObservationSyncID]; !ok {
+			continue
+		}
+		if _, ok := remoteParents[version.ObservationSyncID]; !ok {
+			continue
+		}
+		if _, ok := knownVersions[version.VersionID]; !ok {
+			version.Project = &versionProject
+			selected = append(selected, version)
+		}
+	}
+	return selected
 }
 
 func versionsForObservations(versions []store.ObservationVersion, observations []store.Observation, known map[string]struct{}) []store.ObservationVersion {
