@@ -104,6 +104,12 @@ type ObservationVersionReconciler interface {
 	ReconcileObservationVersions(ctx context.Context, project string) error
 }
 
+// ObservationVersionPullReconciler imports immutable history only after the
+// mutation cursor has applied each parent projection.
+type ObservationVersionPullReconciler interface {
+	ReconcilePulledObservationVersions(ctx context.Context, project string) error
+}
+
 type enrolledProjectLister interface {
 	ListEnrolledProjects() ([]store.EnrolledProject, error)
 }
@@ -205,9 +211,10 @@ type Status struct {
 // and the cloud server. It is safe for concurrent use.
 type Manager struct {
 	store     LocalStore
-	transport CloudTransport
-	cfg       Config
-	reconciler ObservationVersionReconciler
+	transport      CloudTransport
+	cfg            Config
+	reconciler     ObservationVersionReconciler
+	pullReconciler ObservationVersionPullReconciler
 
 	mu        sync.RWMutex
 	status    Status
@@ -261,6 +268,13 @@ func New(localStore LocalStore, transport CloudTransport, cfg Config) *Manager {
 func (m *Manager) SetObservationVersionReconciler(reconciler ObservationVersionReconciler) {
 	m.mu.Lock()
 	m.reconciler = reconciler
+	m.mu.Unlock()
+}
+
+// SetObservationVersionPullReconciler enables optional pull-side history repair.
+func (m *Manager) SetObservationVersionPullReconciler(reconciler ObservationVersionPullReconciler) {
+	m.mu.Lock()
+	m.pullReconciler = reconciler
 	m.mu.Unlock()
 }
 
@@ -769,6 +783,40 @@ func (m *Manager) pull(ctx context.Context) error {
 		}
 	}
 
+	return m.reconcilePulledVersions(ctx)
+}
+
+func (m *Manager) reconcilePulledVersions(ctx context.Context) error {
+	m.mu.RLock()
+	reconciler := m.pullReconciler
+	m.mu.RUnlock()
+	if reconciler == nil {
+		return nil
+	}
+	lister, ok := m.store.(enrolledProjectLister)
+	if !ok {
+		return nil
+	}
+	projects, err := lister.ListEnrolledProjects()
+	if err != nil {
+		return fmt.Errorf("list enrolled projects for pulled observation versions: %w", err)
+	}
+	names := make([]string, 0, len(projects))
+	for _, enrolled := range projects {
+		project := strings.TrimSpace(enrolled.Project)
+		if project != "" {
+			names = append(names, project)
+		}
+	}
+	sort.Strings(names)
+	for _, project := range names {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := reconciler.ReconcilePulledObservationVersions(ctx, project); err != nil {
+			return fmt.Errorf("reconcile pulled observation versions project %q: %w", project, err)
+		}
+	}
 	return nil
 }
 

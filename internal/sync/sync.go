@@ -557,6 +557,63 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 	return result, nil
 }
 
+// ReconcilePulledCloudObservationVersions imports only project-scoped immutable
+// history, keeping sidecar receipts separate from the mutation cursor.
+func (sy *Syncer) ReconcilePulledCloudObservationVersions(project string) error {
+	if !sy.cloudMode {
+		return fmt.Errorf("pulled observation version reconciliation requires cloud mode")
+	}
+	if err := sy.ensureCloudPreflight(project); err != nil {
+		return err
+	}
+	project, _ = store.NormalizeProject(project)
+	if strings.TrimSpace(project) == "" {
+		project = sy.project
+	}
+	receiptTarget := cloudVersionReceiptTargetKey(project)
+	known, err := storeGetSynced(sy.store, receiptTarget)
+	if err != nil {
+		return fmt.Errorf("get pulled observation version receipts: %w", err)
+	}
+	manifest, err := sy.readManifest()
+	if err != nil {
+		return err
+	}
+	for _, entry := range manifest.Chunks {
+		if known[entry.ID] {
+			continue
+		}
+		payload, err := sy.transport.ReadChunk(entry.ID)
+		if err != nil {
+			return fmt.Errorf("read observation version chunk %s: %w", entry.ID, err)
+		}
+		var chunk ChunkData
+		if err := json.Unmarshal(payload, &chunk); err != nil {
+			return fmt.Errorf("parse observation version chunk %s: %w", entry.ID, err)
+		}
+		if len(chunk.ObservationVersions) == 0 {
+			continue
+		}
+		if len(chunk.Sessions) != 0 || len(chunk.Observations) != 0 || len(chunk.Prompts) != 0 || len(chunk.Mutations) != 0 || len(chunk.ObservationVersionCoverage) != 0 {
+			return fmt.Errorf("observation version chunk %s includes current-state data", entry.ID)
+		}
+		for _, version := range chunk.ObservationVersions {
+			if version.Scope != "project" || version.Project == nil {
+				return fmt.Errorf("observation version chunk %s is not project-scoped", entry.ID)
+			}
+			versionProject, _ := store.NormalizeProject(*version.Project)
+			if versionProject != project {
+				return fmt.Errorf("observation version chunk %s belongs to project %q, not %q", entry.ID, versionProject, project)
+			}
+		}
+		if err := storeApplyPulledChunkWithVersions(sy.store, receiptTarget, entry.ID, nil, chunk.ObservationVersions); err != nil {
+			return fmt.Errorf("apply observation version chunk %s: %w", entry.ID, err)
+		}
+		known[entry.ID] = true
+	}
+	return nil
+}
+
 // ReconcileCloudObservationVersions exports only immutable observation history
 // whose project-scoped parents are already present in accepted remote chunks.
 func (sy *Syncer) ReconcileCloudObservationVersions(createdBy, project string) (*SyncResult, error) {
@@ -1905,6 +1962,11 @@ func cloudTargetKey(project string) string {
 		return store.DefaultSyncTargetKey
 	}
 	return fmt.Sprintf("%s:%s", store.DefaultSyncTargetKey, project)
+}
+
+func cloudVersionReceiptTargetKey(project string) string {
+	project, _ = store.NormalizeProject(project)
+	return fmt.Sprintf("%s:versions:%s", store.DefaultSyncTargetKey, strings.TrimSpace(project))
 }
 
 // ─── Manifest I/O ────────────────────────────────────────────────────────────

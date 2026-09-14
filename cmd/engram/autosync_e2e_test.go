@@ -320,6 +320,49 @@ func TestAutosyncVersionSidecarAcknowledgesThenRetries(t *testing.T) {
 	t.Fatalf("mutation pushes=%d version pushes=%d; want parent ACK then one sidecar retry", mutationPushes, versionPushes)
 }
 
+func TestAutosyncPullImportsHistoryAfterMutationAndRetriesSidecar(t *testing.T) {
+	cfg, err := store.DefaultConfig(); if err != nil { t.Fatal(err) }
+	cfg.DataDir = t.TempDir()
+	s, err := store.New(cfg); if err != nil { t.Fatal(err) }
+	defer s.Close() //nolint:errcheck
+	const project, sessionID, syncID = "pull-history", "pull-history-session", "pull-history-observation"
+	if err := s.EnrollProject(project); err != nil { t.Fatal(err) }
+	projectValue := project
+	versionPayload, err := json.Marshal(engramsync.ChunkData{ObservationVersions: []store.ObservationVersion{{VersionID: "00000000-0000-4000-8000-000000000184", ObservationSyncID: syncID, SessionID: sessionID, Type: "note", Title: "historical", Content: "history", Project: &projectValue, Scope: "project", RevisionCount: 2, CapturedAt: "2026-01-01 00:00:00"}}})
+	if err != nil { t.Fatal(err) }
+	var mu sync.Mutex
+	var mutationSince []string
+	versionReads := 0
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/sync/mutations/push": _ = json.NewEncoder(w).Encode(map[string]any{"accepted_seqs": []int64{}})
+		case "/sync/mutations/pull":
+			mu.Lock(); mutationSince = append(mutationSince, r.URL.Query().Get("since_seq")); first := len(mutationSince) == 1; mu.Unlock()
+			if first { _ = json.NewEncoder(w).Encode(map[string]any{"mutations": []any{
+				map[string]any{"seq": 1, "project": project, "entity": "session", "entity_key": sessionID, "op": "upsert", "payload": map[string]any{"id": sessionID, "project": project, "directory": "/tmp/pull-history"}},
+				map[string]any{"seq": 2, "project": project, "entity": "observation", "entity_key": syncID, "op": "upsert", "payload": map[string]any{"sync_id": syncID, "session_id": sessionID, "type": "note", "title": "parent", "content": "current", "project": project, "scope": "project"}},
+			}, "has_more": false}) } else { _ = json.NewEncoder(w).Encode(map[string]any{"mutations": []any{}, "has_more": false}) }
+		case "/sync/pull": _ = json.NewEncoder(w).Encode(engramsync.Manifest{Version: 2, Chunks: []engramsync.ChunkEntry{{ID: "history-sidecar"}}})
+		case "/sync/pull/history-sidecar":
+			mu.Lock(); versionReads++; attempt := versionReads; mu.Unlock()
+			if attempt == 1 { http.Error(w, "sidecar unavailable", http.StatusInternalServerError); return }; _, _ = w.Write(versionPayload)
+		default: http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close(); trustTLSServer(t, srv)
+	transport, err := remote.NewMutationTransport(srv.URL, "test-token"); if err != nil { t.Fatal(err) }
+	managerCfg := autosync.DefaultConfig(); managerCfg.DebounceDuration, managerCfg.PollInterval = time.Millisecond, 5*time.Millisecond; managerCfg.BaseBackoff, managerCfg.MaxBackoff = 5*time.Millisecond, 10*time.Millisecond
+	manager := autosync.New(s, &mutationTransportAdapter{remote: transport}, managerCfg)
+	manager.SetObservationVersionPullReconciler(cloudObservationVersionReconciler{store: s, serverURL: srv.URL, token: "test-token"})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second); defer cancel(); go manager.Run(ctx); defer manager.Stop(); manager.NotifyDirty()
+	deadline := time.Now().Add(800 * time.Millisecond)
+	for time.Now().Before(deadline) { mu.Lock(); attempts := versionReads; calls := append([]string(nil), mutationSince...); mu.Unlock(); if attempts >= 2 && len(calls) >= 2 { break }; time.Sleep(10 * time.Millisecond) }
+	state, err := s.GetSyncState(store.DefaultSyncTargetKey); if err != nil || state.LastPulledSeq != 2 { t.Fatalf("mutation cursor = %#v, %v", state, err) }
+	versions, err := s.ObservationVersions(syncID, 10); if err != nil || len(versions) != 1 || versions[0].Title != "historical" { t.Fatalf("pulled history = %#v, %v", versions, err) }
+	mu.Lock(); defer mu.Unlock()
+	if versionReads < 2 || len(mutationSince) < 2 || mutationSince[1] != "2" { t.Fatalf("sidecar retries=%d mutation cursors=%v", versionReads, mutationSince) }
+}
+
 type ackCheckingReconciler struct {
 	store *store.Store
 	delegate autosync.ObservationVersionReconciler

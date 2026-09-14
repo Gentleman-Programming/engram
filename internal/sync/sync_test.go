@@ -5091,3 +5091,52 @@ func TestCloudVersionImportConflictRollsBackReceipt(t *testing.T) {
 	if err != nil { t.Fatalf("get synced chunks: %v", err) }
 	if synced[conflictID] { t.Fatal("conflicting version sidecar must not record its receipt") }
 }
+
+func TestReconcilePulledCloudObservationVersionsImportsOnlyProjectHistory(t *testing.T) {
+	const project = "proj-a"
+	s := newTestStore(t)
+	if err := s.EnrollProject(project); err != nil { t.Fatal(err) }
+	if err := s.CreateSession("history-parent", project, "/tmp/proj-a"); err != nil { t.Fatal(err) }
+	id, err := s.AddObservation(store.AddObservationParams{SessionID: "history-parent", Type: "note", Title: "parent", Content: "content", Project: project, Scope: "project"})
+	if err != nil { t.Fatal(err) }
+	parent, err := s.GetObservation(id)
+	if err != nil { t.Fatal(err) }
+	projectValue := project
+	version := store.ObservationVersion{VersionID: "00000000-0000-4000-8000-000000000184", ObservationSyncID: parent.SyncID, SessionID: parent.SessionID, Type: parent.Type, Title: "historical", Content: parent.Content, Project: &projectValue, Scope: "project", RevisionCount: 1, CapturedAt: "2026-01-01 00:00:00"}
+	payload, err := json.Marshal(ChunkData{ObservationVersions: []store.ObservationVersion{version}})
+	if err != nil { t.Fatal(err) }
+	transport := newFakeCloudTransport()
+	transport.manifest.Chunks = []ChunkEntry{{ID: "history"}, {ID: "current-only"}}
+	transport.chunks["history"] = payload
+	transport.chunks["current-only"] = []byte(`{"observations":[{"sync_id":"must-not-replay"}]}`)
+	sy := NewCloudWithTransport(s, transport, project)
+	if err := sy.ReconcilePulledCloudObservationVersions(project); err != nil { t.Fatalf("pull history: %v", err) }
+	versions, err := s.ObservationVersions(parent.SyncID, 10)
+	if err != nil || len(versions) != 2 || versions[1].Title != "historical" { t.Fatalf("versions = %#v, %v", versions, err) }
+	if _, err := s.GetObservationBySyncID("must-not-replay"); !errors.Is(err, sql.ErrNoRows) { t.Fatalf("current state replayed: %v", err) }
+	receipts, err := s.GetSyncedChunksForTarget(cloudVersionReceiptTargetKey(project))
+	if err != nil || !receipts["history"] || receipts["current-only"] { t.Fatalf("history receipts = %#v, %v", receipts, err) }
+	if err := sy.ReconcilePulledCloudObservationVersions(project); err != nil { t.Fatalf("repeat pull: %v", err) }
+	if got, err := s.ObservationVersions(parent.SyncID, 10); err != nil || len(got) != 2 { t.Fatalf("duplicate history = %#v, %v", got, err) }
+
+	foreignProject := "proj-b"
+	version.Project = &foreignProject
+	foreign, _ := json.Marshal(ChunkData{ObservationVersions: []store.ObservationVersion{version}})
+	transport.manifest.Chunks = append(transport.manifest.Chunks, ChunkEntry{ID: "foreign"})
+	transport.chunks["foreign"] = foreign
+	if err := sy.ReconcilePulledCloudObservationVersions(project); err == nil { t.Fatal("cross-project history was accepted") }
+	receipts, _ = s.GetSyncedChunksForTarget(cloudVersionReceiptTargetKey(project))
+	if receipts["foreign"] { t.Fatal("rejected history recorded a receipt") }
+
+	version.Project = &projectValue
+	version.Scope = "personal"
+	privatePayload, _ := json.Marshal(ChunkData{ObservationVersions: []store.ObservationVersion{version}})
+	transport.manifest.Chunks = []ChunkEntry{{ID: "private"}}
+	transport.chunks["private"] = privatePayload
+	if err := sy.ReconcilePulledCloudObservationVersions(project); err == nil { t.Fatal("private history was accepted") }
+	transport.manifest.Chunks = []ChunkEntry{{ID: "malformed"}}
+	transport.chunks["malformed"] = []byte(`{`)
+	if err := sy.ReconcilePulledCloudObservationVersions(project); err == nil { t.Fatal("malformed history was accepted") }
+	receipts, _ = s.GetSyncedChunksForTarget(cloudVersionReceiptTargetKey(project))
+	if receipts["private"] || receipts["malformed"] { t.Fatal("rejected history recorded a receipt") }
+}

@@ -2416,6 +2416,25 @@ func TestManagerSidecarFailureBacksOffWithoutReplayingParentMutation(t *testing.
 func TestManagerWithoutVersionReconcilerRemainsCompatible(t *testing.T) {
 	manager := New(newFakeLocalStore(), newFakeTransport(), DefaultConfig())
 	if err := manager.push(context.Background()); err != nil { t.Fatalf("legacy push: %v", err) }
+	if err := manager.pull(context.Background()); err != nil { t.Fatalf("legacy pull: %v", err) }
+}
+
+type recordingPulledVersionReconciler struct { calls []string; afterMutation *fakeLocalStore; err error }
+func (r *recordingPulledVersionReconciler) ReconcilePulledObservationVersions(_ context.Context, project string) error {
+	if r.afterMutation != nil && len(r.afterMutation.appliedMuts) == 0 { return errors.New("versions ran before mutations") }
+	r.calls = append(r.calls, project)
+	return r.err
+}
+
+func TestManagerPullReconcilesEnrolledVersionsAfterMutationsAndWhenEmpty(t *testing.T) {
+	local := &enrolledLocalStore{fakeLocalStore: newFakeLocalStore(), enrolled: []store.EnrolledProject{{Project: "alpha"}, {Project: "beta"}}}
+	transport := newFakeTransport()
+	transport.pullResult = &PullMutationsResponse{Mutations: []PulledMutation{{Seq: 1, Project: "alpha", Entity: "observation", EntityKey: "parent", Op: "upsert"}}}
+	reconciler := &recordingPulledVersionReconciler{afterMutation: local.fakeLocalStore}
+	manager := New(local, transport, DefaultConfig())
+	manager.SetObservationVersionPullReconciler(reconciler)
+	if err := manager.pull(context.Background()); err != nil { t.Fatalf("pull: %v", err) }
+	if got := fmt.Sprint(reconciler.calls); got != "[alpha beta]" { t.Fatalf("version projects = %s", got) }
 }
 
 // ─── Helper types ─────────────────────────────────────────────────────────────

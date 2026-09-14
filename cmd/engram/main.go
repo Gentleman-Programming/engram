@@ -329,6 +329,13 @@ func (r cloudObservationVersionReconciler) ReconcileObservationVersions(ctx cont
 	return err
 }
 
+func (r cloudObservationVersionReconciler) ReconcilePulledObservationVersions(ctx context.Context, project string) error {
+	if err := ctx.Err(); err != nil { return err }
+	transport, err := remote.NewRemoteTransport(r.serverURL, r.token, project)
+	if err != nil { return err }
+	return engramsync.NewCloudWithTransport(r.store, transport, project).ReconcilePulledCloudObservationVersions(project)
+}
+
 type storeSyncStatusProvider struct {
 	store          *store.Store
 	defaultProject string
@@ -981,6 +988,9 @@ func tryStartAutosync(ctx context.Context, s *store.Store, cfg store.Config) (au
 	mgr := newAutosyncManager(s, transport, mgrCfg)
 	if historyManager, ok := mgr.(interface{ SetObservationVersionReconciler(autosync.ObservationVersionReconciler) }); ok {
 		historyManager.SetObservationVersionReconciler(cloudObservationVersionReconciler{store: s, serverURL: serverURL, token: token})
+	}
+	if historyManager, ok := mgr.(interface{ SetObservationVersionPullReconciler(autosync.ObservationVersionPullReconciler) }); ok {
+		historyManager.SetObservationVersionPullReconciler(cloudObservationVersionReconciler{store: s, serverURL: serverURL, token: token})
 	}
 
 	go mgr.Run(ctx)
