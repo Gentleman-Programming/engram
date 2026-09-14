@@ -192,6 +192,13 @@ func TestHandlerPushSniffedGzipBodyWithCorruptPayloadStillRejected(t *testing.T)
 			if !strings.Contains(rec.Body.String(), "invalid push payload") {
 				t.Fatalf("expected invalid push payload error, got %q", rec.Body.String())
 			}
+			// The decode error must report the Content-Type the server actually
+			// received, so operators can tell a rewritten header apart from a
+			// stale server binary. The response body is JSON-encoded, so the
+			// quoted header value appears escaped inside the error string.
+			if !strings.Contains(rec.Body.String(), `(content-type: \"application/json\")`) {
+				t.Fatalf("expected response to report the received Content-Type, got %q", rec.Body.String())
+			}
 		})
 	}
 }
