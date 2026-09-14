@@ -258,6 +258,9 @@ func (cs *CloudStore) WriteChunk(ctx context.Context, project, chunkID, createdB
 		}
 	}()
 
+	if err := cs.materializeObservationVersions(ctx, tx, project, payload, nil); err != nil {
+		return err
+	}
 	counts := summarizeChunk(payload)
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO cloud_chunks (project_name, chunk_id, created_by, client_created_at, payload, sessions_count, observations_count, prompts_count)
@@ -278,6 +281,9 @@ func (cs *CloudStore) WriteChunk(ctx context.Context, project, chunkID, createdB
 		return err
 	}
 	if err := insertMaterializedMutations(ctx, tx, mutations); err != nil {
+		return err
+	}
+	if err := applyObservationVersionVisibility(ctx, tx, project, mutations); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -767,6 +773,18 @@ func (cs *CloudStore) migrate(ctx context.Context) error {
 		END $$`,
 		`CREATE INDEX IF NOT EXISTS idx_cloud_mutations_project ON cloud_mutations(project)`,
 		`CREATE INDEX IF NOT EXISTS idx_cloud_mutations_seq ON cloud_mutations(seq)`,
+		`CREATE TABLE IF NOT EXISTS cloud_observation_versions (
+			version_id TEXT PRIMARY KEY, project TEXT NOT NULL, observation_sync_id TEXT NOT NULL,
+			session_id TEXT NOT NULL, type TEXT NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL,
+			tool_name TEXT, scope TEXT NOT NULL, topic_key TEXT, revision_count INTEGER NOT NULL,
+			is_baseline BOOLEAN NOT NULL, history_complete BOOLEAN NOT NULL, captured_at TEXT NOT NULL,
+			hidden_at TIMESTAMPTZ
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_cloud_observation_versions_lookup ON cloud_observation_versions (project, observation_sync_id, revision_count, version_id)`,
+		`CREATE TABLE IF NOT EXISTS cloud_deleted_observations (
+			project TEXT NOT NULL, observation_sync_id TEXT NOT NULL, deleted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (project, observation_sync_id)
+		)`,
 		// cloud_sync_audit_log: persistent audit trail for push-rejection events (REQ-400).
 		`CREATE TABLE IF NOT EXISTS cloud_sync_audit_log (
 			id           SERIAL PRIMARY KEY,
@@ -791,7 +809,7 @@ func (cs *CloudStore) migrate(ctx context.Context) error {
 	if err := cs.backfillProjectSessionsFromChunks(ctx); err != nil {
 		return err
 	}
-	return nil
+	return cs.backfillObservationVersions(ctx)
 }
 
 // ─── Mutation Journal Queries ─────────────────────────────────────────────────

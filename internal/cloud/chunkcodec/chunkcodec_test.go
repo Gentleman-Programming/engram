@@ -325,3 +325,34 @@ func TestCanonicalizeForProjectAcceptsSessionDeleteMutation(t *testing.T) {
 		t.Fatalf("expected canonical session delete payload without directory, got %#v", payload)
 	}
 }
+
+func TestCanonicalizeForProjectObservationVersions(t *testing.T) {
+	valid := `{"version_id":"7B49D3C4-9B55-4D85-9E27-7B5762E0A638","observation_sync_id":"obs-1","session_id":"session-1","type":"decision","title":"Title","content":"Body","project":"proj-a","scope":"project","revision_count":1,"history_complete":true,"captured_at":"2026-05-01T00:00:00Z"}`
+	canonical, err := CanonicalizeForProject([]byte(`{"observation_versions":[`+valid+`]}`), "proj-a")
+	if err != nil {
+		t.Fatalf("CanonicalizeForProject: %v", err)
+	}
+	var chunk struct{ Versions []store.ObservationVersion `json:"observation_versions"` }
+	if err := json.Unmarshal(canonical, &chunk); err != nil {
+		t.Fatalf("decode canonical chunk: %v", err)
+	}
+	if got := chunk.Versions[0].VersionID; got != "7b49d3c4-9b55-4d85-9e27-7b5762e0a638" {
+		t.Fatalf("version_id = %q, want canonical lowercase UUIDv4", got)
+	}
+	for _, legacy := range []string{`{}`, `{"observation_versions":[]}`, `{"observation_versions":null}`} {
+		if _, err := CanonicalizeForProject([]byte(legacy), "proj-a"); err != nil {
+			t.Fatalf("legacy chunk must remain compatible: %v", err)
+		}
+	}
+	for name, body := range map[string]string{
+		"invalid UUID": strings.Replace(valid, "7B49D3C4-9B55-4D85-9E27-7B5762E0A638", "not-a-uuid", 1),
+		"private scope": strings.Replace(valid, `"scope":"project"`, `"scope":"private"`, 1),
+		"wrong project": strings.Replace(valid, `"project":"proj-a"`, `"project":"proj-b"`, 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := CanonicalizeForProject([]byte(`{"observation_versions":[`+body+`]}`), "proj-a"); err == nil {
+				t.Fatal("expected invalid observation version to be rejected")
+			}
+		})
+	}
+}

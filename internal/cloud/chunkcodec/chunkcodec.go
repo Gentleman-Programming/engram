@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/Gentleman-Programming/engram/v2/internal/store"
@@ -97,12 +98,71 @@ func CanonicalizeForProject(payload []byte, project string) ([]byte, error) {
 		}
 		doc["mutations"] = normalizedMutations
 	}
+	if err := canonicalizeObservationVersions(doc, project); err != nil {
+		return nil, err
+	}
 
 	normalized, err := json.Marshal(doc)
 	if err != nil {
 		return nil, fmt.Errorf("encode chunk data: %w", err)
 	}
 	return normalized, nil
+}
+
+var observationVersionIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+
+func canonicalizeObservationVersions(doc map[string]any, project string) error {
+	entries, exists := doc["observation_versions"]
+	if !exists {
+		return nil // Legacy chunks have no history collection.
+	}
+	if entries == nil {
+		doc["observation_versions"] = []any{}
+		return nil
+	}
+	items, ok := entries.([]any)
+	if !ok {
+		return fmt.Errorf("observation_versions must be an array")
+	}
+	versions := make([]store.ObservationVersion, len(items))
+	for i, item := range items {
+		encoded, err := json.Marshal(item)
+		if err != nil {
+			return fmt.Errorf("observation_versions[%d]: encode: %w", i, err)
+		}
+		if err := json.Unmarshal(encoded, &versions[i]); err != nil {
+			return fmt.Errorf("observation_versions[%d]: decode: %w", i, err)
+		}
+		version := &versions[i]
+		version.VersionID = strings.ToLower(version.VersionID)
+		if err := validateObservationVersion(*version, project); err != nil {
+			return fmt.Errorf("observation_versions[%d]: %w", i, err)
+		}
+	}
+	doc["observation_versions"] = versions
+	return nil
+}
+
+func validateObservationVersion(version store.ObservationVersion, project string) error {
+	for name, value := range map[string]string{
+		"version_id": version.VersionID, "observation_sync_id": version.ObservationSyncID,
+		"session_id": version.SessionID, "type": version.Type, "title": version.Title,
+		"content": version.Content, "captured_at": version.CapturedAt,
+	} {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("%s is required", name)
+		}
+	}
+	if !observationVersionIDPattern.MatchString(version.VersionID) {
+		return fmt.Errorf("version_id must be a canonical UUIDv4")
+	}
+	if version.Project == nil || *version.Project != project || version.Scope != "project" {
+		return fmt.Errorf("project-scoped observation version is required")
+	}
+	if version.RevisionCount < 1 {
+		return fmt.Errorf("revision_count must be positive")
+	}
+	return nil
 }
 
 func collectSessionMutationKeys(entries any) (map[string]struct{}, error) {
