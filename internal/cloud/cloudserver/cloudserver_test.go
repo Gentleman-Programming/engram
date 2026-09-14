@@ -1318,6 +1318,11 @@ func TestHandlerPushRejectsMutationUpsertsMissingRequiredFields(t *testing.T) {
 			wantErr: "session payload directory is required for upsert",
 		},
 		{
+			name:    "session upsert blank directory",
+			payload: `{"mutations":[{"entity":"session","entity_key":"s-1","op":"upsert","payload":"{\"id\":\"s-1\",\"directory\":\"   \"}"}]}`,
+			wantErr: "session payload directory is required for upsert",
+		},
+		{
 			name:    "observation upsert missing title",
 			payload: `{"mutations":[{"entity":"observation","entity_key":"obs-1","op":"upsert","payload":"{\"sync_id\":\"obs-1\",\"session_id\":\"s-1\",\"type\":\"decision\",\"content\":\"c\",\"scope\":\"project\"}"}]}`,
 			wantErr: "observation payload title is required for upsert",
@@ -1356,6 +1361,11 @@ func TestHandlerPushRejectsDirectChunkArraysMissingRequiredFields(t *testing.T) 
 		{
 			name:    "session missing directory",
 			payload: `{"sessions":[{"id":"s-1"}]}`,
+			wantErr: "sessions[0].directory is required",
+		},
+		{
+			name:    "session blank directory",
+			payload: `{"sessions":[{"id":"s-1","directory":"   "}]}`,
 			wantErr: "sessions[0].directory is required",
 		},
 		{

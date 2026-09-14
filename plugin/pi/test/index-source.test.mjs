@@ -351,16 +351,23 @@ function buildSpawnAndWaitForEngramForTest({ spawn, probeEngramHealth, pollMs = 
 
 function buildEnsureSessionForTest(engramFetch) {
   const body = extractFunctionBody("ensureSession", "{\n  const key")
-    .replace("const body: SessionBody", "const body");
-  const factory = new Function("knownSessions", "sessionRegistrationsInFlight", "engramFetch", "project", "directory", `
+    .replace("const body: SessionBody", "const body")
+    .replace("let acknowledgement: unknown;", "let acknowledgement;");
+  const factory = new Function("knownSessions", "registeredSessionProjects", "sessionRegistrationsInFlight", "sessionRegistrationProjects", "sessionProjectConflict", "sessionProjectConflictFromResponse", "engramFetch", "project", "directory", `
     return async function ensureSession(sessionId, sessionProject = project, fetch = engramFetch) {
       ${body}
     };
   `);
   const knownSessions = new Set();
+  const registeredSessionProjects = new Map();
   const sessionRegistrationsInFlight = new Map();
+  const sessionRegistrationProjects = new Map();
+  const sessionProjectConflict = (sessionId, sessionProject) => {
+    const ownerProject = registeredSessionProjects.get(sessionId) || sessionRegistrationProjects.get(sessionId);
+    return ownerProject && ownerProject !== sessionProject ? new Error("session project conflict") : undefined;
+  };
   return {
-    ensureSession: factory(knownSessions, sessionRegistrationsInFlight, engramFetch, "engram", "/work/engram"),
+    ensureSession: factory(knownSessions, registeredSessionProjects, sessionRegistrationsInFlight, sessionRegistrationProjects, sessionProjectConflict, () => undefined, engramFetch, "engram", "/work/engram"),
     knownSessions,
   };
 }

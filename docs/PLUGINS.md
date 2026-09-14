@@ -92,7 +92,7 @@ engram setup claude-code
 claude --plugin-dir ./plugin/claude-code
 ```
 
-Existing marketplace-only copies create their durable MCP registration at the next SessionStart and require one more Claude Code restart before MCP tools return. If `~/.claude/mcp/engram.json` is a symlink or another non-regular path, SessionStart and direct setup refuse to replace it; inspect it and manually replace it with a regular file before rerunning `engram setup claude-code`. Do not edit the plugin cache manually. When `CLAUDE_CONFIG_DIR` is set, Engram writes the MCP registration under that directory instead (`$CLAUDE_CONFIG_DIR/mcp/engram.json`, `$CLAUDE_CONFIG_DIR/settings.json`), the same directory Claude Code itself uses.
+Each SessionStart delegates MCP registration to `engram setup claude-code --mcp-only`; the hook does not inspect, write, or delete Claude configuration. Claude CLI owns the user-scope `mcpServers.engram` entry in `~/.claude.json` (Windows: `%USERPROFILE%\\.claude.json`) or `$CLAUDE_CONFIG_DIR/.claude.json` when that override is set. Setup accepts only the exact expected stdio command and arguments as configured; mismatched or unreadable entries are visible conflicts and are never overwritten. Do not edit the plugin cache manually.
 
 The `--protocol=slim` setup option requires Engram plugin 0.1.1 or later. After successful Claude Code setup, Engram checks `claude plugin list --json`; an unverifiable, disabled, or older plugin produces a warning but does not fail setup or replace the selected slim mode. Use your normal Claude Code plugin update path, then restart Claude Code. Plugins loaded with session-only `claude --plugin-dir ...` cannot be detected.
 

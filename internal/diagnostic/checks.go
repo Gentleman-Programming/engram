@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/Gentleman-Programming/engram/v2/internal/cloud/constants"
@@ -20,6 +21,7 @@ const (
 	CheckOrphanedObservationSession       = "orphaned_observation_session"
 	CheckUnownedSessionProject            = "unowned_session_project"
 	CheckSQLiteLockContention             = "sqlite_lock_contention"
+	CheckAmbiguousActiveRuntimeSessions   = "ambiguous_active_runtime_sessions"
 )
 
 // ReasonQuarantinedPulledSessionIdentity marks a finding of
@@ -40,6 +42,7 @@ type InvalidSessionIdentityCheck struct{}
 type OrphanedObservationSessionCheck struct{}
 type UnownedSessionProjectCheck struct{}
 type SQLiteLockContentionCheck struct{}
+type AmbiguousActiveRuntimeSessionsCheck struct{}
 
 func (SessionProjectDirectoryMismatchCheck) Code() string {
 	return CheckSessionProjectDirectoryMismatch
@@ -53,6 +56,81 @@ func (InvalidSessionIdentityCheck) Code() string     { return CheckInvalidSessio
 func (OrphanedObservationSessionCheck) Code() string { return CheckOrphanedObservationSession }
 func (UnownedSessionProjectCheck) Code() string      { return CheckUnownedSessionProject }
 func (SQLiteLockContentionCheck) Code() string       { return CheckSQLiteLockContention }
+func (AmbiguousActiveRuntimeSessionsCheck) Code() string {
+	return CheckAmbiguousActiveRuntimeSessions
+}
+
+func (c AmbiguousActiveRuntimeSessionsCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {
+	_ = ctx
+	sessions, err := scope.Store.ListDiagnosticSessions(scope.Project)
+	if err != nil {
+		return CheckResult{}, err
+	}
+
+	directoriesByProject := make(map[string]map[string]struct{})
+	directoryBySessionID := make(map[string]string)
+	for _, session := range sessions {
+		project := normalizeProjectName(session.Project)
+		if project == "" || session.Directory == "" {
+			continue
+		}
+		if directoriesByProject[project] == nil {
+			directoriesByProject[project] = make(map[string]struct{})
+		}
+		directoriesByProject[project][session.Directory] = struct{}{}
+		directoryBySessionID[session.ID] = session.Directory
+	}
+
+	projects := make([]string, 0, len(directoriesByProject))
+	for project := range directoriesByProject {
+		projects = append(projects, project)
+	}
+	sort.Strings(projects)
+
+	findings := make([]Finding, 0)
+	for _, project := range projects {
+		directories := make([]string, 0, len(directoriesByProject[project]))
+		for directory := range directoriesByProject[project] {
+			directories = append(directories, directory)
+		}
+		sort.Strings(directories)
+
+		candidateIDs, err := scope.Store.ActiveRuntimeSessions(project, directories...)
+		if err != nil {
+			return CheckResult{}, err
+		}
+		candidatesByDirectory := make(map[string][]string)
+		for _, id := range candidateIDs {
+			candidatesByDirectory[directoryBySessionID[id]] = append(candidatesByDirectory[directoryBySessionID[id]], id)
+		}
+
+		ambiguousDirectories := make([]string, 0)
+		ambiguousIDs := make([]string, 0)
+		for _, directory := range directories {
+			ids := candidatesByDirectory[directory]
+			if len(ids) < 2 {
+				continue
+			}
+			ambiguousDirectories = append(ambiguousDirectories, directory)
+			ambiguousIDs = append(ambiguousIDs, ids...)
+		}
+		if len(ambiguousIDs) == 0 {
+			continue
+		}
+		sort.Strings(ambiguousIDs)
+		findings = append(findings, Finding{
+			CheckID:              c.Code(),
+			Severity:             SeverityWarning,
+			ReasonCode:           c.Code(),
+			Message:              fmt.Sprintf("Project %q has %d active runtime session candidates across %d directory or directories.", project, len(ambiguousIDs), len(ambiguousDirectories)),
+			Why:                  "Omitted-session writes fail closed when multiple active runtime sessions match the same project and directory, so doctor reports the ambiguity without selecting or changing a session.",
+			Evidence:             mustJSON(map[string]any{"project": project, "active_candidate_count": len(ambiguousIDs), "directories": ambiguousDirectories, "session_ids": ambiguousIDs}),
+			SafeNextStep:         "Use an explicit session ID for writes in the affected directory; doctor does not select, end, or modify sessions.",
+			RequiresConfirmation: true,
+		})
+	}
+	return resultFromFindings(c.Code(), map[string]any{"projects_evaluated": len(projects)}, findings), nil
+}
 
 func (c SessionProjectDirectoryMismatchCheck) Run(ctx context.Context, scope Scope) (CheckResult, error) {
 	_ = ctx

@@ -62,9 +62,10 @@ func init() {
 }
 
 var (
-	storeNew      = store.New
-	newHTTPServer = server.New
-	startHTTP     = (*server.Server).Start
+	storeNew           = store.New
+	storeDefaultConfig = store.DefaultConfig
+	newHTTPServer      = server.New
+	startHTTP          = (*server.Server).Start
 
 	newMCPServer           = mcp.NewServer
 	newMCPServerWithTools  = mcp.NewServerWithTools
@@ -81,7 +82,8 @@ var (
 	newTeaProgram = tea.NewProgram
 	runTeaProgram = (*tea.Program).Run
 
-	checkForUpdates = versioncheck.CheckLatest
+	checkForUpdates         = versioncheck.CheckLatest
+	migrateOrphanedDatabase = migrateOrphanedDB
 
 	setupSupportedAgents         = setup.SupportedAgents
 	setupInstallAgent            = setup.Install
@@ -122,7 +124,7 @@ var (
 	syncStatus = func(sy *engramsync.Syncer) (localChunks int, remoteChunks int, pendingImport int, err error) {
 		return sy.Status()
 	}
-	syncImport = func(sy *engramsync.Syncer) (*engramsync.ImportResult, error) { return sy.Import() }
+	syncImport             = func(sy *engramsync.Syncer) (*engramsync.ImportResult, error) { return sy.Import() }
 	syncImportWithProgress = func(sy *engramsync.Syncer, report func(engramsync.ImportProgress)) (*engramsync.ImportResult, error) {
 		return sy.ImportWithProgress(report)
 	}
@@ -666,7 +668,7 @@ func main() {
 		return
 	}
 
-	cfg, cfgErr := store.DefaultConfig()
+	cfg, cfgErr := storeDefaultConfig()
 	if cfgErr != nil {
 		// Fallback: try to resolve home directory from environment variables
 		// that os.UserHomeDir() might have missed (e.g. MCP subprocesses on
@@ -696,7 +698,7 @@ func main() {
 
 	// Migrate orphaned databases that ended up in wrong locations
 	// (e.g. drive root on Windows due to previous bug).
-	migrateOrphanedDB(cfg.DataDir)
+	migrateOrphanedDatabase(cfg.DataDir)
 
 	switch os.Args[1] {
 	case "serve":
@@ -754,7 +756,7 @@ func shouldCheckForUpdates(args []string) bool {
 	}
 	command := strings.ToLower(strings.TrimSpace(args[0]))
 	switch command {
-	case "mcp", "serve", "protocol-mode", "tui", "version", "--version", "-v", "help", "--help", "-h":
+	case "mcp", "serve", "protocol-mode", "tui", "version", "--version", "-v", "help", "--help", "-h", "init":
 		return false
 	case "cloud":
 		return len(args) < 2 || strings.ToLower(strings.TrimSpace(args[1])) != "serve"
@@ -781,6 +783,9 @@ func handleConfigFreeCommand(args []string) bool {
 				return true
 			}
 		}
+	case "init":
+		cmdInit()
+		return true
 	}
 	return false
 }
@@ -2895,6 +2900,80 @@ func cmdProjectsPrune(cfg store.Config) {
 	fmt.Printf("\nPruned %d project(s): %d sessions, %d prompts removed.\n", successful, totalSessions, totalPrompts)
 }
 
+func cmdInit() {
+	var (
+		force       bool
+		projectName string
+	)
+
+	args := os.Args[2:]
+	for i := 0; i < len(args); i++ {
+		token := args[i]
+		switch {
+		case token == "-h" || token == "--help" || token == "help":
+			fmt.Println("usage: engram init [project_name] [--force]")
+			return
+		case token == "-f" || token == "--force":
+			force = true
+		case strings.HasPrefix(token, "-"):
+			fmt.Fprintf(os.Stderr, "engram: unknown flag: %s\n\nusage: engram init [project_name] [--force]\n", token)
+			exitFunc(1)
+			return
+		default:
+			if projectName == "" {
+				projectName = token
+			} else {
+				fmt.Fprintf(os.Stderr, "engram: unexpected argument: %s\n\nusage: engram init [project_name] [--force]\n", token)
+				exitFunc(1)
+				return
+			}
+		}
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		fatal(fmt.Errorf("get current directory: %w", err))
+		return
+	}
+
+	if projectName == "" {
+		projectName = filepath.Base(cwd)
+	}
+
+	trimmed := strings.TrimSpace(projectName)
+	if trimmed == "" {
+		fatal(errors.New("project name is required"))
+		return
+	}
+	if strings.ContainsAny(trimmed, `/\\`) {
+		fatal(errors.New("project name must be a name, not a path"))
+		return
+	}
+	for _, r := range trimmed {
+		if r < 0x20 || r == 0x7f {
+			fatal(errors.New("project name contains control characters"))
+			return
+		}
+	}
+
+	data := map[string]string{
+		"project_name": trimmed,
+	}
+	bytes, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		fatal(fmt.Errorf("marshal config: %w", err))
+		return
+	}
+	bytes = append(bytes, '\n')
+
+	if err := writeInitConfig(cwd, bytes, force); err != nil {
+		fatal(err)
+		return
+	}
+
+	fmt.Printf("Initialized Engram project %q in .engram/config.json\n", trimmed)
+}
+
 func isPathLikeProjectName(name string) bool {
 	return strings.ContainsAny(name, `/\`)
 }
@@ -3243,8 +3322,9 @@ func printPostInstall(result *setup.Result) {
 		fmt.Println("  1. Restart Claude Code — the plugin is active immediately")
 		fmt.Println("  2. Verify with: claude plugin list")
 		if result.MCPConfigured {
-			fmt.Printf("  3. MCP config written to %s using absolute binary path\n", setup.ClaudeCodeUserMCPPath())
-			fmt.Println("     (survives plugin auto-updates; re-run 'engram setup claude-code' if you move the binary)")
+			fmt.Printf("  3. Claude CLI registered the user MCP server in %s using an absolute binary path\n", setup.ClaudeCodeUserMCPPath())
+			fmt.Println("     If the binary moves, run: claude mcp remove engram --scope user")
+			fmt.Println("     Then re-run: engram setup claude-code")
 		} else {
 			fmt.Println("  3. MCP configuration was not written. Re-run 'engram setup claude-code' after resolving the reported error.")
 		}
@@ -3314,6 +3394,8 @@ Commands:
   export [file] [--project PROJECT|--all]
                      Export memories to JSON (default: engram-export.json)
   import <file>      Import memories from a JSON export file
+  init [name]        Initialize an Engram project (.engram/config.json) in current directory
+                       --force, -f   Overwrite existing .engram/config.json
   projects list      List all projects with observation, session, and prompt counts
   projects consolidate [--all] [--dry-run]
                      Merge similar project names into one canonical name

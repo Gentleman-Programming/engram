@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Gentleman-Programming/engram/v2/internal/cloud/chunkcodec"
 	"github.com/Gentleman-Programming/engram/v2/internal/cloud/cloudstore"
@@ -205,6 +206,14 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 	var invalid []map[string]any
 	normalizedEntries := make([]MutationEntry, 0, len(req.Entries))
 	for i, entry := range req.Entries {
+		if !utf8.Valid(entry.Payload) {
+			invalid = append(invalid, map[string]any{
+				"index":  i,
+				"field":  "payload",
+				"entity": strings.TrimSpace(entry.Entity),
+			})
+			continue
+		}
 		if strings.TrimSpace(entry.Entity) == "relation" {
 			if field, ok := validateRelationPayload(entry.Payload); !ok {
 				invalid = append(invalid, map[string]any{"index": i, "field": field, "entity": strings.TrimSpace(entry.Entity)})
