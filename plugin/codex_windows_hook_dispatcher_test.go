@@ -169,8 +169,8 @@ func TestCodexWindowsBashHookDispatcherSurvivesConsoleEncodingMutation(t *testin
 		t.Skip("Git for Windows Bash unavailable: git.exe does not resolve to an installation with bin/bash.exe or usr/bin/bash.exe")
 	}
 
-	originalCodePage := codexWindowsConsoleCodePage(t)
-	t.Cleanup(func() { codexSetWindowsConsoleCodePage(t, originalCodePage) })
+	originalInputCodePage, originalOutputCodePage := codexWindowsConsoleCodePages(t)
+	t.Cleanup(func() { codexSetWindowsConsoleCodePages(t, originalInputCodePage, originalOutputCodePage) })
 
 	root := repoRoot(t)
 	subagentPath := filepath.Join(root, "plugin", "codex", "scripts", "subagent-stop.ps1")
@@ -178,8 +178,9 @@ func TestCodexWindowsBashHookDispatcherSurvivesConsoleEncodingMutation(t *testin
 	if code != 0 || (string(subagentStdout) != "{}\n" && string(subagentStdout) != "{}\r\n") || len(subagentStderr) != 0 {
 		t.Fatalf("contaminate console encoding: exit=%d stdout=%q stderr=%q", code, subagentStdout, subagentStderr)
 	}
-	if got := codexWindowsConsoleCodePage(t); got != 65001 {
-		t.Fatalf("subagent-stop console code page = %d, want 65001", got)
+	inputCodePage, _ := codexWindowsConsoleCodePages(t)
+	if inputCodePage != 65001 {
+		t.Fatalf("subagent-stop input console code page = %d, want 65001", inputCodePage)
 	}
 
 	source, err := os.ReadFile(filepath.Join(root, "plugin", "codex", "scripts", "run-bash-hook.ps1"))
@@ -210,25 +211,63 @@ func TestCodexWindowsBashHookDispatcherSurvivesConsoleEncodingMutation(t *testin
 	}
 }
 
-func codexWindowsConsoleCodePage(t *testing.T) int {
-	t.Helper()
-	run := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "[Console]::InputEncoding.CodePage")
-	output, err := run.Output()
-	if err != nil {
-		t.Fatalf("read console code page: %v", err)
+func TestCodexWindowsConsoleCodePagesRestoreIndependently(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("requires native Windows cmd.exe and PowerShell")
 	}
-	codePage, err := strconv.Atoi(strings.TrimSpace(string(output)))
-	if err != nil {
-		t.Fatalf("parse console code page %q: %v", output, err)
+	if _, err := exec.LookPath("powershell.exe"); err != nil {
+		t.Skip("requires PowerShell")
 	}
-	return codePage
+
+	originalInput, originalOutput := codexWindowsConsoleCodePages(t)
+	t.Cleanup(func() {
+		codexSetWindowsConsoleCodePages(t, originalInput, originalOutput)
+		input, output := codexWindowsConsoleCodePages(t)
+		if input != originalInput || output != originalOutput {
+			t.Errorf("restored console code pages = input %d, output %d, want input %d, output %d", input, output, originalInput, originalOutput)
+		}
+	})
+
+	const inputCodePage = 65001
+	const outputCodePage = 437
+	codexSetWindowsConsoleCodePages(t, inputCodePage, outputCodePage)
+	input, output := codexWindowsConsoleCodePages(t)
+	if input != inputCodePage || output != outputCodePage {
+		t.Fatalf("console code pages = input %d, output %d, want input %d, output %d", input, output, inputCodePage, outputCodePage)
+	}
 }
 
-func codexSetWindowsConsoleCodePage(t *testing.T, codePage int) {
+func codexWindowsConsoleCodePages(t *testing.T) (int, int) {
 	t.Helper()
-	command := "[Console]::InputEncoding = [System.Text.Encoding]::GetEncoding(" + strconv.Itoa(codePage) + "); [Console]::OutputEncoding = [System.Text.Encoding]::GetEncoding(" + strconv.Itoa(codePage) + ")"
-	if output, err := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command).CombinedOutput(); err != nil {
-		t.Errorf("restore console code page %d: %v: %s", codePage, err, output)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	run := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "[Console]::InputEncoding.CodePage; [Console]::OutputEncoding.CodePage")
+	output, err := run.Output()
+	if err != nil {
+		t.Fatalf("read console code pages: %v", err)
+	}
+	codePages := strings.Fields(string(output))
+	if len(codePages) != 2 {
+		t.Fatalf("parse console code pages %q: want input and output values", output)
+	}
+	inputCodePage, err := strconv.Atoi(codePages[0])
+	if err != nil {
+		t.Fatalf("parse input console code page %q: %v", codePages[0], err)
+	}
+	outputCodePage, err := strconv.Atoi(codePages[1])
+	if err != nil {
+		t.Fatalf("parse output console code page %q: %v", codePages[1], err)
+	}
+	return inputCodePage, outputCodePage
+}
+
+func codexSetWindowsConsoleCodePages(t *testing.T, inputCodePage, outputCodePage int) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	command := "[Console]::InputEncoding = [System.Text.Encoding]::GetEncoding(" + strconv.Itoa(inputCodePage) + "); [Console]::OutputEncoding = [System.Text.Encoding]::GetEncoding(" + strconv.Itoa(outputCodePage) + ")"
+	if output, err := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command).CombinedOutput(); err != nil {
+		t.Errorf("set console code pages input %d output %d: %v: %s", inputCodePage, outputCodePage, err, output)
 	}
 }
 
