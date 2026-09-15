@@ -7,6 +7,7 @@
           {
             "type": "command",
             "command": "\"${PLUGIN_ROOT}/scripts/session-start.sh\"",
+            "commandWindows": "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"${PLUGIN_ROOT}\\scripts\\run-bash-hook.ps1\" \"${PLUGIN_ROOT}\\scripts\\session-start.sh\"",
             "timeout": 10,
             "statusMessage": "Loading engram memory..."
           }
@@ -18,6 +19,7 @@
           {
             "type": "command",
             "command": "\"${PLUGIN_ROOT}/scripts/post-compaction.sh\"",
+            "commandWindows": "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"${PLUGIN_ROOT}\\scripts\\run-bash-hook.ps1\" \"${PLUGIN_ROOT}\\scripts\\post-compaction.sh\"",
             "timeout": 10,
             "statusMessage": "Recovering engram context after compaction..."
           }
@@ -30,6 +32,7 @@
           {
             "type": "command",
             "command": "\"${PLUGIN_ROOT}/scripts/user-prompt-submit.sh\"",
+            "commandWindows": "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"${PLUGIN_ROOT}\\scripts\\run-bash-hook.ps1\" \"${PLUGIN_ROOT}\\scripts\\user-prompt-submit.sh\"",
             "timeout": 2
           }
         ]
