@@ -6252,7 +6252,10 @@ func (s *Store) writeRelationApplyFailureTx(tx *sql.Tx, targetKey string, mutati
 				ELSE sync_apply_deferred.retry_count
 			END,
 			last_attempted_at = datetime('now')
-	`, syncID, mutation.Entity, mutation.Payload, targetKey, mutation.EntityKey, mutation.Op, payloadSyncID, project, scopeClass, status, rearmFlag, rearmFlag); err != nil {
+		WHERE sync_apply_deferred.apply_status <> 'dead'
+		   OR excluded.apply_status = 'dead'
+		   OR ?
+	`, syncID, mutation.Entity, mutation.Payload, targetKey, mutation.EntityKey, mutation.Op, payloadSyncID, project, scopeClass, status, rearmFlag, rearmFlag, rearmFlag); err != nil {
 		return "", fmt.Errorf("write relation apply failure: %w", err)
 	}
 

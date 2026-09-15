@@ -1410,16 +1410,40 @@ func TestEnqueueDeferredRelationReArmsDeadRow(t *testing.T) {
 		s, _, _ := setupSyncApplyStore(t)
 		mut := newMutation(t, newSyncID("rel-rearm-mismatch"))
 		enqueueAndDriveToDead(t, s, mut)
+		type deferredState struct {
+			payload, payloadSyncID, entityKey, targetKey, project, scopeClass, applyStatus string
+			retryCount                                                                    int
+		}
+		readState := func() deferredState {
+			var state deferredState
+			if err := s.db.QueryRow(`
+				SELECT payload, payload_sync_id, entity_key, target_key, project, scope_class, apply_status, retry_count
+				FROM sync_apply_deferred WHERE sync_id = ?
+			`, mut.EntityKey).Scan(
+				&state.payload, &state.payloadSyncID, &state.entityKey, &state.targetKey,
+				&state.project, &state.scopeClass, &state.applyStatus, &state.retryCount,
+			); err != nil {
+				t.Fatalf("read dead row before foreign re-enqueue: %v", err)
+			}
+			return state
+		}
+		original := readState()
+
 		// The dead row is keyed by the relation's own sync_id. A delivery that
 		// claims that key while its payload encodes a different relation is not
-		// the expired retry state's own edge, so it must not resurrect the row.
-		foreign := newMutation(t, newSyncID("rel-rearm-foreign"))
+		// the expired retry state's own edge, so it must not resurrect or mutate
+		// the row. Its distinct scope exposes accidental metadata overwrites too.
+		foreign := buildRelationMutation(t, syncRelationPayload{
+			SyncID: newSyncID("rel-rearm-foreign"), SourceID: "obs-foreign-src", TargetID: "obs-foreign-gone",
+			Relation: RelationRelated, JudgmentStatus: JudgmentStatusJudged,
+			CreatedAt: "2026-09-12T10:00:00Z", UpdatedAt: "2026-09-12T10:00:00Z",
+		})
 		foreign.EntityKey = mut.EntityKey
-		if err := s.EnqueueDeferredRelation(DefaultSyncTargetKey, foreign); err != nil {
+		if err := s.EnqueueDeferredRelation("cloud:foreign", foreign); err != nil {
 			t.Fatalf("re-enqueue with disagreeing payload sync_id: %v", err)
 		}
-		if status, retryCount := getDeferredRow(t, s, mut.EntityKey); status != "dead" || retryCount != 5 {
-			t.Fatalf("row after disagreeing re-enqueue = (%q, %d), want the dead row untouched at (dead, 5)", status, retryCount)
+		if got := readState(); got != original {
+			t.Fatalf("foreign re-enqueue overwrote dead row: got %+v, want %+v", got, original)
 		}
 		deferred, dead, err := s.CountDeferredAndDeadForScope(DefaultSyncTargetKey, "proj-enqueue-rearm")
 		if err != nil {
