@@ -1888,15 +1888,19 @@ func TestInsecureModeLoginRedirects(t *testing.T) {
 // inserts while promoting the rest of adminTestStore's identity-store interface.
 type requestAuthAuditContextStore struct {
 	*adminTestStore
-	hasDeadline bool
-	deadline    time.Time
-	block       bool
-	done        chan struct{}
-	insertErr   error
+	hasDeadline    bool
+	deadline       time.Time
+	block          bool
+	done           chan struct{}
+	insertErr      error
+	requiresActive bool
 }
 
 func (s *requestAuthAuditContextStore) InsertAuthAuditEvent(ctx context.Context, event cloudstore.AuthAuditEvent) error {
 	s.deadline, s.hasDeadline = ctx.Deadline()
+	if s.requiresActive && ctx.Err() != nil {
+		return ctx.Err()
+	}
 	if s.block {
 		<-ctx.Done()
 		s.insertErr = ctx.Err()
@@ -2047,8 +2051,9 @@ func TestRequestAuthDeniedAuditReasonMapping(t *testing.T) {
 	}{
 		{name: "missing authorization header", sendHeader: false, wantReason: "missing_header"},
 		{name: "malformed bearer prefix", header: "Token abc", sendHeader: true, wantReason: "malformed_bearer"},
-		{name: "empty bearer credentials", header: "Bearer ", sendHeader: true, wantReason: "missing_header", wantBody: "unauthorized: bearer token is required\n"},
-		{name: "bare bearer scheme", header: "Bearer", sendHeader: true, wantReason: "missing_header", wantBody: "unauthorized: bearer token is required\n"},
+		{name: "empty bearer credentials", header: "Bearer ", sendHeader: true, wantReason: "malformed_bearer", wantBody: "unauthorized: authorization must use Bearer token\n"},
+		{name: "bare bearer scheme", header: "Bearer", sendHeader: true, wantReason: "malformed_bearer", wantBody: "unauthorized: authorization must use Bearer token\n"},
+		{name: "surplus bearer credentials", header: "Bearer rejected-token surplus", sendHeader: true, wantReason: "malformed_bearer", wantBody: "unauthorized: authorization must use Bearer token\n"},
 		{name: "unknown token", header: "Bearer rejected-token", sendHeader: true, tokenErr: cloudauth.ErrUnknownToken, wantReason: "unknown_token"},
 		{name: "revoked token", header: "Bearer rejected-token", sendHeader: true, tokenErr: cloudauth.ErrTokenRevoked, wantReason: "token_revoked"},
 		{name: "disabled principal", header: "Bearer rejected-token", sendHeader: true, tokenErr: cloudauth.ErrPrincipalDisabled, wantReason: "principal_disabled"},
@@ -2088,12 +2093,11 @@ func TestRequestAuthDeniedAuditReasonMapping(t *testing.T) {
 	}
 }
 
-// TestBearerTokenFromRequest pins the Authorization-header grammar of the
-// request auth middleware: a missing or blank header is
-// errMissingAuthorizationHeader, a non-Bearer scheme is
-// errAuthorizationNotBearer, and a Bearer scheme with empty credentials (with
-// or without a trailing space) is errBearerTokenRequired — not a malformed
-// scheme. Scheme matching is case-insensitive per RFC 7235.
+// TestBearerTokenFromRequest pins the pre-PR Authorization parser contract:
+// strings.Fields accepts ordinary spaces and tabs, matching Bearer is
+// case-insensitive, and exactly two fields are required. Every malformed shape
+// maps to errAuthorizationNotBearer so its established 401 body remains
+// byte-identical.
 func TestBearerTokenFromRequest(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -2106,12 +2110,14 @@ func TestBearerTokenFromRequest(t *testing.T) {
 		{name: "blank header", header: "   ", setHeader: true, wantErr: errMissingAuthorizationHeader},
 		{name: "valid bearer token", header: "Bearer sync-token", setHeader: true, wantToken: "sync-token"},
 		{name: "lowercase scheme", header: "bearer sync-token", setHeader: true, wantToken: "sync-token"},
+		{name: "tab separator", header: "Bearer\tsync-token", setHeader: true, wantToken: "sync-token"},
 		{name: "extra inner spaces", header: "Bearer   sync-token", setHeader: true, wantToken: "sync-token"},
+		{name: "surplus credentials", header: "Bearer sync-token surplus", setHeader: true, wantErr: errAuthorizationNotBearer},
 		{name: "non-bearer scheme", header: "Token sync-token", setHeader: true, wantErr: errAuthorizationNotBearer},
 		{name: "scheme glued to token", header: "Bearersync-token", setHeader: true, wantErr: errAuthorizationNotBearer},
-		{name: "bearer with trailing space", header: "Bearer ", setHeader: true, wantErr: errBearerTokenRequired},
-		{name: "bare bearer scheme", header: "Bearer", setHeader: true, wantErr: errBearerTokenRequired},
-		{name: "bearer with only spaces", header: "Bearer    ", setHeader: true, wantErr: errBearerTokenRequired},
+		{name: "bearer with trailing space", header: "Bearer ", setHeader: true, wantErr: errAuthorizationNotBearer},
+		{name: "bare bearer scheme", header: "Bearer", setHeader: true, wantErr: errAuthorizationNotBearer},
+		{name: "bearer with only spaces", header: "Bearer    ", setHeader: true, wantErr: errAuthorizationNotBearer},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2241,5 +2247,110 @@ func TestRequestAuthDeniedWithoutAuditSinkStillRejects(t *testing.T) {
 	}
 	if !strings.Contains(logBuf.String(), "request auth denied") {
 		t.Fatalf("expected per-rejection log line even without an audit sink, got %q", logBuf.String())
+	}
+}
+
+func TestRequestAuthDeniedAuditPersistsAfterRequestCancellation(t *testing.T) {
+	authn := resolvingAuth{errors: map[string]error{"unknown-token": cloudauth.ErrUnknownToken}}
+	store := &requestAuthAuditContextStore{
+		adminTestStore: newAdminTestStore(),
+		requiresActive: true,
+	}
+	srv := New(newFakeMutationStore(), authn, 0, WithAdminIdentityStore(store))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/sync/pull?project=proj-a", nil).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer unknown-token")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 after request cancellation, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if got, want := rec.Body.String(), "unauthorized: unknown token\n"; got != want {
+		t.Fatalf("401 body = %q, want %q", got, want)
+	}
+	if len(store.auditEvents) != 1 {
+		t.Fatalf("expected one persisted audit event after cancellation, got %d: %+v", len(store.auditEvents), store.auditEvents)
+	}
+	assertRequestAuthDeniedEvent(t, store.auditEvents[0], "unknown_token")
+}
+
+func TestProjectPolicyDeniedAuditsAuthorizationWithoutCredentials(t *testing.T) {
+	managedPrincipal := cloudauth.Principal{ID: "principal-1", Kind: cloudauth.PrincipalKindHuman, Role: cloudauth.RoleMember, Source: cloudauth.PrincipalSourceManagedToken, Enabled: true}
+	cases := []struct {
+		name          string
+		authn         Authenticator
+		options       []Option
+		bearer        string
+		wantActorID   string
+		wantActorFrom string
+	}{
+		{
+			name:          "managed principal",
+			authn:         resolvingAuth{principals: map[string]cloudauth.Principal{"managed-token": managedPrincipal}},
+			options:       []Option{WithPrincipalProjectAuthorizer(managedGrantAuthorizer{})},
+			bearer:        "managed-token",
+			wantActorID:   "principal-1",
+			wantActorFrom: string(cloudauth.PrincipalSourceManagedToken),
+		},
+		{
+			name: "legacy principal",
+			authn: resolvingAuth{principals: map[string]cloudauth.Principal{
+				"legacy-token": {ID: "legacy:sync", Kind: cloudauth.PrincipalKindLegacy, Role: cloudauth.RoleMember, Source: cloudauth.PrincipalSourceLegacyEnvSync, Enabled: true},
+			}},
+			options:       []Option{WithProjectAuthorizer(fakeAuth{projectErr: errors.New("denied")})},
+			bearer:        "legacy-token",
+			wantActorFrom: string(cloudauth.PrincipalSourceLegacyEnvSync),
+		},
+		{
+			name:          "no principal",
+			authn:         fakeAuth{projectErr: errors.New("denied")},
+			options:       []Option{WithProjectAuthorizer(fakeAuth{projectErr: errors.New("denied")})},
+			wantActorFrom: authAuditActorSourceRequest,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newAdminTestStore()
+			opts := append(tc.options, WithAdminIdentityStore(store))
+			srv := New(newFakeMutationStore(), tc.authn, 0, opts...)
+
+			var logBuf bytes.Buffer
+			origLog := log.Writer()
+			log.SetOutput(&logBuf)
+			defer log.SetOutput(origLog)
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/sync/pull?project=Beta%20Project", nil)
+			if tc.bearer != "" {
+				req.Header.Set("Authorization", "Bearer "+tc.bearer)
+			}
+			srv.Handler().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("expected 403, got %d body=%q", rec.Code, rec.Body.String())
+			}
+			payload := decodeActionableError(t, rec)
+			if payload.Error != `forbidden: project "beta project" is not allowed` {
+				t.Fatalf("403 body changed: %+v", payload)
+			}
+			if len(store.auditEvents) != 1 {
+				t.Fatalf("expected one project authorization audit event, got %d: %+v", len(store.auditEvents), store.auditEvents)
+			}
+			event := store.auditEvents[0]
+			if event.Action != "sync.authorize" || event.Outcome != authAuditOutcomeDenied || event.ReasonCode != "project_forbidden" {
+				t.Fatalf("unexpected project authorization audit event: %+v", event)
+			}
+			if event.Project != "beta project" || event.ActorPrincipalID != tc.wantActorID || event.ActorSource != tc.wantActorFrom || event.Metadata["source"] != tc.wantActorFrom {
+				t.Fatalf("unexpected project authorization attribution: %+v", event)
+			}
+			assertNoSensitiveAuditMetadata(t, event)
+			if strings.Contains(logBuf.String(), "managed-token") || strings.Count(logBuf.String(), "project authorization denied") != 1 {
+				t.Fatalf("expected one safe project authorization log line, got %q", logBuf.String())
+			}
+		})
 	}
 }

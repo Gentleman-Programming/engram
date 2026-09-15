@@ -98,6 +98,7 @@ var ErrDashboardSessionCodecRequired = errors.New("dashboard session codec is re
 // the same AdminIdentityStore sink the dashboard login/bootstrap flows use.
 const (
 	authAuditActionRequestAuth            = "sync.auth"
+	authAuditActionProjectAuthorize       = "sync.authorize"
 	authAuditActorSourceRequest           = "request"
 	authAuditReasonMissingHeader          = "missing_header"
 	authAuditReasonMalformedBearer        = "malformed_bearer"
@@ -108,21 +109,20 @@ const (
 	authAuditReasonPepperMissing          = "pepper_missing"
 	authAuditReasonResolverError          = "resolver_error"
 	authAuditReasonAuthorizeError         = "authorize_error"
+	authAuditReasonProjectForbidden       = "project_forbidden"
 )
 
 // requestAuthAuditInsertTimeout bounds the best-effort insert after a rejected
 // request auth: the rejection is already decided, so a stalled audit insert
-// must not hold the 401 response hostage while it waits.
+// may delay the response only within this fixed budget, never indefinitely.
 const requestAuthAuditInsertTimeout = 3 * time.Second
 
 // Bearer-extraction failure sentinels. bearerTokenFromRequest's error text is
-// part of the 401 response body, so the messages stay unchanged; wrapping them
-// as sentinels lets the audit reason mapping classify rejections with
-// errors.Is instead of string matching.
+// part of the established 401 response body; the sentinels keep audit reason
+// classification independent from those byte-sensitive messages.
 var (
 	errMissingAuthorizationHeader = errors.New("missing authorization header")
 	errAuthorizationNotBearer     = errors.New("authorization must use Bearer token")
-	errBearerTokenRequired        = errors.New("bearer token is required")
 )
 
 func WithSyncStatusProvider(provider dashboard.SyncStatusProvider) Option {
@@ -382,7 +382,7 @@ func (s *CloudServer) authenticateRequest(w http.ResponseWriter, r *http.Request
 // principal, so it falls to the generic resolver_error bucket.
 func requestAuthDenyReason(err error) string {
 	switch {
-	case errors.Is(err, errMissingAuthorizationHeader), errors.Is(err, errBearerTokenRequired):
+	case errors.Is(err, errMissingAuthorizationHeader):
 		return authAuditReasonMissingHeader
 	case errors.Is(err, errAuthorizationNotBearer):
 		return authAuditReasonMalformedBearer
@@ -403,31 +403,54 @@ func requestAuthDenyReason(err error) string {
 
 // recordRequestAuthDeniedAudit emits the per-rejection server log line and
 // records a best-effort cloud_auth_audit_log row for a rejected request
-// authentication (engram#1134). The rejection has already happened, so the
-// bounded insert budget and any audit failure never change the 401: failures
-// are logged and dropped, matching the dashboard login best-effort convention
-// (recordDashboardLoginAuditBestEffort).
-// Successful request auth is intentionally unaudited per request (volume; the
-// dashboard login flow audits its own successes). The actor principal stays
-// null (no principal was resolved); ActorSource "request" labels the
-// non-dashboard actor shape, mirroring the audit-only sentinel convention
-// documented for authAuditActorSourceUnauthenticated.
+// authentication (engram#1134). Successful request auth is intentionally
+// unaudited per request because it is a high-volume path.
 func (s *CloudServer) recordRequestAuthDeniedAudit(r *http.Request, reason string) {
 	log.Printf("[engram-cloud] request auth denied: %s (reason=%s)", r.RemoteAddr, reason)
-	if s.adminIdentity == nil {
-		log.Printf("cloudserver: admin identity store is not configured; request auth audit skipped")
-		return
-	}
-	insertCtx, cancel := context.WithTimeout(r.Context(), requestAuthAuditInsertTimeout)
-	defer cancel()
-	if err := s.adminIdentity.InsertAuthAuditEvent(insertCtx, cloudstore.AuthAuditEvent{
+	s.recordAuthAuditBestEffort(r.Context(), cloudstore.AuthAuditEvent{
 		ActorSource: authAuditActorSourceRequest,
 		Action:      authAuditActionRequestAuth,
 		Outcome:     authAuditOutcomeDenied,
 		ReasonCode:  reason,
 		Metadata:    map[string]any{"source": authAuditActorSourceRequest},
-	}); err != nil {
-		log.Printf("[engram-cloud] request auth audit insert failed (best-effort): %v", err)
+	}, "request auth")
+}
+
+// recordProjectPolicyDeniedAudit records a project authorization denial after
+// authentication has succeeded. It deliberately carries only principal and
+// project identity; bearer credentials are never logged or persisted.
+func (s *CloudServer) recordProjectPolicyDeniedAudit(ctx context.Context, project string) {
+	principal, ok := PrincipalFromContext(ctx)
+	actorID := ""
+	actorSource := authAuditActorSourceRequest
+	if ok {
+		actorID = auditActorPrincipalIDRef(principal)
+		actorSource = auditActorSource(principal)
+	}
+	log.Printf("[engram-cloud] project authorization denied: project=%q actor=%q actor_source=%q reason=%s", project, actorID, actorSource, authAuditReasonProjectForbidden)
+	s.recordAuthAuditBestEffort(ctx, cloudstore.AuthAuditEvent{
+		ActorPrincipalID: actorID,
+		ActorSource:      actorSource,
+		Project:          project,
+		Action:           authAuditActionProjectAuthorize,
+		Outcome:          authAuditOutcomeDenied,
+		ReasonCode:       authAuditReasonProjectForbidden,
+		Metadata:         map[string]any{"source": actorSource},
+	}, "project authorization")
+}
+
+// recordAuthAuditBestEffort uses a request-derived context with cancellation
+// detached so audits survive client disconnects, while the fixed timeout keeps
+// each synchronous insert bounded.
+func (s *CloudServer) recordAuthAuditBestEffort(ctx context.Context, event cloudstore.AuthAuditEvent, auditName string) {
+	if s.adminIdentity == nil {
+		log.Printf("cloudserver: admin identity store is not configured; %s audit skipped", auditName)
+		return
+	}
+	insertCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), requestAuthAuditInsertTimeout)
+	defer cancel()
+	if err := s.adminIdentity.InsertAuthAuditEvent(insertCtx, event); err != nil {
+		log.Printf("[engram-cloud] %s audit insert failed (best-effort): %v", auditName, err)
 	}
 }
 
@@ -436,15 +459,11 @@ func bearerTokenFromRequest(r *http.Request) (string, error) {
 	if header == "" {
 		return "", errMissingAuthorizationHeader
 	}
-	scheme, credentials, _ := strings.Cut(header, " ")
-	if !strings.EqualFold(scheme, "Bearer") {
+	parts := strings.Fields(header)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
 		return "", errAuthorizationNotBearer
 	}
-	token := strings.TrimSpace(credentials)
-	if token == "" {
-		return "", errBearerTokenRequired
-	}
-	return token, nil
+	return parts[1], nil
 }
 
 func (s *CloudServer) authorizeDashboardRequest(r *http.Request) error {
@@ -760,12 +779,13 @@ func (s *CloudServer) authorizeProjectScope(ctx context.Context, w http.Response
 	if s.principalProject != nil {
 		principal, ok := PrincipalFromContext(ctx)
 		if !ok {
+			s.recordProjectPolicyDeniedAudit(ctx, project)
 			writeActionableError(w, http.StatusForbidden, constants.UpgradeErrorClassPolicy, constants.ReasonPolicyForbidden, "forbidden: principal is required")
 			return false
 		}
 		if usesManagedProjectGrants(principal) {
 			if err := s.principalProject.AuthorizeProjectForPrincipal(ctx, principal, project); err != nil {
-				writeProjectPolicyDenied(w, project)
+				s.writeProjectPolicyDenied(ctx, w, project)
 				return false
 			}
 			return true
@@ -775,7 +795,7 @@ func (s *CloudServer) authorizeProjectScope(ctx context.Context, w http.Response
 		return true
 	}
 	if err := s.projectAuth.AuthorizeProject(project); err != nil {
-		writeProjectPolicyDenied(w, project)
+		s.writeProjectPolicyDenied(ctx, w, project)
 		return false
 	}
 	return true
@@ -793,7 +813,8 @@ func writeActionableError(w http.ResponseWriter, status int, class, code, messag
 	})
 }
 
-func writeProjectPolicyDenied(w http.ResponseWriter, project string) {
+func (s *CloudServer) writeProjectPolicyDenied(ctx context.Context, w http.ResponseWriter, project string) {
+	s.recordProjectPolicyDeniedAudit(ctx, project)
 	writeActionableError(w, http.StatusForbidden, constants.UpgradeErrorClassPolicy, constants.ReasonPolicyForbidden, fmt.Sprintf("forbidden: project %q is not allowed", project))
 }
 
