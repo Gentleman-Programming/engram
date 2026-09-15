@@ -9135,7 +9135,7 @@ func (s *Store) applyRelationUpsertTx(tx *sql.Tx, mutation SyncMutation) error {
 	p.TargetID = strings.TrimSpace(p.TargetID)
 	p.Relation = strings.TrimSpace(p.Relation)
 	p.JudgmentStatus = strings.TrimSpace(p.JudgmentStatus)
-	p.Project = strings.TrimSpace(p.Project)
+	p.Project, _ = NormalizeProject(strings.TrimSpace(p.Project))
 	if p.MarkedByActor != nil {
 		actor := strings.TrimSpace(*p.MarkedByActor)
 		p.MarkedByActor = &actor
@@ -9171,11 +9171,21 @@ func (s *Store) applyRelationUpsertTx(tx *sql.Tx, mutation SyncMutation) error {
 	}
 
 	// Step 2: FK precondition — both observations must exist locally (by sync_id).
+	// A project-scoped payload may only use endpoints in that project. Legacy
+	// payloads omit project, so retain their historical global lookup behavior.
+	observationQuery := `SELECT count(DISTINCT sync_id) FROM observations WHERE sync_id IN (?, ?)`
+	observationArgs := []any{p.SourceID, p.TargetID}
+	if p.Project != "" {
+		observationQuery = `
+			SELECT count(DISTINCT o.sync_id)
+			FROM observations o
+			LEFT JOIN sessions sess ON sess.id = o.session_id
+			WHERE o.sync_id IN (?, ?)
+			  AND coalesce(nullif(o.project, ''), sess.project, '') = ?`
+		observationArgs = append(observationArgs, p.Project)
+	}
 	var obsCount int
-	if err := tx.QueryRow(
-		`SELECT count(*) FROM observations WHERE sync_id IN (?, ?)`,
-		p.SourceID, p.TargetID,
-	).Scan(&obsCount); err != nil {
+	if err := tx.QueryRow(observationQuery, observationArgs...).Scan(&obsCount); err != nil {
 		return fmt.Errorf("applyRelationUpsertTx: check observations: %w", err)
 	}
 	requiredObservations := 2
