@@ -631,7 +631,7 @@ Then add the Memory Protocol as a global rule in `~/.gemini/GEMINI.md`. See [DOC
 engram setup cursor
 ```
 
-This registers `mcpServers.engram` in the global `~/.cursor/mcp.json` and writes an always-applied rule to `~/.cursor/rules/engram.mdc` (with the `alwaysApply: true` frontmatter Cursor needs).
+This registers `mcpServers.engram` in the global `~/.cursor/mcp.json` and writes the Memory Protocol to `~/.cursor/engram-memory-protocol.md` as an informational file for you to paste into User Rules (see the note below).
 
 **Manual** — add to your `.cursor/mcp.json` (global: `~/.cursor/mcp.json`; or project-relative `.cursor/mcp.json`):
 
@@ -648,14 +648,11 @@ This registers `mcpServers.engram` in the global `~/.cursor/mcp.json` and writes
 
 > **Windows**: Make sure `engram.exe` is in your `PATH`. Cursor resolves MCP commands from the system PATH.
 
-> **Memory Protocol:** Cursor uses `.mdc` rule files stored in `.cursor/rules/` (Cursor 0.43+). Create an `engram.mdc` file (any name works — the `.mdc` extension is what matters) and place it in one of:
->
-> - **Project-specific:** `.cursor/rules/engram.mdc` — commit to git so your whole team gets it
-> - **Global (all projects):** `~/.cursor/rules/engram.mdc` (Windows: `%USERPROFILE%\.cursor\rules\engram.mdc`) — create the directory if it doesn't exist
+> **Memory Protocol:** Cursor does **not** read global rule files from the filesystem — `.mdc` files outside a project are silently ignored, so no global rule path works. Setup therefore writes the protocol to `~/.cursor/engram-memory-protocol.md` as an informational file: open it, copy the contents, and paste them into Cursor's **Settings → Rules → User Rules**.
 >
 > See [DOCS.md](../DOCS.md#memory-protocol-full-text) for the full text, or use the minimal version from [Surviving Compaction](#surviving-compaction-recommended).
 >
-> **Note:** The legacy `.cursorrules` file at the project root is still recognized by Cursor but is deprecated. Prefer `.cursor/rules/` for all new setups.
+> **Note:** To share the protocol with a team, commit an in-repo `.cursor/rules/*.mdc` file — unlike global paths, files inside the project are not silently ignored. The legacy `.cursorrules` file at the project root is still recognized but deprecated.
 
 ---
 
@@ -785,15 +782,9 @@ You have access to Engram persistent memory via MCP tools (mem_save, mem_search,
 - After any compaction or context reset, first persist the injected summary with `mem_session_summary`. Request `mem_context` only if additional context is needed.
 ```
 
-**For Cursor** (`.cursor/rules/engram.mdc` or `~/.cursor/rules/engram.mdc`):
-
-The `alwaysApply: true` frontmatter tells Cursor to load this rule in every conversation, regardless of which files are open.
+**For Cursor** (Settings → Rules → User Rules — Cursor does not read global rule files from the filesystem):
 
 ```text
----
-alwaysApply: true
----
-
 You have access to Engram persistent memory (mem_save, mem_search, mem_context, mem_session_summary).
 Save proactively after significant work. After context resets, first persist the injected summary with mem_session_summary. Request mem_context only if additional context is needed.
 ```
