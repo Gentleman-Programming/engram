@@ -138,9 +138,16 @@ func (c SessionProjectDirectoryMismatchCheck) Run(ctx context.Context, scope Sco
 	if err != nil {
 		return CheckResult{}, err
 	}
+	knownProjects, err := knownSessionProjects(scope)
+	if err != nil {
+		return CheckResult{}, err
+	}
 	findings := make([]Finding, 0)
 	detected := make(map[string]DetectedProject)
 	for _, session := range sessions {
+		if _, knownManualTarget := knownManualSessionTarget(session.Name, knownProjects); knownManualTarget {
+			continue
+		}
 		directory := strings.TrimSpace(session.Directory)
 		directoryProject, ok := detectSessionDirectoryProject(scope, detected, directory)
 		sessionProject := normalizeProjectName(session.Project)
@@ -197,12 +204,9 @@ func (c ManualSessionNameProjectMismatchCheck) Run(ctx context.Context, scope Sc
 	}
 	findings := make([]Finding, 0)
 	for _, session := range sessions {
-		if !strings.HasPrefix(session.Name, "manual-save-") {
-			continue
-		}
-		nameProject := normalizeProjectName(strings.TrimPrefix(session.Name, "manual-save-"))
+		nameProject, knownManualTarget := knownManualSessionTarget(session.Name, knownProjects)
 		sessionProject := normalizeProjectName(session.Project)
-		if nameProject == "" || sessionProject == "" || nameProject == sessionProject || !knownProjects[nameProject] {
+		if nameProject == "" || sessionProject == "" || nameProject == sessionProject || !knownManualTarget {
 			continue
 		}
 		findings = append(findings, Finding{
@@ -217,6 +221,17 @@ func (c ManualSessionNameProjectMismatchCheck) Run(ctx context.Context, scope Sc
 		})
 	}
 	return resultFromFindings(c.Code(), map[string]any{"sessions_evaluated": len(sessions)}, findings), nil
+}
+
+// knownManualSessionTarget recognizes the exact manual session name convention
+// only when its normalized target is evidenced by a local session project. A
+// manual-looking name without that local evidence remains untrusted.
+func knownManualSessionTarget(name string, knownProjects map[string]bool) (string, bool) {
+	if !strings.HasPrefix(name, "manual-save-") {
+		return "", false
+	}
+	target := normalizeProjectName(strings.TrimPrefix(name, "manual-save-"))
+	return target, target != "" && knownProjects[target]
 }
 
 func knownSessionProjects(scope Scope) (map[string]bool, error) {

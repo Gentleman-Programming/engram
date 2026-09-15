@@ -393,6 +393,49 @@ func TestSessionProjectDirectoryMismatchFinding(t *testing.T) {
 	}
 }
 
+func TestSessionProjectDirectoryMismatchDefersToKnownManualTarget(t *testing.T) {
+	tests := []struct {
+		name         string
+		sessionID    string
+		project      string
+		knownTarget  bool
+		wantFindings int
+	}{
+		{name: "known manual target beats third project directory", sessionID: "manual-save-engram", project: "sias-app", knownTarget: true, wantFindings: 0},
+		{name: "healthy known manual session has no directory finding", sessionID: "manual-save-engram", project: "engram", wantFindings: 0},
+		{name: "unknown manual target retains trusted directory finding", sessionID: "manual-save-engram", project: "sias-app", wantFindings: 1},
+		{name: "non-manual session retains trusted directory finding", sessionID: "runtime-session", project: "sias-app", wantFindings: 1},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newDiagnosticTestStore(t)
+			if err := s.CreateSession(tc.sessionID, tc.project, "/work/third-project"); err != nil {
+				t.Fatalf("CreateSession: %v", err)
+			}
+			if tc.knownTarget {
+				if err := s.CreateSession("known-engram", "engram", "/work/engram"); err != nil {
+					t.Fatalf("CreateSession known target: %v", err)
+				}
+			}
+
+			report, err := NewRunner().RunOne(context.Background(), Scope{
+				Store:   s,
+				Project: tc.project,
+				DetectProject: func(string) (DetectedProject, bool) {
+					return DetectedProject{Project: "third-project", Source: "git_remote", Path: "/work/third-project"}, true
+				},
+			}, CheckSessionProjectDirectoryMismatch)
+			if err != nil {
+				t.Fatalf("RunOne: %v", err)
+			}
+			if got := len(report.Checks[0].Findings); got != tc.wantFindings {
+				t.Fatalf("findings=%+v, want %d", report.Checks[0].Findings, tc.wantFindings)
+			}
+		})
+	}
+}
+
 // TestSyncMutationRequiredFieldsSurfacesNonEnrolledCountFailure proves the
 // check fails loudly instead of reporting a clean bill of health when the
 // enrollment evidence cannot be read. The enrollment table is dropped after

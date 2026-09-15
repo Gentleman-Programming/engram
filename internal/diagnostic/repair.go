@@ -168,35 +168,24 @@ func planManualSessionRepair(plan *RepairPlan, scope Scope) error {
 	if err != nil {
 		return err
 	}
-	known := map[string]bool{}
-	byProject := make([]string, 0)
+	known := make(map[string]bool)
 	for _, session := range sessions {
 		project := normalizeProjectName(session.Project)
-		if project != "" && !known[project] {
+		if project != "" {
 			known[project] = true
-			byProject = append(byProject, project)
 		}
 	}
-	_ = byProject
 	for _, session := range sessions {
 		from := normalizeProjectName(session.Project)
 		if from != plan.Project {
 			continue
 		}
-		name := strings.TrimSpace(session.Name)
-		if !strings.HasPrefix(name, "manual-save-") {
-			continue
-		}
-		to := normalizeProjectName(strings.TrimPrefix(name, "manual-save-"))
+		to, knownManualTarget := knownManualSessionTarget(session.Name, known)
 		if to == "" || from == to {
 			continue
 		}
-		if !known[to] {
+		if !knownManualTarget {
 			plan.Skipped = append(plan.Skipped, RepairSkip{SessionID: session.ID, ReasonCode: "manual_name_unknown_project", Message: "manual session suffix is not a known local project"})
-			continue
-		}
-		if detected, ok := detectSessionDirectoryProject(scope, map[string]DetectedProject{}, session.Directory); ok && isTrustedDirectoryEvidence(detected.Source) && normalizeProjectName(detected.Project) != to {
-			plan.Skipped = append(plan.Skipped, RepairSkip{SessionID: session.ID, ReasonCode: "trusted_directory_contradicts_manual_name", Message: "trusted directory evidence points at a different project"})
 			continue
 		}
 		plan.Actions = append(plan.Actions, ProjectReclassifyAction{SessionID: session.ID, FromProject: from, ToProject: to, ReasonCode: CheckManualSessionNameProjectMismatch})
