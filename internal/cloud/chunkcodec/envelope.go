@@ -72,6 +72,14 @@ func AcceptsCompressedEnvelope(accept string) bool {
 	return false
 }
 
+// HasGzipMagic reports whether payload begins with the gzip magic bytes
+// (0x1f 0x8b). It identifies a gzip stream by content alone, regardless of
+// the declared Content-Type, which keeps receivers resilient to proxies that
+// drop or rewrite the request Content-Type header.
+func HasGzipMagic(payload []byte) bool {
+	return len(payload) >= 2 && payload[0] == 0x1f && payload[1] == 0x8b
+}
+
 // EncodeCompressedEnvelope gzip-compresses a canonical JSON payload for transport.
 func EncodeCompressedEnvelope(payload []byte) ([]byte, error) {
 	var compressed bytes.Buffer
