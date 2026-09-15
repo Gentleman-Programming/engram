@@ -861,7 +861,7 @@ func (s *Store) EstimateSessionProjectReclassification(actions []SessionProjectR
 			return counts, fmt.Errorf("estimate sessions: %w", err)
 		}
 		counts.Sessions += n
-		if err := s.db.QueryRow(`SELECT count(*) FROM observations WHERE session_id = ? AND project = ? AND deleted_at IS NULL`, action.SessionID, action.FromProject).Scan(&n); err != nil {
+		if err := s.db.QueryRow(`SELECT count(*) FROM observations WHERE session_id = ? AND project = ?`, action.SessionID, action.FromProject).Scan(&n); err != nil {
 			return counts, fmt.Errorf("estimate observations: %w", err)
 		}
 		counts.Observations += n

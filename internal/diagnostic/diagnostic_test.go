@@ -102,12 +102,151 @@ func TestSQLiteLockContentionBranches(t *testing.T) {
 
 func TestRegistryLookupAndOrdering(t *testing.T) {
 	codes := RegisteredCodes()
-	want := []string{CheckInvalidSessionIdentity, CheckManualSessionNameProjectMismatch, CheckOrphanedObservationSession, CheckSessionProjectDirectoryMismatch, CheckSQLiteLockContention, CheckSyncMutationRequiredFields, CheckSyncTargetClosedSpace, CheckUnownedSessionProject}
+	want := []string{CheckAmbiguousActiveRuntimeSessions, CheckInvalidSessionIdentity, CheckManualSessionNameProjectMismatch, CheckOrphanedObservationSession, CheckSessionProjectDirectoryMismatch, CheckSQLiteLockContention, CheckSyncMutationRequiredFields, CheckSyncTargetClosedSpace, CheckUnownedSessionProject}
 	if strings.Join(codes, ",") != strings.Join(want, ",") {
 		t.Fatalf("RegisteredCodes = %v, want %v", codes, want)
 	}
 	if _, err := DefaultRegistry().Lookup("not_real"); err == nil {
 		t.Fatal("expected invalid check error")
+	}
+}
+
+func TestAmbiguousActiveRuntimeSessionsCheck(t *testing.T) {
+	type session struct {
+		id, project, directory string
+		ended                  bool
+		startedAt              string
+	}
+	tests := []struct {
+		name             string
+		project          string
+		sessions         []session
+		wantStatus       string
+		wantDirectories  []string
+		wantSessionIDs   []string
+		wantCandidateCnt int
+	}{
+		{
+			name:    "reports concurrent candidates in one directory",
+			project: "engram",
+			sessions: []session{
+				{id: "runtime-a", project: "engram", directory: "/work/engram"},
+				{id: "runtime-b", project: "engram", directory: "/work/engram"},
+			},
+			wantStatus:       StatusWarning,
+			wantDirectories:  []string{"/work/engram"},
+			wantSessionIDs:   []string{"runtime-a", "runtime-b"},
+			wantCandidateCnt: 2,
+		},
+		{
+			name:    "ignores one candidate",
+			project: "engram",
+			sessions: []session{
+				{id: "runtime-only", project: "engram", directory: "/work/engram"},
+			},
+			wantStatus: StatusOK,
+		},
+		{
+			name:    "ignores candidates in distinct directories",
+			project: "engram",
+			sessions: []session{
+				{id: "runtime-one", project: "engram", directory: "/work/one"},
+				{id: "runtime-two", project: "engram", directory: "/work/two"},
+			},
+			wantStatus: StatusOK,
+		},
+		{
+			name:    "ignores ended sessions",
+			project: "engram",
+			sessions: []session{
+				{id: "runtime-ended-a", project: "engram", directory: "/work/engram", ended: true},
+				{id: "runtime-ended-b", project: "engram", directory: "/work/engram", ended: true},
+			},
+			wantStatus: StatusOK,
+		},
+		{
+			name:    "ignores manual save sessions",
+			project: "engram",
+			sessions: []session{
+				{id: "manual-save-a", project: "engram", directory: "/work/engram"},
+				{id: "manual-save-b", project: "engram", directory: "/work/engram"},
+			},
+			wantStatus: StatusOK,
+		},
+		{
+			name:    "ignores stale sessions",
+			project: "engram",
+			sessions: []session{
+				{id: "runtime-stale-a", project: "engram", directory: "/work/engram", startedAt: "2000-01-01 00:00:00"},
+				{id: "runtime-stale-b", project: "engram", directory: "/work/engram", startedAt: "2000-01-01 00:00:00"},
+			},
+			wantStatus: StatusOK,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newDiagnosticTestStore(t)
+			for _, session := range tt.sessions {
+				if err := s.CreateSession(session.id, session.project, session.directory); err != nil {
+					t.Fatalf("CreateSession(%q): %v", session.id, err)
+				}
+				if session.startedAt != "" {
+					if _, err := s.DB().Exec(`UPDATE sessions SET started_at = ? WHERE id = ?`, session.startedAt, session.id); err != nil {
+						t.Fatalf("set started_at for %q: %v", session.id, err)
+					}
+				}
+				if session.ended {
+					if err := s.EndSession(session.id, "done"); err != nil {
+						t.Fatalf("EndSession(%q): %v", session.id, err)
+					}
+				}
+			}
+
+			report, err := NewRunner().RunOne(context.Background(), Scope{Store: s, Project: tt.project}, "ambiguous_active_runtime_sessions")
+			if err != nil {
+				t.Fatalf("RunOne: %v", err)
+			}
+			if report.Status != tt.wantStatus {
+				t.Fatalf("report status=%q, want %q: %+v", report.Status, tt.wantStatus, report)
+			}
+			if tt.wantCandidateCnt == 0 {
+				if len(report.Checks[0].Findings) != 0 {
+					t.Fatalf("findings=%+v, want none", report.Checks[0].Findings)
+				}
+				return
+			}
+			if len(report.Checks[0].Findings) != 1 {
+				t.Fatalf("findings=%+v, want one per project", report.Checks[0].Findings)
+			}
+			var evidence struct {
+				Project              string   `json:"project"`
+				ActiveCandidateCount int      `json:"active_candidate_count"`
+				Directories          []string `json:"directories"`
+				SessionIDs           []string `json:"session_ids"`
+			}
+			if err := json.Unmarshal(report.Checks[0].Findings[0].Evidence, &evidence); err != nil {
+				t.Fatalf("decode finding evidence: %v", err)
+			}
+			if evidence.Project != tt.project || evidence.ActiveCandidateCount != tt.wantCandidateCnt || !reflect.DeepEqual(evidence.Directories, tt.wantDirectories) || !reflect.DeepEqual(evidence.SessionIDs, tt.wantSessionIDs) {
+				t.Fatalf("evidence=%+v, want project=%q candidates=%d directories=%v session_ids=%v", evidence, tt.project, tt.wantCandidateCnt, tt.wantDirectories, tt.wantSessionIDs)
+			}
+		})
+	}
+}
+
+func TestAmbiguousActiveRuntimeSessionsCheckPropagatesActiveSessionQueryFailure(t *testing.T) {
+	s := newDiagnosticTestStore(t)
+	if err := s.CreateSession("runtime-a", "engram", "/work/engram"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if _, err := s.DB().Exec(`DROP TABLE observations`); err != nil {
+		t.Fatalf("drop observations: %v", err)
+	}
+
+	report, err := NewRunner().RunOne(context.Background(), Scope{Store: s, Project: "engram"}, CheckAmbiguousActiveRuntimeSessions)
+	if err == nil || !strings.Contains(err.Error(), "observations") {
+		t.Fatalf("RunOne report=%+v err=%v, want active-session query failure", report, err)
 	}
 }
 
@@ -251,6 +390,49 @@ func TestSessionProjectDirectoryMismatchFinding(t *testing.T) {
 	}
 	if report.Status != StatusWarning || len(report.Checks[0].Findings) != 1 {
 		t.Fatalf("report=%+v", report)
+	}
+}
+
+func TestSessionProjectDirectoryMismatchDefersToKnownManualTarget(t *testing.T) {
+	tests := []struct {
+		name         string
+		sessionID    string
+		project      string
+		knownTarget  bool
+		wantFindings int
+	}{
+		{name: "known manual target beats third project directory", sessionID: "manual-save-engram", project: "sias-app", knownTarget: true, wantFindings: 0},
+		{name: "healthy known manual session has no directory finding", sessionID: "manual-save-engram", project: "engram", wantFindings: 0},
+		{name: "unknown manual target retains trusted directory finding", sessionID: "manual-save-engram", project: "sias-app", wantFindings: 1},
+		{name: "non-manual session retains trusted directory finding", sessionID: "runtime-session", project: "sias-app", wantFindings: 1},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newDiagnosticTestStore(t)
+			if err := s.CreateSession(tc.sessionID, tc.project, "/work/third-project"); err != nil {
+				t.Fatalf("CreateSession: %v", err)
+			}
+			if tc.knownTarget {
+				if err := s.CreateSession("known-engram", "engram", "/work/engram"); err != nil {
+					t.Fatalf("CreateSession known target: %v", err)
+				}
+			}
+
+			report, err := NewRunner().RunOne(context.Background(), Scope{
+				Store:   s,
+				Project: tc.project,
+				DetectProject: func(string) (DetectedProject, bool) {
+					return DetectedProject{Project: "third-project", Source: "git_remote", Path: "/work/third-project"}, true
+				},
+			}, CheckSessionProjectDirectoryMismatch)
+			if err != nil {
+				t.Fatalf("RunOne: %v", err)
+			}
+			if got := len(report.Checks[0].Findings); got != tc.wantFindings {
+				t.Fatalf("findings=%+v, want %d", report.Checks[0].Findings, tc.wantFindings)
+			}
+		})
 	}
 }
 

@@ -435,6 +435,8 @@ engram setup codex
 
 > `engram setup codex` automatically writes the full Memory Protocol to `~/.codex/engram-instructions.md` and a compaction recovery prompt to `~/.codex/engram-compact-prompt.md`. No additional configuration needed.
 
+The Codex plugin passes the exact runtime `session_id` into model context only after the server confirms registration. Startup, resume, clear, and post-compaction hooks instruct the model to reuse that binding for memory writes and retain it across compaction. Missing or failed registration never supplies an authoritative ID; the model must omit `session_id` rather than invent one. Post-compaction uses the same explicit `ENGRAM_URL` (or local `ENGRAM_PORT`) as startup.
+
 Manual alternative: add to your `~/.codex/config.toml` (Windows: `%APPDATA%\codex\config.toml`):
 
 ```toml

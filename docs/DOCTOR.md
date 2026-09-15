@@ -59,8 +59,9 @@ The CLI `--json` and MCP tool return:
 
 ## MVP check catalog
 
-- `session_project_directory_mismatch` — warns when `sessions.project` disagrees with the project inferred from trusted repository evidence for the session directory. The MVP trusts `git_remote` and `git_root` only; it ignores basename fallback, ambiguous workspaces, missing directories, and child-repo auto-promotion to avoid noisy false positives.
-- `manual_session_name_project_mismatch` — warns when a `manual-save-{suffix}` session name disagrees with its persisted project. A name alone never establishes `project_owned` ownership.
+- `session_project_directory_mismatch` — warns when `sessions.project` disagrees with the project inferred from trusted repository evidence for the session directory. A known exact `manual-save-{project}` target takes precedence over directory inference, so it does not produce this competing finding. Unknown manual suffixes and non-manual sessions retain normal trusted-directory behavior. The MVP trusts `git_remote` and `git_root` only; it ignores basename fallback, ambiguous workspaces, missing directories, and child-repo auto-promotion to avoid noisy false positives.
+- `manual_session_name_project_mismatch` — warns when a known `manual-save-{suffix}` session name disagrees with its persisted project. The suffix must normalize to a project already evidenced by a local session; a name alone never establishes `project_owned` ownership.
+- `ambiguous_active_runtime_sessions` — warns once per project when two or more active runtime candidates match the same directory. Evidence contains the active-candidate count, involved directories, and session IDs. It uses the same unended, non-manual, seven-day activity-window rules as omitted-session resolution; doctor only reports the ambiguity and never selects, ends, or modifies sessions. Use an explicit session ID for writes in the affected directory.
 - `sync_mutation_required_fields` — blocks when a pending `sync_mutations.payload` is missing required fields. On a device that uses cloud sync (at least one project enrolled), it also blocks when pending cloud mutations belong to a project that is not enrolled; the finding identifies the project and backlog count, so enroll intended projects with `engram cloud enroll <project>` or review enrollment before retrying. A local-only install with no enrolled project never reports that finding: the store journals mutations unconditionally, so a non-enrolled backlog is its normal steady state.
 - `orphaned_observation_session` — warns when active or soft-deleted observations reference a missing session. Findings are grouped by the stored observation project and session ID. The canonical session cannot be reconstructed automatically, so inspect and recover the data deliberately; no supported repair exists.
 - `unowned_session_project` — warns for each session with an unclassified or invalid ownership mode, including blank persisted projects and contradictory legacy manual-save identities. Doctor never guesses a rescue. Use `engram projects rescue-ownership --project <name> --session <id>` only after review; its apply path creates a SQLite backup that can be restored for rollback. The listing is deliberately unscoped.
@@ -74,7 +75,7 @@ Plain `engram doctor` remains diagnostic-only. Findings that imply data movement
 `engram doctor repair` is intentionally narrow and local-first: local SQLite remains the source of truth. Project reclassification supports:
 
 - `session_project_directory_mismatch`, using trusted `git_remote` or `git_root` evidence from doctor findings.
-- `manual_session_name_project_mismatch`, only for exact `manual-save-{known_project}` sessions, and only when trusted directory evidence does not contradict the manual-name target.
+- `manual_session_name_project_mismatch`, only for exact `manual-save-{known_project}` sessions. The known manual target takes precedence over trusted directory evidence; unknown suffixes remain unrepaired.
 
 Title restoration supports `sync_mutation_required_fields` only when a pending observation upsert has a blank title as its sole missing field and the matching local titleless observation has non-empty content. It derives a sanitized, bounded title from that local content and updates `observations.title` and `sync_mutations.payload` in place; all other invalid mutations remain quarantined on `--apply`.
 
@@ -87,7 +88,7 @@ Repair never deletes or deduplicates rows, never edits sync cursors, and never w
 
 Title restoration does not create a SQLite backup.
 
-`orphaned_observation_session` is report-only and is not supported by `engram doctor repair`.
+`orphaned_observation_session` and `ambiguous_active_runtime_sessions` are report-only and are not supported by `engram doctor repair`.
 
 ### Repair JSON envelope
 

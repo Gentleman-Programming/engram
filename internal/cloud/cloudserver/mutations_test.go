@@ -184,6 +184,38 @@ func (s *fakeMutationStore) InsertMutationBatch(ctx context.Context, batch []Mut
 	return seqs, nil
 }
 
+func TestMutationPushRejectsNonUTF8PayloadWithoutStorage(t *testing.T) {
+	ms := newFakeMutationStore()
+	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
+	body := []byte(`{"entries":[{"project":"proj-a","entity":"observation","entity_key":"obs-invalid","op":"upsert","payload":{"sync_id":"obs-invalid","session_id":"sess-1","type":"note","title":"Invalid","content":"`)
+	body = append(body, 0xff)
+	body = append(body, []byte(`","scope":"project"}}]}`)...)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		ErrorClass string `json:"error_class"`
+		ErrorCode  string `json:"error_code"`
+		ReasonCode string `json:"reason_code"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("decode rejection response: %v", err)
+	}
+	if response.ErrorClass != "repairable" || response.ErrorCode != "upgrade_repairable_payload_invalid" || response.ReasonCode != "validation_error" {
+		t.Fatalf("expected actionable payload validation error, got %+v", response)
+	}
+	if len(ms.mutations) != 0 {
+		t.Fatalf("expected no stored mutations, got %+v", ms.mutations)
+	}
+}
+
 func TestMutationPushStoresCanonicalEncodedPayload(t *testing.T) {
 	ms := newFakeMutationStore()
 	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
