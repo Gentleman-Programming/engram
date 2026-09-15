@@ -29,6 +29,17 @@ func TestNewRunner_OpenCode(t *testing.T) {
 	}
 }
 
+// TestNewRunner_MiniMax verifies that "minimax" returns a *MiniMaxRunner without error.
+func TestNewRunner_MiniMax(t *testing.T) {
+	runner, err := llm.NewRunner("minimax")
+	if err != nil {
+		t.Fatalf("NewRunner(\"minimax\"): unexpected error: %v", err)
+	}
+	if _, ok := runner.(*llm.MiniMaxRunner); !ok {
+		t.Errorf("NewRunner(\"minimax\") returned %T; want *llm.MiniMaxRunner", runner)
+	}
+}
+
 // TestNewRunner_Empty verifies that an empty string returns a descriptive error
 // naming the ENGRAM_AGENT_CLI env var.
 func TestNewRunner_Empty(t *testing.T) {
