@@ -30,6 +30,7 @@ func TestMCPJobObjectParentExitTerminatesWorker(t *testing.T) {
 	readyPath := filepath.Join(t.TempDir(), "worker-ready")
 	wrapper := exec.Command(os.Args[0], "-test.run=^TestMCPJobObjectParentExitTerminatesWorker$")
 	wrapper.Env = append(os.Environ(), mcpJobHelperEnv+"=wrapper", "ENGRAM_MCP_JOB_READY="+readyPath)
+	wrapper.WaitDelay = time.Second
 	output, err := wrapper.CombinedOutput()
 	if err != nil {
 		t.Fatalf("wrapper failed: %v\n%s", err, output)
@@ -60,11 +61,14 @@ func TestMCPJobObjectParentExitTerminatesWorker(t *testing.T) {
 }
 
 func TestMCPJobObjectSetupDegradesWithoutLeakingChildOwnership(t *testing.T) {
+	createFailed := errors.New("create failed")
+	configureFailed := errors.New("configure failed")
 	permissionDenied := errors.New("access denied")
 	pidReused := errors.New("parent was created after this process")
 	duplicateFailed := errors.New("duplicate failed")
 	assignmentFailed := errors.New("nested jobs are not supported")
 	revokeFailed := errors.New("revoke failed")
+	parentRecheckFailed := errors.New("parent wait failed")
 
 	tests := []struct {
 		name                    string
@@ -74,8 +78,20 @@ func TestMCPJobObjectSetupDegradesWithoutLeakingChildOwnership(t *testing.T) {
 		wantAssignmentSucceeded bool
 		wantChildJobClosed      bool
 		wantParentProcessClosed bool
+		wantParentCopyRetained  bool
 		wantParentCopyRevoked   bool
 	}{
+		{
+			name:      "create job failure leaves no owned handles",
+			fixture:   mcpJobFixture{createJobErr: createFailed},
+			wantError: "create MCP lifetime job",
+		},
+		{
+			name:               "configure job failure closes only child handle",
+			fixture:            mcpJobFixture{configureErr: configureFailed},
+			wantError:          "configure MCP lifetime job",
+			wantChildJobClosed: true,
+		},
 		{
 			name:                    "parent open permission denied",
 			fixture:                 mcpJobFixture{openParentErr: permissionDenied},
@@ -120,6 +136,7 @@ func TestMCPJobObjectSetupDegradesWithoutLeakingChildOwnership(t *testing.T) {
 			wantAssignmentAttempted: true,
 			wantChildJobClosed:      true,
 			wantParentProcessClosed: true,
+			wantParentCopyRetained:  true,
 		},
 		{
 			name:                    "parent exits after duplication without self termination",
@@ -131,12 +148,22 @@ func TestMCPJobObjectSetupDegradesWithoutLeakingChildOwnership(t *testing.T) {
 			wantParentProcessClosed: true,
 		},
 		{
+			name:                    "post assignment parent recheck error retains child job handle",
+			fixture:                 mcpJobFixture{parentRunning: []bool{true, true}, parentRunningErr: []error{nil, parentRecheckFailed}},
+			wantError:               "recheck MCP parent process",
+			wantAssignmentAttempted: true,
+			wantAssignmentSucceeded: true,
+			wantParentProcessClosed: true,
+			wantParentCopyRetained:  true,
+		},
+		{
 			name:                    "parent retains the successful job",
 			fixture:                 mcpJobFixture{parentRunning: []bool{true, true}},
 			wantAssignmentAttempted: true,
 			wantAssignmentSucceeded: true,
 			wantChildJobClosed:      true,
 			wantParentProcessClosed: true,
+			wantParentCopyRetained:  true,
 		},
 	}
 
@@ -164,6 +191,9 @@ func TestMCPJobObjectSetupDegradesWithoutLeakingChildOwnership(t *testing.T) {
 			if fixture.parentProcessClosed != tt.wantParentProcessClosed {
 				t.Fatalf("parent process handle closed = %t, want %t", fixture.parentProcessClosed, tt.wantParentProcessClosed)
 			}
+			if fixture.parentCopyRetained != tt.wantParentCopyRetained {
+				t.Fatalf("parent job copy retained = %t, want %t", fixture.parentCopyRetained, tt.wantParentCopyRetained)
+			}
 			if fixture.parentCopyRevoked != tt.wantParentCopyRevoked {
 				t.Fatalf("parent job copy revoked = %t, want %t", fixture.parentCopyRevoked, tt.wantParentCopyRevoked)
 			}
@@ -175,18 +205,22 @@ func TestMCPJobObjectSetupDegradesWithoutLeakingChildOwnership(t *testing.T) {
 }
 
 type mcpJobFixture struct {
-	openParentErr      error
-	parentPredatesErr  error
-	duplicateErr       error
-	assignErr          error
-	revokeErr          error
-	parentRunning      []bool
+	createJobErr      error
+	configureErr      error
+	openParentErr     error
+	parentPredatesErr error
+	duplicateErr      error
+	assignErr         error
+	revokeErr         error
+	parentRunning     []bool
+	parentRunningErr  []error
 
 	parentCopyExistedBeforeAssignment bool
 	assignmentAttempted               bool
 	assignmentSucceeded               bool
 	childJobClosed                    bool
 	parentProcessClosed               bool
+	parentCopyRetained                bool
 	parentCopyRevoked                 bool
 }
 
@@ -196,9 +230,9 @@ func stubMCPJobOperations(t *testing.T, fixture *mcpJobFixture) {
 	mcpJobOps = mcpJobOperations{
 		currentProcess:  func() windows.Handle { return 1 },
 		parentProcessID: func() (uint32, error) { return 42, nil },
-		createJob:       func() (windows.Handle, error) { return 2, nil },
+		createJob:       func() (windows.Handle, error) { return 2, fixture.createJobErr },
 		configureKillOnClose: func(windows.Handle) error {
-			return nil
+			return fixture.configureErr
 		},
 		openParent: func(uint32) (windows.Handle, error) {
 			return 3, fixture.openParentErr
@@ -207,16 +241,25 @@ func stubMCPJobOperations(t *testing.T, fixture *mcpJobFixture) {
 			return fixture.parentPredatesErr
 		},
 		parentIsRunning: func(windows.Handle) (bool, error) {
-			if len(fixture.parentRunning) == 0 {
-				return true, nil
+			running := true
+			if len(fixture.parentRunning) > 0 {
+				running = fixture.parentRunning[0]
+				fixture.parentRunning = fixture.parentRunning[1:]
 			}
-			running := fixture.parentRunning[0]
-			fixture.parentRunning = fixture.parentRunning[1:]
-			return running, nil
+			var runningErr error
+			if len(fixture.parentRunningErr) > 0 {
+				runningErr = fixture.parentRunningErr[0]
+				fixture.parentRunningErr = fixture.parentRunningErr[1:]
+			}
+			if !running {
+				fixture.parentCopyRetained = false
+			}
+			return running, runningErr
 		},
 		duplicateToParent: func(windows.Handle, windows.Handle) (windows.Handle, error) {
 			if fixture.duplicateErr == nil {
 				fixture.parentCopyExistedBeforeAssignment = true
+				fixture.parentCopyRetained = true
 			}
 			return 4, fixture.duplicateErr
 		},
@@ -229,6 +272,7 @@ func stubMCPJobOperations(t *testing.T, fixture *mcpJobFixture) {
 		},
 		revokeParentCopy: func(windows.Handle, windows.Handle) error {
 			if fixture.revokeErr == nil {
+				fixture.parentCopyRetained = false
 				fixture.parentCopyRevoked = true
 			}
 			return fixture.revokeErr
@@ -253,12 +297,24 @@ func runMCPJobHelper(t *testing.T, helper string) {
 	switch helper {
 	case "wrapper":
 		readyPath := os.Getenv("ENGRAM_MCP_JOB_READY")
-		worker := exec.Command(os.Args[0], "-test.run=^TestMCPJobObjectParentExitTerminatesWorker$")
-		worker.Env = append(os.Environ(), mcpJobHelperEnv+"=worker", "ENGRAM_MCP_JOB_READY="+readyPath)
-		worker.Stderr = os.Stderr
-		if err := worker.Start(); err != nil {
+		workerLogPath := filepath.Join(filepath.Dir(readyPath), "worker.log")
+		workerLog, err := os.OpenFile(workerLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(2)
+		}
+		worker := exec.Command(os.Args[0], "-test.run=^TestMCPJobObjectParentExitTerminatesWorker$")
+		worker.Env = append(os.Environ(), mcpJobHelperEnv+"=worker", "ENGRAM_MCP_JOB_READY="+readyPath)
+		worker.Stdout = workerLog
+		worker.Stderr = workerLog
+		if err := worker.Start(); err != nil {
+			_ = workerLog.Close()
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(3)
+		}
+		if err := workerLog.Close(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(4)
 		}
 		deadline := time.Now().Add(5 * time.Second)
 		for time.Now().Before(deadline) {
@@ -268,8 +324,9 @@ func runMCPJobHelper(t *testing.T, helper string) {
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
-		fmt.Fprintln(os.Stderr, "worker did not become ready")
-		os.Exit(3)
+		diagnostics, _ := os.ReadFile(workerLogPath)
+		fmt.Fprintf(os.Stderr, "worker did not become ready:\n%s", diagnostics)
+		os.Exit(5)
 	case "worker":
 		if err := retainMCPProcessUntilParentExit(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
