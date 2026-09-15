@@ -9165,11 +9165,11 @@ func (s *Store) applyRelationUpsertTx(tx *sql.Tx, mutation SyncMutation) error {
 	// Step 2: FK precondition — both observations must exist locally (by sync_id).
 	// A project-scoped payload may only use endpoints in that project. Legacy
 	// payloads omit project, so retain their historical global lookup behavior.
-	observationQuery := `SELECT count(*) FROM observations WHERE sync_id IN (?, ?)`
+	observationQuery := `SELECT count(DISTINCT sync_id) FROM observations WHERE sync_id IN (?, ?)`
 	observationArgs := []any{p.SourceID, p.TargetID}
 	if p.Project != "" {
 		observationQuery = `
-			SELECT count(*)
+			SELECT count(DISTINCT o.sync_id)
 			FROM observations o
 			LEFT JOIN sessions sess ON sess.id = o.session_id
 			WHERE o.sync_id IN (?, ?)

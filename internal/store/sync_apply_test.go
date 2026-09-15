@@ -413,6 +413,115 @@ func TestApplyPulledRelation_DefersForeignProjectEndpointsUntilLocalEndpointsArr
 	}
 }
 
+func TestApplyPulledRelation_DefersWhenDuplicateRowsNameOnlyOneEndpoint(t *testing.T) {
+	const project = "project-duplicates"
+	const sourceSyncID = "obs-duplicate-source"
+	const targetSyncID = "obs-missing-target"
+
+	for _, tt := range []struct {
+		name    string
+		project string
+	}{
+		{name: "project scoped", project: project},
+		{name: "legacy blank project", project: ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if err := s.CreateSession("ses-duplicates", project, "/tmp/duplicates"); err != nil {
+				t.Fatalf("CreateSession: %v", err)
+			}
+			firstID, _ := addTestObsSession(t, s, "ses-duplicates", "Duplicate source one", "decision", project, "project")
+			secondID, _ := addTestObsSession(t, s, "ses-duplicates", "Duplicate source two", "decision", project, "project")
+			for _, id := range []int64{firstID, secondID} {
+				if _, err := s.db.Exec(`UPDATE observations SET sync_id = ? WHERE id = ?`, sourceSyncID, id); err != nil {
+					t.Fatalf("set duplicate source sync ID: %v", err)
+				}
+			}
+
+			relationSyncID := newSyncID("rel-duplicate-endpoint")
+			mutation := buildRelationMutation(t, syncRelationPayload{
+				SyncID:         relationSyncID,
+				SourceID:       sourceSyncID,
+				TargetID:       targetSyncID,
+				Relation:       RelationRelated,
+				JudgmentStatus: JudgmentStatusJudged,
+				Project:        tt.project,
+				CreatedAt:      "2026-04-26T10:00:00Z",
+				UpdatedAt:      "2026-04-26T10:00:00Z",
+			})
+			mutation.Seq = 1
+
+			if err := s.ApplyPulledMutation(DefaultSyncTargetKey, mutation); err != nil {
+				t.Fatalf("ApplyPulledMutation: %v", err)
+			}
+			if got := countRelationRows(t, s, relationSyncID); got != 0 {
+				t.Fatalf("relation applied with duplicate source rows and no target: got %d rows", got)
+			}
+			if got := countDeferredRows(t, s, relationSyncID); got != 1 {
+				t.Fatalf("deferred rows with missing target: got %d, want 1", got)
+			}
+		})
+	}
+}
+
+func TestApplyPulledRelation_NormalizesDeferredProjectForScopedReplay(t *testing.T) {
+	const payloadProject = " Project__A "
+	canonicalProject, _ := NormalizeProject(payloadProject)
+	if canonicalProject == "" || canonicalProject == payloadProject {
+		t.Fatalf("NormalizeProject(%q) = %q, want a canonical project", payloadProject, canonicalProject)
+	}
+
+	s := newTestStore(t)
+	relationSyncID := newSyncID("rel-canonical-project")
+	sourceSyncID := "obs-canonical-source"
+	targetSyncID := "obs-canonical-target"
+	mutation := buildRelationMutation(t, syncRelationPayload{
+		SyncID:         relationSyncID,
+		SourceID:       sourceSyncID,
+		TargetID:       targetSyncID,
+		Relation:       RelationRelated,
+		JudgmentStatus: JudgmentStatusJudged,
+		Project:        payloadProject,
+		CreatedAt:      "2026-04-26T10:00:00Z",
+		UpdatedAt:      "2026-04-26T10:00:00Z",
+	})
+	mutation.Seq = 1
+
+	if err := s.ApplyPulledMutation(DefaultSyncTargetKey, mutation); err != nil {
+		t.Fatalf("ApplyPulledMutation: %v", err)
+	}
+	if got := countRelationRows(t, s, relationSyncID); got != 0 {
+		t.Fatalf("relation applied before canonical-project endpoints arrived: got %d rows", got)
+	}
+	assertDeferredScope(t, s, relationSyncID, DefaultSyncTargetKey, canonicalProject, "scoped")
+
+	if err := s.CreateSession("ses-canonical-project", canonicalProject, "/tmp/canonical-project"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	sourceID, _ := addTestObsSession(t, s, "ses-canonical-project", "Canonical source", "decision", canonicalProject, "project")
+	targetID, _ := addTestObsSession(t, s, "ses-canonical-project", "Canonical target", "decision", canonicalProject, "project")
+	if _, err := s.db.Exec(`UPDATE observations SET sync_id = ? WHERE id = ?`, sourceSyncID, sourceID); err != nil {
+		t.Fatalf("set source sync ID: %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE observations SET sync_id = ? WHERE id = ?`, targetSyncID, targetID); err != nil {
+		t.Fatalf("set target sync ID: %v", err)
+	}
+
+	result, err := s.ReplayDeferredForScope(DefaultSyncTargetKey, canonicalProject)
+	if err != nil {
+		t.Fatalf("ReplayDeferredForScope: %v", err)
+	}
+	if result.Retried != 1 || result.Succeeded != 1 {
+		t.Fatalf("ReplayDeferredForScope result = %+v, want one successful retry", result)
+	}
+	if got := countRelationRows(t, s, relationSyncID); got != 1 {
+		t.Fatalf("relation rows after canonical-project replay: got %d, want 1", got)
+	}
+	if got := countDeferredRows(t, s, relationSyncID); got != 0 {
+		t.Fatalf("deferred rows after canonical-project replay: got %d, want 0", got)
+	}
+}
+
 func TestApplyPulledMutation_DefersMissingRelationAndAdvancesCursor(t *testing.T) {
 	s, syncA, _ := setupSyncApplyStore(t)
 	relSyncID := newSyncID("rel-missing")
