@@ -3905,7 +3905,15 @@ func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observa
 
 func (s *Store) DeleteObservation(id int64, hardDelete bool) error {
 	return s.withTx(func(tx *sql.Tx) error {
-		obs, err := s.getObservationTx(tx, id)
+		var (
+			obs *Observation
+			err error
+		)
+		if hardDelete {
+			obs, err = s.getObservationIncludingDeletedTx(tx, id)
+		} else {
+			obs, err = s.getObservationTx(tx, id)
+		}
 		if err == sql.ErrNoRows {
 			return ErrObservationNotFound
 		}
@@ -9281,6 +9289,20 @@ func (s *Store) getObservationTx(tx *sql.Tx, id int64) (*Observation, error) {
 	row := tx.QueryRow(
 		`SELECT `+observationSelectColumns+`
 		 FROM observations WHERE id = ? AND deleted_at IS NULL`, id,
+	)
+	var o Observation
+	if err := scanObservationRow(row, &o); err != nil {
+		return nil, err
+	}
+	return &o, nil
+}
+
+// getObservationIncludingDeletedTx is reserved for explicit destructive paths.
+// Ordinary reads and mutations must use getObservationTx so soft-deleted rows stay hidden.
+func (s *Store) getObservationIncludingDeletedTx(tx *sql.Tx, id int64) (*Observation, error) {
+	row := tx.QueryRow(
+		`SELECT `+observationSelectColumns+`
+		 FROM observations WHERE id = ?`, id,
 	)
 	var o Observation
 	if err := scanObservationRow(row, &o); err != nil {
