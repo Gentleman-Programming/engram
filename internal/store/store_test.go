@@ -4972,6 +4972,102 @@ func TestDeleteObservationHardDeleteEnqueuesProjectScopedMutationMetadata(t *tes
 	}
 }
 
+func TestDeleteObservationHardDeleteAfterSoftDeleteCleansSessionReference(t *testing.T) {
+	s := newTestStore(t)
+	enrollTestProject(t, s, "engram")
+	const sessionID = "s-soft-then-hard-delete"
+	if err := s.CreateSession(sessionID, "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	obsID, err := s.AddObservation(AddObservationParams{
+		SessionID: sessionID,
+		Type:      "decision",
+		Title:     "to-delete",
+		Content:   "content",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	var syncID string
+	if err := s.db.QueryRow(`SELECT sync_id FROM observations WHERE id = ?`, obsID).Scan(&syncID); err != nil {
+		t.Fatalf("load observation sync ID: %v", err)
+	}
+	if err := s.DeleteObservation(obsID, false); err != nil {
+		t.Fatalf("soft delete observation: %v", err)
+	}
+	if _, err := s.GetObservation(obsID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetObservation after soft delete error = %v, want sql.ErrNoRows", err)
+	}
+	if err := s.DeleteSession(sessionID); !errors.Is(err, ErrSessionHasObservations) {
+		t.Fatalf("DeleteSession after soft delete error = %v, want ErrSessionHasObservations", err)
+	}
+
+	if err := s.DeleteObservation(obsID, true); err != nil {
+		t.Fatalf("hard delete soft-deleted observation: %v", err)
+	}
+
+	var observations int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE id = ?`, obsID).Scan(&observations); err != nil {
+		t.Fatalf("count observation rows: %v", err)
+	}
+	if observations != 0 {
+		t.Fatalf("observation rows after hard delete = %d, want 0", observations)
+	}
+
+	var tombstoneEntity, tombstoneSessionID, tombstoneProject string
+	var tombstoneHardDelete, tombstoneActive int
+	if err := s.db.QueryRow(`
+		SELECT entity, session_id, project, hard_delete, active
+		FROM sync_delete_tombstones
+		WHERE entity = ? AND entity_key = ?`,
+		SyncEntityObservation, syncID,
+	).Scan(&tombstoneEntity, &tombstoneSessionID, &tombstoneProject, &tombstoneHardDelete, &tombstoneActive); err != nil {
+		t.Fatalf("load hard-delete tombstone: %v", err)
+	}
+	if tombstoneEntity != SyncEntityObservation || tombstoneSessionID != sessionID || tombstoneProject != "engram" || tombstoneHardDelete != 1 || tombstoneActive != 1 {
+		t.Fatalf("hard-delete tombstone = entity=%q session_id=%q project=%q hard_delete=%d active=%d", tombstoneEntity, tombstoneSessionID, tombstoneProject, tombstoneHardDelete, tombstoneActive)
+	}
+
+	var payloadRaw string
+	if err := s.db.QueryRow(`
+		SELECT payload FROM sync_mutations
+		WHERE entity = ? AND entity_key = ? AND op = ?
+		ORDER BY seq DESC LIMIT 1`,
+		SyncEntityObservation, syncID, SyncOpDelete,
+	).Scan(&payloadRaw); err != nil {
+		t.Fatalf("load hard-delete mutation: %v", err)
+	}
+	var payload syncObservationPayload
+	if err := json.Unmarshal([]byte(payloadRaw), &payload); err != nil {
+		t.Fatalf("decode hard-delete mutation payload: %v", err)
+	}
+	if !payload.Deleted || !payload.HardDelete || payload.SessionID != sessionID || derefString(payload.Project) != "engram" {
+		t.Fatalf("hard-delete mutation payload = %+v", payload)
+	}
+
+	var mutationCountBefore int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntityObservation, syncID).Scan(&mutationCountBefore); err != nil {
+		t.Fatalf("count observation mutations before repeated hard delete: %v", err)
+	}
+	if err := s.DeleteObservation(obsID, true); !errors.Is(err, ErrObservationNotFound) {
+		t.Fatalf("repeated hard delete error = %v, want ErrObservationNotFound", err)
+	}
+	var mutationCountAfter int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = ? AND entity_key = ?`, SyncEntityObservation, syncID).Scan(&mutationCountAfter); err != nil {
+		t.Fatalf("count observation mutations after repeated hard delete: %v", err)
+	}
+	if mutationCountAfter != mutationCountBefore {
+		t.Fatalf("observation mutations after repeated hard delete = %d, want %d", mutationCountAfter, mutationCountBefore)
+	}
+
+	if err := s.DeleteSession(sessionID); err != nil {
+		t.Fatalf("delete unreferenced session: %v", err)
+	}
+}
+
 func TestDeleteObservationHardDeleteDerivesProjectFromSessionWhenEntityProjectEmpty(t *testing.T) {
 	s := newTestStore(t)
 	enrollTestProject(t, s, "engram")
