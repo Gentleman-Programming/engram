@@ -10669,7 +10669,7 @@ func (s *Store) RearmEligibleDeadRelationsForScope(targetKey, project string) (i
 		var row deadRow
 		var payloadSyncID string
 		if err := rows.Scan(&row.syncID, &row.payload, &row.entityKey, &row.op, &payloadSyncID); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return 0, fmt.Errorf("rearm eligible dead relations: scan: %w", err)
 		}
 		candidates = append(candidates, row)
