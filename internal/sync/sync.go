@@ -919,6 +919,11 @@ func importProgressSnapshot(local, remote, pending, initialPending int) ImportPr
 // successful import, including imports with no new chunks.
 func (sy *Syncer) finalizeImport(result *ImportResult) (*ImportResult, error) {
 	targetKey := sy.chunkTrackingTargetKey("")
+	if sy.cloudMode {
+		if _, err := sy.store.RearmEligibleDeadRelationsForScope(targetKey, sy.project); err != nil {
+			return nil, fmt.Errorf("rearm eligible dead relations: %w", err)
+		}
+	}
 	replay, err := sy.store.ReplayDeferredForScope(targetKey, sy.project)
 	if err != nil {
 		return nil, fmt.Errorf("replay deferred relations: %w", err)
@@ -1151,10 +1156,12 @@ func (sy *Syncer) importMutationChunk(chunkID string, chunk ChunkData) error {
 // apply/stall behavior, and local import is untouched.
 
 // importDependencyOracle resolves whether a relation endpoint can ever be
-// satisfied locally: it exists in the store, or arrives with a chunk still
-// pending in this import run. The pending sets are built lazily on the first
+// satisfied locally: it exists in the store, or arrives with a manifest chunk
+// still pending in this import run. Its sets are built lazily on the first
 // relation classification, so relation-free imports never pay for extra chunk
-// reads; chunks imported before that point are covered by the store lookup.
+// reads. Already-known chunks may still provide durable delete evidence, but a
+// missing or corrupt known chunk is ignored because it cannot invalidate a
+// successful earlier import.
 type importDependencyOracle struct {
 	sy                    *Syncer
 	entries               []ChunkEntry
@@ -1183,7 +1190,7 @@ func newImportDependencyOracle(sy *Syncer, entries []ChunkEntry, knownChunks map
 	}
 }
 
-// chunkForEntry returns the parsed chunk for a pending entry, serving it from
+// chunkForEntry returns the parsed chunk for a manifest entry, serving it from
 // the classification cache and falling back to the transport when absent. A
 // transport read is parsed once, ownership-checked for legacy manifests, and
 // cached for both classification and the apply loop.
@@ -1259,10 +1266,10 @@ func (o *importDependencyOracle) endpointPermanentlyMissing(syncID string) (bool
 	return deleted, nil
 }
 
-// ensureBuilt builds the pending observation sets on first use. A pending
+// ensureBuilt builds the manifest observation sets on first use. A pending
 // chunk that cannot be read or parsed fails the import before the first
 // relation-bearing chunk applies, so no edge is ever classified against an
-// incomplete pending set.
+// incomplete pending set. Known chunks are best-effort delete evidence only.
 func (o *importDependencyOracle) ensureBuilt() error {
 	if o.built {
 		return o.buildErr
@@ -1278,36 +1285,40 @@ func (o *importDependencyOracle) ensureBuilt() error {
 	return nil
 }
 
-// classifyPendingChunks collects, from every chunk still pending for this
-// import run, the observation sync_ids upserted by those chunks and the
-// observation sync_ids they durably delete. The upsert set keeps its
-// upsert-only semantics; the delete set is separate evidence for the
-// permanence check. Parsed chunks land in the cache so the apply loop reuses
-// them instead of re-reading the transport.
+// classifyPendingChunks collects observation evidence from the manifest. Pending
+// chunks contribute upserts and deletes and remain fail-closed: unreadable or
+// corrupt content aborts classification. Known chunks contribute only delete
+// evidence, because their successful earlier import is already reflected in the
+// local store; an unavailable known chunk therefore cannot newly fail this run.
+// Parsed chunks land in the cache so the apply loop reuses pending chunks instead
+// of re-reading the transport.
 func (o *importDependencyOracle) classifyPendingChunks() (upserts, deletes map[string]struct{}, err error) {
 	upserts = make(map[string]struct{})
 	deletes = make(map[string]struct{})
 	for _, entry := range o.entries {
-		if o.knownChunks[entry.ID] {
-			continue
-		}
+		known := o.knownChunks[entry.ID]
 		chunk, err := o.chunkForEntry(entry.ID)
 		if err != nil {
+			if known {
+				continue
+			}
 			return nil, nil, err
 		}
 		for _, mutation := range buildImportMutations(chunk) {
 			if mutation.Entity != store.SyncEntityObservation {
 				continue
 			}
+			obsID := observationMutationSyncID(mutation)
+			if obsID == "" {
+				continue
+			}
 			switch mutation.Op {
 			case store.SyncOpUpsert:
-				if obsID := observationMutationSyncID(mutation); obsID != "" {
+				if !known {
 					upserts[obsID] = struct{}{}
 				}
 			case store.SyncOpDelete:
-				if obsID := observationMutationSyncID(mutation); obsID != "" {
-					deletes[obsID] = struct{}{}
-				}
+				deletes[obsID] = struct{}{}
 			}
 		}
 	}
@@ -1316,13 +1327,10 @@ func (o *importDependencyOracle) classifyPendingChunks() (upserts, deletes map[s
 
 // observationMutationSyncID resolves the observation identity an upsert or
 // delete mutation acts on. The store applies both operations by the payload's
-// sync_id (applyObservationUpsertTx / applyObservationDeleteTx), so a blank
-// entity_key falls back to the payload's trimmed sync_id, and an identity that
-// is still blank cannot be classified and is ignored.
+// sync_id (applyObservationUpsertTx / applyObservationDeleteTx), so classifier
+// evidence must use that decoded identity even when entity_key is non-blank. A
+// malformed or identity-less payload cannot contribute evidence.
 func observationMutationSyncID(mutation store.SyncMutation) string {
-	if obsID := strings.TrimSpace(mutation.EntityKey); obsID != "" {
-		return obsID
-	}
 	var payload struct {
 		SyncID string `json:"sync_id"`
 	}

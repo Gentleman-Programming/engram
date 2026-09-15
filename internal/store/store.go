@@ -10628,6 +10628,136 @@ func (s *Store) ReplayDeferredForScope(targetKey, project string) (result Replay
 	return result, nil
 }
 
+// RearmEligibleDeadRelationsForScope gives a retry-cap dead relation one fresh
+// replay window only when its original retryable mutation is now satisfiable in
+// this exact target/project scope. Terminal dead evidence is deliberately left
+// untouched: malformed payloads, mismatched identities, unsupported operations,
+// hash-keyed rows, session dead letters, and non-FK failures cannot satisfy every
+// eligibility predicate below.
+func (s *Store) RearmEligibleDeadRelationsForScope(targetKey, project string) (int, error) {
+	const deadThreshold = 5
+	targetKey = normalizeSyncTargetKey(targetKey)
+	project, _ = NormalizeProject(strings.TrimSpace(project))
+	if project == "" {
+		return 0, nil
+	}
+
+	rows, err := s.db.Query(`
+		SELECT sync_id, payload, entity_key, op, payload_sync_id
+		FROM sync_apply_deferred
+		WHERE target_key = ?
+		  AND project = ?
+		  AND scope_class = 'scoped'
+		  AND entity = ?
+		  AND apply_status = 'dead'
+		  AND retry_count = ?
+		  AND last_error = ?
+		  AND sync_id = payload_sync_id
+		  AND entity_key = payload_sync_id
+		  AND op = ?
+		ORDER BY first_seen_at
+		LIMIT 50
+	`, targetKey, project, SyncEntityRelation, deadThreshold, ErrRelationFKMissing.Error(), SyncOpUpsert)
+	if err != nil {
+		return 0, fmt.Errorf("rearm eligible dead relations: list: %w", err)
+	}
+	type deadRow struct {
+		syncID, payload, entityKey, op string
+	}
+	var candidates []deadRow
+	for rows.Next() {
+		var row deadRow
+		var payloadSyncID string
+		if err := rows.Scan(&row.syncID, &row.payload, &row.entityKey, &row.op, &payloadSyncID); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("rearm eligible dead relations: scan: %w", err)
+		}
+		candidates = append(candidates, row)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, fmt.Errorf("rearm eligible dead relations: close: %w", err)
+	}
+
+	rearmed := 0
+	for _, row := range candidates {
+		mutation := SyncMutation{
+			Entity:    SyncEntityRelation,
+			EntityKey: row.entityKey,
+			Op:        row.op,
+			Payload:   row.payload,
+			TargetKey: targetKey,
+			Project:   project,
+		}
+		eligible, err := s.relationMutationSatisfiableForReplay(mutation)
+		if err != nil {
+			return rearmed, err
+		}
+		if !eligible {
+			continue
+		}
+		result, err := s.db.Exec(`
+			UPDATE sync_apply_deferred
+			SET apply_status = 'deferred', retry_count = 0, last_attempted_at = datetime('now')
+			WHERE sync_id = ?
+			  AND target_key = ?
+			  AND project = ?
+			  AND scope_class = 'scoped'
+			  AND entity = ?
+			  AND apply_status = 'dead'
+			  AND retry_count = ?
+			  AND last_error = ?
+			  AND sync_id = payload_sync_id
+			  AND entity_key = payload_sync_id
+			  AND op = ?
+		`, row.syncID, targetKey, project, SyncEntityRelation, deadThreshold, ErrRelationFKMissing.Error(), SyncOpUpsert)
+		if err != nil {
+			return rearmed, fmt.Errorf("rearm eligible dead relation %s: %w", row.syncID, err)
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return rearmed, fmt.Errorf("rearm eligible dead relation %s: rows affected: %w", row.syncID, err)
+		}
+		rearmed += int(changed)
+	}
+	return rearmed, nil
+}
+
+// relationMutationSatisfiableForReplay accepts only the same well-formed
+// relation upsert identity that applyRelationUpsertTx would accept before its FK
+// check, then checks both endpoints including tombstones.
+func (s *Store) relationMutationSatisfiableForReplay(mutation SyncMutation) (bool, error) {
+	if mutation.Entity != SyncEntityRelation || mutation.Op != SyncOpUpsert {
+		return false, nil
+	}
+	var payload syncRelationPayload
+	if err := decodeSyncPayload([]byte(mutation.Payload), &payload); err != nil {
+		return false, nil
+	}
+	payload.SyncID = strings.TrimSpace(payload.SyncID)
+	payload.SourceID = strings.TrimSpace(payload.SourceID)
+	payload.TargetID = strings.TrimSpace(payload.TargetID)
+	payload.Relation = strings.TrimSpace(payload.Relation)
+	payload.JudgmentStatus = strings.TrimSpace(payload.JudgmentStatus)
+	if payload.SyncID == "" || payload.SourceID == "" || payload.TargetID == "" || payload.Relation == "" || payload.JudgmentStatus == "" || strings.TrimSpace(mutation.EntityKey) != payload.SyncID {
+		return false, nil
+	}
+	project, _ := NormalizeProject(strings.TrimSpace(mutation.Project))
+	var count int
+	if err := s.db.QueryRow(`
+		SELECT count(*)
+		FROM observations o
+		LEFT JOIN sessions sess ON sess.id = o.session_id
+		WHERE o.sync_id IN (?, ?)
+		  AND coalesce(nullif(trim(o.project), ''), nullif(trim(sess.project), ''), '') = ?
+	`, payload.SourceID, payload.TargetID, project).Scan(&count); err != nil {
+		return false, fmt.Errorf("rearm eligible dead relations: check endpoints: %w", err)
+	}
+	if payload.SourceID == payload.TargetID {
+		return count == 1, nil
+	}
+	return count == 2, nil
+}
+
 // CountDeferredAndDead returns global administrative totals, including legacy
 // unscoped rows that normal scoped imports intentionally leave untouched.
 func (s *Store) CountDeferredAndDead() (deferred, dead int, err error) {

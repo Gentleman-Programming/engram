@@ -759,6 +759,59 @@ func TestReplayDeferred_DeadAtFiveRetries(t *testing.T) {
 	}
 }
 
+// TestRearmEligibleDeadRelationsForScope only re-arms retry-cap FK-missing
+// relation rows whose validated endpoints now exist in the requested scope.
+func TestRearmEligibleDeadRelationsForScope(t *testing.T) {
+	s, syncA, syncB := setupSyncApplyStore(t)
+	const targetKey = DefaultSyncTargetKey
+	const project = "proj-apply"
+	payload := func(syncID string) string {
+		raw, err := json.Marshal(syncRelationPayload{
+			SyncID: syncID, SourceID: syncA, TargetID: syncB,
+			Relation: RelationRelated, JudgmentStatus: JudgmentStatusJudged, Project: project,
+		})
+		if err != nil {
+			t.Fatalf("marshal payload: %v", err)
+		}
+		return string(raw)
+	}
+	insertDead := func(syncID, entity, body, entityKey, op, payloadSyncID, lastErr string) {
+		t.Helper()
+		if _, err := s.db.Exec(`
+			INSERT INTO sync_apply_deferred
+				(sync_id, entity, payload, target_key, entity_key, op, payload_sync_id, project, scope_class, apply_status, retry_count, last_error, first_seen_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'scoped', 'dead', 5, ?, datetime('now'))
+		`, syncID, entity, body, targetKey, entityKey, op, payloadSyncID, project, lastErr); err != nil {
+			t.Fatalf("insert dead row %q: %v", syncID, err)
+		}
+	}
+
+	eligibleID := "rel-rearm-eligible"
+	insertDead(eligibleID, SyncEntityRelation, payload(eligibleID), eligibleID, SyncOpUpsert, eligibleID, ErrRelationFKMissing.Error())
+	insertDead("rel-rearm-malformed", SyncEntityRelation, "not-json", "rel-rearm-malformed", SyncOpUpsert, "rel-rearm-malformed", ErrRelationFKMissing.Error())
+	insertDead("rel-rearm-mismatch", SyncEntityRelation, payload("rel-rearm-foreign"), "rel-rearm-mismatch", SyncOpUpsert, "rel-rearm-mismatch", ErrRelationFKMissing.Error())
+	insertDead("rel-rearm-unsupported", SyncEntityRelation, payload("rel-rearm-unsupported"), "rel-rearm-unsupported", SyncOpDelete, "rel-rearm-unsupported", ErrRelationFKMissing.Error())
+	insertDead("relation-dead-hash", SyncEntityRelation, payload("rel-rearm-hash-payload"), "relation-dead-hash", SyncOpUpsert, "relation-dead-hash", ErrRelationFKMissing.Error())
+	insertDead("session-dead", SyncEntitySession, `{}`, "session-dead", SyncOpUpsert, "session-dead", ErrRelationFKMissing.Error())
+	insertDead("rel-rearm-terminal", SyncEntityRelation, payload("rel-rearm-terminal"), "rel-rearm-terminal", SyncOpUpsert, "rel-rearm-terminal", ErrApplyDead.Error())
+
+	rearmed, err := s.RearmEligibleDeadRelationsForScope(targetKey, project)
+	if err != nil {
+		t.Fatalf("RearmEligibleDeadRelationsForScope: %v", err)
+	}
+	if rearmed != 1 {
+		t.Fatalf("rearmed = %d, want exactly the FK-missing eligible relation", rearmed)
+	}
+	if status, retries := getDeferredRow(t, s, eligibleID); status != "deferred" || retries != 0 {
+		t.Fatalf("eligible row = (%q, %d), want (deferred, 0)", status, retries)
+	}
+	for _, syncID := range []string{"rel-rearm-malformed", "rel-rearm-mismatch", "rel-rearm-unsupported", "relation-dead-hash", "session-dead", "rel-rearm-terminal"} {
+		if status, retries := getDeferredRow(t, s, syncID); status != "dead" || retries != 5 {
+			t.Fatalf("terminal row %q = (%q, %d), want (dead, 5)", syncID, status, retries)
+		}
+	}
+}
+
 // TestReplayDeferred_DeadRowSkipped: a dead row must not be retried.
 func TestReplayDeferred_DeadRowSkipped(t *testing.T) {
 	s, syncA, _ := setupSyncApplyStore(t)
